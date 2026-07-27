@@ -759,11 +759,23 @@ int main(int argc, char **argv) {
   if (getenv("THVM_ATP_VERBOSE") != NULL) g_cli_verbose = 1;
 
   // Invoked as CheckProof (the ProoVer entry binary), the checker is the
-  // default mode; FindProof stays the prover.
+  // default mode -- and the STRICT ProoVer profile (verify leaves against
+  // the linked problem file, discharge unmodelled thm/cth steps through
+  // the external-ATP hook).  FindProof stays the prover, and its --check
+  // keeps the legacy internal-trace profile (trusted file()/introduced()
+  // leaves) used to certify FindProof's own proofs.
+  // THVM_CHECKPROOF_PROVE=1 forces prover mode regardless of the binary
+  // name: the checker's external-ATP hook re-execs this same binary as
+  // its per-step oracle.
   {
     const char *self = strrchr(argv[0], '/');
     self = (self != NULL) ? self + 1 : argv[0];
-    if (strncmp(self, "CheckProof", 10) == 0) want_check = 1;
+    if (strncmp(self, "CheckProof", 10) == 0 &&
+        getenv("THVM_CHECKPROOF_PROVE") == NULL) {
+      want_check = 1;
+      pc_strict_default = 1;
+    }
+    pc_self_path = argv[0];
   }
 
   for (int i = 1; i < argc; i++) {

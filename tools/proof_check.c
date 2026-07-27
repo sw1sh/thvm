@@ -13,22 +13,52 @@
 // independently by dispatching on its rule, and one SZS verdict is
 // reported for the whole proof:
 //
-//   VerifiedGood        every derived step independently confirmed  (+1)
-//   VerifiedBad  a step is provably unsound                   (+2)
-//   Unknown     a step could not be settled -- abstain       ( 0)
+//   VerifiedGood   every step positively confirmed         (+1 right, -10 wrong)
+//   VerifiedBad    a demonstrated soundness violation       (+2 right,  -1 wrong)
+//   Unknown        anything else -- ABSTAIN BY DEFAULT      ( 0 always)
 //
-// The scoring penalises accepting a bad proof far more than abstaining,
-// so the checker is conservative: an INVALID verdict is emitted only when
-// a step is CERTAIN to be unsound (a completed saturation exhibits a
-// counter-model, a Skolem symbol is demonstrably not fresh), and anything
-// undecided within the resource bound falls back to Unknown.
+// ProoVer's scoring is brutally asymmetric: a wrong VerifiedGOOD (a bad
+// proof accepted) costs -10, ten times a wrong VerifiedBad's -1, and
+// abstaining is always free.  The 2026 entry inverted this in its head
+// -- it guarded the cheap mistake and left the expensive one open, and
+// 18 accepted-invalid proofs (-180) sank it.  The policy is therefore
+// abstain-by-default on BOTH axes:
+//
+//   * VerifiedGood requires EVERY record confirmed: every leaf verified
+//     against the linked problem file (strict mode), every derived step
+//     discharged by a sound internal check or the external-ATP hook,
+//     every record PARSED (a record this checker cannot read caps the
+//     verdict at Unknown -- it must never be silently skipped), unique
+//     names, an acyclic citation graph, and a confirmed $false root.
+//   * VerifiedBad requires a DEMONSTRATED violation: a completed
+//     saturation exhibiting a counter-model of a thm/cth claim, a leaf
+//     whose formula semantically differs from the problem formula it
+//     cites, a Skolem symbol occurring outside its introduction cone, a
+//     citation cycle, duplicate names with differing formulas.  A failed
+//     heuristic or an undecided obligation is NEVER VerifiedBad.
+//
+// Two profiles share this file (same TU, selected by binary name in
+// main.c via pc_strict_default, overridable with THVM_PROOFCHECK_STRICT):
+//
+//   strict (CheckProof, the ProoVer entry): leaves are VERIFIED -- the
+//     file() directive's problem file is loaded and the cited formula
+//     alpha-compared (a semantic mismatch is VerifiedBad; introduced()
+//     and directive-less inputs abstain); unsettled thm/cth steps are
+//     discharged by re-exec'ing this binary as a per-step ATP oracle
+//     (the rules permit exactly this: the step and its premises only).
+//   legacy (FindProof --check): file()/introduced() leaves are trusted
+//     inputs -- the profile used to certify FindProof's own proofs.
 //
 // Obligations, all discharged through the saturation engine except the
 // structural Skolem check:
+//   input (strict)     leaf formula == the problem-file formula it cites
 //   instantiate        parent |= conclusion          (fast path: match)
 //   negated_conjecture conclusion == not(parent)      (both entailments)
-//   skolemize          a fresh Skolem symbol is introduced and used
+//   skolemize          fresh Skolem symbol + parent entails the
+//                      re-existentialised conclusion
 //   consequence/horn/deduction   parents |= conclusion
+//   other rules        parents |= conclusion when status is thm/cth;
+//                      esa steps are never judged by entailment
 //   (final)            parents |= $false  (refutation closes)
 
 #include <stdio.h>
@@ -38,6 +68,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
+#include <fcntl.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 
 // --- limits ---------------------------------------------------------
@@ -46,10 +78,27 @@
 #define PC_NAME         192
 #define PC_MAX_SYMS     16384
 #define PC_MAX_VARS     256
-#define PC_MAX_TOK      16384
+#define PC_MAX_TOK      65536
 #define PC_ENTAIL_CAP   1500    // saturation step cap per entailment (default)
 
 static u32 pc_cap = PC_ENTAIL_CAP;   // runtime override via env, set in worker
+
+// --- ProoVer strict profile ----------------------------------------
+// main.c sets pc_strict_default = 1 when the binary is invoked as
+// CheckProof (the competition entry); THVM_PROOFCHECK_STRICT=0/1
+// overrides in either direction.  pc_self_path is argv[0], the binary
+// the external-ATP hook re-execs (with THVM_CHECKPROOF_PROVE=1) as its
+// per-step oracle.
+static int pc_strict_default = 0;
+static const char *pc_self_path = NULL;
+static int pc_strict(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("THVM_PROOFCHECK_STRICT");
+    v = (e != NULL) ? (e[0] != '\0' && e[0] != '0') : pc_strict_default;
+  }
+  return v;
+}
 
 // --- FOL label conventions (mirror src/fol/cnf.c; file-local there) --
 #define PC_LAB_EQ    0u
@@ -297,9 +346,11 @@ static Term pc_formula(PcParse *p) {
   return a;
 }
 
-// Parse a whole formula string; 0 on failure.
+// Parse a whole formula string; 0 on failure.  The token buffer is
+// static (single-threaded checker): PC_MAX_TOK tokens would otherwise
+// be a multi-megabyte stack frame.
 static Term pc_parse_formula(const char *fstr, PcParse *scope) {
-  PcTok toks[PC_MAX_TOK];
+  static PcTok toks[PC_MAX_TOK];
   int nt = pc_lex(fstr, toks, PC_MAX_TOK);
   if (nt < 0) return 0;
   scope->t = toks; scope->pos = 0; scope->ok = 1; scope->nv = 0;
@@ -516,10 +567,12 @@ static u8 pc_pair_instance(Term gl, Term gr, Term a, Term b) {
 // goal joins under a completion of the parents.  Anything else falls
 // through to the FO route.
 // Master GC-root buffer for the per-step engine sessions: every parsed
-// formula plus the current step's derived pair handles.  Registered as
-// gc_extra_roots on each session so a mid-session collection relocates
-// them IN PLACE; pc_steps and the locals are refreshed from it after.
-static Term g_pc_roots[PC_MAX_STEPS + 2 * PC_MAX_PARENTS + 2];
+// formula (proof steps FIRST, then the strict-mode problem-file
+// formulas) plus the current step's derived pair handles.  Registered
+// as gc_extra_roots on each session so a mid-session collection
+// relocates them IN PLACE; pc_steps / pc_prob and the locals are
+// refreshed from it after.
+static Term g_pc_roots[2 * PC_MAX_STEPS + 2 * PC_MAX_PARENTS + 2];
 static u8   g_pc_eq_gc_refreshed = 0;   // an eq session gc'd + refreshed
 // 1 while an eq session holds g_pc_roots as its gc_extra_roots: filled
 // at session start, cleared on NORMAL session exit.  If a session
@@ -688,7 +741,7 @@ static int pc_entails_eq(Term *parents, int np, Term concl, int do_session) {
   for (u32 i = 0; i < nl; i++) { w[i] = 1u; pr_[i] = i; }
   KboConfig cfg = { w, pr_, nl, 1u };
   // Root set: all parsed formulas + this step's pair handles.
-  u32 nb = pc_fill_roots(g_pc_roots, PC_MAX_STEPS);
+  u32 nb = pc_fill_roots(g_pc_roots, 2u * PC_MAX_STEPS);
   u32 base_pl = nb;
   for (int i = 0; i < npl; i++) {
     g_pc_roots[nb++] = pl[i];
@@ -891,6 +944,9 @@ static int pc_entails(Term *parents, int np, Term concl) {
 
 enum { R_INPUT, R_INSTANTIATE, R_NEGCONJ, R_SKOLEMIZE,
        R_CONSEQUENCE, R_DEDUCTION, R_HORN, R_UNKNOWN };
+enum { PC_ST_NONE, PC_ST_THM, PC_ST_ESA, PC_ST_CTH };
+enum { PC_ROLE_AXIOM, PC_ROLE_CONJ, PC_ROLE_NEGCONJ, PC_ROLE_PLAIN,
+       PC_ROLE_OTHER };
 
 typedef struct {
   char name[PC_NAME];
@@ -899,11 +955,43 @@ typedef struct {
   char parents[PC_MAX_PARENTS][PC_NAME];
   int  n_parents;
   char new_sym[PC_NAME];      // declared Skolem symbol, or ""
-  int  is_conj;               // TPTP role was `conjecture`
+  int  role;                  // PC_ROLE_*
+  int  status;                // PC_ST_*: the annotation's status(...)
+  u8   introduced;            // source was introduced(...)
+  char src_file[PC_NAME];     // file() directive path, or ""
+  char src_name[PC_NAME];     // file() directive formula name, or ""
 } PcStep;
 
 static PcStep pc_steps[PC_MAX_STEPS];
 static int pc_nstep = 0;
+// Records the record splitter could NOT turn into a PcStep (parse
+// failure, token/step overflow, non-fof/cnf content).  Any skipped
+// record caps the whole-proof verdict at Unknown: a proof this checker
+// cannot fully read must never be VerifiedGood -- the 2026 entry
+// silently dropped such records and verified the remainder.
+static int pc_nskipped = 0;
+// A cited parent name that resolves to NO step: per-step abstain (the
+// annotation grammar has forms this parser does not model), and it also
+// disables the Skolem outside-the-cone violation (the cone may be
+// incomplete).
+static int pc_dangling = 0;
+
+// --- strict-profile problem-file table ------------------------------
+// The formulas of the problem file named by the proof's file()
+// directives, for leaf verification.  Their Terms live on the same GC
+// heap as the step formulas and are rooted through g_pc_roots (after
+// the steps).
+typedef struct {
+  char name[PC_NAME];
+  Term formula;
+  int  role;
+} PcProb;
+static PcProb pc_prob[PC_MAX_STEPS];
+static int    pc_nprob = 0;
+static int    pc_prob_unparsed = 0;   // problem records we could not read
+static int    pc_prob_state = 0;      // 0 not tried, 1 loaded, -1 unavailable
+static char   pc_prob_directive[PC_NAME]; // the directive path loaded
+static char   pc_proof_dir[1024];     // directory of the proof file, or ""
 
 // Collect the axiom (R_INPUT, plain-equation) pairs for the fallback
 // entailment: an `orient` trace record's conclusion embodies push-side
@@ -1198,16 +1286,25 @@ static int pc_check_cp(Term *parents, int np, Term concl) {
   return v;
 }
 
+// Step formulas first (pc_check_cp indexes the step region by record
+// index), then the strict-profile problem-file formulas.
 static u32 pc_fill_roots(Term *buf, u32 cap) {
   u32 nb = 0;
   for (int i = 0; i < pc_nstep && nb < cap; i++) {
     buf[nb++] = pc_steps[i].formula;
   }
+  for (int i = 0; i < pc_nprob && nb < cap; i++) {
+    buf[nb++] = pc_prob[i].formula;
+  }
   return nb;
 }
 static void pc_refresh_formulas(const Term *buf) {
+  u32 nb = 0;
   for (int i = 0; i < pc_nstep && i < PC_MAX_STEPS; i++) {
-    pc_steps[i].formula = buf[i];
+    pc_steps[i].formula = buf[nb++];
+  }
+  for (int i = 0; i < pc_nprob && i < PC_MAX_STEPS; i++) {
+    pc_prob[i].formula = buf[nb++];
   }
 }
 
@@ -1236,18 +1333,50 @@ static const char *pc_ident(const char *s, char *buf, int cap) {
   return s;
 }
 
-// Fill rule / parents / new_sym from an inference(...) or file(...) source.
+// Read a possibly-quoted name at `s` into buf; returns advanced pointer.
+static const char *pc_qident(const char *s, char *buf, int cap) {
+  if (*s == '\'') {
+    s++;
+    int k = 0;
+    while (*s && *s != '\'' && k < cap - 1) buf[k++] = *s++;
+    buf[k] = '\0';
+    if (*s == '\'') s++;
+    return s;
+  }
+  return pc_ident(s, buf, cap);
+}
+
+// Fill rule / parents / status / new_sym / file-directive fields from an
+// inference(...), file(...), or introduced(...) source.
 static void pc_parse_source(const char *src, PcStep *st) {
   st->rule = R_UNKNOWN;
   st->n_parents = 0;
   st->new_sym[0] = '\0';
   while (*src && isspace((unsigned char)*src)) src++;
-  if (strncmp(src, "file", 4) == 0) { st->rule = R_INPUT; return; }
+  if (strncmp(src, "file", 4) == 0) {
+    // file('Problems/x.p', name): record path + cited name so the
+    // strict profile can verify the leaf against the problem file.
+    st->rule = R_INPUT;
+    const char *p = strchr(src, '(');
+    if (p != NULL) {
+      p++;
+      while (*p && isspace((unsigned char)*p)) p++;
+      p = pc_qident(p, st->src_file, PC_NAME);
+      while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
+      if (*p != '\0' && *p != ')') pc_qident(p, st->src_name, PC_NAME);
+    }
+    return;
+  }
   // introduced(definition): a conservative-extension leaf (goal-flatten /
-  // tgt subterm naming -- fresh symbol defined equal to a term).  Sound
-  // to accept as an input of the ENCODED problem, exactly like file();
-  // before the fresh-label-range emitter change these printed as file().
-  if (strncmp(src, "introduced", 10) == 0) { st->rule = R_INPUT; return; }
+  // tgt subterm naming -- fresh symbol defined equal to a term).  The
+  // legacy profile trusts it as an input of the ENCODED problem exactly
+  // like file(); the strict profile abstains on it (an arbitrary
+  // formula could be smuggled in this way -- a confirmed -180 hole).
+  if (strncmp(src, "introduced", 10) == 0) {
+    st->rule = R_INPUT;
+    st->introduced = 1;
+    return;
+  }
   const char *inf = strstr(src, "inference");
   if (inf == NULL) return;
   const char *p = strchr(inf, '(');
@@ -1257,6 +1386,23 @@ static void pc_parse_source(const char *src, PcStep *st) {
   char rule[PC_NAME];
   pc_ident(p, rule, PC_NAME);
   st->rule = pc_rule_of(rule);
+
+  // status(thm|esa|cth): the step's semantic claim.  esa steps assert
+  // only equisatisfiability -- they must never be judged by entailment.
+  const char *sp = strstr(src, "status");
+  if (sp != NULL) {
+    const char *q = sp + 6;
+    while (*q && isspace((unsigned char)*q)) q++;
+    if (*q == '(') {
+      char sname[PC_NAME];
+      q++;
+      while (*q && isspace((unsigned char)*q)) q++;
+      pc_ident(q, sname, PC_NAME);
+      if      (strcmp(sname, "thm") == 0) st->status = PC_ST_THM;
+      else if (strcmp(sname, "esa") == 0) st->status = PC_ST_ESA;
+      else if (strcmp(sname, "cth") == 0) st->status = PC_ST_CTH;
+    }
+  }
 
   // declared new Skolem symbol: new_symbols(skolem, [sK...])
   const char *ns = strstr(src, "new_symbols");
@@ -1290,26 +1436,36 @@ static void pc_parse_source(const char *src, PcStep *st) {
 }
 
 // Split fof(...)/cnf(...) inner content on TOP-LEVEL commas (respecting
-// (), [] and quotes).  Returns the argument count.
-static int pc_split_args(const char *s, char args[][8192], int max) {
-  int depth = 0, inq = 0, na = 0, k = 0;
-  if (na < max) args[na][0] = '\0';
-  for (; *s; s++) {
-    char c = *s;
-    if (inq) { if (c == '\'') inq = 0; if (na < max && k < 8191) args[na][k++] = c; continue; }
-    if (c == '\'') { inq = 1; if (na < max && k < 8191) args[na][k++] = c; continue; }
-    if (c == '(' || c == '[') depth++;
-    else if (c == ')' || c == ']') depth--;
-    if (c == ',' && depth == 0) {
-      if (na < max) args[na][k] = '\0';
-      na++; k = 0;
-      if (na < max) args[na][0] = '\0';
-      continue;
+// (), [] and quotes).  Each returned args[i] is heap-allocated (caller
+// frees) and carries the FULL argument -- the old fixed 8K buffers
+// silently truncated large formulas, which corrupted the record instead
+// of failing it.  Returns the argument count (clamped to max).
+static int pc_split_args(const char *s, char **args, int max) {
+  int depth = 0, inq = 0, na = 0;
+  const char *seg = s;
+  const char *p = s;
+  for (;; p++) {
+    char c = *p;
+    if (c != '\0') {
+      if (inq) { if (c == '\'') inq = 0; continue; }
+      if (c == '\'') { inq = 1; continue; }
+      if (c == '(' || c == '[') { depth++; continue; }
+      if (c == ')' || c == ']') { depth--; continue; }
+      if (c != ',' || depth != 0) continue;
     }
-    if (na < max && k < 8191) args[na][k++] = c;
+    if (na < max) {
+      size_t ln = (size_t)(p - seg);
+      char *b = (char *)malloc(ln + 1);
+      if (b == NULL) return na;      // short count reads as parse failure
+      memcpy(b, seg, ln);
+      b[ln] = '\0';
+      args[na] = b;
+    }
+    na++;
+    if (c == '\0') break;
+    seg = p + 1;
   }
-  if (na < max) args[na][k] = '\0';
-  return na + 1;
+  return na > max ? max : na;
 }
 
 static void pc_trim(char *s) {
@@ -1319,7 +1475,17 @@ static void pc_trim(char *s) {
   if (i) memmove(s, s + i, strlen(s + i) + 1);
 }
 
-// Parse one `fof(...)` / `cnf(...)` record.  Returns 1 on success.
+static int pc_role_of(const char *r) {
+  if (strcmp(r, "conjecture") == 0)         return PC_ROLE_CONJ;
+  if (strcmp(r, "axiom") == 0)              return PC_ROLE_AXIOM;
+  if (strcmp(r, "negated_conjecture") == 0) return PC_ROLE_NEGCONJ;
+  if (strcmp(r, "plain") == 0)              return PC_ROLE_PLAIN;
+  return PC_ROLE_OTHER;
+}
+
+// Parse one `fof(...)` / `cnf(...)` record.  Returns 1 on success; a 0
+// return is counted by the caller (pc_nskipped) and caps the verdict at
+// Unknown -- an unread record must never be silently dropped.
 static int pc_parse_record(const char *rec) {
   while (*rec && isspace((unsigned char)*rec)) rec++;
   int is_fof = strncmp(rec, "fof", 3) == 0;
@@ -1329,44 +1495,227 @@ static int pc_parse_record(const char *rec) {
   if (op == NULL) return 0;
   // inner = between the outermost ( ) of the record
   const char *inner = op + 1;
-  static char args[8][8192];
+  char *args[8] = {0};
   int na = pc_split_args(inner, args, 8);
-  if (na < 3) return 0;
-  // Strip the ONE record-closing ')' left on the last argument.  The
-  // old greedy loop ate every trailing paren, mangling any formula that
-  // ends in a nested application -- exactly the shape of FindProof's
-  // own axiom records (no file() source, so the formula IS the last
-  // argument): 'multiply(V,W,multiply(X,Y,Z))' lost both inner parens
-  // and the whole step silently failed to parse ('parent missing').
-  char *last = args[na - 1];
-  int ll = (int)strlen(last);
-  while (ll > 0 && isspace((unsigned char)last[ll - 1])) last[--ll] = '\0';
-  if (ll > 0 && last[ll - 1] == ')') last[--ll] = '\0';
-  while (ll > 0 && isspace((unsigned char)last[ll - 1])) last[--ll] = '\0';
+  int ok = 0;
+  if (na < 3) goto done;
+  {
+    // Strip the ONE record-closing ')' left on the last argument.  The
+    // old greedy loop ate every trailing paren, mangling any formula that
+    // ends in a nested application -- exactly the shape of FindProof's
+    // own axiom records (no file() source, so the formula IS the last
+    // argument): 'multiply(V,W,multiply(X,Y,Z))' lost both inner parens
+    // and the whole step silently failed to parse ('parent missing').
+    char *last = args[na - 1];
+    int ll = (int)strlen(last);
+    while (ll > 0 && isspace((unsigned char)last[ll - 1])) last[--ll] = '\0';
+    if (ll > 0 && last[ll - 1] == ')') last[--ll] = '\0';
+    while (ll > 0 && isspace((unsigned char)last[ll - 1])) last[--ll] = '\0';
 
-  if (pc_nstep >= PC_MAX_STEPS) return 0;
-  PcStep *st = &pc_steps[pc_nstep];
-  memset(st, 0, sizeof *st);
-  pc_trim(args[0]);
-  snprintf(st->name, PC_NAME, "%s", args[0]);
-  pc_trim(args[1]);
-  st->is_conj = (strcmp(args[1], "conjecture") == 0);
+    if (pc_nstep >= PC_MAX_STEPS) goto done;
+    PcStep *st = &pc_steps[pc_nstep];
+    memset(st, 0, sizeof *st);
+    pc_trim(args[0]);
+    snprintf(st->name, PC_NAME, "%s", args[0]);
+    pc_trim(args[1]);
+    st->role = pc_role_of(args[1]);
 
-  PcParse scope;
-  Term f = pc_parse_formula(args[2], &scope);
-  if (f == 0) {
-    if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
-      fprintf(stderr, "PCDBG parse-skip name=%s formula=[%.120s]\n",
-              args[0], args[2]);
+    PcParse scope;
+    Term f = pc_parse_formula(args[2], &scope);
+    if (f == 0) {
+      if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
+        fprintf(stderr, "PCDBG parse-skip name=%s formula=[%.120s]\n",
+                args[0], args[2]);
+      }
+      goto done;                          // unparseable formula
     }
-    return 0;                             // unparseable formula -> skip
-  }
-  st->formula = f;
+    st->formula = f;
 
-  if (na >= 4) pc_parse_source(args[3], st);
-  else         st->rule = R_INPUT;        // no source annotation = given
-  pc_nstep++;
-  return 1;
+    if (na >= 4) pc_parse_source(args[3], st);
+    else         st->rule = R_INPUT;      // no source annotation = given
+    pc_nstep++;
+    ok = 1;
+  }
+done:
+  for (int i = 0; i < na; i++) free(args[i]);
+  return ok;
+}
+
+// ===================================================================
+// strict profile: problem-file loading + leaf verification
+// ===================================================================
+
+static void  pc_strip_comments(char *s);              // fwd (driver section)
+static char *pc_read(const char *file, size_t *len);  // fwd (driver section)
+
+// Parse one problem-file record into pc_prob.  Returns 1 on success.
+static int pc_parse_problem_record(const char *rec) {
+  while (*rec && isspace((unsigned char)*rec)) rec++;
+  if (strncmp(rec, "fof", 3) != 0 && strncmp(rec, "cnf", 3) != 0) return 0;
+  const char *op = strchr(rec, '(');
+  if (op == NULL) return 0;
+  char *args[4] = {0};
+  int na = pc_split_args(op + 1, args, 4);
+  int ok = 0;
+  if (na >= 3 && pc_nprob < PC_MAX_STEPS) {
+    char *last = args[na - 1];
+    int ll = (int)strlen(last);
+    while (ll > 0 && isspace((unsigned char)last[ll - 1])) last[--ll] = '\0';
+    if (ll > 0 && last[ll - 1] == ')') last[--ll] = '\0';
+    while (ll > 0 && isspace((unsigned char)last[ll - 1])) last[--ll] = '\0';
+    pc_trim(args[0]);
+    pc_trim(args[1]);
+    PcParse scope;
+    Term f = pc_parse_formula(args[2], &scope);
+    if (f != 0) {
+      PcProb *pr = &pc_prob[pc_nprob];
+      snprintf(pr->name, PC_NAME, "%s", args[0]);
+      pr->role    = pc_role_of(args[1]);
+      pr->formula = f;
+      pc_nprob++;
+      ok = 1;
+    }
+  }
+  for (int i = 0; i < na; i++) free(args[i]);
+  return ok;
+}
+
+// Load the problem file named by a file() directive.  Returns 0 when
+// loaded (possibly with pc_prob_unparsed records), -1 when unavailable.
+// One problem file per proof (the rules guarantee every directive names
+// the same file as the Proof: header); a second, different directive
+// path abstains rather than mixing tables.
+static int pc_load_problem(const char *dpath) {
+  if (pc_prob_state == 1) {
+    return strcmp(pc_prob_directive, dpath) == 0 ? 0 : -1;
+  }
+  if (pc_prob_state == -1) return -1;
+  pc_prob_state = -1;
+  snprintf(pc_prob_directive, PC_NAME, "%s", dpath);
+  const char *base = strrchr(dpath, '/');
+  base = (base != NULL) ? base + 1 : dpath;
+  char cand[4][1200];
+  int nc = 0;
+  if (pc_proof_dir[0] != '\0') {
+    snprintf(cand[nc++], 1200, "%s/%s", pc_proof_dir, dpath);
+    snprintf(cand[nc++], 1200, "%s/Problems/%s", pc_proof_dir, base);
+    snprintf(cand[nc++], 1200, "%s/../Problems/%s", pc_proof_dir, base);
+  }
+  snprintf(cand[nc++], 1200, "%s", dpath);
+  char *text = NULL;
+  for (int i = 0; i < nc && text == NULL; i++) text = pc_read(cand[i], NULL);
+  if (text == NULL) return -1;
+  pc_strip_comments(text);
+  int depth = 0, inq = 0;
+  char *start = text;
+  for (char *p = text; *p; p++) {
+    if (inq) { if (*p == '\'') inq = 0; continue; }
+    if (*p == '\'') { inq = 1; continue; }
+    if (*p == '(' || *p == '[') depth++;
+    else if (*p == ')' || *p == ']') depth--;
+    else if (*p == '.' && depth == 0) {
+      char save = *p;
+      *p = '\0';
+      int has_content = 0;
+      for (const char *q = start; q < p; q++)
+        if (!isspace((unsigned char)*q)) { has_content = 1; break; }
+      if (has_content && !pc_parse_problem_record(start)) pc_prob_unparsed++;
+      *p = save;
+      start = p + 1;
+    }
+  }
+  free(text);
+  pc_prob_state = 1;
+  return 0;
+}
+
+// Verify an input step.  Legacy profile: inputs are trusted (the
+// internal-trace certification use).  Strict profile: the leaf must
+// positively match the problem-file formula it cites --
+//   * introduced() or a missing/unreadable directive     -> Unknown
+//   * cited name absent (problem file fully parsed)      -> VerifiedBad
+//   * role lie on the conjecture (either direction)      -> VerifiedBad
+//   * alpha-equivalent formula                           -> confirmed
+//   * semantically DIFFERENT formula (countermodel)      -> VerifiedBad
+//   * not alpha-equivalent, difference not demonstrated  -> Unknown
+static int pc_check_leaf(int idx, const char **why) {
+  PcStep *st = &pc_steps[idx];
+  if (!pc_strict()) return PC_VALID;
+  if (st->introduced) {
+    *why = "introduced() formula cannot be positively confirmed";
+    return PC_UNKNOWN;
+  }
+  if (st->src_file[0] == '\0' || st->src_name[0] == '\0') {
+    *why = "input step lacks a checkable file directive";
+    return PC_UNKNOWN;
+  }
+  if (pc_load_problem(st->src_file) != 0) {
+    *why = "problem file unavailable";
+    return PC_UNKNOWN;
+  }
+  // Candidate problem formulas this leaf may legitimately import.  The
+  // named entry when it resolves; otherwise every ROLE-COMPATIBLE entry
+  // -- the official EVL002 sample cites file(...,a1) for an axiom the
+  // problem file names ax1, so a dangling NAME with a genuine formula
+  // must not become a verdict on its own.  Role compatibility bakes in
+  // the conjecture integrity: claiming a non-conjecture as the
+  // conjecture (refuting the wrong statement) or importing the
+  // problem's conjecture as a premise (assuming the goal) leaves the
+  // candidate set without the lying entry, and the mismatch surfaces as
+  // a demonstrated difference below.
+  int cand[PC_MAX_STEPS];
+  int ncand = 0;
+  int named = -1;
+  for (int i = 0; i < pc_nprob; i++)
+    if (strcmp(pc_prob[i].name, st->src_name) == 0) { named = i; break; }
+  int want_conj = (st->role == PC_ROLE_CONJ);
+  if (named >= 0) {
+    int is_conj_entry = (pc_prob[named].role == PC_ROLE_CONJ);
+    if (want_conj != is_conj_entry) {
+      *why = want_conj
+           ? "conjecture step cites a non-conjecture problem formula"
+           : "the problem's conjecture is imported as a premise";
+      return PC_INVALID;
+    }
+    cand[ncand++] = named;
+  } else {
+    for (int i = 0; i < pc_nprob; i++)
+      if ((pc_prob[i].role == PC_ROLE_CONJ) == want_conj) cand[ncand++] = i;
+  }
+  if (ncand == 0) {
+    if (pc_prob_unparsed) {
+      *why = "cited formula not found (problem file only partially parsed)";
+      return PC_UNKNOWN;
+    }
+    *why = "cites a formula absent from the problem file";
+    return PC_INVALID;
+  }
+  for (int k = 0; k < ncand; k++)
+    if (pc_alpha_eq(st->formula, pc_prob[cand[k]].formula)) return PC_VALID;
+  // No alpha-equivalent candidate.  Only a SEMANTIC difference from
+  // EVERY candidate is a demonstrated lie; a benign syntactic variant
+  // (reordered conjuncts, renaming beyond alpha) abstains -- the -1 for
+  // a wrong VerifiedBad is cheap, but 12 of them cost the 2026 entry 12
+  // points and betrayed unsound step logic.
+  int all_differ = 1;
+  for (int k = 0; k < ncand; k++) {
+    Term a = pc_close(st->formula);
+    Term b = pc_close(pc_prob[cand[k]].formula);
+    Term d1[2] = { a, fol_mk_not(b) };
+    AtpStatus s1 = pc_refute(d1, 2);
+    if (s1 == ATP_QUEUE_EMPTY) continue;               // demonstrated difference
+    Term d2[2] = { b, fol_mk_not(a) };
+    AtpStatus s2 = pc_refute(d2, 2);
+    if (s2 == ATP_QUEUE_EMPTY) continue;               // demonstrated difference
+    all_differ = 0;                                    // equivalent or undecided
+    break;
+  }
+  if (all_differ && !pc_prob_unparsed) {
+    *why = "formula differs from every problem formula it could cite";
+    return PC_INVALID;
+  }
+  *why = "formula is not alpha-equivalent to the cited problem formula";
+  return PC_UNKNOWN;
 }
 
 // ===================================================================
@@ -1374,22 +1723,93 @@ static int pc_parse_record(const char *rec) {
 // ===================================================================
 
 // Gather the cited parents' formulas; returns 0 if any is missing.
-// Parents must resolve to STRICTLY EARLIER steps: a derivation is a
-// DAG rooted in the inputs, and accepting a forward or self reference
-// would admit circular justification (a formula "derived" from its own
-// descendants) -- a false VerifiedGood.
+// Parents resolve ANYWHERE in the file: the ProoVer rules place no
+// requirement on record order (the 2026 entry's strictly-earlier scan
+// turned shuffled-but-valid proofs into abstains and worse).  Circular
+// justification is excluded globally instead: pc_check_structure
+// rejects any citation cycle BEFORE step checking starts, so a
+// full-range resolution here cannot admit a formula derived from its
+// own descendants.
 static int pc_parent_formulas(const PcStep *st, Term *out, int *nout) {
-  int self = (int)(st - pc_steps);
   int n = 0;
   for (int i = 0; i < st->n_parents; i++) {
-    int idx = -1;
-    for (int j = 0; j < self; j++)
-      if (strcmp(pc_steps[j].name, st->parents[i]) == 0) { idx = j; break; }
+    int idx = pc_find(st->parents[i]);
     if (idx < 0) return 0;
     if (n < PC_MAX_PARENTS) out[n++] = pc_steps[idx].formula;
   }
   *nout = n;
   return 1;
+}
+
+// Structural pass, run before any step check.  Returns 0 with *why /
+// *bad_idx set on a DEMONSTRATED structural violation:
+//   * duplicate step names with differing formulas (ambiguous
+//     citations -- every parent reference to that name is unsound);
+//   * a citation cycle (circular justification: with cycles admitted,
+//     two steps can each "derive" the other and both pass entailment).
+// Also sets pc_dangling when some cited parent resolves to no step.
+static int pc_check_structure(const char **why, int *bad_idx) {
+  for (int i = 0; i < pc_nstep; i++)
+    for (int j = i + 1; j < pc_nstep; j++)
+      if (strcmp(pc_steps[i].name, pc_steps[j].name) == 0 &&
+          !pc_alpha_eq(pc_steps[i].formula, pc_steps[j].formula)) {
+        *why = "duplicate step name with differing formulas";
+        *bad_idx = j;
+        return 0;
+      }
+  static u8  colour[PC_MAX_STEPS];       // 0 white, 1 grey, 2 black
+  static int stk[PC_MAX_STEPS], pi[PC_MAX_STEPS];
+  memset(colour, 0, (size_t)pc_nstep);
+  for (int r = 0; r < pc_nstep; r++) {
+    if (colour[r] != 0) continue;
+    int sp = 0;
+    stk[0] = r;
+    pi[0] = 0;
+    colour[r] = 1;
+    while (sp >= 0) {
+      int node = stk[sp];
+      if (pi[sp] >= pc_steps[node].n_parents) {
+        colour[node] = 2;
+        sp--;
+        continue;
+      }
+      int k = pi[sp]++;
+      int nx = pc_find(pc_steps[node].parents[k]);
+      if (nx < 0) { pc_dangling = 1; continue; }
+      if (colour[nx] == 1) {
+        *why = "circular derivation";
+        *bad_idx = node;
+        return 0;
+      }
+      if (colour[nx] == 0 && sp + 1 < PC_MAX_STEPS) {
+        colour[nx] = 1;
+        sp++;
+        stk[sp] = nx;
+        pi[sp] = 0;
+      }
+    }
+  }
+  return 1;
+}
+
+// Mark the transitive DESCENDANTS of step `root` (steps whose parent
+// chain reaches it) into mark[].  Used by the Skolem freshness check:
+// a Skolem symbol legitimately flows to every consumer of its
+// introduction, so only occurrences OUTSIDE this cone are violations.
+static void pc_mark_descendants(int root, u8 *mark) {
+  memset(mark, 0, (size_t)pc_nstep);
+  mark[root] = 1;
+  int changed = 1;
+  while (changed) {
+    changed = 0;
+    for (int i = 0; i < pc_nstep; i++) {
+      if (mark[i]) continue;
+      for (int k = 0; k < pc_steps[i].n_parents; k++) {
+        int p = pc_find(pc_steps[i].parents[k]);
+        if (p >= 0 && mark[p]) { mark[i] = 1; changed = 1; break; }
+      }
+    }
+  }
 }
 
 // Re-fetch the current step's parent/conclusion handles from pc_steps
@@ -1419,6 +1839,10 @@ static int pc_check_instantiate(const PcStep *st, const char **why) {
   // otherwise settle by entailment (an instance is a consequence).
   int v = pc_entails(par, np, st->formula);
   *why = "conclusion is not an instance of the parent";
+  if (v == PC_INVALID && st->status != PC_ST_THM && st->status != PC_ST_CTH) {
+    *why = "step does not claim entailment; left unconfirmed";
+    v = PC_UNKNOWN;
+  }
   return v;
 }
 
@@ -1428,13 +1852,16 @@ static int pc_check_negconj(const PcStep *st, const char **why) {
   // The parent must BE the conjecture: negating any other formula (an
   // axiom, say) yields a refutation of axioms-versus-their-own-negation
   // that proves nothing about the conjecture, yet can pass the
-  // equivalence check below when the negations happen to align.
+  // equivalence check below when the negations happen to align.  An
+  // unresolvable parent is an abstain (this parser may be at fault); a
+  // RESOLVED non-conjecture parent is the demonstrated violation.
   {
-    int self = (int)(st - pc_steps);
-    int cidx = -1;
-    for (int j = 0; j < self; j++)
-      if (strcmp(pc_steps[j].name, st->parents[0]) == 0) { cidx = j; break; }
-    if (cidx < 0 || !pc_steps[cidx].is_conj) {
+    int cidx = pc_find(st->parents[0]);
+    if (cidx < 0) {
+      *why = "negated_conjecture parent missing";
+      return PC_UNKNOWN;
+    }
+    if (pc_steps[cidx].role != PC_ROLE_CONJ) {
       *why = "negated_conjecture parent is not the conjecture";
       return PC_INVALID;
     }
@@ -1534,21 +1961,51 @@ static Term pc_sk_place(Term f, u32 V, const u32 *av, u32 na, u32 bound,
   return f;
 }
 
-static int pc_check_skolemize(int idx, const char **why) {
+// `specified` == 1: the step used the mandated rule name `skolemize`,
+// so every shape obligation of the specification stands and its
+// violations are demonstrated.  0: a foreign-named esa step (e.g. a
+// prover's cnf_transformation) that merely ANNOTATES a Skolem symbol --
+// only the freshness violation stands (two independent introductions of
+// one witness symbol fabricate p(sk)&q(sk) from ?[X]p(X) and ?[X]q(X));
+// the other failures abstain, because the conclusion may fold in other
+// transformations this check does not model.
+static int pc_check_skolemize(int idx, int specified, const char **why) {
   const PcStep *st = &pc_steps[idx];
   if (st->new_sym[0] == '\0') { *why = "no declared Skolem symbol"; return PC_UNKNOWN; }
   u32 L = pc_lookup(st->new_sym);
   // must actually occur in the resulting formula
   if (L == PC_NOT_FOUND || !pc_has_label(st->formula, L)) {
     *why = "declared Skolem symbol absent from the result";
-    return PC_INVALID;
+    return specified ? PC_INVALID : PC_UNKNOWN;
   }
-  // must be FRESH: absent from every earlier step (incl. the parent).
-  for (int j = 0; j < idx; j++)
-    if (pc_has_label(pc_steps[j].formula, L)) {
-      *why = "Skolem symbol is not fresh (reused)";
-      return PC_INVALID;
+  // must be FRESH: a Skolem symbol legitimately occurs only in this
+  // step's DESCENDANTS (record order is not required to be topological,
+  // so "absent from earlier records" is the wrong test in both
+  // directions).  Occurrence in any non-descendant step, or in the
+  // problem file itself, is the demonstrated reuse violation -- unless
+  // a dangling citation left the cone incomplete, where only abstaining
+  // is sound.
+  {
+    static u8 cone[PC_MAX_STEPS];
+    pc_mark_descendants(idx, cone);
+    for (int j = 0; j < pc_nstep; j++) {
+      if (cone[j] || j == idx) continue;
+      if (pc_has_label(pc_steps[j].formula, L)) {
+        if (pc_dangling) {
+          *why = "Skolem freshness undecidable (incomplete citation graph)";
+          return PC_UNKNOWN;
+        }
+        *why = "Skolem symbol is not fresh (reused)";
+        return PC_INVALID;
+      }
     }
+    for (int j = 0; j < pc_nprob; j++) {
+      if (pc_has_label(pc_prob[j].formula, L)) {
+        *why = "Skolem symbol already occurs in the problem file";
+        return PC_INVALID;
+      }
+    }
+  }
   // The step must relate to its PARENT: freshness alone would let a
   // "skolemize" step smuggle in an arbitrary claim wrapped around a
   // fresh symbol.  Soundness condition: the parent entails the
@@ -1577,6 +2034,7 @@ static int pc_check_skolemize(int idx, const char **why) {
   }
   int v = pc_entails(par, np, target);
   if (v == PC_VALID) return PC_VALID;
+  if (v == PC_INVALID && !specified) v = PC_UNKNOWN;
   *why = (v == PC_INVALID)
        ? "conclusion is not a Skolemization of the parent"
        : "Skolemization could not be settled";
@@ -1589,28 +2047,305 @@ static int pc_check_entail(const PcStep *st, const char **why) {
   Term concl = pc_is_false(st->formula) ? 0 : st->formula;
   int v = pc_entails(par, np, concl);
   *why = "conclusion is not entailed by the parents";
+  // Only thm/cth steps CLAIM entailment.  A countermodel of
+  // parents |= conclusion for an esa (equisatisfiability) or
+  // unannotated step demonstrates nothing -- judging esa steps by
+  // entailment is exactly how the 2026 entry turned valid prover
+  // output into false VerifiedBads.  (A PROVED entailment still
+  // confirms any step: an entailed conclusion is a sound addition.)
+  if (v == PC_INVALID && st->status != PC_ST_THM && st->status != PC_ST_CTH) {
+    *why = "step does not claim entailment; left unconfirmed";
+    v = PC_UNKNOWN;
+  }
   return v;
 }
 
 static int pc_check_step(int idx, const char **why) {
   const PcStep *st = &pc_steps[idx];
   switch (st->rule) {
+    case R_INPUT:       return pc_check_leaf(idx, why);
     case R_INSTANTIATE: return pc_check_instantiate(st, why);
     case R_NEGCONJ:     return pc_check_negconj(st, why);
-    case R_SKOLEMIZE:   return pc_check_skolemize(idx, why);
+    case R_SKOLEMIZE:   return pc_check_skolemize(idx, 1, why);
     case R_CONSEQUENCE:
     case R_DEDUCTION:
     case R_HORN:        return pc_check_entail(st, why);
     default:
-      // Unknown inference names (the equational engine's own cp /
-      // orient / simp records, other provers' rule vocabularies): try
-      // the semantic route -- parents |= conclusion via the engine --
-      // instead of abstaining outright.  Every equationally-derived
-      // step is an entailment, so FindProof's own CNFRefutations now
-      // verify end-to-end; an unsettled entailment still returns
-      // PC_UNKNOWN (Unknown abstain), never a false VerifiedGood.
+      // Foreign rule names (other provers' vocabularies, the equational
+      // engine's own cp / orient / simp records).  An esa step that
+      // annotates its Skolem symbol gets the positive skolemization
+      // check first; then the semantic route -- parents |= conclusion
+      // -- which can CONFIRM any step but can REFUTE only a thm/cth
+      // claim (pc_check_entail's status gate).  An unsettled step
+      // returns PC_UNKNOWN (abstain), never a false VerifiedGood.
+      if (st->status == PC_ST_ESA && st->new_sym[0] != '\0') {
+        int v = pc_check_skolemize(idx, 0, why);
+        if (v != PC_UNKNOWN) return v;
+      }
       return pc_check_entail(st, why);
   }
+}
+
+// ===================================================================
+// external-ATP hook (strict profile)
+// ===================================================================
+//
+// The ProoVer rules permit validating an unspecified inference step by
+// invoking an external ATP -- but only for steps with status thm or
+// cth, and the ATP may see ONLY that step and its stated premises
+// (re-checking the whole conjecture is forbidden).  The oracle here is
+// this very binary re-exec'd in prover mode (THVM_CHECKPROOF_PROVE=1):
+// the full FindProof CLI pipeline -- equational completion plus the FOF
+// clausal front -- is far stronger than the small per-step saturation
+// above.  A Theorem/Unsatisfiable answer confirms the step; a
+// CounterSatisfiable/Satisfiable answer on a thm claim is a concrete
+// countermodel witness (VerifiedBad); anything else abstains.
+
+static double pc_wall_now(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
+}
+static double g_pc_deadline = 0.0;             // absolute; 0 = untracked
+static volatile pid_t g_pc_hook_child = 0;     // killed by the wall alarm
+
+static unsigned long long pc_fnv(const char *s) {
+  unsigned long long h = 1469598103934665603ull;
+  for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ull; }
+  return h;
+}
+
+// TPTP renderers for the obligation file.  Terms print with the intern
+// table's names (re-quoted when not plain lower_words); variables print
+// as V<id>, which pc_close has bound.
+static void pc_print_sym(FILE *fp, u32 lab) {
+  if (lab == PC_LAB_FALSE) { fputs("$false", fp); return; }
+  if (lab == PC_LAB_TRUE)  { fputs("$true", fp);  return; }
+  if (lab >= PC_LAB_BASE && lab < PC_LAB_BASE + (u32)pc_nsyms) {
+    const char *nm = pc_sym[lab - PC_LAB_BASE];
+    int plain = (nm[0] != '\0') &&
+                (islower((unsigned char)nm[0]) ||
+                 isdigit((unsigned char)nm[0]) || nm[0] == '$');
+    for (const char *q = nm; plain && *q; q++)
+      if (!(isalnum((unsigned char)*q) || *q == '_' || *q == '$')) plain = 0;
+    if (plain) { fputs(nm, fp); return; }
+    fputc('\'', fp);
+    for (const char *q = nm; *q; q++) {
+      if (*q == '\'' || *q == '\\') fputc('\\', fp);
+      fputc(*q, fp);
+    }
+    fputc('\'', fp);
+    return;
+  }
+  fprintf(fp, "l%u", (unsigned)lab);
+}
+static void pc_print_tm(FILE *fp, Term t) {
+  if (term_tag(t) == TAG_FVR) { fprintf(fp, "V%u", (unsigned)term_ext(t)); return; }
+  if (term_tag(t) != TAG_CTR) { fputs("unprintable", fp); return; }
+  pc_print_sym(fp, term_ext(t));
+  u32 n = term_ctr_n(t);
+  if (n == 0) return;
+  fputc('(', fp);
+  for (u32 i = 0; i < n; i++) {
+    if (i) fputc(',', fp);
+    pc_print_tm(fp, term_ctr_at(t, i));
+  }
+  fputc(')', fp);
+}
+static void pc_print_fof(FILE *fp, Term f) {
+  if (term_tag(f) == TAG_CTR) {
+    u32 lab = term_ext(f);
+    if (lab == PC_LAB_NOT) {
+      fputs("~(", fp);
+      pc_print_fof(fp, term_ctr_at(f, 0));
+      fputc(')', fp);
+      return;
+    }
+    if (lab == PC_LAB_AND || lab == PC_LAB_OR ||
+        lab == PC_LAB_IMP || lab == PC_LAB_IFF) {
+      const char *op = (lab == PC_LAB_AND) ? " & "
+                     : (lab == PC_LAB_OR)  ? " | "
+                     : (lab == PC_LAB_IMP) ? " => " : " <=> ";
+      fputc('(', fp);
+      pc_print_fof(fp, term_ctr_at(f, 0));
+      fputs(op, fp);
+      pc_print_fof(fp, term_ctr_at(f, 1));
+      fputc(')', fp);
+      return;
+    }
+    if (lab == PC_LAB_ALL || lab == PC_LAB_EX) {
+      fprintf(fp, "%c [V%u] : (", (lab == PC_LAB_ALL) ? '!' : '?',
+              (unsigned)term_ext(term_ctr_at(f, 0)));
+      pc_print_fof(fp, term_ctr_at(f, 1));
+      fputc(')', fp);
+      return;
+    }
+    if (lab == PC_LAB_EQ && term_ctr_n(f) == 2) {
+      fputc('(', fp);
+      pc_print_tm(fp, term_ctr_at(f, 0));
+      fputs(" = ", fp);
+      pc_print_tm(fp, term_ctr_at(f, 1));
+      fputc(')', fp);
+      return;
+    }
+  }
+  pc_print_tm(fp, f);
+}
+
+// Run the oracle on `axioms |= conj` (conj == 0 encodes $false: the
+// axioms alone must be unsatisfiable).  Returns PC_VALID / PC_INVALID /
+// PC_UNKNOWN.  Decided results are cached under THVM_PROOFCHECK_CACHE
+// when set (validation sweeps); timeouts are never cached -- they
+// depend on the budget.
+static int pc_atp_call(Term *axioms, int nax, Term conj, int budget_s) {
+  const char *atp = getenv("THVM_PROOFCHECK_ATP");
+  if (atp != NULL && (atp[0] == '\0' || strcmp(atp, "0") == 0))
+    return PC_UNKNOWN;                       // hook disabled
+  if (atp == NULL) {
+    if (!pc_strict() || pc_self_path == NULL) return PC_UNKNOWN;
+    atp = pc_self_path;
+  }
+  char *obuf = NULL;
+  size_t olen = 0;
+  FILE *ms = open_memstream(&obuf, &olen);
+  if (ms == NULL) return PC_UNKNOWN;
+  for (int i = 0; i < nax; i++) {
+    fprintf(ms, "fof(p%d, axiom, ", i);
+    pc_print_fof(ms, pc_close(axioms[i]));
+    fputs(").\n", ms);
+  }
+  fputs("fof(goal, conjecture, ", ms);
+  if (conj != 0) pc_print_fof(ms, pc_close(conj));
+  else           fputs("$false", ms);
+  fputs(").\n", ms);
+  fclose(ms);
+  if (obuf == NULL) return PC_UNKNOWN;
+
+  char cpath[1200];
+  cpath[0] = '\0';
+  const char *cdir = getenv("THVM_PROOFCHECK_CACHE");
+  if (cdir != NULL && cdir[0] != '\0') {
+    snprintf(cpath, sizeof cpath, "%s/%016llx", cdir, pc_fnv(obuf));
+    FILE *cf = fopen(cpath, "r");
+    if (cf != NULL) {
+      int c = fgetc(cf);
+      fclose(cf);
+      free(obuf);
+      return (c == 'V') ? PC_VALID : (c == 'I') ? PC_INVALID : PC_UNKNOWN;
+    }
+  }
+
+  char tmpl[1240];
+  const char *tdir = getenv("TMPDIR");
+  snprintf(tmpl, sizeof tmpl, "%s/pc_ob_XXXXXX",
+           (tdir != NULL && tdir[0] != '\0') ? tdir : "/tmp");
+  int fd = mkstemp(tmpl);
+  if (fd < 0) { free(obuf); return PC_UNKNOWN; }
+  ssize_t w = write(fd, obuf, olen);
+  close(fd);
+  if (w != (ssize_t)olen) { unlink(tmpl); free(obuf); return PC_UNKNOWN; }
+
+  int pfd[2];
+  int v = PC_UNKNOWN;
+  if (pipe(pfd) == 0) {
+    fflush(stdout);
+    fflush(stderr);
+    pid_t pid = fork();
+    if (pid == 0) {
+      dup2(pfd[1], 1);
+      close(pfd[0]);
+      close(pfd[1]);
+      int devnull = open("/dev/null", O_RDWR);
+      if (devnull >= 0) { dup2(devnull, 0); dup2(devnull, 2); }
+      setenv("THVM_CHECKPROOF_PROVE", "1", 1);       // self-exec: prover mode
+      setenv("THVM_ATP_RSS_ABORT_MB", "4000", 0);    // bound the oracle
+      char wallbuf[32];
+      snprintf(wallbuf, sizeof wallbuf, "--wall=%d", budget_s);
+      signal(SIGALRM, SIG_DFL);
+      alarm((unsigned)budget_s + 3u);                // belt over the --wall
+      execl(atp, atp, "--szs", wallbuf, tmpl, (char *)NULL);
+      _exit(127);
+    }
+    close(pfd[1]);
+    if (pid > 0) {
+      g_pc_hook_child = pid;
+      char out[8192];
+      size_t got = 0;
+      ssize_t r;
+      while ((r = read(pfd[0], out + got, sizeof out - 1 - got)) > 0) {
+        got += (size_t)r;
+        if (got >= sizeof out - 1) {
+          char drain[4096];
+          while (read(pfd[0], drain, sizeof drain) > 0) {}
+          break;
+        }
+      }
+      out[got] = '\0';
+      close(pfd[0]);
+      int status = 0;
+      waitpid(pid, &status, 0);
+      g_pc_hook_child = 0;
+      const char *sz = strstr(out, "SZS status ");
+      if (sz != NULL) {
+        sz += 11;
+        if (strncmp(sz, "Theorem", 7) == 0 ||
+            strncmp(sz, "Unsatisfiable", 13) == 0 ||
+            strncmp(sz, "ContradictoryAxioms", 19) == 0) v = PC_VALID;
+        else if (strncmp(sz, "CounterSatisfiable", 18) == 0 ||
+                 strncmp(sz, "Satisfiable", 11) == 0) v = PC_INVALID;
+      }
+    } else {
+      close(pfd[0]);
+    }
+  }
+  unlink(tmpl);
+  if (cpath[0] != '\0' && v != PC_UNKNOWN) {
+    FILE *cf = fopen(cpath, "w");
+    if (cf != NULL) {
+      fputc(v == PC_VALID ? 'V' : 'I', cf);
+      fclose(cf);
+    }
+  }
+  free(obuf);
+  return v;
+}
+
+// Discharge one unsettled derived step through the oracle.  Gates: a
+// thm status (entailment IS the claim), or the specified
+// negated_conjecture rule (checked as the equivalence
+// ~parent <=> conclusion); parents resolvable; wall budget remaining.
+// esa steps NEVER reach the ATP (the rules forbid it), and a foreign-
+// named cth step's countermodel is not treated as a violation.
+static int pc_atp_discharge_step(int idx, const char **why) {
+  const PcStep *st = &pc_steps[idx];
+  if (st->rule == R_INPUT || st->rule == R_SKOLEMIZE) return PC_UNKNOWN;
+  Term par[PC_MAX_PARENTS];
+  int np;
+  if (!pc_parent_formulas(st, par, &np) || np < 1) return PC_UNKNOWN;
+  double rem = (g_pc_deadline > 0.0) ? g_pc_deadline - pc_wall_now() : 8.0;
+  if (rem < 1.5) return PC_UNKNOWN;
+  int pending = 1;
+  for (int j = idx + 1; j < pc_nstep; j++)
+    if (pc_steps[j].rule != R_INPUT) pending++;
+  int budget = (int)(rem / (double)pending);
+  if (budget < 1) budget = 1;
+  if (budget > 8) budget = 8;
+  if (st->rule == R_NEGCONJ || st->status == PC_ST_CTH) {
+    if (np != 1) return PC_UNKNOWN;
+    Term equiv = fol_mk_iff(fol_mk_not(pc_close(par[0])),
+                            pc_close(st->formula));
+    int v = pc_atp_call(NULL, 0, equiv, budget);
+    if (v == PC_INVALID) {
+      if (st->rule != R_NEGCONJ) return PC_UNKNOWN;  // foreign cth: abstain
+      *why = "external ATP: not the negation of the conjecture";
+    }
+    return v;
+  }
+  if (st->status != PC_ST_THM) return PC_UNKNOWN;
+  Term concl = pc_is_false(st->formula) ? 0 : st->formula;
+  int v = pc_atp_call(par, np, concl, budget);
+  if (v == PC_INVALID) *why = "external ATP found the step counter-satisfiable";
+  return v;
 }
 
 // ===================================================================
@@ -1666,6 +2401,8 @@ static const char * volatile pc_bad_why;
 static char g_pc_alarm_line[1300];
 static void pc_worker_alarm(int sig) {
   (void)sig;
+  pid_t c = g_pc_hook_child;          // reap a live oracle child first
+  if (c > 0) kill(c, SIGKILL);
   size_t n = 0;
   while (g_pc_alarm_line[n] != '\0') n++;
   if (n > 0) { ssize_t w = write(1, g_pc_alarm_line, n); (void)w; }
@@ -1692,6 +2429,9 @@ static int proof_check_worker(const char *file, int szs) {
                       "Unknown\t%s\n", base);
     signal(SIGALRM, pc_worker_alarm);
     alarm(wsec);
+    // Absolute budget the external-ATP hook spends down; the margin
+    // keeps the final verdict line inside the alarm.
+    g_pc_deadline = pc_wall_now() + (double)wsec - 2.5;
   }
 
   char *text = pc_read(file, NULL);
@@ -1701,8 +2441,23 @@ static int proof_check_worker(const char *file, int szs) {
     return 2;
   }
   pc_strip_comments(text);
+  // The strict profile resolves file() directive paths relative to the
+  // proof file's directory (the samples' layout: Problems/ beside the
+  // proof).
+  {
+    const char *sl = strrchr(file, '/');
+    if (sl != NULL && (size_t)(sl - file) < sizeof pc_proof_dir) {
+      memcpy(pc_proof_dir, file, (size_t)(sl - file));
+      pc_proof_dir[sl - file] = '\0';
+    } else {
+      pc_proof_dir[0] = '\0';
+    }
+  }
 
   pc_bad = -1; pc_any_unknown = 0; pc_saw_false = 0; pc_bad_why = "";
+  pc_nskipped = 0; pc_dangling = 0;
+  pc_nprob = 0; pc_prob_state = 0; pc_prob_unparsed = 0;
+  pc_prob_directive[0] = '\0';
   if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
     fprintf(stderr, "PCDBG loaded steps=%d\n", pc_nstep);
   }
@@ -1716,28 +2471,51 @@ static int proof_check_worker(const char *file, int szs) {
     thvm_heap_exhaust_jmp = NULL;
     verdict = (pc_bad >= 0) ? "VerifiedBad" : "Unknown";
   } else {
-    // Split into '.'-terminated records (respecting quotes / brackets).
+    // Split into '.'-terminated records (respecting quotes / brackets)
+    // and parse each IN PLACE -- the old fixed 64K copy buffer silently
+    // truncated large records.  Every content-bearing segment that does
+    // not become a step is COUNTED: an unread record caps the verdict
+    // at Unknown (the 2026 entry dropped such records silently and
+    // verified the remainder -- a confirmed false-accept hole).
     pc_nstep = 0; pc_nsyms = 0;
     int depth = 0, inq = 0;
     char *start = text;
-    for (char *p = text; *p; p++) {
+    char *p = text;
+    for (; *p; p++) {
       if (inq) { if (*p == '\'') inq = 0; continue; }
       if (*p == '\'') { inq = 1; continue; }
       if (*p == '(' || *p == '[') depth++;
       else if (*p == ')' || *p == ']') depth--;
       else if (*p == '.' && depth == 0) {
-        char save = p[1]; p[1] = '\0';
-        char rec[1 << 16];
-        snprintf(rec, sizeof rec, "%.*s", (int)(p - start), start);
-        pc_parse_record(rec);
-        p[1] = save;
+        char save = *p;
+        *p = '\0';
+        int has_content = 0;
+        for (const char *q = start; q < p; q++)
+          if (!isspace((unsigned char)*q)) { has_content = 1; break; }
+        if (has_content && !pc_parse_record(start)) pc_nskipped++;
+        *p = save;
         start = p + 1;
       }
     }
+    for (const char *q = start; *q; q++)         // unterminated trailing record
+      if (!isspace((unsigned char)*q)) { pc_nskipped++; break; }
 
-    // Validate every derived step; report one verdict.
-    for (int i = 0; i < pc_nstep; i++) {
-      if (pc_steps[i].rule == R_INPUT) continue;   // axioms / given clauses
+    // Structural verification first: unique names and an acyclic
+    // citation graph.  Both violations are demonstrated (organizer-
+    // grade bad proofs), and full-range parent resolution below is only
+    // sound once cycles are excluded.
+    {
+      const char *swhy = NULL;
+      int sbad = -1;
+      if (!pc_check_structure(&swhy, &sbad)) {
+        pc_bad = sbad;
+        pc_bad_why = swhy;
+      }
+    }
+
+    // Validate every step (inputs included: the strict profile verifies
+    // leaves against the problem file); report one verdict.
+    for (int i = 0; i < pc_nstep && pc_bad < 0; i++) {
       const char *why = "";
       // Per-step arena discipline: pc_entails replays a whole engine
       // refutation per step on the global heap; without reclamation a
@@ -1764,6 +2542,13 @@ static int proof_check_worker(const char *file, int szs) {
         g_pc_cur_idx = i;
         v = pc_check_step(i, &why);
         g_pc_cur_idx = -1;
+        // Unsettled thm/cth step: per the rules, discharge it through
+        // the external ATP (this binary re-exec'd as prover) -- the one
+        // mechanism that turns an unverifiable step into a decided one.
+        if (v == PC_UNKNOWN) {
+          int hv = pc_atp_discharge_step(i, &why);
+          if (hv != PC_UNKNOWN) v = hv;
+        }
       }
       thvm_heap_exhaust_jmp = _pc_saved;
       if (gc_count() == _pc_gc) {
@@ -1812,15 +2597,19 @@ static int proof_check_worker(const char *file, int szs) {
                   v == 0 ? "VALID" : v == 1 ? "INVALID" : "UNKNOWN", why);
         }
       }
-      if (v == PC_VALID && pc_is_false(pc_steps[i].formula)) pc_saw_false = 1;
+      if (v == PC_VALID && pc_steps[i].rule != R_INPUT &&
+          pc_is_false(pc_steps[i].formula)) pc_saw_false = 1;
       if (v == PC_INVALID) { pc_bad = i; pc_bad_why = why; break; }
       if (v == PC_UNKNOWN) pc_any_unknown = 1;
     }
     thvm_heap_exhaust_jmp = NULL;
-    if (pc_bad >= 0)          verdict = "VerifiedBad";
-    else if (pc_any_unknown)  verdict = "Unknown";
-    else if (!pc_saw_false)   verdict = "Unknown";  // no refutation closure
-    else                      verdict = "VerifiedGood";
+    // Abstain-by-default assembly: VerifiedGood requires EVERY record
+    // read and EVERY step confirmed, plus a confirmed derived $false.
+    if (pc_bad >= 0)           verdict = "VerifiedBad";
+    else if (pc_nskipped > 0)  verdict = "Unknown";  // unread records
+    else if (pc_any_unknown)   verdict = "Unknown";
+    else if (!pc_saw_false)    verdict = "Unknown";  // no refutation closure
+    else                       verdict = "VerifiedGood";
   }
 
   alarm(0);
@@ -1833,11 +2622,13 @@ static int proof_check_worker(const char *file, int szs) {
 
 static void pc_alarm(int sig) { (void)sig; }   // interrupt waitpid only
 
-// FindProof --check entry point.  Isolates the checking pass in a child
-// process: whatever happens to it -- a clean verdict, a heap-exhaustion
-// fatal, or a saturation that outlives the wall bound -- the proof still
-// gets exactly one SZS line.  The conservative fallback is Unknown
-// (0 points), never a wrong VerifiedBad (-10).
+// FindProof --check / CheckProof entry point.  Isolates the checking
+// pass in a child process: whatever happens to it -- a clean verdict, a
+// heap-exhaustion fatal, or a saturation that outlives the wall bound --
+// the proof still gets exactly one SZS line.  The conservative fallback
+// is Unknown (0 points): under ProoVer scoring a wrong VerifiedGood
+// costs -10 and a wrong VerifiedBad costs -1, so no crash or timeout
+// path may ever guess a verdict.
 static int proof_check_main(const char *file, int szs) {
   const char *base = strrchr(file, '/');
   base = (base != NULL) ? base + 1 : file;
