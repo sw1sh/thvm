@@ -1916,24 +1916,64 @@ static int pc_check_structure(const char **why, int *bad_idx) {
   return 1;
 }
 
-// Mark the transitive DESCENDANTS of step `root` (steps whose parent
-// chain reaches it) into mark[].  Used by the Skolem freshness check:
-// a Skolem symbol legitimately flows to every consumer of its
-// introduction, so only occurrences OUTSIDE this cone are violations.
-static void pc_mark_descendants(int root, u8 *mark) {
-  memset(mark, 0, (size_t)pc_nstep);
-  mark[root] = 1;
-  int changed = 1;
-  while (changed) {
-    changed = 0;
-    for (int i = 0; i < pc_nstep; i++) {
-      if (mark[i]) continue;
-      for (int k = 0; k < pc_steps[i].n_parents; k++) {
-        int p = pc_find(pc_steps[i].parents[k]);
-        if (p >= 0 && mark[p]) { mark[i] = 1; changed = 1; break; }
-      }
+// Skolem-symbol freshness by UNIQUE INTRODUCTION SOURCE.  Collect every
+// step whose formula carries the symbol; a SOURCE is an occurrence step
+// none of whose resolved parents also carries it.  Exactly one source
+// means every occurrence chain terminates at that single introduction
+// (the graph is acyclic by the structure pass), so the symbol flows
+// only downstream of one witness choice -- fresh.  Two or more sources
+// are independent introductions of the same witness symbol: from
+// ?[X]p(X) and ?[X]q(X) that fabricates p(sk)&q(sk) -- the demonstrated
+// reuse violation.  A descendant-cone-of-the-skolemize-step test is
+// WRONG here: Vampire introduces the symbol in a separate
+// introduced(..[skolem_symbol_introduction]) LEAF that the
+// skolemisation step cites as a PARENT, so the legitimate introduction
+// sits upstream of the skolemize record.
+static int pc_sk_fresh(int idx, u32 L, const char **why) {
+  for (int j = 0; j < pc_nprob; j++) {
+    if (pc_has_label(pc_prob[j].formula, L)) {
+      *why = "Skolem symbol already occurs in the problem file";
+      return PC_INVALID;
     }
   }
+  if (pc_dangling) {
+    *why = "Skolem freshness undecidable (incomplete citation graph)";
+    return PC_UNKNOWN;
+  }
+  static u8 occ[PC_MAX_STEPS];
+  for (int j = 0; j < pc_nstep; j++)
+    occ[j] = pc_has_label(pc_steps[j].formula, L) ? 1u : 0u;
+  int nsrc = 0;
+  for (int j = 0; j < pc_nstep; j++) {
+    if (!occ[j]) continue;
+    int from_parent = 0;
+    for (int k = 0; k < pc_steps[j].n_parents && !from_parent; k++) {
+      int p = pc_find(pc_steps[j].parents[k]);
+      if (p >= 0 && occ[p]) from_parent = 1;
+    }
+    if (from_parent) continue;
+    // A record declaring a DIFFERENT symbol as its new_symbols is a
+    // definition/naming of that other symbol in terms of existing ones
+    // (Vampire's avatar_definition leaves mention Skolem terms with no
+    // parents) -- a USE, not an introduction.  Excluding it cannot
+    // admit a false accept: such a record must still be positively
+    // confirmed on its own for the proof ever to reach VerifiedGood.
+    if (pc_steps[j].n_new_syms > 0) {
+      int declares_L = 0;
+      for (int s = 0; s < pc_steps[j].n_new_syms && !declares_L; s++)
+        if (pc_lookup(pc_steps[j].new_syms[s]) == L) declares_L = 1;
+      if (!declares_L) continue;
+    }
+    nsrc++;
+  }
+  (void)idx;
+  if (nsrc == 1) return PC_VALID;
+  if (nsrc == 0) {                       // unreachable once cycles are barred
+    *why = "Skolem freshness undecidable";
+    return PC_UNKNOWN;
+  }
+  *why = "Skolem symbol is not fresh (reused)";
+  return PC_INVALID;
 }
 
 // Re-fetch the current step's parent/conclusion handles from pc_steps
@@ -2109,35 +2149,13 @@ static int pc_check_skolemize(int idx, int specified, const char **why) {
       return specified ? PC_INVALID : PC_UNKNOWN;
     }
   }
-  // must be FRESH: a Skolem symbol legitimately occurs only in this
-  // step's DESCENDANTS (record order is not required to be topological,
-  // so "absent from earlier records" is the wrong test in both
-  // directions).  Occurrence in any non-descendant step, or in the
-  // problem file itself, is the demonstrated reuse violation -- unless
-  // a dangling citation left the cone incomplete, where only abstaining
-  // is sound.
-  {
-    static u8 cone[PC_MAX_STEPS];
-    pc_mark_descendants(idx, cone);
-    for (int s = 0; s < nsyms; s++) {
-      for (int j = 0; j < pc_nstep; j++) {
-        if (cone[j] || j == idx) continue;
-        if (pc_has_label(pc_steps[j].formula, Ls[s])) {
-          if (pc_dangling) {
-            *why = "Skolem freshness undecidable (incomplete citation graph)";
-            return PC_UNKNOWN;
-          }
-          *why = "Skolem symbol is not fresh (reused)";
-          return PC_INVALID;
-        }
-      }
-      for (int j = 0; j < pc_nprob; j++) {
-        if (pc_has_label(pc_prob[j].formula, Ls[s])) {
-          *why = "Skolem symbol already occurs in the problem file";
-          return PC_INVALID;
-        }
-      }
-    }
+  // must be FRESH: exactly one introduction source per symbol
+  // (pc_sk_fresh; record order and the position of the introduction in
+  // the DAG are both free -- only INDEPENDENT re-introduction is the
+  // violation).
+  for (int s = 0; s < nsyms; s++) {
+    int fv = pc_sk_fresh(idx, Ls[s], why);
+    if (fv != PC_VALID) return fv;
   }
   // The step must relate to its PARENT: freshness alone would let a
   // "skolemize" step smuggle in an arbitrary claim wrapped around a
