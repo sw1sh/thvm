@@ -19,8 +19,28 @@ RUN (manual)
   bin/CheckProof --szs PROOF.p
 
 INPUT   First-order TSTP proofs (fof/cnf records with inference
-        annotations), by refutation, closing with $false.
+        annotations), by refutation, closing with $false.  The problem
+        file named by the proof's file() directives is loaded from the
+        adjacent Problems/ directory and every input leaf is verified
+        against it.
 OUTPUT  One SZS verdict line; when a step is rejected, the faulty step
-        is named in a following comment.  VerifiedBad is claimed only
-        when a step is certainly unsound; anything undecided within the
-        resource bound yields Unknown.
+        is named in a following comment.
+
+VERDICT POLICY (abstain-by-default; ProoVer scores a wrong VerifiedGood
+-10 and a wrong VerifiedBad -1):
+  VerifiedGood  every record parsed, every leaf verified against the
+                problem file, every derived step positively confirmed
+                (internal rule check, or the external-ATP hook), names
+                unique, citation graph acyclic, $false root confirmed.
+  VerifiedBad   only on a DEMONSTRATED violation: a countermodel of a
+                thm/cth claim, a leaf semantically differing from the
+                problem formula it cites, a reused Skolem symbol, a
+                citation cycle, duplicate names with differing formulas.
+  Unknown       everything else, including anything undecided within
+                the resource bound.
+
+EXTERNAL ATP (permitted by the ProoVer rules for thm/cth steps):
+unsettled steps are discharged by re-exec'ing this same binary as a
+prover (THVM_CHECKPROOF_PROVE=1) on exactly the step and its premises,
+budgeted against the proof wall.  THVM_PROOFCHECK_ATP=path overrides
+the oracle binary; =0 disables the hook.
