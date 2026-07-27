@@ -1759,7 +1759,10 @@ static int pc_check_leaf(int idx, const char **why) {
     *why = "introduced() formula cannot be positively confirmed";
     return PC_UNKNOWN;
   }
-  if (st->src_file[0] == '\0' || st->src_name[0] == '\0') {
+  // A directive with no formula name still names the FILE: fall through
+  // to the role-compatible candidate match (the competition guarantees
+  // names, but provers in the wild cite file('x.p') bare).
+  if (st->src_file[0] == '\0') {
     *why = "input step lacks a checkable file directive";
     return PC_UNKNOWN;
   }
@@ -2646,9 +2649,6 @@ static int proof_check_worker(const char *file, int szs) {
   pc_nskipped = 0; pc_dangling = 0; pc_nsyms = 0;
   pc_nprob = 0; pc_prob_state = 0; pc_prob_unparsed = 0;
   pc_prob_directive[0] = '\0';
-  if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
-    fprintf(stderr, "PCDBG loaded steps=%d\n", pc_nstep);
-  }
   const char *verdict;
 
   thvm_heap_exhausted = 0;
@@ -2666,6 +2666,10 @@ static int proof_check_worker(const char *file, int szs) {
     // at Unknown (the 2026 entry dropped such records silently and
     // verified the remainder -- a confirmed false-accept hole).
     pc_parse_all(text);
+    if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
+      fprintf(stderr, "PCDBG loaded steps=%d skipped=%d\n",
+              pc_nstep, pc_nskipped);
+    }
 
     // Structural verification first: unique names and an acyclic
     // citation graph.  Both violations are demonstrated (organizer-

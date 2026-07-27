@@ -142,3 +142,45 @@ a checker that accepted 18 false proofs.
 5. **For CASC forecasting: stop predicting from frozen prior-year scores, and
    hold out problems.** Any future estimate should be measured on problems we
    have never dissected, and should assume competitors improve year over year.
+
+## Addendum (2026-07-28): the checker rebuild
+
+Actions 1-4 are done (worktree proover-rebuild).  The official PRV
+problem+proof set is NOT yet published (the site's last commit predates the
+competition; proofs appear "shortly after" per the proceedings) -- re-check
+https://proover-competition.github.io/ and tptp.org/CASC/J13/.  In its place,
+the blind spots were diagnosed by auditing the shipped checker and CONFIRMING
+each hypothesis against the old binary with crafted counterexamples.
+
+**False-accept taxonomy (what -180 was made of).**  The shipped checker never
+opened the problem file: every file()/introduced() leaf was trusted wholesale,
+and unparseable records were silently dropped.  Five invalid families all
+verified as VerifiedGood on the old binary: (a) leaf formula differs from the
+named problem axiom, (b) introduced() smuggling of an arbitrary formula,
+(c) a plain step dodging its check by citing file(), (d) a wrong-conjecture
+import (prove something easier than the problem's conjecture), (e) a
+corrupted record the parser dropped while the remainder verified.  All are
+one mutation family at heart -- LEAF LIES -- which is consistent with the
+near-contiguous PRV046-054 cluster being one organizer generator.  The 12
+false rejects: record order was assumed topological (the rules allow any
+order) and esa steps were judged by entailment, so real-prover output
+(cnf_transformation containing skolemization) drew genuine countermodels and
+became VerifiedBad; the old binary even rejected FindProof's own valid
+SEU140+2 solution.
+
+**The rebuild** (tools/proof_check.c, strict profile = CheckProof binary):
+leaves verified against the loaded problem file (semantic mismatch =
+VerifiedBad, benign variant = abstain); unread records cap the verdict at
+Unknown; duplicate names / citation cycles rejected structurally; parent
+resolution order-independent; countermodels refute only thm/cth claims;
+Skolem freshness is DAG-cone-aware; multi-symbol skolemisation and
+introduced(definition) chains confirm positively; unsettled thm/cth steps
+discharge through the external-ATP hook (this binary re-exec'd as prover,
+per the rules: the step and its premises only).  FindProof --check keeps the
+legacy trusted-leaf profile for internal certification.
+
+**Validation** now runs on real prover output: harvested FindProof+Vampire
+TSTP proofs over CASC-J13 problems, mutated by a spec-derived battery
+(tools/proover/openworld/), scored with a 30% held-out slice whose hard
+requirement is zero false accepts.  The old synth corpus is kept as a
+regression floor (138/138).
