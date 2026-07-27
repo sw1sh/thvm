@@ -5,5 +5,9 @@
 # wall-clock limit is taken from the StarExec environment.
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 LIMIT=${STAREXEC_WALLCLOCK_LIMIT:-30}
-THVM_PROOFCHECK_WALL="$LIMIT"; export THVM_PROOFCHECK_WALL
+# Verdict must be on stdout BEFORE StarExec's own SIGALRM at $LIMIT:
+# keep a 2s margin for the checker's internal wall.
+WALL=$((LIMIT - 2))
+[ "$WALL" -lt 5 ] && WALL=$LIMIT
+THVM_PROOFCHECK_WALL="$WALL"; export THVM_PROOFCHECK_WALL
 exec "$HERE/bin/CheckProof" --szs "$1"
