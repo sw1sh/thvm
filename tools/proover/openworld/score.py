@@ -52,6 +52,7 @@ def main():
         return 2
     corpus, binpath = sys.argv[1], os.path.abspath(sys.argv[2])
     only_held = "--heldout-only" in sys.argv
+    only_dev = "--dev-only" in sys.argv
     wall = 30
     if "--wall" in sys.argv:
         wall = int(sys.argv[sys.argv.index("--wall") + 1])
@@ -64,6 +65,8 @@ def main():
     for fn, gold, cls, prover in rows:
         split = "held" if heldout(fn) else "dev"
         if only_held and split != "held":
+            continue
+        if only_dev and split != "dev":
             continue
         sub = "valid" if gold == "valid" else "buggy"
         v = verdict_of(binpath, os.path.join(corpus, sub, fn), wall)
