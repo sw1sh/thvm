@@ -948,13 +948,17 @@ enum { PC_ST_NONE, PC_ST_THM, PC_ST_ESA, PC_ST_CTH };
 enum { PC_ROLE_AXIOM, PC_ROLE_CONJ, PC_ROLE_NEGCONJ, PC_ROLE_PLAIN,
        PC_ROLE_OTHER };
 
+#define PC_MAX_NEWSYMS 16
+
 typedef struct {
   char name[PC_NAME];
   Term formula;
   int  rule;
   char parents[PC_MAX_PARENTS][PC_NAME];
   int  n_parents;
-  char new_sym[PC_NAME];      // declared Skolem symbol, or ""
+  char new_sym[PC_NAME];      // first declared Skolem symbol, or ""
+  char new_syms[PC_MAX_NEWSYMS][PC_NAME];  // full new_symbols list
+  int  n_new_syms;
   int  role;                  // PC_ROLE_*
   int  status;                // PC_ST_*: the annotation's status(...)
   u8   introduced;            // source was introduced(...)
@@ -1404,14 +1408,27 @@ static void pc_parse_source(const char *src, PcStep *st) {
     }
   }
 
-  // declared new Skolem symbol: new_symbols(skolem, [sK...])
+  // declared new Skolem symbols: new_symbols(skolem, [sK, ...]).  The
+  // whole list is kept (real prover records declare several per
+  // skolemisation step); new_sym mirrors the first for the single-
+  // symbol checks.
   const char *ns = strstr(src, "new_symbols");
   if (ns != NULL) {
     const char *lb = strchr(ns, '[');
     if (lb != NULL) {
       const char *q = lb + 1;
-      while (*q && isspace((unsigned char)*q)) q++;
-      pc_ident(q, st->new_sym, PC_NAME);
+      while (*q && *q != ']') {
+        while (*q && (isspace((unsigned char)*q) || *q == ',')) q++;
+        if (*q == ']' || *q == '\0') break;
+        char nm[PC_NAME];
+        const char *nq = pc_ident(q, nm, PC_NAME);
+        if (nq == q) break;
+        q = nq;
+        if (st->n_new_syms < PC_MAX_NEWSYMS)
+          snprintf(st->new_syms[st->n_new_syms++], PC_NAME, "%s", nm);
+      }
+      if (st->n_new_syms > 0)
+        snprintf(st->new_sym, PC_NAME, "%s", st->new_syms[0]);
     }
   }
   // parents: the LAST bracketed list (it follows the annotation block).
@@ -1972,11 +1989,18 @@ static Term pc_sk_place(Term f, u32 V, const u32 *av, u32 na, u32 bound,
 static int pc_check_skolemize(int idx, int specified, const char **why) {
   const PcStep *st = &pc_steps[idx];
   if (st->new_sym[0] == '\0') { *why = "no declared Skolem symbol"; return PC_UNKNOWN; }
-  u32 L = pc_lookup(st->new_sym);
-  // must actually occur in the resulting formula
-  if (L == PC_NOT_FOUND || !pc_has_label(st->formula, L)) {
-    *why = "declared Skolem symbol absent from the result";
-    return specified ? PC_INVALID : PC_UNKNOWN;
+  // The full declared list: real prover skolemisation records introduce
+  // SEVERAL symbols in one step (SEU140+2's f50_sk declares three).
+  int nsyms = (st->n_new_syms > 0) ? st->n_new_syms : 1;
+  u32 Ls[PC_MAX_NEWSYMS];
+  for (int s = 0; s < nsyms; s++) {
+    const char *nm = (st->n_new_syms > 0) ? st->new_syms[s] : st->new_sym;
+    Ls[s] = pc_lookup(nm);
+    // every declared symbol must actually occur in the resulting formula
+    if (Ls[s] == PC_NOT_FOUND || !pc_has_label(st->formula, Ls[s])) {
+      *why = "declared Skolem symbol absent from the result";
+      return specified ? PC_INVALID : PC_UNKNOWN;
+    }
   }
   // must be FRESH: a Skolem symbol legitimately occurs only in this
   // step's DESCENDANTS (record order is not required to be topological,
@@ -1988,49 +2012,60 @@ static int pc_check_skolemize(int idx, int specified, const char **why) {
   {
     static u8 cone[PC_MAX_STEPS];
     pc_mark_descendants(idx, cone);
-    for (int j = 0; j < pc_nstep; j++) {
-      if (cone[j] || j == idx) continue;
-      if (pc_has_label(pc_steps[j].formula, L)) {
-        if (pc_dangling) {
-          *why = "Skolem freshness undecidable (incomplete citation graph)";
-          return PC_UNKNOWN;
+    for (int s = 0; s < nsyms; s++) {
+      for (int j = 0; j < pc_nstep; j++) {
+        if (cone[j] || j == idx) continue;
+        if (pc_has_label(pc_steps[j].formula, Ls[s])) {
+          if (pc_dangling) {
+            *why = "Skolem freshness undecidable (incomplete citation graph)";
+            return PC_UNKNOWN;
+          }
+          *why = "Skolem symbol is not fresh (reused)";
+          return PC_INVALID;
         }
-        *why = "Skolem symbol is not fresh (reused)";
-        return PC_INVALID;
       }
-    }
-    for (int j = 0; j < pc_nprob; j++) {
-      if (pc_has_label(pc_prob[j].formula, L)) {
-        *why = "Skolem symbol already occurs in the problem file";
-        return PC_INVALID;
+      for (int j = 0; j < pc_nprob; j++) {
+        if (pc_has_label(pc_prob[j].formula, Ls[s])) {
+          *why = "Skolem symbol already occurs in the problem file";
+          return PC_INVALID;
+        }
       }
     }
   }
   // The step must relate to its PARENT: freshness alone would let a
   // "skolemize" step smuggle in an arbitrary claim wrapped around a
   // fresh symbol.  Soundness condition: the parent entails the
-  // conclusion with the Skolem terms abstracted to an existential
-  // placed exactly where the Skolem's argument tuple binds -- then any
-  // model of the parent interprets the fresh symbol as the witness
-  // function, so the step is a conservative (esa) extension.
+  // conclusion with every Skolem term abstracted to an existential
+  // placed exactly where that Skolem's argument tuple binds -- then any
+  // model of the parent interprets the fresh symbols as the witness
+  // functions, so the step is a conservative (esa) extension.  Symbols
+  // are re-existentialised in declaration order, outermost first.
   Term par[PC_MAX_PARENTS]; int np;
   if (!pc_parent_formulas(st, par, &np) || np < 1) {
     *why = "skolemize parent missing";
     return PC_UNKNOWN;
   }
-  u32 av[PC_MAX_VARS], na = 0;
-  int have = 0;
-  if (pc_sk_args(st->formula, L, av, &na, &have) < 0) {
-    *why = "Skolem symbol applied non-uniformly";
-    return PC_UNKNOWN;
+  static u32 avs[PC_MAX_NEWSYMS][PC_MAX_VARS];
+  u32 nas[PC_MAX_NEWSYMS];
+  for (int s = 0; s < nsyms; s++) {
+    int have = 0;
+    nas[s] = 0;
+    if (pc_sk_args(st->formula, Ls[s], avs[s], &nas[s], &have) < 0) {
+      *why = "Skolem symbol applied non-uniformly";
+      return PC_UNKNOWN;
+    }
   }
-  u32 V = pc_max_var(st->formula) + 1u;
-  Term abstracted = pc_sk_abstract(st->formula, L, V);
-  int placed = 1;
-  Term target = pc_sk_place(abstracted, V, av, na, 0, &placed);
-  if (!placed) {
-    *why = "no sound placement for the Skolem witness";
-    return PC_UNKNOWN;
+  u32 Vbase = pc_max_var(st->formula) + 1u;
+  Term target = st->formula;
+  for (int s = 0; s < nsyms; s++)
+    target = pc_sk_abstract(target, Ls[s], Vbase + (u32)s);
+  for (int s = nsyms - 1; s >= 0; s--) {
+    int placed = 1;
+    target = pc_sk_place(target, Vbase + (u32)s, avs[s], nas[s], 0, &placed);
+    if (!placed) {
+      *why = "no sound placement for the Skolem witness";
+      return PC_UNKNOWN;
+    }
   }
   int v = pc_entails(par, np, target);
   if (v == PC_VALID) return PC_VALID;
