@@ -91,6 +91,8 @@ static u32 pc_cap = PC_ENTAIL_CAP;   // runtime override via env, set in worker
 // per-step oracle.
 static int pc_strict_default = 0;
 static const char *pc_self_path = NULL;
+static double pc_wall_now(void);        // defined with the ATP hook below
+static double g_pc_deadline = 0.0;      // absolute wall budget; 0 = untracked
 static int pc_strict(void) {
   static int v = -1;
   if (v < 0) {
@@ -470,6 +472,14 @@ static u32 pc_max_var(Term t) {
 // Skolem constant and turn a satisfiable set spuriously unsatisfiable.
 static AtpStatus pc_refute(Term *fs, int n) {
   if (n <= 0) return ATP_QUEUE_EMPTY;
+  // Clock bound: a single saturation at the step cap can otherwise burn
+  // minutes on heavy equational inputs (the whole proof only has ~30s).
+  // ABORTED reads as "undecided" everywhere, so firing the deadline can
+  // only turn a would-be verdict into an abstain.
+  double rem = (g_pc_deadline > 0.0) ? g_pc_deadline - pc_wall_now() : 12.0;
+  double cap = rem / 4.0;
+  if (cap > 3.0) cap = 3.0;
+  if (cap < 0.3) return ATP_ABORTED;             // no wall left: undecided
   Term conj = pc_close(fs[0]);
   for (int i = 1; i < n; i++) conj = fol_mk_and(conj, pc_close(fs[i]));
   u32 nc = 0;
@@ -482,7 +492,9 @@ static AtpStatus pc_refute(Term *fs, int n) {
   cnf_set_avatar(s, 0u);
   for (u32 j = 0; j < nc; j++) cnf_add_clause(s, cl[j]);
   free(cl);
+  cnf_set_wall_deadline(cap);
   AtpStatus st = cnf_run(s);
+  cnf_set_wall_deadline(0.0);
   cnf_free(s);
   return st;
 }
@@ -496,6 +508,31 @@ static u8 pc_plain_eq(Term f, Term *l, Term *r) {
     *l = term_ctr_at(f, 0);
     *r = term_ctr_at(f, 1);
     return 1;
+  }
+  return 0;
+}
+
+// Leaf-grade syntactic equivalence: plain alpha; alpha of the
+// universal-prefix-stripped matrices (a permuted ALL-prefix is
+// invisible to the bijection over the stripped matrices, and the
+// TSTP closure of either is the same); and the side-swapped variant
+// when both matrices are one (dis)equation.  Real provers reprint
+// imported leaves with permuted binders and reoriented equations, so
+// plain alpha alone rejects genuine imports.
+static int pc_leaf_syn_eq(Term a, Term b) {
+  if (pc_alpha_eq(a, b)) return 1;
+  Term ma = pc_strip_forall(a), mb = pc_strip_forall(b);
+  if (pc_alpha_eq(ma, mb)) return 1;
+  u8 nega = 0, negb = 0;
+  if (term_tag(ma) == TAG_CTR && term_ext(ma) == PC_LAB_NOT &&
+      term_ctr_n(ma) == 1) { nega = 1; ma = term_ctr_at(ma, 0); }
+  if (term_tag(mb) == TAG_CTR && term_ext(mb) == PC_LAB_NOT &&
+      term_ctr_n(mb) == 1) { negb = 1; mb = term_ctr_at(mb, 0); }
+  if (nega != negb) return 0;
+  Term la, ra, lb, rb;
+  if (pc_plain_eq(ma, &la, &ra) && pc_plain_eq(mb, &lb, &rb)) {
+    Term sw[2] = { rb, lb };
+    if (pc_alpha_eq(ma, term_new_ctr(PC_LAB_EQ, sw, 2))) return 1;
   }
   return 0;
 }
@@ -1337,6 +1374,28 @@ static const char *pc_ident(const char *s, char *buf, int cap) {
   return s;
 }
 
+// Parse a new_symbols(kind, [s1, s2, ...]) annotation anywhere in `src`
+// into st->new_syms; new_sym mirrors the first for single-symbol paths.
+static void pc_parse_new_symbols(const char *src, PcStep *st) {
+  const char *ns = strstr(src, "new_symbols");
+  if (ns == NULL) return;
+  const char *lb = strchr(ns, '[');
+  if (lb == NULL) return;
+  const char *q = lb + 1;
+  while (*q && *q != ']') {
+    while (*q && (isspace((unsigned char)*q) || *q == ',')) q++;
+    if (*q == ']' || *q == '\0') break;
+    char nm[PC_NAME];
+    const char *nq = pc_ident(q, nm, PC_NAME);
+    if (nq == q) break;
+    q = nq;
+    if (st->n_new_syms < PC_MAX_NEWSYMS)
+      snprintf(st->new_syms[st->n_new_syms++], PC_NAME, "%s", nm);
+  }
+  if (st->n_new_syms > 0)
+    snprintf(st->new_sym, PC_NAME, "%s", st->new_syms[0]);
+}
+
 // Read a possibly-quoted name at `s` into buf; returns advanced pointer.
 static const char *pc_qident(const char *s, char *buf, int cap) {
   if (*s == '\'') {
@@ -1374,11 +1433,14 @@ static void pc_parse_source(const char *src, PcStep *st) {
   // introduced(definition): a conservative-extension leaf (goal-flatten /
   // tgt subterm naming -- fresh symbol defined equal to a term).  The
   // legacy profile trusts it as an input of the ENCODED problem exactly
-  // like file(); the strict profile abstains on it (an arbitrary
-  // formula could be smuggled in this way -- a confirmed -180 hole).
+  // like file(); the strict profile abstains unless the definition
+  // SHAPE is positively confirmed (pc_check_definition) -- an arbitrary
+  // formula could be smuggled this way (a confirmed -180 hole).  The
+  // declared new_symbols list is parsed for that check.
   if (strncmp(src, "introduced", 10) == 0) {
     st->rule = R_INPUT;
     st->introduced = 1;
+    pc_parse_new_symbols(src, st);
     return;
   }
   const char *inf = strstr(src, "inference");
@@ -1408,29 +1470,9 @@ static void pc_parse_source(const char *src, PcStep *st) {
     }
   }
 
-  // declared new Skolem symbols: new_symbols(skolem, [sK, ...]).  The
-  // whole list is kept (real prover records declare several per
-  // skolemisation step); new_sym mirrors the first for the single-
-  // symbol checks.
-  const char *ns = strstr(src, "new_symbols");
-  if (ns != NULL) {
-    const char *lb = strchr(ns, '[');
-    if (lb != NULL) {
-      const char *q = lb + 1;
-      while (*q && *q != ']') {
-        while (*q && (isspace((unsigned char)*q) || *q == ',')) q++;
-        if (*q == ']' || *q == '\0') break;
-        char nm[PC_NAME];
-        const char *nq = pc_ident(q, nm, PC_NAME);
-        if (nq == q) break;
-        q = nq;
-        if (st->n_new_syms < PC_MAX_NEWSYMS)
-          snprintf(st->new_syms[st->n_new_syms++], PC_NAME, "%s", nm);
-      }
-      if (st->n_new_syms > 0)
-        snprintf(st->new_sym, PC_NAME, "%s", st->new_syms[0]);
-    }
-  }
+  // declared new Skolem symbols: new_symbols(skolem, [sK, ...]) --
+  // real prover records declare several per skolemisation step.
+  pc_parse_new_symbols(src, st);
   // parents: the LAST bracketed list (it follows the annotation block).
   const char *lastlb = NULL;
   for (const char *c = inf; *c; c++) if (*c == '[') lastlb = c;
@@ -1646,19 +1688,74 @@ static int pc_load_problem(const char *dpath) {
   return 0;
 }
 
+// Positive confirmation for introduced(definition) leaves (Vampire's
+// function_definition records: mult(a,b) = sF0).  VALID only when the
+// record declares exactly one new symbol and the formula (under its
+// universal prefix) is an equation whose one side is EXACTLY that
+// symbol applied to pairwise-distinct variables, the other side free
+// of it; the symbol is absent from the problem file, defined only
+// once, and no definition body uses a symbol introduced at the same or
+// a later record (well-founded chain).  Such a definition SET is a
+// conservative extension -- and every CONSUMER of the symbols must
+// still confirm its own step, so nothing can be smuggled through one.
+// Never INVALID: shapes this check cannot read simply abstain.
+static int pc_check_definition(int idx, const char **why) {
+  const PcStep *st = &pc_steps[idx];
+  (void)why;
+  if (st->n_new_syms != 1) return PC_UNKNOWN;
+  u32 L = pc_lookup(st->new_syms[0]);
+  if (L == PC_NOT_FOUND) return PC_UNKNOWN;
+  Term f = pc_strip_forall(st->formula);
+  if (!(term_tag(f) == TAG_CTR && term_ext(f) == PC_LAB_EQ &&
+        term_ctr_n(f) == 2)) return PC_UNKNOWN;
+  Term lhs = term_ctr_at(f, 0), rhs = term_ctr_at(f, 1);
+  Term def, body;
+  if      (term_tag(lhs) == TAG_CTR && term_ext(lhs) == L) { def = lhs; body = rhs; }
+  else if (term_tag(rhs) == TAG_CTR && term_ext(rhs) == L) { def = rhs; body = lhs; }
+  else return PC_UNKNOWN;
+  if (pc_has_label(body, L)) return PC_UNKNOWN;      // recursive definition
+  u32 n = term_ctr_n(def);
+  for (u32 i = 0; i < n; i++) {
+    Term a = term_ctr_at(def, i);
+    if (term_tag(a) != TAG_FVR) return PC_UNKNOWN;   // non-variable argument
+    for (u32 j = 0; j < i; j++)
+      if (term_ext(term_ctr_at(def, j)) == term_ext(a)) return PC_UNKNOWN;
+  }
+  for (int j = 0; j < pc_nprob; j++)
+    if (pc_has_label(pc_prob[j].formula, L)) return PC_UNKNOWN;
+  for (int j = 0; j < pc_nstep; j++) {
+    const PcStep *o = &pc_steps[j];
+    if (j == idx || !o->introduced || o->n_new_syms < 1) continue;
+    for (int s = 0; s < o->n_new_syms; s++) {
+      u32 M = pc_lookup(o->new_syms[s]);
+      if (M == PC_NOT_FOUND) continue;
+      if (M == L) return PC_UNKNOWN;                 // defined twice
+      if (j >= idx && pc_has_label(body, M)) return PC_UNKNOWN;  // not well-founded
+    }
+  }
+  return PC_VALID;
+}
+
 // Verify an input step.  Legacy profile: inputs are trusted (the
 // internal-trace certification use).  Strict profile: the leaf must
 // positively match the problem-file formula it cites --
-//   * introduced() or a missing/unreadable directive     -> Unknown
+//   * introduced(definition) of confirmed shape          -> confirmed
+//   * other introduced() / missing directive             -> Unknown
 //   * cited name absent (problem file fully parsed)      -> VerifiedBad
 //   * role lie on the conjecture (either direction)      -> VerifiedBad
-//   * alpha-equivalent formula                           -> confirmed
-//   * semantically DIFFERENT formula (countermodel)      -> VerifiedBad
-//   * not alpha-equivalent, difference not demonstrated  -> Unknown
+//   * alpha-equivalent OR proved-equivalent formula      -> confirmed
+//     (real provers reprint leaves with permuted binders; the rules
+//     themselves allow the alpha check "using an external ATP", which
+//     can only mean equivalence)
+//   * semantically DIFFERENT from everything it could
+//     cite (countermodel)                                -> VerifiedBad
+//   * otherwise                                          -> Unknown
 static int pc_check_leaf(int idx, const char **why) {
   PcStep *st = &pc_steps[idx];
   if (!pc_strict()) return PC_VALID;
   if (st->introduced) {
+    int v = pc_check_definition(idx, why);
+    if (v == PC_VALID) return v;
     *why = "introduced() formula cannot be positively confirmed";
     return PC_UNKNOWN;
   }
@@ -1708,12 +1805,18 @@ static int pc_check_leaf(int idx, const char **why) {
     return PC_INVALID;
   }
   for (int k = 0; k < ncand; k++)
-    if (pc_alpha_eq(st->formula, pc_prob[cand[k]].formula)) return PC_VALID;
-  // No alpha-equivalent candidate.  Only a SEMANTIC difference from
-  // EVERY candidate is a demonstrated lie; a benign syntactic variant
-  // (reordered conjuncts, renaming beyond alpha) abstains -- the -1 for
-  // a wrong VerifiedBad is cheap, but 12 of them cost the 2026 entry 12
-  // points and betrayed unsound step logic.
+    if (pc_leaf_syn_eq(st->formula, pc_prob[cand[k]].formula)) return PC_VALID;
+  // No syntactically equivalent candidate.  A candidate PROVED
+  // equivalent in both directions still confirms the leaf.  Only a
+  // SEMANTIC difference from EVERY candidate is a demonstrated lie; an
+  // undecided comparison abstains -- the -1 for a wrong VerifiedBad is
+  // cheap, but 12 of them cost the 2026 entry 12 points and betrayed
+  // unsound step logic.  Large fallback candidate sets are not worth
+  // the saturations: abstain.
+  if (ncand > 8) {
+    *why = "formula matches no problem formula syntactically";
+    return PC_UNKNOWN;
+  }
   int all_differ = 1;
   for (int k = 0; k < ncand; k++) {
     Term a = pc_close(st->formula);
@@ -1724,8 +1827,9 @@ static int pc_check_leaf(int idx, const char **why) {
     Term d2[2] = { b, fol_mk_not(a) };
     AtpStatus s2 = pc_refute(d2, 2);
     if (s2 == ATP_QUEUE_EMPTY) continue;               // demonstrated difference
-    all_differ = 0;                                    // equivalent or undecided
-    break;
+    if ((s1 == ATP_PROVED || s1 == ATP_REFUTED) &&
+        (s2 == ATP_PROVED || s2 == ATP_REFUTED)) return PC_VALID;  // equivalent
+    all_differ = 0;                                    // undecided comparison
   }
   if (all_differ && !pc_prob_unparsed) {
     *why = "formula differs from every problem formula it could cite";
@@ -2141,7 +2245,6 @@ static double pc_wall_now(void) {
   gettimeofday(&tv, NULL);
   return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
 }
-static double g_pc_deadline = 0.0;             // absolute; 0 = untracked
 static volatile pid_t g_pc_hook_child = 0;     // killed by the wall alarm
 
 static unsigned long long pc_fnv(const char *s) {
@@ -2418,6 +2521,56 @@ static char *pc_read(const char *file, size_t *len) {
   return buf;
 }
 
+// Parse every '.'-terminated record of the (comment-stripped) proof
+// text into pc_steps, counting unparseable content-bearing segments in
+// pc_nskipped.  Restores the text bytes it NUL-patches, so it can run
+// again on the same buffer.
+static void pc_parse_all(char *text) {
+  pc_nstep = 0;
+  int depth = 0, inq = 0;
+  char *start = text;
+  char *p = text;
+  for (; *p; p++) {
+    if (inq) { if (*p == '\'') inq = 0; continue; }
+    if (*p == '\'') { inq = 1; continue; }
+    if (*p == '(' || *p == '[') depth++;
+    else if (*p == ')' || *p == ']') depth--;
+    else if (*p == '.' && depth == 0) {
+      char save = *p;
+      *p = '\0';
+      int has_content = 0;
+      for (const char *q = start; q < p; q++)
+        if (!isspace((unsigned char)*q)) { has_content = 1; break; }
+      if (has_content && !pc_parse_record(start)) pc_nskipped++;
+      *p = save;
+      start = p + 1;
+    }
+  }
+  for (const char *q = start; *q; q++)           // unterminated trailing record
+    if (!isspace((unsigned char)*q)) { pc_nskipped++; break; }
+}
+
+// A collection ran OUTSIDE any rooted engine session (the strict leaf
+// checks' refutations allocate on the shared heap): every parsed Term
+// dangles, but the comment-stripped proof text is still live -- re-parse
+// everything onto the post-collection heap and keep checking.  Verdicts
+// already recorded are plain ints.  Returns 0 (caller abstains) when the
+// re-parse does not reproduce the same step count.
+static int pc_reparse(char *text) {
+  int nstep0 = pc_nstep, nskip0 = pc_nskipped;
+  pc_nskipped = 0;
+  pc_parse_all(text);
+  int ok = (pc_nstep == nstep0);
+  pc_nskipped = nskip0;
+  // The problem table dangles too; drop it and let the next leaf check
+  // lazily reload the file.
+  pc_nprob = 0;
+  pc_prob_state = 0;
+  pc_prob_unparsed = 0;
+  pc_prob_directive[0] = '\0';
+  return ok;
+}
+
 // Checking-pass accumulators.  File-scope + volatile so their values
 // after a heap-exhaustion longjmp are the ones set before it (locals
 // clobbered across setjmp/longjmp would be indeterminate).
@@ -2490,7 +2643,7 @@ static int proof_check_worker(const char *file, int szs) {
   }
 
   pc_bad = -1; pc_any_unknown = 0; pc_saw_false = 0; pc_bad_why = "";
-  pc_nskipped = 0; pc_dangling = 0;
+  pc_nskipped = 0; pc_dangling = 0; pc_nsyms = 0;
   pc_nprob = 0; pc_prob_state = 0; pc_prob_unparsed = 0;
   pc_prob_directive[0] = '\0';
   if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
@@ -2512,28 +2665,7 @@ static int proof_check_worker(const char *file, int szs) {
     // not become a step is COUNTED: an unread record caps the verdict
     // at Unknown (the 2026 entry dropped such records silently and
     // verified the remainder -- a confirmed false-accept hole).
-    pc_nstep = 0; pc_nsyms = 0;
-    int depth = 0, inq = 0;
-    char *start = text;
-    char *p = text;
-    for (; *p; p++) {
-      if (inq) { if (*p == '\'') inq = 0; continue; }
-      if (*p == '\'') { inq = 1; continue; }
-      if (*p == '(' || *p == '[') depth++;
-      else if (*p == ')' || *p == ']') depth--;
-      else if (*p == '.' && depth == 0) {
-        char save = *p;
-        *p = '\0';
-        int has_content = 0;
-        for (const char *q = start; q < p; q++)
-          if (!isspace((unsigned char)*q)) { has_content = 1; break; }
-        if (has_content && !pc_parse_record(start)) pc_nskipped++;
-        *p = save;
-        start = p + 1;
-      }
-    }
-    for (const char *q = start; *q; q++)         // unterminated trailing record
-      if (!isspace((unsigned char)*q)) { pc_nskipped++; break; }
+    pc_parse_all(text);
 
     // Structural verification first: unique names and an acyclic
     // citation graph.  Both violations are demonstrated (organizer-
@@ -2616,6 +2748,11 @@ static int proof_check_worker(const char *file, int szs) {
           thvm_lpo_invalidate();
           thvm_kbo_invalidate();
           pc_refresh_formulas(g_pc_roots);
+        } else if (pc_reparse(text)) {
+          // Unrooted collection (a strict leaf check's refutation, the
+          // negconj FO route): everything re-parsed onto the live heap;
+          // keep checking from the next step.
+          ;
         } else {
           pc_any_unknown = 1;
           pc_bad = -1;

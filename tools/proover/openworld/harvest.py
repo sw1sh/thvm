@@ -197,6 +197,8 @@ def rewrite_proof(block, prob_tab, prob_rel):
         m = re.match(r"\s*file\s*\(\s*'([^']*)'\s*(?:,\s*([A-Za-z0-9_]+))?\s*\)", src)
         if m:
             fname = m.group(2)
+            if fname == "unknown":      # Vampire's placeholder, not a name
+                fname = None
             if fname is None:
                 for k in canon_keys(formula):
                     fname = canon_map.get(k)
