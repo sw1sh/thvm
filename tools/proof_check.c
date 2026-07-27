@@ -1043,7 +1043,6 @@ static u32 pc_axiom_pairs(Term *pl, Term *pr, u32 cap) {
   u32 n = 0;
   for (int i = 0; i < pc_nstep && n < cap; i++) {
     if (pc_steps[i].rule != R_INPUT) continue;
-    Term l, r;
     if (term_tag(pc_steps[i].formula) == TAG_CTR &&
         term_ext(pc_steps[i].formula) == PC_LAB_EQ &&
         term_ctr_n(pc_steps[i].formula) == 2) {
