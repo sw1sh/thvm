@@ -1,0 +1,10 @@
+file	expected	family
+H1_leaf_lie.s	VerifiedBad	leaf formula lies against the named problem axiom
+H2_introduced_smuggle.s	Unknown	introduced() smuggles an arbitrary formula (abstain: no positive confirmation)
+H3_plain_file_dodge.s	VerifiedBad	plain step dodges checking by citing file()
+H4_wrong_conjecture.s	VerifiedBad	conjecture leaf differs from the problem's conjecture
+H5_record_drop.s	Unknown	unparseable record must cap the verdict (old checker silently dropped it)
+H6_valid_shuffled.s	VerifiedGood	VALID control: record order is free per the rules
+H7_valid_esa_foreign.s	VerifiedGood	VALID control: esa skolemization under a foreign rule name
+H8_cycle.s	VerifiedBad	circular derivation
+H9_dup_name.s	VerifiedBad	unentailed step (crafted alongside the dup-name probe)
