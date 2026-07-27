@@ -1,5 +1,21 @@
 # andassoc <-> Waldmeister trajectory-parity dissection (2026-07-04)
 
+> **STALE -- superseded 2026-07-24. This whole document is pinned at HEAD `25240924`.**
+> **13 commits touched `src/atp/wm_order.c` since** (082359db2, f65ba2eab, d567bc91e,
+> 422517d80 "OA -auto FULLY MATCHED", 18900a124 "WCIS c3 firstdiv 1330 CLEARED",
+> 8e3b3a77f, ab731f1b6, 32153cb9c, 450cd0454, e5fc9a89c, da6febe54, 508a59d4e, 41883ddfc).
+> **At current main `145c5ed6` the andassoc_kbo aligned prefix is 38290, firstdiv 38291
+> -- the pick-2923 fork this document is about is CLOSED** (verified: current pick 2923 =
+> `x1 # nand(nand(x2,x1),nand(nand(x3,x2),x1))` = WM's byte-exact order). Sections 3/4/4b/4c
+> below describe the OLD 2923 fork and its (correctly) disproven local fixes -- historical.
+> Current-HEAD gates: OA lazy **257971/735/2461555**, FEQ non-lazy OA **271083/775/1730452**,
+> DN **2848/254/768876**. The live fork at 38291 is a deeper partner-enumeration DFS-order
+> flip (mother rule i=269, pos L.2.1, self-healing wm-only=0); advancing it is a fresh
+> multi-commit faithful campaign, not a local fix. See [[project_atp_wm_sheffer_lpo]]
+> (2026-07-24 entry): the c3 / beat-FindEquationalProof blocker is the ENDGAME
+> throughput + queue-economics (implicit-pair storage), NOT selection order -- c3 still
+> diverges on the SAME HEAD that already has 38290-pick parity.
+
 *Historical snapshot (2026-07 from git log); knob names and numbers may predate the current CLI -- see docs/atp/README.md for the live map.*
 
 Scoped follow-up plan. This document pins the *matched* goal/config, the
