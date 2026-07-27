@@ -60,13 +60,44 @@ reasons with full equality rather than treating `=` atoms opaquely.
 
 A step is accepted when the saturation derives the empty clause; rejected as
 unsound (`VerifiedBad`, with the step named) only when a completed saturation
-exhibits a counter-model; and left undecided otherwise. Undecided steps -- an
-unknown rule, or an entailment the bounded saturation neither proves nor refutes
--- yield `Unknown`. A `VerifiedBad` verdict is emitted only when a step
-is certainly unsound, honouring the -10 scoring. The whole pass is
+exhibits a counter-model **of a `thm`/`cth` claim** (`esa` steps are never
+judged by entailment -- equisatisfiability is not consequence); and left
+undecided otherwise. Undecided steps yield `Unknown`. The whole pass is
 resource-bounded: a saturation whose equality reasoning outgrows the term store
 abstains to a clean `Unknown` rather than crashing, so every proof gets
 exactly one verdict.
+
+After ProoVer 2026 (-110/150, last place: 18 invalid proofs accepted at -10
+each) the checker was rebuilt around abstain-by-default. The competition
+binary (`CheckProof`, the *strict* profile; `FindProof --check` keeps the
+legacy trusted-leaf profile for certifying FindProof's own proofs) adds:
+
+- **Leaf verification.** The problem file named by each `file()` directive is
+  loaded and the cited formula alpha-compared; a *semantic* mismatch
+  (countermodel) is `VerifiedBad`, a benign variant abstains, `introduced()`
+  abstains. The 2026 entry never opened the problem file, so leaf lies,
+  `introduced()` smuggling, and wrong-conjecture imports all verified.
+- **No silent drops.** A record the parser cannot read caps the verdict at
+  `Unknown` (the old checker skipped such records and verified the rest).
+- **Structure pass.** Duplicate names with differing formulas and citation
+  cycles are `VerifiedBad` before any step check; parent resolution is
+  order-independent (the rules impose no record order).
+- **External-ATP hook.** Unsettled `thm` steps (and the `negated_conjecture`
+  equivalence) are discharged by re-exec'ing the same binary as a prover
+  (`THVM_CHECKPROOF_PROVE=1`) on exactly that step and its premises, as the
+  rules permit, budgeted against the 30s wall
+  (`THVM_PROOFCHECK_ATP` overrides the oracle, `THVM_PROOFCHECK_CACHE`
+  caches decided obligations).
+- **Cone-aware Skolem freshness.** A Skolem symbol may occur only in the
+  introduction step's DAG descendants and never in the problem file;
+  multi-symbol `new_symbols(skolem, [...])` lists are re-existentialised in
+  declaration order for the positive parent-entailment check.
+
+Validation runs on two corpora: `synth/` (the 2026-era self-generated set,
+kept as a regression floor) and `tools/proover/openworld/` (harvest real
+FindProof/Vampire TSTP proofs, mutate them with a spec-derived bug battery,
+score with a 30% held-out slice whose hard requirement is zero false
+accepts).
 
 [proover.wl](proover.wl) is the Wolfram Language prototype of the same design:
 it reuses thvm's `Wolfram`Parser`TPTPImport` FOF parser and decides each step in

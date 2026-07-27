@@ -37,7 +37,7 @@ def main():
         if gold == "buggy":
             bug[(cls, v)] += 1
         if gold == "valid" and v == "VerifiedBad":
-            bad.append((fn, "valid -> VerifiedBad (-10)"))
+            bad.append((fn, "valid -> VerifiedBad (-1)"))
         if gold == "buggy" and v == "VerifiedGood":
             bad.append((fn, "buggy -> VerifiedGood (-10)"))
 
