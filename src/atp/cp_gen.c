@@ -350,7 +350,8 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   u8 i_un = i_eq && !i_mono;
   u8 j_un = j_eq && !j_mono;
   // cp.peak (sigma(l_i)) is read only by the connectedness gate
-  // (:16856), the equation-parent KPAction ordering (:17076/:17151,
+  // (:16856), the simpler-join checkOrder/step3 legs (mode 1 treat,
+  // ft_norm.c), the equation-parent KPAction ordering (:17076/:17151,
   // i_eq/j_eq), and the nusfu gate when armed with a non-empty skolem
   // registry.  Otherwise the Term cp_visit must NOT spend a third
   // thvm_unify_apply building it -- gate it for this pair.
