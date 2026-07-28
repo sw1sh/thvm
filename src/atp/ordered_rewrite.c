@@ -723,10 +723,17 @@ static u8 atp_twee_eqb_has(u32 sym) {
     if (g_atp_eqb_syms[i] == sym) return 1u;
   return 0u;
 }
+// Env-only gate: with an EMPTY symbol set the bonus case never fires
+// and the scorer degenerates to the structural-discount walk, so
+// --twee-eq-bonus supersets --twee-struct-dedup COHERENTLY -- gating
+// on a non-empty set instead would flip pre-registration scoring
+// (axiom intake) and bonus-free problems back to the CLASSIC pointer
+// scorer, forking the trajectory at the intake (measured: LCL927-10
+// axiom pri 319 vs 271, pick-3 fork).
 static u8 atp_twee_eqb_on(void) {
   static int on = -1;
   if (on < 0) on = atp_env_on("THVM_ATP_TWEE_EQB");
-  return (u8)(on && g_atp_eqb_nsyms > 0u);
+  return (u8)on;
 }
 
 #define ATP_EQB_CUR_CAP    256u
