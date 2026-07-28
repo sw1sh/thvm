@@ -181,6 +181,30 @@ static const SchedSlice SCHEDULE[] = {
   // 44.4s -- sym-prec=frequency measured NOT load-bearing).  =2 exits
   // immediately when no definition unfolds, like the unfold slice.
   {"unfold-tgt", "--def-unfold=2 --tgt=1 --preset=none --horn=0 --fof-sat=0", 0.0},
+  // DEF-UNFOLD x TGT x AGE-WEIGHT (the LCL306-10 dissection, Vampire's
+  // winner lrs+10_28_tgt=full:drc=ordering, 0.165s / 1120 activations).
+  // With the 13 goal-subterm definitions in place our unfold-tgt
+  // trajectory holds EVERY vampire proof milestone by pick ~2900 --
+  // except the endgame modus shells ifeq(theorem(or(not(or(sFa,sFb)),
+  // X)),true,theorem(X),true), formed and queued at weight ~12 but
+  // buried forever behind a self-feeding weight-6..11 flood of
+  // derived junk factories (double-negation towers = 31% of all picks,
+  // or-padding generalizations) that Vampire's stream never activates.
+  // Vampire's carrier for the heavy general schemas is the AGE queue:
+  // in its activation trace every heavy proof clause (f20 w16, the
+  // B/C-theorem shells w16-18) lands at activation index == 1 mod 29 --
+  // the 1-in-29 oldest-first pick of awr 1:28.  Composing our existing
+  // --awr FIFO dimension with the tgt lane converts LCL306-10 from
+  // unreachable (TMO at every round-2 config) to PROVED 46-49s at RSS
+  // 2500; ablation: def-unfold + tgt + awr load-bearing, tgt-fold /
+  // cp-weight=0 (Vampire whole-clause ADD weight) / --lrs each
+  // neutral-to-helpful on the specimen.  awr=4 beats Vampire's 28 here
+  // because our flood is already active by the time fairness matters --
+  // the age pointer must reach the seq-1900 shells within the wall.
+  // LRS rides along for queue bounding (live cps 11k vs 175k without;
+  // the schedule shares RSS across par slots).  =2 exit-fast like the
+  // unfold/unfold-tgt lanes: frees the slot when no definition unfolds.
+  {"unfold-tgt-awr", "--def-unfold=2 --tgt=1 --tgt-fold=1 --cp-weight=0 --awr=4 --lrs --preset=none --horn=0 --fof-sat=0", 0.0},
   // (2) Goal FLATTENING (Twee/Vampire naming port) + LAZY ground-join
   // (Twee selection-time redundancy) + backward-simplify + auto-max-weight.
   // Cracks deep-goal UEQ that completion stalls on (COL060-1, GRP167-4);
