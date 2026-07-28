@@ -187,7 +187,19 @@ static u8 vcp_treat_joinable(AtpState *s) {
   // Mirrors the hook in atp_cp_trivially_joinable_ft (ft_cpq.c).
   // Mode 2 (pop-only) skips the generation-time arm.
   if (!joined && s->use_simpler_join == 1u) {
+    // Peak for checkOrder/step3 (Twee Join.hs): sigma(lo) rebuilt from
+    // the stashed formation operands -- same raw variable-id space as
+    // the treated fl/fr cells.  Persistent span, freed after the
+    // verdict.
+    AtpFt *pa = (AtpFt *)s->ft_arena_ptr;
+    AtpFtCell *pk =
+        (g_vcp_treat.lo != NULL && g_vcp_treat.subst != NULL)
+            ? ft_subst_apply(pa, g_vcp_treat.lo, g_vcp_treat.subst, 0)
+            : NULL;
+    if (pk != NULL) atp_sj_peak_arm_ft(pk);
     joined = atp_cp_sj_joinable_ft(s, g_vcp_treat.fl, g_vcp_treat.fr);
+    atp_sj_peak_disarm();
+    if (pk != NULL) ft_free_span(pa, pk, pk->end);
     if (joined) s->n_cps_dropped_simpler_join++;
   }
   if (_dl) {
@@ -357,10 +369,14 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
           joinable = vcp_treat_joinable(s);
           g_ftnet_join += ftnet_now() - _jb;
         } else {
+          atp_sj_peak_arm_term(cps[i].peak);   // sj checkOrder/step3 peak
           joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+          atp_sj_peak_disarm();
         }
 #else
+        atp_sj_peak_arm_term(cps[i].peak);   // sj checkOrder/step3 peak
         joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+        atp_sj_peak_disarm();
 #endif
         s->n_cps_push_normalized++;
       } else {
@@ -403,7 +419,9 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                   strip_hijack = 0u;
                 }
               } else {
+                atp_sj_peak_arm_term(cps[i].peak);   // sj checkOrder/step3 peak
                 joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+                atp_sj_peak_disarm();
               }
             }
           }
@@ -419,10 +437,14 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
         joinable = vcp_treat_joinable(s);
         g_ftnet_join += ftnet_now() - _jb;
       } else {
+        atp_sj_peak_arm_term(cps[i].peak);   // sj checkOrder/step3 peak
         joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+        atp_sj_peak_disarm();
       }
 #else
+      atp_sj_peak_arm_term(cps[i].peak);   // sj checkOrder/step3 peak
       joinable = atp_cp_trivially_joinable(s, &cp_lhs, &cp_rhs);
+      atp_sj_peak_disarm();
 #endif
       s->n_cps_push_normalized++;
     }

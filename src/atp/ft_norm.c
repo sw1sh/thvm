@@ -190,10 +190,40 @@ extern void thvm_ftsj_rulecache_sync(const void *owner, u32 r_revision,
 // pass: a slot's cached verdict is live iff its stamp matches the
 // current pass id.
 static u8   g_ftsj_active     = 0u;
+// Twee Join.hs leg selector while the session is armed: 0 = step2
+// (unorientable instances fire on the OPEN-term decrease, Rule.hs:409
+// `reduces`), 1 = step3 (skolem-ground decrease, Rule.hs:426
+// `reducesSkolem`, sound only under the below-peak constraint the
+// step3 driver enforces).
+static u8   g_ftsj_skolem     = 0u;
+// CP peak stash for the allSteps port (checkOrder + step3 need the
+// overlapped term).  Armed by the generation-time treat callers
+// (cp_push.c) around the joinability call; a NULL/0 stash (pop-time
+// re-checks, interreduce probes) degrades to the peakless step1+2
+// verdict.  FT cells win over the Term when both are set.
+static AtpFtCell *g_ftsj_peak_ft   = NULL;
+static Term       g_ftsj_peak_term = 0;
+static void atp_sj_peak_arm_term(Term t)   { g_ftsj_peak_term = t; }
+static void atp_sj_peak_arm_ft(AtpFtCell *c) { g_ftsj_peak_ft = c; }
+static void atp_sj_peak_disarm(void) {
+  g_ftsj_peak_ft   = NULL;
+  g_ftsj_peak_term = 0;
+}
 static u32 *g_ftsj_memo_stamp = NULL;
 static u8  *g_ftsj_memo_val   = NULL;
 static u32  g_ftsj_memo_cap   = 0u;
 static u32  g_ftsj_pass_id    = 0u;
+// Retire every memoized simplerThan verdict: the memo caches verdicts
+// against the PREPARED CP equation, so every re-prepare (session
+// entry, each step3 variant) bumps the pass id.
+static void ftsj_pass_bump(void) {
+  if (++g_ftsj_pass_id == 0u) {   // stamp wrap: retire every stale slot
+    if (g_ftsj_memo_stamp != NULL) {
+      memset(g_ftsj_memo_stamp, 0, (size_t)g_ftsj_memo_cap * sizeof(u32));
+    }
+    g_ftsj_pass_id = 1u;
+  }
+}
 
 static u8 ftsj_rule_ok(AtpState *s, u32 r) {
   if (g_ftsj_memo_stamp != NULL && r < g_ftsj_memo_cap &&
@@ -2563,7 +2593,14 @@ static int ft_cell_try_rules(AtpState   *s,
       skolem_only = (e != NULL && e[0] != '0' && e[0] != '\0') ? 0 : 1;
       if (getenv("THVM_ATPFT_KBO_DIFF") != NULL) skolem_only = 0;
     }
-    u8 gate_armed = (u8)(s->use_encompass_demod || g_ftsj_active);
+    // Session leg selector: an armed simpler-join session dictates the
+    // unorient gate -- step2 (g_ftsj_skolem == 0) requires the OPEN
+    // decrease (Twee Join.hs:95 `reduces rule sub`), step3 admits the
+    // skolem-ground decrease (Join.hs:114 reducesSkolem) because its
+    // driver holds every intermediate strictly below the peak.  Outside
+    // sessions the encompass-demod opt-in keeps its skolem arm.
+    u8 gate_armed = g_ftsj_active ? g_ftsj_skolem
+                                  : (u8)(s->use_encompass_demod != 0u);
     // Lazy redex pre-encode: thvm_kbo_ft_subst encodes both sides on
     // every call; we attempt up to `slice_count` equations at this
     // cell, each running the unorient gate with the SAME redex `p`.
@@ -3888,35 +3925,152 @@ AtpFtCell *atp_rules_only_normalize_ft(AtpState *s, AtpFtCell *t,
 // --- Simpler-join joinability (AtpState.use_simpler_join) ------------
 //
 // Second-chance join verdict for a CP whose sides l/r survived the
-// engine's standard normalize with DISTINCT NFs.  Port of the
-// discipline behind Twee's joinCriticalPair (Join.hs:55, allSteps =
-// step1 >=> step2 >=> checkOrder >=> step3): re-normalize both sides
-// admitting oriented rules AND unorientable equations, where every
-// step is gated on the rewriting equation being strictly simpler than
-// the CP equation (Equation.hs:59 simplerThan over lessEqSkolem), and
-// an unorientable instance fires when strictly decreasing under the
-// skolem-ground KBO (Rule.hs:425 reducesSkolem) even where the
-// open-term compare is incomparable.  Divergences from Twee, accepted
-// under the opt-in + GaveUp-never-Satisfiable envelope (over-dropping
-// can lose completeness, never soundness -- proofs are built only from
-// recorded engine steps):
-//   * no step3 below-peak constraint (normaliseWith (`lessThan` top))
-//     and no checkOrder peak test -- the peak is not threaded here;
-//   * no variable canonicalisation inside simplerThan (ft_order.c);
+// engine's standard normalize with DISTINCT NFs.  Port of Twee's
+// joinCriticalPair discipline (Join.hs:54-66, allSteps = step1 >=>
+// step2 >=> checkOrder >=> step3):
+//
+//   * step1+2 (Join.hs:88-95): re-normalize both sides admitting
+//     oriented rules AND unorientable equations, every step gated on
+//     the rewriting equation being strictly simpler than the CP
+//     equation (Equation.hs:63 simplerThan, `order`ed + variable-
+//     canonicalised in ft_order.c) and -- for unorientable instances
+//     -- on the OPEN-term decrease (Rule.hs:409 reduces).  The inputs
+//     are the engine's ungated doR NFs, which subsumes step1's gated
+//     oriented normalize.
+//   * checkOrder (Join.hs:81-87): with the peak threaded (see the
+//     g_ftsj_peak stash), a CP whose surviving side is >= the peak
+//     under the open KBO is dropped (`tooBig` -> Nothing).
+//   * step3 (Join.hs:96-120): connectedness-standalone -- renormalize
+//     under the same simplerThan gate but with the skolem-ground
+//     decrease (Rule.hs:426 reducesSkolem), every intermediate term
+//     held STRICTLY below the peak (normaliseWith (`lessThan` top)),
+//     tried on the CP and on its variable-FLIPPED image (flipCP,
+//     x -> n-x): either variant joining drops the CP.
+//
+// Residual divergences from Twee, accepted under the opt-in +
+// GaveUp-never-Satisfiable envelope (over-dropping can lose
+// completeness, never soundness -- proofs replay recorded engine
+// steps):
+//   * Twee joins at POP with the then-current rule set; this verdict
+//     also runs at generation treat, and the pop/interreduce re-checks
+//     carry no peak (checkOrder/step3 degrade off there).
+//   * joinWith's subsumed check (Join.hs:141-170: joinable-equation
+//     index, rule index, congruence decomposition) is not ported --
+//     we only drop on NF equality, i.e. we under-drop.
+//   * Twee rewrites ALL equal subterms per step (Rule.hs:256-258
+//     parallel replace) in outermost index order; the engine splices
+//     one WM-mixmost redex per step.
 //   * VERDICT-ONLY: the caller's l/r keep the engine NFs, so a kept
-//     CP queues/records exactly what the default path queues -- the
-//     gated steps live and die inside this call.
+//     CP queues/records exactly what the default path queues.
 //
 // Termination: oriented steps decrease the open-KBO instance, hence
 // its skolem image; gated unorientable steps decrease the skolem image
-// directly; the skolem-ground order is total, well-founded and closed
-// under contexts, so the gated normalize terminates (64-step cap as
+// (step2's open decrease implies it; step3 gates on it directly); the
+// skolem-ground order is total, well-founded and closed under
+// contexts, so the gated normalize terminates (64-step cap as
 // backstop).
 //
 // The pass can out-join the ungated doR/doE normalize that already
 // failed ONLY through the unorientable-equation leg, so it is skipped
-// when no unorientable equation is live.  Plain-KBO configs only (the
+// when no unorientable equation is live (all-oriented systems also
+// keep both CP sides strictly below the peak by formation, so
+// checkOrder could never fire either).  Plain-KBO configs only (the
 // skolem compare reads s->kbo).
+
+// Max var id over a span (0 when var-free) -- Twee flipCP's
+// `n = maximum (0 : map fromEnum (vars t))`.
+static u32 ftsj_span_max_var(const AtpFtCell *t, u32 cur) {
+  const AtpFtCell *end_after = (t->end != NULL) ? t->end->next : NULL;
+  for (const AtpFtCell *p = t; p != NULL && p != end_after; p = p->next) {
+    if ((p->sym & WF_VAR_BIT) != 0u) {
+      u32 vid = p->sym & ~WF_VAR_BIT;
+      if (vid > cur) cur = vid;
+    }
+  }
+  return cur;
+}
+
+// In-place variable flip x -> n - x (Twee Join.hs:116-120 flipCP).
+static void ftsj_span_flip_vars(AtpFtCell *t, u32 n) {
+  const AtpFtCell *end_after = (t->end != NULL) ? t->end->next : NULL;
+  for (AtpFtCell *p = t; p != NULL && p != (AtpFtCell *)end_after;
+       p = p->next) {
+    if ((p->sym & WF_VAR_BIT) != 0u) {
+      u32 vid = p->sym & ~WF_VAR_BIT;
+      p->sym = WF_VAR_BIT | (n - vid);
+    }
+  }
+}
+
+// Twee step3's normaliseWith (`lessThan` top): greedy single-step
+// loop -- apply the first gated redex the walk finds, keep the step
+// only while the WHOLE rewritten term stays strictly below the peak
+// under the open KBO, stop (no backtracking) the moment it does not
+// (Rule.hs:302-309 takes the head reduction only).  Caller owns the
+// span; the returned span replaces it.
+static AtpFtCell *ftsj_below_peak_normalize(AtpState *s, AtpFtCell *t,
+                                            const AtpFtCell *top) {
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  for (u32 step = 0; step < 64u; step++) {
+    AtpFtCell *prev = ft_clone_span(a, t, 0);
+    if (prev == NULL) return t;
+    g_ftsj_active = 1u;
+    g_ftsj_skolem = 1u;
+    t = atp_rewrite_normalize_ft(s, t, 1u);      // at most ONE gated step
+    g_ftsj_active = 0u;
+    g_ftsj_skolem = 0u;
+    if (ft_eq(t, prev)) {                        // gated NF reached
+      ft_free_span(a, prev, prev->end);
+      return t;
+    }
+    if (thvm_kbo_ft(t, top, s->kbo) != KBO_LT) { // intermediate not < peak:
+      ft_free_span(a, t, t->end);                // roll the step back, stop
+      return prev;
+    }
+    ft_free_span(a, prev, prev->end);
+  }
+  return t;
+}
+
+// One step3 attempt (Join.hs:109-114) on the step2-simplified pair,
+// optionally variable-flipped.  Returns 1 when the below-peak gated
+// normalize joins the two sides.
+static u8 ftsj_step3_joins(AtpState *s, const AtpFtCell *l2,
+                           const AtpFtCell *r2, const AtpFtCell *peak,
+                           u8 flip) {
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *lc = ft_clone_span(a, (AtpFtCell *)l2, 0);
+  AtpFtCell *rc = ft_clone_span(a, (AtpFtCell *)r2, 0);
+  AtpFtCell *pk = ft_clone_span(a, (AtpFtCell *)peak, 0);
+  u8 joined = 0u;
+  if (lc != NULL && rc != NULL && pk != NULL) {
+    if (flip) {
+      // Twee flips the (cp, top) TUPLE: one shared max index, the
+      // peak renamed with the same map -- the open below-peak compare
+      // needs consistent variable identities across all three.
+      u32 n = ftsj_span_max_var(lc, 0u);
+      n = ftsj_span_max_var(rc, n);
+      n = ftsj_span_max_var(pk, n);
+      ftsj_span_flip_vars(lc, n);
+      ftsj_span_flip_vars(rc, n);
+      ftsj_span_flip_vars(pk, n);
+    }
+    // Gate equation = THIS variant's pair (Join.hs:110 joinWith
+    // captures the step2-simplified cp_eqn; the flip moves skolem
+    // verdicts, so each variant re-prepares + retires the memo).
+    if (thvm_ftsj_prepare_eq(lc, rc, s->kbo)) {
+      ftsj_pass_bump();
+      lc = ftsj_below_peak_normalize(s, lc, pk);
+      rc = ftsj_below_peak_normalize(s, rc, pk);
+      joined = (u8)ft_eq(lc, rc);
+    }
+  }
+  if (lc != NULL) ft_free_span(a, lc, lc->end);
+  if (rc != NULL) ft_free_span(a, rc, rc->end);
+  if (pk != NULL) ft_free_span(a, pk, pk->end);
+  return joined;
+}
+
 u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r);
 u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r) {
   if (l == NULL || r == NULL || s->n_rules == 0u) return 0u;
@@ -3925,7 +4079,14 @@ u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r) {
     return 0u;
   }
   if (g_ftsj_active) return 0u;   // defensive: no reentry
-  if (!thvm_ftsj_prepare_eq(l, r, s->kbo)) return 0u;
+  // Twee-session skolem refinement (ft_order.c): the minimal constant
+  // sorts below skolemised variables for every compare in this call.
+  thvm_ftsj_session_min((s->min_const != 0)
+                            ? (i32)term_ext(s->min_const) : -1);
+  if (!thvm_ftsj_prepare_eq(l, r, s->kbo)) {
+    thvm_ftsj_session_min(-1);
+    return 0u;
+  }
   // Sync the rule-encode cache watermark (ft_order.c) for this pass.
   thvm_ftsj_rulecache_sync(s, s->r_revision, s->n_rules);
   // Arm the per-rule simplerThan memo: bump the pass id -- a stale
@@ -3933,32 +4094,81 @@ u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r) {
   if (g_ftsj_memo_cap < s->n_rules) {
     u32 cap = s->n_rules + 256u;
     u32 *st = (u32 *)realloc(g_ftsj_memo_stamp, (size_t)cap * sizeof(u32));
-    if (st == NULL) return 0u;
+    if (st == NULL) { thvm_ftsj_session_min(-1); return 0u; }
     memset(st + g_ftsj_memo_cap, 0,
            (size_t)(cap - g_ftsj_memo_cap) * sizeof(u32));
     g_ftsj_memo_stamp = st;
     u8 *vl = (u8 *)realloc(g_ftsj_memo_val, cap);
-    if (vl == NULL) return 0u;
+    if (vl == NULL) { thvm_ftsj_session_min(-1); return 0u; }
     g_ftsj_memo_val = vl;
     g_ftsj_memo_cap = cap;
   }
-  if (++g_ftsj_pass_id == 0u) {   // stamp wrap: retire every stale slot
-    memset(g_ftsj_memo_stamp, 0, (size_t)g_ftsj_memo_cap * sizeof(u32));
-    g_ftsj_pass_id = 1u;
-  }
+  ftsj_pass_bump();
   // Normalize CLONES: the gated walk splices/frees spans in place, and
   // the caller's l/r must stay the engine NFs (verdict-only contract).
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
   AtpFtCell *lc = ft_clone_span(a, l, 0);
   AtpFtCell *rc = ft_clone_span(a, r, 0);
-  if (lc == NULL || rc == NULL) return 0u;
+  if (lc == NULL || rc == NULL) {
+    thvm_ftsj_session_min(-1);
+    return 0u;
+  }
+  // Twee step2 leg (open-decrease unorient gate; step1 is subsumed --
+  // the inputs are already ungated doR NFs).
   g_ftsj_active = 1u;
+  g_ftsj_skolem = 0u;
   lc = atp_rewrite_normalize_ft(s, lc, 64u);
   rc = atp_rewrite_normalize_ft(s, rc, 64u);
   g_ftsj_active = 0u;
   u8 joined = (u8)ft_eq(lc, rc);
+  // Resolve the peak (lazily -- only the peaked steps read it).
+  AtpFtCell *peak     = NULL;
+  AtpFtCell *peak_own = NULL;
+  if (!joined) {
+    peak = g_ftsj_peak_ft;
+    if (peak == NULL && g_ftsj_peak_term != 0) {
+      peak_own = ft_from_term(a, g_ftsj_peak_term, 0);
+      peak = peak_own;
+    }
+  }
+  u8 phase = joined ? 1u : 0u;   // 1=step2, 2=checkOrder, 3=step3, 4=flip
+  // checkOrder (Join.hs:81-87): tooBig = the peak is <= a surviving
+  // side under the open KBO -> the CP is dropped.
+  if (!joined && peak != NULL) {
+    KboCmp cl = thvm_kbo_ft(peak, lc, s->kbo);
+    if (cl == KBO_LT || cl == KBO_EQ) {
+      joined = 1u;
+    } else {
+      KboCmp cr = thvm_kbo_ft(peak, rc, s->kbo);
+      if (cr == KBO_LT || cr == KBO_EQ) joined = 1u;
+    }
+    if (joined) phase = 2u;
+  }
+  // step3 (Join.hs:96-120): below-peak connectedness on the pair and
+  // its variable-flipped image; either variant joining drops the CP.
+  if (!joined && peak != NULL) {
+    joined = ftsj_step3_joins(s, lc, rc, peak, /*flip=*/0u);
+    if (!joined && ftsj_step3_joins(s, lc, rc, peak, /*flip=*/1u)) {
+      joined = 1u;
+      phase = 4u;
+    } else if (joined) {
+      phase = 3u;
+    }
+  }
+  // Env-gated dissection tap: which allSteps leg dropped this CP
+  // (correlates with the [cpfate] line the treat prints right after).
+  static int sj_dbg = -1;
+  if (sj_dbg < 0) sj_dbg = atp_env_on("THVM_ATP_SJ_DEBUG");
+  if (sj_dbg && joined) {
+    static const char *tag[5] = {"?", "step2", "checkOrder", "step3",
+                                 "step3flip"};
+    fprintf(stderr, "[sjdrop] phase=%s peak=%s\n", tag[phase],
+            (peak != NULL) ? "yes" : "no");
+  }
   ft_free_span(a, lc, lc->end);
   ft_free_span(a, rc, rc->end);
+  if (peak_own != NULL) ft_free_span(a, peak_own, peak_own->end);
+  thvm_ftsj_session_min(-1);
   return joined;
 }
 

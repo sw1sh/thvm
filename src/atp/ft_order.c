@@ -449,6 +449,18 @@ fn KboCmp thvm_kbo_ft_skolem_subst_with_prepared(u32 na,
 // precedence), so a rewrite pass gated on "instance strictly greater"
 // terminates even for steps the open-term KBO calls incomparable
 // (variable-permuted instances of commutativity et al).
+// Simpler-join session refinement (set for the DURATION of an
+// atp_cp_sj_joinable_ft call, -1 otherwise): the label of the minimal
+// constant.  Twee's lessEqSkolem (KBO.hs:22-25) sorts the minimal
+// constant below EVERYTHING at equal weight -- including skolemised
+// variables -- while the base order here puts skolem constants below
+// every function symbol.  The sj lane runs the Twee-faithful variant;
+// the encompassment-demod lane (armed outside sj sessions) keeps the
+// historic base order.
+static i32 g_ftsj_twee_min = -1;
+fn void thvm_ftsj_session_min(i32 label);
+fn void thvm_ftsj_session_min(i32 label) { g_ftsj_twee_min = label; }
+
 static KboCmp atpft_kbo_skolem_cmp(const KboFlatNode *a, u32 pa,
                                    const KboFlatNode *b, u32 pb,
                                    const KboConfig *cfg) {
@@ -459,7 +471,15 @@ static KboCmp atpft_kbo_skolem_cmp(const KboFlatNode *a, u32 pa,
   if (wa != wb) return (wa > wb) ? KBO_GT : KBO_LT;
   i32 sa = a[pa].sym, sb = b[pb].sym;
   u8 va = (sa < 0), vb = (sb < 0);
-  if (va != vb) return va ? KBO_LT : KBO_GT;   // skolem const < any fn sym
+  if (va != vb) {
+    if (g_ftsj_twee_min >= 0) {
+      const KboFlatNode *f = va ? &b[pb] : &a[pa];
+      if (f->sym == g_ftsj_twee_min && f->sz == 1u) {
+        return va ? KBO_GT : KBO_LT;   // Twee: minimal constant < variable
+      }
+    }
+    return va ? KBO_LT : KBO_GT;       // skolem const < any other fn sym
+  }
   if (va) {
     if (sa == sb) return KBO_EQ;               // same variable
     return (sa < sb) ? KBO_GT : KBO_LT;        // by id (total, arbitrary)
@@ -496,7 +516,15 @@ static KboCmp atpft_kbo_skolem_cmp_pw(const KboFlatNode *a, u32 pa,
   if (wa != wb) return (wa > wb) ? KBO_GT : KBO_LT;
   i32 sa = a[pa].sym, sb = b[pb].sym;
   u8 va = (sa < 0), vb = (sb < 0);
-  if (va != vb) return va ? KBO_LT : KBO_GT;   // skolem const < any fn sym
+  if (va != vb) {
+    if (g_ftsj_twee_min >= 0) {
+      const KboFlatNode *f = va ? &b[pb] : &a[pa];
+      if (f->sym == g_ftsj_twee_min && f->sz == 1u) {
+        return va ? KBO_GT : KBO_LT;   // Twee: minimal constant < variable
+      }
+    }
+    return va ? KBO_LT : KBO_GT;       // skolem const < any other fn sym
+  }
   if (va) {
     if (sa == sb) return KBO_EQ;               // same variable
     return (sa < sb) ? KBO_GT : KBO_LT;        // by id (total, arbitrary)
@@ -538,15 +566,24 @@ fn KboCmp thvm_kbo_ft_skolem_after_subst(u32 na, const KboConfig *cfg) {
 //
 // The CP-join discipline (AtpState.use_simpler_join) gates every
 // rewrite step on the rule's equation being strictly SIMPLER than the
-// CP equation under a ground-total order on equations: order each
-// equation by its skolem-ground-larger side, then compare
-// lexicographically (larger side first, smaller side on a tie) with
-// atpft_kbo_skolem_cmp.  This is Twee's orderedSimplerThan
-// (Equation.hs:46-48) over lessEqSkolem, minus the variable
-// canonicalisation inside Twee's `order` (canonicalise renames
-// variables before comparing; here variants tie-break on raw var ids
-// -- still a strict total order on concrete terms, which is what the
-// well-foundedness of the join induction needs).
+// CP equation under a ground-total order on equations -- Twee's
+// simplerThan (Equation.hs:63-65) = `order` both equations, then
+// orderedSimplerThan (Equation.hs:50-52) over lessEqSkolem
+// (larger side first lexicographically, smaller side on a tie).
+//
+// `order` (Equation.hs:34-47) is ported faithfully:
+//   * LHS = the side whose GROUND SKELETON (every variable erased to
+//     the minimal constant, Base.hs:241 `ground`) is the greater under
+//     the -- ground-total -- KBO.  For a rule the engine oriented
+//     l -> r this collapses to hi = l (open strict KBO GT is closed
+//     under substitution, so the skeletons order the same way).
+//   * On a skeleton TIE, whichever canonicalised orientation is
+//     orderedSimplerThan the other.
+//   * The picked pair is variable-CANONICALISED (Base.hs canonicalise:
+//     ids renumbered by first occurrence, larger side walked first).
+//     Skolemised variables compare BY ID, so the historic skip of this
+//     renumber let raw formation-time ids leak into gate verdicts --
+//     one of the three documented sj divergences from Twee.
 //
 // Dedicated buffers: the join pass interleaves these compares with
 // find_redex_ft's unorient gate, whose prepared redex lives in
@@ -560,9 +597,138 @@ static u32 g_ftsj_cp_hi_n = 0u;
 static long long g_ftsj_cp_whi = 0;
 static KboFlatNode g_ftsj_scr_a[ATPFT_KBO_FLAT_CAP];   // rule-side scratch
 static KboFlatNode g_ftsj_scr_b[ATPFT_KBO_FLAT_CAP];
+// Ground-skeleton / flip-orientation scratch (Twee `order` internals).
+static KboFlatNode g_ftsj_gsk_a[ATPFT_KBO_FLAT_CAP];
+static KboFlatNode g_ftsj_gsk_b[ATPFT_KBO_FLAT_CAP];
+// Ordered-pair output scratch for the rule-side `order` (the uncached
+// and cache-fill paths both write here before the compare / memcpy).
+static KboFlatNode g_ftsj_ord_hi[ATPFT_KBO_FLAT_CAP];
+static KboFlatNode g_ftsj_ord_lo[ATPFT_KBO_FLAT_CAP];
 
-// Encode the CP equation (l, r) into the prepared hi/lo buffers.
-// Returns 0 on encode overflow (caller skips the join pass).
+// Variable-canonicalise an oriented flat pair IN PLACE: negative syms
+// renumbered by first occurrence, hi walked before lo (Twee Base.hs
+// canonicalise over the (l :=: r) traversal order).  More than
+// FTSJ_CANON_MAX distinct variables (never seen in practice): the pair
+// is left untouched -- the historic raw-id total order, fail-soft.
+#define FTSJ_CANON_MAX 96u
+static void ftsj_flat_canon_pair(KboFlatNode *hi, u32 nhi,
+                                 KboFlatNode *lo, u32 nlo) {
+  i32 old[FTSJ_CANON_MAX];
+  u32 nseen = 0u;
+  KboFlatNode *arr[2] = {hi, lo};
+  u32          cnt[2] = {nhi, nlo};
+  for (u32 s = 0; s < 2u; s++) {
+    for (u32 i = 0; i < cnt[s]; i++) {
+      if (arr[s][i].sym >= 0) continue;
+      if (nseen >= FTSJ_CANON_MAX) return;   // fail-soft: no renumber
+      u32 k = 0u;
+      while (k < nseen && old[k] != arr[s][i].sym) k++;
+      if (k == nseen) old[nseen++] = arr[s][i].sym;
+    }
+  }
+  for (u32 s = 0; s < 2u; s++) {
+    for (u32 i = 0; i < cnt[s]; i++) {
+      if (arr[s][i].sym >= 0) continue;
+      u32 k = 0u;
+      while (old[k] != arr[s][i].sym) k++;
+      arr[s][i].sym = -(i32)(k + 1u);
+    }
+  }
+}
+
+// Ground-skeleton compare (Twee Base.hs `ground` + KBO lessEq on the
+// now-ground pair): copy both encodes with every variable node erased
+// to the minimal constant, then run the (total-on-ground) flat KBO.
+// KBO_UN only when no minimal constant is latched (no sj session).
+static KboCmp ftsj_ground_skel_cmp(const KboFlatNode *a, u32 na,
+                                   const KboFlatNode *b, u32 nb,
+                                   const KboConfig *cfg) {
+  if (g_ftsj_twee_min < 0) return KBO_UN;
+  i32 mw = ((u32)g_ftsj_twee_min < cfg->n_labels)
+               ? (i32)cfg->weights[(u32)g_ftsj_twee_min] : 0;
+  for (u32 i = 0; i < na; i++) {
+    g_ftsj_gsk_a[i] = a[i];
+    if (g_ftsj_gsk_a[i].sym < 0) {
+      g_ftsj_gsk_a[i].sym = g_ftsj_twee_min;
+      g_ftsj_gsk_a[i].w   = mw;
+    }
+  }
+  for (u32 i = 0; i < nb; i++) {
+    g_ftsj_gsk_b[i] = b[i];
+    if (g_ftsj_gsk_b[i].sym < 0) {
+      g_ftsj_gsk_b[i].sym = g_ftsj_twee_min;
+      g_ftsj_gsk_b[i].w   = mw;
+    }
+  }
+  return atpft_kbo_skolem_cmp(g_ftsj_gsk_a, 0u, g_ftsj_gsk_b, 0u, cfg);
+}
+
+// orderedSimplerThan over two flat pairs: (hi < HI) or (hi == HI and
+// lo < LO), Twee Equation.hs:50-52 over lessEqSkolem.
+static int ftsj_pair_simpler(const KboFlatNode *hi, const KboFlatNode *HI,
+                             const KboFlatNode *lo, const KboFlatNode *LO,
+                             const KboConfig *cfg) {
+  KboCmp ch = atpft_kbo_skolem_cmp(hi, 0u, HI, 0u, cfg);
+  if (ch == KBO_LT) return 1;
+  if (ch != KBO_EQ) return 0;
+  return atpft_kbo_skolem_cmp(lo, 0u, LO, 0u, cfg) == KBO_LT;
+}
+
+// Twee `order` over the encoded pair (a, b): write the canonicalised
+// (hi, lo) into (out_hi, out_lo), returning their node counts.
+// `oriented` collapses the skeleton pick to hi = a (see the section
+// comment).  out buffers must each hold ATPFT_KBO_FLAT_CAP nodes and
+// must not alias the scratch (g_ftsj_scr_*, g_ftsj_gsk_*).
+static void ftsj_order_pair(const KboFlatNode *a, u32 na,
+                            const KboFlatNode *b, u32 nb, u8 oriented,
+                            const KboConfig *cfg,
+                            KboFlatNode *out_hi, u32 *out_nhi,
+                            KboFlatNode *out_lo, u32 *out_nlo) {
+  u8 a_hi = 1u;
+  if (!oriented) {
+    KboCmp g = ftsj_ground_skel_cmp(a, na, b, nb, cfg);
+    if (g == KBO_LT) {
+      a_hi = 0u;
+    } else if (g == KBO_EQ) {
+      // Skeleton tie: pick the orientation whose canonicalised pair is
+      // orderedSimplerThan the other (Equation.hs:38-39); ties keep
+      // (a, b).  gsk scratch is free again after the compare above.
+      memcpy(out_hi, a, (size_t)na * sizeof(KboFlatNode));
+      memcpy(out_lo, b, (size_t)nb * sizeof(KboFlatNode));
+      ftsj_flat_canon_pair(out_hi, na, out_lo, nb);
+      memcpy(g_ftsj_gsk_a, b, (size_t)nb * sizeof(KboFlatNode));
+      memcpy(g_ftsj_gsk_b, a, (size_t)na * sizeof(KboFlatNode));
+      ftsj_flat_canon_pair(g_ftsj_gsk_a, nb, g_ftsj_gsk_b, na);
+      *out_nhi = na;
+      *out_nlo = nb;
+      if (!ftsj_pair_simpler(out_hi, g_ftsj_gsk_a, out_lo, g_ftsj_gsk_b,
+                             cfg) &&
+          !(atpft_kbo_skolem_cmp(out_hi, 0u, g_ftsj_gsk_a, 0u, cfg)
+                == KBO_EQ &&
+            atpft_kbo_skolem_cmp(out_lo, 0u, g_ftsj_gsk_b, 0u, cfg)
+                == KBO_EQ)) {
+        memcpy(out_hi, g_ftsj_gsk_a, (size_t)nb * sizeof(KboFlatNode));
+        memcpy(out_lo, g_ftsj_gsk_b, (size_t)na * sizeof(KboFlatNode));
+        *out_nhi = nb;
+        *out_nlo = na;
+      }
+      return;
+    }
+  }
+  const KboFlatNode *hi = a_hi ? a : b;
+  const KboFlatNode *lo = a_hi ? b : a;
+  u32 nhi = a_hi ? na : nb;
+  u32 nlo = a_hi ? nb : na;
+  memcpy(out_hi, hi, (size_t)nhi * sizeof(KboFlatNode));
+  memcpy(out_lo, lo, (size_t)nlo * sizeof(KboFlatNode));
+  *out_nhi = nhi;
+  *out_nlo = nlo;
+  ftsj_flat_canon_pair(out_hi, nhi, out_lo, nlo);
+}
+
+// Encode the CP equation (l, r) into the prepared hi/lo buffers via
+// Twee `order`.  Returns 0 on encode overflow (caller skips the join
+// pass).
 fn int thvm_ftsj_prepare_eq(const AtpFtCell *l, const AtpFtCell *r,
                             const KboConfig *cfg) {
   u32 nl = 0u, nr = 0u;
@@ -571,14 +737,11 @@ fn int thvm_ftsj_prepare_eq(const AtpFtCell *l, const AtpFtCell *r,
       !atpft_kbo_flat_encode(r, cfg, g_ftsj_scr_b, &nr)) {
     return 0;
   }
-  KboCmp c = atpft_kbo_skolem_cmp(g_ftsj_scr_a, 0u, g_ftsj_scr_b, 0u, cfg);
-  const KboFlatNode *hi = (c == KBO_LT) ? g_ftsj_scr_b : g_ftsj_scr_a;
-  const KboFlatNode *lo = (c == KBO_LT) ? g_ftsj_scr_a : g_ftsj_scr_b;
-  u32 nhi = (c == KBO_LT) ? nr : nl;
-  u32 nlo = (c == KBO_LT) ? nl : nr;
-  memcpy(g_ftsj_cp_hi, hi, (size_t)nhi * sizeof(KboFlatNode));
-  memcpy(g_ftsj_cp_lo, lo, (size_t)nlo * sizeof(KboFlatNode));
+  u32 nhi = 0u, nlo = 0u;
+  ftsj_order_pair(g_ftsj_scr_a, nl, g_ftsj_scr_b, nr, /*oriented=*/0u, cfg,
+                  g_ftsj_cp_hi, &nhi, g_ftsj_cp_lo, &nlo);
   g_ftsj_cp_hi_n = nhi;
+  (void)nlo;
   // Latch hi's total skolem weight for the rule-cache weight fast key
   // (see thvm_ftsj_rule_simpler_cached).
   {
@@ -590,11 +753,10 @@ fn int thvm_ftsj_prepare_eq(const AtpFtCell *l, const AtpFtCell *r,
 }
 
 // Is the rule/equation (rl, rr) strictly simpler than the prepared CP
-// equation?  `oriented` rules have rl skolem-greater by construction
-// (open-term KBO GT is stable under the skolem grounding);
-// unorientable equations pick the larger side via the total skolem
-// compare.  Returns 0 when no CP equation is prepared or on encode
-// overflow (fail-closed: the step does not fire).
+// equation?  Twee simplerThan: `order` the rule equation, then
+// orderedSimplerThan against the prepared (already-ordered) CP pair.
+// Returns 0 when no CP equation is prepared or on encode overflow
+// (fail-closed: the step does not fire).
 fn int thvm_ftsj_rule_simpler(const AtpFtCell *rl, const AtpFtCell *rr,
                               u8 oriented, const KboConfig *cfg) {
   if (g_ftsj_cp_hi_n == 0u) return 0;
@@ -603,19 +765,11 @@ fn int thvm_ftsj_rule_simpler(const AtpFtCell *rl, const AtpFtCell *rr,
       !atpft_kbo_flat_encode(rr, cfg, g_ftsj_scr_b, &nb)) {
     return 0;
   }
-  const KboFlatNode *hi = g_ftsj_scr_a;
-  const KboFlatNode *lo = g_ftsj_scr_b;
-  if (!oriented &&
-      atpft_kbo_skolem_cmp(g_ftsj_scr_a, 0u, g_ftsj_scr_b, 0u, cfg)
-          == KBO_LT) {
-    hi = g_ftsj_scr_b;
-    lo = g_ftsj_scr_a;
-  }
-  // Twee orderedSimplerThan: (hi < HI) or (hi == HI and lo < LO).
-  KboCmp ch = atpft_kbo_skolem_cmp(hi, 0u, g_ftsj_cp_hi, 0u, cfg);
-  if (ch == KBO_LT) return 1;
-  if (ch != KBO_EQ) return 0;
-  return atpft_kbo_skolem_cmp(lo, 0u, g_ftsj_cp_lo, 0u, cfg) == KBO_LT;
+  u32 nhi = 0u, nlo = 0u;
+  ftsj_order_pair(g_ftsj_scr_a, na, g_ftsj_scr_b, nb, oriented, cfg,
+                  g_ftsj_ord_hi, &nhi, g_ftsj_ord_lo, &nlo);
+  return ftsj_pair_simpler(g_ftsj_ord_hi, g_ftsj_cp_hi,
+                           g_ftsj_ord_lo, g_ftsj_cp_lo, cfg);
 }
 
 // --- Per-rule-slot encode cache for the simpler-join gate -----------
@@ -722,17 +876,14 @@ fn int thvm_ftsj_rule_simpler_cached(u32 slot, const AtpFtCell *rl,
       e->overflow = 1u;
       return 0;
     }
-    const KboFlatNode *hi = g_ftsj_scr_a;
-    const KboFlatNode *lo = g_ftsj_scr_b;
-    u32 nhi = na, nlo = nb;
-    if (!oriented &&
-        atpft_kbo_skolem_cmp(g_ftsj_scr_a, 0u, g_ftsj_scr_b, 0u, cfg)
-            == KBO_LT) {
-      hi = g_ftsj_scr_b;
-      lo = g_ftsj_scr_a;
-      nhi = nb;
-      nlo = na;
-    }
+    // Twee `order` on the rule equation (skeleton pick + canonical
+    // vars) -- same computation as the uncached path, content-pure,
+    // so the ordered canonical pair is cacheable as before.
+    u32 nhi = 0u, nlo = 0u;
+    ftsj_order_pair(g_ftsj_scr_a, na, g_ftsj_scr_b, nb, oriented, cfg,
+                    g_ftsj_ord_hi, &nhi, g_ftsj_ord_lo, &nlo);
+    const KboFlatNode *hi = g_ftsj_ord_hi;
+    const KboFlatNode *lo = g_ftsj_ord_lo;
     if (e->cap_hi < nhi) {
       KboFlatNode *p = (KboFlatNode *)realloc(e->hi,
                                               (size_t)nhi * sizeof(KboFlatNode));

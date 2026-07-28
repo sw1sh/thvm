@@ -203,7 +203,10 @@ static u8 atp_cp_trivially_joinable(AtpState *s, Term *lhs, Term *rhs) {
   if (dbg_join_cache < 0) dbg_join_cache = atp_env_on("THVM_ATP_JOIN_CACHE");
   u64 join_key = 0;
   u8  join_cache_eligible = 0;
-  if (dbg_join_cache) {
+  // Simpler-join mode 1 verdicts read the CP's PEAK (checkOrder/step3),
+  // so the content-keyed cache would alias same-pair CPs from different
+  // overlaps -- ineligible.
+  if (dbg_join_cache && s->use_simpler_join != 1u) {
     u64 lh = atp_term_struct_hash(*lhs);
     u64 rh = atp_term_struct_hash(*rhs);
     // Symmetric: joinable(l, r) == joinable(r, l), so the mix is symmetric.
