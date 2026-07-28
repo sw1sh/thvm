@@ -206,7 +206,8 @@ def parse_wm(path):
 
 PRSYM_RE = re.compile(r'^PRSYM (\d+) (\S+) (\d+)')
 CPSEL_RE = re.compile(r'^CPSEL pick=(\d+) j=\d+ seq=(\d+) pri=(\d+) '
-                      r'rules=\d+(?: d=\d+ actre=\d+)? lhs=(.*) rhs=(.*)$')
+                      r'rules=\d+(?: d=\d+ actre=\d+(?: dep=\d+)?)? '
+                      r'lhs=(.*) rhs=(.*)$')
 
 
 def parse_thvm(out_path, trace_path):
