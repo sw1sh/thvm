@@ -233,6 +233,19 @@ static const SchedSlice SCHEDULE[] = {
   // under the slice RSS guard).  --max-steps raised: the win crosses
   // the 500k default (LAT229 1.75M steps).
   {"twee-deep", "--cp-weight=8 --w2-modulo=0 --cp-depth-weight=6 --max-steps=10000000 --fof-sat=0", 0.0},
+  // (5''') TWEE-FREQ: the twee slice under Twee's CASC variant-1
+  // ordering pair -- lhs-weight 1 (CP score counts the larger side at
+  // coefficient 1, so small-RHS lemmas stop being over-taxed) +
+  // frequency precedence (most common symbol LOWEST, Twee
+  // --flip-ordering).  The LAT138-1 dissection pinned the residual
+  // divergence AFTER the faithful simpler-join port to SELECTION, not
+  // joining: default-ordering Twee itself misses LAT138-1 at 300s,
+  // while `twee --lhs-weight 1 --flip-ordering` proves it in 13s and
+  // NEITHER flag alone does at 90s.  Ported pair on the twee slice:
+  // LAT138-1 proves in 0.5s (prior schedule-wide GaveUp at 240s).
+  // Same lean core, so the lane inherits the twee slice's passive-set
+  // + re-scoring discipline.
+  {"twee-freq", "--simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --cp-lhs-weight=1 --sym-prec=frequency --w2-modulo=0 --orphan-murder=0 --cp-set-interreduce --cp-set-ir-budget=5 --fof-sat=0", 0.0},
   {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.33},
   // (4) ENCOMPASSMENT DEMODULATION (Twee reducesSkolem): the WM preset
   // with the skolem-ground unorient gate -- variable-permuted variants
