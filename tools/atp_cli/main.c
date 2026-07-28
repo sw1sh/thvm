@@ -39,6 +39,23 @@ static const SchedSlice SCHEDULE[] = {
   // immediately on ground-goal problems, exactly like the equals
   // slice.
   {"narrowq", "--narrow-queue=2 --fof-sat=0",              0.0},
+  // (1b'') EQUALS x TWEE-CORE: the equals encoding under the twee
+  // slice's lean completion core with the STRUCTURAL shared-subterm
+  // discount (--twee-struct-dedup) -- the Twee-default search shape
+  // for the existential-goal ifeq/CD family.  The LCL927-10
+  // dissection (CASC-J13's only Twee-solo UEQ solve: Twee 55.85s,
+  // everyone else TMO) pinned the portfolio's structural gap: Twee
+  // always equals-encodes existential goals and its winning variant's
+  // ONLY load-bearing flag is --no-flatten-goal, but our equals slice
+  // runs the WM preset whose Horn release + MaxWeight give up in ~1s,
+  // and no lane paired the encoding with the twee core.  With the
+  // pointer-identity dup discount the proof cascade's B-permutation
+  // CPs (repeated instantiated conditions) sat 220 pri above the
+  // selection band forever; the structural discount puts them inside
+  // it and the single proves in ~115s / <2.5GB (twee-core-without-SD
+  // ResourceOuts at every RSS bound tried up to 6GB).  =2 exits
+  // immediately on ground-goal problems, exactly like equals/narrowq.
+  {"equals-twee", "--equals-goal=2 --twee-struct-dedup --preset=none --horn=0 --simpler-join --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --cp-set-interreduce --cp-set-ir-budget=5 --max-steps=10000000 --fof-sat=0", 0.0},
   // (1c) CONDENSED-DETACHMENT lane: the encoded-Horn chaining under
   // the classic CD prover discipline (Otter's max_weight + subsumption
   // on the LCL corpus) -- a formula-size cap with iterative deepening

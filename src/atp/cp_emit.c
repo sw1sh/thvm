@@ -677,6 +677,17 @@ static u8 *ftp_pack_fused(const KboConfig *cfg, const AtpFtCell *lhs,
   fz->twee_l     = 7u * fz->fl_n - (nvar_l);
   fz->twee_r     = 7u * fz->fr_n - (nvar - nvar_l);
   fz->twee_valid = (fz->fl_n <= 256u && fz->fr_n <= 256u) ? 1u : 0u;
+  // STRUCTURAL shared-subterm discount (THVM_ATP_TWEE_SD): the plain
+  // 7*n - nvar count above has no dup discount (exact only vs the
+  // pointer-dedup classic scorer on unshared cells).  Under the knob
+  // the consumer must materialize and score with the structural
+  // dedup, so decline the stashed pair.
+  {
+    static int sd_on = -1;
+    if (sd_on < 0) { const char *e = getenv("THVM_ATP_TWEE_SD");
+                     sd_on = (e != NULL && e[0] != '\0' && e[0] != '0'); }
+    if (sd_on) fz->twee_valid = 0u;
+  }
   *out_len       = pos;
   *out_nodes     = nodes;
   *out_lhs_nodes = lhs_nodes;

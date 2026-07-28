@@ -1977,9 +1977,10 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       fprintf(stderr, "CPSKIP pick=%u j=%u seq=%u pri=%u\n",
               s->cp_select_count, j, s->cp_seq[v], s->cp_pri[v]);
     } else if (cp_pick_trace) {
-      fprintf(stderr, "CPSEL pick=%u j=%u seq=%u pri=%u rules=%u d=%u actre=%u lhs=",
+      fprintf(stderr, "CPSEL pick=%u j=%u seq=%u pri=%u rules=%u d=%u actre=%u dep=%u lhs=",
               s->cp_select_count, j, s->cp_seq[v], s->cp_pri[v], s->n_rules,
-              g_kdh_last_d, s->n_activated_re);
+              g_kdh_last_d, s->n_activated_re,
+              (s->cp_depth != NULL) ? s->cp_depth[v] : 0u);
       atp_dbg_print_term(stderr, *lhs_out);
       fputs(" rhs=", stderr);
       atp_dbg_print_term(stderr, *rhs_out);

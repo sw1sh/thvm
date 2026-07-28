@@ -596,7 +596,87 @@ static void atp_twee_dbg_report(void) {
             (unsigned long long)g_twee_dbg_ctx_dups[i]);
   }
 }
+// --- STRUCTURAL shared-subterm discount (THVM_ATP_TWEE_SD) ----------
+// Twee's size' dedup is STRUCTURAL: an occurrence of a compound
+// subterm costs dupcost=1 when an identical copy occurs anywhere in
+// the REMAINING traversal (Twee.CP.hs:259-261, `t isSubtermOfList ts
+// || any (t isSubtermOfList) us` -- a deep-subterm containment test).
+// The pointer-identity dedup below only fires when equal subterms
+// share heap cells, which substitution-materialized CPs (fresh cells
+// per sigma image) never do -- so on the FT-direct treated route the
+// discount is structurally ABSENT and every CP whose conclusion
+// repeats an instantiated condition (the condensed-detachment
+// discharge shape: LCL927-10's B-permutation cascade repeats i(Z,Y)
+// x3 and the instantiated condition x2) is over-taxed by
+// lhsweight * (size(dup) - 1) per lost dup.  Measured on the LCL927
+// frontier CP: pri 791 pointer-mode vs 571 structural-mode -- the
+// difference between buried-forever and inside the selection band.
+// Opt-in knob (--twee-struct-dedup): default OFF keeps every
+// existing mode-8 lane byte-identical.
+static u8 atp_twee_sd_on(void) {
+  static int on = -1;
+  if (on < 0) on = atp_env_on("THVM_ATP_TWEE_SD");
+  return (u8)on;
+}
+
+// Deep structural containment: does needle occur as a subterm of hay?
+// Both are TAG_CTR trees; equality is label + arity + children.
+static u8 atp_twee_sd_eq(Term a, Term b) {
+  if (a == b) return 1u;
+  u32 ta = term_tag(a), tb = term_tag(b);
+  if (ta != tb) return 0u;
+  if (ta == TAG_FVR || ta == TAG_NUM) return term_ext(a) == term_ext(b) &&
+                                             term_val(a) == term_val(b);
+  if (ta != TAG_CTR) return 0u;
+  if (term_ext(a) != term_ext(b)) return 0u;
+  u32 n = term_ctr_n(a);
+  if (n != term_ctr_n(b)) return 0u;
+  for (u32 i = 0; i < n; i++)
+    if (!atp_twee_sd_eq(term_ctr_at(a, i), term_ctr_at(b, i))) return 0u;
+  return 1u;
+}
+static u8 atp_twee_sd_contains(Term hay, Term needle) {
+  if (atp_twee_sd_eq(hay, needle)) return 1u;
+  if (term_tag(hay) != TAG_CTR) return 0u;
+  u32 n = term_ctr_n(hay);
+  for (u32 i = 0; i < n; i++)
+    if (atp_twee_sd_contains(term_ctr_at(hay, i), needle)) return 1u;
+  return 0u;
+}
+
+// Twee size' with the structural discount, literal port: preorder
+// worklist; a compound costs 7 and is NOT expanded when it occurs
+// (deeply) in any remaining worklist entry; otherwise costs 7 and
+// expands.  Vars cost 6, leaves 7 (the *7 scaling of the caller).
+// Worklist order = Twee's (Cons t ts) us: children pushed so the
+// leftmost pops first.
+static u32 atp_twee_term_score_sd(Term t) {
+  Term work[256];
+  u32 wn = 0;
+  work[wn++] = t;
+  u32 score = 0;
+  while (wn > 0) {
+    Term cur = work[--wn];
+    if (term_tag(cur) != TAG_CTR || term_ctr_n(cur) == 0u) {
+      score += (term_tag(cur) == TAG_FVR) ? 6u : 7u;
+      continue;
+    }
+    u8 dup = 0;
+    for (u32 i = 0; i < wn; i++) {
+      if (atp_twee_sd_contains(work[i], cur)) { dup = 1; break; }
+    }
+    score += 7u;
+    if (dup) continue;                    // dupcost=1 (*7), no recurse
+    u32 n = term_ctr_n(cur);
+    for (u32 i = n; i > 0 && wn < 256; i--) {
+      work[wn++] = term_ctr_at(cur, i - 1u);   // leftmost child pops first
+    }
+  }
+  return score;
+}
+
 static u32 atp_twee_term_score(Term t) {
+  if (atp_twee_sd_on()) return atp_twee_term_score_sd(t);
   static int dbg = -1;
   if (dbg < 0) {
     dbg = atp_env_on("THVM_TWEE_SCORE_STATS");
