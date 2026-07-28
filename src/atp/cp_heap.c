@@ -1890,6 +1890,19 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
                                          &pk, 0);
       g_pop_sj_peak_owner = s->ft_arena_ptr;
     }
+    // Env-gated stash coverage tap (THVM_ATP_POP_PEAK_DEBUG): one line
+    // per non-orphan pop -- did the popped slot carry a peak?
+    {
+      static int ppd = -1;
+      if (ppd < 0) ppd = atp_env_on("THVM_ATP_POP_PEAK_DEBUG");
+      if (ppd) {
+        fprintf(stderr, "[poppeak] pick=%u peak=%s arr=%s packed=%s\n",
+                s->cp_select_count,
+                (g_pop_sj_peak != NULL) ? "yes" : "no",
+                (s->cp_peak != NULL) ? "live" : "null",
+                (s->cp_packed[v] != NULL) ? "yes" : "no");
+      }
+    }
 #endif
   }
   s->last_popped_trace = s->cp_trace[v];

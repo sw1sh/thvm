@@ -2143,6 +2143,14 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
         pop_ft_joined = atp_cp_sj_joinable_ft(s, lf, rf);
         atp_sj_peak_disarm();
         if (pop_ft_joined) s->n_cps_dropped_simpler_join++;
+        {
+          static int ppd2 = -1;
+          if (ppd2 < 0) ppd2 = atp_env_on("THVM_ATP_POP_PEAK_DEBUG");
+          if (ppd2) {
+            fprintf(stderr, "[popsj] arm=ft peak=%s joined=%u\n",
+                    (g_pop_sj_peak != NULL) ? "yes" : "no", pop_ft_joined);
+          }
+        }
       }
       atp_pop_sj_peak_drop(s);
       if (pop_ft_joined) {
@@ -2452,6 +2460,14 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     if (g_pop_sj_peak != NULL) atp_sj_peak_arm_ft(g_pop_sj_peak);
     u8 pop_sj_joined = atp_cp_sj_joinable_term(s, l, r);
     atp_sj_peak_disarm();
+    {
+      static int ppd3 = -1;
+      if (ppd3 < 0) ppd3 = atp_env_on("THVM_ATP_POP_PEAK_DEBUG");
+      if (ppd3) {
+        fprintf(stderr, "[popsj] arm=term peak=%s joined=%u\n",
+                (g_pop_sj_peak != NULL) ? "yes" : "no", pop_sj_joined);
+      }
+    }
     atp_pop_sj_peak_drop(s);
     if (pop_sj_joined) {
       s->n_cps_dropped_simpler_join++;
