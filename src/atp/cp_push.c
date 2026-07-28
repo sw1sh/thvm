@@ -185,22 +185,29 @@ static u8 vcp_treat_joinable(AtpState *s) {
   // Simpler-join second chance (opt-in --simpler-join): verdict-only
   // gated R+E pass on the doR NFs -- the stash keeps the engine NFs.
   // Mirrors the hook in atp_cp_trivially_joinable_ft (ft_cpq.c).
-  // Mode 2 (pop-only) skips the generation-time arm.
-  if (!joined && s->use_simpler_join == 1u) {
+  // Mode 2 (pop-only) skips the generation-time arm but still builds
+  // the peak: its sj runs at pop, where the stash supplies it.
+  if (!joined && s->use_simpler_join != 0u) {
     // Peak for checkOrder/step3 (Twee Join.hs): sigma(lo) rebuilt from
     // the stashed formation operands -- same raw variable-id space as
-    // the treated fl/fr cells.  Persistent span, freed after the
-    // verdict.
+    // the treated fl/fr cells.  A SURVIVOR keeps it on the stash for
+    // the push loop's pop-peak pack (released with the stash); a
+    // joined CP frees it here.
     AtpFt *pa = (AtpFt *)s->ft_arena_ptr;
     AtpFtCell *pk =
         (g_vcp_treat.lo != NULL && g_vcp_treat.subst != NULL)
             ? ft_subst_apply(pa, g_vcp_treat.lo, g_vcp_treat.subst, 0)
             : NULL;
-    if (pk != NULL) atp_sj_peak_arm_ft(pk);
-    joined = atp_cp_sj_joinable_ft(s, g_vcp_treat.fl, g_vcp_treat.fr);
-    atp_sj_peak_disarm();
-    if (pk != NULL) ft_free_span(pa, pk, pk->end);
-    if (joined) s->n_cps_dropped_simpler_join++;
+    if (s->use_simpler_join == 1u) {
+      if (pk != NULL) atp_sj_peak_arm_ft(pk);
+      joined = atp_cp_sj_joinable_ft(s, g_vcp_treat.fl, g_vcp_treat.fr);
+      atp_sj_peak_disarm();
+      if (joined) s->n_cps_dropped_simpler_join++;
+    }
+    if (pk != NULL) {
+      if (joined) ft_free_span(pa, pk, pk->end);
+      else        g_vcp_treat.peak = pk;
+    }
   }
   if (_dl) {
     g_atp_pushn_us_eq += atp_now_us() - _dt;
@@ -502,6 +509,15 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
       g_drc_raw_l = g_drc_raw_r = NULL;
     }
 #endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Simpler-join pop-peak map basis: the queued pair BEFORE the
+    // canonical renumber.  The dense first-occurrence map built over
+    // this pair is the exact numbering thvm_normalize_vars /
+    // acp_pack_fused assign at pack time, and cps[i].peak shares its
+    // raw var space -- so a peak packed through this map lands in the
+    // slot's byte-string var space (see atp_sj_peak_pack_term).
+    Term _pk_base_l = cp_lhs, _pk_base_r = cp_rhs;
+#endif
 #ifdef ATP_VAR_NORM
     // 7c: canonically renumber the CP's variables -- AFTER reduction,
     // since rewriting can drop variables, so the dense [0, k) set is
@@ -786,6 +802,32 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     g_cp_uid_b = (s->r_uid != NULL && rule_b < s->n_rules)
                ? s->r_uid[rule_b] : 0u;
     g_cp_push_fused = fuse;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Simpler-join pop-peak stash: pack the formation peak through the
+    // queued pair's dense var map and arm it for the heap insert (Twee
+    // re-derives the overlap top at pop; we stash it at push).  Routes
+    // with no space-consistent peak leave the pending empty and the
+    // slot degrades to the peakless pop verdict: the raw FT-emit lane
+    // (bytes already in the shared scratch, peak wiring future work),
+    // drc keep lanes (content re-renumbered), deferred descriptors,
+    // and pack anomalies.
+    if (s->use_simpler_join != 0u && !deferred && !g_vcp_emit.armed &&
+        !atp_drc_armed(s)) {
+      if (g_vcp_treat.armed) {
+        if (g_vcp_treat.peak != NULL && g_vcp_treat.fl != NULL &&
+            g_vcp_treat.fr != NULL) {
+          g_sj_peak_pending = atp_sj_peak_pack_ft(g_vcp_treat.peak,
+                                                  g_vcp_treat.fl,
+                                                  g_vcp_treat.fr);
+        }
+      } else if (cps[i].peak != 0 && cp_lhs != 0 && cp_rhs != 0 &&
+                 term_tag(cp_lhs) != TAG_NUM &&
+                 term_tag(cp_rhs) != TAG_NUM) {
+        g_sj_peak_pending = atp_sj_peak_pack_term(cps[i].peak,
+                                                  _pk_base_l, _pk_base_r);
+      }
+    }
+#endif
     if (!deferred) {
 #ifdef THVM_ATPFT_ALLOC
       i64 _hb = ftnet_now();
@@ -796,6 +838,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
 #endif
     }
     g_cp_push_fused = 0u;
+    atp_sj_peak_pending_drop();   // consumed by the insert; defensive
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
     // Hijack-owned stash (ifeq-strip): free un-adopted spans + disarm.
     // A CPQ insert NULLed fl/fr on adopt; the packed-byte queue leaves

@@ -43,6 +43,7 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
       // free(NULL) no-op for deferred slots; their tag bit drops too.
       free(s->cp_packed[vv]);
       s->cp_packed[vv] = NULL;
+      atp_cp_peak_clear(s, vv);
       atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
@@ -156,7 +157,29 @@ static u8 atp_cp_set_ir_due(AtpState *s) {
     u64 hcp = thvm_atp_heap_checkpoint();
     Term l = 0, r = 0;
     atp_cp_slot_read(s, vv, &l, &r);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES) && \
+    !defined(THVM_ATPFT_CPQ)
+    // Sampled-dead statistic under sj mode 1: arm the slot's pop-peak
+    // so the joinable probe's sj second chance runs the same peaked
+    // verdict a pop would.  slot_read decoded the same bytes the peak
+    // map was built over; the CPQ dual-store reads the FT entry
+    // instead (adopted spans keep raw ids), so it stays peakless.
+    AtpFtCell *irs_pk = NULL;
+    if (s->use_simpler_join == 1u && s->cp_peak != NULL &&
+        !atp_cp_slot_implicit(s, vv) && s->cp_packed[vv] != NULL &&
+        s->cp_peak[vv] != NULL) {
+      const u8 *pkb = s->cp_peak[vv];
+      irs_pk = acp_unpack_term_ft((AtpFt *)s->ft_arena_ptr, &pkb, 0);
+      if (irs_pk != NULL) atp_sj_peak_arm_ft(irs_pk);
+    }
     if (atp_cp_trivially_joinable(s, &l, &r)) dead++;
+    if (irs_pk != NULL) {
+      atp_sj_peak_disarm();
+      ft_free_span((AtpFt *)s->ft_arena_ptr, irs_pk, irs_pk->end);
+    }
+#else
+    if (atp_cp_trivially_joinable(s, &l, &r)) dead++;
+#endif
     thvm_atp_heap_reset(hcp);
   }
   u64 after = atp_now_us();
@@ -249,6 +272,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = NULL;
+      atp_cp_peak_clear(s, vv);
       atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
@@ -289,6 +313,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = NULL;
+      atp_cp_peak_clear(s, vv);
       atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
@@ -447,6 +472,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = NULL;
+      atp_cp_peak_clear(s, vv);
       atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
@@ -478,6 +504,11 @@ static void atp_cp_set_interreduce(AtpState *s) {
       // the reduced pair and drop the tag bit -- from now on the slot
       // is an ordinary packed CP (FV-indexed again by the trailing
       // atp_fv_index_rebuild, reweighted below like every survivor).
+      // The pop-peak stash is KEPT: the repack is renumber-free (the
+      // reduced pair keeps the slot's dense ids -- rewriting only ever
+      // instantiates from redex matches), and the CP's identity is
+      // still the same overlap, so its top is unchanged (Twee's
+      // consider would re-derive the same peak).
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = acp_pack(l, r, NULL, NULL);
       atp_cp_implicit_clear(s, vv);

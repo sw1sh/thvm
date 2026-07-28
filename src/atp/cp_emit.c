@@ -329,6 +329,10 @@ typedef struct {
   // subject, untouched by the CP's own treatment).
   const AtpFtCell   *lo, *sub, *rin, *ro;
   const AtpFtSubst  *subst;
+  // Simpler-join pop-peak: sigma(lo) rebuilt by vcp_treat_joinable
+  // (raw formation var space, same as fl/fr) and kept for the push
+  // loop's peak-stash pack; owned by the stash, freed on release.
+  AtpFtCell *peak;
 } VcpTreat;
 #else
 typedef struct {
@@ -728,6 +732,16 @@ static u8 vcp_treat_form(AtpState *s, Term lo, const u32 *p, u32 p_len,
   g_vcp_treat.fl      = fl;
   g_vcp_treat.fr      = fr;
   g_vcp_treat.raw_len = raw_len;
+  // Term-operand route: no FT faces / walk subst back this stash.
+  // Clear them so the simpler-join peak rebuild (vcp_treat_joinable)
+  // can never consume a PREVIOUS FT-route CP's stale operands -- it
+  // degrades to the peakless verdict on this route instead.
+  g_vcp_treat.lo      = NULL;
+  g_vcp_treat.sub     = NULL;
+  g_vcp_treat.rin     = NULL;
+  g_vcp_treat.ro      = NULL;
+  g_vcp_treat.subst   = NULL;
+  g_vcp_treat.peak    = NULL;
   return 1u;
 }
 
@@ -738,6 +752,10 @@ static void vcp_treat_release(AtpState *s) {
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
   if (g_vcp_treat.fl != NULL) ft_free_span(a, g_vcp_treat.fl, g_vcp_treat.fl->end);
   if (g_vcp_treat.fr != NULL) ft_free_span(a, g_vcp_treat.fr, g_vcp_treat.fr->end);
+  if (g_vcp_treat.peak != NULL) {
+    ft_free_span(a, g_vcp_treat.peak, g_vcp_treat.peak->end);
+    g_vcp_treat.peak = NULL;
+  }
   g_vcp_treat.fl = g_vcp_treat.fr = NULL;
   g_vcp_treat.armed = 0u;
 }
@@ -1292,6 +1310,7 @@ static u8 vcp_ft_treat_form(AtpState *s, const AtpFtCell *lo_ft,
   g_vcp_treat.rin     = rin_ft;
   g_vcp_treat.ro      = ro_ft;
   g_vcp_treat.subst   = subst;
+  g_vcp_treat.peak    = NULL;
   return 1u;
 }
 
@@ -1552,7 +1571,9 @@ fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
   free(s->cp_packed[row]);               // free(NULL) is a no-op
   // The slot now holds packed bytes -- drop any deferred-CP tag so the
   // `cp_is_implicit[i] <=> cp_packed[i] == NULL` invariant holds, and
-  // retire any raw-desc descriptor (the bytes are being replaced).
+  // retire any raw-desc descriptor (the bytes are being replaced) plus
+  // any simpler-join peak stash (external content, no overlap backing).
+  atp_cp_peak_clear(s, row);
   atp_cp_implicit_clear(s, row);
   if (s->cp_implicit != NULL) {
     s->cp_implicit[row].out_face = ATP_RDESC_NONE;

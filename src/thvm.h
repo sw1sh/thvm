@@ -5137,6 +5137,20 @@ typedef struct {
   u8            *cp_is_implicit;  // bitset, (cp_cap + 7) / 8 bytes
   u32            n_cps_implicit;  // diagnostics: CPs pushed as descriptors
 
+  // Simpler-join pop-time peak stash (use_simpler_join != 0): per-slot
+  // packed byte string of the CP's formation peak sigma(l_outer) --
+  // Twee's overlap `top` -- renumbered through the SAME dense var map
+  // as the slot's cp_packed pair, so the checkOrder/step3 legs of the
+  // pop/interreduce simpler-join re-checks compare the peak against the
+  // popped sides with consistent variable identities (Twee re-derives
+  // the overlap at pop; we stash its top at push).  Lazily allocated on
+  // the first stash; NULL (zero cost, byte-identical engine) whenever
+  // simpler-join is off.  Slot lifetime mirrors cp_packed exactly
+  // (row moves, drops, pop, destroy).  A NULL slot degrades that CP's
+  // pop re-check to the peakless step1+2 verdict (the pre-stash
+  // behaviour, documented in ft_norm.c).
+  u8           **cp_peak;         // sized cp_cap, only when allocated
+
   // Raw-descriptor lane (`use_raw_desc`) face-pair intern table: the
   // walk former's (lo, ro) span pairs, deduplicated so a descriptor
   // carries two u32 refs instead of four pointers.  `rdesc_hash` is an

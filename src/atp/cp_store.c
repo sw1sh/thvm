@@ -1081,3 +1081,262 @@ static u8 g_trace_eq_nv = 0u;
 // takes the fused pack (its caller skipped the treated renumber).
 static u8 g_cp_push_fused = 0u;
 
+// === Simpler-join pop-time peak stash (AtpState.cp_peak) =============
+//
+// Twee joins a critical pair at SELECTION with the then-current rule
+// set, and its checkOrder/step3 legs (Join.hs:81-120) read the
+// overlap's `top` -- sigma(l_outer), the peak both CP sides descend
+// from -- which Twee recovers by re-deriving the overlap from its
+// parents at pop.  thvm queues the (treated) pair itself, so the peak
+// used to exist only at generation time and the pop/interreduce
+// simpler-join re-checks degraded to the peakless step1+2 verdict
+// (the documented residual divergence in ft_norm.c; on GRP706-1 the
+// missing pop-time below-peak joining kept a flood Twee prunes).
+//
+// The stash closes that gap: at push, the formation peak is packed
+// (acp preorder records, 'C'/'V' only) RENUMBERED THROUGH THE SAME
+// dense first-occurrence var map as the queued pair -- shared
+// variables keep shared ids, peak-only variables extend the map past
+// the pair's k -- and stored per slot in s->cp_peak[].  At pop /
+// interreduce re-checks the bytes decode to an Arena-A span and arm
+// the g_ftsj peak for the SAME faithful allSteps pass the treat runs.
+// Var-space soundness: the queued bytes are the pack-time renumbered
+// pair, pop-side rewriting only instantiates from redex matches (an
+// ordered step never introduces variables -- KBO decrease requires
+// var containment), so the pop NFs stay inside the pair's dense id
+// set and every peak-vs-side compare sees consistent identities.
+//
+// Degrade-to-peakless (slot stays NULL, exactly the pre-stash
+// behaviour): requeued interreduce victims (no overlap, no peak --
+// Twee has no such requeue), the raw-emit FT route + RAW_DESC
+// descriptor lane (the re-derivation reconstructs the overlap at pop;
+// peak wiring there is future work, see the report), record-mode
+// replay (the pair there is the trace RAW pack, a different var
+// space), drc-kept CPs (the kept content is re-renumbered), pack
+// anomalies (NUM/ERA atoms, over-arity, > REWRITE_MAX_VAR vars --
+// unreachable on ATP signatures), and CPQ builds whose slot stores no
+// bytes (the adopted spans keep raw ids).  Over-keeping is the only
+// possible effect of a missing peak; soundness is untouched (proofs
+// replay recorded engine steps).
+static u8 *g_sj_peak_pending = NULL;   // consume-once: armed by the push
+                                       // loop, attached by insert_packed
+
+// Storage management -- compiled unconditionally (the array stays NULL
+// and every helper is a single-branch no-op unless a pack site under
+// the FT defines ever arms a pending peak).
+static void atp_cp_peak_arrays_ensure(AtpState *s) {
+  if (s->cp_peak != NULL) return;
+  u32 cap = s->cp_cap ? s->cp_cap : 1u;
+  s->cp_peak = (u8 **)calloc((size_t)cap, sizeof(u8 *));
+  if (s->cp_peak == NULL) thvm_fatal("atp_cp_peak_arrays_ensure: OOM");
+}
+static inline void atp_cp_peak_clear(AtpState *s, u32 i) {
+  if (s->cp_peak != NULL && s->cp_peak[i] != NULL) {
+    free(s->cp_peak[i]);
+    s->cp_peak[i] = NULL;
+  }
+}
+// Move dst <- src, vacating src (row backfill / densify companion).
+// dst is being overwritten wholesale, so any bytes still there are
+// dead -- free them (free(NULL) no-op) rather than leak.
+static inline void atp_cp_peak_move(AtpState *s, u32 dst, u32 src) {
+  if (s->cp_peak == NULL) return;
+  free(s->cp_peak[dst]);
+  s->cp_peak[dst] = s->cp_peak[src];
+  s->cp_peak[src] = NULL;
+}
+static void atp_sj_peak_pending_drop(void) {
+  free(g_sj_peak_pending);
+  g_sj_peak_pending = NULL;
+}
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Pop-time decoded peak span (Arena A), parked by select_cp for the
+// step function's pop-treatment simpler-join; consumed (freed) there.
+// At most one outstanding -- select_cp clears a leftover defensively.
+// The owner arena rides along so a leftover from another state is
+// dropped (its arena frees it wholesale at destroy) instead of being
+// pushed onto the wrong free list.
+static AtpFtCell *g_pop_sj_peak       = NULL;
+static void      *g_pop_sj_peak_owner = NULL;
+static void atp_pop_sj_peak_drop(const AtpState *s) {
+  if (g_pop_sj_peak == NULL) return;
+  if (s != NULL && s->ft_arena_ptr != NULL &&
+      s->ft_arena_ptr == g_pop_sj_peak_owner) {
+    ft_free_span((AtpFt *)s->ft_arena_ptr, g_pop_sj_peak,
+                 g_pop_sj_peak->end);
+  }
+  g_pop_sj_peak       = NULL;
+  g_pop_sj_peak_owner = NULL;
+}
+
+// Private emit scratch: the peak pack runs between the trace-store
+// emit and the heap push, when g_acp_scratch may still hold live pair
+// bytes (the g_vcp_emit route) -- a separate buffer sidesteps every
+// aliasing question.
+static u8 *g_sjp_scratch = NULL;
+static u32 g_sjp_cap     = 0u;
+static void sjp_ensure(u32 pos, u32 extra) {
+  if (pos + extra <= g_sjp_cap) return;
+  u32 ncap = g_sjp_cap ? g_sjp_cap : 1024u;
+  while (pos + extra > ncap) ncap *= 2u;
+  u8 *nb = (u8 *)realloc(g_sjp_scratch, ncap);
+  if (nb == NULL) thvm_fatal("sjp_ensure: OOM");
+  g_sjp_scratch = nb;
+  g_sjp_cap = ncap;
+}
+
+// First-occurrence dense-map walk over a Term (no emit): the exact
+// nv_rewrite / acp_fuse_walk numbering order.  0 on an anomaly.
+static u8 sjp_map_walk_term(Term t, AcpNvMap *m) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n > REWRITE_MAX_ARITY) return 0;
+      for (u32 i = 0; i < n; i++) {
+        if (!sjp_map_walk_term(term_ctr_at(t, i), m)) return 0;
+      }
+      return 1;
+    }
+    case TAG_FVR: {
+      u32 old = term_ext(t);
+      u32 d = 0;
+      for (; d < m->n; d++) {
+        if (m->old_id[d] == old) break;
+      }
+      if (d == m->n) {
+        if (m->n >= REWRITE_MAX_VAR) return 0;
+        m->old_id[m->n++] = old;
+      }
+      return 1;
+    }
+    default:
+      return 0;   // NUM/ERA atom: the sj compare never sees these
+  }
+}
+
+// Emit `t` renumbered through (an extension of) `m` into the private
+// scratch at *pos -- byte-format identical to acp_pack_term's 'C'/'V'
+// records, so acp_unpack_term_ft decodes it.  0 on an anomaly.
+static u8 sjp_emit_term(Term t, AcpNvMap *m, u32 *pos) {
+  sjp_ensure(*pos, 21u);
+  u8 *p = g_sjp_scratch + *pos;
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n > REWRITE_MAX_ARITY) return 0;
+      *p++ = (u8)'C';
+      acp_put_varint(&p, term_ext(t));
+      acp_put_varint(&p, n);
+      *pos = (u32)(p - g_sjp_scratch);
+      for (u32 i = 0; i < n; i++) {
+        if (!sjp_emit_term(term_ctr_at(t, i), m, pos)) return 0;
+      }
+      return 1;
+    }
+    case TAG_FVR: {
+      u32 old = term_ext(t);
+      u32 d = 0;
+      for (; d < m->n; d++) {
+        if (m->old_id[d] == old) break;
+      }
+      if (d == m->n) {
+        if (m->n >= REWRITE_MAX_VAR) return 0;
+        m->old_id[m->n++] = old;
+      }
+      *p++ = (u8)'V';
+      acp_put_varint(&p, d);
+      *pos = (u32)(p - g_sjp_scratch);
+      return 1;
+    }
+    default:
+      return 0;
+  }
+}
+
+// Span siblings: linear preorder over the ->next chain (a span's chain
+// IS the preorder), arity from the cell -- the ftp_pack_fused record
+// layout.  Marker syms (converted NUM / foreign tags) bail.
+static u8 sjp_map_walk_span(const AtpFtCell *t, AcpNvMap *m) {
+  const AtpFtCell *end_after = (t->end != NULL) ? t->end->next : NULL;
+  for (const AtpFtCell *p = t; p != NULL && p != end_after; p = p->next) {
+    if ((p->sym & WF_VAR_BIT) != 0u) {
+      u32 old = p->sym & ~WF_VAR_BIT;
+      u32 d = 0;
+      for (; d < m->n; d++) {
+        if (m->old_id[d] == old) break;
+      }
+      if (d == m->n) {
+        if (m->n >= REWRITE_MAX_VAR) return 0;
+        m->old_id[m->n++] = old;
+      }
+    } else if (p->sym >= 0x20000000u || p->arity > REWRITE_MAX_ARITY) {
+      return 0;
+    }
+  }
+  return 1;
+}
+static u8 sjp_emit_span(const AtpFtCell *t, AcpNvMap *m, u32 *pos) {
+  const AtpFtCell *end_after = (t->end != NULL) ? t->end->next : NULL;
+  for (const AtpFtCell *c = t; c != NULL && c != end_after; c = c->next) {
+    sjp_ensure(*pos, 21u);
+    u8 *p = g_sjp_scratch + *pos;
+    if ((c->sym & WF_VAR_BIT) != 0u) {
+      u32 old = c->sym & ~WF_VAR_BIT;
+      u32 d = 0;
+      for (; d < m->n; d++) {
+        if (m->old_id[d] == old) break;
+      }
+      if (d == m->n) {
+        if (m->n >= REWRITE_MAX_VAR) return 0;
+        m->old_id[m->n++] = old;
+      }
+      *p++ = (u8)'V';
+      acp_put_varint(&p, d);
+    } else {
+      if (c->sym >= 0x20000000u || c->arity > REWRITE_MAX_ARITY) return 0;
+      *p++ = (u8)'C';
+      acp_put_varint(&p, c->sym);
+      acp_put_varint(&p, c->arity);
+    }
+    *pos = (u32)(p - g_sjp_scratch);
+  }
+  return 1;
+}
+
+// Pack `peak` renumbered through the dense map of the pair the queue
+// will store: the map is built by first-occurrence walk over base_l
+// then base_r (the exact numbering thvm_normalize_vars /
+// acp_pack_fused / ftp_pack_fused assign), then the peak emit extends
+// a copy for peak-only vars.  Returns a malloc'd byte string (caller
+// owns) or NULL on any anomaly (degrade: no stash).
+static u8 *atp_sj_peak_pack_term(Term peak, Term base_l, Term base_r) {
+  if (peak == 0 || base_l == 0 || base_r == 0) return NULL;
+  AcpNvMap m;
+  m.n = 0u;
+  if (!sjp_map_walk_term(base_l, &m)) return NULL;
+  if (!sjp_map_walk_term(base_r, &m)) return NULL;
+  u32 pos = 0u;
+  if (!sjp_emit_term(peak, &m, &pos)) return NULL;
+  u8 *buf = (u8 *)malloc(pos ? pos : 1u);
+  if (buf == NULL) thvm_fatal("atp_sj_peak_pack_term: OOM");
+  memcpy(buf, g_sjp_scratch, pos);
+  return buf;
+}
+static u8 *atp_sj_peak_pack_ft(const AtpFtCell *peak,
+                               const AtpFtCell *base_l,
+                               const AtpFtCell *base_r) {
+  if (peak == NULL || base_l == NULL || base_r == NULL) return NULL;
+  AcpNvMap m;
+  m.n = 0u;
+  if (!sjp_map_walk_span(base_l, &m)) return NULL;
+  if (!sjp_map_walk_span(base_r, &m)) return NULL;
+  u32 pos = 0u;
+  if (!sjp_emit_span(peak, &m, &pos)) return NULL;
+  u8 *buf = (u8 *)malloc(pos ? pos : 1u);
+  if (buf == NULL) thvm_fatal("atp_sj_peak_pack_ft: OOM");
+  memcpy(buf, g_sjp_scratch, pos);
+  return buf;
+}
+#endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
+

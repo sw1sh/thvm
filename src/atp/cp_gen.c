@@ -355,7 +355,7 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   // i_eq/j_eq), and the nusfu gate when armed with a non-empty skolem
   // registry.  Otherwise the Term cp_visit must NOT spend a third
   // thvm_unify_apply building it -- gate it for this pair.
-  g_cp_need_peak = (s->use_connectedness || s->use_simpler_join == 1u ||
+  g_cp_need_peak = (s->use_connectedness || s->use_simpler_join != 0u ||
                     i_eq || j_eq) || atp_kapur_on() ||
                    (s->use_no_overlap_below_skolem && s->n_skolem_labels != 0u)
                        ? 1u : 0u;
@@ -469,7 +469,7 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
     // overlap path for a skolem symbol above it; mirror the Term-side
     // g_cp_need_peak condition (:21430) so an armed nusfu registry still
     // gets a peak here -- else the FT path drops zero and diverges.
-    u8 need_peak = (s->use_connectedness || s->use_simpler_join == 1u ||
+    u8 need_peak = (s->use_connectedness || s->use_simpler_join != 0u ||
                     i_eq || j_eq) || atp_kapur_on() ||
                    (s->use_no_overlap_below_skolem && s->n_skolem_labels != 0u)
                        ? 1u : 0u;

@@ -773,7 +773,7 @@ static u32 sw_form_push_impl(AtpState *s, Term lo, Term ro, Term sub_pre,
     // atp_overlap_ij).  For the dominant rule x rule overlap it is never
     // read; skipping the third unify_apply build is the same pure
     // allocation cut.
-    cp.peak = ((s->use_connectedness || s->use_simpler_join == 1u ||
+    cp.peak = ((s->use_connectedness || s->use_simpler_join != 0u ||
                 o_eq || in_eq) || atp_kapur_on() ||
                (s->use_no_overlap_below_skolem && s->n_skolem_labels != 0u))
                   ? thvm_unify_apply(lo, &subst) : 0;

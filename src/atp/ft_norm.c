@@ -198,9 +198,11 @@ static u8   g_ftsj_active     = 0u;
 static u8   g_ftsj_skolem     = 0u;
 // CP peak stash for the allSteps port (checkOrder + step3 need the
 // overlapped term).  Armed by the generation-time treat callers
-// (cp_push.c) around the joinability call; a NULL/0 stash (pop-time
-// re-checks, interreduce probes) degrades to the peakless step1+2
-// verdict.  FT cells win over the Term when both are set.
+// (cp_push.c) around the joinability call, and by the pop/interreduce
+// re-checks from the queue's per-slot pop-peak stash (AtpState.cp_peak
+// -- rerank.c pop arms, cp_interreduce.c due-sample).  A NULL/0 stash
+// degrades to the peakless step1+2 verdict.  FT cells win over the
+// Term when both are set.
 static AtpFtCell *g_ftsj_peak_ft   = NULL;
 static Term       g_ftsj_peak_term = 0;
 static void atp_sj_peak_arm_term(Term t)   { g_ftsj_peak_term = t; }
@@ -3952,8 +3954,14 @@ AtpFtCell *atp_rules_only_normalize_ft(AtpState *s, AtpFtCell *t,
 // completeness, never soundness -- proofs replay recorded engine
 // steps):
 //   * Twee joins at POP with the then-current rule set; this verdict
-//     also runs at generation treat, and the pop/interreduce re-checks
-//     carry no peak (checkOrder/step3 degrade off there).
+//     also runs at generation treat.  The pop re-check DOES carry the
+//     peak now: the queue's per-slot pop-peak stash (AtpState.cp_peak,
+//     cp_store.c) packs the formation peak through the pair's dense
+//     var map at push and select_cp decodes + arms it, so the
+//     checkOrder/step3 legs run at pop exactly as at treat.  Slots
+//     with no faithful peak (requeued interreduce victims, the raw
+//     FT-emit lane + RAW_DESC descriptors, record-mode replay, pack
+//     anomalies) still degrade to the peakless step1+2 verdict here.
 //   * joinWith's subsumed check (Join.hs:141-170: joinable-equation
 //     index, rule index, congruence decomposition) is not ported --
 //     we only drop on NF equality, i.e. we under-drop.

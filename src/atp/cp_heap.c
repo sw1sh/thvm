@@ -126,6 +126,7 @@ static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
 static inline void atp_cp_row_move(AtpState *s, u32 dst, u32 src) {
   s->cp_packed[dst] = s->cp_packed[src];
   s->cp_packed[src] = NULL;           // vacated row: leave it empty
+  atp_cp_peak_move(s, dst, src);      // sj pop-peak stash rides along
   s->cp_trace[dst]  = s->cp_trace[src];
   s->cp_kind[dst]   = s->cp_kind[src];
   s->cp_pri[dst]    = s->cp_pri[src];
@@ -529,6 +530,22 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   // so this is a backstop that keeps the invariant local).
   atp_cp_implicit_clear(s, i);
   s->cp_packed[i]= packed;
+  // Simpler-join pop-peak stash: attach the armed peak bytes to the
+  // slot -- ONLY when the slot stores packed bytes (the peak was
+  // renumbered through the pair-pack's dense map, so byte-less slots
+  // -- CPQ mode-8 adoption, skip-pack -- would read it against a
+  // different var space; they degrade peakless instead).  Consume-once
+  // either way so a dropped pending can never leak onto a later CP.
+  atp_cp_peak_clear(s, i);   // backstop, mirrors the implicit clear
+  if (g_sj_peak_pending != NULL) {
+    if (packed != NULL) {
+      atp_cp_peak_arrays_ensure(s);
+      s->cp_peak[i] = g_sj_peak_pending;
+      g_sj_peak_pending = NULL;
+    } else {
+      atp_sj_peak_pending_drop();
+    }
+  }
   s->cp_trace[i] = trace;
   s->cp_kind[i]  = kind;
   // Fresh CP: no IR-side normalize witness yet -- force the IR sweep to
@@ -850,6 +867,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
   // FIFO/priority selection still fires over the kept CPs.
   if (s->max_cp_queue > 0u && s->n_cps >= s->max_cp_queue) {
     s->n_cps_dropped_qcap++;
+    atp_sj_peak_pending_drop();
     return;
   }
   // Pack the CP into a byte string outside the managed heap.  The pack
@@ -1019,6 +1037,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
       free(packed);
       g_acp_fuse.valid = 0u;
       g_rdesc_store.armed = 0u;
+      atp_sj_peak_pending_drop();
       return;
     }
     // Twee --max-term-size (per-side cap): drop the CP when EITHER side
@@ -1035,6 +1054,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
       free(packed);
       g_acp_fuse.valid = 0u;
       g_rdesc_store.armed = 0u;
+      atp_sj_peak_pending_drop();
       return;
     }
     // Auto-MaxWeight (completeness-preserving): defer an over-bound CP to
@@ -1062,6 +1082,9 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
                           g_cp_push_kind);
         g_acp_fuse.valid = 0u;
         g_rdesc_store.armed = 0u;
+        // The overflow stash is packed-only; the deferred CP re-enters
+        // via insert_packed later with no peak (degrade-to-peakless).
+        atp_sj_peak_pending_drop();
         return;
       }
     }
@@ -1189,6 +1212,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   // the packed node is stamped pre-sift, after all key writes).
   s->cp_pos[i]  = i;
   s->cp_packed[i] = NULL;          // deferred slot marker
+  atp_cp_peak_clear(s, i);         // backstop: no peak backs a descriptor
   s->cp_trace[i]  = cp_trace_id;
   s->cp_kind[i]   = g_cp_push_kind;
   s->cp_last_norm_r_revision[i] = ATP_CP_NORM_COOKIE_NONE;
@@ -1419,6 +1443,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
     if (s->cp_heap[i].pri <= horizon) continue;
     free(s->cp_packed[vv]);
     s->cp_packed[vv] = NULL;
+    atp_cp_peak_clear(s, vv);
     atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
     atp_cp_ft_clear(s, vv);
@@ -1849,6 +1874,23 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       g_pop_ft_r = acp_unpack_term_ft(pa, &pp, 0);
     }
 #endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Simpler-join pop-peak: decode the slot's stashed peak (same
+    // dense var space as the slot's packed bytes the pop treatment
+    // consumes) for the pop-time allSteps checkOrder/step3 legs.
+    // Record-mode replay keeps the peakless degrade -- its pair comes
+    // from the trace raw pack, a different var space.  A leftover from
+    // a step that exited before the sj site is dropped first.
+    atp_pop_sj_peak_drop(s);
+    if (s->use_simpler_join != 0u && !s->record_norm_steps &&
+        s->cp_peak != NULL && s->cp_peak[v] != NULL &&
+        s->cp_packed[v] != NULL) {
+      const u8 *pk = s->cp_peak[v];
+      g_pop_sj_peak = acp_unpack_term_ft((AtpFt *)s->ft_arena_ptr,
+                                         &pk, 0);
+      g_pop_sj_peak_owner = s->ft_arena_ptr;
+    }
+#endif
   }
   s->last_popped_trace = s->cp_trace[v];
   s->last_popped_kind  = s->cp_kind[v];
@@ -1964,6 +2006,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
 #endif
   free(s->cp_packed[v]);
   s->cp_packed[v] = NULL;
+  atp_cp_peak_clear(s, v);   // peak bytes decoded above (or orphan drop)
   atp_cp_implicit_clear(s, v);
 #ifdef THVM_ATPFT_CPQ
   // Stage 7: the popped row's FT spans return to Arena A's free list

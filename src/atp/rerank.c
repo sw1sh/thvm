@@ -1988,6 +1988,9 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
       g_pop_ft_r = NULL;
     }
 #endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    atp_pop_sj_peak_drop(s);   // pop-peak stash: same skipped-treatment drop
+#endif
     thvm_atp_heap_reset(hcp_norm);
     s->step++;
     return ATP_RUNNING;
@@ -2129,12 +2132,19 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
       u8 pop_ft_joined = (u8)ft_eq(lf, rf);
       // Simpler-join at selection (opt-in --simpler-join): a popped CP
       // whose R+E NFs stay distinct gets the Twee-discipline gated join
-      // pass -- the same redundancy verdict as the ft_eq drop.
+      // pass -- the same redundancy verdict as the ft_eq drop.  The
+      // queue's pop-peak stash (decoded by select_cp, same dense var
+      // space as the byte-decoded pop spans) arms the checkOrder/step3
+      // legs -- Twee's consider re-joins WITH the overlap top at pop;
+      // a NULL stash keeps the peakless degrade.
       if (!pop_ft_joined && s->use_simpler_join) {
         sj_checked = 1u;
+        if (g_pop_sj_peak != NULL) atp_sj_peak_arm_ft(g_pop_sj_peak);
         pop_ft_joined = atp_cp_sj_joinable_ft(s, lf, rf);
+        atp_sj_peak_disarm();
         if (pop_ft_joined) s->n_cps_dropped_simpler_join++;
       }
+      atp_pop_sj_peak_drop(s);
       if (pop_ft_joined) {
         if (pop_trace) {
           l = ft_to_term(lf);
@@ -2434,17 +2444,25 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   // branch above decided already -- sj_checked).  A join is the same
   // redundancy verdict as the kbo_eq drop above: the CP feeds no rule,
   // its NORM_STEP chain and scratch Terms are dead.  lazy_commit pops
-  // keep sentinel l/r and were decided on the FT branch.
-  if (s->use_simpler_join && !sj_checked && !lazy_commit &&
-      atp_cp_sj_joinable_term(s, l, r)) {
-    s->n_cps_dropped_simpler_join++;
-    ATP_POPV("SJJOINED");
-    if (s->record_norm_steps) {
-      s->n_trace = trace_mark;
+  // keep sentinel l/r and were decided on the FT branch.  The pop-peak
+  // stash arms the legacy arm too (select_cp only decodes it when the
+  // popped l/r derive from the slot's bytes -- record replay keeps it
+  // NULL, so the var spaces always agree).
+  if (s->use_simpler_join && !sj_checked && !lazy_commit) {
+    if (g_pop_sj_peak != NULL) atp_sj_peak_arm_ft(g_pop_sj_peak);
+    u8 pop_sj_joined = atp_cp_sj_joinable_term(s, l, r);
+    atp_sj_peak_disarm();
+    atp_pop_sj_peak_drop(s);
+    if (pop_sj_joined) {
+      s->n_cps_dropped_simpler_join++;
+      ATP_POPV("SJJOINED");
+      if (s->record_norm_steps) {
+        s->n_trace = trace_mark;
+      }
+      thvm_atp_heap_reset(hcp_norm);
+      s->step++;
+      return ATP_RUNNING;
     }
-    thvm_atp_heap_reset(hcp_norm);
-    s->step++;
-    return ATP_RUNNING;
   }
 #endif
 
