@@ -3220,6 +3220,38 @@ int main(int argc, char **argv) {
     }
   }
 
+  // Twee hasEqualsBonus symbol set (THVM_ATP_TWEE_EQB / --twee-eq-bonus).
+  // Twee flags its OWN encoding machinery via jukebox name labels
+  // (SequentialMain.hs:554-556: labeled ifeq, or labeled equals at
+  // arity 2); file symbols are unlabeled and never qualify.  Our analog
+  // keys on the reserved encoder names: the equals-goal encoding's
+  // fresh eq symbol (tp_equals_goal's "eq" + 'q'-suffixed clash forms,
+  // arity 2), a literal "equals" at arity 2, and ifeq-family dispatch
+  // heads ("ifeq" + suffix, arity >= 3, first two arguments compared).
+  // Registration is per-problem (labels are positional), hence the
+  // reset; the scorer stays inert while the env knob is off.
+  if (pr_mode) {
+    atp_twee_eqb_reset();
+    const char *eb = getenv("THVM_ATP_TWEE_EQB");
+    if (eb != NULL && eb[0] != '\0' && eb[0] != '0') {
+      for (u32 i = 0; i < prp.n_syms; i++) {
+        const char *nm = prp.syms[i].name;
+        u32 ar = prp.syms[i].arity;
+        u8 hit = 0u;
+        if (ar == 2u) {
+          if (strcmp(nm, "equals") == 0) hit = 1u;
+          if (nm[0] == 'e' && nm[1] == 'q') {
+            const char *q = nm + 2;
+            while (*q == 'q') q++;
+            if (*q == '\0') hit = 1u;   // "eq", "eqq", ... (clash forms)
+          }
+        }
+        if (ar >= 3u && strncmp(nm, "ifeq", 4) == 0) hit = 1u;
+        if (hit) atp_twee_eqb_mark(i + PR_LABEL_BASE);
+      }
+    }
+  }
+
   // MNF goal-directed (two-coloured front) search.  Waldmeister's -auto
   // arms zb=mnf goal treatment for GROUND goals (the Automodus structure
   // strategies + rose() all select the mnf parametrisation when

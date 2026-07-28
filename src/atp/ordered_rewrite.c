@@ -675,7 +675,166 @@ static u32 atp_twee_term_score_sd(Term t) {
   return score;
 }
 
+// --- Twee hasEqualsBonus (THVM_ATP_TWEE_EQB) ------------------------
+// Twee.CP.hs:262-269 (the equals-bonus case of size'): when the score
+// walk reaches f(a, b, ...) where f carries the bonus flag
+// (SequentialMain.hs:515-518 hasEqualsBonus = con_bonus;
+// SequentialMain.hs:554-556 bonus = labeled ifeq, or labeled equals at
+// arity 2 -- the prover's OWN equals/ifeq machinery), a and b are both
+// non-variables, and unify(a, b) = sub exists, the term scores
+//     min( weight f + size' ws xs             -- the normal expansion
+//        , 1 + size' (sub us) (sub (vs:xs)) ) -- the DISCHARGED branch
+// (ws = f's argument list, us = the arguments after a and b, vs = the
+// remaining siblings, xs = the outer worklist).  The discharged branch
+// prices the equation as if the near-solved condition a=b were already
+// closed: pay dupcost 1, drop a and b entirely, and continue over the
+// REMAINder instantiated with the unifier -- the goal-directed
+// accelerant for the equals encoding, where eq(s,t) = efalse CPs with
+// unifiable s,t are exactly the almost-proved goal instances.  Note
+// the reference drops vs in the normal branch (ws continues into xs,
+// not vs:xs) -- ported verbatim, quirk included.
+//
+// Symbol set: Twee keys the flag on jukebox name LABELS, which only
+// its own encoding machinery carries -- file-level ifeq symbols in the
+// TPTP -10 encodings are unlabeled and never get the bonus (verified
+// against SequentialMain.hs:540-557 + jukebox Name.hs label
+// mechanics).  Our analog: the CLI registers the equals-goal
+// encoding's fresh eq symbol (tools/atp_cli/def_unfold.c
+// tp_equals_goal) and name-keyed ifeq*/equals heads by exact shape --
+// see the registration site in tests/test_atp_wolfram_bench.c.  Note
+// the 4-ary -10 ifeq guards compare a `>=`-rooted guard against the
+// constant true, which NEVER unify, so the bonus is structurally
+// inert there (measured on LCL890-10) -- arity-2 eq is the live case.
+//
+// Opt-in (--twee-eq-bonus): default OFF keeps every lane
+// byte-identical.  The bonus scorer embeds the STRUCTURAL dup
+// discount (both live in the same size' in the reference), so
+// --twee-eq-bonus supersets --twee-struct-dedup.
+static u32 g_atp_eqb_syms[16];
+static u32 g_atp_eqb_nsyms = 0u;
+fn void atp_twee_eqb_reset(void) { g_atp_eqb_nsyms = 0u; }
+fn void atp_twee_eqb_mark(u32 sym) {
+  for (u32 i = 0; i < g_atp_eqb_nsyms; i++)
+    if (g_atp_eqb_syms[i] == sym) return;
+  if (g_atp_eqb_nsyms < 16u) g_atp_eqb_syms[g_atp_eqb_nsyms++] = sym;
+}
+static u8 atp_twee_eqb_has(u32 sym) {
+  for (u32 i = 0; i < g_atp_eqb_nsyms; i++)
+    if (g_atp_eqb_syms[i] == sym) return 1u;
+  return 0u;
+}
+static u8 atp_twee_eqb_on(void) {
+  static int on = -1;
+  if (on < 0) on = atp_env_on("THVM_ATP_TWEE_EQB");
+  return (u8)(on && g_atp_eqb_nsyms > 0u);
+}
+
+#define ATP_EQB_CUR_CAP    256u
+#define ATP_EQB_DEPTH_CAP  8u
+
+typedef struct AtpEqbXs {
+  const Term *items;            // list order: items[0] is consumed first
+  u32 n;
+  const struct AtpEqbXs *next;
+} AtpEqbXs;
+
+// Recursive size' over (current list as a stack, outer worklist chain).
+// cur[ncur-1] is the leftmost (next-consumed) entry.  Recursion depth
+// = nested bonus branches only (capped at ATP_EQB_DEPTH_CAP; past the
+// cap a bonus node scores as a plain symbol -- deterministic,
+// content-only).  Caps mirror the classic scorer's 256-entry stack.
+static u32 atp_eqb_score(Term *cur, u32 ncur, const AtpEqbXs *xs, u32 depth) {
+  u32 n = 0;
+  for (;;) {
+    if (ncur == 0u) {
+      if (xs == NULL) return n;
+      u32 m = xs->n;
+      if (m > ATP_EQB_CUR_CAP) m = ATP_EQB_CUR_CAP;
+      for (u32 i = 0; i < m; i++) cur[i] = xs->items[m - 1u - i];
+      ncur = m;
+      xs = xs->next;
+      continue;
+    }
+    Term t = cur[--ncur];
+    if (term_tag(t) != TAG_CTR || term_ctr_n(t) == 0u) {
+      n += (term_tag(t) == TAG_FVR) ? 6u : 7u;
+      continue;
+    }
+    // (1) structural shared-subterm discount (`t isSubtermOfList ts
+    //     || any (t isSubtermOfList) us`, CP.hs:259-261)
+    u8 dup = 0;
+    for (u32 i = 0; i < ncur && !dup; i++)
+      if (atp_twee_sd_contains(cur[i], t)) dup = 1;
+    for (const AtpEqbXs *e = xs; e != NULL && !dup; e = e->next)
+      for (u32 i = 0; i < e->n && !dup; i++)
+        if (atp_twee_sd_contains(e->items[i], t)) dup = 1;
+    if (dup) { n += 7u; continue; }       // dupcost=1 (*7), no recurse
+    u32 nc = term_ctr_n(t);
+    // (2) the equals bonus (CP.hs:262-269)
+    if (nc >= 2u && depth < ATP_EQB_DEPTH_CAP &&
+        atp_twee_eqb_has(term_ext(t))) {
+      Term a = term_ctr_at(t, 0);
+      Term b = term_ctr_at(t, 1);
+      if (term_tag(a) != TAG_FVR && term_tag(b) != TAG_FVR) {
+        RewriteSubst mg;
+        memset(&mg, 0, sizeof mg);
+        if (thvm_unify(a, b, &mg)) {
+          // Branch 1: weight f + f's own arguments, outer worklist
+          // kept, current-list siblings dropped (reference verbatim).
+          Term c1[ATP_EQB_CUR_CAP];
+          u32 n1 = (nc < ATP_EQB_CUR_CAP) ? nc : ATP_EQB_CUR_CAP;
+          for (u32 i = 0; i < n1; i++) c1[i] = term_ctr_at(t, n1 - 1u - i);
+          u32 s1 = 7u + atp_eqb_score(c1, n1, xs, depth + 1u);
+          // Branch 2: dupcost 1, drop a and b, continue over the
+          // instantiated remainder: sub(us) then sub(vs) :: sub(xs).
+          Term c2[ATP_EQB_CUR_CAP];
+          u32 n2 = 0;
+          for (u32 i = nc; i-- > 2u;)
+            c2[n2++] = thvm_unify_apply(term_ctr_at(t, i), &mg);
+          Term vsub[ATP_EQB_CUR_CAP];
+          u32 nvs = 0;
+          for (u32 i = ncur; i-- > 0u;)
+            vsub[nvs++] = thvm_unify_apply(cur[i], &mg);
+          Term xbuf[ATP_EQB_DEPTH_CAP][ATP_EQB_CUR_CAP];
+          AtpEqbXs xnode[ATP_EQB_DEPTH_CAP + 1u];
+          xnode[0].items = vsub;
+          xnode[0].n     = nvs;
+          xnode[0].next  = NULL;
+          u32 nx = 1u;
+          AtpEqbXs *tail = &xnode[0];
+          for (const AtpEqbXs *e = xs;
+               e != NULL && nx <= ATP_EQB_DEPTH_CAP; e = e->next) {
+            u32 m = (e->n < ATP_EQB_CUR_CAP) ? e->n : ATP_EQB_CUR_CAP;
+            for (u32 i = 0; i < m; i++)
+              xbuf[nx - 1u][i] = thvm_unify_apply(e->items[i], &mg);
+            xnode[nx].items = xbuf[nx - 1u];
+            xnode[nx].n     = m;
+            xnode[nx].next  = NULL;
+            tail->next = &xnode[nx];
+            tail = &xnode[nx];
+            nx++;
+          }
+          u32 s2 = 7u + atp_eqb_score(c2, n2, &xnode[0], depth + 1u);
+          return n + ((s1 < s2) ? s1 : s2);
+        }
+      }
+    }
+    // (3) plain symbol: weight f, children spliced into the current
+    //     list (ConsSym rest = args ++ siblings)
+    n += 7u;
+    for (u32 i = nc; i-- > 0u && ncur < ATP_EQB_CUR_CAP;)
+      cur[ncur++] = term_ctr_at(t, i);
+  }
+}
+
+static u32 atp_twee_term_score_eqb(Term t) {
+  Term cur[ATP_EQB_CUR_CAP];
+  cur[0] = t;
+  return atp_eqb_score(cur, 1u, NULL, 0u);
+}
+
 static u32 atp_twee_term_score(Term t) {
+  if (atp_twee_eqb_on()) return atp_twee_term_score_eqb(t);
   if (atp_twee_sd_on()) return atp_twee_term_score_sd(t);
   static int dbg = -1;
   if (dbg < 0) {

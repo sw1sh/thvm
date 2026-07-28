@@ -23,6 +23,7 @@ static const AtpKnob KNOBS[] = {
   {"cp-rhs-weight",          "THVM_ATP_TWEE_RHS_W",      1, "(Twee rhsWeight: coefficient on the SMALLER CP side, default 1)"},
   {"cp-depth-weight",        "THVM_ATP_TWEE_DEPTH_W",    1, "(Twee depthWeight: coefficient on CP formation depth, default 2; 60 = depth-dominant shallow selection)"},
   {"twee-struct-dedup",      "THVM_ATP_TWEE_SD",         0, "(Twee termScore STRUCTURAL shared-subterm discount -- CP.hs:259 isSubtermOfList; default pointer-identity dedup, which never fires on substitution-fresh cells)"},
+  {"twee-eq-bonus",          "THVM_ATP_TWEE_EQB",        0, "(Twee hasEqualsBonus -- CP.hs:262 discharged-branch min for eq(a,b) heads with unifiable non-var sides; supersets --twee-struct-dedup; registers eq/equals arity-2 + ifeq* arity>=3 heads)"},
   {"max-weight",             "THVM_ATP_MAXW",            1, "MaxWeight"},
   {"max-term-size",          "THVM_ATP_MAX_TERM_SIZE",   1, "(Twee --max-term-size: per-side CP node cap; drop CP if max(|lhs|,|rhs|) > N; 0 = off)"},
   {"auto-max-weight",        "THVM_ATP_AUTO_MAXW",       1, "AutoMaxWeight"},

@@ -685,7 +685,14 @@ static u8 *ftp_pack_fused(const KboConfig *cfg, const AtpFtCell *lhs,
   {
     static int sd_on = -1;
     if (sd_on < 0) { const char *e = getenv("THVM_ATP_TWEE_SD");
-                     sd_on = (e != NULL && e[0] != '\0' && e[0] != '0'); }
+                     sd_on = (e != NULL && e[0] != '\0' && e[0] != '0');
+                     e = getenv("THVM_ATP_TWEE_EQB");
+                     // --twee-eq-bonus supersets the structural
+                     // discount (same size' in the reference): the
+                     // consumer must materialize and score, so the
+                     // stash declines under either knob.
+                     if (e != NULL && e[0] != '\0' && e[0] != '0')
+                       sd_on = 1; }
     if (sd_on) fz->twee_valid = 0u;
   }
   *out_len       = pos;

@@ -7438,6 +7438,13 @@ fn void      thvm_atp_set_gnn_coop(AtpState *s, u32 ratio);
 fn void      thvm_atp_set_use_sos(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_goal_subterm(AtpState *s, u8 on);
 fn void      thvm_atp_tgt_add_sym(AtpState *s, u32 label);
+// Twee hasEqualsBonus symbol set (THVM_ATP_TWEE_EQB / --twee-eq-bonus):
+// per-problem registration of the equals-machinery head labels whose
+// near-solved eq(a,b) shapes score the discharged-branch minimum
+// (Twee.CP.hs:262-269).  Reset before each registration pass; inert
+// while the env knob is off or the set is empty.
+fn void      atp_twee_eqb_reset(void);
+fn void      atp_twee_eqb_mark(u32 sym);
 // spb=goal derivation seeding: the NEXT equation added via
 // thvm_atp_add_equation is conjecture-derived (goal-cone tgt definition
 // or conjecture-role unit).  Inert unless THVM_ATP_SPB_GOAL arms the
