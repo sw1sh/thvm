@@ -478,6 +478,7 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->irv_rhs);
   free(s->irv_parent);
   free(s->irv_wmo_key);
+  free(s->irv_depth);
 #ifdef THVM_ATPFT_RULES
   // Victim span slots (cells themselves are arena-owned).
   free(s->irv_lhs_ft);

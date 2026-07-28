@@ -922,6 +922,12 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   // leak onto an axiom/requeued equation, and vice versa).
   g_cp_gd = g_enq_gd_pending;
   g_enq_gd_pending = 0u;
+  // Consume the formation-depth seed identically: axioms enqueue at 0,
+  // interreduce requeues at their victim's r_depth (armed at the call
+  // sites).  Without the reset a stale overlap-batch depth leaks onto
+  // this equation's cp_depth / TWEE score.
+  g_cp_formation_depth = g_enq_depth_pending;
+  g_enq_depth_pending = 0u;
   if (s == NULL) return 0;
   if (getenv("THVM_ATP_ENQ_DEBUG") != NULL) {
     fprintf(stderr,

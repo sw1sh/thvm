@@ -157,6 +157,13 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
       s->r_rederive_cut[_j - 1]      = s->r_rederive_cut[_j];                 \
       s->r_gj_status[_j - 1]      = s->r_gj_status[_j];                       \
       s->r_overlap_done[_j - 1] = s->r_overlap_done[_j];                      \
+      /* Formation depth rides the slot (Twee getDepth); without the   */     \
+      /* shift every rule above a collapse reads its NEIGHBOR's depth  */     \
+      /* and the TWEE weight mode scores garbage (the LAT224-10 depth  */     \
+      /* ladder).  r_gd is shifted by the open-coded loops but was     */     \
+      /* MISSING here too -- same misalignment class for spb=goal.     */     \
+      s->r_depth[_j - 1] = s->r_depth[_j];                                    \
+      s->r_gd[_j - 1]    = s->r_gd[_j];                                       \
       WM_IR_SHIFT_FT(_j)                                                      \
     }                                                                         \
     s->n_rules--;                                                             \
@@ -198,6 +205,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
         atp_irv_push(s, _old_lhs, _old_rhs, _simplify_parent, _wmo_key);      \
       } else {                                                                \
         g_enq_gd_pending = (s->r_gd != NULL) ? s->r_gd[IDX] : 0u;             \
+        g_enq_depth_pending = (s->r_depth != NULL) ? s->r_depth[IDX] : 0u;    \
         atp_add_equation_simplified(s, _reduced, _old_rhs, _simplify_parent); \
       }                                                                       \
       if (atp_rule_trace_on()) {                                             \
@@ -250,6 +258,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
           atp_irv_push(s, _old_lhs, _old_rhs, _simplify_parent, _wmo_key);    \
         } else {                                                              \
           g_enq_gd_pending = (s->r_gd != NULL) ? s->r_gd[IDX] : 0u;           \
+          g_enq_depth_pending = (s->r_depth != NULL) ? s->r_depth[IDX] : 0u;  \
           atp_add_equation_simplified(s, _old_lhs, _reduced,                  \
                                       _simplify_parent);                      \
         }                                                                     \
@@ -831,6 +840,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
       } else {
         g_enq_gd_pending = (s->r_gd != NULL) ? s->r_gd[i] : 0u;
+        g_enq_depth_pending = (s->r_depth != NULL) ? s->r_depth[i] : 0u;
         atp_add_equation_simplified(s, reduced, old_rhs, simplify_parent);
       }
       if (atp_rule_trace_on()) {
@@ -868,6 +878,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         atp_uid_idx_set(s, s->r_uid[j], j - 1);
         s->r_orient[j - 1] = s->r_orient[j];
         s->r_gd[j - 1]     = s->r_gd[j];
+        // Formation depth rides the slot (Twee getDepth) -- see
+        // WM_IR_COMPACT_SLOT for the misalignment this shift fixes.
+        s->r_depth[j - 1]  = s->r_depth[j];
         // Shift the backward-subsumption sentinel state in lockstep:
         // without it, dropping a rule below a soft-deleted slot leaves
         // r_dead[] marking the WRONG slot (the dead bit stays at the
@@ -1203,6 +1216,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
           g_enq_gd_pending = (s->r_gd != NULL) ? s->r_gd[j] : 0u;
+          g_enq_depth_pending = (s->r_depth != NULL) ? s->r_depth[j] : 0u;
           atp_add_equation_simplified(s, reduced_lhs, reduced,
                                       simplify_parent);
         }
@@ -1223,6 +1237,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           atp_uid_idx_set(s, s->r_uid[k], k - 1);
           s->r_orient[k - 1]         = s->r_orient[k];
           s->r_gd[k - 1]             = s->r_gd[k];
+          s->r_depth[k - 1]          = s->r_depth[k];   /* Twee getDepth rides the slot */
+          s->r_gj_status[k - 1]      = s->r_gj_status[k];   /* GJ status rides the slot */
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
           s->r_dead_rhs_save[k - 1]  = s->r_dead_rhs_save[k];
@@ -1266,6 +1282,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           atp_irv_stage_ft(s, j, 5u);
           atp_irv_push(s, old_lhs, old_rhs, simplify_parent, wmo_key);
         } else {
+          g_enq_depth_pending = (s->r_depth != NULL) ? s->r_depth[j] : 0u;
           atp_add_equation_simplified(s, old_lhs, reduced, simplify_parent);
         }
         if (atp_rule_trace_on()) {
@@ -1301,6 +1318,8 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           atp_uid_idx_set(s, s->r_uid[k], k - 1);
           s->r_orient[k - 1]         = s->r_orient[k];
           s->r_gd[k - 1]             = s->r_gd[k];
+          s->r_depth[k - 1]          = s->r_depth[k];   /* Twee getDepth rides the slot */
+          s->r_gj_status[k - 1]      = s->r_gj_status[k];   /* GJ status rides the slot */
           s->r_dead[k - 1]           = s->r_dead[k];
           s->r_dead_lhs_save[k - 1]  = s->r_dead_lhs_save[k];
           s->r_dead_rhs_save[k - 1]  = s->r_dead_rhs_save[k];
@@ -1419,6 +1438,7 @@ static void atp_irv_sort_wm_order(AtpState *s) {
   for (u32 a = 1; a < s->n_irv; a++) {
     Term l = s->irv_lhs[a], r = s->irv_rhs[a];
     u32  p = s->irv_parent[a], k = s->irv_wmo_key[a];
+    u32  d = s->irv_depth[a];
 #ifdef THVM_ATPFT_RULES
     AtpFtCell *fl = s->irv_lhs_ft[a], *fr = s->irv_rhs_ft[a];
 #endif
@@ -1428,6 +1448,7 @@ static void atp_irv_sort_wm_order(AtpState *s) {
       s->irv_rhs[b]     = s->irv_rhs[b - 1u];
       s->irv_parent[b]  = s->irv_parent[b - 1u];
       s->irv_wmo_key[b] = s->irv_wmo_key[b - 1u];
+      s->irv_depth[b]   = s->irv_depth[b - 1u];
 #ifdef THVM_ATPFT_RULES
       s->irv_lhs_ft[b]  = s->irv_lhs_ft[b - 1u];
       s->irv_rhs_ft[b]  = s->irv_rhs_ft[b - 1u];
@@ -1436,6 +1457,7 @@ static void atp_irv_sort_wm_order(AtpState *s) {
     }
     s->irv_lhs[b] = l; s->irv_rhs[b] = r;
     s->irv_parent[b] = p; s->irv_wmo_key[b] = k;
+    s->irv_depth[b] = d;
 #ifdef THVM_ATPFT_RULES
     s->irv_lhs_ft[b] = fl; s->irv_rhs_ft[b] = fr;
 #endif
@@ -1614,6 +1636,9 @@ static void atp_wm_demote_drain(AtpState *s) {
     // fact-1378 divergence: thvm stashed the heavy w1=2141/1937/2437
     // victims that WM's FIFO lane later popped).
     if (!treated) g_enq_raw_untreated = 1u;
+    // Twee depth semantics: the requeued victim keeps its rule's
+    // formation depth (captured at drop time in irv_depth).
+    g_enq_depth_pending = s->irv_depth[v];
     atp_add_equation_simplified(s, l, r, parent);
     s->n_wm_demote_requeued++;
     if (atp_rule_trace_on()) {

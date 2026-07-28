@@ -584,6 +584,17 @@ static u32 g_cp_formation_depth = 0u;
 // thvm_atp_mark_gd_next / the interreduce victim's r_gd).
 static u8 g_cp_gd = 0u;
 static u8 g_enq_gd_pending = 0u;
+// FORMATION DEPTH for axiom/requeue enqueues, consumed by
+// atp_enqueue_equation exactly like g_enq_gd_pending: a simplified
+// rule re-queued by interreduction KEEPS its victim's r_depth (Twee
+// semantics -- simplification preserves an active rule's depth; only
+// genuine overlaps increment it), and an axiom enqueues at 0.  Before
+// this carrier existed the enqueue path left g_cp_formation_depth at
+// whatever the LAST overlap batch set, so requeued rules inherited an
+// arbitrary depth -- which the ATP_CP_WEIGHT_TWEE score turned into a
+// depth ladder (LAT224-10: content Twee holds at depth 2 arrived at
+// depth 16, +196 pri, buried past the frontier).
+static u32 g_enq_depth_pending = 0u;
 // "Never-weight-select" priority (Waldmeister Act_never / maximalWeight).
 // High but far from u32 overflow so cp_pri arithmetic stays safe.
 #define ATP_CP_PRI_NEVER 0x40000000u

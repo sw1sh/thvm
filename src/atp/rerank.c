@@ -1266,6 +1266,13 @@ static AtpFtCell *g_irv_ft_r = NULL;
 static u8 g_irv_site = 0u;
 u8  *g_irv_site_dbg = NULL;
 u32  g_irv_site_dbg_cap = 0u;
+#endif
+// Victim's r_depth staged by atp_irv_stage_ft (which every irv push
+// site calls with the victim's slot index) and consumed by
+// atp_irv_push into s->irv_depth[] -- outside the FT ifdef since the
+// depth bookkeeping is span-independent.
+static u32 g_irv_depth_stage = 0u;
+#ifdef THVM_ATPFT_RULES
 // RHS-composition NF span: the FT composition pipeline parks the
 // committed NF here so the mirror commit adopts it (ownership moves to
 // the rule slot) instead of re-encoding r_reduced via ft_from_term.
@@ -1278,6 +1285,8 @@ static AtpFtCell *g_ir_rhs_nf_ft = NULL;
 // interreduce site) can stage the victim row's FT mirrors without
 // preprocessor forks at the call sites.  No-op off the flag.
 static void atp_irv_stage_ft(AtpState *s, u32 idx, u8 site) {
+  g_irv_depth_stage = (s->r_depth != NULL && idx < s->n_rules)
+                        ? s->r_depth[idx] : 0u;
 #ifdef THVM_ATPFT_RULES
   g_irv_site = site;
   // Lazy slots ride as sentinels: the staged clones are authoritative
@@ -1309,12 +1318,14 @@ static void atp_irv_push(AtpState *s, Term lhs, Term rhs, u32 parent,
     Term *nr = (Term *)realloc(s->irv_rhs,    cap * sizeof(Term));
     u32  *np = (u32  *)realloc(s->irv_parent, cap * sizeof(u32));
     u32  *nk = (u32  *)realloc(s->irv_wmo_key, cap * sizeof(u32));
-    if (nl == NULL || nr == NULL || np == NULL || nk == NULL) {
+    u32  *nd = (u32  *)realloc(s->irv_depth,  cap * sizeof(u32));
+    if (nl == NULL || nr == NULL || np == NULL || nk == NULL || nd == NULL) {
       fprintf(stderr, "atp_irv_push: realloc to %u victims failed\n", cap);
       exit(1);
     }
     s->irv_lhs = nl; s->irv_rhs = nr; s->irv_parent = np;
     s->irv_wmo_key = nk;
+    s->irv_depth = nd;
     s->irv_cap = cap;
 #ifdef THVM_ATPFT_RULES
     AtpFtCell **nfl = (AtpFtCell **)realloc(s->irv_lhs_ft,
@@ -1337,6 +1348,7 @@ static void atp_irv_push(AtpState *s, Term lhs, Term rhs, u32 parent,
   s->irv_rhs[s->n_irv]     = rhs;
   s->irv_parent[s->n_irv]  = parent;
   s->irv_wmo_key[s->n_irv] = wmo_key;
+  s->irv_depth[s->n_irv]   = g_irv_depth_stage;
 #ifdef THVM_ATPFT_RULES
   s->irv_lhs[s->n_irv] = lhs;             // may be a lazy sentinel: the
   s->irv_rhs[s->n_irv] = rhs;             // staged clones are authoritative

@@ -6849,6 +6849,10 @@ typedef struct {
   // leaf-list order (BK_forRegelnRobust over Baum.ErstesBlatt).  Key =
   // (tree << 31) | leaf_list_rank so a stable sort reproduces that order.
   u32  *irv_wmo_key;
+  // Victim's rule formation depth (r_depth) at drop time: the drain's
+  // requeue re-enqueues at THIS depth (Twee semantics -- interreduction
+  // preserves an active rule's depth; only overlaps increment it).
+  u32  *irv_depth;
   u32   n_irv;
   u32   irv_cap;
   u64   n_wm_demote_requeued;     // victims re-queued at drain
