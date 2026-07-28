@@ -287,6 +287,19 @@ static const SchedSlice SCHEDULE[] = {
   // Same lean core, so the lane inherits the twee slice's passive-set
   // + re-scoring discipline.
   {"twee-freq", "--simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --cp-lhs-weight=1 --sym-prec=frequency --w2-modulo=0 --orphan-murder=0 --cp-set-interreduce --cp-set-ir-budget=5 --fof-sat=0", 0.0},
+  // (5''') AXIOM-SIDE NAMING (Twee --flatten / tgt=4): fresh minimal
+  // constants for every ground compound axiom subterm, definitions
+  // born inter-reduced (--tgt-fold).  The loop-theory order
+  // conditions (GRP689-1: op_d^9 = unit, op_c^4 = unit) are ground
+  // towers completion cannot shatter -- named, the powers become
+  // shallow definitional layers and the c*d = d*c commutation proves
+  // in 1s (bare single; Timeout at every bound without, and twee's
+  // OWN default config misses it at 300s while its portfolio's
+  // --flatten variant proves in 1s -- the transform, not the score,
+  // is the content).  Exit-fast (--tgt-exit) on problems with no
+  // axiom-side ground compound subterm: there the transform adds
+  // nothing over the flatten lanes' goal-side naming.
+  {"tgt-ax", "--tgt=4 --tgt-fold=1 --tgt-exit --horn=0 --fof-sat=0", 0.0},
   {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.33},
   // (4) ENCOMPASSMENT DEMODULATION (Twee reducesSkolem): the WM preset
   // with the skolem-ground unorient gate -- variable-permuted variants
@@ -1082,6 +1095,19 @@ int main(int argc, char **argv) {
           n_neg = 0;
           for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
         }
+      }
+      // tgt=4 axiom-naming lane exit-fast (--tgt-exit): the lane's
+      // distinctive content is Twee --flatten's ground-tower
+      // shattering (name every ground compound axiom subterm, e.g.
+      // GRP689-1's op_d^9 = unit order condition); without such a
+      // subterm the transform degenerates to goal-side naming, which
+      // the flatten/flatten-bare lanes already carry -- give the
+      // schedule slot back.
+      {
+        const char *tx = getenv("THVM_ATP_TGT_EXIT");
+        if (tx != NULL && tx[0] != '\0' && tx[0] != '0'
+            && !tp_has_ax_ground_compound(&tp))
+          tp_giveup("tgt-ax slice: no axiom-side ground compound subterm");
       }
       // Existential (non-ground) goals, opt-in: encode them
       // equationally the way Twee's addNarrowing does, BEFORE SInE

@@ -1697,8 +1697,12 @@ int main(int argc, char **argv) {
   // labels/weights).  Opt-in; default OFF keeps the emulation byte-exact.
   // THVM_ATP_TGT >= 1 selects the conjecture-wide generalization
   // (Vampire tgt: 1 = full, 2 = ground; 3 = full over EVERY axiom,
-  // the gtg=all analog) which subsumes the goal-only flatten, so it
-  // takes precedence when both are set.
+  // the gtg=all analog; 4 = ground over EVERY axiom, the Twee
+  // --flatten analog -- names the ground towers in axioms like
+  // GRP689-1's op_d^9 = unit order condition without the full mode's
+  // functor definitions for every non-ground axiom subterm) which
+  // subsumes the goal-only flatten, so it takes precedence when both
+  // are set.
   {
     const char *tg = pr_mode ? getenv("THVM_ATP_TGT") : NULL;
     int tgt_mode = (tg != NULL) ? atoi(tg) : 0;
@@ -1708,7 +1712,7 @@ int main(int argc, char **argv) {
     const char *tf = pr_mode ? getenv("THVM_ATP_TGT_FOLD") : NULL;
     int tgt_fold = (tf != NULL && tf[0] != '\0' && tf[0] != '0');
     if (tgt_mode >= 1) {
-      pr_tgt_transform(&prp, /*ground_only=*/tgt_mode == 2,
+      pr_tgt_transform(&prp, /*ground_only=*/tgt_mode == 2 || tgt_mode == 4,
                        /*all_eqns=*/tgt_mode >= 3, /*fold=*/tgt_fold);
     } else if (pr_mode && getenv("THVM_ATP_FLATTEN_GOAL") != NULL
                && getenv("THVM_ATP_FLATTEN_GOAL")[0] != '0') {

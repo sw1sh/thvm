@@ -702,3 +702,37 @@ static void tp_sine_select(TpProblem *tp) {
   }
 }
 
+
+// --- tgt-ax lane prescreen -----------------------------------------
+// Does any NON-conjecture positive unit carry a ground compound
+// subterm (a function application whose span contains no variable
+// token)?  This is exactly the target set of the tgt=4 axiom-side
+// naming transform (Twee --flatten): the ground order-condition
+// towers of the loop-theory family (GRP689-1's op_d^9 = unit).  A
+// variable token is an identifier starting [A-Z] (TPTP CNF), so the
+// string-level scan is exact for the UEQ grammar.  Conjecture-role
+// units are excluded: their subterms are already in the tgt goal
+// cone (modes 1/2), so they are not the lane's distinctive content.
+static int tp_side_has_ground_compound(const char *s) {
+  for (const char *p = s; *p != '\0'; p++) {
+    if (*p != '(') continue;
+    int depth = 1, ground = 1;
+    for (const char *q = p + 1; *q != '\0' && depth > 0; q++) {
+      if (*q == '(') depth++;
+      else if (*q == ')') depth--;
+      else if (isupper((unsigned char)*q)
+               && !(isalnum((unsigned char)q[-1]) || q[-1] == '_'))
+        ground = 0;
+    }
+    if (ground && depth == 0) return 1;
+  }
+  return 0;
+}
+static int tp_has_ax_ground_compound(const TpProblem *tp) {
+  for (int c = 0; c < tp->n_cls; c++) {
+    if (tp->cls[c].neg || tp->cls[c].conj) continue;
+    if (tp_side_has_ground_compound(tp->cls[c].lhs) ||
+        tp_side_has_ground_compound(tp->cls[c].rhs)) return 1;
+  }
+  return 0;
+}
