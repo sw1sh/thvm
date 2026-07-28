@@ -213,6 +213,26 @@ static const SchedSlice SCHEDULE[] = {
   // --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --simpler-join),
   // a prior Timeout at every wall tried.
   {"twee",   "--simpler-join --flatten-goal --lazy-ground-join --backward-subsume --backward-demod --cp-weight=8 --w2-modulo=0 --orphan-murder=0 --cp-set-interreduce --cp-set-ir-budget=5 --fof-sat=0", 0.0},
+  // (5'') TWEE-SCORED completion with the STEEP formation-depth penalty
+  // (Twee portfolio's --depth-weight lever) on the plain WM-lazy base --
+  // no simpler-join / connectedness (both thvm approximations FALSE-DROP
+  // the cascade-opening CP on the encoded lattice family: LAT224-10's
+  // generalized-absorption lemma join(meet(X,Y), meet(X, join(Y,Z))) ->
+  // meet(X, join(Y,Z)), which Twee keeps under its below-peak joining).
+  // Depth 3x the default (14 -> 42 per unit, *7-scaled) sinks the
+  // deep-derivation permutation/guard-tower flood that shares the
+  // 330-400 score band with the depth-1..3 lemma cascade.  The lever is
+  // MEANINGFUL only since the r_depth compaction-shift + requeue-depth
+  // fixes (an interreduce-simplified rule re-enters at its victim's
+  // depth, Twee semantics; before, depths were garbage after any rule
+  // collapse and the depth term was noise).  Flips LAT224-10 (4.8s,
+  // schedule-wide GaveUp before; Vampire 2.1s / Twee 10.06s at
+  // CASC-J13) and LAT229-10 (48.2s) standalone at 240s; LAT186-10 /
+  // LAT065-10 still flood (queue-cap variants measured WORSE on
+  // LAT229 -- trajectory perturbation -- so the lane runs uncapped
+  // under the slice RSS guard).  --max-steps raised: the win crosses
+  // the 500k default (LAT229 1.75M steps).
+  {"twee-deep", "--cp-weight=8 --w2-modulo=0 --cp-depth-weight=6 --max-steps=10000000 --fof-sat=0", 0.0},
   {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.33},
   // (4) ENCOMPASSMENT DEMODULATION (Twee reducesSkolem): the WM preset
   // with the skolem-ground unorient gate -- variable-permuted variants
