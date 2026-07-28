@@ -300,6 +300,38 @@ static const SchedSlice SCHEDULE[] = {
   // axiom-side ground compound subterm: there the transform adds
   // nothing over the flatten lanes' goal-side naming.
   {"tgt-ax", "--tgt=4 --tgt-fold=1 --tgt-exit --horn=0 --fof-sat=0", 0.0},
+  // CONJECTURE-SYMBOL-WEIGHTED bare completion (the GRP66x Moufang
+  // dissection, E's auto winner G-E--_107_C37_F1_PI_AE_Q4_CS_SP_PS_S0Y
+  // on the whole 661-1..664-12 subfamily, 25-45s official, where every
+  // FindProof slice TMO'd at CASC-J13).  E's queue mix is dominated by
+  // two conjecture-symbol-relative evals (ConjectureGeneralSymbolWeight
+  // PreferNonGoals 200,100,200,50,50,1,100: goal-cone functions 50 vs
+  // 200; RelevanceLevelWeight2 SimulateSOS: rel-1 symbols 300 vs rel-2
+  // 800, vars 400) -- on the Moufang family the goal cone is pure
+  // mult/skolem while the axioms carry ld/rd/unit, so clauses dragging
+  // division-operator debris are taxed ~3-4x and the DEEP pure-mult
+  // superposition chain (E proof DAGs: depth 47-57, 285-410 clauses)
+  // stays inside the selection band.  Our port of exactly this eval
+  // already existed (--tgt-sel, the ifeq-guard-style CP-priority scale
+  // over the conjecture-symbol mask, LCL-round documented); the missing
+  // piece was a LANE arming it: bare + tgt-sel=1 + tgt-nongoal=4 (E's
+  // 200/50 function ratio) proves GRP661-1 89s / GRP662-1 110s /
+  // GRP663-1 92s as 240s singles where bare alone and bare+awr=8 both
+  // ResourceOut.  --awr measured slightly WORSE composed (102s vs 89s
+  // on 661-1): E's own FIFO component is only 1/9 of its picks.
+  // --lrs rides along AND is load-bearing twice over: per-pick cost
+  // scales with the live queue, so pruning beyond the reach horizon
+  // triples the pick rate (661-1: 29.8s / 94 picks/s vs 89s / 43),
+  // and it is what fits the 664-1x subfamily inside the slice RSS cap
+  // (664-10: PROVED 71s at 4500MB with lrs; eager needs ~6GB/290s and
+  // ResourceOuts at 2500 -- the flood is 1.9M SMALL cps, mean 35
+  // symbols, below the raw>=50 descriptor lane's class).  Placed in
+  // the leftover pool (not wave 1): on its family the early exit-fast
+  // lanes free slots within seconds, and the proven wave-1/2 indices
+  // stay unshifted (the LAT138 placement lesson).  Exit-fast when the
+  // conjecture cone covers the signature (uniform scale = duplicate
+  // of bare).
+  {"tgt-sel", "--tgt-sel=1 --tgt-nongoal=4 --lrs --tgt-sel-exit --preset=none --horn=0 --fof-sat=0", 0.0},
   {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.33},
   // (4) ENCOMPASSMENT DEMODULATION (Twee reducesSkolem): the WM preset
   // with the skolem-ground unorient gate -- variable-permuted variants
@@ -1203,6 +1235,7 @@ int main(int argc, char **argv) {
             cap += strlen(tp.syms[i].name) + 1;
           char *buf = (char *)malloc(cap);
           size_t len = 0;
+          int n_hit = 0;
           buf[0] = '\0';
           for (int i = 0; i < tp.n_syms; i++) {
             const char *nm = tp.syms[i].name;
@@ -1222,6 +1255,7 @@ int main(int argc, char **argv) {
               }
             }
             if (hit) {
+              n_hit++;
               if (len > 0) buf[len++] = ' ';
               memcpy(buf + len, nm, nl);
               len += nl;
@@ -1230,6 +1264,20 @@ int main(int argc, char **argv) {
           }
           if (len > 0) setenv("THVM_ATP_TGT_SYMS", buf, 1);
           free(buf);
+          // tgt-sel lane exit-fast (--tgt-sel-exit): the lane's content
+          // is the conjecture-symbol discrimination -- non-goal symbols
+          // (GRP66x: ld/rd/unit vs the goal's pure mult/skolem cone)
+          // taxed by --tgt-nongoal in the CP eval.  When the conjecture
+          // cone covers the whole signature (or no conjecture-role
+          // clause survives the transforms) the multiplier is uniform
+          // and the slice duplicates 'bare' -- give the schedule slot
+          // back, like the tgt-ax/unfold exit-fast discipline.
+          {
+            const char *tx = getenv("THVM_ATP_TGT_SEL_EXIT");
+            if (tx != NULL && tx[0] != '\0' && tx[0] != '0'
+                && (n_hit == 0 || n_hit >= tp.n_syms))
+              tp_giveup("tgt-sel slice: conjecture symbols cover the signature");
+          }
         }
       }
       // --proof: freeze the final unit -> conversion-lineage map from
