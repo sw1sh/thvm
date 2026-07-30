@@ -945,6 +945,12 @@ int main(int argc, char **argv) {
       // byte-correct emission at a bounded RSS cost during search.
       // overwrite=0 keeps an explicit user THVM_ATP_NO_TRACE_PACK=0.
       setenv("THVM_ATP_NO_TRACE_PACK", "1", 0);
+      // Deep citation resolve by default: a goal-chain step whose rule
+      // was interreduced away otherwise resolves to NO citation and the
+      // emitted rw record is unverifiable (checker abstain).  The cost
+      // is emission-time only (trace-pair cache bounds the replay);
+      // =0 restores the shallow resolver.
+      setenv("THVM_ATP_PROOF_RESOLVE_DEEP", "1", 0);
       continue;
     }
     if (nlen == 7 && strncmp(name, "keep-pr", 7) == 0) { keep_pr = 1; continue; }

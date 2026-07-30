@@ -1001,7 +1001,7 @@ static u32 mnf_pop(u32 *q, u32 *head, u32 *tail, u8 last_irred) {
 // taken with a rule that interreduction has since retired will not replay
 // (still equationally valid -- just no longer in R); `*replayed` counts
 // the ones that do.  Returns the root node index.
-static int mnf_edge_step(Term before, Term after,
+static int mnf_edge_step(AtpState *s, Term before, Term after,
                          const Term *rl, const Term *rr, u32 nr,
                          u8 *pos, u8 depth,
                          u32 *out_rule, u8 *out_pos_len, u8 *out_fwd);
@@ -1012,7 +1012,7 @@ static u32 mnf_verify_chain(AtpState *s, AtpMnf *m, u32 ni,
   while (m->nodes[ni].parent != ni && guard++ < m->n_nodes) {
     u32 p = m->nodes[ni].parent;
     u8 pos[ATP_PROOF_MAX_DEPTH]; u32 er; u8 epl, efw;
-    if (mnf_edge_step(m->nodes[p].term, m->nodes[ni].term,
+    if (mnf_edge_step(s, m->nodes[p].term, m->nodes[ni].term,
                       s->lhs, s->rhs, s->n_rules, pos, 0u,
                       &er, &epl, &efw)) (*replayed)++;
     (*len)++;
@@ -1030,7 +1030,7 @@ static void mnf_verify(AtpState *s, AtpMnf *m) {
   u32 lenB = 1u, repB = 0u;
   {
     u8 pos[ATP_PROOF_MAX_DEPTH]; u32 er; u8 epl, efw;
-    if (mnf_edge_step(m->nodes[m->meet_b_parent].term, m->meet_term,
+    if (mnf_edge_step(s, m->nodes[m->meet_b_parent].term, m->meet_term,
                       s->lhs, s->rhs, s->n_rules, pos, 0u,
                       &er, &epl, &efw)) repB++;
   }
@@ -1459,7 +1459,18 @@ static int mnf_step(AtpState *s, AtpMnf *m, u32 budget) {
 // match.  Mirrors mnf_successors' search but stops at the edge whose
 // result is kbo_eq to `after`.  `out_rule` indexes into the slice.
 // Returns 1 on success.
-static int mnf_edge_step(Term before, Term after,
+//
+// r2 grounded-template faces: mnf_exp_visit applies an equation face
+// whose replacement carries variables OUTSIDE the matched side by
+// grounding the extras to the minimal signature constant
+// (atp_unorient_template -- WM RechtsUnfreiErzeugen).  An edge taken
+// that way replays against no plain face (the plain apply leaves the
+// extras as variables, never kbo_eq to the grounded `after`), which
+// silently emptied the whole extraction on every r2-carried join
+// (GRP439-1's multiply(inverse(X),X) = multiply(inverse(Y),Y) meet).
+// Try the templates after the plain faces so well-behaved edges keep
+// their citation order.
+static int mnf_edge_step(AtpState *s, Term before, Term after,
                          const Term *rl, const Term *rr, u32 nr,
                          u8 *pos, u8 depth,
                          u32 *out_rule, u8 *out_pos_len, u8 *out_fwd) {
@@ -1481,6 +1492,23 @@ static int mnf_edge_step(Term before, Term after,
       }
     }
   }
+  for (u32 j = 0; j < nr; j++) {                // r2 grounded templates
+    for (u8 face = 0u; face < 2u; face++) {
+      Term pat = face ? rr[j] : rl[j];
+      Term rep = face ? rl[j] : rr[j];
+      if (atp_vars_contained(rep, pat)) continue;   // plain face covered
+      RewriteSubst sub = {{0}};
+      if (!thvm_match(pat, before, &sub)) continue;
+      Term tmpl = atp_unorient_template(s, pat, rep);
+      if (tmpl == 0) continue;
+      Term repl = thvm_subst_apply(tmpl, &sub);
+      if (kbo_eq(repl, after)) {
+        *out_rule = j; *out_pos_len = depth;
+        *out_fwd = face ? 0u : 1u;
+        return 1;
+      }
+    }
+  }
   // Descend: the rewrite was below the top.  `before` and `after` agree
   // everywhere except the one child holding the redex.
   if (term_tag(before) == TAG_CTR && term_tag(after) == TAG_CTR &&
@@ -1493,7 +1521,7 @@ static int mnf_edge_step(Term before, Term after,
       Term ca = term_ctr_at(after, i);
       if (kbo_eq(cb, ca)) continue;     // unchanged child: not the redex
       pos[depth] = (u8)i;
-      if (mnf_edge_step(cb, ca, rl, rr, nr, pos, (u8)(depth + 1u),
+      if (mnf_edge_step(s, cb, ca, rl, rr, nr, pos, (u8)(depth + 1u),
                         out_rule, out_pos_len, out_fwd)) {
         return 1;
       }
@@ -1562,12 +1590,50 @@ static u32 mnf_collect_lineage(AtpMnf *m, u32 ni, u32 *buf, u32 *len,
   return ni;
 }
 
+// MODE-1 (ExpandRewrite) joins record ONE normalize edge: parent ->
+// full mixmost NF, a MULTI-step rewrite no single mnf_edge_step can
+// replay -- the admitted extraction gap that emptied every mode-1
+// proof.  Decompose it by re-running the SAME mixmost normalizer with
+// AtpProofStep recording: R is unchanged since the join latched (the
+// engine stops at PROVED), so the deterministic replay reaches the
+// same NF, and each recorded single step resolves through the CLI/WL
+// citation machinery like any goal-chain step.  The step cap matches
+// the mode-1 normalize call (4096) so a cap-truncated NF reproduces.
+// Returns 1 when the replay lands exactly on `after`.
+static int mnf_edge_norm_decompose(AtpState *s, Term before, Term after,
+                                   u32 side, AtpProofStep *out, u32 cap,
+                                   u32 *n) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  u32 n0 = *n;
+  atp_ft_mirror_ensure(s);
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFtCell *nf = atp_rewrite_normalize_ft_proofsteps(
+      s, ft_from_term(a, before, 0), 4096u, (u8)side, out, n, cap);
+  if (nf == NULL || *n >= cap || !kbo_eq(ft_to_term(nf), after)) {
+    *n = n0;
+    return 0;
+  }
+  // Map each step's rule SLOT to its TRACE index (the citation form
+  // every other MNF step carries); a slot beyond the live set resolves
+  // by replay on the consumer side.
+  for (u32 k = n0; k < *n; k++) {
+    if (out[k].rule < s->n_rules && s->r_trace != NULL)
+      out[k].rule = s->r_trace[out[k].rule];
+  }
+  return 1;
+#else
+  (void)s; (void)before; (void)after; (void)side;
+  (void)out; (void)cap; (void)n;
+  return 0;
+#endif
+}
+
 // Emit the steps along a lineage (terms[0..n_terms), seed/root first)
 // into out[], tagged with `side`.  Each consecutive pair is one
 // rewrite, reconstructed by mnf_edge_step against the (rl, rr, nr)
 // rule slice.  Both fronts are emitted seed -> meet, so the GREEN and
 // RED chains meet at the join term.  Returns 1 if every edge replayed.
-static int mnf_emit_lineage(AtpMnf *m, const u32 *terms,
+static int mnf_emit_lineage(AtpState *s, AtpMnf *m, const u32 *terms,
                             u32 n_terms, u32 side,
                             const Term *rl, const Term *rr,
                             const u32 *rtr, u32 nr,
@@ -1577,8 +1643,11 @@ static int mnf_emit_lineage(AtpMnf *m, const u32 *terms,
     Term after  = m->nodes[terms[k + 1u]].term;
     u8  pos[ATP_PROOF_MAX_DEPTH];
     u32 rule = 0u; u8 pos_len = 0u, fwd = 1u;
-    if (!mnf_edge_step(before, after, rl, rr, nr,
+    if (!mnf_edge_step(s, before, after, rl, rr, nr,
                        pos, 0u, &rule, &pos_len, &fwd)) {
+      // Not a single-step edge: try the mode-1 normalize decomposition.
+      if (mnf_edge_norm_decompose(s, before, after, side, out, cap, n))
+        continue;
       return 0;   // an edge replays against no historical rule
     }
     if (*n >= cap) return 0;
@@ -1621,9 +1690,19 @@ fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
                       ATP_PROOF_MAX_STEPS + 1u);
 
   u8 col_a = m->nodes[m->meet_a].colour;     // colour that owns lineage A
+  // Colour -> goal-side mapping through the SEEDS: mnf_create
+  // LRSortieren-canonicalizes the goal pair (WM parity), so the GREEN
+  // front may be seeded from goal_RHS.  Mapping GREEN to side 0
+  // unconditionally emitted the two chains against the swapped goal
+  // orientation -- every record claimed the wrong side rewrote
+  // (GRP697-1's g0_0 abstain).
+  u32 green_side = 0u;
+  if (!kbo_eq(m->seed_green, s->goal_lhs) &&
+      kbo_eq(m->seed_green, s->goal_rhs))
+    green_side = 1u;
   // meet_b_col is the opposite colour (the fresh reduct's colour).
-  u32 side_a = (col_a == MNF_GREEN) ? 0u : 1u;
-  u32 side_b = (m->meet_b_col == MNF_GREEN) ? 0u : 1u;
+  u32 side_a = (col_a == MNF_GREEN) ? green_side : 1u - green_side;
+  u32 side_b = (m->meet_b_col == MNF_GREEN) ? green_side : 1u - green_side;
 
   // Reconstruct each edge against the HISTORICAL rule set (live rules +
   // every equation that ever entered R via the trace DAG), so an edge
@@ -1646,16 +1725,16 @@ fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
   // An edge that replays against no historical rule leaves the lineage
   // not reconstructable as a forward/backward chain.  Return 0 (no
   // extractable proof) rather than emit a partial, unsound chain.
-  if (!mnf_emit_lineage(m, lin_a, len_a, side_a, hist_l, hist_r, hist_t, nr,
-                        out, cap, &n)) {
+  if (!mnf_emit_lineage(s, m, lin_a, len_a, side_a, hist_l, hist_r, hist_t,
+                        nr, out, cap, &n)) {
 #ifdef ATP_MNF_DIAG
     fprintf(stderr, "[mnf-extract] lineage A unreplayable at step %u/%u\n",
             n, len_a > 0u ? len_a - 1u : 0u);
 #endif
     free(hist_l); free(hist_r); free(hist_t); return 0;
   }
-  if (!mnf_emit_lineage(m, lin_b, len_b, side_b, hist_l, hist_r, hist_t, nr,
-                        out, cap, &n)) {
+  if (!mnf_emit_lineage(s, m, lin_b, len_b, side_b, hist_l, hist_r, hist_t,
+                        nr, out, cap, &n)) {
 #ifdef ATP_MNF_DIAG
     fprintf(stderr, "[mnf-extract] lineage B unreplayable at step %u\n", n);
 #endif
@@ -1668,8 +1747,13 @@ fn u32 thvm_atp_mnf_proof_extract(AtpState *s, AtpProofStep *out, u32 cap) {
     if (!kbo_eq(before, after)) {
       u8  pos[ATP_PROOF_MAX_DEPTH];
       u32 rule = 0u; u8 pos_len = 0u, fwd = 1u;
-      if (!mnf_edge_step(before, after, hist_l, hist_r, nr,
+      if (!mnf_edge_step(s, before, after, hist_l, hist_r, nr,
                          pos, 0u, &rule, &pos_len, &fwd)) {
+        if (mnf_edge_norm_decompose(s, before, after, side_b,
+                                    out, cap, &n)) {
+          free(hist_l); free(hist_r); free(hist_t);
+          return n;
+        }
         free(hist_l); free(hist_r); free(hist_t); return 0;
       }
       if (n >= cap) return 0;

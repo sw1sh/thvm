@@ -297,6 +297,17 @@ static u8 cli_step_replays(AtpState *s, const AtpProofStep *st,
   acc.n = 0;
   pc_rewrite_all(st->before, l, r, &acc);
   pc_rewrite_all(st->before, r, l, &acc);
+  // r2 grounded-template faces: the MNF front (and the WM normalizers)
+  // apply an equation face whose replacement carries variables outside
+  // the matched side by grounding the extras to the minimal signature
+  // constant.  The plain faces above leave those extras as variables
+  // and never reproduce such a step, so it resolved to NO citation.
+  // Applying the grounded template is still applying an instance of
+  // the cited equation -- sound to cite.
+  Term tl = atp_unorient_template(s, l, r);
+  if (tl != 0 && !kbo_eq(tl, r)) pc_rewrite_all(st->before, l, tl, &acc);
+  Term tr = atp_unorient_template(s, r, l);
+  if (tr != 0 && !kbo_eq(tr, l)) pc_rewrite_all(st->before, r, tr, &acc);
   for (int k = 0; k < acc.n; k++) {
     if (kbo_eq(acc.out[k], st->after)) return 1;
   }
@@ -332,18 +343,46 @@ static u8 cli_tp_cached(AtpState *s, u32 ti, Term *l, Term *r) {
 
 static u32 cli_resolve_step_trace(AtpState *s, const AtpProofStep *st) {
   if (st->before == 0 || st->after == 0) return ATP_TRACE_NONE;
-  // Recorded slot first (correct for oriented-rule steps).
+  // Recorded slot first (correct for oriented-rule steps).  A lazy
+  // slot (TAG_NUM sentinel, live only as its FT mirror) materializes
+  // through atp_rule_term -- skipping it left every FT-lane step
+  // citing NOTHING (the COL006-5 g0_13 abstain).
   if (st->rule < s->n_rules && s->r_trace != NULL) {
     Term l = s->lhs[st->rule], r = s->rhs[st->rule];
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (term_tag(l) == TAG_NUM || term_tag(r) == TAG_NUM) {
+      l = atp_rule_term(s, st->rule, 0u);
+      r = atp_rule_term(s, st->rule, 1u);
+    }
+#endif
     if (term_tag(l) != TAG_NUM && term_tag(r) != TAG_NUM &&
         cli_step_replays(s, st, l, r)) {
       return s->r_trace[st->rule];
     }
   }
+  // Recorded TRACE id next: MNF-extracted steps (and the mode-1
+  // normalize decomposition) store the citation as a trace index, not
+  // a rule slot.  Verified by replay like every other resolution, so
+  // a slot-labelled step can never mis-cite through this arm -- but
+  // without it, an MNF step whose rule was interreduced away resolved
+  // to NOTHING (rw record with no equation parent: unverifiable).
+  if (st->rule < s->n_trace) {
+    Term l = 0, r = 0;
+    if (cli_tp_cached(s, st->rule, &l, &r) &&
+        cli_step_replays(s, st, l, r)) {
+      return st->rule;
+    }
+  }
   // Live slots next (cheap; covers mis-indexed eset steps whose
-  // equation is still alive).
+  // equation is still alive).  Lazy slots materialize (see above).
   for (u32 rr = 0; rr < s->n_rules; rr++) {
     Term l = s->lhs[rr], r = s->rhs[rr];
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (term_tag(l) == TAG_NUM || term_tag(r) == TAG_NUM) {
+      l = atp_rule_term(s, rr, 0u);
+      r = atp_rule_term(s, rr, 1u);
+    }
+#endif
     if (term_tag(l) == TAG_NUM || term_tag(r) == TAG_NUM) continue;
     if (cli_step_replays(s, st, l, r)) {
       return (s->r_trace != NULL) ? s->r_trace[rr] : ATP_TRACE_NONE;
