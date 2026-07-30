@@ -635,6 +635,11 @@ static int run_schedule(const char *self, const char *file, double wall,
   sigaction(SIGINT,  &old_int,  NULL);
   int rc = 1;
   if (winner >= 0) {
+    // Name the winning slice on stderr: which lane carried the solve is
+    // the first question every schedule-level diagnosis asks (proof
+    // emission triage, portfolio tuning), and only the index existed.
+    fprintf(stderr, "%% FindProof schedule winner: %s\n",
+            SCHEDULE[winner].name);
     // Replay only the winning slice's captured output.
     FILE *fp = fopen(outs[winner], "r");
     if (fp != NULL) {
