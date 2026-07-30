@@ -209,6 +209,259 @@ static const char *cli_prov_source(FILE *fp, const PrProblem *pr,
 }
 
 // --- derivation closure over the completion trace ------------------
+
+// Forward decl (bridge search uses the pair loader defined below).
+static u8 cli_tp_cached(AtpState *s, u32 ti, Term *l, Term *r);
+
+// Treatment-compression bridge (post-mortem Track C): an ORIENT trace
+// record stores the equation AFTER normalization by the then-current
+// rules but cites only its pre-treatment parent, so the emitted record
+// claims a conclusion its one listed parent does not yield and the
+// checker abstains (GRP660-10's t10852 class).  At emission, search
+// for the ONE-step rewrite (any trace equation, either face, grounded
+// r2 template included) that takes the parent pair to the recorded
+// pair (modulo orientation + renaming) and emit it as an interposed
+// rw record.  Honest by construction: the interposed equation is
+// itself a trace record with its own emitted derivation, and the step
+// is re-derived here.  A record the search cannot bridge is emitted
+// as before (abstain, never a fabricated citation).
+typedef struct { u32 eq; Term l, r; } CliBridgeStep;
+
+static u8 cli_pair_eq_mod(Term a1, Term b1, Term a2, Term b2) {
+  return pc_pair_alpha_eq(a1, b1, a2, b2);
+}
+
+// The bridge search enumerates one-rewrite successors of a pair over
+// every earlier trace equation -- a fanout that exhausted from-space
+// mid-emission when the candidate Terms were kept (the truncated-
+// proof death).  So the scan keeps NO Terms: each candidate is
+// reduced to {equation, side, candidate-index, canonical pair hash}
+// under a per-equation heap checkpoint/rollback, and only the finally
+// chosen picks are re-derived (deterministically, from eq/side/k).
+typedef struct { u32 eq; u32 k; u64 h; u8 side; } CliBridgeMeta;
+
+static void cli_bridge_cands(AtpState *s, Term st, Term u, Term v,
+                             PcRwSet *acc) {
+  acc->n = 0;
+  pc_rewrite_all(st, u, v, acc);
+  pc_rewrite_all(st, v, u, acc);
+  Term tu = atp_unorient_template(s, u, v);
+  if (tu != 0 && !kbo_eq(tu, v)) pc_rewrite_all(st, u, tu, acc);
+  Term tv = atp_unorient_template(s, v, u);
+  if (tv != 0 && !kbo_eq(tv, u)) pc_rewrite_all(st, v, tv, acc);
+}
+
+// Allocation-free canonical pair hash: structural walk with variables
+// numbered by first occurrence across the pair, minimized over the
+// two side orders (mirrors pc_pair_alpha_eq's equivalence; hash
+// matches are RE-VERIFIED with the real compare, so a collision can
+// only cost a retry, never a wrong bridge).
+static u64 cli_ct_hash_walk(Term t, int *vmap, u32 *vn, u64 h) {
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) {
+    u32 id = term_ext(t);
+    u32 c = id;
+    if (id < 256u) {
+      if (vmap[id] < 0) vmap[id] = (int)(*vn)++;
+      c = (u32)vmap[id];
+    }
+    return (h ^ (0x9E3779B97F4A7C15ull + c)) * 0x100000001B3ull;
+  }
+  if (tg == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    h = (h ^ ((u64)term_ext(t) * 2654435761ull + n)) * 0x100000001B3ull;
+    for (u32 i = 0; i < n; i++)
+      h = cli_ct_hash_walk(term_ctr_at(t, i), vmap, vn, h);
+    return h;
+  }
+  return (h ^ (u64)t) * 0x100000001B3ull;
+}
+
+static u64 cli_pair_canon_hash(Term l, Term r) {
+  u64 best = ~0ull;
+  for (int o = 0; o < 2; o++) {
+    int vmap[256];
+    for (int i = 0; i < 256; i++) vmap[i] = -1;
+    u32 vn = 0;
+    u64 h = 0xCBF29CE484222325ull;
+    h = cli_ct_hash_walk(o ? r : l, vmap, &vn, h);
+    h = (h ^ 0x9E37ull) * 0x100000001B3ull;
+    h = cli_ct_hash_walk(o ? l : r, vmap, &vn, h);
+    if (h < best) best = h;
+  }
+  return best;
+}
+
+#define CLI_BRIDGE_SUCC_CAP 16384u
+#define CLI_BRIDGE_HEADROOM (1ull << 18)
+
+// Hash-scan all one-rewrite successors of (pl, pr); Terms are rolled
+// back per equation.  Bails (returns count so far) on low heap
+// headroom or a GC (rollback then unsafe).
+static u32 cli_bridge_scan(AtpState *s, Term pl, Term pr, u32 below,
+                           CliBridgeMeta *out, u32 cap) {
+  u32 n = 0u;
+  u32 scan = (below < s->n_trace) ? below : s->n_trace;
+  if (scan > (1u << 20)) return 0u;   // unbounded traces: skip
+  for (u32 ti = 0; ti < scan && n < cap; ti++) {
+    Term u = 0, v = 0;
+    if (gc_from_end() - HEAP_NEXT < CLI_BRIDGE_HEADROOM) break;
+    u64 hp = thvm_atp_heap_checkpoint();
+    u64 g0 = gc_count();
+    if (!cli_tp_cached(s, ti, &u, &v)) continue;
+    for (u32 side = 0; side < 2u && n < cap; side++) {
+      Term st = side ? pr : pl;
+      PcRwSet acc;
+      cli_bridge_cands(s, st, u, v, &acc);
+      for (int k = 0; k < acc.n && n < cap; k++) {
+        out[n].eq = ti;
+        out[n].k = (u32)k;
+        out[n].side = (u8)side;
+        out[n].h = side ? cli_pair_canon_hash(pl, acc.out[k])
+                        : cli_pair_canon_hash(acc.out[k], pr);
+        n++;
+      }
+    }
+    if (gc_count() != g0) break;   // relocation: stop scanning
+    thvm_atp_heap_reset(hp);
+  }
+  return n;
+}
+
+// Re-derive one successor pair from its pick (deterministic).
+static u8 cli_bridge_apply(AtpState *s, Term pl, Term pr,
+                           u32 eq, u8 side, u32 k, Term *ol, Term *or_) {
+  Term u = 0, v = 0;
+  if (!cli_tp_cached(s, eq, &u, &v)) return 0u;
+  Term st = side ? pr : pl;
+  PcRwSet acc;
+  cli_bridge_cands(s, st, u, v, &acc);
+  if ((int)k >= acc.n) return 0u;
+  *ol = side ? pl : acc.out[k];
+  *or_ = side ? acc.out[k] : pr;
+  return 1u;
+}
+
+// Bridge (pl, pr) -> (tl, tr) in one or two rewrites.  Two-step uses
+// meet-in-the-middle: successors of the parent x successors of the
+// target (rewriting by an equation is symmetric, so a target
+// successor read backward is a valid forward step; the grounded-
+// template face reversed is still an instance of the cited equation).
+// Fills steps[] forward from the parent; returns the step count
+// (0 = no bridge).
+static u32 cli_bridge_search(AtpState *s, Term pl, Term pr,
+                             Term tl, Term tr, u32 below,
+                             CliBridgeStep *steps) {
+  static CliBridgeMeta A[CLI_BRIDGE_SUCC_CAP];
+  static CliBridgeMeta B[CLI_BRIDGE_SUCC_CAP];
+  u32 na = cli_bridge_scan(s, pl, pr, below, A, CLI_BRIDGE_SUCC_CAP);
+  u64 th = cli_pair_canon_hash(tl, tr);
+  // 1-step: hash match against the target, verified by re-derivation.
+  for (u32 i = 0; i < na; i++) {
+    if (A[i].h != th) continue;
+    Term ml = 0, mr = 0;
+    u64 hp = thvm_atp_heap_checkpoint();
+    u64 g0 = gc_count();
+    u8 ok = cli_bridge_apply(s, pl, pr, A[i].eq, A[i].side, A[i].k,
+                             &ml, &mr) &&
+            cli_pair_eq_mod(ml, mr, tl, tr);
+    if (ok) {
+      steps[0].eq = A[i].eq;
+      steps[0].l = ml;
+      steps[0].r = mr;
+      return 1u;
+    }
+    if (gc_count() == g0) thvm_atp_heap_reset(hp);
+  }
+  // 2-step meet-in-the-middle on hashes; verify each collision pair.
+  u32 nb = cli_bridge_scan(s, tl, tr, below, B, CLI_BRIDGE_SUCC_CAP);
+  u32 tries = 0u;
+  for (u32 i = 0; i < na && tries < 64u; i++) {
+    for (u32 j = 0; j < nb && tries < 64u; j++) {
+      if (A[i].h != B[j].h) continue;
+      tries++;
+      Term al = 0, ar = 0, bl = 0, br2 = 0;
+      u64 hp = thvm_atp_heap_checkpoint();
+      u64 g0 = gc_count();
+      u8 ok = cli_bridge_apply(s, pl, pr, A[i].eq, A[i].side, A[i].k,
+                               &al, &ar) &&
+              cli_bridge_apply(s, tl, tr, B[j].eq, B[j].side, B[j].k,
+                               &bl, &br2) &&
+              cli_pair_eq_mod(al, ar, bl, br2);
+      if (ok) {
+        steps[0].eq = A[i].eq;
+        steps[0].l = al;
+        steps[0].r = ar;
+        steps[1].eq = B[j].eq;
+        steps[1].l = tl;
+        steps[1].r = tr;
+        return 2u;
+      }
+      if (gc_count() == g0) thvm_atp_heap_reset(hp);
+    }
+  }
+  return 0u;
+}
+
+// Parent rescue: when no bridge from the RECORDED parent reaches the
+// record's pair, the recorded index may be a mislabel (the LAT171
+// class: an ESET-internal index written where a trace id was read).
+// Search every EARLIER trace entry for one whose pair equals the
+// record's (pure relabel) or reaches it in ONE rewrite; the found
+// citation is verified by re-derivation, so a wrong rescue is
+// impossible -- only a missing one.  Returns the rescued parent id
+// (and fills steps/n_steps with the connecting rewrite) or
+// ATP_TRACE_NONE.
+static int cmp_u64(const void *a, const void *b) {
+  u64 x = *(const u64 *)a, y = *(const u64 *)b;
+  return (x < y) ? -1 : (x > y) ? 1 : 0;
+}
+
+static u32 cli_bridge_rescue(AtpState *s, Term tl, Term tr, u32 below,
+                             CliBridgeStep *steps, u32 *n_steps) {
+  static CliBridgeMeta B[CLI_BRIDGE_SUCC_CAP];
+  static u64 bh[CLI_BRIDGE_SUCC_CAP];
+  u64 th = cli_pair_canon_hash(tl, tr);
+  u32 nb = cli_bridge_scan(s, tl, tr, below, B, CLI_BRIDGE_SUCC_CAP);
+  for (u32 j = 0; j < nb; j++) bh[j] = B[j].h;
+  qsort(bh, nb, sizeof(u64), cmp_u64);
+  u32 scan = (below < s->n_trace) ? below : s->n_trace;
+  if (scan > (1u << 20)) return ATP_TRACE_NONE;
+  for (u32 e = 0; e < scan; e++) {
+    if (gc_from_end() - HEAP_NEXT < CLI_BRIDGE_HEADROOM) break;
+    u64 hp = thvm_atp_heap_checkpoint();
+    u64 g0 = gc_count();
+    Term el = 0, er = 0;
+    if (!cli_tp_cached(s, e, &el, &er)) continue;
+    u64 eh = cli_pair_canon_hash(el, er);
+    if (eh == th && cli_pair_eq_mod(el, er, tl, tr)) {
+      if (gc_count() == g0) thvm_atp_heap_reset(hp);
+      *n_steps = 0u;   // pure relabel: cite e directly
+      return e;
+    }
+    if (nb > 0u && bsearch(&eh, bh, nb, sizeof(u64), cmp_u64) != NULL) {
+      // One rewrite of the TARGET reaches e's pair; read backward,
+      // e's pair reaches the target by the same equation.  Find the
+      // matching B pick and emit the target pair as the bridge step.
+      for (u32 j = 0; j < nb; j++) {
+        if (B[j].h != eh) continue;
+        Term bl = 0, br2 = 0;
+        if (cli_bridge_apply(s, tl, tr, B[j].eq, B[j].side, B[j].k,
+                             &bl, &br2) &&
+            cli_pair_eq_mod(bl, br2, el, er)) {
+          steps[0].eq = B[j].eq;
+          steps[0].l = tl;
+          steps[0].r = tr;
+          *n_steps = 1u;
+          return e;
+        }
+      }
+    }
+    if (gc_count() == g0) thvm_atp_heap_reset(hp);
+  }
+  return ATP_TRACE_NONE;
+}
+
 // Emit the trace entry `ti` (and, recursively, its parents) as cnf()
 // lines; printed[] de-duplicates.  Names: t<ti>.
 static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
@@ -230,6 +483,46 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
   }
   cli_emit_trace(fp, s, pr, pa, printed);
   cli_emit_trace(fp, s, pr, pb, printed);
+  // Treatment-compression bridge (see cli_bridge_one): an orient
+  // record whose pair is NOT its parent's (modulo orientation and
+  // renaming) was normalized during treatment; interpose the found
+  // rewrite so the printed record follows from its citations.
+  char pa_name[32];
+  pa_name[0] = '\0';
+  if ((reason == TRACE_ORIENT || reason == TRACE_SIMPLIFY) &&
+      pa != ATP_TRACE_NONE && pa < s->n_trace && pb == ATP_TRACE_NONE) {
+    Term ppl = 0, ppr = 0;
+    if (cli_tp_cached(s, pa, &ppl, &ppr) &&
+        !cli_pair_eq_mod(ppl, ppr, lhs, rhs)) {
+      CliBridgeStep br[2];
+      u32 nbr = cli_bridge_search(s, ppl, ppr, lhs, rhs, ti, br);
+      u32 cite = pa;
+      if (nbr == 0u) {
+        // No path from the recorded parent: parent rescue (mislabel /
+        // deeper treatment); an earlier entry reaching the pair in
+        // <= 1 verified step replaces the citation.
+        u32 rp = cli_bridge_rescue(s, lhs, rhs, ti, br, &nbr);
+        if (rp != ATP_TRACE_NONE) {
+          cite = rp;
+          cli_emit_trace(fp, s, pr, rp, printed);
+          if (nbr == 0u) snprintf(pa_name, sizeof pa_name, "t%u", rp);
+        }
+      }
+      if (nbr > 0u) {
+        snprintf(pa_name, sizeof pa_name, "t%u", cite);
+        for (u32 k = 0; k < nbr; k++) {
+          cli_emit_trace(fp, s, pr, br[k].eq, printed);
+          fprintf(fp, "cnf(t%ub%u, plain, ", ti, k);
+          cli_print_term(fp, pr, br[k].l);
+          fputs(" = ", fp);
+          cli_print_term(fp, pr, br[k].r);
+          fprintf(fp, ", inference(rw, [status(thm)], [%s, t%u])).\n",
+                  pa_name, br[k].eq);
+          snprintf(pa_name, sizeof pa_name, "t%ub%u", ti, k);
+        }
+      }
+    }
+  }
   // FOF-path axiom leaf: resolve the conversion lineage FIRST -- the
   // chain records it cites must precede this record in the output.
   const char *prov_src = NULL;
@@ -261,7 +554,8 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
         (reason == TRACE_SIMPLIFY)? "rw" : "step";
     fprintf(fp, ", inference(%s, [status(thm)], [", rule);
     int firstp = 1;
-    if (pa != ATP_TRACE_NONE && pa < s->n_trace) { fprintf(fp, "t%u", pa); firstp = 0; }
+    if (pa_name[0] != '\0') { fprintf(fp, "%s", pa_name); firstp = 0; }
+    else if (pa != ATP_TRACE_NONE && pa < s->n_trace) { fprintf(fp, "t%u", pa); firstp = 0; }
     if (pb != ATP_TRACE_NONE && pb < s->n_trace) { fprintf(fp, "%st%u", firstp ? "" : ", ", pb); }
     fputs("])).\n", fp);
   }

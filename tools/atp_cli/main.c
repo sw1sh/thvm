@@ -1101,6 +1101,20 @@ int main(int argc, char **argv) {
         if (ig != NULL && atoi(ig) >= 2 && !tp_has_ifeq_dispatcher(&tp))
           tp_giveup("ifeq-guard slice: no ifeq dispatcher axiom");
       }
+      // Wide-functor currying: decompose any n-ary functor (n > 8) into
+      // nested binary ap2 applications so the arity-8 term reader can
+      // load it (TOP052's tuple/140).  Sound bijective re-encoding; a
+      // no-op unless a wide functor is present.  THVM_ATP_CURRY=0 keeps
+      // the old clean give-up.  BEFORE the Horn release: the release
+      // snapshots strdup the clause strings they chain over, and a
+      // later curry left every emitted hyper-resolution record in the
+      // UNCURRIED presentation while the engine's trace records print
+      // curried -- the two halves of a PUZ039-10 proof then talk about
+      // different signatures and no step crossing them verifies.
+      {
+        const char *ce = getenv("THVM_ATP_CURRY");
+        if (ce == NULL || ce[0] != '0') tp_curry_wide(&tp);
+      }
       // Encoded-Horn (ifeq) problems: decode the dispatcher encoding
       // and forward-chain released units BEFORE SInE, so the releases
       // participate in axiom selection.  THVM_ATP_HORN=0 disables.
@@ -1179,15 +1193,7 @@ int main(int argc, char **argv) {
         n_neg = 0;
         for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
       }
-      // Wide-functor currying: decompose any n-ary functor (n > 8) into
-      // nested binary ap2 applications so the arity-8 term reader can
-      // load it (TOP052's tuple/140).  Sound bijective re-encoding; a
-      // no-op unless a wide functor is present.  THVM_ATP_CURRY=0 keeps
-      // the old clean give-up.
-      {
-        const char *ce = getenv("THVM_ATP_CURRY");
-        if (ce == NULL || ce[0] != '0') tp_curry_wide(&tp);
-      }
+      // (Wide-functor currying runs BEFORE the Horn release above.)
       // Oversized problems (the CSR knowledge bases run to 8k clauses):
       // goal-directed SInE selection cuts them to the relevant slice
       // BEFORE the capacity checks.  THVM_ATP_SINE=0 restores the old

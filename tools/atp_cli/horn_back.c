@@ -701,6 +701,17 @@ static void tp_horn_release(TpProblem *tp) {
     if (g_hpc_of == NULL) tp_giveup("OOM in Horn release");
     for (int i = 0; i < n; i++) g_hpc_of[i] = -1;
   }
+  // Snapshot the dispatcher clauses: every emitted hyper-resolution
+  // record cites them (the decode applies the reducer implicitly).
+  if (g_prov_on) {
+    g_horn_disp_hpc_n = 0;
+    for (int c = 0; c < n; c++) {
+      if (!is_disp[c]) continue;
+      int j = horn_prov_cls(tp, c);
+      if (j >= 0 && g_horn_disp_hpc_n < 4)
+        g_horn_disp_hpc[g_horn_disp_hpc_n++] = j;
+    }
+  }
   int n_defs = 0;
   for (int c = 0; c < n; c++) {
     if (pl[c] < 0 || is_disp[c] || tp->cls[c].neg) continue;

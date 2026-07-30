@@ -418,7 +418,10 @@ static int prov_emit_hpc(FILE *fp, int j) {
   return 1;
 }
 
-// The parent list of release k: "hi<rule>, <facts...>, hi<defs...>".
+// The parent list of release k: "hi<rule>, <facts...>, hi<defs...>,
+// hi<dispatchers...>" -- the reducer ifeqN(X,X,Y[,Z]) = Y is applied
+// implicitly by every decoded modus-ponens step, and the checker's
+// entailment discharge needs it among the cited parents.
 static int prov_horn_plist(int k, char *buf, size_t cap) {
   const HPr *p = &g_hpr[k];
   size_t o = (size_t)snprintf(buf, cap, "hi%d", p->rule);
@@ -428,11 +431,13 @@ static int prov_horn_plist(int k, char *buf, size_t cap) {
     else if (e >= 0)  o += (size_t)snprintf(buf + o, cap - o, ", h%d", e);
     else              o += (size_t)snprintf(buf + o, cap - o, ", hi%d", ~e);
   }
+  for (int i = 0; i < g_horn_disp_hpc_n && o + 16 < cap; i++)
+    o += (size_t)snprintf(buf + o, cap - o, ", hi%d", g_horn_disp_hpc[i]);
   return o + 16 < cap;
 }
 
 // Emit the input-clause records one release's derivation cites (its
-// rule, its input-fact parents, its defs).
+// rule, its input-fact parents, its defs, the dispatcher reducers).
 static int prov_emit_horn_hpcs(FILE *fp, const HPr *p) {
   if (!prov_emit_hpc(fp, p->rule)) return 0;
   for (int i = 0; i < p->nf + p->nd; i++) {
@@ -440,6 +445,8 @@ static int prov_emit_horn_hpcs(FILE *fp, const HPr *p) {
     int hj = (i >= p->nf) ? e : (e >= 0 ? -1 : ~e);
     if (hj >= 0 && !prov_emit_hpc(fp, hj)) return 0;
   }
+  for (int i = 0; i < g_horn_disp_hpc_n; i++)
+    if (!prov_emit_hpc(fp, g_horn_disp_hpc[i])) return 0;
   return 1;
 }
 

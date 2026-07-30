@@ -726,6 +726,12 @@ typedef struct {   // snapshot of an input clause the chaining used
 } HProvCls;
 static HProvCls *g_hpc = NULL; static int g_hpc_n = 0, g_hpc_cap = 0;
 static int *g_hpc_of = NULL;    // per input-clause index (horn-pass lifetime)
+// Dispatcher-clause snapshots (ifeqN(X,X,Y[,Z]) = Y): every decoded
+// hyper-resolution step uses the reducer implicitly, so every emitted
+// h-record must CITE it -- without it the released unit is not
+// entailed by its listed parents and the checker abstains (the
+// PLA/PUZ/GRP-10 empty-then-unverifiable class).
+static int g_horn_disp_hpc[4]; static int g_horn_disp_hpc_n = 0;
 typedef struct {   // one release's hyper-resolution step
   char *l, *r;                       // released unit (ownership taken
                                      // from the HRel strings at cleanup)
