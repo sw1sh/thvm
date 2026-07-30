@@ -951,6 +951,23 @@ int main(int argc, char **argv) {
       // is emission-time only (trace-pair cache bounds the replay);
       // =0 restores the shallow resolver.
       setenv("THVM_ATP_PROOF_RESOLVE_DEEP", "1", 0);
+      // Narrowing proof recorder: existential-goal closures (greedy
+      // narrowing / the critical-goal queue) record replayable step
+      // descriptors so the emitter prints a real instantiate/rw chain
+      // instead of the "no single-NF chain extractable" marker (the
+      // CASC-J13 15-problem empty-proof class).  Search-time recording,
+      // so --proof trajectories may diverge from no-proof runs on
+      // existential goals (the RecordNorm precedent).
+      setenv("THVM_ATP_NARROW_PROOF", "1", 0);
+      // Treatment-step recording (RecordNorm): orient/simplify
+      // treatment rewrites get their OWN trace records, so the emitted
+      // records cite complete parent lists instead of compressing the
+      // treatment away (the GRP660-10 unverifiable-orient class; the
+      // emission-side bridge covers the 1-2 step cases, this closes
+      // the deep ones at the source).  Search-time recording: --proof
+      // trajectories may diverge from no-proof runs (the sanctioned
+      // RecordNorm divergence); =0 restores the compressed trace.
+      setenv("THVM_ATP_RECORD_NORM", "1", 0);
       continue;
     }
     if (nlen == 7 && strncmp(name, "keep-pr", 7) == 0) { keep_pr = 1; continue; }

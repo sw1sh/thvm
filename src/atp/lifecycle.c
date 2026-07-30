@@ -534,6 +534,7 @@ fn void thvm_atp_free(AtpState *s) {
   gn_free(s->gnarrow);
 #endif
   atp_cgq_free(s->cgq);
+  thvm_atp_nrec_free(s);
   atp_goal_drive_free(s->gdrive);
   free(s);
 }

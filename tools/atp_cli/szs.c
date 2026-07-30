@@ -512,6 +512,214 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
           goal_id, prev);
 }
 
+// === Narrowing (existential-goal) proof emission ====================
+//
+// Replays the recorded narrowing derivation (AtpState.nrec; see
+// src/atp/narrow.c) from the PRISTINE conjecture pair and emits it as
+// an instantiate/rw record chain closing at t != t.  Every term below
+// is re-derived here -- the recording only names the equation (trace
+// id), the goal side, the redex path and the face -- so a defective
+// recording can only fail the replay (marker fallback), never emit an
+// unsound record.  Each narrow step splits into its two checkable
+// halves: an `instantiate` record (parent instance -- the checker's
+// match fast-path) and a `rw` record citing the equation's trace
+// derivation.
+
+typedef struct {
+  Term l, r;
+  u32  trace;                 // cited trace id (rw) or ATP_TRACE_NONE
+  u8   is_rw;                 // 1 = rw record, 0 = instantiate record
+} CliNrecRec;
+
+// Load one trace equation for replay (no cache: narrow chains are
+// short).  Returns 0 when the id is out of range / unloadable.
+static u8 cli_nrec_eq(AtpState *s, u32 ti, Term *l, Term *r) {
+  return cli_trace_pair(s, ti, l, r);
+}
+
+// Replay ONE recorded step onto (cur_l, cur_r), appending records.
+// Returns 0 on any mismatch.
+static int cli_nrec_replay_step(AtpState *s, const NrStep *st,
+                                Term *cur_l, Term *cur_r,
+                                CliNrecRec *recs, u32 *nr, u32 cap) {
+  u32 pos[ATP_PROOF_MAX_DEPTH];
+  for (u8 i = 0; i < st->pos_len; i++) pos[i] = st->pos[i];
+  switch (st->kind) {
+  case NR_CANON:
+    thvm_normalize_vars(cur_l, cur_r);   // alpha only: no record needed
+    return 1;
+  case NR_CLOSE: {
+    if (kbo_eq(*cur_l, *cur_r)) return 1;
+    RewriteSubst mg = {{0}};
+    if (!thvm_unify(*cur_l, *cur_r, &mg)) return 0;
+    *cur_l = thvm_unify_apply(*cur_l, &mg);
+    *cur_r = thvm_unify_apply(*cur_r, &mg);
+    if (*nr >= cap) return 0;
+    recs[*nr].l = *cur_l; recs[*nr].r = *cur_r;
+    recs[*nr].trace = ATP_TRACE_NONE; recs[*nr].is_rw = 0u;
+    (*nr)++;
+    return kbo_eq(*cur_l, *cur_r);
+  }
+  case NR_NORM: {
+    Term tl = 0, tr = 0;
+    if (!cli_nrec_eq(s, st->trace, &tl, &tr)) return 0;
+    Term pat = st->fwd ? tl : tr;
+    Term rep = st->fwd ? tr : tl;
+    Term side = st->side ? *cur_r : *cur_l;
+    Term sub = cp_subterm_at(side, pos, st->pos_len);
+    if (sub == 0) return 0;
+    RewriteSubst m = {{0}};
+    if (!thvm_match(pat, sub, &m)) return 0;
+    Term repl;
+    if (atp_vars_contained(rep, pat)) {
+      repl = thvm_subst_apply(rep, &m);
+    } else {
+      // r2 grounded template: extras -> minimal constant, exactly the
+      // normalizer's application (still an instance of the equation).
+      Term tmpl = atp_unorient_template(s, pat, rep);
+      if (tmpl == 0) return 0;
+      repl = thvm_subst_apply(tmpl, &m);
+    }
+    Term nside = cp_replace_at(side, pos, st->pos_len, repl);
+    if (nside == 0) return 0;
+    if (st->side) *cur_r = nside; else *cur_l = nside;
+    if (*nr >= cap) return 0;
+    recs[*nr].l = *cur_l; recs[*nr].r = *cur_r;
+    recs[*nr].trace = st->trace; recs[*nr].is_rw = 1u;
+    (*nr)++;
+    return 1;
+  }
+  case NR_NARROW: {
+    Term tl = 0, tr = 0;
+    if (!cli_nrec_eq(s, st->trace, &tl, &tr)) return 0;
+    Term pat = thvm_rename_vars(st->fwd ? tl : tr, CP_RENAME_OFFSET);
+    Term rep = thvm_rename_vars(st->fwd ? tr : tl, CP_RENAME_OFFSET);
+    Term side = st->side ? *cur_r : *cur_l;
+    Term sub = cp_subterm_at(side, pos, st->pos_len);
+    if (sub == 0 || term_tag(sub) == TAG_FVR) return 0;
+    RewriteSubst mg = {{0}};
+    if (!thvm_unify(sub, pat, &mg)) return 0;
+    Term inst_l = thvm_unify_apply(*cur_l, &mg);
+    Term inst_r = thvm_unify_apply(*cur_r, &mg);
+    if (!kbo_eq(inst_l, *cur_l) || !kbo_eq(inst_r, *cur_r)) {
+      if (*nr >= cap) return 0;
+      recs[*nr].l = inst_l; recs[*nr].r = inst_r;
+      recs[*nr].trace = ATP_TRACE_NONE; recs[*nr].is_rw = 0u;
+      (*nr)++;
+    }
+    Term rep_i = thvm_unify_apply(rep, &mg);
+    Term iside = st->side ? inst_r : inst_l;
+    Term nside = cp_replace_at(iside, pos, st->pos_len, rep_i);
+    if (nside == 0) return 0;
+    *cur_l = st->side ? inst_l : nside;
+    *cur_r = st->side ? nside : inst_r;
+    if (*nr >= cap) return 0;
+    recs[*nr].l = *cur_l; recs[*nr].r = *cur_r;
+    recs[*nr].trace = st->trace; recs[*nr].is_rw = 1u;
+    (*nr)++;
+    return 1;
+  }
+  default:
+    return 0;
+  }
+}
+
+#define CLI_NREC_MAX_RECS 16384u
+
+// Emit the recorded narrowing proof for goal `goal_id`.  Returns 1 on
+// a complete, closed replay; 0 leaves the caller's marker path.
+static int cli_emit_narrow_proof(FILE *fp, AtpState *s,
+                                 const PrProblem *pr, u32 goal_id,
+                                 u8 *printed) {
+  AtpNrec *q = (AtpNrec *)s->nrec;
+  Term gl = s->goal_orig_lhs, gr = s->goal_orig_rhs;
+  if (gl == 0 || gr == 0) return 0;
+  // Assemble the winning step sequence: the greedy chain is the arena
+  // prefix; the queue's is the closing segment's parent lineage.
+  static const NrStep *seq[CLI_NREC_MAX_RECS];
+  u32 n_seq = 0u;
+  if (q != NULL && q->closed) {
+    // Lineage: close_parent .. seed, reversed.
+    u32 lineage[512];
+    u32 ln = 0u;
+    u32 cur = q->close_parent;
+    while (cur != NR_ROOT && ln < 512u) {
+      if (cur == NR_NONE || cur >= q->n_cg) return 0;
+      lineage[ln++] = cur;
+      cur = q->cg_parent[cur];
+    }
+    if (cur != NR_ROOT) return 0;   // lineage too deep / broken
+    for (u32 i = ln; i > 0u; i--) {
+      u32 cg = lineage[i - 1u];
+      u32 off = q->cg_off[cg];
+      if (off == NR_NONE) return 0;
+      for (u32 k = 0; k < q->cg_len[cg] && n_seq < CLI_NREC_MAX_RECS; k++)
+        seq[n_seq++] = &q->steps[off + k];
+    }
+    if (q->close_off == NR_NONE) return 0;
+    for (u32 k = 0; k < q->close_len && n_seq < CLI_NREC_MAX_RECS; k++)
+      seq[n_seq++] = &q->steps[q->close_off + k];
+  } else if (q != NULL && q->greedy) {
+    if (q->lost) return 0;
+    for (u32 k = 0; k < q->n && n_seq < CLI_NREC_MAX_RECS; k++)
+      seq[n_seq++] = &q->steps[k];
+  } else if (!(term_tag(gl) == term_tag(gr) && kbo_eq(gl, gr))) {
+    return 0;   // nothing recorded and the goal is not trivially closed
+  }
+  if (n_seq >= CLI_NREC_MAX_RECS) return 0;
+  // Replay.
+  CliNrecRec *recs =
+      (CliNrecRec *)malloc((size_t)(2u * n_seq + 2u) * sizeof(CliNrecRec));
+  if (recs == NULL) return 0;
+  u32 cap = 2u * n_seq + 2u;
+  u32 nrs = 0u;
+  Term cur_l = gl, cur_r = gr;
+  for (u32 k = 0; k < n_seq; k++) {
+    if (!cli_nrec_replay_step(s, seq[k], &cur_l, &cur_r,
+                              recs, &nrs, cap)) {
+      free(recs);
+      return 0;
+    }
+  }
+  if (!kbo_eq(cur_l, cur_r)) { free(recs); return 0; }
+  // Emit: cited trace derivations first, then the goal chain.
+  for (u32 k = 0; k < nrs; k++) {
+    if (recs[k].is_rw && recs[k].trace != ATP_TRACE_NONE)
+      cli_emit_trace(fp, s, pr, recs[k].trace, printed);
+  }
+  const char *goal_src = NULL;
+  char gsrcbuf[1024];
+  goal_src = cli_prov_source(fp, pr, gl, gr, 1, gsrcbuf, sizeof gsrcbuf);
+  fprintf(fp, "cnf(goal_%u, negated_conjecture, ", goal_id);
+  cli_print_term(fp, pr, gl);
+  fputs(" != ", fp);
+  cli_print_term(fp, pr, gr);
+  if (goal_src != NULL)
+    fputs(goal_src, fp);
+  else
+    fprintf(fp, ", file('%s')).\n", g_cli_problem);
+  char prev[32];
+  snprintf(prev, sizeof prev, "goal_%u", goal_id);
+  for (u32 k = 0; k < nrs; k++) {
+    fprintf(fp, "cnf(g%u_%u, plain, ", goal_id, k);
+    cli_print_term(fp, pr, recs[k].l);
+    fputs(" != ", fp);
+    cli_print_term(fp, pr, recs[k].r);
+    if (recs[k].is_rw && recs[k].trace != ATP_TRACE_NONE)
+      fprintf(fp, ", inference(rw, [status(thm)], [%s, t%u])).\n",
+              prev, recs[k].trace);
+    else
+      fprintf(fp, ", inference(instantiate, [status(thm)], [%s])).\n",
+              prev);
+    snprintf(prev, sizeof prev, "g%u_%u", goal_id, k);
+  }
+  fprintf(fp, "cnf(contradiction_%u, plain, $false, "
+              "inference(trivial_inequality_removal, [status(thm)], [%s])).\n",
+          goal_id, prev);
+  free(recs);
+  return 1;
+}
+
 static void cli_proof_hook(AtpState *s) {
   if (!g_cli_want_proof || g_atp_bench_status != (int)ATP_PROVED) return;
   PrProblem *pr = (PrProblem *)g_atp_bench_pr;
@@ -551,8 +759,21 @@ static void cli_proof_hook(AtpState *s) {
   // the alias per conjunct with atp_goals_alias (no array rebuild).
   u32 n_goals = (s->n_goals > 0u) ? s->n_goals
               : ((pr->n_goals > 0u) ? pr->n_goals : 1u);
+  // Trace-pair cache: shared by citation resolution, the treatment
+  // bridge, and the narrowing replay (cli_emit_goal_chain re-resets;
+  // idempotent).
+  cli_tp_cache_reset(s);
   for (u32 g = 0; g < n_goals; g++) {
     Term gl, gr;
+    // Existential (narrowing-closed) goal: no single-NF chain exists
+    // structurally; emit the recorded narrowing derivation instead.
+    // Never touch the pr-> handles here (not GC roots) and never
+    // thvm_atp_set_goal (it would clear the existential state).
+    if (s->goal_existential) {
+      if (cli_emit_narrow_proof(out, s, pr, g, printed)) continue;
+      fprintf(out, "%% goal %u: no single-NF chain extractable\n", g);
+      continue;
+    }
     if (s->n_goals > 1u) {
       atp_goals_alias(s, g);
       gl = s->goal_lhs; gr = s->goal_rhs;

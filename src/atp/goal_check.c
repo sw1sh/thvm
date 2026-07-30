@@ -30,24 +30,33 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     Term lhs = s->goal_lhs;
     Term rhs = s->goal_rhs;
     if (kbo_eq(lhs, rhs)) return ATP_PROVED;
+    // Scope the narrowing proof recorder (see thvm.h nrec block) to
+    // THIS loop: thvm_atp_narrow_step is public API on arbitrary
+    // pairs, and only the goal chain belongs in the recording.
+    s->narrow_rec_active = 1u;
     for (u32 i = 0; i < ATP_NARROW_BUDGET; i++) {
       Term new_lhs = 0, new_rhs = 0;
       u8 ok = thvm_atp_narrow_step(s, lhs, rhs,
                                    &new_lhs, &new_rhs,
                                    &s->witness_subst);
-      if (!ok) return ATP_RUNNING;   // no more narrows; wait for new R
+      if (!ok) {
+        s->narrow_rec_active = 0u;
+        return ATP_RUNNING;   // no more narrows; wait for new R
+      }
       lhs = new_lhs;
       rhs = new_rhs;
       if (kbo_eq(lhs, rhs)) {
         // Capture the converged terms back into the goal slots
         // so successive goal_check calls (after full saturation)
         // still report PROVED.
+        s->narrow_rec_active = 0u;
         s->goal_lhs = lhs;
         s->goal_rhs = rhs;
         return ATP_PROVED;
       }
     }
     // Budget exhausted; let the outer loop add more rules and retry.
+    s->narrow_rec_active = 0u;
     s->goal_lhs = lhs;
     s->goal_rhs = rhs;
     return ATP_RUNNING;
@@ -202,6 +211,12 @@ fn u8 thvm_atp_set_goal_existential(AtpState *s, Term lhs, Term rhs) {
   s->goal_lhs = lhs;
   s->goal_rhs = rhs;
   s->goal_existential = 1;
+  // Pristine pair for the proof emitter (GC-rooted): the narrowing
+  // lanes rewrite the goal slots destructively.  A goal change also
+  // invalidates any recorded derivation.
+  s->goal_orig_lhs = lhs;
+  s->goal_orig_rhs = rhs;
+  thvm_atp_nrec_free(s);
   s->tgt_ready = 0;   // tgt goal-symbol bitset recollected lazily
   // Existential goals are single-conjecture only: drop any multi-goal
   // state a prior thvm_atp_set_goals left behind so goal_check takes

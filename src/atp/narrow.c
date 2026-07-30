@@ -46,6 +46,221 @@ fn u32 thvm_atp_peek_top_k(AtpState *s, u32 k,
   return k;
 }
 
+// === Narrowing proof recorder ======================================
+//
+// See the AtpState.nrec block comment in thvm.h.  Both narrowing
+// lanes (the greedy walk and the critical-goal queue) record COMPACT
+// step descriptors -- trace id of the equation used, goal side, redex
+// path, face direction -- never Terms, so the recorder needs no GC
+// rooting and retains no heap.  The CLI emitter replays the winning
+// derivation from the pristine conjecture pair; every emitted term is
+// re-derived at emission, so a recording defect can only cost the
+// proof (marker fallback), never its soundness.
+//
+// Layout: one append-only step arena.  The greedy lane's chain is the
+// arena prefix in order (nr->greedy).  The queue lane commits one
+// SEGMENT per stored critical goal -- [NR_NARROW, NR_NORM*, NR_CANON]
+// -- plus the closing segment [NR_NARROW, NR_NORM*, NR_CLOSE]; the
+// winning lineage is the parent chain from the closing segment up to
+// the seed (parent NR_ROOT).  A segment that cannot be recorded
+// (depth/caps) commits as NR_NONE: search proceeds identically, and
+// emission falls back to the marker only if the winning lineage
+// crosses it.
+
+#define NR_NONE      0xFFFFFFFFu
+#define NR_ROOT      0xFFFFFFFEu
+#define NR_STEP_MAX  (1u << 21)     // arena hard cap (~40B per step)
+#define NR_SCR_CAP   4096u          // steps per in-flight admit
+
+enum { NR_NARROW = 0u, NR_NORM = 1u, NR_CLOSE = 2u, NR_CANON = 3u };
+
+typedef struct {
+  u32 trace;                        // trace id of the equation used
+  u8  kind, side, fwd, pos_len;
+  u8  pos[ATP_PROOF_MAX_DEPTH];
+} NrStep;
+
+typedef struct AtpNrec {
+  NrStep *steps; u32 n, cap;        // committed step arena
+  u32 *cg_parent, *cg_off, *cg_len; // per stored critical goal
+  u32  n_cg, cg_cap;
+  NrStep scr[NR_SCR_CAP];           // in-flight admit scratch
+  u32  sn;
+  u8   scr_bad;                     // this admit's segment unrecordable
+  u32  pending_parent;              // CG being narrowed (NR_ROOT = seed)
+  u32  close_parent, close_off, close_len;
+  u8   closed;
+  u8   greedy;                      // arena prefix is the greedy chain
+  u8   lost;                        // greedy chain broken: no proof
+} AtpNrec;
+
+static AtpNrec *nrec_get(AtpState *s) {
+  if (s->nrec == NULL) {
+    AtpNrec *q = (AtpNrec *)calloc(1u, sizeof(AtpNrec));
+    if (q == NULL) return NULL;
+    q->pending_parent = NR_ROOT;
+    q->close_parent   = NR_NONE;
+    s->nrec = (struct AtpNrec *)q;
+  }
+  return (AtpNrec *)s->nrec;
+}
+
+fn void thvm_atp_nrec_free(AtpState *s) {
+  AtpNrec *q = (AtpNrec *)s->nrec;
+  if (q == NULL) return;
+  free(q->steps);
+  free(q->cg_parent); free(q->cg_off); free(q->cg_len);
+  free(q);
+  s->nrec = NULL;
+}
+
+// Recording armed for this state?  (The greedy lane additionally
+// gates on narrow_rec_active -- thvm_atp_narrow_step is public API.)
+static u8 nrec_on(const AtpState *s) {
+  return (u8)(s->record_narrow != 0u);
+}
+
+// TRACE id of live rule slot k, or NR_NONE (recording then degrades
+// to a broken segment / lost chain -- never to a wrong citation:
+// emission replays every step against the loaded trace equation).
+static u32 nrec_slot_trace(const AtpState *s, u32 k) {
+  if (s->r_trace == NULL || k >= s->n_rules) return NR_NONE;
+  u32 t = s->r_trace[k];
+  return (t == ATP_TRACE_NONE) ? NR_NONE : t;
+}
+
+static void nrec_fill(NrStep *st, u32 kind, u32 trace, u32 side, u8 fwd,
+                      const u32 *pos, u32 pos_len) {
+  st->trace   = trace;
+  st->kind    = (u8)kind;
+  st->side    = (u8)side;
+  st->fwd     = fwd;
+  st->pos_len = (u8)pos_len;
+  for (u32 i = 0; i < pos_len; i++) st->pos[i] = (u8)pos[i];
+}
+
+// Append one step to the arena (greedy chain).  Failure latches lost.
+static void nrec_push(AtpState *s, u32 kind, u32 trace, u32 side, u8 fwd,
+                      const u32 *pos, u32 pos_len) {
+  AtpNrec *q = nrec_get(s);
+  if (q == NULL || q->lost) { if (q != NULL) q->lost = 1u; return; }
+  q->greedy = 1u;
+  if ((kind == NR_NARROW || kind == NR_NORM) && trace == NR_NONE) {
+    q->lost = 1u;
+    return;
+  }
+  if (pos_len > ATP_PROOF_MAX_DEPTH || q->n >= NR_STEP_MAX) {
+    q->lost = 1u;
+    return;
+  }
+  if (q->n == q->cap) {
+    u32 nc = q->cap ? q->cap * 2u : 1024u;
+    NrStep *ns = (NrStep *)realloc(q->steps, (size_t)nc * sizeof(NrStep));
+    if (ns == NULL) { q->lost = 1u; return; }
+    q->steps = ns; q->cap = nc;
+  }
+  nrec_fill(&q->steps[q->n++], kind, trace, side, fwd, pos, pos_len);
+}
+
+// Scratch ops (queue lane): reset per admit, push, commit on store.
+static void nrec_scr_reset(AtpState *s, u32 parent) {
+  AtpNrec *q = nrec_get(s);
+  if (q == NULL) return;
+  q->sn = 0u;
+  q->scr_bad = 0u;
+  q->pending_parent = parent;
+}
+
+static void nrec_scr_push(AtpState *s, u32 kind, u32 trace, u32 side,
+                          u8 fwd, const u32 *pos, u32 pos_len) {
+  AtpNrec *q = nrec_get(s);
+  if (q == NULL || q->scr_bad) { if (q != NULL) q->scr_bad = 1u; return; }
+  if ((kind == NR_NARROW || kind == NR_NORM) && trace == NR_NONE) {
+    q->scr_bad = 1u;
+    return;
+  }
+  if (pos_len > ATP_PROOF_MAX_DEPTH || q->sn >= NR_SCR_CAP) {
+    q->scr_bad = 1u;
+    return;
+  }
+  nrec_fill(&q->scr[q->sn++], kind, trace, side, fwd, pos, pos_len);
+}
+
+// Commit the scratch segment to the arena; returns the offset or
+// NR_NONE (bad/overflowing segments commit as broken -- the search is
+// never perturbed by recording pressure).
+static u32 nrec_scr_commit(AtpState *s) {
+  AtpNrec *q = (AtpNrec *)s->nrec;
+  if (q == NULL || q->scr_bad || q->n + q->sn > NR_STEP_MAX) return NR_NONE;
+  while (q->n + q->sn > q->cap) {
+    u32 nc = q->cap ? q->cap * 2u : 1024u;
+    NrStep *ns = (NrStep *)realloc(q->steps, (size_t)nc * sizeof(NrStep));
+    if (ns == NULL) return NR_NONE;
+    q->steps = ns; q->cap = nc;
+  }
+  u32 off = q->n;
+  for (u32 i = 0; i < q->sn; i++) q->steps[q->n++] = q->scr[i];
+  return off;
+}
+
+// Register stored CG idx's segment (parent + committed slice).
+static void nrec_cg_store(AtpState *s, u32 idx, u32 off, u32 len) {
+  AtpNrec *q = (AtpNrec *)s->nrec;
+  if (q == NULL) return;
+  if (idx >= q->cg_cap) {
+    u32 nc = q->cg_cap ? q->cg_cap : 1024u;
+    while (nc <= idx) nc *= 2u;
+    u32 *np = (u32 *)realloc(q->cg_parent, (size_t)nc * sizeof(u32));
+    u32 *no = (u32 *)realloc(q->cg_off, (size_t)nc * sizeof(u32));
+    u32 *nl = (u32 *)realloc(q->cg_len, (size_t)nc * sizeof(u32));
+    if (np != NULL) q->cg_parent = np;
+    if (no != NULL) q->cg_off = no;
+    if (nl != NULL) q->cg_len = nl;
+    if (np == NULL || no == NULL || nl == NULL) return;   // idx unrecorded
+    for (u32 i = q->cg_cap; i < nc; i++) {
+      q->cg_parent[i] = NR_NONE;
+      q->cg_off[i] = NR_NONE;
+      q->cg_len[i] = 0u;
+    }
+    q->cg_cap = nc;
+  }
+  q->cg_parent[idx] = q->pending_parent;
+  q->cg_off[idx] = off;
+  q->cg_len[idx] = (off == NR_NONE) ? 0u : len;
+  if (idx >= q->n_cg) q->n_cg = idx + 1u;
+}
+
+// Recording normalize (queue lane, recording runs only): the same
+// single-step machinery the proof extractor replays with
+// (atp_proof_rewrite_step: leftmost-outermost, oriented rules plus
+// order-gated unorientable faces), each step pushed to the scratch.
+// Replaces atp_rewrite_normalize inside cgq_admit when armed -- the
+// --proof trajectory may diverge from the unrecorded run (the
+// RecordNorm precedent), which is acceptable: the emitted proof is
+// what must verify, and it replays THESE steps.
+static Term nrec_normalize_rec(AtpState *s, Term t, u32 side) {
+  for (u32 it = 0; it < ATP_GOAL_NORM_CAP; it++) {
+    u8  pos8[ATP_PROOF_MAX_DEPTH];
+    u32 rule = 0u;
+    u8  pos_len = 0u, fwd = 1u, fired = 0u;
+    g_atp_proof_oriented_only = 0u;
+    Term t2 = atp_proof_rewrite_step(s, t, pos8, 0u, &rule, &pos_len,
+                                     &fwd, &fired);
+    if (!fired || kbo_eq(t, t2)) return t;
+    u32 pos[ATP_PROOF_MAX_DEPTH];
+    for (u8 i = 0; i < pos_len; i++) pos[i] = pos8[i];
+    nrec_scr_push(s, NR_NORM, nrec_slot_trace(s, rule), side, fwd,
+                  pos, pos_len);
+    t = t2;
+  }
+  return t;
+}
+
+fn void thvm_atp_set_record_narrow(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->record_narrow = on ? 1u : 0u;
+}
+
 // === 8.9b: narrowing primitives ====================================
 
 // One-shot narrow visitor: tries each rule at the current position,
@@ -59,6 +274,7 @@ typedef struct {
   Term         *out_other;
   RewriteSubst *witness;
   u8            success;
+  u8            side_ix;     // 0 = narrowing lhs, 1 = narrowing rhs
 } NarrowCtx;
 
 static u32 narrow_visit(const u32 *p, u32 p_len, void *raw) {
@@ -69,8 +285,20 @@ static u32 narrow_visit(const u32 *p, u32 p_len, void *raw) {
   if (sub == 0 || term_tag(sub) == TAG_FVR) return 0;
 
   for (u32 k = 0; k < ctx->s->n_rules; k++) {
-    Term lj = thvm_rename_vars(ctx->s->lhs[k], CP_RENAME_OFFSET);
-    Term rj = thvm_rename_vars(ctx->s->rhs[k], CP_RENAME_OFFSET);
+    Term fl = ctx->s->lhs[k], fr = ctx->s->rhs[k];
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // Lazy slots (TAG_NUM sentinels, live only as FT mirrors) never
+    // unify as sentinels -- materialize them, or the greedy walk is
+    // structurally blind to every lazy rule.
+    if (term_tag(fl) == TAG_NUM || term_tag(fr) == TAG_NUM) {
+      fl = atp_rule_term(ctx->s, k, 0u);
+      fr = atp_rule_term(ctx->s, k, 1u);
+    }
+#endif
+    if (fl == 0 || fr == 0 ||
+        term_tag(fl) == TAG_NUM || term_tag(fr) == TAG_NUM) continue;
+    Term lj = thvm_rename_vars(fl, CP_RENAME_OFFSET);
+    Term rj = thvm_rename_vars(fr, CP_RENAME_OFFSET);
     RewriteSubst subst = {{0}};
     if (!thvm_unify(sub, lj, &subst)) continue;
 
@@ -89,6 +317,12 @@ static u32 narrow_visit(const u32 *p, u32 p_len, void *raw) {
         ctx->witness->bindings[i] = subst.bindings[i];
       }
     }
+    // Proof recording (scoped to goal_check's greedy loop): the step
+    // is fully determined by (rule trace id, side, position) -- the
+    // emitter re-unifies at replay.  Greedy uses the l->r face only.
+    if (nrec_on(ctx->s) && ctx->s->narrow_rec_active)
+      nrec_push(ctx->s, NR_NARROW, nrec_slot_trace(ctx->s, k),
+                ctx->side_ix, 1u, p, p_len);
     ctx->success = 1;
     return 0;
   }
@@ -113,6 +347,7 @@ fn u8 thvm_atp_narrow_step(AtpState *s, Term lhs, Term rhs,
   ctx.other      = rhs;
   ctx.out_side   = out_lhs;
   ctx.out_other  = out_rhs;
+  ctx.side_ix    = 0u;
   cp_walk_positions(lhs, path, 0, CP_MAX_DEPTH, narrow_visit, &ctx, 0);
   if (ctx.success) return 1;
 
@@ -121,6 +356,7 @@ fn u8 thvm_atp_narrow_step(AtpState *s, Term lhs, Term rhs,
   ctx.other      = lhs;
   ctx.out_side   = out_rhs;
   ctx.out_other  = out_lhs;
+  ctx.side_ix    = 1u;
   cp_walk_positions(rhs, path, 0, CP_MAX_DEPTH, narrow_visit, &ctx, 0);
   return ctx.success;
 }
@@ -454,15 +690,35 @@ static u8 cgq_seen_add(AtpCgq *q, Term l, Term r, u32 idx) {
 // CG.  Returns ATP_PROVED when the pair's sides unify (equality
 // resolution), ATP_RUNNING otherwise.
 static AtpStatus cgq_admit(AtpState *s, AtpCgq *q, Term l, Term r) {
+  u8 rec = nrec_on(s);
   // R-normalize both sides (equational consequences only: sound).
-  l = atp_rewrite_normalize(s, l, s->lhs, s->rhs, s->n_rules,
-                            ATP_GOAL_NORM_CAP);
-  r = atp_rewrite_normalize(s, r, s->lhs, s->rhs, s->n_rules,
-                            ATP_GOAL_NORM_CAP);
+  // Recording runs take the step-recording normalizer instead (same
+  // rule set; single-step machinery the emitter replays) -- the
+  // --proof trajectory may diverge, the RecordNorm precedent.
+  if (rec) {
+    l = nrec_normalize_rec(s, l, 0u);
+    r = nrec_normalize_rec(s, r, 1u);
+  } else {
+    l = atp_rewrite_normalize(s, l, s->lhs, s->rhs, s->n_rules,
+                              ATP_GOAL_NORM_CAP);
+    r = atp_rewrite_normalize(s, r, s->lhs, s->rhs, s->n_rules,
+                              ATP_GOAL_NORM_CAP);
+  }
   // Close: the two sides unify -> an instance is a syntactic identity.
   {
     RewriteSubst mg = {{0}};
     if (thvm_unify(l, r, &mg)) {
+      if (rec) {
+        AtpNrec *nq = (AtpNrec *)s->nrec;
+        nrec_scr_push(s, NR_CLOSE, NR_NONE, 0u, 1u, NULL, 0u);
+        u32 off = nrec_scr_commit(s);
+        if (nq != NULL && off != NR_NONE) {
+          nq->closed       = 1u;
+          nq->close_parent = nq->pending_parent;
+          nq->close_off    = off;
+          nq->close_len    = nq->sn;
+        }
+      }
       s->goal_lhs = thvm_unify_apply(l, &mg);
       s->goal_rhs = thvm_unify_apply(r, &mg);
       q->proved = 1u;
@@ -471,6 +727,7 @@ static AtpStatus cgq_admit(AtpState *s, AtpCgq *q, Term l, Term r) {
   }
   if (q->full) return ATP_RUNNING;
   thvm_normalize_vars(&l, &r);
+  if (rec) nrec_scr_push(s, NR_CANON, NR_NONE, 0u, 1u, NULL, 0u);
   // Guards: size cap; var ids must stay below CP_RENAME_OFFSET so the
   // per-step rename-apart never crosses the REWRITE_MAX_VAR cliff.
   u32 w = cgq_term_size(l) + cgq_term_size(r);
@@ -508,6 +765,11 @@ static AtpStatus cgq_admit(AtpState *s, AtpCgq *q, Term l, Term r) {
   q->wm[idx] = 0u;
   q->weight[idx] = w;
   q->state[idx] = 0u;
+  if (rec) {
+    AtpNrec *nq = (AtpNrec *)s->nrec;
+    u32 off = nrec_scr_commit(s);
+    if (nq != NULL) nrec_cg_store(s, idx, off, nq->sn);
+  }
   cgq_heap_push(q, idx);
   if (q->n >= ATP_CGQ_MAX_CGS) q->full = 1u;
   return ATP_RUNNING;
@@ -531,7 +793,8 @@ static AtpStatus cgq_admit(AtpState *s, AtpCgq *q, Term l, Term r) {
 // cut the branching the unordered walk drowns in.
 static AtpStatus cgq_narrow_face(AtpState *s, AtpCgq *q, u32 idx,
                                  Term face_l, Term face_r,
-                                 u8 face_oriented, u32 *budget) {
+                                 u8 face_oriented, u32 *budget,
+                                 u32 rec_trace, u8 rec_fwd) {
   for (u32 side = 0u; side < 2u; side++) {
     Term me    = side == 0u ? q->lhs[idx] : q->rhs[idx];
     Term other = side == 0u ? q->rhs[idx] : q->lhs[idx];
@@ -573,6 +836,17 @@ static AtpStatus cgq_narrow_face(AtpState *s, AtpCgq *q, u32 idx,
             if (ok) {
               Term nl = thvm_unify_apply(repl, &mg);
               Term nr = thvm_unify_apply(other, &mg);
+              if (nrec_on(s)) {
+                // Redex path: the child index taken from each stack
+                // frame above the hit.  The emitter re-unifies the
+                // recorded face at this position, so the descriptor
+                // (trace, side, path, face) fully determines the step.
+                nrec_scr_reset(s, idx);
+                u32 rpos[CP_MAX_DEPTH];
+                for (u32 d = 0; d < sp; d++) rpos[d] = st[d].next - 1u;
+                nrec_scr_push(s, NR_NARROW, rec_trace, side, rec_fwd,
+                              rpos, sp);
+              }
               if (cgq_admit(s, q, side == 0u ? nl : nr,
                             side == 0u ? nr : nl) == ATP_PROVED)
                 return ATP_PROVED;
@@ -603,14 +877,17 @@ static AtpStatus cgq_narrow_rule(AtpState *s, AtpCgq *q, u32 idx,
                                  u32 k, u32 *budget) {
   if (s->lhs[k] == 0) return ATP_RUNNING;   // deleted rule slot
   u8 oriented = (u8)(s->r_orient != NULL && s->r_orient[k]);
+  u32 rtr = nrec_on(s) ? nrec_slot_trace(s, k) : NR_NONE;
   Term lj = thvm_rename_vars(s->lhs[k], CP_RENAME_OFFSET);
   Term rj = thvm_rename_vars(s->rhs[k], CP_RENAME_OFFSET);
-  if (cgq_narrow_face(s, q, idx, lj, rj, oriented, budget) == ATP_PROVED)
+  if (cgq_narrow_face(s, q, idx, lj, rj, oriented, budget,
+                      rtr, 1u) == ATP_PROVED)
     return ATP_PROVED;
   if (!oriented) {
     // Unorientable equation: the reversed face narrows too (COL011-1's
     // opening step is o_definition's RHS face).
-    if (cgq_narrow_face(s, q, idx, rj, lj, 0u, budget) == ATP_PROVED)
+    if (cgq_narrow_face(s, q, idx, rj, lj, 0u, budget,
+                        rtr, 0u) == ATP_PROVED)
       return ATP_PROVED;
   }
   return ATP_RUNNING;
@@ -624,6 +901,7 @@ static AtpStatus atp_cgq_check(AtpState *s) {
     s->cgq = (struct AtpCgq *)q;
     // Seed CG0 = the original goal pair (kept immutable in the goal
     // slots -- unlike the greedy lane, the queue never rewrites them).
+    if (nrec_on(s)) nrec_scr_reset(s, NR_ROOT);
     if (cgq_admit(s, q, s->goal_lhs, s->goal_rhs) == ATP_PROVED)
       return ATP_PROVED;
   }

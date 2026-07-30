@@ -2935,6 +2935,16 @@ int main(int argc, char **argv) {
     if (rn != NULL && rn[0] == '1') thvm_atp_set_record_norm_steps(s, 1u);
   }
 
+  // THVM_ATP_NARROW_PROOF=1 arms the narrowing proof recorder (set by
+  // the CLI under --proof): an existential goal's narrowing closure
+  // records compact step descriptors so the emitter can replay the
+  // derivation as an instantiate/rw chain.  Default OFF:
+  // byte-identical trajectories (see AtpState.nrec in thvm.h).
+  {
+    const char *np = getenv("THVM_ATP_NARROW_PROOF");
+    if (np != NULL && np[0] == '1') thvm_atp_set_record_narrow(s, 1u);
+  }
+
   // THVM_ATP_ENIGMA_EXPORT=<path.tsv> records the features of every
   // processed CP so that, on PROVED, the run can label them by proof-DAG
   // reachability and append a labelled row per CP to the dataset TSV --

@@ -5326,6 +5326,34 @@ typedef struct {
   struct AtpCgq *cgq;
   u8 use_narrow_queue;
 
+  // Narrowing proof recorder (--proof emission support; armed via
+  // thvm_atp_set_record_narrow, default OFF = byte-identical
+  // trajectories).  An existential goal closes by NARROWING (the
+  // greedy walk above or the critical-goal queue), and the closing
+  // derivation -- instantiate goal variables, rewrite, repeat -- has
+  // no single-NF chain for the proof extractor: every such win
+  // emitted the "no single-NF chain extractable" marker (the CASC-J13
+  // 15-problem empty-proof class).  When armed, both narrowing lanes
+  // record COMPACT step descriptors (trace id of the equation used,
+  // side, redex path, face -- no Terms, so no GC rooting and no heap
+  // retention), enough for the CLI emitter to REPLAY the derivation
+  // from the pristine conjecture pair and print it as an
+  // instantiate/rw record chain.  Soundness never rests on the
+  // recording: the emitter re-derives every term itself and falls
+  // back to the honest marker if any step fails to replay.
+  // narrow_rec_active scopes recording to goal_check's greedy loop
+  // (thvm_atp_narrow_step is also a public API used on non-goal
+  // pairs, which must not pollute the chain).  Layout in narrow.c.
+  struct AtpNrec *nrec;
+  u8 record_narrow;
+  u8 narrow_rec_active;
+  // Pristine conjecture pair as set by thvm_atp_set_goal_existential
+  // (GC-rooted): the narrowing lanes rewrite the goal slots
+  // destructively, but the emitted negated_conjecture record must
+  // print the ORIGINAL pair so its file()/provenance citation matches
+  // the problem.
+  Term goal_orig_lhs, goal_orig_rhs;
+
   // Refutational goal driver (unified-engine Phase 2; opt-in, see the
   // atp_goal_drive_* lane at the end of src/atp/_.c).  Admits the
   // ground negated goal as an ACTIVE participant: a backward
@@ -7145,6 +7173,9 @@ fn void      thvm_atp_set_wpo     (AtpState *s, const WpoConfig *wpo);
 fn void      thvm_atp_set_use_mnf (AtpState *s, u8 on);
 fn void      thvm_atp_set_use_goal_narrow(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_narrow_queue(AtpState *s, u8 on);
+// Narrowing proof recorder (see AtpState.nrec): arm/free.
+fn void      thvm_atp_set_record_narrow(AtpState *s, u8 on);
+fn void      thvm_atp_nrec_free(AtpState *s);
 fn void      thvm_atp_set_use_goal_drive(AtpState *s, u8 on);
 // Opt in to the flatterm fast-path for the mixed normalize loop (no
 // effect unless the dylib is built with ATP_RULE_INDEX).  Same normal

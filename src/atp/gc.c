@@ -81,7 +81,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // thvm_atp_init and reused across orient_and_add calls, so a GC
   // mid-completion would otherwise leave a dangling cell).
   u32 n_roots = 6u * s->n_rules /* lhs,rhs,dead l/r save,subsumer l/r */
-              + 4u /* goal + goal_nf */
+              + 6u /* goal + goal_nf + pristine goal_orig pair */
               + 4u * s->n_goals /* multi-goal conjuncts + NFs */
               + s->n_trace + REWRITE_MAX_VAR
               + 1u /* min_const */
@@ -123,6 +123,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   roots[w++] = s->goal_rhs;
   roots[w++] = s->goal_lhs_nf;
   roots[w++] = s->goal_rhs_nf;
+  roots[w++] = s->goal_orig_lhs;
+  roots[w++] = s->goal_orig_rhs;
   // Multi-goal conjuncts.  goals_lhs[0] usually VALUE-aliases goal_lhs
   // (same cell); the collector's forwarding pointers relocate both
   // copies to the same to-space address, so duplicate roots are safe
@@ -226,6 +228,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   s->goal_rhs = roots[w++];
   s->goal_lhs_nf = roots[w++];
   s->goal_rhs_nf = roots[w++];
+  s->goal_orig_lhs = roots[w++];
+  s->goal_orig_rhs = roots[w++];
   for (u32 g = 0; g < s->n_goals; g++) {
     s->goals_lhs[g]    = roots[w++];
     s->goals_rhs[g]    = roots[w++];
