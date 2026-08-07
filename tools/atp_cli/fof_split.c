@@ -342,6 +342,56 @@ static int prov_emit_rec(FILE *fp, int rec) {
   return 1;
 }
 
+// A Tseitin definition symbol is NEW exactly once: on the first emitted
+// record that mentions it.  Printing the record's whole [ts0,tsn) range on
+// every clause it clausified into (the pre-2026-07-31 behaviour) repeated an
+// identical 38-name list across all 8 CSR021+1 clauses and declared def36 as
+// "new" on records that only USE it -- a checker verifying new-symbol
+// freshness sees the symbol already in scope and rejects the annotation.
+// `g_prov_newsym_seen` is the per-problem declared set; reset in tp_fof_load.
+static unsigned char *g_prov_newsym_seen = NULL;
+static u32            g_prov_newsym_cap  = 0;
+
+static void prov_def_reset(void) {
+  free(g_prov_newsym_seen);
+  g_prov_newsym_seen = NULL;
+  g_prov_newsym_cap  = 0;
+}
+
+// Claim `idx` for the record being emitted; 0 once some earlier record has.
+static int prov_def_claim(u32 idx) {
+  if (idx >= g_prov_newsym_cap) {
+    u32 ncap = (g_prov_newsym_cap == 0u) ? 64u : g_prov_newsym_cap;
+    while (idx >= ncap) ncap *= 2u;
+    unsigned char *n = (unsigned char *)realloc(g_prov_newsym_seen, ncap);
+    if (n == NULL) return 0;
+    memset(n + g_prov_newsym_cap, 0, ncap - g_prov_newsym_cap);
+    g_prov_newsym_seen = n;
+    g_prov_newsym_cap  = ncap;
+  }
+  if (g_prov_newsym_seen[idx]) return 0;
+  g_prov_newsym_seen[idx] = 1u;
+  return 1;
+}
+
+// Does `text` mention <def_prefix><idx> as a whole token?  The trailing
+// digit check keeps def3 from matching inside def36.
+static int prov_def_mentions(const char *text, u32 idx) {
+  char name[TP_NAME_LEN + 16];
+  int  n = snprintf(name, sizeof name, "%s%u", g_fof_def_prefix, idx);
+  if (n <= 0) return 0;
+  for (const char *p = strstr(text, name); p != NULL;
+       p = strstr(p + 1, name)) {
+    char before = (p == text) ? '\0' : p[-1];
+    char after  = p[n];
+    if ((before == '\0' || (!isalnum((unsigned char)before) && before != '_'))
+        && !isdigit((unsigned char)after)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int prov_emit_cnf(FILE *fp, int k) {
   if (g_prov_cnf == NULL || k < 0 || k >= g_prov_ncnf) return 0;
   ProvCnf *c = &g_prov_cnf[k];
@@ -355,10 +405,17 @@ static int prov_emit_cnf(FILE *fp, int k) {
   fprintf(fp, "cnf(c%d, plain, %s, inference(cnf_transformation, "
               "[status(esa)", k, c->text);
   if (r->tseitin && r->tsn > r->ts0) {
-    fprintf(fp, ", new_symbols(definition, [");
-    for (u32 s = r->ts0; s < r->tsn; s++)
-      fprintf(fp, "%s%s%u", (s > r->ts0) ? "," : "", g_fof_def_prefix, s);
-    fprintf(fp, "])");
+    // Declare only the definitions THIS clause introduces: mentioned here,
+    // and not already declared by an earlier-emitted clause.
+    u32 first = 1u;
+    for (u32 s = r->ts0; s < r->tsn; s++) {
+      if (!prov_def_mentions(c->text, s)) continue;
+      if (!prov_def_claim(s)) continue;
+      fprintf(fp, "%s%s%u", first ? ", new_symbols(definition, [" : ",",
+              g_fof_def_prefix, s);
+      first = 0u;
+    }
+    if (!first) fprintf(fp, "])");
   }
   fprintf(fp, "], [%s])).\n", last);
   return 1;
@@ -1550,6 +1607,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   pc_nsyms = 0;
   fol_reset_skolem();
   fol_reset_tseitin();   // aux labels run per-problem, across records
+  prov_def_reset();      // definition symbols are declared once per problem
   g_fof_or_used = g_fof_eq_used = g_fof_not_used = 0;
   g_fof_or_ncl = g_fof_tseitin_recs = 0;
   g_fof_split_nor = g_fof_split_unfit = g_fof_split_pending = 0;
