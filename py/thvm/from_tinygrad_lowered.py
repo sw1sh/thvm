@@ -91,7 +91,9 @@ class _Lowerer:
         h = self.h
         if op is Ops.PARAM:
             n = _ptr_numel(u.dtype) or 1
-            slot = int(u.arg)
+            # tinygrad PARAM arg became a ParamArg dataclass (slot, dtype, ...)
+            # (tinygrad uop/ops.py:23); older graphs carried the bare slot int.
+            slot = int(getattr(u.arg, "slot", u.arg))
             self.params[slot] = n
             t = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(n,),
                          instance=slot)
