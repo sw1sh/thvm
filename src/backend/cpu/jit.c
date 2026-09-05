@@ -70,6 +70,12 @@ static u32 cpu_jit_warmup(void) {
 }
 
 // Optimization level for the clang JIT compile, tunable via
+// Parser nesting limit for the generated C.  A rendered kernel is a single
+// nested expression whose depth grows with the fused chain length; clang's
+// default is 256, past which the compile FAILS and the kernel falls back to
+// the interpreter.  4096 covers the deepest chains thvm fuses.
+#define CPU_JIT_BRACKET_DEPTH 4096
+
 // THVM_CPU_JIT_OPT (one of "O0".."O3", default "O3").  -O3 (not
 // -ffast-math, so float semantics are bit-identical) gives the deeply
 // nested conv-backward gather-reduce kernels ~1.6x over -O2 at steady
@@ -262,9 +268,15 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   // scalar + bit-identical).  THVM_CPU_JIT_OPT overrides; the dylib
   // filename carries the opt tag so an artifact built at a different
   // level is never reused under the wrong assumptions.
+  // -fbracket-depth: a rendered kernel is ONE nested C expression, so a deep
+  // fused elementwise chain blows clang's default 256-deep parser limit
+  // ("fatal error: bracket nesting level exceeded maximum of 256") and the
+  // whole kernel silently falls back to the interpreter -- correct, but a
+  // ~14x cliff on a 400-op chain.  The limit is a parser guard, not a
+  // codegen one; raising it costs nothing for shallow kernels.
   snprintf(cmd, sizeof cmd,
-           "clang -%s -fPIC -shared -o '%s' '%s' 2>/dev/null",
-           cpu_jit_opt_tag(), dl_path, src_path);
+           "clang -%s -fbracket-depth=%d -fPIC -shared -o '%s' '%s' 2>/dev/null",
+           cpu_jit_opt_tag(), CPU_JIT_BRACKET_DEPTH, dl_path, src_path);
   if (system(cmd) != 0) return NULL;
 
   void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
@@ -407,7 +419,10 @@ static void *cpu_jit_build_combined(CpuJitJob const *jobs, u32 njobs,
     fclose(cf);
     char optflag[8];
     snprintf(optflag, sizeof optflag, "-%s", cpu_jit_opt_tag());
-    char *argv[8] = { (char *)"clang", optflag, (char *)"-fPIC",
+    char bracketflag[32];
+    snprintf(bracketflag, sizeof bracketflag, "-fbracket-depth=%d",
+             CPU_JIT_BRACKET_DEPTH);   // see cpu_jit_build
+    char *argv[9] = { (char *)"clang", optflag, bracketflag, (char *)"-fPIC",
                       (char *)"-shared", (char *)"-o", comb_dl, comb_c, NULL };
     pid_t pid;
     if (posix_spawnp(&pid, "clang", NULL, NULL, argv, environ) != 0) return NULL;
