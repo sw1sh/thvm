@@ -21,8 +21,11 @@ NotImplementedError on purpose so coverage grows explicitly):
   binary     ADD, MUL, MAX, CMPLT, CMPNE, SUB
   unary      RECIPROCAL/RECIP, EXP2, LOG2, SQRT, NEG
   ternary    WHERE  (cond ? a : b, composed from CMP + mul/add)
-  reduce     REDUCE (arg=(Ops.ADD|Ops.MAX, (axis, ...))) and the
-             legacy REDUCE_AXIS spelling
+  reduce     REDUCE in tinygrad's front normal form, arg=(Ops.ADD|Ops.MAX,
+             n_front_axes): the reduced axes were PERMUTEd to the front and
+             the output drops them (uop/ops.py:635-642, :449-452); the older
+             tuple-axis spelling arg=(op, (axis, ...)) and REDUCE_AXIS are
+             still accepted
   movement   RESHAPE, EXPAND, PERMUTE, PAD, SHRINK, FLIP
   cast       CAST, BITCAST
   noop       CONTIGUOUS, CONTIGUOUS_BACKWARD, DETACH, NOOP (passthrough)
@@ -112,6 +115,29 @@ def _expand(src: int, shape) -> int:
     return _move(_uop_expand, src, shape)
 
 
+def _bcast(term: int, src_shape, out_shape) -> int:
+    """Right-align `src_shape` into `out_shape` and expand -- tinygrad's
+    implicit broadcast (uop/ops.py:70-82 _broadcast_shape/broadcast_axes):
+    elementwise srcs keep their own shapes and the ALU node's shape is the
+    per-right-aligned-dim broadcast; codegen expands late.  thvm's binops
+    take same-shape operands, so the bridge materialises the broadcast as
+    RESHAPE (prepend 1s) + EXPAND."""
+    src_shape, out_shape = tuple(src_shape), tuple(out_shape)
+    if src_shape == out_shape or not out_shape:
+        return term
+    if len(src_shape) < len(out_shape):
+        src_shape = (1,) * (len(out_shape) - len(src_shape)) + src_shape
+        term = _reshape(term, src_shape)
+    if src_shape != out_shape:
+        term = _expand(term, out_shape)
+    return term
+
+
+def _emit_b(u, i: int, memo: dict[int, int]) -> int:
+    """Emit src i of an elementwise node, broadcast to the node's shape."""
+    return _bcast(_emit(u.src[i], memo), _shape_of(u.src[i]), _shape_of(u))
+
+
 def _permute(src: int, perm) -> int:
     return _move(_uop_permute, src, perm)
 
@@ -161,10 +187,25 @@ def _const_value(u):
     tinygrad CONST.arg may be a plain python number or a wrapper like
     ConstFloat(0.0) / ConstInt(2) exposing `.x`.
     """
+    # tinygrad's declared CONST accessor is `val` (uop/ops.py:262-266); the
+    # stored arg encoding is explicitly unstable.  Fall back to the raw arg
+    # (and its legacy `.x` wrapper) for older checkouts.
+    # NOTE: probe by calling, not hasattr -- older checkouts also define a
+    # `val` (the BIND accessor, uop/ops.py:915 there) that asserts on CONST.
+    if getattr(u, "op", None) is _ops_const():
+        try:
+            return u.val
+        except Exception:
+            pass
     arg = u.arg
     if hasattr(arg, "x"):
         return arg.x
     return arg
+
+
+def _ops_const():
+    from tinygrad.uop.ops import Ops
+    return Ops.CONST
 
 
 def _find_buffer(u):
@@ -329,24 +370,24 @@ def _emit(u, memo: dict[int, int]) -> int:
 
     # ---- binary -------------------------------------------------------
     if op == Ops.SUB:
-        a = _emit(u.src[0], memo)
-        b = _emit(u.src[1], memo)
+        a = _emit_b(u, 0, memo)
+        b = _emit_b(u, 1, memo)
         term = _binary(K.ADD, a, _unary(K.NEG, b))
         memo[key] = term
         return term
 
     if op == Ops.MAX:
         # max(a,b) = (a<b) ? b : a  =  (a<b)*b + (1-(a<b))*a
-        a = _emit(u.src[0], memo)
-        b = _emit(u.src[1], memo)
+        a = _emit_b(u, 0, memo)
+        b = _emit_b(u, 1, memo)
         term = _max(a, b)
         memo[key] = term
         return term
 
     if op == Ops.CMPNE:
         # a != b  ==  1 - (a == b)
-        a = _emit(u.src[0], memo)
-        b = _emit(u.src[1], memo)
+        a = _emit_b(u, 0, memo)
+        b = _emit_b(u, 1, memo)
         eq = _binary(K.CMPEQ, a, b)
         one = _fconst(1.0)
         term = _binary(K.ADD, one, _unary(K.NEG, eq))
@@ -354,8 +395,8 @@ def _emit(u, memo: dict[int, int]) -> int:
         return term
 
     if op in (Ops.ADD, Ops.MUL, Ops.CMPLT):
-        a = _emit(u.src[0], memo)
-        b = _emit(u.src[1], memo)
+        a = _emit_b(u, 0, memo)
+        b = _emit_b(u, 1, memo)
         term = _binary(_binary_opcode(op), a, b)
         memo[key] = term
         return term
@@ -365,9 +406,9 @@ def _emit(u, memo: dict[int, int]) -> int:
     # branches (tinygrad max_pool2d masks with -inf; an arithmetic select
     # cond*a+(1-cond)*b would hit 0*-inf=NaN).
     if op == Ops.WHERE:
-        cond = _emit(u.src[0], memo)
-        a = _emit(u.src[1], memo)
-        b = _emit(u.src[2], memo)
+        cond = _emit_b(u, 0, memo)
+        a = _emit_b(u, 1, memo)
+        b = _emit_b(u, 2, memo)
         term = _iwhere(cond, a, b)
         memo[key] = term
         return term
@@ -381,6 +422,11 @@ def _emit(u, memo: dict[int, int]) -> int:
             kind = K.REDUCE_MAX
         else:
             raise NotImplementedError(f"unmapped REDUCE op {rop}")
+        # Front normal form (uop/ops.py:635-642): arg[1] is an int n, the
+        # reduced axes are the first n of the (already permuted) src, and
+        # the output shape drops them (:449-452).  Legacy: a tuple of axes.
+        if isinstance(axes, int):
+            axes = tuple(range(axes))
         src = _emit(u.src[0], memo)
         # thvm reduces one axis at a time; reduce innermost-first so the
         # outer axis indices stay valid.
@@ -402,8 +448,11 @@ def _emit(u, memo: dict[int, int]) -> int:
         return term
 
     if op == Ops.EXPAND:
+        # EXPAND now PREPENDS len(arg) dims (uop/ops.py:430-431, :731):
+        # out = arg + src.shape.  _bcast handles both that and the legacy
+        # same-rank expand-the-1s form.
         src = _emit(u.src[0], memo)
-        term = _expand(src, _shape_of(u))
+        term = _bcast(src, _shape_of(u.src[0]), _shape_of(u))
         memo[key] = term
         return term
 

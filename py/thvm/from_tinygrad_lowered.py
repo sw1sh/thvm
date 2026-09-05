@@ -39,6 +39,16 @@ def _ops():
 
 
 def _const(u):
+    # tinygrad's declared CONST accessor is `val` (uop/ops.py:262-266); the
+    # arg encoding itself is unstable.  Keep the raw-arg / `.x` fallbacks
+    # for older checkouts.
+    # NOTE: probe by calling, not hasattr -- older checkouts also define a
+    # `val` (the BIND accessor, uop/ops.py:915 there) that asserts on CONST.
+    if u.op is _ops().CONST:
+        try:
+            return u.val
+        except Exception:
+            pass
     return getattr(u.arg, "x", u.arg)
 
 
@@ -60,6 +70,13 @@ def _axis_type(at) -> int:
         return K.AXIS_LOCAL
     if "REDUCE" in s:
         return K.AXIS_REDUCE
+    if "DEVICE" in s:
+        # a multi-device (UNSHARD) sharding axis; this bridge ingests
+        # single-device kernels only -- refuse rather than misroute.
+        raise NotImplementedError("AxisType.DEVICE range in a single-device import")
+    # AxisType.WEAK (placement uncommitted; tinygrad #17283 renamed the old
+    # LOOP to WEAK and STRONGLOOP to LOOP) and AxisType.LOOP (committed
+    # serial loop) both render as thvm's serial AXIS_LOOP.
     return K.AXIS_LOOP
 
 
@@ -103,7 +120,10 @@ class _Lowerer:
                  else h.fconst(float(v)))
         elif op is Ops.RANGE:
             extent = int(_const(u.src[0]))
-            at = _axis_type(u.arg[1])
+            # RANGE arg = (axis_id, ..., axis_type): tinygrad reads the type
+            # as arg[-1] (uop/ops.py:89, :611, :1172); a multi-part range
+            # carries sub-ids between the two.
+            at = _axis_type(u.arg[-1])
             if at in (K.AXIS_LOOP, K.AXIS_GLOBAL):
                 self.grid_axes.append(extent)
             t = h.range(axis_id=int(u.arg[0]), axis_type=at, extent=extent)
@@ -148,6 +168,16 @@ class _Lowerer:
             # value-preserving cast; thvm cast to the node's dtype
             dst = K.INT32 if _is_int_dtype(u.dtype) else K.FP32
             t = h.cast(self.emit(u.src[0]), dst)
+        elif op is getattr(Ops, "MAX", None):
+            # Binary MAX survives into the lowered IR now (relu = MAX(x, 0)).
+            # thvm's kernel IR has no max opcode; a true select via IWHERE
+            # (not an arithmetic blend) stays correct when a branch is
+            # non-finite, e.g. -inf pool masks.  Float only: the kernel
+            # CMPLT is the float compare.
+            if _is_int_dtype(u.dtype):
+                raise NotImplementedError("lowered int MAX (no int CMPLT in the kernel IR)")
+            a, b = self.emit(u.src[0]), self.emit(u.src[1])
+            t = h.iwhere(h.cmplt(a, b), b, a)
         else:
             raise NotImplementedError(f"lowered op {op}")
         self.memo[key] = t
@@ -178,10 +208,18 @@ def _kernel_stores(tg_tensor):
 
 
 def _uniq(buf_uop):
-    """The UNIQUE id of a BUFFER uop (its stable buffer identity), or None."""
+    """A BUFFER's stable identity, or None.
+
+    Current tinygrad keys a buffer by its ParamArg slot (uop/ops.py:23,
+    :1238-1241 -- `buf.arg.slot`; src[0] is now the size CONST).  Older
+    checkouts carried the identity as a UNIQUE src.
+    """
     Ops = _ops()
-    if (buf_uop.op is Ops.BUFFER and buf_uop.src
-            and buf_uop.src[0].op is Ops.UNIQUE):
+    if buf_uop.op is Ops.BUFFER and hasattr(buf_uop.arg, "slot"):
+        return int(buf_uop.arg.slot)
+    uniq = getattr(Ops, "UNIQUE", None)
+    if (uniq is not None and buf_uop.op is Ops.BUFFER and buf_uop.src
+            and buf_uop.src[0].op is uniq):
         return buf_uop.src[0].arg
     return None
 
