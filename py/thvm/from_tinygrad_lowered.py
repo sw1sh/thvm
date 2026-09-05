@@ -107,10 +107,14 @@ class _Lowerer:
         op = u.op
         h = self.h
         if op is Ops.PARAM:
-            n = _ptr_numel(u.dtype) or 1
-            # tinygrad PARAM arg became a ParamArg dataclass (slot, dtype, ...)
-            # (tinygrad uop/ops.py:23); older graphs carried the bare slot int.
+            # tinygrad PARAM arg became a ParamArg dataclass (uop/ops.py:23);
+            # older graphs carried the bare slot int.  Buffer metadata keeps
+            # migrating INTO that arg (size, then shape in #17783, then the
+            # device Buffer in #17913), so prefer the declared arg.size over
+            # inferring the element count from the pointer dtype.
             slot = int(getattr(u.arg, "slot", u.arg))
+            n = getattr(u.arg, "size", None)
+            n = int(n) if n is not None else (_ptr_numel(u.dtype) or 1)
             self.params[slot] = n
             t = h.buffer(scope=K.SCOPE_GLOBAL, dtype=K.FP32, dims=(n,),
                          instance=slot)
