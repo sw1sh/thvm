@@ -925,6 +925,15 @@ static void rmu_emit_term(Term t, FILE *fp) {
 // `opt_kinds[]` / `opt_factors[]`.  RMU_NO_OPT marks "no OPT wrap"
 // distinctly from "OPT(_, UNROLL, _)" since UOP_OPT_UNROLL == 0
 // would otherwise collide with the zero-init default.
+// Recursion budget for the rmu_term_* subgraph predicates.  These answer
+// "does this subtree contain X"; exceeding the budget makes them answer NO,
+// which is a WRONG answer (not a safe bail) that silently mis-drives codegen.
+// It was 256, so a fused elementwise chain >= 255 deep rendered incorrect
+// kernels (thvm 722711 vs 4848 on a 300-op chain) -- masked until now only
+// because clang refused to compile such a kernel (its own 256-bracket limit)
+// and the whole thing fell back to the interpreter.
+#define RMU_MAX_WALK_DEPTH 8192u
+
 #define RMU_NO_OPT 0xFFu
 
 // Per-render cap on collected ranges.  Larger than MAX_DIM (tensor
@@ -1019,7 +1028,7 @@ static void rmu_collect_ranges_rec(Term t, Term *ranges,
 // in the generic store path.  Bounded recursion by a `depth` budget
 // so a malformed cyclic DAG can't drive an infinite descent.
 static int rmu_term_contains_rec(Term t, Term needle, u32 depth) {
-  if (depth > 256) return 0;
+  if (depth > RMU_MAX_WALK_DEPTH) return 0;
   if (t == needle) return 1;
   if (term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);
@@ -1071,7 +1080,7 @@ static int rmu_term_contains(Term t, Term needle) {
 // popped out of its result's range set: the reduce-axis stops flowing
 // at the reduce, exactly this boundary.
 static int rmu_term_uses_axis_rec(Term t, u32 axis_id, u32 depth) {
-  if (depth > 256) return 0;
+  if (depth > RMU_MAX_WALK_DEPTH) return 0;
   if (term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);
   u64 loc = term_val(t);
@@ -1144,7 +1153,7 @@ static int rmu_term_uses_axis(Term t, u32 axis_id) {
 // undeclared -> MSL "use of undeclared identifier" -> per-op
 // fallback for that kernel).
 static int rmu_term_has_reduce(Term t, u32 depth) {
-  if (depth > 256) return 0;
+  if (depth > RMU_MAX_WALK_DEPTH) return 0;
   if (term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);
   u64 loc = term_val(t);
@@ -6705,6 +6714,24 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   u32 n_inputs = 0;
   rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
   Term out_buf = slot_bufs[0];
+  // DECLINE an unsound signature rather than render it.  n_inputs is the
+  // MAX instance seen, not a count, and rmu_discover_bufs_rec silently
+  // returns on `inst >= RMU_DISCOVER_MAX` -- so a kernel that fuses past the
+  // slot table (or whose instances are sparse) leaves holes in slot_bufs[].
+  // Rendering a hole emitted `const unsigned char *inN` (uop_buffer_dtype of
+  // a 0 Term) while the body used it as float: the kernel compiled and
+  // returned SILENTLY WRONG data -- a 255-deep fused elementwise chain read
+  // its inputs byte-wise (722711 vs 4848 on a 300-op chain).  Writing
+  // nothing makes cpu_jit_render_canon's `ftell <= 0` decline the JIT and
+  // fall back to the interpreter: correct, just slower.  The same hole
+  // previously surfaced as "identifier in63 is undefined" (see RMU_BUF_MAX).
+  // A slot is sound only if it is a real UOP_BUFFER: uop_buffer_dtype
+  // returns 0 for anything else (a 0 hole, or BUFFERIZE residue the unified
+  // pass declined to resolve), and dtype 0 renders as `unsigned char`.
+  if (n_inputs >= RMU_DISCOVER_MAX) return;
+  for (u32 i = 1; i <= n_inputs; i++) {
+    if (slot_bufs[i] == 0 || uop_buffer_dtype(slot_bufs[i]) == 0) return;
+  }
   rmu_buf_names_reset();
   if (out_buf != 0) rmu_buf_names_set(out_buf, "out");
   fputs("#include <stdint.h>\n", fp);
