@@ -16,6 +16,16 @@
 // build).  The movement-op-root gather needs to know whether a TJit
 // closure is mid-record, and to record a replayable JIT_OP_GATHER so the
 // one-shot host gather re-runs off the live source on every replay.
+// Recursion budget for the materialize graph walks/rewrites.  These guards
+// return a WRONG result past the budget (the term unchanged, 0, or an empty
+// list) rather than failing, so a graph deeper than the budget is silently
+// mis-materialized: a 300-deep fused elementwise chain produced 0.0 instead
+// of its sum.  It was 256, which a long `a+b+c+...` chain crosses trivially.
+// Raised well past any chain we fuse; the real fix is iterative/memoized
+// traversal (these are all acyclic hash-consed DAG walks).
+#define MAT_MAX_WALK_DEPTH 65536u
+
+
 fn int  jit_is_capturing(void);
 fn void jit_capture_record_gather(u32 src_tid, u32 dst_buf);
 // Capture-time recycle pool (the JIT memory planner's capture side; see the
@@ -2763,7 +2773,7 @@ static int mask_scan_seen(MaskScanVisited *v, Term t) {
 }
 static int uop_value_subtree_has_mask_op_rec(MaskScanVisited *v,
                                               Term t, u32 depth) {
-  if (depth > 256) return 0;
+  if (depth > MAT_MAX_WALK_DEPTH) return 0;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return 0;
   if (mask_scan_seen(v, r)) return 0;
@@ -3228,7 +3238,7 @@ static Term try_inline_bufferize_via_axis_table(
 static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
                                     UnifiedSubst const *sub,
                                     Term t, u32 depth) {
-  if (depth > 256) return t;
+  if (depth > MAT_MAX_WALK_DEPTH) return t;
   Term resolved = term_resolve(t);
   // Substitution map: when active, replace any Term-identity hit with
   // the matching `to` Term (a consumer-iter expression bound to a
@@ -3601,7 +3611,7 @@ static u32 axext_lookup(AxExtMap const *m, u32 aid) {
 
 static void axext_collect_rec(AxExtMap *m, Term t, u32 *visited, u64 cap,
                               u32 epoch, u32 depth) {
-  if (depth > 256) return;
+  if (depth > MAT_MAX_WALK_DEPTH) return;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return;
   // Memoize per node: the map `m` is a SET keyed by axis_id (axext_add is
@@ -3679,7 +3689,7 @@ static void axext_collect(AxExtMap *m, Term t) {
 // already-inlined body (no BUFFERIZE survives post-inline on the walker
 // path).
 static int subtree_uses_axis_mat(Term t, u32 aid, u32 depth) {
-  if (depth > 256) return 0;
+  if (depth > MAT_MAX_WALK_DEPTH) return 0;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return 0;
   u8 op = term_ext(r);
@@ -3695,7 +3705,7 @@ static int subtree_uses_axis_mat(Term t, u32 aid, u32 depth) {
 static u32 f32_to_bits(f32 v) { u32 b; memcpy(&b, &v, sizeof b); return b; }
 
 static Term repair_collapsed_reduces_rec(Term t, AxExtMap const *m, u32 depth) {
-  if (depth > 256) return t;
+  if (depth > MAT_MAX_WALK_DEPTH) return t;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return t;
   u8 op = term_ext(r);
@@ -3872,7 +3882,7 @@ static int bufferize_scan_seen(BufferizeScanVisited *v, Term t) {
 }
 
 static int bufferize_scan_rec(BufferizeScanVisited *v, Term t, u32 depth) {
-  if (depth > 256) return 0;
+  if (depth > MAT_MAX_WALK_DEPTH) return 0;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return 0;
   if (bufferize_scan_seen(v, r)) return 0;
@@ -3938,7 +3948,7 @@ static int slot_needs_chain_skip(u32 tid) {
 static void unified_fold_chain_scan(KernelEntry const *ke, Term t,
                                     ChainFoldMarks *marks,
                                     BufferizeScanVisited *v, u32 depth) {
-  if (depth > 256) return;
+  if (depth > MAT_MAX_WALK_DEPTH) return;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return;
   if (bufferize_scan_seen(v, r)) return;
@@ -4021,7 +4031,7 @@ static void range_axis_add(RangeAxisSet *s, u32 aid) {
 static void stranded_range_collect_addr(RangeAxisSet *iter_axes,
                                         BufferizeScanVisited *v, Term t,
                                         u32 depth) {
-  if (depth > 256) return;
+  if (depth > MAT_MAX_WALK_DEPTH) return;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return;
   if (bufferize_scan_seen(v, r)) return;
@@ -4045,7 +4055,7 @@ static void stranded_range_collect_addr(RangeAxisSet *iter_axes,
 static int stranded_range_check_value(RangeAxisSet const *iter_axes,
                                       BufferizeScanVisited *v, Term t,
                                       u32 depth) {
-  if (depth > 256) return 0;
+  if (depth > MAT_MAX_WALK_DEPTH) return 0;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return 0;
   if (bufferize_scan_seen(v, r)) return 0;
@@ -4132,7 +4142,7 @@ static RangeAxisSet const *strand_free_aids(StrandFreeCache *c, Term t,
   // `out` is scratch the caller owns; on a cache hit we return the cached
   // pointer, else we fill `out`, cache a copy, and return the cache entry.
   out->n = 0;
-  if (depth > 256) return out;
+  if (depth > MAT_MAX_WALK_DEPTH) return out;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return out;
   u8  op  = term_ext(r);
@@ -4382,7 +4392,7 @@ static int broadcast_input_scan_rec(KernelEntry const *ke,
                                     BufferizeScanVisited *v, Term t,
                                     u64 out_numel,
                                     u32 depth) {
-  if (depth > 256) return 0;
+  if (depth > MAT_MAX_WALK_DEPTH) return 0;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return 0;
   if (bufferize_scan_seen(v, r)) return 0;
@@ -4580,7 +4590,7 @@ static char const *bypass_dbg_op_name(u8 op) {
 static u64 strand_loop_product_rec(RangeAxisSet const *bound,
                                    BufferizeScanVisited *v, Term t,
                                    u32 depth) {
-  if (depth > 256) return 1;
+  if (depth > MAT_MAX_WALK_DEPTH) return 1;
   Term r = term_resolve(t);
   if (term_tag(r) != TAG_UOP) return 1;
   if (bufferize_scan_seen(v, r)) return 1;
