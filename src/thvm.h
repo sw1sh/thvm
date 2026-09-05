@@ -2295,12 +2295,13 @@ u32  thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor);
 u64  thvm_metal_buf_byte_offset(u32 buf_id);
 // Per-realize ARENA planner (schedule/materialize.c) Metal handles.  The
 // planner allocates ONE device buffer for a pass's working set, then hands
-// out per-boundary SLICES (views) of it; non-overlapping lifetimes share
-// bytes.  Recycling a slice is correct under the ICB because Apple hazard-
+// out per-boundary views of it (tinygrad: arena[offset:offset+nbytes]
+// .bitcast(dtype), a SHRINK/BITCAST pair since Ops.SLICE was removed in
+// #17492); non-overlapping lifetimes share bytes.  Recycling a slice is correct under the ICB because Apple hazard-
 // tracks accesses that alias within one MTLBuffer (a separate-MTLBuffer
 // recycle is not ordered by the per-command [cmd setBarrier] on Apple9).
 // Mirror of the CUDA arena helpers (backend/cuda/buf_alloc.c) and tinygrad
-// ops_metal.py:192 (_offset) + schedule/memory.py:56-59.
+// ops_metal.py:192 (_offset) + schedule/memory.py:55-57.
 //
 // thvm_metal_buf_arena_alloc: allocate the shared arena buffer of `nbytes`,
 // marked skip_freelist (freed wholesale at end-of-realize).  Returns 0 on
