@@ -166,6 +166,43 @@ wolframscript -f wl/Examples/proover/check.wls <dir>      # any corpus dir
 the `correct/` vs `incorrect/` subtree is the gold label both checkers score
 against.
 
+## The published 2026 set (a DEV metric)
+
+The organizers published the 100 competition proofs after the event
+(`ProoVer2026.zip`; 9 later withdrawn, 91 scored out of 138). The set is
+public now, so its score is a development measurement, never a forecast:
+every fix below is a general mechanism justified by the ProoVer rules or
+the TSTP semantics, and must also hold on the open-world held-out slice.
+
+| build | score /138 | invalid caught | valid confirmed | false accepts | false rejects |
+| ----- | ---------- | -------------- | --------------- | ------------- | ------------- |
+| competition entry (2026-07) | -103 | 25/47 | 28/44 | 17 | 11 |
+| abstain-by-default rebuild  | -1   | 33/47 | 27/44 | 8  | 14 |
+| + specified-rule checks     | +137 | 47/47 | 43/44 | 0  | 0  |
+
+What the published proofs taught (each bullet is a mechanism, not a case):
+
+- **The specified `skolemize` rule is syntactic.** Status `esa` and nothing
+  else; one parent; one `new_symbols(skolem, [sK])`; a `skolemize(Var,
+  sK(...))` annotation naming an existential *in polarity* (a positive `?`
+  or a negative `!`, never under `<=>`); Skolem arguments covering the
+  universals the eliminated subformula depends on; and the result exactly
+  the parent with that one binder removed. Several invalid proofs were
+  semantically harmless (skolemizing a universal is just an instance) and
+  still invalid by the rule.
+- **Status claims are checked by their meaning.** `thm`: premises entail
+  the conclusion. `esa`: equisatisfiable by a model *expansion*, so a step
+  introducing no new symbol must be entailed. `cth`: brings a hypothesis
+  into the refutation, legitimate only as the negation of the conjecture.
+- **The conjecture enters a refutation only through its negation**; a
+  derivation of `$false` that cites the conjecture any other way assumed
+  its goal.
+- **Leaves are imports.** A record with no source, a cited name absent
+  from the problem file, and a dangling citation are all violations.
+- **Variables are binder-fresh.** Every quantifier binding gets its own
+  id, so shadowed binders (`![X]:..?[X]:..`) can never be conflated by
+  the clausifier, the matcher, or the shape checks.
+
 ## Two StarExec tarballs, one code base
 
 Each competition gets its own self-contained submission, both built from the

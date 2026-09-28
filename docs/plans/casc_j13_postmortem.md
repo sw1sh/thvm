@@ -184,3 +184,53 @@ TSTP proofs over CASC-J13 problems, mutated by a spec-derived battery
 (tools/proover/openworld/), scored with a 30% held-out slice whose hard
 requirement is zero false accepts.  The old synth corpus is kept as a
 regression floor (138/138).
+
+## Addendum (2026-09-28): scored against the published set
+
+The organizers published the 100 PRV proofs on 2026-07-28 (hours after
+the rebuild concluded they were unpublished), then withdrew 9 and
+re-scored out of 138: CheckProof's official result is -103/138, still
+last (GAPT 111). Exact gold labels were recovered from the ten systems'
+per-problem scores with zero conflicts.
+
+**The rebuild scored -1/138** on the set (8 false accepts, 14 false
+rejects). **The leaf-lie taxonomy was right for PRV046-054 only**: all of
+those are caught by the rebuilt leaf check. The other 8 false accepts
+(PRV031, 038, 058, 083, 084, 092, 093, 095) were a different family --
+violations of the SPECIFIED skolemize rule and of the refutation
+structure, most of them semantically harmless:
+
+- PRV038/058: `skolemize` with status `thm` (or `esa` AND `thm`);
+- PRV083/084: the eliminated variable is universal in polarity;
+- PRV092: two parents; PRV093: no `skolemize(Var, T)` annotation;
+- PRV095: the witness replaces a binder that had no occurrence;
+- PRV031: an `assume` step cites the conjecture as a premise.
+
+The 14 false rejects were checker bugs: a shadowed binder nest
+conflated by the clausifier (PRV001), `$false` as a parent read as an
+ordinary atom (PRV030), vacuous skolemizations flagged "symbol absent"
+(PRV010-016, PRV096), and a Skolem-freshness rule that counted
+instantiation at the Skolem constant (and a tautology mentioning it) as
+a second introduction (PRV019/022/076/089).
+
+**After the fixes: +137/138 as a DEV metric** (47/47 invalid caught,
+43/44 valid confirmed, PRV043 abstains), 0 false accepts on the set and
+on the open-world held-out slice. Auditing the new code against its own
+soundness argument found more false-accept holes the old binary shared
+(instantiate binder capture, conjecture/descendant demodulators,
+predicate abstraction, definitions with free body variables); crafted
+counterexamples are battery cases H10-H18. The held-out gate then caught
+one more: the equational routes confirmed steps with UNCITED file-prior
+records and axioms as demodulators (the rebuild accepted H20). The
+strict profile now judges every step by its stated premises only, as
+the rules require of the external ATP -- which also makes FindProof's
+own under-cited records (equality-encoding hyper_resolution steps that
+omit the ifeq axioms, CSR021's p674 that folds in plus-demodulation)
+VerifiedBad: genuine missing premises in FindProof's proof output, and
+the open-world corpus's "valid" label on those proofs is wrong under
+the ProoVer semantics.
+
+Lesson, again: the -10 cases were not the family we modelled. What
+worked this time was reading every error with the proof in hand, and
+deriving each fix from the rules text rather than from the case.
+

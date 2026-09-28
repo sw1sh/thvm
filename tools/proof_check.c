@@ -626,6 +626,9 @@ static Term pc_simp_tf(Term f) {
   }
 }
 
+static double pc_refute_clock = 0.0;
+static u32    pc_refute_steps = 0;
+
 // Clause-count estimate of the distributed CNF (saturating), to route
 // huge disjunctive formulas through the Tseitin transformation instead
 // of the exponential distribution (equisatisfiable either way, so a
@@ -652,6 +655,10 @@ static double pc_cnf_est(Term f) {
 // fol_formula_to_clauses resets the Skolem counter on entry: clausifying
 // each formula separately would give distinct existentials the SAME
 // Skolem constant and turn a satisfiable set spuriously unsatisfiable.
+// pc_refute_clock / pc_refute_steps override one call's clock and
+// saturation-step budget (0 = defaults): the strict equational
+// fallthrough only hunts a quick proof or countermodel over the cited
+// premises.
 static AtpStatus pc_refute(Term *fs, int n) {
   if (n <= 0) return ATP_QUEUE_EMPTY;
   // Clock bound: a single saturation at the step cap can otherwise burn
@@ -661,6 +668,7 @@ static AtpStatus pc_refute(Term *fs, int n) {
   double rem = (g_pc_deadline > 0.0) ? g_pc_deadline - pc_wall_now() : 12.0;
   double cap = rem / 4.0;
   if (cap > 3.0) cap = 3.0;
+  if (pc_refute_clock > 0.0 && cap > pc_refute_clock) cap = pc_refute_clock;
   if (cap < 0.3) return ATP_ABORTED;             // no wall left: undecided
   Term conj = 0;
   for (int i = 0; i < n; i++) {
@@ -681,7 +689,7 @@ static AtpStatus pc_refute(Term *fs, int n) {
     cl = fol_tseitin_extract_clauses(sk, &nc);
   }
   if (cl == NULL) return ATP_ABORTED;
-  CnfState *s = cnf_init(pc_cap);
+  CnfState *s = cnf_init(pc_refute_steps ? pc_refute_steps : pc_cap);
   // Step replay must not depend on the AVATAR splitting env: the
   // checker's per-step refutations are tiny and want the plain
   // deterministic calculus.
@@ -890,6 +898,12 @@ static int pc_entails_eq(Term *parents, int np, Term concl, int do_session) {
     // parent disequation's pair as the goal.
     Term cl, cr;
     if (!pc_plain_eq(term_ctr_at(concl, 0), &cl, &cr)) return PC_UNKNOWN;
+    // The contraposition adds the conclusion's pair as an EQUATION, whose
+    // variables the completion reads universally -- but the negated
+    // conclusion only supplies SOME instance (~![Y]:c!=d == ?[Y]:c=d).
+    // With variables that premise is too strong (and an instance match
+    // against it runs the wrong way): ground conclusions only.
+    if (pc_max_var(cl) > 0 || pc_max_var(cr) > 0) return PC_UNKNOWN;
     int nneg = 0;
     for (int i = 0; i < np; i++) {
       Term f = parents[i];
@@ -1049,7 +1063,24 @@ static int pc_entails_eq(Term *parents, int np, Term concl, int do_session) {
 }
 
 // parents |= concl  (concl==0 means the conclusion is $false).
-static int pc_entails(Term *parents, int np, Term concl) {
+static int pc_is_cur_step_formula(Term f);   // defined with PcStep
+static int pc_entails(Term *parents_in, int np, Term concl_in) {
+  // Unit (dis)equations under a universal prefix read as their matrix
+  // (free variables are universal): Vampire prints ! [X0] : (l = r),
+  // and only the matrix shape reaches the equational routes.
+  Term parents[PC_MAX_PARENTS];
+  for (int i = 0; i < np && i < PC_MAX_PARENTS; i++) parents[i] = pc_strip_forall(parents_in[i]);
+  Term concl = (concl_in != 0) ? pc_strip_forall(concl_in) : 0;
+  // After a heap relocation the handles are re-fetched from pc_steps --
+  // valid only when the caller's conclusion IS the current step's formula.
+  int concl_is_step = pc_is_cur_step_formula(concl_in);
+  u64 entry_gc = gc_count();
+  // The FO route reads the caller's (unstripped) handles, re-fetched
+  // after any relocation in the strict equational fallthrough.
+  Term fo_par[PC_MAX_PARENTS];
+  for (int i = 0; i < np && i < PC_MAX_PARENTS; i++) fo_par[i] = parents_in[i];
+  Term fo_concl = concl_in;
+  int fo_quick = 0;
   // All-equational steps: settle by completion or abstain -- the FO
   // route on a pure-equation step burns seconds to heap-exhaustion per
   // step and never answers (the LAT171-1 whole-proof wall blowout).
@@ -1092,7 +1123,26 @@ static int pc_entails(Term *parents, int np, Term concl) {
       // 3. Two-parent completion session.
       u64 eq_gc0 = gc_count();
       v = pc_entails_eq(parents, np, concl, 1);
-      if (v != PC_UNKNOWN || concl == 0) return v;
+      if (v != PC_UNKNOWN) return v;
+      if (pc_strict()) {
+        // Strict: a step must follow from ITS premises (ProoVer: "each
+        // intermediate step correctly follows from its premises"; an
+        // external ATP may see "only that step and its stated
+        // premises").  No axiom augmentation; instead let the FO route
+        // below search the CITED premises for a proof or a countermodel.
+        if (gc_count() != entry_gc) {
+          Term rp2[PC_MAX_PARENTS];
+          Term c2 = concl_in;
+          if (!concl_is_step || !pc_refresh_step_handles(rp2, np, &c2)) {
+            return PC_UNKNOWN;
+          }
+          for (int i = 0; i < np; i++) fo_par[i] = rp2[i];
+          fo_concl = pc_is_false(c2) ? 0 : c2;
+        }
+        fo_quick = 1;
+        goto fo_route;
+      }
+      if (concl == 0) return v;
       // A rooted eq-session collection relocated the heap: pc_steps was
       // refreshed through g_pc_roots (pc_refresh_formulas), but THIS
       // frame's parents/concl handles are stale from-space Terms -- the
@@ -1102,10 +1152,11 @@ static int pc_entails(Term *parents, int np, Term concl) {
       // pc_steps before any further route touches them.
       Term rp[PC_MAX_PARENTS];
       if (gc_count() != eq_gc0) {
-        if (!pc_refresh_step_handles(rp, np, &concl)) {
+        if (!concl_is_step || !pc_refresh_step_handles(rp, np, &concl)) {
           return PC_UNKNOWN;   // cannot refresh: abstain, don't read garbage
         }
-        parents = rp;
+        for (int i = 0; i < np; i++) parents[i] = pc_strip_forall(rp[i]);
+        concl = pc_strip_forall(concl);
         eq_gc0  = gc_count();
       }
       // 4. Axiom-augmented fallback (sound, weaker provenance):
@@ -1130,10 +1181,11 @@ static int pc_entails(Term *parents, int np, Term concl) {
         v = pc_entails_eq(aug, n2, concl, 1);
         // Same staleness hazard after the second session.
         if (gc_count() != eq_gc0) {
-          if (!pc_refresh_step_handles(rp, np, &concl)) {
+          if (!concl_is_step || !pc_refresh_step_handles(rp, np, &concl)) {
             return v == PC_VALID ? v : PC_UNKNOWN;
           }
-          parents = rp;
+          for (int i = 0; i < np; i++) parents[i] = pc_strip_forall(rp[i]);
+          concl = pc_strip_forall(concl);
         }
       }
       // 5. Last resort (deep mode): the axiom-augmented completion
@@ -1161,11 +1213,19 @@ static int pc_entails(Term *parents, int np, Term concl) {
       return v;
     }
   }
+fo_route:
+  if (fo_quick) {
+    // The equational routes already failed: a quick, bounded hunt only.
+    pc_refute_clock = 1.0;
+    pc_refute_steps = 400u;
+  }
   Term fs[PC_MAX_PARENTS + 1];
   int n = 0;
-  for (int i = 0; i < np && n < PC_MAX_PARENTS; i++) fs[n++] = parents[i];
-  if (concl != 0) fs[n++] = fol_mk_not(pc_close(concl));
+  for (int i = 0; i < np && n < PC_MAX_PARENTS; i++) fs[n++] = fo_par[i];
+  if (fo_concl != 0) fs[n++] = fol_mk_not(pc_close(fo_concl));
   AtpStatus st = pc_refute(fs, n);
+  pc_refute_clock = 0.0;
+  pc_refute_steps = 0u;
   if (st == ATP_PROVED || st == ATP_REFUTED) return PC_VALID;
   if (st == ATP_QUEUE_EMPTY) return PC_INVALID;   // counter-model exists
   return PC_UNKNOWN;
@@ -1210,11 +1270,16 @@ typedef struct {
   char *sk_var;               // skolemize(Var, T): Var, or NULL
   char *sk_term;              // skolemize(Var, T): T's text, or NULL
   int   n_sk_ann;             // skolemize(...) annotations seen
+  u8    open_fof;             // a fof formula with FREE variables
 } PcStep;
 
 static PcStep *pc_steps = NULL;
 static int pc_steps_cap = 0;
 static int pc_nstep = 0;
+static int pc_is_cur_step_formula(Term f) {
+  return g_pc_cur_idx >= 0 && g_pc_cur_idx < pc_nstep &&
+         f == pc_steps[g_pc_cur_idx].formula;
+}
 // Step-name index (open addressing; slot = step index + 1).
 static int *pc_name_ht = NULL;
 static u32  pc_name_ht_n = 0;
@@ -1402,7 +1467,10 @@ static int pc_check_cp_cfg(Term *parents, int np, Term cl, Term cr,
     if      (c == KBO_GT) { pc_nrl[nn] = a; pc_nrr[nn] = b; nn++; }
     else if (c == KBO_LT) { pc_nrl[nn] = b; pc_nrr[nn] = a; nn++; }
   }
-  for (int i = 0; i < g_pc_cur_idx && i < pc_nstep && nn < PC_NORM_RULES; i++) {
+  // Strict: the step's CITED premises only (see pc_entails); the legacy
+  // profile certifies FindProof's own traces, whose treatment rewrites
+  // are not separately recorded.
+  for (int i = 0; !pc_strict() && i < g_pc_cur_idx && i < pc_nstep && nn < PC_NORM_RULES; i++) {
     Term a, b;
     // File-prior records are demodulators only when the file order is a
     // well-founded order of BOTH dependency kinds (every citation points
@@ -2009,6 +2077,10 @@ static int pc_parse_record(const char *rec) {
     }
     st->formula = f;
     st->ftext = strdup(args[2]);
+    // TPTP fof formulas are CLOSED; a free variable (a binder renamed
+    // away from its occurrences) leaves the record's meaning to a
+    // convention -- such a record may still be REFUTED, never confirmed.
+    if (is_fof && pc_close(f) != f) st->open_fof = 1;
 
     if (na >= 4) {
       pc_parse_source(args[3], st);
@@ -2120,17 +2192,54 @@ static int pc_load_problem(const char *dpath) {
   return 0;
 }
 
-// Positive confirmation for introduced(definition) leaves (Vampire's
-// function_definition records: mult(a,b) = sF0).  VALID only when the
-// record declares exactly one new symbol and the formula (under its
-// universal prefix) is an equation whose one side is EXACTLY that
-// symbol applied to pairwise-distinct variables, the other side free
-// of it; the symbol is absent from the problem file, defined only
-// once, and no definition body uses a symbol introduced at the same or
-// a later record (well-founded chain).  Such a definition SET is a
-// conservative extension -- and every CONSUMER of the symbols must
-// still confirm its own step, so nothing can be smuggled through one.
-// Never INVALID: shapes this check cannot read simply abstain.
+static int  pc_label_in_prob(u32 L);                       // symbol index section
+static int  pc_step_has(int j, u32 L);
+static void pc_collect_labels(Term t, int *stamp, int mark, int *out, int *n, int cap);
+
+// Free variables of `t` (binder-aware) all among the ids in `ok`?
+static int pc_fv_within(Term t, const u32 *ok, u32 nok, u8 *bound) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      if (id < PC_MAX_RVARS && bound[id]) return 1;
+      for (u32 i = 0; i < nok; i++) if (ok[i] == id) return 1;
+      return 0;
+    }
+    case TAG_CTR: {
+      u32 lab = term_ext(t);
+      if (lab == PC_LAB_ALL || lab == PC_LAB_EX) {
+        u32 vid = term_ext(term_ctr_at(t, 0));
+        u8 saved = (vid < PC_MAX_RVARS) ? bound[vid] : 0;
+        if (vid < PC_MAX_RVARS) bound[vid] = 1;
+        int r = pc_fv_within(term_ctr_at(t, 1), ok, nok, bound);
+        if (vid < PC_MAX_RVARS) bound[vid] = saved;
+        return r;
+      }
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++)
+        if (!pc_fv_within(term_ctr_at(t, i), ok, nok, bound)) return 0;
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// Positive confirmation for introduced(definition) leaves: Vampire's
+// function_definition records (mult(a,b) = sF0) and predicate namings
+// (p(X) <=> body).  VALID only when the record declares exactly one new
+// symbol L and the formula (under its universal prefix) is an equation
+// or an equivalence whose one side is EXACTLY L applied to pairwise-
+// distinct variables, the other side (the body) free of L and with
+// every free variable among L's arguments (![X]: sF0 = f(X) would force
+// f constant -- not an extension at all); L occurs in no problem
+// formula, no other record declares or independently introduces it;
+// and the body uses only problem symbols and symbols declared by
+// EARLIER introduced records (well-founded: no definition body can
+// reach back through a Skolem witness or a later definition to L).
+// Such a definition SET is a conservative extension -- and every
+// CONSUMER of the symbols must still confirm its own step, so nothing
+// can be smuggled through one.  Never INVALID: shapes this check cannot
+// read simply abstain.
 static int pc_check_definition(int idx, const char **why) {
   const PcStep *st = &pc_steps[idx];
   (void)why;
@@ -2138,8 +2247,9 @@ static int pc_check_definition(int idx, const char **why) {
   u32 L = pc_lookup(st->new_syms[0]);
   if (L == PC_NOT_FOUND) return PC_UNKNOWN;
   Term f = pc_strip_forall(st->formula);
-  if (!(term_tag(f) == TAG_CTR && term_ext(f) == PC_LAB_EQ &&
-        term_ctr_n(f) == 2)) return PC_UNKNOWN;
+  if (term_tag(f) != TAG_CTR || term_ctr_n(f) != 2) return PC_UNKNOWN;
+  u32 shape = term_ext(f);
+  if (shape != PC_LAB_EQ && shape != PC_LAB_IFF) return PC_UNKNOWN;
   Term lhs = term_ctr_at(f, 0), rhs = term_ctr_at(f, 1);
   Term def, body;
   if      (term_tag(lhs) == TAG_CTR && term_ext(lhs) == L) { def = lhs; body = rhs; }
@@ -2147,22 +2257,62 @@ static int pc_check_definition(int idx, const char **why) {
   else return PC_UNKNOWN;
   if (pc_has_label(body, L)) return PC_UNKNOWN;      // recursive definition
   u32 n = term_ctr_n(def);
+  static u32 args[PC_MAX_RVARS];
+  if (n > PC_MAX_RVARS) return PC_UNKNOWN;
   for (u32 i = 0; i < n; i++) {
     Term a = term_ctr_at(def, i);
     if (term_tag(a) != TAG_FVR) return PC_UNKNOWN;   // non-variable argument
     for (u32 j = 0; j < i; j++)
       if (term_ext(term_ctr_at(def, j)) == term_ext(a)) return PC_UNKNOWN;
+    args[i] = term_ext(a);
   }
-  for (int j = 0; j < pc_nprob; j++)
-    if (pc_has_label(pc_prob[j].formula, L)) return PC_UNKNOWN;
+  {
+    static u8 bound[PC_MAX_RVARS];
+    memset(bound, 0, sizeof bound);
+    if (!pc_fv_within(body, args, n, bound)) return PC_UNKNOWN;
+  }
+  if (pc_label_in_prob(L)) return PC_UNKNOWN;
+  // Unique: no other record declares L or introduces it independently.
   for (int j = 0; j < pc_nstep; j++) {
+    if (j == idx) continue;
     const PcStep *o = &pc_steps[j];
-    if (j == idx || !o->introduced || o->n_new_syms < 1) continue;
-    for (int s = 0; s < o->n_new_syms; s++) {
-      u32 M = pc_lookup(o->new_syms[s]);
-      if (M == PC_NOT_FOUND) continue;
-      if (M == L) return PC_UNKNOWN;                 // defined twice
-      if (j >= idx && pc_has_label(body, M)) return PC_UNKNOWN;  // not well-founded
+    for (int s = 0; s < o->n_new_syms; s++)
+      if (pc_lookup(o->new_syms[s]) == L) return PC_UNKNOWN;   // defined twice
+    if (!pc_step_has(j, L)) continue;
+    int from_parent = 0;
+    for (int k = 0; k < o->n_parents && !from_parent; k++) {
+      int p = o->par[k];
+      if (p >= 0 && pc_step_has(p, L)) from_parent = 1;
+    }
+    if (!from_parent && !(o->st_mask == (1u << PC_ST_THM) && o->rule != R_INPUT))
+      return PC_UNKNOWN;                             // another introduction
+  }
+  // Well-founded body: problem symbols, or symbols declared by EARLIER
+  // introduced records.
+  {
+    static int *stamp = NULL, *buf = NULL;
+    static int cap = 0;
+    if (cap < pc_nsyms + 1) {
+      free(stamp); free(buf);
+      cap = pc_nsyms + 1;
+      stamp = (int *)malloc((size_t)cap * sizeof(int));
+      buf = (int *)malloc((size_t)cap * sizeof(int));
+      if (stamp == NULL || buf == NULL) { cap = 0; return PC_UNKNOWN; }
+    }
+    for (int s = 0; s < pc_nsyms; s++) stamp[s] = -1;
+    int nb = 0;
+    pc_collect_labels(body, stamp, 1, buf, &nb, pc_nsyms);
+    for (int k = 0; k < nb; k++) {
+      u32 M = PC_LAB_BASE + (u32)buf[k];
+      if (pc_label_in_prob(M)) continue;
+      int earlier = 0;
+      for (int j = 0; j < idx && !earlier; j++) {
+        const PcStep *o = &pc_steps[j];
+        if (!o->introduced) continue;
+        for (int s = 0; s < o->n_new_syms && !earlier; s++)
+          if (pc_lookup(o->new_syms[s]) == M) earlier = 1;
+      }
+      if (!earlier) return PC_UNKNOWN;
     }
   }
   return PC_VALID;
@@ -3321,6 +3471,122 @@ static int pc_check_entail(const PcStep *st, const char **why) {
   return pc_demote_partial(st, v);
 }
 
+// Every occurrence of L in `t` is a 0-ary term (a constant)?
+static int pc_label_const_only(Term t, u32 L) {
+  if (term_tag(t) != TAG_CTR) return 1;
+  if (term_ext(t) == L && term_ctr_n(t) != 0) return 0;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) if (!pc_label_const_only(term_ctr_at(t, i), L)) return 0;
+  return 1;
+}
+
+// A foreign record may skolemize WITHOUT declaring the symbol: Vampire's
+// cnf_transformation turns ?[X0]:(a(X0) & b(X0)) straight into the
+// clauses a(sK3) and b(sK3).  Undeclared fresh CONSTANTS -- absent from
+// the problem and from every parent, never applied, never a predicate,
+// declared by no record -- are confirmed JOINTLY over the sibling group
+// G carrying them (same parents, rule and status): every introduction
+// source of each constant lies in G, and the parents entail
+//   ?[V1..Vk] : /\_{g in G} closure(g)[sKi := Vi].
+// Then any model of the parents extends by interpreting the sKi as the
+// witnesses, so each member of G is a conservative addition.  Only
+// VALID or UNKNOWN: the group may fold in transformations this check
+// does not model, so a failed entailment demonstrates nothing.
+#define PC_JSK_MAX 16
+static int pc_check_joint_skolem(int idx, const char **why) {
+  const PcStep *st = &pc_steps[idx];
+  if (st->n_new_syms > 0 || st->par_compound || st->n_parents == 0) return PC_UNKNOWN;
+  if (st->st_mask != 0 && st->st_mask != (1u << PC_ST_ESA)) return PC_UNKNOWN;
+  for (int k = 0; k < st->n_parents; k++) if (st->par[k] < 0) return PC_UNKNOWN;
+  if (pc_dangling) return PC_UNKNOWN;
+  static int *stamp = NULL, *buf = NULL;
+  static int cap = 0;
+  if (cap < pc_nsyms + 1) {
+    free(stamp); free(buf);
+    cap = pc_nsyms + 1;
+    stamp = (int *)malloc((size_t)cap * sizeof(int));
+    buf = (int *)malloc((size_t)cap * sizeof(int));
+    if (stamp == NULL || buf == NULL) { cap = 0; return PC_UNKNOWN; }
+  }
+  for (int s = 0; s < pc_nsyms; s++) stamp[s] = -1;
+  int nb = 0;
+  pc_collect_labels(st->formula, stamp, 1, buf, &nb, pc_nsyms);
+  u32 F[PC_JSK_MAX];
+  int nf = 0;
+  for (int q = 0; q < nb; q++) {
+    u32 L = PC_LAB_BASE + (u32)buf[q];
+    if (pc_label_in_prob(L)) continue;
+    int in_par = 0;
+    for (int k = 0; k < st->n_parents && !in_par; k++) in_par = pc_step_has(st->par[k], L);
+    if (in_par) continue;
+    if (nf >= PC_JSK_MAX) return PC_UNKNOWN;
+    F[nf++] = L;
+  }
+  if (nf == 0) return PC_UNKNOWN;
+  // Every fresh symbol: a constant everywhere, declared nowhere, and all
+  // of its introduction sources siblings of this record.
+  static int *grp = NULL;
+  static int gcap = 0;
+  if (gcap < pc_nstep + 1) {
+    free(grp);
+    gcap = pc_nstep + 1;
+    grp = (int *)malloc((size_t)gcap * sizeof(int));
+    if (grp == NULL) { gcap = 0; return PC_UNKNOWN; }
+  }
+  int ng = 0;
+  for (int j = 0; j < pc_nstep; j++) {
+    const PcStep *o = &pc_steps[j];
+    int carries = 0;
+    for (int s = 0; s < nf; s++) {
+      if (!pc_step_has(j, F[s])) continue;
+      carries = 1;
+      if (!pc_label_const_only(o->formula, F[s])) return PC_UNKNOWN;
+      if (pc_label_modes(o->formula, F[s]) & 1) return PC_UNKNOWN;
+    }
+    for (int s = 0; s < o->n_new_syms; s++)
+      for (int q = 0; q < nf; q++)
+        if (pc_lookup(o->new_syms[s]) == F[q]) return PC_UNKNOWN;
+    if (!carries) continue;
+    // A SOURCE of some fresh symbol: carries it while no parent does.
+    int source = 0;
+    for (int s = 0; s < nf && !source; s++) {
+      if (!pc_step_has(j, F[s])) continue;
+      int from_parent = 0;
+      for (int k = 0; k < o->n_parents && !from_parent; k++) {
+        int p = o->par[k];
+        if (p >= 0 && pc_step_has(p, F[s])) from_parent = 1;
+      }
+      if (!from_parent) source = 1;
+    }
+    if (!source) continue;                     // downstream of the group
+    if (j != idx && !pc_siblings(st, o)) {
+      if (o->st_mask == (1u << PC_ST_THM) && o->rule != R_INPUT) continue;
+      return PC_UNKNOWN;                       // introduced elsewhere too
+    }
+    grp[ng++] = j;
+  }
+  if (ng == 0) return PC_UNKNOWN;
+  Term par[PC_MAX_PARENTS]; int np;
+  if (!pc_parent_formulas(st, par, &np) || np < 1) return PC_UNKNOWN;
+  u32 vmax = 0;
+  for (int g = 0; g < ng; g++) {
+    u32 m = pc_max_var(pc_steps[grp[g]].formula);
+    if (m > vmax) vmax = m;
+  }
+  if (vmax + (u32)nf >= PC_MAX_RVARS) return PC_UNKNOWN;
+  Term conj = 0;
+  for (int g = 0; g < ng; g++) {
+    Term c = pc_close(pc_steps[grp[g]].formula);
+    for (int s = 0; s < nf; s++) c = pc_sk_abstract(c, F[s], vmax + (u32)s);
+    conj = (conj == 0) ? c : fol_mk_and(conj, c);
+  }
+  for (int s = nf - 1; s >= 0; s--) conj = fol_mk_ex(term_new_fvr(vmax + (u32)s), conj);
+  int v = pc_entails(par, np, conj);
+  if (v == PC_VALID) return PC_VALID;
+  *why = "undeclared Skolem constants could not be confirmed jointly";
+  return PC_UNKNOWN;
+}
+
 static int pc_check_step(int idx, const char **why) {
   const PcStep *st = &pc_steps[idx];
   if (st->rule == R_INPUT) return pc_check_leaf(idx, why);
@@ -3359,7 +3625,14 @@ static int pc_check_step(int idx, const char **why) {
         int v = pc_check_skolemize(idx, 0, why);
         if (v != PC_UNKNOWN) return v;
       }
-      return pc_check_entail(st, why);
+      {
+        int v = pc_check_entail(st, why);
+        if (v != PC_VALID && v != PC_INVALID) {
+          const char *w2 = *why;
+          if (pc_check_joint_skolem(idx, &w2) == PC_VALID) return PC_VALID;
+        }
+        return v;
+      }
   }
 }
 
@@ -3866,7 +4139,20 @@ static int proof_check_worker(const char *file, int szs) {
     // Validate every step (inputs included: the strict profile verifies
     // leaves against the problem file); report one verdict.
     int pc_retry_idx = -1;   // step already redone after a relocation
-    for (int i = 0; i < pc_nstep && pc_bad < 0; i++) {
+    // Check order: every LEAF first (cheap; a lying import is found
+    // before the wall goes to heavy derived steps), then the derived
+    // steps in file order.  The verdict is order-free: any violation is
+    // VerifiedBad, VerifiedGood needs all.
+    static int *ord = NULL;
+    free(ord);
+    ord = (int *)malloc(((size_t)pc_nstep + 1) * sizeof(int));
+    int nord = 0;
+    if (ord != NULL) {
+      for (int j = 0; j < pc_nstep; j++) if (pc_steps[j].rule == R_INPUT) ord[nord++] = j;
+      for (int j = 0; j < pc_nstep; j++) if (pc_steps[j].rule != R_INPUT) ord[nord++] = j;
+    }
+    for (int pos = 0; pos < pc_nstep && pc_bad < 0; pos++) {
+      int i = (ord != NULL) ? ord[pos] : pos;
       const char *why = "";
       // Per-step arena discipline: pc_entails replays a whole engine
       // refutation per step on the global heap; without reclamation a
@@ -3884,6 +4170,8 @@ static int proof_check_worker(const char *file, int szs) {
       jmp_buf _pc_step_jb;
       jmp_buf *_pc_saved = thvm_heap_exhaust_jmp;
       int v;
+      pc_refute_clock = 0.0;      // a longjmp may have skipped the reset
+      pc_refute_steps = 0u;
       thvm_heap_exhaust_jmp = &_pc_step_jb;
       if (setjmp(_pc_step_jb) != 0) {
         v = PC_UNKNOWN;
@@ -3899,6 +4187,10 @@ static int proof_check_worker(const char *file, int szs) {
         if (v == PC_UNKNOWN) {
           int hv = pc_atp_discharge_step(i, &why);
           if (hv != PC_UNKNOWN) v = hv;
+        }
+        if (v == PC_VALID && pc_steps[i].open_fof) {
+          v = PC_UNKNOWN;
+          why = "fof formula with free variables (not well-formed TPTP)";
         }
       }
       thvm_heap_exhaust_jmp = _pc_saved;
@@ -3950,7 +4242,7 @@ static int proof_check_worker(const char *file, int szs) {
           g_pc_roots_armed = 0;
           if (pc_retry_idx != i) {
             pc_retry_idx = i;
-            i--;
+            pos--;
             continue;
           }
           v = PC_UNKNOWN;

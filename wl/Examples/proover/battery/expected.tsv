@@ -12,7 +12,10 @@ H10_instantiate_capture.s	VerifiedBad	instantiate fast path must not let a binde
 H11_definition_smuggle.s	Unknown	sibling definition clauses over a fresh predicate: no first-order witness abstraction (abstain)
 H12_sibling_skolem_reuse.s	VerifiedBad	two sibling skolemisations share one Skolem function
 H13_cth_negates_axiom.s	VerifiedBad	cth step negates an axiom, not the conjecture
-H14_cp_circular.s	Unknown	out-of-order equational records: no circular demodulation, no conjecture demodulator (abstain)
+H14_cp_circular.s	VerifiedBad	out-of-order equational records: no circular / conjecture demodulation; the cited premises refute the cp
 H15_nested_parent_valid.s	Unknown	VALID control: a countermodel over a partial (nested-parent) premise set is no verdict
 H16_valid_shadowed_negation.s	VerifiedGood	VALID control: negated conjecture over shadowed binders
 H17_valid_false_parent.s	VerifiedGood	VALID control: $false parent and a premise-free tautology
+H18_definition_free_var.s	Unknown	"definition" body with a variable the defined symbol does not take: not a conservative extension
+H19_uncited_demodulator.s	VerifiedBad	a step must follow from its CITED premises: no uncited record as a demodulator (quantified unit)
+H20_uncited_demodulator_cnf.s	VerifiedBad	as H19 with a plain CNF equation (the rebuild accepted this)
