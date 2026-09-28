@@ -3666,9 +3666,12 @@ fn Term thvm_materialize(Term term);
 // callable from other in-tree passes (e.g. the in-engine GNN scorer)
 // that need to drive a UOP graph to a realized TAG_TEN and read the
 // result buffer back.  thvm_realize_many bundles a TAG_CTR of
-// independent roots into one pass.
+// independent roots into one pass, ordering roots that read a buffer
+// before roots that overwrite it; it returns 0 when those orderings form
+// a cycle, and thvm_realize_error() then says why ("" otherwise).
 fn Term thvm_realize(Term expr);
 fn Term thvm_realize_many(Term ctr_term);
+fn char const *thvm_realize_error(void);
 // Ceiling-abort cleanup: hard-rolls a failed (longjmp'd-out) realize's pools
 // back to its entry watermarks so an over-budget run doesn't leak across
 // retries.  Called from the LibraryLink THVM_WL_RECOVER recovery branch; a

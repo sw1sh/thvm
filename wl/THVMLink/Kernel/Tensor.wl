@@ -530,14 +530,28 @@ TGrad[y_, targets_List] := Module[{leaves, grads},
    Looping TRealize per root instead (TRealize /@) re-emits every shared
    sub-DAG per root: each isolated pass sees its upstream as single-
    consumer and inlines it, paying ~N x the kernels (e.g. the N param
-   gradients of one backward, which share the upstream cotangent chain). *)
+   gradients of one backward, which share the upstream cotangent chain).
+
+   Roots realize in data order, not list order: a root that reads a
+   buffer's prior state realizes before another root's TAssign overwrites
+   it (tinygrad schedule/__init__.py WAR edges), so in
+   TRealize[{TAssign[b, beta * b], f[b]}] f reads the OLD b.  Roots that
+   each read what the other overwrites return
+   Failure["TRealize", ...] ("cycle detected in assign graph"). *)
+TRealize[{}] := {}
 TRealize[exprs_List] := Module[{raw, n},
     ensureInit[];
     raw = $realizeManyFn[Developer`ToPackedArray[ttermRaw /@ exprs, Integer]];
+    If[raw === 0, Return @ realizeFailure[]];
     n = $termCtrNFn[raw];
     Table[TTerm[$termCtrAtFn[raw, i]], {i, 0, n - 1}]
 ]
-TRealize[expr_] := (ensureInit[]; TTerm[$realizeFn[ttermRaw[expr]]])
+TRealize[expr_] := (ensureInit[]; realizeResult[$realizeFn[ttermRaw[expr]]])
+
+realizeResult[0] := realizeFailure[]
+realizeResult[raw_] := TTerm[raw]
+
+realizeFailure[] := Failure["TRealize", <|"MessageTemplate" -> $realizeErrorFn[]|>]
 
 (* TMaterialize = direct schedule + kernelize + linearize rewrite,
    no firing.  Useful for inspection (visualize the scheduled DAG

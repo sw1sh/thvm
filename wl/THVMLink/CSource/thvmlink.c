@@ -2252,7 +2252,8 @@ EXTERN_C DLLEXPORT int thvm_wl_realize(WolframLibraryData libData, mint argc,
 // thvm_realize_many so they share one materialize pass / pool
 // boundary.  Used by TAdam to fire all per-param ASSIGNs in one go;
 // without this every param's TRealize re-walks the whole gradient
-// chain and emits ~5K kernel slots per step on LeNet.
+// chain and emits ~5K kernel slots per step on LeNet.  Returns 0 when
+// the roots' assigns form a cycle; thvm_wl_realize_error says why.
 EXTERN_C DLLEXPORT int thvm_wl_realize_many(WolframLibraryData libData,
                                             mint argc, MArgument *args,
                                             MArgument res) {
@@ -2267,6 +2268,15 @@ EXTERN_C DLLEXPORT int thvm_wl_realize_many(WolframLibraryData libData,
   Term ctr = term_new_ctr(0, children, (u32)n);
   Term r   = thvm_realize_many(ctr);
   MArgument_setInteger(res, (mint)r);
+  return LIBRARY_NO_ERROR;
+}
+
+// Why the last TRealize returned 0 ("" when it did not fail).
+EXTERN_C DLLEXPORT int thvm_wl_realize_error(WolframLibraryData libData,
+                                             mint argc, MArgument *args,
+                                             MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  MArgument_setUTF8String(res, (char *)thvm_realize_error());
   return LIBRARY_NO_ERROR;
 }
 

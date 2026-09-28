@@ -37,14 +37,6 @@ from .thvm import K, Term, Thvm, _uop_binary
 # Process-global bridge.  All Tensors share one Thvm instance.
 _TH = Thvm()
 _TAG_TEN = K.TAG_TEN
-# Bundle ASSIGN-bearing realizes through realize_many (one fire scope) by
-# default -- with the precise fire memo (default-on in uop_kernel.c) this
-# kills the ~8x dispatch redundancy of the per-tensor optimizer step
-# (loss + eval-acc byte-identical, validated BS=8/32/128).  Opt out with
-# THVM_BUNDLE_ASSIGNS=0 for the cross-dependent-assign edge case (a
-# sibling's src reading a sibling's freshly-written dst in one bundle).
-import os as _os
-_BUNDLE_ASSIGNS = _os.environ.get('THVM_BUNDLE_ASSIGNS', '1') != '0'
 
 # Routes a realized TAG_TEN's tid back to its originating Python Tensor.
 # backward() walks the in-scope leaf tids of the loss term, looks each
@@ -65,17 +57,6 @@ _LEAF_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
 # Requires THVM_GC=0 (no copying heap GC) so the raw term integers
 # Python caches never move.
 _PIN_NEXT = 1
-
-
-def _term_is_assign(t: int) -> bool:
-    """True iff term `t` is a TAG_UOP whose opcode is UOP_ASSIGN.  Used
-    by Tensor.realize to gate the realize_many bundle: pure-elementwise
-    bundles share forward intermediates via the cross-realize loc->tid
-    cache (schedule/materialize.c), but ASSIGN bundles must run
-    one-at-a-time to avoid in-place buffer aliasing across siblings."""
-    if _TH.term_tag(t) != K.TAG_UOP:
-        return False
-    return _TH.term_ext(t) == K.ASSIGN
 
 
 # thvm's `where`/`maximum`/`minimum` compose through a 0/1 mask MULTIPLY
@@ -300,33 +281,25 @@ class Tensor(metaclass=_TensorMeta):
 
     def realize(self, *lst: "Tensor", **kwargs) -> "Tensor":
         """Drive thvm's pipeline; mutates `term` to the resulting
-        TAG_TEN.  When the input set is ASSIGN-free we bundle through
-        realize_many so the shared forward intermediates inside
-        backward grad chains get emitted once per pass (the
-        cross-realize loc -> tid cache in schedule/materialize.c lives
-        for one realize call's scope -- mirrors tinygrad's
-        per-schedule _realize_cache).
+        TAG_TEN.  Several tensors realize together in ONE realize_many
+        pass, like tinygrad's Tensor.realize(*lst): the shared forward
+        intermediates of backward grad chains emit once (the loc -> tid
+        cache in schedule/materialize.c spans the call, mirroring
+        tinygrad's per-schedule _realize_cache), and every assign
+        applies exactly once.
 
-        ASSIGN-bearing bundles still go per-tensor: a bundled
-        realize_many of multiple in-place ASSIGNs lets the buffer
-        planner alias across siblings, which racing reads can corrupt
-        (the previous "CUDA NaN under bundling" failure mode -- still
-        latent on CPU when an ASSIGN's src reads a sibling's already-
-        written buffer).  Adam/SGD _step build pure-ASSIGN bundles, so
-        their realize(*mv) and realize(*out) paths stay one-at-a-time;
-        loss.realize(*grads) is ASSIGN-free and bundles."""
+        Assign order follows the data, not the argument order: a tensor
+        that reads a buffer's prior state realizes before the assign that
+        overwrites it (tinygrad schedule/__init__.py WAR edges).  thvm
+        orders whole tensors, not kernels, so a prior-state read and an
+        assign under the SAME tensor keep their graph order, and tensors
+        that each read what the other overwrites raise RuntimeError
+        ("cycle detected in assign graph")."""
         if not lst:
             self.term = _TH.realize(self.term)
             self._pin()
             return self
         terms_all = [self.term] + [x.term for x in lst]
-        has_assign = any(_term_is_assign(t) for t in terms_all)
-        if has_assign and not _BUNDLE_ASSIGNS:
-            self.term = _TH.realize(self.term)
-            self._pin()
-            for x in lst:
-                x.realize()
-            return self
         out = _TH.realize_many(terms_all)
         self.term = out[0]
         self._pin()

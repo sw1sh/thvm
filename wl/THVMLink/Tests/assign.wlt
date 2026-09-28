@@ -77,6 +77,47 @@ VerificationTest[
     TestID -> "assign/nested-data-dependency-sequencing"
 ]
 
+(* === TRealize list: a root that reads b's prior state realizes before
+       the TAssign that overwrites b, whatever the list order (tinygrad
+       schedule/__init__.py WAR edges) === *)
+
+VerificationTest[
+    TInit[];
+    b = TTensorCreate @ NumericArray[{1., 2., 3.}, "Real32"];
+    {assigned, read} = TRealize[{TAssign[b, 2.0 * b], b + 10.0}];
+    {Normal @ TTensorData[b], Normal @ TTensorData[read]},
+    {{2., 4., 6.}, {11., 12., 13.}},
+    TestID -> "assign/realize-list-reads-prior-state"
+]
+
+VerificationTest[
+    TInit[];
+    b = TTensorCreate @ NumericArray[{1., 2., 3.}, "Real32"];
+    {read, assigned} = TRealize[{b + 10.0, TAssign[b, 2.0 * b]}];
+    {Normal @ TTensorData[b], Normal @ TTensorData[read]},
+    {{2., 4., 6.}, {11., 12., 13.}},
+    TestID -> "assign/realize-list-reads-prior-state-reader-first"
+]
+
+(* a += b and b += (a + 9) each read what the other overwrites: tinygrad
+   raises "cycle detected in assign graph"; TRealize returns a Failure,
+   leaves both buffers untouched, and the next TRealize still runs. *)
+VerificationTest[
+    TInit[];
+    a = TTensorCreate @ NumericArray[{2., 2.}, "Real32"];
+    b = TTensorCreate @ NumericArray[{3., 3.}, "Real32"];
+    r = TRealize[{TAssign[a, a + b], TAssign[b, b + (a + 9.0)]}];
+    ok = TRealize[{TAssign[a, a + 1.0], b}];
+    {
+        FailureQ[r],
+        StringContainsQ[r["MessageTemplate"], "cycle"],
+        Normal @ TTensorData[a],
+        Normal @ TTensorData[b]
+    },
+    {True, True, {3., 3.}, {3., 3.}},
+    TestID -> "assign/realize-list-cycle-fails"
+]
+
 (* === TWnf re-fires kernels across loop iterations: each
        alo_realize REF unfold produces a fresh ASSIGN+kernel cell pair
        that wnf re-runs.  Tested via SGD-style loop on a scalar. === *)

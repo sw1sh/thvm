@@ -38,7 +38,6 @@ update the matching row here in the same change.
 | `THVM_JIT_REPLAY_NOSKIP` | off | Disable replay skip optimization. |
 | `THVM_JIT_REPLAY_PACK` | off | Experimental: pack replay dispatch records. |
 | `THVM_JIT_REPLAY_TRACE` | off | Trace JIT replay execution. |
-| `THVM_BUNDLE_ASSIGNS` (Python) | on (`1`) | Bundle tensor assignments into one realize; `0` for the cross-dependent-assign edge case. |
 | `THVM_NF_PARALLEL_STEP_SESSION` | off | Parallel normal-form step session. |
 | `THVM_PRECISE_FIRE_MEMO` | off | Precise dispatch-fire memoization. |
 | `THVM_DISPATCH_TRACE` | off | Trace dispatch memoization. |

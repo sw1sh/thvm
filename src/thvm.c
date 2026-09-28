@@ -565,6 +565,10 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // once the per-step heap watermark crosses the threshold.
 #include "heap/collect.c"
 
+// Root ordering for a realize_many bundle (tinygrad's RAW/WAR edges at
+// root granularity).  Read-only walk; used by thvm_realize_many.
+#include "schedule/realize_waves.c"
+
 // thvm_realize: materialize + wnf + per-step buffer pool boundary
 // (sub-item b of the per-step buffer pool arc).  Lives here
 // because it depends on wnf + thvm_materialize + cpu pool helpers.

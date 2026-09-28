@@ -265,19 +265,28 @@ EXPORT uint64_t py_realize(uint64_t t) { return thvm_realize(t); }
 // update) fires its ASSIGN exactly once instead of being re-fired by a
 // later per-tensor realize against an already-updated buffer.  The
 // resolved children are written back into `terms[]` so each Python
-// Tensor can refresh its handle to the materialized TAG_TEN.
+// Tensor can refresh its handle to the materialized TAG_TEN.  Returns 0
+// and leaves `terms[]` untouched when the realize failed (an assign
+// cycle between the roots); py_realize_error() says why.
 EXPORT uint64_t py_realize_many(uint64_t *terms, uint32_t n) {
   if (n == 0) return 0;
-  if (n == 1) { terms[0] = thvm_realize(terms[0]); return terms[0]; }
+  if (n == 1) {
+    Term r = thvm_realize(terms[0]);
+    if (r != 0) terms[0] = r;
+    return r;
+  }
   if (n > 256) n = 256;
   Term children[256];
   for (uint32_t i = 0; i < n; i++) children[i] = terms[i];
   Term ctr = term_new_ctr(0, children, n);
   Term res = thvm_realize(ctr);
+  if (res == 0) return 0;
   uint32_t rn = term_ctr_n(res);
   for (uint32_t i = 0; i < rn && i < n; i++) terms[i] = term_ctr_at(res, i);
   return res;
 }
+
+EXPORT const char *py_realize_error(void) { return thvm_realize_error(); }
 
 // --- live-tensor pinning + cross-step buffer reclaim ---
 // The eager py path realizes a fresh forward/backward/optimizer graph

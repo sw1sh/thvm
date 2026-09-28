@@ -48,11 +48,21 @@ static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
 }
 
 #define THVM_REALIZE_MAX_ITERS 64
+#define THVM_REALIZE_MANY_CAP  256
 
 // Forward decl: CTR-bundle entry point used by thvm_realize when a
 // caller hands us a TAG_CTR of independent root Terms (e.g. all the
 // per-param ASSIGNs of one Adam step).  Defined below.
 fn Term thvm_realize_many(Term ctr_term);
+
+// Why the last thvm_realize / thvm_realize_many returned 0 ("" when it
+// did not fail).  A realize error must not exit(): the py interpreter or
+// the WolframKernel hosting the runtime has to survive it.
+static char REALIZE_ERROR[96];
+
+fn char const *thvm_realize_error(void) {
+  return REALIZE_ERROR;
+}
 
 // Forward-only reclaim (default ON; THVM_FWD_RECLAIM=0 disables).  The
 // per-realize watermark rollback only reclaims buffers allocated DURING the
@@ -277,6 +287,7 @@ fn void thvm_realize_ceiling_cleanup(void) {
 
 fn Term thvm_realize(Term expr) {
   HOT_REALIZE_CALLS++;
+  REALIZE_ERROR[0] = '\0';
   // TEN short-circuit: a Term that's already a TAG_TEN (typical when
   // the user holds onto a TTerm wrapper and re-realizes it) has no
   // remaining compute -- skip the wnf+materialize loop entirely so
@@ -286,7 +297,8 @@ fn Term thvm_realize(Term expr) {
   if (term_tag(resolved) == TAG_TEN) return resolved;
   // CTR-bundle short-circuit: dispatch to the multi-root entry so
   // every child shares one materialize pass + one buffer-pool
-  // boundary.  Per-param TAdam ASSIGNs land here.
+  // boundary.  Per-param TAdam ASSIGNs land here.  Returns 0 when the
+  // bundle's roots form an assign cycle (see thvm_realize_error).
   if (term_tag(resolved) == TAG_CTR) return thvm_realize_many(resolved);
 
   // Device routing (tinygrad's "the device is in the graph"): realize the
@@ -559,6 +571,17 @@ fn Term thvm_realize(Term expr) {
   return res;
 }
 
+// A wave is done once every root in it is a TAG_TEN, so the next wave's
+// writes may start: wnf fires a kernel's producers depth-first, and a
+// root that turned into a cached TEN before its kernel fired is reached
+// by a same-wave root that is not a TEN until that kernel fires.
+static int realize_wave_done(Term const *all, u32 lo, u32 hi) {
+  for (u32 p = lo; p < hi; p++) {
+    if (term_tag(all[p]) != TAG_TEN) return 0;
+  }
+  return 1;
+}
+
 // Multi-root realize: caller bundles N independent root Terms in a
 // TAG_CTR; we run a single materialize + wnf loop over the bundle so
 // shared forward kernels dedup across roots, then drive each child
@@ -571,11 +594,36 @@ fn Term thvm_realize(Term expr) {
 // same pass and emits each forward kernel once.  Tinygrad analogue:
 // `loss.realize(*opt.schedule_step())` fires the whole step in one
 // scheduler pass.
+//
+// Roots that read a buffer's prior state must finish before another
+// root's ASSIGN overwrites it (realize_waves: tinygrad's WAR edges, at
+// root granularity).  The fixpoint loop runs wave by wave, wnf'ing and
+// materializing only the released roots: materialize compiles nested
+// ASSIGN srcs in place (materialize_inner_assigns), so an unreleased
+// root must not be touched early.  The loc -> tid cache, fire scope and
+// pool watermarks span every wave.  Returns 0, with thvm_realize_error
+// set, when the roots' WAR edges form a cycle (tinygrad raises "cycle
+// detected in assign graph", schedule/__init__.py:82).
 fn Term thvm_realize_many(Term ctr_term) {
   HOT_REALIZE_CALLS++;
+  REALIZE_ERROR[0] = '\0';
   if (term_tag(ctr_term) != TAG_CTR) return thvm_realize(ctr_term);
   u32 n = term_ctr_n(ctr_term);
   if (n == 0) return ctr_term;
+  u32 cn = (n < THVM_REALIZE_MANY_CAP) ? n : THVM_REALIZE_MANY_CAP;
+
+  Term all[THVM_REALIZE_MANY_CAP];
+  u32  order[THVM_REALIZE_MANY_CAP];
+  u32  wave_end[THVM_REALIZE_MANY_CAP];
+  u8   has_assign = 0;
+  for (u32 i = 0; i < cn; i++) all[i] = term_ctr_at(ctr_term, i);
+  u32 n_waves = realize_waves(all, cn, order, wave_end, &has_assign);
+  if (n_waves == 0) {
+    snprintf(REALIZE_ERROR, sizeof REALIZE_ERROR,
+             "realize_many: cycle detected in assign graph");
+    return 0;
+  }
+  for (u32 p = 0; p < cn; p++) all[p] = term_ctr_at(ctr_term, order[p]);
 
   grad_memo_begin_realize();
   u32 cpu_wm   = cpu_buf_pool_begin();
@@ -590,41 +638,55 @@ fn Term thvm_realize_many(Term ctr_term) {
   materialized_loc_scope_enter();
   u32 kn_at_call_start = KERNELS_NEXT;
 
-  Term res = ctr_term;
+  u32  label = term_ext(ctr_term);
+  Term mat   = ctr_term;
   int iters_used = 0;
   int kcnt_dbg = (getenv("THVM_KCNT") != NULL);
-  for (int iter = 0; iter < THVM_REALIZE_MAX_ITERS; iter++) {
-    u32 kn0   = KERNELS_NEXT;
-    u64 itrs0 = ITRS;
-    // Cold-start lever: parallel-compile the prior iteration's emitted
-    // kernels before the per-child wnf below fires them serially (see
-    // thvm_realize for the full rationale).  Idempotent + cache-keyed.
-    cpu_jit_precompile_range(kn_at_call_start, KERNELS_NEXT);
-    thvm_metal_precompile_range(kn_at_call_start, KERNELS_NEXT);
-    // wnf is a no-op on a CTR (passive), so drive each child to
-    // fire its kernels / ASSIGNs.  Materialize then walks the
-    // entire bundle, sharing forward-kernel dedup across roots.
-    u32 cn = term_ctr_n(res);
-    Term children[256];
-    if (cn > 256) cn = 256;
-    for (u32 i = 0; i < cn; i++) children[i] = wnf(term_ctr_at(res, i));
-    Term wnf_ctr = term_new_ctr(term_ext(res), children, cn);
-    // Count cross-subgraph consumers over the whole bundle (after every
-    // child's wnf has driven its backward) so the arena planner sees a
-    // forward activation shared by sibling grad targets.  Re-populated
-    // each iteration: the backward graph can grow across the fixpoint
-    // loop, so a once-at-iter-0 walk would miss late-emerging shared
-    // consumers (see xpass_cc_populate).
-    xpass_cc_populate(wnf_ctr);
-    Term mat = thvm_materialize(wnf_ctr);
-    iters_used = iter + 1;
-    if (kcnt_dbg) {
-      fprintf(stderr, "DBG realize_many iter %d: emitted %u kernels (ITRS+%llu)\n",
-              iter, KERNELS_NEXT - kn0, (unsigned long long)(ITRS - itrs0));
+  if (kcnt_dbg && has_assign) fprintf(stderr, "DBG realize_many waves: %u\n", n_waves);
+  u32 lo = 0;
+  for (u32 w = 0; w < n_waves; w++) {
+    u32 hi = wave_end[w];
+    for (int iter = 0; iter < THVM_REALIZE_MAX_ITERS; iter++) {
+      u32 kn0   = KERNELS_NEXT;
+      u64 itrs0 = ITRS;
+      // Cold-start lever: parallel-compile the prior iteration's emitted
+      // kernels before the per-child wnf below fires them serially (see
+      // thvm_realize for the full rationale).  Idempotent + cache-keyed.
+      cpu_jit_precompile_range(kn_at_call_start, KERNELS_NEXT);
+      thvm_metal_precompile_range(kn_at_call_start, KERNELS_NEXT);
+      // wnf is a no-op on a CTR (passive), so drive each child to
+      // fire its kernels / ASSIGNs.  Materialize then walks the
+      // released bundle, sharing forward-kernel dedup across roots.
+      for (u32 p = lo; p < hi; p++) all[p] = wnf(all[p]);
+      Term wnf_ctr = term_new_ctr(label, all, cn);
+      // Count cross-subgraph consumers over the whole bundle (after every
+      // child's wnf has driven its backward) so the arena planner sees a
+      // forward activation shared by sibling grad targets.  Re-populated
+      // each iteration: the backward graph can grow across the fixpoint
+      // loop, so a once-at-iter-0 walk would miss late-emerging shared
+      // consumers (see xpass_cc_populate).  Unreleased roots count too:
+      // a later wave reads what this wave caches.  Roots sit in execution
+      // order, so a released root is never the last reader of a buffer
+      // an unreleased one still needs.
+      xpass_cc_populate(wnf_ctr);
+      mat = thvm_materialize(hi == cn ? wnf_ctr : term_new_ctr(label, all, hi));
+      for (u32 p = lo; p < hi; p++) all[p] = term_ctr_at(mat, p);
+      if (kcnt_dbg) {
+        fprintf(stderr, "DBG realize_many iter %d: emitted %u kernels (ITRS+%llu)\n",
+                iters_used, KERNELS_NEXT - kn0, (unsigned long long)(ITRS - itrs0));
+      }
+      iters_used++;
+      if (KERNELS_NEXT == kn0 && ITRS == itrs0) break;
+      kernel_compute_consumer_counts();
+      if (n_waves > 1 && realize_wave_done(all, lo, hi)) break;
     }
-    if (KERNELS_NEXT == kn0 && ITRS == itrs0) { res = mat; break; }
-    kernel_compute_consumer_counts();
-    res = mat;
+    lo = hi;
+  }
+  Term res = mat;
+  if (n_waves > 1) {
+    Term out[THVM_REALIZE_MANY_CAP];
+    for (u32 p = 0; p < cn; p++) out[order[p]] = all[p];
+    res = term_new_ctr(label, out, cn);
   }
   if (kcnt_dbg) {
     fprintf(stderr, "DBG realize_many emit: %u kernels in %d iters (%u children)\n",
@@ -636,8 +698,7 @@ fn Term thvm_realize_many(Term ctr_term) {
 
   // Preserve mark + GC same as thvm_realize.  Walk every child of
   // the result CTR so each root's producer chain is preserved.
-  u32 cn = term_ctr_n(res);
-  for (u32 i = 0; i < cn && i < 256; i++) mark_gc_preserve(term_ctr_at(res, i));
+  for (u32 i = 0; i < cn; i++) mark_gc_preserve(term_ctr_at(res, i));
   // Capture-time mark-park sweep, same as thvm_realize (see the rationale
   // there: the mark_heap_rooted_preserve overlay is REQUIRED for correctness --
   // it preserves buffers a pending lazy fragment still references, so only
