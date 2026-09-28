@@ -355,6 +355,16 @@ static const SchedSlice SCHEDULE[] = {
   // under the lane's precedence.  Leftover pool after tgt-sel: the
   // wave-1/2 indices stay unshifted.
   {"otter-lpo", "--ord=lpo --sym-prec=const-frequency --spb-prec --otter --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --preset=none --horn=0 --fof-sat=0", 0.0},
+  // PROVER9-SHAPED companion: the same Otter-loop lane under Prover9's
+  // LADR symbol order (--sym-prec=ladr: lex_compare_arity_0213 with
+  // fewer-axiom-occurrences greater, then inverse_order), which ranks
+  // the defined operators ABOVE multiply -- the associator/commutator
+  // definitions unfold, where otter-lpo's goal band folds them -- and
+  // puts sq on top on the sq() presentation.  RNG130-1 (Vampire + CSI +
+  // E at J13, every FindProof slice TMO) proves in 0.05s / 47
+  // selections; the Moufang members flood under this order and stay
+  // with otter-lpo.  Same exit-fast guard.
+  {"otter-ladr", "--ord=lpo --sym-prec=ladr --otter --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --preset=none --horn=0 --fof-sat=0", 0.0},
   {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.33},
   // (4) ENCOMPASSMENT DEMODULATION (Twee reducesSkolem): the WM preset
   // with the skolem-ground unorient gate -- variable-permuted variants
