@@ -828,7 +828,7 @@ static int fof_split_orchestrate(const char *self, const char *file,
       if (ms != NULL) fclose(ms);
       if (ok && bufp != NULL) {
         printf("%% SZS output start Proof for %s\n", file);
-        fwrite(bufp, 1, plen, stdout);
+        cli_proof_write(stdout, bufp, plen);
         printf("%% SZS output end Proof for %s\n", file);
       } else {
         fprintf(stderr, "FindProof: fof-split: branch proof stitching "
@@ -1071,6 +1071,7 @@ int main(int argc, char **argv) {
       // no transform fired the leaf table stays empty and the emitted
       // bytes are unchanged.
       g_prov_on = g_cli_want_proof;
+      g_tp_ren_on = g_cli_want_proof;
       char *pre = tp_preprocess(file, raw);
       pre = tp_unquote_names(pre);
       tp_shorten_names(pre);
@@ -1147,7 +1148,7 @@ int main(int argc, char **argv) {
         if (szs)
           printf("%% SZS status %s for %s\n",
                  g_cli_fof_conjecture ? "Theorem" : "Unsatisfiable", file);
-        fputs(g_cli_prepass_proof, stdout);
+        cli_proof_write(stdout, g_cli_prepass_proof, strlen(g_cli_prepass_proof));
         fflush(stdout);
         return 0;
       }

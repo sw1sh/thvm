@@ -51,3 +51,6 @@ for the per-commit story.
   annotation), status-claim semantics (thm / esa / cth), binder-fresh
   parsing, conjecture-as-premise and cth-hypothesis detection; the
   published 2026 set is a DEV metric (+137/138), never a forecast.
+- FindProof `--proof` output, judged by strict CheckProof (each step against
+  its cited premises only): records print in the problem's own signature
+  (quoted atoms, hashed long names and curried wide functors mapped back).

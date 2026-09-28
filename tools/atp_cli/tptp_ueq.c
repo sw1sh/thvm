@@ -277,6 +277,81 @@ static void tp_scan_term(TpProblem *tp, const char *s) {
   }
 }
 
+// Input renamings the proof must undo.  tp_unquote_names and
+// tp_shorten_names rewrite identifiers the internal grammar cannot
+// carry; a proof printed in the stand-in names cites formulas the
+// problem never states (CSR038-10's hashed constant: a leaf no
+// problem formula matches).  Each stand-in -> original pair is noted
+// here and tp_unrename_write maps the stand-ins back on output.
+typedef struct { char *from, *to; } TpRename;
+static TpRename *g_tp_ren = NULL;
+static u32 g_tp_ren_cap = 0;
+static int g_tp_nren = 0;
+static int g_tp_ren_on = 0;   // --proof runs only: the default path never notes
+
+static int tp_ren_slot(const char *from, size_t n) {
+  if (g_tp_ren_cap == 0u) return -1;
+  u32 slot = (u32)(tp_name_hash(from, n) % (u64)g_tp_ren_cap);
+  for (;;) {
+    TpRename *e = &g_tp_ren[slot];
+    if (e->from == NULL) return (int)slot;
+    if (strlen(e->from) == n && memcmp(e->from, from, n) == 0) return (int)slot;
+    slot = (slot + 1u) % g_tp_ren_cap;
+  }
+}
+
+static void tp_ren_note(const char *from, size_t from_n, const char *to, size_t to_n) {
+  if (!g_tp_ren_on) return;
+  if ((u32)(g_tp_nren + 1) * 2u > g_tp_ren_cap) {
+    TpRename *old = g_tp_ren;
+    u32 ocap = g_tp_ren_cap;
+    g_tp_ren_cap = (ocap == 0u) ? 1024u : 2u * ocap;
+    g_tp_ren = (TpRename *)calloc(g_tp_ren_cap, sizeof(TpRename));
+    if (g_tp_ren == NULL) tp_giveup("OOM in rename table");
+    for (u32 i = 0; i < ocap; i++) {
+      if (old[i].from == NULL) continue;
+      g_tp_ren[tp_ren_slot(old[i].from, strlen(old[i].from))] = old[i];
+    }
+    free(old);
+  }
+  int slot = tp_ren_slot(from, from_n);
+  if (g_tp_ren[slot].from != NULL) return;
+  g_tp_ren[slot].from = strndup(from, from_n);
+  g_tp_ren[slot].to = strndup(to, to_n);
+  if (g_tp_ren[slot].from == NULL || g_tp_ren[slot].to == NULL)
+    tp_giveup("OOM in rename table");
+  g_tp_nren++;
+}
+
+// Write `text` with every stand-in identifier restored.  Quoted spans
+// are copied verbatim (file paths, already-restored atoms).
+static void tp_unrename_write(FILE *out, const char *text, size_t len) {
+  if (g_tp_nren == 0) { fwrite(text, 1, len, out); return; }
+  size_t i = 0;
+  while (i < len) {
+    char c = text[i];
+    if (c == '\'') {
+      size_t j = i + 1;
+      while (j < len && text[j] != '\'') j += (text[j] == '\\' && j + 1 < len) ? 2 : 1;
+      if (j < len) j++;
+      fwrite(text + i, 1, j - i, out);
+      i = j;
+      continue;
+    }
+    if (isalnum((unsigned char)c) || c == '_') {
+      size_t j = i;
+      while (j < len && (isalnum((unsigned char)text[j]) || text[j] == '_')) j++;
+      int slot = tp_ren_slot(text + i, j - i);
+      if (slot >= 0 && g_tp_ren[slot].from != NULL) fputs(g_tp_ren[slot].to, out);
+      else fwrite(text + i, 1, j - i, out);
+      i = j;
+      continue;
+    }
+    fputc(c, out);
+    i++;
+  }
+}
+
 // The CSR knowledge bases carry symbol names up to 224 chars; both the
 // TpSym table and the engine's .pr reader cap names at 64, and silent
 // truncation would conflate distinct symbols (and desync the SIGNATURE
@@ -321,6 +396,7 @@ static char *tp_unquote_names(char *text) {
       while (strstr(text, qrepl[nq]) != NULL &&
              strlen(qrepl[nq]) + 2 < sizeof qrepl[nq])
         strcat(qrepl[nq], "x");
+      tp_ren_note(qrepl[nq], strlen(qrepl[nq]), r, (size_t)(q2 - r) + 1u);
       ix = nq++;
     }
     if (ix < 0) { out[o++] = *r++; continue; }   // table full: leave as-is
@@ -342,9 +418,15 @@ static void tp_shorten_names(char *text) {
       while (isalnum((unsigned char)r[n]) || r[n] == '_') n++;
       if (n >= TP_NAME_LEN) {
         u64 h = tp_name_hash(r, n);
+        char *orig = g_tp_ren_on ? strndup(r, n) : NULL;
+        char *w0 = w;
         memmove(w, r, 40);
         w += 40;
         w += snprintf(w, 20, "_h%016llx", (unsigned long long)h);
+        if (orig != NULL) {
+          tp_ren_note(w0, (size_t)(w - w0), orig, n);
+          free(orig);
+        }
       } else {
         memmove(w, r, n);
         w += n;

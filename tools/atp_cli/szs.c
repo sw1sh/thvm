@@ -1014,6 +1014,24 @@ static int cli_emit_narrow_proof(FILE *fp, AtpState *s,
   return 1;
 }
 
+// The internal signature differs from the problem's (quoted atoms,
+// hashed long names, curried wide functors): proof text is printed
+// through cli_proof_write, which maps every record back.
+static int cli_proof_renamed(void) { return g_tp_nren > 0 || g_curry_nfn > 0; }
+
+static void cli_proof_write(FILE *out, const char *text, size_t len) {
+  if (g_curry_nfn > 0) {
+    size_t ul = 0;
+    char *u = tp_uncurry_text(text, len, &ul);
+    if (u != NULL) {
+      tp_unrename_write(out, u, ul);
+      free(u);
+      return;
+    }
+  }
+  tp_unrename_write(out, text, len);
+}
+
 static void cli_proof_hook(AtpState *s) {
   if (!g_cli_want_proof || g_atp_bench_status != (int)ATP_PROVED) return;
   PrProblem *pr = (PrProblem *)g_atp_bench_pr;
@@ -1024,6 +1042,13 @@ static void cli_proof_hook(AtpState *s) {
   // The bench's stdout is rerouted to stderr in competition mode; the
   // SZS stream goes to the preserved real stdout (g_cli_out).
   FILE *out = (g_cli_out != NULL) ? g_cli_out : stdout;
+  // Renamed input identifiers (quoted atoms, hashed long names): build
+  // the block in memory and restore the problem's own names on output.
+  FILE *real_out = out;
+  char *ren_buf = NULL;
+  size_t ren_len = 0;
+  FILE *ren_ms = cli_proof_renamed() ? open_memstream(&ren_buf, &ren_len) : NULL;
+  if (ren_ms != NULL) out = ren_ms;
   if (g_cli_want_szs && !g_cli_szs_printed) {
     // FOF ontology when a conjecture was negated (Theorem); CNF
     // ontology for clausal input (Unsatisfiable).
@@ -1087,6 +1112,12 @@ static void cli_proof_hook(AtpState *s) {
     cli_emit_goal_chain(out, s, pr, gl, gr, g, steps, n, printed);
   }
   fprintf(out, "%% SZS output end %s for %s\n", szs_form, g_cli_problem);
+  if (ren_ms != NULL) {
+    fclose(ren_ms);
+    cli_proof_write(real_out, ren_buf, ren_len);
+    free(ren_buf);
+    out = real_out;
+  }
   fflush(out);
   free(printed);
 }
