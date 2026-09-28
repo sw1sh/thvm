@@ -85,3 +85,11 @@ for the per-commit story.
   `otter-lpo-cmin` variant (Vampire `sp=const_min`) proves RNG027-8 and
   the Prover9-shaped twin `otter-ladr` (`--sym-prec=ladr`, LADR's symbol
   order) proves RNG130-1.
+- Prover9's clause-weight penalties (`--nest-penalty` / `--depth-penalty`)
+  now weigh every critical pair: the FT-treated push route, which forms
+  almost all of them, scored its pairs without the penalty.
+- Prover9 lex-dependent demodulation (`--lex-dep-demod=N`, LADR
+  `lex_dep_demod_lim`): unorientable equations with equal side sizes
+  (commutativity, left-commutativity) demodulate in every normalization
+  under the run's ordering, the LADR AC-normalization the Prover9 route
+  of the ring problems runs on.

@@ -698,6 +698,37 @@ static u32 atp_ladr_depth(Term t) {
   }
   return d + 1u;
 }
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Span twins for the treated push route, whose Term args are zero
+// sentinels (the CP content is the treatment's NF spans).  A NUM marker
+// subtree is one leaf node, as its Term is.
+static u8 atp_ladr_leaf_ft(const AtpFtCell *c) {
+  return (u8)((c->sym & WF_VAR_BIT) != 0u || c->arity == 0u ||
+              c->sym == ATPFT_NUM_MARKER);
+}
+static u32 atp_ladr_nest_ft(const AtpFtCell *t) {
+  if (atp_ladr_leaf_ft(t)) return 0u;
+  u32 c = 0u;
+  const AtpFtCell *ch = t->next;
+  for (u32 i = 0; i < t->arity; i++) {
+    if (t->arity <= 2u && (ch->sym & WF_VAR_BIT) == 0u && ch->sym == t->sym) c++;
+    c += atp_ladr_nest_ft(ch);
+    ch = ch->end->next;
+  }
+  return c;
+}
+static u32 atp_ladr_depth_ft(const AtpFtCell *t) {
+  if (atp_ladr_leaf_ft(t)) return 0u;
+  u32 d = 0u;
+  const AtpFtCell *ch = t->next;
+  for (u32 i = 0; i < t->arity; i++) {
+    u32 k = atp_ladr_depth_ft(ch);
+    if (k > d) d = k;
+    ch = ch->end->next;
+  }
+  return d + 1u;
+}
+#endif
 
 static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
                                     u32 base, u32 lhs_nodes) {
@@ -747,13 +778,23 @@ static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
                                          lhs_nodes, base - lhs_nodes)
              : atp_cp_weight_base(s, lhs, rhs, mode);
   }
-  if (s != NULL && (s->ladr_nest_pen | s->ladr_depth_pen) != 0u &&
-      lhs != 0 && rhs != 0 &&
-      term_tag(lhs) != TAG_NUM && term_tag(rhs) != TAG_NUM) {
+  if (s != NULL && (s->ladr_nest_pen | s->ladr_depth_pen) != 0u) {
     // The equation literal: depth 1 + max side depth (literals_depth).
-    u32 dl = atp_ladr_depth(lhs), dr = atp_ladr_depth(rhs);
-    base += s->ladr_nest_pen * (atp_ladr_nest(lhs) + atp_ladr_nest(rhs));
-    base += s->ladr_depth_pen * (1u + (dl > dr ? dl : dr));
+    if (lhs != 0 && rhs != 0 &&
+        term_tag(lhs) != TAG_NUM && term_tag(rhs) != TAG_NUM) {
+      u32 dl = atp_ladr_depth(lhs), dr = atp_ladr_depth(rhs);
+      base += s->ladr_nest_pen * (atp_ladr_nest(lhs) + atp_ladr_nest(rhs));
+      base += s->ladr_depth_pen * (1u + (dl > dr ? dl : dr));
+    }
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    else if (g_vcp_treat.armed && g_vcp_treat.fl != NULL &&
+             g_vcp_treat.fr != NULL) {
+      const AtpFtCell *fl = g_vcp_treat.fl, *fr = g_vcp_treat.fr;
+      u32 dl = atp_ladr_depth_ft(fl), dr = atp_ladr_depth_ft(fr);
+      base += s->ladr_nest_pen * (atp_ladr_nest_ft(fl) + atp_ladr_nest_ft(fr));
+      base += s->ladr_depth_pen * (1u + (dl > dr ? dl : dr));
+    }
+#endif
   }
   if (s != NULL && s->use_mix_heuristic) {
     KboCmp c = atp_compare(s, lhs, rhs);
