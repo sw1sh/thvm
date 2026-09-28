@@ -33,7 +33,7 @@ assert REC.itemsize == 64
 NONE = 0xFFFFFFFF
 TRACE_AXIOM, TRACE_ORIENT, TRACE_CP, TRACE_SIMPLIFY = 1, 2, 3, 4
 TRACE_NORM_STEP, TRACE_FVI = 5, 6
-T = {c: ord(c) for c in "BPSXDKkRE"}
+T = {c: ord(c) for c in "BPSXDKkRWE"}
 
 
 def hx_hash(x):
@@ -118,6 +118,7 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
     K = r[r["tag"] == T["K"]]
     k = r[r["tag"] == T["k"]]
     R = r[r["tag"] == T["R"]]
+    W = r[r["tag"] == T["W"]]
     text = open(proof_path, errors="replace").read()
     blk = proof_block(text)
     if blk is None:
@@ -246,7 +247,9 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
         r_id=R["seq"], r_kind=R["kind"], r_c0=R["trace"], r_c1=R["pa"],
         r_step=R["step"], r_flags=R["flags"], r_feat=R["feat"],
         bounds=bounds.astype(np.uint32),
-        x_kind=X["kind"], x_seq=X["seq"], x_step=X["step"],
+        x_kind=X["kind"], x_seq=X["seq"], x_step=X["step"], x_live=X["aux"],
+        w_seq=W["seq"], w_step=W["step"], w_pri=W["pri"], w_kind=W["kind"],
+        w_feat=W["feat"],
         meta=np.array([
             rate_p, rate_c, float(len(S)), float(E["trace"]),
             float(n_push_rec), float(len(cited)), float(len(anc)),
