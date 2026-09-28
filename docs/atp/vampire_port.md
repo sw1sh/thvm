@@ -146,6 +146,35 @@ Ordered by win-frequency in `vampire_raw/`:
 Each of these is a localized addition in `src/atp/` or
 `src/atp/precedence.c` + a small WL surface change in ATP.wl.
 
+## Prover9 (LADR-2026-6A) ports
+
+Prover9-2026 (CASC-J13) is the only prover that solves the whole RNG
+Moufang cluster (RNG027-5/7/8/9/10, 028-5/7/8, 029-5/6/7) -- 4.5-10s in
+`-casc` mode on the dissection pod, every forced portfolio strategy that
+solves RNG027-5 and RNG029-5 being LPO with age-heavy selection and the
+nest/depth penalties.  Its route differs from Vampire's: the LADR symbol
+order ranks the defined operators on top, so the associator/commutator
+definitions unfold, and the AC arrangement is normalized by
+lex-dependent demodulation.
+
+| Prover9 / LADR | thvm option | thvm C source | Notes |
+|---|---|---|---|
+| symbol order (`lex_compare_arity_0213`, fewer occurrences greater, `inverse_order`) | `--sym-prec=ladr` | `src/atp/precedence.c` | The `otter-ladr` lane: RNG130-1 in 0.1s.  The multi-order trial (`multi_order_trial`: frequency / reverse frequency / arity / goal-directed, most orientable equations wins) is a GAP. |
+| `nest_penalty` / `depth_penalty` (`ladr/weight.c`) | `--nest-penalty` / `--depth-penalty` | `src/atp/cp_weight.c` | Every CP, including the FT-treated route (whose Terms are zero sentinels; its NF spans are scored).  `otter-lpo-cmin` carries 2/2. |
+| `max_weight` (default 100, penalized) | `--max-weight=N-1` | `src/atp/cp_heap.c` | With the penalties on, the MaxWeight cap bounds symbol count + penalty (LADR also counts the `=` symbol). |
+| `lex_dep_demod` / `_lim` (11) / `_sane` | `--lex-dep-demod=N` | `src/atp/ft_norm.c`, `src/atp/ordered_rewrite.c` | An unorientable equation with equal side sizes and n_l + n_r + 1 <= N demodulates in every normalization, each step gated by the run's ordering (the FT leg compares under LPO). |
+| `age_part` / `false_part` / `true_part` / `weight_part` | `--awr=a:w` | `src/atp/cp_heap.c` | Without interpretations `false` = negative clauses (the goal family), `true` = positive ones; the goal is no clause here, so A3 F4 T4 W2 is about `--awr=2`. |
+| Otter loop (kept sos clauses demodulate) | `--otter` | `src/atp/otter.c` | The same simplification set as Vampire `sa=otter`. |
+| paramodulation into the negated goal (`false` picks) | GAP | -- | Prover9 selects goal variants; thvm only normalizes the goal. |
+
+Measured on the cluster (--proof singles, 240s): the ported LADR route
+(order + penalties + `--max-weight=99` + `--lex-dep-demod=11`) proves
+none of the Moufang members -- about 1800 selections with ~450 rules
+where Prover9 needs 170-320 given clauses; without `max_weight` the
+unfolded terms reach 1000 symbols and the LPO compares explode.  Open
+divergence: align the kept-rule stream against Prover9's given clauses,
+content-canonically as for the Vampire alignment, before further ports.
+
 ## What is NOT a "Vampire port" but is sometimes confused with one
 
 * **CP-set interreduce** (`CPSetInterreduce`) — Waldmeister
