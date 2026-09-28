@@ -20,6 +20,11 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- Fix: a reduce over an elementwise chain 63+ nodes deep summed wrong on
+  the CPU path.  rangeify's "does the reduce body still use its axis"
+  walk gave up at depth 64 and answered no, so the broadcast repair
+  rewrote SUM(body) into body*extent.  That walk and its two siblings are
+  now exact (memoized, no depth budget).
 - CONST CAST/BITCAST folds keep the value under the f32-payload rule
   (tinygrad #18203/#18204): bf16/f16/fp8 consts truncate to the dtype, a
   float CAST(CONST) rebuilds the const at the destination (CAST(f32 1.0,

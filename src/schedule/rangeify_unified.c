@@ -394,48 +394,110 @@ static Term ru_new_range(u32 extent, u32 axistype) {
   return uop_range(axis_id, axistype, extent);
 }
 
-// Walk a UOp subtree and return 1 if any UOP_RANGE leaf has axis_id == aid.
-// Used after ru_rewrite_subtree to detect when a REDUCE's body lost the
-// reduce-axis range (e.g. a CONST broadcast collapsed past the rewrite,
-// leaving the REDUCE iterating an axis that the walker can't measure).
-static int ru_subtree_uses_axis(Term t, u32 aid, u32 depth) {
-  if (depth > 64) return 0;
-  Term r = term_resolve(t);
-  if (term_tag(r) != TAG_UOP) return 0;
-  u8 op = term_ext(r);
-  if (op == UOP_RANGE) {
-    return uop_range_axis_id(r) == aid;
+// The UOP_RANGE leaf with axis_id `aid` under `t`, or 0 if none.  Does not
+// descend into UOP_BUFFER (its dim cells are TAG_NUM leaves), UOP_BUFFERIZE
+// (an opaque cross-realize boundary), or, with `stop_kernel`, UOP_KERNEL.
+// Exact: an iterative
+// walk that expands each node once, stamped by heap loc, so there is no
+// depth budget.  The budget it replaces answered "absent" past depth 64,
+// and ru_reduce_repair_broadcast_body then rewrote REDUCE_SUM(body) into
+// body*extent: every reduce over an elementwise chain 63+ deep summed
+// wrong, silently.
+static u32  *RU_AXIS_SEEN      = NULL;
+static u64   RU_AXIS_SEEN_CAP  = 0;
+static u32   RU_AXIS_EPOCH     = 0;
+static Term *RU_AXIS_STACK     = NULL;
+static u64   RU_AXIS_STACK_CAP = 0;
+
+static int ru_axis_stack_push(Term t, u64 *sp) {
+  if (*sp == RU_AXIS_STACK_CAP) {
+    u64   want  = RU_AXIS_STACK_CAP ? RU_AXIS_STACK_CAP * 2 : 256;
+    Term *grown = (Term *)realloc(RU_AXIS_STACK, want * sizeof(Term));
+    if (grown == NULL) {
+      return 0;
+    }
+    RU_AXIS_STACK     = grown;
+    RU_AXIS_STACK_CAP = want;
   }
-  // Don't descend into UOP_BUFFER (its dim cells are TAG_NUM leaves) or
-  // UOP_BUFFERIZE (opaque cross-realize boundary).
-  if (op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
-  u8 ar = uop_arity(op);
-  u64 loc = term_val(r);
-  for (u8 i = 0; i < ar; i++) {
-    if (ru_subtree_uses_axis(heap_read(loc + i), aid, depth + 1)) return 1;
+  RU_AXIS_STACK[(*sp)++] = t;
+  return 1;
+}
+
+static Term ru_find_axis_range(Term t, u32 aid, int stop_kernel) {
+  u64 want = HEAP_NEXT;
+  if (want > RU_AXIS_SEEN_CAP) {
+    u32 *grown = (u32 *)realloc(RU_AXIS_SEEN, want * sizeof(u32));
+    if (grown != NULL) {
+      memset(grown + RU_AXIS_SEEN_CAP, 0, (want - RU_AXIS_SEEN_CAP) * sizeof(u32));
+      RU_AXIS_SEEN     = grown;
+      RU_AXIS_SEEN_CAP = want;
+    }
+  }
+  if (++RU_AXIS_EPOCH == 0) {
+    if (RU_AXIS_SEEN != NULL) {
+      memset(RU_AXIS_SEEN, 0, RU_AXIS_SEEN_CAP * sizeof(u32));
+    }
+    RU_AXIS_EPOCH = 1;
+  }
+  // A node past the stamped region (the array could not grow) is expanded
+  // on every visit: still exact, only slower.
+  u64 cap = (RU_AXIS_SEEN != NULL) ? RU_AXIS_SEEN_CAP : 0;
+  u64 sp  = 0;
+  if (!ru_axis_stack_push(t, &sp)) {
+    thvm_fatal("ru_find_axis_range: out of memory");
+  }
+  while (sp > 0) {
+    Term r = term_resolve(RU_AXIS_STACK[--sp]);
+    if (term_tag(r) != TAG_UOP) {
+      continue;
+    }
+    u64 loc = term_val(r);
+    if (loc < cap) {
+      if (RU_AXIS_SEEN[loc] == RU_AXIS_EPOCH) {
+        continue;
+      }
+      RU_AXIS_SEEN[loc] = RU_AXIS_EPOCH;
+    }
+    u8 op = term_ext(r);
+    switch (op) {
+      case UOP_RANGE:
+        if (uop_range_axis_id(r) == aid) {
+          return r;
+        }
+        continue;
+      case UOP_BUFFER: case UOP_BUFFERIZE:
+        continue;
+      case UOP_KERNEL:
+        if (stop_kernel) {
+          continue;
+        }
+        break;
+      default:
+        break;
+    }
+    u8 ar = uop_arity(op);
+    for (u8 i = 0; i < ar; i++) {
+      if (!ru_axis_stack_push(heap_read(loc + i), &sp)) {
+        thvm_fatal("ru_find_axis_range: out of memory");
+      }
+    }
   }
   return 0;
 }
 
-// Find the extent of the UOP_RANGE leaf with axis_id == aid anywhere in
-// subtree `t`, or 0 if absent.  Mirror of ru_subtree_uses_axis but returns
-// the extent.  Used by the THVM_FUSE_MATMUL_INPUT rank-grow remap to match a
-// leaked producer range to the matmul axis (M / K) of equal extent.
-static u32 ru_subtree_axis_extent(Term t, u32 aid, u32 depth) {
-  if (depth > 64) return 0;
-  Term r = term_resolve(t);
-  if (term_tag(r) != TAG_UOP) return 0;
-  u8 op = term_ext(r);
-  if (op == UOP_RANGE)
-    return (uop_range_axis_id(r) == aid) ? uop_range_extent(r) : 0;
-  if (op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
-  u8 ar = uop_arity(op);
-  u64 loc = term_val(r);
-  for (u8 i = 0; i < ar; i++) {
-    u32 e = ru_subtree_axis_extent(heap_read(loc + i), aid, depth + 1);
-    if (e != 0) return e;
-  }
-  return 0;
+// Used after ru_rewrite_subtree to detect when a REDUCE's body lost the
+// reduce-axis range (e.g. a CONST broadcast collapsed past the rewrite,
+// leaving the REDUCE iterating an axis that the walker can't measure).
+static int ru_subtree_uses_axis(Term t, u32 aid) {
+  return ru_find_axis_range(t, aid, 0) != 0;
+}
+
+// The extent of the axis-`aid` RANGE leaf under `t`, or 0 if absent.  Used
+// by the THVM_FUSE_MATMUL_INPUT rank-grow remap to match a leaked producer
+// range to the matmul axis (M / K) of equal extent.
+static u32 ru_subtree_axis_extent(Term t, u32 aid) {
+  Term r = ru_find_axis_range(t, aid, 0);
+  return (r != 0) ? uop_range_extent(r) : 0;
 }
 
 // Build f32 CONST term with given value.
@@ -473,7 +535,7 @@ static Term ru_reduce_repair_broadcast_body(Term reduce_t,
   u32 kind   = uop_reduce_kind(reduce_t);
   Term body  = uop_reduce_src(reduce_t);
   for (u32 a = 0; a < n_axes; a++) {
-    if (ru_subtree_uses_axis(body, uop_reduce_axis(reduce_t, a), 0)) {
+    if (ru_subtree_uses_axis(body, uop_reduce_axis(reduce_t, a))) {
       return reduce_t;
     }
   }
@@ -2511,18 +2573,8 @@ typedef struct {
 // `aid_hi*k + aid_lo`) counts as covered: the consumer iterates those
 // leaf axes in its own scope and substitutes the whole compound
 // expression on splice (ru_subtree_rewrite_ranges via in_rngs).
-static int ru_expr_references_aid(Term t, u32 aid, u32 depth) {
-  if (depth > 64) return 0;
-  Term r = term_resolve(t);
-  if (term_tag(r) != TAG_UOP) return 0;
-  u8 op = term_ext(r);
-  if (op == UOP_RANGE) return uop_range_axis_id(r) == aid;
-  if (op == UOP_BUFFER || op == UOP_BUFFERIZE || op == UOP_KERNEL) return 0;
-  u8 ar = uop_arity(op);
-  u64 loc = term_val(r);
-  for (u8 i = 0; i < ar; i++)
-    if (ru_expr_references_aid(heap_read(loc + i), aid, depth + 1)) return 1;
-  return 0;
+static int ru_expr_references_aid(Term t, u32 aid) {
+  return ru_find_axis_range(t, aid, 1) != 0;
 }
 
 static int ru_free_axis_bound_has(RuFreeAxisSet const *s, u32 aid) {
@@ -3183,9 +3235,9 @@ fn void pm_apply_rangeify(Term root) {
           if (faid == uop_range_axis_id(k_rng)) continue; // already the reduce axis
           int is_out = 0;
           for (u8 a = 0; a < rm->out_ndim && !is_out; a++)
-            if (ru_expr_references_aid(rm->out_rngs[a], faid, 0)) is_out = 1;
+            if (ru_expr_references_aid(rm->out_rngs[a], faid)) is_out = 1;
           if (is_out) continue;                           // a genuine output axis
-          u32 fext = ru_subtree_axis_extent(rbody, faid, 0);
+          u32 fext = ru_subtree_axis_extent(rbody, faid);
           if (fext == 0) continue;
           Term bind = 0;
           // m-leak FIRST: an output range of equal extent NOT read by the weight
@@ -3195,7 +3247,7 @@ fn void pm_apply_rangeify(Term root) {
             Term orng = rm->out_rngs[a];
             if (term_tag(orng)==TAG_UOP && term_ext(orng)==UOP_RANGE
                 && uop_range_extent(orng) == fext
-                && !ru_expr_references_aid(b_idx, uop_range_axis_id(orng), 0))
+                && !ru_expr_references_aid(b_idx, uop_range_axis_id(orng)))
               bind = orng;
           }
           // k-leak: the contraction axis (extent == reduce K extent).
@@ -3237,7 +3289,7 @@ fn void pm_apply_rangeify(Term root) {
           u32 faid = bs.free_aids[fi];
           int is_out = 0;
           for (u8 a = 0; a < rm->out_ndim && !is_out; a++)
-            if (ru_expr_references_aid(rm->out_rngs[a], faid, 0)) is_out = 1;
+            if (ru_expr_references_aid(rm->out_rngs[a], faid)) is_out = 1;
           if (is_out) continue;
           int is_red = 0;
           for (u32 k = 0; k < n_rrng && !is_red; k++)
@@ -3375,7 +3427,7 @@ fn void pm_apply_rangeify(Term root) {
         // the consumer's in_rngs).  Treating them as stranded force-realized
         // the reshape source unnecessarily (the old reshape-source band-aid).
         for (u8 a = 0; a < rm->out_ndim && !covered; a++) {
-          if (ru_expr_references_aid(rm->out_rngs[a], aid, 0)) covered = 1;
+          if (ru_expr_references_aid(rm->out_rngs[a], aid)) covered = 1;
         }
         if (!covered) { stranded = 1; break; }
       }
