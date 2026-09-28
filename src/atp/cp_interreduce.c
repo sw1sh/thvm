@@ -118,7 +118,9 @@ static u64 atp_term_sym_bitmap(Term t) {
 // fixed trajectory re-samples identically.
 // Every time in the discipline -- the epoch, the frequency and budget
 // gates, and both cost accruals (here and around the sweep in
-// thvm_atp_step_impl) -- is PROCESS CPU time, Twee's clock: Task.hs
+// thvm_atp_step_impl) -- reads atp_work_now_us: by default PROCESS CPU
+// time, Twee's clock (THVM_ATP_WORK_CLOCK=instr swaps in a deterministic
+// instruction count; see atp_work_now_us).  Task.hs
 // stamps task_start / task_last / task_spent with getCPUTime (Task.hs:4,
 // :32, :39, :42), which GHC implements as clock_gettime(
 // CLOCK_PROCESS_CPUTIME_ID) (base System/CPUTime/Posix/ClockGetTime.hsc).
@@ -127,7 +129,7 @@ static u64 atp_term_sym_bitmap(Term t) {
 // indices and forking otherwise identical runs.
 static u8 atp_cp_set_ir_due(AtpState *s) {
   if (s->n_cps == 0u || s->n_rules == 0u) return 0;
-  u64 now = atp_cpu_now_us();
+  u64 now = atp_work_now_us();
   if (s->cp_set_ir_start_us == 0u) {
     // Discipline epoch: first check after the queue came alive.  Twee
     // stamps task_start/task_last at task creation (prover start).
@@ -198,7 +200,7 @@ static u8 atp_cp_set_ir_due(AtpState *s) {
 #endif
     thvm_atp_heap_reset(hcp);
   }
-  u64 after = atp_cpu_now_us();
+  u64 after = atp_work_now_us();
   s->cp_set_ir_spent_us += after - now;
   s->cp_set_ir_last_us   = after;
   u8 fire = dead * 100u >= ATP_CP_SET_IR_THRESHOLD * sample;

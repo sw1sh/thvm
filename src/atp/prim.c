@@ -466,6 +466,7 @@ static u64 g_atp_perm_subsume_mask = 0ull;
 // horizon in cp_heap.c.
 static u64 atp_now_us(void);
 static u64 atp_cpu_now_us(void);
+static u64 atp_work_now_us(void);
 static FILE *atp_clock_trace(void);
 static void atp_clock_trace_end(FILE *tf);
 static inline u64 atp_phase_now(void) {

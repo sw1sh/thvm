@@ -5991,8 +5991,9 @@ typedef struct {
   // 100-CP random sample of the queue is dead -- joinable under the
   // current R or orphaned (Twee cfg_renormalise_threshold = 20 over
   // cfg_cp_sample_size = 100).  0 = legacy every-period-rules sweep.
-  // The three stamps are process CPU microseconds (atp_cpu_now_us),
-  // Twee's getCPUTime clock, so the gates ignore time spent descheduled.
+  // The three stamps read atp_work_now_us: process CPU microseconds by
+  // default (Twee's getCPUTime clock), so the gates ignore time spent
+  // descheduled; THVM_ATP_WORK_CLOCK=instr makes them deterministic.
   u32  cp_set_ir_budget;          // percent; 0 -> period discipline
   u64  cp_set_ir_spent_us;        // cumulative sweep + sample-check CPU
   u64  cp_set_ir_last_us;         // last discipline check (freq gate)
@@ -6501,12 +6502,13 @@ typedef struct {
   // Limited Resource Strategy (Riazanov & Voronkov, JSC 36, 2003).  When
   // a wall-clock budget is set, LRS estimates from the observed selection
   // rate how many MORE CPs the saturator will pop before the deadline
-  // (rate and remaining budget in process CPU time, the load-blind CASC
-  // shape of Vampire's instruction-count estimate; see
-  // atp_lrs_recompute_horizon), then prunes the queue of CPs heavier
-  // than the predicted-reachable weight -- the saturator only ever
-  // reaches the lightest `predicted_remaining_selections` CPs, so the
-  // heavy tail wastes index / normalize / heap effort it never spends.
+  // (rate and remaining budget on the work clock -- process CPU time by
+  // default -- the load-blind CASC shape of Vampire's instruction-count
+  // estimate; see atp_lrs_recompute_horizon), then prunes the queue of
+  // CPs heavier than the predicted-reachable weight -- the saturator
+  // only ever reaches the lightest `predicted_remaining_selections` CPs,
+  // so the heavy tail wastes index / normalize / heap effort it never
+  // spends.
   // Soundness: discarded CPs are unreachable in budget, so the proof (if
   // found) does not depend on them -- the same "incomplete in principle,
   // complete in budget" tradeoff Vampire ships.  Default OFF: every field
@@ -6515,7 +6517,7 @@ typedef struct {
   // Flipped on by Method -> {... "LRS" -> True} via
   // thvm_atp_set_use_lrs, or by setting THVM_ATP_LRS=1 at init.
   u8   use_lrs;
-  u64  lrs_start_us;              // epoch (process CPU us at first select)
+  u64  lrs_start_us;              // epoch (atp_work_now_us at first select)
   u64  lrs_start_wall_us;         // epoch on the wall clock: the simulated
                                   // CPU budget is deadline - this
   u32  lrs_recompute_period;      // selections between horizon recomputes

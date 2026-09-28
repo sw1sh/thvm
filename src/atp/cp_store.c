@@ -87,9 +87,10 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
 static void atp_cp_set_interreduce(AtpState *s);
 // Twee task discipline for the sweep (cp_set_ir_budget > 0): frequency,
 // budget and sampled-dead-fraction gates (Twee Task.hs taskDue +
-// Twee.hs:978 newTask 10 / shouldSimplifyQueue), timed in process CPU
-// microseconds like Twee's getCPUTime.  Defined next to the sweep;
-// forward-declared for the thvm_atp_step call site.
+// Twee.hs:978 newTask 10 / shouldSimplifyQueue), timed on the work clock
+// (atp_work_now_us: process CPU microseconds by default, like Twee's
+// getCPUTime).  Defined next to the sweep; forward-declared for the
+// thvm_atp_step call site.
 #define ATP_CP_SET_IR_FREQ_US    10000000ull  // Twee newTask freq = 10 CPU s
 #define ATP_CP_SET_IR_THRESHOLD  20u  // Twee cfg_renormalise_threshold %
 #define ATP_CP_SET_IR_SAMPLE     100u // Twee cfg_cp_sample_size

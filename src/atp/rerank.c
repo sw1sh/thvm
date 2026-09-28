@@ -1434,6 +1434,66 @@ static u64 atp_cpu_now_us(void) {
   return atp_now_us();
 }
 
+#if defined(__linux__)
+#include <linux/perf_event.h>   // atp_work_now_us instruction counter
+#include <sys/syscall.h>
+#endif
+
+// Scale of the instruction work clock: user-space instructions per
+// nominal microsecond.  Calibrated on the reference pod (AMD EPYC Genoa
+// vCPU, equals-twee lane on LCL927-10: 8.9-9.1 G instructions per CPU
+// second over whole runs, 9.5 G over the first 10 s), so the instruction
+// clock ticks like the CPU clock there.  It sets only the clock's scale
+// -- the twee discipline's 10 s cadence and the LRS simulated budget --
+// never its determinism.
+#define ATP_WORK_INSTR_PER_US 9000ull
+
+// Clock of the load-sensitive search disciplines (the cp-set-ir budget
+// discipline and the LRS horizon).  Default: process CPU, Twee's clock.
+// A CPU clock ignores time spent descheduled but still drifts with how
+// fast the host executes the same work (SMT siblings, shared caches,
+// other tenants), so a discipline checking a sampled statistic at
+// clock-chosen selection indices still forks otherwise identical runs.
+// THVM_ATP_WORK_CLOCK=instr counts this process's user-space
+// instructions through perf_event -- the counter behind Vampire's
+// instruction limits (Lib/Timer.cpp) -- which is a function of the work
+// done alone: the disciplines then fire at the same selection indices
+// on every run, loaded or not, on any host running the same binary.
+// Linux only; where the counter cannot be opened the CPU clock is used.
+// Never returns 0: the disciplines use 0 as their unlatched sentinel.
+static u64 atp_work_now_us(void) {
+  static int mode = -1;     // -1 = unprobed, 0 = CPU, 1 = instructions
+#if defined(__linux__)
+  static int fd = -1;
+  if (mode < 0) {
+    mode = 0;
+    const char *e = getenv("THVM_ATP_WORK_CLOCK");
+    if (e != NULL && strcmp(e, "instr") == 0) {
+      struct perf_event_attr pe;
+      memset(&pe, 0, sizeof pe);
+      pe.type           = PERF_TYPE_HARDWARE;
+      pe.size           = sizeof pe;
+      pe.config         = PERF_COUNT_HW_INSTRUCTIONS;
+      pe.exclude_kernel = 1;
+      pe.exclude_hv     = 1;
+      fd = (int)syscall(SYS_perf_event_open, &pe, 0, -1, -1, 0);
+      if (fd >= 0) {
+        mode = 1;
+      }
+    }
+  }
+  if (mode == 1) {
+    u64 n = 0;
+    if (read(fd, &n, sizeof n) == (ssize_t)sizeof n) {
+      return n / ATP_WORK_INSTR_PER_US + 1u;
+    }
+  }
+#else
+  (void)mode;
+#endif
+  return atp_cpu_now_us();
+}
+
 // THVM_ATP_CLOCK_TRACE=<dir>: one line per clock-gated search decision
 // (cp-set-ir sample check and sweep, LRS horizon) appended to
 // <dir>/clock.<pid>.tsv, stamped with the selection index and both
@@ -1463,11 +1523,13 @@ static FILE *atp_clock_trace(void) {
   return state == 1 ? fp : NULL;
 }
 
-// Close one trace line with both clocks and flush it (a schedule kills
-// losing slices with SIGKILL, so buffered lines would be lost).
+// Close one trace line with the three clocks and flush it (a schedule
+// kills losing slices with SIGKILL, so buffered lines would be lost).
 static void atp_clock_trace_end(FILE *tf) {
-  fprintf(tf, " wall=%llu cpu=%llu\n", (unsigned long long)atp_now_us(),
-          (unsigned long long)atp_cpu_now_us());
+  fprintf(tf, " wall=%llu cpu=%llu work=%llu\n",
+          (unsigned long long)atp_now_us(),
+          (unsigned long long)atp_cpu_now_us(),
+          (unsigned long long)atp_work_now_us());
   fflush(tf);
 }
 
@@ -2774,16 +2836,16 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   // 80%+ of the wall on hard UEQ targets (LAT138-1: 24.5s of 30s), where
   // Twee holds the same renormalisation to ~5% of the run and still
   // reaches the proofs -- the budget buys back the completion time.  The
-  // sweep's cost accrues in process CPU time, the discipline's clock.
+  // sweep's cost accrues on the discipline's clock (atp_work_now_us).
   if (s->cp_set_interreduce && added.count > 0u) {
     if (s->cp_set_ir_budget > 0u) {
       if (atp_cp_set_ir_due(s)) {
         u32 cps0 = s->n_cps;
-        u64 t0 = atp_cpu_now_us();
+        u64 t0 = atp_work_now_us();
         u64 _ph_cpir_t0 = atp_phase_now(); g_thvm_phase = "cp_set_ir";
         atp_cp_set_interreduce(s);
         if (g_atp_phase_enabled) g_atp_phase_us_cp_set_ir += atp_now_us() - _ph_cpir_t0;
-        u64 t1 = atp_cpu_now_us();
+        u64 t1 = atp_work_now_us();
         s->cp_set_ir_spent_us += t1 - t0;
         s->cp_set_ir_last_us = t1;
         FILE *tf = atp_clock_trace();

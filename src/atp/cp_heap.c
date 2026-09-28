@@ -1378,9 +1378,10 @@ static void atp_lrs_trace(const AtpState *s, u64 elapsed, u64 remaining,
 // pruned.  O(n_queue) selection + O(n_queue) sweep; the period gate in
 // the caller amortizes this across thousands of selections.
 //
-// Rate and remaining budget are PROCESS CPU time against a simulated
-// budget: the wall span from the LRS epoch to the deadline, as if the
-// prover owned one CPU for all of it.  Vampire's
+// Rate and remaining budget are read on the work clock (atp_work_now_us:
+// PROCESS CPU time by default) against a simulated budget: the wall span
+// from the LRS epoch to the deadline, as if the prover owned one CPU for
+// all of it.  Vampire's
 // LRS::estimatedReachableCount (Saturation/LRS.cpp) takes the min of a
 // time estimate on Timer::elapsedMilliseconds -- a steady_clock WALL
 // reading (Lib/Timer.cpp) -- and, when an instruction limit is set, an
@@ -1416,7 +1417,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
     return;
   }
   u64 wall = atp_now_us();
-  u64 now  = atp_cpu_now_us();
+  u64 now  = atp_work_now_us();
   if (wall == 0u || now == 0u) {
     return;
   }

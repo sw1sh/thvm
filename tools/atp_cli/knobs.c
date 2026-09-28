@@ -104,6 +104,7 @@ static const AtpKnob KNOBS[] = {
   {"w2-modulo",              "THVM_ATP_W2_MODULO",       1, "(FIFO w2 modulo)"},
   {"discount",               "THVM_ATP_DISCOUNT",        1, "(DISCOUNT given-clause discipline: passive CPs queue RAW, R+E normalized + joined only at activation; pair with --awr)"},
   {"awr",                    "THVM_ATP_AWR",             1, "(Vampire age_weight_ratio 1:N -- one oldest-by-age pick per N weight picks; awr=50 == dis+_50)"},
+  {"work-clock",             "THVM_ATP_WORK_CLOCK",      1, "(clock of the time-gated disciplines, --cp-set-ir-budget and --lrs: cpu = process CPU, Twee's getCPUTime (default); instr = perf user-space instruction count, deterministic across runs and load (Linux; falls back to cpu))"},
   {"lrs",                    "THVM_ATP_LRS",             0, "(Vampire Limited Resource Strategy: periodically prune queued CPs whose priority is beyond the pick-rate reach horizon for the remaining budget, estimated in process CPU time like CASC Vampire's sil instruction estimate)"},
   {"perm-subsume",           "THVM_ATP_PERM_SUB",        0, "(permutative subsume)"},
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
