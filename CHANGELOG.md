@@ -87,7 +87,9 @@ for the per-commit story.
   order) proves RNG130-1.
 - Prover9's clause-weight penalties (`--nest-penalty` / `--depth-penalty`)
   now weigh every critical pair: the FT-treated push route, which forms
-  almost all of them, scored its pairs without the penalty.
+  almost all of them, scored its pairs without the penalty.  With them on,
+  `--max-weight` bounds the penalized weight, as Prover9's `max_weight`
+  does.
 - Prover9 lex-dependent demodulation (`--lex-dep-demod=N`, LADR
   `lex_dep_demod_lim`): unorientable equations with equal side sizes
   (commutativity, left-commutativity) demodulate in every normalization

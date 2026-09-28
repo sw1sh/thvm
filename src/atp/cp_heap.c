@@ -1033,8 +1033,10 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     // Waldmeister MaxWeight (hard cap): drop an over-weight critical pair
     // before it enters the queue.  0 = unbounded.  This is the LOSSY
     // bound (flag-gated by the caller setting max_cp_weight); the default
-    // engine leaves it 0.
-    if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) {
+    // engine leaves it 0.  The weight includes the LADR penalties when
+    // they are on (Prover9 max_weight bounds the penalized clause weight).
+    if (s->max_cp_weight > 0u &&
+        cp_nodes + atp_ladr_penalty(s, lhs, rhs) > s->max_cp_weight) {
       free(packed);
       g_acp_fuse.valid = 0u;
       g_rdesc_store.armed = 0u;
@@ -1193,7 +1195,8 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
     return 1u;   // consumed (dropped) -- identical verdict to the MaxWeight cap
   }
   // Waldmeister MaxWeight hard cap: same lossy drop as atp_cp_heap_push.
-  if (s->max_cp_weight > 0u && cp_nodes > s->max_cp_weight) return 1u;
+  if (s->max_cp_weight > 0u &&
+      cp_nodes + atp_ladr_penalty(s, lhs, rhs) > s->max_cp_weight) return 1u;
   // Twee --max-term-size per-side cap (see atp_cp_heap_push): drop when
   // EITHER side's node count exceeds the bound.  Same lossy consumed verdict.
   if (s->max_cp_side > 0u &&

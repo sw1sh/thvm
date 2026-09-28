@@ -730,6 +730,29 @@ static u32 atp_ladr_depth_ft(const AtpFtCell *t) {
 }
 #endif
 
+// The LADR clause-weight penalty of a CP (0 when both penalties are
+// off): nest_pen * nest + depth_pen * (1 + max side depth).  Real Terms
+// score directly; the treated push route (zero-sentinel Terms) scores
+// its NF spans.
+static u32 atp_ladr_penalty(const AtpState *s, Term lhs, Term rhs) {
+  if (s == NULL || (s->ladr_nest_pen | s->ladr_depth_pen) == 0u) return 0u;
+  if (lhs != 0 && rhs != 0 &&
+      term_tag(lhs) != TAG_NUM && term_tag(rhs) != TAG_NUM) {
+    u32 dl = atp_ladr_depth(lhs), dr = atp_ladr_depth(rhs);
+    return s->ladr_nest_pen * (atp_ladr_nest(lhs) + atp_ladr_nest(rhs)) +
+           s->ladr_depth_pen * (1u + (dl > dr ? dl : dr));
+  }
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (g_vcp_treat.armed && g_vcp_treat.fl != NULL && g_vcp_treat.fr != NULL) {
+    const AtpFtCell *fl = g_vcp_treat.fl, *fr = g_vcp_treat.fr;
+    u32 dl = atp_ladr_depth_ft(fl), dr = atp_ladr_depth_ft(fr);
+    return s->ladr_nest_pen * (atp_ladr_nest_ft(fl) + atp_ladr_nest_ft(fr)) +
+           s->ladr_depth_pen * (1u + (dl > dr ? dl : dr));
+  }
+#endif
+  return 0u;
+}
+
 static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
                                     u32 base, u32 lhs_nodes) {
   // ifeq guard discipline (see AtpState.ifeq_syms): scale by
@@ -778,24 +801,8 @@ static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
                                          lhs_nodes, base - lhs_nodes)
              : atp_cp_weight_base(s, lhs, rhs, mode);
   }
-  if (s != NULL && (s->ladr_nest_pen | s->ladr_depth_pen) != 0u) {
-    // The equation literal: depth 1 + max side depth (literals_depth).
-    if (lhs != 0 && rhs != 0 &&
-        term_tag(lhs) != TAG_NUM && term_tag(rhs) != TAG_NUM) {
-      u32 dl = atp_ladr_depth(lhs), dr = atp_ladr_depth(rhs);
-      base += s->ladr_nest_pen * (atp_ladr_nest(lhs) + atp_ladr_nest(rhs));
-      base += s->ladr_depth_pen * (1u + (dl > dr ? dl : dr));
-    }
-#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-    else if (g_vcp_treat.armed && g_vcp_treat.fl != NULL &&
-             g_vcp_treat.fr != NULL) {
-      const AtpFtCell *fl = g_vcp_treat.fl, *fr = g_vcp_treat.fr;
-      u32 dl = atp_ladr_depth_ft(fl), dr = atp_ladr_depth_ft(fr);
-      base += s->ladr_nest_pen * (atp_ladr_nest_ft(fl) + atp_ladr_nest_ft(fr));
-      base += s->ladr_depth_pen * (1u + (dl > dr ? dl : dr));
-    }
-#endif
-  }
+  // The equation literal: depth 1 + max side depth (literals_depth).
+  base += atp_ladr_penalty(s, lhs, rhs);
   if (s != NULL && s->use_mix_heuristic) {
     KboCmp c = atp_compare(s, lhs, rhs);
     if (c != KBO_GT && c != KBO_LT) {
