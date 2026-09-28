@@ -275,6 +275,22 @@ fn CnfState *cnf_init(u32 step_cap) {
   return s;
 }
 
+// --- forward-demodulation provenance (proof mode) ---------------------
+// cnf_forward_demod normalizes every derived clause before it is
+// stored; the trace records only the generating inference, so without
+// these steps a proof record would claim the NORMALIZED clause from
+// parents that yield only the raw one (CSR021+1's resolution record
+// carrying an uncited plus(n2,n1) -> n3 rewrite).
+static void cnf_fd_free(CnfFdRec *r) {
+  if (r == NULL) return;
+  if (r->pre != NULL) fol_clause_free(r->pre);
+  for (u32 k = 0; k + 1u < r->n; k++)
+    if (r->mid[k] != NULL) fol_clause_free(r->mid[k]);
+  free(r->rule);
+  free(r->mid);
+  memset(r, 0, sizeof *r);
+}
+
 fn void cnf_free(CnfState *s) {
   if (s == NULL) return;
   for (u32 i = 0; i < s->n; i++) {
@@ -283,6 +299,13 @@ fn void cnf_free(CnfState *s) {
     free(s->cfrozen[i]);
   }
   free(s->corpse);
+  for (u32 i = 0; s->fdrec != NULL && i < s->fdrec_cap; i++) {
+    if (s->fdrec[i] == NULL) continue;
+    cnf_fd_free(s->fdrec[i]);
+    free(s->fdrec[i]);
+  }
+  free(s->fdrec);
+  cnf_fd_free(&s->fd_pend);
   // Drain any deferred frees still pending.
   for (u32 i = 0; i < s->n_deferred; i++) {
     if (s->deferred_free[i] != NULL) fol_clause_free(s->deferred_free[i]);
@@ -633,6 +656,41 @@ fn void cnf_set_sine_levels(CnfState *s, const u8 *levels, u32 n_labels,
   }
 }
 
+// Record one forward-demodulation step: `c` (owned from here on) is the
+// clause before the rewrite by unit-equation clause `rule_id`.
+static void cnf_fd_pend_push(CnfState *s, FolClause *c, u32 rule_id) {
+  CnfFdRec *r = &s->fd_pend;
+  u32 *nr = (u32 *)realloc(r->rule, (size_t)(r->n + 1u) * sizeof(u32));
+  FolClause **nm = (FolClause **)realloc(r->mid, (size_t)(r->n + 1u) * sizeof(FolClause *));
+  if (nr != NULL) r->rule = nr;
+  if (nm != NULL) r->mid = nm;
+  if (nr == NULL || nm == NULL) { fol_clause_free(c); return; }
+  if (r->n == 0u) r->pre = c;
+  else r->mid[r->n - 1u] = c;
+  r->rule[r->n++] = rule_id;
+}
+
+// Hand the pending steps to stored clause `id` when `c` is the clause
+// they normalized into.
+static void cnf_fd_attach(CnfState *s, u32 id, const FolClause *c) {
+  if (s->fd_pend_final == NULL || c != s->fd_pend_final) return;
+  s->fd_pend_final = NULL;
+  if (id >= s->fdrec_cap) {
+    u32 nc = (s->fdrec_cap == 0u) ? 1024u : s->fdrec_cap;
+    while (nc <= id) nc *= 2u;
+    CnfFdRec **na = (CnfFdRec **)realloc(s->fdrec, (size_t)nc * sizeof(CnfFdRec *));
+    if (na == NULL) { cnf_fd_free(&s->fd_pend); return; }
+    for (u32 i = s->fdrec_cap; i < nc; i++) na[i] = NULL;
+    s->fdrec = na;
+    s->fdrec_cap = nc;
+  }
+  CnfFdRec *r = (CnfFdRec *)malloc(sizeof(CnfFdRec));
+  if (r == NULL) { cnf_fd_free(&s->fd_pend); return; }
+  *r = s->fd_pend;
+  memset(&s->fd_pend, 0, sizeof s->fd_pend);
+  s->fdrec[id] = r;
+}
+
 // Internal: append clause + record trace metadata.  Used by every
 // inference path so the provenance DAG stays consistent.
 static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
@@ -748,6 +806,7 @@ static i32 cnf_add_clause_traced(CnfState *s, FolClause *c,
   s->trace[id].rule     = rule;
   s->trace[id].parent_a = parent_a;
   s->trace[id].parent_b = parent_b;
+  if (s->retain_dead) cnf_fd_attach(s, id, c);
   s->n++;
   if (s->idx_on) {
     s->cact[id] = 0u;
@@ -1277,6 +1336,11 @@ fn const FolClause *cnf_clause_at(const CnfState *s, u32 id) {
   return (s->corpse != NULL) ? s->corpse[id] : NULL;
 }
 
+fn const CnfFdRec *cnf_fdrec_at(const CnfState *s, u32 id) {
+  if (s == NULL || s->fdrec == NULL || id >= s->fdrec_cap) return NULL;
+  return s->fdrec[id];
+}
+
 fn void cnf_set_kbo(CnfState *s, const KboConfig *kbo) { if (s) { s->cnf_kbo = kbo; cnf_elig_invalidate(s); } }
 fn void cnf_set_lpo(CnfState *s, const LpoConfig *lpo) { if (s) { s->cnf_lpo = lpo; cnf_elig_invalidate(s); } }
 fn void cnf_set_rpo(CnfState *s, const RpoConfig *rpo) { if (s) { s->cnf_rpo = rpo; cnf_elig_invalidate(s); } }
@@ -1731,6 +1795,12 @@ static u32 cnf_demod_find_at(const CnfState *s, Term term,
 
 static void cnf_forward_demod(CnfState *s, FolClause **pc,
                               const CnfGmask *asum) {
+  if (s->retain_dead) {
+    // A previous conclusion's steps never reached the store (dropped
+    // as redundant): discard them.
+    cnf_fd_free(&s->fd_pend);
+    s->fd_pend_final = NULL;
+  }
   if (pc == NULL || *pc == NULL) return;
   FolClause *c = *pc;
   for (u32 iter = 0; iter < CNF_DEMOD_BUDGET; iter++) {
@@ -1756,13 +1826,15 @@ static void cnf_forward_demod(CnfState *s, FolClause **pc,
     if (best == ~0u) break;
     FolClause *d = cnf_demodulate_pre(s, s->ueq_lhs[best], s->ueq_rhs[best], c);
     if (d == NULL) break;   // unreachable: Phase A already confirmed a hit
-    fol_clause_free(c);
+    if (s->retain_dead) cnf_fd_pend_push(s, c, s->ueq[best]);
+    else fol_clause_free(c);
     c = d;
     // An unorientable rule's RHS can inject renamed-range variable
     // ids; keep the working clause canonical.
     fol_clause_canon_vars(c);
   }
   *pc = c;
+  if (s->retain_dead && s->fd_pend.n > 0u) s->fd_pend_final = c;
 }
 
 // Internal: check whether `c` is subsumed by any currently-stored

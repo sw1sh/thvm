@@ -794,35 +794,54 @@ static int prepass_emit_c(FILE *out, CnfState *s, u32 id, u8 *done,
   }
   if (!prepass_emit_c(out, s, t->parent_a, done, id2cnf, map_cap, def_done)) return 0;
   if (!prepass_emit_c(out, s, t->parent_b, done, id2cnf, map_cap, def_done)) return 0;
-  char *txt = prov_clause_text(c);
-  if (txt == NULL) return 0;
   static const char *rn[] = {
     "input", "resolution", "factoring", "superposition",
     "equality_resolution", "equality_factoring", "demodulation" };
   const char *rule = ((u32)t->rule < sizeof rn / sizeof rn[0])
                        ? rn[t->rule] : "unknown";
   const CnfGmask *asum = (s->cassume != NULL) ? &s->cassume[id] : NULL;
-  fprintf(out, "cnf(p%u, plain, ", id);
-  if (asum != NULL && !cnf_gm_is_zero(asum)) {
-    fprintf(out, "(%s", txt);
-    prepass_emit_tail(out, asum);
-    fputs(")", out);
-  } else {
-    fputs(txt, out);
-  }
-  fprintf(out, ", inference(%s, [status(thm)], [", rule);
   char na[32];
-  int first = 1;
-  if (t->parent_a != FOL_NO_PARENT && t->parent_a < s->n) {
-    fputs(prepass_name(s, t->parent_a, id2cnf, map_cap, na, sizeof na), out);
-    first = 0;
+  // Forward demodulation normalized the inference's conclusion before
+  // it was stored: the inference record carries the RAW conclusion,
+  // then one demodulation record per rewrite cites its unit equation.
+  const CnfFdRec *fd = cnf_fdrec_at(s, id);
+  if (fd != NULL && fd->n > 0u && fd->pre != NULL) {
+    for (u32 k = 0; k < fd->n; k++)
+      if (!prepass_emit_c(out, s, fd->rule[k], done, id2cnf, map_cap, def_done)) return 0;
   }
-  if (t->parent_b != FOL_NO_PARENT && t->parent_b < s->n) {
-    if (!first) fputs(", ", out);
-    fputs(prepass_name(s, t->parent_b, id2cnf, map_cap, na, sizeof na), out);
+  u32 nfd = (fd != NULL && fd->pre != NULL) ? fd->n : 0u;
+  for (u32 k = 0; k <= nfd; k++) {
+    const FolClause *cc = (k == nfd) ? c : (k == 0u ? fd->pre : fd->mid[k - 1u]);
+    char *txt = prov_clause_text(cc);
+    if (txt == NULL) return 0;
+    if (k == nfd) fprintf(out, "cnf(p%u, plain, ", id);
+    else fprintf(out, "cnf(p%u_f%u, plain, ", id, k);
+    if (asum != NULL && !cnf_gm_is_zero(asum)) {
+      fprintf(out, "(%s", txt);
+      prepass_emit_tail(out, asum);
+      fputs(")", out);
+    } else {
+      fputs(txt, out);
+    }
+    free(txt);
+    if (k > 0u) {
+      fprintf(out, ", inference(demodulation, [status(thm)], [p%u_f%u, %s])).\n",
+              id, k - 1u,
+              prepass_name(s, fd->rule[k - 1u], id2cnf, map_cap, na, sizeof na));
+      continue;
+    }
+    fprintf(out, ", inference(%s, [status(thm)], [", rule);
+    int first = 1;
+    if (t->parent_a != FOL_NO_PARENT && t->parent_a < s->n) {
+      fputs(prepass_name(s, t->parent_a, id2cnf, map_cap, na, sizeof na), out);
+      first = 0;
+    }
+    if (t->parent_b != FOL_NO_PARENT && t->parent_b < s->n) {
+      if (!first) fputs(", ", out);
+      fputs(prepass_name(s, t->parent_b, id2cnf, map_cap, na, sizeof na), out);
+    }
+    fputs("])).\n", out);
   }
-  fputs("])).\n", out);
-  free(txt);
   return 1;
 }
 

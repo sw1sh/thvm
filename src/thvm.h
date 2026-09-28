@@ -3913,7 +3913,18 @@ typedef enum {
 
 #define FOL_NO_PARENT 0xFFFFFFFFu
 
+// Forward-demodulation provenance (proof mode, cnf_set_retain_dead): a
+// stored clause's generating inference concluded `pre`; `n` unit
+// equations (clause ids rule[0..n)) then rewrote it, through the
+// intermediate clauses mid[0..n-1), to the stored clause.
 typedef struct {
+  struct FolClauseS *pre;
+  u32                n;
+  u32               *rule;
+  struct FolClauseS **mid;
+} CnfFdRec;
+
+typedef struct FolClauseS {
   FolLit *lits;
   u32     n_lits;
 } FolClause;
@@ -4417,6 +4428,13 @@ typedef struct {
   // literals.  Off by default -- zero overhead outside --proof runs.
   u8          retain_dead;
   FolClause **corpse;
+  // fdrec[id]: the forward-demodulation steps behind stored clause id
+  // (NULL when none fired); fd_pend collects the steps of the clause
+  // cnf_consider is processing until the store attaches them.
+  CnfFdRec  **fdrec;
+  u32         fdrec_cap;
+  CnfFdRec    fd_pend;
+  FolClause  *fd_pend_final;
   // --- literal indexing (per-(root label, sign) partner lists) ------
   // Replaces the O(active) resolution cross-scan and the O(n)
   // subsumption walks with bucket retrievals; candidate SETS and the
@@ -4544,6 +4562,8 @@ fn u32       fol_components  (const FolClause *c, u8 *comp_of);
 fn void      cnf_set_retain_dead(CnfState *s);
 // The clause for `id`, live or retained-dead; NULL when unavailable.
 fn const FolClause *cnf_clause_at(const CnfState *s, u32 id);
+// Forward-demodulation steps behind stored clause `id`, or NULL.
+fn const CnfFdRec  *cnf_fdrec_at(const CnfState *s, u32 id);
 
 // Walk the provenance DAG rooted at `root_id` (typically the empty
 // clause's id when status == ATP_PROVED) and write a text proof

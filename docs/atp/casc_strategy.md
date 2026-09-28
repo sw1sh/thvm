@@ -291,6 +291,36 @@ rewrite. Provenance is explicit end-to-end:
   clausal pre-pass, closing at `$false` (verified on SEU140+2, 1.4 s,
   2026-07-16).
 
+Every record must follow from its CITED premises alone -- the ProoVer rules
+and CASC's derivation verifier (GDV) judge each step that way, and strict
+`bin/CheckProof` is the oracle.  The emitter therefore spells out every rule a
+record applies (2026-09-29):
+
+- **Clausal pre-pass**: forward demodulation normalizes each derived clause
+  before it is stored; the inference record now carries the raw conclusion
+  (`p<id>_f0`) and each rewrite is its own `demodulation` record citing its
+  unit equation (CSR021+1's resolution record had applied an uncited
+  `plus(n2,n1) -> n3`).
+- **Fresh-symbol definitions** (goal flattening, tgt, the distributivity
+  names) are `introduced(definition, [new_symbols(definition, [sF<k>])])`,
+  one symbol each.  Under `--tgt-fold` a definition over another fresh
+  symbol, the folded goal, and folded conjecture units are printed in their
+  RAW form (every fresh application expanded -- a problem formula or a
+  definition over problem symbols) followed by single-rewrite fold steps,
+  each citing the definition it folds by.  Definition identity comes from the
+  engine feed (`PrProblem.sym_def_trace`), never from shape: a folded unit can
+  read `sF89(X1,X2) = b`.
+- **The problem's own signature**: quoted atoms (`qtd<N>`), hashed long names
+  (the 64-char cap) and curried wide functors (`ap2` chains) are internal
+  encodings; `cli_proof_write` maps every emitted record back, so leaves are
+  formulas the problem actually states.
+
+What strict CheckProof still cannot confirm is esa conversion (the FOF
+equality encoding and its `ifeq`/`true`/`false` helper axioms, Tseitin
+definitional CNF), large NNF/prenex equivalences beyond its bounded
+saturation, and terms wider than its arity cap (TOP052-1's tuple/140): those
+proofs stay `Unknown`, never `VerifiedBad`.
+
 Verification is two-layer, both verified 2026-07-16 on a fresh LAT171-1
 portfolio proof (0.3 s to prove):
 

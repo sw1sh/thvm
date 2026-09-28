@@ -56,4 +56,5 @@ for the per-commit story.
   (quoted atoms, hashed long names and curried wide functors mapped back);
   fresh-symbol definitions declare their symbol, and tgt-folded
   definitions, goals and conjecture units print their raw form plus
-  single-rewrite fold steps.
+  single-rewrite fold steps; the clausal pre-pass prints each forward
+  demodulation as its own `demodulation` record citing its unit equation.
