@@ -5565,6 +5565,12 @@ typedef struct {
   // (backward demodulation of R) only by rules the ordering orients --
   // an unorientable new equation simplifies nothing.  Default OFF.
   u8   use_bd_preordered;
+  // Vampire AgeQueue (THVM_ATP_AGE_DEPTH): the age picks of the --awr
+  // interleave take the minimal (formation depth, weight, seq) instead
+  // of the oldest seq, and the age/weight phase advances on
+  // activations (a pop that joins away was never passive in Vampire),
+  // age pick first (AWPassiveClauseContainer balance).  Default OFF.
+  u8   use_age_depth;
   u8   otter_rec;
   u8   otter_primed;        // the input queue got its replay (first pop)
   u32 *otter_rows;
@@ -7526,6 +7532,8 @@ fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_otter(AtpState *s, u8 on);
 // Vampire bd=preordered: interreduce only with oriented new rules.
 fn void      thvm_atp_set_use_bd_preordered(AtpState *s, u8 on);
+// Vampire AgeQueue for the age picks (derivation depth, then weight).
+fn void      thvm_atp_set_use_age_depth(AtpState *s, u8 on);
 // Selections between GNN re-ranks (0 = off, the default).  Only takes
 // effect while a GNN model is loaded (thvm_atp_set_gnn_scorer).
 fn void      thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period);

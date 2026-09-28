@@ -1302,6 +1302,9 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
 // interleave the weight-order unit tests rely on.
 static inline u8 atp_cp_fifo_dimension(const AtpState *s) {
   u32 modulo = s->fifo_modulo ? s->fifo_modulo : ATP_CP_FIFO_MODULO;
+  // Vampire AWPassiveClauseContainer balance: age pick first, then the
+  // weight picks, counted in activations.
+  if (s->use_age_depth) return (s->n_activated_re % modulo) == 0u;
   if (s->use_intake_order) {
     static int thr = -2;
     if (thr == -2) {
@@ -1793,7 +1796,25 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     // death test here is permanent (set-only death marks), so every
     // entry below the floor was proven dead by an earlier scan or has
     // been extracted.
-    if (s->s2a_coeff > 0u) {
+    if (s->use_age_depth && s->cp_depth != NULL) {
+      // Vampire AgeQueue::lessThan: age = derivation depth (max premise
+      // age + 1, Kernel/Inference.cpp), then weight, then clause number.
+      u32 best = 0xffffffffu, bd = 0u, bp = 0u, bq = 0u;
+      for (u32 i = 0; i < s->n_cps; i++) {
+        u32 vv = s->cp_heap[i].row;
+        u32 d = s->cp_depth[vv], p = s->cp_heap[i].pri, q = s->cp_heap[i].seq;
+        if (best != 0xffffffffu &&
+            (d > bd || (d == bd && (p > bp || (p == bp && q >= bq))))) {
+          continue;
+        }
+        if (s->use_orphan_murder) {
+          if (atp_cp_is_orphan(s, s->cp_trace[vv])) continue;
+          if (atp_cp_uid_orphan(s, vv)) continue;
+        }
+        best = i; bd = d; bp = p; bq = q;
+      }
+      j = (best != 0xffffffffu) ? best : 0u;
+    } else if (s->s2a_coeff > 0u) {
       // s2a (Vampire sine_to_age): the age dimension orders by effective
       // age = cp_seq + s2a_coeff*cp_sine, so a goal-distant CP (high SInE
       // level) is made younger and the goal-NEAR oldest wins.  The dead-

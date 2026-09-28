@@ -109,6 +109,7 @@ static const AtpKnob KNOBS[] = {
   {"otter",                  "THVM_ATP_OTTER",           0, "(Vampire Otter/LRS simplification set: orientable queued CPs act as passive demodulators before selection, each step's batch replayed newest-first; pair with --pop-rules-only for fd/bd=preordered)"},
   {"bd-preordered",          "THVM_ATP_BD_PREORDERED",   0, "(Vampire bd=preordered: interreduce R only with ORIENTED new rules; an unorientable new equation backward-simplifies nothing)"},
   {"uid-orphan",             "THVM_ATP_UID_ORPHAN",      1, "(WM uid-layer orphan murder at selection, default 1; 0 keeps CPs whose parent rule was simplified away, as Vampire does)"},
+  {"age-depth",              "THVM_ATP_AGE_DEPTH",       0, "(Vampire AgeQueue: --awr age picks take the minimal (derivation depth, weight, seq), age pick first, phase counted in activations)"},
   {"perm-subsume",           "THVM_ATP_PERM_SUB",        0, "(permutative subsume)"},
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},
