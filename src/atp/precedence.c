@@ -623,6 +623,9 @@ fn u32 atp_frequency_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
 //   unary-frequency    unary greatest, then frequency
 //   const-frequency    constants least, then frequency
 //   occurrence         tie-break only
+//   ladr               Prover9's LADR lex_order (lex_compare_arity_0213:
+//                      constants < binary < unary < ternary..., fewer
+//                      axiom occurrences greater) + inverse_order
 // Frequency = occurrence count over the axioms and the goal (Shell/
 // Property.cpp scanForInterpreted -> incUsageCnt).  The final tie-break
 // is the label id; Vampire's is the symbol id (first-occurrence order),
@@ -679,17 +682,79 @@ static int atp_vsp_cmp(const AtpVspCtx *c, u32 a, u32 b) {
       if ((ara == 0u) != (arb == 0u)) return (ara == 0u) ? -1 : 1;
       r = atp_vsp_icmp(c->count[b], c->count[a]);
       break;
+    case ATP_VSP_LADR: {
+      // LADR lex_compare_arity_0213: constants < binary < unary <
+      // ternary < ...; fewer occurrences greater; name order last (the
+      // alphabetized .pr labels ARE strcmp order).
+      u32 ka = (ara == 0u) ? 0u : (ara == 2u) ? 1u : (ara == 1u) ? 2u : ara;
+      u32 kb = (arb == 0u) ? 0u : (arb == 2u) ? 1u : (arb == 1u) ? 2u : arb;
+      r = atp_vsp_icmp(ka, kb);
+      if (r == 0) r = atp_vsp_icmp(c->count[b], c->count[a]);
+      break;
+    }
     default:
       break;
   }
   return (r != 0) ? r : atp_vsp_icmp(a, b);
 }
 
+// LADR inverse_order (provers.src/utilities.c): every inverse axiom
+// f2(f1(x), x) = c or f2(x, f1(x)) = c (c a constant) moves its binary
+// f2, then its unary f1, to just above the constants, keeping their
+// relative lex order: constants < f2's < f1's < the rest.  `order`
+// holds the n ranked labels, least first; rewritten in place.
+static int ladr_inverse_axiom(Term a, Term b, const u32 *arity,
+                              u32 *f2, u32 *f1) {
+  if (term_tag(a) == TAG_CTR && term_ctr_n(a) == 0u) { Term t = a; a = b; b = t; }
+  if (term_tag(b) != TAG_CTR || term_ctr_n(b) != 0u) return 0;
+  if (term_tag(a) != TAG_CTR || term_ctr_n(a) != 2u) return 0;
+  Term a0 = term_ctr_at(a, 0), a1 = term_ctr_at(a, 1);
+  if (term_tag(a0) == TAG_FVR) { Term t = a0; a0 = a1; a1 = t; }
+  if (term_tag(a1) != TAG_FVR) return 0;
+  if (term_tag(a0) != TAG_CTR || term_ctr_n(a0) != 1u) return 0;
+  Term x = term_ctr_at(a0, 0);
+  if (term_tag(x) != TAG_FVR || term_ext(x) != term_ext(a1)) return 0;
+  *f2 = term_ext(a);
+  *f1 = term_ext(a0);
+  (void)arity;
+  return 1;
+}
+
+static void atp_ladr_inverse_order(const Term *lhs, const Term *rhs,
+                                   u32 n_eqns, const u32 *arity,
+                                   u32 *order, u32 n) {
+  u8 *bin = (u8 *)calloc((size_t)n + 1u, 1u);
+  u8 *un  = (u8 *)calloc((size_t)n + 1u, 1u);
+  u32 *out = (u32 *)malloc(sizeof(u32) * ((size_t)n + 1u));
+  if (bin == NULL || un == NULL || out == NULL) {
+    free(bin); free(un); free(out); return;
+  }
+  u32 hits = 0;
+  for (u32 e = 0; e < n_eqns; e++) {
+    u32 f2 = 0, f1 = 0;
+    if (!ladr_inverse_axiom(lhs[e], rhs[e], arity, &f2, &f1)) continue;
+    for (u32 i = 0; i < n; i++) {
+      if (order[i] == f2) { bin[i] = 1u; hits++; }
+      if (order[i] == f1) { un[i] = 1u; hits++; }
+    }
+  }
+  if (hits > 0u) {
+    u32 w = 0, i = 0;
+    for (; i < n && arity[order[i]] == 0u; i++)
+      if (!bin[i] && !un[i]) out[w++] = order[i];
+    for (u32 k = 0; k < n; k++) if (bin[k]) out[w++] = order[k];
+    for (u32 k = 0; k < n; k++) if (un[k] && !bin[k]) out[w++] = order[k];
+    for (; i < n; i++) if (!bin[i] && !un[i]) out[w++] = order[i];
+    for (u32 k = 0; k < n; k++) order[k] = out[k];
+  }
+  free(bin); free(un); free(out);
+}
+
 fn int atp_vampire_sp_scheme(const char *name) {
   static const char *const names[] = {
     "arity", "reverse-arity", "unary-first", "const-max", "const-min",
     "frequency", "reverse-frequency", "unary-frequency", "const-frequency",
-    "occurrence",
+    "occurrence", "ladr",
   };
   if (name == NULL) return -1;
   for (int k = 0; k < (int)(sizeof names / sizeof names[0]); k++) {
@@ -702,14 +767,19 @@ fn u32 atp_vampire_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
                                 Term goal_l, Term goal_r, u32 base,
                                 u32 n_labels, const u32 *arity, int scheme,
                                 int boost_goal, u32 *prec) {
-  if (n_labels <= base || scheme < 0 || scheme > ATP_VSP_OCCURRENCE) return 0u;
+  if (n_labels <= base || scheme < 0 || scheme > ATP_VSP_LADR) return 0u;
   u32 *count = (u32 *)calloc((size_t)n_labels, sizeof(u32));
   u32 *goal  = (u32 *)calloc((size_t)n_labels, sizeof(u32));
   u32 *order = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
   if (count == NULL || goal == NULL || order == NULL) {
     free(count); free(goal); free(order); return 0u;
   }
-  prec_occ_census_g(lhs, rhs, n_eqns, goal_l, goal_r, count, n_labels);
+  // LADR counts the non-negative clauses only (symbol_order ->
+  // nonneg_clauses): the negated goal stays out of the census.
+  if (scheme == ATP_VSP_LADR)
+    prec_occ_census_g(lhs, rhs, n_eqns, 0, 0, count, n_labels);
+  else
+    prec_occ_census_g(lhs, rhs, n_eqns, goal_l, goal_r, count, n_labels);
   prec_occ_walk(goal_l, goal, n_labels);
   prec_occ_walk(goal_r, goal, n_labels);
   AtpVspCtx c = { arity, count, goal, scheme, boost_goal };
@@ -724,6 +794,7 @@ fn u32 atp_vampire_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
     }
     order[j] = x;
   }
+  if (scheme == ATP_VSP_LADR) atp_ladr_inverse_order(lhs, rhs, n_eqns, arity, order, n);
   for (u32 i = 0; i < n; i++) prec[order[i]] = i + 1u;
   free(count); free(goal); free(order);
   return n;
