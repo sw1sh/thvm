@@ -117,6 +117,7 @@ static const AtpKnob KNOBS[] = {
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},
   {"sym-prec",               "THVM_ATP_SYM_PREC",        1, "(Vampire symbol precedence: frequency|reverse-frequency|weighted-frequency, or the sortAuxBySymbolPrecedence port arity|reverse-arity|unary-first|const-max|const-min|const-frequency|unary-frequency|occurrence)"},
   {"spb-prec",               "THVM_ATP_SPB_PREC",        0, "(Vampire spb=goal PRECEDENCE boost: goal-occurring symbols outrank all others, the --sym-prec scheme ranking inside each band (default Vampire sp=frequency); the LPO ring-family lever)"},
+  {"precedence",             "THVM_ATP_PRECEDENCE",      1, "(explicit symbol precedence, comma-separated, least first; applied after --sym-prec/--spb-prec; unlisted symbols rank below the list)"},
   {"kws",                    "THVM_ATP_KWS",             1, "(KBO symbol weight scheme: const|precedence|inv-precedence|arity|inv-arity|arity-sq|inv-arity-sq|frequency|inv-frequency)"},
   {"kmz",                    "THVM_ATP_KMZ",             0, "(kbo-max-zero: max-precedence UNARY symbol gets weight 0)"},
   {"ord",                    "THVM_ATP_ORD",             1, "(reduction ordering: lpo selects LPO over the default KBO)"},

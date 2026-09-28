@@ -2063,6 +2063,55 @@ int main(int argc, char **argv) {
         setenv("THVM_ATP_FIFO_THRESHOLD", "0", 0);  // no -pq interleave
       }
     }
+    // Explicit symbol precedence (THVM_ATP_PRECEDENCE / --precedence):
+    // a comma-separated list, least first, applied after every scheme
+    // above -- listed symbols are ranked 1..k in order, unlisted ones
+    // below them by their current order.  The oracle-replay knob (e.g.
+    // Prover9's printed function_order for a problem).
+    {
+      const char *pe = getenv("THVM_ATP_PRECEDENCE");
+      if (pe != NULL && pe[0] != '\0') {
+        u32 cap2 = prp.n_syms + PR_LABEL_BASE;
+        u32 *rank = (u32 *)calloc((size_t)cap2, sizeof(u32));
+        if (rank != NULL) {
+          u32 k = 0;
+          const char *q = pe;
+          while (*q != '\0') {
+            size_t len = strcspn(q, ",");
+            for (u32 l = PR_LABEL_BASE; l < cap2; l++) {
+              const char *nm = prp.syms[l - PR_LABEL_BASE].name;
+              if (strlen(nm) == len && strncmp(nm, q, len) == 0 &&
+                  rank[l] == 0u)
+                rank[l] = ++k;
+            }
+            q += len;
+            if (*q == ',') q++;
+          }
+          // Unlisted symbols first (by current precedence), then the list.
+          u32 n_un = 0;
+          for (u32 l = PR_LABEL_BASE; l < cap2; l++) if (rank[l] == 0u) n_un++;
+          u32 r = 0;
+          for (u32 pass = 0; pass < n_un; pass++) {
+            u32 best = 0xffffffffu, best_l = 0;
+            for (u32 l = PR_LABEL_BASE; l < cap2; l++) {
+              if (rank[l] != 0u) continue;
+              if (prp.precedence[l] < best) { best = prp.precedence[l]; best_l = l; }
+            }
+            rank[best_l] = 0x80000000u + (++r);
+          }
+          for (u32 l = PR_LABEL_BASE; l < cap2; l++)
+            prp.precedence[l] = (rank[l] >= 0x80000000u) ? (rank[l] - 0x80000000u)
+                                                          : (n_un + rank[l]);
+          free(rank);
+        }
+        if (getenv("THVM_ATP_DEBUG_SYMPREC") != NULL) {
+          fprintf(stderr, "EXPLICIT-PREC label: prec\n");
+          for (u32 l = PR_LABEL_BASE; l < cap2; l++)
+            fprintf(stderr, "  %-22s %u\n",
+                    prp.syms[l - PR_LABEL_BASE].name, prp.precedence[l]);
+        }
+      }
+    }
     // Otter-lane exit-fast (THVM_ATP_OTTER_EXIT / --otter-exit): the
     // lane's lever is LPO orienting a distributivity law as EXPANSION
     // (the goal operator above the one it distributes over, via
