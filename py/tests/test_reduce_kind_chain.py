@@ -26,7 +26,7 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
 
-from thvm import Tensor, nn  # noqa: E402
+from thvm import Context, Tensor, nn  # noqa: E402
 
 TOL = 1e-3
 
@@ -79,8 +79,8 @@ class TestReduceKindChain(unittest.TestCase):
     # The wrong forward (above) corrupted this conv-weight grad (RANK 4).
     # Reference: a one-conv pool-sum whose forward is now correct, so the
     # autograd grad must be finite + match a finite-difference probe.
+    @Context(TRAINING=1)
     def test_conv_relu_pool_sum_bwd_matches_fd(self):
-        Tensor.training = True
         x = self._rand((2, 1, 12, 12))
         w = (self._rand((8, 1, 5, 5))) * 0.1
 
@@ -118,8 +118,9 @@ import os, sys
 import numpy as np
 sys.path.insert(0, os.environ["THVM_PY"])
 from thvm import Tensor, nn
+from thvm.helpers import TRAINING
 np.random.seed(0)
-Tensor.training = True
+TRAINING.value = 1
 bs = 4
 c1 = nn.Conv2d(1, 8, 5); bn = nn.BatchNorm(8)
 nn.optim.Adam(nn.state.get_parameters([c1]))

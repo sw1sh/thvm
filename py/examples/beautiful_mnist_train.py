@@ -27,7 +27,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from thvm import Tensor, nn, GlobalCounters     # noqa: E402
-from thvm.helpers import getenv                 # noqa: E402
+from thvm.helpers import TRAINING, getenv       # noqa: E402
 from thvm.nn.datasets import mnist              # noqa: E402
 from thvm.thvm import Thvm                      # noqa: E402
 
@@ -87,7 +87,7 @@ def main():
     print(f"OPT={os.environ.get('OPT','adam')} LR={_lr}")
 
     def test_acc():
-        Tensor.training = False
+        TRAINING.value = 0
         correct = total = 0
         n_full = (len(Xte) + bs - 1) // bs
         nb = n_full if eval_batches <= 0 else min(eval_batches, n_full)
@@ -98,7 +98,7 @@ def main():
                 break
             pred = np.argmax(model(Tensor(xb)).numpy(), axis=1)
             correct += int((pred == yb).sum()); total += len(yb)
-        Tensor.training = True
+        TRAINING.value = 1
         # The eval forwards build unpinned transient buffers; free them so
         # peak memory stays flat across evals (params/grads/JIT buffers
         # remain pinned by their live Tensors).
@@ -106,7 +106,7 @@ def main():
             _TH.reclaim()
         return 100.0 * correct / max(total, 1)
 
-    Tensor.training = True
+    TRAINING.value = 1
     wall, peak = [], 0
     acc = float("nan")
     _noreclaim = os.environ.get("NORECLAIM") == "1"
@@ -188,7 +188,7 @@ def main():
         return
     # TEST_EVERY=0 means SKIP eval entirely.  Inverted previously: `not
     # test_every` ran the final test_acc when 0, which is the eval-mode
-    # hang on CUDA/Metal (model(x) under Tensor.training=False stalls),
+    # hang on CUDA/Metal (model(x) with TRAINING unset stalls),
     # leaving the process zombied forever in test_acc after the last step
     # printed.  Now: only run a final eval if test_every > 0 AND we
     # didn't already eval this step.

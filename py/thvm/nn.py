@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .helpers import TRAINING
 from .tensor import Tensor
 
 
@@ -92,7 +93,7 @@ class BatchNorm:
         self.num_batches_tracked = Tensor.zeros().is_param_(False)
 
     def calc_stats(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        if self.track_running_stats and not Tensor.training:
+        if self.track_running_stats and not TRAINING:
             return self.running_mean, self.running_var
         # batch mean over all axes except feature axis (axis 1).
         reduce_axes = tuple(i for i in range(x.ndim) if i != 1)
@@ -110,9 +111,9 @@ class BatchNorm:
     def __call__(self, x: Tensor) -> Tensor:
         mean, var = self.calc_stats(x)
         # Update running stats in training (mirrors tinygrad) so eval --
-        # which reads running_mean/var with Tensor.training=False -- is
+        # which reads running_mean/var while TRAINING is unset -- is
         # correct.  detach() keeps the update off the autograd path.
-        if self.track_running_stats and Tensor.training:
+        if self.track_running_stats and TRAINING:
             n = x.numel()
             corr = n / (n - x.shape[1]) if n > x.shape[1] else 1.0
             # Realize the running-stat assigns IMMEDIATELY rather than

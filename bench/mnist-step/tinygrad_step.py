@@ -15,6 +15,7 @@ _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.environ.get("TINYGRAD", os.path.join(_here, "..", "..", "..", "tinygrad")))
 
 from tinygrad import Tensor, nn, Device
+from tinygrad.helpers import TRAINING
 
 print("device =>", Device.DEFAULT)
 
@@ -35,7 +36,7 @@ params = nn.state.get_parameters(net)
 opt = nn.optim.SGD(params, lr=0.1)
 x = Tensor.rand(64, 1, 28, 28).realize()
 y = Tensor.randint(64, low=0, high=10).realize()
-Tensor.training = True
+TRAINING.value = 1
 
 
 def step():

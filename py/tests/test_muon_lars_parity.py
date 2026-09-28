@@ -29,8 +29,9 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
-from thvm import Tensor          # noqa: E402
+from thvm import Context, Tensor  # noqa: E402
 from thvm import optim           # noqa: E402
+from _tinygrad_compat import tg_training  # noqa: E402
 
 try:
     import tinygrad              # noqa: F401
@@ -49,8 +50,8 @@ def _linreg_problem(seed, d_in, d_out, n):
     return W0, X, Y
 
 
+@Context(TRAINING=1)
 def _thvm_run(make_opt, W0, X, Y, steps, mean=False):
-    Tensor.training = True
     w = Tensor(W0.copy())
     w.realize()
     opt = make_opt([w])
@@ -69,19 +70,19 @@ def _thvm_run(make_opt, W0, X, Y, steps, mean=False):
 
 
 def _tg_run(make_opt, W0, X, Y, steps, mean=False):
-    TgTensor.training = True
     w = TgTensor(W0.copy())
     opt = make_opt([w])
     x = TgTensor(X); y = TgTensor(Y)
     traj = [w.numpy().copy()]
-    for _ in range(steps):
-        opt.zero_grad()
-        out = x @ w
-        diff = out - y
-        loss = (diff * diff).mean() if mean else (diff * diff).sum()
-        loss.backward()
-        opt.step()
-        traj.append(w.numpy().copy())
+    with tg_training():
+        for _ in range(steps):
+            opt.zero_grad()
+            out = x @ w
+            diff = out - y
+            loss = (diff * diff).mean() if mean else (diff * diff).sum()
+            loss.backward()
+            opt.step()
+            traj.append(w.numpy().copy())
     return np.array(traj)
 
 

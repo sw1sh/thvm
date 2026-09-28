@@ -13,6 +13,7 @@ via .is_param_(False) and is realized but not updated.
 """
 from __future__ import annotations
 
+from .helpers import TRAINING
 from .tensor import Tensor
 
 
@@ -69,8 +70,11 @@ class Optimizer:
         `loss.realize(*opt.schedule_step())` fires them together -- which
         is also exactly what makes the whole step one JIT-capturable
         graph (no eager realize mid-step)."""
-        if not Tensor.training:
-            raise RuntimeError("Tensor.training must be True to step the optimizer")
+        if not TRAINING:
+            raise RuntimeError(
+                f"TRAINING={TRAINING.value}, TRAINING must be enabled to use the "
+                "optimizer.  Consider using Context(TRAINING=1) before calling "
+                "Optimizer.step().")
         # Realize the grads first so the forward activations that read the
         # params are materialized BEFORE the in-place ASSIGN writes them.
         # Then the caller's loss reduction reads realized activations (not

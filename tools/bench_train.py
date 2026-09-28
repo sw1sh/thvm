@@ -24,6 +24,7 @@ import numpy as np
 
 sys.path.insert(0, os.environ.get("THVM_PY", "py"))
 from thvm import Tensor, nn
+from thvm.helpers import TRAINING
 from thvm.thvm import Thvm
 
 _TH = Thvm()
@@ -69,7 +70,7 @@ opt = nn.optim.Adam(nn.state.get_parameters(layers), lr=0.001)
 xSlot = Tensor(np.zeros((BS, 1, 28, 28), np.float32)); xSlot.realize()
 ohSlot = Tensor(np.zeros((BS, 10), np.float32)); ohSlot.realize()
 lossSlot = Tensor(np.zeros((1,), np.float32)); lossSlot.realize()
-Tensor.training = True
+TRAINING.value = 1
 
 
 def train_step():

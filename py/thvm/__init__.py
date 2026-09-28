@@ -16,7 +16,7 @@ from . import templates, nn, helpers
 from .tensor import Tensor
 from .dtypes import dtypes, DType
 from .device import Device
-from .context import Context
+from .helpers import Context
 from ._misc import Variable, TinyJit, UOp
 from .helpers import GlobalCounters, function
 from .from_tinygrad import from_tinygrad

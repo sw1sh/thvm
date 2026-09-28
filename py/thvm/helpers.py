@@ -1,6 +1,7 @@
 """tinygrad-compatible helpers module (Phase 2A subset)."""
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 import sys
@@ -12,6 +13,77 @@ from typing import Any
 def getenv(key: str, default: Any = 0):
     """Read an env var and cast to the default's type (tinygrad-compatible)."""
     return type(default)(os.environ.get(key, default))
+
+
+class Context(contextlib.ContextDecorator):
+    """`with Context(BEAM=1): ...` (or `@Context(TRAINING=1)`) overrides the
+    named knobs for the block and restores them on exit.
+
+    A registered ContextVar (e.g. TRAINING) is overridden in-process, as
+    tinygrad does (helpers.py:169-177).  Every key is also exported to the
+    environment, which is where the C runtime reads its knobs.
+    """
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def _recreate_cm(self):
+        # ContextDecorator otherwise reuses self, so a recursive call would
+        # overwrite the saved state.
+        return Context(**self.kwargs)
+
+    def __enter__(self):
+        self.saved_vars = {k: ContextVar._cache[k].value
+                           for k in self.kwargs if k in ContextVar._cache}
+        self.saved_env = {k: os.environ.get(k) for k in self.kwargs}
+        for k, v in self.kwargs.items():
+            if k in ContextVar._cache:
+                ContextVar._cache[k].value = v
+            os.environ[k] = str(v)
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self.saved_vars.items():
+            ContextVar._cache[k].value = v
+        for k, old in self.saved_env.items():
+            if old is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old
+
+
+class ContextVar:
+    """tinygrad's ContextVar (helpers.py:179-191): a named knob seeded from
+    the environment whose value `Context` overrides for a block."""
+
+    _cache: dict[str, "ContextVar"] = {}
+
+    def __init__(self, key: str, default_value: Any):
+        if key in ContextVar._cache:
+            raise RuntimeError(f"attempt to recreate ContextVar {key}")
+        ContextVar._cache[key] = self
+        self.value, self.key = getenv(key, default_value), key
+
+    def __bool__(self):
+        return bool(self.value)
+
+    def __eq__(self, x):
+        return self.value == x
+
+    def __ge__(self, x):
+        return self.value >= x
+
+    def __gt__(self, x):
+        return self.value > x
+
+    def __lt__(self, x):
+        return self.value < x
+
+
+# Training mode (tinygrad helpers.py:240, #16703; the Tensor.training alias
+# was removed in #16774): BatchNorm normalizes with batch statistics and
+# the optimizers step only while it is set.
+TRAINING = ContextVar("TRAINING", 0)
 
 
 CI: bool = os.environ.get("CI", "") != ""

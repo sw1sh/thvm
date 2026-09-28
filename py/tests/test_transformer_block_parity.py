@@ -64,6 +64,7 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PY = str(ROOT / "py")
 sys.path.insert(0, os.environ.get("THVM_PY", PY))
+from _tinygrad_compat import tg_training  # noqa: E402
 
 
 def _have_tg():
@@ -292,7 +293,7 @@ class TestTransformerTrain(unittest.TestCase):
                (list(p.values()), lr=1e-2))
         ln1, ln2 = ("ln1_w", "ln1_b"), ("ln2_w", "ln2_b")
         losses = []
-        with thvm.Tensor.train():
+        with thvm.Context(TRAINING=1):
             for _ in range(n_steps):
                 opt.zero_grad()
                 d = _mlp_block(p, x, ln1, ln2) - tgt
@@ -320,7 +321,7 @@ class TestTransformerTrain(unittest.TestCase):
         opt = (Adam if opt_name == "adam" else Muon)(list(p.values()), lr=1e-2)
         ln1, ln2 = ("ln1_w", "ln1_b"), ("ln2_w", "ln2_b")
         losses = []
-        with tinygrad.Tensor.train():
+        with tg_training():
             for _ in range(n_steps):
                 opt.zero_grad()
                 d = _mlp_block(p, x, ln1, ln2) - tgt
@@ -401,7 +402,7 @@ class TestTransformerTrain(unittest.TestCase):
         tgt = thvm.Tensor(self.target.copy())
         opt = thvm.optim.Adam(list(p.values()), lr=1e-2)
         losses = []
-        with thvm.Tensor.train():
+        with thvm.Context(TRAINING=1):
             for _ in range(2):
                 opt.zero_grad()
                 d = thvm_fwd(p, x) - tgt
@@ -418,7 +419,7 @@ class TestTransformerTrain(unittest.TestCase):
         from tinygrad.nn.optim import Adam as TgAdam
         topt = TgAdam(list(tp.values()), lr=1e-2)
         tlosses = []
-        with tinygrad.Tensor.train():
+        with tg_training():
             for _ in range(2):
                 topt.zero_grad()
                 d = thvm_fwd(tp, tx) - ttgt

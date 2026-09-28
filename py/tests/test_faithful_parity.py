@@ -29,8 +29,9 @@ import os, sys
 import numpy as np
 sys.path.insert(0, os.environ["THVM_PY"])
 from thvm import Tensor, nn
+from thvm.helpers import TRAINING
 np.random.seed(0)
-Tensor.training = True
+TRAINING.value = 1
 bs = 8
 c1 = nn.Conv2d(1, 32, 5); c2 = nn.Conv2d(32, 32, 5); lin = nn.Linear(32 * 20 * 20, 10)
 # backward auto-fills .grad for every float leaf; Adam updates the params.

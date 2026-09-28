@@ -31,7 +31,7 @@ if "TRAIN_BEAM" in os.environ and "JITBEAM" not in os.environ:
 
 sys.path.insert(0, str(TINYGRAD_ROOT))
 
-from tinygrad import Tensor, TinyJit, nn, GlobalCounters, function, Device, dtypes  # noqa: E402
+from tinygrad import Tensor, TinyJit, nn, GlobalCounters, function, Device, dtypes, Context  # noqa: E402
 from tinygrad.helpers import BEAM, DEBUG, JIT, getenv  # noqa: E402
 from tinygrad.uop.ops import Ops  # noqa: E402
 
@@ -309,7 +309,7 @@ def main() -> None:
   GlobalCounters.reset()
 
   @TinyJit
-  @Tensor.train()
+  @Context(TRAINING=1)
   def train_step(batch_x: Tensor, batch_y: Tensor) -> Tensor:
     opt.zero_grad()
     loss = model(batch_x).sparse_categorical_crossentropy(batch_y).backward()

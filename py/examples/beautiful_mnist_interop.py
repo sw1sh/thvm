@@ -103,14 +103,13 @@ def main():
         "fc.w": randn(10, 576),       "fc.b": np.zeros(10, np.float32),
     }
 
-    tinygrad.Tensor.training = True
-    with Context(DEV="CPU"):
+    # BatchNorm's mode is fixed when tinygrad builds the graph, so both the
+    # reference and the graph thvm imports are built under TRAINING.
+    with Context(DEV="CPU", TRAINING=1):
         ref = np.asarray(build(tinygrad.Tensor, TGN, state).numpy(),
                          dtype=np.float32)
 
-    from thvm import Tensor as ThvmTensor  # noqa
-    ThvmTensor.training = True
-    with Context(DEV="CPU"):
+    with Context(DEV="CPU", TRAINING=1):
         tg_graph = build(tinygrad.Tensor, TGN, state)
     k0 = _TH.kernel_count()
     imported = np.asarray(from_tinygrad(tg_graph).numpy(),

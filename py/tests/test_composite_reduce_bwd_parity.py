@@ -45,6 +45,7 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PY = str(ROOT / "py")
 sys.path.insert(0, os.environ.get("THVM_PY", PY))
+from _tinygrad_compat import tg_training  # noqa: E402
 
 
 def _have_tg():
@@ -122,18 +123,16 @@ class TestCompositeReduceBwdParity(unittest.TestCase):
         g_truth = _fd_grad(X, W0)
 
         Xf = X.astype(np.float32); Wf = W0.astype(np.float32)
-        thvm.Tensor.training = True
-        wh = thvm.Tensor(Wf.copy())
-        (THN.BatchNorm(Cout)(thvm.Tensor(Xf.copy()).conv2d(wh).relu())
-         .max_pool2d().sum().backward())
-        thvm.Tensor.training = False
+        with thvm.Context(TRAINING=1):
+            wh = thvm.Tensor(Wf.copy())
+            (THN.BatchNorm(Cout)(thvm.Tensor(Xf.copy()).conv2d(wh).relu())
+             .max_pool2d().sum().backward())
         g_th = np.asarray(wh.grad.numpy(), np.float64).reshape(W0.shape)
 
-        tinygrad.Tensor.training = True
-        wt = tinygrad.Tensor(Wf.copy())
-        (TGN.BatchNorm(Cout)(tinygrad.Tensor(Xf.copy()).conv2d(wt).relu())
-         .max_pool2d().sum().backward())
-        tinygrad.Tensor.training = False
+        with tg_training():
+            wt = tinygrad.Tensor(Wf.copy())
+            (TGN.BatchNorm(Cout)(tinygrad.Tensor(Xf.copy()).conv2d(wt).relu())
+             .max_pool2d().sum().backward())
         g_tg = np.asarray(wt.grad.numpy(), np.float64).reshape(W0.shape)
 
         denom = np.abs(g_truth).max() + 1e-12
@@ -171,13 +170,12 @@ class TestCompositeReduceBwdParity(unittest.TestCase):
         X = rng.standard_normal((32, 1, 12, 12)).astype(np.float32)
         CW = rng.standard_normal((8, 1, 3, 3)).astype(np.float32)
 
-        tinygrad.Tensor.training = True
-        w = tinygrad.Tensor(CW)
-        y = tinygrad.Tensor(X).conv2d(w).relu()
-        y = TGN.BatchNorm(8)(y)
-        loss = y.sum()
-        loss.backward()
-        tinygrad.Tensor.training = False
+        with tg_training():
+            w = tinygrad.Tensor(CW)
+            y = tinygrad.Tensor(X).conv2d(w).relu()
+            y = TGN.BatchNorm(8)(y)
+            loss = y.sum()
+            loss.backward()
 
         g_tg = np.abs(w.grad.numpy()).sum()
         g_th = np.abs(from_tinygrad(w.grad).numpy()).sum()
@@ -214,17 +212,15 @@ class TestCompositeReduceBwdParity(unittest.TestCase):
         X = rng.standard_normal((32, 1, 12, 12)).astype(np.float32)
         CW = rng.standard_normal((8, 1, 3, 3)).astype(np.float32)
 
-        tinygrad.Tensor.training = True
-        wt = tinygrad.Tensor(CW)
-        TGN.BatchNorm(8)(tinygrad.Tensor(X).conv2d(wt).relu()).sum().backward()
-        g_tg = wt.grad.numpy()
-        tinygrad.Tensor.training = False
+        with tg_training():
+            wt = tinygrad.Tensor(CW)
+            TGN.BatchNorm(8)(tinygrad.Tensor(X).conv2d(wt).relu()).sum().backward()
+            g_tg = wt.grad.numpy()
 
-        thvm.Tensor.training = True
-        wh = thvm.Tensor(CW)
-        THN.BatchNorm(8)(thvm.Tensor(X).conv2d(wh).relu()).sum().backward()
-        g_th = wh.grad.numpy().reshape(g_tg.shape)
-        thvm.Tensor.training = False
+        with thvm.Context(TRAINING=1):
+            wh = thvm.Tensor(CW)
+            THN.BatchNorm(8)(thvm.Tensor(X).conv2d(wh).relu()).sum().backward()
+            g_th = wh.grad.numpy().reshape(g_tg.shape)
 
         self.assertLess(float(np.abs(g_th).max()), 1.0,
                         f"conv->relu->BN(train)->sum per-element grad: thvm "
@@ -250,11 +246,10 @@ class TestCompositeReduceBwdParity(unittest.TestCase):
         rng = np.random.default_rng(0)
         W = rng.standard_normal((32, 8, 10, 10)).astype(np.float32)
 
-        tinygrad.Tensor.training = True
-        w = tinygrad.Tensor(W)
-        loss = TGN.BatchNorm(8)(w).sum()
-        loss.backward()
-        tinygrad.Tensor.training = False
+        with tg_training():
+            w = tinygrad.Tensor(W)
+            loss = TGN.BatchNorm(8)(w).sum()
+            loss.backward()
 
         g_tg = np.abs(w.grad.numpy()).sum()
         g_th = np.abs(from_tinygrad(w.grad).numpy()).sum()

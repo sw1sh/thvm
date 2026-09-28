@@ -3,7 +3,7 @@ Mirrors examples/beautiful_mnist.py exactly; just adds timing wrapper."""
 import os, time, sys
 sys.path.insert(0, '/Users/swish/src/tinygrad')
 
-from tinygrad import Tensor, TinyJit, nn, function, Device, GlobalCounters
+from tinygrad import Tensor, TinyJit, nn, function, Device, GlobalCounters, Context
 from tinygrad.helpers import getenv
 from tinygrad.nn.datasets import mnist
 
@@ -22,7 +22,7 @@ class Model:
   def __call__(self, x): return x.sequential(self.layers)
 
   @TinyJit
-  @Tensor.train()
+  @Context(TRAINING=1)
   def train_step(self, X_train, Y_train):
     opt.zero_grad()
     samples = Tensor.randint(getenv("BS", 512), high=X_train.shape[0])

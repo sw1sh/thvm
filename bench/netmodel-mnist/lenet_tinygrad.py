@@ -17,6 +17,7 @@ _here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.environ.get("TINYGRAD", os.path.join(_here, "..", "..", "..", "tinygrad")))
 
 from tinygrad import Tensor, nn, Device
+from tinygrad.helpers import TRAINING
 from tinygrad.nn.datasets import mnist
 
 print("device =>", Device.DEFAULT)
@@ -50,7 +51,7 @@ yt = Y_test[:N_TEST]
 net = LeNet()
 params = nn.state.get_parameters(net)
 opt = nn.optim.SGD(params, lr=LR)
-Tensor.training = True
+TRAINING.value = 1
 
 
 def step():
@@ -69,7 +70,7 @@ for _ in range(ROUNDS):
 dt = time.perf_counter() - t0
 print("tinygrad LeNet warm ms/round (full-batch SGD, bs%d) =>" % N_TRAIN, round(1000 * dt / ROUNDS, 1))
 
-Tensor.training = False
+TRAINING.value = 0
 preds = net(xt).argmax(axis=1).numpy()
 acc = float((preds == yt.numpy()).mean())
 print("tinygrad LeNet held-out test acc (%d imgs, %d rounds) =>" % (N_TEST, ROUNDS), round(acc, 3))

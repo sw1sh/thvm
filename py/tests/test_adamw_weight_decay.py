@@ -20,8 +20,9 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
-from thvm import Tensor          # noqa: E402
+from thvm import Context, Tensor  # noqa: E402
 from thvm import optim           # noqa: E402
+from _tinygrad_compat import tg_training  # noqa: E402
 
 try:
     import tinygrad              # noqa: F401
@@ -37,11 +38,11 @@ def _problem():
     return np.random.randn(8).astype(np.float32), np.random.randn(8).astype(np.float32)
 
 
+@Context(TRAINING=1)
 def _thvm_steps(make_opt, steps):
     w0, target = _problem()
     w = Tensor(w0.copy())
     opt = make_opt([w])
-    Tensor.training = True
     for _ in range(steps):
         opt.zero_grad()
         loss = ((w - Tensor(target)) * (w - Tensor(target))).sum()
@@ -54,12 +55,12 @@ def _tg_steps(make_opt, steps):
     w0, target = _problem()
     w = TgTensor(w0.copy())
     opt = make_opt([w])
-    TgTensor.training = True
-    for _ in range(steps):
-        opt.zero_grad()
-        loss = ((w - TgTensor(target)) * (w - TgTensor(target))).sum()
-        loss.backward()
-        opt.step()
+    with tg_training():
+        for _ in range(steps):
+            opt.zero_grad()
+            loss = ((w - TgTensor(target)) * (w - TgTensor(target))).sum()
+            loss.backward()
+            opt.step()
     return w.numpy()
 
 

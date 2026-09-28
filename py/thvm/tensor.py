@@ -29,6 +29,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from .dtypes import DType, dtypes
+from .helpers import TRAINING
 from .thvm import K, Term, Thvm, _uop_binary
 
 
@@ -139,48 +140,33 @@ def _wrap_other(self_t: "Tensor", other) -> "Tensor":
     return Tensor(arr, dtype=dtype)
 
 
-class Tensor:
+class _TensorMeta(type):
+    # tinygrad removed the Tensor.training alias (#16774) in favour of the
+    # TRAINING ContextVar.  Without this, `Tensor.training = True` silently
+    # creates a class attribute nothing reads and training runs in eval mode.
+    @property
+    def training(cls):
+        raise AttributeError(_TRAINING_MOVED)
+
+    @training.setter
+    def training(cls, mode):
+        raise AttributeError(_TRAINING_MOVED)
+
+
+_TRAINING_MOVED = ("Tensor.training was removed (tinygrad #16774): use "
+                   "`with Context(TRAINING=1):` or `@Context(TRAINING=1)`")
+
+
+class Tensor(metaclass=_TensorMeta):
     """thvm tensor: TAG_TEN handle + Python-tracked dtype + shape."""
 
     __slots__ = ("term", "_dtype", "_shape", "is_param", "grad",
                  "_pin_id", "_view_base", "_view_begin_end", "__weakref__")
 
-    # tinygrad's class-level `Tensor.training` flag; BatchNorm reads it.
-    training: bool = False
-
     # Identity hashing: __eq__ is overridden to build an elementwise mask
     # (tinygrad semantics), which would otherwise make Tensor unhashable.
     def __hash__(self):
         return id(self)
-
-    class _TrainCtx:
-        """Context manager + decorator: `with Tensor.train():` or
-        `@Tensor.train()` flips Tensor.training for the dynamic extent."""
-        def __init__(self, mode: bool):
-            self.mode = mode
-            self.prev = None
-
-        def __enter__(self):
-            self.prev = Tensor.training
-            Tensor.training = self.mode
-            return self
-
-        def __exit__(self, *exc):
-            Tensor.training = self.prev
-            return False
-
-        def __call__(self, fn):
-            import functools
-
-            @functools.wraps(fn)
-            def wrapped(*a, **k):
-                with Tensor._TrainCtx(self.mode):
-                    return fn(*a, **k)
-            return wrapped
-
-    @classmethod
-    def train(cls, mode: bool = True) -> "Tensor._TrainCtx":
-        return cls._TrainCtx(mode)
 
     # ---- construction --------------------------------------------------
 
@@ -1423,6 +1409,11 @@ class Tensor:
         qk = (q @ k^T)/sqrt(d_k); optional causal/additive mask; softmax
         over the last axis; @ value."""
         q = self
+        if dropout_p and TRAINING:
+            # tinygrad applies softmax(qk).dropout(p) under TRAINING
+            # (mixin/rand.py:282-294); thvm has no dropout op yet.
+            raise NotImplementedError("scaled_dot_product_attention dropout_p "
+                                      "under TRAINING (thvm has no dropout)")
         qk = (q @ key.transpose(-2, -1)) / math.sqrt(q._shape[-1])
         if is_causal:
             if attn_mask is not None:

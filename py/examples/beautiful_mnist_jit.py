@@ -30,7 +30,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from thvm import Tensor, nn                 # noqa: E402
-from thvm.helpers import getenv            # noqa: E402
+from thvm.helpers import TRAINING, getenv  # noqa: E402
 from thvm.nn.datasets import mnist         # noqa: E402
 from thvm.thvm import Thvm                 # noqa: E402
 
@@ -103,7 +103,7 @@ def main():
     ohSlot = Tensor(np.zeros((bs, 10), np.float32)); ohSlot.realize()
     lossSlot = Tensor(np.zeros((1,), np.float32)); lossSlot.realize()
 
-    Tensor.training = True
+    TRAINING.value = 1
 
     def train_step():
         logits = model(xSlot)

@@ -14,7 +14,7 @@
 import unittest
 import numpy as np
 
-from thvm import Tensor, TinyJit, nn
+from thvm import Context, Tensor, TinyJit, nn
 from thvm.helpers import getenv
 
 
@@ -33,14 +33,14 @@ def _bc_inv_values(opt):
 
 class TestAdamJitBiasCorrection(unittest.TestCase):
     def setUp(self):
-        # Restore Tensor.training after the test so eval-mode tests
-        # (BatchNorm in test_mnist_components) aren't polluted by a leaked
-        # global -- both test cases need training=True for the optimizer.
-        self._prev_training = Tensor.training
-        self.addCleanup(lambda: setattr(Tensor, "training", self._prev_training))
+        # Both test cases step an optimizer, which needs TRAINING; scope it to
+        # the test so eval-mode tests (BatchNorm in test_mnist_components)
+        # aren't polluted by a leaked global.
+        ctx = Context(TRAINING=1)
+        ctx.__enter__()
+        self.addCleanup(ctx.__exit__, None, None, None)
 
     def test_bias_correction_advances_under_jit(self):
-        Tensor.training = True
         b1, b2 = 0.9, 0.999
 
         # Tiny problem: minimize (w - target)^2; stable pre-allocated input.
@@ -85,7 +85,6 @@ class TestAdamJitBiasCorrection(unittest.TestCase):
     def test_trajectory_matches_tinygrad_adam_eager(self):
         # Eager (no JIT) faithfulness: param trajectory matches the exact
         # tinygrad Adam update over many steps on a fixed seed/problem.
-        Tensor.training = True
         b1, b2, lr, eps = 0.9, 0.999, 0.01, 1e-8
         rng = np.random.RandomState(0)
         w0 = rng.randn(8).astype(np.float32)

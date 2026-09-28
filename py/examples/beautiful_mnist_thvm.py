@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo py/ on path
 
 from typing import Callable
-from thvm import Tensor, TinyJit, nn, GlobalCounters, function
+from thvm import Tensor, TinyJit, nn, GlobalCounters, function, Context
 from thvm.helpers import getenv, colored, trange
 from thvm.nn.datasets import mnist
 
@@ -35,7 +35,7 @@ class Model:
   def __call__(self, x:Tensor) -> Tensor: return x.sequential(self.layers)
 
   @TinyJit
-  @Tensor.train()
+  @Context(TRAINING=1)
   def train_step(self, X_train:Tensor, Y_train:Tensor) -> Tensor:
     opt.zero_grad()
     samples = Tensor.randint(getenv("BS", 512), high=X_train.shape[0])

@@ -44,6 +44,7 @@ import numpy as np
 
 sys.path.insert(0, os.environ.get("THVM_PY", os.path.join(
     os.path.dirname(__file__), "..")))
+from _tinygrad_compat import tg_training  # noqa: E402
 
 
 def _have_tg():
@@ -174,17 +175,15 @@ class TestDetachReduceBwdParity(unittest.TestCase):
         # and computes sum(x*~1) -- a genuinely nonzero grad (~377) -- while
         # tinygrad normalizes by batch stats, so the two sides diverge for a
         # mode mismatch, not a numerics bug.
-        thvm.Tensor.training = True
-        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn)
-        THN.BatchNorm(4)(x.conv2d(w).relu()).sum().backward()
-        g_thvm = float(np.abs(w.grad.numpy()).sum())
-        thvm.Tensor.training = False
+        with thvm.Context(TRAINING=1):
+            x = thvm.Tensor(Xn); w = thvm.Tensor(Wn)
+            THN.BatchNorm(4)(x.conv2d(w).relu()).sum().backward()
+            g_thvm = float(np.abs(w.grad.numpy()).sum())
 
-        tinygrad.Tensor.training = True
-        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
-        TGN.BatchNorm(4)(tx.conv2d(tw).relu()).sum().backward()
-        g_tg = float(np.abs(tw.grad.numpy()).sum())
-        tinygrad.Tensor.training = False
+        with tg_training():
+            tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
+            TGN.BatchNorm(4)(tx.conv2d(tw).relu()).sum().backward()
+            g_tg = float(np.abs(tw.grad.numpy()).sum())
 
         # True grad is 0 (fp64-proven).  With BN in train mode on both sides
         # thvm cancels to ~3e-5 (vs tinygrad ~1e-5) -- benign reduce roundoff.
@@ -216,18 +215,16 @@ class TestDetachReduceBwdParity(unittest.TestCase):
         # Both sides run BN in TRAIN mode (batch statistics); without the
         # thvm training flag BN reads its init running_mean=0/var=1 and the
         # two sides normalize differently.
-        thvm.Tensor.training = True
-        x = thvm.Tensor(Xn); w = thvm.Tensor(Wn)
-        THN.BatchNorm(4)(x.conv2d(w).relu()).max_pool2d((2, 2)).sum().backward()
-        g_thvm = w.grad.numpy()
-        thvm.Tensor.training = False
+        with thvm.Context(TRAINING=1):
+            x = thvm.Tensor(Xn); w = thvm.Tensor(Wn)
+            THN.BatchNorm(4)(x.conv2d(w).relu()).max_pool2d((2, 2)).sum().backward()
+            g_thvm = w.grad.numpy()
 
-        tinygrad.Tensor.training = True
-        tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
-        TGN.BatchNorm(4)(tx.conv2d(tw).relu()).max_pool2d((2, 2)).sum() \
-            .backward()
-        g_tg = tw.grad.numpy()
-        tinygrad.Tensor.training = False
+        with tg_training():
+            tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
+            TGN.BatchNorm(4)(tx.conv2d(tw).relu()).max_pool2d((2, 2)).sum() \
+                .backward()
+            g_tg = tw.grad.numpy()
 
         self.assertFalse(bool(np.isnan(g_thvm).any()),
                          "relu->BN->maxpool->sum conv-weight grad is NaN "

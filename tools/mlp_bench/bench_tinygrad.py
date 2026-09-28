@@ -13,7 +13,7 @@ Force the CPU backend with CPU=1 (tinygrad defaults to METAL on macOS):
 import os, sys, time
 sys.path.insert(0, os.environ.get("TINYGRAD", "/Users/swish/src/tinygrad"))
 
-from tinygrad import Tensor, TinyJit, nn, Device, GlobalCounters
+from tinygrad import Tensor, TinyJit, nn, Device, GlobalCounters, Context
 from tinygrad.helpers import getenv
 
 IN     = int(os.environ.get("IN", "256"))
@@ -34,7 +34,7 @@ n_params = sum(int(p.numel()) for p in nn.state.get_parameters(layers))
 
 
 @TinyJit
-@Tensor.train()
+@Context(TRAINING=1)
 def train_step():
     opt.zero_grad()
     out = X.sequential(layers)
