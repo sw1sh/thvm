@@ -152,6 +152,10 @@ for the per-commit story.
   in the problem's own symbol spelling -- previously it gave up.  The gate
   now reads `$true`/`$false` literals at their fixed value (as free
   predicates, `p => $false` with `p` read "satisfiable").
+- `tools/casc/model_check.py`: an independent finite-model checker (own
+  TPTP tokenizer, parser with include selections, evaluator) for
+  FindProof's FiniteModel answers -- checks the status claim, symbol
+  coverage and every record's truth; shares no code with the prover.
 - FindProof `--proof` output, judged by strict CheckProof (each step against
   its cited premises only): records print in the problem's own signature
   (quoted atoms, hashed long names and curried wide functors mapped back);
