@@ -115,6 +115,7 @@ static const AtpKnob KNOBS[] = {
   {"lrs-age",                "THVM_ATP_LRS_AGE",         0, "(Vampire LRS limits with --lrs + --awr: prune only CPs beyond BOTH the age reach and the weight reach of the remaining selections -- AWPassiveClauseContainer::exceedsAllLimits)"},
   {"nest-penalty",           "THVM_ATP_NEST_PEN",        1, "(Prover9 nest_penalty: CP priority + N per same-symbol parent/child pair under an arity<=2 parent; 0 off)"},
   {"depth-penalty",          "THVM_ATP_DEPTH_PEN",       1, "(Prover9 depth_penalty: CP priority + N * equation depth (1 + max side depth); 0 off)"},
+  {"lex-dep-demod",          "THVM_ATP_LEX_DEP_DEMOD",   1, "(Prover9 lex-dependent demodulation, lex_dep_demod_lim N (LADR default 11): unorientable equations with equal side sizes and n_l+n_r+1 <= N demodulate in every normalization, each step gated by the run's ordering; no other unorientable equation rewrites; 0 off)"},
   {"perm-subsume",           "THVM_ATP_PERM_SUB",        0, "(permutative subsume)"},
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},

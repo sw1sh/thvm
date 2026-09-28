@@ -5582,6 +5582,12 @@ typedef struct {
   // the equation's depth (1 + max side depth) times depth_pen is
   // added to the CP priority.  0 = off (default).
   u32  ladr_nest_pen, ladr_depth_pen;
+  // LADR lex-dependent demodulation (ladr/demod.c; THVM_ATP_LEX_DEP_DEMOD
+  // = lex_dep_demod_lim, 0 = off): an unorientable equation with equal
+  // side symbol counts and n_l + n_r + 1 <= the limit demodulates in
+  // EVERY normalization (rules-only ones included), each instance step
+  // gated by the run's ordering; no other unorientable equation does.
+  u32  lex_dep_lim;
   u64  lrs_age_horizon;
   u8   otter_rec;
   u8   otter_primed;        // the input queue got its replay (first pop)

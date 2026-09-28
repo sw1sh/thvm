@@ -3183,6 +3183,12 @@ int main(int argc, char **argv) {
     if (np != NULL) s->ladr_nest_pen = (u32)atoi(np);
     if (dp != NULL) s->ladr_depth_pen = (u32)atoi(dp);
   }
+  // THVM_ATP_LEX_DEP_DEMOD=<lim> (--lex-dep-demod): LADR lex-dependent
+  // demodulation with lex_dep_demod_lim <lim> (Prover9's default 11).
+  {
+    const char *ld = getenv("THVM_ATP_LEX_DEP_DEMOD");
+    if (ld != NULL) s->lex_dep_lim = (u32)atoi(ld);
+  }
   // THVM_ATP_RANDOM_RATIO=<n> -- every n-th CP selection picks a
   // uniformly-random queued CP via xorshift64.  Default off.
   // THVM_ATP_RANDOM_SEED=<u64> seeds the stream (default: a fixed

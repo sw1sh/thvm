@@ -134,6 +134,19 @@ static u8 atp_orient_memo_gt(AtpState *s, Term l, Term r) {
   return gt;
 }
 
+static u32 atp_symbol_count(Term t);
+// Term twin of ftn_lex_dep_dirs (ft_norm.c): the LADR lex-dependent
+// demodulator directions of an unorientable equation (bit0 l -> r,
+// bit1 r -> l), 0 when it is not a lex-dependent demodulator.
+static u8 atp_lex_dep_dirs(const AtpState *s, Term l, Term r) {
+  u32 nl = atp_symbol_count(l), nr = atp_symbol_count(r);
+  if (nl != nr || nl + nr + 1u > s->lex_dep_lim) return 0u;
+  u8 d = 0u;
+  if (term_tag(l) != TAG_FVR && atp_vars_contained(r, l)) d |= 1u;
+  if (term_tag(r) != TAG_FVR && atp_vars_contained(l, r)) d |= 2u;
+  return d;
+}
+
 static Term atp_ordered_try_top(AtpState *s, Term t,
                                 const Term *lhs, const Term *rhs,
                                 u32 n_rules, u8 *fired) {
@@ -221,9 +234,15 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
     // variables fires with the grounded WM free-variable instance.
     Term li = lhs[i];
     Term ri = rhs[i];
-    if (term_tag(li) == TAG_CTR &&
-        (t_tag != TAG_CTR || term_ext(li) != t_sym ||
-         term_ctr_n(li) != t_n)) {
+    u8 ld = 3u;
+    if (s->lex_dep_lim != 0u) {
+      ld = atp_lex_dep_dirs(s, li, ri);
+      if (ld == 0u) continue;
+    }
+    if (!(ld & 1u) ||
+        (term_tag(li) == TAG_CTR &&
+         (t_tag != TAG_CTR || term_ext(li) != t_sym ||
+          term_ctr_n(li) != t_n))) {
       // l side cannot match -- skip both directions' l->r path; the
       // r->l path may still apply if its top (term_tag(ri)) matches.
     } else {
@@ -236,9 +255,10 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
         }
       }
     }
-    if (term_tag(ri) == TAG_CTR &&
-        (t_tag != TAG_CTR || term_ext(ri) != t_sym ||
-         term_ctr_n(ri) != t_n)) {
+    if (!(ld & 2u) ||
+        (term_tag(ri) == TAG_CTR &&
+         (t_tag != TAG_CTR || term_ext(ri) != t_sym ||
+          term_ctr_n(ri) != t_n))) {
       continue;
     }
     {

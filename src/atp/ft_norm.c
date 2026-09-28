@@ -2354,6 +2354,33 @@ static void ftdt_dtb_verify(const FtPiIndex *ix, const FtDtRec *rec,
   }
 }
 
+// LADR lex-dependent demodulation (ladr/demod.c demodulator_type): an
+// unorientable equation demodulates only when both sides have the same
+// symbol count (lex_dep_demod_sane) and n_l + n_r + 1 <= the limit
+// (lex_dep_demod_lim); a direction fires only when its replacement side
+// introduces no variable, and each step only when the instance
+// decreases under the run's ordering (term_greater).  Returns the
+// usable directions: bit0 = lhs -> rhs, bit1 = rhs -> lhs.
+static u8 ftn_lex_dep_dirs(const AtpState *s, const AtpFtCell *l,
+                           const AtpFtCell *r) {
+  u32 nl = ft_symbol_count_span(l), nr = ft_symbol_count_span(r);
+  if (nl != nr || nl + nr + 1u > s->lex_dep_lim) return 0u;
+  u8 d = 0u;
+  if ((l->sym & WF_VAR_BIT) == 0u && ft_vars_contained_span(r, l)) d |= 1u;
+  if ((r->sym & WF_VAR_BIT) == 0u && ft_vars_contained_span(l, r)) d |= 2u;
+  return d;
+}
+// LPO step gate for the lex-dependent leg: instantiate the replacement
+// face and compare it with the redex under the run's LPO.
+static KboCmp ftn_lpo_gate(AtpState *s, AtpFt *a, const AtpFtCell *redex,
+                           const AtpFtCell *tmpl, const AtpFtSubst *subst) {
+  AtpFtCell *repl = ft_subst_apply(a, tmpl, subst, 0);
+  if (repl == NULL) return KBO_UN;
+  LpoCmp c = thvm_lpo_ft(redex, repl, s->lpo);
+  ft_free_span(a, repl, repl->end);
+  return (c == LPO_GT) ? KBO_GT : KBO_UN;
+}
+
 // Per-cell redex attempt -- the body shared by the legacy pre-order
 // scan (find_redex_ft) and the WM mixmost walk
 // (atp_normalize_mixmost_ft).  Tries every live oriented rule in the
@@ -2619,6 +2646,13 @@ static int ft_cell_try_rules(AtpState   *s,
       if (s->r_orient[r]) continue;
       // Simpler-join gate (Twee Join.hs step2/step3): see pass 1.
       if (g_ftsj_active && !ftsj_rule_ok(s, r)) continue;
+      u8 ld_dirs = 3u;
+      u8 ld_lpo  = 0u;
+      if (s->lex_dep_lim != 0u) {
+        ld_dirs = ftn_lex_dep_dirs(s, lhs, rhs);
+        if (ld_dirs == 0u) continue;
+        ld_lpo = (u8)(s->lpo != NULL);
+      }
       // Unorientable equation: try forward (l -> r) then backward (r -> l).
       // Forward: lhs matches p; rhs vars NOT bound by the lhs match
       // (extension variables) are grounded to the minimal constant --
@@ -2648,8 +2682,9 @@ static int ft_cell_try_rules(AtpState   *s,
         fwd_matched = ft_match_maybe_ac(ft_arena_local, lhs, p, subst_buf);
       }
       if (fwd_matched) {
-        if (ft_subst_ground_extras(s, rhs, subst_buf)) {
-          if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
+        if ((ld_dirs & 1u) && ft_subst_ground_extras(s, rhs, subst_buf)) {
+          if (!ld_lpo && redex_na == 0u)
+            redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           // Encompassment demodulation (opt-in, Twee reducesSkolem):
           // an instance the open-term KBO calls incomparable still
           // fires when strictly decreasing under the skolem-ground
@@ -2662,7 +2697,9 @@ static int ft_cell_try_rules(AtpState   *s,
           // above supplies the redundancy discipline.  Armed + default:
           // skolem-only (see the gate comment at pass-2 entry).
           KboCmp ft_v;
-          if (gate_armed && skolem_only) {
+          if (ld_lpo) {
+            ft_v = ftn_lpo_gate(s, ft_arena_local, p, rhs, subst_buf);
+          } else if (gate_armed && skolem_only) {
             ft_v = thvm_kbo_ft_skolem_subst_with_prepared(redex_na, rhs,
                                                           subst_buf, s->kbo);
           } else {
@@ -2674,7 +2711,7 @@ static int ft_cell_try_rules(AtpState   *s,
           }
           static int dbg_diff = -1;
           if (dbg_diff < 0) dbg_diff = getenv("THVM_ATPFT_KBO_DIFF") != NULL ? 1 : 0;
-          if (dbg_diff) {
+          if (dbg_diff && !ld_lpo) {
             AtpFt *arena_chk = (AtpFt *)s->ft_arena_ptr;
             AtpFtCell *repl = ft_subst_apply(arena_chk, rhs, subst_buf, 1);
             if (repl != NULL) {
@@ -2717,11 +2754,14 @@ static int ft_cell_try_rules(AtpState   *s,
         bwd_matched = ft_match_maybe_ac(ft_arena_local, rhs, p, subst_buf);
       }
       if (bwd_matched) {
-        if (ft_subst_ground_extras(s, lhs, subst_buf)) {
-          if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
+        if ((ld_dirs & 2u) && ft_subst_ground_extras(s, lhs, subst_buf)) {
+          if (!ld_lpo && redex_na == 0u)
+            redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           // Encompassment demodulation, backward face (see fwd branch).
           KboCmp ft_v;
-          if (gate_armed && skolem_only) {
+          if (ld_lpo) {
+            ft_v = ftn_lpo_gate(s, ft_arena_local, p, lhs, subst_buf);
+          } else if (gate_armed && skolem_only) {
             ft_v = thvm_kbo_ft_skolem_subst_with_prepared(redex_na, lhs,
                                                           subst_buf, s->kbo);
           } else {
@@ -3262,6 +3302,9 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
                                            AtpFtSubst *subst,
                                            AtpProofStep *psteps, u32 *pn,
                                            u32 pcap) {
+  // Lex-dependent demodulation: every demodulation admits the
+  // lex-dependent equations (LADR has no oriented-only strength).
+  if (s->lex_dep_lim != 0u) doE = 1u;
   FtNfPathEnt st_fixed[64];
   FtMixmost m = {
     .s = s, .arena = (AtpFt *)s->ft_arena_ptr, .root = t,
@@ -4321,6 +4364,7 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   if (t == NULL) return NULL;
   if (slice_count == 0u) return t;
   if (slice_first >= s->n_rules) return t;
+  if (s->lex_dep_lim != 0u) doE = 1u;   // see atp_normalize_mixmost_ft
   if (slice_first + slice_count > s->n_rules) {
     slice_count = s->n_rules - slice_first;
   }
