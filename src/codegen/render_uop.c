@@ -343,14 +343,15 @@ static const char *rmu_gpu_alu_type_name(u32 dtype) {
 // Emit the GPU fp8 -> float decode helpers into the kernel prologue.  fp8 has
 // no native GPU scalar; a buffer stores one raw byte/element and the load site
 // wraps the byte in one of these decoders.  DIRECT PORT of the CPU
-// fp8e4m3_to_f32 / fp8e5m2_to_f32 (src/dtype/fp8.c:92-128), which themselves
-// port tinygrad's fp8_to_float (tinygrad/dtype.py:228-287): both formats expand
-// the u8 into the f16 (half) bit layout and let the native half->float
-// conversion finish.  e5m2 maps directly onto half's 5-exp/10-mantissa layout;
-// e4m3 needs explicit subnormal renormalization first.  Emitted once per kernel
-// that has an fp8 input (rmu_kernel_has_fp8_input), so fp8-free kernels are
-// byte-identical to before.  MSL uses `as_type<half>(uint16)`; CUDA uses
-// __ushort_as_half (cuda_fp16.h).
+// fp8e4m3_to_f32 / fp8e5m2_to_f32 (src/dtype/fp8.c), which themselves
+// port tinygrad's fp8_to_float (tinygrad/dtype.py:270-282 at 365f87a8a):
+// both formats expand the u8 into the f16 (half) bit layout and let the native
+// half->float conversion finish.  e5m2 maps directly onto half's
+// 5-exp/10-mantissa layout; e4m3 needs explicit subnormal renormalization
+// first.  Emitted once per kernel that has an fp8 input
+// (rmu_kernel_has_fp8_input), so fp8-free kernels are byte-identical to
+// before.  MSL uses `as_type<half>(uint16)`; CUDA uses __ushort_as_half
+// (cuda_fp16.h).
 static void rmu_emit_fp8_helpers(FILE *fp) {
   if (RMU_TARGET == CG_TARGET_CUDA) {
     fputs(

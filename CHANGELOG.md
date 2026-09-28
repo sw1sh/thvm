@@ -13,6 +13,7 @@ for the per-commit story.
   BUFFERIZE, END, STACK, GEP, UNROLL, CONTRACT, VCONST, PLACEHOLDER and
   DETACH nodes were never copied, so after a collection a kernel's content
   hash (the Metal PSO / tile-JIT / autotune cache key) and its ranges changed.
+- fp8 conversion follows tinygrad's two rules. Host conversion (CONST payloads, CAST/BITCAST folds, WL writes) is `float_to_fp8`: every e4m3 non-finite is NaN, and e5m2 keeps inf. CPU kernel stores follow the emulated kernels' saturating narrow, so a runtime cast of -inf to fp8e4m3 stays -448. The MAX identity is `dt.min` (-448 for e4m3), as in `identity_element`.
 - Term packing, flat heap, WNF stack machine, 29 interaction rules.
 - Parallel WNF: atomic heap primitives, work-stealing deque,
   persistent worker pthreads (`THVM_THREADS`).

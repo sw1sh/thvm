@@ -218,14 +218,17 @@ static int uwalk_dtype_is_float(u32 dt) {
       || dt == DT_FP8E4M3 || dt == DT_FP8E5M2;
 }
 
+// fp8 narrows through the _sat encoders, as a tinygrad kernel store does
+// (codegen/decomp/dtype.py:115-134): inf saturates to maxnorm, unlike
+// the host-side float_to_fp8.
 static void uwalk_store_f64(void *p, i64 off, u32 dt, double v) {
   switch (dt) {
     case DT_FP32:  ((f32 *)p)[off] = (f32)v; break;
     case DT_FP64:  ((f64 *)p)[off] = v;      break;
     case DT_FP16:  ((u16 *)p)[off] = f32_to_fp16((f32)v); break;
     case DT_BF16:  ((u16 *)p)[off] = f32_to_bf16((f32)v); break;
-    case DT_FP8E4M3: ((u8 *)p)[off] = f32_to_fp8e4m3((f32)v); break;
-    case DT_FP8E5M2: ((u8 *)p)[off] = f32_to_fp8e5m2((f32)v); break;
+    case DT_FP8E4M3: ((u8 *)p)[off] = f32_to_fp8e4m3_sat((f32)v); break;
+    case DT_FP8E5M2: ((u8 *)p)[off] = f32_to_fp8e5m2_sat((f32)v); break;
     case DT_INT8:  ((i8  *)p)[off] = (i8 )v; break;
     case DT_UINT8: ((u8  *)p)[off] = (u8 )v; break;
     case DT_INT16: ((i16 *)p)[off] = (i16)v; break;
@@ -245,8 +248,8 @@ static void uwalk_store_i64(void *p, i64 off, u32 dt, i64 v) {
     case DT_FP64:  ((f64 *)p)[off] = (f64)v; break;
     case DT_FP16:  ((u16 *)p)[off] = f32_to_fp16((f32)v); break;
     case DT_BF16:  ((u16 *)p)[off] = f32_to_bf16((f32)v); break;
-    case DT_FP8E4M3: ((u8 *)p)[off] = f32_to_fp8e4m3((f32)v); break;
-    case DT_FP8E5M2: ((u8 *)p)[off] = f32_to_fp8e5m2((f32)v); break;
+    case DT_FP8E4M3: ((u8 *)p)[off] = f32_to_fp8e4m3_sat((f32)v); break;
+    case DT_FP8E5M2: ((u8 *)p)[off] = f32_to_fp8e5m2_sat((f32)v); break;
     case DT_INT8:  ((i8  *)p)[off] = (i8 )v; break;
     case DT_UINT8: ((u8  *)p)[off] = (u8 )v; break;
     case DT_INT16: ((i16 *)p)[off] = (i16)v; break;

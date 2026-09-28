@@ -177,23 +177,20 @@ fn Term uop_end_body(Term t) {
 
 // === Helpers ===========================================================
 
-// Bits of float identity element for a reduce kind.  Mirrors tinygrad
-// identity_element() in uop/ops.py.  For SUM the identity is +0.0; for
-// MAX it is -INFINITY.  Returned as a u32 holding the float bit
-// pattern -- consumers pass it directly to uop_const(dtype, bits).
+// Bits of the float identity element for a reduce kind, tinygrad's
+// identity_element() (uop/ops.py:61): +0.0 for SUM, dt.min for MAX.
+// dt.min is -inf except for e4m3, which has no inf (dtype.py:69-77): a
+// -inf e4m3 CONST truncates to NaN, which the MAX combine below never
+// replaces.  Returned as a u32 holding the f32 bit pattern -- consumers
+// pass it directly to uop_const(dtype, bits).
 static u32 devec_reduce_identity_bits(u32 kind, u32 dtype) {
-  // Only FP32 supported in this first port -- the reduce-to-acc path
-  // lands on float accumulators; int reductions go through a different
-  // tinygrad lowering.  Other dtypes fall back to +0.0.
-  (void)dtype;
-  if (kind == REDUCE_MAX) {
-    // -INFINITY in IEEE-754 fp32: sign=1, exp=0xFF, mant=0
-    union { float f; u32 u; } v;
-    v.u = 0xFF800000u;
-    return v.u;
+  if (kind != REDUCE_MAX) {
+    return 0u;
   }
-  // REDUCE_SUM or unknown -> +0.0
-  return 0u;
+  f32 v = (dtype == DT_FP8E4M3) ? -fp8e4m3_max() : -INFINITY;
+  u32 bits;
+  memcpy(&bits, &v, sizeof bits);
+  return bits;
 }
 
 // === Cone walk ==========================================================

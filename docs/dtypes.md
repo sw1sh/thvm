@@ -51,19 +51,58 @@ Native lanes -- f32, f64, the integer family.  The kernel reads /
 writes the dtype's storage directly and runs typed arithmetic.
 
 Promote-to-f32 lanes -- f16, bf16, fp8e4m3, fp8e5m2.  No native ALU
-on any backend; arithmetic always promotes inputs to f32 via
-`to_fp32_lane`, runs the f32 kernel, then demotes via
-`from_fp32_lane`.  Driver: `cpu_op_run_via_f32` in
-[src/backend/cpu/op/_promote.c](../src/backend/cpu/op/_promote.c).
-This path is bit-for-bit precision-bound by f32 internally; bf16 and
-fp8 round-trip exact for their representable values, f16 / fp8e5m2
-overflow saturate to inf, fp8e4m3 saturates at MAXNORM = 448.
+on the CPU.  The CPU JIT declines any kernel with a buffer of these
+dtypes (`cpu_jit_narrow_float` in
+[src/backend/cpu/jit.c](../src/backend/cpu/jit.c)), so the kernel runs
+in the UOp walker
+([src/backend/cpu/uop_walk.c](../src/backend/cpu/uop_walk.c)): each
+load decodes to f32 and widens to f64, the ALU runs in f64, and each
+store narrows through f32.  bf16 and fp8 round-trip exact for their
+representable values, and f16 overflow saturates to inf.
+
+fp8 has two encodings, as in tinygrad.  Host-side encoding is
+tinygrad's `float_to_fp8` (dtype.py:245-268), in `f32_to_fp8e4m3` /
+`f32_to_fp8e5m2` and `from_fp32_lane`.  It covers CONST payload
+truncation, CAST / BITCAST constant folds, the materialized CONST
+fill, and WL tensor writes.  Finite overflow saturates to MAXNORM: 448
+for fp8e4m3, 57344 for fp8e5m2.  fp8e5m2 keeps inf (0x7c, or 0xfc when
+negative).  fp8e4m3 has no inf, so inf encodes to NaN.  NaN encodes to
+0x7f in both formats, or 0xff when its sign bit is set.
+
+A kernel store saturates instead, as tinygrad's emulated fp8 kernels
+do.  tinygrad's CPU and Metal renderers have no fp8
+(renderer/cstyle.py:307-308, 398-400), so their kernels emulate it
+through `f2f_clamp(sat=True)` and `f2f`
+(codegen/decomp/dtype.py:115-134).  The walker's STORE into an fp8
+buffer ports that rule in `f32_to_fp8e4m3_sat` / `f32_to_fp8e5m2_sat`.
+inf stores as MAXNORM (0x7e / 0xfe for fp8e4m3, 0x7b / 0xfb for
+fp8e5m2), so a realized cast of inf reads back as +/-448 or +/-57344,
+and a kernel that only negates or adds to fp8e5m2 data turns its inf
+into MAXNORM as well.  A NaN keeps its sign and the top mantissa bits
+of its f32 pattern (codegen/decomp/dtype.py:120-121): 0x7f for
+fp8e4m3, and 0x7e for the default quiet NaN in fp8e5m2.  Finite values
+store as in `float_to_fp8`.
+
+The walker still differs from tinygrad's emulated kernels outside the
+finite normal range:
+
+- tinygrad flushes fp8 subnormals to zero on load and on store
+  (codegen/decomp/dtype.py:114, 119); thvm keeps them.  A cast of 2^-9
+  to fp8e4m3 stores 0x01 in thvm and 0x00 in tinygrad.
+- tinygrad's kernels carry a NaN's bits through; the walker does not.
+  It evaluates in f64, which quiets a signaling NaN, and its fp8
+  decoders return one canonical positive NaN.  An f32 0x7f800001 cast
+  to fp8e5m2 stores 0x7c (inf) in tinygrad and 0x7e in thvm; negating
+  fp8e5m2 0x7e gives 0xfe in tinygrad and 0xff in thvm.
+
+Since an fp8e4m3 CONST of -inf is NaN, the MAX reduce identity is the
+dtype's minimum: -448 for fp8e4m3, -inf for the other float dtypes
+(tinygrad `identity_element`, uop/ops.py:61).
 
 Unpack-to-i8 lanes -- i4, u4.  Storage is 2 nibbles per byte, low
-nibble first.  Movement ops route through `cpu_op_run_via_i8` (in
-the same `_promote.c`): unpack the source bytes to a temp i8
-buffer, run the i8 movement kernel, repack to nibbles.  Elementwise
-ops route through `cpu_op_run_via_f32` like the float-narrow types
+nibble first.  Movement ops route through `cpu_op_run_via_i8`: unpack
+the source bytes to a temp i8 buffer, run the i8 movement kernel,
+repack to nibbles.  Elementwise ops route through `cpu_op_run_via_f32`
 (int4 / uint4 unpacking is handled inside `to_fp32_lane`).
 
 ## CAST and BITCAST
@@ -184,3 +223,8 @@ TRealize @ TUOpBitcast[
 | `wl/THVMLink/Tests/dtype_int4.wlt`           | 17    | packed int4 / uint4 + dequant via CAST         |
 
 Total: 124 dtype-specific VerificationTests.
+
+C side: `tests/test_uop_const_fold_dtype.c` covers CONST payload
+truncation and CAST / BITCAST folding; `tests/test_fp8_nonfinite.c`
+covers fp8 inf / NaN encoding on the host and at realized kernel
+stores, and the fp8 MAX reduce identity.
