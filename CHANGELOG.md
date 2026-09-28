@@ -66,6 +66,8 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- py: `test_tiny.py` resynced to tinygrad 365f87a8a (test_eye, clone-based
+  gemm/gemv, test_hgemm, test_call); `thvm.helpers` exports `OSX`/`WIN`.
 - py: `Tensor.var`, `var_mean`, `std_mean`; `Tensor.std` takes `correction`
   with tinygrad's default of 1 (was the population estimator) (#18150).
 - py: `Tensor.to(device, force=False)` accepts tinygrad's `force` flag

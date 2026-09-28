@@ -9,6 +9,9 @@ import time
 import urllib.request
 from typing import Any
 
+# tinygrad helpers.py:17
+OSX, WIN = sys.platform == "darwin", sys.platform == "win32"
+
 
 def getenv(key: str, default: Any = 0):
     """Read an env var and cast to the default's type (tinygrad-compatible)."""
@@ -85,9 +88,6 @@ class ContextVar:
 # the optimizers step only while it is set.
 TRAINING = ContextVar("TRAINING", 0)
 
-
-CI: bool = os.environ.get("CI", "") != ""
-
 # tinygrad debug/JIT env knobs (helpers.DEBUG / helpers.JIT).  GPT2 reads
 # both: DEBUG gates the per-step timing print, JIT gates the symbolic
 # single-token forward_jit path.
@@ -126,7 +126,7 @@ def fetch(url: str, name: "pathlib.Path | str | None" = None,
         cache = pathlib.Path(
             os.environ.get("XDG_CACHE_HOME",
                            pathlib.Path.home() / "Library" / "Caches"
-                           if sys.platform == "darwin"
+                           if OSX
                            else pathlib.Path.home() / ".cache")) / "tinygrad" / "downloads"
         if subdir:
             cache = cache / subdir

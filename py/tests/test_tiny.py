@@ -1,17 +1,16 @@
 # Cross-test: tinygrad's test/test_tiny.py, ported to the thvm Python
 # frontend by swapping the `tinygrad` -> `thvm` imports.  Source:
-# tinygrad/test/test_tiny.py (MIT).  This is the Phase-4 cross-test
-# (docs/plans/py_tensor_frontend.md) -- the SAME test code runs on
-# tinygrad and thvm via a one-line import swap.
+# tinygrad/test/test_tiny.py at 365f87a8a (MIT).  This is the Phase-4
+# cross-test (docs/plans/py_tensor_frontend.md) -- the SAME test code runs
+# on tinygrad and thvm via a one-line import swap.
 #
-# STATUS: red until Phase 2 (thvm/tensor.py) + Phase 3 (thvm/nn.py)
-# land -- the `thvm` package does not yet export Tensor / nn / etc.
-# Kept as the executable target spec, deliberately not skipped.
+# Kept as the executable target spec, deliberately not skipped: test_hgemm
+# fails until thvm exposes dtypes.half.
 
 # basic self-contained tests of the external functionality of tinygrad
 import unittest, random
-from thvm import Tensor, Context, Variable, TinyJit, dtypes, Device, nn
-from thvm.helpers import CI, getenv
+from thvm import Tensor, Context, Variable, TinyJit, dtypes, Device, nn, function
+from thvm.helpers import getenv, OSX
 
 class TestTiny(unittest.TestCase):
 
@@ -49,22 +48,36 @@ class TestTiny(unittest.TestCase):
     out = Tensor.ones(N).contiguous().sum()
     self.assertEqual(out.item(), N)
 
-  def test_gemm(self, N=getenv("GEMM_N", 64)):
-    a = Tensor.ones(N,N).contiguous()
-    b = Tensor.eye(N).contiguous()
+  def test_eye(self):
+    out = Tensor.eye(3).flatten()
+    self.assertListEqual(out.tolist(), [1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0])
+
+  def test_gemm(self, N=getenv("GEMM_N", 64), dtype=dtypes.float):
+    a = Tensor.ones(N,N, dtype=dtype).contiguous()
+    b = Tensor.eye(N, dtype=dtype).clone()
     lst = (out:=a@b).tolist()
     for y in range(N):
       for x in range(N):
         self.assertEqual(lst[y][x], 1.0, msg=f"mismatch at ({y},{x})")
-    self.assertEqual(out.dtype, dtypes.float)
+    self.assertEqual(out.dtype, dtype)
+
+  @unittest.skipIf(Device.DEFAULT == "DSP", "half is broken on DSP")
+  def test_hgemm(self): self.test_gemm(dtype=dtypes.half)
 
   def test_gemv(self, N=getenv("GEMV_N", 64), out_dtype=dtypes.float):
     a = Tensor.ones(1,N).contiguous()
-    b = Tensor.eye(N).contiguous()
+    b = Tensor.eye(N).clone()
     lst = (out:=a@b).tolist()
     for x in range(N):
       self.assertEqual(lst[0][x], 1.0, msg=f"mismatch at {x}")
     self.assertEqual(out.dtype, out_dtype)
+
+  def test_call(self):
+    a, b = Tensor([1.,2,3]), Tensor([4.,5,6])
+    Tensor.realize(a,b)
+    @function
+    def plus_fxn(a:Tensor, b:Tensor) -> Tensor: return (a+b)
+    self.assertEqual(plus_fxn(a,b).tolist(), (a+b).tolist())
 
   # *** randomness ***
 
@@ -99,6 +112,7 @@ class TestTiny(unittest.TestCase):
 
   # *** BEAM (for Kernel speed) ***
 
+  @unittest.skipIf(Device.DEFAULT == "WEBGPU" and OSX, "WEBGPU's timestamp-query is unreliable on dawn's metal backend")
   def test_beam(self):
     with Context(BEAM=1, IGNORE_BEAM_CACHE=1): self.test_plus()
 
@@ -121,7 +135,7 @@ class TestTiny(unittest.TestCase):
   # *** a model ***
 
   # TODO: this is failing because of how swizzling rewrites the ShapeTracker of the final STORE
-  @unittest.skipIf(CI and Device.DEFAULT == "DSP", "failing because of make things that can't be images not images")
+  @unittest.skipIf(Device.DEFAULT == "DSP", "failing because of make things that can't be images not images")
   def test_mnist(self):
     layers = [
       nn.Conv2d(1, 32, 5), Tensor.relu,
@@ -140,7 +154,7 @@ class TestTiny(unittest.TestCase):
     self.assertEqual(len(probs[0]), 10)
 
   # TODO: this is failing because of how swizzling rewrites the ShapeTracker of the final STORE
-  @unittest.skipIf(CI and Device.DEFAULT == "DSP", "failing because of make things that can't be images not images")
+  @unittest.skipIf(Device.DEFAULT == "DSP", "failing because of make things that can't be images not images")
   def test_mnist_backward(self):
     # NOTE: we don't have the whole model here for speed
     layers = [
@@ -150,7 +164,7 @@ class TestTiny(unittest.TestCase):
     # replace random weights with ones
     Tensor.realize(*[p.replace(Tensor.ones_like(p).contiguous()) for p in nn.state.get_parameters(layers)])
 
-    # realize gradients (backward auto-fills .grad for every float leaf)
+    # realize gradients
     Tensor.empty(4, 1, 14, 14).sequential(layers).sum().backward()
     Tensor.realize(*[x.grad for x in nn.state.get_parameters(layers) if x.grad is not None])
 
