@@ -112,6 +112,8 @@ static const AtpKnob KNOBS[] = {
   {"uid-orphan",             "THVM_ATP_UID_ORPHAN",      1, "(WM uid-layer orphan murder at selection, default 1; 0 keeps CPs whose parent rule was simplified away, as Vampire does)"},
   {"age-depth",              "THVM_ATP_AGE_DEPTH",       0, "(Vampire AgeQueue: --awr age picks take the minimal (derivation depth, weight, seq), age pick first, phase counted in activations)"},
   {"lrs-age",                "THVM_ATP_LRS_AGE",         0, "(Vampire LRS limits with --lrs + --awr: prune only CPs beyond BOTH the age reach and the weight reach of the remaining selections -- AWPassiveClauseContainer::exceedsAllLimits)"},
+  {"nest-penalty",           "THVM_ATP_NEST_PEN",        1, "(Prover9 nest_penalty: CP priority + N per same-symbol parent/child pair under an arity<=2 parent; 0 off)"},
+  {"depth-penalty",          "THVM_ATP_DEPTH_PEN",       1, "(Prover9 depth_penalty: CP priority + N * equation depth (1 + max side depth); 0 off)"},
   {"perm-subsume",           "THVM_ATP_PERM_SUB",        0, "(permutative subsume)"},
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},

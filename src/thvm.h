@@ -5576,6 +5576,12 @@ typedef struct {
   // interleave can still reach (AWPassiveClauseContainer::
   // exceedsAllLimits); lrs_age_horizon is the age-key cutoff.
   u8   use_lrs_age;
+  // Prover9/LADR clause-weight penalties (ladr/weight.c clause_weight;
+  // THVM_ATP_NEST_PEN / THVM_ATP_DEPTH_PEN): each same-symbol
+  // parent/child pair under an arity <= 2 parent adds nest_pen, and
+  // the equation's depth (1 + max side depth) times depth_pen is
+  // added to the CP priority.  0 = off (default).
+  u32  ladr_nest_pen, ladr_depth_pen;
   u64  lrs_age_horizon;
   u8   otter_rec;
   u8   otter_primed;        // the input queue got its replay (first pop)

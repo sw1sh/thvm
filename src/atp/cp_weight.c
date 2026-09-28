@@ -676,6 +676,29 @@ static u32 atp_cp_twee_fused_base(Term lhs, Term rhs) {
 // `lhs_nodes` (0xffffffff = unknown) is the LHS-only node count from
 // acp_pack_ex; when known, the per-side weight modes reuse it (and
 // base - lhs_nodes) instead of re-walking the two sides.
+// LADR clause-weight penalties (ladr/weight.c): nest counts the
+// parent/child pairs sharing a symbol under an arity <= 2 parent; depth
+// is the term depth with variables and constants at 0.
+static u32 atp_ladr_nest(Term t) {
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 n = term_ctr_n(t), c = 0u;
+  for (u32 i = 0; i < n; i++) {
+    Term ch = term_ctr_at(t, i);
+    if (n <= 2u && term_tag(ch) == TAG_CTR && term_ext(ch) == term_ext(t)) c++;
+    c += atp_ladr_nest(ch);
+  }
+  return c;
+}
+static u32 atp_ladr_depth(Term t) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) == 0u) return 0u;
+  u32 n = term_ctr_n(t), d = 0u;
+  for (u32 i = 0; i < n; i++) {
+    u32 k = atp_ladr_depth(term_ctr_at(t, i));
+    if (k > d) d = k;
+  }
+  return d + 1u;
+}
+
 static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
                                     u32 base, u32 lhs_nodes) {
   // ifeq guard discipline (see AtpState.ifeq_syms): scale by
@@ -723,6 +746,14 @@ static u32 atp_cp_priority_sized_ex(AtpState *s, Term lhs, Term rhs,
              ? atp_cp_weight_base_counts(s, lhs, rhs, mode,
                                          lhs_nodes, base - lhs_nodes)
              : atp_cp_weight_base(s, lhs, rhs, mode);
+  }
+  if (s != NULL && (s->ladr_nest_pen | s->ladr_depth_pen) != 0u &&
+      lhs != 0 && rhs != 0 &&
+      term_tag(lhs) != TAG_NUM && term_tag(rhs) != TAG_NUM) {
+    // The equation literal: depth 1 + max side depth (literals_depth).
+    u32 dl = atp_ladr_depth(lhs), dr = atp_ladr_depth(rhs);
+    base += s->ladr_nest_pen * (atp_ladr_nest(lhs) + atp_ladr_nest(rhs));
+    base += s->ladr_depth_pen * (1u + (dl > dr ? dl : dr));
   }
   if (s != NULL && s->use_mix_heuristic) {
     KboCmp c = atp_compare(s, lhs, rhs);
