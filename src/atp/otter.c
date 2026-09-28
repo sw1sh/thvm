@@ -341,8 +341,13 @@ static void atp_otter(AtpState *s) {
     u32 hi = s->otter_n;
     s->otter_rec = 1u;
     for (u32 k = hi; k-- > lo; ) {
-      if (s->trace_pack &&
-          (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+      // One replay can adopt thousands of passive rules inside a single
+      // step; under --proof (on-heap trace, recorded adoption chains)
+      // their scratch alone overruns the from-space between the
+      // step-start collections, so collect on heap pressure here too.
+      if ((s->trace_pack &&
+           (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) ||
+          atp_heap_under_pressure()) {
         thvm_atp_gc_collect(s);
       }
       atp_otter_one(s, s->otter_rows[k], s->otter_seqs[k]);
