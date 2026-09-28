@@ -16,8 +16,8 @@ NotImplementedError on purpose so coverage grows explicitly):
 
   leaves     BUFFER, COPY (passthrough to the BUFFER under it),
              CONST, VCONST-as-value
-  plumbing   DEVICE, UNIQUE, LUNIQUE          (never translated; only
-             appear as srcs of BUFFER/COPY)
+  plumbing   DEVICE, UNIQUE, LUNIQUE on older checkouts (never translated;
+             only appear as srcs of BUFFER/COPY)
   binary     ADD, MUL, MAX, CMPLT, CMPNE, SUB
   unary      RECIPROCAL/RECIP, EXP2, LOG2, SQRT, NEG
   ternary    WHERE  (cond ? a : b, composed from CMP + mul/add)
@@ -28,7 +28,8 @@ NotImplementedError on purpose so coverage grows explicitly):
              still accepted
   movement   RESHAPE, EXPAND, PERMUTE, PAD, SHRINK, FLIP
   cast       CAST, BITCAST
-  noop       CONTIGUOUS, CONTIGUOUS_BACKWARD, DETACH, NOOP (passthrough)
+  noop       STAGE (CONTIGUOUS on older checkouts), CONTIGUOUS_BACKWARD,
+             DETACH, NOOP (passthrough)
 
 Movement target shapes come from `u.shape` (NOT the symbolic VCONST
 shape-spec srcs).  PAD/SHRINK begin/end vectors come from the trailing
@@ -348,7 +349,10 @@ def _emit(u, memo: dict[int, int]) -> int:
         return term
 
     # ---- passthrough plumbing / no-ops --------------------------------
-    if op in (Ops.CONTIGUOUS, Ops.CONTIGUOUS_BACKWARD, Ops.DETACH, Ops.NOOP):
+    # STAGE replaced CONTIGUOUS on tinygrad master (#18097): contiguous() is
+    # `alu(Ops.STAGE)` and tinygrad itself walks through {STAGE, DETACH,
+    # CONTIGUOUS_BACKWARD} as value-identity (tensor.py:178).
+    if op in _passthrough_ops(Ops):
         term = _emit(u.src[0], memo)
         memo[key] = term
         return term
@@ -500,6 +504,11 @@ def _emit(u, memo: dict[int, int]) -> int:
             "unrealized tensor's .uop (do not realize before from_tinygrad).")
 
     raise NotImplementedError(f"unmapped tinygrad op {op}")
+
+
+def _passthrough_ops(Ops) -> tuple:
+    names = ("STAGE", "CONTIGUOUS", "CONTIGUOUS_BACKWARD", "DETACH", "NOOP")
+    return tuple(o for o in (getattr(Ops, n, None) for n in names) if o is not None)
 
 
 def _max(a: int, b: int) -> int:

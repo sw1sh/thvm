@@ -5,7 +5,9 @@ thvm ranged IR, renders, and dispatches; we diff vs tinygrad's own result.
 Complements test_from_tinygrad.py (tensor-level / full-backend path).
 
 Single-kernel pointwise coverage for now (the lowered importer's scope).
-Runs on the default backend (DEV=metal locally, DEV=cuda on the pod).
+Runs on the DEV-selected backend: cpu by default (C99, in-process), or
+DEV=metal / DEV=cuda to dispatch on a GPU.  tinygrad lowers for the same
+device.
 """
 import os
 import unittest
@@ -14,7 +16,7 @@ import numpy as np
 
 from thvm.from_tinygrad_lowered import cross_validate
 
-_BACKEND = "cuda" if os.environ.get("DEV", "").lower() == "cuda" else "metal"
+_BACKEND = (os.environ.get("DEV", "") or "cpu").split(":", 1)[0].lower()
 
 
 def _tg():

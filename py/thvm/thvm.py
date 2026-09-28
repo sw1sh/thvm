@@ -160,6 +160,8 @@ _uop_buffer_dim = _bind("py_uop_buffer_dim", c_uint32, c_uint64, c_uint32)
 _render_uop_kernel = _bind("py_render_uop_kernel", c_void_p, c_uint64, c_char_p)
 _render_uop_kernel_cuda = _bind(
     "py_render_uop_kernel_cuda", c_void_p, c_uint64, c_char_p)
+_render_uop_kernel_c = _bind(
+    "py_render_uop_kernel_c", c_void_p, c_uint64, c_char_p)
 _string_free = _bind("py_string_free", None, c_void_p)
 
 # ---------------- BEAM / autotune surface ----------------
@@ -781,6 +783,20 @@ class Thvm:
         (`extern "C" __global__ void k(...)`).
         """
         ptr = _render_uop_kernel_cuda(c_uint64(int(root)), name.encode("utf-8"))
+        if not ptr:
+            return ""
+        try:
+            return ctypes.string_at(ptr).decode("utf-8")
+        finally:
+            _string_free(ptr)
+
+    def render_c(self, root: Term, name: str = "k") -> str:
+        """Render the UOp DAG to a C99 kernel with the CPU-JIT contract
+        (`void k(void *out_v, const void *const *ins_v, unsigned n,
+        const unsigned *in_numels, const unsigned *kvar_vals)`).  Empty
+        when the renderer declines the signature.
+        """
+        ptr = _render_uop_kernel_c(c_uint64(int(root)), name.encode("utf-8"))
         if not ptr:
             return ""
         try:

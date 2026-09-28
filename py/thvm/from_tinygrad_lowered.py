@@ -9,7 +9,8 @@ UOP_STORE + integer address arithmetic), which thvm renders DIRECTLY
 (no rangeify -- the IR is already ranged).  This cross-validates thvm's
 codegen against tinygrad's lowered kernels.
 
-A tinygrad lowered kernel is the STORE subtree of `tensor.schedule_linear()`:
+A tinygrad lowered kernel is the STORE subtree of the compute CALL (the one
+whose body is a SINK) in `tensor.schedule_linear()`:
 
     STORE(INDEX(PARAM_out, addr), value)
 
@@ -19,6 +20,9 @@ values.  PARAM(arg=n) is kernel-arg slot n (n=0 is the output by
 convention).  thvm's renderer promotes the LOOP/GLOBAL axes to GPU threads,
 so the dispatch grid is the product of those axis extents (== output numel
 for a pure pointwise kernel).
+
+The other CALLs in the schedule are copies that stage the host inputs;
+they are followed back to the source buffers to find each input's data.
 
 Scope: single-kernel pointwise / simple-index kernels (elementwise, casts,
 selects, affine indexing).  Multi-kernel programs (conv, anything with an
@@ -204,11 +208,8 @@ class _Lowerer:
 from .thvm import _uop_binary, _uop_iwhere  # noqa: E402
 
 
-def _kernel_stores(tg_tensor):
-    """Return the lowered STORE uops of `tg_tensor`'s schedule, in order."""
-    Ops = _ops()
-    sink = tg_tensor.schedule_linear()
-    return [u for u in sink.toposort() if u.op is Ops.STORE]
+def _param_slot(p) -> int:
+    return int(getattr(p.arg, "slot", p.arg))
 
 
 def _uniq(buf_uop):
@@ -228,42 +229,70 @@ def _uniq(buf_uop):
     return None
 
 
-def _slot_inputs(sink, params, py_data):
-    """Map each input PARAM slot (>=1) to its host data array.
+def _copy_links(calls) -> dict:
+    """Map each copy CALL's destination arg to its source arg.
 
-    The kernel CALL (the one whose arg0 is the SINK ast) lists its buffers in
-    PARAM-slot order in src[1:].  COPY calls (arg0 is a COPY) bind a device
-    buffer's uniq (src[1]) to its source python uniq (src[2]); py_data is
-    keyed on the python uniqs.  Resolve slot -> device uniq -> python uniq ->
-    data.
+    tinygrad master schedules a copy as a STORE-bodied CALL (copy-is-store,
+    tinygrad #18303): the body is STORE(PARAM_dst, PARAM_src) and the PARAM
+    slots index the CALL's own args.  The destination is an arena view
+    (BITCAST of a SHRINK of the arena BUFFER, engine/memory.py:55-57) that
+    the kernel CALL takes as an input -- the SAME hash-consed UOp, so the
+    view itself is the join key.  Older checkouts carry a COPY body whose
+    args are (dst, src).
     """
     Ops = _ops()
-    calls = [u for u in sink.toposort() if u.op is Ops.CALL]
-    kernel_bufs = None
-    copy_map = {}
+    links = {}
     for c in calls:
-        if not c.src:
-            continue
-        if c.src[0].op is Ops.SINK:
-            kernel_bufs = list(c.src[1:])         # slot 0,1,2,...
-        elif c.src[0].op is Ops.COPY and len(c.src) >= 3:
-            dst, src = _uniq(c.src[1]), _uniq(c.src[2])
-            if dst is not None and src is not None:
-                copy_map[dst] = src
-    inputs = {}
-    if kernel_bufs is None:
-        return inputs
+        body, args = c.src[0], c.src[1:]
+        if body.op is Ops.COPY and len(args) >= 2:
+            links[args[0]] = args[1]
+        elif (body.op is Ops.STORE and len(body.src) >= 2
+              and all(x.op is Ops.PARAM for x in body.src[:2])):
+            links[args[_param_slot(body.src[0])]] = args[_param_slot(body.src[1])]
+    return links
+
+
+def _kernel_call(sink):
+    """The schedule's one compute CALL (its body is the kernel SINK)."""
+    Ops = _ops()
+    calls = [u for u in sink.toposort() if u.op is Ops.CALL and u.src]
+    kernels = [c for c in calls if c.src[0].op is Ops.SINK]
+    if len(kernels) != 1:
+        raise NotImplementedError(
+            f"{len(kernels)} kernels; single-kernel only for now")
+    return kernels[0], calls
+
+
+def _slot_inputs(kernel, calls, params, py_data):
+    """Map each input PARAM slot (>=1) to its host data array.
+
+    The kernel CALL lists its buffers in PARAM-slot order in src[1:].  Walk
+    each through the copy links back to the source buffer, whose uniq keys
+    py_data.  A slot with no host data is an error, not a skip: the renderer
+    packs its inputs densely by slot, so a dropped slot would shift every
+    later input onto the wrong kernel argument.
+    """
+    kernel_bufs = kernel.src[1:]
+    links = _copy_links(calls)
+    inputs, missing = {}, []
     for slot in (s for s in sorted(params) if s != 0):
-        if slot >= len(kernel_bufs):
-            continue
-        dev = _uniq(kernel_bufs[slot])
-        py = copy_map.get(dev, dev)
-        if py in py_data:
-            inputs[slot] = py_data[py]
+        buf = kernel_bufs[slot] if slot < len(kernel_bufs) else None
+        while buf is not None and buf in links:
+            buf = links[buf]
+        uq = _uniq(buf) if buf is not None else None
+        if uq in py_data:
+            inputs[slot] = py_data[uq]
+        else:
+            missing.append(slot)
+    if missing:
+        raise NotImplementedError(f"no host data for input PARAM slots {missing}")
     return inputs
 
 
-def cross_validate(build_fn, *, backend: str = "metal", opts=None):
+_TG_DEVICE = {"cpu": "CPU", "metal": "METAL", "cuda": "CUDA"}
+
+
+def cross_validate(build_fn, *, backend: str = "cpu", opts=None):
     """Cross-validate thvm's codegen against tinygrad's lowered kernel.
 
     `build_fn` is a 0-arg callable returning a FRESH tinygrad Tensor (the
@@ -273,6 +302,11 @@ def cross_validate(build_fn, *, backend: str = "metal", opts=None):
     buffers), so the two graphs must be independent and the input data
     must be read BEFORE scheduling.
 
+    `backend` picks where thvm renders and runs the kernel ("cpu" renders
+    C99 and runs it in-process; "metal" / "cuda" dispatch on the GPU).
+    tinygrad is pinned to the same device for the reference and the
+    lowering.
+
     `opts`, if given, is a list of (KOP, axis, factor) thvm KOpts (e.g.
     [(K.KOP_UPCAST, 0, 4)]) applied to the imported ranged-IR root before
     render -- this cross-validates thvm's KOpt transforms (UPCAST / UNROLL
@@ -281,33 +315,37 @@ def cross_validate(build_fn, *, backend: str = "metal", opts=None):
 
     Single-kernel only.  Returns (got, ref, max_abs_err).
     """
-    Ops = _ops()
+    from tinygrad.helpers import Context
+    if backend not in _TG_DEVICE:
+        raise ValueError(f"backend {backend!r}")
 
     # NOTE: tinygrad's lowered IR is target-dependent (a REDUCE lowers
     # differently for CPU vs GPU), so tinygrad must lower for the SAME
-    # backend thvm renders -- do NOT force a different tinygrad device here.
+    # backend thvm renders.
+    with Context(DEV=_TG_DEVICE[backend]):
+        # 1) Reference, on an independent graph.
+        ref = np.asarray(build_fn().numpy(), dtype=np.float32)
 
-    # 1) Reference, on an independent graph.
-    ref = np.asarray(build_fn().numpy(), dtype=np.float32)
+        # 2) Lowering graph: read python-buffer data by uniq BEFORE
+        #    schedule_linear consumes it (it zeroes the input buffers).
+        t_low = build_fn()
+        py_data = {}
+        for u in t_low.uop.toposort():
+            uq = _uniq(u)
+            if uq is not None and uq not in py_data:
+                try:
+                    py_data[uq] = np.asarray(u.buffer.numpy(),
+                                             dtype=np.float32).ravel()
+                except Exception:
+                    pass
 
-    # 2) Lowering graph: read python-buffer data by UNIQUE id BEFORE
-    #    schedule_linear consumes it (it zeroes the input buffers).
-    t_low = build_fn()
-    py_data = {}
-    for u in t_low.uop.toposort():
-        uq = _uniq(u)
-        if uq is not None and uq not in py_data:
-            try:
-                py_data[uq] = np.asarray(u.buffer.numpy(),
-                                         dtype=np.float32).ravel()
-            except Exception:
-                pass
+        sink = t_low.schedule_linear()
 
-    sink = t_low.schedule_linear()
-    stores = [u for u in sink.toposort() if u.op is Ops.STORE]
+    Ops = _ops()
+    kernel, calls = _kernel_call(sink)
+    stores = [u for u in kernel.src[0].toposort() if u.op is Ops.STORE]
     if len(stores) != 1:
-        raise NotImplementedError(
-            f"{len(stores)} kernels; single-kernel only for now")
+        raise NotImplementedError(f"{len(stores)} stores; single-output only for now")
 
     h = Thvm()
     low = _Lowerer(h)
@@ -320,10 +358,7 @@ def cross_validate(build_fn, *, backend: str = "metal", opts=None):
             raise RuntimeError(f"KOpt {opt} bailed")
         root = new_root
 
-    # Authoritative PARAM-slot -> buffer mapping: the kernel CALL (arg0 is the
-    # SINK ast) lists its buffers in slot order; COPY calls link a device
-    # buffer's uniq to its source python uniq (which py_data is keyed on).
-    inputs = _slot_inputs(sink, low.params, py_data)
+    inputs = _slot_inputs(kernel, calls, low.params, py_data)
 
     grid_fallback = 1
     for e in low.grid_axes:
@@ -331,11 +366,11 @@ def cross_validate(build_fn, *, backend: str = "metal", opts=None):
     if grid_fallback == 0:
         grid_fallback = max(1, int(np.prod(ref.shape)))
 
+    if backend == "cpu":
+        return _run_cpu(h, root, ref, inputs)
     if backend == "metal":
         return _run_metal(h, root, ref, inputs, grid_fallback)
-    if backend == "cuda":
-        return _run_cuda(h, root, ref, inputs, grid_fallback)
-    raise ValueError(f"backend {backend!r}")
+    return _run_cuda(h, root, ref, inputs, grid_fallback)
 
 
 def _grid_from_guard(src: str, fallback: int) -> int:
@@ -382,4 +417,36 @@ def _run_cuda(h, root, ref, inputs, grid_fallback):
     blocks = (grid_n + block - 1) // block
     c.dispatch(fn, ordered, grid=blocks, block=block)
     got = c.buf_read_array(out_buf, ref.shape if ref.shape else (1,), np.float32)
+    return got, ref, float(np.abs(got - ref).max())
+
+
+def _run_cpu(h, root, ref, inputs):
+    """Render C99 and run it in-process.  The kernel loops over its own
+    axes, so there is no grid; the signature is the CPU-JIT contract that
+    src/backend/cpu/jit.c dlsyms, compiled with the same flags."""
+    import os
+    import subprocess
+    import tempfile
+    src = h.render_c(root, name="k")
+    if not src:
+        raise RuntimeError("thvm's C renderer declined the kernel signature")
+    shape = ref.shape if ref.shape else (1,)
+    out = np.zeros(int(np.prod(shape)), dtype=np.float32)
+    ins = [np.ascontiguousarray(inputs[s], dtype=np.float32) for s in sorted(inputs)]
+    with tempfile.TemporaryDirectory(prefix="thvm_lowered_") as d:
+        c_path, so_path = os.path.join(d, "k.c"), os.path.join(d, "k.so")
+        with open(c_path, "w") as f:
+            f.write(src)
+        subprocess.run(["clang", "-O2", "-fbracket-depth=4096", "-fPIC", "-shared",
+                        "-o", so_path, c_path], check=True, capture_output=True)
+        k = _ct.CDLL(so_path).k
+    k.restype = None
+    k.argtypes = [_ct.c_void_p, _ct.POINTER(_ct.c_void_p), _ct.c_uint,
+                  _ct.POINTER(_ct.c_uint), _ct.POINTER(_ct.c_uint)]
+    n_in = max(1, len(ins))
+    ptrs = (_ct.c_void_p * n_in)(*[a.ctypes.data for a in ins])
+    numels = (_ct.c_uint * n_in)(*[a.size for a in ins])
+    kvars = (_ct.c_uint * 1)()
+    k(out.ctypes.data, ptrs, out.size, numels, kvars)
+    got = out.reshape(shape)
     return got, ref, float(np.abs(got - ref).max())

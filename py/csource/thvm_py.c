@@ -531,6 +531,22 @@ EXPORT char *py_render_uop_kernel_cuda(uint64_t root, const char *name) {
   return buf;
 }
 
+// C99 structural renderer: the CPU-JIT kernel contract
+// (`void k(void *out_v, const void *const *ins_v, unsigned n,
+//          const unsigned *in_numels, const unsigned *kvar_vals)`).
+// An empty string means the renderer declined the signature.  Caller
+// frees via py_string_free.
+EXPORT char *py_render_uop_kernel_c(uint64_t root, const char *name) {
+  char *buf = NULL;
+  size_t sz = 0;
+  FILE *fp = open_memstream(&buf, &sz);
+  if (fp == NULL) return NULL;
+  cg_render_uop_kernel_c_root(root, name ? name : "k", fp);
+  fflush(fp);
+  fclose(fp);
+  return buf;
+}
+
 EXPORT void py_string_free(char *s) { free(s); }
 
 // ---------------- BEAM / autotune surface ----------------

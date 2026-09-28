@@ -37,6 +37,9 @@ for the per-commit story.
 - End-to-end LeNet + Adam on MNIST (Metal); beautiful-MNIST,
   MLP, GPT-2 example pipelines.
 - Cross-framework benchmarks vs tinygrad / PyTorch MPS / MLX.
+- Python cross-validation bridges (`py/thvm/from_tinygrad*.py`) track
+  tinygrad master 365f87a8a (STAGE passthrough, copy-as-store schedules);
+  the lowered-kernel bridge validates on CPU by default.
 
 ### Equational reasoning (parallel research)
 - FindProof builds on modern Linux compilers: the TPTP UEQ reader no longer calls the GNU-only `memmem`, which gcc 14+ / clang 16+ reject as an implicit declaration under thvm's strict feature macros (older compilers truncated its pointer result to `int`).

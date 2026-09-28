@@ -5,7 +5,7 @@ via `from_tinygrad`, and assert the thvm result matches tinygrad's own
 `.numpy()` within 1e-4.
 
 Run:
-  cd <repo> && PYTHONPATH=py:/Users/swish/src/tinygrad DEV=cpu \\
+  cd <repo> && PYTHONPATH=py:<tinygrad checkout> DEV=cpu \\
     python3 -m pytest py/tests/test_from_tinygrad.py -x -q
 """
 import os
