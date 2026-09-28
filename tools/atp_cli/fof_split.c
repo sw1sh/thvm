@@ -1502,6 +1502,17 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
 // Node-budgeted; budget exhaustion returns "not shown satisfiable"
 // (lanes proceed) -- the collapse instances seen in practice are
 // small, and the guard must never block real proving on a timeout.
+// $true / $false literals take their fixed value (the clausifier keeps
+// them as atoms; read as free predicates, `p => $false` plus `p` came
+// out "satisfiable").  A bare-variable or connective atom is a
+// clausification the model cannot read: no verdict (pass B gives up on
+// those shapes anyway).  On success the assignment is kept in
+// g_oe_key / g_oe_val for fof_one_elt_claim.
+enum { OE_MAX_LITS = 65536, OE_MAX_VARS = 4096, OE_MAX_CLS = 65536 };
+static u64         g_oe_key[OE_MAX_VARS];
+static signed char g_oe_val[OE_MAX_VARS];   // -1: left open by the search
+static int         g_oe_nvar = 0;
+
 static int fof_one_elt_rec(const int *cl_off, const int *cl_len,
                            const int *lv, const int *lp,
                            int ncl, signed char *asg, long *budget) {
@@ -1522,50 +1533,357 @@ static int fof_one_elt_rec(const int *cl_off, const int *cl_len,
   for (int val = 0; val <= 1; val++) {
     asg[pick] = (signed char)val;
     int r = fof_one_elt_rec(cl_off, cl_len, lv, lp, ncl, asg, budget);
-    if (r != 0) { asg[pick] = -1; return r; }  // sat or unknown
+    if (r == 1) return 1;                      // keep the model
+    if (r < 0) { asg[pick] = -1; return r; }   // unknown
   }
   asg[pick] = -1;
   return 0;
 }
 
 static int fof_one_elt_sat(FolClause **cls, int ncl) {
-  enum { OE_MAX_LITS = 65536, OE_MAX_VARS = 4096, OE_MAX_CLS = 65536 };
   static int cl_off[OE_MAX_CLS], cl_len[OE_MAX_CLS];
   static int lv[OE_MAX_LITS], lp[OE_MAX_LITS];
   static u64 keys[OE_MAX_VARS];
   int nvar = 0, nlit = 0, nout = 0;
-  for (int i = 0; i < ncl && nout < OE_MAX_CLS; i++) {
+  g_oe_nvar = 0;
+  for (int i = 0; i < ncl; i++) {
     const FolClause *c = cls[i];
     if (c == NULL) continue;
     int off = nlit, len = 0, sat = 0;
-    for (u32 j = 0; j < c->n_lits; j++) {
+    for (u32 j = 0; j < c->n_lits && !sat; j++) {
       Term a = c->lits[j].atom;
+      int pos = (c->lits[j].sign == 0u);
+      if (term_tag(a) != TAG_CTR) return 0;
       if (fol_atom_is_eq(a)) {
-        if (c->lits[j].sign == 0u) { sat = 1; break; }  // positive eq: true
-        continue;                                        // negative eq: drops
+        if (pos) sat = 1;                      // positive eq: true
+        continue;                              // negative eq: drops
       }
-      // Predicate label (or the raw term as key for exotic atoms).
-      u64 key = (term_tag(a) == TAG_CTR) ? (u64)term_ext(a)
-                                         : ((u64)a | (1ull << 63));
+      u32 lab = term_ext(a);
+      if (lab == PC_LAB_TRUE || lab == PC_LAB_FALSE) {
+        if (pos == (lab == PC_LAB_TRUE)) sat = 1;
+        continue;
+      }
+      if (fol_is_connective(lab)) return 0;
+      u64 key = (u64)lab;
       int v = -1;
       for (int k = 0; k < nvar; k++) if (keys[k] == key) { v = k; break; }
       if (v < 0) {
-        if (nvar >= OE_MAX_VARS || nlit >= OE_MAX_LITS) return 0;
+        if (nvar >= OE_MAX_VARS) return 0;
         keys[nvar] = key; v = nvar++;
       }
       if (nlit >= OE_MAX_LITS) return 0;
-      lv[nlit] = v; lp[nlit] = (c->lits[j].sign == 0u) ? 1 : 0;
+      lv[nlit] = v; lp[nlit] = pos;
       nlit++; len++;
     }
     if (sat) { nlit = off; continue; }
     if (len == 0) return 0;   // clause false in the one-element model
+    if (nout >= OE_MAX_CLS) return 0;
     cl_off[nout] = off; cl_len[nout] = len; nout++;
   }
-  if (nout == 0) return 1;
-  signed char asg[OE_MAX_VARS];
+  static signed char asg[OE_MAX_VARS];
   memset(asg, -1, sizeof asg);
   long budget = 1000000;
-  return fof_one_elt_rec(cl_off, cl_len, lv, lp, nout, asg, &budget) == 1;
+  if (nout > 0 &&
+      fof_one_elt_rec(cl_off, cl_len, lv, lp, nout, asg, &budget) != 1)
+    return 0;
+  memcpy(g_oe_key, keys, sizeof(u64) * (size_t)nvar);
+  memcpy(g_oe_val, asg, (size_t)nvar);
+  g_oe_nvar = nvar;
+  return 1;
+}
+
+// --- one-element model: the Satisfiable / CounterSatisfiable answer ------
+// SOUNDNESS.  In a one-element domain {e} every term denotes e, so an
+// atom p(t..) reads one truth bit per predicate symbol, s = t is true,
+// and a quantifier is its body.  The gate's clause set comes from NNF
+// (equivalence), Skolemization and Tseitin definitions aux <-> G (a
+// model of the result, restricted to the input signature, is a model of
+// the input -- in {e} every Skolem function maps to e), and naive
+// distribution (equivalence).  So its assignment, restricted to the
+// problem's predicates, is a model of the problem.  The claim does not
+// rest on that argument alone: the clausifier has silent-drop paths
+// (fol_clause_new refuses > FOL_MAX_LITS literals, the Skolemizer bails
+// at FOL_SKOLEM_MAX_UNIV binders), so every ORIGINAL record formula --
+// as parsed, universally closed, the conjecture negated -- is
+// re-evaluated under the assignment (predicates the search left open
+// read false) and one false formula withdraws the claim.  Input shapes
+// that read differently from the TPTP semantics withdraw it too:
+// numbers and distinct objects (interpreted as distinct values), $-
+// symbols, a name used at two arities or as both predicate and
+// function, a quoted atom aliasing a plain name the unquoting pass
+// renamed apart, records the scanner does not read (typed records,
+// unexpanded nested include(), comments it does not strip), and roles
+// outside the axiom/conjecture family.  Output: Vampire's FiniteModel
+// form (tff declarations, finite_domain, one definition per symbol),
+// every input symbol in the problem's own spelling.
+static Term *g_oe_form = NULL;     // record formulas (closed, conjecture negated)
+static int   g_oe_nform = 0;
+static int   g_oe_role_bad = 0;    // a role outside the axiom/conjecture family
+
+static int fof_oe_role_ok(const char *role) {
+  static const char *ok[] = {
+    "axiom", "hypothesis", "definition", "assumption", "lemma", "theorem",
+    "corollary", "conjecture", "negated_conjecture", "plain", NULL };
+  for (int i = 0; ok[i] != NULL; i++) {
+    if (strcmp(role, ok[i]) == 0) return 1;
+  }
+  return 0;
+}
+
+static int fof_oe_user(u32 lab) {
+  return lab >= PC_LAB_BASE && lab < PC_LAB_BASE + (u32)pc_nsyms;
+}
+
+// Truth of an original formula: 1 / 0, -1 when it cannot be read.
+static int fof_oe_eval(Term f, const signed char *pval) {
+  if (term_tag(f) != TAG_CTR) return -1;
+  u32 lab = term_ext(f);
+  switch (lab) {
+    case FOL_LAB_NOT: {
+      int a = fof_oe_eval(term_ctr_at(f, 0u), pval);
+      return (a < 0) ? -1 : !a;
+    }
+    case FOL_LAB_AND: case FOL_LAB_OR: case FOL_LAB_IMP: case FOL_LAB_IFF: {
+      int a = fof_oe_eval(term_ctr_at(f, 0u), pval);
+      int b = fof_oe_eval(term_ctr_at(f, 1u), pval);
+      if (a < 0 || b < 0) return -1;
+      switch (lab) {
+        case FOL_LAB_AND: return a && b;
+        case FOL_LAB_OR:  return a || b;
+        case FOL_LAB_IMP: return !a || b;
+        default:          return a == b;
+      }
+    }
+    case FOL_LAB_ALL: case FOL_LAB_EX:
+      return fof_oe_eval(term_ctr_at(f, 1u), pval);
+    case PC_LAB_TRUE:  return (term_ctr_n(f) == 0u) ? 1 : -1;
+    case PC_LAB_FALSE: return (term_ctr_n(f) == 0u) ? 0 : -1;
+    case PC_LAB_EQ:    return (term_ctr_n(f) == 2u) ? 1 : -1;
+    default:
+      if (!fof_oe_user(lab)) return -1;
+      return pval[lab - PC_LAB_BASE];
+  }
+}
+
+// Signature of the original formulas: kind 1 = predicate, 2 = function.
+// 0 on a shape the model cannot print (clash, non-symbol subterm).
+static int fof_oe_note(u32 lab, u8 kind, u32 arity, u8 *skind, u32 *sarity) {
+  if (!fof_oe_user(lab)) return 0;
+  u32 i = lab - PC_LAB_BASE;
+  if (skind[i] == 0u) { skind[i] = kind; sarity[i] = arity; return 1; }
+  return skind[i] == kind && sarity[i] == arity;
+}
+
+static int fof_oe_sig_term(Term t, u8 *skind, u32 *sarity) {
+  if (term_tag(t) == TAG_FVR) return 1;
+  if (term_tag(t) != TAG_CTR) return 0;
+  u32 n = term_ctr_n(t);
+  if (!fof_oe_note(term_ext(t), 2u, n, skind, sarity)) return 0;
+  for (u32 i = 0; i < n; i++) {
+    if (!fof_oe_sig_term(term_ctr_at(t, i), skind, sarity)) return 0;
+  }
+  return 1;
+}
+
+static int fof_oe_sig_form(Term f, u8 *skind, u32 *sarity) {
+  if (term_tag(f) != TAG_CTR) return 0;
+  u32 lab = term_ext(f);
+  u32 n = term_ctr_n(f);
+  switch (lab) {
+    case FOL_LAB_NOT:
+      return fof_oe_sig_form(term_ctr_at(f, 0u), skind, sarity);
+    case FOL_LAB_AND: case FOL_LAB_OR: case FOL_LAB_IMP: case FOL_LAB_IFF:
+      return fof_oe_sig_form(term_ctr_at(f, 0u), skind, sarity) &&
+             fof_oe_sig_form(term_ctr_at(f, 1u), skind, sarity);
+    case FOL_LAB_ALL: case FOL_LAB_EX:
+      return fof_oe_sig_form(term_ctr_at(f, 1u), skind, sarity);
+    case PC_LAB_TRUE: case PC_LAB_FALSE:
+      return n == 0u;
+    case PC_LAB_EQ:
+      return n == 2u &&
+             fof_oe_sig_term(term_ctr_at(f, 0u), skind, sarity) &&
+             fof_oe_sig_term(term_ctr_at(f, 1u), skind, sarity);
+    default:
+      if (!fof_oe_note(lab, 1u, n, skind, sarity)) return 0;
+      for (u32 i = 0; i < n; i++) {
+        if (!fof_oe_sig_term(term_ctr_at(f, i), skind, sarity)) return 0;
+      }
+      return 1;
+  }
+}
+
+static int fof_oe_lower_word(const char *s, size_t n) {
+  if (n == 0 || !islower((unsigned char)s[0])) return 0;
+  for (size_t i = 1; i < n; i++) {
+    if (!isalnum((unsigned char)s[i]) && s[i] != '_') return 0;
+  }
+  return 1;
+}
+
+// The problem's own spelling of an interned name (undoes the quoted-atom
+// and long-name stand-ins); NULL when the name is not a TPTP functor.
+static const char *fof_oe_spelling(const char *nm) {
+  if (!fof_oe_lower_word(nm, strlen(nm))) return NULL;
+  int slot = tp_ren_slot(nm, strlen(nm));
+  if (slot >= 0 && g_tp_ren[slot].from != NULL) return g_tp_ren[slot].to;
+  return nm;
+}
+
+// A quoted atom 'w' with w a lower word IS the functor w: the unquoting
+// pass renamed it apart from a plain w, so both present = one symbol
+// read as two.
+static int fof_oe_quote_alias(const char *sp) {
+  if (sp[0] != '\'') return 0;
+  size_t n = strlen(sp);
+  if (n < 2 || sp[n - 1] != '\'') return 1;
+  const char *w = sp + 1;
+  size_t wl = n - 2;
+  if (!fof_oe_lower_word(w, wl)) return 0;
+  if (wl >= TP_NAME_LEN) return 1;
+  char buf[TP_NAME_LEN];
+  memcpy(buf, w, wl);
+  buf[wl] = '\0';
+  return pc_lookup(buf) != PC_NOT_FOUND;
+}
+
+// Text the record scanner reads as the problem: a comment, quote or
+// record kind it does not handle means the parsed formulas may not be
+// the problem's.
+static const char *fof_oe_text_refusal(const char *text) {
+  if (strchr(text, '\'') != NULL) return "quoted text left after unquoting";
+  if (strchr(text, '"') != NULL) return "distinct object";
+  if (strchr(text, '%') != NULL) return "trailing comment";
+  if (strstr(text, "/*") != NULL) return "block comment";
+  static const char *kinds[] = { "include(", "tff(", "thf(", "tcf(", "tpi(", NULL };
+  for (int k = 0; kinds[k] != NULL; k++) {
+    size_t kl = strlen(kinds[k]);
+    for (const char *q = text; (q = strstr(q, kinds[k])) != NULL; q += kl) {
+      if (q == text || !(isalnum((unsigned char)q[-1]) || q[-1] == '_'))
+        return "unread record kind";
+    }
+  }
+  return NULL;
+}
+
+// Vampire-style declaration / definition names: prefix + name, quoted
+// when the name is.
+static void fof_oe_prefixed(FILE *out, const char *prefix, const char *sp) {
+  if (sp[0] == '\'') fprintf(out, "'%s%s", prefix, sp + 1);
+  else fprintf(out, "%s%s", prefix, sp);
+}
+static void fof_oe_suffixed(FILE *out, const char *sp, const char *suffix) {
+  size_t n = strlen(sp);
+  if (sp[0] == '\'') fprintf(out, "%.*s%s'", (int)(n - 1), sp, suffix);
+  else fprintf(out, "%s%s", sp, suffix);
+}
+
+#define FOF_OE_ELT "'fmb_$i_1'"
+
+static void fof_oe_args(FILE *out, u32 n) {
+  fputc('(', out);
+  for (u32 k = 0; k < n; k++) fprintf(out, "%s" FOF_OE_ELT, k ? "," : "");
+  fputc(')', out);
+}
+
+static void fof_oe_print(FILE *out, const u8 *skind, const u32 *sarity,
+                         const signed char *pval) {
+  fprintf(out, "tff('declare_$i1',type," FOF_OE_ELT ":$i).\n");
+  fprintf(out, "tff('finite_domain_$i',axiom,\n"
+               "      ! [X:$i] : (\n"
+               "         X = " FOF_OE_ELT "\n"
+               "      ) ).\n\n");
+  // constants, functions, propositions, predicates (Vampire's order)
+  for (int pass = 0; pass < 4; pass++) {
+    u8 kind = (pass < 2) ? 2u : 1u;
+    for (int i = 0; i < pc_nsyms; i++) {
+      if (skind[i] != kind || ((sarity[i] == 0u) != (pass % 2 == 0))) continue;
+      const char *sp = fof_oe_spelling(pc_sym[i]);
+      u32 n = sarity[i];
+      fputs("tff(", out);
+      fof_oe_prefixed(out, "declare_", sp);
+      fprintf(out, ",type,%s: ", sp);
+      if (n > 0u) {
+        fputc('(', out);
+        for (u32 k = 0; k < n; k++) fprintf(out, "%s$i", k ? " * " : "");
+        fprintf(out, ") > ");
+      }
+      fprintf(out, "%s).\n", (kind == 2u) ? "$i" : "$o");
+      if (n == 0u) {
+        fputs("tff(", out);
+        fof_oe_suffixed(out, sp, "_definition");
+        if (kind == 2u) fprintf(out, ",axiom,%s = " FOF_OE_ELT ").\n", sp);
+        else fprintf(out, ",axiom,%s%s).\n", pval[i] ? "" : "~", sp);
+        continue;
+      }
+      fputs("tff(", out);
+      fof_oe_prefixed(out, (kind == 2u) ? "function_" : "predicate_", sp);
+      fprintf(out, ",axiom,\n           ");
+      if (kind == 2u) {
+        fputs(sp, out);
+        fof_oe_args(out, n);
+        fprintf(out, " = " FOF_OE_ELT "\n");
+      } else {
+        fprintf(out, "%s%s", pval[i] ? "" : "~", sp);
+        fof_oe_args(out, n);
+        fputc('\n', out);
+      }
+      fprintf(out, "\n).\n\n");
+    }
+  }
+}
+
+// Claim the gate's one-element model: print the SZS status and the
+// FiniteModel block and exit 0 (the schedule's winner signal).  Returns
+// (lanes proceed to the old give-up) when any check refuses the claim.
+static void fof_one_elt_claim(const char *text) {
+  const char *why = fof_oe_text_refusal(text);
+  if (why == NULL && g_oe_role_bad) why = "role outside the axiom/conjecture family";
+  u8 *skind = (u8 *)calloc((size_t)pc_nsyms + 1u, 1u);
+  u32 *sarity = (u32 *)calloc((size_t)pc_nsyms + 1u, sizeof(u32));
+  signed char *pval = (signed char *)calloc((size_t)pc_nsyms + 1u, 1u);
+  if (skind == NULL || sarity == NULL || pval == NULL) why = "OOM";
+  for (int r = 0; why == NULL && r < g_oe_nform; r++) {
+    if (!fof_oe_sig_form(g_oe_form[r], skind, sarity))
+      why = "symbol shape (arity clash, predicate used as function, ...)";
+  }
+  for (int i = 0; why == NULL && i < pc_nsyms; i++) {
+    if (skind[i] == 0u) continue;
+    const char *sp = fof_oe_spelling(pc_sym[i]);
+    if (sp == NULL) why = "number or $-symbol";
+    else if (fof_oe_quote_alias(sp)) why = "quoted atom aliasing a plain name";
+  }
+  if (why == NULL) {
+    for (int k = 0; k < g_oe_nvar; k++) {
+      u64 key = g_oe_key[k];
+      if (key <= 0xFFFFFFFFull && fof_oe_user((u32)key) && g_oe_val[k] == 1)
+        pval[key - PC_LAB_BASE] = 1;
+    }
+    for (int r = 0; why == NULL && r < g_oe_nform; r++) {
+      if (fof_oe_eval(g_oe_form[r], pval) != 1)
+        why = "a record is false under the clause-level model";
+    }
+  }
+  if (why != NULL) {
+    fprintf(stderr, "FindProof: one-element model not claimed: %s\n", why);
+    free(skind); free(sarity); free(pval);
+    return;
+  }
+  int npred = 0, nfun = 0;
+  for (int i = 0; i < pc_nsyms; i++) {
+    if (skind[i] == 1u) npred++;
+    else if (skind[i] == 2u) nfun++;
+  }
+  printf("%% SZS status %s for %s\n",
+         g_cli_fof_conjecture ? "CounterSatisfiable" : "Satisfiable",
+         g_cli_probpath);
+  printf("%% SZS output start FiniteModel for %s\n", g_cli_probpath);
+  fof_oe_print(stdout, skind, sarity, pval);
+  printf("%% SZS output end FiniteModel for %s\n", g_cli_probpath);
+  fflush(stdout);
+  fprintf(stderr, "FindProof: one-element model: %d predicate(s), "
+          "%d function(s), %d record(s) re-evaluated true\n",
+          npred, nfun, g_oe_nform);
+  exit(0);
 }
 
 static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
@@ -1643,7 +1961,11 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   // session runs before serialization, so nothing moves the heap).
   FolClause **cls = (FolClause **)malloc(sizeof(FolClause *) * TP_MAX_CLAUSES);
   u8 *ccnj = (u8 *)malloc(TP_MAX_CLAUSES);
-  if (cls == NULL || ccnj == NULL) tp_giveup("OOM in FOF front-end");
+  if (g_oe_form == NULL) g_oe_form = (Term *)malloc(sizeof(Term) * FOF_MAX_RECORDS);
+  if (cls == NULL || ccnj == NULL || g_oe_form == NULL)
+    tp_giveup("OOM in FOF front-end");
+  g_oe_nform = 0;
+  g_oe_role_bad = 0;
   // --proof: conversion-lineage capture (record chain + per-clause
   // source-record map for the emitted cnf(c<k>, ...) layer).
   g_prov_on = g_cli_want_proof;
@@ -1728,6 +2050,8 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     }
     f = pc_close(f);                     // TPTP: free variables are universal
     if (is_conj) f = fol_mk_not(f);      // refutation: negate the conjecture
+    if (!fof_oe_role_ok(rolebuf)) g_oe_role_bad = 1;
+    g_oe_form[g_oe_nform++] = f;
     // Clausify WITHOUT resetting the Skolem counter (fresh across records).
     u32 sk0 = g_fol_skolem_next;
     Term nnf = fol_nnf(f);
@@ -1791,6 +2115,17 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     fflush(stdout);
     exit(0);
   }
+
+  // One-element-model gate on the full clause set, before any encoding
+  // (see fof_one_elt_sat).  A verified model IS the answer
+  // (fof_one_elt_claim prints it and exits 0); a refused claim still
+  // gives up after pass B, as before.  Split children inherit the
+  // parent's verdict path.
+  int oe_sat = !g_fof_split_child && fof_one_elt_sat(cls, ncl);
+  if (oe_sat) fof_one_elt_claim(text);
+  if (getenv("THVM_ATP_ONE_ELT_PROBE") != NULL)
+    tp_giveup(oe_sat ? "one-element probe: model found, claim refused"
+                     : "one-element probe: no one-element model");
 
   // Fresh names: the pc_intern table now holds every problem symbol.
   fof_fresh_const(g_fof_true_name, sizeof g_fof_true_name);
@@ -1888,12 +2223,10 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   g_fof_soft_oversize = 0;
   g_cur_prov_kind = PROV_NONE;
   g_cur_prov_ix   = 0;
-  // One-element-model gate: a set satisfiable in the one-element
-  // interpretation is satisfiable -- give up before ANY lane can run
-  // an encoding that would spuriously refute it (see fof_one_elt_sat).
-  // Split children inherit the parent's verdict path; skip there.
-  if (!g_fof_split_child && fof_one_elt_sat(cls, ncl))
-    tp_giveup("satisfiable in the one-element interpretation");
+  // One-element-model gate (decided before pass B): a set satisfiable
+  // in the one-element interpretation is satisfiable -- give up before
+  // ANY lane can run an encoding that would spuriously refute it.
+  if (oe_sat) tp_giveup("satisfiable in the one-element interpretation");
   // fof-split fitness (parent): Horn except 1..k or-clauses, every
   // positive ground, branch product bounded.  A fitting shape hands
   // the whole wall to the branch orchestration in main -- including

@@ -151,6 +151,7 @@ static const AtpKnob KNOBS[] = {
   {"fol-sos",                "THVM_FOL_SOS",             1, "(clausal pre-pass set of support: generating inferences need a conjecture-descended parent; 0 off)"},
   {"fof-sat-wall",           "THVM_ATP_FOF_SAT_WALL",    1, "(clausal pre-pass share of the REMAINING wall, percent; default 60, 95+ = the whole slice wall)"},
   {"fof-stats",              "THVM_ATP_FOF_STATS",       0, "(front-end probe: clausify, print component-split stats, exit -- no engine)"},
+  {"one-elt-probe",          "THVM_ATP_ONE_ELT_PROBE",   0, "(front-end probe: clausify, run the one-element-model gate (a verified model prints Satisfiable/CounterSatisfiable + FiniteModel), else GaveUp -- no engine)"},
   {"canon-input",            "THVM_ATP_CANON_INPUT",     1, "(canonical input presentation: greater side left + sorted clauses; 0 disables)"},
   {"horn",                   "THVM_ATP_HORN",            1, "(encoded-Horn release: 0 disables)"},
   {"horn-ratio",             "THVM_ATP_HORN_RATIO",      1, "(Horn pick-given size:age ratio, 0..4)"},

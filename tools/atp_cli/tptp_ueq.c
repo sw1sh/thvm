@@ -262,7 +262,7 @@ typedef struct { char *from, *to; } TpRename;
 static TpRename *g_tp_ren = NULL;
 static u32 g_tp_ren_cap = 0;
 static int g_tp_nren = 0;
-static int g_tp_ren_on = 0;   // --proof runs only: the default path never notes
+static int g_tp_ren_on = 0;   // set for TPTP input (main): proof + model output
 
 static int tp_ren_slot(const char *from, size_t n) {
   if (g_tp_ren_cap == 0u) return -1;

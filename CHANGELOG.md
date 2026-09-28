@@ -144,6 +144,14 @@ for the per-commit story.
   counter-model needs an ORDERED saturation (the unordered pass's naive
   demodulation false-rejected a one-step superposition); a one-rewrite
   route confirms variable-bearing disequation steps (narrowing proofs).
+- FindProof answers FNT (first-order non-theorem) problems: when the
+  one-element-model gate finds a model of the full clause set, every
+  original record is re-evaluated in that model (the clausifier has
+  silent-drop paths) and, if all hold, FindProof prints SZS Satisfiable
+  (no conjecture) or CounterSatisfiable plus a Vampire-style FiniteModel
+  in the problem's own symbol spelling -- previously it gave up.  The gate
+  now reads `$true`/`$false` literals at their fixed value (as free
+  predicates, `p => $false` with `p` read "satisfiable").
 - FindProof `--proof` output, judged by strict CheckProof (each step against
   its cited premises only): records print in the problem's own signature
   (quoted atoms, hashed long names and curried wide functors mapped back);

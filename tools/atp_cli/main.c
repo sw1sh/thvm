@@ -1108,7 +1108,9 @@ int main(int argc, char **argv) {
       // no transform fired the leaf table stays empty and the emitted
       // bytes are unchanged.
       g_prov_on = g_cli_want_proof;
-      g_tp_ren_on = g_cli_want_proof;
+      // Stand-in names are noted on every run: a --proof derivation and
+      // the one-element FiniteModel both print the problem's spelling.
+      g_tp_ren_on = 1;
       char *pre = tp_preprocess(file, raw);
       pre = tp_unquote_names(pre);
       tp_shorten_names(pre);
@@ -1119,6 +1121,8 @@ int main(int argc, char **argv) {
       // clausal front-end; pure UEQ input keeps the byte-identical
       // tp_parse path.
       if (tp_needs_clausal(pre)) tp_fof_load(&tp, pre);
+      else if (getenv("THVM_ATP_ONE_ELT_PROBE") != NULL)
+        tp_giveup("one-element probe: unit-equality input (no gate)");
       else tp_parse(&tp, pre);
       free(pre);
       int n_neg = 0;
