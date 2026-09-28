@@ -303,6 +303,7 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   s->use_flatterm = (u8)atp_env_on("THVM_ATP_FLATTERM");
   s->trace_pack = (u8)atp_env_on("THVM_ATP_TRACE_PACK");
   s->cp_trace_lean = (u8)atp_env_on("THVM_ATP_CP_TRACE_LEAN");
+  atp_hx_open(s);   // THVM_ATP_HISTORY_EXPORT (observation-only)
   s->use_wm_interred = (u8)atp_env_on("THVM_ATP_WM_INTERRED");
   // Opt-in faithful Waldmeister-FPA normalize path.  OFF unless
   // THVM_ATP_WMFPA is set to a non-"0" value -- default stays byte-
@@ -388,6 +389,7 @@ static void gn_gc_writeback(struct AtpGoalNarrow *g, const Term *roots,
 
 fn void thvm_atp_free(AtpState *s) {
   if (s == NULL) return;
+  thvm_atp_history_finish(s, 0xffu);   // no-op unless still recording
   atp_wmo_free((struct AtpWmOrder *)s->wmo);
   free(s->trace);
   free(s->lhs);

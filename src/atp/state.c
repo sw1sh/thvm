@@ -504,6 +504,7 @@ static void atp_uid_mark_dead(AtpState *s, u32 uid) {
     s->uid_dead_cap = ncap;
   }
   s->uid_dead[uid] = 1u;
+  atp_hx_kill(s, 'K', uid);
   {
     static int rt = -1;
     if (rt < 0) rt = (getenv("THVM_ATP_RULE_TRACE") != NULL) ? 1 : 0;

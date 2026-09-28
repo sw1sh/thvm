@@ -1412,6 +1412,7 @@ static void atp_trace_mark_dead(AtpState *s, u32 trace_id) {
   // Ids past the default trace cap exist only in a proof run: the
   // search treats them as absent, as the no-proof run must.
   if (trace_id == ATP_TRACE_NONE || trace_id >= ATP_MAX_TRACE) return;
+  atp_hx_kill(s, 'k', trace_id);
   u32 byte = trace_id >> 3;
   if (byte >= s->r_trace_dead_cap >> 3) {
     u32 new_bits = (trace_id + 1u + 4096u) & ~4095u;  // round up
@@ -1798,6 +1799,7 @@ static u32 atp_trace_push_norm_step(AtpState *s, u32 p_a, u32 rule_idx,
   u32 idx = s->n_trace;
   if (s->trace_pack) s->trace_eq_off[idx] = eq_off;
   s->n_trace++;
+  atp_hx_trace_stamp(s, idx);
   return idx;
 }
 
@@ -1827,6 +1829,7 @@ static u32 atp_trace_push_norm_step_off(AtpState *s, u32 p_a, u32 rule_idx,
   u32 idx = s->n_trace;
   s->trace_eq_off[idx] = eq_off;
   s->n_trace++;
+  atp_hx_trace_stamp(s, idx);
   return idx;
 }
 
@@ -2187,6 +2190,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   if (s->use_lazy_ground_join &&
       atp_cp_ground_joinable(s, cp_rhs, cp_lhs)) {
     s->n_cps_ground_joinable++;
+    atp_hx_outcome(s, ATP_HX_OUT_LAZYGJ);
 #ifdef THVM_ATPFT_RULES
     // The select-time byte->FT stash was decoded for the pop treatment
     // this drop skips -- return the spans so they don't leak.
@@ -2437,6 +2441,8 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
           }
           if (ft_drop == 1u) s->n_cps_dropped_perm_subsumed++;
           else               s->n_cps_dropped_pop_subsumed++;
+          atp_hx_outcome(s, ft_drop == 1u ? ATP_HX_OUT_PERMSUB
+                                          : ATP_HX_OUT_SUBSUMED);
           g_ft_region = 0u;
           if (g_atp_phase_enabled)
             g_atp_phase_us_pop_normalize += atp_now_us() - _ph_pop_t0;
@@ -2493,6 +2499,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
                   g_ft_region = 0u;
                   if (g_atp_phase_enabled)
                     g_atp_phase_us_pop_normalize += atp_now_us() - _ph_pop_t0;
+                  atp_hx_outcome(s, ATP_HX_OUT_REFUSED);
                   s->step++;
                   return ATP_RUNNING;
                 }
@@ -2640,6 +2647,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   }
   if (pop_joined) {
     ATP_POPV("JOINED");
+    atp_hx_outcome(s, ATP_HX_OUT_JOINED);
     // Trivially joined: this CP adds no rule.  Drop the NORM_STEP
     // entries just recorded for it (rewind the trace to trace_mark) so
     // no surviving trace entry references a Term past hcp_norm, then
@@ -2682,6 +2690,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     if (pop_sj_joined) {
       s->n_cps_dropped_simpler_join++;
       ATP_POPV("SJJOINED");
+      atp_hx_outcome(s, ATP_HX_OUT_SJOINED);
       if (s->record_norm_steps) {
         s->n_trace = trace_mark;
       }
@@ -2711,6 +2720,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
 #endif
       atp_cp_perm_subsumed(l, r)) {
     ATP_POPV("PERMSUB");
+    atp_hx_outcome(s, ATP_HX_OUT_PERMSUB);
     s->n_cps_dropped_perm_subsumed++;
     if (s->record_norm_steps) {
       s->n_trace = trace_mark;
@@ -2733,6 +2743,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
       atp_compare(s, l, r) == KBO_UN &&
       atp_pop_eq_subsumed(s, l, r)) {
     ATP_POPV("SUBSUMED");
+    atp_hx_outcome(s, ATP_HX_OUT_SUBSUMED);
     s->n_cps_dropped_pop_subsumed++;
     if (s->record_norm_steps) {
       s->n_trace = trace_mark;
@@ -2770,6 +2781,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
 #endif
     if (atp_pop_gj_joinable(s, gj_l, gj_r)) {
       ATP_POPV("POPGJ");
+      atp_hx_outcome(s, ATP_HX_OUT_POPGJ);
       s->n_cps_dropped_pop_gj++;
       if (s->record_norm_steps) {
         s->n_trace = trace_mark;
@@ -2797,10 +2809,12 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   if (added.count == 0) {
     s->rj_hold = 0u;
     ATP_POPV("REFUSED");
+    atp_hx_outcome(s, ATP_HX_OUT_REFUSED);
     s->step++;
     return ATP_RUNNING;
   }
   ATP_POPV("KEPT");
+  atp_hx_outcome(s, ATP_HX_OUT_KEPT);
   // This CP became a rule/equation -> restore its (leaned) TRACE_CP terms.
   // Store the RAW overlap pair (cp_lhs/cp_rhs, unpacked from cp_packed at
   // selection -- the exact content the non-lean push planted in children

@@ -684,6 +684,7 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
     }
   }
   atp_cp_form_trace(seq, cp_nodes, lhs, rhs);
+  atp_hx_push(s, i, packed, cp_nodes);
   // All comparator keys for row i are final -- stamp the packed node
   // (refresh invariant) before the sift compares against it.
   atp_cp_heap_set(s, i, i);
@@ -1133,6 +1134,7 @@ static void atp_cp_heap_push(AtpState *s, Term lhs, Term rhs, u32 trace,
     }
   }
 #endif
+  if (atp_hx_on(s)) g_hx.raw_pending = raw_untreated;
   atp_cp_heap_insert_packed(s, packed, score_nodes, lhs, rhs, trace,
                             is_ultimate, score_lhs, g_cp_push_kind);
   g_acp_fuse.valid = 0u;   // the fused weigh state is consume-once
@@ -1261,6 +1263,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   atp_cp_heap_set(s, i, i);
   s->n_cps++;
   s->n_cps_implicit++;
+  atp_hx_push(s, i, NULL, cp_nodes);
   if (atp_kdheap_on()) atp_kdh_insert(s, i);
   else atp_cp_sift_up(s, i);
   return 1u;
@@ -1562,6 +1565,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
     u32 vv = s->cp_heap[i].row;
     if (s->cp_heap[i].pri <= horizon) continue;
     if (two && atp_lrs_age_key(s, i, vv) <= s->lrs_age_horizon) continue;
+    atp_hx_del(s, s->cp_seq[vv], ATP_HX_DEL_LRS);
     // Vampire LRS discards the clause from passive, which also takes it
     // out of the Otter simplification set (Otter::onPassiveRemoved).
     if (s->use_otter) atp_otter_popkill(s, s->cp_seq[vv]);
@@ -1971,6 +1975,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     }
   }
   if (!orphan) s->cp_select_count++;
+  else atp_hx_del(s, s->cp_seq[v], ATP_HX_DEL_ORPHAN_POP);
 
   // Unpack the chosen CP from its byte string into two fresh heap
   // Terms for the caller to normalize.  An implicit slot has no byte
@@ -2003,6 +2008,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
                        s->cp_raw != NULL) ? s->cp_raw[v] : NULL;
     if (raw_b != NULL) acp_unpack(raw_b, lhs_out, rhs_out);
     else               atp_cp_slot_read(s, v, lhs_out, rhs_out);
+    atp_hx_select(s, v);
     // ifeq guard-DECIDING telemetry: did the CP the main loop actually
     // picked decide a live guard (see atp_ifeq_decide_hit)?  Counts
     // distinct SELECTIONS, complementing g_ifeq_decide_n_hit's scoring-

@@ -24,9 +24,10 @@ def header_fields(path):
     spc = status = None
     with open(path, "r", errors="replace") as f:
         for i, line in enumerate(f):
-            if i > 200 or not line.startswith("%"):
-                if i > 5 and not line.startswith("%"):
-                    break
+            if i > 400 or line.startswith(("cnf(", "fof(", "include(",
+                                           "tff(", "thf(")):
+                break
+            if not line.startswith("%"):
                 continue
             m = re.match(r"%\s*SPC\s*:\s*(\S+)", line)
             if m:

@@ -39,6 +39,7 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
       }
     }
     if (orphan) {
+      atp_hx_del(s, s->cp_seq[vv], ATP_HX_DEL_ORPHAN_SWEEP);
       // Drop the orphan -- free its byte string (the queue owns it).
       // free(NULL) no-op for deferred slots; their tag bit drops too.
       free(s->cp_packed[vv]);
@@ -295,6 +296,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
     if (s->use_orphan_murder &&
         (atp_cp_is_orphan(s, s->cp_trace[vv]) || atp_cp_uid_orphan(s, vv))) {
       atp_cp_watch_seq(s->cp_seq[vv], "IR-DROP orphan");
+      atp_hx_del(s, s->cp_seq[vv], ATP_HX_DEL_IR_ORPHAN);
       s->n_cps_dropped_orphan++;
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
@@ -336,6 +338,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
     // Gated on `use_rule_subsume_drop`, matching the same fast-path's
     // push-time wiring (WL Method options).
     if (s->use_rule_subsume_drop && atp_cp_rule_subsumed(s, ol, orr)) {
+      atp_hx_del(s, s->cp_seq[vv], ATP_HX_DEL_IR_SUBSUMED);
       s->n_cps_dropped_rule_subsumed++;
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
@@ -495,6 +498,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       // packed to free; the tag bit drops and the trace entry stays (it
       // is a GC root and may back other diagnostics).
       atp_cp_watch_seq(s->cp_seq[vv], "IR-DROP joinable");
+      atp_hx_del(s, s->cp_seq[vv], ATP_HX_DEL_IR_JOINED);
       s->n_cps_dropped_joinable++;
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
