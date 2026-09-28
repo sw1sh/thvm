@@ -36,17 +36,34 @@ fielded 5.0.1 at 370. Measuring a freshly-tuned system against last year's
 frozen scores is not a prediction, it is a comparison against systems that no
 longer exist.
 
-**We tuned on the test set.** We swept and dissected CASC-30's exact 300 UEQ
-problems for weeks, flipping specific named problems. J13 drew 400 freshly
-selected problems. 88% on the set we tuned against became 67% on fresh
-selection, a roughly 21-point generalization gap. That is the textbook
-signature of benchmark overfitting, and every "flip" we banked against the
-CASC-30 residual was partly fitting noise.
+**We tuned on the test set, and it shows on the problems we did not tune
+on.** We swept and dissected CASC-30's exact 300 UEQ problems for weeks,
+flipping specific named problems. J13 was not a fresh selection: 232 of its
+400 UEQ problems were in CASC-30's 300 and 59 more in CASC-28's (corrected
+2026-09-29; this section first said "400 freshly selected problems"). Solved
+counts per subset, from the official results table:
+
+| J13 subset | n | Vampire 5.0.1 | Vampire 5.0 | Twee 2.7 | FindProof | CSI_PP | E 3.5.1 | Prover9 2026-6A |
+|---|---|---|---|---|---|---|---|---|
+| in CASC-30 | 232 | 220 | 192 | 175 | **176** (3rd) | 154 | 152 | 120 |
+| in CASC-28 only | 59 | 54 | 53 | 51 | **41** (5th) | 42 | 41 | 36 |
+| in neither | 109 | 96 | 77 | 60 | **52** (6th, tied) | 62 | 62 | 52 |
+| all | 400 | 370 | 322 | 286 | **269** (4th) | 258 | 255 | 208 |
+
+The two gaps separate cleanly. On the problems we tuned against we tied Twee
+(176 vs 175). The whole 18-problem deficit to Twee sits in the other 168,
+where E and CSI_PP also beat us: that is the overfitting. Separately, the
+tuned-on set measured 266/300 (89%) before the competition at 240s wall,
+without `--proof`, on pods; its 232 problems that recurred in J13 scored 176
+(76%) under competition conditions. That drop is the deployment gap, not
+overfitting.
 
 **The hardware caveat was real and under-weighted.** We documented that the
 measurement pods ran 16 slices at full speed while StarExec runs 16 threads on
 8 physical cores, and called 265 "a slight upper bound". It was optimistic by
-more than "slight".
+more than "slight". The measurement protocol since then: 180s wall, `--proof`,
+a Solutions pass under strict CheckProof, and hardware calibration against the
+submission build's official times.
 
 ## 2. FOF: over-predicted a division we knew was weak
 
