@@ -371,30 +371,34 @@ static Term expander_pm_range(Term t, void *user) {
 // For each axis ID in the REDUCE's axes[], if any UNROLL in the src
 // subtree carries that axis, the axis was unrolled -- drop it from
 // REDUCE.axes[] and add it to a CONTRACT around src.
-//
-// Recursive walk to find UNROLL'd axes nested in src.
 
-static int term_subtree_has_unroll_axis(Term t, u32 axis_id, u32 depth) {
-  if (depth > 256) return 0;
-  if (term_tag(t) != TAG_UOP) return 0;
-  u32 op = term_ext(t);
-  if (op == UOP_UNROLL) {
-    u32 na = uop_unroll_n_args(t);
-    for (u32 i = 0; i < na; i++) {
-      if (uop_unroll_axis_id(t, i) == axis_id) return 1;
+// Factor of the first UNROLL under `src` that carries `axis_id`, or 0.
+// Searches the whole subtree at any depth: a missed UNROLL would leave its
+// axis in REDUCE.axes as a loop.  Does not descend through an UNROLL (its
+// inner is already expanded and no longer names the raw axis).
+static u32 expander_unroll_factor(Term src, u32 axis_id) {
+  UOpWalk w = {0};
+  uop_walk_push(&w, src);
+  u32  factor = 0;
+  Term n;
+  while (factor == 0 && (n = uop_walk_pop(&w)) != 0) {
+    if (term_ext(n) == UOP_UNROLL) {
+      u32 na = uop_unroll_n_args(n);
+      for (u32 j = 0; j < na && factor == 0; j++) {
+        if (uop_unroll_axis_id(n, j) == axis_id) {
+          factor = uop_unroll_factor(n, j);
+        }
+      }
+      continue;
     }
-    // Don't descend through UNROLL -- its inner has already been
-    // expanded, won't reference the raw range axis_id.
-    return 0;
-  }
-  u8 ar = uop_arity((u8)op);
-  u64 loc = term_val(t);
-  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
-    if (term_subtree_has_unroll_axis(heap_read(loc + i), axis_id, depth + 1)) {
-      return 1;
+    u8  ar  = uop_arity((u8)term_ext(n));
+    u64 loc = term_val(n);
+    for (u8 j = 0; j < ar && j < MAX_UOP_SRC; j++) {
+      uop_walk_push(&w, heap_read(loc + j));
     }
   }
-  return 0;
+  uop_walk_free(&w);
+  return factor;
 }
 
 static Term expander_fix_reduce_unroll(Term t, void *user) {
@@ -410,36 +414,8 @@ static Term expander_fix_reduce_unroll(Term t, void *user) {
   u32 ur_factors[MAX_DIM];
   u32 n_ur = 0;
   for (u32 i = 0; i < n_axes; i++) {
-    u32 ax = uop_reduce_axis(t, i);
-    // Find this axis's UNROLL factor by walking src.
-    // Use a search helper that returns the factor when found.
-    // (term_subtree_has_unroll_axis just bool; we need factor too.)
-    // Inline a tiny walker: BFS over src subtree.
-    u32 factor = 0;
-    Term stack[64];
-    u32 sp = 0;
-    stack[sp++] = src;
-    while (sp > 0 && factor == 0) {
-      Term cur = stack[--sp];
-      if (term_tag(cur) != TAG_UOP) continue;
-      u32 cop = term_ext(cur);
-      if (cop == UOP_UNROLL) {
-        u32 na = uop_unroll_n_args(cur);
-        for (u32 j = 0; j < na; j++) {
-          if (uop_unroll_axis_id(cur, j) == ax) {
-            factor = uop_unroll_factor(cur, j);
-            break;
-          }
-        }
-        // Don't descend.
-        continue;
-      }
-      u8 ar = uop_arity((u8)cop);
-      u64 cloc = term_val(cur);
-      for (u8 j = 0; j < ar && j < MAX_UOP_SRC && sp < 64; j++) {
-        stack[sp++] = heap_read(cloc + j);
-      }
-    }
+    u32 ax     = uop_reduce_axis(t, i);
+    u32 factor = expander_unroll_factor(src, ax);
     if (factor != 0) {
       ur_axes[n_ur] = ax;
       ur_factors[n_ur] = factor;

@@ -37,7 +37,9 @@ class TestDeepChainDepth(unittest.TestCase):
         self.assertAlmostEqual(got, ref, delta=max(1e-2, abs(ref) * 1e-5))
 
     def test_depth_past_old_guard(self):
-        for depth in (300, 500):
+        # 1000 and 2000 also cross the UOp rewrite passes' old 256 cap and
+        # stress their recursion budget (uop/graph_rewrite.c)
+        for depth in (300, 500, 1000, 2000):
             with self.subTest(depth=depth):
                 got, ref = self._chain(depth, 8)
                 self.assertAlmostEqual(got, ref, delta=max(1e-2, abs(ref) * 1e-5))

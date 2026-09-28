@@ -31,26 +31,84 @@
 // rule returns 0 and the caller keeps the literal reduce loop, so this is
 // a pure narrowing optimisation with no correctness exposure.
 
-// True iff `t`'s DAG references a free UOP_RANGE leaf with axis_id == aid.
-// Stops at nested UOP_REDUCE that bind `aid` (none here, but faithful).
-static int rc_uses_axis(Term t, u32 aid, u32 depth) {
-  if (depth > 256) return 0;
-  if (term_tag(t) != TAG_UOP) return 0;
-  u32 op = term_ext(t);
-  u64 loc = term_val(t);
-  if (op == UOP_RANGE) return (u32)term_val(heap_read(loc + 0)) == aid;
-  if (op == UOP_BUFFER || op == UOP_BUFFERIZE || op == UOP_KERNEL) return 0;
-  if (op == UOP_REDUCE) {
-    Term tred = term_new(0, TAG_UOP, UOP_REDUCE, loc);
-    u32 n_axes = uop_reduce_n_axes(tred);
-    for (u32 i = 0; i < n_axes; i++)
-      if (uop_reduce_axis(tred, i) == aid) return 0;   // bound by inner reduce
-    return rc_uses_axis(uop_reduce_src(tred), aid, depth + 1);
+static int rc_reduce_binds(Term red, u32 aid) {
+  u32 n_axes = uop_reduce_n_axes(red);
+  for (u32 i = 0; i < n_axes; i++) {
+    if (uop_reduce_axis(red, i) == aid) {
+      return 1;
+    }
   }
-  u8 ar = uop_arity(op);
-  for (u8 i = 0; i < ar; i++)
-    if (rc_uses_axis(heap_read(loc + i), aid, depth + 1)) return 1;
   return 0;
+}
+
+// 1 when `n` is RANGE(aid); otherwise queues the sources a free RANGE(aid)
+// could sit under.  A REDUCE that binds aid closes it for its body.
+static int rc_axis_visit(UOpWalk *w, Term n, u32 aid) {
+  u64 loc = term_val(n);
+  switch (term_ext(n)) {
+    case UOP_RANGE:
+      return (u32)term_val(heap_read(loc + 0)) == aid;
+    case UOP_BUFFER: case UOP_BUFFERIZE: case UOP_KERNEL:
+      return 0;
+    case UOP_REDUCE:
+      if (rc_reduce_binds(n, aid)) {
+        return 0;
+      }
+      break;
+    default:
+      break;
+  }
+  u8 ar = uop_arity(term_ext(n));
+  for (u8 i = 0; i < ar; i++) {
+    uop_walk_push(w, heap_read(loc + i));
+  }
+  return 0;
+}
+
+// True iff `t`'s DAG references a free UOP_RANGE leaf with axis_id == aid.
+// Exact at any depth: a false "unused" would let rule (2) fold a `val`
+// that varies with the reduce axis.  tinygrad's no_range answers the same
+// question over the full backward_slice (codegen/simplify.py:79).
+static int rc_uses_axis(Term t, u32 aid) {
+  UOpWalk w = {0};
+  uop_walk_push(&w, t);
+  int  found = 0;
+  Term n;
+  while (!found && (n = uop_walk_pop(&w)) != 0) {
+    found = rc_axis_visit(&w, n, aid);
+  }
+  uop_walk_free(&w);
+  return found;
+}
+
+// First RANGE(aid) under `body`, bound or free (only its extent is read);
+// 0 when there is none.
+static Term rc_find_range(Term body, u32 aid) {
+  UOpWalk w = {0};
+  uop_walk_push(&w, body);
+  Term found = 0;
+  Term n;
+  while (found == 0 && (n = uop_walk_pop(&w)) != 0) {
+    u64 loc = term_val(n);
+    switch (term_ext(n)) {
+      case UOP_RANGE:
+        if ((u32)term_val(heap_read(loc + 0)) == aid) {
+          found = n;
+        }
+        break;
+      case UOP_BUFFER: case UOP_BUFFERIZE: case UOP_KERNEL:
+        break;
+      default: {
+        u8 ar = uop_arity(term_ext(n));
+        for (u8 i = 0; i < ar; i++) {
+          uop_walk_push(&w, heap_read(loc + i));
+        }
+        break;
+      }
+    }
+  }
+  uop_walk_free(&w);
+  return found;
 }
 
 // Read a UOP_CONST integer payload.  Returns 1 + sets *out on success.
@@ -80,8 +138,8 @@ static int rc_split_affine(Term t, u32 aid, Term *rng, Term *rest) {
   if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_IADD) {
     Term a = heap_read(term_val(t) + 0);
     Term b = heap_read(term_val(t) + 1);
-    int a_has = rc_uses_axis(a, aid, 0);
-    int b_has = rc_uses_axis(b, aid, 0);
+    int a_has = rc_uses_axis(a, aid);
+    int b_has = rc_uses_axis(b, aid);
     if (a_has && !b_has) {
       Term ar, arest;
       if (!rc_split_affine(a, aid, &ar, &arest)) return 0;
@@ -124,23 +182,7 @@ static Term rc_collapse_one(Term red) {
   // Locate the reduce axis's RANGE leaf to read its static extent.  The
   // axis_id is the numeric reduce axis; scan the body for RANGE(aid).
   // (Used only for the extent; the affine split re-finds it.)
-  Term range_leaf = 0;
-  {
-    // Small DFS for the first RANGE(aid).
-    Term stack[256]; u32 sp = 0; stack[sp++] = body;
-    while (sp > 0 && range_leaf == 0) {
-      Term t = stack[--sp];
-      if (term_tag(t) != TAG_UOP) continue;
-      u32 op = term_ext(t); u64 loc = term_val(t);
-      if (op == UOP_RANGE) {
-        if ((u32)term_val(heap_read(loc + 0)) == aid) range_leaf = t;
-        continue;
-      }
-      if (op == UOP_BUFFER || op == UOP_BUFFERIZE || op == UOP_KERNEL) continue;
-      u8 ar = uop_arity(op);
-      for (u8 i = 0; i < ar && sp < 256; i++) stack[sp++] = heap_read(loc + i);
-    }
-  }
+  Term range_leaf = rc_find_range(body, aid);
 
   // Rule (1): reduce_unparented -- body never references aid.
   if (range_leaf == 0) {
@@ -159,7 +201,7 @@ static Term rc_collapse_one(Term red) {
   Term then_v = heap_read(bloc + 1);
   Term else_v = heap_read(bloc + 2);
   // `val` must NOT reference the reduce axis.
-  if (rc_uses_axis(then_v, aid, 0)) return 0;
+  if (rc_uses_axis(then_v, aid)) return 0;
   // else must be 0 / INVALID (both render as 0 and are the SUM identity).
   int else_zero = 0;
   if (term_tag(else_v) == TAG_UOP) {
@@ -171,8 +213,8 @@ static Term rc_collapse_one(Term red) {
   if (term_tag(cond) != TAG_UOP || term_ext(cond) != UOP_ILT) return 0;
   Term lhs = heap_read(term_val(cond) + 0);
   Term rhs = heap_read(term_val(cond) + 1);
-  int lhs_has = rc_uses_axis(lhs, aid, 0);
-  int rhs_has = rc_uses_axis(rhs, aid, 0);
+  int lhs_has = rc_uses_axis(lhs, aid);
+  int rhs_has = rc_uses_axis(rhs, aid);
   if (lhs_has == rhs_has) return 0;                    // need exactly one side
 
   // Count of r in [0, ext) satisfying the guard, times `then_v`.

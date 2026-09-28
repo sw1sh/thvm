@@ -7,9 +7,28 @@
 // the first goal is to provide one reusable home for symbolic,
 // movement, and schedule-IR rewrite rules as they are ported.
 
-#define UOP_GRAPH_REWRITE_STATS_CAP    128
-#define UOP_GRAPH_REWRITE_MAX_RESTARTS 32
-#define UOP_GRAPH_REWRITE_MEMO_MAX     (1u << 20)
+#define UOP_GRAPH_REWRITE_STATS_CAP 128
+#define UOP_GRAPH_REWRITE_MEMO_MAX  (1u << 20)
+
+// Past either budget the pass fails through thvm_fatal with a diagnostic,
+// as tinygrad raises RuntimeError (uop/ops.py:1804 stack limit, :1815
+// fixed_point_rewrite cycle): stopping early would return a graph rewritten
+// only above the cut.  thvm_fatal returns an armed LibraryLink entry to WL
+// as an error instead of killing the kernel.
+//
+// MAX_DEPTH bounds structural recursion (child and STACK-lane descent), the
+// only part of the pass that grows the C stack.  Rewrites run on the calling
+// thread, at least the 8 MB main-thread stack (no render runs on a worker
+// pool).  A level costs one 176-byte frame on arm64 at -O2 (plus 128 bytes
+// at a STACK), so the budget stays under 1.5 MB in practice and 2.5 MB at
+// worst, while sitting 4x above the deepest chain tested end to end (2000
+// levels in py/tests/test_deep_chain_depth.py).
+//
+// MAX_CHAIN bounds successive rule hits on one node.  A chain runs
+// iteratively and costs no stack; a node that reappears on its own chain
+// aborts at once.
+#define UOP_GRAPH_REWRITE_MAX_DEPTH 8192u
+#define UOP_GRAPH_REWRITE_MAX_CHAIN 1024u
 
 typedef struct {
   char const *name;
@@ -21,13 +40,27 @@ typedef struct {
   Term value;
 } UOpGraphRewriteMemoSlot;
 
+// One rule hit on an open chain: the node the rule fired on, and the
+// replacement to memoize once the chain settles (0 when it was already
+// memoized or is not a UOp node).
 typedef struct {
-  UOpGraphRewriteMemoSlot *memo;
-  u32                      memo_cap;
-  u32                      memo_used;
+  Term node;
+  Term key;
+  u32  rule;
+} UOpGraphRewriteStep;
+
+typedef struct {
+  UOpGraphRewriteMemoSlot   *memo;
+  u32                        memo_cap;
+  u32                        memo_used;
   UOpGraphRewriteRule const *rules;
-  u32                      n_rules;
-  void                    *user;
+  u32                        n_rules;
+  void                      *user;
+  UOpGraphRewriteStep       *chain;      // every open chain, innermost last
+  u32                        chain_len;
+  u32                        chain_cap;
+  u32                        max_depth;  // high-water marks, DUMP_UOP_REWRITE
+  u32                        max_chain;
 } UOpGraphRewriteState;
 
 static UOpGraphRewriteStat UOP_GRAPH_REWRITE_STATS[UOP_GRAPH_REWRITE_STATS_CAP];
@@ -129,6 +162,57 @@ static void uop_graph_rewrite_memo_insert(UOpGraphRewriteState *st,
   }
 }
 
+__attribute__((noinline, noreturn))
+static void uop_graph_rebuild_fail(Term t, char const *why) {
+  char msg[160];
+  snprintf(msg, sizeof(msg), "uop_graph_rewrite: cannot rebuild op %u: %s",
+           (u32)term_ext(t), why);
+  thvm_fatal(msg);
+}
+
+static u32 uop_graph_rebuild_ndim(Term t) {
+  u32 ndim = (u32)term_val(heap_read(term_val(t) + 1));
+  if (ndim > MAX_DIM) {
+    uop_graph_rebuild_fail(t, "ndim exceeds MAX_DIM");
+  }
+  return ndim;
+}
+
+// `small` when `n` values fit in it, else a heap buffer the caller frees.
+static u32 *uop_graph_rebuild_buf(Term t, u32 *small, u32 small_n, u32 n) {
+  if (n <= small_n) {
+    return small;
+  }
+  u32 *buf = (u32 *)malloc((size_t)n * sizeof(u32));
+  if (buf == NULL) {
+    uop_graph_rebuild_fail(t, "out of memory");
+  }
+  return buf;
+}
+
+// UNROLL / CONTRACT: [src, NUM(n), (NUM(axis), NUM(factor)) * n].
+static Term uop_graph_rebuild_axis_args(Term t, Term src) {
+  u64  loc = term_val(t);
+  u32  n   = (u32)term_val(heap_read(loc + 1));
+  u32  small[16];
+  u32 *buf  = uop_graph_rebuild_buf(t, small, 16, 2 * n);
+  u32 *axes = buf;
+  u32 *facs = buf + n;
+  for (u32 i = 0; i < n; i++) {
+    axes[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 0));
+    facs[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 1));
+  }
+  Term out = term_ext(t) == UOP_UNROLL ? uop_unroll(src, n, axes, facs)
+                                       : uop_contract(src, n, axes, facs);
+  if (buf != small) {
+    free(buf);
+  }
+  return out;
+}
+
+// Kept out of line: its argument buffers must not land in the recursive
+// frame of uop_graph_rewrite_rec.
+__attribute__((noinline))
 static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
   u8  op  = term_ext(t);
   u64 loc = term_val(t);
@@ -152,10 +236,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     }
 
     case UOP_RESHAPE: {
-      u32 ndim = (u32)term_val(heap_read(loc + 1));
-      if (ndim > MAX_DIM) {
-        return t;
-      }
+      u32 ndim = uop_graph_rebuild_ndim(t);
       u32 dims[MAX_DIM];
       for (u32 i = 0; i < ndim; i++) {
         dims[i] = (u32)term_val(heap_read(loc + 2 + i));
@@ -164,10 +245,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     }
 
     case UOP_PERMUTE: {
-      u32 ndim = (u32)term_val(heap_read(loc + 1));
-      if (ndim > MAX_DIM) {
-        return t;
-      }
+      u32 ndim = uop_graph_rebuild_ndim(t);
       u32 perm[MAX_DIM];
       for (u32 i = 0; i < ndim; i++) {
         perm[i] = (u32)term_val(heap_read(loc + 2 + i));
@@ -176,10 +254,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     }
 
     case UOP_EXPAND: {
-      u32 ndim = (u32)term_val(heap_read(loc + 1));
-      if (ndim > MAX_DIM) {
-        return t;
-      }
+      u32 ndim = uop_graph_rebuild_ndim(t);
       u32 dims[MAX_DIM];
       for (u32 i = 0; i < ndim; i++) {
         dims[i] = (u32)term_val(heap_read(loc + 2 + i));
@@ -188,10 +263,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     }
 
     case UOP_PAD: {
-      u32 ndim = (u32)term_val(heap_read(loc + 1));
-      if (ndim > MAX_DIM) {
-        return t;
-      }
+      u32 ndim = uop_graph_rebuild_ndim(t);
       u32 widths[2 * MAX_DIM];
       for (u32 i = 0; i < 2 * ndim; i++) {
         widths[i] = (u32)term_val(heap_read(loc + 2 + i));
@@ -200,10 +272,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     }
 
     case UOP_SHRINK: {
-      u32 ndim = (u32)term_val(heap_read(loc + 1));
-      if (ndim > MAX_DIM) {
-        return t;
-      }
+      u32 ndim = uop_graph_rebuild_ndim(t);
       u32 bounds[2 * MAX_DIM];
       for (u32 i = 0; i < 2 * ndim; i++) {
         bounds[i] = (u32)term_val(heap_read(loc + 2 + i));
@@ -276,128 +345,227 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     // Arity 1: only src[0] is a recursable child.  The tail NUM cells
     // (n_args + axis_id/factor pairs, or n_idx + indices) describe the
     // op's static arg shape and don't change under graph rewrite.
-    case UOP_UNROLL: {
-      u32 n = (u32)term_val(heap_read(loc + 1));
-      if (n > 8) return t;
-      u32 axes[8];
-      u32 facs[8];
-      for (u32 i = 0; i < n; i++) {
-        axes[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 0));
-        facs[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 1));
-      }
-      return uop_unroll(srcs[0], n, axes, facs);
-    }
-    case UOP_CONTRACT: {
-      u32 n = (u32)term_val(heap_read(loc + 1));
-      if (n > 8) return t;
-      u32 axes[8];
-      u32 facs[8];
-      for (u32 i = 0; i < n; i++) {
-        axes[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 0));
-        facs[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 1));
-      }
-      return uop_contract(srcs[0], n, axes, facs);
-    }
+    case UOP_UNROLL:
+    case UOP_CONTRACT:
+      return uop_graph_rebuild_axis_args(t, srcs[0]);
+
     case UOP_GEP: {
-      u32 n = (u32)term_val(heap_read(loc + 1));
-      if (n > 256) return t;
-      u32 idxs[256];
+      u32  n = (u32)term_val(heap_read(loc + 1));
+      u32  small[64];
+      u32 *idxs = uop_graph_rebuild_buf(t, small, 64, n);
       for (u32 i = 0; i < n; i++) {
         idxs[i] = (u32)term_val(heap_read(loc + 2 + i));
       }
-      return uop_gep(srcs[0], n, idxs);
+      Term out = uop_gep(srcs[0], n, idxs);
+      if (idxs != small) {
+        free(idxs);
+      }
+      return out;
     }
     // UOP_VCONST / UOP_PLACEHOLDER: arity 0, no rebuild path needed.
-    // UOP_STACK / UOP_END: variadic Term payload, arity-0 in the
-    // uop_meta table; nodes are constructed at devectorizer-pass output
-    // and rewrites do not need to descend into them.  If a future pass
-    // needs to recurse, add the rebuild explicitly here.
+    // UOP_STACK: arity 0 here; uop_graph_rewrite_stack_lanes rewrites and
+    // rebuilds its variadic lanes.  UOP_END: arity 0, lanes are RANGEs.
 
     default:
       return t;
   }
 }
 
-static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st,
-                                  Term t,
-                                  u32 depth) {
-  if (depth > 256) {
-    return t;
-  }
-  Term resolved = term_resolve(t);
-  if (term_tag(resolved) != TAG_UOP) {
-    return resolved;
-  }
-  if (term_ext(resolved) == UOP_KERNEL) {
-    return resolved;
-  }
+static char const *uop_graph_rewrite_rule_name(UOpGraphRewriteState const *st,
+                                               u32 rule) {
+  char const *name = st->rules[rule].name;
+  return name != NULL ? name : "?";
+}
 
-  Term memo_hit = 0;
-  if (uop_graph_rewrite_memo_lookup(st, resolved, &memo_hit)) {
-    return memo_hit;
+// Prints the rule table and the newest steps of the open chains from `base`
+// up, then fails with `why` and the op of `node`.
+__attribute__((noinline, noreturn))
+static void uop_graph_rewrite_fail(UOpGraphRewriteState const *st,
+                                   char const *why, Term node, u32 base) {
+  fprintf(stderr, "uop_graph_rewrite: rules:");
+  for (u32 i = 0; i < st->n_rules; i++) {
+    fprintf(stderr, " %s", uop_graph_rewrite_rule_name(st, i));
   }
+  fprintf(stderr, "\n");
+  u32 from = st->chain_len - base > 16 ? st->chain_len - 16 : base;
+  if (from < st->chain_len) {
+    fprintf(stderr, "uop_graph_rewrite: chain (%u hits, newest %u):\n",
+            st->chain_len - base, st->chain_len - from);
+  }
+  for (u32 k = from; k < st->chain_len; k++) {
+    UOpGraphRewriteStep const *s = &st->chain[k];
+    fprintf(stderr, "    op %u -> %s\n", (u32)term_ext(s->node),
+            uop_graph_rewrite_rule_name(st, s->rule));
+  }
+  char msg[192];
+  snprintf(msg, sizeof(msg), "uop_graph_rewrite: %s at op %u", why,
+           (u32)term_ext(node));
+  thvm_fatal(msg);
+}
 
-  u8  op  = term_ext(resolved);
-  u8  ar  = uop_arity(op);
-  u64 loc = term_val(resolved);
+static void uop_graph_rewrite_chain_push(UOpGraphRewriteState *st, Term node,
+                                         u32 rule) {
+  if (st->chain_len == st->chain_cap) {
+    u32 cap = st->chain_cap != 0 ? st->chain_cap * 2 : 64;
+    UOpGraphRewriteStep *grown = (UOpGraphRewriteStep *)realloc(
+        st->chain, (size_t)cap * sizeof(UOpGraphRewriteStep));
+    if (grown == NULL) {
+      uop_graph_rewrite_fail(st, "out of memory growing the chain", node,
+                             st->chain_len);
+    }
+    st->chain     = grown;
+    st->chain_cap = cap;
+  }
+  st->chain[st->chain_len].node = node;
+  st->chain[st->chain_len].key  = 0;
+  st->chain[st->chain_len].rule = rule;
+  st->chain_len++;
+}
+
+// First rule that rewrites `t`: its index, with the replacement in *out.
+// n_rules when none fires.
+static u32 uop_graph_rewrite_match(UOpGraphRewriteState *st, Term t,
+                                   Term *out) {
+  for (u32 i = 0; i < st->n_rules; i++) {
+    if (st->rules[i].apply == NULL) {
+      continue;
+    }
+    Term next = st->rules[i].apply(t, st->user);
+    if (next != 0 && next != t) {
+      *out = next;
+      return i;
+    }
+  }
+  return st->n_rules;
+}
+
+static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st, Term t, u32 depth);
+
+// Variadic STACK: uop_arity reports 0, so the fixed-arity descent skips the
+// lanes.  Rewrites each lane and rebuilds through the canonical uop_stack
+// constructor (hash-conses, collapses singletons) when any lane changed.
+// Out of line so the lane buffer never sits in the recursive frame.
+__attribute__((noinline))
+static Term uop_graph_rewrite_stack_lanes(UOpGraphRewriteState *st,
+                                          Term stack, u32 depth) {
+  u32   n     = uop_stack_n(stack);
+  Term *lanes = NULL;
+  for (u32 i = 0; i < n; i++) {
+    Term old_l = uop_stack_src(stack, i);
+    Term new_l = uop_graph_rewrite_rec(st, old_l, depth);
+    if (new_l != old_l && lanes == NULL) {
+      lanes = (Term *)malloc((size_t)n * sizeof(Term));
+      if (lanes == NULL) {
+        uop_graph_rewrite_fail(st, "out of memory rebuilding a STACK", stack,
+                               st->chain_len);
+      }
+      for (u32 j = 0; j < i; j++) {
+        lanes[j] = uop_stack_src(stack, j);
+      }
+    }
+    if (lanes != NULL) {
+      lanes[i] = new_l;
+    }
+  }
+  if (lanes == NULL) {
+    return stack;
+  }
+  Term out = uop_stack(n, lanes);
+  free(lanes);
+  return out;
+}
+
+// Rewrites the sources of UOp node `t` at `depth` and rebuilds it when any
+// changed.
+static Term uop_graph_rewrite_descend(UOpGraphRewriteState *st, Term t,
+                                      u32 depth) {
+  u8   op  = term_ext(t);
+  u8   ar  = uop_arity(op);
+  u64  loc = term_val(t);
   Term srcs[MAX_UOP_SRC] = {0};
-  int changed = 0;
+  int  changed = 0;
   for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
     Term old_child = heap_read(loc + i);
-    Term new_child = uop_graph_rewrite_rec(st, old_child, depth + 1);
+    Term new_child = uop_graph_rewrite_rec(st, old_child, depth);
     srcs[i] = new_child;
     if (new_child != old_child) {
       changed = 1;
     }
   }
-
-  Term cur = changed ? uop_graph_rebuild_with_srcs(resolved, srcs)
-                     : resolved;
-
-  // Variadic STACK descent.  uop_arity returns 0 for STACK so the
-  // generic fixed-arity walk above leaves the lanes untouched -- but
-  // the sym pass (and any future graph rewrite running over post-
-  // devectorize lanes) needs to recurse into each src and rebuild the
-  // STACK if any lane changed.  The lane reads + rebuild use the
-  // canonical uop_stack constructor, which hash-conses on the new
-  // lane Terms and collapses singletons.
+  Term cur = changed ? uop_graph_rebuild_with_srcs(t, srcs) : t;
   if (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_STACK) {
-    u32 n = uop_stack_n(cur);
-    if (n > 0 && n <= 256) {
-      Term lanes[256];
-      int stack_changed = 0;
-      for (u32 i = 0; i < n; i++) {
-        Term old_l = uop_stack_src(cur, i);
-        Term new_l = uop_graph_rewrite_rec(st, old_l, depth + 1);
-        lanes[i] = new_l;
-        if (new_l != old_l) stack_changed = 1;
+    cur = uop_graph_rewrite_stack_lanes(st, cur, depth);
+  }
+  return cur;
+}
+
+// Bottom-up: rewrite the sources, then apply the first matching rule and
+// fully rewrite its replacement, repeating until no rule fires.  The
+// replacement chain is a loop, not recursion, so `depth` counts structural
+// descent only.  Every node on a chain maps to the chain's fixpoint.
+static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st, Term t, u32 depth) {
+  Term resolved = term_resolve(t);
+  if (term_tag(resolved) != TAG_UOP || term_ext(resolved) == UOP_KERNEL) {
+    return resolved;
+  }
+  Term memo_hit = 0;
+  if (uop_graph_rewrite_memo_lookup(st, resolved, &memo_hit)) {
+    return memo_hit;
+  }
+  if (depth >= UOP_GRAPH_REWRITE_MAX_DEPTH) {
+    uop_graph_rewrite_fail(st, "structural depth budget exceeded (graph too "
+                           "deep, or a replacement contains the node being "
+                           "rewritten)", resolved, 0);
+  }
+  if (depth > st->max_depth) {
+    st->max_depth = depth;
+  }
+
+  Term cur   = resolved;
+  int  fresh = 1;                // cur's sources are not rewritten yet
+  u32  base  = st->chain_len;
+  for (;;) {
+    if (fresh) {
+      cur = uop_graph_rewrite_descend(st, cur, depth + 1);
+    }
+    for (u32 k = base; k < st->chain_len; k++) {
+      if (st->chain[k].node == cur) {
+        uop_graph_rewrite_fail(st, "rewrite chain revisits a node (infinite "
+                               "loop in fixed_point_rewrite)", resolved, base);
       }
-      if (stack_changed) {
-        cur = uop_stack(n, lanes);
-      }
+    }
+    Term next = 0;
+    u32  rule = uop_graph_rewrite_match(st, cur, &next);
+    if (rule == st->n_rules) {
+      break;
+    }
+    uop_graph_rewrite_stats_record(st->rules[rule].name, 1);
+    uop_graph_rewrite_chain_push(st, cur, rule);
+    if (st->chain_len - base > UOP_GRAPH_REWRITE_MAX_CHAIN) {
+      uop_graph_rewrite_fail(st, "rewrite chain budget exceeded (a rule "
+                             "keeps producing new nodes)", resolved, base);
+    }
+    Term key = term_resolve(next);
+    fresh = 0;
+    if (term_tag(key) != TAG_UOP || term_ext(key) == UOP_KERNEL) {
+      cur = key;
+    } else if (!uop_graph_rewrite_memo_lookup(st, key, &cur)) {
+      st->chain[st->chain_len - 1].key = key;
+      cur   = key;
+      fresh = 1;
     }
   }
 
-  for (u32 restart = 0; restart < UOP_GRAPH_REWRITE_MAX_RESTARTS; restart++) {
-    int hit = 0;
-    for (u32 i = 0; i < st->n_rules; i++) {
-      if (st->rules[i].apply == NULL) {
-        continue;
-      }
-      Term next = st->rules[i].apply(cur, st->user);
-      if (next == 0 || next == cur) {
-        continue;
-      }
-      uop_graph_rewrite_stats_record(st->rules[i].name, 1);
-      cur = uop_graph_rewrite_rec(st, next, depth + 1);
-      hit = 1;
-      break;
-    }
-    if (!hit) {
-      break;
+  u32 hits = st->chain_len - base;
+  if (hits > st->max_chain) {
+    st->max_chain = hits;
+  }
+  for (u32 k = base; k < st->chain_len; k++) {
+    if (st->chain[k].key != 0) {
+      uop_graph_rewrite_memo_insert(st, st->chain[k].key, cur);
     }
   }
-
+  st->chain_len = base;
   uop_graph_rewrite_memo_insert(st, resolved, cur);
   return cur;
 }
@@ -407,12 +575,13 @@ static int uop_graph_rewrite_dump_enabled(void) {
   return e != NULL && e[0] == '1';
 }
 
-static void uop_graph_rewrite_stats_dump(void) {
+static void uop_graph_rewrite_stats_dump(UOpGraphRewriteState const *st) {
   if (!uop_graph_rewrite_dump_enabled()) {
     return;
   }
-  fprintf(stderr, "uop_graph_rewrite_summary rules=%u\n",
-          UOP_GRAPH_REWRITE_STATS_LEN);
+  fprintf(stderr, "uop_graph_rewrite_summary rules=%u max_depth=%u "
+          "max_chain=%u\n", UOP_GRAPH_REWRITE_STATS_LEN, st->max_depth,
+          st->max_chain);
   for (u32 i = 0; i < UOP_GRAPH_REWRITE_STATS_LEN; i++) {
     fprintf(stderr, "  %s hits=%u\n",
             UOP_GRAPH_REWRITE_STATS[i].name,
@@ -442,7 +611,8 @@ fn Term uop_graph_rewrite(Term root,
 
   Term out = uop_graph_rewrite_rec(&st, root, 0);
   free(st.memo);
-  uop_graph_rewrite_stats_dump();
+  free(st.chain);
+  uop_graph_rewrite_stats_dump(&st);
   return out;
 }
 
@@ -460,10 +630,22 @@ fn Term uop_graph_rewrite(Term root,
 // existing COPY is left intact: it already names its src's device, so we don't
 // recurse into it (which would double-wrap its leaf).  Memoized by term so a
 // shared leaf yields one COPY (uploaded once).
+//
+// Past UOP_GRAPH_REWRITE_MAX_DEPTH it fails: returning the subtree unwrapped
+// would leave its leaves on the old device, a mixed-device graph.
+static void uop_to_device_leaves_check_depth(Term r, u32 depth) {
+  if (depth >= UOP_GRAPH_REWRITE_MAX_DEPTH) {
+    char msg[96];
+    snprintf(msg, sizeof(msg),
+             "uop_to_device_leaves: depth budget exceeded at op %u",
+             (u32)term_ext(r));
+    thvm_fatal(msg);
+  }
+}
+
 static Term uop_to_device_leaves_rec(Term t, i32 dev,
                                      UOpGraphRewriteMemoSlot *memo,
                                      u32 cap, u32 *used, u32 depth) {
-  if (depth > 4096) return term_resolve(t);
   Term r   = term_resolve(t);
   u8   tag = term_tag(r);
   if (tag == TAG_TEN) return uop_copy_dev(r, dev);     // the leaf upload
@@ -479,6 +661,7 @@ static Term uop_to_device_leaves_rec(Term t, i32 dev,
     // and the mixed-device kernel computes garbage.  Re-target it to `dev` so
     // every operand lands on the same device.
     if (uop_copy_device(term_val(r)) >= 0) return r;
+    uop_to_device_leaves_check_depth(r, depth);
     Term csrc = uop_to_device_leaves_rec(heap_read(term_val(r) + 0),
                                          dev, memo, cap, used, depth + 1);
     return uop_copy_dev(csrc, dev);
@@ -494,6 +677,7 @@ static Term uop_to_device_leaves_rec(Term t, i32 dev,
     }
     if (memo_hit != 0) return memo_hit;
   }
+  uop_to_device_leaves_check_depth(r, depth);
 
   u8  ar  = uop_arity(op);
   u64 loc = term_val(r);

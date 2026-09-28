@@ -216,10 +216,11 @@ static Term sym_pm_strip_opt(Term t, void *user) {
 // === Entry point ============================================================
 
 // One pass of all sym rules.  Each rule returns 0 to mean "no match",
-// and the rewriter restarts when any rule fires (graph_rewrite.c
-// UOP_GRAPH_REWRITE_MAX_RESTARTS).  Order matters only weakly --
-// graph_rewrite re-traverses children after each restart, so a leaf
-// fold that exposes a new parent fold catches on the next restart.
+// and the rewriter re-runs the table on each replacement until none
+// fires (graph_rewrite.c, at most UOP_GRAPH_REWRITE_MAX_CHAIN hits per
+// node).  Order matters only weakly -- graph_rewrite rewrites a
+// replacement's children before retrying the rules on it, so a leaf
+// fold that exposes a new parent fold catches on the next pass.
 fn Term uop_symbolic_rewrite(Term root) {
   static UOpGraphRewriteRule const SYM_RULES[] = {
     { "sym_pm_alu_const",       sym_pm_alu_const       },

@@ -118,6 +118,34 @@ int main(void) {
     CHECK(has_reduce(folded, 0));
   }
 
+  // === skips: val uses the reduce axis only below depth 300 ===
+  // Same guard as the upper-tail fold, but val = r1 + r_100 + ... + r_399
+  // with r1 at the bottom of a 300-deep chain.  Folding would multiply an
+  // r1-dependent val by the iteration count: wrong numbers.
+  TEST_BEGIN("reduce-collapse/skips-deep-axis-dependent-val");
+  {
+    u32 OUTER = 8, INNER = 9;
+    Term r0 = uop_range(OUTER, KAX_LOOP, 8);
+    Term r1 = uop_range(INNER, KAX_LOOP, 8);
+    Term val = r1;
+    for (u32 i = 0; i < 300; i++) {
+      val = uop_int_binary(UOP_IADD, val, uop_range(100 + i, KAX_LOOP, 2));
+    }
+    u32 spine = 0;
+    for (Term s = val; term_tag(s) == TAG_UOP && term_ext(s) == UOP_IADD;
+         s = heap_read(term_val(s) + 0)) {
+      spine++;
+    }
+    CHECK(spine >= 300);
+    Term six = uop_const(DT_INT32, 6);
+    Term affine = uop_int_binary(UOP_IADD, r0, r1);
+    Term cond = uop_int_binary(UOP_ILT, six, affine);
+    Term body = uop_iwhere(cond, val, uop_const(DT_INT32, 0));
+    Term red = uop_reduce(REDUCE_SUM, INNER, body);
+    Term folded = uop_reduce_arange_collapse(red);
+    CHECK_EQ(folded, red);
+  }
+
   // === skips: MAX reduce (only SUM folds) ===
   TEST_BEGIN("reduce-collapse/skips-max-reduce");
   {

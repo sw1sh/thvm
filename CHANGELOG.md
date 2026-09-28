@@ -20,6 +20,11 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- UOp graph rewrites no longer stop silently at depth 256: past a structural
+  depth of 8192, 1024 successive rule hits on one node, or a rewrite cycle,
+  the pass reports the rule chain and fails (tinygrad uop/ops.py:1804, :1815).
+  reduce_collapse no longer folds a value that uses the reduce axis deep in
+  the graph (wrong numbers), and the expander finds UNROLLs at any depth.
 - IWHERE closure fold before the gate merges (tinygrad #18268), plus the
   else-branch (a|b) merge.
 - Generic c0*x < c1 fold (tinygrad #17290/#17291) for every sign pair with

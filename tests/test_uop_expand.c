@@ -297,6 +297,40 @@ static int test_case8_hash_cons(void) {
   TEST_REPORT();
 }
 
+// Case 9: fix_reduce_unroll must find an UNROLL however deep it sits.
+// Each IADD(leaf, rest) level leaves one pending sibling on the search
+// stack, so a 100-deep right spine is deeper than any fixed-size stack.
+static Term raw_iadd(Term a, Term b) {
+  u64 loc = heap_alloc(2);
+  heap_set(loc + 0, a);
+  heap_set(loc + 1, b);
+  return term_new(0, TAG_UOP, UOP_IADD, loc);
+}
+
+static int test_case9_fix_reduce_unroll_deep(void) {
+  thvm_init();
+  TEST_BEGIN("case9 fix_reduce_unroll finds an UNROLL 100 levels down");
+  u32 ax[1]   = { 2 };
+  u32 fac[1]  = { 4 };
+  u32 bits[4] = { 0, 1, 2, 3 };
+  Term src = uop_unroll(uop_vconst(DT_INT32, 4, bits), 1, ax, fac);
+  for (u32 i = 0; i < 100; i++) {
+    src = raw_iadd(uop_range(100 + i, KAX_LOOP, 2), src);
+  }
+  Term red = uop_reduce_multi(REDUCE_SUM, 1, ax, src);
+  Term out = expander_fix_reduce_unroll(red, NULL);
+  CHECK(out != 0);
+  CHECK_EQ(term_ext(out), UOP_REDUCE);
+  CHECK_EQ(uop_reduce_n_axes(out), 0u);
+  Term con = heap_read(term_val(out) + 0);
+  CHECK_EQ(term_ext(con), UOP_CONTRACT);
+  CHECK_EQ(uop_contract_n_args(con), 1u);
+  CHECK_EQ(uop_contract_axis_id(con, 0), 2u);
+  CHECK_EQ(uop_contract_factor(con, 0), 4u);
+  thvm_free();
+  TEST_REPORT();
+}
+
 int main(void) {
   int rc = 0;
   rc |= test_case1_bare_upcast_range();
@@ -307,5 +341,6 @@ int main(void) {
   rc |= test_case6_upcast_and_unroll();
   rc |= test_case7_nested_ops();
   rc |= test_case8_hash_cons();
+  rc |= test_case9_fix_reduce_unroll_deep();
   return rc;
 }
