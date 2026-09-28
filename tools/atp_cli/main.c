@@ -503,6 +503,7 @@ static void sched_sig_teardown(int sig) {
 // (status line + proof) win whenever it is able to run.
 static char g_alarm_szs[1200];
 static int  g_alarm_fd = -1;
+static int  g_alarm_exit_code = 6;   // 0 once a status is out (fe_decided)
 static void cli_alarm_fire(int sig) {
   (void)sig;
   if (g_alarm_fd >= 0 && g_alarm_szs[0] != '\0') {
@@ -512,7 +513,7 @@ static void cli_alarm_fire(int sig) {
     (void)w;
   }
   if (g_sched_active) sched_sig_teardown(SIGALRM);
-  _exit(6);
+  _exit(g_alarm_exit_code);
 }
 static void cli_arm_wall_alarm(double wall, int grace, int fd,
                                const char *szs_line) {
@@ -1168,13 +1169,24 @@ int main(int argc, char **argv) {
       // instance of the negated equation -- a refutation with no
       // engine run.  Decisive for problems the engine cannot even
       // load (PUZ039's state/12 exceeds the term reader's arity cap).
-      // --proof runs stay on the engine path for the CNFRefutation.
+      // A --proof run decides here exactly like the no-proof run and
+      // prints the same status; a stashed front-end proof follows it,
+      // otherwise the engine run below only reconstructs the proof.
       if ((g_horn_goal_reached || g_cli_fof_trivial || g_cli_fof_satref) &&
-          szs && !g_cli_want_proof) {
+          szs) {
         printf("%% SZS status %s for %s\n",
                g_cli_fof_conjecture ? "Theorem" : "Unsatisfiable", file);
         fflush(stdout);
-        return 0;
+        if (!g_cli_want_proof) return 0;
+        if (g_cli_prepass_proof != NULL) {
+          cli_proof_write(stdout, g_cli_prepass_proof,
+                          strlen(g_cli_prepass_proof));
+          fflush(stdout);
+          return 0;
+        }
+        g_cli_fe_decided  = 1;
+        g_cli_szs_printed = 1;
+        g_alarm_exit_code = 0;
       }
       // --proof with a stashed front-end refutation (clausal pre-pass
       // win or a $false at clausification): print the conversion-
@@ -1192,7 +1204,7 @@ int main(int argc, char **argv) {
       // one branch child per positive-literal choice, sequential,
       // every branch must refute.  The orchestrator owns the rest of
       // the wall and the process exits with its verdict.
-      if (g_fof_split_pending)
+      if (g_fof_split_pending && !g_cli_fe_decided)
         return fof_split_orchestrate(argv[0], file, preset, max_steps,
                                      szs, g_cli_want_proof);
       // Function-definition unfolding (Vampire definition_unfolding),
@@ -1204,7 +1216,7 @@ int main(int argc, char **argv) {
         const char *du = getenv("THVM_ATP_DEF_UNFOLD");
         if (du != NULL && (du[0] == '1' || du[0] == '2')) {
           tp_def_unfold(&tp);
-          if (du[0] == '2' && g_cli_defunfold_n == 0)
+          if (du[0] == '2' && g_cli_defunfold_n == 0 && !g_cli_fe_decided)
             tp_giveup("def-unfold slice: no function definition");
           n_neg = 0;
           for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
@@ -1220,7 +1232,7 @@ int main(int argc, char **argv) {
       {
         const char *tx = getenv("THVM_ATP_TGT_EXIT");
         if (tx != NULL && tx[0] != '\0' && tx[0] != '0'
-            && !tp_has_ax_ground_compound(&tp))
+            && !tp_has_ax_ground_compound(&tp) && !g_cli_fe_decided)
           tp_giveup("tgt-ax slice: no axiom-side ground compound subterm");
       }
       // Existential (non-ground) goals, opt-in: encode them
@@ -1349,7 +1361,7 @@ int main(int argc, char **argv) {
           {
             const char *tx = getenv("THVM_ATP_TGT_SEL_EXIT");
             if (tx != NULL && tx[0] != '\0' && tx[0] != '0'
-                && (n_hit == 0 || n_hit >= tp.n_syms))
+                && (n_hit == 0 || n_hit >= tp.n_syms) && !g_cli_fe_decided)
               tp_giveup("tgt-sel slice: conjecture symbols cover the signature");
           }
         }
@@ -1404,7 +1416,8 @@ int main(int argc, char **argv) {
   // duplicating the WM lane for a whole wall.
   {
     const char *ee = getenv("THVM_ATP_EQUALS_GOAL");
-    if (ee != NULL && atoi(ee) >= 2 && !g_cli_equals_applied)
+    if (ee != NULL && atoi(ee) >= 2 && !g_cli_equals_applied &&
+        !g_cli_fe_decided)
       tp_giveup("equals-goal slice: no existential goal to encode");
   }
   // --narrow-queue=2 (the schedule's narrowq slice): same exit-fast
@@ -1412,7 +1425,8 @@ int main(int argc, char **argv) {
   // WM lane on an existential (non-ground) conjecture.
   {
     const char *nqe = getenv("THVM_ATP_NARROW_QUEUE");
-    if (nqe != NULL && atoi(nqe) >= 2 && !g_cli_goal_existential)
+    if (nqe != NULL && atoi(nqe) >= 2 && !g_cli_goal_existential &&
+        !g_cli_fe_decided)
       tp_giveup("narrow-queue slice: goal is ground");
   }
 
@@ -1439,9 +1453,13 @@ int main(int argc, char **argv) {
   // full wall: its clausify is instant, so the value is unchanged and its
   // proofs stay byte-identical.
   char wall_left[32];
-  if (g_horn_cd || g_cli_fof_applied) {
+  if (g_horn_cd || g_cli_fof_applied || g_cli_fe_decided) {
     double left = atof(wall) - (horn_now() - main_t0);
     if (left < 1.0) left = 1.0;
+    // A decided front-end leaves the engine only the proof to rebuild:
+    // bounded, so a lane that cannot rebuild it frees its slot as the
+    // no-proof run's shortcut does (another lane's rebuild wins).
+    if (g_cli_fe_decided && left > 30.0) left = 30.0;
     snprintf(wall_left, sizeof wall_left, "%.1f", left);
     wall = wall_left;
   }
@@ -1455,7 +1473,7 @@ int main(int argc, char **argv) {
     int outfd = (real_stdout >= 0) ? real_stdout : 1;
     char line[1100];
     line[0] = '\0';
-    if (szs && !slice)
+    if (szs && !slice && !g_cli_fe_decided)
       snprintf(line, sizeof line, "%% SZS status %s for %s\n",
                g_cli_tptp_mode ? "Timeout" : "ResourceOut", file);
     cli_arm_wall_alarm(atof(wall), 30, outfd, line[0] ? line : NULL);
@@ -1506,6 +1524,6 @@ int main(int argc, char **argv) {
     printf("%% SZS status %s for %s\n", tag, file);
   }
   if (tmp_pr[0] != '\0' && !keep_pr) unlink(tmp_pr);
-  if (g_atp_bench_status == (int)ATP_PROVED) return 0;
+  if (g_atp_bench_status == (int)ATP_PROVED || g_cli_fe_decided) return 0;
   return (rc != 0) ? rc : 1;
 }

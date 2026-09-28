@@ -12,6 +12,13 @@ static int g_cli_sine_applied     = 0;
 // Set in main before conversion so the over-bound handler can emit a
 // competition-valid SZS line instead of crashing.
 static int g_cli_szs_wanted = 0;
+// --proof run whose front-end already decided the problem exactly as the
+// no-proof run does (Horn goal reached, clausification or the clausal
+// pre-pass refuted it) and printed that status: the engine run that
+// follows only reconstructs the proof.  Nothing after the decision may
+// give up -- the status stands and the exit is 0 whatever the engine
+// does.
+static int g_cli_fe_decided = 0;
 // Diagnostic verbosity.  Default OFF: a CASC/competition run must emit
 // ONLY the SZS status line + solution block on stdout and nothing on
 // stderr.  The engine bench TU writes its per-run diagnostics (PRSYM,
@@ -27,6 +34,12 @@ static int g_prov_on;
 static int g_cli_fof_applied;
 
 static void tp_giveup(const char *why) {
+  if (g_cli_fe_decided) {
+    // The status is out; only the proof reconstruction gives up.
+    fprintf(stderr, "FindProof: %s (proof not reconstructed)\n", why);
+    fflush(stdout);
+    exit(0);
+  }
   // Under a schedule slice the wrapper owns the single final status, so
   // stay silent on stdout and let the non-zero exit advance the slice.
   if (g_cli_szs_wanted && getenv("FINDPROOF_SLICE") == NULL)

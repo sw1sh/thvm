@@ -137,7 +137,11 @@ for the per-commit story.
   collector never copies, run off the clock-gated disciplines' work
   clock, and are discounted by the RSS guard; the proof settings are
   requested in-process so the environment is the no-proof one, and the
-  Horn front-end's wall budgets leave the proof capture out.
+  Horn front-end's wall budgets leave the proof capture out.  A
+  front-end decision (Horn goal reached, clausification or the clausal
+  pre-pass refuting) prints the no-proof status first; the engine then
+  only rebuilds the proof (30s at most), and nothing after the decision
+  gives up (MGT080+1 and MGT077+1 printed no status or GaveUp).
 - Vampire Otter-loop simplification set (`--otter`, `src/atp/otter.c`):
   orientable queued critical pairs rewrite as passive rules before
   selection.  With Vampire's symbol-precedence port (`--sym-prec`
