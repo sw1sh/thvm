@@ -52,6 +52,7 @@ for the per-commit story.
 - `bin/test_materialize_v2`: a same-kind REDUCE chain is one multi-axis
   REDUCE (one boundary); a max-then-sum chain keeps two boundaries in fire
   order.  The old chain reduced axis 0 of an already fully reduced value.
+- A reduce over `reshape(shrink(x))` that merges a shrunk axis into its neighbour reads the right elements again on the CPU JIT and the UOp walker (`x.shrink(...).reshape(2,6).sum(1)` was off by 1.8, and the walker applied every offset shrink twice). materialize commits the chain-composed input flags with every rewritten store, and the BEAM isolated bench sizes a composed slot's scratch buffer to the extent its view spans in the raw buffer (it was the view numel, and the bench read past it).
 - Fix (Linux/gcc): a ~2000-deep elementwise chain overflowed the 8 MB stack
   in the unified rewrite (gcc hoisted a 1 KB substitution and the inlined
   bufferize helpers' arrays into every recursion level, 6 KB each); those

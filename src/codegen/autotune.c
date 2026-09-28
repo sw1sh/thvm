@@ -54,15 +54,15 @@ typedef struct {
   u64     us;
 } KOptSeqBench;
 
-// === Isolated-buffer bench (port of tinygrad codegen/opt/search.py
-// `_time_program` + postrange.py `bufs_from_ast`) ===
+// === Isolated-buffer bench (port of tinygrad codegen/opt/search.py:35
+// `_time_program` + postrange.py:256-258 `args_from_ast`) ===
 //
 // The default bench re-fires a kernel on its LIVE TENS buffers in the
 // shared context.  During a FLUX session that context is shared across the
 // qwen / DiT / VAE captures, so a search that dispatches on the live
 // buffers perturbs the cross-stage activation + tile-JIT state the next
 // capture depends on.  tinygrad instead times each candidate on FRESH
-// rawbufs allocated to the kernel's PARAM-slot byte sizes (bufs_from_ast),
+// rawbufs allocated to the kernel's PARAM-slot byte sizes (args_from_ast),
 // never touching the live graph buffers.  This mirrors that: when ISO is
 // active, kernel_bench_fire dispatches the kernel on these scratch buffers
 // and kautotune_output_stat reads the scratch output instead of TENS.
@@ -938,6 +938,26 @@ static void kautotune_iso_fill(Backend *b, u32 buf_id, u32 dt, u64 numel) {
   free(host);
 }
 
+// Elements the scratch of a chain-composed input slot must hold.  Its loads
+// compose the movement chain into an address over the raw buffer.  The
+// innermost view (prior_views[0], or the lone view) is the one that maps
+// into that buffer, so every such address lies within its extent.  tinygrad
+// sizes each beam scratch to its PARAM's whole buffer
+// (schedule/rangeify.py:284, codegen/opt/postrange.py:256-258); this is the
+// part of it a load reaches.  Never below `numel`, the view's own count.
+static u64 kautotune_iso_composed_numel(TenDesc const *td, u64 numel) {
+  View const *v    = td->nviews != 0 ? &td->prior_views[0] : &td->view;
+  i64         last = v->offset;
+  for (u32 a = 0; a < v->shape.ndim; a++) {
+    u32 dim = kvar_extent_static(v->shape.dims[a]);
+    if (dim > 1 && v->strides[a] > 0) {
+      last += (i64)(dim - 1) * v->strides[a];
+    }
+  }
+  u64 extent = last >= 0 ? (u64)last + 1 : 0;
+  return extent > numel ? extent : numel;
+}
+
 // Allocate + fill fresh scratch buffers sized to this kernel's input/output
 // PARAM slots and install them in ISO.  Returns 1 on success, 0 if the
 // kernel can't be benched in isolation (no backend, missing dtype/numel
@@ -989,20 +1009,24 @@ static int kautotune_iso_begin(u32 kid) {
       // the caller fall back to NOT searching this kernel in isolation.
       goto fail;
     }
-    // A strided-view input the dispatch path pre-materialises (gather)
-    // reads through metal_tendesc_strided_index(td, k) over the LIVE
-    // TenDesc's view, whose max element index can exceed input_numels[i]
-    // (the view's logical numel) -- a contiguous scratch buffer sized to
-    // numel would be read out of bounds.  Decline the isolated search for
-    // such a kernel rather than risk an OOB read on the scratch.  The
-    // high-value FLUX targets (conv/matmul tile kernels) read contiguous
-    // or chain-composed inputs, so this loses nothing that matters.
+    // A chain-composed slot binds the scratch as its raw buffer and reads
+    // it up to the extent its view spans there, past input_numels[i] (the
+    // view's numel) for a shrunk or offset view; size it to that extent.
+    // Any other strided-view input the dispatch path pre-materialises
+    // (gather) reads through metal_tendesc_strided_index(td, k) over the
+    // LIVE TenDesc's view, not the scratch: decline the isolated search
+    // for such a kernel.  The high-value FLUX targets (conv/matmul tile
+    // kernels) read contiguous or chain-composed inputs, so this loses
+    // nothing that matters.
     int composed = (ke->input_chain_composed != NULL
                     && ke->input_chain_composed[i]);
     u32 tid = ke->input_tids != NULL ? ke->input_tids[i] : 0;
-    if (!composed && tid != 0 && tid < TENS_NEXT) {
+    if (tid != 0 && tid < TENS_NEXT) {
       TenDesc const *td = &TENS[tid];
-      if (!td->view.contiguous || td->view.offset != 0 || td->nviews != 0) {
+      if (composed) {
+        numel = kautotune_iso_composed_numel(td, numel);
+      } else if (!td->view.contiguous || td->view.offset != 0
+                 || td->nviews != 0) {
         goto fail;
       }
     }
@@ -1322,7 +1346,7 @@ static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
   ke->schedule->autotuned = 1;
 
   // Bench on ISOLATED scratch buffers (tinygrad codegen/opt/search.py
-  // _time_program + postrange.py bufs_from_ast: every beam-search times
+  // _time_program + postrange.py args_from_ast: every beam-search times
   // candidates on FRESH rawbufs sized to the kernel's PARAM slots, never
   // the live graph buffers).  The bench fires thus read/write only scratch
   // -- they never touch the live activation tensors of an in-flight FLUX

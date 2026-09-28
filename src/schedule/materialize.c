@@ -3930,10 +3930,11 @@ static int uop_subtree_has_residual_bufferize(Term root) {
 // buffer; visit() separately routed the same movement through
 // view_resolve so the slot's tid points at a chained / non-contig
 // descriptor.  Without the flag the backend pre-mats via the public
-// view (wrong numel) while the kernel reads at the swizzled
-// underlying-buffer index -- the addr lands in the wrong region of the
-// pre-mat buffer.  Setting input_chain_composed=1 tells the backend to
-// skip pre-mat and bind the underlying buffer directly.
+// view (wrong numel) and the walker biases the pointer by the view
+// offset, while the kernel reads at the swizzled underlying-buffer
+// index -- the addr lands in the wrong region of the pre-mat buffer.
+// Setting input_chain_composed=1 tells the backend to skip pre-mat and
+// bind the underlying buffer directly.
 //
 // Two code paths reach the flag:
 //   - ru_rewrite_subtree's TAG_TEN branch sees a chained tid at
@@ -5956,14 +5957,12 @@ static u32 input_slot_dedup(KernelEntry *ke, u32 tid, Term term) {
   ke->input_numels [slot] = TENS[tid].view.numel;
   ke->input_terms  [slot] = term;
   ke->input_views  [slot] = TENS[tid].view;     // codegen consumes for strided reads
-  // Mirror rangeify.c's input_chain_composed[] bookkeeping for the
-  // unified-pass path: when the unified pass folded prior_views into
-  // the TAG_TEN-wrapped INDEX_E.addr, the backend pre-mat must SKIP
-  // the gather (the kernel reads the underlying buffer directly with
-  // the chain-composed addr).  The matching addr rewrite for chained
-  // tids minted by visit()/view_resolve INSIDE materialize lives in
-  // unified_rewrite_rec_sub's INDEX_E case, which also flips this
-  // flag at that point.
+  // When the unified pass folded this tid's prior_views into the
+  // TAG_TEN-wrapped INDEX_E.addr, the backend pre-mat must SKIP the
+  // gather (the kernel reads the underlying buffer directly with the
+  // chain-composed addr).  Slots visit()/view_resolve mint for a
+  // movement chain the unified pass already swizzled into the addr are
+  // flagged by unified_fold_chain_scan instead.
   if (ke->input_chain_composed != NULL
       && rangeify_unified_tid_chain_composed(tid)) {
     ke->input_chain_composed[slot] = 1;
@@ -6663,9 +6662,8 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // TAG_TEN/BUFFERIZE leaves with UOP_BUFFER input slots).  The
     // cached_lift.in_bufs[] / n_inputs / out_buf fields from
     // kernel_lift_to_uop bind the runtime input/output tables; the
-    // rewritten store_root drives compute.  Three per-kernel safety
-    // gates (residual-BUFFERIZE, stranded-RANGE, broadcast-input)
-    // decide whether the chain-fold flag commits are saved.
+    // rewritten store_root drives compute, and the chain-fold flags
+    // committed with it say how its loads address each input slot.
     //
     // kernel_lift_to_uop sets cached_lift.store_root = ru_root and
     // returns 0 if ru_root is 0 -- so inside this branch we already
@@ -6695,14 +6693,14 @@ static Term emit_kernel_for_boundary(u32 bi) {
     }
     // Scan the rewritten store_root for INDEX_E reads against slots
     // whose tid carries non-trivial layout (chain or non-contig
-    // view).  The flag commit is deferred until the bypass-succeeded
-    // branch below so a gate-declined kernel doesn't get its pre-mat
-    // skipped while still reading via the unfolded store_root.
+    // view); the marks are committed below with the store_root.
     ChainFoldMarks _cf_marks;
     _cf_marks.slot_mask_lo = 0;
     _cf_marks.slot_mask_hi = 0;
     ru_rewritten = unified_fold_chain(ke, ru_rewritten, &_cf_marks);
-    // Per-kernel safety gates for the unified-bypass:
+    // Per-kernel coverage diagnostics, counted for THVM_DUMP_LIFT_COVERAGE
+    // and printed by THVM_DEBUG_BYPASS_LAST.  They select nothing: every
+    // kernel runs the rewritten store_root.
     //
     //   has_resid:   the cpu_uop_walk INDEX_E handler only resolves
     //                UOP_BUFFER leaves; a residual UOP_BUFFERIZE in
@@ -6726,25 +6724,13 @@ static Term emit_kernel_for_boundary(u32 bi) {
     //                kernel where one INDEX_E feeds from a non-
     //                realized PERMUTE/RESHAPE chain.
     //
-    //   has_bcast:   the rewritten subtree reads from a UOP_BUFFER
-    //                input slot whose backing View has a stride-0
-    //                (broadcast) axis, negative stride (FLIP) or
-    //                a non-row-major stride pattern (PERMUTE /
-    //                SHRINK view).  ru_pass builds addresses from
-    //                per-axis ranges without consulting strides,
-    //                and the input_views[slot].strides per-slot
-    //                stride table that would fold the broadcast
-    //                axis to CONST(0) isn't reflected in the
-    //                rewritten subtree.  Until ru_pass threads
-    //                view strides through INDEX_E address
-    //                construction, decline the bypass for these
-    //                inputs.  Softmax-CE backward hits this where
-    //                a 1-element scalar feeds a 3-element consumer
-    //                via stride-0 broadcast.
-    //
-    // When any gate trips, skip the chain-fold commit; store_root
-    // still gets the rewritten subtree (the renderer can't name
-    // raw TAG_TEN / BUFFERIZE leaves regardless of gate outcome).
+    //   has_bcast:   an INDEX_E still names a raw TAG_TEN, or its
+    //                address can reach past its UOP_BUFFER's element
+    //                count (with no static bound: the buffer is smaller
+    //                than the iteration footprint).  A load composed
+    //                over a shrunk base trips it by design: the slot's
+    //                BUFFER takes the view's shape while the address
+    //                spans the base buffer.
     int has_resid    = uop_subtree_has_residual_bufferize(ru_rewritten);
     int has_stranded = uop_subtree_has_stranded_range(ru_rewritten);
     int has_bcast    = uop_subtree_has_broadcast_input(ke, ru_rewritten);
@@ -6756,9 +6742,18 @@ static Term emit_kernel_for_boundary(u32 bi) {
       bypass_dbg_dump("ru_rewrit", kid, ru_rewritten);
     }
     BYPASS_KERNEL_TOTAL++;
-    if (has_resid)    BYPASS_GATE_RESID++;
-    if (has_stranded) BYPASS_GATE_STRANDED++;
-    if (has_bcast)    BYPASS_GATE_BCAST++;
+    if (has_resid) {
+      BYPASS_GATE_RESID++;
+    }
+    if (has_stranded) {
+      BYPASS_GATE_STRANDED++;
+    }
+    if (has_bcast) {
+      BYPASS_GATE_BCAST++;
+    }
+    if (!has_resid && !has_stranded && !has_bcast) {
+      BYPASS_KERNEL_USED_UNIFIED++;
+    }
     // Always substitute the rewritten store_root.  The raw unified
     // ru_root carries TAG_TEN / UOP_BUFFERIZE leaves that the
     // renderer can't name (falls through to the buf%llu fallback
@@ -6766,10 +6761,12 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // those with proper UOP_BUFFER terms carrying input-slot
     // instance, which is benign regardless of gate outcome.
     ke->cached_lift.store_root = ru_rewritten;
-    if (!has_resid && !has_stranded && !has_bcast) {
-      BYPASS_KERNEL_USED_UNIFIED++;
-      unified_fold_chain_commit_flags(ke, &_cf_marks);
-    }
+    // The marks describe this store_root's loads, so they commit with
+    // it.  An unflagged slot whose load is composed over the raw buffer
+    // gets its view gathered into a contiguous temp (or, in the walker,
+    // its pointer biased by the view offset), and the kernel applies
+    // the movement chain a second time.
+    unified_fold_chain_commit_flags(ke, &_cf_marks);
     // Post-lift UPatRule pass.  Reads applied_opts via the tile_anno
     // facade (single read site so the eventual KpSchedule -> KernelEntry
     // ownership move is a one-file change).

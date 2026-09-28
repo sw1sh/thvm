@@ -25,18 +25,13 @@ fn void apply_movement_op_shrink(u32 ndim,
                                   u32 const *begin_end,
                                   Term const *out_rngs,
                                   Term *in_rngs) {
-  // tinygrad indexing.py:131  rngs = tuple(a if ss == 0 else a+ss ...):
-  // shift each consumer index by the begin offset so the kernel reads
-  // the source at out_iter + begin.  A SHRINK that feeds a kernel body
-  // (REDUCE / elementwise) or sits over a COMPUTED source (PAD result)
-  // is rangeified through here -- view_apply_shrink in materialize.c
-  // only ever sees a SHRINK that resolves to a buffer-backed view
-  // *input alias* (op_is_view_movement path), and those never reach
-  // this swizzle, so the begin offset is applied exactly once.  The
-  // a4d6ca41 double-shift came from an earlier flow that fed a
-  // view-offset-shifted alias through a +ss-swizzled index; the
-  // current rangeify/view-resolve split keeps the two paths disjoint
-  // (project_shrink_over_pad_offset_dropped).
+  // tinygrad schedule/indexing.py:173 (365f87a8a)
+  // `a if off == 0 else a+off`: shift each consumer index by the begin
+  // offset so the kernel reads the source at out_iter + begin.  A SHRINK
+  // over a buffer is ALSO resolved by materialize.c's visit() into an
+  // offset view slot (view_apply_shrink); unified_fold_chain_scan flags
+  // that slot input_chain_composed, so the backend binds the raw buffer
+  // and the begin offset is applied only here.
   for (u32 i = 0; i < ndim; i++) {
     // A kvar-packed begin (KVAR_FLAG set) is the RUNTIME row offset of a
     // single-row slice at a symbolic position -- the GPT-2 decode

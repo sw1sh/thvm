@@ -2946,15 +2946,13 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr,
       //
       // For TAG_TEN whose TenDesc carries a non-trivial prior_views
       // chain we fold the ShapeTracker decompose-by-shape into the
-      // INDEX_E.addr (mirrors rangeify.c's
-      // emit_chained_index_from_addr).  In practice most chained
-      // descs are minted by view_resolve INSIDE materialize.c's visit
-      // -- not visible here -- so materialize.c's
-      // unified_rewrite_rec_sub runs an equivalent compose pass over
-      // the rebuilt INDEX_E; this branch handles the rarer case
-      // where the chained desc is already on the TAG_TEN at
-      // unified-pass time (cross-realize reuse of a chained
-      // intermediate).
+      // INDEX_E.addr.  Most chained descs are instead minted by
+      // view_resolve inside materialize.c's visit(), for a movement
+      // chain the swizzlers already composed into in_addr over the
+      // base TAG_TEN; materialize.c's unified_fold_chain_scan flags
+      // those slots.  This branch handles a chained desc that is
+      // already the TAG_TEN at unified-pass time (cross-realize reuse
+      // of a chained intermediate).
       Term addr = in_addr;
       if (ctag == TAG_TEN) {
         u32 tid = (u32)term_val(resolved);

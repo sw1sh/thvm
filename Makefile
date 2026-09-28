@@ -280,6 +280,7 @@ TESTS := \
   $(BIN)/test_kernel_fire_gen \
   $(BIN)/test_custom_kernel \
   $(BIN)/test_autotune_correctness_gate \
+  $(BIN)/test_autotune_iso_scratch \
   $(BIN)/test_uop_content_hash \
   $(BIN)/test_view_shrink \
   $(BIN)/test_view_permute \
