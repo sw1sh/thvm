@@ -1530,7 +1530,7 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
   return 0;
 }
 
-// === uop_given_valid (tinygrad symbolic.py:303-353) ===
+// === uop_given_valid (tinygrad symbolic.py:328-371) ===
 
 // Mint a throwaway RANGE leaf with a reserved high axis_id (won't
 // collide with real kernel axes, which are densely numbered from 0) and
@@ -1548,37 +1548,56 @@ static Term uop_make_fake_range(u32 extent) {
 }
 
 
-// Rebuild `t`, replacing every structural occurrence of `from` with
-// `to`, routing through the simplifying constructors (uop_int_binary /
-// uop_iwhere) so the substituted tree is re-simplified bottom-up.  This
-// is the `substitute` half of tinygrad's uop_given_valid: it lets a
-// bounded fake-variable propagate the div/mod folds, then the inverse
-// substitution restores the original sub-expression.  Bounded recursion
-// over the finite index DAG.
-static Term uop_index_substitute(Term t, Term from, Term to, u32 depth) {
-  if (t == from) return to;
-  if (depth > 48) return t;
-  if (term_tag(t) != TAG_UOP) return t;
-  u32 op = term_ext(t);
+// Rebuild `t`, replacing every structural occurrence of from[i] with
+// to[i], routing through the simplifying constructors (uop_int_binary /
+// uop_iwhere) so the substituted tree is re-simplified bottom-up.  The
+// map is checked at a node before its children and a replaced node is
+// not descended, so the pairs apply simultaneously and the topmost match
+// wins, as in tinygrad's UOp.substitute (ops.py:532).  Bounded recursion
+// over the finite index DAG: past depth 48 the rest is left as is.
+static Term uop_index_substitute_multi(Term t, Term const *from, Term const *to,
+                                       u32 n, u32 depth) {
+  for (u32 i = 0; i < n; i++) {
+    if (t == from[i]) {
+      return to[i];
+    }
+  }
+  if (depth > 48 || term_tag(t) != TAG_UOP) {
+    return t;
+  }
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
     case UOP_IXOR: case UOP_ISHR: {
-      Term a = uop_index_substitute(heap_read(term_val(t) + 0), from, to, depth + 1);
-      Term b = uop_index_substitute(heap_read(term_val(t) + 1), from, to, depth + 1);
-      if (a == heap_read(term_val(t) + 0) && b == heap_read(term_val(t) + 1)) return t;
+      Term a0 = heap_read(loc + 0);
+      Term b0 = heap_read(loc + 1);
+      Term a  = uop_index_substitute_multi(a0, from, to, n, depth + 1);
+      Term b  = uop_index_substitute_multi(b0, from, to, n, depth + 1);
+      if (a == a0 && b == b0) {
+        return t;
+      }
       return uop_int_binary(op, a, b);
     }
     case UOP_IWHERE: {
-      Term c = uop_index_substitute(heap_read(term_val(t) + 0), from, to, depth + 1);
-      Term x = uop_index_substitute(heap_read(term_val(t) + 1), from, to, depth + 1);
-      Term e = uop_index_substitute(heap_read(term_val(t) + 2), from, to, depth + 1);
-      if (c == heap_read(term_val(t) + 0) && x == heap_read(term_val(t) + 1)
-          && e == heap_read(term_val(t) + 2)) return t;
+      Term c0 = heap_read(loc + 0);
+      Term x0 = heap_read(loc + 1);
+      Term e0 = heap_read(loc + 2);
+      Term c  = uop_index_substitute_multi(c0, from, to, n, depth + 1);
+      Term x  = uop_index_substitute_multi(x0, from, to, n, depth + 1);
+      Term e  = uop_index_substitute_multi(e0, from, to, n, depth + 1);
+      if (c == c0 && x == x0 && e == e0) {
+        return t;
+      }
       return uop_iwhere(c, x, e);
     }
     default: return t;
   }
+}
+
+static Term uop_index_substitute(Term t, Term from, Term to, u32 depth) {
+  return uop_index_substitute_multi(t, &from, &to, 1, depth);
 }
 
 // Bits returned by uop_index_scan.
@@ -1724,7 +1743,7 @@ static int uop_term_shares_range_with(Term clause, Term x, u32 depth) {
   return 0;
 }
 
-// parse_valid (symbolic.py:303-314): decompose a single valid clause
+// parse_valid (tinygrad symbolic.py:328-340): decompose a single valid clause
 // into (expr, is_upper, bound):
 //   X < c        -> (X, upper, c-1)        [X <= c-1]
 //   (X < c).ne(1) i.e. X >= c              [thvm has no CMPNE form; the
@@ -1762,14 +1781,82 @@ static u32 uop_valid_split_and(Term v, Term *out, u32 cap, u32 depth) {
   return 1;
 }
 
-// uop_given_valid (symbolic.py:316-353): simplify `uop` assuming `valid`
-// is true.  For each parsed clause, substitute the bounded expression
-// with a fresh RANGE that has the constrained extent, re-simplify, and
-// substitute back; keep the result only if the substitution changed and
-// re-simplified the body (a strictly-smaller form).  This is what folds
-// the col2im decode: given `(X) < 125` the guarded `X//25` / `X%25`
-// simplify against the tightened [vmin, vmax] window of X.
-static Term uop_given_valid(Term valid, Term uop) {
+// A stand-in for `e` over [lo, hi]: returns a fake RANGE f over
+// [0, hi-lo], with *to_out = f+lo to replace e and *back_out = e+(-lo)
+// to replace f.  e+(-lo) rather than ISUB: the re-fold may hoist the +lo
+// to the root, and only an add-const moves up to cancel it there.
+// Returns 0 when the window is empty, negative, or too wide.
+static Term uop_valid_fake(Term e, i64 lo, i64 hi, Term *to_out, Term *back_out) {
+  if (lo < 0 || hi < lo || hi - lo >= 0x40000000) {
+    return 0;
+  }
+  Term fake = uop_make_fake_range((u32)(hi - lo + 1));
+  *to_out   = (lo == 0) ? fake : uop_int_binary(UOP_IADD, fake, uop_iconst(lo));
+  *back_out = (lo == 0) ? e    : uop_int_binary(UOP_IADD, e, uop_iconst(-lo));
+  return fake;
+}
+
+// Substitute from[i] -> to[i] simultaneously, re-simplify, then put each
+// fake back.  The fakes are fresh leaves that no back_i contains, so
+// restoring them one at a time is still simultaneous.  Returns `uop`
+// when nothing matched, or when a fake survives: the back pass stops at
+// uop_index_substitute's depth cap, and a leaked fake would reach the
+// kernel as an undeclared loop variable.
+static Term uop_valid_try(Term uop, Term const *from, Term const *to,
+                          Term const *fakes, Term const *backs, u32 n) {
+  Term sub = uop_index_substitute_multi(uop, from, to, n, 0);
+  if (sub == uop) {
+    return uop;
+  }
+  for (u32 i = 0; i < n; i++) {
+    sub = uop_index_substitute(sub, fakes[i], backs[i], 0);
+  }
+  if (uop_index_scan(sub, fakes, n, UOP_VALID_SCAN_BUDGET) != 0) {
+    return uop;
+  }
+  return sub;
+}
+
+// The simplex candidate (tinygrad symbolic.py:358-366): a clause
+// X0 + X1 + ... >= 1 over irreducible addends means some Xi >= 1.  When
+// assuming each Xi >= 1 alone simplifies `uop` to one and the same term,
+// that term is `uop` under the clause.  tinygrad's STACK branch is
+// dropped: index UOps are scalar.
+static Term uop_valid_simplex(Term uop, Term const *xs, u32 nx) {
+  for (u32 i = 0; i < nx; i++) {
+    u32 op = (term_tag(xs[i]) == TAG_UOP) ? term_ext(xs[i]) : 0;
+    if (op != UOP_RANGE && op != UOP_CONST) {
+      return uop;
+    }
+    if (uop_index_scan(uop, &xs[i], 1, UOP_VALID_SCAN_BUDGET) != UOP_SCAN_FOUND) {
+      return uop;
+    }
+  }
+  Term first = 0;
+  for (u32 i = 0; i < nx; i++) {
+    i64  hi;
+    Term to, back;
+    Term fake = uop_term_max_value(xs[i], &hi) ? uop_valid_fake(xs[i], 1, hi, &to, &back) : 0;
+    if (fake == 0) {
+      return uop;
+    }
+    Term r = uop_valid_try(uop, &xs[i], &to, &fake, &back, 1);
+    if (i > 0 && r != first) {
+      return uop;
+    }
+    first = r;
+  }
+  return first;
+}
+
+// uop_given_valid (tinygrad symbolic.py:342-371): simplify `uop` assuming
+// `valid` is true.  Parse the valid into per-expression [lo, hi] bounds,
+// then substitute EVERY bounded expression with a fake over its window
+// in one simultaneous pass, re-simplify, and substitute back.  This is
+// what folds the col2im decode: given `(X) < 125` the guarded `X//25` /
+// `X%25` simplify against the tightened window of X.  With try_simplex,
+// each clause may first try the per-addend simplex candidate.
+static Term uop_given_valid(Term valid, Term uop, int try_simplex) {
   Term clauses[16];
   u32 nc = uop_valid_split_and(valid, clauses, 16, 0);
   // Aggregate per-expression bounds: lo[i], hi[i] (NULL == unknown).
@@ -1788,40 +1875,31 @@ static Term uop_given_valid(Term valid, Term uop) {
     if (up) { his[idx] = b; has_hi[idx] = 1; }
     else    { los[idx] = b; has_lo[idx] = 1; }
   }
+  Term from[16], to[16], fakes[16], backs[16];
+  u32  nj = 0;
   for (u32 i = 0; i < ne; i++) {
     Term e = exprs[i];
-    // Skip a bare RANGE / CONST -- nothing to fold.
-    if (term_tag(e) != TAG_UOP) continue;
-    u32 eop = term_ext(e);
-    if (eop == UOP_RANGE || eop == UOP_CONST) continue;
+    if (term_tag(e) != TAG_UOP || term_ext(e) == UOP_CONST) {
+      continue;
+    }
     i64 lo, hi;
     if (has_lo[i]) lo = los[i]; else if (!uop_term_min_value(e, &lo)) continue;
     if (has_hi[i]) hi = his[i]; else if (!uop_term_max_value(e, &hi)) continue;
-    if (lo < 0 || hi < lo) continue;
-    // Build a fresh bounded RANGE standing in for `e` over [0, hi-lo]
-    // shifted by lo (i.e. fake in [0, hi-lo], e == fake+lo).  We model
-    // the constrained variable as a RANGE of extent (hi-lo+1) plus lo.
-    u64 span = (u64)(hi - lo) + 1;
-    if (span == 0 || span > 0x40000000ull) continue;
-    Term fake = uop_make_fake_range((u32)span);
-    if (fake == 0) continue;
-    Term fake_expr = (lo == 0) ? fake
-                   : uop_int_binary(UOP_IADD, fake, uop_iconst(lo));
-    Term sub = uop_index_substitute(uop, e, fake_expr, 0);
-    if (sub == uop) continue;  // e not present in uop -- skip
-    // e + (-lo), not ISUB: the re-fold may have hoisted the +lo to the
-    // root, and only an add-const moves up to cancel it there.
-    Term e_back = (lo == 0) ? e : uop_int_binary(UOP_IADD, e, uop_iconst(-lo));
-    Term back = uop_index_substitute(sub, fake, e_back, 0);
-    // The back pass stops at uop_index_substitute's depth cap, and the
-    // re-fold can push a fake below it; a surviving fake would reach the
-    // kernel as an undeclared loop variable.
-    if (uop_index_scan(back, &fake, 1, UOP_VALID_SCAN_BUDGET) != 0) {
+    Term fake = uop_valid_fake(e, lo, hi, &to[nj], &backs[nj]);
+    if (fake == 0) {
       continue;
     }
-    if (back != uop) uop = back;
+    from[nj]  = e;
+    fakes[nj] = fake;
+    nj++;
+    Term xs[16];
+    u32  nx = 0;
+    if (try_simplex && term_ext(e) == UOP_IADD && lo == 1
+        && uop_iadd_tree_collect_const_mul(e, xs, &nx, 16, 0)) {
+      uop = uop_valid_simplex(uop, xs, nx);
+    }
   }
-  return uop;
+  return uop_valid_try(uop, from, to, fakes, backs, nj);
 }
 
 // === Ternary IWHERE simplifier ===
@@ -1870,16 +1948,17 @@ static Term uop_simplify_iwhere_body(Term cond, Term then_v, Term else_v) {
       }
     }
   }
-  // gated_given_valid (tinygrad symbolic.py:408-412): when the gate is a
+  // gated_given_valid (tinygrad symbolic.py:427-432): when the gate is a
   // valid mask (`WHERE(cond, body, INVALID)`), simplify `body` against
-  // the bounds `cond` asserts.  Gated behind the conv-bwd opt so the
-  // shared index simplifier stays bit-identical with the flag OFF.
+  // the bounds `cond` asserts, without the simplex candidate.  Gated
+  // behind THVM_VALID_FOLD so the shared index simplifier stays
+  // bit-identical with the flag OFF.
   if (uop_is_invalid(else_v) && uop_valid_fold_enabled()
       && term_tag(then_v) == TAG_UOP) {
     u32 to = term_ext(then_v);
     if (to == UOP_IDIV || to == UOP_IMOD || to == UOP_IADD
         || to == UOP_IMUL || to == UOP_ISUB) {
-      Term folded = uop_given_valid(cond, then_v);
+      Term folded = uop_given_valid(cond, then_v, 0);
       if (folded != then_v) return uop_iwhere(cond, folded, else_v);
     }
   }

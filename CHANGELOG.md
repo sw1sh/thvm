@@ -20,6 +20,9 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- uop_given_valid follows tinygrad #18478: one simultaneous substitution
+  over every valid bound replaces the per-clause pass, plus the simplex
+  candidate behind try_simplex.
 - Fix (THVM_VALID_FOLD=1): uop_given_valid's lo-offset inverse substituted
   the fake back as e instead of e+(-lo), and leaked its fake RANGE; now exact
   (tinygrad #18478).  New bin/test_uop_valid_fold covers the flag-on path.

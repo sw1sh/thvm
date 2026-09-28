@@ -159,6 +159,96 @@ int main(void) {
     CHECK_EQ(wrong, 0);
   }
 
+  // tinygrad substitutes every bounds entry at once.  Alone, e0 -> [0,3]
+  // leaves e1 at [0,14] and the sum's max at 17, so neither clause folds
+  // the //8; together the max is 6.
+  Term r2 = uop_range(2, KAX_LOOP, 8);
+  Term r3 = uop_range(3, KAX_LOOP, 8);
+  Term e1 = uop_int_binary(UOP_IADD, r2, r3);
+  Term s  = uop_int_binary(UOP_IADD, e, e1);
+  TEST_BEGIN("valid-fold/joint-two-clauses");
+  {
+    CHECK_EQ(heap_read(term_val(s) + 0), e);
+    CHECK_EQ(heap_read(term_val(s) + 1), e1);
+    Term valid = uop_int_binary(UOP_IAND, uop_int_binary(UOP_ILT, e, ic(4)),
+                                          uop_int_binary(UOP_ILT, e1, ic(4)));
+    Term g = uop_iwhere(valid, uop_int_binary(UOP_IDIV, s, ic(8)), inv);
+    CHECK_EQ(g, uop_iwhere(valid, ic(0), inv));
+  }
+
+  // A lower bound on one clause: e >= 8 and e1 <= 1 put the sum in
+  // [8, 15], so the //8 is 1.
+  TEST_BEGIN("valid-fold/joint-lo-offset");
+  {
+    Term valid = uop_int_binary(UOP_IAND, uop_int_binary(UOP_ILT, ic(7), e),
+                                          uop_int_binary(UOP_ILT, e1, ic(2)));
+    Term g = uop_iwhere(valid, uop_int_binary(UOP_IDIV, s, ic(8)), inv);
+    CHECK_EQ(g, uop_iwhere(valid, ic(1), inv));
+  }
+
+  // The #18478 shape: rb < 7 and ra*7+rb < 8.  The joint map holds both
+  // x = ra*7+rb and its own addend rb; x must be replaced as a unit, with
+  // the bare rb elsewhere bound separately.
+  TEST_BEGIN("valid-fold/joint-nested-clauses");
+  {
+    Term ra = uop_range(20, KAX_LOOP, 2);
+    Term rb = uop_range(21, KAX_LOOP, 8);
+    Term x  = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, ra, ic(7)), rb);
+    Term valid = uop_int_binary(UOP_IAND, uop_int_binary(UOP_ILT, rb, ic(7)),
+                                          uop_int_binary(UOP_ILT, x, ic(8)));
+    Term body = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IDIV, x, ic(8)),
+                                         uop_int_binary(UOP_IMOD, rb, ic(7)));
+    Term g = uop_iwhere(valid, body, inv);
+    CHECK_EQ(g, uop_iwhere(valid, rb, inv));
+    CHECK(!has_fake(g, 0));
+    int wrong = 0;
+    for (i64 a = 0; a < 2; a++) {
+      for (i64 b = 0; b < 8; b++) {
+        Env env = { 0 };
+        env_set(&env, 20, a);
+        env_set(&env, 21, b);
+        if (b < 7 && a * 7 + b < 8 && ev(g, &env) != (a * 7 + b) / 8 + b % 7) {
+          wrong++;
+        }
+      }
+    }
+    CHECK_EQ(wrong, 0);
+  }
+
+  // The PAD lowering gates ISUB(r, s) on s-1 < r < hi.  The bare RANGE r
+  // is a joint candidate too; r - s round-trips as r + (-s), tinygrad's
+  // spelling of it, and stays put on the next pass.
+  TEST_BEGIN("valid-fold/pad-gate-body");
+  {
+    Term r = uop_range(30, KAX_LOOP, 10);
+    Term valid = uop_int_binary(UOP_IAND, uop_int_binary(UOP_ILT, ic(2), r),
+                                          uop_int_binary(UOP_ILT, r, ic(8)));
+    Term g = uop_iwhere(valid, uop_int_binary(UOP_ISUB, r, ic(3)), inv);
+    CHECK_EQ(then_of(g), uop_int_binary(UOP_IADD, r, ic(-3)));
+    CHECK_EQ(uop_iwhere(valid, then_of(g), inv), g);
+    int wrong = 0;
+    for (i64 v = 3; v < 8; v++) {
+      Env env = { 0 };
+      env_set(&env, 30, v);
+      wrong += ev(g, &env) != v - 3;
+    }
+    CHECK_EQ(wrong, 0);
+  }
+
+  // Simplex: r0 + r1 >= 1 means r0 >= 1 or r1 >= 1, and 2*r0 + r1 >= 1
+  // holds under either.  Only try_simplex tries the per-addend branches;
+  // the gated path passes 0 (tinygrad symbolic.py:432).
+  TEST_BEGIN("valid-fold/simplex");
+  {
+    Term valid = uop_int_binary(UOP_ILT, ic(0), e);
+    Term both  = uop_int_binary(UOP_ILT, ic(0),
+                   uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, r0, ic(2)), r1));
+    CHECK_EQ(uop_given_valid(valid, both, 1), ic(1));
+    CHECK_EQ(uop_given_valid(valid, both, 0), both);
+    Term one_side = uop_int_binary(UOP_ILT, ic(0), r0);
+    CHECK_EQ(uop_given_valid(valid, one_side, 1), one_side);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
