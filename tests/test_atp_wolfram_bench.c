@@ -624,6 +624,14 @@ typedef struct {
   // test, immune to user symbols that happen to spell sF*/sFlat*.
   u32   fresh_sym_base;
   u32   n_fresh_syms;
+  // Definition provenance for the proof emitter: eq_def[e] is the fresh
+  // label equation e DEFINES (0 = not a definition), and
+  // sym_def_trace[label - PR_LABEL_BASE] the trace id the engine gave
+  // that definition at the feed.  A tgt-folded conjecture unit can
+  // have the very same shape (sF89(X1,X2) = b) -- only this identity
+  // tells the defining record apart.
+  u32   eq_def[PR_MAX_EQNS];
+  u32   sym_def_trace[PR_MAX_SYMS];
   // needle (THVM_ATP_DRC_NEEDLE): eq_l/eq_r[0 .. n_orig_eqns) is the
   // pre-transform EQUATIONS block -- snapshotted in main() right after
   // pr_load_terms, before pr_tgt_transform / pr_flatten_goal /
@@ -1255,6 +1263,7 @@ static void pr_flatten_goal(PrProblem *pr) {
     Term fresh = term_new_ctr(lbl, NULL, 0);
     pr->eq_l[pr->n_eqns] = fresh;   // fresh = subterm  (orients subterm -> fresh)
     pr->eq_r[pr->n_eqns] = subs[i];
+    pr->eq_def[pr->n_eqns] = lbl;
     pr->n_eqns++;
   }
   pr->n_fresh_syms = pr->n_syms - pr->fresh_sym_base;
@@ -1485,6 +1494,7 @@ static void pr_tgt_transform(PrProblem *pr, int ground_only, int all_eqns,
         fold ? pr_tgt_fold_term(pr, pr_tgt_subs[i], 1, i) : pr_tgt_subs[i];
     // Goal-cone definitions seed the spb=goal derivation bit.
     pr->eq_gd[pr->n_eqns] = pr_tgt_sub_goal[i];
+    pr->eq_def[pr->n_eqns] = lbl;
     pr->n_eqns++;
   }
   pr->n_fresh_syms = pr->n_syms - pr->fresh_sym_base;
@@ -1657,6 +1667,7 @@ static void pr_distrib_transform(PrProblem *pr) {
     Term dvars[3] = {x, y, z};
     pr->eq_l[pr->n_eqns] = term_new_ctr(lbl, dvars, 3);
     pr->eq_r[pr->n_eqns] = term_new_ctr(hit_g[i], rhs_args, 2);
+    pr->eq_def[pr->n_eqns] = lbl;
     pr->n_eqns++;
     pr->n_fresh_syms++;
     added++;
@@ -3062,11 +3073,15 @@ int main(int argc, char **argv) {
       // above) through as the post-unfold instance-match targets.
       thvm_atp_set_orig_axioms(s, prp.eq_l, prp.eq_r, prp.n_orig_eqns);
     }
+    for (u32 i = 0; i < PR_MAX_SYMS; i++) prp.sym_def_trace[i] = ATP_TRACE_NONE;
     for (u32 e = 0; e < prp.n_eqns; e++) {
       // spb=goal derivation seed (goal-cone definitions + conjecture
       // units); inert unless THVM_ATP_SPB_GOAL arms the bias.
       if (prp.eq_gd[e]) thvm_atp_mark_gd_next(s);
+      u32 nt0 = s->n_trace;
       thvm_atp_add_equation(s, prp.eq_l[e], prp.eq_r[e]);
+      if (prp.eq_def[e] >= PR_LABEL_BASE && s->n_trace > nt0)
+        prp.sym_def_trace[prp.eq_def[e] - PR_LABEL_BASE] = nt0;
     }
     // WM ACSymboleSuchen (ANA/PhilMarlow.c:111): a symbol is AC iff the
     // axiom set contains BOTH an associativity and a commutativity

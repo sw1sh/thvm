@@ -53,4 +53,7 @@ for the per-commit story.
   published 2026 set is a DEV metric (+137/138), never a forecast.
 - FindProof `--proof` output, judged by strict CheckProof (each step against
   its cited premises only): records print in the problem's own signature
-  (quoted atoms, hashed long names and curried wide functors mapped back).
+  (quoted atoms, hashed long names and curried wide functors mapped back);
+  fresh-symbol definitions declare their symbol, and tgt-folded
+  definitions, goals and conjecture units print their raw form plus
+  single-rewrite fold steps.

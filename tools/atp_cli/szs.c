@@ -106,18 +106,46 @@ static const char *cli_var_prefix(const PrProblem *pr) {
 // (GDV) does not try to match it against the problem's formulae.
 // Decided by the recorded fresh-label RANGE, immune to user symbols
 // that happen to spell sF*/sFlat*.
+static int cli_is_flat_label(const PrProblem *pr, u32 l) {
+  if (pr == NULL || pr->n_fresh_syms == 0u || l < PR_LABEL_BASE) return 0;
+  u32 si = l - PR_LABEL_BASE;
+  return si >= pr->fresh_sym_base &&
+         si < pr->fresh_sym_base + pr->n_fresh_syms;
+}
+
 static int cli_term_has_flat_sym(const PrProblem *pr, Term t) {
   if (t == 0 || term_tag(t) != TAG_CTR) return 0;
-  u32 l = term_ext(t);
-  if (pr != NULL && pr->n_fresh_syms > 0u && l >= PR_LABEL_BASE) {
-    u32 si = l - PR_LABEL_BASE;
-    if (si >= pr->fresh_sym_base &&
-        si < pr->fresh_sym_base + pr->n_fresh_syms) return 1;
-  }
+  if (cli_is_flat_label(pr, term_ext(t))) return 1;
   u32 n = term_ctr_n(t);
   for (u32 i = 0; i < n; i++)
     if (cli_term_has_flat_sym(pr, term_ctr_at(t, i))) return 1;
   return 0;
+}
+
+static int cli_term_has_label(Term t, u32 l) {
+  if (t == 0 || term_tag(t) != TAG_CTR) return 0;
+  if (term_ext(t) == l) return 1;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++)
+    if (cli_term_has_label(term_ctr_at(t, i), l)) return 1;
+  return 0;
+}
+
+// The fresh symbol a definitional axiom introduces: `d` is a fresh
+// label applied to pairwise-distinct variables and `body` is free of
+// that label.  Returns the label, 0 when `d` has no definition shape.
+static u32 cli_def_label(const PrProblem *pr, Term d, Term body) {
+  if (d == 0 || term_tag(d) != TAG_CTR || !cli_is_flat_label(pr, term_ext(d)))
+    return 0u;
+  u32 n = term_ctr_n(d);
+  for (u32 i = 0; i < n; i++) {
+    Term a = term_ctr_at(d, i);
+    if (term_tag(a) != TAG_FVR) return 0u;
+    for (u32 j = 0; j < i; j++)
+      if (term_ext(term_ctr_at(d, j)) == term_ext(a)) return 0u;
+  }
+  if (cli_term_has_label(body, term_ext(d))) return 0u;
+  return term_ext(d);
 }
 
 static void cli_print_term(FILE *fp, const PrProblem *pr, Term t) {
@@ -462,6 +490,174 @@ static u32 cli_bridge_rescue(AtpState *s, Term tl, Term tr, u32 below,
   return ATP_TRACE_NONE;
 }
 
+static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
+                           u32 ti, u8 *printed);
+
+// Trace id of the input definition introducing each fresh label
+// (ATP_TRACE_NONE: the definition never entered): the identity the
+// bench recorded at the engine feed (PrProblem.sym_def_trace), else
+// the first definition-shaped axiom (built once per emission).
+static u32 *g_cli_def_trace = NULL;
+static const AtpState *g_cli_def_trace_s = NULL;
+
+static u32 cli_def_trace_of(AtpState *s, const PrProblem *pr, u32 lab) {
+  if (cli_is_flat_label(pr, lab)) {
+    u32 fed = pr->sym_def_trace[lab - PR_LABEL_BASE];
+    if (fed != ATP_TRACE_NONE && fed < s->n_trace) return fed;
+  }
+  u32 n = pr->n_fresh_syms;
+  if (g_cli_def_trace_s != s) {
+    free(g_cli_def_trace);
+    g_cli_def_trace = (u32 *)malloc((size_t)(n ? n : 1u) * sizeof(u32));
+    g_cli_def_trace_s = s;
+    if (g_cli_def_trace == NULL) return ATP_TRACE_NONE;
+    for (u32 k = 0; k < n; k++) g_cli_def_trace[k] = ATP_TRACE_NONE;
+    for (u32 ti = 0; ti < s->n_trace; ti++) {
+      Term e = s->trace[ti];
+      if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 4u ||
+          term_ext(e) != TRACE_AXIOM) continue;
+      Term l = 0, r = 0;
+      if (!cli_tp_cached(s, ti, &l, &r)) continue;
+      u32 d = cli_def_label(pr, l, r);
+      if (d == 0u) d = cli_def_label(pr, r, l);
+      if (d == 0u) continue;
+      u32 k = d - PR_LABEL_BASE - pr->fresh_sym_base;
+      if (k < n && g_cli_def_trace[k] == ATP_TRACE_NONE) g_cli_def_trace[k] = ti;
+    }
+  }
+  if (g_cli_def_trace == NULL || !cli_is_flat_label(pr, lab)) return ATP_TRACE_NONE;
+  return g_cli_def_trace[lab - PR_LABEL_BASE - pr->fresh_sym_base];
+}
+
+// --- tgt-fold presentation --------------------------------------------
+// Under --tgt-fold the definitions are born inter-reduced (sF1 =
+// complement(sF0)) and the goal / conjecture units are folded in place
+// (sF22 != n1).  Printed as-is they state nothing the problem gives,
+// and a definition body over another fresh symbol reads as a second
+// introduction of that symbol.  Each such record is printed as its RAW
+// form instead -- every fresh application expanded to its definition
+// body, i.e. a problem formula or a definition over problem symbols --
+// followed by single-rewrite FOLD steps, each citing the definition it
+// folds by, ending at the engine's record.
+
+// The pair of definition record `ti` split into head (fresh symbol
+// applied to its variables) and body.
+static u8 cli_def_split(AtpState *s, const PrProblem *pr, u32 ti,
+                        Term *head, Term *body) {
+  Term l = 0, r = 0;
+  if (ti == ATP_TRACE_NONE || !cli_tp_cached(s, ti, &l, &r)) return 0u;
+  if (cli_def_label(pr, l, r) != 0u) { *head = l; *body = r; return 1u; }
+  if (cli_def_label(pr, r, l) != 0u) { *head = r; *body = l; return 1u; }
+  return 0u;
+}
+
+// `t` with every fresh-symbol application replaced by its definition's
+// raw body; 0 when some fresh symbol has no definition record.
+static Term cli_unfold(AtpState *s, const PrProblem *pr, Term t, u32 depth) {
+  if (t == 0 || term_tag(t) != TAG_CTR) return t;
+  u32 n = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY || depth > 256u) return 0;
+  Term kids[REWRITE_MAX_ARITY];
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = cli_unfold(s, pr, term_ctr_at(t, i), depth + 1u);
+    if (kids[i] == 0) return 0;
+  }
+  Term u = term_new_ctr(term_ext(t), n ? kids : NULL, n);
+  if (!cli_is_flat_label(pr, term_ext(t))) return u;
+  Term head = 0, body = 0;
+  if (!cli_def_split(s, pr, cli_def_trace_of(s, pr, term_ext(t)), &head, &body))
+    return 0;
+  RewriteSubst sub = {{0}};
+  if (!thvm_match(head, u, &sub)) return 0;
+  return cli_unfold(s, pr, thvm_subst_apply(body, &sub), depth + 1u);
+}
+
+// One innermost-leftmost fold: a subterm that is an instance of some
+// definition body becomes the definition head.  0 when none applies.
+static Term cli_fold_once(AtpState *s, const PrProblem *pr, Term t, u32 *def) {
+  if (t == 0 || term_tag(t) != TAG_CTR) return 0;
+  u32 n = term_ctr_n(t);
+  if (n == 0u || n > REWRITE_MAX_ARITY) return 0;
+  for (u32 i = 0; i < n; i++) {
+    Term c = cli_fold_once(s, pr, term_ctr_at(t, i), def);
+    if (c == 0) continue;
+    Term kids[REWRITE_MAX_ARITY];
+    for (u32 j = 0; j < n; j++) kids[j] = (j == i) ? c : term_ctr_at(t, j);
+    return term_new_ctr(term_ext(t), kids, n);
+  }
+  for (u32 k = 0; k < pr->n_fresh_syms; k++) {
+    u32 lab = PR_LABEL_BASE + pr->fresh_sym_base + k;
+    u32 ti = cli_def_trace_of(s, pr, lab);
+    Term head = 0, body = 0;
+    if (!cli_def_split(s, pr, ti, &head, &body)) continue;
+    if (term_tag(body) != TAG_CTR || term_ext(body) != term_ext(t)) continue;
+    RewriteSubst sub = {{0}};
+    if (!thvm_match(body, t, &sub)) continue;
+    *def = ti;
+    return thvm_subst_apply(head, &sub);
+  }
+  return 0;
+}
+
+#define CLI_FOLD_MAX 256u
+typedef struct { Term l, r; u32 def; } CliFoldStep;
+
+// Raw form of (tl, tr) plus the fold steps back to it.  1 when the
+// chain reaches (tl, tr) exactly with at least one step; every cited
+// definition is emitted before returning.  `head` (1 = left, 2 =
+// right, 0 = none) marks a definition's own head, kept as-is.
+static int cli_fold_chain(FILE *fp, AtpState *s, const PrProblem *pr,
+                          Term tl, Term tr, int head, Term *rl, Term *rr,
+                          CliFoldStep *st, u32 *nst, u8 *printed) {
+  *nst = 0u;
+  Term ul = (head == 1) ? tl : cli_unfold(s, pr, tl, 0u);
+  Term ur = (head == 2) ? tr : cli_unfold(s, pr, tr, 0u);
+  if (ul == 0 || ur == 0) return 0;
+  if ((head != 1 && cli_term_has_flat_sym(pr, ul)) ||
+      (head != 2 && cli_term_has_flat_sym(pr, ur))) return 0;
+  Term cl = ul, cr = ur;
+  // A definition's own head stays: fold only the side that differs.
+  while (!(kbo_eq(cl, tl) && kbo_eq(cr, tr))) {
+    if (*nst >= CLI_FOLD_MAX) return 0;
+    u32 def = ATP_TRACE_NONE;
+    Term nl = cl, nr = cr;
+    if (!kbo_eq(cl, tl)) nl = cli_fold_once(s, pr, cl, &def);
+    else nr = cli_fold_once(s, pr, cr, &def);
+    if (nl == 0 || nr == 0 || def == ATP_TRACE_NONE) return 0;
+    cl = nl;
+    cr = nr;
+    st[*nst].l = cl;
+    st[*nst].r = cr;
+    st[*nst].def = def;
+    (*nst)++;
+  }
+  if (*nst == 0u) return 0;
+  for (u32 k = 0; k < *nst; k++) cli_emit_trace(fp, s, pr, st[k].def, printed);
+  *rl = ul;
+  *rr = ur;
+  return 1;
+}
+
+// Print the fold steps after the raw record `first` (records
+// <base>f<k>, the last one named `last`), `op` = "=" or "!=".
+static void cli_print_fold(FILE *fp, const PrProblem *pr, const char *base,
+                           const char *first, const char *last,
+                           const char *op, const CliFoldStep *st, u32 nst) {
+  char prev[64];
+  snprintf(prev, sizeof prev, "%s", first);
+  for (u32 k = 0; k < nst; k++) {
+    char nm[64];
+    if (k + 1u == nst) snprintf(nm, sizeof nm, "%s", last);
+    else snprintf(nm, sizeof nm, "%sf%u", base, k);
+    fprintf(fp, "cnf(%s, plain, ", nm);
+    cli_print_term(fp, pr, st[k].l);
+    fprintf(fp, " %s ", op);
+    cli_print_term(fp, pr, st[k].r);
+    fprintf(fp, ", inference(rw, [status(thm)], [%s, t%u])).\n", prev, st[k].def);
+    snprintf(prev, sizeof prev, "%s", nm);
+  }
+}
+
 // Emit the trace entry `ti` (and, recursively, its parents) as cnf()
 // lines; printed[] de-duplicates.  Names: t<ti>.
 static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
@@ -529,6 +725,58 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
   char srcbuf[1024];
   if (reason == TRACE_AXIOM)
     prov_src = cli_prov_source(fp, pr, lhs, rhs, 0, srcbuf, sizeof srcbuf);
+  u32 defl = 0u;
+  if (reason == TRACE_AXIOM && prov_src == NULL &&
+      (cli_term_has_flat_sym(pr, lhs) || cli_term_has_flat_sym(pr, rhs))) {
+    // Folded record (see cli_fold_chain): raw leaf, then the fold steps.
+    Term rl = 0, rr = 0;
+    // Heap-allocated: cli_fold_chain recurses (through the definitions
+    // it cites) into other records' fold chains.
+    CliFoldStep *fst = (CliFoldStep *)malloc(CLI_FOLD_MAX * sizeof(CliFoldStep));
+    u32 nfst = 0u;
+    int body_fresh = 1, head = 0;
+    defl = cli_def_label(pr, lhs, rhs);
+    if (defl != 0u) { body_fresh = cli_term_has_flat_sym(pr, rhs); head = 1; }
+    else if ((defl = cli_def_label(pr, rhs, lhs)) != 0u) {
+      body_fresh = cli_term_has_flat_sym(pr, lhs);
+      head = 2;
+    }
+    // Definition SHAPE is not identity: a folded conjecture unit can
+    // read sF89(X1,X2) = b.  Only the record the feed tied to the label
+    // defines it; any other is a folded axiom (raw leaf + fold steps).
+    if (defl != 0u && cli_def_trace_of(s, pr, defl) != ti) {
+      defl = 0u;
+      body_fresh = 1;
+      head = 0;
+    }
+    if (fst != NULL && body_fresh &&
+        cli_fold_chain(fp, s, pr, lhs, rhs, head, &rl, &rr, fst, &nfst, printed)) {
+      u32 rdef = cli_def_label(pr, rl, rr);
+      if (rdef == 0u) rdef = cli_def_label(pr, rr, rl);
+      const char *rsrc = NULL;
+      char rbuf[1024];
+      if (rdef == 0u) rsrc = cli_prov_source(fp, pr, rl, rr, 0, rbuf, sizeof rbuf);
+      fprintf(fp, "cnf(t%ur, axiom, ", ti);
+      cli_print_term(fp, pr, rl);
+      fputs(" = ", fp);
+      cli_print_term(fp, pr, rr);
+      if (rdef != 0u)
+        fprintf(fp, ", introduced(definition, [new_symbols(definition, [%s])])).\n",
+                pr->syms[rdef - PR_LABEL_BASE].name);
+      else if (rsrc != NULL)
+        fputs(rsrc, fp);
+      else
+        fprintf(fp, ", file('%s')).\n", g_cli_problem);
+      char base[32], first[32], last[32];
+      snprintf(base, sizeof base, "t%u", ti);
+      snprintf(first, sizeof first, "t%ur", ti);
+      snprintf(last, sizeof last, "t%u", ti);
+      cli_print_fold(fp, pr, base, first, last, "=", fst, nfst);
+      free(fst);
+      return;
+    }
+    free(fst);
+  }
   fprintf(fp, "cnf(t%u, %s, ", ti,
           (reason == TRACE_AXIOM && prov_src == NULL) ? "axiom" : "plain");
   cli_print_term(fp, pr, lhs);
@@ -539,10 +787,14 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
     // match it and complete leaf verification; a goal-flattening
     // definition (fresh sFlat constant = subterm) is an introduced
     // definitional extension, not a problem clause, and is sourced as
-    // such.  An equationalized FOF clause cites its conversion chain
-    // (J13: leaves must be formulae from the problem).
+    // such, declaring the ONE symbol it introduces.  An equationalized
+    // FOF clause cites its conversion chain (J13: leaves must be
+    // formulae from the problem).
     if (prov_src != NULL)
       fputs(prov_src, fp);
+    else if (defl != 0u)
+      fprintf(fp, ", introduced(definition, [new_symbols(definition, [%s])])).\n",
+              pr->syms[defl - PR_LABEL_BASE].name);
     else if (cli_term_has_flat_sym(pr, lhs) || cli_term_has_flat_sym(pr, rhs))
       fputs(", introduced(definition)).\n", fp);
     else
@@ -698,6 +950,45 @@ static u32 cli_resolve_step_trace(AtpState *s, const AtpProofStep *st) {
   return ATP_TRACE_NONE;
 }
 
+// The goal record goal_<id>: the negated conjecture as the problem
+// states it (a FOF goal cites its encoding lineage).  A tgt-folded goal
+// prints its raw form goal_<id>r and the fold steps ending at goal_<id>.
+static void cli_emit_goal_leaf(FILE *fp, AtpState *s, const PrProblem *pr,
+                               Term gl, Term gr, u32 goal_id, u8 *printed) {
+  Term pl = gl, pr_ = gr;
+  CliFoldStep *fst = (CliFoldStep *)malloc(CLI_FOLD_MAX * sizeof(CliFoldStep));
+  u32 nfst = 0u;
+  Term rl = 0, rr = 0;
+  if (fst != NULL &&
+      (cli_term_has_flat_sym(pr, gl) || cli_term_has_flat_sym(pr, gr)) &&
+      cli_fold_chain(fp, s, pr, gl, gr, 0, &rl, &rr, fst, &nfst, printed)) {
+    pl = rl;
+    pr_ = rr;
+  } else {
+    nfst = 0u;
+  }
+  const char *goal_src = NULL;
+  char gsrcbuf[1024];
+  goal_src = cli_prov_source(fp, pr, pl, pr_, 1, gsrcbuf, sizeof gsrcbuf);
+  if (nfst > 0u) fprintf(fp, "cnf(goal_%ur, negated_conjecture, ", goal_id);
+  else fprintf(fp, "cnf(goal_%u, negated_conjecture, ", goal_id);
+  cli_print_term(fp, pr, pl);
+  fputs(" != ", fp);
+  cli_print_term(fp, pr, pr_);
+  if (goal_src != NULL)
+    fputs(goal_src, fp);
+  else
+    fprintf(fp, ", file('%s')).\n", g_cli_problem);
+  if (nfst > 0u) {
+    char base[32], first[32], last[32];
+    snprintf(base, sizeof base, "goal_%u", goal_id);
+    snprintf(first, sizeof first, "goal_%ur", goal_id);
+    snprintf(last, sizeof last, "goal_%u", goal_id);
+    cli_print_fold(fp, pr, base, first, last, "!=", fst, nfst);
+  }
+  free(fst);
+}
+
 // Emit one goal's closing rewrite chain (steps from
 // thvm_atp_proof_extract) plus the derivations of every rule cited.
 static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
@@ -761,17 +1052,7 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
   // FOF-path goal: cite the encoding lineage of the negative unit
   // (direct goals cite their CNF record; the funnel goal cites every
   // negative clause's record) -- chains print before the record.
-  const char *goal_src = NULL;
-  char gsrcbuf[1024];
-  goal_src = cli_prov_source(fp, pr, gl, gr, 1, gsrcbuf, sizeof gsrcbuf);
-  fprintf(fp, "cnf(goal_%u, negated_conjecture, ", goal_id);
-  cli_print_term(fp, pr, gl);
-  fputs(" != ", fp);
-  cli_print_term(fp, pr, gr);
-  if (goal_src != NULL)
-    fputs(goal_src, fp);
-  else
-    fprintf(fp, ", file('%s')).\n", g_cli_problem);
+  cli_emit_goal_leaf(fp, s, pr, gl, gr, goal_id, printed);
   Term cur_l = gl, cur_r = gr;
   char prev[32];
   snprintf(prev, sizeof prev, "goal_%u", goal_id);
@@ -981,17 +1262,7 @@ static int cli_emit_narrow_proof(FILE *fp, AtpState *s,
     if (recs[k].is_rw && recs[k].trace != ATP_TRACE_NONE)
       cli_emit_trace(fp, s, pr, recs[k].trace, printed);
   }
-  const char *goal_src = NULL;
-  char gsrcbuf[1024];
-  goal_src = cli_prov_source(fp, pr, gl, gr, 1, gsrcbuf, sizeof gsrcbuf);
-  fprintf(fp, "cnf(goal_%u, negated_conjecture, ", goal_id);
-  cli_print_term(fp, pr, gl);
-  fputs(" != ", fp);
-  cli_print_term(fp, pr, gr);
-  if (goal_src != NULL)
-    fputs(goal_src, fp);
-  else
-    fprintf(fp, ", file('%s')).\n", g_cli_problem);
+  cli_emit_goal_leaf(fp, s, pr, gl, gr, goal_id, printed);
   char prev[32];
   snprintf(prev, sizeof prev, "goal_%u", goal_id);
   for (u32 k = 0; k < nrs; k++) {
