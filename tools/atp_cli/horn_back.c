@@ -222,6 +222,7 @@ static int g_bk_id = 0;
 static void bk_log_push(int id, int gl, int gr, int kind, int who,
                         const int *kids, int nkids) {
   if (!g_prov_on) return;
+  double t0 = horn_now();
   if (g_bkl_n >= g_bkl_cap) {
     g_bkl_cap = (g_bkl_cap == 0) ? (1 << 12) : g_bkl_cap * 2;
     g_bkl = (BkLog *)realloc(g_bkl, (size_t)g_bkl_cap * sizeof(BkLog));
@@ -231,6 +232,7 @@ static void bk_log_push(int id, int gl, int gr, int kind, int who,
   e->id = id; e->gl = gl; e->gr = gr; e->kind = kind; e->who = who;
   e->nkids = (nkids > HORN_MAX_COND) ? HORN_MAX_COND : nkids;
   for (int i = 0; i < e->nkids; i++) e->kids[i] = kids[i];
+  g_horn_prov_excl += horn_now() - t0;
 }
 
 // Print a term instance under the CURRENT bindings; leftover free
@@ -302,7 +304,8 @@ static int bk_pf_build(const TpProblem *tp, int id, int lo) {
 // its subtree; a bare input-clause ref (the goal closed as one fact
 // instance) wraps in a record so the result is citable.  Returns the
 // g_hpr index or -1.
-static int bk_pf_commit(const TpProblem *tp, int id, int gl, int gr, int lo) {
+static int bk_pf_commit_impl(const TpProblem *tp, int id, int gl, int gr,
+                             int lo) {
   int ref = bk_pf_build(tp, id, lo);
   if (ref == HORN_SRC_NONE) return -1;
   if (ref >= 0) return ref;
@@ -316,11 +319,17 @@ static int bk_pf_commit(const TpProblem *tp, int id, int gl, int gr, int lo) {
   if (ix < 0) { free(sl); free(sr); return -1; }
   return ix;
 }
+static int bk_pf_commit(const TpProblem *tp, int id, int gl, int gr, int lo) {
+  double t0 = horn_now();
+  int ix = bk_pf_commit_impl(tp, id, gl, gr, lo);
+  g_horn_prov_excl += horn_now() - t0;   // off the search budget
+  return ix;
+}
 
 static int bk_budget_ok(void) {
   if (g_bk_over) return 0;
   if ((++g_bk_nodes & 0x3fff) == 0) {
-    if (horn_now() > g_bk_deadline) { g_bk_over = 1; return 0; }
+    if (horn_budget_now() > g_bk_deadline) { g_bk_over = 1; return 0; }
   }
   if (g_bk_node_cap > 0 && g_bk_nodes > g_bk_node_cap) { g_bk_over = 1; return 0; }
   if (g_hn_n > (1 << 24)) { g_bk_over = 1; return 0; }   // arena ceiling
@@ -569,7 +578,7 @@ static int horn_backward_prove(const TpProblem *tp) {
       }
       bk_undo(mark); g_hn_n = an; g_ha_n = aa; g_bk_nv = nvm;
     }
-    if (g_bk_over && horn_now() > g_bk_deadline) break;   // out of wall
+    if (g_bk_over && horn_budget_now() > g_bk_deadline) break;   // out of wall
   }
   fprintf(stderr, "FindProof: Horn backward CD: %s (%ld nodes, %d memo, %.1fs)\n",
           proved ? "goal PROVED" : "no proof", g_bk_nodes, g_bk_memo_n,
@@ -1010,7 +1019,7 @@ static void tp_horn_release(TpProblem *tp) {
         // replayed joins, exactly like CD deepening).
         if (g_horn_gate_on && !gh_admitted && !g_horn_goal_reached &&
             (n_pops & 255) == 0 &&
-            horn_now() - g_horn_t0 > 0.4 * g_horn_wall) {
+            horn_budget_now() - g_horn_t0 > 0.4 * g_horn_wall) {
           gh_admitted = 1;
           int newr = 0;
           for (int r = 0; r < g_hr_n; r++)
@@ -1084,7 +1093,7 @@ static void tp_horn_release(TpProblem *tp) {
       // dedup set short-circuits the replayed joins; only conclusions
       // the old cap rejected are new.
       if (g_horn_cd && !g_horn_stop && !g_horn_goal_reached && g_cd_overcap &&
-          horn_now() - g_horn_t0 < g_horn_wall) {
+          horn_budget_now() - g_horn_t0 < g_horn_wall) {
         g_cd_cap += g_cd_step;
         g_cd_overcap = 0;
         g_cd_rounds++;
@@ -1117,7 +1126,7 @@ static void tp_horn_release(TpProblem *tp) {
       }
       if (g_horn_steer && g_hg_n > 0 && g_hsg_n < g_hsg_max) {
         g_hsg_stop = 0;
-        double cd = horn_now() + 0.25 * g_horn_wall;
+        double cd = horn_budget_now() + 0.25 * g_horn_wall;
         g_hsg_deadline = (cd < g_horn_t0 + g_horn_wall)
                            ? cd : g_horn_t0 + g_horn_wall;
         horn_backward_cone(tp);

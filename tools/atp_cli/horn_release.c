@@ -960,6 +960,14 @@ static double horn_now(void) {
   struct timeval tv; gettimeofday(&tv, NULL);
   return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
 }
+// Wall a --proof run spends capturing derivation records.  The search-
+// shaping budgets read horn_budget_now, which leaves it out, so the
+// proof run releases what the no-proof run releases in its budget; the
+// absolute slice deadline stays on the real clock.
+static double g_horn_prov_excl = 0.0;
+static inline double horn_budget_now(void) {
+  return horn_now() - g_horn_prov_excl;
+}
 // STOP-condition wall test: the release-relative budget (search-shaping)
 // OR the absolute slice deadline (overrun guard), whichever comes first.
 // Used only where the loop would set g_horn_stop; the search-shaping
@@ -967,7 +975,7 @@ static double horn_now(void) {
 // form so a release that finishes before the wall stays byte-identical.
 static inline int horn_wall_over(void) {
   double tn = horn_now();
-  if (tn - g_horn_t0 > g_horn_wall) return 1;
+  if (tn - g_horn_prov_excl - g_horn_t0 > g_horn_wall) return 1;
   if (g_horn_abs_deadline > 0.0 && tn > g_horn_abs_deadline) return 1;
   return 0;
 }
@@ -1099,7 +1107,7 @@ static void horn_bwd_fill(const TpProblem *tp, const HRule *ru, int ci,
   while (ci == open) ci++;
   if (ci >= ru->nc) { horn_bwd_emit(tp, ru->cl[open], ru->ct[open], depth); return; }
   if ((g_horn_attempts & 0xfff) == 0 &&
-      (g_horn_attempts > HORN_MAX_ATTEMPTS || horn_now() > g_hsg_deadline ||
+      (g_horn_attempts > HORN_MAX_ATTEMPTS || horn_budget_now() > g_hsg_deadline ||
        g_hn_n > (1 << 22))) { g_hsg_stop = 1; return; }
   int c = ru->cl[ci], coff = 0;
   horn_deref(&c, &coff);
@@ -1165,7 +1173,7 @@ static void horn_backward_cone(const TpProblem *tp) {
           }
         }
         horn_undo(mark);
-        if ((g_horn_attempts & 0xfff) == 0 && horn_now() > g_hsg_deadline)
+        if ((g_horn_attempts & 0xfff) == 0 && horn_budget_now() > g_hsg_deadline)
           g_hsg_stop = 1;
       }
     }
@@ -1498,12 +1506,15 @@ static int horn_prov_new(int rule, const int *fps, int nf, char *l, char *r) {
 // bound at every condition, from g_hpf).
 static int horn_prov_record(const HRule *ru, const HRel *re) {
   if (!g_prov_on) return -1;
+  double t0 = horn_now();
   int fps[HORN_MAX_COND];
   for (int ci = 0; ci < ru->nc; ci++) {
     int f = g_hpf[ci];
     fps[ci] = (f >= 0 && f < g_hf_n) ? g_hf[f].src : HORN_SRC_NONE;
   }
-  return horn_prov_new(ru->hpc, fps, ru->nc, re->l, re->r);
+  int k = horn_prov_new(ru->hpc, fps, ru->nc, re->l, re->r);
+  g_horn_prov_excl += horn_now() - t0;
+  return k;
 }
 
 static void horn_emit_release(TpProblem *tp, const HRule *ru) {

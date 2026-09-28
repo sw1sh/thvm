@@ -610,7 +610,7 @@ static void init_ctx_arrays(TContext *ctx) {
     // and never returns it to the OS via free() -- the bulk of issue #1's
     // "reserves ~5 GB at init" / "TFree no-op for RSS".  The small WNF
     // stacks stay on calloc (1 MB total).
-    ctx->heap             = (Term *)       arena_map(thvm_heap_cells() * sizeof(Term));
+    ctx->heap             = (Term *)       arena_map(thvm_heap_map_cells() * sizeof(Term));
     ctx->wnf_state.stack  = (Term *)calloc(WNF_CAP,      sizeof(Term));
     ctx->wnf_last_stack   = (Term *)calloc(WNF_CAP,      sizeof(Term));
     ctx->tens             = (TenDesc *)    arena_map(TENS_CAP    * sizeof(TenDesc));
@@ -811,7 +811,7 @@ void thvm_free(void) {
   cpu_jit_cache_reset();
   cpu_custom_cache_reset();
   cg_profile_reset();
-  arena_unmap(HEAP, thvm_heap_cells() * sizeof(Term));            HEAP = NULL;
+  arena_unmap(HEAP, thvm_heap_map_cells() * sizeof(Term));            HEAP = NULL;
   free(WNF_STACK);       WNF_STACK       = NULL;
   free(WNF_LAST_STACK);  WNF_LAST_STACK  = NULL;
   // Free per-kernel heap arrays before unmapping the KERNELS table
@@ -968,7 +968,7 @@ void thvm_context_destroy(u32 slot) {
       for (u32 i = 0; i < ctx->kernels_next; i++)
         kernel_free_arrays(&ctx->kernels[i]);  // owns input_*[] on the heap
     }
-    arena_unmap(ctx->heap,       thvm_heap_cells() * sizeof(Term));
+    arena_unmap(ctx->heap,       thvm_heap_map_cells() * sizeof(Term));
     free(ctx->wnf_state.stack);
     free(ctx->wnf_last_stack);
     arena_unmap(ctx->tens,       TENS_CAP    * sizeof(TenDesc));

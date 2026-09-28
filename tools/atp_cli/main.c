@@ -965,49 +965,48 @@ int main(int argc, char **argv) {
     if (nlen == 7 && strncmp(name, "verbose", 7) == 0) { g_cli_verbose = 1; continue; }
     if (nlen == 5 && strncmp(name, "proof", 5) == 0) {
       g_cli_want_proof = 1;
+      // --proof must not change the search: everything below either
+      // records beside it or runs after it.
+      //
       // The proof extractor cites each goal-closing rule through its
       // completion-trace lineage; the default 128K trace soft cap drops
       // the derivations of rules formed late in a deep completion, so
       // those citations resolve to nothing and the checker cannot bridge
       // the step.  Raise the cap for --proof runs so every proof-critical
-      // lineage survives.  Trajectory-neutral: the CP formation stream is
-      // BYTE-IDENTICAL with the cap raised (INSERT_TRACE on LAT171-1, a
-      // WM/orphan-murder problem that hits the default cap) because CP
-      // selection reads the uid-stamp layer, not r_trace.  setenv with
-      // overwrite=0 keeps any explicit user THVM_ATP_TRACE_MAX.  Applies
-      // in the schedule too: run_schedule re-execs each child with
-      // --proof, so the child sets this before its engine init.
-      setenv("THVM_ATP_TRACE_MAX", "16777216", 0);
-      // The packed trace corrupts emission-replay NORM_STEP chains in the
-      // goal-cone bracket (var=var pairs past REWRITE_MAX_VAR -- the
-      // span-sourced byte store/load in atp_trace_eq_store_ft; open bug).
-      // Proofs must be citable, so --proof runs use the unpacked trace:
-      // byte-correct emission at a bounded RSS cost during search.
-      // overwrite=0 keeps an explicit user THVM_ATP_NO_TRACE_PACK=0.
-      setenv("THVM_ATP_NO_TRACE_PACK", "1", 0);
-      // Deep citation resolve by default: a goal-chain step whose rule
-      // was interreduced away otherwise resolves to NO citation and the
-      // emitted rw record is unverifiable (checker abstain).  The cost
-      // is emission-time only (trace-pair cache bounds the replay);
-      // =0 restores the shallow resolver.
-      setenv("THVM_ATP_PROOF_RESOLVE_DEEP", "1", 0);
+      // lineage survives.  The entries past the default cap stay out of
+      // the search's way (atp_trace_node): their nodes live in a
+      // permanent heap tail the collector never copies (2^28 cells of
+      // address space, touched only as entries arrive), their work runs
+      // off the clock-gated disciplines' work clock, and the RSS guard
+      // discounts their bytes.  An explicit THVM_ATP_TRACE_MAX /
+      // THVM_HEAP_PERM_CELLS still wins.  Applies in the schedule too:
+      // run_schedule re-execs each child with --proof, so the child
+      // makes these requests before its engine init.
+      //
+      // All of it is requested in-process, never through setenv: the
+      // search must run in the no-proof environment (an uncached getenv
+      // in a hot path costs work in proportion to the environment's
+      // size, which the instruction work clock counts).
+      thvm_atp_request_trace_cap(16777216u);
+      thvm_heap_request_perm_cells(268435456ull);
+      // Deep citation resolve by default (cli_resolve_deep): a goal-
+      // chain step whose rule was interreduced away otherwise resolves
+      // to NO citation and the emitted rw record is unverifiable
+      // (checker abstain).  Emission-time only; the env var overrides.
+      //
       // Narrowing proof recorder: existential-goal closures (greedy
       // narrowing / the critical-goal queue) record replayable step
       // descriptors so the emitter prints a real instantiate/rw chain
       // instead of the "no single-NF chain extractable" marker (the
-      // CASC-J13 15-problem empty-proof class).  Search-time recording,
-      // so --proof trajectories may diverge from no-proof runs on
-      // existential goals (the RecordNorm precedent).
-      setenv("THVM_ATP_NARROW_PROOF", "1", 0);
-      // Treatment-step recording (RecordNorm): orient/simplify
-      // treatment rewrites get their OWN trace records, so the emitted
-      // records cite complete parent lists instead of compressing the
-      // treatment away (the GRP660-10 unverifiable-orient class; the
-      // emission-side bridge covers the 1-2 step cases, this closes
-      // the deep ones at the source).  Search-time recording: --proof
-      // trajectories may diverge from no-proof runs (the sanctioned
-      // RecordNorm divergence); =0 restores the compressed trace.
-      setenv("THVM_ATP_RECORD_NORM", "1", 0);
+      // CASC-J13 15-problem empty-proof class).  Observation only: the
+      // queue normalizes with the engine's own normalizer and logs its
+      // splices, so the search is the no-proof search.
+      g_atp_bench_narrow_proof = 1;
+      // The treatment chains between a trace record and its parent are
+      // re-derived at emission (thvm_atp_rederive), never recorded: the
+      // treatment recorder (THVM_ATP_RECORD_NORM) and the unpacked trace
+      // (THVM_ATP_NO_TRACE_PACK) both change the search, so neither is
+      // armed here.
       continue;
     }
     if (nlen == 7 && strncmp(name, "keep-pr", 7) == 0) { keep_pr = 1; continue; }
@@ -1460,6 +1459,10 @@ int main(int argc, char **argv) {
       snprintf(line, sizeof line, "%% SZS status %s for %s\n",
                g_cli_tptp_mode ? "Timeout" : "ResourceOut", file);
     cli_arm_wall_alarm(atof(wall), 30, outfd, line[0] ? line : NULL);
+    // Proof emission must finish inside the alarm's grace: past this
+    // point its replays and deep scans give up (records keep their
+    // cheap bridges), so a slow emission costs proof quality only.
+    g_cli_emit_deadline_us = atp_now_us() + (u64)((atof(wall) + 15.0) * 1e6);
   }
 
   char *bench_argv[5];

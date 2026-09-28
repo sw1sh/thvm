@@ -230,14 +230,12 @@ static void nrec_cg_store(AtpState *s, u32 idx, u32 off, u32 len) {
   if (idx >= q->n_cg) q->n_cg = idx + 1u;
 }
 
-// Recording normalize (queue lane, recording runs only): the same
-// single-step machinery the proof extractor replays with
+// Single-step recording normalize: the proof extractor's machinery
 // (atp_proof_rewrite_step: leftmost-outermost, oriented rules plus
 // order-gated unorientable faces), each step pushed to the scratch.
-// Replaces atp_rewrite_normalize inside cgq_admit when armed -- the
-// --proof trajectory may diverge from the unrecorded run (the
-// RecordNorm precedent), which is acceptable: the emitted proof is
-// what must verify, and it replays THESE steps.
+// A different rewrite order from the engine's normalizer, so it only
+// ever runs as a CHECKED side computation (see nrec_normalize): its
+// chain is kept when it lands on the engine's normal form.
 static Term nrec_normalize_rec(AtpState *s, Term t, u32 side) {
   for (u32 it = 0; it < ATP_GOAL_NORM_CAP; it++) {
     u8  pos8[ATP_PROOF_MAX_DEPTH];
@@ -254,6 +252,57 @@ static Term nrec_normalize_rec(AtpState *s, Term t, u32 side) {
     t = t2;
   }
   return t;
+}
+
+static void nrec_scr_mark_bad(AtpState *s) {
+  AtpNrec *q = (AtpNrec *)s->nrec;
+  if (q != NULL) q->scr_bad = 1u;
+}
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Mixmost splice sink (g_ft_step_sink): one NR_NORM per splice, cited
+// by the fired slot's trace id -- the step the emitter replays.
+static void nrec_ft_sink(AtpState *s, u8 side, u32 rule, u8 dir,
+                         const u8 *pos, u8 pos_len, int have_pos) {
+  if (!have_pos) {
+    nrec_scr_mark_bad(s);
+    return;
+  }
+  u32 p[ATP_PROOF_MAX_DEPTH];
+  for (u8 i = 0; i < pos_len; i++) p[i] = pos[i];
+  nrec_scr_push(s, NR_NORM, nrec_slot_trace(s, rule), side,
+                (u8)(dir == 0u), p, pos_len);
+}
+#endif
+
+// Recording normalize (queue lane, recording runs only).  The search
+// sees exactly the unrecorded normal form: the engine's own normalizer
+// runs unchanged and its mixmost walk reports every splice to
+// nrec_ft_sink.  A normalizer without a splice log gets a chain from
+// the single-step recorder inside a heap bracket, kept only when it
+// reaches the same normal form; otherwise the segment is unrecordable
+// (the emitter falls back to the marker if the winning lineage needs it).
+static Term nrec_normalize(AtpState *s, Term t, u32 side) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (s->use_mixmost_nf) {
+    g_ft_step_sink      = nrec_ft_sink;
+    g_ft_step_sink_side = (u8)side;
+    Term nf = atp_rewrite_normalize(s, t, s->lhs, s->rhs, s->n_rules,
+                                    ATP_GOAL_NORM_CAP);
+    u8 logged = (u8)(g_ft_step_sink == NULL);
+    g_ft_step_sink = NULL;
+    if (!logged && !kbo_eq(nf, t)) nrec_scr_mark_bad(s);
+    return nf;
+  }
+#endif
+  Term nf = atp_rewrite_normalize(s, t, s->lhs, s->rhs, s->n_rules,
+                                  ATP_GOAL_NORM_CAP);
+  u64 hp = thvm_atp_heap_checkpoint();
+  u64 g0 = gc_count();
+  Term rec = nrec_normalize_rec(s, t, side);
+  if (!kbo_eq(rec, nf)) nrec_scr_mark_bad(s);
+  if (gc_count() == g0) thvm_atp_heap_reset(hp);
+  return nf;
 }
 
 fn void thvm_atp_set_record_narrow(AtpState *s, u8 on) {
@@ -320,9 +369,14 @@ static u32 narrow_visit(const u32 *p, u32 p_len, void *raw) {
     // Proof recording (scoped to goal_check's greedy loop): the step
     // is fully determined by (rule trace id, side, position) -- the
     // emitter re-unifies at replay.  Greedy uses the l->r face only.
-    if (nrec_on(ctx->s) && ctx->s->narrow_rec_active)
-      nrec_push(ctx->s, NR_NARROW, nrec_slot_trace(ctx->s, k),
-                ctx->side_ix, 1u, p, p_len);
+    // Off the work clock (atp_work_pause), in the no-proof run too.
+    if (ctx->s->narrow_rec_active) {
+      atp_work_pause();
+      if (nrec_on(ctx->s))
+        nrec_push(ctx->s, NR_NARROW, nrec_slot_trace(ctx->s, k),
+                  ctx->side_ix, 1u, p, p_len);
+      atp_work_resume();
+    }
     ctx->success = 1;
     return 0;
   }
@@ -692,12 +746,10 @@ static u8 cgq_seen_add(AtpCgq *q, Term l, Term r, u32 idx) {
 static AtpStatus cgq_admit(AtpState *s, AtpCgq *q, Term l, Term r) {
   u8 rec = nrec_on(s);
   // R-normalize both sides (equational consequences only: sound).
-  // Recording runs take the step-recording normalizer instead (same
-  // rule set; single-step machinery the emitter replays) -- the
-  // --proof trajectory may diverge, the RecordNorm precedent.
+  // Recording runs log the same normalization (nrec_normalize).
   if (rec) {
-    l = nrec_normalize_rec(s, l, 0u);
-    r = nrec_normalize_rec(s, r, 1u);
+    l = nrec_normalize(s, l, 0u);
+    r = nrec_normalize(s, r, 1u);
   } else {
     l = atp_rewrite_normalize(s, l, s->lhs, s->rhs, s->n_rules,
                               ATP_GOAL_NORM_CAP);

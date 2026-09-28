@@ -122,6 +122,22 @@ for the per-commit story.
   definitions, goals and conjecture units print their raw form plus
   single-rewrite fold steps; the clausal pre-pass prints each forward
   demodulation as its own `demodulation` record citing its unit equation.
+- FindProof `--proof` no longer changes the search: a proof run takes the
+  no-proof run's steps, rules and critical pairs (same winning lane) and
+  recovers the proof beside or after it.  The treatment recorder and the
+  unpacked trace are no longer armed (both changed the search: MVA011-1
+  lost its 1.4s encompass proof, the narrowing lane ran 5-20x slower
+  and lost COL003-1/COL044-1 at 180s); the treatment chain behind each
+  printed orient/simplify record is re-derived at emission by replaying
+  the engine's normalizers over the historical rule window, with a
+  meet-in-the-middle fallback (`thvm_atp_rederive`).  The critical-goal
+  queue logs the splices of the engine's own normalizer instead of
+  re-normalizing with the proof extractor.  Trace entries past the
+  default cap (kept for deep proofs) live in a permanent heap tail the
+  collector never copies, run off the clock-gated disciplines' work
+  clock, and are discounted by the RSS guard; the proof settings are
+  requested in-process so the environment is the no-proof one, and the
+  Horn front-end's wall budgets leave the proof capture out.
 - Vampire Otter-loop simplification set (`--otter`, `src/atp/otter.c`):
   orientable queued critical pairs rewrite as passive rules before
   selection.  With Vampire's symbol-precedence port (`--sym-prec`

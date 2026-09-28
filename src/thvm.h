@@ -1578,6 +1578,14 @@ fn u64  thvm_heap_cells(void);
 // BOOK_CAP; overridable once per process via THVM_BOOK_CELLS.  Drives
 // the book-heap mmap size in init_ctx_arrays.
 fn u64  thvm_book_cells(void);
+// Permanent (never collected) heap tail past the semi-spaces, in cells:
+// THVM_HEAP_PERM_CELLS, default 0.  thvm_heap_map_cells is the mapping
+// size; heap_perm_alloc bump-allocates atom-only nodes there (0 = none).
+fn u64  thvm_heap_perm_cells(void);
+fn void thvm_heap_request_perm_cells(u64 cells);
+fn u64  thvm_heap_map_cells(void);
+fn u64  heap_perm_alloc(u64 n);
+fn u64  heap_perm_used(void);
 fn void gc_init(u64 space_words);
 fn void gc_reset(void);
 fn int  gc_enabled(void);
@@ -5798,6 +5806,16 @@ typedef struct {
   u32   n_trace;
   u32   t_cap;
   u32   t_max;
+  // Bytes held only by entries past the default cap (ATP_MAX_TRACE),
+  // which exist only when the cap is raised for a proof: their nodes
+  // live in the permanent heap tail and their cost is off the work
+  // clock; the RSS guard discounts these bytes, so the search sees the
+  // default-cap run's memory.
+  u64   trace_x_bytes;
+  // Some entry past the default cap sits in the collected heap (a full
+  // permanent tail, a non-atom node, a later rebuild): the collector then
+  // roots the whole trace instead of the default-cap prefix.
+  u8    trace_x_heap;
 
   // Off-heap trace-equation store (env THVM_ATP_TRACE_PACK).  The proof
   // DAG's per-step equation (children 2,3 of each trace entry) is the
@@ -7627,6 +7645,7 @@ fn void      thvm_atp_set_use_overlap_exhaust(AtpState *s, u8 on);
 // once per process via THVM_ATP_TRACE_MAX (read at first call).  An unset
 // env is byte-identical to the historical fixed 131072-entry trace.
 fn u32       thvm_atp_trace_cap(void);
+fn void      thvm_atp_request_trace_cap(u32 cap);
 
 // Set a wall-clock deadline.  `seconds_from_now` is a float duration
 // (e.g. 5.0 = 5 seconds); pass 0.0 to clear the deadline.  The
@@ -8602,6 +8621,20 @@ fn void thvm_atp_materialize_trace(AtpState *s);
 // search terminates and BEFORE trace materialization / extraction;
 // entries whose replay misses the recorded equation stay untouched.
 fn void thvm_atp_record_goal_cone(AtpState *s);
+
+// Emission-time treatment re-derivation (the --proof emitter): for trace
+// entry `ti` (TRACE_ORIENT / TRACE_FVI / TRACE_SIMPLIFY) whose pair is
+// not its parent's, replay the engine's normalizers over the historical
+// rule window and return the rewrite chain parent -> entry in out[]:
+// out[k] is the pair after step k and the trace id of the equation it
+// applies.  Returns the step count (0 = no replay reaches the entry's
+// pair).  Nothing is pushed on the trace.  thvm_atp_rederive_end drops
+// the window cache once emission is done.
+typedef struct { Term l, r; u32 eq; } AtpRederiveStep;
+fn u32  thvm_atp_rederive(AtpState *s, u32 ti, AtpRederiveStep *out, u32 cap);
+fn void thvm_atp_rederive_end(AtpState *s);
+// Wall deadline (us, atp_now_us clock) after which re-derivation gives up.
+fn void thvm_atp_rederive_deadline(u64 wall_us);
 
 // Redex inspection / single-redex firing for the debugger interface.
 // is_redex predicate; redex_fire dispatches the matching interaction

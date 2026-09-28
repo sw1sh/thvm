@@ -141,6 +141,12 @@ static u8 atp_cone_orient_gt_ft(AtpState *s, const AtpFtCell *bl,
 // the birth at p_a (the SIMPLIFY victim's own rule).  Returns the
 // installed slot count; *win_unor_out gets the window's unorientable
 // count.  Caller owns setting/restoring s->n_rules / s->n_unorient.
+// Wide windows (emission re-derivation's last resort): every birth
+// before the window time, dead or not -- a derived equation stays true
+// after the engine retired it, and the death model misses retirements
+// that leave no SIMPLIFY record.
+static u8 g_cone_win_wide = 0u;
+
 static u32 atp_cone_install_window(AtpState *s, u32 n_rules0,
                                    const u32 *birth_ti,
                                    const u32 *birth_dead,
@@ -152,7 +158,9 @@ static u32 atp_cone_install_window(AtpState *s, u32 n_rules0,
   u32 k = 0u, win_unor = 0u;
   for (u32 b = 0; b < n_births; b++) {
     if (birth_ti[b] >= tw) break;
-    if (birth_dead[b] != ATP_TRACE_NONE && birth_dead[b] < tw) continue;
+    if (!g_cone_win_wide && birth_dead[b] != ATP_TRACE_NONE &&
+        birth_dead[b] < tw)
+      continue;
     if (!incl_parent && birth_ti[b] == p_a) continue;
     if (birth_state[b] == 0u) {
       AtpFtCell *bl = NULL, *br = NULL;
@@ -464,6 +472,7 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
           for (u32 q = 0; q < n; q++) ch[q] = term_ctr_at(e, q);
           ch[0] = term_new(0, TAG_NUM, 0, chain);
           s->trace[ti] = term_new_ctr(reason, ch, n);
+          if (ti >= ATP_MAX_TRACE) s->trace_x_heap = 1u;
           success = 1;
           n_fixed++;
         } else {
@@ -504,3 +513,593 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
 #endif
 }
 
+
+// === Emission-time treatment re-derivation ===========================
+//
+// A --proof search records no treatment steps: the treatment recorder
+// (record_norm_steps) and the unpacked trace both changed the search
+// they were meant to explain.  The emitter asks instead, for each
+// printed ORIENT / FVI / SIMPLIFY record whose pair is not its
+// parent's: thvm_atp_rederive replays the engine's normalizers over the
+// historical rule window R(ti) of the goal-cone model above and returns
+// the rewrite chain parent -> record as fresh Terms.  The trace and the
+// live rule set are left as they were.  Rungs, in the order a record's
+// pair most likely came to differ from its parent's:
+//   pop normalize over R(ti), both sides (doR+doE, then doR only --
+//     the Otter adoption and the WM demote drain are rules-only);
+//   the formation treatment (doR over R(p_a)) then the pop normalize;
+//   the same shapes Term-side (leftmost-outermost, oriented rules first
+//     at each position) for the non-mixmost normalizers;
+//   SIMPLIFY: the victim without its own rule, or its RHS composed with
+//     the rule still live.
+// A rung counts only when its last pair IS the record's pair (either
+// orientation, up to renaming; an FVI record may be a grounded instance
+// of it), so a returned chain is a real derivation -- a missing one
+// only costs the emitter's fallbacks.
+
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+typedef struct {
+  const AtpState *s;
+  u32   n_trace;          // trace length the index describes
+  u32   n_births;
+  u32  *birth_ti;         // ORIENT / FVI entries, ascending
+  u32  *birth_dead;       // first SIMPLIFY citing the birth, or NONE
+  u8   *birth_state;      // 0 unloaded / 1 spans loaded / 2 no pair
+  u8   *birth_or;
+  AtpFtCell **birth_lft;
+  AtpFtCell **birth_rft;
+} AtpRdHist;
+static AtpRdHist g_rd_hist;
+
+static void atp_rd_hist_drop(void) {
+  AtpRdHist *h = &g_rd_hist;
+  if (h->s != NULL && h->birth_state != NULL && h->s->ft_arena_ptr != NULL) {
+    AtpFt *a = (AtpFt *)h->s->ft_arena_ptr;
+    for (u32 b = 0; b < h->n_births; b++) {
+      if (h->birth_state[b] == 1u)
+        atp_cone_free_pair(a, h->birth_lft[b], h->birth_rft[b]);
+    }
+  }
+  free(h->birth_ti); free(h->birth_dead); free(h->birth_state);
+  free(h->birth_or); free(h->birth_lft); free(h->birth_rft);
+  memset(h, 0, sizeof *h);
+}
+
+// A rule slot is born by an ORIENT / FVI record, and REBORN in place by
+// a SIMPLIFY record when interreduction rewrote a live rule without
+// removing it (RHS composition): such a SIMPLIFY is the slot's current
+// record -- still live at the end, or itself simplified later.  A
+// SIMPLIFY whose victim left R (requeued) is no rule.
+static u8 *atp_rd_rebirths(AtpState *s) {
+  u8 *rb = (u8 *)calloc(s->n_trace ? s->n_trace : 1u, 1u);
+  if (rb == NULL) return NULL;
+  for (u32 i = 0; i < s->n_trace; i++) {
+    Term e = s->trace[i];
+    if (term_tag(e) != TAG_CTR || term_ext(e) != TRACE_SIMPLIFY) continue;
+    u32 p_a = (u32)term_val(term_ctr_at(e, 0));
+    if (p_a == ATP_TRACE_NONE || p_a >= i) continue;
+    Term pe = s->trace[p_a];
+    if (term_tag(pe) == TAG_CTR && term_ext(pe) == TRACE_SIMPLIFY)
+      rb[p_a] = 1u;
+  }
+  for (u32 k = 0; k < s->n_rules; k++) {
+    u32 t = s->r_trace[k];
+    if (t == ATP_TRACE_NONE || t >= s->n_trace || s->r_dead[k]) continue;
+    Term e = s->trace[t];
+    if (term_tag(e) == TAG_CTR && term_ext(e) == TRACE_SIMPLIFY) rb[t] = 1u;
+  }
+  return rb;
+}
+
+static int atp_rd_hist_ensure(AtpState *s) {
+  AtpRdHist *h = &g_rd_hist;
+  if (h->s == s && h->n_trace == s->n_trace && h->birth_ti != NULL) return 1;
+  atp_rd_hist_drop();
+  u8 *reborn = atp_rd_rebirths(s);
+  if (reborn == NULL) return 0;
+#define ATP_RD_IS_BIRTH(I, REASON)                                            \
+  ((REASON) == TRACE_ORIENT || (REASON) == TRACE_FVI ||                       \
+   ((REASON) == TRACE_SIMPLIFY && reborn[(I)]))
+  u32 nb = 0u;
+  for (u32 i = 0; i < s->n_trace; i++) {
+    Term e = s->trace[i];
+    if (term_tag(e) != TAG_CTR) continue;
+    u32 reason = term_ext(e);
+    if (ATP_RD_IS_BIRTH(i, reason)) nb++;
+  }
+  if (nb == 0u) { free(reborn); return 0; }
+  h->birth_ti    = (u32 *)malloc((size_t)nb * sizeof(u32));
+  h->birth_dead  = (u32 *)malloc((size_t)nb * sizeof(u32));
+  h->birth_state = (u8 *)calloc(nb, 1u);
+  h->birth_or    = (u8 *)calloc(nb, 1u);
+  h->birth_lft   = (AtpFtCell **)calloc(nb, sizeof(AtpFtCell *));
+  h->birth_rft   = (AtpFtCell **)calloc(nb, sizeof(AtpFtCell *));
+  if (h->birth_ti == NULL || h->birth_dead == NULL || h->birth_state == NULL ||
+      h->birth_or == NULL || h->birth_lft == NULL || h->birth_rft == NULL) {
+    free(reborn);
+    atp_rd_hist_drop();
+    return 0;
+  }
+  u32 w = 0u;
+  for (u32 i = 0; i < s->n_trace; i++) {
+    Term e = s->trace[i];
+    if (term_tag(e) != TAG_CTR) continue;
+    u32 reason = term_ext(e);
+    if (!ATP_RD_IS_BIRTH(i, reason)) continue;
+    h->birth_ti[w]   = i;
+    h->birth_dead[w] = ATP_TRACE_NONE;
+    w++;
+  }
+#undef ATP_RD_IS_BIRTH
+  free(reborn);
+  for (u32 i = 0; i < s->n_trace; i++) {
+    Term e = s->trace[i];
+    if (term_tag(e) != TAG_CTR || term_ext(e) != TRACE_SIMPLIFY) continue;
+    u32 p_a = (u32)term_val(term_ctr_at(e, 0));
+    if (p_a == ATP_TRACE_NONE) continue;
+    u32 lo = 0u, hi = nb;
+    while (lo < hi) {
+      u32 mid = lo + (hi - lo) / 2u;
+      if (h->birth_ti[mid] < p_a) lo = mid + 1u; else hi = mid;
+    }
+    if (lo < nb && h->birth_ti[lo] == p_a &&
+        h->birth_dead[lo] == ATP_TRACE_NONE) {
+      h->birth_dead[lo] = i;
+    }
+  }
+  h->s        = s;
+  h->n_trace  = s->n_trace;
+  h->n_births = nb;
+  return 1;
+}
+
+// Lands: the replayed pair IS the record's (either orientation, up to
+// renaming), or -- an FVI record -- a substitution instance of it.
+static int atp_rd_lands(u32 reason, Term fl, Term fr, Term el, Term er) {
+  if (atp_cone_pair_eq(fl, fr, el, er) || atp_cone_pair_eq(fl, fr, er, el))
+    return 1;
+  if (reason != TRACE_FVI) return 0;
+  RewriteSubst sub;
+  memset(&sub, 0, sizeof sub);
+  if (thvm_match(fl, el, &sub) && thvm_match(fr, er, &sub)) return 1;
+  memset(&sub, 0, sizeof sub);
+  return (thvm_match(fl, er, &sub) && thvm_match(fr, el, &sub)) ? 1 : 0;
+}
+
+#define ATP_RD_PSTEPS 256u
+
+// Mixmost replay of one phase: normalize the sides in `sides` (bit 0
+// lhs, bit 1 rhs) of (*cl, *cr) over R(tw), appending one out[] step per
+// splice.  Returns 0 when the window is empty, the chain overflows, or
+// a step's rule has no trace id.
+static int atp_rd_phase_ft(AtpState *s, Term *cl, Term *cr, u32 tw,
+                           u8 doE, u8 incl_parent, u32 p_a, u8 sides,
+                           AtpRederiveStep *out, u32 cap, u32 *n_out) {
+  AtpRdHist *h = &g_rd_hist;
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  const u32 n_rules0 = s->n_rules;
+  const u32 n_unor0  = s->n_unorient;
+  u32 win_unor = 0u;
+  u32 k = atp_cone_install_window(s, n_rules0, h->birth_ti, h->birth_dead,
+                                  h->birth_state, h->birth_or,
+                                  h->birth_lft, h->birth_rft, h->n_births,
+                                  tw, incl_parent, p_a, &win_unor);
+  if (k == 0u) return 0;
+  s->n_rules    = n_rules0 + k;
+  s->n_unorient = n_unor0 + win_unor;
+  static AtpProofStep ps[ATP_RD_PSTEPS];
+  int ok = 1;
+  for (u8 side = 0u; side < 2u && ok; side++) {
+    if (!(sides & (1u << side))) continue;
+    u32 pn = 0u;
+    AtpFtCell *t = ft_from_term(a, side ? *cr : *cl, 0);
+    ft_clear_subst_fresh(t);
+    AtpFtSubst subst;
+    memset(&subst, 0, sizeof(subst));
+    AtpFtCell *nf = atp_normalize_mixmost_ft(s, t, n_rules0, n_rules0 + k,
+                                             64u, doE, 0, (Term)0, side,
+                                             NULL, &subst, ps, &pn,
+                                             ATP_RD_PSTEPS);
+    Term nft = ft_to_term(nf);
+    ft_free_span(a, nf, nf->end);
+    if (pn >= ATP_RD_PSTEPS) { ok = 0; break; }
+    for (u32 j = 0; j < pn; j++) {
+      u32 eq = (ps[j].rule < s->n_rules) ? s->r_trace[ps[j].rule]
+                                         : ATP_TRACE_NONE;
+      if (eq == ATP_TRACE_NONE || *n_out >= cap) { ok = 0; break; }
+      if (side) *cr = ps[j].after; else *cl = ps[j].after;
+      out[*n_out].l  = *cl;
+      out[*n_out].r  = *cr;
+      out[*n_out].eq = eq;
+      (*n_out)++;
+    }
+    if (ok && !kbo_eq(side ? *cr : *cl, nft)) ok = 0;   // log incomplete
+  }
+  s->n_rules    = n_rules0;
+  s->n_unorient = n_unor0;
+  return ok;
+}
+
+// Term-side replay of one phase: leftmost-outermost single steps over
+// R(tw) (oriented rules first at each position, then order-gated
+// unorientable faces -- the atp_proof_rewrite_step_slice pick), after an
+// oriented-only fixpoint when `oriented_first` (the record-mode shape of
+// the non-mixmost pop normalize).
+static int atp_rd_phase_term(AtpState *s, Term *cl, Term *cr, u32 tw,
+                             u8 doE, u8 incl_parent, u32 p_a, u8 sides,
+                             u8 oriented_first,
+                             AtpRederiveStep *out, u32 cap, u32 *n_out) {
+  AtpRdHist *h = &g_rd_hist;
+  u32 nwin = 0u;
+  for (u32 b = 0; b < h->n_births && h->birth_ti[b] < tw; b++) nwin++;
+  if (nwin == 0u) return 0;
+  Term *wl = (Term *)malloc((size_t)nwin * sizeof(Term));
+  Term *wr = (Term *)malloc((size_t)nwin * sizeof(Term));
+  u32  *wt = (u32 *)malloc((size_t)nwin * sizeof(u32));
+  u8   *wo = (u8 *)malloc((size_t)nwin);
+  if (wl == NULL || wr == NULL || wt == NULL || wo == NULL) {
+    free(wl); free(wr); free(wt); free(wo);
+    return 0;
+  }
+  u32 k = 0u;
+  for (u32 b = 0; b < h->n_births; b++) {
+    if (h->birth_ti[b] >= tw) break;
+    if (h->birth_dead[b] != ATP_TRACE_NONE && h->birth_dead[b] < tw) continue;
+    if (!incl_parent && h->birth_ti[b] == p_a) continue;
+    Term l = 0, r = 0;
+    if (!atp_cone_eq(s, h->birth_ti[b], &l, &r)) continue;
+    wl[k] = l;
+    wr[k] = r;
+    wt[k] = h->birth_ti[b];
+    wo[k] = (u8)(atp_compare(s, l, r) == KBO_GT);
+    k++;
+  }
+  // Oriented subset first (the oriented-only fixpoint phase).
+  u32 ko = 0u;
+  Term *ol = (Term *)malloc((size_t)(k ? k : 1u) * sizeof(Term));
+  Term *orr = (Term *)malloc((size_t)(k ? k : 1u) * sizeof(Term));
+  u32  *ot = (u32 *)malloc((size_t)(k ? k : 1u) * sizeof(u32));
+  int ok = (ol != NULL && orr != NULL && ot != NULL && k > 0u);
+  if (ok) {
+    for (u32 i = 0; i < k; i++) {
+      if (!wo[i]) continue;
+      ol[ko] = wl[i]; orr[ko] = wr[i]; ot[ko] = wt[i]; ko++;
+    }
+  }
+  for (u8 side = 0u; side < 2u && ok; side++) {
+    if (!(sides & (1u << side))) continue;
+    for (u8 ph = oriented_first ? 0u : 1u; ph < 2u && ok; ph++) {
+      if (ph == 1u && !doE && oriented_first) break;
+      const Term *al = (ph == 0u || !doE) ? ol : wl;
+      const Term *ar = (ph == 0u || !doE) ? orr : wr;
+      const u32 *at = (ph == 0u || !doE) ? ot : wt;
+      u32 an = (ph == 0u || !doE) ? ko : k;
+      for (u32 it = 0; it < 64u; it++) {
+        u8  pos[ATP_PROOF_MAX_DEPTH];
+        u32 rule = 0u;
+        u8  pos_len = 0u, fwd = 1u, fired = 0u;
+        Term t = side ? *cr : *cl;
+        Term t2 = atp_proof_rewrite_step_slice(s, t, pos, 0u, al, ar, an,
+                                               &rule, &pos_len, &fwd,
+                                               &fired);
+        if (!fired || kbo_eq(t, t2)) break;
+        if (*n_out >= cap || rule >= an) { ok = 0; break; }
+        if (side) *cr = t2; else *cl = t2;
+        out[*n_out].l  = *cl;
+        out[*n_out].r  = *cr;
+        out[*n_out].eq = at[rule];
+        (*n_out)++;
+      }
+    }
+  }
+  free(ol); free(orr); free(ot);
+  free(wl); free(wr); free(wt); free(wo);
+  return ok;
+}
+
+// Normalize ONE term over R(tw) (mixmost), returning its NF and the
+// intermediate terms + cited equations in st_t[] / st_eq[] (st_t[j] is
+// the term after step j).  0 on an empty window, a step without a trace
+// id, or overflow.
+static int atp_rd_nf_ft(AtpState *s, Term t, u32 tw, u8 doE, u8 incl_parent,
+                        u32 p_a, Term *nf_out, Term *st_t, u32 *st_eq,
+                        u32 cap, u32 *n_out) {
+  AtpRdHist *h = &g_rd_hist;
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  const u32 n_rules0 = s->n_rules;
+  const u32 n_unor0  = s->n_unorient;
+  u32 win_unor = 0u;
+  u32 k = atp_cone_install_window(s, n_rules0, h->birth_ti, h->birth_dead,
+                                  h->birth_state, h->birth_or,
+                                  h->birth_lft, h->birth_rft, h->n_births,
+                                  tw, incl_parent, p_a, &win_unor);
+  if (k == 0u) return 0;
+  s->n_rules    = n_rules0 + k;
+  s->n_unorient = n_unor0 + win_unor;
+  static AtpProofStep ps[ATP_RD_PSTEPS];
+  u32 pn = 0u;
+  AtpFtCell *ft = ft_from_term(a, t, 0);
+  ft_clear_subst_fresh(ft);
+  AtpFtSubst subst;
+  memset(&subst, 0, sizeof(subst));
+  AtpFtCell *nf = atp_normalize_mixmost_ft(s, ft, n_rules0, n_rules0 + k,
+                                           64u, doE, 0, (Term)0, 0u, NULL,
+                                           &subst, ps, &pn, ATP_RD_PSTEPS);
+  *nf_out = ft_to_term(nf);
+  ft_free_span(a, nf, nf->end);
+  int ok = (pn < ATP_RD_PSTEPS && pn <= cap);
+  for (u32 j = 0; ok && j < pn; j++) {
+    u32 eq = (ps[j].rule < s->n_rules) ? s->r_trace[ps[j].rule]
+                                       : ATP_TRACE_NONE;
+    if (eq == ATP_TRACE_NONE) { ok = 0; break; }
+    st_t[j]  = ps[j].after;
+    st_eq[j] = eq;
+  }
+  *n_out = ok ? pn : 0u;
+  s->n_rules    = n_rules0;
+  s->n_unorient = n_unor0;
+  return ok;
+}
+
+// Meet in the middle: normalize the parent's sides AND the record's
+// sides over the same window; when the two pairs meet at one normal-form
+// pair (up to renaming), the chain runs forward from the parent to the
+// normal forms and back to the record, each record-side step read in
+// reverse (a rewrite by the same equation).  Robust to a window holding
+// more rules than the engine had (retired passive demodulators, rules
+// subsumed away): extra rules normalize both ends alike.  The record is
+// renamed apart first and its side mapped onto the parent's variables
+// at the meeting point, so every chain pair is one equation.
+static u32 atp_rd_meet(AtpState *s, Term pl, Term pr, Term el, Term er,
+                       u32 ti, u32 p_a, u8 doE, AtpRederiveStep *out,
+                       u32 cap) {
+  enum { M = ATP_RD_PSTEPS };
+  static Term ta[4][M];
+  static u32  qa[4][M];
+  u32 na[4];
+  for (u32 swap = 0; swap < 2u; swap++) {
+    Term xl = thvm_rename_vars(swap ? er : el, CP_RENAME_OFFSET);
+    Term xr = thvm_rename_vars(swap ? el : er, CP_RENAME_OFFSET);
+    Term src[4] = { pl, pr, xl, xr };
+    Term nf4[4];
+    int ok = 1;
+    for (u32 i = 0; i < 4u && ok; i++)
+      ok = atp_rd_nf_ft(s, src[i], ti, doE, 0u, p_a, &nf4[i], ta[i], qa[i],
+                        M, &na[i]);
+    if (!ok) continue;
+    u32 total = na[0] + na[1] + na[2] + na[3];
+    if (total == 0u || total > cap) continue;
+    // Record normal forms onto the parent's: a variable renaming only.
+    RewriteSubst rho;
+    memset(&rho, 0, sizeof rho);
+    if (!thvm_match(nf4[2], nf4[0], &rho) || !thvm_match(nf4[3], nf4[1], &rho))
+      continue;
+    int renaming = 1;
+    for (u32 v = 0; v < REWRITE_MAX_VAR && renaming; v++) {
+      Term b = rho.bindings[v];
+      if (b == 0) continue;
+      if (term_tag(b) != TAG_FVR) { renaming = 0; break; }
+      for (u32 w = v + 1u; w < REWRITE_MAX_VAR; w++)
+        if (rho.bindings[w] != 0 && kbo_eq(rho.bindings[w], b)) {
+          renaming = 0;
+          break;
+        }
+    }
+    if (!renaming) continue;
+    u32 n = 0u;
+    Term cl = pl, cr = pr;
+    for (u32 j = 0; j < na[0]; j++) {                // parent lhs -> NF
+      cl = ta[0][j];
+      out[n].l = cl; out[n].r = cr; out[n].eq = qa[0][j]; n++;
+    }
+    for (u32 j = 0; j < na[1]; j++) {                // parent rhs -> NF
+      cr = ta[1][j];
+      out[n].l = cl; out[n].r = cr; out[n].eq = qa[1][j]; n++;
+    }
+    for (u32 j = na[2]; j-- > 0u; ) {                // NF -> record lhs
+      cl = thvm_subst_apply((j == 0u) ? xl : ta[2][j - 1u], &rho);
+      out[n].l = cl; out[n].r = cr; out[n].eq = qa[2][j]; n++;
+    }
+    for (u32 j = na[3]; j-- > 0u; ) {                // NF -> record rhs
+      cr = thvm_subst_apply((j == 0u) ? xr : ta[3][j - 1u], &rho);
+      out[n].l = cl; out[n].r = cr; out[n].eq = qa[3][j]; n++;
+    }
+    return n;
+  }
+  return 0u;
+}
+
+#endif
+
+// Emission deadline (wall us, 0 = none): past it the replays stop and
+// the emitter's cheaper fallbacks take the remaining records, so a slow
+// re-derivation costs proof quality, never the run's status.
+static u64 g_atp_rd_deadline_us = 0u;
+fn void thvm_atp_rederive_deadline(u64 wall_us) { g_atp_rd_deadline_us = wall_us; }
+static int atp_rd_late(void) {
+  return g_atp_rd_deadline_us != 0u && atp_now_us() >= g_atp_rd_deadline_us;
+}
+
+// THVM_ATP_RD_DEBUG=1: one line per re-derivation (rung 0 = miss;
+// 1+r mixmost-or-term rung r of the first pass, 101+r second pass,
+// 1000+k meet).
+static void atp_rd_note(u32 ti, u32 reason, u32 rung, u32 n) {
+  static int dbg = -1;
+  if (dbg < 0) dbg = atp_env_on("THVM_ATP_RD_DEBUG");
+  if (dbg)
+    fprintf(stderr, "[rederive] ti=%u reason=%u rung=%u steps=%u\n",
+            ti, reason, rung, n);
+}
+
+fn u32 thvm_atp_rederive(AtpState *s, u32 ti, AtpRederiveStep *out,
+                         u32 cap) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (s == NULL || s->trace == NULL || ti >= s->n_trace || cap == 0u)
+    return 0u;
+  if (s->ft_arena_ptr == NULL) return 0u;
+  Term e = s->trace[ti];
+  if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 4u) return 0u;
+  u32 reason = term_ext(e);
+  if (reason != TRACE_ORIENT && reason != TRACE_FVI &&
+      reason != TRACE_SIMPLIFY)
+    return 0u;
+  u32 p_a = (u32)term_val(term_ctr_at(e, 0));
+  if (p_a == ATP_TRACE_NONE || p_a >= ti) return 0u;
+  // Headroom: a failed rung rolls its Terms back, a found chain stays
+  // live until the emitter prints it.
+  if (gc_from_end() - HEAP_NEXT < (u64)(4u << 20)) return 0u;
+  Term el = 0, er = 0, pl = 0, pr = 0;
+  if (!atp_cone_eq(s, ti, &el, &er) || !atp_cone_eq(s, p_a, &pl, &pr))
+    return 0u;
+  if (atp_cone_pair_eq(pl, pr, el, er) || atp_cone_pair_eq(pl, pr, er, el))
+    return 0u;   // no gap
+  if (!atp_rd_hist_ensure(s)) return 0u;
+  atp_ft_mirror_ensure(s);
+  // Rung table: {ft, doE, incl_parent, sides, two-phase, oriented_first}.
+  typedef struct { u8 ft, doE, inc, sides, two, ofirst; } Rung;
+  static const Rung orient_rungs[] = {
+    {1, 1, 0, 3, 0, 0}, {1, 0, 0, 3, 0, 0},
+    {1, 1, 0, 3, 1, 0}, {1, 0, 0, 3, 1, 0},
+    {0, 1, 0, 3, 0, 1}, {0, 1, 0, 3, 0, 0}, {0, 0, 0, 3, 0, 0},
+    {0, 1, 0, 3, 1, 1},
+    {1, 1, 1, 2, 0, 0}, {1, 0, 1, 2, 0, 0},
+  };
+  static const Rung simp_rungs[] = {
+    {1, 0, 0, 3, 0, 0}, {1, 1, 0, 3, 0, 0},
+    {1, 1, 1, 2, 0, 0}, {1, 0, 1, 2, 0, 0},
+    {0, 0, 0, 3, 0, 0}, {0, 1, 0, 3, 0, 1},
+    {0, 1, 1, 2, 0, 0}, {0, 0, 1, 2, 0, 0},
+  };
+  const Rung *rungs = (reason == TRACE_SIMPLIFY) ? simp_rungs : orient_rungs;
+  u32 n_rungs = (reason == TRACE_SIMPLIFY)
+      ? (u32)(sizeof simp_rungs / sizeof simp_rungs[0])
+      : (u32)(sizeof orient_rungs / sizeof orient_rungs[0]);
+  // The engine's own normalizer first: the mixmost rungs for a mixmost
+  // run, the Term-side rungs otherwise.
+  u8 first_ft = s->use_mixmost_nf ? 1u : 0u;
+  for (u32 pass = 0; pass < 2u; pass++) {
+  for (u32 ri = 0; ri < n_rungs; ri++) {
+    const Rung *rg = &rungs[ri];
+    if ((rg->ft == first_ft) != (pass == 0u)) continue;
+    if (atp_rd_late()) return 0u;
+    u64 hp = thvm_atp_heap_checkpoint();
+    u64 g0 = gc_count();
+    u32 n = 0u;
+    Term cl = pl, cr = pr;
+    int ok;
+    if (rg->ft) {
+      ok = 1;
+      if (rg->two)   // formation-time treatment first (doR over R(p_a))
+        ok = atp_rd_phase_ft(s, &cl, &cr, p_a, 0u, 1u, p_a, rg->sides,
+                             out, cap, &n);
+      if (ok)
+        ok = atp_rd_phase_ft(s, &cl, &cr, ti, rg->doE, rg->inc, p_a,
+                             rg->sides, out, cap, &n);
+    } else {
+      ok = 1;
+      if (rg->two)
+        ok = atp_rd_phase_term(s, &cl, &cr, p_a, 0u, 1u, p_a, rg->sides,
+                               1u, out, cap, &n);
+      if (ok)
+        ok = atp_rd_phase_term(s, &cl, &cr, ti, rg->doE, rg->inc, p_a,
+                               rg->sides, rg->ofirst, out, cap, &n);
+    }
+    if (ok && n > 0u && atp_rd_lands(reason, cl, cr, el, er)) {
+      atp_rd_note(ti, reason, 1u + pass * 100u + ri, n);
+      return n;
+    }
+    {
+      static int dbg2 = -1;
+      if (dbg2 < 0) {
+        const char *e = getenv("THVM_ATP_RD_DEBUG");
+        dbg2 = (e != NULL && e[0] == '2') ? 1 : 0;
+      }
+      if (dbg2) {
+        fprintf(stderr, "[rd-miss] ti=%u rung=%u ok=%d n=%u got: ", ti,
+                1u + pass * 100u + ri, ok, n);
+        atp_dbg_print_term(stderr, cl);
+        fputs(" = ", stderr);
+        atp_dbg_print_term(stderr, cr);
+        fputs("  want: ", stderr);
+        atp_dbg_print_term(stderr, el);
+        fputs(" = ", stderr);
+        atp_dbg_print_term(stderr, er);
+        fputs("  from: ", stderr);
+        atp_dbg_print_term(stderr, pl);
+        fputs(" = ", stderr);
+        atp_dbg_print_term(stderr, pr);
+        fputc('\n', stderr);
+        for (u32 j = 0; j < n; j++) {
+          Term ql = 0, qr = 0;
+          fprintf(stderr, "   step %u eq=t%u: ", j, out[j].eq);
+          if (atp_cone_eq(s, out[j].eq, &ql, &qr)) {
+            atp_dbg_print_term(stderr, ql);
+            fputs(" = ", stderr);
+            atp_dbg_print_term(stderr, qr);
+            Term te = s->trace[out[j].eq];
+            fprintf(stderr, "  (reason %u parent t%u)",
+                    term_ext(te), (u32)term_val(term_ctr_at(te, 0)));
+          }
+          fputc('\n', stderr);
+        }
+      }
+    }
+    if (gc_count() == g0) thvm_atp_heap_reset(hp);
+  }
+  }
+  if (reason != TRACE_FVI) {
+    for (u32 k = 0; k < 2u; k++) {             // doR+doE, then doR
+      u64 hp = thvm_atp_heap_checkpoint();
+      u64 g0 = gc_count();
+      if (atp_rd_late()) return 0u;
+      u32 n = atp_rd_meet(s, pl, pr, el, er, ti, p_a, (u8)(1u - k), out,
+                          cap);
+      if (n > 0u) {
+        atp_rd_note(ti, reason, 1000u + k, n);
+        return n;
+      }
+      if (gc_count() == g0) thvm_atp_heap_reset(hp);
+    }
+  }
+  // Last resort: the same attempts over WIDE windows (every earlier
+  // birth, retired or not).
+  g_cone_win_wide = 1u;
+  for (u32 k = 0; k < 2u; k++) {
+    if (atp_rd_late()) break;
+    u64 hp = thvm_atp_heap_checkpoint();
+    u64 g0 = gc_count();
+    u32 n = 0u;
+    Term cl = pl, cr = pr;
+    int ok = atp_rd_phase_ft(s, &cl, &cr, ti, (u8)(1u - k), 0u, p_a, 3u,
+                             out, cap, &n);
+    if (ok && n > 0u && atp_rd_lands(reason, cl, cr, el, er)) {
+      g_cone_win_wide = 0u;
+      atp_rd_note(ti, reason, 2000u + k, n);
+      return n;
+    }
+    if (reason != TRACE_FVI) {
+      n = atp_rd_meet(s, pl, pr, el, er, ti, p_a, (u8)(1u - k), out, cap);
+      if (n > 0u) {
+        g_cone_win_wide = 0u;
+        atp_rd_note(ti, reason, 2010u + k, n);
+        return n;
+      }
+    }
+    if (gc_count() == g0) thvm_atp_heap_reset(hp);
+  }
+  g_cone_win_wide = 0u;
+  atp_rd_note(ti, reason, 0u, 0u);
+  return 0u;
+#else
+  (void)s; (void)ti; (void)out; (void)cap;
+  return 0u;
+#endif
+}
+
+fn void thvm_atp_rederive_end(AtpState *s) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (g_rd_hist.s == s) atp_rd_hist_drop();
+#else
+  (void)s;
+#endif
+}

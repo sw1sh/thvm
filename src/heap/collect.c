@@ -32,6 +32,7 @@ static u64 GC_FROM_END   = 0;
 static u64 GC_TO_START   = 0;
 static u64 GC_TO_END     = 0;
 static u64 GC_COUNT      = 0;
+static u64 HEAP_PERM_USED = 0;   // permanent-tail cells handed out
 
 // Runtime heap allowance (cells).  Resolved once from THVM_HEAP_CELLS,
 // falling back to the HEAP_CAP compile-time default so an unset env is
@@ -75,6 +76,49 @@ fn u64 thvm_book_cells(void) {
   return cells;
 }
 
+// Permanent cells past the two semi-spaces, reserved only when
+// THVM_HEAP_PERM_CELLS asks (default 0 keeps the historical mapping).
+// The collector never evacuates or scans a loc outside from-space, so
+// a node built here stays put and costs the copying pass nothing: the
+// home for append-only atom-only nodes a run keeps to its end (the
+// --proof trace entries past the default trace cap, which would
+// otherwise grow the live set every collection copies).
+static u64 HEAP_PERM_REQ = 0;
+// In-process request (a caller that must not grow the environment:
+// every uncached getenv in a hot path would then cost more work).
+// Takes effect only before the heap is first mapped.
+fn void thvm_heap_request_perm_cells(u64 cells) { HEAP_PERM_REQ = cells; }
+
+fn u64 thvm_heap_perm_cells(void) {
+  static u64 cells = ~0ull;
+  if (cells == ~0ull) {
+    cells = (HEAP_PERM_REQ <= (1ULL << 30)) ? HEAP_PERM_REQ : 0;
+    const char *e = getenv("THVM_HEAP_PERM_CELLS");
+    if (e != NULL && *e != '\0') {
+      char *end = NULL;
+      unsigned long long v = strtoull(e, &end, 0);
+      if (end != NULL && *end == '\0' && v <= (1ULL << 30)) cells = (u64)v;
+    }
+  }
+  return cells;
+}
+
+// Cells the heap mapping covers: both semi-spaces plus the permanent tail.
+fn u64 thvm_heap_map_cells(void) {
+  return thvm_heap_cells() + thvm_heap_perm_cells();
+}
+
+// Bump-allocate n permanent cells; 0 when the tail is absent or full
+// (a real loc is never 0: the tail starts past both semi-spaces).
+fn u64 heap_perm_alloc(u64 n) {
+  if (n == 0 || HEAP_PERM_USED + n > thvm_heap_perm_cells()) return 0;
+  u64 loc = thvm_heap_cells() + HEAP_PERM_USED;
+  HEAP_PERM_USED += n;
+  return loc;
+}
+
+fn u64 heap_perm_used(void) { return HEAP_PERM_USED; }
+
 fn void gc_reset(void) {
   GC_ENABLED    = 0;
   GC_SPACE_SZ   = 0;
@@ -102,6 +146,7 @@ fn void gc_init(u64 space_words) {
   GC_TO_START   = space_words;
   GC_TO_END     = 2 * space_words;
   GC_COUNT      = 0;
+  HEAP_PERM_USED = 0;
   // Loc 0 is used as the "no binder yet" sentinel in book/clone, so
   // bump the alloc cursor past it.  thvm pre-GC behaviour reserved
   // loc 0 implicitly by initializing HEAP_NEXT to 0 + first alloc.

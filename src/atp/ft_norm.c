@@ -68,6 +68,16 @@ extern void atp_ri_ft_sync(AtpState *s);
 // this unchanged other side -- instead of decoding a Term per step.
 // Set/cleared around the cone's slice_record calls only.
 static const AtpFtCell *g_rec_eq_other_ft = NULL;
+// Splice log of ONE mixmost walk: armed by the caller right before a
+// normalize, consumed (and cleared) by the next atp_normalize_mixmost_ft
+// entry, so nested walks never log.  The sink sees the fired slot, its
+// direction and the redex path -- no Term, no trace entry, no arena
+// cell -- so a logged walk rewrites exactly like an unlogged one.
+// have_pos == 0 means the path overflowed ATP_PROOF_MAX_DEPTH.
+typedef void (*AtpFtStepSink)(AtpState *s, u8 side, u32 rule, u8 dir,
+                              const u8 *pos, u8 pos_len, int have_pos);
+static AtpFtStepSink g_ft_step_sink = NULL;
+static u8 g_ft_step_sink_side = 0u;
 // Defined later in the same TU (_.c includes this file first).
 static u64 atp_trace_eq_store_ft(AtpState *s, const AtpFtCell *lhs,
                                  const AtpFtCell *rhs);
@@ -2941,6 +2951,9 @@ typedef struct {
   AtpProofStep *psteps;
   u32          *pn;
   u32           pcap;
+  // Splice log (see g_ft_step_sink): observation only.
+  AtpFtStepSink sink;
+  u8            sink_side;
   // Subtree-NF memo state (see FtNfmEnt): splices fired this call,
   // budget/cap starvation (blocks stores), gate + want-config key.
   u64           rw_count;
@@ -2999,7 +3012,8 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   // docs/plans/atp_ac_soundness.md.
   static int dbg_all = -1;
   if (dbg_all < 0) dbg_all = getenv("THVM_ATP_MIXSTEP_ALL") != NULL;
-  if (m->record || m->psteps != NULL || dbg_goal_nf || dbg_all) {
+  if (m->record || m->psteps != NULL || m->sink != NULL || dbg_goal_nf ||
+      dbg_all) {
     have_pos = ft_find_position(m->root, e->cell, pos, &pos_len);
   }
   if (dbg_goal_nf && (g_goalnf_active || m->psteps != NULL || dbg_all)) {
@@ -3050,6 +3064,9 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
     fprintf(stderr, "\n[mixstep-all] after =");
     atp_dbg_print_term(stderr, ft_to_term(m->root));
     fputc('\n', stderr);
+  }
+  if (m->sink != NULL) {
+    m->sink(m->s, m->sink_side, rule, dir, pos, pos_len, have_pos);
   }
   if (m->psteps != NULL && *m->pn < m->pcap) {
     AtpProofStep *st = &m->psteps[*m->pn];
@@ -3314,7 +3331,9 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     .eq_other = eq_other, .side = side, .chain_tail = chain_tail,
     .subst = subst,
     .psteps = psteps, .pn = pn, .pcap = pcap,
+    .sink = g_ft_step_sink, .sink_side = g_ft_step_sink_side,
   };
+  g_ft_step_sink = NULL;
   FtNfPathEnt *heap_st = NULL;
   m.st[0].cell = t;
   m.st[0].ins  = NULL;

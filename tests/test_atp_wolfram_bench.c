@@ -234,6 +234,10 @@ unsigned g_atp_bench_unorient = 0;
 // when the run was pr-mode.
 struct PrProblem_;
 void (*g_atp_bench_pre_free_hook)(AtpState *s) = NULL;
+// Wrapper request to arm the narrowing proof recorder (the CLI under
+// --proof), in-process so the environment the search runs in is the
+// no-proof one; THVM_ATP_NARROW_PROOF=1 arms it too.
+int g_atp_bench_narrow_proof = 0;
 // Clean give-up from bench intake (the =2 exit-fast discipline).  The
 // CLI points this at its tp_giveup so direct runs print the SZS line;
 // standalone bench builds fall back to stderr + exit(1) (the schedule
@@ -3116,7 +3120,8 @@ int main(int argc, char **argv) {
   // byte-identical trajectories (see AtpState.nrec in thvm.h).
   {
     const char *np = getenv("THVM_ATP_NARROW_PROOF");
-    if (np != NULL && np[0] == '1') thvm_atp_set_record_narrow(s, 1u);
+    if (g_atp_bench_narrow_proof || (np != NULL && np[0] == '1'))
+      thvm_atp_set_record_narrow(s, 1u);
   }
 
   // THVM_ATP_ENIGMA_EXPORT=<path.tsv> records the features of every
@@ -3683,8 +3688,10 @@ int main(int argc, char **argv) {
   // Post-PROVED proof-cone re-derivation (same call the WL wrapper
   // makes in thvm_wl_atp_run_proof): splice NORM_STEP chains behind
   // goal-family ORIENT / SIMPLIFY bridges.  On a t_max-capped trace it
-  // no-ops after the scan (no headroom for chains).
-  if (st == ATP_PROVED) {
+  // no-ops after the scan (no headroom for chains).  A proof-emitting
+  // wrapper (pre-free hook) re-derives the chain of every record it
+  // prints itself (thvm_atp_rederive) and needs the trace unspliced.
+  if (st == ATP_PROVED && g_atp_bench_pre_free_hook == NULL) {
     clock_t tc0 = clock();
     thvm_atp_record_goal_cone(s);
     printf("   cone: %.2fs  n_trace=%u\n",

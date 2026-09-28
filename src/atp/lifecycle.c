@@ -2,10 +2,18 @@
 // falling back to ATP_MAX_TRACE so an unset env keeps the historical drop
 // point.  A bad/zero/oversize value falls back to the default.  The trace
 // buffer grows on demand (atp_trace_ensure) until this cap is reached.
+static u32 g_atp_trace_cap_req = 0;
+// In-process request (see thvm_heap_request_perm_cells): takes effect
+// before the first engine init; an explicit THVM_ATP_TRACE_MAX wins.
+fn void thvm_atp_request_trace_cap(u32 cap) { g_atp_trace_cap_req = cap; }
+
 fn u32 thvm_atp_trace_cap(void) {
   static u32 cap = 0;
   if (cap == 0) {
     cap = ATP_MAX_TRACE;
+    if (g_atp_trace_cap_req >= ATP_MAX_TRACE &&
+        g_atp_trace_cap_req <= (1u << 28))
+      cap = g_atp_trace_cap_req;
     const char *e = getenv("THVM_ATP_TRACE_MAX");
     if (e != NULL && *e != '\0') {
       char *end = NULL;

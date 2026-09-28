@@ -11,6 +11,12 @@ static int  g_cli_want_proof = 0;
 static int  g_cli_want_szs = 0;
 static int  g_cli_szs_printed = 0;
 static const char *g_cli_problem = NULL;
+// Wall deadline (atp_now_us) for the proof emission's expensive passes
+// (re-derivation, deep citation scans, bridge searches); 0 = none.
+static u64 g_cli_emit_deadline_us = 0u;
+static int cli_emit_late(void) {
+  return g_cli_emit_deadline_us != 0u && atp_now_us() >= g_cli_emit_deadline_us;
+}
 
 // 1 when no completeness-breaking pruning is active AND the goal is
 // ground, so a saturation (QUEUE_EMPTY) soundly reports Satisfiable;
@@ -380,6 +386,7 @@ static u8 cli_bridge_apply(AtpState *s, Term pl, Term pr,
 static u32 cli_bridge_search(AtpState *s, Term pl, Term pr,
                              Term tl, Term tr, u32 below,
                              CliBridgeStep *steps) {
+  if (cli_emit_late()) return 0u;
   static CliBridgeMeta A[CLI_BRIDGE_SUCC_CAP];
   static CliBridgeMeta B[CLI_BRIDGE_SUCC_CAP];
   u32 na = cli_bridge_scan(s, pl, pr, below, A, CLI_BRIDGE_SUCC_CAP);
@@ -447,6 +454,7 @@ static int cmp_u64(const void *a, const void *b) {
 
 static u32 cli_bridge_rescue(AtpState *s, Term tl, Term tr, u32 below,
                              CliBridgeStep *steps, u32 *n_steps) {
+  if (cli_emit_late()) return ATP_TRACE_NONE;
   static CliBridgeMeta B[CLI_BRIDGE_SUCC_CAP];
   static u64 bh[CLI_BRIDGE_SUCC_CAP];
   u64 th = cli_pair_canon_hash(tl, tr);
@@ -492,6 +500,37 @@ static u32 cli_bridge_rescue(AtpState *s, Term tl, Term tr, u32 below,
 
 static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
                            u32 ti, u8 *printed);
+
+// Treatment chain of record ti (the search recorded none): replay it
+// (thvm_atp_rederive), print the cited equations' derivations, then one
+// rw record per rewrite, t<ti>n<k>.  On success `last` names the final
+// record, which the entry's own record cites.  The chain buffer is per
+// call: the cited derivations recurse through here.
+#define CLI_RD_MAX 512u
+static int cli_emit_rederived(FILE *fp, AtpState *s, const PrProblem *pr,
+                              u32 ti, u8 *printed, char *last, size_t cap) {
+  AtpRederiveStep *rd =
+      (AtpRederiveStep *)malloc(CLI_RD_MAX * sizeof(AtpRederiveStep));
+  if (rd == NULL) return 0;
+  u32 n = thvm_atp_rederive(s, ti, rd, CLI_RD_MAX);
+  if (n == 0u) { free(rd); return 0; }
+  for (u32 k = 0; k < n; k++) cli_emit_trace(fp, s, pr, rd[k].eq, printed);
+  Term e = s->trace[ti];
+  char prev[32];
+  snprintf(prev, sizeof prev, "t%u", (u32)term_val(term_ctr_at(e, 0)));
+  for (u32 k = 0; k < n; k++) {
+    fprintf(fp, "cnf(t%un%u, plain, ", ti, k);
+    cli_print_term(fp, pr, rd[k].l);
+    fputs(" = ", fp);
+    cli_print_term(fp, pr, rd[k].r);
+    fprintf(fp, ", inference(rw, [status(thm)], [%s, t%u])).\n",
+            prev, rd[k].eq);
+    snprintf(prev, sizeof prev, "t%un%u", ti, k);
+  }
+  snprintf(last, cap, "%s", prev);
+  free(rd);
+  return 1;
+}
 
 // Trace id of the input definition introducing each fresh label
 // (ATP_TRACE_NONE: the definition never entered): the identity the
@@ -685,11 +724,17 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
   // rewrite so the printed record follows from its citations.
   char pa_name[32];
   pa_name[0] = '\0';
-  if ((reason == TRACE_ORIENT || reason == TRACE_SIMPLIFY) &&
+  if ((reason == TRACE_ORIENT || reason == TRACE_SIMPLIFY ||
+       reason == TRACE_FVI) &&
       pa != ATP_TRACE_NONE && pa < s->n_trace && pb == ATP_TRACE_NONE) {
     Term ppl = 0, ppr = 0;
     if (cli_tp_cached(s, pa, &ppl, &ppr) &&
-        !cli_pair_eq_mod(ppl, ppr, lhs, rhs)) {
+        !cli_pair_eq_mod(ppl, ppr, lhs, rhs) &&
+        cli_emit_rederived(fp, s, pr, ti, printed, pa_name,
+                           sizeof pa_name)) {
+      // Treatment chain re-derived by replay: pa_name is its last record.
+    } else if (reason != TRACE_FVI && ppl != 0 && ppr != 0 &&
+               !cli_pair_eq_mod(ppl, ppr, lhs, rhs)) {
       CliBridgeStep br[2];
       u32 nbr = cli_bridge_search(s, ppl, ppr, lhs, rhs, ti, br);
       u32 cite = pa;
@@ -887,6 +932,17 @@ static u8 cli_tp_cached(AtpState *s, u32 ti, Term *l, Term *r) {
   return 1;
 }
 
+// Deep citation resolve (a full trace scan per unresolved step): on in
+// --proof runs, THVM_ATP_PROOF_RESOLVE_DEEP=0/1 overrides.
+static int cli_resolve_deep(void) {
+  static int deep = -1;
+  if (deep < 0) {
+    const char *e = getenv("THVM_ATP_PROOF_RESOLVE_DEEP");
+    deep = (e != NULL) ? (e[0] != '0' && e[0] != '\0') : g_cli_want_proof;
+  }
+  return deep;
+}
+
 static u32 cli_resolve_step_trace(AtpState *s, const AtpProofStep *st) {
   if (st->before == 0 || st->after == 0) return ATP_TRACE_NONE;
   // Recorded slot first (correct for oriented-rule steps).  A lazy
@@ -936,12 +992,7 @@ static u32 cli_resolve_step_trace(AtpState *s, const AtpProofStep *st) {
   }
   // Full trace scan: the applied equation was interreduced away.
   // Costly (replay per trace entry) -- opt-in, the deep resolve pass.
-  static int deep = -1;
-  if (deep < 0) {
-    const char *e = getenv("THVM_ATP_PROOF_RESOLVE_DEEP");
-    deep = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
-  }
-  if (!deep) return ATP_TRACE_NONE;
+  if (!cli_resolve_deep() || cli_emit_late()) return ATP_TRACE_NONE;
   for (u32 ti = 0; ti < s->n_trace; ti++) {
     Term l = 0, r = 0;
     if (!cli_tp_cached(s, ti, &l, &r)) continue;
@@ -1003,12 +1054,8 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
     resolved[k]  = cli_resolve_step_trace(s, &steps[k]);
     resolved2[k] = ATP_TRACE_NONE;
     midpoint[k]  = 0;
-    static int deep2 = -1;
-    if (deep2 < 0) {
-      const char *e = getenv("THVM_ATP_PROOF_RESOLVE_DEEP");
-      deep2 = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
-    }
-    if (deep2 && resolved[k] == ATP_TRACE_NONE) {
+    if (cli_resolve_deep() && resolved[k] == ATP_TRACE_NONE &&
+        !cli_emit_late()) {
       // No single recorded equation reproduces before -> after: the
       // recorder coalesced two rewrites into one step.  Find a 2-step
       // decomposition through any midpoint and SPLIT the record at
@@ -1305,6 +1352,7 @@ static void cli_proof_write(FILE *out, const char *text, size_t len) {
 
 static void cli_proof_hook(AtpState *s) {
   if (!g_cli_want_proof || g_atp_bench_status != (int)ATP_PROVED) return;
+  thvm_atp_rederive_deadline(g_cli_emit_deadline_us);
   PrProblem *pr = (PrProblem *)g_atp_bench_pr;
   if (pr == NULL) return;
   static AtpProofStep steps[ATP_PROOF_MAX_STEPS];
@@ -1391,5 +1439,6 @@ static void cli_proof_hook(AtpState *s) {
   }
   fflush(out);
   free(printed);
+  thvm_atp_rederive_end(s);
 }
 

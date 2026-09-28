@@ -1395,7 +1395,9 @@ static void atp_irv_push(AtpState *s, Term lhs, Term rhs, u32 parent,
 // Mark a rule's birthing trace id as dead so descendant CPs are skipped
 // at pop time.  Grows the bitset on demand (8 trace ids per byte).
 static void atp_trace_mark_dead(AtpState *s, u32 trace_id) {
-  if (trace_id == ATP_TRACE_NONE) return;
+  // Ids past the default trace cap exist only in a proof run: the
+  // search treats them as absent, as the no-proof run must.
+  if (trace_id == ATP_TRACE_NONE || trace_id >= ATP_MAX_TRACE) return;
   u32 byte = trace_id >> 3;
   if (byte >= s->r_trace_dead_cap >> 3) {
     u32 new_bits = (trace_id + 1u + 4096u) & ~4095u;  // round up
@@ -1422,7 +1424,9 @@ static int atp_trace_is_dead(const AtpState *s, u32 trace_id) {
 // are never orphaned.  Mirrors WM selectNonOrphan's
 // `aP->lebtNoch && oP->lebtNoch` test (KPVerwaltung.c:540).
 static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace) {
-  if (cp_trace == ATP_TRACE_NONE || cp_trace >= s->n_trace) return 0;
+  if (cp_trace == ATP_TRACE_NONE || cp_trace >= s->n_trace ||
+      cp_trace >= ATP_MAX_TRACE)   // proof-only entry: absent to the search
+    return 0;
   Term te = s->trace[cp_trace];
   if (term_tag(te) != TAG_CTR || term_ext(te) != TRACE_CP) return 0;
   u32 pa = (u32)term_val(term_ctr_at(te, 0));
@@ -1489,7 +1493,10 @@ static u64 atp_cpu_now_us(void) {
 // on every run, loaded or not, on any host running the same binary.
 // Linux only; where the counter cannot be opened the CPU clock is used.
 // Never returns 0: the disciplines use 0 as their unlatched sentinel.
-static u64 atp_work_now_us(void) {
+// Raw work-clock reading in the clock's own unit: user-space
+// instructions (mode 1) or CPU microseconds (mode 0).  *mode_out gets
+// the mode; the probe runs once.
+static u64 atp_work_raw(int *mode_out) {
   static int mode = -1;     // -1 = unprobed, 0 = CPU, 1 = instructions
 #if defined(__linux__)
   static int fd = -1;
@@ -1513,13 +1520,52 @@ static u64 atp_work_now_us(void) {
   if (mode == 1) {
     u64 n = 0;
     if (read(fd, &n, sizeof n) == (ssize_t)sizeof n) {
-      return n / ATP_WORK_INSTR_PER_US + 1u;
+      *mode_out = 1;
+      return n;
     }
   }
 #else
-  (void)mode;
+  if (mode < 0) mode = 0;
 #endif
+  *mode_out = 0;
   return atp_cpu_now_us();
+}
+
+// Exclusion windows (atp_work_pause / atp_work_resume): work a --proof
+// run does only to keep its proof -- the trace entries past the default
+// cap -- is taken off the clock, so every clock-gated decision fires at
+// the same point of the search as in the no-proof run.  Windows nest;
+// they cost nothing until a discipline has read the clock (its epoch:
+// work before it never enters a delta).
+static u64 g_atp_work_excl[2]  = { 0u, 0u };   // excluded, per mode
+static u64 g_atp_work_pause0   = 0u;
+static int g_atp_work_pause_mode = 0;
+static u32 g_atp_work_depth    = 0u;
+static u8  g_atp_work_live     = 0u;
+
+static void atp_work_pause(void) {
+  if (!g_atp_work_live) return;
+  if (g_atp_work_depth++ == 0u)
+    g_atp_work_pause0 = atp_work_raw(&g_atp_work_pause_mode);
+}
+
+static void atp_work_resume(void) {
+  if (!g_atp_work_live || g_atp_work_depth == 0u) return;
+  if (--g_atp_work_depth == 0u) {
+    int mode = 0;
+    u64 now = atp_work_raw(&mode);
+    if (mode == g_atp_work_pause_mode && now >= g_atp_work_pause0)
+      g_atp_work_excl[mode] += now - g_atp_work_pause0;
+  }
+}
+
+static u64 atp_work_now_us(void) {
+  g_atp_work_live = 1u;
+  int mode = 0;
+  u64 raw = atp_work_raw(&mode);
+  u64 eff = (raw > g_atp_work_excl[mode]) ? raw - g_atp_work_excl[mode] : 0u;
+  if (mode == 1) return eff / ATP_WORK_INSTR_PER_US + 1u;
+  return eff ? eff : 1u;
 }
 
 // THVM_ATP_CLOCK_TRACE=<dir>: one line per clock-gated search decision
@@ -1732,6 +1778,7 @@ static u32 atp_trace_push_norm_step(AtpState *s, u32 p_a, u32 rule_idx,
   }
   children[5u + pos_len]      = term_new(0, TAG_NUM, 0, side);
   children[5u + pos_len + 1u] = term_new(0, TAG_NUM, 0, fwd);
+  if (s->n_trace >= ATP_MAX_TRACE) s->trace_x_heap = 1u;
   s->trace[s->n_trace] = term_new_ctr(TRACE_NORM_STEP, children,
                                       7u + pos_len);
   u32 idx = s->n_trace;
@@ -1760,6 +1807,7 @@ static u32 atp_trace_push_norm_step_off(AtpState *s, u32 p_a, u32 rule_idx,
   }
   children[5u + pos_len]      = term_new(0, TAG_NUM, 0, side);
   children[5u + pos_len + 1u] = term_new(0, TAG_NUM, 0, fwd);
+  if (s->n_trace >= ATP_MAX_TRACE) s->trace_x_heap = 1u;
   s->trace[s->n_trace] = term_new_ctr(TRACE_NORM_STEP, children,
                                       7u + pos_len);
   u32 idx = s->n_trace;
@@ -2015,6 +2063,8 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     }
     if (rss_cap_bytes > 0) {
       long long rss = thvm_atp_live_rss_bytes();
+      // Proof-only trace bytes are not the search's (atp_trace_node).
+      if (rss > 0) rss -= (long long)s->trace_x_bytes;
       if (rss > 0 && s->rss_guard_baseline == 0) {
         s->rss_guard_baseline = rss;   // first successful poll: baseline
       } else if (rss > 0 && rss - s->rss_guard_baseline > rss_cap_bytes) {

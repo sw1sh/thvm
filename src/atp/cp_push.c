@@ -788,7 +788,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     // only), which atp_cp_implicit_push signals by returning 0.
     u8 deferred = 0u;
     u64 _dpk_t0 = g_atp_phase_detail ? atp_now_us() : 0;
-    if (s->use_implicit_cp != 0u && t != ATP_TRACE_NONE
+    if (s->use_implicit_cp != 0u && t != ATP_TRACE_NONE && t < ATP_MAX_TRACE
         && parent_a != ATP_TRACE_NONE && parent_b != ATP_TRACE_NONE) {
       deferred = atp_cp_implicit_push(s, cp_lhs, cp_rhs,
                                       parent_a, parent_b, t, cp_ult);

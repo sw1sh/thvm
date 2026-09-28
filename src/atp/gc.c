@@ -63,6 +63,11 @@ fn void thvm_atp_heap_reset(u64 checkpoint) {
 fn u8 thvm_atp_gc_collect(AtpState *s) {
   if (s == NULL || !gc_enabled()) return 0;
   u64 gc_t0 = atp_now_us();
+  // Trace entries past the default cap live in the permanent heap tail
+  // (atp_trace_node) and need no collection: rooting only the default-
+  // cap prefix keeps a proof run's collection work the no-proof run's.
+  u32 n_trace_roots = (s->trace_x_heap || s->n_trace < ATP_MAX_TRACE)
+                        ? s->n_trace : ATP_MAX_TRACE;
 
   // needle (THVM_ATP_DRC_NEEDLE): fold_def_body[0..fold_width) and
   // needle_ax_l/r[0..n_needle_ax) are long-lived Term arrays (set once
@@ -83,7 +88,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   u32 n_roots = 6u * s->n_rules /* lhs,rhs,dead l/r save,subsumer l/r */
               + 6u /* goal + goal_nf + pristine goal_orig pair */
               + 4u * s->n_goals /* multi-goal conjuncts + NFs */
-              + s->n_trace + REWRITE_MAX_VAR
+              + n_trace_roots + REWRITE_MAX_VAR
               + 1u /* min_const */
               + 2u * s->n_irv /* buffered IR victims (use_wm_demote) */
               + needle_fold_width + 2u * s->n_needle_ax /* needle */
@@ -135,7 +140,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
     roots[w++] = s->goals_lhs_nf[g];
     roots[w++] = s->goals_rhs_nf[g];
   }
-  for (u32 i = 0; i < s->n_trace; i++) roots[w++] = s->trace[i];
+  for (u32 i = 0; i < n_trace_roots; i++) roots[w++] = s->trace[i];
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
     roots[w++] = s->witness_subst.bindings[i];
   }
@@ -207,7 +212,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
       for (u32 i = 0; i < s->n_rules; i++)
         rule_n += atp_symbol_count(roots[2u*i]) + atp_symbol_count(roots[2u*i+1u]);
       u32 tbase = 6u*s->n_rules + 4u + 4u*s->n_goals;
-      for (u32 i = 0; i < s->n_trace; i++) trace_n += atp_symbol_count(roots[tbase + i]);
+      for (u32 i = 0; i < n_trace_roots; i++) trace_n += atp_symbol_count(roots[tbase + i]);
       fprintf(stderr, "GCLOG n_rules=%u n_trace=%u live=%lluK rule_nodes=%lluK trace_nodes=%lluK\n",
         s->n_rules, s->n_trace, (unsigned long long)((HEAP_NEXT - gc_from_start())>>10),
         (unsigned long long)(rule_n>>10), (unsigned long long)(trace_n>>10)); } }
@@ -236,7 +241,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
     s->goals_lhs_nf[g] = roots[w++];
     s->goals_rhs_nf[g] = roots[w++];
   }
-  for (u32 i = 0; i < s->n_trace; i++) s->trace[i] = roots[w++];
+  for (u32 i = 0; i < n_trace_roots; i++) s->trace[i] = roots[w++];
   for (u32 i = 0; i < REWRITE_MAX_VAR; i++) {
     s->witness_subst.bindings[i] = roots[w++];
   }
@@ -586,6 +591,7 @@ fn void thvm_atp_materialize_trace(AtpState *s) {
     ch[2] = lhs;
     ch[3] = rhs;
     s->trace[i] = term_new_ctr(reason, ch, n);
+    if (i >= ATP_MAX_TRACE) s->trace_x_heap = 1u;
     s->trace_eq_off[i] = 0u;                              // now materialized
     n_mat++;
   }
@@ -598,6 +604,44 @@ fn void thvm_atp_materialize_trace(AtpState *s) {
   s->trace_pack = 0u;
 }
 
+// Trace entries past the default cap (ATP_MAX_TRACE) exist only when a
+// proof raised it: the no-proof search stops recording there.  Such an
+// entry keeps the search out of its way -- its node goes to the
+// permanent heap tail (never copied by the collector), its work runs
+// inside a work-clock exclusion window, and its bytes are discounted by
+// the RSS guard -- so the search sees the default-cap heap and clock.
+// The window opens at every push attempt past the default cap, in the
+// no-proof run too (where the attempt just fails): a window's own
+// entry/exit work then counts the same in both runs.
+static u8 atp_trace_windowed(const AtpState *s) {
+  return (u8)(s->n_trace >= ATP_MAX_TRACE);
+}
+static u8 atp_trace_proof_only(const AtpState *s) {
+  return (u8)(s->n_trace >= ATP_MAX_TRACE && s->t_max > ATP_MAX_TRACE);
+}
+
+// Entry node: atom-only nodes of a proof-only entry take the permanent
+// tail (the collector never scans it); anything else, or a full tail,
+// takes the ordinary heap.
+static Term atp_trace_node(AtpState *s, u8 proof_only, u32 reason,
+                           const Term *ch, u32 n) {
+  if (proof_only) {
+    u32 i = 0;
+    while (i < n && term_tag(ch[i]) == TAG_NUM) i++;
+    if (i == n) {
+      u64 loc = heap_perm_alloc(1u + n);
+      if (loc != 0u) {
+        heap_set(loc, term_new(0, TAG_NUM, DT_INT32, n));
+        for (u32 k = 0; k < n; k++) heap_set(loc + 1u + k, ch[k]);
+        s->trace_x_bytes += (u64)(1u + n) * sizeof(Term);
+        return term_new(0, TAG_CTR, reason, loc);
+      }
+    }
+    s->trace_x_heap = 1u;
+  }
+  return term_new_ctr(reason, ch, n);
+}
+
 // Push a trace entry as a TAG_CTR with label = reason and children
 // [NUM(parent_a), NUM(parent_b), lhs, rhs].  Returns the entry's
 // index in s->trace, or ATP_TRACE_NONE if the buffer is full.
@@ -605,9 +649,22 @@ fn void thvm_atp_materialize_trace(AtpState *s) {
 // 6.1b/c will wire this into add_equation / orient_and_add /
 // generate_cps; for 6.1a the helper just exists, and the storage is
 // init'd to zero by thvm_atp_init's calloc.
+static u32 atp_trace_push_impl(AtpState *s, u8 proof_only, u32 reason,
+                               u32 p_a, u32 p_b, Term lhs, Term rhs);
 static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
                           Term lhs, Term rhs) {
-  if (s == NULL || !atp_trace_ensure(s)) return ATP_TRACE_NONE;
+  if (s == NULL) return ATP_TRACE_NONE;
+  u8 windowed = atp_trace_windowed(s);
+  if (windowed) atp_work_pause();
+  u32 idx = atp_trace_push_impl(s, atp_trace_proof_only(s), reason, p_a,
+                                p_b, lhs, rhs);
+  if (windowed) atp_work_resume();
+  return idx;
+}
+static u32 atp_trace_push_impl(AtpState *s, u8 proof_only, u32 reason,
+                               u32 p_a, u32 p_b, Term lhs, Term rhs) {
+  if (!atp_trace_ensure(s)) return ATP_TRACE_NONE;
+  u64 eq0 = s->trace_eq_len;
   // Rule/axiom/ORIENT/SIMPLIFY entries stay MATERIALIZED (real pair on
   // heap) even under trace_pack.  These are only ~n_rules entries (the
   // millions that drive the GC live set are the CP pushes, packed in
@@ -655,10 +712,12 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
     c_lhs,
     c_rhs,
   };
-  s->trace[s->n_trace] = term_new_ctr(reason, children, 4);
+  s->trace[s->n_trace] = atp_trace_node(s, proof_only, reason, children, 4);
   u32 idx = s->n_trace;
   if (s->trace_pack) s->trace_eq_off[idx] = eq_off;   // 0 = real pair on heap
   s->n_trace++;
+  if (proof_only)
+    s->trace_x_bytes += (s->trace_eq_len - eq0) + 2u * sizeof(u64);
   return idx;
 }
 
@@ -675,10 +734,25 @@ static u32 atp_trace_push(AtpState *s, u32 reason, u32 p_a, u32 p_b,
 // child (index 5+pos_len) is the overlap face-combo index (0..3, or
 // 0xff = unknown) -- the only consumer is atp_wmo_cp_combo, which the
 // CP-formation side geometry (use_cp_side) reads at the orient site.
+static u32 atp_trace_push_cp_impl(AtpState *s, u8 proof_only,
+                                  u32 p_a, u32 p_b, Term lhs, Term rhs,
+                                  const u8 *pos, u8 pos_len, u8 combo);
 static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
                              Term lhs, Term rhs,
                              const u8 *pos, u8 pos_len, u8 combo) {
-  if (s == NULL || !atp_trace_ensure(s)) return ATP_TRACE_NONE;
+  if (s == NULL) return ATP_TRACE_NONE;
+  u8 windowed = atp_trace_windowed(s);
+  if (windowed) atp_work_pause();
+  u32 idx = atp_trace_push_cp_impl(s, atp_trace_proof_only(s), p_a, p_b,
+                                   lhs, rhs, pos, pos_len, combo);
+  if (windowed) atp_work_resume();
+  return idx;
+}
+static u32 atp_trace_push_cp_impl(AtpState *s, u8 proof_only,
+                                  u32 p_a, u32 p_b, Term lhs, Term rhs,
+                                  const u8 *pos, u8 pos_len, u8 combo) {
+  if (!atp_trace_ensure(s)) return ATP_TRACE_NONE;
+  u64 eq0 = s->trace_eq_len;
   u64 eq_off = 0u;
   Term c_lhs = lhs, c_rhs = rhs;
   if (s->trace_pack) {
@@ -704,10 +778,13 @@ static u32 atp_trace_push_cp(AtpState *s, u32 p_a, u32 p_b,
     children[5 + k] = term_new(0, TAG_NUM, 0, pos[k]);
   }
   children[5u + pos_len] = term_new(0, TAG_NUM, 0, combo);
-  s->trace[s->n_trace] = term_new_ctr(TRACE_CP, children, 6u + pos_len);
+  s->trace[s->n_trace] = atp_trace_node(s, proof_only, TRACE_CP, children,
+                                        6u + pos_len);
   u32 idx = s->n_trace;
   if (s->trace_pack) s->trace_eq_off[idx] = eq_off;
   s->n_trace++;
+  if (proof_only)
+    s->trace_x_bytes += (s->trace_eq_len - eq0) + 2u * sizeof(u64);
   return idx;
 }
 
@@ -738,6 +815,7 @@ static void atp_trace_cp_rematerialize(AtpState *s, u32 tid, Term lhs, Term rhs)
   for (u8 k = 0; k < pos_len; k++) children[5 + k] = term_ctr_at(old, 5 + k);
   children[5u + pos_len] = term_ctr_at(old, 5u + pos_len);  // combo
   s->trace[tid] = term_new_ctr(TRACE_CP, children, 6u + pos_len);
+  if (tid >= ATP_MAX_TRACE) s->trace_x_heap = 1u;
 }
 
 // WM-distinguished-face flag (dist_rhs) for a newly-added unorientable
@@ -775,7 +853,9 @@ static int atp_lr_sortieren_rec_ft(const struct AtpFtCell *lhs,
 
 static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
   if (s == NULL) return 1u;
-  if (src_trace == ATP_TRACE_NONE || src_trace >= s->n_trace) {
+  // A proof-only entry (past the default cap) is absent to the search.
+  if (src_trace == ATP_TRACE_NONE || src_trace >= s->n_trace ||
+      src_trace >= ATP_MAX_TRACE) {
     // Past the proof-trace soft cap the trace entry is gone, but the
     // popped CP's origin class survives on the queue (cp_kind ->
     // last_popped_kind).  Apply the SAME class rule as the tagged
