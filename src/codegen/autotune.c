@@ -21,11 +21,13 @@
 // real wallclock; 5 is enough to separate small kernels from each
 // other against a ~10us-resolution clock.
 #define KAUTOTUNE_N_RUNS 5
-// v4: kautotune_structural_key now folds a finer GC-invariant DAG
-// content hash (was root-op tag/ext + shapes only, which could collide
-// distinct kernels and reuse the wrong tuned tile).  Bump so v3 disk
-// entries (coarser key) are ignored rather than mis-keyed.
-#define KAUTOTUNE_CACHE_VERSION 4
+// Disk-cache version.  The key folds a GC-invariant DAG content hash
+// (kautotune_structural_key; a coarser key could collide distinct kernels
+// and reuse the wrong tuned tile), and a stored winner holds only opts
+// that pass tinygrad's split validation (split_targets, REDUCE membership,
+// no group inside another reduce).  An older entry can name an opt that
+// now bails on replay, so a version mismatch re-searches instead.
+#define KAUTOTUNE_CACHE_VERSION 5
 #define KAUTOTUNE_CACHE_PATH_CAP 1024
 // Cap on the per-kernel proposer candidate set.  The rich action space
 // (propose_rich_action_space, codegen/propose.c) ported from tinygrad's

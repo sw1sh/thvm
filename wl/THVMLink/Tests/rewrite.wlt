@@ -92,9 +92,12 @@ VerificationTest[
     TestID -> "xvalid-swap-matmul-mn"]
 
 (* --- splits: UPCAST / UNROLL / LOCAL / GROUP / GROUPTOP ----------
-   All take (axis, factor); use factor 4 on axis 0 (extent 16).
-   The split rule rewrites RANGE(0, LOOP, 16) into IADD(IMUL(outer,
-   4), inner); xvalid asserts WL and C produce the same shape. *)
+   All take (axis, factor); use factor 4 (extents are 16).  UPCAST and
+   LOCAL split the output axis m (0), UNROLL the reduce axis k (2): the
+   only axis tinygrad's split_targets let it split
+   (codegen/opt/postrange.py:14-15).  The split rule rewrites
+   RANGE(axis, type, 16) into IADD(IMUL(outer, 4), inner); xvalid
+   asserts WL and C produce the same shape. *)
 
 VerificationTest[
     xvalid[KOptUpcast[0, 4],   $KopUpcast[0, 4],   buildMatmul16],
@@ -102,9 +105,9 @@ VerificationTest[
     TestID -> "xvalid-upcast-matmul-axis0-factor4"]
 
 VerificationTest[
-    xvalid[KOptUnroll[0, 4],   $KopUnroll[0, 4],   buildMatmul16],
+    xvalid[KOptUnroll[2, 4],   $KopUnroll[2, 4],   buildMatmul16],
     True,
-    TestID -> "xvalid-unroll-matmul-axis0-factor4"]
+    TestID -> "xvalid-unroll-matmul-axis2-factor4"]
 
 VerificationTest[
     xvalid[KOptLocal[0, 4],    $KopLocal[0, 4],    buildMatmul16],

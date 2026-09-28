@@ -20,6 +20,9 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- Split opts are validated like tinygrad's apply_opt (#18112/#18332/#18346):
+  split targets, REDUCE membership for UNROLL/GROUP, no group inside another
+  reduce; invalid opts from py, WL or autotune are skipped, never mis-applied.
 - UOp graph rewrites no longer stop silently at depth 256: past a structural
   depth of 8192, 1024 successive rule hits on one node, or a rewrite cycle,
   the pass reports the rule chain and fails (tinygrad uop/ops.py:1804, :1815).

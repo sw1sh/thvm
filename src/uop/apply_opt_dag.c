@@ -125,7 +125,9 @@ fn Term uop_dag_apply_global(Term root, u32 axis_id) {
 // which doesn't wrap inner in UOP_OPT).
 //
 // Validity: `target_axis` must currently be a single bare UOP_RANGE
-// leaf in the DAG with extent % k == 0.  Returns 0 on bail.
+// leaf in the DAG with extent % k == 0, its type a split target of `op`
+// (kop_split_source_ok), and an UNROLL target an axis some REDUCE reduces
+// (tinygrad codegen/opt/postrange.py:128-130).  Returns 0 on bail.
 
 // Substitution map: keys are pre-existing Term IDs, values are their
 // post-rewrite replacements.  The map only contains ORIGINAL terms;
@@ -371,6 +373,67 @@ static u32 apply_opt_dag_collect_ranges(Term root, Term *out, u32 cap) {
   return n;
 }
 
+// tinygrad split_targets (codegen/opt/postrange.py:14-15), checked in
+// shift_to (:80), which every split goes through.  thvm keeps tinygrad's
+// WEAK output axes as KAX_LOOP and the reduce-typed LOCAL a group leaves
+// as KAX_GROUP_REDUCE (tinygrad's GROUP_REDUCE before #18388), so the
+// group split of a REDUCE axis into a local is KOP_GROUP/GROUPTOP, not
+// KOP_LOCAL.
+fn int kop_split_source_ok(u8 op, u32 axis_type) {
+  switch (op) {
+    case KOP_UPCAST:
+      return axis_type == KAX_LOOP || axis_type == KAX_GLOBAL
+          || axis_type == KAX_LOCAL;
+    case KOP_UNROLL:
+      return axis_type == KAX_REDUCE || axis_type == KAX_GROUP_REDUCE;
+    case KOP_LOCAL:
+      return axis_type == KAX_LOOP || axis_type == KAX_GLOBAL;
+    case KOP_GROUP:
+    case KOP_GROUPTOP:
+      return axis_type == KAX_REDUCE;
+    default:
+      return 0;
+  }
+}
+
+static int apply_opt_dag_reduce_names(Term red, u32 axis_id) {
+  u32 n = uop_reduce_n_axes(red);
+  for (u32 i = 0; i < n; i++) {
+    if (uop_reduce_axis(red, i) == axis_id) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void apply_opt_dag_push_srcs(UOpWalk *w, Term t) {
+  u8  ar  = uop_arity((u8)term_ext(t));
+  u64 loc = term_val(t);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    uop_walk_push(w, heap_read(loc + i));
+  }
+}
+
+// First UOP_REDUCE reachable from `root` that reduces `axis_id`, or 0.
+static Term apply_opt_dag_reduce_of(Term root, u32 axis_id) {
+  UOpWalk w = {0};
+  uop_walk_push(&w, root);
+  Term found = 0;
+  for (Term t = uop_walk_pop(&w); t != 0; t = uop_walk_pop(&w)) {
+    if (term_ext(t) == UOP_REDUCE && apply_opt_dag_reduce_names(t, axis_id)) {
+      found = t;
+      break;
+    }
+    apply_opt_dag_push_srcs(&w, t);
+  }
+  uop_walk_free(&w);
+  return found;
+}
+
+fn int uop_dag_reduces_axis(Term root, u32 axis_id) {
+  return apply_opt_dag_reduce_of(root, axis_id) != 0;
+}
+
 fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
   if (k == 0) return 0;
   Term old_leaf = apply_opt_dag_find_range(root, target_axis);
@@ -406,6 +469,20 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
     return 0;
   }
   u32 axis_type_outer = uop_range_axis_type(old_leaf);
+  if (!kop_split_source_ok(op, axis_type_outer)) {
+    if (getenv("THVM_HANDOPT_TRACE")) {
+      fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: axis type %u is no "
+              "split target\n", op, target_axis, k, axis_type_outer);
+    }
+    return 0;
+  }
+  if (op == KOP_UNROLL && !uop_dag_reduces_axis(root, target_axis)) {
+    if (getenv("THVM_HANDOPT_TRACE")) {
+      fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: no REDUCE reduces "
+              "the axis\n", op, target_axis, k);
+    }
+    return 0;
+  }
   u8  inner_kax       = apply_opt_dag_inner_kax(op);
   u32 opt_kind        = apply_opt_dag_inner_opt_kind(op);
 
@@ -462,38 +539,11 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
 // range of the `outer` operand.  Body membership cannot answer this once a
 // kernel nests reduces -- `inner` then sits inside every enclosing reduce's
 // body, and a reduce that folds another reduce's inner half re-sums it.
-
-#define APPLY_OPT_DAG_OWN_CAP 8192                        // power of two
-#define APPLY_OPT_DAG_OWN_MAX (APPLY_OPT_DAG_OWN_CAP / 2)
-
-static Term APPLY_OPT_DAG_OWN_SEEN [APPLY_OPT_DAG_OWN_CAP];
-static u32  APPLY_OPT_DAG_OWN_GEN  [APPLY_OPT_DAG_OWN_CAP];
-static u32  APPLY_OPT_DAG_OWN_EPOCH;
-static u32  APPLY_OPT_DAG_OWN_N;
-static Term APPLY_OPT_DAG_OWN_STACK[APPLY_OPT_DAG_OWN_MAX];
-
-// Push `t` unless this walk already reached it.  The visited set stays at
-// most half full, which also bounds the stack; past that the walk stops
-// growing and the caller sees "not found".
-static void apply_opt_dag_own_push(Term t, u32 *sp) {
-  if (term_tag(t) != TAG_UOP || APPLY_OPT_DAG_OWN_N >= APPLY_OPT_DAG_OWN_MAX) {
-    return;
-  }
-  u32 h = (u32)(t ^ (t >> 29) ^ (t >> 41)) * 0x9E3779B1u;
-  for (u32 probe = 0; probe < APPLY_OPT_DAG_OWN_CAP; probe++) {
-    u32 i = (h + probe) & (APPLY_OPT_DAG_OWN_CAP - 1);
-    if (APPLY_OPT_DAG_OWN_GEN[i] != APPLY_OPT_DAG_OWN_EPOCH) {
-      APPLY_OPT_DAG_OWN_GEN[i]  = APPLY_OPT_DAG_OWN_EPOCH;
-      APPLY_OPT_DAG_OWN_SEEN[i] = t;
-      APPLY_OPT_DAG_OWN_N++;
-      APPLY_OPT_DAG_OWN_STACK[(*sp)++] = t;
-      return;
-    }
-    if (APPLY_OPT_DAG_OWN_SEEN[i] == t) {
-      return;
-    }
-  }
-}
+//
+// Both walks below reach every node at any graph size.  A walk that stopped
+// early would answer "not owned": the renderer and the CPU walker would fold
+// the inner half in every reduce around it, and the group check would count
+// it as an open range and refuse a valid group.
 
 static u32 apply_opt_dag_opt_range_aid(Term t) {
   while (term_tag(t) == TAG_UOP && term_ext(t) == UOP_OPT) {
@@ -506,87 +556,107 @@ static u32 apply_opt_dag_opt_range_aid(Term t) {
 }
 
 // 1 iff a RANGE leaf of index expression `t` is one of `red`'s axes.
-static int apply_opt_dag_names_leaf_of(Term red, Term t, u32 depth) {
-  if (depth > 64 || term_tag(t) != TAG_UOP) {
-    return 0;
-  }
-  u32 op = term_ext(t);
-  switch (op) {
-    case UOP_RANGE: {
-      u32 aid = uop_range_axis_id(t);
-      u32 n   = uop_reduce_n_axes(red);
-      for (u32 i = 0; i < n; i++) {
-        if (uop_reduce_axis(red, i) == aid) {
-          return 1;
-        }
-      }
-      return 0;
+static int apply_opt_dag_names_leaf_of(Term red, Term t) {
+  UOpWalk w = {0};
+  uop_walk_push(&w, t);
+  int named = 0;
+  for (Term n = uop_walk_pop(&w); n != 0; n = uop_walk_pop(&w)) {
+    if (term_ext(n) == UOP_RANGE
+        && apply_opt_dag_reduce_names(red, uop_range_axis_id(n))) {
+      named = 1;
+      break;
     }
-    case UOP_OPT:
-      return apply_opt_dag_names_leaf_of(red, uop_opt_target(t), depth + 1);
-    case UOP_CONST: case UOP_BUFFER: case UOP_INVALID:
-      return 0;
-    default: {
-      u8  ar  = uop_arity((u8)op);
-      u64 loc = term_val(t);
-      for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
-        if (apply_opt_dag_names_leaf_of(red, heap_read(loc + i), depth + 1)) {
-          return 1;
-        }
-      }
-      return 0;
-    }
+    apply_opt_dag_push_srcs(&w, n);
   }
+  uop_walk_free(&w);
+  return named;
+}
+
+// 1 iff IADD `t` adds `inner_aid` to an operand holding one of `red`'s
+// axes: the composition a split of that axis leaves.
+static int apply_opt_dag_composes_split(Term red, Term t, u32 inner_aid) {
+  Term a = heap_read(term_val(t) + 0);
+  Term b = heap_read(term_val(t) + 1);
+  return (apply_opt_dag_opt_range_aid(b) == inner_aid
+          && apply_opt_dag_names_leaf_of(red, a))
+      || (apply_opt_dag_opt_range_aid(a) == inner_aid
+          && apply_opt_dag_names_leaf_of(red, b));
 }
 
 fn int uop_reduce_owns_split_axis(Term red, u32 inner_aid) {
   if (term_tag(red) != TAG_UOP || term_ext(red) != UOP_REDUCE) {
     return 0;
   }
-  if (++APPLY_OPT_DAG_OWN_EPOCH == 0) {
-    for (u32 i = 0; i < APPLY_OPT_DAG_OWN_CAP; i++) {
-      APPLY_OPT_DAG_OWN_GEN[i] = 0;
+  UOpWalk w = {0};
+  uop_walk_push(&w, uop_reduce_src(red));
+  int owns = 0;
+  for (Term t = uop_walk_pop(&w); t != 0; t = uop_walk_pop(&w)) {
+    if (term_ext(t) == UOP_IADD
+        && apply_opt_dag_composes_split(red, t, inner_aid)) {
+      owns = 1;
+      break;
     }
-    APPLY_OPT_DAG_OWN_EPOCH = 1;
+    apply_opt_dag_push_srcs(&w, t);
   }
-  APPLY_OPT_DAG_OWN_N = 0;
-  u32 sp = 0;
-  apply_opt_dag_own_push(uop_reduce_src(red), &sp);
-  while (sp > 0) {
-    Term t   = APPLY_OPT_DAG_OWN_STACK[--sp];
-    u32  op  = term_ext(t);
-    u64  loc = term_val(t);
-    switch (op) {
-      case UOP_RANGE: case UOP_CONST: case UOP_BUFFER: case UOP_INVALID:
-        continue;
-      case UOP_OPT:
-        apply_opt_dag_own_push(uop_opt_target(t), &sp);
-        continue;
-      case UOP_REDUCE:
-        apply_opt_dag_own_push(uop_reduce_src(t), &sp);
-        continue;
-      case UOP_IADD: {
-        Term a = heap_read(loc + 0);
-        Term b = heap_read(loc + 1);
-        if (apply_opt_dag_opt_range_aid(b) == inner_aid
-            && apply_opt_dag_names_leaf_of(red, a, 0)) {
-          return 1;
-        }
-        if (apply_opt_dag_opt_range_aid(a) == inner_aid
-            && apply_opt_dag_names_leaf_of(red, b, 0)) {
-          return 1;
-        }
-        break;
-      }
-      default:
-        break;
+  uop_walk_free(&w);
+  return owns;
+}
+
+// ---------- no group inside another reduce --------------------------
+// tinygrad codegen/opt/postrange.py:131-134 refuses a group whose REDUCE
+// sits inside another reduce.  It reads reduces[0].ranges: the ranges still
+// open at the REDUCE, i.e. those of its body minus the ones it or a reduce
+// in the body closes (uop/ops.py:469-497).  A REDUCE closes the axes it
+// names plus the inner halves of their splits, which tinygrad keeps in
+// REDUCE.src[1:] and thvm reads off the split composition.
+
+static int apply_opt_dag_reduce_closes(Term red, u32 aid, u32 kax) {
+  if (apply_opt_dag_reduce_names(red, aid)) {
+    return 1;
+  }
+  return kax == KAX_UNROLL && uop_reduce_owns_split_axis(red, aid);
+}
+
+// 1 iff `red` or a REDUCE in its body closes the range (aid, kax).
+static int apply_opt_dag_closed_in(Term red, u32 aid, u32 kax) {
+  if (apply_opt_dag_reduce_closes(red, aid, kax)) {
+    return 1;
+  }
+  UOpWalk w = {0};
+  uop_walk_push(&w, uop_reduce_src(red));
+  int closed = 0;
+  for (Term t = uop_walk_pop(&w); t != 0; t = uop_walk_pop(&w)) {
+    if (term_ext(t) == UOP_REDUCE && apply_opt_dag_reduce_closes(t, aid, kax)) {
+      closed = 1;
+      break;
     }
-    u8 ar = uop_arity((u8)op);
-    for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
-      apply_opt_dag_own_push(heap_read(loc + i), &sp);
+    apply_opt_dag_push_srcs(&w, t);
+  }
+  uop_walk_free(&w);
+  return closed;
+}
+
+// A REDUCE, UNROLL or GROUP_REDUCE range still open at `red`, or 0: the
+// check's (REDUCE, UNROLL) plus the GROUP_REDUCE tinygrad listed before
+// #18388 folded it into LOCAL.
+static Term apply_opt_dag_open_reduce_range(Term red) {
+  UOpWalk w = {0};
+  uop_walk_push(&w, uop_reduce_src(red));
+  Term open = 0;
+  for (Term t = uop_walk_pop(&w); t != 0; t = uop_walk_pop(&w)) {
+    if (term_ext(t) != UOP_RANGE) {
+      apply_opt_dag_push_srcs(&w, t);
+      continue;
+    }
+    u32 kax = uop_range_axis_type(t);
+    if ((kax == KAX_REDUCE || kax == KAX_UNROLL || kax == KAX_GROUP_REDUCE)
+        && !apply_opt_dag_closed_in(red, uop_range_axis_id(t), kax)) {
+      open = t;
+      break;
     }
   }
-  return 0;
+  uop_walk_free(&w);
+  return open;
 }
 
 // ---------- KOP_GROUP / KOP_GROUPTOP --------------------------------
@@ -610,8 +680,10 @@ fn int uop_reduce_owns_split_axis(Term red, u32 inner_aid) {
 // (its "multiple distinct" guard returns 0), which silently killed the
 // conv GROUP candidate.  Collect EVERY matching leaf and substitute each
 // with its GROUP_REDUCE-wrapped form; the rewriter recursion fixpoints
-// since the wrapped outputs are not themselves rule keys.  Returns 0 on
-// bail (no match, a non-REDUCE leaf, or extent not divisible).
+// since the wrapped outputs are not themselves rule keys.  A REDUCE must
+// reduce the axis and must not sit inside another reduce (tinygrad
+// codegen/opt/postrange.py:128-134).  Returns 0 on bail (no match, a
+// non-REDUCE leaf, extent not divisible, no such REDUCE, or a nested one).
 
 fn Term uop_dag_apply_group_reduce(Term root, u32 target_axis, u32 k) {
   int gr_tr = getenv("THVM_GROUP_REDUCE_TRACE") != NULL;
@@ -625,7 +697,7 @@ fn Term uop_dag_apply_group_reduce(Term root, u32 target_axis, u32 k) {
   for (u32 i = 0; i < n_ranges; i++) {
     Term r = ranges[i];
     if (uop_range_axis_id(r) != target_axis) continue;
-    if (uop_range_axis_type(r) != KAX_REDUCE) {
+    if (!kop_split_source_ok(KOP_GROUP, uop_range_axis_type(r))) {
       if (gr_tr) fprintf(stderr, "[gr] axis=%u k=%u BAIL: leaf kax=%u != REDUCE\n",
                          target_axis, k, uop_range_axis_type(r));
       return 0;
@@ -659,6 +731,23 @@ fn Term uop_dag_apply_group_reduce(Term root, u32 target_axis, u32 k) {
                 uop_range_axis_type(ranges[i]), uop_range_extent(ranges[i]));
       }
       fputc('\n', stderr);
+    }
+    return 0;
+  }
+  Term red = apply_opt_dag_reduce_of(root, target_axis);
+  if (red == 0) {
+    if (gr_tr) {
+      fprintf(stderr, "[gr] axis=%u k=%u BAIL: no REDUCE reduces the axis\n",
+              target_axis, k);
+    }
+    return 0;
+  }
+  Term open = apply_opt_dag_open_reduce_range(red);
+  if (open != 0) {
+    if (gr_tr) {
+      fprintf(stderr, "[gr] axis=%u k=%u BAIL: group inside another reduce "
+              "(range a%u kax=%u open at its REDUCE)\n", target_axis, k,
+              uop_range_axis_id(open), uop_range_axis_type(open));
     }
     return 0;
   }

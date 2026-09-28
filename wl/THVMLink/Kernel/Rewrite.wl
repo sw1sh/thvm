@@ -68,9 +68,9 @@ Idempotent at the same factor$."];
 
 SetUsage[KOptGlobal, "KOptGlobal[axis$] returns an operator that swaps every RANGE leaf at axis$ from KAX_LOOP to KAX_GLOBAL."];
 
-SetUsage[KOptUpcast, "KOptUpcast[axis$, k$] returns an operator that splits RANGE(axis$, LOOP, N) into an outer RANGE(axis$, LOOP, N/k$) and an inner RANGE(axis$+1, KAX_UPCAST, k$), replacing refs with IADD(IMUL(outer, k$), inner)."];
-SetUsage[KOptUnroll, "KOptUnroll[axis$, k$] returns an operator that splits RANGE(axis$, LOOP, N) into an outer RANGE(axis$, LOOP, N/k$) and an inner RANGE(axis$+1, KAX_UNROLL, k$), replacing refs with IADD(IMUL(outer, k$), inner)."];
-SetUsage[KOptLocal, "KOptLocal[axis$, k$] returns an operator that splits RANGE(axis$, LOOP, N) into an outer RANGE(axis$, LOOP, N/k$) and an inner RANGE(axis$+1, KAX_LOCAL, k$), replacing refs with IADD(IMUL(outer, k$), inner)."];
+SetUsage[KOptUpcast, "KOptUpcast[axis$, k$] returns an operator that splits an output RANGE(axis$, t, N), t one of KAX_LOOP, KAX_GLOBAL or KAX_LOCAL, into an outer RANGE(axis$, t, N/k$) and an inner RANGE(axis$+1, KAX_UPCAST, k$), replacing refs with IADD(IMUL(outer, k$), inner)."];
+SetUsage[KOptUnroll, "KOptUnroll[axis$, k$] returns an operator that splits a reduce RANGE(axis$, t, N), t one of KAX_REDUCE or KAX_GROUP_REDUCE with axis$ reduced by some REDUCE, into an outer RANGE(axis$, t, N/k$) and an inner RANGE(axis$+1, KAX_UNROLL, k$), replacing refs with IADD(IMUL(outer, k$), inner)."];
+SetUsage[KOptLocal, "KOptLocal[axis$, k$] returns an operator that splits an output RANGE(axis$, t, N), t one of KAX_LOOP or KAX_GLOBAL, into an outer RANGE(axis$, t, N/k$) and an inner RANGE(axis$+1, KAX_LOCAL, k$), replacing refs with IADD(IMUL(outer, k$), inner)."];
 SetUsage[KOptGroup, "KOptGroup[axis$, k$] returns an operator that splits RANGE(axis$, LOOP, N) into an outer RANGE(axis$, LOOP, N/k$) and an inner RANGE(axis$+1, KAX_LOOP, k$), replacing refs with IADD(IMUL(outer, k$), inner).
 KOP_GROUP is a retired opcode kept for back-compat; it falls through to KAX_LOOP with no OPT wrapper."];
 SetUsage[KOptGroupTop, "KOptGroupTop[axis$, k$] returns an operator that splits RANGE(axis$, LOOP, N) into an outer RANGE(axis$, LOOP, N/k$) and an inner RANGE(axis$+1, KAX_LOOP, k$), replacing refs with IADD(IMUL(outer, k$), inner).
@@ -147,7 +147,11 @@ KOptGlobal[axis_Integer] := ReplaceAll[
  *   - LOCAL is special: optKind = None so inner is the bare RANGE.
  * Other RANGE leaves with axis_id > target are renumbered +1 (the
  * new inner steals id `axis+1`).  Mirrors uop_dag_apply_split in
- * src/uop/apply_opt_dag.c. *)
+ * src/uop/apply_opt_dag.c for valid opts only: that function first
+ * checks tinygrad's split_targets (codegen/opt/postrange.py:14-15) and,
+ * for UNROLL, that some REDUCE reduces the axis, and bails when either
+ * fails (TUOpDagApplyKOpt then returns TTerm[0]).  These rules do not
+ * model that bail. *)
 splitRule[innerKax_, optKind_, axis_, k_] := With[{
     innerExpr = If[ optKind === None,
         "UOP"["RANGE", "NUM"[axis + 1], "NUM"[innerKax], "NUM"[k]],

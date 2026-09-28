@@ -1377,12 +1377,14 @@ int main(void) {
   // (for non-LOCAL classes) wraps the inner in a UOP_OPT annotation.
   for (u32 i = 0; i < 3; i++) {
     static u8 const ops[3]      = { KOP_UPCAST, KOP_UNROLL, KOP_LOCAL };
+    static u8 const src_kax[3]  = { (u8)KAX_LOOP, (u8)KAX_REDUCE,
+                                    (u8)KAX_LOOP };
     static u8 const expect[3]   = { (u8)KAX_UPCAST, (u8)KAX_UNROLL,
                                     (u8)KAX_LOCAL };
     static u8 const opt_kind[3] = { (u8)UOP_OPT_UPCAST, (u8)UOP_OPT_UNROLL,
                                     0xFFu };
     Term sda_buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, (u32[]){32});
-    Term sda_r0   = uop_range(0, KAX_LOOP, 32);
+    Term sda_r0   = uop_range(0, src_kax[i], 32);
     Term sda_ie   = uop_index_e(sda_buf, sda_r0);
     Term sda_val  = uop_load(sda_ie);
     Term sda_root = uop_store(sda_buf, sda_r0, sda_val);
@@ -1399,6 +1401,23 @@ int main(void) {
       sda_inn = uop_opt_target(sda_inn_or_opt);
     }
     CHECK_EQ(uop_range_axis_type(sda_inn), (u32)expect[i]);
+  }
+
+  TEST_BEGIN("apply-split-dag/checks-source-type");
+  // tinygrad split_targets (codegen/opt/postrange.py:14-15, :80): UNROLL
+  // splits only a reduce axis, UPCAST and LOCAL only an output axis.  The
+  // replay skips an opt whose source axis is no split target.
+  for (u32 i = 0; i < 3; i++) {
+    static u8 const ops[3]     = { KOP_UNROLL, KOP_UPCAST, KOP_LOCAL };
+    static u8 const src_kax[3] = { (u8)KAX_LOOP, (u8)KAX_REDUCE,
+                                   (u8)KAX_REDUCE };
+    Term sdt_buf  = uop_buffer(UOP_SCOPE_GLOBAL, DT_FP32, 1, (u32[]){32});
+    Term sdt_r0   = uop_range(0, src_kax[i], 32);
+    Term sdt_val  = uop_load(uop_index_e(sdt_buf, sdt_r0));
+    Term sdt_root = uop_store(sdt_buf, sdt_r0, sdt_val);
+    KOpt sdt_opts[1] = {{ ops[i], 0, 4 }};
+    Term sdt_out = uop_apply_split_dag(sdt_root, sdt_opts, 1);
+    CHECK_EQ(heap_read(term_val(sdt_out) + 1), sdt_r0);
   }
 
   TEST_BEGIN("apply-split-dag/preserves-non-range-leaves");

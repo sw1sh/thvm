@@ -2615,6 +2615,16 @@ fn Term uop_dag_renumber_axes(Term root);
 // exactly the reduce this returns 1 for.  Defined in uop/apply_opt_dag.c.
 fn int uop_reduce_owns_split_axis(Term red, u32 inner_aid);
 
+// 1 iff the split-class KOpt `op` (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) may
+// split an axis of type `axis_type`: tinygrad's split_targets
+// (codegen/opt/postrange.py:14-15).  Defined in uop/apply_opt_dag.c.
+fn int kop_split_source_ok(u8 op, u32 axis_type);
+
+// 1 iff a UOP_REDUCE reachable from `root` reduces `axis_id`, tinygrad's
+// Scheduler.reduce_axes (codegen/opt/postrange.py:92-95).  Defined in
+// uop/apply_opt_dag.c.
+fn int uop_dag_reduces_axis(Term root, u32 axis_id);
+
 // === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
 // `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via

@@ -1,9 +1,10 @@
-// test_apply_opt_dag.c -- DAG-side apply_opt: TC + GLOBAL coverage.
+// test_apply_opt_dag.c - DAG-side apply_opt: TC, GLOBAL, split, SWAP and
+// group coverage.
 //
-// Phase E groundwork: validates that uop_dag_apply_tc and
-// uop_dag_apply_global produce the expected DAG mutations on a
-// canonical matmul shape, and that kernel_apply_opt's outer dispatcher
-// takes the DAG path when cached_lift.store_root is populated.
+// Validates the DAG mutation each opt makes on a canonical matmul shape,
+// the split validation tinygrad applies (split_targets, REDUCE membership,
+// no group inside another reduce), and that kernel_apply_opt's outer
+// dispatcher takes the DAG path when cached_lift.store_root is populated.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -291,40 +292,306 @@ static void test_apply_split_local_no_opt_wrap(void) {
 }
 
 static void test_apply_split_unroll_wraps_inner_opt(void) {
+  // UNROLL the K reduce axis (2, extent 32) by 4.  Every reference to k
+  // becomes IADD(IMUL(RANGE(2, REDUCE, 8), 4), OPT(RANGE(3, UNROLL, 4),
+  // UNROLL, 4)) and the REDUCE keeps naming the outer id.
   Term root = build_matmul_root(NULL, NULL, NULL);
-  Term r = uop_dag_apply_split(root, KOP_UNROLL, 0, 4);
+  Term r = uop_dag_apply_split(root, KOP_UNROLL, 2, 4);
   CHECK(r != 0);
   CHECK(r != root);
-  // Walk c_addr looking for an OPT(_, UNROLL, 4) wrapper.
-  Term c_addr = heap_read(term_val(r) + 1);
-  // c_addr should be IADD(IMUL(IADD(IMUL(outer, 4), inner_unroll), 16), n).
-  // Just check that an OPT_UNROLL wrapper exists somewhere.
-  Term opts[16]; u32 no = 0;
-  // Brute walk: descend IADD/IMUL chains.
-  Term stack[32]; u32 sp = 0; stack[sp++] = c_addr;
-  while (sp > 0) {
-    Term t = stack[--sp];
-    if (term_tag(t) != TAG_UOP) continue;
-    u32 op = term_ext(t);
-    if (op == UOP_OPT) {
-      if (no < 16) opts[no++] = t;
-      Term tgt = uop_opt_target(t);
-      if (term_tag(tgt) == TAG_UOP && sp < 32) stack[sp++] = tgt;
+  Term red = heap_read(term_val(r) + 2);
+  CHECK(term_tag(red) == TAG_UOP && term_ext(red) == UOP_REDUCE);
+  CHECK_EQ(uop_reduce_n_axes(red), 1u);
+  CHECK_EQ(uop_reduce_axis(red, 0), 2u);
+  // a[m,k] = m*32 + k now reads m*32 + linear.
+  Term a_load = heap_read(term_val(uop_reduce_src(red)) + 0);
+  Term a_addr = heap_read(term_val(a_load) + 1);
+  CHECK_EQ(term_ext(a_addr), UOP_IADD);
+  Term linear = heap_read(term_val(a_addr) + 1);
+  CHECK_EQ(term_ext(linear), UOP_IADD);
+  Term scaled = heap_read(term_val(linear) + 0);
+  Term inner  = heap_read(term_val(linear) + 1);
+  CHECK_EQ(term_ext(scaled), UOP_IMUL);
+  CHECK_EQ(heap_read(term_val(scaled) + 0), uop_range(2, KAX_REDUCE, 8));
+  CHECK_EQ(heap_read(term_val(scaled) + 1), uop_const(DT_INT32, 4));
+  CHECK_EQ(term_ext(inner), UOP_OPT);
+  CHECK_EQ(uop_opt_kind(inner), (u32)UOP_OPT_UNROLL);
+  CHECK_EQ(uop_opt_factor(inner), 4u);
+  CHECK_EQ(uop_opt_target(inner), uop_range(3, KAX_UNROLL, 4));
+  // b[k,n] = k*16 + n now reads linear*16 + n.
+  Term b_load = heap_read(term_val(uop_reduce_src(red)) + 1);
+  Term b_addr = heap_read(term_val(b_load) + 1);
+  CHECK_EQ(term_ext(b_addr), UOP_IADD);
+  Term b_scaled = heap_read(term_val(b_addr) + 0);
+  CHECK_EQ(term_ext(b_scaled), UOP_IMUL);
+  CHECK_EQ(heap_read(term_val(b_scaled) + 0), linear);
+  CHECK_EQ(heap_read(term_val(b_scaled) + 1), uop_const(DT_INT32, 16));
+  CHECK_EQ(heap_read(term_val(b_addr) + 1), uop_range(1, KAX_LOOP, 16));
+}
+
+// tinygrad split_targets (codegen/opt/postrange.py:14-15, checked in
+// shift_to at :80): UPCAST splits an output axis (GLOBAL/LOCAL/WEAK, thvm
+// LOOP/GLOBAL/LOCAL), UNROLL a reduce axis, LOCAL a GLOBAL or WEAK one.
+static void test_apply_split_checks_source_type(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);   // 0, 1 LOOP; 2 REDUCE
+  CHECK(uop_dag_apply_split(root, KOP_UNROLL, 0, 4) == 0);
+  CHECK(uop_dag_apply_split(root, KOP_UPCAST, 2, 2) == 0);
+  CHECK(uop_dag_apply_split(root, KOP_LOCAL,  2, 2) == 0);
+  CHECK(uop_dag_apply_split(root, KOP_UPCAST, 0, 2) != 0);
+  CHECK(uop_dag_apply_split(root, KOP_UNROLL, 2, 4) != 0);
+
+  Term g = uop_dag_apply_global(root, 0);
+  CHECK(uop_dag_apply_split(g, KOP_UPCAST, 0, 4) != 0);
+  CHECK(uop_dag_apply_split(g, KOP_LOCAL,  0, 4) != 0);
+
+  // The UPCAST inner (id 1) is no split target for another UPCAST or LOCAL.
+  Term u = uop_dag_apply_split(root, KOP_UPCAST, 0, 4);
+  CHECK(u != 0);
+  CHECK(uop_dag_apply_split(u, KOP_UPCAST, 1, 2) == 0);
+  CHECK(uop_dag_apply_split(u, KOP_LOCAL,  1, 2) == 0);
+
+  // The dispatcher bails the same way and leaves store_root untouched.
+  u32 kid = kernel_alloc();
+  KernelEntry *ke = &KERNELS[kid];
+  ke->cached_lift.store_root = root;
+  KOpt bad = { KOP_UNROLL, 0, 4 };
+  CHECK(kernel_apply_opt(ke, bad) == 0);
+  CHECK(ke->cached_lift.store_root == root);
+}
+
+// A split keeps the outer id in REDUCE.axes, so a second UNROLL of the outer
+// still finds its REDUCE; the UNROLL inner itself is no split target.
+static void test_apply_split_unroll_twice_on_outer(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  Term r1 = uop_dag_apply_split(root, KOP_UNROLL, 2, 4);
+  CHECK(r1 != 0);
+  CHECK(uop_dag_apply_split(r1, KOP_UNROLL, 2, 2) != 0);
+  CHECK(uop_dag_apply_split(r1, KOP_UNROLL, 3, 2) == 0);
+}
+
+// hand_opts section 7 unrolls a GROUP_REDUCE axis (tinygrad's UNROLL
+// split_targets hold the reduce-typed LOCAL a group leaves).
+static void test_apply_split_unroll_on_group_reduce_axis(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  Term g = uop_dag_apply_group_reduce(root, 2, 4);
+  CHECK(g != 0);
+  CHECK(uop_dag_apply_split(g, KOP_UNROLL, 2, 2) != 0);
+}
+
+// tinygrad test_custom_kernel.py test_gemm_unroll_refused /
+// test_gemm_group_refused: k is typed REDUCE but no REDUCE reduces it, the
+// shape of a kernel that stores per (m, n, k).
+static Term build_orphan_reduce_root(void) {
+  u32 dimsA[2] = { 16, 32 };
+  u32 dimsB[2] = { 32, 16 };
+  u32 dimsC[2] = { 16, 16 };
+  Term A = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsA, 1);
+  Term B = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsB, 2);
+  Term C = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsC, 0);
+  Term r_m = uop_range(0, KAX_LOOP,   16);
+  Term r_n = uop_range(1, KAX_LOOP,   16);
+  Term r_k = uop_range(2, KAX_REDUCE, 32);
+  Term k16 = uop_const(DT_INT32, 16);
+  Term k32 = uop_const(DT_INT32, 32);
+  Term a_addr = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, r_m, k32), r_k);
+  Term b_addr = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, r_k, k16), r_n);
+  Term c_addr = uop_int_binary(UOP_IADD, uop_int_binary(UOP_IMUL, r_m, k16), r_n);
+  Term mul = uop_binary(UOP_MUL, uop_index_e(A, a_addr), uop_index_e(B, b_addr));
+  return uop_store(C, c_addr, mul);
+}
+
+// tinygrad postrange.py:128-130: UNROLL and the group split need an axis
+// some REDUCE reduces.
+static void test_apply_opt_rejects_orphan_reduce_axis(void) {
+  Term root = build_orphan_reduce_root();
+  CHECK(uop_dag_apply_split(root, KOP_UNROLL, 2, 4) == 0);
+  CHECK(uop_dag_apply_group_reduce(root, 2, 4) == 0);
+  KOpt top = { KOP_GROUPTOP, 2, 4 };
+  CHECK(uop_dag_apply_kopt(root, top) == 0);
+  CHECK(uop_dag_apply_split(root, KOP_UPCAST, 0, 4) != 0);
+}
+
+// Unique UOp nodes reachable from `root`.
+static u32 count_uop_nodes(Term root) {
+  UOpWalk w = {0};
+  uop_walk_push(&w, root);
+  u32 n = 0;
+  for (Term t = uop_walk_pop(&w); t != 0; t = uop_walk_pop(&w)) {
+    n++;
+    u8  ar  = uop_arity((u8)term_ext(t));
+    u64 loc = term_val(t);
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+      uop_walk_push(&w, heap_read(loc + i));
+    }
+  }
+  uop_walk_free(&w);
+  return n;
+}
+
+// `body` + w(m), where w(m) = sum_i z[m*4096 + i] over 1200 loads of about
+// four unique nodes each, so a reduce over it holds more than 4096 nodes.
+// WIDE_FIRST makes w the ADD's first operand and WIDE_LAST its second, so a
+// depth-first walk meets either operand first.
+enum { WIDE_NONE, WIDE_FIRST, WIDE_LAST };
+
+static Term add_wide_term(Term body, Term r_m, int wide) {
+  if (wide == WIDE_NONE) {
+    return body;
+  }
+  u32  dimsZ[1] = { 4 * 4096 };
+  Term Z   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsZ, 3);
+  Term row = uop_int_binary(UOP_IMUL, r_m, uop_const(DT_INT32, 4096));
+  Term sum = uop_index_e(Z, row);
+  for (u32 i = 1; i < 1200; i++) {
+    Term addr = uop_int_binary(UOP_IADD, row, uop_const(DT_INT32, i));
+    sum = uop_binary(UOP_ADD, sum, uop_index_e(Z, addr));
+  }
+  return (wide == WIDE_FIRST) ? uop_binary(UOP_ADD, sum, body)
+                              : uop_binary(UOP_ADD, body, sum);
+}
+
+// out[m] = sum_k (x[m,k] + w(m)).
+static Term build_wide_row_sum_root(int wide) {
+  u32 dimsX[2] = { 4, 32 };
+  u32 dimsO[1] = { 4 };
+  Term X = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsX, 1);
+  Term O = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsO, 0);
+  Term r_m = uop_range(0, KAX_LOOP,   4);
+  Term r_k = uop_range(1, KAX_REDUCE, 32);
+  Term mk  = uop_int_binary(UOP_IADD,
+                            uop_int_binary(UOP_IMUL, r_m, uop_const(DT_INT32, 32)),
+                            r_k);
+  Term sum = uop_reduce(REDUCE_SUM, 1,
+                        add_wide_term(uop_index_e(X, mk), r_m, wide));
+  return uop_store(O, r_m, sum);
+}
+
+// out[m] = sum_j x[m,j] * max_k (y[m,j,k] + w(m)): the MAX reduce over k
+// (axis 2) sits inside the SUM over j (axis 1) and reads j.  WIDE_NONE
+// leaves w(m) out.
+static Term build_nested_reduce_root(int wide) {
+  u32 dimsX[2] = { 4, 8 };
+  u32 dimsY[3] = { 4, 8, 16 };
+  u32 dimsO[1] = { 4 };
+  Term X = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsX, 1);
+  Term Y = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 3, dimsY, 2);
+  Term O = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsO, 0);
+  Term r_m = uop_range(0, KAX_LOOP,   4);
+  Term r_j = uop_range(1, KAX_REDUCE, 8);
+  Term r_k = uop_range(2, KAX_REDUCE, 16);
+  Term mj  = uop_int_binary(UOP_IADD,
+                            uop_int_binary(UOP_IMUL, r_m, uop_const(DT_INT32, 8)),
+                            r_j);
+  Term mjk = uop_int_binary(UOP_IADD,
+                            uop_int_binary(UOP_IMUL, mj, uop_const(DT_INT32, 16)),
+                            r_k);
+  Term inner = uop_reduce(REDUCE_MAX, 2,
+                          add_wide_term(uop_index_e(Y, mjk), r_m, wide));
+  Term outer = uop_reduce(REDUCE_SUM, 1,
+                          uop_binary(UOP_MUL, uop_index_e(X, mj), inner));
+  return uop_store(O, r_m, outer);
+}
+
+// tinygrad postrange.py:131-134 (test_kernel_opts.py test_double_sum_group):
+// no group inside another reduce.  The ranges still open at a REDUCE are
+// its body's minus the ones it or a reduce in its body closes.
+static void test_apply_group_reduce_rejects_group_inside_reduce(void) {
+  Term root = build_nested_reduce_root(WIDE_NONE);
+  CHECK(uop_dag_apply_group_reduce(root, 2, 4) == 0);
+  CHECK(uop_dag_apply_group_reduce(root, 1, 4) != 0);
+  // UNROLL j, then group k (now axis 3): k's reduce still reads j's halves.
+  Term u = uop_dag_apply_split(root, KOP_UNROLL, 1, 4);
+  CHECK(u != 0);
+  CHECK(uop_dag_apply_group_reduce(u, 3, 4) == 0);
+}
+
+// Both halves of a reduce's own split close at that reduce (tinygrad keeps
+// them in REDUCE.src[1:]), so a group after its own UNROLL is no nested
+// group.
+static void test_apply_group_reduce_after_own_unroll(void) {
+  Term root = build_matmul_root(NULL, NULL, NULL);
+  Term u = uop_dag_apply_split(root, KOP_UNROLL, 2, 4);
+  CHECK(u != 0);
+  CHECK(uop_dag_apply_group_reduce(u, 2, 4) != 0);
+}
+
+// In tinygrad a reduce closes both halves of its own split whatever its
+// body's size (reduces[0].ranges, uop/ops.py:469-497), so the split
+// ownership and nested-group checks walk the whole body.
+static void test_apply_group_reduce_after_own_unroll_wide_body(void) {
+  for (int wide = WIDE_FIRST; wide <= WIDE_LAST; wide++) {
+    Term u = uop_dag_apply_split(build_wide_row_sum_root(wide),
+                                 KOP_UNROLL, 1, 4);
+    CHECK(u != 0);
+    if (u == 0) {
       continue;
     }
-    if (op == UOP_IADD || op == UOP_IMUL) {
-      u64 loc = term_val(t);
-      Term l = heap_read(loc + 0);
-      Term ri = heap_read(loc + 1);
-      if (term_tag(l) == TAG_UOP && sp < 32) stack[sp++] = l;
-      if (term_tag(ri) == TAG_UOP && sp < 32) stack[sp++] = ri;
+    Term red = heap_read(term_val(u) + 2);
+    CHECK(count_uop_nodes(uop_reduce_src(red)) > 4096);
+    CHECK(uop_reduce_owns_split_axis(red, 2) == 1);
+    CHECK(uop_dag_apply_group_reduce(u, 1, 4) != 0);
+  }
+}
+
+// After UNROLL k the MAX closes both halves of k whatever its body's size, so
+// a group of the SUM's j is no nested group, while a group of k stays
+// refused: j is open at the MAX.
+static void test_apply_group_reduce_over_wide_nested_unroll(void) {
+  for (int wide = WIDE_FIRST; wide <= WIDE_LAST; wide++) {
+    Term u = uop_dag_apply_split(build_nested_reduce_root(wide),
+                                 KOP_UNROLL, 2, 4);
+    CHECK(u != 0);
+    if (u == 0) {
+      continue;
     }
+    CHECK(uop_dag_apply_group_reduce(u, 1, 4) != 0);
+    CHECK(uop_dag_apply_group_reduce(u, 2, 2) == 0);
   }
-  int saw_unroll = 0;
-  for (u32 i = 0; i < no; i++) {
-    if (uop_opt_kind(opts[i]) == UOP_OPT_UNROLL && uop_opt_factor(opts[i]) == 4) saw_unroll = 1;
+}
+
+// === hand-coded opts ================================================
+
+// tinygrad unrollable_dims (codegen/opt/postrange.py:102-104) draws from
+// reduce_axes, so the hand-coded UNROLL (heuristic.py:138-150) never picks
+// a REDUCE-typed axis no REDUCE reduces.  out[m] = max_j x[m*32 + j*4 + o]
+// with o such an axis, sorted last.  A MAX keeps the kernel off the CPU
+// BLAS ladder, which would skip the hand-coded opts.
+static void test_hand_opts_unroll_skips_orphan_reduce_axis(void) {
+  unsetenv("NOOPT");
+  setenv("HAND_CODED_OPTS", "1", 1);
+  u32 dimsX[1] = { 128 };
+  u32 dimsO[1] = { 4 };
+  Term X = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsX, 1);
+  Term O = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsO, 0);
+  Term r_m = uop_range(0, KAX_LOOP,   4);
+  Term r_j = uop_range(1, KAX_REDUCE, 8);
+  Term r_o = uop_range(2, KAX_REDUCE, 4);
+  Term mj = uop_int_binary(UOP_IADD,
+                           uop_int_binary(UOP_IMUL, r_m, uop_const(DT_INT32, 32)),
+                           uop_int_binary(UOP_IMUL, r_j, uop_const(DT_INT32, 4)));
+  Term red  = uop_reduce(REDUCE_MAX, 1,
+                         uop_index_e(X, uop_int_binary(UOP_IADD, mj, r_o)));
+  Term root = uop_store(O, r_m, red);
+
+  u32 kid = kernel_alloc();
+  KernelEntry *ke = &KERNELS[kid];
+  ke->cached_lift.store_root = root;
+  ke->cached_lift.out_buf    = O;
+  ke->cached_lift.in_bufs[0] = X;
+  ke->cached_lift.n_inputs   = 1;
+  ke->n_inputs = 1;
+  CHECK(kernel_hand_coded_opts(ke) > 0);
+
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types, exts,
+                               MAX_AXES);
+  int unrolled_j = 0, unrolled_o = 0;
+  for (u32 i = 0; i < n; i++) {
+    if (types[i] == KAX_UNROLL && exts[i] == 8) unrolled_j = 1;
+    if (types[i] == KAX_UNROLL && exts[i] == 4) unrolled_o = 1;
   }
-  CHECK(saw_unroll);
+  CHECK(unrolled_j);
+  CHECK(!unrolled_o);
 }
 
 // === KOP_SWAP DAG mutation ============================================
@@ -475,6 +742,22 @@ int main(void) {
   TEST_BEGIN("apply_split_upcast_splits_axis");    test_apply_split_upcast_splits_axis();
   TEST_BEGIN("apply_split_local_no_opt_wrap");     test_apply_split_local_no_opt_wrap();
   TEST_BEGIN("apply_split_unroll_wraps_inner_opt"); test_apply_split_unroll_wraps_inner_opt();
+  TEST_BEGIN("apply_split_checks_source_type");    test_apply_split_checks_source_type();
+  TEST_BEGIN("apply_split_unroll_twice_on_outer"); test_apply_split_unroll_twice_on_outer();
+  TEST_BEGIN("apply_split_unroll_on_group_reduce_axis");
+                                                    test_apply_split_unroll_on_group_reduce_axis();
+  TEST_BEGIN("apply_opt_rejects_orphan_reduce_axis");
+                                                    test_apply_opt_rejects_orphan_reduce_axis();
+  TEST_BEGIN("apply_group_reduce_rejects_group_inside_reduce");
+                                                    test_apply_group_reduce_rejects_group_inside_reduce();
+  TEST_BEGIN("apply_group_reduce_after_own_unroll");
+                                                    test_apply_group_reduce_after_own_unroll();
+  TEST_BEGIN("apply_group_reduce_after_own_unroll_wide_body");
+                                                    test_apply_group_reduce_after_own_unroll_wide_body();
+  TEST_BEGIN("apply_group_reduce_over_wide_nested_unroll");
+                                                    test_apply_group_reduce_over_wide_nested_unroll();
+  TEST_BEGIN("hand_opts_unroll_skips_orphan_reduce_axis");
+                                                    test_hand_opts_unroll_skips_orphan_reduce_axis();
   TEST_BEGIN("apply_swap_axes");                   test_apply_swap_axes();
   TEST_BEGIN("apply_swap_noop_when_axes_equal");   test_apply_swap_noop_when_axes_equal();
   TEST_BEGIN("apply_swap_follows_reduce_axis");    test_apply_swap_follows_reduce_axis();

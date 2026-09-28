@@ -118,16 +118,19 @@ static u32 hand_opt_upcastable_dims(HandOptAxes const *ax, u32 *out) {
   return n;
 }
 
-// tinygrad: k.unrollable_dims = [i for i in axes_of(GROUP_REDUCE, REDUCE)
-//                                if isinstance(s:=full_shape[i], int) and s > 1].
-// Symbolic (kvar) reduce axes are excluded for the same reason as
-// hand_opt_upcastable_dims.
-static u32 hand_opt_unrollable_dims(HandOptAxes const *ax, u32 *out) {
+// tinygrad: k.unrollable_dims = [i for i in reduce_axes if axis_types[i] in
+//   (LOCAL, REDUCE) and isinstance(s:=full_shape[i], int) and s > 1]
+// (codegen/opt/postrange.py:102-104).  The reduce-typed LOCAL is thvm's
+// GROUP_REDUCE, and reduce_axes keeps only axes some REDUCE of `root`
+// reduces, the axes UNROLL accepts.  Symbolic (kvar) reduce axes are
+// excluded for the same reason as hand_opt_upcastable_dims.
+static u32 hand_opt_unrollable_dims(HandOptAxes const *ax, Term root, u32 *out) {
   u32 n = 0;
   for (u32 i = 0; i < ax->n; i++) {
     u8 t = ax->kax_type[i];
     if (kvar_extent_is_var(ax->extent[i])) continue;   // isinstance(s, int)
-    if ((t == KAX_REDUCE || t == KAX_GROUP_REDUCE) && ax->extent[i] > 1) {
+    if ((t == KAX_REDUCE || t == KAX_GROUP_REDUCE) && ax->extent[i] > 1
+        && uop_dag_reduces_axis(root, ax->axis_id[i])) {
       out[n++] = i;
     }
   }
@@ -909,7 +912,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   if (!hand_opt_kernel_is_cuda(ke)) {
     if (hand_opt_snapshot_axes(ke, &ax)) {
       u32 unr[MAX_AXES];
-      u32 n_unr = hand_opt_unrollable_dims(&ax, unr);
+      u32 n_unr = hand_opt_unrollable_dims(&ax, ke->cached_lift.store_root, unr);
       u64 us = hand_opt_upcast_size(&ax);
       u8 unroll_t[] = { KAX_UNROLL };
       u32 n_existing_unroll = hand_opt_axes_of_n(&ax, unroll_t, 1);
@@ -928,7 +931,8 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
             // UNROLL renumbered axes.
             if (ext <= 3 && hand_opt_snapshot_axes(ke, &ax)) {
               u32 unr2[MAX_AXES];
-              u32 n_unr2 = hand_opt_unrollable_dims(&ax, unr2);
+              u32 n_unr2 = hand_opt_unrollable_dims(&ax, ke->cached_lift.store_root,
+                                                    unr2);
               if (n_unr2 > 0) {
                 u32 last2 = unr2[n_unr2 - 1];
                 u32 ext2  = ax.extent[last2];

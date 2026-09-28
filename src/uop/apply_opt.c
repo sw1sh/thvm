@@ -741,6 +741,9 @@ fn Term uop_apply_kernel_opts_validate(Term root, KOpt const *applied_opts,
 //           IADD/IMUL chains to find the outermost RANGE), or
 //         * the seed leaf RANGE(a, LOOP, origin_extent[a]) on first
 //           split.
+//     - Skip the opt when that outer's axis type is no split target of
+//       o.op (kop_split_source_ok, tinygrad codegen/opt/postrange.py:80),
+//       the same check uop_dag_apply_split makes.
 //     - Apply uop_range_split to that outer leaf with the opt's k and
 //       inner_kax.  The primitive returns (outer_split, inner_split,
 //       linear).
@@ -1013,6 +1016,14 @@ fn Term uop_apply_split_dag(Term root, KOpt const *applied_opts,
     } else {
       outer_leaf = split_dag_outermost_range(cur_expr);
       if (outer_leaf == 0) continue;
+    }
+    if (!kop_split_source_ok(o->op, uop_range_axis_type(outer_leaf))) {
+      if (getenv("THVM_HANDOPT_TRACE")) {
+        fprintf(stderr, "[split-dag] SKIP op=%u axis=%u k=%u: axis type %u "
+                "is no split target\n", o->op, a, k,
+                uop_range_axis_type(outer_leaf));
+      }
+      continue;
     }
     UopRangeSplit rs = uop_range_split(outer_leaf, k, inner_kax);
     if (rs.linear_index == 0) continue;
