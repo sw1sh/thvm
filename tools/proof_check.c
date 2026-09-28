@@ -647,6 +647,58 @@ static double pc_cnf_est(Term f) {
   return 1.0;
 }
 
+// Clausify one closed formula and saturate it within `cap` seconds;
+// `ordered` attaches a KBO (all weights 1, precedence = label order).
+static AtpStatus pc_saturate(Term conj, double cap, int ordered) {
+  u32 nc = 0;
+  FolClause **cl;
+  fol_reset_skolem();
+  Term sk = fol_skolemize(fol_nnf(conj));
+  if (pc_cnf_est(sk) <= 4096.0) {
+    cl = fol_extract_clauses(fol_distribute(sk), &nc);
+  } else {
+    fol_reset_tseitin();
+    cl = fol_tseitin_extract_clauses(sk, &nc);
+  }
+  if (cl == NULL) return ATP_ABORTED;
+  CnfState *s = cnf_init(pc_refute_steps ? pc_refute_steps : pc_cap);
+  // Step replay must not depend on the AVATAR splitting env: the
+  // checker's per-step refutations are tiny and want the plain
+  // deterministic calculus.
+  cnf_set_avatar(s, 0u);
+  static u32 *kw = NULL, *kp = NULL;
+  static u32 kn = 0u;
+  static KboConfig kbo;
+  if (ordered) {
+    u32 nl = FOL_LAB_SKOLEM_BASE + g_fol_skolem_next + 1u;
+    if (nl > kn) {
+      free(kw); free(kp);
+      kw = (u32 *)malloc((size_t)nl * sizeof(u32));
+      kp = (u32 *)malloc((size_t)nl * sizeof(u32));
+      kn = (kw != NULL && kp != NULL) ? nl : 0u;
+      for (u32 i = 0; i < kn; i++) { kw[i] = 1u; kp[i] = i; }
+    }
+    if (kn == 0u) {
+      for (u32 j = 0; j < nc; j++) fol_clause_free(cl[j]);
+      free(cl);
+      cnf_free(s);
+      return ATP_ABORTED;
+    }
+    kbo.weights = kw;
+    kbo.precedence = kp;
+    kbo.n_labels = kn;
+    kbo.var_weight = 1u;
+    cnf_set_kbo(s, &kbo);
+  }
+  for (u32 j = 0; j < nc; j++) cnf_add_clause(s, cl[j]);
+  free(cl);
+  cnf_set_wall_deadline(cap);
+  AtpStatus st = cnf_run(s);
+  cnf_set_wall_deadline(0.0);
+  cnf_free(s);
+  return st;
+}
+
 // Refute a conjunction: clausify all (universally closed) formulas and
 // saturate.  ATP_PROVED/ATP_REFUTED = unsatisfiable, ATP_QUEUE_EMPTY =
 // saturated satisfiable, anything else = undecided within the bound.
@@ -678,29 +730,23 @@ static AtpStatus pc_refute(Term *fs, int n) {
     conj = (conj == 0) ? c : fol_mk_and(conj, c);
   }
   if (conj == 0) return ATP_QUEUE_EMPTY;         // only $true: satisfiable
-  u32 nc = 0;
-  FolClause **cl;
-  fol_reset_skolem();
-  Term sk = fol_skolemize(fol_nnf(conj));
-  if (pc_cnf_est(sk) <= 4096.0) {
-    cl = fol_extract_clauses(fol_distribute(sk), &nc);
-  } else {
-    fol_reset_tseitin();
-    cl = fol_tseitin_extract_clauses(sk, &nc);
-  }
-  if (cl == NULL) return ATP_ABORTED;
-  CnfState *s = cnf_init(pc_refute_steps ? pc_refute_steps : pc_cap);
-  // Step replay must not depend on the AVATAR splitting env: the
-  // checker's per-step refutations are tiny and want the plain
-  // deterministic calculus.
-  cnf_set_avatar(s, 0u);
-  for (u32 j = 0; j < nc; j++) cnf_add_clause(s, cl[j]);
-  free(cl);
-  cnf_set_wall_deadline(cap);
-  AtpStatus st = cnf_run(s);
-  cnf_set_wall_deadline(0.0);
-  cnf_free(s);
-  return st;
+  AtpStatus st = pc_saturate(conj, cap, 0);
+  if (st != ATP_QUEUE_EMPTY) return st;
+  // The unordered saturation's QUEUE_EMPTY witnesses no model: without
+  // an ordering its demodulation rewrites naively -- an equation stated
+  // smaller side first, sk10 = sk7(sk10), rewrites sk10 into an ever
+  // deeper sk7 tower and buries the one-step superposition that refutes
+  // (NLP147+1: a valid superposition record judged VerifiedBad).  Only
+  // an ORDERED saturation (ordered resolution, paramodulation and
+  // demodulation under KBO) that also empties its queue is reported as
+  // a countermodel; its refutation is a proof like any other.
+  rem = (g_pc_deadline > 0.0) ? g_pc_deadline - pc_wall_now() : 12.0;
+  double cap2 = rem / 4.0;
+  if (cap2 > cap) cap2 = cap;
+  if (cap2 < 0.3) return ATP_ABORTED;
+  st = pc_saturate(conj, cap2, 1);
+  if (st == ATP_PROVED || st == ATP_REFUTED || st == ATP_QUEUE_EMPTY) return st;
+  return ATP_ABORTED;
 }
 
 enum { PC_VALID, PC_INVALID, PC_UNKNOWN };
@@ -898,6 +944,53 @@ static int pc_entails_eq(Term *parents, int np, Term concl, int do_session) {
     // parent disequation's pair as the goal.
     Term cl, cr;
     if (!pc_plain_eq(term_ctr_at(concl, 0), &cl, &cr)) return PC_UNKNOWN;
+    // Direct one-rewrite route, variables allowed: the conclusion is
+    // the parent disequation with ONE side rewritten once by an equation
+    // parent (either direction, renamed apart), modulo side order and
+    // renaming, or an instance of that.  Sound for any variables: for
+    // every assignment the parent gives a != b, the equation instance
+    // makes the rewritten side equal to the original one (its fresh
+    // extension variables range over anything), and a universally read
+    // disequation entails each of its instances.  The narrowing proofs'
+    // rw records over a variable-bearing goal (COL037-1 g0_16) have
+    // exactly this shape; the contraposition route below cannot take
+    // them.
+    {
+      Term dl = 0, dr = 0;
+      Term el[PC_MAX_PARENTS], er[PC_MAX_PARENTS];
+      int nd = 0, ne = 0, shape = 1;
+      for (int i = 0; i < np && shape; i++) {
+        Term f = parents[i], a, b;
+        if (term_tag(f) == TAG_CTR && term_ext(f) == PC_LAB_NOT &&
+            term_ctr_n(f) == 1 && pc_plain_eq(term_ctr_at(f, 0), &a, &b)) {
+          nd++; dl = a; dr = b;
+        } else if (pc_plain_eq(f, &a, &b)) {
+          el[ne] = a; er[ne] = b; ne++;
+        } else {
+          shape = 0;
+        }
+      }
+      if (shape && nd == 1) {
+        if (pc_pair_alpha_eq(cl, cr, dl, dr) || pc_pair_instance(cl, cr, dl, dr))
+          return PC_VALID;
+        for (int j = 0; j < ne; j++) {
+          Term lj = thvm_rename_vars(el[j], REWRITE_MAX_VAR / 2);
+          Term rj = thvm_rename_vars(er[j], REWRITE_MAX_VAR / 2);
+          PcRwSet ls, rs;
+          ls.n = rs.n = 0;
+          pc_rewrite_all(dl, lj, rj, &ls);
+          pc_rewrite_all(dl, rj, lj, &ls);
+          pc_rewrite_all(dr, lj, rj, &rs);
+          pc_rewrite_all(dr, rj, lj, &rs);
+          for (int k = 0; k < ls.n; k++)
+            if (pc_pair_alpha_eq(cl, cr, ls.out[k], dr) ||
+                pc_pair_instance(cl, cr, ls.out[k], dr)) return PC_VALID;
+          for (int k = 0; k < rs.n; k++)
+            if (pc_pair_alpha_eq(cl, cr, dl, rs.out[k]) ||
+                pc_pair_instance(cl, cr, dl, rs.out[k])) return PC_VALID;
+        }
+      }
+    }
     // The contraposition adds the conclusion's pair as an EQUATION, whose
     // variables the completion reads universally -- but the negated
     // conclusion only supplies SOME instance (~![Y]:c!=d == ?[Y]:c=d).

@@ -62,7 +62,13 @@ A step is accepted when the saturation derives the empty clause; rejected as
 unsound (`VerifiedBad`, with the step named) only when a completed saturation
 exhibits a counter-model **of a `thm`/`cth` claim** (`esa` steps are never
 judged by entailment -- equisatisfiability is not consequence); and left
-undecided otherwise. Undecided steps yield `Unknown`. The whole pass is
+undecided otherwise.  The first saturation runs without a term ordering, and
+its demodulation then rewrites naively: an equation stated smaller side first
+(`sk10 = sk7(sk10)`) grows an ever deeper tower and buries the refutation, so
+an exhausted queue there witnesses nothing.  A counter-model is only reported
+when an **ordered** re-run (ordered resolution, paramodulation and
+demodulation under KBO) exhausts its queue too; an ordered refutation confirms
+the step. Undecided steps yield `Unknown`. The whole pass is
 resource-bounded: a saturation whose equality reasoning outgrows the term store
 abstains to a clean `Unknown` rather than crashing, so every proof gets
 exactly one verdict.
