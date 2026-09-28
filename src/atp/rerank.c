@@ -194,11 +194,15 @@ fn u32 thvm_atp_cp_size_stats(const AtpState *s, u32 *min_out, u32 *max_out,
     // proof trace) but whose alternative was heap_alloc's hard fatal:
     // the walk's ~50 transient cells per queued CP times a multi-
     // million post-saturation queue overran the remaining from-space
-    // right after the summary prints (exit 1 on a PROVED run).
-    if ((s->trace_pack &&
-         (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes())
-        || atp_heap_under_pressure()) {
-      thvm_atp_gc_collect(s);
+    // right after the summary prints (exit 1 on a PROVED run).  The
+    // pressure mark is throttled (atp_pressure_collect): a live set above
+    // half the space -- a full on-heap trace -- collected on EVERY queued
+    // CP here, a post-run stall of thousands of whole-heap copies.
+    if (s->trace_pack &&
+        (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+      thvm_atp_gc_collect((AtpState *)s);
+    } else {
+      atp_pressure_collect((AtpState *)s);
     }
     atp_cp_slot_read(s, s->cp_heap[i].row, &l, &r);
     u32 nodes = atp_symbol_count(l) + atp_symbol_count(r);
