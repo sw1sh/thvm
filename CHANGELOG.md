@@ -31,6 +31,10 @@ for the per-commit story.
   no longer keep only the last unrolled lane.
 
 ### Backends
+- CPU JIT: the C renderer compiles kernels whose lift keeps an unread input
+  slot (conv+BatchNorm) instead of declining them to the slow walker; it
+  still declines untyped slots and bodies that read an unclaimed slot
+  (`THVM_TRACE_RENDER_DECLINE=1` says why).
 - CPU interpreter + per-op kernels + UOp-graph JIT.
 - Metal: shader compile, MTLDevice dispatch, PSO cache.
 - Hand-optimized Metal conv tiling (multi-axis UPCAST + LOCAL).

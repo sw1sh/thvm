@@ -6707,6 +6707,45 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
 // slots from `root` via UOP_BUFFER.instance instead of trusting an
 // out_buf/in_bufs[] tuple from the caller.  cpu/jit.c uses this to
 // pass ke->cached_lift.store_root directly.
+static void rmu_c_decline(char const *why, u32 slot) {
+  static int known = 0, on = 0;
+  if (!known) {
+    char const *e = getenv("THVM_TRACE_RENDER_DECLINE");
+    on = (e != NULL && e[0] == '1');
+    known = 1;
+  }
+  if (on) {
+    fprintf(stderr, "render_c decline: %s (slot %u)\n", why, slot);
+  }
+}
+
+static int rmu_ident_char(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+      || (c >= '0' && c <= '9') || c == '_';
+}
+
+// 1 iff C source `src` names input `in<k>` as a whole identifier.
+static int rmu_src_names_input(char const *src, u32 k) {
+  char name[16];
+  int  len = snprintf(name, sizeof name, "in%u", k);
+  for (char const *p = strstr(src, name); p != NULL; p = strstr(p + 1, name)) {
+    if ((p == src || !rmu_ident_char(p[-1])) && !rmu_ident_char(p[len])) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// 1 iff `src` names an input slot (1..n_inputs) that no UOP_BUFFER claimed.
+static int rmu_src_names_hole(char const *src, Term const *slots, u32 n_inputs) {
+  for (u32 i = 1; i <= n_inputs; i++) {
+    if (slots[i] == 0 && rmu_src_names_input(src, i - 1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
                                     FILE *fp) {
   if (fp == NULL) fp = stderr;
@@ -6756,23 +6795,33 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   u32 n_inputs = 0;
   rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
   Term out_buf = slot_bufs[0];
-  // DECLINE an unsound signature rather than render it.  n_inputs is the
-  // MAX instance seen, not a count, and rmu_discover_bufs_rec silently
-  // returns on `inst >= RMU_DISCOVER_MAX` -- so a kernel that fuses past the
-  // slot table (or whose instances are sparse) leaves holes in slot_bufs[].
-  // Rendering a hole emitted `const unsigned char *inN` (uop_buffer_dtype of
-  // a 0 Term) while the body used it as float: the kernel compiled and
-  // returned SILENTLY WRONG data -- a 255-deep fused elementwise chain read
-  // its inputs byte-wise (722711 vs 4848 on a 300-op chain).  Writing
-  // nothing makes cpu_jit_render_canon's `ftell <= 0` decline the JIT and
-  // fall back to the interpreter: correct, just slower.  The same hole
-  // previously surfaced as "identifier in63 is undefined" (see RMU_BUF_MAX).
-  // A slot is sound only if it is a real UOP_BUFFER: uop_buffer_dtype
-  // returns 0 for anything else (a 0 hole, or BUFFERIZE residue the unified
-  // pass declined to resolve), and dtype 0 renders as `unsigned char`.
-  if (n_inputs >= RMU_DISCOVER_MAX) return;
+  // DECLINE an unsound signature rather than render it: writing nothing
+  // makes cpu_jit_render_canon's `ftell <= 0` fall back to the interpreter
+  // (correct, just slower).  n_inputs is the MAX instance seen, not a count,
+  // and rmu_discover_bufs_rec drops `inst >= RMU_DISCOVER_MAX`, so an
+  // overflowing kernel is unsound.  So is a slot holding anything but a real
+  // UOP_BUFFER (dtype 0: a bare TAG_TEN leaf, BUFFERIZE residue): it renders
+  // as `unsigned char` while the body reads floats, which once returned
+  // silently wrong data (a 300-op fused chain read its inputs byte-wise).
+  // A slot NOTHING claimed (a hole) is an input the kernel does not read --
+  // conv+BatchNorm lifts keep one -- so it gets no declaration; only a body
+  // that names a hole anyway (a discovery gap) declines.
+  if (n_inputs >= RMU_DISCOVER_MAX) {
+    rmu_c_decline("slot table overflow", n_inputs);
+    return;
+  }
   for (u32 i = 1; i <= n_inputs; i++) {
-    if (slot_bufs[i] == 0 || uop_buffer_dtype(slot_bufs[i]) == 0) return;
+    if (slot_bufs[i] != 0 && uop_buffer_dtype(slot_bufs[i]) == 0) {
+      rmu_c_decline("slot is not a typed buffer", i);
+      return;
+    }
+  }
+  char  *src    = NULL;
+  size_t src_sz = 0;
+  FILE  *out_fp = fp;
+  fp = open_memstream(&src, &src_sz);
+  if (fp == NULL) {
+    return;
   }
   rmu_buf_names_reset();
   if (out_buf != 0) rmu_buf_names_set(out_buf, "out");
@@ -6800,6 +6849,9 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
           rmu_c_type_name(out_dtype), rmu_c_type_name(out_dtype));
   for (u32 i = 0; i < n_inputs; i++) {
     Term in_buf = slot_bufs[i + 1];
+    if (in_buf == 0) {
+      continue;
+    }
     u32 dt = uop_buffer_dtype(in_buf);
     fprintf(fp, "  const %s *in%u = (const %s *)ins_v[%u];\n",
             rmu_c_type_name(dt), i, rmu_c_type_name(dt), i);
@@ -6835,6 +6887,13 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   }
   RMU_TARGET = CG_TARGET_METAL;
   fputs("}\n", fp);
+  fclose(fp);
+  if (rmu_src_names_hole(src, slot_bufs, n_inputs)) {
+    rmu_c_decline("body reads an unclaimed input slot", 0);
+  } else {
+    fputs(src, out_fp);
+  }
+  free(src);
 }
 
 // True iff `t`'s subtree contains a UOP_RANGE whose axis_type ==

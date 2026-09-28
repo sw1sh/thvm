@@ -104,6 +104,7 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 | `THVM_CPU_JIT_WARMUP` | (impl) | CPU JIT warmup iterations. |
 | `THVM_CPU_UOP_WALK` | (impl) | CPU UOp-walk control. |
 | `THVM_CPU_UOP_WALK_TRACE` | off | Trace each UOp-walk entry (lift outcome + root op). |
+| `THVM_TRACE_RENDER_DECLINE` | off | Print why the C kernel renderer declined a kernel (overflow, untyped slot, or a body reading an unclaimed input slot), sending it to the CPU walker. |
 | `THVM_TRACE_UOP_WALK_DECLINE` | off | Trace why the UOp walk declined a kernel. |
 | `THVM_CPU_BLAS_DISABLE` | off | Disable the cblas dispatch path (force the generic walker). |
 | `THVM_BLAS_CONTRACTION_TRACE` | off | Trace BLAS contraction dispatch. |
