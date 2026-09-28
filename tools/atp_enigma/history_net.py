@@ -21,6 +21,7 @@
 # Usage:
 #   history_net.py train  <npz_dir> <pool.tsv> <out.npz> [dim=32 hid=32 epochs=40 seed=0]
 #   history_net.py gate   <model.npz> <npz_dir> <pool.tsv> <out_prefix>
+#   history_net.py summary <harvest.tsv> <npz_dir> <out.txt>
 #   history_net.py gradcheck
 import hashlib
 import os
@@ -210,6 +211,30 @@ class Problem:
         for i, t in enumerate(trace.tolist()):
             node_of[i] = tid_node.get(t, -1)
         self.cp_node = node_of
+        # core nodes (non-CP, or an input of another node) first, then the
+        # leaf CPs (never selected into a rule): a training batch carries
+        # the core DAG plus only the leaves it scores.  Leaves depend only
+        # on core nodes, so the permutation keeps the order topological.
+        used = np.zeros(nn, dtype=bool)
+        for arr in (self.in1, self.in2, self.s_member):
+            used[arr[arr >= 0]] = True
+        core = used | (self.ntype != NT_CP)
+        perm = np.concatenate([np.nonzero(core)[0], np.nonzero(~core)[0]])
+        inv = np.empty(nn, dtype=np.int64)
+        inv[perm] = np.arange(nn)
+        def remap(a):
+            return np.where(a >= 0, inv[np.maximum(a, 0)], -1)
+        self.ntype = self.ntype[perm]
+        self.in1 = remap(self.in1)[perm]
+        self.in2 = remap(self.in2)[perm]
+        self.rkind = self.rkind[perm]
+        self.level = self.level[perm]
+        self.ax_phi = self.ax_phi[perm]
+        self.s_cnt = self.s_cnt[perm]
+        self.s_owner = remap(self.s_owner)
+        self.s_member = remap(self.s_member)
+        self.cp_node = remap(self.cp_node)
+        self.n_core = int(core.sum())
         self.phi = phi_cp(d)
         self.label = d["label"].astype(bool)
         self.in_sample = d["in_sample"].astype(bool)
@@ -264,23 +289,30 @@ def fix_levels(p):
 
 class Batch:
     def __init__(self, probs, rows):
-        """rows[i] = indices of problem i's scored CPs to include."""
+        """rows[i] = indices of problem i's scored CPs to include; the
+        batch carries each problem's core DAG plus the scored leaves."""
         off = 0
         nt, a1, a2, rk, lv, axp = [], [], [], [], [], []
         so, sm, sc = [], [], []
         cn, ph, lab, grp = [], [], [], []
         for gi, (p, rr) in enumerate(zip(probs, rows)):
-            nt.append(p.ntype)
-            a1.append(np.where(p.in1 >= 0, p.in1 + off, -1))
-            a2.append(np.where(p.in2 >= 0, p.in2 + off, -1))
-            rk.append(p.rkind); lv.append(p.level); axp.append(p.ax_phi)
-            so.append(p.s_owner + off); sm.append(p.s_member + off)
-            sc.append(p.s_cnt)
+            C = p.n_core
             nodes = p.cp_node[rr]
-            cn.append(np.where(nodes >= 0, nodes + off, -1))
+            leaves = np.unique(nodes[nodes >= C])
+            take = np.concatenate([np.arange(C), leaves])
+            nt.append(p.ntype[take])
+            a1.append(np.where(p.in1[take] >= 0, p.in1[take] + off, -1))
+            a2.append(np.where(p.in2[take] >= 0, p.in2[take] + off, -1))
+            rk.append(p.rkind[take]); lv.append(p.level[take])
+            axp.append(p.ax_phi[take])
+            so.append(p.s_owner + off); sm.append(p.s_member + off)
+            sc.append(p.s_cnt[take])
+            loc = np.where(nodes >= C, C + np.searchsorted(leaves, nodes),
+                           nodes)
+            cn.append(np.where(nodes >= 0, loc + off, -1))
             ph.append(p.phi[rr]); lab.append(p.label[rr])
             grp.append(np.full(len(rr), gi))
-            off += len(p.ntype)
+            off += len(take)
         self.N = off
         self.ntype = np.concatenate(nt) if nt else np.zeros(0, np.int64)
         self.in1 = np.concatenate(a1); self.in2 = np.concatenate(a2)
@@ -703,12 +735,13 @@ def cmd_gate(model_path, npz_dir, pool_path, out_prefix):
         med = {k: float(np.median(r["pct"][k])) for k in r["pct"]}
         hit = {k: float(np.mean(r["hit"][k])) for k in r["hit"]}
         per.append((nm, med, hit, len(r["hit"]["model"]),
-                    len(r["pct"]["model"]), p.rate, int(p.label.sum())))
+                    len(r["pct"]["model"]), p.rate, int(p.label.sum()),
+                    p.n_sel))
         rows.append(r)
     with open(out_prefix + "_per_problem.tsv", "w") as f:
         f.write("problem\tsteps\tpairs\trate\tn_pos\tmed_model\tmed_engine\t"
                 "med_weight\thit_model\thit_engine\thit_weight\n")
-        for nm, med, hit, ns, npair, rate, npos in per:
+        for nm, med, hit, ns, npair, rate, npos, _ in per:
             f.write(f"{nm}\t{ns}\t{npair}\t{rate:.4g}\t{npos}\t"
                     f"{med['model']:.5f}\t{med['engine']:.5f}\t{med['weight']:.5f}\t"
                     f"{hit['model']:.4f}\t{hit['engine']:.4f}\t{hit['weight']:.4f}\n")
@@ -739,9 +772,61 @@ def cmd_gate(model_path, npz_dir, pool_path, out_prefix):
                  f"{ci_rh[1]:.4f}] (need >= 2: {'yes' if pass_h else 'no'}; "
                  f"CI clears: {'yes' if ci_rh[0] >= 2.0 else 'no'})")
     lines.append("GATE: " + ("PASS" if (pass_m and pass_h) else "FAIL"))
+    # SECONDARY (not the gate): the same statistics by problem size.
+    lines.append("secondary, by selections per problem (not the gate):")
+    nsel = np.array([x[7] for x in per])
+    for lo, hi in ((0, 100), (100, 1000), (1000, 10 ** 9)):
+        m = (nsel >= lo) & (nsel < hi)
+        if not m.any():
+            continue
+        parts = [f"  sel [{lo},{hi if hi < 10 ** 9 else 'inf'}) n={int(m.sum())}:"]
+        for k in K:
+            parts.append(f"{k} med {np.median(meds[k][m]):.4f} hit "
+                         f"{np.mean(hits[k][m]):.3f}")
+        lines.append(" ".join(parts))
     txt = "\n".join(lines)
     print(txt)
     with open(out_prefix + "_summary.txt", "w") as f:
+        f.write(txt + "\n")
+
+
+# --------------------------------------------------------------------------
+# harvest summary
+
+def cmd_summary(harvest_tsv, npz_dir, out_path):
+    rows = [l.rstrip("\n").split("\t") for l in open(harvest_tsv)]
+    lines = []
+    for sp in ("train", "heldout"):
+        rr = [r for r in rows if r[1] == sp]
+        solved = [r for r in rr if r[2] == "Unsatisfiable"]
+        ok = [r for r in solved if r[5].startswith("ok")]
+        pushed, prec, pos, sel, cited = [], [], [], [], []
+        for r in ok:
+            path = os.path.join(npz_dir, r[0] + ".npz")
+            if not os.path.exists(path):
+                continue
+            m = np.load(path)["meta"]
+            sel.append(m[2]); pushed.append(m[3]); prec.append(m[4])
+            cited.append(m[5]); pos.append(m[7])
+        pos = np.array(pos); sel = np.array(sel); pushed = np.array(pushed)
+        st = {}
+        for r in rr:
+            st[r[2]] = st.get(r[2], 0) + 1
+        lines.append(
+            f"{sp}: attempted {len(rr)} solved {len(solved)} extracted {len(ok)} "
+            f"with>=1 positive {int((pos > 0).sum())}; status {st}")
+        if len(pos):
+            lines.append(
+                f"  CPs pushed total {int(pushed.sum())} (P records "
+                f"{int(np.sum(prec))}); per problem median {np.median(pushed):.0f} "
+                f"max {pushed.max():.0f}; selections median {np.median(sel):.0f} "
+                f"max {sel.max():.0f}")
+            lines.append(
+                f"  positives per problem mean {pos.mean():.1f} median "
+                f"{np.median(pos):.0f} max {pos.max():.0f} total {int(pos.sum())}")
+    txt = "\n".join(lines)
+    print(txt)
+    with open(out_path, "w") as f:
         f.write(txt + "\n")
 
 
@@ -764,6 +849,7 @@ def cmd_gradcheck():
     p.ax_phi = rng.normal(size=(nn, N_PHI_AX))
     p.level = np.zeros(nn, dtype=np.int64)
     fix_levels(p)
+    p.n_core = 10   # nodes 10, 11 are leaf CPs (scored, used by no node)
     p.cp_node = np.array([3, 5, 8, 10, 11, 7, -1])
     p.phi = rng.normal(size=(7, N_PHI))
     p.label = np.array([1, 0, 0, 1, 0, 0, 1], dtype=bool)
@@ -790,6 +876,23 @@ def cmd_gradcheck():
           f"({'OK' if worst < 1e-4 else 'FAIL'})")
 
 
+def cmd_selftest(npz_path):
+    """Real-data consistency: subset batches score like the full batch."""
+    p = Problem(npz_path)
+    print(f"{p.name}: nodes {len(p.ntype)} core {p.n_core} levels "
+          f"{p.n_levels} levels-valid {validate_levels(p)} cps {len(p.seq)} "
+          f"pos {int(p.label.sum())} unmapped {int((p.cp_node < 0).sum())}")
+    rng = np.random.default_rng(0)
+    P = init_params(16, 16, rng)
+    full = score_problem(P, p)
+    rr = rng.choice(len(p.seq), size=min(50, len(p.seq)), replace=False)
+    B = Batch([p, p], [rr, rr[::-1]])
+    lg, _ = forward(P, B, need_cache=False)
+    err = max(np.max(np.abs(lg[:len(rr)] - full[rr])),
+              np.max(np.abs(lg[len(rr):] - full[rr[::-1]])))
+    print(f"subset-vs-full max |diff| {err:.2e} ({'OK' if err < 1e-9 else 'FAIL'})")
+
+
 def main():
     cmd = sys.argv[1]
     if cmd == "train":
@@ -804,6 +907,10 @@ def main():
         cmd_gate(*sys.argv[2:6])
     elif cmd == "gradcheck":
         cmd_gradcheck()
+    elif cmd == "summary":
+        cmd_summary(*sys.argv[2:5])
+    elif cmd == "selftest":
+        cmd_selftest(sys.argv[2])
 
 
 if __name__ == "__main__":
