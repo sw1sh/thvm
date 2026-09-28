@@ -5798,6 +5798,8 @@ typedef struct {
   // GC-rooted trace spine stays tiny; reads reconstruct via
   // atp_trace_eq_load.  Default OFF -> byte-identical legacy behaviour.
   u8    trace_pack;
+  u64  gc_live_after;       // live cells after the last collection
+  u8   heap_full;           // a pressure collection left the heap above the abort fraction
   u8   *trace_eq_buf;     // append-only packed (lhs,rhs) pairs
   u64   trace_eq_len;     // bytes used
   u64   trace_eq_cap;     // bytes allocated

@@ -1962,23 +1962,8 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     //
     // Default 0.85 -- aggressive enough to trip BEFORE the OS starts
     // paging on a typical 16GB box (with a multi-GB semi-space).
-    // Tunable via THVM_ATP_HEAP_ABORT_FRAC env var; valid range
-    // (0.5, 1.0); a 0 or out-of-range value disables the guard.
-    static double frac = -1.0;
-    if (frac < 0.0) {
-      frac = 0.85;
-      const char *e = getenv("THVM_ATP_HEAP_ABORT_FRAC");
-      if (e != NULL && *e != '\0') {
-        char *end = NULL;
-        double v = strtod(e, &end);
-        if (end != NULL && *end == '\0' && v > 0.5 && v < 1.0) {
-          frac = v;
-        } else if (end != NULL && *end == '\0' && v == 0.0) {
-          frac = 2.0;     // sentinel "guard disabled" (HEAP_NEXT
-                          // can never exceed semi-space capacity)
-        }
-      }
-    }
+    // Tunable via THVM_ATP_HEAP_ABORT_FRAC (atp_heap_abort_frac).
+    double frac = atp_heap_abort_frac();
     u64 lo, cap;
     if (gc_enabled()) {
       lo  = gc_from_start();
@@ -2062,6 +2047,10 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   // routes them through the same unprocessed loop), once, before the
   // first selection.
   if (s->use_otter && !s->otter_primed) atp_otter(s);
+  if (s->heap_full) {
+    atp_dbg_abort_site("heap-full", s);
+    return ATP_ABORTED;
+  }
 
   Term cp_lhs = 0, cp_rhs = 0;
   if (!thvm_atp_select_cp(s, &cp_lhs, &cp_rhs)) {
@@ -2920,6 +2909,10 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   // Otter loop: replay this step's queued CPs, adopting the orientable
   // survivors as passive demodulators (src/atp/otter.c).
   if (s->use_otter) atp_otter(s);
+  if (s->heap_full) {
+    atp_dbg_abort_site("heap-full", s);
+    return ATP_ABORTED;
+  }
 
 #ifdef ATP_CP_GROUND_JOIN
   // WM RueckwaertsGrundzusammenfuehrbarkeit (ArbeitsAufnahme,

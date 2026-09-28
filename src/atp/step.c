@@ -1614,7 +1614,7 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     // lane is fully enumerated, so a later flat-transposition fact will not
     // re-superpose against it.
     if (s->use_overlap_exhaust && !s->r_orient[f]) s->r_overlap_done[f] = 1u;
-    if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
+    atp_pressure_collect(s);
   }
   return pushed;
 }
@@ -1829,7 +1829,7 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       // Bound the per-step transient: a step can out-allocate a GC
       // semi-space in raw-CP + normalisation scratch.  `buf` is fully
       // processed here, so a collection between overlap pairs is safe.
-      if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
+      atp_pressure_collect(s);
     }
   }
 
@@ -1851,7 +1851,7 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       pushed += atp_push_cps_traced(s, buf, ctx.count,
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);
-      if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);   // see above
+      atp_pressure_collect(s);   // see above
     }
   }
 

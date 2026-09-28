@@ -307,6 +307,20 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
 #endif
 }
 
+// Heap discipline inside one replay, which can adopt thousands of
+// passive rules in a single step: the packed-trace threshold collects
+// as everywhere else; with the trace on-heap (--proof) collect on heap
+// pressure like the overlap-pair loops (atp_pressure_collect).
+static void atp_otter_heap_gate(AtpState *s) {
+  if (s->trace_pack) {
+    if ((HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+      thvm_atp_gc_collect(s);
+    }
+    return;
+  }
+  atp_pressure_collect(s);
+}
+
 static int atp_otter_seq_cmp(const void *a, const void *b) {
   u32 x = ((const u32 *)a)[1], y = ((const u32 *)b)[1];
   return (x > y) - (x < y);
@@ -341,16 +355,14 @@ static void atp_otter(AtpState *s) {
     u32 hi = s->otter_n;
     s->otter_rec = 1u;
     for (u32 k = hi; k-- > lo; ) {
-      // One replay can adopt thousands of passive rules inside a single
-      // step; under --proof (on-heap trace, recorded adoption chains)
-      // their scratch alone overruns the from-space between the
-      // step-start collections, so collect on heap pressure here too.
-      if ((s->trace_pack &&
-           (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) ||
-          atp_heap_under_pressure()) {
-        thvm_atp_gc_collect(s);
-      }
+      atp_otter_heap_gate(s);
+      if (s->heap_full) break;
       atp_otter_one(s, s->otter_rows[k], s->otter_seqs[k]);
+    }
+    if (s->heap_full) {
+      s->otter_rec = 0u;
+      s->otter_n = 0u;
+      return;
     }
     s->otter_rec = 0u;
     lo = hi;

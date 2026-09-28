@@ -683,7 +683,7 @@ static u32 atp_gen_one(AtpState *s, u32 i, u32 j, CriticalPair *buf) {
   // raw critical-pair + normalisation scratch.  Collect between overlap
   // pairs -- `buf` is fully processed here, so no in-flight CP needs
   // rooting -- to bound the transient working set instead of crashing.
-  if (atp_heap_under_pressure()) thvm_atp_gc_collect(s);
+  atp_pressure_collect(s);
   return pushed;
 }
 

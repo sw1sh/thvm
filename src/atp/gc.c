@@ -288,9 +288,31 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // force-bump the step epoch here: GC is a coarse phase boundary
   // (workload shifts post-GC) and the rare-event cost is negligible.
   atp_unf_memo_invalidate(s->r_revision, 1u);
+  s->gc_live_after = HEAP_NEXT - gc_from_start();
   g_atp_gc_us += atp_now_us() - gc_t0;
   g_atp_gc_n  += 1u;
   return 1;
+}
+
+// Live-set fraction of the semi-space past which a collection that
+// reclaimed too little ends the run (THVM_ATP_HEAP_ABORT_FRAC, default
+// 0.85, valid (0.5, 1.0); 0 disables -- the sentinel 2.0 never trips).
+static double atp_heap_abort_frac(void) {
+  static double frac = -1.0;
+  if (frac < 0.0) {
+    frac = 0.85;
+    const char *e = getenv("THVM_ATP_HEAP_ABORT_FRAC");
+    if (e != NULL && *e != '\0') {
+      char *end = NULL;
+      double v = strtod(e, &end);
+      if (end != NULL && *end == '\0' && v > 0.5 && v < 1.0) {
+        frac = v;
+      } else if (end != NULL && *end == '\0' && v == 0.0) {
+        frac = 2.0;
+      }
+    }
+  }
+  return frac;
 }
 
 // Trigger threshold: collect when the from-space bump cursor has
@@ -302,6 +324,29 @@ static u8 atp_heap_under_pressure(void) {
   u64 hi   = gc_from_end();
   u64 half = lo + (hi - lo) / 2;
   return HEAP_NEXT > half;
+}
+
+// In-step collection under heap pressure (the overlap-pair loops, the
+// Otter replay).  A live set that a collection leaves above half the
+// semi-space (the on-heap trace under --proof) would otherwise collect
+// again on every pair: once the last collection left it above half,
+// the next one waits for another eighth of the space (or the last
+// thirty-second).  A collection that leaves the live set above
+// atp_heap_abort_frac() raises heap_full; the step ends the run
+// (ResourceOut) at its next check instead of thrashing.
+static void atp_pressure_collect(AtpState *s) {
+  if (!atp_heap_under_pressure()) return;
+  u64 lo = gc_from_start(), cap = gc_from_end() - lo, used = HEAP_NEXT - lo;
+  if (s->gc_live_after > cap / 2u && used < s->gc_live_after + cap / 8u &&
+      used < cap - cap / 32u) {
+    return;
+  }
+  thvm_atp_gc_collect(s);
+  lo  = gc_from_start();
+  cap = gc_from_end() - lo;
+  if ((double)(HEAP_NEXT - lo) > atp_heap_abort_frac() * (double)cap) {
+    s->heap_full = 1u;
+  }
 }
 
 // Grow the heap-allocated trace[] to hold at least one more entry,
