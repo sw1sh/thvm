@@ -1,7 +1,9 @@
 """Tensor methods synced to tinygrad 365f87a8a.
 
-clone (tensor.py:344-351, uop/ops.py:887-893) and to(device, force)
-(tensor.py:353-367), checked against numpy.
+clone (tensor.py:344-351, uop/ops.py:887-893), to(device, force)
+(tensor.py:353-367) and var / std with Bessel's correction
+(mixin/op.py:523-607), checked against numpy and, when importable,
+against tinygrad itself.
 """
 import os
 import pathlib
@@ -112,6 +114,82 @@ class TestTo(unittest.TestCase):
         y = x.to("CPU", force=True)
         self.assertIs(y.grad, x.grad)
         self.assertEqual(y.grad.tolist(), [3., 3.])
+
+
+def _have_tg():
+    try:
+        import tinygrad  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+class TestVarStd(unittest.TestCase):
+    X = np.array([[1., 2, 3], [4, 5, 7]], np.float32)
+
+    def test_var_of_int_input_is_float(self):
+        v = Tensor(np.array([1, 2, 3, 4], np.int32)).var()
+        self.assertEqual(v.dtype, dtypes.float32)
+        np.testing.assert_allclose(v.item(), 5 / 3, rtol=1e-6)
+
+    def test_std_defaults_to_bessel_correction(self):
+        np.testing.assert_allclose(Tensor(self.X).std(axis=1).numpy(),
+                                   np.std(self.X, axis=1, ddof=1), rtol=1e-6)
+
+    def test_var_correction_zero_is_the_population_variance(self):
+        np.testing.assert_allclose(Tensor(self.X).var(correction=0).numpy(),
+                                   np.var(self.X), rtol=1e-6)
+
+    def test_var_axes_and_keepdim(self):
+        v = Tensor(self.X).var(axis=(0, 1), keepdim=True)
+        self.assertEqual(v.shape, (1, 1))
+        np.testing.assert_allclose(v.numpy(), np.var(self.X, ddof=1, keepdims=True),
+                                   rtol=1e-6)
+        np.testing.assert_allclose(Tensor(self.X).var(axis=-1).numpy(),
+                                   np.var(self.X, axis=-1, ddof=1), rtol=1e-6)
+
+    def test_std_of_int_input_is_float(self):
+        x = np.array([[1, 2], [4, 8]], np.int32)
+        s = Tensor(x).std(axis=0)
+        self.assertEqual(s.dtype, dtypes.float32)
+        np.testing.assert_allclose(s.numpy(), np.std(x, axis=0, ddof=1), rtol=1e-6)
+
+    def test_var_without_degrees_of_freedom_is_nan(self):
+        self.assertTrue(np.isnan(Tensor([3.0]).var().item()))
+
+    def test_var_mean_and_std_mean(self):
+        v, m = Tensor(self.X).var_mean(axis=0)
+        np.testing.assert_allclose(v.numpy(), np.var(self.X, axis=0, ddof=1), rtol=1e-6)
+        np.testing.assert_allclose(m.numpy(), np.mean(self.X, axis=0), rtol=1e-6)
+        s, m = Tensor(self.X).std_mean(axis=1, keepdim=True, correction=0)
+        np.testing.assert_allclose(s.numpy(), np.std(self.X, axis=1, keepdims=True),
+                                   rtol=1e-6)
+        np.testing.assert_allclose(m.numpy(), np.mean(self.X, axis=1, keepdims=True),
+                                   rtol=1e-6)
+
+    def test_mean_matches_numpy(self):
+        for axis in (None, 0, 1, -1, (0, 1), (-2, 1)):
+            for keepdim in (False, True):
+                got = Tensor(self.X).mean(axis=axis, keepdim=keepdim)
+                want = np.mean(self.X, axis=axis, keepdims=keepdim)
+                self.assertEqual(got.shape, want.shape)
+                np.testing.assert_allclose(got.numpy(), want, rtol=1e-6)
+        m = Tensor(np.array([1, 2, 4], np.int32)).mean()
+        self.assertEqual(m.dtype, dtypes.float32)
+        np.testing.assert_allclose(m.item(), 7 / 3, rtol=1e-6)
+
+    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    def test_var_std_match_tinygrad(self):
+        from tinygrad import Tensor as TgTensor
+        for kw in ({}, {"axis": 0}, {"axis": -1, "keepdim": True},
+                   {"axis": (0, 1), "correction": 0}):
+            np.testing.assert_allclose(Tensor(self.X).var(**kw).numpy(),
+                                       TgTensor(self.X).var(**kw).numpy(), rtol=1e-6)
+            np.testing.assert_allclose(Tensor(self.X).std(**kw).numpy(),
+                                       TgTensor(self.X).std(**kw).numpy(), rtol=1e-6)
+        xi = np.array([1, 2, 3, 4], np.int32)
+        np.testing.assert_allclose(Tensor(xi).var().numpy(),
+                                   TgTensor(xi).var().numpy(), rtol=1e-6)
 
 
 if __name__ == "__main__":

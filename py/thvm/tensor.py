@@ -915,13 +915,18 @@ class Tensor(metaclass=_TensorMeta):
 
     # ---- reductions ---------------------------------------------------
 
-    def _reduce(self, kind: int, axis, keepdim: bool) -> "Tensor":
+    def _reduce_axes(self, axis) -> list[int]:
         if axis is None:
-            axes = list(range(self.ndim))
-        elif isinstance(axis, int):
-            axes = [axis if axis >= 0 else axis + self.ndim]
-        else:
-            axes = sorted(set(a if a >= 0 else a + self.ndim for a in axis))
+            return list(range(self.ndim))
+        if isinstance(axis, int):
+            return [axis if axis >= 0 else axis + self.ndim]
+        return sorted(set(a if a >= 0 else a + self.ndim for a in axis))
+
+    def _reduce_count(self, axis) -> int:
+        return math.prod(self._shape[a] for a in self._reduce_axes(axis))
+
+    def _reduce(self, kind: int, axis, keepdim: bool) -> "Tensor":
+        axes = self._reduce_axes(axis)
         # Reduce innermost-first so the outer-axis indices stay valid.
         t = self.term
         new_shape = list(self._shape)
@@ -947,23 +952,35 @@ class Tensor(metaclass=_TensorMeta):
 
     def mean(self, axis=None, keepdim: bool = False) -> "Tensor":
         s = self.sum(axis=axis, keepdim=keepdim)
-        if axis is None:
-            div = self.numel()
-        elif isinstance(axis, int):
-            ax = axis if axis >= 0 else axis + self.ndim
-            div = self._shape[ax]
-        else:
-            div = 1
-            for ax in axis:
-                a = ax if ax >= 0 else ax + self.ndim
-                div *= self._shape[a]
+        div = self._reduce_count(axis)
         return s * (1.0 / div) if div else s
 
-    def std(self, axis=None, keepdim: bool = False) -> "Tensor":
-        m = self.mean(axis=axis, keepdim=True)
-        diff = self - m
-        var = (diff * diff).mean(axis=axis, keepdim=keepdim)
-        return var.sqrt()
+    def var(self, axis=None, keepdim: bool = False,
+            correction=1) -> "Tensor":
+        """Variance with Bessel's `correction` (tinygrad mixin/op.py:523-549).
+        Like tinygrad's smax(n - correction, 0) divisor, n <= correction
+        divides by zero (inf/nan) instead of raising."""
+        output_dtype = (self._dtype if dtypes.is_float(self._dtype)
+                        else dtypes.float32)
+        squares = (self - self.mean(axis=axis, keepdim=True)).square()
+        # tinygrad sums in sum_acc_dtype(squares.dtype) (op.py:548); the
+        # squares are already float32, since mean promotes int input.
+        numerator = squares.sum(axis=axis, keepdim=keepdim)
+        n = self._reduce_count(axis)
+        return (numerator / Tensor(float(max(n - correction, 0)))).cast(output_dtype)
+
+    def var_mean(self, axis=None, keepdim: bool = False,
+                 correction=1) -> "tuple[Tensor, Tensor]":
+        return self.var(axis, keepdim, correction), self.mean(axis, keepdim)
+
+    def std(self, axis=None, keepdim: bool = False,
+            correction=1) -> "Tensor":
+        """Standard deviation (tinygrad mixin/op.py:568-590)."""
+        return self.var(axis, keepdim, correction).sqrt()
+
+    def std_mean(self, axis=None, keepdim: bool = False,
+                 correction=1) -> "tuple[Tensor, Tensor]":
+        return self.std(axis, keepdim, correction), self.mean(axis, keepdim)
 
     # ---- movement -----------------------------------------------------
 

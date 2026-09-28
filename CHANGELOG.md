@@ -66,6 +66,8 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- py: `Tensor.var`, `var_mean`, `std_mean`; `Tensor.std` takes `correction`
+  with tinygrad's default of 1 (was the population estimator) (#18150).
 - py: `Tensor.to(device, force=False)` accepts tinygrad's `force` flag
   (#18327); it stays the identity on thvm's single DEV device.
 - py: `Tensor.clone()` copies the value into fresh storage (tinygrad
