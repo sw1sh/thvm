@@ -3056,6 +3056,9 @@ int main(int argc, char **argv) {
   // THVM_ATP_AGE_DEPTH=1 (--age-depth): Vampire AgeQueue for the --awr
   // age picks (derivation depth, then weight; age pick first).
   if (atp_env_on("THVM_ATP_AGE_DEPTH")) thvm_atp_set_use_age_depth(s, 1u);
+  // THVM_ATP_LRS_AGE=1 (--lrs-age): Vampire LRS limits -- a CP within the
+  // age reach OR the weight reach survives the horizon prune.
+  if (atp_env_on("THVM_ATP_LRS_AGE")) thvm_atp_set_use_lrs_age(s, 1u);
   // THVM_ATP_RANDOM_RATIO=<n> -- every n-th CP selection picks a
   // uniformly-random queued CP via xorshift64.  Default off.
   // THVM_ATP_RANDOM_SEED=<u64> seeds the stream (default: a fixed

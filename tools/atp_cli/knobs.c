@@ -110,6 +110,7 @@ static const AtpKnob KNOBS[] = {
   {"bd-preordered",          "THVM_ATP_BD_PREORDERED",   0, "(Vampire bd=preordered: interreduce R only with ORIENTED new rules; an unorientable new equation backward-simplifies nothing)"},
   {"uid-orphan",             "THVM_ATP_UID_ORPHAN",      1, "(WM uid-layer orphan murder at selection, default 1; 0 keeps CPs whose parent rule was simplified away, as Vampire does)"},
   {"age-depth",              "THVM_ATP_AGE_DEPTH",       0, "(Vampire AgeQueue: --awr age picks take the minimal (derivation depth, weight, seq), age pick first, phase counted in activations)"},
+  {"lrs-age",                "THVM_ATP_LRS_AGE",         0, "(Vampire LRS limits with --lrs + --awr: prune only CPs beyond BOTH the age reach and the weight reach of the remaining selections -- AWPassiveClauseContainer::exceedsAllLimits)"},
   {"perm-subsume",           "THVM_ATP_PERM_SUB",        0, "(permutative subsume)"},
   {"random-ratio",           "THVM_ATP_RANDOM_RATIO",    1, "(random CP ratio)"},
   {"random-seed",            "THVM_ATP_RANDOM_SEED",     1, "(random seed)"},

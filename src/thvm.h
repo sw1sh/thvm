@@ -5571,6 +5571,12 @@ typedef struct {
   // activations (a pop that joins away was never passive in Vampire),
   // age pick first (AWPassiveClauseContainer balance).  Default OFF.
   u8   use_age_depth;
+  // Vampire LRS limits (THVM_ATP_LRS_AGE): the horizon prune keeps a CP
+  // that either the weight picks OR the age picks of the --awr
+  // interleave can still reach (AWPassiveClauseContainer::
+  // exceedsAllLimits); lrs_age_horizon is the age-key cutoff.
+  u8   use_lrs_age;
+  u64  lrs_age_horizon;
   u8   otter_rec;
   u8   otter_primed;        // the input queue got its replay (first pop)
   u32 *otter_rows;
@@ -7534,6 +7540,8 @@ fn void      thvm_atp_set_use_otter(AtpState *s, u8 on);
 fn void      thvm_atp_set_use_bd_preordered(AtpState *s, u8 on);
 // Vampire AgeQueue for the age picks (derivation depth, then weight).
 fn void      thvm_atp_set_use_age_depth(AtpState *s, u8 on);
+// Vampire LRS two-limit discard (age OR weight reach keeps a CP).
+fn void      thvm_atp_set_use_lrs_age(AtpState *s, u8 on);
 // Selections between GNN re-ranks (0 = off, the default).  Only takes
 // effect while a GNN model is loaded (thvm_atp_set_gnn_scorer).
 fn void      thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period);

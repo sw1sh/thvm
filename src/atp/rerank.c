@@ -954,6 +954,12 @@ fn void thvm_atp_set_use_age_depth(AtpState *s, u8 on) {
   s->use_age_depth = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_lrs_age(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_lrs_age = on ? 1u : 0u;
+  s->lrs_age_horizon = UINT64_MAX;
+}
+
 // Walk a Term collecting its CTR symbol-label bits into mask[].
 // goal_sym_mask is a fixed-size bit-set of 8 * 32 = 256 labels (the
 // most common range); larger labels mod into the same buckets, so the

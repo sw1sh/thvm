@@ -1373,6 +1373,34 @@ static void atp_lrs_trace(const AtpState *s, u64 elapsed, u64 remaining,
   atp_clock_trace_end(tf);
 }
 
+// Age key of queued row `vv` for the LRS age limit: the FIFO order
+// (seq), or Vampire's AgeQueue order (depth, then weight) under
+// --age-depth.  Smaller = reached earlier by the age picks.
+static inline u64 atp_lrs_age_key(const AtpState *s, u32 pos, u32 vv) {
+  if (s->use_age_depth && s->cp_depth != NULL)
+    return ((u64)s->cp_depth[vv] << 32) | (u64)s->cp_heap[pos].pri;
+  return (u64)s->cp_heap[pos].seq;
+}
+
+// k-th smallest (0-indexed) of a[0..n) by quickselect; permutes a.
+static u64 atp_u64_select(u64 *a, u32 n, u32 k) {
+  u32 lo = 0, hi = n - 1u;
+  while (lo < hi) {
+    u64 pivot = a[(lo + hi) >> 1];
+    u32 i = lo, j = hi;
+    for (;;) {
+      while (a[i] < pivot) i++;
+      while (a[j] > pivot) j--;
+      if (i >= j) break;
+      u64 t = a[i]; a[i] = a[j]; a[j] = t;
+      i++; if (j == 0u) break; j--;
+    }
+    if (j < k) lo = j + 1u;
+    else       hi = j;
+  }
+  return a[k];
+}
+
 // LRS horizon recomputation (Riazanov & Voronkov, JSC 36, 2003).  Given
 // the observed selection rate and the remaining budget, predict how
 // many MORE CPs the saturator will pop, then take the `k`-th smallest
@@ -1463,12 +1491,27 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
   // scratch copy of cp_pri keeps it O(n_queue) average without touching
   // the live heap.
   u32 n = s->n_cps;
+  // Vampire LRS (--lrs-age): the age picks reach `ka` of the predicted
+  // selections, the weight picks the rest; a CP survives when EITHER
+  // queue reaches it (AWPassiveClauseContainer::exceedsAllLimits).
+  u8  two = (u8)(s->use_lrs_age && s->fifo_modulo > 1u);
+  u64 kw = predicted;
+  s->lrs_age_horizon = UINT64_MAX;
+  if (two) {
+    u64 ka = (predicted + s->fifo_modulo - 1u) / s->fifo_modulo;
+    kw = (predicted > ka) ? predicted - ka : 1u;
+    u64 *ak = (u64 *)malloc((size_t)n * sizeof(u64));
+    if (ak == NULL) return;     // out of memory: skip the recompute (sound)
+    for (u32 i = 0; i < n; i++) ak[i] = atp_lrs_age_key(s, i, s->cp_heap[i].row);
+    s->lrs_age_horizon = atp_u64_select(ak, n, (u32)(ka - 1u));
+    free(ak);
+  }
   u32 *scratch = (u32 *)malloc((size_t)n * sizeof(u32));
   if (scratch == NULL) return;  // out of memory: skip the recompute (sound)
   // node.pri == cp_pri[node.row] (refresh invariant) -- the packed
   // read spares the dependent payload load per entry.
   for (u32 i = 0; i < n; i++) scratch[i] = s->cp_heap[i].pri;
-  u32 k = (u32)predicted - 1u;  // 0-indexed k-th smallest
+  u32 k = (u32)kw - 1u;         // 0-indexed k-th smallest
   // Hoare partition / quickselect loop.
   u32 lo = 0, hi = n - 1u;
   while (lo < hi) {
@@ -1505,6 +1548,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
     // reads the packed cache (== cp_pri[vv], refresh invariant).
     u32 vv = s->cp_heap[i].row;
     if (s->cp_heap[i].pri <= horizon) continue;
+    if (two && atp_lrs_age_key(s, i, vv) <= s->lrs_age_horizon) continue;
     // Vampire LRS discards the clause from passive, which also takes it
     // out of the Otter simplification set (Otter::onPassiveRemoved).
     if (s->use_otter) atp_otter_popkill(s, s->cp_seq[vv]);
