@@ -20,6 +20,8 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- Generic c0*x < c1 fold (tinygrad #17290/#17291) for every sign pair with
+  |c0|>1 (was only two of the four).
 - uop_given_valid follows tinygrad #18478: one simultaneous substitution
   over every valid bound replaces the per-clause pass, plus the simplex
   candidate behind try_simplex.

@@ -819,11 +819,70 @@ int main(void) {
       CHECK(uop_iconst_value(heap_read(term_val(r19) + 1), &cc));
       CHECK_EQ(cc, 4);  // ceil(10/3) == 4
     }
-    TEST_BEGIN("ported/ilt-pos-coeff-skips-nonpositive-c1");
-    // (3*rb) < 0 -> c1 not > 0 -> rule 19 skipped (bound-fold gives 0).
+    TEST_BEGIN("ported/ilt-pos-coeff-nonpositive-c1-bound-folds");
+    // (3*rb) < 0: rb is a RANGE, so the bound fold decides it before the
+    // c0*x rule does.
     Term r19s = uop_int_binary(UOP_ILT,
                   uop_int_binary(UOP_IMUL, c3, rb), zero);
     CHECK_EQ(r19s, zero);  // 3*rb in [0,297] -> lo=0 >= 0 -> 0
+
+    // The generic c0*x < c1 rule, tinygrad/uop/symbolic.py:286-288:
+    // (c0*x) < c1 -> (x if c0 > 0 else -x) < ceil(c1/|c0|) for |c0| > 1.
+    // x is an INDEX_E load, whose bounds are unknown, so the bound fold
+    // cannot decide first.
+    u32  xdims[1] = { 16 };
+    Term xo = uop_index_e(uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_INT32, 1, xdims, 1), rb);
+    Term neg_xo = uop_int_binary(UOP_IMUL, xo, uop_iconst(-1));
+    {
+      i64 blo, bhi;
+      CHECK_EQ(uop_int_bounds(xo, &blo, &bhi), 0);
+    }
+    TEST_BEGIN("ported/ilt-const-mul-new-sign-pairs");
+    // 2*x < -3 -> x < -1 and -2*x < 3 -> -x < 2.
+    CHECK_EQ(uop_int_binary(UOP_ILT, uop_int_binary(UOP_IMUL, c2, xo), uop_iconst(-3)),
+             uop_int_binary(UOP_ILT, xo, uop_iconst(-1)));
+    CHECK_EQ(uop_int_binary(UOP_ILT, uop_int_binary(UOP_IMUL, uop_iconst(-2), xo), uop_iconst(3)),
+             uop_int_binary(UOP_ILT, neg_xo, uop_iconst(2)));
+    TEST_BEGIN("ported/ilt-const-mul-old-sign-pairs");
+    // 3*x < 10 -> x < 4 and -3*x < -7 -> -x < -2.
+    CHECK_EQ(uop_int_binary(UOP_ILT, uop_int_binary(UOP_IMUL, c3, xo), ten),
+             uop_int_binary(UOP_ILT, xo, uop_iconst(4)));
+    CHECK_EQ(uop_int_binary(UOP_ILT, uop_int_binary(UOP_IMUL, uop_iconst(-3), xo), uop_iconst(-7)),
+             uop_int_binary(UOP_ILT, neg_xo, uop_iconst(-2)));
+    TEST_BEGIN("ported/ilt-const-mul-exhaustive");
+    {
+      int bad = 0;
+      for (i64 k0 = -5; k0 <= 5; k0++) {
+        if (k0 >= -1 && k0 <= 1) {
+          continue;
+        }
+        for (i64 k1 = -9; k1 <= 9; k1++) {
+          Term t = uop_int_binary(UOP_ILT, uop_int_binary(UOP_IMUL, uop_iconst(k0), xo),
+                                  uop_iconst(k1));
+          i64  q = 0;
+          int  shaped = term_ext(t) == UOP_ILT
+                     && uop_iconst_value(heap_read(term_val(t) + 1), &q)
+                     && heap_read(term_val(t) + 0) == (k0 > 0 ? xo : neg_xo);
+          if (!shaped) {
+            bad++;
+            continue;
+          }
+          for (i64 v = -20; v <= 20; v++) {
+            bad += (k0 * v < k1) != ((k0 > 0 ? v : -v) < q);
+          }
+        }
+      }
+      CHECK_EQ(bad, 0);
+    }
+    TEST_BEGIN("ported/ilt-const-mul-nested-terminates");
+    // -6*(x*2) < 5, i.e. -12*x < 5: the rewrite re-matches -2*x once and
+    // stops at -x < 1.
+    {
+      Term t = uop_int_binary(UOP_ILT,
+                 uop_int_binary(UOP_IMUL, uop_iconst(-6), uop_int_binary(UOP_IMUL, xo, c2)),
+                 c5);
+      CHECK_EQ(t, uop_int_binary(UOP_ILT, neg_xo, one));
+    }
 
     // Rule 20/9: (x//d) < c -> x < (c*d) for d>0, nonneg(x).
     TEST_BEGIN("ported/ilt-div-eliminate");
@@ -885,7 +944,7 @@ int main(void) {
                   neg_rb);
     CHECK_EQ(term_ext(r22s), UOP_ILT);
 
-    // Rule 23: (c0*x) < c1 -> (-x) < -floor(-c1/-c0) for c0<0,c0!=-1,c1<=0.
+    // Rule 23: the c0*x < c1 rule with c0 < -1: (c0*x) < c1 -> (-x) < ceil(c1/|c0|).
     TEST_BEGIN("ported/ilt-neg-coeff");
     // (-3*ra) < -6 -> (-ra) < -floor(6/3) = -2.
     Term r23 = uop_int_binary(UOP_ILT,
@@ -902,8 +961,9 @@ int main(void) {
       CHECK(uop_iconst_value(heap_read(term_val(r23) + 1), &cc));
       CHECK_EQ(cc, -2);
     }
-    TEST_BEGIN("ported/ilt-neg-coeff-skips-positive-c1");
-    // (-3*ra) < 6 -- c1 > 0 -> rule 23 not applicable.
+    TEST_BEGIN("ported/ilt-neg-coeff-positive-c1-bound-folds");
+    // (-3*ra) < 6: ra is a RANGE, so the bound fold decides it before the
+    // c0*x rule does.
     Term r23s = uop_int_binary(UOP_ILT,
                   uop_int_binary(UOP_IMUL, uop_const(DT_INT32, (u32)(i32)-3), ra),
                   c6);

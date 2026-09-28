@@ -1391,23 +1391,17 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           }
         }
       }
-      // (c0 * x) < c1 -> x < ceil(c1/c0) for c0>0, c1>0.  ceil computed as
-      // (c1+c0-1)/c0 (numerator positive).  tinygrad/uop/symbolic.py:273-274.
+      // (c0 * x) < c1 -> (x if c0 > 0 else -x) < ceil(c1/|c0|) for |c0| > 1,
+      // with ceil(c1/d) = -((-c1) // d) in floor division.
+      // tinygrad/uop/symbolic.py:286-288.  Exact for unbounded ints, as
+      // tinygrad's dtypes.weakint gate assumes; an int32 x*c0 that wraps
+      // compares differently (x = 2^30: 2*x < -3 is true, x < -1 is not).
       if (b_const) {
         i64 c0; Term x;
-        if (uop_match_const_mul(a, &c0, &x) && c0 > 0 && bv > 0) {
-          i64 num, ceilv;
-          if (uop_chk_add(bv, c0 - 1, &num)) {
-            ceilv = num / c0;
-            return uop_int_binary(UOP_ILT, x, uop_iconst(ceilv));
-          }
-        }
-        // (c0 * x) < c1 -> (-x) < -(floor(-c1/-c0)) for c0<0, c0!=-1, c1<=0.
-        // tinygrad/uop/symbolic.py:276-277.
-        if (uop_match_const_mul(a, &c0, &x) && c0 < 0 && c0 != -1 && bv <= 0) {
-          i64 fv = (-bv) / (-c0);  // floor(-c1/-c0); trunc==floor as (-bv)>=0,(-c0)>0
-          Term neg_x = uop_int_binary(UOP_IMUL, x, uop_iconst(-1));
-          return uop_int_binary(UOP_ILT, neg_x, uop_iconst(-fv));
+        if (uop_match_const_mul(a, &c0, &x) && (c0 > 1 || c0 < -1)) {
+          i64  q   = -uop_floordiv_i64(-bv, c0 > 0 ? c0 : -c0);
+          Term lhs = c0 > 0 ? x : uop_int_binary(UOP_IMUL, x, uop_iconst(-1));
+          return uop_int_binary(UOP_ILT, lhs, uop_iconst(q));
         }
       }
       // (x // d) < c -> x < (c * d) for d>0 and nonneg(x).  Under nonneg(x)
