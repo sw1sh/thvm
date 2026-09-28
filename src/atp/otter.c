@@ -210,13 +210,8 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
   // Vampire LRS discards a new clause beyond the limits at retention
   // (it never enters passive); ours waits for the next horizon prune,
   // so do not adopt it meanwhile.
-  {
-    static int lrs_skip = -1;
-    if (lrs_skip < 0) lrs_skip = !atp_env_on("THVM_ATP_OTTER_NO_LRSSKIP");
-    if (lrs_skip && s->use_lrs && s->lrs_horizon != 0u &&
-        s->cp_pri[row] > s->lrs_horizon)
-      return;
-  }
+  if (s->use_lrs && s->lrs_horizon != 0u && s->cp_pri[row] > s->lrs_horizon)
+    return;
   // FT-native normalize (the push-time treatment's normalizer): its
   // pattern index appends new rules incrementally, where the Term-side
   // rule index rebuilds after every push.
