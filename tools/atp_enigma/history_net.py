@@ -19,8 +19,11 @@
 # formation depth, overlap depth, origin kind and flags, standardized.
 #
 # Usage:
-#   history_net.py train  <npz_dir> <pool.tsv> <out.npz> [dim=32 hid=32 epochs=40 seed=0]
+#   history_net.py train  <npz_dir> <pool.tsv> <out.npz> [dim=32 hid=32 epochs=40 seed=0
+#                         weighting=uniform|residence]
 #   history_net.py gate   <model.npz> <npz_dir> <pool.tsv> <out_prefix>
+#   history_net.py valgate <model.npz> <npz_dir> <pool.tsv> <out_prefix>
+#                  (the same statistics on the train-carved validation slice)
 #   history_net.py summary <harvest.tsv> <npz_dir> <out.txt>
 #   history_net.py gradcheck
 import hashlib
@@ -288,14 +291,18 @@ def fix_levels(p):
 # batched forward / backward over a disjoint union of problem DAGs
 
 class Batch:
-    def __init__(self, probs, rows):
+    def __init__(self, probs, rows, weights=None):
         """rows[i] = indices of problem i's scored CPs to include; the
-        batch carries each problem's core DAG plus the scored leaves."""
+        batch carries each problem's core DAG plus the scored leaves.
+        weights[i] = per-row loss weights (class-normalized per problem)."""
         off = 0
         nt, a1, a2, rk, lv, axp = [], [], [], [], [], []
         so, sm, sc = [], [], []
-        cn, ph, lab, grp = [], [], [], []
+        cn, ph, lab, grp, rws = [], [], [], [], []
+        if weights is None:
+            weights = [np.ones(len(rr)) for rr in rows]
         for gi, (p, rr) in enumerate(zip(probs, rows)):
+            rws.append(weights[gi])
             C = p.n_core
             nodes = p.cp_node[rr]
             leaves = np.unique(nodes[nodes >= C])
@@ -322,6 +329,7 @@ class Batch:
         self.s_cnt = np.concatenate(sc)
         self.cp_node = np.concatenate(cn); self.phi = np.concatenate(ph)
         self.label = np.concatenate(lab); self.group = np.concatenate(grp)
+        self.rw = np.concatenate(rws).astype(np.float64)
         self.n_groups = len(probs)
         L = int(self.level.max()) + 1 if self.N else 1
         order = np.argsort(self.level, kind="stable")
@@ -426,11 +434,12 @@ def loss_grad(P, B, logit, fw, pos_w=0.5):
     """Class-balanced logistic loss, each problem weighted equally."""
     y = B.label.astype(np.float64)
     G = B.n_groups
-    npos = np.bincount(B.group, weights=y, minlength=G)
-    nneg = np.bincount(B.group, weights=1 - y, minlength=G)
-    wpos = np.where(npos > 0, pos_w / np.maximum(npos, 1), 0.0)
-    wneg = np.where(nneg > 0, (1 - pos_w) / np.maximum(nneg, 1), 0.0)
-    w = np.where(y > 0, wpos[B.group], wneg[B.group]) / G
+    rw = B.rw
+    npos = np.bincount(B.group, weights=y * rw, minlength=G)
+    nneg = np.bincount(B.group, weights=(1 - y) * rw, minlength=G)
+    wpos = np.where(npos > 0, pos_w / np.maximum(npos, 1e-12), 0.0)
+    wneg = np.where(nneg > 0, (1 - pos_w) / np.maximum(nneg, 1e-12), 0.0)
+    w = rw * np.where(y > 0, wpos[B.group], wneg[B.group]) / G
     # stable log-sigmoid
     lp = -np.logaddexp(0.0, -logit)      # log sigma(z)
     ln = -np.logaddexp(0.0, logit)       # log (1 - sigma(z))
@@ -551,13 +560,22 @@ def load_problems(npz_dir, names):
     return probs
 
 
-def train_rows(p, rng, max_neg):
+def train_rows(p, rng, max_neg, weighting="uniform"):
+    """Rows (all positives + a uniform negative subsample) and per-row
+    weights: uniform, or queue residence (selections alive), which is
+    how often a CP enters the gate's (step, queue) samples."""
     pos = np.nonzero(p.label & (p.cp_node >= 0))[0]
     neg = np.nonzero((~p.label) & (p.in_sample | (p.selected_at >= 0))
                      & (p.cp_node >= 0))[0]
     if len(neg) > max_neg:
         neg = rng.choice(neg, size=max_neg, replace=False)
-    return np.concatenate([pos, neg])
+    rr = np.concatenate([pos, neg])
+    if weighting == "residence":
+        end = np.minimum(p.end_step[rr], p.n_sel)
+        w = np.maximum(1, end - p.push_step[rr]).astype(np.float64)
+    else:
+        w = np.ones(len(rr))
+    return rr, w
 
 
 def fit_standardizer(P, probs):
@@ -570,11 +588,11 @@ def fit_standardizer(P, probs):
         P["sd_ax"] = axs.std(0) + 1e-6
 
 
-def eval_loss(P, probs, rng, max_neg=4096):
+def eval_loss(P, probs, rng, max_neg=4096, weighting="uniform"):
     tot = 0.0
     for p in probs:
-        rr = train_rows(p, rng, max_neg)
-        B = Batch([p], [rr])
+        rr, w = train_rows(p, rng, max_neg, weighting)
+        B = Batch([p], [rr], [w])
         logit, fw = forward(P, B, need_cache=False)
         l, _ = loss_grad(P, B, logit, fw)
         tot += l
@@ -582,7 +600,8 @@ def eval_loss(P, probs, rng, max_neg=4096):
 
 
 def cmd_train(npz_dir, pool_path, out_path, dim=32, hid=32, epochs=40,
-              seed=0, batch=8, max_neg=4096, lr=2e-3, patience=6):
+              seed=0, batch=8, max_neg=4096, lr=2e-3, patience=6,
+              weighting="uniform"):
     split = load_pool(pool_path)
     names = sorted(n for n, s in split.items() if s == "train")
     tr_names = [n for n in names if not is_val(n)]
@@ -605,15 +624,15 @@ def cmd_train(npz_dir, pool_path, out_path, dim=32, hid=32, epochs=40,
         te = time.time()
         for bi in range(0, len(order), batch):
             ps = [tr[i] for i in order[bi:bi + batch]]
-            rows = [train_rows(p, rng, max_neg) for p in ps]
-            B = Batch(ps, rows)
+            rw = [train_rows(p, rng, max_neg, weighting) for p in ps]
+            B = Batch(ps, [x[0] for x in rw], [x[1] for x in rw])
             logit, fw = forward(P, B)
             l, dl = loss_grad(P, B, logit, fw)
             g = backward(P, B, fw, dl)
             opt.step(P, g)
             tl += l; nb += 1
         vrng = np.random.default_rng(1234)
-        vl = eval_loss(P, va, vrng)
+        vl = eval_loss(P, va, vrng, weighting=weighting)
         print(f"epoch {ep} train {tl/max(1,nb):.4f} val {vl:.4f} "
               f"({time.time()-te:.0f}s)", flush=True)
         if vl < best[0]:
@@ -622,7 +641,7 @@ def cmd_train(npz_dir, pool_path, out_path, dim=32, hid=32, epochs=40,
             break
     Pb = best[1]
     np.savez(out_path, **Pb, dim=dim, hid=hid, best_epoch=best[2],
-             best_val=best[0])
+             best_val=best[0], weighting=weighting)
     print(f"saved {out_path} best epoch {best[2]} val {best[0]:.4f}")
 
 
@@ -712,11 +731,15 @@ def bootstrap(vals_by_prob, stat, n=10000, seed=0):
     return np.percentile(out, [2.5, 97.5]), out
 
 
-def cmd_gate(model_path, npz_dir, pool_path, out_prefix):
+def cmd_gate(model_path, npz_dir, pool_path, out_prefix, which="heldout"):
     M = dict(np.load(model_path))
-    P = {k: M[k] for k in M.files if k not in ("dim", "hid", "best_epoch", "best_val")}
+    P = {k: M[k] for k in M.files
+         if k not in ("dim", "hid", "best_epoch", "best_val", "weighting")}
     split = load_pool(pool_path)
-    names = sorted(n for n, s in split.items() if s == "heldout")
+    if which == "heldout":
+        names = sorted(n for n, s in split.items() if s == "heldout")
+    else:   # the validation slice carved from train (model selection only)
+        names = sorted(n for n, s in split.items() if s == "train" and is_val(n))
     rows = []
     per = []
     for nm in names:
@@ -853,7 +876,7 @@ def cmd_gradcheck():
     p.cp_node = np.array([3, 5, 8, 10, 11, 7, -1])
     p.phi = rng.normal(size=(7, N_PHI))
     p.label = np.array([1, 0, 0, 1, 0, 0, 1], dtype=bool)
-    B = Batch([p], [np.arange(7)])
+    B = Batch([p], [np.arange(7)], [rng.uniform(0.5, 3.0, 7)])
     P = init_params(6, 5, rng)
     logit, fw = forward(P, B)
     l, dl = loss_grad(P, B, logit, fw)
@@ -874,6 +897,75 @@ def cmd_gradcheck():
             worst = max(worst, err)
     print(f"gradcheck worst relative error {worst:.2e} "
           f"({'OK' if worst < 1e-4 else 'FAIL'})")
+
+
+def cmd_recon(npz_dir, pool_path, out_path, max_probs=10 ** 9):
+    """Queue-reconstruction check: at every selection t, rank the CP the
+    engine actually picked inside the rebuilt queue Q_t under the engine
+    key (cp_pri at t, seq) and under pure FIFO (seq).  A faithful rebuild
+    puts the pick at rank 0 under one of them (weight pick / FIFO pick;
+    ultimate axioms first).  Exact problems (rate 1) only."""
+    split = load_pool(pool_path)
+    names = sorted(split)
+    tot = {"n": 0, "w0": 0, "f0": 0, "ult": 0, "other": 0}
+    worst = []
+    done = 0
+    for nm in names:
+        path = os.path.join(npz_dir, nm + ".npz")
+        if not os.path.exists(path) or done >= max_probs:
+            continue
+        d = np.load(path)
+        if float(d["meta"][0]) < 1.0:
+            continue
+        done += 1
+        seq = d["seq"].astype(np.int64)
+        push = d["push_step"].astype(np.int64)
+        end = d["end_step"].astype(np.int64)
+        sel = d["selected_at"].astype(np.int64)
+        pri0 = np.where(d["has_push"], d["pri_push"], d["pri"]).astype(np.int64)
+        ult = (d["flags"].astype(np.int64) & 1) != 0
+        ws, wst, wp = (d["w_seq"].astype(np.int64), d["w_step"].astype(np.int64),
+                       d["w_pri"].astype(np.int64))
+        wi = np.searchsorted(seq, ws)
+        T = int(d["meta"][2])
+        order_sel = np.argsort(sel)
+        pri = pri0.copy()
+        wptr = 0
+        other = 0
+        for t in range(1, T + 1):
+            while wptr < len(wst) and wst[wptr] <= t - 1:
+                if wi[wptr] < len(seq) and seq[wi[wptr]] == ws[wptr]:
+                    pri[wi[wptr]] = wp[wptr]
+                wptr += 1
+            j = np.nonzero(sel == t)[0]
+            if len(j) != 1:
+                continue
+            j = j[0]
+            alive = (push <= t - 1) & (end >= t)
+            tot["n"] += 1
+            if ult[j]:
+                tot["ult"] += 1
+                continue
+            a = np.nonzero(alive & ~ult)[0]
+            kp, ks = pri[a], seq[a]
+            wrank = int(np.sum((kp < pri[j]) | ((kp == pri[j]) & (ks < seq[j]))))
+            frank = int(np.sum(ks < seq[j]))
+            if wrank == 0:
+                tot["w0"] += 1
+            elif frank == 0:
+                tot["f0"] += 1
+            else:
+                tot["other"] += 1
+                other += 1
+        worst.append((other, nm, T))
+    worst.sort(reverse=True)
+    lines = [f"problems {done} selections {tot['n']}: weight-rank-0 {tot['w0']} "
+             f"fifo-rank-0 {tot['f0']} ultimate {tot['ult']} other {tot['other']}",
+             "most 'other' picks: " + ", ".join(f"{nm} {o}/{T}" for o, nm, T in worst[:10])]
+    txt = "\n".join(lines)
+    print(txt)
+    with open(out_path, "w") as f:
+        f.write(txt + "\n")
 
 
 def cmd_selftest(npz_path):
@@ -902,15 +994,21 @@ def main():
         if len(a) > 4: kw["hid"] = int(a[4])
         if len(a) > 5: kw["epochs"] = int(a[5])
         if len(a) > 6: kw["seed"] = int(a[6])
+        if len(a) > 7: kw["weighting"] = a[7]
         cmd_train(a[0], a[1], a[2], **kw)
     elif cmd == "gate":
         cmd_gate(*sys.argv[2:6])
+    elif cmd == "valgate":
+        cmd_gate(*sys.argv[2:6], which="val")
     elif cmd == "gradcheck":
         cmd_gradcheck()
     elif cmd == "summary":
         cmd_summary(*sys.argv[2:5])
     elif cmd == "selftest":
         cmd_selftest(sys.argv[2])
+    elif cmd == "recon":
+        cmd_recon(sys.argv[2], sys.argv[3], sys.argv[4],
+                  int(sys.argv[5]) if len(sys.argv) > 5 else 10 ** 9)
 
 
 if __name__ == "__main__":
