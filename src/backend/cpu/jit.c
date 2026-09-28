@@ -1,4 +1,4 @@
-// backend/cpu/jit.c - shell out to clang to compile a generated
+// backend/cpu/jit.c - shell out to the C compiler to compile a generated
 // C source into a .dylib, dlopen it, and cache the resolved
 // `void k(...)` symbol against the program's hash so subsequent
 // dispatches skip both compilation and dlsym.
@@ -208,6 +208,66 @@ static CpuJitSlot *cpu_jit_lookup_slot(u64 key) {
   return NULL;
 }
 
+// The C compiler for JIT kernels: THVM_CPU_CC, else $CC, else the first of
+// clang / cc / gcc on PATH (the Linux pods ship gcc only).  Resolved once
+// per process.  clang-only flags are added only when it is clang.
+static char const *cpu_cc(void) {
+  static char cc[128] = {0};
+  if (cc[0] != '\0') return cc;
+  char const *env = getenv("THVM_CPU_CC");
+  if (env == NULL || env[0] == '\0') env = getenv("CC");
+  if (env != NULL && env[0] != '\0') {
+    snprintf(cc, sizeof cc, "%s", env);
+    return cc;
+  }
+  static char const *candidates[] = {"clang", "cc", "gcc"};
+  for (u32 i = 0; i < 3; i++) {
+    char probe[192];
+    snprintf(probe, sizeof probe, "command -v %s >/dev/null 2>&1", candidates[i]);
+    if (system(probe) == 0) {
+      snprintf(cc, sizeof cc, "%s", candidates[i]);
+      return cc;
+    }
+  }
+  snprintf(cc, sizeof cc, "cc");
+  return cc;
+}
+
+static int cpu_cc_is_clang(void) {
+  static int known = 0, clang = 0;
+  if (!known) {
+    char probe[320];
+    snprintf(probe, sizeof probe,
+             "%s -dM -E -x c /dev/null 2>/dev/null | grep -q __clang__", cpu_cc());
+    clang = (system(probe) == 0);
+    known = 1;
+  }
+  return clang;
+}
+
+// A kernel whose compile fails runs in the CPU interpreter: correct, but
+// orders of magnitude slower, so say so once instead of degrading silently.
+// THVM_CPU_JIT_VERBOSE=1 keeps the compiler's own diagnostics.
+static int cpu_jit_verbose(void) {
+  static int known = 0, on = 0;
+  if (!known) {
+    char const *e = getenv("THVM_CPU_JIT_VERBOSE");
+    on = (e != NULL && e[0] == '1');
+    known = 1;
+  }
+  return on;
+}
+
+static void cpu_jit_warn_compile_failed(char const *what) {
+  static int warned = 0;
+  if (warned) return;
+  warned = 1;
+  fprintf(stderr,
+          "thvm: CPU JIT %s failed with C compiler '%s'; those kernels run in the "
+          "CPU interpreter (much slower).  Set THVM_CPU_CC (or CC) to a working "
+          "compiler; THVM_CPU_JIT_VERBOSE=1 shows its errors.\n", what, cpu_cc());
+}
+
 // Compile + load.  Returns the resolved `k` function pointer or NULL
 // on any failure (caller falls back to interpreter).
 static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
@@ -274,10 +334,17 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   // whole kernel silently falls back to the interpreter -- correct, but a
   // ~14x cliff on a 400-op chain.  The limit is a parser guard, not a
   // codegen one; raising it costs nothing for shallow kernels.
-  snprintf(cmd, sizeof cmd,
-           "clang -%s -fbracket-depth=%d -fPIC -shared -o '%s' '%s' 2>/dev/null",
-           cpu_jit_opt_tag(), CPU_JIT_BRACKET_DEPTH, dl_path, src_path);
-  if (system(cmd) != 0) return NULL;
+  char bracket[40] = "";
+  if (cpu_cc_is_clang()) {
+    snprintf(bracket, sizeof bracket, "-fbracket-depth=%d", CPU_JIT_BRACKET_DEPTH);
+  }
+  snprintf(cmd, sizeof cmd, "%s -%s %s -fPIC -shared -o '%s' '%s'%s",
+           cpu_cc(), cpu_jit_opt_tag(), bracket, dl_path, src_path,
+           cpu_jit_verbose() ? "" : " 2>/dev/null");
+  if (system(cmd) != 0) {
+    cpu_jit_warn_compile_failed("compile");
+    return NULL;
+  }
 
   void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
   if (!h) return NULL;
@@ -422,13 +489,28 @@ static void *cpu_jit_build_combined(CpuJitJob const *jobs, u32 njobs,
     char bracketflag[32];
     snprintf(bracketflag, sizeof bracketflag, "-fbracket-depth=%d",
              CPU_JIT_BRACKET_DEPTH);   // see cpu_jit_build
-    char *argv[9] = { (char *)"clang", optflag, bracketflag, (char *)"-fPIC",
-                      (char *)"-shared", (char *)"-o", comb_dl, comb_c, NULL };
+    char *argv[9];
+    u32 ac = 0;
+    argv[ac++] = (char *)cpu_cc();
+    argv[ac++] = optflag;
+    if (cpu_cc_is_clang()) argv[ac++] = bracketflag;
+    argv[ac++] = (char *)"-fPIC";
+    argv[ac++] = (char *)"-shared";
+    argv[ac++] = (char *)"-o";
+    argv[ac++] = comb_dl;
+    argv[ac++] = comb_c;
+    argv[ac]   = NULL;
     pid_t pid;
-    if (posix_spawnp(&pid, "clang", NULL, NULL, argv, environ) != 0) return NULL;
+    if (posix_spawnp(&pid, cpu_cc(), NULL, NULL, argv, environ) != 0) {
+      cpu_jit_warn_compile_failed("parallel compile");
+      return NULL;
+    }
     int status;
     waitpid(pid, &status, 0);
-    if (stat(comb_dl, &st) != 0) return NULL;   // compile failed
+    if (stat(comb_dl, &st) != 0) {
+      cpu_jit_warn_compile_failed("parallel compile");
+      return NULL;
+    }
   }
   return dlopen(comb_dl, RTLD_NOW | RTLD_LOCAL);
 }

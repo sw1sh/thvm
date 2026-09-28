@@ -51,33 +51,15 @@ static CpuCustomSlot *cpu_custom_lookup_slot(u64 key) {
   return NULL;
 }
 
-// C compiler for injected sources: THVM_CPU_CUSTOM_CC overrides, else
-// the first of clang / cc / gcc present on PATH.  cpu_jit_build can
-// afford its hardcoded clang because a failed compile there falls back
-// to the interpreter; an injected kernel has no interpreter, so the
-// compile must work on clang-less hosts (the Linux CUDA pods ship gcc
-// only).  Resolved once per process; the dylib filename carries the
-// compiler tag so artifacts from different compilers never alias.
+// C compiler for injected sources: THVM_CPU_CUSTOM_CC overrides, else the
+// JIT's cpu_cc() (THVM_CPU_CC / $CC / clang / cc / gcc).  An injected
+// kernel has no interpreter fallback, so it must compile on clang-less
+// hosts; the dylib filename carries the compiler tag so artifacts from
+// different compilers never alias.
 static const char *cpu_custom_cc(void) {
-  static char cc[128] = {0};
-  if (cc[0] != '\0') return cc;
   char const *env = getenv("THVM_CPU_CUSTOM_CC");
-  if (env != NULL && env[0] != '\0') {
-    snprintf(cc, sizeof cc, "%s", env);
-    return cc;
-  }
-  static char const *candidates[] = {"clang", "cc", "gcc"};
-  for (u32 i = 0; i < 3; i++) {
-    char probe[192];
-    snprintf(probe, sizeof probe, "command -v %s >/dev/null 2>&1",
-             candidates[i]);
-    if (system(probe) == 0) {
-      snprintf(cc, sizeof cc, "%s", candidates[i]);
-      return cc;
-    }
-  }
-  snprintf(cc, sizeof cc, "cc");   // last resort; the compile error names it
-  return cc;
+  if (env != NULL && env[0] != '\0') return env;
+  return cpu_cc();
 }
 
 // Content key: source hash (cpu_src_hash, jit.c) mixed with the entry

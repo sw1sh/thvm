@@ -56,6 +56,10 @@ for the per-commit story.
   last iteration.
 
 ### Backends
+- CPU JIT compiles with any C compiler: THVM_CPU_CC, else $CC, else the first
+  of clang / cc / gcc (clang-only flags only for clang; the float4 lane type
+  is a GCC-compatible vector_size vector).  A failed compile warns once
+  instead of silently running every kernel in the interpreter.
 - CPU JIT: the C renderer compiles kernels whose lift keeps an unread input
   slot (conv+BatchNorm) instead of declining them to the slow walker; it
   still declines untyped slots and bodies that read an unclaimed slot

@@ -102,6 +102,8 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 | --- | --- | --- |
 | `THVM_THREADS` | (impl) | CPU worker-thread count. |
 | `THVM_CPU_JIT_WARMUP` | (impl) | CPU JIT warmup iterations. |
+| `THVM_CPU_CC` | `$CC`, else clang / cc / gcc | C compiler for CPU JIT kernels (clang-only flags are added only for clang). |
+| `THVM_CPU_JIT_VERBOSE` | off | Show the C compiler's diagnostics when a JIT compile fails (a failed kernel runs in the interpreter; thvm warns once). |
 | `THVM_CPU_UOP_WALK` | (impl) | CPU UOp-walk control. |
 | `THVM_CPU_UOP_WALK_TRACE` | off | Trace each UOp-walk entry (lift outcome + root op). |
 | `THVM_TRACE_RENDER_DECLINE` | off | Print why the C kernel renderer declined a kernel (overflow, untyped slot, or a body reading an unclaimed input slot), sending it to the CPU walker. |

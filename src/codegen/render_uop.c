@@ -6498,13 +6498,13 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   // the renderer emits `*((float4*)(&out[base])) = (float4){l0,l1,l2,l3}`
   // for contiguous 4-wide output lane groups so clang packs the upstream
   // accumulator chain into `fmla.4s` instead of scalar `fmadd`.  GCC/clang
-  // ext_vector_type extension; both CPU JIT compilers accept it.  aligned(4)
+  // vector_size extension; clang and gcc both accept it.  aligned(4)
   // (element alignment, NOT 16) makes the cast an UNALIGNED vector store so
   // it is safe for any contiguous base offset, regardless of the arena
   // buffer's alignment -- arm64 NEON handles unaligned `str q` natively and
   // it still emits the packed fmla.4s (verified bit-exact + 20 fmla.4s).
-  fputs("typedef float float4 __attribute__((aligned(4),"
-        "ext_vector_type(4)));\n", fp);
+  fputs("typedef float float4 __attribute__((vector_size(16),"
+        "aligned(4)));\n", fp);
   // CPU-JIT entry-point signature; cpu/jit.c dlsyms "k" and calls
   // it directly with caller pointers.
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
@@ -6688,8 +6688,8 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   // accumulator chain into `fmla.4s` instead of scalar `fmadd`.  aligned(4)
   // = an UNALIGNED vector store, safe for any contiguous base offset (arm64
   // NEON `str q` handles unaligned natively); still emits packed fmla.4s.
-  fputs("typedef float float4 __attribute__((aligned(4),"
-        "ext_vector_type(4)));\n", fp);
+  fputs("typedef float float4 __attribute__((vector_size(16),"
+        "aligned(4)));\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
   fputs("              unsigned n, const unsigned *in_numels,\n", fp);
   fputs("              const unsigned *kvar_vals) {\n", fp);
