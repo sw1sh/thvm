@@ -7717,16 +7717,25 @@ fn void atp_frequency_weights_g(const Term *lhs, const Term *rhs, u32 n_eqns,
                                 Term goal_l, Term goal_r, u32 n_labels,
                                 u32 *weights);
 
-// Vampire symbol_precedence_boost=goal (spb=goal): remap `prec` so every
-// symbol occurring in the goal outranks every non-goal symbol, keeping
-// the relative order inside each band.  Composes with any base scheme
-// (label order, sp=frequency, ...).  Under LPO this is the ring-family
-// lever: goal-cone operators (multiply) rise above the additive theory,
-// so distributivity orients as sum-of-products EXPANSION and the
-// defined-operator folds (associator/commutator) become demodulators.
-// Returns the number of goal-band symbols, 0 on OOM / no goal.
-fn u32  atp_goal_boost_precedence_g(Term goal_l, Term goal_r, u32 n_labels,
-                                    u32 *prec);
+// Vampire symbol precedence schemes (sp=...) with the optional
+// symbol_precedence_boost=goal (spb=goal) band, ported from
+// Kernel/Ordering.cpp sortAuxBySymbolPrecedence; see precedence.c.
+// Under LPO spb=goal is the ring-family lever: the goal operator
+// (multiply) rises above the additive theory, so distributivity orients
+// as sum-of-products expansion and the associator/commutator definitions
+// orient as folds.  atp_vampire_sp_scheme maps a --sym-prec name to the
+// enum (-1 = not a Vampire-port scheme).  `arity` is indexed by label.
+enum {
+  ATP_VSP_ARITY, ATP_VSP_REVERSE_ARITY, ATP_VSP_UNARY_FIRST,
+  ATP_VSP_CONST_MAX, ATP_VSP_CONST_MIN, ATP_VSP_FREQUENCY,
+  ATP_VSP_REVERSE_FREQUENCY, ATP_VSP_UNARY_FREQUENCY,
+  ATP_VSP_CONST_FREQUENCY, ATP_VSP_OCCURRENCE
+};
+fn int  atp_vampire_sp_scheme(const char *name);
+fn u32  atp_vampire_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                 Term goal_l, Term goal_r, u32 base,
+                                 u32 n_labels, const u32 *arity, int scheme,
+                                 int boost_goal, u32 *prec);
 
 // KBO weight-generation schemes (Vampire kbo_weight_scheme / -kws,
 // Kernel/KBO.cpp weightsFromOpts), goal-inclusive.  atp_arity_weights_g

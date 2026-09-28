@@ -1833,68 +1833,48 @@ int main(int argc, char **argv) {
         }
       }
     }
-    // Vampire symbol_precedence_boost=goal (THVM_ATP_SPB_PREC=goal /
-    // --spb-prec): every goal-occurring symbol outranks every non-goal
-    // symbol, relative order inside each band preserved -- composes
-    // with the sym-prec block above (base scheme first, boost second),
-    // exactly Vampire's sp= then spb= pipeline.  Distinct from the
-    // existing --spb-goal knob, which scales CP WEIGHTS by conjecture
-    // ancestry and never touches the ordering.  The RNG Moufang
-    // dissection lever: under --ord=lpo this lifts the goal cone
-    // (multiply) above the additive theory, turning distributivity
-    // into a sum-of-products demodulator and the associator/commutator
-    // definitions into folds (Vampire winner
-    // lrs+10_2_to=lpo:spb=goal:fd=preordered:bd=preordered on
-    // RNG027-5, 91 activations).  Unset = byte-identical precedence.
+    // Vampire symbol precedence port (Kernel/Ordering.cpp
+    // sortAuxBySymbolPrecedence): --sym-prec=arity|reverse-arity|
+    // unary-first|const-max|const-min|const-frequency|unary-frequency|
+    // occurrence ranks the signature with Vampire's comparator chain,
+    // and --spb-prec (THVM_ATP_SPB_PREC, Vampire spb=goal) wraps any
+    // scheme -- including frequency / reverse-frequency, and Vampire's
+    // default sp=frequency when --sym-prec is unset -- in the goal band:
+    // every goal-occurring symbol outranks every other.  Distinct from
+    // --spb-goal, which scales CP WEIGHTS by conjecture ancestry.  The
+    // RNG Moufang lever under --ord=lpo: multiply above the additive
+    // theory orients distributivity as expansion and the associator /
+    // commutator definitions as folds (Vampire's RNG027-5 winner
+    // lrs+10_2_to=lpo:sp=const_frequency:spb=goal:... ranks
+    // additive_identity < add < additive_inverse < associator <
+    // commutator < cx < cz < cy < multiply).  The existing
+    // frequency / reverse-frequency / weighted-frequency paths above
+    // stay byte-identical when --spb-prec is unset.
     {
       const char *spbp = getenv("THVM_ATP_SPB_PREC");
-      if (spbp != NULL && spbp[0] != '\0' && spbp[0] != '0'
+      const char *spn  = getenv("THVM_ATP_SYM_PREC");
+      int boost = (spbp != NULL && spbp[0] != '\0' && spbp[0] != '0');
+      int scheme = atp_vampire_sp_scheme(spn);
+      if (boost && scheme < 0) scheme = ATP_VSP_FREQUENCY;  // sp default,
+                                                          // weighted too
+      int legacy = (spn != NULL && (strcmp(spn, "frequency") == 0 ||
+                                    strcmp(spn, "reverse-frequency") == 0));
+      if (scheme >= 0 && (boost || !legacy)
           && getenv("ATP_BENCH_AUTO_WEIGHTS") == NULL) {
-        atp_goal_boost_precedence_g(prp.goal_l, prp.goal_r,
-                                    prp.n_syms + PR_LABEL_BASE,
-                                    prp.precedence);
-        // Const-min discipline (Vampire pairs spb=goal with sp=const_*
-        // in every RNG winner): after the boost, push ALL constants
-        // (arity 0, goal or not) into a bottom band below every
-        // function symbol, band-stable.  Load-bearing for OUR engine
-        // beyond fidelity: the WM unorientable-direction grounding
-        // (ft_subst_ground_extras, min_const = reserved label 1) makes
-        // `c -> f(min_const,...)` a LEGAL decreasing rewrite whenever a
-        // constant outranks a function symbol under LPO -- a boosted
-        // goal constant (or additive_identity above commutator) turns
-        // every occurrence of it into a min-const junk factory
-        // (measured: RNG027-5 pick 9 `e = commutator(C1,C1)` and the
-        // whole C1 cascade; gone under const-min).
-        {
-          u32 cap2 = prp.n_syms + PR_LABEL_BASE;
-          u32 nseen = 0;
-          // Collect ranked labels, split into function / constant bands.
-          // Two stable passes re-rank: functions above constants.
-          u32 rank = 0;
-          for (int band = 0; band < 2; band++) {   // 0 = consts, 1 = funcs
-            // ascending existing prec within the band
-            for (;;) {
-              u32 best = 0, best_l = 0;
-              best = 0xFFFFFFFFu;
-              for (u32 l = PR_LABEL_BASE; l < cap2; l++) {
-                u32 a = prp.syms[l - PR_LABEL_BASE].arity;
-                if ((band == 0) != (a == 0u)) continue;
-                u32 p = prp.precedence[l];
-                if (p == 0u || p >= 0x40000000u) continue;  // unseen / done
-                if (p < best) { best = p; best_l = l; }
-              }
-              if (best == 0xFFFFFFFFu) break;
-              prp.precedence[best_l] = 0x40000000u + (++rank);
-            }
-          }
+        u32 cap2 = prp.n_syms + PR_LABEL_BASE;
+        u32 *ar = (u32 *)calloc((size_t)cap2, sizeof(u32));
+        if (ar != NULL) {
           for (u32 l = PR_LABEL_BASE; l < cap2; l++)
-            if (prp.precedence[l] >= 0x40000000u)
-              prp.precedence[l] -= 0x40000000u;
-          (void)nseen;
+            ar[l] = prp.syms[l - PR_LABEL_BASE].arity;
+          atp_vampire_precedence_g(prp.eq_l, prp.eq_r, prp.n_eqns,
+                                   prp.goal_l, prp.goal_r, PR_LABEL_BASE,
+                                   cap2, ar, scheme, boost, prp.precedence);
+          free(ar);
         }
         if (getenv("THVM_ATP_DEBUG_SYMPREC") != NULL) {
-          fprintf(stderr, "SPB-PREC[goal] label: prec\n");
-          for (u32 l = PR_LABEL_BASE; l < prp.n_syms + PR_LABEL_BASE; l++)
+          fprintf(stderr, "VAMPIRE-SP[%s%s] label: prec\n",
+                  spn != NULL ? spn : "frequency", boost ? "+spb=goal" : "");
+          for (u32 l = PR_LABEL_BASE; l < cap2; l++)
             fprintf(stderr, "  %-22s %u\n",
                     prp.syms[l - PR_LABEL_BASE].name, prp.precedence[l]);
         }

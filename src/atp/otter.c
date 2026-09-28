@@ -200,17 +200,34 @@ static u32 atp_otter_row_of(const AtpState *s, u32 row, u32 seq) {
 }
 
 static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
+#if !(defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES))
+  (void)s; (void)row; (void)seq;       // the FT normalizer is required
+  return;
+#else
   row = atp_otter_row_of(s, row, seq);
   if (row == 0xffffffffu) return;
-  if (atp_cp_slot_implicit(s, row)) return;
+  if (atp_cp_slot_implicit(s, row) || s->cp_packed[row] == NULL) return;
+  // FT-native normalize (the push-time treatment's normalizer): its
+  // pattern index appends new rules incrementally, where the Term-side
+  // rule index rebuilds after every push.
+  atp_ft_mirror_ensure(s);
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  const u8 *pp = s->cp_packed[row];
+  AtpFtCell *fl = acp_unpack_term_ft(a, &pp, 0);
+  AtpFtCell *fr = acp_unpack_term_ft(a, &pp, 0);
+  fl = atp_rules_only_normalize_ft(s, fl, 64u);
+  fr = atp_rules_only_normalize_ft(s, fr, 64u);
+  u8 joined = (u8)ft_eq(fl, fr);
   u64 hc = thvm_atp_heap_checkpoint();
-  Term l = 0, r = 0;
-  atp_cp_slot_read(s, row, &l, &r);
-  Term nl = atp_rules_only_normalize(s, l, 64u);
-  Term nr = atp_rules_only_normalize(s, r, 64u);
-  if (kbo_eq(nl, nr)) {
+  Term nl = 0, nr = 0;
+  if (!joined) {
+    nl = ft_to_term(fl);
+    nr = ft_to_term(fr);
+  }
+  ft_free_span(a, fl, fl->end);
+  ft_free_span(a, fr, fr->end);
+  if (joined) {
     s->n_otter_joined++;
-    thvm_atp_heap_reset(hc);
     return;
   }
   KboCmp c = atp_compare(s, nl, nr);
@@ -245,7 +262,11 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
   }
   atp_otter_mark(s, s->r_uid[i], 1u);
   atp_otter_map_put(s, seq, s->r_uid[i]);
-  atp_trace_cp_rematerialize(s, s->cp_trace[row], l, r);
+  if (s->cp_trace_lean) {
+    Term l = 0, r = 0;
+    atp_cp_slot_read(s, row, &l, &r);
+    atp_trace_cp_rematerialize(s, s->cp_trace[row], l, r);
+  }
   s->r_trace[i] = atp_trace_push(s, TRACE_ORIENT, s->cp_trace[row],
                                  ATP_TRACE_NONE, s->lhs[i], s->rhs[i]);
   s->n_otter_adopted++;
@@ -253,6 +274,7 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
   // collect garbage -- no Term above is read past this point.
   AtpAddedRange ar = { i, 1u, 0u };
   thvm_atp_interreduce(s, ar);
+#endif
 }
 
 static int atp_otter_seq_cmp(const void *a, const void *b) {

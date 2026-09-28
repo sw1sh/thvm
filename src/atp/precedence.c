@@ -608,56 +608,125 @@ fn u32 atp_frequency_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
   return n_seen;
 }
 
-// Vampire symbol_precedence_boost=goal port (Shell/Options
-// symbol_precedence_boost; Kernel/SignatureHelper boosts unit-goal
-// symbols above the base `sp=` order).  Census the two goal sides,
-// then remap the existing ranks into two bands: non-goal symbols keep
-// their relative order in the low band, goal symbols keep theirs in
-// the high band.  Labels with prec==0 (unseen by the base scheme) stay
-// 0 unless they occur in the goal, in which case they enter the goal
-// band (bottom of it, label-id tie-break).  See thvm.h for the LPO
-// ring-family rationale.
-fn u32 atp_goal_boost_precedence_g(Term goal_l, Term goal_r, u32 n_labels,
-                                   u32 *prec) {
-  if (n_labels == 0u) return 0u;
-  if (term_tag(goal_l) != TAG_CTR && term_tag(goal_r) != TAG_CTR) return 0u;
-  u32 *gcount = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
-  u64 *score  = (u64 *)malloc(sizeof(u64) * (size_t)n_labels);
-  u32 *order  = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
-  if (gcount == NULL || score == NULL || order == NULL) {
-    free(gcount); free(score); free(order); return 0u;
+// Vampire symbol precedence (Kernel/Ordering.cpp
+// sortAuxBySymbolPrecedence + BoostWrapper), the `sp=` schemes of the
+// UEQ schedule plus `spb=goal`.  Every declared label in [base, n_labels)
+// is sorted ascending under the scheme's comparator chain and ranked
+// 1..N (N = greatest); labels below `base` keep their value.  Chains:
+//   arity              higher arity greater
+//   reverse-arity      lower arity greater
+//   unary-first        unary greatest, then arity, then frequency
+//   const-max          constants greatest, then arity
+//   const-min          constants least, then reverse arity
+//   frequency          rarer greater (Vampire's default sp)
+//   reverse-frequency  commoner greater
+//   unary-frequency    unary greatest, then frequency
+//   const-frequency    constants least, then frequency
+//   occurrence         tie-break only
+// Frequency = occurrence count over the axioms and the goal (Shell/
+// Property.cpp scanForInterpreted -> incUsageCnt).  The final tie-break
+// is the label id; Vampire's is the symbol id (first-occurrence order),
+// which the alphabetized .pr signature does not preserve.  boost_goal
+// (spb=goal): goal-occurring symbols outrank all others, the scheme
+// deciding inside each band.  Returns the number of ranked labels, 0
+// on OOM or an unknown scheme.
+typedef struct {
+  const u32 *arity, *count, *goal;
+  int scheme, boost_goal;
+} AtpVspCtx;
+
+static int atp_vsp_icmp(u32 a, u32 b) { return (a > b) - (a < b); }
+
+// < 0 when label a ranks below label b.
+static int atp_vsp_cmp(const AtpVspCtx *c, u32 a, u32 b) {
+  if (c->boost_goal) {
+    int ga = c->goal[a] != 0u, gb = c->goal[b] != 0u;
+    if (ga != gb) return ga ? 1 : -1;
   }
-  for (u32 i = 0; i < n_labels; i++) gcount[i] = 0u;
-  prec_occ_walk(goal_l, gcount, n_labels);
-  prec_occ_walk(goal_r, gcount, n_labels);
-  // Rank every label that is either base-ranked or goal-occurring.
-  // Sort key: (band, old_prec, label) ascending -- non-goal band first,
-  // then by the base rank, so a stable two-band remap falls out of one
-  // insertion sort.
-  u32 n_seen = 0, n_goal = 0;
-  for (u32 l = 0; l < n_labels; l++) {
-    u32 in_goal = (gcount[l] > 0u) ? 1u : 0u;
-    if (prec[l] == 0u && !in_goal) continue;
-    if (in_goal) n_goal++;
-    score[n_seen] = ((u64)in_goal << 62) | ((u64)prec[l] << 30) | (u64)l;
-    order[n_seen] = l;
-    n_seen++;
+  u32 ara = c->arity[a], arb = c->arity[b];
+  int r = 0;
+  switch (c->scheme) {
+    case ATP_VSP_ARITY:
+      r = atp_vsp_icmp(ara, arb);
+      break;
+    case ATP_VSP_REVERSE_ARITY:
+      r = atp_vsp_icmp(arb, ara);
+      break;
+    case ATP_VSP_UNARY_FIRST:
+      if ((ara == 1u) != (arb == 1u)) return (ara == 1u) ? 1 : -1;
+      r = atp_vsp_icmp(ara, arb);
+      if (r == 0) r = atp_vsp_icmp(c->count[b], c->count[a]);
+      break;
+    case ATP_VSP_CONST_MAX:
+      if ((ara == 0u) != (arb == 0u)) return (ara == 0u) ? 1 : -1;
+      r = atp_vsp_icmp(ara, arb);
+      break;
+    case ATP_VSP_CONST_MIN:
+      if ((ara == 0u) != (arb == 0u)) return (ara == 0u) ? -1 : 1;
+      r = atp_vsp_icmp(arb, ara);
+      break;
+    case ATP_VSP_FREQUENCY:
+      r = atp_vsp_icmp(c->count[b], c->count[a]);
+      break;
+    case ATP_VSP_REVERSE_FREQUENCY:
+      r = atp_vsp_icmp(c->count[a], c->count[b]);
+      break;
+    case ATP_VSP_UNARY_FREQUENCY:
+      if ((ara == 1u) != (arb == 1u)) return (ara == 1u) ? 1 : -1;
+      r = atp_vsp_icmp(c->count[b], c->count[a]);
+      break;
+    case ATP_VSP_CONST_FREQUENCY:
+      if ((ara == 0u) != (arb == 0u)) return (ara == 0u) ? -1 : 1;
+      r = atp_vsp_icmp(c->count[b], c->count[a]);
+      break;
+    default:
+      break;
   }
-  for (u32 i = 1; i < n_seen; i++) {
-    u64 sk = score[i];
-    u32 ok = order[i];
+  return (r != 0) ? r : atp_vsp_icmp(a, b);
+}
+
+fn int atp_vampire_sp_scheme(const char *name) {
+  static const char *const names[] = {
+    "arity", "reverse-arity", "unary-first", "const-max", "const-min",
+    "frequency", "reverse-frequency", "unary-frequency", "const-frequency",
+    "occurrence",
+  };
+  if (name == NULL) return -1;
+  for (int k = 0; k < (int)(sizeof names / sizeof names[0]); k++) {
+    if (strcmp(name, names[k]) == 0) return k;
+  }
+  return -1;
+}
+
+fn u32 atp_vampire_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
+                                Term goal_l, Term goal_r, u32 base,
+                                u32 n_labels, const u32 *arity, int scheme,
+                                int boost_goal, u32 *prec) {
+  if (n_labels <= base || scheme < 0 || scheme > ATP_VSP_OCCURRENCE) return 0u;
+  u32 *count = (u32 *)calloc((size_t)n_labels, sizeof(u32));
+  u32 *goal  = (u32 *)calloc((size_t)n_labels, sizeof(u32));
+  u32 *order = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
+  if (count == NULL || goal == NULL || order == NULL) {
+    free(count); free(goal); free(order); return 0u;
+  }
+  prec_occ_census_g(lhs, rhs, n_eqns, goal_l, goal_r, count, n_labels);
+  prec_occ_walk(goal_l, goal, n_labels);
+  prec_occ_walk(goal_r, goal, n_labels);
+  AtpVspCtx c = { arity, count, goal, scheme, boost_goal };
+  u32 n = 0;
+  for (u32 l = base; l < n_labels; l++) order[n++] = l;
+  for (u32 i = 1; i < n; i++) {
+    u32 x = order[i];
     u32 j = i;
-    while (j > 0 && score[j - 1] > sk) {
-      score[j] = score[j - 1];
+    while (j > 0 && atp_vsp_cmp(&c, order[j - 1], x) > 0) {
       order[j] = order[j - 1];
       j--;
     }
-    score[j] = sk;
-    order[j] = ok;
+    order[j] = x;
   }
-  for (u32 i = 0; i < n_seen; i++) prec[order[i]] = i + 1u;
-  free(gcount); free(score); free(order);
-  return n_goal;
+  for (u32 i = 0; i < n; i++) prec[order[i]] = i + 1u;
+  free(count); free(goal); free(order);
+  return n;
 }
 
 // Vampire KBO FREQUENCY weight-generation scheme (Kernel/KBO.cpp
