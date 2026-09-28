@@ -76,3 +76,8 @@ for the per-commit story.
   definitions, goals and conjecture units print their raw form plus
   single-rewrite fold steps; the clausal pre-pass prints each forward
   demodulation as its own `demodulation` record citing its unit equation.
+- Vampire Otter-loop simplification set (`--otter`, `src/atp/otter.c`):
+  orientable queued critical pairs rewrite as passive rules before
+  selection.  With Vampire's symbol-precedence port (`--sym-prec`
+  schemes + `--spb-prec` goal band) it forms the `otter-lpo` schedule
+  lane, which proves the CASC-J13 ring misses RNG027-5/027-7/028-5/027-10.

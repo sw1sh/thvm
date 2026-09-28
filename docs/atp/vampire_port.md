@@ -45,7 +45,8 @@ Conventions:
 | `kws=inv_precedence` | `"KboWeightScheme" -> "InvPrecedence"` | `wl/THVMLink/CSource/thvmlink_atp.c` args[29] | PORTED.  Derives per-symbol KBO weight from AutoPrecedence (weight = `max_prec - prec(sym) + 1`) when SymbolWeights is not provided.  Probe @ TC=60s combining `ReverseFrequency` + `InvPrecedence` + `GroundJoin` + `BackwardDemod` + `RHSInterreduce` + `UnfailingCP` cracked 0/6 of the residual NotableTheorems; needs `nwc=N` + `spb=*` companions for the full Vampire shape. |
 | `kmz=on` | GAP | — | KBO "modular zero" — variant weight handling for zero-coefficient slots. |
 | `spb=goal_then_units` | GAP | — | LITERAL selection priority: goal literals first, then units, then others.  Appeared 38× in wins — second-most common spb after `intro`/`goal`. |
-| `spb=goal` | GAP | — | Goal-literal selection.  14 wins. |
+| `spb=goal` | `--spb-prec` (CLI) | `src/atp/precedence.c::atp_vampire_precedence_g` | PORTED as the precedence boost Vampire implements (Kernel/Ordering.cpp BoostWrapper: goal symbols outrank the rest, the `sp=` scheme ranking inside each band).  Load-bearing for the `otter-lpo` lane. |
+| `sp=arity` / `const_min` / `const_max` / `const_frequency` / `unary_first` / `unary_frequency` / `occurrence` | `--sym-prec=<scheme>` (CLI) | `src/atp/precedence.c::atp_vampire_precedence_g` | PORTED from sortAuxBySymbolPrecedence; tie-break is the label id (the .pr signature is alphabetized, Vampire uses first occurrence). |
 | `spb=intro` | GAP | — | "Introduced" literal selection. 14 wins. |
 | `lrs_first_time_check(N)` | `"LRS" -> True` (param N hardcoded) | `src/atp/_.c::thvm_atp_set_use_lrs` | LRS = Limited Resource Strategy.  N=100 ms first-check appeared in 7 wins; thvm's LRS uses a different cadence. |
 
@@ -54,8 +55,12 @@ Conventions:
 | Vampire flag | thvm option | thvm C source | Notes |
 |---|---|---|---|
 | `fgj=on` (forward ground joinability) | `"GroundJoin" -> True` | `src/atp/_.c::gj_less_in` | Martin-Nipkow/Twee ground-joinability test.  KBO-only currently. |
-| `fd=preordered` | `"RHSInterreduce" -> True` (engine-level) | `src/atp/_.c::thvm_atp_set_use_rhs_interreduce` | Forward demodulation = simplification of newly-generated clauses against existing rules. |
+| `fd=preordered` | `--pop-rules-only` (CLI) | `src/atp/rerank.c` pop normalize | Oriented rules only at selection; the generation-time treatment is already oriented-only (WM `-kg r`). |
 | `bd=preordered` / `bd=all_1` / `bd=all` | `"BackwardDemod" -> True` | `src/atp/_.c::thvm_atp_set_use_bwd_demod` | Backward demodulation = rewrite OLD rules' LHS using a NEW rule.  Vampire `bd=all` = exhaustive; thvm matches the all-variant. |
+| `bd=preordered` (strict) | `--bd-preordered` (CLI) | `src/atp/wm_drain.c::thvm_atp_interreduce` | An unorientable new equation interreduces nothing. |
+| `sa=lrs` / `sa=otter` simplification set | `--otter` (CLI) | `src/atp/otter.c` | Passive (queued) orientable clauses demodulate before selection; the batch is replayed newest-first (the LIFO-to-FIFO unprocessed order).  Vampire `dis` (DISCOUNT) fails where `lrs`/`ott` solve on RNG027-5. |
+| age queue (derivation depth) | `--age-depth` (CLI) | `src/atp/cp_heap.c` FIFO dimension | AgeQueue::lessThan: depth, then weight; age pick first. |
+| LRS age+weight limits | `--lrs-age` (CLI) | `src/atp/cp_heap.c::atp_lrs_recompute_horizon` | exceedsAllLimits: prune only CPs beyond both reaches. |
 | (forward subsumption) | `"ForwardSubsume" -> True` | `src/atp/_.c::thvm_atp_set_use_fwd_subsume` | Vampire `--forward_subsumption` analog. |
 | `bs=on` / `bs=unit_only` | `"BackwardSubsume" -> True` | `src/atp/_.c::thvm_atp_set_use_bwd_subsume` | Vampire `bs=unit_only` analog: drop existing rules subsumed by a new one. |
 | `fsr=off` | (default OFF) | — | Forward subsumption RESOLUTION disabled.  thvm doesn't have a separate `fsr` knob — `fwd_subsume` already covers the conservative case.  GAP for the resolution-on variant. |
@@ -117,11 +122,13 @@ Ordered by win-frequency in `vampire_raw/`:
    selection time, pick a clause that contains a goal literal first,
    then units, then others.  Lives next to `atp_select_cp` in
    `src/atp/_.c`.
-3. **`fd=preordered` + `bd=preordered`** — currently thvm's rewrite
-   path is "all preordered" with no toggle.  Vampire's `preordered`
-   variant only applies a rule when the orientation IS preordered
-   (skips KBO/LPO check at rewrite time, trusts the stored orient
-   flag).  Mostly a perf knob.
+3. ~~**`fd=preordered` + `bd=preordered`**~~ — PORTED as
+   `--pop-rules-only` + `--bd-preordered`: `preordered` means an
+   unorientable equation never demodulates (forward or backward), not a
+   performance shortcut.  On RNG027-5 the default WM interreduction let
+   commutativity retire `-X+X -> 0` and orphan its children.  The
+   decisive companion is the Otter simplification set (`--otter`), see
+   the table above.
 4. **`nwc=N` non-unit weight coefficient** — multiply non-unit clause
    weight by N in `cp_weight_mode` evaluation.  Bias toward unit-clause
    selection.  Trivial 5-LOC addition.
