@@ -639,6 +639,7 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   if (g_atp_phase_detail) g_atp_cpg_us_kbo += atp_now_us() - _dkb_t0;
   u32 seq        = s->cp_seq_next++;
   s->cp_seq[i]   = seq;
+  if (s->otter_rec) atp_otter_record(s, i, seq);
   if (s->cp_uid_a != NULL) { s->cp_uid_a[i] = g_cp_uid_a; s->cp_uid_b[i] = g_cp_uid_b; }
   // Raw-descriptor lane: stamp the descriptor for the FT-direct raw
   // emit class (g_rdesc_store armed by atp_cp_heap_push), or the
@@ -1501,6 +1502,9 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
     // reads the packed cache (== cp_pri[vv], refresh invariant).
     u32 vv = s->cp_heap[i].row;
     if (s->cp_heap[i].pri <= horizon) continue;
+    // Vampire LRS discards the clause from passive, which also takes it
+    // out of the Otter simplification set (Otter::onPassiveRemoved).
+    if (s->use_otter) atp_otter_popkill(s, s->cp_seq[vv]);
     free(s->cp_packed[vv]);
     s->cp_packed[vv] = NULL;
     atp_cp_peak_clear(s, vv);
@@ -1970,6 +1974,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   s->last_popped_kind  = s->cp_kind[v];
   s->last_popped_depth = (s->cp_depth != NULL) ? s->cp_depth[v] : 0u;
   s->last_popped_gd    = (s->cp_gd != NULL) ? s->cp_gd[v] : 0u;
+  s->last_popped_seq   = s->cp_seq[v];
   // Cleared per pop; the KBO_UN orient branch sets it iff the CP-formation
   // side swap physically fires, so the emission mirror never reads a stale
   // verdict from an earlier (e.g. orientable) selection.

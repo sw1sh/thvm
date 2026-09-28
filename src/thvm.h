@@ -5549,6 +5549,30 @@ typedef struct {
   // Goal-derived bit (cp_gd) of the popped CP -- a rule oriented from it
   // inherits this as its r_gd (spb=goal derivation tracking).
   u8   last_popped_gd;
+  // Queue sequence number (cp_seq) of the popped CP.  The Otter-loop
+  // layer (use_otter) keys a queued CP's passive demodulator on it.
+  u32  last_popped_seq;
+  // Vampire Otter/LRS simplification set (THVM_ATP_OTTER, --otter; see
+  // src/atp/otter.c).  Every orientable queued CP is a PASSIVE rule: it
+  // rewrites wherever R rewrites but forms no overlaps until its CP is
+  // selected.  Passive status is keyed by rule uid (stable across every
+  // slot compaction); otter_map_* maps a queued CP's seq to its passive
+  // uid.  otter_rows/otter_seqs record the CPs queued during the current
+  // step (armed by otter_rec) for the post-batch replay.  Default OFF:
+  // nothing below is touched and the engine is byte-identical.
+  u8   use_otter;
+  u8   otter_rec;
+  u8   otter_primed;        // the input queue got its replay (first pop)
+  u32 *otter_rows;
+  u32 *otter_seqs;
+  u32  otter_n, otter_cap;
+  u8  *uid_passive;
+  u32  uid_passive_cap;
+  u32 *otter_map_key;       // seq + 1 (0 = empty bucket)
+  u32 *otter_map_uid;       // passive uid (0 = retired)
+  u32  otter_map_cap, otter_map_used;
+  u64  n_otter_adopted, n_otter_retired, n_otter_joined, n_otter_unorient,
+       n_otter_refused;
   // Folded-signature label band [fold_lo, fold_hi): the fresh
   // definitional symbols (sF*/sFlat*/f_g*) the pr-layer transformations
   // introduced, registered via thvm_atp_set_fold_band.  Consumed by the
@@ -7492,6 +7516,10 @@ fn void      thvm_atp_set_use_fvi(AtpState *s, u8 on);
 // subset it can actually reach.  Sound (incomplete in principle, complete
 // in budget); 0 = off (default) -> engine byte-identical.
 fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
+// Vampire Otter/LRS simplification set (src/atp/otter.c): orientable
+// queued CPs act as passive demodulators before they are selected.
+// 0 = off (default) -> engine byte-identical.
+fn void      thvm_atp_set_use_otter(AtpState *s, u8 on);
 // Selections between GNN re-ranks (0 = off, the default).  Only takes
 // effect while a GNN model is loaded (thvm_atp_set_gnn_scorer).
 fn void      thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period);

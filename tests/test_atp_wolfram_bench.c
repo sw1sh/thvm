@@ -3067,6 +3067,9 @@ int main(int argc, char **argv) {
       if (wall_cap > 0.0) thvm_atp_set_wall_deadline(s, wall_cap);
     }
   }
+  // THVM_ATP_OTTER=1 (--otter): Vampire Otter/LRS simplification set --
+  // orientable queued CPs demodulate before selection (src/atp/otter.c).
+  if (atp_env_on("THVM_ATP_OTTER")) thvm_atp_set_use_otter(s, 1u);
   // THVM_ATP_RANDOM_RATIO=<n> -- every n-th CP selection picks a
   // uniformly-random queued CP via xorshift64.  Default off.
   // THVM_ATP_RANDOM_SEED=<u64> seeds the stream (default: a fixed
@@ -4074,6 +4077,17 @@ int main(int argc, char **argv) {
   { u32 unor = 0;
     for (u32 i = 0; i < s->n_rules; i++) if (!s->r_orient[i]) unor++;
     printf("   unorientable rules: %u / %u\n", unor, s->n_rules); }
+  if (s->use_otter) {
+    u32 np = 0;
+    for (u32 i = 0; i < s->n_rules; i++) if (atp_otter_passive(s, i)) np++;
+    printf("   otter: adopted=%llu retired=%llu joined=%llu unorient=%llu "
+           "refused=%llu live-passive=%u\n",
+           (unsigned long long)s->n_otter_adopted,
+           (unsigned long long)s->n_otter_retired,
+           (unsigned long long)s->n_otter_joined,
+           (unsigned long long)s->n_otter_unorient,
+           (unsigned long long)s->n_otter_refused, np);
+  }
   printf("   steps/sec=%.1f  cps/step=%.1f\n",
          (el > 0.0) ? (double)i / el : 0.0,
          (i > 0) ? (double)max_cps / (double)i : 0.0);

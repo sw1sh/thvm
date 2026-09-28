@@ -267,3 +267,6 @@ static u8 atp_eq_is_mono(const AtpState *s, u32 i);
 #include "cp_gen.c"
 #include "step.c"
 #include "narrow.c"
+// Otter-loop passive demodulators (--otter): needs the step, the
+// interreduce, and the uid lookup above.
+#include "otter.c"

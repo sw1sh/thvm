@@ -464,6 +464,11 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->r_gd);
   free(s->uid_dead);
   free(s->uid_idx);
+  free(s->otter_rows);
+  free(s->otter_seqs);
+  free(s->uid_passive);
+  free(s->otter_map_key);
+  free(s->otter_map_uid);
   free(s->cp_last_norm_r_revision);
   // Deferred-CP (`implicit_pair`) arc commit 1: the descriptor array and
   // the per-slot tag bitset are plain malloc'd blocks (no per-slot owned

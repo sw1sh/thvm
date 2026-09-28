@@ -667,6 +667,9 @@ static u32 atp_gen_one(AtpState *s, u32 i, u32 j, CriticalPair *buf) {
       s->r_gj_status[j] == ATP_GJ_ST_JOINABLE) {
     return 0;
   }
+  // A passive demodulator (Otter loop, src/atp/otter.c) is not yet
+  // active: Vampire generates inferences only with the active set.
+  if (atp_otter_passive(s, i) || atp_otter_passive(s, j)) return 0;
   u32 nbuf   = atp_overlap_ij(s, i, j, buf, ATP_CP_BATCH, NULL);
   u32 pushed = atp_push_cps_traced(s, buf, nbuf,
                                    s->r_trace[i], s->r_trace[j], i, j);

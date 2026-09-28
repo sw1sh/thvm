@@ -524,6 +524,21 @@ static void atp_uid_idx_set(AtpState *s, u32 uid, u32 idx) {
   s->uid_idx[uid] = idx;
 }
 
+// Otter-loop passive demodulators (src/atp/otter.c, included last).
+// The hooks run from the queue insert (record), the pop (retire the
+// popped CP's own passive rule) and the step tail (the post-batch
+// replay); the overlap former asks atp_otter_passive.
+static void atp_otter_record(AtpState *s, u32 row, u32 seq);
+static void atp_otter_popkill(AtpState *s, u32 seq);
+static void atp_otter(AtpState *s);
+
+// Is rule slot `i` a passive demodulator (forms no overlaps)?
+static inline u8 atp_otter_passive(const AtpState *s, u32 i) {
+  if (!s->use_otter) return 0u;
+  u32 uid = s->r_uid[i];
+  return (u8)(uid < s->uid_passive_cap && s->uid_passive[uid]);
+}
+
 // Uid-layer orphan test for queue slot j: either stamped parent uid died.
 // Default ON (THVM_ATP_UID_ORPHAN=0 disables): the KPV_KillParent
 // call-site semantics are pinned from RUndEVerwaltung.c/Interreduktion.c

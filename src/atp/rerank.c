@@ -936,6 +936,14 @@ fn void thvm_atp_set_use_lrs(AtpState *s, u8 on) {
   s->lrs_horizon = 0u;
 }
 
+// Vampire Otter/LRS simplification set (src/atp/otter.c).  Set before
+// the first step; the input queue is replayed at the first selection.
+fn void thvm_atp_set_use_otter(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_otter = on ? 1u : 0u;
+  s->otter_primed = 0u;
+}
+
 // Walk a Term collecting its CTR symbol-label bits into mask[].
 // goal_sym_mask is a fixed-size bit-set of 8 * 32 = 256 labels (the
 // most common range); larger labels mod into the same buckets, so the
@@ -2034,10 +2042,18 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     thvm_atp_gnn_rerank(s);
   }
 
+  // Otter loop: the input clauses pass through the replay too (Vampire
+  // routes them through the same unprocessed loop), once, before the
+  // first selection.
+  if (s->use_otter && !s->otter_primed) atp_otter(s);
+
   Term cp_lhs = 0, cp_rhs = 0;
   if (!thvm_atp_select_cp(s, &cp_lhs, &cp_rhs)) {
     return ATP_QUEUE_EMPTY;
   }
+  // Otter loop: the selected CP stops being a passive demodulator
+  // before its selection-time normalize (else it joins against itself).
+  if (s->use_otter) atp_otter_popkill(s, s->last_popped_seq);
 
   // 9.3: snapshot the heap before the (potentially heavy) IC-routed
   // rewrite cells are allocated.  When the CP is trivially joined
@@ -2767,6 +2783,11 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   if (s->use_bwd_ground_join) atp_gj_classify_added(s, added);
 #endif
 
+  // Otter loop: record every CP this step queues (interreduction
+  // victims, the new fact's overlaps, IR-victim drains) for the
+  // post-batch replay below.
+  if (s->use_otter) { s->otter_rec = 1u; s->otter_n = 0u; }
+
   // Interreduce shifts new-rule indices down by `dropped`.
   u64 _ph_ir_t0 = atp_phase_now(); g_thvm_phase = "interreduce";
   g_ft_region = 2u;
@@ -2879,6 +2900,10 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     atp_wm_demote_drain(s);
     g_ft_region = 0u;
   }
+
+  // Otter loop: replay this step's queued CPs, adopting the orientable
+  // survivors as passive demodulators (src/atp/otter.c).
+  if (s->use_otter) atp_otter(s);
 
 #ifdef ATP_CP_GROUND_JOIN
   // WM RueckwaertsGrundzusammenfuehrbarkeit (ArbeitsAufnahme,
