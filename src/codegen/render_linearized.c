@@ -18,8 +18,11 @@
 //                       (LOOP/REDUCE only; UPCAST/UNROLL stay folded
 //                       into VCONST + GEP after expander+devectorize)
 //   UOP_END          -- closes one `}` per range carried in src list
-//   UOP_STORE        -- `lhs = rhs;` (multi-store when rhs is STACK)
-//   UOP_AFTER        -- nothing emitted; toposort places its operands
+//                       (they must be the innermost open loops)
+//   UOP_STORE        -- `lhs = rhs;`, or `_accN = rhs;` into a
+//                       PLACEHOLDER reached through AFTERs
+//   UOP_AFTER        -- nothing emitted; the linearizer places its
+//                       operands, and as a value it is its src[0]
 //   UOP_LOAD / VCONST / GEP / STACK / ALU -- treated as values; only
 //                       referenced from STORE's rhs (via lz_emit_value)
 //
@@ -34,7 +37,7 @@
 //   tinygrad/codegen/__init__.py:140-143  do_render (the analog: it
 //     takes a linearized UOp list and asks the renderer to emit a
 //     string).
-//   tinygrad/codegen/late/devectorizer.py:311-328  reduce_to_acc
+//   tinygrad/codegen/__init__.py:197-204  reduce_ranges_to_acc
 //     (produces the PLACEHOLDER + STORE-init + STORE-update + END +
 //     LOAD shape this renderer consumes).
 //   tinygrad/codegen/late/linearizer.py:37-47    heap-driven emit
@@ -60,11 +63,19 @@ typedef struct {
 } LzBufSlot;
 
 #define LZ_MAX_BUFS 32
+#define LZ_MAX_OPEN 64
 
 typedef struct {
   LzBufSlot bufs[LZ_MAX_BUFS];
   u32       n_bufs;
   LzTarget  target;
+  // Set when a value cannot be rendered faithfully (an unsupported op, or
+  // a vector value in a scalar slot); the body walk then bails instead of
+  // emitting source that fails to compile or computes lane 0 only.
+  int       bad;
+  // RANGE Terms of the loops currently open, innermost last.
+  Term      open[LZ_MAX_OPEN];
+  u32       n_open;
   // Accumulator declarations already emitted, keyed on the PLACEHOLDER
   // Term (hash-consed on (dtype, acc_id)), not on acc_id alone: two
   // accumulators that collide on an acc_id get one declaration each, which
@@ -211,8 +222,9 @@ static void lz_emit_value_lane(Term t, u32 lane, LzCtx *ctx, FILE *fp) {
     }
     return;
   }
-  if (op == UOP_UNROLL) {
-    // UNROLL is a structural wrapper; its src is the vector value.
+  if (op == UOP_UNROLL || op == UOP_AFTER) {
+    // UNROLL is a structural wrapper and AFTER only orders; src[0] is
+    // the vector value.
     Term inner = heap_read(term_val(t) + 0);
     lz_emit_value_lane(inner, lane, ctx, fp);
     return;
@@ -229,6 +241,9 @@ static u32 lz_value_width(Term t) {
   u32 op = term_ext(t);
   if (op == UOP_STACK)  return uop_stack_n(t);
   if (op == UOP_VCONST) return uop_vconst_n(t);
+  if (op == UOP_AFTER) {
+    return lz_value_width(heap_read(term_val(t) + 0));
+  }
   if (op == UOP_UNROLL) {
     // Width is product of the UNROLL's args' factors.
     u32 n_args = (u32)term_val(heap_read(term_val(t) + 1));
@@ -243,8 +258,20 @@ static u32 lz_value_width(Term t) {
   return 1;
 }
 
+// 1 iff every lane of the STACK is the same Term, so any lane is its value.
+static int lz_stack_is_broadcast(Term t) {
+  u32 n = uop_stack_n(t);
+  for (u32 i = 1; i < n; i++) {
+    if (uop_stack_src(t, i) != uop_stack_src(t, 0)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static void lz_emit_value(Term t, LzCtx *ctx, FILE *fp) {
   if (term_tag(t) != TAG_UOP) {
+    ctx->bad = 1;
     fprintf(fp, "/* non-uop leaf */");
     return;
   }
@@ -349,15 +376,19 @@ static void lz_emit_value(Term t, LzCtx *ctx, FILE *fp) {
         u32 idx = uop_gep_idx(t, 0);
         lz_emit_value_lane(src, idx, ctx, fp);
       } else {
-        // Multi-idx GEP shouldn't survive devectorizer pm_render; emit
-        // lane 0 as a fallback rather than abort.
+        // A multi-index GEP is a vector; it cannot fill a scalar slot.
+        ctx->bad = 1;
         lz_emit_value_lane(src, uop_gep_idx(t, 0), ctx, fp);
       }
       return;
     }
     case UOP_STACK: {
-      // STACK referenced as a scalar value: emit lane 0 (defensive --
-      // STORE handling drives the multi-emit when STACK is the rhs).
+      // STACK in a scalar slot: only a broadcast (every lane the same
+      // Term) has a single value.  STORE drives the per-lane emit when a
+      // STACK is its rhs.
+      if (!lz_stack_is_broadcast(t)) {
+        ctx->bad = 1;
+      }
       if (uop_stack_n(t) > 0) {
         lz_emit_value(uop_stack_src(t, 0), ctx, fp);
       } else {
@@ -366,11 +397,15 @@ static void lz_emit_value(Term t, LzCtx *ctx, FILE *fp) {
       return;
     }
     case UOP_VCONST: {
-      // VCONST referenced as a scalar: emit lane 0.  pm_render should
-      // have rewritten this to STACK(CONST, ...) before reaching the
-      // renderer, but be defensive.
+      // VCONST in a scalar slot: pm_render should have rewritten it to a
+      // STACK of CONSTs; only an all-equal VCONST has a single value.
       u32 dt = uop_vconst_dtype(t);
       u32 bits = (uop_vconst_n(t) > 0) ? uop_vconst_bits(t, 0) : 0;
+      for (u32 i = 1; i < uop_vconst_n(t); i++) {
+        if (uop_vconst_bits(t, i) != bits) {
+          ctx->bad = 1;
+        }
+      }
       if (dt == DT_FP32) {
         union { u32 u; float f; } cvt; cvt.u = bits;
         fprintf(fp, "%ff", cvt.f);
@@ -404,7 +439,13 @@ static void lz_emit_value(Term t, LzCtx *ctx, FILE *fp) {
       lz_emit_value(inner, ctx, fp);
       return;
     }
+    case UOP_AFTER:
+      // The value is src[0]; the other operand only orders statements,
+      // and the linearizer has already placed it.
+      lz_emit_value(heap_read(loc + 0), ctx, fp);
+      return;
     default:
+      ctx->bad = 1;
       fprintf(fp, "/* unsupported uop op=%u */", op);
       return;
   }
@@ -520,6 +561,13 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
         || op == UOP_BUFFERIZE || op == UOP_REDUCE) {
       return 0;
     }
+    // The Metal and CUDA preludes do not decode thread ids, so every
+    // launched thread runs the whole loop nest; a lowered reduce would
+    // multiply that by its own loops.  Those targets leave reduces to the
+    // legacy emit, which maps the output axes onto threads.
+    if (op == UOP_PLACEHOLDER && ctx->target != LZ_TGT_C) {
+      return 0;
+    }
   }
 
   // Pass 1: register every UOP_BUFFER + emit every PLACEHOLDER decl.
@@ -570,6 +618,15 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
         }
         u32 axis_id = uop_range_axis_id(t);
         u32 extent  = uop_range_extent(t);
+        // The preludes bind no symbolic (kvar) bounds; the packed token
+        // is not a trip count.
+        if (kvar_extent_is_var(extent)) {
+          return 0;
+        }
+        if (ctx->n_open >= LZ_MAX_OPEN) {
+          return 0;
+        }
+        ctx->open[ctx->n_open++] = t;
         for (u32 d = 0; d < depth; d++) fputc(' ', fp);
         fputc(' ', fp);
         fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u++) {\n",
@@ -578,13 +635,26 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
         break;
       }
       case UOP_END: {
-        // Close one `}` per range carried in END's src list.  The
-        // linearizer placed END at the position where the LAST loop
-        // body should close; the ordered close matches the open order
-        // of the matching RANGE nodes.
+        // Close one `}` per range carried in END's src list.  Those must
+        // be exactly the innermost open loops; any other order would
+        // close an enclosing loop in their place.
         u32 n = uop_end_n(t);
+        if (n > ctx->n_open) {
+          return 0;
+        }
         for (u32 r = 0; r < n; r++) {
-          if (depth == 0) return 0;
+          int open = 0;
+          for (u32 j = ctx->n_open - n; j < ctx->n_open; j++) {
+            if (ctx->open[j] == uop_end_range(t, r)) {
+              open = 1;
+            }
+          }
+          if (!open) {
+            return 0;
+          }
+        }
+        ctx->n_open -= n;
+        for (u32 r = 0; r < n; r++) {
           depth--;
           for (u32 d = 0; d < depth; d++) fputc(' ', fp);
           fputc(' ', fp);
@@ -614,40 +684,19 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
             break;
           }
         }
-        // STACK rhs: F parallel stores.  The addr for each lane is the
-        // shared address + lane offset; for the conv-kid=3 shape the
-        // STACK lanes are the F UPCAST'd output positions, which the
-        // expander emitted as separate scalar addresses.  Without
-        // per-lane addresses, we can only emit lane 0; in that case
-        // the STORE falls through to the scalar emit.  Currently the
-        // expander+devectorize pipeline used by hand_opts produces
-        // STACK lanes for the VALUE only -- the address remains
-        // scalar -- so emit one store with multi-lane addressing not
-        // surfaced.  Treat STACK rhs as multi-store when buf is a
-        // PLACEHOLDER (acc); otherwise emit lane 0.
-        u32 vw = lz_value_width(value);
-        int is_acc_store = (term_tag(buf) == TAG_UOP
-                            && term_ext(buf) == UOP_PLACEHOLDER);
-        if (vw > 1 && is_acc_store) {
-          // Multi-store: one assignment per lane.
-          for (u32 lane = 0; lane < vw; lane++) {
-            for (u32 d = 0; d < depth; d++) fputc(' ', fp);
-            fputc(' ', fp);
-            // Accumulator buf is a PLACEHOLDER -> `_accN[lane]` is a
-            // separate accumulator per lane.  Allocate a synthetic
-            // per-lane name `_acc<id>_<lane>`.
-            u32 acc_id = uop_placeholder_acc_id(buf);
-            fprintf(fp, "_acc%u_%u = ", acc_id, lane);
-            lz_emit_value_lane(value, lane, ctx, fp);
-            fputs(";\n", fp);
-          }
-        } else if (is_acc_store) {
-          // Scalar accumulator store: `_accN = value;` -- the addr
-          // (always 0) is implicit.
+        // A reduce stores through acc.after(...) (codegen/__init__.py:
+        // 200-203); the AFTERs only order the store.
+        Term acc = buf;
+        while (term_tag(acc) == TAG_UOP && term_ext(acc) == UOP_AFTER) {
+          acc = heap_read(term_val(acc) + 0);
+        }
+        if (term_tag(acc) == TAG_UOP && term_ext(acc) == UOP_PLACEHOLDER) {
+          // Accumulator store: `_accN = value;` -- the addr (always 0)
+          // is implicit.  Each accumulator is scalar, so a vector value
+          // bails inside lz_emit_value.
           for (u32 d = 0; d < depth; d++) fputc(' ', fp);
           fputc(' ', fp);
-          u32 acc_id = uop_placeholder_acc_id(buf);
-          fprintf(fp, "_acc%u = ", acc_id);
+          fprintf(fp, "_acc%u = ", uop_placeholder_acc_id(acc));
           lz_emit_value(value, ctx, fp);
           fputs(";\n", fp);
         } else {
@@ -721,15 +770,14 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
         return 0;
     }
   }
-  // Any open loop should be closed by an END in a well-formed
-  // linearized list; if not, close them now (best-effort).
+  // Output loops have no END: they close at the end of the kernel.
   while (depth > 1) {
     depth--;
     for (u32 d = 0; d < depth; d++) fputc(' ', fp);
     fputc(' ', fp);
     fputs("}\n", fp);
   }
-  return 1;
+  return !ctx->bad;
 }
 
 // === Entry points =====================================================

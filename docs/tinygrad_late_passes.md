@@ -612,8 +612,10 @@ Three new opcodes back this:
   declaration, heap = [NUM(dtype), NUM(acc_id)], hash-cons by
   (dtype, acc_id).
 - `UOP_END` (slot 50): "close these loops here" marker, heap =
-  [NUM(n), range_0, ..., range_{n-1}].  Not hash-cons'd -- two END
-  markers in two different reduces are semantically distinct.
+  [NUM(n), range_0, ..., range_{n-1}, body]: the loops close after
+  `body`, the store that runs inside them (tinygrad `END(body,
+  *ranges)`).  Not hash-cons'd -- two END markers in two different
+  reduces are semantically distinct.
 
 Both `uop_devectorize_graph` and `uop_load_store_fold_graph` are
 exposed via `src/thvm.h` and exercised by `tests/test_uop_devectorize.c`
@@ -688,6 +690,42 @@ needs to either be limited to a narrow opt-rich shape (with a robust
 gate) or grow to cover all the legacy concerns.  Either path is a
 multi-session piece of work; landing stages a + b first gives the
 next agent the post-linearize input shape to start from.
+
+### Linearized reduces: live-range init + loop nesting
+
+`uop_devectorize_graph` lowers a REDUCE the way current tinygrad's
+`reduce_ranges_to_acc` does (`codegen/__init__.py:197-204`, #18372).
+The init stores through `acc.after(*live_ranges)`: the ranges the
+reduce body lives in, minus its own axes, minus axes an inner END
+already closes, minus UPCAST/UNROLL lanes.  The update stores through
+`acc.after(init, *reduce_ranges)`, the END carries the update as its
+body (`END(update, *ranges)`, over the real RANGE Terms), and the
+result is `LOAD(acc.after(END))`.
+
+`uop_linearize` ports the nesting half of `pm_add_control_flow`
+(`linearizer.py:52-85`) with run counts taken over `u.ranges`
+(`ops.py:470-499`): each RANGE an END closes is nested in the ranges
+that END lives in, so its run count includes the enclosing extents
+and the init lands inside the output loop and before the reduce loop
+even when the output is wider than the reduce.  A RANGE closed by two
+ENDs (tinygrad merges or clones those first) makes `uop_linearize`
+decline.
+
+`cg_render_linearized_c` renders an AFTER value as its `src[0]`,
+checks that every END closes the innermost open loops, and declines a
+vector value in a scalar slot rather than storing lane 0.  The Metal
+and CUDA C-source preludes do not decode thread ids, so those targets
+leave lowered reduces to the legacy emit; the PTX renderer maps output
+axes onto threads and renders them.
+
+`cg_render_linearized_ptx` closes each reduce loop at the END that
+names it, as tinygrad's PTX renderer does (`renderer/ptx.py:126-130`),
+with the same innermost-loop check.  Only an unpromoted output loop,
+which has no END, closes after the last node that uses its axis.  A
+reduce loop cannot close that way: a nested reduce's outer update can
+reach its own axis only through the inner accumulator
+(`out[i] = sum_j 2 * sum_k x[i,j,k]`), so the last use of that axis is
+the inner load, before the update that must run once per iteration.
 
 ## PTX renderer (the nvrtc bypass) -- M1-M3c LANDED, conv renders to PTX
 

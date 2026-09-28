@@ -14,6 +14,9 @@
 #include "../src/thvm.c"
 #include "test.h"
 
+#include <dlfcn.h>
+#include <unistd.h>
+
 static u32 pos_of_first_op(LinKernel const *k, u32 want_op) {
   for (u32 i = 0; i < k->n; i++) {
     Term t = lin_kernel_at(k, i);
@@ -187,11 +190,10 @@ static int test_case3_post_devectorize_reduce(void) {
   CHECK(validate_toposort(&lk));
   // PLACEHOLDER must appear (the accumulator).
   CHECK(pos_of_first_op(&lk, UOP_PLACEHOLDER) != 0xFFFFFFFFu);
-  // END must precede the final LOAD of the accumulator.  The final
-  // LOAD is the top-level READ (after the AFTER chain).  Devectorize
-  // emits AFTER(final_LOAD, AFTER(END, AFTER(update, init))) so in
-  // emission order: PLACEHOLDER first, then init STORE, then update
-  // STORE, then END, then final LOAD, then AFTER chains (sink).
+  // END must precede the final LOAD of the accumulator.  Devectorize
+  // emits LOAD(AFTER(acc, END(update, r))) with the update storing
+  // through AFTER(acc, init), so in emission order: PLACEHOLDER, init
+  // STORE, update STORE, END, then the final LOAD.
   u32 p_end  = pos_of_first_op(&lk, UOP_END);
   u32 p_load_last  = pos_of_last_op(&lk, UOP_LOAD);
   CHECK(p_end != 0xFFFFFFFFu);
@@ -430,6 +432,458 @@ static int test_case7_route_gate(void) {
   TEST_REPORT();
 }
 
+// === Reduces inside output loops (codegen/__init__.py:197-204) ==========
+
+static u32 pos_of_term(LinKernel const *k, Term want) {
+  for (u32 i = 0; i < k->n; i++) {
+    if (k->uops[i] == want) {
+      return i;
+    }
+  }
+  return 0xFFFFFFFFu;
+}
+
+// A STORE's buf with the ordering AFTERs peeled off.
+static Term store_target(Term st) {
+  Term b = heap_read(term_val(st) + 0);
+  while (term_tag(b) == TAG_UOP && term_ext(b) == UOP_AFTER) {
+    b = heap_read(term_val(b) + 0);
+  }
+  return b;
+}
+
+// Position of the init (value is the identity CONST) or the update STORE
+// into accumulator `acc_id`.
+static u32 pos_of_acc_store(LinKernel const *k, u32 acc_id, int init) {
+  for (u32 i = 0; i < k->n; i++) {
+    Term t = k->uops[i];
+    if (term_ext(t) != UOP_STORE) {
+      continue;
+    }
+    Term acc = store_target(t);
+    if (term_ext(acc) != UOP_PLACEHOLDER || uop_placeholder_acc_id(acc) != acc_id) {
+      continue;
+    }
+    Term v = heap_read(term_val(t) + 2);
+    if ((term_ext(v) == UOP_CONST) == (init != 0)) {
+      return i;
+    }
+  }
+  return 0xFFFFFFFFu;
+}
+
+// Axis ids of the RANGEs an init STORE's buf is sequenced after (the
+// reduce's live ranges); returns how many.
+static u32 init_live_axes(LinKernel const *k, u32 acc_id, u32 *axes) {
+  u32 p = pos_of_acc_store(k, acc_id, 1);
+  if (p == 0xFFFFFFFFu) {
+    return 0;
+  }
+  u32 n = 0;
+  Term b = heap_read(term_val(k->uops[p]) + 0);
+  while (term_tag(b) == TAG_UOP && term_ext(b) == UOP_AFTER) {
+    Term dep = heap_read(term_val(b) + 1);
+    if (term_ext(dep) == UOP_RANGE && n < 8) {
+      axes[n++] = uop_range_axis_id(dep);
+    }
+    b = heap_read(term_val(b) + 0);
+  }
+  return n;
+}
+
+// Linearize + render `root` as C99 into buf; returns the renderer's result.
+static int render_lin_c(Term root, LinKernel *lk, char *buf, u32 cap) {
+  buf[0] = 0;
+  if (!uop_linearize(root, lk)) {
+    return 0;
+  }
+  FILE *fp = fmemopen(buf, cap - 1, "w");
+  if (fp == NULL) {
+    return 0;
+  }
+  int ok = cg_render_linearized_c(lk, "k", fp);
+  long n = ftell(fp);
+  fclose(fp);
+  buf[n > 0 ? n : 0] = 0;
+  return ok;
+}
+
+// Compile the rendered kernel with clang, run it once, return 1 if it
+// compiled and ran.  The signature is render_linearized.c's C prelude.
+static int run_c_kernel(const char *src, float *out, const void *const *ins) {
+  static u32 serial = 0;
+  char src_path[96], dl_path[96], cmd[320];
+  snprintf(src_path, sizeof(src_path), "/tmp/thvm_lin_reduce_%d_%u.c",
+           (int)getpid(), serial);
+  snprintf(dl_path, sizeof(dl_path), "/tmp/thvm_lin_reduce_%d_%u.dylib",
+           (int)getpid(), serial);
+  serial++;
+  FILE *f = fopen(src_path, "w");
+  if (f == NULL) {
+    return 0;
+  }
+  fputs(src, f);
+  fclose(f);
+  snprintf(cmd, sizeof(cmd), "clang -O1 -fPIC -shared -o %s %s", dl_path, src_path);
+  int built = (system(cmd) == 0);
+  unlink(src_path);
+  if (!built) {
+    return 0;
+  }
+  void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+  unlink(dl_path);
+  if (h == NULL) {
+    return 0;
+  }
+  typedef void (*KFn)(void *, const void *const *, unsigned, const unsigned *);
+  KFn kfn = (KFn)dlsym(h, "k");
+  if (kfn != NULL) {
+    kfn(out, ins, 0, NULL);
+  }
+  dlclose(h);
+  return kfn != NULL;
+}
+
+// out[r0] = sum_r1 in[r0*e1 + r1]: r0 an output loop, r1 the reduce loop.
+static Term build_row_sum(u32 e0, u32 e1, Term *r0_out, Term *r1_out) {
+  u32 dims_out[1] = { e0 };
+  u32 dims_in[1]  = { e0 * e1 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_out, 0);
+  Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_in, 1);
+  Term r0 = uop_range(0, KAX_LOOP, e0);
+  Term r1 = uop_range(1, KAX_LOOP, e1);
+  Term addr = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IMUL, r0, uop_const(DT_INT32, e1)), r1);
+  u32 axes[1] = { 1 };
+  Term red = uop_reduce_multi(REDUCE_SUM, 1, axes, uop_load(uop_index_e(in_buf, addr)));
+  *r0_out = r0;
+  *r1_out = r1;
+  return uop_store(out_buf, uop_index_e(out_buf, r0), red);
+}
+
+// Renders out[r0] = sum_r1 in[r0*e1 + r1] and checks the order and the
+// numbers: the accumulator init runs once per output element, inside the
+// r0 loop and before the r1 loop, and the END closes the r1 loop right
+// after the update, before the output store.
+static void check_row_sum(u32 e0, u32 e1) {
+  Term r0, r1;
+  Term dv = uop_devectorize_graph(build_row_sum(e0, e1, &r0, &r1));
+  static LinKernel lk;
+  static char buf[16384];
+  CHECK(render_lin_c(dv, &lk, buf, sizeof(buf)));
+  CHECK(validate_toposort(&lk));
+  CHECK(strstr(buf, "unsupported") == NULL);
+
+  u32 p_r0   = pos_of_term(&lk, r0);
+  u32 p_r1   = pos_of_term(&lk, r1);
+  u32 p_init = pos_of_acc_store(&lk, 0, 1);
+  u32 p_upd  = pos_of_acc_store(&lk, 0, 0);
+  u32 p_end  = pos_of_first_op(&lk, UOP_END);
+  CHECK(p_r0 < p_init);
+  CHECK(p_init < p_r1);
+  CHECK(p_r1 < p_upd);
+  CHECK(p_upd < p_end);
+  CHECK(p_end < pos_of_last_op(&lk, UOP_STORE));
+
+  char f0[64], f1[64];
+  snprintf(f0, sizeof(f0), "for (uint a0 = 0; a0 < %u;", e0);
+  snprintf(f1, sizeof(f1), "for (uint a1 = 0; a1 < %u;", e1);
+  const char *loop0 = strstr(buf, f0);
+  const char *loop1 = strstr(buf, f1);
+  const char *init  = strstr(buf, "_acc0 = 0.000000f;");
+  CHECK(loop0 != NULL && init != NULL && loop1 != NULL);
+  CHECK(loop0 < init && init < loop1);
+  CHECK(strstr(buf, "   }\n   out[a0] = _acc0;\n") != NULL);
+
+  static float in[4096], out[64];
+  for (u32 i = 0; i < e0 * e1; i++) {
+    in[i] = (float)(i % 7);
+  }
+  const void *ins[1] = { in };
+  CHECK(run_c_kernel(buf, out, ins));
+  for (u32 i = 0; i < e0; i++) {
+    float want = 0.0f;
+    for (u32 j = 0; j < e1; j++) {
+      want += in[i * e1 + j];
+    }
+    CHECK(out[i] == want);
+  }
+}
+
+// Case 8: 4 outputs, each a sum of 8.  Without the live-range AFTER the
+// init ran once, before the output loop, so the accumulator carried over
+// from one output element to the next.
+static int test_case8_reduce_init_per_output(void) {
+  thvm_init();
+  TEST_BEGIN("case8 out[r0] = sum_r1: init inside the output loop, END after the update");
+  check_row_sum(4, 8);
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 9: the output loop runs more iterations (64) than the reduce loop
+// (8), so run-count priority alone would open r1 before the init; the
+// reduce's RANGE must be nested inside the ranges its END lives in
+// (tinygrad pm_add_control_flow).
+static int test_case9_reduce_init_wide_output(void) {
+  thvm_init();
+  TEST_BEGIN("case9 out[64] = sum over 8: the reduce loop nests inside the output loop");
+  check_row_sum(64, 8);
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 10: a reduce inside a reduce,
+//   out[r0] = sum_r1 in[r0*8 + r1] * (sum_r2 w[r1*3 + r2]).
+// The inner reduce lowers first (acc 0), the outer second (acc 1).  The
+// outer init lives in r0 only -- never in its own r1 or the inner r2 the
+// inner END already closes -- and precedes both reduce loops; the inner
+// init lives in r1 and precedes r2.
+static int test_case10_nested_reduce(void) {
+  thvm_init();
+  TEST_BEGIN("case10 nested reduce: each init runs inside its live loops only");
+
+  u32 dims_out[1] = { 4 };
+  u32 dims_in[1]  = { 32 };
+  u32 dims_w[1]   = { 24 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_out, 0);
+  Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_in, 1);
+  Term w_buf   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_w, 2);
+  Term r0 = uop_range(0, KAX_LOOP, 4);
+  Term r1 = uop_range(1, KAX_LOOP, 8);
+  Term r2 = uop_range(2, KAX_LOOP, 3);
+  Term in_addr = uop_int_binary(UOP_IADD,
+                   uop_int_binary(UOP_IMUL, r0, uop_const(DT_INT32, 8)), r1);
+  Term w_addr  = uop_int_binary(UOP_IADD,
+                   uop_int_binary(UOP_IMUL, r1, uop_const(DT_INT32, 3)), r2);
+  u32 ax2[1] = { 2 };
+  Term inner = uop_reduce_multi(REDUCE_SUM, 1, ax2, uop_load(uop_index_e(w_buf, w_addr)));
+  Term body  = uop_binary(UOP_MUL, uop_load(uop_index_e(in_buf, in_addr)), inner);
+  u32 ax1[1] = { 1 };
+  Term outer = uop_reduce_multi(REDUCE_SUM, 1, ax1, body);
+  Term store = uop_store(out_buf, uop_index_e(out_buf, r0), outer);
+
+  Term dv = uop_devectorize_graph(store);
+  static LinKernel lk;
+  static char buf[16384];
+  CHECK(render_lin_c(dv, &lk, buf, sizeof(buf)));
+  CHECK(validate_toposort(&lk));
+
+  u32 axes[8];
+  u32 n_out = init_live_axes(&lk, 1, axes);
+  CHECK_EQ(n_out, 1);
+  CHECK_EQ(axes[0], 0);
+  u32 n_in = init_live_axes(&lk, 0, axes);
+  CHECK_EQ(n_in, 1);
+  CHECK_EQ(axes[0], 1);
+
+  u32 p_out_init = pos_of_acc_store(&lk, 1, 1);
+  u32 p_in_init  = pos_of_acc_store(&lk, 0, 1);
+  CHECK(pos_of_term(&lk, r0) < p_out_init);
+  CHECK(p_out_init < pos_of_term(&lk, r1));
+  CHECK(pos_of_term(&lk, r1) < p_in_init);
+  CHECK(p_in_init < pos_of_term(&lk, r2));
+  CHECK(pos_of_term(&lk, r2) < pos_of_acc_store(&lk, 0, 0));
+  CHECK(pos_of_acc_store(&lk, 0, 0) < pos_of_acc_store(&lk, 1, 0));
+
+  static float in[32], w[24], out[4];
+  for (u32 i = 0; i < 32; i++) {
+    in[i] = (float)(i % 5);
+  }
+  for (u32 i = 0; i < 24; i++) {
+    w[i] = (float)(i % 3);
+  }
+  const void *ins[2] = { in, w };
+  CHECK(run_c_kernel(buf, out, ins));
+  for (u32 i = 0; i < 4; i++) {
+    float want = 0.0f;
+    for (u32 j = 0; j < 8; j++) {
+      float s = 0.0f;
+      for (u32 q = 0; q < 3; q++) {
+        s += w[j * 3 + q];
+      }
+      want += in[i * 8 + j] * s;
+    }
+    CHECK(out[i] == want);
+  }
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 11: F parallel accumulators.  A STACK body of 4 lanes (an UPCAST'd
+// output reaching the reduce as lanes) gets 4 accumulators; every lane's
+// init runs inside the output loop and before the reduce loop, and all
+// four updates close under one END.  The F-lane output store renders on
+// the PTX route only (text check).
+static int test_case11_parallel_accumulators(void) {
+  thvm_init();
+  TEST_BEGIN("case11 F-lane reduce: every lane's init inside r0, before r1");
+
+  u32 dims_out[1] = { 8 };
+  u32 dims_in[1]  = { 64 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_out, 0);
+  Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_in, 1);
+  Term r0 = uop_range(0, KAX_LOOP, 2);
+  Term r1 = uop_range(1, KAX_REDUCE, 8);
+  Term lanes[4], addrs[4];
+  for (u32 i = 0; i < 4; i++) {
+    Term row = uop_int_binary(UOP_IADD,
+                 uop_int_binary(UOP_IMUL, r0, uop_const(DT_INT32, 4)),
+                 uop_const(DT_INT32, i));
+    Term a = uop_int_binary(UOP_IADD,
+               uop_int_binary(UOP_IMUL, row, uop_const(DT_INT32, 8)), r1);
+    lanes[i] = uop_load(uop_index_e(in_buf, a));
+    addrs[i] = uop_index_e(out_buf, row);
+  }
+  u32 axes[1] = { 1 };
+  Term red   = uop_reduce_multi(REDUCE_SUM, 1, axes, uop_stack(4, lanes));
+  Term store = uop_store(out_buf, uop_stack(4, addrs), red);
+
+  Term dv = uop_devectorize_graph(store);
+  static LinKernel lk;
+  CHECK(uop_linearize(dv, &lk));
+  CHECK(validate_toposort(&lk));
+  u32 p_r0 = pos_of_term(&lk, r0);
+  u32 p_r1 = pos_of_term(&lk, r1);
+  u32 p_end = pos_of_first_op(&lk, UOP_END);
+  CHECK_EQ(pos_of_last_op(&lk, UOP_END), p_end);
+  for (u32 acc = 0; acc < 4; acc++) {
+    u32 p_init = pos_of_acc_store(&lk, acc, 1);
+    u32 p_upd  = pos_of_acc_store(&lk, acc, 0);
+    CHECK(p_r0 < p_init);
+    CHECK(p_init < p_r1);
+    CHECK(p_r1 < p_upd);
+    CHECK(p_upd < p_end);
+  }
+
+  // PTX: r0 indexes the store, so it is a thread axis; each lane's init
+  // `mov` precedes the reduce loop's label.
+  static char ptx[1 << 16];
+  FILE *fp = fmemopen(ptx, sizeof(ptx) - 1, "w");
+  CHECK(fp != NULL);
+  int ok = cg_render_linearized_ptx(&lk, "k", 70, fp);
+  long n = ftell(fp);
+  fclose(fp);
+  ptx[n > 0 ? n : 0] = 0;
+  CHECK(ok);
+  const char *loop = strstr(ptx, "LOOP_0:");
+  CHECK(loop != NULL);
+  for (u32 acc = 0; acc < 4; acc++) {
+    char init[48];
+    snprintf(init, sizeof(init), "mov.b32 %%acc_f32_%u, %%const_f32_", acc);
+    const char *p = strstr(ptx, init);
+    CHECK(p != NULL && loop != NULL && p < loop);
+  }
+  CHECK(strstr(ptx, "LOOP_1:") == NULL);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 12: an extent-1 reduce loop gives the init and the update the same
+// run count; the update still follows the init because it stores through
+// acc.after(init) (tinygrad's acc_initted), not by priority.
+static int test_case12_reduce_extent_one(void) {
+  thvm_init();
+  TEST_BEGIN("case12 extent-1 reduce: the update is sequenced after the init");
+
+  Term r0, r1;
+  Term dv = uop_devectorize_graph(build_row_sum(4, 1, &r0, &r1));
+  static LinKernel lk;
+  static char buf[16384];
+  CHECK(render_lin_c(dv, &lk, buf, sizeof(buf)));
+  CHECK(pos_of_acc_store(&lk, 0, 1) < pos_of_acc_store(&lk, 0, 0));
+
+  static float in[4], out[4];
+  for (u32 i = 0; i < 4; i++) {
+    in[i] = (float)(i + 1);
+  }
+  const void *ins[1] = { in };
+  CHECK(run_c_kernel(buf, out, ins));
+  for (u32 i = 0; i < 4; i++) {
+    CHECK(out[i] == in[i]);
+  }
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 13: two reduces over the same RANGE Term would open one loop and
+// close it twice.  tinygrad merges or clones such ranges first
+// (merge_reduce_ends); thvm's linearizer declines the kernel instead.
+static int test_case13_shared_reduce_range_declines(void) {
+  thvm_init();
+  TEST_BEGIN("case13 two ENDs closing one RANGE: linearize declines");
+
+  u32 dims_out[1] = { 4 };
+  u32 dims_in[1]  = { 32 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_out, 0);
+  Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_in, 1);
+  Term r0 = uop_range(0, KAX_LOOP, 4);
+  Term r1 = uop_range(1, KAX_LOOP, 8);
+  Term addr = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IMUL, r0, uop_const(DT_INT32, 8)), r1);
+  Term ld = uop_load(uop_index_e(in_buf, addr));
+  u32 axes[1] = { 1 };
+  Term sum = uop_reduce_multi(REDUCE_SUM, 1, axes, ld);
+  Term max = uop_reduce_multi(REDUCE_MAX, 1, axes, ld);
+  Term store = uop_store(out_buf, uop_index_e(out_buf, r0),
+                         uop_binary(UOP_ADD, sum, max));
+
+  static LinKernel lk;
+  CHECK_EQ(uop_linearize(uop_devectorize_graph(store), &lk), 0);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 14: a vector value in a scalar slot has no single value.  The
+// renderer declines instead of storing lane 0.
+static int test_case14_vector_in_scalar_store_declines(void) {
+  thvm_init();
+  TEST_BEGIN("case14 STACK value stored to a scalar address: render declines");
+
+  u32 dims[1] = { 8 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
+  Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 1);
+  Term r = uop_range(0, KAX_LOOP, 4);
+  Term lanes[2] = {
+    uop_load(uop_index_e(in_buf, r)),
+    uop_load(uop_index_e(in_buf, uop_int_binary(UOP_IADD, r, uop_const(DT_INT32, 4)))),
+  };
+  Term store = uop_store(out_buf, uop_index_e(out_buf, r), uop_stack(2, lanes));
+
+  static LinKernel lk;
+  static char buf[4096];
+  CHECK_EQ(render_lin_c(store, &lk, buf, sizeof(buf)), 0);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 15: the Metal and CUDA preludes do not decode thread ids, so a
+// lowered reduce stays on the legacy emit there; C renders it.
+static int test_case15_gpu_targets_leave_reduces_to_legacy(void) {
+  thvm_init();
+  TEST_BEGIN("case15 lowered reduce: C renders it, Metal/CUDA decline");
+
+  Term r0, r1;
+  Term dv = uop_devectorize_graph(build_row_sum(4, 8, &r0, &r1));
+  static LinKernel lk;
+  CHECK(uop_linearize(dv, &lk));
+  static char buf[16384];
+  FILE *fp = fmemopen(buf, sizeof(buf) - 1, "w");
+  CHECK(fp != NULL);
+  CHECK_EQ(cg_render_linearized_c(&lk, "k", fp), 1);
+  CHECK_EQ(cg_render_linearized_metal(&lk, "k", fp), 0);
+  CHECK_EQ(cg_render_linearized_cuda(&lk, "k", fp), 0);
+  fclose(fp);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 int main(void) {
   int rc = 0;
   rc |= test_case1_elementwise();
@@ -440,5 +894,13 @@ int main(void) {
   rc |= test_case6_render_multi_axis_reduce();
   rc |= test_case7_route_gate();
   rc |= test_case7b_bail_on_unfolded_contract();
+  rc |= test_case8_reduce_init_per_output();
+  rc |= test_case9_reduce_init_wide_output();
+  rc |= test_case10_nested_reduce();
+  rc |= test_case11_parallel_accumulators();
+  rc |= test_case12_reduce_extent_one();
+  rc |= test_case13_shared_reduce_range_declines();
+  rc |= test_case14_vector_in_scalar_store_declines();
+  rc |= test_case15_gpu_targets_leave_reduces_to_legacy();
   return rc;
 }

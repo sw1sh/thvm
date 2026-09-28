@@ -49,8 +49,64 @@ static int subtree_count_op(Term t, u32 want_op, u32 depth) {
     for (u32 i = 0; i < n; i++) {
       total += subtree_count_op(uop_end_range(t, i), want_op, depth + 1);
     }
+    total += subtree_count_op(uop_end_body(t), want_op, depth + 1);
   }
   return total;
+}
+
+// Every distinct UOp Term reachable from a root through every child kind:
+// uop_arity srcs, both AFTER operands, STACK lanes, END ranges and body.
+// No depth bound -- case13 places a PLACEHOLDER past 256 levels.
+typedef struct {
+  Term t[8192];
+  u32  n;
+} TermSet;
+
+static void collect_reachable(TermSet *s, Term t) {
+  if (term_tag(t) != TAG_UOP) {
+    return;
+  }
+  for (u32 i = 0; i < s->n; i++) {
+    if (s->t[i] == t) {
+      return;
+    }
+  }
+  if (s->n < 8192) {
+    s->t[s->n++] = t;
+  }
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  u8  ar  = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    collect_reachable(s, heap_read(loc + i));
+  }
+  if (op == UOP_AFTER) {
+    collect_reachable(s, heap_read(loc + 0));
+    collect_reachable(s, heap_read(loc + 1));
+  } else if (op == UOP_STACK) {
+    for (u32 i = 0; i < uop_stack_n(t); i++) {
+      collect_reachable(s, uop_stack_src(t, i));
+    }
+  } else if (op == UOP_END) {
+    for (u32 i = 0; i < uop_end_n(t); i++) {
+      collect_reachable(s, uop_end_range(t, i));
+    }
+    collect_reachable(s, uop_end_body(t));
+  }
+}
+
+// Distinct Terms with opcode `want_op` reachable from `t`.
+static u32 distinct_count_op(Term t, u32 want_op) {
+  static TermSet s;
+  s.n = 0;
+  collect_reachable(&s, t);
+  u32 n = 0;
+  for (u32 i = 0; i < s.n; i++) {
+    if (term_ext(s.t[i]) == want_op) {
+      n++;
+    }
+  }
+  return n;
 }
 
 // Case 1: REDUCE(body, axes=[2]) -> PLACEHOLDER acc + STORE init +
@@ -83,8 +139,10 @@ static int test_case1_reduce_to_acc(void) {
   CHECK(subtree_count_op(out, UOP_PLACEHOLDER, 0) >= 1);
   // Exactly one END marker (we passed one axis).
   CHECK_EQ(subtree_count_op(out, UOP_END, 0), 1);
-  // Two STOREs (init + update) somewhere in the chain.
-  CHECK_EQ(subtree_count_op(out, UOP_STORE, 0), 2);
+  // Two STOREs (init + update).  The update reaches the init twice --
+  // through its buf and through its LOAD of acc.after(init) -- so count
+  // distinct Terms, not visits.
+  CHECK_EQ(distinct_count_op(out, UOP_STORE), 2);
   // At least two LOADs: one reading the accumulator inside the update,
   // and one final post-END read.
   CHECK(subtree_count_op(out, UOP_LOAD, 0) >= 2);
@@ -482,70 +540,26 @@ static int test_case10_post_fold_renders(void) {
   TEST_REPORT();
 }
 
-// Distinct PLACEHOLDER acc_ids reachable from a root through every child
-// kind: uop_arity srcs, both AFTER operands, STACK lanes, END ranges.  No
-// depth bound -- case13 places its PLACEHOLDER past 256 levels.
-typedef struct {
-  Term seen[8192];
-  u32  n_seen;
-  u32  ids[64];
-  u32  n_ids;
-} AccIdScan;
-
-static void acc_ids_rec(AccIdScan *s, Term t) {
-  if (term_tag(t) != TAG_UOP) {
-    return;
-  }
-  for (u32 i = 0; i < s->n_seen; i++) {
-    if (s->seen[i] == t) {
-      return;
-    }
-  }
-  if (s->n_seen < 8192) {
-    s->seen[s->n_seen++] = t;
-  }
-  u32 op  = term_ext(t);
-  u64 loc = term_val(t);
-  if (op == UOP_PLACEHOLDER) {
-    u32 id = uop_placeholder_acc_id(t);
-    for (u32 i = 0; i < s->n_ids; i++) {
-      if (s->ids[i] == id) {
-        return;
-      }
-    }
-    if (s->n_ids < 64) {
-      s->ids[s->n_ids++] = id;
-    }
-    return;
-  }
-  u8 ar = uop_arity((u8)op);
-  for (u8 i = 0; i < ar; i++) {
-    acc_ids_rec(s, heap_read(loc + i));
-  }
-  if (op == UOP_AFTER) {
-    acc_ids_rec(s, heap_read(loc + 0));
-    acc_ids_rec(s, heap_read(loc + 1));
-  } else if (op == UOP_STACK) {
-    for (u32 i = 0; i < uop_stack_n(t); i++) {
-      acc_ids_rec(s, uop_stack_src(t, i));
-    }
-  } else if (op == UOP_END) {
-    for (u32 i = 0; i < uop_end_n(t); i++) {
-      acc_ids_rec(s, uop_end_range(t, i));
-    }
-  }
-}
-
 // 1 iff the acc_ids reachable from `t` are exactly {0, 1}.
 static int acc_ids_are_0_1(Term t) {
-  static AccIdScan s;
-  s.n_seen = 0;
-  s.n_ids  = 0;
-  acc_ids_rec(&s, t);
-  if (s.n_ids != 2) {
-    return 0;
+  static TermSet s;
+  s.n = 0;
+  collect_reachable(&s, t);
+  int has0 = 0, has1 = 0;
+  for (u32 i = 0; i < s.n; i++) {
+    if (term_ext(s.t[i]) != UOP_PLACEHOLDER) {
+      continue;
+    }
+    u32 id = uop_placeholder_acc_id(s.t[i]);
+    if (id == 0) {
+      has0 = 1;
+    } else if (id == 1) {
+      has1 = 1;
+    } else {
+      return 0;
+    }
   }
-  return (s.ids[0] == 0 && s.ids[1] == 1) || (s.ids[0] == 1 && s.ids[1] == 0);
+  return has0 && has1;
 }
 
 // SUM over axis 0 (extent 8) of in0[a0].
@@ -692,6 +706,62 @@ static int test_case15_acc_decl_per_placeholder(void) {
   TEST_REPORT();
 }
 
+// Case 16: a reduce inside an output loop lowers to tinygrad's
+// reduce_ranges_to_acc shape (codegen/__init__.py:197-204):
+//   init   = STORE(acc.after(r0), 0, identity)             r0 is live
+//   update = STORE(acc.after(init).after(r1), 0, LOAD(same) + body)
+//   result = LOAD(acc.after(END(update, r1)))              the real r1
+static int test_case16_reduce_ranges_to_acc_shape(void) {
+  thvm_init();
+  TEST_BEGIN("case16 reduce_to_acc: init after live ranges, END(update, real range)");
+
+  u32 dims[1] = { 32 };
+  Term in_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 1);
+  Term r0 = uop_range(0, KAX_LOOP, 4);
+  Term r1 = uop_range(1, KAX_LOOP, 8);
+  Term addr = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IMUL, r0, uop_const(DT_INT32, 8)), r1);
+  Term body = uop_load(uop_index_e(in_buf, addr));
+  u32 axes[1] = { 1 };
+  Term out = uop_devectorize_graph(uop_reduce_multi(REDUCE_SUM, 1, axes, body));
+
+  CHECK_EQ(term_ext(out), UOP_LOAD);
+  Term done = heap_read(term_val(out) + 0);
+  CHECK_EQ(term_ext(done), UOP_AFTER);
+  Term acc = uop_after_node(done);
+  Term end = uop_after_after_node(done);
+  CHECK_EQ(term_ext(acc), UOP_PLACEHOLDER);
+  CHECK_EQ(term_ext(end), UOP_END);
+  CHECK_EQ(uop_end_n(end), 1);
+  CHECK_EQ(uop_end_range(end, 0), r1);
+
+  Term update  = uop_end_body(end);
+  Term initted = uop_store_buf(update);
+  CHECK_EQ(term_ext(update), UOP_STORE);
+  CHECK_EQ(term_ext(initted), UOP_AFTER);
+  CHECK_EQ(uop_after_after_node(initted), r1);
+  Term acc_after_init = uop_after_node(initted);
+  CHECK_EQ(term_ext(acc_after_init), UOP_AFTER);
+  CHECK_EQ(uop_after_node(acc_after_init), acc);
+  Term combined = uop_store_value(update);
+  CHECK_EQ(term_ext(combined), UOP_ADD);
+  Term acc_val = heap_read(term_val(combined) + 0);
+  CHECK_EQ(term_ext(acc_val), UOP_LOAD);
+  CHECK_EQ(heap_read(term_val(acc_val) + 0), initted);
+  CHECK_EQ(heap_read(term_val(combined) + 1), body);
+
+  Term init = uop_after_after_node(acc_after_init);
+  CHECK_EQ(term_ext(init), UOP_STORE);
+  Term init_buf = uop_store_buf(init);
+  CHECK_EQ(term_ext(init_buf), UOP_AFTER);
+  CHECK_EQ(uop_after_node(init_buf), acc);
+  CHECK_EQ(uop_after_after_node(init_buf), r0);
+  CHECK_EQ(term_ext(uop_store_value(init)), UOP_CONST);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 // Case 7: hash-cons on PLACEHOLDER + STACK.
 static int test_case7_hash_cons(void) {
   thvm_init();
@@ -740,5 +810,6 @@ int main(void) {
   rc |= test_case13_acc_seed_deep();
   rc |= test_case14_acc_seed_distinct_dtype();
   rc |= test_case15_acc_decl_per_placeholder();
+  rc |= test_case16_reduce_ranges_to_acc_shape();
   return rc;
 }

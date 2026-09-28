@@ -562,10 +562,11 @@ int             dtype_is_packed   (u32 dt);
 //   body.  Mirrors tinygrad's UOp.placeholder + AddrSpace.REG used by
 //   reduce_to_acc (devectorizer.py:321).
 // UOP_END: explicit "close the reduce loops covering these ranges"
-//   marker.  Heap = [NUM(n_ranges), range_0, ..., range_{n-1}].  Each
-//   range_i is a Term referencing a UOP_RANGE (the reduce axis whose
-//   loop body just completed).  Mirrors tinygrad's Ops.END at
-//   uop/ops.py:215 + devectorizer.py:327.
+//   marker.  Heap = [NUM(n_ranges), range_0, ..., range_{n-1}, body].
+//   Each range_i is a Term referencing a UOP_RANGE (the reduce axis whose
+//   loop body just completed); body is the store that runs inside those
+//   loops, so the END depends on it.  Mirrors tinygrad's
+//   Ops.END(body, *ranges) (codegen/__init__.py:203).
 #define UOP_VCONST      44
 #define UOP_UNROLL      45
 #define UOP_CONTRACT    46
@@ -3434,9 +3435,10 @@ fn Term uop_stack_src   (Term t, u32 i);
 fn Term uop_placeholder (u32 dtype, u32 acc_id);
 fn u32  uop_placeholder_dtype (Term t);
 fn u32  uop_placeholder_acc_id(Term t);
-fn Term uop_end         (u32 n, Term const *ranges);
+fn Term uop_end         (Term body, u32 n, Term const *ranges);
 fn u32  uop_end_n       (Term t);
 fn Term uop_end_range   (Term t, u32 i);
+fn Term uop_end_body    (Term t);
 fn Term uop_devectorize_graph    (Term root);
 fn Term uop_load_store_fold_graph(Term root);
 

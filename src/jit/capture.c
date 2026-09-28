@@ -1693,6 +1693,8 @@ static u64 uop_content_hash_rec(Term t, u32 depth) {
         h = uop_content_mix(h,
               uop_content_hash_rec(heap_read(loc + 1 + i), depth + 1));
       }
+      h = uop_content_mix(h,
+            uop_content_hash_rec(heap_read(loc + 1 + n), depth + 1));
       break;
     }
 

@@ -26,12 +26,12 @@ fn u8 uop_arity(u8 op) {
     // (uop_graph_rebuild_with_srcs) -- arity-0 here keeps the generic
     // walker out of the variadic payload.
     case UOP_STACK:
-    // UOP_END heap = [NUM(n), range_0, ..., range_{n-1}].  Each range_i
-    // is a UOP_RANGE Term; they are atoms (arity 0) on their own and
-    // dedup via the canonical range constructor.  END itself is a leaf
-    // marker for the renderer.  Treating arity as 0 here means the
-    // generic walker won't try to rebuild END from a fixed-arity
-    // descent; the variadic rebuild path handles it explicitly.
+    // UOP_END heap = [NUM(n), range_0, ..., range_{n-1}, body].  Each
+    // range_i is a UOP_RANGE Term; they are atoms (arity 0) on their own
+    // and dedup via the canonical range constructor.  Treating arity as
+    // 0 here means the generic walker won't try to rebuild END from a
+    // fixed-arity descent; the walkers that need the variadic payload
+    // (linearizer, devectorize's cone walk) read it explicitly.
     case UOP_END:
       return 0;
     // UOP_OPT carries [target, NUM(kind), NUM(factor)]; only the

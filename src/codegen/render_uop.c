@@ -6600,6 +6600,13 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
                                     FILE *fp) {
   if (fp == NULL) fp = stderr;
   if (kernel_name == NULL) kernel_name = "uop_kernel";
+  // THVM_ROUTE_TRACE=1: log which render path each kernel takes, as the
+  // CUDA entry does.
+  static int route_trace = -1;
+  if (route_trace < 0) {
+    char const *e = getenv("THVM_ROUTE_TRACE");
+    route_trace = (e != NULL && e[0] != '0') ? 1 : 0;
+  }
   // Piece #4 route gate -- see comments on cg_render_uop_kernel_root.
   if (uop_has_upcast_or_unroll(root)) {
     Term r2 = root;
@@ -6634,12 +6641,23 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
         long sn = ftell(sfp);
         fclose(sfp);
         if (ok && sn > 0) {
+          if (route_trace) {
+            fprintf(stderr, "[route] %s: linearized-C\n", kernel_name);
+          }
           scratch[sn] = 0;
           fputs(scratch, fp);
           return;
         }
+        if (route_trace) {
+          fprintf(stderr, "[route] %s: linearized-C bailed\n", kernel_name);
+        }
       }
+    } else if (route_trace) {
+      fprintf(stderr, "[route] %s: linearize failed\n", kernel_name);
     }
+  }
+  if (route_trace) {
+    fprintf(stderr, "[route] %s: legacy rmu_emit\n", kernel_name);
   }
   Term slot_bufs[RMU_DISCOVER_MAX] = {0};
   u32 n_inputs = 0;

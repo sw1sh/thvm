@@ -178,6 +178,10 @@ static u32 lin_collect_srcs(Term t, Term out[LIN_SRC_CAP]) {
         Term r = uop_end_range(t, i);
         if (r != 0) out[n++] = r;
       }
+      Term body = uop_end_body(t);
+      if (body != 0 && n < LIN_SRC_CAP) {
+        out[n++] = body;
+      }
       break;
     }
     default:
@@ -186,38 +190,176 @@ static u32 lin_collect_srcs(Term t, Term out[LIN_SRC_CAP]) {
   return n;
 }
 
-// === Internal: run_count (product of enclosing range extents) ===========
+// === Internal: loop nesting + run_count ==================================
 //
-// tinygrad's linearizer uses `u.ranges` which is computed bottom-up
-// over the toposort.  We approximate by walking the DAG once and
-// accumulating the product of extent of every UOP_RANGE term reachable
-// in the cone of `t`.  This is an over-approximation (a node that
-// happens to reference a RANGE Term via two paths only multiplies once
-// per unique RANGE, which is what we want), but it stays bounded by
-// the closed-set of RANGE leaves visited via lin_hash_put.
+// tinygrad's run_count is the product of the extents of u.ranges: the
+// RANGEs reachable through u's srcs, minus the ones an END on the way has
+// already closed (ops.py:470-499).  Before linearizing, pm_add_control_flow
+// (linearizer.py:52-85) gives each loop's RANGE a src on the loop it is
+// nested in, so a nested RANGE's run_count includes every enclosing extent
+// and the heap opens it after whatever runs once per enclosing iteration
+// (an accumulator init).  thvm's output loops have no END -- they close at
+// the end of the kernel -- so the only nesting is a reduce loop inside the
+// ranges its END lives in: each RANGE an END closes gets those ranges as
+// extra srcs.  A RANGE closed by two ENDs has no single nesting (tinygrad
+// merges or clones such ranges first, merge_reduce_ends), so uop_linearize
+// declines it, as it does a cyclic nesting.
 
-static u64 lin_range_product(Term t, LinHash *seen_ranges,
-                             u32 *out_visit_count) {
-  if (term_tag(t) != TAG_UOP) return 1;
-  u32 op = term_ext(t);
-  if (op == UOP_RANGE) {
-    if (lin_hash_put(seen_ranges, t, 1)) {
-      // First time we see this range: multiply by its extent.
-      u32 extent = uop_range_extent(t);
-      if (extent == 0) extent = 1;
-      return (u64)extent;
+#define LIN_RANGE_CAP 256
+#define LIN_MASK_WORDS (LIN_RANGE_CAP / 64)
+
+typedef struct {
+  u32  n;                                    // distinct RANGE Terms
+  u32  words;                                // u64 words per range mask
+  Term range  [LIN_RANGE_CAP];               // index -> RANGE Term
+  u64  parent [LIN_RANGE_CAP * LIN_MASK_WORDS];
+  u64  closure[LIN_RANGE_CAP * LIN_MASK_WORDS];
+  u64  live   [LIN_KERNEL_CAP * LIN_MASK_WORDS];
+} LinNest;
+
+static void lin_mask_set(u64 *m, u32 k) {
+  m[k >> 6] |= 1ULL << (k & 63);
+}
+
+static void lin_mask_clear(u64 *m, u32 k) {
+  m[k >> 6] &= ~(1ULL << (k & 63));
+}
+
+static int lin_mask_has(u64 const *m, u32 k) {
+  return (int)((m[k >> 6] >> (k & 63)) & 1ULL);
+}
+
+static void lin_mask_or(u64 *dst, u64 const *src, u32 words) {
+  for (u32 w = 0; w < words; w++) {
+    dst[w] |= src[w];
+  }
+}
+
+// u.ranges for every toposort node: the union over its srcs, minus the
+// ranges an END closes.  With `nested`, a RANGE also lives in every range
+// it is nested in (the pm_add_control_flow src).
+static void lin_nest_live(LinKernel const *topo, LinHash const *seen,
+                          LinHash const *index, LinNest *nest, int nested) {
+  u32 W = nest->words;
+  for (u32 i = 0; i < topo->n; i++) {
+    Term t  = topo->uops[i];
+    u64 *m  = nest->live + (u64)i * W;
+    u32  op = term_ext(t);
+    memset(m, 0, (size_t)W * sizeof(u64));
+    if (op == UOP_RANGE) {
+      u32 k = lin_hash_get_default(index, t, 0);
+      if (nested) {
+        memcpy(m, nest->closure + (u64)k * W, (size_t)W * sizeof(u64));
+      }
+      lin_mask_set(m, k);
+      continue;
     }
-    return 1;
+    Term srcs[LIN_SRC_CAP];
+    u32 ns = lin_collect_srcs(t, srcs);
+    for (u32 j = 0; j < ns; j++) {
+      u32 p = lin_hash_get_default(seen, srcs[j], 0xFFFFFFFFu);
+      if (p < topo->n) {
+        lin_mask_or(m, nest->live + (u64)p * W, W);
+      }
+    }
+    if (op == UOP_END) {
+      u32 en = uop_end_n(t);
+      for (u32 j = 0; j < en; j++) {
+        lin_mask_clear(m, lin_hash_get_default(index, uop_end_range(t, j), 0));
+      }
+    }
   }
-  // Descend.
-  Term srcs[LIN_SRC_CAP];
-  u32 ns = lin_collect_srcs(t, srcs);
+}
+
+// Index the RANGEs, find each END-closed RANGE's parents, close them
+// transitively, and fill nest->live with the nested u.ranges.  Returns 0
+// if the ranges overflow LIN_RANGE_CAP, an END closes a non-RANGE, a
+// RANGE is closed by two ENDs, or the nesting is cyclic.
+static int lin_nest_build(LinKernel const *topo, LinHash const *seen,
+                          LinHash *index, LinNest *nest) {
+  lin_hash_reset(index);
+  nest->n = 0;
+  for (u32 i = 0; i < topo->n; i++) {
+    Term t = topo->uops[i];
+    if (term_ext(t) != UOP_RANGE) {
+      continue;
+    }
+    if (nest->n >= LIN_RANGE_CAP) {
+      return 0;
+    }
+    lin_hash_put(index, t, nest->n);
+    nest->range[nest->n++] = t;
+  }
+  u32 W = (nest->n + 63) / 64;
+  nest->words = (W == 0) ? 1 : W;
+  W = nest->words;
+  memset(nest->parent, 0, (size_t)nest->n * W * sizeof(u64));
+  lin_nest_live(topo, seen, index, nest, 0);
+  static u8 closed[LIN_RANGE_CAP];
+  memset(closed, 0, sizeof(closed));
+  for (u32 i = 0; i < topo->n; i++) {
+    Term t = topo->uops[i];
+    if (term_ext(t) != UOP_END) {
+      continue;
+    }
+    u32 en = uop_end_n(t);
+    for (u32 j = 0; j < en; j++) {
+      Term r = uop_end_range(t, j);
+      if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) {
+        return 0;
+      }
+      u32 k = lin_hash_get_default(index, r, 0);
+      if (closed[k]) {
+        return 0;
+      }
+      closed[k] = 1;
+      lin_mask_or(nest->parent + (u64)k * W, nest->live + (u64)i * W, W);
+    }
+  }
+  memcpy(nest->closure, nest->parent, (size_t)nest->n * W * sizeof(u64));
+  for (int changed = 1; changed; ) {
+    changed = 0;
+    for (u32 k = 0; k < nest->n; k++) {
+      u64 *c = nest->closure + (u64)k * W;
+      for (u32 p = 0; p < nest->n; p++) {
+        if (!lin_mask_has(c, p)) {
+          continue;
+        }
+        u64 const *cp = nest->closure + (u64)p * W;
+        for (u32 w = 0; w < W; w++) {
+          if ((c[w] | cp[w]) != c[w]) {
+            c[w] |= cp[w];
+            changed = 1;
+          }
+        }
+      }
+    }
+  }
+  for (u32 k = 0; k < nest->n; k++) {
+    if (lin_mask_has(nest->closure + (u64)k * W, k)) {
+      return 0;
+    }
+  }
+  lin_nest_live(topo, seen, index, nest, 1);
+  return 1;
+}
+
+// prod(extent) over topo node i's nested u.ranges, saturated to the
+// 24-bit run_count field of the priority key.
+static u32 lin_nest_run_count(LinNest const *nest, u32 i) {
+  u64 const *m = nest->live + (u64)i * nest->words;
   u64 prod = 1;
-  for (u32 i = 0; i < ns; i++) {
-    prod *= lin_range_product(srcs[i], seen_ranges, out_visit_count);
+  for (u32 k = 0; k < nest->n; k++) {
+    if (!lin_mask_has(m, k)) {
+      continue;
+    }
+    u32 extent = uop_range_extent(nest->range[k]);
+    prod *= (extent == 0) ? 1 : extent;
+    if (prod > 0xFFFFFFu) {
+      return 0xFFFFFFu;
+    }
   }
-  (void)out_visit_count;
-  return prod;
+  return (u32)prod;
 }
 
 // === Internal: topological sort ========================================
@@ -290,12 +432,33 @@ static int lin_toposort(Term sink, LinKernel *out, LinHash *seen) {
 // For each UOp in the toposort, for each src, increment src's out_degree.
 // Mirrors linearizer.py:15-16.
 
-static void lin_build_out_degree(LinKernel const *lst, LinHash *out_deg) {
+#define LIN_NESTED_SRC_CAP (LIN_SRC_CAP + LIN_RANGE_CAP)
+
+// lin_collect_srcs plus, for a RANGE, the ranges it is nested in.
+static u32 lin_collect_nested_srcs(Term t, LinNest const *nest,
+                                   LinHash const *index,
+                                   Term out[LIN_NESTED_SRC_CAP]) {
+  u32 n = lin_collect_srcs(t, out);
+  if (term_ext(t) != UOP_RANGE) {
+    return n;
+  }
+  u64 const *pm = nest->parent
+                + (u64)lin_hash_get_default(index, t, 0) * nest->words;
+  for (u32 p = 0; p < nest->n; p++) {
+    if (lin_mask_has(pm, p)) {
+      out[n++] = nest->range[p];
+    }
+  }
+  return n;
+}
+
+static void lin_build_out_degree(LinKernel const *lst, LinNest const *nest,
+                                 LinHash const *index, LinHash *out_deg) {
   lin_hash_reset(out_deg);
   for (u32 i = 0; i < lst->n; i++) {
     Term t = lst->uops[i];
-    Term srcs[LIN_SRC_CAP];
-    u32 ns = lin_collect_srcs(t, srcs);
+    Term srcs[LIN_NESTED_SRC_CAP];
+    u32 ns = lin_collect_nested_srcs(t, nest, index, srcs);
     for (u32 j = 0; j < ns; j++) {
       if (term_tag(srcs[j]) != TAG_UOP) continue;
       u32 cur = lin_hash_get_default(out_deg, srcs[j], 0);
@@ -402,22 +565,20 @@ fn int uop_linearize(Term sink, LinKernel *out) {
   topo.n = 0;
   if (!lin_toposort(sink, &topo, &seen)) return 0;
 
-  // Stage 2: out-degree.
+  // Stage 2: loop nesting (the pm_add_control_flow srcs) + out-degree.
+  static LinHash range_index;
+  static LinNest nest;
+  if (!lin_nest_build(&topo, &seen, &range_index, &nest)) {
+    return 0;
+  }
   static LinHash out_deg;
-  lin_build_out_degree(&topo, &out_deg);
+  lin_build_out_degree(&topo, &nest, &range_index, &out_deg);
 
   // Stage 3: compute priority key per Term.
   static u64 keys[LIN_KERNEL_CAP];
-  static LinHash range_seen;
   for (u32 i = 0; i < topo.n; i++) {
-    Term t = topo.uops[i];
-    lin_hash_reset(&range_seen);
-    u32 visits = 0;
-    u64 run_count = lin_range_product(t, &range_seen, &visits);
-    if (run_count > 0xFFFFFFu) run_count = 0xFFFFFFu;
-    u32 op = term_ext(t);
-    i32 pri = lin_opcode_priority(op);
-    keys[i] = lin_priority_pack((u32)run_count, pri, 0);
+    i32 pri = lin_opcode_priority(term_ext(topo.uops[i]));
+    keys[i] = lin_priority_pack(lin_nest_run_count(&nest, i), pri, 0);
   }
 
   // Stage 4: assign nkey by sorted-key index.
@@ -437,8 +598,8 @@ fn int uop_linearize(Term sink, LinKernel *out) {
     if (newn >= LIN_KERNEL_CAP) return 0;
     Term u = lin_heap_pop(heap, &hn);
     newlst[newn++] = u;
-    Term srcs[LIN_SRC_CAP];
-    u32 ns = lin_collect_srcs(u, srcs);
+    Term srcs[LIN_NESTED_SRC_CAP];
+    u32 ns = lin_collect_nested_srcs(u, &nest, &range_index, srcs);
     for (u32 j = 0; j < ns; j++) {
       Term v = srcs[j];
       if (term_tag(v) != TAG_UOP) continue;
@@ -451,6 +612,9 @@ fn int uop_linearize(Term sink, LinKernel *out) {
         lin_heap_push(heap, &hn, vk, v);
       }
     }
+  }
+  if (newn != topo.n) {
+    return 0;
   }
   // Reverse newlst into out.
   out->n = newn;

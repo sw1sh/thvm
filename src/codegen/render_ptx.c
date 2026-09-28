@@ -107,6 +107,8 @@ typedef struct {
 } PtxBufSlot;
 
 #define PTX_MAX_OPEN_RANGES 16
+// last_use of a loop an END names: that END closes it, liveness never does.
+#define PTX_CLOSED_AT_END   0xFFFFFFFFu
 
 typedef struct {
   PtxBufSlot bufs[PTX_MAX_BUFS];
@@ -121,9 +123,10 @@ typedef struct {
   // Stack of open loops (scaffold emitted, close pending).  Labels are
   // keyed on a monotonic occurrence id, NOT the axis id -- a malformed
   // linearized list can carry two RANGE nodes with the same axis id, and
-  // axis-id labels would collide into invalid PTX.  A matching UOP_END
-  // pops + emits the close; still-open loops at body end drain in reverse
-  // (mirrors render_linearized.c's auto-close-at-end fallback).
+  // axis-id labels would collide into invalid PTX.  A UOP_END pops the
+  // loops it names + emits their closes; a loop no END names closes after
+  // its last_use; still-open loops at body end drain in reverse (mirrors
+  // render_linearized.c's auto-close-at-end fallback).
   struct { Term range; u32 label; u32 last_use; } open_ranges[PTX_MAX_OPEN_RANGES];
   u32  n_open;
   u32  next_loop_label;
@@ -494,8 +497,8 @@ static const char *ptx_value_resolve(PtxCtx *ctx, Term t,
 
 // Does t's subtree reference a UOP_RANGE with this axis_id?  Used to
 // compute a loop's liveness span (the last linearized node that uses
-// its induction var).  Skips END markers -- they carry a synthetic
-// range whose axis_id matches but does not constitute a real use.
+// its induction var).  Skips END markers: naming a range to close it is
+// not a use of its induction var.
 static int ptx_term_refs_axis(Term t, u32 axis_id, u32 depth) {
   if (depth > 256 || term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);
@@ -519,19 +522,38 @@ static int ptx_term_refs_axis(Term t, u32 axis_id, u32 depth) {
 }
 
 // Last linearized index (in [open_idx+1, n)) whose node references the
-// loop's axis.  The loop closes right after that node, so anything later
-// (e.g. the reduce's final F-lane store, which does not use the reduce
-// axis) lands OUTSIDE the loop -- the fix for "stores emitted inside the
-// reduce loop".  Returns open_idx if nothing uses it (degenerate).
+// loop's axis.  A loop no END names (an unpromoted output loop) closes
+// right after that node, so anything later lands OUTSIDE the loop.
+// Returns open_idx if nothing uses it (degenerate).
 static u32 ptx_loop_last_use(LinKernel const *lk, u32 open_idx, u32 axis_id) {
   u32 last = open_idx;
   for (u32 j = open_idx + 1; j < lk->n; j++) {
     Term t = lk->uops[j];
     if (term_tag(t) != TAG_UOP) continue;
-    if (term_ext(t) == UOP_END) continue;        // synthetic marker range
     if (ptx_term_refs_axis(t, axis_id, 0)) last = j;
   }
   return last;
+}
+
+// 1 if an END after open_idx names `range`.  tinygrad closes every loop at
+// its END (renderer/ptx.py:126-130), not after the last use of its axis: a
+// reduce's update can reach its own axis only through an inner reduce's
+// accumulator (sum_j 2 * sum_k x[i,j,k]), so the last use of j is the
+// inner load, before the update that must run once per j.
+static int ptx_loop_has_end(LinKernel const *lk, u32 open_idx, Term range) {
+  for (u32 j = open_idx + 1; j < lk->n; j++) {
+    Term t = lk->uops[j];
+    if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_END) {
+      continue;
+    }
+    u32 n = uop_end_n(t);
+    for (u32 r = 0; r < n; r++) {
+      if (uop_end_range(t, r) == range) {
+        return 1;
+      }
+    }
+  }
+  return 0;
 }
 
 // === Body walk ========================================================
@@ -653,18 +675,11 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
           }
           break;
         }
-        // A degenerate extent-0 RANGE is the synthetic marker the reduce
-        // accumulator's END carries -- not a real loop.  Skip it (no
-        // register, no loop); liveness-based closing (below) handles the
-        // real reduce loop, and the END node is a no-op.
-        u32 ext0 = uop_range_extent(t);
-        if (ext0 == 0) break;
         // Serial loop (reduce / unpromoted axis).  Faithful to tinygrad's
         // do-while: mov ridx,-1 ; bra END ; LOOP: ... ; END incr+test+bra.
-        // The loop CLOSES by liveness -- after the last node that uses its
-        // axis -- NOT at the UOP_END marker (whose synthetic range matched
-        // a phantom empty loop, leaving the real loop to auto-close after
-        // the final store, i.e. re-storing every iteration).
+        // A reduce loop closes at the END that names it.  An unpromoted
+        // output loop has no END, so it closes after the last node that
+        // uses its axis.
         char r[40]; ptx_ssa(ctx, "ridx", DT_INT32, r, sizeof(r));
         ptx_reg_put(ctx, t, r);
         if (ctx->n_open >= PTX_MAX_OPEN_RANGES) return 0;
@@ -675,16 +690,38 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         ctx->open_ranges[ctx->n_open].range    = t;
         ctx->open_ranges[ctx->n_open].label    = label;
         ctx->open_ranges[ctx->n_open].last_use =
-            ptx_loop_last_use(lk, i, axis_id);
+            ptx_loop_has_end(lk, i, t) ? PTX_CLOSED_AT_END
+                                       : ptx_loop_last_use(lk, i, axis_id);
         ctx->n_open++;
         break;
       }
 
-      case UOP_END:
-        // No-op: loops close by liveness (after this node, below), not by
-        // the END marker.  The marker's synthetic range does not name the
-        // real loop reliably.
+      case UOP_END: {
+        // Close the loops this END names (tinygrad renderer/ptx.py:
+        // 126-130).  They must be the innermost open loops: closing any
+        // other would close the loops inside it with it.
+        u32 n = uop_end_n(t);
+        if (n > ctx->n_open) {
+          return 0;
+        }
+        for (u32 r = 0; r < n; r++) {
+          int open = 0;
+          for (u32 j = ctx->n_open - n; j < ctx->n_open; j++) {
+            if (ctx->open_ranges[j].range == uop_end_range(t, r)) {
+              open = 1;
+            }
+          }
+          if (!open) {
+            return 0;
+          }
+        }
+        for (u32 r = 0; r < n; r++) {
+          ctx->n_open--;
+          ptx_emit_loop_close(ctx, ctx->open_ranges[ctx->n_open].range,
+                              ctx->open_ranges[ctx->n_open].label, fp);
+        }
         break;
+      }
 
       case UOP_INDEX_E: {
         // Pointer arithmetic: byte_addr = base + idx * itemsize, in u64.
@@ -712,9 +749,15 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
       case UOP_LOAD: {
         Term idx = heap_read(loc + 0);
         // LOAD of a PLACEHOLDER reads the accumulator register directly
-        // (the final reduce result); no global load.
-        if (term_tag(idx) == TAG_UOP && term_ext(idx) == UOP_PLACEHOLDER) {
-          const char *ar = ptx_reg_get(ctx, idx);
+        // (the update's operand and the final reduce result); no global
+        // load.  The reduce loads through acc.after(...), which only
+        // orders the read (codegen/__init__.py:201-204).
+        Term acc = idx;
+        while (term_tag(acc) == TAG_UOP && term_ext(acc) == UOP_AFTER) {
+          acc = heap_read(term_val(acc) + 0);
+        }
+        if (term_tag(acc) == TAG_UOP && term_ext(acc) == UOP_PLACEHOLDER) {
+          const char *ar = ptx_reg_get(ctx, acc);
           if (ar[0] == '\0') return 0;
           ptx_reg_put(ctx, t, ar);
           break;
@@ -734,12 +777,18 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         Term value = heap_read(loc + 2);
         // STORE into a PLACEHOLDER is an accumulator reassignment: a bit
         // copy into the persistent acc register (init = const, update =
-        // acc+x).  Mirrors render_linearized.c's `_accN = value;`.
-        if (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_PLACEHOLDER) {
+        // acc+x).  Mirrors render_linearized.c's `_accN = value;`.  The
+        // reduce stores through acc.after(...), which only orders the
+        // store (codegen/__init__.py:200-203).
+        Term acc = buf;
+        while (term_tag(acc) == TAG_UOP && term_ext(acc) == UOP_AFTER) {
+          acc = heap_read(term_val(acc) + 0);
+        }
+        if (term_tag(acc) == TAG_UOP && term_ext(acc) == UOP_PLACEHOLDER) {
           const char *vr = ptx_reg_get(ctx, value);
-          const char *ar = ptx_reg_get(ctx, buf);
+          const char *ar = ptx_reg_get(ctx, acc);
           if (vr[0] == '\0' || ar[0] == '\0') return 0;
-          u32 dt = uop_placeholder_dtype(buf);
+          u32 dt = uop_placeholder_dtype(acc);
           fprintf(fp, "\tmov.b%s %s, %s;\n", ptx_reg_type(dt) + 1, ar, vr);
           break;
         }
@@ -909,10 +958,9 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
         return 0;
     }
 
-    // Liveness close: after emitting node i, close any open loop whose
-    // last referencing node was i (innermost first).  This places the
-    // loop-close right after the loop body, so later nodes (the reduce's
-    // final F-lane store) fall OUTSIDE the loop.
+    // Liveness close: after emitting node i, close any open loop no END
+    // names whose last referencing node was i (innermost first), so later
+    // nodes fall OUTSIDE the loop.
     while (ctx->n_open > 0
            && ctx->open_ranges[ctx->n_open - 1].last_use <= i) {
       ctx->n_open--;
@@ -920,8 +968,8 @@ static int ptx_emit_body(LinKernel const *lk, PtxCtx *ctx, FILE *fp) {
                           ctx->open_ranges[ctx->n_open].label, fp);
     }
   }
-  // Drain: close any loop still open (defensive -- liveness should have
-  // closed them all), innermost first.
+  // Drain: close any loop still open (defensive -- the ENDs and liveness
+  // should have closed them all), innermost first.
   while (ctx->n_open > 0) {
     ctx->n_open--;
     ptx_emit_loop_close(ctx, ctx->open_ranges[ctx->n_open].range,

@@ -9,11 +9,11 @@
 //   1. uop_devectorize_graph(root) runs three sub-passes:
 //      (a) pm_reduce      -- REDUCE(body, *axes) ->
 //                             PLACEHOLDER(acc_id)
-//                             + STORE(acc, 0, identity)
-//                             + STORE(acc, 0, acc[0] op body)
-//                             + END(axes)
-//                             + LOAD(acc[0])
-//          Mirrors devectorizer.py:311-328 (reduce_to_acc).
+//                             + STORE(acc.after(*live), 0, identity)
+//                             + STORE(acc.after(init), 0, acc op body)
+//                             + END(update, *axes)
+//                             + LOAD(acc.after(END))
+//          Mirrors codegen/__init__.py:197-204 (reduce_ranges_to_acc).
 //      (b) pm_devectorize -- vector-typed ALU / CAST / BITCAST split
 //                            into a STACK of N scalar ALUs threading
 //                            GEPs into the source operands.  Mirrors
@@ -141,16 +141,23 @@ fn u32 uop_placeholder_acc_id(Term t) {
   return (u32)term_val(heap_read(term_val(t) + 1));
 }
 
-// UOP_END: heap = [NUM(n), range_0, ..., range_{n-1}].  Each range_i is
-// a UOP_RANGE Term.  We don't hash-cons identical END nodes -- they
-// carry a positional meaning (close THIS loop body) and identical END
-// markers in two different reduces are semantically distinct.
-fn Term uop_end(u32 n, Term const *ranges) {
-  if (n == 0) return 0;
-  if (n > 16) n = 16;
-  u64 loc = heap_alloc(1 + n);
+// UOP_END: heap = [NUM(n), range_0, ..., range_{n-1}, body].  tinygrad's
+// Ops.END(body, *ranges): the loops over the ranges close after `body`,
+// the store that runs inside them, so body is a src and orders the END
+// after it.  Each range_i is a UOP_RANGE Term.  We don't hash-cons
+// identical END nodes -- they carry a positional meaning (close THIS loop
+// body) and identical END markers in two different reduces are
+// semantically distinct.
+fn Term uop_end(Term body, u32 n, Term const *ranges) {
+  if (n == 0) {
+    return 0;
+  }
+  u64 loc = heap_alloc(2 + n);
   heap_set(loc + 0, term_new(0, TAG_NUM, DT_INT32, n));
-  for (u32 i = 0; i < n; i++) heap_set(loc + 1 + i, ranges[i]);
+  for (u32 i = 0; i < n; i++) {
+    heap_set(loc + 1 + i, ranges[i]);
+  }
+  heap_set(loc + 1 + n, body);
   return term_new(0, TAG_UOP, UOP_END, loc);
 }
 fn u32 uop_end_n(Term t) {
@@ -160,6 +167,12 @@ fn u32 uop_end_n(Term t) {
 fn Term uop_end_range(Term t, u32 i) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_END) return 0;
   return heap_read(term_val(t) + 1 + i);
+}
+fn Term uop_end_body(Term t) {
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_END) {
+    return 0;
+  }
+  return heap_read(term_val(t) + 1 + uop_end_n(t));
 }
 
 // === Helpers ===========================================================
@@ -187,10 +200,11 @@ static u32 devec_reduce_identity_bits(u32 kind, u32 dtype) {
 //
 // Visits every node reachable from a root exactly once: the uop_arity srcs
 // plus the children uop_arity reports as 0 (both AFTER operands, every
-// STACK lane, every END range).  Iterative with a visited set, so it is
-// linear on hash-consed DAGs and has no depth budget: a budgeted walk
-// silently returns a partial answer past its budget (the depth-guard bug
-// class fixed in materialize.c).  Returns 0 only if it cannot allocate.
+// STACK lane, every END range and the END's body).  Iterative with a
+// visited set, so it is linear on hash-consed DAGs and has no depth
+// budget: a budgeted walk silently returns a partial answer past its
+// budget (the depth-guard bug class fixed in materialize.c).  Returns 0
+// only if it cannot allocate.
 
 typedef void (*DevecVisit)(Term t, void *user);
 
@@ -297,7 +311,7 @@ static int devec_walk_push_children(DevecWalk *w, Term t) {
           return 0;
         }
       }
-      return 1;
+      return devec_walk_push(w, uop_end_body(t));
     }
     default:
       return 1;
@@ -351,27 +365,6 @@ static void devec_visit_acc_max(Term t, void *user) {
   }
 }
 
-// Build the reduce-to-acc lowering for one REDUCE node:
-//   placeholder = PLACEHOLDER(dtype, acc_num++)
-//   init        = STORE(placeholder, 0, CONST(identity))
-//   update      = STORE(placeholder, 0, ALU(LOAD(placeholder, 0), body))
-//   end         = END(reduce_axes)
-//   result      = LOAD(placeholder, 0) sequenced after end
-//
-// The LOAD/STORE used here are the value-layer UOP_LOAD / UOP_STORE
-// from src/uop/load.c / src/uop/store.c.  thvm's STORE takes (buf,
-// addr, value) and LOAD takes (src); we use index 0 (a CONST) as the
-// address since the accumulator is a 1-slot REG buffer.
-//
-// The return Term replaces the REDUCE in its parent; downstream rewrites
-// stitch the init + update + end into the parent's STORE-order chain
-// via UOP_AFTER markers when the renderer is wired up.  For the
-// graph-rewrite output we encode the chain by sequencing through
-// UOP_AFTER:
-//   final = AFTER(LOAD(placeholder), end_marker)
-// where end_marker itself nests AFTER(update, init).  The AFTER tree
-// is what the renderer's existing emit-after walker (rmu_emit_after)
-// already linearizes into source order.
 // Combine an accumulator load with a body lane via the REDUCE's kind.
 // Returns 0 for an unknown kind.
 static Term devec_reduce_combine(u32 kind, Term acc_val, Term body) {
@@ -387,85 +380,212 @@ static Term devec_reduce_combine(u32 kind, Term acc_val, Term body) {
   return 0;
 }
 
-// Build the END marker carrying the reduce axes (by axis_id; the
-// renderer / linearizer matches on axis_id alone, extent is a
-// placeholder).
-static Term devec_reduce_end_marker(Term red) {
-  u32 n_axes = uop_reduce_n_axes(red);
-  Term axes_terms[8] = {0};
-  u32 nax = n_axes > 8 ? 8 : n_axes;
-  for (u32 i = 0; i < nax; i++) {
-    axes_terms[i] = uop_range(uop_reduce_axis(red, i), KAX_LOOP, 0);
+// === Reduce ranges (codegen/__init__.py:197-204) ========================
+//
+// tinygrad's reduce_ranges_to_acc makes the accumulator init depend on the
+// ranges the reduce input lives in, minus the reduce's own ranges:
+//   input_ranges = tuple(x for x in r.src[0].ranges if x not in r.src[1:])
+//   acc_init     = acc.after(*input_ranges).store(identity)
+// so the init runs once per iteration of every enclosing loop.  thvm's
+// REDUCE lists axis ids rather than RANGE Terms, and an inner reduce that
+// is already lowered keeps its RANGE leaves reachable through its AFTER
+// chain, so the scan collects the RANGE leaves of the body's cone and
+// sorts them: the reduce's own axes are the loops its END closes; the rest
+// are live unless an END in the body already closes them (an inner
+// reduce) or they are UPCAST/UNROLL lanes rather than loops.
+
+#define DEVEC_SCAN_CAP 32
+
+typedef struct {
+  Term red;
+  Term live[DEVEC_SCAN_CAP];
+  u32  n_live;
+  Term own[DEVEC_SCAN_CAP];
+  u32  n_own;
+  u32  ended[DEVEC_SCAN_CAP];
+  u32  n_ended;
+  int  overflow;
+} DevecRangeScan;
+
+static int devec_reduce_has_axis(Term red, u32 axis_id) {
+  u32 n = uop_reduce_n_axes(red);
+  for (u32 i = 0; i < n; i++) {
+    if (uop_reduce_axis(red, i) == axis_id) {
+      return 1;
+    }
   }
-  return (nax > 0) ? uop_end(nax, axes_terms) : 0;
+  return 0;
 }
 
-static Term devec_reduce_to_acc(DevecReduceCtx *ctx, Term red) {
-  if (term_tag(red) != TAG_UOP || term_ext(red) != UOP_REDUCE) return 0;
-  u64 loc = term_val(red);
-  Term body = heap_read(loc + 0);
-  u32 kind = uop_reduce_kind(red);
-  u32 body_dtype = DT_FP32;
-  (void)term_dtype_in(body, 0, &body_dtype);
-  u32 idbits = devec_reduce_identity_bits(kind, body_dtype);
-  Term identity  = uop_const(body_dtype, idbits);
-  Term zero_addr = uop_const(DT_INT32, 0);
-  Term end_marker = devec_reduce_end_marker(red);
-
-  // PARALLEL ACCUMULATORS: when the reduce body is an F-wide STACK (an
-  // UPCAST'd output -- e.g. conv's Cout=4 lanes), the F lanes are F
-  // INDEPENDENT reductions (W[cout,:] . X differs per cout).  A single
-  // scalar accumulator would make all F outputs read the same sum.  So
-  // allocate F accumulators, one per lane, and gather their final loads
-  // into a STACK.  Mirrors tinygrad reduce_to_acc giving the DEFINE_REG
-  // the body's vec(F) dtype, then no_vectorized splitting into F lanes.
-  // A STACK-bodied reduce (an output upcast that reached reduce_to_acc
-  // as F lanes rather than F distinct REDUCE nodes) needs F independent
-  // accumulators -- a single scalar acc would make all F outputs read
-  // the same sum.  (For the conv shape the REDUCE-expandable path
-  // produces F distinct scalar reduces instead, so this guards the
-  // alternate lowering.)
-  u32 F = (term_tag(body) == TAG_UOP && term_ext(body) == UOP_STACK)
-        ? uop_stack_n(body) : 1;
-  if (F > 1 && F <= 256) {
-    Term seq = 0;          // AFTER chain: inits first, then updates
-    Term loads[256];
-    for (u32 i = 0; i < F; i++) {
-      Term acc_i = uop_placeholder(body_dtype, ctx->acc_num++);
-      Term init_i = uop_store(acc_i, zero_addr, identity);
-      seq = (seq == 0) ? init_i : uop_after(init_i, seq);
-      loads[i] = uop_load(acc_i);   // captured here; the update reads
-                                    // a fresh load (same acc Term)
-    }
-    // Updates: combined_i = combine(LOAD(acc_i), body_lane_i).  The
-    // accumulator Term is identified by the placeholder built above; a
-    // fresh LOAD over the same placeholder reads the current value.
-    // Re-derive acc_i from the load's src (loads[i] = LOAD(acc_i)).
-    for (u32 i = 0; i < F; i++) {
-      Term acc_i = heap_read(term_val(loads[i]) + 0);
-      Term acc_val = uop_load(acc_i);
-      Term body_i  = uop_stack_src(body, i);
-      Term combined = devec_reduce_combine(kind, acc_val, body_i);
-      if (combined == 0) return 0;
-      Term update_i = uop_store(acc_i, zero_addr, combined);
-      seq = uop_after(update_i, seq);
-    }
-    if (end_marker != 0) seq = uop_after(end_marker, seq);
-    Term final = uop_stack(F, loads);
-    return uop_after(final, seq);
+static void devec_scan_push(DevecRangeScan *s, Term *arr, u32 *n, Term t) {
+  if (*n >= DEVEC_SCAN_CAP) {
+    s->overflow = 1;
+    return;
   }
+  arr[(*n)++] = t;
+}
 
-  // Scalar reduce (F == 1): one accumulator.
-  u32 acc_id = ctx->acc_num++;
-  Term acc = uop_placeholder(body_dtype, acc_id);
-  Term init = uop_store(acc, zero_addr, identity);
-  Term combined = devec_reduce_combine(kind, uop_load(acc), body);
-  if (combined == 0) return 0;       // unknown reduce kind
-  Term update = uop_store(acc, zero_addr, combined);
-  Term chain1 = uop_after(update, init);
-  Term chain2 = (end_marker != 0) ? uop_after(end_marker, chain1) : chain1;
-  Term result = uop_after(uop_load(acc), chain2);
-  return result;
+static void devec_visit_ranges(Term t, void *user) {
+  DevecRangeScan *s = (DevecRangeScan *)user;
+  switch (term_ext(t)) {
+    case UOP_RANGE: {
+      u32 at = uop_range_axis_type(t);
+      if (devec_reduce_has_axis(s->red, uop_range_axis_id(t))) {
+        devec_scan_push(s, s->own, &s->n_own, t);
+      } else if (at != KAX_UPCAST && at != KAX_UNROLL) {
+        devec_scan_push(s, s->live, &s->n_live, t);
+      }
+      return;
+    }
+    case UOP_END: {
+      u32 n = uop_end_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (s->n_ended >= DEVEC_SCAN_CAP) {
+          s->overflow = 1;
+          return;
+        }
+        s->ended[s->n_ended++] = uop_range_axis_id(uop_end_range(t, i));
+      }
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+// Sort RANGE Terms by axis id so the AFTER chain and the END (and so the
+// rendered source and its JIT cache key) do not depend on walk order.
+static void devec_sort_ranges(Term *r, u32 n) {
+  for (u32 i = 1; i < n; i++) {
+    Term cur = r[i];
+    u32 j = i;
+    while (j > 0 && uop_range_axis_id(r[j - 1]) > uop_range_axis_id(cur)) {
+      r[j] = r[j - 1];
+      j--;
+    }
+    r[j] = cur;
+  }
+}
+
+// Scan `red`'s body.  Returns 0 if the scan overflowed or cannot allocate,
+// or if a reduce axis does not map to exactly one RANGE leaf in the body
+// (none: there is no loop for its END to close; several: one axis would
+// run as several loops); the caller then leaves the REDUCE unlowered.
+static int devec_reduce_scan(Term red, DevecRangeScan *s) {
+  memset(s, 0, sizeof(*s));
+  s->red = red;
+  if (!devec_cone_walk(uop_reduce_src(red), devec_visit_ranges, s)) {
+    return 0;
+  }
+  if (s->overflow) {
+    return 0;
+  }
+  u32 kept = 0;
+  for (u32 i = 0; i < s->n_live; i++) {
+    u32 axis_id = uop_range_axis_id(s->live[i]);
+    int ended = 0;
+    for (u32 j = 0; j < s->n_ended; j++) {
+      if (s->ended[j] == axis_id) {
+        ended = 1;
+        break;
+      }
+    }
+    if (!ended) {
+      s->live[kept++] = s->live[i];
+    }
+  }
+  s->n_live = kept;
+  u32 n_axes = uop_reduce_n_axes(red);
+  for (u32 i = 0; i < n_axes; i++) {
+    u32 axis_id = uop_reduce_axis(red, i);
+    u32 found = 0;
+    for (u32 j = 0; j < s->n_own; j++) {
+      if (uop_range_axis_id(s->own[j]) == axis_id) {
+        found++;
+      }
+    }
+    if (found != 1) {
+      return 0;
+    }
+  }
+  devec_sort_ranges(s->live, s->n_live);
+  devec_sort_ranges(s->own, s->n_own);
+  return 1;
+}
+
+// acc.after(*ranges) as nested binary AFTERs.
+static Term devec_after_ranges(Term acc, Term const *ranges, u32 n) {
+  Term t = acc;
+  for (u32 i = 0; i < n; i++) {
+    t = uop_after(t, ranges[i]);
+  }
+  return t;
+}
+
+// Lower one REDUCE to an accumulator (tinygrad reduce_ranges_to_acc,
+// codegen/__init__.py:197-204), with `live` and `own` from
+// devec_reduce_scan:
+//   acc         = PLACEHOLDER(dtype, next slot)
+//   init        = STORE(acc.after(*live), 0, identity)
+//   acc_initted = acc.after(init, *own)
+//   update      = STORE(acc_initted, 0, LOAD(acc_initted) <op> body)
+//   result      = LOAD(acc.after(END(update, *own)))
+// The init runs once per iteration of the live loops, the update once per
+// iteration of the reduce loops.  The AFTERs order init -> update -> END
+// -> result by dependency, and the linearizer nests the reduce loops
+// inside the ranges the END lives in, so the init also precedes them.
+// The accumulator is a 1-slot REG buffer, so the address is the CONST 0.
+//
+// PARALLEL ACCUMULATORS: a STACK body of F lanes is F independent
+// reductions (an UPCAST'd output that reached the reduce as F lanes, not
+// F distinct REDUCEs -- conv's W[cout,:] . X differs per cout), so it gets
+// F accumulators, one END over all F updates, and the STACK of the F lane
+// loads as its result.  Mirrors tinygrad giving the DEFINE_REG the body's
+// vec(F) dtype and no_vectorized splitting it into F lanes.
+static Term devec_reduce_to_acc(DevecReduceCtx *ctx, Term red) {
+  if (term_tag(red) != TAG_UOP || term_ext(red) != UOP_REDUCE) {
+    return 0;
+  }
+  u32 kind = uop_reduce_kind(red);
+  if (kind != REDUCE_SUM && kind != REDUCE_MAX) {
+    return 0;
+  }
+  Term body  = uop_reduce_src(red);
+  u32  lanes = (term_tag(body) == TAG_UOP && term_ext(body) == UOP_STACK)
+             ? uop_stack_n(body) : 1;
+  if (lanes == 0 || lanes > 256) {
+    return 0;
+  }
+  DevecRangeScan scan;
+  if (!devec_reduce_scan(red, &scan)) {
+    return 0;
+  }
+  u32 dtype = DT_FP32;
+  (void)term_dtype_in(body, 0, &dtype);
+  Term identity  = uop_const(dtype, devec_reduce_identity_bits(kind, dtype));
+  Term zero_addr = uop_const(DT_INT32, 0);
+
+  Term accs[256];
+  Term updates = 0;
+  for (u32 i = 0; i < lanes; i++) {
+    Term acc  = uop_placeholder(dtype, ctx->acc_num++);
+    Term init = uop_store(devec_after_ranges(acc, scan.live, scan.n_live),
+                          zero_addr, identity);
+    Term initted = devec_after_ranges(uop_after(acc, init),
+                                      scan.own, scan.n_own);
+    Term lane = (lanes > 1) ? uop_stack_src(body, i) : body;
+    Term combined = devec_reduce_combine(kind, uop_load(initted), lane);
+    Term update = uop_store(initted, zero_addr, combined);
+    updates = (updates == 0) ? update : uop_after(update, updates);
+    accs[i] = acc;
+  }
+  Term done = (scan.n_own > 0) ? uop_end(updates, scan.n_own, scan.own)
+                               : updates;
+  Term loads[256];
+  for (u32 i = 0; i < lanes; i++) {
+    loads[i] = uop_load(uop_after(accs[i], done));
+  }
+  return (lanes > 1) ? uop_stack(lanes, loads) : loads[0];
 }
 
 static Term devec_pm_reduce(Term t, void *user) {
@@ -939,7 +1059,7 @@ fn Term uop_devectorize_graph(Term root) {
   //      under AFTER, no further per-node rewrites reach it.
   //
   //   2. pm_reduce (reduce_to_acc): REDUCE -> PLACEHOLDER + STOREs +
-  //      END + LOAD chain.  Mirrors devectorizer.py:311-328.
+  //      END + LOAD chain.  Mirrors codegen/__init__.py:197-204.
   //
   //   3. A final cleanup pm_render pass over the post-reduce graph
   //      (catches GEP/STACK singletons synthesized while rebuilding).
