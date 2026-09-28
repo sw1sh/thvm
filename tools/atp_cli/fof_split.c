@@ -962,12 +962,28 @@ static u32 fof_cnf_estimate(Term f, u32 cap) {
   u64 v = (lab == FOL_LAB_AND) ? ((u64)a + (u64)b) : ((u64)a * (u64)b);
   return (v > (u64)cap) ? cap + 1u : (u32)v;
 }
+// Widest clause naive distribution produces: a literal is 1, AND keeps
+// the wider side, OR adds.  fol_clause_new refuses more than
+// FOL_MAX_LITS literals and the extractor then SKIPS that clause while
+// the record's other clauses survive -- a silently weaker set (the
+// one-element gate read the Theorems LCL662+1.010 and LCL668+1.015 as
+// satisfiable).  Saturates at cap + 1.
+static u32 fof_cnf_width(Term f, u32 cap) {
+  if (term_tag(f) != TAG_CTR) return 1u;
+  u32 lab = term_ext(f);
+  if (lab != FOL_LAB_AND && lab != FOL_LAB_OR) return 1u;
+  u32 a = fof_cnf_width(term_ctr_at(f, 0u), cap);
+  u32 b = fof_cnf_width(term_ctr_at(f, 1u), cap);
+  u64 v = (lab == FOL_LAB_AND) ? (u64)(a > b ? a : b) : (u64)a + (u64)b;
+  return (v > (u64)cap) ? cap + 1u : (u32)v;
+}
 static u32 fof_distrib_bound(void) {
   const char *e = getenv("THVM_ATP_FOF_DISTRIB");
   if (e != NULL && atoi(e) > 0) return (u32)atoi(e);
   return 512u;
 }
 static int g_fof_tseitin_recs = 0;   // records clausified definitionally
+static int g_fof_wide_recs    = 0;   // ... of which for clause width alone
 
 // --- clausal pre-pass SInE cone -------------------------------------------
 // Large non-Horn knowledge bases (the AGT/CSR/MED FOF families run to
@@ -1602,8 +1618,9 @@ static int fof_one_elt_sat(FolClause **cls, int ncl) {
 // distribution (equivalence).  So its assignment, restricted to the
 // problem's predicates, is a model of the problem.  The claim does not
 // rest on that argument alone: the clausifier has silent-drop paths
-// (fol_clause_new refuses > FOL_MAX_LITS literals, the Skolemizer bails
-// at FOL_SKOLEM_MAX_UNIV binders), so every ORIGINAL record formula --
+// (fol_clause_new refuses > FOL_MAX_LITS literals and the extractor
+// skips that clause while the record's others survive; allocation
+// failures drop clauses the same way), so every ORIGINAL record formula --
 // as parsed, universally closed, the conjecture negated -- is
 // re-evaluated under the assignment (predicates the search left open
 // read false) and one false formula withdraws the claim.  Input shapes
@@ -1946,7 +1963,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   fol_reset_tseitin();   // aux labels run per-problem, across records
   prov_def_reset();      // definition symbols are declared once per problem
   g_fof_or_used = g_fof_eq_used = g_fof_not_used = 0;
-  g_fof_or_ncl = g_fof_tseitin_recs = 0;
+  g_fof_or_ncl = g_fof_tseitin_recs = g_fof_wide_recs = 0;
   g_fof_split_nor = g_fof_split_unfit = g_fof_split_pending = 0;
   fof_split_read_branch();
   thvm_heap_exhausted = 0;
@@ -2061,12 +2078,16 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     FolClause **recc;
     u32 bound = fof_distrib_bound();
     int rec_tseitin = 0;
-    if (fof_cnf_estimate(sk, bound) > bound) {
-      // Naive distribution would blow past the bound: clausify this
-      // record definitionally (Tseitin).  The aux counter runs across
-      // records (reset once above) so labels never collide.
+    int too_many = fof_cnf_estimate(sk, bound) > bound;
+    int too_wide = !too_many && fof_cnf_width(sk, FOL_MAX_LITS) > FOL_MAX_LITS;
+    if (too_many || too_wide) {
+      // Naive distribution would blow past the clause-count bound or
+      // emit a clause wider than FOL_MAX_LITS: clausify this record
+      // definitionally (Tseitin).  The aux counter runs across records
+      // (reset once above) so labels never collide.
       recc = fol_tseitin_extract_clauses(sk, &nc);
       g_fof_tseitin_recs++;
+      g_fof_wide_recs += too_wide;
       rec_tseitin = 1;
     } else {
       Term cnf_ = fol_distribute(sk);
@@ -2123,9 +2144,14 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   // parent's verdict path.
   int oe_sat = !g_fof_split_child && fof_one_elt_sat(cls, ncl);
   if (oe_sat) fof_one_elt_claim(text);
-  if (getenv("THVM_ATP_ONE_ELT_PROBE") != NULL)
-    tp_giveup(oe_sat ? "one-element probe: model found, claim refused"
-                     : "one-element probe: no one-element model");
+  if (getenv("THVM_ATP_ONE_ELT_PROBE") != NULL) {
+    char why[160];
+    snprintf(why, sizeof why, "one-element probe: %s (%d record(s) via "
+             "Tseitin, %d for width)",
+             oe_sat ? "model found, claim refused" : "no one-element model",
+             g_fof_tseitin_recs, g_fof_wide_recs);
+    tp_giveup(why);
+  }
 
   // Fresh names: the pc_intern table now holds every problem symbol.
   fof_fresh_const(g_fof_true_name, sizeof g_fof_true_name);
@@ -2423,8 +2449,8 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     snprintf(orinfo, sizeof orinfo, ", %d or-encoded", g_fof_or_ncl);
   char tsinfo[64] = "";
   if (g_fof_tseitin_recs > 0)
-    snprintf(tsinfo, sizeof tsinfo, ", %d record(s) via Tseitin",
-             g_fof_tseitin_recs);
+    snprintf(tsinfo, sizeof tsinfo, ", %d record(s) via Tseitin (%d for width)",
+             g_fof_tseitin_recs, g_fof_wide_recs);
   char drinfo[64] = "";
   if (g_fof_dropped_n > 0)
     snprintf(drinfo, sizeof drinfo, ", %d oversized clause(s) dropped",
