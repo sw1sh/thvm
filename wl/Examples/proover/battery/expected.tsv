@@ -8,3 +8,11 @@ H6_valid_shuffled.s	VerifiedGood	VALID control: record order is free per the rul
 H7_valid_esa_foreign.s	VerifiedGood	VALID control: esa skolemization under a foreign rule name
 H8_cycle.s	VerifiedBad	circular derivation
 H9_dup_name.s	VerifiedBad	unentailed step (crafted alongside the dup-name probe)
+H10_instantiate_capture.s	VerifiedBad	instantiate fast path must not let a binder capture a pattern variable
+H11_definition_smuggle.s	Unknown	sibling definition clauses over a fresh predicate: no first-order witness abstraction (abstain)
+H12_sibling_skolem_reuse.s	VerifiedBad	two sibling skolemisations share one Skolem function
+H13_cth_negates_axiom.s	VerifiedBad	cth step negates an axiom, not the conjecture
+H14_cp_circular.s	Unknown	out-of-order equational records: no circular demodulation, no conjecture demodulator (abstain)
+H15_nested_parent_valid.s	Unknown	VALID control: a countermodel over a partial (nested-parent) premise set is no verdict
+H16_valid_shadowed_negation.s	VerifiedGood	VALID control: negated conjecture over shadowed binders
+H17_valid_false_parent.s	VerifiedGood	VALID control: $false parent and a premise-free tautology

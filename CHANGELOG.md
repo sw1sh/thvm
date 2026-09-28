@@ -42,3 +42,8 @@ for the per-commit story.
 - Waldmeister-style ATP layer: KBO / LPO, unification, critical pairs,
   rewrite engine, CNF, unfailing completion driver
   (`src/{wald,kbo,lpo,rewrite,unify,cp,cnf,atp}/`).
+- CheckProof (ProoVer proof checker, `tools/proof_check.c`): the ProoVer
+  2026 specified-rule obligations (skolemize shape / status / witness
+  annotation), status-claim semantics (thm / esa / cth), binder-fresh
+  parsing, conjecture-as-premise and cth-hypothesis detection; the
+  published 2026 set is a DEV metric (+137/138), never a forecast.

@@ -3,7 +3,11 @@
 # expected.tsv.  The battery is the distilled ProoVer 2026 post-mortem:
 # H1-H5 are the false-accept families the shipped checker verified
 # (-10 each at the competition), H6-H7 the false-reject families it
-# rejected or abstained on.  Usage: run.sh [CheckProof]
+# rejected or abstained on.  H10-H17 are the soundness holes found in
+# the rebuilt checker against the published 2026 set (binder capture in
+# the instantiate fast path, predicate abstraction, sibling Skolem
+# reuse, cth hypotheses, circular / conjecture demodulation) and the
+# valid shapes it rejected.  Usage: run.sh [CheckProof]
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=${1:-$HERE/../../../../bin/CheckProof}
 fail=0

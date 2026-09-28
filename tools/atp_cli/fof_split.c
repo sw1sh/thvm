@@ -207,7 +207,7 @@ static void prov_rec_stage(int rec, int is_conj, Term nnf, Term sk,
   if (scope->nv > 0) {
     r->vnames = (char *)malloc((size_t)scope->nv * PC_NAME);
     if (r->vnames != NULL)
-      memcpy(r->vnames, scope->vname, (size_t)scope->nv * PC_NAME);
+      memcpy(r->vnames, pc_vname, (size_t)scope->nv * PC_NAME);
   }
 }
 
@@ -1604,7 +1604,7 @@ static jmp_buf g_fof_oom_jb;
 static void tp_fof_load(TpProblem *tp, const char *text) {
   thvm_init();
   g_cli_fof_applied = 1;
-  pc_nsyms = 0;
+  pc_sym_reset();
   fol_reset_skolem();
   fol_reset_tseitin();   // aux labels run per-problem, across records
   prov_def_reset();      // definition symbols are declared once per problem
