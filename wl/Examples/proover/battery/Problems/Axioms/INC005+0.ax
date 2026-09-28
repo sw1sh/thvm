@@ -1,0 +1,3 @@
+% Nests a selective include: only a2 of INC000+0.ax comes along.
+include('Axioms/INC000+0.ax', [a2]).
+fof(a5, axiom, s(b)).

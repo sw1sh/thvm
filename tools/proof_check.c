@@ -41,7 +41,8 @@
 // main.c via pc_strict_default, overridable with THVM_PROOFCHECK_STRICT):
 //
 //   strict (CheckProof, the ProoVer entry): leaves are VERIFIED -- the
-//     file() directive's problem file is loaded and the cited formula
+//     file() directive's problem file is loaded (its include() directives
+//     expanded as FindProof expands them) and the cited formula
 //     alpha-compared (a semantic mismatch is VerifiedBad; introduced()
 //     and directive-less inputs abstain); unsettled thm/cth steps are
 //     discharged by re-exec'ing this binary as a per-step ATP oracle
@@ -2193,7 +2194,6 @@ done:
 // strict profile: problem-file loading + leaf verification
 // ===================================================================
 
-static void  pc_strip_comments(char *s);              // fwd (driver section)
 static char *pc_read(const char *file, size_t *len);  // fwd (driver section)
 
 // Parse one problem-file record into pc_prob.  Returns 1 on success.
@@ -2236,7 +2236,68 @@ static int pc_parse_problem_record(const char *rec) {
   return ok;
 }
 
-// Load the problem file named by a file() directive.  Returns 0 when
+static void pc_load_problem_text(char *text, const char *path);
+
+// An include() directive of the problem file at `path`: its expansion
+// (tp_include_expand -- FindProof's roots and selection semantics) joins
+// the table, or the directive counts as one unread record.
+static void pc_load_include(const char *rec, const char *path) {
+  char why[1400];
+  char *text = tp_include_expand(path, rec, 1, NULL, why, sizeof why);
+  if (text == NULL) {
+    pc_prob_unparsed++;
+    if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
+      fprintf(stderr, "PCDBG include unread: %s\n", why);
+    }
+    return;
+  }
+  tp_blank_comments(text);
+  pc_load_problem_text(text, NULL);
+  free(text);
+}
+
+// Every '.'-terminated record of comment-blanked problem text into
+// pc_prob, include() directives expanded against the problem file at
+// `path` (NULL for an expansion, which has none left).  Whatever is not
+// read -- an unparseable record, an include that does not expand, an
+// unterminated tail -- counts in pc_prob_unparsed.
+static void pc_load_problem_text(char *text, const char *path) {
+  int depth = 0, inq = 0;
+  char *start = text;
+  for (char *p = text; *p != '\0'; p++) {
+    if (inq) {
+      if (*p == '\'') {
+        inq = 0;
+      }
+      continue;
+    }
+    if (*p == '\'') {
+      inq = 1;
+    } else if (*p == '(' || *p == '[') {
+      depth++;
+    } else if (*p == ')' || *p == ']') {
+      depth--;
+    } else if (*p == '.' && depth == 0) {
+      *p = '\0';
+      const char *rec = tp_skip_blank(start);
+      if (*rec != '\0') {
+        if (tp_is_include(rec) && path != NULL) {
+          pc_load_include(rec, path);
+        } else if (!pc_parse_problem_record(rec)) {
+          pc_prob_unparsed++;
+        }
+      }
+      *p = '.';
+      start = p + 1;
+    }
+  }
+  if (*tp_skip_blank(start) != '\0') {
+    pc_prob_unparsed++;
+  }
+}
+
+// Load the problem file named by a file() directive, its include()
+// directives expanded exactly as FindProof expands them.  Returns 0 when
 // loaded (possibly with pc_prob_unparsed records), -1 when unavailable.
 // One problem file per proof (the rules guarantee every directive names
 // the same file as the Proof: header); a second, different directive
@@ -2259,27 +2320,16 @@ static int pc_load_problem(const char *dpath) {
   }
   snprintf(cand[nc++], 1200, "%s", dpath);
   char *text = NULL;
-  for (int i = 0; i < nc && text == NULL; i++) text = pc_read(cand[i], NULL);
-  if (text == NULL) return -1;
-  pc_strip_comments(text);
-  int depth = 0, inq = 0;
-  char *start = text;
-  for (char *p = text; *p; p++) {
-    if (inq) { if (*p == '\'') inq = 0; continue; }
-    if (*p == '\'') { inq = 1; continue; }
-    if (*p == '(' || *p == '[') depth++;
-    else if (*p == ')' || *p == ']') depth--;
-    else if (*p == '.' && depth == 0) {
-      char save = *p;
-      *p = '\0';
-      int has_content = 0;
-      for (const char *q = start; q < p; q++)
-        if (!isspace((unsigned char)*q)) { has_content = 1; break; }
-      if (has_content && !pc_parse_problem_record(start)) pc_prob_unparsed++;
-      *p = save;
-      start = p + 1;
-    }
+  int found = -1;
+  for (int i = 0; i < nc && text == NULL; i++) {
+    text = pc_read(cand[i], NULL);
+    found = i;
   }
+  if (text == NULL) {
+    return -1;
+  }
+  tp_blank_comments(text);
+  pc_load_problem_text(text, cand[found]);
   free(text);
   pc_prob_state = 1;
   return 0;
@@ -4011,21 +4061,6 @@ static int pc_atp_discharge_step(int idx, const char **why) {
 // driver
 // ===================================================================
 
-// Strip TSTP comments (% to end of line, /* ... */) in place.
-static void pc_strip_comments(char *s) {
-  int inq = 0;
-  for (char *p = s; *p; p++) {
-    if (inq) { if (*p == '\'') inq = 0; continue; }
-    if (*p == '\'') { inq = 1; continue; }
-    if (*p == '%') { while (*p && *p != '\n') *p++ = ' '; if (!*p) break; }
-    else if (*p == '/' && p[1] == '*') {
-      *p++ = ' '; *p++ = ' ';
-      while (*p && !(*p == '*' && p[1] == '/')) *p++ = ' ';
-      if (*p) { *p = ' '; p[1] = ' '; p++; }
-    }
-  }
-}
-
 static char *pc_read(const char *file, size_t *len) {
   FILE *fp = fopen(file, "rb");
   if (fp == NULL) return NULL;
@@ -4168,7 +4203,7 @@ static int proof_check_worker(const char *file, int szs) {
     fprintf(stderr, "FindProof: cannot open %s\n", file);
     return 2;
   }
-  pc_strip_comments(text);
+  tp_blank_comments(text);
   // The strict profile resolves file() directive paths relative to the
   // proof file's directory (the samples' layout: Problems/ beside the
   // proof).

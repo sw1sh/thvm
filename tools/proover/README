@@ -22,7 +22,12 @@ INPUT   First-order TSTP proofs (fof/cnf records with inference
         annotations), by refutation, closing with $false.  The problem
         file named by the proof's file() directives is loaded from the
         adjacent Problems/ directory and every input leaf is verified
-        against it.
+        against it.  Its include('F') directives are read too: F
+        resolves against the problem's directory, $TPTP, then the
+        current directory, and include('F', [n1, ...]) contributes only
+        the listed formulas.  When an include cannot be read, leaves
+        still match only formulas that were read, and a leaf citing a
+        formula found nowhere abstains instead of failing.
 OUTPUT  One SZS verdict line; when a step is rejected, the faulty step
         is named in a following comment.
 

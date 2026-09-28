@@ -53,6 +53,10 @@
 #include <signal.h>
 #include <fcntl.h>
 
+// TPTP include() expansion: the checker's problem loading and the TPTP
+// front-end below read problems through the same code.
+#include "atp_cli/tptp_include.c"
+
 // --check mode: validate a first-order TSTP proof (the ProoVer task).
 // Reuses the src/fol saturation engine already linked into this binary.
 #include "proof_check.c"

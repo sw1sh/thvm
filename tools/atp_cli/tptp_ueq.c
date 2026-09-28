@@ -106,40 +106,6 @@ static int  prov_unf_new(const TpClause *cl);
 static void prov_unf_add_def(int unf, int def);
 static int  prov_eqg_new(const TpClause *cl);
 
-static char *tp_read_file(const char *path, size_t *len_out) {
-  FILE *fp = fopen(path, "rb");
-  if (fp == NULL) return NULL;
-  fseek(fp, 0, SEEK_END);
-  long n = ftell(fp);
-  fseek(fp, 0, SEEK_SET);
-  char *buf = (char *)malloc((size_t)n + 1u);
-  if (buf == NULL) { fclose(fp); return NULL; }
-  size_t rd = fread(buf, 1, (size_t)n, fp);
-  fclose(fp);
-  buf[rd] = '\0';
-  if (len_out != NULL) *len_out = rd;
-  return buf;
-}
-
-// Resolve an include('NAME') against dirname(problem), $TPTP, CWD.
-static char *tp_resolve_include(const char *problem_path, const char *inc) {
-  static char cand[4096];
-  const char *slash = strrchr(problem_path, '/');
-  if (slash != NULL) {
-    snprintf(cand, sizeof cand, "%.*s/%s",
-             (int)(slash - problem_path), problem_path, inc);
-    char *b = tp_read_file(cand, NULL);
-    if (b != NULL) return b;
-  }
-  const char *tptp = getenv("TPTP");
-  if (tptp != NULL) {
-    snprintf(cand, sizeof cand, "%s/%s", tptp, inc);
-    char *b = tp_read_file(cand, NULL);
-    if (b != NULL) return b;
-  }
-  return tp_read_file(inc, NULL);
-}
-
 // Strip %-comments and splice include directives (one level -- TPTP
 // axiom files do not nest for the UEQ library).
 static char *tp_preprocess(const char *problem_path, const char *raw) {

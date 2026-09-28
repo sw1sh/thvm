@@ -8,7 +8,10 @@
 # the instantiate fast path, predicate abstraction, sibling Skolem
 # reuse, cth hypotheses, circular / conjecture demodulation, definitions
 # with free body variables, uncited demodulators) and the valid shapes
-# it rejected.  Usage: run.sh [CheckProof]
+# it rejected.  H21-H28 cover problems that include() axiom files: leaves
+# match the included formulas (nested includes too), never the ones a
+# selection list leaves out, and an include that does not expand abstains.
+# Usage: run.sh [CheckProof]
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=${1:-$HERE/../../../../bin/CheckProof}
 fail=0

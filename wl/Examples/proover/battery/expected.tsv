@@ -19,3 +19,11 @@ H17_valid_false_parent.s	VerifiedGood	VALID control: $false parent and a premise
 H18_definition_free_var.s	Unknown	"definition" body with a variable the defined symbol does not take: not a conservative extension
 H19_uncited_demodulator.s	VerifiedBad	a step must follow from its CITED premises: no uncited record as a demodulator (quantified unit)
 H20_uncited_demodulator_cnf.s	VerifiedBad	as H19 with a plain CNF equation (the rebuild accepted this)
+H21_include_valid.s	VerifiedGood	VALID control: leaves cite axioms of an include()d file
+H22_include_ghost.s	VerifiedBad	leaf cites a name neither the problem nor its included file defines
+H23_include_unselected.s	VerifiedBad	leaf cites a formula the include() selection excludes
+H24_include_unresolved.s	Unknown	include() resolves under no root: the problem is only partly read (abstain)
+H25_include_select_valid.s	VerifiedGood	VALID control: a two-line include() selection loads exactly the listed formulas
+H26_include_select_missing.s	Unknown	selection names a formula the file lacks: the include is unread (abstain)
+H27_include_nested_valid.s	VerifiedGood	VALID control: a leaf cites a formula a nested include() selects
+H28_include_nested_unselected.s	VerifiedBad	leaf cites a formula the nested include() selection leaves out
