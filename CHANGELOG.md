@@ -34,6 +34,11 @@ for the per-commit story.
   broadcast back into a second sum no longer re-accumulates 9x, and
   walker-run reduce kernels (BatchNorm-train gradients, conv+BN blocks)
   no longer keep only the last unrolled lane.
+- A store of a REDUCE of a REDUCE of another kind renders through the
+  generic nested-reduce path.  The dedicated chain template read each
+  link's axis count as its axis id, so a link over two axes (max over j of
+  a sum over k,l) looped one of them outside the reduce and stored the
+  last iteration.
 
 ### Backends
 - CPU JIT: the C renderer compiles kernels whose lift keeps an unread input

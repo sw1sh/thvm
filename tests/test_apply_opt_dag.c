@@ -267,7 +267,8 @@ static void test_apply_split_upcast_splits_axis(void) {
     value = uop_opt_target(value);
   }
   CHECK(term_tag(value) == TAG_UOP && term_ext(value) == UOP_REDUCE);
-  CHECK_EQ((u32)term_val(heap_read(term_val(value) + 2)), 3u);
+  CHECK_EQ(uop_reduce_n_axes(value), 1u);
+  CHECK_EQ(uop_reduce_axis(value, 0), 3u);
   // And the actual K range leaf is now axis 3, KAX_REDUCE, extent 32.
   Term body = heap_read(term_val(value) + 0);
   Term value_ranges[16]; u32 nv = 0;
@@ -369,7 +370,8 @@ static void test_apply_swap_follows_reduce_axis(void) {
   CHECK(r != 0 && r != root);
   Term value = heap_read(term_val(r) + 2);
   CHECK(term_tag(value) == TAG_UOP && term_ext(value) == UOP_REDUCE);
-  CHECK_EQ((u32)term_val(heap_read(term_val(value) + 2)), 1u);
+  CHECK_EQ(uop_reduce_n_axes(value), 1u);
+  CHECK_EQ(uop_reduce_axis(value, 0), 1u);
 }
 
 // === KOP_GROUP / KOP_GROUPTOP ========================================

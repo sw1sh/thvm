@@ -106,10 +106,11 @@ index compare now lowers correctly.  See `py/examples/cuda_render_bugs.py`
 
 A `REDUCE` whose body contains another `REDUCE` over a different axis,
 where the inner reduce indexes by the *outer* reduce's axis variable,
-is emitted at the wrong loop nesting level.  The chain-reduce path in
-`rmu_emit_store_reduce` handles only *directly* nested
-`REDUCE(REDUCE(...))`; when the inner reduce is wrapped in any
-elementwise op, it falls to the generic post-order hoist
+is emitted at the wrong loop nesting level.  A chain-reduce template in
+`rmu_emit_store_reduce` (since removed; the generic path below now
+renders every nesting, direct chains included) handled only *directly*
+nested `REDUCE(REDUCE(...))`; when the inner reduce was wrapped in any
+elementwise op, it fell to the generic post-order hoist
 (`rmu_collect_reduces`), which emits every reduce loop flat at the top
 level.  The inner loop then references the outer reduce's axis var
 before it is declared (NVRTC: `identifier "a6" is undefined`), and

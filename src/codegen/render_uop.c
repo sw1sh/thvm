@@ -1242,14 +1242,6 @@ static void rmu_collect_ranges(Term t, Term *ranges, u32 *n_out) {
                          0, 0);
 }
 
-static void rmu_collect_ranges_with_opts(Term t, Term *ranges,
-                                         u32 *opt_kinds,
-                                         u32 *opt_factors,
-                                         u32 *n_out) {
-  rmu_collect_ranges_rec(t, ranges, opt_kinds, opt_factors, n_out,
-                         RMU_NO_OPT, 0);
-}
-
 // Like rmu_collect_ranges_rec but DESCENDS into UOP_REDUCE bodies.
 // The REDUCE-blind primary collector exists because the outer store's
 // ranges[] is for OUTPUT axes (axes that index the store position) --
@@ -4447,141 +4439,6 @@ static u32 rmu_emit_inner_reduce_decomp_loops(Term const *ranges,
   return depth;
 }
 
-// Chain-reduce emission: STORE(buf, addr, REDUCE(REDUCE(...REDUCE(leaf,
-// kind_n, axis_n)..., kind_1, axis_1), kind_0, axis_0)) where every link
-// is a plain UOP_REDUCE (no OPT wrapping in the chain) and the leaf body
-// contains no REDUCE.  Each chain link gets its own accumulator
-// reinitialised inside the enclosing link's loop; combines bubble
-// inner_acc up into outer_acc.  Returns 1 on emit, 0 to fall through.
-static int rmu_emit_chain_reduce(Term store, FILE *fp, u32 depth) {
-  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
-  u64 sloc = term_val(store);
-  Term value = heap_read(sloc + 2);
-  Term chain[MAX_DIM];
-  u32  n_chain = 0;
-  Term cur = value;
-  while (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_REDUCE
-         && n_chain < MAX_DIM) {
-    chain[n_chain++] = cur;
-    cur = heap_read(term_val(cur) + 0);
-  }
-  if (n_chain < 2) return 0;
-  Term leaf = cur;
-  if (rmu_term_has_reduce(leaf, 0)) return 0;
-
-  Term buf  = heap_read(sloc + 0);
-  Term addr = heap_read(sloc + 1);
-
-  Term ranges[MAX_DIM];
-  u32  opt_kinds[MAX_DIM]   = {0};
-  u32  opt_factors[MAX_DIM] = {0};
-  u32  n_ranges = 0;
-  rmu_collect_ranges_with_opts(addr, ranges, opt_kinds, opt_factors, &n_ranges);
-  rmu_collect_ranges_with_opts(leaf, ranges, opt_kinds, opt_factors, &n_ranges);
-
-  u32 chain_axes[MAX_DIM];
-  for (u32 i = 0; i < n_chain; i++) {
-    chain_axes[i] = term_val(heap_read(term_val(chain[i]) + 2));
-  }
-  Term out_ranges[MAX_DIM];
-  u32  out_kinds[MAX_DIM]   = {0};
-  u32  out_factors[MAX_DIM] = {0};
-  u32  n_out = 0;
-  Term red_range_per_chain    [MAX_DIM] = {0};
-  u32  red_kind_opt_per_chain [MAX_DIM];
-  for (u32 i = 0; i < MAX_DIM; i++) red_kind_opt_per_chain[i] = RMU_NO_OPT;
-  for (u32 i = 0; i < n_ranges; i++) {
-    if (term_tag(ranges[i]) != TAG_UOP
-        || term_ext(ranges[i]) != UOP_RANGE) continue;
-    u32 axis_id = term_val(heap_read(term_val(ranges[i]) + 0));
-    int is_chain = 0;
-    u32 chain_pos = 0;
-    for (u32 c = 0; c < n_chain; c++) {
-      if (chain_axes[c] == axis_id) { is_chain = 1; chain_pos = c; break; }
-    }
-    if (is_chain) {
-      red_range_per_chain    [chain_pos] = ranges[i];
-      red_kind_opt_per_chain [chain_pos] = opt_kinds[i];
-    } else {
-      out_ranges  [n_out] = ranges[i];
-      out_kinds   [n_out] = opt_kinds[i];
-      out_factors [n_out] = opt_factors[i];
-      n_out++;
-    }
-  }
-  for (u32 i = 0; i < n_chain; i++) {
-    if (red_range_per_chain[i] == 0) return 0;
-  }
-
-  int needs_close[MAX_DIM] = {0};
-  u32 body_depth = rmu_emit_output_loops(addr, out_ranges, out_kinds,
-                                          out_factors, n_out, depth, fp,
-                                          needs_close);
-
-  char acc_names[MAX_DIM][32];
-  u32  red_kinds[MAX_DIM];
-  for (u32 i = 0; i < n_chain; i++) {
-    u64 rloc_i = term_val(chain[i]);
-    red_kinds[i] = term_val(heap_read(rloc_i + 1));
-    u32 ax = term_val(heap_read(rloc_i + 2));
-    snprintf(acc_names[i], sizeof(acc_names[i]), "_acc%u", ax);
-  }
-  u32 cur_depth = body_depth;
-  for (u32 i = 0; i < n_chain; i++) {
-    for (u32 d = 0; d < cur_depth; d++) fputs("  ", fp);
-    fprintf(fp, "float %s = ", acc_names[i]);
-    rmu_emit_reduce_init(red_kinds[i], fp);
-    fputs(";\n", fp);
-    // GPU-generic: small-extent reduce unroll for Metal AND CUDA.
-    if (red_kind_opt_per_chain[i] == RMU_NO_OPT && RMU_TARGET != CG_TARGET_C) {
-      u32 red_extent = uop_range_extent(red_range_per_chain[i]);
-      if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {
-        for (u32 d = 0; d < cur_depth; d++) fputs("  ", fp);
-        fprintf(fp, "#pragma unroll(%u)\n", red_extent);
-      }
-    }
-    rmu_emit_range_open(red_range_per_chain[i], fp, cur_depth,
-                        red_kind_opt_per_chain[i]);
-    cur_depth++;
-  }
-  for (u32 d = 0; d < cur_depth; d++) fputs("  ", fp);
-  rmu_emit_reduce_combine(acc_names[n_chain - 1], red_kinds[n_chain - 1],
-                          leaf, fp);
-  for (i32 i = (i32)n_chain - 1; i > 0; i--) {
-    cur_depth--;
-    for (u32 d = 0; d < cur_depth; d++) fputs("  ", fp);
-    fputs("}\n", fp);
-    for (u32 d = 0; d < cur_depth; d++) fputs("  ", fp);
-    if (red_kinds[i - 1] == REDUCE_MAX) {
-      fprintf(fp, "%s = fmax(%s, %s);\n",
-              acc_names[i - 1], acc_names[i - 1], acc_names[i]);
-    } else {
-      fprintf(fp, "%s = %s + %s;\n",
-              acc_names[i - 1], acc_names[i - 1], acc_names[i]);
-    }
-  }
-  cur_depth--;
-  for (u32 d = 0; d < cur_depth; d++) fputs("  ", fp);
-  fputs("}\n", fp);
-
-  for (u32 d = 0; d < cur_depth; d++) fputs("  ", fp);
-  fprintf(fp, "%s[", rmu_buf_name(buf));
-  rmu_emit_term(addr, fp);
-  fputs("] = ", fp);
-  rmu_store_cast_open(buf, fp);
-  fputs(acc_names[0], fp);
-  rmu_store_cast_close(buf, fp);
-  fputs(";\n", fp);
-
-  for (i32 i = (i32)n_out - 1; i >= 0; i--) {
-    if (!needs_close[i]) continue;
-    body_depth--;
-    for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-    fputs("}\n", fp);
-  }
-  return 1;
-}
-
 // Does the subtree rooted at `t` contain any UOP_RANGE leaf whose
 // axis_id is listed in `up_axes[0..n_up)`?  Used by the parallel-acc
 // emit path (path #2 of docs/tinygrad_late_passes.md) to classify
@@ -4990,16 +4847,9 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   Term addr = heap_read(sloc + 1);
   u64 rloc      = term_val(value);
   Term red_src  = heap_read(rloc + 0);
-  // REDUCE(REDUCE(...)) chain: dispatch to chain-reduce template so each
-  // chain link's accumulator reinitialises inside the enclosing link's
-  // loop.  Falls through to the generic store path only when the body
-  // contains a non-immediate nested reduce (e.g. mean/var-of-reductions
-  // inside an elementwise body) -- the generic post-order hoist handles
-  // those because the inner accumulator is referenced as a sibling
-  // expression, not as the outer's reduce-body directly.
-  if (term_tag(red_src) == TAG_UOP && term_ext(red_src) == UOP_REDUCE) {
-    if (rmu_emit_chain_reduce(store, fp, depth)) return 1;
-  }
+  // Any nested reduce, a direct REDUCE(REDUCE(...)) chain included, goes
+  // to the generic rmu_emit_store path: it opens every axis of every link
+  // and nests each reduce inside the one whose axis its body reads.
   if (rmu_term_has_reduce(red_src, 0)) return 0;
   // emit_store_reduce now handles SINGLE-axis AND multi-axis REDUCE.
   // Multi-axis: collect every reduce axis_id; rmu_split_reduce_multi
