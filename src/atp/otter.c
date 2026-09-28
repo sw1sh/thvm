@@ -207,6 +207,11 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
   row = atp_otter_row_of(s, row, seq);
   if (row == 0xffffffffu) return;
   if (atp_cp_slot_implicit(s, row) || s->cp_packed[row] == NULL) return;
+  // Vampire LRS discards a new clause beyond the limits at retention
+  // (it never enters passive); ours waits for the next horizon prune,
+  // so do not adopt it meanwhile.
+  if (s->use_lrs && s->lrs_horizon != 0u && s->cp_pri[row] > s->lrs_horizon)
+    return;
   // FT-native normalize (the push-time treatment's normalizer): its
   // pattern index appends new rules incrementally, where the Term-side
   // rule index rebuilds after every push.

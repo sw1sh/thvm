@@ -2371,6 +2371,21 @@ static void ftdt_dtb_verify(const FtPiIndex *ix, const FtDtRec *rec,
 // ->x1 keeps the shared variable and joins the CP, WM's more-specific
 // fop(fop(x1,x1),fop(x2,x3))->fop(x3,x2) keeps it distinct and queues
 // it).
+// LPO sibling of the streaming KBO unorient gate: instantiate the
+// replacement face and compare it with the redex under the run's LPO.
+// The unorientable-equation leg below was hard-wired to KBO, so under
+// --ord=lpo the goal check and every R+E normalize gated ordered
+// rewriting with a different ordering than the one completion orients
+// by (sound, but not the ordering the rule set is convergent for).
+static KboCmp ftn_lpo_gate(AtpState *s, AtpFt *a, const AtpFtCell *redex,
+                           const AtpFtCell *tmpl, const AtpFtSubst *subst) {
+  AtpFtCell *repl = ft_subst_apply(a, tmpl, subst, 0);
+  if (repl == NULL) return KBO_UN;
+  LpoCmp c = thvm_lpo_ft(redex, repl, s->lpo);
+  ft_free_span(a, repl, repl->end);
+  return (c == LPO_GT) ? KBO_GT : KBO_UN;
+}
+
 static int ft_cell_try_rules(AtpState   *s,
                              AtpFtCell  *p,
                              u32         slice_first,
@@ -2649,7 +2664,8 @@ static int ft_cell_try_rules(AtpState   *s,
       }
       if (fwd_matched) {
         if (ft_subst_ground_extras(s, rhs, subst_buf)) {
-          if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
+          if (s->lpo == NULL && redex_na == 0u)
+            redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           // Encompassment demodulation (opt-in, Twee reducesSkolem):
           // an instance the open-term KBO calls incomparable still
           // fires when strictly decreasing under the skolem-ground
@@ -2662,7 +2678,9 @@ static int ft_cell_try_rules(AtpState   *s,
           // above supplies the redundancy discipline.  Armed + default:
           // skolem-only (see the gate comment at pass-2 entry).
           KboCmp ft_v;
-          if (gate_armed && skolem_only) {
+          if (s->lpo != NULL) {
+            ft_v = ftn_lpo_gate(s, ft_arena_local, p, rhs, subst_buf);
+          } else if (gate_armed && skolem_only) {
             ft_v = thvm_kbo_ft_skolem_subst_with_prepared(redex_na, rhs,
                                                           subst_buf, s->kbo);
           } else {
@@ -2718,10 +2736,13 @@ static int ft_cell_try_rules(AtpState   *s,
       }
       if (bwd_matched) {
         if (ft_subst_ground_extras(s, lhs, subst_buf)) {
-          if (redex_na == 0u) redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
+          if (s->lpo == NULL && redex_na == 0u)
+            redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           // Encompassment demodulation, backward face (see fwd branch).
           KboCmp ft_v;
-          if (gate_armed && skolem_only) {
+          if (s->lpo != NULL) {
+            ft_v = ftn_lpo_gate(s, ft_arena_local, p, lhs, subst_buf);
+          } else if (gate_armed && skolem_only) {
             ft_v = thvm_kbo_ft_skolem_subst_with_prepared(redex_na, lhs,
                                                           subst_buf, s->kbo);
           } else {

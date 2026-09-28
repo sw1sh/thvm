@@ -673,6 +673,21 @@ static void thvm_atp_interreduce_full(AtpState *s) {
 }
 #endif
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+// Function-symbol set of a flat span, one bit per label mod 64.  A
+// pattern can match inside a term only if the term carries every
+// function symbol of the pattern, so a missing bit proves no redex --
+// the Otter replay's per-adoption interreduce scan skips on it.
+static u64 atp_ft_symmask(const AtpFtCell *c) {
+  u64 m = 0u;
+  const AtpFtCell *e = c->end->next;
+  for (; c != e; c = c->next) {
+    if ((c->sym & WF_VAR_BIT) == 0u) m |= (u64)1 << (c->sym & 63u);
+  }
+  return m;
+}
+#endif
+
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;
   // Vampire bd=preordered (EqHelper::getDemodulationLHSIterator with
@@ -745,8 +760,35 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   // A no-op when already current; the in-loop compaction keeps it valid
   // (lockstep slot shift), so this single ensure suffices.
   if (atp_ir_ft_on()) atp_ft_mirror_ensure(s);
+  // Otter replay: symbol-subset prefilter over the new rules' pattern
+  // faces (the LHS; both faces of an unorientable rule).  Skips exactly
+  // the older rules no pattern can match in, so the pass is unchanged.
+  u64 ir_pm[4];
+  u32 ir_npm = 0u;
+  u8  ir_skip = 0u;
+  if (s->use_otter) {
+    ir_skip = 1u;
+    for (u32 k = 0; k < n_new && ir_skip; k++) {
+      u32 r = added.first + k;
+      if (s->lhs_ft[r] == NULL || s->rhs_ft[r] == NULL) { ir_skip = 0u; break; }
+      ir_pm[ir_npm++] = atp_ft_symmask(s->lhs_ft[r]);
+      if (!s->r_orient[r]) ir_pm[ir_npm++] = atp_ft_symmask(s->rhs_ft[r]);
+    }
+  }
 #endif
   while (i < added.first - dropped) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    if (ir_skip && s->lhs_ft[i] != NULL && s->rhs_ft[i] != NULL) {
+      u64 ml = atp_ft_symmask(s->lhs_ft[i]);
+      u64 mr = s->right_reduce ? atp_ft_symmask(s->rhs_ft[i]) : 0u;
+      u8 may = 0u;
+      for (u32 q = 0; q < ir_npm && !may; q++) {
+        if ((ir_pm[q] & ~ml) == 0u) may = 1u;
+        if (s->right_reduce && (ir_pm[q] & ~mr) == 0u) may = 1u;
+      }
+      if (!may) { i++; continue; }
+    }
+#endif
     // Bound the interreduce transient: this loop runs O(n_rules) normalizes
     // whose scratch is not reclaimed until step end, so on deep completions
     // one interreduce pass alone overruns the from-space.  At the iteration
