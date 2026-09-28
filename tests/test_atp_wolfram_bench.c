@@ -3051,8 +3051,18 @@ int main(int argc, char **argv) {
   {
     const char *awr = getenv("THVM_ATP_AWR");
     if (awr != NULL && awr[0] != '\0') {
-      u32 n = (u32)atoi(awr);
-      if (n > 0) thvm_atp_set_selection_ratio(s, n + 1u);
+      const char *colon = strchr(awr, ':');
+      if (colon != NULL) {
+        // Vampire's a:w form: a age picks per a+w selections.
+        u32 a = (u32)atoi(awr), w = (u32)atoi(colon + 1);
+        if (a > 0 && w > 0) {
+          thvm_atp_set_selection_ratio(s, a + w);
+          s->fifo_age_part = a;
+        }
+      } else {
+        u32 n = (u32)atoi(awr);
+        if (n > 0) thvm_atp_set_selection_ratio(s, n + 1u);
+      }
     }
   }
   // THVM_ATP_GOAL_INTERLEAVE=<N>: enable goal-direction interleaving --

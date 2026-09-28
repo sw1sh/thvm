@@ -1304,7 +1304,10 @@ static inline u8 atp_cp_fifo_dimension(const AtpState *s) {
   u32 modulo = s->fifo_modulo ? s->fifo_modulo : ATP_CP_FIFO_MODULO;
   // Vampire AWPassiveClauseContainer balance: age pick first, then the
   // weight picks, counted in activations.
-  if (s->use_age_depth) return (s->n_activated_re % modulo) == 0u;
+  if (s->use_age_depth) {
+    u32 ap = s->fifo_age_part ? s->fifo_age_part : 1u;
+    return (s->n_activated_re % modulo) < ap;
+  }
   if (s->use_intake_order) {
     static int thr = -2;
     if (thr == -2) {
@@ -1314,7 +1317,8 @@ static inline u8 atp_cp_fifo_dimension(const AtpState *s) {
     if (thr <= 0) return 0u;
     return (s->n_activated_re % modulo) < (u32)thr;
   }
-  return (modulo - ATP_CP_FIFO_THRESHOLD) <= (s->cp_select_count % modulo);
+  u32 thr = s->fifo_age_part ? s->fifo_age_part : ATP_CP_FIFO_THRESHOLD;
+  return (modulo - thr) <= (s->cp_select_count % modulo);
 }
 
 // Select and remove one CP from the queue.  Most calls take the heap

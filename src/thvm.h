@@ -5947,6 +5947,10 @@ typedef struct {
   // heavy CP.  Default 11 (1:10, the most-fair Waldmeister setting);
   // Waldmeister also uses 50/100/200.  0 is treated as the default.
   u32  fifo_modulo;
+  // Age picks per fifo_modulo selections (0 = the historical single
+  // pick).  Set only by the --awr=a:w form (Vampire's age:weight
+  // ratio with a > 1, e.g. Prover9-style age-heavy 3:2).
+  u32  fifo_age_part;
   // Vampire-style random CP-selection seed + ratio.  Default 0 (off,
   // engine byte-identical).  When `random_modulo > 0`, every nth CP
   // selection picks a uniformly-random queued CP instead of the heap
