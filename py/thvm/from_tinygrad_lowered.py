@@ -116,6 +116,10 @@ class _Lowerer:
             # migrating INTO that arg (size, then shape in #17783, then the
             # device Buffer in #17913), so prefer the declared arg.size over
             # inferring the element count from the pointer dtype.
+            if "ALU" in str(getattr(u.arg, "addrspace", "")):
+                # A bound Variable is an ALU PARAM (slot -1, tinygrad
+                # #18444): a scalar argument, not a buffer to bind.
+                raise NotImplementedError("ALU PARAM (bound Variable) in a lowered kernel")
             slot = int(getattr(u.arg, "slot", u.arg))
             n = getattr(u.arg, "size", None)
             n = int(n) if n is not None else (_ptr_numel(u.dtype) or 1)
@@ -172,10 +176,12 @@ class _Lowerer:
             t = h.unary(K.SQRT, self.emit(u.src[0]))
         elif op is getattr(Ops, "NEG", None):
             t = h.unary(K.NEG, self.emit(u.src[0]))
-        elif op is getattr(Ops, "CAST", None) or op is getattr(Ops, "BITCAST", None):
-            # value-preserving cast; thvm cast to the node's dtype
+        elif op is getattr(Ops, "CAST", None):
             dst = K.INT32 if _is_int_dtype(u.dtype) else K.FP32
             t = h.cast(self.emit(u.src[0]), dst)
+        elif op is getattr(Ops, "BITCAST", None):
+            dst = K.INT32 if _is_int_dtype(u.dtype) else K.FP32
+            t = h.bitcast(self.emit(u.src[0]), dst)
         elif op is getattr(Ops, "MAX", None):
             # Binary MAX survives into the lowered IR now (relu = MAX(x, 0)).
             # thvm's kernel IR has no max opcode; a true select via IWHERE
@@ -276,7 +282,7 @@ def _slot_inputs(kernel, calls, params, py_data):
     links = _copy_links(calls)
     inputs, missing = {}, []
     for slot in (s for s in sorted(params) if s != 0):
-        buf = kernel_bufs[slot] if slot < len(kernel_bufs) else None
+        buf = kernel_bufs[slot] if 0 < slot < len(kernel_bufs) else None
         while buf is not None and buf in links:
             buf = links[buf]
         uq = _uniq(buf) if buf is not None else None

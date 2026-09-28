@@ -49,6 +49,7 @@ from .thvm import (
     _term_fconst,
     _term_iconst,
     _uop_binary,
+    _uop_bitcast,
     _uop_cast,
     _uop_expand,
     _uop_flip,
@@ -94,6 +95,10 @@ def _reduce(kind: int, axis: int, src: int) -> int:
 
 def _cast(src: int, dtype_id: int) -> int:
     return int(_uop_cast(_ct.c_uint64(int(src)), _ct.c_uint32(int(dtype_id))))
+
+
+def _bitcast(src: int, dtype_id: int) -> int:
+    return int(_uop_bitcast(_ct.c_uint64(int(src)), _ct.c_uint32(int(dtype_id))))
 
 
 def _fconst(value: float) -> int:
@@ -211,18 +216,6 @@ def _ops_const():
     return Ops.CONST
 
 
-def _find_buffer(u):
-    """Descend through COPY / RESHAPE / DEVICE plumbing to the BUFFER leaf."""
-    Ops = _ops()
-    stack = [u]
-    while stack:
-        node = stack.pop()
-        if node.op == Ops.BUFFER:
-            return node
-        stack.extend(node.src)
-    return None
-
-
 def _movement_begin_end(u, kind: str):
     """Decode a PAD / SHRINK movement-arg into thvm's flat
     [begin0,end0,begin1,end1,...] per-axis bounds.
@@ -324,20 +317,24 @@ def _emit(u, memo: dict[int, int]) -> int:
     op = u.op
 
     # ---- leaves -------------------------------------------------------
-    if op in (Ops.BUFFER, Ops.COPY):
-        # Read the realized host data of the BUFFER beneath this node and
-        # build a fresh thvm leaf tensor from it.
-        buf = _find_buffer(u)
-        if buf is None:
-            raise NotImplementedError(f"no BUFFER under {op}")
-        arr = buf.buffer.numpy()
-        dt = _to_dtype(buf.dtype)
-        # tinygrad's leaf BUFFER is flat; reshape to this node's shape.
+    if op == Ops.BUFFER:
+        # Read the realized host data into a fresh thvm leaf tensor.
+        arr = u.buffer.numpy()
+        dt = _to_dtype(u.dtype)
         target = _shape_of(u)
         if target and tuple(arr.shape) != target:
             arr = arr.reshape(target)
         leaf = Tensor._from_numpy(arr.astype(dt.np_dtype, copy=False), dt)
         term = int(leaf.term)
+        memo[key] = term
+        return term
+
+    # A COPY's value is its src[0] (a single-device COPY is an identity,
+    # schedule/prepare.py:214-215); src[1:] carries device plumbing.
+    # Descending to "the first BUFFER below" dropped the computation and any
+    # movement between the COPY and its buffer.
+    if op == Ops.COPY:
+        term = _emit(u.src[0], memo)
         memo[key] = term
         return term
 
@@ -505,7 +502,7 @@ def _emit(u, memo: dict[int, int]) -> int:
     if op in (Ops.CAST, Ops.BITCAST):
         src = _emit(u.src[0], memo)
         dt = _to_dtype(u.dtype)
-        term = _cast(src, dt.thvm_id)
+        term = (_bitcast if op == Ops.BITCAST else _cast)(src, dt.thvm_id)
         memo[key] = term
         return term
 

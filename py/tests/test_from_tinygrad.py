@@ -67,6 +67,29 @@ def test_maximum_nonfinite():
     _check(x.maximum(y))
 
 
+def test_copy_of_computation():
+    # A COPY's value is its src[0]; reading "the first BUFFER below it"
+    # returned one operand of the add.
+    t = (TgTensor([1., 2, 3]) + TgTensor([10., 20, 30])).to("CPU:1")
+    _check(t)
+
+
+def test_copy_of_permute():
+    x = np.arange(6, dtype=np.float32).reshape(2, 3)
+    t = TgTensor(x).permute(1, 0).to("CPU:1")
+    expected = t.numpy()
+    if not np.array_equal(expected, x.T):
+        pytest.skip("this tinygrad checkout mis-copies a permuted view itself")
+    _check(t)
+
+
+def test_bitcast_reinterprets_bits():
+    from tinygrad import dtypes as tg_dtypes
+    t = TgTensor([1.0, -2.0, 0.5]).bitcast(tg_dtypes.int32)
+    got = from_tinygrad(t).numpy()
+    np.testing.assert_array_equal(got, np.array([1.0, -2.0, 0.5], np.float32).view(np.int32))
+
+
 def test_reduce_max_axis0():
     np.random.seed(3)
     x = np.random.randn(4, 6).astype(np.float32)

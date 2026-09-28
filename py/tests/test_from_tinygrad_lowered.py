@@ -74,6 +74,34 @@ class TestFromTinygradLowered(unittest.TestCase):
     def test_max(self):
         T = _tg(); self._chk(lambda: T(self.C).max())
 
+    def test_bitcast_then_cast(self):
+        # BITCAST reinterprets the bits; a value cast would give ~x.
+        from tinygrad import dtypes
+        T = _tg()
+        P = np.abs(self.A) + 0.5
+        got, ref, _ = cross_validate(lambda: T(P).bitcast(dtypes.int32).cast(dtypes.float32),
+                                     backend=_BACKEND)
+        np.testing.assert_allclose(got, ref, rtol=1e-6)
+
+    def test_alu_param_refused(self):
+        # A bound Variable is an ALU-addrspace PARAM (slot -1, tinygrad
+        # #18444): a scalar argument, not a buffer this bridge can bind.
+        from tinygrad.uop.ops import UOp, Ops
+        try:
+            from tinygrad.uop.ops import ParamArg
+            from tinygrad.dtype import AddrSpace, dtypes
+        except ImportError:
+            self.skipTest("tinygrad checkout predates ParamArg.addrspace")
+        if not {"addrspace", "dtype"} <= set(getattr(ParamArg, "__dataclass_fields__", {})):
+            self.skipTest("tinygrad checkout predates ParamArg(dtype, addrspace)")
+        from thvm.thvm import Thvm
+        from thvm.from_tinygrad_lowered import _Lowerer
+        u = UOp(Ops.PARAM, arg=ParamArg(slot=-1, dtype=dtypes.int32, addrspace=AddrSpace.ALU))
+        low = _Lowerer(Thvm())
+        with self.assertRaises(NotImplementedError):
+            low.emit(u)
+        self.assertNotIn(-1, low.params)
+
     # --- KOpt level: apply a thvm KOpt to the imported kernel; the
     #     OPTIMIZED kernel must still match tinygrad's result. ---
     def _chk_opt(self, build_fn, opts):

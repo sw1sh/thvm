@@ -38,8 +38,14 @@ for the per-commit story.
   MLP, GPT-2 example pipelines.
 - Cross-framework benchmarks vs tinygrad / PyTorch MPS / MLX.
 - Python cross-validation bridges (`py/thvm/from_tinygrad*.py`) track
-  tinygrad master 365f87a8a (STAGE passthrough, copy-as-store schedules);
+  tinygrad master 365f87a8a (STAGE passthrough, copy-as-store schedules,
+  AFTER writes, COPY as a value identity, BITCAST as a real reinterpret);
   the lowered-kernel bridge validates on CPU by default.
+- py frontend follows tinygrad's training switch: the `TRAINING` ContextVar
+  and a decorator-capable `Context` replace `Tensor.training`, which now
+  raises instead of silently doing nothing.  Muon applies its post-momentum
+  weight decay (tinygrad #17709).  New `Tensor.softmin`, `max_shape`,
+  `max_numel`.
 
 ### Equational reasoning (parallel research)
 - FindProof builds on modern Linux compilers: the TPTP UEQ reader no longer calls the GNU-only `memmem`, which gcc 14+ / clang 16+ reject as an implicit declaration under thvm's strict feature macros (older compilers truncated its pointer result to `int`).

@@ -92,6 +92,7 @@ _ten_shape = _bind("py_ten_shape", c_uint32, c_uint64,
                    ctypes.POINTER(c_uint32))
 _uop_unary = _bind("py_uop_unary", c_uint64, c_uint32, c_uint64)
 _uop_cast = _bind("py_uop_cast", c_uint64, c_uint64, c_uint32)
+_uop_bitcast = _bind("py_uop_bitcast", c_uint64, c_uint64, c_uint32)
 _uop_reshape = _bind("py_uop_reshape", c_uint64,
                      c_uint64, c_uint32, ctypes.POINTER(c_uint32))
 _uop_permute = _bind("py_uop_permute", c_uint64,
@@ -521,6 +522,10 @@ class Thvm:
 
     def cast(self, x: Term, dst_dtype: int) -> Term:
         return Term(_uop_cast(c_uint64(int(x)), c_uint32(int(dst_dtype))))
+
+    def bitcast(self, x: Term, dst_dtype: int) -> Term:
+        """Same-itemsize reinterpret of the bits (not a value conversion)."""
+        return Term(_uop_bitcast(c_uint64(int(x)), c_uint32(int(dst_dtype))))
 
     # ---- movement ops ----
     def _move(self, fn, src: Term, dims) -> Term:

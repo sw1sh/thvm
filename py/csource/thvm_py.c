@@ -189,6 +189,9 @@ EXPORT uint64_t py_uop_unary(uint32_t opcode, uint64_t src) {
 EXPORT uint64_t py_uop_cast(uint64_t src, uint32_t dst_dtype) {
   return uop_cast(src, dst_dtype);
 }
+EXPORT uint64_t py_uop_bitcast(uint64_t src, uint32_t dst_dtype) {
+  return uop_bitcast(src, dst_dtype);
+}
 
 // --- movement ops (tinygrad reshape/permute/expand/pad/shrink/flip).
 //     pad / shrink take begin_end[2*ndim]; flip takes an axes bitmask. ---
