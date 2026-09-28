@@ -5991,8 +5991,10 @@ typedef struct {
   // 100-CP random sample of the queue is dead -- joinable under the
   // current R or orphaned (Twee cfg_renormalise_threshold = 20 over
   // cfg_cp_sample_size = 100).  0 = legacy every-period-rules sweep.
+  // The three stamps are process CPU microseconds (atp_cpu_now_us),
+  // Twee's getCPUTime clock, so the gates ignore time spent descheduled.
   u32  cp_set_ir_budget;          // percent; 0 -> period discipline
-  u64  cp_set_ir_spent_us;        // cumulative sweep + sample-check time
+  u64  cp_set_ir_spent_us;        // cumulative sweep + sample-check CPU
   u64  cp_set_ir_last_us;         // last discipline check (freq gate)
   u64  cp_set_ir_start_us;        // discipline epoch (first check)
   u32  n_cp_set_ir_passes;        // diagnostics: passes run

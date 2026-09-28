@@ -2805,7 +2805,8 @@ atpGoalNarrowOpt[o_Association] := Switch[Lookup[o, "GoalNarrow", Automatic],
    the CP-set interreduction sweep (freq 10s + budget% + 20%-dead
    sample trigger, Twee.hs:978 / Task.hs; Twee's default share is 5).
    Non-zero swaps the sweep's rule-count period gate for the time
-   budget; inert unless "CPSetInterreduce" -> True arms the sweep.
+   budget, measured in process CPU time like Twee's getCPUTime; inert
+   unless "CPSetInterreduce" -> True arms the sweep.
    CLI --cp-set-ir-budget / env THVM_ATP_CP_SET_IR_BUDGET. *)
 atpCPSetIRBudgetOpt[o_Association] := With[{n = Lookup[o, "CPSetIRBudget", 0]},
     If[ IntegerQ[n] && n > 0, n, 0]];

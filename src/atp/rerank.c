@@ -1415,9 +1415,14 @@ static u64 atp_now_us(void) {
   return (u64)ts.tv_sec * 1000000ull + (u64)(ts.tv_nsec / 1000);
 }
 
-// Process CPU microseconds (CLOCK_PROCESS_CPUTIME_ID).  Time spent
-// descheduled on a loaded machine advances the wall clock but not this
-// one.  Falls back to the wall clock where the CPU clock is missing.
+// Process CPU microseconds (CLOCK_PROCESS_CPUTIME_ID) -- the clock of
+// the search disciplines ported from provers that time themselves in
+// CPU: Twee's Task.hs reads getCPUTime, which GHC implements with this
+// exact clock id.  Time spent descheduled on a loaded machine advances
+// the wall clock but not this one, so a discipline gated on it fires at
+// the same point of the search whatever else shares the machine.  The
+// engine is single-threaded, so the process clock is the prover's own
+// CPU.  Falls back to the wall clock where the CPU clock is missing.
 static u64 atp_cpu_now_us(void) {
 #ifdef CLOCK_PROCESS_CPUTIME_ID
   struct timespec ts;
@@ -2767,16 +2772,17 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   // discipline (atp_cp_set_ir_due): the every-16-rules full sweep costs
   // 80%+ of the wall on hard UEQ targets (LAT138-1: 24.5s of 30s), where
   // Twee holds the same renormalisation to ~5% of the run and still
-  // reaches the proofs -- the budget buys back the completion time.
+  // reaches the proofs -- the budget buys back the completion time.  The
+  // sweep's cost accrues in process CPU time, the discipline's clock.
   if (s->cp_set_interreduce && added.count > 0u) {
     if (s->cp_set_ir_budget > 0u) {
       if (atp_cp_set_ir_due(s)) {
         u32 cps0 = s->n_cps;
-        u64 t0 = atp_now_us();
+        u64 t0 = atp_cpu_now_us();
         u64 _ph_cpir_t0 = atp_phase_now(); g_thvm_phase = "cp_set_ir";
         atp_cp_set_interreduce(s);
         if (g_atp_phase_enabled) g_atp_phase_us_cp_set_ir += atp_now_us() - _ph_cpir_t0;
-        u64 t1 = atp_now_us();
+        u64 t1 = atp_cpu_now_us();
         s->cp_set_ir_spent_us += t1 - t0;
         s->cp_set_ir_last_us = t1;
         FILE *tf = atp_clock_trace();

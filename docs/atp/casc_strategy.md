@@ -240,7 +240,10 @@ Key faithfulness details that took the most work:
   5% budget, `--cp-set-ir-budget=5`) instead of an every-16-rules full sweep
   (3x the throughput); removing Waldmeister's Waisenmord (orphan murder) so
   parent-collapsed CPs survive to be re-scored the way Twee does. These flip
-  the lattice/group residuals (LAT149, GRP177/706/753/766).
+  the lattice/group residuals (LAT149, GRP177/706/753/766). The task
+  discipline runs on process CPU time, Twee's own clock (`Task.hs` reads
+  `getCPUTime`), so a slice descheduled by a loaded machine sweeps at the
+  same selection indices as an unloaded one.
 - **AC-completion** (`--full-ac`): the engine has a full AC subsystem
   (AC-matching, Stickel AC-unification, AC-flatten/canon in `src/atp/ac.c`)
   that used to be compiled in but inert. `--full-ac` auto-detects AC operators
