@@ -9,6 +9,57 @@
 
 #include "../src/thvm.c"
 #include "test.h"
+#include <time.h>
+
+// Structural hash of an index DAG over op, payload and children, never
+// heap addresses, so a golden value holds across builds that allocate
+// differently.  Memoised: the chains below share subterms heavily.
+#define SHASH_SLOTS 8192
+static Term shash_key[SHASH_SLOTS];
+static u64  shash_val[SHASH_SLOTS];
+
+static u64 shash_mix(u64 h, u64 v) { return (h ^ v) * 1099511628211ull; }
+
+static u64 shash(Term t) {
+  u32 h = (u32)(((u64)t * 0x9E3779B97F4A7C15ull) >> 51) & (SHASH_SLOTS - 1);
+  for (u32 i = h; shash_key[i] != 0; i = (i + 1) & (SHASH_SLOTS - 1)) {
+    if (shash_key[i] == t) {
+      return shash_val[i];
+    }
+  }
+  u64 v = shash_mix(1469598103934665603ull, term_tag(t));
+  if (term_tag(t) == TAG_UOP) {
+    u32 op  = term_ext(t);
+    u64 loc = term_val(t);
+    v = shash_mix(v, op);
+    switch (op) {
+      case UOP_CONST: v = shash_mix(v, term_val(heap_read(loc))); break;
+      case UOP_RANGE:
+        v = shash_mix(v, term_val(heap_read(loc)));
+        v = shash_mix(v, term_val(heap_read(loc + 2)));
+        break;
+      case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+      case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
+      case UOP_IXOR: case UOP_ISHR:
+        v = shash_mix(v, shash(heap_read(loc)));
+        v = shash_mix(v, shash(heap_read(loc + 1)));
+        break;
+      case UOP_IWHERE:
+        v = shash_mix(v, shash(heap_read(loc)));
+        v = shash_mix(v, shash(heap_read(loc + 1)));
+        v = shash_mix(v, shash(heap_read(loc + 2)));
+        break;
+      default: break;
+    }
+  }
+  u32 i = h;
+  while (shash_key[i] != 0) {
+    i = (i + 1) & (SHASH_SLOTS - 1);
+  }
+  shash_key[i] = t;
+  shash_val[i] = v;
+  return v;
+}
 
 int main(void) {
   thvm_init();
@@ -1033,6 +1084,75 @@ int main(void) {
     } else {
       CHECK_EQ(1, 1);
     }
+  }
+
+  // === IWHERE closure fold and gate merges (tinygrad symbolic.py:228-259) ===
+  {
+    Term wx = uop_range(600, KAX_LOOP, 11);
+    Term wy = uop_range(601, KAX_LOOP, 11);
+    Term wa = uop_range(602, KAX_LOOP, 4);
+    Term wc = uop_int_binary(UOP_ILT, wx, uop_iconst(5));
+    Term wg = uop_int_binary(UOP_ILT, wy, uop_iconst(7));
+    Term cg = uop_int_binary(UOP_IAND, wc, wg);
+
+    // The outer cond folds to 1 inside the inner gate before the two
+    // gates merge, so the merged gate carries no repeated conjunct
+    // (test_where_closure_folding_before_gate_merge, #18268).
+    TEST_BEGIN("where/closure-before-gate-merge");
+    CHECK_EQ(uop_iwhere(wc, uop_iwhere(cg, wa, zero), zero), uop_iwhere(cg, wa, zero));
+
+    TEST_BEGIN("where/closure-else-branch");
+    // Inside the else branch the cond is 0: c ? a : (c ? 1 : y) -> c ? a : y.
+    CHECK_EQ(uop_iwhere(wc, wa, uop_iwhere(wc, one, wy)), uop_iwhere(wc, wa, wy));
+
+    TEST_BEGIN("where/else-branch-merge");
+    // a.where(c, b.where(c, d)) -> (a|b).where(c, d).
+    CHECK_EQ(uop_iwhere(wc, wa, uop_iwhere(wg, wa, zero)),
+             uop_iwhere(uop_int_binary(UOP_IOR, wc, wg), wa, zero));
+
+    TEST_BEGIN("where/closure-skips-non-bool-cond");
+    // k = x & 3 is not 0/1, so k != 0 does not make k == 1 in the then branch.
+    Term wk = uop_int_binary(UOP_IAND, wx, uop_iconst(3));
+    Term wkk = uop_int_binary(UOP_IMUL, wk, two);
+    Term wnb = uop_iwhere(wk, wkk, zero);
+    CHECK_EQ(term_ext(wnb), UOP_IWHERE);
+    CHECK_EQ(heap_read(term_val(wnb) + 1), wkk);
+
+    TEST_BEGIN("where/closure-skips-index-gates");
+    // A load under the gate or in its cond belongs to the valid machinery
+    // (tinygrad's op_in_backward_slice_with_self(Ops.INDEX) guard).
+    u32  wdims[1] = { 16 };
+    Term wld = uop_index_e(uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_INT32, 1, wdims, 2), wx);
+    Term wsum = uop_int_binary(UOP_IADD, wld, wc);
+    Term wix = uop_iwhere(wc, wsum, zero);
+    CHECK_EQ(heap_read(term_val(wix) + 1), wsum);
+    Term wlc = uop_int_binary(UOP_ILT, wld, uop_iconst(5));
+    Term wlt = uop_int_binary(UOP_IADD, wlc, wx);
+    Term wix2 = uop_iwhere(wlc, wlt, zero);
+    CHECK_EQ(heap_read(term_val(wix2) + 1), wlt);
+
+    // Deep shared chains: the closure scan stays bounded on them and the
+    // fold never fires, so both build to fixed terms, pinned here by
+    // structural hash.  The clamp chain is reduce_collapse's min shape;
+    // the gate chain nests PAD gates the way the col2im index composes
+    // them.
+    TEST_BEGIN("where/deep-chains-unchanged");
+    clock_t t0 = clock();
+    Term wm = uop_range(610, KAX_LOOP, 11);
+    for (u32 i = 0; i < 40; i++) {
+      Term k = uop_iconst(5 + (i % 3));
+      wm = uop_iwhere(uop_int_binary(UOP_ILT, wm, k), wm, k);
+    }
+    Term wp = uop_range(611, KAX_LOOP, 64);
+    for (u32 i = 0; i < 40; i++) {
+      Term valid = uop_int_binary(UOP_IAND, uop_int_binary(UOP_ILT, zero, wp),
+                                            uop_int_binary(UOP_ILT, wp, uop_iconst(63 - i)));
+      wp = uop_iwhere(valid, uop_int_binary(UOP_ISUB, wp, one), uop_invalid());
+    }
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    CHECK(secs < 2.0);
+    CHECK_EQ(shash(wm), 0x3d989531e7008ff8ull);
+    CHECK_EQ(shash(wp), 0x127cb1947f463466ull);
   }
 
   thvm_free();

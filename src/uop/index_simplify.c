@@ -1597,13 +1597,15 @@ static Term uop_index_substitute(Term t, Term from, Term to, u32 depth) {
 // Bits returned by uop_index_scan.
 #define UOP_SCAN_FOUND   1u  // one of the `find` terms occurs
 #define UOP_SCAN_GAVE_UP 2u  // too many visits or too deep
+#define UOP_SCAN_OPAQUE  4u  // a node outside the index layer (INDEX_E, LOAD, ...)
 #define UOP_SCAN_STACK   256
 
 // Walk the index DAG under `root`, descending the ten binary I-ops and
-// IWHERE, and report whether any of the `nfind` terms occurs.  There is
-// no visited set, so a shared subtree is walked once per reference:
-// `budget` caps the visits and the explicit stack caps the depth.
-// Callers must treat UOP_SCAN_GAVE_UP as "unknown".
+// IWHERE, and report whether any of the `nfind` terms occurs and whether
+// anything other than those ops and RANGE/CONST/INVALID leaves does.
+// There is no visited set, so a shared subtree is walked once per
+// reference: `budget` caps the visits and the explicit stack caps the
+// depth.  Callers must treat UOP_SCAN_GAVE_UP as "unknown".
 static u32 uop_index_scan(Term root, Term const *find, u32 nfind, u32 budget) {
   Term stack[UOP_SCAN_STACK];
   u32  sp = 0, visits = 0, out = 0;
@@ -1622,15 +1624,19 @@ static u32 uop_index_scan(Term root, Term const *find, u32 nfind, u32 budget) {
       continue;
     }
     if (term_tag(t) != TAG_UOP) {
+      if (term_tag(t) != TAG_NUM) {
+        out |= UOP_SCAN_OPAQUE;
+      }
       continue;
     }
-    u32 n;
+    u32 n = 0;
     switch (term_ext(t)) {
       case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
       case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
       case UOP_IXOR: case UOP_ISHR: n = 2; break;
       case UOP_IWHERE:              n = 3; break;
-      default:                      n = 0; break;
+      case UOP_RANGE: case UOP_CONST: case UOP_INVALID: break;
+      default: out |= UOP_SCAN_OPAQUE; break;
     }
     if (sp + n > UOP_SCAN_STACK) {
       return out | UOP_SCAN_GAVE_UP;
@@ -1805,7 +1811,8 @@ static Term uop_valid_try(Term uop, Term const *from, Term const *to,
   for (u32 i = 0; i < n; i++) {
     sub = uop_index_substitute(sub, fakes[i], backs[i], 0);
   }
-  if (uop_index_scan(sub, fakes, n, UOP_VALID_SCAN_BUDGET) != 0) {
+  u32 left = uop_index_scan(sub, fakes, n, UOP_VALID_SCAN_BUDGET);
+  if (left & (UOP_SCAN_FOUND | UOP_SCAN_GAVE_UP)) {
     return uop;
   }
   return sub;
@@ -1822,7 +1829,8 @@ static Term uop_valid_simplex(Term uop, Term const *xs, u32 nx) {
     if (op != UOP_RANGE && op != UOP_CONST) {
       return uop;
     }
-    if (uop_index_scan(uop, &xs[i], 1, UOP_VALID_SCAN_BUDGET) != UOP_SCAN_FOUND) {
+    u32 seen = uop_index_scan(uop, &xs[i], 1, UOP_VALID_SCAN_BUDGET);
+    if ((seen & (UOP_SCAN_FOUND | UOP_SCAN_GAVE_UP)) != UOP_SCAN_FOUND) {
       return uop;
     }
   }
@@ -1898,17 +1906,78 @@ static Term uop_given_valid(Term valid, Term uop, int try_simplex) {
 
 // === Ternary IWHERE simplifier ===
 
+#define UOP_CLOSURE_SCAN_BUDGET 256
+
+// 1 iff `t` is an index leaf, which cannot contain a gate's cond.
+static int uop_is_index_leaf(Term t) {
+  if (term_tag(t) != TAG_UOP) {
+    return term_tag(t) == TAG_NUM;
+  }
+  switch (term_ext(t)) {
+    case UOP_RANGE: case UOP_CONST: case UOP_INVALID: return 1;
+    default: return 0;
+  }
+}
+
+// fold_where_closure (tinygrad symbolic.py:228-233): in cond.where(t, f),
+// cond is true inside t and false inside f.  tinygrad matches a bool
+// cond; thvm's conds are ints, so cond -> 1 inside t needs cond in
+// [0, 1], while cond -> 0 inside f holds for any cond.  A gate with a
+// load or any other non-index node in it is left alone, as tinygrad
+// leaves INDEX gates to the valid machinery.  Every IWHERE is built
+// through here, value selects and deep PAD-gate chains included, so the
+// scans are bounded and a gate over two leaves exits before any scan.
+static Term uop_fold_where_closure(Term cond, Term t, Term f) {
+  if (term_tag(cond) != TAG_UOP) {
+    return 0;
+  }
+  switch (term_ext(cond)) {
+    case UOP_ILT: case UOP_IAND: case UOP_IOR: break;
+    default: return 0;
+  }
+  int t_leaf = uop_is_index_leaf(t);
+  int f_leaf = uop_is_index_leaf(f);
+  if (t_leaf && f_leaf) {
+    return 0;
+  }
+  if (uop_index_scan(cond, NULL, 0, UOP_CLOSURE_SCAN_BUDGET) != 0) {
+    return 0;
+  }
+  u32 ts = t_leaf ? 0 : uop_index_scan(t, &cond, 1, UOP_CLOSURE_SCAN_BUDGET);
+  u32 fs = f_leaf ? 0 : uop_index_scan(f, &cond, 1, UOP_CLOSURE_SCAN_BUDGET);
+  if ((ts | fs) & (UOP_SCAN_GAVE_UP | UOP_SCAN_OPAQUE)) {
+    return 0;
+  }
+  Term nt = t, nf = f;
+  i64  lo, hi;
+  if ((ts & UOP_SCAN_FOUND) && uop_int_bounds(cond, &lo, &hi) && lo >= 0 && hi <= 1) {
+    nt = uop_index_substitute(t, cond, uop_iconst(1), 0);
+  }
+  if (fs & UOP_SCAN_FOUND) {
+    nf = uop_index_substitute(f, cond, uop_iconst(0), 0);
+  }
+  if (nt == t && nf == f) {
+    return 0;
+  }
+  return uop_iwhere(cond, nt, nf);
+}
+
 static Term uop_simplify_iwhere_body(Term cond, Term then_v, Term else_v) {
   i64 cv;
   if (uop_iconst_value(cond, &cv)) {
     return cv != 0 ? then_v : else_v;
   }
   if (then_v == else_v) return then_v;
+  // The closure fold runs before the gate merges, so a merged gate
+  // carries no repeated conjunct (tinygrad symbolic.py:253-254, #18268).
+  {
+    Term r = uop_fold_where_closure(cond, then_v, else_v);
+    if (r != 0) return r;
+  }
   // IWHERE-of-IWHERE collapse: when the then-branch is itself an
   // IWHERE that shares the same else-branch (the canonical PAD-mask
   // shape: IWHERE(c1, IWHERE(c2, val, INVALID), INVALID)), combine
-  // the conditions via IAND.  Mirrors emit_iwhere's nested-fold in
-  // schedule/rangeify.c.
+  // the conditions via IAND.  tinygrad symbolic.py:256-257.
   if (term_tag(then_v) == TAG_UOP && term_ext(then_v) == UOP_IWHERE) {
     Term inner_cond = heap_read(term_val(then_v) + 0);
     Term inner_then = heap_read(term_val(then_v) + 1);
@@ -1917,6 +1986,15 @@ static Term uop_simplify_iwhere_body(Term cond, Term then_v, Term else_v) {
       Term combined = uop_int_binary(UOP_IAND, cond, inner_cond);
       return uop_iwhere(combined, inner_then, else_v);
     }
+  }
+  // a.where(c, b.where(c, d)) -> (a|b).where(c, d), tinygrad
+  // symbolic.py:258-259.  IOR is bitwise, so a|b is nonzero exactly when
+  // a or b is, for any ints.
+  if (term_tag(else_v) == TAG_UOP && term_ext(else_v) == UOP_IWHERE
+      && heap_read(term_val(else_v) + 1) == then_v) {
+    Term inner_cond = heap_read(term_val(else_v) + 0);
+    Term inner_else = heap_read(term_val(else_v) + 2);
+    return uop_iwhere(uop_int_binary(UOP_IOR, cond, inner_cond), then_v, inner_else);
   }
   // drop_and_clauses (tinygrad symbolic.py:382-385): in WHERE(cond, x, INV)
   // partition cond's AND-clauses by whether their ranges appear in x; if
