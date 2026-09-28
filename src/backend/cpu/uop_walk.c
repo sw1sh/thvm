@@ -73,6 +73,14 @@ typedef struct {
   u32   red_free_ids [UWALK_MAX_REDUCES][UWALK_MAX_RANGES];     // axis_id per snapshot slot
   u32   red_free_iter[UWALK_MAX_REDUCES][UWALK_MAX_RANGES];     // iter value at cache time
   u32   n_reduces;
+  // Split-inner axes of the current store: the UNROLL/UPCAST half of a
+  // hand_opts-split reduce axis, which REDUCE.axes does not name.  Each is
+  // iterated by the reduce owning it (uop_reduce_owns_split_axis), never as
+  // a store loop.  An owner of 0 (no split composition found) makes every
+  // reduce whose body holds the axis iterate it, as the renderer does.
+  u32   split_aid  [UWALK_MAX_RANGES];
+  Term  split_owner[UWALK_MAX_RANGES];
+  u32   n_split;
   // Input/output buffer pointers + dtypes, indexed by slot.
   Term  in_terms [UWALK_MAX_INPUTS];   // UOP_BUFFER terms (for slot match)
   void *in_ptrs  [UWALK_MAX_INPUTS];
@@ -310,11 +318,31 @@ static int uwalk_reduce_lookup(UWalkCtx const *c, Term red, double *out) {
 // for the iter-aware reduce cache uses it from here.
 static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out);
 
+// 1 iff `red` iterates split-inner axis `aid` of the current store: it owns
+// the split, or no reduce does and `red`'s body (ranges `body`) holds it.
+static int uwalk_reduce_folds_split(UWalkCtx const *c, Term red, u32 aid,
+                                    Term const *body, u32 n_body) {
+  for (u32 i = 0; i < c->n_split; i++) {
+    if (c->split_aid[i] != aid) {
+      continue;
+    }
+    if (c->split_owner[i] != 0) {
+      return c->split_owner[i] == red;
+    }
+    for (u32 j = 0; j < n_body; j++) {
+      if ((u32)term_val(heap_read(term_val(body[j]) + 0)) == aid) {
+        return 1;
+      }
+    }
+    return 0;
+  }
+  return 0;
+}
+
 // Walk a REDUCE's body and collect axis_ids the body references,
-// excluding the REDUCE's OWN axes (all n_axes are bound inside the
-// reduce loops, not by the enclosing iter state).  Returns the count,
-// writes ids into out[] up to cap.
-static u8 uwalk_reduce_free_axes(Term red, u32 *out, u8 cap) {
+// excluding the axes the REDUCE binds (its n_axes plus the split-inner
+// axes it folds).  Returns the count, writes ids into out[] up to cap.
+static u8 uwalk_reduce_free_axes(UWalkCtx const *c, Term red, u32 *out, u8 cap) {
   Term body      = uop_reduce_src(red);
   u32  n_axes    = uop_reduce_n_axes(red);
   u32  own_axes[MAX_DIM];
@@ -328,6 +356,9 @@ static u8 uwalk_reduce_free_axes(Term red, u32 *out, u8 cap) {
     int is_own = 0;
     for (u32 j = 0; j < n_axes; j++) if (own_axes[j] == ax) { is_own = 1; break; }
     if (is_own) continue;
+    if (uwalk_reduce_folds_split(c, red, ax, ranges_buf, n_r)) {
+      continue;
+    }
     if (n_free >= cap) break;
     out[n_free++] = ax;
   }
@@ -485,7 +516,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       u32 slot = c->n_reduces++;
       c->red_term[slot]   = t;
       c->red_acc[slot]    = v;
-      c->red_n_free[slot] = uwalk_reduce_free_axes(t,
+      c->red_n_free[slot] = uwalk_reduce_free_axes(c, t,
                               c->red_free_ids[slot], UWALK_MAX_RANGES);
       uwalk_reduce_snapshot_save(c, slot);
       return v;
@@ -621,7 +652,7 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       u32 slot = c->n_reduces++;
       c->red_term[slot]   = t;
       c->red_acc[slot]    = v;
-      c->red_n_free[slot] = uwalk_reduce_free_axes(t,
+      c->red_n_free[slot] = uwalk_reduce_free_axes(c, t,
                               c->red_free_ids[slot], UWALK_MAX_RANGES);
       uwalk_reduce_snapshot_save(c, slot);
       return (i64)v;
@@ -748,6 +779,145 @@ static void uwalk_collect_reduces(Term t, Term *reduces, u32 *n_out) {
   }
 }
 
+// Collect every REDUCE under `t`, nested reduce bodies included.
+static void uwalk_collect_all_reduces(Term t, Term *reduces, u32 *n_out,
+                                      u32 depth) {
+  if (depth > 256 || term_tag(t) != TAG_UOP || *n_out >= UWALK_MAX_REDUCES) {
+    return;
+  }
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_REDUCE) {
+    for (u32 i = 0; i < *n_out; i++) {
+      if (reduces[i] == t) {
+        return;
+      }
+    }
+    reduces[(*n_out)++] = t;
+    uwalk_collect_all_reduces(heap_read(loc + 0), reduces, n_out, depth + 1);
+    return;
+  }
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      uwalk_collect_all_reduces(heap_read(loc + 0), reduces, n_out, depth + 1);
+      uwalk_collect_all_reduces(heap_read(loc + 1), reduces, n_out, depth + 1);
+      return;
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+    case UOP_OPT:
+      uwalk_collect_all_reduces(heap_read(loc + 0), reduces, n_out, depth + 1);
+      return;
+    case UOP_IWHERE:
+      uwalk_collect_all_reduces(heap_read(loc + 0), reduces, n_out, depth + 1);
+      uwalk_collect_all_reduces(heap_read(loc + 1), reduces, n_out, depth + 1);
+      uwalk_collect_all_reduces(heap_read(loc + 2), reduces, n_out, depth + 1);
+      return;
+    default:
+      return;
+  }
+}
+
+// Collect the RANGE leaves under `t` that uop_dag_apply_split minted as the
+// inner half of a split (wrapped in OPT(UNROLL|UPCAST)), nested reduce
+// bodies included.
+static void uwalk_collect_split_ranges(Term t, Term *ranges, u32 *n_out,
+                                       u32 depth) {
+  if (depth > 256 || term_tag(t) != TAG_UOP || *n_out >= UWALK_MAX_RANGES) {
+    return;
+  }
+  u32 op = term_ext(t);
+  u64 loc = term_val(t);
+  switch (op) {
+    case UOP_OPT: {
+      Term tgt  = heap_read(loc + 0);
+      u32  kind = uop_opt_kind(t);
+      if ((kind == UOP_OPT_UNROLL || kind == UOP_OPT_UPCAST)
+          && term_tag(tgt) == TAG_UOP && term_ext(tgt) == UOP_RANGE) {
+        u32 aid = uop_range_axis_id(tgt);
+        for (u32 i = 0; i < *n_out; i++) {
+          if (uop_range_axis_id(ranges[i]) == aid) {
+            return;
+          }
+        }
+        ranges[(*n_out)++] = tgt;
+        return;
+      }
+      uwalk_collect_split_ranges(tgt, ranges, n_out, depth + 1);
+      return;
+    }
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      uwalk_collect_split_ranges(heap_read(loc + 0), ranges, n_out, depth + 1);
+      uwalk_collect_split_ranges(heap_read(loc + 1), ranges, n_out, depth + 1);
+      return;
+    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
+    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_CAST:  case UOP_BITCAST:
+    case UOP_REDUCE:
+      uwalk_collect_split_ranges(heap_read(loc + 0), ranges, n_out, depth + 1);
+      return;
+    case UOP_IWHERE:
+      uwalk_collect_split_ranges(heap_read(loc + 0), ranges, n_out, depth + 1);
+      uwalk_collect_split_ranges(heap_read(loc + 1), ranges, n_out, depth + 1);
+      uwalk_collect_split_ranges(heap_read(loc + 2), ranges, n_out, depth + 1);
+      return;
+    default:
+      return;
+  }
+}
+
+// Record the store's split-inner axes and their owning reduces: every
+// OPT(UNROLL|UPCAST) range inside some reduce body that indexes no store
+// position.  Mirrors the renderer's inner-reduce-decomposition set
+// (rmu_range_is_inner_reduce_decomp + rmu_reduce_folds_split_axis).
+static void uwalk_split_axes_init(UWalkCtx *c, Term store_addr, Term value) {
+  c->n_split = 0;
+  Term reds[UWALK_MAX_REDUCES];
+  u32  n_reds = 0;
+  uwalk_collect_all_reduces(value, reds, &n_reds, 0);
+  if (n_reds == 0) {
+    return;
+  }
+  Term split[UWALK_MAX_RANGES];
+  u32  n_split = 0;
+  for (u32 i = 0; i < n_reds; i++) {
+    uwalk_collect_split_ranges(uop_reduce_src(reds[i]), split, &n_split, 0);
+  }
+  Term addr_ranges[UWALK_MAX_RANGES];
+  u32  n_addr = 0;
+  uwalk_collect_ranges(store_addr, addr_ranges, &n_addr);
+  for (u32 i = 0; i < n_split && c->n_split < UWALK_MAX_RANGES; i++) {
+    u32 aid = uop_range_axis_id(split[i]);
+    int in_addr = 0;
+    for (u32 j = 0; j < n_addr; j++) {
+      if ((u32)term_val(heap_read(term_val(addr_ranges[j]) + 0)) == aid) {
+        in_addr = 1;
+        break;
+      }
+    }
+    if (in_addr) {
+      continue;
+    }
+    Term owner = 0;
+    for (u32 k = 0; k < n_reds && owner == 0; k++) {
+      if (uop_reduce_owns_split_axis(reds[k], aid)) {
+        owner = reds[k];
+      }
+    }
+    c->split_aid  [c->n_split] = aid;
+    c->split_owner[c->n_split] = owner;
+    c->n_split++;
+  }
+}
+
 // Compute one reduce accumulator over its axis range.
 // Run a (possibly multi-axis) REDUCE by chaining through nested
 // same-kind UOP_REDUCE shells.  Mirrors tinygrad's lowered form
@@ -813,6 +983,27 @@ static double uwalk_run_reduce(UWalkCtx *c, Term red) {
       }
       axes[chain_len]    = caxis;
       extents[chain_len] = cext;
+      chain_len++;
+    }
+    // The split-inner halves this shell folds iterate innermost, like the
+    // renderer's inner-reduce-decomposition loops.
+    for (u32 i = 0; i < n_src_r && chain_len < UWALK_MAX_RANGES; i++) {
+      u32 ax = term_val(heap_read(term_val(src_ranges[i]) + 0));
+      if (!uwalk_reduce_folds_split(c, cur, ax, src_ranges, n_src_r)) {
+        continue;
+      }
+      int dup = 0;
+      for (u32 j = 0; j < chain_len; j++) {
+        if (axes[j] == ax) {
+          dup = 1;
+          break;
+        }
+      }
+      if (dup) {
+        continue;
+      }
+      axes[chain_len]    = ax;
+      extents[chain_len] = kvar_extent_runtime(term_val(heap_read(term_val(src_ranges[i]) + 2)));
       chain_len++;
     }
     body = csrc;
@@ -912,7 +1103,7 @@ static void uwalk_loop_and_store(UWalkCtx *c,
         if (c->n_reduces >= UWALK_MAX_REDUCES) return;
         idx = (int)c->n_reduces++;
         c->red_term[idx]   = value_reduces[i];
-        c->red_n_free[idx] = uwalk_reduce_free_axes(value_reduces[i],
+        c->red_n_free[idx] = uwalk_reduce_free_axes(c, value_reduces[i],
                                 c->red_free_ids[idx], UWALK_MAX_RANGES);
       }
       c->red_acc[idx] = uwalk_run_reduce(c, value_reduces[i]);
@@ -985,13 +1176,18 @@ static int uwalk_emit_store(UWalkCtx *c, Term store) {
     Term r_src = uop_reduce_src(reduce_as_value);
     uwalk_collect_ranges(r_src, all_ranges, &n_all);
   }
-  u32 reduce_axes[MAX_DIM];
+  u32 reduce_axes[MAX_DIM + UWALK_MAX_RANGES];
   u32 n_reduce_axes = 0;
   if (reduce_as_value != 0) {
     n_reduce_axes = uop_reduce_n_axes(reduce_as_value);
     for (u32 i = 0; i < n_reduce_axes; i++) {
       reduce_axes[i] = uop_reduce_axis(reduce_as_value, i);
     }
+  }
+  // Split-inner axes are iterated inside their owning reduce.
+  uwalk_split_axes_init(c, store_addr, value_for_emit);
+  for (u32 i = 0; i < c->n_split; i++) {
+    reduce_axes[n_reduce_axes++] = c->split_aid[i];
   }
   // Output ranges = all_ranges minus all reduce axes (if any).
   Term out_ranges[UWALK_MAX_RANGES];
@@ -1059,7 +1255,7 @@ static int uwalk_emit_store(UWalkCtx *c, Term store) {
     }
     u32 idx = c->n_reduces++;
     c->red_term[idx]   = value_reduces[i];
-    c->red_n_free[idx] = uwalk_reduce_free_axes(value_reduces[i],
+    c->red_n_free[idx] = uwalk_reduce_free_axes(c, value_reduces[i],
                             c->red_free_ids[idx], UWALK_MAX_RANGES);
     c->red_acc[idx]    = uwalk_run_reduce(c, value_reduces[i]);
     uwalk_reduce_snapshot_save(c, idx);

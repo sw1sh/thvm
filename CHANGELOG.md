@@ -24,6 +24,11 @@ for the per-commit story.
 - Bufferize / rangeify schedule IR -- unified pass, default on.
 - Tile-level UOps + tile codegen for CPU and Metal.
 - AOT compiler with C and Metal targets.
+- A hand-opt UNROLL/UPCAST split of a reduce axis folds into exactly the
+  reduce that owns it, in the renderer and the CPU UOp walker.  A mean
+  broadcast back into a second sum no longer re-accumulates 9x, and
+  walker-run reduce kernels (BatchNorm-train gradients, conv+BN blocks)
+  no longer keep only the last unrolled lane.
 
 ### Backends
 - CPU interpreter + per-op kernels + UOp-graph JIT.

@@ -4396,6 +4396,26 @@ static u32 rmu_partition_out_ranges(Term *out_ranges, u32 *out_kinds,
   return head;
 }
 
+// Owner of each inner-reduce-decomposition axis of the store rmu_emit_store
+// is emitting (uop_reduce_owns_split_axis).  With nested reduces the inner
+// half of one reduce's split axis lies inside every enclosing reduce's body;
+// only its owner may open its loop, or an enclosing SUM re-accumulates the
+// owner's result once per inner iteration.  An owner of 0 means no reduce
+// carries the split composition (a DAG not built by uop_dag_apply_split):
+// every reduce whose body holds the axis folds it.
+static u32  RMU_SPLIT_AID  [RMU_MAX_RANGES];
+static Term RMU_SPLIT_OWNER[RMU_MAX_RANGES];
+static u32  RMU_SPLIT_N = 0;
+
+static int rmu_reduce_folds_split_axis(Term red, u32 aid) {
+  for (u32 i = 0; i < RMU_SPLIT_N; i++) {
+    if (RMU_SPLIT_AID[i] == aid) {
+      return RMU_SPLIT_OWNER[i] == 0 || RMU_SPLIT_OWNER[i] == red;
+    }
+  }
+  return 1;
+}
+
 // Emit inner-reduce-decomposition ranges as nested #pragma unroll
 // for-loops at `depth`, returning the new depth (depth + count).
 // Caller closes the loops symmetrically after the combine.
@@ -5543,6 +5563,9 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth,
   // this the generic rmu_emit_store path (which handles STORE(ADD(REDUCE,
   // bias)) matmul+bias kernels) opened it as an OUTER loop, resetting
   // _acc each iteration + storing inside -> a partial sum, wrong value.
+  // r_ranges descends into nested reduce bodies, so an axis seen here may
+  // be another reduce's inner half: fold only the ones this reduce owns
+  // (rmu_reduce_folds_split_axis).
   // See rmu_range_is_inner_reduce_decomp's banner (tinygrad do_expand).
   Term  decomp_ranges [RMU_MAX_RANGES];
   u32   decomp_factors[RMU_MAX_RANGES] = {0};
@@ -5557,6 +5580,9 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth,
       if (axis_ids[ai] == ax) { is_named_reduce = 1; break; }
     if (is_named_reduce) continue;
     if (rmu_term_uses_axis(store_addr, ax)) continue;  // real output axis
+    if (!rmu_reduce_folds_split_axis(red, ax)) {
+      continue;
+    }
     decomp_ranges [n_decomp]   = r_ranges[j];
     decomp_factors[n_decomp]   = r_factors[j];
     n_decomp++;
@@ -5865,6 +5891,22 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   Term reduces[RMU_MAX_RANGES];
   u32  n_reduces = 0;
   rmu_collect_reduces(value, reduces, &n_reduces);
+  RMU_SPLIT_N = 0;
+  for (u32 i = 0; i < n_ranges && RMU_SPLIT_N < RMU_MAX_RANGES; i++) {
+    if (!range_is_inner_decomp[i]) {
+      continue;
+    }
+    u32 aid = (u32)term_val(heap_read(term_val(ranges[i]) + 0));
+    Term owner = 0;
+    for (u32 k = 0; k < n_reduces && owner == 0; k++) {
+      if (uop_reduce_owns_split_axis(reduces[k], aid)) {
+        owner = reduces[k];
+      }
+    }
+    RMU_SPLIT_AID  [RMU_SPLIT_N] = aid;
+    RMU_SPLIT_OWNER[RMU_SPLIT_N] = owner;
+    RMU_SPLIT_N++;
+  }
   u32 required_pos[RMU_MAX_RANGES] = {0};
   for (u32 i = 0; i < n_reduces; i++) {
     Term r_src = heap_read(term_val(reduces[i]) + 0);

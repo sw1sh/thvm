@@ -2609,6 +2609,12 @@ fn Term uop_apply_split_dag(Term root, KOpt const *applied_opts,
 // store_root is finalized, before fire-time hand_opts.
 fn Term uop_dag_renumber_axes(Term root);
 
+// 1 iff REDUCE `red` owns `inner_aid`, the inner (UNROLL/UPCAST) half of
+// one of its axes split by uop_dag_apply_split: REDUCE.axes names only the
+// outer half, so renderers and the CPU walker fold the inner half into
+// exactly the reduce this returns 1 for.  Defined in uop/apply_opt_dag.c.
+fn int uop_reduce_owns_split_axis(Term red, u32 inner_aid);
+
 // === Buffer leaf ===
 // Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
 // `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via

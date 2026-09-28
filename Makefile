@@ -299,6 +299,7 @@ TESTS := \
   $(BIN)/test_uop_opt \
   $(BIN)/test_uop_recognise_tc \
   $(BIN)/test_apply_opt_dag \
+  $(BIN)/test_nested_reduce_unroll \
   $(BIN)/test_render_uop \
   $(BIN)/test_render_uop_metal \
   $(BIN)/test_render_uop_cuda \

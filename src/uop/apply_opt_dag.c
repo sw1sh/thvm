@@ -453,6 +453,142 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
   return apply_opt_dag_substitute(root, &st);
 }
 
+// ---------- split ownership -----------------------------------------
+// A split of reduce axis T leaves REDUCE.axes naming only `outer`, while
+// every former reference to T reads IADD(IMUL(outer, k), OPT(inner, _, k)).
+// tinygrad's shift_to substitutes that composition into REDUCE.src[1:], so
+// the REDUCE owns BOTH halves (codegen/opt/postrange.py:79-87).  thvm reads
+// the owner of `inner` back off the composition: it is the REDUCE naming a
+// range of the `outer` operand.  Body membership cannot answer this once a
+// kernel nests reduces -- `inner` then sits inside every enclosing reduce's
+// body, and a reduce that folds another reduce's inner half re-sums it.
+
+#define APPLY_OPT_DAG_OWN_CAP 8192                        // power of two
+#define APPLY_OPT_DAG_OWN_MAX (APPLY_OPT_DAG_OWN_CAP / 2)
+
+static Term APPLY_OPT_DAG_OWN_SEEN [APPLY_OPT_DAG_OWN_CAP];
+static u32  APPLY_OPT_DAG_OWN_GEN  [APPLY_OPT_DAG_OWN_CAP];
+static u32  APPLY_OPT_DAG_OWN_EPOCH;
+static u32  APPLY_OPT_DAG_OWN_N;
+static Term APPLY_OPT_DAG_OWN_STACK[APPLY_OPT_DAG_OWN_MAX];
+
+// Push `t` unless this walk already reached it.  The visited set stays at
+// most half full, which also bounds the stack; past that the walk stops
+// growing and the caller sees "not found".
+static void apply_opt_dag_own_push(Term t, u32 *sp) {
+  if (term_tag(t) != TAG_UOP || APPLY_OPT_DAG_OWN_N >= APPLY_OPT_DAG_OWN_MAX) {
+    return;
+  }
+  u32 h = (u32)(t ^ (t >> 29) ^ (t >> 41)) * 0x9E3779B1u;
+  for (u32 probe = 0; probe < APPLY_OPT_DAG_OWN_CAP; probe++) {
+    u32 i = (h + probe) & (APPLY_OPT_DAG_OWN_CAP - 1);
+    if (APPLY_OPT_DAG_OWN_GEN[i] != APPLY_OPT_DAG_OWN_EPOCH) {
+      APPLY_OPT_DAG_OWN_GEN[i]  = APPLY_OPT_DAG_OWN_EPOCH;
+      APPLY_OPT_DAG_OWN_SEEN[i] = t;
+      APPLY_OPT_DAG_OWN_N++;
+      APPLY_OPT_DAG_OWN_STACK[(*sp)++] = t;
+      return;
+    }
+    if (APPLY_OPT_DAG_OWN_SEEN[i] == t) {
+      return;
+    }
+  }
+}
+
+static u32 apply_opt_dag_opt_range_aid(Term t) {
+  while (term_tag(t) == TAG_UOP && term_ext(t) == UOP_OPT) {
+    t = uop_opt_target(t);
+  }
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) {
+    return 0xFFFFFFFFu;
+  }
+  return uop_range_axis_id(t);
+}
+
+// 1 iff a RANGE leaf of index expression `t` is one of `red`'s axes.
+static int apply_opt_dag_names_leaf_of(Term red, Term t, u32 depth) {
+  if (depth > 64 || term_tag(t) != TAG_UOP) {
+    return 0;
+  }
+  u32 op = term_ext(t);
+  switch (op) {
+    case UOP_RANGE: {
+      u32 aid = uop_range_axis_id(t);
+      u32 n   = uop_reduce_n_axes(red);
+      for (u32 i = 0; i < n; i++) {
+        if (uop_reduce_axis(red, i) == aid) {
+          return 1;
+        }
+      }
+      return 0;
+    }
+    case UOP_OPT:
+      return apply_opt_dag_names_leaf_of(red, uop_opt_target(t), depth + 1);
+    case UOP_CONST: case UOP_BUFFER: case UOP_INVALID:
+      return 0;
+    default: {
+      u8  ar  = uop_arity((u8)op);
+      u64 loc = term_val(t);
+      for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+        if (apply_opt_dag_names_leaf_of(red, heap_read(loc + i), depth + 1)) {
+          return 1;
+        }
+      }
+      return 0;
+    }
+  }
+}
+
+fn int uop_reduce_owns_split_axis(Term red, u32 inner_aid) {
+  if (term_tag(red) != TAG_UOP || term_ext(red) != UOP_REDUCE) {
+    return 0;
+  }
+  if (++APPLY_OPT_DAG_OWN_EPOCH == 0) {
+    for (u32 i = 0; i < APPLY_OPT_DAG_OWN_CAP; i++) {
+      APPLY_OPT_DAG_OWN_GEN[i] = 0;
+    }
+    APPLY_OPT_DAG_OWN_EPOCH = 1;
+  }
+  APPLY_OPT_DAG_OWN_N = 0;
+  u32 sp = 0;
+  apply_opt_dag_own_push(uop_reduce_src(red), &sp);
+  while (sp > 0) {
+    Term t   = APPLY_OPT_DAG_OWN_STACK[--sp];
+    u32  op  = term_ext(t);
+    u64  loc = term_val(t);
+    switch (op) {
+      case UOP_RANGE: case UOP_CONST: case UOP_BUFFER: case UOP_INVALID:
+        continue;
+      case UOP_OPT:
+        apply_opt_dag_own_push(uop_opt_target(t), &sp);
+        continue;
+      case UOP_REDUCE:
+        apply_opt_dag_own_push(uop_reduce_src(t), &sp);
+        continue;
+      case UOP_IADD: {
+        Term a = heap_read(loc + 0);
+        Term b = heap_read(loc + 1);
+        if (apply_opt_dag_opt_range_aid(b) == inner_aid
+            && apply_opt_dag_names_leaf_of(red, a, 0)) {
+          return 1;
+        }
+        if (apply_opt_dag_opt_range_aid(a) == inner_aid
+            && apply_opt_dag_names_leaf_of(red, b, 0)) {
+          return 1;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+    u8 ar = uop_arity((u8)op);
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+      apply_opt_dag_own_push(heap_read(loc + i), &sp);
+    }
+  }
+  return 0;
+}
+
 // ---------- KOP_GROUP / KOP_GROUPTOP --------------------------------
 // Stamp the target UOP_RANGE leaf (which must be a KAX_REDUCE axis) as
 // KAX_GROUP_REDUCE and wrap every reference in OPT(_, GROUP_REDUCE, k)
