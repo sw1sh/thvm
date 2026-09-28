@@ -27,6 +27,7 @@ sys.path.insert(0, os.environ.get("THVM_PY", PY))
 
 import thvm  # noqa: E402
 import thvm.optim as optim  # noqa: E402
+from thvm import Context  # noqa: E402
 from thvm import Tensor as T  # noqa: E402
 
 B, S, H, Dh = 2, 4, 2, 3
@@ -76,9 +77,9 @@ class TransformerTrainTest(unittest.TestCase):
             relmax = np.abs(gt[:, :, slot] - g[:, :, slot]).max() / (np.abs(g[:, :, slot]).max() + 1e-6)
             self.assertLess(relmax, 1e-3, f"qkv slot {slot} grad relmax={relmax:.4g}")
 
+    @Context(TRAINING=1)
     def test_attention_block_trains(self):
         """07532c22: multi-step eager opt.step() training descends (no hang/freeze)."""
-        T.training = True
         rng = np.random.default_rng(0)
         X = rng.standard_normal((4, 6, D)).astype(np.float32)
         Y = (X @ (rng.standard_normal((D, D)).astype(np.float32) * 0.3)).astype(np.float32)
@@ -105,6 +106,7 @@ class TransformerTrainTest(unittest.TestCase):
         self.assertTrue(all(np.isfinite(x) for x in losses), f"non-finite loss: {losses}")
         self.assertLess(losses[-1], 0.85 * losses[0], f"loss did not descend: {losses[0]:.3f} -> {losses[-1]:.3f}")
 
+    @Context(TRAINING=1)
     def test_2layer_transformer_trains(self):
         """Stacked (LayerNorm + attn + residual + MLP) x2 trains, no NaN.
 
@@ -114,7 +116,6 @@ class TransformerTrainTest(unittest.TestCase):
         layernorm AND the final residual add) is exactly what tripped the
         arena planner into recycling a still-live buffer -> NaN.
         """
-        T.training = True
         rng = np.random.default_rng(0)
         Bx, Sx, Dd, Hh, Dhh, Dff, L = 4, 6, 8, 2, 4, 16, 2
         sc = 1.0 / np.sqrt(Dhh)
