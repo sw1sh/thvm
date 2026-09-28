@@ -332,6 +332,29 @@ static const SchedSlice SCHEDULE[] = {
   // conjecture cone covers the signature (uniform scale = duplicate
   // of bare).
   {"tgt-sel", "--tgt-sel=1 --tgt-nongoal=4 --lrs --tgt-sel-exit --preset=none --horn=0 --fof-sat=0", 0.0},
+  // VAMPIRE OTTER-LOOP lane (the RNG Moufang dissection, CASC-J13 UEQ
+  // cluster RNG027-5/7/8/10, 028-5/7, 029-5/6: Vampire + Prover9 only;
+  // E and Twee, both DISCOUNT-loop provers, time out).  Vampire's slot
+  // lrs+10_2_to=lpo:sp=const_frequency:spb=goal:fd=preordered:
+  // bd=preordered:fde=none:nwc=1 solves RNG027-5 in 91 activations as
+  // lrs or ott and FAILS as dis: 19 of its proof's 84 demodulations use
+  // never-selected clauses (the reassociation law 11 times).  Composed:
+  // LPO under Vampire's const_frequency + spb=goal precedence (the goal
+  // operator above the additive theory -- distributivity expands, the
+  // associator/commutator definitions fold), the Otter simplification
+  // set (--otter: orientable queued CPs demodulate as passive rules,
+  // replayed newest-first per batch), oriented-only selection normalize
+  // (--pop-rules-only, the fd=preordered analog), NO WM orphan murder
+  // (Vampire keeps a simplified clause's descendants; with it the lane
+  // ResourceOuts), age:weight 1:2, LRS, and --mixmost-nf so proof
+  // extraction replays the goal check's own normal forms (VerifiedGood).
+  // Ablated on RNG027-5: --otter, LPO, spb=goal and orphan-murder-off
+  // are each load-bearing.  Cracks RNG027-5/027-7/028-5 in ~40s and
+  // 027-10 in ~100s as singles, all TMO for every prior slice.  Exit-
+  // fast (--otter-exit) unless a distributivity law orients as expansion
+  // under the lane's precedence.  Leftover pool after tgt-sel: the
+  // wave-1/2 indices stay unshifted.
+  {"otter-lpo", "--ord=lpo --sym-prec=const-frequency --spb-prec --otter --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --preset=none --horn=0 --fof-sat=0", 0.0},
   {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.33},
   // (4) ENCOMPASSMENT DEMODULATION (Twee reducesSkolem): the WM preset
   // with the skolem-ground unorient gate -- variable-permuted variants

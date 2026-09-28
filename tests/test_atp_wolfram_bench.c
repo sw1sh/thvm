@@ -246,6 +246,45 @@ static void tp_bench_giveup(const char *why) {
 }
 void *g_atp_bench_pr = NULL;
 
+// Distributivity shape for the otter lane's exit-fast (--otter-exit):
+// f(X, g(Y,Z)) = g(f(X,Y), f(X,Z)) or f(g(X,Y), Z) = g(f(X,Z), f(Y,Z))
+// with X Y Z distinct variables and f != g binary.  Sets *f / *g.
+static int pr_bin_label(Term t, u32 *lab) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) != 2u) return 0;
+  *lab = term_ext(t);
+  return 1;
+}
+static int pr_is_fvr(Term t, u32 *v) {
+  if (term_tag(t) != TAG_FVR) return 0;
+  *v = term_ext(t);
+  return 1;
+}
+static int pr_app2_vars(Term t, u32 f, u32 a, u32 b) {
+  u32 lab, x, y;
+  return pr_bin_label(t, &lab) && lab == f &&
+         pr_is_fvr(term_ctr_at(t, 0), &x) && x == a &&
+         pr_is_fvr(term_ctr_at(t, 1), &y) && y == b;
+}
+static int pr_distrib_shape(Term big, Term sum, u32 *fo, u32 *go) {
+  u32 f, g, g2, x, y, z;
+  if (!pr_bin_label(big, &f) || !pr_bin_label(sum, &g) || f == g) return 0;
+  Term a0 = term_ctr_at(big, 0), a1 = term_ctr_at(big, 1);
+  Term s0 = term_ctr_at(sum, 0), s1 = term_ctr_at(sum, 1);
+  if (pr_is_fvr(a0, &x) && pr_bin_label(a1, &g2) && g2 == g &&
+      pr_is_fvr(term_ctr_at(a1, 0), &y) && pr_is_fvr(term_ctr_at(a1, 1), &z) &&
+      x != y && x != z && y != z &&
+      pr_app2_vars(s0, f, x, y) && pr_app2_vars(s1, f, x, z)) {
+    *fo = f; *go = g; return 1;
+  }
+  if (pr_is_fvr(a1, &z) && pr_bin_label(a0, &g2) && g2 == g &&
+      pr_is_fvr(term_ctr_at(a0, 0), &x) && pr_is_fvr(term_ctr_at(a0, 1), &y) &&
+      x != y && x != z && y != z &&
+      pr_app2_vars(s0, f, x, z) && pr_app2_vars(s1, f, y, z)) {
+    *fo = f; *go = g; return 1;
+  }
+  return 0;
+}
+
 // nand is the single binary function symbol (CTR label 1).
 #define L_NAND 1u
 
@@ -2023,6 +2062,24 @@ int main(int argc, char **argv) {
         setenv("THVM_ATP_MNF", "0", 0);             // no MNF goal front
         setenv("THVM_ATP_FIFO_THRESHOLD", "0", 0);  // no -pq interleave
       }
+    }
+    // Otter-lane exit-fast (THVM_ATP_OTTER_EXIT / --otter-exit): the
+    // lane's lever is LPO orienting a distributivity law as EXPANSION
+    // (the goal operator above the one it distributes over, via
+    // --spb-prec), which turns the ring's defined operators into folds
+    // and linearizes the alternative laws.  Without such an axiom under
+    // the final precedence the slot goes back to the schedule.
+    if (atp_env_on("THVM_ATP_OTTER_EXIT")) {
+      int expands = 0;
+      for (u32 e = 0; e < prp.n_eqns && !expands; e++) {
+        u32 f = 0, g = 0;
+        if ((pr_distrib_shape(prp.eq_l[e], prp.eq_r[e], &f, &g) ||
+             pr_distrib_shape(prp.eq_r[e], prp.eq_l[e], &f, &g)) &&
+            prp.precedence[f] > prp.precedence[g])
+          expands = 1;
+      }
+      if (!expands)
+        tp_bench_giveup("otter slice: no distributivity law orients as expansion");
     }
     // LPO-ordering slice (Vampire-port).  Vampire's UEQ schedule is
     // dominated by `to=lpo` (65+ of ~400 strategies) -- lexicographic
