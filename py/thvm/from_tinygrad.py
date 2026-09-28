@@ -16,6 +16,8 @@ NotImplementedError on purpose so coverage grows explicitly):
 
   leaves     BUFFER, COPY (passthrough to the BUFFER under it),
              CONST, VCONST-as-value
+  buffers    AFTER(buf, STORE(buf, v)) -> v  (whole-buffer write, e.g. an
+             ALLOC'd Tensor.ones parameter or an assign)
   plumbing   DEVICE, UNIQUE, LUNIQUE on older checkouts (never translated;
              only appear as srcs of BUFFER/COPY)
   binary     ADD, MUL, MAX, CMPLT, CMPNE, SUB
@@ -348,6 +350,16 @@ def _emit(u, memo: dict[int, int]) -> int:
         memo[key] = term
         return term
 
+    # ---- materialized buffers -----------------------------------------
+    # AFTER(buf, STORE(buf, v)): the buffer read after a whole-buffer write.
+    # Contiguous allocations (Tensor.ones/zeros params; the target is an
+    # ALLOC on tinygrad master, #18316) and Tensor.assign take this form, so
+    # the value is v.
+    if op is getattr(Ops, "AFTER", None):
+        term = _emit(_after_value(u, Ops), memo)
+        memo[key] = term
+        return term
+
     # ---- passthrough plumbing / no-ops --------------------------------
     # STAGE replaced CONTIGUOUS on tinygrad master (#18097): contiguous() is
     # `alu(Ops.STAGE)` and tinygrad itself walks through {STAGE, DETACH,
@@ -503,6 +515,16 @@ def _emit(u, memo: dict[int, int]) -> int:
             "unrealized tensor's .uop (do not realize before from_tinygrad).")
 
     raise NotImplementedError(f"unmapped tinygrad op {op}")
+
+
+def _after_value(u, Ops):
+    target, deps = u.src[0], u.src[1:]
+    if (len(deps) != 1 or deps[0].op is not Ops.STORE
+            or deps[0].src[0] is not target
+            or _shape_of(deps[0].src[1]) != _shape_of(u)):
+        raise NotImplementedError(
+            "AFTER other than one whole-buffer STORE into its own target")
+    return deps[0].src[1]
 
 
 def _passthrough_ops(Ops) -> tuple:
