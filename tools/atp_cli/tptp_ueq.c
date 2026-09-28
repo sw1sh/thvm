@@ -358,6 +358,21 @@ static void tp_shorten_names(char *text) {
 }
 
 // Parse the preprocessed text into clauses + signature.
+
+// Bounded substring test.  memmem is a GNU extension that the strict Linux
+// feature macros in thvm.h leave undeclared: an error on gcc 14+ / clang 16+,
+// and a pointer silently truncated to int on older compilers.
+static int tp_span_has(const char *h, size_t hl, const char *n, size_t nl) {
+  if (nl > hl) {
+    return 0;
+  }
+  for (size_t i = 0; i + nl <= hl; i++) {
+    if (memcmp(h + i, n, nl) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
 static void tp_parse(TpProblem *tp, const char *text) {
   const char *p = text;
   while ((p = strstr(p, "cnf(")) != NULL) {
@@ -389,7 +404,7 @@ static void tp_parse(TpProblem *tp, const char *text) {
     int is_conj = 0;
     if (role != NULL) {
       size_t rl = (size_t)(lit - 1 - role);
-      is_conj = (memmem(role, rl, "negated_conjecture", 18) != NULL);
+      is_conj = tp_span_has(role, rl, "negated_conjecture", 18);
     }
     size_t llen = blen - (size_t)(lit - body);
     // trim spaces and one level of ( )

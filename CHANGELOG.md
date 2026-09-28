@@ -39,6 +39,7 @@ for the per-commit story.
 - Cross-framework benchmarks vs tinygrad / PyTorch MPS / MLX.
 
 ### Equational reasoning (parallel research)
+- FindProof builds on modern Linux compilers: the TPTP UEQ reader no longer calls the GNU-only `memmem`, which gcc 14+ / clang 16+ reject as an implicit declaration under thvm's strict feature macros (older compilers truncated its pointer result to `int`).
 - Waldmeister-style ATP layer: KBO / LPO, unification, critical pairs,
   rewrite engine, CNF, unfailing completion driver
   (`src/{wald,kbo,lpo,rewrite,unify,cp,cnf,atp}/`).
