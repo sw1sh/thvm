@@ -460,10 +460,14 @@ static u64 g_atp_orient_memo_gen  = 0;
 // pop site.  Defined up here because the enqueue / pop-normalize gates
 // read it before its setter's definition point.
 static u64 g_atp_perm_subsume_mask = 0ull;
-// Forward decl: atp_now_us is defined further down (with the wall-clock
+// Forward decls: the clocks are defined further down (with the wall-clock
 // deadline helpers); needed up here for the profile timers in functions
-// defined ahead of it (e.g. atp_unorient_step_indexed).
+// defined ahead of them (e.g. atp_unorient_step_indexed) and for the LRS
+// horizon in cp_heap.c.
 static u64 atp_now_us(void);
+static u64 atp_cpu_now_us(void);
+static FILE *atp_clock_trace(void);
+static void atp_clock_trace_end(FILE *tf);
 static inline u64 atp_phase_now(void) {
   if (!g_atp_phase_enabled) return 0;
   return atp_now_us();

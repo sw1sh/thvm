@@ -1401,17 +1401,68 @@ static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace) {
   return atp_trace_is_dead(s, pa) || atp_trace_is_dead(s, pb);
 }
 
-// Read wall-clock microseconds from CLOCK_REALTIME -- portable
-// across linux / macOS / freebsd and good enough for a >=1 second
-// deadline budget.
 // Host abort hook (see thvm.h): NULL unless a host (e.g. the WL glue)
 // installs a poll into Abort[] / TimeConstrained[].
 int (*thvm_atp_abort_hook)(void) = NULL;
 
+// Wall-clock microseconds from CLOCK_REALTIME -- portable across linux /
+// macOS / freebsd and good enough for a >=1 second deadline budget.
+// Every deadline and wall-limit test reads this clock: the competition
+// kills on wall.
 static u64 atp_now_us(void) {
   struct timespec ts;
   if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
   return (u64)ts.tv_sec * 1000000ull + (u64)(ts.tv_nsec / 1000);
+}
+
+// Process CPU microseconds (CLOCK_PROCESS_CPUTIME_ID).  Time spent
+// descheduled on a loaded machine advances the wall clock but not this
+// one.  Falls back to the wall clock where the CPU clock is missing.
+static u64 atp_cpu_now_us(void) {
+#ifdef CLOCK_PROCESS_CPUTIME_ID
+  struct timespec ts;
+  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0) {
+    return (u64)ts.tv_sec * 1000000ull + (u64)(ts.tv_nsec / 1000);
+  }
+#endif
+  return atp_now_us();
+}
+
+// THVM_ATP_CLOCK_TRACE=<dir>: one line per clock-gated search decision
+// (cp-set-ir sample check and sweep, LRS horizon) appended to
+// <dir>/clock.<pid>.tsv, stamped with the selection index and both
+// clocks, so repeated runs of one configuration can be diffed for WHERE
+// in the search each decision fired.  The header names the schedule
+// slice (FINDPROOF_SLICE) the process runs.  Unset: no file is opened
+// and no clock is read beyond the gates' own.
+static FILE *atp_clock_trace(void) {
+  static int   state = 0;     // 0 = unprobed, 1 = open, 2 = off
+  static FILE *fp    = NULL;
+  if (state == 0) {
+    state = 2;
+    const char *dir = getenv("THVM_ATP_CLOCK_TRACE");
+    if (dir != NULL && dir[0] != '\0') {
+      char path[1024];
+      snprintf(path, sizeof path, "%s/clock.%ld.tsv", dir, (long)getpid());
+      fp = fopen(path, "a");
+      if (fp != NULL) {
+        const char *slice = getenv("FINDPROOF_SLICE");
+        fprintf(fp, "# pid=%ld slice=%s\n", (long)getpid(),
+                slice != NULL ? slice : "-");
+        fflush(fp);
+        state = 1;
+      }
+    }
+  }
+  return state == 1 ? fp : NULL;
+}
+
+// Close one trace line with both clocks and flush it (a schedule kills
+// losing slices with SIGKILL, so buffered lines would be lost).
+static void atp_clock_trace_end(FILE *tf) {
+  fprintf(tf, " wall=%llu cpu=%llu\n", (unsigned long long)atp_now_us(),
+          (unsigned long long)atp_cpu_now_us());
+  fflush(tf);
 }
 
 // Throttled poll (every 256 calls) of the wall deadline + host abort,
@@ -2720,6 +2771,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   if (s->cp_set_interreduce && added.count > 0u) {
     if (s->cp_set_ir_budget > 0u) {
       if (atp_cp_set_ir_due(s)) {
+        u32 cps0 = s->n_cps;
         u64 t0 = atp_now_us();
         u64 _ph_cpir_t0 = atp_phase_now(); g_thvm_phase = "cp_set_ir";
         atp_cp_set_interreduce(s);
@@ -2727,6 +2779,13 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
         u64 t1 = atp_now_us();
         s->cp_set_ir_spent_us += t1 - t0;
         s->cp_set_ir_last_us = t1;
+        FILE *tf = atp_clock_trace();
+        if (tf != NULL) {
+          fprintf(tf, "cpir-sweep sel=%u step=%u rules=%u cps0=%u cps1=%u "
+                  "cost=%llu", s->cp_select_count, s->step, s->n_rules, cps0,
+                  s->n_cps, (unsigned long long)(t1 - t0));
+          atp_clock_trace_end(tf);
+        }
       }
     } else {
       u32 period = s->cp_set_ir_period ? s->cp_set_ir_period

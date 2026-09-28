@@ -588,9 +588,12 @@ static int run_schedule(const char *self, const char *file, double wall,
           int dn = open("/dev/null", O_WRONLY);
           if (dn >= 0) { dup2(dn, 2); close(dn); }
         }
+        // FINDPROOF_SLICE carries the slice name: every consumer tests
+        // only its presence, and the name labels the process for
+        // diagnostics (THVM_ATP_CLOCK_TRACE headers, /proc environ).
         char cmd[4096];
-        snprintf(cmd, sizeof cmd, "FINDPROOF_SLICE=1 '%s' %s --wall=%.0f%s%s '%s'",
-                 self, SCHEDULE[i].flags, slice_wall,
+        snprintf(cmd, sizeof cmd, "FINDPROOF_SLICE='%s' '%s' %s --wall=%.0f%s%s '%s'",
+                 SCHEDULE[i].name, self, SCHEDULE[i].flags, slice_wall,
                  szs ? " --szs" : "", want_proof ? " --proof" : "", file);
         // Forward the slice's real exit code: 2 (input/environment error,
         // e.g. an unresolvable include) must stay distinguishable from 1

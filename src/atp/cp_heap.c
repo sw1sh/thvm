@@ -1355,6 +1355,20 @@ static u8 atp_cp_perm_subsumed_ft(const AtpFtCell *lhs,
 static inline void atp_ft_mirror_ensure(AtpState *s);
 #endif
 
+// THVM_ATP_CLOCK_TRACE line for one LRS horizon recompute.
+static void atp_lrs_trace(const AtpState *s, u64 elapsed, u64 remaining,
+                          u64 predicted, u32 cps0) {
+  FILE *tf = atp_clock_trace();
+  if (tf == NULL) {
+    return;
+  }
+  fprintf(tf, "lrs sel=%u step=%u el=%llu rem=%llu pred=%llu horizon=%u "
+          "cps0=%u cps1=%u", s->cp_select_count, s->step,
+          (unsigned long long)elapsed, (unsigned long long)remaining,
+          (unsigned long long)predicted, s->lrs_horizon, cps0, s->n_cps);
+  atp_clock_trace_end(tf);
+}
+
 // LRS horizon recomputation (Riazanov & Voronkov, JSC 36, 2003).  Given
 // the observed selection rate and the remaining wall budget, predict how
 // many MORE CPs the saturator will pop, then take the `k`-th smallest
@@ -1395,6 +1409,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
     s->lrs_horizon = 0u;
     s->lrs_last_recompute_at = s->cp_select_count;
     s->n_lrs_recomputes++;
+    atp_lrs_trace(s, elapsed, remaining, predicted, s->n_cps);
     return;
   }
   // Find the k-th smallest cp_pri.  k == predicted (1-indexed) -- the
@@ -1433,7 +1448,11 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
   // backfill from the live last slot; defer sifting until the end so the
   // prune is O(n_queue) instead of O(n_queue * log n_queue).  After
   // pruning, Floyd-build the remaining slots into a heap in one pass.
-  if (horizon == UINT32_MAX) return;  // sentinel: never prune everything
+  u32 cps0 = s->n_cps;
+  if (horizon == UINT32_MAX) {        // sentinel: never prune everything
+    atp_lrs_trace(s, elapsed, remaining, predicted, cps0);
+    return;
+  }
   u32 i = s->n_cps;
   while (i > 0u) {
     i--;
@@ -1489,6 +1508,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
       atp_cp_sift_down(s, k);
     }
   }
+  atp_lrs_trace(s, elapsed, remaining, predicted, cps0);
 }
 
 // Deferred-CP (`implicit_pair`) materialization at selection -- the WM

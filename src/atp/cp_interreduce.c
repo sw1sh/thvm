@@ -124,6 +124,13 @@ static u8 atp_cp_set_ir_due(AtpState *s) {
     // stamps task_start/task_last at task creation (prover start).
     s->cp_set_ir_start_us = now;
     s->cp_set_ir_last_us  = now;
+    FILE *tf = atp_clock_trace();
+    if (tf != NULL) {
+      fprintf(tf, "cpir-epoch sel=%u step=%u rules=%u cps=%u budget=%u",
+              s->cp_select_count, s->step, s->n_rules, s->n_cps,
+              s->cp_set_ir_budget);
+      atp_clock_trace_end(tf);
+    }
     return 0;
   }
   // 1. frequency gate.
@@ -185,7 +192,16 @@ static u8 atp_cp_set_ir_due(AtpState *s) {
   u64 after = atp_now_us();
   s->cp_set_ir_spent_us += after - now;
   s->cp_set_ir_last_us   = after;
-  return dead * 100u >= ATP_CP_SET_IR_THRESHOLD * sample;
+  u8 fire = dead * 100u >= ATP_CP_SET_IR_THRESHOLD * sample;
+  FILE *tf = atp_clock_trace();
+  if (tf != NULL) {
+    fprintf(tf, "cpir-check sel=%u step=%u rules=%u cps=%u el=%llu "
+            "spent=%llu dead=%u/%u fire=%u", s->cp_select_count, s->step,
+            s->n_rules, n, (unsigned long long)(after - s->cp_set_ir_start_us),
+            (unsigned long long)s->cp_set_ir_spent_us, dead, sample, fire);
+    atp_clock_trace_end(tf);
+  }
+  return fire;
 }
 
 static void atp_cp_set_interreduce(AtpState *s) {
