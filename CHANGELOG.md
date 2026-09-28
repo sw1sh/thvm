@@ -66,6 +66,8 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- py: `Tensor.to(device, force=False)` accepts tinygrad's `force` flag
+  (#18327); it stays the identity on thvm's single DEV device.
 - py: `Tensor.clone()` copies the value into fresh storage (tinygrad
   tensor.py:344-351), clones `.grad` and keeps `is_param`; it realizes
   eagerly, so gradients do not flow back through it (tinygrad passes them).

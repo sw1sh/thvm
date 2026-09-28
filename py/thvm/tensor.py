@@ -1378,10 +1378,13 @@ class Tensor(metaclass=_TensorMeta):
         # the thvm bench does not set).
         return self
 
-    def to(self, device) -> "Tensor":
-        """Device move (tinygrad `.to`); thvm picks the device from DEV at
-        process start, so this is an identity that realizes the data."""
-        del device
+    def to(self, device, force: bool = False) -> "Tensor":
+        """Device move (tinygrad tensor.py:353-367).  DEV picks thvm's
+        single device at process start, so this is the identity, grad
+        included.  `force` inserts a transfer for device-less values in
+        tinygrad; thvm's leaves are always backend buffers, so it has no
+        effect here."""
+        del device, force
         return self
 
     def const_like(self, value) -> "Tensor":

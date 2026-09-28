@@ -1,6 +1,7 @@
 """Tensor methods synced to tinygrad 365f87a8a.
 
-clone (tensor.py:344-351, uop/ops.py:887-893), checked against numpy.
+clone (tensor.py:344-351, uop/ops.py:887-893) and to(device, force)
+(tensor.py:353-367), checked against numpy.
 """
 import os
 import pathlib
@@ -90,6 +91,27 @@ class TestClone(unittest.TestCase):
         t._dtype = DType("float16", 2, np.float16, 11)
         with self.assertRaises(NotImplementedError):
             t.clone()
+
+
+class TestTo(unittest.TestCase):
+
+    def test_to_force_is_the_identity(self):
+        t = Tensor([1., 2.])
+        self.assertEqual(t.to("CPU", force=True).tolist(), [1., 2.])
+        self.assertIs(t.to("CPU", True), t)
+        self.assertEqual(t.to(None).tolist(), [1., 2.])
+
+    def test_to_force_keeps_a_lazy_tensor(self):
+        u = Tensor([1., 2.]) + 1
+        self.assertIs(u.to("CPU", force=True), u)
+        self.assertEqual(u.tolist(), [2., 3.])
+
+    def test_to_force_keeps_grad(self):
+        x = Tensor([1., 2.])
+        (x * 3).sum().backward()
+        y = x.to("CPU", force=True)
+        self.assertIs(y.grad, x.grad)
+        self.assertEqual(y.grad.tolist(), [3., 3.])
 
 
 if __name__ == "__main__":
