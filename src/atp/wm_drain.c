@@ -675,6 +675,17 @@ static void thvm_atp_interreduce_full(AtpState *s) {
 
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;
+  // Vampire bd=preordered (EqHelper::getDemodulationLHSIterator with
+  // onlyPreordered): only an equation the ordering orients demodulates
+  // backward.  An unorientable new equation (commutativity, the AC
+  // permutation laws) would otherwise ordered-rewrite older rules --
+  // e.g. retire -X+X -> 0 into X+-X under commutativity -- and orphan
+  // their queued descendants.
+  if (s->use_bd_preordered) {
+    for (u32 k = 0; k < added.count; k++) {
+      if (!s->r_orient[added.first + k]) return 0;
+    }
+  }
   // SENTINEL_STRICT localization: report any rule slot still holding a
   // lazy sentinel at interreduce entry (post materialize-at-birth this
   // must be empty; a hit names the bypassing store path).

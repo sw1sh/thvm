@@ -5561,6 +5561,10 @@ typedef struct {
   // step (armed by otter_rec) for the post-batch replay.  Default OFF:
   // nothing below is touched and the engine is byte-identical.
   u8   use_otter;
+  // Vampire bd=preordered (THVM_ATP_BD_PREORDERED): interreduction
+  // (backward demodulation of R) only by rules the ordering orients --
+  // an unorientable new equation simplifies nothing.  Default OFF.
+  u8   use_bd_preordered;
   u8   otter_rec;
   u8   otter_primed;        // the input queue got its replay (first pop)
   u32 *otter_rows;
@@ -7520,6 +7524,8 @@ fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
 // queued CPs act as passive demodulators before they are selected.
 // 0 = off (default) -> engine byte-identical.
 fn void      thvm_atp_set_use_otter(AtpState *s, u8 on);
+// Vampire bd=preordered: interreduce only with oriented new rules.
+fn void      thvm_atp_set_use_bd_preordered(AtpState *s, u8 on);
 // Selections between GNN re-ranks (0 = off, the default).  Only takes
 // effect while a GNN model is loaded (thvm_atp_set_gnn_scorer).
 fn void      thvm_atp_set_gnn_rerank_period(AtpState *s, u32 period);

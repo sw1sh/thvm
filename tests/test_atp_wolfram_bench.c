@@ -3050,6 +3050,9 @@ int main(int argc, char **argv) {
   // THVM_ATP_OTTER=1 (--otter): Vampire Otter/LRS simplification set --
   // orientable queued CPs demodulate before selection (src/atp/otter.c).
   if (atp_env_on("THVM_ATP_OTTER")) thvm_atp_set_use_otter(s, 1u);
+  // THVM_ATP_BD_PREORDERED=1 (--bd-preordered): Vampire bd=preordered --
+  // interreduction only by oriented new rules.
+  if (atp_env_on("THVM_ATP_BD_PREORDERED")) thvm_atp_set_use_bd_preordered(s, 1u);
   // THVM_ATP_RANDOM_RATIO=<n> -- every n-th CP selection picks a
   // uniformly-random queued CP via xorshift64.  Default off.
   // THVM_ATP_RANDOM_SEED=<u64> seeds the stream (default: a fixed
