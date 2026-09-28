@@ -319,6 +319,28 @@ class Tensor(metaclass=_TensorMeta):
     def contiguous(self) -> "Tensor":
         return self.realize()
 
+    def clone(self, device=None) -> "Tensor":
+        """Fresh storage holding self's value, never aliasing self
+        (tinygrad tensor.py:344-351; uop/ops.py:887-893 stores the value
+        into empty_like storage).  `device` is accepted for tinygrad
+        compatibility; DEV picks thvm's single device.
+
+        Realized eagerly, like contiguous(), so the clone is a new leaf and
+        backward() does not reach self through it, where tinygrad passes
+        the gradient to the source (mixin/gradient.py:100-101)."""
+        del device
+        if self._dtype not in (dtypes.float32, dtypes.int32):
+            # interact_assign_with copies only fp32/int32 and leaves any
+            # other dst unwritten (src/interact/uop_assign.c).
+            raise NotImplementedError(f"clone of a {self._dtype.name} tensor")
+        dst = Tensor._from_term(
+            _TH.ten_create(self._dtype.thvm_id, list(self._shape)),
+            self._dtype, self._shape)
+        ret = dst.assign(self).realize()
+        if self.grad is not None:
+            ret.grad = self.grad.clone()
+        return ret.is_param_(self.is_param)
+
     def numpy(self) -> np.ndarray:
         self.realize()
         n = self.numel()

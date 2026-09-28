@@ -66,6 +66,9 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- py: `Tensor.clone()` copies the value into fresh storage (tinygrad
+  tensor.py:344-351), clones `.grad` and keeps `is_param`; it realizes
+  eagerly, so gradients do not flow back through it (tinygrad passes them).
 - Wolfram LibraryLink paclet (`wl/THVMLink/`).
 - Heap-graph and IC string-diagram renderers (dark + light themes).
 - End-to-end LeNet + Adam on MNIST (Metal); beautiful-MNIST,
