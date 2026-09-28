@@ -69,6 +69,10 @@ for the per-commit story.
   last iteration.
 
 ### Backends
+- Linux CPU BLAS: native Linux builds route matmul / matvec / dot kernels
+  through OpenBLAS or BLIS (cblas) when installed, as macOS does through
+  Accelerate; THVM_CBLAS=0 opts out.  Without it those kernels run as
+  JIT-compiled loops (a 1024x80->64->1 MLP forward: 2.9 ms vs 46 us).
 - CPU JIT compiles with any C compiler: THVM_CPU_CC, else $CC, else the first
   of clang / cc / gcc (clang-only flags only for clang; the float4 lane type
   is a GCC-compatible vector_size vector).  A failed compile warns once

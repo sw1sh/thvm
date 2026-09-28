@@ -1,6 +1,6 @@
 // backend/cpu/blas.c - pattern-recognise matmul / matvec / dot
-// kernels from the lifted UOp DAG and dispatch them to Apple
-// Accelerate (cblas_*).  10-100x speedup on the hot ML workload
+// kernels from the lifted UOp DAG and dispatch them to cblas_*: Apple
+// Accelerate on macOS, OpenBLAS / BLIS on Linux.  10-100x speedup on the hot ML workload
 // (matmul) -- a kernel that the JIT path doesn't attempt (it bails
 // at REDUCE).
 //
@@ -21,6 +21,12 @@
 // (sdot/ddot/sgemm/dgemm/sgemv/dgemv), so the narrow header is sufficient
 // and sidesteps the SDK breakage.
 #include <vecLib/cblas_new.h>
+#define HAVE_BLAS 1
+#elif defined(THVM_HAVE_CBLAS)
+// Linux: OpenBLAS / BLIS through the standard cblas interface.  The
+// Makefile defines THVM_HAVE_CBLAS when it finds one (THVM_CBLAS=0 opts
+// out); without it matmuls run as JIT-compiled loops, ~60x slower.
+#include <cblas.h>
 #define HAVE_BLAS 1
 #else
 #define HAVE_BLAS 0

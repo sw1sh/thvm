@@ -668,12 +668,33 @@ $(METAL_LIBPATH): $(METAL_AIRS) | $(BUILD)
 # Depends on the metallib so metal_init can find it at runtime.
 # Darwin folds libm into libSystem; Linux needs an explicit -lm (the
 # UOp walker / renderer call exp2/log2/sqrt).
-TEST_LDFLAGS := $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm)
+# Linux CPU BLAS: when OpenBLAS (or BLIS) is installed, native Linux builds
+# route matmul / matvec / dot kernels through cblas, as macOS does through
+# Accelerate (src/backend/cpu/blas.c).  Found via pkg-config, else a
+# <cblas.h> + -lopenblas probe.  THVM_CBLAS=0 opts out; CBLAS_CFLAGS /
+# CBLAS_LIBS override the detection.
+THVM_CBLAS ?= 1
+ifeq ($(UNAME_S),Linux)
+ifneq ($(THVM_CBLAS),0)
+CBLAS_PKG := $(shell pkg-config --exists openblas 2>/dev/null && echo openblas || (pkg-config --exists blis 2>/dev/null && echo blis))
+ifneq ($(CBLAS_PKG),)
+CBLAS_CFLAGS ?= -DTHVM_HAVE_CBLAS $(shell pkg-config --cflags $(CBLAS_PKG))
+CBLAS_LIBS   ?= $(shell pkg-config --libs $(CBLAS_PKG))
+else
+CBLAS_PROBE := $(shell printf '\043include <cblas.h>\nint main(void){return (int)cblas_sdot(0,0,1,0,1);}\n' | $(CC) -x c - -o /dev/null -lopenblas 2>/dev/null && echo yes)
+ifeq ($(CBLAS_PROBE),yes)
+CBLAS_CFLAGS ?= -DTHVM_HAVE_CBLAS
+CBLAS_LIBS   ?= -lopenblas
+endif
+endif
+endif
+endif
+TEST_LDFLAGS := $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm $(CBLAS_LIBS))
 # Test binaries that #include src/thvm.c (which pulls in src/atp/_.c)
 # need ATP_DEFINES so the ATP_RULE_INDEX-gated forward decls match
 # the unconditional call sites at ~lines 5866, 8601, 9982.  Folding
 # ATP_DEFINES into TEST_DEFINES keeps the per-target rules clean.
-TEST_DEFINES := $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,) $(ATP_DEFINES)
+TEST_DEFINES := $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,) $(ATP_DEFINES) $(CBLAS_CFLAGS)
 
 # === Embedded thvm runtime source ==================================
 # At build time, flatten src/thvm.c (resolve all `#include "..."`,
@@ -1142,7 +1163,7 @@ ifeq ($(shell uname -s),Linux)
 PY_SO           := py/thvm/libthvm_py.so
 PY_THVM_OBJ     := $(BUILD)/py_thvm.o
 $(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
-	$(CC) -fPIC -O2 $(CUDA_DEFINES) $(ATP_DEFINES) \
+	$(CC) -fPIC -O2 $(CUDA_DEFINES) $(ATP_DEFINES) $(CBLAS_CFLAGS) \
 	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
 	    -c -o $@ $<
 ifdef HAVE_CUDA
@@ -1150,10 +1171,10 @@ PY_CUDA_OBJ     := $(BUILD)/py_thvm_cuda.o
 $(PY_CUDA_OBJ): py/csource/thvm_py_cuda.c | $(BUILD)
 	$(CC) -fPIC -O2 $(CUDA_DEFINES) -c -o $@ $<
 $(PY_SO): $(PY_THVM_OBJ) $(PY_CUDA_OBJ)
-	$(CC) -shared -o $@ $^ $(CUDA_LDFLAGS) -lm
+	$(CC) -shared -o $@ $^ $(CUDA_LDFLAGS) -lm $(CBLAS_LIBS)
 else
 $(PY_SO): $(PY_THVM_OBJ)
-	$(CC) -shared -o $@ $^ -lm
+	$(CC) -shared -o $@ $^ -lm $(CBLAS_LIBS)
 endif
 .PHONY: py
 py: $(PY_SO)
