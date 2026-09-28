@@ -2377,6 +2377,11 @@ static void ftdt_dtb_verify(const FtPiIndex *ix, const FtDtRec *rec,
 // --ord=lpo the goal check and every R+E normalize gated ordered
 // rewriting with a different ordering than the one completion orients
 // by (sound, but not the ordering the rule set is convergent for).
+static int ftn_lpo_gate_on(const AtpState *s) {
+  static int on = -1;
+  if (on < 0) on = !atp_env_on("THVM_ATP_NO_LPO_GATE");
+  return on && s->lpo != NULL;
+}
 static KboCmp ftn_lpo_gate(AtpState *s, AtpFt *a, const AtpFtCell *redex,
                            const AtpFtCell *tmpl, const AtpFtSubst *subst) {
   AtpFtCell *repl = ft_subst_apply(a, tmpl, subst, 0);
@@ -2664,7 +2669,7 @@ static int ft_cell_try_rules(AtpState   *s,
       }
       if (fwd_matched) {
         if (ft_subst_ground_extras(s, rhs, subst_buf)) {
-          if (s->lpo == NULL && redex_na == 0u)
+          if (!ftn_lpo_gate_on(s) && redex_na == 0u)
             redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           // Encompassment demodulation (opt-in, Twee reducesSkolem):
           // an instance the open-term KBO calls incomparable still
@@ -2678,7 +2683,7 @@ static int ft_cell_try_rules(AtpState   *s,
           // above supplies the redundancy discipline.  Armed + default:
           // skolem-only (see the gate comment at pass-2 entry).
           KboCmp ft_v;
-          if (s->lpo != NULL) {
+          if (ftn_lpo_gate_on(s)) {
             ft_v = ftn_lpo_gate(s, ft_arena_local, p, rhs, subst_buf);
           } else if (gate_armed && skolem_only) {
             ft_v = thvm_kbo_ft_skolem_subst_with_prepared(redex_na, rhs,
@@ -2736,11 +2741,11 @@ static int ft_cell_try_rules(AtpState   *s,
       }
       if (bwd_matched) {
         if (ft_subst_ground_extras(s, lhs, subst_buf)) {
-          if (s->lpo == NULL && redex_na == 0u)
+          if (!ftn_lpo_gate_on(s) && redex_na == 0u)
             redex_na = thvm_kbo_ft_subst_prepare_redex(p, s->kbo);
           // Encompassment demodulation, backward face (see fwd branch).
           KboCmp ft_v;
-          if (s->lpo != NULL) {
+          if (ftn_lpo_gate_on(s)) {
             ft_v = ftn_lpo_gate(s, ft_arena_local, p, lhs, subst_buf);
           } else if (gate_armed && skolem_only) {
             ft_v = thvm_kbo_ft_skolem_subst_with_prepared(redex_na, lhs,

@@ -210,34 +210,62 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
   // Vampire LRS discards a new clause beyond the limits at retention
   // (it never enters passive); ours waits for the next horizon prune,
   // so do not adopt it meanwhile.
-  if (s->use_lrs && s->lrs_horizon != 0u && s->cp_pri[row] > s->lrs_horizon)
-    return;
+  {
+    static int lrs_skip = -1;
+    if (lrs_skip < 0) lrs_skip = !atp_env_on("THVM_ATP_OTTER_NO_LRSSKIP");
+    if (lrs_skip && s->use_lrs && s->lrs_horizon != 0u &&
+        s->cp_pri[row] > s->lrs_horizon)
+      return;
+  }
   // FT-native normalize (the push-time treatment's normalizer): its
   // pattern index appends new rules incrementally, where the Term-side
   // rule index rebuilds after every push.
   atp_ft_mirror_ensure(s);
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-  const u8 *pp = s->cp_packed[row];
-  AtpFtCell *fl = acp_unpack_term_ft(a, &pp, 0);
-  AtpFtCell *fr = acp_unpack_term_ft(a, &pp, 0);
-  fl = atp_rules_only_normalize_ft(s, fl, 64u);
-  fr = atp_rules_only_normalize_ft(s, fr, 64u);
-  u8 joined = (u8)ft_eq(fl, fr);
   u64 hc = thvm_atp_heap_checkpoint();
+  u32 trace_mark = s->n_trace;
+  u32 chain = s->cp_trace[row];
+  AtpFtCell *fl, *fr;
   Term nl = 0, nr = 0;
-  if (!joined) {
+  if (s->record_norm_steps) {
+    // Proof mode: normalize the RAW overlap (the TRACE_CP pair) with
+    // recorded NORM_STEPs -- the selection-time record discipline -- so
+    // the passive rule's ORIENT cites a complete chain from its CP.
+    Term raw_l = 0, raw_r = 0;
+    if (!s->cp_trace_lean && chain != ATP_TRACE_NONE && chain < s->n_trace) {
+      Term te = s->trace[chain];
+      if (term_tag(te) == TAG_CTR && term_ext(te) == TRACE_CP &&
+          term_ctr_n(te) >= 4u &&
+          !atp_trace_eq_load(s, chain, &raw_l, &raw_r)) {
+        raw_l = term_ctr_at(te, 2);
+        raw_r = term_ctr_at(te, 3);
+      }
+    }
+    if (raw_l == 0 || raw_r == 0) atp_cp_slot_read(s, row, &raw_l, &raw_r);
+    fl = atp_rules_only_normalize_ft_record(s, ft_from_term(a, raw_l, 0),
+                                            64u, raw_r, 0u, &chain);
     nl = ft_to_term(fl);
+    fr = atp_rules_only_normalize_ft_record(s, ft_from_term(a, raw_r, 0),
+                                            64u, nl, 1u, &chain);
+  } else {
+    const u8 *pp = s->cp_packed[row];
+    fl = atp_rules_only_normalize_ft(s, acp_unpack_term_ft(a, &pp, 0), 64u);
+    fr = atp_rules_only_normalize_ft(s, acp_unpack_term_ft(a, &pp, 0), 64u);
+  }
+  u8 joined = (u8)ft_eq(fl, fr);
+  if (!joined) {
+    if (nl == 0) nl = ft_to_term(fl);
     nr = ft_to_term(fr);
   }
   ft_free_span(a, fl, fl->end);
   ft_free_span(a, fr, fr->end);
-  if (joined) {
-    s->n_otter_joined++;
-    return;
-  }
-  KboCmp c = atp_compare(s, nl, nr);
+  KboCmp c = joined ? KBO_EQ : atp_compare(s, nl, nr);
   if (c != KBO_GT && c != KBO_LT) {
-    s->n_otter_unorient++;
+    // Joined or unorientable: no demodulator.  Drop the recorded chain
+    // and the scratch Terms (the selection path's joined rewind).
+    if (joined) s->n_otter_joined++;
+    else        s->n_otter_unorient++;
+    s->n_trace = trace_mark;
     thvm_atp_heap_reset(hc);
     return;
   }
@@ -272,7 +300,7 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
     atp_cp_slot_read(s, row, &l, &r);
     atp_trace_cp_rematerialize(s, s->cp_trace[row], l, r);
   }
-  s->r_trace[i] = atp_trace_push(s, TRACE_ORIENT, s->cp_trace[row],
+  s->r_trace[i] = atp_trace_push(s, TRACE_ORIENT, chain,
                                  ATP_TRACE_NONE, s->lhs[i], s->rhs[i]);
   s->n_otter_adopted++;
   // bd=preordered: the new demodulator backward-simplifies R.  May
