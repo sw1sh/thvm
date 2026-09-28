@@ -64,7 +64,7 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PY = str(ROOT / "py")
 sys.path.insert(0, os.environ.get("THVM_PY", PY))
-from _tinygrad_compat import tg_training  # noqa: E402
+from _tinygrad_compat import tg_muon_decays, tg_training  # noqa: E402
 
 
 def _have_tg():
@@ -356,6 +356,8 @@ class TestTransformerTrain(unittest.TestCase):
     def test_train_muon_descends(self):
         """Muon (Newton-Schulz) descends the correct-forward sub-block with
         no NaN, and tracks tinygrad's descent."""
+        if not tg_muon_decays():
+            self.skipTest("tinygrad checkout predates #17709 (dead Muon decay)")
         th = self._train_thvm_mlp("muon")
         tg = self._train_tg_mlp("muon")
         self._assert_descends(th, "thvm-muon")

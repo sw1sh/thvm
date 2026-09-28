@@ -201,13 +201,13 @@ def AdamW(params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.01, **_):
 
 
 # LARS / Muon share one trust-ratio + momentum + Newton-Schulz core,
-# faithfully porting tinygrad nn/optim.py:99-133 (class LARS).  thvm's
+# faithfully porting tinygrad nn/optim.py:95-130 (class LARS).  thvm's
 # SGD/Adam/AdamW above stay in their own byte-stable eager paths; LARS is
 # a separate class so adding it cannot perturb them.  In tinygrad SGD is
 # LARS(tcoef=0) and Muon is LARS(ns_coefficients=...); thvm keeps the fast
 # specialized SGD and exposes Muon as the LARS(NS) wrapper below.
 class LARS(Optimizer):
-    """Layer-wise Adaptive Rate Scaling (tinygrad nn/optim.py:99-133).
+    """Layer-wise Adaptive Rate Scaling (tinygrad nn/optim.py:95-130).
 
     Trust ratio ``r = tcoef * |w| / (|g| + wd*|w|)`` gated on |w|>0 & |g|>0
     (else 1.0) scales the momentum-SGD update.  With ``tcoef=0`` it is plain
@@ -234,7 +234,7 @@ class LARS(Optimizer):
     def _step(self):
         # The trust ratio, weight decay, momentum update, Newton-Schulz
         # orthogonalization, and the in-place param assign, ported from
-        # tinygrad LARS._step (nn/optim.py:113-133).
+        # tinygrad LARS._step (nn/optim.py:109-130).
         #
         # The non-NS path stays fully eager-inline like thvm's SGD: build g,
         # update self.b[i] in place, p.assign(p - g), and return both the
@@ -286,6 +286,7 @@ class LARS(Optimizer):
             # popular momentum applies the learning rate after momentum.
             if not self.classic:
                 g = (g * r * self.lr) if isinstance(r, Tensor) else (g * (r * self.lr))
+            g = self._post_wd(p, g)
             p.assign(p - g)
             if self.momentum:
                 out.append(self.b[i])
@@ -305,29 +306,29 @@ class LARS(Optimizer):
             gshape = g.shape
             g = g.reshape(gshape[0], -1).newton_schulz(
                 self.ns_steps, self.ns_coefficients).reshape(*gshape)
-            # tinygrad nn/optim.py:129 reassigns its LOCAL `t = t.detach() *
-            # (1 - wd*lr)` for the "muon post-momentum weight decay", but that
-            # decayed `t` is then used ONLY for `g.cast(t.dtype)` (line 132) --
-            # the param update applied by schedule_step is `tt.assign(tt.detach()
-            # - up)` against the ORIGINAL param `tt` (line 60, _apply_update),
-            # so the decay never reaches the param value.  Porting the actual
-            # tinygrad behaviour (thvm is f32-only so the dtype hook is moot):
-            # no param decay -- p <- p - g.  (Verified: applying the decay puts
-            # thvm off tinygrad by exactly |p|*wd*lr.)
             # popular momentum applies the learning rate after momentum.
             if not self.classic:
                 g = (g * r * self.lr) if isinstance(r, Tensor) else (g * (r * self.lr))
+            g = self._post_wd(p, g)
             p.assign(p - g)
             out.append(p)
         return out
 
+    def _post_wd(self, p, g):
+        # Muon's post-momentum weight decay, added after the lr scaling so it
+        # stays decoupled from the trust ratio: p <- p*(1 - lr*wd) - g, as in
+        # torch (tinygrad nn/optim.py:127-128, #17709; before that fix the
+        # decayed param was computed and dropped).
+        if not self.pre_wd and self.wd > 0:
+            g = g + p.detach() * (self.wd * self.lr)
+        return g
+
 
 # Muon applies Newton-Schulz orthogonalization to the momentum update --
-# tinygrad nn/optim.py:86-97 (Muon(...) = LARS(pre_wd=False, classic=False,
+# tinygrad nn/optim.py:83-93 (Muon(...) = LARS(pre_wd=False, classic=False,
 # nesterov=True, ns_coef)).  Coefficients/steps default to the Muon quintic
-# (3.4445,-4.775,2.0315), 5 steps; momentum 0.95, weight_decay 0.1, matching
-# tinygrad's defaults.  (tinygrad's "post-momentum weight decay" is dead code
-# -- see LARS._step -- so weight_decay does not affect the Muon param update.)
+# (3.4445,-4.775,2.0315), 5 steps; momentum 0.95, weight_decay 0.1 (applied
+# post-momentum, see LARS._post_wd), matching tinygrad's defaults.
 def Muon(params, lr=0.001, momentum=0.95, weight_decay=0.1, ns_steps=5,
          ns_coefficients=(3.4445, -4.775, 2.0315), nesterov=True, **_):
     return LARS(params, lr=lr, momentum=momentum, weight_decay=weight_decay,

@@ -1,6 +1,6 @@
 """LARS + Muon parity vs tinygrad nn.optim.
 
-Both are ports of tinygrad's single LARS class (nn/optim.py:99-133):
+Both are ports of tinygrad's single LARS class (nn/optim.py:95-130):
   - LARS: layer-wise adaptive trust ratio r = tcoef*|w|/(|g|+wd*|w|),
     gated on |w|>0 & |g|>0, scaling a momentum-SGD update.
   - Muon: LARS(classic=False, pre_wd=False, nesterov=True, ns_coef) -- the
@@ -8,13 +8,10 @@ Both are ports of tinygrad's single LARS class (nn/optim.py:99-133):
     iterations (coefficients (3.4445,-4.775,2.0315)) reshaped to 2-D, via
     thvm's N-D matmul + transpose.
 
-tinygrad subtlety faithfully reproduced: Muon's "post-momentum weight
-decay" (nn/optim.py:129, `t = t.detach()*(1-wd*lr)`) reassigns a LOCAL
-`t` used ONLY for `g.cast(t.dtype)`; the param update applied by
-schedule_step is `tt.assign(tt.detach() - up)` against the ORIGINAL param,
-so the decay never reaches the param value.  thvm therefore does NOT decay
-the param (and is f32-only, so the dtype hook is moot).  Applying the decay
-would put thvm off tinygrad by exactly |p|*wd*lr -- asserted below.
+Muon's post-momentum weight decay is added to the update after the lr
+scaling, p <- p*(1 - lr*wd) - g (nn/optim.py:127-128).  Before tinygrad
+#17709 that decay was dead code; the step-1 parity check skips on a
+tinygrad checkout that still has the dead decay.
 
 Newton-Schulz is an ill-conditioned (near-singular) map, so a tiny f32
 matmul-ordering difference between thvm's and tinygrad's lowering amplifies
@@ -31,7 +28,7 @@ import numpy as np
 sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
 from thvm import Context, Tensor  # noqa: E402
 from thvm import optim           # noqa: E402
-from _tinygrad_compat import tg_training  # noqa: E402
+from _tinygrad_compat import tg_muon_decays, tg_training  # noqa: E402
 
 try:
     import tinygrad              # noqa: F401
@@ -166,6 +163,8 @@ class TestLARSParity(unittest.TestCase):
 class TestMuonParity(unittest.TestCase):
     @unittest.skipUnless(_HAVE_TG, "tinygrad not importable")
     def test_muon_step1_exact(self):
+        if not tg_muon_decays():
+            self.skipTest("tinygrad checkout predates #17709 (dead Muon decay)")
         W0, X, Y = _linreg_problem(7, 5, 3, 8)
         kw = dict(lr=0.02, momentum=0.95, weight_decay=0.1, nesterov=True)
         th = _thvm_run(lambda p: optim.Muon(p, **kw), W0, X, Y, 1)
@@ -185,20 +184,20 @@ class TestMuonParity(unittest.TestCase):
         self.assertLess(float(np.abs(th - tg).max()), 1e-3,
                         f"Muon traj maxdiff {float(np.abs(th - tg).max()):.3e}")
 
-    def test_muon_post_decay_is_dead_in_tinygrad(self):
-        # tinygrad's Muon weight-decay line reassigns a local `t` used only
-        # for the cast dtype, never the param value.  thvm faithfully does
-        # NOT decay the param: a high-wd and zero-wd Muon must give the SAME
-        # param update at step 1 (thvm-vs-thvm; no tinygrad needed).
+    def test_muon_post_decay_applied(self):
+        # The decay is added after momentum + Newton-Schulz and never feeds
+        # them, so at step 1 a wd>0 Muon differs from wd=0 by exactly
+        # -lr*wd*p0 (thvm-vs-thvm; no tinygrad needed).
         W0, X, Y = _linreg_problem(7, 5, 3, 8)
-        th_wd = _thvm_run(lambda p: optim.Muon(p, lr=0.02, momentum=0.95,
-                                               weight_decay=0.5, nesterov=True),
+        lr, wd = 0.02, 0.5
+        th_wd = _thvm_run(lambda p: optim.Muon(p, lr=lr, momentum=0.95,
+                                               weight_decay=wd, nesterov=True),
                           W0, X, Y, 1)
-        th_no = _thvm_run(lambda p: optim.Muon(p, lr=0.02, momentum=0.95,
+        th_no = _thvm_run(lambda p: optim.Muon(p, lr=lr, momentum=0.95,
                                                weight_decay=0.0, nesterov=True),
                           W0, X, Y, 1)
-        self.assertLess(float(np.abs(th_wd[1] - th_no[1]).max()), 1e-6,
-                        "Muon param decay leaked (tinygrad's is dead code)")
+        err = float(np.abs((th_wd[1] - th_no[1]) + lr * wd * W0).max())
+        self.assertLess(err, 1e-6, f"Muon post-momentum decay off by {err:.3e}")
 
     def test_muon_is_not_adam(self):
         # Muon must no longer alias Adam.  Same seed/problem, the two
