@@ -1370,7 +1370,7 @@ static void atp_lrs_trace(const AtpState *s, u64 elapsed, u64 remaining,
 }
 
 // LRS horizon recomputation (Riazanov & Voronkov, JSC 36, 2003).  Given
-// the observed selection rate and the remaining wall budget, predict how
+// the observed selection rate and the remaining budget, predict how
 // many MORE CPs the saturator will pop, then take the `k`-th smallest
 // cp_pri in the queue as the weight horizon: any CP with cp_pri >
 // horizon is provably unreachable in budget (the saturator will pop
@@ -1378,27 +1378,67 @@ static void atp_lrs_trace(const AtpState *s, u64 elapsed, u64 remaining,
 // pruned.  O(n_queue) selection + O(n_queue) sweep; the period gate in
 // the caller amortizes this across thousands of selections.
 //
+// Rate and remaining budget are PROCESS CPU time against a simulated
+// budget: the wall span from the LRS epoch to the deadline, as if the
+// prover owned one CPU for all of it.  Vampire's
+// LRS::estimatedReachableCount (Saturation/LRS.cpp) takes the min of a
+// time estimate on Timer::elapsedMilliseconds -- a steady_clock WALL
+// reading (Lib/Timer.cpp) -- and, when an instruction limit is set, an
+// estimate on a perf_event user-space instruction count against `sil`,
+// the simulated instruction limit.  In the CASC UEQ schedule
+// (CASC/Schedules.cpp) 58 of the 59 lrs strategies set sil and run
+// under an `i=` instruction kill with the time limit the whole remaining
+// run, so their binding estimate counts work done and is blind to load;
+// the one without (the first champion, run for the whole time)
+// estimates on the wall.  The lanes here take the load-blind form: the
+// schedule's slices share one machine, and a wall estimate turns their
+// contention into trajectory changes.  Work done is measured in CPU
+// time, not instructions: an instruction estimate needs an instruction
+// BUDGET per lane (Vampire tunes sil per strategy offline), and turning
+// the slice's wall budget into one needs an instructions-per-second
+// constant (Vampire's own conversion assumes 2 GHz,
+// CASC/PortfolioMode.cpp) that mis-scales every horizon by the host's
+// real rate; the counter is also Linux-only (perf_event, gated by
+// kernel.perf_event_paranoid).  CPU time needs neither.  An unloaded
+// slice, where CPU tracks wall, gets the wall estimate's horizon; a
+// descheduled slice gets that same horizon at the same selection index
+// instead of pruning harder.  The kill stays on the wall: the deadline
+// guard reads the wall clock.
+//
 // Soundness: a discarded CP is not in the reach window; the proof, if it
 // exists in budget, does not depend on it (same "incomplete in principle,
 // complete in budget" tradeoff Vampire ships).  When the deadline has
-// already passed `remaining_us` <= 0, leave the horizon untouched -- the
-// next deadline check in atp_norm_deadline_fired will trip ATP_TIMEOUT.
+// already passed, or the simulated budget is spent, leave the horizon
+// untouched -- the next deadline check in atp_norm_deadline_fired will
+// trip ATP_TIMEOUT.
 static void atp_lrs_recompute_horizon(AtpState *s) {
-  if (!s->use_lrs) return;
-  if (s->wall_deadline_us == 0u) return;
-  if (s->n_cps == 0u) return;
-  u64 now = atp_now_us();
-  if (now == 0u) return;
-  if (s->lrs_start_us == 0u) {
-    // first call: latch the start, run the warmup before any horizon
-    s->lrs_start_us = now;
+  if (!s->use_lrs || s->wall_deadline_us == 0u || s->n_cps == 0u) {
     return;
   }
-  if (now >= s->wall_deadline_us) return;
-  if (now <= s->lrs_start_us) return;
-  if (s->cp_select_count < s->lrs_warmup_selections) return;
+  u64 wall = atp_now_us();
+  u64 now  = atp_cpu_now_us();
+  if (wall == 0u || now == 0u) {
+    return;
+  }
+  if (s->lrs_start_us == 0u) {
+    // First call: latch the epoch on both clocks, then warm up.
+    s->lrs_start_us      = now;
+    s->lrs_start_wall_us = wall;
+    return;
+  }
+  if (wall >= s->wall_deadline_us || now <= s->lrs_start_us ||
+      s->wall_deadline_us <= s->lrs_start_wall_us) {
+    return;
+  }
+  if (s->cp_select_count < s->lrs_warmup_selections) {
+    return;
+  }
+  u64 budget  = s->wall_deadline_us - s->lrs_start_wall_us;
   u64 elapsed = now - s->lrs_start_us;
-  u64 remaining = s->wall_deadline_us - now;
+  if (elapsed >= budget) {
+    return;
+  }
+  u64 remaining = budget - elapsed;
   // predicted_remaining = remaining * (selections_done / elapsed)
   // computed as (sel * remaining) / elapsed to keep the divide last.
   u64 predicted = ((u64)s->cp_select_count * remaining) / elapsed;

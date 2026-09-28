@@ -40,7 +40,7 @@ which cracks this problem in the first 5 ms slot.  Decoded:
 |---|---|---|
 | `lrs+10` | saturation algorithm = LRS (`Saturation/LRS.{hpp,cpp}`, extends `Otter`), strategy template id +10 | `"LRS" -> True` (partial: thvm's LRS is queue-prune only, no estimated-reachable-count) |
 | `_1:1` | age:weight ratio in the passive queue alternation | `"SelectionRatio" -> 2` (thvm SR=N means 1 FIFO per N picks; SR=2 ~ 1:1) -- **MISMATCH**: thvm's `VampireUEQ` preset uses SR=10 (= 1:9 weight-bias) |
-| `sil=4000` | strategy instruction limit (kInstr) | -- (thvm uses wall-seconds not instruction count) |
+| `sil=4000` | simulated instruction limit (Mi), read only by the LRS reachability estimate | `"LRS" -> True` estimates reachability in process CPU time against the slice's wall span, the load-blind analog (`atp_lrs_recompute_horizon`) |
 | `st=3.0` | `sine_tolerance` = 3.0 | `"AxiomRelevance" -> {"SInE", "SineTolerance" -> 3.0, ...}` -- thvm default 3.0 already |
 | `i=102` | per-strategy instruction budget | -- (thvm divides wall fairly across portfolio slots) |
 | `sd=2` | `sine_depth` = 2 | `"SineDepth" -> 2` (thvm default 2) |

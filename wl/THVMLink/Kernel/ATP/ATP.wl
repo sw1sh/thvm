@@ -2718,10 +2718,12 @@ atpRecordNormOpt[o_Association] := Switch[Lookup[o, "RecordNorm", Automatic],
 (* "LRS" -> True: Vampire Limited Resource Strategy (Riazanov & Voronkov,
    JSC 36, 2003).  Under a wall-clock budget, periodically prune the CP
    queue of CPs above the predicted-reachable weight horizon -- the
-   saturator concentrates on the budget-tractable subset.  Sound (the
-   discarded CPs cannot be reached in budget; same incomplete-in-principle,
-   complete-in-budget tradeoff Vampire ships).  True = on; False/Automatic
-   = off (default), engine byte-identical. *)
+   saturator concentrates on the budget-tractable subset.  The reach
+   estimate runs on process CPU time, so machine load does not move the
+   horizon (the analog of CASC Vampire's sil instruction estimate).
+   Sound (the discarded CPs cannot be reached in budget; same
+   incomplete-in-principle, complete-in-budget tradeoff Vampire ships).
+   True = on; False/Automatic = off (default), engine byte-identical. *)
 atpLRSOpt[o_Association] := Switch[Lookup[o, "LRS", Automatic],
     True, 1, False | Automatic, 0, _, 0];
 (* "SetOfSupport" -> True: bias CP-queue priority toward CPs whose

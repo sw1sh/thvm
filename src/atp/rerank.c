@@ -925,12 +925,13 @@ fn void thvm_atp_set_min_const_label(AtpState *s, u32 label) {
 // Vampire-style Limited Resource Strategy (Riazanov & Voronkov, JSC 36,
 // 2003).  See AtpState.use_lrs / thvm_atp_select_cp / atp_lrs_recompute_
 // horizon for the algorithm.  Resets the per-run horizon state so a
-// fresh saturation starts in warmup (no horizon yet); leaves the start
-// timestamp NULL so the first selection latches it.
+// fresh saturation starts in warmup (no horizon yet); leaves the epoch
+// stamps zero so the first selection latches them.
 fn void thvm_atp_set_use_lrs(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_lrs = on ? 1u : 0u;
   s->lrs_start_us = 0u;
+  s->lrs_start_wall_us = 0u;
   s->lrs_last_recompute_at = 0u;
   s->lrs_horizon = 0u;
 }

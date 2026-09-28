@@ -6500,19 +6500,24 @@ typedef struct {
 
   // Limited Resource Strategy (Riazanov & Voronkov, JSC 36, 2003).  When
   // a wall-clock budget is set, LRS estimates from the observed selection
-  // rate how many MORE CPs the saturator will pop before the deadline,
-  // then prunes the queue of CPs heavier than the predicted-reachable
-  // weight -- the saturator only ever reaches the lightest
-  // `predicted_remaining_selections` CPs, so the heavy tail wastes index
-  // / normalize / heap effort it never spends.  Soundness: discarded CPs
-  // are unreachable in budget, so the proof (if found) does not depend on
-  // them -- the same "incomplete in principle, complete in budget"
-  // tradeoff Vampire ships.  Default OFF: every field stays 0 and
-  // thvm_atp_select_cp is byte-identical to the milestone-9 path.
+  // rate how many MORE CPs the saturator will pop before the deadline
+  // (rate and remaining budget in process CPU time, the load-blind CASC
+  // shape of Vampire's instruction-count estimate; see
+  // atp_lrs_recompute_horizon), then prunes the queue of CPs heavier
+  // than the predicted-reachable weight -- the saturator only ever
+  // reaches the lightest `predicted_remaining_selections` CPs, so the
+  // heavy tail wastes index / normalize / heap effort it never spends.
+  // Soundness: discarded CPs are unreachable in budget, so the proof (if
+  // found) does not depend on them -- the same "incomplete in principle,
+  // complete in budget" tradeoff Vampire ships.  Default OFF: every field
+  // stays 0 and thvm_atp_select_cp is byte-identical to the milestone-9
+  // path.
   // Flipped on by Method -> {... "LRS" -> True} via
   // thvm_atp_set_use_lrs, or by setting THVM_ATP_LRS=1 at init.
   u8   use_lrs;
-  u64  lrs_start_us;              // run start (atp_now_us at first select)
+  u64  lrs_start_us;              // epoch (process CPU us at first select)
+  u64  lrs_start_wall_us;         // epoch on the wall clock: the simulated
+                                  // CPU budget is deadline - this
   u32  lrs_recompute_period;      // selections between horizon recomputes
   u32  lrs_warmup_selections;     // selections before the first horizon
   u32  lrs_last_recompute_at;     // cp_select_count at the last recompute
