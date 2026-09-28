@@ -542,6 +542,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       // consider would re-derive the same peak).
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = acp_pack(l, r, NULL, NULL);
+      if (atp_hx_on(s)) g_hx.repacked = 1u;   // the commit below records it
       atp_cp_implicit_clear(s, vv);
       // Raw-desc lane: the slot's bytes were REWRITTEN in place, so any
       // descriptor no longer derives them -- retire it (cert mode would

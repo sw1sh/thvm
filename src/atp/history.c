@@ -12,11 +12,15 @@
 // <path>.  Record tags:
 //   'B' session begin   seq=session, pri=sample threshold (u32 hash
 //                       bound; a CP is sampled iff hx_hash(seq) < pri)
-//   'P' push (SAMPLED CPs only, uniform by seq hash)
+//   'P' push (SAMPLED CPs only, uniform by seq hash); the last 'P'
+//                       per seq wins (the WM intake re-stamps axioms)
 //   'S' selection       every non-orphan pop; aux = cp_seq_next at the
 //                       pick, so push step of seq q = #{S : aux <= q}
 //   'X' pop outcome     kind = ATP_HX_OUT_*, for the last 'S';
 //                       aux = live queue after the pop
+//   'W' reweight        queued CP re-scored in place (SAMPLED CPs
+//                       only): pri = new cp_pri, aux = old, kind = 1
+//                       when the content was repacked, feat = content
 //   'D' deletion        queued CP removed without selection (SAMPLED
 //                       CPs only); kind = ATP_HX_DEL_*
 //   'K' / 'k'           parent death marks: rule uid / rule trace id
@@ -73,6 +77,7 @@
 #define ATP_HX_F_GD       0x10u   // goal-derived
 #define ATP_HX_F_GOALSYM  0x20u   // goal symbol set known (feat[7] valid)
 #define ATP_HX_F_IMPLICIT 0x40u   // deferred descriptor slot
+#define ATP_HX_F_RESTAMP  0x80u   // re-emitted after the WM intake permutation
 
 typedef struct {
   u8  tag;
@@ -104,6 +109,7 @@ typedef struct {
   u32   gsym_cap;
   u8    gsym_ready;
   u8    raw_pending;    // raw_untreated flag for the next heap insert
+  u8    repacked;       // next reweight follows an in-place repack
   u32   last_sel_seq;
   u64   n_rec_push;
   u64   n_rec_sel;
@@ -466,6 +472,25 @@ static void atp_hx_push(const AtpState *s, u32 row, const u8 *packed,
   g_hx.n_rec_push++;
 }
 
+// The WM intake permutes the queued axioms' seq stamps before the first
+// pick: re-emit every queued row so the LAST 'P' record per seq holds
+// the post-permutation content (flag ATP_HX_F_RESTAMP).
+static void atp_hx_restamp_queue(const AtpState *s) {
+  if (!atp_hx_on(s)) return;
+  atp_hx_gsym_ensure(s);
+  for (u32 pos = 0; pos < s->n_cps; pos++) {
+    u32 row = s->cp_heap[pos].row;
+    if (!atp_hx_sampled(s->cp_seq[row])) continue;
+    AtpHxRec r;
+    atp_hx_rec_init(&r, 'P', s);
+    atp_hx_row(s, &r, row);
+    r.flags |= ATP_HX_F_RESTAMP;
+    if (s->cp_packed[row] == NULL) r.flags |= ATP_HX_F_IMPLICIT;
+    atp_hx_feat_packed(&r, s->cp_packed[row]);
+    atp_hx_write(&r);
+  }
+}
+
 // Non-orphan pop of row `row` (bytes still owned by the slot).
 static void atp_hx_select(const AtpState *s, u32 row) {
   if (!atp_hx_on(s)) return;
@@ -479,6 +504,25 @@ static void atp_hx_select(const AtpState *s, u32 row) {
   atp_hx_write(&r);
   g_hx.last_sel_seq = r.seq;
   g_hx.n_rec_sel++;
+}
+
+// Queued CP re-scored in place (CP-set interreduction survivors, the
+// reheapify rebuild): record the new priority (and the new content's
+// features) when it changed, or when the slot was just repacked.
+static void atp_hx_reweight(const AtpState *s, u32 row, u32 old_pri) {
+  if (!atp_hx_on(s)) return;
+  u8 forced = g_hx.repacked;
+  g_hx.repacked = 0u;
+  if (!forced && s->cp_pri[row] == old_pri) return;
+  if (!atp_hx_sampled(s->cp_seq[row])) return;
+  AtpHxRec r;
+  atp_hx_rec_init(&r, 'W', s);
+  r.seq  = s->cp_seq[row];
+  r.pri  = s->cp_pri[row];
+  r.aux  = old_pri;
+  r.kind = forced;
+  atp_hx_feat_packed(&r, s->cp_packed[row]);
+  atp_hx_write(&r);
 }
 
 static void atp_hx_outcome(const AtpState *s, u8 code) {

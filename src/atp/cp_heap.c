@@ -2290,6 +2290,7 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
     // whichever append last landed there -- is what the historical
     // rebuild read.  Preserves that quirk bit-exactly (GJ-keep configs).
     g_twee_dbg_ctx = 3u;
+    u32 hx_old_pri = s->cp_pri[vv];
     s->cp_pri[vv] = s->cp_deprio[i] ? ATP_CP_PRI_NEVER
                                     : atp_cp_priority(s, l, r);
     g_twee_dbg_ctx = 0u;
@@ -2303,6 +2304,7 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
     s->cp_pri2[vv] = s->gnn_coop          ? ATP_GNN_COOP_NEUTRAL_PRI
                   : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, l, r, s->w2_mode)
                   :                        0u;
+    atp_hx_reweight(s, vv, hx_old_pri);
     // cp_seq is NOT touched: insertion age is stamped once (heap push /
     // thvm_atp_cp_set) and survives every reweight, matching WM's
     // C_ReClassify which only recomputes w1 ("w2 wird nicht geaendert"
@@ -2356,6 +2358,7 @@ static inline void atp_cp_commit_priorities(AtpState *s, u32 w, u32 slot,
   // the WM preset (mode 4 ignores the global).
   if (s->cp_depth != NULL) g_cp_formation_depth = s->cp_depth[slot];
   g_twee_dbg_ctx = 3u;
+  u32 hx_old_pri = s->cp_pri[slot];
   s->cp_pri[slot]  = s->cp_deprio[w] ? ATP_CP_PRI_NEVER
                                      : atp_cp_priority(s, l, r);
   // spb=goal re-score: re-apply the derivation-bit scale from THIS
@@ -2369,6 +2372,7 @@ static inline void atp_cp_commit_priorities(AtpState *s, u32 w, u32 slot,
                 : (s->w2_modulo > 0u)  ? atp_cp_weight_base(s, l, r, s->w2_mode)
                 :                        0u;
   g_twee_dbg_ctx = 0u;
+  atp_hx_reweight(s, slot, hx_old_pri);
 }
 
 fn void thvm_atp_cp_reheapify(AtpState *s) {

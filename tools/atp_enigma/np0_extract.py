@@ -109,6 +109,9 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
     E = recs[e]
     thresh_c = int(recs[b]["pri"])
     P = r[r["tag"] == T["P"]]
+    # last 'P' per seq wins (the WM intake re-stamps the queued axioms)
+    _, last = np.unique(P["seq"][::-1], return_index=True)
+    P = P[len(P) - 1 - last]
     S = r[r["tag"] == T["S"]]
     X = r[r["tag"] == T["X"]]
     D = r[r["tag"] == T["D"]]

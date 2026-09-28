@@ -1989,6 +1989,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   if (s->use_intake_order && !s->wm_intake_done) {
     s->wm_intake_done = 1u;
     atp_wm_intake_canonicalize(s);
+    atp_hx_restamp_queue(s);
   }
 
   AtpStatus goal = thvm_atp_goal_check(s);
