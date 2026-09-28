@@ -967,6 +967,26 @@ static u32 fof_distrib_bound(void) {
   if (e != NULL && atoi(e) > 0) return (u32)atoi(e);
   return 512u;
 }
+// Literal occurrences of an NNF+Skolemized formula (saturating at cap).
+static u32 fof_atom_count(Term f, u32 cap) {
+  if (term_tag(f) != TAG_CTR) return 1u;
+  u32 lab = term_ext(f);
+  if (lab != FOL_LAB_AND && lab != FOL_LAB_OR) return 1u;
+  u64 v = (u64)fof_atom_count(term_ctr_at(f, 0u), cap) +
+          (u64)fof_atom_count(term_ctr_at(f, 1u), cap);
+  return (v > (u64)cap) ? cap : (u32)v;
+}
+// Distribute unless it BLOWS UP: past the bound AND past twice the
+// formula's literal count.  A big conjunction (or one disjunct over a big
+// conjunction: p(X) => q1(X) & ... & q10000(X)) distributes into as many
+// clauses as it has conjuncts -- linear -- and naming its every node
+// instead ran the 27MB BIO knowledge base out of Tseitin labels.
+static int fof_route_tseitin(Term sk, u32 bound) {
+  if (fof_cnf_estimate(sk, bound) <= bound) return 0;
+  u32 atoms = fof_atom_count(sk, 0x3FFFFFFFu);
+  u32 cap = (atoms > bound / 2u) ? 2u * atoms : bound;
+  return fof_cnf_estimate(sk, cap) > cap;
+}
 static int g_fof_tseitin_recs = 0;   // records clausified definitionally
 
 // --- clausal pre-pass SInE cone -------------------------------------------
@@ -1778,10 +1798,6 @@ static int fof_oe_role_ok(const char *role) {
   return 0;
 }
 
-static int fof_oe_user(u32 lab) {
-  return lab >= PC_LAB_BASE && lab < PC_LAB_BASE + (u32)pc_nsyms;
-}
-
 // Truth of an original formula: 1 / 0, -1 when it cannot be read.
 static int fof_oe_eval(Term f, const signed char *pval) {
   if (term_tag(f) != TAG_CTR) return -1;
@@ -1807,17 +1823,18 @@ static int fof_oe_eval(Term f, const signed char *pval) {
     case PC_LAB_TRUE:  return (term_ctr_n(f) == 0u) ? 1 : -1;
     case PC_LAB_FALSE: return (term_ctr_n(f) == 0u) ? 0 : -1;
     case PC_LAB_EQ:    return (term_ctr_n(f) == 2u) ? 1 : -1;
-    default:
-      if (!fof_oe_user(lab)) return -1;
-      return pval[lab - PC_LAB_BASE];
+    default: {
+      int ix = pc_ix_of(lab);
+      return (ix < 0) ? -1 : pval[ix];
+    }
   }
 }
 
 // Signature of the original formulas: kind 1 = predicate, 2 = function.
 // 0 on a shape the model cannot print (clash, non-symbol subterm).
 static int fof_oe_note(u32 lab, u8 kind, u32 arity, u8 *skind, u32 *sarity) {
-  if (!fof_oe_user(lab)) return 0;
-  u32 i = lab - PC_LAB_BASE;
+  int i = pc_ix_of(lab);
+  if (i < 0) return 0;
   if (skind[i] == 0u) { skind[i] = kind; sarity[i] = arity; return 1; }
   return skind[i] == kind && sarity[i] == arity;
 }
@@ -2014,8 +2031,8 @@ static void fof_one_elt_claim(const char *text) {
   if (why == NULL) {
     for (int k = 0; k < g_oe_nvar; k++) {
       u64 key = g_oe_key[k];
-      if (key <= 0xFFFFFFFFull && fof_oe_user((u32)key) && g_oe_val[k] == 1)
-        pval[key - PC_LAB_BASE] = 1;
+      int ix = (key <= 0xFFFFFFFFull) ? pc_ix_of((u32)key) : -1;
+      if (ix >= 0 && g_oe_val[k] == 1) pval[ix] = 1;
     }
     for (int r = 0; why == NULL && r < g_oe_nform; r++) {
       if (fof_oe_eval(g_oe_form[r], pval) != 1)
@@ -2194,6 +2211,44 @@ static void fof_cls_reserve(FolClause ***cls, u8 **ccnj, int **cls_rec,
 
 static jmp_buf g_fof_oom_jb;
 
+// Upper bound on the distinct symbols of the text: every distinct word
+// that is not a variable (record names and role words included).  Only
+// consulted when the text could hold more symbols than the default
+// label range.
+static int fof_symbol_bound(const char *text) {
+  size_t len = strlen(text);
+  if (len < 2u * (size_t)PC_MAX_SYMS) return 0;
+  u32 cap = 1u << 18;
+  const char **key = NULL;
+  u32 *klen = NULL;
+  int n = 0;
+  for (;;) {
+    key = (const char **)calloc(cap, sizeof(char *));
+    klen = (u32 *)calloc(cap, sizeof(u32));
+    if (key == NULL || klen == NULL) tp_giveup("OOM in FOF front-end");
+    n = 0;
+    int full = 0;
+    for (const char *p = text; *p != '\0' && !full; ) {
+      if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '$')) { p++; continue; }
+      const char *w = p;
+      while (isalnum((unsigned char)*p) || *p == '_' || *p == '$') p++;
+      if (isupper((unsigned char)*w) || *w == '_') continue;   // variable
+      u32 l = (u32)(p - w);
+      u32 sl = (u32)(tp_name_hash(w, l) & (cap - 1u));
+      while (key[sl] != NULL && !(klen[sl] == l && memcmp(key[sl], w, l) == 0))
+        sl = (sl + 1u) & (cap - 1u);
+      if (key[sl] == NULL) {
+        key[sl] = w; klen[sl] = l; n++;
+        if (2u * (u32)n > cap) full = 1;
+      }
+    }
+    free(key); free(klen);
+    if (!full) break;
+    cap *= 2u;
+  }
+  return n;
+}
+
 static void tp_fof_load(TpProblem *tp, const char *text) {
   thvm_init();
   g_cli_fof_applied = 1;
@@ -2205,6 +2260,18 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   g_fof_or_ncl = g_fof_tseitin_recs = 0;
   g_fof_split_nor = g_fof_split_unfit = g_fof_split_pending = 0;
   fof_split_read_branch();
+  // A signature past the default label range (the BIO knowledge base:
+  // ~81k symbols) takes labels above the connectives; the Skolem and
+  // Tseitin families move up past them first.
+  {
+    int nsym = fof_symbol_bound(text);
+    if (nsym > PC_MAX_SYMS) {
+      u32 floor = (nsym > PC_LOW_SYMS)
+                    ? PC_LAB_EXT + (u32)(nsym - PC_LOW_SYMS) : 0x10000u;
+      if (!pc_sym_extend(nsym) || !fol_set_label_floor(floor))
+        tp_giveup("problem exceeds symbol bound");
+    }
+  }
   thvm_heap_exhausted = 0;
   thvm_heap_exhaust_jmp = &g_fof_oom_jb;
   if (setjmp(g_fof_oom_jb) != 0) {
@@ -2299,7 +2366,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
                pc_err != NULL ? pc_err : "syntax");
       tp_giveup(why);
     }
-    if (pc_nsyms >= PC_MAX_SYMS - 1) tp_giveup("problem exceeds symbol bound");
+    if (pc_nsyms >= pc_sym_limit - 1) tp_giveup("problem exceeds symbol bound");
     int is_conj = (strcmp(rolebuf, "conjecture") == 0);
     int conj_mark = is_conj || (strcmp(rolebuf, "negated_conjecture") == 0);
     if (is_conj) {
@@ -2326,7 +2393,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     FolClause **recc;
     u32 bound = fof_distrib_bound();
     int rec_tseitin = 0;
-    if (fof_cnf_estimate(sk, bound) > bound) {
+    if (fof_route_tseitin(sk, bound)) {
       // Naive distribution would blow past the bound: clausify this
       // record definitionally (Tseitin).  The aux counter runs across
       // records (reset once above) so labels never collide.  A clause
@@ -2342,8 +2409,13 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
       // remainders: the record's clauses then carry definitions too.
       if (g_fol_tseitin_next > ts0) rec_tseitin = 1;
     }
-    if (fol_labels_exhausted())
-      tp_giveup("clausification exhausted the Skolem/definition label space");
+    if (fol_labels_exhausted()) {
+      char why[160];
+      snprintf(why, sizeof why, "clausification exhausted the Skolem/definition "
+               "label space (%u Skolem, %u definition labels)",
+               g_fol_skolem_next, g_fol_tseitin_next);
+      tp_giveup(why);
+    }
     if (recc == NULL) {
       char why[256];
       size_t nm_len = (role != NULL) ? (size_t)(role - 1 - body) : 0u;
@@ -2388,9 +2460,9 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
       if (m > max_comp) max_comp = m;
     }
     printf("FOFSTATS file=%s ncl=%d wide=%d nonhorn=%d split=%d "
-           "split_nonhorn=%d input_guards=%d max_comp=%u\n",
+           "split_nonhorn=%d input_guards=%d max_comp=%u tseitin=%d\n",
            g_cli_probpath, ncl, wide, nonhorn, split,
-           split_nonhorn, split_input_guards, max_comp);
+           split_nonhorn, split_input_guards, max_comp, g_fof_tseitin_recs);
     fflush(stdout);
     exit(0);
   }

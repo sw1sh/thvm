@@ -285,8 +285,8 @@ static void fof_ser_term(Term t, FofVarScope *sc, char *buf, size_t cap, size_t 
     snprintf(nm, sizeof nm, "%s%u", g_fof_sk_prefix, lab - FOL_LAB_SKOLEM_BASE);
   } else if (fol_is_tseitin_aux(lab)) {
     snprintf(nm, sizeof nm, "%s%u", g_fof_def_prefix, lab - FOL_LAB_TSEITIN_BASE);
-  } else if (lab >= PC_LAB_BASE && lab < PC_LAB_BASE + (u32)pc_nsyms) {
-    snprintf(nm, sizeof nm, "%s", pc_sym[lab - PC_LAB_BASE]);
+  } else if (pc_ix_of(lab) >= 0) {
+    snprintf(nm, sizeof nm, "%s", pc_sym[pc_ix_of(lab)]);
   } else {
     tp_giveup("unsupported symbol in clausified formula");
     return;

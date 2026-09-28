@@ -4701,6 +4701,9 @@ fn FolClause **fol_formula_to_clauses(Term f, u32 *n_out);
 // the subformula's free vars as arguments.  Reset the counter via
 // fol_reset_tseitin before each independent run.
 fn FolClause **fol_tseitin_extract_clauses(Term nnf_skolemized, u32 *n_out);
+// Move the Tseitin family to `floor` and the Skolem family 0x10000 above
+// it (for a signature whose labels reach past 0x10000); 0 = no room.
+fn u8          fol_set_label_floor(u32 floor);
 fn FolClause **fol_formula_to_clauses_tseitin(Term f, u32 *n_out);
 fn void        fol_reset_tseitin(void);
 fn u8          fol_is_tseitin_aux(u32 label);

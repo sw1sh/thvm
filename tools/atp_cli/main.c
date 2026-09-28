@@ -1135,6 +1135,21 @@ int main(int argc, char **argv) {
       char *pre = tp_preprocess(file, raw);
       pre = tp_unquote_names(pre);
       tp_shorten_names(pre);
+      // The term heap is sized once, at its first use: a knowledge base
+      // whose clausification outgrows the default semi-space (the 27MB
+      // BIO axiom file: ~363k clauses) gets a reservation scaled to its
+      // text (the mapping is lazy -- only touched cells cost memory).
+      // An explicit THVM_HEAP_CELLS / --heap-cells wins.
+      {
+        size_t plen = strlen(pre);
+        if (getenv("THVM_HEAP_CELLS") == NULL && plen > (8u << 20)) {
+          u64 cells = HEAP_CAP;
+          while (cells < 64u * (u64)plen && cells < (1ull << 31)) cells <<= 1;
+          char hc[32];
+          snprintf(hc, sizeof hc, "%llu", (unsigned long long)cells);
+          setenv("THVM_HEAP_CELLS", hc, 1);
+        }
+      }
       TpProblem *tpp = (TpProblem *)calloc(1, sizeof(TpProblem));
       if (tpp == NULL) { fprintf(stderr, "FindProof: OOM\n"); return 2; }
 #define tp (*tpp)

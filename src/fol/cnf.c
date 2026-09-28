@@ -192,7 +192,12 @@ fn Term fol_nnf(Term f) {
 // 262143).  Connectives live at 0xFFF0..0xFFF6 (~65520); user
 // predicate labels typically take low values.  Skolems fit safely
 // above the connectives but below the 18-bit ceiling.
-#define FOL_LAB_SKOLEM_BASE 0x20000u
+// The Skolem and Tseitin families sit above the user labels; a caller
+// with a signature past the connectives (fol_set_label_floor) moves both
+// up before allocating any.
+static u32 g_fol_lab_tseitin = 0x10000u;
+static u32 g_fol_lab_skolem  = 0x20000u;
+#define FOL_LAB_SKOLEM_BASE g_fol_lab_skolem
 
 static u32 g_fol_skolem_next = 0u;
 // Set when a Skolem or Tseitin family runs out of labels (the CTR label
@@ -627,7 +632,19 @@ fn FolClause **fol_formula_to_clauses(Term f, u32 *n_out) {
 // Caller must run fol_nnf + fol_skolemize first; this pass only
 // handles ∧, ∨, ¬-on-atom, and atoms.
 
-#define FOL_LAB_TSEITIN_BASE 0x10000u
+#define FOL_LAB_TSEITIN_BASE g_fol_lab_tseitin
+
+// Place the Tseitin family at `floor` (>= 0x10000, rounded up to 4096)
+// and the Skolem family 0x10000 above it.  0 when no Skolem room would
+// remain.  Only before the first Tseitin/Skolem label of a problem.
+fn u8 fol_set_label_floor(u32 floor) {
+  if (floor < 0x10000u) floor = 0x10000u;
+  floor = (floor + 0xFFFu) & ~0xFFFu;
+  if (floor + 0x10000u + 0x8000u > (u32)EXT_MASK) return 0u;
+  g_fol_lab_tseitin = floor;
+  g_fol_lab_skolem  = floor + 0x10000u;
+  return 1u;
+}
 
 static u32 g_fol_tseitin_next = 0u;
 

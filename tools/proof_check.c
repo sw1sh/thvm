@@ -123,6 +123,12 @@ static int pc_strict(void) {
 #define PC_LAB_ALL   0xFFF5u
 #define PC_LAB_EX    0xFFF6u
 #define PC_NOT_FOUND 0xFFFFFFFFu
+// User labels live below the connectives; a signature past that range
+// (the FOF front-end only: the 27MB BIO knowledge base has ~81k symbols)
+// continues at PC_LAB_EXT, above the connectives, once the front-end
+// has moved the Tseitin/Skolem families up (pc_sym_extend).
+#define PC_LAB_EXT   0x10000u
+#define PC_LOW_SYMS  ((int)(PC_LAB_NOT - PC_LAB_BASE))
 
 // ===================================================================
 // symbol interning: predicate/function/constant name -> stable label
@@ -134,8 +140,33 @@ static int pc_strict(void) {
 static char **pc_sym = NULL;
 static int    pc_nsyms = 0;
 static int    pc_sym_cap = 0;
+static int    pc_sym_limit = PC_MAX_SYMS;   // raised by pc_sym_extend
+
+// Label of symbol index ix, and back (-1 for a non-user label).
+static u32 pc_lab_of(int ix) {
+  return (ix < PC_LOW_SYMS) ? PC_LAB_BASE + (u32)ix
+                            : PC_LAB_EXT + (u32)(ix - PC_LOW_SYMS);
+}
+static int pc_ix_of(u32 lab) {
+  if (lab >= PC_LAB_BASE && lab < PC_LAB_NOT) {
+    int ix = (int)(lab - PC_LAB_BASE);
+    return (ix < pc_nsyms) ? ix : -1;
+  }
+  if (lab >= PC_LAB_EXT && pc_nsyms > PC_LOW_SYMS &&
+      lab - PC_LAB_EXT < (u32)(pc_nsyms - PC_LOW_SYMS))
+    return PC_LOW_SYMS + (int)(lab - PC_LAB_EXT);
+  return -1;
+}
+// Admit `n` symbols (the caller has moved every label family above
+// pc_lab_of(n - 1)); 0 when n exceeds what the labels can hold.
+static int pc_sym_extend(int n) {
+  if (n <= pc_sym_limit) return 1;
+  if (n > PC_LOW_SYMS + (int)(0x20000u - PC_LAB_EXT)) return 0;
+  pc_sym_limit = n;
+  return 1;
+}
 // Open-addressing index over pc_sym (slot = symbol index + 1, 0 empty).
-#define PC_SYM_HT (1u << 17)
+#define PC_SYM_HT (1u << 18)   // load <= 0.5 at the extended symbol cap
 static int pc_sym_ht[PC_SYM_HT];
 // Wide-functor encoding (pc_curry): on in the checker only, and the
 // label of its application symbol once a formula used it.
@@ -162,7 +193,7 @@ static u32 pc_lookup_n(const char *name, size_t n) {
   for (u32 h = pc_strhash_n(name, n) & (PC_SYM_HT - 1u);; h = (h + 1u) & (PC_SYM_HT - 1u)) {
     int s = pc_sym_ht[h];
     if (s == 0) return PC_NOT_FOUND;
-    if (pc_sym_is(s - 1, name, n)) return PC_LAB_BASE + (u32)(s - 1);
+    if (pc_sym_is(s - 1, name, n)) return pc_lab_of(s - 1);
   }
 }
 static u32 pc_lookup(const char *name) { return pc_lookup_n(name, strlen(name)); }
@@ -174,12 +205,12 @@ static u32 pc_intern_n(const char *name, size_t n) {
   for (;; h = (h + 1u) & (PC_SYM_HT - 1u)) {
     int s = pc_sym_ht[h];
     if (s == 0) break;
-    if (pc_sym_is(s - 1, name, n)) return PC_LAB_BASE + (u32)(s - 1);
+    if (pc_sym_is(s - 1, name, n)) return pc_lab_of(s - 1);
   }
-  if (pc_nsyms >= PC_MAX_SYMS) return PC_NOT_FOUND;
+  if (pc_nsyms >= pc_sym_limit) return PC_NOT_FOUND;
   if (pc_nsyms >= pc_sym_cap) {
     int ncap = (pc_sym_cap == 0) ? 1024 : 2 * pc_sym_cap;
-    if (ncap > PC_MAX_SYMS) ncap = PC_MAX_SYMS;
+    if (ncap > pc_sym_limit) ncap = pc_sym_limit;
     char **ns = (char **)realloc(pc_sym, (size_t)ncap * sizeof(char *));
     if (ns == NULL) return PC_NOT_FOUND;
     pc_sym = ns;
@@ -189,7 +220,7 @@ static u32 pc_intern_n(const char *name, size_t n) {
   if (copy == NULL) return PC_NOT_FOUND;
   pc_sym[pc_nsyms] = copy;
   pc_sym_ht[h] = pc_nsyms + 1;
-  return PC_LAB_BASE + (u32)pc_nsyms++;
+  return pc_lab_of(pc_nsyms++);
 }
 static u32 pc_intern(const char *name) { return pc_intern_n(name, strlen(name)); }
 
