@@ -482,6 +482,216 @@ static int test_case10_post_fold_renders(void) {
   TEST_REPORT();
 }
 
+// Distinct PLACEHOLDER acc_ids reachable from a root through every child
+// kind: uop_arity srcs, both AFTER operands, STACK lanes, END ranges.  No
+// depth bound -- case13 places its PLACEHOLDER past 256 levels.
+typedef struct {
+  Term seen[8192];
+  u32  n_seen;
+  u32  ids[64];
+  u32  n_ids;
+} AccIdScan;
+
+static void acc_ids_rec(AccIdScan *s, Term t) {
+  if (term_tag(t) != TAG_UOP) {
+    return;
+  }
+  for (u32 i = 0; i < s->n_seen; i++) {
+    if (s->seen[i] == t) {
+      return;
+    }
+  }
+  if (s->n_seen < 8192) {
+    s->seen[s->n_seen++] = t;
+  }
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_PLACEHOLDER) {
+    u32 id = uop_placeholder_acc_id(t);
+    for (u32 i = 0; i < s->n_ids; i++) {
+      if (s->ids[i] == id) {
+        return;
+      }
+    }
+    if (s->n_ids < 64) {
+      s->ids[s->n_ids++] = id;
+    }
+    return;
+  }
+  u8 ar = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    acc_ids_rec(s, heap_read(loc + i));
+  }
+  if (op == UOP_AFTER) {
+    acc_ids_rec(s, heap_read(loc + 0));
+    acc_ids_rec(s, heap_read(loc + 1));
+  } else if (op == UOP_STACK) {
+    for (u32 i = 0; i < uop_stack_n(t); i++) {
+      acc_ids_rec(s, uop_stack_src(t, i));
+    }
+  } else if (op == UOP_END) {
+    for (u32 i = 0; i < uop_end_n(t); i++) {
+      acc_ids_rec(s, uop_end_range(t, i));
+    }
+  }
+}
+
+// 1 iff the acc_ids reachable from `t` are exactly {0, 1}.
+static int acc_ids_are_0_1(Term t) {
+  static AccIdScan s;
+  s.n_seen = 0;
+  s.n_ids  = 0;
+  acc_ids_rec(&s, t);
+  if (s.n_ids != 2) {
+    return 0;
+  }
+  return (s.ids[0] == 0 && s.ids[1] == 1) || (s.ids[0] == 1 && s.ids[1] == 0);
+}
+
+// SUM over axis 0 (extent 8) of in0[a0].
+static Term seed_test_reduce(void) {
+  u32 dims[1] = { 8 };
+  Term in_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 1);
+  Term r      = uop_range(0, KAX_LOOP, 8);
+  u32 axes[1] = { 0 };
+  return uop_reduce_multi(REDUCE_SUM, 1, axes, uop_load(uop_index_e(in_buf, r)));
+}
+
+// out[0] = value.
+static Term seed_test_store(Term value) {
+  u32 dims[1] = { 1 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
+  Term idx     = uop_index_e(out_buf, uop_const(DT_INT32, 0));
+  return uop_store(out_buf, idx, value);
+}
+
+// Linearize + render `root` as C99 into buf.  Returns the renderer's result.
+static int render_c(Term root, char *buf, u32 cap) {
+  static LinKernel lk;
+  buf[0] = 0;
+  if (!uop_linearize(root, &lk)) {
+    return 0;
+  }
+  FILE *fp = fmemopen(buf, cap - 1, "w");
+  if (fp == NULL) {
+    return 0;
+  }
+  int ok = cg_render_linearized_c(&lk, "k", fp);
+  long n = ftell(fp);
+  fclose(fp);
+  buf[n > 0 ? n : 0] = 0;
+  return ok;
+}
+
+// Case 11: a PLACEHOLDER(0) already in the DAG, reachable only through an
+// AFTER chain, keeps acc_id 0; the lowered reduce draws acc_id 1 instead of
+// hash-consing onto the same accumulator.  Mirrors tinygrad seeding its
+// slot counter above the live slots (codegen/__init__.py:310).
+static int test_case11_acc_seed_through_after(void) {
+  thvm_init();
+  TEST_BEGIN("case11 acc seed: PLACEHOLDER behind AFTER -> reduce takes acc_id 1");
+
+  Term p0    = uop_placeholder(DT_FP32, 0);
+  Term p_set = uop_store(p0, uop_const(DT_INT32, 0), uop_const(DT_FP32, 0x3f800000u));
+  Term p_val = uop_after(uop_load(p0), p_set);
+  Term root  = seed_test_store(uop_binary(UOP_ADD, seed_test_reduce(), p_val));
+
+  Term dv = uop_devectorize_graph(root);
+  CHECK(acc_ids_are_0_1(dv));
+  static char buf[16384];
+  CHECK(render_c(dv, buf, sizeof(buf)));
+  CHECK(strstr(buf, "float _acc0;") != NULL);
+  CHECK(strstr(buf, "float _acc1;") != NULL);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 12: same, with the PLACEHOLDER reachable only through a STACK lane
+// (uop_arity reports 0 for STACK).
+static int test_case12_acc_seed_through_stack(void) {
+  thvm_init();
+  TEST_BEGIN("case12 acc seed: PLACEHOLDER in a STACK lane -> reduce takes acc_id 1");
+
+  Term p0    = uop_placeholder(DT_FP32, 0);
+  Term p_set = uop_store(p0, uop_const(DT_INT32, 0), uop_const(DT_FP32, 0x3f800000u));
+  Term lanes[2] = { seed_test_store(seed_test_reduce()), p_set };
+  Term root  = uop_stack(2, lanes);
+
+  Term dv = uop_devectorize_graph(root);
+  CHECK(acc_ids_are_0_1(dv));
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 13: same, with the PLACEHOLDER 300 levels deep.  A walk with a
+// depth budget would stop short and reseed the counter at 0.
+static int test_case13_acc_seed_deep(void) {
+  thvm_init();
+  TEST_BEGIN("case13 acc seed: PLACEHOLDER past depth 256 -> reduce takes acc_id 1");
+
+  u32 dims[1] = { 512 };
+  Term in2  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 2);
+  Term deep = uop_load(uop_placeholder(DT_FP32, 0));
+  for (u32 i = 0; i < 300; i++) {
+    Term ld = uop_load(uop_index_e(in2, uop_const(DT_INT32, i)));
+    deep = uop_binary(UOP_ADD, deep, ld);
+  }
+  Term root = seed_test_store(uop_binary(UOP_ADD, seed_test_reduce(), deep));
+
+  Term dv = uop_devectorize_graph(root);
+  CHECK(acc_ids_are_0_1(dv));
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 14: an int32 PLACEHOLDER(0) next to a float reduce.  The reduce's
+// accumulator must be declared on its own (`float _acc1;`), not folded
+// into the existing `int _acc0;` declaration.
+static int test_case14_acc_seed_distinct_dtype(void) {
+  thvm_init();
+  TEST_BEGIN("case14 acc seed: int PLACEHOLDER(0) + float reduce -> distinct declarations");
+
+  Term pi    = uop_placeholder(DT_INT32, 0);
+  Term p_set = uop_store(pi, uop_const(DT_INT32, 0), uop_const(DT_INT32, 7));
+  Term p_val = uop_cast(uop_after(uop_load(pi), p_set), DT_FP32);
+  Term root  = seed_test_store(uop_binary(UOP_ADD, seed_test_reduce(), p_val));
+
+  Term dv = uop_devectorize_graph(root);
+  static char buf[16384];
+  CHECK(render_c(dv, buf, sizeof(buf)));
+  CHECK(strstr(buf, "int _acc0;") != NULL);
+  CHECK(strstr(buf, "float _acc1;") != NULL);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// Case 15: the renderer declares accumulators per PLACEHOLDER Term, not per
+// acc_id.  Two accumulators that collide on acc_id 0 with different dtypes
+// get two declarations, which a C compiler rejects, instead of the second
+// silently aliasing onto the first.
+static int test_case15_acc_decl_per_placeholder(void) {
+  thvm_init();
+  TEST_BEGIN("case15 render: colliding acc_ids get one declaration per PLACEHOLDER");
+
+  Term zero = uop_const(DT_INT32, 0);
+  Term pf   = uop_placeholder(DT_FP32, 0);
+  Term pi   = uop_placeholder(DT_INT32, 0);
+  Term sf   = uop_store(pf, zero, uop_const(DT_FP32, 0x3f800000u));
+  Term si   = uop_store(pi, zero, uop_const(DT_INT32, 7));
+
+  static char buf[4096];
+  CHECK(render_c(uop_after(sf, si), buf, sizeof(buf)));
+  CHECK(strstr(buf, "float _acc0;") != NULL);
+  CHECK(strstr(buf, "int _acc0;") != NULL);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 // Case 7: hash-cons on PLACEHOLDER + STACK.
 static int test_case7_hash_cons(void) {
   thvm_init();
@@ -525,5 +735,10 @@ int main(void) {
   rc |= test_case8_conv_kid3_no_contract();
   rc |= test_case9_multi_axis_k_with_upcast();
   rc |= test_case10_post_fold_renders();
+  rc |= test_case11_acc_seed_through_after();
+  rc |= test_case12_acc_seed_through_stack();
+  rc |= test_case13_acc_seed_deep();
+  rc |= test_case14_acc_seed_distinct_dtype();
+  rc |= test_case15_acc_decl_per_placeholder();
   return rc;
 }

@@ -65,14 +65,13 @@ typedef struct {
   LzBufSlot bufs[LZ_MAX_BUFS];
   u32       n_bufs;
   LzTarget  target;
-  // Optional: track placeholders we've emitted so a repeated reference
-  // doesn't re-declare the accumulator.  The hash-cons in
-  // uop_placeholder makes two PLACEHOLDERs with the same (dtype,
-  // acc_id) the same Term, but the linearizer may surface the same
-  // Term twice if the toposort encounters it from two paths -- which it
-  // shouldn't (seen-map dedups), but defence-in-depth.
-  u32 emitted_accs[64];
-  u32 n_emitted_accs;
+  // Accumulator declarations already emitted, keyed on the PLACEHOLDER
+  // Term (hash-consed on (dtype, acc_id)), not on acc_id alone: two
+  // accumulators that collide on an acc_id get one declaration each, which
+  // the compiler rejects, instead of the second silently aliasing onto the
+  // first.
+  Term emitted_accs[64];
+  u32  n_emitted_accs;
 } LzCtx;
 
 static u32 lz_register_buf(LzCtx *ctx, Term buf) {
@@ -112,16 +111,20 @@ static const char *lz_type_name(LzCtx const *ctx, u32 dtype) {
   }
 }
 
-static int lz_acc_already_emitted(LzCtx const *ctx, u32 acc_id) {
+static int lz_acc_already_emitted(LzCtx const *ctx, Term acc) {
   for (u32 i = 0; i < ctx->n_emitted_accs; i++) {
-    if (ctx->emitted_accs[i] == acc_id) return 1;
+    if (ctx->emitted_accs[i] == acc) {
+      return 1;
+    }
   }
   return 0;
 }
 
-static void lz_acc_mark_emitted(LzCtx *ctx, u32 acc_id) {
-  if (ctx->n_emitted_accs >= 64) return;
-  ctx->emitted_accs[ctx->n_emitted_accs++] = acc_id;
+static void lz_acc_mark_emitted(LzCtx *ctx, Term acc) {
+  if (ctx->n_emitted_accs >= 64) {
+    return;
+  }
+  ctx->emitted_accs[ctx->n_emitted_accs++] = acc;
 }
 
 // === Expression emit ===================================================
@@ -529,11 +532,13 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
     if (op == UOP_BUFFER) {
       lz_register_buf(ctx, t);
     } else if (op == UOP_PLACEHOLDER) {
-      u32 acc_id = uop_placeholder_acc_id(t);
-      if (lz_acc_already_emitted(ctx, acc_id)) continue;
+      if (lz_acc_already_emitted(ctx, t)) {
+        continue;
+      }
       u32 dt = uop_placeholder_dtype(t);
-      fprintf(fp, "  %s _acc%u;\n", lz_type_name(ctx, dt), acc_id);
-      lz_acc_mark_emitted(ctx, acc_id);
+      fprintf(fp, "  %s _acc%u;\n", lz_type_name(ctx, dt),
+              uop_placeholder_acc_id(t));
+      lz_acc_mark_emitted(ctx, t);
     }
   }
 

@@ -186,9 +186,15 @@ Ops.REDUCE(body, *reduce_axes, arg=(op, axes_tuple))
 ```
 
 `acc_num` (held in `ReduceContext`) ensures every REDUCE gets a unique
-accumulator slot. The result is a graph where reduces have been
-"linearized" into a register accumulator + an explicit per-axis update
-+ a final load.
+accumulator slot. Current tinygrad draws these from one per-kernel
+`slots` counter that starts one past the largest BUFFER/ALLOC slot
+already in the sink (`codegen/__init__.py:310-316`); thvm's
+`uop_devectorize_graph` seeds its counter the same way, one past the
+largest PLACEHOLDER `acc_id` already in the DAG, and the linearized
+renderer declares one accumulator per PLACEHOLDER Term, so a collision
+fails to compile instead of aliasing. The result is a graph where
+reduces have been "linearized" into a register accumulator + an
+explicit per-axis update + a final load.
 
 **Why this matters for opt-rich code:** when the expander has REPLICATED
 the body F times (one copy per UPCAST'd element), each copy hits a

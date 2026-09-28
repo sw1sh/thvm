@@ -183,14 +183,173 @@ static u32 devec_reduce_identity_bits(u32 kind, u32 dtype) {
   return 0u;
 }
 
+// === Cone walk ==========================================================
+//
+// Visits every node reachable from a root exactly once: the uop_arity srcs
+// plus the children uop_arity reports as 0 (both AFTER operands, every
+// STACK lane, every END range).  Iterative with a visited set, so it is
+// linear on hash-consed DAGs and has no depth budget: a budgeted walk
+// silently returns a partial answer past its budget (the depth-guard bug
+// class fixed in materialize.c).  Returns 0 only if it cannot allocate.
+
+typedef void (*DevecVisit)(Term t, void *user);
+
+typedef struct {
+  Term *set;        // open-addressed visited set; 0 marks an empty slot
+  u32   set_cap;    // power of two
+  u32   set_used;
+  Term *stk;
+  u32   stk_n;
+  u32   stk_cap;
+} DevecWalk;
+
+static u32 devec_walk_slot(Term t, u32 cap) {
+  u64 x = (u64)t;
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  return (u32)x & (cap - 1);
+}
+
+static int devec_walk_rehash(DevecWalk *w, u32 cap) {
+  Term *set = (Term *)calloc(cap, sizeof(Term));
+  if (set == NULL) {
+    return 0;
+  }
+  for (u32 i = 0; i < w->set_cap; i++) {
+    Term t = w->set[i];
+    if (t == 0) {
+      continue;
+    }
+    u32 j = devec_walk_slot(t, cap);
+    while (set[j] != 0) {
+      j = (j + 1) & (cap - 1);
+    }
+    set[j] = t;
+  }
+  free(w->set);
+  w->set     = set;
+  w->set_cap = cap;
+  return 1;
+}
+
+// 1 if `t` is visited for the first time, 0 if seen before, -1 if the set
+// cannot grow.
+static int devec_walk_mark(DevecWalk *w, Term t) {
+  if ((w->set_used + 1) * 2 > w->set_cap) {
+    u32 cap = (w->set_cap != 0) ? w->set_cap * 2 : 256;
+    if (!devec_walk_rehash(w, cap)) {
+      return -1;
+    }
+  }
+  u32 i = devec_walk_slot(t, w->set_cap);
+  while (w->set[i] != 0) {
+    if (w->set[i] == t) {
+      return 0;
+    }
+    i = (i + 1) & (w->set_cap - 1);
+  }
+  w->set[i] = t;
+  w->set_used++;
+  return 1;
+}
+
+static int devec_walk_push(DevecWalk *w, Term t) {
+  if (w->stk_n == w->stk_cap) {
+    u32 cap = (w->stk_cap != 0) ? w->stk_cap * 2 : 256;
+    Term *stk = (Term *)realloc(w->stk, cap * sizeof(Term));
+    if (stk == NULL) {
+      return 0;
+    }
+    w->stk     = stk;
+    w->stk_cap = cap;
+  }
+  w->stk[w->stk_n++] = t;
+  return 1;
+}
+
+static int devec_walk_push_children(DevecWalk *w, Term t) {
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  u8  ar  = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    if (!devec_walk_push(w, heap_read(loc + i))) {
+      return 0;
+    }
+  }
+  switch (op) {
+    case UOP_AFTER:
+      return devec_walk_push(w, heap_read(loc + 0))
+          && devec_walk_push(w, heap_read(loc + 1));
+    case UOP_STACK: {
+      u32 n = uop_stack_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (!devec_walk_push(w, uop_stack_src(t, i))) {
+          return 0;
+        }
+      }
+      return 1;
+    }
+    case UOP_END: {
+      u32 n = uop_end_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (!devec_walk_push(w, uop_end_range(t, i))) {
+          return 0;
+        }
+      }
+      return 1;
+    }
+    default:
+      return 1;
+  }
+}
+
+static int devec_cone_walk(Term root, DevecVisit visit, void *user) {
+  DevecWalk w;
+  memset(&w, 0, sizeof(w));
+  int ok = devec_walk_push(&w, root);
+  while (ok && w.stk_n > 0) {
+    Term t = w.stk[--w.stk_n];
+    if (term_tag(t) != TAG_UOP) {
+      continue;
+    }
+    int fresh = devec_walk_mark(&w, t);
+    if (fresh < 0) {
+      ok = 0;
+    } else if (fresh > 0) {
+      visit(t, user);
+      ok = devec_walk_push_children(&w, t);
+    }
+  }
+  free(w.set);
+  free(w.stk);
+  return ok;
+}
+
 // === pm_reduce / reduce_to_acc (devectorizer.py:311-328) ===============
 //
-// Context shared across all rewrites in one uop_graph_rewrite pass: a
-// monotonically increasing acc_id counter so every distinct REDUCE gets
-// a unique accumulator slot (tinygrad's ReduceContext.acc_num).
+// The one per-kernel scratch-slot counter, threaded through every rewrite
+// of the pass: tinygrad's `slots` (codegen/__init__.py:310-316), which
+// "remove reduces" and "add local buffers" share.  It starts one past the
+// largest acc_id already in the DAG so a lowered reduce never hash-conses
+// onto a live accumulator.  Any future LOCAL/REG scratch producer on the
+// linearized route (a pm_add_local_buffers or group-for-reduce port) must
+// draw from this counter too: its buffers render with the same `_acc<N>`
+// names as these accumulators (render_linearized.c).
 typedef struct {
   u32 acc_num;
 } DevecReduceCtx;
+
+static void devec_visit_acc_max(Term t, void *user) {
+  if (term_ext(t) != UOP_PLACEHOLDER) {
+    return;
+  }
+  u32 *next = (u32 *)user;
+  u32 id = uop_placeholder_acc_id(t);
+  if (id + 1 > *next) {
+    *next = id + 1;
+  }
+}
 
 // Build the reduce-to-acc lowering for one REDUCE node:
 //   placeholder = PLACEHOLDER(dtype, acc_num++)
@@ -827,11 +986,17 @@ fn Term uop_devectorize_graph(Term root) {
                         NULL);
 
   // Pass (b): pm_reduce -- one shared ReduceContext threads acc_num
-  // across every REDUCE the rewrite encounters.
+  // across every REDUCE the rewrite encounters.  If the seed walk cannot
+  // allocate, the REDUCEs stay unlowered: every linearized renderer
+  // declines a surviving REDUCE, so the kernel takes the legacy emit
+  // instead of reusing a live accumulator id.
   static UOpGraphRewriteRule const REDUCE_RULES[] = {
     { "devec_pm_reduce", devec_pm_reduce },
   };
   DevecReduceCtx ctx = { 0 };
+  if (!devec_cone_walk(t, devec_visit_acc_max, &ctx.acc_num)) {
+    return t;
+  }
   t = uop_graph_rewrite(t, REDUCE_RULES,
                         sizeof(REDUCE_RULES) / sizeof(REDUCE_RULES[0]),
                         &ctx);
