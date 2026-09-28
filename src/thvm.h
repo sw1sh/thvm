@@ -7689,6 +7689,17 @@ fn void atp_frequency_weights_g(const Term *lhs, const Term *rhs, u32 n_eqns,
                                 Term goal_l, Term goal_r, u32 n_labels,
                                 u32 *weights);
 
+// Vampire symbol_precedence_boost=goal (spb=goal): remap `prec` so every
+// symbol occurring in the goal outranks every non-goal symbol, keeping
+// the relative order inside each band.  Composes with any base scheme
+// (label order, sp=frequency, ...).  Under LPO this is the ring-family
+// lever: goal-cone operators (multiply) rise above the additive theory,
+// so distributivity orients as sum-of-products EXPANSION and the
+// defined-operator folds (associator/commutator) become demodulators.
+// Returns the number of goal-band symbols, 0 on OOM / no goal.
+fn u32  atp_goal_boost_precedence_g(Term goal_l, Term goal_r, u32 n_labels,
+                                    u32 *prec);
+
 // KBO weight-generation schemes (Vampire kbo_weight_scheme / -kws,
 // Kernel/KBO.cpp weightsFromOpts), goal-inclusive.  atp_arity_weights_g
 // mode: 0 arity, 1 inv_arity, 2 arity_squared, 3 inv_arity_squared;

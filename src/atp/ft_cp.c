@@ -56,6 +56,34 @@ extern AtpFtCell *ft_unify_apply (AtpFt *a, const AtpFtCell *t,
                                   const AtpFtSubst *s, int scratch);
 extern void       ft_subst_reset (AtpFtSubst *s);
 
+// --- Generation-time per-side CP node cap ---------------------------
+//
+// Twee --max-term-size enforcement point.  The queue-time gate
+// (cp_heap.c max_cp_side) runs AFTER the raw overlap is materialized
+// into heap Terms -- under a duplicating ordering regime (the LPO
+// ring lanes: distributivity oriented as expansion, so sigma carries
+// repeated big bindings) a SINGLE overlap's sigma-materialization can
+// exhaust the whole from-space inside phase=cp_gen, where the
+// collector cannot run.  Enforce the SAME per-side cap on the scratch
+// FT trees BEFORE ft_to_term: cells are counted with an early abort at
+// cap+1, so the guard is O(cap) per accepted position and free when
+// the knob is unset (0).  Set per overlap batch from s->max_cp_side by
+// atp_overlap_ij; 0 = off = byte-identical behaviour.
+static u32 g_ftcp_max_side = 0u;
+fn void thvm_ft_cp_set_max_side(u32 cap) { g_ftcp_max_side = cap; }
+
+// Count cells of the subterm chain c..c->end, aborting past `cap`.
+// Returns cap+1 when the tree is larger than cap.
+static u32 ft_cp_count_capped(const AtpFtCell *c, u32 cap) {
+  u32 n = 0;
+  const AtpFtCell *stop = c->end->next;
+  while (c != stop) {
+    if (++n > cap) return cap + 1u;
+    c = c->next;
+  }
+  return n;
+}
+
 // --- Var-bit helpers (file-local copies) -----------------------------
 static inline int  ft_cp_is_var (const AtpFtCell *c) {
   return (c->sym & WF_VAR_BIT) != 0u;
@@ -317,6 +345,16 @@ static u32 ft_cp_visit(const u32 *p, u32 p_len, void *raw) {
     return ctx->count;
   }
   if (ctx->need_peak && cp_peak_ft == NULL) return ctx->count;
+  // Generation-time --max-term-size: drop the CP while it is still a
+  // scratch FT tree, before any heap materialization (see the header
+  // comment on g_ftcp_max_side).  Same per-side semantics as the
+  // queue-time gate; counters are not ticked here because the CP never
+  // becomes a heap object at all.
+  if (g_ftcp_max_side != 0u &&
+      (ft_cp_count_capped(cp_lhs_ft, g_ftcp_max_side) > g_ftcp_max_side ||
+       ft_cp_count_capped(cp_rhs_ft, g_ftcp_max_side) > g_ftcp_max_side)) {
+    return ctx->count;
+  }
 
   // Decode back to Term for the CriticalPair slot.  The peak slot is
   // only populated when the connectedness gate is active (otherwise

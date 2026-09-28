@@ -608,6 +608,58 @@ fn u32 atp_frequency_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
   return n_seen;
 }
 
+// Vampire symbol_precedence_boost=goal port (Shell/Options
+// symbol_precedence_boost; Kernel/SignatureHelper boosts unit-goal
+// symbols above the base `sp=` order).  Census the two goal sides,
+// then remap the existing ranks into two bands: non-goal symbols keep
+// their relative order in the low band, goal symbols keep theirs in
+// the high band.  Labels with prec==0 (unseen by the base scheme) stay
+// 0 unless they occur in the goal, in which case they enter the goal
+// band (bottom of it, label-id tie-break).  See thvm.h for the LPO
+// ring-family rationale.
+fn u32 atp_goal_boost_precedence_g(Term goal_l, Term goal_r, u32 n_labels,
+                                   u32 *prec) {
+  if (n_labels == 0u) return 0u;
+  if (term_tag(goal_l) != TAG_CTR && term_tag(goal_r) != TAG_CTR) return 0u;
+  u32 *gcount = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
+  u64 *score  = (u64 *)malloc(sizeof(u64) * (size_t)n_labels);
+  u32 *order  = (u32 *)malloc(sizeof(u32) * (size_t)n_labels);
+  if (gcount == NULL || score == NULL || order == NULL) {
+    free(gcount); free(score); free(order); return 0u;
+  }
+  for (u32 i = 0; i < n_labels; i++) gcount[i] = 0u;
+  prec_occ_walk(goal_l, gcount, n_labels);
+  prec_occ_walk(goal_r, gcount, n_labels);
+  // Rank every label that is either base-ranked or goal-occurring.
+  // Sort key: (band, old_prec, label) ascending -- non-goal band first,
+  // then by the base rank, so a stable two-band remap falls out of one
+  // insertion sort.
+  u32 n_seen = 0, n_goal = 0;
+  for (u32 l = 0; l < n_labels; l++) {
+    u32 in_goal = (gcount[l] > 0u) ? 1u : 0u;
+    if (prec[l] == 0u && !in_goal) continue;
+    if (in_goal) n_goal++;
+    score[n_seen] = ((u64)in_goal << 62) | ((u64)prec[l] << 30) | (u64)l;
+    order[n_seen] = l;
+    n_seen++;
+  }
+  for (u32 i = 1; i < n_seen; i++) {
+    u64 sk = score[i];
+    u32 ok = order[i];
+    u32 j = i;
+    while (j > 0 && score[j - 1] > sk) {
+      score[j] = score[j - 1];
+      order[j] = order[j - 1];
+      j--;
+    }
+    score[j] = sk;
+    order[j] = ok;
+  }
+  for (u32 i = 0; i < n_seen; i++) prec[order[i]] = i + 1u;
+  free(gcount); free(score); free(order);
+  return n_goal;
+}
+
 // Vampire KBO FREQUENCY weight-generation scheme (Kernel/KBO.cpp
 // weightsFromOpts, KboWeightGenerationScheme::FREQUENCY:
 // `weight = frequency > 0 ? frequency : 1`).  Goal-inclusive census.

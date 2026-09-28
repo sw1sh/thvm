@@ -1833,6 +1833,73 @@ int main(int argc, char **argv) {
         }
       }
     }
+    // Vampire symbol_precedence_boost=goal (THVM_ATP_SPB_PREC=goal /
+    // --spb-prec): every goal-occurring symbol outranks every non-goal
+    // symbol, relative order inside each band preserved -- composes
+    // with the sym-prec block above (base scheme first, boost second),
+    // exactly Vampire's sp= then spb= pipeline.  Distinct from the
+    // existing --spb-goal knob, which scales CP WEIGHTS by conjecture
+    // ancestry and never touches the ordering.  The RNG Moufang
+    // dissection lever: under --ord=lpo this lifts the goal cone
+    // (multiply) above the additive theory, turning distributivity
+    // into a sum-of-products demodulator and the associator/commutator
+    // definitions into folds (Vampire winner
+    // lrs+10_2_to=lpo:spb=goal:fd=preordered:bd=preordered on
+    // RNG027-5, 91 activations).  Unset = byte-identical precedence.
+    {
+      const char *spbp = getenv("THVM_ATP_SPB_PREC");
+      if (spbp != NULL && spbp[0] != '\0' && spbp[0] != '0'
+          && getenv("ATP_BENCH_AUTO_WEIGHTS") == NULL) {
+        atp_goal_boost_precedence_g(prp.goal_l, prp.goal_r,
+                                    prp.n_syms + PR_LABEL_BASE,
+                                    prp.precedence);
+        // Const-min discipline (Vampire pairs spb=goal with sp=const_*
+        // in every RNG winner): after the boost, push ALL constants
+        // (arity 0, goal or not) into a bottom band below every
+        // function symbol, band-stable.  Load-bearing for OUR engine
+        // beyond fidelity: the WM unorientable-direction grounding
+        // (ft_subst_ground_extras, min_const = reserved label 1) makes
+        // `c -> f(min_const,...)` a LEGAL decreasing rewrite whenever a
+        // constant outranks a function symbol under LPO -- a boosted
+        // goal constant (or additive_identity above commutator) turns
+        // every occurrence of it into a min-const junk factory
+        // (measured: RNG027-5 pick 9 `e = commutator(C1,C1)` and the
+        // whole C1 cascade; gone under const-min).
+        {
+          u32 cap2 = prp.n_syms + PR_LABEL_BASE;
+          u32 nseen = 0;
+          // Collect ranked labels, split into function / constant bands.
+          // Two stable passes re-rank: functions above constants.
+          u32 rank = 0;
+          for (int band = 0; band < 2; band++) {   // 0 = consts, 1 = funcs
+            // ascending existing prec within the band
+            for (;;) {
+              u32 best = 0, best_l = 0;
+              best = 0xFFFFFFFFu;
+              for (u32 l = PR_LABEL_BASE; l < cap2; l++) {
+                u32 a = prp.syms[l - PR_LABEL_BASE].arity;
+                if ((band == 0) != (a == 0u)) continue;
+                u32 p = prp.precedence[l];
+                if (p == 0u || p >= 0x40000000u) continue;  // unseen / done
+                if (p < best) { best = p; best_l = l; }
+              }
+              if (best == 0xFFFFFFFFu) break;
+              prp.precedence[best_l] = 0x40000000u + (++rank);
+            }
+          }
+          for (u32 l = PR_LABEL_BASE; l < cap2; l++)
+            if (prp.precedence[l] >= 0x40000000u)
+              prp.precedence[l] -= 0x40000000u;
+          (void)nseen;
+        }
+        if (getenv("THVM_ATP_DEBUG_SYMPREC") != NULL) {
+          fprintf(stderr, "SPB-PREC[goal] label: prec\n");
+          for (u32 l = PR_LABEL_BASE; l < prp.n_syms + PR_LABEL_BASE; l++)
+            fprintf(stderr, "  %-22s %u\n",
+                    prp.syms[l - PR_LABEL_BASE].name, prp.precedence[l]);
+        }
+      }
+    }
     // KBO per-symbol WEIGHT generation scheme (Vampire kbo_weight_scheme
     // / -kws), opt-in and orthogonal to --sym-prec above: sym-prec fills
     // prp.precedence, kws fills prp.weights.  Both feed the SAME KboConfig
