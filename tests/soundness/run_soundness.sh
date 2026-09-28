@@ -3,7 +3,9 @@
 # refutation (SZS Unsatisfiable / Theorem) is UNSOUND.  FindProof must
 # report GaveUp / Satisfiable / ResourceOut -- never a refutation.
 # Reported by Geoff Sutcliffe (CASC J13 soundness testing, 2026-07-17);
-# root causes fixed in c68b1bd7.  Run from the repo root after `make`.
+# root causes fixed in c68b1bd7.  edge_include_select.p is satisfiable
+# only when its include() selection is honoured.  Run from the repo root
+# after `make`.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=${1:-$(cd "$HERE/../.." && pwd)/bin/FindProof}

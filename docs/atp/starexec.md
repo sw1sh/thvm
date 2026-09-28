@@ -251,7 +251,8 @@ bin/FindProof --schedule --szs --proof --wall=<limit> PROBLEM.p
 
 - INPUT: a TPTP CNF unit-equality problem, or FOF / non-unit CNF via the
   equationalization front end. `include('Axioms/*.ax')` directives resolve
-  against the problem directory and the `TPTP` environment variable.
+  against the problem directory, the `TPTP` environment variable and the
+  current directory; `include('F', [n1, ...])` keeps only the listed formulas.
 - `--schedule` runs a CONCURRENT portfolio: the configuration slices launch as
   child processes in a bounded pool (`THVM_ATP_SCHED_MAX_PAR` at once --
   default 5 for the bare binary, pinned to the core count by the run script --

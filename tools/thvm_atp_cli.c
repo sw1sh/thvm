@@ -16,7 +16,8 @@
 // CASC compatibility: a TPTP CNF UEQ problem (unit equalities, one or
 // more negative units) is converted in-process to Waldmeister .pr form
 // -- include('Axioms/X.ax') directives resolve against the problem's
-// directory, $TPTP, and the CWD -- and the SZS result line uses the
+// directory, $TPTP, and the CWD, and include('X', [n1, ...]) keeps only
+// the listed formulas -- and the SZS result line uses the
 // CNF ontology (Unsatisfiable / Satisfiable / GaveUp / ResourceOut /
 // Timeout).  --proof prints an SZS CNFRefutation block: the input
 // clauses, the derivation of every rule the closing rewrite chain

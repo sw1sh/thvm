@@ -1,0 +1,3 @@
+% Two unit equations; edge_include_select.p selects only a1.
+cnf(a1, axiom, f(X) = X).
+cnf(a2, axiom, g(X) = a).

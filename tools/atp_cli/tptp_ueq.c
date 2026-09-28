@@ -106,8 +106,9 @@ static int  prov_unf_new(const TpClause *cl);
 static void prov_unf_add_def(int unf, int def);
 static int  prov_eqg_new(const TpClause *cl);
 
-// Strip %-comments and splice include directives (one level -- TPTP
-// axiom files do not nest for the UEQ library).
+// Drop %-comment lines and splice include directives through
+// tp_include_expand (selections honoured, nested includes followed).  A
+// directive that does not expand is an input error.
 static char *tp_preprocess(const char *problem_path, const char *raw) {
   size_t cap = strlen(raw) * 4u + 65536u;
   char *out = (char *)malloc(cap);
@@ -120,37 +121,32 @@ static char *tp_preprocess(const char *problem_path, const char *raw) {
     size_t tl = ll;
     while (tl > 0 && isspace((unsigned char)*t)) { t++; tl--; }
     if (tl > 0 && *t == '%') { /* comment line: drop */ }
-    else if (tl > 8 && strncmp(t, "include(", 8) == 0) {
-      const char *q1 = strchr(t, '\'');
-      const char *q2 = (q1 != NULL) ? strchr(q1 + 1, '\'') : NULL;
-      if (q1 != NULL && q2 != NULL) {
-        char inc[1024];
-        size_t n = (size_t)(q2 - q1 - 1);
-        if (n >= sizeof inc) n = sizeof inc - 1;
-        memcpy(inc, q1 + 1, n);
-        inc[n] = '\0';
-        char *body = tp_resolve_include(problem_path, inc);
-        if (body == NULL) {
-          fprintf(stderr, "FindProof: cannot resolve include('%s')\n", inc);
-          exit(2);
-        }
-        // strip comments in the included body too (no nested includes)
-        const char *bp = body;
-        while (*bp != '\0') {
-          const char *beol = strchr(bp, '\n');
-          size_t bll = (beol != NULL) ? (size_t)(beol - bp) : strlen(bp);
-          const char *bt = bp;
-          size_t btl = bll;
-          while (btl > 0 && isspace((unsigned char)*bt)) { bt++; btl--; }
-          if (!(btl > 0 && *bt == '%')) {
-            if (o + bll + 2 >= cap) { cap = cap * 2 + bll; out = (char *)realloc(out, cap); }
-            memcpy(out + o, bp, bll); o += bll; out[o++] = '\n';
-          }
-          if (beol == NULL) break;
-          bp = beol + 1;
-        }
-        free(body);
+    else if (tl > 8 && tp_is_include(t)) {
+      const char *end = NULL;
+      char why[1400];
+      char *body = tp_include_expand(problem_path, t, 1, &end, why, sizeof why);
+      if (body == NULL) {
+        fprintf(stderr, "FindProof: %s\n", why);
+        exit(2);
       }
+      // drop the comment lines of the expansion too
+      const char *bp = body;
+      while (*bp != '\0') {
+        const char *beol = strchr(bp, '\n');
+        size_t bll = (beol != NULL) ? (size_t)(beol - bp) : strlen(bp);
+        const char *bt = bp;
+        size_t btl = bll;
+        while (btl > 0 && isspace((unsigned char)*bt)) { bt++; btl--; }
+        if (!(btl > 0 && *bt == '%')) {
+          if (o + bll + 2 >= cap) { cap = cap * 2 + bll; out = (char *)realloc(out, cap); }
+          memcpy(out + o, bp, bll); o += bll; out[o++] = '\n';
+        }
+        if (beol == NULL) break;
+        bp = beol + 1;
+      }
+      free(body);
+      // A directive that spans lines ends on the line of its '.'.
+      eol = strchr(end, '\n');
     } else {
       if (o + ll + 2 >= cap) { cap = cap * 2 + ll; out = (char *)realloc(out, cap); }
       memcpy(out + o, p, ll); o += ll; out[o++] = '\n';

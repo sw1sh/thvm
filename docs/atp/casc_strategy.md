@@ -37,10 +37,16 @@ historically dominant UEQ prover) extended with mechanisms borrowed from
 A single `FindProof problem.p` invocation does the following, in order.
 
 ### 2.1 Parse + include splicing
-`tp_preprocess` strips comments and splices one level of `include('Axioms/...')`
-directives, resolving them against the problem directory, `$TPTP`, and the
-current directory. A missing/unresolvable include is a hard
-`SZS status Error`, not a silent GaveUp.
+`tp_preprocess` strips comments and splices `include('Axioms/...')`
+directives through `tp_include_expand` (`tools/atp_cli/tptp_include.c`, shared
+with CheckProof's problem loading), resolving them against the problem
+directory, `$TPTP`, and the current directory. A selection
+`include('F', [n1, ...])` splices only the listed formulas, and includes inside
+an included file expand too (up to 8 levels). An unresolvable include, a
+selection naming a formula the file lacks, a namespace argument or a malformed
+directive stops the run as an input error (exit 2, the reason on stderr), as an
+unresolvable include does; under `--schedule` the slices' stderr is silenced and
+the portfolio reports GaveUp (Error when every slice hits it).
 
 ### 2.2 Problem transforms (all in the CLI, before the engine sees anything)
 These run on the parsed clause set, each gated so it is a no-op when
