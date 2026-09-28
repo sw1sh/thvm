@@ -20,6 +20,9 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- Fix (THVM_VALID_FOLD=1): uop_given_valid's lo-offset inverse substituted
+  the fake back as e instead of e+(-lo), and leaked its fake RANGE; now exact
+  (tinygrad #18478).  New bin/test_uop_valid_fold covers the flag-on path.
 - Fix: a reduce over an elementwise chain 63+ nodes deep summed wrong on
   the CPU path.  rangeify's "does the reduce body still use its axis"
   walk gave up at depth 64 and answered no, so the broadcast repair

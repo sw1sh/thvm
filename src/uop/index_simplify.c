@@ -1535,11 +1535,12 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
 // Mint a throwaway RANGE leaf with a reserved high axis_id (won't
 // collide with real kernel axes, which are densely numbered from 0) and
 // a constrained extent.  uop_given_valid substitutes a guarded
-// expression with such a fake so the div/mod folds see the TIGHTER
-// [0, extent) bound from the valid clause, then substitutes the fake
-// back -- it never escapes into a kernel body.  Mirrors tinygrad's
+// expression e in [lo, hi] with fake+lo, fake a RANGE over [0, hi-lo],
+// so the div/mod folds see the TIGHTER bound from the valid clause, then
+// substitutes fake -> e-lo back.  Mirrors tinygrad's
 // `UOp.variable(f"fake{i}", v0, v1)` in uop_given_valid.
 #define UOP_VALID_FAKE_AXIS_BASE 0x70000000u
+#define UOP_VALID_SCAN_BUDGET    4096
 static Term uop_make_fake_range(u32 extent) {
   static u32 ctr = 0;
   if (extent == 0) return 0;
@@ -1578,6 +1579,54 @@ static Term uop_index_substitute(Term t, Term from, Term to, u32 depth) {
     }
     default: return t;
   }
+}
+
+// Bits returned by uop_index_scan.
+#define UOP_SCAN_FOUND   1u  // one of the `find` terms occurs
+#define UOP_SCAN_GAVE_UP 2u  // too many visits or too deep
+#define UOP_SCAN_STACK   256
+
+// Walk the index DAG under `root`, descending the ten binary I-ops and
+// IWHERE, and report whether any of the `nfind` terms occurs.  There is
+// no visited set, so a shared subtree is walked once per reference:
+// `budget` caps the visits and the explicit stack caps the depth.
+// Callers must treat UOP_SCAN_GAVE_UP as "unknown".
+static u32 uop_index_scan(Term root, Term const *find, u32 nfind, u32 budget) {
+  Term stack[UOP_SCAN_STACK];
+  u32  sp = 0, visits = 0, out = 0;
+  stack[sp++] = root;
+  while (sp > 0) {
+    Term t = stack[--sp];
+    if (++visits > budget) {
+      return out | UOP_SCAN_GAVE_UP;
+    }
+    int hit = 0;
+    for (u32 i = 0; i < nfind; i++) {
+      hit |= t == find[i];
+    }
+    if (hit) {
+      out |= UOP_SCAN_FOUND;
+      continue;
+    }
+    if (term_tag(t) != TAG_UOP) {
+      continue;
+    }
+    u32 n;
+    switch (term_ext(t)) {
+      case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+      case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
+      case UOP_IXOR: case UOP_ISHR: n = 2; break;
+      case UOP_IWHERE:              n = 3; break;
+      default:                      n = 0; break;
+    }
+    if (sp + n > UOP_SCAN_STACK) {
+      return out | UOP_SCAN_GAVE_UP;
+    }
+    for (u32 i = 0; i < n; i++) {
+      stack[sp++] = heap_read(term_val(t) + i);
+    }
+  }
+  return out;
 }
 
 // === fast_idiv late lowering (tinygrad get_late_rewrite_patterns) ===
@@ -1760,8 +1809,16 @@ static Term uop_given_valid(Term valid, Term uop) {
                    : uop_int_binary(UOP_IADD, fake, uop_iconst(lo));
     Term sub = uop_index_substitute(uop, e, fake_expr, 0);
     if (sub == uop) continue;  // e not present in uop -- skip
-    // Substitute the fake back to the original expr and re-simplify.
-    Term back = uop_index_substitute(sub, fake, e, 0);
+    // e + (-lo), not ISUB: the re-fold may have hoisted the +lo to the
+    // root, and only an add-const moves up to cancel it there.
+    Term e_back = (lo == 0) ? e : uop_int_binary(UOP_IADD, e, uop_iconst(-lo));
+    Term back = uop_index_substitute(sub, fake, e_back, 0);
+    // The back pass stops at uop_index_substitute's depth cap, and the
+    // re-fold can push a fake below it; a surviving fake would reach the
+    // kernel as an undeclared loop variable.
+    if (uop_index_scan(back, &fake, 1, UOP_VALID_SCAN_BUDGET) != 0) {
+      continue;
+    }
     if (back != uop) uop = back;
   }
   return uop;
