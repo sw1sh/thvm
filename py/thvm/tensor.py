@@ -267,6 +267,16 @@ class Tensor(metaclass=_TensorMeta):
         for d in self._shape: n *= d
         return n
 
+    @property
+    def max_shape(self) -> tuple[int, ...]:
+        # tinygrad replaces each symbolic dim by its maximum
+        # (mixin/movement.py:49-53); thvm shapes are always concrete (a bound
+        # Variable is its value), so the maximum is the shape itself.
+        return tuple(int(d) for d in self._shape)
+
+    def max_numel(self) -> int:
+        return self.numel()
+
     # ---- realize + host readback --------------------------------------
 
     def realize(self, *lst: "Tensor", **kwargs) -> "Tensor":
@@ -709,6 +719,10 @@ class Tensor(metaclass=_TensorMeta):
         m = self.max(axis=axis, keepdim=True)
         e = (self - m).exp()
         return e * e.sum(axis=axis, keepdim=True).reciprocal()
+
+    def softmin(self, axis: int = -1) -> "Tensor":
+        # tinygrad mixin/op.py:709-724.
+        return (-self).softmax(axis=axis)
 
     def log_softmax(self, axis: int = -1) -> "Tensor":
         # x - max, then subtract logsumexp; REDUCE_MAX backward (mask at
