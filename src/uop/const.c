@@ -1,8 +1,13 @@
 // uop/const.c - construct a UOP_CONST node, with a small cache.
 //
 // Heap layout: [NUM(bits)] -- a single TAG_NUM cell carrying the
-// raw bits of the constant value.  EXT of the UOP_CONST term holds
-// the dtype so the reader knows how to interpret the bits.
+// payload; EXT of the NUM holds the dtype so the reader knows how to
+// interpret it.  A float payload is the f32 bits of the value
+// truncated to the dtype, as tinygrad's DType.const truncates in every
+// UOp.const (dtype.py:79-84); f64 values are therefore f32-precise.
+// An integer payload is the low 32 bits of the value, so a signed
+// narrow int is sign-extended.  Every reader decodes this way
+// (const_to_tendesc, the renderers, uop_walk).
 //
 // Cache: a fixed-size open-addressed hash table keyed by (dtype, bits)
 // returns the existing CONST term when one was already allocated in
@@ -55,7 +60,28 @@ static inline u64 uop_const_key(u32 dtype, u32 bits) {
   return ((u64)dtype << 32) | (u64)bits | (ctx << 48) | (1ULL << 63);
 }
 
+// f16 / bf16 / fp8 round-trip the f32 payload through their storage
+// encoding, so equal values at the dtype share one cache entry.
+static u32 uop_const_truncate(u32 dtype, u32 bits) {
+  switch (dtype_kind(dtype)) {
+    case DK_FP16:
+    case DK_BF16:
+    case DK_FP8: {
+      f32 v;
+      u16 storage = 0;
+      memcpy(&v, &bits, sizeof v);
+      from_fp32_lane(&storage, dtype, &v, 1);
+      to_fp32_lane(&v, &storage, dtype, 1);
+      memcpy(&bits, &v, sizeof bits);
+      return bits;
+    }
+    default:
+      return bits;
+  }
+}
+
 fn Term uop_const(u32 dtype, u32 bits) {
+  bits = uop_const_truncate(dtype, bits);
   u64 key = uop_const_key(dtype, bits);
   u32 mask = UOP_CONST_CACHE_CAP - 1;
   // FNV-ish: combine low/high u32 of key into a u32 hash.

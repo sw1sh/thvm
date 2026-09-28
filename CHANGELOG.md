@@ -20,6 +20,11 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- CONST CAST/BITCAST folds keep the value under the f32-payload rule
+  (tinygrad #18203/#18204): bf16/f16/fp8 consts truncate to the dtype, a
+  float CAST(CONST) rebuilds the const at the destination (CAST(f32 1.0,
+  bf16) used to realize as 0), BITCAST(CONST) reads the storage bits at
+  the destination width, and PTX float immediates follow render_val.
 - Materialize -> kernelize -> linearize pipeline.
 - Bufferize / rangeify schedule IR -- unified pass, default on.
 - Tile-level UOps + tile codegen for CPU and Metal.

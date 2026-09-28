@@ -228,6 +228,54 @@ static int test_case5_reduce_accumulator(void) {
   TEST_REPORT();
 }
 
+// Render STORE(out[i], CONST) for an `dt` output buffer.
+static char *render_const_fill(u32 dt, u32 bits, const char *name) {
+  u32 dims[1] = { 8 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, dt, 1, dims, 0);
+  Term r       = uop_range(0, KAX_LOOP, 8);
+  Term store   = uop_store(out_buf, uop_index_e(out_buf, r), uop_const(dt, bits));
+  return render_ptx_str(store, name, 70);
+}
+
+// Case 6: float CONST immediates follow tinygrad render_val
+// (renderer/ptx.py:11-16).  The payload holds the value's f32 bits, so
+// f16 renders its half encoding, f64 its double encoding, and every
+// other float (bf16 included) the f32 bits.
+static int test_case6_float_const_immediates(void) {
+  thvm_init();
+  TEST_BEGIN("case6 float CONST immediates follow render_val");
+
+  char *h = render_const_fill(DT_FP16, 0x3F800000u, "fill_f16");
+  CHECK(h != NULL);
+  CHECK(has(h, "0x3C00"));
+  free(h);
+
+  char *b = render_const_fill(DT_BF16, 0x3F800000u, "fill_bf16");
+  CHECK(b != NULL);
+  CHECK(has(b, "0f3F800000"));
+  CHECK(lacks(b, "1065353216"));
+  free(b);
+
+  char *d = render_const_fill(DT_FP64, 0x3F800000u, "fill_f64");
+  CHECK(d != NULL);
+  CHECK(has(d, "0d3FF0000000000000"));
+  free(d);
+
+  // A CAST(CONST) fold feeds the same immediate.
+  u32 dims[1] = { 8 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP16, 1, dims, 0);
+  Term r       = uop_range(0, KAX_LOOP, 8);
+  Term val     = uop_cast(uop_const(DT_FP32, 0x3F800000u), DT_FP16);
+  char *c = render_ptx_str(uop_store(out_buf, uop_index_e(out_buf, r), val),
+                           "fill_cast_f16", 70);
+  CHECK(c != NULL);
+  CHECK(has(c, "0x3C00"));
+  free(c);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 int main(void) {
   int rc = 0;
   rc |= test_case1_elementwise();
@@ -235,5 +283,6 @@ int main(void) {
   rc |= test_case3_cast();
   rc |= test_case4_reduce_bails();
   rc |= test_case5_reduce_accumulator();
+  rc |= test_case6_float_const_immediates();
   return rc;
 }

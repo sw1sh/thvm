@@ -191,15 +191,35 @@ static u32 ptx_dtype_of(Term t) {
   return DT_FP32;
 }
 
-// Render a constant immediate the way PTX wants it: floats as a typed
-// bit pattern ("0f3F800000"), ints as decimal.  Matches tinygrad
-// render_val.
+// Render a constant immediate the way PTX wants it: tinygrad render_val
+// (renderer/ptx.py:11-16).  A float payload holds the value's f32 bits;
+// f64 renders the double's bits ("0d" + 16 hex), f16 the half's
+// ("0x" + 4 hex), and every other float the f32 bits ("0f" + 8 hex).
+// Ints render as decimal.
 static void ptx_render_val(u32 dt, u32 bits, char *out, u32 out_sz) {
-  if (dt == DT_FP32) {
-    snprintf(out, out_sz, "0f%08X", bits);
-  } else if (dt == DT_FP16) {
-    snprintf(out, out_sz, "0x%04X", bits & 0xFFFFu);
-  } else if (ptx_dtype_is_unsigned(dt)) {
+  f32 v;
+  memcpy(&v, &bits, sizeof v);
+  switch (dt) {
+    case DT_FP64: {
+      f64 d = (f64)v;
+      u64 d_bits;
+      memcpy(&d_bits, &d, sizeof d_bits);
+      snprintf(out, out_sz, "0d%016llX", (unsigned long long)d_bits);
+      return;
+    }
+    case DT_FP16:
+      snprintf(out, out_sz, "0x%04X", (unsigned)f32_to_fp16(v));
+      return;
+    case DT_FP32:
+    case DT_BF16:
+    case DT_FP8E4M3:
+    case DT_FP8E5M2:
+      snprintf(out, out_sz, "0f%08X", bits);
+      return;
+    default:
+      break;
+  }
+  if (ptx_dtype_is_unsigned(dt)) {
     snprintf(out, out_sz, "%uU", bits);
   } else {
     snprintf(out, out_sz, "%d", (int)bits);

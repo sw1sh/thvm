@@ -395,7 +395,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       u32 dt   = term_ext(heap_read(loc));
       u32 bits = (u32)term_val(heap_read(loc));
       // thvm_wl_uop_const stores every float dtype's bits as the f32
-      // representation of the input mreal (see thvmlink.c:1141-1147), so
+      // representation of the input mreal (see thvmlink.c:1836-1848), so
       // CONST nodes flagged DT_FP64/FP16/BF16 still carry an f32 payload
       // here.  Decode uniformly as f32 for any float dtype; upcast to
       // f64 happens via the (double)pun.f promotion.

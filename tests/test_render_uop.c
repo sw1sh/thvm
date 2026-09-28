@@ -1541,6 +1541,21 @@ int main(void) {
     unlink(dl_path);
   }
 
+  TEST_BEGIN("render-uop-c/bf16-const-folded-from-f32-renders-value");
+  {
+    // CAST(CONST f32 1.0, bf16) folds to a bf16 CONST whose payload is
+    // the f32 bits of 1.0, so the C literal is the value 1.
+    u32 dimsH[1] = { 4 };
+    Term outH = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_BF16, 1, dimsH, 0);
+    Term rH   = uop_range(0, 0, 4);
+    Term one  = uop_cast(uop_const(DT_FP32, 0x3F800000u), DT_BF16);
+    char src[4096];
+    fp = fmemopen(src, sizeof(src), "w");
+    cg_render_uop_kernel_c(uop_store(outH, rH, one), "kh", outH, NULL, 0, fp);
+    fclose(fp);
+    CHECK(contains(src, "out[a0] = 1;"));
+  }
+
   TEST_BEGIN("render-uop/tc-tiled-opt-config-flows-to-emitter");
   // The KOP_TC autotune carries a tile config in the OPT_TC factor
   // (tc_tile_pack).  Build the SAME M=128,N=64,K=16 tiled matmul twice:

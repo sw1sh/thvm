@@ -10,7 +10,87 @@
 // Folding rules:
 //   BITCAST(x, x.dtype) -> x
 //   BITCAST(BITCAST(x, mid), dst) -> BITCAST(x, dst) when itemsizes match
-//   BITCAST(CONST(bits, src), dst) -> CONST(bits, dst) when itemsize matches
+//   BITCAST(CONST(v, src), dst) -> CONST(w, dst), where w is v's storage
+//     bits at src's width read back at dst's: tinygrad's fold_bitcast
+//     (uop/symbolic.py:23-26).  Packed int4 / uint4 stay a node.  An
+//     8-byte dtype folds the payload unchanged, a known gap: a u32
+//     payload cannot hold a 64-bit pattern.
+
+static u32 uop_bitcast_int_mask(u32 dt) {
+  u32 size = dtype_itemsize(dt);
+  return size >= 4 ? 0xFFFFFFFFu : (1u << (8 * size)) - 1u;
+}
+
+// Storage bits of CONST payload `bits` at dtype `dt`: to_storage_scalar
+// + struct.pack (tinygrad dtype.py:286-290, 303-307).
+static u32 uop_bitcast_const_store(u32 dt, u32 bits) {
+  f32 v;
+  memcpy(&v, &bits, sizeof v);
+  switch (dtype_kind(dt)) {
+    case DK_FP16:
+    case DK_BF16: {
+      u16 h;
+      from_fp32_lane(&h, dt, &v, 1);
+      return h;
+    }
+    case DK_FP8: {
+      u8 q;
+      from_fp32_lane(&q, dt, &v, 1);
+      return q;
+    }
+    case DK_BOOL:
+      return bits != 0;
+    case DK_SINT:
+    case DK_UINT:
+      return bits & uop_bitcast_int_mask(dt);
+    default:
+      return bits;
+  }
+}
+
+// CONST payload of storage bits `raw` read at dtype `dt`: struct.unpack
+// + from_storage_scalar (tinygrad dtype.py:292-295, 303-307).
+static u32 uop_bitcast_const_load(u32 dt, u32 raw) {
+  f32 v;
+  switch (dtype_kind(dt)) {
+    case DK_FP16:
+    case DK_BF16: {
+      u16 h = (u16)raw;
+      to_fp32_lane(&v, &h, dt, 1);
+      break;
+    }
+    case DK_FP8: {
+      u8 q = (u8)raw;
+      to_fp32_lane(&v, &q, dt, 1);
+      break;
+    }
+    case DK_BOOL:
+      return raw != 0;
+    case DK_SINT:
+      switch (dtype_itemsize(dt)) {
+        case 1:  return (u32)(i32)(i8)raw;
+        case 2:  return (u32)(i32)(i16)raw;
+        default: return raw;
+      }
+    default:
+      return raw;
+  }
+  u32 bits;
+  memcpy(&bits, &v, sizeof bits);
+  return bits;
+}
+
+// 0 declines the fold.
+static Term uop_bitcast_const(u32 src_dt, u32 bits, u32 dst_dt) {
+  if (dtype_is_packed(src_dt) || dtype_is_packed(dst_dt)) {
+    return 0;
+  }
+  if (dtype_itemsize(dst_dt) == 8) {
+    return uop_const(dst_dt, bits);
+  }
+  u32 raw = uop_bitcast_const_store(src_dt, bits);
+  return uop_const(dst_dt, uop_bitcast_const_load(dst_dt, raw));
+}
 
 fn Term uop_bitcast(Term src, u32 dst_dtype) {
   // Identity.
@@ -39,12 +119,13 @@ fn Term uop_bitcast(Term src, u32 dst_dtype) {
     return uop_bitcast(inner, dst_dtype);
   }
 
-  // BITCAST(CONST, dst): fold to fresh CONST with the same bits.
   if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_CONST) {
     Term num = heap_read(term_val(src));
     if (term_tag(num) == TAG_NUM) {
-      u32 bits = (u32)term_val(num);
-      return uop_const(dst_dtype, bits);
+      Term folded = uop_bitcast_const(term_ext(num), (u32)term_val(num), dst_dtype);
+      if (folded != 0) {
+        return folded;
+      }
     }
   }
 

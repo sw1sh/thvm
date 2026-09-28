@@ -81,14 +81,26 @@ src.dtype), matching tinygrad/gradient.py:42.
 CAST backward is `cast(gy, src.dtype)`, matching
 tinygrad/gradient.py:17.
 
-Folding rules:
+A CONST's payload is a u32.  A float payload is the f32 bits of the
+value truncated to the CONST's dtype: `uop_const` rounds f16 / bf16 /
+fp8 payloads through their storage encoding, as tinygrad's
+`DType.const` truncates in every `UOp.const` (dtype.py:79-84).  An
+f64 CONST is therefore f32-precise.  An integer payload is the low 32
+bits of the value, so a signed narrow int is sign-extended.
+
+Folding rules, all at the constructor level:
 - `CAST(x, x.dtype) -> x`
-- `CAST(CONST(bits, src), dst) -> CONST(converted, dst)` -- folded
-  at the constructor level
+- `CAST(CONST(v, src), dst) -> CONST(v, dst)` when src and dst are
+  floats: tinygrad's `root.const_like(c.val)` (uop/symbolic.py:151-155).
+  Integer CONST casts stay nodes.
 - `BITCAST(x, x.dtype) -> x`
 - `BITCAST(BITCAST(x, mid), dst) -> BITCAST(x, dst)`
-- `BITCAST(CONST(bits, src), dst) -> CONST(bits, dst)` -- same bits
-  reinterpreted
+- `BITCAST(CONST(v, src), dst) -> CONST(w, dst)`, where `w` is v's
+  storage bits at src's width read back at dst's: tinygrad's
+  `fold_bitcast` (uop/symbolic.py:23-26).  A bf16 1.0 bitcasts to u16
+  16256, an f16 -1.0 to i16 -17408.  Packed i4 / u4 stay a node.  An
+  8-byte dtype folds the payload unchanged, a known gap: a u32 payload
+  cannot hold a 64-bit pattern.
 
 ## Quantization
 

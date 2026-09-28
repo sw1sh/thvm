@@ -5,12 +5,10 @@
 //
 // Folding rules (best-effort, no failure path):
 //   CAST(x, x.dtype) -> x
-//   CAST(CAST(x, mid), dst) -> CAST(x, dst) when mid is at least as
-//     wide as max(src, dst) and same kind family
-//   CAST(CONST(bits, src_dt), dst_dt) -> CONST(reinterpreted_bits, dst_dt)
-//
-// More aggressive folds may land in src/uop/rewrite_cast.c later;
-// the constructor itself stays small.
+//   CAST(CONST(v, src_dt), dst_dt) -> CONST(v, dst_dt) for float src_dt
+//     and dst_dt: tinygrad's root.const_like(c.val)
+//     (uop/symbolic.py:151-155).  The payload is the f32 bits of v and
+//     uop_const truncates v to dst_dt.
 
 fn Term uop_cast(Term src, u32 dst_dtype) {
   // Identity: cast to the term's existing dtype is a no-op.
@@ -19,29 +17,13 @@ fn Term uop_cast(Term src, u32 dst_dtype) {
     return src;
   }
 
-  // CAST(CONST, dst): fold immediately when source is a UOP_CONST so
-  // downstream materialize sees a fresh CONST of the target dtype.
+  // A CAST of a CONST to or from an int dtype stays a node; the kernel
+  // converts it.
   if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_CONST) {
     Term num = heap_read(term_val(src));
-    if (term_tag(num) == TAG_NUM) {
-      u32 src_dt = term_ext(num);
-      u32 src_bits = (u32)term_val(num);
-      // Promote src bits to f32 and re-pack to dst_dt for floats.
-      // For int->int we sign-extend / zero-extend the low bits;
-      // int->float / float->int go through f32.
-      if (dtype_is_float(dst_dtype) && dtype_is_float(src_dt)) {
-        f32 v;
-        u8  out_bytes[8] = {0};
-        // src_dt's bits already encode an f32 -- the const path
-        // stores f32 bits regardless of the narrow target dtype.
-        memcpy(&v, &src_bits, sizeof(v));
-        from_fp32_lane(out_bytes, dst_dtype, &v, 1);
-        u32 packed = 0;
-        memcpy(&packed, out_bytes, dtype_storage_bytes(dst_dtype, 1) > 4 ? 4 : dtype_storage_bytes(dst_dtype, 1));
-        return uop_const(dst_dtype, packed);
-      }
-      // Fall through to the runtime kernel for int<->float / int<->int
-      // -- keeps the constructor simple.  rewrite_cast.c can extend.
+    if (term_tag(num) == TAG_NUM
+        && dtype_is_float(term_ext(num)) && dtype_is_float(dst_dtype)) {
+      return uop_const(dst_dtype, (u32)term_val(num));
     }
   }
 

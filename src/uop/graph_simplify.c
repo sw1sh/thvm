@@ -507,8 +507,14 @@ static Term uop_graph_simplify_cast(Term t, void *user) {
     Term inner = heap_read(term_val(v.src[0]));
     return uop_bitcast(inner, dtype);
   }
+  // A declined fold heap-allocates a fresh BITCAST that is not
+  // hash-consed; returning it would re-fire this rule without end.
   if (term_tag(v.src[0]) == TAG_UOP && term_ext(v.src[0]) == UOP_CONST) {
-    return uop_bitcast(v.src[0], dtype);
+    Term folded = uop_bitcast(v.src[0], dtype);
+    if (folded != 0 && folded != t
+        && !(term_tag(folded) == TAG_UOP && term_ext(folded) == UOP_BITCAST)) {
+      return folded;
+    }
   }
   return 0;
 }
