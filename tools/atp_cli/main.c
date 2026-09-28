@@ -633,7 +633,17 @@ static int run_schedule(const char *self, const char *file, double wall,
         // whole portfolio stays quiet.  The winner's proof is on stdout
         // (the temp file above), so nothing checkable is lost.  --verbose
         // keeps the stream for debugging.
-        if (!g_cli_verbose) {
+        // THVM_ATP_SCHED_ERRDIR=<dir> keeps each slice's stderr in
+        // <dir>/<slice>.err instead: the per-lane exit reason is the
+        // first question an all-lanes-gave-up diagnosis asks, and the
+        // verbose stream interleaves every lane's narration unlabeled.
+        const char *ed = getenv("THVM_ATP_SCHED_ERRDIR");
+        if (ed != NULL && ed[0] != '\0') {
+          char ep[1024];
+          snprintf(ep, sizeof ep, "%s/%s.err", ed, SCHEDULE[i].name);
+          int ef = open(ep, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          if (ef >= 0) { dup2(ef, 2); close(ef); }
+        } else if (!g_cli_verbose) {
           int dn = open("/dev/null", O_WRONLY);
           if (dn >= 0) { dup2(dn, 2); close(dn); }
         }
