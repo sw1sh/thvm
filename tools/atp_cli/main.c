@@ -333,9 +333,9 @@ static const SchedSlice SCHEDULE[] = {
   // of bare).
   {"tgt-sel", "--tgt-sel=1 --tgt-nongoal=4 --lrs --tgt-sel-exit --preset=none --horn=0 --fof-sat=0", 0.0},
   // VAMPIRE OTTER-LOOP lane (the RNG Moufang dissection, CASC-J13 UEQ
-  // cluster RNG027-5/7/8/10, 028-5/7, 029-5/6: Vampire + Prover9 only;
-  // E and Twee, both DISCOUNT-loop provers, time out).  Vampire's slot
-  // lrs+10_2_to=lpo:sp=const_frequency:spb=goal:fd=preordered:
+  // cluster RNG027-5/7/8/9/10, 028-5/7/8, 029-5/6/7: Vampire + Prover9
+  // only; E and Twee, both DISCOUNT-loop provers, time out).  Vampire's
+  // slot lrs+10_2_to=lpo:sp=const_frequency:spb=goal:fd=preordered:
   // bd=preordered:fde=none:nwc=1 solves RNG027-5 in 91 activations as
   // lrs or ott and FAILS as dis: 19 of its proof's 84 demodulations use
   // never-selected clauses (the reassociation law 11 times).  Composed:
@@ -346,35 +346,28 @@ static const SchedSlice SCHEDULE[] = {
   // replayed newest-first per batch), oriented-only selection normalize
   // (--pop-rules-only, the fd=preordered analog), NO WM orphan murder
   // (Vampire keeps a simplified clause's descendants; with it the lane
-  // ResourceOuts), age:weight 1:2, LRS, --mixmost-nf so proof
-  // extraction replays the goal check's own normal forms (VerifiedGood),
-  // and Prover9's clause-weight penalties (nest 2, depth 2: every
-  // Prover9-2026 strategy solving the cluster carries them).  Ablated on
+  // ResourceOuts), age:weight 1:2, LRS, and --mixmost-nf so proof
+  // extraction replays the goal check's own normal forms.  Ablated on
   // RNG027-5: --otter, LPO, spb=goal and orphan-murder-off are each
-  // load-bearing; the penalties add 028-7/029-5/029-6.  Cracks RNG027-5,
-  // 027-7, 027-10, 028-5, 028-7, 029-5, 029-6 in 36-66s as singles, all
-  // TMO for every prior slice.  Exit-fast (--otter-exit) unless a
-  // distributivity law orients as expansion under the lane's
-  // precedence.  Leftover pool after tgt-sel: the wave-1/2 indices stay
-  // unshifted.
-  {"otter-lpo", "--ord=lpo --sym-prec=const-frequency --spb-prec --otter --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --nest-penalty=2 --depth-penalty=2 --preset=none --horn=0 --fof-sat=0", 0.0},
+  // load-bearing.  Under --proof (the CASC condition), singles on two
+  // repeats: RNG027-5/7/10, 028-5/7, 029-5/6/7 proved in 43-103s, every
+  // proof VerifiedGood; all TMO for every prior slice.  Prover9's clause
+  // penalties (--nest-penalty/--depth-penalty) cost this lane six of the
+  // eight.  Exit-fast (--otter-exit) unless a distributivity law orients
+  // as expansion under the lane's precedence.  Leftover pool after
+  // tgt-sel: the wave-1/2 indices stay unshifted.
+  {"otter-lpo", "--ord=lpo --sym-prec=const-frequency --spb-prec --otter --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --preset=none --horn=0 --fof-sat=0", 0.0},
   // The same lane under Vampire's sp=const_min (Vampire's own casc slot
-  // for RNG027-8): when the goal is stated with the defined operator
+  // for RNG027-8) with Prover9's clause-weight penalties (nest 2, depth
+  // 2).  With the goal stated through the defined operator
   // (associator(x, x*y, z) = associator(x,y,z)*x), spb=goal lifts
   // associator too and const_frequency ranks it above multiply -- the
   // definition unfolds; const_min's reverse arity keeps multiply above
-  // it.  Proves RNG027-8 in ~47s; loses the multiply-form members,
-  // which otter-lpo keeps.
+  // it.  --proof singles on two repeats: RNG027-8 (88s) and RNG028-8
+  // (90s, Prover9-only at J13), VerifiedGood; without the penalties
+  // 027-8 slows to 145s and 028-8 is lost.  The multiply-form members
+  // stay with otter-lpo.
   {"otter-lpo-cmin", "--ord=lpo --sym-prec=const-min --spb-prec --otter --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --nest-penalty=2 --depth-penalty=2 --preset=none --horn=0 --fof-sat=0", 0.0},
-  // PROVER9-SHAPED companion: the same Otter-loop lane under Prover9's
-  // LADR symbol order (--sym-prec=ladr: lex_compare_arity_0213 with
-  // fewer-axiom-occurrences greater, then inverse_order), which ranks
-  // the defined operators ABOVE multiply -- the associator/commutator
-  // definitions unfold, where otter-lpo's goal band folds them -- and
-  // puts sq on top on the sq() presentation.  RNG130-1 (Vampire + CSI +
-  // E at J13, every FindProof slice TMO) proves in 0.05s / 47
-  // selections; the Moufang members flood under this order and stay
-  // with otter-lpo.  Same exit-fast guard.
   {"otter-ladr", "--ord=lpo --sym-prec=ladr --otter --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --preset=none --horn=0 --fof-sat=0", 0.0},
   {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.33},
   // (4) ENCOMPASSMENT DEMODULATION (Twee reducesSkolem): the WM preset
