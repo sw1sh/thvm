@@ -452,8 +452,14 @@ static u32 atp_overlap_ij(AtpState *s, u32 i, u32 j,
   // (gated on THVM_ATP_AC below) stay Term-side because they rebuild
   // Term-shaped extended rule forms.
   // Arm the generation-time --max-term-size guard (ft_cp.c) with the
-  // state's queue-time cap: same knob, earlier enforcement point.
-  thvm_ft_cp_set_max_side(s->max_cp_side);
+  // state's queue-time cap when --max-term-size-gen asks for the earlier
+  // enforcement point (raw sides, before the push-time normalize); the
+  // plain knob keeps its queue-time semantics.
+  {
+    static int gen = -1;
+    if (gen < 0) gen = atp_env_on("THVM_ATP_MAX_TERM_SIZE_GEN");
+    thvm_ft_cp_set_max_side(gen ? s->max_cp_side : 0u);
+  }
   AtpFt *ft_arena_local = (AtpFt *)s->ft_arena_ptr;
   if (ft_arena_local != NULL
       && s->lhs_ft != NULL && s->rhs_ft != NULL

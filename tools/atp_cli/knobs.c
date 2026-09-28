@@ -26,6 +26,7 @@ static const AtpKnob KNOBS[] = {
   {"twee-eq-bonus",          "THVM_ATP_TWEE_EQB",        0, "(Twee hasEqualsBonus -- CP.hs:262 discharged-branch min for eq(a,b) heads with unifiable non-var sides; supersets --twee-struct-dedup; registers eq/equals arity-2 + ifeq* arity>=3 heads)"},
   {"max-weight",             "THVM_ATP_MAXW",            1, "MaxWeight"},
   {"max-term-size",          "THVM_ATP_MAX_TERM_SIZE",   1, "(Twee --max-term-size: per-side CP node cap; drop CP if max(|lhs|,|rhs|) > N; 0 = off)"},
+  {"max-term-size-gen",      "THVM_ATP_MAX_TERM_SIZE_GEN", 0, "(apply the --max-term-size cap at CP generation on the raw sides, before any heap materialization; default: queue time)"},
   {"auto-max-weight",        "THVM_ATP_AUTO_MAXW",       1, "AutoMaxWeight"},
   {"max-cp-queue",           "THVM_ATP_MAX_CP_QUEUE",    1, "MaxCpQueue"},
   {"max-weight-slope",       "THVM_ATP_MAXW_SLOPE",      1, "AutoMaxWeight slope"},
