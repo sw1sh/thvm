@@ -59,6 +59,14 @@ def test_elementwise_mul_add():
     _check(t)
 
 
+def test_maximum_nonfinite():
+    # maximum is binary MAX; an arithmetic select (a<b)*b + (1-(a<b))*a
+    # turns the unselected -inf into 0*-inf = NaN.
+    x = TgTensor([-np.inf, -1.0, 0.0, 2.0, np.inf])
+    y = TgTensor([1.0, -np.inf, 3.0, -2.0, 0.0])
+    _check(x.maximum(y))
+
+
 def test_reduce_max_axis0():
     np.random.seed(3)
     x = np.random.randn(4, 6).astype(np.float32)

@@ -20,7 +20,7 @@ NotImplementedError on purpose so coverage grows explicitly):
              only appear as srcs of BUFFER/COPY)
   binary     ADD, MUL, MAX, CMPLT, CMPNE, SUB
   unary      RECIPROCAL/RECIP, EXP2, LOG2, SQRT, NEG
-  ternary    WHERE  (cond ? a : b, composed from CMP + mul/add)
+  ternary    WHERE  (cond ? a : b, a true IWHERE select; MAX uses the same)
   reduce     REDUCE in tinygrad's front normal form, arg=(Ops.ADD|Ops.MAX,
              n_front_axes): the reduced axes were PERMUTEd to the front and
              the output drops them (uop/ops.py:635-642, :449-452); the older
@@ -381,7 +381,6 @@ def _emit(u, memo: dict[int, int]) -> int:
         return term
 
     if op == Ops.MAX:
-        # max(a,b) = (a<b) ? b : a  =  (a<b)*b + (1-(a<b))*a
         a = _emit_b(u, 0, memo)
         b = _emit_b(u, 1, memo)
         term = _max(a, b)
@@ -512,11 +511,10 @@ def _passthrough_ops(Ops) -> tuple:
 
 
 def _max(a: int, b: int) -> int:
-    """max(a,b) = (a<b)*b + (1-(a<b))*a, all on raw thvm Terms."""
-    less = _binary(K.CMPLT, a, b)
-    one = _fconst(1.0)
-    not_less = _binary(K.ADD, one, _unary(K.NEG, less))
-    return _binary(K.ADD, _binary(K.MUL, less, b), _binary(K.MUL, not_less, a))
+    """max(a,b) = (a<b) ? b : a as a true select, like WHERE: the
+    arithmetic form (a<b)*b + (1-(a<b))*a is 0*inf = NaN whenever the
+    losing operand is infinite."""
+    return _iwhere(_binary(K.CMPLT, a, b), b, a)
 
 
 # ---- public entry point -------------------------------------------------
