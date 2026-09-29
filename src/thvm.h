@@ -1864,6 +1864,13 @@ fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 // boundary so emit records its tid in FP8_TRANSIENT_TIDS and end-of-realize
 // frees it after the consuming matmul has fired.
 #define BUFFERIZE_REASON_FP8_TRANSIENT (1u << 9)
+// The storage operand of an indexed op (GATHER slot 0) is read through an
+// address the op builds itself (rangeify_unified.c ru_index_leaf), so it
+// must be a leaf the address reaches through views alone
+// (uop_indexed_operand_is_structural) or a buffer.  This reason realizes
+// the compute source under such an operand's view chain; the faithful
+// seed honors it and rangeify reads the buffer through it.
+#define BUFFERIZE_REASON_INDEXED_SRC (1u << 10)
 typedef struct {
   u64 loc;             // heap loc of the underlying UOp value
   u32 buffer_id;       // 1-based stable id within this graph
@@ -3622,6 +3629,10 @@ fn Term uop_detach(Term src);
 // check both share.  scatter_identity_bits writes the identity of `kind`
 // over `dtype` as a CONST payload and returns 0 when none exists.
 fn int  uop_indexed_shape_ok(Shape const *s);
+// 1 iff indexed-op operand `t` reaches a TEN, VAR, KERNEL or CONST through
+// RESHAPE / PERMUTE / EXPAND / SHRINK / FLIP only: storage an address can
+// read without realizing anything (uop/indexed_operand_is_structural.c).
+fn int  uop_indexed_operand_is_structural(Term t);
 fn Term uop_gather     (Term src, Term idx, u32 dim);
 fn Term uop_gather_node(Term src, Term idx, u32 dim);
 fn Term uop_gather_src (Term g);

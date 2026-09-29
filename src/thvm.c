@@ -292,6 +292,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/copy.c"
 #include "uop/detach.c"
 #include "uop/indexed_shape_ok.c"
+#include "uop/indexed_operand_is_structural.c"
 #include "uop/gather.c"
 #include "uop/scatter.c"
 #include "uop/cast.c"

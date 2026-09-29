@@ -50,6 +50,14 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- `UOP_GATHER` lowers to a guarded indexed load (the collapsed one-hot form
+  of tinygrad's pm_reduce_load_collapse, codegen/simplify.py:143-145): one
+  load per output element, no REDUCE, fused into its consumer.  The
+  gathered operand is read through its views down to storage; a computed
+  operand realizes first (`BUFFERIZE_REASON_INDEXED_SRC`).  Gather kernels
+  run on the CPU backend only, including JIT capture and replay with the
+  index rewritten in place; V=1e4, N=1024, D=64 realizes in ~1 ms (C JIT)
+  where the one-hot formulation took 0.89 s.
 - Multi-store kernels: a kernel root may be an AFTER chain of STOREs.  Every
   materialize-time pass (arange collapse, walker rewrite + REDUCE repair,
   chain-fold scan, resid/stranded/broadcast gates) now runs on each store,

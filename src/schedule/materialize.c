@@ -1442,6 +1442,7 @@ typedef struct {
   u32 *refs;
   u32  len;
   u32  cap;
+  u8   indexed;   // 1 once the kernel holds a gather (CPU-only kernels)
 } VisitMemo;
 
 static void visit_memo_free(VisitMemo *m) {
@@ -6092,6 +6093,9 @@ static void materialize_dump_big_input_source(KernelEntry *ke,
   materialize_dump_source_child(ke->source_uop, 0);
 }
 
+static u32 visit_indexed_leaf(Term t, KernelEntry *ke, u64 root_loc,
+                              VisitMemo *memo);
+
 // Recursive visit.  Returns VISIT_OK on success (the per-op
 // program is gone; visit now exists only to populate ke's input
 // bindings) or VISIT_BAIL on any unsupported op.
@@ -6240,6 +6244,18 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     return VISIT_OK;
   }
 
+  // GATHER: idx fuses like any operand; src is read at the lowered
+  // address, which rangeify composed against its storage.
+  if (op == UOP_GATHER) {
+    memo->indexed = 1;
+    u32 ii = visit(heap_read(loc + 1), ke, root_loc, memo);
+    if (ii == VISIT_BAIL) return VISIT_BAIL;
+    u32 si = visit_indexed_leaf(heap_read(loc + 0), ke, root_loc, memo);
+    if (si == VISIT_BAIL) return VISIT_BAIL;
+    visit_memo_store(memo, loc, VISIT_OK);
+    return VISIT_OK;
+  }
+
   // GRAD is a stop point in materialize -- the architecture is
   // wnf-fires-grad + materialize-compiles-uops, with thvm_realize
   // looping the pair until no fresh kernels are emitted.  Bailing
@@ -6340,6 +6356,27 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
   }
 
   return VISIT_BAIL;
+}
+
+// Input slot for an indexed operand: the storage under its views (a TEN, a
+// VAR, a KERNEL's output or a realized boundary), never a view alias.  The
+// lowered address is composed against that storage (ru_index_leaf); an
+// alias slot would need the chain-fold mark to keep its own offset and
+// pre-materialization off the read.
+static u32 visit_indexed_leaf(Term t, KernelEntry *ke, u64 root_loc,
+                              VisitMemo *memo) {
+  for (;;) {
+    t = term_resolve(t);
+    if (term_tag(t) != TAG_UOP || !op_is_view_movement((u8)term_ext(t))) {
+      break;
+    }
+    u64 loc = term_val(t);
+    if (loc != root_loc && boundary_index_for_loc(loc) != 0xFFFFFFFFu) {
+      break;
+    }
+    t = heap_read(loc);
+  }
+  return visit(t, ke, root_loc, memo);
 }
 
 // Does the UOP subtree rooted at `loc` reference TAG_TEN(tid)?  Bounded
@@ -6648,8 +6685,20 @@ static Term emit_kernel_for_boundary(u32 bi) {
   u32 result;
   SCHED_PROF_BLOCK(SCHED_PROF_VISIT,
                    result = visit(root_term, ke, boundary_loc, &memo));
+  u8 indexed = memo.indexed;
   visit_memo_free(&memo);
   if (result == VISIT_BAIL) {
+    kernel_dealloc_last(kid);
+    TENS[out_tid].producer_kid = 0;
+    return 0;
+  }
+  // A gather kernel is lowered for, and verified on, the serial CPU
+  // backends only: a GPU renderer would spread its loops over threads
+  // untested.  Decline loudly; the realize leaves the graph unrealized.
+  if (indexed && op_backend != &CPU_BACKEND) {
+    fprintf(stderr, "thvm: gather kernels run on the CPU backend only; "
+                    "the kernel for a %s boundary was not emitted\n",
+            bypass_dbg_op_name(op));
     kernel_dealloc_last(kid);
     TENS[out_tid].producer_kid = 0;
     return 0;

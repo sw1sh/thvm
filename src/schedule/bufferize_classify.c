@@ -1276,6 +1276,45 @@ static u64 bufferize_movement_compute_source(u64 loc, u32 depth) {
   return sloc;
 }
 
+// Realize what an indexed op's storage operand `t` reads (see
+// BUFFERIZE_REASON_INDEXED_SRC): nothing when the operand is structural,
+// else the compute source under its view chain -- never the view itself, as
+// the MAXPOOL_INPUT seed -- or, when the chain holds a PAD, the operand node.
+static void bufferize_seed_indexed_operand(Term t) {
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP || uop_indexed_operand_is_structural(r)) {
+    return;
+  }
+  u64 target = term_val(r);
+  int has_pad = 0;
+  for (Term v = r; term_tag(v) == TAG_UOP && uop_is_movement(term_ext(v));
+       v = term_resolve(heap_read(term_val(v)))) {
+    has_pad |= (term_ext(v) == UOP_PAD);
+  }
+  if (!has_pad && uop_is_movement(term_ext(r))) {
+    u64 src = bufferize_movement_compute_source(target, 0);
+    if (src != 0) {
+      target = src;
+    }
+  }
+  u32 idx = bufferize_info_find(target);
+  if (idx == 0xFFFFFFFFu) {
+    return;
+  }
+  bufferize_node_mark(&BUFFERIZE_NODES[idx], BUFFERIZE_REASON_MULTI);
+  bufferize_node_mark(&BUFFERIZE_NODES[idx], BUFFERIZE_REASON_INDEXED_SRC);
+}
+
+// Runs after every rule that can unmark, so no later rule drops these
+// correctness realizes.
+static void bufferize_seed_indexed_operands(void) {
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    if (BUFFERIZE_NODES[i].op == UOP_GATHER) {
+      bufferize_seed_indexed_operand(heap_read(BUFFERIZE_NODES[i].loc + 0));
+    }
+  }
+}
+
 // True iff the term `t` is (a movement-broadcast of) a REDUCE_MAX.  Used to
 // recognise the broadcast `lift(MAX(a))` operand of the maxpool backward mask
 // CMPEQ(a, lift(MAX(a))) (gradient.py:11-14).
@@ -2270,6 +2309,7 @@ fn void bufferize_classify(Term root) {
     // decline doesn't trigger.  Runs after softmax-unmark so the
     // boundary set reflects every other rule first.
     bufferize_rule_metal_tile_fanin_cap(root);
+    bufferize_seed_indexed_operands();
     bufferize_seed_from_nodes(root);
     // The unified walk writes RU_RANGE_MAP / RU_REALIZE_MAP and the
     // main-heap UOP_BUFFERIZE Terms (one per realize boundary).

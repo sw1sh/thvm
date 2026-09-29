@@ -148,6 +148,22 @@ address holds a load (`uop_dag_has_dynamic_index`, a gather or scatter
 index); hand_opts, BEAM/autotune and `kernel_apply_opt` then leave the
 kernel as a serial loop nest.
 
+A `UOP_GATHER(src, idx, dim)` ([src/uop/gather.c](../src/uop/gather.c))
+lowers in `pm_apply_rangeify` (`ru_lower_gather`) straight to the form
+tinygrad's `pm_reduce_load_collapse` leaves once the one-hot sum of
+`Tensor.gather` collapses: idx loads at the node's own ranges, and src
+loads at those ranges with axis `dim` replaced by the loaded index,
+clamped to 0 and gated `INVALID` (read as 0) when the index is out of
+range.  No REDUCE is created, so a gather costs one load per output
+element and fuses into its consumer like an elementwise op.  src is read
+at an address the gather builds itself, so `ru_index_leaf` walks its views
+down to storage, and the gather hands its ranges to idx only
+(`ru_consumer_passes_rngs`).  A src that is not a view of a TEN, VAR,
+KERNEL output or CONST (`uop_indexed_operand_is_structural`) realizes its
+compute source first (`BUFFERIZE_REASON_INDEXED_SRC`), and `visit` binds
+the storage itself as the kernel input, never a view alias.  Gather
+kernels run on the CPU backend only; emit declines them on a GPU backend.
+
 ## Pass 4: Render
 
 - File: [src/codegen/render_uop.c](../src/codegen/render_uop.c)

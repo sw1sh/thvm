@@ -320,6 +320,9 @@ fn int ru_seed_boundary_holds(u32 reasons) {
     // reduce-iter count mis-reads over the size-1 batch axis -> zero grad).
     // Also a correctness realize, so faithful seeds it too.
     if (reasons & BUFFERIZE_REASON_MAXPOOL_MASK) return 1;
+    // An indexed op's storage operand: only a buffer or a view of a leaf is
+    // addressable by the op's computed address (ru_index_leaf).
+    if (reasons & BUFFERIZE_REASON_INDEXED_SRC) return 1;
     // Seed every REDUCE output as a boundary.  This is faithful to tinygrad
     // (one reduce per kernel; a REDUCE output always escapes into a buffer)
     // and is the lever that de-fuses the conv data-grad.  Without it the
@@ -665,6 +668,19 @@ typedef struct {
   u8   ndim;
 } RuConsumerRangs;
 
+// 1 iff consumer `ci` hands its in_rngs to the node at `loc`.  An indexed
+// op reads its storage operand at an address it builds itself
+// (ru_index_leaf), so a GATHER passes its ranges to its idx slot only: the
+// storage operand's views would inherit idx-shaped ranges that do not fit
+// them.
+static int ru_consumer_passes_rngs(u32 ci, u64 loc) {
+  if (BUFFERIZE_NODES[ci].op != UOP_GATHER) {
+    return 1;
+  }
+  Term idx = term_resolve(heap_read(BUFFERIZE_NODES[ci].loc + 1));
+  return term_tag(idx) == TAG_UOP && term_val(idx) == loc;
+}
+
 static u32 ru_gather_consumer_rngs(u32 node_idx, u8 my_ndim,
                                    RuConsumerRangs *out, u32 cap) {
   u32 consumer_idxs[RU_MAX_CONSUMERS];
@@ -673,6 +689,7 @@ static u32 ru_gather_consumer_rngs(u32 node_idx, u8 my_ndim,
   for (u32 i = 0; i < n_c; i++) {
     u32 ci = consumer_idxs[i];
     if (!RU_RANGE_MAP[ci].has_ranges) continue;
+    if (!ru_consumer_passes_rngs(ci, BUFFERIZE_NODES[node_idx].loc)) continue;
     // The consumer's in_rngs at the slot where this node is the source.
     // Tinygrad's per-consumer `range_map[c][0]` is rank-equal to the
     // PRODUCER's out shape (the consumer's `in` for this edge), so we
@@ -1824,9 +1841,13 @@ fn void run_rangeify_unified_impl(Term root) {
     // *** Mirror indexing.py:223-232 ***
     // "if this element is a reduce and there's ended ranges, we might
     //  have to end some other ranges (...)"
+    // A GATHER counts as elementwise here: in tinygrad it is a one-hot
+    // REDUCE (mixin/op.py:1043), so an expand above it ends ranges the same
+    // way (a gather feeding a matmul realizes; the matmul reads a buffer).
     int is_elementwise = uop_is_unary_elementwise(info->op)
                       || uop_is_binary_elementwise(info->op)
-                      || uop_is_ternary_elementwise(info->op);
+                      || uop_is_ternary_elementwise(info->op)
+                      || info->op == UOP_GATHER;
     if (RU_ENDING_RANGES[node_idx].n
         && (is_elementwise || info->op == UOP_REDUCE)) {
       // indexing.py:230-233:
@@ -2916,6 +2937,67 @@ static RuAxisSubst ru_build_axis_subst(u32 pidx,
 // rm->in_rngs).
 // Mirror: tinygrad/schedule/indexing.py:create_bufferize_and_index_based_on_ranges
 // (lines 56-81), `new_srcs` accumulation loop + final `x.replace(src=tns)`.
+// ru_rewrite_child is the per-slot body; ru_rewrite_subtree applies it to
+// every slot of the node.
+static Term ru_rewrite_child(Term old_child, Term in_addr,
+                             RuRangeMap const *consumer_rm) {
+  Term new_child = old_child;
+  Term resolved  = term_resolve(old_child);
+  u8 ctag = term_tag(resolved);
+  if (ctag == TAG_UOP) {
+    u32 cidx = bufferize_info_find(term_val(resolved));
+    if (cidx != 0xFFFFFFFFu && RU_SUBST[cidx] != 0) {
+      Term sub = RU_SUBST[cidx];
+      // BUFFERIZE substitute (realized producer): re-index at OUR iter.
+      if (term_tag(sub) == TAG_UOP && term_ext(sub) == UOP_BUFFERIZE) {
+        new_child = uop_index_e(sub, in_addr);
+        // Stash per-axis range terms alongside the flat addr so the
+        // bypass rewriter can substitute closed_ranges directly per
+        // tinygrad's spec (indexing.py:78) rather than re-decomposing
+        // the flat addr (which fails on movement-op swizzlers).
+        if (consumer_rm != NULL) {
+          ru_index_axes_register(new_child, consumer_rm->in_rngs,
+                                 consumer_rm->in_ndim);
+        }
+      } else {
+        // Non-realized producer: splice in its value subtree, but
+        // first rewrite producer-scope RANGE axis_ids to the
+        // consumer's equivalent at the same axis position.
+        if (consumer_rm != NULL) {
+          RuAxisSubst m = ru_build_axis_subst(cidx, consumer_rm);
+          new_child = ru_subtree_rewrite_ranges(sub, &m, 0);
+        } else {
+          new_child = sub;
+        }
+      }
+    }
+  } else if (ctag == TAG_TEN || ctag == TAG_VAR) {
+    // TAG_VAR (shape-annotated TLam-bound variable): treated as a
+    // symbolic input slot just like TAG_TEN.  visit() maps it to
+    // KSRC_AS_INPUT via input_slot_dedup_var; the bypass rewriter
+    // (unified_rewrite_buffer_for_var in materialize.c) substitutes
+    // it with the matching UOP_BUFFER before cpu_uop_walk binds
+    // runtime input pointers.
+    //
+    // For TAG_TEN whose TenDesc carries a non-trivial prior_views
+    // chain we fold the ShapeTracker decompose-by-shape into the
+    // INDEX_E.addr.  Most chained descs are instead minted by
+    // view_resolve inside materialize.c's visit(), for a movement
+    // chain the swizzlers already composed into in_addr over the
+    // base TAG_TEN; materialize.c's unified_fold_chain_scan flags
+    // those slots.  This branch handles a chained desc that is
+    // already the TAG_TEN at unified-pass time (cross-realize reuse
+    // of a chained intermediate).
+    Term addr = in_addr;
+    if (ctag == TAG_TEN) {
+      u32 tid = (u32)term_val(resolved);
+      addr = ru_compose_view_chain(in_addr, tid);
+    }
+    new_child = uop_index_e(resolved, addr);
+  }
+  return new_child;
+}
+
 static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr,
                                 RuRangeMap const *consumer_rm) {
   u8 ar = uop_arity(op);
@@ -2924,65 +3006,201 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr,
   int changed = 0;
   for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
     Term old_child = heap_read(loc + i);
-    Term new_child = old_child;
-    Term resolved  = term_resolve(old_child);
-    u8 ctag = term_tag(resolved);
-    if (ctag == TAG_UOP) {
-      u32 cidx = bufferize_info_find(term_val(resolved));
-      if (cidx != 0xFFFFFFFFu && RU_SUBST[cidx] != 0) {
-        Term sub = RU_SUBST[cidx];
-        // BUFFERIZE substitute (realized producer): re-index at OUR iter.
-        if (term_tag(sub) == TAG_UOP && term_ext(sub) == UOP_BUFFERIZE) {
-          new_child = uop_index_e(sub, in_addr);
-          // Stash per-axis range terms alongside the flat addr so the
-          // bypass rewriter can substitute closed_ranges directly per
-          // tinygrad's spec (indexing.py:78) rather than re-decomposing
-          // the flat addr (which fails on movement-op swizzlers).
-          if (consumer_rm != NULL) {
-            ru_index_axes_register(new_child, consumer_rm->in_rngs,
-                                   consumer_rm->in_ndim);
-          }
-        } else {
-          // Non-realized producer: splice in its value subtree, but
-          // first rewrite producer-scope RANGE axis_ids to the
-          // consumer's equivalent at the same axis position.
-          if (consumer_rm != NULL) {
-            RuAxisSubst m = ru_build_axis_subst(cidx, consumer_rm);
-            new_child = ru_subtree_rewrite_ranges(sub, &m, 0);
-          } else {
-            new_child = sub;
-          }
-        }
-      }
-    } else if (ctag == TAG_TEN || ctag == TAG_VAR) {
-      // TAG_VAR (shape-annotated TLam-bound variable): treated as a
-      // symbolic input slot just like TAG_TEN.  visit() maps it to
-      // KSRC_AS_INPUT via input_slot_dedup_var; the bypass rewriter
-      // (unified_rewrite_buffer_for_var in materialize.c) substitutes
-      // it with the matching UOP_BUFFER before cpu_uop_walk binds
-      // runtime input pointers.
-      //
-      // For TAG_TEN whose TenDesc carries a non-trivial prior_views
-      // chain we fold the ShapeTracker decompose-by-shape into the
-      // INDEX_E.addr.  Most chained descs are instead minted by
-      // view_resolve inside materialize.c's visit(), for a movement
-      // chain the swizzlers already composed into in_addr over the
-      // base TAG_TEN; materialize.c's unified_fold_chain_scan flags
-      // those slots.  This branch handles a chained desc that is
-      // already the TAG_TEN at unified-pass time (cross-realize reuse
-      // of a chained intermediate).
-      Term addr = in_addr;
-      if (ctag == TAG_TEN) {
-        u32 tid = (u32)term_val(resolved);
-        addr = ru_compose_view_chain(in_addr, tid);
-      }
-      new_child = uop_index_e(resolved, addr);
-    }
+    Term new_child = ru_rewrite_child(old_child, in_addr, consumer_rm);
     srcs[i] = new_child;
     if (new_child != old_child) changed = 1;
   }
   if (!changed) return self;
   return uop_graph_rebuild_with_srcs(self, srcs);
+}
+
+// === Indexed ops (UOP_GATHER) ===
+
+// Buffer address of per-axis coordinates into tensor `tid`: the public
+// view's strides and offset (a plain row-major address when the view is
+// contiguous from 0), then every prior view of its ShapeTracker --
+// tendesc_strided_index (view/strided_index.c), built symbolically.  A
+// composed address reads the raw buffer, so the tid is flagged for
+// input_slot_dedup to skip the backend's view handling.
+static Term ru_ten_leaf_addr(u32 tid, Term const *coords, u32 ndim) {
+  TenDesc const *td = &TENS[tid];
+  View const    *v  = &td->view;
+  int  plain = v->contiguous && v->offset == 0;
+  Term addr;
+  if (plain) {
+    addr = ru_build_addr_with_dims(coords, (u8)ndim, v->shape.dims);
+  } else {
+    Term acc = (v->offset != 0) ? uop_const(DT_INT32, (u32)v->offset) : 0;
+    for (u32 d = 0; d < ndim; d++) {
+      if (v->strides[d] == 0) {
+        continue;
+      }
+      Term c = coords[d];
+      if (v->strides[d] != 1) {
+        c = uop_int_binary(UOP_IMUL, c, uop_const(DT_INT32, (u32)v->strides[d]));
+      }
+      acc = (acc == 0) ? c : uop_int_binary(UOP_IADD, acc, c);
+    }
+    addr = (acc != 0) ? acc : uop_const(DT_INT32, 0);
+  }
+  for (i32 k = (i32)td->nviews - 1; k >= 0; k--) {
+    if (!ru_view_composes_as_identity(&td->prior_views[k])) {
+      addr = ru_compose_one_view(addr, &td->prior_views[k]);
+    }
+  }
+  if (!plain || td->nviews > 0) {
+    RU_TID_CHAIN_COMPOSED[tid] = 1;
+  }
+  return addr;
+}
+
+// Source coordinates of a RESHAPE from its output coordinates: the
+// row-major flat index over the output dims, split by the source dims.
+// Exact for any reshape of a row-major value, so it never declines.
+static void ru_reshape_coords(Term const *oc, Shape const *os, Term *ic,
+                              Shape const *is) {
+  Term flat   = ru_build_addr_with_dims(oc, (u8)os->ndim, os->dims);
+  u32  suffix = 1;
+  for (i32 d = (i32)is->ndim - 1; d >= 0; d--) {
+    u32  ext = kvar_extent_static(is->dims[d]);
+    Term c   = flat;
+    if (suffix != 1) {
+      c = uop_int_binary(UOP_IDIV, c, uop_const(DT_INT32, suffix));
+    }
+    if (d != 0) {
+      c = uop_int_binary(UOP_IMOD, c, uop_const(DT_INT32, ext));
+    }
+    ic[d] = c;
+    suffix *= ext;
+  }
+}
+
+__attribute__((noinline, noreturn))
+static void ru_index_leaf_fail(u8 op, char const *why) {
+  char msg[160];
+  snprintf(msg, sizeof msg, "ru_index_leaf: indexed operand op %u %s",
+           (u32)op, why);
+  thvm_fatal(msg);
+}
+
+// The value of indexed operand `t` at per-axis coordinates coords[0..ndim).
+// The operand's views are walked structurally (a RESHAPE through its
+// row-major flat index, the others through ru_apply_movement) down to
+// storage: the buffer of a node bufferize_classify realized
+// (BUFFERIZE_REASON_INDEXED_SRC), a TEN's or VAR's storage, a KERNEL's
+// output tensor, or a CONST, which is its own value.  An operand that
+// reaches none of these was not realized, and no address reads it.  A
+// non-UOP term (an unfired grad projection) is returned unlowered; visit()
+// declines its kernel as it does elsewhere.
+static Term ru_index_leaf(Term t, Term const *coords, u32 ndim) {
+  Term c[RU_MAX_AXES];
+  for (u32 d = 0; d < ndim; d++) {
+    c[d] = coords[d];
+  }
+  for (;;) {
+    Term r   = term_resolve(t);
+    u8   tag = term_tag(r);
+    if (tag == TAG_TEN) {
+      return uop_index_e(r, ru_ten_leaf_addr((u32)term_val(r), c, ndim));
+    }
+    if (tag == TAG_VAR) {
+      Shape vs;
+      if (!term_shape_in(r, 0, &vs) || vs.ndim != ndim) {
+        return r;
+      }
+      return uop_index_e(r, ru_build_addr_with_dims(c, (u8)ndim, vs.dims));
+    }
+    if (tag != TAG_UOP) {
+      return r;
+    }
+    u8  op  = term_ext(r);
+    u64 loc = term_val(r);
+    if (op == UOP_CONST) {
+      return r;
+    }
+    if (op == UOP_KERNEL) {
+      Term out = heap_read(loc);
+      if (term_tag(out) != TAG_TEN) {
+        ru_index_leaf_fail(op, "has no output tensor");
+      }
+      return uop_index_e(out, ru_ten_leaf_addr((u32)term_val(out), c, ndim));
+    }
+    u32 idx = bufferize_info_find(loc);
+    if (idx != 0xFFFFFFFFu
+        && (BUFFERIZE_NODES[idx].reasons & BUFFERIZE_REASON_INDEXED_SRC)) {
+      Term  b = RU_SUBST[idx];
+      Shape ns;
+      if (b == 0 || term_tag(b) != TAG_UOP || term_ext(b) != UOP_BUFFERIZE
+          || !term_shape_in(r, 0, &ns) || ns.ndim != ndim) {
+        ru_index_leaf_fail(op, "was realized but has no buffer");
+      }
+      return uop_index_e(b, ru_build_addr_with_dims(c, (u8)ndim, ns.dims));
+    }
+    Shape ss;
+    if (!ru_node_src_shape(loc, &ss) || ss.ndim > RU_MAX_AXES) {
+      ru_index_leaf_fail(op, "has no source shape");
+    }
+    Term in[RU_MAX_AXES];
+    u32  in_ndim = 0;
+    switch (op) {
+      case UOP_RESHAPE: {
+        Shape os;
+        if (!ru_node_shape(loc, op, &os) || os.ndim != ndim) {
+          ru_index_leaf_fail(op, "has no output shape");
+        }
+        ru_reshape_coords(c, &os, in, &ss);
+        in_ndim = ss.ndim;
+        break;
+      }
+      case UOP_PERMUTE: case UOP_EXPAND: case UOP_SHRINK: case UOP_FLIP:
+        if (!ru_apply_movement(loc, op, c, ndim, in, &in_ndim)
+            || in_ndim < ss.ndim) {
+          ru_index_leaf_fail(op, "has no index swizzle");
+        }
+        break;
+      default:
+        ru_index_leaf_fail(op, "is neither storage nor realized");
+    }
+    // A rank-growing EXPAND aligns its source by suffix: the leading
+    // coordinates are the broadcast axes.
+    u32 lead = in_ndim - ss.ndim;
+    for (u32 d = 0; d < ss.ndim; d++) {
+      c[d] = in[lead + d];
+    }
+    ndim = ss.ndim;
+    t    = heap_read(loc);
+  }
+}
+
+// GATHER(src, idx, dim) at this node's ranges.  idx loads at the row-major
+// address of the ranges over idx's own shape (ru_build_input_addr_for
+// would size by slot 0, src).  src loads at the ranges with axis `dim`
+// replaced by the loaded index, clamped to 0 so the load stays in bounds,
+// and the value is gated INVALID (read as 0) when the index is out of
+// range: the collapsed one-hot sum tinygrad's pm_reduce_load_collapse
+// leaves (codegen/simplify.py:143-145).  The gate holds a load, so
+// uop_fold_where_closure keeps the clamp, and the INVALID branch keeps the
+// materialize broadcast gate off the data-dependent address.
+static Term ru_lower_gather(Term self, u64 loc, RuRangeMap const *rm) {
+  Term  src = heap_read(loc + 0);
+  Term  idx = heap_read(loc + 1);
+  u32   dim = uop_gather_dim(self);
+  Shape is, ss;
+  if (!term_shape_in(idx, 0, &is) || !term_shape_in(src, 0, &ss)
+      || is.ndim != rm->in_ndim || ss.ndim != is.ndim) {
+    ru_index_leaf_fail(UOP_GATHER, "has operand shapes its ranges do not fit");
+  }
+  Term iaddr = ru_build_addr_with_dims(rm->in_rngs, rm->in_ndim, is.dims);
+  Term iv    = uop_cast(ru_rewrite_child(idx, iaddr, rm), DT_INT32);
+  Term valid = uop_int_binary(UOP_IAND,
+      uop_int_binary(UOP_ILT, uop_const(DT_INT32, (u32)-1), iv),
+      uop_int_binary(UOP_ILT, iv, uop_const(DT_INT32, ss.dims[dim])));
+  Term coords[RU_MAX_AXES];
+  for (u8 a = 0; a < rm->in_ndim; a++) {
+    coords[a] = rm->in_rngs[a];
+  }
+  coords[dim] = uop_iwhere(valid, iv, uop_const(DT_INT32, 0));
+  return uop_iwhere(valid, ru_index_leaf(src, coords, rm->in_ndim), uop_invalid());
 }
 
 // PAD value-side guard: build IWHERE(cond, body, INVALID) where `cond`
@@ -3131,7 +3349,9 @@ fn void pm_apply_rangeify(Term root) {
     // After computing, we apply REDUCE-axis rewire / repair / trivial-
     // strip, then run the strand check that may force-realize.
     Term in_addr   = ru_build_input_addr_for(rm, info->loc);
-    Term rewritten = ru_rewrite_subtree(self, info->loc, info->op,
+    Term rewritten = (info->op == UOP_GATHER)
+                   ? ru_lower_gather(self, info->loc, rm)
+                   : ru_rewrite_subtree(self, info->loc, info->op,
                                         in_addr, rm);
     // Rewire UOP_REDUCE's axes from the original shape-axis indices
     // (e.g. "axes (1, 3) of {3,2,4,5}") to the freshly minted
