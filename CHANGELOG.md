@@ -23,6 +23,8 @@ for the per-commit story.
 - `bin/test_kernel_fire_gen` builds again: it passes `kernel_bench_us` the
   early-stop budget that argument gained with the beam-search bounds (0
   disables it).
+- `bin/test_uop` reads UOP_REDUCE's multi-axis heap layout
+  `[src, kind, n_axes, axis_0, ...]` and checks the reduce accessors.
 - Fix (Linux/gcc): a ~2000-deep elementwise chain overflowed the 8 MB stack
   in the unified rewrite (gcc hoisted a 1 KB substitution and the inlined
   bufferize helpers' arrays into every recursion level, 6 KB each); those

@@ -38,12 +38,18 @@ int main(void) {
   Term r = uop_reduce(REDUCE_SUM, 0, a);
   CHECK_EQ(term_tag(r), TAG_UOP);
   CHECK_EQ(term_ext(r), UOP_REDUCE);
-  Term kind_cell = heap_read(term_val(r) + 1);
-  Term axis_cell = heap_read(term_val(r) + 2);
+  // Heap layout: [src, NUM(kind), NUM(n_axes), NUM(axis_0), ...].
+  Term kind_cell  = heap_read(term_val(r) + 1);
+  Term naxes_cell = heap_read(term_val(r) + 2);
+  Term axis_cell  = heap_read(term_val(r) + 3);
   CHECK_EQ(term_tag(kind_cell), TAG_NUM);
   CHECK_EQ(term_val(kind_cell), REDUCE_SUM);
+  CHECK_EQ(term_tag(naxes_cell), TAG_NUM);
+  CHECK_EQ(term_val(naxes_cell), 1);
   CHECK_EQ(term_tag(axis_cell), TAG_NUM);
   CHECK_EQ(term_val(axis_cell), 0);
+  CHECK_EQ(uop_reduce_n_axes(r), 1);
+  CHECK_EQ(uop_reduce_axis(r, 0), 0);
 
   TEST_BEGIN("uop/reshape-stores-dims");
   // Heap layout: [src, NUM(ndim), NUM(d0), ..., NUM(d_{ndim-1})].
