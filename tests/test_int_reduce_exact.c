@@ -5,19 +5,27 @@
 // it at identity_element (uop/ops.py:61), 0 for SUM and dt.min for MAX:
 // -2^(bits-1) for a signed int, 0 for an unsigned int, False for bool
 // (dtype.py:70-72).  A bool ADD or MAX is an OR (uop/symbolic.py:163-166).
+// Its C renderer declares the accumulator in that dtype.
 //
-// The 64-bit values sit above 2^53, where a double accumulator rounds, and
-// the u64 ones above 2^63.  For SUM and MAX over every int dtype and bool,
-// out[i] = reduce_j x[i, j] runs on the CPU UOp walker in five shapes:
+// The 32-bit values sit above 2^24, where an f32 accumulator rounds, the
+// 64-bit ones above 2^53, where a double one does, and the u64 ones above
+// 2^63.  For SUM and MAX over every int dtype and bool, out[i] =
+// reduce_j x[i, j] runs on the CPU UOp walker and on the legacy C emit
+// (the explicit-buffer entry, compiled with the JIT's C compiler) in five
+// shapes:
 //   plain            one accumulator;
-//   upcast           the output axis UPCAST;
-//   unroll           the reduce axis UNROLLed;
-//   upcast-shared    x[i, j] + w[j], output UPCAST;
-//   epilogue         reduce + y[i], with and without the output UPCAST.
+//   upcast           the output axis UPCAST: parallel accumulators;
+//   unroll           the reduce axis UNROLLed into the accumulator;
+//   upcast-shared    x[i, j] + w[j], output UPCAST: the lane-invariant
+//                    w[j] load is hoisted into a local;
+//   epilogue         reduce + y[i]: a lane-blocked accumulator, with a
+//                    hoisted w[j], when the output axis is UPCAST, a
+//                    scalar one when it is not.
 // The realized repros run end to end through thvm_realize, and each
-// kernel runs again through the walker.
+// kernel again through the walker.
 #include "../src/thvm.c"
 #include "test.h"
+#include <dlfcn.h>
 
 #define NI 8
 #define NJ 6
@@ -377,6 +385,119 @@ static void check_walker_units(void) {
   }
 }
 
+// === Rendered C ==========================================================
+
+// The rendered kernels, concatenated into one translation unit that is
+// compiled once: the preludes repeat identical includes, typedefs and
+// macros, which C11 accepts.
+static char  *SRC;
+static size_t SRC_LEN;
+static size_t SRC_CAP;
+
+static void src_append(char const *s, size_t n) {
+  if (SRC_LEN + n + 1 > SRC_CAP) {
+    SRC_CAP = (SRC_LEN + n + 1) * 2;
+    SRC     = (char *)realloc(SRC, SRC_CAP);
+  }
+  memcpy(SRC + SRC_LEN, s, n);
+  SRC_LEN += n;
+  SRC[SRC_LEN] = 0;
+}
+
+static void *compile_src(void) {
+  char const *tmp = getenv("TMPDIR");
+  char path[512];
+  snprintf(path, sizeof path, "%s/thvm_int_reduce_XXXXXX.c",
+           (tmp != NULL && tmp[0] != '\0') ? tmp : "/tmp");
+  int fd = mkstemps(path, 2);
+  if (fd < 0) {
+    return NULL;
+  }
+  FILE *cf = fdopen(fd, "w");
+  fputs(SRC, cf);
+  fclose(cf);
+  char so[600];
+  snprintf(so, sizeof so, "%s.so", path);
+  char cmd[1400];
+  snprintf(cmd, sizeof cmd, "%s -O1 -shared -fPIC -o '%s' '%s'", cpu_cc(), so, path);
+  void *h = (system(cmd) == 0) ? dlopen(so, RTLD_NOW) : NULL;
+  if (h == NULL) {
+    fprintf(stderr, "  compile failed: %s\n", cmd);
+  }
+  unlink(path);
+  unlink(so);
+  SRC_LEN = 0;
+  return h;
+}
+
+typedef void (*LegacyFn)(void *, const void *const *, unsigned,
+                         const unsigned *, const unsigned *);
+
+static void render_legacy(Kern const *k, char const *fn_name) {
+  Term   ins[3];
+  u32    n   = 0;
+  char  *buf = NULL;
+  size_t len = 0;
+  for (u32 s = 0; s < 3; s++) {
+    if (k->ins[s] != 0) {
+      ins[n++] = k->ins[s];
+    }
+  }
+  FILE *fp = open_memstream(&buf, &len);
+  cg_render_uop_kernel_c(k->root, fn_name, k->out, ins, n, fp);
+  fclose(fp);
+  src_append(buf, len);
+  free(buf);
+}
+
+// The explicit-buffer entry binds the inputs in order.
+static void run_legacy(Kern const *k, LegacyFn f, void *res) {
+  const void *all[3]   = { k->x, k->w, k->y };
+  unsigned    alln[3]  = { NI * NJ * NK, NJ, NI };
+  const void *ins[3];
+  unsigned    numel[3];
+  u32 n = 0;
+  for (u32 s = 0; s < 3; s++) {
+    if (k->ins[s] != 0) {
+      ins[n]   = all[s];
+      numel[n] = alln[s];
+      n++;
+    }
+  }
+  f(res, ins, NI, numel, NULL);
+}
+
+static void check_legacy_units(void) {
+  char fn_name[32];
+  for (u32 q = 0; q < N_KERNS; q++) {
+    if (KERNS_ON[q]) {
+      snprintf(fn_name, sizeof fn_name, "k_legacy_%u", q);
+      render_legacy(&KERNS[q], fn_name);
+    }
+  }
+  void *h = compile_src();
+  TEST_BEGIN("legacy-c/compiles");
+  CHECK(h != NULL);
+  u8 res[8 * NI];
+  for (u32 q = 0; q < N_KERNS; q++) {
+    if (!KERNS_ON[q]) {
+      continue;
+    }
+    TEST_BEGIN(kern_name(&KERNS[q], "legacy-c"));
+    snprintf(fn_name, sizeof fn_name, "k_legacy_%u", q);
+    LegacyFn f = (h != NULL) ? (LegacyFn)dlsym(h, fn_name) : NULL;
+    CHECK(f != NULL);
+    if (f != NULL) {
+      memset(res, 0, sizeof res);
+      run_legacy(&KERNS[q], f, res);
+      check_out(&KERNS[q], res);
+    }
+  }
+  if (h != NULL) {
+    dlclose(h);
+  }
+}
+
 // === End to end ==========================================================
 
 static Term ten(u32 dt, void const *data, u32 ndim, u32 const *dims) {
@@ -406,8 +527,8 @@ static void check_elems(u32 dt, u8 const *got, i64 const *want, u32 n,
   }
 }
 
-// Realize `expr`, then run its kernel again through the walker and
-// compare the n elements it writes with `want`.
+// Realize `expr` and compare its n elements with `want`, then run its
+// kernel again through the walker.
 static void check_realized(Term expr, u32 dt, i64 const *want, u32 n) {
   u32  k0   = KERNELS_NEXT;
   Term done = term_resolve(thvm_realize(expr));
@@ -421,6 +542,8 @@ static void check_realized(Term expr, u32 dt, i64 const *want, u32 n) {
   CHECK_EQ(TENS[tid].view.numel, n);
   CHECK(TENS[tid].view.contiguous);
   u8 got[8 * 64];
+  TENS[tid].backend->buf_read(TENS[tid].buf_id, got, bytes);
+  check_elems(dt, got, want, n, "realized");
   u32 walked = 0;
   for (u32 kid = k0; kid < KERNELS_NEXT; kid++) {
     KernelEntry *ke = &KERNELS[kid];
@@ -541,6 +664,7 @@ int main(void) {
 
   build_kernels();
   check_walker_units();
+  check_legacy_units();
 
   check_end_to_end();
   printf("  e2e: %u realized kernels, %u of them on the JIT, all re-run on the walker\n",
@@ -549,6 +673,7 @@ int main(void) {
   TEST_BEGIN("e2e/no-kernel-ran-without-a-rung");
   CHECK_EQ(cpu_dispatch_no_rung_count(), 0);
 
+  free(SRC);
   thvm_free();
   TEST_REPORT();
 }

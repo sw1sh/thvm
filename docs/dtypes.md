@@ -124,6 +124,11 @@ the accumulator like the reduce (reduce_ranges_to_acc,
 codegen/__init__.py:197-204).  The CPU UOp walker accumulates it in
 i64, reads each body value and wraps the sum in the dtype, and compares
 a u64 MAX unsigned; a bool SUM or MAX is an OR (uop/symbolic.py:163-166).
+The legacy C emit declares the accumulator, and the hoisted loads and
+lane-invariant locals of a register-blocked reduce, in the dtype's C
+type; an int MAX starts at `INT<n>_MIN` or 0 and compares, as tinygrad
+lowers MAX (codegen/decomp/op.py:84).  Float reduces, and the GPU
+targets, keep the float accumulator.
 
 Packed nibble lanes -- i4, u4.  Storage is 2 nibbles per byte, low
 nibble first ([src/dtype/nibble.c](../src/dtype/nibble.c)).  No CPU

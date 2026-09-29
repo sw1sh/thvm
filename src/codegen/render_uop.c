@@ -2105,10 +2105,40 @@ static u32 rmu_split_reduce(Term *ranges, u32 *opt_kinds,
   return reduce_idx;
 }
 
-// Emit `<acc> = <combine(kind, acc, src)>;` per the REDUCE kind.
-static void rmu_emit_reduce_combine(const char *acc_name, u32 kind,
+// 1 iff a reduce accumulator or hoisted local of dtype `dt` is held in its
+// own int or bool type.  On the C target it is, as tinygrad allocates the
+// accumulator like the reduce (reduce_ranges_to_acc,
+// codegen/__init__.py:197-204); floats, and the GPU targets, hold float.
+static int rmu_holds_int(u32 dt) {
+  return RMU_TARGET == CG_TARGET_C
+      && (dtype_is_bool(dt) || (dtype_is_int(dt) && !dtype_is_packed(dt)));
+}
+
+static const char *rmu_hold_type(u32 dt) {
+  return rmu_holds_int(dt) ? rmu_c_type_name(dt) : "float";
+}
+
+static u32 rmu_dtype_of(Term t) {
+  u32 dt = DT_FP32;
+  (void)term_dtype_in(t, 0, &dt);
+  return dt;
+}
+
+// Emit `<acc> = <combine(kind, acc, src)>;` per the REDUCE kind.  An int
+// MAX compares, as tinygrad lowers MAX where the renderer has none
+// (codegen/decomp/op.py:84); a bool SUM or MAX is an OR
+// (uop/symbolic.py:163-166).
+static void rmu_emit_reduce_combine(const char *acc_name, u32 kind, u32 dt,
                                     Term src, FILE *fp) {
-  if (kind == REDUCE_MAX) {
+  if (rmu_holds_int(dt) && dtype_is_bool(dt)) {
+    fprintf(fp, "%s = %s | ((", acc_name, acc_name);
+    rmu_emit_term(src, fp);
+    fputs(") != 0);\n", fp);
+  } else if (rmu_holds_int(dt) && kind == REDUCE_MAX) {
+    fprintf(fp, "{ %s _v = ", rmu_c_type_name(dt));
+    rmu_emit_term(src, fp);
+    fprintf(fp, "; %s = (%s < _v) ? _v : %s; }\n", acc_name, acc_name, acc_name);
+  } else if (kind == REDUCE_MAX) {
     fprintf(fp, "%s = fmax(%s, ", acc_name, acc_name);
     rmu_emit_term(src, fp);
     fputs(");\n", fp);
@@ -2120,10 +2150,25 @@ static void rmu_emit_reduce_combine(const char *acc_name, u32 kind,
   }
 }
 
-// Emit init expression for a REDUCE kind: 0.0f for SUM, -INFINITY for MAX.
-static void rmu_emit_reduce_init(u32 kind, FILE *fp) {
-  if (kind == REDUCE_MAX) fputs("-INFINITY", fp);
-  else                    fputs("0.0f", fp);
+// Emit the init expression of a REDUCE accumulator: tinygrad's
+// identity_element (uop/ops.py:61), 0 for SUM and dt.min for MAX, which is
+// -2^(bits-1) for a signed int, 0 for an unsigned int or bool
+// (dtype.py:70-72), and -INFINITY for a float accumulator.
+static void rmu_emit_reduce_init(u32 kind, u32 dt, FILE *fp) {
+  if (!rmu_holds_int(dt)) {
+    fputs((kind == REDUCE_MAX) ? "-INFINITY" : "0.0f", fp);
+    return;
+  }
+  if (kind != REDUCE_MAX || !dtype_is_signed(dt)) {
+    fputs("0", fp);
+    return;
+  }
+  switch (dtype_info(dt)->bits) {
+    case 8:  fputs("INT8_MIN", fp);  break;
+    case 16: fputs("INT16_MIN", fp); break;
+    case 32: fputs("INT32_MIN", fp); break;
+    default: fputs("INT64_MIN", fp); break;
+  }
 }
 
 // ---- Threadgroup-memory-tiled simdgroup_matrix matmul (Metal) ------
@@ -4202,7 +4247,7 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   // Per-thread init.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
   fprintf(fp, "%s = ", acc_slot);
-  rmu_emit_reduce_init(red_kind, fp);
+  rmu_emit_reduce_init(red_kind, DT_FP32, fp);
   fputs(";\n", fp);
   // Pre-loop barrier so every thread sees a clean slot.
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
@@ -4253,7 +4298,7 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   fprintf(fp, "if (tt %% %uu == 0u) {\n", group_extent);
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fputs("float _total = ", fp);
-  rmu_emit_reduce_init(red_kind, fp);
+  rmu_emit_reduce_init(red_kind, DT_FP32, fp);
   fputs(";\n", fp);
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fprintf(fp, "for (uint _i = 0; _i < %u; _i++) {\n", group_extent);
@@ -4556,9 +4601,9 @@ static u32 rmu_hoist_shared_loads(Term red_src,
       memcpy(slot_name, tmp, (u32)tn + 1);
       pool_used += (u32)tn + 1;
       if (!rmu_hoist_add(cur, slot_name)) continue;
-      // Emit:  float _sh<r>_<i> = in<k>[<addr>];
+      // Emit:  T _sh<r>_<i> = in<k>[<addr>];  T holds the buffer's values.
       for (u32 d = 0; d < indent_depth; d++) fputs("  ", fp);
-      fprintf(fp, "float %s = %s[", slot_name, bn);
+      fprintf(fp, "%s %s = %s[", rmu_hold_type(rmu_slot_dtype(buf)), slot_name, bn);
       rmu_emit_term(addr, fp);
       fputs("];\n", fp);
       n_hoist++;
@@ -4652,7 +4697,8 @@ static int rmu_hoist_worth(Term t) {
 // lane-INVARIANT) replicated 16x.  This walks red_src top-down and, for
 // each MAXIMAL subterm that (a) is worth hoisting (rmu_hoist_worth) and
 // (b) references NO lane axis (rmu_term_depends_on_upcast == 0), emits ONE
-// `int`/`float` local and registers it in the hoist map; rmu_emit_term
+// local (`int` for index math, else the value's rmu_hold_type) and
+// registers it in the hoist map; rmu_emit_term
 // then short-circuits every per-lane occurrence to that local name.
 //
 // Maximal: a lane-invariant node is hoisted whole and NOT descended (its
@@ -4706,7 +4752,7 @@ static u32 rmu_hoist_lane_invariant(Term t,
       && rmu_term_axes_in_set(t, scope_axes, n_scope)) {
     // Maximal lane-invariant subtree: hoist it whole.
     if (*n_hoist >= RMU_HOIST_MAX) return 0;
-    const char *ty = rmu_op_is_int(op) ? "int" : "float";
+    const char *ty = rmu_op_is_int(op) ? "int" : rmu_hold_type(rmu_dtype_of(t));
     char tmp[40];
     int tn = snprintf(tmp, sizeof(tmp), "_sh%u_%u", red_axis, *n_hoist);
     if (tn <= 0 || (u32)tn + 1 > name_pool_cap - *pool_used) return 0;
@@ -4857,6 +4903,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   // (outermost axis_0, innermost axis_{n-1}; mirrors tinygrad
   // lowerer.py).
   u32  red_kind   = uop_reduce_kind(value);
+  u32  red_dt     = rmu_dtype_of(value);
   u32  red_n_axes = uop_reduce_n_axes(value);
   if (red_n_axes == 0 || red_n_axes > MAX_DIM) return 0;
   u32  red_axes[MAX_DIM];
@@ -5018,8 +5065,8 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
     // F parallel accumulator declarations.
     for (u32 k = 0; k < pa_total; k++) {
       for (u32 d = 0; d < pa_body_depth; d++) fputs("  ", fp);
-      fprintf(fp, "float %s_%u = ", pa_acc_name, k);
-      rmu_emit_reduce_init(red_kind, fp);
+      fprintf(fp, "%s %s_%u = ", rmu_hold_type(red_dt), pa_acc_name, k);
+      rmu_emit_reduce_init(red_kind, red_dt, fp);
       fputs(";\n", fp);
     }
     // Reduce loops, nested outermost (axis_0) -> innermost
@@ -5083,16 +5130,10 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
         rem /= pa_up_exts[i];
       }
       Term rk = uop_graph_rewrite(red_src, pa_rules, 1, &pa_up);
+      char lane_acc[48];
+      snprintf(lane_acc, sizeof(lane_acc), "%s_%u", pa_acc_name, k);
       for (u32 d = 0; d < pa_red_depth; d++) fputs("  ", fp);
-      if (red_kind == REDUCE_MAX) {
-        fprintf(fp, "%s_%u = fmax(%s_%u, ", pa_acc_name, k, pa_acc_name, k);
-        rmu_emit_term(rk, fp);
-        fputs(");\n", fp);
-      } else {
-        fprintf(fp, "%s_%u = %s_%u + ", pa_acc_name, k, pa_acc_name, k);
-        rmu_emit_term(rk, fp);
-        fputs(";\n", fp);
-      }
+      rmu_emit_reduce_combine(lane_acc, red_kind, red_dt, rk, fp);
     }
     rmu_hoist_clear();
     // Close all reduce loops (innermost first).
@@ -5197,8 +5238,8 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   char acc_name[32];
   snprintf(acc_name, sizeof(acc_name), "_acc%u", red_axis);
   for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
-  fprintf(fp, "float %s = ", acc_name);
-  rmu_emit_reduce_init(red_kind, fp);
+  fprintf(fp, "%s %s = ", rmu_hold_type(red_dt), acc_name);
+  rmu_emit_reduce_init(red_kind, red_dt, fp);
   fputs(";\n", fp);
   // Reduce-axis loops, nested outermost (axis_0) -> innermost
   // (axis_{n-1}).  Per-axis: honour OPT(UNROLL) if present, otherwise
@@ -5229,7 +5270,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
       out_factors + n_out_true, n_inner, fp, red_depth);
   // Combine inside the (innermost) reduce loop.
   for (u32 d = 0; d < reduce_body_depth; d++) fputs("  ", fp);
-  rmu_emit_reduce_combine(acc_name, red_kind, red_src, fp);
+  rmu_emit_reduce_combine(acc_name, red_kind, red_dt, red_src, fp);
   for (u32 i = 0; i < n_inner; i++) {
     reduce_body_depth--;
     for (u32 d = 0; d < reduce_body_depth; d++) fputs("  ", fp);
@@ -5318,6 +5359,7 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth,
                                 u32 n_reduces, FILE *fp, Term store_addr,
                                 const RmuLaneBlock *lb) {
   u32  r_kind   = uop_reduce_kind(red);
+  u32  r_dt     = rmu_dtype_of(red);
   // Multi-axis REDUCE: one shell, one shared accumulator named after
   // axis_0; emit a nested for-loop PER reduce axis with the innermost
   // loop (last axis in the builder list) carrying the combine.
@@ -5338,15 +5380,15 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth,
     RmuConvMSubstCtx cx = {0};
     for (u32 k = 0; k < n_lanes; k++) {
       for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-      fprintf(fp, "float %s_%u = ", acc_name, k);
-      rmu_emit_reduce_init(r_kind, fp);
+      fprintf(fp, "%s %s_%u = ", rmu_hold_type(r_dt), acc_name, k);
+      rmu_emit_reduce_init(r_kind, r_dt, fp);
       fputs(";\n", fp);
     }
     (void)cx;
   } else {
     for (u32 d = 0; d < emit_depth; d++) fputs("  ", fp);
-    fprintf(fp, "float %s = ", acc_name);
-    rmu_emit_reduce_init(r_kind, fp);
+    fprintf(fp, "%s %s = ", rmu_hold_type(r_dt), acc_name);
+    rmu_emit_reduce_init(r_kind, r_dt, fp);
     fputs(";\n", fp);
   }
   // RMU_MAX_RANGES (32), NOT MAX_DIM (8): a faithful-seed fused conv-bwd
@@ -5501,7 +5543,7 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth,
       // suffix (the inner reduce was lane-blocked above).
       snprintf(RMU_ACC_LANE_SUFFIX, sizeof(RMU_ACC_LANE_SUFFIX), "_%u", k);
       for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
-      rmu_emit_reduce_combine(lane_acc, r_kind, r_src_k, fp);
+      rmu_emit_reduce_combine(lane_acc, r_kind, r_dt, r_src_k, fp);
       RMU_ACC_LANE_SUFFIX[0] = '\0';
     }
     // Drop this reduce's hoist entries so they don't leak into a sibling
@@ -5514,7 +5556,7 @@ static void rmu_emit_one_reduce_lb(Term red, u32 emit_depth,
     }
   } else {
     for (u32 d = 0; d < inner_depth; d++) fputs("  ", fp);
-    rmu_emit_reduce_combine(acc_name, r_kind, r_src, fp);
+    rmu_emit_reduce_combine(acc_name, r_kind, r_dt, r_src, fp);
   }
   // Close inner-reduce-decomp loops (innermost first).
   for (u32 i = 0; i < n_decomp; i++) {

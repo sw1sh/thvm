@@ -30,6 +30,7 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- The legacy C emit declares an int or bool reduce's accumulator in the reduce's dtype, as tinygrad's C renderer does: an int MAX starts at `INT<n>_MIN` or 0 and compares, a bool SUM or MAX is an OR, and the hoisted loads and lane-invariant locals of a register-blocked reduce keep the int type. Every accumulator and hoisted value was a `float` (from -INFINITY, combined with `fmax`), so the CPU JIT gave 16777216 for an int32 `max{16777217, 1, 2, 3}`, -8999999488 for an int64 max of -9e9, and a bool SUM its count.
 - The tensor-core recogniser's UPat tables are spelled as constant expressions, so the single-TU build (FindProof's CASC source package included) compiles with clang 14, which rejects a `const` object's value in a static initializer (C11 6.7.9p4); gcc accepted it as an extension.
 - `bin/test_kernel_fire_gen` builds again: it passes `kernel_bench_us` the
   early-stop budget that argument gained with the beam-search bounds (0
