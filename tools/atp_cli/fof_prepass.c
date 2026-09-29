@@ -224,8 +224,13 @@ static void fof_fresh_prefix(char *prefix, size_t cap) {
 }
 
 // --- clause-side serializer: fol Term -> .pr-ready text ---------------
+// A clause with more variables than the equational engine could ever
+// load is unrepresentable in the encoding (never in the clausal
+// pre-pass, which keeps the clause): the oversize discipline below
+// drops it on the axiom side.
+#define FOF_ENC_MAX_VARS 256
 typedef struct {
-  u32 id[PC_MAX_VARS];   // clause-local variable ids, first-occurrence order
+  u32 id[FOF_ENC_MAX_VARS];   // clause-local variable ids, first-occurrence order
   int n;
 } FofVarScope;
 
@@ -261,7 +266,10 @@ static void fof_ser_term(Term t, FofVarScope *sc, char *buf, size_t cap, size_t 
     int ix = -1;
     for (int i = 0; i < sc->n; i++) if (sc->id[i] == vid) { ix = i; break; }
     if (ix < 0) {
-      if (sc->n >= (int)PC_MAX_VARS) tp_giveup("FOF clause exceeds variable bound");
+      if (sc->n >= FOF_ENC_MAX_VARS) {
+        if (g_fof_soft_oversize) { g_fof_ser_overflow = 1; return; }
+        tp_giveup("FOF clause exceeds variable bound");
+      }
       ix = sc->n;
       sc->id[sc->n++] = vid;
     }

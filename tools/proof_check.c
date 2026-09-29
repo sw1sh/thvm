@@ -76,17 +76,17 @@
 // --- limits ---------------------------------------------------------
 // Step and problem tables grow on demand up to PC_MAX_STEPS (the
 // official set carries 10006-record proofs).  PC_MAX_SYMS keeps every
-// user label below the FOL connective labels (0xFFF0).  PC_MAX_VARS
-// bounds one record's variables in the NAME-keyed parse the FindProof
-// FOF front-end shares; the checker's binder-fresh parse (every
-// quantifier binding its own id) counts binders, up to PC_MAX_RVARS.
+// user label below the FOL connective labels (0xFFF0).  The formula
+// parser itself has no token, name-length, arity or (name-keyed)
+// variable cap; the checker's binder-fresh parse (every quantifier
+// binding its own id) counts binders up to PC_MAX_RVARS, the size of
+// its per-id tables.  PC_NAME bounds the fixed-width annotation fields
+// (step names, rule names, file() directives).
 #define PC_MAX_STEPS    262144
 #define PC_MAX_PARENTS  64
 #define PC_NAME         192
 #define PC_MAX_SYMS     60000
-#define PC_MAX_VARS     256
 #define PC_MAX_RVARS    4096
-#define PC_MAX_TOK      65536
 #define PC_ENTAIL_CAP   1500    // saturation step cap per entailment (default)
 
 static u32 pc_cap = PC_ENTAIL_CAP;   // runtime override via env, set in worker
@@ -128,8 +128,12 @@ static int pc_strict(void) {
 // symbol interning: predicate/function/constant name -> stable label
 // ===================================================================
 
-static char pc_sym[PC_MAX_SYMS][PC_NAME];
-static int  pc_nsyms = 0;
+// Names are heap copies of any length: a fixed-width table truncated
+// long names, and two symbols sharing a truncated prefix then shared
+// one label.
+static char **pc_sym = NULL;
+static int    pc_nsyms = 0;
+static int    pc_sym_cap = 0;
 // Open-addressing index over pc_sym (slot = symbol index + 1, 0 empty).
 #define PC_SYM_HT (1u << 17)
 static int pc_sym_ht[PC_SYM_HT];
@@ -138,39 +142,56 @@ static int pc_sym_ht[PC_SYM_HT];
 static int pc_curry_on = 0;
 static u32 pc_ap2_lab  = PC_NOT_FOUND;
 
-static u32 pc_strhash(const char *s) {
+static u32 pc_strhash_n(const char *s, size_t n) {
   u32 h = 2166136261u;
-  for (; *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+  for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 16777619u; }
   return h;
 }
+static u32 pc_strhash(const char *s) { return pc_strhash_n(s, strlen(s)); }
+static int pc_sym_is(int ix, const char *name, size_t n) {
+  return strncmp(pc_sym[ix], name, n) == 0 && pc_sym[ix][n] == '\0';
+}
 static void pc_sym_reset(void) {
+  for (int i = 0; i < pc_nsyms; i++) free(pc_sym[i]);
   pc_nsyms = 0;
   pc_ap2_lab = PC_NOT_FOUND;
   memset(pc_sym_ht, 0, sizeof pc_sym_ht);
 }
 // Label of an already-seen name, or PC_NOT_FOUND (never interned).
-static u32 pc_lookup(const char *name) {
-  for (u32 h = pc_strhash(name) & (PC_SYM_HT - 1u);; h = (h + 1u) & (PC_SYM_HT - 1u)) {
+static u32 pc_lookup_n(const char *name, size_t n) {
+  for (u32 h = pc_strhash_n(name, n) & (PC_SYM_HT - 1u);; h = (h + 1u) & (PC_SYM_HT - 1u)) {
     int s = pc_sym_ht[h];
     if (s == 0) return PC_NOT_FOUND;
-    if (strcmp(pc_sym[s - 1], name) == 0) return PC_LAB_BASE + (u32)(s - 1);
+    if (pc_sym_is(s - 1, name, n)) return PC_LAB_BASE + (u32)(s - 1);
   }
 }
+static u32 pc_lookup(const char *name) { return pc_lookup_n(name, strlen(name)); }
 // Intern a symbol.  Table full returns PC_NOT_FOUND and the caller
 // fails the record: folding distinct symbols onto one label would let
 // unrelated predicates unify.
-static u32 pc_intern(const char *name) {
-  u32 h = pc_strhash(name) & (PC_SYM_HT - 1u);
+static u32 pc_intern_n(const char *name, size_t n) {
+  u32 h = pc_strhash_n(name, n) & (PC_SYM_HT - 1u);
   for (;; h = (h + 1u) & (PC_SYM_HT - 1u)) {
     int s = pc_sym_ht[h];
     if (s == 0) break;
-    if (strcmp(pc_sym[s - 1], name) == 0) return PC_LAB_BASE + (u32)(s - 1);
+    if (pc_sym_is(s - 1, name, n)) return PC_LAB_BASE + (u32)(s - 1);
   }
   if (pc_nsyms >= PC_MAX_SYMS) return PC_NOT_FOUND;
-  snprintf(pc_sym[pc_nsyms], PC_NAME, "%s", name);
+  if (pc_nsyms >= pc_sym_cap) {
+    int ncap = (pc_sym_cap == 0) ? 1024 : 2 * pc_sym_cap;
+    if (ncap > PC_MAX_SYMS) ncap = PC_MAX_SYMS;
+    char **ns = (char **)realloc(pc_sym, (size_t)ncap * sizeof(char *));
+    if (ns == NULL) return PC_NOT_FOUND;
+    pc_sym = ns;
+    pc_sym_cap = ncap;
+  }
+  char *copy = strndup(name, n);
+  if (copy == NULL) return PC_NOT_FOUND;
+  pc_sym[pc_nsyms] = copy;
   pc_sym_ht[h] = pc_nsyms + 1;
   return PC_LAB_BASE + (u32)pc_nsyms++;
 }
+static u32 pc_intern(const char *name) { return pc_intern_n(name, strlen(name)); }
 
 // ===================================================================
 // tokenizer (one record at a time)
@@ -181,18 +202,49 @@ enum {
   K_ALL, K_EX, K_NOT, K_AND, K_OR, K_IMP, K_IFF, K_EQ, K_NEQ,
   K_REVIMP, K_XOR, K_NAND, K_NOR, K_STR, K_EOF
 };
-typedef struct { int kind; char text[PC_NAME]; } PcTok;
+// A token is a span of the lexed string: no copy, no length cap.  A
+// K_STR span is the quoted atom's content (quotes excluded, backslash
+// escapes kept as written).
+typedef struct { int kind; u32 off; u32 len; } PcTok;
 
-// Lex `s` into `out` (up to `max`).  Returns token count, or -1 on
-// overflow / bad character.
-static int pc_lex(const char *s, PcTok *out, int max) {
-  int n = 0;
+// Why the most recent pc_parse_formula failed (static text, first cause
+// wins; NULL on success) -- the FOF front-end names it with the record.
+static const char *pc_err = NULL;
+static void pc_set_err(const char *why) { if (pc_err == NULL) pc_err = why; }
+
+// The token buffer grows on demand (the Mizar/Coq-exported FOF sets
+// carry single formulas of 150k tokens; a fixed cap rejected them).
+static PcTok *pc_toks = NULL;
+static u32    pc_toks_cap = 0;
+
+static int pc_toks_reserve(u32 n) {
+  if (n < pc_toks_cap) return 1;
+  u32 ncap = (pc_toks_cap == 0u) ? 4096u : pc_toks_cap;
+  while (ncap <= n) ncap *= 2u;
+  PcTok *nt = (PcTok *)realloc(pc_toks, (size_t)ncap * sizeof(PcTok));
+  if (nt == NULL) return 0;
+  pc_toks = nt;
+  pc_toks_cap = ncap;
+  return 1;
+}
+
+static int pc_word_char(char c) {
+  return c == '$' || c == '_' || isalnum((unsigned char)c);
+}
+
+// Lex `src` into pc_toks.  Returns the token count (a K_EOF token
+// follows), or -1 on a bad character or allocation failure.
+static int pc_lex(const char *src) {
+  u32 n = 0;
+  const char *s = src;
   while (*s) {
     if (isspace((unsigned char)*s)) { s++; continue; }
-    if (n >= max - 1) return -1;
-    PcTok *t = &out[n];
-    t->text[0] = '\0';
+    if (!pc_toks_reserve(n + 1u)) { pc_set_err("out of memory"); return -1; }
+    PcTok *t = &pc_toks[n];
+    const char *t0 = s;
     char c = *s;
+    t->off = (u32)(s - src);
+    t->len = 0;
     if (c == '(') { t->kind = K_LP;    s++; }
     else if (c == ')') { t->kind = K_RP;    s++; }
     else if (c == '[') { t->kind = K_LB;    s++; }
@@ -217,29 +269,31 @@ static int pc_lex(const char *s, PcTok *out, int max) {
       if      (s[1] == '=' && s[2] == '>') { t->kind = K_IFF;    s += 3; }
       else if (s[1] == '=')                { t->kind = K_REVIMP; s += 2; }
       else if (s[1] == '~' && s[2] == '>') { t->kind = K_XOR;    s += 3; }
-      else return -1;
+      else { pc_set_err("bad '<' connective"); return -1; }
     }
     else if (c == '\'') {                      // 'quoted atom'
-      s++; int k = 0;
-      while (*s && *s != '\'' && k < PC_NAME - 1) t->text[k++] = *s++;
-      t->text[k] = '\0';
-      if (*s == '\'') s++;
+      const char *q = s + 1;
+      while (*q && *q != '\'') q += (q[0] == '\\' && q[1] != '\0') ? 2 : 1;
+      if (*q != '\'') { pc_set_err("unterminated quoted atom"); return -1; }
       t->kind = K_STR;
+      t->off = (u32)(s + 1 - src);
+      t->len = (u32)(q - (s + 1));
+      s = q + 1;
     }
-    else if (c == '$' || c == '_' || isalnum((unsigned char)c)) {
-      int k = 0;
-      while (*s && (*s == '$' || *s == '_' || isalnum((unsigned char)*s))
-             && k < PC_NAME - 1)
-        t->text[k++] = *s++;
-      t->text[k] = '\0';
+    else if (pc_word_char(c)) {
+      while (*s && pc_word_char(*s)) s++;
+      t->len = (u32)(s - t0);
       // TSTP: a variable starts with an uppercase letter.
-      t->kind = isupper((unsigned char)t->text[0]) ? K_VAR : K_IDENT;
+      t->kind = isupper((unsigned char)c) ? K_VAR : K_IDENT;
     }
-    else return -1;
+    else { pc_set_err("unlexable character"); return -1; }
     n++;
   }
-  out[n].kind = K_EOF; out[n].text[0] = '\0';
-  return n;
+  if (!pc_toks_reserve(n + 1u)) { pc_set_err("out of memory"); return -1; }
+  pc_toks[n].kind = K_EOF;
+  pc_toks[n].off = (u32)(s - src);
+  pc_toks[n].len = 0;
+  return (int)n;
 }
 
 // ===================================================================
@@ -255,89 +309,140 @@ static int pc_lex(const char *s, PcTok *out, int max) {
 // ![X]..?[X] nest drew a false countermodel from exactly that).
 // pc_vname keeps id -> source name for the most recent parse.
 typedef struct {
+  const char *src;
   PcTok *t;
   int    pos;
   int    ok;
   int    nv;        // ids allocated in this record
   int    nscope;    // binder stack depth
   int    nfree;     // free variables seen
+  int    closed;    // no new variables: an unknown name fails the parse
 } PcParse;
-static char pc_vname[PC_MAX_RVARS][PC_NAME];
-static int  pc_scope_id[PC_MAX_RVARS];
-static int  pc_free_id[PC_MAX_RVARS];
+static char **pc_vname = NULL;   // id -> name, pc_vname_cap slots
+static int    pc_vname_cap = 0;
+static int   *pc_scope_id = NULL;
+static int    pc_scope_cap = 0;
+static int   *pc_free_id = NULL;
+static int    pc_free_cap = 0;
 // 1 in the checker (binder-fresh ids); 0 keeps the name-keyed ids the
 // FindProof FOF front-end was validated with (one id per NAME per
 // record) -- the prover's behavior must not move with checker work.
+// The checker's per-id tables stop at PC_MAX_RVARS; the name-keyed
+// front-end has no variable cap (a Coq-exported record binds 1300).
 static int  pc_fresh_binders = 0;
+
+static int pc_grow_ints(int **a, int *cap, int need) {
+  if (need < *cap) return 1;
+  int ncap = (*cap == 0) ? 256 : *cap;
+  while (ncap <= need) ncap *= 2;
+  int *na = (int *)realloc(*a, (size_t)ncap * sizeof(int));
+  if (na == NULL) return 0;
+  *a = na;
+  *cap = ncap;
+  return 1;
+}
 
 static int pc_peek(PcParse *p) { return p->t[p->pos].kind; }
 static PcTok *pc_cur(PcParse *p) { return &p->t[p->pos]; }
+static const char *pc_tok_s(PcParse *p, const PcTok *t) { return p->src + t->off; }
 static void pc_adv(PcParse *p) { p->pos++; }
 static void pc_expect(PcParse *p, int kind) {
-  if (pc_peek(p) == kind) pc_adv(p); else p->ok = 0;
+  if (pc_peek(p) == kind) pc_adv(p); else { pc_set_err("syntax"); p->ok = 0; }
 }
-static int pc_newvar(PcParse *p, const char *name) {
-  if (p->nv >= (pc_fresh_binders ? PC_MAX_RVARS : PC_MAX_VARS)) { p->ok = 0; return 0; }
-  snprintf(pc_vname[p->nv], PC_NAME, "%s", name);
+static int pc_vname_is(int id, const char *name, u32 len) {
+  return strncmp(pc_vname[id], name, len) == 0 && pc_vname[id][len] == '\0';
+}
+static int pc_newvar(PcParse *p, const char *name, u32 len) {
+  if (p->closed || (pc_fresh_binders && p->nv >= PC_MAX_RVARS)) {
+    pc_set_err("variable cap"); p->ok = 0; return 0;
+  }
+  if (p->nv >= pc_vname_cap) {
+    int ncap = (pc_vname_cap == 0) ? 256 : 2 * pc_vname_cap;
+    char **nn = (char **)realloc(pc_vname, (size_t)ncap * sizeof(char *));
+    if (nn == NULL) { pc_set_err("out of memory"); p->ok = 0; return 0; }
+    for (int i = pc_vname_cap; i < ncap; i++) nn[i] = NULL;
+    pc_vname = nn;
+    pc_vname_cap = ncap;
+  }
+  char *copy = (char *)realloc(pc_vname[p->nv], (size_t)len + 1u);
+  if (copy == NULL) { pc_set_err("out of memory"); p->ok = 0; return 0; }
+  memcpy(copy, name, len);
+  copy[len] = '\0';
+  pc_vname[p->nv] = copy;
   return p->nv++;
 }
 // Name-keyed id (the FindProof front-end's convention): one id per
 // distinct name in the record, binders and occurrences alike.
-static int pc_nameid(PcParse *p, const char *name) {
+static int pc_nameid(PcParse *p, const char *name, u32 len) {
   for (int i = 0; i < p->nv; i++)
-    if (strcmp(pc_vname[i], name) == 0) return i;
-  return pc_newvar(p, name);
+    if (pc_vname_is(i, name, len)) return i;
+  return pc_newvar(p, name, len);
 }
-static u32 pc_varid(PcParse *p, const char *name) {
-  if (!pc_fresh_binders) return (u32)pc_nameid(p, name);
+static u32 pc_varid(PcParse *p, const char *name, u32 len) {
+  if (!pc_fresh_binders) return (u32)pc_nameid(p, name, len);
   for (int i = p->nscope - 1; i >= 0; i--)
-    if (strcmp(pc_vname[pc_scope_id[i]], name) == 0) return (u32)pc_scope_id[i];
+    if (pc_vname_is(pc_scope_id[i], name, len)) return (u32)pc_scope_id[i];
   for (int i = 0; i < p->nfree; i++)
-    if (strcmp(pc_vname[pc_free_id[i]], name) == 0) return (u32)pc_free_id[i];
-  int id = pc_newvar(p, name);
-  if (p->ok && p->nfree < PC_MAX_RVARS) pc_free_id[p->nfree++] = id;
+    if (pc_vname_is(pc_free_id[i], name, len)) return (u32)pc_free_id[i];
+  int id = pc_newvar(p, name, len);
+  if (p->ok) {
+    if (!pc_grow_ints(&pc_free_id, &pc_free_cap, p->nfree)) {
+      pc_set_err("out of memory"); p->ok = 0; return 0;
+    }
+    pc_free_id[p->nfree++] = id;
+  }
   return (u32)id;
 }
 
 static Term pc_formula(PcParse *p);   // fwd
 static Term pc_unary(PcParse *p);     // fwd
 
-// f(t1, ..., tn) wider than a term node holds (the checker's saturation
-// leaves such a node out, pc_term_wide) becomes the chain
-// ap2:(...ap2:(wide:f/n, t1)..., tn), in records and problem alike.  The encoding is injective on terms --
-// the arity is in the head's name, and ':' / '/' spell no identifier,
-// the quoted spellings being refused (pc_curry_reserved) -- so every
-// syntactic check reads it exactly.  Entailment differs.  A model of
-// the curried formulas is a model of the originals (read f off the
-// chains), so a countermodel found through the encoding is real.  The
-// converse must host the partial applications as domain elements,
-// injectively, and a finite model can lack the room: X = a | X = b with
-// four distinct binary residuals of a ternary f is satisfiable, its
-// curried form is not.  A satisfiable Horn clause set has a one-element
-// model or, by direct products, an infinite one, which hosts them all:
-// a refutation through the encoding confirms a Horn set only
-// (pc_curry_horn_ok).  Wide predicates are not read.  FindProof's FOF
-// front end keeps its give-up (pc_curry_on is 0 there): its non-Horn
-// lanes run before its own currying, which comes after the unit
-// encoding.
-static int pc_curry_reserved(const char *name) {
-  return strcmp(name, "ap2:") == 0 || strncmp(name, "wide:", 5) == 0;
+// In the checker, f(t1, ..., tn) wider than a term node holds becomes
+// the chain ap2:(...ap2:(wide:f/n, t1)..., tn), in records and problem
+// alike (the checker's saturation leaves a wide node out, pc_term_wide).
+// The encoding is injective on terms -- the arity is in the head's name,
+// and ':' / '/' spell no identifier, the quoted spellings being refused
+// (pc_curry_reserved) -- so every syntactic check reads it exactly.
+// Entailment differs.  A model of the curried formulas is a model of the
+// originals (read f off the chains), so a countermodel found through the
+// encoding is real.  The converse must host the partial applications as
+// domain elements, injectively, and a finite model can lack the room:
+// X = a | X = b with four distinct binary residuals of a ternary f is
+// satisfiable, its curried form is not.  A satisfiable Horn clause set
+// has a one-element model or, by direct products, an infinite one, which
+// hosts them all: a refutation through the encoding confirms a Horn set
+// only (pc_curry_horn_ok).  Wide predicates are not read.  FindProof's
+// FOF front end (pc_curry_on 0) keeps the application as one node: its
+// term walkers rebuild any arity, its clausal pre-pass leaves wide
+// clauses out, and its own currying (curry.c, arity > 8) runs on the
+// Horn table of the unit encoding.
+static int pc_curry_reserved_n(const char *name, size_t n) {
+  return (n == 4 && memcmp(name, "ap2:", 4) == 0) ||
+         (n >= 5 && memcmp(name, "wide:", 5) == 0);
 }
-static Term pc_curry(PcParse *p, const char *name, const Term *args, u32 n) {
-  char hn[PC_NAME];
-  if (snprintf(hn, sizeof hn, "wide:%s/%u", name, (unsigned)n) >= (int)sizeof hn) {
+static int pc_curry_reserved(const char *name) {
+  return pc_curry_reserved_n(name, strlen(name));
+}
+static Term pc_curry(PcParse *p, const char *name, size_t nlen,
+                     const Term *args, u32 n) {
+  size_t hl = nlen + 32u;
+  char *hn = (char *)malloc(hl);
+  if (hn == NULL) { pc_set_err("out of memory"); p->ok = 0; return 0; }
+  snprintf(hn, hl, "wide:%.*s/%u", (int)nlen, name, (unsigned)n);
+  u32 head = pc_intern(hn), ap = pc_intern("ap2:");
+  free(hn);
+  if (head == PC_NOT_FOUND || ap == PC_NOT_FOUND) {
+    pc_set_err("symbol cap");
     p->ok = 0;
     return 0;
   }
-  u32 head = pc_intern(hn), ap = pc_intern("ap2:");
-  if (head == PC_NOT_FOUND || ap == PC_NOT_FOUND) { p->ok = 0; return 0; }
   pc_ap2_lab = ap;
-  Term t = term_new_ctr(head, NULL, 0);
+  Term r = term_new_ctr(head, NULL, 0);
   for (u32 i = 0; i < n; i++) {
-    Term kid[2] = { t, args[i] };
-    t = term_new_ctr(ap, kid, 2u);
+    Term kid[2] = { r, args[i] };
+    r = term_new_ctr(ap, kid, 2u);
   }
-  return t;
+  return r;
 }
 // A declared symbol name the encoding touches: reserved, or read wide
 // somewhere (its checks abstain: the name no longer labels its uses).
@@ -354,59 +459,61 @@ static int pc_curry_name(const char *name) {
 }
 
 // term := VAR | ident [ '(' term (',' term)* ')' ]
+// Any arity: the argument list grows on the heap past its stack array;
+// past REWRITE_MAX_ARITY the checker curries the application (pc_curry).
 static Term pc_term(PcParse *p) {
   if (pc_peek(p) == K_VAR) {
-    u32 id = pc_varid(p, pc_cur(p)->text);
+    PcTok *t = pc_cur(p);
+    u32 id = pc_varid(p, pc_tok_s(p, t), t->len);
     pc_adv(p);
     return term_new_fvr(id);
   }
   if (pc_peek(p) == K_IDENT || pc_peek(p) == K_STR) {
-    char name[PC_NAME];
-    snprintf(name, PC_NAME, "%s", pc_cur(p)->text);
-    if (pc_curry_on && pc_peek(p) == K_STR && pc_curry_reserved(name)) {
+    PcTok name = *pc_cur(p);
+    if (pc_curry_on && pc_peek(p) == K_STR &&
+        pc_curry_reserved_n(pc_tok_s(p, &name), name.len)) {
+      pc_set_err("quoted atom spells the wide-functor encoding");
       p->ok = 0;
       return 0;
     }
     pc_adv(p);
     if (pc_peek(p) == K_LP) {
       pc_adv(p);
-      Term kids[REWRITE_MAX_ARITY];
-      Term *wide = NULL;   // all arguments, once more than a node holds
-      u32 n = 0, wcap = 0;
+      Term stk[REWRITE_MAX_ARITY];
+      Term *kids = stk;
+      u32 n = 0, cap = REWRITE_MAX_ARITY;
       for (;;) {
-        Term a = pc_term(p);
-        if (!p->ok) { free(wide); return 0; }
-        if (wide == NULL && n < REWRITE_MAX_ARITY) {
-          kids[n++] = a;
-        } else {
-          if (!pc_curry_on) { p->ok = 0; return 0; }
-          if (wide == NULL || n == wcap) {
-            u32 cap = wcap ? 2u * wcap : 4u * REWRITE_MAX_ARITY;
-            Term *w = (Term *)realloc(wide, (size_t)cap * sizeof(Term));
-            if (w == NULL) { free(wide); p->ok = 0; return 0; }
-            if (wide == NULL) memcpy(w, kids, (size_t)n * sizeof(Term));
-            wide = w;
-            wcap = cap;
-          }
-          wide[n++] = a;
+        if (n == cap) {
+          Term *nk = (Term *)malloc((size_t)cap * 2u * sizeof(Term));
+          if (nk == NULL) { pc_set_err("out of memory"); p->ok = 0; break; }
+          memcpy(nk, kids, (size_t)n * sizeof(Term));
+          if (kids != stk) free(kids);
+          kids = nk;
+          cap *= 2u;
         }
+        kids[n++] = pc_term(p);
         if (pc_peek(p) == K_COMMA) { pc_adv(p); continue; }
         break;
       }
       pc_expect(p, K_RP);
-      if (wide != NULL) {
-        Term t = p->ok ? pc_curry(p, name, wide, n) : 0;
-        free(wide);
-        return t;
+      // Interned even after a failed argument: label order is the
+      // checker's KBO precedence, and it must not move with this rewrite.
+      Term r = 0;
+      if (n > REWRITE_MAX_ARITY && pc_curry_on) {
+        if (p->ok) r = pc_curry(p, pc_tok_s(p, &name), name.len, kids, n);
+      } else {
+        u32 lab = pc_intern_n(pc_tok_s(p, &name), name.len);
+        if (lab == PC_NOT_FOUND) { pc_set_err("symbol cap"); p->ok = 0; }
+        else r = term_new_ctr(lab, kids, n);
       }
-      u32 lab = pc_intern(name);
-      if (lab == PC_NOT_FOUND) { p->ok = 0; return 0; }
-      return term_new_ctr(lab, kids, n);
+      if (kids != stk) free(kids);
+      return r;
     }
-    u32 lab = pc_intern(name);
-    if (lab == PC_NOT_FOUND) { p->ok = 0; return 0; }
+    u32 lab = pc_intern_n(pc_tok_s(p, &name), name.len);
+    if (lab == PC_NOT_FOUND) { pc_set_err("symbol cap"); p->ok = 0; return 0; }
     return term_new_ctr(lab, NULL, 0);   // constant
   }
+  pc_set_err("syntax (term expected)");
   p->ok = 0;
   return 0;
 }
@@ -414,9 +521,16 @@ static Term pc_term(PcParse *p) {
 // atom := '$false' | '$true' | term [ ('='|'!=') term ]
 static Term pc_atom(PcParse *p) {
   if (pc_peek(p) == K_IDENT) {
-    const char *nm = pc_cur(p)->text;
-    if (strcmp(nm, "$false") == 0) { pc_adv(p); return term_new_ctr(PC_LAB_FALSE, NULL, 0); }
-    if (strcmp(nm, "$true")  == 0) { pc_adv(p); return term_new_ctr(PC_LAB_TRUE,  NULL, 0); }
+    PcTok *t = pc_cur(p);
+    const char *nm = pc_tok_s(p, t);
+    if (t->len == 6 && strncmp(nm, "$false", 6) == 0) {
+      pc_adv(p);
+      return term_new_ctr(PC_LAB_FALSE, NULL, 0);
+    }
+    if (t->len == 5 && strncmp(nm, "$true", 5) == 0) {
+      pc_adv(p);
+      return term_new_ctr(PC_LAB_TRUE, NULL, 0);
+    }
   }
   Term a = pc_term(p);
   if (pc_peek(p) == K_EQ) {
@@ -446,10 +560,14 @@ static Term pc_quant(PcParse *p) {
   pc_expect(p, K_LB);
   int first = p->nscope;
   for (;;) {
-    if (pc_peek(p) != K_VAR) { p->ok = 0; break; }
-    int id = pc_fresh_binders ? pc_newvar(p, pc_cur(p)->text)
-                              : pc_nameid(p, pc_cur(p)->text);
-    if (!p->ok || p->nscope >= PC_MAX_RVARS) { p->ok = 0; break; }
+    if (pc_peek(p) != K_VAR) { pc_set_err("syntax (binder)"); p->ok = 0; break; }
+    PcTok *t = pc_cur(p);
+    int id = pc_fresh_binders ? pc_newvar(p, pc_tok_s(p, t), t->len)
+                              : pc_nameid(p, pc_tok_s(p, t), t->len);
+    if (!p->ok) break;
+    if (!pc_grow_ints(&pc_scope_id, &pc_scope_cap, p->nscope)) {
+      pc_set_err("out of memory"); p->ok = 0; break;
+    }
     pc_scope_id[p->nscope++] = id;
     pc_adv(p);
     if (pc_peek(p) == K_COMMA) { pc_adv(p); continue; }
@@ -492,8 +610,9 @@ static Term pc_or(PcParse *p) {
   while (pc_peek(p) == K_OR) { pc_adv(p); a = fol_mk_or(a, pc_and(p)); }
   return a;
 }
-// formula := or [ ('=>'|'<=>'|'<='|'<~>') formula ]   (right-associative;
-// TPTP forbids unparenthesised mixing, so one binary tail suffices)
+// formula := or [ ('=>'|'<=>'|'<='|'<~>'|'~&'|'~|') formula ]
+// (right-associative; TPTP forbids unparenthesised mixing, so one
+// binary tail suffices)
 static Term pc_formula(PcParse *p) {
   Term a = pc_or(p);
   if (pc_peek(p) == K_IMP) { pc_adv(p); return fol_mk_imp(a, pc_formula(p)); }
@@ -506,16 +625,16 @@ static Term pc_formula(PcParse *p) {
 }
 
 // Parse a whole formula string; 0 on failure.  The token buffer is
-// static (single-threaded checker): PC_MAX_TOK tokens would otherwise
-// be a multi-megabyte stack frame.  On success pc_vname[0..scope->nv)
-// names every variable id of the result.
+// shared (single-threaded) and grows on demand.  On success
+// pc_vname[0..scope->nv) names every variable id of the result.
 static Term pc_parse_formula(const char *fstr, PcParse *scope) {
-  static PcTok toks[PC_MAX_TOK];
-  int nt = pc_lex(fstr, toks, PC_MAX_TOK);
+  pc_err = NULL;
+  int nt = pc_lex(fstr);
   if (nt < 0) return 0;
-  scope->t = toks; scope->pos = 0; scope->ok = 1; scope->nv = 0;
-  scope->nscope = 0; scope->nfree = 0;
+  scope->src = fstr; scope->t = pc_toks; scope->pos = 0; scope->ok = 1;
+  scope->nv = 0; scope->nscope = 0; scope->nfree = 0; scope->closed = 0;
   Term f = pc_formula(scope);
+  if (scope->ok && pc_peek(scope) != K_EOF) pc_set_err("syntax (trailing tokens)");
   if (!scope->ok || pc_peek(scope) != K_EOF) return 0;
   return f;
 }
@@ -527,15 +646,17 @@ static Term pc_parse_formula(const char *fstr, PcParse *scope) {
 // name binders of the parent formula.
 static Term pc_parse_term_ctx(const char *tstr, const int *scope_ids,
                               int nscope, const int *free_ids, int nfree) {
-  static PcTok toks[4096];
-  int nt = pc_lex(tstr, toks, 4096);
+  pc_err = NULL;
+  int nt = pc_lex(tstr);
   if (nt < 0) return 0;
+  if (!pc_grow_ints(&pc_scope_id, &pc_scope_cap, nscope) ||
+      !pc_grow_ints(&pc_free_id, &pc_free_cap, nfree)) return 0;
   PcParse sc;
-  sc.t = toks; sc.pos = 0; sc.ok = 1;
-  sc.nv = PC_MAX_RVARS;              // no new variables: unknown names fail
+  sc.src = tstr; sc.t = pc_toks; sc.pos = 0; sc.ok = 1;
+  sc.nv = 0; sc.closed = 1;          // no new variables: unknown names fail
   sc.nscope = 0; sc.nfree = 0;
-  for (int i = 0; i < nscope && i < PC_MAX_RVARS; i++) pc_scope_id[sc.nscope++] = scope_ids[i];
-  for (int i = 0; i < nfree && i < PC_MAX_RVARS; i++) pc_free_id[sc.nfree++] = free_ids[i];
+  for (int i = 0; i < nscope; i++) pc_scope_id[sc.nscope++] = scope_ids[i];
+  for (int i = 0; i < nfree; i++) pc_free_id[sc.nfree++] = free_ids[i];
   Term t = pc_term(&sc);
   if (!sc.ok || pc_peek(&sc) != K_EOF) return 0;
   return t;
@@ -560,11 +681,15 @@ static int pc_has_label(Term t, u32 L) {
 // Free-variable universal closure: any FVR not bound by an enclosing
 // quantifier is closed with a leading forall (TSTP treats a formula's
 // free variables as universally quantified).
+// `bound`/`freev` are indexed by variable id and cover every id of the
+// formula (pc_close sizes them): an id past a fixed table stayed FREE,
+// and a free variable of a conjecture then escaped the negation --
+// ~p(X) read as !X ~p(X), not ~!X p(X).
 static void pc_free_rec(Term t, unsigned char *bound, unsigned char *freev) {
   switch (term_tag(t)) {
     case TAG_FVR: {
       u32 id = term_ext(t);
-      if (id < PC_MAX_RVARS && !bound[id]) freev[id] = 1;
+      if (!bound[id]) freev[id] = 1;
       return;
     }
     case TAG_CTR: {
@@ -572,10 +697,10 @@ static void pc_free_rec(Term t, unsigned char *bound, unsigned char *freev) {
       if (lab == PC_LAB_ALL || lab == PC_LAB_EX) {
         Term var = term_ctr_at(t, 0);
         u32 vid = term_ext(var);
-        unsigned char saved = (vid < PC_MAX_RVARS) ? bound[vid] : 0;
-        if (vid < PC_MAX_RVARS) bound[vid] = 1;
+        unsigned char saved = bound[vid];
+        bound[vid] = 1;
         pc_free_rec(term_ctr_at(t, 1), bound, freev);
-        if (vid < PC_MAX_RVARS) bound[vid] = saved;
+        bound[vid] = saved;
         return;
       }
       u32 n = term_ctr_n(t);
@@ -585,14 +710,22 @@ static void pc_free_rec(Term t, unsigned char *bound, unsigned char *freev) {
     default: return;
   }
 }
+static u32 pc_max_var(Term t);
 static Term pc_close(Term f) {
-  unsigned char bound[PC_MAX_RVARS], freev[PC_MAX_RVARS];
-  memset(bound, 0, sizeof bound);
-  memset(freev, 0, sizeof freev);
+  u32 span = pc_max_var(f);
+  if (span < PC_MAX_RVARS) span = PC_MAX_RVARS;
+  unsigned char *bound = (unsigned char *)calloc(span, 1u);
+  unsigned char *freev = (unsigned char *)calloc(span, 1u);
+  if (bound == NULL || freev == NULL) {
+    fprintf(stderr, "thvm: out of memory closing a formula\n");
+    abort();
+  }
   pc_free_rec(f, bound, freev);
   Term r = f;
-  for (int id = PC_MAX_RVARS - 1; id >= 0; id--)
+  for (int id = (int)span - 1; id >= 0; id--)
     if (freev[id]) r = fol_mk_all(term_new_fvr((u32)id), r);
+  free(bound);
+  free(freev);
   return r;
 }
 

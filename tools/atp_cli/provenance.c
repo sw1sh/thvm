@@ -43,7 +43,7 @@ typedef struct {
   u32   sk0, skn;             // Skolem counter range introduced here
   u32   ts0, tsn;             // Tseitin aux counter range
   Term  t_nnf, t_sk;          // pass-A stage terms (dead after load)
-  char *vnames;               // packed scope names (nv * PC_NAME)
+  char **vnames;              // scope names, nv entries
   int   nv;
   char *nnf, *sk;             // serialized stage formulas (pass B)
   int   emitted;
@@ -134,8 +134,8 @@ static int prov_sym_name(u32 lab, char *nm, size_t cap) {
 
 static void prov_var_name(const ProvRec *pr, u32 id, char *nm, size_t cap) {
   if (pr != NULL && pr->vnames != NULL && id < (u32)pr->nv &&
-      pr->vnames[(size_t)id * PC_NAME] != '\0')
-    snprintf(nm, cap, "%s", &pr->vnames[(size_t)id * PC_NAME]);
+      pr->vnames[id] != NULL && pr->vnames[id][0] != '\0')
+    snprintf(nm, cap, "%s", pr->vnames[id]);
   else
     snprintf(nm, cap, "X%u", id);
 }
@@ -242,13 +242,14 @@ static void prov_ser_formula(Term f, const ProvRec *pr,
 // Collect free variables (a quantifier-free skolemized formula's
 // implicit universals) so the emitted fof record is closed.  Bound
 // occurrences (under a surviving quantifier) are excluded.
-static void prov_free_vars(Term f, u8 *bound, u8 *seen,
-                           u32 *order, u32 *n, u32 max) {
+// `bound`/`seen` are indexed by variable id (sized by the caller from
+// prov_var_span); `order` receives each free id once, first occurrence.
+static void prov_free_vars(Term f, u8 *bound, u8 *seen, u32 *order, u32 *n) {
   if (term_tag(f) == TAG_FVR) {
     u32 id = term_ext(f);
-    if (id < PC_MAX_VARS && !bound[id] && !seen[id]) {
+    if (!bound[id] && !seen[id]) {
       seen[id] = 1u;
-      if (*n < max) order[(*n)++] = id;
+      order[(*n)++] = id;
     }
     return;
   }
@@ -257,15 +258,27 @@ static void prov_free_vars(Term f, u8 *bound, u8 *seen,
   if ((lab == FOL_LAB_ALL || lab == FOL_LAB_EX) && term_ctr_n(f) == 2u &&
       term_tag(term_ctr_at(f, 0u)) == TAG_FVR) {
     u32 v = term_ext(term_ctr_at(f, 0u));
-    u8 saved = (v < PC_MAX_VARS) ? bound[v] : 0u;
-    if (v < PC_MAX_VARS) bound[v] = 1u;
-    prov_free_vars(term_ctr_at(f, 1u), bound, seen, order, n, max);
-    if (v < PC_MAX_VARS) bound[v] = saved;
+    u8 saved = bound[v];
+    bound[v] = 1u;
+    prov_free_vars(term_ctr_at(f, 1u), bound, seen, order, n);
+    bound[v] = saved;
     return;
   }
   u32 k = term_ctr_n(f);
   for (u32 i = 0; i < k; i++)
-    prov_free_vars(term_ctr_at(f, i), bound, seen, order, n, max);
+    prov_free_vars(term_ctr_at(f, i), bound, seen, order, n);
+}
+
+// One past the largest variable id in `f` (binder variables included).
+static u32 prov_var_span(Term f) {
+  if (term_tag(f) == TAG_FVR) return term_ext(f) + 1u;
+  if (term_tag(f) != TAG_CTR) return 0u;
+  u32 m = 0u, k = term_ctr_n(f);
+  for (u32 i = 0; i < k; i++) {
+    u32 v = prov_var_span(term_ctr_at(f, i));
+    if (v > m) m = v;
+  }
+  return m;
 }
 
 // Serialize a formula, wrapping free variables in an outer `! [..] :`.
@@ -273,12 +286,16 @@ static char *prov_formula_text(Term f, const ProvRec *pr) {
   static char buf[1 << 18];
   size_t o = 0;
   g_prov_ser_fail = 0;
-  u8  bound[PC_MAX_VARS], seen[PC_MAX_VARS];
-  u32 order[PC_MAX_VARS];
+  u32 span = prov_var_span(f);
+  u8  *bound = (u8 *)calloc((size_t)span + 1u, 1u);
+  u8  *seen  = (u8 *)calloc((size_t)span + 1u, 1u);
+  u32 *order = (u32 *)malloc(((size_t)span + 1u) * sizeof(u32));
+  if (bound == NULL || seen == NULL || order == NULL) {
+    free(bound); free(seen); free(order);
+    return NULL;
+  }
   u32 nfree = 0;
-  memset(bound, 0, sizeof bound);
-  memset(seen, 0, sizeof seen);
-  prov_free_vars(f, bound, seen, order, &nfree, PC_MAX_VARS);
+  prov_free_vars(f, bound, seen, order, &nfree);
   if (nfree > 0) {
     prov_emit_s(buf, sizeof buf, &o, "! [");
     char nm[PC_NAME + 16];
@@ -293,6 +310,7 @@ static char *prov_formula_text(Term f, const ProvRec *pr) {
   } else {
     prov_ser_formula(f, pr, buf, sizeof buf, &o);
   }
+  free(bound); free(seen); free(order);
   if (g_prov_ser_fail) return NULL;
   return strdup(buf);
 }

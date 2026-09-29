@@ -205,9 +205,9 @@ static void prov_rec_stage(int rec, int is_conj, Term nnf, Term sk,
   r->tseitin = tseitin;
   r->nv = scope->nv;
   if (scope->nv > 0) {
-    r->vnames = (char *)malloc((size_t)scope->nv * PC_NAME);
+    r->vnames = (char **)calloc((size_t)scope->nv, sizeof(char *));
     if (r->vnames != NULL)
-      memcpy(r->vnames, pc_vname, (size_t)scope->nv * PC_NAME);
+      for (int i = 0; i < scope->nv; i++) r->vnames[i] = strdup(pc_vname[i]);
   }
 }
 
@@ -2047,7 +2047,14 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     PcParse scope;
     Term f = pc_parse_formula(fbuf, &scope);
     free(fbuf);
-    if (f == 0) tp_giveup("cannot parse a TPTP formula");
+    if (f == 0) {
+      char why[256];
+      size_t nm_len = (role != NULL) ? (size_t)(role - 1 - body) : 0u;
+      snprintf(why, sizeof why, "cannot parse a TPTP formula (record %.*s: %s)",
+               (int)(nm_len < 96 ? nm_len : 96), body,
+               pc_err != NULL ? pc_err : "syntax");
+      tp_giveup(why);
+    }
     if (pc_nsyms >= PC_MAX_SYMS - 1) tp_giveup("problem exceeds symbol bound");
     int is_conj = (strcmp(rolebuf, "conjecture") == 0);
     int conj_mark = is_conj || (strcmp(rolebuf, "negated_conjecture") == 0);
