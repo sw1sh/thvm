@@ -561,6 +561,9 @@ fn void thvm_atp_free(AtpState *s) {
   atp_cgq_free(s->cgq);
   thvm_atp_nrec_free(s);
   atp_goal_drive_free(s->gdrive);
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  atp_goal_incr_free(s->goal_incr);
+#endif
   free(s);
 }
 

@@ -1876,6 +1876,28 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
     }
 
     u8 gl_mir = (u8)(mir_l != NULL && mir_r != NULL);
+    // Incremental check (goal_incr.c) for the aliased single universal
+    // goal: the last full walk stands when it would run again unchanged.
+    struct AtpGoalIncr *ginc = NULL;
+    if (gl == s->goal_lhs && gr == s->goal_rhs && s->n_goals <= 1u &&
+        !s->goal_existential && atp_goal_incr_on()) {
+      if (s->goal_incr == NULL) {
+        s->goal_incr = (struct AtpGoalIncr *)calloc(1, sizeof(AtpGoalIncr));
+      }
+      ginc = s->goal_incr;
+    }
+    if (ginc != NULL && gl_mir && ginc->valid &&
+        ginc->mir_l == mir_l && ginc->mir_r == mir_r &&
+        ginc->mixmost == s->use_mixmost_nf &&
+        ginc->lex_dep == (u8)(s->lex_dep_lim != 0u) &&
+        atp_goal_incr_same(s, ginc, ATP_GOAL_NORM_CAP)) {
+#ifdef THVM_ATP_GOAL_INCR_SELFCHECK
+      atp_goal_incr_selfcheck(s, ginc, ATP_GOAL_NORM_CAP);
+#endif
+      // *nf_l / *nf_r keep the stored walk's decode (the caller passes
+      // the alias's own goal_lhs_nf / goal_rhs_nf).
+      return ginc->joined;
+    }
     AtpFtCell *fl_in;
     AtpFtCell *fr_in;
     if (gl_mir) {
@@ -1932,9 +1954,19 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
     // tag the two goal walks 1/2 so the [mixstep] tracer separates the
     // L and R reduction sequences.
     g_goalnf_active = 1;
+    if (ginc != NULL) {
+      atp_goal_walk_clear(&ginc->walk[0]);
+      g_goal_rec_arm = &ginc->walk[0];
+    }
     AtpFtCell *fl = atp_rewrite_normalize_ft(s, fl_in, ATP_GOAL_NORM_CAP);
+    g_goal_rec_arm = NULL;
     g_goalnf_active = 2;
+    if (ginc != NULL) {
+      atp_goal_walk_clear(&ginc->walk[1]);
+      g_goal_rec_arm = &ginc->walk[1];
+    }
     AtpFtCell *fr = atp_rewrite_normalize_ft(s, fr_in, ATP_GOAL_NORM_CAP);
+    g_goal_rec_arm = NULL;
     g_goalnf_active = 0;
     // NF decode cache (goal_nf_ft_l/r, see thvm.h): the goal's NF is
     // content-stable across most checks, so when the fresh span
@@ -1944,6 +1976,11 @@ static u8 atp_goal_pair_joined(AtpState *s, Term gl, Term gr,
     // aliased goal (gl_mir); conjunct-loop calls neither read nor
     // refresh it.
     u8 joined_ft = (u8)ft_eq(fl, fr);
+    if (ginc != NULL) {
+      g_atp_goal_incr_full++;
+      atp_goal_incr_store(s, ginc, s->goal_lhs_ft, s->goal_rhs_ft, fl, fr,
+                          joined_ft);
+    }
     static int goalnf_dbg = -1;
     if (goalnf_dbg < 0)
       goalnf_dbg = getenv("THVM_ATP_GOAL_NF_DEBUG") != NULL ? 1 : 0;

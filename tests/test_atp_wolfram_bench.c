@@ -3872,6 +3872,17 @@ int main(int argc, char **argv) {
     printf("   gc: collections=%llu total=%.2fs (%.0f%%; inside cp-gen tile)\n",
            (unsigned long long)g_atp_gc_n, g_atp_gc_us / 1e6,
            100.0 * (g_atp_gc_us / 1e6) / w);
+    // Incremental goal check (src/atp/goal_incr.c): full normalizations,
+    // checks kept with no rule added / after a replay, replays an added
+    // rule ended, checks whose fired rules changed, clean-replay misses.
+    printf("   goal-incr: full=%llu kept=%llu+%llu diverged=%llu changed=%llu"
+           " miss=%llu unorient-rhs-edits=%u\n",
+           (unsigned long long)g_atp_goal_incr_full,
+           (unsigned long long)g_atp_goal_incr_nonew,
+           (unsigned long long)g_atp_goal_incr_replay,
+           (unsigned long long)g_atp_goal_incr_diverge,
+           (unsigned long long)g_atp_goal_incr_changed,
+           (unsigned long long)g_atp_goal_incr_miss, s->unorient_rhs_edits);
     if (g_atp_phase_detail) {
       u64 sumd = g_atp_pushn_us_mirror + g_atp_pushn_us_from +
                  g_atp_pushn_us_norm + g_atp_pushn_us_eq +

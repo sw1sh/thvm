@@ -52,6 +52,12 @@ static void      atp_cgq_free(struct AtpCgq *q);
 struct AtpGoalDrive;
 static AtpStatus atp_goal_drive_check(AtpState *s);
 static void      atp_goal_drive_free(struct AtpGoalDrive *g);
+// Incremental goal check (goal_incr.c, included before mnf.c): freed
+// with the state.
+struct AtpGoalIncr;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+static void      atp_goal_incr_free(struct AtpGoalIncr *g);
+#endif
 // GC rooting: every stored critical goal holds two live Terms; the
 // dedup hash is structural (content-keyed), so relocation needs no
 // fixup beyond the write-back -- same discipline as the MNF nodes.
@@ -215,6 +221,7 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 // with the (potentially larger) rule set.
 #define ATP_NARROW_BUDGET 8
 
+#include "goal_incr.c"
 #include "mnf.c"
 
 #ifdef ATP_ORDERED_REWRITE

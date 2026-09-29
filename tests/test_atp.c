@@ -3546,6 +3546,209 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  // === incremental goal check (src/atp/goal_incr.c) ====================
+  //
+  // A check keeps the last full walk's normal forms only when a full
+  // normalization from the original goal would retrace that walk, under
+  // both strategies (mixmost, and the outermost scan).  Every check below
+  // is compared with a from-scratch normalization of the goal.  Labels:
+  // 3 a, 4 b, 5 c, 6 d, 7 e (constants, precedence a > b > c > d > e),
+  // 8 g (unary), 9 h and 10 f (binary); unit weights, so every rule below
+  // orients left to right.
+  {
+    static u32 gi_w[11] = { 0u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u, 1u };
+    static u32 gi_p[11] = { 0u, 1u, 2u, 10u, 9u, 8u, 7u, 6u, 11u, 12u, 13u };
+    static const KboConfig GI_CFG = {
+      .weights = gi_w, .precedence = gi_p, .n_labels = 11u, .var_weight = 1u,
+    };
+    #define GI_C(lab)       term_new_ctr((lab), NULL, 0)
+    #define GI_G(x)         ({ Term _c[1] = {(x)}; term_new_ctr(8u, _c, 1); })
+    #define GI_H(x, y)      ({ Term _c[2] = {(x), (y)}; term_new_ctr(9u, _c, 2); })
+    #define GI_F(x, y)      ({ Term _c[2] = {(x), (y)}; term_new_ctr(10u, _c, 2); })
+    // From-scratch normal form of goal side `t` under the current R.
+    #define GI_SCRATCH(s, t) \
+      atp_rewrite_normalize_ft((s), ft_from_term((AtpFt *)(s)->ft_arena_ptr, (t), 0), 1u << 16)
+    // One goal check past the revision cache; its verdict.
+    #define GI_CHECK(s) ((s)->goal_check_running_rev = 0u, thvm_atp_goal_check(s))
+
+    for (u8 mm = 0; mm <= 1u; mm++) {
+      TEST_BEGIN(mm ? "atp/goal-incr/keep-mixmost" : "atp/goal-incr/keep-outermost");
+      {
+        // f(a, c) = d under a -> b: the second check adds nothing and
+        // keeps the walk; the third adds g(e) -> e, which fires nowhere
+        // on the walk, and keeps it after a replay.
+        AtpState *s = thvm_atp_init(&GI_CFG, 64u);
+        thvm_atp_set_use_mixmost_nf(s, mm);
+        atp_push_rule(s, GI_C(3u), GI_C(4u));
+        Term gl = GI_F(GI_C(3u), GI_C(5u)), gr = GI_C(6u);
+        thvm_atp_set_goal(s, gl, gr);
+        u64 full0 = g_atp_goal_incr_full, nonew0 = g_atp_goal_incr_nonew;
+        u64 rep0 = g_atp_goal_incr_replay;
+        CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+        CHECK_EQ(g_atp_goal_incr_full - full0, 1u);
+        CHECK(s->goal_incr != NULL && s->goal_incr->valid);
+        CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+        CHECK_EQ(g_atp_goal_incr_nonew - nonew0, 1u);
+        atp_push_rule(s, GI_G(GI_C(7u)), GI_C(7u));
+        CHECK_EQ(s->r_orient[1], 1u);
+        CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+        CHECK_EQ(g_atp_goal_incr_replay - rep0, 1u);
+        CHECK_EQ(g_atp_goal_incr_full - full0, 1u);
+        CHECK(ft_eq(s->goal_incr->nf_l, GI_SCRATCH(s, gl)));
+        CHECK(ft_eq(s->goal_incr->nf_r, GI_SCRATCH(s, gr)));
+        thvm_atp_free(s);
+      }
+
+      TEST_BEGIN(mm ? "atp/goal-incr/intermediate-term-mixmost"
+                    : "atp/goal-incr/intermediate-term-outermost");
+      {
+        // g(a) = e under a -> b, g(b) -> c: the walk passes g(b) and
+        // ends on c.  The added g(b) -> e matches only that intermediate
+        // term, never the normal form c.  Mixmost takes the newest slot
+        // on a pattern tie at g(b), so a full normalization reaches e and
+        // the goal joins: the check must not keep c.  The outermost scan
+        // fires the older g(b) -> c first, so there the walk stands.
+        AtpState *s = thvm_atp_init(&GI_CFG, 64u);
+        thvm_atp_set_use_mixmost_nf(s, mm);
+        atp_push_rule(s, GI_C(3u), GI_C(4u));
+        atp_push_rule(s, GI_G(GI_C(4u)), GI_C(5u));
+        Term gl = GI_G(GI_C(3u)), gr = GI_C(7u);
+        thvm_atp_set_goal(s, gl, gr);
+        CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+        atp_push_rule(s, GI_G(GI_C(4u)), GI_C(7u));
+        CHECK_EQ(s->n_rules, 3u);
+        u64 div0 = g_atp_goal_incr_diverge, rep0 = g_atp_goal_incr_replay;
+        AtpStatus st = GI_CHECK(s);
+        CHECK(ft_eq(GI_SCRATCH(s, gl), ft_from_term((AtpFt *)s->ft_arena_ptr,
+                                                    mm ? gr : GI_C(5u), 0)));
+        if (mm) {
+          CHECK_EQ((int)st, (int)ATP_PROVED);
+          CHECK_EQ(g_atp_goal_incr_diverge - div0, 1u);
+        } else {
+          CHECK_EQ((int)st, (int)ATP_RUNNING);
+          CHECK_EQ(g_atp_goal_incr_replay - rep0, 1u);
+          CHECK(ft_eq(s->goal_incr->nf_l, GI_SCRATCH(s, gl)));
+        }
+        thvm_atp_free(s);
+      }
+
+      TEST_BEGIN(mm ? "atp/goal-incr/visited-root-mixmost"
+                    : "atp/goal-incr/visited-root-outermost");
+      {
+        // h(a, a) = d under a -> b ends on h(b, b); on the way the root
+        // is visited as h(b, a) (the outermost rescan from the root, the
+        // mixmost ascent).  The added h(b, a) -> d fires there in a full
+        // normalization, so the goal joins.
+        AtpState *s = thvm_atp_init(&GI_CFG, 64u);
+        thvm_atp_set_use_mixmost_nf(s, mm);
+        atp_push_rule(s, GI_C(3u), GI_C(4u));
+        Term gl = GI_H(GI_C(3u), GI_C(3u)), gr = GI_C(6u);
+        thvm_atp_set_goal(s, gl, gr);
+        CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+        atp_push_rule(s, GI_H(GI_C(4u), GI_C(3u)), GI_C(6u));
+        u64 div0 = g_atp_goal_incr_diverge;
+        CHECK_EQ((int)GI_CHECK(s), (int)ATP_PROVED);
+        CHECK_EQ(g_atp_goal_incr_diverge - div0, 1u);
+        thvm_atp_free(s);
+      }
+
+      TEST_BEGIN(mm ? "atp/goal-incr/fired-rule-changes-mixmost"
+                    : "atp/goal-incr/fired-rule-changes-outermost");
+      {
+        // f(a, c) = d under a -> b.  A soft-deleted fired rule, and a
+        // fired rule whose right side is replaced, each send the check
+        // back to a full normalization.
+        for (u8 how = 0; how <= 1u; how++) {
+          AtpState *s = thvm_atp_init(&GI_CFG, 64u);
+          thvm_atp_set_use_mixmost_nf(s, mm);
+          atp_push_rule(s, GI_C(3u), GI_C(4u));
+          Term gl = GI_F(GI_C(3u), GI_C(5u)), gr = GI_C(6u);
+          thvm_atp_set_goal(s, gl, gr);
+          CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+          AtpFt *fa = (AtpFt *)s->ft_arena_ptr;
+          if (how == 0u) {
+            AtpFtCell *sent = ftnew_var(fa, 255u, 0);
+            s->r_dead[0]  = 1u;
+            s->lhs_ft[0]  = sent;
+            s->rhs_ft[0]  = sent;
+          } else {
+            s->rhs_ft[0] = ft_from_term(fa, GI_C(7u), 0);
+          }
+          s->r_revision++;
+          u64 chg0 = g_atp_goal_incr_changed, full0 = g_atp_goal_incr_full;
+          CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+          CHECK_EQ(g_atp_goal_incr_changed - chg0, 1u);
+          CHECK_EQ(g_atp_goal_incr_full - full0, 1u);
+          CHECK(ft_eq(s->goal_incr->nf_l, GI_SCRATCH(s, gl)));
+          thvm_atp_free(s);
+        }
+      }
+
+      TEST_BEGIN(mm ? "atp/goal-incr/unorientable-edit-mixmost"
+                    : "atp/goal-incr/unorientable-edit-outermost");
+      {
+        // h(b, a) = d under the unorientable h(x, y) = h(y, x): no
+        // instance at h(b, a) decreases, so the walk fires nothing.  The
+        // right side is then rewritten in place (the RHS compose outside
+        // the WM preset reaches unorientable equations) to d, and
+        // h(b, a) -> d decreases: a full normalization joins the goal
+        // although no rule was added or deleted.
+        AtpState *s = thvm_atp_init(&GI_CFG, 64u);
+        thvm_atp_set_use_mixmost_nf(s, mm);
+        atp_push_rule(s, GI_H(mk_v(0u), mk_v(1u)), GI_H(mk_v(1u), mk_v(0u)));
+        CHECK_EQ(s->r_orient[0], 0u);
+        Term gl = GI_H(GI_C(4u), GI_C(3u)), gr = GI_C(6u);
+        thvm_atp_set_goal(s, gl, gr);
+        CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+        s->rhs_ft[0] = ft_from_term((AtpFt *)s->ft_arena_ptr, GI_C(6u), 0);
+        s->unorient_rhs_edits++;
+        u64 chg0 = g_atp_goal_incr_changed;
+        CHECK_EQ((int)GI_CHECK(s), (int)ATP_PROVED);
+        CHECK_EQ(g_atp_goal_incr_changed - chg0, 1u);
+        thvm_atp_free(s);
+      }
+    }
+    TEST_BEGIN("atp/goal-incr/budget-capped-walk");
+    {
+      // a -> b and b -> a, both forced oriented: the mixmost walk of
+      // f(a, c) cycles at the first argument until the step budget runs
+      // out.  The capped walk is kept like a normal form: a check that
+      // adds nothing keeps it, one that adds g(e) -> e replays all its
+      // firings and keeps it, and the result is the from-scratch one.
+      AtpState *s = thvm_atp_init(&GI_CFG, 64u);
+      thvm_atp_set_use_mixmost_nf(s, 1u);
+      atp_push_rule(s, GI_C(3u), GI_C(4u));
+      atp_push_rule(s, GI_C(4u), GI_C(3u));
+      CHECK_EQ(s->r_orient[1], 0u);
+      s->r_orient[1] = 1u;
+      s->n_unorient--;
+      Term gl = GI_F(GI_C(3u), GI_C(5u)), gr = GI_C(6u);
+      thvm_atp_set_goal(s, gl, gr);
+      u64 full0 = g_atp_goal_incr_full, nonew0 = g_atp_goal_incr_nonew;
+      u64 rep0 = g_atp_goal_incr_replay;
+      CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+      CHECK(s->goal_incr != NULL && s->goal_incr->valid);
+      CHECK_EQ(s->goal_incr->walk[0].starved, 1u);
+      CHECK_EQ(s->goal_incr->walk[0].n_fire, 1u << 16);
+      CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+      CHECK_EQ(g_atp_goal_incr_nonew - nonew0, 1u);
+      atp_push_rule(s, GI_G(GI_C(7u)), GI_C(7u));
+      CHECK_EQ((int)GI_CHECK(s), (int)ATP_RUNNING);
+      CHECK_EQ(g_atp_goal_incr_replay - rep0, 1u);
+      CHECK_EQ(g_atp_goal_incr_full - full0, 1u);
+      CHECK(ft_eq(s->goal_incr->nf_l, GI_SCRATCH(s, gl)));
+      thvm_atp_free(s);
+    }
+    #undef GI_C
+    #undef GI_G
+    #undef GI_H
+    #undef GI_F
+    #undef GI_SCRATCH
+    #undef GI_CHECK
+  }
+#endif
+
   TEST_BEGIN("atp/goal-check-single-goal-latches-joined-mask");
   {
     // The single-conjecture path mirrors its join into the multi-goal

@@ -5315,6 +5315,12 @@ typedef struct {
   // wraps in any realistic completion run (a u32 takes ~4G mutations
   // to wrap).
   u32   r_revision;
+  // In-place right-side rewrites of unorientable equations (the RHS
+  // compose of thvm_atp_interreduce outside the WM preset reaches them;
+  // r_revision does not count them).  Both faces of such an equation
+  // rewrite, so the incremental goal check (goal_incr.c) treats any such
+  // edit since its last full normalization as a rule-set change.
+  u32   unorient_rhs_edits;
 
   // Waldmeister history-driven Act_ultimate (NewClassification.c:314):
   // an input axiom is classified with action `ultimate`, forcing its CP
@@ -7260,6 +7266,11 @@ typedef struct {
   // goal_rhs_nf (above) are the paired decoded values.
   struct AtpFtCell  *goal_nf_ft_l;
   struct AtpFtCell  *goal_nf_ft_r;
+  // Incremental goal check (src/atp/goal_incr.c): the last full
+  // normalization of the single universal goal (its normal forms, the
+  // walks that reached them and the rules those fired), reused while the
+  // same walks would run again.  NULL until the first goal check.
+  struct AtpGoalIncr *goal_incr;
   // Cached FT image of s->min_const for the unfailing-instantiation
   // grounding (ft_norm's ftn_ground_subst encoded it fresh per call).
   // Keyed by the Term handle: a GC forward or a min-const change

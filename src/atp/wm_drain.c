@@ -456,6 +456,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
           atp_trace_push(s, TRACE_SIMPLIFY, s->r_trace[i],
                          ATP_TRACE_NONE, old_lhs, r_reduced);
           s->rhs[i] = r_reduced;
+          if (!s->r_orient[i]) s->unorient_rhs_edits++;
           // WM order mirror: NO update.  The mirror keys facts by birth
           // uid (r_uid, stable across the RHS compose) and indexes the
           // rule's LHS face only, so the in-place RHS edit leaves its
@@ -1236,6 +1237,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             atp_trace_push(s, TRACE_SIMPLIFY, s->r_trace[i],
                            ATP_TRACE_NONE, old_lhs, r_reduced);
             s->rhs[i]     = r_reduced;
+            // An unorientable equation's right side is a rewrite face
+            // too: the incremental goal check must see this edit.
+            if (!s->r_orient[i]) s->unorient_rhs_edits++;
             // WM order mirror: NO update -- the mirror keys facts by
             // birth uid (stable across the compose) and indexes the LHS
             // face only; see the WM-path compose above for the trace-

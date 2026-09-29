@@ -107,7 +107,7 @@ into one binary via
 | `src/atp/ft_alloc.c` | 425 | flatterm arenas: persistent slab pool + bump-pointer scratch | `ft_alloc_persistent`, `ft_free_span`, `ft_scratch_reset` |
 | `src/atp/ft_match.c` | 405 | flatterm matching + substitution application | `ft_match`, `ft_subst_apply` |
 | `src/atp/ft_unify.c` | 199 | flatterm unification (CP formation side) | `ft_unify` |
-| `src/atp/ft_norm.c` | 4232 | the flatterm normalizer: innermost rewriting fixpoint, treated-CP classes, Waldmeister flat-path emulation | `atp_rewrite_normalize_ft` |
+| `src/atp/ft_norm.c` | 4865 | the flatterm normalizer: innermost rewriting fixpoint, treated-CP classes, Waldmeister flat-path emulation, the goal walk's record and replay (`goal_incr.c`) | `atp_rewrite_normalize_ft` |
 | `src/atp/ft_splice.c` | 431 | in-place rewrite at a redex position (Waldmeister `SigmaRInEZ`/`InLZ` port) | `ft_splice` |
 | `src/atp/ft_order.c` | 838 | Knuth-Bendix Ordering (KBO) + Lexicographic Path Ordering (LPO) over flatterm cells | `thvm_kbo_ft`, `thvm_lpo_ft` |
 | `src/atp/ft_ri.c` | 399 | discrimination-tree descent walking flatterm cells | `atp_ri_descend_ft_at` |
@@ -118,6 +118,7 @@ into one binary via
 | `src/atp/ac.c` | 974 | the AC subsystem: AC-operator detection, AC-canonical flatten, Stickel AC-unification | `thvm_atp_auto_ac`, `thvm_atp_set_ac_mask` |
 | `src/atp/goal_narrow.c` | 695 | ground congruence-closure + goal-cone e-matching endgame (`--goal-narrow`) | `gn_*`, switched by `thvm_atp_set_use_goal_narrow` |
 | `src/atp/precedence.c` | 976 | automatic precedence from algebraic-structure analysis (Waldmeister PhilMarlow port), the Vampire `sp=` / `spb=goal` / LADR precedence ports, KBO weight schemes, and the floor that keeps the reserved grounding constants below every user symbol | `atp_auto_precedence`, `atp_analyze_axioms`, `atp_vampire_precedence_g`, `atp_precedence_floor_reserved` |
+| `src/atp/goal_incr.c` | 474 | incremental goal check: the single universal goal keeps its last full normalization while a replay of its walk against the rules added since shows a full normalization would retrace it | `atp_goal_incr_same`, `atp_goal_incr_store` (called from the goal check) |
 | `src/atp/lpo_cache.c` | 139 | LPO orientability cache (build-gated) | `atp_lpo_orient_cache_invalidate`, `thvm_atp_orient_stats` |
 | `src/atp/wm_intake.c` | 462 | Waldmeister intake ordering / CP classification | `thvm_atp_wm_intake_order` |
 | `src/atp/wm_order.c` | 2989 | Waldmeister CP-selection order: MixWeight comparator, rank trie, N-way rank cache | `atp_wmo_insert_fact`, `wmo_*` |

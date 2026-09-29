@@ -78,6 +78,103 @@ typedef void (*AtpFtStepSink)(AtpState *s, u8 side, u32 rule, u8 dir,
                               const u8 *pos, u8 pos_len, int have_pos);
 static AtpFtStepSink g_ft_step_sink = NULL;
 static u8 g_ft_step_sink_side = 0u;
+// Incremental goal normal form (goal_incr.c).  A goal-side normalize can
+// record its firings (the fired rule, its direction and pass, and the
+// redex position), and a later normalize of the same side can replay
+// them: the recorded firings are forced at their positions and only the
+// rules added since the recording are asked at each visit.  Armed by the
+// caller right before one normalize and consumed at its entry, like the
+// splice sink, so nested walks never see them.
+typedef struct {
+  u32 uid;      // the fired rule (compaction moves its slot, not its uid)
+  u32 ri;       // index into the goal state's table of fired rules
+  u32 slot;     // the rule's slot at replay time (set by the replay)
+  u32 pos_off;  // mixmost: offset of the child-index path in pos[]
+  u32 depth;    // mixmost: path length; outermost: preorder index
+  u8  dir;      // 0 lhs -> rhs, 1 rhs -> lhs
+  u8  pass;     // 1 fired as an oriented rule, 2 as an unorientable one
+} AtpGoalFire;
+
+typedef struct {
+  AtpGoalFire *fire;
+  u32          n_fire, cap_fire;
+  u16         *pos;
+  u32          n_pos, cap_pos;
+  u8           starved;   // the walk stopped short: budget, NF cap, deadline
+  u8           cut;       // ... by the NF cap or the deadline (not replayable)
+  u8           unusable;  // a firing could not be recorded
+} AtpGoalWalk;
+
+// Replay of one recorded walk: the next firing to force, the first slot
+// of the rules added since the recording (every later slot holds one),
+// whether the unorientable pass is live, and the verdict: diverged is
+// set when an added rule fires at a visited position or a forced firing
+// no longer matches.
+typedef struct {
+  AtpGoalWalk *w;
+  u32          cur;
+  u32          k0;
+  u8           try_u;
+  u8           diverged;
+  u8           starved;   // the replay ran out of budget like its recording
+  AtpFtSubst   scratch;
+} AtpGoalReplay;
+
+static AtpGoalWalk   *g_goal_rec_arm    = NULL;
+static AtpGoalReplay *g_goal_replay_arm = NULL;
+
+static void atp_goal_walk_clear(AtpGoalWalk *w) {
+  w->n_fire   = 0u;
+  w->n_pos    = 0u;
+  w->starved  = 0u;
+  w->cut      = 0u;
+  w->unusable = 0u;
+}
+
+// Append one firing; `path` holds `depth` child indices (mixmost) or is
+// NULL (outermost, where `depth` is the redex's preorder index).
+static void atp_goal_walk_push(AtpGoalWalk *w, u32 uid, u8 dir, u8 pass,
+                               u32 depth, const u16 *path) {
+  if (w->unusable) {
+    return;
+  }
+  if (w->n_fire == w->cap_fire) {
+    u32 cap = (w->cap_fire != 0u) ? 2u * w->cap_fire : 64u;
+    AtpGoalFire *nf = (AtpGoalFire *)realloc(w->fire, (size_t)cap * sizeof *nf);
+    if (nf == NULL) {
+      w->unusable = 1u;
+      return;
+    }
+    w->fire     = nf;
+    w->cap_fire = cap;
+  }
+  u32 plen = (path != NULL) ? depth : 0u;
+  if (w->n_pos + plen > w->cap_pos) {
+    u32 cap = (w->cap_pos != 0u) ? w->cap_pos : 256u;
+    while (cap < w->n_pos + plen) {
+      cap *= 2u;
+    }
+    u16 *np = (u16 *)realloc(w->pos, (size_t)cap * sizeof *np);
+    if (np == NULL) {
+      w->unusable = 1u;
+      return;
+    }
+    w->pos     = np;
+    w->cap_pos = cap;
+  }
+  AtpGoalFire *f = &w->fire[w->n_fire++];
+  f->uid     = uid;
+  f->ri      = 0u;
+  f->slot    = 0u;
+  f->pos_off = w->n_pos;
+  f->depth   = depth;
+  f->dir     = dir;
+  f->pass    = pass;
+  if (plen > 0u) {
+    memcpy(w->pos + w->n_pos, path, (size_t)plen * sizeof(u16));
+    w->n_pos += plen;
+  }
+}
 // Defined later in the same TU (_.c includes this file first).
 static u64 atp_trace_eq_store_ft(AtpState *s, const AtpFtCell *lhs,
                                  const AtpFtCell *rhs);
@@ -2954,13 +3051,99 @@ typedef struct {
   // Splice log (see g_ft_step_sink): observation only.
   AtpFtStepSink sink;
   u8            sink_side;
+  // Incremental goal normal form (see AtpGoalWalk): record this walk's
+  // firings, or replay a recorded walk.
+  AtpGoalWalk   *grec;
+  AtpGoalReplay *grp;
   // Subtree-NF memo state (see FtNfmEnt): splices fired this call,
   // budget/cap starvation (blocks stores), gate + want-config key.
   u64           rw_count;
   u8            starved;
+  u8            cut;       // the NF cap or the deadline stopped the walk
   u8            nfm_on;
   u8            nfm_want;
 } FtMixmost;
+
+// Child index of path level d (1 <= d <= m->depth) within its parent:
+// the parent's count of children still to visit already excludes the
+// child being walked.
+static inline u16 ft_mm_child_index(const FtMixmost *m, u32 d) {
+  const FtNfPathEnt *p = &m->st[d - 1u];
+  return (u16)(ft_cell_arity(p->cell) - p->left - 1u);
+}
+
+// Record a firing at the current path position.
+static void ft_mm_goal_record(FtMixmost *m, u32 rule, u8 dir) {
+  AtpGoalWalk *w = m->grec;
+  AtpState *s = m->s;
+  u8 pass = (u8)((s->n_unorient > 0u && !s->r_orient[rule]) ? 2u : 1u);
+  u16 path_fixed[64];
+  u16 *path = path_fixed;
+  if (m->depth > 64u) {
+    path = (u16 *)malloc((size_t)m->depth * sizeof(u16));
+    if (path == NULL) {
+      w->unusable = 1u;
+      return;
+    }
+  }
+  for (u32 d = 1u; d <= m->depth; d++) {
+    path[d - 1u] = ft_mm_child_index(m, d);
+  }
+  atp_goal_walk_push(w, s->r_uid[rule], dir, pass, m->depth, path);
+  if (path != path_fixed) {
+    free(path);
+  }
+}
+
+// Replay oracle for one mixmost visit.  The recorded walk made this visit
+// on the same subterm, so under the unchanged rules its outcome stands;
+// only a rule added since the recording can change it, and one that
+// fires here ends the replay, even where a recorded firing would outrank
+// it (the pattern order gives the newest slot the ties).
+// When this is the next recorded firing's position, the firing is forced
+// and m->subst holds its bindings.
+static int ft_mm_goal_replay(FtMixmost *m, AtpFtCell *cell, u32 *rule_out,
+                             u8 *dir_out) {
+  AtpGoalReplay *rp = m->grp;
+  AtpState *s = m->s;
+  const AtpGoalWalk *w = rp->w;
+  const AtpGoalFire *f = (rp->cur < w->n_fire) ? &w->fire[rp->cur] : NULL;
+  u8 here = (u8)(f != NULL && f->depth == m->depth);
+  for (u32 d = 1u; here && d <= m->depth; d++) {
+    if (ft_mm_child_index(m, d) != w->pos[f->pos_off + d - 1u]) {
+      here = 0u;
+    }
+  }
+  // An oriented firing here ends the rule pass before the unorientable
+  // equations are asked.
+  u8 try_u = (u8)(rp->try_u && !(here && f->pass == 1u));
+  if (rp->k0 < s->n_rules) {
+    u32 r = 0u;
+    u8 d = 0u;
+    if (ft_cell_try_rules(s, cell, rp->k0, s->n_rules, 1u, try_u,
+                          &rp->scratch, &r, &d)) {
+      rp->diverged = 1u;
+      m->budget = 0u;
+      return 0;
+    }
+  }
+  if (!here) {
+    return 0;
+  }
+  AtpFtCell *pat = (f->dir == 0u) ? s->lhs_ft[f->slot] : s->rhs_ft[f->slot];
+  AtpFtCell *tpl = (f->dir == 0u) ? s->rhs_ft[f->slot] : s->lhs_ft[f->slot];
+  ft_subst_reset(m->subst);
+  if (!ft_match_maybe_ac(m->arena, pat, cell, m->subst) ||
+      (f->pass == 2u && !ft_subst_ground_extras(s, tpl, m->subst))) {
+    rp->diverged = 1u;
+    m->budget = 0u;
+    return 0;
+  }
+  rp->cur++;
+  *rule_out = f->slot;
+  *dir_out  = f->dir;
+  return 1;
+}
 
 // WM NFB_RegelOderGleichungAngewendet: one reduction attempt at the
 // CURRENT path position.  On success the position's entry is re-seated
@@ -2991,10 +3174,14 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   }
   u32 rule = 0u;
   u8  dir  = 0u;
-  if (!ft_cell_try_rules(m->s, e->cell, m->slice_first, m->slice_end,
-                         /*try_orient=*/1u,
-                         (u8)(m->doE && m->s->n_unorient > 0u),
-                         m->subst, &rule, &dir)) {
+  if (m->grp != NULL) {
+    if (!ft_mm_goal_replay(m, e->cell, &rule, &dir)) {
+      return 0;
+    }
+  } else if (!ft_cell_try_rules(m->s, e->cell, m->slice_first, m->slice_end,
+                                /*try_orient=*/1u,
+                                (u8)(m->doE && m->s->n_unorient > 0u),
+                                m->subst, &rule, &dir)) {
     return 0;
   }
   u8  pos[ATP_PROOF_MAX_DEPTH];
@@ -3040,6 +3227,9 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   AtpFtCell *new_root = ft_splice(m->arena, m->root, parent, e->cell,
                                   rhs_tmpl, m->subst);
   if (new_root == NULL) return 0;   // defensive: ft_splice returns the root
+  if (m->grec != NULL) {
+    ft_mm_goal_record(m, rule, dir);
+  }
   if (_pd_alloc) {
     u64 da = g_ft_persist_alloc_total - _a0;
     u64 df = g_ft_free_span_total - _f0;
@@ -3332,8 +3522,11 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     .subst = subst,
     .psteps = psteps, .pn = pn, .pcap = pcap,
     .sink = g_ft_step_sink, .sink_side = g_ft_step_sink_side,
+    .grec = g_goal_rec_arm, .grp = g_goal_replay_arm,
   };
-  g_ft_step_sink = NULL;
+  g_ft_step_sink    = NULL;
+  g_goal_rec_arm    = NULL;
+  g_goal_replay_arm = NULL;
   FtNfPathEnt *heap_st = NULL;
   m.st[0].cell = t;
   m.st[0].ins  = NULL;
@@ -3352,7 +3545,9 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     nfm_check = (c != NULL && c[0] != '0' && c[0] != '\0') ? 1 : 0;
   }
   u8 nfm_root_hit = 0u;
-  if (!nfm_off && ftpi_applicable(s, slice_first, slice_end)) {
+  // A replay asks only the added rules at each visit; the memo answers
+  // for the whole rule set and stays out of it.
+  if (!nfm_off && m.grp == NULL && ftpi_applicable(s, slice_first, slice_end)) {
     ftpi_ensure(s);
     m.nfm_on   = 1u;
     m.nfm_want = (u8)(FTDT_WANT_ORIENT |
@@ -3381,7 +3576,10 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
   // Root fixpoint (the loop before WeiterInVO, NFBildung.c:355).
   while (ft_mm_here_fix(&m)) {
     if (nf_cap > 0 &&
-        nf_arena->n_persistent_alive - nf_start > (u64)nf_cap) break;
+        nf_arena->n_persistent_alive - nf_start > (u64)nf_cap) {
+      m.cut = 1u;
+      break;
+    }
   }
   for (;;) {
     if (m.budget == 0u) break;
@@ -3394,10 +3592,11 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     // calls) and inert unless a deadline is armed (s->wall_deadline_us) or
     // a host Abort[] is pending; the partial NF is marked starved so the
     // caller does not trust it (we are past the wall, ending the run).
-    if (atp_norm_deadline_fired(s)) { m.starved = 1u; break; }
+    if (atp_norm_deadline_fired(s)) { m.starved = 1u; m.cut = 1u; break; }
     if (nf_cap > 0 &&
         nf_arena->n_persistent_alive - nf_start > (u64)nf_cap) {
       m.starved = 1u;   // capped: completion below proves nothing
+      m.cut = 1u;
       break;
     }
     // WeiterInVO (:289-300): ascend past exhausted positions, then
@@ -3468,6 +3667,16 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
     }
   }
 done:
+  if (m.grec != NULL) {
+    m.grec->starved = m.starved;
+    m.grec->cut     = m.cut;
+  }
+  if (m.grp != NULL) {
+    m.grp->starved = m.starved;
+    if (m.cut) {
+      m.grp->diverged = 1u;
+    }
+  }
   // Whole-term store / root-hit certify (the depth-0 "pop").
   if (m.nfm_on && m.rw_count == 0u) {
     if (!m.starved) ftnfm_store(m.s, m.root, m.nfm_want);
@@ -4373,6 +4582,67 @@ AtpFtCell *atp_rewrite_normalize_ft_slice_record(AtpState *s, AtpFtCell *t,
                                        eq_other, side, chain_tail);
 }
 
+// Replay of one outermost scan (find_redex_ft) against a recorded walk.
+// Every cell the scan passes before the recorded redex found no rule
+// under the recorded rule set, so only an added rule can fire there; at
+// the redex an oriented firing wins the slot-order scan over every added
+// rule, while an unorientable firing yields to an added oriented rule.
+// After the last recorded firing the scan runs to the end of the term.
+// Returns 1 with the forced firing in the out parameters and its bindings
+// in `subst`, 0 when the scan finds nothing (or the replay diverges).
+static int ft_goal_replay_outer(AtpState *s, AtpFtCell *root,
+                                AtpGoalReplay *rp, AtpFtCell **parent_out,
+                                AtpFtCell **redex_out, u32 *rule_out,
+                                u8 *dir_out, AtpFtSubst *subst) {
+  const AtpGoalWalk *w = rp->w;
+  const AtpGoalFire *f = (rp->cur < w->n_fire) ? &w->fire[rp->cur] : NULL;
+  AtpFtCell *end_after = (root->end != NULL) ? root->end->next : NULL;
+  AtpFtCell *prev = NULL;
+  u32 k = 0u;
+  u32 r = 0u;
+  u8 d = 0u;
+  for (AtpFtCell *p = root; p != NULL && p != end_after; p = p->next, k++) {
+    u8 fresh = (u8)((p->flags & ATPFT_FLAG_SUBST_FRESH) != 0u);
+    if (f != NULL && k == f->depth) {
+      if (fresh) {
+        rp->diverged = 1u;
+        return 0;
+      }
+      if (f->pass == 2u && rp->k0 < s->n_rules &&
+          ft_cell_try_rules(s, p, rp->k0, s->n_rules, 1u, 0u, &rp->scratch,
+                            &r, &d)) {
+        rp->diverged = 1u;
+        return 0;
+      }
+      AtpFtCell *pat = (f->dir == 0u) ? s->lhs_ft[f->slot] : s->rhs_ft[f->slot];
+      AtpFtCell *tpl = (f->dir == 0u) ? s->rhs_ft[f->slot] : s->lhs_ft[f->slot];
+      ft_subst_reset(subst);
+      if (!ft_match_maybe_ac((AtpFt *)s->ft_arena_ptr, pat, p, subst) ||
+          (f->pass == 2u && !ft_subst_ground_extras(s, tpl, subst))) {
+        rp->diverged = 1u;
+        return 0;
+      }
+      rp->cur++;
+      *parent_out = (p == root) ? NULL : prev;
+      *redex_out  = p;
+      *rule_out   = f->slot;
+      *dir_out    = f->dir;
+      return 1;
+    }
+    if (!fresh && rp->k0 < s->n_rules &&
+        ft_cell_try_rules(s, p, rp->k0, s->n_rules, 1u, rp->try_u,
+                          &rp->scratch, &r, &d)) {
+      rp->diverged = 1u;
+      return 0;
+    }
+    prev = p;
+  }
+  if (f != NULL) {
+    rp->diverged = 1u;
+  }
+  return 0;
+}
+
 static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
                                                 u32 slice_first,
                                                 u32 slice_count,
@@ -4425,6 +4695,10 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
                                     /*psteps=*/NULL, /*pn=*/NULL, /*pcap=*/0u);
   }
 
+  AtpGoalWalk   *grec = g_goal_rec_arm;
+  AtpGoalReplay *grp  = g_goal_replay_arm;
+  g_goal_rec_arm    = NULL;
+  g_goal_replay_arm = NULL;
   int use_full_range = (slice_first == 0u && slice_count == s->n_rules);
 #ifdef THVM_ATPFT_RI
   // Stage 6b: opt-in via THVM_ATPFT_RI=1 (env knob).  Default OFF so
@@ -4496,12 +4770,27 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   // The prior split-phase (orient-fixpoint, ONE unorient, repeat) produced
   // different NFs from Term/WM on AC-class workloads; blocked migrations
   // of goal_check + CP-set-IR.
+#ifdef THVM_ATPFT_RI
+  // The index descent visits positions in its own order; a recording
+  // of it cannot be replayed by the scan below.
+  if (use_ri && grec != NULL) grec->unusable = 1u;
+  if (grp != NULL) use_ri = 0;
+#endif
+  u8 scan_done = 0u;
   for (u32 i = 0; i < step_cap; i++) {
     AtpFtCell *parent = NULL;
     AtpFtCell *redex  = NULL;
     u32        rule   = 0u;
     u8         dir    = 0u;
     int hit = 0;
+    if (grp != NULL) {
+      hit = ft_goal_replay_outer(s, t, grp, &parent, &redex, &rule, &dir,
+                                 &subst);
+      if (!hit) {
+        scan_done = 1u;
+        break;
+      }
+    } else
 #ifdef THVM_ATPFT_RI
     if (use_ri) {
       hit = find_redex_ft_via_ri(s, t, &parent, &redex, &rule, &dir,
@@ -4517,20 +4806,39 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
                           /*try_orient=*/1u, /*try_unorient=*/have_unorient);
     }
 #else
-    hit = find_redex_ft(s, t, slice_first, slice_count,
-                        &parent, &redex, &rule, &dir, &subst,
-                        /*try_orient=*/1u, /*try_unorient=*/have_unorient);
+    {
+      hit = find_redex_ft(s, t, slice_first, slice_count,
+                          &parent, &redex, &rule, &dir, &subst,
+                          /*try_orient=*/1u, /*try_unorient=*/have_unorient);
+    }
 #endif
-    if (!hit) break;
+    if (!hit) {
+      scan_done = 1u;
+      break;
+    }
     u8  pos[ATP_PROOF_MAX_DEPTH];
     u8  pos_len  = 0u;
     int have_pos = 0;
     if (record) {
       have_pos = ft_find_position(t, redex, pos, &pos_len);
     }
+    u32 redex_k = 0u;
+    if (grec != NULL) {
+      for (const AtpFtCell *c = t; c != redex; c = c->next) {
+        redex_k++;
+      }
+    }
     AtpFtCell *rhs_tmpl = (dir == 0u) ? s->rhs_ft[rule] : s->lhs_ft[rule];
     AtpFtCell *new_root = ft_splice(a, t, parent, redex, rhs_tmpl, &subst);
     if (new_root != NULL) t = new_root;
+    if (grec != NULL) {
+      if (new_root == NULL) {
+        grec->unusable = 1u;
+      } else {
+        u8 pass = (u8)((s->n_unorient > 0u && !s->r_orient[rule]) ? 2u : 1u);
+        atp_goal_walk_push(grec, s->r_uid[rule], dir, pass, redex_k, NULL);
+      }
+    }
     if (record) {
       Term step_term = ft_to_term(t);
       u8  fwd        = (dir == 0u) ? 1u : 0u;
@@ -4544,6 +4852,12 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
                                         pos, pos_len);
       if (ti != ATP_TRACE_NONE) *chain_tail = ti;
     }
+  }
+  if (grec != NULL) {
+    grec->starved = (u8)!scan_done;
+  }
+  if (grp != NULL) {
+    grp->starved = (u8)!scan_done;
   }
   return t;
 }
