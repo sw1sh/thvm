@@ -10,7 +10,8 @@
 //   (a) gate-off default: the pass does nothing if env var unset.
 //   (b) single-consumer chain: producer inherits consumer ranges (no
 //       new realize).
-//   (c) diamond fan-out: shared producer realizes (multi-consumer rule).
+//   (c) diamond fan-out: a shared producer stays fused while its
+//       consumers index it identically, and realizes once they diverge.
 //   (d) REDUCE injects a fresh KAX_REDUCE range on the reduced axis.
 //   (e) ranges are assigned monotonically (the axis_id counter
 //       increments on each new RANGE).
@@ -64,11 +65,12 @@ int main(void) {
   CHECK(rangeify_unified_subst_at(mul_idx) != 0);
 
   // (c) Diamond fan-out: shared = a + b; consumers are
-  // parent1 = shared * c, parent2 = shared * d, root = p1 + p2.
-  // bufferize_classify pre-seeds `shared` as realized via the MULTI
-  // rule (consumer_count >= 2), so the unified pass inherits
-  // realized_full = 1 from that seed.
-  TEST_BEGIN("unified-rangeify/diamond-shared-producer-realized");
+  // parent1 = shared * c, parent2 = shared * d, root = p1 + p2.  Both
+  // parents index `shared` with the root's range, so the walk keeps it
+  // fused and it inherits that range (tinygrad indexing.py: all_all_same).
+  // bufferize_classify still tags it MULTI, but the default seed (809c2a66)
+  // does not realize on that tag; THVM_HEURISTIC_SEED=1 still would.
+  TEST_BEGIN("unified-rangeify/diamond-shared-producer-fuses");
   Term d = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor1(3));
   Term shared = uop_binary(UOP_ADD, a, b);
   Term p1 = uop_binary(UOP_MUL, shared, c);
@@ -77,10 +79,25 @@ int main(void) {
   bufferize_classify(root);
   run_rangeify_unified(root);
   u32 shared_idx = bufferize_info_find(term_val(shared));
+  u32 root_idx   = bufferize_info_find(term_val(root));
   CHECK(shared_idx != 0xFFFFFFFFu);
-  // Shared has 2 consumers => bufferize_classify seeds it as realized
-  // via the MULTI rule, or our pass marks partial-realize. Either way:
-  CHECK_EQ(rangeify_unified_is_realized(shared_idx), 1);
+  CHECK(root_idx != 0xFFFFFFFFu);
+  CHECK(bufferize_reasons(shared) & BUFFERIZE_REASON_MULTI);
+  CHECK_EQ(rangeify_unified_is_realized(shared_idx), 0);
+  CHECK_EQ(rangeify_unified_has_ranges_at(shared_idx), 1);
+  CHECK_EQ(rangeify_unified_out_rng_at(shared_idx, 0),
+           rangeify_unified_out_rng_at(root_idx, 0));
+
+  // (c2) Divergent diamond: parent2 reads `shared` flipped, so the two
+  // consumers index it differently and the walk realizes it.
+  TEST_BEGIN("unified-rangeify/diamond-divergent-consumers-realize");
+  Term p2_flip   = uop_binary(UOP_MUL, uop_flip(shared, 1), d);
+  Term root_flip = uop_binary(UOP_ADD, p1, p2_flip);
+  bufferize_classify(root_flip);
+  run_rangeify_unified(root_flip);
+  u32 shared_flip_idx = bufferize_info_find(term_val(shared));
+  CHECK(shared_flip_idx != 0xFFFFFFFFu);
+  CHECK_EQ(rangeify_unified_is_realized(shared_flip_idx), 1);
 
   // (d) REDUCE injects KAX_REDUCE range. We sum a 1D tensor (axis 0)
   // -> the producer reads through one fresh REDUCE range.
