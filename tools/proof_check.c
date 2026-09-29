@@ -819,8 +819,33 @@ static double pc_cnf_est(Term f) {
   return 1.0;
 }
 
+// A node wider than a term node holds: the unifier, the renamer and the
+// substitution walkers pass it through unchanged, so a saturation over
+// it derives what its clauses do not entail (p(sk(X1..X17)) resolved at
+// X1 := a stays p(sk(X1..X17))).  The parse curries wide functors
+// (pc_curry), but clausification still builds them: a Skolem term over
+// more than REWRITE_MAX_ARITY universals, a Tseitin name over as many
+// free variables.
+static int pc_term_wide(Term t) {
+  if (term_tag(t) != TAG_CTR) return 0;
+  u32 n = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY) return 1;
+  for (u32 i = 0; i < n; i++) {
+    if (pc_term_wide(term_ctr_at(t, i))) return 1;
+  }
+  return 0;
+}
+static int pc_clause_wide(const FolClause *c) {
+  for (u32 j = 0; j < c->n_lits; j++) {
+    if (pc_term_wide(c->lits[j].atom)) return 1;
+  }
+  return 0;
+}
+
 // Clausify one closed formula and saturate it within `cap` seconds;
 // `ordered` attaches a KBO (all weights 1, precedence = label order).
+// Wide clauses (pc_term_wide) stay out: a refutation of the rest still
+// refutes, but its saturation is no countermodel.
 static AtpStatus pc_saturate(Term conj, double cap, int ordered) {
   u32 nc = 0;
   FolClause **cl;
@@ -833,6 +858,16 @@ static AtpStatus pc_saturate(Term conj, double cap, int ordered) {
     cl = fol_tseitin_extract_clauses(sk, &nc);
   }
   if (cl == NULL) return ATP_ABORTED;
+  u32 kept = 0, wide = 0;
+  for (u32 j = 0; j < nc; j++) {
+    if (pc_clause_wide(cl[j])) {
+      fol_clause_free(cl[j]);
+      wide++;
+    } else {
+      cl[kept++] = cl[j];
+    }
+  }
+  nc = kept;
   CnfState *s = cnf_init(pc_refute_steps ? pc_refute_steps : pc_cap);
   // Step replay must not depend on the AVATAR splitting env: the
   // checker's per-step refutations are tiny and want the plain
@@ -868,6 +903,7 @@ static AtpStatus pc_saturate(Term conj, double cap, int ordered) {
   AtpStatus st = cnf_run(s);
   cnf_set_wall_deadline(0.0);
   cnf_free(s);
+  if (wide > 0 && st == ATP_QUEUE_EMPTY) return ATP_ABORTED;
   return st;
 }
 

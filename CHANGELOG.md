@@ -261,6 +261,16 @@ for the per-commit story.
   takes the classic Term routes of critical-pair formation and requeue,
   its own search (COL004-1 narrowq forks at pick 83; COL006-5, COL049-1,
   GRP697-1 too), and nothing needs it since `--proof` stopped arming it.
+- No saturation reads a term node wider than 16 arguments any more: the
+  unifier and renamer pass such a node through unchanged, and
+  clausification builds them (a Skolem term over more than 16
+  universals, a Tseitin name over as many free variables).  CheckProof
+  leaves those clauses out of its refutations, where a saturation of the
+  rest is no countermodel; FindProof's clausal pre-pass leaves them out
+  (its equational lanes read them curried).  A $false step from
+  satisfiable axioms with an existential under 17 universals was
+  VerifiedGood, and FindProof refuted the satisfiable
+  tests/soundness/wide_skolem17_pp.p.
 - CheckProof reads functors wider than 16 arguments by currying them into
   a binary application symbol, records and problem alike; every proof of
   TOP052-1, whose goal is a 144-argument tuple, was Unknown.  A model of

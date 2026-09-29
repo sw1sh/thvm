@@ -1375,6 +1375,12 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   }
   for (int i = 0; i < ncl; i++) {
     if (sine_keep != NULL && !sine_keep[i]) continue;   // outside the cone
+    // A Skolem term over more than REWRITE_MAX_ARITY universals (or a
+    // Tseitin name over as many variables) is a node the unifier and
+    // renamer pass through unchanged: saturating it derives what the
+    // clause does not entail (pc_term_wide).  The equational lanes read
+    // it curried; here it stays out, which only shrinks the set.
+    if (pc_clause_wide(cls[i])) continue;
     FolClause *c = fol_clause_new(cls[i]->n_lits);
     if (c == NULL) {
       thvm_kbo_set_persist(0u);   // restore the safe per-call default

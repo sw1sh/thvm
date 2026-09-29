@@ -31,3 +31,4 @@ H29_curry_nonhorn.s	Unknown	non-Horn step refuted only through the curried encod
 H30_curry_horn_valid.s	VerifiedGood	VALID control: a Horn first-order step over a 17-ary functor, confirmed through the encoding
 H31_curry_arity_alias.s	VerifiedBad	one name at arities 17 and 20 is two symbols: the curried heads must not share a name
 H32_curry_quoted_alias.s	Unknown	quoted atoms spelling the encoding's own symbol names are not read
+H33_wide_skolem.s	Unknown	a Skolem term over 17 universals is wider than the unifier handles: no saturation may read it
