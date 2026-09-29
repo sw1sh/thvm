@@ -142,6 +142,7 @@ for the per-commit story.
   last iteration.
 
 ### Backends
+- `test_cpu_jit_nonfinite` and `test_cpu_jit_f64_reduce` require the CPU JIT route only when `THVM_CPU_JIT_WARMUP` is at most 1. They also required it whenever the parallel precompile was on, which no longer compiles past the warmup gate, so with `THVM_CPU_JIT_WARMUP=1000000000` their kernels walked and 9 and 8 route checks failed; both now pass there (131/131, 146/146).
 - `test_uop_walk_cast` covers a CAST to int32 of an i64 select under a float mask: the walker walks a CAST's source in the dtype `uwalk_term_dtype` gives it, so the select keeps the low bits of values past 2^53. Taking the select's domain from its float condition, as the CAST fix's `uwalk_value_is_int` did before it met the per-subterm dtype fix, rounds them through a double.
 - docs/dtypes.md no longer says the legacy C emit accumulates an int or bool reduce in a float: it declares an int, bool or f64 reduce's accumulator, and the values it hoists next to one, in the reduce's dtype, and only an f32 reduce and the GPU targets keep a float accumulator.
 - docs/metal.md names the dtypes the Metal paths take, as docs/dtypes.md does: the tile path's MSL maps f32, f16, bf16, fp8 bytes and i8 / u8 / i32 / i64, and the shader-library encoder takes f32 / i32. It said the GPU runs f32 only and falls through to the deleted CPU interpreter.

@@ -17,9 +17,9 @@
 // Each case realizes on the CPU and checks the values and the signs of
 // zeros, compiles the kernel's JIT source with the JIT's own compiler and
 // flags (cpu_jit_compile_shared), and, whenever the JIT may compile it
-// (warmup at most 1, or the parallel precompile on), checks that the
-// kernel dispatched through the JIT.  The literal checks render f64
-// constants through each C renderer.
+// (THVM_CPU_JIT_WARMUP at most 1), checks that the kernel dispatched
+// through the JIT.  The literal checks render f64 constants through each
+// C renderer.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -49,12 +49,11 @@ static Term f64_buffer(f64 const *v) {
   return term_new(0, TAG_TEN, DT_FP64, tid);
 }
 
-// The warmup gate keeps a kernel off the JIT until it has fired
-// THVM_CPU_JIT_WARMUP times, unless the parallel precompile, which
-// ignores the gate, built it at realize.
+// A kernel runs compiled from the fire at which its source has fired
+// THVM_CPU_JIT_WARMUP times, on every JIT path; each kernel here fires
+// once.
 static int jit_may_compile(void) {
-  char const *p = getenv("THVM_CPU_JIT_PARALLEL");
-  return cpu_jit_warmup() <= 1 || p == NULL || p[0] != '0';
+  return cpu_jit_warmup() <= 1;
 }
 
 static int compiles_on_jit(KernelEntry const *ke) {
