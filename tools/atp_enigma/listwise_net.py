@@ -212,9 +212,13 @@ class ListNet:
         self.h1 = nn.Linear((dim if history else 0) + N_PHI, hid)
         self.he = nn.Linear(N_ENG, hid, bias=False)
         self.out = nn.Linear(hid, 1)
-        self.out.weight = Tensor.zeros(1, hid).contiguous()
-        self.out.bias = Tensor.zeros(1).contiguous()
-        self.kappa = Tensor.ones(1).contiguous()
+        # numpy-backed: tinygrad 0.11 hash-conses Tensor.zeros(...).contiguous(),
+        # so a parameter built that way shares its buffer with every
+        # same-shaped optimizer state (Adam's m, v, b1_t, b2_t are built the
+        # same way) once a forward pass realizes it
+        self.out.weight = Tensor(np.zeros((1, hid), np.float32))
+        self.out.bias = Tensor(np.zeros(1, np.float32))
+        self.kappa = Tensor(np.ones(1, np.float32))
 
     table = HistoryNet.table
 
@@ -530,26 +534,33 @@ def cmd_sanity(npz_dir, pool_path, n_probs=6, steps=30):
         ok &= eq or not exact
     fb = ListBatch(probs, std, 16, True)
     params = get_parameters(model)
-    before = [x.numpy().copy() for x in params]
     opt = nn.optim.Adam(params, lr=3e-3)
+    fixed = fb.sample(rng)
+    # a forward pass first realizes the parameters (as the training loop's
+    # validation pass does), then Adam's first step moves each by <= lr
+    model.loss(fb, *fixed).realize()
+    before = [x.numpy().copy() for x in params]
 
     def step(*ins):
         loss = model.loss(fb, *ins)
         opt.zero_grad(); loss.backward(); opt.step()
         return loss.realize()
     jit = TinyJit(step)
-    fixed = fb.sample(rng)
-    losses, times = [], []
+    losses, times, first = [], [], None
     with train_mode():
         for it in range(steps):
             t0 = time.time()
             losses.append(jit(*fixed).item())
             times.append(time.time() - t0)
+            if it == 0:
+                first = max(float(np.max(np.abs(x.numpy() - b0))) for x, b0 in zip(params, before))
     moved = max(float(np.max(np.abs(x.numpy() - b0))) for x, b0 in zip(params, before))
-    print(f"loss {losses[0]:.4f} -> {losses[-1]:.4f} over {steps} jitted Adam steps; max "
-          f"|param delta| {moved:.3e}; step s: first {times[0]:.1f} second {times[1]:.1f} "
-          f"replay {np.median(times[2:]):.3f}")
-    ok &= losses[-1] < 0.9 * losses[0] and moved > 0
+    finite = all(np.all(np.isfinite(x.numpy())) for x in params)
+    print(f"loss {losses[0]:.4f} -> {losses[-1]:.4f} over {steps} jitted Adam steps; first "
+          f"step max |param delta| {first:.3e} (lr 3e-3); after {steps} {moved:.3e}; params "
+          f"finite {finite}; step s: first {times[0]:.1f} second {times[1]:.1f} replay "
+          f"{np.median(times[2:]):.3f}")
+    ok &= losses[-1] < 0.9 * losses[0] and 0 < first <= 3.01e-3 and finite
     print("SANITY " + ("OK" if ok else "FAIL"))
 
 
