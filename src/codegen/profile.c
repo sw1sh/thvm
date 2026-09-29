@@ -1,7 +1,7 @@
 // codegen/profile.c - per-kernel introspection: FLOPS, dispatch
 // route, source rendering hooks.  Backend-agnostic; the actual
 // dispatch counters are bumped from the per-backend dispatchers
-// (cpu_blas_dispatch, cpu_jit_dispatch, cpu_interpret).
+// (cpu_blas_dispatch, cpu_jit_dispatch, cpu_uop_walk).
 //
 // FLOPS estimate is the static count baked into the lifted DAG:
 // per UOp we charge a tiny constant cost based on its opcode

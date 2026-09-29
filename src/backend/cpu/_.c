@@ -6,7 +6,7 @@
 
 Backend CPU_BACKEND = {
   .id              = 1,
-  .view_aware      = 1,   // cpu_interpret pre-materializes non-contig inputs
+  .view_aware      = 1,   // cpu_dispatch_kernel gathers chained inputs; rungs read strided views
   .init            = cpu_init,
   .shutdown        = cpu_shutdown,
   .buf_alloc       = cpu_buf_alloc,

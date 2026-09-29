@@ -6615,7 +6615,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // a single input slot (result == KSRC_AS_INPUT).  This happens when
   // the boundary's root is a movement-op chain whose view_resolve
   // found a direct alias TenDesc -- no compute to do.  Without this
-  // branch the kernel commits with an empty program; cpu_interpret
+  // branch the kernel commits with an empty program; the dispatch
   // runs nothing; the alloc'd output buffer stays zero-initialized,
   // silently zeroing whatever signal was supposed to flow through
   // (the gy=CONST(1.0) seed in MSE backward, etc).  Skip kernel

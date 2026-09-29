@@ -4842,8 +4842,7 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
 
   // Tile path declined (or wasn't eligible).  The DAG encoder below
   // reads inputs contiguously, so pre-materialise any strided-view
-  // input now into a contiguous temp buffer (mirror of
-  // cpu_interpret's strided pre-mat).  MTLResourceStorageModeShared
+  // input now into a contiguous temp buffer.  MTLResourceStorageModeShared
   // keeps the bytes host-readable so the copy is plain pointer
   // arithmetic with no extra memcpy out of Metal.
   for (u32 i = 0; i < ke->n_inputs; i++) {

@@ -791,8 +791,9 @@ struct Backend {
   // view_aware = 1 if dispatch_kernel pre-materializes non-contig
   // input TenDescs (sub-item f3b/c/d/e/g view-only aliases) via
   // view_strided_index before reading buffer bytes.  CPU sets this
-  // (cpu_interpret has the pre-materialize loop); Metal does NOT
-  // (its shaders read bufs flat).  materialize_uop_in_env's f3
+  // (cpu_dispatch_kernel gathers a ShapeTracker chain into a contiguous
+  // temp, and every rung reads a single strided view in place); Metal
+  // does NOT (its shaders read bufs flat).  materialize_uop_in_env's f3
   // view-only branches gate on this flag and fall through to
   // kernel emission when the active backend can't consume aliases
   // -- the reflected wins land for view-aware backends only.
@@ -1014,13 +1015,15 @@ typedef struct KernelEntry {
   // Per-input-slot view metadata.  When the input is a contig
   // TenDesc, input_views[i] mirrors TENS[input_tids[i]].view (the
   // canonical layout) and the renderer emits flat `in%u[i]`.  When
-  // the input is non-contig (single-view stride pattern -- multi-
-  // view chains still bail), the renderer composes a strided
-  // index expression `in%u[s0*c0(i) + ... + offset]` into the
-  // body loop, eliminating the cpu_interpret pre-mat pass for
-  // strided reads.  Mirrors tinygrad's codegen-time index UOP
-  // inlining (each input's stride pattern is hardcoded into the
-  // generated kernel; different patterns get different dylibs).
+  // the input is non-contig (single-view stride pattern -- a multi-
+  // view chain is gathered into a contiguous temp by
+  // cpu_dispatch_kernel first, unless rangeify composed it into the
+  // kernel INDEX), the renderer composes a strided index expression
+  // `in%u[s0*c0(i) + ... + offset]` into the body loop, so a strided
+  // read needs no pre-materialize pass.  Mirrors tinygrad's
+  // codegen-time index UOP inlining (each input's stride pattern is
+  // hardcoded into the generated kernel; different patterns get
+  // different dylibs).
   View     *input_views;
   // For inputs that aren't statically a TenDesc (e.g., a free TAG_VAR
   // that gets bound to a TEN at fire time via APP-LAM beta), we
