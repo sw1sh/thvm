@@ -748,11 +748,15 @@ int main(void) {
   // then read the sink kernel's input slots and verify one of them
   // carries the source buffer id of the shared producer.  This
   // exercises the materialize-side wiring that links each kernel
-  // input slot back to its bufferize edge.
+  // input slot back to its bufferize edge.  The right consumer reads
+  // ks_a flipped so ks_a realizes: consumers that index it identically
+  // keep it fused into the sink kernel (the consumer-divergence walk,
+  // the default seed since 809c2a66), and then no input slot comes
+  // from it.
   setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
   Term ks_a   = uop_binary(UOP_ADD, a, b);
   Term ks_l   = uop_binary(UOP_MUL, ks_a, c);
-  Term ks_r   = uop_binary(UOP_MUL, ks_a, a);
+  Term ks_r   = uop_binary(UOP_MUL, uop_flip(ks_a, 1), a);
   Term ks_t   = uop_binary(UOP_ADD, ks_l, ks_r);
   Term ks_out = thvm_materialize(ks_t);
   // Resolve out to its kernel id.

@@ -40,6 +40,10 @@ for the per-commit story.
   unset and levels up to 2 leave the realize map byte-identical, flash mode
   (3) keeps both softmax reduces fused and realizes only the exp's reduced
   axis.
+- `bin/test_bufferize` checks the kernel-input to bufferize-edge wiring on a
+  shared producer that the default seed realizes (one consumer reads it
+  flipped); with identical consumers it fuses and no input slot comes from
+  it.
 - Fix (Linux/gcc): a ~2000-deep elementwise chain overflowed the 8 MB stack
   in the unified rewrite (gcc hoisted a 1 KB substitution and the inlined
   bufferize helpers' arrays into every recursion level, 6 KB each); those
