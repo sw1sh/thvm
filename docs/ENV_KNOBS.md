@@ -78,7 +78,7 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 | `THVM_TILE` | off | Tile-size tuning for the tiled codegen path. |
 | `THVM_LOOP_UNROLL_MAX` | (impl) | Max loop-unroll iterations. |
 | `THVM_HANDOPT_TRACE` | off | Trace hand-coded optimization decisions. |
-| `THVM_NO_FAST_IDIV` | off | A/B revert (read in `index_simplify.c`, not hand_opts): disable the fast_idiv/magicgu late-rewrite that lowers `x//c` -> `(x*m)>>s` at the C-render root (tinygrad's decompositions.py). On = keep literal IDIV/IMOD. |
+| `THVM_NO_FAST_IDIV` | off | A/B revert (read in `index_simplify.c`, not hand_opts): disable the fast_idiv/magicgu late-rewrite that lowers `x//c` -> `(x*m)>>s` at the C-render root (tinygrad's codegen/decomp/op.py). On = keep literal IDIV/IMOD. Upstream defaults the rewrite off (`DISABLE_FAST_IDIV=1`); thvm defaults it on for the C target. |
 
 ## Memory, GC & buffer management
 

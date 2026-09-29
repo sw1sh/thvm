@@ -508,7 +508,7 @@ static int uop_int_bounds(Term t, i64 *lo, i64 *hi) {
 //
 // Compute (m, s) such that `x / d == (x * m) >> s` for every integer
 // 0 <= x <= vmax, with d > 0.  Direct port of tinygrad
-// uop/decompositions.py:272-280 (magicgu), itself adapted from Hacker's
+// codegen/decomp/op.py:9-18 (magicgu), itself adapted from Hacker's
 // Delight Ch.10.  The window-decode `idx // 25`-style divides the conv
 // _pool reshape leaves are non-negative and bounded, so this lowers them
 // to a vectorizable integer multiply + arithmetic-right-shift instead of
@@ -1652,10 +1652,13 @@ static u32 uop_index_scan(Term root, Term const *find, u32 nfind, u32 budget) {
 //
 // Rewrite `x // c` (c a positive non-power-of-two constant, x a provably
 // non-negative bounded index) into the magic multiply-shift `(x * m) >> s`,
-// and `x % c` into `x - c*(x // c)`.  Faithful port of tinygrad's fast_idiv
-// (uop/decompositions.py:282-300), applied -- exactly as tinygrad does --
-// as a LATE codegen rewrite (get_late_rewrite_patterns, wired in
-// codegen/__init__.py:89), NOT inside the general symbolic simplifier.
+// and `x % c` into `x - c*(x // c)`.  Port of tinygrad's fast_idiv
+// (codegen/decomp/op.py:20-34) minus its widening-cast fallback, applied
+// -- exactly as tinygrad does -- as a LATE codegen rewrite
+// (get_late_rewrite_patterns, codegen/decomp/op.py:97-103, wired in
+// codegen/__init__.py:360), NOT inside the general symbolic simplifier.
+// Upstream ships it disabled (DISABLE_FAST_IDIV=1, helpers.py:249); thvm
+// enables it on the C target, the only target that runs this rule.
 // Keeping it out of uop_int_binary is essential: the schedule/index
 // pipeline (and the structural unit tests + uop_int_bounds-driven valid
 // folds) rely on div/mod staying in their canonical IDIV/IMOD shape; only
@@ -1668,7 +1671,26 @@ static u32 uop_index_scan(Term root, Term const *find, u32 nfind, u32 budget) {
 // node; on failure the literal IDIV/IMOD is kept -- so this can never emit
 // a wrong value.  Powers of two are skipped (signed >> is not a valid
 // truncating divide there, and they are already cheap).
-//
+
+// x // d for 0 <= x <= hi (d > 1) as `(x * m) >> s`, or 0 when m*hi would
+// overflow int32.  An even d first retries on `(x >> k) // (d >> k)` with
+// k = ctz(d): exact for x >= 0, and the smaller numerator can bring m*hi
+// back under int32 (codegen/decomp/op.py:26-27).  d >> k is odd, so the
+// recursion stops there.
+static Term uop_fast_idiv_div(Term x, i64 hi, i64 d) {
+  i64 m, s;
+  if (thvm_magicgu(hi, d, &m, &s) && m >= 1 && m <= 0x7fffffff
+      && hi <= 0x7fffffff / m) {
+    Term mul = uop_int_binary(UOP_IMUL, x, uop_iconst(m));
+    return uop_int_binary(UOP_ISHR, mul, uop_iconst(s));
+  }
+  i32 k = __builtin_ctzll((unsigned long long)d);
+  if (k == 0) {
+    return 0;
+  }
+  return uop_fast_idiv_div(uop_int_binary(UOP_ISHR, x, uop_iconst(k)), hi >> k, d >> k);
+}
+
 // Single-node rewrite: given an already-children-rewritten IDIV/IMOD node,
 // return its lowered form, or 0 if the guards fail.  Driven over the full
 // kernel AST by uop_graph_rewrite (bottom-up), so nested div/mod inside a
@@ -1689,11 +1711,10 @@ static Term uop_fast_idiv_node(Term node) {
   // index-corruption for gated/bounded numerators (e.g. IWHERE(cond, r<c,
   // INVALID)//c).  Short-circuit to the exact values before magicgu.
   if (hi < bv) return (op == UOP_IDIV) ? uop_iconst(0) : num;
-  i64 m, s;
-  if (!thvm_magicgu(hi, bv, &m, &s)) return 0;
-  if (m < 1 || m > 0x7fffffff || hi > 0x7fffffff / m) return 0;  // int32 mul guard
-  Term mul = uop_int_binary(UOP_IMUL, num, uop_iconst(m));
-  Term div = uop_int_binary(UOP_ISHR, mul, uop_iconst(s));
+  Term div = uop_fast_idiv_div(num, hi, bv);
+  if (div == 0) {
+    return 0;
+  }
   if (op == UOP_IDIV) return div;
   // x % c -> x - c*(x // c); reuses the lowered div so no IDIV remains.
   Term cm = uop_int_binary(UOP_IMUL, div, den);

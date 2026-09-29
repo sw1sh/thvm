@@ -61,6 +61,52 @@ static u64 shash(Term t) {
   return v;
 }
 
+// Value of an index DAG with every RANGE leaf set to `x`, under the
+// rendered C semantics: truncating `/` and `%`, arithmetic `>>`, 0/1
+// compares.  An intermediate outside int32 (undefined behavior in the
+// rendered `int` arithmetic), a zero divisor, or an op outside this set
+// sets ieval_bad.
+static int ieval_bad = 0;
+
+static i64 ieval(Term t, i64 x) {
+  if (term_tag(t) != TAG_UOP) {
+    ieval_bad = 1;
+    return 0;
+  }
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  switch (op) {
+    case UOP_CONST: return (i64)(i32)term_val(heap_read(loc));
+    case UOP_RANGE: return x;
+    default:        break;
+  }
+  i64 a = ieval(heap_read(loc), x);
+  i64 b = ieval(heap_read(loc + 1), x);
+  i64 v = 0;
+  switch (op) {
+    case UOP_IADD: v = a + b;  break;
+    case UOP_ISUB: v = a - b;  break;
+    case UOP_IMUL: v = a * b;  break;
+    case UOP_ISHR: v = a >> b; break;
+    case UOP_ILT:  v = a < b;  break;
+    case UOP_IDIV:
+    case UOP_IMOD:
+      if (b == 0) {
+        ieval_bad = 1;
+        return 0;
+      }
+      v = (op == UOP_IDIV) ? a / b : a % b;
+      break;
+    default:
+      ieval_bad = 1;
+      return 0;
+  }
+  if (v < INT32_MIN || v > INT32_MAX) {
+    ieval_bad = 1;
+  }
+  return v;
+}
+
 int main(void) {
   thvm_init();
 
@@ -664,6 +710,45 @@ int main(void) {
     CHECK_EQ(gdv, 0);
     Term gmod = uop_int_binary(UOP_IMOD, gated, uop_const(DT_INT32, 25));
     CHECK_EQ(uop_fast_idiv_node(gmod), gated);          // x%25 == x for x<25
+
+    // shift retry (tinygrad codegen/decomp/op.py:26-27): over x in
+    // [0, 2^20) the direct magic for 448 = 2^6*7 is m = 1198373, and m*hi
+    // overflows int32.  Shifting 2^6 out of both operands leaves x>>6 in
+    // [0, 2^14) over 7, whose m = 18725 fits: ((x>>6)*18725)>>17.
+    TEST_BEGIN("fastidiv/shift-retry-even-divisor-lowers");
+    Term fx20    = uop_range(402, KAX_LOOP, 1u << 20);
+    Term c448    = uop_const(DT_INT32, 448);
+    Term low448  = uop_fast_idiv_node(uop_int_binary(UOP_IDIV, fx20, c448));
+    Term want448 = uop_int_binary(UOP_ISHR,
+                     uop_int_binary(UOP_IMUL,
+                       uop_int_binary(UOP_ISHR, fx20, uop_const(DT_INT32, 6)),
+                       uop_const(DT_INT32, 18725)),
+                     uop_const(DT_INT32, 17));
+    CHECK_EQ(low448, want448);
+    TEST_BEGIN("fastidiv/shift-retry-imod-keeps-original-divisor");
+    Term lowm448 = uop_fast_idiv_node(uop_int_binary(UOP_IMOD, fx20, c448));
+    CHECK_EQ(lowm448, uop_int_binary(UOP_ISUB, fx20,
+                                     uop_int_binary(UOP_IMUL, want448, c448)));
+    TEST_BEGIN("fastidiv/shift-retry-exhaustive");
+    int agree448 = low448 != 0 && lowm448 != 0;
+    ieval_bad = 0;
+    for (i64 x = 0; agree448 && x < (1 << 20); x++) {
+      agree448 = ieval(low448, x) == x / 448 && ieval(lowm448, x) == x % 448;
+    }
+    CHECK_EQ(agree448, 1);
+    CHECK_EQ(ieval_bad, 0);
+
+    // skip: over [0, 2^24) the shifted numerator x>>6 spans [0, 2^18) and
+    // its magic for 7 overflows int32 too, so the literal divide stays.
+    TEST_BEGIN("fastidiv/shift-retry-declines-when-shifted-overflows");
+    Term fx24 = uop_range(403, KAX_LOOP, 1u << 24);
+    CHECK_EQ(uop_fast_idiv_node(uop_int_binary(UOP_IDIV, fx24, c448)), 0);
+    CHECK_EQ(uop_fast_idiv_node(uop_int_binary(UOP_IMOD, fx24, c448)), 0);
+
+    // skip: an odd divisor has no power of two to shift out, so an
+    // overflowing magic (7 over [0, 2^20): m = 1198373) still declines.
+    TEST_BEGIN("fastidiv/shift-retry-skips-odd-divisor");
+    CHECK_EQ(uop_fast_idiv_node(uop_int_binary(UOP_IDIV, fx20, uop_const(DT_INT32, 7))), 0);
   }
 
   // === Ported tinygrad symbolic rules (29-rule batch) ====================

@@ -6563,7 +6563,7 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   cg_emit_cpu_kvar_decls(root, fp);
   RMU_TARGET = CG_TARGET_C;
   // Late fast_idiv lowering (tinygrad get_late_rewrite_patterns,
-  // codegen/__init__.py:89): rewrite every constant-divisor `x // c`,
+  // codegen/__init__.py:360): rewrite every constant-divisor `x // c`,
   // `x % c` over a bounded non-negative index into the vectorizable
   // `(x*m) >> s` magic multiply-shift across the WHOLE kernel AST.  The C
   // target's scalar `/c`,`%c` serialize on clang's idiv unit and block
@@ -6571,9 +6571,10 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   // mul-shift form vectorizes.  Applied bottom-up by uop_graph_rewrite, so
   // a numerator's own nested div/mod lower first (and stay bounded via
   // uop_int_bounds' ISHR case).  C target only: METAL has a compiler bug
-  // with the magic multiply and CUDA renders via its own path -- mirrors
-  // fast_idiv's device gate (decompositions.py:284).  No-op where the
-  // bounds / int32-overflow guards fail, so it can never change a value.
+  // with the magic multiply and CUDA renders via its own path.  Upstream
+  // ships the rewrite disabled on every target (DISABLE_FAST_IDIV=1,
+  // helpers.py:249).  No-op where the bounds / int32-overflow guards fail,
+  // so it can never change a value.
   Term emit_root = root;
   if (root != 0) {
     UOpGraphRewriteRule fi_rules[1] = { { "fast_idiv", uop_fast_idiv_rule } };
@@ -6765,7 +6766,7 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   cg_emit_cpu_kvar_decls(root, fp);
   RMU_TARGET = CG_TARGET_C;
   // Late fast_idiv lowering (tinygrad get_late_rewrite_patterns,
-  // codegen/__init__.py:89): rewrite every constant-divisor `x // c`,
+  // codegen/__init__.py:360): rewrite every constant-divisor `x // c`,
   // `x % c` over a bounded non-negative index into the vectorizable
   // `(x*m) >> s` magic multiply-shift across the WHOLE kernel AST.  The C
   // target's scalar `/c`,`%c` serialize on clang's idiv unit and block
@@ -6773,9 +6774,10 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   // mul-shift form vectorizes.  Applied bottom-up by uop_graph_rewrite, so
   // a numerator's own nested div/mod lower first (and stay bounded via
   // uop_int_bounds' ISHR case).  C target only: METAL has a compiler bug
-  // with the magic multiply and CUDA renders via its own path -- mirrors
-  // fast_idiv's device gate (decompositions.py:284).  No-op where the
-  // bounds / int32-overflow guards fail, so it can never change a value.
+  // with the magic multiply and CUDA renders via its own path.  Upstream
+  // ships the rewrite disabled on every target (DISABLE_FAST_IDIV=1,
+  // helpers.py:249).  No-op where the bounds / int32-overflow guards fail,
+  // so it can never change a value.
   Term emit_root = root;
   if (root != 0) {
     UOpGraphRewriteRule fi_rules[1] = { { "fast_idiv", uop_fast_idiv_rule } };
