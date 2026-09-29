@@ -251,6 +251,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- py: `test_gather_parity`'s tinygrad cross-check builds its tensor as tinygrad master does, with no `requires_grad` argument (master's `backward` fills `.grad` for every float tensor in the graph, tensor.py:486-488); with tinygrad on the path it raised a TypeError.
 - py: `Tensor.gather` (tinygrad mixin/op.py:1023-1041, with its checks and
   exception types), and `Tensor.embedding` / `nn.Embedding` and `x[idx]` with
   a Tensor / list / ndarray index, are native `UOP_GATHER`s on the CPU

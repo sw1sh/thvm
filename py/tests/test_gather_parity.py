@@ -131,7 +131,9 @@ class TestGather(unittest.TestCase):
         for dim in (0, 1, 2):
             t = Tensor(x)
             out = t.gather(dim, Tensor(b))
-            tg = TgTensor(x, requires_grad=True)
+            # master takes no requires_grad: backward fills .grad for every
+            # float tensor in the graph (tensor.py:486-488).
+            tg = TgTensor(x)
             tout = tg.gather(dim, TgTensor(b))
             out.sum().backward()
             tout.sum().backward()
