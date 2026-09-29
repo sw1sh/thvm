@@ -1,13 +1,15 @@
 #!/bin/bash
-# Soundness regression: these TPTP problems are all Satisfiable, so a
-# refutation (SZS Unsatisfiable / Theorem) is UNSOUND.  FindProof must
-# report GaveUp / Satisfiable / ResourceOut -- never a refutation.
-# Reported by Geoff Sutcliffe (CASC J13 soundness testing, 2026-07-17);
-# root causes fixed in c68b1bd7.  edge_include_select.p is satisfiable
-# only when its include() selection is honoured.  curry_wide*_dc.p are
-# satisfiable only in a model too small to host a wide functor's curried
-# partial applications; wide_skolem17_pp.p only when its 17-ary Skolem
-# term keeps its variables.  Run from the repo root after `make`.
+# Soundness regression: these TPTP problems are all Satisfiable or
+# CounterSatisfiable, so a refutation (SZS Unsatisfiable / Theorem) is
+# UNSOUND.  FindProof must report GaveUp / Satisfiable / ResourceOut --
+# never a refutation.  Reported by Geoff Sutcliffe (CASC J13 soundness
+# testing, 2026-07-17); root causes fixed in c68b1bd7.
+# edge_include_select.p (CNF) and edge_include_select_fof.p (FOF) are
+# satisfiable only when their include() selection is honoured.
+# curry_wide*_dc.p are satisfiable only in a model too small to host a
+# wide functor's curried partial applications; wide_skolem17_pp.p only
+# when its 17-ary Skolem term keeps its variables.  Run from the repo
+# root after `make`.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=${1:-$(cd "$HERE/../.." && pwd)/bin/FindProof}

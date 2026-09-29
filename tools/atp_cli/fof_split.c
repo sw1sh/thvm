@@ -1597,13 +1597,15 @@ static int fof_one_elt_solve(int nvar, int ncl, const int *cl_off,
       if (asg[v] >= 0) { if (asg[v] != val) conflict = 1; continue; }
       asg[v] = (signed char)val;
       trail[ntrail++] = v;
-      for (int o = occ_start[v]; o < occ_start[v + 1] && !conflict; o++) {
+      // Every occurrence is counted even past a conflict: the undo on
+      // backtrack reverses all of them.
+      for (int o = occ_start[v]; o < occ_start[v + 1]; o++) {
         int li = occ[o], c = lit_cl[li];
         work++;
         if (lp[li] == val) { nsat[c]++; continue; }
         nfalse[c]++;
-        if (nsat[c] > 0) continue;
-        if (nfalse[c] == cl_len[c]) { conflict = 1; break; }
+        if (nsat[c] > 0 || conflict) continue;
+        if (nfalse[c] == cl_len[c]) { conflict = 1; continue; }
         if (nfalse[c] == cl_len[c] - 1) {
           for (int k = 0; k < cl_len[c]; k++) {
             int lk = cl_off[c] + k;
