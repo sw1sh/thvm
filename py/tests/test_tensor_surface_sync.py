@@ -88,11 +88,23 @@ class TestClone(unittest.TestCase):
         (x.clone() * 2).sum().backward()
         self.assertIsNone(x.grad)
 
-    def test_clone_refuses_a_dtype_assign_cannot_copy(self):
-        t = Tensor([1., 2])
-        t._dtype = DType("float16", 2, np.float16, 11)
-        with self.assertRaises(NotImplementedError):
-            t.clone()
+    def test_clone_copies_narrow_dtypes_bit_exact(self):
+        # NaN payloads, subnormals and -0 survive only a byte copy.
+        cases = [
+            (DType("float16", 2, np.float16, 11), np.uint16, [0x7C01, 0xFE01, 0x0001, 0x8000]),
+            (DType("bfloat16", 2, np.uint16, 12), np.uint16, [0x7F81, 0xFFC1, 0x0001, 0x8000]),
+            (DType("fp8e5m2", 1, np.uint8, 10), np.uint8, [0x7D, 0xFE, 0x01, 0x80]),
+            (DType("int8", 1, np.int8, 1), np.uint8, [0x80, 0xFF, 0x01, 0x7F]),
+        ]
+        for dt, raw, bits in cases:
+            data = np.array(bits, raw).tobytes()
+            src = _TH.ten_create(dt.thvm_id, [len(bits)])
+            _TH.ten_write(src, data)
+            t = Tensor._from_term(src, dt, (len(bits),))
+            c = t.clone()
+            self.assertEqual(c.dtype, dt)
+            self.assertNotEqual(_TH.ten_get_buf_id(c.term), _TH.ten_get_buf_id(t.term))
+            self.assertEqual(_TH.ten_read(c.term, len(data)), data, dt.name)
 
 
 class TestTo(unittest.TestCase):

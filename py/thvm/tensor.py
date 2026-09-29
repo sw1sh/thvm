@@ -329,10 +329,6 @@ class Tensor(metaclass=_TensorMeta):
         backward() does not reach self through it, where tinygrad passes
         the gradient to the source (mixin/gradient.py:100-101)."""
         del device
-        if self._dtype not in (dtypes.float32, dtypes.int32):
-            # interact_assign_with copies only fp32/int32 and leaves any
-            # other dst unwritten (src/interact/uop_assign.c).
-            raise NotImplementedError(f"clone of a {self._dtype.name} tensor")
         dst = Tensor._from_term(
             _TH.ten_create(self._dtype.thvm_id, list(self._shape)),
             self._dtype, self._shape)

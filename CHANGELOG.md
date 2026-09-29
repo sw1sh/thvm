@@ -161,6 +161,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- py: `Tensor.clone()` copies a tensor of any dtype bit for bit.  It raised NotImplementedError for everything but float32 / int32, because ASSIGN copied only those.
 - py: `test_int_reduce_exact.py` checks int32 `max` / `sum` past 2^24 against numpy and tinygrad on the CPU JIT and on the forced walker, including the 4x4 max over axis 1 that read -100000000 for -100000001 and the UPCAST 37-wide rows.
 - `test_param_zero_init_aliasing` pins that zero-initialized parameters (`zeros`, `zeros().contiguous()`, `full`, `zeros_like`) own distinct buffers and train independently under Adam; tinygrad 0.11 hash-consed two `zeros().contiguous()` parameters into one buffer.
 - `nn.state.safe_save` / `safe_load` / `safe_load_metadata` port tinygrad's safetensors format: files match tinygrad's byte for byte and load in either direction; other dtypes narrow to float32 / int32 as `torch_load` does. `nn.state.*` and `from thvm.nn.state import ...` now expose the same functions, including `get_parameters`.
