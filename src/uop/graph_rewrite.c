@@ -341,6 +341,16 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     case UOP_STORE:
       return uop_store(srcs[0], srcs[1], srcs[2]);
 
+    // The indexed ops copy their NUM payload.  The unchecked builders:
+    // the original node passed the checks, and a rewritten source (a
+    // folded CONST, say) need not keep a shape the checks could read.
+    case UOP_GATHER:
+      return uop_gather_node(srcs[0], srcs[1], uop_gather_dim(t));
+
+    case UOP_SCATTER:
+      return uop_scatter_node(srcs[0], srcs[1], srcs[2], uop_scatter_dim(t),
+                              uop_scatter_kind(t), uop_scatter_include_self(t));
+
     // === Expander structural opcodes (src/uop/expander.c) ===
     // Arity 1: only src[0] is a recursable child.  The tail NUM cells
     // (n_args + axis_id/factor pairs, or n_idx + indices) describe the

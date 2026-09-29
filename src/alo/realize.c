@@ -60,6 +60,9 @@ static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
         }
         case UOP_LOAD:                                     return 1;
         case UOP_KERNEL:                                   return 2;
+        // Every cell, the NUM payload included (NUMs pass through bare).
+        case UOP_GATHER:                                   return 3;
+        case UOP_SCATTER:                                  return 6;
         default:                                           return 0;
       }
     }

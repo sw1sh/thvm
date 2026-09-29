@@ -317,6 +317,14 @@ class _Constants:
     # Reduce kinds
     REDUCE_SUM = _read_uint32_const("py_const_REDUCE_SUM")
     REDUCE_MAX = _read_uint32_const("py_const_REDUCE_MAX")
+    # Indexed ops and their scatter combine kinds
+    GATHER = _read_uint32_const("py_const_UOP_GATHER")
+    SCATTER = _read_uint32_const("py_const_UOP_SCATTER")
+    SCATTER_SUM = _read_uint32_const("py_const_SCATTER_SUM")
+    SCATTER_PROD = _read_uint32_const("py_const_SCATTER_PROD")
+    SCATTER_MAX = _read_uint32_const("py_const_SCATTER_MAX")
+    SCATTER_MIN = _read_uint32_const("py_const_SCATTER_MIN")
+    SCATTER_REPLACE = _read_uint32_const("py_const_SCATTER_REPLACE")
     # Axis types (KAX_*)
     AXIS_LOOP = _read_uint32_const("py_const_KAX_LOOP")
     AXIS_REDUCE = _read_uint32_const("py_const_KAX_REDUCE")

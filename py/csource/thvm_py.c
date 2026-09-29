@@ -758,6 +758,14 @@ EXPORT uint32_t py_const_UOP_IXOR(void)  { return UOP_IXOR; }
 EXPORT uint32_t py_const_REDUCE_SUM(void) { return REDUCE_SUM; }
 EXPORT uint32_t py_const_REDUCE_MAX(void) { return REDUCE_MAX; }
 
+EXPORT uint32_t py_const_UOP_GATHER(void)      { return UOP_GATHER; }
+EXPORT uint32_t py_const_UOP_SCATTER(void)     { return UOP_SCATTER; }
+EXPORT uint32_t py_const_SCATTER_SUM(void)     { return SCATTER_SUM; }
+EXPORT uint32_t py_const_SCATTER_PROD(void)    { return SCATTER_PROD; }
+EXPORT uint32_t py_const_SCATTER_MAX(void)     { return SCATTER_MAX; }
+EXPORT uint32_t py_const_SCATTER_MIN(void)     { return SCATTER_MIN; }
+EXPORT uint32_t py_const_SCATTER_REPLACE(void) { return SCATTER_REPLACE; }
+
 EXPORT uint32_t py_const_KAX_LOOP(void)         { return KAX_LOOP; }
 EXPORT uint32_t py_const_KAX_REDUCE(void)       { return KAX_REDUCE; }
 EXPORT uint32_t py_const_KAX_UPCAST(void)       { return KAX_UPCAST; }

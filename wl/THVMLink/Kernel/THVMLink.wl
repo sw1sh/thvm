@@ -470,6 +470,9 @@ $UopOpt = 39;
 (* UOP_COPY: lazy device transfer (heap = [src]); inherits src's
    shape + dtype.  Keep in sync with src/thvm.h. *)
 $UopCopy = 52;
+(* UOP_GATHER / UOP_SCATTER: indexed read and indexed combine along one
+   axis (src/uop/gather.c, src/uop/scatter.c). *)
+$UopGather = 53; $UopScatter = 54;
 (* UOP_BUFFER scope tag.  Mirrors UOP_SCOPE_GLOBAL/LOCAL/REG in src/thvm.h:
    GLOBAL = device memory (Tensor argument default), LOCAL = threadgroup-
    shared, REG = per-thread fragment. *)
@@ -523,7 +526,9 @@ $uopNames = <|
     37 -> "STORE",
     38 -> "AFTER",
     39 -> "OPT",
-    52 -> "COPY"
+    52 -> "COPY",
+    53 -> "GATHER",
+    54 -> "SCATTER"
 |>;
 
 (* Reduce-kind constants *)

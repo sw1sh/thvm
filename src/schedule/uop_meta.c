@@ -76,6 +76,8 @@ fn u8 uop_arity(u8 op) {
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR:
     case UOP_INDEX_E:
+    // GATHER = [src, idx, NUM(dim)]: the trailing NUM is payload.
+    case UOP_GATHER:
       return 2;
     // Ternary symbolic ops.  IWHERE = [cond, then, else];
     // STORE = [buf, addr, value].  All three slots are Term
@@ -83,6 +85,8 @@ fn u8 uop_arity(u8 op) {
     // STORE root all the way down to UOP_RANGE leaves.
     case UOP_IWHERE:
     case UOP_STORE:
+    // SCATTER = [base, idx, src, NUM(dim), NUM(kind), NUM(include_self)].
+    case UOP_SCATTER:
       return 3;
     default:
       return 0;
@@ -265,6 +269,13 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
   if (op == UOP_BUFFERIZE) {
     return term_shape_in(heap_read(loc), 0, out);
   }
+  // GATHER has idx's shape (slot 1); SCATTER has base's (slot 0).
+  if (op == UOP_GATHER) {
+    return term_shape_in(heap_read(loc + 1), 0, out);
+  }
+  if (op == UOP_SCATTER) {
+    return term_shape_in(heap_read(loc + 0), 0, out);
+  }
   if (uop_is_binary_elementwise(op)) {
     Shape la, lb; int la_ok = term_shape_in(heap_read(loc + 0), 0, &la);
     int lb_ok = term_shape_in(heap_read(loc + 1), 0, &lb);
@@ -379,12 +390,14 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
     }
     // Elementwise + reduce + movement ops inherit dtype from src[0]
     // (and binary ops require both srcs share a dtype -- the strict
-    // policy matches tinygrad's no-implicit-promotion stance).
+    // policy matches tinygrad's no-implicit-promotion stance).  So do
+    // GATHER (src) and SCATTER (base).
     if (uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op)
         || op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
         || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP
         || op == UOP_REDUCE  || op == UOP_LOAD    || op == UOP_ASSIGN
-        || op == UOP_BUFFERIZE || op == UOP_COPY) {
+        || op == UOP_BUFFERIZE || op == UOP_COPY
+        || op == UOP_GATHER  || op == UOP_SCATTER) {
       Term src0 = heap_read(loc);
       return term_dtype_in(src0, env_id, out);
     }

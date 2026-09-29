@@ -72,6 +72,10 @@ static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
         case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
         case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
           return 0;  // variable-arity; unsupported in book snapshot for now
+        // Fixed-size indexed ops: clone every cell (NUM payload included,
+        // matching alo_node_arity).
+        case UOP_GATHER:                                   return 3;
+        case UOP_SCATTER:                                  return 6;
         default:                                           return 0;
       }
     }

@@ -4647,6 +4647,8 @@ static char const *bypass_dbg_op_name(u8 op) {
     case UOP_STORE:       return "STORE";
     case UOP_BUFFERIZE:   return "BUFFERIZE";
     case UOP_DETACH:      return "DETACH";
+    case UOP_GATHER:      return "GATHER";
+    case UOP_SCATTER:     return "SCATTER";
     default:              return "?";
   }
 }

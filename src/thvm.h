@@ -595,11 +595,29 @@ int             dtype_is_packed   (u32 dt);
 //   target as src[1] (uop/ops.py:660 copy_to_device, ops.py:756
 //   COPY.device == src[1].device; engine/realize.py:158 exec_copy).
 #define UOP_COPY        52
-#define UOP_COUNT       53
+// UOP_GATHER: heap = [src, idx, NUM(dim)] (arity 2).  idx's shape, src's
+//   dtype: out[i] = src[i with i_dim := idx[i]] when 0 <= idx[i] <
+//   src.shape[dim], else 0 (tinygrad Tensor.gather, mixin/op.py:1023-1043).
+//   See uop/gather.c.
+// UOP_SCATTER: heap = [base, idx, src, NUM(dim), NUM(kind),
+//   NUM(include_self)] (arity 3).  base's shape and dtype: src combined
+//   into base at the positions idx names along dim, with a SCATTER_* kind
+//   (tinygrad scatter_reduce / scatter, mixin/op.py:1126-1177).  See
+//   uop/scatter.c.
+#define UOP_GATHER      53
+#define UOP_SCATTER     54
+#define UOP_COUNT       55
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
 #define REDUCE_MAX   1
+
+// UOP_SCATTER combine kinds (NUM(kind) cell).
+#define SCATTER_SUM      0
+#define SCATTER_PROD     1
+#define SCATTER_MAX      2
+#define SCATTER_MIN      3
+#define SCATTER_REPLACE  4
 
 // === Capacities ===
 #define HEAP_CAP     (1ULL << 28)   // 256M cells * 8B = 2 GiB.  Cheney splits in half (1 GiB per semi-space).  Bumped from 1<<26 so the HVM bench fib_nat (~1.2B cells over its tree) fits without GC.
@@ -3596,6 +3614,30 @@ fn i32  uop_copy_device(u64 loc);
 
 // Build a UOP_DETACH node wrapping `src` (stop-gradient; see UOP_DETACH).
 fn Term uop_detach(Term src);
+
+// Indexed ops (UOP_GATHER / UOP_SCATTER; uop/gather.c, uop/scatter.c).
+// uop_gather / uop_scatter validate their operands and return 0 when a
+// check fails; the *_node forms skip the checks, for rebuilding a node
+// whose sources a rewrite replaced.  uop_indexed_shape_ok is the extent
+// check both share.  scatter_identity_bits writes the identity of `kind`
+// over `dtype` as a CONST payload and returns 0 when none exists.
+fn int  uop_indexed_shape_ok(Shape const *s);
+fn Term uop_gather     (Term src, Term idx, u32 dim);
+fn Term uop_gather_node(Term src, Term idx, u32 dim);
+fn Term uop_gather_src (Term g);
+fn Term uop_gather_idx (Term g);
+fn u32  uop_gather_dim (Term g);
+fn Term uop_scatter     (Term base, Term idx, Term src, u32 dim, u32 kind,
+                         u32 include_self);
+fn Term uop_scatter_node(Term base, Term idx, Term src, u32 dim, u32 kind,
+                         u32 include_self);
+fn Term uop_scatter_base        (Term s);
+fn Term uop_scatter_idx         (Term s);
+fn Term uop_scatter_src         (Term s);
+fn u32  uop_scatter_dim         (Term s);
+fn u32  uop_scatter_kind        (Term s);
+fn u32  uop_scatter_include_self(Term s);
+fn int  scatter_identity_bits(u32 kind, u32 dtype, u32 *bits);
 
 
 // === schedule/ ===

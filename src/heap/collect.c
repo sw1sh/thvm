@@ -164,7 +164,7 @@ fn u64 gc_from_end(void)     { return GC_FROM_END; }
 // full live tag set).
 // A UOp opcode with no case here is never evacuated, and a live node of it
 // reads garbage after the swap: every opcode below UOP_COUNT has a case.
-_Static_assert(UOP_COUNT == 53, "a new UOp opcode needs its heap size in gc_node_size");
+_Static_assert(UOP_COUNT == 55, "a new UOp opcode needs its heap size in gc_node_size");
 static u32 gc_node_size(Term t) {
   u8  tag = term_tag(t);
   u64 loc = term_val(t);
@@ -224,11 +224,15 @@ static u32 gc_node_size(Term t) {
         case UOP_INVALID:     return 1;       // [NUM(0)]
         case UOP_DETACH:      return 1;       // [src]
         case UOP_PLACEHOLDER: return 2;       // [NUM(dtype), NUM(acc_id)]
-        // 3-cell range / ternary / store / opt.
+        // 3-cell range / ternary / store / opt / gather.
         case UOP_RANGE:                       // [NUM(axis_id), NUM(axis_type), NUM(extent)]
         case UOP_IWHERE: case UOP_STORE:      // [cond,then,else] / [buf,addr,value]
         case UOP_OPT:                         // [target, NUM(kind), NUM(factor)]
+        case UOP_GATHER:                      // [src, idx, NUM(dim)]
           return 3;
+        // [base, idx, src, NUM(dim), NUM(kind), NUM(include_self)]
+        case UOP_SCATTER:
+          return 6;
         case UOP_FLIP:   return 2;
         // UOP_REDUCE: heap = [src, kind, n_axes, axis_0, ..., axis_{n-1}].
         // Total cells = 3 + n_axes (multi-axis port).

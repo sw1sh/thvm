@@ -28,6 +28,15 @@ for the per-commit story.
   multiway and causal graphs.
 
 ### Tensors & Autograd
+- New indexed UOps (IR only, no lowering yet): `UOP_GATHER` (tinygrad
+  `Tensor.gather`, mixin/op.py:1023-1043: an out-of-range index reads 0) and
+  `UOP_SCATTER` with SUM / PROD / MAX / MIN / REPLACE kinds and include_self
+  (tinygrad `scatter_reduce` / `scatter`, :1126-1177).  `uop_gather` /
+  `uop_scatter` check the operands the frontends validate and return 0 on a
+  mismatch; `scatter_identity_bits` gives tinygrad's exact identities
+  (dtype.py:70-78).  Every per-op table knows them: arity, shape, dtype,
+  graph-rewrite rebuild, GC cell size, the WL lambda copiers, and the py /
+  WL opcode names.
 - Chain rule through a value select: `IWHERE(c, t, e)` sends the cotangent to
   the selected branch and none to `c` (tinygrad mixin/gradient.py:81), and the
   single-walk pre-walk credits only those two slots.  New `uop_where` builds a
