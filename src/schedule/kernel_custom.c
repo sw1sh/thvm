@@ -32,9 +32,8 @@
 //     caller's back; downstream reads see the written bytes as plain
 //     TAG_TEN leaves.
 
-// The outs mask is a u64 bit set, so an injected kernel takes at most
-// 64 buffer arguments (matches KERNEL_LIFT_MAX_INPUT and the capture's
-// inline-input width).
+// The outs mask (custom_outs_mask) is a u64 bit set, so an injected
+// kernel takes at most 64 buffer arguments.
 #define KERNEL_CUSTOM_MAX_ARGS 64u
 
 // One argument slot: realized, live, contiguous offset-0 leaf.

@@ -202,6 +202,7 @@ static void test_kernel_apply_opt_dag_path(void) {
   // schedule remains NULL -- forces the DAG branch.
   u32 kid = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
+  kernel_lift_reserve(&ke->cached_lift, 2);
   ke->cached_lift.store_root = root;
   ke->cached_lift.out_buf    = C;
   ke->cached_lift.in_bufs[0] = A;
@@ -575,6 +576,7 @@ static void test_hand_opts_unroll_skips_orphan_reduce_axis(void) {
 
   u32 kid = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
+  kernel_lift_reserve(&ke->cached_lift, 1);
   ke->cached_lift.store_root = root;
   ke->cached_lift.out_buf    = O;
   ke->cached_lift.in_bufs[0] = X;

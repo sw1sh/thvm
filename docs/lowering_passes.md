@@ -126,10 +126,12 @@ represents the kernel's compute:
   (im2col split) emits a nested `UOP_IWHERE` chain selecting the
   right input slot based on q.
 
-The lifter populates `KernelUopLift { store_root, out_buf, in_bufs[],
-n_inputs }` ready for the renderer.  `uop_buffer_inst`'s slot
-disambiguator keeps each kernel-arg buffer distinct even when
-shapes coincide.
+The lifter populates `KernelUopLift { store_root, out_buf, in_bufs,
+n_inputs }` ready for the renderer; `in_bufs` is a heap array with one
+entry per kernel input, so a kernel takes any number of inputs (CPU and
+CUDA have no per-kernel buffer cap; Metal's 31 is enforced before the
+lift).  `uop_buffer_inst`'s slot disambiguator keeps each kernel-arg
+buffer distinct even when shapes coincide.
 
 ## Pass 4: Render
 

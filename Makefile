@@ -297,6 +297,7 @@ TESTS := \
   $(BIN)/test_bufferize_classify \
   $(BIN)/test_rangeify_unified \
   $(BIN)/test_limit_bufs \
+  $(BIN)/test_kernel_width \
   $(BIN)/test_bufferize \
   $(BIN)/test_uop_buffer \
   $(BIN)/test_uop_store_after \

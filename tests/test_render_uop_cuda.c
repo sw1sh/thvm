@@ -20,6 +20,19 @@ static int contains(const char *haystack, const char *needle) {
   return strstr(haystack, needle) != NULL;
 }
 
+// 1 iff the signature declares `const float *in<k>` as a whole parameter
+// (not as the prefix of in<k>0..in<k>9).
+static int declares_input(const char *src, u32 k) {
+  char decl[32];
+  int  len = snprintf(decl, sizeof(decl), "const float *in%u", k);
+  for (const char *p = strstr(src, decl); p != NULL; p = strstr(p + 1, decl)) {
+    if (p[len] < '0' || p[len] > '9') {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 // Render `root` through the structural CUDA entry point into a heap
 // buffer.  Caller frees.
 static char *render_cuda(Term root, const char *name) {
@@ -102,15 +115,14 @@ int main(void) {
     free(cu);
   }
 
-  // === at-cap fan-in: 64 inputs must ALL be declared ====================
+  // === 64-input fan-in: every input must be declared ====================
   TEST_BEGIN("render-uop-cuda/64-input-fusion-declares-in63");
   {
-    // KERNEL_LIFT_MAX_INPUT admits 64 inputs; the renderer's slot table
-    // must hold output + all 64 (RMU_BUF_MAX).  At 64 slots exactly, the
-    // 64th input (instance 64 -> `in63`) was silently dropped from the
-    // signature while the body referenced it -- nvrtc "identifier in63 is
-    // undefined" and a silently-zero output (the Krea DiT modulation
-    // fusion on H100).
+    // The renderer's slot table must hold the output + all 64 inputs.
+    // When it held 64 slots, the 64th input (instance 64 -> `in63`) was
+    // silently dropped from the signature while the body referenced it --
+    // nvrtc "identifier in63 is undefined" and a silently-zero output (the
+    // Krea DiT modulation fusion on H100).
     u32 dims[1] = { 32 };
     Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
     Term r0  = uop_range(0, KAX_LOOP, 32);
@@ -127,6 +139,38 @@ int main(void) {
     CHECK(contains(cu, "const float *in63"));
     CHECK(contains(cu, "in63["));
     free(cu);
+  }
+
+  // === wider fan-in: every input of a 70- and a 100-input fusion =======
+  TEST_BEGIN("render-uop-cuda/wide-fusion-declares-every-input");
+  {
+    // CUDA has no per-kernel buffer cap, so the signature must declare
+    // every input the body reads, however many there are.
+    u32 widths[2] = { 70, 100 };
+    for (u32 w = 0; w < 2; w++) {
+      u32 n = widths[w];
+      u32 dims[1] = { 32 };
+      Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
+      Term r0  = uop_range(0, KAX_LOOP, 32);
+      Term acc = 0;
+      for (u32 i = 1; i <= n; i++) {
+        Term in = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, i);
+        Term ld = uop_index_e(in, r0);
+        acc = (acc == 0) ? ld : uop_binary(UOP_ADD, acc, ld);
+      }
+      Term st = uop_store(out, r0, acc);
+      char *cu = render_cuda(st, "k_fanw");
+      CHECK(cu != NULL);
+      u32 declared = 0;
+      for (u32 i = 0; i < n; i++) {
+        declared += declares_input(cu, i);
+      }
+      CHECK_EQ(declared, n);
+      char last[16];
+      snprintf(last, sizeof(last), "in%u[", n - 1);
+      CHECK(contains(cu, last));
+      free(cu);
+    }
   }
 
   // === f32 TC matmul must NOT get a tile-derived __launch_bounds__ ======

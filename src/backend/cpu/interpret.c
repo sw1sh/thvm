@@ -16,6 +16,15 @@ fn int cpu_blas_dispatch       (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id
 fn int cpu_jit_dispatch        (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn int cpu_custom_dispatch     (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn int cpu_uop_walk            (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
+fn char const *cpu_uop_walk_last_decline(void);
+
+// Dispatches in which no rung of the ladder ran, so the kernel's output
+// was never written.  C tests read it through cpu_dispatch_no_rung_count.
+static u64 CPU_DISPATCH_NO_RUNG;
+
+fn u64 cpu_dispatch_no_rung_count(void) {
+  return CPU_DISPATCH_NO_RUNG;
+}
 
 // === ShapeTracker-chained input pre-materialise (CPU side) ===
 //
@@ -131,8 +140,7 @@ static void cpu_premat_restore(KernelEntry *ke, u32 slot, CpuPrematSlot *st) {
 //
 // Bisection knob `THVM_CPU_UOP_WALK=0` is retained for diagnosis.
 // With the walker disabled, dispatch flows BLAS -> JIT only; if both
-// decline, cpu_dispatch_kernel returns 0 with KDISPATCH_INTERPRETER
-// recorded.
+// decline, cpu_dispatch_kernel reports that no rung ran.
 static int cpu_uop_walk_enabled(void) {
   static int known = 0, enabled = 0;
   if (!known) {
@@ -175,8 +183,8 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
       return 0;
     }
   }
-  cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
-  return 0;
+  cg_profile_record(kid, KDISPATCH_NONE, cg_now_us() - t0);
+  return -1;
 }
 
 // Public dispatch entry: pre-materialise any ShapeTracker-chained
@@ -185,6 +193,9 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
 // reaches here -- xCol is a multi-view strided view over the layer
 // input -- so the gather collapses it to a dense matmul operand.  The
 // gather is O(numel * nviews), done once per fire, freed right after.
+//
+// Returns -1 when no rung ran.  The inner ladder only reports it: the
+// swapped input_tids must be restored on the cached KernelEntry first.
 fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // Raw injected kernel: skip the lift-driven ladder entirely (no
   // cached_lift to classify) and bind the argument buffers directly.
@@ -199,5 +210,14 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     cpu_premat_chained_input(ke, i, in_buf_ids, &premat[i]);
   int rc = cpu_dispatch_kernel_inner(ke, in_buf_ids, out_buf_id);
   for (u32 i = 0; i < ke->n_inputs; i++) cpu_premat_restore(ke, i, &premat[i]);
+  if (rc < 0) {
+    CPU_DISPATCH_NO_RUNG++;
+    fprintf(stderr,
+            "thvm: CPU kernel kid=%u n_inputs=%u ran no dispatch rung "
+            "(walker: %s); its output was not written\n",
+            (u32)(ke - KERNELS), ke->n_inputs,
+            cpu_uop_walk_enabled() ? cpu_uop_walk_last_decline()
+                                   : "disabled");
+  }
   return rc;
 }

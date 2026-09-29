@@ -14,10 +14,9 @@
 // IWHERE, OPT, CAST/BITCAST, STORE, AFTER).
 
 // === recursion guard ===========================================
-// Lifted DAGs are bounded (KERNEL_LIFT_MAX_INPUT inputs; one STORE
-// chain per output) but cycles aren't possible -- the lifter constructs
-// pure DAGs.  No memoisation; each helper is one bounded walk per
-// dispatch.  Depth is naturally O(n_ops + n_inputs).
+// Lifted DAGs have one STORE chain per output and no cycles -- the
+// lifter constructs pure DAGs.  No memoisation; each helper is one
+// bounded walk per dispatch.  Depth is naturally O(n_ops + n_inputs).
 
 // Walk the DAG rooted at `t` and verify every dtype-carrying node has
 // dtype `dt`.  Returns 1 on uniform-dtype, 0 on mismatch / unknown.

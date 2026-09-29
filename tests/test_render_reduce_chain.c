@@ -89,7 +89,9 @@ static int run_walker(Term root, Term out, Term x_buf, f32 const *x, f32 *res) {
   memset(&ke, 0, sizeof ke);
   u32 tids[1] = {0};                      // raw buffer pointer, no view bias
   u32 in_buf_ids[1] = { TENS[mk_f32(NX, x)].buf_id };
-  ke.cached_lift.in_bufs[0] = x_buf;
+  Term lift_ins[1] = { x_buf };
+  ke.cached_lift.in_bufs = lift_ins;
+  ke.cached_lift.in_cap  = 1;
   u32 tout = mk_f32(NI, NULL);
   ke.n_inputs               = 1;
   ke.input_tids             = tids;

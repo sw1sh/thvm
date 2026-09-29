@@ -2363,6 +2363,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_source_c(WolframLibraryData libData,
   }
   KernelUopLift lift = {0};
   if (!kernel_lift_to_uop(&KERNELS[kid], &lift)) {
+    kernel_lift_release(&lift);
     MArgument_setUTF8String(res, (char *)"");
     return LIBRARY_NO_ERROR;
   }
@@ -2377,11 +2378,13 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_source_c(WolframLibraryData libData,
   // read it back, rather than a fixed stack buffer -- no length cap.
   FILE *fp = tmpfile();
   if (fp == NULL) {
+    kernel_lift_release(&lift);
     MArgument_setUTF8String(res, (char *)"");
     return LIBRARY_NO_ERROR;
   }
   cg_render_uop_kernel_c(store_root, "k", lift.out_buf,
                          lift.in_bufs, lift.n_inputs, fp);
+  kernel_lift_release(&lift);
   long n = ftell(fp);
   if (n <= 0) {
     fclose(fp);

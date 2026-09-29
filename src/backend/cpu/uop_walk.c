@@ -26,7 +26,6 @@
 
 #define UWALK_MAX_RANGES   16
 #define UWALK_MAX_REDUCES  64
-#define UWALK_MAX_INPUTS KERNEL_LIFT_MAX_INPUT
 
 // THVM_TRACE_UOP_WALK_DECLINE=1 emits one stderr line per decline
 // site, classified by short tag + detail. Off by default; one cached
@@ -42,8 +41,17 @@ static int uwalk_decline_trace_enabled(void) {
   return on;
 }
 
+// The reason of the latest decline, which cpu_dispatch_kernel names when
+// no dispatch rung ran.  cpu_uop_walk clears it on entry.
+static char const *UWALK_LAST_DECLINE;
+
+fn char const *cpu_uop_walk_last_decline(void) {
+  return UWALK_LAST_DECLINE != NULL ? UWALK_LAST_DECLINE : "none";
+}
+
 #define UWALK_DECLINE(kid, reason, fmt, ...)                              \
   do {                                                                    \
+    UWALK_LAST_DECLINE = (reason);                                        \
     if (uwalk_decline_trace_enabled()) {                                  \
       fprintf(stderr,                                                     \
               "THVM_UOP_WALK_DECLINE kid=%u reason=\"%s\" detail=\""      \
@@ -81,11 +89,13 @@ typedef struct {
   u32   split_aid  [UWALK_MAX_RANGES];
   Term  split_owner[UWALK_MAX_RANGES];
   u32   n_split;
-  // Input/output buffer pointers + dtypes, indexed by slot.
-  Term  in_terms [UWALK_MAX_INPUTS];   // UOP_BUFFER terms (for slot match)
-  void *in_ptrs  [UWALK_MAX_INPUTS];
-  u32   in_dtypes[UWALK_MAX_INPUTS];
-  u32   n_inputs;
+  // Input buffer terms (for slot match), pointers and dtypes, indexed by
+  // slot: heap arrays of n_inputs entries, so a kernel may take any
+  // number of inputs without growing the stack.
+  Term  *in_terms;
+  void **in_ptrs;
+  u32   *in_dtypes;
+  u32    n_inputs;
   // Single output buffer (every emitted kernel writes one buffer).
   Term  out_term;
   void *out_ptr;
@@ -1370,6 +1380,7 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     trace_known = 1;
   }
   u32 kid = (u32)(ke - KERNELS);
+  UWALK_LAST_DECLINE = NULL;
   // store_root==0 means the lift declined; the walker can't help in
   // that case (legacy fallback runs).
   if (ke->cached_lift.store_root == 0) {
@@ -1381,12 +1392,6 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     return 0;
   }
   KernelUopLift const *lift = &ke->cached_lift;
-  if (lift->n_inputs > UWALK_MAX_INPUTS) {
-    UWALK_DECLINE(kid, "lift_n_inputs_over_cap",
-                  "n_inputs=%u cap=%u",
-                  (unsigned)lift->n_inputs, (unsigned)UWALK_MAX_INPUTS);
-    return 0;
-  }
   UWalkCtx ctx = {0};
   ctx.kid       = kid;
   ctx.n_inputs  = lift->n_inputs;
@@ -1395,6 +1400,15 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   ctx.out_ptr   = CPU_BUFS[out_buf_id].data;
   ctx.out_dtype = uop_buffer_dtype(lift->out_buf);
   if (ctx.out_dtype == 0) ctx.out_dtype = ke->output_dtype;
+  u32 n_tab = lift->n_inputs ? lift->n_inputs : 1;
+  ctx.in_terms  = (Term  *)calloc(n_tab, sizeof(Term));
+  ctx.in_ptrs   = (void **)calloc(n_tab, sizeof(void *));
+  ctx.in_dtypes = (u32   *)calloc(n_tab, sizeof(u32));
+  if (ctx.in_terms == NULL || ctx.in_ptrs == NULL || ctx.in_dtypes == NULL) {
+    thvm_fatal("cpu_uop_walk: out of memory");
+  }
+  int  ok   = 0;
+  Term root = lift->store_root;
   // Resolve raw pointers (no pre-mat -- the lifter's view-stride
   // addressing reads the underlying buffer directly).
   for (u32 i = 0; i < lift->n_inputs; i++) {
@@ -1409,13 +1423,11 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       UWALK_DECLINE(kid, "input_ptr_unresolved",
                     "slot=%u buf_id=%u",
                     (unsigned)i, (unsigned)in_buf_ids[i]);
-      return 0;
+      goto done;
     }
     ctx.in_ptrs[i] = p;
   }
   // Walk the root.
-  Term root = lift->store_root;
-  int ok = 0;
   if (root != 0 && term_tag(root) == TAG_UOP) {
     u32 op = term_ext(root);
     if      (op == UOP_STORE) ok = uwalk_emit_store(&ctx, root);
@@ -1435,5 +1447,9 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
               (unsigned)term_tag(root));
     }
   }
+done:
+  free(ctx.in_terms);
+  free(ctx.in_ptrs);
+  free(ctx.in_dtypes);
   return ok;
 }

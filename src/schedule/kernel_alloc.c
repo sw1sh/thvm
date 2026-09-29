@@ -44,6 +44,10 @@ fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
     memset(&ke->input_views[i], 0, sizeof(View));
   }
   ke->inputs_cap = new_cap;
+  // The lift's per-input table grows with the slots it mirrors, so an
+  // input slot added after the lift (the unified rewrite's extend path)
+  // always has a lift slot.
+  kernel_lift_reserve(&ke->cached_lift, new_cap);
 }
 
 // Free the heap-allocated arrays in a KernelEntry; reset counts and
@@ -67,9 +71,7 @@ fn void kernel_free_arrays(KernelEntry *ke) {
   // store_root==0; without this a GC-stripped kernel reached via a
   // stale TenDesc.producer_kid would walk the dangling lift with
   // freed input arrays and read uninitialised buffer ids.
-  ke->cached_lift.store_root = 0;
-  ke->cached_lift.out_buf    = 0;
-  ke->cached_lift.n_inputs   = 0;
+  kernel_lift_release(&ke->cached_lift);
 }
 
 fn u32 kernel_alloc(void) {

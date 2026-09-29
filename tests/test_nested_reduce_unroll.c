@@ -123,10 +123,13 @@ static int run_walker(Term root, Term out, Term const *ins, u32 n_in,
   memset(&ke, 0, sizeof ke);
   u32 tids[2] = {0, 0};                   // raw buffer pointers, no view bias
   u32 in_buf_ids[2];
+  Term lift_ins[2] = {0, 0};
   for (u32 s = 0; s < n_in; s++) {
     in_buf_ids[s] = TENS[mk_f32(numels[s], in_data[s])].buf_id;
-    ke.cached_lift.in_bufs[s] = ins[s];
+    lift_ins[s]   = ins[s];
   }
+  ke.cached_lift.in_bufs = lift_ins;
+  ke.cached_lift.in_cap  = 2;
   u32 tout = mk_f32(NI, NULL);
   ke.n_inputs               = n_in;
   ke.input_tids             = tids;

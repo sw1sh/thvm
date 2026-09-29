@@ -977,19 +977,24 @@ typedef struct {
 // the typedef is hoisted here so KernelEntry can embed it by-value as
 // `cached_lift`.
 //
-// KERNEL_LIFT_MAX_INPUT bounds the in_bufs[] inline array for stack
-// safety -- KERNEL_MAX_INPUT (1M) is a sanity cap, not a typical
-// fan-in.  Real workloads max out at ~30 inputs (Conv2D fuses
-// kh*kw input/weight tids per kernel).
-#define KERNEL_LIFT_MAX_INPUT 64
+// in_bufs is a heap array of in_cap slots, one per kernel input, so a
+// lifted kernel takes any number of inputs: tinygrad caps kernel buffers
+// only on WEBGPU (schedule/rangeify.py:170), and wide fusions are real
+// (a Krea DiT kernel reads 64).  kernel_lift_reserve grows it and
+// kernel_lift_release frees it.  A KernelEntry's cached_lift grows with
+// the entry's other per-input arrays (kernel_inputs_reserve) and is
+// released by kernel_free_arrays.
 typedef struct {
   // Topmost UOP_STORE for the kernel's single output.
-  Term store_root;
+  Term  store_root;
   // Output buffer Term (the UOP_BUFFER the STORE writes to).
-  Term out_buf;
-  Term in_bufs[KERNEL_LIFT_MAX_INPUT];
-  u32  n_inputs;
+  Term  out_buf;
+  Term *in_bufs;
+  u32   in_cap;
+  u32   n_inputs;
 } KernelUopLift;
+fn void kernel_lift_reserve(KernelUopLift *lift, u32 needed);
+fn void kernel_lift_release(KernelUopLift *lift);
 
 typedef struct KernelEntry {
   // Input-tensor arrays: dynamically grown.  inputs_cap is the
@@ -1067,8 +1072,9 @@ typedef struct KernelEntry {
   // cached_lift.store_root stays 0.  All Term-typed fields
   // (store_root, out_buf, in_bufs[0..n_inputs)) are heap-resident
   // and walked by gc_evacuate_side_tables across collections.
-  // Embedded by-value (~528 B per slot, KERNELS_CAP-bounded) so
-  // there's no extra allocation / lifetime management.
+  // Embedded by-value; its in_bufs array is reserved with the
+  // per-input arrays above (kernel_inputs_reserve) and freed by
+  // kernel_free_arrays.
   KernelUopLift cached_lift;
 
   // Snapshot of cached_lift.store_root at materialize time, before any
@@ -3253,9 +3259,11 @@ fn int uop_classify_gemv(Term root, u32 *out_k_extent, int *out_w_first);
 // per-kernel output and wraps it as a KernelUopLift; the renderer /
 // DAG-side encoder / cpu_uop_walk all consume the result.
 //
-// `KernelUopLift` + `KERNEL_LIFT_MAX_INPUT` are forward-defined above
-// (right before `KernelEntry`) so the kernel entry can embed the lift
-// output by-value as `cached_lift`.  See that block for the typedef.
+// `KernelUopLift` is forward-defined above (right before `KernelEntry`)
+// so the kernel entry can embed the lift output by-value as
+// `cached_lift`.  See that block for the typedef.  kernel_lift_to_uop
+// reserves out->in_bufs for every input; a caller that owns `out`
+// releases it with kernel_lift_release.
 fn int kernel_lift_to_uop(struct KernelEntry const *ke,
                           KernelUopLift *out);
 

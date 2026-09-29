@@ -645,10 +645,10 @@ static int bufferize_metal_tile_fanin_cap_enabled(void) {
 #ifdef THVM_HAS_CUDA
   // Opt-in on CUDA (THVM_CUDA_FANIN_CAP=1): splitting wide fan-ins is a
   // perf/pressure knob there, NOT a correctness requirement -- the renderer
-  // declares up to KERNEL_LIFT_MAX_INPUT inputs (RMU_BUF_MAX covers
-  // output + 64).  The always-on experiment regressed the Krea gen with an
-  // async CUDA_ERROR_ILLEGAL_ADDRESS from a split boundary, so it stays
-  // off until the split is hardened for CUDA shapes.
+  // declares every input a kernel reads.  The always-on experiment
+  // regressed the Krea gen with an async CUDA_ERROR_ILLEGAL_ADDRESS from a
+  // split boundary, so it stays off until the split is hardened for CUDA
+  // shapes.
   if (CUDA_READY) {
     char const *ce = getenv("THVM_CUDA_FANIN_CAP");
     return ce != NULL && ce[0] == '1';

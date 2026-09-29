@@ -2618,11 +2618,9 @@ static Term unified_rewrite_buffer_for_tid_extend(KernelEntry *ke, u32 tid) {
   Term repl = unified_rewrite_buffer_for_tid(ke, tid);
   if (repl != 0) return repl;
   if (tid == 0 || tid >= TENS_NEXT) return 0;
-  if (ke->n_inputs >= KERNEL_LIFT_MAX_INPUT) return 0;
   TenDesc const *td = &TENS[tid];
   Term ten_term = term_new(0, TAG_TEN, td->dtype, tid);
   u32 slot = input_slot_dedup(ke, tid, ten_term);
-  if (slot >= KERNEL_LIFT_MAX_INPUT) return 0;
   u32 dtype = ke->input_dtypes[slot];
   Term buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype,
                              td->view.shape.ndim, td->view.shape.dims,
@@ -2633,11 +2631,10 @@ static Term unified_rewrite_buffer_for_tid_extend(KernelEntry *ke, u32 tid) {
   // to 0 for the new slot (kernel_inputs_reserve zero-pads); per-slot
   // view-aware addressing kicks in only for tids wired through
   // ru_pass's input_chain logic.
-  if (slot < KERNEL_LIFT_MAX_INPUT) {
-    ke->cached_lift.in_bufs[slot] = buf;
-    if (ke->cached_lift.n_inputs < ke->n_inputs) {
-      ke->cached_lift.n_inputs = ke->n_inputs;
-    }
+  kernel_lift_reserve(&ke->cached_lift, ke->n_inputs);
+  ke->cached_lift.in_bufs[slot] = buf;
+  if (ke->cached_lift.n_inputs < ke->n_inputs) {
+    ke->cached_lift.n_inputs = ke->n_inputs;
   }
   return buf;
 }
@@ -3950,8 +3947,8 @@ static int uop_subtree_has_residual_bufferize(Term root) {
 //     rewritten store_root for INDEX_E(UOP_BUFFER slot, addr) cells and
 //     flag those slots so the backend skips pre-mat.
 typedef struct {
-  u32 slot_mask_lo;       // bit i set iff slot i was flagged (slots 0..31)
-  u32 slot_mask_hi;       // slot 32..63
+  u8  *flagged;           // flagged[i] = 1 iff input slot i was flagged
+  u32  n_slots;
 } ChainFoldMarks;
 
 static int slot_needs_chain_skip(u32 tid) {
@@ -3983,9 +3980,9 @@ static void unified_fold_chain_scan(KernelEntry const *ke, Term t,
                        && ke->input_chain_composed[slot] != 0);
         if (slot_needs_chain_skip(tid)
             && !already
-            && !rangeify_unified_tid_chain_composed(tid)) {
-          if (slot < 32) marks->slot_mask_lo |= (1u << slot);
-          else if (slot < 64) marks->slot_mask_hi |= (1u << (slot - 32));
+            && !rangeify_unified_tid_chain_composed(tid)
+            && slot < marks->n_slots) {
+          marks->flagged[slot] = 1;
         }
       }
     }
@@ -3996,10 +3993,19 @@ static void unified_fold_chain_scan(KernelEntry const *ke, Term t,
   }
 }
 
+// The marks hold one flag per input slot; unified_fold_chain_commit_flags
+// consumes them.
 static Term unified_fold_chain(KernelEntry *ke, Term root, ChainFoldMarks *marks) {
-  marks->slot_mask_lo = 0;
-  marks->slot_mask_hi = 0;
-  if (root == 0 || ke == NULL || ke->input_tids == NULL) return root;
+  marks->flagged = NULL;
+  marks->n_slots = 0;
+  if (root == 0 || ke == NULL || ke->input_tids == NULL || ke->n_inputs == 0) {
+    return root;
+  }
+  marks->flagged = (u8 *)calloc(ke->n_inputs, sizeof(u8));
+  if (marks->flagged == NULL) {
+    thvm_fatal("unified_fold_chain: out of memory");
+  }
+  marks->n_slots = ke->n_inputs;
   BufferizeScanArena arena;
   BufferizeScanVisited v;
   bufferize_scan_open(&v, &arena);
@@ -4009,14 +4015,17 @@ static Term unified_fold_chain(KernelEntry *ke, Term root, ChainFoldMarks *marks
 }
 
 static void unified_fold_chain_commit_flags(KernelEntry *ke,
-                                             ChainFoldMarks const *marks) {
-  if (ke == NULL || ke->input_chain_composed == NULL) return;
-  for (u32 slot = 0; slot < ke->n_inputs && slot < 64; slot++) {
-    u32 bit = (slot < 32)
-              ? ((marks->slot_mask_lo >> slot) & 1u)
-              : ((marks->slot_mask_hi >> (slot - 32)) & 1u);
-    if (bit) ke->input_chain_composed[slot] = 1;
+                                             ChainFoldMarks *marks) {
+  if (ke != NULL && ke->input_chain_composed != NULL) {
+    for (u32 slot = 0; slot < ke->n_inputs && slot < marks->n_slots; slot++) {
+      if (marks->flagged[slot]) {
+        ke->input_chain_composed[slot] = 1;
+      }
+    }
   }
+  free(marks->flagged);
+  marks->flagged = NULL;
+  marks->n_slots = 0;
 }
 
 // Per-kernel bypass safety gate: collect every UOP_RANGE axis_id
@@ -6650,11 +6659,12 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // Cache kernel_lift_to_uop output on the KernelEntry: the lifter
   // resolves the unified-pass store_root and packages it as
   // KernelUopLift.  When the lift declines (no source_uop /
-  // bufferize_info miss / n_inputs > KERNEL_LIFT_MAX_INPUT)
-  // cached_lift stays zero-initialized and the dispatch ladder
+  // bufferize_info miss / no unified store_root)
+  // cached_lift.store_root stays 0 and the dispatch ladder
   // falls back to whatever paths each backend exposes for unlifted
-  // kernels (today: cpu_blas_dispatch by pattern, cpu_jit_dispatch
-  // declines, cpu_uop_walk declines, Metal dispatch returns -1).
+  // kernels (today: cpu_blas_dispatch by pattern; cpu_jit_dispatch and
+  // cpu_uop_walk decline, and cpu_dispatch_kernel reports that no rung
+  // ran; Metal dispatch returns -1).
   //
   // Dispatch-time consumers (cpu_jit_build, cg_emit_via_uop,
   // cpu_uop_walk) read store_root / out_buf / in_bufs[] from
@@ -6697,8 +6707,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // whose tid carries non-trivial layout (chain or non-contig
     // view); the marks are committed below with the store_root.
     ChainFoldMarks _cf_marks;
-    _cf_marks.slot_mask_lo = 0;
-    _cf_marks.slot_mask_hi = 0;
     ru_rewritten = unified_fold_chain(ke, ru_rewritten, &_cf_marks);
     // Per-kernel coverage diagnostics, counted for THVM_DUMP_LIFT_COVERAGE
     // and printed by THVM_DEBUG_BYPASS_LAST.  They select nothing: every

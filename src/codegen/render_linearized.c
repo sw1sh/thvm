@@ -89,7 +89,12 @@ static u32 lz_register_buf(LzCtx *ctx, Term buf) {
   for (u32 i = 0; i < ctx->n_bufs; i++) {
     if (ctx->bufs[i].buf == buf) return i;
   }
-  if (ctx->n_bufs >= LZ_MAX_BUFS) return 0xFFFFFFFFu;
+  // A buffer without a slot would render as `?`: bail so the legacy
+  // emit, whose slot table grows per kernel, renders the kernel.
+  if (ctx->n_bufs >= LZ_MAX_BUFS) {
+    ctx->bad = 1;
+    return 0xFFFFFFFFu;
+  }
   LzBufSlot *s = &ctx->bufs[ctx->n_bufs++];
   s->buf = buf;
   u32 inst = uop_buffer_inst_get(buf);

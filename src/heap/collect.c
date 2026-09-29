@@ -449,10 +449,12 @@ static void gc_evacuate_side_tables(u64 *alloc) {
       ke->cached_lift.out_buf =
           gc_evacuate(ke->cached_lift.out_buf, alloc);
     }
-    for (u32 i = 0; i < ke->cached_lift.n_inputs; i++) {
-      if (ke->cached_lift.in_bufs[i] != 0) {
-        ke->cached_lift.in_bufs[i] =
-            gc_evacuate(ke->cached_lift.in_bufs[i], alloc);
+    if (ke->cached_lift.in_bufs != NULL) {
+      for (u32 i = 0; i < ke->cached_lift.n_inputs; i++) {
+        if (ke->cached_lift.in_bufs[i] != 0) {
+          ke->cached_lift.in_bufs[i] =
+              gc_evacuate(ke->cached_lift.in_bufs[i], alloc);
+        }
       }
     }
     if (ke->input_terms != NULL) {

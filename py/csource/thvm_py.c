@@ -571,17 +571,19 @@ EXPORT void py_kernel_set_cached_lift(uint32_t kid, uint64_t store_root,
                                       uint32_t n_inputs) {
   if (kid == 0 || kid >= KERNELS_NEXT) return;
   KernelEntry *ke = &KERNELS[kid];
+  // ke->n_inputs below must index real (zeroed) input arrays.
+  kernel_inputs_reserve(ke, n_inputs);
+  kernel_lift_reserve(&ke->cached_lift, n_inputs);
   ke->cached_lift.store_root = store_root;
-  ke->cached_lift.out_buf = out_buf;
-  ke->cached_lift.n_inputs = n_inputs;
-  if (n_inputs > KERNEL_LIFT_MAX_INPUT) n_inputs = KERNEL_LIFT_MAX_INPUT;
+  ke->cached_lift.out_buf    = out_buf;
   for (uint32_t i = 0; i < n_inputs; i++) {
     ke->cached_lift.in_bufs[i] = in_bufs[i];
   }
-  // Also set the KernelEntry's own n_inputs -- DAG classifiers read
+  // Both counts name the same inputs -- DAG classifiers read
   // ke->n_inputs (not cached_lift.n_inputs) when validating the
-  // BUFFER.instance->slot mapping (uop_dag_classify_matmul_shape:507).
-  ke->n_inputs = n_inputs;
+  // BUFFER.instance->slot mapping (uop_dag_classify_matmul_shape).
+  ke->cached_lift.n_inputs = n_inputs;
+  ke->n_inputs             = n_inputs;
 }
 
 // Returns number of candidates filled into out_ops[]/out_axes[]/out_args[].

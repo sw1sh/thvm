@@ -16,6 +16,34 @@ fn u64 kernel_lift_successes(void)       { return KERNEL_LIFT_SUCCESSES; }
 fn void kernel_lift_count_attempt (void) { KERNEL_LIFT_ATTEMPTS++; }
 fn void kernel_lift_count_success (void) { KERNEL_LIFT_SUCCESSES++; }
 
+fn void kernel_lift_reserve(KernelUopLift *lift, u32 needed) {
+  if (needed <= lift->in_cap) {
+    return;
+  }
+  u32 new_cap = lift->in_cap == 0 ? KERNEL_INIT_INPUT : lift->in_cap * 2;
+  while (new_cap < needed) {
+    new_cap *= 2;
+  }
+  Term *grown = (Term *)realloc(lift->in_bufs, (size_t)new_cap * sizeof(Term));
+  if (grown == NULL) {
+    thvm_fatal("kernel_lift_reserve: out of memory");
+  }
+  for (u32 i = lift->in_cap; i < new_cap; i++) {
+    grown[i] = 0;
+  }
+  lift->in_bufs = grown;
+  lift->in_cap  = new_cap;
+}
+
+fn void kernel_lift_release(KernelUopLift *lift) {
+  free(lift->in_bufs);
+  lift->in_bufs    = NULL;
+  lift->in_cap     = 0;
+  lift->n_inputs   = 0;
+  lift->store_root = 0;
+  lift->out_buf    = 0;
+}
+
 static void lift_reject_log(u32 sid, const char *where) {
   static int reject_log_inited = 0;
   static int reject_log_on     = 0;
@@ -69,10 +97,7 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     lift_reject_log(0, "entry/no-unified-store-root");
     return 0;
   }
-  if (ke->n_inputs > KERNEL_LIFT_MAX_INPUT) {
-    lift_reject_log(0, "entry/n-inputs-over-cap");
-    return 0;
-  }
+  kernel_lift_reserve(out, ke->n_inputs);
   out->n_inputs = ke->n_inputs;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     Term in_buf = lift_input_buffer(ke, i);

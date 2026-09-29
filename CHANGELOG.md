@@ -116,6 +116,7 @@ for the per-commit story.
   last iteration.
 
 ### Backends
+- A CPU kernel with more than 64 inputs computes instead of returning zeros: the kernel lift, the UOp walker, the C renderer and the chain-fold marks size their input tables per kernel. A CPU dispatch that finds no rung returns -1, counts itself (`cpu_dispatch_no_rung_count`) and prints one line, instead of silently keeping the zero fill.
 - Linux CPU BLAS: native Linux builds route matmul / matvec / dot kernels
   through OpenBLAS or BLIS (cblas) when installed, as macOS does through
   Accelerate; THVM_CBLAS=0 opts out.  Without it those kernels run as

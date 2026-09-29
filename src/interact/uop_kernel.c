@@ -545,17 +545,22 @@ fn void kernel_fire_by_id(u32 kid) {
               "out_numel=%llu\n", (u32)(ke - KERNELS), bn, ke->n_inputs, sv_op,
               (unsigned long long)ke->output_numel);
     }
-    b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
-    // Precise memo bookkeeping: record this dispatch's OUTPUT write so a
-    // downstream kernel reading it re-fires iff WE re-fired (propagates
-    // re-fires through the kernel chain -- a fresh forward correctly
-    // re-runs when an input changed; an unchanged upstream still lets
-    // downstream skip, preserving the dedup).  Record BEFORE stamping
-    // fire_assign_seq so our own output write (seq == fire_assign_seq)
-    // doesn't make US look dirty on a later re-walk.
-    if (b == out_b && out_buf_id != 0) kernel_assign_write_record(b, out_buf_id);
-    ke->fire_assign_seq = ASSIGN_SEQ;
-    ke->fire_pass       = ASSIGN_PASS_EPOCH;
+    int rc = b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
+    // A CPU dispatch that ran no rung wrote nothing (cpu_dispatch_kernel
+    // said so on stderr): leave the precise memo unstamped so the output
+    // is not taken as produced and a later fire tries again.
+    if (!(rc < 0 && b == &CPU_BACKEND)) {
+      // Precise memo bookkeeping: record this dispatch's OUTPUT write so a
+      // downstream kernel reading it re-fires iff WE re-fired (propagates
+      // re-fires through the kernel chain -- a fresh forward correctly
+      // re-runs when an input changed; an unchanged upstream still lets
+      // downstream skip, preserving the dedup).  Record BEFORE stamping
+      // fire_assign_seq so our own output write (seq == fire_assign_seq)
+      // doesn't make US look dirty on a later re-walk.
+      if (b == out_b && out_buf_id != 0) kernel_assign_write_record(b, out_buf_id);
+      ke->fire_assign_seq = ASSIGN_SEQ;
+      ke->fire_pass       = ASSIGN_PASS_EPOCH;
+    }
   }
 
   // Per-fire consumer-count decref removed alongside `fired`: the

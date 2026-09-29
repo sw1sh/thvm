@@ -169,33 +169,23 @@ static void rmu_emit_unroll_pragma(FILE *fp, u32 factor) {
 //
 // Static globals are fine; the renderer isn't re-entrant in practice
 // and the map is cleared at the start of each render.
-// RMU_BUF_MAX bounds the number of distinct BUFFER / BUFFERIZE Terms
-// rmu_discover_bufs_rec can promote to input slots in one kernel.
-// Metal caps kernel-argument buffers at 31; the lift / Metal codegen
-// gate that elsewhere.  On CPU / CUDA there is no hard limit, but the
-// renderer's static slot table needs a fixed cap; 64 matches
-// KERNEL_LIFT_MAX_INPUT (the kernel_lift cap on n_inputs) so the
-// discover walk never spills on a kernel the lift accepted.
 //
-// Going below the lift cap was a real bug: when no REDUCE is force-
-// realized, the BN-train mean/var/inv broadcast graphs fuse into the
-// downstream MaxPool kernel and pull the BN params (mean, var, scale,
-// shift, eps, plus the BUFFERIZE handles for the inner reduces) past
-// the 32-slot ceiling -- the overflow BUFFERIZEs then hit
-// rmu_buf_name's `buf<term_val>` fallback and the JIT'd C source
-// references undeclared identifiers (build fails, dispatch falls to
-// the walker, walker doesn't terminate at BS=2 on MNIST).
-//
-// 64 EXACTLY was still off by one: slot 0 is the OUTPUT, so 64 slots
-// hold only 63 inputs, while the lift admits n_inputs == 64
-// (KERNEL_LIFT_MAX_INPUT).  An at-cap fusion (the Krea DiT combined-
-// stream concat + modulations, 64 inputs) then dropped instance 64 from
-// the signature while the body still referenced it -- nvrtc "identifier
-// in63 is undefined", the dispatch failed, and the output buffer stayed
-// silently zero.  66 = output + the lift's 64 + slack.
-#define RMU_BUF_MAX 66
-static struct { Term term; char name[16]; } RMU_BUF_NAMES[RMU_BUF_MAX];
-static u32 RMU_BUF_NAMES_N;
+// The map and the discover walk's slot table (RmuSlots below) grow per
+// kernel: CPU and CUDA take any number of kernel buffers, and Metal's
+// 31-buffer cap is enforced upstream (ru_limit_bufs_node) and by the
+// Metal renderer's own n_inputs decline.  Both were fixed tables once,
+// and every kernel wider than the table rendered a body that named an
+// input its signature did not declare: past 32 slots a BN-train
+// MaxPool fusion's JIT source did not compile, and past 64 a Krea DiT
+// fusion failed nvrtc ("identifier in63 is undefined") and left its
+// output silently zero.
+typedef struct {
+  Term term;
+  char name[16];
+} RmuBufName;
+static RmuBufName *RMU_BUF_NAMES;
+static u32         RMU_BUF_NAMES_N;
+static u32         RMU_BUF_NAMES_CAP;
 
 static void rmu_buf_names_reset(void) {
   RMU_BUF_NAMES_N = 0;
@@ -208,7 +198,16 @@ static void rmu_buf_names_reset(void) {
 // register the output's "out" name (whose lifter-assigned instance is
 // 0 and so doesn't carry a structural slot).
 static void rmu_buf_names_set(Term t, const char *name) {
-  if (RMU_BUF_NAMES_N >= RMU_BUF_MAX) return;
+  if (RMU_BUF_NAMES_N == RMU_BUF_NAMES_CAP) {
+    u32 cap = RMU_BUF_NAMES_CAP ? RMU_BUF_NAMES_CAP * 2 : 64;
+    RmuBufName *grown = (RmuBufName *)realloc(RMU_BUF_NAMES,
+                                              (size_t)cap * sizeof(RmuBufName));
+    if (grown == NULL) {
+      thvm_fatal("rmu_buf_names_set: out of memory");
+    }
+    RMU_BUF_NAMES     = grown;
+    RMU_BUF_NAMES_CAP = cap;
+  }
   RMU_BUF_NAMES[RMU_BUF_NAMES_N].term = t;
   snprintf(RMU_BUF_NAMES[RMU_BUF_NAMES_N].name,
            sizeof(RMU_BUF_NAMES[0].name), "%s", name);
@@ -940,8 +939,7 @@ static void rmu_emit_term(Term t, FILE *fp) {
 // rank) because a kernel's iter scope can combine many axes: output
 // axes + auxiliary LOOP axes inside reduce bodies + reduce-axes
 // themselves.  Bench-train backward kernels touching 5-layer
-// conv+BN+maxpool chains can reach ~12 distinct axes.  32 matches
-// RMU_BUF_MAX (the Metal buffer-attribute cap) for symmetry.
+// conv+BN+maxpool chains can reach ~12 distinct axes.
 #define RMU_MAX_RANGES 32
 
 static void rmu_collect_ranges_rec_cap(Term t, Term *ranges,
@@ -6049,10 +6047,10 @@ static void rmu_emit_after(Term after, FILE *fp, u32 depth) {
 
 // Walk the DAG rooted at `root` and collect the unique UOP_BUFFER
 // terms keyed by `instance` (kernel_lift.c sets instance=0 on the
-// output and instance=slot+1 on input slot `slot`).  Slot 0 of the
-// returned `slot_bufs[]` array holds the output (instance=0), slot
-// k>=1 holds input (k-1).  Returns the highest input slot+1 used,
-// i.e. n_inputs.
+// output and instance=slot+1 on input slot `slot`).  Slot 0 of
+// `slots->bufs` holds the output (instance=0), slot k>=1 holds input
+// (k-1).  *n_inputs_out ends as the highest input slot used, i.e.
+// n_inputs.
 //
 // For lifted kernels every BUFFER carries a structural instance, so
 // this walk is the source of truth for the kernel signature: shapes
@@ -6062,11 +6060,50 @@ static void rmu_emit_after(Term after, FILE *fp, u32 depth) {
 // helper -- they go through the explicit cg_render_uop_kernel(root,
 // out_buf, in_bufs[]) entry instead.
 //
-// Capacity matches RMU_BUF_MAX (1 output + up to KERNEL_LIFT_MAX_INPUT
-// inputs; Metal's 31-buffer attribute cap is gated separately by the
-// Metal renderer's own n_inputs decline).
-#define RMU_DISCOVER_MAX RMU_BUF_MAX
-static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
+// The table grows to the highest slot the walk fills (rmu_slots_open);
+// Metal's 31-buffer attribute cap is gated separately by the Metal
+// renderer's own n_inputs decline.
+typedef struct {
+  Term *bufs;
+  u32   cap;
+} RmuSlots;
+
+static void rmu_slots_reserve(RmuSlots *s, u32 need) {
+  if (need <= s->cap) {
+    return;
+  }
+  u32 cap = s->cap ? s->cap : 16;
+  while (cap < need) {
+    cap *= 2;
+  }
+  Term *grown = (Term *)realloc(s->bufs, (size_t)cap * sizeof(Term));
+  if (grown == NULL) {
+    thvm_fatal("rmu_slots_reserve: out of memory");
+  }
+  for (u32 i = s->cap; i < cap; i++) {
+    grown[i] = 0;
+  }
+  s->bufs = grown;
+  s->cap  = cap;
+}
+
+// Place `t` in the first free slot above *n_inputs_out unless a slot
+// there already holds it.
+static void rmu_slots_promote(RmuSlots *s, Term t, u32 *n_inputs_out) {
+  for (u32 i = (*n_inputs_out) + 1; ; i++) {
+    rmu_slots_reserve(s, i + 1);
+    if (s->bufs[i] == t) {
+      return;
+    }
+    if (s->bufs[i] == 0) {
+      s->bufs[i] = t;
+      *n_inputs_out = i;
+      return;
+    }
+  }
+}
+
+static void rmu_discover_bufs_rec(Term t, RmuSlots *slots, u32 *n_inputs_out) {
   // TAG_TEN: bare tensor leaves the unified pass / kernel_lift left in
   // the DAG instead of converting to UOP_BUFFER input slots.  Treat as
   // input slots: promote to the next free slot and register so
@@ -6074,14 +6111,7 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
   // the `buf{term_val}` fallback and Metal compile fails on the
   // undeclared identifier.
   if (term_tag(t) == TAG_TEN) {
-    for (u32 i = (*n_inputs_out) + 1; i < RMU_DISCOVER_MAX; i++) {
-      if (slot_bufs[i] == t) return;
-      if (slot_bufs[i] == 0) {
-        slot_bufs[i] = t;
-        *n_inputs_out = i;
-        return;
-      }
-    }
+    rmu_slots_promote(slots, t, n_inputs_out);
     return;
   }
   if (term_tag(t) != TAG_UOP) return;
@@ -6123,12 +6153,13 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
   }
   if (op == UOP_BUFFER) {
     u32 inst = uop_buffer_inst_get(t);
-    if (inst >= RMU_DISCOVER_MAX) return;
+    if (inst > KERNEL_MAX_INPUT) return;   // no kernel has such a slot
+    rmu_slots_reserve(slots, inst + 1);
     // Already filled by this exact Term -- a reuse (same BUFFER appears
     // in multiple positions of the DAG).  Nothing to do.
-    if (slot_bufs[inst] == t) return;
-    if (slot_bufs[inst] == 0) {
-      slot_bufs[inst] = t;
+    if (slots->bufs[inst] == t) return;
+    if (slots->bufs[inst] == 0) {
+      slots->bufs[inst] = t;
       if (inst >= 1 && inst > *n_inputs_out) *n_inputs_out = inst;
       return;
     }
@@ -6140,15 +6171,7 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
     // fires in the body -- the resulting MSL references undeclared
     // identifiers (`buf53991`, etc.) and Metal compile fails.  Promote
     // to the next free input slot.
-    for (u32 i = (*n_inputs_out) + 1; i < RMU_DISCOVER_MAX; i++) {
-      if (slot_bufs[i] == t) return;       // already promoted by an
-                                            // earlier visit of the same Term
-      if (slot_bufs[i] == 0) {
-        slot_bufs[i] = t;
-        *n_inputs_out = i;
-        return;
-      }
-    }
+    rmu_slots_promote(slots, t, n_inputs_out);
     return;
   }
   // Recurse over operand slots.  Mirrors rmu_collect_ranges' op
@@ -6165,40 +6188,40 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
     case UOP_ISHR:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
-      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 1), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 1), slots, n_inputs_out);
       return;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
     case UOP_LOG2:  case UOP_SQRT:
-      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
       return;
     case UOP_CAST:  case UOP_BITCAST:
       // [src, NUM(dst_dtype)]
-      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
       return;
     case UOP_IWHERE:
-      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 1), slot_bufs, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 2), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 1), slots, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 2), slots, n_inputs_out);
       return;
     case UOP_OPT:
       // [target, NUM(kind), NUM(factor)]
-      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
       return;
     case UOP_REDUCE:
       // [src, NUM(kind), NUM(axis)]
-      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
       return;
     case UOP_STORE:
       // [buf, addr, value]
-      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 1), slot_bufs, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 2), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 1), slots, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 2), slots, n_inputs_out);
       return;
     case UOP_AFTER:
       // [node, after_node]
-      rmu_discover_bufs_rec(heap_read(loc + 0), slot_bufs, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 1), slot_bufs, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
+      rmu_discover_bufs_rec(heap_read(loc + 1), slots, n_inputs_out);
       return;
     case UOP_RANGE:
     case UOP_CONST: case UOP_INVALID:
@@ -6207,6 +6230,22 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
     default:
       return;
   }
+}
+
+// Discover `root`'s buffer slots into a table that covers at least
+// slots 0..*n_inputs_out.  Release it with rmu_slots_free.
+static RmuSlots rmu_slots_open(Term root, u32 *n_inputs_out) {
+  RmuSlots slots = { NULL, 0 };
+  *n_inputs_out = 0;
+  rmu_discover_bufs_rec(root, &slots, n_inputs_out);
+  rmu_slots_reserve(&slots, *n_inputs_out + 1);
+  return slots;
+}
+
+static void rmu_slots_free(RmuSlots *slots) {
+  free(slots->bufs);
+  slots->bufs = NULL;
+  slots->cap  = 0;
 }
 
 // Public: return the highest input slot (UOP_BUFFER instance) the
@@ -6223,9 +6262,9 @@ static void rmu_discover_bufs_rec(Term t, Term *slot_bufs, u32 *n_inputs_out) {
 // buffer list is derived FROM the final AST's PARAM nodes, never a
 // separately-maintained list that can drift.
 fn u32 cg_render_input_inst_count(Term root) {
-  Term slot_bufs[RMU_DISCOVER_MAX] = {0};
-  u32 n_inputs = 0;
-  rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
+  u32      n_inputs = 0;
+  RmuSlots slots    = rmu_slots_open(root, &n_inputs);
+  rmu_slots_free(&slots);
   return n_inputs;
 }
 
@@ -6361,10 +6400,10 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
       }
     }
   }
-  Term slot_bufs[RMU_DISCOVER_MAX] = {0};
-  u32 n_inputs = 0;
-  rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
-  Term out_buf = slot_bufs[0];
+  u32      n_inputs  = 0;
+  RmuSlots slots     = rmu_slots_open(root, &n_inputs);
+  Term    *slot_bufs = slots.bufs;
+  Term     out_buf   = slot_bufs[0];
   rmu_buf_names_reset();
   // Output's instance is 0; rmu_buf_name falls through to the
   // identity map for it.  Inputs are resolved structurally so we
@@ -6442,6 +6481,7 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   RMU_HAS_GROUP_REDUCE = 0;
   RMU_GROUP_EXTENT = 0; RMU_GROUP_LOCAL_TOTAL = 1;
   fputs("}\n", fp);
+  rmu_slots_free(&slots);
 }
 
 // F6: render the same UOp DAG as a C99 kernel for the CPU JIT.
@@ -6659,28 +6699,24 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   if (route_trace) {
     fprintf(stderr, "[route] %s: legacy rmu_emit\n", kernel_name);
   }
-  Term slot_bufs[RMU_DISCOVER_MAX] = {0};
-  u32 n_inputs = 0;
-  rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
-  Term out_buf = slot_bufs[0];
+  u32      n_inputs  = 0;
+  RmuSlots slots     = rmu_slots_open(root, &n_inputs);
+  Term    *slot_bufs = slots.bufs;
+  Term     out_buf   = slot_bufs[0];
   // DECLINE an unsound signature rather than render it: writing nothing
   // makes cpu_jit_render_canon's `ftell <= 0` fall back to the interpreter
-  // (correct, just slower).  n_inputs is the MAX instance seen, not a count,
-  // and rmu_discover_bufs_rec drops `inst >= RMU_DISCOVER_MAX`, so an
-  // overflowing kernel is unsound.  So is a slot holding anything but a real
-  // UOP_BUFFER (dtype 0: a bare TAG_TEN leaf, BUFFERIZE residue): it renders
-  // as `unsigned char` while the body reads floats, which once returned
-  // silently wrong data (a 300-op fused chain read its inputs byte-wise).
+  // (correct, just slower).  n_inputs is the MAX instance seen, not a
+  // count.  A slot holding anything but a real UOP_BUFFER (dtype 0: a bare
+  // TAG_TEN leaf, BUFFERIZE residue) renders as `unsigned char` while the
+  // body reads floats, which once returned silently wrong data (a 300-op
+  // fused chain read its inputs byte-wise).
   // A slot NOTHING claimed (a hole) is an input the kernel does not read --
   // conv+BatchNorm lifts keep one -- so it gets no declaration; only a body
   // that names a hole anyway (a discovery gap) declines.
-  if (n_inputs >= RMU_DISCOVER_MAX) {
-    rmu_c_decline("slot table overflow", n_inputs);
-    return;
-  }
   for (u32 i = 1; i <= n_inputs; i++) {
     if (slot_bufs[i] != 0 && uop_buffer_dtype(slot_bufs[i]) == 0) {
       rmu_c_decline("slot is not a typed buffer", i);
+      rmu_slots_free(&slots);
       return;
     }
   }
@@ -6689,6 +6725,7 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   FILE  *out_fp = fp;
   fp = open_memstream(&src, &src_sz);
   if (fp == NULL) {
+    rmu_slots_free(&slots);
     return;
   }
   rmu_buf_names_reset();
@@ -6762,6 +6799,7 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
     fputs(src, out_fp);
   }
   free(src);
+  rmu_slots_free(&slots);
 }
 
 // True iff `t`'s subtree contains a UOP_RANGE whose axis_type ==
@@ -6965,10 +7003,10 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   // non-matmul kernels; the batched-gemm + conv2d recognisers run too so
   // those templates fire identically to the Metal path.
   root = uop_recognise_tc_parallel(root);
-  Term slot_bufs[RMU_DISCOVER_MAX] = {0};
-  u32 n_inputs = 0;
-  rmu_discover_bufs_rec(root, slot_bufs, &n_inputs);
-  Term out_buf = slot_bufs[0];
+  u32      n_inputs  = 0;
+  RmuSlots slots     = rmu_slots_open(root, &n_inputs);
+  Term    *slot_bufs = slots.bufs;
+  Term     out_buf   = slot_bufs[0];
   rmu_buf_names_reset();
   if (out_buf != 0) rmu_buf_names_set(out_buf, "out");
   RMU_TARGET = CG_TARGET_CUDA;
@@ -7125,4 +7163,5 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   RMU_HAS_GROUP_REDUCE = 0;
   RMU_GROUP_EXTENT = 0; RMU_GROUP_LOCAL_TOTAL = 1;
   fputs("}\n", fp);
+  rmu_slots_free(&slots);
 }
