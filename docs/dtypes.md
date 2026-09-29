@@ -1,10 +1,11 @@
 # Dtypes
 
 THVM mirrors tinygrad's full dtype set (15 concrete dtypes) plus
-packed `int4` / `uint4` for modern quantization.  Every dtype is
-end-to-end through the CPU interpreter and the WL bridge; the
-codegen / JIT / BLAS / Metal paths still gate to F32 only and fall
-back to interpret.c on anything else.
+packed `int4` / `uint4` for modern quantization.  Every dtype but
+the packed `int4` / `uint4` (see ALU strategy) is end-to-end through
+the CPU interpreter and the WL bridge; the codegen / JIT / BLAS /
+Metal paths still gate to F32 only and fall back to interpret.c on
+anything else.
 
 Reference:
 - enum + DTypeInfo:    [src/dtype/info.c](../src/dtype/info.c)
@@ -31,8 +32,8 @@ Reference:
 | 12 | `bf16`      | 2        | bf16     | y      | UnsignedInteger16 *  | promote -> f32  |
 | 13 | `f32`       | 4        | float    | y      | Real32               | native          |
 | 14 | `f64`       | 8        | float    | y      | Real64               | native          |
-| 15 | `i4`        | packed   | int4     | y      | UnsignedInteger8 *   | unpack -> i8    |
-| 16 | `u4`        | packed   | uint4    | n      | UnsignedInteger8 *   | unpack -> i8    |
+| 15 | `i4`        | packed   | int4     | y      | UnsignedInteger8 *   | none            |
+| 16 | `u4`        | packed   | uint4    | n      | UnsignedInteger8 *   | none            |
 
 `*` -- raw-bytes carrier.  The NumericArray bytes do not represent
 their numeric value directly; the WL surface decodes via the dtype-
@@ -114,17 +115,22 @@ Since an fp8e4m3 CONST of -inf is NaN, the MAX reduce identity is the
 dtype's minimum: -448 for fp8e4m3, -inf for the other float dtypes
 (tinygrad `identity_element`, uop/ops.py:61).
 
-Unpack-to-i8 lanes -- i4, u4.  Storage is 2 nibbles per byte, low
-nibble first.  Movement ops route through `cpu_op_run_via_i8`: unpack
-the source bytes to a temp i8 buffer, run the i8 movement kernel,
-repack to nibbles.  Elementwise ops route through `cpu_op_run_via_f32`
-(int4 / uint4 unpacking is handled inside `to_fp32_lane`).
+Packed nibble lanes -- i4, u4.  Storage is 2 nibbles per byte, low
+nibble first ([src/dtype/nibble.c](../src/dtype/nibble.c)).  No CPU
+kernel handles them: the UOp walker has no nibble load or store, and
+materialize sizes buffers with `dtype_itemsize`, which aborts on a
+packed dtype.  An elementwise or movement op over an i4 / u4 tensor
+aborts in `bufferize_compute_costs`, and a reduce or a CAST to f32
+returns wrong values.  Only storage works: pack / unpack, tensor
+creation and readback.
 
 ## CAST and BITCAST
 
 CAST is value-preserving across any dtype pair.  Heap layout
-`[src, NUM(dst_dtype)]`.  Implementation: `to_fp32_lane(src)` ->
-`from_fp32_lane(dst)`.
+`[src, NUM(dst_dtype)]`.  Implementation: the kernel reads the source
+value (the walker widens it to f64 or i64) and stores it at the
+destination dtype, so an fp8 destination takes the store rule above.
+A CAST of a float CONST folds on the host (below).
 
 BITCAST is bit-level reinterpret; source and destination must share
 itemsize.  Implementation is a memcpy.  Width mismatch is caught at
@@ -161,7 +167,9 @@ Folding rules, all at the constructor level:
 The dequantization pattern composes through CAST + arithmetic.  No
 dedicated UOP_DEQUANT / UOP_QUANT primitives -- matches tinygrad's
 choice (see TinyHVM/tinygrad/tinygrad/codegen/quantize.py for
-tinygrad's pattern-rewrite-based approach).
+tinygrad's pattern-rewrite-based approach).  The CPU backend has no
+kernel path for the int4 CAST (see ALU strategy), so the example
+shows the pattern, not a result thvm computes.
 
 ```mathematica
 (* Dequantize an int4 tensor: (raw - zp) * scale *)
@@ -182,7 +190,7 @@ a view-only no-op when contiguous-compatible).
 
 | Path        | Wired dtypes |
 |-------------|--------------|
-| CPU interpret  | all 17    |
+| CPU interpret  | all but i4 / u4 |
 | CPU JIT (clang) | f32 only |
 | CPU BLAS (Accelerate) | f32 only (matmul / matvec / dot) |
 | Metal shaders | f32 only |

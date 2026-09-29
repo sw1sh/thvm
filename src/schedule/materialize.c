@@ -5714,11 +5714,11 @@ static u32 view_resolve_inner(Term t, int boundary_base) {
   u8 tag = term_tag(t);
   if (tag == TAG_TEN) {
     u32 tid = (u32)term_val(t);
-    // Packed nibble dtypes can't ride the view-only path: every
-    // gather step in materialize_root_alias and the cpu_interpret
-    // pre-mat loop is byte-aligned (1/2/4/8) and packed itemsize
-    // is 0.  Force a kernel emit so cpu_op_run_via_i8 handles the
-    // unpack/repack for movement ops.
+    // Packed nibble dtypes can't ride the view-only path: the gather
+    // in materialize_root_alias moves whole 1/2/4/8-byte elements, and
+    // a packed dtype has no itemsize.  Declining sends the chain to
+    // the kernel path, which has no packed-nibble support on the CPU
+    // backend either (docs/dtypes.md).
     if (tid != 0 && tid < TENS_NEXT && dtype_is_packed(TENS[tid].dtype)) return 0;
     return tid;
   }

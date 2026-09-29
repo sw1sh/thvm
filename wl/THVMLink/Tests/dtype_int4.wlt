@@ -1,8 +1,9 @@
 (* dtype_int4.wlt -- packed int4 / uint4 round-trip and arithmetic.
    Storage: 2 nibbles per byte, low nibble first.  numel is the
    logical nibble count; dtype_storage_bytes(numel) = (numel+1)/2.
-   Arithmetic routes through eager-unpack-to-int8 (cpu_op_run_via_f32
-   path); movement ops through cpu_op_run_via_i8.
+   Arithmetic wraps at 4 bits; movement ops keep the logical nibble
+   order.  The CPU backend has no kernel path for packed nibbles
+   (docs/dtypes.md).
    Dequantization at the user surface is CAST(int4_tensor, "f32"). *)
 
 (* === pack / unpack helpers === *)
@@ -116,7 +117,7 @@ VerificationTest[
     TestID -> "int4/reduce-sum"
 ]
 
-(* === movement (eager unpack-to-i8 path) === *)
+(* === movement === *)
 
 VerificationTest[
     TInit[]; TReset[];

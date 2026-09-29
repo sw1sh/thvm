@@ -333,7 +333,7 @@ typedef enum {
     DK_FP16,    // ieee754 half (promote-to-fp32 ALU)
     DK_BF16,    // bfloat16    (promote-to-fp32 ALU)
     DK_FP8,     // fp8e4m3 / fp8e5m2 (promote-to-fp32 ALU)
-    DK_INT4,    // signed nibble  (eager unpack-to-int8)
+    DK_INT4,    // signed nibble, 2 per byte
     DK_UINT4    // unsigned nibble
 } DTypeKind;
 

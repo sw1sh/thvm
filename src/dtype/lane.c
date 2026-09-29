@@ -1,18 +1,21 @@
-// dtype/lane.c -- promote / demote primitives between any wired
-// dtype and the f32 ALU buffer used by every elementwise kernel.
+// dtype/lane.c -- convert elements between any wired dtype's storage
+// and f32.
 //
 // to_fp32_lane(dst, src, dt, n) reads `n` `dt` elements from `src`
 // and writes `n` f32s to `dst`.  from_fp32_lane(dst, dt, src, n)
 // is the inverse.  f32 / f64 paths use direct casts; f16 / bf16 /
-// fp8 go through the fp_convert / fp8 routines.  Integer dtypes are
-// also covered (sint -> sitofp, uint -> uitofp) so a single helper
-// handles the cross-family route.
+// fp8 go through the fp_convert / fp8 routines, fp8 with the host-side
+// float_to_fp8 rule.  Integer dtypes are also covered (sint -> sitofp,
+// uint -> uitofp) so a single helper handles the cross-family route.
 //
 // Used by:
-//   - cpu_op_run_via_f32 (elementwise promote-to-f32 ALU for f16,
-//     bf16, fp8 -- they don't have native ALU paths in interpret.c)
-//   - cpu_op_cast (Phase E) for value-preserving CAST
-//   - rewrite_cast.c constant-folder for CAST(CONST, dt)
+//   - uop_const, which rounds an f16 / bf16 / fp8 payload through its
+//     storage encoding (uop/const.c)
+//   - the BITCAST constant fold (uop/bitcast.c)
+//   - const_to_tendesc for an f16 / bf16 / f64 fill
+//     (schedule/materialize.c)
+//   - WL tensor writes of f16 / bf16 / fp8 data
+//     (wl/THVMLink/CSource/thvmlink.c)
 
 void to_fp32_lane(f32 *dst, void const *src, u32 dt, u32 n) {
   switch (dt) {
