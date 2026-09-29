@@ -202,6 +202,60 @@ Three mechanisms ride along:
   engine ever differed; on FOF input the pre-pass now runs only in the lanes
   that vary it (`wm` keeps the default discipline).
 
+### 3.2 Satisfiable answers: the one-element model (FNT)
+
+FindProof's only Satisfiable / CounterSatisfiable answer on FOF input is a
+**one-element model**, found by the gate `fof_one_elt_sat`
+(`tools/atp_cli/fof_split.c`) and claimed by `fof_one_elt_claim`.
+
+- **The gate.** It runs right after clausification, on the FULL clause set
+  (every record's clauses; SInE, the pre-pass and the equational encoding
+  all come later). In a one-element domain every term denotes the single
+  element, so `s = t` is true, `p(t..)` reads one truth bit per predicate,
+  and a quantifier is its body: the clause set's truth is a propositional
+  formula over the predicate bits (`$true`/`$false` at their fixed value),
+  decided by a 1M-node DPLL. It was added as a soundness gate for the
+  eq/true/false encoding (a collapse-satisfiable set lets the or-tables
+  refute spuriously); a refused claim still gives up after pass B.
+- **Why the clausal model is a model of the problem.** NNF and naive
+  distribution are equivalences. Skolemization and Tseitin (`aux <-> G`,
+  both directions emitted) preserve models in the needed direction: a
+  model of the result, restricted to the input signature, is a model of the
+  input -- and in one element every Skolem function maps to that element.
+- **Why the claim does not rest on that argument.** Naive distribution
+  used to emit clauses wider than `FOL_MAX_LITS` (64), which
+  `fol_clause_new` refuses and the extractor SKIPPED while the record's
+  other clauses survived: a silently weaker set. The first library sweep
+  found the gate "satisfiable" on the Theorems LCL662+1.010 and
+  LCL668+1.015 (and the CounterSatisfiable LCL669+1.020) that way. Such
+  records now go through Tseitin (`fof_cnf_width`); an allocation failure
+  is the remaining drop path. The claim therefore re-evaluates every
+  ORIGINAL record -- as parsed, universally closed, the conjecture negated
+  -- under the assignment (predicates the search left open read false),
+  and one false record withdraws it: that check is what withdrew the
+  three LCL claims before the width fix.
+- **Inputs whose parse can differ from TPTP semantics withdraw the
+  claim:** numbers and distinct objects (interpreted as distinct values),
+  `$`-symbols, a name at two arities or as both predicate and function, a
+  quoted atom `'w'` aliasing a plain `w` (the unquoting pass renames them
+  apart), typed records, unexpanded nested `include()`, trailing or block
+  comments, roles outside axiom / hypothesis / definition / assumption /
+  lemma / theorem / corollary / conjecture / negated_conjecture / plain.
+- **Output.** `% SZS status Satisfiable` (no conjecture) or
+  `CounterSatisfiable`, then `% SZS output start FiniteModel` in Vampire
+  5.0.1's form: `tff` declarations, a `finite_domain` axiom over
+  `'fmb_$i_1'`, one definition per symbol (constants `c = 'fmb_$i_1'`,
+  function tables, propositions `p` / `~p`, predicate tables), every input
+  symbol in the problem's own spelling (the stand-in names of the unquoting
+  and long-name passes mapped back). Exit 0 makes it the schedule winner;
+  it fires in the first slice to finish loading.
+- **Verification** (outside the prover): `tools/casc/model_check.py`
+  (own TPTP parser and evaluator; also checks the status claim and symbol
+  coverage) and Vampire 5.0.1 `--mode model_check` (the block wrapped in
+  `vampire(model_check,model_start)` / `model_end`, then the problem).
+  `--one-elt-probe` (`THVM_ATP_ONE_ELT_PROBE`) stops after the gate: the
+  library-wide soundness sweep's mode.
+
 ## 4. The saturation engine (what a slice actually does)
 
 Each slice runs the shared completion engine (`src/atp/_.c`, ~31k lines,
