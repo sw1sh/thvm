@@ -300,8 +300,6 @@ static int horn_size(int t) {
 // All of it is gated on g_horn_cd so every other flavor's trajectory
 // stays byte-identical.
 static int  g_horn_cd = 0;             // THVM_ATP_HORN_CD (2 = slice mode)
-static double g_cli_wall_sec = 120.0;  // engine wall, for the CD lane budget
-static double g_cli_main_t0  = 0.0;    // process start (main); wall-remaining anchor
 // Parsed negative units (the goals), for the subsumption rank check
 // and the CD resonators.
 static int g_hg_l[64], g_hg_r[64]; static int g_hg_n = 0;

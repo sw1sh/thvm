@@ -1740,12 +1740,17 @@ static u8 cnf_demod_candidate_ok(const CnfState *s, u32 slot,
 // bound ever changes that value, so cnf_forward_demod materializing
 // with the returned winning rule (cnf_demodulate_pre) reproduces the
 // EXACT old fixpoint trajectory -- only the per-round search for
-// "which rule wins" gets cheaper.
+// "which rule wins" gets cheaper.  Past an armed deadline
+// (cnf_late_tick) the scan stops where it is.
 static u32 cnf_demod_find_at(const CnfState *s, Term term,
                              const FolClause *c, const CnfGmask *asum,
                              u32 bound, u64 *mask_out) {
   u32 best = bound;
   u64 mask = 0ull;
+  if (cnf_late_tick()) {
+    if (mask_out != NULL) *mask_out = 0ull;
+    return best;
+  }
   if (term_tag(term) == TAG_CTR) {
     mask = cnf_demod_label_bit(term_ext(term));
     u32 n = term_ctr_n(term);
@@ -1812,6 +1817,10 @@ static void cnf_forward_demod(CnfState *s, FolClause **pc,
     for (u32 li = 0; li < c->n_lits; li++) {
       best = cnf_demod_find_at(s, c->lits[li].atom, c, asum, best, NULL);
     }
+    if (g_cnf_late) {
+      cnf_reclaim(mark, gc_snap, kbo_snap);
+      break;   // the deadline passed mid-scan: the caller aborts the step
+    }
     // Phase-A's own matches are scratch (a yes/no existence probe,
     // not a kept term -- cnf_demodulate_pre below re-derives the
     // actual substitution independently), so roll back
@@ -1849,6 +1858,7 @@ static void cnf_forward_demod(CnfState *s, FolClause **pc,
 static u8 cnf_fsub_try(const CnfState *s, u32 i, const FolClause *c,
                        u64 cm, u32 cw, const FolLit *frozen,
                        const CnfGmask *ca) {
+  if (cnf_late_tick()) return 0u;   // past the deadline: the step aborts
   const FolClause *a = s->clauses[i];
   if (a == NULL) return 0u;
   if (a->n_lits > c->n_lits) return 0u;
@@ -2061,6 +2071,7 @@ static u64 g_cnf_wall_deadline_us = 0u;
 static u32 g_cnf_wall_tick = 0u;
 
 fn void cnf_set_wall_deadline(double seconds_from_now) {
+  g_cnf_late = 0u;
   if (seconds_from_now <= 0.0) { g_cnf_wall_deadline_us = 0u; return; }
   u64 now = atp_now_us();
   if (now == 0u) return;   // clock unavailable: leave the deadline off
@@ -2071,6 +2082,21 @@ static inline int cnf_wall_fired(void) {
   if (g_cnf_wall_deadline_us == 0u) return 0;
   u64 now = atp_now_us();
   return now != 0u && now >= g_cnf_wall_deadline_us;
+}
+
+// The deadline inside one conclusion's simplification scans: forward
+// demodulation and forward subsumption over huge terms outran the
+// per-conclusion poll for minutes (SWV536-1.010, SWV546-1.010: the
+// fallback pre-pass stuck in one cnf_consider).  Set once a deadline
+// fires mid-scan; the scans stop and cnf_consider aborts the step.
+// Cleared whenever the deadline is armed or disarmed.
+static u32 g_cnf_late_tick = 0u;
+
+static inline int cnf_late_tick(void) {
+  if (!g_cnf_late && (++g_cnf_late_tick & 0xffu) == 0u && cnf_wall_fired()) {
+    g_cnf_late = 1u;
+  }
+  return g_cnf_late;
 }
 
 static void cnf_backward_subsume(CnfState *s, u32 new_id) {
@@ -2100,12 +2126,12 @@ static void cnf_backward_subsume(CnfState *s, u32 new_id) {
       b = cnf_idx_bucket(&s->idx_bsub_f, cnf_idx_fine_key(p0, sgn, a0), 0u);
     }
     for (u32 e = 0; b != NULL && e < b->n; e++) {
-      if ((e & 0x7f) == 0 && cnf_wall_fired()) { s->status = ATP_ABORTED; return; }
+      if (g_cnf_late || ((e & 0x7f) == 0 && cnf_wall_fired())) { s->status = ATP_ABORTED; return; }
       cnf_bsub_try(s, new_id, new_c, nm, (u32)b->ents[e]);
     }
   } else {
     for (u32 i = 0; i < s->n; i++) {
-      if ((i & 0x7f) == 0 && cnf_wall_fired()) { s->status = ATP_ABORTED; return; }
+      if (g_cnf_late || ((i & 0x7f) == 0 && cnf_wall_fired())) { s->status = ATP_ABORTED; return; }
       cnf_bsub_try(s, new_id, new_c, nm, i);
     }
   }
@@ -2210,13 +2236,22 @@ static void cnf_consider(CnfState *s, FolClause *c,
   // filters, later inferences on the stored clause) needs dense ids.
   fol_clause_canon_vars(c);
   cnf_forward_demod(s, &c, &asum);
+  if (g_cnf_late) {
+    s->status = ATP_ABORTED;
+    if (c != NULL) fol_clause_free(c);
+    return;
+  }
   if (c == NULL) return;
   if (fol_clause_is_empty(c)) {
     cnf_empty_derived(s, c, rule, parent_a, parent_b);
     return;
   }
   if (fol_is_tautology(c)) { fol_clause_free(c); return; }
-  if (cnf_is_subsumed(s, c, &asum)) { fol_clause_free(c); return; }
+  if (cnf_is_subsumed(s, c, &asum) || g_cnf_late) {
+    if (g_cnf_late) s->status = ATP_ABORTED;
+    fol_clause_free(c);
+    return;
+  }
   // Store (splitting into guarded components when avatar applies);
   // run the backward passes for every fresh QUEUED clause -- the one
   // stored clause on the plain path, the components on a split (the

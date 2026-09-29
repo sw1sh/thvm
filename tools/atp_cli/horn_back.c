@@ -326,10 +326,17 @@ static int bk_pf_commit(const TpProblem *tp, int id, int gl, int gr, int lo) {
   return ix;
 }
 
+// Polled every 64 nodes: a node over the curried terms of a modal
+// problem costs milliseconds (LCL637+1.015 checked first at 16384
+// nodes, 50 s in, past a 23 s budget).
 static int bk_budget_ok(void) {
   if (g_bk_over) return 0;
-  if ((++g_bk_nodes & 0x3fff) == 0) {
+  if ((++g_bk_nodes & 0x3f) == 0) {
     if (horn_budget_now() > g_bk_deadline) { g_bk_over = 1; return 0; }
+    if (g_horn_abs_deadline > 0.0 && horn_now() > g_horn_abs_deadline) {
+      g_bk_over = 1;
+      return 0;
+    }
   }
   if (g_bk_node_cap > 0 && g_bk_nodes > g_bk_node_cap) { g_bk_over = 1; return 0; }
   if (g_hn_n > (1 << 24)) { g_bk_over = 1; return 0; }   // arena ceiling
@@ -801,6 +808,24 @@ static void tp_horn_release(TpProblem *tp) {
   // instantiations, exactly like a weight-ordered given-clause loop.
   g_horn_t0 = horn_now();
   g_horn_stop = 0; g_horn_attempts = 0;
+  // Absolute stop deadline for the release: the slice's whole wall,
+  // measured from process start.  g_horn_wall (0.4..0.9 of the wall,
+  // from g_horn_t0) still shapes the search -- the gate-relax ladder and
+  // the phase-2 head-closure trigger are fractions of it, so leaving it
+  // untouched keeps a fast release byte-identical.  But g_horn_wall is
+  // anchored at the release START, which comes AFTER the clausal pre-pass
+  // (up to 0.6 of the wall): g_horn_t0 + 0.4..0.9*wall runs PAST the slice
+  // deadline and gets hard-killed with no SZS line (the 240s FOF NoOutput
+  // class).  The STOP polls -- the forward loop's and the backward CD
+  // lane's -- honor this absolute cap too, so the release self-terminates
+  // at the slice wall without reshaping the search that finishes before
+  // it.  An explicit --horn-wall keeps the old unbounded behavior (a
+  // manual single-lane override).
+  if (getenv("THVM_ATP_HORN_WALL") == NULL)
+    g_horn_abs_deadline = g_cli_main_t0 + g_cli_wall_sec;
+  else
+    g_horn_abs_deadline = 0.0;
+
   // CD lane defaults: wall-governed chaining (the deep detachment
   // chains ARE the proof search here, not a preprocessing garnish), so
   // most of the run budget goes to the lane and the attempt cap steps
@@ -943,22 +968,6 @@ static void tp_horn_release(TpProblem *tp) {
       }
     }
   }
-  // Absolute stop deadline for the release: the slice's whole wall,
-  // measured from process start.  g_horn_wall (0.4..0.8 of the wall,
-  // from g_horn_t0) still shapes the search -- the gate-relax ladder and
-  // the phase-2 head-closure trigger are fractions of it, so leaving it
-  // untouched keeps a fast release byte-identical.  But g_horn_wall is
-  // anchored at the release START, which comes AFTER the clausal pre-pass
-  // (up to 0.6 of the wall): g_horn_t0 + 0.4..0.8*wall runs PAST the slice
-  // deadline and gets hard-killed with no SZS line (the 240s FOF NoOutput
-  // class).  The STOP polls honor this absolute cap too, so the release
-  // self-terminates at the slice wall without reshaping the search that
-  // finishes before it.  An explicit --horn-wall keeps the old unbounded
-  // behavior (a manual single-lane override).
-  if (getenv("THVM_ATP_HORN_WALL") == NULL)
-    g_horn_abs_deadline = g_cli_main_t0 + g_cli_wall_sec;
-  else
-    g_horn_abs_deadline = 0.0;
   // Backward subgoal cone (v2): bounded regression from the goals, a
   // wall slice ahead of the forward loop.  Auto-gated (see
   // g_horn_steer); THVM_ATP_HORN_BWD: 0 disables, 2 forces.

@@ -1611,6 +1611,7 @@ static int fof_one_elt_solve(int nvar, int ncl, const int *cl_off,
   memset(asg, -1, (size_t)nvar + 1u);
   int ntrail = 0, ndec = 0, qh = 0, qt = 0, next_var = 0, verdict = -1;
   long work = 0, decisions = 0;
+  int late = 0;   // the wall passed: stop as at the budget (no verdict)
   const long work_cap = 400000000L, dec_cap = 1000000L;
   // Unit clauses seed the queue (a literal is queued as var*2+value).
   for (int c = 0; c < ncl; c++)
@@ -1629,6 +1630,7 @@ static int fof_one_elt_solve(int nvar, int ncl, const int *cl_off,
       for (int o = occ_start[v]; o < occ_start[v + 1]; o++) {
         int li = occ[o], c = lit_cl[li];
         work++;
+        if ((work & 0xFFFFF) == 0 && cli_fe_late()) late = 1;
         if (lp[li] == val) { nsat[c]++; continue; }
         nfalse[c]++;
         if (nsat[c] > 0 || conflict) continue;
@@ -1642,7 +1644,7 @@ static int fof_one_elt_solve(int nvar, int ncl, const int *cl_off,
         }
       }
     }
-    if (work > work_cap || decisions > dec_cap) break;   // unknown
+    if (work > work_cap || decisions > dec_cap || late) break;   // unknown
     if (conflict) {
       // Backtrack to the latest decision whose other value is untried.
       int resumed = 0;
@@ -2303,6 +2305,17 @@ static void fof_cls_reserve(FolClause ***cls, u8 **ccnj, int **cls_rec,
 
 static jmp_buf g_fof_oom_jb;
 
+// Clausification abandons at the wall: the fol walkers' poll hook jumps
+// to tp_fof_load's recovery point, which gives up.
+static int g_fof_wall_hit = 0;
+
+static void fof_fe_poll(void) {
+  if (cli_fe_late()) {
+    g_fof_wall_hit = 1;
+    longjmp(g_fof_oom_jb, 1);
+  }
+}
+
 // Upper bound on the distinct symbols of the text: every distinct word
 // that is not a variable (record names and role words included).  Only
 // consulted when the text could hold more symbols than the default
@@ -2366,11 +2379,17 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   }
   thvm_heap_exhausted = 0;
   thvm_heap_exhaust_jmp = &g_fof_oom_jb;
+  g_fof_wall_hit = 0;
   if (setjmp(g_fof_oom_jb) != 0) {
     thvm_heap_exhaust_jmp = NULL;
+    fol_set_poll(NULL);
+    if (g_fof_wall_hit) {
+      tp_giveup("FOF clausification reached the wall");
+    }
     tp_giveup("FOF clausification exhausted the term heap "
               "(raise --heap-cells)");
   }
+  fol_set_poll(fof_fe_poll);
 
   // Pass A: parse + clausify every record.  Terms persist (no engine
   // session runs before serialization, so nothing moves the heap).
@@ -2390,7 +2409,10 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   int ncl = 0;
   int n_conjectures = 0;
   const char *p = text;
-  for (;;) {
+  for (u32 n_rec = 0;; n_rec++) {
+    if ((n_rec & 63u) == 0u) {
+      cli_fe_check("FOF clausification");
+    }
     int rec_is_cnf = 0;
     const char *rec = fof_next_record(text, p, &rec_is_cnf);
     if (rec == NULL) break;
@@ -2528,6 +2550,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     }
     free(recc);
   }
+  fol_set_poll(NULL);
   if (ncl == 0) tp_giveup("no TPTP records parsed");
 
   // --fof-stats: front-end-only probe.  Report, per clausified set,
@@ -2605,6 +2628,9 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   Term neg_unit_l = 0, neg_unit_r = 0;
   g_fof_soft_oversize = 1;       // axiom-side: oversized encodings drop
   for (int c = 0; c < ncl; c++) {
+    if ((c & 1023) == 0) {
+      cli_fe_check("the FOF encoding");
+    }
     FolClause *cl = cls[c];
     if (fol_is_tautology(cl)) continue;
     int npos = 0, nneg = 0, drop_clause = 0;

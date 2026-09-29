@@ -288,6 +288,15 @@ fn FolClause *fol_paramodulate(const FolClause *eq_clause, u32 eq_idx,
 // Complexity is |C1|! worst case; bounded by FOL_MAX_LITS = 64 but
 // in practice clauses subsumed in saturation are small.
 
+// A saturation's armed deadline (sat.c: the pre-pass guard, the wall)
+// reaches inside one subsumption test: past it the matcher answers "not
+// subsumed" -- which only keeps a clause -- and the step aborts.  A test
+// over many literals of one predicate backtracks exponentially (the
+// LCL6xx modal pre-pass sat in one for over a minute).  Disarmed
+// deadlines never fire.
+static u8 g_cnf_late = 0u;
+static inline int cnf_late_tick(void);
+
 // `nvars` = number of binding slots the PATTERN can touch (its max
 // variable id + 1; canon clauses have dense ids).  Snapshot/restore
 // only that prefix -- a full RewriteSubst copy per literal trial is
@@ -300,6 +309,7 @@ static u8 fol_subsume_rec(const FolClause *c1, u32 c1_idx,
   if (c1_idx >= c1->n_lits) return 1u;
   const FolLit *l1 = &c1->lits[c1_idx];
   for (u32 j = 0; j < n2; j++) {
+    if (cnf_late_tick()) return 0u;
     if (used[j]) continue;
     if (c2_lits[j].sign != l1->sign) continue;
     Term snap[REWRITE_MAX_VAR];

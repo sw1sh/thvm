@@ -59,6 +59,41 @@ static void tp_giveup(const char *why) {
   exit(1);
 }
 
+// --- front-end wall ----------------------------------------------------
+// The engine measures its wall from its own start; the stages before it
+// (clausification, the one-element gate, the equational encoding, the
+// clausal pre-pass, the Horn release, axiom selection, the transforms)
+// run inside the same --wall and abstain once it is spent: a stage blind
+// to it ran a schedule slice past the parent's status line (LCL641+1.010
+// printed nothing for 90 s at --wall=30).  The deadline is process start
+// + --wall on the wall clock.  0 = none (the schedule parent,
+// CheckProof).
+static double g_cli_wall_sec = 120.0;  // engine wall, for the CD lane budget
+static double g_cli_main_t0  = 0.0;    // process start (main); wall-remaining anchor
+static double g_cli_fe_deadline = 0.0;
+
+static double cli_wall_now(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
+}
+
+static int cli_fe_late(void) {
+  return g_cli_fe_deadline > 0.0 && cli_wall_now() >= g_cli_fe_deadline;
+}
+
+// Give up once the wall is spent, naming the stage that reached it; the
+// deferred pre-pass does not take over (it has no wall left either).
+static void cli_fe_check(const char *stage) {
+  if (!cli_fe_late()) {
+    return;
+  }
+  char why[160];
+  snprintf(why, sizeof why, "%s reached the wall", stage);
+  g_tp_giveup_hook = NULL;
+  tp_giveup(why);
+}
+
 #define TP_MAX_CLAUSES  65536
 #define TP_MAX_SYMS     262144
 #define TP_MAX_VARS     4096

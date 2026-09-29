@@ -541,6 +541,46 @@ static void cli_arm_wall_alarm(double wall, int grace, int fd,
   alarm((unsigned)(wall + grace + 0.999));
 }
 
+// A slice's captured stdout holds an SZS status line only when the slice
+// decided the problem (a slice prints nothing else to stdout): an
+// engine proof (the status is flushed before the proof block is
+// built), a front-end refutation whose proof is still being rebuilt, a
+// verified one-element model.  Returns the bytes to replay -- up to the
+// last complete line, cut before an unterminated solution block -- or
+// 0 when the file holds no status line.
+static size_t sched_salvage_len(const char *text, size_t len) {
+  const char *st = NULL;
+  for (const char *p = text; p < text + len; p++) {
+    if ((p == text || p[-1] == '\n') && (size_t)(text + len - p) > 13 &&
+        strncmp(p, "% SZS status ", 13) == 0) {
+      st = p;
+      break;
+    }
+  }
+  if (st == NULL) {
+    return 0;
+  }
+  size_t keep = len;
+  while (keep > 0 && text[keep - 1] != '\n') {
+    keep--;
+  }
+  const char *open = NULL;
+  for (const char *p = text; p < text + keep; p++) {
+    if (p != text && p[-1] != '\n') {
+      continue;
+    }
+    if (strncmp(p, "% SZS output start", 18) == 0) {
+      open = p;
+    } else if (strncmp(p, "% SZS output end", 16) == 0) {
+      open = NULL;
+    }
+  }
+  if (open != NULL) {
+    keep = (size_t)(open - text);
+  }
+  return (keep > (size_t)(st - text)) ? keep : 0;
+}
+
 // CONCURRENT portfolio: run the slices in a bounded pool (SCHED_MAX_PAR at
 // a time), EACH with the FULL wall -- not wall/N as the old sequential
 // scheme did.  Sequential slicing starved every strategy (a problem
@@ -561,13 +601,14 @@ static int run_schedule(const char *self, const char *file, double wall,
   sigaction(SIGTERM, &sa, &old_term);
   sigaction(SIGINT,  &sa, &old_int);
   g_sched_active = 1;
-  // Belt-and-braces: if every slice wedges past its own hard wall, the
-  // parent still emits one status line and reaps the subtrees.
+  // Belt-and-braces: the wait loop below stops the slices at the wall;
+  // should the parent itself stall, the alarm still emits one status
+  // line a second past the wall and reaps the subtrees.
   {
     char line[1100];
     line[0] = '\0';
     if (szs) snprintf(line, sizeof line, "%% SZS status Timeout for %s\n", file);
-    cli_arm_wall_alarm(wall, 60, 1, line[0] ? line : NULL);
+    cli_arm_wall_alarm(wall, 1, 1, line[0] ? line : NULL);
   }
   // Bound each child's RSS unless the caller set a tighter cap already.
   if (getenv("THVM_ATP_RSS_ABORT_MB") == NULL) {
@@ -605,6 +646,12 @@ static int run_schedule(const char *self, const char *file, double wall,
   // above describes -- now actually enforced.
   double sched_t0 = horn_now();
   double budget = (wall > 6.0) ? wall - 3.0 : wall;
+  // The status line must be out by the wall whatever the slices do: a
+  // slice past its own wall (a stage blind to it, an engine step that
+  // never polls) is stopped here, half a second before the wall, instead
+  // of holding the parent in wait() until its alarm.
+  double deadline = sched_t0 + ((wall > 2.0) ? wall - 0.5 : wall);
+  int stopped = 0;
   // Launch up to max_par, then refill as children exit.
   while (winner < 0 && (next < N_SCHED || launched > 0)) {
     while (winner < 0 && launched < max_par && next < N_SCHED) {
@@ -670,8 +717,17 @@ static int run_schedule(const char *self, const char *file, double wall,
     }
     if (launched == 0) break;
     int status = 0;
-    pid_t w = wait(&status);
-    if (w <= 0) break;
+    pid_t w = waitpid(-1, &status, WNOHANG);
+    if (w == 0) {
+      if (horn_now() >= deadline) {
+        stopped = 1;
+        break;
+      }
+      struct timespec nap = { 0, 10000000L };
+      nanosleep(&nap, NULL);
+      continue;
+    }
+    if (w < 0) break;
     for (int i = 0; i < N_SCHED; i++) {
       if (pids[i] == w) {
         done[i] = 1; launched--;
@@ -681,6 +737,37 @@ static int run_schedule(const char *self, const char *file, double wall,
         break;
       }
     }
+  }
+  // Stopped at the wall: a slice still running may already have decided
+  // (its status line is out, the proof still being built or rebuilt) --
+  // it wins with what it printed.  Stop them all first, so no file grows
+  // while it is read.
+  size_t salvage_len = 0;
+  char *salvage = NULL;
+  if (stopped) {
+    for (int i = 0; i < N_SCHED; i++) {
+      if (pids[i] > 0 && !done[i]) {
+        killpg(pids[i], SIGKILL);
+        kill(pids[i], SIGKILL);
+      }
+    }
+    for (int i = 0; i < N_SCHED && winner < 0; i++) {
+      if (pids[i] <= 0 || done[i] || outs[i][0] == '\0') {
+        continue;
+      }
+      size_t len = 0;
+      char *txt = tp_read_file(outs[i], &len);
+      size_t keep = (txt != NULL) ? sched_salvage_len(txt, len) : 0;
+      if (keep > 0) {
+        winner = i;
+        salvage = txt;
+        salvage_len = keep;
+      } else {
+        free(txt);
+      }
+    }
+    fprintf(stderr, "FindProof: schedule stopped at the wall (%.1fs)%s\n",
+            horn_now() - sched_t0, (winner >= 0) ? "; a slice had decided" : "");
   }
   // Kill + reap any still-running slices (the winner made them redundant).
   // killpg on the child's group takes down the shell + FindProof grandchild
@@ -703,11 +790,15 @@ static int run_schedule(const char *self, const char *file, double wall,
     fprintf(stderr, "%% FindProof schedule winner: %s\n",
             SCHEDULE[winner].name);
     // Replay only the winning slice's captured output.
-    FILE *fp = fopen(outs[winner], "r");
-    if (fp != NULL) {
-      char buf[4096]; size_t n;
-      while ((n = fread(buf, 1, sizeof buf, fp)) > 0) fwrite(buf, 1, n, stdout);
-      fclose(fp);
+    if (salvage != NULL) {
+      fwrite(salvage, 1, salvage_len, stdout);
+    } else {
+      FILE *fp = fopen(outs[winner], "r");
+      if (fp != NULL) {
+        char buf[4096]; size_t n;
+        while ((n = fread(buf, 1, sizeof buf, fp)) > 0) fwrite(buf, 1, n, stdout);
+        fclose(fp);
+      }
     }
     rc = 0;
   } else if (n_inerr == N_SCHED) {
@@ -718,8 +809,9 @@ static int run_schedule(const char *self, const char *file, double wall,
     if (szs) printf("%% SZS status Error for %s\n", file);
     rc = 2;
   } else if (szs) {
-    printf("%% SZS status GaveUp for %s\n", file);
+    printf("%% SZS status %s for %s\n", stopped ? "Timeout" : "GaveUp", file);
   }
+  free(salvage);
   for (int i = 0; i < N_SCHED; i++) if (outs[i][0]) unlink(outs[i]);
   return rc;
 }
@@ -1061,6 +1153,20 @@ int main(int argc, char **argv) {
     return run_schedule(argv[0], file, atof(wall), szs, g_cli_want_proof);
   }
 
+  // Front-end wall (cli_fe_check): every stage before the engine abstains
+  // once process start + --wall passes, and the alarm stops whatever does
+  // not poll a second later -- silently in a schedule slice, with the
+  // Timeout line on a direct run.  The engine re-arms it with its own
+  // grace when it starts.
+  g_cli_fe_deadline = main_t0 + g_cli_wall_sec;
+  {
+    char line[1100];
+    line[0] = '\0';
+    if (szs && getenv("FINDPROOF_SLICE") == NULL)
+      snprintf(line, sizeof line, "%% SZS status Timeout for %s\n", file);
+    cli_arm_wall_alarm(g_cli_wall_sec, 1, 1, line[0] ? line : NULL);
+  }
+
   // Presets replicate the WL $AtpPresetDefaults stacks; setenv(...,0)
   // never overwrites an explicit knob flag, so flags override the
   // preset exactly like Method suboptions override a preset name.
@@ -1135,6 +1241,7 @@ int main(int argc, char **argv) {
       char *pre = tp_preprocess(file, raw);
       pre = tp_unquote_names(pre);
       tp_shorten_names(pre);
+      cli_fe_check("TPTP preprocessing");
       // The term heap is sized once, at its first use: a knowledge base
       // whose clausification outgrows the default semi-space (the 27MB
       // BIO axiom file: ~363k clauses) gets a reservation scaled to its
@@ -1197,6 +1304,7 @@ int main(int argc, char **argv) {
         const char *ce = getenv("THVM_ATP_CURRY");
         if (ce == NULL || ce[0] != '0') tp_curry_wide(&tp);
       }
+      cli_fe_check("the equational encoding");
       // The deferred FOF clausal pre-pass (see tp_fof_load) runs here,
       // once the encoding exists and is curried, with its usual share
       // of the wall -- AHEAD of the Horn release, whose oversized-KB
@@ -1236,6 +1344,7 @@ int main(int argc, char **argv) {
         g_cli_fe_decided  = 1;
         g_cli_szs_printed = 1;
         g_alarm_exit_code = 0;
+        g_alarm_szs[0] = '\0';   // the status is out: an alarm adds none
       }
       // --proof with a stashed front-end refutation (clausal pre-pass
       // win or a $false at clausification): print the conversion-
@@ -1253,6 +1362,7 @@ int main(int argc, char **argv) {
       // one branch child per positive-literal choice, sequential,
       // every branch must refute.  The orchestrator owns the rest of
       // the wall and the process exits with its verdict.
+      cli_fe_check("the Horn release");
       if (g_fof_split_pending && !g_cli_fe_decided)
         return fof_split_orchestrate(argv[0], file, preset, max_steps,
                                      szs, g_cli_want_proof);
@@ -1291,6 +1401,7 @@ int main(int argc, char **argv) {
       {
         const char *ee = getenv("THVM_ATP_EQUALS_GOAL");
         if (ee != NULL && ee[0] != '0') tp_equals_goal(&tp);
+        cli_fe_check("the goal transforms");
         n_neg = 0;
         for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
       }
@@ -1304,6 +1415,7 @@ int main(int argc, char **argv) {
         u8 sine_on = (se == NULL || se[0] != '0');
         if (sine_on && (tp.n_cls - n_neg) > (int)PR_MAX_EQNS) {
           tp_sine_select(&tp);
+          cli_fe_check("axiom selection");
           n_neg = 0;
           for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
         }
@@ -1327,6 +1439,7 @@ int main(int argc, char **argv) {
       {
         const char *cn = getenv("THVM_ATP_CANON_INPUT");
         if (cn == NULL || cn[0] != '0') tp_canon_input(&tp);
+        cli_fe_check("the canonical presentation");
       }
       // tgt conjecture-role export: the .pr format has no clause-role
       // field, and BOTH tgt ports need the conjecture cone -- Vampire
@@ -1479,6 +1592,21 @@ int main(int argc, char **argv) {
       tp_giveup("narrow-queue slice: goal is ground");
   }
 
+  // The front end spent the wall: nothing is left for the engine, which
+  // measures its wall from its own start (the old 1 s floor plus the
+  // engine's grace ran a slice up to half a minute past its wall).  A
+  // decided run's status is out already.
+  if ((g_horn_cd || g_cli_fof_applied || g_cli_fe_decided) &&
+      atof(wall) - (horn_now() - main_t0) < 0.5) {
+    if (tmp_pr[0] != '\0' && !keep_pr) unlink(tmp_pr);
+    if (g_cli_fe_decided) {
+      fflush(stdout);
+      return 0;
+    }
+    g_tp_giveup_hook = NULL;
+    tp_giveup("the front end spent the wall");
+  }
+
   g_cli_want_szs = szs;
   if (g_cli_want_proof) g_atp_bench_pre_free_hook = cli_proof_hook;
   // Competition-clean stdout: reroute the bench TU's diagnostic chatter
@@ -1504,7 +1632,7 @@ int main(int argc, char **argv) {
   char wall_left[32];
   if (g_horn_cd || g_cli_fof_applied || g_cli_fe_decided) {
     double left = atof(wall) - (horn_now() - main_t0);
-    if (left < 1.0) left = 1.0;
+    if (left < 0.5) left = 0.5;
     // A decided front-end leaves the engine only the proof to rebuild:
     // bounded, so a lane that cannot rebuild it frees its slot as the
     // no-proof run's shortcut does (another lane's rebuild wins).
