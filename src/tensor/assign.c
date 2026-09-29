@@ -48,6 +48,32 @@ static int tensor_assign_convert(void *dst, u32 ddt, void *src, u32 sdt, u32 n) 
   return 0;
 }
 
+// Merge n packed nibbles `vals` (low nibble first) into dst's storage from
+// element `off` on.  A byte the range starts or ends inside keeps its
+// other nibble, which belongs to a neighbouring element.
+static int tensor_assign_nibbles(TenDesc *dd, u64 off, u8 const *vals, u32 n) {
+  u64 first = off >> 1;
+  u64 end   = (off + n + 1) >> 1;
+  u8 *bytes = (u8 *)malloc((size_t)end);
+  if (bytes == NULL) {
+    return -1;
+  }
+  dd->backend->buf_read(dd->buf_id, bytes, end);
+  for (u32 k = 0; k < n; k++) {
+    u8  v = (u8)((vals[k >> 1] >> ((k & 1u) * 4u)) & 0x0Fu);
+    u64 p = off + k;
+    u8 *b = &bytes[p >> 1];
+    *b = (p & 1u) ? (u8)((*b & 0x0Fu) | (u8)(v << 4)) : (u8)((*b & 0xF0u) | v);
+  }
+  if (dd->backend->buf_write_at != NULL) {
+    dd->backend->buf_write_at(dd->buf_id, first, bytes + first, end - first);
+  } else {
+    dd->backend->buf_write(dd->buf_id, bytes, end);
+  }
+  free(bytes);
+  return 0;
+}
+
 fn int tensor_assign(u32 dst_id, u32 src_id, u64 dst_off) {
   TenDesc *dd       = &TENS[dst_id];
   TenDesc *sd       = &TENS[src_id];
@@ -55,7 +81,8 @@ fn int tensor_assign(u32 dst_id, u32 src_id, u64 dst_off) {
   u64      nbytes   = dtype_storage_bytes(dd->dtype, numel);
   u64      byte_off = dtype_storage_bytes(dd->dtype, dst_off);
   int      same     = (dd->dtype == sd->dtype);
-  if (same && dd->backend == sd->backend) {
+  int      nibbles  = dtype_is_packed(dd->dtype) && ((dst_off | numel) & 1u);
+  if (same && !nibbles && dd->backend == sd->backend) {
     if (dd->backend->buf_copy_at != NULL
         && dd->backend->buf_copy_at(dd->buf_id, byte_off, sd->buf_id, nbytes) == 0) {
       return 0;
@@ -72,12 +99,16 @@ fn int tensor_assign(u32 dst_id, u32 src_id, u64 dst_off) {
   if (in != NULL && out != NULL) {
     sd->backend->buf_read(sd->buf_id, in, sbytes);
     if (same || tensor_assign_convert(out, dd->dtype, in, sd->dtype, numel) == 0) {
-      if (dd->backend->buf_write_at != NULL) {
-        dd->backend->buf_write_at(dd->buf_id, byte_off, out, nbytes);
+      if (nibbles) {
+        rc = tensor_assign_nibbles(dd, dst_off, (u8 const *)out, numel);
       } else {
-        dd->backend->buf_write(dd->buf_id, out, nbytes);   // whole-buffer (byte_off == 0)
+        if (dd->backend->buf_write_at != NULL) {
+          dd->backend->buf_write_at(dd->buf_id, byte_off, out, nbytes);
+        } else {
+          dd->backend->buf_write(dd->buf_id, out, nbytes);   // whole-buffer (byte_off == 0)
+        }
+        rc = 0;
       }
-      rc = 0;
     }
   }
   if (out != in) {

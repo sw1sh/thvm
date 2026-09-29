@@ -186,7 +186,9 @@ tinygrad/gradient.py:17.
 
 ASSIGN copies the source's storage bytes into the destination when
 the dtypes match, for every dtype, so NaN payloads, subnormals and
-packed nibbles survive.  When they differ it stores the source values
+packed nibbles survive; a destination view of packed nibbles that
+starts or ends inside a byte keeps the byte's other nibble.  When they
+differ it stores the source values
 at the destination dtype as a CAST kernel would (`tensor_assign` in
 [src/tensor/assign.c](../src/tensor/assign.c)): it reads each value in
 the source's lane, so a float stored into a bool is x != 0 and an int

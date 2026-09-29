@@ -5,12 +5,13 @@
 // patterns (NaN payloads, subnormals, -0) survive unchanged, and so do
 // 1-, 2- and 8-byte ints and packed nibbles.  A dst that is a row view of
 // a larger buffer takes the row at its element offset, scaled by the
-// dtype's width.  When the dtypes differ, dst takes src's values at its
-// own dtype, as a realized CAST stores them.  tinygrad casts a weak
-// (Python-scalar) value to the target dtype before assigning and raises
-// on any other mismatch (tensor.py:243-244 at 365f87a8a); a fired ASSIGN
-// cannot tell the two apart and converts both.  A JIT capture replays
-// the write.
+// dtype's width; a view of packed nibbles that starts or ends inside a
+// byte keeps the neighbouring nibble.  When the dtypes differ, dst takes
+// src's values at its own dtype, as a realized CAST stores them.
+// tinygrad casts a weak (Python-scalar) value to the target dtype before
+// assigning and raises on any other mismatch (tensor.py:243-244 at
+// 365f87a8a); a fired ASSIGN cannot tell the two apart and converts both.
+// A JIT capture replays the write.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -219,6 +220,57 @@ static void check_conversions(void) {
   check_convert("assign/converts/u64-to-f32", DT_UINT64, u, DT_FP32, u_as_f32);
 }
 
+// dst is a view of a 9-element packed nibble buffer, `n` elements from
+// element `off` on.  The ASSIGN writes those nibbles and keeps the other
+// nibble of a byte the view starts or ends inside.
+static void check_nibble_view(u32 dtype, u32 sdt, void const *src, u32 off, u32 n) {
+  static char name[80];
+  snprintf(name, sizeof name, "assign/packed-view-keeps-neighbours/%s-from-%s-at-%u-of-%u",
+           dtype_name(dtype), dtype_name(sdt), off, n);
+  TEST_BEGIN(name);
+  u8 cache[5] = { 0x55, 0x55, 0x55, 0x55, 0x55 };
+  u32 const cdims[1] = { 9 };
+  u32 const sdims[1] = { n };
+  u32 c_tid = cpu_tensor(dtype, 1, cdims, cache);
+  u32 s_tid = cpu_tensor(sdt, 1, sdims, src);
+  View v = {0};
+  v.shape.ndim    = 1;
+  v.shape.dims[0] = n;
+  v.strides[0]    = 1;
+  v.offset        = (i32)off;
+  v.numel         = n;
+  u32 d_tid = tensor_view_of(c_tid, v);
+  Term done = interact_assign_with(ten(d_tid), ten(s_tid));
+  CHECK_EQ(term_val(done), d_tid);
+  u8 got[5], nib[9];
+  read_bytes(c_tid, got, sizeof got);
+  unpack_uint4(nib, got, 9);
+  u32 mismatches = 0;
+  for (u32 i = 0; i < 9; i++) {
+    u32 want = (i >= off && i < off + n) ? i - off + 1 : 5;
+    mismatches += (nib[i] != want);
+  }
+  if (mismatches != 0) {
+    fprintf(stderr, "  %s: nibbles", name);
+    for (u32 i = 0; i < 9; i++) {
+      fprintf(stderr, " %u", nib[i]);
+    }
+    fprintf(stderr, "\n");
+  }
+  CHECK_EQ(mismatches, 0);
+}
+
+static void check_nibble_views(void) {
+  u8  const n3[2] = { 0x21, 0x03 };         // 1, 2, 3
+  u8  const n4[2] = { 0x21, 0x43 };         // 1, 2, 3, 4
+  f32 const f3[3] = { 1.0f, 2.0f, 3.0f };
+  check_nibble_view(DT_INT4, DT_INT4, n3, 1, 3);
+  check_nibble_view(DT_UINT4, DT_UINT4, n3, 2, 3);
+  check_nibble_view(DT_UINT4, DT_UINT4, n4, 3, 4);
+  check_nibble_view(DT_INT4, DT_INT4, n4, 4, 4);
+  check_nibble_view(DT_INT4, DT_FP32, f3, 1, 3);
+}
+
 // A captured ASSIGN of a narrow dtype replays: the second write reads
 // the source's new bytes.
 static void check_jit_replay(u32 sdt, u32 ddt, void const *src0, void const *src1,
@@ -255,6 +307,8 @@ int main(void) {
   }
 
   check_conversions();
+
+  check_nibble_views();
 
   u16 const h0[4] = { 0x3C00, 0x7C01, 0x0001, 0x8000 };
   u16 const h1[4] = { 0xC000, 0x3555, 0xFE01, 0x03FF };
