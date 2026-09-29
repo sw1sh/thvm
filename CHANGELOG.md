@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- The kernel content hash (Metal pipeline cache and autotune cache key) includes each buffer's input slot: `x*x+y` and `x*y+y` hashed equal, so on Metal one kernel could reuse the other's pipeline. Autotune caches on disk re-tune once.
 - The garbage collector refuses to build when a UOp opcode is added without a heap size in `gc_node_size` (a missing size leaves live nodes of that op unevacuated), and the UOP_BUFFER constructor documents its instance cell.
 - Fix: the copying collector keeps every UOp node whole.  A live RANGE lost
   its extent and a BUFFER its last dim (both were sized one cell short), and

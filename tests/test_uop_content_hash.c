@@ -16,8 +16,9 @@
 //   (3) SHARING: two structurally-identical kernels hash EQUAL (they
 //       SHOULD share a PSO -- that's correct, not a collision).
 //   (4) DISTINCTNESS: structurally-different kernels (different op,
-//       different dtype, different shape, different const) hash
-//       DISTINCT (a collision here = wrong PSO = silent wrong result).
+//       different dtype, different shape, different const, different
+//       operand slots) hash DISTINCT (a collision here = wrong PSO =
+//       silent wrong result).
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -166,6 +167,26 @@ int main(void) {
     CHECK(sr8 != 0);
     CHECK(sr32 != 0);
     CHECK(uop_dag_content_hash(sr8) != uop_dag_content_hash(sr32));
+  }
+
+  // Same op, dtype and shape, different operand slots: x*x+y reads slot 1
+  // twice where x*y+y reads slots 1 and 2.  Hashing a BUFFER without its
+  // instance made these equal, so one kernel reused the other's pipeline.
+  TEST_BEGIN("content-hash/distinct-operand-slot");
+  {
+    u32 d4[1] = {4};
+    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d4, 0);
+    Term bx  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d4, 1);
+    Term by  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d4, 2);
+    Term i   = uop_range(0, KAX_LOOP, 4);
+    Term lx  = uop_index_e(bx, i);
+    Term ly  = uop_index_e(by, i);
+    Term xxy = uop_store(out, i, uop_binary(UOP_ADD, uop_binary(UOP_MUL, lx, lx), ly));
+    Term xyy = uop_store(out, i, uop_binary(UOP_ADD, uop_binary(UOP_MUL, lx, ly), ly));
+    Term xxy2 = uop_store(out, i, uop_binary(UOP_ADD, uop_binary(UOP_MUL, lx, lx), ly));
+    CHECK(uop_dag_content_hash(xxy) != uop_dag_content_hash(xyy));
+    CHECK(uop_dag_content_hash(bx) != uop_dag_content_hash(by));
+    CHECK_EQ(uop_dag_content_hash(xxy), uop_dag_content_hash(xxy2));
   }
 
   // === (2b) GC-INVARIANT for every heap layout the hash reads ========

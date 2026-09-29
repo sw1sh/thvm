@@ -1623,8 +1623,11 @@ static u64 uop_content_hash_rec(Term t, u32 depth) {
       break;
     }
     case UOP_BUFFER: {
+      // The instance (kernel slot) says WHICH input an operand reads:
+      // without it x*x+y and x*y+y hash equal and share a pipeline.
       h = uop_content_mix(h, (u64)uop_buffer_scope(t));
       h = uop_content_mix(h, (u64)uop_buffer_dtype(t));
+      h = uop_content_mix(h, (u64)uop_buffer_inst_get(t));
       u32 ndim = uop_buffer_ndim(t);
       h = uop_content_mix(h, (u64)ndim);
       for (u32 d = 0; d < ndim; d++) {
