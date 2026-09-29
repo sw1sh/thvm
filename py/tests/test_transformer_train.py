@@ -62,13 +62,17 @@ class TransformerTrainTest(unittest.TestCase):
         rng = np.random.default_rng(0)
         QKV = rng.standard_normal((B, S, 3, H, Dh)).astype(np.float32)
         O = rng.standard_normal((D, D)).astype(np.float32)
-        g = np.zeros_like(QKV)
+        # The finite-difference reference runs in float64: in float32 its own
+        # cancellation noise (~1e-3 relative at eps=1e-3) depends on numpy's
+        # BLAS build and crossed the gate on Linux while thvm's grad was fine.
+        Q64, O64 = QKV.astype(np.float64), O.astype(np.float64)
+        g = np.zeros_like(Q64)
         eps = 1e-3
-        for i in range(QKV.size):
-            b = QKV.flat[i]
-            QKV.flat[i] = b + eps; lp = _attn_np(QKV, O)
-            QKV.flat[i] = b - eps; lm = _attn_np(QKV, O)
-            QKV.flat[i] = b
+        for i in range(Q64.size):
+            b = Q64.flat[i]
+            Q64.flat[i] = b + eps; lp = _attn_np(Q64, O64)
+            Q64.flat[i] = b - eps; lm = _attn_np(Q64, O64)
+            Q64.flat[i] = b
             g.flat[i] = (lp - lm) / (2 * eps)
         qkv = T(QKV.copy())
         _attn_thvm(qkv, T(O.copy())).backward()
