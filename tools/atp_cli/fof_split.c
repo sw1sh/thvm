@@ -1505,61 +1505,160 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
 // (caught by the 2026-07-19 full-library soundness sweep).  Deciding
 // here, BEFORE any lane runs, is sound for every lane at once, and
 // costs a tiny DPLL: the sets are minute after equality filtering.
-// Node-budgeted; budget exhaustion returns "not shown satisfiable"
-// (lanes proceed) -- the collapse instances seen in practice are
-// small, and the guard must never block real proving on a timeout.
+// Budgeted; budget exhaustion returns "not shown satisfiable" (lanes
+// proceed) -- the guard must never block real proving on a timeout.
+// The search is DPLL with unit propagation over literal-occurrence
+// lists: the knowledge-base FOF sets (10k-100k clauses) are Horn-heavy,
+// where propagation alone decides, and the old per-node rescan of every
+// clause was quadratic there (it only ever ran below a 4096-predicate
+// cap).  Any complete procedure returns the same verdict; the budget
+// (decisions plus literal visits) only bounds when it may give up.
 // $true / $false literals take their fixed value (the clausifier keeps
 // them as atoms; read as free predicates, `p => $false` plus `p` came
 // out "satisfiable").  A bare-variable or connective atom is a
 // clausification the model cannot read: no verdict (pass B gives up on
 // those shapes anyway).  On success the assignment is kept in
 // g_oe_key / g_oe_val for fof_one_elt_claim.
-enum { OE_MAX_LITS = 65536, OE_MAX_VARS = 4096, OE_MAX_CLS = 65536 };
-static u64         g_oe_key[OE_MAX_VARS];
-static signed char g_oe_val[OE_MAX_VARS];   // -1: left open by the search
-static int         g_oe_nvar = 0;
+static u64         *g_oe_key = NULL;   // predicate label of each gate variable
+static signed char *g_oe_val = NULL;   // its value; -1: left open (no clause reached the search)
+static int          g_oe_nvar = 0;
 
-static int fof_one_elt_rec(const int *cl_off, const int *cl_len,
-                           const int *lv, const int *lp,
-                           int ncl, signed char *asg, long *budget) {
-  if (--(*budget) < 0) return -1;              // unknown: budget spent
-  int pick = -1;
-  for (int c = 0; c < ncl; c++) {
-    int sat = 0, undec = -1;
+// DPLL over the gate's clauses: 1 satisfiable (the full assignment in
+// model[0..nvar)), 0 unsatisfiable, -1 budget spent.
+static int fof_one_elt_solve(int nvar, int ncl, const int *cl_off,
+                             const int *cl_len, const int *lv, const int *lp,
+                             signed char *model) {
+  int nlit = (ncl > 0) ? cl_off[ncl - 1] + cl_len[ncl - 1] : 0;
+  int *occ_start = (int *)calloc((size_t)nvar + 1u, sizeof(int));
+  int *occ = (int *)malloc(((size_t)nlit + 1u) * sizeof(int));
+  int *lit_cl = (int *)malloc(((size_t)nlit + 1u) * sizeof(int));
+  int *nsat = (int *)calloc((size_t)ncl + 1u, sizeof(int));
+  int *nfalse = (int *)calloc((size_t)ncl + 1u, sizeof(int));
+  signed char *asg = (signed char *)malloc((size_t)nvar + 1u);
+  int *trail = (int *)malloc(((size_t)nvar + 1u) * sizeof(int));
+  int *dec_pos = (int *)malloc(((size_t)nvar + 1u) * sizeof(int));  // trail index of each decision
+  signed char *dec_flipped = (signed char *)malloc((size_t)nvar + 1u);
+  // Between two decisions a clause turns unit at most once: the queue
+  // never holds more than one entry per clause plus the decision.
+  int *queue = (int *)malloc(((size_t)ncl + (size_t)nvar + 2u) * sizeof(int));
+  if (occ_start == NULL || occ == NULL || lit_cl == NULL || nsat == NULL ||
+      nfalse == NULL || asg == NULL || trail == NULL || dec_pos == NULL ||
+      dec_flipped == NULL || queue == NULL) tp_giveup("OOM in FOF front-end");
+  for (int c = 0; c < ncl; c++)
     for (int k = 0; k < cl_len[c]; k++) {
-      int v = lv[cl_off[c] + k], p = lp[cl_off[c] + k];
-      if (asg[v] < 0) { if (undec < 0) undec = v; }
-      else if (asg[v] == p) { sat = 1; break; }
+      lit_cl[cl_off[c] + k] = c;
+      occ_start[lv[cl_off[c] + k] + 1]++;
     }
-    if (sat) continue;
-    if (undec < 0) return 0;                   // clause falsified
-    if (pick < 0) pick = undec;
+  for (int v = 0; v < nvar; v++) occ_start[v + 1] += occ_start[v];
+  {
+    int *fill = (int *)malloc(((size_t)nvar + 1u) * sizeof(int));
+    if (fill == NULL) tp_giveup("OOM in FOF front-end");
+    memcpy(fill, occ_start, ((size_t)nvar + 1u) * sizeof(int));
+    for (int li = 0; li < nlit; li++) occ[fill[lv[li]]++] = li;
+    free(fill);
   }
-  if (pick < 0) return 1;                      // every clause satisfied
-  for (int val = 0; val <= 1; val++) {
-    asg[pick] = (signed char)val;
-    int r = fof_one_elt_rec(cl_off, cl_len, lv, lp, ncl, asg, budget);
-    if (r == 1) return 1;                      // keep the model
-    if (r < 0) { asg[pick] = -1; return r; }   // unknown
+  memset(asg, -1, (size_t)nvar + 1u);
+  int ntrail = 0, ndec = 0, qh = 0, qt = 0, next_var = 0, verdict = -1;
+  long work = 0, decisions = 0;
+  const long work_cap = 400000000L, dec_cap = 1000000L;
+  // Unit clauses seed the queue (a literal is queued as var*2+value).
+  for (int c = 0; c < ncl; c++)
+    if (cl_len[c] == 1) queue[qt++] = lv[cl_off[c]] * 2 + lp[cl_off[c]];
+  for (;;) {
+    // Propagate the queue; a conflict sets `conflict`.
+    int conflict = 0;
+    while (qh < qt && !conflict) {
+      int v = queue[qh] >> 1, val = queue[qh] & 1;
+      qh++;
+      if (asg[v] >= 0) { if (asg[v] != val) conflict = 1; continue; }
+      asg[v] = (signed char)val;
+      trail[ntrail++] = v;
+      for (int o = occ_start[v]; o < occ_start[v + 1] && !conflict; o++) {
+        int li = occ[o], c = lit_cl[li];
+        work++;
+        if (lp[li] == val) { nsat[c]++; continue; }
+        nfalse[c]++;
+        if (nsat[c] > 0) continue;
+        if (nfalse[c] == cl_len[c]) { conflict = 1; break; }
+        if (nfalse[c] == cl_len[c] - 1) {
+          for (int k = 0; k < cl_len[c]; k++) {
+            int lk = cl_off[c] + k;
+            work++;
+            if (asg[lv[lk]] < 0) { queue[qt++] = lv[lk] * 2 + lp[lk]; break; }
+          }
+        }
+      }
+    }
+    if (work > work_cap || decisions > dec_cap) break;   // unknown
+    if (conflict) {
+      // Backtrack to the latest decision whose other value is untried.
+      int resumed = 0;
+      while (ndec > 0 && !resumed) {
+        int d = ndec - 1;
+        int dv = trail[dec_pos[d]];
+        int dval = asg[dv];
+        while (ntrail > dec_pos[d]) {          // undo down to the decision
+          int u = trail[--ntrail];
+          int uval = asg[u];
+          for (int o = occ_start[u]; o < occ_start[u + 1]; o++) {
+            int li = occ[o], c = lit_cl[li];
+            if (lp[li] == uval) nsat[c]--; else nfalse[c]--;
+          }
+          asg[u] = -1;
+        }
+        qh = qt = 0;
+        if (!dec_flipped[d]) {
+          dec_flipped[d] = 1;
+          queue[qt++] = dv * 2 + (1 - dval);
+          resumed = 1;
+        } else {
+          ndec--;
+        }
+      }
+      if (!resumed) { verdict = 0; break; }       // refuted at level 0
+      next_var = 0;
+      continue;
+    }
+    while (next_var < nvar && asg[next_var] >= 0) { next_var++; work++; }
+    if (next_var >= nvar) { verdict = 1; break; }  // every variable set
+    decisions++;
+    dec_pos[ndec] = ntrail;
+    dec_flipped[ndec] = 0;
+    ndec++;
+    qh = qt = 0;
+    queue[qt++] = next_var * 2 + 0;
   }
-  asg[pick] = -1;
-  return 0;
+  if (verdict == 1) memcpy(model, asg, (size_t)nvar);
+  free(occ_start); free(occ); free(lit_cl); free(nsat); free(nfalse);
+  free(asg); free(trail); free(dec_pos); free(dec_flipped); free(queue);
+  return verdict;
 }
 
 static int fof_one_elt_sat(FolClause **cls, int ncl) {
-  static int cl_off[OE_MAX_CLS], cl_len[OE_MAX_CLS];
-  static int lv[OE_MAX_LITS], lp[OE_MAX_LITS];
-  static u64 keys[OE_MAX_VARS];
-  int nvar = 0, nlit = 0, nout = 0;
+  // Tables sized by the input (a fixed 4096-predicate / 65536-literal
+  // table returned "not shown satisfiable" past it -- the gate then
+  // silently skipped the big problems); predicate keys hashed.
+  size_t lit_cap = 1024, cls_cap = (size_t)ncl + 1;
+  int *cl_off = (int *)malloc(cls_cap * sizeof(int));
+  int *cl_len = (int *)malloc(cls_cap * sizeof(int));
+  int *lv = (int *)malloc(lit_cap * sizeof(int));
+  int *lp = (int *)malloc(lit_cap * sizeof(int));
+  u32 hcap = 1024u;
+  u64 *hkey = (u64 *)malloc(hcap * sizeof(u64));
+  int *hvar = (int *)malloc(hcap * sizeof(int));
+  if (cl_off == NULL || cl_len == NULL || lv == NULL || lp == NULL ||
+      hkey == NULL || hvar == NULL) tp_giveup("OOM in FOF front-end");
+  for (u32 h = 0; h < hcap; h++) hvar[h] = -1;
+  int nvar = 0, nlit = 0, nout = 0, verdict = -1;
   g_oe_nvar = 0;
-  for (int i = 0; i < ncl; i++) {
+  for (int i = 0; i < ncl && verdict < 0; i++) {
     const FolClause *c = cls[i];
     if (c == NULL) continue;
     int off = nlit, len = 0, sat = 0;
     for (u32 j = 0; j < c->n_lits && !sat; j++) {
       Term a = c->lits[j].atom;
       int pos = (c->lits[j].sign == 0u);
-      if (term_tag(a) != TAG_CTR) return 0;
+      if (term_tag(a) != TAG_CTR) { verdict = 0; break; }   // no verdict
       if (fol_atom_is_eq(a)) {
         if (pos) sat = 1;                      // positive eq: true
         continue;                              // negative eq: drops
@@ -1569,33 +1668,68 @@ static int fof_one_elt_sat(FolClause **cls, int ncl) {
         if (pos == (lab == PC_LAB_TRUE)) sat = 1;
         continue;
       }
-      if (fol_is_connective(lab)) return 0;
+      if (fol_is_connective(lab)) { verdict = 0; break; }  // no verdict
       u64 key = (u64)lab;
-      int v = -1;
-      for (int k = 0; k < nvar; k++) if (keys[k] == key) { v = k; break; }
-      if (v < 0) {
-        if (nvar >= OE_MAX_VARS) return 0;
-        keys[nvar] = key; v = nvar++;
+      if (2u * (u32)(nvar + 1) > hcap) {
+        u32 ncap = 2u * hcap;
+        u64 *nk = (u64 *)malloc(ncap * sizeof(u64));
+        int *nv = (int *)malloc(ncap * sizeof(int));
+        if (nk == NULL || nv == NULL) tp_giveup("OOM in FOF front-end");
+        for (u32 h = 0; h < ncap; h++) nv[h] = -1;
+        for (u32 h = 0; h < hcap; h++) {
+          if (hvar[h] < 0) continue;
+          u32 sl = (u32)((hkey[h] * 0x9E3779B97F4A7C15ull) >> 32) & (ncap - 1u);
+          while (nv[sl] >= 0) sl = (sl + 1u) & (ncap - 1u);
+          nk[sl] = hkey[h];
+          nv[sl] = hvar[h];
+        }
+        free(hkey); free(hvar);
+        hkey = nk; hvar = nv; hcap = ncap;
       }
-      if (nlit >= OE_MAX_LITS) return 0;
-      lv[nlit] = v; lp[nlit] = pos;
+      u32 sl = (u32)((key * 0x9E3779B97F4A7C15ull) >> 32) & (hcap - 1u);
+      while (hvar[sl] >= 0 && hkey[sl] != key) sl = (sl + 1u) & (hcap - 1u);
+      if (hvar[sl] < 0) { hkey[sl] = key; hvar[sl] = nvar++; }
+      if ((size_t)nlit >= lit_cap) {
+        lit_cap *= 2;
+        lv = (int *)realloc(lv, lit_cap * sizeof(int));
+        lp = (int *)realloc(lp, lit_cap * sizeof(int));
+        if (lv == NULL || lp == NULL) tp_giveup("OOM in FOF front-end");
+      }
+      lv[nlit] = hvar[sl]; lp[nlit] = pos;
       nlit++; len++;
     }
+    if (verdict >= 0) break;
     if (sat) { nlit = off; continue; }
-    if (len == 0) return 0;   // clause false in the one-element model
-    if (nout >= OE_MAX_CLS) return 0;
-    cl_off[nout] = off; cl_len[nout] = len; nout++;
+    if (len == 0) verdict = 0;   // clause false in the one-element model
+    else { cl_off[nout] = off; cl_len[nout] = len; nout++; }
   }
-  static signed char asg[OE_MAX_VARS];
-  memset(asg, -1, sizeof asg);
-  long budget = 1000000;
-  if (nout > 0 &&
-      fof_one_elt_rec(cl_off, cl_len, lv, lp, nout, asg, &budget) != 1)
-    return 0;
-  memcpy(g_oe_key, keys, sizeof(u64) * (size_t)nvar);
-  memcpy(g_oe_val, asg, (size_t)nvar);
-  g_oe_nvar = nvar;
-  return 1;
+  signed char *model = NULL;
+  if (verdict < 0) {
+    model = (signed char *)malloc((size_t)nvar + 1u);
+    if (model == NULL) tp_giveup("OOM in FOF front-end");
+    memset(model, -1, (size_t)nvar + 1u);
+    if (nout == 0) {
+      verdict = 1;
+    } else {
+      verdict = fof_one_elt_solve(nvar, nout, cl_off, cl_len, lv, lp, model) == 1;
+    }
+  }
+  if (verdict == 1) {
+    // The assignment for fof_one_elt_claim: variable hvar[h] is the
+    // predicate label hkey[h].
+    u64 *keys = (u64 *)malloc(((size_t)nvar + 1u) * sizeof(u64));
+    if (keys == NULL) tp_giveup("OOM in FOF front-end");
+    for (u32 h = 0; h < hcap; h++)
+      if (hvar[h] >= 0) keys[hvar[h]] = hkey[h];
+    free(g_oe_key); free(g_oe_val);
+    g_oe_key = keys;
+    g_oe_val = model;
+    g_oe_nvar = nvar;
+    model = NULL;
+  }
+  free(model);
+  free(cl_off); free(cl_len); free(lv); free(lp); free(hkey); free(hvar);
+  return verdict;
 }
 
 // --- one-element model: the Satisfiable / CounterSatisfiable answer ------

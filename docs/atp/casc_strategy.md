@@ -214,7 +214,10 @@ FindProof's only Satisfiable / CounterSatisfiable answer on FOF input is a
   element, so `s = t` is true, `p(t..)` reads one truth bit per predicate,
   and a quantifier is its body: the clause set's truth is a propositional
   formula over the predicate bits (`$true`/`$false` at their fixed value),
-  decided by a 1M-node DPLL. It was added as a soundness gate for the
+  decided by DPLL with unit propagation over literal-occurrence lists
+  (tables sized by the input, so the 100k-clause knowledge bases are
+  decided too; budget 1M decisions and 400M literal visits, past which
+  the gate reports no model). It was added as a soundness gate for the
   eq/true/false encoding (a collapse-satisfiable set lets the or-tables
   refute spuriously); a refused claim still gives up after pass B.
 - **Why the clausal model is a model of the problem.** NNF and naive
