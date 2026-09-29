@@ -1632,6 +1632,101 @@ int main(void) {
     CHECK(contains(bBuf, "KB=8 */"));
   }
 
+  // out[i] = sum_j (x[i, j] + (j < 5 ? w[j] : INVALID)) + y[i] with the
+  // output axis UPCAST 4: a lane-blocked reduce, which hoists the
+  // lane-invariant padded load into one local.  The local holds w's float,
+  // where an `int` cut 0.25 to 0 and 2.25 to 2.
+  TEST_BEGIN("render-uop-c/lane-block-hoisted-select-keeps-float");
+  {
+    u32  dimsX[1] = { 48 };
+    u32  dimsW[1] = { 6 };
+    u32  dimsO[1] = { 8 };
+    Term outL    = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsO, 0);
+    Term xL      = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsX, 1);
+    Term wL      = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsW, 2);
+    Term yL      = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsO, 3);
+    Term insL[3] = { xL, wL, yL };
+    Term iL   = uop_range(0, KAX_LOOP, 8);
+    Term jL   = uop_range(1, KAX_REDUCE, 6);
+    Term xa   = uop_int_binary(UOP_IADD,
+                               uop_int_binary(UOP_IMUL, iL, uop_const(DT_INT32, 6)), jL);
+    Term pad  = uop_iwhere(uop_int_binary(UOP_ILT, jL, uop_const(DT_INT32, 5)),
+                           uop_index_e(wL, jL), uop_invalid());
+    Term body = uop_binary(UOP_ADD, uop_index_e(xL, xa), pad);
+    Term val  = uop_binary(UOP_ADD, uop_reduce(REDUCE_SUM, 1, body), uop_index_e(yL, iL));
+    KOpt up   = { KOP_UPCAST, 0, 4 };
+    Term stL  = uop_dag_apply_kopt(uop_store(outL, iL, val), up);
+    static char srcL[65536];
+    fp = fmemopen(srcL, sizeof(srcL), "w");
+    cg_render_uop_kernel_c(stL, "k_lane_pad", outL, insL, 3, fp);
+    fclose(fp);
+    // The hoisted local's declaration: the line that reads `? in1[`.
+    char const *sel = strstr(srcL, "? in1[");
+    char const *bol = sel;
+    while (bol != NULL && bol > srcL && bol[-1] != '\n') {
+      bol--;
+    }
+    while (bol != NULL && *bol == ' ') {
+      bol++;
+    }
+    CHECK(sel != NULL);
+    CHECK(bol != NULL && strncmp(bol, "float _sh", 9) == 0);
+    char const *tmpdir = getenv("TMPDIR");
+    char src_path[512];
+    snprintf(src_path, sizeof(src_path), "%s/thvm_lane_pad_XXXXXX.c",
+             (tmpdir != NULL && tmpdir[0] != '\0') ? tmpdir : "/tmp");
+    int fd = mkstemps(src_path, 2);
+    CHECK(fd >= 0);
+    void *h = NULL;
+    char so_path[600];
+    snprintf(so_path, sizeof(so_path), "%s.so", src_path);
+    if (fd >= 0) {
+      FILE *cf = fdopen(fd, "w");
+      fputs(srcL, cf);
+      fclose(cf);
+      char cmd[1400];
+      snprintf(cmd, sizeof(cmd), "%s -O1 -fPIC -shared -o '%s' '%s' 2>&1", cpu_cc(),
+               so_path, src_path);
+      CHECK(system(cmd) == 0);
+      h = dlopen(so_path, RTLD_NOW | RTLD_LOCAL);
+    }
+    CHECK(h != NULL);
+    typedef void (*KFn)(void *, const void *const *, unsigned, const unsigned *,
+                        const unsigned *);
+    KFn kfn = (h != NULL) ? (KFn)dlsym(h, "k_lane_pad") : NULL;
+    CHECK(kfn != NULL);
+    float xx[48], ww[6] = { 0.25f, 1.5f, -0.75f, 2.25f, 0.5f, 100.0f }, yy[8], oo[8];
+    for (u32 i = 0; i < 48; i++) {
+      xx[i] = 0.5f * (float)(i / 6 + 1) + (float)(i % 6);
+    }
+    for (u32 i = 0; i < 8; i++) {
+      yy[i] = 0.125f * (float)i;
+      oo[i] = 0.0f;
+    }
+    const void *insp[3]   = { xx, ww, yy };
+    unsigned    numels[3] = { 48, 6, 8 };
+    if (kfn != NULL) {
+      kfn(oo, insp, 8, numels, NULL);
+    }
+    for (u32 i = 0; i < 8; i++) {
+      float want = 0.0f;
+      for (u32 j = 0; j < 6; j++) {
+        want = want + (xx[i * 6 + j] + ((j < 5) ? ww[j] : 0.0f));
+      }
+      want = want + yy[i];
+      if (oo[i] != want) {
+        fprintf(stderr, "  %s: out[%u] got %g want %g\n", test_name, i, (double)oo[i],
+                (double)want);
+      }
+      CHECK(oo[i] == want);
+    }
+    if (h != NULL) {
+      dlclose(h);
+    }
+    unlink(src_path);
+    unlink(so_path);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

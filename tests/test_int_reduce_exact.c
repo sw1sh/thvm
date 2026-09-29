@@ -11,7 +11,7 @@
 // 64-bit ones above 2^53, where a double one does, and the u64 ones above
 // 2^63.  For SUM and MAX over every int dtype and bool, out[i] =
 // reduce_j x[i, j] runs on the CPU UOp walker and on the legacy C emit
-// (the explicit-buffer entry, compiled with the JIT's C compiler) in five
+// (the explicit-buffer entry, compiled with the JIT's C compiler) in these
 // shapes:
 //   plain            one accumulator;
 //   upcast           the output axis UPCAST: parallel accumulators;
@@ -21,6 +21,10 @@
 //   epilogue         reduce + y[i]: a lane-blocked accumulator, with a
 //                    hoisted w[j], when the output axis is UPCAST, a
 //                    scalar one when it is not;
+//   padded           the UPCAST epilogue over x[i, j] + (0 < j ? w[j] :
+//                    INVALID), a lifted pad: the hoisted lane-invariant
+//                    select holds w's type, not an `int`;
+//   padded-swapped   the same select spelled j < 1 ? 0 : w[j];
 //   of-sum           max_j sum_k x[i, j, k]: nested accumulators.
 // The linearized C renderer (a store through INDEX_E, expanded,
 // devectorized and linearized) runs a scalar reduce and a MAX of a SUM,
@@ -38,11 +42,12 @@
 #define NK 3
 
 enum { SH_PLAIN, SH_UPCAST, SH_UNROLL, SH_UPCAST_SHARED, SH_EPILOGUE,
-       SH_EPILOGUE_UPCAST, SH_MAX_OF_SUM, SH_COUNT };
+       SH_EPILOGUE_UPCAST, SH_PADDED, SH_PADDED_SWAPPED, SH_MAX_OF_SUM,
+       SH_COUNT };
 
 static char const *const SHAPE_NAME[SH_COUNT] = {
   "plain", "upcast", "unroll", "upcast-shared", "epilogue", "epilogue-upcast",
-  "of-sum",
+  "padded", "padded-swapped", "of-sum",
 };
 
 #define N_DTYPES 9
@@ -198,13 +203,18 @@ typedef struct {
   i64  want[NI];
 } Kern;
 
+static int shape_is_padded(u32 shape) {
+  return shape == SH_PADDED || shape == SH_PADDED_SWAPPED;
+}
+
 static int shape_has_w(u32 shape) {
   return shape == SH_UPCAST_SHARED || shape == SH_EPILOGUE
-      || shape == SH_EPILOGUE_UPCAST;
+      || shape == SH_EPILOGUE_UPCAST || shape_is_padded(shape);
 }
 
 static int shape_has_y(u32 shape) {
-  return shape == SH_EPILOGUE || shape == SH_EPILOGUE_UPCAST;
+  return shape == SH_EPILOGUE || shape == SH_EPILOGUE_UPCAST
+      || shape_is_padded(shape);
 }
 
 // A bool ADD renders as `+`, not as an OR, so bool keeps to the bare
@@ -260,8 +270,14 @@ static void build_kernel(Kern *k, u32 dt, u32 kind, u32 shape) {
   Term i    = uop_range(0, KAX_LOOP, NI);
   Term j    = uop_range(1, KAX_REDUCE, NJ);
   Term body = uop_index_e(k->ins[0], iadd(imul(i, ic(NJ)), j));
+  Term wj   = uop_index_e(k->ins[1], j);
+  if (shape == SH_PADDED) {
+    wj = uop_iwhere(uop_int_binary(UOP_ILT, ic(0), j), wj, uop_invalid());
+  } else if (shape == SH_PADDED_SWAPPED) {
+    wj = uop_iwhere(uop_int_binary(UOP_ILT, j, ic(1)), uop_const(dt, 0), wj);
+  }
   if (shape_has_w(shape)) {
-    body = uop_binary(UOP_ADD, body, uop_index_e(k->ins[1], j));
+    body = uop_binary(UOP_ADD, body, wj);
   }
   if (shape == SH_MAX_OF_SUM) {
     Term kk   = uop_range(2, KAX_REDUCE, NK);
@@ -274,7 +290,7 @@ static void build_kernel(Kern *k, u32 dt, u32 kind, u32 shape) {
   }
   k->root = uop_store(k->out, i, value);
   if (shape == SH_UPCAST || shape == SH_UPCAST_SHARED
-      || shape == SH_EPILOGUE_UPCAST) {
+      || shape == SH_EPILOGUE_UPCAST || shape_is_padded(shape)) {
     KOpt opt = { KOP_UPCAST, 0, 4 };
     k->root = uop_dag_apply_kopt(k->root, opt);
   } else if (shape == SH_UNROLL) {
@@ -302,7 +318,7 @@ static void build_kernel(Kern *k, u32 dt, u32 kind, u32 shape) {
         store_elem(dt, k->x, ii * NJ + jj, xv);
         b = xv;
       }
-      if (shape_has_w(shape)) {
+      if (shape_has_w(shape) && (!shape_is_padded(shape) || jj > 0)) {
         b = canon(dt, (u64)b + (u64)load_elem(dt, k->w, jj));
       }
       acc = combine(dt, kind, acc, b);

@@ -4654,18 +4654,46 @@ static int rmu_term_refs_axis(Term t, u32 axis_id) {
   return 0;
 }
 
-// Is `op` an integer (index-space) UOp?  Used to pick the `int` vs `float`
-// type for a hoisted lane-invariant local.
-static int rmu_op_is_int(u32 op) {
-  switch (op) {
+// Is `t` index math, which a hoisted lane-invariant local holds in an
+// `int`?  An IWHERE is when both branches are, as a validity-masked
+// address is (INVALID on the masked side); one that selects a value, a
+// padded load `j < 5 ? w[j] : 0` or a maximum, holds the value's type.
+static int rmu_term_is_index(Term t) {
+  if (term_tag(t) != TAG_UOP) {
+    return 1;
+  }
+  u64 loc = term_val(t);
+  switch (term_ext(t)) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
-    case UOP_IXOR: case UOP_ISHR: case UOP_IWHERE: case UOP_INVALID:
-    case UOP_RANGE:
+    case UOP_IXOR: case UOP_ISHR: case UOP_INVALID: case UOP_RANGE:
       return 1;
+    case UOP_CONST:
+      return !dtype_is_float(term_ext(heap_read(loc)));
+    case UOP_OPT:
+      return rmu_term_is_index(heap_read(loc));
+    case UOP_IWHERE:
+      return rmu_term_is_index(heap_read(loc + 1))
+          && rmu_term_is_index(heap_read(loc + 2));
     default:
       return 0;
   }
+}
+
+// The dtype of the value `t` computes.  An IWHERE takes it from a branch
+// that is neither a CONST nor INVALID, where term_dtype_in reads the
+// then-branch: `j < 5 ? 0 : w[j]` selects w's dtype, not the CONST's.
+static u32 rmu_value_dtype(Term t) {
+  if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_IWHERE) {
+    for (u32 k = 1; k <= 2; k++) {
+      Term v = heap_read(term_val(t) + k);
+      if (term_tag(v) == TAG_UOP && term_ext(v) != UOP_CONST
+          && term_ext(v) != UOP_INVALID) {
+        return rmu_value_dtype(v);
+      }
+    }
+  }
+  return rmu_dtype_of(t);
 }
 
 // Is `t` a "worth hoisting" non-leaf node?  Bare RANGE/CONST/INVALID/
@@ -4752,7 +4780,7 @@ static u32 rmu_hoist_lane_invariant(Term t,
       && rmu_term_axes_in_set(t, scope_axes, n_scope)) {
     // Maximal lane-invariant subtree: hoist it whole.
     if (*n_hoist >= RMU_HOIST_MAX) return 0;
-    const char *ty = rmu_op_is_int(op) ? "int" : rmu_hold_type(rmu_dtype_of(t));
+    const char *ty = rmu_term_is_index(t) ? "int" : rmu_hold_type(rmu_value_dtype(t));
     char tmp[40];
     int tn = snprintf(tmp, sizeof(tmp), "_sh%u_%u", red_axis, *n_hoist);
     if (tn <= 0 || (u32)tn + 1 > name_pool_cap - *pool_used) return 0;
