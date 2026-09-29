@@ -29,6 +29,7 @@ for the per-commit story.
   multiway and causal graphs.
 
 ### Tensors & Autograd
+- `docs/gather_scatter.md` and `docs/thvm_vs_tinygrad.md` list a gather or scatter index outside the int32 range as a deviation: the kernels compare the index as an int32, the width of every kernel address, and py's `Tensor` stores an int64 array as int32, so 2^32 + 1 reads row 1 where tinygrad reads 0. Only the `ru_lower_gather` comment said so.
 - `bin/test_grad_gather_scatter` checks that a half gather's gradient
   accumulates in float32: three cotangents 2048, 1, 1 on one row give 2050,
   where half accumulation stays at 2048.

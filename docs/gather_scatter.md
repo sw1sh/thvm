@@ -22,6 +22,13 @@ sum selects nothing for an index out of range.  `uop_gather` returns 0
 unless the operands have equal rank, idx has an int dtype, `dim` is in
 range and `idx.shape[d] <= src.shape[d]` for every `d != dim`.
 
+Deviation: a kernel compares the index as an int32, the width of every
+kernel address, and py's `Tensor` stores an int64 array as int32, so an
+index outside the int32 range reads the row its low 32 bits name
+(2^32 + 1 reads row 1) where tinygrad reads 0.  A list or ndarray index
+to `x[...]` maps an out-of-range index to -1 on the host first, so it
+reads 0.  A scatter reads its index the same way.
+
 `UOP_SCATTER(base, idx, src, dim, kind, include_self)`
 ([src/uop/scatter.c](../src/uop/scatter.c)) has base's shape and dtype.
 With `t(p)` = p with `p_dim := idx[p]` and a valid p one whose index is in
