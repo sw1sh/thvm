@@ -6761,6 +6761,9 @@ typedef struct {
   // This is "GNN as a coop queue with the WM preset": set gnn_coop=1 and
   // w2_modulo=ratio.  When 0, the re-rank overwrites cp_pri (GT-mode).
   u8   gnn_coop;                  // GNN re-rank targets cp_pri2 (coop) not cp_pri
+  // Selection-time top-K re-ranker state (src/atp/topk.c, an AtpTopk):
+  // NULL unless THVM_ATP_RERANK_TOPK / THVM_ATP_RERANK_MODEL arm it.
+  void *topk;
 
   // Indexed unorientable-rewrite pass.  When set, the default tree mixed
   // normalizer replaces its O(n_rules) linear KBO-gated unorientable step
@@ -8163,6 +8166,12 @@ fn void      thvm_atp_set_cp_pri2_by_seq(AtpState *s, const u32 *seq,
 // No-op when unarmed.
 fn void      thvm_atp_history_finish(AtpState *s, u32 status);
 fn void      thvm_atp_history_search_end(AtpState *s);
+
+// Selection-time top-K re-ranker (src/atp/topk.c): load its head from a
+// safetensors file (tools/atp_enigma/topk_net.py export).  Returns 1 on
+// success.  The engine arms itself from THVM_ATP_RERANK_TOPK and
+// THVM_ATP_RERANK_MODEL; this entry is for hosts and tests.
+fn int       thvm_atp_topk_load(const char *path);
 
 // Enable/disable recording of processed-CP feature rows.  OFF (0) by
 // default: select_cp records nothing and the engine is byte-identical.

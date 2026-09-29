@@ -111,6 +111,9 @@ static void      cgq_gc_writeback(struct AtpCgq *q, const Term *roots,
 // Derivation-history export (neural-selection phase 0): opt-in,
 // observation-only; its hooks sit in state/gc/cp_heap/rerank below.
 #include "history.c"
+// Selection-time top-K re-ranker (neural-selection phase 0d): opt-in;
+// its hooks sit in gc/lifecycle/cp_heap/rerank below.
+#include "topk.c"
 #include "state.c"
 #include "rule_journal.c"
 #include "cp_store.c"

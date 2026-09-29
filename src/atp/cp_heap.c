@@ -685,6 +685,7 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   }
   atp_cp_form_trace(seq, cp_nodes, lhs, rhs);
   atp_hx_push(s, i, packed, cp_nodes);
+  atp_topk_on_push(s, i);
   // All comparator keys for row i are final -- stamp the packed node
   // (refresh invariant) before the sift compares against it.
   atp_cp_heap_set(s, i, i);
@@ -1264,6 +1265,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   s->n_cps++;
   s->n_cps_implicit++;
   atp_hx_push(s, i, NULL, cp_nodes);
+  atp_topk_on_push(s, i);
   if (atp_kdheap_on()) atp_kdh_insert(s, i);
   else atp_cp_sift_up(s, i);
   return 1u;
@@ -1927,6 +1929,10 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     // seq is dead or gone from here on.
     if (best != 0xffffffffu) s->fifo_floor_seq = best_sq + 1u;
     }
+  } else if (s->topk != NULL) {
+    // Weight dimension under the opt-in top-K re-ranker (src/atp/topk.c):
+    // the head's pick among the root's K best, 0 when it keeps the root.
+    j = atp_topk_pick(s);
   }
 
   // The chosen CP: j is its heap POSITION, v its stationary payload
@@ -2009,6 +2015,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     if (raw_b != NULL) acp_unpack(raw_b, lhs_out, rhs_out);
     else               atp_cp_slot_read(s, v, lhs_out, rhs_out);
     atp_hx_select(s, v);
+    atp_topk_on_select(s);
     // ifeq guard-DECIDING telemetry: did the CP the main loop actually
     // picked decide a live guard (see atp_ifeq_decide_hit)?  Counts
     // distinct SELECTIONS, complementing g_ifeq_decide_n_hit's scoring-

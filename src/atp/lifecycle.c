@@ -390,6 +390,7 @@ static void gn_gc_writeback(struct AtpGoalNarrow *g, const Term *roots,
 fn void thvm_atp_free(AtpState *s) {
   if (s == NULL) return;
   thvm_atp_history_finish(s, 0xffu);   // no-op unless still recording
+  atp_topk_free(s);
   atp_wmo_free((struct AtpWmOrder *)s->wmo);
   free(s->trace);
   free(s->lhs);

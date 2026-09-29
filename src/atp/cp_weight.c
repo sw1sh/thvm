@@ -483,10 +483,9 @@ static u32 atp_goal_subterm_overlap_rec(const AtpState *s, Term t, u32 best) {
   return best;
 }
 
-static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
-  if (s == NULL || s->goal_lhs == 0) return 0u;
-  Term gl = s->goal_lhs_nf ? s->goal_lhs_nf : s->goal_lhs;
-  Term gr = s->goal_rhs_nf ? s->goal_rhs_nf : s->goal_rhs;
+// CPinGoal weight against an explicit goal pair (gl, gr): the goal's
+// normal form, or the goal itself before one exists.
+static u32 atp_goal_weight_vs(Term gl, Term gr, Term cl, Term cr) {
   u32 phi_g = atp_symbol_count(gl) + atp_symbol_count(gr);
   RewriteSubst e = {{0}};
   // Doppelmatch over both pairings (cl->gl & cr->gr, cl->gr & cr->gl).
@@ -506,6 +505,13 @@ static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
   }
   // Nullmatch.
   return (atp_symbol_count(cl) + atp_symbol_count(cr)) * ATP_GOAL_NONE_FACTOR;
+}
+
+static u32 atp_goal_weight(const AtpState *s, Term cl, Term cr) {
+  if (s == NULL || s->goal_lhs == 0) return 0u;
+  Term gl = s->goal_lhs_nf ? s->goal_lhs_nf : s->goal_lhs;
+  Term gr = s->goal_rhs_nf ? s->goal_rhs_nf : s->goal_rhs;
+  return atp_goal_weight_vs(gl, gr, cl, cr);
 }
 // 8.8: priority weight for a CP.  Default `--add` heuristic is
 // the symbol-count sum.  When `s->use_mix_heuristic` is set, add

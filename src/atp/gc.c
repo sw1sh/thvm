@@ -107,6 +107,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 #endif
   // Critical-goal queue: two Terms per stored CG.
   n_roots += cgq_gc_count(s->cgq);
+  // Top-K re-ranker: the goal normal forms it scores CPs against.
+  n_roots += atp_topk_gc_count(s);
   Term *roots = (Term *)malloc((size_t)n_roots * sizeof(Term));
   if (roots == NULL) return 0;
 
@@ -185,6 +187,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 #endif
   u32 cgq_node_root = w;
   cgq_gc_gather(s->cgq, roots, &w);
+  u32 topk_root = w;
+  atp_topk_gc_gather(s, roots, &w);
 
   gc_collect(roots, w);
   g_atp_gc_epoch++;   // invalidate handle-keyed caches (cells moved)
@@ -273,6 +277,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   gn_gc_writeback(s->gnarrow, roots, gn_node_root);
 #endif
   cgq_gc_writeback(s->cgq, roots, cgq_node_root);
+  atp_topk_gc_writeback(s, roots, topk_root);
 
   free(roots);
 

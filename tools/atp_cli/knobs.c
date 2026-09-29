@@ -201,6 +201,11 @@ static const AtpKnob KNOBS[] = {
   // unset run is byte-identical to the classical selection.
   {"enigma",                 "THVM_ATP_ENIGMA",          0, "(route CP selection through the learned ENIGMA scorer)"},
   {"enigma-weights",         "THVM_ATP_ENIGMA_WEIGHTS",  1, "(path to a trained learned-scorer weights file)"},
+  // Selection-time top-K re-ranker (src/atp/topk.c): at every weight pick
+  // a trained head picks among the heap root's K best.  Both unset (the
+  // default): byte-identical selection.
+  {"rerank-topk",            "THVM_ATP_RERANK_TOPK",     1, "(top-K re-ranker: candidates per weight pick; needs --rerank-model)"},
+  {"rerank-model",           "THVM_ATP_RERANK_MODEL",    1, "(top-K re-ranker weights: safetensors from tools/atp_enigma/topk_net.py export)"},
 };
 static const int N_KNOBS = (int)(sizeof(KNOBS) / sizeof(KNOBS[0]));
 

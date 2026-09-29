@@ -26,8 +26,17 @@
 #   topk_net.py valgate <model_prefix> <prep_dir> <pool.tsv> <out_prefix>
 #   topk_net.py gate    <model_prefix> <prep_dir> <pool.tsv> <out_prefix>
 #   topk_net.py select  <out.tsv> <ratios.tsv>...
+#   topk_net.py export  <model_prefix> <out.safetensors>
+#   topk_net.py parity  <model_prefix> <model.safetensors> <dump.tsv> <out.txt>
+#   topk_net.py featparity <npz> <dump.tsv> <out.txt>
+# export writes the head for the engine's re-ranker (src/atp/topk.c);
+# parity scores the rows the engine dumped (THVM_ATP_RERANK_DUMP) with the
+# Python head; featparity rebuilds the same run's queue from its history
+# export and compares the engine's candidates and inputs with it.
 import heapq
+import json
 import os
+import struct
 import sys
 import time
 from multiprocessing import Pool
@@ -733,6 +742,137 @@ def cmd_sanity(prep_dir, pool_path, steps=30):
     print("SANITY " + ("OK" if ok else "FAIL"))
 
 
+# --------------------------------------------------------------------------
+# the engine side (src/atp/topk.c): weights file, head parity, input parity
+
+EXPORT_ORDER = ("mu", "sd", "w1", "b1", "w2", "b2", "kappa")
+
+
+def cmd_export(model_prefix, out_path):
+    """safetensors for the engine: f32 mu, sd [18], w1 [hid, 18], b1, w2
+    [hid], b2, kappa [1]; K / Hidden / Inputs / Variant in __metadata__."""
+    model, m = load_model(model_prefix)
+    arrs = {"mu": m["mu"], "sd": m["sd"], "w1": model.h1.weight.numpy(),
+            "b1": model.h1.bias.numpy(), "w2": model.out.weight.numpy()[0],
+            "b2": model.out.bias.numpy(), "kappa": model.kappa.numpy()}
+    head = {"__metadata__": {"K": str(int(m["k"])), "Hidden": str(int(m["hid"])),
+                             "Inputs": str(N_X), "Variant": str(m["variant"])}}
+    blobs, off = [], 0
+    for nm in EXPORT_ORDER:
+        a = np.ascontiguousarray(np.asarray(arrs[nm], np.float32))
+        head[nm] = {"dtype": "F32", "shape": list(a.shape), "data_offsets": [off, off + a.nbytes]}
+        blobs.append(a.tobytes())
+        off += a.nbytes
+    js = json.dumps(head, separators=(",", ":")).encode()
+    js += b" " * ((8 - len(js) % 8) % 8)
+    with open(out_path, "wb") as f:
+        f.write(struct.pack("<Q", len(js)))
+        f.write(js)
+        f.write(b"".join(blobs))
+    print(f"exported {model_prefix} -> {out_path} (K {int(m['k'])}, hidden {int(m['hid'])})")
+
+
+def read_export(path):
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        head = json.loads(f.read(n))
+        data = f.read()
+    out = {}
+    for nm in EXPORT_ORDER:
+        a, b = head[nm]["data_offsets"]
+        out[nm] = np.frombuffer(data[a:b], np.float32).reshape(head[nm]["shape"]).astype(np.float64)
+    return out, head["__metadata__"]
+
+
+def score_rows(p, X):
+    """The head on explicit input rows (x0 carries log1p(rank))."""
+    z = (X - p["mu"]) / p["sd"]
+    return (np.maximum(z @ p["w1"].T + p["b1"], 0.0) @ p["w2"].reshape(-1) + p["b2"][0]
+            - p["kappa"][0] * X[:, 0])
+
+
+def read_dump(path):
+    rows = np.loadtxt(path, dtype=np.float64, ndmin=2)
+    return (rows[:, 0].astype(np.int64), rows[:, 1].astype(np.int64), rows[:, 2].astype(np.int64),
+            rows[:, 3].astype(np.int64), rows[:, 4:4 + N_X], rows[:, 4 + N_X])
+
+
+def cmd_parity(model_prefix, st_path, dump_path, out_path):
+    model, m = load_model(model_prefix)
+    ck = {"mu": m["mu"].astype(np.float64), "sd": m["sd"].astype(np.float64),
+          "w1": model.h1.weight.numpy().astype(np.float64),
+          "b1": model.h1.bias.numpy().astype(np.float64),
+          "w2": model.out.weight.numpy().astype(np.float64)[0],
+          "b2": model.out.bias.numpy().astype(np.float64),
+          "kappa": model.kappa.numpy().astype(np.float64)}
+    fl, meta = read_export(st_path)
+    t, r, seq, chosen, X, sc = read_dump(dump_path)
+    d_file = float(np.max(np.abs(score_rows(fl, X) - sc)))
+    d_ck = float(np.max(np.abs(score_rows(ck, X) - sc)))
+    bad_pick = 0
+    steps = np.unique(t)
+    for tt in steps:
+        m_t = t == tt
+        py = score_rows(fl, X[m_t])
+        if int(np.argmax(py)) != int(np.nonzero(chosen[m_t])[0][0]):
+            bad_pick += 1
+    ok = d_file < 1e-5 and d_ck < 1e-5 and bad_pick == 0
+    lines = [f"parity: {len(t)} candidate rows over {len(steps)} re-ranked picks (dump {dump_path})",
+             f"engine score vs Python head on the exported weights: max |diff| {d_file:.3e}",
+             f"engine score vs Python head on the training checkpoint (float64 mu / sd): max |diff| "
+             f"{d_ck:.3e}",
+             f"picks whose Python argmax differs from the engine's: {bad_pick}",
+             "PARITY " + ("OK" if ok else "FAIL")]
+    txt = "\n".join(lines)
+    print(txt)
+    with open(out_path, "w") as f:
+        f.write(txt + "\n")
+
+
+def cmd_featparity(npz_path, dump_path, out_path):
+    """The engine's candidates and inputs at each dumped pick against the
+    queue rebuilt from the same run's history export (rate 1, 'F' records)."""
+    p = Run(npz_path)
+    t, r, seq, chosen, X, sc = read_dump(dump_path)
+    steps = np.unique(t)
+    same_set = 0
+    dmax = {"queue": 0.0, "pri": 0.0, "feat": 0.0, "age": 0.0}
+    fcol = np.zeros(N_CPF)
+    pick_ok = 0
+    for tt in steps.tolist():
+        m_t = np.nonzero(t == tt)[0]
+        k = len(m_t)
+        pri_t = engine_pri_at(p, tt) if len(p.w_seq) else p.pri
+        tp, na = top_at(p, tt, pri_t, k)
+        if len(tp) == k and np.array_equal(p.seq[tp], seq[m_t]):
+            same_set += 1
+            Xo = step_x(p, tt, tp, na, pri_t)[:k].astype(np.float64)
+            Xo[:, 1] = np.log1p(na)
+            Xo[:, 2] = np.log1p(pri_t[tp].astype(np.float64))
+            Xo[:, 3 + N_CPF] = np.log1p(tt - p.push_step[tp])
+            Xc = X[m_t]
+            dmax["queue"] = max(dmax["queue"], float(np.max(np.abs(Xo[:, 1] - Xc[:, 1]))))
+            dmax["pri"] = max(dmax["pri"], float(np.max(np.abs(Xo[:, 2] - Xc[:, 2]))))
+            fd = np.abs(Xo[:, 3:3 + N_CPF] - Xc[:, 3:3 + N_CPF])
+            fcol = np.maximum(fcol, fd.max(0))
+            dmax["feat"] = max(dmax["feat"], float(fd.max()))
+            dmax["age"] = max(dmax["age"], float(np.max(np.abs(Xo[:, 3 + N_CPF] - Xc[:, 3 + N_CPF]))))
+        j = np.nonzero(p.selected_at == tt)[0]
+        if len(j) == 1 and p.seq[j[0]] == seq[m_t][np.nonzero(chosen[m_t])[0][0]]:
+            pick_ok += 1
+    ok = same_set == len(steps) and pick_ok == len(steps) and max(dmax.values()) < 1e-9
+    lines = [f"featparity: {len(steps)} re-ranked picks of {p.name} (export {npz_path})",
+             f"picks whose engine top K equals the rebuilt top K (seq for seq): {same_set}",
+             f"picks whose engine choice is the export's 'S' record: {pick_ok}",
+             "max |engine - rebuilt| input: " + " ".join(f"{k}={v:.3e}" for k, v in dmax.items()),
+             "  per push feature: " + " ".join(f"f{i}={v:.3g}" for i, v in enumerate(fcol)),
+             "FEATPARITY " + ("OK" if ok else "FAIL")]
+    txt = "\n".join(lines)
+    print(txt)
+    with open(out_path, "w") as f:
+        f.write(txt + "\n")
+
+
 def main():
     cmd = sys.argv[1]
     if cmd == "prep":
@@ -747,6 +887,12 @@ def main():
         cmd_gate(*sys.argv[2:6], which="val")
     elif cmd == "select":
         cmd_select(sys.argv[2], *sys.argv[3:])
+    elif cmd == "export":
+        cmd_export(sys.argv[2], sys.argv[3])
+    elif cmd == "parity":
+        cmd_parity(*sys.argv[2:6])
+    elif cmd == "featparity":
+        cmd_featparity(*sys.argv[2:5])
 
 
 if __name__ == "__main__":

@@ -53,10 +53,7 @@ static int atp_term_label_set(Term t, u64 *labels) {
   }
   return 0;
 }
-static int atp_cp_shares_goal_symbol(const AtpState *s, Term l, Term r) {
-  if (s == NULL || s->goal_lhs == 0) return 0;
-  Term gl = s->goal_lhs_nf ? s->goal_lhs_nf : s->goal_lhs;
-  Term gr = s->goal_rhs_nf ? s->goal_rhs_nf : s->goal_rhs;
+static int atp_cp_shares_goal_symbol_vs(Term gl, Term gr, Term l, Term r) {
   u64 goal_labels = 0u;
   atp_term_label_set(gl, &goal_labels);
   atp_term_label_set(gr, &goal_labels);
@@ -260,9 +257,12 @@ fn int thvm_atp_cp_graph(const AtpState *s, Term lhs, Term rhs,
   return 1;
 }
 
-fn void thvm_atp_cp_features(const AtpState *s, Term lhs, Term rhs,
-                             u32 age, float *out) {
-  if (out == NULL) return;
+// The feature vector against an explicit goal pair (gl, gr) -- the goal
+// normal form a caller captured earlier (the selection-time re-ranker
+// scores a CP against the goal as it stood at the CP's push); gl == 0
+// means no goal.  thvm_atp_cp_features passes the current goal.
+static void atp_cp_features_vs(const AtpState *s, Term lhs, Term rhs, u32 age,
+                               Term gl, Term gr, float *out) {
   for (u32 i = 0; i < ATP_CP_FEATURE_DIM; i++) out[i] = 0.0f;
 
   u32 sl = atp_symbol_count(lhs), sr = atp_symbol_count(rhs);
@@ -282,14 +282,25 @@ fn void thvm_atp_cp_features(const AtpState *s, Term lhs, Term rhs,
   out[4]  = (float)atp_cp_weight_base(sm, lhs, rhs, ATP_CP_WEIGHT_ADD);
   out[5]  = (float)atp_cp_weight_base(sm, lhs, rhs, ATP_CP_WEIGHT_GT);
   out[6]  = (float)atp_cp_weight_base(sm, lhs, rhs, ATP_CP_WEIGHT_MIX2);
-  out[7]  = (float)atp_goal_weight(s, lhs, rhs);
+  out[7]  = (gl != 0) ? (float)atp_goal_weight_vs(gl, gr, lhs, rhs) : 0.0f;
   out[8]  = (float)age;
   out[9]  = (float)atp_cp_top_symbol(lhs);
   out[10] = (float)atp_cp_top_symbol(rhs);
-  out[11] = (float)atp_cp_shares_goal_symbol(s, lhs, rhs);
+  out[11] = (gl != 0) ? (float)atp_cp_shares_goal_symbol_vs(gl, gr, lhs, rhs) : 0.0f;
   KboCmp c = atp_compare(sm, lhs, rhs);
   out[12] = (float)((c == KBO_GT || c == KBO_LT) ? 1 : 0);
   out[13] = (float)atp_unif_measure(lhs, rhs);
+}
+
+fn void thvm_atp_cp_features(const AtpState *s, Term lhs, Term rhs,
+                             u32 age, float *out) {
+  if (out == NULL) return;
+  Term gl = 0, gr = 0;
+  if (s != NULL && s->goal_lhs != 0) {
+    gl = s->goal_lhs_nf ? s->goal_lhs_nf : s->goal_lhs;
+    gr = s->goal_rhs_nf ? s->goal_rhs_nf : s->goal_rhs;
+  }
+  atp_cp_features_vs(s, lhs, rhs, age, gl, gr, out);
 }
 
 fn void thvm_atp_set_record_cp_features(AtpState *s, u8 on) {
