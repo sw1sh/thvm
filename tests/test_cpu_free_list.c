@@ -15,6 +15,8 @@
 //     state (the slot is dropped on the floor).
 //   - external bufs (cpu_buf_alloc_external) are NOT recycled
 //     by the freelist path -- the storage isn't ours to zero.
+//   - Backend.buf_nbytes reports the requested size, not the size of
+//     the block a best-fit recycle hands the request.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -69,6 +71,18 @@ int main(void) {
   CHECK_EQ(CPU_BUFS[e].data, big_data);     // donor's storage
   CHECK_EQ(CPU_BUFS[e].nbytes, 128);        // donor's nbytes preserved
   CHECK(CPU_BUFS[big].data == NULL);        // donor dead
+
+  TEST_BEGIN("cpu-free-list/buf-nbytes-is-the-request");
+  // Backend.buf_nbytes reports a buffer's logical size, the bytes its
+  // allocation asked for: 64 for the slot on the 128-byte donor block.
+  // The BEAM isolated bench sizes a whole-buffer scratch from it.
+  static u8 wrapped[48] = {0};
+  u32 wrap = cpu_buf_alloc_external(wrapped, 48, NULL, NULL);
+  CHECK_EQ(CPU_BACKEND.buf_nbytes(e), 64);
+  CHECK_EQ(CPU_BACKEND.buf_nbytes(d), 64);      // fresh calloc
+  CHECK_EQ(CPU_BACKEND.buf_nbytes(wrap), 48);   // external bytes
+  CHECK_EQ(CPU_BACKEND.buf_nbytes(big), 0);     // dead donor
+  CHECK_EQ(CPU_BACKEND.buf_nbytes(0), 0);
 
   TEST_BEGIN("cpu-free-list/external-buf-not-recycled");
   // Stash a non-owning buf in the freelist.  Even with matching

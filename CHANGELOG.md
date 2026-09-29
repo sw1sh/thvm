@@ -127,6 +127,7 @@ for the per-commit story.
 
 ### Backends
 - docs/dtypes.md, the lane.c and materialize.c comments and dtype_int4.wlt no longer route int4 / uint4 through the deleted `cpu_op_run_via_i8` / `cpu_op_run_via_f32` drivers. They say what runs today: no CPU kernel handles packed nibbles, so an i4 / u4 elementwise or movement op aborts in `bufferize_compute_costs` and a reduce or CAST to f32 returns wrong values.
+- `Backend.buf_nbytes` reports a buffer's logical size, the bytes its allocation requested: CPU and CUDA buffers record the request (`req_nbytes`), since a best-fit freelist recycle serves it from a larger parked block; `test_cpu_free_list` pins that.
 - A CPU kernel with more than 64 inputs computes instead of returning zeros: the kernel lift, the UOp walker, the C renderer and the chain-fold marks size their input tables per kernel. A CPU dispatch that finds no rung returns -1, counts itself (`cpu_dispatch_no_rung_count`) and prints one line, instead of silently keeping the zero fill.
 - Linux CPU BLAS: native Linux builds route matmul / matvec / dot kernels
   through OpenBLAS or BLIS (cblas) when installed, as macOS does through
