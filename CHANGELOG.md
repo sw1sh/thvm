@@ -20,6 +20,10 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- Fix (Linux/gcc): a ~2000-deep elementwise chain overflowed the 8 MB stack
+  in the unified rewrite (gcc hoisted a 1 KB substitution and the inlined
+  bufferize helpers' arrays into every recursion level, 6 KB each); those
+  now live out of line.  Headroom on the Linux pod: 4000 deep.
 - Split opts are validated like tinygrad's apply_opt (#18112/#18332/#18346):
   split targets, REDUCE membership for UNROLL/GROUP, no group inside another
   reduce; invalid opts from py, WL or autotune are skipped, never mis-applied.

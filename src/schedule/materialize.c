@@ -2985,6 +2985,7 @@ static Term try_inline_bufferize_1axis_via_decomp(
 //      reshape-MAX gradients on the safe path.
 //
 // Returns the substituted Term on hit, 0 to signal no match.
+__attribute__((noinline))
 static Term try_inline_bufferize_multi_via_stride_match(
     UnifiedRewriteState *st, UnifiedSubst const *sub,
     Term inner_buf, Term v, Term addr_term, u32 n_ranges, u32 depth) {
@@ -3146,6 +3147,7 @@ static Term try_inline_bufferize_multi_via_stride_match(
 //
 // Returns the substituted Term on hit (caller short-circuits), or 0
 // to signal "table miss, try other inline strategies".
+__attribute__((noinline))
 static Term try_inline_bufferize_via_axis_table(
     UnifiedRewriteState *st, UnifiedSubst const *sub,
     Term resolved, Term inner_buf, Term v, u32 n_ranges, u32 depth) {
@@ -3230,6 +3232,32 @@ static Term try_inline_bufferize_via_axis_table(
     }
     new_sub.from[new_sub.n] = cr;
     new_sub.to  [new_sub.n] = to_rng;
+    new_sub.n++;
+  }
+  return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
+}
+
+// Recurse into `v` under `sub` extended by (from -> to).  Out of line so
+// the 1 KB UnifiedSubst sits only on this path's frames: gcc -O2 hoisted it
+// (and the inlined bufferize helpers' arrays) into every level of
+// unified_rewrite_rec_sub, 6 KB a level, and a 2000-deep elementwise chain
+// overflowed the 8 MB Linux stack.
+__attribute__((noinline))
+static Term unified_rewrite_rec_extend(UnifiedRewriteState *st,
+                                       UnifiedSubst const *sub,
+                                       Term from, Term to, Term v, u32 depth) {
+  UnifiedSubst new_sub;
+  new_sub.n = 0;
+  if (sub != NULL) {
+    for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+      new_sub.from[new_sub.n] = sub->from[i];
+      new_sub.to  [new_sub.n] = sub->to  [i];
+      new_sub.n++;
+    }
+  }
+  if (new_sub.n < UNIFIED_SUBST_CAP) {
+    new_sub.from[new_sub.n] = from;
+    new_sub.to  [new_sub.n] = to;
     new_sub.n++;
   }
   return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
@@ -3374,21 +3402,7 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
           // new (old_r -> addr_term) entry so a chain of BUFFERIZEs
           // each rebinds its own closed_range without losing the
           // outer scope's bindings.  Bounded by UNIFIED_SUBST_CAP.
-          UnifiedSubst new_sub;
-          new_sub.n = 0;
-          if (sub != NULL) {
-            for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
-              new_sub.from[new_sub.n] = sub->from[i];
-              new_sub.to  [new_sub.n] = sub->to  [i];
-              new_sub.n++;
-            }
-          }
-          if (new_sub.n < UNIFIED_SUBST_CAP) {
-            new_sub.from[new_sub.n] = old_r;
-            new_sub.to  [new_sub.n] = addr_term;
-            new_sub.n++;
-          }
-          return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
+          return unified_rewrite_rec_extend(st, sub, old_r, addr_term, v, depth);
         }
       }
       // n_ranges==1 broadcast inline: addr is a compound IADD/IMUL
