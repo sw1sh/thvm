@@ -934,20 +934,26 @@ def engine_pri_at(p, t):
     return pri
 
 
-def gate_problem(p, logit, max_steps=50):
+def candidate_steps(p):
+    """Selections t with some positive pending (push <= t-1, selected >= t):
+    pending count at t = #{push <= t-1} - #{selected <= t-1}."""
     pos_idx = np.nonzero(p.label)[0]
     T = p.n_sel
-    if len(pos_idx) == 0 or T < 2:
-        return None
-    # candidate steps: some positive pending (push <= t-1, selected >= t)
     ps, pe = p.push_step[pos_idx], p.selected_at[pos_idx]
-    cand = []
-    # sweep: pending count at t = #{push<=t-1} - #{sel<=t-1}
     ev = np.zeros(T + 2, dtype=np.int64)
     np.add.at(ev, np.clip(ps + 1, 0, T + 1), 1)
     np.add.at(ev, np.clip(pe + 1, 0, T + 1), -1)
     pending = np.cumsum(ev)
-    cand = np.nonzero(pending[1:T + 1] > 0)[0] + 1
+    return np.nonzero(pending[1:T + 1] > 0)[0] + 1
+
+
+def gate_problem(p, logit, max_steps=50):
+    """Gate statistics of one problem.  logit: one score per kept CP (fixed
+    at push), or a function (t, members) -> the members' scores at
+    selection t."""
+    if p.label.sum() == 0 or p.n_sel < 2:
+        return None
+    cand = candidate_steps(p)
     if len(cand) == 0:
         return None
     k = min(max_steps, len(cand))
@@ -964,12 +970,18 @@ def gate_problem(p, logit, max_steps=50):
             continue
         size = len(P_t) + len(N_t) / rate
         pri_t = engine_pri_at(p, t)
-        keys = {"model": -logit, "engine": pri_t.astype(np.float64),
-                "weight": p.weight.astype(np.float64)}
-        for rk, key in keys.items():
+        if callable(logit):
+            sc = logit(t, np.concatenate([P_t, N_t]))
+            model_kp, model_kn = -sc[:len(P_t)], -sc[len(P_t):]
+        else:
+            model_kp, model_kn = -logit[P_t], -logit[N_t]
+        keys = {"model": (model_kp, model_kn),
+                "engine": (pri_t[P_t].astype(np.float64), pri_t[N_t].astype(np.float64)),
+                "weight": (p.weight[P_t].astype(np.float64), p.weight[N_t].astype(np.float64))}
+        for rk, (kp, kn) in keys.items():
             # lexicographic (key, seq): encode as sort order
-            kp = key[P_t]; sp = p.seq[P_t]
-            kn = key[N_t]; sn = p.seq[N_t]
+            sp = p.seq[P_t]
+            sn = p.seq[N_t]
             order_n = np.lexsort((sn, kn))
             kn_s, sn_s = kn[order_n], sn[order_n]
             # count negatives strictly before each positive
