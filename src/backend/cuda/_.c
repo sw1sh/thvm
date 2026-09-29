@@ -46,6 +46,7 @@ Backend CUDA_BACKEND = {
   .buf_zero            = cuda_buf_zero,
   .buf_storage_root    = cuda_buf_storage_root,
   .buf_addr            = cuda_buf_addr,
+  .buf_nbytes          = cuda_buf_nbytes,
   .dispatch_begin  = NULL,
   .dispatch_flush  = NULL,
   .dispatch_end    = cuda_dispatch_end,

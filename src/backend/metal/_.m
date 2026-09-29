@@ -1215,6 +1215,19 @@ u64 thvm_metal_buf_byte_offset(u32 buf_id) {
   return METAL_BUFS[buf_id].byte_offset;
 }
 
+// Logical size of buf_id (Backend.buf_nbytes): the bytes a kernel bound to
+// it addresses.  The freelist recycles by exact size, so nbytes is the
+// request, and an arena view's nbytes is its window.  A borrowed disk-mmap
+// wrap covers the page-aligned mapping and binds at byte_offset, where the
+// weight starts.
+static u64 metal_buf_nbytes(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT || METAL_BUFS[buf_id].buf == nil) {
+    return 0;
+  }
+  MetalBuf const *b = &METAL_BUFS[buf_id];
+  return b->borrowed ? b->nbytes - b->byte_offset : b->nbytes;
+}
+
 // True iff buf_id is a borrowed (newBufferWithBytesNoCopy) disk-mmap wrap.
 int thvm_metal_buf_is_borrowed(u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return 0;
@@ -6269,6 +6282,7 @@ Backend METAL_BACKEND = {
   .buf_jit_pin     = metal_buf_jit_pin,
   .buf_jit_unpin   = metal_buf_jit_unpin,
   .buf_zero        = thvm_metal_buf_gpu_zero,
+  .buf_nbytes      = metal_buf_nbytes,
   .dispatch_begin  = metal_dispatch_begin,
   .dispatch_flush  = metal_dispatch_flush,
   .dispatch_end    = metal_dispatch_end,

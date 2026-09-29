@@ -132,6 +132,7 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
   CudaBuf *b = &CUDA_BUFS[id];
   b->dptr          = dptr;
   b->nbytes        = nbytes;
+  b->req_nbytes    = nbytes;
   b->refcount      = 1;
   b->preserved     = 0;
   b->owns_data     = 1;
@@ -180,6 +181,7 @@ fn u32 cuda_buf_alloc_external(CUdeviceptr dptr, u64 nbytes) {
   CudaBuf *b = &CUDA_BUFS[id];
   b->dptr          = dptr;
   b->nbytes        = nbytes;
+  b->req_nbytes    = nbytes;
   b->refcount      = 1;
   b->preserved     = 0;
   b->owns_data     = 0;
@@ -224,6 +226,15 @@ fn CUdeviceptr cuda_buf_dptr(u32 buf_id) {
 fn u64 cuda_buf_addr(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) return 0;
   return (u64)CUDA_BUFS[buf_id].dptr;
+}
+
+// Logical size of buf_id (Backend.buf_nbytes): the bytes its allocation
+// requested, which a recycled block's nbytes can exceed.
+fn u64 cuda_buf_nbytes(u32 buf_id) {
+  if (buf_id == 0 || buf_id >= CUDA_BUFS_NEXT) {
+    return 0;
+  }
+  return CUDA_BUFS[buf_id].req_nbytes;
 }
 
 // Walk to the storage root: a view buf chains through parent_buf_id

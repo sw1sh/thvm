@@ -108,6 +108,7 @@ fn u32 cpu_buf_alloc(u64 nbytes) {
     exit(1);
   }
   b->nbytes     = nbytes;
+  b->req_nbytes = nbytes;
   b->refcount   = 1;
   b->owns_data  = 1;
   b->skip_freelist = 0;
@@ -119,6 +120,15 @@ fn u32 cpu_buf_alloc(u64 nbytes) {
   if (CPU_MEM_LIVE > CPU_MEM_PEAK) CPU_MEM_PEAK = CPU_MEM_LIVE;
   jit_twophase_note_alloc(&CPU_BACKEND, id);
   return id;
+}
+
+// Logical size of buf_id (Backend.buf_nbytes): the bytes its allocation
+// requested, which a recycled block's nbytes can exceed.
+fn u64 cpu_buf_nbytes(u32 buf_id) {
+  if (CPU_BUFS == NULL || buf_id == 0 || buf_id >= CPU_BUFS_NEXT) {
+    return 0;
+  }
+  return CPU_BUFS[buf_id].req_nbytes;
 }
 
 // Zero a buffer's full extent (Backend.buf_zero).  The JIT replay calls this
@@ -145,6 +155,7 @@ fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
   CpuBuf *b = &CPU_BUFS[id];
   b->data       = data;
   b->nbytes     = nbytes;
+  b->req_nbytes = nbytes;
   b->refcount   = 1;
   b->owns_data  = 0;
   b->skip_freelist = 0;

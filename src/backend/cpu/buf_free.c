@@ -23,6 +23,7 @@ fn void cpu_buf_free(u32 buf_id) {
   }
   b->data       = NULL;
   b->nbytes     = 0;
+  b->req_nbytes = 0;
   b->refcount   = 0;
   b->handle     = NULL;
   b->on_release = NULL;

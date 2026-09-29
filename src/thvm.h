@@ -843,6 +843,12 @@ struct Backend {
   // alias check than buf_storage_root since arena reuse can land
   // a fresh buf at the same dptr without updating parent_buf_id.
   u64   (*buf_addr)(u32 buf_id);
+  // Optional: the logical size in bytes of buf_id, the bytes its allocation
+  // requested (a best-fit freelist recycle can back it with a larger
+  // block).  0 when unknown.  The BEAM isolated bench sizes a chain-composed
+  // input's scratch to it: tinygrad benches every PARAM on its whole buffer
+  // (codegen/opt/postrange.py:258).  NULL: that bench declines such kernels.
+  u64   (*buf_nbytes)(u32 buf_id);
   // Optional: GPU-side zero-fill of a buffer's full extent, ordered before the
   // next dispatch by the backend's own hazard tracking (no host sync).  The
   // JIT replay loop calls this to clear a RECYCLED (replay_packed) output slot
@@ -1173,6 +1179,10 @@ typedef struct {
 typedef struct {
   void *data;
   u64   nbytes;
+  // req_nbytes: the bytes the allocation requested, the buffer's logical
+  // size.  A best-fit recycle (cpu_buf_freelist_try_pop) backs a request
+  // with a larger parked block, whose size nbytes keeps.
+  u64   req_nbytes;
   u32   refcount;
   u8    owns_data;
   u8    preserved;

@@ -42,6 +42,7 @@ fn void cuda_buf_free(u32 buf_id) {
   }
   b->dptr          = 0;
   b->nbytes        = 0;
+  b->req_nbytes    = 0;
   b->refcount      = 0;
   b->preserved     = 0;
   b->owns_data     = 0;

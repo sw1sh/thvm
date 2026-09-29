@@ -938,24 +938,15 @@ static void kautotune_iso_fill(Backend *b, u32 buf_id, u32 dt, u64 numel) {
   free(host);
 }
 
-// Elements the scratch of a chain-composed input slot must hold.  Its loads
-// compose the movement chain into an address over the raw buffer.  The
-// innermost view (prior_views[0], or the lone view) is the one that maps
-// into that buffer, so every such address lies within its extent.  tinygrad
-// sizes each beam scratch to its PARAM's whole buffer
-// (schedule/rangeify.py:284, codegen/opt/postrange.py:256-258); this is the
-// part of it a load reaches.  Never below `numel`, the view's own count.
-static u64 kautotune_iso_composed_numel(TenDesc const *td, u64 numel) {
-  View const *v    = td->nviews != 0 ? &td->prior_views[0] : &td->view;
-  i64         last = v->offset;
-  for (u32 a = 0; a < v->shape.ndim; a++) {
-    u32 dim = kvar_extent_static(v->shape.dims[a]);
-    if (dim > 1 && v->strides[a] > 0) {
-      last += (i64)(dim - 1) * v->strides[a];
-    }
+// Elements of `dt` in the whole buffer behind `td`, from the logical size
+// its backend reports (Backend.buf_nbytes); 0 when it reports none.
+static u64 kautotune_iso_buffer_numel(TenDesc const *td, u32 dt) {
+  Backend const *tb = td->backend;
+  if (td->buf_id == 0 || tb == NULL || tb->buf_nbytes == NULL) {
+    return 0;
   }
-  u64 extent = last >= 0 ? (u64)last + 1 : 0;
-  return extent > numel ? extent : numel;
+  u64 nbytes = tb->buf_nbytes(td->buf_id);
+  return dtype_is_packed(dt) ? nbytes * 2 : nbytes / dtype_itemsize(dt);
 }
 
 // Allocate + fill fresh scratch buffers sized to this kernel's input/output
@@ -1001,7 +992,12 @@ static int kautotune_iso_begin(u32 kid) {
   if (ISO.out_buf_id == 0) {
     return 0;
   }
-  for (u32 i = 0; i < ke->n_inputs; i++) {
+  static int iso_tr = -1;
+  if (iso_tr < 0) {
+    iso_tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
+  }
+  u32 i = 0;
+  for (; i < ke->n_inputs; i++) {
     u32 dt    = ke->input_dtypes != NULL ? ke->input_dtypes[i] : ke->output_dtype;
     u64 numel = ke->input_numels  != NULL ? ke->input_numels[i]  : 0;
     if (numel == 0) {
@@ -1009,28 +1005,38 @@ static int kautotune_iso_begin(u32 kid) {
       // the caller fall back to NOT searching this kernel in isolation.
       goto fail;
     }
-    // A chain-composed slot binds the scratch as its raw buffer and reads
-    // it up to the extent its view spans there, past input_numels[i] (the
-    // view's numel) for a shrunk or offset view; size it to that extent.
-    // Any other strided-view input the dispatch path pre-materialises
-    // (gather) reads through metal_tendesc_strided_index(td, k) over the
-    // LIVE TenDesc's view, not the scratch: decline the isolated search
-    // for such a kernel.  The high-value FLUX targets (conv/matmul tile
-    // kernels) read contiguous or chain-composed inputs, so this loses
-    // nothing that matters.
-    int composed = (ke->input_chain_composed != NULL
-                    && ke->input_chain_composed[i]);
-    u32 tid = ke->input_tids != NULL ? ke->input_tids[i] : 0;
-    if (tid != 0 && tid < TENS_NEXT) {
-      TenDesc const *td = &TENS[tid];
-      if (composed) {
-        numel = kautotune_iso_composed_numel(td, numel);
-      } else if (!td->view.contiguous || td->view.offset != 0
-                 || td->nviews != 0) {
+    // A chain-composed slot binds the scratch in place of its raw buffer:
+    // its loads compose the movement chain into addresses over that buffer,
+    // and loads of other views of the buffer land on it too
+    // (unified_rewrite_buffer_for_tid maps a leaf to the first slot sharing
+    // its buf_id, so in x[:, :64] + x[:, 64:] the x[:, :64] slot is read
+    // across all of x).  tinygrad allocates each beam scratch as its PARAM's
+    // whole buffer (schedule/rangeify.py:284 sizes a PARAM
+    // prod(buf.max_shape), codegen/opt/postrange.py:258 allocates
+    // max_numel), so hold the logical size of the buffer behind the slot,
+    // never less than the view's numel, and decline when the backend cannot
+    // report it.  Any other strided-view input the dispatch path
+    // pre-materialises (gather) reads through
+    // metal_tendesc_strided_index(td, k) over the LIVE TenDesc's view, not
+    // the scratch: decline the isolated search for such a kernel.  The
+    // high-value FLUX targets (conv/matmul tile kernels) read contiguous or
+    // chain-composed inputs, so this loses nothing that matters.
+    int            composed = (ke->input_chain_composed != NULL
+                               && ke->input_chain_composed[i]);
+    u32            tid      = ke->input_tids != NULL ? ke->input_tids[i] : 0;
+    TenDesc const *td       = (tid != 0 && tid < TENS_NEXT) ? &TENS[tid] : NULL;
+    u64            scratch  = numel;
+    if (composed) {
+      u64 whole = td != NULL ? kautotune_iso_buffer_numel(td, dt) : 0;
+      if (whole == 0) {
         goto fail;
       }
+      scratch = whole > numel ? whole : numel;
+    } else if (td != NULL && (!td->view.contiguous || td->view.offset != 0
+                              || td->nviews != 0)) {
+      goto fail;
     }
-    u64 nbytes = dtype_storage_bytes(dt, numel);
+    u64 nbytes = dtype_storage_bytes(dt, scratch);
     if (nbytes == 0 || (ceiling != 0 && nbytes > ceiling)) {
       // 0 == undecodable dtype; over-ceiling would exit(1) in buf_alloc.
       goto fail;
@@ -1040,7 +1046,13 @@ static int kautotune_iso_begin(u32 kid) {
       goto fail;
     }
     ISO.in_buf_ids[i] = buf;
-    kautotune_iso_fill(b, buf, dt, numel);
+    kautotune_iso_fill(b, buf, dt, scratch);
+    if (iso_tr) {
+      fprintf(stderr,
+              "[iso] kid=%u slot=%u composed=%d numel=%llu scratch=%llu\n",
+              kid, i, composed, (unsigned long long)numel,
+              (unsigned long long)scratch);
+    }
   }
   ISO.active   = 1;
   ISO.backend  = b;
@@ -1049,9 +1061,12 @@ static int kautotune_iso_begin(u32 kid) {
   return 1;
 
 fail:
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (ISO.in_buf_ids[i] != 0) {
-      b->buf_free(ISO.in_buf_ids[i]);
+  if (iso_tr) {
+    fprintf(stderr, "[iso] kid=%u slot=%u declined\n", kid, i);
+  }
+  for (u32 j = 0; j < ke->n_inputs; j++) {
+    if (ISO.in_buf_ids[j] != 0) {
+      b->buf_free(ISO.in_buf_ids[j]);
     }
   }
   if (ISO.out_buf_id != 0) {

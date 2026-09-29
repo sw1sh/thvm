@@ -86,6 +86,7 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   u64   nb   = donor->nbytes;
   donor->data       = NULL;
   donor->nbytes     = 0;
+  donor->req_nbytes = 0;
   donor->refcount   = 0;
   donor->preserved  = 0;
   donor->freeable   = 0;
@@ -107,6 +108,7 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   CpuBuf *nb_slot = &CPU_BUFS[new_id];
   nb_slot->data       = data;
   nb_slot->nbytes     = nb;
+  nb_slot->req_nbytes = nbytes;
   nb_slot->refcount   = 1;
   nb_slot->preserved  = 0;
   nb_slot->freeable   = 0;

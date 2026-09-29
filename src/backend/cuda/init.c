@@ -31,6 +31,8 @@
 typedef struct {
   CUdeviceptr dptr;          // device allocation or view base; 0 = free slot
   u64         nbytes;
+  u64         req_nbytes;    // bytes requested: logical size (a best-fit
+                             // recycle backs it with a larger block)
   u32         refcount;
   u8          preserved;     // per-realize pool keep-flag (see buf_pool.c)
   u8          owns_data;     // 1: cuMemFree on release; 0: view, do not free

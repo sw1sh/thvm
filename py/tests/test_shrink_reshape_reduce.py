@@ -18,17 +18,26 @@ runs through the default CPU JIT, and again in a child process whose JIT
 never compiles, so the walker executes every kernel.
 
 With BEAM=2 each kernel is first benched on scratch buffers.  A composed
-slot is read up to its base's extent, so its scratch must cover that
-extent, not the view's numel.  The BEAM child runs under macOS Guard Malloc
-when it loads, where a read past a scratch buffer faults.
+slot is read up to its base's extent, and a kernel that reads two views of
+one buffer (x[:, :64] + x[:, 64:], a GLU split) loads both through the
+first view's slot, so that slot's scratch must hold the whole buffer, not
+the view's numel.  The BEAM child reports each scratch it allocates
+(THVM_AUTOTUNE_TRACE); the test checks that the slot the leaf's loads land
+on holds the whole leaf buffer, that the search ran and every candidate
+passed its correctness gate, and that BEAM=2 leaves each result as the
+default path computes it, bit for bit where no opt can reorder a sum.  On
+macOS the child also runs under Guard Malloc, where a read past a scratch
+buffer faults.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_shrink_reshape_reduce.py -q
 """
 import itertools
 import os
 import pathlib
+import re
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -122,29 +131,61 @@ def run_named_case(name):
 NAMED = list(_named_cases())
 
 
+def _on(xa, build):
+    return lambda: build(Tensor(xa))
+
+
 def _beam_cases():
+    """name -> (build, numpy reference, element count of the leaf buffer
+    the kernel reads)."""
     xm = _data((2, 128))
     xs = _data((2, 4, 8))
+    xd = _data((4, 33))
+    xg = _data((4, 64))
     return {
         # The view is (2,64) at offset 64: the kernel reads xm up to its
         # last element, twice the view's numel.
         "shrink-mul": (
-            lambda: Tensor(xm).shrink(((0, 2), (64, 128))) * 2,
-            xm[:, 64:] * 2),
+            _on(xm, lambda x: x.shrink(((0, 2), (64, 128))) * 2),
+            xm[:, 64:] * 2, xm.size),
         # A two-view chain whose address spans all 64 elements of xs.
         "shrink-merge-sum": (
-            lambda: Tensor(xs).shrink(((0, 2), (0, 4), (4, 8)))
-            .reshape(2, 16).sum(axis=1),
-            xs[:, :, 4:].reshape(2, 16).sum(1)),
+            _on(xs, lambda x: x.shrink(((0, 2), (0, 4), (4, 8)))
+                .reshape(2, 16).sum(axis=1)),
+            xs[:, :, 4:].reshape(2, 16).sum(1), xs.size),
+        # Two views of one buffer load through the first operand's slot.
+        # With the lower view first, that slot's own view stops short of
+        # the buffer's end.
+        "halves-add": (
+            _on(xm, lambda x: x[:, :64] + x[:, 64:]),
+            xm[:, :64] + xm[:, 64:], xm.size),
+        "halves-add-rev": (
+            _on(xm, lambda x: x[:, 64:] + x[:, :64]),
+            xm[:, 64:] + xm[:, :64], xm.size),
+        "diff": (
+            _on(xd, lambda x: x[:, :-1] - x[:, 1:]),
+            xd[:, :-1] - xd[:, 1:], xd.size),
+        "diff-rev": (
+            _on(xd, lambda x: x[:, 1:] - x[:, :-1]),
+            xd[:, 1:] - xd[:, :-1], xd.size),
+        "glu-halves": (
+            _on(xg, lambda x: x[:, :32] * x[:, 32:]),
+            xg[:, :32] * xg[:, 32:], xg.size),
+        "glu-halves-rev": (
+            _on(xg, lambda x: x[:, 32:] * x[:, :32]),
+            xg[:, 32:] * xg[:, :32], xg.size),
     }
 
 
 def run_beam_case(name):
-    build, want = _beam_cases()[name]
+    build, want, _ = _beam_cases()[name]
     return build().numpy(), want
 
 
 BEAM = list(_beam_cases())
+# A winning opt may sum a reduce in another order; the rest compute each
+# element the same way under every opt.
+BEAM_REORDERS = {"shrink-merge-sum"}
 
 
 class TestShrinkReshapeReduce(unittest.TestCase):
@@ -205,7 +246,9 @@ sys.path.insert(0, os.environ["THVM_TESTS"])
 import numpy as np
 import test_shrink_reshape_reduce as t
 for name in t.BEAM:
+    print(f"BEGIN {name}", file=sys.stderr, flush=True)
     got, want = t.run_beam_case(name)
+    np.save(os.path.join(os.environ["THVM_BEAM_OUT"], name + ".npy"), got)
     err = float(np.abs(np.asarray(got) - want).max())
     ok = bool(np.allclose(got, want, rtol=1e-5, atol=1e-5))
     print(f"CASE {name} ok={ok} maxerr={err:.6g}", flush=True)
@@ -223,24 +266,66 @@ def _guard_malloc(env):
     return guarded if probe.returncode == 0 else env
 
 
+def _trace_by_case(stderr):
+    """The child's stderr lines grouped under the case whose BEGIN marker
+    precedes them."""
+    sections, name = {}, None
+    for line in stderr.splitlines():
+        if line.startswith("BEGIN "):
+            name = line[len("BEGIN "):]
+            sections[name] = []
+        elif name is not None:
+            sections[name].append(line)
+    return sections
+
+
+def _iso_slots(lines):
+    """The fields of each `[iso]` line that reports an allocated scratch."""
+    return [{k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", l)}
+            for l in lines if l.startswith("[iso] ") and " scratch=" in l]
+
+
 class TestShrinkBeamIsolatedBench(unittest.TestCase):
     def test_beam_bench_stays_inside_scratch(self):
         # AUTOTUNE_CACHE=0: no cached winner may skip the search.
-        env = _guard_malloc(dict(
-            os.environ, DEV="cpu", BEAM="2", AUTOTUNE_CACHE="0",
-            THVM_AUTOTUNE_TRACE="1",
-            THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
-            THVM_TESTS=str(pathlib.Path(__file__).resolve().parent)))
-        out = subprocess.run([sys.executable, "-c", _BEAM_CHILD], env=env,
-                             capture_output=True, text=True, timeout=600)
-        self.assertEqual(out.returncode, 0,
-                         f"child failed:\n{out.stdout}\n{out.stderr[-4000:]}")
-        lines = [l for l in out.stdout.splitlines() if l.startswith("CASE ")]
-        self.assertEqual(len(lines), len(BEAM), out.stdout)
-        self.assertEqual([l for l in lines if "ok=False" in l], [])
-        cands = [l for l in out.stderr.splitlines() if l.startswith("[cand]")]
-        self.assertGreaterEqual(len(cands), len(BEAM),
-                                "the isolated search declined the kernels")
+        with tempfile.TemporaryDirectory() as out_dir:
+            env = _guard_malloc(dict(
+                os.environ, DEV="cpu", BEAM="2", AUTOTUNE_CACHE="0",
+                THVM_AUTOTUNE_TRACE="1", THVM_BEAM_OUT=out_dir,
+                THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
+                THVM_TESTS=str(pathlib.Path(__file__).resolve().parent)))
+            out = subprocess.run([sys.executable, "-c", _BEAM_CHILD], env=env,
+                                 capture_output=True, text=True, timeout=600)
+            self.assertEqual(out.returncode, 0,
+                             f"child failed:\n{out.stdout}\n{out.stderr[-4000:]}")
+            lines = [l for l in out.stdout.splitlines() if l.startswith("CASE ")]
+            self.assertEqual(len(lines), len(BEAM), out.stdout)
+            self.assertEqual([l for l in lines if "ok=False" in l], [])
+            beam = {name: np.load(os.path.join(out_dir, name + ".npy"))
+                    for name in BEAM}
+        cases, traces, problems = _beam_cases(), _trace_by_case(out.stderr), []
+        for name in BEAM:
+            trace = traces.get(name, [])
+            # The default path (no BEAM in this process) computes the same
+            # values, bit for bit where no opt can reorder a sum.
+            default = run_beam_case(name)[0]
+            same = (np.allclose(beam[name], default, rtol=1e-5, atol=1e-5)
+                    if name in BEAM_REORDERS
+                    else np.array_equal(beam[name], default))
+            if not same:
+                problems.append(f"{name}: BEAM=2 changed the result")
+            if not [l for l in trace if l.startswith("[cand]")]:
+                problems.append(f"{name}: the isolated search declined")
+            if [l for l in trace if "NAN-REJECT" in l]:
+                problems.append(f"{name}: a candidate failed the gate")
+            # The slot the leaf's loads land on holds its whole buffer (other
+            # composed slots hold broadcast constants).
+            whole = cases[name][2]
+            scratch = [s["scratch"] for s in _iso_slots(trace) if s["composed"]]
+            if not scratch or max(scratch) < whole:
+                problems.append(f"{name}: composed scratch {scratch} is short "
+                                f"of the {whole}-element leaf buffer")
+        self.assertEqual(problems, [])
         # The scratch holds finite values, so a non-finite baseline means the
         # bench read past it.
         self.assertNotIn("finite=0 /", out.stderr)

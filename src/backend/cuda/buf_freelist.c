@@ -78,6 +78,7 @@ fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
   u64         nb   = donor->nbytes;
   donor->dptr      = 0;
   donor->nbytes    = 0;
+  donor->req_nbytes = 0;
   donor->refcount  = 0;
   donor->preserved = 0;
   donor->owns_data = 0;
@@ -97,6 +98,7 @@ fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
   CudaBuf *nb_slot = &CUDA_BUFS[new_id];
   nb_slot->dptr          = dptr;
   nb_slot->nbytes        = nb;
+  nb_slot->req_nbytes    = nbytes;
   nb_slot->refcount      = 1;
   nb_slot->preserved     = 0;
   nb_slot->owns_data     = 1;
