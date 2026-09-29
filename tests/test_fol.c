@@ -41,6 +41,321 @@ static Term dist_ref(Term f) {
   return fol_mk_or(dp, dq);
 }
 
+// --- recursive oracles ------------------------------------------------
+// The clausification walkers as they were before their explicit stacks
+// (src/fol/cnf.c at 156e7d0f), with every pair of calls sequenced left
+// to right: the order clang gave their argument lists, and the CASC
+// binary is a clang (zig cc) build.  The walkers must agree with them
+// term for term, label for label, clause for clause.
+static Term nnf_ref(Term f, u8 neg) {
+  if (term_tag(f) != TAG_CTR) return neg ? fol_mk_not(f) : f;
+  u32 lab = term_ext(f);
+  Term p = term_ctr_at(f, 0u), q = term_ctr_at(f, 1u);
+  switch (lab) {
+    case FOL_LAB_NOT: return nnf_ref(p, (u8)(neg ^ 1u));
+    case FOL_LAB_AND: case FOL_LAB_OR: {
+      Term a = nnf_ref(p, neg);
+      Term b = nnf_ref(q, neg);
+      return ((lab == FOL_LAB_AND) ^ neg) ? fol_mk_and(a, b) : fol_mk_or(a, b);
+    }
+    case FOL_LAB_IMP: {
+      Term a = nnf_ref(p, (u8)(neg ^ 1u));
+      Term b = nnf_ref(q, neg);
+      return neg ? fol_mk_and(a, b) : fol_mk_or(a, b);
+    }
+    case FOL_LAB_IFF: {
+      if (neg) {
+        Term a = nnf_ref(p, 0u), b = nnf_ref(q, 1u);
+        Term l = fol_mk_and(a, b);
+        Term c = nnf_ref(p, 1u), d = nnf_ref(q, 0u);
+        Term r = fol_mk_and(c, d);
+        return fol_mk_or(l, r);
+      }
+      Term a = nnf_ref(p, 1u), b = nnf_ref(q, 0u);
+      Term l = fol_mk_or(a, b);
+      Term c = nnf_ref(p, 0u), d = nnf_ref(q, 1u);
+      Term r = fol_mk_or(c, d);
+      return fol_mk_and(l, r);
+    }
+    case FOL_LAB_ALL: case FOL_LAB_EX: {
+      Term b = nnf_ref(q, neg);
+      return ((lab == FOL_LAB_ALL) ^ neg) ? fol_mk_all(p, b) : fol_mk_ex(p, b);
+    }
+    default: return neg ? fol_mk_not(f) : f;
+  }
+}
+
+static Term vsubst_ref(Term t, u32 vid, Term repl) {
+  if (term_tag(t) == TAG_FVR) return (term_ext(t) == vid) ? repl : t;
+  if (term_tag(t) != TAG_CTR) return t;
+  u32 lab = term_ext(t);
+  if (lab == FOL_LAB_ALL || lab == FOL_LAB_EX) {
+    Term var = term_ctr_at(t, 0u);
+    if (term_tag(var) == TAG_FVR && term_ext(var) == vid) return t;
+  }
+  u32 n = term_ctr_n(t);
+  if (n == 0u) return t;
+  Term *kids = (Term *)malloc((size_t)n * sizeof(Term));
+  u8 changed = 0u;
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = vsubst_ref(term_ctr_at(t, i), vid, repl);
+    if (kids[i] != term_ctr_at(t, i)) changed = 1u;
+  }
+  Term r = changed ? term_new_ctr(lab, kids, n) : t;
+  free(kids);
+  return r;
+}
+
+static Term sk_ref(Term f, u32 n_univ) {
+  if (term_tag(f) != TAG_CTR) return f;
+  u32 lab = term_ext(f);
+  switch (lab) {
+    case FOL_LAB_NOT: {
+      Term a = sk_ref(term_ctr_at(f, 0u), n_univ);
+      return fol_mk_not(a);
+    }
+    case FOL_LAB_AND: case FOL_LAB_OR: case FOL_LAB_IMP: case FOL_LAB_IFF: {
+      Term kids[2];
+      kids[0] = sk_ref(term_ctr_at(f, 0u), n_univ);
+      kids[1] = sk_ref(term_ctr_at(f, 1u), n_univ);
+      return term_new_ctr(lab, kids, 2u);
+    }
+    case FOL_LAB_ALL:
+      fol_sk_fit(&g_fol_sk_univ, &g_fol_sk_univ_cap, n_univ);
+      g_fol_sk_univ[n_univ] = term_ctr_at(f, 0u);
+      return sk_ref(term_ctr_at(f, 1u), n_univ + 1u);
+    case FOL_LAB_EX: {
+      Term var = term_ctr_at(f, 0u), body = term_ctr_at(f, 1u);
+      if (term_tag(var) != TAG_FVR) return f;
+      if (FOL_LAB_SKOLEM_BASE + g_fol_skolem_next > (u32)EXT_MASK) {
+        g_fol_sk_out = 1u;
+        return f;
+      }
+      u32 sk_label = FOL_LAB_SKOLEM_BASE + g_fol_skolem_next++;
+      Term sk;
+      if (n_univ == 0u) {
+        sk = term_new_ctr(sk_label, NULL, 0u);
+      } else if (n_univ <= REWRITE_MAX_ARITY) {
+        sk = term_new_ctr(sk_label, g_fol_sk_univ, n_univ);
+      } else {
+        fol_vepoch_next();
+        fol_stamp_vars(body);
+        u32 na = 0u;
+        for (u32 i = 0; i < n_univ; i++) {
+          Term u = g_fol_sk_univ[i];
+          if (term_tag(u) != TAG_FVR || !fol_var_stamped(term_ext(u))) continue;
+          u32 dup = 0u;
+          for (u32 j = 0; j < na && !dup; j++) dup = (g_fol_sk_args[j] == u);
+          if (dup) continue;
+          fol_sk_fit(&g_fol_sk_args, &g_fol_sk_args_cap, na);
+          g_fol_sk_args[na++] = u;
+        }
+        sk = term_new_ctr(sk_label, na ? g_fol_sk_args : NULL, na);
+      }
+      return sk_ref(vsubst_ref(body, term_ext(var), sk), n_univ);
+    }
+    default: return f;
+  }
+}
+
+static Term or_cnf_ref(Term x, Term y) {
+  if (term_tag(x) == TAG_CTR && term_ext(x) == FOL_LAB_AND) {
+    Term a = or_cnf_ref(term_ctr_at(x, 0u), y);
+    Term b = or_cnf_ref(term_ctr_at(x, 1u), y);
+    return fol_mk_and(a, b);
+  }
+  if (term_tag(y) == TAG_CTR && term_ext(y) == FOL_LAB_AND) {
+    Term a = or_cnf_ref(x, term_ctr_at(y, 0u));
+    Term b = or_cnf_ref(x, term_ctr_at(y, 1u));
+    return fol_mk_and(a, b);
+  }
+  return fol_mk_or(x, y);
+}
+
+static Term distribute_ref(Term f) {
+  if (term_tag(f) != TAG_CTR) return f;
+  u32 lab = term_ext(f);
+  if (lab != FOL_LAB_AND && lab != FOL_LAB_OR) return f;
+  Term a = distribute_ref(term_ctr_at(f, 0u));
+  Term b = distribute_ref(term_ctr_at(f, 1u));
+  return (lab == FOL_LAB_AND) ? fol_mk_and(a, b) : or_cnf_ref(a, b);
+}
+
+static void extract_or_ref(Term f, FolLit **lits, u32 *n, u32 *cap) {
+  if (term_tag(f) == TAG_CTR && term_ext(f) == FOL_LAB_OR) {
+    extract_or_ref(term_ctr_at(f, 0u), lits, n, cap);
+    extract_or_ref(term_ctr_at(f, 1u), lits, n, cap);
+    return;
+  }
+  FolLit lit;
+  if (term_tag(f) == TAG_CTR && term_ext(f) == FOL_LAB_NOT) {
+    lit.atom = term_ctr_at(f, 0u);
+    lit.sign = 1u;
+  } else {
+    lit.atom = f;
+    lit.sign = 0u;
+  }
+  fol_extract_lit(lits, n, cap, lit);
+}
+
+static void extract_and_ref(Term f, FolClause ***out, u32 *n, u32 *cap) {
+  if (term_tag(f) == TAG_CTR && term_ext(f) == FOL_LAB_AND) {
+    extract_and_ref(term_ctr_at(f, 0u), out, n, cap);
+    extract_and_ref(term_ctr_at(f, 1u), out, n, cap);
+    return;
+  }
+  FolLit *lits = NULL;
+  u32 nl = 0u, capl = 0u;
+  extract_or_ref(f, &lits, &nl, &capl);
+  if (nl > FOL_MAX_LITS) fol_append_wide(out, n, cap, lits, nl);
+  else fol_push_lits(out, n, cap, lits, nl);
+  free(lits);
+}
+
+static void collect_vars_ref(Term t, u32 *n) {
+  if (term_tag(t) == TAG_FVR) {
+    u32 id = term_ext(t);
+    if (fol_var_stamped(id)) return;
+    fol_vstamp_fit(id);
+    g_fol_vstamp[id] = g_fol_vepoch;
+    fol_sk_fit(&g_fol_ts_vars, &g_fol_ts_vars_cap, *n);
+    g_fol_ts_vars[(*n)++] = t;
+    return;
+  }
+  if (term_tag(t) != TAG_CTR) return;
+  u32 nk = term_ctr_n(t);
+  for (u32 i = 0; i < nk; i++) collect_vars_ref(term_ctr_at(t, i), n);
+}
+
+static FolLit tseitin_ref(Term f, FolClause ***out, u32 *n, u32 *cap) {
+  if (term_tag(f) == TAG_CTR && term_ext(f) == FOL_LAB_NOT)
+    return (FolLit){ .atom = term_ctr_at(f, 0u), .sign = 1u };
+  if (term_tag(f) != TAG_CTR || !fol_is_connective(term_ext(f)))
+    return (FolLit){ .atom = f, .sign = 0u };
+  u32 lab = term_ext(f);
+  FolLit b = tseitin_ref(term_ctr_at(f, 0u), out, n, cap);
+  FolLit c = tseitin_ref(term_ctr_at(f, 1u), out, n, cap);
+  u32 nv = 0u;
+  fol_vepoch_next();
+  collect_vars_ref(f, &nv);
+  Term aux = fol_fresh_aux(g_fol_ts_vars, nv);
+  FolLit na = { .atom = aux, .sign = 1u }, pa = { .atom = aux, .sign = 0u };
+  FolLit nb = { .atom = b.atom, .sign = (u8)(b.sign ^ 1u) };
+  FolLit nc = { .atom = c.atom, .sign = (u8)(c.sign ^ 1u) };
+  if (lab == FOL_LAB_AND) {
+    FolLit c1[2] = { na, b }, c2[2] = { na, c }, c3[3] = { nb, nc, pa };
+    fol_tseitin_emit(out, n, cap, c1, 2);
+    fol_tseitin_emit(out, n, cap, c2, 2);
+    fol_tseitin_emit(out, n, cap, c3, 3);
+  } else {
+    FolLit c1[3] = { na, b, c }, c2[2] = { nb, pa }, c3[2] = { nc, pa };
+    fol_tseitin_emit(out, n, cap, c1, 3);
+    fol_tseitin_emit(out, n, cap, c2, 2);
+    fol_tseitin_emit(out, n, cap, c3, 2);
+  }
+  return pa;
+}
+
+// Naive-distribution clause count, saturating (small formulas only).
+static u32 est_ref(Term f) {
+  if (term_tag(f) != TAG_CTR) return 1u;
+  u32 lab = term_ext(f);
+  if (lab != FOL_LAB_AND && lab != FOL_LAB_OR) return 1u;
+  u64 a = est_ref(term_ctr_at(f, 0u)), b = est_ref(term_ctr_at(f, 1u));
+  u64 r = (lab == FOL_LAB_AND) ? a + b : a * b;
+  return (r > 100000u) ? 100000u : (u32)r;
+}
+
+// Structural equality over an explicit stack (the deep cases outgrow any
+// recursive comparison).
+static int teq(Term a, Term b) {
+  static Term *st = NULL;
+  static u32 cap = 0u;
+  u32 n = 0u;
+  if (cap == 0u) { cap = 1024u; st = (Term *)malloc(cap * sizeof(Term)); }
+  st[n++] = a;
+  st[n++] = b;
+  while (n > 0u) {
+    Term y = st[--n], x = st[--n];
+    if (x == y) continue;
+    if (term_tag(x) != TAG_CTR || term_tag(y) != TAG_CTR) return 0;
+    u32 k = term_ctr_n(x);
+    if (term_ext(x) != term_ext(y) || term_ctr_n(y) != k) return 0;
+    if (n + 2u * k > cap) {
+      while (n + 2u * k > cap) cap *= 2u;
+      st = (Term *)realloc(st, cap * sizeof(Term));
+    }
+    for (u32 i = 0; i < k; i++) {
+      st[n++] = term_ctr_at(x, i);
+      st[n++] = term_ctr_at(y, i);
+    }
+  }
+  return 1;
+}
+
+static int clauses_eq(FolClause **a, u32 na, FolClause **b, u32 nb) {
+  if (na != nb) return 0;
+  for (u32 c = 0; c < na; c++) {
+    if (a[c]->n_lits != b[c]->n_lits) return 0;
+    for (u32 i = 0; i < a[c]->n_lits; i++) {
+      if (a[c]->lits[i].sign != b[c]->lits[i].sign) return 0;
+      if (!teq(a[c]->lits[i].atom, b[c]->lits[i].atom)) return 0;
+    }
+  }
+  return 1;
+}
+
+static void clauses_free(FolClause **cs, u32 n) {
+  for (u32 c = 0; c < n; c++) fol_clause_free(cs[c]);
+  free(cs);
+}
+
+// A random first-order formula over every connective, depth <= d, with
+// variables drawn from ids [0, nv) (binders over the same id nest and
+// shadow; LCG state *s).
+static Term rand_fol(u32 *s, u32 d, u32 nv) {
+  *s = *s * 1103515245u + 12345u;
+  u32 r = (*s >> 16) % 11u;
+  u32 x = (*s >> 8) % nv, y = (*s >> 24) % nv;
+  if (d == 0u || r < 3u) {
+    if (r == 0u) return pred1(P_P, v(x));
+    if (r == 1u) return pred2(P_R, v(x), k(L_a + (y & 3u)));
+    return pred2(P_R, v(x), v(y));
+  }
+  if (r == 3u) return fol_mk_not(rand_fol(s, d - 1u, nv));
+  if (r == 9u) return fol_mk_all(v(x), rand_fol(s, d - 1u, nv));
+  if (r == 10u) return fol_mk_ex(v(x), rand_fol(s, d - 1u, nv));
+  Term a = rand_fol(s, d - 1u, nv);
+  Term b = rand_fol(s, d - 1u, nv);
+  if (r <= 5u) return fol_mk_and(a, b);
+  if (r <= 7u) return fol_mk_or(a, b);
+  return (r == 8u) ? fol_mk_imp(a, b) : fol_mk_iff(a, b);
+}
+
+// A random matrix under random quantifier blocks: 1..4 blocks of 1..6
+// binders each (universal or existential per block), variables drawn
+// from [0, nv) -- runs of existential binders, variables bound twice,
+// existential binders over a universal's name (capture), all under
+// narrow or wide universal scopes.
+static Term rand_prefixed(u32 *s, u32 nv, u32 wide) {
+  Term f = rand_fol(s, 4u, nv);
+  *s = *s * 1103515245u + 12345u;
+  u32 nb = 1u + (*s >> 16) % 4u;
+  for (u32 b = 0; b < nb; b++) {
+    *s = *s * 1103515245u + 12345u;
+    u32 ex = (*s >> 16) & 1u, len = 1u + (*s >> 20) % 6u;
+    for (u32 i = 0; i < len; i++) {
+      *s = *s * 1103515245u + 12345u;
+      Term x = v((*s >> 16) % nv);
+      f = ex ? fol_mk_ex(x, f) : fol_mk_all(x, f);
+    }
+  }
+  // The wide scope's universals overlap the matrix's variables (ids 3
+  // up): some are mentioned, some rebound below, some neither.
+  for (u32 i = wide; i-- > 0u;) f = fol_mk_all(v(3u + i), f);
+  return f;
+}
+
 // A random NNF formula over P/Q literals of depth <= d (LCG state *s).
 static Term rand_nnf(u32 *s, u32 d) {
   *s = *s * 1103515245u + 12345u;
@@ -1932,6 +2247,182 @@ int main(void) {
       same = kbo_eq(fol_distribute(g), dist_ref(g));
     }
     CHECK(same);
+  }
+
+  TEST_BEGIN("fol/walkers-match-recursive-oracles");
+  {
+    // Random formulas over every connective, shadowing binders
+    // included: NNF terms; Skolem terms and label counts (from raw and
+    // from NNF input); distributed terms and their clauses, in order;
+    // Tseitin clauses and name counts.
+    u32 s = 20260930u;
+    int nnf_ok = 1, sk_ok = 1, dist_ok = 1, ts_ok = 1, n_dist = 0;
+    for (u32 t = 0; t < 600u; t++) {
+      Term f = rand_fol(&s, 2u + t % 7u, (t % 3u == 0u) ? 12u : 4u);
+      Term n1 = fol_nnf(f);
+      nnf_ok &= teq(n1, nnf_ref(f, 0u));
+      for (int raw = 0; raw < 2; raw++) {
+        Term in = raw ? f : n1;
+        fol_reset_skolem();
+        Term s1 = fol_skolemize(in);
+        u32 c1 = g_fol_skolem_next;
+        fol_reset_skolem();
+        Term s0 = sk_ref(in, 0u);
+        sk_ok &= teq(s1, s0) && c1 == g_fol_skolem_next;
+      }
+      fol_reset_skolem();
+      Term sk = fol_skolemize(n1);
+      if (dist_ok && est_ref(sk) <= 2000u) {
+        Term d1 = fol_distribute(sk);
+        Term d0 = distribute_ref(sk);
+        dist_ok &= teq(d1, d0);
+        u32 m1 = 0u, m0 = 0u, cap0 = 0u;
+        fol_reset_tseitin();
+        FolClause **x1 = fol_extract_clauses(d1, &m1);
+        fol_reset_tseitin();
+        FolClause **x0 = NULL;
+        extract_and_ref(d0, &x0, &m0, &cap0);
+        dist_ok &= clauses_eq(x1, m1, x0, m0);
+        clauses_free(x1, m1);
+        clauses_free(x0, m0);
+        n_dist++;
+      }
+      u32 m1 = 0u, m0 = 0u, cap0 = 0u;
+      fol_reset_tseitin();
+      FolClause **t1 = fol_tseitin_extract_clauses(sk, &m1);
+      u32 a1 = g_fol_tseitin_next;
+      fol_reset_tseitin();
+      FolClause **t0 = NULL;
+      FolLit root = tseitin_ref(sk, &t0, &m0, &cap0);
+      fol_tseitin_emit(&t0, &m0, &cap0, &root, 1u);
+      ts_ok &= clauses_eq(t1, m1, t0, m0) && a1 == g_fol_tseitin_next;
+      clauses_free(t1, m1);
+      clauses_free(t0, m0);
+    }
+    CHECK(nnf_ok);
+    CHECK(sk_ok);
+    CHECK(dist_ok);
+    CHECK(ts_ok);
+    CHECK(n_dist > 200);
+    // Wide universal scopes (past REWRITE_MAX_ARITY universals): the
+    // Skolem term keeps the universals its body mentions, an inner one
+    // included.
+    int wide_ok = 1;
+    for (u32 w = 15u; w < 24u; w++) {
+      Term inner = fol_mk_ex(v(41u), fol_mk_and(pred2(P_R, v(41u), v(40u)),
+                                                pred2(P_R, v(w - 3u), v(41u))));
+      Term f = fol_mk_ex(v(40u), fol_mk_and(pred2(P_R, v(40u), v(w % 5u)), inner));
+      for (u32 i = w; i-- > 0u;) f = fol_mk_all(v(i), f);
+      fol_reset_skolem();
+      Term s1 = fol_skolemize(f);
+      fol_reset_skolem();
+      wide_ok &= teq(s1, sk_ref(f, 0u)) && g_fol_skolem_next == 2u;
+    }
+    CHECK(wide_ok);
+    // Quantifier blocks: existential runs Skolemized at once must give
+    // what one binder at a time gives (shadowing and capture included),
+    // under narrow and wide universal scopes.
+    int run_ok = 1;
+    for (u32 t = 0; t < 1500u; t++) {
+      Term f = rand_prefixed(&s, (t % 2u) ? 5u : 9u, (t % 5u == 0u) ? 17u : t % 4u);
+      for (int raw = 0; raw < 2; raw++) {
+        Term in = raw ? f : fol_nnf(f);
+        fol_reset_skolem();
+        Term s1 = fol_skolemize(in);
+        u32 c1 = g_fol_skolem_next;
+        fol_reset_skolem();
+        Term s0 = sk_ref(in, 0u);
+        run_ok &= teq(s1, s0) && c1 == g_fol_skolem_next;
+      }
+    }
+    CHECK(run_ok);
+    // A 30k-binder existential prefix over a formula mentioning every
+    // variable: one substitution walk, each variable its own Skolem
+    // constant.
+    {
+      const u32 K = 30000u;
+      Term body = pred1(P_P, v(0u));
+      for (u32 i = 1; i < K; i++) body = fol_mk_and(body, pred1(P_P, v(i)));
+      Term f = body;
+      for (u32 i = K; i-- > 0u;) f = fol_mk_ex(v(i), f);
+      fol_reset_skolem();
+      Term sk = fol_skolemize(f);
+      CHECK_EQ(g_fol_skolem_next, K);
+      int consts = 1;
+      Term spine = sk;
+      for (u32 i = K - 1u; consts && i > 0u; i--) {
+        Term a = term_ctr_at(spine, 1u);
+        Term c = term_ctr_at(a, 0u);
+        consts = term_ext(spine) == FOL_LAB_AND && term_ext(a) == P_P &&
+                 term_ext(c) == FOL_LAB_SKOLEM_BASE + i && term_ctr_n(c) == 0u;
+        spine = term_ctr_at(spine, 0u);
+      }
+      CHECK(consts);
+    }
+  }
+
+  TEST_BEGIN("fol/walkers-take-any-depth");
+  {
+    // A 200k-conjunct chain, left-nested as the TPTP parser builds it,
+    // under a universal and an existential binder: past any C stack
+    // (HWV061+1 is 117k levels; one frame per level overflowed 8 MB in
+    // fol_nnf_rec).
+    const u32 N = 200000u;
+    Term chain = pred2(P_R, v(0u), k(L_a));
+    for (u32 i = 1; i < N; i++) {
+      chain = fol_mk_and(chain, pred2(P_R, v(i % 2u), k(1000u + i % 5000u)));
+    }
+    Term f = fol_mk_all(v(0u), fol_mk_ex(v(1u), chain));
+    CHECK_EQ(fol_depth(f, 1000000u), N + 3u);
+    CHECK_EQ(fol_depth(f, 100u), 100u);
+    CHECK(teq(fol_nnf(fol_mk_not(fol_mk_not(f))), f));
+    // ~f: ?[x0] ![x1] of an OR chain of negated atoms, left-nested.
+    Term g = fol_nnf(fol_mk_not(f));
+    int shape = term_ext(g) == FOL_LAB_EX && term_ext(term_ctr_at(g, 1u)) == FOL_LAB_ALL;
+    Term spine = term_ctr_at(term_ctr_at(g, 1u), 1u);
+    for (u32 i = N - 1u; shape && i > 0u; i--) {
+      shape = term_ext(spine) == FOL_LAB_OR &&
+              term_ext(term_ctr_at(spine, 1u)) == FOL_LAB_NOT;
+      spine = term_ctr_at(spine, 0u);
+    }
+    CHECK(shape && term_ext(spine) == FOL_LAB_NOT);
+    // Skolemized, distributed, extracted: N unit clauses in chain order,
+    // x1 read as sk0(x0).
+    fol_reset_skolem();
+    Term sk = fol_skolemize(fol_nnf(f));
+    CHECK_EQ(g_fol_skolem_next, 1u);
+    Term sk0 = term_new_ctr(FOL_LAB_SKOLEM_BASE, (Term[]){ v(0u) }, 1u);
+    u32 m = 0u;
+    FolClause **cs = fol_extract_clauses(fol_distribute(sk), &m);
+    CHECK_EQ(m, N);
+    int units = (cs != NULL && m == N);
+    for (u32 i = 0; units && i < N; i++) {
+      Term want = (i == 0u) ? pred2(P_R, v(0u), k(L_a))
+                            : pred2(P_R, (i % 2u) ? sk0 : v(0u), k(1000u + i % 5000u));
+      units = cs[i]->n_lits == 1u && cs[i]->lits[0].sign == 0u &&
+              teq(cs[i]->lits[0].atom, want);
+    }
+    CHECK(units);
+    clauses_free(cs, m);
+    // Tseitin over a 12k-deep disjunction chain: one name per compound,
+    // the recursive oracle's clauses exactly (the oracle's own frames
+    // bound the depth; every compound's name collects its subformula's
+    // variables, quadratic in the chain).
+    const u32 M = 12000u;
+    Term ors = pred1(P_P, k(L_a));
+    for (u32 i = 1; i < M; i++) ors = fol_mk_or(ors, pred1(P_Q, k(1000u + i)));
+    u32 m1 = 0u, m0 = 0u, cap0 = 0u;
+    fol_reset_tseitin();
+    FolClause **t1 = fol_tseitin_extract_clauses(ors, &m1);
+    CHECK_EQ(g_fol_tseitin_next, M - 1u);
+    CHECK_EQ(m1, 3u * (M - 1u) + 1u);
+    fol_reset_tseitin();
+    FolClause **t0 = NULL;
+    FolLit root = tseitin_ref(ors, &t0, &m0, &cap0);
+    fol_tseitin_emit(&t0, &m0, &cap0, &root, 1u);
+    CHECK(clauses_eq(t1, m1, t0, m0));
+    clauses_free(t1, m1);
+    clauses_free(t0, m0);
   }
 
   thvm_free();

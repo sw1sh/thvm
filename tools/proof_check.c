@@ -669,6 +669,20 @@ static Term pc_parse_formula(const char *fstr, PcParse *scope) {
   if (!scope->ok || pc_peek(scope) != K_EOF) return 0;
   return f;
 }
+// A record the checker reads: its step checks walk formulas recursively,
+// so a formula nested past PC_MAX_DEPTH is not read -- the record counts
+// as unparsed and the checks citing it abstain, where one C frame per
+// level overflowed the stack (HWV061+1: 117k levels).  FindProof's
+// clausification walkers take any depth.
+#define PC_MAX_DEPTH 10000u
+static Term pc_parse_read(const char *fstr, PcParse *scope) {
+  Term f = pc_parse_formula(fstr, scope);
+  if (f != 0 && fol_depth(f, PC_MAX_DEPTH + 1u) > PC_MAX_DEPTH) {
+    pc_set_err("formula nested past the checker's depth bound");
+    return 0;
+  }
+  return f;
+}
 // Parse a TERM in an existing variable context: `scope_ids` are the
 // binder ids in scope (outermost first; the innermost binder of a name
 // wins), `free_ids` the formula's free variables; pc_vname must name
@@ -716,29 +730,59 @@ static int pc_has_label(Term t, u32 L) {
 // formula (pc_close sizes them): an id past a fixed table stayed FREE,
 // and a free variable of a conjecture then escaped the negation --
 // ~p(X) read as !X ~p(X), not ~!X p(X).
+// An explicit stack (any formula depth): a binder marks its variable,
+// queues the restore of the old mark beneath its body, and the body is
+// walked before anything queued earlier.
+typedef struct { Term t; u32 vid; u8 restore, saved; } PcFreeItem;
+static PcFreeItem *pc_fv_stk = NULL;
+static u32         pc_fv_cap = 0;
+
+static void pc_free_push(u32 *n, PcFreeItem it) {
+  if (*n >= pc_fv_cap) {
+    u32 ncap = pc_fv_cap ? 2u * pc_fv_cap : 256u;
+    PcFreeItem *ns = (PcFreeItem *)realloc(pc_fv_stk, (size_t)ncap * sizeof *ns);
+    if (ns == NULL) {
+      fprintf(stderr, "thvm: out of memory closing a formula\n");
+      abort();
+    }
+    pc_fv_stk = ns;
+    pc_fv_cap = ncap;
+  }
+  pc_fv_stk[(*n)++] = it;
+}
+
 static void pc_free_rec(Term t, unsigned char *bound, unsigned char *freev) {
-  switch (term_tag(t)) {
-    case TAG_FVR: {
-      u32 id = term_ext(t);
-      if (!bound[id]) freev[id] = 1;
-      return;
+  u32 n = 0;
+  pc_free_push(&n, (PcFreeItem){ t, 0u, 0u, 0u });
+  while (n > 0u) {
+    PcFreeItem it = pc_fv_stk[--n];
+    if (it.restore) {
+      bound[it.vid] = it.saved;
+      continue;
     }
-    case TAG_CTR: {
-      u32 lab = term_ext(t);
-      if (lab == PC_LAB_ALL || lab == PC_LAB_EX) {
-        Term var = term_ctr_at(t, 0);
-        u32 vid = term_ext(var);
-        unsigned char saved = bound[vid];
-        bound[vid] = 1;
-        pc_free_rec(term_ctr_at(t, 1), bound, freev);
-        bound[vid] = saved;
-        return;
+    Term x = it.t;
+    if (term_tag(x) == TAG_FVR) {
+      u32 id = term_ext(x);
+      if (!bound[id]) {
+        freev[id] = 1;
       }
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) pc_free_rec(term_ctr_at(t, i), bound, freev);
-      return;
+      continue;
     }
-    default: return;
+    if (term_tag(x) != TAG_CTR) {
+      continue;
+    }
+    u32 lab = term_ext(x);
+    if (lab == PC_LAB_ALL || lab == PC_LAB_EX) {
+      u32 vid = term_ext(term_ctr_at(x, 0));
+      pc_free_push(&n, (PcFreeItem){ 0, vid, 1u, bound[vid] });
+      bound[vid] = 1;
+      pc_free_push(&n, (PcFreeItem){ term_ctr_at(x, 1), 0u, 0u, 0u });
+      continue;
+    }
+    u32 nk = term_ctr_n(x);
+    for (u32 i = 0; i < nk; i++) {
+      pc_free_push(&n, (PcFreeItem){ term_ctr_at(x, i), 0u, 0u, 0u });
+    }
   }
 }
 static u32 pc_max_var(Term t);
@@ -796,14 +840,51 @@ static Term pc_strip_forall(Term f) {
     f = term_ctr_at(f, 1);
   return f;
 }
+// One past the largest variable id in `t`, over an explicit stack.
+static Term *pc_mv_stk = NULL;
+static u32   pc_mv_cap = 0;
+
 static u32 pc_max_var(Term t) {
-  if (term_tag(t) == TAG_FVR) return term_ext(t) + 1u;
-  if (term_tag(t) == TAG_CTR) {
-    u32 m = 0, n = term_ctr_n(t);
-    for (u32 i = 0; i < n; i++) { u32 c = pc_max_var(term_ctr_at(t, i)); if (c > m) m = c; }
-    return m;
+  u32 n = 0, m = 0;
+  if (pc_mv_cap == 0u) {
+    pc_mv_stk = (Term *)malloc(256u * sizeof(Term));
+    if (pc_mv_stk == NULL) {
+      fprintf(stderr, "thvm: out of memory scanning a formula\n");
+      abort();
+    }
+    pc_mv_cap = 256u;
   }
-  return 0;
+  pc_mv_stk[n++] = t;
+  while (n > 0u) {
+    Term x = pc_mv_stk[--n];
+    if (term_tag(x) == TAG_FVR) {
+      if (term_ext(x) + 1u > m) {
+        m = term_ext(x) + 1u;
+      }
+      continue;
+    }
+    if (term_tag(x) != TAG_CTR) {
+      continue;
+    }
+    u32 nk = term_ctr_n(x);
+    if (n + nk > pc_mv_cap) {
+      u32 ncap = pc_mv_cap;
+      while (n + nk > ncap) {
+        ncap *= 2u;
+      }
+      Term *ns = (Term *)realloc(pc_mv_stk, (size_t)ncap * sizeof(Term));
+      if (ns == NULL) {
+        fprintf(stderr, "thvm: out of memory scanning a formula\n");
+        abort();
+      }
+      pc_mv_stk = ns;
+      pc_mv_cap = ncap;
+    }
+    for (u32 i = 0; i < nk; i++) {
+      pc_mv_stk[n++] = term_ctr_at(x, i);
+    }
+  }
+  return m;
 }
 
 // ===================================================================
@@ -2562,7 +2643,7 @@ static int pc_parse_record(const char *rec) {
     st->role = pc_role_of(args[1]);
 
     PcParse scope;
-    Term f = pc_parse_formula(args[2], &scope);
+    Term f = pc_parse_read(args[2], &scope);
     if (f == 0) {
       if (getenv("THVM_PROOFCHECK_DBG") != NULL) {
         fprintf(stderr, "PCDBG parse-skip name=%s formula=[%.120s]\n",
@@ -2620,7 +2701,7 @@ static int pc_parse_problem_record(const char *rec) {
     pc_trim(args[0]);
     pc_trim(args[1]);
     PcParse scope;
-    Term f = pc_parse_formula(args[2], &scope);
+    Term f = pc_parse_read(args[2], &scope);
     if (f != 0) {
       PcProb *pr = &pc_prob[pc_nprob];
       pc_name_copy(pr->name, args[0]);

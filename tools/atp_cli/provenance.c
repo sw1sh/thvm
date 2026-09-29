@@ -165,77 +165,111 @@ static void prov_ser_term(Term t, const ProvRec *pr,
   prov_emit_s(buf, cap, o, ")");
 }
 
+// The formula levels run on an explicit stack of text pieces (any
+// depth): a FORM item serializes a subformula, a TERM item a term (terms
+// keep the recursive prov_ser_term), a TEXT item emits its string.
+// Items are pushed in reverse so the text comes out left to right.
+enum { PROV_SER_FORM, PROV_SER_TERM, PROV_SER_TEXT };
+typedef struct { Term t; const char *s; u8 kind; } ProvSerItem;
+static ProvSerItem *g_prov_ser = NULL;
+static u32          g_prov_ser_cap = 0u;
+
+static void prov_ser_push(u32 *n, u8 kind, Term t, const char *s) {
+  FOL_RESERVE(g_prov_ser, g_prov_ser_cap, *n);
+  g_prov_ser[(*n)++] = (ProvSerItem){ t, s, kind };
+}
+
 static void prov_ser_formula(Term f, const ProvRec *pr,
                              char *buf, size_t cap, size_t *o) {
-  if (g_prov_ser_fail) return;
   char nm[PC_NAME + 16];
-  if (term_tag(f) == TAG_FVR) { prov_ser_term(f, pr, buf, cap, o); return; }
-  if (term_tag(f) != TAG_CTR) { g_prov_ser_fail = 1; return; }
-  u32 lab = term_ext(f);
-  u32 n = term_ctr_n(f);
-  switch (lab) {
-  case FOL_LAB_NOT: {
-    Term a = term_ctr_at(f, 0u);
-    if (term_tag(a) == TAG_CTR && term_ext(a) == PC_LAB_EQ &&
-        term_ctr_n(a) == 2u) {
-      prov_ser_term(term_ctr_at(a, 0u), pr, buf, cap, o);
-      prov_emit_s(buf, cap, o, " != ");
-      prov_ser_term(term_ctr_at(a, 1u), pr, buf, cap, o);
-    } else {
-      prov_emit_s(buf, cap, o, "~(");
-      prov_ser_formula(a, pr, buf, cap, o);
-      prov_emit_s(buf, cap, o, ")");
+  u32 n = 0u;
+  prov_ser_push(&n, PROV_SER_FORM, f, NULL);
+  while (n > 0u && !g_prov_ser_fail) {
+    ProvSerItem it = g_prov_ser[--n];
+    if (it.kind == PROV_SER_TEXT) {
+      prov_emit_s(buf, cap, o, it.s);
+      continue;
     }
-    return;
-  }
-  case FOL_LAB_AND:
-  case FOL_LAB_OR: {
-    prov_emit_s(buf, cap, o, "(");
-    for (u32 i = 0; i < n; i++) {
-      if (i > 0) prov_emit_s(buf, cap, o, (lab == FOL_LAB_AND) ? " & " : " | ");
-      prov_ser_formula(term_ctr_at(f, i), pr, buf, cap, o);
+    if (it.kind == PROV_SER_TERM || term_tag(it.t) == TAG_FVR) {
+      prov_ser_term(it.t, pr, buf, cap, o);
+      continue;
     }
-    prov_emit_s(buf, cap, o, ")");
-    return;
-  }
-  case FOL_LAB_IMP:
-  case FOL_LAB_IFF: {
-    prov_emit_s(buf, cap, o, "(");
-    prov_ser_formula(term_ctr_at(f, 0u), pr, buf, cap, o);
-    prov_emit_s(buf, cap, o, (lab == FOL_LAB_IMP) ? " => " : " <=> ");
-    prov_ser_formula(term_ctr_at(f, 1u), pr, buf, cap, o);
-    prov_emit_s(buf, cap, o, ")");
-    return;
-  }
-  case FOL_LAB_ALL:
-  case FOL_LAB_EX: {
-    prov_emit_s(buf, cap, o, (lab == FOL_LAB_ALL) ? "! [" : "? [");
-    Term cur = f;
-    int first = 1;
-    while (term_tag(cur) == TAG_CTR && term_ext(cur) == lab &&
-           term_ctr_n(cur) == 2u) {
-      Term v = term_ctr_at(cur, 0u);
-      if (term_tag(v) != TAG_FVR) { g_prov_ser_fail = 1; return; }
-      if (!first) prov_emit_s(buf, cap, o, ",");
-      prov_var_name(pr, term_ext(v), nm, sizeof nm);
-      prov_emit_s(buf, cap, o, nm);
-      first = 0;
-      cur = term_ctr_at(cur, 1u);
+    Term g = it.t;
+    if (term_tag(g) != TAG_CTR) {
+      g_prov_ser_fail = 1;
+      break;
     }
-    prov_emit_s(buf, cap, o, "] : (");
-    prov_ser_formula(cur, pr, buf, cap, o);
-    prov_emit_s(buf, cap, o, ")");
-    return;
-  }
-  default:   // atom
-    if (lab == PC_LAB_EQ && n == 2u) {
-      prov_ser_term(term_ctr_at(f, 0u), pr, buf, cap, o);
-      prov_emit_s(buf, cap, o, " = ");
-      prov_ser_term(term_ctr_at(f, 1u), pr, buf, cap, o);
-      return;
+    u32 lab = term_ext(g);
+    u32 k = term_ctr_n(g);
+    switch (lab) {
+    case FOL_LAB_NOT: {
+      Term a = term_ctr_at(g, 0u);
+      if (term_tag(a) == TAG_CTR && term_ext(a) == PC_LAB_EQ &&
+          term_ctr_n(a) == 2u) {
+        prov_ser_push(&n, PROV_SER_TERM, term_ctr_at(a, 1u), NULL);
+        prov_ser_push(&n, PROV_SER_TEXT, 0, " != ");
+        prov_ser_push(&n, PROV_SER_TERM, term_ctr_at(a, 0u), NULL);
+      } else {
+        prov_ser_push(&n, PROV_SER_TEXT, 0, ")");
+        prov_ser_push(&n, PROV_SER_FORM, a, NULL);
+        prov_ser_push(&n, PROV_SER_TEXT, 0, "~(");
+      }
+      break;
     }
-    prov_ser_term(f, pr, buf, cap, o);
-    return;
+    case FOL_LAB_AND:
+    case FOL_LAB_OR:
+      prov_ser_push(&n, PROV_SER_TEXT, 0, ")");
+      for (u32 i = k; i-- > 0u;) {
+        prov_ser_push(&n, PROV_SER_FORM, term_ctr_at(g, i), NULL);
+        if (i > 0u) {
+          prov_ser_push(&n, PROV_SER_TEXT, 0, (lab == FOL_LAB_AND) ? " & " : " | ");
+        }
+      }
+      prov_ser_push(&n, PROV_SER_TEXT, 0, "(");
+      break;
+    case FOL_LAB_IMP:
+    case FOL_LAB_IFF:
+      prov_ser_push(&n, PROV_SER_TEXT, 0, ")");
+      prov_ser_push(&n, PROV_SER_FORM, term_ctr_at(g, 1u), NULL);
+      prov_ser_push(&n, PROV_SER_TEXT, 0, (lab == FOL_LAB_IMP) ? " => " : " <=> ");
+      prov_ser_push(&n, PROV_SER_FORM, term_ctr_at(g, 0u), NULL);
+      prov_ser_push(&n, PROV_SER_TEXT, 0, "(");
+      break;
+    case FOL_LAB_ALL:
+    case FOL_LAB_EX: {
+      prov_emit_s(buf, cap, o, (lab == FOL_LAB_ALL) ? "! [" : "? [");
+      Term cur = g;
+      int first = 1;
+      while (term_tag(cur) == TAG_CTR && term_ext(cur) == lab &&
+             term_ctr_n(cur) == 2u) {
+        Term v = term_ctr_at(cur, 0u);
+        if (term_tag(v) != TAG_FVR) {
+          g_prov_ser_fail = 1;
+          break;
+        }
+        if (!first) {
+          prov_emit_s(buf, cap, o, ",");
+        }
+        prov_var_name(pr, term_ext(v), nm, sizeof nm);
+        prov_emit_s(buf, cap, o, nm);
+        first = 0;
+        cur = term_ctr_at(cur, 1u);
+      }
+      prov_emit_s(buf, cap, o, "] : (");
+      prov_ser_push(&n, PROV_SER_TEXT, 0, ")");
+      prov_ser_push(&n, PROV_SER_FORM, cur, NULL);
+      break;
+    }
+    default:   // atom
+      if (lab == PC_LAB_EQ && k == 2u) {
+        prov_ser_push(&n, PROV_SER_TERM, term_ctr_at(g, 1u), NULL);
+        prov_ser_push(&n, PROV_SER_TEXT, 0, " = ");
+        prov_ser_push(&n, PROV_SER_TERM, term_ctr_at(g, 0u), NULL);
+      } else {
+        prov_ser_term(g, pr, buf, cap, o);
+      }
+      break;
+    }
   }
 }
 
@@ -243,40 +277,71 @@ static void prov_ser_formula(Term f, const ProvRec *pr,
 // implicit universals) so the emitted fof record is closed.  Bound
 // occurrences (under a surviving quantifier) are excluded.
 // `bound`/`seen` are indexed by variable id (sized by the caller from
-// prov_var_span); `order` receives each free id once, first occurrence.
+// prov_var_span); `order` receives each free id once, first occurrence
+// (pre-order, left to right, over an explicit stack: a binder queues
+// the restore of its variable's old mark beneath its body).
+typedef struct { Term t; u32 v; u8 restore, saved; } ProvFvItem;
+static ProvFvItem *g_prov_fv = NULL;
+static u32         g_prov_fv_cap = 0u;
+
 static void prov_free_vars(Term f, u8 *bound, u8 *seen, u32 *order, u32 *n) {
-  if (term_tag(f) == TAG_FVR) {
-    u32 id = term_ext(f);
-    if (!bound[id] && !seen[id]) {
-      seen[id] = 1u;
-      order[(*n)++] = id;
+  u32 ns = 0u;
+  FOL_RESERVE(g_prov_fv, g_prov_fv_cap, ns);
+  g_prov_fv[ns++] = (ProvFvItem){ f, 0u, 0u, 0u };
+  while (ns > 0u) {
+    ProvFvItem it = g_prov_fv[--ns];
+    if (it.restore) {
+      bound[it.v] = it.saved;
+      continue;
     }
-    return;
+    Term x = it.t;
+    if (term_tag(x) == TAG_FVR) {
+      u32 id = term_ext(x);
+      if (!bound[id] && !seen[id]) {
+        seen[id] = 1u;
+        order[(*n)++] = id;
+      }
+      continue;
+    }
+    if (term_tag(x) != TAG_CTR) {
+      continue;
+    }
+    u32 lab = term_ext(x);
+    if ((lab == FOL_LAB_ALL || lab == FOL_LAB_EX) && term_ctr_n(x) == 2u &&
+        term_tag(term_ctr_at(x, 0u)) == TAG_FVR) {
+      u32 v = term_ext(term_ctr_at(x, 0u));
+      FOL_RESERVE(g_prov_fv, g_prov_fv_cap, ns + 2u);
+      g_prov_fv[ns++] = (ProvFvItem){ 0, v, 1u, bound[v] };
+      bound[v] = 1u;
+      g_prov_fv[ns++] = (ProvFvItem){ term_ctr_at(x, 1u), 0u, 0u, 0u };
+      continue;
+    }
+    u32 k = term_ctr_n(x);
+    FOL_RESERVE(g_prov_fv, g_prov_fv_cap, ns + k);
+    for (u32 i = k; i-- > 0u;) {
+      g_prov_fv[ns++] = (ProvFvItem){ term_ctr_at(x, i), 0u, 0u, 0u };
+    }
   }
-  if (term_tag(f) != TAG_CTR) return;
-  u32 lab = term_ext(f);
-  if ((lab == FOL_LAB_ALL || lab == FOL_LAB_EX) && term_ctr_n(f) == 2u &&
-      term_tag(term_ctr_at(f, 0u)) == TAG_FVR) {
-    u32 v = term_ext(term_ctr_at(f, 0u));
-    u8 saved = bound[v];
-    bound[v] = 1u;
-    prov_free_vars(term_ctr_at(f, 1u), bound, seen, order, n);
-    bound[v] = saved;
-    return;
-  }
-  u32 k = term_ctr_n(f);
-  for (u32 i = 0; i < k; i++)
-    prov_free_vars(term_ctr_at(f, i), bound, seen, order, n);
 }
 
 // One past the largest variable id in `f` (binder variables included).
 static u32 prov_var_span(Term f) {
-  if (term_tag(f) == TAG_FVR) return term_ext(f) + 1u;
-  if (term_tag(f) != TAG_CTR) return 0u;
-  u32 m = 0u, k = term_ctr_n(f);
-  for (u32 i = 0; i < k; i++) {
-    u32 v = prov_var_span(term_ctr_at(f, i));
-    if (v > m) m = v;
+  u32 m = 0u, ns = 0u;
+  FOL_RESERVE(g_fol_walk, g_fol_walk_cap, ns);
+  g_fol_walk[ns++] = f;
+  while (ns > 0u) {
+    Term x = g_fol_walk[--ns];
+    if (term_tag(x) == TAG_FVR) {
+      if (term_ext(x) + 1u > m) {
+        m = term_ext(x) + 1u;
+      }
+    } else if (term_tag(x) == TAG_CTR) {
+      u32 k = term_ctr_n(x);
+      FOL_RESERVE(g_fol_walk, g_fol_walk_cap, ns + k);
+      for (u32 i = 0; i < k; i++) {
+        g_fol_walk[ns++] = term_ctr_at(x, i);
+      }
+    }
   }
   return m;
 }

@@ -4709,6 +4709,15 @@ fn u8          fol_set_label_floor(u32 floor);
 fn FolClause **fol_formula_to_clauses_tseitin(Term f, u32 *n_out);
 fn void        fol_reset_tseitin(void);
 fn u8          fol_is_tseitin_aux(u32 label);
+// The pipeline's walkers keep their work on heap stacks (any formula
+// depth).  A caller bounding clausification by time installs a hook the
+// walkers call once per 2^16 work items; the hook abandons the
+// clausification (longjmp, never returns) once its deadline passed.
+// NULL removes it.
+fn void        fol_set_poll(void (*hook)(void));
+// Nesting depth of a formula or term (a leaf is 1), counted up to `cap`:
+// returns min(depth, cap).
+fn u32         fol_depth(Term t, u32 cap);
 
 // Initial heap capacities for the growable rule / CP arrays in
 // AtpState.  The arrays double on demand (see atp_ensure_rule_cap /

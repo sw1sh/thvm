@@ -950,17 +950,49 @@ static void prepass_emit_proof(CnfState *s, const int *id2cnf, int map_cap) {
 }
 
 // --- distribution blow-up guard ------------------------------------------
+// Bottom-up count over the AND/OR skeleton of an NNF+Skolemized formula
+// (explicit stacks, any depth): a literal counts 1, AND sums, OR sums
+// (`mul_or` 0) or multiplies (`mul_or` 1), every node saturating at
+// `sat` once past `cap`.
+typedef struct { Term t; u32 lab; u8 join; } FofCountTask;
+static FofCountTask *g_fcnt_task = NULL;
+static u32           g_fcnt_task_cap = 0u;
+static u32          *g_fcnt_val = NULL;
+static u32           g_fcnt_val_cap = 0u;
+
+static u32 fof_skeleton_count(Term f, u32 cap, u32 sat, int mul_or) {
+  u32 nt = 0u, nv = 0u;
+  FOL_RESERVE(g_fcnt_task, g_fcnt_task_cap, nt);
+  g_fcnt_task[nt++] = (FofCountTask){ f, 0u, 0u };
+  while (nt > 0u) {
+    fol_poll();
+    FofCountTask k = g_fcnt_task[--nt];
+    if (k.join) {
+      u64 b = g_fcnt_val[--nv];
+      u64 a = g_fcnt_val[--nv];
+      u64 v = (k.lab == FOL_LAB_OR && mul_or) ? a * b : a + b;
+      g_fcnt_val[nv++] = (v > (u64)cap) ? sat : (u32)v;
+      continue;
+    }
+    u32 lab = (term_tag(k.t) == TAG_CTR) ? term_ext(k.t) : 0u;
+    if (lab == FOL_LAB_AND || lab == FOL_LAB_OR) {
+      FOL_RESERVE(g_fcnt_task, g_fcnt_task_cap, nt + 2u);
+      g_fcnt_task[nt++] = (FofCountTask){ 0, lab, 1u };
+      g_fcnt_task[nt++] = (FofCountTask){ term_ctr_at(k.t, 1u), 0u, 0u };
+      g_fcnt_task[nt++] = (FofCountTask){ term_ctr_at(k.t, 0u), 0u, 0u };
+      continue;
+    }
+    FOL_RESERVE(g_fcnt_val, g_fcnt_val_cap, nv);
+    g_fcnt_val[nv++] = 1u;
+  }
+  return g_fcnt_val[0];
+}
+
 // Estimate the naive-distribution clause count of an NNF+Skolemized
 // formula: a literal counts 1, AND sums, OR multiplies.  Saturates at
 // cap + 1 so callers compare against the bound without overflow.
 static u32 fof_cnf_estimate(Term f, u32 cap) {
-  if (term_tag(f) != TAG_CTR) return 1u;
-  u32 lab = term_ext(f);
-  if (lab != FOL_LAB_AND && lab != FOL_LAB_OR) return 1u;
-  u32 a = fof_cnf_estimate(term_ctr_at(f, 0u), cap);
-  u32 b = fof_cnf_estimate(term_ctr_at(f, 1u), cap);
-  u64 v = (lab == FOL_LAB_AND) ? ((u64)a + (u64)b) : ((u64)a * (u64)b);
-  return (v > (u64)cap) ? cap + 1u : (u32)v;
+  return fof_skeleton_count(f, cap, cap + 1u, 1);
 }
 static u32 fof_distrib_bound(void) {
   const char *e = getenv("THVM_ATP_FOF_DISTRIB");
@@ -969,12 +1001,7 @@ static u32 fof_distrib_bound(void) {
 }
 // Literal occurrences of an NNF+Skolemized formula (saturating at cap).
 static u32 fof_atom_count(Term f, u32 cap) {
-  if (term_tag(f) != TAG_CTR) return 1u;
-  u32 lab = term_ext(f);
-  if (lab != FOL_LAB_AND && lab != FOL_LAB_OR) return 1u;
-  u64 v = (u64)fof_atom_count(term_ctr_at(f, 0u), cap) +
-          (u64)fof_atom_count(term_ctr_at(f, 1u), cap);
-  return (v > (u64)cap) ? cap : (u32)v;
+  return fof_skeleton_count(f, cap, cap, 0);
 }
 // Distribute unless it BLOWS UP: past the bound AND past twice the
 // formula's literal count.  A big conjunction (or one disjunct over a big
@@ -1803,35 +1830,70 @@ static int fof_oe_role_ok(const char *role) {
 }
 
 // Truth of an original formula: 1 / 0, -1 when it cannot be read.
+// Post-order over explicit stacks (the formula as parsed, any depth).
+typedef struct { Term f; u32 lab; u8 join; } FofOeTask;
+static FofOeTask *g_oe_task = NULL;
+static u32        g_oe_task_cap = 0u;
+static int       *g_oe_vals = NULL;
+static u32        g_oe_vals_cap = 0u;
+
 static int fof_oe_eval(Term f, const signed char *pval) {
-  if (term_tag(f) != TAG_CTR) return -1;
-  u32 lab = term_ext(f);
-  switch (lab) {
-    case FOL_LAB_NOT: {
-      int a = fof_oe_eval(term_ctr_at(f, 0u), pval);
-      return (a < 0) ? -1 : !a;
-    }
-    case FOL_LAB_AND: case FOL_LAB_OR: case FOL_LAB_IMP: case FOL_LAB_IFF: {
-      int a = fof_oe_eval(term_ctr_at(f, 0u), pval);
-      int b = fof_oe_eval(term_ctr_at(f, 1u), pval);
-      if (a < 0 || b < 0) return -1;
+  u32 nt = 0u, nv = 0u;
+  FOL_RESERVE(g_oe_task, g_oe_task_cap, nt);
+  g_oe_task[nt++] = (FofOeTask){ f, 0u, 0u };
+  while (nt > 0u) {
+    FofOeTask k = g_oe_task[--nt];
+    int r;
+    if (k.join) {
+      if (k.lab == FOL_LAB_NOT) {
+        int a = g_oe_vals[--nv];
+        r = (a < 0) ? -1 : !a;
+      } else {
+        int b = g_oe_vals[--nv];
+        int a = g_oe_vals[--nv];
+        if (a < 0 || b < 0) {
+          r = -1;
+        } else if (k.lab == FOL_LAB_AND) {
+          r = a && b;
+        } else if (k.lab == FOL_LAB_OR) {
+          r = a || b;
+        } else if (k.lab == FOL_LAB_IMP) {
+          r = !a || b;
+        } else {
+          r = (a == b);
+        }
+      }
+    } else if (term_tag(k.f) != TAG_CTR) {
+      r = -1;
+    } else {
+      u32 lab = term_ext(k.f);
       switch (lab) {
-        case FOL_LAB_AND: return a && b;
-        case FOL_LAB_OR:  return a || b;
-        case FOL_LAB_IMP: return !a || b;
-        default:          return a == b;
+        case FOL_LAB_NOT:
+        case FOL_LAB_AND: case FOL_LAB_OR: case FOL_LAB_IMP: case FOL_LAB_IFF:
+          FOL_RESERVE(g_oe_task, g_oe_task_cap, nt + 2u);
+          g_oe_task[nt++] = (FofOeTask){ 0, lab, 1u };
+          if (lab != FOL_LAB_NOT) {
+            g_oe_task[nt++] = (FofOeTask){ term_ctr_at(k.f, 1u), 0u, 0u };
+          }
+          g_oe_task[nt++] = (FofOeTask){ term_ctr_at(k.f, 0u), 0u, 0u };
+          continue;
+        case FOL_LAB_ALL: case FOL_LAB_EX:
+          g_oe_task[nt++] = (FofOeTask){ term_ctr_at(k.f, 1u), 0u, 0u };
+          continue;
+        case PC_LAB_TRUE:  r = (term_ctr_n(k.f) == 0u) ? 1 : -1; break;
+        case PC_LAB_FALSE: r = (term_ctr_n(k.f) == 0u) ? 0 : -1; break;
+        case PC_LAB_EQ:    r = (term_ctr_n(k.f) == 2u) ? 1 : -1; break;
+        default: {
+          int ix = pc_ix_of(lab);
+          r = (ix < 0) ? -1 : pval[ix];
+          break;
+        }
       }
     }
-    case FOL_LAB_ALL: case FOL_LAB_EX:
-      return fof_oe_eval(term_ctr_at(f, 1u), pval);
-    case PC_LAB_TRUE:  return (term_ctr_n(f) == 0u) ? 1 : -1;
-    case PC_LAB_FALSE: return (term_ctr_n(f) == 0u) ? 0 : -1;
-    case PC_LAB_EQ:    return (term_ctr_n(f) == 2u) ? 1 : -1;
-    default: {
-      int ix = pc_ix_of(lab);
-      return (ix < 0) ? -1 : pval[ix];
-    }
+    FOL_RESERVE(g_oe_vals, g_oe_vals_cap, nv);
+    g_oe_vals[nv++] = r;
   }
+  return g_oe_vals[0];
 }
 
 // Signature of the original formulas: kind 1 = predicate, 2 = function.
@@ -1843,42 +1905,68 @@ static int fof_oe_note(u32 lab, u8 kind, u32 arity, u8 *skind, u32 *sarity) {
   return skind[i] == kind && sarity[i] == arity;
 }
 
-static int fof_oe_sig_term(Term t, u8 *skind, u32 *sarity) {
-  if (term_tag(t) == TAG_FVR) return 1;
-  if (term_tag(t) != TAG_CTR) return 0;
-  u32 n = term_ctr_n(t);
-  if (!fof_oe_note(term_ext(t), 2u, n, skind, sarity)) return 0;
-  for (u32 i = 0; i < n; i++) {
-    if (!fof_oe_sig_term(term_ctr_at(t, i), skind, sarity)) return 0;
-  }
-  return 1;
-}
+// One walk over formula and term positions (explicit stack, any depth),
+// stopping at the first shape it cannot print.
+typedef struct { Term t; u8 is_term; } FofSigItem;
+static FofSigItem *g_oe_sig = NULL;
+static u32         g_oe_sig_cap = 0u;
 
 static int fof_oe_sig_form(Term f, u8 *skind, u32 *sarity) {
-  if (term_tag(f) != TAG_CTR) return 0;
-  u32 lab = term_ext(f);
-  u32 n = term_ctr_n(f);
-  switch (lab) {
-    case FOL_LAB_NOT:
-      return fof_oe_sig_form(term_ctr_at(f, 0u), skind, sarity);
-    case FOL_LAB_AND: case FOL_LAB_OR: case FOL_LAB_IMP: case FOL_LAB_IFF:
-      return fof_oe_sig_form(term_ctr_at(f, 0u), skind, sarity) &&
-             fof_oe_sig_form(term_ctr_at(f, 1u), skind, sarity);
-    case FOL_LAB_ALL: case FOL_LAB_EX:
-      return fof_oe_sig_form(term_ctr_at(f, 1u), skind, sarity);
-    case PC_LAB_TRUE: case PC_LAB_FALSE:
-      return n == 0u;
-    case PC_LAB_EQ:
-      return n == 2u &&
-             fof_oe_sig_term(term_ctr_at(f, 0u), skind, sarity) &&
-             fof_oe_sig_term(term_ctr_at(f, 1u), skind, sarity);
-    default:
-      if (!fof_oe_note(lab, 1u, n, skind, sarity)) return 0;
-      for (u32 i = 0; i < n; i++) {
-        if (!fof_oe_sig_term(term_ctr_at(f, i), skind, sarity)) return 0;
+  u32 n = 0u;
+  FOL_RESERVE(g_oe_sig, g_oe_sig_cap, n);
+  g_oe_sig[n++] = (FofSigItem){ f, 0u };
+  while (n > 0u) {
+    FofSigItem it = g_oe_sig[--n];
+    Term x = it.t;
+    if (it.is_term && term_tag(x) == TAG_FVR) {
+      continue;
+    }
+    if (term_tag(x) != TAG_CTR) {
+      return 0;
+    }
+    u32 lab = term_ext(x);
+    u32 nk = term_ctr_n(x);
+    u8 kids_are_terms = 1u;
+    u32 first = 0u;
+    if (it.is_term) {
+      if (!fof_oe_note(lab, 2u, nk, skind, sarity)) {
+        return 0;
       }
-      return 1;
+    } else {
+      switch (lab) {
+        case FOL_LAB_NOT:
+        case FOL_LAB_AND: case FOL_LAB_OR: case FOL_LAB_IMP: case FOL_LAB_IFF:
+          kids_are_terms = 0u;
+          nk = (lab == FOL_LAB_NOT) ? 1u : 2u;
+          break;
+        case FOL_LAB_ALL: case FOL_LAB_EX:
+          kids_are_terms = 0u;
+          first = 1u;
+          nk = 2u;
+          break;
+        case PC_LAB_TRUE: case PC_LAB_FALSE:
+          if (nk != 0u) {
+            return 0;
+          }
+          break;
+        case PC_LAB_EQ:
+          if (nk != 2u) {
+            return 0;
+          }
+          break;
+        default:
+          if (!fof_oe_note(lab, 1u, nk, skind, sarity)) {
+            return 0;
+          }
+          break;
+      }
+    }
+    FOL_RESERVE(g_oe_sig, g_oe_sig_cap, n + nk);
+    for (u32 i = nk; i-- > first;) {
+      g_oe_sig[n++] = (FofSigItem){ term_ctr_at(x, i), kids_are_terms };
+    }
   }
+  return 1;
 }
 
 static int fof_oe_lower_word(const char *s, size_t n) {
