@@ -9,7 +9,8 @@
 //   5. a graph rewrite that unwraps a DETACH child keeps the NUM payload;
 //   6. uop_leaf_tids reaches every tensor operand;
 //   7. the WL lambda tables (book snapshot, ALO realize, binder use) see
-//      every child;
+//      every child, and those of the CAST, BITCAST and CMPEQ a gather's
+//      adjoint builds;
 //   8. a copying GC keeps the children and the NUM payload.
 #include "../src/thvm.c"
 #include "test.h"
@@ -329,6 +330,26 @@ static void test_lambda_tables(void) {
   CHECK(sb != 0);
   heap_set(lam2, sb);
   CHECK(lam_body_uses_var(lam2));
+
+  // A half gather's adjoint casts between f16 and f32: a CAST, a BITCAST and
+  // a CMPEQ keep their cells in the book and get ALO children when realized,
+  // instead of passing through with a stale heap location.
+  Term nw     = uop_unary(UOP_NEG, w);
+  Term ops[3] = { uop_cast(nw, DT_FP16), uop_bitcast(nw, DT_INT32),
+                  uop_binary(UOP_CMPEQ, nw, w) };
+  u32  opc[3] = { UOP_CAST, UOP_BITCAST, UOP_CMPEQ };
+  for (u32 q = 0; q < 3; q++) {
+    CHECK_EQ(term_tag(ops[q]), TAG_UOP);
+    CHECK_EQ(term_ext(ops[q]), opc[q]);
+    Term bo = thvm_book_from_dynamic(ops[q]);
+    CHECK_EQ(term_ext(bo), term_ext(ops[q]));
+    CHECK_EQ(term_ext(book_read(term_val(bo) + 0)), UOP_NEG);
+    CHECK_EQ(book_read(term_val(bo) + 1), heap_read(term_val(ops[q]) + 1));
+    Term dq = alo_realize(bo, 0);
+    CHECK_EQ(term_ext(dq), term_ext(ops[q]));
+    CHECK_EQ(term_tag(heap_read(term_val(dq) + 0)), TAG_ALO);
+    CHECK_EQ(heap_read(term_val(dq) + 1), heap_read(term_val(ops[q]) + 1));
+  }
 }
 
 // === 8. a copying GC keeps children and payload ===

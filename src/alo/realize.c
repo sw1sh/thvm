@@ -45,9 +45,12 @@ static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
     case TAG_UOP: {
       switch (ext) {
         case UOP_CONST:                                    return 1;
-        case UOP_ADD: case UOP_MUL: case UOP_CMPLT:        return 2;
+        case UOP_ADD: case UOP_MUL: case UOP_CMPLT:
+        case UOP_CMPEQ:                                    return 2;
         case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
         case UOP_LOG2: case UOP_SQRT:                      return 1;
+        // [src, NUM(dst dtype)]: the NUM passes through bare.
+        case UOP_CAST: case UOP_BITCAST:                   return 2;
         // UOP_REDUCE: book heap = [src, kind, n_axes, axis_0, ...].
         // n_axes lives at val+2 (a TAG_NUM cell in the book); total
         // cells = 3 + n_axes.

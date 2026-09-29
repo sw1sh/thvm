@@ -63,6 +63,8 @@ static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
         case UOP_CMPEQ:                                    return 2;
         case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
         case UOP_LOG2: case UOP_SQRT:                      return 1;
+        // [src, NUM(dst dtype)]: clone both cells, as alo_node_arity does.
+        case UOP_CAST: case UOP_BITCAST:                   return 2;
         case UOP_LOAD:                                     return 1;
         // UOP_REDUCE is now variable-arity (multi-axis): heap is
         // [src, kind, n_axes, axis_0, ..., axis_{n-1}].  Treat like
