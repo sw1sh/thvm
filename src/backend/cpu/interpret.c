@@ -19,7 +19,9 @@ fn int cpu_uop_walk            (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id
 fn char const *cpu_uop_walk_last_decline(void);
 
 // Dispatches in which no rung of the ladder ran, so the kernel's output
-// was never written.  C tests read it through cpu_dispatch_no_rung_count.
+// holds no result: nothing wrote it, or a walk that declined partway (at
+// an op without a rule, or at a later store of an AFTER chain) wrote part
+// of it.  C tests read it through cpu_dispatch_no_rung_count.
 static u64 CPU_DISPATCH_NO_RUNG;
 
 fn u64 cpu_dispatch_no_rung_count(void) {
@@ -214,7 +216,7 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     CPU_DISPATCH_NO_RUNG++;
     fprintf(stderr,
             "thvm: CPU kernel kid=%u n_inputs=%u ran no dispatch rung "
-            "(walker: %s); its output was not written\n",
+            "(walker: %s); its output holds no result\n",
             (u32)(ke - KERNELS), ke->n_inputs,
             cpu_uop_walk_enabled() ? cpu_uop_walk_last_decline()
                                    : "disabled");

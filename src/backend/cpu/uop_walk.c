@@ -1517,21 +1517,28 @@ static void uwalk_loop_and_store(UWalkCtx *c,
       c->red_acc[idx] = uwalk_run_reduce(c, value_reduces[i]);
       uwalk_reduce_snapshot_save(c, (u32)idx);
     }
-    // Evaluate address (always integer).
+    // Evaluate address (always integer).  An address or value that met an
+    // op without a rule (c->bad) read it as 0, so it stores nothing.
     i64 addr_v = uwalk_eval_int(c, store_addr);
-    if (addr_v < 0) {
+    if (addr_v < 0 || c->bad) {
       (void)store_buf;
       return;
     }
     if (uwalk_dtype_is_float(out_dt)) {
       double v = uwalk_convert_float(c, store_value, c->store_dt, out_dt);
-      uwalk_store_f64(out_p, addr_v, out_dt, v);
+      if (!c->bad) {
+        uwalk_store_f64(out_p, addr_v, out_dt, v);
+      }
     } else if (c->store_from_float) {
       i64 v = uwalk_f64_to_int(out_dt, uwalk_eval_float(c, store_value, c->store_dt));
-      uwalk_store_i64(out_p, addr_v, out_dt, v);
+      if (!c->bad) {
+        uwalk_store_i64(out_p, addr_v, out_dt, v);
+      }
     } else {
       i64 v = uwalk_eval_known_int(c, store_value);
-      uwalk_store_i64(out_p, addr_v, out_dt, v);
+      if (!c->bad) {
+        uwalk_store_i64(out_p, addr_v, out_dt, v);
+      }
     }
     return;
   }
@@ -1769,8 +1776,9 @@ static int uwalk_resolve_input_ptr(KernelEntry *ke, u32 slot, u32 buf_id,
   return 0;
 }
 
-// A declined walk leaves the kernel's output unwritten, so an op without a
-// rule is reported whether or not decline tracing is on, once per op.
+// The walk stops at the first op without a rule, so what it stored before
+// stays written and the output holds no result.  The op is reported
+// whether or not decline tracing is on, once per op.
 static void uwalk_warn_no_rule(u32 kid, u32 op) {
   static u64 warned = 0;
   u64 bit = (op < 63) ? (1ULL << op) : (1ULL << 63);
@@ -1779,7 +1787,7 @@ static void uwalk_warn_no_rule(u32 kid, u32 op) {
   }
   warned |= bit;
   fprintf(stderr, "thvm: CPU UOp walker has no rule for op %u (kernel %u); "
-                  "kernel declined\n", op, kid);
+                  "the walk stopped there and declined the kernel\n", op, kid);
 }
 
 // === Public entry point ===

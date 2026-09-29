@@ -250,7 +250,8 @@ static void test_cast_to_bool_is_truthiness(void) {
 }
 
 // A DETACH never reaches a kernel; the walker has no rule for it and must
-// decline rather than read it as 0.0.
+// decline rather than read it as 0.0.  The first position meets it, so the
+// walk stops before its first store and the output keeps its 0xA5 fill.
 static void test_unknown_op_declines(void) {
   KhKernel k;
   kh_init(&k, DT_FP32, N);
@@ -261,7 +262,10 @@ static void test_unknown_op_declines(void) {
   Term det  = term_new(0, TAG_UOP, UOP_DETACH, loc);
   Term root = uop_store(k.out, i, uop_binary(UOP_ADD, x, det));
   u8 got[N * sizeof(f32)];
+  u8 fill[N * sizeof(f32)];
+  memset(fill, 0xA5, sizeof fill);
   CHECK(!kh_run_walker(root, &k, got));
+  CHECK(memcmp(got, fill, sizeof fill) == 0);
 }
 
 // out[i] = x[i] + x[i] + ... (DEEP_ADDS additions) over int32: the int
