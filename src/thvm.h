@@ -1093,6 +1093,13 @@ typedef struct KernelEntry {
   // declined.
   Term      cached_lift_init_root;
 
+  // 1 = no opt pass (hand_opts, BEAM/autotune, kernel_apply_opt) touches
+  // this kernel.  Set at emit for a multi-store (AFTER) root or an address
+  // that depends on loaded data (uop_dag_has_dynamic_index): the opts
+  // assume affine addresses, and a read-modify-write scatter is race-free
+  // only as a serial loop (UPCAST lanes would lose duplicate-index updates).
+  u8        no_opts;
+
   u32       consumer_count;        // # of OTHER kernels whose input_tids
                                    // trace back (via TENS[tid].producer_kid)
                                    // to this kernel.  Populated by
@@ -3121,6 +3128,23 @@ fn Term uop_after(Term node, Term after_node);
 
 fn Term uop_after_node      (Term t);
 fn Term uop_after_after_node(Term t);
+
+// A kernel root is one STORE or an AFTER chain of STOREs (a kernel that
+// writes its output in ordered passes).  uop_arity(AFTER) is 0, so a pass
+// that walks by arity must go through these to see every store:
+// uop_root_map_stores rebuilds the root with `pass` applied to each store (0
+// if any call returns 0), uop_root_each_store ORs `pass` over all of them,
+// and uop_root_store_buf is the buffer they write.  A non-AFTER root is its
+// own single store.
+typedef Term (*UopStoreMapFn) (Term store, void *ctx);
+typedef int  (*UopStorePredFn)(Term store, void *ctx);
+fn Term uop_root_map_stores(Term root, UopStoreMapFn pass, void *ctx);
+fn int  uop_root_each_store(Term root, UopStorePredFn pass, void *ctx);
+fn Term uop_root_store_buf (Term root);
+
+// 1 iff an INDEX_E sits inside the address of an INDEX_E or STORE under
+// `root`: the address depends on loaded data (gather / scatter).
+fn int  uop_dag_has_dynamic_index(Term root);
 
 // === Opt annotation ===
 // Attach an optimisation directive (UOP_OPT_UNROLL, UPCAST, TC,

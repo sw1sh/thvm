@@ -1162,7 +1162,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
 // The env opt-in is on AND the per-shape hand_coded_done flag is still 0.
 fn int kernel_should_hand_code_opts(struct KernelEntry const *ke) {
   if (!hand_coded_opts_enabled()) return 0;
-  if (ke == NULL) return 0;
+  if (ke == NULL || ke->no_opts) return 0;
   if (ke->schedule != NULL && ke->schedule->hand_coded_done) return 0;
   return 1;
 }

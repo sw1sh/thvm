@@ -35,6 +35,14 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- Multi-store kernels: a kernel root may be an AFTER chain of STOREs.  Every
+  materialize-time pass (arange collapse, walker rewrite + REDUCE repair,
+  chain-fold scan, resid/stranded/broadcast gates) now runs on each store,
+  the axis renumber spans all stores, and the lift names their output
+  buffer; before, an AFTER root kept raw TEN leaves, sparse axis ids and a
+  null output buffer.  Emit flags such kernels, and any kernel whose
+  address holds a load (gather / scatter index), `no_opts`: hand_opts,
+  BEAM and `kernel_apply_opt` leave them serial.
 - A lane-invariant value the legacy C emit hoists out of a register-blocked reduce (an UPCAST output axis of `reduce + y[i]`) is an `__auto_type` local, so it keeps its expression's C type. It was declared from the value's dtype, so the CPU JIT truncated an int reduce's float quotient `a[j] * (1.0f/b[j])` to an `int` (a row of quotients such as 1312 / 41 summed to 31 where C's arithmetic without the hoist, and the walker, give 34) and rounded an f32 reduce's double `v[j] * 3.0` to a `float` (3 instead of 3.0000002). `test_uop_walk_c_types` compiles both lane-blocked kernels and holds them to C's values and to the walker.
 - `test_render_uop` expects a bf16 CONST folded from f32 1.0 to render on C as the floating constant `1.0`, the spelling both C renderers now use for an integral non-f32 literal; it pinned `1`.
 - Both C renderers, the legacy emit and the linearized one, spell a finite f64 / f16 / bf16 / fp8 CONST as a floating constant, as tinygrad's str(float) does (renderer/cstyle.py:37): `-0.0`, `1.0`. An integral value printed as `-0` or `1`, an int, so an f64 -0.0 lost its sign and the CPU JIT computed `x * -0.0` and `z + -0.0` as +0 where IEEE gives -0. Metal and CUDA render as before.

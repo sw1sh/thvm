@@ -226,6 +226,17 @@ static Term apply_opt_dag_sub_uncached(Term t, ApplyOptDagSubState *st) {
     if (new_tgt == tgt) return t;
     return uop_opt(new_tgt, uop_opt_kind(t), uop_opt_factor(t));
   }
+  // An AFTER kernel root (arity 0) rewrites every store, so all stores
+  // share one axis-id space.  Only kernel roots reach here: the
+  // devectorizer's AFTER chains live inside the renderers.
+  if (op == UOP_AFTER) {
+    Term node  = uop_after_node(t);
+    Term after = uop_after_after_node(t);
+    Term nn = apply_opt_dag_substitute(node, st);
+    Term na = apply_opt_dag_substitute(after, st);
+    if (nn == node && na == after) return t;
+    return uop_after(nn, na);
+  }
   if (op == UOP_REDUCE) {
     // Rebuild with the (possibly remapped) reduce axes -- see the
     // long comment on ApplyOptDagSubState.reduce_shift_above.
@@ -339,7 +350,8 @@ static u32 apply_opt_dag_inner_opt_kind(u8 op) {
 }
 
 // Collect every UOP_RANGE leaf reachable from root into out[] (deduped
-// by Term identity).  Returns the count.
+// by Term identity), through every store of an AFTER root.  Returns the
+// count.
 static u32 apply_opt_dag_collect_ranges(Term root, Term *out, u32 cap) {
   if (root == 0) return 0;
   Term stack[256];
@@ -363,7 +375,7 @@ static u32 apply_opt_dag_collect_ranges(Term root, Term *out, u32 cap) {
       if (term_tag(tgt) == TAG_UOP && sp < 256) stack[sp++] = tgt;
       continue;
     }
-    u8 ar = uop_arity(op);
+    u8 ar = (op == UOP_AFTER) ? 2 : uop_arity(op);
     u64 loc = term_val(t);
     for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 256; i++) {
       Term child = heap_read(loc + i);

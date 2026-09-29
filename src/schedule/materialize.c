@@ -3780,12 +3780,28 @@ static Term repair_collapsed_reduces_rec(Term t, AxExtMap const *m, u32 depth) {
   return uop_reduce_multi(kind, n_kept, kept_axes, new_body);
 }
 
+// Walker rewrite of one store: substitute its TAG_TEN / BUFFERIZE leaves,
+// then re-apply the broadcast-collapsed REDUCE repair.  A per-channel-
+// mean-style producer fused into a reduce collapses its value to the
+// invariant per-channel scalar, dropping the reduce-axis RANGE leaves so
+// uwalk_run_reduce would bail to the SUM identity 0 (the detached-mean
+// live-adjoint at N=1, bias.expand grads, etc.); the lost extents come
+// from the pre-inline store.
+static Term unified_rewrite_store_for_walker(Term store, void *ctx) {
+  UnifiedRewriteState *st = (UnifiedRewriteState *)ctx;
+  Term rewritten = unified_rewrite_rec(st, store, 0);
+  AxExtMap axm;
+  axm.n = 0;
+  axext_collect(&axm, store);
+  return repair_collapsed_reduces_rec(rewritten, &axm, 0);
+}
+
 static Term unified_store_root_for_walker(KernelEntry *ke, Term root) {
   if (root == 0 || ke == NULL) return root;
   UnifiedRewriteState st;
   memset(&st, 0, sizeof(st));
   st.ke = ke;
-  return unified_rewrite_rec(&st, root, 0);
+  return uop_root_map_stores(root, unified_rewrite_store_for_walker, &st);
 }
 
 // Walk a (post-rewrite) UOp subtree and return 1 if any UOP_BUFFERIZE
@@ -3910,12 +3926,16 @@ static int bufferize_scan_rec(BufferizeScanVisited *v, Term t, u32 depth) {
   return 0;
 }
 
+static int bufferize_scan_store(Term store, void *ctx) {
+  return bufferize_scan_rec((BufferizeScanVisited *)ctx, store, 0);
+}
+
 static int uop_subtree_has_residual_bufferize(Term root) {
   if (root == 0) return 0;
   BufferizeScanArena arena;
   BufferizeScanVisited v;
   bufferize_scan_open(&v, &arena);
-  int rc = bufferize_scan_rec(&v, root, 0);
+  int rc = uop_root_each_store(root, bufferize_scan_store, &v);
   bufferize_scan_close(&arena);
   return rc;
 }
@@ -3993,6 +4013,18 @@ static void unified_fold_chain_scan(KernelEntry const *ke, Term t,
   }
 }
 
+typedef struct {
+  KernelEntry const    *ke;
+  ChainFoldMarks       *marks;
+  BufferizeScanVisited *v;
+} FoldChainScan;
+
+static int fold_chain_scan_store(Term store, void *ctx) {
+  FoldChainScan *s = (FoldChainScan *)ctx;
+  unified_fold_chain_scan(s->ke, store, s->marks, s->v, 0);
+  return 0;
+}
+
 // The marks hold one flag per input slot; unified_fold_chain_commit_flags
 // consumes them.
 static Term unified_fold_chain(KernelEntry *ke, Term root, ChainFoldMarks *marks) {
@@ -4009,7 +4041,8 @@ static Term unified_fold_chain(KernelEntry *ke, Term root, ChainFoldMarks *marks
   BufferizeScanArena arena;
   BufferizeScanVisited v;
   bufferize_scan_open(&v, &arena);
-  unified_fold_chain_scan(ke, root, marks, &v, 0);
+  FoldChainScan scan = { ke, marks, &v };
+  uop_root_each_store(root, fold_chain_scan_store, &scan);
   bufferize_scan_close(&arena);
   return root;
 }
@@ -4304,16 +4337,15 @@ static int bufferize_value_would_strand_c(Term buf, u32 node_idx,
   return rc;
 }
 
-// Returns 1 when `store_root` has a UOP_RANGE leaf in its value
+// Returns 1 when a store of `root` has a UOP_RANGE leaf in its value
 // subtree whose axis_id is neither in the STORE's addr nor inside the
 // scope of an enclosing UOP_REDUCE.  cpu_uop_walk's loop scaffolding
 // has no slot for such a "stranded" range, so it reads iter=0 forever
 // and the kernel writes only the slice-0 result.
-static int uop_subtree_has_stranded_range(Term store_root) {
-  if (store_root == 0) return 0;
-  if (term_tag(store_root) != TAG_UOP) return 0;
-  if (term_ext(store_root) != UOP_STORE) return 0;
-  u64 sloc = term_val(store_root);
+static int stranded_range_in_store(Term store, void *ctx) {
+  (void)ctx;
+  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
+  u64 sloc = term_val(store);
   Term s_addr  = heap_read(sloc + 1);
   Term s_value = heap_read(sloc + 2);
   BufferizeScanArena arena;
@@ -4327,6 +4359,11 @@ static int uop_subtree_has_stranded_range(Term store_root) {
   int rc = stranded_range_check_value(&iter_axes, &vv, s_value, 0);
   bufferize_scan_close(&arena);
   return rc;
+}
+
+static int uop_subtree_has_stranded_range(Term root) {
+  if (root == 0) return 0;
+  return uop_root_each_store(root, stranded_range_in_store, NULL);
 }
 
 // Safety gate: scan the rewritten subtree for any UOP_INDEX_E reading
@@ -4550,12 +4587,11 @@ static int broadcast_input_scan_rec(KernelEntry const *ke,
   return 0;
 }
 
-static int uop_subtree_has_broadcast_input(KernelEntry const *ke,
-                                            Term root) {
-  if (root == 0 || ke == NULL) return 0;
-  // root is a UOP_STORE; compute its iter footprint from the output BUFFER.
-  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
-  u64 sloc = term_val(root);
+// A store's iter footprint is its output BUFFER's numel.
+static int broadcast_input_in_store(Term store, void *ctx) {
+  KernelEntry const *ke = (KernelEntry const *)ctx;
+  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
+  u64 sloc = term_val(store);
   Term out_buf = heap_read(sloc + 0);
   Term s_value = heap_read(sloc + 2);
   u64 out_numel = uop_buffer_numel(out_buf);
@@ -4566,6 +4602,12 @@ static int uop_subtree_has_broadcast_input(KernelEntry const *ke,
   int rc = broadcast_input_scan_rec(ke, &v, s_value, out_numel, 0);
   bufferize_scan_close(&arena);
   return rc;
+}
+
+static int uop_subtree_has_broadcast_input(KernelEntry const *ke,
+                                            Term root) {
+  if (root == 0 || ke == NULL) return 0;
+  return uop_root_each_store(root, broadcast_input_in_store, (void *)ke);
 }
 
 // === Debug dumper for THVM_DEBUG_BYPASS_LAST=1 ===
@@ -6693,20 +6735,12 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // inner reduce-axis loop.  Runs on the raw RANGE-arithmetic store_root
     // -- the same form tinygrad collapses.  No-op (returns root) when the
     // body isn't the IWHERE(ILT(affine(r)), val, 0) mask shape.
+    //
+    // Every pass below runs on each store of a multi-store (AFTER) root
+    // (uop_root_map_stores / uop_root_each_store inside each helper).
     ke->cached_lift.store_root =
         uop_reduce_arange_collapse(ke->cached_lift.store_root);
     Term ru_rewritten = unified_store_root_for_walker(ke, ke->cached_lift.store_root);
-    // Re-apply the broadcast-collapsed REDUCE repair AFTER the inline:
-    // a per-channel-mean-style producer fused into a reduce collapses its
-    // value to the invariant per-channel scalar, dropping the reduce-axis
-    // RANGE leaves so uwalk_run_reduce would bail to the SUM identity 0
-    // (the detached-mean live-adjoint at N=1, bias.expand grads, etc.).
-    // The lost axis extents are recovered from the PRE-inline store_root.
-    {
-      AxExtMap _axm; _axm.n = 0;
-      axext_collect(&_axm, ke->cached_lift.store_root);
-      ru_rewritten = repair_collapsed_reduces_rec(ru_rewritten, &_axm, 0);
-    }
     // Scan the rewritten store_root for INDEX_E reads against slots
     // whose tid carries non-trivial layout (chain or non-contig
     // view); the marks are committed below with the store_root.
@@ -6814,9 +6848,13 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // time rewrite, before the init snapshot + fire-time hand_opts -- so
   // hand_opts' `axis_id+1` splits stay contiguous on a dense base and
   // the renderer emits dense ids directly (no post-render canonicalize).
+  // A multi-store root or a data-dependent address closes every opt pass
+  // (see KernelEntry.no_opts).
   if (ke->cached_lift.store_root != 0) {
-    ke->cached_lift.store_root =
-        uop_dag_renumber_axes(ke->cached_lift.store_root);
+    Term root = uop_dag_renumber_axes(ke->cached_lift.store_root);
+    ke->cached_lift.store_root = root;
+    ke->no_opts = (term_tag(root) == TAG_UOP && term_ext(root) == UOP_AFTER)
+               || uop_dag_has_dynamic_index(root);
   }
 
   // Reconcile the dispatch-time input count with the rendered kernel

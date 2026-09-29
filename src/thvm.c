@@ -298,6 +298,8 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/movement_index.c"
 #include "uop/buffer.c"
 #include "uop/store.c"
+#include "uop/root_map_stores.c"
+#include "uop/dag_has_dynamic_index.c"
 #include "uop/opt.c"
 #include "uop/view.c"
 #include "uop/graph_rewrite.c"

@@ -133,6 +133,21 @@ CUDA have no per-kernel buffer cap; Metal's 31 is enforced before the
 lift).  `uop_buffer_inst`'s slot disambiguator keeps each kernel-arg
 buffer distinct even when shapes coincide.
 
+A kernel root may also be an `UOP_AFTER` chain of `UOP_STORE`s: a
+kernel that writes its output in ordered passes (a scatter's init,
+accumulate and finish stores).  `uop_arity(UOP_AFTER)` stays 0 because
+the devectorizer's AFTER chains rely on it, so every materialize-time
+pass over a kernel root goes through `uop_root_map_stores` /
+`uop_root_each_store` ([src/uop/root_map_stores.c](../src/uop/root_map_stores.c)):
+the arange collapse, the walker rewrite with its REDUCE repair, the
+chain-fold scan and the resid / stranded / broadcast gates each see every
+store; `uop_dag_renumber_axes` gives all stores one dense axis-id space;
+and `out_buf` is the buffer the stores write (`uop_root_store_buf`).
+Emit sets `KernelEntry.no_opts` for such a root, and for any kernel whose
+address holds a load (`uop_dag_has_dynamic_index`, a gather or scatter
+index); hand_opts, BEAM/autotune and `kernel_apply_opt` then leave the
+kernel as a serial loop nest.
+
 ## Pass 4: Render
 
 - File: [src/codegen/render_uop.c](../src/codegen/render_uop.c)

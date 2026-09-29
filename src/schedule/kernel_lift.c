@@ -107,7 +107,7 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
     }
     out->in_bufs[i] = in_buf;
   }
-  out->out_buf     = uop_store_buf(ru_root);
+  out->out_buf     = uop_root_store_buf(ru_root);
   out->store_root  = ru_root;
   return 1;
 }

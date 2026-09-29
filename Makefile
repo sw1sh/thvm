@@ -311,6 +311,7 @@ TESTS := \
   $(BIN)/test_bufferize \
   $(BIN)/test_uop_buffer \
   $(BIN)/test_uop_store_after \
+  $(BIN)/test_after_root_kernel \
   $(BIN)/test_uop_opt \
   $(BIN)/test_uop_recognise_tc \
   $(BIN)/test_apply_opt_dag \
@@ -458,10 +459,10 @@ ifeq ($(shell uname -s),Linux)
   endif
 endif
 
-# Every C and header file under src/, plus the test harness header.
+# Every C and header file under src/, plus the test harness headers.
 # Used as a prerequisite by both the C tests and the WL bridge so any
 # runtime change retriggers a rebuild.
-SRC := $(shell find src -name '*.c' -o -name '*.h') tests/test.h
+SRC := $(shell find src -name '*.c' -o -name '*.h') tests/test.h tests/kernel_harness.h
 
 # Default goal: build the WL paclet dylib only.  Every C test depends on
 # all of $(SRC), so a bare `make` used to recompile ~100 test binaries on

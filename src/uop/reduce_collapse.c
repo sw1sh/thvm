@@ -376,10 +376,15 @@ static Term rc_rewrite_rec(Term t, RcMemo *m, u32 depth) {
   return out;
 }
 
+static Term rc_collapse_store(Term store, void *ctx) {
+  return rc_rewrite_rec(store, (RcMemo *)ctx, 0);
+}
+
 // Public entry: collapse arange/reduce store values.  `root` is the
-// kernel store_root (UOP_STORE(...)) from kernel_lift; returns a
-// rewritten root with foldable single-axis SUM-reduces replaced by their
-// closed forms.  Gated OFF by THVM_NO_REDUCE_COLLAPSE=1 for A/B.
+// kernel store_root (a UOP_STORE, or an AFTER chain whose every store is
+// collapsed) from kernel_lift; returns a rewritten root with foldable
+// single-axis SUM-reduces replaced by their closed forms.  Gated OFF by
+// THVM_NO_REDUCE_COLLAPSE=1 for A/B.
 fn Term uop_reduce_arange_collapse(Term root) {
   static int known = 0, enabled = 1;
   if (!known) {
@@ -398,5 +403,5 @@ fn Term uop_reduce_arange_collapse(Term root) {
     memset(memo.slot_gen, 0, sizeof(memo.slot_gen));
     memo.cur_gen = 1;
   }
-  return rc_rewrite_rec(root, &memo, 0);
+  return uop_root_map_stores(root, rc_collapse_store, &memo);
 }

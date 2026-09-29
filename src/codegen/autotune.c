@@ -1829,7 +1829,7 @@ fn int kernel_should_autotune(KernelEntry const *ke) {
       && !(autotune_jitbeam_enabled() && jit_is_capturing())) {
     return 0;
   }
-  if (ke == NULL || ke->schedule == NULL) {
+  if (ke == NULL || ke->schedule == NULL || ke->no_opts) {
     return 0;
   }
   if (ke->schedule->autotuned) {

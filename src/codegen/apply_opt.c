@@ -14,7 +14,7 @@
 fn Term uop_dag_apply_kopt(Term root, KOpt opt);
 
 fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
-  if (ke == NULL) {
+  if (ke == NULL || ke->no_opts) {
     return 0;
   }
   // DAG-mode: Phase E path.  When cached_lift.store_root is populated
