@@ -6714,7 +6714,8 @@ static Term emit_kernel_for_boundary(u32 bi) {
     ru_rewritten = unified_fold_chain(ke, ru_rewritten, &_cf_marks);
     // Per-kernel coverage diagnostics, counted for THVM_DUMP_LIFT_COVERAGE
     // and printed by THVM_DEBUG_BYPASS_LAST.  They select nothing: every
-    // kernel runs the rewritten store_root.
+    // kernel runs the rewritten store_root, so the three DAG walks run
+    // only under those two knobs.
     //
     //   has_resid:   the cpu_uop_walk INDEX_E handler only resolves
     //                UOP_BUFFER leaves; a residual UOP_BUFFERIZE in
@@ -6745,28 +6746,31 @@ static Term emit_kernel_for_boundary(u32 bi) {
     //                over a shrunk base trips it by design: the slot's
     //                BUFFER takes the view's shape while the address
     //                spans the base buffer.
-    int has_resid    = uop_subtree_has_residual_bufferize(ru_rewritten);
-    int has_stranded = uop_subtree_has_stranded_range(ru_rewritten);
-    int has_bcast    = uop_subtree_has_broadcast_input(ke, ru_rewritten);
-    if (getenv("THVM_DEBUG_BYPASS_LAST")) {
-      fprintf(stderr,
-              "BYPASS_DBG kid=%u resid=%d stranded=%d bcast=%d\n",
-              kid, has_resid, has_stranded, has_bcast);
-      bypass_dbg_dump("lift_root", kid, ke->cached_lift.store_root);
-      bypass_dbg_dump("ru_rewrit", kid, ru_rewritten);
-    }
-    BYPASS_KERNEL_TOTAL++;
-    if (has_resid) {
-      BYPASS_GATE_RESID++;
-    }
-    if (has_stranded) {
-      BYPASS_GATE_STRANDED++;
-    }
-    if (has_bcast) {
-      BYPASS_GATE_BCAST++;
-    }
-    if (!has_resid && !has_stranded && !has_bcast) {
-      BYPASS_KERNEL_USED_UNIFIED++;
+    int bypass_dbg = getenv("THVM_DEBUG_BYPASS_LAST") != NULL;
+    if (bypass_dbg || getenv("THVM_DUMP_LIFT_COVERAGE") != NULL) {
+      int has_resid    = uop_subtree_has_residual_bufferize(ru_rewritten);
+      int has_stranded = uop_subtree_has_stranded_range(ru_rewritten);
+      int has_bcast    = uop_subtree_has_broadcast_input(ke, ru_rewritten);
+      if (bypass_dbg) {
+        fprintf(stderr,
+                "BYPASS_DBG kid=%u resid=%d stranded=%d bcast=%d\n",
+                kid, has_resid, has_stranded, has_bcast);
+        bypass_dbg_dump("lift_root", kid, ke->cached_lift.store_root);
+        bypass_dbg_dump("ru_rewrit", kid, ru_rewritten);
+      }
+      BYPASS_KERNEL_TOTAL++;
+      if (has_resid) {
+        BYPASS_GATE_RESID++;
+      }
+      if (has_stranded) {
+        BYPASS_GATE_STRANDED++;
+      }
+      if (has_bcast) {
+        BYPASS_GATE_BCAST++;
+      }
+      if (!has_resid && !has_stranded && !has_bcast) {
+        BYPASS_KERNEL_USED_UNIFIED++;
+      }
     }
     // Always substitute the rewritten store_root.  The raw unified
     // ru_root carries TAG_TEN / UOP_BUFFERIZE leaves that the
