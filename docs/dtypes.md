@@ -54,9 +54,10 @@ writes the dtype's storage directly and runs typed arithmetic.  On the
 CPU JIT a reduce accumulates in its dtype, as tinygrad allocates the
 accumulator like the reduce (reduce_ranges_to_acc,
 codegen/__init__.py:197-204): an f64 reduce in a double and an int or
-bool reduce in its own C type (below), and so do the loads and
-lane-invariant values the legacy C emit hoists next to the
-accumulator.
+bool reduce in its own C type (below), and so do the loads the legacy
+C emit hoists next to the accumulator.  A lane-invariant value it
+hoists is an `__auto_type` local, which keeps the type of its
+expression, so hoisting never converts a value.
 
 The CPU UOp walker
 ([src/backend/cpu/uop_walk.c](../src/backend/cpu/uop_walk.c)) gives
@@ -155,10 +156,11 @@ the accumulator like the reduce (reduce_ranges_to_acc,
 codegen/__init__.py:197-204).  The CPU UOp walker accumulates it in
 i64, reads each body value and wraps the sum in the dtype, and compares
 a u64 MAX unsigned; a bool SUM or MAX is an OR (uop/symbolic.py:163-166).
-The legacy C emit declares the accumulator, and the hoisted loads and
-lane-invariant locals of a register-blocked reduce, in the dtype's C
-type; an int MAX starts at `INT<n>_MIN` or 0 and compares, as tinygrad
-lowers MAX (codegen/decomp/op.py:84).  An f32 reduce keeps a float
+The legacy C emit declares the accumulator and the hoisted loads of a
+register-blocked reduce in the dtype's C type, and a hoisted
+lane-invariant value in its expression's own type (`__auto_type`); an
+int MAX starts at `INT<n>_MIN` or 0 and compares, as tinygrad lowers
+MAX (codegen/decomp/op.py:84).  An f32 reduce keeps a float
 accumulator and an f64 one a double, on the C emit and in the walker;
 the GPU targets keep a float accumulator for every dtype.  The
 devectorizer types each accumulator from the reduce's body, a STACK of
@@ -339,4 +341,5 @@ holds f64 sums and maxes to f64 precision in every legacy C emit
 reduce shape and on the realized CPU JIT route,
 `tests/test_uop_walk_cast.c` holds the walker's CAST to the C emit's,
 and `tests/test_uop_walk_c_types.c` holds its float arithmetic, float
-and int accumulators and mixed-type conversions to the C emit's.
+and int accumulators and mixed-type conversions to the C emit's, whose
+register-blocked reduces hoist a lane-invariant value unconverted.

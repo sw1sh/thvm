@@ -18,11 +18,19 @@
 // computed here in C, one rounding per statement.  The guard kernels hold
 // a double value in a double: a sqrt or a double CONST that a float op
 // would round, and an f64 quotient.
+//
+// The lane-block kernels UPCAST the output axis of reduce + y[i], so the C
+// emit register-blocks the reduce and hoists its lane-invariant subterm
+// into a local.  The local must hold the subterm's own C type: declared
+// from the reduce's dtype, it truncated an int reduce's float quotient
+// `a[j] * (1.0f/b[j])` to an `int` and rounded the double `v[j] * 3.0` of
+// an f32 reduce to a `float`, so the compiled kernel disagreed with the
+// same kernel without the UPCAST and with the walker.
 #include "../src/thvm.c"
 #include "test.h"
 #include <dlfcn.h>
 
-#define MAXI 3
+#define MAXI 4
 #define NO   8
 #define NJ   8
 #define MAXE (NO * NJ)
@@ -39,6 +47,7 @@ typedef struct {
   u32         in_n[MAXI];
   u8          in_data[MAXI][8 * MAXE];
   u8          want[8 * NO];
+  int         hoists;
 } Kern;
 
 static Kern KERNS[32];
@@ -370,6 +379,81 @@ static void build_guards(void) {
   }
 }
 
+// reduce_j body + y[i] with the output axis UPCAST 4.
+static Term lane_block(Kern *k, Term body, u32 y_slot) {
+  Term val = uop_binary(UOP_ADD, uop_reduce(REDUCE_SUM, 1, body), ld(k, y_slot, at_i()));
+  KOpt up  = { KOP_UPCAST, 0, 4 };
+  k->hoists = 1;
+  return uop_dag_apply_kopt(uop_store(k->out, at_i(), val), up);
+}
+
+static void build_lane_blocks(void) {
+  Term j = uop_range(1, KAX_REDUCE, NJ);
+  {
+    i32 x[NO * NJ], y[NO];
+    i32 const a[NJ] = { -7, 5, 7, 1312, -1312, 1271, 41, 3 };
+    i32 const b[NJ] = { 2, 2, 2, 41, 41, 41, 41, 4 };
+    for (u32 n = 0; n < NO * NJ; n++) {
+      x[n] = (i32)(n % 3) - 1;
+    }
+    for (u32 i = 0; i < NO; i++) {
+      y[i] = (i32)i;
+    }
+    i32 w[NO];
+    for (u32 i = 0; i < NO; i++) {
+      i32 acc = 0;
+      for (u32 jj = 0; jj < NJ; jj++) {
+        f32 q = quot_f32((f32)a[jj], (f32)b[jj]);
+        f32 v = (f32)x[i * NJ + jj] + q;
+        f32 s = (f32)acc + v;
+        acc = (i32)s;
+      }
+      w[i] = acc + y[i];
+    }
+    Kern *k = kern("lane-block-i32-sum-of-quotients", DT_INT32, NO);
+    input(k, DT_INT32, NO * NJ, x);
+    input(k, DT_INT32, NJ, a);
+    input(k, DT_INT32, NJ, b);
+    input(k, DT_INT32, NO, y);
+    Term body = uop_binary(UOP_ADD, ld(k, 0, at_ij()), quot(ld(k, 1, j), ld(k, 2, j)));
+    k->root = lane_block(k, body, 3);
+    want(k, w);
+  }
+  {
+    f32 x[NO * NJ], v[NJ], y[NO];
+    for (u32 n = 0; n < NO * NJ; n++) {
+      x[n] = (n % NJ < 2) ? (f32)(n / NJ + 1) : 0.5f;
+    }
+    for (u32 jj = 0; jj < NJ; jj++) {
+      v[jj] = 0.0f;
+    }
+    v[0] = 1.0f;
+    v[1] = 0x1p-23f / 3.0f;
+    for (u32 i = 0; i < NO; i++) {
+      y[i] = 0.5f * (f32)i;
+    }
+    f32 w[NO];
+    for (u32 i = 0; i < NO; i++) {
+      f32 acc = 0.0f;
+      for (u32 jj = 0; jj < NJ; jj++) {
+        f64 p = (f64)v[jj] * 3.0;
+        f64 t = (f64)x[i * NJ + jj] * p;
+        f64 s = (f64)acc + t;
+        acc = (f32)s;
+      }
+      w[i] = acc + y[i];
+    }
+    Kern *k = kern("lane-block-f32-sum-of-double-products", DT_FP32, NO);
+    input(k, DT_FP32, NO * NJ, x);
+    input(k, DT_FP32, NJ, v);
+    input(k, DT_FP32, NO, y);
+    Term body = uop_binary(UOP_MUL, ld(k, 0, at_ij()),
+                           uop_binary(UOP_MUL, ld(k, 1, j), f64c(3.0f)));
+    k->root = lane_block(k, body, 2);
+    want(k, w);
+  }
+}
+
 // === Walker ===============================================================
 
 static u32 cpu_buf(u32 dt, void const *data, u32 n) {
@@ -449,6 +533,18 @@ static void check_walker(void) {
 typedef void (*LegacyFn)(void *, const void *const *, unsigned,
                          const unsigned *, const unsigned *);
 
+// 1 iff the C emit of `k` hoists a lane-invariant local (`_sh<r>_<n>`).
+static int renders_hoist(Kern const *k) {
+  char  *src = NULL;
+  size_t len = 0;
+  FILE  *fp  = open_memstream(&src, &len);
+  cg_render_uop_kernel_c(k->root, "k_probe", k->out, k->ins, k->n_in, fp);
+  fclose(fp);
+  int hit = strstr(src, " _sh") != NULL;
+  free(src);
+  return hit;
+}
+
 static void check_rendered(void) {
   static char name[80];
   char  *src = NULL;
@@ -494,9 +590,12 @@ static void check_rendered(void) {
     if (f == NULL) {
       continue;
     }
+    if (k->hoists) {
+      CHECK(renders_hoist(k));
+    }
     memset(res, 0x5A, sizeof res);
-    const void *ins[MAXI]   = { k->in_data[0], k->in_data[1], k->in_data[2] };
-    unsigned    numel[MAXI] = { k->in_n[0], k->in_n[1], k->in_n[2] };
+    const void *ins[MAXI]   = { k->in_data[0], k->in_data[1], k->in_data[2], k->in_data[3] };
+    unsigned    numel[MAXI] = { k->in_n[0], k->in_n[1], k->in_n[2], k->in_n[3] };
     f(res, ins, k->n_out, numel, NULL);
     check_bytes("rendered", k, res);
   }
@@ -510,6 +609,7 @@ int main(void) {
   build_elementwise();
   build_reduces();
   build_guards();
+  build_lane_blocks();
   check_walker();
   check_rendered();
   thvm_free();

@@ -4692,7 +4692,7 @@ static int rmu_term_refs_axis(Term t, u32 axis_id) {
 // Is `t` index math, which a hoisted lane-invariant local holds in an
 // `int`?  An IWHERE is when both branches are, as a validity-masked
 // address is (INVALID on the masked side); one that selects a value, a
-// padded load `j < 5 ? w[j] : 0` or a maximum, holds the value's type.
+// padded load `j < 5 ? w[j] : 0` or a maximum, is a value.
 static int rmu_term_is_index(Term t) {
   if (term_tag(t) != TAG_UOP) {
     return 1;
@@ -4713,22 +4713,6 @@ static int rmu_term_is_index(Term t) {
     default:
       return 0;
   }
-}
-
-// The dtype of the value `t` computes.  An IWHERE takes it from a branch
-// that is neither a CONST nor INVALID, where term_dtype_in reads the
-// then-branch: `j < 5 ? 0 : w[j]` selects w's dtype, not the CONST's.
-static u32 rmu_value_dtype(Term t) {
-  if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_IWHERE) {
-    for (u32 k = 1; k <= 2; k++) {
-      Term v = heap_read(term_val(t) + k);
-      if (term_tag(v) == TAG_UOP && term_ext(v) != UOP_CONST
-          && term_ext(v) != UOP_INVALID) {
-        return rmu_value_dtype(v);
-      }
-    }
-  }
-  return rmu_dtype_of(t);
 }
 
 // Is `t` a "worth hoisting" non-leaf node?  Bare RANGE/CONST/INVALID/
@@ -4760,9 +4744,14 @@ static int rmu_hoist_worth(Term t) {
 // lane-INVARIANT) replicated 16x.  This walks red_src top-down and, for
 // each MAXIMAL subterm that (a) is worth hoisting (rmu_hoist_worth) and
 // (b) references NO lane axis (rmu_term_depends_on_upcast == 0), emits ONE
-// local (`int` for index math, else the value's rmu_hold_type) and
-// registers it in the hoist map; rmu_emit_term
-// then short-circuits every per-lane occurrence to that local name.
+// local and registers it in the hoist map; rmu_emit_term then
+// short-circuits every per-lane occurrence to that local name.  Index math
+// is an `int`.  A value is `__auto_type`, the C type of its expression,
+// so the local holds exactly what the expression computes in place: an
+// int reduce's float quotient `a * (1.0f/b)` is not truncated, a double
+// product `v * 3.0` or `sqrt(x) * w` is not rounded to float, and a padded
+// load `j < 5 ? w[j] : 0` keeps w's type.  Lane blocking runs only on the
+// C target (rmu_emit_one_reduce_lb), whose compilers take `__auto_type`.
 //
 // Maximal: a lane-invariant node is hoisted whole and NOT descended (its
 // entire subtree is invariant); a lane-VARIANT node is descended so its
@@ -4815,7 +4804,7 @@ static u32 rmu_hoist_lane_invariant(Term t,
       && rmu_term_axes_in_set(t, scope_axes, n_scope)) {
     // Maximal lane-invariant subtree: hoist it whole.
     if (*n_hoist >= RMU_HOIST_MAX) return 0;
-    const char *ty = rmu_term_is_index(t) ? "int" : rmu_hold_type(rmu_value_dtype(t));
+    const char *ty = rmu_term_is_index(t) ? "int" : "__auto_type";
     char tmp[40];
     int tn = snprintf(tmp, sizeof(tmp), "_sh%u_%u", red_axis, *n_hoist);
     if (tn <= 0 || (u32)tn + 1 > name_pool_cap - *pool_used) return 0;

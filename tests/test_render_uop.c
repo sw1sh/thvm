@@ -1635,8 +1635,9 @@ int main(void) {
 
   // out[i] = sum_j (x[i, j] + (j < 5 ? w[j] : INVALID)) + y[i] with the
   // output axis UPCAST 4: a lane-blocked reduce, which hoists the
-  // lane-invariant padded load into one local.  The local holds w's float,
-  // where an `int` cut 0.25 to 0 and 2.25 to 2.
+  // lane-invariant padded load into one local.  The local takes its
+  // expression's type (`__auto_type`), w's float, where an `int` cut 0.25
+  // to 0 and 2.25 to 2.
   TEST_BEGIN("render-uop-c/lane-block-hoisted-select-keeps-float");
   {
     u32  dimsX[1] = { 48 };
@@ -1671,7 +1672,7 @@ int main(void) {
       bol++;
     }
     CHECK(sel != NULL);
-    CHECK(bol != NULL && strncmp(bol, "float _sh", 9) == 0);
+    CHECK(bol != NULL && strncmp(bol, "__auto_type _sh", 15) == 0);
     char const *tmpdir = getenv("TMPDIR");
     char src_path[512];
     snprintf(src_path, sizeof(src_path), "%s/thvm_lane_pad_XXXXXX.c",
