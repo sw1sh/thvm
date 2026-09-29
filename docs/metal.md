@@ -131,8 +131,11 @@ swapping the implementation is mechanical.
   buffer; no recompilation per call.
 - **Standard command encoders.** Indirect command buffers are not
   used.
-- **f32 only on the GPU.** Non-f32 dtypes fall through to CPU
-  interpret. See `docs/dtypes.md` for backend coverage.
+- **Dtypes.** The generated MSL of the tile path takes the dtypes
+  `rmu_msl_type_name` maps (f32, f16, bf16, fp8 bytes, i8 / u8 / i32 /
+  i64); the shader-library DAG encoder takes f32 and i32 only
+  (`metal_kernel_supported`). See `docs/dtypes.md` for backend
+  coverage.
 
 ## Build dependency
 
