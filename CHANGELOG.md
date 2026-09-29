@@ -205,6 +205,10 @@ for the per-commit story.
   an uncached getenv per selection costs work in proportion to the
   environment's size, which the instruction work clock turns into
   moved clock-gated decisions.
+- The bench's `THVM_ATP_NO_TRACE_PACK` switch is gone: the on-heap trace
+  takes the classic Term routes of critical-pair formation and requeue,
+  its own search (COL004-1 narrowq forks at pick 83; COL006-5, COL049-1,
+  GRP697-1 too), and nothing needs it since `--proof` stopped arming it.
 - Vampire Otter-loop simplification set (`--otter`, `src/atp/otter.c`):
   orientable queued critical pairs rewrite as passive rules before
   selection.  With Vampire's symbol-precedence port (`--sym-prec`

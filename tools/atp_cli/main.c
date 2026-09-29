@@ -1004,10 +1004,10 @@ int main(int argc, char **argv) {
       // splices, so the search is the no-proof search.
       g_atp_bench_narrow_proof = 1;
       // The treatment chains between a trace record and its parent are
-      // re-derived at emission (thvm_atp_rederive), never recorded: the
-      // treatment recorder (THVM_ATP_RECORD_NORM) and the unpacked trace
-      // (THVM_ATP_NO_TRACE_PACK) both change the search, so neither is
-      // armed here.
+      // re-derived at emission (thvm_atp_rederive, over the rule-set
+      // journal), never recorded: the treatment recorder
+      // (THVM_ATP_RECORD_NORM) changes the search, so it is not armed
+      // here.
       continue;
     }
     if (nlen == 7 && strncmp(name, "keep-pr", 7) == 0) { keep_pr = 1; continue; }

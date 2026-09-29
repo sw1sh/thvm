@@ -2188,19 +2188,17 @@ int main(int argc, char **argv) {
   }
 
   AtpState *s = thvm_atp_init(&cfg, step_cap);
-  // Off-heap packed proof trace ON by default.  The on-heap trace is
-  // ~99.9% of the GC live set on a deep completion (WolframAxioms/
+  // Off-heap packed proof trace, always.  The on-heap trace is ~99.9%
+  // of the GC live set on a deep completion (WolframAxioms/
   // OrAssociativity: trace 32.4M of 46.8M live K-nodes vs rules 11K;
   // 35 heap-pressure collections = 6.6s of a 26.1s batch wall, 25%),
-  // and packing collapses that to 11 collections / 0.04s with the
-  // trajectory byte-identical (steps/rules/cps exact, both formers)
-  // and RSS down ~0.6GB -- every search-time trace reader goes through
-  // atp_trace_eq_load, and the WL bridge's post-run materialize has no
-  // bench equivalent to break (the bench reads counts only; the goal
-  // cone runs on the packed trace exactly like the WL wrapper).  Kill
-  // switch: THVM_ATP_NO_TRACE_PACK=1 restores the on-heap trace
-  // (THVM_ATP_TRACE_PACK=1 is now redundant here).
-  s->trace_pack = atp_env_on("THVM_ATP_NO_TRACE_PACK") ? 0u : 1u;
+  // and packing collapses that to 11 collections / 0.04s and RSS down
+  // ~0.6GB -- every search-time trace reader goes through
+  // atp_trace_eq_load, and the goal cone runs on the packed trace
+  // exactly like the WL wrapper.  The on-heap trace is not the same
+  // search (COL004-1 narrowq forks at pick 83, also COL006-5,
+  // COL049-1, GRP697-1), so there is no switch back to it.
+  s->trace_pack = 1u;
   if (use_lpo) thvm_atp_set_lpo(s, &lpo);
   // ENIGMA Tier 2: THVM_ATP_GNN_ASSET=<path.safetensors> loads a
   // pretrained GCN scorer (the bundled GCNAtpScorer asset or a
