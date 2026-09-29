@@ -163,27 +163,48 @@ static const char *lz_alu_symbol(u32 op) {
   }
 }
 
-// Emit a CONST scalar literal (fp32 / int32).
+// Emit a scalar literal of dtype `dt` whose payload is `bits`.  Float
+// literals must carry the exact f32 value: `%f` keeps six decimals (1e-7
+// became 0.000000f) and spells infinities `inff`, which is not a token --
+// the -INFINITY identity of every MAX reduce.  f32 renders as the legacy
+// emit does on Metal and CUDA (a bit reinterpretation) and as a C99 hex
+// float on C.  Non-f32 float dtypes (f64 / f16 / bf16 / fp8) carry an f32
+// IEEE-754 pattern too (the grad-chain / gradOnesSeed literal, decoded the
+// same way by const_to_tendesc) and render as a decimal literal with no
+// suffix, so it coerces to the kernel's compute type; f32->double is exact,
+// so %.17g round-trips.  A negative literal is parenthesized so a NEG in
+// front of it cannot form `--`.
+static void lz_emit_scalar_bits(LzCtx const *ctx, u32 dt, u32 bits, FILE *fp) {
+  if (!dtype_is_float(dt)) {
+    fprintf(fp, "%u", bits);
+    return;
+  }
+  float f;
+  memcpy(&f, &bits, sizeof f);
+  if (dt == DT_FP32 && ctx->target == LZ_TGT_METAL) {
+    fprintf(fp, "as_type<float>(0x%08xu)", bits);
+    return;
+  }
+  if (dt == DT_FP32 && ctx->target == LZ_TGT_CUDA) {
+    fprintf(fp, "__uint_as_float(0x%08xu)", bits);
+    return;
+  }
+  if (isnan(f)) {
+    fputs(ctx->target == LZ_TGT_CUDA ? "__int_as_float(0x7fffffff)" : "NAN", fp);
+    return;
+  }
+  if (isinf(f)) {
+    fputs(f < 0.0f ? "(-INFINITY)" : "INFINITY", fp);
+    return;
+  }
+  char const *fmt = (dt == DT_FP32) ? (signbit(f) ? "(%af)" : "%af")
+                                    : (signbit(f) ? "(%.17g)" : "%.17g");
+  fprintf(fp, fmt, (double)f);
+}
+
 static void lz_emit_const(Term t, LzCtx *ctx, FILE *fp) {
   Term n = heap_read(term_val(t) + 0);
-  u32 dt = term_ext(n);
-  u32 bits = (u32)term_val(n);
-  (void)ctx;
-  if (dt == DT_FP32) {
-    union { u32 u; float f; } cvt; cvt.u = bits;
-    fprintf(fp, "%ff", cvt.f);
-  } else if (dtype_is_float(dt)) {
-    // Non-f32 float dtypes (f64 / f16 / bf16 / fp8): `bits` holds an
-    // f32 IEEE-754 pattern (the grad-chain / gradOnesSeed literal -- see
-    // const_to_tendesc, which decodes the same way).  Decode and emit a
-    // decimal literal (no `f` suffix, so it coerces to the kernel's
-    // compute type) rather than the raw bit pattern.  f32->double is
-    // exact, so %.17g round-trips losslessly.
-    union { u32 u; float f; } cvt; cvt.u = bits;
-    fprintf(fp, "%.17g", (double)cvt.f);
-  } else {
-    fprintf(fp, "%u", bits);
-  }
+  lz_emit_scalar_bits(ctx, term_ext(n), (u32)term_val(n), fp);
 }
 
 static void lz_emit_value(Term t, LzCtx *ctx, FILE *fp);
@@ -207,19 +228,8 @@ static void lz_emit_value_lane(Term t, u32 lane, LzCtx *ctx, FILE *fp) {
   }
   if (op == UOP_VCONST) {
     u32 n = uop_vconst_n(t);
-    u32 dt = uop_vconst_dtype(t);
-    u32 bits = uop_vconst_bits(t, lane < n ? lane : (n - 1));
-    if (dt == DT_FP32) {
-      union { u32 u; float f; } cvt; cvt.u = bits;
-      fprintf(fp, "%ff", cvt.f);
-    } else if (dtype_is_float(dt)) {
-      // Non-f32 float lanes carry an f32 IEEE pattern (see lz_emit_const);
-      // decode to a decimal literal instead of the raw bit pattern.
-      union { u32 u; float f; } cvt; cvt.u = bits;
-      fprintf(fp, "%.17g", (double)cvt.f);
-    } else {
-      fprintf(fp, "%u", bits);
-    }
+    lz_emit_scalar_bits(ctx, uop_vconst_dtype(t),
+                        uop_vconst_bits(t, lane < n ? lane : (n - 1)), fp);
     return;
   }
   if (op == UOP_UNROLL || op == UOP_AFTER) {
@@ -406,12 +416,7 @@ static void lz_emit_value(Term t, LzCtx *ctx, FILE *fp) {
           ctx->bad = 1;
         }
       }
-      if (dt == DT_FP32) {
-        union { u32 u; float f; } cvt; cvt.u = bits;
-        fprintf(fp, "%ff", cvt.f);
-      } else {
-        fprintf(fp, "%u", bits);
-      }
+      lz_emit_scalar_bits(ctx, dt, bits, fp);
       return;
     }
     case UOP_UNROLL:

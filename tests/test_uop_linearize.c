@@ -590,7 +590,7 @@ static void check_row_sum(u32 e0, u32 e1) {
   snprintf(f1, sizeof(f1), "for (uint a1 = 0; a1 < %u;", e1);
   const char *loop0 = strstr(buf, f0);
   const char *loop1 = strstr(buf, f1);
-  const char *init  = strstr(buf, "_acc0 = 0.000000f;");
+  const char *init  = strstr(buf, "_acc0 = 0x0p+0f;");
   CHECK(loop0 != NULL && init != NULL && loop1 != NULL);
   CHECK(loop0 < init && init < loop1);
   CHECK(strstr(buf, "   }\n   out[a0] = _acc0;\n") != NULL);
@@ -921,9 +921,57 @@ static int test_case16_init_before_loop_at_2p24_outputs(void) {
   CHECK(pos_of_acc_store(&lk, 1, 1) < pos_of_term(&lk, rj));
   CHECK(pos_of_term(&lk, rj) < pos_of_acc_store(&lk, 0, 1));
   CHECK(pos_of_acc_store(&lk, 0, 1) < pos_of_term(&lk, rk));
-  const char *init_outer = strstr(buf, "_acc1 = 0.000000f;");
+  const char *init_outer = strstr(buf, "_acc1 = 0x0p+0f;");
   const char *loop_j     = strstr(buf, "for (uint a1 = 0; a1 < 4;");
   CHECK(init_outer != NULL && loop_j != NULL && init_outer < loop_j);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
+// out[r0] = max_r1 in[r0*8 + r1] * 1e-7 + 0.1, on the C route.  The MAX
+// accumulator starts at -INFINITY and 1e-7 has no six-decimal spelling, so
+// every float literal must render exactly: `%f` spelled them `-inff` (not a
+// C token) and `0.000000f`.
+static int test_case17_float_literals_render_exactly(void) {
+  thvm_init();
+  TEST_BEGIN("case17 C route: -inf identity and 1e-7 render exactly");
+
+  u32 dims_out[1] = { 4 };
+  u32 dims_in[1]  = { 32 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_out, 0);
+  Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_in, 1);
+  Term r0 = uop_range(0, KAX_LOOP, 4);
+  Term r1 = uop_range(1, KAX_REDUCE, 8);
+  Term addr = uop_int_binary(UOP_IADD,
+                uop_int_binary(UOP_IMUL, r0, uop_const(DT_INT32, 8)), r1);
+  u32 axes[1] = { 1 };
+  Term mx = uop_reduce_multi(REDUCE_MAX, 1, axes, uop_load(uop_index_e(in_buf, addr)));
+  float tiny = 1e-7f, tenth = 0.1f;
+  u32 tiny_bits, tenth_bits;
+  memcpy(&tiny_bits, &tiny, 4);
+  memcpy(&tenth_bits, &tenth, 4);
+  Term val = uop_binary(UOP_ADD,
+               uop_binary(UOP_MUL, mx, uop_const(DT_FP32, tiny_bits)),
+               uop_const(DT_FP32, tenth_bits));
+  Term store = uop_store(out_buf, uop_index_e(out_buf, r0), val);
+
+  static LinKernel lk;
+  static char buf[16384];
+  CHECK(render_lin_c(uop_devectorize_graph(store), &lk, buf, sizeof(buf)));
+  static float in[32], out[4];
+  for (u32 i = 0; i < 32; i++) {
+    in[i] = (float)((int)((i * 5) % 13) - 20);
+  }
+  const void *ins[1] = { in };
+  CHECK(run_c_kernel(buf, out, ins));
+  for (u32 i = 0; i < 4; i++) {
+    float m = -INFINITY;
+    for (u32 j = 0; j < 8; j++) {
+      m = (m < in[i * 8 + j]) ? in[i * 8 + j] : m;
+    }
+    CHECK(out[i] == m * tiny + tenth);
+  }
 
   thvm_free();
   TEST_REPORT();
@@ -948,5 +996,6 @@ int main(void) {
   rc |= test_case14_vector_in_scalar_store_declines();
   rc |= test_case15_gpu_targets_leave_reduces_to_legacy();
   rc |= test_case16_init_before_loop_at_2p24_outputs();
+  rc |= test_case17_float_literals_render_exactly();
   return rc;
 }
