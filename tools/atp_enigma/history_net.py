@@ -28,9 +28,10 @@
 # formation depth, overlap depth, origin kind and flags, standardized.
 #
 # The recursion is evaluated level by level over the derivation DAG
-# (every input of a node sits on a lower level): per level, one batched
-# Linear per inference kind over the parents' embeddings, gathered from
-# the table of all embeddings computed so far.  Block sizes and the table
+# (every input of a node sits on a lower level): per level, one block of
+# all the level's derived nodes, one batched Linear per inference kind
+# over the parents' embeddings (gathered from the table of all
+# embeddings computed so far), each kind's rows selected by a mask.  Block sizes and the table
 # are padded to power-of-two buckets so tinygrad reuses its compiled
 # kernels across problems (padding rows point at the learned "missing"
 # row and carry zero loss weight).
@@ -388,43 +389,52 @@ class DagLayout:
         lb = np.searchsorted(level[lvl_order], np.arange(L + 1))
         for l in range(L):
             vs_l = lvl_order[lb[l]:lb[l + 1]]
-            for kind in (NT_AXIOM, NT_CP, NT_RULE, NT_SIMPQ):
-                vs = vs_l[ntype[vs_l] == kind]
-                if len(vs) == 0:
-                    continue
-                n = len(vs); P = pow2(n)
+            ax = vs_l[ntype[vs_l] == NT_AXIOM]
+            if len(ax):
+                n = len(ax); P = pow2(n)
                 blk = Block()
-                blk.kind, blk.n, blk.P = kind, n, P
-                blk.Ptab = pow2(cur)
-                if kind == NT_AXIOM:
-                    X = np.zeros((P, N_PHI_AX), dtype=np.float32)
-                    X[:n] = axn[vs]
-                    blk.X = Tensor(X)
-                elif kind == NT_CP:
-                    blk.i1 = self.idx_rows(self.gpos(in1[vs]), P)
-                    blk.i2 = self.idx_rows(self.gpos(in2[vs]), P)
-                else:
-                    blk.i1 = self.idx_rows(self.gpos(in1[vs]), P)
-                    own, mem, w = [], [], []
-                    if len(s_owner):
-                        for k, v in enumerate(vs.tolist()):
-                            for e in range(starts[v], ends[v]):
-                                own.append(k); mem.append(sm_s[e])
-                                w.append(1.0 / s_cnt[v])
-                    M = pow2(len(own))
-                    ow = np.zeros(M, dtype=np.int32); ow[:len(own)] = own
-                    me = np.full(M, -1, dtype=np.int64); me[:len(mem)] = mem
-                    ww = np.zeros((M, 1), dtype=np.float32); ww[:len(w), 0] = w
-                    blk.own = Tensor(np.repeat(ow[:, None], dim, axis=1))
-                    blk.mem = self.idx_rows(self.gpos(me), M)
-                    blk.w = Tensor(ww)
-                    if kind == NT_RULE:
-                        oh = np.zeros((P, N_RULE_KINDS), dtype=np.float32)
-                        oh[np.arange(n), rkind[vs]] = 1.0
-                        blk.onehot = Tensor(oh)
-                self.pos[vs] = cur + np.arange(n)
+                blk.kind, blk.n, blk.P, blk.Ptab = NT_AXIOM, n, P, pow2(cur)
+                X = np.zeros((P, N_PHI_AX), dtype=np.float32)
+                X[:n] = axn[ax]
+                blk.X = Tensor(X)
+                self.pos[ax] = cur + np.arange(n)
                 cur += P
                 self.blocks.append(blk)
+            # every derived node of the level in ONE block: each inference
+            # kind keeps its own batched Linear, selected by kind masks
+            vs = vs_l[ntype[vs_l] != NT_AXIOM]
+            if len(vs) == 0:
+                continue
+            n = len(vs); P = pow2(n)
+            blk = Block()
+            blk.kind, blk.n, blk.P, blk.Ptab = -1, n, P, pow2(cur)
+            blk.i1 = self.idx_rows(self.gpos(in1[vs]), P)
+            blk.i2 = self.idx_rows(self.gpos(in2[vs]), P)
+            own, mem, w = [], [], []
+            if len(s_owner):
+                for k, v in enumerate(vs.tolist()):
+                    for e in range(starts[v], ends[v]):
+                        own.append(k); mem.append(sm_s[e])
+                        w.append(1.0 / s_cnt[v])
+            M = pow2(len(own))
+            ow = np.zeros(M, dtype=np.int32); ow[:len(own)] = own
+            me = np.full(M, -1, dtype=np.int64); me[:len(mem)] = mem
+            ww = np.zeros((M, 1), dtype=np.float32); ww[:len(w), 0] = w
+            blk.own = Tensor(np.repeat(ow[:, None], dim, axis=1))
+            blk.mem = self.idx_rows(self.gpos(me), M)
+            blk.w = Tensor(ww)
+            oh = np.zeros((P, N_RULE_KINDS), dtype=np.float32)
+            nk = ntype[vs]
+            isr = nk == NT_RULE
+            oh[np.nonzero(isr)[0], rkind[vs][isr]] = 1.0
+            blk.onehot = Tensor(oh)
+            for attr, t in (("m_cp", NT_CP), ("m_or", NT_RULE), ("m_sq", NT_SIMPQ)):
+                m = np.zeros((P, 1), dtype=np.float32)
+                m[:n, 0] = nk == t
+                setattr(blk, attr, Tensor(m))
+            self.pos[vs] = cur + np.arange(n)
+            cur += P
+            self.blocks.append(blk)
         self.n_table = cur
         self.Pfinal = pow2(cur)
 
@@ -621,16 +631,14 @@ class HistoryNet:
             T = table.pad(((0, b.Ptab - table.shape[0]), None))
             if b.kind == NT_AXIOM:
                 Z = self.ax(b.X)
-            elif b.kind == NT_CP:
-                Z = self.cp(T.gather(0, b.i1).cat(T.gather(0, b.i2), dim=1))
             else:
-                src = T.gather(0, b.i1)
+                x1 = T.gather(0, b.i1)
+                x2 = T.gather(0, b.i2)
                 agg = Tensor.zeros(b.P, self.dim).scatter_reduce(
                     0, b.own, T.gather(0, b.mem) * b.w, reduce="sum")
-                if b.kind == NT_RULE:
-                    Z = self.orl(src.cat(agg, b.onehot, dim=1))
-                else:
-                    Z = self.sq(src.cat(agg, dim=1))
+                Z = (self.cp(x1.cat(x2, dim=1)) * b.m_cp
+                     + self.orl(x1.cat(agg, b.onehot, dim=1)) * b.m_or
+                     + self.sq(x1.cat(agg, dim=1)) * b.m_sq)
             table = table.cat(act(Z), dim=0)
         return table.pad(((0, layout.Pfinal - table.shape[0]), None))
 
@@ -754,14 +762,22 @@ def batch_loss(model, fb, i1, i2, ph, y, w):
 
 
 def cmd_train(npz_dir, pool_path, out_prefix, dim=32, hid=32, epochs=60,
-              seed=0, K=512, lr=3e-3, patience=8, weighting="uniform"):
+              seed=0, K=256, lr=3e-3, patience=8, weighting="uniform",
+              max_levels=100):
     split = load_pool(pool_path)
     names = sorted(n for n, s in split.items() if s == "train")
     tr_names = [n for n in names if not is_val(n)]
     va_names = [n for n in names if is_val(n)]
     t0 = time.time()
-    tr = load_problems(npz_dir, tr_names)
-    va = load_problems(npz_dir, va_names)
+    # Training (and the early-stopping loss) skips the few problems whose
+    # derivation DAG is deeper than max_levels: one captured step per
+    # such problem, for little data.  The gates score every problem.
+    tr_all = load_problems(npz_dir, tr_names)
+    va_all = load_problems(npz_dir, va_names)
+    tr = [p for p in tr_all if p.n_levels <= max_levels]
+    va = [p for p in va_all if p.n_levels <= max_levels]
+    print(f"depth cap {max_levels}: train {len(tr)}/{len(tr_all)} "
+          f"val {len(va)}/{len(va_all)}", flush=True)
     Tensor.manual_seed(seed)
     rng = np.random.default_rng(seed)
     std = Std(tr)
@@ -788,7 +804,8 @@ def cmd_train(npz_dir, pool_path, out_prefix, dim=32, hid=32, epochs=60,
         fb.jit = TinyJit(fwd)
         fb.fixed = [x.realize() for x in fb.sample(vrng, weighting)]
     ntr = sum(len(fb.probs) for fb in tb); nva = sum(len(fb.probs) for fb in vb)
-    meta = dict(dim=dim, hid=hid, weighting=weighting, seed=seed, lr=lr, K=K)
+    meta = dict(dim=dim, hid=hid, weighting=weighting, seed=seed, lr=lr, K=K,
+                max_levels=max_levels)
     best = (np.inf, -1)
     for ep in range(epochs):
         te = time.time()
