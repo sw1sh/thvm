@@ -30,6 +30,9 @@ for the per-commit story.
   disables it).
 - `bin/test_uop` reads UOP_REDUCE's multi-axis heap layout
   `[src, kind, n_axes, axis_0, ...]` and checks the reduce accessors.
+- `bin/test_render_uop` pins how a pre-stamped legacy KAX_GLOBAL output
+  range renders: it joins the flat-grid decode and reads `tid` (no LOCAL
+  axis), not `tg`.
 - Fix (Linux/gcc): a ~2000-deep elementwise chain overflowed the 8 MB stack
   in the unified rewrite (gcc hoisted a 1 KB substitution and the inlined
   bufferize helpers' arrays into every recursion level, 6 KB each); those

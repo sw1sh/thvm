@@ -1076,15 +1076,20 @@ int main(void) {
     if (xcrun_metal_available()) CHECK_EQ(compile_msl_xcrun(buf2l), 0);
   }
 
-  TEST_BEGIN("render-uop/legacy-kax-global-emits-tg");
-  // Direct axis_type=5 (legacy KAX_GLOBAL) without OPT also emits tg.
+  TEST_BEGIN("render-uop/legacy-kax-global-decodes-tid");
+  // A pre-stamped axis_type=5 (legacy KAX_GLOBAL) output range without
+  // OPT joins the flat-grid decode like a promoted axis, so with no LOCAL
+  // axis it reads `tid`, not `tg` (27516415: `tg` collapsed a matmul's
+  // M and N onto one grid index).
   Term r_gl  = uop_range(2, 5 /*GLOBAL*/, 32);
   Term st_gl = uop_store(out, r_gl, one);
   char bufgl[2048];
   fp = fmemopen(bufgl, sizeof(bufgl), "w");
   cg_render_uop_kernel(st_gl, "k_global", out, NULL, 0, fp);
   fclose(fp);
-  CHECK(contains(bufgl, "uint a2 = tg"));
+  CHECK(contains(bufgl, "if (tid >= 32u) return;"));
+  CHECK(contains(bufgl, "uint a2 = tid; /* global ext=32 */"));
+  CHECK(!contains(bufgl, "= tg;"));
 
   TEST_BEGIN("render-uop/reduce-axis-marked");
   // RANGE with axis_type=1 (REDUCE) emits /*reduce*/ comment.

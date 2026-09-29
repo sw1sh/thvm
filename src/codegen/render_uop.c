@@ -1449,11 +1449,11 @@ static int rmu_axis_is_threadbound(u32 opt_kind, u32 axis_type) {
 //                              launches >= this many threads and the
 //                              kernel guards `tid >= total`)
 //
-// Note: explicitly-pre-stamped axis_type==KAX_GLOBAL ranges (the TC
-// matmul / conv2d_flat templates bind those themselves, and the one
-// `render-uop/legacy-kax-global-emits-tg` test) are NOT entered here
-// -- those still emit `uint aN = tg;` via rmu_emit_range_open_ctx's
-// axis_type==5 branch.
+// Ranges that arrive pre-stamped axis_type==KAX_GLOBAL (the TC matmul
+// template's M/N axes) are entered here too, so a kernel with no LOCAL
+// axis decodes them from `tid` like a promoted axis.  Only a range
+// opened without a decode context (rmu_emit_range_open) still reaches
+// rmu_emit_range_open_ctx's `uint aN = tg;` axis_type==5 branch.
 //
 // tg/tt split: when the kernel ALSO carries one or more LOCAL axes (a
 // KOP_LOCAL split: OPT(_, LOCAL, f) wrapping the INNER half, the OUTER
@@ -1525,7 +1525,7 @@ static u32 rmu_gd_l_stride(RmuGlobalDecode const *g, u32 aid) {
 //   LOCAL                       -> `uint aN = tt;`
 //   promoted GLOBAL, n==1       -> `uint aN = tid;`
 //   promoted GLOBAL, n>=2       -> `uint aN = (tid/stride) % mod;`  (`tid % mod` for innermost)
-//   axis_type==5 (legacy)       -> `uint aN = tg;`
+//   axis_type==5, not in gctx   -> `uint aN = tg;`
 //   axis_type==1 (REDUCE)       -> `for (...) /*reduce*/ {`
 //   else                        -> `for (...) {`
 //
@@ -1604,7 +1604,7 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
     }
     return;
   }
-  if (axis_type == 5 /* legacy KAX_GLOBAL (TC/conv templates, test) */) {
+  if (axis_type == 5 /* legacy KAX_GLOBAL opened without a decode context */) {
     fprintf(fp, "uint a%u = tg; /* global ext=%u */\n", axis_id, extent);
     return;
   }
