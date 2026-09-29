@@ -192,6 +192,13 @@ for the per-commit story.
   printed underived and VerifiedBad before, re-derive: the trace-only
   model kept joined victims and retired passives in the window and had
   no slice replay.
+- `--proof` fails closed: the proof block is printed only when every
+  record in it is derived from what it cites -- an input leaf, a critical
+  pair of its two parents, an orient / simplify record that restates its
+  parent or is reached from it by the re-derived chain or a verified
+  bridge, a goal rewrite whose equation replays -- and some goal reaches
+  `$false`.  Otherwise the SZS status stands alone and one stderr line
+  names the first underived record.
 - Vampire Otter-loop simplification set (`--otter`, `src/atp/otter.c`):
   orientable queued critical pairs rewrite as passive rules before
   selection.  With Vampire's symbol-precedence port (`--sym-prec`

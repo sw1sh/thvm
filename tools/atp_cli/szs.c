@@ -27,6 +27,21 @@ static int cli_scan_over(u64 t0, u32 i) {
   return cli_emit_late() || atp_now_us() - t0 >= CLI_SCAN_US;
 }
 
+// Fail-closed emission: a proof block is printed only when every step in
+// it is derived from what it cites (see cli_emit_trace and
+// cli_emit_goal_chain) and some goal reaches $false; otherwise the
+// status stands alone and one stderr line names the first step that
+// is not.  A missing proof costs a solution; an underived step would
+// read as an unsound prover.
+static u32  g_cli_n_unjust = 0u;
+static u32  g_cli_n_refuted = 0u;
+static char g_cli_unjust_what[96];
+
+static void cli_unjustified(const char *name, const char *why) {
+  if (g_cli_n_unjust++ == 0u)
+    snprintf(g_cli_unjust_what, sizeof g_cli_unjust_what, "%s %s", name, why);
+}
+
 // 1 when no completeness-breaking pruning is active AND the goal is
 // ground, so a saturation (QUEUE_EMPTY) soundly reports Satisfiable;
 // else GaveUp.  An existential goal (variables in the negative unit)
@@ -272,6 +287,14 @@ typedef struct { u32 eq; Term l, r; } CliBridgeStep;
 
 static u8 cli_pair_eq_mod(Term a1, Term b1, Term a2, Term b2) {
   return pc_pair_alpha_eq(a1, b1, a2, b2);
+}
+
+// (l, r) is a substitution instance of (pl, pr), either orientation.
+static u8 cli_pair_instance(Term pl, Term pr, Term l, Term r) {
+  RewriteSubst sub = {{0}};
+  if (thvm_match(pl, l, &sub) && thvm_match(pr, r, &sub)) return 1u;
+  RewriteSubst sub2 = {{0}};
+  return (u8)(thvm_match(pl, r, &sub2) && thvm_match(pr, l, &sub2));
 }
 
 // The bridge search enumerates one-rewrite successors of a pair over
@@ -717,7 +740,12 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
   if (ti == ATP_TRACE_NONE || ti >= s->n_trace || printed[ti]) return;
   printed[ti] = 1u;
   Term e = s->trace[ti];
-  if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 4u) return;
+  if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 4u) {
+    char nm[32];
+    snprintf(nm, sizeof nm, "t%u", ti);
+    cli_unjustified(nm, "(unreadable record)");
+    return;
+  }
   u32 reason = term_ext(e);
   u32 pa = (u32)term_val(term_ctr_at(e, 0));
   u32 pb = (u32)term_val(term_ctr_at(e, 1));
@@ -729,6 +757,11 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
     Term ll = 0, rr = 0;
     if (atp_trace_eq_load(s, ti, &ll, &rr)) { lhs = ll; rhs = rr; }
   }
+  if (term_tag(lhs) == TAG_NUM || term_tag(rhs) == TAG_NUM) {
+    char nm[32];
+    snprintf(nm, sizeof nm, "t%u", ti);
+    cli_unjustified(nm, "(no stored equation)");
+  }
   cli_emit_trace(fp, s, pr, pa, printed);
   cli_emit_trace(fp, s, pr, pb, printed);
   // Treatment-compression bridge (see cli_bridge_one): an orient
@@ -737,45 +770,70 @@ static void cli_emit_trace(FILE *fp, AtpState *s, const PrProblem *pr,
   // rewrite so the printed record follows from its citations.
   char pa_name[32];
   pa_name[0] = '\0';
-  if ((reason == TRACE_ORIENT || reason == TRACE_SIMPLIFY ||
-       reason == TRACE_FVI) &&
-      pa != ATP_TRACE_NONE && pa < s->n_trace && pb == ATP_TRACE_NONE) {
+  // Justified: an input leaf, a critical pair of its two cited parents
+  // (the engine stores the raw overlap), or an ORIENT / SIMPLIFY / FVI
+  // record that restates its parent (an FVI record: an instance of it)
+  // or is reached from its citation by the re-derived treatment chain, a
+  // verified one- or two-rewrite bridge, or a verified parent rescue.
+  u8 derived = 1u;
+  if (reason == TRACE_ORIENT || reason == TRACE_SIMPLIFY ||
+      reason == TRACE_FVI) {
     Term ppl = 0, ppr = 0;
-    if (cli_tp_cached(s, pa, &ppl, &ppr) &&
-        !cli_pair_eq_mod(ppl, ppr, lhs, rhs) &&
-        cli_emit_rederived(fp, s, pr, ti, printed, pa_name,
-                           sizeof pa_name)) {
-      // Treatment chain re-derived by replay: pa_name is its last record.
-    } else if (reason != TRACE_FVI && ppl != 0 && ppr != 0 &&
-               !cli_pair_eq_mod(ppl, ppr, lhs, rhs)) {
-      CliBridgeStep br[2];
-      u32 nbr = cli_bridge_search(s, ppl, ppr, lhs, rhs, ti, br);
-      u32 cite = pa;
-      if (nbr == 0u) {
-        // No path from the recorded parent: parent rescue (mislabel /
-        // deeper treatment); an earlier entry reaching the pair in
-        // <= 1 verified step replaces the citation.
-        u32 rp = cli_bridge_rescue(s, lhs, rhs, ti, br, &nbr);
-        if (rp != ATP_TRACE_NONE) {
-          cite = rp;
-          cli_emit_trace(fp, s, pr, rp, printed);
-          if (nbr == 0u) snprintf(pa_name, sizeof pa_name, "t%u", rp);
+    derived = 0u;
+    if (pa != ATP_TRACE_NONE && pa < s->n_trace && pb == ATP_TRACE_NONE &&
+        cli_tp_cached(s, pa, &ppl, &ppr)) {
+      if (cli_pair_eq_mod(ppl, ppr, lhs, rhs) ||
+          (reason == TRACE_FVI && cli_pair_instance(ppl, ppr, lhs, rhs))) {
+        derived = 1u;
+      } else if (cli_emit_rederived(fp, s, pr, ti, printed, pa_name,
+                                    sizeof pa_name)) {
+        // Treatment chain re-derived by replay: pa_name is its last record.
+        derived = 1u;
+      } else if (reason != TRACE_FVI) {
+        CliBridgeStep br[2];
+        u32 nbr = cli_bridge_search(s, ppl, ppr, lhs, rhs, ti, br);
+        u32 cite = pa;
+        if (nbr == 0u) {
+          // No path from the recorded parent: parent rescue (mislabel /
+          // deeper treatment); an earlier entry reaching the pair in
+          // <= 1 verified step replaces the citation.
+          u32 rp = cli_bridge_rescue(s, lhs, rhs, ti, br, &nbr);
+          if (rp != ATP_TRACE_NONE) {
+            cite = rp;
+            derived = 1u;
+            cli_emit_trace(fp, s, pr, rp, printed);
+            if (nbr == 0u) snprintf(pa_name, sizeof pa_name, "t%u", rp);
+          }
         }
-      }
-      if (nbr > 0u) {
-        snprintf(pa_name, sizeof pa_name, "t%u", cite);
-        for (u32 k = 0; k < nbr; k++) {
-          cli_emit_trace(fp, s, pr, br[k].eq, printed);
-          fprintf(fp, "cnf(t%ub%u, plain, ", ti, k);
-          cli_print_term(fp, pr, br[k].l);
-          fputs(" = ", fp);
-          cli_print_term(fp, pr, br[k].r);
-          fprintf(fp, ", inference(rw, [status(thm)], [%s, t%u])).\n",
-                  pa_name, br[k].eq);
-          snprintf(pa_name, sizeof pa_name, "t%ub%u", ti, k);
+        if (nbr > 0u) {
+          derived = 1u;
+          snprintf(pa_name, sizeof pa_name, "t%u", cite);
+          for (u32 k = 0; k < nbr; k++) {
+            cli_emit_trace(fp, s, pr, br[k].eq, printed);
+            fprintf(fp, "cnf(t%ub%u, plain, ", ti, k);
+            cli_print_term(fp, pr, br[k].l);
+            fputs(" = ", fp);
+            cli_print_term(fp, pr, br[k].r);
+            fprintf(fp, ", inference(rw, [status(thm)], [%s, t%u])).\n",
+                    pa_name, br[k].eq);
+            snprintf(pa_name, sizeof pa_name, "t%ub%u", ti, k);
+          }
         }
       }
     }
+  } else if (reason == TRACE_CP) {
+    derived = (u8)(pa < s->n_trace && pb < s->n_trace);
+  } else if (reason != TRACE_AXIOM) {
+    derived = 0u;
+  }
+  if (!derived) {
+    char nm[32];
+    snprintf(nm, sizeof nm, "t%u", ti);
+    cli_unjustified(nm, reason == TRACE_ORIENT   ? "(orient)" :
+                        reason == TRACE_SIMPLIFY ? "(simplify)" :
+                        reason == TRACE_FVI      ? "(free-variable instance)" :
+                        reason == TRACE_CP       ? "(critical pair)" :
+                                                   "(unknown inference)");
   }
   // FOF-path axiom leaf: resolve the conversion lineage FIRST -- the
   // chain records it cites must precede this record in the output.
@@ -1146,10 +1204,20 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
     if (rt != ATP_TRACE_NONE) fprintf(fp, ", t%u", rt);
     fputs("])).\n", fp);
     snprintf(prev, sizeof prev, "g%u_%u", goal_id, k);
+    // A step is derived only by the one-rewrite replay that resolved
+    // its equation (cli_resolve_step_trace / the midpoint split).
+    if (rt == ATP_TRACE_NONE) cli_unjustified(prev, "(goal rewrite, no equation)");
   }
   fprintf(fp, "cnf(contradiction_%u, plain, $false, "
               "inference(trivial_inequality_removal, [status(thm)], [%s])).\n",
           goal_id, prev);
+  if (kbo_eq(cur_l, cur_r)) {
+    g_cli_n_refuted++;
+  } else {
+    char nm[32];
+    snprintf(nm, sizeof nm, "contradiction_%u", goal_id);
+    cli_unjustified(nm, "(sides not identical)");
+  }
 }
 
 // === Narrowing (existential-goal) proof emission ====================
@@ -1346,6 +1414,7 @@ static int cli_emit_narrow_proof(FILE *fp, AtpState *s,
   fprintf(fp, "cnf(contradiction_%u, plain, $false, "
               "inference(trivial_inequality_removal, [status(thm)], [%s])).\n",
           goal_id, prev);
+  g_cli_n_refuted++;
   free(recs);
   return 1;
 }
@@ -1378,23 +1447,42 @@ static void cli_proof_hook(AtpState *s) {
   if (printed == NULL) return;
   // The bench's stdout is rerouted to stderr in competition mode; the
   // SZS stream goes to the preserved real stdout (g_cli_out).
-  FILE *out = (g_cli_out != NULL) ? g_cli_out : stdout;
-  // Renamed input identifiers (quoted atoms, hashed long names): build
-  // the block in memory and restore the problem's own names on output.
-  FILE *real_out = out;
-  char *ren_buf = NULL;
-  size_t ren_len = 0;
-  FILE *ren_ms = cli_proof_renamed() ? open_memstream(&ren_buf, &ren_len) : NULL;
-  if (ren_ms != NULL) out = ren_ms;
+  FILE *real_out = (g_cli_out != NULL) ? g_cli_out : stdout;
   if (g_cli_want_szs && !g_cli_szs_printed) {
     // FOF ontology when a conjecture was negated (Theorem); CNF
-    // ontology for clausal input (Unsatisfiable).
-    fprintf(out, "%% SZS status %s for %s\n",
+    // ontology for clausal input (Unsatisfiable).  The status stands
+    // whatever the emission below decides.
+    char *st_buf = NULL;
+    size_t st_len = 0;
+    FILE *st_ms = open_memstream(&st_buf, &st_len);
+    FILE *st_out = (st_ms != NULL) ? st_ms : real_out;
+    fprintf(st_out, "%% SZS status %s for %s\n",
             g_cli_fof_conjecture ? "Theorem" :
             g_cli_tptp_mode      ? "Unsatisfiable" : "Theorem",
             g_cli_problem);
+    if (st_ms != NULL) {
+      fclose(st_ms);
+      if (cli_proof_renamed()) cli_proof_write(real_out, st_buf, st_len);
+      else fwrite(st_buf, 1, st_len, real_out);
+      free(st_buf);
+    }
+    fflush(real_out);
     g_cli_szs_printed = 1;
   }
+  // The block is built in memory and printed only when every step in it
+  // is derived (renamed input identifiers -- quoted atoms, hashed long
+  // names -- get the problem's own names back on the way out).
+  char *blk_buf = NULL;
+  size_t blk_len = 0;
+  FILE *out = open_memstream(&blk_buf, &blk_len);
+  if (out == NULL) {
+    fprintf(stderr, "FindProof: proof withheld: no memory for the proof block\n");
+    free(printed);
+    return;
+  }
+  g_cli_n_unjust = 0u;
+  g_cli_n_refuted = 0u;
+  g_cli_unjust_what[0] = '\0';
   // FOF-path derivations include fof() conversion records, so the
   // output form is a Proof; pure-CNF input keeps CNFRefutation
   // byte-identically.
@@ -1449,13 +1537,18 @@ static void cli_proof_hook(AtpState *s) {
     cli_emit_goal_chain(out, s, pr, gl, gr, g, steps, n, printed);
   }
   fprintf(out, "%% SZS output end %s for %s\n", szs_form, g_cli_problem);
-  if (ren_ms != NULL) {
-    fclose(ren_ms);
-    cli_proof_write(real_out, ren_buf, ren_len);
-    free(ren_buf);
-    out = real_out;
+  fclose(out);
+  if (g_cli_n_unjust == 0u && g_cli_n_refuted > 0u) {
+    if (cli_proof_renamed()) cli_proof_write(real_out, blk_buf, blk_len);
+    else fwrite(blk_buf, 1, blk_len, real_out);
+  } else if (g_cli_n_unjust > 0u) {
+    fprintf(stderr, "FindProof: proof withheld: %s is not derived from "
+            "what it cites\n", g_cli_unjust_what);
+  } else {
+    fprintf(stderr, "FindProof: proof withheld: no goal reaches $false\n");
   }
-  fflush(out);
+  free(blk_buf);
+  fflush(real_out);
   free(printed);
   thvm_atp_rederive_end(s);
 }
