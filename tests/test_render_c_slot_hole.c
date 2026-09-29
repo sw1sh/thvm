@@ -39,7 +39,7 @@ static int compile_run(char const *src, const void *const *ins, f32 *out) {
   char so_path[sizeof c_path + 8];
   snprintf(so_path, sizeof so_path, "%s.so", c_path);
   char cmd[512];
-  snprintf(cmd, sizeof cmd, "clang -O1 -fPIC -shared -o '%s' '%s' 2>/dev/null",
+  snprintf(cmd, sizeof cmd, "%s -O1 -fPIC -shared -o '%s' '%s' 2>/dev/null", cpu_cc(),
            so_path, c_path);
   int ok = system(cmd) == 0;
   void *h = ok ? dlopen(so_path, RTLD_NOW | RTLD_LOCAL) : NULL;

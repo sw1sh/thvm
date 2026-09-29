@@ -524,7 +524,7 @@ static int run_c_kernel(const char *src, float *out, const void *const *ins) {
   }
   fputs(src, f);
   fclose(f);
-  snprintf(cmd, sizeof(cmd), "clang -O1 -fPIC -shared -o %s %s", dl_path, src_path);
+  snprintf(cmd, sizeof(cmd), "%s -O1 -fPIC -shared -o %s %s", cpu_cc(), dl_path, src_path);
   int built = (system(cmd) == 0);
   unlink(src_path);
   if (!built) {

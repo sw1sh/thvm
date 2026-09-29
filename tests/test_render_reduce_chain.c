@@ -8,7 +8,7 @@
 //   D  A with the SUM's l axis fully UNROLLed (split-inner half)
 //
 // Each is rendered through the production C entry
-// (cg_render_uop_kernel_c_root), compiled with clang and run, and walked
+// (cg_render_uop_kernel_c_root), compiled with the JIT's C compiler and run, and walked
 // by cpu_uop_walk; both must match the reference.
 #include "../src/thvm.c"
 #include "test.h"
@@ -28,7 +28,7 @@ static Term x_index(Term i, Term j, Term k, Term l) {
                         uop_int_binary(UOP_IADD, uop_int_binary(UOP_IADD, a, b), c), l);
 }
 
-// Render `root` through the production C entry, compile it with clang and
+// Render `root` through the production C entry, compile it with the JIT's C compiler and
 // run it.  Returns 1 on a completed run.
 static int run_rendered(Term root, f32 const *x, f32 *res) {
   static char src[65536];
@@ -52,7 +52,7 @@ static int run_rendered(Term root, f32 const *x, f32 *res) {
   char so[600];
   snprintf(so, sizeof so, "%s.dylib", path);
   char cmd[1400];
-  snprintf(cmd, sizeof cmd, "clang -O1 -shared -fPIC -o '%s' '%s' 2>/dev/null", so, path);
+  snprintf(cmd, sizeof cmd, "%s -O1 -shared -fPIC -o '%s' '%s' 2>/dev/null", cpu_cc(), so, path);
   void *h = (system(cmd) == 0) ? dlopen(so, RTLD_NOW) : NULL;
   typedef void (*kfn)(void *, const void *const *, unsigned,
                       const unsigned *, const unsigned *);

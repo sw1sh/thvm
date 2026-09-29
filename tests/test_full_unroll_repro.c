@@ -86,7 +86,7 @@ int main(void) {
   char so[300]; snprintf(so, sizeof so, "%s.dylib", path);
   char cmd[800];
   snprintf(cmd, sizeof cmd,
-           "clang -O3 -shared -fPIC -o %s %s 2>/dev/null", so, path);
+           "%s -O3 -shared -fPIC -o %s %s 2>/dev/null", cpu_cc(), so, path);
   int rc = system(cmd);
   CHECK(rc == 0);
   void *h = dlopen(so, RTLD_NOW);

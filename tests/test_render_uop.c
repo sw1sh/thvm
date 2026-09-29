@@ -1196,7 +1196,7 @@ int main(void) {
     fclose(cf);
     char cmd[256];
     snprintf(cmd, sizeof(cmd),
-             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+             "%s -O2 -fPIC -shared -o %s %s 2>&1", cpu_cc(), dl_path, src_path);
     CHECK(system(cmd) == 0);
     void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
     CHECK(h != NULL);
@@ -1210,7 +1210,7 @@ int main(void) {
     }
     const void *ins[2] = { a, b };
     unsigned numels[2] = { 32, 32 };
-    kfn(y, ins, 32, numels);
+    if (kfn != NULL) kfn(y, ins, 32, numels);
     // Each y[i] = a[i] + b[i] = i + (100 - i) = 100.
     for (u32 i = 0; i < 32; i++) CHECK(y[i] == 100.0f);
     dlclose(h);
@@ -1250,7 +1250,7 @@ int main(void) {
     fclose(cf);
     char cmd[256];
     snprintf(cmd, sizeof(cmd),
-             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+             "%s -O2 -fPIC -shared -o %s %s 2>&1", cpu_cc(), dl_path, src_path);
     CHECK(system(cmd) == 0);
     void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
     CHECK(h != NULL);
@@ -1265,7 +1265,7 @@ int main(void) {
     }
     const void *insp[3] = { aa, bb, cc };
     unsigned numels[3] = { 16, 16, 16 };
-    kfn(yy, insp, 16, numels);
+    if (kfn != NULL) kfn(yy, insp, 16, numels);
     // y[i] = i + 2*3 = i + 6.
     for (u32 i = 0; i < 16; i++) {
       CHECK(yy[i] == (float)i + 6.0f);
@@ -1297,7 +1297,7 @@ int main(void) {
     fclose(cf);
     char cmd[256];
     snprintf(cmd, sizeof(cmd),
-             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+             "%s -O2 -fPIC -shared -o %s %s 2>&1", cpu_cc(), dl_path, src_path);
     CHECK(system(cmd) == 0);
     void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
     CHECK(h != NULL);
@@ -1308,7 +1308,7 @@ int main(void) {
     for (u32 i = 0; i < 8; i++) aa[i] = (float)i;
     const void *insp[1] = { aa };
     unsigned numels[1] = { 8 };
-    kfn(yy, insp, 8, numels);
+    if (kfn != NULL) kfn(yy, insp, 8, numels);
     for (u32 i = 0; i < 8; i++) CHECK(yy[i] == -(float)i);
     dlclose(h);
     unlink(src_path);
@@ -1344,7 +1344,7 @@ int main(void) {
     fclose(cf);
     char cmd[256];
     snprintf(cmd, sizeof(cmd),
-             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+             "%s -O2 -fPIC -shared -o %s %s 2>&1", cpu_cc(), dl_path, src_path);
     int rc = system(cmd);
     if (rc != 0) {
       fprintf(stderr, "=== rendered C99 that failed to compile ===\n%s===\n",
@@ -1360,7 +1360,7 @@ int main(void) {
     for (u32 i = 0; i < 32; i++) aa[i] = (float)i;  // 0..31
     const void *insp[1] = { aa };
     unsigned numels[1] = { 32 };
-    kfn(yy, insp, 4, numels);
+    if (kfn != NULL) kfn(yy, insp, 4, numels);
     // y[0] = 0+1+2+...+7   = 28
     // y[1] = 8+9+...+15    = 92
     // y[2] = 16+17+...+23  = 156
@@ -1401,7 +1401,7 @@ int main(void) {
     fclose(cf);
     char cmd[256];
     snprintf(cmd, sizeof(cmd),
-             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+             "%s -O2 -fPIC -shared -o %s %s 2>&1", cpu_cc(), dl_path, src_path);
     int rc = system(cmd);
     if (rc != 0) {
       fprintf(stderr, "=== rendered C99 that failed to compile ===\n%s===\n",
@@ -1424,7 +1424,7 @@ int main(void) {
     aa[31] = 4000.0f;   // row 3 max
     const void *insp[1] = { aa };
     unsigned numels[1] = { 32 };
-    kfn(yy, insp, 4, numels);
+    if (kfn != NULL) kfn(yy, insp, 4, numels);
     CHECK(yy[0] == 1000.0f);
     CHECK(yy[1] == 2000.0f);
     CHECK(yy[2] == 3000.0f);
@@ -1459,7 +1459,7 @@ int main(void) {
     char cmd[256];
     // -lm in case the libm symbols aren't auto-linked (Linux, BSD).
     snprintf(cmd, sizeof(cmd),
-             "clang -O2 -fPIC -shared -o %s %s -lm 2>&1", dl_path, src_path);
+             "%s -O2 -fPIC -shared -o %s %s -lm 2>&1", cpu_cc(), dl_path, src_path);
     int rc = system(cmd);
     if (rc != 0) {
       fprintf(stderr, "=== rendered C99 that failed to compile ===\n%s===\n",
@@ -1474,7 +1474,7 @@ int main(void) {
     float aa[4] = {1.0f, 4.0f, 9.0f, 16.0f}, yy[4];
     const void *insp[1] = { aa };
     unsigned numels[1] = { 4 };
-    kfn(yy, insp, 4, numels);
+    if (kfn != NULL) kfn(yy, insp, 4, numels);
     CHECK(yy[0] == 1.0f);
     CHECK(yy[1] == 2.0f);
     CHECK(yy[2] == 3.0f);
@@ -1509,7 +1509,7 @@ int main(void) {
     fclose(cf);
     char cmd[256];
     snprintf(cmd, sizeof(cmd),
-             "clang -O2 -fPIC -shared -o %s %s 2>&1", dl_path, src_path);
+             "%s -O2 -fPIC -shared -o %s %s 2>&1", cpu_cc(), dl_path, src_path);
     int rc = system(cmd);
     if (rc != 0) {
       fprintf(stderr, "=== rendered C99 that failed to compile ===\n%s===\n",
@@ -1534,7 +1534,7 @@ int main(void) {
     int32_t yy[4];
     const void *insp[1] = { aa };
     unsigned numels[1] = { 4 };
-    kfn(yy, insp, 4, numels);
+    if (kfn != NULL) kfn(yy, insp, 4, numels);
     for (u32 i = 0; i < 4; i++) CHECK(yy[i] == expected[i]);
     dlclose(h);
     unlink(src_path);

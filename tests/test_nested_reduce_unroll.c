@@ -5,7 +5,7 @@
 // IADD(IMUL(outer, k), OPT(inner, UNROLL, k)) while REDUCE.axes keeps naming
 // only `outer`, so the unrolled `inner` half lies inside the body of every
 // reduce that encloses the split one.  Two shapes, each checked for
-// ownership (uop_reduce_owns_split_axis), for the rendered C (clang + run)
+// ownership (uop_reduce_owns_split_axis), for the rendered C (compiled with the JIT's C compiler + run)
 // and for the CPU UOp walker:
 //   A  out[i] = 0.5 * sum_j (x[i,j] + sum_k x[i,k])   UNROLL k: the INNER
 //      reduce owns it.  Unowned, the outer loop re-summed the inner reduce
@@ -63,7 +63,7 @@ static Term build_b(Term out, Term y, Term z) {
   return uop_store(out, i, outer);
 }
 
-// Render `root` to C, compile it with clang and run it.  Returns 1 on a
+// Render `root` to C, compile it with the JIT's C compiler and run it.  Returns 1 on a
 // completed run.
 static int run_rendered(Term root, Term out, Term const *ins, u32 n_in,
                         const void *const *in_data, unsigned const *numels,
@@ -86,7 +86,7 @@ static int run_rendered(Term root, Term out, Term const *ins, u32 n_in,
   char so[300];
   snprintf(so, sizeof so, "%s.dylib", path);
   char cmd[800];
-  snprintf(cmd, sizeof cmd, "clang -O1 -shared -fPIC -o %s %s 2>/dev/null", so, path);
+  snprintf(cmd, sizeof cmd, "%s -O1 -shared -fPIC -o %s %s 2>/dev/null", cpu_cc(), so, path);
   void *h = (system(cmd) == 0) ? dlopen(so, RTLD_NOW) : NULL;
   typedef void (*kfn)(void *, const void *const *, unsigned,
                       const unsigned *, const unsigned *);
