@@ -28,6 +28,17 @@ for the per-commit story.
   multiway and causal graphs.
 
 ### Tensors & Autograd
+- Chain rule through `UOP_GATHER` and `UOP_SCATTER(SUM)`, the gradients of
+  tinygrad's one-hot gather and scatter_reduce sum (mixin/op.py:1041,
+  :1127): a gather's src gets the cotangent scatter-added back (accumulated
+  in float32 for 16- and 8-bit floats, as sum_acc_dtype), a scatter's src
+  gets it gathered, its base gets it as is or, without include_self, with
+  the written positions zeroed (a REPLACE scatter, tinygrad's `_inv_mask`);
+  the index gets none and the single-walk pre-walk credits no index slot.
+  No backward builds a one-hot or a REDUCE.  PROD / MAX / MIN / REPLACE
+  scatters have no rule yet: their cell fires to zero and the new chain-rule
+  error slot (`grad_err_set` / `grad_err_take`) names the kind, where the
+  cell used to stay unfired with no message.
 - New indexed UOps (IR only, no lowering yet): `UOP_GATHER` (tinygrad
   `Tensor.gather`, mixin/op.py:1023-1043: an out-of-range index reads 0) and
   `UOP_SCATTER` with SUM / PROD / MAX / MIN / REPLACE kinds and include_self
@@ -60,7 +71,7 @@ for the per-commit story.
 - `UOP_SCATTER` with SUM or REPLACE lowers to its own kernel: an AFTER chain
   of stores (init, a reset for include_self=0, a serial read-modify-write
   over the index space, and for SUM with include_self a final `+ base`, so
-  the result is tinygrad's S + self, mixin/op.py:1129).  An invalid index
+  the result is tinygrad's S + self, mixin/op.py:1127).  An invalid index
   writes the old value back; duplicates combine in ascending order along
   dim, so REPLACE is last-write-wins.  O(|base| + |idx|) work, CPU backend
   only, JIT replay with the index rewritten in place.  PROD / MAX / MIN

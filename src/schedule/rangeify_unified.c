@@ -3237,7 +3237,7 @@ static Term ru_lower_gather(Term self, u64 loc, RuRangeMap const *rm) {
 // last-write-wins order of REPLACE.  The stores run in AFTER order:
 //   SUM, include_self   OUT[R] = 0; accumulate; OUT[R] = OUT[R] + base[R]
 //                       (the last store drops when base is the CONST 0):
-//                       S + self, as tinygrad adds (mixin/op.py:1129);
+//                       S + self, as tinygrad adds (mixin/op.py:1127);
 //   SUM, no self        OUT[R] = base[R]; OUT[t] = valid ? 0 : OUT[t];
 //                       accumulate;
 //   REPLACE             OUT[R] = base[R]; accumulate.

@@ -51,6 +51,12 @@
 //   FLIP(a, m)       gy_for_a = FLIP(gy, m)
 //   PAD(a, b/e)      gy_for_a = SHRINK(gy, [b_i, b_i + a.dim_i])
 //   SHRINK(a, b/e)   gy_for_a = PAD(gy, [b_i, src.dim_i - e_i])
+//   GATHER(s, i, d)  gy_for_s = SCATTER(SUM, zeros(s.shape), i, gy, d, 1)
+//                    (i gets none)
+//   SCATTER(b, i, s, d, SUM, self)
+//                    gy_for_b = gy if self, else
+//                               SCATTER(REPLACE, gy, i, zeros(i.shape), d)
+//                    gy_for_s = GATHER(gy, i, d)            (i gets none)
 //   CONST/LOAD/CMP   no children to differentiate (leaf cotangent dies)
 
 // Forward decl: grad_target_dtype reads the target stack defined
@@ -663,13 +669,20 @@ static void grad_prewalk_credit_and_descend(Term child, Term target) {
 }
 
 // Bit i set = the chain rule sends a cotangent to child slot i of `op`:
-// every uop_arity slot, except none for a diff sink and none for IWHERE's
-// condition (tinygrad mixin/gradient.py:81 returns None for it).  The
-// pre-walk credits exactly these slots, so its counts match the arrivals.
+// every uop_arity slot, except none for a diff sink, none for IWHERE's
+// condition (tinygrad mixin/gradient.py:81 returns None for it) and none for
+// an indexed op's index.  The pre-walk credits exactly these slots, so its
+// counts match the arrivals.
 static u32 grad_op_diff_slot_mask(u8 op) {
-  if (grad_op_is_diff_sink(op)) return 0;
-  if (op == UOP_IWHERE) return 0x6u;
-  return (1u << uop_arity(op)) - 1u;
+  if (grad_op_is_diff_sink(op)) {
+    return 0;
+  }
+  switch (op) {
+    case UOP_IWHERE:  return 0x6u;   // then, else
+    case UOP_GATHER:  return 0x1u;   // src
+    case UOP_SCATTER: return 0x5u;   // base, src
+    default:          return (1u << uop_arity(op)) - 1u;
+  }
 }
 
 // Credit the BWD-arrival children of a UOP node at (loc, op): the slots of
@@ -893,7 +906,121 @@ fn Term grad_half_const(void) {
   return uop_const(grad_target_dtype(), bits);
 }
 
+// The chain rule's error slot: the first node since the last grad_err_take
+// that the rule cannot differentiate (a scatter kind with no rule yet, or a
+// cotangent that does not fit the node).  That node's cell fires to zero so
+// the walk still finishes; the frontends take the message and raise it.
+static char GRAD_ERR[256];
+static char GRAD_ERR_TAKEN[256];
 
+fn void grad_err_set(char const *msg) {
+  if (GRAD_ERR[0] != 0) {
+    return;
+  }
+  snprintf(GRAD_ERR, sizeof GRAD_ERR, "%s", msg);
+  fprintf(stderr, "thvm: %s\n", GRAD_ERR);
+}
+
+// The pending grad error, cleared by the call; NULL when there is none.
+fn char const *grad_err_take(void) {
+  if (GRAD_ERR[0] == 0) {
+    return NULL;
+  }
+  memcpy(GRAD_ERR_TAKEN, GRAD_ERR, sizeof GRAD_ERR);
+  GRAD_ERR[0] = 0;
+  return GRAD_ERR_TAKEN;
+}
+
+static int grad_shape_eq(Shape const *a, Shape const *b) {
+  if (a->ndim != b->ndim) {
+    return 0;
+  }
+  for (u32 d = 0; d < a->ndim; d++) {
+    if (a->dims[d] != b->dims[d]) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+// A tensor of shape `s` holding the CONST payload `bits` of `dtype`.
+static Term grad_full(u32 dtype, Shape const *s, u32 bits) {
+  u32 ones[MAX_DIM];
+  for (u32 d = 0; d < s->ndim; d++) {
+    ones[d] = 1;
+  }
+  return uop_expand(uop_reshape(uop_const(dtype, bits), s->ndim, ones),
+                    s->ndim, s->dims);
+}
+
+// gy at y's shape: gy itself, or a broadcast of a one-element gy (the
+// scalar-zero convention of grad_zero_at).  0 when neither fits.
+static Term grad_gy_at(Term gy, Term y) {
+  Shape ys, gs;
+  if (!term_shape_in(y, 0, &ys) || !term_shape_in(gy, 0, &gs)) {
+    return 0;
+  }
+  if (grad_shape_eq(&gs, &ys)) {
+    return gy;
+  }
+  if (shape_numel(gs) != 1) {
+    return 0;
+  }
+  u32 ones[MAX_DIM];
+  for (u32 d = 0; d < ys.ndim; d++) {
+    ones[d] = 1;
+  }
+  return uop_expand(uop_reshape(gy, ys.ndim, ones), ys.ndim, ys.dims);
+}
+
+// tinygrad's sum_acc_dtype for a float cotangent (dtype.py:220): the 16- and
+// 8-bit floats accumulate in float32, the others in their own dtype.
+static u32 grad_acc_dtype(u32 dtype) {
+  if (dtype_is_float(dtype) && dtype_itemsize(dtype) < 4) {
+    return DT_FP32;
+  }
+  return dtype;
+}
+
+// The gather gradient: gy (at the gather's shape) summed into zeros of
+// src's shape at the positions idx reads along dim.  tinygrad sums the
+// one-hot's broadcast axis in sum_acc_dtype and casts back
+// (mixin/gradient.py:133); so does this.  0 when gy does not fit.
+static Term grad_gather_adjoint(Term y, Term src, Term idx, Term gy, u32 dim) {
+  Shape ss;
+  Term  g = grad_gy_at(gy, y);
+  if (g == 0 || !term_shape_in(src, 0, &ss)) {
+    return 0;
+  }
+  u32 dt = DT_FP32;
+  term_dtype_in(g, 0, &dt);
+  u32 acc = grad_acc_dtype(dt);
+  if (acc != dt) {
+    g = uop_cast(g, acc);
+  }
+  Term out = uop_scatter(grad_full(acc, &ss, 0), idx, g, dim, SCATTER_SUM, 1);
+  if (out != 0 && acc != dt) {
+    out = uop_cast(out, dt);
+  }
+  return out;
+}
+
+// g with every position idx writes along dim set to zero: tinygrad's
+// _inv_mask(g, 0) (mixin/op.py:1126) as a REPLACE scatter of zeros.
+static Term grad_zero_written(Term g, Term idx, u32 dim) {
+  Shape is;
+  u32   dt = DT_FP32;
+  if (!term_shape_in(idx, 0, &is)) {
+    return 0;
+  }
+  term_dtype_in(g, 0, &dt);
+  return uop_scatter(g, idx, grad_full(dt, &is, 0), dim, SCATTER_REPLACE, 0);
+}
+
+static char const *const GRAD_SCATTER_KIND_NAME[] = {
+  [SCATTER_SUM] = "sum", [SCATTER_PROD] = "prod", [SCATTER_MAX] = "amax",
+  [SCATTER_MIN] = "amin", [SCATTER_REPLACE] = "replace",
+};
 
 static Term grad_kernel_term_from_ten(Term ten) {
   Term tr = term_resolve(ten);
@@ -1209,6 +1336,59 @@ static Term interact_grad_dispatch(Term grad_term) {
       }
       (void)ca;
       return grad_bwd_emit_uop(a, gy_a);
+    }
+
+    // === Indexed ops ===
+    // GATHER(src, idx, dim): src gets gy summed back into the positions idx
+    // read (the gradient of tinygrad's one-hot where+sum, mixin/op.py:1041);
+    // idx gets none.
+    case UOP_GATHER: {
+      Term src = uop_gather_src(y);
+      Term idx = uop_gather_idx(y);
+      u64  ci  = grad_cell_alloc(idx);
+      Term g_src = grad_gather_adjoint(y, src, grad_fwd_inline(ci, idx), gy,
+                                       uop_gather_dim(y));
+      if (g_src == 0) {
+        grad_err_set("grad: the cotangent of a gather does not fit its shape");
+        return grad_zero_at(y);
+      }
+      return grad_bwd_for_child(src, g_src);
+    }
+
+    // SCATTER(base, idx, src, dim, kind, include_self).  SUM differentiates
+    // tinygrad's mask.where(src, 0).sum(-1).add(self if include_self else
+    // _inv_mask(self, 0)) (mixin/op.py:1127): src reads gy back at the
+    // positions it was written to; base gets gy, with those positions zeroed
+    // unless include_self.  idx gets none.  A kind with no rule yet fires to
+    // zero and names itself in the error slot.
+    case UOP_SCATTER: {
+      u32 kind = uop_scatter_kind(y);
+      if (kind != SCATTER_SUM) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "grad: no gradient rule yet for a '%s' scatter",
+                 kind <= SCATTER_REPLACE ? GRAD_SCATTER_KIND_NAME[kind] : "?");
+        grad_err_set(msg);
+        return grad_zero_at(y);
+      }
+      Term base   = uop_scatter_base(y);
+      Term idx    = uop_scatter_idx(y);
+      Term src    = uop_scatter_src(y);
+      u32  dim    = uop_scatter_dim(y);
+      u64  ci     = grad_cell_alloc(idx);
+      Term idx_fw = grad_fwd_inline(ci, idx);
+      Term g      = grad_gy_at(gy, y);
+      Term g_src  = g != 0 ? uop_gather(g, idx_fw, dim) : 0;
+      Term g_base = g;
+      if (g != 0 && !uop_scatter_include_self(y)) {
+        g_base = grad_zero_written(g, idx_fw, dim);
+      }
+      if (g_src == 0 || g_base == 0) {
+        grad_err_set("grad: the cotangent of a scatter does not fit its shape");
+        return grad_zero_at(y);
+      }
+      Term base_bwd = grad_bwd_for_child(base, g_base);
+      Term src_bwd  = grad_bwd_for_child(src, g_src);
+      return uop_binary(UOP_ADD, base_bwd, src_bwd);
     }
 
     // === Movement ops ===

@@ -271,6 +271,7 @@ TESTS := \
   $(BIN)/test_uop_range_axis_type \
   $(BIN)/test_grad \
   $(BIN)/test_iwhere_grad \
+  $(BIN)/test_grad_gather_scatter \
   $(BIN)/test_ref \
   $(BIN)/test_mat_op2 \
   $(BIN)/test_wnf_n \

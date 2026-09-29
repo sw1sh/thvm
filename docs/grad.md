@@ -81,6 +81,8 @@ plus an outer combiner. The adjoint table mirrors tinygrad / JAX:
 | `SHRINK(a, b/e)`  | `PAD(gy, [b_i, src.dim_i - e_i])`                                   |
 | `CAST(a, dt)`     | `CAST(gy, a.dtype)` — value-preserving                              |
 | `IWHERE(c, t, e)` | `gy_for_t = where(c, gy, 0)`; `gy_for_e = where(c, 0, gy)`; `c` gets none (tinygrad `mixin/gradient.py:81`) |
+| `GATHER(s, i, d)` | `gy_for_s = SCATTER(SUM, zeros(s.shape), i, gy, d, include_self=1)`: `gy` summed back into the positions `i` read; `i` gets none |
+| `SCATTER(b, i, s, d, SUM, self)` | `gy_for_s = GATHER(gy, i, d)`; `gy_for_b = gy` when `self`, else `SCATTER(REPLACE, gy, i, zeros(i.shape), d)` (`gy` with every written position zeroed); `i` gets none |
 | `CMPLT/CMPEQ`     | non-differentiable; emits scalar zero                               |
 | `BITCAST/CONST/LOAD/ASSIGN` | non-differentiable; cotangent dies                        |
 | `KERNEL(...)`     | `grad_kernel_backprop` (see below)                                  |
@@ -102,9 +104,32 @@ branches.  The py tinygrad importer (`from_tinygrad`) maps `WHERE` (and
 The requires-grad single walk pre-counts each node's backward arrivals
 before any chain rule fires (`grad_prewalk_fanin`); it credits exactly the
 child slots the rule sends a cotangent to (`grad_op_diff_slot_mask`: every
-arity slot of a differentiable op, none of a sink, and `IWHERE`'s value
-slots but not its condition), so no slot waits for an arrival that never
-comes.
+arity slot of a differentiable op, none of a sink, `IWHERE`'s value slots
+but not its condition, `GATHER`'s src, and `SCATTER`'s base and src but
+never an index), so no slot waits for an arrival that never comes.
+
+### Indexed ops
+
+The `GATHER` and `SCATTER(SUM)` rules are the gradients of tinygrad's
+one-hot formulations (`Tensor.gather`, `mixin/op.py:1023-1041`, and
+`scatter_reduce` sum, `mixin/op.py:1126-1127`, through
+`mixin/gradient.py`), built from the same two native ops, so a backward is
+linear in its operand sizes: no one-hot mask and no REDUCE.
+
+  - The gather gradient accumulates in tinygrad's `sum_acc_dtype`
+    (float32 for the 16- and 8-bit floats, `mixin/gradient.py:133`) and
+    casts back.  Duplicate indices sum in ascending order along `dim`;
+    an out-of-range index contributes nothing, as the forward read 0.
+  - `SCATTER`'s base gradient without `include_self` is tinygrad's
+    `_inv_mask(gy, 0)`: a `REPLACE` scatter of zeros, so a non-finite
+    cotangent at a written position becomes an exact 0, as `where` gives.
+  - A one-element cotangent (the scalar-zero convention of
+    `grad_zero_at`) is broadcast to the node's shape first.
+  - `PROD`, `MAX`, `MIN` and `REPLACE` scatters have no rule yet.  Their
+    cell fires to zero and the chain rule records the first such node in
+    its error slot (`grad_err_set`; the message also goes to stderr).
+    `grad_err_take()` returns the pending message and clears it, or NULL;
+    the frontends take it after a backward walk and raise.
 
 ### TEN-leaf short-circuit
 
