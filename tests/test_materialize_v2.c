@@ -16,6 +16,14 @@ static u32 alloc_f32_tensor(u32 dim) {
   return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
 }
 
+static u32 alloc_f32_tensor2(u32 d0, u32 d1) {
+  Shape s = {0};
+  s.ndim    = 2;
+  s.dims[0] = d0;
+  s.dims[1] = d1;
+  return tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
+}
+
 static Term kernel_id_from_term(Term t) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_KERNEL) return 0;
   return heap_read(term_val(t) + 1);
@@ -79,11 +87,30 @@ int main(void) {
   CHECK_EQ(materialize_boundary_count(), 1u);
   CHECK_EQ(materialize_boundary_at(0), term_val(reduced));
 
-  // Chain of two REDUCEs: each is a separate boundary; topo order
-  // puts the upstream one first.
+  // Same-kind REDUCE chain: uop_reduce merges REDUCE(REDUCE(x)) into one
+  // multi-axis REDUCE over x when it is built (52549362), so the chain is
+  // a single reduce and a single boundary.
+  TEST_BEGIN("materialize-v2/same-kind-reduce-chain-merges");
+  u32 tx = alloc_f32_tensor2(4, 8), ty = alloc_f32_tensor2(4, 8);
+  Term x2    = uop_binary(UOP_ADD, term_new(0, TAG_TEN, DT_FP32, tx),
+                                   term_new(0, TAG_TEN, DT_FP32, ty));
+  Term row   = uop_reduce(REDUCE_SUM, 1, x2);
+  Term total = uop_reduce(REDUCE_SUM, 0, row);
+  CHECK_EQ(uop_reduce_src(total), x2);
+  CHECK_EQ(uop_reduce_n_axes(total), 2u);
+  thvm_materialize(total);
+  CHECK_EQ(materialize_boundary_count(), 1u);
+  CHECK_EQ(materialize_boundary_at(0), term_val(total));
+
+  // Chain of two REDUCEs of different kinds, a max then a sum: kinds that
+  // differ are not merged and keep their boundary (8ec1e7db), so each is a
+  // separate boundary; topo order puts the upstream one first.  The max
+  // reads a stored tensor: over an elementwise value it would also realize
+  // that value (the maxpool-input rule), a third boundary.
   TEST_BEGIN("materialize-v2/reduce-chain-yields-two-boundaries");
-  Term inner_red = uop_reduce(REDUCE_SUM, 0, sum_inner);
+  Term inner_red = uop_reduce(REDUCE_MAX, 1, term_new(0, TAG_TEN, DT_FP32, tx));
   Term outer_red = uop_reduce(REDUCE_SUM, 0, inner_red);
+  CHECK_EQ(uop_reduce_src(outer_red), inner_red);
   thvm_materialize(outer_red);
   CHECK_EQ(materialize_boundary_count(), 2u);
   CHECK_EQ(materialize_boundary_at(0), term_val(inner_red));

@@ -47,6 +47,9 @@ for the per-commit story.
 - `bin/test_materialize_v2`: a shared subexpression whose parents index it
   identically fuses into the sink (one boundary); read flipped by one
   parent, it becomes a second boundary ahead of the sink.
+- `bin/test_materialize_v2`: a same-kind REDUCE chain is one multi-axis
+  REDUCE (one boundary); a max-then-sum chain keeps two boundaries in fire
+  order.  The old chain reduced axis 0 of an already fully reduced value.
 - Fix (Linux/gcc): a ~2000-deep elementwise chain overflowed the 8 MB stack
   in the unified rewrite (gcc hoisted a 1 KB substitution and the inlined
   bufferize helpers' arrays into every recursion level, 6 KB each); those
