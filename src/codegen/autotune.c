@@ -918,7 +918,11 @@ static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
 // Fill a fresh scratch buffer with a small deterministic pattern.  Timing
 // doesn't depend on the data, but a non-degenerate finite fill keeps the
 // correctness gate (kautotune_output_stat) meaningful and avoids denormal
-// stalls on some GPUs.  Index-mod pattern in [0,1).
+// stalls on some GPUs.  A scratch holds its input's whole buffer, which can
+// run to hundreds of MB, and the pattern repeats every 34 elements: one
+// period is computed and doubled by memcpy.  A backend that writes at an
+// offset gets a block of whole periods (about 1 MB) written across the
+// buffer; any other gets the whole buffer staged on the host.
 static void kautotune_iso_fill(Backend *b, u32 buf_id, u32 dt, u64 numel) {
   if (b == NULL || b->buf_write == NULL || buf_id == 0 || numel == 0) {
     return;
@@ -927,12 +931,20 @@ static void kautotune_iso_fill(Backend *b, u32 buf_id, u32 dt, u64 numel) {
   if (nbytes == 0) {
     return;
   }
-  void *host = malloc((size_t)nbytes);
+  int packed = dtype_is_packed(dt);
+  u64 esz    = packed ? 0 : dtype_itemsize(dt);
+  u64 block  = numel;
+  if (!packed && b->buf_write_at != NULL) {
+    u64 periods = (1u << 20) / (34 * esz);
+    block = 34 * (periods > 0 ? periods : 1);
+    block = block < numel ? block : numel;
+  }
+  u8 *host = (u8 *)calloc(1, (size_t)dtype_storage_bytes(dt, block));
   if (host == NULL) {
     return;
   }
-  memset(host, 0, (size_t)nbytes);
-  for (u64 i = 0; i < numel; i++) {
+  u64 period = block < 34 ? block : 34;
+  for (u64 i = 0; i < period; i++) {
     // Zero-mean, sign-alternating pattern in [-1, 1).  A non-negative [0,1)
     // fill let a partial / scrambled reduction stay positive and scale with
     // sum_abs, slipping the correctness gate; a signed zero-mean pattern makes
@@ -952,7 +964,22 @@ static void kautotune_iso_fill(Backend *b, u32 buf_id, u32 dt, u64 numel) {
       default: break;  // leave zeros for dtypes we don't model
     }
   }
-  b->buf_write(buf_id, host, nbytes);
+  // A packed dtype has no case above and stays zero.
+  if (!packed) {
+    for (u64 done = period; done < block;) {
+      u64 n = done < block - done ? done : block - done;
+      memcpy(host + done * esz, host, (size_t)(n * esz));
+      done += n;
+    }
+  }
+  if (block == numel) {
+    b->buf_write(buf_id, host, nbytes);
+  } else {
+    for (u64 off = 0; off < numel; off += block) {
+      u64 n = numel - off < block ? numel - off : block;
+      b->buf_write_at(buf_id, off * esz, host, n * esz);
+    }
+  }
   free(host);
 }
 

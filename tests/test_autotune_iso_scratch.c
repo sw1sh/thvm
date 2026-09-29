@@ -12,17 +12,17 @@
 // tinygrad allocates each beam scratch as its PARAM's whole buffer
 // (schedule/rangeify.py:284, codegen/opt/postrange.py:258).
 //
-// For each kernel the test bounds every address the kernel loads from each
-// input slot.  It checks that every slot's scratch was requested large
-// enough for its loads, and that every slot over the leaf's buffer was
-// requested at the whole buffer.  It then checks that the isolated bench
-// computes the kernel from the scratch contents, that every candidate the
-// search applies passes the correctness gate there, and that a BEAM=2
-// search leaves the live result correct.  The freelist is emptied before
-// every scratch allocation, so each scratch is a fresh block of exactly the
-// requested size: a best-fit recycle could hand back a larger donor and
-// hide an undersized request, and under ASan a read past a fresh block
-// faults.
+// The scratch fill is pinned element by element.  For each kernel the test
+// bounds every address the kernel loads from each input slot.  It checks
+// that every slot's scratch was requested large enough for its loads, and
+// that every slot over the leaf's buffer was requested at the whole
+// buffer.  It then checks that the isolated bench computes the kernel from
+// the scratch contents, that every candidate the search applies passes the
+// correctness gate there, and that a BEAM=2 search leaves the live result
+// correct.  The freelist is emptied before every scratch allocation, so
+// each scratch is a fresh block of exactly the requested size: a best-fit
+// recycle could hand back a larger donor and hide an undersized request,
+// and under ASan a read past a fresh block faults.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -78,6 +78,61 @@ static int slot_over_buf(KernelEntry const *ke, u32 slot, u32 buf) {
 // CPU_BUFS[].nbytes is exactly the requested size.
 static void fresh_allocs(void) {
   CPU_FREELIST_LEN = 0;
+}
+
+// === Scratch fill ===
+
+// Element i of the scratch fill, written at `out`: a sign-alternating
+// (i % 17) / 17, or (i % 17) with that sign for int32; zero for a dtype
+// the fill does not model.
+static void fill_elem(u32 dt, u64 i, u8 *out) {
+  f64 mag = (f64)(i % 17) * (1.0 / 17.0);
+  f64 v   = (i & 1) ? -mag : mag;
+  switch (dt) {
+    case DT_FP32:    *(f32 *)out = (f32)v; break;
+    case DT_FP64:    *(f64 *)out = v; break;
+    case DT_BF16:    *(u16 *)out = f32_to_bf16((f32)v); break;
+    case DT_FP16:    *(u16 *)out = f32_to_fp16((f32)v); break;
+    case DT_FP8E4M3: *out = f32_to_fp8e4m3((f32)v); break;
+    case DT_FP8E5M2: *out = f32_to_fp8e5m2((f32)v); break;
+    case DT_INT32:   *(i32 *)out = (i32)((i % 17) * ((i & 1) ? -1 : 1)); break;
+    default:         memset(out, 0, dtype_itemsize(dt)); break;
+  }
+}
+
+// kautotune_iso_fill writes element i as fill_elem does, for sizes on
+// both sides of the pattern's 34-element period and past the ~1 MB block
+// a backend with buf_write_at receives in pieces.
+static void check_fill(void) {
+  static u32 const dts[]   = {DT_FP32, DT_FP64, DT_BF16, DT_FP16,
+                              DT_FP8E4M3, DT_FP8E5M2, DT_INT32, DT_INT8};
+  static u64 const sizes[] = {1, 17, 33, 34, 35, 68, 69, 1000, 4099,
+                              2500007};
+  TEST_BEGIN("autotune-iso/fill-pattern");
+  for (u32 d = 0; d < sizeof(dts) / sizeof(dts[0]); d++) {
+    for (u32 s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
+      u32 dt  = dts[d];
+      u64 n   = sizes[s];
+      u64 esz = dtype_itemsize(dt);
+      u32 buf = CURRENT_BACKEND->buf_alloc(n * esz);
+      u8 *got = (u8 *)malloc((size_t)(n * esz));
+      u8 *want = (u8 *)malloc((size_t)(n * esz));
+      kautotune_iso_fill(CURRENT_BACKEND, buf, dt, n);
+      CURRENT_BACKEND->buf_read(buf, got, n * esz);
+      for (u64 i = 0; i < n; i++) {
+        fill_elem(dt, i, want + i * esz);
+      }
+      int same = memcmp(got, want, (size_t)(n * esz)) == 0;
+      if (!same) {
+        fprintf(stderr, "  fill dt=%u n=%llu differs\n", dt,
+                (unsigned long long)n);
+      }
+      CHECK(same);
+      free(got);
+      free(want);
+      CURRENT_BACKEND->buf_free(buf);
+    }
+  }
 }
 
 // === Load-address bounds ===
@@ -615,6 +670,7 @@ int main(void) {
   unsetenv("JITBEAM");
   unsetenv("AUTOTUNE");
   thvm_init();
+  check_fill();
   for (u32 i = 0; i < sizeof(CASES) / sizeof(CASES[0]); i++) {
     run_case(&CASES[i]);
   }
