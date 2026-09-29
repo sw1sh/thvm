@@ -38,6 +38,7 @@ single sample; predicted class flips from 0 to 4 (correct).
 | AOT compiler (C + Metal targets)             | implemented + tested    |
 | Autograd via UOP_GRAD interaction            | implemented + tested    |
 | TGrad through Conv2D / softmax / etc.        | implemented + tested    |
+| Native gather / embedding + grads (CPU)      | implemented + tested    |
 | TOptim["Adam"], TOptim["SGD"]                | implemented + tested    |
 | Einx-style verbs over TUOp                   | implemented + tested    |
 | Multi-context API (TContextSnapshot, slices) | in progress             |

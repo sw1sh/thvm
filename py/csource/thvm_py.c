@@ -105,6 +105,17 @@ EXPORT uint64_t py_uop_after(uint64_t node, uint64_t after_node) {
 EXPORT uint64_t py_uop_load(uint64_t src) { return uop_load(src); }
 EXPORT uint64_t py_uop_detach(uint64_t src) { return uop_detach(src); }
 
+// Indexed ops (uop/gather.c, uop/scatter.c): 0 when the operands fail the
+// constructor's checks; the frontend raises.
+EXPORT uint64_t py_uop_gather(uint64_t src, uint64_t idx, uint32_t dim) {
+  return uop_gather(src, idx, dim);
+}
+EXPORT uint64_t py_uop_scatter(uint64_t base, uint64_t idx, uint64_t src,
+                               uint32_t dim, uint32_t kind,
+                               uint32_t include_self) {
+  return uop_scatter(base, idx, src, dim, kind, include_self);
+}
+
 // ============== high-level tensor surface (TAG_TEN) ==================
 // Phase 1 of the Python Tensor frontend (docs/plans/py_tensor_frontend
 // .md): the high-level tensor-term layer, ported from the WL
@@ -469,6 +480,9 @@ EXPORT uint64_t py_grad_slot_refire (void) { return grad_slot_refire_get();  }
 EXPORT uint64_t py_grad_slot_prewalk(void) { return grad_slot_prewalk_get(); }
 EXPORT uint64_t py_grad_slot_excess (void) { return grad_slot_excess_get();  }
 EXPORT uint64_t py_grad_slot_stuck  (void) { return grad_slot_stuck_get();   }
+// The chain rule's pending error message (a node it has no rule for),
+// cleared by the call; NULL when there is none.
+EXPORT char const *py_grad_err_take(void) { return grad_err_take(); }
 
 // Walk-once backward readback: the canonical "this tensor's grad"
 // after a uop_grad-driven realize.  grad_leaf_sup's target==0 path
@@ -486,6 +500,13 @@ EXPORT int py_ten_clear_grad(uint64_t t) {
   u32 id = (u32)term_val(t);
   if (id == 0 || id >= TENS_NEXT) return 0;
   TENS[id].grad = 0;
+  return 1;
+}
+EXPORT int py_ten_set_grad(uint64_t t, uint64_t g) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  TENS[id].grad = (Term)g;
   return 1;
 }
 

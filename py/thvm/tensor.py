@@ -28,6 +28,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from .device import Device
 from .dtypes import DType, dtypes
 from .helpers import TRAINING
 from .thvm import K, Term, Thvm, _uop_binary
@@ -100,6 +101,24 @@ def _finite_sentinel(value, dt: "DType"):
     if math.isinf(fv):
         return _F32_SENTINEL if fv > 0 else -_F32_SENTINEL
     return value
+
+
+def _native_indexing() -> bool:
+    """Gather / scatter kernels run on the CPU backend only (emit refuses
+    them on a GPU backend), so the frontends build the native UOP_GATHER /
+    UOP_SCATTER only when DEV picked the CPU."""
+    return Device.DEFAULT == "CPU"
+
+
+def _const_broadcast(value, shape, dtype: DType) -> "Tensor":
+    """A lazy constant of `shape`: EXPAND(RESHAPE(CONST)), no host buffer,
+    so a JIT capture holds no temporary tensor that could be freed under it
+    (the relu zero-cache problem)."""
+    c = (_TH.iconst(int(value)) if dtypes.is_int(dtype)
+         else _TH.fconst(float(value)))
+    shape = tuple(int(d) for d in shape)
+    t = _TH.expand(_TH.reshape(c, [1] * len(shape)), list(shape))
+    return Tensor._from_term(t, dtype, shape)
 
 
 def _normalize_pairs(arg, shape, full):
@@ -468,9 +487,20 @@ class Tensor(metaclass=_TensorMeta):
                 break
         try:
             # Build the walk-once BWD root and drive wnf to fire the chain
-            # rule (interact_grad -> grad_leaf_sup accumulator).
+            # rule (interact_grad -> grad_leaf_sup accumulator).  A node the
+            # chain rule has no gradient for fires to zero and leaves a
+            # message in its error slot (any earlier message is stale); then
+            # the walk's partial sums are dropped and backward() raises, as
+            # tinygrad's compute_gradient does (mixin/gradient.py:127).
+            _TH.grad_err_take()
+            before = [_TH.ten_get_grad(leaf.term) for leaf in leaves]
             bwd = _TH.grad(self.term, gradient.term)
             _TH.wnf(bwd)
+            err = _TH.grad_err_take()
+            if err is not None:
+                for leaf, g_term in zip(leaves, before):
+                    _TH.ten_set_grad(leaf.term, g_term)
+                raise RuntimeError(f"backward(): {err}")
             # Wrap each in-scope leaf's TenDesc.grad term.
             for leaf in leaves:
                 g_term = _TH.ten_get_grad(leaf.term)
@@ -1153,17 +1183,104 @@ class Tensor(metaclass=_TensorMeta):
         out._view_begin_end = [int(x) for x in begin_end]
         return out
 
+    # ---- indexed ops (native UOP_GATHER on the CPU backend) -----------
+
+    def _resolve_dim(self, dim: int, *, extra: int = 0) -> int:
+        # tinygrad mixin/movement.py:81-84.
+        total = self.ndim + extra
+        if not -max(1, total) <= dim <= max(1, total) - 1:
+            raise IndexError(
+                f"{dim=} out of range {[-max(1, total), max(1, total) - 1]}")
+        return dim + total if dim < 0 else dim
+
+    def gather(self, dim: int, index: "Tensor") -> "Tensor":
+        """Values along `dim` at the positions `index` names (tinygrad
+        mixin/op.py:1023-1041, with its checks and exception types): the
+        result has index's shape and self's dtype,
+        out[i] = self[i with i_dim := index[i]], and an index outside
+        [0, self.shape[dim]) reads 0.  On the CPU backend this is one
+        native UOP_GATHER, O(|index|) and differentiable (self's gradient
+        is the cotangent scatter-added back); on another device it runs
+        host-side and carries no gradient."""
+        if index.ndim != self.ndim:
+            raise RuntimeError(
+                f"self.ndim must equal index.ndim, {self.ndim=}, {index.ndim=}")
+        dim = self._resolve_dim(dim)
+        assert all(s >= i for d, (s, i) in enumerate(zip(self._shape, index._shape))
+                   if d != dim), \
+            "requires self.shape[d] >= index.shape[d] for all d != dim"
+        if not dtypes.is_int(index._dtype):
+            raise RuntimeError(
+                f"_one_hot_along_dim expects int index tensor, getting {index._dtype}")
+        if index.numel() == 0 or self._shape[dim] == 0 or not _native_indexing():
+            return self._gather_host(dim, index)
+        t = _TH.gather(self.term, index.term, dim)
+        if int(t) == 0:
+            raise RuntimeError(
+                f"gather: cannot index {self._shape} along {dim} by {index._shape}")
+        return Tensor._from_term(t, self._dtype, index._shape)
+
+    def _gather_host(self, dim: int, index: "Tensor") -> "Tensor":
+        """gather on the host: an empty index or axis (no kernel to run), or
+        a device without native gather kernels."""
+        out = np.zeros(index._shape, dtype=self._dtype.np_dtype)
+        if out.size and self._shape[dim]:
+            idx = index.numpy().astype(np.int64)
+            sl = tuple(slice(None) if d == dim else slice(0, s)
+                       for d, s in enumerate(index._shape))
+            valid = (idx >= 0) & (idx < self._shape[dim])
+            vals = np.take_along_axis(self.numpy()[sl], np.where(valid, idx, 0), axis=dim)
+            out = np.where(valid, vals, out)
+        return Tensor(out, dtype=self._dtype)
+
+    def _gather_rows(self, idx: "Tensor", wrap: bool) -> "Tensor":
+        """self[idx] along axis 0: shape idx.shape + self.shape[1:], a row
+        of 0 for an index out of range.  With `wrap` a negative index first
+        counts from the end (tinygrad's advanced getitem, mixin/op.py:95);
+        embedding reads it as out of range.  The wrap runs on the gather's
+        index grid, where it fuses into the gather kernel."""
+        rest = tuple(self._shape[1:])
+        n = idx.numel()
+        if n == 0:
+            return Tensor(np.zeros((*idx._shape, *rest), dtype=self._dtype.np_dtype),
+                          dtype=self._dtype)
+        ix = idx.reshape(n, *([1] * len(rest))).expand(n, *rest)
+        if wrap:
+            s = ix._shape
+            neg = ix < _const_broadcast(0, s, ix._dtype)
+            ix = ix + neg * _const_broadcast(self._shape[0], s, ix._dtype)
+        return self.gather(0, ix).reshape(*idx._shape, *rest)
+
+    def _index_rows(self, idx) -> "Tensor":
+        """Advanced getitem with one Tensor / list / ndarray index on axis
+        0 (tinygrad mixin/op.py:84-95): the index must be int, a negative
+        index counts from the end, and an index still out of range reads 0."""
+        if isinstance(idx, Tensor):
+            if not dtypes.is_int(idx._dtype):
+                raise IndexError(f"index dtype {idx._dtype} is not supported")
+            return self._gather_rows(idx, wrap=True)
+        arr = np.asarray(idx)
+        if arr.size and not np.issubdtype(arr.dtype, np.integer):
+            raise IndexError(f"{idx=} contains non-int element")
+        size = self._shape[0]
+        arr = arr.astype(np.int64)
+        arr = np.where(arr < 0, arr + size, arr)
+        # An index still out of range reads a zero row whatever its value,
+        # so -1 stands for every one of them and all indices fit int32.
+        arr = np.where((arr >= 0) & (arr < size), arr, -1).astype(np.int32)
+        return self._gather_rows(Tensor(arr, dtype=dtypes.int32), wrap=False)
+
     def __getitem__(self, idx):
         """Basic indexing: int / slice (per leading dim), via shrink.
 
         An int index shrinks the axis to width 1 then drops it (squeeze);
         a slice shrinks to [start:stop].  Trailing dims default to full.
-        Tensor / fancy (gather) indexing is not handled here -- that lives
-        at the lowered/gather level."""
-        # Fancy / gather indexing: a Tensor or array of indices selects
-        # rows along axis 0.  Done host-side -- the index source is data
-        # (the dataset / a randint batch), never on the autograd path.
+        A Tensor / list / ndarray index selects rows along axis 0
+        (_index_rows); other advanced forms raise NotImplementedError."""
         if isinstance(idx, (Tensor, np.ndarray, list)):
+            if _native_indexing():
+                return self._index_rows(idx)
+            # Host gather off the CPU backend: no native gather kernels there.
             sel = idx.numpy() if isinstance(idx, Tensor) else np.asarray(idx)
             gathered = self.numpy()[sel.astype(np.int64)]
             return Tensor(gathered, dtype=self._dtype)
@@ -1444,8 +1561,15 @@ class Tensor(metaclass=_TensorMeta):
         return cls.cat(*unsq, dim=dim)
 
     def embedding(self, idx: "Tensor") -> "Tensor":
-        """Gather rows of self (vocab, embed) by integer indices `idx`;
-        result shape (*idx.shape, embed).  Powers nn.Embedding."""
+        """Rows of self (vocab, embed) at the integer ids `idx`, shape
+        (*idx.shape, embed): tinygrad nn.Embedding's forward
+        (nn/__init__.py:369-371), where an id outside [0, vocab) (a negative
+        one included) reads a zero row.  On the CPU backend it is one native
+        gather, differentiable: the weight's gradient scatter-adds the
+        cotangent rows.  Powers nn.Embedding."""
+        if _native_indexing():
+            return self._gather_rows(idx, wrap=False)
+        # Host gather off the CPU backend: no native gather kernels there.
         sel = idx.numpy().astype(np.int64)
         rows = self.numpy()[sel.reshape(-1)]
         out_shape = tuple(sel.shape) + (self._shape[-1],)

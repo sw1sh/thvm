@@ -29,6 +29,10 @@ If you are new to the project, read these in order:
    `cpu_dispatch_kernel` order (BLAS, optional tile path, JITs,
    interpreters), the `propose -> apply_opt` chain, and the JIT
    cache key.
+9. [gather_scatter.md](gather_scatter.md): the native `UOP_GATHER` /
+   `UOP_SCATTER` indexed ops -- semantics, lowering, gradients, the py
+   `gather` / `embedding` / `x[idx]` surface, and where they deviate
+   from tinygrad.
 
 ## What's not here yet
 

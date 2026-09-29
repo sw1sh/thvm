@@ -244,6 +244,18 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- py: `Tensor.gather` (tinygrad mixin/op.py:1023-1041, with its checks and
+  exception types), and `Tensor.embedding` / `nn.Embedding` and `x[idx]` with
+  a Tensor / list / ndarray index, are native `UOP_GATHER`s on the CPU
+  backend: O(|index|), fused into the consumer, and differentiable (the
+  weight's gradient is a scatter-add; they were host numpy with no gradient).
+  An out-of-range id reads a zero row; `x[idx]` wraps negative indices first,
+  the embedding does not, as in tinygrad; `nn.Embedding` raises TypeError for
+  a non-int index.  Other devices keep the host path.  `backward()` raises a
+  RuntimeError when the chain rule reports a node it cannot differentiate;
+  `helpers.USE_ATOMICS` is accepted.  New bridge calls: `py_uop_gather`,
+  `py_uop_scatter`, `py_grad_err_take`, `py_ten_set_grad`.  An embedding step
+  at N = 1e5 ids, D = 64 takes 17 / 17 / 32 ms at V = 1e3 / 1e4 / 1e5 rows.
 - py: `test_int_reduce_exact.py` sets each leg's warmup itself: the default leg compiles at warmup 0 under any suite warmup, and the walker leg forces the UOp walker with `THVM_CPU_JIT_WARMUP=1000000000` alone, without the `THVM_CPU_JIT_PARALLEL=0` and unused opt tag it needed while the precompile and the dylib cache ignored the warmup gate.
 - py: `Tensor.clone()` copies a tensor of any dtype bit for bit.  It raised NotImplementedError for everything but float32 / int32, because ASSIGN copied only those.
 - py: `test_int_reduce_exact.py` checks int32 `max` / `sum` past 2^24 against numpy and tinygrad on the CPU JIT and on the forced walker, including the 4x4 max over axis 1 that read -100000000 for -100000001 and the UPCAST 37-wide rows.

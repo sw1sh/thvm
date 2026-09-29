@@ -88,6 +88,10 @@ class ContextVar:
 # the optimizers step only while it is set.
 TRAINING = ContextVar("TRAINING", 0)
 
+# tinygrad helpers.py:288, accepted for compatibility: nn.Embedding behaves
+# the same either way, its gather and scatter-add gradient are native.
+USE_ATOMICS = ContextVar("USE_ATOMICS", 0)
+
 # tinygrad debug/JIT env knobs (helpers.DEBUG / helpers.JIT).  GPT2 reads
 # both: DEBUG gates the per-step timing print, JIT gates the symbolic
 # single-token forward_jit path.

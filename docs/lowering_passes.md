@@ -188,7 +188,8 @@ identity, then accumulates; REPLACE stores base, then writes.  The
 scatter's BUFFERIZE wraps the SCATTER itself, so no consumer inlines it,
 and every store of a gather or scatter kernel is checked for unbound
 leaves after the walker rewrite.  PROD, MAX and MIN have no lowering yet:
-emit declines their kernel with a stderr line.
+emit declines their kernel with a stderr line.  The ops' semantics,
+gradients and py surface are in [gather_scatter.md](gather_scatter.md).
 
 ## Pass 4: Render
 

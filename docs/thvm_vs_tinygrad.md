@@ -387,6 +387,20 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
   tinygrad importer maps MAX to the select `where(a < b, b, a)`, so an exact tie sends
   the whole cotangent to `a`, where tinygrad's MAX rule (`mixin/gradient.py:78-79`)
   splits it 0.5/0.5.
+- **Gather / scatter are native ops, not one-hot masks** (deviation by design,
+  [gather_scatter.md](gather_scatter.md)).  tinygrad writes `Tensor.gather`,
+  `scatter_reduce` and `nn.Embedding` as one-hot where+sum graphs, O(|index| x
+  |axis|) unless its late load-collapse fires; thvm has `UOP_GATHER` /
+  `UOP_SCATTER` and their chain rules (a gather's gradient is a scatter-add, a
+  sum scatter's src gradient a gather), so the values match at O(|index|).
+  Deviations: the native kernels run on the CPU backend only (py falls back to
+  the host path, with no gradient, elsewhere); `USE_ATOMICS` changes nothing and
+  an out-of-range embedding id's gradient is dropped where tinygrad's atomic
+  backward clips the id into range (`nn/__init__.py:356`); an index view's
+  offset (a decode position) is a kernel constant, so each position compiles
+  its own kernel, where tinygrad binds a symbolic Variable.  PROD / MAX / MIN
+  scatter lowerings and the PROD / MAX / MIN / REPLACE scatter gradients are
+  still to come; `backward()` raises for the missing gradients.
 - **MULTI / AFTER / TUPLE / FUNCTION+grad_fxn** - *large*. No custom grad functions; blocks higher-order grads.
 - **Higher-order gradients (grad of grad)** - *large*. thvm grads are AST Terms, not differentiable Tensors; would need `TENS[tid].grad` rearchitected as a Tensor.
 - **LARS / Muon optimizers** - *medium each*. Only SGD + Adam; Muon aliased to Adam.

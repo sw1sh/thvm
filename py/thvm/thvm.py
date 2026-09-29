@@ -81,6 +81,9 @@ _uop_store = _bind("py_uop_store", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_after = _bind("py_uop_after", c_uint64, c_uint64, c_uint64)
 _uop_load = _bind("py_uop_load", c_uint64, c_uint64)
 _uop_detach = _bind("py_uop_detach", c_uint64, c_uint64)
+_uop_gather = _bind("py_uop_gather", c_uint64, c_uint64, c_uint64, c_uint32)
+_uop_scatter = _bind("py_uop_scatter", c_uint64, c_uint64, c_uint64, c_uint64,
+                     c_uint32, c_uint32, c_uint32)
 
 # ---------------- high-level tensor surface (TAG_TEN) ----------------
 _ten_create = _bind("py_ten_create", c_uint64,
@@ -148,9 +151,11 @@ _grad_slot_refire  = _bind("py_grad_slot_refire",  c_uint64)
 _grad_slot_prewalk = _bind("py_grad_slot_prewalk", c_uint64)
 _grad_slot_excess  = _bind("py_grad_slot_excess",  c_uint64)
 _grad_slot_stuck   = _bind("py_grad_slot_stuck",   c_uint64)
+_grad_err_take     = _bind("py_grad_err_take",     c_char_p)
 _ten_get_grad     = _bind("py_ten_get_grad",     c_uint64, c_uint64)
 _ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
 _ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
+_ten_set_grad     = _bind("py_ten_set_grad",     c_int32,  c_uint64, c_uint64)
 
 # ---------------- buffer accessors ----------------
 _uop_buffer_scope = _bind("py_uop_buffer_scope", c_uint32, c_uint64)
@@ -499,6 +504,21 @@ class Thvm:
     def detach(self, src: Term) -> Term:
         return Term(_uop_detach(c_uint64(int(src))))
 
+    # ---------------- indexed ops ----------------
+    def gather(self, src: Term, idx: Term, dim: int) -> Term:
+        """UOP_GATHER, or Term(0) when the operands fail uop_gather's checks."""
+        return Term(_uop_gather(c_uint64(int(src)), c_uint64(int(idx)),
+                                c_uint32(int(dim))))
+
+    def scatter(self, base: Term, idx: Term, src: Term, dim: int, kind: int,
+                include_self: bool) -> Term:
+        """UOP_SCATTER with a SCATTER_* kind, or Term(0) when the operands
+        fail uop_scatter's checks."""
+        return Term(_uop_scatter(c_uint64(int(base)), c_uint64(int(idx)),
+                                 c_uint64(int(src)), c_uint32(int(dim)),
+                                 c_uint32(int(kind)),
+                                 c_uint32(1 if include_self else 0)))
+
     # ============ high-level tensor surface (TAG_TEN) ============
     # Phase 1 of the Python Tensor frontend.  add / mul / cmplt /
     # cmpeq / reduce above already compose TAG_TEN operands; these add
@@ -688,6 +708,12 @@ class Thvm:
     def grad_slot_excess (self) -> int: return int(_grad_slot_excess())
     def grad_slot_stuck  (self) -> int: return int(_grad_slot_stuck())
 
+    def grad_err_take(self) -> "str | None":
+        """The chain rule's pending error (a node it has no gradient rule
+        for), cleared by the call; None when there is none."""
+        msg = _grad_err_take()
+        return None if msg is None else msg.decode()
+
     def ten_get_grad(self, t: Term) -> int:
         """Read TENS[tid].grad (the chain-rule accumulator).
         Returns 0 if no grad has been accumulated yet."""
@@ -696,6 +722,10 @@ class Thvm:
     def ten_clear_grad(self, t: Term) -> bool:
         """Zero out TENS[tid].grad (PyTorch's zero_grad analogue)."""
         return bool(_ten_clear_grad(c_uint64(int(t))))
+
+    def ten_set_grad(self, t: Term, g: int) -> bool:
+        """Set TENS[tid].grad to the lazy term `g` (0 clears it)."""
+        return bool(_ten_set_grad(c_uint64(int(t)), c_uint64(int(g))))
 
     # ---------------- buffer accessors ----------------
     def buffer_scope(self, t: Term) -> int:

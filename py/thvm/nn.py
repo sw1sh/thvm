@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .dtypes import dtypes
 from .helpers import TRAINING
 from .tensor import Tensor
 
@@ -181,7 +182,11 @@ class LayerNorm2d(LayerNorm):
 class Embedding:
     """Lookup table: maps integer indices to rows of a (vocab, embed)
     weight.  Mirrors tinygrad's nn.Embedding -- forward gathers the rows
-    selected by `idx` and reshapes to (*idx.shape, embed_size)."""
+    selected by `idx` and reshapes to (*idx.shape, embed_size); an id out of
+    range reads a zero row.  On the CPU backend the gather is native and the
+    weight gradient a scatter-add, with or without USE_ATOMICS: tinygrad's
+    atomic backward clips an out-of-range id into [0, vocab) (nn/__init__.py:
+    356), thvm drops it, as the forward reads it as 0."""
 
     def __init__(self, vocab_size: int, embed_size: int):
         self.vocab_size = vocab_size
@@ -192,6 +197,9 @@ class Embedding:
                                      low=-bound, high=bound)
 
     def __call__(self, idx: Tensor) -> Tensor:
+        # tinygrad nn/__init__.py:392.
+        if not dtypes.is_int(idx.dtype):
+            raise TypeError(f"Expected integer dtype for index in embedding, got {idx.dtype}")
         return self.weight.embedding(idx)
 
 
