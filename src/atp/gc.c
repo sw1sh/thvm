@@ -1060,7 +1060,9 @@ static u8 atp_enqueue_equation(AtpState *s, Term lhs, Term rhs,
   g_cp_formation_depth = g_enq_depth_pending;
   g_enq_depth_pending = 0u;
   if (s == NULL) return 0;
-  if (getenv("THVM_ATP_ENQ_DEBUG") != NULL) {
+  static int enq_dbg = -1;
+  if (enq_dbg < 0) enq_dbg = getenv("THVM_ATP_ENQ_DEBUG") != NULL;
+  if (enq_dbg) {
     fprintf(stderr,
         "[enq] reason=%u  lhs:t%u/e%u",
         reason, term_tag(lhs), term_ext(lhs));

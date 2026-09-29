@@ -2443,10 +2443,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
         // through -- push_rule re-verifies Term-side, so only the
         // refusal is decided here.
         {
-          static int fdo_env2 = -1;
-          if (fdo_env2 < 0)
-            fdo_env2 = getenv("THVM_ATP_FORCE_DEF_ORIENT") ? 1 : 0;
-          if (atp_order_is_plain_kbo(s) && !fdo_env2 &&
+          if (atp_order_is_plain_kbo(s) && !atp_force_def_orient_env() &&
               !s->use_force_def_orient && !s->use_fwd_subsume &&
               !(s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull)) {
             KboCmp oc = thvm_kbo_ft(lf, rf, s->kbo);
@@ -2498,7 +2495,9 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
         // per-side NUM sentinel handles and every content step
         // intercepts on the bracket; nothing is decoded.  Any special
         // orient mode falls back to the decode below.
-        if (getenv("THVM_ATP_LAZY_DBG") != NULL) {
+        static int lazy_dbg = -1;
+        if (lazy_dbg < 0) lazy_dbg = getenv("THVM_ATP_LAZY_DBG") != NULL;
+        if (lazy_dbg) {
           fprintf(stderr,
                   "LAZYDBG on=%d plain=%d fdo=%u fwd=%u flat=%u mnf=%u "
                   "rec=%u permz=%d nv=%u\n",
@@ -2512,7 +2511,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
             !s->use_force_def_orient &&
             !s->use_fwd_subsume && !s->record_norm_steps &&
             !(s->use_perm_subsume && g_atp_perm_subsume_mask == 0ull) &&
-            getenv("THVM_ATP_FORCE_DEF_ORIENT") == NULL &&
+            !atp_force_def_orient_env() &&
             ft_distinct_var_count(lf, rf) < REWRITE_MAX_VAR) {
           KboCmp loc = thvm_kbo_ft(lf, rf, s->kbo);
           u8 un_lazy = 0u;

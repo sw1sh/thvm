@@ -404,6 +404,16 @@ static int atp_env_off(const char *name) {
   return (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
 }
 
+// THVM_ATP_FORCE_DEF_ORIENT (set = on), read once: the pop path consults
+// it per selection, and an uncached getenv there costs work in
+// proportion to the environment's size -- on the instruction work clock
+// that moves every clock-gated decision (NOTES M7).
+static int atp_force_def_orient_env(void) {
+  static int on = -1;
+  if (on < 0) on = getenv("THVM_ATP_FORCE_DEF_ORIENT") ? 1 : 0;
+  return on;
+}
+
 // r_overlap_done compaction (unconditional; the one-round
 // THVM_ATP_OVERLAP_DONE_FIX kill switch is retired): the per-slot
 // overlap-exhausted flag shifts in lockstep with the other rule arrays

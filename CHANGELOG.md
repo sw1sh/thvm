@@ -199,6 +199,12 @@ for the per-commit story.
   bridge, a goal rewrite whose equation replays -- and some goal reaches
   `$false`.  Otherwise the SZS status stands alone and one stderr line
   names the first underived record.
+- The pop path reads `THVM_ATP_LAZY_DBG` and `THVM_ATP_FORCE_DEF_ORIENT`
+  once, as do the requeue (`THVM_ATP_ENQ_DEBUG`), the AC unifier's debug
+  switch, the WM interleave (`THVM_ATP_WM_ITL_TOP`) and the goal drive:
+  an uncached getenv per selection costs work in proportion to the
+  environment's size, which the instruction work clock turns into
+  moved clock-gated decisions.
 - Vampire Otter-loop simplification set (`--otter`, `src/atp/otter.c`):
   orientable queued critical pairs rewrite as passive rules before
   selection.  With Vampire's symbol-precedence port (`--sym-prec`

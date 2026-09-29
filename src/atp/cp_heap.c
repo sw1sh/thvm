@@ -1776,8 +1776,12 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     // (find_min, KDHeap.c:641 "in den obersten d+1 Ebenen suchen"), i.e.
     // the min-w2 (oldest) among the ~3 lightest CPs -- the binary-heap root
     // (slot 0) + its two children (slots 1,2) -- NOT the global oldest.
-    u32 topcap = getenv("THVM_ATP_WM_ITL_TOP") ?
-                   (u32)strtoul(getenv("THVM_ATP_WM_ITL_TOP"), NULL, 10) : 0u;
+    static long topcap_env = -1;
+    if (topcap_env < 0) {
+      const char *e = getenv("THVM_ATP_WM_ITL_TOP");
+      topcap_env = (e != NULL) ? (long)strtoul(e, NULL, 10) : 0;
+    }
+    u32 topcap = (u32)topcap_env;
     u32 top = (topcap == 0u || topcap > s->n_cps) ? s->n_cps : topcap;
     u32 best = 0;
     for (u32 i = 1; i < top; i++) {

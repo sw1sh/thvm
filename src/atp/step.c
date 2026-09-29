@@ -2144,9 +2144,7 @@ fn AtpAddedRange thvm_atp_orient_and_add(AtpState *s, Term lhs, Term rhs) {
   //       op appears on BOTH sides) is untouched, keeping OA -auto 26387 etc.
   // Off by default; the combinator -auto bench path opts in.
   {
-    static int fdo_env = -1;
-    if (fdo_env < 0) fdo_env = getenv("THVM_ATP_FORCE_DEF_ORIENT") ? 1 : 0;
-    if ((fdo_env || s->use_force_def_orient)
+    if ((atp_force_def_orient_env() || s->use_force_def_orient)
         && atp_compare(s, lhs, rhs) == KBO_UN) {
       // Orientation-agnostic: the combinator REDEX may be on either side --
       // the bench/.pr stores `S x y z = (xz)(yz)` (redex LHS) but the WL

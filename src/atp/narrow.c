@@ -1513,13 +1513,19 @@ static AtpStatus atp_goal_drive_check(AtpState *s) {
     g->built_rev = 0xffffffffu;
     s->gdrive = g;
   }
-  u32 stride = 100u; long node_cap = 15000; int depth_cap = 12;
-  { const char *e = getenv("THVM_ATP_GOAL_DRIVE_STRIDE");
+  static u32 stride = 0u;
+  static long node_cap = 15000;
+  static int depth_cap = 12, gd_dbg = 0;
+  if (stride == 0u) {
+    stride = 100u;
+    const char *e = getenv("THVM_ATP_GOAL_DRIVE_STRIDE");
     if (e != NULL && atoi(e) > 0) stride = (u32)atoi(e);
     e = getenv("THVM_ATP_GOAL_DRIVE_NODES");
     if (e != NULL && atoi(e) > 0) node_cap = atol(e);
     e = getenv("THVM_ATP_GOAL_DRIVE_DEPTH");
-    if (e != NULL && atoi(e) > 0) depth_cap = atoi(e); }
+    if (e != NULL && atoi(e) > 0) depth_cap = atoi(e);
+    gd_dbg = getenv("THVM_ATP_GOAL_DRIVE_DEBUG") != NULL;
+  }
   // Interleave cadence: run once, then only after R has grown by
   // `stride` rules (completion enriches the fact base between runs --
   // the bidirectional meet-in-the-middle needs fresh derived theorems).
@@ -1529,7 +1535,7 @@ static AtpStatus atp_goal_drive_check(AtpState *s) {
   if (g->n_rules == 0u) return ATP_RUNNING;   // no dispatcher rule (don't
                                               // latch: retry once detected)
   g->last_run_rules = s->n_rules ? s->n_rules : 1u;
-  if (getenv("THVM_ATP_GOAL_DRIVE_DEBUG") != NULL) {
+  if (gd_dbg) {
     // Ground unconditional facts (compound = nullary-const) -- the
     // forward-derived theorem/axiom leaves the backward search meets.
     u32 gfacts = 0u;
@@ -1546,7 +1552,7 @@ static AtpStatus atp_goal_drive_check(AtpState *s) {
             "gfacts=%u\n", (unsigned long long)g_goal_drive_calls,
             s->n_rules, g->n_rules, gfacts);
   }
-  if (getenv("THVM_ATP_GOAL_DRIVE_DEBUG") != NULL && g_goal_drive_calls < 1u) {
+  if (gd_dbg && g_goal_drive_calls < 1u) {
     fprintf(stderr, "[goal-drive] seed lhs="); atp_dbg_print_term(stderr, s->goal_lhs);
     fprintf(stderr, "  rhs="); atp_dbg_print_term(stderr, s->goal_rhs);
     fprintf(stderr, "  n_rules=%u dispatchers=%u ifeq_syms=%u\n",

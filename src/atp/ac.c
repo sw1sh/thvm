@@ -1011,7 +1011,9 @@ fn u32 atp_ac_unify_emit_cps(Term li, Term ri,
   }
   u32 c_after_p2 = ctx.count;
 
-  if (getenv("THVM_ATP_AC_UNIFY_DEBUG") != NULL) {
+  static int unify_dbg = -1;
+  if (unify_dbg < 0) unify_dbg = getenv("THVM_ATP_AC_UNIFY_DEBUG") != NULL;
+  if (unify_dbg) {
     fprintf(stderr,
         "[ac_unify] lab=%u  |S|=%u |T|=%u  pass1+=%u pass2+=%u\n",
         lab, ns, nt,
