@@ -1627,6 +1627,7 @@ static int fof_one_elt_sat(FolClause **cls, int ncl) {
 // every input symbol in the problem's own spelling.
 static Term *g_oe_form = NULL;     // record formulas (closed, conjecture negated)
 static int   g_oe_nform = 0;
+static int   g_oe_cap = 0;
 static int   g_oe_role_bad = 0;    // a role outside the axiom/conjecture family
 
 static int fof_oe_role_ok(const char *role) {
@@ -1954,7 +1955,48 @@ static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
 }
 
 // --- the front-end ------------------------------------------------------
-#define FOF_MAX_RECORDS 65536
+// Next fof( / cnf( record keyword at an identifier boundary, scanning
+// forward from p (quote-aware); NULL at the end.  One pass over the
+// text in total -- the old per-record strstr for BOTH keywords rescanned
+// the rest of a fof-only file for "cnf(" every record (quadratic: 25k
+// records x 27MB on the BIO knowledge base).
+static const char *fof_next_record(const char *text, const char *p, int *is_cnf) {
+  for (; *p != '\0'; p++) {
+    if (*p == '\'' || *p == '"') {
+      const char *e = tp_quote_end(p);
+      if (e == NULL) return NULL;
+      p = e;
+      continue;
+    }
+    if ((p[0] == 'f' && p[1] == 'o' && p[2] == 'f' && p[3] == '(') ||
+        (p[0] == 'c' && p[1] == 'n' && p[2] == 'f' && p[3] == '(')) {
+      if (p == text || !(isalnum((unsigned char)p[-1]) || p[-1] == '_')) {
+        *is_cnf = (p[0] == 'c');
+        return p;
+      }
+    }
+  }
+  return NULL;
+}
+
+// Clausified-clause arrays, grown together.
+static void fof_cls_reserve(FolClause ***cls, u8 **ccnj, int **cls_rec,
+                            int *cap, int need) {
+  if (need < *cap) return;
+  int ncap = (*cap == 0) ? 4096 : *cap;
+  while (ncap <= need) ncap *= 2;
+  FolClause **nc = (FolClause **)realloc(*cls, (size_t)ncap * sizeof(FolClause *));
+  u8 *nj = (u8 *)realloc(*ccnj, (size_t)ncap);
+  if (nc == NULL || nj == NULL) tp_giveup("OOM in FOF front-end");
+  *cls = nc;
+  *ccnj = nj;
+  if (cls_rec != NULL && *cls_rec != NULL) {
+    int *nr = (int *)realloc(*cls_rec, (size_t)ncap * sizeof(int));
+    if (nr == NULL) tp_giveup("OOM in FOF front-end");
+    *cls_rec = nr;
+  }
+  *cap = ncap;
+}
 
 static jmp_buf g_fof_oom_jb;
 
@@ -1979,11 +2021,9 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
 
   // Pass A: parse + clausify every record.  Terms persist (no engine
   // session runs before serialization, so nothing moves the heap).
-  FolClause **cls = (FolClause **)malloc(sizeof(FolClause *) * TP_MAX_CLAUSES);
-  u8 *ccnj = (u8 *)malloc(TP_MAX_CLAUSES);
-  if (g_oe_form == NULL) g_oe_form = (Term *)malloc(sizeof(Term) * FOF_MAX_RECORDS);
-  if (cls == NULL || ccnj == NULL || g_oe_form == NULL)
-    tp_giveup("OOM in FOF front-end");
+  FolClause **cls = NULL;
+  u8 *ccnj = NULL;
+  int cls_cap = 0;
   g_oe_nform = 0;
   g_oe_role_bad = 0;
   // --proof: conversion-lineage capture (record chain + per-clause
@@ -1991,28 +2031,25 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   g_prov_on = g_cli_want_proof;
   int *cls_rec = NULL;
   if (g_prov_on) {
-    cls_rec = (int *)malloc(sizeof(int) * TP_MAX_CLAUSES);
+    cls_rec = (int *)malloc(sizeof(int));
     if (cls_rec == NULL) g_prov_on = 0;
   }
   int ncl = 0;
   int n_conjectures = 0;
   const char *p = text;
-  int nrec = 0;
   for (;;) {
-    // next fof( / cnf( record at an identifier boundary
-    const char *pf = NULL;
-    for (const char *q = p; (q = strstr(q, "fof(")) != NULL; q += 4)
-      if (q == text || !(isalnum((unsigned char)q[-1]) || q[-1] == '_')) { pf = q; break; }
-    const char *pcx = NULL;
-    for (const char *q = p; (q = strstr(q, "cnf(")) != NULL; q += 4)
-      if (q == text || !(isalnum((unsigned char)q[-1]) || q[-1] == '_')) { pcx = q; break; }
-    const char *rec = (pf != NULL && (pcx == NULL || pf < pcx)) ? pf : pcx;
+    int rec_is_cnf = 0;
+    const char *rec = fof_next_record(text, p, &rec_is_cnf);
     if (rec == NULL) break;
-    if (++nrec > FOF_MAX_RECORDS) tp_giveup("problem exceeds record bound");
     p = rec + 4;
     int depth = 1;
     const char *body = p;
     while (*p != '\0' && depth > 0) {
+      if (*p == '\'' || *p == '"') {
+        const char *e = tp_quote_end(p);
+        p = (e != NULL) ? e + 1 : p + strlen(p);
+        continue;
+      }
       if (*p == '(') depth++;
       else if (*p == ')') depth--;
       p++;
@@ -2055,7 +2092,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     int rec_ix = -1;
     if (g_prov_on) {
       size_t nm_len = (role != NULL) ? (size_t)(role - 1 - body) : 0u;
-      rec_ix = prov_rec_new(body, nm_len, rolebuf, fbuf, rec == pcx);
+      rec_ix = prov_rec_new(body, nm_len, rolebuf, fbuf, rec_is_cnf);
     }
     PcParse scope;
     Term f = pc_parse_formula(fbuf, &scope);
@@ -2078,6 +2115,13 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
     f = pc_close(f);                     // TPTP: free variables are universal
     if (is_conj) f = fol_mk_not(f);      // refutation: negate the conjecture
     if (!fof_oe_role_ok(rolebuf)) g_oe_role_bad = 1;
+    if (g_oe_nform >= g_oe_cap) {
+      int ncap = (g_oe_cap == 0) ? 1024 : 2 * g_oe_cap;
+      Term *nf = (Term *)realloc(g_oe_form, sizeof(Term) * (size_t)ncap);
+      if (nf == NULL) tp_giveup("OOM in FOF front-end");
+      g_oe_form = nf;
+      g_oe_cap = ncap;
+    }
     g_oe_form[g_oe_nform++] = f;
     // Clausify WITHOUT resetting the Skolem counter (fresh across records).
     u32 sk0 = g_fol_skolem_next;
@@ -2118,7 +2162,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
       prov_rec_stage(rec_ix, is_conj, nnf, sk, sk0, g_fol_skolem_next,
                      ts0, g_fol_tseitin_next, rec_tseitin, &scope);
     for (u32 i = 0; i < nc; i++) {
-      if (ncl >= TP_MAX_CLAUSES) tp_giveup("problem exceeds clause bound");
+      fof_cls_reserve(&cls, &ccnj, &cls_rec, &cls_cap, ncl);
       cls[ncl] = recc[i];
       ccnj[ncl] = (u8)conj_mark;
       if (cls_rec != NULL) cls_rec[ncl] = rec_ix;

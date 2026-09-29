@@ -351,6 +351,14 @@ static void tp_fof_push(TpProblem *tp, const char *lhs, const char *rhs,
     }
     tp_giveup("FOF-encoded clause exceeds side-length bound");
   }
+  // The unit table is the equational lanes' input only: past it, an
+  // axiom-side clause drops like an oversized one (the clausal pre-pass
+  // keeps the whole set), and the last slots stay reserved for the goal
+  // and the encoding helpers.
+  if (g_fof_soft_oversize && tp->n_cls >= TP_MAX_CLAUSES - 64) {
+    g_fof_dropped_n++;
+    return;
+  }
   if (tp->n_cls >= TP_MAX_CLAUSES) tp_giveup("problem exceeds clause bound");
   TpClause *cl = &tp->cls[tp->n_cls++];
   snprintf(cl->lhs, sizeof cl->lhs, "%s", lhs);
