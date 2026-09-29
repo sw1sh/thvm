@@ -726,6 +726,36 @@ static int uwalk_cond_truth(UWalkCtx *c, Term cterm) {
   return uwalk_eval_int(c, cterm) != 0;
 }
 
+static int uwalk_is_arith(Term x) {
+  if (term_tag(x) != TAG_UOP) {
+    return 0;
+  }
+  u32 op = term_ext(x);
+  return op == UOP_ADD || op == UOP_MUL || op == UOP_NEG;
+}
+
+// The ADD, MUL or NEG `t` of an int C type, in integer arithmetic, which
+// keeps wrap and unsigned bits.  Its operands have int types too, since a
+// float operand makes the op a float (uwalk_dtype_promote), so an ADD, MUL
+// or NEG operand recurses here without the type lookup the int evaluator
+// makes to catch a float one.
+static i64 uwalk_int_arith(UWalkCtx *c, Term t) {
+  u64  loc = term_val(t);
+  Term x   = heap_read(loc + 0);
+  i64  a   = uwalk_is_arith(x) ? uwalk_int_arith(c, x) : uwalk_eval_int(c, x);
+  if (term_ext(t) == UOP_NEG) {
+    return -a;
+  }
+  Term y = heap_read(loc + 1);
+  i64  b = uwalk_is_arith(y) ? uwalk_int_arith(c, y) : uwalk_eval_int(c, y);
+  return (term_ext(t) == UOP_ADD) ? a + b : a * b;
+}
+
+// The value of `x`, whose C type the caller knows is an int or bool.
+static i64 uwalk_eval_known_int(UWalkCtx *c, Term x) {
+  return uwalk_is_arith(x) ? uwalk_int_arith(c, x) : uwalk_eval_int(c, x);
+}
+
 // The value of `t` as a double, where `dt` is t's C type
 // (uwalk_term_dtype), a float or a double: a float value is an f32 value.
 // An ADD, MUL, NEG or IWHERE of an int type walks in the int evaluator.
@@ -763,7 +793,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
     }
     case UOP_ADD: case UOP_MUL: {
       if (!uwalk_dtype_is_float(dt)) {
-        return uwalk_int_to_f64(dt, uwalk_eval_int(c, t));
+        return uwalk_int_to_f64(dt, uwalk_int_arith(c, t));
       }
       double a = uwalk_cast_float(c, heap_read(loc + 0), dt);
       double b = uwalk_cast_float(c, heap_read(loc + 1), dt);
@@ -773,7 +803,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
       return uwalk_compare(c, op, heap_read(loc + 0), heap_read(loc + 1));
     case UOP_NEG:
       if (!uwalk_dtype_is_float(dt)) {
-        return uwalk_int_to_f64(dt, uwalk_eval_int(c, t));
+        return uwalk_int_to_f64(dt, uwalk_int_arith(c, t));
       }
       return -uwalk_eval_float(c, heap_read(loc + 0), dt);
     case UOP_RECIP:
@@ -948,22 +978,14 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
     }
     // UOP_ADD / MUL / NEG serve int tensors too (the WL Plus / Times emit
     // them for every element type).  An int value (uwalk_term_dtype) stays
-    // in integer arithmetic to preserve wrap / unsigned bits; a float one
-    // converts its float result, never its truncated operands.
+    // in integer arithmetic; a float one converts its float result, never
+    // its truncated operands.
     case UOP_ADD: case UOP_MUL: case UOP_NEG: {
       u32 dt = uwalk_term_dtype(c, t);
       if (uwalk_dtype_is_float(dt)) {
         return uwalk_f64_to_int(DT_INT64, uwalk_eval_float(c, t, dt));
       }
-      if (op == UOP_NEG) {
-        return -uwalk_eval_int(c, heap_read(loc + 0));
-      }
-      if (op == UOP_ADD) {
-        return uwalk_eval_int(c, heap_read(loc + 0))
-             + uwalk_eval_int(c, heap_read(loc + 1));
-      }
-      return uwalk_eval_int(c, heap_read(loc + 0))
-           * uwalk_eval_int(c, heap_read(loc + 1));
+      return uwalk_int_arith(c, t);
     }
     case UOP_CMPLT: case UOP_CMPEQ:
       return uwalk_compare(c, op, heap_read(loc + 0), heap_read(loc + 1));
@@ -1400,7 +1422,7 @@ static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
       if (body_float) {
         acc = uwalk_int_combine_f64(kind, dt, bdt, acc, uwalk_eval_float(c, body, bdt));
       } else {
-        acc = uwalk_int_combine(kind, dt, acc, uwalk_eval_int(c, body));
+        acc = uwalk_int_combine(kind, dt, acc, uwalk_eval_known_int(c, body));
       }
     } while (!c->bad && uwalk_odometer_next(c, slot0, extents, chain_len));
     c->n_ranges -= chain_len;
@@ -1508,7 +1530,7 @@ static void uwalk_loop_and_store(UWalkCtx *c,
       i64 v = uwalk_f64_to_int(out_dt, uwalk_eval_float(c, store_value, c->store_dt));
       uwalk_store_i64(out_p, addr_v, out_dt, v);
     } else {
-      i64 v = uwalk_eval_int(c, store_value);
+      i64 v = uwalk_eval_known_int(c, store_value);
       uwalk_store_i64(out_p, addr_v, out_dt, v);
     }
     return;

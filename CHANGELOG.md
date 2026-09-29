@@ -207,6 +207,7 @@ for the per-commit story.
   last iteration.
 
 ### Backends
+- The CPU UOp walker's int evaluator looks up the C type only at the top of an int ADD, MUL or NEG expression: an ADD, MUL or NEG operand of an int one is an int too, so it recurses without the lookup that catches a float one. A 2000-deep int32 ADD chain over 4096 elements walked in 0.152 s with a lookup at every ADD and walks in 0.133 s, against 0.130 s without the float check (medians of 12 interleaved runs).
 - `test_uop_walk_domains` walks a 2000-deep int32 ADD chain over 4096 elements on the CPU UOp walker under a 10 s bound. The walker's int evaluator asks every ADD, MUL and NEG for its C type, which stays linear only through `uwalk_term_dtype`'s per-walk memo: unmemoized, each question re-walked the chain beneath it, and the chain took 101 s.
 - CPU JIT: the in-memory kernel cache grows (open addressing, doubled before
   half full) instead of holding a fixed 256 kernels.  Past 256 distinct
