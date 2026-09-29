@@ -534,24 +534,28 @@ static void fol_collect_shared(Term t, u32 *n) {
   }
 }
 
-// A disjunction wider than FOL_MAX_LITS (a 201-literal domain closure
-// X = c1 | ... | X = c201; an 85-way negated existential conjecture)
-// used to fail clause allocation and vanish -- the record then
-// "clausified" to nothing.  Chunk it instead, naming each remainder:
+// Literals per piece of a chunked wide clause.  WHY 8: an all-negative
+// (goal) clause then chunks into Horn rules ~L1..~L7 | a1,
+// ~a1 | ~L8..~L13 | a2, ... whose bodies the Horn release can join (it
+// takes at most 8 conditions); 63-literal pieces were rules no Horn lane
+// could use.
+#define FOL_WIDE_PIECE 8u
+
+// Chunk a disjunction into pieces of at most FOL_WIDE_PIECE literals,
+// naming each remainder:
 //   A | B  ~~>  { A | a(x),  ~a(x) | B },  x = vars(A) & vars(B).
 // Sound: any model of A | B satisfies both with a(x) := !y B(x,y)
 // (y = the rest of B's variables): where A fails, B holds for every
 // y.  Resolving on a(x) gives A | B back.  The names come from the
 // Tseitin family, so the proof layer declares them as definitions.
-static void fol_append_wide(FolClause ***out, u32 *n, u32 *cap,
-                            const FolLit *lits, u32 nl) {
-  const u32 room = FOL_MAX_LITS - 2u;   // middle chunk: ~a_prev + room + a_next
-  FolLit buf[FOL_MAX_LITS];
+static void fol_append_pieces(FolClause ***out, u32 *n, u32 *cap,
+                              const FolLit *lits, u32 nl) {
+  FolLit buf[FOL_WIDE_PIECE];
   FolLit prev = { 0, 0u };
   u32 have_prev = 0u;
   u32 i = 0u;
-  while (nl - i > FOL_MAX_LITS - have_prev) {
-    u32 take = have_prev ? room : FOL_MAX_LITS - 1u;
+  while (nl - i > FOL_WIDE_PIECE - have_prev) {
+    u32 take = FOL_WIDE_PIECE - 1u - have_prev;
     u32 k = 0u;
     if (have_prev) buf[k++] = prev;
     for (u32 j = 0; j < take; j++) buf[k++] = lits[i + j];
@@ -571,6 +575,123 @@ static void fol_append_wide(FolClause ***out, u32 *n, u32 *cap,
   if (have_prev) buf[k++] = prev;
   for (; i < nl; i++) buf[k++] = lits[i];
   fol_push_lits(out, n, cap, buf, k);
+}
+
+// Variable-disjoint components of a clause: union-find over literal
+// indices, a variable's first literal kept in g_fol_vowner (valid where
+// g_fol_vstamp carries the current epoch).
+static u32 *g_fol_vowner = NULL;
+static u32  g_fol_vowner_cap = 0u;
+
+static u32 fol_uf_find(u32 *par, u32 x) {
+  while (par[x] != x) {
+    par[x] = par[par[x]];
+    x = par[x];
+  }
+  return x;
+}
+
+static void fol_comp_walk(Term t, u32 lit, u32 *par) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      if (fol_var_stamped(id)) {
+        u32 a = fol_uf_find(par, lit), b = fol_uf_find(par, g_fol_vowner[id]);
+        if (a != b) par[a > b ? a : b] = (a > b) ? b : a;
+        return;
+      }
+      fol_vstamp_fit(id);
+      if (g_fol_vowner_cap < g_fol_vstamp_cap) {
+        u32 *no = (u32 *)realloc(g_fol_vowner, (size_t)g_fol_vstamp_cap * sizeof(u32));
+        if (no == NULL) {
+          fprintf(stderr, "thvm: out of memory in clausification\n");
+          abort();
+        }
+        g_fol_vowner = no;
+        g_fol_vowner_cap = g_fol_vstamp_cap;
+      }
+      g_fol_vstamp[id] = g_fol_vepoch;
+      g_fol_vowner[id] = lit;
+      return;
+    }
+    case TAG_CTR: {
+      u32 nk = term_ctr_n(t);
+      for (u32 i = 0; i < nk; i++) fol_comp_walk(term_ctr_at(t, i), lit, par);
+      return;
+    }
+    default: return;
+  }
+}
+
+// A disjunction wider than FOL_MAX_LITS (a 201-literal domain closure
+// X = c1 | ... | X = c201; an 85-way negated existential conjecture)
+// used to fail clause allocation and vanish -- the record then
+// "clausified" to nothing.  Its variable-disjoint components C1..Cm
+// (m >= 2) are named first, each by a fresh propositional atom:
+//   C1 | ... | Cm  ~~>  { Cj | dj  (Cj all negative),  Cj | ~nj (else),
+//                         ~d.. | n.. }
+// Sound: with components sharing no variable, C1 | ... | Cm holds iff
+// some !Cj holds; a model of the clause satisfies the named set with
+// dj := ~!Cj and nj := !Cj, and resolving the top clause against the
+// namings gives the clause back.  An all-negative component keeps its
+// naming clause Horn (the body of dj), so a goal such as
+// ~(?[X]:p1(X) & ... & ?[X]:p85(X)) becomes 85 one-condition rules and
+// a propositional goal instead of one 85-condition join.  Every clause
+// wider than FOL_WIDE_PIECE is then chunked (fol_append_pieces).
+static u32 g_fol_wide_clauses = 0u;   // clauses chunked (FOFSTATS)
+
+static void fol_append_wide(FolClause ***out, u32 *n, u32 *cap,
+                            const FolLit *lits, u32 nl) {
+  g_fol_wide_clauses++;
+  u32 *par = (u32 *)malloc((size_t)nl * sizeof(u32));
+  u32 *start = (u32 *)calloc((size_t)nl + 1u, sizeof(u32));
+  u32 *order = (u32 *)malloc((size_t)nl * sizeof(u32));
+  FolLit *top = (FolLit *)malloc((size_t)nl * sizeof(FolLit));
+  FolLit *comp = (FolLit *)malloc((size_t)(nl + 1u) * sizeof(FolLit));
+  if (par == NULL || start == NULL || order == NULL || top == NULL || comp == NULL) {
+    fprintf(stderr, "thvm: out of memory in clausification\n");
+    abort();
+  }
+  for (u32 i = 0; i < nl; i++) par[i] = i;
+  fol_vepoch_next();
+  for (u32 i = 0; i < nl; i++) fol_comp_walk(lits[i].atom, i, par);
+  // Literals grouped by component root (its smallest literal index),
+  // input order kept within one.
+  for (u32 i = 0; i < nl; i++) par[i] = fol_uf_find(par, i);
+  for (u32 i = 0; i < nl; i++) start[par[i] + 1u]++;
+  for (u32 r = 0; r < nl; r++) start[r + 1u] += start[r];
+  for (u32 i = 0; i < nl; i++) order[start[par[i]]++] = i;
+  for (u32 r = nl; r > 0; r--) start[r] = start[r - 1u];
+  start[0] = 0u;
+  u32 m = 0u;
+  for (u32 r = 0; r < nl; r++) {
+    if (start[r + 1u] > start[r]) m++;
+  }
+  if (m < 2u) {
+    fol_append_pieces(out, n, cap, lits, nl);
+  } else {
+    u32 nt = 0u;
+    for (u32 r = 0; r < nl; r++) {
+      u32 b = start[r], e = start[r + 1u];
+      if (b == e) continue;
+      u32 k = 0u;
+      u8 all_neg = 1u;
+      for (u32 q = b; q < e; q++) {
+        comp[k++] = lits[order[q]];
+        if (lits[order[q]].sign == 0u) all_neg = 0u;
+      }
+      Term aux = fol_fresh_aux(NULL, 0u);
+      comp[k++] = (FolLit){ .atom = aux, .sign = all_neg ? 0u : 1u };
+      top[nt++] = (FolLit){ .atom = aux, .sign = all_neg ? 1u : 0u };
+      fol_append_pieces(out, n, cap, comp, k);
+    }
+    fol_append_pieces(out, n, cap, top, nt);
+  }
+  free(comp);
+  free(top);
+  free(order);
+  free(start);
+  free(par);
 }
 
 // Append a clause built from `or_root` to `*out`, growing as needed.

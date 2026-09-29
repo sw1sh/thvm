@@ -1763,6 +1763,104 @@ int main(void) {
     CHECK(kbo_eq(term_ctr_at(sk, 0), x));
   }
 
+  TEST_BEGIN("fol/wide-clause-chunks-into-narrow-pieces");
+  {
+    // R(x, c0) | ... | R(x, c69): one variable-connected component past
+    // FOL_MAX_LITS.  It chunks into pieces of at most 8 literals linked by
+    // aux atoms over x, every original literal kept, and the pieces
+    // refute against the 70 units ~R(a, ci).
+    fol_reset_tseitin();
+    const u32 W = 70u;
+    Term x = v(0);
+    Term f = pred2(P_R, x, k(100u));
+    for (u32 i = 1; i < W; i++) f = fol_mk_or(f, pred2(P_R, x, k(100u + i)));
+    u32 n = 0;
+    FolClause **cs = fol_extract_clauses(f, &n);
+    CHECK(n > 1u);
+    u32 orig = 0u, aux_ok = 1u, narrow = 1u;
+    for (u32 c = 0; c < n; c++) {
+      if (cs[c]->n_lits > 8u) narrow = 0u;
+      for (u32 l = 0; l < cs[c]->n_lits; l++) {
+        Term a = cs[c]->lits[l].atom;
+        if (term_ext(a) == P_R) orig++;
+        else if (!fol_is_tseitin_aux(term_ext(a)) || term_ctr_n(a) != 1u) aux_ok = 0u;
+      }
+    }
+    CHECK(narrow);
+    CHECK(aux_ok);
+    CHECK_EQ(orig, W);
+    CnfState *st = cnf_init(1u << 20);
+    for (u32 c = 0; c < n; c++) cnf_add_clause(st, cs[c]);
+    free(cs);
+    for (u32 i = 0; i < W; i++) {
+      FolClause *u = fol_clause_new(1);
+      u->lits[0] = (FolLit){ .atom = pred2(P_R, k(L_a), k(100u + i)), .sign = 1 };
+      cnf_add_clause(st, u);
+    }
+    CHECK(cnf_run(st) == ATP_PROVED);
+    cnf_free(st);
+  }
+
+  TEST_BEGIN("fol/wide-clause-names-disjoint-components");
+  {
+    // ~P0(x0) | ... | ~P84(x84), no variable shared: the negated
+    // conjecture ?[X]:P0(X) & ... & ?[X]:P84(X).  Each literal is named
+    // by a propositional atom (P_i(x) -> d_i, a one-condition Horn rule)
+    // and the goal over the d_i chunks into Horn pieces of at most 8
+    // literals: no clause gains a second positive literal.  With the 85
+    // facts P_i(ci) the set refutes.
+    fol_reset_tseitin();
+    const u32 W = 85u;
+    Term f = fol_mk_not(pred1(200u, v(0)));
+    for (u32 i = 1; i < W; i++) f = fol_mk_or(f, fol_mk_not(pred1(200u + i, v(i))));
+    u32 n = 0;
+    FolClause **cs = fol_extract_clauses(f, &n);
+    u32 named = 0u, narrow = 1u, horn = 1u;
+    for (u32 c = 0; c < n; c++) {
+      if (cs[c]->n_lits > 8u) narrow = 0u;
+      u32 pos = 0u, orig = 0u;
+      for (u32 l = 0; l < cs[c]->n_lits; l++) {
+        Term a = cs[c]->lits[l].atom;
+        if (cs[c]->lits[l].sign == 0u) pos++;
+        if (!fol_is_tseitin_aux(term_ext(a))) orig++;
+        else if (term_ctr_n(a) != 0u) horn = 0u;   // names are propositional
+      }
+      if (pos > 1u) horn = 0u;
+      if (orig > 0u) {
+        CHECK_EQ(orig, 1u);
+        CHECK_EQ(cs[c]->n_lits, 2u);
+        named++;
+      }
+    }
+    CHECK(narrow);
+    CHECK(horn);
+    CHECK_EQ(named, W);
+    CnfState *st = cnf_init(1u << 20);
+    for (u32 c = 0; c < n; c++) cnf_add_clause(st, cs[c]);
+    free(cs);
+    for (u32 i = 0; i < W; i++) {
+      FolClause *u = fol_clause_new(1);
+      u->lits[0] = (FolLit){ .atom = pred1(200u + i, k(300u + i)), .sign = 0 };
+      cnf_add_clause(st, u);
+    }
+    CHECK(cnf_run(st) == ATP_PROVED);
+    cnf_free(st);
+    // Satisfiable without the fact for P84: the names add no refutation.
+    fol_reset_tseitin();
+    u32 n2 = 0;
+    FolClause **cs2 = fol_extract_clauses(f, &n2);
+    CnfState *st2 = cnf_init(1u << 20);
+    for (u32 c = 0; c < n2; c++) cnf_add_clause(st2, cs2[c]);
+    free(cs2);
+    for (u32 i = 0; i + 1u < W; i++) {
+      FolClause *u = fol_clause_new(1);
+      u->lits[0] = (FolLit){ .atom = pred1(200u + i, k(300u + i)), .sign = 0 };
+      cnf_add_clause(st2, u);
+    }
+    CHECK(cnf_run(st2) == ATP_QUEUE_EMPTY);
+    cnf_free(st2);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

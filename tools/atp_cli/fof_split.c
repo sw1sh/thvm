@@ -1762,9 +1762,11 @@ static int fof_one_elt_sat(FolClause **cls, int ncl) {
 // SOUNDNESS.  In a one-element domain {e} every term denotes e, so an
 // atom p(t..) reads one truth bit per predicate symbol, s = t is true,
 // and a quantifier is its body.  The gate's clause set comes from NNF
-// (equivalence), Skolemization and Tseitin definitions aux <-> G (a
-// model of the result, restricted to the input signature, is a model of
-// the input -- in {e} every Skolem function maps to e), and naive
+// (equivalence), Skolemization, Tseitin definitions aux <-> G and the
+// chunking of a clause wider than FOL_MAX_LITS (named pieces and
+// components: resolving on the names gives the clause back) -- a model
+// of the result, restricted to the input signature, is a model of the
+// input; in {e} every Skolem function maps to e -- and naive
 // distribution (equivalence).  So its assignment, restricted to the
 // problem's predicates, is a model of the problem.  The claim does not
 // rest on that argument alone: an allocation failure in the clausifier
@@ -2462,9 +2464,11 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
       if (m > max_comp) max_comp = m;
     }
     printf("FOFSTATS file=%s ncl=%d wide=%d nonhorn=%d split=%d "
-           "split_nonhorn=%d input_guards=%d max_comp=%u tseitin=%d\n",
+           "split_nonhorn=%d input_guards=%d max_comp=%u tseitin=%d "
+           "chunked=%u\n",
            g_cli_probpath, ncl, wide, nonhorn, split,
-           split_nonhorn, split_input_guards, max_comp, g_fof_tseitin_recs);
+           split_nonhorn, split_input_guards, max_comp, g_fof_tseitin_recs,
+           g_fol_wide_clauses);
     fflush(stdout);
     exit(0);
   }

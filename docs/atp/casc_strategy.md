@@ -221,10 +221,13 @@ FindProof's only Satisfiable / CounterSatisfiable answer on FOF input is a
   eq/true/false encoding (a collapse-satisfiable set lets the or-tables
   refute spuriously); a refused claim still gives up after pass B.
 - **Why the clausal model is a model of the problem.** NNF and naive
-  distribution are equivalences. Skolemization and Tseitin (`aux <-> G`,
-  both directions emitted) preserve models in the needed direction: a
-  model of the result, restricted to the input signature, is a model of the
-  input -- and in one element every Skolem function maps to that element.
+  distribution are equivalences. Skolemization, Tseitin (`aux <-> G`,
+  both directions emitted) and the chunking of a clause wider than
+  `FOL_MAX_LITS` (pieces linked by named atoms, variable-disjoint
+  components named first; resolving on the names gives the clause back)
+  preserve models in the needed direction: a model of the result,
+  restricted to the input signature, is a model of the input -- and in
+  one element every Skolem function maps to that element.
 - **Why the claim does not rest on that argument.** Naive distribution
   used to emit clauses wider than `FOL_MAX_LITS` (64), which
   `fol_clause_new` refuses and the extractor SKIPPED while the record's
