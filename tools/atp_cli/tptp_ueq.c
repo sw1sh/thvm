@@ -66,7 +66,8 @@ static void tp_giveup(const char *why) {
 // run inside the same --wall and abstain once it is spent: a stage blind
 // to it ran a schedule slice past the parent's status line (LCL641+1.010
 // printed nothing for 90 s at --wall=30).  The deadline is process start
-// + --wall on the wall clock.  0 = none (the schedule parent,
+// + --wall on the wall clock (the hard stop; the budgets that steer the
+// search read the work clock instead).  0 = none (the schedule parent,
 // CheckProof).
 static double g_cli_wall_sec = 120.0;  // engine wall, for the CD lane budget
 static double g_cli_main_t0  = 0.0;    // process start (main); wall-remaining anchor
@@ -92,6 +93,18 @@ static void cli_fe_check(const char *stage) {
   snprintf(why, sizeof why, "%s reached the wall", stage);
   g_tp_giveup_hook = NULL;
   tp_giveup(why);
+}
+
+// The work clock of the front-end budgets that steer the search -- the
+// Horn release budget and its fractions, the clausal pre-pass guard --
+// in seconds: atp_work_now_us, process CPU by default and the
+// deterministic instruction count under --work-clock=instr, so a stage
+// does the same work for the same budget whatever else shares the
+// machine.  On the wall clock the Horn release kept ~55k units in one
+// loaded GEO535+1 run and ~60k in another, and SInE then kept a
+// different clause set.  The wall stays the hard stop.
+static double cli_work_now(void) {
+  return (double)atp_work_now_us() * 1e-6;
 }
 
 #define TP_MAX_CLAUSES  65536

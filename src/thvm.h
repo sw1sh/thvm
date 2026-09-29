@@ -4604,6 +4604,10 @@ fn void      cnf_set_wpo     (CnfState *s, const WpoConfig *wpo);
 // flood) poll it so one long step trips ATP_ABORTED instead of overrunning
 // the caller's between-steps wall poll.  File-global; disarmed by default.
 fn void      cnf_set_wall_deadline(double seconds_from_now);
+// The same self-abort against a work budget on atp_work_now_us's clock
+// (seconds of work from now; <=0 disarms): trips at the same point of
+// the search under any load.  Both may be armed; either fires.
+fn void      cnf_set_work_deadline(double seconds_from_now);
 
 // Attach a selection function (default NONE).  Affects which literal
 // of a clause is allowed to participate in resolution + paramodulation.

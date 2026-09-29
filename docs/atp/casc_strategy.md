@@ -159,6 +159,20 @@ lanes run, a bounded clausal-saturation pre-pass (`fof_clausal_prepass`,
 `src/fol/sat.c`) races resolution/superposition on the clausal form for up to
 60% of the remaining wall (step budget `--fof-sat`).
 
+**Walls and clocks.** Every front-end stage -- clausification, the
+one-element gate, the encoding, the pre-pass (inside a step too), the Horn
+release, axiom selection, the transforms -- gives up at process start +
+`--wall`, and an alarm a second later stops whatever does not poll; the
+schedule parent stops its slices half a second before the wall and prints its
+status (a slice that already printed a decision wins with it). The budgets
+that steer the search rather than end the run -- the Horn release's 2.5 s and
+its fractions of the wall, the pre-pass guard and its LRS estimate -- read the
+work clock (`--work-clock`: process CPU by default, the instruction count
+under `instr`), so a loaded machine does the same work for them; the wall
+stays the hard stop. The clausification walkers keep their work on heap
+stacks and take any formula depth (the QBF-derived HWV06x records are 100k+
+levels deep).
+
 Every UEQ slice used to run that identical front end and differ only in
 engine knobs the pre-pass never reads -- measured on a 56-problem stratified
 FEQ+FNE sample at 60 s, the dominant failure class (26/56 Timeout) was one

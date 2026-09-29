@@ -1454,37 +1454,54 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
     }
   }
   if (wall_frac < g_fof_pp_min_frac) wall_frac = g_fof_pp_min_frac;
-  double wall_guard = wall_frac * (g_cli_wall_sec - (horn_now() - g_cli_main_t0));
+  // The guard is a WORK budget: the share of the wall left at the start,
+  // spent on the work clock (cli_work_now), so the saturation stops at
+  // the same step under any load -- its LRS reach estimate reads the
+  // same clock.  The run's wall deadline stays the hard stop, between
+  // steps and inside one.
+  double wall_left = g_cli_wall_sec - (horn_now() - g_cli_main_t0);
+  double wall_guard = wall_frac * wall_left;
   if (wall_guard < 0.0) wall_guard = 0.0;
   double t0 = horn_now();
+  double w0 = cli_work_now();
   // Arm the single-step self-abort so ONE long cnf_step (a giant backward-
   // subsumption sweep, a conclusion flood) trips ATP_ABORTED at the guard
   // instead of overrunning this between-steps poll (GEO340 burned 45s+ in
   // one step).  Disarmed after the loop so no later cnf caller inherits it.
-  cnf_set_wall_deadline(wall_guard);
+  // No wall left: no step at all (a zero guard would leave it disarmed).
   const char *tripped = NULL;
+  if (wall_left <= 0.0 || wall_guard <= 0.0) {
+    tripped = "wall";
+    s->status = ATP_ABORTED;
+  }
+  cnf_set_work_deadline(wall_guard);
+  cnf_set_wall_deadline(wall_left);
   u32 lrs_next = 256u;
   while (s->status == ATP_RUNNING) {
     if (cnf_step(s) != ATP_RUNNING) break;
-    if (horn_now() - t0 > wall_guard) { tripped = "wall"; break; }
+    if (cli_work_now() - w0 > wall_guard) { tripped = "work"; break; }
+    if (horn_now() - t0 > wall_left) { tripped = "wall"; break; }
     if (HEAP_NEXT > heap_lim) { tripped = "heap"; break; }
     // LRS estimate: picks left = observed pick rate x remaining guard.
     // Re-tick every 256 steps once a second of signal exists; the
     // watermark walk is O(passive), so the cadence keeps it noise.
     if (s->lrs_on && s->step >= lrs_next) {
       lrs_next = s->step + 256u;
-      double el = horn_now() - t0;
+      double el = cli_work_now() - w0;
       if (el > 1.0 && el < wall_guard) {
         double rem = ((double)s->step / el) * (wall_guard - el);
         cnf_lrs_tick(s, (rem >= 4294967295.0) ? ~0u : (u32)rem);
       }
     }
   }
-  cnf_set_wall_deadline(0.0);   // disarm: no other cnf caller inherits it
+  cnf_set_work_deadline(0.0);   // disarm: no other cnf caller inherits them
+  cnf_set_wall_deadline(0.0);
   // A single-step self-abort breaks the loop with ATP_ABORTED and no
-  // tripped tag; label it as the wall bound it is (guard already passed).
-  if (tripped == NULL && s->status == ATP_ABORTED &&
-      horn_now() - t0 > wall_guard) tripped = "wall";
+  // tripped tag; label it by the bound that fired (already passed).
+  if (tripped == NULL && s->status == ATP_ABORTED) {
+    if (cli_work_now() - w0 > wall_guard) tripped = "work";
+    else if (horn_now() - t0 > wall_left) tripped = "wall";
+  }
   thvm_kbo_set_persist(0u);   // restore the safe per-call default
   AtpStatus st = s->status;
   u32 steps = s->step;

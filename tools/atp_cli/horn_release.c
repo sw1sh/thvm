@@ -939,7 +939,12 @@ static int horn_decode_side(int s, int other, HRule *ru) {
 
 // --- the forward-chaining join ------------------------------------------
 static int g_horn_stop = 0;
+// The release budget g_horn_wall and every fraction of it -- the phase-2
+// trigger, the backward cone's slice, the gate relax, CD deepening, the
+// backward CD lane -- run on the work clock (cli_work_now): g_horn_t0 is
+// the release start there, g_horn_t0_wall on the wall (reports only).
 static double g_horn_t0 = 0.0;
+static double g_horn_t0_wall = 0.0;
 static double g_horn_wall = HORN_WALL_SEC;      // THVM_ATP_HORN_WALL
 // Absolute wall-clock stop deadline (process-start + slice wall), set in
 // tp_horn_release.  Independent of g_horn_wall (which is release-start-
@@ -958,23 +963,23 @@ static double horn_now(void) {
   struct timeval tv; gettimeofday(&tv, NULL);
   return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
 }
-// Wall a --proof run spends capturing derivation records.  The search-
-// shaping budgets read horn_budget_now, which leaves it out, so the
-// proof run releases what the no-proof run releases in its budget; the
-// absolute slice deadline stays on the real clock.
-static double g_horn_prov_excl = 0.0;
+// The search-shaping budgets read horn_budget_now, the work clock.  A
+// --proof run captures its derivation records inside work-clock
+// exclusion windows (atp_work_pause / atp_work_resume), so it releases
+// what the no-proof run releases in its budget; the absolute slice
+// deadline stays on the wall clock.
 static inline double horn_budget_now(void) {
-  return horn_now() - g_horn_prov_excl;
+  return cli_work_now();
 }
-// STOP-condition wall test: the release-relative budget (search-shaping)
-// OR the absolute slice deadline (overrun guard), whichever comes first.
-// Used only where the loop would set g_horn_stop; the search-shaping
-// deadlines (phase-2 trigger, gate-relax cones) keep the bare g_horn_wall
-// form so a release that finishes before the wall stays byte-identical.
+// STOP-condition test: the release-relative budget (search-shaping, work
+// clock) OR the absolute slice deadline (overrun guard, wall clock),
+// whichever comes first.  Used only where the loop would set
+// g_horn_stop; the search-shaping deadlines (phase-2 trigger, gate-relax
+// cones) keep the bare g_horn_wall form so a release that finishes
+// before the wall stays byte-identical.
 static inline int horn_wall_over(void) {
-  double tn = horn_now();
-  if (tn - g_horn_prov_excl - g_horn_t0 > g_horn_wall) return 1;
-  if (g_horn_abs_deadline > 0.0 && tn > g_horn_abs_deadline) return 1;
+  if (horn_budget_now() - g_horn_t0 > g_horn_wall) return 1;
+  if (g_horn_abs_deadline > 0.0 && horn_now() > g_horn_abs_deadline) return 1;
   return 0;
 }
 
@@ -1504,14 +1509,14 @@ static int horn_prov_new(int rule, const int *fps, int nf, char *l, char *r) {
 // bound at every condition, from g_hpf).
 static int horn_prov_record(const HRule *ru, const HRel *re) {
   if (!g_prov_on) return -1;
-  double t0 = horn_now();
+  atp_work_pause();
   int fps[HORN_MAX_COND];
   for (int ci = 0; ci < ru->nc; ci++) {
     int f = g_hpf[ci];
     fps[ci] = (f >= 0 && f < g_hf_n) ? g_hf[f].src : HORN_SRC_NONE;
   }
   int k = horn_prov_new(ru->hpc, fps, ru->nc, re->l, re->r);
-  g_horn_prov_excl += horn_now() - t0;
+  atp_work_resume();
   return k;
 }
 

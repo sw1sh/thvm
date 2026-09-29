@@ -2078,10 +2078,31 @@ fn void cnf_set_wall_deadline(double seconds_from_now) {
   g_cnf_wall_deadline_us = now + (u64)(seconds_from_now * 1e6);
 }
 
+// The same self-abort against a WORK budget (atp_work_now_us: process
+// CPU, or the instruction count under --work-clock=instr): a caller that
+// budgets the saturation in work time (the FOF pre-pass guard) stops it
+// inside a step at the same point of the search whatever else shares
+// the machine; its wall deadline above stays the hard stop.  Zero
+// disarms.
+static u64 g_cnf_work_deadline_us = 0u;
+
+fn void cnf_set_work_deadline(double seconds_from_now) {
+  g_cnf_late = 0u;
+  if (seconds_from_now <= 0.0) {
+    g_cnf_work_deadline_us = 0u;
+    return;
+  }
+  g_cnf_work_deadline_us = atp_work_now_us() + (u64)(seconds_from_now * 1e6);
+}
+
 static inline int cnf_wall_fired(void) {
-  if (g_cnf_wall_deadline_us == 0u) return 0;
-  u64 now = atp_now_us();
-  return now != 0u && now >= g_cnf_wall_deadline_us;
+  if (g_cnf_wall_deadline_us != 0u) {
+    u64 now = atp_now_us();
+    if (now != 0u && now >= g_cnf_wall_deadline_us) {
+      return 1;
+    }
+  }
+  return g_cnf_work_deadline_us != 0u && atp_work_now_us() >= g_cnf_work_deadline_us;
 }
 
 // The deadline inside one conclusion's simplification scans: forward
@@ -2089,7 +2110,7 @@ static inline int cnf_wall_fired(void) {
 // per-conclusion poll for minutes (SWV536-1.010, SWV546-1.010: the
 // fallback pre-pass stuck in one cnf_consider).  Set once a deadline
 // fires mid-scan; the scans stop and cnf_consider aborts the step.
-// Cleared whenever the deadline is armed or disarmed.
+// Cleared whenever a deadline is armed or disarmed.
 static u32 g_cnf_late_tick = 0u;
 
 static inline int cnf_late_tick(void) {

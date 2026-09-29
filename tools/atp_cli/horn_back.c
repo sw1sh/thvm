@@ -222,7 +222,7 @@ static int g_bk_id = 0;
 static void bk_log_push(int id, int gl, int gr, int kind, int who,
                         const int *kids, int nkids) {
   if (!g_prov_on) return;
-  double t0 = horn_now();
+  atp_work_pause();   // off the search budget
   if (g_bkl_n >= g_bkl_cap) {
     g_bkl_cap = (g_bkl_cap == 0) ? (1 << 12) : g_bkl_cap * 2;
     g_bkl = (BkLog *)realloc(g_bkl, (size_t)g_bkl_cap * sizeof(BkLog));
@@ -232,7 +232,7 @@ static void bk_log_push(int id, int gl, int gr, int kind, int who,
   e->id = id; e->gl = gl; e->gr = gr; e->kind = kind; e->who = who;
   e->nkids = (nkids > HORN_MAX_COND) ? HORN_MAX_COND : nkids;
   for (int i = 0; i < e->nkids; i++) e->kids[i] = kids[i];
-  g_horn_prov_excl += horn_now() - t0;
+  atp_work_resume();
 }
 
 // Print a term instance under the CURRENT bindings; leftover free
@@ -320,9 +320,9 @@ static int bk_pf_commit_impl(const TpProblem *tp, int id, int gl, int gr,
   return ix;
 }
 static int bk_pf_commit(const TpProblem *tp, int id, int gl, int gr, int lo) {
-  double t0 = horn_now();
+  atp_work_pause();   // off the search budget
   int ix = bk_pf_commit_impl(tp, id, gl, gr, lo);
-  g_horn_prov_excl += horn_now() - t0;   // off the search budget
+  atp_work_resume();
   return ix;
 }
 
@@ -589,7 +589,7 @@ static int horn_backward_prove(const TpProblem *tp) {
   }
   fprintf(stderr, "FindProof: Horn backward CD: %s (%ld nodes, %d memo, %.1fs)\n",
           proved ? "goal PROVED" : "no proof", g_bk_nodes, g_bk_memo_n,
-          horn_now() - g_horn_t0);
+          horn_now() - g_horn_t0_wall);
   if (g_bk_memo != NULL) {
     for (int i = 0; i < BK_MEMO_SLOTS; i++) free(g_bk_memo[i].key);
     free(g_bk_memo); g_bk_memo = NULL; g_bk_memo_n = 0;
@@ -806,15 +806,17 @@ static void tp_horn_release(TpProblem *tp) {
   // position against the already-processed facts.  Smallest-first
   // keeps the chaining on small lemmas instead of drowning in deep
   // instantiations, exactly like a weight-ordered given-clause loop.
-  g_horn_t0 = horn_now();
+  g_horn_t0 = horn_budget_now();
+  g_horn_t0_wall = horn_now();
   g_horn_stop = 0; g_horn_attempts = 0;
   // Absolute stop deadline for the release: the slice's whole wall,
   // measured from process start.  g_horn_wall (0.4..0.9 of the wall,
-  // from g_horn_t0) still shapes the search -- the gate-relax ladder and
-  // the phase-2 head-closure trigger are fractions of it, so leaving it
-  // untouched keeps a fast release byte-identical.  But g_horn_wall is
-  // anchored at the release START, which comes AFTER the clausal pre-pass
-  // (up to 0.6 of the wall): g_horn_t0 + 0.4..0.9*wall runs PAST the slice
+  // from g_horn_t0, on the work clock) still shapes the search -- the
+  // gate-relax ladder and the phase-2 head-closure trigger are fractions
+  // of it, so leaving it untouched keeps a fast release byte-identical.
+  // But g_horn_wall is anchored at the release START, which comes AFTER
+  // the clausal pre-pass (up to 0.6 of the wall), and a loaded machine
+  // stretches work time: g_horn_t0 + 0.4..0.9*wall runs PAST the slice
   // deadline and gets hard-killed with no SZS line (the 240s FOF NoOutput
   // class).  The STOP polls -- the forward loop's and the backward CD
   // lane's -- honor this absolute cap too, so the release self-terminates
@@ -1292,7 +1294,7 @@ static void tp_horn_release(TpProblem *tp) {
               "round(s), %ld fwd-subsumed, %ld back-subsumed, %ld "
               "resonant, %.1fs\n",
               g_cd_cap, g_cd_rounds, g_cd_fsub, g_cd_bsub, g_cd_reso_hits,
-              horn_now() - g_horn_t0);
+              horn_now() - g_horn_t0_wall);
   }
 done:
   free(pl); free(prr); free(pnv); free(is_disp); free(ps);

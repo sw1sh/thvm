@@ -123,7 +123,8 @@ typedef struct AtpGoalNarrow {
   u8    cone_only;  // 1: subjects gated on goal-reachability; 0: any
                     // small node (vampire-style: superpose among ALL
                     // derived ground-lane facts)
-  u64   t0_us;      // first-check clock, for the endgame burst
+  u64   t0_us;      // first-check wall clock, for the endgame burst
+  u64   w0_us;      // first-check work clock (atp_work_now_us)
   u32   n_inst;     // e-match-created nodes so far
   // Stats.
   u64   st_eqs, st_merges, st_hits, st_sweeps;
@@ -658,15 +659,23 @@ static u8 atp_goal_narrow_joined(AtpState *s, Term gl, Term gr) {
   // Endgame burst: past 85% of the wall the interleave pacing has
   // nothing left to protect -- lift the stride and the per-sweep
   // quota so the remaining instance budget converts a near-miss CC
-  // before the deadline (the mission's post-saturation endgame).
+  // before the deadline (the mission's post-saturation endgame).  The
+  // span is the wall from the first check to the deadline; the progress
+  // through it is read on the work clock (atp_work_now_us), so the burst
+  // starts at the same point of the search under any load, as the LRS
+  // reach estimate does.
   u8 endgame = 0u;
   {
     u64 now = atp_now_us();
-    if (g->t0_us == 0ull && now != 0ull) g->t0_us = now;
+    u64 work = atp_work_now_us();
+    if (g->t0_us == 0ull && now != 0ull) {
+      g->t0_us = now;
+      g->w0_us = work;
+    }
     if (s->wall_deadline_us != 0ull && g->t0_us != 0ull &&
         now != 0ull && s->wall_deadline_us > g->t0_us) {
       u64 span = s->wall_deadline_us - g->t0_us;
-      if (now >= g->t0_us + (span * 85ull) / 100ull) endgame = 1u;
+      if (work >= g->w0_us + (span * 85ull) / 100ull) endgame = 1u;
     }
   }
   u8 joined = (u8)(gn_find(g, a) == gn_find(g, b));
