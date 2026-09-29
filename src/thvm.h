@@ -421,7 +421,7 @@ int             dtype_is_packed   (u32 dt);
 // (per-axis ranges, integer arithmetic, conditional WHERE, INVALID
 // sentinel for PAD masks, INDEX_E nodes pairing a buffer with a
 // symbolic offset expression).
-#define UOP_RANGE       25   // heap = [NUM(axis_type), NUM(extent)]; ext = axis_id.
+#define UOP_RANGE       25   // heap = [NUM(axis_id), NUM(axis_type), NUM(extent)].
                              //   Symbolic axis-iter leaf.  axis_type
                              //   uses the KAX_LOOP/REDUCE/UPCAST/UNROLL/
                              //   LOCAL/GLOBAL/GROUP_REDUCE encoding from
@@ -459,9 +459,11 @@ int             dtype_is_packed   (u32 dt);
 #define UOP_SCOPE_LOCAL   1   // threadgroup-shared (T.alloc_shared)
 #define UOP_SCOPE_REG     2   // per-thread register fragment (T.alloc_fragment)
 #define UOP_BUFFER      36   // heap = [NUM(scope), NUM(dtype), NUM(ndim),
-                             //         NUM(d0), ..., NUM(d_{ndim-1})];
+                             //         NUM(instance), NUM(d0), ...,
+                             //         NUM(d_{ndim-1})];
                              //   ext = UOP_BUFFER opcode.  Hash-cons by
-                             //   (scope, dtype, ndim, dims).
+                             //   (scope, dtype, ndim, instance, dims);
+                             //   instance = kernel slot + 1 (0 = output).
 #define UOP_STORE       37   // heap = [buf, addr, value];
                              //   Symmetric counterpart to UOP_INDEX_E.
                              //   Writes `value` to `buf` at the symbolic

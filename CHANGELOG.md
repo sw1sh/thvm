@@ -6,6 +6,11 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- Fix: the copying collector keeps every UOp node whole.  A live RANGE lost
+  its extent and a BUFFER its last dim (both were sized one cell short), and
+  BUFFERIZE, END, STACK, GEP, UNROLL, CONTRACT, VCONST, PLACEHOLDER and
+  DETACH nodes were never copied, so after a collection a kernel's content
+  hash (the Metal PSO / tile-JIT / autotune cache key) and its ranges changed.
 - Term packing, flat heap, WNF stack machine, 29 interaction rules.
 - Parallel WNF: atomic heap primitives, work-stealing deque,
   persistent worker pthreads (`THVM_THREADS`).

@@ -214,13 +214,15 @@ static u32 gc_node_size(Term t) {
         // cells; the integer/bitwise ALU ops = [a, b] (index arithmetic).
         case UOP_CAST: case UOP_BITCAST:
         case UOP_INDEX_E: case UOP_AFTER:
-        case UOP_RANGE:                       // [NUM(axis_type), NUM(extent)]
         case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
         case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR:
         case UOP_IXOR: case UOP_ISHR:
           return 2;
-        case UOP_INVALID: return 1;           // [NUM(0)]
-        // 3-cell ternary / store / opt.
+        case UOP_INVALID:     return 1;       // [NUM(0)]
+        case UOP_DETACH:      return 1;       // [src]
+        case UOP_PLACEHOLDER: return 2;       // [NUM(dtype), NUM(acc_id)]
+        // 3-cell range / ternary / store / opt.
+        case UOP_RANGE:                       // [NUM(axis_id), NUM(axis_type), NUM(extent)]
         case UOP_IWHERE: case UOP_STORE:      // [cond,then,else] / [buf,addr,value]
         case UOP_OPT:                         // [target, NUM(kind), NUM(factor)]
           return 3;
@@ -242,11 +244,38 @@ static u32 gc_node_size(Term t) {
           if (term_tag(ndim_cell) != TAG_NUM) return 0;
           return 2 + 2 * (u32)term_val(ndim_cell);
         }
-        // UOP_BUFFER = [NUM(scope), NUM(dtype), NUM(ndim), NUM(d0)..].
+        // UOP_BUFFER = [NUM(scope), NUM(dtype), NUM(ndim), NUM(instance),
+        //               NUM(d0), ..].
         case UOP_BUFFER: {
           Term ndim_cell = HEAP[loc + 2];
           if (term_tag(ndim_cell) != TAG_NUM) return 0;
-          return 3 + (u32)term_val(ndim_cell);
+          return 4 + (u32)term_val(ndim_cell);
+        }
+        // UOP_BUFFERIZE = [value, NUM(addrspace), NUM(removable), NUM(n),
+        //                  range_0, .., range_{n-1}].
+        case UOP_BUFFERIZE: {
+          Term n_cell = HEAP[loc + 3];
+          if (term_tag(n_cell) != TAG_NUM) return 0;
+          return 4 + (u32)term_val(n_cell);
+        }
+        // UOP_VCONST = [NUM(dtype), NUM(n), NUM(bits_0), ..];
+        // UOP_GEP    = [src, NUM(n), NUM(idx_0), ..].
+        case UOP_VCONST: case UOP_GEP: {
+          Term n_cell = HEAP[loc + 1];
+          if (term_tag(n_cell) != TAG_NUM) return 0;
+          return 2 + (u32)term_val(n_cell);
+        }
+        // UOP_UNROLL / UOP_CONTRACT = [src, NUM(n), NUM(axis_0), NUM(F_0), ..].
+        case UOP_UNROLL: case UOP_CONTRACT: {
+          Term n_cell = HEAP[loc + 1];
+          if (term_tag(n_cell) != TAG_NUM) return 0;
+          return 2 + 2 * (u32)term_val(n_cell);
+        }
+        // UOP_STACK = [NUM(n), src_0, ..]; UOP_END = [NUM(n), range_0, .., body].
+        case UOP_STACK: case UOP_END: {
+          Term n_cell = HEAP[loc];
+          if (term_tag(n_cell) != TAG_NUM) return 0;
+          return (op == UOP_END ? 2 : 1) + (u32)term_val(n_cell);
         }
         default: return 0;
       }

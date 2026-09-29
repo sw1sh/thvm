@@ -11,7 +11,8 @@
 //
 //   (1) STABLE: identical re-hashing of the same DAG is equal.
 //   (2) GC-INVARIANT: a gc_collect relocates store_root, but the
-//       content hash is UNCHANGED (the whole point of the fix).
+//       content hash is UNCHANGED (the whole point of the fix), for
+//       every UOp heap layout the hash reads.
 //   (3) SHARING: two structurally-identical kernels hash EQUAL (they
 //       SHOULD share a PSO -- that's correct, not a collision).
 //   (4) DISTINCTNESS: structurally-different kernels (different op,
@@ -165,6 +166,47 @@ int main(void) {
     CHECK(sr8 != 0);
     CHECK(sr32 != 0);
     CHECK(uop_dag_content_hash(sr8) != uop_dag_content_hash(sr32));
+  }
+
+  // === (2b) GC-INVARIANT for every heap layout the hash reads ========
+  // Each node must move into the new from-space and keep its hash.  A
+  // layout the collector under-sizes loses its trailing cells (RANGE's
+  // extent, BUFFER's last dim); one it does not know is never copied.
+  TEST_BEGIN("content-hash/gc-invariant-every-layout");
+  {
+    u32 dims[2]   = {3, 5};
+    u32 bits[3]   = {7, 8, 9};
+    u32 axes[2]   = {4, 6};
+    u32 factor[2] = {2, 3};
+    u32 lanes[2]  = {1, 0};
+    Term rng = uop_range(3, KAX_REDUCE, 17);
+    Term buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims, 2);
+    Term val = uop_index_e(buf, rng);
+    Term srcs[2] = { val, rng };
+    Term nodes[] = {
+      rng,
+      buf,
+      uop_bufferize_new(val, UOP_SCOPE_GLOBAL, 1, 1, &rng),
+      uop_detach(val),
+      uop_vconst(DT_FP32, 3, bits),
+      uop_unroll(val, 2, axes, factor),
+      uop_contract(val, 2, axes, factor),
+      uop_gep(val, 2, lanes),
+      uop_stack(2, srcs),
+      uop_placeholder(DT_FP32, 5),
+      uop_end(val, 1, &rng),
+    };
+    u32 n = sizeof(nodes) / sizeof(nodes[0]);
+    u64 before[sizeof(nodes) / sizeof(nodes[0])];
+    for (u32 i = 0; i < n; i++) {
+      before[i] = uop_dag_content_hash(nodes[i]);
+    }
+    gc_collect(nodes, n);
+    for (u32 i = 0; i < n; i++) {
+      u64 loc = term_val(nodes[i]);
+      CHECK(loc >= gc_from_start() && loc < gc_from_end());
+      CHECK_EQ(uop_dag_content_hash(nodes[i]), before[i]);
+    }
   }
 
   // === (5) empty root -> 0 ==========================================
