@@ -739,6 +739,11 @@ static const KboFlatNode *g_ld_arr[2]    = {NULL, NULL};
 static u32                g_ld_len[2]    = {0, 0};
 static u8                 g_ld_occ_ok[2] = {0, 0};
 static u64                g_lpo_dag_fallbacks = 0;
+#ifdef THVM_LPO_SELFCHECK
+// Self-check probe: 1 makes an UN lex verdict return UN (Waldmeister's
+// LP_LPO, LPO.c:300-306) instead of taking the LT leg.
+static u8                 g_ld_lex_un_is_un = 0;
+#endif
 
 static void lpo_dag_free(void) {
   free(g_ld_node);
@@ -1166,6 +1171,11 @@ static LpoCmp lpo_dag_compute(u32 c1, u32 c2) {
   if (lex == LPO_EQ) {
     return LPO_EQ;
   }
+#ifdef THVM_LPO_SELFCHECK
+  if (lex == LPO_UN && g_ld_lex_un_is_un) {
+    return LPO_UN;
+  }
+#endif
   // As lpo_flat_rec_compute: an UN lex verdict takes the LT leg.
   if (lex == LPO_GT) {
     for (u32 j = d; j < ny; j++) {
@@ -1256,6 +1266,12 @@ static u64 g_lpo_sc_max_new  = 0;   // the DAG's time on the max_ref pair
 static u32 g_lpo_sc_max_n    = 0;   // na + nb of the max_ref pair
 static u64 g_lpo_sc_max_dag  = 0;   // slowest DAG compare
 static u32 g_lpo_sc_max_dag_n = 0;
+// Top-level verdicts that change when an UN lex verdict returns UN
+// (lex_un_diff), and among them the orientations it decides (LT or GT
+// that becomes UN).
+static u64 g_lpo_sc_lexun_pairs = 0;
+static u64 g_lpo_sc_lexun_diff  = 0;
+static u64 g_lpo_sc_lexun_orient = 0;
 static u8  g_lpo_sc_reg      = 0;
 // Per-size buckets (na + nb <= 16, 32, ..., 2^15, more): pairs and the
 // time each evaluator spent on them.
@@ -1291,6 +1307,10 @@ fn void thvm_lpo_selfcheck_report(FILE *f) {
           (double)g_lpo_sc_max_ref / 1e6, g_lpo_sc_max_n,
           (double)g_lpo_sc_max_new / 1e6,
           (double)g_lpo_sc_max_dag / 1e6, g_lpo_sc_max_dag_n);
+  fprintf(f, "   lpo-selfcheck-lexun: pairs=%llu changed=%llu orient-to-un=%llu\n",
+          (unsigned long long)g_lpo_sc_lexun_pairs,
+          (unsigned long long)g_lpo_sc_lexun_diff,
+          (unsigned long long)g_lpo_sc_lexun_orient);
   fprintf(f, "   lpo-selfcheck-sizes:");
   for (u32 b = 0; b < LPO_SC_NB; b++) {
     if (g_lpo_sc_b_n[b] != 0u) {
@@ -1385,6 +1405,26 @@ static LpoCmp lpo_flat_cmp(u32 na, u32 nb, const LpoConfig *cfg) {
     g_lpo_sc_max_ref = t2 - t1;
     g_lpo_sc_max_new = t1 - t0;
     g_lpo_sc_max_n   = na + nb;
+  }
+  // The Waldmeister-faithful lex step on the same DAG (fresh memo).
+  if (na + nb > LPO_DAG_MIN_NODES && lpo_dag_build(na, nb, cfg)) {
+    u64 sr2 = g_lpo_flat_rec_calls, sh2 = g_lpo_flat_memo_hits;
+    u64 sc2 = g_lpo_flat_compute_calls;
+    g_ld_lex_un_is_un = 1u;
+    LpoCmp wm = lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
+    g_ld_lex_un_is_un = 0u;
+    g_lpo_flat_rec_calls     = sr2;
+    g_lpo_flat_memo_hits     = sh2;
+    g_lpo_flat_compute_calls = sc2;
+    if (!g_lpo_past_deadline) {
+      g_lpo_sc_lexun_pairs++;
+      if (wm != r) {
+        g_lpo_sc_lexun_diff++;
+        if ((r == LPO_LT || r == LPO_GT) && wm == LPO_UN) {
+          g_lpo_sc_lexun_orient++;
+        }
+      }
+    }
   }
   if (ref != r) {
     g_lpo_sc_mismatch++;
