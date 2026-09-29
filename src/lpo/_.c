@@ -20,6 +20,17 @@
 //     (3) f == g        AND (s_1..s_m) >_lex_lpo (t_1..t_n)
 //                       AND s >_lpo t_j  for all j in 1..n
 //
+// f >_F g iff precedence[f] > precedence[g]; labels past n_labels read
+// precedence 0.  Two distinct symbols of equal precedence are
+// incomparable heads (the precedence is a strict partial order), so only
+// (1) orders their terms, as Waldmeister's LP_LPO does for
+// incomparable ("Unvergleichbar") top symbols (sources/ORD/LPO.c:276-282).
+// The lexicographic extension compares the arguments at the first
+// position where they differ: when that pair is incomparable, neither
+// (s_1..s_m) >_lex (t_1..t_n) nor the converse holds, and s, t are
+// ordered by (1) or not at all (LPO.c:300-306; Vampire 5.0.1
+// Kernel/LPO.cpp:139-140 cLMA -> cAA, :148-158).
+//
 // Variable cases:
 //   x >_lpo t  iff false (no FVR can dominate any term)
 //   s >_lpo x  iff x occurs as a strict subterm of s (and s != x)
@@ -234,7 +245,7 @@ static LpoCmp lpo_rec(Term s, Term t, const LpoConfig *cfg) {
   u32 idx = lpo_memo_hash(s, t);
   LpoMemoEnt *e = &g_lpo_memo[idx];
   if (e->epoch == g_lpo_epoch && e->s == s && e->t == t)
-    return (LpoCmp)e->cmp;
+    return (LpoCmp)(i8)e->cmp;
   LpoCmp c = lpo_rec_compute(s, t, cfg);
   e->s = s; e->t = t; e->epoch = g_lpo_epoch; e->cmp = (u8)c;
   return c;
@@ -264,8 +275,8 @@ static u8 lpo_some_arg_dominates(Term s_parent, Term t,
   return 0;
 }
 
-// Lexicographic argument comparison: returns LPO_GT, LPO_LT, LPO_EQ
-// (mirrors LpoCmp but limited to the three outcomes).  Assumes equal
+// Lexicographic argument comparison: the verdict of the first argument
+// pair that is not LPO_EQ (GT, LT or UN), else LPO_EQ.  Assumes equal
 // arity.
 static LpoCmp lpo_lex(Term s_parent, Term t_parent,
                       const LpoConfig *cfg) {
@@ -303,8 +314,9 @@ fn void thvm_lpo_set_persist(u8 on) { g_lpo_persist = on ? 1u : 0u; }
 //
 //   (a) b is a strict preorder slice (= subterm) of a              -> LPO_GT
 //   (b) a is a strict preorder slice (= subterm) of b              -> LPO_LT
-//   (c) one operand is a constant, every symbol on the other side
-//       is precedence-dominated (or the other is var-heavy)        -> +/- forced
+//   (c) one operand is a constant c: a term t > c iff a symbol of t
+//       is above c or c occurs in t; c > t iff t is ground and
+//       every symbol of t is below c                               -> +/- forced
 //
 // Returns +1 / -1 if conclusive (caller maps to LPO_GT / LPO_LT), or 0
 // to fall through to the full recursive thvm_lpo (then the memoized
@@ -342,7 +354,7 @@ int lpo_pretest_groesser_flat(const KboFlatNode *a, u32 na,
     for (u32 i = 0; i < na; i++) {
       if (a[i].sym < 0) continue;
       u32 pa_i = ((u32)a[i].sym < cfg->n_labels) ? cfg->precedence[(u32)a[i].sym] : 0u;
-      if (pa_i >= pb) return +1;
+      if (pa_i > pb || a[i].sym == b[0].sym) return +1;
     }
     return -1;
   }
@@ -614,24 +626,35 @@ static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
   }
   // Equal precedence: case (1) both directions can fire, then case (3)
   // lex.
-  if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
-  if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
+  if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) {
+    return LPO_GT;
+  }
+  if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) {
+    return LPO_LT;
+  }
+  if (a[pa].sym != b[pb].sym) {
+    return LPO_UN;
+  }
   // Same head symbol implies same arity (signature constraint), but
   // subtree sizes (`sz`) may differ when children have different shapes
   // -- so DO NOT short-circuit on sz mismatch.  lex compare handles it.
   u32 diff_a = 0, diff_b = 0;
   LpoCmp lex = lpo_flat_lex_diff(a, pa, b, pb, cfg, &diff_a, &diff_b);
-  if (lex == LPO_EQ) return LPO_EQ;
+  if (lex == LPO_EQ) {
+    return LPO_EQ;
+  }
   // After lex finds the differing position, earlier children are
   // pairwise EQ -- so dominates_all_args trivially holds for them via
   // case (1) at that child position.  Skip to the differing position
   // (WM's LPOGroesserAlleDiff structure, LPO.c:261/287).
   if (lex == LPO_GT) {
-    if (lpo_flat_dominates_from(a, pa, b, pb, diff_b, cfg)) return LPO_GT;
-    return LPO_UN;
+    return lpo_flat_dominates_from(a, pa, b, pb, diff_b, cfg) ? LPO_GT : LPO_UN;
   }
-  // lex == LPO_LT or LPO_UN
-  if (lpo_flat_dominates_from(b, pb, a, pa, diff_a, cfg)) return LPO_LT;
+  if (lex == LPO_LT) {
+    return lpo_flat_dominates_from(b, pb, a, pa, diff_a, cfg) ? LPO_LT : LPO_UN;
+  }
+  // An incomparable argument pair decides neither lex direction, and
+  // case (1) failed both ways above (LPO.c:300-306).
   return LPO_UN;
 }
 
@@ -739,11 +762,6 @@ static const KboFlatNode *g_ld_arr[2]    = {NULL, NULL};
 static u32                g_ld_len[2]    = {0, 0};
 static u8                 g_ld_occ_ok[2] = {0, 0};
 static u64                g_lpo_dag_fallbacks = 0;
-#ifdef THVM_LPO_SELFCHECK
-// Self-check probe: 1 makes an UN lex verdict return UN (Waldmeister's
-// LP_LPO, LPO.c:300-306) instead of taking the LT leg.
-static u8                 g_ld_lex_un_is_un = 0;
-#endif
 
 static void lpo_dag_free(void) {
   free(g_ld_node);
@@ -1046,7 +1064,9 @@ static u8 lpo_dag_var_in(u32 c, i32 vsym) {
   return 0u;
 }
 
-// lpo_pretest_groesser_flat(x, y) > 0 for non-variable roots.
+// lpo_pretest_groesser_flat(x, y) > 0 for non-variable roots.  Against
+// a constant y, a maxp equal to y's precedence comes from y itself or
+// from a symbol tied with it, so only an occurrence of y decides.
 static u8 lpo_dag_vortest(u32 cx, u32 cy) {
   const LpoDagNode *x = &g_ld_node[cx];
   const LpoDagNode *y = &g_ld_node[cy];
@@ -1054,7 +1074,10 @@ static u8 lpo_dag_vortest(u32 cx, u32 cy) {
     return (u8)(!y->hasvar && y->maxp < x->p);
   }
   if (y->sz == 1u) {
-    return (u8)(x->maxp >= y->p);
+    if (x->maxp != y->p) {
+      return (u8)(x->maxp > y->p);
+    }
+    return lpo_dag_sub(cx, cy);
   }
   if (x->sz <= y->sz) {
     return 0u;
@@ -1158,6 +1181,9 @@ static LpoCmp lpo_dag_compute(u32 c1, u32 c2) {
       return LPO_LT;
     }
   }
+  if (x->sym != y->sym) {
+    return LPO_UN;
+  }
   u32    n   = (nx < ny) ? nx : ny;
   u32    d   = 0u;
   LpoCmp lex = LPO_EQ;
@@ -1171,12 +1197,9 @@ static LpoCmp lpo_dag_compute(u32 c1, u32 c2) {
   if (lex == LPO_EQ) {
     return LPO_EQ;
   }
-#ifdef THVM_LPO_SELFCHECK
-  if (lex == LPO_UN && g_ld_lex_un_is_un) {
+  if (lex == LPO_UN) {
     return LPO_UN;
   }
-#endif
-  // As lpo_flat_rec_compute: an UN lex verdict takes the LT leg.
   if (lex == LPO_GT) {
     for (u32 j = d; j < ny; j++) {
       if (lpo_dag_rec(c1, ky[j]) != LPO_GT) {
@@ -1248,8 +1271,10 @@ static LpoCmp lpo_flat_cmp_run(u32 na, u32 nb, const LpoConfig *cfg) {
 #include <time.h>
 
 // Differential self-check (-DTHVM_LPO_SELFCHECK): every top-level flat
-// compare also runs lpo_flat_ref and counts disagreements; both are
-// timed.  A compare whose deadline fires is not counted.  With
+// compare also runs lpo_flat_ref and counts disagreements (both are
+// timed), and runs the reversed compare on the DAG, counting verdicts
+// that are not its inverse.  A compare whose deadline fires is not
+// counted.  With
 // THVM_LPO_SELFCHECK_DUMP=<file>, a pair on which the DAG computes at
 // least THVM_LPO_SELFCHECK_DUMP_MIN (default 2000) class pairs, or any
 // mismatch, is appended to <file> BEFORE the reference runs, so pairs
@@ -1266,12 +1291,11 @@ static u64 g_lpo_sc_max_new  = 0;   // the DAG's time on the max_ref pair
 static u32 g_lpo_sc_max_n    = 0;   // na + nb of the max_ref pair
 static u64 g_lpo_sc_max_dag  = 0;   // slowest DAG compare
 static u32 g_lpo_sc_max_dag_n = 0;
-// Top-level verdicts that change when an UN lex verdict returns UN
-// (lex_un_diff), and among them the orientations it decides (LT or GT
-// that becomes UN).
-static u64 g_lpo_sc_lexun_pairs = 0;
-static u64 g_lpo_sc_lexun_diff  = 0;
-static u64 g_lpo_sc_lexun_orient = 0;
+// Antisymmetry of the top-level verdicts: the reversed compare on the
+// same DAG must return the inverse verdict (EQ and UN to themselves, GT
+// to LT).
+static u64 g_lpo_sc_anti_pairs = 0;
+static u64 g_lpo_sc_anti_bad   = 0;
 static u8  g_lpo_sc_reg      = 0;
 // Per-size buckets (na + nb <= 16, 32, ..., 2^15, more): pairs and the
 // time each evaluator spent on them.
@@ -1307,10 +1331,9 @@ fn void thvm_lpo_selfcheck_report(FILE *f) {
           (double)g_lpo_sc_max_ref / 1e6, g_lpo_sc_max_n,
           (double)g_lpo_sc_max_new / 1e6,
           (double)g_lpo_sc_max_dag / 1e6, g_lpo_sc_max_dag_n);
-  fprintf(f, "   lpo-selfcheck-lexun: pairs=%llu changed=%llu orient-to-un=%llu\n",
-          (unsigned long long)g_lpo_sc_lexun_pairs,
-          (unsigned long long)g_lpo_sc_lexun_diff,
-          (unsigned long long)g_lpo_sc_lexun_orient);
+  fprintf(f, "   lpo-selfcheck-antisym: pairs=%llu violations=%llu\n",
+          (unsigned long long)g_lpo_sc_anti_pairs,
+          (unsigned long long)g_lpo_sc_anti_bad);
   fprintf(f, "   lpo-selfcheck-sizes:");
   for (u32 b = 0; b < LPO_SC_NB; b++) {
     if (g_lpo_sc_b_n[b] != 0u) {
@@ -1406,23 +1429,19 @@ static LpoCmp lpo_flat_cmp(u32 na, u32 nb, const LpoConfig *cfg) {
     g_lpo_sc_max_new = t1 - t0;
     g_lpo_sc_max_n   = na + nb;
   }
-  // The Waldmeister-faithful lex step on the same DAG (fresh memo).
-  if (na + nb > LPO_DAG_MIN_NODES && lpo_dag_build(na, nb, cfg)) {
+  // The reversed compare on the same DAG (fresh memo).
+  if (lpo_dag_build(na, nb, cfg)) {
     u64 sr2 = g_lpo_flat_rec_calls, sh2 = g_lpo_flat_memo_hits;
     u64 sc2 = g_lpo_flat_compute_calls;
-    g_ld_lex_un_is_un = 1u;
-    LpoCmp wm = lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
-    g_ld_lex_un_is_un = 0u;
+    LpoCmp rev = lpo_dag_compute(g_ld_cls[1][0], g_ld_cls[0][0]);
     g_lpo_flat_rec_calls     = sr2;
     g_lpo_flat_memo_hits     = sh2;
     g_lpo_flat_compute_calls = sc2;
     if (!g_lpo_past_deadline) {
-      g_lpo_sc_lexun_pairs++;
-      if (wm != r) {
-        g_lpo_sc_lexun_diff++;
-        if ((r == LPO_LT || r == LPO_GT) && wm == LPO_UN) {
-          g_lpo_sc_lexun_orient++;
-        }
+      LpoCmp inv = (r == LPO_GT) ? LPO_LT : (r == LPO_LT) ? LPO_GT : r;
+      g_lpo_sc_anti_pairs++;
+      if (rev != inv) {
+        g_lpo_sc_anti_bad++;
       }
     }
   }
@@ -1630,16 +1649,22 @@ static LpoCmp lpo_rec_compute(Term s, Term t, const LpoConfig *cfg) {
     return LPO_UN;
   }
 
-  // Equal head symbols: case (3).  Lex compare args; the winning
-  // direction must dominate the loser's args.
-  if (term_ctr_n(s) != term_ctr_n(t)) return LPO_UN;   // arity mismatch
-  LpoCmp lex = lpo_lex(s, t, cfg);
-  if (lex == LPO_EQ) return LPO_EQ;   // can't happen if lpo_eq fired earlier
-  if (lex == LPO_GT) {
-    if (lpo_dominates_all_args(s, t, cfg)) return LPO_GT;
+  // Equal precedence: distinct symbols are incomparable heads, which
+  // case (1) above did not order.  Equal head symbols: case (3).  Lex
+  // compare args; the winning direction must dominate the loser's args.
+  if (lab_s != lab_t || term_ctr_n(s) != term_ctr_n(t)) {
     return LPO_UN;
   }
-  // lex == LPO_LT
-  if (lpo_dominates_all_args(t, s, cfg)) return LPO_LT;
+  LpoCmp lex = lpo_lex(s, t, cfg);
+  if (lex == LPO_EQ) {
+    return LPO_EQ;   // can't happen if lpo_eq fired earlier
+  }
+  if (lex == LPO_GT) {
+    return lpo_dominates_all_args(s, t, cfg) ? LPO_GT : LPO_UN;
+  }
+  if (lex == LPO_LT) {
+    return lpo_dominates_all_args(t, s, cfg) ? LPO_LT : LPO_UN;
+  }
+  // An incomparable argument pair decides neither lex direction.
   return LPO_UN;
 }

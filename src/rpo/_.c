@@ -239,8 +239,12 @@ static RpoCmp rpo_rec_compute(Term s, Term t, const RpoConfig *cfg) {
     return RPO_UN;
   }
 
-  // Equal head symbols: case (3).
-  if (term_ctr_n(s) != term_ctr_n(t)) return RPO_UN;
+  // Equal precedence: distinct symbols are incomparable heads, which (1)
+  // did not order (Waldmeister LPO.c:276-282).  Equal head symbols:
+  // case (3).
+  if (lab_s != lab_t || term_ctr_n(s) != term_ctr_n(t)) {
+    return RPO_UN;
+  }
 
   if (rpo_status_is_mul(cfg, lab_s)) {
     // Multiset status -- delegate to rpo_multi entirely.  Note: this

@@ -385,6 +385,45 @@ for the per-commit story.
   against main: 25 of the 27 J13 ring problems instead of 23 (RNG029-5
   and 029-6, with and without `--proof`, proofs VerifiedGood), the 7
   recent flips and 21 of the 31 held-out problems as before, no loss.
+- LPO is an ordering (`src/lpo/_.c`).  When the first differing argument
+  pair of two terms with the same head is incomparable, the terms are
+  incomparable unless an argument of one reaches the other, as
+  Waldmeister (`LPO.c:300-306`) and Vampire 5.0.1 (`Kernel/LPO.cpp`
+  cLMA -> cAA) decide it; the flat recursion, the DAG evaluator and the
+  Term-tree recursion took the less-than leg there, so `f(x,y)` and
+  `f(y,x)` each compared below the other.  Distinct symbols of equal
+  precedence are incomparable heads: the flat and DAG paths compared
+  their arguments lexicographically (`f(x)` and `g(x)` came out EQ) and
+  the constant pretest counted a tied symbol as a greater one.  The
+  Term-tree memo returned a cached less-than as 255.  RPO with every
+  symbol LEX now agrees with LPO on tied precedences.  `bin/test_lpo`
+  checks every evaluator against a textbook LPO (Baader and Nipkow, Def.
+  5.4.12) on random terms with variables under strict and tied
+  precedences: 0 mismatches over 65871 pairs, and antisymmetry,
+  irreflexivity, transitivity (145886 chains), stability under
+  substitution, monotonicity and the subterm property hold; the previous
+  evaluators fail it (4693 mismatches, 1535 antisymmetry violations).
+  The `-DTHVM_LPO_SELFCHECK` probe counts antisymmetry violations of the
+  real compares (0 in 1.43M compares from six otter-lane runs; the old
+  lex step decided 6.1% of 1.20M).  On Waldmeister's own LPO problem
+  `andassoc.pr` (WM preset, the file's precedence) the run proves in
+  260201 steps instead of stopping at the memory guard: the WM preset's
+  MixWeight gave a lex-incomparable pair one side's weight instead of
+  the sum, and correcting that term alone lets the old build prove it
+  in 755097 steps.  The LPO schedule lanes, single lane (instruction
+  clock, 177s) over every J13 UEQ problem and every non-satisfiable TPTP
+  UEQ problem outside J13 where a lane does not exit fast: J13 49 -> 48
+  solved by some LPO lane, the 31 held-out ring problems 21 -> 21, the
+  other 151 held-out problems 126 -> 127; across five LRS clock scales
+  the robust changes are RNG026-6 (`otter-lpo-cmin`, 4-8s instead of
+  unsolved) and REL031-1 (`otter-ladr`) gained, REL026-3 and RNG027-9
+  (both `otter-lpo-cmin`) lost, the rest wall-edge noise.  CASC-J13
+  protocol (16 vCPU, `--schedule --proof --wall=180`, strict
+  CheckProof): the 27 J13 ring problems and 7 flips go from 32 to 33
+  (RNG027-9 in 46s via `otter-lpo-cmin` in four runs of four,
+  VerifiedGood; main gives up in all four; the single-lane runs lose it,
+  so the lane's outcome on it depends on the clock), and the 8 problems
+  with a changed lane are solved by both, by other lanes.
 - Prover9's clause-weight penalties (`--nest-penalty` / `--depth-penalty`)
   now weigh every critical pair: the FT-treated push route, which forms
   almost all of them, scored its pairs without the penalty.  With them on,

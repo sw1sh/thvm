@@ -3878,7 +3878,8 @@ typedef enum {
 } LpoCmp;
 
 typedef struct {
-  const u32 *precedence;   // higher value = greater symbol
+  const u32 *precedence;   // higher value = greater symbol; distinct
+                           // symbols of equal value are incomparable
   u32        n_labels;
 } LpoConfig;
 
@@ -3903,7 +3904,8 @@ typedef enum {
 } RpoStatus;
 
 typedef struct {
-  const u32       *precedence;   // higher value = greater symbol
+  const u32       *precedence;   // higher value = greater symbol; distinct
+                                 // symbols of equal value are incomparable
   const RpoStatus *status;       // status[label] in {LEX, MUL}; NULL => all-LEX
   u32              n_labels;
 } RpoConfig;
