@@ -335,6 +335,18 @@ for the per-commit story.
   was half of an `otter-lpo-cmin --ir-run-order` run once its rules
   reached thousands of symbols, and RNG029-5 on `otter-lpo` with both
   options proves in 45s instead of 80s (instruction clock).
+- The `otter-lpo` schedule lane arms `--otter-raw --ir-run-order`.
+  Single-lane runs (instruction clock, 177s) over the 27 J13 ring
+  problems and 31 held-out RNG UEQ problems: with both options the lane
+  proves RNG029-5/029-6 besides its RNG027-5/7/10, 028-5/7 and 029-7,
+  and the same held-out problems.  `otter-lpo-cmin` stays unarmed (with
+  `--ir-run-order` its rule set explodes on RNG027-5/028-5 and it keeps 3
+  of 8; `--otter-raw` alone trades RNG027-8 for problems `otter-lpo`
+  proves), as does `otter-ladr` (no change either way).  CASC-J13
+  protocol (16 vCPU, `--schedule --wall=180`, one problem at a time)
+  against main: 25 of the 27 J13 ring problems instead of 23 (RNG029-5
+  and 029-6, with and without `--proof`, proofs VerifiedGood), the 7
+  recent flips and 21 of the 31 held-out problems as before, no loss.
 - Prover9's clause-weight penalties (`--nest-penalty` / `--depth-penalty`)
   now weigh every critical pair: the FT-treated push route, which forms
   almost all of them, scored its pairs without the penalty.  With them on,

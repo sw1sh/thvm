@@ -349,25 +349,36 @@ static const SchedSlice SCHEDULE[] = {
   // ResourceOuts), age:weight 1:2, LRS, and --mixmost-nf so proof
   // extraction replays the goal check's own normal forms.  Ablated on
   // RNG027-5: --otter, LPO, spb=goal and orphan-murder-off are each
-  // load-bearing.  Under --proof (the CASC condition), singles on two
-  // repeats: RNG027-5/7/10, 028-5/7, 029-5/6/7 proved in 43-103s, every
-  // proof VerifiedGood; all TMO for every prior slice.  Prover9's clause
-  // penalties (--nest-penalty/--depth-penalty) cost this lane six of the
-  // eight.  Exit-fast (--otter-exit) unless a distributivity law orients
-  // as expansion under the lane's precedence.  Leftover pool after
-  // tgt-sel: the wave-1/2 indices stay unshifted.
-  {"otter-lpo", "--ord=lpo --sym-prec=const-frequency --spb-prec --otter --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --preset=none --horn=0 --fof-sat=0", 0.0},
+  // load-bearing.  --otter-raw demodulates each CP from its raw overlap,
+  // once, as Vampire's unprocessed loop does, and --ir-run-order
+  // interreduces under the lane's LPO (the FT walk gates unorientable
+  // instances by KBO): single-lane runs (instruction clock, 177s) then
+  // prove RNG027-5/7/10, 028-5/7 and 029-5/6/7 of the J13 ring set (029-5
+  // and 029-6 stay open without them) and the same 8 of the 31 held-out
+  // RNG UEQ problems.  Prover9's clause penalties (--nest-penalty/
+  // --depth-penalty) cost this lane six of the eight.  Exit-fast
+  // (--otter-exit) unless a distributivity law orients as expansion under
+  // the lane's precedence.  Leftover pool after tgt-sel: the wave-1/2
+  // indices stay unshifted.
+  {"otter-lpo", "--ord=lpo --sym-prec=const-frequency --spb-prec --otter --otter-raw --ir-run-order --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --preset=none --horn=0 --fof-sat=0", 0.0},
   // The same lane under Vampire's sp=const_min (Vampire's own casc slot
   // for RNG027-8) with Prover9's clause-weight penalties (nest 2, depth
   // 2).  With the goal stated through the defined operator
   // (associator(x, x*y, z) = associator(x,y,z)*x), spb=goal lifts
   // associator too and const_frequency ranks it above multiply -- the
   // definition unfolds; const_min's reverse arity keeps multiply above
-  // it.  --proof singles on two repeats: RNG027-8 (88s) and RNG028-8
-  // (90s, Prover9-only at J13), VerifiedGood; without the penalties
-  // 027-8 slows to 145s and 028-8 is lost.  The multiply-form members
-  // stay with otter-lpo.
+  // it.  Of the otter lanes only this one proves RNG027-8 (62s single-
+  // lane); without the penalties it slows to 145s.  The multiply-form
+  // members stay with otter-lpo.  --otter-raw and --ir-run-order are not
+  // armed: with --ir-run-order the rule set explodes on RNG027-5/028-5
+  // (1.2K to 6.5K rules between steps 500 and 640, every adoption
+  // interreducing every older rule) and the lane keeps 3 of its 8 J13
+  // solves; --otter-raw alone trades RNG027-8 for 028-5/029-5/029-6,
+  // which otter-lpo proves.
   {"otter-lpo-cmin", "--ord=lpo --sym-prec=const-min --spb-prec --otter --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --nest-penalty=2 --depth-penalty=2 --preset=none --horn=0 --fof-sat=0", 0.0},
+  // Prover9's LADR symbol order.  --otter-raw / --ir-run-order leave its
+  // single-lane solves unchanged (10 of the J13 ring set, 21 of the 31
+  // held-out), so it runs without them.
   {"otter-ladr", "--ord=lpo --sym-prec=ladr --otter --otter-exit --pop-rules-only --forward-subsume --lrs --awr=2 --cp-weight=0 --mixmost-nf --uid-orphan=0 --eager-sweep=0 --orphan-murder=0 --preset=none --horn=0 --fof-sat=0", 0.0},
   {"mnf-gj-amw", "--mnf --ground-join --connectedness --auto-max-weight=6 --max-weight-slope=1 --fof-sat=0", 0.33},
   // (4) ENCOMPASSMENT DEMODULATION (Twee reducesSkolem): the WM preset
