@@ -162,6 +162,9 @@ fn u64 gc_from_end(void)     { return GC_FROM_END; }
 // for unrecognized -- caller treats unrecognized as atom (best
 // effort; missing a tag costs correctness, so the switch covers the
 // full live tag set).
+// A UOp opcode with no case here is never evacuated, and a live node of it
+// reads garbage after the swap: every opcode below UOP_COUNT has a case.
+_Static_assert(UOP_COUNT == 53, "a new UOp opcode needs its heap size in gc_node_size");
 static u32 gc_node_size(Term t) {
   u8  tag = term_tag(t);
   u64 loc = term_val(t);

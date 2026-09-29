@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- The garbage collector refuses to build when a UOp opcode is added without a heap size in `gc_node_size` (a missing size leaves live nodes of that op unevacuated), and the UOP_BUFFER constructor documents its instance cell.
 - Fix: the copying collector keeps every UOp node whole.  A live RANGE lost
   its extent and a BUFFER its last dim (both were sized one cell short), and
   BUFFERIZE, END, STACK, GEP, UNROLL, CONTRACT, VCONST, PLACEHOLDER and

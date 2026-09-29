@@ -1,13 +1,14 @@
 // uop/buffer.c - construct a UOP_BUFFER leaf.
 //
-// Heap layout: [NUM(scope), NUM(dtype), NUM(ndim), NUM(d0), ...,
-//               NUM(d_{ndim-1})].
+// Heap layout: [NUM(scope), NUM(dtype), NUM(ndim), NUM(instance),
+//               NUM(d0), ..., NUM(d_{ndim-1})];
+// instance = kernel slot + 1 (0 = the output buffer).
 //
 // Scope (UOP_SCOPE_GLOBAL/LOCAL/REG) carries the storage tier:
 // GLOBAL = device memory (kernel argument), LOCAL = threadgroup-shared,
 // REG = per-thread register fragment.
 //
-// Hash-cons via uop_mov_cache: (scope, dtype, ndim, dims) round-trip
+// Hash-cons via uop_mov_cache: (scope, dtype, ndim, instance, dims) round-trip
 // to one heap loc.  Repeated `uop_buffer(GLOBAL, DT_FP32, 1, &n)` calls
 // for the same shape return the same Term so kernel boundaries dedup
 // to single buffer slots.
