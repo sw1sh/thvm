@@ -193,11 +193,16 @@ fn Term fol_nnf(Term f) {
 // predicate labels typically take low values.  Skolems fit safely
 // above the connectives but below the 18-bit ceiling.
 #define FOL_LAB_SKOLEM_BASE 0x20000u
-#define FOL_SKOLEM_MAX_UNIV  256u
 
 static u32 g_fol_skolem_next = 0u;
+// Set when a Skolem or Tseitin family runs out of labels (the CTR label
+// field is 18 bits): a label past its range would alias an existing
+// symbol, so the clausification must be abandoned, never wrapped.
+static u8  g_fol_sk_out = 0u;
+static u8  g_fol_ts_out = 0u;
 
-fn void fol_reset_skolem(void) { g_fol_skolem_next = 0u; }
+fn void fol_reset_skolem(void) { g_fol_skolem_next = 0u; g_fol_sk_out = 0u; }
+fn u8   fol_labels_exhausted(void) { return (u8)(g_fol_sk_out | g_fol_ts_out); }
 
 // Substitute `var_id` in `t` with `repl`; structure-shares unchanged
 // subterms.  Local to this file to keep the Skolem path free of any
@@ -218,48 +223,117 @@ static Term fol_var_subst(Term t, u32 var_id, Term repl) {
       }
       u32 n = term_ctr_n(t);
       if (n == 0u) return t;
-      Term kids[REWRITE_MAX_ARITY];
-      if (n > REWRITE_MAX_ARITY) return t;
+      Term stk[REWRITE_MAX_ARITY];
+      Term *kids = term_kids_buf(stk, n);
       u8 changed = 0u;
       for (u32 i = 0; i < n; i++) {
         Term orig = term_ctr_at(t, i);
         kids[i] = fol_var_subst(orig, var_id, repl);
         if (kids[i] != orig) changed = 1u;
       }
-      if (!changed) return t;
-      return term_new_ctr(term_ext(t), kids, n);
+      Term r = changed ? term_new_ctr(term_ext(t), kids, n) : t;
+      term_kids_release(kids, stk);
+      return r;
     }
     default: return t;
   }
 }
 
-static Term fol_skolem_rec(Term f, const Term *univ, u32 n_univ) {
+// Variable-id occurrence stamps shared by the Skolemizer and the
+// Tseitin/chunking passes: stamp[id] == epoch marks id as seen in the
+// current walk.  Grown on demand (a Coq-exported record binds 1300
+// variables; a fixed table silently dropped the rest).
+static u32 *g_fol_vstamp = NULL;
+static u32  g_fol_vstamp_cap = 0u;
+static u32  g_fol_vepoch = 0u;
+
+static void fol_vstamp_fit(u32 id) {
+  if (id < g_fol_vstamp_cap) return;
+  u32 ncap = (g_fol_vstamp_cap == 0u) ? 1024u : g_fol_vstamp_cap;
+  while (ncap <= id) ncap *= 2u;
+  u32 *ns = (u32 *)realloc(g_fol_vstamp, (size_t)ncap * sizeof(u32));
+  if (ns == NULL) {
+    fprintf(stderr, "thvm: out of memory in clausification\n");
+    abort();
+  }
+  memset(ns + g_fol_vstamp_cap, 0, (size_t)(ncap - g_fol_vstamp_cap) * sizeof(u32));
+  g_fol_vstamp = ns;
+  g_fol_vstamp_cap = ncap;
+}
+
+static void fol_vepoch_next(void) {
+  if (++g_fol_vepoch == 0u) {
+    if (g_fol_vstamp != NULL) memset(g_fol_vstamp, 0, (size_t)g_fol_vstamp_cap * sizeof(u32));
+    g_fol_vepoch = 1u;
+  }
+}
+
+// Stamp every variable id occurring in `t` (binders included).
+static void fol_stamp_vars(Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      fol_vstamp_fit(id);
+      g_fol_vstamp[id] = g_fol_vepoch;
+      return;
+    }
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) fol_stamp_vars(term_ctr_at(t, i));
+      return;
+    }
+    default: return;
+  }
+}
+
+static u8 fol_var_stamped(u32 id) {
+  return (id < g_fol_vstamp_cap && g_fol_vstamp[id] == g_fol_vepoch) ? 1u : 0u;
+}
+
+// The universal scope of the Skolemizer: one shared stack (a scope
+// copy per binder was O(depth^2), and a fixed 256-slot copy returned
+// the formula with its quantifiers still inside past that depth).
+static Term *g_fol_sk_univ = NULL;
+static u32   g_fol_sk_univ_cap = 0u;
+static Term *g_fol_sk_args = NULL;
+static u32   g_fol_sk_args_cap = 0u;
+
+static void fol_sk_fit(Term **a, u32 *cap, u32 need) {
+  if (need < *cap) return;
+  u32 ncap = (*cap == 0u) ? 256u : *cap;
+  while (ncap <= need) ncap *= 2u;
+  Term *na = (Term *)realloc(*a, (size_t)ncap * sizeof(Term));
+  if (na == NULL) {
+    fprintf(stderr, "thvm: out of memory in Skolemization\n");
+    abort();
+  }
+  *a = na;
+  *cap = ncap;
+}
+
+static Term fol_skolem_rec(Term f, u32 n_univ) {
   if (term_tag(f) != TAG_CTR) return f;
   u32 lab = term_ext(f);
   switch (lab) {
     case FOL_LAB_NOT:
-      return fol_mk_not(fol_skolem_rec(term_ctr_at(f, 0u), univ, n_univ));
+      return fol_mk_not(fol_skolem_rec(term_ctr_at(f, 0u), n_univ));
     case FOL_LAB_AND:
-      return fol_mk_and(fol_skolem_rec(term_ctr_at(f, 0u), univ, n_univ),
-                        fol_skolem_rec(term_ctr_at(f, 1u), univ, n_univ));
+      return fol_mk_and(fol_skolem_rec(term_ctr_at(f, 0u), n_univ),
+                        fol_skolem_rec(term_ctr_at(f, 1u), n_univ));
     case FOL_LAB_OR:
-      return fol_mk_or (fol_skolem_rec(term_ctr_at(f, 0u), univ, n_univ),
-                        fol_skolem_rec(term_ctr_at(f, 1u), univ, n_univ));
+      return fol_mk_or (fol_skolem_rec(term_ctr_at(f, 0u), n_univ),
+                        fol_skolem_rec(term_ctr_at(f, 1u), n_univ));
     case FOL_LAB_IMP:
-      return fol_mk_imp(fol_skolem_rec(term_ctr_at(f, 0u), univ, n_univ),
-                        fol_skolem_rec(term_ctr_at(f, 1u), univ, n_univ));
+      return fol_mk_imp(fol_skolem_rec(term_ctr_at(f, 0u), n_univ),
+                        fol_skolem_rec(term_ctr_at(f, 1u), n_univ));
     case FOL_LAB_IFF:
-      return fol_mk_iff(fol_skolem_rec(term_ctr_at(f, 0u), univ, n_univ),
-                        fol_skolem_rec(term_ctr_at(f, 1u), univ, n_univ));
+      return fol_mk_iff(fol_skolem_rec(term_ctr_at(f, 0u), n_univ),
+                        fol_skolem_rec(term_ctr_at(f, 1u), n_univ));
     case FOL_LAB_ALL: {
       // Extend univ scope; drop the `∀` -- everything stays implicit.
-      Term var  = term_ctr_at(f, 0u);
-      Term body = term_ctr_at(f, 1u);
-      if (n_univ >= FOL_SKOLEM_MAX_UNIV) return f;  // bail safely
-      Term new_univ[FOL_SKOLEM_MAX_UNIV];
-      for (u32 i = 0; i < n_univ; i++) new_univ[i] = univ[i];
-      new_univ[n_univ] = var;
-      return fol_skolem_rec(body, new_univ, n_univ + 1u);
+      fol_sk_fit(&g_fol_sk_univ, &g_fol_sk_univ_cap, n_univ);
+      g_fol_sk_univ[n_univ] = term_ctr_at(f, 0u);
+      return fol_skolem_rec(term_ctr_at(f, 1u), n_univ + 1u);
     }
     case FOL_LAB_EX: {
       Term var  = term_ctr_at(f, 0u);
@@ -267,17 +341,41 @@ static Term fol_skolem_rec(Term f, const Term *univ, u32 n_univ) {
       if (term_tag(var) != TAG_FVR) return f;
       u32 vid = term_ext(var);
 
-      // Fresh Skolem function symbol; arity = current ∀-scope size.
+      // Fresh Skolem function symbol over the ∀-scope.  A scope wider
+      // than the engine's native arity keeps only the universals the
+      // body mentions (dedup'd, scope order) -- the same Skolemization
+      // semantically (a witness cannot depend on a variable its
+      // formula never mentions), without 50-argument Skolem terms from
+      // the deep binder nests of the Coq/Mizar exports.  Narrow scopes
+      // keep every universal, as the solved FOF set was validated with.
+      if (FOL_LAB_SKOLEM_BASE + g_fol_skolem_next > (u32)EXT_MASK) {
+        g_fol_sk_out = 1u;
+        return f;
+      }
       u32 sk_label = FOL_LAB_SKOLEM_BASE + g_fol_skolem_next;
       g_fol_skolem_next++;
       Term sk_term;
       if (n_univ == 0u) {
         sk_term = term_new_ctr(sk_label, NULL, 0u);
+      } else if (n_univ <= REWRITE_MAX_ARITY) {
+        sk_term = term_new_ctr(sk_label, g_fol_sk_univ, n_univ);
       } else {
-        sk_term = term_new_ctr(sk_label, (Term *)univ, n_univ);
+        fol_vepoch_next();
+        fol_stamp_vars(body);
+        u32 na = 0u;
+        for (u32 i = 0; i < n_univ; i++) {
+          Term u = g_fol_sk_univ[i];
+          if (term_tag(u) != TAG_FVR || !fol_var_stamped(term_ext(u))) continue;
+          u32 dup = 0u;
+          for (u32 j = 0; j < na && !dup; j++) dup = (g_fol_sk_args[j] == u);
+          if (dup) continue;
+          fol_sk_fit(&g_fol_sk_args, &g_fol_sk_args_cap, na);
+          g_fol_sk_args[na++] = u;
+        }
+        sk_term = term_new_ctr(sk_label, na ? g_fol_sk_args : NULL, na);
       }
       Term substituted = fol_var_subst(body, vid, sk_term);
-      return fol_skolem_rec(substituted, univ, n_univ);
+      return fol_skolem_rec(substituted, n_univ);
     }
     default:
       // Atom / non-connective: recurse into args defensively (some
@@ -288,8 +386,7 @@ static Term fol_skolem_rec(Term f, const Term *univ, u32 n_univ) {
 }
 
 fn Term fol_skolemize(Term f) {
-  Term univ_buf[FOL_SKOLEM_MAX_UNIV];
-  return fol_skolem_rec(f, univ_buf, 0u);
+  return fol_skolem_rec(f, 0u);
 }
 
 // True iff `label` is a Skolem function symbol generated by the
@@ -384,15 +481,7 @@ static void fol_extract_or(Term f, FolLit **lits, u32 *n, u32 *cap) {
   fol_extract_lit(lits, n, cap, lit);
 }
 
-// Append a clause built from `or_root` to `*out`, growing as needed.
-static void fol_append_clause(FolClause ***out, u32 *n, u32 *cap, Term or_root) {
-  FolLit *lits = NULL;
-  u32 nl = 0u, capl = 0u;
-  fol_extract_or(or_root, &lits, &nl, &capl);
-  FolClause *c = fol_clause_new(nl);
-  if (c == NULL) { free(lits); return; }
-  for (u32 i = 0; i < nl; i++) c->lits[i] = lits[i];
-  free(lits);
+static void fol_push_clause(FolClause ***out, u32 *n, u32 *cap, FolClause *c) {
   if (*n >= *cap) {
     u32 ncap = (*cap == 0u) ? 8u : (*cap) * 2u;
     FolClause **grow = (FolClause **)realloc(*out, (size_t)ncap * sizeof(FolClause *));
@@ -402,6 +491,91 @@ static void fol_append_clause(FolClause ***out, u32 *n, u32 *cap, Term or_root) 
   }
   (*out)[*n] = c;
   *n += 1u;
+}
+
+static void fol_push_lits(FolClause ***out, u32 *n, u32 *cap,
+                          const FolLit *lits, u32 nl) {
+  FolClause *c = fol_clause_new(nl);
+  if (c == NULL) return;
+  for (u32 i = 0; i < nl; i++) c->lits[i] = lits[i];
+  fol_push_clause(out, n, cap, c);
+}
+
+static Term fol_fresh_aux(const Term *vars, u32 n_vars);   // Tseitin, below
+
+// Distinct variables of a subformula (or of a chunked clause's shared
+// part), first-occurrence order, in one shared growable list.
+static Term *g_fol_ts_vars = NULL;
+static u32   g_fol_ts_vars_cap = 0u;
+
+// Append (once, first occurrence) every variable of `t` stamped in the
+// current epoch; a taken variable's stamp is cleared.
+static void fol_collect_shared(Term t, u32 *n) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      if (!fol_var_stamped(id)) return;
+      g_fol_vstamp[id] = 0u;
+      fol_sk_fit(&g_fol_ts_vars, &g_fol_ts_vars_cap, *n);
+      g_fol_ts_vars[(*n)++] = t;
+      return;
+    }
+    case TAG_CTR: {
+      u32 nk = term_ctr_n(t);
+      for (u32 i = 0; i < nk; i++) fol_collect_shared(term_ctr_at(t, i), n);
+      return;
+    }
+    default: return;
+  }
+}
+
+// A disjunction wider than FOL_MAX_LITS (a 201-literal domain closure
+// X = c1 | ... | X = c201; an 85-way negated existential conjecture)
+// used to fail clause allocation and vanish -- the record then
+// "clausified" to nothing.  Chunk it instead, naming each remainder:
+//   A | B  ~~>  { A | a(x),  ~a(x) | B },  x = vars(A) & vars(B).
+// Sound: any model of A | B satisfies both with a(x) := !y B(x,y)
+// (y = the rest of B's variables): where A fails, B holds for every
+// y.  Resolving on a(x) gives A | B back.  The names come from the
+// Tseitin family, so the proof layer declares them as definitions.
+static void fol_append_wide(FolClause ***out, u32 *n, u32 *cap,
+                            const FolLit *lits, u32 nl) {
+  const u32 room = FOL_MAX_LITS - 2u;   // middle chunk: ~a_prev + room + a_next
+  FolLit buf[FOL_MAX_LITS];
+  FolLit prev = { 0, 0u };
+  u32 have_prev = 0u;
+  u32 i = 0u;
+  while (nl - i > FOL_MAX_LITS - have_prev) {
+    u32 take = have_prev ? room : FOL_MAX_LITS - 1u;
+    u32 k = 0u;
+    if (have_prev) buf[k++] = prev;
+    for (u32 j = 0; j < take; j++) buf[k++] = lits[i + j];
+    i += take;
+    // Shared variables: those of everything so far that the rest uses.
+    fol_vepoch_next();
+    for (u32 j = i; j < nl; j++) fol_stamp_vars(lits[j].atom);
+    u32 nv = 0u;
+    for (u32 j = 0; j < i; j++) fol_collect_shared(lits[j].atom, &nv);
+    Term aux = fol_fresh_aux(g_fol_ts_vars, nv);
+    buf[k++] = (FolLit){ .atom = aux, .sign = 0u };
+    fol_push_lits(out, n, cap, buf, k);
+    prev = (FolLit){ .atom = aux, .sign = 1u };
+    have_prev = 1u;
+  }
+  u32 k = 0u;
+  if (have_prev) buf[k++] = prev;
+  for (; i < nl; i++) buf[k++] = lits[i];
+  fol_push_lits(out, n, cap, buf, k);
+}
+
+// Append a clause built from `or_root` to `*out`, growing as needed.
+static void fol_append_clause(FolClause ***out, u32 *n, u32 *cap, Term or_root) {
+  FolLit *lits = NULL;
+  u32 nl = 0u, capl = 0u;
+  fol_extract_or(or_root, &lits, &nl, &capl);
+  if (nl > FOL_MAX_LITS) fol_append_wide(out, n, cap, lits, nl);
+  else fol_push_lits(out, n, cap, lits, nl);
+  free(lits);
 }
 
 // Walk the AND-of-... tree and emit a clause per top-level disjunct.
@@ -454,45 +628,56 @@ fn FolClause **fol_formula_to_clauses(Term f, u32 *n_out) {
 // handles ∧, ∨, ¬-on-atom, and atoms.
 
 #define FOL_LAB_TSEITIN_BASE 0x10000u
-#define FOL_TSEITIN_MAX_VARS  128u
 
 static u32 g_fol_tseitin_next = 0u;
 
-fn void fol_reset_tseitin(void) { g_fol_tseitin_next = 0u; }
+fn void fol_reset_tseitin(void) { g_fol_tseitin_next = 0u; g_fol_ts_out = 0u; }
 
 fn u8 fol_is_tseitin_aux(u32 label) {
   return (label >= FOL_LAB_TSEITIN_BASE && label < FOL_LAB_SKOLEM_BASE) ? 1u : 0u;
 }
 
-// Collect distinct FVR ids in `t` into `vars[0..*n)`.  Stops at cap.
-static void fol_collect_vars(Term t, u32 *vars, u32 *n, u32 cap) {
+// The auxiliary predicate naming a subformula carries EVERY variable
+// of it: a truncated argument list (the old 128-variable cap) makes
+// `aux(v1..v128) <-> G(v1..v200)` assert that G ignores v129..v200 --
+// a strengthening, i.e. unsound.
+
+static void fol_collect_vars_rec(Term t, u32 *n) {
   switch (term_tag(t)) {
     case TAG_FVR: {
       u32 id = term_ext(t);
-      for (u32 i = 0; i < *n; i++) if (vars[i] == id) return;
-      if (*n < cap) vars[(*n)++] = id;
+      if (fol_var_stamped(id)) return;
+      fol_vstamp_fit(id);
+      g_fol_vstamp[id] = g_fol_vepoch;
+      fol_sk_fit(&g_fol_ts_vars, &g_fol_ts_vars_cap, *n);
+      g_fol_ts_vars[(*n)++] = t;
       return;
     }
     case TAG_CTR: {
       u32 nk = term_ctr_n(t);
-      for (u32 i = 0; i < nk; i++) {
-        fol_collect_vars(term_ctr_at(t, i), vars, n, cap);
-      }
+      for (u32 i = 0; i < nk; i++) fol_collect_vars_rec(term_ctr_at(t, i), n);
       return;
     }
     default: return;
   }
 }
 
+static u32 fol_collect_vars(Term t) {
+  u32 n = 0u;
+  fol_vepoch_next();
+  fol_collect_vars_rec(t, &n);
+  return n;
+}
+
 // Build a fresh auxiliary atom A_n(v1, ..., vk) from the var list.
-static Term fol_fresh_aux(const u32 *vars, u32 n_vars) {
+static Term fol_fresh_aux(const Term *vars, u32 n_vars) {
+  if (FOL_LAB_TSEITIN_BASE + g_fol_tseitin_next >= FOL_LAB_SKOLEM_BASE) {
+    g_fol_ts_out = 1u;   // callers abandon the clause set
+    return term_new_ctr(FOL_LAB_TSEITIN_BASE, NULL, 0u);
+  }
   u32 label = FOL_LAB_TSEITIN_BASE + g_fol_tseitin_next;
   g_fol_tseitin_next++;
-  if (n_vars == 0u) return term_new_ctr(label, NULL, 0u);
-  Term kids[FOL_TSEITIN_MAX_VARS];
-  if (n_vars > FOL_TSEITIN_MAX_VARS) n_vars = FOL_TSEITIN_MAX_VARS;
-  for (u32 i = 0; i < n_vars; i++) kids[i] = term_new_fvr(vars[i]);
-  return term_new_ctr(label, kids, n_vars);
+  return term_new_ctr(label, n_vars ? vars : NULL, n_vars);
 }
 
 // Append a clause from a literal list (literals are copied).
@@ -533,10 +718,8 @@ static FolLit fol_tseitin_rec(Term f, FolClause ***out, u32 *n, u32 *cap) {
   FolLit name_b = fol_tseitin_rec(left,  out, n, cap);
   FolLit name_c = fol_tseitin_rec(right, out, n, cap);
 
-  u32 vars[FOL_TSEITIN_MAX_VARS];
-  u32 n_vars = 0u;
-  fol_collect_vars(f, vars, &n_vars, FOL_TSEITIN_MAX_VARS);
-  Term aux = fol_fresh_aux(vars, n_vars);
+  u32 n_vars = fol_collect_vars(f);
+  Term aux = fol_fresh_aux(g_fol_ts_vars, n_vars);
 
   FolLit neg_aux = { .atom = aux, .sign = 1u };
   FolLit pos_aux = { .atom = aux, .sign = 0u };

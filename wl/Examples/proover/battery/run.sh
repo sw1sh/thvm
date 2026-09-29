@@ -14,8 +14,9 @@
 # H29-H32 cover functors wider than a term node, read through a curried
 # encoding: a refutation through it confirms only a Horn step, a name at
 # two arities is two symbols, and quoted atoms cannot spell its names.
-# H33: a Skolem term over 17 universals is wider than the unifier handles,
-# and no saturation may read it.
+# H33: an existential under 17 universals: a Skolem term over all of them
+# passed the unifier whole (VerifiedGood); the witness takes the universals
+# its body mentions, and the step's countermodel is found.
 # Usage: run.sh [CheckProof]
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=${1:-$HERE/../../../../bin/CheckProof}

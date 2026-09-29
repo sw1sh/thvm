@@ -4658,7 +4658,8 @@ fn Term fol_mk_ex (Term var, Term body);
 fn Term fol_nnf(Term f);
 
 // Skolemization: replaces every `∃y` with sk_n(x1..xk), where x1..xk
-// are the enclosing ∀-bound vars.  Drops the surviving `∀`
+// are the enclosing ∀-bound vars (past REWRITE_MAX_ARITY of them, only
+// those the ∃-body mentions).  Drops the surviving `∀`
 // quantifiers; output is a quantifier-free formula whose free
 // variables are implicitly universal.  Skolem function symbols sit
 // in the [FOL_LAB_SKOLEM_BASE, FOL_LAB_NOT) reserved range.
@@ -4669,6 +4670,9 @@ fn Term fol_nnf(Term f);
 fn Term fol_skolemize    (Term f);
 fn void fol_reset_skolem (void);
 fn u8   fol_is_skolem    (u32 label);
+// 1 once a Skolem or Tseitin label family ran out since its reset: the
+// clausification produced since then must be discarded.
+fn u8   fol_labels_exhausted(void);
 
 // Distribute ∨ over ∧ to produce a conjunction-of-disjunctions.
 // Caller must run fol_nnf and fol_skolemize first.  Worst-case

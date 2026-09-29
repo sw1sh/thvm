@@ -858,7 +858,13 @@ static AtpStatus pc_saturate(Term conj, double cap, int ordered) {
     fol_reset_tseitin();
     cl = fol_tseitin_extract_clauses(sk, &nc);
   }
-  if (cl == NULL) return ATP_ABORTED;
+  if (cl == NULL || fol_labels_exhausted()) {
+    if (cl != NULL) {
+      for (u32 j = 0; j < nc; j++) fol_clause_free(cl[j]);
+      free(cl);
+    }
+    return ATP_ABORTED;
+  }
   u32 kept = 0, wide = 0;
   for (u32 j = 0; j < nc; j++) {
     if (pc_clause_wide(cl[j])) {

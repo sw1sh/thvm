@@ -190,6 +190,7 @@ for the per-commit story.
 - Derivation-history export for learned CP selection (`THVM_ATP_HISTORY_EXPORT=<path>`, `src/atp/history.c`): an opt-in, observation-only 64-byte record stream of queue pushes (seq-hash sampled at `THVM_ATP_HISTORY_RATE`, default 1/16), selections with pop outcomes, in-place reweights, deletions, parent deaths and the rule-side trace DAG (entries from proof emission flagged), with packed-byte structural features; its work runs off the work clock, so recorded and unrecorded runs select identically.  `tools/atp_enigma/np0_extract.py` labels a run from the emitted TSTP proof's citations; `tools/atp_enigma/history_net.py` trains a derivation-history CP scorer on the tinygrad Tensor API and runs the phase-0 offline gate.
 - Learned CP selection, phase 0b (`tools/atp_enigma/listwise_net.py`): the derivation-history scorer trained with a listwise loss (at each sampled selection step, -log of the softmax mass of the pending proof pairs within the rebuilt queue, a segment log-sum-exp by `scatter_reduce`), with the engine's own signal as input (its rank and priority at the step; the untrained model ranks exactly as the engine), and the pre-registered phase-0b offline gate (median-percentile ratio and top-10 miss-rate ratio, both at most 0.5).  `history_net.py`'s gate takes a per-step scorer.
 - Learned CP selection, phase 0c: the history export's opt-in `F` record (`THVM_ATP_HISTORY_CPFEAT=1`) carries each pushed CP's 14 engine features (`thvm_atp_cp_features` on the queued pair decoded from the slot, age = its seq), the vector a push-time scorer computes; `tools/atp_enigma/np0_extract.py` keeps them (`cpfeat`), and `tools/atp_enigma/static_net.py` trains a static listwise head over them plus log1p of the push priority (scored once at push, starting as the engine's ranking) and runs the pre-registered phase-0c gate.  FindProof runs without a heap collector, so the record's decoded Terms are never reclaimed: a long export can exhaust the heap.
+- FOF clausification without silent caps: the Skolemizer keeps its universal scope on one shared stack (a 256-deep copy per binder used to hand back the formula with its quantifiers still inside) and, past `REWRITE_MAX_ARITY` universals, gives a Skolem term only the variables its body mentions; Tseitin definitions carry every free variable of the subformula they name (a 128-variable truncation made the definition a strengthening); a disjunction wider than `FOL_MAX_LITS` is chunked with named remainders instead of vanishing (HWV051+1's 201-literal domain closure, PRD001+1's 85-way conjecture); a Skolem or definition family that runs out of labels abandons the clause set instead of wrapping onto live symbols.
 - The term rebuilds the clausal engine and CheckProof share (substitution, renaming apart, variable canonicalisation, KBO hashing, demodulation) handle any arity: past `REWRITE_MAX_ARITY` they used to return the subterm untouched -- a renaming or substitution that silently skipped part of a clause.
 - FindProof builds on modern Linux compilers: the TPTP UEQ reader no longer calls the GNU-only `memmem`, which gcc 14+ / clang 16+ reject as an implicit declaration under thvm's strict feature macros (older compilers truncated its pointer result to `int`).
 - Waldmeister-style ATP layer: KBO / LPO, unification, critical pairs,
@@ -211,13 +212,14 @@ for the per-commit story.
   in the problem's own symbol spelling -- previously it gave up.  The gate
   now reads `$true`/`$false` literals at their fixed value (as free
   predicates, `p => $false` with `p` read "satisfiable").
-- FOF clausification never drops a clause: a record whose naive
-  distribution would emit a clause wider than `FOL_MAX_LITS` (64) goes
-  through Tseitin like one past the clause-count bound.  The extractor used
-  to skip such a clause silently (the one-element gate read the Theorems
-  LCL662+1.010 / LCL668+1.015 as satisfiable), or fail the record outright
-  when it was the only clause ("clausification failed" on HWV051+1,
-  PRD001+1 and six J13 FNT problems).
+- FOF clausification never drops a clause: the extractor chunks a clause
+  wider than `FOL_MAX_LITS` (64) with named remainders, on the
+  distribution and the Tseitin route alike (see "FOF clausification
+  without silent caps").  It used to skip such a clause silently (the
+  one-element gate read the Theorems LCL662+1.010 / LCL668+1.015 as
+  satisfiable), or fail the record outright when it was the only clause
+  ("clausification failed" on HWV051+1, PRD001+1 and six J13 FNT
+  problems).
 - `tools/casc/model_check.py`: an independent finite-model checker (own
   TPTP tokenizer, parser with include selections, evaluator) for
   FindProof's FiniteModel answers -- checks the status claim, symbol

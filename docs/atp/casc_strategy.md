@@ -227,13 +227,14 @@ FindProof's only Satisfiable / CounterSatisfiable answer on FOF input is a
   `fol_clause_new` refuses and the extractor SKIPPED while the record's
   other clauses survived: a silently weaker set. The first library sweep
   found the gate "satisfiable" on the Theorems LCL662+1.010 and
-  LCL668+1.015 (and the CounterSatisfiable LCL669+1.020) that way. Such
-  records now go through Tseitin (`fof_cnf_width`); an allocation failure
-  is the remaining drop path. The claim therefore re-evaluates every
-  ORIGINAL record -- as parsed, universally closed, the conjecture negated
-  -- under the assignment (predicates the search left open read false),
-  and one false record withdraws it: that check is what withdrew the
-  three LCL claims before the width fix.
+  LCL668+1.015 (and the CounterSatisfiable LCL669+1.020) that way. The
+  extractor now chunks such a clause with named remainders
+  (`fol_append_wide`), on the distribution and the Tseitin route alike;
+  an allocation failure is the remaining drop path. The claim therefore
+  re-evaluates every ORIGINAL record -- as parsed, universally closed,
+  the conjecture negated -- under the assignment (predicates the search
+  left open read false), and one false record withdraws it: that check
+  is what withdrew the three LCL claims before the width fix.
 - **Inputs whose parse can differ from TPTP semantics withdraw the
   claim:** numbers and distinct objects (interpreted as distinct values),
   `$`-symbols, a name at two arities or as both predicate and function, a
