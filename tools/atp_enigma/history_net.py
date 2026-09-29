@@ -38,7 +38,10 @@
 #
 # Usage:
 #   history_net.py train  <npz_dir> <pool.tsv> <out_prefix> [dim=32 hid=32
-#                         epochs=30 seed=0 weighting=uniform|residence]
+#                         epochs=60 seed=0 weighting=uniform|residence
+#                         warm_steps=0]
+#                  (warm_steps > 0: the scoring MLP starts from a features-
+#                  only head trained that many steps, saved as <out>_phi)
 #   history_net.py gate   <model_prefix> <npz_dir> <pool.tsv> <out_prefix>
 #   history_net.py valgate <model_prefix> <npz_dir> <pool.tsv> <out_prefix>
 #                  (the same statistics on the train-carved validation slice)
@@ -741,6 +744,71 @@ def make_batches(probs, core_cap=4096, max_n=64):
     return out
 
 
+class PhiHead:
+    """Features-only head (no derivation history): the warm start of the
+    history net's scoring MLP, and the features-only baseline."""
+
+    def __init__(self, hid):
+        self.h1 = nn.Linear(N_PHI, hid)
+        self.out = nn.Linear(hid, 1)
+
+    def __call__(self, x):
+        return self.out(self.h1(x).relu()).reshape(-1)
+
+
+def phi_rows(probs, rng, K, std, weighting):
+    X, Y, W = [], [], []
+    for p in probs:
+        pos = np.nonzero(p.label)[0]
+        neg = np.nonzero(~p.label & (p.in_sample | (p.selected_at >= 0)))[0]
+        if len(neg) > K:
+            neg = rng.choice(neg, K, replace=False)
+        rr = np.concatenate([pos, neg])
+        y = p.label[rr].astype(np.float32)
+        rw = row_weights(p, rr, weighting)
+        w = balance_weights(y, rw, np.zeros(len(rr), np.int64), 1) / len(probs)
+        X.append((p.phi[rr] - std.mu_phi) / std.sd_phi); Y.append(y); W.append(w)
+    return np.concatenate(X), np.concatenate(Y), np.concatenate(W)
+
+
+def train_phi_head(tr, std, hid, weighting, steps, rng, n_probs=64, K=256,
+                   lr=3e-3):
+    """Features-only head trained on many problems per step (a fixed
+    padded shape, one TinyJit capture)."""
+    head = PhiHead(hid)
+    opt = nn.optim.Adam(get_parameters(head), lr=lr)
+    R = pow2(n_probs * (K + 64))
+
+    def step(x, y, w):
+        loss = (bce_rows(head(x), y) * w).sum()
+        opt.zero_grad(); loss.backward(); opt.step()
+        return loss.realize()
+    jit = TinyJit(step)
+    with train_mode():
+        for it in range(steps):
+            idx = rng.choice(len(tr), min(n_probs, len(tr)), replace=False)
+            X, Y, W = phi_rows([tr[i] for i in idx], rng, K, std, weighting)
+            n = min(len(Y), R)
+            Xp = np.zeros((R, N_PHI), np.float32); Xp[:n] = X[:n]
+            Yp = np.zeros(R, np.float32); Yp[:n] = Y[:n]
+            Wp = np.zeros(R, np.float32); Wp[:n] = W[:n]
+            loss = jit(Tensor(Xp).realize(), Tensor(Yp).realize(), Tensor(Wp).realize())
+            if it % 100 == 0:
+                print(f"  phi head step {it} loss {loss.item():.4f}", flush=True)
+    return head
+
+
+def warm_start(model, head):
+    """History net whose scoring MLP starts as the features-only head:
+    the embedding columns of h1 start at zero."""
+    W = np.zeros((model.hid, model.dim + N_PHI), np.float32)
+    W[:, model.dim:] = head.h1.weight.numpy()
+    model.h1.weight.assign(Tensor(W)).realize()
+    model.h1.bias.assign(Tensor(head.h1.bias.numpy())).realize()
+    model.out.weight.assign(Tensor(head.out.weight.numpy())).realize()
+    model.out.bias.assign(Tensor(head.out.bias.numpy())).realize()
+
+
 def batch_logits(model, fb, i1, i2, ph):
     """Logits of a FixedBatch: its CP rows, then its other rows."""
     T = model.table(fb.layout)
@@ -763,7 +831,7 @@ def batch_loss(model, fb, i1, i2, ph, y, w):
 
 def cmd_train(npz_dir, pool_path, out_prefix, dim=32, hid=32, epochs=60,
               seed=0, K=256, lr=3e-3, patience=8, weighting="uniform",
-              max_levels=100):
+              max_levels=100, warm_steps=0):
     split = load_pool(pool_path)
     names = sorted(n for n, s in split.items() if s == "train")
     tr_names = [n for n in names if not is_val(n)]
@@ -782,6 +850,12 @@ def cmd_train(npz_dir, pool_path, out_prefix, dim=32, hid=32, epochs=60,
     rng = np.random.default_rng(seed)
     std = Std(tr)
     model = HistoryNet(dim, hid)
+    if warm_steps > 0:
+        head = train_phi_head(tr, std, hid, weighting, warm_steps, rng)
+        warm_start(model, head)
+        save_model(out_prefix + "_phi", model, std,
+                   dict(dim=dim, hid=hid, weighting=weighting, seed=seed,
+                        warm_steps=warm_steps, features_only=1))
     opt = nn.optim.Adam(get_parameters(model), lr=lr)
     tb = [FixedBatch([tr[i] for i in b], std, dim, K) for b in make_batches(tr)]
     vb = [FixedBatch([va[i] for i in b], std, dim, K) for b in make_batches(va)]
@@ -805,7 +879,7 @@ def cmd_train(npz_dir, pool_path, out_prefix, dim=32, hid=32, epochs=60,
         fb.fixed = [x.realize() for x in fb.sample(vrng, weighting)]
     ntr = sum(len(fb.probs) for fb in tb); nva = sum(len(fb.probs) for fb in vb)
     meta = dict(dim=dim, hid=hid, weighting=weighting, seed=seed, lr=lr, K=K,
-                max_levels=max_levels)
+                max_levels=max_levels, warm_steps=warm_steps)
     best = (np.inf, -1)
     for ep in range(epochs):
         te = time.time()
@@ -1178,6 +1252,7 @@ def main():
         if len(a) > 5: kw["epochs"] = int(a[5])
         if len(a) > 6: kw["seed"] = int(a[6])
         if len(a) > 7: kw["weighting"] = a[7]
+        if len(a) > 8: kw["warm_steps"] = int(a[8])
         cmd_train(a[0], a[1], a[2], **kw)
     elif cmd == "gate":
         cmd_gate(*sys.argv[2:6])
