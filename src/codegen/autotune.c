@@ -1121,12 +1121,16 @@ fn u64 kernel_bench_us(u32 kid, u32 n_runs, u64 early_stop) {
     u64 t0 = cg_now_us();
     kernel_bench_fire(kid);
     u64 dt = cg_now_us() - t0;
-    if (dt < best) best = dt;
+    if (dt < best) {
+      best = dt;
+    }
     // Early-stop (tinygrad _time_program: `if early_stop < min(tms): break`):
     // once the min already exceeds the budget (best-so-far * 3) this variant
     // cannot win, so stop the reps instead of paying n_runs full dispatches of
     // a slow tile.  early_stop == 0 disables (baseline/heuristic/variant probes).
-    if (early_stop != 0 && best > early_stop) break;
+    if (early_stop != 0 && best > early_stop) {
+      break;
+    }
   }
   return best;
 }

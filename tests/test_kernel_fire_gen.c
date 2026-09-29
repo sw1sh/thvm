@@ -100,7 +100,7 @@ int main(void) {
   u32 before_gen = KERNEL_FIRE_GEN;
   u32 before_k1_fire_gen = K1->fire_gen;
   u32 before_k2_fire_gen = K2->fire_gen;
-  u64 bench_us = kernel_bench_us(k2, 3);
+  u64 bench_us = kernel_bench_us(k2, 3, 0);
   (void)bench_us;
   CHECK_EQ(cg_kernel_dispatch_count(k1), before_k1);
   CHECK_EQ(cg_kernel_dispatch_count(k2), before_k2 + 3);
