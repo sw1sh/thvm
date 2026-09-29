@@ -30,6 +30,7 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- The tensor-core recogniser's UPat tables are spelled as constant expressions, so the single-TU build (FindProof's CASC source package included) compiles with clang 14, which rejects a `const` object's value in a static initializer (C11 6.7.9p4); gcc accepted it as an extension.
 - `bin/test_kernel_fire_gen` builds again: it passes `kernel_bench_us` the
   early-stop budget that argument gained with the beam-search bounds (0
   disables it).

@@ -21,33 +21,33 @@
 // whenever the structural shape matches.
 
 // Pattern leaves: bind A_buf at slot 0, A_addr at slot 1,
-// B_buf at slot 2, B_addr at slot 3.
-static UPat const rec_tc_a_buf  = { UOP_BUFFER,  0,    0, 0, NULL,           NULL };
-static UPat const rec_tc_a_addr = { 0,           0xFF, 0, 1, NULL,           NULL };
-static UPat const rec_tc_a_kids[2] = { rec_tc_a_buf, rec_tc_a_addr };
-static UPat const rec_tc_a      = { UOP_INDEX_E, 2,    0, -1, rec_tc_a_kids, NULL };
+// B_buf at slot 2, B_addr at slot 3.  Each sub-pattern is a braced macro,
+// not a named object: C11 6.7.9p4 wants constant expressions in a static
+// initializer, and a const object's value is not one (clang 14 rejects it).
+#define REC_TC_A_BUF  { UOP_BUFFER,  0,    0, 0,  NULL, NULL }
+#define REC_TC_A_ADDR { 0,           0xFF, 0, 1,  NULL, NULL }
+static UPat const rec_tc_a_kids[2] = { REC_TC_A_BUF, REC_TC_A_ADDR };
+#define REC_TC_A      { UOP_INDEX_E, 2,    0, -1, rec_tc_a_kids, NULL }
 
-static UPat const rec_tc_b_buf  = { UOP_BUFFER,  0,    0, 2, NULL,           NULL };
-static UPat const rec_tc_b_addr = { 0,           0xFF, 0, 3, NULL,           NULL };
-static UPat const rec_tc_b_kids[2] = { rec_tc_b_buf, rec_tc_b_addr };
-static UPat const rec_tc_b      = { UOP_INDEX_E, 2,    0, -1, rec_tc_b_kids, NULL };
+#define REC_TC_B_BUF  { UOP_BUFFER,  0,    0, 2,  NULL, NULL }
+#define REC_TC_B_ADDR { 0,           0xFF, 0, 3,  NULL, NULL }
+static UPat const rec_tc_b_kids[2] = { REC_TC_B_BUF, REC_TC_B_ADDR };
+#define REC_TC_B      { UOP_INDEX_E, 2,    0, -1, rec_tc_b_kids, NULL }
 
-static UPat const rec_tc_mul_kids[2] = { rec_tc_a, rec_tc_b };
-static UPat const rec_tc_mul    = { UOP_MUL,     2,    0, -1, rec_tc_mul_kids, NULL };
+static UPat const rec_tc_mul_kids[2] = { REC_TC_A, REC_TC_B };
+#define REC_TC_MUL    { UOP_MUL,     2,    0, -1, rec_tc_mul_kids, NULL }
 
 // REDUCE has uop_arity 1 -- src[0] is the body. UP1 trusts explicit
 // nsrc, so nsrc=1 walks just the body slot. The kind/axis NUMs at
 // loc+1, loc+2 are not Term children so we don't bind them here.
-static UPat const rec_tc_reduce_kids[1] = { rec_tc_mul };
-static UPat const rec_tc_reduce = { UOP_REDUCE,  1,    0, -1, rec_tc_reduce_kids, NULL };
+static UPat const rec_tc_reduce_kids[1] = { REC_TC_MUL };
+#define REC_TC_REDUCE { UOP_REDUCE,  1,    0, -1, rec_tc_reduce_kids, NULL }
 
 // STORE heap layout: [buf, addr, value]. nsrc=3 walks all three.
 // We don't bind buf / addr here -- the rebuilder reads them off the
 // store's heap directly.
-static UPat const rec_tc_store_buf  = { 0, 0xFF, 0, -1, NULL, NULL };
-static UPat const rec_tc_store_addr = { 0, 0xFF, 0, -1, NULL, NULL };
 static UPat const rec_tc_store_kids[3] = {
-  rec_tc_store_buf, rec_tc_store_addr, rec_tc_reduce
+  { 0, 0xFF, 0, -1, NULL, NULL }, { 0, 0xFF, 0, -1, NULL, NULL }, REC_TC_REDUCE
 };
 static UPat const rec_tc_store = { UOP_STORE,   3,    0, -1, rec_tc_store_kids, NULL };
 
