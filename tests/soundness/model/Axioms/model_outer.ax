@@ -1,0 +1,2 @@
+fof(outer_p,axiom,p).
+include('Axioms/model_inner.ax').
