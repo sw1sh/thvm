@@ -3177,9 +3177,24 @@ static Term ru_index_leaf(Term t, Term const *coords, u32 ndim) {
   }
 }
 
-// GATHER(src, idx, dim) at this node's ranges.  idx loads at the row-major
-// address of the ranges over idx's own shape (ru_build_input_addr_for
-// would size by slot 0, src).  src loads at the ranges with axis `dim`
+// The value of operand `t` of shape `dims` at the node's own ranges: the
+// operand an indexed op reads where its consumer does (GATHER idx, SCATTER
+// base).  A structural operand is read through its storage, as the storage
+// slots are (ru_index_leaf), so its views compose into the address exactly
+// and visit binds that storage (visit_operand_at_ranges).  A computed one
+// fuses like an elementwise operand, at the row-major address over its own
+// shape (ru_build_input_addr_for would size a GATHER's by slot 0, src).
+static Term ru_read_operand_at_ranges(Term t, u32 const *dims,
+                                      RuRangeMap const *rm) {
+  if (uop_indexed_operand_is_structural(t)) {
+    return ru_index_leaf(t, rm->in_rngs, rm->in_ndim);
+  }
+  Term addr = ru_build_addr_with_dims(rm->in_rngs, rm->in_ndim, dims);
+  return ru_rewrite_child(t, addr, rm);
+}
+
+// GATHER(src, idx, dim) at this node's ranges.  idx is read at the ranges
+// (ru_read_operand_at_ranges).  src loads at the ranges with axis `dim`
 // replaced by the loaded index, clamped to 0 so the load stays in bounds,
 // and the value is gated INVALID (read as 0) when the index is out of
 // range: the collapsed one-hot sum tinygrad's pm_reduce_load_collapse
@@ -3197,8 +3212,7 @@ static Term ru_lower_gather(Term self, u64 loc, RuRangeMap const *rm) {
       || is.ndim != rm->in_ndim || ss.ndim != is.ndim) {
     ru_index_leaf_fail(UOP_GATHER, "has operand shapes its ranges do not fit");
   }
-  Term iaddr = ru_build_addr_with_dims(rm->in_rngs, rm->in_ndim, is.dims);
-  Term iv    = uop_cast(ru_rewrite_child(idx, iaddr, rm), DT_INT32);
+  Term iv    = uop_cast(ru_read_operand_at_ranges(idx, is.dims, rm), DT_INT32);
   Term valid = uop_int_binary(UOP_IAND,
       uop_int_binary(UOP_ILT, uop_const(DT_INT32, (u32)-1), iv),
       uop_int_binary(UOP_ILT, iv, uop_const(DT_INT32, ss.dims[dim])));
@@ -3212,9 +3226,10 @@ static Term ru_lower_gather(Term self, u64 loc, RuRangeMap const *rm) {
 
 // SCATTER(base, idx, src, dim, kind, include_self) at node i: always its
 // own kernel over its output OUT.  base is read at the node's ranges R
-// (base.shape); idx and src at fresh loop ranges E over idx.shape.  With t
-// = E where t_dim is the loaded index clamped to 0, and valid its range
-// check, the accumulate store is
+// over base.shape (ru_read_operand_at_ranges); idx and src through
+// ru_index_leaf at fresh loop ranges E over idx.shape.  With t = E where
+// t_dim is the loaded index clamped to 0, and valid its range check, the
+// accumulate store is
 //   OUT[t] = valid ? OUT[t] + src[E] : OUT[t]     (SUM; src[E] for REPLACE)
 // so an invalid index writes the old value back.  The src positions that
 // meet at one output share t's other coordinates, so every loop order
@@ -3253,8 +3268,7 @@ static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {
   }
   Term out     = uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype, bs.ndim, bs.dims, 0);
   Term my_addr = ru_build_index_addr_for(rm, self);
-  Term base    = ru_rewrite_child(heap_read(loc + 0),
-                                  ru_build_input_addr_for(rm, loc), rm);
+  Term base    = ru_read_operand_at_ranges(heap_read(loc + 0), bs.dims, rm);
   Term e[RU_MAX_AXES];
   for (u32 a = 0; a < is.ndim; a++) {
     e[a] = ru_new_range(is.dims[a], KAX_LOOP);

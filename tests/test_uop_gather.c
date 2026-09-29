@@ -15,6 +15,9 @@
 //      (one extra kernel), a prior kernel's output, a CONST;
 //   4. idx forms: idx + 1 (fused on the index grid, realized before an
 //      expand), a cast from float, tokens[:, 1:], edge_index[1] with V < N;
+//      idx views read in place through their storage, as src is: a
+//      view-alias TEN (an offset, a PERMUTE), lazy SHRINK and FLIP views
+//      used directly, a column SHRINK gathering along dim 1;
 //   5. fusion: gather * 2 + 1 is one kernel; a gather inside a SUM; a
 //      gather feeding a matmul realizes and the matmul runs on BLAS;
 //   6. the gather kernel holds no REDUCE, loops at most |idx| times per
@@ -506,6 +509,103 @@ static void test_idx_forms(void) {
   check_gather_kernel(tid, k0, E * ED);
 }
 
+// A gather of a fresh (EV, ED) table by the view `idx`, whose logical
+// values are idx_eff: one kernel, the view read in place.
+static void idx_view_case(Term idx, i32 const *idx_eff, Shape const *is,
+                          u32 dim, char const *what) {
+  Shape ss = {0};
+  ss.ndim = 2; ss.dims[0] = EV; ss.dims[1] = ED;
+  f32 w[EV * ED];
+  fill_src(w, EV * ED, 0.5f);
+  u32 in = numel_of(is);
+  f32 want[EN * ED], got[EN * ED];
+  CHECK(in <= EN * ED);
+  ref_gather(w, &ss, idx_eff, is, dim, want);
+  Term g = uop_gather(ten(mk(DT_FP32, 2, ss.dims, w)), idx, dim);
+  CHECK(g != 0);
+  u32 k0 = KERNELS_NEXT;
+  u32 tid = realize_into(g, got, in);
+  check_bytes(got, want, in, what);
+  CHECK_EQ(KERNELS_NEXT - k0, 1u);
+  check_dispatch(k0);
+  check_gather_kernel(tid, k0, in);
+}
+
+static void test_idx_views(void) {
+  Shape is = {0};
+  is.ndim = 2; is.dims[0] = EN; is.dims[1] = ED;
+  u32 id[2] = { EN, ED };
+  // Row ids behind three junk entries: W[ids] through an offset view.
+  static i32 const ids[EN] = { 2, -1, 0, EV, 3, 5, 1, 10982377 };
+  i32 grid[EN * ED];
+  for (u32 p = 0; p < EN * ED; p++) {
+    grid[p] = ids[p / ED];
+  }
+  i32 big[EN + 3] = { 4, -7, 1 };
+  memcpy(big + 3, ids, sizeof ids);
+  u32 bd[1] = { EN + 3 }, be[2] = { 3, EN + 3 };
+  Term alias = materialize_uop_in_env(uop_shrink(ten(mk(DT_INT32, 1, bd, big)), 1, be), 0);
+  CHECK_EQ(term_tag(alias), TAG_TEN);
+  CHECK(TENS[(u32)term_val(alias)].view.offset != 0);
+  idx_view_case(rows(alias, EN, ED), grid, &is, 0, "idx view-alias TEN");
+  idx_view_case(rows(uop_shrink(ten(mk(DT_INT32, 1, bd, big)), 1, be), EN, ED), grid,
+                &is, 0, "idx lazy SHRINK then expand");
+  // An index that varies along both axes, with invalid entries.
+  i32 gv[EN * ED];
+  for (u32 r = 0; r < EN; r++) {
+    for (u32 c = 0; c < ED; c++) {
+      gv[r * ED + c] = (i32)((r * 3u + c * 5u) % (EV + 3)) - 1;
+    }
+  }
+  // A PERMUTE view-alias TEN (offset 0, not contiguous): gv's transpose.
+  i32 gt[ED * EN];
+  for (u32 r = 0; r < EN; r++) {
+    for (u32 c = 0; c < ED; c++) {
+      gt[c * EN + r] = gv[r * ED + c];
+    }
+  }
+  u32 td[2] = { ED, EN }, perm[2] = { 1, 0 };
+  Term palias = materialize_uop_in_env(uop_permute(ten(mk(DT_INT32, 2, td, gt)), 2, perm), 0);
+  CHECK_EQ(term_tag(palias), TAG_TEN);
+  CHECK(!TENS[(u32)term_val(palias)].view.contiguous);
+  idx_view_case(palias, gv, &is, 0, "idx PERMUTE view-alias TEN");
+  // tokens[:, 1:] used directly as a 2-D index.
+  i32 wide[EN * (ED + 1)];
+  for (u32 r = 0; r < EN; r++) {
+    wide[r * (ED + 1)] = 9;
+    for (u32 c = 0; c < ED; c++) {
+      wide[r * (ED + 1) + c + 1] = gv[r * ED + c];
+    }
+  }
+  u32 wd[2] = { EN, ED + 1 }, wbe[4] = { 0, EN, 1, ED + 1 };
+  idx_view_case(uop_shrink(ten(mk(DT_INT32, 2, wd, wide)), 2, wbe), gv, &is, 0,
+                "idx 2-D SHRINK view");
+  // A FLIP view (a negative stride and an offset).
+  i32 fl[EN * ED];
+  for (u32 r = 0; r < EN; r++) {
+    for (u32 c = 0; c < ED; c++) {
+      fl[r * ED + c] = gv[(EN - 1 - r) * ED + c];
+    }
+  }
+  idx_view_case(uop_flip(ten(mk(DT_INT32, 2, id, fl)), 1u), gv, &is, 0, "idx FLIP view");
+  // Along dim 1: out[i][j] = W[i][idx[i][j]], idx a column SHRINK of an
+  // (EV, 5) grid.
+  Shape is1 = {0};
+  is1.ndim = 2; is1.dims[0] = EV; is1.dims[1] = 3;
+  i32 cols[EV * 5], ceff[EV * 3];
+  for (u32 r = 0; r < EV; r++) {
+    for (u32 c = 0; c < 5; c++) {
+      cols[r * 5 + c] = (i32)((r * 2u + c * 3u) % (ED + 2)) - 1;
+    }
+    for (u32 c = 0; c < 3; c++) {
+      ceff[r * 3 + c] = cols[r * 5 + c + 2];
+    }
+  }
+  u32 cd[2] = { EV, 5 }, cbe[4] = { 0, EV, 2, 5 };
+  idx_view_case(uop_shrink(ten(mk(DT_INT32, 2, cd, cols)), 2, cbe), ceff, &is1, 1,
+                "idx column SHRINK, dim 1");
+}
+
 // === 5. fusion ===
 static void test_fusion(void) {
   f32 w[EV * ED];
@@ -673,6 +773,8 @@ int main(void) {
   test_src_forms();
   TEST_BEGIN("gather/idx-forms");
   test_idx_forms();
+  TEST_BEGIN("gather/idx-views");
+  test_idx_views();
   TEST_BEGIN("gather/fusion");
   test_fusion();
   TEST_BEGIN("gather/jit-replay");

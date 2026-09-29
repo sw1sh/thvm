@@ -17,7 +17,10 @@
 //   3. an all-invalid idx leaves base; REPLACE is last-write-wins;
 //   4. idx as an expand of an {E} tensor and as edge_index[1]; a computed
 //      src realizes into its own kernel (2 kernels), a gathered one too
-//      (message passing, out[dst[e]] += h[src[e]]);
+//      (message passing, out[dst[e]] += h[src[e]]); base views read in
+//      place through their storage, as idx and src are (a view-alias TEN
+//      with an offset or a PERMUTE, lazy row / column SHRINK and FLIP
+//      views), and a computed base fused into the stores, one kernel each;
 //   5. the scatter is an intermediate: its output buffer may be a reused
 //      arena slot, and the init store covers it;
 //   6. every store loops at most max(|base|, |idx|) times, no REDUCE, and
@@ -438,6 +441,102 @@ static void test_operand_forms(void) {
   check_scatter_kernel(tid, k0, 3, SV * SD, E * SD);
 }
 
+enum {
+  BASE_ALIAS, BASE_PERMUTE_ALIAS, BASE_SHRINK_ROWS, BASE_SHRINK_COLS,
+  BASE_FLIP, BASE_COMPUTED, BASE_FORMS
+};
+
+// A fresh (SV, SD) base of the given form; eff receives its logical values.
+static Term base_form(u32 form, f32 *eff) {
+  u32 bd[2] = { SV, SD };
+  f32 raw[(SV + 2) * (SD + 2)];
+  fill(raw, (SV + 2) * (SD + 2), 0.5f, 0.25f);
+  switch (form) {
+    case BASE_ALIAS: {
+      memcpy(eff, raw + SD, (size_t)SV * SD * 4);
+      u32 d[2] = { SV + 1, SD }, be[4] = { 1, SV + 1, 0, SD };
+      Term a = materialize_uop_in_env(uop_shrink(ten(mk(DT_FP32, 2, d, raw)), 2, be), 0);
+      CHECK(term_tag(a) == TAG_TEN && TENS[(u32)term_val(a)].view.offset != 0);
+      return a;
+    }
+    case BASE_PERMUTE_ALIAS: {
+      for (u32 r = 0; r < SV; r++) {
+        for (u32 c = 0; c < SD; c++) {
+          eff[r * SD + c] = raw[c * SV + r];
+        }
+      }
+      u32 d[2] = { SD, SV }, perm[2] = { 1, 0 };
+      Term a = materialize_uop_in_env(uop_permute(ten(mk(DT_FP32, 2, d, raw)), 2, perm), 0);
+      CHECK(term_tag(a) == TAG_TEN && !TENS[(u32)term_val(a)].view.contiguous);
+      return a;
+    }
+    case BASE_SHRINK_ROWS: {
+      memcpy(eff, raw + 2 * SD, (size_t)SV * SD * 4);
+      u32 d[2] = { SV + 2, SD }, be[4] = { 2, SV + 2, 0, SD };
+      return uop_shrink(ten(mk(DT_FP32, 2, d, raw)), 2, be);
+    }
+    case BASE_SHRINK_COLS: {
+      for (u32 r = 0; r < SV; r++) {
+        for (u32 c = 0; c < SD; c++) {
+          eff[r * SD + c] = raw[r * (SD + 2) + c + 1];
+        }
+      }
+      u32 d[2] = { SV, SD + 2 }, be[4] = { 0, SV, 1, SD + 1 };
+      return uop_shrink(ten(mk(DT_FP32, 2, d, raw)), 2, be);
+    }
+    case BASE_FLIP: {
+      for (u32 r = 0; r < SV; r++) {
+        for (u32 c = 0; c < SD; c++) {
+          eff[r * SD + c] = raw[(SV - 1 - r) * SD + c];
+        }
+      }
+      return uop_flip(ten(mk(DT_FP32, 2, bd, raw)), 1u);
+    }
+    default: {
+      for (u32 q = 0; q < SV * SD; q++) {
+        eff[q] = -raw[q];
+      }
+      return uop_unary(UOP_NEG, ten(mk(DT_FP32, 2, bd, raw)));
+    }
+  }
+}
+
+static void test_base_views(void) {
+  static char const *const names[BASE_FORMS] = {
+    "view-alias TEN", "PERMUTE view-alias TEN", "row SHRINK", "column SHRINK",
+    "FLIP", "computed",
+  };
+  static u32 const kinds[3]  = { SCATTER_SUM, SCATTER_SUM, SCATTER_REPLACE };
+  static u32 const selfs[3]  = { 1, 0, 0 };
+  static u32 const stores[3] = { 3, 3, 2 };
+  Shape bs = shape2(SV, SD), is = shape2(SE, SD);
+  u32 id[2] = { SE, SD };
+  f32 src[SE * SD];
+  fill(src, SE * SD, 0.37f, 0.11f);
+  for (u32 f = 0; f < BASE_FORMS; f++) {
+    for (u32 k = 0; k < 3; k++) {
+      f32 eff[SV * SD], want[SV * SD], got[SV * SD];
+      Term b = base_form(f, eff);
+      if (kinds[k] == SCATTER_SUM) {
+        ref_sum(eff, &bs, IDX0, src, &is, 0, (int)selfs[k], want);
+      } else {
+        ref_replace(eff, &bs, IDX0, src, &is, 0, want);
+      }
+      Term s = uop_scatter(b, ten(mk(DT_INT32, 2, id, IDX0)), ten(mk(DT_FP32, 2, id, src)),
+                           0, kinds[k], selfs[k]);
+      CHECK(s != 0);
+      char what[64];
+      snprintf(what, sizeof what, "base %s, kind %u self %u", names[f], kinds[k], selfs[k]);
+      u32 k0 = KERNELS_NEXT;
+      u32 tid = realize_into(s, got, SV * SD);
+      check_bytes(got, want, SV * SD, what);
+      CHECK_EQ(KERNELS_NEXT - k0, 1u);
+      check_dispatch(k0);
+      check_scatter_kernel(tid, k0, stores[k], SV * SD, SE * SD);
+    }
+  }
+}
+
 // Message passing: out[dst[e]] += h[src[e]] over the valid edges, a gather
 // feeding a scatter (the gathered messages realize first: 2 kernels).
 static void test_message_passing(void) {
@@ -575,6 +674,8 @@ int main(void) {
   test_invalid_and_replace();
   TEST_BEGIN("scatter/operand-forms");
   test_operand_forms();
+  TEST_BEGIN("scatter/base-views");
+  test_base_views();
   TEST_BEGIN("scatter/message-passing");
   test_message_passing();
   TEST_BEGIN("scatter/intermediate");

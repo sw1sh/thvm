@@ -50,6 +50,13 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- A gather's index and a scatter's base that are views of storage (a
+  view-alias TEN with an offset or a PERMUTE, a lazy SHRINK or FLIP) are
+  read through their storage like the other indexed operands
+  (`ru_index_leaf`, bound by `visit_indexed_leaf`).  The elementwise read
+  they used before dropped an alias's offset and strides on both CPU
+  backends, and on the UOp walker misread a lazy row or column SHRINK (out
+  of bounds for a scatter base).  A computed index or base still fuses.
 - `UOP_SCATTER` with SUM or REPLACE lowers to its own kernel: an AFTER chain
   of stores (init, a reset for include_self=0, a serial read-modify-write
   over the index space, and for SUM with include_self a final `+ base`, so

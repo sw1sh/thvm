@@ -6135,6 +6135,8 @@ static void materialize_dump_big_input_source(KernelEntry *ke,
 
 static u32 visit_indexed_leaf(Term t, KernelEntry *ke, u64 root_loc,
                               VisitMemo *memo);
+static u32 visit_operand_at_ranges(Term t, KernelEntry *ke, u64 root_loc,
+                                   VisitMemo *memo);
 
 // Recursive visit.  Returns VISIT_OK on success (the per-op
 // program is gone; visit now exists only to populate ke's input
@@ -6284,21 +6286,25 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     return VISIT_OK;
   }
 
-  // GATHER: idx fuses like any operand; src is read at the lowered
-  // address, which rangeify composed against its storage.
+  // GATHER: src is read at the lowered address, which rangeify composed
+  // against its storage; idx is bound as rangeify reads it.
   if (op == UOP_GATHER) {
     memo->indexed = 1;
-    u32 ii = visit(heap_read(loc + 1), ke, root_loc, memo);
-    if (ii == VISIT_BAIL) return VISIT_BAIL;
+    u32 ii = visit_operand_at_ranges(heap_read(loc + 1), ke, root_loc, memo);
+    if (ii == VISIT_BAIL) {
+      return VISIT_BAIL;
+    }
     u32 si = visit_indexed_leaf(heap_read(loc + 0), ke, root_loc, memo);
-    if (si == VISIT_BAIL) return VISIT_BAIL;
+    if (si == VISIT_BAIL) {
+      return VISIT_BAIL;
+    }
     visit_memo_store(memo, loc, VISIT_OK);
     return VISIT_OK;
   }
 
-  // SCATTER (always its own kernel root): base fuses like any operand;
-  // idx and src are read at lowered addresses composed against their
-  // storage.  Kinds without a lowering decline the kernel.
+  // SCATTER (always its own kernel root): idx and src are read at lowered
+  // addresses composed against their storage; base is bound as rangeify
+  // reads it.  Kinds without a lowering decline the kernel.
   if (op == UOP_SCATTER) {
     memo->indexed = 1;
     u32 kind = uop_scatter_kind(t);
@@ -6307,7 +6313,8 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
                       "its kernel was not emitted\n", kind);
       return VISIT_BAIL;
     }
-    if (visit(heap_read(loc + 0), ke, root_loc, memo) == VISIT_BAIL) {
+    u32 bi = visit_operand_at_ranges(heap_read(loc + 0), ke, root_loc, memo);
+    if (bi == VISIT_BAIL) {
       return VISIT_BAIL;
     }
     for (u32 s = 1; s <= 2; s++) {
@@ -6438,6 +6445,17 @@ static u32 visit_indexed_leaf(Term t, KernelEntry *ke, u64 root_loc,
       break;
     }
     t = heap_read(loc);
+  }
+  return visit(t, ke, root_loc, memo);
+}
+
+// The operand an indexed op reads at the node's own ranges (GATHER idx,
+// SCATTER base), bound as rangeify reads it (ru_read_operand_at_ranges):
+// a structural one as its storage, a computed one as any fused operand.
+static u32 visit_operand_at_ranges(Term t, KernelEntry *ke, u64 root_loc,
+                                   VisitMemo *memo) {
+  if (uop_indexed_operand_is_structural(t)) {
+    return visit_indexed_leaf(t, ke, root_loc, memo);
   }
   return visit(t, ke, root_loc, memo);
 }
