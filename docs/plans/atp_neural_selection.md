@@ -256,6 +256,65 @@ sooner; the misses need a different proof or far fewer steps, which a
 one-step top-K re-ranking did not provide. The lane stays out of the
 schedule and J13 was not run.
 
+## Phase 0e result (2026-09-29): why better ranking does not convert; online FAIL
+
+Pre-registered in two sections, each before the runs it governs
+(`~/.cache/thvm/casc/J13/neural_p3/gate_spec_0e.txt`). Three hypotheses
+for 0d's tie.
+
+H3, overhead. On 0d's 134 common solves the re-ranked lane's wall is
+0.87 of twee's (geometric mean, interval 0.79 to 0.95; slower on 42,
+faster on 53), tracking its selections (0.85); the re-ranker itself takes
+3.4% of the lane's wall. Not the reason.
+
+H1, a longer wall. At 300 s neither twee nor the re-ranked lane solves
+any of the 37 problems both miss at 60 s (FAIL; the gate needed +3).
+Over a third of those runs end on the 3.5 GB memory guard before 300 s,
+most of the rest run the full 300 s, and four exit at once (the lane
+cannot search them).
+
+H2, distribution shift, tested with one DAgger round. A harvest with the
+0d head armed (history export on, the re-ranker's own proofs as labels)
+gives the states the re-ranker walks; `topk_net.py prep ...
+rerank:32:<model>` rebuilds them and replays the head on the rebuilt
+inputs (it reproduces 96,618 of 96,675 stored picks; the rest are FIFO
+picks). On those states 0d's head picks a proof CP at 20% of weight
+selections against 27% on the engine's states (held-out 24% against
+31%), although the labels there favor its own picks: the shift is real. A
+head trained on both trajectories to convergence (`train2`, early
+stopping; 0d had stopped at a 30-epoch cap with the loss still falling)
+fixes the offline number:
+
+| head (validation) | re-ranker-visited states | engine-visited states |
+|---|---|---|
+| engine pick | 0.158 | 0.169 |
+| 0d, R32h32 | 0.202 (rho 1.27) | 0.268 (rho 1.58) |
+| DAgger, D32h64 (chosen) | 0.314 (rho 1.98) | 0.303 (rho 1.79) |
+
+Held-out: 0.359 against R32h32's 0.244 on re-ranker-visited states. A K
+of 64 lifts the ceiling (a proof CP among the candidates) from 0.72 to
+0.86, but the K 64 heads rank worse than K 32. The chosen head is
+`tools/atp_enigma/models/topk_rerank_D32h64_dagger1.safetensors`; engine
+and Python agree on it (parity and featparity on 8 problems).
+
+Online it shortens proofs further (selections 0.78 of twee's, geometric
+mean) and still solves exactly twee's 134 of the 171 held-out problems at
+60 s (FAIL). At 300 s on the 37 it gains one, GRP441-1 (twee 0,
+DAgger head 1; FAIL, needed +3): its proof is VerifiedGood under strict
+CheckProof and repeats 3 of 3 times at 19,612 selections, while twee
+reaches the memory guard at 20,480 every time.
+
+Why it does not convert: the misses are far from the budget, not near
+it. Twee's slowest held-out solve takes 18 s on one pod and 37 s on
+another, nothing is solved between 38 and 60 s, and nothing more by
+300 s. A 0.78x step factor moves a problem across 60 s only from the
+(60, 77] s band, which is empty. Many misses are bounded by queue growth
+(memory), and the one conversion is a proof found just under that
+ceiling. Picking the eventual proof's CPs earlier at the head of the
+queue shortens proofs the engine already finds; the misses need a search
+orders of magnitude cheaper in selections or memory, or a different
+proof. The lane stays out of the schedule; J13 was not run.
+
 ## Risks
 
 - Volume: history embeddings for 10M+ CPs cost memory (32 floats per CP is

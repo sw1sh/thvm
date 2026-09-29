@@ -323,6 +323,30 @@ topk_net.py parity     runs/R32h32 models/topk_rerank_R32h32.safetensors dump.ts
 topk_net.py featparity export.npz dump.tsv out.txt   # same run, history export at rate 1
 ```
 
+Phase 0e (DAgger): the same harvest with the R32h32 head ARMED gives the
+states the re-ranker walks itself; one head is trained on both trajectories
+to convergence. `models/topk_rerank_D32h64_dagger1.safetensors` (K 32,
+hidden 64) was made by exactly these commands (the harvest on 8 vCPUs):
+
+```
+THVM_ATP_HISTORY_CPFEAT=1 np0_harvest.sh bin/FindProof <TPTP> pool.tsv twee-rerank \
+  "<twee lane flags> --rerank-topk=32 --rerank-model=models/topk_rerank_R32h32.safetensors" \
+  rr_harvest 60 8 1 3500 100000 400000
+topk_net.py prep  harvest/npz pool.tsv prep_eng precheck_eng.txt 8 engine   # the phase-0c harvest
+topk_net.py prep  rr_harvest/npz pool.tsv prep_rr precheck_rr.txt 8 \
+  rerank:32:models/topk_rerank_R32h32.safetensors                            # + replay of the head
+topk_net.py rrcheck prep_rr rr_harvest/err rrcheck.txt                     # vs the engine's counters
+topk_net.py train2  d_runs/D32h64 D32h64 pool.tsv prep_eng prep_rr         # early stopping, patience 20
+topk_net.py valgate d_runs/D32h64 prep_rr  pool.tsv d_val/D32h64_rr        # re-ranker-visited states
+topk_net.py valgate d_runs/D32h64 prep_eng pool.tsv d_val/D32h64_eng       # engine-visited states
+topk_net.py export  d_runs/D32h64 models/topk_rerank_D32h64_dagger1.safetensors
+```
+
+It beats R32h32 on both state distributions (held-out top-1 proof-CP hit
+0.36 against R32h32's 0.24 on re-ranker-visited states) and shortens proofs
+further online, yet solves twee's set at 60 s and one more problem of the 37
+twee misses at 300 s; it stays opt-in as well.
+
 ## Typical flow
 
 ```
