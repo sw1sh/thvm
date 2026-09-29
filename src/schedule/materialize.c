@@ -1442,7 +1442,7 @@ typedef struct {
   u32 *refs;
   u32  len;
   u32  cap;
-  u8   indexed;   // 1 once the kernel holds a gather (CPU-only kernels)
+  u8   indexed;   // 1 once the kernel holds a gather or scatter (CPU only)
 } VisitMemo;
 
 static void visit_memo_free(VisitMemo *m) {
@@ -3236,6 +3236,11 @@ static Term try_inline_bufferize_via_axis_table(
   return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
 }
 
+static int bufferize_holds_scatter(Term b) {
+  Term v = uop_bufferize_value(b);
+  return term_tag(v) == TAG_UOP && term_ext(v) == UOP_SCATTER;
+}
+
 // Recurse into `v` under `sub` extended by (from -> to).  Out of line so
 // the 1 KB UnifiedSubst sits only on this path's frames: gcc -O2 hoisted it
 // (and the inlined bufferize helpers' arrays) into every level of
@@ -3359,8 +3364,11 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
     // BUFFERIZE in) fell through to the inline block and re-derived the
     // whole producer.  Gating on _extend lets the fall-through read path
     // (leaf-BUFFERIZE -> INDEX_E(BUFFER)) fire for realized boundaries.
+    // A SCATTER's buffer is never inlined: its value is a sequence of
+    // stores, not an expression a consumer can recompute.
     if (term_tag(inner_buf) == TAG_UOP
         && term_ext(inner_buf) == UOP_BUFFERIZE
+        && !bufferize_holds_scatter(inner_buf)
         && unified_rewrite_buffer_for_bufferize_extend(st->ke, inner_buf) == 0) {
       Term v = uop_bufferize_value(inner_buf);
       // Fast path for CONST: bypass the recursive rewrite (the
@@ -3937,6 +3945,38 @@ static int uop_subtree_has_residual_bufferize(Term root) {
   BufferizeScanVisited v;
   bufferize_scan_open(&v, &arena);
   int rc = uop_root_each_store(root, bufferize_scan_store, &v);
+  bufferize_scan_close(&arena);
+  return rc;
+}
+
+// 1 iff a store of a gather / scatter kernel still holds a TAG_TEN, a
+// BUFFERIZE, or a GATHER / SCATTER: a leaf the walker rewrite did not bind
+// to an input slot, or an indexed op the lowering did not replace.  The
+// backends read such a node as 0.
+static int unbound_leaf_scan_rec(BufferizeScanVisited *v, Term t, u32 depth) {
+  if (depth > MAT_MAX_WALK_DEPTH) return 0;
+  Term r = term_resolve(t);
+  if (term_tag(r) == TAG_TEN) return 1;
+  if (term_tag(r) != TAG_UOP) return 0;
+  if (bufferize_scan_seen(v, r)) return 0;
+  u8 op = term_ext(r);
+  if (op == UOP_BUFFERIZE || op == UOP_GATHER || op == UOP_SCATTER) return 1;
+  u8 ar = uop_arity(op);
+  for (u8 i = 0; i < ar; i++) {
+    if (unbound_leaf_scan_rec(v, heap_read(term_val(r) + i), depth + 1)) return 1;
+  }
+  return 0;
+}
+
+static int unbound_leaf_in_store(Term store, void *ctx) {
+  return unbound_leaf_scan_rec((BufferizeScanVisited *)ctx, store, 0);
+}
+
+static int indexed_kernel_has_unbound_leaf(Term root) {
+  BufferizeScanArena arena;
+  BufferizeScanVisited v;
+  bufferize_scan_open(&v, &arena);
+  int rc = uop_root_each_store(root, unbound_leaf_in_store, &v);
   bufferize_scan_close(&arena);
   return rc;
 }
@@ -6256,6 +6296,29 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     return VISIT_OK;
   }
 
+  // SCATTER (always its own kernel root): base fuses like any operand;
+  // idx and src are read at lowered addresses composed against their
+  // storage.  Kinds without a lowering decline the kernel.
+  if (op == UOP_SCATTER) {
+    memo->indexed = 1;
+    u32 kind = uop_scatter_kind(t);
+    if (kind != SCATTER_SUM && kind != SCATTER_REPLACE) {
+      fprintf(stderr, "thvm: scatter kind %u has no lowering yet; "
+                      "its kernel was not emitted\n", kind);
+      return VISIT_BAIL;
+    }
+    if (visit(heap_read(loc + 0), ke, root_loc, memo) == VISIT_BAIL) {
+      return VISIT_BAIL;
+    }
+    for (u32 s = 1; s <= 2; s++) {
+      if (visit_indexed_leaf(heap_read(loc + s), ke, root_loc, memo) == VISIT_BAIL) {
+        return VISIT_BAIL;
+      }
+    }
+    visit_memo_store(memo, loc, VISIT_OK);
+    return VISIT_OK;
+  }
+
   // GRAD is a stop point in materialize -- the architecture is
   // wnf-fires-grad + materialize-compiles-uops, with thvm_realize
   // looping the pair until no fresh kernels are emitted.  Bailing
@@ -6692,12 +6755,13 @@ static Term emit_kernel_for_boundary(u32 bi) {
     TENS[out_tid].producer_kid = 0;
     return 0;
   }
-  // A gather kernel is lowered for, and verified on, the serial CPU
-  // backends only: a GPU renderer would spread its loops over threads
-  // untested.  Decline loudly; the realize leaves the graph unrealized.
+  // A gather or scatter kernel is lowered for, and verified on, the serial
+  // CPU backends only: a GPU renderer would spread its loops over threads
+  // (racing a scatter's read-modify-write).  Decline loudly; the realize
+  // leaves the graph unrealized.
   if (indexed && op_backend != &CPU_BACKEND) {
-    fprintf(stderr, "thvm: gather kernels run on the CPU backend only; "
-                    "the kernel for a %s boundary was not emitted\n",
+    fprintf(stderr, "thvm: gather/scatter kernels run on the CPU backend "
+                    "only; the kernel for a %s boundary was not emitted\n",
             bypass_dbg_op_name(op));
     kernel_dealloc_last(kid);
     TENS[out_tid].producer_kid = 0;
@@ -6864,6 +6928,12 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // those with proper UOP_BUFFER terms carrying input-slot
     // instance, which is benign regardless of gate outcome.
     ke->cached_lift.store_root = ru_rewritten;
+    // A gather / scatter address holds loads, so an unbound leaf read as 0
+    // would misplace data, not just misvalue it.  Stop rather than run it.
+    if (indexed && indexed_kernel_has_unbound_leaf(ru_rewritten)) {
+      thvm_fatal("emit: a gather/scatter kernel kept an unbound TEN, "
+                 "BUFFERIZE or indexed op after the walker rewrite");
+    }
     // The marks describe this store_root's loads, so they commit with
     // it.  An unflagged slot whose load is composed over the raw buffer
     // gets its view gathered into a contiguous temp (or, in the walker,

@@ -161,8 +161,28 @@ down to storage, and the gather hands its ranges to idx only
 (`ru_consumer_passes_rngs`).  A src that is not a view of a TEN, VAR,
 KERNEL output or CONST (`uop_indexed_operand_is_structural`) realizes its
 compute source first (`BUFFERIZE_REASON_INDEXED_SRC`), and `visit` binds
-the storage itself as the kernel input, never a view alias.  Gather
-kernels run on the CPU backend only; emit declines them on a GPU backend.
+the storage itself as the kernel input, never a view alias.  Gather and
+scatter kernels run on the CPU backend only; emit declines them on a GPU
+backend.
+
+A `UOP_SCATTER` ([src/uop/scatter.c](../src/uop/scatter.c)) is always its
+own kernel (`BUFFERIZE_REASON_SCATTER`): `ru_lower_scatter` builds an AFTER
+chain of stores over the output buffer instead of an expression.  base is
+read at the node's ranges; idx and src at fresh loop ranges over idx's
+shape, both through `ru_index_leaf` (a computed idx or src realizes
+first).  The accumulate store is a serial read-modify-write, `OUT[t] =
+valid ? OUT[t] + src : OUT[t]`, where `t` puts the clamped loaded index on
+axis `dim`, so an invalid index writes the old value back.  Positions that
+meet at one output differ only on `dim` and are visited in ascending
+order: tinygrad's reduce order, and REPLACE's last write wins.  SUM with
+include_self stores the identity, accumulates, then adds base (S + self,
+as tinygrad; the last store drops when base is the identity CONST);
+without include_self it stores base, resets every touched position to the
+identity, then accumulates; REPLACE stores base, then writes.  The
+scatter's BUFFERIZE wraps the SCATTER itself, so no consumer inlines it,
+and every store of a gather or scatter kernel is checked for unbound
+leaves after the walker rewrite.  PROD, MAX and MIN have no lowering yet:
+emit declines their kernel with a stderr line.
 
 ## Pass 4: Render
 

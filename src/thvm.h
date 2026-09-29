@@ -1864,13 +1864,16 @@ fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 // boundary so emit records its tid in FP8_TRANSIENT_TIDS and end-of-realize
 // frees it after the consuming matmul has fired.
 #define BUFFERIZE_REASON_FP8_TRANSIENT (1u << 9)
-// The storage operand of an indexed op (GATHER slot 0) is read through an
-// address the op builds itself (rangeify_unified.c ru_index_leaf), so it
+// A storage operand of an indexed op (GATHER slot 0, SCATTER slots 1 and 2)
+// is read through an address the op builds itself (ru_index_leaf), so it
 // must be a leaf the address reaches through views alone
 // (uop_indexed_operand_is_structural) or a buffer.  This reason realizes
 // the compute source under such an operand's view chain; the faithful
 // seed honors it and rangeify reads the buffer through it.
 #define BUFFERIZE_REASON_INDEXED_SRC (1u << 10)
+// Every SCATTER is its own kernel: a serial read-modify-write of its
+// output (rangeify_unified.c ru_lower_scatter).  The faithful seed honors it.
+#define BUFFERIZE_REASON_SCATTER (1u << 11)
 typedef struct {
   u64 loc;             // heap loc of the underlying UOp value
   u32 buffer_id;       // 1-based stable id within this graph

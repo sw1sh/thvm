@@ -321,8 +321,10 @@ fn int ru_seed_boundary_holds(u32 reasons) {
     // Also a correctness realize, so faithful seeds it too.
     if (reasons & BUFFERIZE_REASON_MAXPOOL_MASK) return 1;
     // An indexed op's storage operand: only a buffer or a view of a leaf is
-    // addressable by the op's computed address (ru_index_leaf).
+    // addressable by the op's computed address (ru_index_leaf).  A SCATTER
+    // is always its own read-modify-write kernel (ru_lower_scatter).
     if (reasons & BUFFERIZE_REASON_INDEXED_SRC) return 1;
+    if (reasons & BUFFERIZE_REASON_SCATTER) return 1;
     // Seed every REDUCE output as a boundary.  This is faithful to tinygrad
     // (one reduce per kernel; a REDUCE output always escapes into a buffer)
     // and is the lever that de-fuses the conv data-grad.  Without it the
@@ -669,16 +671,19 @@ typedef struct {
 } RuConsumerRangs;
 
 // 1 iff consumer `ci` hands its in_rngs to the node at `loc`.  An indexed
-// op reads its storage operand at an address it builds itself
-// (ru_index_leaf), so a GATHER passes its ranges to its idx slot only: the
-// storage operand's views would inherit idx-shaped ranges that do not fit
-// them.
+// op reads its storage operands at addresses it builds itself
+// (ru_index_leaf), so a GATHER passes its ranges to its idx slot only and
+// a SCATTER to its base slot only: a storage operand's views would inherit
+// ranges shaped for another operand.
 static int ru_consumer_passes_rngs(u32 ci, u64 loc) {
-  if (BUFFERIZE_NODES[ci].op != UOP_GATHER) {
-    return 1;
+  u32 slot;
+  switch (BUFFERIZE_NODES[ci].op) {
+    case UOP_GATHER:  slot = 1; break;
+    case UOP_SCATTER: slot = 0; break;
+    default:          return 1;
   }
-  Term idx = term_resolve(heap_read(BUFFERIZE_NODES[ci].loc + 1));
-  return term_tag(idx) == TAG_UOP && term_val(idx) == loc;
+  Term s = term_resolve(heap_read(BUFFERIZE_NODES[ci].loc + slot));
+  return term_tag(s) == TAG_UOP && term_val(s) == loc;
 }
 
 static u32 ru_gather_consumer_rngs(u32 node_idx, u8 my_ndim,
@@ -3014,7 +3019,7 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr,
   return uop_graph_rebuild_with_srcs(self, srcs);
 }
 
-// === Indexed ops (UOP_GATHER) ===
+// === Indexed ops (UOP_GATHER, UOP_SCATTER) ===
 
 // Buffer address of per-axis coordinates into tensor `tid`: the public
 // view's strides and offset (a plain row-major address when the view is
@@ -3180,7 +3185,9 @@ static Term ru_index_leaf(Term t, Term const *coords, u32 ndim) {
 // range: the collapsed one-hot sum tinygrad's pm_reduce_load_collapse
 // leaves (codegen/simplify.py:143-145).  The gate holds a load, so
 // uop_fold_where_closure keeps the clamp, and the INVALID branch keeps the
-// materialize broadcast gate off the data-dependent address.
+// materialize broadcast gate off the data-dependent address.  The index is
+// compared as int32, the width of every kernel address: a 64-bit index
+// outside the int32 range wraps (a uint32 -1 still reads as invalid).
 static Term ru_lower_gather(Term self, u64 loc, RuRangeMap const *rm) {
   Term  src = heap_read(loc + 0);
   Term  idx = heap_read(loc + 1);
@@ -3201,6 +3208,87 @@ static Term ru_lower_gather(Term self, u64 loc, RuRangeMap const *rm) {
   }
   coords[dim] = uop_iwhere(valid, iv, uop_const(DT_INT32, 0));
   return uop_iwhere(valid, ru_index_leaf(src, coords, rm->in_ndim), uop_invalid());
+}
+
+// SCATTER(base, idx, src, dim, kind, include_self) at node i: always its
+// own kernel over its output OUT.  base is read at the node's ranges R
+// (base.shape); idx and src at fresh loop ranges E over idx.shape.  With t
+// = E where t_dim is the loaded index clamped to 0, and valid its range
+// check, the accumulate store is
+//   OUT[t] = valid ? OUT[t] + src[E] : OUT[t]     (SUM; src[E] for REPLACE)
+// so an invalid index writes the old value back.  The src positions that
+// meet at one output share t's other coordinates, so every loop order
+// visits them in ascending t_dim: tinygrad's reduce order, and the
+// last-write-wins order of REPLACE.  The stores run in AFTER order:
+//   SUM, include_self   OUT[R] = 0; accumulate; OUT[R] = OUT[R] + base[R]
+//                       (the last store drops when base is the CONST 0):
+//                       S + self, as tinygrad adds (mixin/op.py:1129);
+//   SUM, no self        OUT[R] = base[R]; OUT[t] = valid ? 0 : OUT[t];
+//                       accumulate;
+//   REPLACE             OUT[R] = base[R]; accumulate.
+// The node's BUFFERIZE wraps the SCATTER itself, so no consumer can inline
+// it.  PROD / MAX / MIN have no lowering yet: the node still becomes a
+// boundary, and visit() declines its kernel.
+static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {
+  u64  loc  = BUFFERIZE_NODES[i].loc;
+  Term self = term_new(0, TAG_UOP, UOP_SCATTER, loc);
+  Term closed[MAX_DIM];
+  u32  n_closed = ru_collect_closed_ranges(i, closed, MAX_DIM);
+  Term b = uop_bufferize_new(self, UOP_SCOPE_GLOBAL, 0, n_closed, closed);
+  RU_BUFFERIZE_TERM[i] = b;
+  RU_SUBST[i]          = b;
+  RU_LAST_BUFFERIZES_EMITTED++;
+  u32 kind = uop_scatter_kind(self);
+  if (kind != SCATTER_SUM && kind != SCATTER_REPLACE) {
+    return;
+  }
+  u32   dim = uop_scatter_dim(self);
+  u32   dtype, ident;
+  Shape bs, is;
+  if (!term_dtype_in(self, 0, &dtype) || !term_shape_in(self, 0, &bs)
+      || !term_shape_in(heap_read(loc + 1), 0, &is)
+      || bs.ndim != rm->out_ndim || is.ndim != bs.ndim
+      || !scatter_identity_bits(kind, dtype, &ident)) {
+    ru_index_leaf_fail(UOP_SCATTER, "has operand shapes its ranges do not fit");
+  }
+  Term out     = uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype, bs.ndim, bs.dims, 0);
+  Term my_addr = ru_build_index_addr_for(rm, self);
+  Term base    = ru_rewrite_child(heap_read(loc + 0),
+                                  ru_build_input_addr_for(rm, loc), rm);
+  Term e[RU_MAX_AXES];
+  for (u32 a = 0; a < is.ndim; a++) {
+    e[a] = ru_new_range(is.dims[a], KAX_LOOP);
+  }
+  Term iv    = uop_cast(ru_index_leaf(heap_read(loc + 1), e, is.ndim), DT_INT32);
+  Term sv    = ru_index_leaf(heap_read(loc + 2), e, is.ndim);
+  Term valid = uop_int_binary(UOP_IAND,
+      uop_int_binary(UOP_ILT, uop_const(DT_INT32, (u32)-1), iv),
+      uop_int_binary(UOP_ILT, iv, uop_const(DT_INT32, bs.dims[dim])));
+  Term t[RU_MAX_AXES];
+  for (u32 a = 0; a < is.ndim; a++) {
+    t[a] = e[a];
+  }
+  t[dim] = uop_iwhere(valid, iv, uop_const(DT_INT32, 0));
+  Term t_addr = ru_build_addr_with_dims(t, (u8)bs.ndim, bs.dims);
+  Term old    = uop_index_e(out, t_addr);
+  Term upd    = (kind == SCATTER_SUM) ? uop_binary(UOP_ADD, old, sv) : sv;
+  Term acc    = uop_store(out, t_addr, uop_where(valid, upd, old));
+  Term root;
+  if (kind == SCATTER_SUM && uop_scatter_include_self(self)) {
+    Term identity = uop_const(dtype, ident);
+    root = uop_after(acc, uop_store(out, my_addr, identity));
+    if (base != identity) {
+      Term sum = uop_binary(UOP_ADD, uop_index_e(out, my_addr), base);
+      root = uop_after(uop_store(out, my_addr, sum), root);
+    }
+  } else if (kind == SCATTER_SUM) {
+    Term reset = uop_store(out, t_addr,
+                           uop_where(valid, uop_const(dtype, ident), old));
+    root = uop_after(acc, uop_after(reset, uop_store(out, my_addr, base)));
+  } else {
+    root = uop_after(acc, uop_store(out, my_addr, base));
+  }
+  RU_STORE_ROOT[i] = root;
 }
 
 // PAD value-side guard: build IWHERE(cond, body, INVALID) where `cond`
@@ -3340,6 +3428,11 @@ fn void pm_apply_rangeify(Term root) {
 
     int realized = RU_REALIZE_MAP[i].realized_full
                 || RU_REALIZE_MAP[i].realized_partial;
+
+    if (info->op == UOP_SCATTER) {
+      ru_lower_scatter(i, rm);
+      continue;
+    }
 
     Term self = term_new(0, TAG_UOP, info->op, info->loc);
 

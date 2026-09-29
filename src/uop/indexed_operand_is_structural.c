@@ -1,10 +1,10 @@
 // uop/indexed_operand_is_structural.c - can an indexed op read this operand
 // in place?
 //
-// An indexed op (GATHER slot 0) reads its storage operand at an address it
-// builds itself, walking the operand's views down to storage
-// (rangeify_unified.c ru_index_leaf).  That works when the views end at a
-// TEN, a VAR, a KERNEL's output or a CONST, and holds no PAD (whose
+// An indexed op reads a storage operand (GATHER slot 0, SCATTER slots 1 and
+// 2) at an address it builds itself, walking the operand's views down to
+// storage (rangeify_unified.c ru_index_leaf).  That works when the views end
+// at a TEN, a VAR, a KERNEL's output or a CONST, and holds no PAD (whose
 // out-of-window mask the walk does not model).  Any other operand has a
 // compute source bufferize_classify realizes first; both sides decide with
 // this predicate so they agree.

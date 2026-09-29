@@ -1,0 +1,590 @@
+// test_uop_scatter.c -- UOP_SCATTER forward (SUM and REPLACE) through
+// thvm_realize.
+//
+// Every case compares the realized tensor with a host reference byte for
+// byte.  The SUM reference is tinygrad's algebra (mixin/op.py:1126-1129):
+// S[j] sums src over the valid p with t(p) = j in row-major p order
+// starting from 0, and out = S + T with T = base (include_self) or
+// (touched ? 0 : base).  REPLACE is last-write-wins along dim, base where
+// untouched (_masked_merge, :1170-1177).  Run the binary twice, as
+// test_uop_gather.c does: as is (C JIT), and with THVM_CPU_JIT_WARMUP=
+// 1000000000 THVM_CPU_JIT_PARALLEL=0 THVM_CPU_JIT_OPT=O0 (UOp walker);
+// check_dispatch asserts which backend ran.
+//
+//   1. SUM with include_self 1 and 0, dims 0 and 1, duplicates and invalid
+//      ids {-1, V, 10982377, -19238}; the S-then-self order is visible;
+//   2. an identity-CONST base gives 2 stores, a non-identity base 3;
+//   3. an all-invalid idx leaves base; REPLACE is last-write-wins;
+//   4. idx as an expand of an {E} tensor and as edge_index[1]; a computed
+//      src realizes into its own kernel (2 kernels), a gathered one too
+//      (message passing, out[dst[e]] += h[src[e]]);
+//   5. the scatter is an intermediate: its output buffer may be a reused
+//      arena slot, and the init store covers it;
+//   6. every store loops at most max(|base|, |idx|) times, no REDUCE, and
+//      the kernel is flagged no_opts;
+//   7. JIT capture, then replays with the index rewritten in place and the
+//      output poisoned first;
+//   8. kinds without a lowering yet (MAX) are declined, not mis-run.
+#include "../src/thvm.c"
+#include "test.h"
+
+static int interp_mode(void) {
+  char const *e = getenv("THVM_CPU_JIT_WARMUP");
+  return e != NULL && atoi(e) > 1;
+}
+
+static u32 mk(u32 dtype, u32 ndim, u32 const *dims, void const *data) {
+  Shape s = {0};
+  s.ndim = ndim;
+  for (u32 d = 0; d < ndim; d++) {
+    s.dims[d] = dims[d];
+  }
+  u32 tid = tensor_alloc(&CPU_BACKEND, s, dtype);
+  if (data != NULL) {
+    CPU_BACKEND.buf_write(TENS[tid].buf_id, (void *)data,
+                          (u64)TENS[tid].view.numel * dtype_itemsize(dtype));
+  }
+  return tid;
+}
+
+static Term ten(u32 tid) {
+  return term_new(0, TAG_TEN, TENS[tid].dtype, tid);
+}
+
+static Term fconst(u32 ndim, u32 const *dims, f32 v) {
+  u32 bits;
+  memcpy(&bits, &v, sizeof bits);
+  u32 ones[MAX_DIM] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+  return uop_expand(uop_reshape(uop_const(DT_FP32, bits), ndim, ones), ndim, dims);
+}
+
+static u32 numel_of(Shape const *s) {
+  u32 n = 1;
+  for (u32 d = 0; d < s->ndim; d++) {
+    n *= s->dims[d];
+  }
+  return n;
+}
+
+static Shape shape2(u32 d0, u32 d1) {
+  Shape s = {0};
+  s.ndim = 2;
+  s.dims[0] = d0;
+  s.dims[1] = d1;
+  return s;
+}
+
+// Target flat index of position p, or -1 when idx[p] is out of range.
+static i32 target_of(u32 p, Shape const *bs, Shape const *is, i32 const *idx,
+                     u32 dim) {
+  u32 c[MAX_DIM];
+  u32 rem = p;
+  for (i32 d = (i32)is->ndim - 1; d >= 0; d--) {
+    c[d] = rem % is->dims[d];
+    rem /= is->dims[d];
+  }
+  i32 v = idx[p];
+  if (v < 0 || (u32)v >= bs->dims[dim]) {
+    return -1;
+  }
+  c[dim] = (u32)v;
+  u32 j = 0;
+  for (u32 d = 0; d < bs->ndim; d++) {
+    j = j * bs->dims[d] + c[d];
+  }
+  return (i32)j;
+}
+
+static void ref_sum(f32 const *base, Shape const *bs, i32 const *idx,
+                    f32 const *src, Shape const *is, u32 dim, int self,
+                    f32 *out) {
+  u32 bn = numel_of(bs), in = numel_of(is);
+  f32 *s  = (f32 *)calloc(bn, 4);
+  u8  *hit = (u8 *)calloc(bn, 1);
+  for (u32 p = 0; p < in; p++) {
+    i32 j = target_of(p, bs, is, idx, dim);
+    if (j >= 0) {
+      s[j] = s[j] + src[p];
+      hit[j] = 1;
+    }
+  }
+  for (u32 j = 0; j < bn; j++) {
+    f32 t = (self || !hit[j]) ? base[j] : 0.0f;
+    out[j] = s[j] + t;
+  }
+  free(s);
+  free(hit);
+}
+
+static void ref_replace(f32 const *base, Shape const *bs, i32 const *idx,
+                        f32 const *src, Shape const *is, u32 dim, f32 *out) {
+  u32 bn = numel_of(bs), in = numel_of(is);
+  memcpy(out, base, (size_t)bn * 4);
+  for (u32 p = 0; p < in; p++) {
+    i32 j = target_of(p, bs, is, idx, dim);
+    if (j >= 0) {
+      out[j] = src[p];
+    }
+  }
+}
+
+static void check_bytes(void const *got, void const *want, u32 n,
+                        char const *what) {
+  f32 const *g = (f32 const *)got;
+  f32 const *w = (f32 const *)want;
+  u32 shown = 0;
+  for (u32 i = 0; i < n && shown < 8; i++) {
+    if (memcmp(&g[i], &w[i], 4) != 0) {
+      fprintf(stderr, "  %s: out[%u] got=%.9g want=%.9g\n", what, i, g[i], w[i]);
+      shown++;
+    }
+  }
+  CHECK(memcmp(got, want, (size_t)n * 4) == 0);
+}
+
+static u32 DISPATCHED = 0;
+
+static void check_dispatch(u32 k0) {
+  u32 want = interp_mode() ? KDISPATCH_INTERPRETER : KDISPATCH_JIT;
+  for (u32 k = k0; k < KERNELS_NEXT; k++) {
+    u32 kind = cg_kernel_dispatch_kind(k);
+    if (kind == KDISPATCH_NONE
+        || (kind >= KDISPATCH_BLAS_DOT && kind <= KDISPATCH_BLAS_GEMM)) {
+      continue;
+    }
+    CHECK_EQ(kind, want);
+    DISPATCHED++;
+  }
+}
+
+static u32 realize_into(Term t, void *out, u32 n) {
+  Term r = term_resolve(thvm_realize(t));
+  CHECK_EQ(term_tag(r), TAG_TEN);
+  if (term_tag(r) != TAG_TEN) {
+    memset(out, 0, (size_t)n * 4);
+    return 0;
+  }
+  u32 tid = (u32)term_val(r);
+  TENS[tid].backend->buf_read(TENS[tid].buf_id, out, (u64)n * 4);
+  return tid;
+}
+
+static u32 kernel_for(u32 tid, u32 k0) {
+  for (u32 k = KERNELS_NEXT; k-- > k0 && k > 0;) {
+    if (KERNELS[k].output_tid == tid) {
+      return k;
+    }
+  }
+  return 0;
+}
+
+static void collect_ranges(Term t, u32 *aid, u32 *ext, u32 *n, u32 depth) {
+  if (depth > 256 || term_tag(t) != TAG_UOP) {
+    return;
+  }
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == UOP_RANGE) {
+    u32 a = uop_range_axis_id(t);
+    for (u32 i = 0; i < *n; i++) {
+      if (aid[i] == a) {
+        return;
+      }
+    }
+    if (*n < 64) {
+      aid[*n] = a;
+      ext[*n] = uop_range_extent(t);
+      (*n)++;
+    }
+    return;
+  }
+  u8 ar = uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    collect_ranges(heap_read(loc + i), aid, ext, n, depth + 1);
+  }
+}
+
+typedef struct {
+  u32 n_stores;
+  u64 max_loops;
+} StoreStats;
+
+static void store_stats(Term root, StoreStats *st) {
+  if (term_tag(root) == TAG_UOP && term_ext(root) == UOP_AFTER) {
+    store_stats(uop_after_after_node(root), st);
+    store_stats(uop_after_node(root), st);
+    return;
+  }
+  st->n_stores++;
+  u32 aid[64], ext[64], n = 0;
+  collect_ranges(root, aid, ext, &n, 0);
+  u64 prod = 1;
+  for (u32 i = 0; i < n; i++) {
+    prod *= ext[i];
+  }
+  if (prod > st->max_loops) {
+    st->max_loops = prod;
+  }
+}
+
+static int has_op(Term t, u32 want, u32 depth) {
+  if (depth > 256 || term_tag(t) != TAG_UOP) {
+    return 0;
+  }
+  u32 op  = term_ext(t);
+  u64 loc = term_val(t);
+  if (op == want) {
+    return 1;
+  }
+  u8 ar = (op == UOP_AFTER) ? 2 : uop_arity((u8)op);
+  for (u8 i = 0; i < ar; i++) {
+    if (has_op(heap_read(loc + i), want, depth + 1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// The scatter kernel writing tid: its store count, no REDUCE, at most
+// max(|base|, |idx|) iterations per store, no_opts set.
+static void check_scatter_kernel(u32 tid, u32 k0, u32 want_stores,
+                                 u64 base_numel, u64 idx_numel) {
+  u32 kid = (tid != 0) ? kernel_for(tid, k0) : 0;
+  CHECK(kid != 0);
+  if (kid == 0) {
+    return;
+  }
+  Term root = KERNELS[kid].cached_lift.store_root;
+  CHECK(root != 0);
+  StoreStats st = { 0, 0 };
+  store_stats(root, &st);
+  CHECK_EQ(st.n_stores, want_stores);
+  CHECK(st.max_loops <= (base_numel > idx_numel ? base_numel : idx_numel));
+  CHECK(!has_op(root, UOP_REDUCE, 0));
+  CHECK_EQ(KERNELS[kid].no_opts, 1);
+}
+
+static void fill(f32 *v, u32 n, f32 scale, f32 bias) {
+  for (u32 q = 0; q < n; q++) {
+    v[q] = bias + scale * (f32)((i32)(q * 7u % 23u) - 11);
+  }
+}
+
+// A scatter of (base, idx, src) with the given kind; compares with the
+// reference and checks the kernel.
+static void scatter_case(Shape const *bs, Shape const *is, u32 dim, u32 kind,
+                         u32 self, f32 const *base, i32 const *idx,
+                         f32 const *src, u32 want_stores, char const *what) {
+  u32 bn = numel_of(bs), in = numel_of(is);
+  f32 *want = (f32 *)malloc((size_t)bn * 4);
+  f32 *got  = (f32 *)malloc((size_t)bn * 4);
+  if (kind == SCATTER_SUM) {
+    ref_sum(base, bs, idx, src, is, dim, (int)self, want);
+  } else {
+    ref_replace(base, bs, idx, src, is, dim, want);
+  }
+  Term s = uop_scatter(ten(mk(DT_FP32, bs->ndim, bs->dims, base)),
+                       ten(mk(DT_INT32, is->ndim, is->dims, idx)),
+                       ten(mk(DT_FP32, is->ndim, is->dims, src)), dim, kind, self);
+  CHECK(s != 0);
+  u32 k0 = KERNELS_NEXT;
+  u32 tid = realize_into(s, got, bn);
+  check_bytes(got, want, bn, what);
+  CHECK_EQ(KERNELS_NEXT - k0, 1u);
+  check_dispatch(k0);
+  check_scatter_kernel(tid, k0, want_stores, bn, in);
+  free(want);
+  free(got);
+}
+
+// === 1. SUM with duplicates and invalid ids ===
+#define SV 5
+#define SD 3
+#define SE 6
+static i32 const IDX0[SE * SD] = {
+  1, 3, 1,   -1, SV, 0,   1, 1, 4,
+  10982377, 2, 2,   0, -19238, 4,   1, 3, 1,
+};
+
+static void test_sum(void) {
+  Shape bs = shape2(SV, SD), is = shape2(SE, SD);
+  f32 base[SV * SD], src[SE * SD];
+  // Large base, fractional src: S + base rounds differently from summing
+  // src into base one element at a time.
+  fill(base, SV * SD, 1.0e6f, 3.0e7f);
+  fill(src, SE * SD, 0.37f, 0.11f);
+  f32 s_first[SV * SD];
+  ref_sum(base, &bs, IDX0, src, &is, 0, 1, s_first);
+  f32 seq[SV * SD];
+  memcpy(seq, base, sizeof seq);
+  for (u32 p = 0; p < SE * SD; p++) {
+    i32 j = target_of(p, &bs, &is, IDX0, 0);
+    if (j >= 0) {
+      seq[j] = seq[j] + src[p];
+    }
+  }
+  CHECK(memcmp(seq, s_first, sizeof seq) != 0);
+  scatter_case(&bs, &is, 0, SCATTER_SUM, 1, base, IDX0, src, 3, "sum self dim 0");
+  scatter_case(&bs, &is, 0, SCATTER_SUM, 0, base, IDX0, src, 3, "sum no-self dim 0");
+  // Along dim 1: base (3, 6), idx (3, 4).
+  Shape bs1 = shape2(3, 6), is1 = shape2(3, 4);
+  static i32 const idx1[12] = { 5, 0, 5, 6,  -1, 2, 2, 2,  3, 1, 0, 3 };
+  f32 base1[18], src1[12];
+  fill(base1, 18, 0.5f, 0.0f);
+  fill(src1, 12, 0.25f, 0.0f);
+  scatter_case(&bs1, &is1, 1, SCATTER_SUM, 1, base1, idx1, src1, 3, "sum self dim 1");
+  scatter_case(&bs1, &is1, 1, SCATTER_SUM, 0, base1, idx1, src1, 3, "sum no-self dim 1");
+}
+
+// === 2. an identity-CONST base drops the finishing store ===
+static void test_identity_base(void) {
+  u32 bd[2] = { SV, SD }, id[2] = { SE, SD };
+  Shape bs = shape2(SV, SD), is = shape2(SE, SD);
+  f32 zero[SV * SD], src[SE * SD];
+  memset(zero, 0, sizeof zero);
+  fill(src, SE * SD, 0.37f, 0.11f);
+  f32 want[SV * SD], got[SV * SD];
+  ref_sum(zero, &bs, IDX0, src, &is, 0, 1, want);
+  Term s = uop_scatter(fconst(2, bd, 0.0f), ten(mk(DT_INT32, 2, id, IDX0)),
+                       ten(mk(DT_FP32, 2, id, src)), 0, SCATTER_SUM, 1);
+  u32 k0 = KERNELS_NEXT;
+  u32 tid = realize_into(s, got, SV * SD);
+  check_bytes(got, want, SV * SD, "sum into zeros");
+  CHECK_EQ(KERNELS_NEXT - k0, 1u);
+  check_dispatch(k0);
+  check_scatter_kernel(tid, k0, 2, SV * SD, SE * SD);
+}
+
+// === 3. all-invalid idx, REPLACE ===
+static void test_invalid_and_replace(void) {
+  Shape bs = shape2(SV, SD), is = shape2(SE, SD);
+  f32 base[SV * SD], src[SE * SD];
+  fill(base, SV * SD, 0.5f, 0.25f);
+  fill(src, SE * SD, 0.75f, 0.0f);
+  i32 none[SE * SD];
+  for (u32 p = 0; p < SE * SD; p++) {
+    none[p] = (p % 2) ? -1 : SV + (i32)p;
+  }
+  scatter_case(&bs, &is, 0, SCATTER_SUM, 1, base, none, src, 3, "sum all-invalid");
+  scatter_case(&bs, &is, 0, SCATTER_SUM, 0, base, none, src, 3, "sum no-self all-invalid");
+  scatter_case(&bs, &is, 0, SCATTER_REPLACE, 0, base, IDX0, src, 2, "replace");
+  scatter_case(&bs, &is, 0, SCATTER_REPLACE, 0, base, none, src, 2, "replace all-invalid");
+}
+
+// === 4. idx forms and a computed src ===
+static Term rows(Term ids, u32 n, u32 d) {
+  u32 n1[2] = { n, 1 };
+  u32 nd[2] = { n, d };
+  return uop_expand(uop_reshape(ids, 2, n1), 2, nd);
+}
+
+static void test_operand_forms(void) {
+  Shape bs = shape2(SV, SD);
+  u32 bd[2] = { SV, SD };
+  f32 base[SV * SD];
+  fill(base, SV * SD, 0.5f, 0.25f);
+  // idx expanded from an {E} tensor.
+  enum { E = 11 };
+  static i32 const ids[E] = { 4, 0, 4, -1, 2, SV, 1, 4, 0, 3, 2 };
+  i32 grid[E * SD];
+  for (u32 p = 0; p < E * SD; p++) {
+    grid[p] = ids[p / SD];
+  }
+  Shape is = shape2(E, SD);
+  u32 id[2] = { E, SD };
+  f32 src[E * SD];
+  fill(src, E * SD, 0.37f, 0.11f);
+  f32 want[SV * SD], got[SV * SD];
+  ref_sum(base, &bs, grid, src, &is, 0, 1, want);
+  u32 e1[1] = { E };
+  Term s = uop_scatter(ten(mk(DT_FP32, 2, bd, base)),
+                       rows(ten(mk(DT_INT32, 1, e1, ids)), E, SD),
+                       ten(mk(DT_FP32, 2, id, src)), 0, SCATTER_SUM, 1);
+  u32 k0 = KERNELS_NEXT;
+  u32 tid = realize_into(s, got, SV * SD);
+  check_bytes(got, want, SV * SD, "idx expanded");
+  CHECK_EQ(KERNELS_NEXT - k0, 1u);
+  check_dispatch(k0);
+  check_scatter_kernel(tid, k0, 3, SV * SD, E * SD);
+  // idx = edge_index[1].
+  static i32 const edges[2 * E] = { 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0,
+                                    4, 0, 4, -1, 2, SV, 1, 4, 0, 3, 2 };
+  u32 ed[2] = { 2, E };
+  u32 ebe[4] = { 1, 2, 0, E };
+  Term row1 = uop_reshape(uop_shrink(ten(mk(DT_INT32, 2, ed, edges)), 2, ebe), 1, e1);
+  s = uop_scatter(ten(mk(DT_FP32, 2, bd, base)), rows(row1, E, SD),
+                  ten(mk(DT_FP32, 2, id, src)), 0, SCATTER_SUM, 1);
+  k0 = KERNELS_NEXT;
+  tid = realize_into(s, got, SV * SD);
+  check_bytes(got, want, SV * SD, "idx edge_index[1]");
+  CHECK_EQ(KERNELS_NEXT - k0, 1u);
+  check_dispatch(k0);
+  check_scatter_kernel(tid, k0, 3, SV * SD, E * SD);
+  // A computed src realizes into its own kernel.
+  f32 neg[E * SD];
+  for (u32 p = 0; p < E * SD; p++) {
+    neg[p] = -src[p];
+  }
+  ref_sum(base, &bs, grid, neg, &is, 0, 0, want);
+  s = uop_scatter(ten(mk(DT_FP32, 2, bd, base)),
+                  rows(ten(mk(DT_INT32, 1, e1, ids)), E, SD),
+                  uop_unary(UOP_NEG, ten(mk(DT_FP32, 2, id, src))), 0,
+                  SCATTER_SUM, 0);
+  k0 = KERNELS_NEXT;
+  tid = realize_into(s, got, SV * SD);
+  check_bytes(got, want, SV * SD, "computed src");
+  CHECK_EQ(KERNELS_NEXT - k0, 2u);
+  check_dispatch(k0);
+  check_scatter_kernel(tid, k0, 3, SV * SD, E * SD);
+}
+
+// Message passing: out[dst[e]] += h[src[e]] over the valid edges, a gather
+// feeding a scatter (the gathered messages realize first: 2 kernels).
+static void test_message_passing(void) {
+  enum { V = 6, D = 4, E = 13 };
+  static i32 const srcs[E] = { 0, 1, 2, 3, 4, 5, 0, 2, 4, -1, 6, 1, 3 };
+  static i32 const dsts[E] = { 1, 2, 3, 4, 5, 0, 5, 5, 5, 2, 1, -3, 0 };
+  f32 h[V * D];
+  fill(h, V * D, 0.37f, 0.11f);
+  u32 vd[2] = { V, D }, e1[1] = { E };
+  Term msgs = uop_gather(ten(mk(DT_FP32, 2, vd, h)),
+                         rows(ten(mk(DT_INT32, 1, e1, srcs)), E, D), 0);
+  Term agg = uop_scatter(fconst(2, vd, 0.0f), rows(ten(mk(DT_INT32, 1, e1, dsts)), E, D),
+                         msgs, 0, SCATTER_SUM, 1);
+  CHECK(msgs != 0 && agg != 0);
+  f32 m[E * D];
+  i32 grid[E * D];
+  for (u32 p = 0; p < E * D; p++) {
+    i32 s = srcs[p / D];
+    m[p] = (s >= 0 && s < V) ? h[(u32)s * D + p % D] : 0.0f;
+    grid[p] = dsts[p / D];
+  }
+  f32 zero[V * D], want[V * D], got[V * D];
+  memset(zero, 0, sizeof zero);
+  Shape bs = shape2(V, D), is = shape2(E, D);
+  ref_sum(zero, &bs, grid, m, &is, 0, 1, want);
+  u32 k0 = KERNELS_NEXT;
+  u32 tid = realize_into(agg, got, V * D);
+  check_bytes(got, want, V * D, "message passing");
+  CHECK_EQ(KERNELS_NEXT - k0, 2u);
+  check_dispatch(k0);
+  check_scatter_kernel(tid, k0, 2, V * D, E * D);
+}
+
+// === 5. the scatter as an intermediate ===
+static void test_intermediate(void) {
+  Shape bs = shape2(SV, SD), is = shape2(SE, SD);
+  u32 bd[2] = { SV, SD }, id[2] = { SE, SD };
+  f32 base[SV * SD], src[SE * SD];
+  fill(base, SV * SD, 0.5f, 0.25f);
+  fill(src, SE * SD, 0.37f, 0.11f);
+  // A released tensor of the scatter's size leaves a recyclable buffer
+  // holding large garbage values.
+  f32 junk[SV * SD];
+  for (u32 q = 0; q < SV * SD; q++) {
+    junk[q] = 1.0e30f;
+  }
+  f32 tmp[SV * SD];
+  u32 jr = realize_into(uop_unary(UOP_NEG, ten(mk(DT_FP32, 2, bd, junk))), tmp,
+                        SV * SD);
+  if (jr != 0) {
+    tensor_release(jr);
+  }
+  f32 sum[SV * SD], want[SV * SD], got[SV * SD];
+  ref_sum(base, &bs, IDX0, src, &is, 0, 0, sum);
+  for (u32 q = 0; q < SV * SD; q++) {
+    want[q] = sum[q] * 2.0f;
+  }
+  Term s = uop_scatter(ten(mk(DT_FP32, 2, bd, base)), ten(mk(DT_INT32, 2, id, IDX0)),
+                       ten(mk(DT_FP32, 2, id, src)), 0, SCATTER_SUM, 0);
+  u32 k0 = KERNELS_NEXT;
+  realize_into(uop_binary(UOP_MUL, s, fconst(2, bd, 2.0f)), got, SV * SD);
+  check_bytes(got, want, SV * SD, "scatter * 2");
+  CHECK_EQ(KERNELS_NEXT - k0, 2u);
+  check_dispatch(k0);
+}
+
+// === 7. JIT capture, replays with the index rewritten in place ===
+static void test_jit_replay(void) {
+  Shape bs = shape2(SV, SD), is = shape2(SE, SD);
+  u32 bd[2] = { SV, SD }, id[2] = { SE, SD };
+  f32 base[SV * SD], src[SE * SD];
+  fill(base, SV * SD, 0.5f, 0.25f);
+  fill(src, SE * SD, 0.37f, 0.11f);
+  i32 idx[4][SE * SD];
+  for (u32 rep = 0; rep < 4; rep++) {
+    for (u32 p = 0; p < SE * SD; p++) {
+      idx[rep][p] = (i32)((p * (3u + rep) + rep) % (SV + 2)) - 1;
+    }
+  }
+  u32 it = mk(DT_INT32, 2, id, idx[0]);
+  Term s = uop_scatter(ten(mk(DT_FP32, 2, bd, base)), ten(it),
+                       ten(mk(DT_FP32, 2, id, src)), 0, SCATTER_SUM, 0);
+  u32 slot = jit_capture_begin();
+  CHECK(slot != 0);
+  Term r = term_resolve(thvm_realize(s));
+  jit_capture_end_with_result(r);
+  CHECK_EQ(term_tag(r), TAG_TEN);
+  if (term_tag(r) != TAG_TEN) {
+    return;
+  }
+  u32 tid = (u32)term_val(r);
+  f32 want[SV * SD], got[SV * SD];
+  TENS[tid].backend->buf_read(TENS[tid].buf_id, got, SV * SD * 4);
+  ref_sum(base, &bs, idx[0], src, &is, 0, 0, want);
+  check_bytes(got, want, SV * SD, "capture");
+  for (u32 rep = 1; rep < 4; rep++) {
+    CPU_BACKEND.buf_write(TENS[it].buf_id, idx[rep], SE * SD * 4);
+    f32 poison[SV * SD];
+    for (u32 q = 0; q < SV * SD; q++) {
+      poison[q] = -999.0f;
+    }
+    TENS[tid].backend->buf_write(TENS[tid].buf_id, poison, SV * SD * 4);
+    jit_replay(slot);
+    TENS[tid].backend->buf_read(TENS[tid].buf_id, got, SV * SD * 4);
+    ref_sum(base, &bs, idx[rep], src, &is, 0, 0, want);
+    char what[32];
+    snprintf(what, sizeof what, "replay %u", rep);
+    check_bytes(got, want, SV * SD, what);
+  }
+  jit_capture_drop(slot);
+}
+
+// === 8. kinds without a lowering are declined ===
+static void test_declined_kind(void) {
+  u32 bd[2] = { SV, SD }, id[2] = { SE, SD };
+  f32 base[SV * SD], src[SE * SD];
+  fill(base, SV * SD, 0.5f, 0.25f);
+  fill(src, SE * SD, 0.37f, 0.11f);
+  Term s = uop_scatter(ten(mk(DT_FP32, 2, bd, base)), ten(mk(DT_INT32, 2, id, IDX0)),
+                       ten(mk(DT_FP32, 2, id, src)), 0, SCATTER_MAX, 1);
+  CHECK(s != 0);
+  u32 k0 = KERNELS_NEXT;
+  Term r = term_resolve(thvm_realize(s));
+  CHECK(term_tag(r) != TAG_TEN);
+  CHECK_EQ(KERNELS_NEXT, k0);
+}
+
+int main(void) {
+  thvm_init();
+  TEST_BEGIN("scatter/sum");
+  test_sum();
+  TEST_BEGIN("scatter/identity-base");
+  test_identity_base();
+  TEST_BEGIN("scatter/invalid-and-replace");
+  test_invalid_and_replace();
+  TEST_BEGIN("scatter/operand-forms");
+  test_operand_forms();
+  TEST_BEGIN("scatter/message-passing");
+  test_message_passing();
+  TEST_BEGIN("scatter/intermediate");
+  test_intermediate();
+  TEST_BEGIN("scatter/jit-replay");
+  test_jit_replay();
+  TEST_BEGIN("scatter/declined-kind");
+  test_declined_kind();
+  TEST_BEGIN("scatter/dispatched");
+  CHECK(DISPATCHED >= 12);
+  thvm_free();
+  TEST_REPORT();
+}

@@ -1305,12 +1305,19 @@ static void bufferize_seed_indexed_operand(Term t) {
   bufferize_node_mark(&BUFFERIZE_NODES[idx], BUFFERIZE_REASON_INDEXED_SRC);
 }
 
-// Runs after every rule that can unmark, so no later rule drops these
-// correctness realizes.
+// A GATHER reads slot 0 as storage; a SCATTER is its own kernel and reads
+// slots 1 and 2 as storage.  Runs after every rule that can unmark, so no
+// later rule drops these correctness realizes.
 static void bufferize_seed_indexed_operands(void) {
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-    if (BUFFERIZE_NODES[i].op == UOP_GATHER) {
-      bufferize_seed_indexed_operand(heap_read(BUFFERIZE_NODES[i].loc + 0));
+    UOpInfo *info = &BUFFERIZE_NODES[i];
+    if (info->op == UOP_GATHER) {
+      bufferize_seed_indexed_operand(heap_read(info->loc + 0));
+    } else if (info->op == UOP_SCATTER) {
+      bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
+      bufferize_node_mark(info, BUFFERIZE_REASON_SCATTER);
+      bufferize_seed_indexed_operand(heap_read(info->loc + 1));
+      bufferize_seed_indexed_operand(heap_read(info->loc + 2));
     }
   }
 }

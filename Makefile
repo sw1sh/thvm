@@ -315,6 +315,7 @@ TESTS := \
   $(BIN)/test_after_root_kernel \
   $(BIN)/test_uop_gather_scatter_ir \
   $(BIN)/test_uop_gather \
+  $(BIN)/test_uop_scatter \
   $(BIN)/test_uop_opt \
   $(BIN)/test_uop_recognise_tc \
   $(BIN)/test_apply_opt_dag \

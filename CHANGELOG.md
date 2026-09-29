@@ -50,6 +50,14 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- `UOP_SCATTER` with SUM or REPLACE lowers to its own kernel: an AFTER chain
+  of stores (init, a reset for include_self=0, a serial read-modify-write
+  over the index space, and for SUM with include_self a final `+ base`, so
+  the result is tinygrad's S + self, mixin/op.py:1129).  An invalid index
+  writes the old value back; duplicates combine in ascending order along
+  dim, so REPLACE is last-write-wins.  O(|base| + |idx|) work, CPU backend
+  only, JIT replay with the index rewritten in place.  PROD / MAX / MIN
+  are declined until they get a lowering.
 - `UOP_GATHER` lowers to a guarded indexed load (the collapsed one-hot form
   of tinygrad's pm_reduce_load_collapse, codegen/simplify.py:143-145): one
   load per output element, no REDUCE, fused into its consumer.  The
