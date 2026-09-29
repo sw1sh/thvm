@@ -9,7 +9,7 @@
 //     and an index compare (RANGE, IADD, IMUL), which the float evaluator
 //     cannot evaluate, as an int;
 //   - an IWHERE condition is true in its own dtype, so a fractional float
-//     mask is true;
+//     mask is true, and a bool cast of a float comparison compares floats;
 //   - a CAST converts its source's value, truncating a float toward zero
 //     and wrapping an int to the destination: CAST(1.5 * 2.5, i32) is 3,
 //     CAST(300, i8) is 44, and CAST(RANGE, f32) is the index;
@@ -90,6 +90,7 @@ static int walk(Term root, Term out, u32 out_dt, u32 out_n,
 
 static i64 elem(u32 dt, void const *p, u32 k) {
   switch (dt) {
+    case DT_BOOL:   return ((u8  const *)p)[k];
     case DT_INT8:   return ((i8  const *)p)[k];
     case DT_INT32:  return ((i32 const *)p)[k];
     case DT_UINT32: return ((u32 const *)p)[k];
@@ -228,6 +229,10 @@ static void check_conditions(void) {
   unit_indexed("walker/f32-cond-in-int", DT_INT32, f_half,
                uop_iwhere(uop_binary(UOP_CMPLT, fr, fc(0.5f)), xr, ic(DT_INT32, 0)),
                x, fb, want_half);
+
+  i64 const want_lt[6] = { 1, 0, 1, 0, 1, 0 };
+  unit_indexed("walker/bool-cast-of-f32-compare", DT_BOOL, f_half,
+               uop_cast(uop_binary(UOP_CMPLT, fr, fc(0.5f)), DT_BOOL), x, fb, want_lt);
 
   i64 const want_mask[6] = { 0, 101, 102, 103, 0, 105 };
   unit_indexed("walker/f32-mask-cond", DT_INT32, f_mask,
@@ -430,6 +435,15 @@ static void check_end_to_end(void) {
     i64 const want[4] = { 3, -3, 2, 0 };
     check_realized(pick_quotient(ten(DT_INT32, qa, 1, four), ten(DT_INT32, qb, 1, four)),
                    DT_INT32, want, 4);
+  }
+
+  TEST_BEGIN("e2e/bool-cast-of-f32-compare");
+  {
+    u32 const six[1]  = { 6 };
+    f32 const f[6]    = { 0.25f, 0.75f, -0.5f, 0.5f, 0.4f, -1.5f };
+    i64 const want[6] = { 1, 0, 1, 0, 1, 1 };
+    Term lt = uop_binary(UOP_CMPLT, ten(DT_FP32, f, 1, six), fc(0.5f));
+    check_realized(uop_cast(lt, DT_BOOL), DT_BOOL, want, 6);
   }
 
   TEST_BEGIN("e2e/i32-sum-of-cast-of-scaled-f32");
