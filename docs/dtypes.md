@@ -342,5 +342,6 @@ holds f64 sums and maxes to f64 precision in every legacy C emit
 reduce shape and on the realized CPU JIT route,
 `tests/test_uop_walk_cast.c` holds the walker's CAST to the C emit's,
 and `tests/test_uop_walk_c_types.c` holds its float arithmetic, float
-and int accumulators and mixed-type conversions to the C emit's, whose
-register-blocked reduces hoist a lane-invariant value unconverted.
+and int accumulators, mixed-type conversions and index ops over float
+values to the C emit's, whose register-blocked reduces hoist a
+lane-invariant value unconverted.

@@ -26,6 +26,15 @@
 // `a[j] * (1.0f/b[j])` to an `int` and rounded the double `v[j] * 3.0` of
 // an f32 reduce to a `float`, so the compiled kernel disagreed with the
 // same kernel without the UPCAST and with the walker.
+//
+// The index-op kernels store IADD / ISUB of float values into an int32
+// buffer.  The C emit casts each operand of an index op to `int`, so a
+// float ADD, MUL, NEG, RECIP, EXP2, LOG2 or SQRT there converts its own
+// result, rounded to f32 first where it is a float: (int)(0.75f + 0.75f)
+// is 1 where the truncated operands add to 0, and (int)(1.0f / 0.1f) is
+// 10 where the double quotient truncates to 9.  The walker's int evaluator
+// added the truncated operands of a float ADD, MUL or NEG and read RECIP,
+// EXP2, LOG2 and SQRT as 0.
 #include "../src/thvm.c"
 #include "test.h"
 #include <dlfcn.h>
@@ -454,6 +463,77 @@ static void build_lane_blocks(void) {
   }
 }
 
+// out[i] = <index op>(a(x[i], y[i]), b(x[i], y[i])) over f32 x and y.
+static Kern *index_op_kern(char const *name, f32 const *x, f32 const *y) {
+  Kern *k = kern(name, DT_INT32, NO);
+  input(k, DT_FP32, NO, x);
+  input(k, DT_FP32, NO, y);
+  return k;
+}
+
+static void build_index_ops(void) {
+  {
+    f32 const x[NO] = { 0.75f, 0.75f, -0.75f, 1.5f, 2.5f, 0.1f, 16777216.0f, -1.25f };
+    f32 const y[NO] = { 0.75f, 0.5f, -0.75f, 1.5f, 0.25f, 0.2f, 1.0f, -1.25f };
+    i32 w[NO];
+    for (u32 i = 0; i < NO; i++) {
+      f32 s = x[i] + y[i];
+      w[i] = (i32)s + 1;
+    }
+    Kern *k = index_op_kern("index-op-of-f32-sum", x, y);
+    Term  s = uop_binary(UOP_ADD, ld(k, 0, at_i()), ld(k, 1, at_i()));
+    k->root = uop_store(k->out, at_i(), uop_int_binary(UOP_IADD, s, uop_const(DT_INT32, 1)));
+    want(k, w);
+  }
+  {
+    f32 const x[NO] = { 1.5f, 0.75f, -1.5f, 2.5f, 0.3f, -0.6f, 3.0f, 1.1f };
+    f32 const y[NO] = { 1.5f, 0.75f, 1.5f, 0.5f, 0.3f, -0.6f, 0.4f, 1.1f };
+    i32 w[NO];
+    for (u32 i = 0; i < NO; i++) {
+      f32 p = x[i] * y[i];
+      f32 s = x[i] + y[i];
+      f32 n = -s;
+      w[i] = (i32)p - (i32)n;
+    }
+    Kern *k  = index_op_kern("index-op-of-f32-product-and-negation", x, y);
+    Term  xv = ld(k, 0, at_i());
+    Term  yv = ld(k, 1, at_i());
+    Term  n  = uop_unary(UOP_NEG, uop_binary(UOP_ADD, xv, yv));
+    k->root  = uop_store(k->out, at_i(), uop_int_binary(UOP_ISUB, uop_binary(UOP_MUL, xv, yv), n));
+    want(k, w);
+  }
+  {
+    f32 const x[NO] = { 0.25f, 0.1f, 3.0f, -0.2f, 0.3f, 1e-3f, 2.0f, -0.125f };
+    f32 const y[NO] = { 4.0f, 2.0f, 9.0f, 0.0f, 16.5f, 1e6f, 0.5f, 2.25f };
+    i32 w[NO];
+    for (u32 i = 0; i < NO; i++) {
+      f32 r = 1.0f / x[i];
+      f64 q = sqrt((f64)y[i]);
+      w[i] = (i32)r + (i32)q;
+    }
+    Kern *k = index_op_kern("index-op-of-recip-and-sqrt", x, y);
+    Term  r = uop_unary(UOP_RECIP, ld(k, 0, at_i()));
+    k->root = uop_store(k->out, at_i(),
+                        uop_int_binary(UOP_IADD, r, uop_unary(UOP_SQRT, ld(k, 1, at_i()))));
+    want(k, w);
+  }
+  {
+    f32 const x[NO] = { 0.5f, 3.9f, -0.5f, 10.0f, 0.0f, -3.5f, 1.0f, 4.5f };
+    f32 const y[NO] = { 10.0f, 0.3f, 1.0f, 1000.0f, 3.0f, 0.75f, 2.0f, 1e-3f };
+    i32 w[NO];
+    for (u32 i = 0; i < NO; i++) {
+      f64 e = exp2((f64)x[i]);
+      f64 l = log2((f64)y[i]);
+      w[i] = (i32)e + (i32)l;
+    }
+    Kern *k = index_op_kern("index-op-of-exp2-and-log2", x, y);
+    Term  e = uop_unary(UOP_EXP2, ld(k, 0, at_i()));
+    k->root = uop_store(k->out, at_i(),
+                        uop_int_binary(UOP_IADD, e, uop_unary(UOP_LOG2, ld(k, 1, at_i()))));
+    want(k, w);
+  }
+}
+
 // === Walker ===============================================================
 
 static u32 cpu_buf(u32 dt, void const *data, u32 n) {
@@ -610,6 +690,7 @@ int main(void) {
   build_reduces();
   build_guards();
   build_lane_blocks();
+  build_index_ops();
   check_walker();
   check_rendered();
   thvm_free();

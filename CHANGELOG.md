@@ -207,6 +207,7 @@ for the per-commit story.
   last iteration.
 
 ### Backends
+- `test_uop_walk_c_types` stores IADD / ISUB of float values (an ADD, MUL, NEG, RECIP, SQRT, EXP2 and LOG2 of f32 loads) into int32 buffers through the CPU UOp walker and the compiled C emit. The C emit casts each operand of an index op `(int)(x)`, so a float value converts its own result, rounded to f32 first where it is a float; the walker's int evaluator does the same since it converts a float subterm through its float result, and without that it added truncated operands and read RECIP, EXP2, LOG2 and SQRT as 0 (83/87 on the base walker, 87/87 now).
 - The CPU UOp walker's int evaluator looks up the C type only at the top of an int ADD, MUL or NEG expression: an ADD, MUL or NEG operand of an int one is an int too, so it recurses without the lookup that catches a float one. A 2000-deep int32 ADD chain over 4096 elements walked in 0.152 s with a lookup at every ADD and walks in 0.133 s, against 0.130 s without the float check (medians of 12 interleaved runs).
 - `test_uop_walk_domains` walks a 2000-deep int32 ADD chain over 4096 elements on the CPU UOp walker under a 10 s bound. The walker's int evaluator asks every ADD, MUL and NEG for its C type, which stays linear only through `uwalk_term_dtype`'s per-walk memo: unmemoized, each question re-walked the chain beneath it, and the chain took 101 s.
 - CPU JIT: the in-memory kernel cache grows (open addressing, doubled before
