@@ -119,6 +119,12 @@ for an unsigned int and False for bool.  An i64 minimum does not fit
 the CONST's 32-bit payload, so an i64 MAX reduce stays unlowered and
 the linearized renderers decline it.
 
+An int or bool reduce is exact in its own dtype, as tinygrad allocates
+the accumulator like the reduce (reduce_ranges_to_acc,
+codegen/__init__.py:197-204).  The CPU UOp walker accumulates it in
+i64, reads each body value and wraps the sum in the dtype, and compares
+a u64 MAX unsigned; a bool SUM or MAX is an OR (uop/symbolic.py:163-166).
+
 Packed nibble lanes -- i4, u4.  Storage is 2 nibbles per byte, low
 nibble first ([src/dtype/nibble.c](../src/dtype/nibble.c)).  No CPU
 kernel handles them: the UOp walker has no nibble load or store, and
@@ -255,4 +261,5 @@ C side: `tests/test_uop_const_fold_dtype.c` covers CONST payload
 truncation and CAST / BITCAST folding; `tests/test_fp8_nonfinite.c`
 covers fp8 inf / NaN encoding on the host, at realized kernel stores
 and in realized constant fills, and the MAX reduce identity of the
-fp8, f32, int and bool dtypes.
+fp8, f32, int and bool dtypes; `tests/test_int_reduce_exact.c` covers
+int and bool SUM / MAX past 2^24 and 2^53 on the CPU routes.

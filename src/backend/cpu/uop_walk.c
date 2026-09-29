@@ -22,10 +22,20 @@
 // LIMITATIONS: f32 only for the float ALU evaluator; integer values
 // are evaluated as i64. Mixed-dtype kernels (CAST chains) are
 // supported via per-leaf dtype reads/writes; intermediate ALU
-// computations promote to double / i64.
+// computations promote to double / i64.  An int or bool REDUCE
+// accumulates exactly in its dtype (uwalk_run_reduce).
 
 #define UWALK_MAX_RANGES   16
 #define UWALK_MAX_REDUCES  64
+
+// A REDUCE's value.  An int or bool reduce keeps its exact value `i` in
+// its dtype (two's complement for u64), and `f` converts it; a float
+// reduce has only `f`.
+typedef struct {
+  double f;
+  i64    i;
+  int    is_int;
+} UWalkRed;
 
 // THVM_TRACE_UOP_WALK_DECLINE=1 emits one stderr line per decline
 // site, classified by short tag + detail. Off by default; one cached
@@ -67,9 +77,9 @@ typedef struct {
   u32   axis_id[UWALK_MAX_RANGES];
   u32   iter   [UWALK_MAX_RANGES];
   u32   n_ranges;
-  // Reduce accumulators: indexed by reduce slot. Float-only for now.
-  Term  red_term[UWALK_MAX_REDUCES];   // identity term that selects this acc
-  double red_acc[UWALK_MAX_REDUCES];
+  // Reduce results, indexed by reduce slot.
+  Term     red_term[UWALK_MAX_REDUCES];   // identity term that selects this acc
+  UWalkRed red_acc [UWALK_MAX_REDUCES];
   // Iter-aware cache validation: each cached REDUCE result carries the
   // FREE-axis iter snapshot at the moment of compute.  A subsequent
   // eval_float of the same REDUCE term reuses the cached value iff the
@@ -264,9 +274,9 @@ static void uwalk_store_i64(void *p, i64 off, u32 dt, i64 v) {
 }
 
 // Forward decls.
-static double uwalk_eval_float(UWalkCtx *c, Term t);
-static i64    uwalk_eval_int  (UWalkCtx *c, Term t);
-static double uwalk_run_reduce(UWalkCtx *c, Term red);
+static double   uwalk_eval_float(UWalkCtx *c, Term t);
+static i64      uwalk_eval_int  (UWalkCtx *c, Term t);
+static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red);
 
 // Decide whether to evaluate a term as float vs int. Floats: ADD/MUL/
 // CMPLT/CMPEQ/NEG/RECIP/EXP2/LOG2/SQRT/REDUCE/INDEX_E (depending on
@@ -314,12 +324,11 @@ static int uwalk_term_is_int(UWalkCtx *c, Term t) {
 
 // Look up a hoisted reduce accumulator by REDUCE term identity.
 // NOTE: callers that get a non-negative idx must verify the iter
-// snapshot via uwalk_reduce_snapshot_matches before using *out --
+// snapshot via uwalk_reduce_snapshot_matches before using its value --
 // the cache may be stale if a relevant free axis has advanced.
-static int uwalk_reduce_lookup(UWalkCtx const *c, Term red, double *out) {
+static int uwalk_reduce_lookup(UWalkCtx const *c, Term red) {
   for (u32 i = 0; i < c->n_reduces; i++) {
     if (c->red_term[i] == red) {
-      if (out) *out = c->red_acc[i];
       return (int)i;
     }
   }
@@ -396,6 +405,58 @@ static void uwalk_reduce_snapshot_save(UWalkCtx *c, u32 slot) {
   for (u32 i = 0; i < c->red_n_free[slot]; i++) {
     c->red_free_iter[slot][i] = uwalk_lookup_iter(c, c->red_free_ids[slot][i]);
   }
+}
+
+// A REDUCE's value through the iter-aware cache: if the REDUCE has a slot
+// whose snapshot still matches the current iter for its free axes, return
+// the cached value; otherwise recompute and refresh or register the slot.
+// Without this, an inner REDUCE inside another REDUCE's body is recomputed
+// every outer iteration even when its body is invariant to the outer's
+// axis (e.g. conv-backward x-grad has reduces over (Cout,kH,kW) nested with
+// the unfold sub-reduces; ~25x speedup for the inner Conv2d weight/input
+// grad kernels).
+static UWalkRed uwalk_reduce_value(UWalkCtx *c, Term t) {
+  int idx = uwalk_reduce_lookup(c, t);
+  if (idx >= 0 && uwalk_reduce_snapshot_matches(c, (u32)idx)) {
+    return c->red_acc[idx];
+  }
+  UWalkRed v = uwalk_run_reduce(c, t);
+  if (idx >= 0) {
+    c->red_acc[idx] = v;
+    uwalk_reduce_snapshot_save(c, (u32)idx);
+    return v;
+  }
+  if (c->n_reduces >= UWALK_MAX_REDUCES) {
+    return v;
+  }
+  u32 slot = c->n_reduces++;
+  c->red_term[slot]   = t;
+  c->red_acc[slot]    = v;
+  c->red_n_free[slot] = uwalk_reduce_free_axes(c, t, c->red_free_ids[slot],
+                                               UWALK_MAX_RANGES);
+  uwalk_reduce_snapshot_save(c, slot);
+  return v;
+}
+
+// Truth of an IWHERE condition, walked in its own domain.  The cond may be
+// an integer predicate (index-layer ILT/IAND/PAD bounds) OR a float
+// comparison mask (value-layer WHERE, e.g. relu's CMPLT producing
+// 0.0/1.0).  The int evaluator doesn't handle CMPLT/CMPEQ over floats, so
+// a float cond walked as int truncates its operands.
+static int uwalk_cond_truth(UWalkCtx *c, Term cterm) {
+  Term cr = term_resolve(cterm);
+  int int_cond = 0;
+  if (term_tag(cr) == TAG_UOP) {
+    u8 cop = term_ext(cr);
+    int_cond = (cop == UOP_ILT  || cop == UOP_IAND || cop == UOP_IADD
+             || cop == UOP_IOR  || cop == UOP_IXOR || cop == UOP_ISHR
+             || cop == UOP_ISUB || cop == UOP_IMUL || cop == UOP_IDIV
+             || cop == UOP_IMOD || cop == UOP_IWHERE
+             || cop == UOP_INVALID || cop == UOP_RANGE
+             || cop == UOP_INDEX_E);
+  }
+  return int_cond ? (uwalk_eval_int(c, cterm) != 0)
+                  : (uwalk_eval_float(c, cterm) != 0.0);
 }
 
 static double uwalk_eval_float(UWalkCtx *c, Term t) {
@@ -482,58 +543,13 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       }
       return (double)uwalk_eval_int(c, src);
     }
-    case UOP_IWHERE: {
-      // The cond may be an integer predicate (index-layer ILT/IAND/PAD
-      // bounds) OR a float comparison mask (value-layer WHERE, e.g. relu's
-      // CMPLT producing 0.0/1.0).  Evaluate it in the right domain: the int
-      // evaluator doesn't handle CMPLT/CMPEQ, so a float cond walked as int
-      // returns garbage.  Dispatch on the cond's op domain.
-      Term cterm = heap_read(loc + 0);
-      Term cr    = term_resolve(cterm);
-      int int_cond = 0;
-      if (term_tag(cr) == TAG_UOP) {
-        u8 cop = term_ext(cr);
-        int_cond = (cop == UOP_ILT  || cop == UOP_IAND || cop == UOP_IADD
-                 || cop == UOP_IOR  || cop == UOP_IXOR || cop == UOP_ISHR
-                 || cop == UOP_ISUB || cop == UOP_IMUL || cop == UOP_IDIV
-                 || cop == UOP_IMOD || cop == UOP_IWHERE
-                 || cop == UOP_INVALID || cop == UOP_RANGE
-                 || cop == UOP_INDEX_E);
+    case UOP_IWHERE:
+      if (uwalk_cond_truth(c, heap_read(loc + 0))) {
+        return uwalk_eval_float(c, heap_read(loc + 1));
       }
-      int truth = int_cond ? (uwalk_eval_int(c, cterm)   != 0)
-                           : (uwalk_eval_float(c, cterm) != 0.0);
-      if (truth) return uwalk_eval_float(c, heap_read(loc + 1));
       return uwalk_eval_float(c, heap_read(loc + 2));
-    }
-    case UOP_REDUCE: {
-      // Iter-aware cache: if this REDUCE term has a slot AND the
-      // snapshot still matches the current iter for its free axes,
-      // return the cached value.  Otherwise (slot exists but stale,
-      // or no slot) recompute and refresh / register.  Without this,
-      // an inner REDUCE inside another REDUCE's body is recomputed
-      // every outer iteration even when its body is invariant to
-      // the outer's axis (e.g. conv-backward x-grad has reduces over
-      // (Cout,kH,kW) nested with the unfold sub-reduces; ~25x speedup
-      // for the inner Conv2d weight/input grad kernels).
-      int idx = uwalk_reduce_lookup(c, t, NULL);
-      if (idx >= 0 && uwalk_reduce_snapshot_matches(c, (u32)idx)) {
-        return c->red_acc[idx];
-      }
-      double v = uwalk_run_reduce(c, t);
-      if (idx >= 0) {
-        c->red_acc[idx] = v;
-        uwalk_reduce_snapshot_save(c, (u32)idx);
-        return v;
-      }
-      if (c->n_reduces >= UWALK_MAX_REDUCES) return v;     // cache full
-      u32 slot = c->n_reduces++;
-      c->red_term[slot]   = t;
-      c->red_acc[slot]    = v;
-      c->red_n_free[slot] = uwalk_reduce_free_axes(c, t,
-                              c->red_free_ids[slot], UWALK_MAX_RANGES);
-      uwalk_reduce_snapshot_save(c, slot);
-      return v;
-    }
+    case UOP_REDUCE:
+      return uwalk_reduce_value(c, t).f;
     case UOP_OPT:
       return uwalk_eval_float(c, heap_read(loc + 0));
     case UOP_INVALID:
@@ -590,11 +606,10 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
                         ^ uwalk_eval_int(c, heap_read(loc+1));
     case UOP_ISHR: return (i64)((i32)uwalk_eval_int(c, heap_read(loc+0))
                         >> (i32)uwalk_eval_int(c, heap_read(loc+1)));
-    case UOP_IWHERE: {
-      i64 cond = uwalk_eval_int(c, heap_read(loc+0));
-      return cond ? uwalk_eval_int(c, heap_read(loc+1))
-                  : uwalk_eval_int(c, heap_read(loc+2));
-    }
+    case UOP_IWHERE:
+      return uwalk_cond_truth(c, heap_read(loc + 0))
+           ? uwalk_eval_int(c, heap_read(loc + 1))
+           : uwalk_eval_int(c, heap_read(loc + 2));
     case UOP_INVALID: return 0;
     case UOP_INDEX_E: {
       Term buf = heap_read(loc + 0);
@@ -650,25 +665,8 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
     case UOP_OPT:
       return uwalk_eval_int(c, heap_read(loc + 0));
     case UOP_REDUCE: {
-      // Same iter-aware cache logic as eval_float's UOP_REDUCE.
-      int idx = uwalk_reduce_lookup(c, t, NULL);
-      if (idx >= 0 && uwalk_reduce_snapshot_matches(c, (u32)idx)) {
-        return (i64)c->red_acc[idx];
-      }
-      double v = uwalk_run_reduce(c, t);
-      if (idx >= 0) {
-        c->red_acc[idx] = v;
-        uwalk_reduce_snapshot_save(c, (u32)idx);
-        return (i64)v;
-      }
-      if (c->n_reduces >= UWALK_MAX_REDUCES) return (i64)v;
-      u32 slot = c->n_reduces++;
-      c->red_term[slot]   = t;
-      c->red_acc[slot]    = v;
-      c->red_n_free[slot] = uwalk_reduce_free_axes(c, t,
-                              c->red_free_ids[slot], UWALK_MAX_RANGES);
-      uwalk_reduce_snapshot_save(c, slot);
-      return (i64)v;
+      UWalkRed r = uwalk_reduce_value(c, t);
+      return r.is_int ? r.i : (i64)r.f;
     }
     // UOP_ADD / MUL / CMPLT / CMPEQ / NEG over integer-typed operands.
     // The high-level WL Plus / Times / etc. emit these generic ALU ops
@@ -749,9 +747,9 @@ static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out) {
 // Collect TOP-LEVEL REDUCE nodes (those reachable from `t` without
 // crossing another UOP_REDUCE boundary).  Reduces nested inside another
 // reduce's body are NOT collected here: the outer's uwalk_run_reduce
-// will iterate its axis, and uwalk_eval_float on the inner UOP_REDUCE
-// re-runs it on every iteration via uwalk_run_reduce (see eval_float's
-// UOP_REDUCE cache-miss branch).  Pre-registering inner reduces would
+// will iterate its axis, and evaluating the inner UOP_REDUCE re-runs it
+// on every iteration via uwalk_run_reduce (see uwalk_reduce_value's
+// cache-miss branch).  Pre-registering inner reduces would
 // cache a stale value (computed once with the outer's axis at 0) and
 // the outer's accumulator would combine the same value N times.
 static void uwalk_collect_reduces(Term t, Term *reduces, u32 *n_out) {
@@ -931,6 +929,88 @@ static void uwalk_split_axes_init(UWalkCtx *c, Term store_addr, Term value) {
   }
 }
 
+// v as a value of int or bool dtype `dt`: its low bits, sign-extended
+// when dt is signed.  A bool is v != 0.
+static i64 uwalk_int_wrap(u32 dt, i64 v) {
+  if (dtype_is_bool(dt)) {
+    return v != 0;
+  }
+  u32 bits = dtype_info(dt)->bits;
+  if (bits >= 64) {
+    return v;
+  }
+  u64 mask = ((u64)1 << bits) - 1;
+  u64 u    = (u64)v & mask;
+  if (dtype_is_signed(dt) && ((u >> (bits - 1)) & 1)) {
+    u |= ~mask;
+  }
+  return (i64)u;
+}
+
+static UWalkRed uwalk_int_red(u32 dt, i64 v) {
+  UWalkRed r;
+  r.i      = v;
+  r.f      = (dt == DT_UINT64) ? (double)(u64)v : (double)v;
+  r.is_int = 1;
+  return r;
+}
+
+// 1 iff `red` reduces an int or bool dtype, written to *dt.
+static int uwalk_reduce_int_dtype(Term red, u32 *dt) {
+  u32 d = DT_FP32;
+  (void)term_dtype_in(red, 0, &d);
+  if (!dtype_is_bool(d) && !(dtype_is_int(d) && !dtype_is_packed(d))) {
+    return 0;
+  }
+  *dt = d;
+  return 1;
+}
+
+// tinygrad's identity_element (uop/ops.py:61): 0 for SUM, dt.min for MAX,
+// which is -2^(bits-1) for a signed int, 0 for an unsigned int or bool
+// (dtype.py:70-72), and -inf for a float.
+static UWalkRed uwalk_reduce_identity(u32 kind, int is_int, u32 dt) {
+  if (!is_int) {
+    UWalkRed r = { (kind == REDUCE_MAX) ? -INFINITY : 0.0, 0, 0 };
+    return r;
+  }
+  i64 id = 0;
+  if (kind == REDUCE_MAX && dtype_is_signed(dt)) {
+    id = uwalk_int_wrap(dt, (i64)((u64)1 << (dtype_info(dt)->bits - 1)));
+  }
+  return uwalk_int_red(dt, id);
+}
+
+// acc <kind> v in int or bool dtype `dt`.  SUM wraps as the dtype's
+// accumulator does, MAX compares in the dtype's order, and a bool SUM or
+// MAX is an OR (tinygrad uop/symbolic.py:163-166).
+static i64 uwalk_int_combine(u32 kind, u32 dt, i64 acc, i64 v) {
+  v = uwalk_int_wrap(dt, v);
+  if (dtype_is_bool(dt)) {
+    return acc | v;
+  }
+  if (kind == REDUCE_SUM) {
+    return uwalk_int_wrap(dt, (i64)((u64)acc + (u64)v));
+  }
+  if (dt == DT_UINT64) {
+    return ((u64)acc < (u64)v) ? v : acc;
+  }
+  return (acc < v) ? v : acc;
+}
+
+// Advance the reduce odometer over the n axes pushed at slot0 (innermost
+// last).  Returns 0 once every combination has run.
+static int uwalk_odometer_next(UWalkCtx *c, u32 slot0, u32 const *extents,
+                               u32 n) {
+  for (u32 d = n; d > 0; d--) {
+    if (++c->iter[slot0 + d - 1] < extents[d - 1]) {
+      return 1;
+    }
+    c->iter[slot0 + d - 1] = 0;
+  }
+  return 0;
+}
+
 // Compute one reduce accumulator over its axis range.
 // Run a (possibly multi-axis) REDUCE by chaining through nested
 // same-kind UOP_REDUCE shells.  Mirrors tinygrad's lowered form
@@ -952,13 +1032,20 @@ static void uwalk_split_axes_init(UWalkCtx *c, Term store_addr, Term value) {
 // `r_src == UOP_REDUCE(same_kind)` shells; if the body branches into
 // elementwise ops over multiple sibling REDUCEs, those siblings stay
 // as separate uwalk_eval_float entries (handled via the iter-cache).
-static double uwalk_run_reduce(UWalkCtx *c, Term red) {
+//
+// An int or bool reduce accumulates in its dtype, as tinygrad allocates
+// the accumulator like the reduce (reduce_ranges_to_acc,
+// codegen/__init__.py:197-204); a double accumulator rounds past 2^53.
+static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
   u32  axes  [UWALK_MAX_RANGES];
   u32  extents[UWALK_MAX_RANGES];
   u32  chain_len = 0;
   Term cur   = red;
   u32  kind  = term_val(heap_read(term_val(red) + 1));
   Term body  = cur;
+  u32  dt    = DT_FP32;
+  int  is_int = uwalk_reduce_int_dtype(red, &dt);
+  UWalkRed identity = uwalk_reduce_identity(kind, is_int, dt);
   // Walk down the chain of same-kind UOP_REDUCE shells.  Each shell may
   // itself be multi-axis (mirrors tinygrad REDUCE with src=(body,
   // range_0, range_1, ...) -- uop/ops.py + schedule/indexing.py:94).
@@ -992,7 +1079,7 @@ static double uwalk_run_reduce(UWalkCtx *c, Term red) {
         // No contributions on this axis -> the whole chain yields
         // identity.  (Identity-or-bail matches the old single-axis
         // r_extent==0 short-circuit.)
-        return (kind == REDUCE_MAX) ? -INFINITY : 0.0;
+        return identity;
       }
       axes[chain_len]    = caxis;
       extents[chain_len] = cext;
@@ -1024,32 +1111,36 @@ static double uwalk_run_reduce(UWalkCtx *c, Term red) {
   }
   if (chain_len == 0) {
     // Caller passed a non-REDUCE (defensive).
-    return (kind == REDUCE_MAX) ? -INFINITY : 0.0;
+    return identity;
   }
   // Push one range slot per chained axis.
-  if (c->n_ranges + chain_len > UWALK_MAX_RANGES) return 0.0;
+  if (c->n_ranges + chain_len > UWALK_MAX_RANGES) {
+    UWalkRed none = { 0.0, 0, is_int };
+    return none;
+  }
   u32 slot0 = c->n_ranges;
   for (u32 i = 0; i < chain_len; i++) {
     c->axis_id[slot0 + i] = axes[i];
     c->iter   [slot0 + i] = 0;
   }
   c->n_ranges += chain_len;
-  double acc = (kind == REDUCE_MAX) ? -INFINITY : 0.0;
   // Iterate the full Cartesian product of axes via odometer.
-  for (;;) {
-    double v = uwalk_eval_float(c, body);
-    if (kind == REDUCE_MAX) acc = (v > acc) ? v : acc;
-    else                    acc = acc + v;
-    // Advance the odometer (innermost = chain_len-1).
-    u32 d = chain_len;
-    while (d > 0) {
-      d--;
-      c->iter[slot0 + d]++;
-      if (c->iter[slot0 + d] < extents[d]) break;
-      c->iter[slot0 + d] = 0;
-      if (d == 0) { c->n_ranges -= chain_len; return acc; }
-    }
+  if (is_int) {
+    i64 acc = identity.i;
+    do {
+      acc = uwalk_int_combine(kind, dt, acc, uwalk_eval_int(c, body));
+    } while (uwalk_odometer_next(c, slot0, extents, chain_len));
+    c->n_ranges -= chain_len;
+    return uwalk_int_red(dt, acc);
   }
+  double acc = identity.f;
+  do {
+    double v = uwalk_eval_float(c, body);
+    acc = (kind == REDUCE_MAX) ? ((v > acc) ? v : acc) : (acc + v);
+  } while (uwalk_odometer_next(c, slot0, extents, chain_len));
+  c->n_ranges -= chain_len;
+  UWalkRed r = { acc, 0, 0 };
+  return r;
 }
 
 // Find the output-axis ranges (those that appear in addr) vs reduce
@@ -1109,7 +1200,7 @@ static void uwalk_loop_and_store(UWalkCtx *c,
     // axes).
     for (u32 i = 0; i < n_reduces; i++) {
       if (hoistable[i]) continue;
-      int idx = uwalk_reduce_lookup(c, value_reduces[i], NULL);
+      int idx = uwalk_reduce_lookup(c, value_reduces[i]);
       if (idx < 0) {
         // First time: register slot + free-axis snapshot fields so
         // the iter-aware cache check in eval_float can validate it.
