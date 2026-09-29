@@ -59,16 +59,27 @@ lane-invariant values the legacy C emit hoists next to the
 accumulator.
 
 The CPU UOp walker
-([src/backend/cpu/uop_walk.c](../src/backend/cpu/uop_walk.c)) has a
-float evaluator, in f64, and an int one, in i64.  It walks each
-subterm in the evaluator the subterm's own dtype picks, as the C the
-renderer emits types it.  A comparison compares in its operands'
-dtype: an i64 past 2^53 exactly, a u64 unsigned, and an index (RANGE
-or I-op arithmetic) as an int.  An IWHERE condition is true when
-nonzero in its own dtype.  An int kernel whose body is float-typed
-(py's int32 true division builds one) computes that body in float and
-converts it as C converts `acc = acc + v` or `out[i] = v`, so the walker
-agrees with the CPU JIT.
+([src/backend/cpu/uop_walk.c](../src/backend/cpu/uop_walk.c)) gives
+each subterm the C type the legacy C emit renders for it and computes
+in that type, so it agrees with the CPU JIT.  An f32 value is a
+`float`, as are f16, bf16 and fp8 values; an f64 value, a CONST of
+another float dtype (a double literal) and EXP2 / LOG2 / SQRT (math.h's
+double functions) are `double`s.  The float evaluator carries each
+value in a double and rounds every float result to f32, which gives
+the float operation's result.  An op over mixed types converts as C's
+usual arithmetic conversions do: an int operand of a float op reaches
+f32 rounded once, and an int compared with a float compares in float.
+A float reduce accumulates in a `float` (a `double` for f64).  An int
+or bool value walks in an i64 evaluator: two ints compare exactly past
+2^53, a u64 unsigned, and an index (RANGE or I-op arithmetic) as an
+int.  An IWHERE condition is true when nonzero in its own type.  An int
+kernel whose body is float-typed (py's int32 true division, `a *
+(1.0f/b)`, builds one) computes that body in float and converts it as C
+converts `acc = acc + v` or `out[i] = v`: 1312 / 41 is 31.999998 in
+float and stores 31.  Two gaps remain.  Int arithmetic runs in i64 and
+wraps to a narrower dtype only at a CAST, a REDUCE or the store.  A
+compiler that fuses `a * b + c` into one multiply-add (clang does on
+arm64 by default) rounds once where the walker rounds twice.
 
 Promote-to-f32 lanes -- f16, bf16, fp8e4m3, fp8e5m2.  No native ALU
 on the CPU.  The CPU JIT declines any kernel with a buffer of these
@@ -76,9 +87,10 @@ dtypes (`cpu_jit_narrow_float` in
 [src/backend/cpu/jit.c](../src/backend/cpu/jit.c)), so the kernel runs
 in the UOp walker
 ([src/backend/cpu/uop_walk.c](../src/backend/cpu/uop_walk.c)): each
-load decodes to f32 and widens to f64, the ALU runs in f64, and each
-store narrows through f32.  bf16 and fp8 round-trip exact for their
-representable values, and f16 overflow saturates to inf.
+load decodes to f32, the ALU computes in the C emit's types (a float,
+or a double for exp2, log2 and sqrt), and each store narrows through
+f32.  bf16 and fp8 round-trip exact for their representable values,
+and f16 overflow saturates to inf.
 
 fp8 has two encodings, as in tinygrad.  Host-side encoding is
 tinygrad's `float_to_fp8` (dtype.py:245-268), in `f32_to_fp8e4m3` /
@@ -147,11 +159,11 @@ The legacy C emit declares the accumulator, and the hoisted loads and
 lane-invariant locals of a register-blocked reduce, in the dtype's C
 type; an int MAX starts at `INT<n>_MIN` or 0 and compares, as tinygrad
 lowers MAX (codegen/decomp/op.py:84).  An f32 reduce keeps a float
-accumulator and an f64 one a double; the GPU targets keep a float
-accumulator for every dtype.  The devectorizer types each
-accumulator from the reduce's body, a STACK of lanes and a lowered
-inner reduce included, and combines a bool SUM as it does a MAX, which
-is an OR on {0, 1}.
+accumulator and an f64 one a double, on the C emit and in the walker;
+the GPU targets keep a float accumulator for every dtype.  The
+devectorizer types each accumulator from the reduce's body, a STACK of
+lanes and a lowered inner reduce included, and combines a bool SUM as
+it does a MAX, which is an OR on {0, 1}.
 
 Packed nibble lanes -- i4, u4.  Storage is 2 nibbles per byte, low
 nibble first ([src/dtype/nibble.c](../src/dtype/nibble.c)).  No CPU
@@ -170,11 +182,13 @@ source value as a C cast does, which is what the C emit renders: a
 float truncates toward zero into an int, an int wraps into a narrower
 int, a cast to bool is `!= 0` (tinygrad's bool(x)), an int reaches f32
 rounded once and an f64 value cast to f32 rounds.  The walker
-evaluates the source in its own dtype (f64 or i64) first, to match.
-It rounds to f16, bf16 or fp8 only at the store, so a CAST to one of
-those that feeds more arithmetic in the same kernel is not rounded
-there, and an fp8 destination takes the store rule above.  A CAST of
-a float CONST folds on the host (below).
+evaluates the source in its own C type first, to match.  The C emit
+renders a CAST to f16, bf16 or fp8 as `(float)x`, so on both routes
+the value rounds to f32 there and to the narrow dtype only at the
+store: a CAST to one of those that feeds more arithmetic in the same
+kernel is not rounded to it, where tinygrad rounds, and an fp8
+destination takes the store rule above.  A CAST of a float CONST folds
+on the host (below).
 
 BITCAST is bit-level reinterpret; source and destination must share
 itemsize.  Implementation is a memcpy.  Width mismatch is caught at
@@ -322,5 +336,7 @@ ASSIGN for every dtype, and `tests/test_cpu_jit_nonfinite.c` checks
 that f64 kernels with inf, NaN, negative and -0 constants compile on
 the CPU JIT and keep their values.  `tests/test_cpu_jit_f64_reduce.c`
 holds f64 sums and maxes to f64 precision in every legacy C emit
-reduce shape and on the realized CPU JIT route, and
-`tests/test_uop_walk_cast.c` holds the walker's CAST to the C emit's.
+reduce shape and on the realized CPU JIT route,
+`tests/test_uop_walk_cast.c` holds the walker's CAST to the C emit's,
+and `tests/test_uop_walk_c_types.c` holds its float arithmetic, float
+and int accumulators and mixed-type conversions to the C emit's.

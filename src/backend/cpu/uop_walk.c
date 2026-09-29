@@ -19,17 +19,27 @@
 // Default-ON; THVM_CPU_UOP_WALK=0 retained for bisection but the
 // only remaining downstream fallback is cpu_jit_dispatch.
 //
-// Each subterm walks in the evaluator its own dtype picks
-// (uwalk_term_dtype), as the rendered C types it: a float in doubles, an
-// int or bool in i64, a comparison in its operands' dtype (a u64
-// unsigned).  A CAST converts as the C emit's `((T)x)` does, and an int
-// kernel with a float body converts that body's value as C does.  An int
-// or bool REDUCE accumulates exactly in its dtype (uwalk_run_reduce).
+// Each subterm has the C type the legacy C emit gives it
+// (uwalk_term_dtype) and walks in the evaluator that type picks: a float
+// or a double in the float evaluator, an int or bool in the i64 one.  An
+// f32 value is a C float, as are f16, bf16 and fp8 values
+// (rmu_c_type_name); an f64 value, a CONST of any other float dtype (a
+// double literal) and EXP2 / LOG2 / SQRT (math.h's double functions) are
+// doubles.  A float op converts its operands to its type as C's usual
+// arithmetic conversions do, computes in a double and rounds a float
+// result to f32.  That is the float operation's result: a double holds a
+// float product exactly, and a double sum, quotient or square root of
+// floats rounds to the same f32 as the float operation.  A float REDUCE
+// accumulator is a float (a double for f64) that each combine rounds
+// into; an int or bool one accumulates exactly in its dtype
+// (uwalk_run_reduce).  A comparison compares in its operands' type (a u64
+// unsigned), and a CAST converts as the C emit's `((T)x)` does.
 //
-// LIMITATIONS: float ALU results stay doubles, not rounded to f32 per op;
-// int ALU results stay i64, wrapped to a narrower dtype only by a CAST, a
-// REDUCE or the store, so a u32 or i32 sum that overflows its width feeds
-// a comparison unwrapped.
+// LIMITATIONS: int ALU results stay i64, wrapped to a narrower dtype only
+// by a CAST, a REDUCE or the store, so a u32 or i32 sum that overflows its
+// width feeds a comparison unwrapped.  A JIT compiler that contracts
+// `a * b + c` into a fused multiply-add (clang does by default on arm64)
+// rounds once where the walker rounds twice.
 
 #define UWALK_MAX_RANGES   16
 #define UWALK_MAX_REDUCES  64
@@ -119,6 +129,14 @@ typedef struct {
   // 1 while the current store writes an int or bool buffer from a float
   // value, which converts as the rendered C store `out[i] = v` does.
   int   store_from_float;
+  // uwalk_term_dtype's memo, so a walk types each node once however often
+  // it evaluates it: open addressing on the term (a UOP term is never 0,
+  // so 0 marks a free slot) over ty_cap = 2^(64 - ty_shift) slots.
+  Term *ty_key;
+  u8   *ty_dt;
+  u32   ty_cap;
+  u32   ty_shift;
+  u32   ty_n;
   // Kid (index into KERNELS[]) of the currently-walking entry, used
   // only for THVM_TRACE_UOP_WALK_DECLINE telemetry. Set by
   // cpu_uop_walk before any uwalk_emit_* helper runs.
@@ -286,6 +304,7 @@ static void uwalk_store_i64(void *p, i64 off, u32 dt, i64 v) {
 static double   uwalk_eval_float(UWalkCtx *c, Term t);
 static i64      uwalk_eval_int  (UWalkCtx *c, Term t);
 static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red);
+static u32      uwalk_term_dtype(UWalkCtx *c, Term t);
 
 // v as a value of int or bool dtype `dt`: its low bits, sign-extended
 // when dt is signed.  A bool is v != 0.
@@ -308,6 +327,22 @@ static i64 uwalk_int_wrap(u32 dt, i64 v) {
 // Int or bool value v of dtype `dt` as a double; a u64 is unsigned.
 static double uwalk_int_to_f64(u32 dt, i64 v) {
   return (dt == DT_UINT64) ? (double)(u64)v : (double)v;
+}
+
+// v held in float dtype `dt` as the C emit holds it: a double for an f64,
+// else a float, so v rounds to f32.
+static double uwalk_round(u32 dt, double v) {
+  return (dt == DT_FP64) ? v : (double)(f32)v;
+}
+
+// Int or bool value v of dtype `sdt` converted to float dtype `dst` as C
+// converts it: to a double for an f64, else to a float rounded once from
+// the exact value, not through a double.  A u64 is unsigned.
+static double uwalk_int_to_float(u32 sdt, u32 dst, i64 v) {
+  if (dst == DT_FP64) {
+    return uwalk_int_to_f64(sdt, v);
+  }
+  return (sdt == DT_UINT64) ? (double)(f32)(u64)v : (double)(f32)v;
 }
 
 // f converted to int or bool dtype `dt` as a C cast converts it: toward
@@ -344,50 +379,71 @@ static int uwalk_reduce_int_dtype(Term red, u32 *dt) {
   return 1;
 }
 
-// The dtype C's usual arithmetic conversions give an op over dtypes a and
-// b, as far as the evaluators tell them apart: a float wins, then a u64;
-// any other int pair computes exactly in the i64 evaluator.
+// The dtype C's usual arithmetic conversions give an op over C types a and
+// b, as far as the evaluators tell them apart: a double wins, then a
+// float, then a u64; any other int pair computes exactly in the i64
+// evaluator.
 static u32 uwalk_dtype_promote(u32 a, u32 b) {
-  if (uwalk_dtype_is_float(a)) {
-    return a;
+  if (a == DT_FP64 || b == DT_FP64) {
+    return DT_FP64;
   }
-  if (uwalk_dtype_is_float(b) || b == DT_UINT64) {
-    return b;
+  if (uwalk_dtype_is_float(a) || uwalk_dtype_is_float(b)) {
+    return DT_FP32;
   }
-  return a;
+  return (b == DT_UINT64) ? b : a;
 }
 
-// The dtype of the value `t` evaluates to, which picks the evaluator its
-// consumer walks it with.  It follows the C the renderer emits for `t`:
-// index arithmetic (RANGE, the I-ops, INVALID) is an int and a comparison
-// an int 0 or 1; a load, CONST, CAST or REDUCE has its own dtype; RECIP,
-// EXP2, LOG2 and SQRT give a float; ADD, MUL, NEG and an IWHERE's branches
-// take their operands' dtype, the float or u64 one when they mix.
-static u32 uwalk_term_dtype(UWalkCtx *c, Term t) {
-  if (term_tag(t) != TAG_UOP) {
-    return DT_INT64;
+// The C type the legacy C emit gives a value of dtype `dt`
+// (rmu_c_type_name): a double for an f64, a float for every other float
+// dtype, and an int or bool dtype itself.
+static u32 uwalk_c_dtype(u32 dt) {
+  if (!uwalk_dtype_is_float(dt)) {
+    return dt;
   }
+  return (dt == DT_FP64) ? DT_FP64 : DT_FP32;
+}
+
+// The C type of the expression the legacy C emit renders for `t`, as
+// DT_FP64 for a double, DT_FP32 for a float and an int or bool dtype
+// otherwise; it picks the evaluator `t` walks in.  Index arithmetic
+// (RANGE, the I-ops, INVALID) is an int and a comparison an int 0 or 1.  A
+// load, CAST or REDUCE has its dtype's C type; a CONST too, except that a
+// CONST of a float dtype other than f32 renders as a double literal.
+// RECIP renders `1.0f/x`, a float unless x is a double, and EXP2, LOG2 and
+// SQRT call math.h's double functions.  ADD, MUL, NEG and an IWHERE's
+// branches take their operands' type, by C's usual arithmetic conversions
+// when they mix.
+static u32 uwalk_term_dtype_of(UWalkCtx *c, Term t) {
   u64 loc = term_val(t);
   switch (term_ext(t)) {
-    case UOP_CONST:
-      return term_ext(heap_read(loc));
+    case UOP_CONST: {
+      u32 dt = term_ext(heap_read(loc));
+      return (uwalk_dtype_is_float(dt) && dt != DT_FP32) ? DT_FP64 : dt;
+    }
     case UOP_CAST: case UOP_BITCAST:
-      return (u32)term_val(heap_read(loc + 1));
+      return uwalk_c_dtype((u32)term_val(heap_read(loc + 1)));
     case UOP_INDEX_E: {
       void *bp;
       u32   bdt;
-      return uwalk_resolve_buf(c, heap_read(loc), &bp, &bdt) ? bdt : DT_FP32;
+      if (!uwalk_resolve_buf(c, heap_read(loc), &bp, &bdt)) {
+        return DT_FP32;
+      }
+      return uwalk_c_dtype(bdt);
     }
     case UOP_REDUCE: {
       u32 dt = DT_FP32;
-      return uwalk_reduce_int_dtype(t, &dt) ? dt : DT_FP32;
+      if (uwalk_reduce_int_dtype(t, &dt)) {
+        return dt;
+      }
+      (void)term_dtype_in(t, 0, &dt);
+      return (dt == DT_FP64) ? DT_FP64 : DT_FP32;
     }
     case UOP_CMPLT: case UOP_CMPEQ: case UOP_ILT:
       return DT_BOOL;
-    case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: {
-      u32 d = uwalk_term_dtype(c, heap_read(loc));
-      return uwalk_dtype_is_float(d) ? d : DT_FP32;
-    }
+    case UOP_RECIP:
+      return (uwalk_term_dtype(c, heap_read(loc)) == DT_FP64) ? DT_FP64 : DT_FP32;
+    case UOP_EXP2: case UOP_LOG2: case UOP_SQRT:
+      return DT_FP64;
     case UOP_NEG: case UOP_OPT:
       return uwalk_term_dtype(c, heap_read(loc));
     case UOP_ADD: case UOP_MUL:
@@ -401,16 +457,70 @@ static u32 uwalk_term_dtype(UWalkCtx *c, Term t) {
   }
 }
 
+// The memo slot of `t`: its own, or the free slot where it goes.
+static u32 uwalk_ty_slot(UWalkCtx const *c, Term t) {
+  u32 mask = c->ty_cap - 1;
+  u32 i    = (u32)((t * 0x9E3779B97F4A7C15ull) >> c->ty_shift);
+  while (c->ty_key[i] != 0 && c->ty_key[i] != t) {
+    i = (i + 1) & mask;
+  }
+  return i;
+}
+
+static void uwalk_ty_grow(UWalkCtx *c) {
+  Term *old_key = c->ty_key;
+  u8   *old_dt  = c->ty_dt;
+  u32   old_cap = c->ty_cap;
+  c->ty_cap   = (old_cap != 0) ? 2 * old_cap : 256;
+  c->ty_shift = (old_cap != 0) ? c->ty_shift - 1 : 64 - 8;
+  c->ty_key   = (Term *)calloc(c->ty_cap, sizeof(Term));
+  c->ty_dt    = (u8 *)malloc(c->ty_cap);
+  if (c->ty_key == NULL || c->ty_dt == NULL) {
+    thvm_fatal("cpu_uop_walk: out of memory");
+  }
+  for (u32 k = 0; k < old_cap; k++) {
+    if (old_key[k] != 0) {
+      u32 i = uwalk_ty_slot(c, old_key[k]);
+      c->ty_key[i] = old_key[k];
+      c->ty_dt [i] = old_dt[k];
+    }
+  }
+  free(old_key);
+  free(old_dt);
+}
+
+static u32 uwalk_term_dtype(UWalkCtx *c, Term t) {
+  if (term_tag(t) != TAG_UOP) {
+    return DT_INT64;
+  }
+  if (c->ty_cap != 0) {
+    u32 i = uwalk_ty_slot(c, t);
+    if (c->ty_key[i] == t) {
+      return c->ty_dt[i];
+    }
+  }
+  u32 dt = uwalk_term_dtype_of(c, t);
+  if (2 * (c->ty_n + 1) > c->ty_cap) {
+    uwalk_ty_grow(c);
+  }
+  u32 i = uwalk_ty_slot(c, t);
+  c->ty_key[i] = t;
+  c->ty_dt [i] = (u8)dt;
+  c->ty_n++;
+  return dt;
+}
+
 static int uwalk_term_is_float(UWalkCtx *c, Term t) {
   return uwalk_dtype_is_float(uwalk_term_dtype(c, t));
 }
 
 // CAST(src, dst) as the C emit converts it, `((T)x)`, and a bool as
-// `(x != 0)`, which is tinygrad's bool(x).  src walks in its own dtype
+// `(x != 0)`, which is tinygrad's bool(x).  src walks in its own C type
 // (uwalk_term_dtype): a float reaches an int dtype truncated toward zero
-// and wrapped, an int wraps into a narrower one, and an int, or an f64
-// value, reaches f32 rounded once rather than through a double.  A u64
-// converts from its unsigned value.
+// and wrapped, an int wraps into a narrower one, and an int or a double
+// reaches a float rounded once.  A u64 converts from its unsigned value.
+// An implicit conversion, an operand of a wider C type or the value of a
+// store, converts the same way.
 static i64 uwalk_cast_int(UWalkCtx *c, Term src, u32 dst) {
   if (uwalk_term_is_float(c, src)) {
     return uwalk_f64_to_int(dst, uwalk_eval_float(c, src));
@@ -421,14 +531,9 @@ static i64 uwalk_cast_int(UWalkCtx *c, Term src, u32 dst) {
 static double uwalk_cast_float(UWalkCtx *c, Term src, u32 dst) {
   u32 sdt = uwalk_term_dtype(c, src);
   if (uwalk_dtype_is_float(sdt)) {
-    double f = uwalk_eval_float(c, src);
-    return (dst == DT_FP32) ? (double)(f32)f : f;
+    return uwalk_round(dst, uwalk_eval_float(c, src));
   }
-  i64 v = uwalk_eval_int(c, src);
-  if (dst == DT_FP64) {
-    return uwalk_int_to_f64(sdt, v);
-  }
-  return (sdt == DT_UINT64) ? (double)(f32)(u64)v : (double)(f32)v;
+  return uwalk_int_to_float(sdt, dst, uwalk_eval_int(c, src));
 }
 
 // Look up a hoisted reduce accumulator by REDUCE term identity.
@@ -547,16 +652,17 @@ static UWalkRed uwalk_reduce_value(UWalkCtx *c, Term t) {
   return v;
 }
 
-// a < b (CMPLT) or a == b (CMPEQ) in the operands' dtype, as the rendered
-// C compares them: in doubles when either is a float, else in the int
-// evaluator, unsigned when either is a u64.  A double holds an int exactly
-// only below 2^53.
+// a < b (CMPLT) or a == b (CMPEQ) in the operands' type, as the rendered
+// C compares them: when either is a float or a double, both convert to the
+// wider of their types, so an int past 2^24 meets a float rounded to f32;
+// else in the int evaluator, unsigned when either is a u64.
 static int uwalk_compare(UWalkCtx *c, u32 op, Term a, Term b) {
   u32 da = uwalk_term_dtype(c, a);
   u32 db = uwalk_term_dtype(c, b);
   if (uwalk_dtype_is_float(da) || uwalk_dtype_is_float(db)) {
-    double x = uwalk_eval_float(c, a);
-    double y = uwalk_eval_float(c, b);
+    u32    dt = uwalk_dtype_promote(da, db);
+    double x  = uwalk_cast_float(c, a, dt);
+    double y  = uwalk_cast_float(c, b, dt);
     return (op == UOP_CMPLT) ? (x < y) : (x == y);
   }
   i64 x = uwalk_eval_int(c, a);
@@ -576,6 +682,9 @@ static int uwalk_cond_truth(UWalkCtx *c, Term cterm) {
   return uwalk_eval_int(c, cterm) != 0;
 }
 
+// The value of `t`, whose C type is a float or a double
+// (uwalk_term_dtype), as a double: a float value is an f32 value.  An ADD,
+// MUL, NEG or IWHERE of an int type walks in the int evaluator.
 static double uwalk_eval_float(UWalkCtx *c, Term t) {
   if (term_tag(t) == TAG_NUM) return (double)(u32)term_val(t);
   if (term_tag(t) != TAG_UOP) return 0.0;
@@ -608,26 +717,31 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       i64 off = uwalk_eval_int(c, addr);
       return uwalk_load_f64(bp, off, bdt);
     }
-    case UOP_ADD: {
-      double a = uwalk_eval_float(c, heap_read(loc + 0));
-      double b = uwalk_eval_float(c, heap_read(loc + 1));
-      return a + b;
-    }
-    case UOP_MUL: {
-      double a = uwalk_eval_float(c, heap_read(loc + 0));
-      double b = uwalk_eval_float(c, heap_read(loc + 1));
-      return a * b;
+    case UOP_ADD: case UOP_MUL: {
+      u32 dt = uwalk_term_dtype(c, t);
+      if (!uwalk_dtype_is_float(dt)) {
+        return uwalk_int_to_f64(dt, uwalk_eval_int(c, t));
+      }
+      double a = uwalk_cast_float(c, heap_read(loc + 0), dt);
+      double b = uwalk_cast_float(c, heap_read(loc + 1), dt);
+      return uwalk_round(dt, (op == UOP_ADD) ? a + b : a * b);
     }
     case UOP_CMPLT: case UOP_CMPEQ:
       return uwalk_compare(c, op, heap_read(loc + 0), heap_read(loc + 1));
-    case UOP_NEG:  return -uwalk_eval_float(c, heap_read(loc + 0));
-    case UOP_RECIP:{
-      double a = uwalk_eval_float(c, heap_read(loc + 0));
-      return 1.0 / a;
+    case UOP_NEG: {
+      u32 dt = uwalk_term_dtype(c, t);
+      if (!uwalk_dtype_is_float(dt)) {
+        return uwalk_int_to_f64(dt, uwalk_eval_int(c, t));
+      }
+      return -uwalk_eval_float(c, heap_read(loc + 0));
     }
-    case UOP_EXP2: return exp2(uwalk_eval_float(c, heap_read(loc + 0)));
-    case UOP_LOG2: return log2(uwalk_eval_float(c, heap_read(loc + 0)));
-    case UOP_SQRT: return sqrt(uwalk_eval_float(c, heap_read(loc + 0)));
+    case UOP_RECIP: {
+      u32 dt = uwalk_term_dtype(c, t);
+      return uwalk_round(dt, 1.0 / uwalk_cast_float(c, heap_read(loc + 0), dt));
+    }
+    case UOP_EXP2: return exp2(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
+    case UOP_LOG2: return log2(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
+    case UOP_SQRT: return sqrt(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
     case UOP_CAST: {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
@@ -654,11 +768,15 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       }
       return (double)uwalk_eval_int(c, src);
     }
-    case UOP_IWHERE:
-      if (uwalk_cond_truth(c, heap_read(loc + 0))) {
-        return uwalk_eval_float(c, heap_read(loc + 1));
+    case UOP_IWHERE: {
+      u32  dt = uwalk_term_dtype(c, t);
+      Term v  = uwalk_cond_truth(c, heap_read(loc + 0)) ? heap_read(loc + 1)
+                                                         : heap_read(loc + 2);
+      if (!uwalk_dtype_is_float(dt)) {
+        return uwalk_int_to_f64(dt, uwalk_eval_int(c, v));
       }
-      return uwalk_eval_float(c, heap_read(loc + 2));
+      return uwalk_cast_float(c, v, dt);
+    }
     case UOP_REDUCE:
       return uwalk_reduce_value(c, t).f;
     case UOP_OPT:
@@ -1084,12 +1202,13 @@ static i64 uwalk_int_combine(u32 kind, u32 dt, i64 acc, i64 v) {
   return (acc < v) ? v : acc;
 }
 
-// acc <kind> v for a float body value v of an int or bool reduce, as the
-// rendered C combines it: `acc = acc + v` adds in float and converts the
-// sum back, while a MAX converts v into the dtype before it compares.
-static i64 uwalk_int_combine_f64(u32 kind, u32 dt, i64 acc, double v) {
+// acc <kind> v for a body value v of C float type `fdt` (a float or a
+// double) of an int or bool reduce, as the rendered C combines it: `acc =
+// acc + v` converts acc to v's type, adds there and converts the sum back,
+// while a MAX converts v into the dtype before it compares.
+static i64 uwalk_int_combine_f64(u32 kind, u32 dt, u32 fdt, i64 acc, double v) {
   if (kind == REDUCE_SUM && !dtype_is_bool(dt)) {
-    return uwalk_f64_to_int(dt, uwalk_int_to_f64(dt, acc) + v);
+    return uwalk_f64_to_int(dt, uwalk_round(fdt, uwalk_int_to_float(dt, fdt, acc) + v));
   }
   return uwalk_int_combine(kind, dt, acc, uwalk_f64_to_int(dt, v));
 }
@@ -1131,7 +1250,9 @@ static int uwalk_odometer_next(UWalkCtx *c, u32 slot0, u32 const *extents,
 //
 // An int or bool reduce accumulates in its dtype, as tinygrad allocates
 // the accumulator like the reduce (reduce_ranges_to_acc,
-// codegen/__init__.py:197-204); a double accumulator rounds past 2^53.
+// codegen/__init__.py:197-204); a double accumulator rounds past 2^53.  A
+// float reduce accumulates in the C type the legacy C emit declares
+// (rmu_hold_type): a double for an f64 reduce, else a float.
 static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
   u32  axes  [UWALK_MAX_RANGES];
   u32  extents[UWALK_MAX_RANGES];
@@ -1221,12 +1342,13 @@ static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
   }
   c->n_ranges += chain_len;
   // Iterate the full Cartesian product of axes via odometer.
+  u32 bdt = uwalk_term_dtype(c, body);
   if (is_int) {
-    int body_float = uwalk_term_is_float(c, body);
+    int body_float = uwalk_dtype_is_float(bdt);
     i64 acc        = identity.i;
     do {
       if (body_float) {
-        acc = uwalk_int_combine_f64(kind, dt, acc, uwalk_eval_float(c, body));
+        acc = uwalk_int_combine_f64(kind, dt, bdt, acc, uwalk_eval_float(c, body));
       } else {
         acc = uwalk_int_combine(kind, dt, acc, uwalk_eval_int(c, body));
       }
@@ -1234,10 +1356,15 @@ static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
     c->n_ranges -= chain_len;
     return uwalk_int_red(dt, acc);
   }
+  // `acc = acc + v` adds in the wider of acc's and v's C types and rounds
+  // into acc; `acc = fmax(acc, v)` compares doubles and rounds into acc.
+  u32    adt = uwalk_term_dtype(c, red);
+  u32    sdt = (kind == REDUCE_MAX) ? DT_FP64 : uwalk_dtype_promote(adt, bdt);
   double acc = identity.f;
   do {
-    double v = uwalk_eval_float(c, body);
-    acc = (kind == REDUCE_MAX) ? ((v > acc) ? v : acc) : (acc + v);
+    double v = uwalk_cast_float(c, body, sdt);
+    double r = (kind == REDUCE_MAX) ? ((v > acc) ? v : acc) : uwalk_round(sdt, acc + v);
+    acc = uwalk_round(adt, r);
   } while (uwalk_odometer_next(c, slot0, extents, chain_len));
   c->n_ranges -= chain_len;
   UWalkRed r = { acc, 0, 0 };
@@ -1321,7 +1448,7 @@ static void uwalk_loop_and_store(UWalkCtx *c,
       return;
     }
     if (uwalk_dtype_is_float(out_dt)) {
-      double v = uwalk_eval_float(c, store_value);
+      double v = uwalk_cast_float(c, store_value, out_dt);
       uwalk_store_f64(out_p, addr_v, out_dt, v);
     } else if (c->store_from_float) {
       i64 v = uwalk_f64_to_int(out_dt, uwalk_eval_float(c, store_value));
@@ -1651,5 +1778,7 @@ done:
   free(ctx.in_terms);
   free(ctx.in_ptrs);
   free(ctx.in_dtypes);
+  free(ctx.ty_key);
+  free(ctx.ty_dt);
   return ok;
 }

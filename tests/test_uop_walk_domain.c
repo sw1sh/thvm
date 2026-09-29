@@ -20,7 +20,8 @@
 //   - a float body in an int kernel (py's int32 true division builds one)
 //     computes in float and converts, as C converts `acc + a * (1.0f/b)`
 //     back into an int accumulator and `out[i] = a * (1.0f/b)` into an int
-//     store.
+//     store: 1312 * (1.0f/41) is 31.999998 in float, so 1312 / 41 stores
+//     31, where doubles give 32.
 // Unit kernels run through cpu_uop_walk.  The realized kernels run on the
 // default route, the CPU JIT, and then again through the walker.
 #include "../src/thvm.c"
@@ -146,6 +147,17 @@ static Term pick_quotient(Term a, Term b) {
   return uop_binary(UOP_MUL, a, uop_unary(UOP_RECIP, b));
 }
 
+// Quotients a float rounds below the exact integer: 1312 * (1.0f/41) is
+// 31.999998, 1271 * (1.0f/41) 30.999998 and 41 * (1.0f/41) 0.99999994.
+static i32 const FQA[4] = { 1312, -1312, 1271, 41 };
+static i32 const FQB[4] = { 41, 41, 41, 41 };
+
+// Rows [1312/41, 0/1, 0/1] and [1271/41, 41/41, 0/1]: an int accumulator
+// that adds each quotient in float and truncates holds 31 in both rows,
+// where doubles give 32.
+static i32 const FSA[6] = { 1312, 0, 0, 1271, 41, 0 };
+static i32 const FSB[6] = { 41, 1, 1, 41, 41, 1 };
+
 static void check_compares(void) {
   i64 const a[5] = { (i64)P53, 5, -(i64)(P53 + 1), (i64)P53 + 3, (i64)P53 + 7 };
   i64 const b[5] = { (i64)P53 + 1, 3, -(i64)P53, (i64)P53 + 2, (i64)P53 + 7 };
@@ -169,6 +181,10 @@ static void check_compares(void) {
   i32 const qb[4] = { 2, 2, 4, 4 };
   i64 const want_q[4] = { 3, -3, 2, 0 };
   unit_pair("walker/i32-quotient-store", DT_INT32, DT_INT32, qa, qb, 4, pick_quotient, want_q);
+
+  i64 const want_fq[4] = { 31, -31, 30, 0 };
+  unit_pair("walker/i32-quotient-in-float", DT_INT32, DT_INT32, FQA, FQB, 4, pick_quotient,
+            want_fq);
 }
 
 // out[r] = value(r, x[r], f[r]) over an i32 x and an f32 f of six elements.
@@ -332,6 +348,9 @@ static void check_float_bodies(void) {
   unit_reduce("walker/i32-sum-of-quotients", REDUCE_SUM, QA, QB, pick_quotient, want_sum);
   unit_reduce("walker/i32-max-of-quotients", REDUCE_MAX, QA, QB, pick_quotient, want_max);
   unit_reduce("walker/i32-sum-of-sqrt", REDUCE_SUM, SA, QB, body_sqrt, want_sqrt);
+  i64 const want_fsum[2] = { 31, 31 };
+  unit_reduce("walker/i32-sum-of-quotients-in-float", REDUCE_SUM, FSA, FSB, pick_quotient,
+              want_fsum);
 }
 
 // === End to end ==========================================================
@@ -457,6 +476,21 @@ static void check_end_to_end(void) {
     i64 const want[4] = { 3, -3, 2, 0 };
     check_realized(pick_quotient(ten(DT_INT32, qa, 1, four), ten(DT_INT32, qb, 1, four)),
                    DT_INT32, want, 4);
+  }
+
+  TEST_BEGIN("e2e/i32-quotient-in-float");
+  {
+    u32 const four[1] = { 4 };
+    i64 const want[4] = { 31, -31, 30, 0 };
+    check_realized(pick_quotient(ten(DT_INT32, FQA, 1, four), ten(DT_INT32, FQB, 1, four)),
+                   DT_INT32, want, 4);
+  }
+
+  TEST_BEGIN("e2e/i32-sum-of-quotients-in-float");
+  {
+    i64 const want[2] = { 31, 31 };
+    Term q = pick_quotient(ten(DT_INT32, FSA, 2, two_by_three), ten(DT_INT32, FSB, 2, two_by_three));
+    check_realized(uop_reduce(REDUCE_SUM, 1, q), DT_INT32, want, 2);
   }
 
   TEST_BEGIN("e2e/bool-cast-of-f32-compare");

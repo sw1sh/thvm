@@ -17,8 +17,11 @@ agree with the reference too.
 
 An int32 true division stays int32 in thvm (tinygrad promotes it to float), so
 `(a / b).sum()` reduces a float body into an int accumulator.  The rendered C
-adds each quotient in float and truncates the sum back into the accumulator,
-and a store truncates the quotient; the walker must compute the same values.
+computes each quotient as `a * (1.0f/b)` in float32, adds it to the
+accumulator in float32 and truncates the sum back, and a store truncates the
+quotient; math.h's sqrt is a double, so a sqrt body adds in float64.  The
+walker must compute the same values: 1312 / 41 is 31.999998 in float32 and
+truncates to 31, where float64 gives 32.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_int_reduce_exact.py -q
 """
@@ -57,8 +60,10 @@ def _cases():
 
 CASES = _cases()
 
-_A = np.array([[-7, 5, 7, 8], [7, 9, 11, 13], [100, -3, 17, 2], [1, 2, 3, 4]])
-_B = np.array([[2, 2, 2, 4], [2, 2, 2, 4], [8, 2, 4, 2], [4, 4, 4, 4]])
+_A = np.array([[-7, 5, 7, 8], [7, 9, 11, 13], [100, -3, 17, 2], [1, 2, 3, 4],
+               [1312, -1312, 1271, 41]])
+_B = np.array([[2, 2, 2, 4], [2, 2, 2, 4], [8, 2, 4, 2], [4, 4, 4, 4],
+               [41, 41, 41, 41]])
 FLOAT_BODY_CASES = ["div-sum", "div", "sqrt-sum"]
 
 
@@ -73,15 +78,19 @@ def run_float_body(name):
 
 
 def float_body_reference(name):
-    """`acc = acc + v` per element, truncated toward zero, as the C runs it."""
+    """`acc = acc + v` per element in v's type, truncated toward zero, as the
+    rendered C runs it: a quotient `a * (1.0f/b)` is float32, a sqrt float64."""
+    if name == "sqrt-sum":
+        rows = np.sqrt(np.abs(_A).astype(np.float64))
+    else:
+        rows = _A.astype(np.float32) * (np.float32(1) / _B.astype(np.float32))
     if name == "div":
-        return np.trunc(_A / _B).astype(np.int32)
-    rows = _A / _B if name == "div-sum" else np.sqrt(np.abs(_A))
+        return np.trunc(rows).astype(np.int32)
     out = []
     for row in rows:
         acc = 0
         for v in row:
-            acc = int(acc + v)
+            acc = int(v.dtype.type(acc) + v)
         out.append(acc)
     return np.array(out, dtype=np.int32)
 
