@@ -68,6 +68,11 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   // tensor.  Mirrors cuda_buf_freelist_try_pop; tinygrad parity:
   // their schedule/memory.py + Buffer object give each recycle a
   // fresh logical Buffer wrapping reused storage.
+  // With no slot id left for the block, miss before touching the donor;
+  // the caller's fresh-alloc path then reports the full table.
+  if (CPU_BUFS_NEXT >= CPU_BUFS_CAP) {
+    return 0;
+  }
   u32 best = 0; u64 best_nb = (u64)-1;
   for (u32 i = 0; i < CPU_FREELIST_LEN; i++) {
     u32 bid = CPU_FREELIST[i];
@@ -94,16 +99,6 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   donor->jit_pinned = 0;
   donor->handle     = NULL;
   donor->on_release = NULL;
-  if (CPU_BUFS_NEXT >= CPU_BUFS_CAP) {
-    // Out of slot table -- restore donor and bail; caller falls back
-    // to fresh calloc (extra alloc; never aliasing).
-    donor->data      = data;
-    donor->nbytes    = nb;
-    donor->refcount  = 0;
-    donor->owns_data = 1;
-    cpu_buf_freelist_push(donor_bid);
-    return 0;
-  }
   u32 new_id = (u32)CPU_BUFS_NEXT++;
   CpuBuf *nb_slot = &CPU_BUFS[new_id];
   nb_slot->data       = data;

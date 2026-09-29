@@ -59,6 +59,11 @@ fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
   // Tinygrad parity: their schedule/memory.py + runtime Buffer object
   // separates logical Buffer identity from underlying storage; recycle
   // creates a new Buffer wrapping reused bytes.
+  // With no slot id left for the block, miss before touching the donor;
+  // the caller's fresh-alloc path then reports the full table.
+  if (CUDA_BUFS_NEXT >= CUDA_BUFS_CAP) {
+    return 0;
+  }
   u32 best_i = 0; u64 best_nb = (u64)-1;
   for (u32 i = 0; i < CUDA_FREELIST_LEN; i++) {
     u32 bid = CUDA_FREELIST[i];
@@ -84,16 +89,6 @@ fn u32 cuda_buf_freelist_try_pop(u64 nbytes) {
   donor->owns_data = 0;
   donor->skip_freelist = 0;
   donor->parent_buf_id = 0;
-  if (CUDA_BUFS_NEXT >= CUDA_BUFS_CAP) {
-    // Out of slot table -- restore donor and bail; caller will fall back
-    // to cuMemAlloc (cost: an extra fresh allocation, never aliasing).
-    donor->dptr      = dptr;
-    donor->nbytes    = nb;
-    donor->refcount  = 0;
-    donor->owns_data = 1;
-    cuda_buf_freelist_push(donor_bid);
-    return 0;
-  }
   u32 new_id = (u32)CUDA_BUFS_NEXT++;
   CudaBuf *nb_slot = &CUDA_BUFS[new_id];
   nb_slot->dptr          = dptr;

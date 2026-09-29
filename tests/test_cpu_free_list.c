@@ -17,6 +17,7 @@
 //     by the freelist path -- the storage isn't ours to zero.
 //   - Backend.buf_nbytes reports the requested size, not the size of
 //     the block a best-fit recycle hands the request.
+//   - with the slot table full a pop misses without touching the donor.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -95,6 +96,24 @@ int main(void) {
   u32 fresh = cpu_buf_alloc(32);
   CHECK(fresh != ext);
   CHECK_EQ(CPU_BUFS[fresh].owns_data, 1);   // owned, freshly calloc'd
+
+  TEST_BEGIN("cpu-free-list/full-slot-table-keeps-donor");
+  // With no slot id left for the recycled block the pop misses and leaves
+  // the parked donor whole, so a rollback (cpu_buf_freelist_remove)
+  // revives it with its logical size.
+  CPU_FREELIST_LEN = 0;
+  u32   park      = cpu_buf_alloc(100);
+  void *park_data = CPU_BUFS[park].data;
+  cpu_buf_freelist_push(park);
+  u64 next = CPU_BUFS_NEXT;
+  CPU_BUFS_NEXT = CPU_BUFS_CAP;
+  CHECK_EQ(cpu_buf_freelist_try_pop(64), 0);
+  CPU_BUFS_NEXT = next;
+  cpu_buf_freelist_remove(park);
+  CHECK_EQ(CPU_BUFS[park].data, park_data);
+  CHECK_EQ(CPU_BUFS[park].nbytes, 100);
+  CHECK_EQ(CPU_BUFS[park].refcount, 1);
+  CHECK_EQ(CPU_BACKEND.buf_nbytes(park), 100);
 
   TEST_BEGIN("cpu-free-list/saturated-push-no-crash");
   // Saturate the list with throwaway slots.  Pushes past
