@@ -22,9 +22,9 @@
 // Each subterm walks in the evaluator its own dtype picks
 // (uwalk_term_dtype), as the rendered C types it: a float in doubles, an
 // int or bool in i64, a comparison in its operands' dtype (a u64
-// unsigned).  A CAST converts across, and an int kernel with a float body
-// converts that body's value as C does.  An int or bool REDUCE
-// accumulates exactly in its dtype (uwalk_run_reduce).
+// unsigned).  A CAST converts as the C emit's `((T)x)` does, and an int
+// kernel with a float body converts that body's value as C does.  An int
+// or bool REDUCE accumulates exactly in its dtype (uwalk_run_reduce).
 //
 // LIMITATIONS: float ALU results stay doubles, not rounded to f32 per op;
 // int ALU results stay i64, wrapped to a narrower dtype only by a CAST, a
@@ -405,6 +405,32 @@ static int uwalk_term_is_float(UWalkCtx *c, Term t) {
   return uwalk_dtype_is_float(uwalk_term_dtype(c, t));
 }
 
+// CAST(src, dst) as the C emit converts it, `((T)x)`, and a bool as
+// `(x != 0)`, which is tinygrad's bool(x).  src walks in its own dtype
+// (uwalk_term_dtype): a float reaches an int dtype truncated toward zero
+// and wrapped, an int wraps into a narrower one, and an int, or an f64
+// value, reaches f32 rounded once rather than through a double.  A u64
+// converts from its unsigned value.
+static i64 uwalk_cast_int(UWalkCtx *c, Term src, u32 dst) {
+  if (uwalk_term_is_float(c, src)) {
+    return uwalk_f64_to_int(dst, uwalk_eval_float(c, src));
+  }
+  return uwalk_int_wrap(dst, uwalk_eval_int(c, src));
+}
+
+static double uwalk_cast_float(UWalkCtx *c, Term src, u32 dst) {
+  u32 sdt = uwalk_term_dtype(c, src);
+  if (uwalk_dtype_is_float(sdt)) {
+    double f = uwalk_eval_float(c, src);
+    return (dst == DT_FP32) ? (double)(f32)f : f;
+  }
+  i64 v = uwalk_eval_int(c, src);
+  if (dst == DT_FP64) {
+    return uwalk_int_to_f64(sdt, v);
+  }
+  return (sdt == DT_UINT64) ? (double)(f32)(u64)v : (double)(f32)v;
+}
+
 // Look up a hoisted reduce accumulator by REDUCE term identity.
 // NOTE: callers that get a non-negative idx must verify the iter
 // snapshot via uwalk_reduce_snapshot_matches before using its value --
@@ -605,14 +631,10 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
     case UOP_CAST: {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
-      if (!uwalk_dtype_is_float(dst)) {
-        return uwalk_int_to_f64(dst, uwalk_eval_int(c, t));
+      if (uwalk_dtype_is_float(dst)) {
+        return uwalk_cast_float(c, src, dst);
       }
-      u32 sdt = uwalk_term_dtype(c, src);
-      if (uwalk_dtype_is_float(sdt)) {
-        return uwalk_eval_float(c, src);
-      }
-      return uwalk_int_to_f64(sdt, uwalk_eval_int(c, src));
+      return uwalk_int_to_f64(dst, uwalk_cast_int(c, src, dst));
     }
     case UOP_BITCAST: {
       Term src = heap_read(loc + 0);
@@ -718,12 +740,9 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
       if (uwalk_dtype_is_float(dst)) {
-        return uwalk_f64_to_int(DT_INT64, uwalk_eval_float(c, t));
+        return uwalk_f64_to_int(DT_INT64, uwalk_cast_float(c, src, dst));
       }
-      if (uwalk_term_is_float(c, src)) {
-        return uwalk_f64_to_int(dst, uwalk_eval_float(c, src));
-      }
-      return uwalk_int_wrap(dst, uwalk_eval_int(c, src));
+      return uwalk_cast_int(c, src, dst);
     }
     case UOP_BITCAST: {
       Term src = heap_read(loc + 0);

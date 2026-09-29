@@ -165,11 +165,15 @@ creation and readback.
 
 CAST is value-preserving across any dtype pair.  Heap layout
 `[src, NUM(dst_dtype)]`.  Implementation: the kernel converts the
-source value as a C cast does, so a float truncates toward zero into
-an int, an int wraps into a narrower int, and a cast to bool is
-`!= 0`.  The walker evaluates the source in its own dtype (f64 or i64)
-first.  An fp8 destination takes the store rule above.  A CAST of a
-float CONST folds on the host (below).
+source value as a C cast does, which is what the C emit renders: a
+float truncates toward zero into an int, an int wraps into a narrower
+int, a cast to bool is `!= 0` (tinygrad's bool(x)), an int reaches f32
+rounded once and an f64 value cast to f32 rounds.  The walker
+evaluates the source in its own dtype (f64 or i64) first, to match.
+It rounds to f16, bf16 or fp8 only at the store, so a CAST to one of
+those that feeds more arithmetic in the same kernel is not rounded
+there, and an fp8 destination takes the store rule above.  A CAST of
+a float CONST folds on the host (below).
 
 BITCAST is bit-level reinterpret; source and destination must share
 itemsize.  Implementation is a memcpy.  Width mismatch is caught at
@@ -313,4 +317,5 @@ ASSIGN for every dtype, and `tests/test_cpu_jit_nonfinite.c` checks
 that f64 kernels with inf, NaN and negative constants compile on the
 CPU JIT.  `tests/test_cpu_jit_f64_reduce.c` holds f64 sums and maxes
 to f64 precision in every legacy C emit reduce shape and on the
-realized CPU JIT route.
+realized CPU JIT route, and `tests/test_uop_walk_cast.c` holds the
+walker's CAST to the C emit's.
