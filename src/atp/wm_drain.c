@@ -691,6 +691,28 @@ static u64 atp_ft_symmask(const AtpFtCell *c) {
 }
 #endif
 
+// --ir-run-order: rewrite `t` by the new-rule slice one leftmost-
+// outermost step at a time, restarting from the root, each unorientable
+// instance checked with atp_compare (the run's ordering) -- the walk of
+// atp_rewrite_normalize_slice_record without its trace records.  Vampire
+// backward demodulation checks every instance with the run's ordering
+// (BackwardDemodulation.cpp:138 at v5.0.1); the FT slice walk's
+// unorientable leg checks KBO even in an LPO run.
+static Term atp_ir_run_order_slice(AtpState *s, Term t, const Term *lhs_arr,
+                                   const Term *rhs_arr, u32 n,
+                                   u32 step_cap) {
+  for (u32 it = 0; it < step_cap; it++) {
+    u8  pos[ATP_PROOF_MAX_DEPTH];
+    u32 rule = 0;
+    u8  pos_len = 0, fwd = 1u, fired = 0;
+    Term t2 = atp_proof_rewrite_step_slice(s, t, pos, 0u, lhs_arr, rhs_arr,
+                                           n, &rule, &pos_len, &fwd, &fired);
+    if (!fired) break;
+    t = t2;
+  }
+  return t;
+}
+
 fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
   if (s == NULL || added.count == 0 || added.first == 0) return 0;
   // Vampire bd=preordered (EqHelper::getDemodulationLHSIterator with
@@ -839,6 +861,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       reduced = atp_rewrite_normalize_slice_record(
           s, old_lhs, new_lhs, new_rhs, new_traces, n_new, 16,
           &simplify_parent, 0u, old_rhs);
+    } else if (s->use_ir_run_order && !s->use_wm_demote) {
+      reduced = atp_ir_run_order_slice(s, old_lhs, new_lhs, new_rhs,
+                                       n_new, 16);
     } else {
       // Under use_wm_demote the slice reduction is DETECTION only
       // (WM NF_ObjektAnwendbar, Interreduktion.c:308: an existence
@@ -1082,6 +1107,9 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
           r_reduced = atp_rewrite_normalize_slice_record(
               s, old_rhs, new_lhs, new_rhs, new_traces, n_new, 16,
               &rr_parent, 1u, old_lhs);
+        } else if (s->use_ir_run_order) {
+          r_reduced = atp_ir_run_order_slice(s, old_rhs, new_lhs, new_rhs,
+                                             n_new, 16);
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
         } else if (atp_ir_ft_on()) {
           // FT-native RHS composition (same slice as the LHS reduction).

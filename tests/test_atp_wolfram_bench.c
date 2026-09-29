@@ -3172,6 +3172,9 @@ int main(int argc, char **argv) {
   // THVM_ATP_OTTER_RAW=1 (--otter-raw): the Otter replay and the
   // selection normalize start from each CP's raw overlap.
   if (atp_env_on("THVM_ATP_OTTER_RAW")) thvm_atp_set_use_otter_raw(s, 1u);
+  // THVM_ATP_IR_RUN_ORDER=1 (--ir-run-order): interreduction checks
+  // unorientable instances with the run's ordering (src/atp/wm_drain.c).
+  if (atp_env_on("THVM_ATP_IR_RUN_ORDER")) thvm_atp_set_use_ir_run_order(s, 1u);
   // THVM_ATP_BD_PREORDERED=1 (--bd-preordered): Vampire bd=preordered --
   // interreduction only by oriented new rules.
   if (atp_env_on("THVM_ATP_BD_PREORDERED")) thvm_atp_set_use_bd_preordered(s, 1u);

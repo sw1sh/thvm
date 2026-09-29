@@ -5609,6 +5609,14 @@ typedef struct {
   // start from each CP's raw overlap (cp_raw) instead of its push-time
   // treated pair.  Default OFF: the engine is byte-identical.
   u8   use_otter_raw;
+  // Interreduction under the run's ordering (THVM_ATP_IR_RUN_ORDER,
+  // --ir-run-order): an older rule's sides are rewritten by the new
+  // rules through atp_proof_rewrite_step_slice -- leftmost-outermost
+  // steps from the root, each unorientable-equation instance checked
+  // with atp_compare, i.e. the run's ordering -- instead of the FT walk,
+  // whose unorientable leg checks KBO whatever the run's ordering.
+  // Default OFF: the engine is byte-identical.
+  u8   use_ir_run_order;
   // Vampire bd=preordered (THVM_ATP_BD_PREORDERED): interreduction
   // (backward demodulation of R) only by rules the ordering orients --
   // an unorientable new equation simplifies nothing.  Default OFF.
@@ -7629,6 +7637,8 @@ fn void      thvm_atp_set_use_otter(AtpState *s, u8 on);
 // Raw-overlap demodulation for the Otter replay and the selection
 // normalize (src/atp/otter.c).  0 = off (default) -> byte-identical.
 fn void      thvm_atp_set_use_otter_raw(AtpState *s, u8 on);
+// Interreduction under the run's ordering (src/atp/wm_drain.c).
+fn void      thvm_atp_set_use_ir_run_order(AtpState *s, u8 on);
 // Vampire bd=preordered: interreduce only with oriented new rules.
 fn void      thvm_atp_set_use_bd_preordered(AtpState *s, u8 on);
 // Vampire AgeQueue for the age picks (derivation depth, then weight).

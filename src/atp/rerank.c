@@ -957,6 +957,11 @@ fn void thvm_atp_set_use_otter_raw(AtpState *s, u8 on) {
   s->use_otter_raw = on ? 1u : 0u;
 }
 
+fn void thvm_atp_set_use_ir_run_order(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_ir_run_order = on ? 1u : 0u;
+}
+
 fn void thvm_atp_set_use_bd_preordered(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_bd_preordered = on ? 1u : 0u;

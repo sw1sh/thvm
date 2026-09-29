@@ -6990,6 +6990,42 @@ int main(void) {
     }
   }
 
+  TEST_BEGIN("atp/ir-run-order-checks-instances-with-the-run-ordering");
+  {
+    // An LPO run whose KBO disagrees on one instance of commutativity:
+    // A = f(a,a) is LPO-greater than B = i(i(f(a,e))) (f above i in the
+    // LPO precedence) but KBO-smaller (i weighs 0, i above f in KBO).
+    // The older rule f(A,B) -> e is therefore reducible by f(x,y) =
+    // f(y,x) under the run's ordering only.  The FT walk checks the
+    // instance with KBO and keeps the rule; --ir-run-order checks it
+    // with the run's LPO, retires the rule and requeues it.
+    static u32 irro_prec[5] = {0, 1, 2, 4, 3};
+    static const LpoConfig IRRO_LPO = { .precedence = irro_prec, .n_labels = 5 };
+    #define V(id) term_new(0, TAG_FVR, (id), 0)
+    for (u8 ro = 0; ro <= 1u; ro++) {
+      AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+      thvm_atp_set_lpo(s, &IRRO_LPO);
+      thvm_atp_set_use_mixmost_nf(s, 1u);
+      thvm_atp_set_use_ir_run_order(s, ro);
+      Term A = mk_f(mk_a(), mk_a());
+      Term B = mk_i(mk_i(mk_f(mk_a(), mk_e())));
+      CHECK_EQ((int)thvm_lpo(A, B, &IRRO_LPO), (int)LPO_GT);
+      CHECK_EQ((int)thvm_kbo(A, B, &DUMMY_CFG), (int)KBO_LT);
+      AtpAddedRange r0 = thvm_atp_orient_and_add(s, mk_f(A, B), mk_e());
+      CHECK_EQ(r0.count, 1u);
+      AtpAddedRange comm =
+          thvm_atp_orient_and_add(s, mk_f(V(0), V(1)), mk_f(V(1), V(0)));
+      CHECK_EQ(comm.count, 1u);
+      CHECK_EQ(s->r_orient[comm.first], 0u);     // unorientable
+      u32 n_cps0 = s->n_cps;
+      CHECK_EQ(thvm_atp_interreduce(s, comm), ro ? 1u : 0u);
+      CHECK_EQ(s->n_rules, ro ? 1u : 2u);
+      CHECK_EQ(s->n_cps, n_cps0 + (ro ? 1u : 0u));  // the requeue
+      thvm_atp_free(s);
+    }
+    #undef V
+  }
+
   thvm_free();
   TEST_REPORT();
 }

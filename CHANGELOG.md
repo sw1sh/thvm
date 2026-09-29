@@ -248,6 +248,14 @@ for the per-commit story.
   treated pair again hid the raw overlap from the batch's own passive
   rules.  This is the half of the old `--proof` search (its treatment
   recorder read the raw pair off the trace) that proved RNG029-5/029-7.
+- `--ir-run-order`: interreduction checks each instance of an
+  unorientable new equation with the run's ordering, as Vampire's
+  backward demodulation does, walking leftmost-outermost from the root.
+  The FT walk it replaces gates those instances with KBO even in an LPO
+  run, so an LPO lane kept rules its own ordering reduces (commutativity
+  swaps KBO calls increasing).  The other half of the old `--proof`
+  search on the ring lanes: its treatment recorder interreduced through
+  the Term-side walk.
 - Prover9's clause-weight penalties (`--nest-penalty` / `--depth-penalty`)
   now weigh every critical pair: the FT-treated push route, which forms
   almost all of them, scored its pairs without the penalty.  With them on,
