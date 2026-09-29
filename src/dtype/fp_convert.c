@@ -67,6 +67,50 @@ f32 fp16_to_f32(u16 h) {
 #endif
 }
 
+// The manual encode f32_to_fp16 falls back to without _Float16, built on
+// every platform like fp16_to_f32_manual.  Rounds to nearest even.
+u16 f32_to_fp16_manual(f32 v) {
+  u32 f32_bits;
+  memcpy(&f32_bits, &v, sizeof(f32_bits));
+  u32 sign = (f32_bits >> 16) & 0x8000u;
+  u32 exp  = (f32_bits >> 23) & 0xFFu;
+  u32 mant = f32_bits & 0x7FFFFFu;
+  if (exp == 0xFF) {
+    // inf, or a NaN that keeps its top payload bits and comes out quiet,
+    // as the hardware conversions (x86 VCVTPS2PH, arm64 FCVT) deliver it.
+    u32 nan = (mant != 0) ? 0x200u | (mant >> 13) : 0u;
+    return (u16)(sign | 0x7C00u | nan);
+  }
+  if (exp >= 127 + 16) {
+    return (u16)(sign | 0x7C00u);
+  }
+  if (exp >= 127 - 14) {
+    // Normal.  A carry out of the mantissa bumps the exponent, up to inf.
+    u32 h     = ((exp - 127 + 15) << 10) | (mant >> 13);
+    u32 round = mant & 0x1FFFu;
+    if (round > 0x1000u || (round == 0x1000u && (h & 1u))) {
+      h++;
+    }
+    return (u16)(sign | h);
+  }
+  if (exp < 127 - 25) {
+    return (u16)sign;
+  }
+  // Subnormal, in units of 2^-24: (mant | 1 << 23) * 2^(exp - 126).  The
+  // whole remainder takes part in the rounding, so a value just above
+  // half a unit rounds up (half of 2^-24 itself ties to zero); rounding
+  // up from 1023 lands on the smallest normal, 0x0400.
+  u32 m     = mant | 0x800000u;
+  u32 shift = 126 - exp;
+  u32 h     = m >> shift;
+  u32 rem   = m & ((1u << shift) - 1u);
+  u32 half  = 1u << (shift - 1u);
+  if (rem > half || (rem == half && (h & 1u))) {
+    h++;
+  }
+  return (u16)(sign | h);
+}
+
 u16 f32_to_fp16(f32 v) {
 #if THVM_HAVE_FLOAT16_BUILTIN
   _Float16 h = (_Float16)v;
@@ -74,47 +118,7 @@ u16 f32_to_fp16(f32 v) {
   memcpy(&bits, &h, sizeof(bits));
   return bits;
 #else
-  u32 f32_bits;
-  memcpy(&f32_bits, &v, sizeof(f32_bits));
-  u32 sign = (f32_bits >> 31) & 0x1u;
-  u32 exp  = (f32_bits >> 23) & 0xFFu;
-  u32 mant = f32_bits & 0x7FFFFFu;
-  u16 h;
-  if (exp == 0xFF) {
-    // inf / NaN.
-    h = (u16)((sign << 15) | (0x1Fu << 10) | (mant ? 0x200u : 0u));
-  } else if (exp <= 127 - 15) {
-    // Subnormal or zero in fp16.  Round-to-nearest-even on the
-    // shifted mantissa.
-    if (exp < 127 - 24) {
-      h = (u16)(sign << 15);   // underflow to signed zero
-    } else {
-      u32 m = (mant | 0x800000u) >> ((127 - 14) - exp);
-      // Rounding: add 0x1000 then drop low 13 bits, with bankers
-      // tiebreak.
-      u32 round = m & 0x1FFFu;
-      u32 r = m >> 13;
-      if (round > 0x1000u || (round == 0x1000u && (r & 1))) r += 1;
-      h = (u16)((sign << 15) | r);
-    }
-  } else if (exp >= 127 + 16) {
-    // Overflow to inf.
-    h = (u16)((sign << 15) | (0x1Fu << 10));
-  } else {
-    u32 fp16_exp = exp - 127 + 15;
-    u32 round = mant & 0x1FFFu;
-    u32 m     = mant >> 13;
-    if (round > 0x1000u || (round == 0x1000u && (m & 1))) {
-      m += 1;
-      if (m & 0x400u) { m = 0; fp16_exp += 1; }
-    }
-    if (fp16_exp >= 0x1Fu) {
-      h = (u16)((sign << 15) | (0x1Fu << 10));
-    } else {
-      h = (u16)((sign << 15) | (fp16_exp << 10) | m);
-    }
-  }
-  return h;
+  return f32_to_fp16_manual(v);
 #endif
 }
 
