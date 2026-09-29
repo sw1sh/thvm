@@ -236,11 +236,16 @@ FindProof's only Satisfiable / CounterSatisfiable answer on FOF input is a
   left open read false), and one false record withdraws it: that check
   is what withdrew the three LCL claims before the width fix.
 - **Inputs whose parse can differ from TPTP semantics withdraw the
-  claim:** numbers and distinct objects (interpreted as distinct values),
+  claim:** numbers and distinct objects (interpreted as distinct values;
+  the unquoting pass renames `"text"` and non-identifier numbers such as
+  `-1`, `2.5`, `1/3` to fresh constants `dob<n>` / `num<n>`, and the
+  claim reads their original spelling back from the rename table),
   `$`-symbols, a name at two arities or as both predicate and function, a
-  quoted atom `'w'` aliasing a plain `w` (the unquoting pass renames them
-  apart), typed records, unexpanded nested `include()`, trailing or block
-  comments, roles outside axiom / hypothesis / definition / assumption /
+  stand-in spelled as a quoted lower word (`'w'` IS `w`, so the unquoting
+  pass strips those quotes; the check stays as a guard), typed records,
+  unexpanded nested `include()`, a comment left in the text
+  (preprocessing blanks `%` and `/* */` comments; the check stays as a
+  guard), roles outside axiom / hypothesis / definition / assumption /
   lemma / theorem / corollary / conjecture / negated_conjecture / plain.
 - **Output.** `% SZS status Satisfiable` (no conjecture) or
   `CounterSatisfiable`, then `% SZS output start FiniteModel` in Vampire

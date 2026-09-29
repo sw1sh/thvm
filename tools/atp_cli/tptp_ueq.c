@@ -108,7 +108,9 @@ static int  prov_eqg_new(const TpClause *cl);
 
 // Drop %-comment lines and splice include directives through
 // tp_include_expand (selections honoured, nested includes followed).  A
-// directive that does not expand is an input error.
+// directive that does not expand is an input error.  A % comment that
+// starts mid-line and a /* */ block are blanked last: the record scanner
+// would read them as formula text.
 static char *tp_preprocess(const char *problem_path, const char *raw) {
   size_t cap = strlen(raw) * 4u + 65536u;
   char *out = (char *)malloc(cap);
@@ -155,6 +157,7 @@ static char *tp_preprocess(const char *problem_path, const char *raw) {
     p = eol + 1;
   }
   out[o] = '\0';
+  tp_blank_comments(out);
   return out;
 }
 
@@ -339,50 +342,168 @@ static void tp_unrename_write(FILE *out, const char *text, size_t len) {
 // the Horn parser) admits them -- LCL890-10 died on a pr parse error.
 // Rewrite every DISTINCT quoted atom to a fresh plain name (qtd0,
 // qtd1, ...): an isomorphic renaming, so provability is untouched.
-// Candidate names are collision-guarded against the input text.
-static char *tp_unquote_names(char *text) {
-  if (strchr(text, '\'') == NULL) return text;
-#define TP_MAX_QUOTED 512
-  char *qname[TP_MAX_QUOTED];
-  char  qrepl[TP_MAX_QUOTED][24];
-  int nq = 0;
-  size_t cap = strlen(text) + 4096;
-  char *out = (char *)malloc(cap);
-  size_t o = 0;
-  if (out == NULL) tp_giveup("OOM in quoted-atom rename");
-  for (const char *r = text; *r != '\0'; ) {
-    if (o + 32 >= cap) {
-      cap *= 2;
-      out = (char *)realloc(out, cap);
-      if (out == NULL) tp_giveup("OOM in quoted-atom rename");
-    }
-    if (*r != '\'') { out[o++] = *r++; continue; }
-    const char *q2 = r + 1;
-    while (*q2 != '\0' && *q2 != '\'')
-      q2 += (q2[0] == '\\' && q2[1] != '\0') ? 2 : 1;
-    if (*q2 == '\0' || q2 == r + 1) { out[o++] = *r++; continue; }
-    size_t n = (size_t)(q2 - (r + 1));
-    int ix = -1;
-    for (int i = 0; i < nq; i++)
-      if (strlen(qname[i]) == n && memcmp(qname[i], r + 1, n) == 0) { ix = i; break; }
-    if (ix < 0 && nq < TP_MAX_QUOTED) {
-      qname[nq] = strndup(r + 1, n);
-      snprintf(qrepl[nq], sizeof qrepl[nq], "qtd%d", nq);
-      while (strstr(text, qrepl[nq]) != NULL &&
-             strlen(qrepl[nq]) + 2 < sizeof qrepl[nq])
-        strcat(qrepl[nq], "x");
-      tp_ren_note(qrepl[nq], strlen(qrepl[nq]), r, (size_t)(q2 - r) + 1u);
-      ix = nq++;
-    }
-    if (ix < 0) { out[o++] = *r++; continue; }   // table full: leave as-is
-    size_t rl = strlen(qrepl[ix]);
-    memcpy(out + o, qrepl[ix], rl); o += rl;
-    r = q2 + 1;
+// A quoted lower_word ('abc') IS the atom abc in TPTP and simply loses
+// its quotes.  Distinct objects ("text") and numbers outside the
+// identifier grammar (-1, 2.5, 1/3) take fresh names from their own
+// families (dob<n>, num<n>): each is a constant, and dropping their
+// implicit pairwise-distinctness only weakens the theory.  One hash
+// table, linear in the text -- the Coq-exported SEV sets carry 3000
+// distinct quoted names, the BIO knowledge base 25000.
+typedef struct { const char *key; u32 len; u32 ix; } TpQuoted;
+
+static int tp_is_lower_word(const char *s, size_t n) {
+  if (n == 0 || !islower((unsigned char)s[0])) return 0;
+  for (size_t i = 1; i < n; i++)
+    if (!(isalnum((unsigned char)s[i]) || s[i] == '_')) return 0;
+  return 1;
+}
+
+// A TPTP number that is NOT already a plain identifier token: signed,
+// decimal, rational or signed-exponent forms.  Returns its length at
+// p (0 when p does not start one).
+static size_t tp_number_len(const char *text, const char *p) {
+  if (p > text && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) return 0;
+  const char *q = p;
+  int odd = 0;
+  if (*q == '+' || *q == '-') { q++; odd = 1; }
+  if (!isdigit((unsigned char)*q)) return 0;
+  while (isdigit((unsigned char)*q)) q++;
+  if (q[0] == '.' && isdigit((unsigned char)q[1])) {
+    q++; odd = 1;
+    while (isdigit((unsigned char)*q)) q++;
   }
-  out[o] = '\0';
-  for (int i = 0; i < nq; i++) free(qname[i]);
+  if ((q[0] == 'e' || q[0] == 'E') &&
+      (isdigit((unsigned char)q[1]) ||
+       ((q[1] == '+' || q[1] == '-') && isdigit((unsigned char)q[2])))) {
+    q++;
+    if (*q == '+' || *q == '-') { q++; odd = 1; }
+    while (isdigit((unsigned char)*q)) q++;
+  } else if (q[0] == '/' && isdigit((unsigned char)q[1])) {
+    q++; odd = 1;
+    while (isdigit((unsigned char)*q)) q++;
+  }
+  if (!odd || isalnum((unsigned char)*q) || *q == '_') return 0;
+  return (size_t)(q - p);
+}
+
+// Grow `prefix` until no identifier of the text (quoted lower_words
+// included, since they lose their quotes) starts with it: every
+// <prefix><digits> name is then fresh.
+static void tp_fresh_family(const char *text, char *prefix, size_t cap) {
+  for (;;) {
+    size_t pl = strlen(prefix);
+    int clash = 0;
+    for (const char *p = text; *p != '\0' && !clash; ) {
+      if (*p == '\'' || *p == '"') {
+        const char *e = tp_quote_end(p);
+        if (e == NULL) { p++; continue; }
+        size_t il = (size_t)(e - p) - 1u;
+        if (*p == '\'' && tp_is_lower_word(p + 1, il) && il >= pl &&
+            strncmp(p + 1, prefix, pl) == 0)
+          clash = 1;
+        p = e + 1;
+        continue;
+      }
+      if (isalnum((unsigned char)*p) || *p == '_') {
+        const char *e = p;
+        while (isalnum((unsigned char)*e) || *e == '_') e++;
+        if ((size_t)(e - p) >= pl && strncmp(p, prefix, pl) == 0) clash = 1;
+        p = e;
+        continue;
+      }
+      p++;
+    }
+    if (!clash) return;
+    if (pl + 2 >= cap) tp_giveup("cannot make a fresh name family");
+    prefix[pl] = 'x';
+    prefix[pl + 1] = '\0';
+  }
+}
+
+static char *tp_unquote_names(char *text) {
+  int any = 0;
+  for (const char *p = text; *p != '\0' && !any; p++) {
+    if (*p == '\'' || *p == '"') any = 1;
+    else if ((*p == '+' || *p == '-' || isdigit((unsigned char)*p)) &&
+             tp_number_len(text, p) != 0) any = 1;
+  }
+  if (!any) return text;
+  char fam[3][24] = { "qtd", "dob", "num" };
+  for (int k = 0; k < 3; k++) tp_fresh_family(text, fam[k], sizeof fam[k]);
+  u32 hcap = 1024u;
+  u32 nent = 0u;
+  u32 next_ix[3] = { 0u, 0u, 0u };
+  TpQuoted *ht = (TpQuoted *)calloc(hcap, sizeof(TpQuoted));
+  TpBuf out = {0};
+  if (ht == NULL) tp_giveup("OOM in quoted-atom rename");
+  tp_buf_put(&out, "", 0);
+  const char *r = text, *seg = text;
+  while (*r != '\0') {
+    int kind = -1;
+    size_t tl = 0;           // token length, quotes included
+    if (*r == '\'' || *r == '"') {
+      const char *e = tp_quote_end(r);
+      if (e == NULL || e == r + 1) { r++; continue; }   // open or empty: as-is
+      kind = (*r == '\'') ? 0 : 1;
+      tl = (size_t)(e - r) + 1u;
+      if (kind == 0 && tp_is_lower_word(r + 1, tl - 2u)) {
+        tp_buf_put(&out, seg, (size_t)(r - seg));
+        tp_buf_put(&out, r + 1, tl - 2u);
+        r = e + 1;
+        seg = r;
+        continue;
+      }
+    } else if (*r == '+' || *r == '-' || isdigit((unsigned char)*r)) {
+      tl = tp_number_len(text, r);
+      if (tl != 0) kind = 2;
+    }
+    if (kind < 0) {
+      if (isalnum((unsigned char)*r) || *r == '_') {
+        while (isalnum((unsigned char)*r) || *r == '_') r++;   // skip a word
+      } else {
+        r++;
+      }
+      continue;
+    }
+    if (2u * (nent + 1u) > hcap) {
+      u32 ncap = 2u * hcap;
+      TpQuoted *nh = (TpQuoted *)calloc(ncap, sizeof(TpQuoted));
+      if (nh == NULL) tp_giveup("OOM in quoted-atom rename");
+      for (u32 i = 0; i < hcap; i++) {
+        if (ht[i].key == NULL) continue;
+        u32 sl = (u32)(tp_name_hash(ht[i].key, ht[i].len) % ncap);
+        while (nh[sl].key != NULL) sl = (sl + 1u) % ncap;
+        nh[sl] = ht[i];
+      }
+      free(ht);
+      ht = nh;
+      hcap = ncap;
+    }
+    u32 sl = (u32)(tp_name_hash(r, tl) % hcap);
+    while (ht[sl].key != NULL &&
+           !(ht[sl].len == tl && memcmp(ht[sl].key, r, tl) == 0))
+      sl = (sl + 1u) % hcap;
+    char nm[48];
+    if (ht[sl].key == NULL) {
+      ht[sl].key = r;
+      ht[sl].len = (u32)tl;
+      ht[sl].ix = next_ix[kind]++ | ((u32)kind << 30);
+      nent++;
+      snprintf(nm, sizeof nm, "%s%u", fam[kind], ht[sl].ix & 0x3FFFFFFFu);
+      tp_ren_note(nm, strlen(nm), r, tl);
+    } else {
+      u32 ix = ht[sl].ix;
+      snprintf(nm, sizeof nm, "%s%u", fam[ix >> 30], ix & 0x3FFFFFFFu);
+    }
+    tp_buf_put(&out, seg, (size_t)(r - seg));
+    tp_buf_put(&out, nm, strlen(nm));
+    r += tl;
+    seg = r;
+  }
+  tp_buf_put(&out, seg, (size_t)(r - seg));
+  free(ht);
   free(text);
-  return out;
+  return out.s;
 }
 
 static void tp_shorten_names(char *text) {

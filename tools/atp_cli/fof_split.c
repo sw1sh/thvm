@@ -1616,10 +1616,12 @@ static int fof_one_elt_sat(FolClause **cls, int ncl) {
 // the search left open read false) and one false formula withdraws the
 // claim.  Input shapes that read differently from the TPTP semantics
 // withdraw it too: numbers and distinct objects (interpreted as distinct
-// values), $-symbols, a name used at two arities or as both predicate
-// and function, a quoted atom aliasing a plain name the unquoting pass
-// renamed apart, records the scanner does not read (typed records,
-// unexpanded nested include(), comments it does not strip), and roles
+// values; the unquoting pass renames the non-identifier ones to fresh
+// constants, and the rename table still names them), $-symbols, a name
+// used at two arities or as both predicate and function, a stand-in
+// spelled as a quoted lower word (the unquoting pass strips those
+// quotes: 'w' IS w), records the scanner does not read (typed records,
+// unexpanded nested include(), a comment preprocessing left), and roles
 // outside the axiom/conjecture family.  Output: Vampire's FiniteModel
 // form (tff declarations, finite_domain, one definition per symbol),
 // every input symbol in the problem's own spelling.
@@ -1728,17 +1730,22 @@ static int fof_oe_lower_word(const char *s, size_t n) {
 }
 
 // The problem's own spelling of an interned name (undoes the quoted-atom
-// and long-name stand-ins); NULL when the name is not a TPTP functor.
+// and long-name stand-ins); NULL when the name is not a TPTP functor --
+// a number or $-symbol, or the stand-in of a distinct object or number:
+// the unquoting pass renames "text", -1, 2.5 and 1/3 to fresh constants
+// (dob<n> / num<n>), whose original spelling the rename table keeps.
 static const char *fof_oe_spelling(const char *nm) {
   if (!fof_oe_lower_word(nm, strlen(nm))) return NULL;
   int slot = tp_ren_slot(nm, strlen(nm));
-  if (slot >= 0 && g_tp_ren[slot].from != NULL) return g_tp_ren[slot].to;
-  return nm;
+  if (slot < 0 || g_tp_ren[slot].from == NULL) return nm;
+  const char *to = g_tp_ren[slot].to;
+  if (to[0] == '\'' || fof_oe_lower_word(to, strlen(to))) return to;
+  return NULL;
 }
 
-// A quoted atom 'w' with w a lower word IS the functor w: the unquoting
-// pass renamed it apart from a plain w, so both present = one symbol
-// read as two.
+// A quoted atom 'w' with w a lower word IS the functor w (TPTP BNF).  The
+// unquoting pass strips those quotes, so a stand-in spelled 'w' next to a
+// plain w would be one symbol read as two.
 static int fof_oe_quote_alias(const char *sp) {
   if (sp[0] != '\'') return 0;
   size_t n = strlen(sp);
@@ -1755,10 +1762,16 @@ static int fof_oe_quote_alias(const char *sp) {
 
 // Text the record scanner reads as the problem: a comment, quote or
 // record kind it does not handle means the parsed formulas may not be
-// the problem's.
+// the problem's.  A distinct object anywhere in the input refuses: the
+// unquoting pass renames each to a fresh constant, and the rename table
+// (main.c keeps it on every TPTP run) names it.
 static const char *fof_oe_text_refusal(const char *text) {
+  if (!g_tp_ren_on) return "input renames not recorded";
   if (strchr(text, '\'') != NULL) return "quoted text left after unquoting";
   if (strchr(text, '"') != NULL) return "distinct object";
+  for (u32 i = 0; i < g_tp_ren_cap; i++) {
+    if (g_tp_ren[i].from != NULL && g_tp_ren[i].to[0] == '"') return "distinct object";
+  }
   if (strchr(text, '%') != NULL) return "trailing comment";
   if (strstr(text, "/*") != NULL) return "block comment";
   static const char *kinds[] = { "include(", "tff(", "thf(", "tcf(", "tpi(", NULL };
@@ -1856,7 +1869,7 @@ static void fof_one_elt_claim(const char *text) {
   for (int i = 0; why == NULL && i < pc_nsyms; i++) {
     if (skind[i] == 0u) continue;
     const char *sp = fof_oe_spelling(pc_sym[i]);
-    if (sp == NULL) why = "number or $-symbol";
+    if (sp == NULL) why = "number, distinct object or $-symbol";
     else if (fof_oe_quote_alias(sp)) why = "quoted atom aliasing a plain name";
   }
   if (why == NULL) {

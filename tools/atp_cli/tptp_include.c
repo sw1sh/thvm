@@ -57,19 +57,23 @@ static char *tp_resolve_include(const char *problem_path, const char *inc) {
   return tp_read_file(inc, NULL);
 }
 
-// Blank TSTP comments (% to end of line, /* ... */) outside single
-// quotes, in place; offsets and length are kept.
+// Blank TSTP comments (% to end of line, /* ... */) outside quoted
+// tokens ('atom' and "distinct object", backslash escapes honoured), in
+// place; offsets, length and line breaks are kept.  A quote still open at
+// the end of its line is malformed and closes there.
 static void tp_blank_comments(char *s) {
-  int inq = 0;
+  char q = 0;
   for (char *p = s; *p != '\0'; p++) {
-    if (inq) {
-      if (*p == '\'') {
-        inq = 0;
+    if (q != 0) {
+      if (p[0] == '\\' && p[1] != '\0' && p[1] != '\n') {
+        p++;
+      } else if (*p == q || *p == '\n') {
+        q = 0;
       }
       continue;
     }
-    if (*p == '\'') {
-      inq = 1;
+    if (*p == '\'' || *p == '"') {
+      q = *p;
       continue;
     }
     if (*p == '%') {
@@ -80,7 +84,10 @@ static void tp_blank_comments(char *s) {
       *p++ = ' ';
       *p++ = ' ';
       while (*p != '\0' && !(p[0] == '*' && p[1] == '/')) {
-        *p++ = ' ';
+        if (*p != '\n') {
+          *p = ' ';
+        }
+        p++;
       }
       if (*p != '\0') {
         p[0] = ' ';
@@ -112,12 +119,14 @@ static const char *tp_skip_blank(const char *s) {
   }
 }
 
-// The closing quote of the single-quoted token opening at q, or NULL.
+// The closing quote of the quoted token ('atom' or "distinct object")
+// opening at q, or NULL.
 static const char *tp_quote_end(const char *q) {
+  char c = *q;
   for (q++; *q != '\0'; q++) {
     if (q[0] == '\\' && q[1] != '\0') {
       q++;
-    } else if (*q == '\'') {
+    } else if (*q == c) {
       return q;
     }
   }
@@ -131,6 +140,7 @@ static const char *tp_record_end(const char *s) {
   for (const char *p = s; *p != '\0'; p++) {
     switch (*p) {
       case '\'':
+      case '"':
         p = tp_quote_end(p);
         if (p == NULL) {
           return NULL;
