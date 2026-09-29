@@ -406,6 +406,26 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
       *out = uop_buffer_dtype(t);
       return 1;
     }
+    // Expander / devectorizer value nodes: a STACK's lanes share one
+    // dtype, a PLACEHOLDER or VCONST carries its own, and AFTER, GEP,
+    // UNROLL and CONTRACT carry their src[0]'s.  Without these a reduce
+    // over a STACK body, or over a lowered inner reduce
+    // (LOAD(AFTER(PLACEHOLDER, END))), lowered to an f32 accumulator.
+    if (op == UOP_STACK && uop_stack_n(t) > 0) {
+      return term_dtype_in(uop_stack_src(t, 0), env_id, out);
+    }
+    if (op == UOP_PLACEHOLDER) {
+      *out = uop_placeholder_dtype(t);
+      return 1;
+    }
+    if (op == UOP_VCONST) {
+      *out = uop_vconst_dtype(t);
+      return 1;
+    }
+    if (op == UOP_AFTER || op == UOP_GEP || op == UOP_UNROLL
+        || op == UOP_CONTRACT) {
+      return term_dtype_in(heap_read(loc), env_id, out);
+    }
   }
   // TUOpGradWithTarget chain-rule projection: cell is [y, gy, target];
   // the gradient result has y's dtype (= gy's dtype = leaf's dtype).

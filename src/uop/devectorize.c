@@ -581,6 +581,9 @@ static Term devec_reduce_to_acc(DevecReduceCtx *ctx, Term red) {
   }
   Term identity  = uop_const(dtype, identity_bits);
   Term zero_addr = uop_const(DT_INT32, 0);
+  // A bool SUM or MAX is an OR (tinygrad uop/symbolic.py:163-166), which
+  // on {0, 1} is the MAX combine; an ADD would count past 1.
+  u32 combine_kind = dtype_is_bool(dtype) ? REDUCE_MAX : kind;
 
   Term accs[256];
   Term updates = 0;
@@ -591,7 +594,7 @@ static Term devec_reduce_to_acc(DevecReduceCtx *ctx, Term red) {
     Term initted = devec_after_ranges(uop_after(acc, init),
                                       scan.own, scan.n_own);
     Term lane = (lanes > 1) ? uop_stack_src(body, i) : body;
-    Term combined = devec_reduce_combine(kind, uop_load(initted), lane);
+    Term combined = devec_reduce_combine(combine_kind, uop_load(initted), lane);
     Term update = uop_store(initted, zero_addr, combined);
     updates = (updates == 0) ? update : uop_after(update, updates);
     accs[i] = acc;

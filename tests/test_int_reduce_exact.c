@@ -20,9 +20,15 @@
 //                    w[j] load is hoisted into a local;
 //   epilogue         reduce + y[i]: a lane-blocked accumulator, with a
 //                    hoisted w[j], when the output axis is UPCAST, a
-//                    scalar one when it is not.
-// The realized repros run end to end through thvm_realize, and each
-// kernel again through the walker.
+//                    scalar one when it is not;
+//   of-sum           max_j sum_k x[i, j, k]: nested accumulators.
+// The linearized C renderer (a store through INDEX_E, expanded,
+// devectorized and linearized) runs a scalar reduce and a MAX of a SUM,
+// whose accumulator takes its dtype through the inner reduce's result; it
+// declines an i64 MAX, whose identity does not fit a CONST payload.  A
+// STACK-bodied reduce lowers to one accumulator per lane in the reduce's
+// dtype.  The realized repros run end to end through thvm_realize, and
+// each kernel again through the walker.
 #include "../src/thvm.c"
 #include "test.h"
 #include <dlfcn.h>
@@ -32,10 +38,11 @@
 #define NK 3
 
 enum { SH_PLAIN, SH_UPCAST, SH_UNROLL, SH_UPCAST_SHARED, SH_EPILOGUE,
-       SH_EPILOGUE_UPCAST, SH_COUNT };
+       SH_EPILOGUE_UPCAST, SH_MAX_OF_SUM, SH_COUNT };
 
 static char const *const SHAPE_NAME[SH_COUNT] = {
   "plain", "upcast", "unroll", "upcast-shared", "epilogue", "epilogue-upcast",
+  "of-sum",
 };
 
 #define N_DTYPES 9
@@ -181,6 +188,7 @@ typedef struct {
   u32  dt;
   u32  kind;
   u32  shape;
+  int  nested;
   Term root;
   Term out;
   Term ins[3];                  // x, w, y: instances 1..3
@@ -200,15 +208,18 @@ static int shape_has_y(u32 shape) {
 }
 
 // A bool ADD renders as `+`, not as an OR, so bool keeps to the bare
-// reduce.
-static int shape_applies(u32 dt, u32 shape) {
+// reduce.  The nested shape is a MAX of a SUM.
+static int shape_applies(u32 dt, u32 kind, u32 shape) {
+  if (shape == SH_MAX_OF_SUM) {
+    return kind == REDUCE_MAX && dt != DT_BOOL;
+  }
   return dt != DT_BOOL || !shape_has_w(shape);
 }
 
 // The edge values where an overflow is defined: MAX never adds, an
 // unsigned sum wraps, and a narrow signed sum converts back to its dtype.
 static int use_edge(u32 dt, u32 kind, u32 shape) {
-  if (shape_has_w(shape)) {
+  if (shape_has_w(shape) || shape == SH_MAX_OF_SUM) {
     return 0;
   }
   return kind == REDUCE_MAX || !dtype_is_signed(dt) || dtype_info(dt)->bits < 32;
@@ -227,14 +238,15 @@ static i64 x_val(u32 dt, int edge, u32 i, u32 j) {
 }
 
 // out[i] = reduce_j body(i, j) [+ y[i]] with body = x[i*NJ + j] [+ w[j]],
-// stored through a bare address like a lifted kernel.
+// or out[i] = max_j sum_k x[(i*NJ + j)*NK + k], stored through a bare
+// address like a lifted kernel.
 static void build_kernel(Kern *k, u32 dt, u32 kind, u32 shape) {
   memset(k, 0, sizeof *k);
   k->dt    = dt;
   k->kind  = kind;
   k->shape = shape;
   int edge = use_edge(dt, kind, shape);
-  u32 xd[1] = { NI * NJ };
+  u32 xd[1] = { NI * NJ * NK };
   u32 wd[1] = { NJ };
   u32 od[1] = { NI };
   k->out    = uop_buffer_inst(UOP_SCOPE_GLOBAL, dt, 1, od, 0);
@@ -250,6 +262,11 @@ static void build_kernel(Kern *k, u32 dt, u32 kind, u32 shape) {
   Term body = uop_index_e(k->ins[0], iadd(imul(i, ic(NJ)), j));
   if (shape_has_w(shape)) {
     body = uop_binary(UOP_ADD, body, uop_index_e(k->ins[1], j));
+  }
+  if (shape == SH_MAX_OF_SUM) {
+    Term kk   = uop_range(2, KAX_REDUCE, NK);
+    Term addr = iadd(imul(iadd(imul(i, ic(NJ)), j), ic(NK)), kk);
+    body = uop_reduce(REDUCE_SUM, 2, uop_index_e(k->ins[0], addr));
   }
   Term value = uop_reduce(kind, 1, body);
   if (shape_has_y(shape)) {
@@ -273,11 +290,20 @@ static void build_kernel(Kern *k, u32 dt, u32 kind, u32 shape) {
     store_elem(dt, k->y, ii, yv);
     i64 acc = (kind == REDUCE_MAX) ? dt_min(dt) : 0;
     for (u32 jj = 0; jj < NJ; jj++) {
-      i64 xv = x_val(dt, edge, ii, jj);
-      store_elem(dt, k->x, ii * NJ + jj, xv);
-      i64 b = xv;
+      i64 b = 0;
+      if (shape == SH_MAX_OF_SUM) {
+        for (u32 q = 0; q < NK; q++) {
+          i64 xv = x_val(dt, 0, ii, jj * NK + q);
+          store_elem(dt, k->x, (ii * NJ + jj) * NK + q, xv);
+          b = combine(dt, REDUCE_SUM, b, xv);
+        }
+      } else {
+        i64 xv = x_val(dt, edge, ii, jj);
+        store_elem(dt, k->x, ii * NJ + jj, xv);
+        b = xv;
+      }
       if (shape_has_w(shape)) {
-        b = canon(dt, (u64)xv + (u64)load_elem(dt, k->w, jj));
+        b = canon(dt, (u64)b + (u64)load_elem(dt, k->w, jj));
       }
       acc = combine(dt, kind, acc, b);
     }
@@ -288,10 +314,60 @@ static void build_kernel(Kern *k, u32 dt, u32 kind, u32 shape) {
   }
 }
 
+// out[i] = reduce_j x[i*NJ + j], or with `nested` out[i] = max_j sum_k
+// x[(i*NJ + j)*NK + k], stored through INDEX_E and read through LOAD: the
+// shape the linearized renderer consumes.
+static void build_linear_kernel(Kern *k, u32 dt, u32 kind, int nested) {
+  memset(k, 0, sizeof *k);
+  k->dt     = dt;
+  k->kind   = kind;
+  k->nested = nested;
+  int edge = !nested && use_edge(dt, kind, SH_PLAIN);
+  u32 xd[1] = { NI * NJ * NK };
+  u32 od[1] = { NI };
+  k->out    = uop_buffer_inst(UOP_SCOPE_GLOBAL, dt, 1, od, 0);
+  k->ins[0] = uop_buffer_inst(UOP_SCOPE_GLOBAL, dt, 1, xd, 1);
+  Term i     = uop_range(0, KAX_LOOP, NI);
+  Term j     = uop_range(1, KAX_REDUCE, NJ);
+  Term ij    = iadd(imul(i, ic(NJ)), j);
+  u32  aj[1] = { 1 };
+  Term value;
+  if (nested) {
+    Term kk    = uop_range(2, KAX_REDUCE, NK);
+    Term ld    = uop_load(uop_index_e(k->ins[0], iadd(imul(ij, ic(NK)), kk)));
+    u32  ak[1] = { 2 };
+    value = uop_reduce_multi(REDUCE_MAX, 1, aj,
+                             uop_reduce_multi(REDUCE_SUM, 1, ak, ld));
+  } else {
+    value = uop_reduce_multi(kind, 1, aj, uop_load(uop_index_e(k->ins[0], ij)));
+  }
+  k->root = uop_store(k->out, uop_index_e(k->out, i), value);
+  for (u32 ii = 0; ii < NI; ii++) {
+    i64 acc = (nested || kind == REDUCE_MAX) ? dt_min(dt) : 0;
+    for (u32 jj = 0; jj < NJ; jj++) {
+      if (!nested) {
+        i64 xv = x_val(dt, edge, ii, jj);
+        store_elem(dt, k->x, ii * NJ + jj, xv);
+        acc = combine(dt, kind, acc, xv);
+        continue;
+      }
+      i64 s = 0;
+      for (u32 q = 0; q < NK; q++) {
+        i64 xv = x_val(dt, 0, ii, jj * NK + q);
+        store_elem(dt, k->x, (ii * NJ + jj) * NK + q, xv);
+        s = combine(dt, REDUCE_SUM, s, xv);
+      }
+      acc = combine(dt, REDUCE_MAX, acc, s);
+    }
+    k->want[ii] = acc;
+  }
+}
+
 static char const *kern_name(Kern const *k, char const *route) {
   static char name[96];
   snprintf(name, sizeof name, "%s/%s-%s-%s", route, dtype_name(k->dt),
-           k->kind == REDUCE_MAX ? "max" : "sum", SHAPE_NAME[k->shape]);
+           k->kind == REDUCE_MAX ? "max" : "sum",
+           k->nested ? "of-sum" : SHAPE_NAME[k->shape]);
   return name;
 }
 
@@ -316,7 +392,7 @@ static void build_kernels(void) {
   for (u32 d = 0; d < N_DTYPES; d++) {
     for (u32 kind = 0; kind < 2; kind++) {
       for (u32 sh = 0; sh < SH_COUNT; sh++, n++) {
-        if (shape_applies(DTYPES[d], sh)) {
+        if (shape_applies(DTYPES[d], kind, sh)) {
           build_kernel(&KERNS[n], DTYPES[d], kind, sh);
           KERNS_ON[n] = 1;
         }
@@ -432,6 +508,8 @@ static void *compile_src(void) {
 
 typedef void (*LegacyFn)(void *, const void *const *, unsigned,
                          const unsigned *, const unsigned *);
+typedef void (*LinearFn)(void *, const void *const *, unsigned,
+                         const unsigned *);
 
 static void render_legacy(Kern const *k, char const *fn_name) {
   Term   ins[3];
@@ -495,6 +573,164 @@ static void check_legacy_units(void) {
   }
   if (h != NULL) {
     dlclose(h);
+  }
+}
+
+// Expand, devectorize, linearize and render as cg_render_uop_kernel_c_root's
+// linearized route does.  Returns the renderer's result.
+static int render_linear(Kern const *k, char const *fn_name) {
+  Term r = uop_expand_graph(k->root);
+  r = uop_symbolic_rewrite(r);
+  r = uop_devectorize_graph(r);
+  r = uop_symbolic_rewrite(r);
+  r = uop_load_store_fold_graph(r);
+  r = uop_symbolic_rewrite(r);
+  static LinKernel lk;
+  if (!uop_linearize(r, &lk)) {
+    return 0;
+  }
+  char  *buf = NULL;
+  size_t len = 0;
+  FILE  *fp  = open_memstream(&buf, &len);
+  int    ok  = cg_render_linearized_c(&lk, fn_name, fp);
+  fclose(fp);
+  if (ok) {
+    src_append(buf, len);
+  }
+  free(buf);
+  return ok;
+}
+
+#define N_LINEAR (N_DTYPES * 2 + 8)
+
+static Kern LINEAR[N_LINEAR];
+static int  LINEAR_ON[N_LINEAR];
+
+static void check_linear_units(void) {
+  char fn_name[32];
+  u32  m = 0;
+  TEST_BEGIN("linearized-c/renders");
+  for (u32 d = 0; d < N_DTYPES; d++) {
+    for (u32 kind = 0; kind < 2; kind++, m++) {
+      build_linear_kernel(&LINEAR[m], DTYPES[d], kind, 0);
+      snprintf(fn_name, sizeof fn_name, "k_linear_%u", m);
+      int ok = render_linear(&LINEAR[m], fn_name);
+      // An i64 MAX identity does not fit a CONST payload: devectorize
+      // leaves the REDUCE, the linearized renderer declines it, and the
+      // legacy emit renders the kernel.
+      CHECK_EQ(ok, !(DTYPES[d] == DT_INT64 && kind == REDUCE_MAX));
+      LINEAR_ON[m] = ok;
+    }
+  }
+  for (u32 d = 0; d < N_DTYPES; d++) {
+    if (DTYPES[d] == DT_BOOL) {
+      continue;
+    }
+    build_linear_kernel(&LINEAR[m], DTYPES[d], REDUCE_MAX, 1);
+    snprintf(fn_name, sizeof fn_name, "k_linear_%u", m);
+    LINEAR_ON[m] = render_linear(&LINEAR[m], fn_name);
+    CHECK_EQ(LINEAR_ON[m], DTYPES[d] != DT_INT64);
+    m++;
+  }
+  void *h = compile_src();
+  TEST_BEGIN("linearized-c/compiles");
+  CHECK(h != NULL);
+  u8 res[8 * NI];
+  for (u32 q = 0; q < m; q++) {
+    if (!LINEAR_ON[q]) {
+      continue;
+    }
+    TEST_BEGIN(kern_name(&LINEAR[q], "linearized-c"));
+    snprintf(fn_name, sizeof fn_name, "k_linear_%u", q);
+    LinearFn f = (h != NULL) ? (LinearFn)dlsym(h, fn_name) : NULL;
+    CHECK(f != NULL);
+    if (f != NULL) {
+      const void *ins[1]   = { LINEAR[q].x };
+      unsigned    numel[1] = { NI * NJ * NK };
+      memset(res, 0, sizeof res);
+      f(res, ins, NI, numel);
+      check_out(&LINEAR[q], res);
+    }
+  }
+  if (h != NULL) {
+    dlclose(h);
+  }
+}
+
+// === STACK-bodied lowering ===============================================
+
+typedef struct {
+  u32 n_acc;
+  u32 acc_dt[16];
+  u32 n_init;
+  u32 init_bits[16];
+  u32 init_dt[16];
+  u32 n_reduce;
+} LowerScan;
+
+static void lower_visit(Term t, void *user) {
+  LowerScan *s = (LowerScan *)user;
+  switch (term_ext(t)) {
+    case UOP_PLACEHOLDER:
+      if (s->n_acc < 16) {
+        s->acc_dt[s->n_acc++] = uop_placeholder_dtype(t);
+      }
+      return;
+    case UOP_STORE: {
+      Term v = uop_store_value(t);
+      if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_CONST && s->n_init < 16) {
+        Term num = heap_read(term_val(v));
+        s->init_bits[s->n_init] = (u32)term_val(num);
+        s->init_dt[s->n_init]   = term_ext(num);
+        s->n_init++;
+      }
+      return;
+    }
+    case UOP_REDUCE:
+      s->n_reduce++;
+      return;
+    default:
+      return;
+  }
+}
+
+// reduce_j x[(4i + l)*NJ + j] over the four lanes l as one STACK body
+// lowers to four accumulators, each in the reduce's dtype and started at
+// its identity.  An i64 MAX stays a REDUCE.
+static void check_stack_lowering(u32 dt, u32 kind) {
+  static char name[96];
+  snprintf(name, sizeof name, "devectorize/stack-body-acc-dtype/%s-%s",
+           dtype_name(dt), kind == REDUCE_MAX ? "max" : "sum");
+  TEST_BEGIN(name);
+  u32  xd[1] = { 4 * NI * NJ };
+  Term x = uop_buffer_inst(UOP_SCOPE_GLOBAL, dt, 1, xd, 1);
+  Term i = uop_range(0, KAX_LOOP, NI / 4);
+  Term j = uop_range(1, KAX_REDUCE, NJ);
+  Term lanes[4];
+  for (u32 l = 0; l < 4; l++) {
+    Term row = iadd(imul(i, ic(4)), ic(l));
+    lanes[l] = uop_load(uop_index_e(x, iadd(imul(row, ic(NJ)), j)));
+  }
+  u32  axes[1] = { 1 };
+  Term red     = uop_reduce_multi(kind, 1, axes, uop_stack(4, lanes));
+  LowerScan s;
+  memset(&s, 0, sizeof s);
+  CHECK(devec_cone_walk(uop_devectorize_graph(red), lower_visit, &s));
+  if (dt == DT_INT64 && kind == REDUCE_MAX) {
+    CHECK_EQ(s.n_acc, 0);
+    CHECK_EQ(s.n_reduce, 1);
+    return;
+  }
+  CHECK_EQ(s.n_reduce, 0);
+  CHECK_EQ(s.n_acc, 4);
+  CHECK_EQ(s.n_init, 4);
+  for (u32 a = 0; a < s.n_acc; a++) {
+    CHECK_EQ(s.acc_dt[a], dt);
+  }
+  u32 want = (kind == REDUCE_MAX) ? (u32)dt_min(dt) : 0;
+  for (u32 a = 0; a < s.n_init; a++) {
+    CHECK_EQ(s.init_dt[a], dt);
+    CHECK_EQ(s.init_bits[a], want);
   }
 }
 
@@ -665,6 +901,13 @@ int main(void) {
   build_kernels();
   check_walker_units();
   check_legacy_units();
+  check_linear_units();
+
+  u32 const stack_dts[6] = { DT_INT8, DT_UINT16, DT_INT32, DT_INT64, DT_UINT64, DT_BOOL };
+  for (u32 d = 0; d < 6; d++) {
+    check_stack_lowering(stack_dts[d], REDUCE_SUM);
+    check_stack_lowering(stack_dts[d], REDUCE_MAX);
+  }
 
   check_end_to_end();
   printf("  e2e: %u realized kernels, %u of them on the JIT, all re-run on the walker\n",

@@ -128,7 +128,10 @@ The legacy C emit declares the accumulator, and the hoisted loads and
 lane-invariant locals of a register-blocked reduce, in the dtype's C
 type; an int MAX starts at `INT<n>_MIN` or 0 and compares, as tinygrad
 lowers MAX (codegen/decomp/op.py:84).  Float reduces, and the GPU
-targets, keep the float accumulator.
+targets, keep the float accumulator.  The devectorizer types each
+accumulator from the reduce's body, a STACK of lanes and a lowered
+inner reduce included, and combines a bool SUM as it does a MAX, which
+is an OR on {0, 1}.
 
 Packed nibble lanes -- i4, u4.  Storage is 2 nibbles per byte, low
 nibble first ([src/dtype/nibble.c](../src/dtype/nibble.c)).  No CPU
