@@ -5,8 +5,9 @@ packed `int4` / `uint4` for modern quantization.  Every dtype but
 the packed `int4` / `uint4` (see ALU strategy) runs end to end on the
 CPU and through the WL bridge.  The CPU JIT compiles kernels of those
 dtypes, except that it declines a kernel with an f16, bf16 or fp8
-buffer, which runs in the UOp walker instead; BLAS and Metal cover
-narrower sets (see Backend coverage).
+buffer, and its legacy C emit a kernel that reads a bool buffer; those
+run in the UOp walker instead.  BLAS and Metal cover narrower sets (see
+Backend coverage).
 
 Reference:
 - enum + DTypeInfo:    [src/dtype/info.c](../src/dtype/info.c)
@@ -263,7 +264,7 @@ a view-only no-op when contiguous-compatible).
 | Path        | Wired dtypes |
 |-------------|--------------|
 | CPU UOp walker (`uop_walk.c`) | all but i4 / u4 |
-| CPU JIT (`jit.c`, any C compiler) | all but f16 / bf16 / fp8 (`cpu_jit_narrow_float`) and i4 / u4 |
+| CPU JIT (`jit.c`, any C compiler) | all but f16 / bf16 / fp8 (`cpu_jit_narrow_float`) and i4 / u4; the legacy C emit, which renders every kernel the linearized C renderer does not take (all without an UPCAST or UNROLL), also declines one that reads a bool buffer, because its check for an untyped input slot (`cg_render_uop_kernel_c_root`) takes DT_BOOL, which is 0, for untyped |
 | CPU BLAS (Accelerate, OpenBLAS / BLIS) | f32 and f64 matmul / matvec / dot; batched matmul and contractions f32 only |
 | Metal generated MSL | the types `rmu_msl_type_name` maps: f32, f16 (`half`), bf16 (`bfloat`), fp8 (bytes decoded to float), i8 / u8 / i32 / i64 |
 | Metal shader library (DAG encoder) | f32 / i32 (`metal_kernel_supported`) |
