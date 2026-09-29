@@ -19,6 +19,41 @@ static Term v(u32 id) { return term_new_fvr(id); }
 static Term pred1(u32 lab, Term x) { Term cs[1] = {x}; return term_new_ctr(lab, cs, 1); }
 static Term pred2(u32 lab, Term x, Term y) { Term cs[2] = {x, y}; return term_new_ctr(lab, cs, 2); }
 
+// The distribution fol_distribute replaced (every joined side
+// distributed again), kept as the oracle its terms must equal.
+static Term dist_ref(Term f) {
+  if (term_tag(f) != TAG_CTR) return f;
+  u32 lab = term_ext(f);
+  if (lab == FOL_LAB_AND) {
+    return fol_mk_and(dist_ref(term_ctr_at(f, 0u)), dist_ref(term_ctr_at(f, 1u)));
+  }
+  if (lab != FOL_LAB_OR) return f;
+  Term dp = dist_ref(term_ctr_at(f, 0u));
+  Term dq = dist_ref(term_ctr_at(f, 1u));
+  if (term_tag(dp) == TAG_CTR && term_ext(dp) == FOL_LAB_AND) {
+    return fol_mk_and(dist_ref(fol_mk_or(term_ctr_at(dp, 0u), dq)),
+                      dist_ref(fol_mk_or(term_ctr_at(dp, 1u), dq)));
+  }
+  if (term_tag(dq) == TAG_CTR && term_ext(dq) == FOL_LAB_AND) {
+    return fol_mk_and(dist_ref(fol_mk_or(dp, term_ctr_at(dq, 0u))),
+                      dist_ref(fol_mk_or(dp, term_ctr_at(dq, 1u))));
+  }
+  return fol_mk_or(dp, dq);
+}
+
+// A random NNF formula over P/Q literals of depth <= d (LCG state *s).
+static Term rand_nnf(u32 *s, u32 d) {
+  *s = *s * 1103515245u + 12345u;
+  u32 r = (*s >> 16) & 7u;
+  if (d == 0u || r < 2u) {
+    Term a = pred1((r & 1u) ? P_P : P_Q, k(L_a + ((*s >> 20) & 3u)));
+    return (r == 0u) ? fol_mk_not(a) : a;
+  }
+  Term x = rand_nnf(s, d - 1u);
+  Term y = rand_nnf(s, d - 1u);
+  return (r & 1u) ? fol_mk_and(x, y) : fol_mk_or(x, y);
+}
+
 int main(void) {
   thvm_init();
 
@@ -1859,6 +1894,44 @@ int main(void) {
     }
     CHECK(cnf_run(st2) == ATP_QUEUE_EMPTY);
     cnf_free(st2);
+  }
+
+  TEST_BEGIN("fol/distribute-builds-each-clause-once");
+  {
+    // (a1 & ... & a60) | (b1 & ... & b60): 3600 clauses ai | bj,
+    // a-major, and the heap grows by the result alone -- distributing a
+    // joined side again per conjunct of the other allocated ~N^3 nodes.
+    const u32 N = 60u;
+    Term A = pred1(P_P, k(1000u)), B = pred1(P_Q, k(2000u));
+    for (u32 i = 1; i < N; i++) {
+      A = fol_mk_and(A, pred1(P_P, k(1000u + i)));
+      B = fol_mk_and(B, pred1(P_Q, k(2000u + i)));
+    }
+    Term f = fol_mk_or(A, B);
+    u64 h0 = CURRENT_CTX->heap_next;
+    Term d = fol_distribute(f);
+    u64 used = CURRENT_CTX->heap_next - h0;
+    CHECK(used < 16u * (u64)N * N);
+    u32 n = 0;
+    FolClause **cs = fol_extract_clauses(d, &n);
+    CHECK_EQ(n, N * N);
+    u32 ok = (cs != NULL);
+    for (u32 c = 0; ok && c < n; c++) {
+      ok = cs[c]->n_lits == 2u &&
+           kbo_eq(cs[c]->lits[0].atom, pred1(P_P, k(1000u + c / N))) &&
+           kbo_eq(cs[c]->lits[1].atom, pred1(P_Q, k(2000u + c % N)));
+    }
+    CHECK(ok);
+    for (u32 c = 0; c < n; c++) fol_clause_free(cs[c]);
+    free(cs);
+    CHECK(kbo_eq(d, dist_ref(f)));
+    // Random NNF formulas: the same terms as the old distribution.
+    u32 s = 20260929u, same = 1u;
+    for (u32 t = 0; t < 300u && same; t++) {
+      Term g = rand_nnf(&s, 6u);
+      same = kbo_eq(fol_distribute(g), dist_ref(g));
+    }
+    CHECK(same);
   }
 
   thvm_free();

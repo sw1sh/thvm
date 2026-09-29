@@ -406,45 +406,42 @@ fn u8 fol_is_skolem(u32 label) {
 // OR, NOT-on-atom) and rewrite it into a conjunction-of-disjunctions:
 //
 //   distribute(p ∧ q) = distribute(p) ∧ distribute(q)
-//   distribute(p ∨ q):
-//     dp = distribute(p),  dq = distribute(q)
-//     if dp = (a ∧ b):   distribute((a ∨ dq) ∧ (b ∨ dq))
-//     if dq = (a ∧ b):   distribute((dp ∨ a) ∧ (dp ∨ b))
-//     else:              dp ∨ dq
+//   distribute(p ∨ q) = or_cnf(distribute(p), distribute(q))
 //   distribute(literal) = literal
+//
+// or_cnf joins two CNFs: (a ∧ b) ∨ y = (a ∨ y) ∧ (b ∨ y), then
+// x ∨ (a ∧ b) = (x ∨ a) ∧ (x ∨ b), else x ∨ y.  Both sides are already
+// distributed, so every result node is built once: distributing a
+// joined side again rebuilds its AND spine per conjunct of the other,
+// quadratic in the clause count (LCL681+1.015's 1590-clause, 109k-
+// literal CNF exhausted a 2^30-cell term heap that way).
 //
 // Worst-case exponential in nested-OR depth -- the classical Tseitin
 // alternative (intro auxiliary atoms) avoids that blowup but enlarges
-// the signature.  For initial coverage we lean on the simpler
-// distribution; Tseitin-CNF is a follow-up if a real bench hits the
-// blowup.
+// the signature; the FOF front end routes such records through it.
+
+static Term fol_or_cnf(Term x, Term y) {
+  if (term_tag(x) == TAG_CTR && term_ext(x) == FOL_LAB_AND) {
+    return fol_mk_and(fol_or_cnf(term_ctr_at(x, 0u), y),
+                      fol_or_cnf(term_ctr_at(x, 1u), y));
+  }
+  if (term_tag(y) == TAG_CTR && term_ext(y) == FOL_LAB_AND) {
+    return fol_mk_and(fol_or_cnf(x, term_ctr_at(y, 0u)),
+                      fol_or_cnf(x, term_ctr_at(y, 1u)));
+  }
+  return fol_mk_or(x, y);
+}
 
 fn Term fol_distribute(Term f) {
   if (term_tag(f) != TAG_CTR) return f;
   u32 lab = term_ext(f);
   if (lab == FOL_LAB_AND) {
-    Term p = term_ctr_at(f, 0u);
-    Term q = term_ctr_at(f, 1u);
-    return fol_mk_and(fol_distribute(p), fol_distribute(q));
+    return fol_mk_and(fol_distribute(term_ctr_at(f, 0u)),
+                      fol_distribute(term_ctr_at(f, 1u)));
   }
   if (lab == FOL_LAB_OR) {
-    Term dp = fol_distribute(term_ctr_at(f, 0u));
-    Term dq = fol_distribute(term_ctr_at(f, 1u));
-    // (a ∧ b) ∨ dq  =>  (a ∨ dq) ∧ (b ∨ dq)
-    if (term_tag(dp) == TAG_CTR && term_ext(dp) == FOL_LAB_AND) {
-      Term a = term_ctr_at(dp, 0u);
-      Term b = term_ctr_at(dp, 1u);
-      return fol_mk_and(fol_distribute(fol_mk_or(a, dq)),
-                        fol_distribute(fol_mk_or(b, dq)));
-    }
-    // dp ∨ (a ∧ b)  =>  (dp ∨ a) ∧ (dp ∨ b)
-    if (term_tag(dq) == TAG_CTR && term_ext(dq) == FOL_LAB_AND) {
-      Term a = term_ctr_at(dq, 0u);
-      Term b = term_ctr_at(dq, 1u);
-      return fol_mk_and(fol_distribute(fol_mk_or(dp, a)),
-                        fol_distribute(fol_mk_or(dp, b)));
-    }
-    return fol_mk_or(dp, dq);
+    return fol_or_cnf(fol_distribute(term_ctr_at(f, 0u)),
+                      fol_distribute(term_ctr_at(f, 1u)));
   }
   // NOT-on-atom or literal atom -- leave alone.
   return f;
