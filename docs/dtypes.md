@@ -316,8 +316,8 @@ kernels.  `tests/test_fp16_convert.c` holds the f16 conversions,
 builtin and manual, to exact references (all 65536 decodes; every
 encode in the boundary binades).  `tests/test_assign_dtypes.c` covers
 ASSIGN for every dtype, and `tests/test_cpu_jit_nonfinite.c` checks
-that f64 kernels with inf, NaN and negative constants compile on the
-CPU JIT.  `tests/test_cpu_jit_f64_reduce.c` holds f64 sums and maxes
-to f64 precision in every legacy C emit reduce shape and on the
-realized CPU JIT route, and `tests/test_uop_walk_cast.c` holds the
-walker's CAST to the C emit's.
+that f64 kernels with inf, NaN, negative and -0 constants compile on
+the CPU JIT and keep their values.  `tests/test_cpu_jit_f64_reduce.c`
+holds f64 sums and maxes to f64 precision in every legacy C emit
+reduce shape and on the realized CPU JIT route, and
+`tests/test_uop_walk_cast.c` holds the walker's CAST to the C emit's.

@@ -1,5 +1,5 @@
 // test_cpu_jit_nonfinite.c - the CPU JIT compiles kernels whose f64
-// literals are infinite, NaN or negative.
+// literals are infinite, NaN, negative or -0, and keeps their values.
 //
 // The legacy C emit (render_uop.c) spells a float CONST of any dtype but
 // f32 as a decimal literal.  It printed an infinity or NaN as `inf` /
@@ -9,13 +9,17 @@
 // the right values, orders of magnitude slower.  tinygrad spells a
 // non-finite constant with its renderer's names for infinity and NaN
 // (renderer/cstyle.py:25-26, 137-138 at 365f87a8a); the C target uses
-// INFINITY / NAN from math.h, as the linearized renderer does.
+// INFINITY / NAN from math.h, as the linearized renderer does.  Both C
+// renderers spell a finite literal as a floating constant, as tinygrad's
+// str(float) does (cstyle.py:37): `-0` is the int 0, which drops the sign
+// of zero.
 //
-// Each case realizes on the CPU and checks the values, compiles the
-// kernel's JIT source with the JIT's own compiler and flags
-// (cpu_jit_compile_shared), and, whenever the JIT may compile it (warmup
-// at most 1, or the parallel precompile on), checks that the kernel
-// dispatched through the JIT.
+// Each case realizes on the CPU and checks the values and the signs of
+// zeros, compiles the kernel's JIT source with the JIT's own compiler and
+// flags (cpu_jit_compile_shared), and, whenever the JIT may compile it
+// (warmup at most 1, or the parallel precompile on), checks that the
+// kernel dispatched through the JIT.  The literal checks render f64
+// constants through each C renderer.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -92,6 +96,7 @@ static void check_case(char const *name, Term expr, f64 const *want) {
     TENS[tid].backend->buf_read(TENS[tid].buf_id, got, sizeof got);
     for (u32 i = 0; i < 4; i++) {
       CHECK((isnan(want[i]) && isnan(got[i])) || got[i] == want[i]);
+      CHECK(isnan(want[i]) || !signbit(got[i]) == !signbit(want[i]));
     }
   }
   for (u32 kid = k0; kid < k1; kid++) {
@@ -102,8 +107,41 @@ static void check_case(char const *name, Term expr, f64 const *want) {
   }
 }
 
+// Both C renderers, the legacy emit and the linearized one, spell a
+// finite f64 CONST as a floating constant.
+static void check_c_literal(f32 v, char const *want) {
+  static char name[64];
+  snprintf(name, sizeof name, "c-literal/%s", want);
+  TEST_BEGIN(name);
+  char legacy[64] = {0};
+  char linear[64] = {0};
+  FILE *fp = fmemopen(legacy, sizeof legacy - 1, "w");
+  cg_target saved = RMU_TARGET;
+  RMU_TARGET = CG_TARGET_C;
+  rmu_emit_term(uop_const(DT_FP64, bits_of(v)), fp);
+  RMU_TARGET = saved;
+  fclose(fp);
+  LzCtx ctx = (LzCtx){ .n_bufs = 0, .target = LZ_TGT_C, .n_emitted_accs = 0 };
+  fp = fmemopen(linear, sizeof linear - 1, "w");
+  lz_emit_scalar_bits(&ctx, DT_FP64, bits_of(v), fp);
+  fclose(fp);
+  if (strcmp(legacy, want) != 0 || strcmp(linear, want) != 0) {
+    fprintf(stderr, "  %s: legacy %s linearized %s\n", name, legacy, linear);
+  }
+  CHECK(strcmp(legacy, want) == 0);
+  CHECK(strcmp(linear, want) == 0);
+}
+
 int main(void) {
   thvm_init();
+
+  check_c_literal(-0.0f, "(-0.0)");
+  check_c_literal(0.0f, "0.0");
+  check_c_literal(1.0f, "1.0");
+  check_c_literal(16777216.0f, "16777216.0");
+  check_c_literal(-2.5f, "(-2.5)");
+  check_c_literal(0.5f, "0.5");
+  check_c_literal(1e20f, "1.0000000200408773e+20");
 
   f64 const x[4]    = { 1.0, -2.0, 3.0, 0.5 };
   f64 const pinf[4] = { INFINITY, INFINITY, INFINITY, INFINITY };
@@ -122,6 +160,14 @@ int main(void) {
   check_case("cpu-jit/f64-neg-of-negative-const", uop_unary(UOP_NEG, f64_const(-2.5f)), two5);
   check_case("cpu-jit/f64-mul-neg-of-negative-const",
              uop_binary(UOP_MUL, f64_buffer(x), uop_unary(UOP_NEG, f64_const(-2.5f))), x25);
+
+  // -0.0 keeps its sign: the int 0 that `(-0)` spells would turn x * -0.0
+  // and z + -0.0 into +0 where IEEE gives -0.
+  f64 const z[4]   = { -0.0, -0.0, 1.0, -0.0 };
+  f64 const xnz[4] = { -0.0, 0.0, -0.0, -0.0 };
+  f64 const znz[4] = { -0.0, -0.0, 1.0, -0.0 };
+  check_case("cpu-jit/f64-mul-neg-zero", uop_binary(UOP_MUL, f64_buffer(x), f64_const(-0.0f)), xnz);
+  check_case("cpu-jit/f64-add-neg-zero", uop_binary(UOP_ADD, f64_buffer(z), f64_const(-0.0f)), znz);
 
   thvm_free();
   TEST_REPORT();

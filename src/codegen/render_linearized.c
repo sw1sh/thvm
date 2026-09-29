@@ -178,7 +178,9 @@ static const char *lz_alu_symbol(u32 op) {
 // same way by const_to_tendesc) and render as a decimal literal with no
 // suffix, so it coerces to the kernel's compute type; f32->double is exact,
 // so %.17g round-trips.  A negative literal is parenthesized so a NEG in
-// front of it cannot form `--`.
+// front of it cannot form `--`.  C reads an integral spelling such as `-0`
+// as an int, which drops the sign of zero, so on C it stays a floating
+// constant, as tinygrad's str(float) spells it (renderer/cstyle.py:37).
 static void lz_emit_scalar_bits(LzCtx const *ctx, u32 dt, u32 bits, FILE *fp) {
   if (!dtype_is_float(dt)) {
     // Index math is signed (UOP_ISUB / UOP_ILT are signed, thvm.h): a
@@ -212,9 +214,14 @@ static void lz_emit_scalar_bits(LzCtx const *ctx, u32 dt, u32 bits, FILE *fp) {
     fputs(f < 0.0f ? "(-INFINITY)" : "INFINITY", fp);
     return;
   }
-  char const *fmt = (dt == DT_FP32) ? (signbit(f) ? "(%af)" : "%af")
-                                    : (signbit(f) ? "(%.17g)" : "%.17g");
-  fprintf(fp, fmt, (double)f);
+  if (dt == DT_FP32) {
+    fprintf(fp, signbit(f) ? "(%af)" : "%af", (double)f);
+    return;
+  }
+  char lit[32];
+  snprintf(lit, sizeof lit, "%.17g", (double)f);
+  char const *frac = (ctx->target == LZ_TGT_C && strpbrk(lit, ".e") == NULL) ? ".0" : "";
+  fprintf(fp, signbit(f) ? "(%s%s)" : "%s%s", lit, frac);
 }
 
 static void lz_emit_const(Term t, LzCtx *ctx, FILE *fp) {

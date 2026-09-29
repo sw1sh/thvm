@@ -622,14 +622,21 @@ static void rmu_emit_term(Term t, FILE *fp) {
         // 25-26): INFINITY / NAN (math.h on C, metal_stdlib on Metal;
         // nvrtc has no NAN, and the CUDA prologue defines INFINITY).  A
         // negative literal is parenthesized so a NEG in front of it
-        // cannot form `--`.
+        // cannot form `--`.  C reads an integral spelling such as `-0` as
+        // an int, which drops the sign of zero, so the C target keeps
+        // every literal a floating constant, as tinygrad's str(float)
+        // spells it (renderer/cstyle.py:37).
         f32 fv; memcpy(&fv, &bits, sizeof(fv));
         if (isnan(fv)) {
           fputs(RMU_TARGET == CG_TARGET_CUDA ? "__int_as_float(0x7fffffff)" : "NAN", fp);
         } else if (isinf(fv)) {
           fputs(fv < 0.0f ? "(-INFINITY)" : "INFINITY", fp);
         } else {
-          fprintf(fp, signbit(fv) ? "(%.17g)" : "%.17g", (double)fv);
+          char lit[32];
+          snprintf(lit, sizeof lit, "%.17g", (double)fv);
+          char const *frac = (RMU_TARGET == CG_TARGET_C && strpbrk(lit, ".e") == NULL)
+                           ? ".0" : "";
+          fprintf(fp, signbit(fv) ? "(%s%s)" : "%s%s", lit, frac);
         }
       } else {
         fprintf(fp, "%d", (int)bits);
