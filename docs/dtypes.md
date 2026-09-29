@@ -51,6 +51,18 @@ logical shape via `TTensorShape[]`.
 Native lanes -- f32, f64, the integer family.  The kernel reads /
 writes the dtype's storage directly and runs typed arithmetic.
 
+The CPU UOp walker
+([src/backend/cpu/uop_walk.c](../src/backend/cpu/uop_walk.c)) has a
+float evaluator, in f64, and an int one, in i64.  It walks each
+subterm in the evaluator the subterm's own dtype picks, as the C the
+renderer emits types it.  A comparison compares in its operands'
+dtype: an i64 past 2^53 exactly, a u64 unsigned, and an index (RANGE
+or I-op arithmetic) as an int.  An IWHERE condition is true when
+nonzero in its own dtype.  An int kernel whose body is float-typed
+(py's int32 true division builds one) computes that body in float and
+converts it as C converts `acc = acc + v` or `out[i] = v`, so the walker
+agrees with the CPU JIT.
+
 Promote-to-f32 lanes -- f16, bf16, fp8e4m3, fp8e5m2.  No native ALU
 on the CPU.  The CPU JIT declines any kernel with a buffer of these
 dtypes (`cpu_jit_narrow_float` in
@@ -145,10 +157,12 @@ creation and readback.
 ## CAST and BITCAST
 
 CAST is value-preserving across any dtype pair.  Heap layout
-`[src, NUM(dst_dtype)]`.  Implementation: the kernel reads the source
-value (the walker widens it to f64 or i64) and stores it at the
-destination dtype, so an fp8 destination takes the store rule above.
-A CAST of a float CONST folds on the host (below).
+`[src, NUM(dst_dtype)]`.  Implementation: the kernel converts the
+source value as a C cast does, so a float truncates toward zero into
+an int, an int wraps into a narrower int, and a cast to bool is
+`!= 0`.  The walker evaluates the source in its own dtype (f64 or i64)
+first.  An fp8 destination takes the store rule above.  A CAST of a
+float CONST folds on the host (below).
 
 BITCAST is bit-level reinterpret; source and destination must share
 itemsize.  Implementation is a memcpy.  Width mismatch is caught at
@@ -270,4 +284,7 @@ truncation and CAST / BITCAST folding; `tests/test_fp8_nonfinite.c`
 covers fp8 inf / NaN encoding on the host, at realized kernel stores
 and in realized constant fills, and the MAX reduce identity of the
 fp8, f32, int and bool dtypes; `tests/test_int_reduce_exact.c` covers
-int and bool SUM / MAX past 2^24 and 2^53 on the CPU routes.
+int and bool SUM / MAX past 2^24 and 2^53 on the CPU routes;
+`tests/test_uop_walk_domain.c` covers the walker's evaluator choice
+for comparisons, IWHERE conditions, CASTs and float bodies in int
+kernels.

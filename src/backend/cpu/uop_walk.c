@@ -19,11 +19,17 @@
 // Default-ON; THVM_CPU_UOP_WALK=0 retained for bisection but the
 // only remaining downstream fallback is cpu_jit_dispatch.
 //
-// LIMITATIONS: f32 only for the float ALU evaluator; integer values
-// are evaluated as i64. Mixed-dtype kernels (CAST chains) are
-// supported via per-leaf dtype reads/writes; intermediate ALU
-// computations promote to double / i64.  An int or bool REDUCE
+// Each subterm walks in the evaluator its own dtype picks
+// (uwalk_term_dtype), as the rendered C types it: a float in doubles, an
+// int or bool in i64, a comparison in its operands' dtype (a u64
+// unsigned).  A CAST converts across, and an int kernel with a float body
+// converts that body's value as C does.  An int or bool REDUCE
 // accumulates exactly in its dtype (uwalk_run_reduce).
+//
+// LIMITATIONS: float ALU results stay doubles, not rounded to f32 per op;
+// int ALU results stay i64, wrapped to a narrower dtype only by a CAST, a
+// REDUCE or the store, so a u32 or i32 sum that overflows its width feeds
+// a comparison unwrapped.
 
 #define UWALK_MAX_RANGES   16
 #define UWALK_MAX_REDUCES  64
@@ -110,6 +116,9 @@ typedef struct {
   Term  out_term;
   void *out_ptr;
   u32   out_dtype;
+  // 1 while the current store writes an int or bool buffer from a float
+  // value, which converts as the rendered C store `out[i] = v` does.
+  int   store_from_float;
   // Kid (index into KERNELS[]) of the currently-walking entry, used
   // only for THVM_TRACE_UOP_WALK_DECLINE telemetry. Set by
   // cpu_uop_walk before any uwalk_emit_* helper runs.
@@ -278,48 +287,122 @@ static double   uwalk_eval_float(UWalkCtx *c, Term t);
 static i64      uwalk_eval_int  (UWalkCtx *c, Term t);
 static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red);
 
-// Decide whether to evaluate a term as float vs int. Floats: ADD/MUL/
-// CMPLT/CMPEQ/NEG/RECIP/EXP2/LOG2/SQRT/REDUCE/INDEX_E (depending on
-// buffer dtype)/CAST(to_float)/BITCAST(to_float)/CONST(float_dtype).
-// Ints: RANGE/IADD/.../IWHERE/INVALID/CONST(int_dtype)/CAST(to_int).
-static int uwalk_term_is_int(UWalkCtx *c, Term t) {
-  if (term_tag(t) == TAG_NUM) return 1;
-  if (term_tag(t) != TAG_UOP) return 1;
-  u32 op = term_ext(t);
-  u64 loc = term_val(t);
-  switch (op) {
-    case UOP_RANGE:
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
-    case UOP_IDIV: case UOP_IMOD: case UOP_ILT: case UOP_IAND:
-    case UOP_IOR: case UOP_IXOR: case UOP_ISHR:
-    case UOP_IWHERE: case UOP_INVALID:
-      return 1;
-    case UOP_CONST: {
-      u32 dt = term_ext(heap_read(loc));
-      return !uwalk_dtype_is_float(dt);
-    }
-    case UOP_CAST: case UOP_BITCAST: {
-      u32 dst = term_val(heap_read(loc + 1));
-      return !uwalk_dtype_is_float(dst);
-    }
-    case UOP_INDEX_E: {
-      Term buf = heap_read(loc + 0);
-      void *bp; u32 bdt;
-      if (uwalk_resolve_buf(c, buf, &bp, &bdt)) {
-        return !uwalk_dtype_is_float(bdt);
-      }
-      return 0;
-    }
-    case UOP_REDUCE:
-    case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2: case UOP_SQRT:
-      return 0;
-    case UOP_OPT:
-      return uwalk_term_is_int(c, heap_read(loc + 0));
-    default:
-      return 0;
+// v as a value of int or bool dtype `dt`: its low bits, sign-extended
+// when dt is signed.  A bool is v != 0.
+static i64 uwalk_int_wrap(u32 dt, i64 v) {
+  if (dtype_is_bool(dt)) {
+    return v != 0;
   }
+  u32 bits = dtype_info(dt)->bits;
+  if (bits >= 64) {
+    return v;
+  }
+  u64 mask = ((u64)1 << bits) - 1;
+  u64 u    = (u64)v & mask;
+  if (dtype_is_signed(dt) && ((u >> (bits - 1)) & 1)) {
+    u |= ~mask;
+  }
+  return (i64)u;
+}
+
+// Int or bool value v of dtype `dt` as a double; a u64 is unsigned.
+static double uwalk_int_to_f64(u32 dt, i64 v) {
+  return (dt == DT_UINT64) ? (double)(u64)v : (double)v;
+}
+
+// f converted to int or bool dtype `dt` as a C cast converts it: toward
+// zero, then wrapped to the dtype; a bool is f != 0.  Where C leaves the
+// conversion undefined, NaN is 0 and a value past the i64 range (the u64
+// range for a u64) saturates first.
+static i64 uwalk_f64_to_int(u32 dt, double f) {
+  if (dtype_is_bool(dt)) {
+    return f != 0.0;
+  }
+  if (f != f) {
+    return 0;
+  }
+  if (dt == DT_UINT64 && f >= 9223372036854775808.0) {
+    return (f >= 18446744073709551616.0) ? (i64)UINT64_MAX : (i64)(u64)f;
+  }
+  if (f >= 9223372036854775808.0) {
+    return uwalk_int_wrap(dt, INT64_MAX);
+  }
+  if (f < -9223372036854775808.0) {
+    return uwalk_int_wrap(dt, INT64_MIN);
+  }
+  return uwalk_int_wrap(dt, (i64)f);
+}
+
+// 1 iff `red` reduces an int or bool dtype, written to *dt.
+static int uwalk_reduce_int_dtype(Term red, u32 *dt) {
+  u32 d = DT_FP32;
+  (void)term_dtype_in(red, 0, &d);
+  if (!dtype_is_bool(d) && !(dtype_is_int(d) && !dtype_is_packed(d))) {
+    return 0;
+  }
+  *dt = d;
+  return 1;
+}
+
+// The dtype C's usual arithmetic conversions give an op over dtypes a and
+// b, as far as the evaluators tell them apart: a float wins, then a u64;
+// any other int pair computes exactly in the i64 evaluator.
+static u32 uwalk_dtype_promote(u32 a, u32 b) {
+  if (uwalk_dtype_is_float(a)) {
+    return a;
+  }
+  if (uwalk_dtype_is_float(b) || b == DT_UINT64) {
+    return b;
+  }
+  return a;
+}
+
+// The dtype of the value `t` evaluates to, which picks the evaluator its
+// consumer walks it with.  It follows the C the renderer emits for `t`:
+// index arithmetic (RANGE, the I-ops, INVALID) is an int and a comparison
+// an int 0 or 1; a load, CONST, CAST or REDUCE has its own dtype; RECIP,
+// EXP2, LOG2 and SQRT give a float; ADD, MUL, NEG and an IWHERE's branches
+// take their operands' dtype, the float or u64 one when they mix.
+static u32 uwalk_term_dtype(UWalkCtx *c, Term t) {
+  if (term_tag(t) != TAG_UOP) {
+    return DT_INT64;
+  }
+  u64 loc = term_val(t);
+  switch (term_ext(t)) {
+    case UOP_CONST:
+      return term_ext(heap_read(loc));
+    case UOP_CAST: case UOP_BITCAST:
+      return (u32)term_val(heap_read(loc + 1));
+    case UOP_INDEX_E: {
+      void *bp;
+      u32   bdt;
+      return uwalk_resolve_buf(c, heap_read(loc), &bp, &bdt) ? bdt : DT_FP32;
+    }
+    case UOP_REDUCE: {
+      u32 dt = DT_FP32;
+      return uwalk_reduce_int_dtype(t, &dt) ? dt : DT_FP32;
+    }
+    case UOP_CMPLT: case UOP_CMPEQ: case UOP_ILT:
+      return DT_BOOL;
+    case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: {
+      u32 d = uwalk_term_dtype(c, heap_read(loc));
+      return uwalk_dtype_is_float(d) ? d : DT_FP32;
+    }
+    case UOP_NEG: case UOP_OPT:
+      return uwalk_term_dtype(c, heap_read(loc));
+    case UOP_ADD: case UOP_MUL:
+      return uwalk_dtype_promote(uwalk_term_dtype(c, heap_read(loc)),
+                                 uwalk_term_dtype(c, heap_read(loc + 1)));
+    case UOP_IWHERE:
+      return uwalk_dtype_promote(uwalk_term_dtype(c, heap_read(loc + 1)),
+                                 uwalk_term_dtype(c, heap_read(loc + 2)));
+    default:
+      return DT_INT64;
+  }
+}
+
+static int uwalk_term_is_float(UWalkCtx *c, Term t) {
+  return uwalk_dtype_is_float(uwalk_term_dtype(c, t));
 }
 
 // Look up a hoisted reduce accumulator by REDUCE term identity.
@@ -438,25 +521,33 @@ static UWalkRed uwalk_reduce_value(UWalkCtx *c, Term t) {
   return v;
 }
 
-// Truth of an IWHERE condition, walked in its own domain.  The cond may be
-// an integer predicate (index-layer ILT/IAND/PAD bounds) OR a float
-// comparison mask (value-layer WHERE, e.g. relu's CMPLT producing
-// 0.0/1.0).  The int evaluator doesn't handle CMPLT/CMPEQ over floats, so
-// a float cond walked as int truncates its operands.
-static int uwalk_cond_truth(UWalkCtx *c, Term cterm) {
-  Term cr = term_resolve(cterm);
-  int int_cond = 0;
-  if (term_tag(cr) == TAG_UOP) {
-    u8 cop = term_ext(cr);
-    int_cond = (cop == UOP_ILT  || cop == UOP_IAND || cop == UOP_IADD
-             || cop == UOP_IOR  || cop == UOP_IXOR || cop == UOP_ISHR
-             || cop == UOP_ISUB || cop == UOP_IMUL || cop == UOP_IDIV
-             || cop == UOP_IMOD || cop == UOP_IWHERE
-             || cop == UOP_INVALID || cop == UOP_RANGE
-             || cop == UOP_INDEX_E);
+// a < b (CMPLT) or a == b (CMPEQ) in the operands' dtype, as the rendered
+// C compares them: in doubles when either is a float, else in the int
+// evaluator, unsigned when either is a u64.  A double holds an int exactly
+// only below 2^53, and the float evaluator has no index ops.
+static int uwalk_compare(UWalkCtx *c, u32 op, Term a, Term b) {
+  u32 da = uwalk_term_dtype(c, a);
+  u32 db = uwalk_term_dtype(c, b);
+  if (uwalk_dtype_is_float(da) || uwalk_dtype_is_float(db)) {
+    double x = uwalk_eval_float(c, a);
+    double y = uwalk_eval_float(c, b);
+    return (op == UOP_CMPLT) ? (x < y) : (x == y);
   }
-  return int_cond ? (uwalk_eval_int(c, cterm) != 0)
-                  : (uwalk_eval_float(c, cterm) != 0.0);
+  i64 x = uwalk_eval_int(c, a);
+  i64 y = uwalk_eval_int(c, b);
+  if (op == UOP_CMPEQ) {
+    return x == y;
+  }
+  return (da == DT_UINT64 || db == DT_UINT64) ? ((u64)x < (u64)y) : (x < y);
+}
+
+// Truth of an IWHERE condition in its own dtype: an index predicate or a
+// comparison is an int 0 or 1, and a float mask is true when nonzero.
+static int uwalk_cond_truth(UWalkCtx *c, Term cterm) {
+  if (uwalk_term_is_float(c, cterm)) {
+    return uwalk_eval_float(c, cterm) != 0.0;
+  }
+  return uwalk_eval_int(c, cterm) != 0;
 }
 
 static double uwalk_eval_float(UWalkCtx *c, Term t) {
@@ -501,16 +592,8 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       double b = uwalk_eval_float(c, heap_read(loc + 1));
       return a * b;
     }
-    case UOP_CMPLT: {
-      double a = uwalk_eval_float(c, heap_read(loc + 0));
-      double b = uwalk_eval_float(c, heap_read(loc + 1));
-      return (a < b) ? 1.0 : 0.0;
-    }
-    case UOP_CMPEQ: {
-      double a = uwalk_eval_float(c, heap_read(loc + 0));
-      double b = uwalk_eval_float(c, heap_read(loc + 1));
-      return (a == b) ? 1.0 : 0.0;
-    }
+    case UOP_CMPLT: case UOP_CMPEQ:
+      return uwalk_compare(c, op, heap_read(loc + 0), heap_read(loc + 1));
     case UOP_NEG:  return -uwalk_eval_float(c, heap_read(loc + 0));
     case UOP_RECIP:{
       double a = uwalk_eval_float(c, heap_read(loc + 0));
@@ -522,8 +605,14 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
     case UOP_CAST: {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
-      if (uwalk_dtype_is_float(dst)) return uwalk_eval_float(c, src);
-      return (double)uwalk_eval_int(c, src);
+      if (!uwalk_dtype_is_float(dst)) {
+        return uwalk_int_to_f64(dst, uwalk_eval_int(c, t));
+      }
+      u32 sdt = uwalk_term_dtype(c, src);
+      if (uwalk_dtype_is_float(sdt)) {
+        return uwalk_eval_float(c, src);
+      }
+      return uwalk_int_to_f64(sdt, uwalk_eval_int(c, src));
     }
     case UOP_BITCAST: {
       Term src = heap_read(loc + 0);
@@ -552,6 +641,11 @@ static double uwalk_eval_float(UWalkCtx *c, Term t) {
       return uwalk_reduce_value(c, t).f;
     case UOP_OPT:
       return uwalk_eval_float(c, heap_read(loc + 0));
+    case UOP_RANGE:
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
+    case UOP_IXOR: case UOP_ISHR:
+      return (double)uwalk_eval_int(c, t);
     case UOP_INVALID:
       return 0.0;
     default:
@@ -623,8 +717,13 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
     case UOP_CAST: {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
-      if (uwalk_dtype_is_float(dst)) return (i64)uwalk_eval_float(c, src);
-      return uwalk_eval_int(c, src);
+      if (uwalk_dtype_is_float(dst)) {
+        return uwalk_f64_to_int(DT_INT64, uwalk_eval_float(c, t));
+      }
+      if (uwalk_term_is_float(c, src)) {
+        return uwalk_f64_to_int(dst, uwalk_eval_float(c, src));
+      }
+      return uwalk_int_wrap(dst, uwalk_eval_int(c, src));
     }
     case UOP_BITCAST: {
       Term src = heap_read(loc + 0);
@@ -636,7 +735,9 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
         // through a double and lose the original bits when the value
         // can't be represented exactly in f32, or even when it CAN --
         // 1.0_u32 becomes (f32)1.0 whose bit pattern is 0x3F800000.
-        if (uwalk_term_is_int(c, src)) return uwalk_eval_int(c, src);
+        if (!uwalk_term_is_float(c, src)) {
+          return uwalk_eval_int(c, src);
+        }
         double f = uwalk_eval_float(c, src);
         union { u32 b; f32 f; } pun;
         pun.f = (f32)f;
@@ -668,11 +769,10 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       UWalkRed r = uwalk_reduce_value(c, t);
       return r.is_int ? r.i : (i64)r.f;
     }
-    // UOP_ADD / MUL / CMPLT / CMPEQ / NEG over integer-typed operands.
-    // The high-level WL Plus / Times / etc. emit these generic ALU ops
-    // regardless of element type; for integer tensors the store-side
-    // dtype dispatch routes here.  Mirror the float branch's semantics
-    // but stay in integer arithmetic to preserve wrap / unsigned bits.
+    // UOP_ADD / MUL / NEG over integer-typed operands.  The high-level WL
+    // Plus / Times / etc. emit these generic ALU ops regardless of element
+    // type; an int value (uwalk_term_dtype) walks here and stays in integer
+    // arithmetic to preserve wrap / unsigned bits.
     case UOP_ADD:
       return uwalk_eval_int(c, heap_read(loc + 0))
            + uwalk_eval_int(c, heap_read(loc + 1));
@@ -681,12 +781,8 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
            * uwalk_eval_int(c, heap_read(loc + 1));
     case UOP_NEG:
       return -uwalk_eval_int(c, heap_read(loc + 0));
-    case UOP_CMPLT:
-      return (uwalk_eval_int(c, heap_read(loc + 0))
-            < uwalk_eval_int(c, heap_read(loc + 1))) ? 1 : 0;
-    case UOP_CMPEQ:
-      return (uwalk_eval_int(c, heap_read(loc + 0))
-           == uwalk_eval_int(c, heap_read(loc + 1))) ? 1 : 0;
+    case UOP_CMPLT: case UOP_CMPEQ:
+      return uwalk_compare(c, op, heap_read(loc + 0), heap_read(loc + 1));
     default:
       return 0;
   }
@@ -929,41 +1025,12 @@ static void uwalk_split_axes_init(UWalkCtx *c, Term store_addr, Term value) {
   }
 }
 
-// v as a value of int or bool dtype `dt`: its low bits, sign-extended
-// when dt is signed.  A bool is v != 0.
-static i64 uwalk_int_wrap(u32 dt, i64 v) {
-  if (dtype_is_bool(dt)) {
-    return v != 0;
-  }
-  u32 bits = dtype_info(dt)->bits;
-  if (bits >= 64) {
-    return v;
-  }
-  u64 mask = ((u64)1 << bits) - 1;
-  u64 u    = (u64)v & mask;
-  if (dtype_is_signed(dt) && ((u >> (bits - 1)) & 1)) {
-    u |= ~mask;
-  }
-  return (i64)u;
-}
-
 static UWalkRed uwalk_int_red(u32 dt, i64 v) {
   UWalkRed r;
   r.i      = v;
-  r.f      = (dt == DT_UINT64) ? (double)(u64)v : (double)v;
+  r.f      = uwalk_int_to_f64(dt, v);
   r.is_int = 1;
   return r;
-}
-
-// 1 iff `red` reduces an int or bool dtype, written to *dt.
-static int uwalk_reduce_int_dtype(Term red, u32 *dt) {
-  u32 d = DT_FP32;
-  (void)term_dtype_in(red, 0, &d);
-  if (!dtype_is_bool(d) && !(dtype_is_int(d) && !dtype_is_packed(d))) {
-    return 0;
-  }
-  *dt = d;
-  return 1;
 }
 
 // tinygrad's identity_element (uop/ops.py:61): 0 for SUM, dt.min for MAX,
@@ -996,6 +1063,16 @@ static i64 uwalk_int_combine(u32 kind, u32 dt, i64 acc, i64 v) {
     return ((u64)acc < (u64)v) ? v : acc;
   }
   return (acc < v) ? v : acc;
+}
+
+// acc <kind> v for a float body value v of an int or bool reduce, as the
+// rendered C combines it: `acc = acc + v` adds in float and converts the
+// sum back, while a MAX converts v into the dtype before it compares.
+static i64 uwalk_int_combine_f64(u32 kind, u32 dt, i64 acc, double v) {
+  if (kind == REDUCE_SUM && !dtype_is_bool(dt)) {
+    return uwalk_f64_to_int(dt, uwalk_int_to_f64(dt, acc) + v);
+  }
+  return uwalk_int_combine(kind, dt, acc, uwalk_f64_to_int(dt, v));
 }
 
 // Advance the reduce odometer over the n axes pushed at slot0 (innermost
@@ -1126,9 +1203,14 @@ static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
   c->n_ranges += chain_len;
   // Iterate the full Cartesian product of axes via odometer.
   if (is_int) {
-    i64 acc = identity.i;
+    int body_float = uwalk_term_is_float(c, body);
+    i64 acc        = identity.i;
     do {
-      acc = uwalk_int_combine(kind, dt, acc, uwalk_eval_int(c, body));
+      if (body_float) {
+        acc = uwalk_int_combine_f64(kind, dt, acc, uwalk_eval_float(c, body));
+      } else {
+        acc = uwalk_int_combine(kind, dt, acc, uwalk_eval_int(c, body));
+      }
     } while (uwalk_odometer_next(c, slot0, extents, chain_len));
     c->n_ranges -= chain_len;
     return uwalk_int_red(dt, acc);
@@ -1222,6 +1304,9 @@ static void uwalk_loop_and_store(UWalkCtx *c,
     if (uwalk_dtype_is_float(out_dt)) {
       double v = uwalk_eval_float(c, store_value);
       uwalk_store_f64(out_p, addr_v, out_dt, v);
+    } else if (c->store_from_float) {
+      i64 v = uwalk_f64_to_int(out_dt, uwalk_eval_float(c, store_value));
+      uwalk_store_i64(out_p, addr_v, out_dt, v);
     } else {
       i64 v = uwalk_eval_int(c, store_value);
       uwalk_store_i64(out_p, addr_v, out_dt, v);
@@ -1365,6 +1450,8 @@ static int uwalk_emit_store(UWalkCtx *c, Term store) {
     uwalk_reduce_snapshot_save(c, idx);
   }
   // Run nested for-loops over out_ranges.
+  c->store_from_float = !uwalk_dtype_is_float(out_dt)
+                     && uwalk_term_is_float(c, value_term);
   uwalk_loop_and_store(c, out_ranges, range_extents, range_slots,
                        n_out, 0,
                        store_buf, store_addr, value_term,

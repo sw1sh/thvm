@@ -290,6 +290,8 @@ TESTS := \
   $(BIN)/test_cpu_free_list \
   $(BIN)/test_cpu_jit_warmup \
   $(BIN)/test_cpu_jit_via_uop \
+  $(BIN)/test_uop_walk_domain \
+  $(BIN)/test_int_reduce_exact \
   $(BIN)/test_slot_reuse \
   $(BIN)/test_heap_rooted_preserve \
   $(BIN)/test_heap_recovery \

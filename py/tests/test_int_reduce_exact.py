@@ -15,6 +15,11 @@ reference.  The 37-wide rows are not unrolled, so hand_opts UPCASTs their
 output axis into parallel accumulators.  When tinygrad is importable it must
 agree with the reference too.
 
+An int32 true division stays int32 in thvm (tinygrad promotes it to float), so
+`(a / b).sum()` reduces a float body into an int accumulator.  The rendered C
+adds each quotient in float and truncates the sum back into the accumulator,
+and a store truncates the quotient; the walker must compute the same values.
+
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_int_reduce_exact.py -q
 """
 import os
@@ -52,6 +57,34 @@ def _cases():
 
 CASES = _cases()
 
+_A = np.array([[-7, 5, 7, 8], [7, 9, 11, 13], [100, -3, 17, 2], [1, 2, 3, 4]])
+_B = np.array([[2, 2, 2, 4], [2, 2, 2, 4], [8, 2, 4, 2], [4, 4, 4, 4]])
+FLOAT_BODY_CASES = ["div-sum", "div", "sqrt-sum"]
+
+
+def run_float_body(name):
+    """thvm's int32 result for an int reduce or store of a float body."""
+    a, b = Tensor(_A.astype(np.int32)), Tensor(_B.astype(np.int32))
+    if name == "div-sum":
+        return (a / b).sum(axis=1).numpy()
+    if name == "div":
+        return (a / b).numpy()
+    return Tensor(np.abs(_A).astype(np.int32)).sqrt().sum(axis=1).numpy()
+
+
+def float_body_reference(name):
+    """`acc = acc + v` per element, truncated toward zero, as the C runs it."""
+    if name == "div":
+        return np.trunc(_A / _B).astype(np.int32)
+    rows = _A / _B if name == "div-sum" else np.sqrt(np.abs(_A))
+    out = []
+    for row in rows:
+        acc = 0
+        for v in row:
+            acc = int(acc + v)
+        out.append(acc)
+    return np.array(out, dtype=np.int32)
+
 
 def reference(arr, op, axis):
     a = arr.astype(np.int64)
@@ -75,6 +108,11 @@ for name, arr, op, axis in t.CASES:
     want = t.reference(arr, op, axis)
     ok = got.dtype == np.int32 and got.shape == want.shape and bool((got == want).all())
     print(f"CASE {name} ok={ok} got={got.tolist()} want={want.tolist()}", flush=True)
+for name in t.FLOAT_BODY_CASES:
+    got = np.asarray(t.run_float_body(name))
+    want = t.float_body_reference(name)
+    ok = got.dtype == np.int32 and got.shape == want.shape and bool((got == want).all())
+    print(f"CASE {name} ok={ok} got={got.tolist()} want={want.tolist()}", flush=True)
 """
 
 
@@ -90,7 +128,7 @@ def _run_child(extra_env):
 class TestIntReduceExact(unittest.TestCase):
     def _check_child(self, out):
         lines = [l for l in out.stdout.splitlines() if l.startswith("CASE ")]
-        self.assertEqual(len(lines), len(CASES),
+        self.assertEqual(len(lines), len(CASES) + len(FLOAT_BODY_CASES),
                          f"child failed:\n{out.stdout}\n{out.stderr[-4000:]}")
         bad = [l for l in lines if "ok=False" in l]
         self.assertEqual(bad, [], "an int32 reduce is not exact")
