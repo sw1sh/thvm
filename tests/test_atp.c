@@ -6930,6 +6930,66 @@ int main(void) {
     CHECK(prec[LAB_e] > prec[LAB_a]);
   }
 
+  TEST_BEGIN("atp/otter-raw-stash-and-select");
+  {
+    // --otter-raw keeps each pushed critical pair's raw overlap beside
+    // its treated queue pair, and the selection hands that raw pair to
+    // the pop normalize.  Off, no stash is ever allocated.
+    for (u8 raw = 0; raw <= 1u; raw++) {
+      AtpState *s = thvm_atp_init(&DUMMY_CFG, 64);
+      thvm_atp_set_use_mixmost_nf(s, 1u);
+      thvm_atp_set_use_otter(s, 1u);
+      thvm_atp_set_use_otter_raw(s, raw);
+      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
+      thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                            mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+      for (u32 k = 0; k < 4u; k++) {
+        if (thvm_atp_step(s) != ATP_RUNNING) break;
+      }
+      if (!raw) {
+        CHECK(s->cp_raw == NULL);
+        thvm_atp_free(s);
+        continue;
+      }
+      u32 n_raw = 0u, n_diff = 0u;
+      u32  seq[256];
+      Term rl[256], rr[256];
+      for (u32 r = 0; r < s->n_cps; r++) {
+        if (s->cp_raw == NULL || s->cp_raw[r] == NULL ||
+            s->cp_packed[r] == NULL) {
+          continue;
+        }
+        Term al, ar, pl, pr;
+        acp_unpack(s->cp_raw[r], &al, &ar);
+        acp_unpack(s->cp_packed[r], &pl, &pr);
+        if (!kbo_eq(al, pl) || !kbo_eq(ar, pr)) n_diff++;
+        if (n_raw < 256u) {
+          seq[n_raw] = s->cp_seq[r];
+          rl[n_raw]  = al;
+          rr[n_raw]  = ar;
+        }
+        n_raw++;
+      }
+      CHECK(n_raw > 0u);    // pushed pairs carry their raw overlap
+      CHECK(n_diff > 0u);   // ... which the push-time treatment rewrote
+      u8 checked = 0u;
+      for (u32 k = 0; k < 64u && !checked && s->n_cps > 0u; k++) {
+        Term l = 0, r = 0;
+        if (!thvm_atp_select_cp(s, &l, &r)) break;
+        for (u32 q = 0; q < n_raw && q < 256u; q++) {
+          if (seq[q] != s->last_popped_seq) continue;
+          CHECK(kbo_eq(l, rl[q]));
+          CHECK(kbo_eq(r, rr[q]));
+          checked = 1u;
+          break;
+        }
+      }
+      CHECK(checked);       // a raw-carrying pair was selected as raw
+      thvm_atp_free(s);
+    }
+  }
+
   thvm_free();
   TEST_REPORT();
 }

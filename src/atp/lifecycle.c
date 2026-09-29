@@ -443,10 +443,15 @@ fn void thvm_atp_free(AtpState *s) {
     for (u32 i = 0; i < s->cp_cap; i++) free(s->cp_packed[i]);
     free(s->cp_packed);
   }
-  // Simpler-join pop-peak stash: same per-slot ownership as cp_packed.
+  // Simpler-join pop-peak and raw-overlap stashes: same per-slot
+  // ownership as cp_packed.
   if (s->cp_peak != NULL) {
     for (u32 i = 0; i < s->cp_cap; i++) free(s->cp_peak[i]);
     free(s->cp_peak);
+  }
+  if (s->cp_raw != NULL) {
+    for (u32 i = 0; i < s->cp_cap; i++) free(s->cp_raw[i]);
+    free(s->cp_raw);
   }
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
   // A leftover pop-decoded peak span lived in this state's Arena A
@@ -455,6 +460,7 @@ fn void thvm_atp_free(AtpState *s) {
   g_pop_sj_peak_owner = NULL;
 #endif
   atp_sj_peak_pending_drop();
+  atp_cp_raw_pending_drop();
   free(s->cp_trace);
   free(s->cp_kind);
   free(s->cp_pri);

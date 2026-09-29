@@ -217,6 +217,39 @@ static u8 vcp_treat_joinable(AtpState *s) {
 }
 #endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
+// Raw-overlap stash for the CP about to be queued (use_otter_raw): the
+// pair's bytes BEFORE the push-time treatment, armed for the heap
+// insert.  Nothing is stored where the queued pair already is the raw
+// pair (the untreated class, the FT-direct emit route) or on a pack
+// anomaly; the slot then normalizes from its queued pair.
+static void atp_cp_raw_pend(AtpState *s, Term raw_lhs, Term raw_rhs,
+                            u8 raw_untreated) {
+  atp_cp_raw_pending_drop();
+  if (raw_untreated) return;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (g_vcp_emit.armed) return;
+  if (g_vcp_treat.armed) {
+    // The treated FT-direct route keeps its raw pair as formation
+    // operands; the trace store may already have emitted the bytes.
+    u32 n = g_vcp_treat.raw_len;
+    if (n == 0u) n = vcp_ft_treat_emit_raw(s);
+    if (n == 0u) return;
+    u8 *b = (u8 *)malloc(n);
+    if (b == NULL) thvm_fatal("atp_cp_raw_pend: OOM");
+    memcpy(b, g_acp_scratch, n);
+    g_cp_raw_pending = b;
+    return;
+  }
+#endif
+  if (raw_lhs == 0 || raw_rhs == 0 ||
+      term_tag(raw_lhs) == TAG_NUM || term_tag(raw_rhs) == TAG_NUM) {
+    return;
+  }
+  Term l = raw_lhs, r = raw_rhs;
+  thvm_normalize_vars(&l, &r);
+  g_cp_raw_pending = acp_pack(l, r, NULL, NULL);
+}
+
 static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 ncps, u32 parent_a, u32 parent_b,
                                u32 rule_a, u32 rule_b) {
@@ -829,6 +862,9 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     }
 #endif
     if (!deferred) {
+      if (s->use_otter_raw) {
+        atp_cp_raw_pend(s, raw_lhs, raw_rhs, raw_untreated);
+      }
 #ifdef THVM_ATPFT_ALLOC
       i64 _hb = ftnet_now();
 #endif
@@ -839,6 +875,7 @@ static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
     }
     g_cp_push_fused = 0u;
     atp_sj_peak_pending_drop();   // consumed by the insert; defensive
+    atp_cp_raw_pending_drop();
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
     // Hijack-owned stash (ifeq-strip): free un-adopted spans + disarm.
     // A CPQ insert NULLed fl/fr on adopt; the packed-byte queue leaves

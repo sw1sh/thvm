@@ -1590,8 +1590,8 @@ fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
   // The slot now holds packed bytes -- drop any deferred-CP tag so the
   // `cp_is_implicit[i] <=> cp_packed[i] == NULL` invariant holds, and
   // retire any raw-desc descriptor (the bytes are being replaced) plus
-  // any simpler-join peak stash (external content, no overlap backing).
-  atp_cp_peak_clear(s, row);
+  // any peak / raw-overlap stash (external content, no overlap backing).
+  atp_cp_stash_clear(s, row);
   atp_cp_implicit_clear(s, row);
   if (s->cp_implicit != NULL) {
     s->cp_implicit[row].out_face = ATP_RDESC_NONE;

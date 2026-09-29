@@ -885,6 +885,18 @@ static void atp_ensure_cp_cap(AtpState *s, u32 need) {
     memset(s->cp_peak + s->cp_cap, 0,
            (size_t)(cap - s->cp_cap) * sizeof(u8 *));
   }
+  // Raw-overlap stash: the same lazy growth (NULL unless use_otter_raw).
+  if (s->cp_raw != NULL) {
+    u8 **nrw = (u8 **)realloc(s->cp_raw, cap * sizeof(u8 *));
+    if (nrw == NULL) {
+      fprintf(stderr, "atp_ensure_cp_cap: realloc cp_raw to %u failed\n",
+              cap);
+      exit(1);
+    }
+    s->cp_raw = nrw;
+    memset(s->cp_raw + s->cp_cap, 0,
+           (size_t)(cap - s->cp_cap) * sizeof(u8 *));
+  }
   // Lazy-grow cp_ultimate only when the flag is on; engine byte-
   // identical when off (zero overhead).
   if (s->use_initial_ultimate) {

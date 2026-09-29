@@ -126,7 +126,7 @@ static void atp_cp_swap(AtpState *s, u32 i, u32 j) {
 static inline void atp_cp_row_move(AtpState *s, u32 dst, u32 src) {
   s->cp_packed[dst] = s->cp_packed[src];
   s->cp_packed[src] = NULL;           // vacated row: leave it empty
-  atp_cp_peak_move(s, dst, src);      // sj pop-peak stash rides along
+  atp_cp_stash_move(s, dst, src);     // peak / raw stashes ride along
   s->cp_trace[dst]  = s->cp_trace[src];
   s->cp_kind[dst]   = s->cp_kind[src];
   s->cp_pri[dst]    = s->cp_pri[src];
@@ -536,7 +536,7 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
   // -- CPQ mode-8 adoption, skip-pack -- would read it against a
   // different var space; they degrade peakless instead).  Consume-once
   // either way so a dropped pending can never leak onto a later CP.
-  atp_cp_peak_clear(s, i);   // backstop, mirrors the implicit clear
+  atp_cp_stash_clear(s, i);  // backstop, mirrors the implicit clear
   if (g_sj_peak_pending != NULL) {
     if (packed != NULL) {
       atp_cp_peak_arrays_ensure(s);
@@ -545,6 +545,12 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
     } else {
       atp_sj_peak_pending_drop();
     }
+  }
+  // Raw-overlap stash: self-contained bytes, attached to any slot.
+  if (g_cp_raw_pending != NULL) {
+    atp_cp_raw_arrays_ensure(s);
+    s->cp_raw[i] = g_cp_raw_pending;
+    g_cp_raw_pending = NULL;
   }
   s->cp_trace[i] = trace;
   s->cp_kind[i]  = kind;
@@ -1216,7 +1222,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
   // the packed node is stamped pre-sift, after all key writes).
   s->cp_pos[i]  = i;
   s->cp_packed[i] = NULL;          // deferred slot marker
-  atp_cp_peak_clear(s, i);         // backstop: no peak backs a descriptor
+  atp_cp_stash_clear(s, i);        // backstop: no stash backs a descriptor
   s->cp_trace[i]  = cp_trace_id;
   s->cp_kind[i]   = g_cp_push_kind;
   s->cp_last_norm_r_revision[i] = ATP_CP_NORM_COOKIE_NONE;
@@ -1561,7 +1567,7 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
     if (s->use_otter) atp_otter_popkill(s, s->cp_seq[vv]);
     free(s->cp_packed[vv]);
     s->cp_packed[vv] = NULL;
-    atp_cp_peak_clear(s, vv);
+    atp_cp_stash_clear(s, vv);
     atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
     atp_cp_ft_clear(s, vv);
@@ -1990,7 +1996,13 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     // free-on-pop -- is the eager code path bit-for-bit.  Orphan pops
     // never materialize (the whole point of the descriptor).
     atp_cp_rdesc_pop_fix(s, v);
-    atp_cp_slot_read(s, v, lhs_out, rhs_out);
+    // --otter-raw: the popped CP is its raw overlap; the pop normalize
+    // derives its current form from there (the start its passive
+    // demodulator was normalized from).
+    const u8 *raw_b = (s->use_otter_raw && !s->record_norm_steps &&
+                       s->cp_raw != NULL) ? s->cp_raw[v] : NULL;
+    if (raw_b != NULL) acp_unpack(raw_b, lhs_out, rhs_out);
+    else               atp_cp_slot_read(s, v, lhs_out, rhs_out);
     // ifeq guard-DECIDING telemetry: did the CP the main loop actually
     // picked decide a live guard (see atp_ifeq_decide_hit)?  Counts
     // distinct SELECTIONS, complementing g_ifeq_decide_n_hit's scoring-
@@ -2010,7 +2022,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     if (s->use_mixmost_nf && !s->record_norm_steps &&
         !atp_cp_slot_implicit(s, v) && s->cp_packed[v] != NULL) {
       AtpFt *pa = (AtpFt *)s->ft_arena_ptr;
-      const u8 *pp = s->cp_packed[v];
+      const u8 *pp = (raw_b != NULL) ? raw_b : s->cp_packed[v];
       g_pop_ft_l = acp_unpack_term_ft(pa, &pp, 0);
       g_pop_ft_r = acp_unpack_term_ft(pa, &pp, 0);
     }
@@ -2024,6 +2036,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     // a step that exited before the sj site is dropped first.
     atp_pop_sj_peak_drop(s);
     if (s->use_simpler_join != 0u && !s->record_norm_steps &&
+        raw_b == NULL &&   // the peak shares the queued pair's var space
         s->cp_peak != NULL && s->cp_peak[v] != NULL &&
         s->cp_packed[v] != NULL) {
       const u8 *pk = s->cp_peak[v];
@@ -2162,7 +2175,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
 #endif
   free(s->cp_packed[v]);
   s->cp_packed[v] = NULL;
-  atp_cp_peak_clear(s, v);   // peak bytes decoded above (or orphan drop)
+  atp_cp_stash_clear(s, v);  // stash bytes decoded above (or orphan drop)
   atp_cp_implicit_clear(s, v);
 #ifdef THVM_ATPFT_CPQ
   // Stage 7: the popped row's FT spans return to Arena A's free list

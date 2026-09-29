@@ -239,6 +239,15 @@ for the per-commit story.
   LADR's symbol order) proves RNG130-1.  RNG028-8 and RNG029-5/029-6/
   029-7 were proved only by the search `--proof` used to change; with
   proof runs taking the no-proof search they are open again.
+- `--otter-raw` (with `--otter`): the passive-demodulator replay and the
+  selection normalize start from each critical pair's raw overlap, kept
+  beside its push-time treated queue pair, instead of from the treated
+  pair.  Vampire demodulates the generating inference's conclusion
+  itself, once, against the simplification set as it grows during the
+  batch, and activates the retained clause as it stands; normalizing the
+  treated pair again hid the raw overlap from the batch's own passive
+  rules.  This is the half of the old `--proof` search (its treatment
+  recorder read the raw pair off the trace) that proved RNG029-5/029-7.
 - Prover9's clause-weight penalties (`--nest-penalty` / `--depth-penalty`)
   now weigh every critical pair: the FT-treated push route, which forms
   almost all of them, scored its pairs without the penalty.  With them on,

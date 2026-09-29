@@ -1122,34 +1122,57 @@ static u8 g_cp_push_fused = 0u;
 // replay recorded engine steps).
 static u8 *g_sj_peak_pending = NULL;   // consume-once: armed by the push
                                        // loop, attached by insert_packed
+// Raw-overlap stash (AtpState.cp_raw, use_otter_raw): the same
+// consume-once handoff for the CP's raw pair bytes.
+static u8 *g_cp_raw_pending = NULL;
 
-// Storage management -- compiled unconditionally (the array stays NULL
-// and every helper is a single-branch no-op unless a pack site under
-// the FT defines ever arms a pending peak).
+// Storage management for the per-slot byte stashes (cp_peak, cp_raw)
+// -- compiled unconditionally (the arrays stay NULL and every helper is
+// a single-branch no-op unless a pack site ever arms a pending stash).
 static void atp_cp_peak_arrays_ensure(AtpState *s) {
   if (s->cp_peak != NULL) return;
   u32 cap = s->cp_cap ? s->cp_cap : 1u;
   s->cp_peak = (u8 **)calloc((size_t)cap, sizeof(u8 *));
   if (s->cp_peak == NULL) thvm_fatal("atp_cp_peak_arrays_ensure: OOM");
 }
-static inline void atp_cp_peak_clear(AtpState *s, u32 i) {
+static void atp_cp_raw_arrays_ensure(AtpState *s) {
+  if (s->cp_raw != NULL) return;
+  u32 cap = s->cp_cap ? s->cp_cap : 1u;
+  s->cp_raw = (u8 **)calloc((size_t)cap, sizeof(u8 *));
+  if (s->cp_raw == NULL) thvm_fatal("atp_cp_raw_arrays_ensure: OOM");
+}
+static inline void atp_cp_stash_clear(AtpState *s, u32 i) {
   if (s->cp_peak != NULL && s->cp_peak[i] != NULL) {
     free(s->cp_peak[i]);
     s->cp_peak[i] = NULL;
+  }
+  if (s->cp_raw != NULL && s->cp_raw[i] != NULL) {
+    free(s->cp_raw[i]);
+    s->cp_raw[i] = NULL;
   }
 }
 // Move dst <- src, vacating src (row backfill / densify companion).
 // dst is being overwritten wholesale, so any bytes still there are
 // dead -- free them (free(NULL) no-op) rather than leak.
-static inline void atp_cp_peak_move(AtpState *s, u32 dst, u32 src) {
-  if (s->cp_peak == NULL) return;
-  free(s->cp_peak[dst]);
-  s->cp_peak[dst] = s->cp_peak[src];
-  s->cp_peak[src] = NULL;
+static inline void atp_cp_stash_move(AtpState *s, u32 dst, u32 src) {
+  if (s->cp_peak != NULL) {
+    free(s->cp_peak[dst]);
+    s->cp_peak[dst] = s->cp_peak[src];
+    s->cp_peak[src] = NULL;
+  }
+  if (s->cp_raw != NULL) {
+    free(s->cp_raw[dst]);
+    s->cp_raw[dst] = s->cp_raw[src];
+    s->cp_raw[src] = NULL;
+  }
 }
 static void atp_sj_peak_pending_drop(void) {
   free(g_sj_peak_pending);
   g_sj_peak_pending = NULL;
+}
+static void atp_cp_raw_pending_drop(void) {
+  free(g_cp_raw_pending);
+  g_cp_raw_pending = NULL;
 }
 
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)

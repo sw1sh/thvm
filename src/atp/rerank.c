@@ -950,6 +950,13 @@ fn void thvm_atp_set_use_otter(AtpState *s, u8 on) {
   s->otter_primed = 0u;
 }
 
+// Raw-overlap demodulation (src/atp/otter.c).  Set before the first
+// step: only CPs pushed while it is on carry a raw stash.
+fn void thvm_atp_set_use_otter_raw(AtpState *s, u8 on) {
+  if (s == NULL) return;
+  s->use_otter_raw = on ? 1u : 0u;
+}
+
 fn void thvm_atp_set_use_bd_preordered(AtpState *s, u8 on) {
   if (s == NULL) return;
   s->use_bd_preordered = on ? 1u : 0u;

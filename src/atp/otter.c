@@ -37,6 +37,19 @@
 // Passive status is keyed by rule uid, which rides every slot
 // compaction; the CP -> passive link is a seq -> uid map.
 //
+// Raw overlap (--otter-raw).  Vampire demodulates a generated clause
+// once, from the generating inference's conclusion, in the unprocessed
+// loop (SaturationAlgorithm.cpp:1186-1212 at v5.0.1: forwardSimplify
+// rewrites one step against the simplification set as it stands, the
+// replacement re-enters the FIFO, so clauses retained earlier in the
+// batch already demodulate it), and activates the retained clause as
+// it stands.  thvm treats a CP at push against R, and the replay then
+// normalizes that treated pair again: the batch's own passive rules
+// never see the raw overlap.  With use_otter_raw each queued CP keeps
+// its raw pair (cp_raw); the replay and the selection normalize start
+// from it, so a selected CP re-derives the form its passive rule was
+// adopted from.  The queue weight stays the treated pair's.
+//
 // Scope: the batch overlap former (atp_gen_one).  The WM single-walk
 // former (use_emission_order) and the IC former do not consult passive
 // status, so the layer stays inert under them.  Deferred raw-descriptor
@@ -247,7 +260,11 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
     fr = atp_rules_only_normalize_ft_record(s, ft_from_term(a, raw_r, 0),
                                             64u, nl, 1u, &chain);
   } else {
-    const u8 *pp = s->cp_packed[row];
+    // --otter-raw: normalize the raw overlap (cp_raw), not the
+    // push-treated pair.
+    const u8 *pp = (s->use_otter_raw && s->cp_raw != NULL &&
+                    s->cp_raw[row] != NULL) ? s->cp_raw[row]
+                                            : s->cp_packed[row];
     fl = atp_rules_only_normalize_ft(s, acp_unpack_term_ft(a, &pp, 0), 64u);
     fr = atp_rules_only_normalize_ft(s, acp_unpack_term_ft(a, &pp, 0), 64u);
   }

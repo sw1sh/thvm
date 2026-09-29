@@ -5213,6 +5213,13 @@ typedef struct {
   // pop re-check to the peakless step1+2 verdict (the pre-stash
   // behaviour, documented in ft_norm.c).
   u8           **cp_peak;         // sized cp_cap, only when allocated
+  // Raw-overlap stash (use_otter_raw): per-slot packed byte string of
+  // the CP's RAW superposition pair, before the push-time treatment.
+  // The Otter replay and the selection normalize start from it.  NULL
+  // slot = the queued pair is already raw (the untreated >= 50 class,
+  // requeued interreduction victims, input equations).  Lazily
+  // allocated; lifetime mirrors cp_packed (atp_cp_stash_clear/_move).
+  u8           **cp_raw;          // sized cp_cap, only when allocated
 
   // Raw-descriptor lane (`use_raw_desc`) face-pair intern table: the
   // walk former's (lo, ro) span pairs, deduplicated so a descriptor
@@ -5597,6 +5604,11 @@ typedef struct {
   // step (armed by otter_rec) for the post-batch replay.  Default OFF:
   // nothing below is touched and the engine is byte-identical.
   u8   use_otter;
+  // Raw-overlap demodulation (THVM_ATP_OTTER_RAW, --otter-raw; see
+  // src/atp/otter.c): the Otter replay and the selection normalize
+  // start from each CP's raw overlap (cp_raw) instead of its push-time
+  // treated pair.  Default OFF: the engine is byte-identical.
+  u8   use_otter_raw;
   // Vampire bd=preordered (THVM_ATP_BD_PREORDERED): interreduction
   // (backward demodulation of R) only by rules the ordering orients --
   // an unorientable new equation simplifies nothing.  Default OFF.
@@ -7614,6 +7626,9 @@ fn void      thvm_atp_set_use_lrs(AtpState *s, u8 on);
 // queued CPs act as passive demodulators before they are selected.
 // 0 = off (default) -> engine byte-identical.
 fn void      thvm_atp_set_use_otter(AtpState *s, u8 on);
+// Raw-overlap demodulation for the Otter replay and the selection
+// normalize (src/atp/otter.c).  0 = off (default) -> byte-identical.
+fn void      thvm_atp_set_use_otter_raw(AtpState *s, u8 on);
 // Vampire bd=preordered: interreduce only with oriented new rules.
 fn void      thvm_atp_set_use_bd_preordered(AtpState *s, u8 on);
 // Vampire AgeQueue for the age picks (derivation depth, then weight).

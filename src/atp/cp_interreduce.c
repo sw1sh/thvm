@@ -43,7 +43,7 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
       // free(NULL) no-op for deferred slots; their tag bit drops too.
       free(s->cp_packed[vv]);
       s->cp_packed[vv] = NULL;
-      atp_cp_peak_clear(s, vv);
+      atp_cp_stash_clear(s, vv);
       atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
@@ -299,7 +299,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = NULL;
-      atp_cp_peak_clear(s, vv);
+      atp_cp_stash_clear(s, vv);
       atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
@@ -340,7 +340,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = NULL;
-      atp_cp_peak_clear(s, vv);
+      atp_cp_stash_clear(s, vv);
       atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
@@ -499,7 +499,7 @@ static void atp_cp_set_interreduce(AtpState *s) {
       s->n_cp_set_ir_deleted++;
       free(s->cp_packed[vv]);   // free(NULL) no-op for deferred slots
       s->cp_packed[vv] = NULL;
-      atp_cp_peak_clear(s, vv);
+      atp_cp_stash_clear(s, vv);
       atp_cp_implicit_clear(s, vv);
 #ifdef THVM_ATPFT_CPQ
       atp_cp_ft_clear(s, vv);        // keep the FT queue in lockstep
