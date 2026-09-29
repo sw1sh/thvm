@@ -1850,6 +1850,12 @@ fn u32 jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words) {
         row[12] = op->assign_dst_tid;
         row[13] = op->assign_src_tid;
         break;
+      case JIT_OP_GATHER:
+        row[3] = 1;
+        row[4] = op->gather_dst_buf;
+        row[5] = op->gather_src_buf;
+        row[8] = op->gather_view.numel;
+        break;
     }
   }
   return 2 + n * row_width;
@@ -2270,6 +2276,12 @@ static int jit_capture_op_refs_buf(JitCaptureOp const *op,
         }
       }
       return 0;
+    case JIT_OP_GATHER:
+      // A replayable gather re-reads its source every step: sinking a
+      // dispatch it reads into an assign's buffer would leave it replaying
+      // the capture step's bytes.
+      return (Backend *)op->gather_backend == backend
+          && (op->gather_src_buf == buf_id || op->gather_dst_buf == buf_id);
   }
   return 0;
 }
@@ -3352,6 +3364,10 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
       case JIT_OP_ASSIGN:
         jit_capture_retain_tensor_buf(c, op->assign_dst_tid);
         jit_capture_retain_tensor_buf(c, op->assign_src_tid);
+        break;
+      case JIT_OP_GATHER:
+        jit_capture_retain_buf(c, (Backend *)op->gather_backend, op->gather_src_buf);
+        jit_capture_retain_buf(c, (Backend *)op->gather_backend, op->gather_dst_buf);
         break;
     }
   }
