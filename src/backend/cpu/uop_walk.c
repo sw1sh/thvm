@@ -10,7 +10,8 @@
 // UOP_OPT, UOP_CONST, UOP_IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND/IOR/IXOR, UOP_IWHERE,
 // UOP_INVALID, UOP_ADD/MUL/CMPLT/CMPEQ/NEG/RECIP/EXP2/LOG2/SQRT,
 // UOP_CAST, UOP_BITCAST, UOP_REDUCE (SUM/MAX) -- the same set the
-// renderer emits.
+// renderer emits.  An op outside it declines the kernel, with a stderr
+// line, instead of evaluating to 0.
 //
 // Wired into cpu_dispatch_kernel after cpu_blas_dispatch.  The
 // scalar-UOp interpreter fallback (cpu_dispatch_scalar) and the
@@ -33,7 +34,10 @@
 // accumulator is a float (a double for f64) that each combine rounds
 // into; an int or bool one accumulates exactly in its dtype
 // (uwalk_run_reduce).  A comparison compares in its operands' type (a u64
-// unsigned), and a CAST converts as the C emit's `((T)x)` does.
+// unsigned), and a CAST converts as the C emit's `((T)x)` does.  A float
+// subterm the int evaluator meets anyway, such as the operand of an index
+// op, which the C emit casts `(int)(x)`, converts its float result, never
+// its truncated operands.
 //
 // LIMITATIONS: int ALU results stay i64, wrapped to a narrower dtype only
 // by a CAST, a REDUCE or the store, so a u32 or i32 sum that overflows its
@@ -144,6 +148,10 @@ typedef struct {
   // only for THVM_TRACE_UOP_WALK_DECLINE telemetry. Set by
   // cpu_uop_walk before any uwalk_emit_* helper runs.
   u32   kid;
+  // Set by an evaluator that meets an op it has no rule for; the walk
+  // then stops and cpu_uop_walk declines the kernel.
+  u8    bad;
+  u32   bad_op;
 } UWalkCtx;
 
 // Resolve a UOP_BUFFER term to (ptr, dtype). Returns 1 on hit.
@@ -522,6 +530,13 @@ static u32 uwalk_term_dtype(UWalkCtx *c, Term t) {
   return dt;
 }
 
+static void uwalk_mark_bad(UWalkCtx *c, u32 op) {
+  if (!c->bad) {
+    c->bad    = 1;
+    c->bad_op = op;
+  }
+}
+
 // CAST(src, dst) as the C emit converts it, `((T)x)`, and a bool as
 // `(x != 0)`, which is tinygrad's bool(x).  src walks in its own C type
 // (uwalk_term_dtype): a float reaches an int dtype truncated toward zero
@@ -812,6 +827,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
     case UOP_INVALID:
       return 0.0;
     default:
+      uwalk_mark_bad(c, op);
       return 0.0;
   }
 }
@@ -930,21 +946,31 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       UWalkRed r = uwalk_reduce_value(c, t);
       return r.is_int ? r.i : (i64)r.f;
     }
-    // UOP_ADD / MUL / NEG over integer-typed operands.  The high-level WL
-    // Plus / Times / etc. emit these generic ALU ops regardless of element
-    // type; an int value (uwalk_term_dtype) walks here and stays in integer
-    // arithmetic to preserve wrap / unsigned bits.
-    case UOP_ADD:
-      return uwalk_eval_int(c, heap_read(loc + 0))
-           + uwalk_eval_int(c, heap_read(loc + 1));
-    case UOP_MUL:
+    // UOP_ADD / MUL / NEG serve int tensors too (the WL Plus / Times emit
+    // them for every element type).  An int value (uwalk_term_dtype) stays
+    // in integer arithmetic to preserve wrap / unsigned bits; a float one
+    // converts its float result, never its truncated operands.
+    case UOP_ADD: case UOP_MUL: case UOP_NEG: {
+      u32 dt = uwalk_term_dtype(c, t);
+      if (uwalk_dtype_is_float(dt)) {
+        return uwalk_f64_to_int(DT_INT64, uwalk_eval_float(c, t, dt));
+      }
+      if (op == UOP_NEG) {
+        return -uwalk_eval_int(c, heap_read(loc + 0));
+      }
+      if (op == UOP_ADD) {
+        return uwalk_eval_int(c, heap_read(loc + 0))
+             + uwalk_eval_int(c, heap_read(loc + 1));
+      }
       return uwalk_eval_int(c, heap_read(loc + 0))
            * uwalk_eval_int(c, heap_read(loc + 1));
-    case UOP_NEG:
-      return -uwalk_eval_int(c, heap_read(loc + 0));
+    }
     case UOP_CMPLT: case UOP_CMPEQ:
       return uwalk_compare(c, op, heap_read(loc + 0), heap_read(loc + 1));
+    case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT:
+      return uwalk_f64_to_int(DT_INT64, uwalk_eval_float(c, t, uwalk_term_dtype(c, t)));
     default:
+      uwalk_mark_bad(c, op);
       return 0;
   }
 }
@@ -1376,7 +1402,7 @@ static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
       } else {
         acc = uwalk_int_combine(kind, dt, acc, uwalk_eval_int(c, body));
       }
-    } while (uwalk_odometer_next(c, slot0, extents, chain_len));
+    } while (!c->bad && uwalk_odometer_next(c, slot0, extents, chain_len));
     c->n_ranges -= chain_len;
     return uwalk_int_red(dt, acc);
   }
@@ -1390,7 +1416,7 @@ static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
   do {
     double v = uwalk_convert_float(c, body, bdt, sdt);
     acc = uwalk_round(adt, (kind == REDUCE_MAX) ? ((v > acc) ? v : acc) : acc + v);
-  } while (uwalk_odometer_next(c, slot0, extents, chain_len));
+  } while (!c->bad && uwalk_odometer_next(c, slot0, extents, chain_len));
   c->n_ranges -= chain_len;
   UWalkRed r = { acc, 0, 0 };
   return r;
@@ -1447,6 +1473,9 @@ static void uwalk_loop_and_store(UWalkCtx *c,
                                  void *out_p, u32 out_dt,
                                  Term *value_reduces, int *hoistable,
                                  u32 n_reduces) {
+  if (c->bad) {
+    return;
+  }
   if (depth == n_out) {
     // Run all reduces. Hoistable ones were precomputed; non-hoistable
     // ones rerun here per output position (they reference output
@@ -1718,6 +1747,19 @@ static int uwalk_resolve_input_ptr(KernelEntry *ke, u32 slot, u32 buf_id,
   return 0;
 }
 
+// A declined walk leaves the kernel's output unwritten, so an op without a
+// rule is reported whether or not decline tracing is on, once per op.
+static void uwalk_warn_no_rule(u32 kid, u32 op) {
+  static u64 warned = 0;
+  u64 bit = (op < 63) ? (1ULL << op) : (1ULL << 63);
+  if (warned & bit) {
+    return;
+  }
+  warned |= bit;
+  fprintf(stderr, "thvm: CPU UOp walker has no rule for op %u (kernel %u); "
+                  "kernel declined\n", op, kid);
+}
+
 // === Public entry point ===
 //
 // Returns 1 if the walker handled the kernel (output buffer written),
@@ -1799,6 +1841,11 @@ fn int cpu_uop_walk(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       fprintf(stderr, "uop_walk: empty/non-UOP root tag=%u\n",
               (unsigned)term_tag(root));
     }
+  }
+  if (ctx.bad) {
+    uwalk_warn_no_rule(kid, ctx.bad_op);
+    UWALK_DECLINE(kid, "value_op_unsupported", "op=%u", (unsigned)ctx.bad_op);
+    ok = 0;
   }
 done:
   free(ctx.in_terms);

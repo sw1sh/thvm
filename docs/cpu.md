@@ -4,8 +4,8 @@ The directory layout hides a real boundary. `src/backend/cpu/` is one
 layer (runtime dispatch + buffer lifecycle + UOp-DAG walker and JIT),
 and `src/codegen/` is a second, backend-agnostic layer that turns a
 lifted UOp DAG into either C or Metal source text. They meet inside
-`cpu_dispatch_kernel`, which tries BLAS first, then the UOp walker,
-then the clang JIT, then the rangeify scalar-UOp interpreter.
+`cpu_dispatch_kernel`, which tries BLAS first, then the C JIT, then
+the UOp walker.
 
 ## Runtime layer (`src/backend/cpu/`)
 
@@ -51,8 +51,20 @@ Compute paths:
   Reads the cached lift root (`ke->cached_lift.store_root`) and
   evaluates the DAG directly against the input/output buffers,
   mirroring the traversal pattern of `cg_render_uop_kernel_c`
-  without going through clang. Primary CPU compute path for any
-  kernel the lifter accepts.
+  without going through clang. Runs every kernel the JIT declines
+  or has not yet compiled. Each subterm has the C type the legacy C
+  emit gives it (`uwalk_term_dtype`) and is evaluated in that type,
+  as [dtypes.md](dtypes.md) describes: an f32 value is a float that
+  every op rounds to f32, an int term (RANGE, IADD, ILT, ...) in a
+  float context keeps its value, CMPLT/CMPEQ compare in their
+  operands' type (both convert to the wider one when either is a
+  float, so `IAND(ILT, CMPLT)` compares floats; a u64 unsigned), a
+  select condition is true when nonzero in its own type, a CAST
+  converts as C's `((T)x)` does (a CAST to bool is truthiness), a
+  float operand of an index op converts through its float value, as
+  the C emit's `(int)(x)` does, and an int or bool REDUCE accumulates
+  exactly in its dtype. An op the walker has no rule for declines the
+  kernel with a stderr line instead of reading 0.
 - [interpret.c](../src/backend/cpu/interpret.c): holds the
   `cpu_dispatch_kernel` entry point that pre-materializes
   non-contiguous + multi-view inputs into temp buffers before
@@ -81,14 +93,16 @@ through `Backend.dispatch_kernel`. The body lives at the bottom of
 1. Recover `kid = ke - KERNELS` and snapshot `t0 = cg_now_us()`.
 2. `cpu_blas_dispatch(ke, ...)` first. On a non-zero return, record
    the route via `cg_profile_record(kid, blas_kind, ...)` and stop.
-3. If `THVM_CPU_UOP_WALK` is not set to `0`, call
+3. `cpu_jit_dispatch(ke, ...)`. On a 1 return, record
+   `KDISPATCH_JIT` and stop. It declines during warmup
+   (`THVM_CPU_JIT_WARMUP`, default 0 = compile on first fire) and
+   for kernels it cannot render or compile.
+4. If `THVM_CPU_UOP_WALK` is not set to `0`, call
    `cpu_uop_walk(ke, ...)`. On success, record
-   `KDISPATCH_INTERPRETER` and stop. The walker is the primary CPU
-   compute path; the JIT below remains reachable when the walker
-   declines.
-4. `cpu_jit_dispatch(ke, ...)`. On a 1 return, record
-   `KDISPATCH_JIT` and stop.
-5. Otherwise return 0 with `KDISPATCH_INTERPRETER` recorded.
+   `KDISPATCH_INTERPRETER` and stop.
+5. Otherwise record `KDISPATCH_NONE` and return -1:
+   `cpu_dispatch_kernel` counts it (`cpu_dispatch_no_rung_count`)
+   and prints one line naming the walker's decline reason.
 
 Each path writes its elapsed wallclock through `cg_profile_record`
 (see [src/codegen/profile.c](../src/codegen/profile.c)) so per-kid
