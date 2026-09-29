@@ -42,6 +42,9 @@
 //                       'P' records written, pb = flag bits, pri =
 //                       n_rules, uid_a = live queue, aux = trace size
 //                       at the search's end
+//   'F' push features   (THVM_ATP_HISTORY_CPFEAT=1 only) follows its
+//                       'P': seq, then the engine's 14 CP features
+//                       (AtpHxFeatRec); the last 'F' per seq wins
 // 'P'/'S' carry: kind = cp_kind (TRACE_AXIOM/CP/SIMPLIFY), flags, pos_len
 // (overlap position depth, 0xff = none), seq, step (selections so far),
 // trace (the CP's trace id), pa / pb (parent rule trace ids: pa is the
@@ -53,7 +56,12 @@
 // remaining columns there (KBO orientability, three weight modes) need
 // heap Terms that the FT-routed push never materializes, and building
 // them here would allocate on the IC heap -- the engine's own weight is
-// recorded instead (pri).
+// recorded instead (pri).  The 'F' records are the exception, opted
+// into separately: they decode the slot's bytes into transient heap
+// Terms and run thvm_atp_cp_features on them with age = the CP's seq,
+// the vector a push-time learned scorer computes.  The decode is the
+// only IC heap allocation the export makes (no collection runs inside
+// the push loop, and the step-top collection reclaims the cells).
 
 #define ATP_HX_REC_SIZE 64u
 #define ATP_HX_NFEAT    10u
@@ -106,6 +114,16 @@ typedef struct {
 _Static_assert(sizeof(AtpHxRec) == ATP_HX_REC_SIZE, "AtpHxRec must stay 64 bytes");
 
 typedef struct {
+  u8    tag;
+  u8    kind;
+  u8    flags;
+  u8    pad;
+  u32   seq;
+  float feat[ATP_CP_FEATURE_DIM];
+} AtpHxFeatRec;
+_Static_assert(sizeof(AtpHxFeatRec) == ATP_HX_REC_SIZE, "AtpHxFeatRec must stay 64 bytes");
+
+typedef struct {
   FILE           *fp;
   const AtpState *s;
   u32   thresh;
@@ -117,6 +135,7 @@ typedef struct {
   u8    gsym_ready;
   u8    raw_pending;    // raw_untreated flag for the next heap insert
   u8    repacked;       // next reweight follows an in-place repack
+  u8    cpfeat;         // THVM_ATP_HISTORY_CPFEAT: 'F' records
   u32   last_sel_seq;
   u32   n_trace_search;   // trace size when the search ended (0 = unmarked)
   u64   n_rec_push;
@@ -125,8 +144,10 @@ typedef struct {
 
 static AtpHx g_hx;
 
-// Defined in state.c (included after this file).
+// Defined in state.c / cp_store.c (included after this file).
 static int atp_uid_orphan_on(void);
+static int atp_env_on(const char *name);
+static void acp_unpack(const u8 *buf, Term *lhs, Term *rhs);
 
 static inline u8 atp_hx_on(const AtpState *s) {
   return g_hx.fp != NULL && g_hx.s == s;
@@ -414,6 +435,19 @@ static void atp_hx_row(const AtpState *s, AtpHxRec *r, u32 row) {
   atp_hx_parents(s, r, r->trace);
 }
 
+// 'F' record of row `row` (seq already stamped), content `packed`.
+static void atp_hx_cpfeat(const AtpState *s, u32 row, const u8 *packed) {
+  if (!g_hx.cpfeat || packed == NULL) return;
+  Term l = 0, r = 0;
+  acp_unpack(packed, &l, &r);
+  AtpHxFeatRec f;
+  memset(&f, 0, sizeof f);
+  f.tag = 'F';
+  f.seq = s->cp_seq[row];
+  thvm_atp_cp_features(s, l, r, s->cp_seq[row], f.feat);
+  fwrite(&f, ATP_HX_REC_SIZE, 1u, g_hx.fp);
+}
+
 // --- hooks -------------------------------------------------------------
 
 static void atp_hx_open(const AtpState *s) {
@@ -438,6 +472,7 @@ static void atp_hx_open(const AtpState *s) {
   g_hx.s       = s;
   g_hx.thresh  = thresh;
   g_hx.session = session++;
+  g_hx.cpfeat  = atp_env_on("THVM_ATP_HISTORY_CPFEAT") ? 1u : 0u;
   AtpHxRec r;
   atp_hx_rec_init(&r, 'B', s);
   r.seq = g_hx.session;
@@ -478,6 +513,7 @@ static void atp_hx_push(const AtpState *s, u32 row, const u8 *packed,
   r.aux = nodes;
   atp_hx_feat_packed(&r, packed);
   atp_hx_write(&r);
+  atp_hx_cpfeat(s, row, packed);
   g_hx.n_rec_push++;
   atp_work_resume();
 }
@@ -499,6 +535,7 @@ static void atp_hx_restamp_queue(const AtpState *s) {
     if (s->cp_packed[row] == NULL) r.flags |= ATP_HX_F_IMPLICIT;
     atp_hx_feat_packed(&r, s->cp_packed[row]);
     atp_hx_write(&r);
+    atp_hx_cpfeat(s, row, s->cp_packed[row]);
   }
   atp_work_resume();
 }

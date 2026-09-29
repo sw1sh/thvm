@@ -274,6 +274,9 @@ class Problem:
         self.cp_node = remap(self.cp_node)
         self.n_core = int(core.sum())
         self.phi = phi_cp(d)
+        # the engine's 14 push-time CP features ('F' records; phase 0c)
+        self.cpfeat = d["cpfeat"].astype(np.float64) if "cpfeat" in d else None
+        self.has_cpfeat = d["has_cpfeat"].astype(bool) if "has_cpfeat" in d else None
         self.label = d["label"].astype(bool)
         self.in_sample = d["in_sample"].astype(bool)
         self.selected_at = d["selected_at"].astype(np.int64)

@@ -14,7 +14,10 @@
 # Output (.npz): every queued CP the export saw ('P' records; the export
 # rate and a further uniform seq-hash subsample are recorded), every
 # selected CP ('S'), the rule-side DAG ('R'), per-selection seq
-# boundaries, and parent-death events; see save() for the arrays.
+# boundaries, parent-death events, and -- when the run armed
+# THVM_ATP_HISTORY_CPFEAT -- each pushed CP's 14 engine features ('F':
+# thvm_atp_cp_features at push, cpfeat / has_cpfeat); see save() for
+# the arrays.
 #
 # Usage: np0_extract.py <hx.bin> <proof.out> <out.npz> [max_neg=300000]
 #        np0_extract.py --stats <hx.bin>
@@ -30,10 +33,15 @@ REC = np.dtype([
     ("depth", "<u4"), ("aux", "<u4"), ("feat", "<u2", (10,)),
 ])
 assert REC.itemsize == 64
+FREC = np.dtype([
+    ("tag", "u1"), ("kind", "u1"), ("flags", "u1"), ("pad", "u1"),
+    ("seq", "<u4"), ("f", "<f4", (14,)),
+])
+assert FREC.itemsize == 64
 NONE = 0xFFFFFFFF
 TRACE_AXIOM, TRACE_ORIENT, TRACE_CP, TRACE_SIMPLIFY = 1, 2, 3, 4
 TRACE_NORM_STEP, TRACE_FVI = 5, 6
-T = {c: ord(c) for c in "BPSXDKkRWE"}
+T = {c: ord(c) for c in "BPSXDKkRWEF"}
 
 
 def hx_hash(x):
@@ -119,6 +127,10 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
     k = r[r["tag"] == T["k"]]
     R = r[r["tag"] == T["R"]]
     W = r[r["tag"] == T["W"]]
+    F = recs.view(FREC)[b:stop][r["tag"] == T["F"]]
+    if len(F):   # last 'F' per seq wins, as for 'P'
+        _, lastf = np.unique(F["seq"][::-1], return_index=True)
+        F = F[len(F) - 1 - lastf]
     text = open(proof_path, errors="replace").read()
     blk = proof_block(text)
     if blk is None:
@@ -177,6 +189,13 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
         flags[ix] |= src["flags"]
     pri[idx_p] = P["pri"]
     pri_push[idx_p] = P["pri"]
+    cpfeat = np.zeros((n, 14), dtype=np.float32)
+    has_cpfeat = np.zeros(n, bool)
+    if len(F):
+        idx_f = np.searchsorted(seqs, F["seq"].astype(np.int64))
+        okf = (idx_f < n) & (seqs[np.minimum(idx_f, n - 1)] == F["seq"])
+        cpfeat[idx_f[okf]] = F["f"][okf]
+        has_cpfeat[idx_f[okf]] = True
     pri[idx_s] = S["pri"]
     has_push = np.zeros(n, bool); has_push[idx_p] = True
     # push step from the selection boundaries: #{t : bounds_t <= seq}
@@ -249,7 +268,7 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
         bounds=bounds.astype(np.uint32),
         x_kind=X["kind"], x_seq=X["seq"], x_step=X["step"], x_live=X["aux"],
         w_seq=W["seq"], w_step=W["step"], w_pri=W["pri"], w_kind=W["kind"],
-        w_feat=W["feat"],
+        w_feat=W["feat"], cpfeat=cpfeat[keep], has_cpfeat=has_cpfeat[keep],
         meta=np.array([
             rate_p, rate_c, float(len(S)), float(E["trace"]),
             float(n_push_rec), float(len(cited)), float(len(anc)),
@@ -259,7 +278,8 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
     print(f"ok sel={len(S)} pushed={int(E['trace'])} P={n_push_rec} "
           f"kept={int(keep.sum())} rate_p={rate_p:.4g} cited={len(cited)} "
           f"anc={len(anc)} pos={int(label.sum())} "
-          f"cited_unknown={n_cited_unknown} R={len(R)}")
+          f"cited_unknown={n_cited_unknown} R={len(R)} "
+          f"F={int(has_cpfeat[keep].sum())}/{int(keep.sum())}")
     return 0
 
 
