@@ -50,7 +50,13 @@ logical shape via `TTensorShape[]`.
 ## ALU strategy
 
 Native lanes -- f32, f64, the integer family.  The kernel reads /
-writes the dtype's storage directly and runs typed arithmetic.
+writes the dtype's storage directly and runs typed arithmetic.  On the
+CPU JIT an f64 reduce accumulates in a double, as tinygrad allocates
+the accumulator like the reduce (reduce_ranges_to_acc,
+codegen/__init__.py:197-199), and so do the loads and lane-invariant
+values the legacy C emit hoists next to the accumulator.  The legacy C
+emit accumulates an int or bool reduce in a float, which is exact
+below 2^24.
 
 The CPU UOp walker
 ([src/backend/cpu/uop_walk.c](../src/backend/cpu/uop_walk.c)) has a
@@ -232,7 +238,7 @@ a view-only no-op when contiguous-compatible).
 | Path        | Wired dtypes |
 |-------------|--------------|
 | CPU UOp walker (`uop_walk.c`) | all but i4 / u4 |
-| CPU JIT (`jit.c`, any C compiler) | all but f16 / bf16 / fp8 (`cpu_jit_narrow_float`) and i4 / u4 |
+| CPU JIT (`jit.c`, any C compiler) | all but f16 / bf16 / fp8 (`cpu_jit_narrow_float`) and i4 / u4; the legacy C emit accumulates an int or bool reduce in a float |
 | CPU BLAS (Accelerate, OpenBLAS / BLIS) | f32 and f64 matmul / matvec / dot; batched matmul and contractions f32 only |
 | Metal generated MSL | the types `rmu_msl_type_name` maps: f32, f16 (`half`), bf16 (`bfloat`), fp8 (bytes decoded to float), i8 / u8 / i32 / i64 |
 | Metal shader library (DAG encoder) | f32 / i32 (`metal_kernel_supported`) |
@@ -305,4 +311,6 @@ builtin and manual, to exact references (all 65536 decodes; every
 encode in the boundary binades).  `tests/test_assign_dtypes.c` covers
 ASSIGN for every dtype, and `tests/test_cpu_jit_nonfinite.c` checks
 that f64 kernels with inf, NaN and negative constants compile on the
-CPU JIT.
+CPU JIT.  `tests/test_cpu_jit_f64_reduce.c` holds f64 sums and maxes
+to f64 precision in every legacy C emit reduce shape and on the
+realized CPU JIT route.

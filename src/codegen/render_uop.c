@@ -2120,14 +2120,25 @@ static u32 rmu_split_reduce(Term *ranges, u32 *opt_kinds,
 // 1 iff a reduce accumulator or hoisted local of dtype `dt` is held in its
 // own int or bool type.  On the C target it is, as tinygrad allocates the
 // accumulator like the reduce (reduce_ranges_to_acc,
-// codegen/__init__.py:197-204); floats, and the GPU targets, hold float.
+// codegen/__init__.py:197-204).
 static int rmu_holds_int(u32 dt) {
   return RMU_TARGET == CG_TARGET_C
       && (dtype_is_bool(dt) || (dtype_is_int(dt) && !dtype_is_packed(dt)));
 }
 
+// 1 iff it is held in a double: the C target computes an f64 value as a
+// double (rmu_c_type_name), and a float accumulator keeps f32 precision.
+static int rmu_holds_double(u32 dt) {
+  return RMU_TARGET == CG_TARGET_C && dt == DT_FP64;
+}
+
+// Every other float, and every value on the GPU targets (which type an
+// f64 buffer as float), is held in a float.
 static const char *rmu_hold_type(u32 dt) {
-  return rmu_holds_int(dt) ? rmu_c_type_name(dt) : "float";
+  if (rmu_holds_int(dt)) {
+    return rmu_c_type_name(dt);
+  }
+  return rmu_holds_double(dt) ? "double" : "float";
 }
 
 static u32 rmu_dtype_of(Term t) {
@@ -2162,13 +2173,18 @@ static void rmu_emit_reduce_combine(const char *acc_name, u32 kind, u32 dt,
   }
 }
 
-// Emit the init expression of a REDUCE accumulator: tinygrad's
-// identity_element (uop/ops.py:61), 0 for SUM and dt.min for MAX, which is
-// -2^(bits-1) for a signed int, 0 for an unsigned int or bool
-// (dtype.py:70-72), and -INFINITY for a float accumulator.
+// Emit the init expression of a REDUCE accumulator of dtype `dt`:
+// tinygrad's identity_element (uop/ops.py:61), 0 for SUM and dt.min for
+// MAX, which is -2^(bits-1) for a signed int, 0 for an unsigned int or
+// bool (dtype.py:70-72), and -INFINITY for a float accumulator.  A double
+// accumulator starts a SUM from a double literal.
 static void rmu_emit_reduce_init(u32 kind, u32 dt, FILE *fp) {
   if (!rmu_holds_int(dt)) {
-    fputs((kind == REDUCE_MAX) ? "-INFINITY" : "0.0f", fp);
+    if (kind == REDUCE_MAX) {
+      fputs("-INFINITY", fp);
+    } else {
+      fputs(rmu_holds_double(dt) ? "0.0" : "0.0f", fp);
+    }
     return;
   }
   if (kind != REDUCE_MAX || !dtype_is_signed(dt)) {
