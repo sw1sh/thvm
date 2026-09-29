@@ -28,6 +28,12 @@ for the per-commit story.
   multiway and causal graphs.
 
 ### Tensors & Autograd
+- Chain rule through a value select: `IWHERE(c, t, e)` sends the cotangent to
+  the selected branch and none to `c` (tinygrad mixin/gradient.py:81), and the
+  single-walk pre-walk credits only those two slots.  New `uop_where` builds a
+  value select without `uop_iwhere`'s index-layer folds (which turned nested
+  selects into an unschedulable tensor-level IAND); the py tinygrad importer
+  maps WHERE and MAX through it, so imported WHERE graphs are differentiable.
 - `TTensor` + `TUOp` graph (const / unary / binary / reduce / movement / Conv2D).
 - Autograd via `UOP_GRAD`; chain rule through Conv2D, Softmax,
   Pooling, ReLU, Tanh, Reshape, Flatten, ...

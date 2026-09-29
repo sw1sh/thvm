@@ -22,7 +22,10 @@ NotImplementedError on purpose so coverage grows explicitly):
              only appear as srcs of BUFFER/COPY)
   binary     ADD, MUL, MAX, CMPLT, CMPNE, SUB
   unary      RECIPROCAL/RECIP, EXP2, LOG2, SQRT, NEG
-  ternary    WHERE  (cond ? a : b, a true IWHERE select; MAX uses the same)
+  ternary    WHERE  (cond ? a : b, a true IWHERE select built by uop_where,
+             the value-level constructor: no index-layer folds, so nested
+             selects stay selects and the chain rule differentiates them;
+             MAX uses the same)
   reduce     REDUCE in tinygrad's front normal form, arg=(Ops.ADD|Ops.MAX,
              n_front_axes): the reduced axes were PERMUTEd to the front and
              the output drops them (uop/ops.py:635-642, :449-452); the older
@@ -53,13 +56,13 @@ from .thvm import (
     _uop_cast,
     _uop_expand,
     _uop_flip,
-    _uop_iwhere,
     _uop_pad,
     _uop_permute,
     _uop_reduce,
     _uop_reshape,
     _uop_shrink,
     _uop_unary,
+    _uop_where,
 )
 
 import ctypes as _ct
@@ -79,9 +82,9 @@ def _binary(opcode: int, a: int, b: int) -> int:
                            _ct.c_uint64(int(a)), _ct.c_uint64(int(b))))
 
 
-def _iwhere(cond: int, a: int, b: int) -> int:
-    return int(_uop_iwhere(_ct.c_uint64(int(cond)),
-                           _ct.c_uint64(int(a)), _ct.c_uint64(int(b))))
+def _where(cond: int, a: int, b: int) -> int:
+    return int(_uop_where(_ct.c_uint64(int(cond)),
+                          _ct.c_uint64(int(a)), _ct.c_uint64(int(b))))
 
 
 def _unary(opcode: int, src: int) -> int:
@@ -416,12 +419,14 @@ def _emit(u, memo: dict[int, int]) -> int:
     # ---- ternary: WHERE(cond, a, b) -> thvm IWHERE (true select) ------
     # IWHERE renders/realizes as `cond ? a : b`, correct for non-finite
     # branches (tinygrad max_pool2d masks with -inf; an arithmetic select
-    # cond*a+(1-cond)*b would hit 0*-inf=NaN).
+    # cond*a+(1-cond)*b would hit 0*-inf=NaN).  uop_where, not uop_iwhere:
+    # the index-layer folds would merge nested selects into a tensor-level
+    # IAND that materialize cannot schedule or differentiate.
     if op == Ops.WHERE:
         cond = _emit_b(u, 0, memo)
         a = _emit_b(u, 1, memo)
         b = _emit_b(u, 2, memo)
-        term = _iwhere(cond, a, b)
+        term = _where(cond, a, b)
         memo[key] = term
         return term
 
@@ -533,7 +538,7 @@ def _max(a: int, b: int) -> int:
     """max(a,b) = (a<b) ? b : a as a true select, like WHERE: the
     arithmetic form (a<b)*b + (1-(a<b))*a is 0*inf = NaN whenever the
     losing operand is infinite."""
-    return _iwhere(_binary(K.CMPLT, a, b), b, a)
+    return _where(_binary(K.CMPLT, a, b), b, a)
 
 
 # ---- public entry point -------------------------------------------------

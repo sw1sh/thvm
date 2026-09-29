@@ -2428,6 +2428,10 @@ fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IM
 fn Term uop_fast_idiv_rule(Term t, void *user);                  // late: x//c -> (x*m)>>s, x%c -> x-c*(x//c)
 fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
 fn Term uop_invalid  (void);
+// Value-level select (tinygrad Ops.WHERE): the same UOP_IWHERE node, folding
+// only a constant cond or then == else -- none of uop_iwhere's index-layer
+// folds, which would turn nested value selects into tensor-level IAND.
+fn Term uop_where    (Term cond, Term then_v, Term else_v);
 
 // === UOP_BUFFERIZE main-heap allocator ===
 // 1-to-1 port of tinygrad/schedule/indexing.py:77 (`UOp(Ops.BUFFERIZE,

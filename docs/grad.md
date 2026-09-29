@@ -80,13 +80,31 @@ plus an outer combiner. The adjoint table mirrors tinygrad / JAX:
 | `PAD(a, b/e)`     | `SHRINK(gy, [b_i, b_i + a.dim_i])`                                  |
 | `SHRINK(a, b/e)`  | `PAD(gy, [b_i, src.dim_i - e_i])`                                   |
 | `CAST(a, dt)`     | `CAST(gy, a.dtype)` — value-preserving                              |
+| `IWHERE(c, t, e)` | `gy_for_t = where(c, gy, 0)`; `gy_for_e = where(c, 0, gy)`; `c` gets none (tinygrad `mixin/gradient.py:81`) |
 | `CMPLT/CMPEQ`     | non-differentiable; emits scalar zero                               |
 | `BITCAST/CONST/LOAD/ASSIGN` | non-differentiable; cotangent dies                        |
 | `KERNEL(...)`     | `grad_kernel_backprop` (see below)                                  |
 
 The outer combiner for binary ops is `UOP_ADD(BWD_a, BWD_b)`
 (reverse-mode summation of contributions); for unary/movement ops
-it's just `BWD_a`.
+it's just `BWD_a`.  `IWHERE` combines its two value branches the same
+way.
+
+A value select, and the masks the `IWHERE` rule builds, go through
+`uop_where` ([`src/uop/where.c`](../src/uop/where.c)), not
+`uop_iwhere`: `uop_iwhere` runs the index-layer folds, whose
+IWHERE-of-IWHERE collapse turns nested value selects into tensor-level
+`IAND`/`IOR` nodes that materialize cannot schedule.  `uop_where` builds
+the same `UOP_IWHERE` node and folds only a constant condition or equal
+branches.  The py tinygrad importer (`from_tinygrad`) maps `WHERE` (and
+`MAX`, a select on `a < b`) through it.
+
+The requires-grad single walk pre-counts each node's backward arrivals
+before any chain rule fires (`grad_prewalk_fanin`); it credits exactly the
+child slots the rule sends a cotangent to (`grad_op_diff_slot_mask`: every
+arity slot of a differentiable op, none of a sink, and `IWHERE`'s value
+slots but not its condition), so no slot waits for an arrival that never
+comes.
 
 ### TEN-leaf short-circuit
 

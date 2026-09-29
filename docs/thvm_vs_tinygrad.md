@@ -27,7 +27,8 @@
 >   faithful's fused convs miss thvm's Accelerate-BLAS matmul path, so faithful CPU wall
 >   is 238 ms vs tinygrad 15 ms (default 7.36 ms). There are also **no missing autodiff
 >   backward rules** (Tensor ops like maximum/relu decompose to primitives that already
->   have gradients; thvm has no SIN/COS/POW/WHERE *primitives* to differentiate).
+>   have gradients; thvm has no SIN/COS/POW *primitives* to differentiate, and its value
+>   select IWHERE follows tinygrad's WHERE rule).
 
 ---
 
@@ -378,10 +379,14 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 
 - **No missing per-op backward RULES** (corrected). `uop_grad.c` covers every thvm
   primitive (ADD/MUL/NEG/RECIP/SQRT/EXP2/LOG2/REDUCE/RESHAPE/EXPAND/PERMUTE/PAD/SHRINK/
-  FLIP/CAST...). thvm has no SIN/COS/POW/MAX/WHERE *primitive UOPs*; the Tensor ops that
-  exist (`maximum`/`minimum`/`relu`) DECOMPOSE to CMPLT+MUL+ADD, so their gradients flow
-  through the existing rules. SIN/COS/POW/WHERE are absent Tensor *features* (small
-  decomposed adds if a workload needs them), not autodiff gaps.
+  FLIP/CAST..., and the value select IWHERE with tinygrad's WHERE rule,
+  `mixin/gradient.py:81`). thvm has no SIN/COS/POW/MAX *primitive UOPs*; the Tensor ops
+  that exist (`maximum`/`minimum`/`relu`) DECOMPOSE to CMPLT+MUL+ADD, so their gradients
+  flow through the existing rules. SIN/COS/POW are absent Tensor *features* (small
+  decomposed adds if a workload needs them), not autodiff gaps.  Deviation: the py
+  tinygrad importer maps MAX to the select `where(a < b, b, a)`, so an exact tie sends
+  the whole cotangent to `a`, where tinygrad's MAX rule (`mixin/gradient.py:78-79`)
+  splits it 0.5/0.5.
 - **MULTI / AFTER / TUPLE / FUNCTION+grad_fxn** - *large*. No custom grad functions; blocks higher-order grads.
 - **Higher-order gradients (grad of grad)** - *large*. thvm grads are AST Terms, not differentiable Tensors; would need `TENS[tid].grad` rearchitected as a Tensor.
 - **LARS / Muon optimizers** - *medium each*. Only SGD + Adam; Muon aliased to Adam.

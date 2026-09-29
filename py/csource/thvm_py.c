@@ -75,6 +75,11 @@ EXPORT uint64_t py_uop_iwhere(uint64_t cond, uint64_t t, uint64_t e) {
   return uop_iwhere(cond, t, e);
 }
 
+// Value-level select (tensor WHERE): no index-layer folds.
+EXPORT uint64_t py_uop_where(uint64_t cond, uint64_t t, uint64_t e) {
+  return uop_where(cond, t, e);
+}
+
 EXPORT uint64_t py_uop_invalid(void) { return uop_invalid(); }
 
 EXPORT uint64_t py_uop_binary(uint32_t opcode, uint64_t a, uint64_t b) {

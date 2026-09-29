@@ -72,6 +72,7 @@ _uop_range = _bind("py_uop_range", c_uint64, c_uint32, c_uint32, c_uint32)
 _uop_index_e = _bind("py_uop_index_e", c_uint64, c_uint64, c_uint64)
 _uop_int_binary = _bind("py_uop_int_binary", c_uint64, c_uint32, c_uint64, c_uint64)
 _uop_iwhere = _bind("py_uop_iwhere", c_uint64, c_uint64, c_uint64, c_uint64)
+_uop_where = _bind("py_uop_where", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_invalid = _bind("py_uop_invalid", c_uint64)
 _uop_binary = _bind("py_uop_binary", c_uint64, c_uint32, c_uint64, c_uint64)
 _uop_reduce = _bind("py_uop_reduce", c_uint64, c_uint32, c_uint32, c_uint64)
@@ -428,6 +429,12 @@ class Thvm:
         return Term(_uop_iwhere(c_uint64(int(cond)),
                                 c_uint64(int(t)),
                                 c_uint64(int(e))))
+
+    def where(self, cond: Term, t: Term, e: Term) -> Term:
+        """Value-level select: IWHERE without the index-layer folds."""
+        return Term(_uop_where(c_uint64(int(cond)),
+                               c_uint64(int(t)),
+                               c_uint64(int(e))))
 
     def invalid(self) -> Term:
         return Term(_uop_invalid())

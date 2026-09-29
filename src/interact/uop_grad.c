@@ -36,6 +36,8 @@
 //
 //   ADD(a, b)        gy_for_a = gy            ; gy_for_b = gy
 //   MUL(a, b)        gy_for_a = MUL(b_fwd,gy) ; gy_for_b = MUL(a_fwd,gy)
+//   IWHERE(c, t, e)  gy_for_t = where(c, gy, 0) ; gy_for_e = where(c, 0, gy)
+//                    (c gets none)
 //   NEG(a)           gy_for_a = NEG(gy)
 //   RECIP(a)         gy_for_a = MUL(gy, NEG(MUL(RECIP(a), RECIP(a))))
 //   EXP2(a)          gy_for_a = MUL(gy, MUL(EXP2(a), CONST(ln 2)))
@@ -660,10 +662,18 @@ static void grad_prewalk_credit_and_descend(Term child, Term target) {
   grad_prewalk_count(cr);                  // descend through this UOP once
 }
 
-// Credit the BWD-arrival children of a UOP node at (loc, op).  The chain
-// rule's dispatch table descends into uop_arity-many slots for normal ops,
-// into KERNELS[kid].source_uop for UOP_KERNEL, and into no slots for
-// grad_zero_at diff-sinks (CMPLT/CMPEQ/BITCAST/CONST/LOAD/ASSIGN).
+// Bit i set = the chain rule sends a cotangent to child slot i of `op`:
+// every uop_arity slot, except none for a diff sink and none for IWHERE's
+// condition (tinygrad mixin/gradient.py:81 returns None for it).  The
+// pre-walk credits exactly these slots, so its counts match the arrivals.
+static u32 grad_op_diff_slot_mask(u8 op) {
+  if (grad_op_is_diff_sink(op)) return 0;
+  if (op == UOP_IWHERE) return 0x6u;
+  return (1u << uop_arity(op)) - 1u;
+}
+
+// Credit the BWD-arrival children of a UOP node at (loc, op): the slots of
+// grad_op_diff_slot_mask, or KERNELS[kid].source_uop for UOP_KERNEL.
 static void grad_prewalk_descend_children(u8 op, u64 loc, Term target) {
   if (op == UOP_KERNEL) {
     u32 kid = (u32)term_val(heap_read(loc + 1));
@@ -673,10 +683,12 @@ static void grad_prewalk_descend_children(u8 op, u64 loc, Term target) {
     }
     return;
   }
-  if (grad_op_is_diff_sink(op)) return;
-  u8 ar = uop_arity(op);
+  u32 mask = grad_op_diff_slot_mask(op);
+  u8  ar   = uop_arity(op);
   for (u8 i = 0; i < ar; i++) {
-    grad_prewalk_credit_and_descend(heap_read(loc + i), target);
+    if (mask & (1u << i)) {
+      grad_prewalk_credit_and_descend(heap_read(loc + i), target);
+    }
   }
 }
 
@@ -1027,6 +1039,21 @@ static Term interact_grad_dispatch(Term grad_term) {
     // CMPLT/CMPEQ: non-differentiable; cotangent dies.
     case UOP_CMPLT: case UOP_CMPEQ: {
       return grad_zero_at(y);
+    }
+
+    // IWHERE(c, t, e) as a value select (tinygrad mixin/gradient.py:81):
+    // t gets gy where c holds, e gets gy elsewhere, c gets nothing.  The
+    // masks are value selects, so uop_where (no index-layer folds).
+    case UOP_IWHERE: {
+      Term c     = heap_read(y_loc + 0);
+      Term t     = heap_read(y_loc + 1);
+      Term e     = heap_read(y_loc + 2);
+      u64  cc    = grad_cell_alloc(c);
+      Term c_fw  = grad_fwd_inline(cc, c);
+      Term zero  = grad_zero_at(y);
+      Term t_bwd = grad_bwd_for_child(t, uop_where(c_fw, gy, zero));
+      Term e_bwd = grad_bwd_for_child(e, uop_where(c_fw, zero, gy));
+      return uop_binary(UOP_ADD, t_bwd, e_bwd);
     }
 
     // === Elementwise unary ===
