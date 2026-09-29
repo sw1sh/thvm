@@ -150,11 +150,12 @@ for the per-commit story.
   selection.  With Vampire's symbol-precedence port (`--sym-prec`
   schemes + `--spb-prec` goal band) it forms the `otter-lpo` schedule
   lane, which proves the CASC-J13 ring misses RNG027-5/027-7/027-10/
-  028-5/028-7/029-5/029-6/029-7 with verified proofs; the
-  `otter-lpo-cmin` variant (Vampire `sp=const_min` plus Prover9's
-  clause-weight penalties) proves RNG027-8 and RNG028-8, and the
-  Prover9-shaped twin `otter-ladr` (`--sym-prec=ladr`, LADR's symbol
-  order) proves RNG130-1.
+  028-5/028-7 inside 180s on a 16-vCPU pod; the `otter-lpo-cmin` variant
+  (Vampire `sp=const_min` plus Prover9's clause-weight penalties) proves
+  RNG027-8, and the Prover9-shaped twin `otter-ladr` (`--sym-prec=ladr`,
+  LADR's symbol order) proves RNG130-1.  RNG028-8 and RNG029-5/029-6/
+  029-7 were proved only by the search `--proof` used to change; with
+  proof runs taking the no-proof search they are open again.
 - Prover9's clause-weight penalties (`--nest-penalty` / `--depth-penalty`)
   now weigh every critical pair: the FT-treated push route, which forms
   almost all of them, scored its pairs without the penalty.  With them on,
