@@ -27,3 +27,7 @@ H25_include_select_valid.s	VerifiedGood	VALID control: a two-line include() sele
 H26_include_select_missing.s	Unknown	selection names a formula the file lacks: the include is unread (abstain)
 H27_include_nested_valid.s	VerifiedGood	VALID control: a leaf cites a formula a nested include() selects
 H28_include_nested_unselected.s	VerifiedBad	leaf cites a formula the nested include() selection leaves out
+H29_curry_nonhorn.s	Unknown	non-Horn step refuted only through the curried encoding of a 17-ary functor (a finite model cannot host the partial applications)
+H30_curry_horn_valid.s	VerifiedGood	VALID control: a Horn first-order step over a 17-ary functor, confirmed through the encoding
+H31_curry_arity_alias.s	VerifiedBad	one name at arities 17 and 20 is two symbols: the curried heads must not share a name
+H32_curry_quoted_alias.s	Unknown	quoted atoms spelling the encoding's own symbol names are not read

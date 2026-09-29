@@ -11,6 +11,9 @@
 # it rejected.  H21-H28 cover problems that include() axiom files: leaves
 # match the included formulas (nested includes too), never the ones a
 # selection list leaves out, and an include that does not expand abstains.
+# H29-H32 cover functors wider than a term node, read through a curried
+# encoding: a refutation through it confirms only a Horn step, a name at
+# two arities is two symbols, and quoted atoms cannot spell its names.
 # Usage: run.sh [CheckProof]
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=${1:-$HERE/../../../../bin/CheckProof}

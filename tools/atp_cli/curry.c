@@ -9,13 +9,26 @@
 // a left-nested chain of a fresh BINARY symbol ap2:
 //     f(t1,...,tn)  ->  ap2(ap2(...ap2(f, c1), c2)..., cn)
 // where f becomes a 0-arity constant and each ci is the recursively
-// curried argument.  This is a bijective term re-encoding: ap2 is a
-// fresh free binary symbol carrying no equations, so two curried terms
-// are equal (under congruence) iff their heads agree and every argument
-// is equal -- exactly the equality the original n-ary functor induced.
-// Provability is therefore unchanged; only the representation shrinks
-// to arities the reader admits.  A no-op unless some functor exceeds 8,
-// so it never perturbs the byte-exact WM emulation on existing corpora.
+// curried argument (f occurs at one arity only: tp_sym_note_ix exits on
+// a clash, so the constant f names nothing else).  The encoding is
+// injective on terms, but entailment survives it only where a model can
+// host the partial applications ap2(..ap2(f, c1).., ck) as domain
+// elements.  A model of the curried set is a model of the original
+// (read f off the chains); the converse fails for a non-Horn set --
+// X = a | X = b with four distinct binary residuals of f is satisfiable,
+// its curried form is not (tests/soundness/curry_wide*_dc.p).  This
+// pass curries the table AFTER the unit encoding (tp_parse's unit
+// equations, or tp_fof_load's ifeq / or-chain equations) with negative
+// unit goals: a Horn set.  A satisfiable Horn set has a one-element
+// model or, by direct products, an infinite one, which hosts every
+// partial application injectively, so the engine's, the Horn release's
+// and the backward chainer's refutations of the curried table refute
+// the original, and a saturation of it (Satisfiable) is a model of the
+// original.  The lanes that reason over non-Horn clauses -- the clausal
+// pre-pass, the one-element gate and the fof-split detection -- run in
+// tp_fof_load on the uncurried clauses, before this pass.  A no-op
+// unless some functor exceeds 8, so it never perturbs the byte-exact WM
+// emulation on existing corpora.
 #define CURRY_ARITY_CAP 8
 
 // Recursive-descent term rewriter over a clause-side string.  Returns a

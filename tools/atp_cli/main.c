@@ -1148,8 +1148,9 @@ int main(int argc, char **argv) {
       }
       // Wide-functor currying: decompose any n-ary functor (n > 8) into
       // nested binary ap2 applications so the arity-8 term reader can
-      // load it (TOP052's tuple/140).  Sound bijective re-encoding; a
-      // no-op unless a wide functor is present.  THVM_ATP_CURRY=0 keeps
+      // load it (TOP052's tuple/140).  Sound here, on the unit-encoded
+      // (Horn) table, not before it (curry.c); a no-op unless a wide
+      // functor is present.  THVM_ATP_CURRY=0 keeps
       // the old clean give-up.  BEFORE the Horn release: the release
       // snapshots strdup the clause strings they chain over, and a
       // later curry left every emitted hyper-resolution record in the

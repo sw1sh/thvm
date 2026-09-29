@@ -133,6 +133,10 @@ static int  pc_nsyms = 0;
 // Open-addressing index over pc_sym (slot = symbol index + 1, 0 empty).
 #define PC_SYM_HT (1u << 17)
 static int pc_sym_ht[PC_SYM_HT];
+// Wide-functor encoding (pc_curry): on in the checker only, and the
+// label of its application symbol once a formula used it.
+static int pc_curry_on = 0;
+static u32 pc_ap2_lab  = PC_NOT_FOUND;
 
 static u32 pc_strhash(const char *s) {
   u32 h = 2166136261u;
@@ -141,6 +145,7 @@ static u32 pc_strhash(const char *s) {
 }
 static void pc_sym_reset(void) {
   pc_nsyms = 0;
+  pc_ap2_lab = PC_NOT_FOUND;
   memset(pc_sym_ht, 0, sizeof pc_sym_ht);
 }
 // Label of an already-seen name, or PC_NOT_FOUND (never interned).
@@ -297,6 +302,58 @@ static u32 pc_varid(PcParse *p, const char *name) {
 static Term pc_formula(PcParse *p);   // fwd
 static Term pc_unary(PcParse *p);     // fwd
 
+// f(t1, ..., tn) wider than a term node holds (every term walker sizes
+// its child buffer by REWRITE_MAX_ARITY and passes a wider node through
+// unsubstituted) becomes the chain ap2:(...ap2:(wide:f/n, t1)..., tn),
+// in records and problem alike.  The encoding is injective on terms --
+// the arity is in the head's name, and ':' / '/' spell no identifier,
+// the quoted spellings being refused (pc_curry_reserved) -- so every
+// syntactic check reads it exactly.  Entailment differs.  A model of
+// the curried formulas is a model of the originals (read f off the
+// chains), so a countermodel found through the encoding is real.  The
+// converse must host the partial applications as domain elements,
+// injectively, and a finite model can lack the room: X = a | X = b with
+// four distinct binary residuals of a ternary f is satisfiable, its
+// curried form is not.  A satisfiable Horn clause set has a one-element
+// model or, by direct products, an infinite one, which hosts them all:
+// a refutation through the encoding confirms a Horn set only
+// (pc_curry_horn_ok).  Wide predicates are not read.  FindProof's FOF
+// front end keeps its give-up (pc_curry_on is 0 there): its non-Horn
+// lanes run before its own currying, which comes after the unit
+// encoding.
+static int pc_curry_reserved(const char *name) {
+  return strcmp(name, "ap2:") == 0 || strncmp(name, "wide:", 5) == 0;
+}
+static Term pc_curry(PcParse *p, const char *name, const Term *args, u32 n) {
+  char hn[PC_NAME];
+  if (snprintf(hn, sizeof hn, "wide:%s/%u", name, (unsigned)n) >= (int)sizeof hn) {
+    p->ok = 0;
+    return 0;
+  }
+  u32 head = pc_intern(hn), ap = pc_intern("ap2:");
+  if (head == PC_NOT_FOUND || ap == PC_NOT_FOUND) { p->ok = 0; return 0; }
+  pc_ap2_lab = ap;
+  Term t = term_new_ctr(head, NULL, 0);
+  for (u32 i = 0; i < n; i++) {
+    Term kid[2] = { t, args[i] };
+    t = term_new_ctr(ap, kid, 2u);
+  }
+  return t;
+}
+// A declared symbol name the encoding touches: reserved, or read wide
+// somewhere (its checks abstain: the name no longer labels its uses).
+static int pc_curry_name(const char *name) {
+  if (pc_curry_reserved(name)) return 1;
+  if (pc_ap2_lab == PC_NOT_FOUND) return 0;
+  size_t nl = strlen(name);
+  for (int i = 0; i < pc_nsyms; i++) {
+    const char *s = pc_sym[i];
+    if (strncmp(s, "wide:", 5) == 0 && strncmp(s + 5, name, nl) == 0 && s[5 + nl] == '/')
+      return 1;
+  }
+  return 0;
+}
+
 // term := VAR | ident [ '(' term (',' term)* ')' ]
 static Term pc_term(PcParse *p) {
   if (pc_peek(p) == K_VAR) {
@@ -307,18 +364,42 @@ static Term pc_term(PcParse *p) {
   if (pc_peek(p) == K_IDENT || pc_peek(p) == K_STR) {
     char name[PC_NAME];
     snprintf(name, PC_NAME, "%s", pc_cur(p)->text);
+    if (pc_curry_on && pc_peek(p) == K_STR && pc_curry_reserved(name)) {
+      p->ok = 0;
+      return 0;
+    }
     pc_adv(p);
     if (pc_peek(p) == K_LP) {
       pc_adv(p);
       Term kids[REWRITE_MAX_ARITY];
-      u32 n = 0;
+      Term *wide = NULL;   // all arguments, once more than a node holds
+      u32 n = 0, wcap = 0;
       for (;;) {
-        if (n >= REWRITE_MAX_ARITY) { p->ok = 0; return 0; }
-        kids[n++] = pc_term(p);
+        Term a = pc_term(p);
+        if (!p->ok) { free(wide); return 0; }
+        if (wide == NULL && n < REWRITE_MAX_ARITY) {
+          kids[n++] = a;
+        } else {
+          if (!pc_curry_on) { p->ok = 0; return 0; }
+          if (wide == NULL || n == wcap) {
+            u32 cap = wcap ? 2u * wcap : 4u * REWRITE_MAX_ARITY;
+            Term *w = (Term *)realloc(wide, (size_t)cap * sizeof(Term));
+            if (w == NULL) { free(wide); p->ok = 0; return 0; }
+            if (wide == NULL) memcpy(w, kids, (size_t)n * sizeof(Term));
+            wide = w;
+            wcap = cap;
+          }
+          wide[n++] = a;
+        }
         if (pc_peek(p) == K_COMMA) { pc_adv(p); continue; }
         break;
       }
       pc_expect(p, K_RP);
+      if (wide != NULL) {
+        Term t = p->ok ? pc_curry(p, name, wide, n) : 0;
+        free(wide);
+        return t;
+      }
       u32 lab = pc_intern(name);
       if (lab == PC_NOT_FOUND) { p->ok = 0; return 0; }
       return term_new_ctr(lab, kids, n);
@@ -350,6 +431,11 @@ static Term pc_atom(PcParse *p) {
     Term b = pc_term(p);
     Term k[2] = {a, b};
     return fol_mk_not(term_new_ctr(PC_LAB_EQ, k, 2));
+  }
+  if (p->ok && pc_ap2_lab != PC_NOT_FOUND && term_tag(a) == TAG_CTR &&
+      term_ext(a) == pc_ap2_lab) {
+    p->ok = 0;   // a wide predicate: the encoding covers functions only
+    return 0;
   }
   return a;   // predicate atom
 }
@@ -627,6 +713,91 @@ static Term pc_simp_tf(Term f) {
   }
 }
 
+// Most positive literals in one clause of the distributed CNF of f (*p)
+// and of ~f (*n), saturating at 2, in one pass (a nest of equivalences
+// stays linear).  Quantifiers do not move a literal's sign, so these
+// are the counts of the Skolemized clause sets; $true and $false count
+// 0, an upper bound.
+static int pc_horn_max(int a, int b) {
+  return a > b ? a : b;
+}
+static int pc_horn_sum(int a, int b) {
+  return (a + b > 2) ? 2 : a + b;
+}
+static void pc_horn_pn(Term f, int *p, int *n);
+static void pc_horn_kids(Term f, int *xp, int *xn, int *yp, int *yn) {
+  pc_horn_pn(term_ctr_at(f, 0), xp, xn);
+  pc_horn_pn(term_ctr_at(f, 1), yp, yn);
+}
+static void pc_horn_pn(Term f, int *p, int *n) {
+  if (term_tag(f) != TAG_CTR) {
+    *p = 2;
+    *n = 2;
+    return;
+  }
+  int xp, xn, yp, yn;
+  switch (term_ext(f)) {
+    case PC_LAB_NOT:
+      pc_horn_pn(term_ctr_at(f, 0), &xp, &xn);
+      *p = xn;
+      *n = xp;
+      return;
+    case PC_LAB_AND:
+      pc_horn_kids(f, &xp, &xn, &yp, &yn);
+      *p = pc_horn_max(xp, yp);
+      *n = pc_horn_sum(xn, yn);
+      return;
+    case PC_LAB_OR:
+      pc_horn_kids(f, &xp, &xn, &yp, &yn);
+      *p = pc_horn_sum(xp, yp);
+      *n = pc_horn_max(xn, yn);
+      return;
+    case PC_LAB_IMP:
+      pc_horn_kids(f, &xp, &xn, &yp, &yn);
+      *p = pc_horn_sum(xn, yp);
+      *n = pc_horn_max(xp, yn);
+      return;
+    case PC_LAB_IFF:
+      pc_horn_kids(f, &xp, &xn, &yp, &yn);
+      *p = pc_horn_max(pc_horn_sum(xn, yp), pc_horn_sum(xp, yn));
+      *n = pc_horn_max(pc_horn_sum(xp, yp), pc_horn_sum(xn, yn));
+      return;
+    case PC_LAB_ALL:
+    case PC_LAB_EX:
+      pc_horn_pn(term_ctr_at(f, 1), p, n);
+      return;
+    case PC_LAB_TRUE:
+    case PC_LAB_FALSE:
+      *p = 0;
+      *n = 0;
+      return;
+    default:
+      *p = 1;
+      *n = 0;
+      return;
+  }
+}
+
+// May an unsatisfiability shown for pos[0..npos) & ~neg (neg 0: none)
+// confirm anything?  Always, unless the set mentions the wide-functor
+// encoding; then only for a Horn clause set (the note at pc_curry).
+static int pc_curry_horn_ok(const Term *pos, int npos, Term neg) {
+  if (pc_ap2_lab == PC_NOT_FOUND) return 1;
+  int curried = (neg != 0) && pc_has_label(neg, pc_ap2_lab);
+  for (int i = 0; i < npos && !curried; i++) curried = pc_has_label(pos[i], pc_ap2_lab);
+  if (!curried) return 1;
+  int p, n, m = 0;
+  if (neg != 0) {
+    pc_horn_pn(neg, &p, &n);
+    m = n;
+  }
+  for (int i = 0; i < npos && m <= 1; i++) {
+    pc_horn_pn(pos[i], &p, &n);
+    m = pc_horn_max(m, p);
+  }
+  return m <= 1;
+}
+
 static double pc_refute_clock = 0.0;
 static u32    pc_refute_steps = 0;
 
@@ -731,7 +902,11 @@ static AtpStatus pc_refute(Term *fs, int n) {
     conj = (conj == 0) ? c : fol_mk_and(conj, c);
   }
   if (conj == 0) return ATP_QUEUE_EMPTY;         // only $true: satisfiable
+  // Through the wide-functor encoding only a countermodel of a non-Horn
+  // set means anything (pc_curry): its refutation is no verdict.
+  int horn_ok = pc_curry_horn_ok(&conj, 1, 0);
   AtpStatus st = pc_saturate(conj, cap, 0);
+  if (!horn_ok && (st == ATP_PROVED || st == ATP_REFUTED)) return ATP_ABORTED;
   if (st != ATP_QUEUE_EMPTY) return st;
   // The unordered saturation's QUEUE_EMPTY witnesses no model: without
   // an ordering its demodulation rewrites naively -- an equation stated
@@ -746,6 +921,7 @@ static AtpStatus pc_refute(Term *fs, int n) {
   if (cap2 > cap) cap2 = cap;
   if (cap2 < 0.3) return ATP_ABORTED;
   st = pc_saturate(conj, cap2, 1);
+  if (!horn_ok && (st == ATP_PROVED || st == ATP_REFUTED)) return ATP_ABORTED;
   if (st == ATP_PROVED || st == ATP_REFUTED || st == ATP_QUEUE_EMPTY) return st;
   return ATP_ABORTED;
 }
@@ -2386,7 +2562,7 @@ static int pc_fv_within(Term t, const u32 *ok, u32 nok, u8 *bound) {
 static int pc_check_definition(int idx, const char **why) {
   const PcStep *st = &pc_steps[idx];
   (void)why;
-  if (st->n_new_syms != 1) return PC_UNKNOWN;
+  if (st->n_new_syms != 1 || pc_curry_name(st->new_syms[0])) return PC_UNKNOWN;
   u32 L = pc_lookup(st->new_syms[0]);
   if (L == PC_NOT_FOUND) return PC_UNKNOWN;
   Term f = pc_strip_forall(st->formula);
@@ -3236,6 +3412,10 @@ static int pc_check_skolemize(int idx, int specified, const char **why) {
   u32 Ls[PC_MAX_NEWSYMS];
   for (int s = 0; s < nsyms; s++) {
     const char *nm = (st->n_new_syms > 0) ? st->new_syms[s] : st->new_sym;
+    if (pc_curry_name(nm)) {
+      *why = "declared symbol is read through the wide-functor encoding";
+      return PC_UNKNOWN;
+    }
     Ls[s] = pc_lookup(nm);
     // every declared symbol must actually occur in the resulting formula
     if (Ls[s] == PC_NOT_FOUND || !pc_has_label(st->formula, Ls[s])) {
@@ -3441,6 +3621,10 @@ static int pc_check_skolemize_spec(int idx, const char **why) {
   }
   int pidx = st->par[0];
   if (pidx < 0) { *why = "skolemize parent missing"; return PC_UNKNOWN; }
+  if (pc_curry_name(st->new_syms[0])) {
+    *why = "Skolem symbol is read through the wide-functor encoding";
+    return PC_UNKNOWN;
+  }
   // Interned on demand: a vacuous binder's Skolem symbol legitimately
   // occurs in no formula at all (PRV096 eliminates ?[Y] from p(a)).
   u32 L = pc_intern(st->new_syms[0]);
@@ -3471,6 +3655,10 @@ static int pc_check_skolemize_spec(int idx, const char **why) {
     PcSkCand *cd = &pc_skc[c];
     Term T = pc_parse_term_ctx(st->sk_term, cd->scope, cd->nscope, pfree, npfree);
     if (T == 0) { fail = "Skolem term uses a variable not in scope"; continue; }
+    if (pc_ap2_lab != PC_NOT_FOUND && term_tag(T) == TAG_CTR && term_ext(T) == pc_ap2_lab) {
+      *why = "Skolem term is read through the wide-functor encoding";
+      return PC_UNKNOWN;
+    }
     if (term_tag(T) != TAG_CTR || term_ext(T) != L) {
       fail = "Skolem term's head is not the declared symbol";
       continue;
@@ -3662,7 +3850,7 @@ static int pc_check_joint_skolem(int idx, const char **why) {
     int in_par = 0;
     for (int k = 0; k < st->n_parents && !in_par; k++) in_par = pc_step_has(st->par[k], L);
     if (in_par) continue;
-    if (nf >= PC_JSK_MAX) return PC_UNKNOWN;
+    if (nf >= PC_JSK_MAX || pc_curry_reserved(pc_sym[L - PC_LAB_BASE])) return PC_UNKNOWN;
     F[nf++] = L;
   }
   if (nf == 0) return PC_UNKNOWN;
@@ -3897,6 +4085,9 @@ static int pc_atp_call(Term *axioms, int nax, Term conj, int budget_s) {
     if (!pc_strict() || pc_self_path == NULL) return PC_UNKNOWN;
     atp = pc_self_path;
   }
+  // The oracle proves the curried obligation: its Theorem confirms a
+  // Horn set only, its countermodel always (pc_curry).
+  int horn_ok = pc_curry_horn_ok(axioms, nax, conj);
   char *obuf = NULL;
   size_t olen = 0;
   FILE *ms = open_memstream(&obuf, &olen);
@@ -3923,7 +4114,8 @@ static int pc_atp_call(Term *axioms, int nax, Term conj, int budget_s) {
       int c = fgetc(cf);
       fclose(cf);
       free(obuf);
-      return (c == 'V') ? PC_VALID : (c == 'I') ? PC_INVALID : PC_UNKNOWN;
+      if (c == 'V') return horn_ok ? PC_VALID : PC_UNKNOWN;
+      return (c == 'I') ? PC_INVALID : PC_UNKNOWN;
     }
   }
 
@@ -3999,6 +4191,7 @@ static int pc_atp_call(Term *axioms, int nax, Term conj, int budget_s) {
     }
   }
   free(obuf);
+  if (v == PC_VALID && !horn_ok) return PC_UNKNOWN;
   return v;
 }
 
@@ -4220,6 +4413,7 @@ static int proof_check_worker(const char *file, int szs) {
   pc_bad = -1; pc_any_unknown = 0; pc_saw_false = 0; pc_bad_why = "";
   pc_nskipped = 0; pc_dangling = 0; pc_sym_reset();
   pc_fresh_binders = 1;
+  pc_curry_on = 1;
   pc_nprob = 0; pc_prob_state = 0; pc_prob_unparsed = 0;
   pc_prob_directive[0] = '\0';
   const char *verdict;

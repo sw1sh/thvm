@@ -261,6 +261,17 @@ for the per-commit story.
   takes the classic Term routes of critical-pair formation and requeue,
   its own search (COL004-1 narrowq forks at pick 83; COL006-5, COL049-1,
   GRP697-1 too), and nothing needs it since `--proof` stopped arming it.
+- CheckProof reads functors wider than 16 arguments by currying them into
+  a binary application symbol, records and problem alike; every proof of
+  TOP052-1, whose goal is a 144-argument tuple, was Unknown.  A model of
+  the original gives one of the curried form only when it can host the
+  partial applications (a satisfiable Horn set always has such a model),
+  so a refutation through the encoding confirms a Horn step only (a
+  countermodel still refutes any step); the curried heads carry the
+  arity, quoted atoms cannot spell the encoding's names, wide predicates
+  and wide Skolem symbols abstain, and FindProof's FOF front end still
+  gives up on such a functor (its clausal pre-pass would saturate the
+  curried non-Horn set).
 - Vampire Otter-loop simplification set (`--otter`, `src/atp/otter.c`):
   orientable queued critical pairs rewrite as passive rules before
   selection.  With Vampire's symbol-precedence port (`--sym-prec`
