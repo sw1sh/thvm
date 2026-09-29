@@ -11,7 +11,7 @@ UNAME_S := $(shell uname -s)
 LDFLAGS := $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm)
 DEFS    += $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,)
 
-bin/FindProof: tools/thvm_atp_cli.c tools/proof_check.c
+bin/FindProof: tools/thvm_atp_cli.c tools/proof_check.c $(wildcard tools/atp_cli/*.c)
 	@mkdir -p bin
 	$(CC) $(CFLAGS) $(DEFS) -o $@ tools/thvm_atp_cli.c $(LDFLAGS)
 
