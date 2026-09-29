@@ -718,6 +718,8 @@ static u32 atp_trace_push_impl(AtpState *s, u8 proof_only, u32 reason,
   s->n_trace++;
   if (proof_only)
     s->trace_x_bytes += (s->trace_eq_len - eq0) + 2u * sizeof(u64);
+  if (reason == TRACE_ORIENT || reason == TRACE_FVI || reason == TRACE_SIMPLIFY)
+    atp_rj_view(s, idx);
   return idx;
 }
 
@@ -2597,7 +2599,10 @@ fn AtpAddedRange thvm_atp_install_oriented_rule(AtpState *s, Term lhs,
   if (ax_t != ATP_TRACE_NONE) {
     u32 or_t = atp_trace_push(s, TRACE_ORIENT, ax_t, ATP_TRACE_NONE,
                               s->lhs[i], s->rhs[i]);
-    if (or_t != ATP_TRACE_NONE) s->r_trace[i] = or_t;
+    if (or_t != ATP_TRACE_NONE) {
+      s->r_trace[i] = or_t;
+      atp_rj_content(s, i);
+    }
   }
   if (s->use_emission_order) atp_wmo_insert_fact(s, i);
   r.first = idx;

@@ -407,6 +407,9 @@ fn void thvm_atp_free(AtpState *s) {
   free(s->r_rederive_cut);
   free(s->r_gj_status);
   free(s->r_trace_dead);
+  free(s->rj);
+  free(s->rj_x);
+  if (g_rj_sh.owner == s) g_rj_sh.owner = NULL;
 #ifdef THVM_ATPFT_RULES
   // Stage 4: release the parallel pointer arrays + drop the slab pool
   // (one ft_destroy frees every AtpFtCell handed out in this state's

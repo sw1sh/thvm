@@ -608,6 +608,7 @@ lazy_skip_varnorm: ;
   // so this always walks real content.  No-op unless use_ifeq_decide
   // is armed.
   atp_ifeq_guard_register(s, s->lhs[s->n_rules], s->rhs[s->n_rules]);
+  atp_rj_birth(s, s->n_rules);
   s->n_rules++;
   // Env-gated live-rule-set dump (THVM_ATP_DUMP_RULES_AT=N): when the rule
   // count first reaches N, print every live rule so the live set can be diffed
@@ -661,6 +662,7 @@ lazy_skip_varnorm: ;
     for (u32 i = 0; i < new_i; i++) {
       if (s->r_dead[i]) continue;
       if (atp_rule_subsumes_unit(new_lhs, new_rhs, s->lhs[i], s->rhs[i])) {
+        atp_rj_death(s, i);
         s->r_dead_lhs_save[i] = s->lhs[i];   // sentinel rides; save_ft is authoritative
         s->r_dead_rhs_save[i] = s->rhs[i];
         s->lhs[i] = dead_sentinel;
@@ -1920,6 +1922,7 @@ fn AtpStatus thvm_atp_step(AtpState *s) {
 #ifdef THVM_ATPFT_ALLOC
   g_ftnet_step += ftnet_now() - _sb;
 #endif
+  if (atp_rj_check_mode()) atp_rj_verify(s);
   return rv;
 }
 
@@ -2113,6 +2116,8 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   // Otter loop: the selected CP stops being a passive demodulator
   // before its selection-time normalize (else it joins against itself).
   if (s->use_otter) atp_otter_popkill(s, s->last_popped_seq);
+  // The rule set this CP normalizes on: its orient records' view.
+  const u32 rj_pop = s->rj_n;
 
   // 9.3: snapshot the heap before the (potentially heavy) IC-routed
   // rewrite cells are allocated.  When the CP is trivially joined
@@ -2770,6 +2775,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   if (lazy_commit) g_lazy_rule.armed = 1u;
 #endif
   g_ft_region = 5u;
+  s->rj_hold = rj_pop + 1u;
   AtpAddedRange added = thvm_atp_orient_and_add(s, l, r);
   g_ft_region = 0u;
 #ifdef THVM_ATPFT_RULES
@@ -2778,6 +2784,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   g_rule_ft_r = NULL;
 #endif
   if (added.count == 0) {
+    s->rj_hold = 0u;
     ATP_POPV("REFUSED");
     s->step++;
     return ATP_RUNNING;
@@ -2832,7 +2839,9 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     u32  t  = atp_trace_push(s, reason, chain_tail,
                              ATP_TRACE_NONE, rl, rr);
     s->r_trace[rid] = t;
+    atp_rj_content(s, rid);
   }
+  s->rj_hold = 0u;
 
 #ifdef ATP_CP_GROUND_JOIN
   // WM -gj forward fact test at creation (RUndEVerwaltung.c:182-183 /

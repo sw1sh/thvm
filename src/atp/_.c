@@ -109,6 +109,7 @@ static void      cgq_gc_writeback(struct AtpCgq *q, const Term *roots,
 #include "ac.c"
 
 #include "state.c"
+#include "rule_journal.c"
 #include "cp_store.c"
 #include "cp_emit.c"
 #include "fv_index.c"

@@ -102,7 +102,7 @@ into one binary via
 
 | file | lines | responsibility | main entry points |
 |---|---|---|---|
-| `src/atp/_.c` | 30812 | the saturation engine: rule storage, CP queue + selection, interreduction, indexes, memos, goal check, proof trace, GC roots | `thvm_atp_init`, `thvm_atp_add_equation`, `thvm_atp_set_goal`, `thvm_atp_step`, `thvm_atp_free`, the `thvm_atp_set_*` knob setters |
+| `src/atp/_.c` | 30812 | the saturation engine: rule storage, CP queue + selection, interreduction, indexes, memos, goal check, proof trace, rule-set journal (`rule_journal.c`: every rule birth, content and death, for the `--proof` re-derivation), GC roots | `thvm_atp_init`, `thvm_atp_add_equation`, `thvm_atp_set_goal`, `thvm_atp_step`, `thvm_atp_free`, the `thvm_atp_set_*` knob setters |
 | `src/atp/ft.c` | 777 | flatterm (AtpFt) cell representation: constructors, Term converters, equality/hash, pretty-print | `ftnew_var/const/ctr`, `ft_from_term`, `ft_to_term`, `ft_eq`, `ft_hash` |
 | `src/atp/ft_alloc.c` | 425 | flatterm arenas: persistent slab pool + bump-pointer scratch | `ft_alloc_persistent`, `ft_free_span`, `ft_scratch_reset` |
 | `src/atp/ft_match.c` | 405 | flatterm matching + substitution application | `ft_match`, `ft_subst_apply` |

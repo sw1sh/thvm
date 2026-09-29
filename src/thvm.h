@@ -4752,6 +4752,22 @@ fn u8          fol_is_tseitin_aux(u32 label);
 #define TRACE_FVI      6u
 #define ATP_TRACE_NONE 0xFFFFFFFFu
 
+// Rule-set journal event (AtpState.rj; src/atp/rule_journal.c).
+// w = kind << 29 | orient << 28 | rule uid; nt = n_trace when logged.
+//   BIRTH    a slot appended to R (tid unused)
+//   CONTENT  the uid's content is trace record tid, orientation orient
+//   DEATH    the uid left R
+//   VIEW     record nt - 1 was computed on the rule set at position tid
+//   SLICE    an interreduction pass reduces with the tid rules whose
+//            uids start at uid (tid 0: the pass ended)
+typedef struct { u32 w; u32 tid; u32 nt; } AtpRjEv;
+#define ATP_RJ_BIRTH    0u
+#define ATP_RJ_CONTENT  1u
+#define ATP_RJ_DEATH    2u
+#define ATP_RJ_VIEW     3u
+#define ATP_RJ_SLICE    4u
+#define ATP_RJ_UID_MASK 0x0fffffffu
+
 // CTR label for the synthetic `Cp(lhs, rhs)` head used by the FV
 // subsumption index to span both sides of a queued CP in a single
 // term.  Distinct from the TRACE_* labels so a Cp head is never
@@ -5818,6 +5834,20 @@ typedef struct {
   // permanent tail, a non-atom node, a later rebuild): the collector then
   // roots the whole trace instead of the default-cap prefix.
   u8    trace_x_heap;
+  // Rule-set journal (src/atp/rule_journal.c): every birth, content
+  // stamp and death of a rule, in order, plus the rule-set position each
+  // ORIENT / FVI / SIMPLIFY record was computed at.  Always on and the
+  // same with or without --proof; only the proof re-derivation reads it.
+  // Views of records past the default trace cap (proof only) go to
+  // rj_x as (record, position) pairs, their bytes in trace_x_bytes.
+  AtpRjEv *rj;
+  u32   rj_n;
+  u32   rj_cap;
+  u8    rj_lost;          // an allocation failed: the journal is incomplete
+  u32   rj_hold;          // position + 1 the next records were computed at (0: now)
+  u32  *rj_x;
+  u32   rj_x_n;
+  u32   rj_x_cap;
 
   // Off-heap trace-equation store (env THVM_ATP_TRACE_PACK).  The proof
   // DAG's per-step equation (children 2,3 of each trace entry) is the

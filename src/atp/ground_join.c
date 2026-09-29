@@ -2227,6 +2227,7 @@ static void atp_bwd_ground_join_walk(AtpState *s, u32 skip_lo, u32 skip_hi) {
       // is NOT decremented -- matching the bwd-subsume convention (dead slots
       // are skipped via r_dead/sentinel; the count stays an upper bound).
       if (s->use_gj_delete_rule && !s->r_dead[i]) {
+        atp_rj_death(s, i);
         Term dead_sentinel = term_new(0, TAG_FVR, 255u, 0);
         s->r_dead_lhs_save[i] = s->lhs[i];   // sentinel rides; save_ft is authoritative
         s->r_dead_rhs_save[i] = s->rhs[i];

@@ -676,6 +676,7 @@ static void atp_eset_subsume_by_new(AtpState *s, u32 new_i) {
     }
     if (!subsumed)
       continue;
+    atp_rj_death(s, i);
     s->r_dead_lhs_save[i] = s->lhs[i];   // sentinel rides; save_ft is authoritative
     s->r_dead_rhs_save[i] = s->rhs[i];
     // Remove-and-re-derive root-overlap ownership: save the subsuming

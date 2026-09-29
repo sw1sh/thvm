@@ -138,6 +138,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
   // ===============================================================
 #define WM_IR_COMPACT_SLOT(IDX)                                               \
   do {                                                                        \
+    atp_rj_death(s, (IDX));                                                   \
     if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[IDX]);        \
     if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[IDX]);                \
     atp_wmo_defer_or_remove(s, &wd, s->r_uid[IDX]);                           \
@@ -469,6 +470,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
           // @300: r_trace[slot10]=51 collided with uid 51 = WM rule 45,
           // whose or(x,and(x,y)) CP family then never formed).
           s->r_trace[i] = new_t;
+          atp_rj_content(s, i);
           s->n_right_reduced++;
           if (atp_rule_trace_on()) {
             char la[2048], ra[2048];
@@ -654,6 +656,7 @@ static void thvm_atp_interreduce_full(AtpState *s) {
       fprintf(stderr, "  FULL-IR delete (slot %u, joinable): %s = %s\n",
               i, la, ra);
     }
+    atp_rj_death(s, i);
     s->r_dead_lhs_save[i] = old_lhs;   // sentinel rides; save_ft authoritative
     s->r_dead_rhs_save[i] = old_rhs;
     s->lhs[i] = dead_sentinel;  s->rhs[i] = dead_sentinel;
@@ -720,7 +723,12 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       }
     }
   }
-  if (s->use_wm_interred) return thvm_atp_interreduce_wm(s, added);
+  atp_rj_slice(s, added.first, added.count > 2u ? 2u : added.count);
+  if (s->use_wm_interred) {
+    u32 wm_dropped = thvm_atp_interreduce_wm(s, added);
+    atp_rj_slice(s, 0u, 0u);
+    return wm_dropped;
+  }
   // Pass-start drain-key snapshot (see AtpWmoDefer above the _wm fn).
   AtpWmoDefer wd = {0};
   wd.active = (s->use_wm_demote && s->use_emission_order &&
@@ -919,6 +927,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
       // Snapshot-deferred so later victims' drain keys rank against the
       // pass-start leaf list (see AtpWmoDefer).
       atp_wmo_defer_or_remove(s, &wd, s->r_uid[i]);
+      atp_rj_death(s, i);
       // Keep the unorientable-rule count live: the dropped rule leaves
       // R here (it re-enters as a queued equation, re-counted only if
       // re-oriented unorientable at its next atp_push_rule).
@@ -1144,6 +1153,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             // face only; see the WM-path compose above for the trace-
             // space rename hazard this used to carry.
             s->r_trace[i] = new_t;
+            atp_rj_content(s, i);
             s->n_right_reduced++;
             if (atp_rule_trace_on()) {
               char la[2048], ra[2048];
@@ -1281,6 +1291,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         if (s->use_orphan_murder) atp_trace_mark_dead(s, s->r_trace[j]);
         if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[j]);
         atp_wmo_defer_or_remove(s, &wd, s->r_uid[j]);
+        atp_rj_death(s, j);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
           s->lhs[k - 1]              = s->lhs[k];
@@ -1362,6 +1373,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
         // covers both, WM kills both).
         if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[j]);
         atp_wmo_defer_or_remove(s, &wd, s->r_uid[j]);
+        atp_rj_death(s, j);
         if (!s->r_orient[j]) s->n_unorient--;
         for (u32 k = j + 1; k < s->n_rules; k++) {
           s->lhs[k - 1]              = s->lhs[k];
@@ -1417,6 +1429,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
     free(atp_dead);
   }
 #endif
+  atp_rj_slice(s, 0u, 0u);
   return dropped;
 }
 

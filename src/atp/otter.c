@@ -137,6 +137,7 @@ static u32 atp_otter_map_take(AtpState *s, u32 seq) {
 // Remove rule slot i from R, shifting every slot-keyed array in
 // lockstep (the same block as the interreduce drops in wm_drain.c).
 static void atp_otter_drop_slot(AtpState *s, u32 i) {
+  atp_rj_death(s, i);
   if (s->r_uid != NULL) atp_uid_mark_dead(s, s->r_uid[i]);
   if (s->use_emission_order) atp_wmo_remove_trace(s, s->r_uid[i]);
   if (!s->r_orient[i]) s->n_unorient--;
@@ -221,6 +222,7 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
   u64 hc = thvm_atp_heap_checkpoint();
   u32 trace_mark = s->n_trace;
+  const u32 rj0 = s->rj_n;   // the rule set this CP normalizes on
   u32 chain = s->cp_trace[row];
   AtpFtCell *fl, *fr;
   Term nl = 0, nr = 0;
@@ -297,8 +299,11 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
     atp_cp_slot_read(s, row, &l, &r);
     atp_trace_cp_rematerialize(s, s->cp_trace[row], l, r);
   }
+  s->rj_hold = rj0 + 1u;
   s->r_trace[i] = atp_trace_push(s, TRACE_ORIENT, chain,
                                  ATP_TRACE_NONE, s->lhs[i], s->rhs[i]);
+  s->rj_hold = 0u;
+  atp_rj_content(s, i);
   s->n_otter_adopted++;
   // bd=preordered: the new demodulator backward-simplifies R.  May
   // collect garbage -- no Term above is read past this point.

@@ -174,6 +174,16 @@ for the per-commit story.
   pre-pass refuting) prints the no-proof status first; the engine then
   only rebuilds the proof (30s at most), and nothing after the decision
   gives up (MGT080+1 and MGT077+1 printed no status or GaveUp).
+- Rule-set journal (`src/atp/rule_journal.c`): every rule birth, content
+  stamp (its birth record, or an in-place RHS compose) and death, in slot
+  order, plus the rule-set position each orient / simplify record was
+  computed at.  Always on and the same with or without `--proof`; nothing
+  in the search reads it.  It records the deaths no trace record states:
+  joined interreduction victims, backward and E-set subsumption, the Twee
+  full interreduction, ground-joinable deletion and the Otter loop's
+  retired passive rules.  `THVM_ATP_RJ_CHECK=1` replays it against the
+  live rule slots after every step (clean on the 108-pair battery and on
+  the OA, DN and raw-descriptor pins).
 - Vampire Otter-loop simplification set (`--otter`, `src/atp/otter.c`):
   orientable queued critical pairs rewrite as passive rules before
   selection.  With Vampire's symbol-precedence port (`--sym-prec`
