@@ -258,38 +258,44 @@ fn int ru_fuse_matmul_input_target_ok(void) {
   return CURRENT_CTX != NULL && CURRENT_CTX->default_device == THVM_DEV_METAL;
 }
 
-// Per-device hard kernel-buffer cap.  Mirror tinygrad
-// schedule/rangeify.py:377 `DEVICE_MAX_BUFS = {"METAL": 31, "WEBGPU": 8}`.
-// Metal binds the output at buffer index 0 and each input at 1+i
-// (backend/metal/_.m:2604-2611); the Metal `[[buffer(n)]]` attribute caps n
-// at 30, so a kernel may reference at most 31 distinct buffers.  A kernel that
-// exceeds this is a HARD compile error (`'buffer' attribute parameter is out
-// of bounds: must be between 0 and 30`), never a valid choice -- so this is a
-// correctness constraint, not a tunable opt, and is default-ON for Metal.
+// Per-device kernel-buffer cap: tinygrad's DEVICE_MAX_BUFS = {"WEBGPU": 8}
+// (schedule/rangeify.py:170).  #18322 took METAL out of that table because
+// tinygrad's Metal kernels now take one `constant args_t& args [[buffer(0)]]`
+// struct of buffer pointers (renderer/cstyle.py:365, 393-396); its CPU entry
+// was already stale.  CPU and CUDA return 0 here, as on master.
 //
-// THVM_MAX_KERNEL_BUFFERS mirrors tinygrad's `MAX_KERNEL_BUFFERS` ContextVar
-// (helpers.py:253): if set (>0) it overrides the device default for any
-// device.  0 / unset falls back to the device table (Metal=31, others 0 =
-// "no limit", their real cap being effectively unbounded for codegen here).
+// Metal keeps 31 because thvm's own Metal ABI still binds one [[buffer(n)]]
+// per buffer: the output at 0 and input i at 1+i (cg_render_uop_kernel,
+// cg_render_uop_kernel_root, lz_emit_prelude_metal, and
+// metal_tile_jit_encode_on in backend/metal/_.m), and metal_graph_build's
+// ICB sets setMaxKernelBufferBindCount:31.  An index past 30 does not compile
+// ("'buffer' attribute parameter is out of bounds"), so this is a
+// correctness cap, not a tunable.  Known gap: metal_tile_jit_encode_on binds
+// the conv-cfg bytes and each symbolic variable's value after the inputs, in
+// the same 31 slots, and ru_limit_bufs_node does not count them.
 //
-// Returns 0 == "no limit" (the buffer-split pass is skipped).
+// THVM_MAX_KERNEL_BUFFERS is tinygrad's MAX_KERNEL_BUFFERS (helpers.py:252,
+// default 0): a positive value overrides the table on every device.
+//
+// Returns 0 for "no limit", which skips the split.
 static u32 ru_device_max_bufs(void) {
   char const *e = getenv("THVM_MAX_KERNEL_BUFFERS");
   if (e != NULL) {
     int v = atoi(e);
-    if (v > 0) return (u32)v;
-    // v == 0 explicitly disables the limit (tinygrad: MAX_KERNEL_BUFFERS.value
-    // 0 falls through to the device table -- but here an explicit 0 from the
-    // env means "off", matching the documented override semantics).
+    if (v > 0) {
+      return (u32)v;
+    }
+    // tinygrad reads 0 as "use the table", which lists only WEBGPU, so on
+    // every thvm device master is uncapped at 0 as well.  Only an unset
+    // variable keeps thvm's Metal ABI cap.
     return 0;
   }
-  if (CURRENT_CTX == NULL) return 0;
+  if (CURRENT_CTX == NULL) {
+    return 0;
+  }
   switch (CURRENT_CTX->default_device) {
-    case THVM_DEV_METAL: return 31;   // tinygrad DEVICE_MAX_BUFS["METAL"]
-    // CPU / CUDA: no codegen buffer-index cap (CUDA kernel params + CPU args
-    // are not bound by a 31-slot table), so no limit. tinygrad's table omits
-    // them too (DEVICE_MAX_BUFS.get(device, 0) == 0 == no limit).
-    default: return 0;
+    case THVM_DEV_METAL: return 31;
+    default:             return 0;
   }
 }
 
@@ -1420,14 +1426,14 @@ static int rb_matmul_epilogue_fusable(u32 node_idx) {
 }
 
 // Count the DISTINCT input buffers a kernel rooted at `node_idx` references.
-// Mirror tinygrad limit_bufs's gated toposort (schedule/rangeify.py:383-388):
-//   bufs=set(); root.toposort(gate=lambda u: u not in {STAGE,AFTER,PARAM,...})
-// i.e. descend the value graph but STOP-AND-COUNT at every load/buffer
-// boundary, deduping by loc.  thvm's rb_collect_accessed_buffers is exactly
-// that gate (stops at UOP_BUFFER / realized boundary / leaf TEN-PARAM), so we
-// reuse it over the root's direct src subtrees.  `cap` bounds the count; we
-// only care whether it exceeds MAX_BUFS-1, so once it saturates `cap` the
-// caller already knows it's over budget.
+// Mirror tinygrad _limit_bufs's visitor (schedule/rangeify.py:181-185): a
+// STAGE / AFTER / PARAM / MSELECT / MSTACK counts as one buffer and ends the
+// descent, any other node contributes the union of its srcs' buffers.
+// thvm's rb_collect_accessed_buffers is that gate (stops at UOP_BUFFER /
+// realized boundary / leaf TEN-PARAM), so we reuse it over the root's direct
+// src subtrees.  `cap` bounds the count; we only care whether it exceeds
+// MAX_BUFS-1, so once it saturates `cap` the caller already knows it's over
+// budget.
 #define RU_LIMIT_BUFS_CAP 64
 static u32 ru_kernel_input_bufs(u32 node_idx) {
   u64 locs[RU_LIMIT_BUFS_CAP];
@@ -1473,18 +1479,18 @@ static int ru_src_is_broadcast_expander(Term src) {
   return out_numel >= (u64)RU_BROADCAST_EXPAND_RATIO * in_sum;
 }
 
-// PORT of tinygrad limit_bufs (schedule/rangeify.py:378-399).
+// PORT of tinygrad _limit_bufs (schedule/rangeify.py:176-198).
 //
 // A single elementwise kernel may reference at most MAX_BUFS distinct buffers
 // (output + inputs).  If a kernel root would exceed (MAX_BUFS - 1) INPUT
-// buffers (the -1 reserves the output slot, rangeify.py:390), tinygrad
+// buffers (the -1 reserves the output slot, rangeify.py:187), tinygrad
 // bufferizes the root's elementwise srcs -- forcing each into its OWN kernel
 // so the root reads it as a single buffer.  Here the thvm analog of
 // "bufferize this src" is PRE-MARKING it realized (RU_REALIZE_MAP[src]
 // .realized_full = 1) DURING the reverse-topo walk, BEFORE the walk reaches
 // the src: the walk processes consumers-before-producers, so a src marked here
-// while we process `root` is visited later and takes the realized-node branch
-// (line ~1581) which mints fresh LOOP out_rngs + consistent in_rngs for it --
+// while we process `root` is visited later and takes the walk's realized-node
+// branch, which mints fresh LOOP out_rngs + consistent in_rngs for it --
 // i.e. the walk's own machinery produces a clean materialize boundary, exactly
 // as for any other realized node.  pm_apply_rangeify then emits a
 // UOP_BUFFERIZE on it and codegen splits it into its own kernel.  (A post-walk
@@ -1497,8 +1503,16 @@ static int ru_src_is_broadcast_expander(Term src) {
 // over-fused subexpression splits even when its own root stays fused.  The
 // gated buffer count (rb_collect_accessed_buffers stops at realized
 // boundaries) means a src realized by an earlier (closer-to-sink) root already
-// caps the count for roots below it -- giving the recursive fixpoint tinygrad
-// gets from re-running pm_limit_bufs.
+// caps the count for roots below it.
+//
+// The split points differ from tinygrad's.  pm_limit_bufs is one
+// graph_rewrite in the default order (rangeify.py:360), which rewrites a node
+// after its srcs (uop/ops.py:1840-1843), so tinygrad splits from the leaves
+// up and a left-deep chain gets a STAGE every MAX_BUFS-1 leaves.  This walk
+// visits the root first, so every node from the root down to the first one
+// within budget becomes its own kernel: 40 leaves under
+// THVM_MAX_KERNEL_BUFFERS=8 give 34 kernels here, 7 in tinygrad.  Both keep
+// every kernel within the cap.
 static void ru_limit_bufs_node(u32 root_idx) {
   u32 max_bufs = ru_device_max_bufs();
   if (max_bufs < 2) return;                  // 0 == no limit; <2 underflow-guard
@@ -1514,7 +1528,7 @@ static void ru_limit_bufs_node(u32 root_idx) {
   if (ru_kernel_input_bufs(root_idx) <= input_cap) return;   // within budget
 
   // Over budget: bufferize (force-realize) the elementwise srcs so each
-  // becomes its own kernel.  Mirror rangeify.py:392-397: for s in root.src:
+  // becomes its own kernel.  Mirror rangeify.py:189-196: for s in root.src:
   // if s in GroupOp.Elementwise and s.device is not None: bufferize(s).
   //
   // PASS 0 realizes only CHEAP (non-broadcast) elementwise srcs; PASS 1 falls
@@ -1591,22 +1605,25 @@ fn void run_rangeify_unified_impl(Term root) {
   u32 root_node = bufferize_info_find(term_val(root));
   if (root_node == 0xFFFFFFFFu) return;
 
-  // *** Mirror indexing.py:152-153 (generate realize map) ***
+  // *** Mirror indexing.py:195 (generate realize map) ***
   // Seed RU_REALIZE_MAP from BUFFERIZE_NODES.realized -- the
   // post-bufferize_classify-rules realize set.  Tinygrad's
-  // pm_generate_realize_map seeds only COPY/CONTIGUOUS/STORE
-  // (indexing.py:28-35); thvm doesn't have those opcodes, so we
+  // pm_generate_realize_map (indexing.py:45-54) always realizes a STORE,
+  // plus the srcs of MSELECT / MSTACK, custom-kernel inputs, and the src
+  // of a STORE that reads its own destination.  It needs no contiguous or
+  // COPY rule because prepare has already lowered a bare STAGE and a
+  // COPY to STOREs into fresh buffers (prepare.py:215-231).  thvm's
+  // tensor graph has no STORE here (the root stands in for one), so we
   // inherit the OLD path's realize bit (= ROOT seed + MULTI seed +
   // REDUCE/MATMUL seed + matmul-input-protect + the 11 named
   // removal rules' result).
   //
   // THVM_RU_FAITHFUL_SEED=1: seed ONLY structural realize boundaries
-  // (ROOT == tinygrad's STORE; pm_generate_realize_map seeds only
-  // COPY/CONTIGUOUS/STORE, indexing.py:28-35).  The MULTI (consumer>=2),
+  // (ROOT == tinygrad's STORE, indexing.py:49).  The MULTI (consumer>=2),
   // REDUCE, MATMUL and FANIN_CAP reasons are thvm heuristics that tinygrad
   // does NOT seed -- it DERIVES realization in the walk below via
-  // multi-consumer range divergence (indexing.py:196-220) and the
-  // reduce/elementwise ending-ranges rule (indexing.py:222-232).  Seeding
+  // multi-consumer range divergence (indexing.py:245-268) and the
+  // reduce/elementwise ending-ranges rule (indexing.py:270-277).  Seeding
   // them up front pre-empts that derivation and over-realizes (the
   // 240-vs-5 kernel beautiful_mnist gap).  Default OFF until the walk's
   // derivation is proven to cover every case the heuristic seeds did
@@ -1618,15 +1635,14 @@ fn void run_rangeify_unified_impl(Term root) {
     RU_REALIZE_MAP[i].n_realized_axes = MAX_DIM;
   }
 
-  // *** Mirror indexing.py:161 (reverse-topo walk) ***
+  // *** Mirror indexing.py:207 (reverse-topo walk) ***
   // bufferize_walk_rec's PRE-order does NOT strictly satisfy
   // "consumers-before-producers" on DAGs with shared subexpressions
   // (e.g. softmax's EXP node is reached via MUL first, but its
   // REDUCE_SUM consumer is appended later via the RECIP path).  We
   // compute a true reverse-topological order via Kahn's algorithm and
-  // iterate it here.  Mirror: tinygrad/uop/ops.py
-  // :consumer_map_from_toposort, used at
-  // schedule/indexing.py:157 (`consumer_map = ...`).
+  // iterate it here.  Mirror: the consumer map run_rangeify builds from
+  // its toposort (schedule/indexing.py:198-203).
   ru_compute_topo_order();
   for (u32 oi = 0; oi < RU_TOPO_ORDER_LEN; oi++) {
     u32 node_idx = RU_TOPO_ORDER[oi];
@@ -1757,9 +1773,10 @@ fn void run_rangeify_unified_impl(Term root) {
           }
         }
         if (n_realized > 0) {
-          // Mirror indexing.py:75: a BUFFERIZE whose realized_ranges cover
-          // EVERY output axis (len(range_map[s][1]) == len(realized_ranges))
-          // is a full GLOBAL boundary, not a LOCAL partial.
+          // Mirror indexing.py:96-97 at ac4049794, the partial-realize path
+          // #18368 later deleted: a STAGE whose realized_ranges cover EVERY
+          // output axis (len(range_map[s][1]) == len(realized_ranges)) is a
+          // full GLOBAL boundary, not a LOCAL partial.
           //
           // A MOVEMENT op (SHRINK / RESHAPE / PERMUTE / FLIP) that realizes
           // on consumer-divergence is FULLY realized regardless of how many
@@ -1868,7 +1885,7 @@ fn void run_rangeify_unified_impl(Term root) {
       RU_ENDING_RANGES[node_idx].n = 0;
     }
 
-    // *** Mirror limit_bufs (tinygrad schedule/rangeify.py:378-399) ***
+    // *** Mirror _limit_bufs (tinygrad schedule/rangeify.py:176-198) ***
     // Before deriving this node's input ranges (and thus before the walk
     // descends into its srcs), enforce the device kernel-buffer cap: if this
     // elementwise node's fused subtree would read more distinct buffers than
@@ -2493,15 +2510,16 @@ fn u32 rangeify_unified_last_bufferizes_emitted(void) {
 }
 
 // Collect "closed ranges" for a realize boundary at node `i`. Mirror:
-// tinygrad/schedule/indexing.py:66 (`closed_ranges = tuple([r for i,r in
-// enumerate(ctx.range_map[s][1]) if i in realized_ranges])`) -- i.e. the
+// tinygrad/schedule/indexing.py:88 at ac4049794 (`closed_ranges =
+// tuple([r for i,r in enumerate(ctx.range_map[s][1]) if i in
+// realized_ranges])`, the partial-realize form #18368 deleted) -- i.e. the
 // out_rngs at the realized axes. Returns the number of ranges written
 // (>= 0, <= MAX_DIM).
 //
 // For realized_full, every axis is closed.  For realized_partial only
 // the axes in axes_mask are closed.  RANGEs that hash-cons to
 // UOP_CONST(0) (extent==1 axes) are dropped, mirroring tinygrad's
-// `if r.op is Ops.RANGE` filter at tinygrad/schedule/indexing.py:69.
+// `if r.op is Ops.RANGE` filter at indexing.py:91 at ac4049794.
 static u32 ru_collect_closed_ranges(u32 i, Term *out_ranges, u32 cap) {
   RuRangeMap const *rm = &RU_RANGE_MAP[i];
   RuRealizeEntry const *rl = &RU_REALIZE_MAP[i];
@@ -3488,9 +3506,8 @@ fn void pm_apply_rangeify(Term root) {
     }
 
     if (realized) {
-      // Mirror indexing.py:75-77:
-      //   new_src = UOp(Ops.BUFFERIZE, s.dtype, src=(new_src,)+closed_ranges,
-      //                 arg=opts)
+      // Mirror indexing.py:92:
+      //   new_src = UOp(Ops.STAGE, src=(new_src,)+closed_ranges, arg=opts)
       // The main-heap node wraps the REWRITTEN subtree so
       // uop_bufferize_value returns the lowered form with INDEX_E around
       // realized-producer references.  RU_SUBST keeps using `self` (the
@@ -3524,15 +3541,15 @@ fn void pm_apply_rangeify(Term root) {
       // addrspace mirrors tinygrad's BufferizeOpts.addrspace:
       // full-realize -> GLOBAL device memory; partial-realize falls back
       // to LOCAL (threadgroup-shared) because the per-axis collapse
-      // matches tinygrad's `len(range_map[s][1]) != len(realized_ranges)`
-      // branch at tinygrad/schedule/indexing.py:75-76.
+      // matches the `len(range_map[s][1]) != len(realized_ranges)` branch
+      // at tinygrad/schedule/indexing.py:96-97 at ac4049794, which #18368
+      // deleted.
       u32 addrspace = RU_REALIZE_MAP[i].realized_full
                     ? UOP_SCOPE_GLOBAL
                     : UOP_SCOPE_LOCAL;
-      // removable mirrors `removable = x.op is not Ops.COPY and s.op
-      // not in ALWAYS_CONTIGUOUS` from indexing.py:73. thvm has no
-      // COPY opcode at the tensor-level UOp layer yet (TCopy lives in
-      // backend dispatch); we default removable=1 here.
+      // removable mirrors `removable = s.op not in ALWAYS_CONTIGUOUS and
+      // s not in ctx.non_removable` (indexing.py:90).  thvm has UOP_COPY
+      // but no ALWAYS_CONTIGUOUS set, so removable defaults to 1.
       u32 removable = 1;
       Term b = uop_bufferize_new(rewritten, addrspace, removable,
                                  n_closed, closed_ranges);

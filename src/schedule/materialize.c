@@ -62,8 +62,8 @@ fn u64  bypass_gate_bcast_count         (void) { return BYPASS_GATE_BCAST;      
 // no unified-pass record).  Populated by topo_sort_boundaries when
 // the unified pass produced a non-zero RU_BUFFERIZE_TERM;
 // emit_kernel_for_boundary stashes this onto ke->compute_bufferize.
-// Mirror: tinygrad/schedule/indexing.py:77 lands a UOp(Ops.BUFFERIZE,
-// ...) per realize boundary; the scheduler downstream walks those.
+// Mirror: tinygrad/schedule/indexing.py:92 lands a UOp(Ops.STAGE, ...)
+// per realize boundary; the scheduler downstream walks those.
 static Term BOUNDARY_BUFFERIZE_TERM[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_ORDER_LEN = 0;
 
@@ -3170,15 +3170,16 @@ static Term try_inline_bufferize_via_axis_table(
   u32 prod_ndim = rangeify_unified_out_ndim_at(prod_idx);
   // realized_axes[i] = the i-th producer output axis position that was
   // CLOSED (became an actual UOP_RANGE closed_range) in this BUFFERIZE.
-  // Mirror tinygrad indexing.py:66 `closed_ranges = tuple([r for i,r in
-  // enumerate(range_map[s][1]) if i in realized_ranges])` and thvm's own
-  // ru_collect_closed_ranges (rangeify_unified.c): a realized output axis
-  // whose out_rng collapsed to CONST(0) (a keepdim size-1 axis) carries no
-  // stride and is NOT a closed_range, so it is skipped here.  Filtering on
-  // the actual UOP_RANGE out_rng (not just the axes_mask popcount) keeps
-  // n_realized == n_ranges for the keepdim-reduce broadcast case, so the
-  // i-th closed_range binds POSITIONALLY to the i-th surviving output axis
-  // -- never disambiguated by extent.
+  // Mirror tinygrad indexing.py:88 at ac4049794 `closed_ranges =
+  // tuple([r for i,r in enumerate(range_map[s][1]) if i in
+  // realized_ranges])` (the partial-realize form #18368 deleted) and
+  // thvm's own ru_collect_closed_ranges (rangeify_unified.c): a realized
+  // output axis whose out_rng collapsed to CONST(0) (a keepdim size-1 axis)
+  // carries no stride and is NOT a closed_range, so it is skipped here.
+  // Filtering on the actual UOP_RANGE out_rng (not just the axes_mask
+  // popcount) keeps n_realized == n_ranges for the keepdim-reduce broadcast
+  // case, so the i-th closed_range binds POSITIONALLY to the i-th surviving
+  // output axis -- never disambiguated by extent.
   int prod_full = rangeify_unified_realized_full_at(prod_idx);
   u8 axes_mask = rangeify_unified_axes_mask_at(prod_idx);
   u32 realized_axes[MAX_DIM] = {0};
@@ -3423,7 +3424,8 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
       if (v != 0 && n_ranges == 1
           && (term_tag(addr_term) != TAG_UOP
               || term_ext(addr_term) != UOP_RANGE)) {
-        // Tinygrad-spec POSITIONAL inline first (indexing.py:66,78): bind
+        // Tinygrad-spec POSITIONAL inline first (indexing.py:88,99 at
+        // ac4049794, the partial-realize path #18368 deleted): bind
         // the single closed_range to the consumer's in_rng at the
         // producer's realized output axis via the per-axis side table --
         // NEVER by extent equality.  This is the keepdim-reduce broadcast

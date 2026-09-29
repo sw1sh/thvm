@@ -494,7 +494,9 @@ int             dtype_is_packed   (u32 dt);
                              //   directive carries no scalar (TC, LOCAL).
                              //   The renderer walks UOp shape + OptOp
                              //   annotations to fire specialised templates.
-// === Unified rangeify boundary (mirrors tinygrad's Ops.BUFFERIZE) ===
+// === Unified rangeify boundary (mirrors tinygrad's Ops.STAGE) ===
+// tinygrad renamed BUFFERIZE to STAGE in #16125; UOp.bufferize builds a
+// STAGE (uop/ops.py:679).
 // Heap layout: [value, NUM(addrspace), NUM(removable), NUM(n_ranges),
 //               range_0, ..., range_{n_ranges-1}].
 //   value         : the producer Term whose output this buffer holds.
@@ -504,15 +506,20 @@ int             dtype_is_packed   (u32 dt);
 //   addrspace     : UOP_SCOPE_GLOBAL / LOCAL / REG (mirrors
 //                   BufferizeOpts.addrspace in tinygrad/schedule/indexing.py).
 //   removable     : 1 if a downstream pass may collapse this boundary into
-//                   its single consumer (mirrors BufferizeOpts.removable).
-//                   0 forces it to materialize (e.g. CONTIGUOUS / COPY src).
+//                   its single consumer (mirrors BufferizeOpts.removable,
+//                   indexing.py:90).  0 keeps it materialized: tinygrad
+//                   clears it for a src in ALWAYS_CONTIGUOUS or an input of
+//                   a custom kernel.  A contiguous() STAGE (arg=None) or a
+//                   COPY never gets here: prepare drops one with nothing to
+//                   do and lowers the rest to a STORE into a fresh buffer
+//                   (schedule/prepare.py:215-231).
 //   n_ranges      : number of "closed" range Terms that follow.
 //   range_i       : the UOP_RANGE leaves that index this buffer; their
 //                   extents are the buffer's shape.  Mirrors tinygrad's
 //                   `(new_src,)+closed_ranges` src tuple at
-//                   tinygrad/schedule/indexing.py:77.
+//                   tinygrad/schedule/indexing.py:92.
 //
-// pm_apply_rangeify in tinygrad emits BUFFERIZE at every realize boundary
+// pm_apply_rangeify in tinygrad emits a STAGE at every realize boundary
 // the run_rangeify walk decided; thvm's unified pass writes UOP_BUFFERIZE
 // onto the main heap at the same boundaries so materialize.c can read a
 // single source of truth.

@@ -44,6 +44,7 @@ update the matching row here in the same change.
 | `THVM_DISPATCH_TRACE` | off | Trace dispatch memoization. |
 | `THVM_RU_FAITHFUL_SEED` | off | Realize-seed only structural boundaries (ROOT) + REDUCE outputs, deriving the rest in the rangeify walk (tinygrad's structural seed); default mode also seeds MULTI/MATMUL/FANIN. Faithful CPU beats tinygrad + default (see [[project_faithful_cpu_breakthrough]]). |
 | `THVM_RU_NO_SEED_REDUCE` | off | A/B revert: under faithful seed, go back to ROOT-only (drop the REDUCE-output seed). ROOT-only under-realizes -> conv data-grad becomes a col2im gather (faithful beautiful_mnist CPU 5.18ms -> 77.6ms). For comparison only. |
+| `THVM_MAX_KERNEL_BUFFERS` | Metal 31, else no cap | tinygrad's `MAX_KERNEL_BUFFERS`: a positive value caps the distinct buffers (output included) one kernel may bind on every device, splitting wider elementwise fusions (`ru_limit_bufs_node`). `0` turns the cap off everywhere, Metal included. |
 
 ## Bufferize & kernel lift
 
