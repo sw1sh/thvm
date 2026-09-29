@@ -1549,7 +1549,8 @@ int main(void) {
   TEST_BEGIN("render-uop-c/bf16-const-folded-from-f32-renders-value");
   {
     // CAST(CONST f32 1.0, bf16) folds to a bf16 CONST whose payload is
-    // the f32 bits of 1.0, so the C literal is the value 1.
+    // the f32 bits of 1.0, so the C literal is the value 1.0, a floating
+    // constant.
     u32 dimsH[1] = { 4 };
     Term outH = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_BF16, 1, dimsH, 0);
     Term rH   = uop_range(0, 0, 4);
@@ -1558,7 +1559,7 @@ int main(void) {
     fp = fmemopen(src, sizeof(src), "w");
     cg_render_uop_kernel_c(uop_store(outH, rH, one), "kh", outH, NULL, 0, fp);
     fclose(fp);
-    CHECK(contains(src, "out[a0] = 1;"));
+    CHECK(contains(src, "out[a0] = 1.0;"));
   }
 
   TEST_BEGIN("render-uop/tc-tiled-opt-config-flows-to-emitter");
