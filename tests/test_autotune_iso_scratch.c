@@ -2,18 +2,20 @@
 // hold every element the kernel can read.
 //
 // kautotune_iso_begin benches a kernel on fresh scratch buffers instead of
-// the live graph buffers.  An input slot flagged input_chain_composed binds
-// the raw buffer under its view: the kernel's loads compose the movement
-// chain into addresses over that buffer.  A shrunk view is read up to the
-// extent its base spans, past the view's own element count.  A kernel that
-// reads two views of one buffer (x[:, :64] + x[:, 64:], a GLU split) loads
-// both through the slot of the view it visited first, so that slot is read
-// across both views.  tinygrad allocates each beam scratch as its PARAM's
-// whole buffer (schedule/rangeify.py:284, codegen/opt/postrange.py:258).
+// the live graph buffers.  A slot the dispatch binds to its raw buffer is
+// not read only through its own view.  A chain-composed slot's loads
+// compose the movement chain into addresses over the buffer, so a shrunk
+// view is read up to the extent its base spans.  A kernel that reads two
+// views of one buffer (x[:, :64] + x[:, 64:], x[0] + x[1], a GLU split)
+// loads both through the slot of the view it visited first, whether that
+// slot is chain-composed or a contiguous view at offset 0 such as x[0].
+// tinygrad allocates each beam scratch as its PARAM's whole buffer
+// (schedule/rangeify.py:284, codegen/opt/postrange.py:258).
 //
-// For each kernel the test bounds every address the kernel loads from its
-// composed slot and checks that the slot's scratch was requested at the
-// whole buffer, which covers them.  It then checks that the isolated bench
+// For each kernel the test bounds every address the kernel loads from each
+// input slot.  It checks that every slot's scratch was requested large
+// enough for its loads, and that every slot over the leaf's buffer was
+// requested at the whole buffer.  It then checks that the isolated bench
 // computes the kernel from the scratch contents, that every candidate the
 // search applies passes the correctness gate there, and that a BEAM=2
 // search leaves the live result correct.  The freelist is emptied before
@@ -67,13 +69,9 @@ static u32 kernel_writing(Term realized) {
   return 0;
 }
 
-static u32 composed_slot(KernelEntry const *ke) {
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    if (ke->input_chain_composed[i]) {
-      return i;
-    }
-  }
-  return ke->n_inputs;
+static int slot_over_buf(KernelEntry const *ke, u32 slot, u32 buf) {
+  u32 tid = ke->input_tids != NULL ? ke->input_tids[slot] : 0;
+  return tid != 0 && tid < TENS_NEXT && TENS[tid].buf_id == buf;
 }
 
 // Park nothing, so the next allocation is a fresh block whose
@@ -224,118 +222,269 @@ static Span buffer_load_span(Term t, u32 inst, u32 depth) {
 // === Kernels ===
 
 typedef struct Case Case;
-typedef u32 (*MismatchFn)(Case const *k, f32 const *in, f32 const *out);
+typedef Term (*BuildFn)(Case const *k, Term x);
+typedef void (*RefFn)(Case const *k, f32 const *x, f32 *want);
 
-// One kernel over one leaf buffer x of `whole` elements, whose highest
-// element the kernel reads is `last`.  A sibling-view kernel computes
-// out[r][j] = x[r][lhs + j] op x[r][rhs + j] for j < width over x of shape
-// (rows, cols).
+// One kernel over one leaf buffer x of shape `dims`, computing `out`
+// elements and reading x up to element `last`.  The slot x's loads land on
+// is chain-composed iff `composed`, over a TenDesc with `nviews` prior
+// views.  A pair kernel computes out[r * width + j] = x[r * stride + lhs +
+// j] op x[r * stride + rhs + j] for r < rows and j < width; op 'd' sums
+// those products over j into out[r].  `sums`: an opt may reorder a sum, so
+// results match within a tolerance.
 struct Case {
   char const *name;
-  u32         whole;
+  BuildFn     build;
+  RefFn       ref;
+  u32         ndim;
+  u32         dims[3];
+  u32         out;
   u32         last;
+  int         composed;
   u32         nviews;
-  MismatchFn  mismatches;
+  int         sums;
   u32         rows;
-  u32         cols;
+  u32         stride;
   u32         lhs;
   u32         rhs;
   u32         width;
   char        op;
 };
 
-// out[r * 64 + c] = 2 * in[r * 128 + 64 + c]
-static u32 shrink_mul_mismatches(Case const *k, f32 const *in,
-                                 f32 const *out) {
+static u32 leaf_numel(Case const *k) {
+  u32 n = 1;
+  for (u32 a = 0; a < k->ndim; a++) {
+    n *= k->dims[a];
+  }
+  return n;
+}
+
+// x.shrink(((0,2),(64,128))) * 2 over x of shape (2,128).
+static Term shrink_mul(Case const *k, Term x) {
   (void)k;
-  u32 bad = 0;
+  u32 be[4] = {0, 2, 64, 128};
+  u32 yd[2] = {2, 64};
+  return uop_binary(UOP_MUL, uop_shrink(x, 2, be),
+                    full_f32(0x40000000u, 2, yd));
+}
+
+static void shrink_mul_ref(Case const *k, f32 const *x, f32 *want) {
+  (void)k;
   for (u32 r = 0; r < 2; r++) {
     for (u32 c = 0; c < 64; c++) {
-      if (out[r * 64 + c] != 2.0f * in[r * 128 + 64 + c]) {
-        bad++;
-      }
+      want[r * 64 + c] = 2.0f * x[r * 128 + 64 + c];
     }
   }
-  return bad;
 }
 
-// out[r] = sum of in[r * 32 + j * 8 + 4 + k] over j, k < 4
-static u32 merge_sum_mismatches(Case const *k, f32 const *in,
-                                f32 const *out) {
+// x.shrink(((0,2),(0,4),(4,8))).reshape(2,16).sum(1) over x of shape (2,4,8).
+static Term merge_sum(Case const *k, Term x) {
   (void)k;
-  u32 bad = 0;
+  u32 be[6] = {0, 2, 0, 4, 4, 8};
+  u32 md[2] = {2, 16};
+  return uop_reduce(REDUCE_SUM, 1, uop_reshape(uop_shrink(x, 3, be), 2, md));
+}
+
+static void merge_sum_ref(Case const *k, f32 const *x, f32 *want) {
+  (void)k;
   for (u32 r = 0; r < 2; r++) {
-    f64 want = 0.0;
+    f64 s = 0.0;
     for (u32 j = 0; j < 4; j++) {
       for (u32 m = 0; m < 4; m++) {
-        want += (f64)in[r * 32 + j * 8 + 4 + m];
+        s += (f64)x[r * 32 + j * 8 + 4 + m];
       }
     }
-    if (fabs((f64)out[r] - want) > 1e-4 * (1.0 + fabs(want))) {
-      bad++;
-    }
+    want[r] = (f32)s;
   }
-  return bad;
 }
 
-static u32 sibling_mismatches(Case const *k, f32 const *in, f32 const *out) {
-  u32 bad = 0;
+static void pair_ref(Case const *k, f32 const *x, f32 *want) {
   for (u32 r = 0; r < k->rows; r++) {
+    f64 dot = 0.0;
     for (u32 j = 0; j < k->width; j++) {
-      f32 a    = in[r * k->cols + k->lhs + j];
-      f32 b    = in[r * k->cols + k->rhs + j];
-      f32 want = k->op == '+' ? a + b : k->op == '-' ? a - b : a * b;
-      if (out[r * k->width + j] != want) {
-        bad++;
+      f32 a = x[r * k->stride + k->lhs + j];
+      f32 b = x[r * k->stride + k->rhs + j];
+      switch (k->op) {
+        case '+': want[r * k->width + j] = a + b; break;
+        case '-': want[r * k->width + j] = a - b; break;
+        case '*': want[r * k->width + j] = a * b; break;
+        default:  dot += (f64)a * (f64)b;         break;
       }
     }
+    if (k->op == 'd') {
+      want[r] = (f32)dot;
+    }
   }
-  return bad;
 }
 
-static Term sibling_uop(Case const *k, Term x) {
-  u32  lo[4] = {0, k->rows, k->lhs, k->lhs + k->width};
-  u32  hi[4] = {0, k->rows, k->rhs, k->rhs + k->width};
-  Term a     = uop_shrink(x, 2, lo);
-  Term b     = uop_shrink(x, 2, hi);
+static Term pair_op(Case const *k, Term a, Term b) {
   switch (k->op) {
     case '+':
       return uop_binary(UOP_ADD, a, b);
     case '-':
       return uop_binary(UOP_ADD, a, uop_unary(UOP_NEG, b));
-    default:
+    case '*':
       return uop_binary(UOP_MUL, a, b);
+    default:
+      return uop_reduce(REDUCE_SUM, 0, uop_binary(UOP_MUL, a, b));
   }
+}
+
+// x[:, lhs:lhs+width] op x[:, rhs:rhs+width] over x of shape (rows, stride).
+static Term cols_pair(Case const *k, Term x) {
+  u32 lo[4] = {0, k->rows, k->lhs, k->lhs + k->width};
+  u32 hi[4] = {0, k->rows, k->rhs, k->rhs + k->width};
+  return pair_op(k, uop_shrink(x, 2, lo), uop_shrink(x, 2, hi));
+}
+
+// x[i] op x[j] for i = lhs / width and j = rhs / width: one index along
+// axis 0, reshaped to the remaining axes, as Python's x[0] builds it.
+static Term rows_pair(Case const *k, Term x) {
+  u32 lo[2 * MAX_DIM];
+  u32 hi[2 * MAX_DIM];
+  u32 rest[MAX_DIM];
+  for (u32 a = 0; a < k->ndim; a++) {
+    lo[2 * a]     = 0;
+    lo[2 * a + 1] = k->dims[a];
+    hi[2 * a]     = 0;
+    hi[2 * a + 1] = k->dims[a];
+    if (a > 0) {
+      rest[a - 1] = k->dims[a];
+    }
+  }
+  lo[0] = k->lhs / k->width;
+  lo[1] = lo[0] + 1;
+  hi[0] = k->rhs / k->width;
+  hi[1] = hi[0] + 1;
+  Term a = uop_reshape(uop_shrink(x, k->ndim, lo), k->ndim - 1, rest);
+  Term b = uop_reshape(uop_shrink(x, k->ndim, hi), k->ndim - 1, rest);
+  return pair_op(k, a, b);
+}
+
+// x[lhs:lhs+width].reshape(4, width/4) op x[rhs:rhs+width].reshape(4,
+// width/4) over a 1-D x.
+static Term flat_pair(Case const *k, Term x) {
+  u32 lo[2] = {k->lhs, k->lhs + k->width};
+  u32 hi[2] = {k->rhs, k->rhs + k->width};
+  u32 md[2] = {4, k->width / 4};
+  Term a = uop_reshape(uop_shrink(x, 1, lo), 2, md);
+  Term b = uop_reshape(uop_shrink(x, 1, hi), 2, md);
+  return pair_op(k, a, b);
+}
+
+#define COLS(nm, r, c, l, h, w, o)                                         \
+  {.name = (nm), .build = cols_pair, .ref = pair_ref, .ndim = 2,           \
+   .dims = {(r), (c)}, .out = (r) * (w), .last = (r) * (c) - 1,            \
+   .composed = 1, .rows = (r), .stride = (c), .lhs = (l), .rhs = (h),      \
+   .width = (w), .op = (o)}
+
+static Case const CASES[] = {
+  // The view is (2,64) at offset 64 with row stride 128, so the kernel
+  // reads x up to element 1*128 + 64 + 63 = 255.
+  {.name = "shrink-mul", .build = shrink_mul, .ref = shrink_mul_ref,
+   .ndim = 2, .dims = {2, 128}, .out = 128, .last = 255, .composed = 1},
+  // The reshape merges the shrunk axis with its outer neighbour, a
+  // two-view chain whose address reaches 32 + 3*8 + 4 + 3 = 63.
+  {.name = "merge-sum", .build = merge_sum, .ref = merge_sum_ref,
+   .ndim = 3, .dims = {2, 4, 8}, .out = 2, .last = 63, .composed = 1,
+   .nviews = 1, .sums = 1},
+  // Two column views of one buffer: both loads land on the first operand's
+  // slot.  With the lower view first, that slot's own view stops short of
+  // the buffer's end (x[:, :64] spans elements 0..191 of 256, x[:, :-1]
+  // 0..130 of 132, x[:, :32] 0..223 of 256).
+  COLS("halves-add",     2, 128,  0, 64, 64, '+'),
+  COLS("halves-add-rev", 2, 128, 64,  0, 64, '+'),
+  COLS("diff",           4,  33,  0,  1, 32, '-'),
+  COLS("diff-rev",       4,  33,  1,  0, 32, '-'),
+  COLS("glu-halves",     4,  64,  0, 32, 32, '*'),
+  COLS("glu-halves-rev", 4,  64, 32,  0, 32, '*'),
+  // Two row views: x[0] is contiguous at offset 0, so its slot binds the
+  // raw buffer without being chain-composed, and x[1]'s loads land on it.
+  {.name = "rows-add", .build = rows_pair, .ref = pair_ref, .ndim = 2,
+   .dims = {2, 128}, .out = 128, .last = 255, .rows = 1, .lhs = 0,
+   .rhs = 128, .width = 128, .op = '+'},
+  {.name = "rows-add-rev", .build = rows_pair, .ref = pair_ref, .ndim = 2,
+   .dims = {2, 128}, .out = 128, .last = 255, .composed = 1, .rows = 1,
+   .lhs = 128, .rhs = 0, .width = 128, .op = '+'},
+  // x[0] * x[1] over x (4,2,32): reads the first two of four rows.
+  {.name = "rows-mul", .build = rows_pair, .ref = pair_ref, .ndim = 3,
+   .dims = {4, 2, 32}, .out = 64, .last = 127, .rows = 1, .lhs = 0,
+   .rhs = 64, .width = 64, .op = '*'},
+  // (x[0] * x[1]).sum() over x (2,128).
+  {.name = "rows-dot", .build = rows_pair, .ref = pair_ref, .ndim = 2,
+   .dims = {2, 128}, .out = 1, .last = 255, .sums = 1, .rows = 1,
+   .lhs = 0, .rhs = 128, .width = 128, .op = 'd'},
+  // x[:32].reshape(4,8) - x[1:].reshape(4,8) over x (33): the reshape
+  // makes x[:32] contiguous at offset 0, one element short of the buffer.
+  {.name = "diff-flat", .build = flat_pair, .ref = pair_ref, .ndim = 1,
+   .dims = {33}, .out = 32, .last = 32, .rows = 1, .lhs = 0, .rhs = 1,
+   .width = 32, .op = '-'},
+  {.name = "diff-flat-rev", .build = flat_pair, .ref = pair_ref, .ndim = 1,
+   .dims = {33}, .out = 32, .last = 32, .composed = 1, .rows = 1, .lhs = 1,
+   .rhs = 0, .width = 32, .op = '-'},
+};
+
+// Elements of the output `out_buf` that differ from the kernel's value over
+// the input contents `x`.
+static u32 mismatches(Case const *k, f32 const *x, Backend *b, u32 out_buf) {
+  f32 *want = (f32 *)calloc(k->out, sizeof(f32));
+  f32 *got  = (f32 *)calloc(k->out, sizeof(f32));
+  k->ref(k, x, want);
+  b->buf_read(out_buf, got, (u64)k->out * sizeof(f32));
+  u32 bad = 0;
+  for (u32 i = 0; i < k->out; i++) {
+    f64 w   = (f64)want[i];
+    f64 tol = k->sums ? 1e-4 * (1.0 + fabs(w)) : 0.0;
+    if (!(fabs((f64)got[i] - w) <= tol)) {
+      bad++;
+    }
+  }
+  free(want);
+  free(got);
+  return bad;
 }
 
 // === Checks ===
 
-// Bench `kid` on the isolated scratch: the composed slot's scratch holds
-// the whole buffer, which covers every address the kernel loads from it,
-// the bench computes the kernel from it, and every candidate the search
-// applies passes the correctness gate.
-static void check_iso_scratch(Case const *k, u32 kid) {
+// Bench `kid` on the isolated scratch: every slot's scratch covers the
+// addresses the kernel loads from it and every slot over x's buffer holds
+// the whole buffer, the bench computes the kernel from the scratch, and
+// every candidate the search applies passes the correctness gate.
+static void check_iso_scratch(Case const *k, u32 kid, Term x) {
   char         label[128];
-  KernelEntry *ke   = &KERNELS[kid];
-  u32          slot = composed_slot(ke);
+  KernelEntry *ke    = &KERNELS[kid];
+  u32          n     = ke->n_inputs;
+  u32          xbuf  = TENS[(u32)term_val(x)].buf_id;
+  u64          whole = (u64)leaf_numel(k) * sizeof(f32);
+  Span         span[n > 0 ? n : 1];
+  u32          leaf  = n;
+  i64          last  = -1;
+  int          known = 1;
+  int          lo_ok = 1;
+  for (u32 i = 0; i < n; i++) {
+    span[i] = buffer_load_span(ke->cached_lift.store_root, i + 1, 0);
+    known   = known && span[i].st != SPAN_UNKNOWN;
+    lo_ok   = lo_ok && (span[i].st != SPAN_OK || span[i].lo >= 0);
+    if (span[i].st == SPAN_OK && slot_over_buf(ke, i, xbuf)) {
+      leaf = leaf < n ? leaf : i;
+      last = span[i].hi > last ? span[i].hi : last;
+    }
+  }
 
-  snprintf(label, sizeof(label), "autotune-iso/%s/slot-chain-composed",
-           k->name);
+  snprintf(label, sizeof(label), "autotune-iso/%s/leaf-slot", k->name);
   TEST_BEGIN(label);
-  CHECK(slot < ke->n_inputs);
-  if (slot >= ke->n_inputs) {
+  CHECK(leaf < n);
+  if (leaf >= n) {
     return;
   }
-  CHECK_EQ(TENS[ke->input_tids[slot]].nviews, k->nviews);
+  CHECK_EQ(ke->input_chain_composed[leaf] != 0, k->composed);
+  CHECK_EQ(TENS[ke->input_tids[leaf]].nviews, k->nviews);
 
   snprintf(label, sizeof(label), "autotune-iso/%s/loads-reach-last", k->name);
   TEST_BEGIN(label);
-  Span s = buffer_load_span(ke->cached_lift.store_root, slot + 1, 0);
-  CHECK_EQ(s.st, SPAN_OK);
-  CHECK(s.lo >= 0);
-  CHECK_EQ(s.hi, k->last);
-  u64 hi   = s.st == SPAN_OK && s.hi > (i64)k->last ? (u64)s.hi : k->last;
-  u64 need = (hi + 1) * sizeof(f32);
+  CHECK(known);
+  CHECK(lo_ok);
+  CHECK_EQ(last, k->last);
 
   snprintf(label, sizeof(label), "autotune-iso/%s/bench-isolates", k->name);
   TEST_BEGIN(label);
@@ -346,36 +495,48 @@ static void check_iso_scratch(Case const *k, u32 kid) {
     return;
   }
 
-  u64 have  = CPU_BUFS[ISO.in_buf_ids[slot]].nbytes;
-  u64 whole = (u64)k->whole * sizeof(f32);
   snprintf(label, sizeof(label), "autotune-iso/%s/scratch-covers-loads",
            k->name);
   TEST_BEGIN(label);
-  CHECK(have >= need);
+  int covered = known;
+  for (u32 i = 0; i < n; i++) {
+    if (span[i].st != SPAN_OK) {
+      continue;
+    }
+    u64 need = dtype_storage_bytes(ke->input_dtypes[i], (u64)span[i].hi + 1);
+    u64 have = CPU_BUFS[ISO.in_buf_ids[i]].nbytes;
+    if (have < need) {
+      fprintf(stderr, "  %s: slot %u scratch %llu bytes, loads need %llu\n",
+              k->name, i, (unsigned long long)have, (unsigned long long)need);
+      covered = 0;
+    }
+  }
+  CHECK(covered);
+
   snprintf(label, sizeof(label), "autotune-iso/%s/scratch-is-whole-buffer",
            k->name);
   TEST_BEGIN(label);
-  CHECK_EQ(have, whole);
+  for (u32 i = 0; i < n; i++) {
+    if (slot_over_buf(ke, i, xbuf)) {
+      CHECK_EQ(CPU_BUFS[ISO.in_buf_ids[i]].nbytes, whole);
+    }
+  }
 
-  // Fire only on a scratch that covers the loads: an undersized one would
+  // Fire only on scratch that covers the loads: an undersized one would
   // make the test itself read past it.
   snprintf(label, sizeof(label), "autotune-iso/%s/bench-reads-scratch",
            k->name);
   TEST_BEGIN(label);
-  int covered = have >= need && have >= whole;
+  covered = covered && CPU_BUFS[ISO.in_buf_ids[leaf]].nbytes >= whole;
   CHECK(covered);
   if (covered) {
     kernel_bench_fire(kid);
     KautotuneOutStat st = kautotune_output_stat(ke);
     CHECK(st.valid && st.all_finite);
-    f32 *in  = (f32 *)malloc((size_t)whole);
-    f32 *out = (f32 *)malloc((size_t)ke->output_numel * sizeof(f32));
-    ISO.backend->buf_read(ISO.in_buf_ids[slot], in, whole);
-    ISO.backend->buf_read(ISO.out_buf_id, out,
-                          (u64)ke->output_numel * sizeof(f32));
-    CHECK_EQ(k->mismatches(k, in, out), 0);
+    f32 *in = (f32 *)malloc((size_t)whole);
+    ISO.backend->buf_read(ISO.in_buf_ids[leaf], in, whole);
+    CHECK_EQ(mismatches(k, in, ISO.backend, ISO.out_buf_id), 0);
     free(in);
-    free(out);
   }
 
   snprintf(label, sizeof(label), "autotune-iso/%s/gate-accepts-candidates",
@@ -425,91 +586,38 @@ static void check_beam_live(Case const *k, u32 kid, Term x) {
   kernel_autotune(kid);
   unsetenv("BEAM");
   kernel_bench_fire(kid);
-  u32  xt  = (u32)term_val(x);
-  f32 *in  = (f32 *)malloc((size_t)k->whole * sizeof(f32));
-  f32 *out = (f32 *)malloc((size_t)ke->output_numel * sizeof(f32));
-  TENS[xt].backend->buf_read(TENS[xt].buf_id, in,
-                             (u64)k->whole * sizeof(f32));
-  TENS[ke->output_tid].backend->buf_read(TENS[ke->output_tid].buf_id, out,
-                                         (u64)ke->output_numel * sizeof(f32));
-  CHECK_EQ(k->mismatches(k, in, out), 0);
+  u32  xt    = (u32)term_val(x);
+  u64  whole = (u64)leaf_numel(k) * sizeof(f32);
+  f32 *in    = (f32 *)malloc((size_t)whole);
+  TENS[xt].backend->buf_read(TENS[xt].buf_id, in, whole);
+  TenDesc const *out = &TENS[ke->output_tid];
+  CHECK_EQ(mismatches(k, in, out->backend, out->buf_id), 0);
   free(in);
-  free(out);
 }
 
-static void run_case(Case const *k, Term x, Term y) {
+static void run_case(Case const *k) {
   char label[128];
-  u32  kid = kernel_writing(thvm_realize(y));
+  Term x   = leaf_f32(k->ndim, k->dims);
+  u32  kid = kernel_writing(thvm_realize(k->build(k, x)));
   snprintf(label, sizeof(label), "autotune-iso/%s/kernel", k->name);
   TEST_BEGIN(label);
   CHECK(kid != 0 && kid < KERNELS_NEXT);
   if (kid == 0 || kid >= KERNELS_NEXT) {
     return;
   }
-  check_iso_scratch(k, kid);
+  CHECK_EQ(KERNELS[kid].output_numel, k->out);
+  check_iso_scratch(k, kid, x);
   check_beam_live(k, kid, x);
 }
-
-// Two views of one buffer: the first operand's view is the first slot, and
-// both loads land on it.  With the lower view first, that slot's own view
-// stops short of the buffer's end (x[:, :64] spans elements 0..191 of 256,
-// x[:, :-1] 0..130 of 132, x[:, :32] 0..223 of 256); with it second, the
-// first slot's view happens to reach the end.
-#define SIBLING(nm, r, c, l, h, w, o)                                  \
-  {.name = (nm), .whole = (r) * (c), .last = (r) * (c) - 1,             \
-   .mismatches = sibling_mismatches, .rows = (r), .cols = (c),          \
-   .lhs = (l), .rhs = (h), .width = (w), .op = (o)}
-
-static Case const SIBLINGS[] = {
-  SIBLING("halves-add",     2, 128,  0, 64, 64, '+'),
-  SIBLING("halves-add-rev", 2, 128, 64,  0, 64, '+'),
-  SIBLING("diff",           4,  33,  0,  1, 32, '-'),
-  SIBLING("diff-rev",       4,  33,  1,  0, 32, '-'),
-  SIBLING("glu-halves",     4,  64,  0, 32, 32, '*'),
-  SIBLING("glu-halves-rev", 4,  64, 32,  0, 32, '*'),
-};
 
 int main(void) {
   unsetenv("BEAM");
   unsetenv("JITBEAM");
   unsetenv("AUTOTUNE");
   thvm_init();
-
-  // x.shrink(((0,2),(64,128))) * 2 over x of shape (2,128): the view is
-  // (2,64) at offset 64 with row stride 128, so the kernel reads x up to
-  // element 1*128 + 64 + 63 = 255.
-  {
-    Case const k = {.name = "shrink-mul", .whole = 256, .last = 255,
-                    .mismatches = shrink_mul_mismatches};
-    u32  xd[2] = {2, 128};
-    u32  be[4] = {0, 2, 64, 128};
-    u32  yd[2] = {2, 64};
-    Term x     = leaf_f32(2, xd);
-    Term two   = full_f32(0x40000000u, 2, yd);
-    run_case(&k, x, uop_binary(UOP_MUL, uop_shrink(x, 2, be), two));
+  for (u32 i = 0; i < sizeof(CASES) / sizeof(CASES[0]); i++) {
+    run_case(&CASES[i]);
   }
-
-  // x.shrink(((0,2),(0,4),(4,8))).reshape(2,16).sum(1) over x of shape
-  // (2,4,8): the reshape merges the shrunk axis with its outer neighbour,
-  // a two-view chain whose address reaches 32 + 3*8 + 4 + 3 = 63.
-  {
-    Case const k = {.name = "merge-sum", .whole = 64, .last = 63, .nviews = 1,
-                    .mismatches = merge_sum_mismatches};
-    u32  zd[3]  = {2, 4, 8};
-    u32  zbe[6] = {0, 2, 0, 4, 4, 8};
-    u32  md[2]  = {2, 16};
-    Term z      = leaf_f32(3, zd);
-    Term merged = uop_reshape(uop_shrink(z, 3, zbe), 2, md);
-    run_case(&k, z, uop_reduce(REDUCE_SUM, 1, merged));
-  }
-
-  for (u32 i = 0; i < sizeof(SIBLINGS) / sizeof(SIBLINGS[0]); i++) {
-    Case const *k     = &SIBLINGS[i];
-    u32         xd[2] = {k->rows, k->cols};
-    Term        x     = leaf_f32(2, xd);
-    run_case(k, x, sibling_uop(k, x));
-  }
-
   thvm_free();
   TEST_REPORT();
 }

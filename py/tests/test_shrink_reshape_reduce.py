@@ -19,15 +19,16 @@ never compiles, so the walker executes every kernel.
 
 With BEAM=2 each kernel is first benched on scratch buffers.  A composed
 slot is read up to its base's extent, and a kernel that reads two views of
-one buffer (x[:, :64] + x[:, 64:], a GLU split) loads both through the
-first view's slot, so that slot's scratch must hold the whole buffer, not
-the view's numel.  The BEAM child reports each scratch it allocates
-(THVM_AUTOTUNE_TRACE); the test checks that the slot the leaf's loads land
-on holds the whole leaf buffer, that the search ran and every candidate
-passed its correctness gate, and that BEAM=2 leaves each result as the
-default path computes it, bit for bit where no opt can reorder a sum.  On
-macOS the child also runs under Guard Malloc, where a read past a scratch
-buffer faults.
+one buffer (x[:, :64] + x[:, 64:], x[0] + x[1], a GLU split) loads both
+through the first view's slot, whether that slot is composed or, like x[0],
+a contiguous view at offset 0.  So that slot's scratch must hold the whole
+buffer, not the view's numel.  The BEAM child reports each scratch it
+allocates (THVM_AUTOTUNE_TRACE); the test checks that some slot's scratch
+holds the whole leaf buffer, that the search ran and every candidate passed
+its correctness gate, and that BEAM=2 leaves each result as the default
+path computes it, bit for bit where no opt can reorder a sum.  On macOS the
+child also runs under Guard Malloc, where a read past a scratch buffer
+faults.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_shrink_reshape_reduce.py -q
 """
@@ -142,6 +143,8 @@ def _beam_cases():
     xs = _data((2, 4, 8))
     xd = _data((4, 33))
     xg = _data((4, 64))
+    xr = _data((4, 2, 32))
+    xf = _data((33,))
     return {
         # The view is (2,64) at offset 64: the kernel reads xm up to its
         # last element, twice the view's numel.
@@ -174,6 +177,22 @@ def _beam_cases():
         "glu-halves-rev": (
             _on(xg, lambda x: x[:, 32:] * x[:, :32]),
             xg[:, 32:] * xg[:, :32], xg.size),
+        # x[0] is contiguous at offset 0, so its slot is not composed, and
+        # x[1]'s loads land on it too.
+        "rows-add": (
+            _on(xm, lambda x: x[0] + x[1]), xm[0] + xm[1], xm.size),
+        "rows-add-rev": (
+            _on(xm, lambda x: x[1] + x[0]), xm[1] + xm[0], xm.size),
+        "rows-mul": (
+            _on(xr, lambda x: x[0] * x[1]), xr[0] * xr[1], xr.size),
+        "rows-dot": (
+            _on(xm, lambda x: (x[0] * x[1]).sum()), (xm[0] * xm[1]).sum(),
+            xm.size),
+        # The reshape makes x[:32] contiguous at offset 0, one element short
+        # of the buffer.
+        "diff-flat": (
+            _on(xf, lambda x: x[:32].reshape(4, 8) - x[1:].reshape(4, 8)),
+            xf[:32].reshape(4, 8) - xf[1:].reshape(4, 8), xf.size),
     }
 
 
@@ -185,7 +204,7 @@ def run_beam_case(name):
 BEAM = list(_beam_cases())
 # A winning opt may sum a reduce in another order; the rest compute each
 # element the same way under every opt.
-BEAM_REORDERS = {"shrink-merge-sum"}
+BEAM_REORDERS = {"shrink-merge-sum", "rows-dot"}
 
 
 class TestShrinkReshapeReduce(unittest.TestCase):
@@ -318,13 +337,13 @@ class TestShrinkBeamIsolatedBench(unittest.TestCase):
                 problems.append(f"{name}: the isolated search declined")
             if [l for l in trace if "NAN-REJECT" in l]:
                 problems.append(f"{name}: a candidate failed the gate")
-            # The slot the leaf's loads land on holds its whole buffer (other
-            # composed slots hold broadcast constants).
+            # The slot the leaf's loads land on, composed or not, holds the
+            # whole leaf buffer; the other slots hold broadcast constants.
             whole = cases[name][2]
-            scratch = [s["scratch"] for s in _iso_slots(trace) if s["composed"]]
+            scratch = [s["scratch"] for s in _iso_slots(trace)]
             if not scratch or max(scratch) < whole:
-                problems.append(f"{name}: composed scratch {scratch} is short "
-                                f"of the {whole}-element leaf buffer")
+                problems.append(f"{name}: scratch {scratch} is short of the "
+                                f"{whole}-element leaf buffer")
         self.assertEqual(problems, [])
         # The scratch holds finite values, so a non-finite baseline means the
         # bench read past it.

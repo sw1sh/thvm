@@ -952,7 +952,8 @@ static u64 kautotune_iso_buffer_numel(TenDesc const *td, u32 dt) {
 // Allocate + fill fresh scratch buffers sized to this kernel's input/output
 // PARAM slots and install them in ISO.  Returns 1 on success, 0 if the
 // kernel can't be benched in isolation (no backend, missing dtype/numel
-// metadata, or an alloc failed -- caller then skips the isolated search).
+// metadata, an input buffer of unknown size, a gathered strided input, or
+// an alloc failed -- caller then skips the isolated search).
 static int kautotune_iso_begin(u32 kid) {
   memset(&ISO, 0, sizeof(ISO));
   if (kid == 0 || kid >= KERNELS_NEXT) {
@@ -1005,17 +1006,20 @@ static int kautotune_iso_begin(u32 kid) {
       // the caller fall back to NOT searching this kernel in isolation.
       goto fail;
     }
-    // A chain-composed slot binds the scratch in place of its raw buffer:
-    // its loads compose the movement chain into addresses over that buffer,
-    // and loads of other views of the buffer land on it too
-    // (unified_rewrite_buffer_for_tid maps a leaf to the first slot sharing
-    // its buf_id, so in x[:, :64] + x[:, 64:] the x[:, :64] slot is read
-    // across all of x).  tinygrad allocates each beam scratch as its PARAM's
-    // whole buffer (schedule/rangeify.py:284 sizes a PARAM
-    // prod(buf.max_shape), codegen/opt/postrange.py:258 allocates
-    // max_numel), so hold the logical size of the buffer behind the slot,
-    // never less than the view's numel, and decline when the backend cannot
-    // report it.  Any other strided-view input the dispatch path
+    // A slot bound to its raw buffer (chain-composed, or a contiguous view
+    // at offset 0) is read across that buffer, not only through its own
+    // view: composed loads compose the movement chain into addresses over
+    // the buffer, and unified_rewrite_buffer_for_tid maps a load of any
+    // view to the first slot sharing its buf_id, composed or not (in
+    // x[:, :64] + x[:, 64:] the composed x[:, :64] slot, in x[0] + x[1] the
+    // contiguous x[0] slot, is read across all of x).  tinygrad allocates
+    // each beam scratch as its PARAM's whole buffer (schedule/rangeify.py:284
+    // sizes a PARAM prod(buf.max_shape), codegen/opt/postrange.py:258
+    // allocates max_numel), so hold the logical size of the buffer behind
+    // the slot, never less than the view's numel, and decline when the
+    // backend cannot report it.  A slot with no TenDesc (a lambda-bound
+    // input, resolved at fire) takes no loads of other views and holds its
+    // numel.  Any other strided-view input the dispatch path
     // pre-materialises (gather) reads through
     // metal_tendesc_strided_index(td, k) over the LIVE TenDesc's view, not
     // the scratch: decline the isolated search for such a kernel.  The
@@ -1025,16 +1029,17 @@ static int kautotune_iso_begin(u32 kid) {
                                && ke->input_chain_composed[i]);
     u32            tid      = ke->input_tids != NULL ? ke->input_tids[i] : 0;
     TenDesc const *td       = (tid != 0 && tid < TENS_NEXT) ? &TENS[tid] : NULL;
-    u64            scratch  = numel;
-    if (composed) {
+    if (!composed && td != NULL
+        && (!td->view.contiguous || td->view.offset != 0 || td->nviews != 0)) {
+      goto fail;
+    }
+    u64 scratch = numel;
+    if (td != NULL || composed) {
       u64 whole = td != NULL ? kautotune_iso_buffer_numel(td, dt) : 0;
       if (whole == 0) {
         goto fail;
       }
       scratch = whole > numel ? whole : numel;
-    } else if (td != NULL && (!td->view.contiguous || td->view.offset != 0
-                              || td->nviews != 0)) {
-      goto fail;
     }
     u64 nbytes = dtype_storage_bytes(dt, scratch);
     if (nbytes == 0 || (ceiling != 0 && nbytes > ceiling)) {
