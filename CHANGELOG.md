@@ -203,6 +203,7 @@ for the per-commit story.
   last iteration.
 
 ### Backends
+- `test_uop_walk_domains` walks a 2000-deep int32 ADD chain over 4096 elements on the CPU UOp walker under a 10 s bound. The walker's int evaluator asks every ADD, MUL and NEG for its C type, which stays linear only through `uwalk_term_dtype`'s per-walk memo: unmemoized, each question re-walked the chain beneath it, and the chain took 101 s.
 - CPU JIT: the in-memory kernel cache grows (open addressing, doubled before
   half full) instead of holding a fixed 256 kernels.  Past 256 distinct
   kernel sources a process ran every new kernel on the UOp walker, slow and,

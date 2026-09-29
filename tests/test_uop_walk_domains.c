@@ -10,11 +10,14 @@
 //   - a float select stays float under CAST and BITCAST, and a float mask
 //     condition is true when nonzero;
 //   - a CAST to bool is truthiness;
-//   - an op the walker has no rule for declines the kernel.
+//   - an op the walker has no rule for declines the kernel;
+//   - typing each subterm stays linear in the DAG: a 2000-deep int32 ADD
+//     chain over 4096 elements walks well inside 10 s (unmemoized, the
+//     type recursion took 101 s).
 //
 // Each kernel is built by hand and run through kernel_harness.h: the
 // rendered C and cpu_uop_walk must both equal a host reference byte for
-// byte.
+// byte (the deep chain runs on the walker only).
 #include "../src/thvm.c"
 #include "test.h"
 #include "kernel_harness.h"
@@ -261,6 +264,37 @@ static void test_unknown_op_declines(void) {
   CHECK(!kh_run_walker(root, &k, got));
 }
 
+// out[i] = x[i] + x[i] + ... (DEEP_ADDS additions) over int32: the int
+// evaluator asks every ADD for its type, which must not re-walk the chain
+// beneath it.
+#define DEEP_N    4096
+#define DEEP_ADDS 2000
+static void test_deep_int_chain_is_linear(void) {
+  static i32 x[DEEP_N], want[DEEP_N];
+  for (u32 r = 0; r < DEEP_N; r++) {
+    x[r]    = (i32)(r % 7u) - 3;
+    want[r] = x[r] * (DEEP_ADDS + 1);
+  }
+  KhKernel k;
+  kh_init(&k, DT_INT32, DEEP_N);
+  Term i   = uop_range(0, KAX_LOOP, DEEP_N);
+  Term xi  = uop_index_e(kh_input(&k, DT_INT32, DEEP_N, x), i);
+  Term acc = xi;
+  for (u32 d = 0; d < DEEP_ADDS; d++) {
+    acc = uop_binary(UOP_ADD, acc, xi);
+  }
+  u8 *got = (u8 *)malloc(sizeof want);
+  u64 t0  = cg_now_us();
+  int ok  = kh_run_walker(uop_store(k.out, i, acc), &k, got);
+  double secs = (double)(cg_now_us() - t0) / 1e6;
+  fprintf(stderr, "  deep int chain: %u adds x %u elements walked in %.3f s\n",
+          DEEP_ADDS, DEEP_N, secs);
+  CHECK(ok);
+  CHECK(ok && memcmp(got, want, sizeof want) == 0);
+  CHECK(secs < 10.0);
+  free(got);
+}
+
 int main(void) {
   thvm_init();
   TEST_BEGIN("uop-walk-domains/range-in-float-context");
@@ -281,6 +315,8 @@ int main(void) {
   test_cast_to_bool_is_truthiness();
   TEST_BEGIN("uop-walk-domains/unknown-op-declines");
   test_unknown_op_declines();
+  TEST_BEGIN("uop-walk-domains/deep-int-chain-is-linear");
+  test_deep_int_chain_is_linear();
   thvm_free();
   TEST_REPORT();
 }

@@ -53,10 +53,11 @@ Compute paths:
   mirroring the traversal pattern of `cg_render_uop_kernel_c`
   without going through clang. Runs every kernel the JIT declines
   or has not yet compiled. Each subterm has the C type the legacy C
-  emit gives it (`uwalk_term_dtype`) and is evaluated in that type,
-  as [dtypes.md](dtypes.md) describes: an f32 value is a float that
-  every op rounds to f32, an int term (RANGE, IADD, ILT, ...) in a
-  float context keeps its value, CMPLT/CMPEQ compare in their
+  emit gives it (`uwalk_term_dtype`, memoized per walk, since a
+  term's type does not depend on loop state) and is evaluated in
+  that type, as [dtypes.md](dtypes.md) describes: an f32 value is a
+  float that every op rounds to f32, an int term (RANGE, IADD, ILT,
+  ...) in a float context keeps its value, CMPLT/CMPEQ compare in their
   operands' type (both convert to the wider one when either is a
   float, so `IAND(ILT, CMPLT)` compares floats; a u64 unsigned), a
   select condition is true when nonzero in its own type, a CAST
