@@ -871,6 +871,48 @@ static void test_grad_err(void) {
   }
 }
 
+// === 9. a half gather accumulates its gradient in float32 ===
+// tinygrad sums the one-hot's broadcast axis in sum_acc_dtype (float32 for
+// half) and casts back (mixin/gradient.py:133): the adjoint is a float32
+// scatter-add cast to half.  Three cotangents 2048, 1, 1 on one row sum to
+// 2050 in float32 but stay 2048 in half (its spacing there is 2).
+static void test_half_accumulates_in_f32(void) {
+  u32 wd[2] = { 4, 1 }, nd[1] = { 3 }, gd[2] = { 3, 1 };
+  Shape ws = shape_of(2, wd), ns = shape_of(1, nd);
+  u16 w[4] = { 0, 0, 0, 0 };
+  u16 c[3] = { f32_to_fp16(2048.0f), f32_to_fp16(1.0f), f32_to_fp16(1.0f) };
+  static i32 const ids[3] = { 2, 2, 2 };
+  u32 wt = tensor_alloc(&CPU_BACKEND, ws, DT_FP16);
+  CPU_BACKEND.buf_write(TENS[wt].buf_id, w, sizeof w);
+  Shape gs = shape_of(2, gd);
+  u32 ct = tensor_alloc(&CPU_BACKEND, gs, DT_FP16);
+  CPU_BACKEND.buf_write(TENS[ct].buf_id, c, sizeof c);
+  Term y = uop_gather(ten(wt), rows(ten(mk(DT_INT32, &ns, ids)), 3, 1), 0);
+  CHECK(y != 0);
+  Term g = term_resolve(wnf(uop_grad_with_target(y, ten(ct), ten(wt))));
+  u32 gdt = 0, sdt = 0;
+  CHECK(term_tag(g) == TAG_UOP && term_ext(g) == UOP_CAST);
+  CHECK(term_dtype_in(g, 0, &gdt) && gdt == DT_FP16);
+  Term s = term_resolve(heap_read(term_val(g)));
+  CHECK(term_tag(s) == TAG_UOP && term_ext(s) == UOP_SCATTER);
+  CHECK(term_dtype_in(s, 0, &sdt) && sdt == DT_FP32);
+  Term r = term_resolve(thvm_realize(g));
+  CHECK_EQ(term_tag(r), TAG_TEN);
+  if (term_tag(r) != TAG_TEN) {
+    return;
+  }
+  u32 tid = (u32)term_val(r);
+  u16 got[4] = { 0 };
+  CHECK_EQ(TENS[tid].dtype, DT_FP16);
+  TENS[tid].backend->buf_read(TENS[tid].buf_id, got, sizeof got);
+  CHECK(fp16_to_f32(got[0]) == 0.0f && fp16_to_f32(got[1]) == 0.0f
+        && fp16_to_f32(got[3]) == 0.0f);
+  if (fp16_to_f32(got[2]) != 2050.0f) {
+    fprintf(stderr, "  half gather grad: got=%g want=2050\n", fp16_to_f32(got[2]));
+  }
+  CHECK(fp16_to_f32(got[2]) == 2050.0f);
+}
+
 int main(void) {
   thvm_init();
   TEST_BEGIN("grad-gather-scatter/gather");
@@ -891,6 +933,8 @@ int main(void) {
   test_jit_replay();
   TEST_BEGIN("grad-gather-scatter/grad-err");
   test_grad_err();
+  TEST_BEGIN("grad-gather-scatter/half-accumulates-in-f32");
+  test_half_accumulates_in_f32();
   TEST_BEGIN("grad-gather-scatter/dispatched");
   CHECK(DISPATCHED >= 20);
   CHECK(grad_err_take() == NULL);

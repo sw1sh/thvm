@@ -28,6 +28,9 @@ for the per-commit story.
   multiway and causal graphs.
 
 ### Tensors & Autograd
+- `bin/test_grad_gather_scatter` checks that a half gather's gradient
+  accumulates in float32: three cotangents 2048, 1, 1 on one row give 2050,
+  where half accumulation stays at 2048.
 - Chain rule through `UOP_GATHER` and `UOP_SCATTER(SUM)`, the gradients of
   tinygrad's one-hot gather and scatter_reduce sum (mixin/op.py:1041,
   :1127): a gather's src gets the cotangent scatter-added back (accumulated
