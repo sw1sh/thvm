@@ -27,12 +27,11 @@ int main(void) {
 
   // Shared-subexpression case: s = a + b appears as the source of
   // TWO distinct parents (left = MUL[s, c], right = MUL[s, d]); the
-  // sink ADD merges them.  realize_classify rules:
-  //   - sink is the root             -> realized
-  //   - left, right consumers=1     -> not realized
-  //   - s consumers=2 (multi)       -> realized
-  // Expected: BOUNDARY_ORDER = [s, sink], depth(s)=1, depth(sink)=2.
-  TEST_BEGIN("materialize-v2/shared-subexpr-yields-two-boundaries");
+  // sink ADD merges them.  Both parents index s with the sink's range, so
+  // the consumer-divergence walk keeps s fused (tinygrad indexing.py:
+  // all_all_same) and the sink is the only boundary.  The consumer count
+  // alone no longer realizes s (809c2a66).
+  TEST_BEGIN("materialize-v2/shared-subexpr-fuses-into-sink");
   u32 ta = alloc_f32_tensor(4), tb = alloc_f32_tensor(4);
   u32 tc = alloc_f32_tensor(4), td = alloc_f32_tensor(4);
   Term a = term_new(0, TAG_TEN, DT_FP32, ta);
@@ -44,9 +43,21 @@ int main(void) {
   Term right = uop_binary(UOP_MUL, s, d);
   Term sink  = uop_binary(UOP_ADD, left, right);
   thvm_materialize(sink);
+  CHECK_EQ(materialize_boundary_count(), 1u);
+  CHECK_EQ(materialize_boundary_at(0), term_val(sink));
+
+  // Divergent shared subexpression: the right parent reads s2 flipped,
+  // so the two parents index it differently and s2 realizes.
+  // Expected: BOUNDARY_ORDER = [s2, sink_flip].
+  TEST_BEGIN("materialize-v2/divergent-shared-subexpr-yields-two-boundaries");
+  Term s2         = uop_binary(UOP_ADD, a, c);
+  Term left_flip  = uop_binary(UOP_MUL, s2, b);
+  Term right_flip = uop_binary(UOP_MUL, uop_flip(s2, 1), d);
+  Term sink_flip  = uop_binary(UOP_ADD, left_flip, right_flip);
+  thvm_materialize(sink_flip);
   CHECK_EQ(materialize_boundary_count(), 2u);
-  CHECK_EQ(materialize_boundary_at(0), term_val(s));
-  CHECK_EQ(materialize_boundary_at(1), term_val(sink));
+  CHECK_EQ(materialize_boundary_at(0), term_val(s2));
+  CHECK_EQ(materialize_boundary_at(1), term_val(sink_flip));
 
   // Linear elementwise chain: each intermediate has consumers=1 and
   // is not REDUCE, so only the sink is a boundary.

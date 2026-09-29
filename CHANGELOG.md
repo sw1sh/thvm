@@ -44,6 +44,9 @@ for the per-commit story.
   shared producer that the default seed realizes (one consumer reads it
   flipped); with identical consumers it fuses and no input slot comes from
   it.
+- `bin/test_materialize_v2`: a shared subexpression whose parents index it
+  identically fuses into the sink (one boundary); read flipped by one
+  parent, it becomes a second boundary ahead of the sink.
 - Fix (Linux/gcc): a ~2000-deep elementwise chain overflowed the 8 MB stack
   in the unified rewrite (gcc hoisted a 1 KB substitution and the inlined
   bufferize helpers' arrays into every recursion level, 6 KB each); those
