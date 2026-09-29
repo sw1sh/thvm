@@ -288,6 +288,7 @@ TESTS := \
   $(BIN)/test_custom_kernel \
   $(BIN)/test_autotune_correctness_gate \
   $(BIN)/test_autotune_iso_scratch \
+  $(BIN)/test_autotune_iso_extent \
   $(BIN)/test_uop_content_hash \
   $(BIN)/test_view_shrink \
   $(BIN)/test_view_permute \
@@ -325,6 +326,7 @@ TESTS := \
   $(BIN)/test_render_c_slot_hole \
   $(BIN)/test_render_reduce_chain \
   $(BIN)/test_uop_walk_domains \
+  $(BIN)/test_bypass_gate_view_offset \
   $(BIN)/test_render_uop \
   $(BIN)/test_render_uop_metal \
   $(BIN)/test_render_uop_cuda \

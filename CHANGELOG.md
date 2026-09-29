@@ -65,6 +65,7 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- `test_bypass_gate_view_offset` and `test_autotune_iso_extent` (from the gather/scatter branch, whose fixes main already holds as 6b15789d, 73062fab and 9adca130) pin a gate-tripped kernel's composed-view marks and the BEAM isolated search's scratch: a row sum over `W[t]` (a SHRINK view) plus a broadcast scalar marks every offset slot `input_chain_composed` and walks exactly on the JIT and the UOp walker, every input slot's scratch holds the largest index its view chain reaches, and `BEAM=2` realizes rows at the end of a 200000-row table.
 - `try_inline_bufferize_1axis_via_decomp` is `noinline`, like the other bufferize helpers of the walker rewrite: its decomposition stacks make a 4784-byte frame (gcc 11 -O2), which inlined into `unified_rewrite_rec_sub` would sit on every level of that recursion, the frame growth that overflowed the 8 MB Linux stack on a 2000-deep chain before 911589c0. gcc 11 and clang 14 keep it out of line today; the attribute holds that.
 - A gather's index and a scatter's base that are views of storage (a
   view-alias TEN with an offset or a PERMUTE, a lazy SHRINK or FLIP) are

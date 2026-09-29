@@ -148,6 +148,19 @@ address holds a load (`uop_dag_has_dynamic_index`, a gather or scatter
 index); hand_opts, BEAM/autotune and `kernel_apply_opt` then leave the
 kernel as a serial loop nest.
 
+The walker rewrite composes an input's view (a SHRINK offset, a permute,
+a prior-view chain) into the addresses over its underlying buffer, and the
+chain-fold scan marks those slots `input_chain_composed` so the backends
+bind that buffer as is: no pre-materialization, and no view-offset bias on
+the UOp walker's pointer.  The marks commit with the rewritten root
+whatever the resid / stranded / broadcast gates would report (the gates
+only count, under `THVM_DEBUG_BYPASS_LAST` / `THVM_DUMP_LIFT_COVERAGE`).
+Such a slot reads past its view's numel (row `t` of `W` reaches `W`'s
+element `t*D+D-1`), so the BEAM / AUTOTUNE / JITBEAM isolated search gives
+a raw-buffer slot a scratch buffer of the whole buffer behind it, as
+tinygrad sizes each beam buffer to its whole PARAM
+(codegen/opt/postrange.py:256-258).
+
 A `UOP_GATHER(src, idx, dim)` ([src/uop/gather.c](../src/uop/gather.c))
 lowers in `pm_apply_rangeify` (`ru_lower_gather`) straight to the form
 tinygrad's `pm_reduce_load_collapse` leaves once the one-hot sum of
