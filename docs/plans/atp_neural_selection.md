@@ -97,7 +97,7 @@ problems outside J13. The training pool is the TPTP library's unit-equality
 problems minus the J13 400. The J13 lesson: we tied Twee on the problems we
 had tuned against and trailed it by 18 on the rest.
 
-## Phase 0 result so far (2026-09-29)
+## Phase 0 result (2026-09-29): FAIL
 
 Infrastructure, verified on a pod: the opt-in history export
 (`THVM_ATP_HISTORY_EXPORT`, `src/atp/history.c`) is observation-only (twee
@@ -111,17 +111,61 @@ the tinygrad API.
 On the validation slice carved from train (64 problems), the engine's own
 priority already places the pending proof pairs at a median percentile of
 0.108, and its top 10 holds a proof pair at 60% of sampled steps. Every
-trained model is worse: best median 0.127 (ratio 1.17; the gate needs 0.5 or
-less). The held-out gate has not run yet; the expected verdict is FAIL.
+trained model was worse; the pre-registered rule chose the dimension-32
+history net (validation median ratio 1.13). Its one held-out run (132
+problems): median percentile 0.111 against the engine's 0.113 (ratio 0.99,
+95% bootstrap interval over problems 0.72 to 1.20), top-10 hit rate 0.646
+against 0.633 (ratio 1.02, interval 0.95 to 1.10). The pointwise history
+net ties the engine; the gate needed ratios of 0.5 and 2.
 
 Two lessons. The pre-registered top-10 criterion (twice the engine's hit
 rate) was unattainable once the engine exceeds 0.5, a flaw in the gate, not
 the model. And the objective does not match the gate: class-balanced
 cross-entropy scores each pair in isolation, while selection ranks it against
-the rest of the queue at that step. Phase 0b trains a listwise objective
-(softmax over the queue at each sampled step, the supervised form of the
-[Sud25] policy gradient) under a new gate: median percentile ratio at most
-0.5, and top-10 miss rate (1 - hit) at most half the engine's.
+the rest of the queue at that step.
+
+## Phase 0b result (2026-09-29): FAIL, but the first model that beats the engine
+
+Pre-registered before any 0b training or held-out number
+(`~/.cache/thvm/casc/J13/neural_p0/gate_spec_0b.txt`): same pool, split,
+steps and queue reconstruction; PASS iff the model's median-percentile ratio
+to the engine is at most 0.5 AND its top-10 miss rate (1 - hit) at most half
+the engine's. Trainer: `tools/atp_enigma/listwise_net.py`. The loss is
+listwise: at each sampled selection step, -log of the softmax mass of the
+pending proof pairs within the rebuilt queue (positives weigh 1, sampled
+negatives 1/rate), the supervised form of the [Sud25] policy gradient. The
+score takes the engine's own signal at the step (its rank, rank over queue
+size and log priority, computed without labels) and starts as exactly the
+engine's ranking: s = -kappa log1p(engine rank) + an MLP correction whose
+output layer starts at zero.
+
+| variant (validation, 64 problems) | median ratio | miss ratio |
+|---|---|---|
+| features + engine signal head, no history (H32) | 0.636 | 0.782 |
+| history net, dim 16 (N16) | 0.635 | 0.819 |
+| history net, dim 32 (N32) | 0.596 | 0.792 |
+
+The fixed rule (lowest max of the two ratios) chose H32. Its one held-out
+run (132 problems): median percentile 0.078 against the engine's 0.113
+(ratio 0.69, interval 0.55 to 0.87; better on 86 problems, worse on 44), top-10
+miss rate 0.282 against 0.368 (ratio 0.77, interval 0.66 to 0.87). FAIL
+against the 0.5 thresholds, but both intervals exclude 1: the listwise
+objective with the engine's signal as input is the first model in this arc
+that ranks proof pairs better than the engine's own priority on unseen
+problems. The derivation-history embedding adds nothing measurable over
+the features-only head (N32's median edge comes with a worse miss rate).
+
+Caveat for any follow-up gate: the positives are the proof the engine found
+along its own selection order, so an offline comparison on that trajectory
+favors the engine. The rank feature is also step-dependent; an online lane
+(phase 1) would score with the static columns (priority, features).
+
+tinygrad 0.11 trap met on the way: `Tensor.zeros(shape).contiguous()` is
+hash-consed, so a parameter initialized that way shares its buffer with
+Adam's same-shaped `m`, `v`, `b1_t` and `b2_t` (built the same way) once a
+forward pass realizes it, and the first step writes NaN. Initialize
+constant parameters from numpy. Phase 0's parameters were all random, so
+its Adam was unaffected.
 
 ## Risks
 
