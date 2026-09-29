@@ -51,12 +51,12 @@ logical shape via `TTensorShape[]`.
 
 Native lanes -- f32, f64, the integer family.  The kernel reads /
 writes the dtype's storage directly and runs typed arithmetic.  On the
-CPU JIT an f64 reduce accumulates in a double, as tinygrad allocates
-the accumulator like the reduce (reduce_ranges_to_acc,
-codegen/__init__.py:197-199), and so do the loads and lane-invariant
-values the legacy C emit hoists next to the accumulator.  The legacy C
-emit accumulates an int or bool reduce in a float, which is exact
-below 2^24.
+CPU JIT a reduce accumulates in its dtype, as tinygrad allocates the
+accumulator like the reduce (reduce_ranges_to_acc,
+codegen/__init__.py:197-204): an f64 reduce in a double and an int or
+bool reduce in its own C type (below), and so do the loads and
+lane-invariant values the legacy C emit hoists next to the
+accumulator.
 
 The CPU UOp walker
 ([src/backend/cpu/uop_walk.c](../src/backend/cpu/uop_walk.c)) has a
@@ -146,8 +146,9 @@ a u64 MAX unsigned; a bool SUM or MAX is an OR (uop/symbolic.py:163-166).
 The legacy C emit declares the accumulator, and the hoisted loads and
 lane-invariant locals of a register-blocked reduce, in the dtype's C
 type; an int MAX starts at `INT<n>_MIN` or 0 and compares, as tinygrad
-lowers MAX (codegen/decomp/op.py:84).  Float reduces, and the GPU
-targets, keep the float accumulator.  The devectorizer types each
+lowers MAX (codegen/decomp/op.py:84).  An f32 reduce keeps a float
+accumulator and an f64 one a double; the GPU targets keep a float
+accumulator for every dtype.  The devectorizer types each
 accumulator from the reduce's body, a STACK of lanes and a lowered
 inner reduce included, and combines a bool SUM as it does a MAX, which
 is an OR on {0, 1}.
@@ -246,7 +247,7 @@ a view-only no-op when contiguous-compatible).
 | Path        | Wired dtypes |
 |-------------|--------------|
 | CPU UOp walker (`uop_walk.c`) | all but i4 / u4 |
-| CPU JIT (`jit.c`, any C compiler) | all but f16 / bf16 / fp8 (`cpu_jit_narrow_float`) and i4 / u4; the legacy C emit accumulates an int or bool reduce in a float |
+| CPU JIT (`jit.c`, any C compiler) | all but f16 / bf16 / fp8 (`cpu_jit_narrow_float`) and i4 / u4 |
 | CPU BLAS (Accelerate, OpenBLAS / BLIS) | f32 and f64 matmul / matvec / dot; batched matmul and contractions f32 only |
 | Metal generated MSL | the types `rmu_msl_type_name` maps: f32, f16 (`half`), bf16 (`bfloat`), fp8 (bytes decoded to float), i8 / u8 / i32 / i64 |
 | Metal shader library (DAG encoder) | f32 / i32 (`metal_kernel_supported`) |
