@@ -146,6 +146,23 @@ static u8 atp_cone_orient_gt_ft(AtpState *s, const AtpFtCell *bl,
 // after the engine retired it, and the death model misses retirements
 // that leave no SIMPLIFY record.
 static u8 g_cone_win_wide = 0u;
+// Symbol filter (emission re-derivation's fast pass): a nonzero mask
+// admits only births whose rewriting face uses function symbols inside
+// it (a 64-bit bloom by symbol id), cutting a thousands-rule window to
+// the rules a chain between two known endpoints can plausibly apply.
+// The per-birth face masks are the caller's (NULL = no filter).
+static u64  g_cone_win_mask = 0u;
+static u64 *g_cone_birth_lmask = NULL;
+static u64 *g_cone_birth_rmask = NULL;
+
+static u64 atp_cone_span_mask(const AtpFtCell *t) {
+  u64 m = 0u;
+  const AtpFtCell *end_after = (t->end != NULL) ? t->end->next : NULL;
+  for (const AtpFtCell *c = t; c != NULL && c != end_after; c = c->next) {
+    if ((c->sym & WF_VAR_BIT) == 0u) m |= 1ull << (c->sym & 63u);
+  }
+  return m;
+}
 
 static u32 atp_cone_install_window(AtpState *s, u32 n_rules0,
                                    const u32 *birth_ti,
@@ -171,9 +188,18 @@ static u32 atp_cone_install_window(AtpState *s, u32 n_rules0,
         birth_rft[b]   = br;
         birth_or[b]    = atp_cone_orient_gt_ft(s, bl, br);
         birth_state[b] = 1u;
+        if (g_cone_birth_lmask != NULL) {
+          g_cone_birth_lmask[b] = atp_cone_span_mask(bl);
+          g_cone_birth_rmask[b] = atp_cone_span_mask(br);
+        }
       }
     }
     if (birth_state[b] != 1u) continue;
+    if (g_cone_win_mask != 0u && g_cone_birth_lmask != NULL) {
+      u8 lhs_in = (u8)((g_cone_birth_lmask[b] & ~g_cone_win_mask) == 0u);
+      u8 rhs_in = (u8)((g_cone_birth_rmask[b] & ~g_cone_win_mask) == 0u);
+      if (!(lhs_in || (!birth_or[b] && rhs_in))) continue;
+    }
     atp_ensure_rule_cap(s, n_rules0 + k + 1u);
     u32 w = n_rules0 + k;
     s->lhs[w]      = 0;   // FT path never reads the Term slots
@@ -537,6 +563,8 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
 // of it), so a returned chain is a real derivation -- a missing one
 // only costs the emitter's fallbacks.
 
+static int atp_rd_late(void);
+
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
 typedef struct {
   const AtpState *s;
@@ -548,6 +576,8 @@ typedef struct {
   u8   *birth_or;
   AtpFtCell **birth_lft;
   AtpFtCell **birth_rft;
+  u64  *birth_lmask;      // face symbol masks (atp_cone_span_mask)
+  u64  *birth_rmask;
 } AtpRdHist;
 static AtpRdHist g_rd_hist;
 
@@ -562,7 +592,10 @@ static void atp_rd_hist_drop(void) {
   }
   free(h->birth_ti); free(h->birth_dead); free(h->birth_state);
   free(h->birth_or); free(h->birth_lft); free(h->birth_rft);
+  free(h->birth_lmask); free(h->birth_rmask);
   memset(h, 0, sizeof *h);
+  g_cone_birth_lmask = NULL;
+  g_cone_birth_rmask = NULL;
 }
 
 // A rule slot is born by an ORIENT / FVI record, and REBORN in place by
@@ -614,8 +647,11 @@ static int atp_rd_hist_ensure(AtpState *s) {
   h->birth_or    = (u8 *)calloc(nb, 1u);
   h->birth_lft   = (AtpFtCell **)calloc(nb, sizeof(AtpFtCell *));
   h->birth_rft   = (AtpFtCell **)calloc(nb, sizeof(AtpFtCell *));
+  h->birth_lmask = (u64 *)calloc(nb, sizeof(u64));
+  h->birth_rmask = (u64 *)calloc(nb, sizeof(u64));
   if (h->birth_ti == NULL || h->birth_dead == NULL || h->birth_state == NULL ||
-      h->birth_or == NULL || h->birth_lft == NULL || h->birth_rft == NULL) {
+      h->birth_or == NULL || h->birth_lft == NULL || h->birth_rft == NULL ||
+      h->birth_lmask == NULL || h->birth_rmask == NULL) {
     free(reborn);
     atp_rd_hist_drop();
     return 0;
@@ -858,13 +894,15 @@ static u32 atp_rd_meet(AtpState *s, Term pl, Term pr, Term el, Term er,
   static u32  qa[4][M];
   u32 na[4];
   for (u32 swap = 0; swap < 2u; swap++) {
+    if (atp_rd_late()) return 0u;
     Term xl = thvm_rename_vars(swap ? er : el, CP_RENAME_OFFSET);
     Term xr = thvm_rename_vars(swap ? el : er, CP_RENAME_OFFSET);
     Term src[4] = { pl, pr, xl, xr };
     Term nf4[4];
     int ok = 1;
     for (u32 i = 0; i < 4u && ok; i++)
-      ok = atp_rd_nf_ft(s, src[i], ti, doE, 0u, p_a, &nf4[i], ta[i], qa[i],
+      ok = !atp_rd_late() &&
+           atp_rd_nf_ft(s, src[i], ti, doE, 0u, p_a, &nf4[i], ta[i], qa[i],
                         M, &na[i]);
     if (!ok) continue;
     u32 total = na[0] + na[1] + na[2] + na[3];
@@ -916,45 +954,35 @@ static u32 atp_rd_meet(AtpState *s, Term pl, Term pr, Term el, Term er,
 // re-derivation costs proof quality, never the run's status.
 static u64 g_atp_rd_deadline_us = 0u;
 fn void thvm_atp_rederive_deadline(u64 wall_us) { g_atp_rd_deadline_us = wall_us; }
+// One record's replays get at most this long (a record no rung can
+// reach would otherwise sweep every window at full size).
+#define ATP_RD_CALL_US 1500000ull
+static u64 g_atp_rd_call_deadline_us = 0u;
 static int atp_rd_late(void) {
-  return g_atp_rd_deadline_us != 0u && atp_now_us() >= g_atp_rd_deadline_us;
+  u64 now = atp_now_us();
+  if (g_atp_rd_deadline_us != 0u && now >= g_atp_rd_deadline_us) return 1;
+  return g_atp_rd_call_deadline_us != 0u && now >= g_atp_rd_call_deadline_us;
 }
 
 // THVM_ATP_RD_DEBUG=1: one line per re-derivation (rung 0 = miss;
 // 1+r mixmost-or-term rung r of the first pass, 101+r second pass,
 // 1000+k meet).
+static u64 g_atp_rd_t0 = 0u;
 static void atp_rd_note(u32 ti, u32 reason, u32 rung, u32 n) {
   static int dbg = -1;
   if (dbg < 0) dbg = atp_env_on("THVM_ATP_RD_DEBUG");
   if (dbg)
-    fprintf(stderr, "[rederive] ti=%u reason=%u rung=%u steps=%u\n",
-            ti, reason, rung, n);
+    fprintf(stderr, "[rederive] ti=%u reason=%u rung=%u steps=%u us=%llu\n",
+            ti, reason, rung, n,
+            (unsigned long long)(atp_now_us() - g_atp_rd_t0));
 }
 
-fn u32 thvm_atp_rederive(AtpState *s, u32 ti, AtpRederiveStep *out,
-                         u32 cap) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-  if (s == NULL || s->trace == NULL || ti >= s->n_trace || cap == 0u)
-    return 0u;
-  if (s->ft_arena_ptr == NULL) return 0u;
-  Term e = s->trace[ti];
-  if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 4u) return 0u;
-  u32 reason = term_ext(e);
-  if (reason != TRACE_ORIENT && reason != TRACE_FVI &&
-      reason != TRACE_SIMPLIFY)
-    return 0u;
-  u32 p_a = (u32)term_val(term_ctr_at(e, 0));
-  if (p_a == ATP_TRACE_NONE || p_a >= ti) return 0u;
-  // Headroom: a failed rung rolls its Terms back, a found chain stays
-  // live until the emitter prints it.
-  if (gc_from_end() - HEAP_NEXT < (u64)(4u << 20)) return 0u;
-  Term el = 0, er = 0, pl = 0, pr = 0;
-  if (!atp_cone_eq(s, ti, &el, &er) || !atp_cone_eq(s, p_a, &pl, &pr))
-    return 0u;
-  if (atp_cone_pair_eq(pl, pr, el, er) || atp_cone_pair_eq(pl, pr, er, el))
-    return 0u;   // no gap
-  if (!atp_rd_hist_ensure(s)) return 0u;
-  atp_ft_mirror_ensure(s);
+// The replay ladder, then the meet-in-the-middle, over the windows the
+// current filter (g_cone_win_mask) admits.  Returns the chain length or 0.
+static u32 atp_rd_ladder(AtpState *s, u32 ti, u32 reason, u32 p_a,
+                         Term pl, Term pr, Term el, Term er,
+                         AtpRederiveStep *out, u32 cap, u32 tag) {
   // Rung table: {ft, doE, incl_parent, sides, two-phase, oriented_first}.
   typedef struct { u8 ft, doE, inc, sides, two, ofirst; } Rung;
   static const Rung orient_rungs[] = {
@@ -1005,7 +1033,7 @@ fn u32 thvm_atp_rederive(AtpState *s, u32 ti, AtpRederiveStep *out,
                                rg->sides, rg->ofirst, out, cap, &n);
     }
     if (ok && n > 0u && atp_rd_lands(reason, cl, cr, el, er)) {
-      atp_rd_note(ti, reason, 1u + pass * 100u + ri, n);
+      atp_rd_note(ti, reason, tag + 1u + pass * 100u + ri, n);
       return n;
     }
     {
@@ -1016,7 +1044,7 @@ fn u32 thvm_atp_rederive(AtpState *s, u32 ti, AtpRederiveStep *out,
       }
       if (dbg2) {
         fprintf(stderr, "[rd-miss] ti=%u rung=%u ok=%d n=%u got: ", ti,
-                1u + pass * 100u + ri, ok, n);
+                tag + 1u + pass * 100u + ri, ok, n);
         atp_dbg_print_term(stderr, cl);
         fputs(" = ", stderr);
         atp_dbg_print_term(stderr, cr);
@@ -1055,11 +1083,63 @@ fn u32 thvm_atp_rederive(AtpState *s, u32 ti, AtpRederiveStep *out,
       u32 n = atp_rd_meet(s, pl, pr, el, er, ti, p_a, (u8)(1u - k), out,
                           cap);
       if (n > 0u) {
-        atp_rd_note(ti, reason, 1000u + k, n);
+        atp_rd_note(ti, reason, tag + 1000u + k, n);
         return n;
       }
       if (gc_count() == g0) thvm_atp_heap_reset(hp);
     }
+  }
+  return 0u;
+}
+#endif
+
+fn u32 thvm_atp_rederive(AtpState *s, u32 ti, AtpRederiveStep *out,
+                         u32 cap) {
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+  if (s == NULL || s->trace == NULL || ti >= s->n_trace || cap == 0u)
+    return 0u;
+  if (s->ft_arena_ptr == NULL) return 0u;
+  Term e = s->trace[ti];
+  if (term_tag(e) != TAG_CTR || term_ctr_n(e) < 4u) return 0u;
+  u32 reason = term_ext(e);
+  if (reason != TRACE_ORIENT && reason != TRACE_FVI &&
+      reason != TRACE_SIMPLIFY)
+    return 0u;
+  u32 p_a = (u32)term_val(term_ctr_at(e, 0));
+  if (p_a == ATP_TRACE_NONE || p_a >= ti) return 0u;
+  g_atp_rd_t0 = atp_now_us();
+  g_atp_rd_call_deadline_us = g_atp_rd_t0 + ATP_RD_CALL_US;
+  // Headroom: a failed rung rolls its Terms back, a found chain stays
+  // live until the emitter prints it.
+  if (gc_from_end() - HEAP_NEXT < (u64)(4u << 20)) return 0u;
+  Term el = 0, er = 0, pl = 0, pr = 0;
+  if (!atp_cone_eq(s, ti, &el, &er) || !atp_cone_eq(s, p_a, &pl, &pr))
+    return 0u;
+  if (atp_cone_pair_eq(pl, pr, el, er) || atp_cone_pair_eq(pl, pr, er, el))
+    return 0u;   // no gap
+  if (!atp_rd_hist_ensure(s)) return 0u;
+  atp_ft_mirror_ensure(s);
+  // Fast pass: windows filtered to the rules whose faces use only the
+  // endpoints' function symbols; then the full windows.
+  u64 allowed = 0u;
+  {
+    AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+    Term ends[4] = { pl, pr, el, er };
+    for (u32 i = 0; i < 4u; i++) {
+      AtpFtCell *c = ft_from_term(a, ends[i], 0);
+      allowed |= atp_cone_span_mask(c);
+      ft_free_span(a, c, c->end);
+    }
+  }
+  g_cone_birth_lmask = g_rd_hist.birth_lmask;
+  g_cone_birth_rmask = g_rd_hist.birth_rmask;
+  for (u32 fp = 0; fp < 2u; fp++) {
+    g_cone_win_mask = (fp == 0u) ? (allowed ? allowed : ~0ull) : 0u;
+    u32 n = atp_rd_ladder(s, ti, reason, p_a, pl, pr, el, er, out, cap,
+                          fp == 0u ? 5000u : 0u);
+    g_cone_win_mask = 0u;
+    if (n > 0u) return n;
+    if (atp_rd_late()) return 0u;
   }
   // Last resort: the same attempts over WIDE windows (every earlier
   // birth, retired or not).

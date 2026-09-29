@@ -130,7 +130,10 @@ for the per-commit story.
   and lost COL003-1/COL044-1 at 180s); the treatment chain behind each
   printed orient/simplify record is re-derived at emission by replaying
   the engine's normalizers over the historical rule window, with a
-  meet-in-the-middle fallback (`thvm_atp_rederive`).  The critical-goal
+  meet-in-the-middle fallback (`thvm_atp_rederive`); the emission is
+  bounded to finish inside the wall (a schedule replays a slice only
+  once it exits), so a slow re-derivation costs proof quality, never
+  the status.  The critical-goal
   queue logs the splices of the engine's own normalizer instead of
   re-normalizing with the proof extractor.  Trace entries past the
   default cap (kept for deep proofs) live in a permanent heap tail the

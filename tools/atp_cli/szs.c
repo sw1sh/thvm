@@ -17,6 +17,15 @@ static u64 g_cli_emit_deadline_us = 0u;
 static int cli_emit_late(void) {
   return g_cli_emit_deadline_us != 0u && atp_now_us() >= g_cli_emit_deadline_us;
 }
+// A whole-trace scan (bridge successors, parent rescue, deep citation
+// resolve) for ONE record or step stops after this long, or at the
+// emission deadline -- a record none of them can reach otherwise costs
+// seconds per scan on a deep trace.
+#define CLI_SCAN_US 1000000ull
+static int cli_scan_over(u64 t0, u32 i) {
+  if ((i & 1023u) != 0u) return 0;
+  return cli_emit_late() || atp_now_us() - t0 >= CLI_SCAN_US;
+}
 
 // 1 when no completeness-breaking pruning is active AND the goal is
 // ground, so a saturation (QUEUE_EMPTY) soundly reports Satisfiable;
@@ -337,8 +346,10 @@ static u32 cli_bridge_scan(AtpState *s, Term pl, Term pr, u32 below,
   u32 n = 0u;
   u32 scan = (below < s->n_trace) ? below : s->n_trace;
   if (scan > (1u << 20)) return 0u;   // unbounded traces: skip
+  u64 t0 = atp_now_us();
   for (u32 ti = 0; ti < scan && n < cap; ti++) {
     Term u = 0, v = 0;
+    if (cli_scan_over(t0, ti)) break;
     if (gc_from_end() - HEAP_NEXT < CLI_BRIDGE_HEADROOM) break;
     u64 hp = thvm_atp_heap_checkpoint();
     u64 g0 = gc_count();
@@ -463,7 +474,9 @@ static u32 cli_bridge_rescue(AtpState *s, Term tl, Term tr, u32 below,
   qsort(bh, nb, sizeof(u64), cmp_u64);
   u32 scan = (below < s->n_trace) ? below : s->n_trace;
   if (scan > (1u << 20)) return ATP_TRACE_NONE;
+  u64 t0 = atp_now_us();
   for (u32 e = 0; e < scan; e++) {
+    if (cli_scan_over(t0, e)) break;
     if (gc_from_end() - HEAP_NEXT < CLI_BRIDGE_HEADROOM) break;
     u64 hp = thvm_atp_heap_checkpoint();
     u64 g0 = gc_count();
@@ -993,7 +1006,9 @@ static u32 cli_resolve_step_trace(AtpState *s, const AtpProofStep *st) {
   // Full trace scan: the applied equation was interreduced away.
   // Costly (replay per trace entry) -- opt-in, the deep resolve pass.
   if (!cli_resolve_deep() || cli_emit_late()) return ATP_TRACE_NONE;
+  u64 t0 = atp_now_us();
   for (u32 ti = 0; ti < s->n_trace; ti++) {
+    if (cli_scan_over(t0, ti)) break;
     Term l = 0, r = 0;
     if (!cli_tp_cached(s, ti, &l, &r)) continue;
     if (cli_step_replays(s, st, l, r)) return ti;
@@ -1061,7 +1076,9 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
       // decomposition through any midpoint and SPLIT the record at
       // emission so the checker sees single-step inferences.
       const AtpProofStep *st = &steps[k];
+      u64 t0 = atp_now_us();
       for (u32 ta = 0; ta < s->n_trace && midpoint[k] == 0; ta++) {
+        if (cli_scan_over(t0, ta)) break;
         Term la = 0, ra = 0;
         if (!cli_tp_cached(s, ta, &la, &ra)) continue;
         // The candidate replays allocate heavily (fanout x trace Term
@@ -1079,6 +1096,7 @@ static void cli_emit_goal_chain(FILE *fp, AtpState *s, const PrProblem *pr,
           AtpProofStep half = *st;
           half.before = acc.out[m];
           for (u32 tb = 0; tb < s->n_trace && midpoint[k] == 0; tb++) {
+            if (cli_scan_over(t0, tb)) break;
             Term lb = 0, rb = 0;
             if (!cli_tp_cached(s, tb, &lb, &rb)) continue;
             if (cli_step_replays(s, &half, lb, rb)) {

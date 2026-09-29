@@ -1477,10 +1477,16 @@ int main(int argc, char **argv) {
       snprintf(line, sizeof line, "%% SZS status %s for %s\n",
                g_cli_tptp_mode ? "Timeout" : "ResourceOut", file);
     cli_arm_wall_alarm(atof(wall), 30, outfd, line[0] ? line : NULL);
-    // Proof emission must finish inside the alarm's grace: past this
-    // point its replays and deep scans give up (records keep their
-    // cheap bridges), so a slow emission costs proof quality only.
-    g_cli_emit_deadline_us = atp_now_us() + (u64)((atof(wall) + 15.0) * 1e6);
+    // Proof emission must finish inside the wall: a schedule replays a
+    // slice's output only once it exits, and the competition kills at
+    // the wall.  Past this point the emission's replays and deep scans
+    // give up (records keep their cheap bridges), so a slow emission
+    // costs proof quality, never the status.
+    {
+      double ew = atof(wall) - 1.0;
+      if (ew < 1.0) ew = 1.0;
+      g_cli_emit_deadline_us = atp_now_us() + (u64)(ew * 1e6);
+    }
   }
 
   char *bench_argv[5];
