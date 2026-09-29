@@ -538,16 +538,17 @@ static Term fol_rewrite_once(Term term, Term s, Term t) {
   if (term_tag(term) != TAG_CTR) return term;
   u32 n = term_ctr_n(term);
   if (n == 0u) return term;
-  if (n > REWRITE_MAX_ARITY) return term;
-  Term kids[REWRITE_MAX_ARITY];
+  Term stk[REWRITE_MAX_ARITY];
+  Term *kids = term_kids_buf(stk, n);
   u8 changed = 0u;
   for (u32 i = 0; i < n; i++) {
     Term orig = term_ctr_at(term, i);
     kids[i] = fol_rewrite_once(orig, s, t);
     if (kids[i] != orig) changed = 1u;
   }
-  if (!changed) return term;
-  return term_new_ctr(term_ext(term), kids, n);
+  Term r = changed ? term_new_ctr(term_ext(term), kids, n) : term;
+  term_kids_release(kids, stk);
+  return r;
 }
 
 // Apply the rewrite `s -> t` to a single literal's atom.  Returns

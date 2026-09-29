@@ -72,14 +72,17 @@ static Term cp_replace_at(Term t, const u32 *p, u32 p_len, Term repl) {
   if (p_len == 0) return repl;
   if (term_tag(t) != TAG_CTR) return t;
   u32 n = term_ctr_n(t);
-  if (p[0] >= n || n > REWRITE_MAX_ARITY) return t;
-  Term children[REWRITE_MAX_ARITY];
+  if (p[0] >= n) return t;
+  Term stk[REWRITE_MAX_ARITY];
+  Term *children = term_kids_buf(stk, n);
   for (u32 i = 0; i < n; i++) {
     children[i] = (i == p[0])
       ? cp_replace_at(term_ctr_at(t, i), p + 1, p_len - 1, repl)
       : term_ctr_at(t, i);
   }
-  return term_new_ctr(term_ext(t), children, n);
+  Term r = term_new_ctr(term_ext(t), children, n);
+  term_kids_release(children, stk);
+  return r;
 }
 
 // Read the sub-term at position `p`.

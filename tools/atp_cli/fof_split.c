@@ -1375,11 +1375,11 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
   }
   for (int i = 0; i < ncl; i++) {
     if (sine_keep != NULL && !sine_keep[i]) continue;   // outside the cone
-    // A Skolem term over more than REWRITE_MAX_ARITY universals (or a
-    // Tseitin name over as many variables) is a node the unifier and
-    // renamer pass through unchanged: saturating it derives what the
-    // clause does not entail (pc_term_wide).  The equational lanes read
-    // it curried; here it stays out, which only shrinks the set.
+    // A node wider than REWRITE_MAX_ARITY (a Skolem term over more
+    // universals, a Tseitin name over as many variables) stays out, which
+    // only shrinks the set: the walkers rebuild any arity, but one that
+    // passed it through unsubstituted would derive what the clause does
+    // not entail (pc_term_wide).  The equational lanes read it curried.
     if (pc_clause_wide(cls[i])) continue;
     FolClause *c = fol_clause_new(cls[i]->n_lits);
     if (c == NULL) {

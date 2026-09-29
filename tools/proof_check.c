@@ -302,10 +302,9 @@ static u32 pc_varid(PcParse *p, const char *name) {
 static Term pc_formula(PcParse *p);   // fwd
 static Term pc_unary(PcParse *p);     // fwd
 
-// f(t1, ..., tn) wider than a term node holds (every term walker sizes
-// its child buffer by REWRITE_MAX_ARITY and passes a wider node through
-// unsubstituted) becomes the chain ap2:(...ap2:(wide:f/n, t1)..., tn),
-// in records and problem alike.  The encoding is injective on terms --
+// f(t1, ..., tn) wider than a term node holds (the checker's saturation
+// leaves such a node out, pc_term_wide) becomes the chain
+// ap2:(...ap2:(wide:f/n, t1)..., tn), in records and problem alike.  The encoding is injective on terms --
 // the arity is in the head's name, and ':' / '/' spell no identifier,
 // the quoted spellings being refused (pc_curry_reserved) -- so every
 // syntactic check reads it exactly.  Entailment differs.  A model of
@@ -819,13 +818,15 @@ static double pc_cnf_est(Term f) {
   return 1.0;
 }
 
-// A node wider than a term node holds: the unifier, the renamer and the
-// substitution walkers pass it through unchanged, so a saturation over
-// it derives what its clauses do not entail (p(sk(X1..X17)) resolved at
-// X1 := a stays p(sk(X1..X17))).  The parse curries wide functors
-// (pc_curry), but clausification still builds them: a Skolem term over
-// more than REWRITE_MAX_ARITY universals, a Tseitin name over as many
-// free variables.
+// A node wider than a term node holds.  The term walkers rebuild any
+// arity (term_kids_buf), but one that passed such a node through
+// unsubstituted -- as the unifier and renamer did -- makes a saturation
+// derive what its clauses do not entail (p(sk(X1..X17)) resolved at
+// X1 := a stays p(sk(X1..X17))), so saturation leaves these clauses out
+// and a missed walker costs completeness only.  The parse curries wide
+// functors (pc_curry), but clausification still builds them: a Skolem
+// term over more than REWRITE_MAX_ARITY universals, a Tseitin name over
+// as many free variables.
 static int pc_term_wide(Term t) {
   if (term_tag(t) != TAG_CTR) return 0;
   u32 n = term_ctr_n(t);
@@ -3396,15 +3397,17 @@ static Term pc_sk_abstract(Term t, u32 L, u32 V) {
   if (term_ext(t) == L) return term_new_fvr(V);
   u32 n = term_ctr_n(t);
   if (n == 0) return t;
-  Term kids[REWRITE_MAX_ARITY];
-  if (n > REWRITE_MAX_ARITY) return t;
+  Term stk[REWRITE_MAX_ARITY];
+  Term *kids = term_kids_buf(stk, n);
   int changed = 0;
   for (u32 i = 0; i < n; i++) {
     Term c = term_ctr_at(t, i);
     kids[i] = pc_sk_abstract(c, L, V);
     if (kids[i] != c) changed = 1;
   }
-  return changed ? term_new_ctr(term_ext(t), kids, n) : t;
+  Term r = changed ? term_new_ctr(term_ext(t), kids, n) : t;
+  term_kids_release(kids, stk);
+  return r;
 }
 
 // Insert `exists V` into the quantifier prefix of `f` at the outermost
@@ -3603,15 +3606,17 @@ static Term pc_subst_var(Term t, u32 vid, Term repl) {
   if (term_tag(t) != TAG_CTR) return t;
   u32 n = term_ctr_n(t);
   if (n == 0) return t;
-  Term kids[REWRITE_MAX_ARITY];
-  if (n > REWRITE_MAX_ARITY) return t;
+  Term stk[REWRITE_MAX_ARITY];
+  Term *kids = term_kids_buf(stk, n);
   int ch = 0;
   for (u32 i = 0; i < n; i++) {
     Term c = term_ctr_at(t, i);
     kids[i] = pc_subst_var(c, vid, repl);
     if (kids[i] != c) ch = 1;
   }
-  return ch ? term_new_ctr(term_ext(t), kids, n) : t;
+  Term r = ch ? term_new_ctr(term_ext(t), kids, n) : t;
+  term_kids_release(kids, stk);
+  return r;
 }
 // Replace the node `target` (by identity) inside f with `repl`.
 static Term pc_replace_node(Term f, Term target, Term repl, int *done) {
@@ -3619,15 +3624,17 @@ static Term pc_replace_node(Term f, Term target, Term repl, int *done) {
   if (term_tag(f) != TAG_CTR) return f;
   u32 n = term_ctr_n(f);
   if (n == 0) return f;
-  Term kids[REWRITE_MAX_ARITY];
-  if (n > REWRITE_MAX_ARITY) return f;
+  Term stk[REWRITE_MAX_ARITY];
+  Term *kids = term_kids_buf(stk, n);
   int ch = 0;
   for (u32 i = 0; i < n; i++) {
     Term c = term_ctr_at(f, i);
     kids[i] = (*done) ? c : pc_replace_node(c, target, repl, done);
     if (kids[i] != c) ch = 1;
   }
-  return ch ? term_new_ctr(term_ext(f), kids, n) : f;
+  Term r = ch ? term_new_ctr(term_ext(f), kids, n) : f;
+  term_kids_release(kids, stk);
+  return r;
 }
 static int pc_var_free_in(Term t, u32 vid) {
   if (term_tag(t) == TAG_FVR) return term_ext(t) == vid;

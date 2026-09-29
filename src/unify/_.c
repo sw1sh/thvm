@@ -151,8 +151,8 @@ fn Term thvm_rename_vars(Term t, u32 offset) {
       Term n_cell = heap_read(base);
       if (term_tag(n_cell) != TAG_NUM) return t;
       u32 n = (u32)term_val(n_cell);
-      if (n > REWRITE_MAX_ARITY) return t;
-      Term children[REWRITE_MAX_ARITY];
+      Term stk[REWRITE_MAX_ARITY];
+      Term *children = term_kids_buf(stk, n);
       u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
         Term orig = heap_read(base + 1u + (u64)i);
@@ -161,8 +161,9 @@ fn Term thvm_rename_vars(Term t, u32 offset) {
       }
       // If t had no variables, every child returned itself -- avoid the
       // wasted term_new_ctr (closed-term case, e.g. ground goal sides).
-      if (!changed) return t;
-      return term_new_ctr(term_ext(t), children, n);
+      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
+      term_kids_release(children, stk);
+      return r;
     }
     default: return t;
   }
@@ -197,8 +198,8 @@ fn Term thvm_unify_apply(Term t, const RewriteSubst *subst) {
       Term n_cell = heap_read(base);
       if (term_tag(n_cell) != TAG_NUM) { g_unify_apply_taint++; return t; }
       u32 n = (u32)term_val(n_cell);
-      if (n > REWRITE_MAX_ARITY) { g_unify_apply_taint++; return t; }
-      Term children[REWRITE_MAX_ARITY];
+      Term stk[REWRITE_MAX_ARITY];
+      Term *children = term_kids_buf(stk, n);
       u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
         Term orig = heap_read(base + 1u + (u64)i);
@@ -207,8 +208,9 @@ fn Term thvm_unify_apply(Term t, const RewriteSubst *subst) {
       }
       // Hash-cons skip: if no child rewrote, return original t (saves
       // a term_new_ctr allocation per untouched subterm during CP-gen).
-      if (!changed) return t;
-      return term_new_ctr(term_ext(t), children, n);
+      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
+      term_kids_release(children, stk);
+      return r;
     }
     default: return t;
   }
@@ -282,16 +284,17 @@ static Term nv_rewrite(Term t, NvMap *m) {
       Term n_cell = heap_read(base);
       if (term_tag(n_cell) != TAG_NUM) return t;
       u32 n = (u32)term_val(n_cell);
-      if (n > REWRITE_MAX_ARITY) return t;
-      Term children[REWRITE_MAX_ARITY];
+      Term stk[REWRITE_MAX_ARITY];
+      Term *children = term_kids_buf(stk, n);
       u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
         Term orig = heap_read(base + 1u + (u64)i);
         children[i] = nv_rewrite(orig, m);
         if (children[i] != orig) changed = 1;
       }
-      if (!changed) return t;
-      return term_new_ctr(term_ext(t), children, n);
+      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
+      term_kids_release(children, stk);
+      return r;
     }
     default: return t;
   }

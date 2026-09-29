@@ -1700,6 +1700,10 @@ fn void thvm_register_core_prims(void);
 fn Term term_new_ctr (u32 label, const Term *children, u32 n);
 fn u32  term_ctr_n   (Term ctr_term);
 fn Term term_ctr_at  (Term ctr_term, u32 i);
+// Child scratch for a CTR rebuild: `stk` (REWRITE_MAX_ARITY slots)
+// when n fits, a heap block otherwise; release with term_kids_release.
+fn Term *term_kids_buf    (Term *stk, u32 n);
+fn void  term_kids_release(Term *kids, Term *stk);
 
 // === lazy outermost-layer resolver ===
 // Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);

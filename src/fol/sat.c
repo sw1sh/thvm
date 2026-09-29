@@ -1550,16 +1550,17 @@ static Term cnf_rewrite_once(const CnfState *s, Term term, Term lhs, Term rhs) {
   if (term_tag(term) != TAG_CTR) return term;
   u32 n = term_ctr_n(term);
   if (n == 0u) return term;
-  if (n > REWRITE_MAX_ARITY) return term;
-  Term kids[REWRITE_MAX_ARITY];
+  Term stk[REWRITE_MAX_ARITY];
+  Term *kids = term_kids_buf(stk, n);
   u8 changed = 0u;
   for (u32 i = 0; i < n; i++) {
     Term orig = term_ctr_at(term, i);
     kids[i] = cnf_rewrite_once(s, orig, lhs, rhs);
     if (kids[i] != orig) changed = 1u;
   }
-  if (!changed) return term;
-  return term_new_ctr(term_ext(term), kids, n);
+  Term r = changed ? term_new_ctr(term_ext(term), kids, n) : term;
+  term_kids_release(kids, stk);
+  return r;
 }
 
 // Apply an ALREADY-RENAMED lhs/rhs pair to every literal of target,
@@ -1636,7 +1637,7 @@ static u64 cnf_demod_label_bit(u32 label) {
 // registration time over a rule's own (small, axiom/derived-clause
 // sized) LHS, not over an arbitrary target -- unlike cnf_demod_find_at
 // below, which walks a considered clause's structure on every
-// forward-demod attempt and does bound recursion at REWRITE_MAX_ARITY.
+// forward-demod attempt.
 static u64 cnf_demod_term_mask(Term t) {
   if (term_tag(t) != TAG_CTR) return 0ull;
   u64 m = cnf_demod_label_bit(term_ext(t));
@@ -1725,9 +1726,8 @@ static u8 cnf_demod_candidate_ok(const CnfState *s, u32 slot,
 // immediate label.
 //
 // Visits exactly the positions cnf_rewrite_once's recursive descent
-// would (root first, then every child up to REWRITE_MAX_ARITY) so it
-// can't report a "hit" at a position the materializing walk would
-// never reach.
+// would (root first, then every child) so it can't report a "hit" at a
+// position the materializing walk would never reach.
 //
 // Equivalence with the old rule-major scan follows from the min-min
 // swap:  min_p min_{k matches at p} k  ==  min_k [exists p: k matches
@@ -1749,13 +1749,11 @@ static u32 cnf_demod_find_at(const CnfState *s, Term term,
   if (term_tag(term) == TAG_CTR) {
     mask = cnf_demod_label_bit(term_ext(term));
     u32 n = term_ctr_n(term);
-    if (n <= REWRITE_MAX_ARITY) {
-      for (u32 i = 0; i < n; i++) {
-        u64 child_mask = 0ull;
-        best = cnf_demod_find_at(s, term_ctr_at(term, i), c, asum,
-                                 best, &child_mask);
-        mask |= child_mask;
-      }
+    for (u32 i = 0; i < n; i++) {
+      u64 child_mask = 0ull;
+      best = cnf_demod_find_at(s, term_ctr_at(term, i), c, asum,
+                               best, &child_mask);
+      mask |= child_mask;
     }
     // `mask` now covers term's whole subtree (its own root label plus
     // every visited descendant, mirroring exactly the set of nodes

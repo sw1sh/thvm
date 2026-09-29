@@ -101,8 +101,8 @@ fn Term thvm_subst_apply(Term t, const RewriteSubst *subst) {
       Term n_cell = heap_read(base);
       if (term_tag(n_cell) != TAG_NUM) return t;
       u32 n = (u32)term_val(n_cell);
-      if (n > REWRITE_MAX_ARITY) return t;
-      Term children[REWRITE_MAX_ARITY];
+      Term stk[REWRITE_MAX_ARITY];
+      Term *children = term_kids_buf(stk, n);
       u8 changed = 0;
       for (u32 i = 0; i < n; i++) {
         Term orig = heap_read(base + 1u + (u64)i);
@@ -111,8 +111,9 @@ fn Term thvm_subst_apply(Term t, const RewriteSubst *subst) {
       }
       // Hash-cons skip: if no child rewrote, reuse original t pointer
       // (saves a term_new_ctr allocation per unchanged subtree).
-      if (!changed) return t;
-      return term_new_ctr(term_ext(t), children, n);
+      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
+      term_kids_release(children, stk);
+      return r;
     }
     default: return t;
   }
@@ -175,17 +176,20 @@ fn Term thvm_rewrite_step(Term t, const Term *lhs, const Term *rhs, u32 n_rules)
   // Descend into CTR children, left-to-right; first sub-rewrite wins.
   if (term_tag(t) == TAG_CTR) {
     u32 n = term_ctr_n(t);
-    if (n > REWRITE_MAX_ARITY) return t;
-    Term children[REWRITE_MAX_ARITY];
+    Term stk[REWRITE_MAX_ARITY];
+    Term *children = term_kids_buf(stk, n);
     for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
     for (u32 i = 0; i < n; i++) {
       Term original = children[i];
       Term rewritten = thvm_rewrite_step(original, lhs, rhs, n_rules);
       if (!kbo_eq(rewritten, original)) {
         children[i] = rewritten;
-        return term_new_ctr(term_ext(t), children, n);
+        Term r = term_new_ctr(term_ext(t), children, n);
+        term_kids_release(children, stk);
+        return r;
       }
     }
+    term_kids_release(children, stk);
   }
 
   return t;

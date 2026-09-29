@@ -190,6 +190,7 @@ for the per-commit story.
 - Derivation-history export for learned CP selection (`THVM_ATP_HISTORY_EXPORT=<path>`, `src/atp/history.c`): an opt-in, observation-only 64-byte record stream of queue pushes (seq-hash sampled at `THVM_ATP_HISTORY_RATE`, default 1/16), selections with pop outcomes, in-place reweights, deletions, parent deaths and the rule-side trace DAG (entries from proof emission flagged), with packed-byte structural features; its work runs off the work clock, so recorded and unrecorded runs select identically.  `tools/atp_enigma/np0_extract.py` labels a run from the emitted TSTP proof's citations; `tools/atp_enigma/history_net.py` trains a derivation-history CP scorer on the tinygrad Tensor API and runs the phase-0 offline gate.
 - Learned CP selection, phase 0b (`tools/atp_enigma/listwise_net.py`): the derivation-history scorer trained with a listwise loss (at each sampled selection step, -log of the softmax mass of the pending proof pairs within the rebuilt queue, a segment log-sum-exp by `scatter_reduce`), with the engine's own signal as input (its rank and priority at the step; the untrained model ranks exactly as the engine), and the pre-registered phase-0b offline gate (median-percentile ratio and top-10 miss-rate ratio, both at most 0.5).  `history_net.py`'s gate takes a per-step scorer.
 - Learned CP selection, phase 0c: the history export's opt-in `F` record (`THVM_ATP_HISTORY_CPFEAT=1`) carries each pushed CP's 14 engine features (`thvm_atp_cp_features` on the queued pair decoded from the slot, age = its seq), the vector a push-time scorer computes; `tools/atp_enigma/np0_extract.py` keeps them (`cpfeat`), and `tools/atp_enigma/static_net.py` trains a static listwise head over them plus log1p of the push priority (scored once at push, starting as the engine's ranking) and runs the pre-registered phase-0c gate.  FindProof runs without a heap collector, so the record's decoded Terms are never reclaimed: a long export can exhaust the heap.
+- The term rebuilds the clausal engine and CheckProof share (substitution, renaming apart, variable canonicalisation, KBO hashing, demodulation) handle any arity: past `REWRITE_MAX_ARITY` they used to return the subterm untouched -- a renaming or substitution that silently skipped part of a clause.
 - FindProof builds on modern Linux compilers: the TPTP UEQ reader no longer calls the GNU-only `memmem`, which gcc 14+ / clang 16+ reject as an implicit declaration under thvm's strict feature macros (older compilers truncated its pointer result to `int`).
 - Waldmeister-style ATP layer: KBO / LPO, unification, critical pairs,
   rewrite engine, CNF, unfailing completion driver
@@ -287,7 +288,8 @@ for the per-commit story.
   its own search (COL004-1 narrowq forks at pick 83; COL006-5, COL049-1,
   GRP697-1 too), and nothing needs it since `--proof` stopped arming it.
 - No saturation reads a term node wider than 16 arguments any more: the
-  unifier and renamer pass such a node through unchanged, and
+  unifier and renamer passed such a node through unchanged (every term
+  rebuild handles any arity now; the exclusion stays as a guard), and
   clausification builds them (a Skolem term over more than 16
   universals, a Tseitin name over as many free variables).  CheckProof
   leaves those clauses out of its refutations, where a saturation of the

@@ -324,14 +324,19 @@ static inline u64 kbo_mix64(u64 x) {
 // per child so distinct variable ids never cancel.  Used identically by
 // kbo_leaf_hash's CTR fallback and kbo_memo_combine so the two paths
 // agree byte-for-byte.
-static inline u64 kbo_node_hash(u32 lab, const u64 *child_hashes, u32 n) {
-  u64 h = 0xcbf29ce484222325ull ^ ((u64)lab * 0x100000001b3ull);
-  for (u32 i = 0; i < n; i++) {
-    h ^= kbo_mix64(child_hashes[i] + 0x9e3779b97f4a7c15ull * (u64)(i + 1u));
-    h *= 0x100000001b3ull;
-  }
-  h ^= (u64)n * 0x9e3779b97f4a7c15ull;
-  return h;
+// Folded one child at a time, so a node of ANY arity hashes over all
+// of its children (a fixed child array used to truncate at
+// REWRITE_MAX_ARITY: two wide terms agreeing on their first 16
+// children shared a memo slot, weight and variable profile).
+static inline u64 kbo_node_hash_init(u32 lab) {
+  return 0xcbf29ce484222325ull ^ ((u64)lab * 0x100000001b3ull);
+}
+static inline u64 kbo_node_hash_add(u64 h, u32 i, u64 child_hash) {
+  h ^= kbo_mix64(child_hash + 0x9e3779b97f4a7c15ull * (u64)(i + 1u));
+  return h * 0x100000001b3ull;
+}
+static inline u64 kbo_node_hash_fini(u64 h, u32 n) {
+  return h ^ ((u64)n * 0x9e3779b97f4a7c15ull);
 }
 
 // Compute a leaf's contribution to the structural hash.  Inlined so
@@ -354,10 +359,11 @@ static inline u64 kbo_leaf_hash(Term t) {
     // (Rare -- only on a same-walk thash collision.)
     u32 lab = term_ext(t);
     u64 base; u32 n = kbo_ctr_children(t, &base);
-    u64 ch[REWRITE_MAX_ARITY];
-    if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
-    for (u32 i = 0; i < n; i++) ch[i] = kbo_leaf_hash(heap_read(base + i));
-    return kbo_node_hash(lab, ch, n);
+    u64 h = kbo_node_hash_init(lab);
+    for (u32 i = 0; i < n; i++) {
+      h = kbo_node_hash_add(h, i, kbo_leaf_hash(heap_read(base + i)));
+    }
+    return kbo_node_hash_fini(h, n);
   }
   return kbo_mix64(0xdeadbeefcafebabeull ^ ((u64)tg * 0x100000001b3ull));
 }
@@ -410,10 +416,11 @@ static KboWMemoEnt *kbo_memo_combine(const KboConfig *cfg, Term t) {
   // variable ids in symmetric positions can never cancel into a collision.
   u32 lab = term_ext(t);
   u64 base; u32 n = kbo_ctr_children(t, &base);
-  u64 chh[REWRITE_MAX_ARITY];
-  u32 nh = (n > REWRITE_MAX_ARITY) ? REWRITE_MAX_ARITY : n;
-  for (u32 i = 0; i < nh; i++) chh[i] = kbo_leaf_hash(heap_read(base + i));
-  u64 sh = kbo_node_hash(lab, chh, nh);
+  u64 sh = kbo_node_hash_init(lab);
+  for (u32 i = 0; i < n; i++) {
+    sh = kbo_node_hash_add(sh, i, kbo_leaf_hash(heap_read(base + i)));
+  }
+  sh = kbo_node_hash_fini(sh, n);
 
   // Register this Term ID in the per-Term-ID cache.
   u32 thidx = kbo_thash_slot(t);
