@@ -2085,9 +2085,11 @@ fn void cnf_set_wall_deadline(double seconds_from_now) {
 // the machine; its wall deadline above stays the hard stop.  Zero
 // disarms.
 static u64 g_cnf_work_deadline_us = 0u;
+static u32 g_cnf_work_tick = 0u;
 
 fn void cnf_set_work_deadline(double seconds_from_now) {
   g_cnf_late = 0u;
+  g_cnf_work_tick = 0u;
   if (seconds_from_now <= 0.0) {
     g_cnf_work_deadline_us = 0u;
     return;
@@ -2095,6 +2097,13 @@ fn void cnf_set_work_deadline(double seconds_from_now) {
   g_cnf_work_deadline_us = atp_work_now_us() + (u64)(seconds_from_now * 1e6);
 }
 
+// The work clock is read on one poll in 64: a CPU-clock read is a
+// syscall (~1 us on the reference pods; the wall clock's vDSO read
+// ~25 ns), and the in-step polls come every few microseconds of
+// subsumption -- one read per poll cost SWX223+1's fof-wall pre-pass
+// 3.0M reads in 32 s of CPU.  The work deadline is a budget, not the
+// kill, and a poll count keeps its stop point a function of the work
+// under --work-clock=instr.
 static inline int cnf_wall_fired(void) {
   if (g_cnf_wall_deadline_us != 0u) {
     u64 now = atp_now_us();
@@ -2102,7 +2111,10 @@ static inline int cnf_wall_fired(void) {
       return 1;
     }
   }
-  return g_cnf_work_deadline_us != 0u && atp_work_now_us() >= g_cnf_work_deadline_us;
+  if (g_cnf_work_deadline_us == 0u || (++g_cnf_work_tick & 0x3fu) != 0u) {
+    return 0;
+  }
+  return atp_work_now_us() >= g_cnf_work_deadline_us;
 }
 
 // The deadline inside one conclusion's simplification scans: forward

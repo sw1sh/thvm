@@ -168,8 +168,12 @@ status (a slice that already printed a decision wins with it). The budgets
 that steer the search rather than end the run -- the Horn release's 2.5 s and
 its fractions of the wall, the pre-pass guard and its LRS estimate -- read the
 work clock (`--work-clock`: process CPU by default, the instruction count
-under `instr`), so a loaded machine does the same work for them; the wall
-stays the hard stop. The clausification walkers keep their work on heap
+under `instr`), so a loaded machine does the same work for them: exactly
+under `instr` (GEO535+1's release keeps 59997 units at any load), nearly on
+the CPU clock (64.1k units idle, 56.1k beside 16 or 32 spinning loops, where
+the wall clock gave 63k, 42k and 23k); the wall stays the hard stop. A CPU or
+instruction clock read is a syscall (~1 us and ~4.5 us on the reference
+pods), so the hot loops poll the wall clock and read the work clock sparingly. The clausification walkers keep their work on heap
 stacks and take any formula depth (the QBF-derived HWV06x records are 100k+
 levels deep).
 

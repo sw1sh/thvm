@@ -107,6 +107,25 @@ static double cli_work_now(void) {
   return (double)atp_work_now_us() * 1e-6;
 }
 
+// Exclusion window around one --proof bookkeeping record, open only on
+// the instruction clock.  A window costs two clock reads; on the CPU
+// clock each is a syscall (~1 us on the reference pods) against the
+// ~0.1 us the record takes, so the window would cost the budget more
+// than the record it keeps off it (GEO535+1 --proof: 112k reads, 4% of
+// the Horn release).  On the instruction clock the reads' kernel side
+// is not counted and the window stays exact.
+static void cli_work_pause(void) {
+  if (atp_work_mode() == 1) {
+    atp_work_pause();
+  }
+}
+
+static void cli_work_resume(void) {
+  if (atp_work_mode() == 1) {
+    atp_work_resume();
+  }
+}
+
 #define TP_MAX_CLAUSES  65536
 #define TP_MAX_SYMS     262144
 #define TP_MAX_VARS     4096

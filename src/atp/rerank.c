@@ -1508,15 +1508,17 @@ static u64 atp_cpu_now_us(void) {
 // on every run, loaded or not, on any host running the same binary.
 // Linux only; where the counter cannot be opened the CPU clock is used.
 // Never returns 0: the disciplines use 0 as their unlatched sentinel.
-// Raw work-clock reading in the clock's own unit: user-space
-// instructions (mode 1) or CPU microseconds (mode 0).  *mode_out gets
-// the mode; the probe runs once.
-static u64 atp_work_raw(int *mode_out) {
-  static int mode = -1;     // -1 = unprobed, 0 = CPU, 1 = instructions
+// The clock's mode, probed once: 1 = instructions (the counter opened),
+// 0 = CPU.
+static int g_atp_work_mode = -1;
 #if defined(__linux__)
-  static int fd = -1;
-  if (mode < 0) {
-    mode = 0;
+static int g_atp_work_fd   = -1;
+#endif
+
+static int atp_work_mode(void) {
+  if (g_atp_work_mode < 0) {
+    g_atp_work_mode = 0;
+#if defined(__linux__)
     const char *e = getenv("THVM_ATP_WORK_CLOCK");
     if (e != NULL && strcmp(e, "instr") == 0) {
       struct perf_event_attr pe;
@@ -1526,21 +1528,28 @@ static u64 atp_work_raw(int *mode_out) {
       pe.config         = PERF_COUNT_HW_INSTRUCTIONS;
       pe.exclude_kernel = 1;
       pe.exclude_hv     = 1;
-      fd = (int)syscall(SYS_perf_event_open, &pe, 0, -1, -1, 0);
-      if (fd >= 0) {
-        mode = 1;
+      g_atp_work_fd = (int)syscall(SYS_perf_event_open, &pe, 0, -1, -1, 0);
+      if (g_atp_work_fd >= 0) {
+        g_atp_work_mode = 1;
       }
     }
+#endif
   }
-  if (mode == 1) {
+  return g_atp_work_mode;
+}
+
+// Raw work-clock reading in the clock's own unit: user-space
+// instructions (mode 1) or CPU microseconds (mode 0).  *mode_out gets
+// the mode.
+static u64 atp_work_raw(int *mode_out) {
+#if defined(__linux__)
+  if (atp_work_mode() == 1) {
     u64 n = 0;
-    if (read(fd, &n, sizeof n) == (ssize_t)sizeof n) {
+    if (read(g_atp_work_fd, &n, sizeof n) == (ssize_t)sizeof n) {
       *mode_out = 1;
       return n;
     }
   }
-#else
-  if (mode < 0) mode = 0;
 #endif
   *mode_out = 0;
   return atp_cpu_now_us();

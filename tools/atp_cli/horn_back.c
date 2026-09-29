@@ -222,7 +222,7 @@ static int g_bk_id = 0;
 static void bk_log_push(int id, int gl, int gr, int kind, int who,
                         const int *kids, int nkids) {
   if (!g_prov_on) return;
-  atp_work_pause();   // off the search budget
+  cli_work_pause();   // off the search budget
   if (g_bkl_n >= g_bkl_cap) {
     g_bkl_cap = (g_bkl_cap == 0) ? (1 << 12) : g_bkl_cap * 2;
     g_bkl = (BkLog *)realloc(g_bkl, (size_t)g_bkl_cap * sizeof(BkLog));
@@ -232,7 +232,7 @@ static void bk_log_push(int id, int gl, int gr, int kind, int who,
   e->id = id; e->gl = gl; e->gr = gr; e->kind = kind; e->who = who;
   e->nkids = (nkids > HORN_MAX_COND) ? HORN_MAX_COND : nkids;
   for (int i = 0; i < e->nkids; i++) e->kids[i] = kids[i];
-  atp_work_resume();
+  cli_work_resume();
 }
 
 // Print a term instance under the CURRENT bindings; leftover free

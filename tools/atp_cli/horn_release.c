@@ -963,11 +963,11 @@ static double horn_now(void) {
   struct timeval tv; gettimeofday(&tv, NULL);
   return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
 }
-// The search-shaping budgets read horn_budget_now, the work clock.  A
-// --proof run captures its derivation records inside work-clock
-// exclusion windows (atp_work_pause / atp_work_resume), so it releases
-// what the no-proof run releases in its budget; the absolute slice
-// deadline stays on the wall clock.
+// The search-shaping budgets read horn_budget_now, the work clock.  On
+// the instruction clock a --proof run captures its derivation records
+// inside exclusion windows (cli_work_pause), so it releases exactly what
+// the no-proof run releases in its budget; the absolute slice deadline
+// stays on the wall clock.
 static inline double horn_budget_now(void) {
   return cli_work_now();
 }
@@ -1509,14 +1509,14 @@ static int horn_prov_new(int rule, const int *fps, int nf, char *l, char *r) {
 // bound at every condition, from g_hpf).
 static int horn_prov_record(const HRule *ru, const HRel *re) {
   if (!g_prov_on) return -1;
-  atp_work_pause();
+  cli_work_pause();
   int fps[HORN_MAX_COND];
   for (int ci = 0; ci < ru->nc; ci++) {
     int f = g_hpf[ci];
     fps[ci] = (f >= 0 && f < g_hf_n) ? g_hf[f].src : HORN_SRC_NONE;
   }
   int k = horn_prov_new(ru->hpc, fps, ru->nc, re->l, re->r);
-  atp_work_resume();
+  cli_work_resume();
   return k;
 }
 
