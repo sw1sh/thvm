@@ -6,7 +6,7 @@
 // input encodes to NaN: 0x7f, or 0xff when the sign bit is set
 // (dtype.py:251).  e5m2 keeps inf as 0x7c / 0xfc and encodes NaN as
 // sign | 0x7f (dtype.py:252).  Finite inputs are unaffected, and finite
-// overflow still saturates to maxnorm.  A float CONST payload truncates
+// overflow saturates to maxnorm.  A float CONST payload truncates
 // through the same encoding (DType.const, dtype.py:79-84 and 299), and
 // the devectorized MAX accumulator starts at dt.min (identity_element,
 // uop/ops.py:61), which is the finite -448 for e4m3 (dtype.py:69-77).
@@ -16,12 +16,15 @@
 // +/-maxnorm, and NaN keeps its sign and the top mantissa bits of its
 // f32 pattern.  The store checks realize kernels on the CPU walker: a
 // CAST, a NEG of e5m2 inf, and an ADD of an inf CONST, which keeps inf
-// as an e5m2 payload yet saturates when stored.  The walker's f64
-// evaluation quiets a signaling NaN before the store, so the realized
-// checks use quiet NaNs.  A sweep checks that the two encodings agree
-// on finite inputs.  Every other expected value was computed with
-// tinygrad at 365f87a8a: float_to_fp8 for the host encoder, DEV=CPU
-// kernels for the _sat encoder and the stores.
+// as an e5m2 payload yet saturates when stored.  A realized CONST fills
+// through the same rule, since tinygrad realizes a constant in a
+// kernel: an e5m2 inf CONST, broadcast, 0-d, reshaped or folded from a
+// CAST, fills as maxnorm.  The walker's f64 evaluation quiets a
+// signaling NaN before the store, so the realized checks use quiet
+// NaNs.  A sweep checks that the two encodings agree on finite inputs.
+// Every other expected value was computed with tinygrad at 365f87a8a:
+// float_to_fp8 for the host encoder, DEV=CPU kernels for the _sat
+// encoder, the stores and the fills.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -113,6 +116,12 @@ static Term cpu_buffer(u32 dtype, void const *data, u32 n) {
   return term_new(0, TAG_TEN, dtype, tid);
 }
 
+static Term splat4(Term c) {
+  u32 const one[1]  = { 1 };
+  u32 const four[1] = { 4 };
+  return uop_expand(uop_reshape(c, 1, one), 1, four);
+}
+
 static void check_realized_bytes(Term expr, u32 dtype, u8 const *want, u32 n) {
   Term done = term_resolve(thvm_realize(expr));
   CHECK(term_tag(done) == TAG_TEN);
@@ -121,7 +130,9 @@ static void check_realized_bytes(Term expr, u32 dtype, u8 const *want, u32 n) {
   }
   u32 tid = (u32)term_val(done);
   CHECK_EQ(TENS[tid].dtype, dtype);
-  if (TENS[tid].dtype != dtype) {
+  CHECK_EQ(TENS[tid].view.numel, n);
+  CHECK(TENS[tid].view.contiguous);
+  if (TENS[tid].dtype != dtype || TENS[tid].view.numel != n || !TENS[tid].view.contiguous) {
     return;
   }
   u8 got[8] = {0};
@@ -152,19 +163,48 @@ static void check_kernel_stores(void) {
                        DT_FP8E5M2, neg_want, 4);
 
   TEST_BEGIN("store/add-inf-const-saturates-e5m2");
-  u32 const one[1]      = { 1 };
-  u32 const four[1]     = { 4 };
-  u8  const add_src[4]  = { 0x00, 0x3C, 0xC0, 0x38 };
-  u8  const add_e5m2[4] = { 0x7B, 0x7B, 0x7B, 0x7B };
-  Term inf_e5m2 = uop_expand(uop_reshape(uop_const(DT_FP8E5M2, bits_of(INFINITY)), 1, one), 1, four);
+  u8 const add_src[4]  = { 0x00, 0x3C, 0xC0, 0x38 };
+  u8 const add_e5m2[4] = { 0x7B, 0x7B, 0x7B, 0x7B };
+  Term inf_e5m2 = splat4(uop_const(DT_FP8E5M2, bits_of(INFINITY)));
   check_realized_bytes(uop_binary(UOP_ADD, cpu_buffer(DT_FP8E5M2, add_src, 4), inf_e5m2),
                        DT_FP8E5M2, add_e5m2, 4);
 
   TEST_BEGIN("store/add-inf-const-is-nan-e4m3");
   u8 const add_e4m3[4] = { 0x7F, 0x7F, 0x7F, 0x7F };
-  Term inf_e4m3 = uop_expand(uop_reshape(uop_const(DT_FP8E4M3, bits_of(INFINITY)), 1, one), 1, four);
+  Term inf_e4m3 = splat4(uop_const(DT_FP8E4M3, bits_of(INFINITY)));
   check_realized_bytes(uop_binary(UOP_ADD, cpu_buffer(DT_FP8E4M3, add_src, 4), inf_e4m3),
                        DT_FP8E4M3, add_e4m3, 4);
+}
+
+// tinygrad realizes a constant in a kernel whose store saturates, for
+// Tensor.full with buffer=True or False, a 0-d Tensor, or a CAST that
+// folds to a CONST, so a realized e5m2 inf fill is maxnorm even though
+// its CONST payload keeps inf.  An e4m3 inf payload is already NaN.
+static void check_const_fills(void) {
+  Term pinf_e5m2 = uop_const(DT_FP8E5M2, bits_of(INFINITY));
+  Term ninf_e5m2 = uop_const(DT_FP8E5M2, bits_of(-INFINITY));
+  u8 const pmax[4] = { 0x7B, 0x7B, 0x7B, 0x7B };
+  u8 const nmax[4] = { 0xFB, 0xFB, 0xFB, 0xFB };
+
+  TEST_BEGIN("fill/e5m2-inf-broadcast-saturates");
+  check_realized_bytes(splat4(pinf_e5m2), DT_FP8E5M2, pmax, 4);
+  check_realized_bytes(splat4(ninf_e5m2), DT_FP8E5M2, nmax, 4);
+
+  TEST_BEGIN("fill/e5m2-inf-scalar-saturates");
+  u32 const one[1] = { 1 };
+  check_realized_bytes(pinf_e5m2, DT_FP8E5M2, pmax, 1);
+  check_realized_bytes(ninf_e5m2, DT_FP8E5M2, nmax, 1);
+  check_realized_bytes(uop_reshape(pinf_e5m2, 1, one), DT_FP8E5M2, pmax, 1);
+
+  TEST_BEGIN("fill/folded-cast-of-f32-inf-saturates");
+  Term cast = uop_cast(uop_const(DT_FP32, bits_of(INFINITY)), DT_FP8E5M2);
+  CHECK_EQ(term_ext(cast), UOP_CONST);
+  check_realized_bytes(cast, DT_FP8E5M2, pmax, 1);
+
+  TEST_BEGIN("fill/e4m3-inf-is-nan");
+  u8 const nan4[4] = { 0x7F, 0x7F, 0x7F, 0x7F };
+  check_realized_bytes(splat4(uop_const(DT_FP8E4M3, bits_of(INFINITY))), DT_FP8E4M3, nan4, 4);
+  check_realized_bytes(splat4(uop_const(DT_FP8E4M3, bits_of(-INFINITY))), DT_FP8E4M3, nan4, 4);
 }
 
 int main(void) {
@@ -278,6 +318,7 @@ int main(void) {
   CHECK(CURRENT_BACKEND == &CPU_BACKEND);
   if (CURRENT_BACKEND == &CPU_BACKEND) {
     check_kernel_stores();
+    check_const_fills();
   }
 
   thvm_free();

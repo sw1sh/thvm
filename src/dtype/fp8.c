@@ -11,20 +11,22 @@
 //
 // Encoding settles non-finite inputs first, in one of two ways, as
 // tinygrad does.  f32_to_fp8e4m3 / f32_to_fp8e5m2 are float_to_fp8
-// (dtype.py:251-252), the host-side encoding: e4m3 has no inf, so inf
+// (dtype.py:251-252), the host-side encoding of CONST payloads, CAST /
+// BITCAST constant folds and WL tensor writes: e4m3 has no inf, so inf
 // and NaN both encode to NaN, while e5m2 keeps inf.  The _sat variants
-// are the kernel store.  tinygrad's CPU and Metal renderers have no fp8
-// (renderer/cstyle.py:307-308, 398-400), so their kernels narrow
-// through tinygrad/codegen/decomp/dtype.py: f2f_clamp(sat=True)
-// (:127-134) sends +/-inf to +/-maxnorm, and f2f (:120-121) keeps a
-// NaN's sign and the top mantissa bits of its f32 pattern.  Unlike f2f
-// (:119), the _sat variants keep subnormals.  Finite inputs encode the
-// same way in both: interpolate through f64 for the rounding (pack the
-// f32 input into f64 bits, mask + shift to the fp8 significand,
-// round-to-nearest-even with a banker's tiebreak, and pack out as one
-// byte), and saturate finite overflow to maxnorm.  Decoding goes
-// through the f16 bit layout (the fp8 -> f16 mapping is exact for
-// normal values).
+// are the kernel store, which also fills a realized CONST because
+// tinygrad realizes a constant in a kernel.  tinygrad's CPU and Metal
+// renderers have no fp8 (renderer/cstyle.py:307-308, 398-400), so their
+// kernels narrow through tinygrad/codegen/decomp/dtype.py:
+// f2f_clamp(sat=True) (:127-134) sends +/-inf to +/-maxnorm, and f2f
+// (:120-121) keeps a NaN's sign and the top mantissa bits of its f32
+// pattern.  Unlike f2f (:119), the _sat variants keep subnormals.
+// Finite inputs encode the same way in both: interpolate through f64
+// for the rounding (pack the f32 input into f64 bits, mask + shift to
+// the fp8 significand, round-to-nearest-even with a banker's tiebreak,
+// and pack out as one byte), and saturate finite overflow to maxnorm.
+// Decoding goes through the f16 bit layout (the fp8 -> f16 mapping is
+// exact for normal values).
 
 typedef struct {
     u32 exp_bias;

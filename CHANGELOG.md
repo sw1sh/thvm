@@ -13,6 +13,7 @@ for the per-commit story.
   BUFFERIZE, END, STACK, GEP, UNROLL, CONTRACT, VCONST, PLACEHOLDER and
   DETACH nodes were never copied, so after a collection a kernel's content
   hash (the Metal PSO / tile-JIT / autotune cache key) and its ranges changed.
+- A realized fp8 constant fills through the kernel-store rule, as tinygrad realizes a constant in a kernel: an fp8e5m2 +/-inf CONST (broadcast, 0-d, reshaped, or a CAST that folds to one) fills as 0x7b / 0xfb (maxnorm), not 0x7c / 0xfc. The CONST payload and BITCAST / CAST folds keep inf.
 - JIT capture: sinking a dispatch into an assign's buffer now checks replayable gathers too, so a realized view of that dispatch's output keeps reading fresh bytes on replay (the sink only runs for Metal tile kernels). Gather endpoints are retained with the capture like other ops' buffers, and the profiling export shows gather rows.
 - fp8 conversion follows tinygrad's two rules. Host conversion (CONST payloads, CAST/BITCAST folds, WL writes) is `float_to_fp8`: every e4m3 non-finite is NaN, and e5m2 keeps inf. CPU kernel stores follow the emulated kernels' saturating narrow, so a runtime cast of -inf to fp8e4m3 stays -448. The MAX identity is `dt.min` (-448 for e4m3), as in `identity_element`.
 - Term packing, flat heap, WNF stack machine, 29 interaction rules.

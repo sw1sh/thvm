@@ -5599,6 +5599,8 @@ static u32 const_to_tendesc(u64 const_loc) {
   // `bits` as an i32 (sign-extended at the WL bridge) and pack down
   // to the narrow width.
   u8  buf8;  u16 buf16;  u32 buf32;  u64 buf64;
+  f32 fv;
+  memcpy(&fv, &bits, sizeof fv);
   void *src = NULL;  u64 nbytes = 0;
   switch (dtype) {
     case DT_BOOL:   buf8  = (u8)(bits & 1);                     src = &buf8;  nbytes = 1; break;
@@ -5611,17 +5613,19 @@ static u32 const_to_tendesc(u64 const_loc) {
     case DT_FP32:   buf32 = bits;                               src = &buf32; nbytes = 4; break;
     case DT_INT64:  buf64 = (u64)(i64)(int32_t)bits;            src = &buf64; nbytes = 8; break;
     case DT_UINT64: buf64 = (u64)bits;                          src = &buf64; nbytes = 8; break;
+    // tinygrad realizes a constant in a kernel, and a kernel's fp8 store
+    // saturates (codegen/decomp/dtype.py:127-134), so an e5m2 inf payload
+    // fills as maxnorm, not inf.
+    case DT_FP8E4M3: buf8 = f32_to_fp8e4m3_sat(fv);             src = &buf8;  nbytes = 1; break;
+    case DT_FP8E5M2: buf8 = f32_to_fp8e5m2_sat(fv);             src = &buf8;  nbytes = 1; break;
     case DT_FP16:
     case DT_BF16:
-    case DT_FP64:
-    case DT_FP8E4M3:
-    case DT_FP8E5M2: {
+    case DT_FP64: {
       // Promote f32 bits -> target float (lossy for 64-bit beyond
       // f32 precision; precise enough for the common 0.0 / 1.0 /
       // log(2) literals the grad chain rule emits).
-      f32 v; memcpy(&v, &bits, sizeof(v));
       static u8 buf_bytes[8];
-      from_fp32_lane(buf_bytes, dtype, &v, 1);
+      from_fp32_lane(buf_bytes, dtype, &fv, 1);
       src = buf_bytes; nbytes = dtype_storage_bytes(dtype, 1);
       break;
     }
