@@ -19,20 +19,32 @@
 # (tools/atp_enigma/history_net.py); only exact (rate-1) problems take
 # part, since a subsampled problem's top K would miss unsampled CPs.
 #
+# Phase 0e (DAgger): a harvest with the re-ranker ARMED yields the
+# states the re-ranker itself visits.  `prep ... rerank:<K>:<model>`
+# classifies such a trajectory (a weight pick is any of the engine's top
+# K, at its recorded rank) and replays the generating head on the rebuilt
+# inputs; `train2` fits a head on several trajectories' preps at once
+# with early stopping on their joint validation loss.
+#
 # Usage:
-#   topk_net.py prep    <npz_dir> <pool.tsv> <prep_dir> <precheck.txt> [jobs]
+#   topk_net.py prep    <npz_dir> <pool.tsv> <prep_dir> <precheck.txt> [jobs] [traj]
+#                       traj: engine (default) | rerank:<K>:<model.safetensors>
 #   topk_net.py sanity  <prep_dir> <pool.tsv>
 #   topk_net.py train   <prep_dir> <pool.tsv> <out_prefix> <variant>
+#   topk_net.py train2  <out_prefix> <variant> <pool.tsv> <prep_dir>...
 #   topk_net.py valgate <model_prefix> <prep_dir> <pool.tsv> <out_prefix>
 #   topk_net.py gate    <model_prefix> <prep_dir> <pool.tsv> <out_prefix>
 #   topk_net.py select  <out.tsv> <ratios.tsv>...
+#   topk_net.py rrcheck <prep_dir> <err_dir> <out.txt>
 #   topk_net.py export  <model_prefix> <out.safetensors>
 #   topk_net.py parity  <model_prefix> <model.safetensors> <dump.tsv> <out.txt>
 #   topk_net.py featparity <npz> <dump.tsv> <out.txt>
 # export writes the head for the engine's re-ranker (src/atp/topk.c);
 # parity scores the rows the engine dumped (THVM_ATP_RERANK_DUMP) with the
 # Python head; featparity rebuilds the same run's queue from its history
-# export and compares the engine's candidates and inputs with it.
+# export and compares the engine's candidates and inputs with it; rrcheck
+# compares a re-ranker trajectory's offline pick counts with the engine's
+# own counters (the harvest's topk-rerank stderr line).
 import heapq
 import json
 import os
@@ -48,7 +60,7 @@ from tinygrad.nn.state import get_parameters, get_state_dict, load_state_dict, s
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from history_net import bootstrap, candidate_steps, engine_pri_at, is_val, load_pool, train_mode
 
-KMAX = 32
+KMAX = 64
 N_CPF = 14
 N_X = 3 + N_CPF + 1
 S_STEPS = 16
@@ -57,7 +69,10 @@ GATE_STEPS = 50
 POOL_STEPS = 400
 BIG = 1e4
 VARIANTS = {f"R{k}h{h}": (k, h) for k in (8, 16, 32) for h in (16, 32)}
-KS = (8, 16, 32)
+VARIANTS.update({f"D{k}h{h}": (k, h) for k in (32, 64) for h in (32, 64)})
+KS = (8, 16, 32, 64)
+PATIENCE2 = 20
+MAX_EPOCHS2 = 2000
 # selection classes
 C_WEIGHT, C_WEIGHT_ULT, C_FIFO, C_ULT, C_OTHER, C_MISSING = range(6)
 C_NAMES = ("weight", "weight_ultimate_alive", "fifo", "ultimate", "other", "pick_missing")
@@ -184,6 +199,107 @@ def classify(p):
     return cls, pick
 
 
+def classify_rr(p, krun):
+    """classify() for a trajectory the re-ranker (top krun) generated: a
+    non-ultimate pick among the engine's krun best is a weight pick at its
+    rank.  Also returns, per selection, that rank (-1 outside the top
+    krun), the queue size, and whether the pick is the FIFO minimum too
+    (a FIFO-scheduled pick inside the top krun reads as a re-ranked one)."""
+    T, N = p.n_sel, len(p.seq)
+    cls = np.full(T + 1, C_MISSING, np.int8)
+    rank = np.full(T + 1, -1, np.int64)
+    qsize = np.zeros(T + 1, np.int64)
+    fmin = np.zeros(T + 1, bool)
+    sel = p.selected_at
+    ok = (sel >= 1) & (sel <= T)
+    cnt = np.bincount(sel[ok], minlength=T + 1)
+    pick = np.full(T + 1, -1, np.int64)
+    pick[sel[ok]] = np.nonzero(ok)[0]
+    pick[cnt != 1] = -1
+    t_on = np.where(p.end_step >= p.push_step + 1, p.push_step + 1, T + 2)
+    t_off = np.minimum(p.end_step + 1, T + 2)
+    on = np.argsort(t_on, kind="stable").tolist()
+    off = np.argsort(t_off, kind="stable").tolist()
+    t_on_l, t_off_l = t_on.tolist(), t_off.tolist()
+    wi = np.searchsorted(p.seq, p.w_seq)
+    wok = (wi < N) & (p.seq[np.minimum(wi, max(N - 1, 0))] == p.w_seq) if N else wi < 0
+    w_t = (p.w_step + 1).tolist()
+    w_i = np.where(wok, wi, -1).tolist()
+    w_p = p.w_pri.tolist()
+    worder = np.argsort(p.w_step + 1, kind="stable").tolist()
+    cur = p.pri.tolist()
+    seq = p.seq.tolist()
+    ult = p.ult.tolist()
+    ver = [0] * N
+    alive = [False] * N
+    wh, fh = [], []
+    n_ult = n_alive = 0
+    ion = ioff = iw = 0
+    nw = len(worder)
+    for t in range(1, T + 1):
+        while ion < N and t_on_l[on[ion]] <= t:
+            i = on[ion]
+            ion += 1
+            alive[i] = True
+            n_alive += 1
+            if ult[i]:
+                n_ult += 1
+            else:
+                heapq.heappush(wh, (cur[i], seq[i], ver[i], i))
+                heapq.heappush(fh, (seq[i], i))
+        while ioff < N and t_off_l[off[ioff]] <= t:
+            i = off[ioff]
+            ioff += 1
+            if alive[i]:
+                alive[i] = False
+                n_alive -= 1
+                if ult[i]:
+                    n_ult -= 1
+        while iw < nw and w_t[worder[iw]] <= t:
+            k = worder[iw]
+            iw += 1
+            i = w_i[k]
+            if i < 0:
+                continue
+            cur[i] = w_p[k]
+            ver[i] += 1
+            if alive[i] and not ult[i]:
+                heapq.heappush(wh, (cur[i], seq[i], ver[i], i))
+        qsize[t] = n_alive
+        j = int(pick[t])
+        if j < 0:
+            continue
+        if ult[j]:
+            cls[t] = C_ULT
+            continue
+        while fh and not alive[fh[0][1]]:
+            heapq.heappop(fh)
+        fmin[t] = bool(fh) and fh[0][1] == j
+        if not alive[j]:
+            cls[t] = C_OTHER
+            continue
+        got = []
+        r = -1
+        while wh and len(got) < krun:
+            e = heapq.heappop(wh)
+            if not alive[e[3]] or e[2] != ver[e[3]]:
+                continue
+            got.append(e)
+            if e[3] == j:
+                r = len(got) - 1
+                break
+        for e in got:
+            heapq.heappush(wh, e)
+        if r >= 0:
+            cls[t] = C_WEIGHT if n_ult == 0 else C_WEIGHT_ULT
+            rank[t] = r
+        elif fmin[t]:
+            cls[t] = C_FIFO
+        else:
+            cls[t] = C_OTHER
+    return cls, pick, rank, qsize, fmin
+
+
 def spaced(steps, n):
     """At most n of steps, evenly spaced (the 0b / 0c step rule)."""
     if len(steps) == 0:
@@ -203,10 +319,10 @@ def top_at(p, t, pri_t, k=KMAX):
     return idx[part], len(idx)
 
 
-def step_x(p, t, top, n_alive, pri_t):
+def step_x(p, t, top, n_alive, pri_t, dtype=np.float32):
     """Raw inputs of the candidates top at selection t (KMAX rows, zero
     padded)."""
-    x = np.zeros((KMAX, N_X), np.float32)
+    x = np.zeros((KMAX, N_X), dtype)
     k = len(top)
     x[:k, 0] = np.log1p(np.arange(k))
     x[:k, 1] = np.log1p(n_alive)
@@ -216,13 +332,20 @@ def step_x(p, t, top, n_alive, pri_t):
     return x
 
 
+RR_KEYS = ("rr_weight2", "rr_changed2", "rr_fmin_top", "pick_rank_bad", "replay_n", "replay_bad",
+           "replay_fmin", "replay_tie")
+
+
 def prep_one(args):
     """Classify, pick the gate and pool steps, and store their top KMAX
-    candidates with inputs and labels."""
-    path, split, out_dir = args
+    candidates with inputs and labels.  traj: None (the engine's own
+    trajectory) or (krun, head) for a trajectory the re-ranker generated."""
+    path, split, out_dir, traj = args
     nm = os.path.basename(path)[:-4]
     row = {"name": nm, "split": split, "reason": "", "n_sel": 0, "cls": [0] * 6,
            "n_rw": 0, "p4_n": 0, "p4_ok": 0, "rank0_bad": 0, "n_c": 0, "n_cp": 0}
+    row.update({k: 0 for k in RR_KEYS})
+    row["replay_margin"] = np.inf
     if not os.path.exists(path):
         row["reason"] = "no_npz"
         return row
@@ -233,7 +356,15 @@ def prep_one(args):
     if why is not None:
         row["reason"] = why
         return row
-    cls, pick = classify(p)
+    if traj is None:
+        cls, pick = classify(p)
+    else:
+        krun, head = traj
+        cls, pick, rank, qsize, fmin = classify_rr(p, krun)
+        w = cls == C_WEIGHT
+        row["rr_weight2"] = int(np.sum(w & (qsize >= 2)))
+        row["rr_changed2"] = int(np.sum(w & (qsize >= 2) & (rank > 0)))
+        row["rr_fmin_top"] = int(np.sum(w & (qsize >= 2) & fmin))
     row["cls"] = np.bincount(cls[1:], minlength=6).tolist()
     cand = candidate_steps(p)
     cprime = cand[cls[cand] == C_WEIGHT]
@@ -249,6 +380,7 @@ def prep_one(args):
     lab = np.zeros((n, KMAX), bool)
     X = np.zeros((n, KMAX, N_X), np.float32)
     n_alive = np.zeros(n, np.int64)
+    r_pick = np.zeros(n, np.int64)
     xs = np.argsort(p.x_step, kind="stable")
     for i, t in enumerate(steps.tolist()):
         pri_t = engine_pri_at(p, t) if len(p.w_seq) else p.pri
@@ -257,8 +389,31 @@ def prep_one(args):
         lab[i, :len(tp)] = p.label[tp]
         X[i] = step_x(p, t, tp, na, pri_t)
         n_alive[i] = na
-        if len(tp) == 0 or tp[0] != pick[t]:
-            row["rank0_bad"] += 1
+        at = np.nonzero(tp == pick[t])[0]
+        r_pick[i] = int(at[0]) if len(at) else -1
+        if traj is None:
+            if len(tp) == 0 or tp[0] != pick[t]:
+                row["rank0_bad"] += 1
+        else:
+            if r_pick[i] != rank[t]:
+                row["pick_rank_bad"] += 1
+            # the generating head on the same inputs (float64) must pick it
+            kk = min(krun, len(tp))
+            s = score_rows(head, step_x(p, t, tp[:kk], na, pri_t, np.float64)[:kk])
+            a = int(np.argmax(s))
+            row["replay_n"] += 1
+            if a != rank[t]:
+                srt = np.sort(s)[::-1]
+                gap = float(srt[0] - srt[1]) if kk > 1 else np.inf
+                if fmin[t]:
+                    row["replay_fmin"] += 1
+                elif gap <= 1e-9:
+                    row["replay_tie"] += 1
+                else:
+                    row["replay_bad"] += 1
+            elif kk > 1:
+                srt = np.sort(s)[::-1]
+                row["replay_margin"] = min(row["replay_margin"], float(srt[0] - srt[1]))
         if np.any(g == t):
             k = np.searchsorted(p.x_step[xs], t)
             if k < len(xs) and p.x_step[xs[k]] == t:
@@ -266,17 +421,29 @@ def prep_one(args):
                 row["p4_ok"] += int(na == p.x_live[xs[k]] + 1)
     np.savez_compressed(os.path.join(out_dir, nm + ".npz"), steps=steps,
                         is_gate=np.isin(steps, g), is_pool=np.isin(steps, q), top=top,
-                        lab=lab, X=X, n_alive=n_alive, n_sel=p.n_sel, n_rw=len(p.w_seq))
+                        lab=lab, X=X, n_alive=n_alive, n_sel=p.n_sel, n_rw=len(p.w_seq),
+                        r_pick=r_pick)
     row["reason"] = "ok"
     return row
 
 
-def cmd_prep(npz_dir, pool_path, prep_dir, out_path, jobs=8):
+def parse_traj(spec):
+    """'engine' -> None; 'rerank:<K>:<model.safetensors>' -> (K, head)."""
+    if spec in (None, "", "engine"):
+        return None
+    kind, k, path = spec.split(":", 2)
+    assert kind == "rerank", spec
+    head, _ = read_export(path)
+    return int(k), head
+
+
+def cmd_prep(npz_dir, pool_path, prep_dir, out_path, jobs=8, traj_spec="engine"):
     os.makedirs(prep_dir, exist_ok=True)
     split = load_pool(pool_path)
     names = sorted(split)
     t0 = time.time()
-    args = [(os.path.join(npz_dir, nm + ".npz"), split[nm], prep_dir) for nm in names]
+    traj = parse_traj(traj_spec)
+    args = [(os.path.join(npz_dir, nm + ".npz"), split[nm], prep_dir, traj) for nm in names]
     rows = []
     with Pool(int(jobs)) as pool:
         for r in pool.imap_unordered(prep_one, args, chunksize=1):
@@ -284,13 +451,16 @@ def cmd_prep(npz_dir, pool_path, prep_dir, out_path, jobs=8):
     rows.sort(key=lambda r: r["name"])
     with open(os.path.join(prep_dir, "prep.tsv"), "w") as f:
         f.write("name\tsplit\tpart\treason\tn_sel\tn_reweights\tn_cand\tn_weight_cand\t"
-                + "\t".join(C_NAMES) + "\tp4_n\tp4_ok\trank0_bad\n")
+                + "\t".join(C_NAMES) + "\tp4_n\tp4_ok\trank0_bad\t" + "\t".join(RR_KEYS)
+                + "\treplay_margin\n")
         for r in rows:
             part = part_of(r["name"], r["split"])
             f.write(f"{r['name']}\t{r['split']}\t{part}\t{r['reason']}\t{r['n_sel']}\t{r['n_rw']}\t"
                     f"{r['n_c']}\t{r['n_cp']}\t" + "\t".join(str(c) for c in r["cls"])
-                    + f"\t{r['p4_n']}\t{r['p4_ok']}\t{r['rank0_bad']}\n")
-    lines = [f"phase-0d prep over {len(rows)} pool problems ({time.time() - t0:.0f}s)"]
+                    + f"\t{r['p4_n']}\t{r['p4_ok']}\t{r['rank0_bad']}\t"
+                    + "\t".join(str(r[k]) for k in RR_KEYS) + f"\t{r['replay_margin']:.3e}\n")
+    lines = [f"prep ({traj_spec.split(':')[0] if traj_spec else 'engine'} trajectory) over "
+             f"{len(rows)} pool problems ({time.time() - t0:.0f}s)"]
     for part in ("train", "val", "heldout"):
         rr = [r for r in rows if part_of(r["name"], r["split"]) == part and r["reason"] != "no_npz"]
         reasons = {}
@@ -314,6 +484,20 @@ def cmd_prep(npz_dir, pool_path, prep_dir, out_path, jobs=8):
     lines.append(f"P4 gate steps with an 'X' record: {p4n}; queue size == X live + 1: {p4k} "
                  f"({p4k / max(1, p4n):.4f})")
     stop = int(tot[C_OTHER]) + int(tot[C_MISSING]) + rb
+    if traj is not None:
+        s = {k: sum(r[k] for r in ok) for k in RR_KEYS}
+        mg = min((r["replay_margin"] for r in ok), default=np.inf)
+        lines.append(f"P1r re-ranker trajectory (K {traj[0]}): weight picks at queue >= 2: "
+                     f"{s['rr_weight2']}, of them rank > 0: {s['rr_changed2']}; weight picks that "
+                     f"are also the FIFO minimum: {s['rr_fmin_top']}")
+        lines.append(f"P1r stored steps whose rebuilt top-K position of the pick differs from the "
+                     f"sweep's rank: {s['pick_rank_bad']}")
+        lines.append(f"P5 replay of the generating head at {s['replay_n']} stored weight steps: "
+                     f"reproduced {s['replay_n'] - s['replay_bad'] - s['replay_fmin'] - s['replay_tie']}; "
+                     f"differ at a FIFO-minimum pick {s['replay_fmin']}, at a near-tie (<= 1e-9) "
+                     f"{s['replay_tie']}, otherwise {s['replay_bad']}; smallest reproduced top-2 "
+                     f"margin {mg:.3e}")
+        stop += s["pick_rank_bad"] + int(s["replay_bad"] > 0.001 * max(1, s["replay_n"]))
     lines.append("PRECHECK " + ("OK" if stop == 0 else "STOP"))
     txt = "\n".join(lines)
     print(txt)
@@ -342,6 +526,8 @@ class Prep:
         self.X = d["X"]
         self.n_alive = d["n_alive"]
         self.n_sel = int(d["n_sel"])
+        self.r_pick = d["r_pick"] if "r_pick" in d else None
+        self.traj = os.path.basename(os.path.dirname(os.path.abspath(path)))
 
 
 def load_part(prep_dir, pool_path, part):
@@ -379,6 +565,20 @@ def fit_std(probs, k):
         xs.append(X[mem])
     x = np.concatenate(xs)
     return x.mean(0), x.std(0) + 1e-6
+
+
+def fit_std_stream(probs, k):
+    """fit_std in two streaming passes (no concatenated copy of every row)."""
+    n, s1, s2 = 0, np.zeros(N_X), np.zeros(N_X)
+    for pp in probs:
+        X, _, _, _, _, mem = pool_arrays(pp, k)
+        n += int(mem.sum())
+        s1 += X[mem].sum(0)
+    mu = s1 / n
+    for pp in probs:
+        X, _, _, _, _, mem = pool_arrays(pp, k)
+        s2 += ((X[mem] - mu) ** 2).sum(0)
+    return mu, np.sqrt(s2 / n) + 1e-6
 
 
 class TopKNet:
@@ -535,6 +735,88 @@ def cmd_train(prep_dir, pool_path, out_prefix, variant, epochs=30, patience=5, l
     print(f"saved {out_prefix} best epoch {best[1]} val {best[0]:.4f}")
 
 
+def cmd_train2(out_prefix, variant, pool_path, *prep_dirs, lr=1e-3, seed=0):
+    """Train on the units (problem, trajectory) of several preps at once:
+    one S-step draw per unit per epoch; early stopping (patience
+    PATIENCE2) on the mean validation loss over every trajectory's
+    validation units, MAX_EPOCHS2 as a reported safety cap."""
+    k, hid = VARIANTS[variant]
+    t0 = time.time()
+    tr, va = [], {}
+    for d in prep_dirs:
+        tr += load_part(d, pool_path, "train")
+        va[os.path.basename(os.path.normpath(d))] = load_part(d, pool_path, "val")
+    mu, sd = fit_std_stream(tr, k)
+    tb = Batcher(tr, k, mu, sd)
+    vbs = {nm: Batcher(v, k, mu, sd) for nm, v in va.items()}
+    ntr = {}
+    for pp in tr:
+        ntr[pp.traj] = ntr.get(pp.traj, 0) + 1
+    nva_all = {nm: len(v) for nm, v in va.items()}
+    n_tr = len(tr)
+    del tr, va
+    Tensor.manual_seed(seed)
+    rng = np.random.default_rng(seed)
+    model = TopKNet(hid)
+    opt = nn.optim.Adam(get_parameters(model), lr=lr)
+    print(f"{variant}: train units {len(tb.arr)} of {n_tr} with a usable step ("
+          + ", ".join(f"{nm} {n}" for nm, n in sorted(ntr.items())) + "); val units "
+          + ", ".join(f"{nm} {len(vb.arr)} of {nva_all[nm]}" for nm, vb in vbs.items())
+          + f"; loaded in {time.time() - t0:.0f}s; input mu {np.round(mu, 3).tolist()} sd "
+          f"{np.round(sd, 3).tolist()}", flush=True)
+
+    def step(*ins):
+        loss = model.loss(*ins)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        return loss.realize()
+    jit = TinyJit(step)
+    vjit = TinyJit(lambda *ins: model.loss(*ins).realize())
+    vrng = np.random.default_rng(1234)
+    vfix = {}
+    for nm, vb in vbs.items():
+        vfix[nm] = []
+        for b0 in range(0, len(vb.arr), BATCH):
+            idx = list(range(b0, min(b0 + BATCH, len(vb.arr))))
+            vfix[nm].append((len(idx), tensors(vb.draw(idx, vrng))))
+    nva = sum(len(vb.arr) for vb in vbs.values())
+    meta = dict(k=k, hid=hid, variant=variant, seed=seed, lr=lr, S=S_STEPS, batch=BATCH,
+                patience=PATIENCE2, max_epochs=MAX_EPOCHS2, trajectories=",".join(sorted(vbs)))
+
+    def val_loss():
+        per = {nm: sum(vjit(*ins).item() * n for n, ins in fx) for nm, fx in vfix.items()}
+        tot = sum(per.values()) / nva
+        return tot, {nm: per[nm] / max(1, len(vbs[nm].arr)) for nm in per}
+
+    def fmt(per):
+        return " ".join(f"{nm} {v:.4f}" for nm, v in sorted(per.items()))
+    vl0, per0 = val_loss()
+    print(f"epoch -1 (the engine's rank alone, kappa 1) val {vl0:.4f} ({fmt(per0)})", flush=True)
+    best = (np.inf, -1)
+    reason = f"the {MAX_EPOCHS2}-epoch safety cap"
+    ep = -1
+    for ep in range(MAX_EPOCHS2):
+        te = time.time()
+        tl = 0.0
+        perm = rng.permutation(len(tb.arr))
+        with train_mode():
+            for b0 in range(0, len(perm), BATCH):
+                idx = perm[b0:b0 + BATCH].tolist()
+                tl += jit(*tensors(tb.draw(idx, rng))).item() * len(idx)
+        vl, per = val_loss()
+        print(f"epoch {ep} train {tl / len(tb.arr):.4f} val {vl:.4f} ({fmt(per)}) kappa "
+              f"{model.kappa.numpy()[0]:.3f} ({time.time() - te:.0f}s)", flush=True)
+        if vl < best[0]:
+            best = (vl, ep)
+            save_model(out_prefix, model, mu, sd, dict(meta, best_epoch=ep, best_val=vl, val0=vl0))
+        elif ep - best[1] >= PATIENCE2:
+            reason = f"no validation improvement for {PATIENCE2} epochs"
+            break
+    print(f"saved {out_prefix} best epoch {best[1]} val {best[0]:.4f}; stopped after epoch {ep}: "
+          f"{reason}")
+
+
 # --------------------------------------------------------------------------
 # gate (gate_spec_0d.txt): numpy float64 from the saved weights
 
@@ -556,7 +838,7 @@ class Head:
 def gate_problem(pp, k, head):
     """Per gate step: engine / re-ranker hit, positive in the top k, and
     the best-positive rank under each ranker (-1 when none)."""
-    out = {"hE": [], "hR": [], "o": [], "bE": [], "bR": []}
+    out = {"hE": [], "hR": [], "o": [], "bE": [], "bR": [], "hG": []}
     for i in np.nonzero(pp.is_gate)[0]:
         top = pp.top[i, :k]
         n = int(np.sum(top >= 0))
@@ -566,6 +848,9 @@ def gate_problem(pp, k, head):
         out["hE"].append(float(lab[0]))
         out["hR"].append(float(lab[a]))
         out["o"].append(float(lab.any()))
+        if pp.r_pick is not None:
+            # the pick the generating run made (its trajectory's own policy)
+            out["hG"].append(float(pp.lab[i, pp.r_pick[i]]) if pp.r_pick[i] >= 0 else 0.0)
         if lab.any():
             order = np.argsort(-s, kind="stable")
             out["bE"].append(int(np.argmax(lab)))
@@ -573,7 +858,7 @@ def gate_problem(pp, k, head):
     return out
 
 
-RANK_BINS = ((0, 0), (1, 1), (2, 3), (4, 7), (8, 15), (16, 31))
+RANK_BINS = ((0, 0), (1, 1), (2, 3), (4, 7), (8, 15), (16, 31), (32, 63))
 
 
 def rank_hist(vals):
@@ -621,6 +906,11 @@ def cmd_gate(model_prefix, prep_dir, pool_path, out_prefix, which="heldout"):
              f"{ci_o[1]:.4f}]; none {1 - oo.mean():.4f}; H_O / H_E {oo.mean() / max(1e-12, hE.mean()):.4f}",
              f"best-positive rank (steps with a positive in the top K): engine mean-of-problem-means "
              f"{mbE:.3f} [{rank_hist(bE)}]; re-ranker {mbR:.3f} [{rank_hist(bR)}]"]
+    if all(o["hG"] for _, _, o in per):
+        hG = np.array([np.mean(o["hG"]) for _, _, o in per])
+        ci_g, _ = bootstrap(per, lambda idx: hG[idx].mean())
+        lines.append(f"the trajectory's own pick (the generating run's choice) hit H_G {hG.mean():.4f} "
+                     f"CI [{ci_g[0]:.4f}, {ci_g[1]:.4f}]; H_R / H_G {hR.mean() / max(1e-12, hG.mean()):.4f}")
     lines.append("model-free, every K (engine pick r = 0; ceiling = a positive in the top K):")
     for kk in KS:
         pk = [(nm, ns, gate_problem(pp, kk, None)) for (nm, ns, _), pp in zip(per, probs)]
@@ -631,7 +921,7 @@ def cmd_gate(model_prefix, prep_dir, pool_path, out_prefix, which="heldout"):
                      f"{ci2[1]:.4f}]  none {1 - o2.mean():.4f}  H_O/H_E "
                      f"{o2.mean() / max(1e-12, e2.mean()):.4f}  engine best-positive rank "
                      f"[{rank_hist(b2)}]")
-    lines.append("GATE 0d: " + ("PASS" if ci_r[0] > 1.0 else "FAIL"))
+    lines.append("OFFLINE (rho interval above 1): " + ("PASS" if ci_r[0] > 1.0 else "FAIL"))
     lines.append("secondary, by selections per problem (not the gate):")
     nsel = np.array([ns for _, ns, _ in per])
     for lo, hi in ((0, 100), (100, 1000), (1000, 10 ** 9)):
@@ -873,10 +1163,59 @@ def cmd_featparity(npz_path, dump_path, out_path):
         f.write(txt + "\n")
 
 
+def cmd_rrcheck(prep_dir, err_dir, out_path):
+    """A re-ranker trajectory's offline weight picks (queue >= 2) and
+    changed picks (rank > 0) against the engine's own counters (the
+    harvest's `topk-rerank: ... picks=N changed=M` stderr line).  A
+    FIFO-scheduled pick inside the top K reads offline as a weight pick,
+    so offline - engine lies in [0, weight picks that are also the FIFO
+    minimum] when the rebuild is exact."""
+    rows = []
+    with open(os.path.join(prep_dir, "prep.tsv")) as f:
+        hdr = next(f).rstrip("\n").split("\t")
+        for line in f:
+            r = dict(zip(hdr, line.rstrip("\n").split("\t")))
+            if r["reason"] in ("ok", "no_gate_step"):
+                rows.append(r)
+    n = exact = within = outside = missing = multi = 0
+    bad = []
+    for r in rows:
+        path = os.path.join(err_dir, r["name"] + ".topk")
+        lines = [l for l in open(path)] if os.path.exists(path) else []
+        if not lines:
+            missing += 1
+            continue
+        multi += int(len(lines) > 1)
+        kv = dict(tok.split("=", 1) for tok in lines[-1].split() if "=" in tok)
+        pe, ce = int(kv["picks"]), int(kv["changed"])
+        wo, co, fo = int(r["rr_weight2"]), int(r["rr_changed2"]), int(r["rr_fmin_top"])
+        n += 1
+        if wo == pe and co == ce:
+            exact += 1
+        elif 0 <= wo - pe <= fo and 0 <= co - ce <= fo:
+            within += 1
+        else:
+            outside += 1
+            bad.append(f"{r['name']} offline {wo}/{co} (fifo-min {fo}) engine {pe}/{ce}")
+    lines = [f"rrcheck {prep_dir}: {n} eligible problems with the engine's counter line "
+             f"({missing} without; {multi} with more than one session line, the last one used)",
+             f"offline weight picks / changed picks == the engine's picks / changed: {exact}; "
+             f"within the FIFO-minimum bound: {within}; outside: {outside}"]
+    lines += ["  " + b for b in bad[:20]]
+    txt = "\n".join(lines)
+    print(txt)
+    with open(out_path, "w") as f:
+        f.write(txt + "\n")
+
+
 def main():
     cmd = sys.argv[1]
     if cmd == "prep":
-        cmd_prep(*sys.argv[2:7])
+        cmd_prep(*sys.argv[2:8])
+    elif cmd == "train2":
+        cmd_train2(sys.argv[2], sys.argv[3], sys.argv[4], *sys.argv[5:])
+    elif cmd == "rrcheck":
+        cmd_rrcheck(*sys.argv[2:5])
     elif cmd == "sanity":
         cmd_sanity(sys.argv[2], sys.argv[3])
     elif cmd == "train":

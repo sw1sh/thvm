@@ -10,7 +10,8 @@
 #                       [max_neg_train=100000] [max_neg_heldout=400000]
 # pool.tsv: name, relpath, status, spc, split (np0_pool.py).
 # Writes <outdir>/harvest.tsv (name, split, SZS, seconds, raw bytes,
-# extract summary) and <outdir>/harvest.done at the end.
+# extract summary), err/<name>.topk (the re-ranker's counter lines when
+# the flags arm it) and <outdir>/harvest.done at the end.
 set -u
 BIN=$1; ROOT=$2; POOL=$3; LANE=$4; FLAGS=$5; OUT=$6
 WALL=${7:-60}; PAR=${8:-16}; RATE=${9:-1}; RSS=${10:-3500}
@@ -36,6 +37,7 @@ run_one() {
      "$ROOT/$rel" </dev/null >"$OUT/out/$nm.out" 2>"$OUT/err/$nm.full")
   t1=$(date +%s.%N)
   tail -40 "$OUT/err/$nm.full" > "$OUT/err/$nm.err"
+  grep -h 'topk-rerank:' "$OUT/err/$nm.full" > "$OUT/err/$nm.topk"
   rm -f "$OUT/err/$nm.full"
   st=$(grep -m1 -o 'SZS status [A-Za-z]*' "$OUT/out/$nm.out" | awk '{print $3}')
   [ -z "$st" ] && st=NoOutput
