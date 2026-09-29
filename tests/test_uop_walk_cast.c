@@ -11,6 +11,11 @@
 // in the destination's domain, so a float source was truncated before a
 // bool tested it and a float product cast to int multiplied truncated
 // operands, and it sent an int to f32 through a double.
+//
+// A CAST's source walks in its own dtype (uwalk_term_dtype), and an IWHERE
+// takes its branches' dtype whatever its condition compares in: a select of
+// i64 values under a float mask, cast to int32, keeps the low bits of each
+// exact value past 2^53, where a double would round them.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -73,7 +78,14 @@ static Term to_f32(Term v) {
   return uop_cast(v, DT_FP32);
 }
 
-#define N_KERNS 8
+#define MASK_BOUND 1e18f
+
+static Term where_f32_mask(Term v) {
+  Term mask = uop_binary(UOP_CMPLT, uop_cast(v, DT_FP32), f32c(MASK_BOUND));
+  return uop_iwhere(mask, v, uop_const(DT_INT64, 0));
+}
+
+#define N_KERNS 9
 
 static Kern KERNS[N_KERNS];
 
@@ -124,6 +136,17 @@ static u32 build_kernels(void) {
     gf[i] = (f64)(f32)g[i];
   }
   build(&KERNS[n++], "f64-to-f32-to-f64", DT_FP64, DT_FP64, g, gf, to_f32);
+
+  i64 const p53 = (i64)1 << 53;
+  i64 const h[NI] = { p53 + 1, -(p53 + 3), ((i64)1 << 60) + 5, 7,
+                      -(((i64)1 << 40) + 9), ((i64)1 << 62) + 1,
+                      ((i64)1 << 33) + 3, -1 };
+  u32 hl[NI];
+  for (u32 i = 0; i < NI; i++) {
+    hl[i] = (u32)(u64)(((f32)h[i] < MASK_BOUND) ? h[i] : 0);
+  }
+  build(&KERNS[n++], "i64-where-f32-mask-to-i32", DT_INT64, DT_INT32, h, hl,
+        where_f32_mask);
 
   return n;
 }

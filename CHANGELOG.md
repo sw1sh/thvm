@@ -142,6 +142,7 @@ for the per-commit story.
   last iteration.
 
 ### Backends
+- `test_uop_walk_cast` covers a CAST to int32 of an i64 select under a float mask: the walker walks a CAST's source in the dtype `uwalk_term_dtype` gives it, so the select keeps the low bits of values past 2^53. Taking the select's domain from its float condition, as the CAST fix's `uwalk_value_is_int` did before it met the per-subterm dtype fix, rounds them through a double.
 - docs/dtypes.md no longer says the legacy C emit accumulates an int or bool reduce in a float: it declares an int, bool or f64 reduce's accumulator, and the values it hoists next to one, in the reduce's dtype, and only an f32 reduce and the GPU targets keep a float accumulator.
 - docs/metal.md names the dtypes the Metal paths take, as docs/dtypes.md does: the tile path's MSL maps f32, f16, bf16, fp8 bytes and i8 / u8 / i32 / i64, and the shader-library encoder takes f32 / i32. It said the GPU runs f32 only and falls through to the deleted CPU interpreter.
 - The CPU UOp walker's CAST converts as the C emit does: it walks the source in its own domain, so a float cast to bool is x != 0 (tinygrad's bool(x)), a float expression cast to an int truncates as a whole, and an int, or an f64 value, reaches f32 rounded once. It walked every source in the destination's domain, so 0.5 cast to bool stored 0, `x * 2.5` cast to int32 multiplied truncated operands (3 gave 6, not 7), and an i64 or u64 went to f32 through a double (2^60 + 2^36 + 1 gave 2^60).
