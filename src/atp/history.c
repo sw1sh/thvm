@@ -60,8 +60,9 @@
 // into separately: they decode the slot's bytes into transient heap
 // Terms and run thvm_atp_cp_features on them with age = the CP's seq,
 // the vector a push-time learned scorer computes.  The decode is the
-// only IC heap allocation the export makes (no collection runs inside
-// the push loop, and the step-top collection reclaims the cells).
+// only IC heap allocation the export makes.  Without an armed collector
+// (FindProof runs with none) those cells are never reclaimed, so a long
+// export can exhaust the heap (BOO078-1 at 56 s of a 60 s twee run).
 
 #define ATP_HX_REC_SIZE 64u
 #define ATP_HX_NFEAT    10u

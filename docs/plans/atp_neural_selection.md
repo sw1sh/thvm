@@ -167,6 +167,54 @@ forward pass realizes it, and the first step writes NaN. Initialize
 constant parameters from numpy. Phase 0's parameters were all random, so
 its Adam was unaffected.
 
+## Phase 0c result (2026-09-29): FAIL, the static head ties the engine
+
+Pre-registered before the harvest and any training
+(`~/.cache/thvm/casc/J13/neural_p1/gate_spec_0c.txt`): 0b's pool, split,
+steps, queue reconstruction, loss and selection rule, but the model sees
+only what a selector has at push: s(c) = -kappa log1p(cp_pri at push) + an
+MLP over the standardized 14 engine CP features (`thvm_atp_cp_features`)
+and log1p(cp_pri at push), output layer at zero so it starts as the
+engine. PASS iff the upper ends of both bootstrap intervals (median-
+percentile ratio, top-10 miss ratio) are below 1. Trainer:
+`tools/atp_enigma/static_net.py`.
+
+Seven of the 14 features (GT and MIX2 weights, goal weight, top-symbol
+labels, orientability, unification measure) cannot be derived from the
+phase-0 export, so the harvest was re-run with the export's new `F` record
+(`THVM_ATP_HISTORY_CPFEAT=1`: the queued pair decoded from the slot,
+`thvm_atp_cp_features` with age = seq). On phase 0's 7 observation problems
+selections, proofs and stats match with the export off and on (GRP417-1
+differed once on the off side, an 11 s run straddling the lane's 10 s
+CPU-time interreduction trigger; three repeats of each side then matched
+phase 0). The `F` columns that the `P` record also defines agree exactly on
+6.7M rows. The decode roughly doubles the export's cost (median 1.8x wall on
+common solves), so the 60 s harvest lost four wall-edge solves (train 482,
+held-out 133, against 485 and 134). FindProof runs without a heap
+collector, so the decoded cells are never reclaimed; one long unsolved run
+(BOO078-1) exhausted the heap.
+
+| variant (validation, 64 problems) | median ratio | miss ratio |
+|---|---|---|
+| S16 (hidden 16) | 0.950 [0.66, 1.73] | 0.980 [0.86, 1.11] |
+| S32 (hidden 32) | 0.954 [0.65, 1.74] | 0.961 [0.84, 1.09] |
+
+The rule chose S32. Its one held-out run (131 problems): median percentile
+0.124 against the engine's 0.112 (ratio 1.10, interval 0.92 to 1.34;
+better on 67 problems, worse on 60), top-10 miss rate 0.345 against 0.362
+(ratio 0.95, interval 0.87 to 1.04). FAIL: a tie. The head helps on small
+problems (under 100 selections: median 0.125 against 0.167) and loses on
+large ones (over 1000 selections: 0.135 against 0.061). No gated problem
+re-scored a queued CP in place, so the engine ranked by exactly the push
+priority the head starts from.
+
+So 0b's edge came from the step-dependent signal (a CP's rank in the live
+queue), not from anything a CP carries at push. A push-time scorer over
+these features has no offline support, and phase 1 as planned (score once
+at push) is not built. Using the queue-relative position online means
+re-scoring the queue head periodically, the Tier-2 re-rank design whose
+per-candidate cost was its named bottleneck.
+
 ## Risks
 
 - Volume: history embeddings for 10M+ CPs cost memory (32 floats per CP is
