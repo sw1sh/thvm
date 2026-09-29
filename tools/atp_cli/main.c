@@ -1197,12 +1197,20 @@ int main(int argc, char **argv) {
         const char *ce = getenv("THVM_ATP_CURRY");
         if (ce == NULL || ce[0] != '0') tp_curry_wide(&tp);
       }
+      // The deferred FOF clausal pre-pass (see tp_fof_load) runs here,
+      // once the encoding exists and is curried, with its usual share
+      // of the wall -- AHEAD of the Horn release, whose oversized-KB
+      // budget (0.4 of the wall) would otherwise eat into the
+      // saturation's 60%.  A give-up before this point ran it already,
+      // with the whole wall, through the tp_giveup hook.  A refutation
+      // sets g_cli_fof_satref: the front-end decision below prints it.
+      int prepass_won = fof_prepass_run(0.0);
       // Encoded-Horn (ifeq) problems: decode the dispatcher encoding
       // and forward-chain released units BEFORE SInE, so the releases
       // participate in axiom selection.  THVM_ATP_HORN=0 disables.
       {
         const char *he = getenv("THVM_ATP_HORN");
-        if (he == NULL || he[0] != '0') tp_horn_release(&tp);
+        if ((he == NULL || he[0] != '0') && !prepass_won) tp_horn_release(&tp);
       }
       // Goal reached by the chaining itself: some released unit (a
       // logical consequence, by the modus-ponens-only invariant)
@@ -1311,14 +1319,6 @@ int main(int argc, char **argv) {
       // representation, so give up cleanly instead of aborting the reader.
       for (int i = 0; i < tp.n_syms; i++)
         if (tp.syms[i].arity > 8) tp_giveup("functor arity exceeds 8");
-      // Every equational capacity gate has passed: the deferred FOF
-      // clausal pre-pass takes its usual share of the wall here, the
-      // engine the rest (see tp_fof_load).
-      if (fof_prepass_run(0.0)) {
-        fof_prepass_report();
-        free(tpp);
-        return 0;
-      }
       // Canonical presentation (orientation + order + variable names):
       // AFTER every content transform and capacity gate, BEFORE .pr
       // emission, so the emitted .pr is invariant across the corpus

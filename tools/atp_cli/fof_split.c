@@ -2608,12 +2608,12 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   // clauses (case analysis lives there, not in any equational
   // encoding).  Under --proof a win emits the recorded resolution
   // refutation with its conversion lineage (prepass_emit_proof).
-  // DEFERRED: main runs it (fof_prepass_run) once every equational
-  // capacity gate has passed, with its usual share of the wall; a gate
-  // that gives up first -- equation/symbol capacity, currying, axiom
-  // selection -- runs it through the tp_giveup hook with the whole
-  // remaining wall instead of ending the lane after 60% of it (the
-  // SEV606+1 / LCL646+1.010 early-give-up class).
+  // DEFERRED: main runs it (fof_prepass_run) once the encoding is built
+  // and curried, with its usual share of the wall; a give-up before that
+  // point -- no negative clause, an unrepresentable goal, a curried goal
+  // past the side buffer, no negated conjecture -- runs it through the
+  // tp_giveup hook with the whole remaining wall instead of ending the
+  // lane with the wall unspent.
   int defer_prepass = (g_fof_or_ncl > 0 && !g_cli_fof_trivial &&
                        !g_fof_split_pending && fof_prepass_enabled());
   if (defer_prepass) {
