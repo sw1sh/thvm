@@ -240,7 +240,7 @@ static int test_case4_end_to_end_render(void) {
   CHECK(strstr(buf, "void k(") != NULL);
   CHECK(strstr(buf, "float *out =") != NULL);
   CHECK(strstr(buf, "const float *in0 =") != NULL);
-  CHECK(strstr(buf, "for (uint a0 = 0; a0 < 8; a0++)") != NULL);
+  CHECK(strstr(buf, "for (int a0 = 0; a0 < 8; a0++)") != NULL);
   // Body: `out[a0] = (in0[a0] + 1.000000f);`
   CHECK(strstr(buf, "out[a0]") != NULL);
   CHECK(strstr(buf, "in0[a0]") != NULL);
@@ -293,7 +293,7 @@ static int test_case5_render_reduce_single_axis(void) {
   CHECK(strstr(buf, "void k_reduce(") != NULL);
   CHECK(strstr(buf, "float _acc0;") != NULL);
   CHECK(strstr(buf, "_acc0 = ") != NULL);
-  CHECK(strstr(buf, "for (uint a0 = 0; a0 < 8;") != NULL);
+  CHECK(strstr(buf, "for (int a0 = 0; a0 < 8;") != NULL);
   CHECK(strstr(buf, "}\n") != NULL);
   // The final store back to out reads `_acc0` (after END).
   CHECK(strstr(buf, "out[0]") != NULL);
@@ -345,12 +345,12 @@ static int test_case6_render_multi_axis_reduce(void) {
   }
   buf[n] = 0;
   // All three axes must appear as for-loops.
-  CHECK(strstr(buf, "for (uint a0 = 0; a0 < 4;") != NULL);
-  CHECK(strstr(buf, "for (uint a1 = 0; a1 < 3;") != NULL);
-  CHECK(strstr(buf, "for (uint a2 = 0; a2 < 3;") != NULL);
+  CHECK(strstr(buf, "for (int a0 = 0; a0 < 4;") != NULL);
+  CHECK(strstr(buf, "for (int a1 = 0; a1 < 3;") != NULL);
+  CHECK(strstr(buf, "for (int a2 = 0; a2 < 3;") != NULL);
   // The accumulator decl is at body scope (before any for-loop).
   const char *acc = strstr(buf, "float _acc0;");
-  const char *first_for = strstr(buf, "for (uint a");
+  const char *first_for = strstr(buf, "for (int a");
   CHECK(acc != NULL && first_for != NULL && acc < first_for);
 
   thvm_free();
@@ -586,8 +586,8 @@ static void check_row_sum(u32 e0, u32 e1) {
   CHECK(p_end < pos_of_last_op(&lk, UOP_STORE));
 
   char f0[64], f1[64];
-  snprintf(f0, sizeof(f0), "for (uint a0 = 0; a0 < %u;", e0);
-  snprintf(f1, sizeof(f1), "for (uint a1 = 0; a1 < %u;", e1);
+  snprintf(f0, sizeof(f0), "for (int a0 = 0; a0 < %u;", e0);
+  snprintf(f1, sizeof(f1), "for (int a1 = 0; a1 < %u;", e1);
   const char *loop0 = strstr(buf, f0);
   const char *loop1 = strstr(buf, f1);
   const char *init  = strstr(buf, "_acc0 = 0x0p+0f;");
@@ -922,7 +922,7 @@ static int test_case16_init_before_loop_at_2p24_outputs(void) {
   CHECK(pos_of_term(&lk, rj) < pos_of_acc_store(&lk, 0, 1));
   CHECK(pos_of_acc_store(&lk, 0, 1) < pos_of_term(&lk, rk));
   const char *init_outer = strstr(buf, "_acc1 = 0x0p+0f;");
-  const char *loop_j     = strstr(buf, "for (uint a1 = 0; a1 < 4;");
+  const char *loop_j     = strstr(buf, "for (int a1 = 0; a1 < 4;");
   CHECK(init_outer != NULL && loop_j != NULL && init_outer < loop_j);
 
   thvm_free();
@@ -977,6 +977,54 @@ static int test_case17_float_literals_render_exactly(void) {
   TEST_REPORT();
 }
 
+// out[r0] = sum_r1 (0 <= r0 + r1 - 1 < 8 ? in[r0 + r1 - 1] : 0), a padded
+// window on the C route.  Index math is signed (UOP_ISUB / UOP_ILT are
+// signed, thvm.h), as tinygrad renders ranges as `int`
+// (renderer/cstyle.py:18-19): with `uint` loops and `%u` constants, -1
+// became 4294967295 and `-1 < idx` was false for every idx.
+static int test_case18_padded_window_index_is_signed(void) {
+  thvm_init();
+  TEST_BEGIN("case18 C route: a negative window offset stays signed");
+
+  u32 dims_out[1] = { 4 };
+  u32 dims_in[1]  = { 8 };
+  Term out_buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_out, 0);
+  Term in_buf  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims_in, 1);
+  Term r0 = uop_range(0, KAX_LOOP, 4);
+  Term r1 = uop_range(1, KAX_REDUCE, 3);
+  Term idx = uop_int_binary(UOP_ISUB, uop_int_binary(UOP_IADD, r0, r1),
+                            uop_const(DT_INT32, 1));
+  Term ok  = uop_int_binary(UOP_IAND,
+               uop_int_binary(UOP_ILT, uop_const(DT_INT32, 0xFFFFFFFFu), idx),
+               uop_int_binary(UOP_ILT, idx, uop_const(DT_INT32, 8)));
+  Term val = uop_iwhere(ok, uop_load(uop_index_e(in_buf, idx)),
+                        uop_const(DT_FP32, 0));
+  u32 axes[1] = { 1 };
+  Term red = uop_reduce_multi(REDUCE_SUM, 1, axes, val);
+  Term store = uop_store(out_buf, uop_index_e(out_buf, r0), red);
+
+  static LinKernel lk;
+  static char buf[16384];
+  CHECK(render_lin_c(uop_devectorize_graph(store), &lk, buf, sizeof(buf)));
+  static float in[8], out[4];
+  for (u32 i = 0; i < 8; i++) {
+    in[i] = (float)(i + 1);
+  }
+  const void *ins[1] = { in };
+  CHECK(run_c_kernel(buf, out, ins));
+  for (int i = 0; i < 4; i++) {
+    float want = 0.0f;
+    for (int j = 0; j < 3; j++) {
+      int x = i + j - 1;
+      want += (x >= 0 && x < 8) ? in[x] : 0.0f;
+    }
+    CHECK(out[i] == want);
+  }
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 int main(void) {
   int rc = 0;
   rc |= test_case1_elementwise();
@@ -997,5 +1045,6 @@ int main(void) {
   rc |= test_case15_gpu_targets_leave_reduces_to_legacy();
   rc |= test_case16_init_before_loop_at_2p24_outputs();
   rc |= test_case17_float_literals_render_exactly();
+  rc |= test_case18_padded_window_index_is_signed();
   return rc;
 }

@@ -176,7 +176,17 @@ static const char *lz_alu_symbol(u32 op) {
 // front of it cannot form `--`.
 static void lz_emit_scalar_bits(LzCtx const *ctx, u32 dt, u32 bits, FILE *fp) {
   if (!dtype_is_float(dt)) {
-    fprintf(fp, "%u", bits);
+    // Index math is signed (UOP_ISUB / UOP_ILT are signed, thvm.h): a
+    // signed constant renders signed, so -1 stays -1 against the `int`
+    // loop variables.  Unsigned dtypes keep an unsigned literal.
+    if (dt == DT_BOOL) {
+      fprintf(fp, "%u", bits);
+    } else if (dt == DT_UINT8 || dt == DT_UINT16 || dt == DT_UINT32
+               || dt == DT_UINT64 || dt == DT_UINT4) {
+      fprintf(fp, "%uu", bits);
+    } else {
+      fprintf(fp, ((i32)bits < 0) ? "(%d)" : "%d", (i32)bits);
+    }
     return;
   }
   float f;
@@ -634,7 +644,9 @@ static int lz_emit_body(LinKernel const *lk, LzCtx *ctx, FILE *fp) {
         ctx->open[ctx->n_open++] = t;
         for (u32 d = 0; d < depth; d++) fputc(' ', fp);
         fputc(' ', fp);
-        fprintf(fp, "for (uint a%u = 0; a%u < %u; a%u++) {\n",
+        // `int`, as tinygrad renders ranges (renderer/cstyle.py:18-19):
+        // index math over them is signed.
+        fprintf(fp, "for (int a%u = 0; a%u < %u; a%u++) {\n",
                 axis_id, axis_id, extent, axis_id);
         depth++;
         break;
