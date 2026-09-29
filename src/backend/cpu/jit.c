@@ -52,13 +52,20 @@ static void cpu_jit_kvar_vals(KernelEntry const *ke, unsigned *out_vals) {
 }
 
 #define CPU_JIT_CACHE_CAP 256
-// JIT warmup gate: a kernel hash must fire CPU_JIT_WARMUP times before
-// committing to a clang compile (interpreted until then).  Default 0 =
+// JIT warmup gate: a kernel source must fire CPU_JIT_WARMUP times before
+// it runs compiled; the UOp walker runs it until then.  Default 0 =
 // compile on first fire (tinygrad always compiles).  At BS=128 an
 // interpreted conv step is ~100s, so any warmup>0 makes the first few
 // steps catastrophically slow; compiling immediately pays one clang
 // pass (~ms/kernel) and every subsequent step is fast.  The source-keyed
 // cache + on-disk /tmp dylib reuse make repeat compiles free.
+//
+// The gate stands in front of every way to a compiled kernel: the batched
+// precompile at realize builds only a kernel whose next fire reaches the
+// threshold, and neither the in-memory cache nor a dylib on disk is used
+// before that fire.  So a threshold no run reaches
+// (THVM_CPU_JIT_WARMUP=1000000000) sends every kernel the JIT would take
+// to the walker, however warm the caches are.
 #define CPU_JIT_WARMUP 0
 // Override the warmup threshold via THVM_CPU_JIT_WARMUP (0 = compile on
 // first fire).  Lets a training loop with large one-shot-feeling kernels
@@ -93,6 +100,21 @@ static const char *cpu_jit_opt_tag(void) {
   }
   return tag;
 }
+
+// The on-disk dylib of one kernel (stem "", keyed by its source hash) or of
+// one combined cold-start batch (stem "comb_", keyed by the batch key).
+static void cpu_jit_dylib_path(char *out, size_t cap, char const *stem, u64 key) {
+  snprintf(out, cap, "/tmp/thvm_jit_%s%016llx_%s.dylib", stem,
+           (unsigned long long)key, cpu_jit_opt_tag());
+}
+
+static int cpu_jit_dylib_cached(u64 key) {
+  char dl_path[256];
+  cpu_jit_dylib_path(dl_path, sizeof dl_path, "", key);
+  struct stat st;
+  return stat(dl_path, &st) == 0;
+}
+
 typedef struct {
   u64       key;          // 0 = empty
   CpuJitFn  func;         // NULL until compile completes
@@ -206,6 +228,31 @@ static CpuJitSlot *cpu_jit_lookup_slot(u64 key) {
     if (CPU_JIT_CACHE[i].key == 0)   return &CPU_JIT_CACHE[i];
   }
   return NULL;
+}
+
+// Warmup gate.  A key's fires are counted in its cache slot until it runs
+// compiled, and fire number n may run compiled once n >= the threshold.
+// The precompile asks whether the key's NEXT fire gets there; the dispatch
+// counts the fire it is making.  A slot holds a compiled func only for a key
+// that got there, so a cached func needs no count.  A full table (s == NULL)
+// has nowhere to count: there only an ungated run takes a dylib already on
+// disk, and nothing is compiled.
+static int cpu_jit_next_fire_warm(CpuJitSlot const *s, u64 key) {
+  u32 fired = (s != NULL && s->key == key) ? s->fire_count : 0;
+  return fired + 1 >= cpu_jit_warmup();
+}
+
+static int cpu_jit_count_fire(CpuJitSlot *s, u64 key, u32 n_inputs) {
+  if (s == NULL) return cpu_jit_warmup() <= 1 && cpu_jit_dylib_cached(key);
+  if (s->key == 0) {
+    s->key        = key;
+    s->func       = NULL;
+    s->dl_handle  = NULL;
+    s->n_inputs   = n_inputs;
+    s->fire_count = 0;
+  }
+  s->fire_count++;
+  return s->fire_count >= cpu_jit_warmup();
 }
 
 // The C compiler for JIT kernels: THVM_CPU_CC, else $CC, else the first of
@@ -325,12 +372,12 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   char src_path[256], dl_path[256];
   snprintf(src_path, sizeof src_path, "/tmp/thvm_jit_%016llx.c",
            (unsigned long long)key);
-  snprintf(dl_path,  sizeof dl_path,  "/tmp/thvm_jit_%016llx_%s.dylib",
-           (unsigned long long)key, cpu_jit_opt_tag());
+  cpu_jit_dylib_path(dl_path, sizeof dl_path, "", key);
 
   // Skip the compile if the .dylib is already on disk (e.g. from a
   // previous session) and current.  Stat-only check; we don't try to
-  // verify cache freshness against the current source.
+  // verify cache freshness against the current source.  The caller has
+  // already passed the warmup gate.
   struct stat st;
   if (stat(dl_path, &st) == 0) {
     void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
@@ -435,6 +482,15 @@ typedef struct {
   char func_name[24];
 } CpuJitJob;
 
+// Batch key = FNV-1a over every job's per-kernel content key, so a
+// structurally-identical batch (same kernels, same order) maps to the
+// same combined dylib across processes.
+static u64 cpu_jit_batch_key(CpuJitJob const *jobs, u32 njobs) {
+  u64 bk = 0xcbf29ce484222325ULL;
+  for (u32 i = 0; i < njobs; i++) { bk ^= jobs[i].key; bk *= 0x100000001b3ULL; }
+  return bk | (1ULL << 63);
+}
+
 #endif  // !_WIN32
 
 #ifndef _WIN32
@@ -458,17 +514,11 @@ typedef struct {
 static void *cpu_jit_build_combined(CpuJitJob const *jobs, u32 njobs,
                                     char *out_dl_path, size_t out_cap) {
   if (njobs == 0) return NULL;
-  // Batch key = FNV-1a over every job's per-kernel content key, so a
-  // structurally-identical batch (same kernels, same order) maps to the
-  // same combined dylib across processes.
-  u64 bk = 0xcbf29ce484222325ULL;
-  for (u32 i = 0; i < njobs; i++) { bk ^= jobs[i].key; bk *= 0x100000001b3ULL; }
-  bk |= (1ULL << 63);
+  u64 bk = cpu_jit_batch_key(jobs, njobs);
   char comb_c[256], comb_dl[256];
   snprintf(comb_c,  sizeof comb_c,  "/tmp/thvm_jit_comb_%016llx.c",
            (unsigned long long)bk);
-  snprintf(comb_dl, sizeof comb_dl, "/tmp/thvm_jit_comb_%016llx_%s.dylib",
-           (unsigned long long)bk, cpu_jit_opt_tag());
+  cpu_jit_dylib_path(comb_dl, sizeof comb_dl, "comb_", bk);
   snprintf(out_dl_path, out_cap, "%s", comb_dl);
 
   struct stat st;
@@ -578,15 +628,17 @@ fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
     if (src == NULL) continue;
     u64 key = cpu_src_hash(src);
 
-    // Already compiled in-memory?  Skip.
+    // Warmup gate, ahead of both caches: build only a kernel whose next
+    // fire reaches the threshold.
     CpuJitSlot *s = cpu_jit_lookup_slot(key);
+    if (!cpu_jit_next_fire_warm(s, key)) { free(src); continue; }
+    // Already compiled in-memory?  Skip.
     if (s != NULL && s->key == key && s->func != NULL) { free(src); continue; }
+    // On disk: the dispatch loads it.
+    if (cpu_jit_dylib_cached(key)) { free(src); continue; }
 
     char dl_path[256];
-    snprintf(dl_path, sizeof dl_path, "/tmp/thvm_jit_%016llx_%s.dylib",
-             (unsigned long long)key, cpu_jit_opt_tag());
-    struct stat st;
-    if (stat(dl_path, &st) == 0) { free(src); continue; }  // on-disk cache hit
+    cpu_jit_dylib_path(dl_path, sizeof dl_path, "", key);
 
     // De-dup the batch by hash: two structurally-identical kernels render
     // to the same source -> same dylib; compile it once.
@@ -763,39 +815,12 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   CpuJitFn jfn = (s && s->key == key) ? s->func : NULL;
 
   if (jfn == NULL) {
-    // Warmup gate: if the cached dylib doesn't already exist on
-    // disk AND this kernel hasn't been fired enough times to be
-    // worth a clang compile, bail to the interpreter.  Track the
-    // pending hash in the cache slot's `fire_count` so the next
-    // fire can decide.  Mirrors what tinygrad does implicitly via
-    // its compile cache: one-shot kernels pay no compile cost;
-    // training-loop kernels cross the threshold almost immediately.
-    char dl_path[256];
-    snprintf(dl_path, sizeof dl_path, "/tmp/thvm_jit_%016llx_%s.dylib",
-             (unsigned long long)key, cpu_jit_opt_tag());
-    struct stat st;
-    int dl_exists = (stat(dl_path, &st) == 0);
-    if (!dl_exists) {
-      if (s != NULL) {
-        u32 warmup = cpu_jit_warmup();
-        if (s->key == 0) {                 // claim a fresh slot for tracking
-          s->key = key;
-          s->func = NULL;
-          s->dl_handle = NULL;
-          s->n_inputs = ke->n_inputs;
-          s->fire_count = 1;
-          if (warmup > 1) { free(src); return 0; }
-          // warmup<=1: fall through to compile on first fire.
-        } else if (s->key == key && s->func == NULL) {
-          s->fire_count++;
-          if (s->fire_count < warmup) { free(src); return 0; }
-          // Crossed warmup threshold: fall through to compile.
-        }
-      } else {
-        free(src);
-        return 0;                          // table full; stay on interpreter
-      }
-    }
+    // Warmup gate, ahead of the on-disk dylib: until this kernel has
+    // fired enough times to be worth a clang compile, the walker runs
+    // it.  Mirrors what tinygrad does implicitly via its compile
+    // cache: one-shot kernels pay no compile cost; training-loop
+    // kernels cross the threshold almost immediately.
+    if (!cpu_jit_count_fire(s, key, ke->n_inputs)) { free(src); return 0; }
     jfn = cpu_jit_build(ke, key, src);
     if (!jfn) { free(src); return 0; }
   }

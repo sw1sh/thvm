@@ -199,14 +199,18 @@ CPU JIT path, end to end:
 4. `cpu_jit_lookup_slot(key)` linear-probes
    `CPU_JIT_CACHE[CPU_JIT_CACHE_CAP]`. On hit, the cached `CpuJitFn`
    is reused.
-5. On miss, a warmup gate (`CPU_JIT_WARMUP` fires) holds the
-   compile back; the dispatcher returns 0 and the dispatcher falls
-   through to `cpu_dispatch_scalar`. Once the threshold is crossed,
-   `cpu_jit_build` calls `cg_render_uop_kernel_c_root(store_root,
-   "k", fp)` to render the source, writes it to
-   `/tmp/thvm_jit_<hash>.c`, shells out to clang, `dlopen`s the
-   resulting `/tmp/thvm_jit_<hash>.dylib`, and `dlsym`s the `k`
-   symbol. The slot is populated and returned.
+5. On miss, the warmup gate counts the fire in the key's slot and,
+   until the count reaches `THVM_CPU_JIT_WARMUP`, returns 0 so the
+   UOp walker runs the kernel. Only past the gate does
+   `cpu_jit_build` reuse `/tmp/thvm_jit_<hash>_<opt>.dylib` when it
+   is on disk, or call `cg_render_uop_kernel_c_root(store_root,
+   "k", fp)` to render the source, write it to
+   `/tmp/thvm_jit_<hash>.c`, shell out to the C compiler, `dlopen`
+   the dylib, and `dlsym` the `k` symbol. The slot is populated and
+   returned. The batched precompile at realize
+   (`cpu_jit_precompile_range`) passes the same gate: it builds only
+   kernels whose next fire reaches the threshold, so a threshold no
+   run reaches keeps every kernel on the walker.
 6. A view-contiguity check rejects strided inputs that the renderer
    doesn't have stride logic for; on rejection `cpu_jit_dispatch`
    returns 0 and the dispatcher falls through.
@@ -220,9 +224,9 @@ CPU JIT path, end to end:
 The cache is keyed at the granularity of "program shape": same
 opcodes + same per-input numels + same applied opts hash to the
 same slot. Two kernels with identical bodies share one `.dylib`.
-A persistent `/tmp/thvm_jit_<hash>.dylib` is honored across
-processes (a stat-only freshness check; no source-content
-verification).
+A persistent `/tmp/thvm_jit_<hash>_<opt>.dylib` is honored across
+processes once the kernel is past the warmup gate (a stat-only
+freshness check; no source-content verification).
 
 ## Comparison with Metal
 
