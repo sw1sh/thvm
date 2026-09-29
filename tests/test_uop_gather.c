@@ -2,9 +2,9 @@
 //
 // Every case compares the realized tensor with a host reference byte for
 // byte.  Run the binary twice: as is (kernels run through the C JIT), and
-// with THVM_CPU_JIT_WARMUP=1000000000 THVM_CPU_JIT_PARALLEL=0
-// THVM_CPU_JIT_OPT=O0 (no kernel crosses the compile gate, so each runs on
-// the UOp walker).  check_dispatch asserts which backend ran each kernel,
+// with THVM_CPU_JIT_WARMUP=1000000000 (no kernel crosses the compile gate,
+// which the precompile and both JIT caches honor, so each runs on the UOp
+// walker).  check_dispatch asserts which backend ran each kernel,
 // so the two runs agree with the reference, and with each other, on both
 // backends.
 //

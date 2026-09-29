@@ -8,8 +8,7 @@
 // (touched ? 0 : base).  REPLACE is last-write-wins along dim, base where
 // untouched (_masked_merge, :1170-1177).  Run the binary twice, as
 // test_uop_gather.c does: as is (C JIT), and with THVM_CPU_JIT_WARMUP=
-// 1000000000 THVM_CPU_JIT_PARALLEL=0 THVM_CPU_JIT_OPT=O0 (UOp walker);
-// check_dispatch asserts which backend ran.
+// 1000000000 (UOp walker); check_dispatch asserts which backend ran.
 //
 //   1. SUM with include_self 1 and 0, dims 0 and 1, duplicates and invalid
 //      ids {-1, V, 10982377, -19238}; the S-then-self order is visible;

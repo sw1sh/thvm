@@ -30,8 +30,7 @@
 //      error (grad_err_take) instead of leaving the cell unfired.
 //
 // Run twice, as test_uop_gather: as is (C JIT) and with
-// THVM_CPU_JIT_WARMUP=1000000000 THVM_CPU_JIT_PARALLEL=0
-// THVM_CPU_JIT_OPT=O0 (the UOp walker).
+// THVM_CPU_JIT_WARMUP=1000000000 (the UOp walker).
 #include "../src/thvm.c"
 #include "test.h"
 

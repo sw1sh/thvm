@@ -14,8 +14,7 @@
 // y = sum_j (W[t, j] + s), with W[t] a SHRINK view of W and s a broadcast
 // scalar (the broadcast trips has_bcast).  Integer-valued data, so the sum is
 // exact on both backends.  Run as is (C JIT) and with
-// THVM_CPU_JIT_WARMUP=1000000000 THVM_CPU_JIT_PARALLEL=0 THVM_CPU_JIT_OPT=O0
-// (the walker).
+// THVM_CPU_JIT_WARMUP=1000000000 (the walker).
 #include "../src/thvm.c"
 #include "test.h"
 
