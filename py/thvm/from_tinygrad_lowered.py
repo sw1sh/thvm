@@ -429,9 +429,9 @@ def _run_cuda(h, root, ref, inputs, grid_fallback):
 def _run_cpu(h, root, ref, inputs):
     """Render C99 and run it in-process.  The kernel loops over its own
     axes, so there is no grid; the signature is the CPU-JIT contract that
-    src/backend/cpu/jit.c dlsyms, compiled with the same flags."""
+    src/backend/cpu/jit.c dlsyms, compiled by the JIT's own compiler and
+    flags (cpu_jit_compile_shared)."""
     import os
-    import subprocess
     import tempfile
     src = h.render_c(root, name="k")
     if not src:
@@ -443,8 +443,9 @@ def _run_cpu(h, root, ref, inputs):
         c_path, so_path = os.path.join(d, "k.c"), os.path.join(d, "k.so")
         with open(c_path, "w") as f:
             f.write(src)
-        subprocess.run(["clang", "-O2", "-fbracket-depth=4096", "-fPIC", "-shared",
-                        "-o", so_path, c_path], check=True, capture_output=True)
+        if not h.compile_c_shared(c_path, so_path):
+            raise RuntimeError("compiling the rendered kernel failed "
+                               "(THVM_CPU_JIT_VERBOSE=1 shows the compiler's errors)")
         k = _ct.CDLL(so_path).k
     k.restype = None
     k.argtypes = [_ct.c_void_p, _ct.POINTER(_ct.c_void_p), _ct.c_uint,

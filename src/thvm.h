@@ -3704,6 +3704,10 @@ void thvm_metal_jit_drop_in_memory_psos(void);
 
 fn void cpu_jit_cache_reset(void);
 
+// Compile a C source file into a shared object with the CPU JIT's compiler
+// (THVM_CPU_CC, else $CC, else clang / cc / gcc) and flags.  1 on success.
+fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path);
+
 // Parallel cold-start JIT warm: render + clang-compile every JIT-eligible
 // CPU kernel in [kid_lo, kid_hi) CONCURRENTLY (a posix_spawn pool of up to
 // ncores clang processes) and populate the on-disk dylib cache + in-memory

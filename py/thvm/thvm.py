@@ -164,6 +164,8 @@ _render_uop_kernel_cuda = _bind(
 _render_uop_kernel_c = _bind(
     "py_render_uop_kernel_c", c_void_p, c_uint64, c_char_p)
 _string_free = _bind("py_string_free", None, c_void_p)
+_cpu_jit_compile_shared = _bind(
+    "py_cpu_jit_compile_shared", ctypes.c_int, c_char_p, c_char_p)
 
 # ---------------- BEAM / autotune surface ----------------
 _kernel_alloc = _bind("py_kernel_alloc", c_uint32)
@@ -808,6 +810,13 @@ class Thvm:
             return ctypes.string_at(ptr).decode("utf-8")
         finally:
             _string_free(ptr)
+
+    def compile_c_shared(self, c_path: str, so_path: str) -> bool:
+        """Compile a C99 file into a shared object with the CPU JIT's
+        compiler and flags (THVM_CPU_CC, else $CC, else clang / cc / gcc).
+        THVM_CPU_JIT_VERBOSE=1 keeps the compiler's diagnostics.
+        """
+        return bool(_cpu_jit_compile_shared(c_path.encode("utf-8"), so_path.encode("utf-8")))
 
 
 class Metal:

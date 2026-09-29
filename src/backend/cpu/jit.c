@@ -270,6 +270,33 @@ static void cpu_jit_warn_compile_failed(char const *what) {
 
 // Compile + load.  Returns the resolved `k` function pointer or NULL
 // on any failure (caller falls back to interpreter).
+// Compile a C source file into a shared object with the JIT's compiler and
+// flags.  Returns 1 on success.
+// -O3 default (not -O2): on the rendered conv-backward gather-reduce
+// kernels (deeply-nested masked-index expressions) -O3's extra
+// unrolling + scalar opts give ~1.6x over -O2 with NO float-semantics
+// change (-O3 does NOT enable -ffast-math, so the reduction stays
+// scalar + bit-identical).  THVM_CPU_JIT_OPT overrides; the dylib
+// filename carries the opt tag so an artifact built at a different
+// level is never reused under the wrong assumptions.
+// -fbracket-depth: a rendered kernel is ONE nested C expression, so a deep
+// fused elementwise chain blows clang's default 256-deep parser limit
+// ("fatal error: bracket nesting level exceeded maximum of 256") and the
+// whole kernel silently falls back to the interpreter -- correct, but a
+// ~14x cliff on a 400-op chain.  The limit is a parser guard, not a
+// codegen one; raising it costs nothing for shallow kernels.
+fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path) {
+  char bracket[40] = "";
+  if (cpu_cc_is_clang()) {
+    snprintf(bracket, sizeof bracket, "-fbracket-depth=%d", CPU_JIT_BRACKET_DEPTH);
+  }
+  char cmd[768];
+  snprintf(cmd, sizeof cmd, "%s -%s %s -fPIC -shared -o '%s' '%s'%s",
+           cpu_cc(), cpu_jit_opt_tag(), bracket, dl_path, src_path,
+           cpu_jit_verbose() ? "" : " 2>/dev/null");
+  return system(cmd) == 0;
+}
+
 static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   // Render the kernel as C99 by lifting to the UOp DAG and walking
   // it via cg_render_uop_kernel_c. Output signature matches the
@@ -320,28 +347,7 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   fputs(src, f);
   fclose(f);
 
-  char cmd[768];
-  // -O3 default (not -O2): on the rendered conv-backward gather-reduce
-  // kernels (deeply-nested masked-index expressions) -O3's extra
-  // unrolling + scalar opts give ~1.6x over -O2 with NO float-semantics
-  // change (-O3 does NOT enable -ffast-math, so the reduction stays
-  // scalar + bit-identical).  THVM_CPU_JIT_OPT overrides; the dylib
-  // filename carries the opt tag so an artifact built at a different
-  // level is never reused under the wrong assumptions.
-  // -fbracket-depth: a rendered kernel is ONE nested C expression, so a deep
-  // fused elementwise chain blows clang's default 256-deep parser limit
-  // ("fatal error: bracket nesting level exceeded maximum of 256") and the
-  // whole kernel silently falls back to the interpreter -- correct, but a
-  // ~14x cliff on a 400-op chain.  The limit is a parser guard, not a
-  // codegen one; raising it costs nothing for shallow kernels.
-  char bracket[40] = "";
-  if (cpu_cc_is_clang()) {
-    snprintf(bracket, sizeof bracket, "-fbracket-depth=%d", CPU_JIT_BRACKET_DEPTH);
-  }
-  snprintf(cmd, sizeof cmd, "%s -%s %s -fPIC -shared -o '%s' '%s'%s",
-           cpu_cc(), cpu_jit_opt_tag(), bracket, dl_path, src_path,
-           cpu_jit_verbose() ? "" : " 2>/dev/null");
-  if (system(cmd) != 0) {
+  if (!cpu_jit_compile_shared(src_path, dl_path)) {
     cpu_jit_warn_compile_failed("compile");
     return NULL;
   }
@@ -488,7 +494,7 @@ static void *cpu_jit_build_combined(CpuJitJob const *jobs, u32 njobs,
     snprintf(optflag, sizeof optflag, "-%s", cpu_jit_opt_tag());
     char bracketflag[32];
     snprintf(bracketflag, sizeof bracketflag, "-fbracket-depth=%d",
-             CPU_JIT_BRACKET_DEPTH);   // see cpu_jit_build
+             CPU_JIT_BRACKET_DEPTH);   // see cpu_jit_compile_shared
     char *argv[9];
     u32 ac = 0;
     argv[ac++] = (char *)cpu_cc();

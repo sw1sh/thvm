@@ -552,6 +552,12 @@ EXPORT char *py_render_uop_kernel_c(uint64_t root, const char *name) {
 
 EXPORT void py_string_free(char *s) { free(s); }
 
+// Compile a C99 file into a shared object with the CPU JIT's compiler and
+// flags, so py-side kernel harnesses build exactly as the runtime does.
+EXPORT int py_cpu_jit_compile_shared(const char *src_path, const char *so_path) {
+  return cpu_jit_compile_shared(src_path, so_path);
+}
+
 // ---------------- BEAM / autotune surface ----------------
 // Phase E entry: the autotune.c BEAM (slice 8 session 4) reads
 // `ke->cached_lift.store_root` for matmul-shape recognition via

@@ -140,6 +140,7 @@ for the per-commit story.
 ### Frontend
 - `test_param_zero_init_aliasing` pins that zero-initialized parameters (`zeros`, `zeros().contiguous()`, `full`, `zeros_like`) own distinct buffers and train independently under Adam; tinygrad 0.11 hash-consed two `zeros().contiguous()` parameters into one buffer.
 - `nn.state.safe_save` / `safe_load` / `safe_load_metadata` port tinygrad's safetensors format: files match tinygrad's byte for byte and load in either direction; other dtypes narrow to float32 / int32 as `torch_load` does. `nn.state.*` and `from thvm.nn.state import ...` now expose the same functions, including `get_parameters`.
+- The lowered tinygrad bridge (`from_tinygrad_lowered`) compiles its rendered kernels through the CPU JIT's own `cpu_jit_compile_shared` (THVM_CPU_CC, else $CC, else clang / cc / gcc; `-fbracket-depth` only for clang) instead of a hardcoded `clang -O2`, so its cross-checks run on gcc-only Linux hosts.
 - py: `test_tiny.py` resynced to tinygrad 365f87a8a (test_eye, clone-based
   gemm/gemv, test_hgemm, test_call); `thvm.helpers` exports `OSX`/`WIN`.
 - py: `Tensor.var`, `var_mean`, `std_mean`; `Tensor.std` takes `correction`
