@@ -300,6 +300,29 @@ topk cap), or a value/lookahead model rather than a pointwise CP ranker.
 `gcn_tier2_casc_round2.safetensors` / `round3` are committed as the DAgger
 artifacts; the lane stays opt-in and is NOT added to `SCHEDULE[]`.
 
+## Selection-time top-K re-ranker (neural selection phase 0d)
+
+At every weight pick the engine's K best queued CPs are scored by a small
+listwise head (rank, queue size, priority, the 14 push features, age) and
+the argmax is selected. Offline it beats the engine's pick on held-out
+problems; online it solves the same set as the twee lane (see
+[docs/plans/atp_neural_selection.md](../../docs/plans/atp_neural_selection.md)),
+so it stays opt-in and out of `SCHEDULE[]`. Pod-only pipeline over a
+history-export harvest (`np0_harvest.sh` with `THVM_ATP_HISTORY_CPFEAT=1`):
+
+```
+topk_net.py prep    harvest/npz pool.tsv prep precheck.txt 8   # queues, top K, inputs
+topk_net.py sanity  prep pool.tsv
+topk_net.py train   prep pool.tsv runs/R32h32 R32h32
+topk_net.py valgate runs/R32h32 prep pool.tsv validation/R32h32_val
+topk_net.py export  runs/R32h32 models/topk_rerank_R32h32.safetensors
+# engine: FindProof <twee lane flags> --rerank-topk=32 \
+#   --rerank-model=tools/atp_enigma/models/topk_rerank_R32h32.safetensors
+# THVM_ATP_RERANK_DUMP=<tsv> dumps the engine's candidates, inputs and scores:
+topk_net.py parity     runs/R32h32 models/topk_rerank_R32h32.safetensors dump.tsv out.txt
+topk_net.py featparity export.npz dump.tsv out.txt   # same run, history export at rate 1
+```
+
 ## Typical flow
 
 ```

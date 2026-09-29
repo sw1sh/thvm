@@ -215,6 +215,47 @@ at push) is not built. Using the queue-relative position online means
 re-scoring the queue head periodically, the Tier-2 re-rank design whose
 per-candidate cost was its named bottleneck.
 
+## Phase 0d result (2026-09-29): the selection-time re-ranker beats the engine offline, ties it online
+
+Pre-registered before any code or number
+(`~/.cache/thvm/casc/J13/neural_p2/gate_spec_0d.txt`). The deployable form
+of 0b: at every weight (non-FIFO) selection, take the engine's top K by its
+own key and let a head pick among them. Inputs are what a selector has at
+that moment: the candidate's rank in the top K, the queue size, its
+priority, the 14 push features and its age in selections. The head is 0b's
+listwise head trained within the top K, starting as the engine's pick.
+Trainer and gate: `tools/atp_enigma/topk_net.py`, on the 0c harvest, exact
+(unsubsampled) problems only.
+
+Step A, offline. Six variants (K 8 / 16 / 32, hidden 16 / 32); every one
+beat the engine on validation, and the rule chose K 32, hidden 32. On the
+held-out split (109 problems, 4,667 selections with a proof CP pending) the
+engine's own pick is a proof CP 20.4% of the time and the re-ranker's 30.9%:
+ratio 1.51, 95% interval 1.39 to 1.66, better on 82 problems and worse on
+17. PASS. The top 32 holds a proof CP at 76% of those selections, so any
+re-ranker is capped at 3.7 times the engine's rate.
+
+Step B, online. `src/atp/topk.c` (FindProof `--rerank-topk=32
+--rerank-model=tools/atp_enigma/models/topk_rerank_R32h32.safetensors`)
+walks the CP heap for the root's 32 best at each weight pick and extracts
+the head's choice. It reproduces the offline inputs exactly: the goal
+columns are evaluated against the goal normal form as it stood at each
+CP's push, and the candidates' pairs are decoded into heap scratch popped
+after the scoring. On eight problems the engine's candidate sets, choices
+and inputs equal the queue rebuilt from the same run's history export, and
+its scores equal the Python head's to 1e-14. Unarmed, selection is
+byte-identical (test_atp, the OA and DN pins, twee-lane proofs).
+
+The online gate (171 held-out pool problems, 60 s, twee against
+twee-rerank): both lanes solve the same 134 problems, none gained, none
+lost. FAIL. The re-ranker finds most of those proofs in fewer selections
+(fewer on 80 of 132, more on 26, geometric mean 0.85; LAT177-1 9,569 to
+1,865), at 51 microseconds per pick, but the 37 problems twee misses stay
+missed. The offline metric rewards picking the engine's own proof CPs
+sooner; the misses need a different proof or far fewer steps, which a
+one-step top-K re-ranking did not provide. The lane stays out of the
+schedule and J13 was not run.
+
 ## Risks
 
 - Volume: history embeddings for 10M+ CPs cost memory (32 floats per CP is
