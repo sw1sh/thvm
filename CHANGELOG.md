@@ -132,6 +132,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- `nn.state.safe_save` / `safe_load` / `safe_load_metadata` port tinygrad's safetensors format: files match tinygrad's byte for byte and load in either direction; other dtypes narrow to float32 / int32 as `torch_load` does. `nn.state.*` and `from thvm.nn.state import ...` now expose the same functions, including `get_parameters`.
 - py: `test_tiny.py` resynced to tinygrad 365f87a8a (test_eye, clone-based
   gemm/gemv, test_hgemm, test_call); `thvm.helpers` exports `OSX`/`WIN`.
 - py: `Tensor.var`, `var_mean`, `std_mean`; `Tensor.std` takes `correction`

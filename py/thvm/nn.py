@@ -226,6 +226,12 @@ class _State:
     def get_state_dict(obj) -> dict[str, Tensor]:
         return _get_state_dict(obj)
 
+    # nn.state.safe_save / safe_load / torch_load / load_state_dict live in
+    # nn_state (the `thvm.nn.state` module), which imports this file.
+    def __getattr__(self, name):
+        from . import nn_state
+        return getattr(nn_state, name)
+
 
 state = _State()
 

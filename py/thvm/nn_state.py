@@ -1,9 +1,17 @@
-"""thvm's `nn.state` surface: torch_load / load_state_dict / get_state_dict.
+"""thvm's `nn.state` surface: safetensors, torch_load, state dicts.
 
 Faithful to tinygrad/nn/state.py's API:
+  - safe_save(tensors, fn, metadata=None) / safe_load(fn) -> dict[str, Tensor]
+  - safe_load_metadata(fn) -> (file bytes, data_start, header)
   - torch_load(path) -> dict[str, Tensor]   (reads a PyTorch .bin/.pth)
   - get_state_dict(obj) -> dict[str, Tensor]
   - load_state_dict(model, state_dict) -> list[Tensor]
+
+safetensors files are byte-identical to tinygrad's safe_save.  thvm has no
+disk device, so safe_load_metadata returns a read-only numpy memmap of the
+file where tinygrad returns a disk Tensor.  py/thvm holds only float32 and
+int32 tensors, so safe_load narrows other dtypes the way torch_load does:
+float formats to float32 and integer formats to int32.
 
 torch_load reads BOTH PyTorch save formats directly into numpy (no
 torch / safetensors dependency):
@@ -22,6 +30,8 @@ Re-exported under the dotted `thvm.nn.state` name in thvm/__init__.py.
 from __future__ import annotations
 
 import io
+import json
+import pathlib
 import pickle
 import struct
 import zipfile
@@ -44,6 +54,73 @@ _TORCH_DTYPES = {
     "ByteStorage": (np.uint8, 1, False),
     "BoolStorage": (np.bool_, 1, False),
 }
+
+
+# safetensors dtype tag -> numpy storage dtype; BF16 and the fp8 tags have
+# no numpy dtype and are widened by _safe_array (tinygrad nn/state.py:33-35).
+_SAFE_NP = {
+    "BOOL": np.bool_, "I8": np.int8, "U8": np.uint8, "I16": np.int16,
+    "U16": np.uint16, "I32": np.int32, "U32": np.uint32, "I64": np.int64,
+    "U64": np.uint64, "F16": np.float16, "BF16": np.uint16,
+    "F32": np.float32, "F64": np.float64,
+}
+
+
+def _safe_array(raw, tag: str, shape) -> np.ndarray:
+    if tag == "BF16":
+        u16 = np.frombuffer(raw, dtype=np.uint16)
+        flat = (u16.astype(np.uint32) << 16).view(np.float32)
+    elif tag in _SAFE_NP:
+        flat = np.frombuffer(raw, dtype=_SAFE_NP[tag])
+    else:
+        raise NotImplementedError(f"safetensors dtype {tag} is not supported by py/thvm")
+    return flat.reshape(shape)
+
+
+def safe_load_metadata(fn):
+    """Loads a .safetensors file, returning the file bytes, the data start
+    position, and the header (tinygrad nn/state.py:44-50)."""
+    t = np.memmap(pathlib.Path(fn), dtype=np.uint8, mode="r")
+    data_start = int.from_bytes(t[0:8].tobytes(), "little") + 8
+    return t, data_start, json.loads(t[8:data_start].tobytes())
+
+
+def safe_load(fn) -> dict[str, "Tensor"]:
+    """Loads a .safetensors file, returning the `state_dict`
+    (tinygrad nn/state.py:51-62)."""
+    t, data_start, metadata = safe_load_metadata(fn)
+    data = t[data_start:]
+    out = {}
+    for k, v in metadata.items():
+        if k == "__metadata__":
+            continue
+        lo, hi = v["data_offsets"]
+        out[k] = Tensor(np.array(_safe_array(data[lo:hi], v["dtype"], v["shape"])))
+    return out
+
+
+def safe_save(tensors: dict[str, "Tensor"], fn, metadata: dict | None = None):
+    """Saves a `state_dict` to disk in a .safetensors file with optional
+    metadata (tinygrad nn/state.py:64-86): a little-endian u64 header
+    length, the JSON header padded with spaces to a multiple of 8, then the
+    raw tensor bytes in dict order."""
+    headers, offset, blobs = {}, 0, []
+    if metadata:
+        headers["__metadata__"] = metadata
+    for k, v in tensors.items():
+        arr = np.ascontiguousarray(v.numpy(), dtype=v.dtype.np_dtype)
+        tag = {np.dtype(np.float32): "F32", np.dtype(np.int32): "I32"}[arr.dtype]
+        headers[k] = {"dtype": tag, "shape": list(v.shape),
+                      "data_offsets": [offset, offset + arr.nbytes]}
+        offset += arr.nbytes
+        blobs.append(arr.tobytes())
+    j = json.dumps(headers, separators=(",", ":"))
+    j += "\x20" * ((len(j) + 7) // 8 * 8 - len(j))
+    with open(fn, "wb") as f:
+        f.write(len(j).to_bytes(8, "little"))
+        f.write(j.encode("utf-8"))
+        for b in blobs:
+            f.write(b)
 
 
 def _prod(xs):
@@ -185,6 +262,10 @@ def get_state_dict(obj, prefix: str = "") -> dict[str, "Tensor"]:
     return sd
 
 
+def get_parameters(obj) -> list["Tensor"]:
+    return list(_get_state_dict(obj).values())
+
+
 def load_state_dict(model, state_dict: dict[str, "Tensor"],
                     strict: bool = True, verbose: bool = True,
                     consume: bool = False, realize: bool = True):
@@ -214,4 +295,5 @@ def load_state_dict(model, state_dict: dict[str, "Tensor"],
     return ret
 
 
-__all__ = ["torch_load", "get_state_dict", "load_state_dict"]
+__all__ = ["safe_save", "safe_load", "safe_load_metadata", "torch_load",
+           "get_state_dict", "get_parameters", "load_state_dict"]
