@@ -6,13 +6,16 @@
 // picks the evaluator, not the consumer's dtype and not the op's kind:
 //   - a CMPLT or CMPEQ compares in its operands' dtype: an i64 compare
 //     past 2^53, where a double rounds, a u64 compare past 2^63 unsigned,
-//     and an index compare (RANGE, IADD, IMUL), which the float evaluator
-//     cannot evaluate, as an int;
+//     an index compare (RANGE, IADD, IMUL) as an int, and a bool cast of
+//     an f32 comparison in floats;
+//   - an index in float math (f < RANGE, RANGE * RANGE into an f32) reads
+//     the index;
 //   - an IWHERE condition is true in its own dtype, so a fractional float
-//     mask is true, and a bool cast of a float comparison compares floats;
+//     mask is true;
 //   - a CAST converts its source's value, truncating a float toward zero
 //     and wrapping an int to the destination: CAST(1.5 * 2.5, i32) is 3,
-//     CAST(300, i8) is 44, and CAST(RANGE, f32) is the index;
+//     CAST(300, i8) is 44, CAST(1e19, u64) is exact, and a CAST of an
+//     index to f64 is the index;
 //   - a BITCAST of an int sum takes the sum's bits;
 //   - a float body in an int kernel (py's int32 true division builds one)
 //     computes in float and converts, as C converts `acc + a * (1.0f/b)`
@@ -273,6 +276,25 @@ static void check_narrowing_cast(void) {
   check_ints("walker", DT_INT32, res, want, 4);
 }
 
+// out[r] = CAST(f[r], u64) over f64 values past 2^63, which an i64 cannot
+// hold: the conversion runs from the double, not through an i64 load.
+static f64 const F64_BIG[4] = { 1e19, 9223372036854775808.0, 18446744073709549568.0, 5.75 };
+static i64 const U64_BIG[4] = { (i64)10000000000000000000ULL, (i64)P63,
+                                (i64)18446744073709549568ULL, 5 };
+
+static void check_f64_to_u64(void) {
+  TEST_BEGIN("walker/cast-f64-to-u64-past-2p63");
+  Term out     = gbuf(DT_UINT64, 4, 0);
+  Term ins[1]  = { gbuf(DT_FP64, 4, 1) };
+  Buf  bufs[1] = { { DT_FP64, F64_BIG, 4 } };
+  Term r    = uop_range(0, KAX_LOOP, 4);
+  Term root = uop_store(out, r, uop_cast(uop_index_e(ins[0], r), DT_UINT64));
+  u8 res[8 * MAXN];
+  memset(res, 0, sizeof res);
+  CHECK(walk(root, out, DT_UINT64, 4, ins, bufs, 1, res));
+  check_ints("walker", DT_UINT64, res, U64_BIG, 4);
+}
+
 // out[i] = reduce_j body(a[i, j], b[i, j]) over 2 x 3 int32 inputs.
 static void unit_reduce(char const *name, u32 kind, i32 const *a, i32 const *b,
                         Term (*body)(Term, Term), i64 const *want) {
@@ -446,6 +468,12 @@ static void check_end_to_end(void) {
     check_realized(uop_cast(lt, DT_BOOL), DT_BOOL, want, 6);
   }
 
+  TEST_BEGIN("e2e/cast-f64-to-u64-past-2p63");
+  {
+    u32 const four[1] = { 4 };
+    check_realized(uop_cast(ten(DT_FP64, F64_BIG, 1, four), DT_UINT64), DT_UINT64, U64_BIG, 4);
+  }
+
   TEST_BEGIN("e2e/i32-sum-of-cast-of-scaled-f32");
   {
     f32 const f[6]    = { 1.5f, -1.5f, 0.3f, 3.9f, 2.0f, -0.2f };
@@ -461,6 +489,7 @@ int main(void) {
   check_compares();
   check_conditions();
   check_narrowing_cast();
+  check_f64_to_u64();
   check_float_bodies();
 
   check_end_to_end();

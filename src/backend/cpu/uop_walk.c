@@ -524,7 +524,7 @@ static UWalkRed uwalk_reduce_value(UWalkCtx *c, Term t) {
 // a < b (CMPLT) or a == b (CMPEQ) in the operands' dtype, as the rendered
 // C compares them: in doubles when either is a float, else in the int
 // evaluator, unsigned when either is a u64.  A double holds an int exactly
-// only below 2^53, and the float evaluator has no index ops.
+// only below 2^53.
 static int uwalk_compare(UWalkCtx *c, u32 op, Term a, Term b) {
   u32 da = uwalk_term_dtype(c, a);
   u32 db = uwalk_term_dtype(c, b);
