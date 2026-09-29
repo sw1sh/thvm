@@ -6,7 +6,11 @@
 // THVM_ATP_HISTORY_EXPORT=<path>; with the env unset every hook is one
 // predictable branch and the engine is byte-identical.  The hooks only
 // READ engine state: no IC heap allocation, no cache traffic, no RNG --
-// the recorded run follows the unrecorded trajectory exactly.
+// the recorded run follows the unrecorded trajectory exactly.  Their
+// feature walks and writes run inside work-clock exclusion windows
+// (atp_work_pause / atp_work_resume), so the clock-gated disciplines
+// (CP-set interreduction sweeps, LRS) fire at the same point of the
+// search as in the unrecorded run.
 //
 // Format: fixed 64-byte little-endian records (AtpHxRec), appended to
 // <path>.  Record tags:
@@ -30,11 +34,14 @@
 //                       (parent / chain predecessor), pa = child 1
 //                       (NORM_STEP: the rewriting rule's trace id),
 //                       step = creation step, feat = the equation's
-//                       features when its pair is materialized
+//                       features when its pair is materialized, flags
+//                       bit 0 = pushed after the search ended (proof
+//                       emission), which a search-time model never sees
 //   'E' session end     kind = AtpStatus (0xff unknown), seq = n_trace,
 //                       step = selections, trace = CPs pushed, pa =
 //                       'P' records written, pb = flag bits, pri =
-//                       n_rules, uid_a = live queue
+//                       n_rules, uid_a = live queue, aux = trace size
+//                       at the search's end
 // 'P'/'S' carry: kind = cp_kind (TRACE_AXIOM/CP/SIMPLIFY), flags, pos_len
 // (overlap position depth, 0xff = none), seq, step (selections so far),
 // trace (the CP's trace id), pa / pb (parent rule trace ids: pa is the
@@ -111,6 +118,7 @@ typedef struct {
   u8    raw_pending;    // raw_untreated flag for the next heap insert
   u8    repacked;       // next reweight follows an in-place repack
   u32   last_sel_seq;
+  u32   n_trace_search;   // trace size when the search ended (0 = unmarked)
   u64   n_rec_push;
   u64   n_rec_sel;
 } AtpHx;
@@ -460,6 +468,7 @@ static void atp_hx_push(const AtpState *s, u32 row, const u8 *packed,
   u8 raw = g_hx.raw_pending;
   g_hx.raw_pending = 0u;
   if (!atp_hx_sampled(s->cp_seq[row])) return;
+  atp_work_pause();
   atp_hx_gsym_ensure(s);
   AtpHxRec r;
   atp_hx_rec_init(&r, 'P', s);
@@ -470,6 +479,7 @@ static void atp_hx_push(const AtpState *s, u32 row, const u8 *packed,
   atp_hx_feat_packed(&r, packed);
   atp_hx_write(&r);
   g_hx.n_rec_push++;
+  atp_work_resume();
 }
 
 // The WM intake permutes the queued axioms' seq stamps before the first
@@ -477,6 +487,7 @@ static void atp_hx_push(const AtpState *s, u32 row, const u8 *packed,
 // the post-permutation content (flag ATP_HX_F_RESTAMP).
 static void atp_hx_restamp_queue(const AtpState *s) {
   if (!atp_hx_on(s)) return;
+  atp_work_pause();
   atp_hx_gsym_ensure(s);
   for (u32 pos = 0; pos < s->n_cps; pos++) {
     u32 row = s->cp_heap[pos].row;
@@ -489,11 +500,13 @@ static void atp_hx_restamp_queue(const AtpState *s) {
     atp_hx_feat_packed(&r, s->cp_packed[row]);
     atp_hx_write(&r);
   }
+  atp_work_resume();
 }
 
 // Non-orphan pop of row `row` (bytes still owned by the slot).
 static void atp_hx_select(const AtpState *s, u32 row) {
   if (!atp_hx_on(s)) return;
+  atp_work_pause();
   atp_hx_gsym_ensure(s);
   AtpHxRec r;
   atp_hx_rec_init(&r, 'S', s);
@@ -504,6 +517,7 @@ static void atp_hx_select(const AtpState *s, u32 row) {
   atp_hx_write(&r);
   g_hx.last_sel_seq = r.seq;
   g_hx.n_rec_sel++;
+  atp_work_resume();
 }
 
 // Queued CP re-scored in place (CP-set interreduction survivors, the
@@ -515,6 +529,7 @@ static void atp_hx_reweight(const AtpState *s, u32 row, u32 old_pri) {
   g_hx.repacked = 0u;
   if (!forced && s->cp_pri[row] == old_pri) return;
   if (!atp_hx_sampled(s->cp_seq[row])) return;
+  atp_work_pause();
   AtpHxRec r;
   atp_hx_rec_init(&r, 'W', s);
   r.seq  = s->cp_seq[row];
@@ -523,33 +538,47 @@ static void atp_hx_reweight(const AtpState *s, u32 row, u32 old_pri) {
   r.kind = forced;
   atp_hx_feat_packed(&r, s->cp_packed[row]);
   atp_hx_write(&r);
+  atp_work_resume();
 }
 
 static void atp_hx_outcome(const AtpState *s, u8 code) {
   if (!atp_hx_on(s)) return;
+  atp_work_pause();
   AtpHxRec r;
   atp_hx_rec_init(&r, 'X', s);
   r.kind = code;
   r.seq  = g_hx.last_sel_seq;
   r.aux  = s->n_cps;
   atp_hx_write(&r);
+  atp_work_resume();
 }
 
 static void atp_hx_del(const AtpState *s, u32 seq, u8 reason) {
   if (!atp_hx_on(s) || !atp_hx_sampled(seq)) return;
+  atp_work_pause();
   AtpHxRec r;
   atp_hx_rec_init(&r, 'D', s);
   r.kind = reason;
   r.seq  = seq;
   atp_hx_write(&r);
+  atp_work_resume();
 }
 
 static void atp_hx_kill(const AtpState *s, u8 tag, u32 id) {
   if (!atp_hx_on(s)) return;
+  atp_work_pause();
   AtpHxRec r;
   atp_hx_rec_init(&r, tag, s);
   r.seq = id;
   atp_hx_write(&r);
+  atp_work_resume();
+}
+
+// The search is over (proof emission comes next): later trace entries are
+// flagged in the session-end dump.
+fn void thvm_atp_history_search_end(AtpState *s) {
+  if (!atp_hx_on(s)) return;
+  g_hx.n_trace_search = s->n_trace;
 }
 
 // Session end: dump the non-CP trace entries (the rule-side derivation
@@ -570,6 +599,7 @@ fn void thvm_atp_history_finish(AtpState *s, u32 status) {
     r.pa    = (u32)term_val(term_ctr_at(e, 1));
     r.step  = (g_hx.tstep != NULL && i < g_hx.tstep_cap)
                 ? g_hx.tstep[i] : 0xffffffffu;
+    if (g_hx.n_trace_search != 0u && i >= g_hx.n_trace_search) r.flags |= 1u;
     if (reason == TRACE_NORM_STEP && term_ctr_n(e) >= 5u) {
       r.pos_len = (u8)term_val(term_ctr_at(e, 4));
     }
@@ -591,6 +621,7 @@ fn void thvm_atp_history_finish(AtpState *s, u32 status) {
   r.uid_a = s->n_cps;
   r.uid_b = (u32)g_hx.n_rec_sel;
   r.depth = s->t_max;
+  r.aux   = g_hx.n_trace_search;
   atp_hx_write(&r);
   fclose(g_hx.fp);
   free(g_hx.tstep);

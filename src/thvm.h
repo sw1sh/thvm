@@ -8110,9 +8110,12 @@ fn void      thvm_atp_set_cp_pri2_by_seq(AtpState *s, const u32 *seq,
 // Derivation-history export (src/atp/history.c): THVM_ATP_HISTORY_EXPORT
 // =<path> arms an observation-only record stream of pushes (sampled at
 // THVM_ATP_HISTORY_RATE, default 1/16), selections, deletions, parent
-// deaths and the rule-side trace DAG.  finish dumps the trace entries and
-// closes the session; call it after proof emission.  No-op when unarmed.
+// deaths and the rule-side trace DAG.  search_end marks where the search
+// stopped (entries after it came from proof emission); finish dumps the
+// trace entries and closes the session; call it after proof emission.
+// No-op when unarmed.
 fn void      thvm_atp_history_finish(AtpState *s, u32 status);
+fn void      thvm_atp_history_search_end(AtpState *s);
 
 // Enable/disable recording of processed-CP feature rows.  OFF (0) by
 // default: select_cp records nothing and the engine is byte-identical.

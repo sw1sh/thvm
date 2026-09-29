@@ -4344,6 +4344,7 @@ int main(int argc, char **argv) {
     }
   }
 
+  thvm_atp_history_search_end(s);
   if (g_atp_bench_pre_free_hook != NULL) g_atp_bench_pre_free_hook(s);
   // History export (THVM_ATP_HISTORY_EXPORT): close the session AFTER
   // the proof emission, so every trace entry the proof cites is dumped.

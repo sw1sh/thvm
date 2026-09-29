@@ -131,15 +131,23 @@ class Problem:
         rk = dict(zip(r_id.tolist(), r_kind.tolist()))
         rc0 = dict(zip(r_id.tolist(), r_c0.tolist()))
         rc1 = dict(zip(r_id.tolist(), r_c1.tolist()))
-        # queued-axiom goal-derived bit (role)
+        # queued-axiom goal-derived bit (role) and features: the queue
+        # rows' packed-byte features stand in when the trace pair is
+        # packed off-heap (the default trace)
         kind_cp = d["kind"].astype(np.int64)
-        gd_of = {}
-        for t, k, fl in zip(d["trace"].tolist(), kind_cp.tolist(),
-                            d["flags"].tolist()):
+        gd_of, ax_feat_of = {}, {}
+        cp_phi18 = phi_struct(d["feat"], d["flags"])
+        for i, (t, k, fl) in enumerate(zip(d["trace"].tolist(), kind_cp.tolist(),
+                                           d["flags"].tolist())):
             if k == TRACE_AXIOM:
                 gd_of[t] = (fl >> 4) & 1
+                if fl & 0x08:
+                    ax_feat_of[t] = cp_phi18[i]
         r_phi = phi_struct(d["r_feat"], d["r_flags"])
         r_featok = (d["r_flags"].astype(np.int64) & 0x08) != 0
+        # entries pushed after the search ended (proof emission) are not
+        # part of the history a search-time scorer sees
+        r_search = (d["r_flags"].astype(np.int64) & 0x01) == 0
         # CP entries (trace id -> parents) from the CP table
         cp_par = {}
         for t, pa, pb, k in zip(d["trace"].tolist(), d["pa"].tolist(),
@@ -148,7 +156,7 @@ class Problem:
                 cp_par[t] = (pa, pb)
         events = []   # (trace id, node type, payload)
         for i, (t, k) in enumerate(zip(r_id.tolist(), r_kind.tolist())):
-            if k == TRACE_NORM_STEP:
+            if k == TRACE_NORM_STEP or not r_search[i]:
                 continue
             events.append((t, k, i))
         for t in cp_par:
@@ -175,6 +183,8 @@ class Problem:
                 ph = np.zeros(N_PHI_AX)
                 if r_featok[i]:
                     ph[:18] = r_phi[i]
+                elif t in ax_feat_of:
+                    ph[:18] = ax_feat_of[t]
                 ph[18] = 1.0 - gd_of.get(t, 0)
                 ph[19] = gd_of.get(t, 0)
                 ax_phi_rows.append((node, ph))
