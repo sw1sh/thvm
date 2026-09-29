@@ -32,6 +32,9 @@ for the per-commit story.
   the pass reports the rule chain and fails (tinygrad uop/ops.py:1804, :1815).
   reduce_collapse no longer folds a value that uses the reduce axis deep in
   the graph (wrong numbers), and the expander finds UNROLLs at any depth.
+- Fix: the linearizer keeps run counts exact (58 bits, was clipped at 2^24),
+  so on a 2^24-element output a nested reduce's init no longer lands inside
+  its own loop and resets the accumulator every iteration.
 - Linearized reduce: the accumulator init runs inside the reduce input's
   live loops (tinygrad #18372), with the AFTER value emit it needs; PTX
   closes a serial loop at its END, not at the last use of its axis.

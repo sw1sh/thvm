@@ -14,7 +14,7 @@
 // guided topological sort:
 //
 //   1. Toposort the DAG once.
-//   2. For each node, compute (run_count, priority, extra) where
+//   2. For each node, compute (run_count, priority) where
 //      run_count = product of enclosing range extents and priority
 //      is a small bias by opcode (LOAD early, STORE late, RANGE later,
 //      END earlier).
@@ -40,27 +40,27 @@
 //
 // === Internal: priority tuple ===========================================
 //
-// (run_count, priority, extra) packed into a single u64 so we can use
-// it as a min-heap key directly:
+// (run_count, priority) packed into a single u64 so the ideal-order sort
+// compares one key:
 //
-//   bits 63..40  run_count (24 bits -- product of range extents; capped)
-//   bits 39..16  priority  (24 bits, signed-biased)
-//   bits 15..0   extra     (16 bits -- placeholder; we don't currently
-//                           differentiate PARAM/DEFINE_VAR slots like
-//                           tinygrad does for its asm backend, so this
-//                           stays 0)
+//   bits 63..6  run_count (58 bits -- product of range extents)
+//   bits  5..0  priority  (biased by 32; the table below spans -18..5)
 //
-// Smaller values sort earlier.  The priority bias adds 0x800000 so the
-// "negative" values from tinygrad's table become non-negative u24.
+// Smaller values sort earlier.  tinygrad's extra slot (the PARAM slot for
+// its asm backend) has no thvm analog.  The run count must stay exact, as
+// tinygrad's Python ints are (linearizer.py:21): an accumulator init sorts
+// before its reduce loop only because the loop body runs more often, and a
+// clipped count ties the two on a large output, which puts the init inside
+// the loop.  LIN_RUN_MAX is 2^58 iterations, beyond any kernel.
 
-#define LIN_PRIO_BIAS  0x800000u
+#define LIN_RUN_MAX    ((1ULL << 58) - 1)
+#define LIN_PRIO_BIAS  32
 
-static u64 lin_priority_pack(u32 run_count, i32 priority, u32 extra) {
-  if (run_count > 0xFFFFFFu) run_count = 0xFFFFFFu;
-  u32 pri = (u32)((i64)priority + (i64)LIN_PRIO_BIAS);
-  if (pri > 0xFFFFFFu) pri = 0xFFFFFFu;
-  if (extra > 0xFFFFu) extra = 0xFFFFu;
-  return ((u64)run_count << 40) | ((u64)pri << 16) | (u64)extra;
+static u64 lin_priority_pack(u64 run_count, i32 priority) {
+  if (run_count > LIN_RUN_MAX) {
+    run_count = LIN_RUN_MAX;
+  }
+  return (run_count << 6) | (u64)(priority + LIN_PRIO_BIAS);
 }
 
 // Opcode -> priority bias.  Matches linearizer.py:23-33.  Lower priority
@@ -344,9 +344,9 @@ static int lin_nest_build(LinKernel const *topo, LinHash const *seen,
   return 1;
 }
 
-// prod(extent) over topo node i's nested u.ranges, saturated to the
-// 24-bit run_count field of the priority key.
-static u32 lin_nest_run_count(LinNest const *nest, u32 i) {
+// prod(extent) over topo node i's nested u.ranges, saturated at
+// LIN_RUN_MAX.
+static u64 lin_nest_run_count(LinNest const *nest, u32 i) {
   u64 const *m = nest->live + (u64)i * nest->words;
   u64 prod = 1;
   for (u32 k = 0; k < nest->n; k++) {
@@ -354,12 +354,15 @@ static u32 lin_nest_run_count(LinNest const *nest, u32 i) {
       continue;
     }
     u32 extent = uop_range_extent(nest->range[k]);
-    prod *= (extent == 0) ? 1 : extent;
-    if (prod > 0xFFFFFFu) {
-      return 0xFFFFFFu;
+    if (extent == 0) {
+      extent = 1;
     }
+    if (prod > LIN_RUN_MAX / extent) {
+      return LIN_RUN_MAX;
+    }
+    prod *= extent;
   }
-  return (u32)prod;
+  return prod;
 }
 
 // === Internal: topological sort ========================================
@@ -578,7 +581,7 @@ fn int uop_linearize(Term sink, LinKernel *out) {
   static u64 keys[LIN_KERNEL_CAP];
   for (u32 i = 0; i < topo.n; i++) {
     i32 pri = lin_opcode_priority(term_ext(topo.uops[i]));
-    keys[i] = lin_priority_pack(lin_nest_run_count(&nest, i), pri, 0);
+    keys[i] = lin_priority_pack(lin_nest_run_count(&nest, i), pri);
   }
 
   // Stage 4: assign nkey by sorted-key index.

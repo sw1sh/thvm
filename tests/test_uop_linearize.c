@@ -884,6 +884,51 @@ static int test_case15_gpu_targets_leave_reduces_to_legacy(void) {
   TEST_REPORT();
 }
 
+// Case 16: out[i] = sum_j 2 * sum_k z[(i*4 + j)*3 + k] over 2^24 outputs.
+// Every run count reaches 2^24 here, so a priority key that clips run counts
+// at 24 bits ties each init with the nodes of its own reduce loop and the
+// outer init lands inside the j loop, resetting the accumulator every
+// iteration.  tinygrad compares exact run counts (linearizer.py:21), so the
+// init sorts before the loop whenever the loop has more than one iteration.
+static int test_case16_init_before_loop_at_2p24_outputs(void) {
+  thvm_init();
+  TEST_BEGIN("case16 2^24 outputs: each accumulator init precedes its reduce loop");
+
+  u32 n_out = 1u << 24;
+  u32 dout[1] = { n_out };
+  u32 dz[1]   = { 4096 };
+  Term O  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dout, 0);
+  Term Z  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dz, 1);
+  Term ri = uop_range(0, KAX_LOOP, n_out);
+  Term rj = uop_range(1, KAX_REDUCE, 4);
+  Term rk = uop_range(2, KAX_REDUCE, 3);
+  Term ij = uop_int_binary(UOP_IADD,
+              uop_int_binary(UOP_IMUL, ri, uop_const(DT_INT32, 4)), rj);
+  Term ijk = uop_int_binary(UOP_IADD,
+               uop_int_binary(UOP_IMUL, ij, uop_const(DT_INT32, 3)), rk);
+  Term addr = uop_int_binary(UOP_IMOD, ijk, uop_const(DT_INT32, 4096));
+  Term inner = uop_reduce(REDUCE_SUM, 2, uop_load(uop_index_e(Z, addr)));
+  Term outer = uop_reduce(REDUCE_SUM, 1,
+                 uop_binary(UOP_MUL, inner, uop_const(DT_FP32, 0x40000000u)));
+  Term st = uop_store(O, uop_index_e(O, ri), outer);
+
+  static LinKernel lk;
+  static char buf[16384];
+  CHECK(render_lin_c(uop_devectorize_graph(st), &lk, buf, sizeof(buf)));
+  CHECK(validate_toposort(&lk));
+  // The inner reduce lowers first (acc 0), the outer second (acc 1).
+  CHECK(pos_of_term(&lk, ri) < pos_of_acc_store(&lk, 1, 1));
+  CHECK(pos_of_acc_store(&lk, 1, 1) < pos_of_term(&lk, rj));
+  CHECK(pos_of_term(&lk, rj) < pos_of_acc_store(&lk, 0, 1));
+  CHECK(pos_of_acc_store(&lk, 0, 1) < pos_of_term(&lk, rk));
+  const char *init_outer = strstr(buf, "_acc1 = 0.000000f;");
+  const char *loop_j     = strstr(buf, "for (uint a1 = 0; a1 < 4;");
+  CHECK(init_outer != NULL && loop_j != NULL && init_outer < loop_j);
+
+  thvm_free();
+  TEST_REPORT();
+}
+
 int main(void) {
   int rc = 0;
   rc |= test_case1_elementwise();
@@ -902,5 +947,6 @@ int main(void) {
   rc |= test_case13_shared_reduce_range_declines();
   rc |= test_case14_vector_in_scalar_store_declines();
   rc |= test_case15_gpu_targets_leave_reduces_to_legacy();
+  rc |= test_case16_init_before_loop_at_2p24_outputs();
   return rc;
 }
