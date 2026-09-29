@@ -111,9 +111,13 @@ range:
   mixin/creation.py:64-86) stores the fill first, so the same ops read
   0x7b and 57344 there.
 
-Since an fp8e4m3 CONST of -inf is NaN, the MAX reduce identity is the
-dtype's minimum: -448 for fp8e4m3, -inf for the other float dtypes
-(tinygrad `identity_element`, uop/ops.py:61).
+The devectorized MAX reduce starts its accumulator at the dtype's
+minimum (tinygrad `identity_element`, uop/ops.py:61, and `DType.min`,
+dtype.py:70-72): -448 for fp8e4m3, since an fp8e4m3 CONST of -inf is
+NaN; -inf for the other float dtypes; -2^(bits-1) for a signed int, 0
+for an unsigned int and False for bool.  An i64 minimum does not fit
+the CONST's 32-bit payload, so an i64 MAX reduce stays unlowered and
+the linearized renderers decline it.
 
 Packed nibble lanes -- i4, u4.  Storage is 2 nibbles per byte, low
 nibble first ([src/dtype/nibble.c](../src/dtype/nibble.c)).  No CPU
@@ -250,4 +254,5 @@ Total: 124 dtype-specific VerificationTests.
 C side: `tests/test_uop_const_fold_dtype.c` covers CONST payload
 truncation and CAST / BITCAST folding; `tests/test_fp8_nonfinite.c`
 covers fp8 inf / NaN encoding on the host, at realized kernel stores
-and in realized constant fills, and the fp8 MAX reduce identity.
+and in realized constant fills, and the MAX reduce identity of the
+fp8, f32, int and bool dtypes.

@@ -171,7 +171,7 @@ static const char *lz_alu_symbol(u32 op) {
 // Emit a scalar literal of dtype `dt` whose payload is `bits`.  Float
 // literals must carry the exact f32 value: `%f` keeps six decimals (1e-7
 // became 0.000000f) and spells infinities `inff`, which is not a token --
-// the -INFINITY identity of every MAX reduce.  f32 renders as the legacy
+// the -INFINITY identity of a float MAX reduce.  f32 renders as the legacy
 // emit does on Metal and CUDA (a bit reinterpretation) and as a C99 hex
 // float on C.  Non-f32 float dtypes (f64 / f16 / bf16 / fp8) carry an f32
 // IEEE-754 pattern too (the grad-chain / gradOnesSeed literal, decoded the

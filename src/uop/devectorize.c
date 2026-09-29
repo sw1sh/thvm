@@ -177,20 +177,34 @@ fn Term uop_end_body(Term t) {
 
 // === Helpers ===========================================================
 
-// Bits of the float identity element for a reduce kind, tinygrad's
-// identity_element() (uop/ops.py:61): +0.0 for SUM, dt.min for MAX.
-// dt.min is -inf except for e4m3, which has no inf (dtype.py:69-77): a
-// -inf e4m3 CONST truncates to NaN, which the MAX combine below never
-// replaces.  Returned as a u32 holding the f32 bit pattern -- consumers
-// pass it directly to uop_const(dtype, bits).
-static u32 devec_reduce_identity_bits(u32 kind, u32 dtype) {
-  if (kind != REDUCE_MAX) {
-    return 0u;
+// The CONST payload of a reduce kind's identity element, tinygrad's
+// identity_element() (uop/ops.py:61): 0 for SUM, dt.min for MAX.
+// dt.min (dtype.py:70-72) is -2^(bits-1) for a signed int, 0 for an
+// unsigned int, False for bool, and -dt.max for a float: -inf, except
+// for e4m3, which has no inf (dtype.py:74-78).  A -inf e4m3 CONST
+// truncates to NaN, which the MAX combine below never replaces.  An
+// int payload is the value's low 32 bits, so a signed dt.min
+// sign-extends.  Returns 0 when dt.min does not fit that payload (i64),
+// else 1 with the payload in *bits.
+static int devec_reduce_identity_bits(u32 kind, u32 dtype, u32 *bits) {
+  *bits = 0u;
+  if (kind != REDUCE_MAX || dtype_is_bool(dtype)) {
+    return 1;
+  }
+  if (dtype_is_int(dtype)) {
+    if (!dtype_is_signed(dtype)) {
+      return 1;
+    }
+    u32 width = dtype_info(dtype)->bits;
+    if (width > 32) {
+      return 0;
+    }
+    *bits = (u32)-(i64)((u64)1 << (width - 1));
+    return 1;
   }
   f32 v = (dtype == DT_FP8E4M3) ? -fp8e4m3_max() : -INFINITY;
-  u32 bits;
-  memcpy(&bits, &v, sizeof bits);
-  return bits;
+  memcpy(bits, &v, sizeof *bits);
+  return 1;
 }
 
 // === Cone walk ==========================================================
@@ -553,13 +567,19 @@ static Term devec_reduce_to_acc(DevecReduceCtx *ctx, Term red) {
   if (lanes == 0 || lanes > 256) {
     return 0;
   }
+  u32 dtype = DT_FP32;
+  (void)term_dtype_in(body, 0, &dtype);
+  // An i64 MAX identity does not fit the CONST payload: leave the REDUCE
+  // unlowered, which the linearized renderers decline.
+  u32 identity_bits;
+  if (!devec_reduce_identity_bits(kind, dtype, &identity_bits)) {
+    return 0;
+  }
   DevecRangeScan scan;
   if (!devec_reduce_scan(red, &scan)) {
     return 0;
   }
-  u32 dtype = DT_FP32;
-  (void)term_dtype_in(body, 0, &dtype);
-  Term identity  = uop_const(dtype, devec_reduce_identity_bits(kind, dtype));
+  Term identity  = uop_const(dtype, identity_bits);
   Term zero_addr = uop_const(DT_INT32, 0);
 
   Term accs[256];
