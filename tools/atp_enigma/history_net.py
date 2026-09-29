@@ -39,7 +39,7 @@
 # Usage:
 #   history_net.py train  <npz_dir> <pool.tsv> <out_prefix> [dim=32 hid=32
 #                         epochs=60 seed=0 weighting=uniform|residence
-#                         warm_steps=0]
+#                         warm_steps=0 lr=3e-3]
 #                  (warm_steps > 0: the scoring MLP starts from a features-
 #                  only head trained that many steps, saved as <out>_phi)
 #   history_net.py gate   <model_prefix> <npz_dir> <pool.tsv> <out_prefix>
@@ -1253,6 +1253,7 @@ def main():
         if len(a) > 6: kw["seed"] = int(a[6])
         if len(a) > 7: kw["weighting"] = a[7]
         if len(a) > 8: kw["warm_steps"] = int(a[8])
+        if len(a) > 9: kw["lr"] = float(a[9])
         cmd_train(a[0], a[1], a[2], **kw)
     elif cmd == "gate":
         cmd_gate(*sys.argv[2:6])
