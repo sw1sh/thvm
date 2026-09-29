@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- The f16 decode fallback, used where the compiler has no `_Float16` (gcc 11 on the x86 Linux pods), decodes every pattern as the builtin does. It put subnormals one binade low, so every f16 and fp8e5m2 subnormal read back at half its value there, and it let a signaling NaN through unquieted. `fp16_to_f32_manual` is now built on every platform; `test_fp16_convert` holds it and `fp16_to_f32` to an exact reference for all 65536 patterns, and the reference to the F16C instruction on x86.
 - ASSIGN writes every dtype, and a JIT capture replays it: matching dtypes copy the storage bytes (an fp8, f16, bf16, bool, 1-, 2- or 8-byte int or packed-nibble destination was left unwritten; only f32 and i32 copied). Differing dtypes store the source values at the destination dtype, as a CAST kernel would (an i32 source was copied into an f32 buffer as raw bits). tinygrad casts a weak value to the target dtype before assigning (tensor.py:243) and raises on a strong mismatch (tensor.py:244).
 - The kernel content hash (Metal pipeline cache and autotune cache key) includes each buffer's input slot: `x*x+y` and `x*y+y` hashed equal, so on Metal one kernel could reuse the other's pipeline. Autotune caches on disk re-tune once.
 - The garbage collector refuses to build when a UOp opcode is added without a heap size in `gc_node_size` (a missing size leaves live nodes of that op unevacuated), and the UOP_BUFFER constructor documents its instance cell.

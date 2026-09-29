@@ -21,14 +21,9 @@
 
 // === fp16 (IEEE-754 half: 1 sign / 5 exp / 10 mantissa) =============
 
-f32 fp16_to_f32(u16 h) {
-#if THVM_HAVE_FLOAT16_BUILTIN
-  _Float16 v;
-  memcpy(&v, &h, sizeof(v));
-  return (f32)v;
-#else
-  // Manual bit-pack fallback.  Decompose; renormalize denormals;
-  // map inf / NaN exponents.
+// The manual decode fp16_to_f32 falls back to without _Float16.  Built
+// on every platform so tests can hold it to the builtin.
+f32 fp16_to_f32_manual(u16 h) {
   u32 sign = (u32)(h >> 15) & 0x1u;
   u32 exp  = (u32)(h >> 10) & 0x1Fu;
   u32 mant = (u32)h & 0x3FFu;
@@ -37,16 +32,22 @@ f32 fp16_to_f32(u16 h) {
     if (mant == 0) {
       f32_bits = sign << 31;
     } else {
-      // Denormal: renormalize.
-      u32 e = 1;
-      while ((mant & 0x400u) == 0) { mant <<= 1; e++; }
+      // Subnormal: mant * 2^-24.  Shifting the leading one up to the
+      // implicit bit (bit 10) leaves 1.mant * 2^(-14 - shifts).
+      u32 shifts = 0;
+      while ((mant & 0x400u) == 0) {
+        mant <<= 1;
+        shifts++;
+      }
       mant &= 0x3FFu;
-      u32 f32_exp = 127 - 15 - e + 1;
+      u32 f32_exp = 127 - 14 - shifts;
       f32_bits = (sign << 31) | (f32_exp << 23) | (mant << 13);
     }
   } else if (exp == 0x1F) {
-    // inf or NaN.
-    f32_bits = (sign << 31) | (0xFFu << 23) | (mant << 13);
+    // inf, or a NaN that keeps its payload and comes out quiet, as the
+    // hardware conversions (x86 VCVTPH2PS, arm64 FCVT) deliver it.
+    u32 quiet = (mant != 0) ? 0x00400000u : 0u;
+    f32_bits = (sign << 31) | (0xFFu << 23) | quiet | (mant << 13);
   } else {
     u32 f32_exp = exp - 15 + 127;
     f32_bits = (sign << 31) | (f32_exp << 23) | (mant << 13);
@@ -54,6 +55,15 @@ f32 fp16_to_f32(u16 h) {
   f32 r;
   memcpy(&r, &f32_bits, sizeof(r));
   return r;
+}
+
+f32 fp16_to_f32(u16 h) {
+#if THVM_HAVE_FLOAT16_BUILTIN
+  _Float16 v;
+  memcpy(&v, &h, sizeof(v));
+  return (f32)v;
+#else
+  return fp16_to_f32_manual(h);
 #endif
 }
 
