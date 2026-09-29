@@ -328,20 +328,27 @@ int main(void) {
   }
   thvm_free();
 
-  // (j) Default-off inertness: a softmax-shaped graph (the flash-attention
-  // building block: max-reduce -> sub -> exp -> sum-reduce -> recip -> mul)
-  // produces a BYTE-IDENTICAL realize-map with THVM_PCONTIG unset vs set.  The
-  // gate must never alter the default schedule, and on thvm's decomposed graph
-  // (matmul/reduce seed boundaries pre-realized) the PCONTIG ratio gate keeps
-  // every candidate, so PCONTIG=3 is a no-op here too -- this documents that
-  // the partial-contig staging only diverges once the seed-boundary
-  // realization is relaxed (out of scope for the faithful cost-model port).
+  // (j) PCONTIG on a softmax (max-reduce -> sub -> exp -> sum-reduce ->
+  // recip -> mul, the flash-attention building block).  Every PCONTIG gate
+  // is `> 2`, so unset and levels up to 2 give a byte-identical realize map.
+  // Flash mode (3) skips the seed on both softmax reduces and keeps them
+  // fused, and the exp, read by the sum over axis 1 and by the output mul,
+  // realizes only axis 1 (a partial realize); this divergence is intended
+  // since 7bcb4e12.
   TEST_BEGIN("unified-rangeify/pcontig-default-off-inert");
   {
-    u8 mask_off[64]; u8 real_off[64]; u32 n_off = 0;
-    u8 mask_on[64];  u8 real_on[64];  u32 n_on = 0;
-    for (int pass = 0; pass < 2; pass++) {
-      if (pass == 0) unsetenv("THVM_PCONTIG"); else setenv("THVM_PCONTIG", "3", 1);
+    char const *levels[3] = { NULL, "2", "3" };
+    u8  mask[3][64];
+    u8  real[3][64];
+    u32 nn[3] = {0, 0, 0};
+    int mx_real[3], sm_real[3], e_real[3], e_full[3], out_full[3];
+    u8  e_mask[3], out_mask[3];
+    for (int pass = 0; pass < 3; pass++) {
+      if (levels[pass] == NULL) {
+        unsetenv("THVM_PCONTIG");
+      } else {
+        setenv("THVM_PCONTIG", levels[pass], 1);
+      }
       thvm_init();
       Term sx  = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(8, 8));
       Term mx  = uop_reduce(REDUCE_MAX, /*axis*/1, sx);
@@ -352,27 +359,51 @@ int main(void) {
       Term out = uop_binary(UOP_MUL, e, rc);
       bufferize_classify(out);
       run_rangeify_unified(out);
-      u32 nn = rangeify_unified_last_nodes_walked();
-      if (nn > 64) nn = 64;
-      for (u32 k = 0; k < nn; k++) {
-        if (pass == 0) {
-          mask_off[k] = rangeify_unified_axes_mask_at(k);
-          real_off[k] = (u8)rangeify_unified_is_realized(k);
-        } else {
-          mask_on[k] = rangeify_unified_axes_mask_at(k);
-          real_on[k] = (u8)rangeify_unified_is_realized(k);
-        }
+      nn[pass] = rangeify_unified_last_nodes_walked();
+      if (nn[pass] > 64) {
+        nn[pass] = 64;
       }
-      if (pass == 0) n_off = nn; else n_on = nn;
+      for (u32 k = 0; k < nn[pass]; k++) {
+        mask[pass][k] = rangeify_unified_axes_mask_at(k);
+        real[pass][k] = (u8)rangeify_unified_is_realized(k);
+      }
+      u32 e_idx   = bufferize_info_find(term_val(e));
+      u32 out_idx = bufferize_info_find(term_val(out));
+      mx_real[pass]  = rangeify_unified_is_realized(bufferize_info_find(term_val(mx)));
+      sm_real[pass]  = rangeify_unified_is_realized(bufferize_info_find(term_val(sm)));
+      e_real[pass]   = rangeify_unified_is_realized(e_idx);
+      e_full[pass]   = rangeify_unified_realized_full_at(e_idx);
+      e_mask[pass]   = rangeify_unified_axes_mask_at(e_idx);
+      out_full[pass] = rangeify_unified_realized_full_at(out_idx);
+      out_mask[pass] = rangeify_unified_axes_mask_at(out_idx);
       thvm_free();
     }
     unsetenv("THVM_PCONTIG");
-    CHECK_EQ(n_off, n_on);
+    CHECK_EQ(nn[0], nn[1]);
     int identical = 1;
-    for (u32 k = 0; k < n_off && k < n_on; k++) {
-      if (mask_off[k] != mask_on[k] || real_off[k] != real_on[k]) { identical = 0; break; }
+    for (u32 k = 0; k < nn[0] && k < nn[1]; k++) {
+      if (mask[0][k] != mask[1][k] || real[0][k] != real[1][k]) {
+        identical = 0;
+        break;
+      }
     }
     CHECK_EQ(identical, 1);
+    // Default: both reduces and the exp are realized, the exp in full.
+    CHECK_EQ(mx_real[0], 1);
+    CHECK_EQ(sm_real[0], 1);
+    CHECK_EQ(e_full[0], 1);
+    CHECK_EQ(e_mask[0], 0x3);
+    CHECK_EQ(out_full[0], 1);
+
+    TEST_BEGIN("unified-rangeify/pcontig-flash-unseeds-softmax-reduces");
+    CHECK_EQ(nn[2], nn[0]);
+    CHECK_EQ(mx_real[2], 0);
+    CHECK_EQ(sm_real[2], 0);
+    CHECK_EQ(e_real[2], 1);
+    CHECK_EQ(e_full[2], 0);
+    CHECK_EQ(e_mask[2], 0x2);
+    CHECK_EQ(out_full[2], 1);
+    CHECK_EQ(out_mask[2], 0x3);
   }
 
   TEST_REPORT();

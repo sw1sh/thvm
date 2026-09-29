@@ -36,6 +36,10 @@ for the per-commit story.
 - `bin/test_rangeify_unified` pins the default seed's diamond: a shared
   producer whose consumers index it identically stays fused; once one
   consumer reads it flipped, it realizes.
+- `bin/test_rangeify_unified` pins what THVM_PCONTIG does to a softmax:
+  unset and levels up to 2 leave the realize map byte-identical, flash mode
+  (3) keeps both softmax reduces fused and realizes only the exp's reduced
+  axis.
 - Fix (Linux/gcc): a ~2000-deep elementwise chain overflowed the 8 MB stack
   in the unified rewrite (gcc hoisted a 1 KB substitution and the inlined
   bufferize helpers' arrays into every recursion level, 6 KB each); those
