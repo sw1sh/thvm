@@ -313,6 +313,19 @@ for the per-commit story.
   swaps KBO calls increasing).  The other half of the old `--proof`
   search on the ring lanes: its treatment recorder interreduced through
   the Term-side walk.
+- LPO compares run on a DAG of their operands (`src/lpo/_.c`): both flat
+  encodings are hash-consed into one DAG of distinct subterms, and the
+  Waldmeister-port recursion runs over subterm pairs with a lossless memo
+  and O(1) per-pair tests, returning the flat recursion's verdict on
+  every pair (pairs of at most 32 nodes stay on the flat recursion, where
+  hash-consing costs more than it saves).  The position-keyed recursion
+  recomputed pairs its direct-mapped memo evicted and rescanned slices at
+  every level; over 16.4M compares from RNG otter-lane runs the DAG is 3x
+  faster, 4.3x on the 240K hardest, 95x on the worst (576 ms), and
+  `otter-ladr --ir-run-order` proves RNG025-4/025-6 instead of stalling
+  near step 230.  `-DTHVM_LPO_SELFCHECK` runs both evaluators on every
+  compare (0 mismatches) and dumps hard pairs that `bin/test_lpo FILE`
+  rechecks.
 - Prover9's clause-weight penalties (`--nest-penalty` / `--depth-penalty`)
   now weigh every critical pair: the FT-treated push route, which forms
   almost all of them, scored its pairs without the penalty.  With them on,

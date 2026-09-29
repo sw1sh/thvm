@@ -18,10 +18,9 @@
 // Stage 3 uses Strategy B: ~30-line pre-order encoders that walk the
 // AtpFtCell tree once, emitting a KboFlatNode array with the KBO/LPO
 // conventions; then delegate to thvm_kbo_flat_slice (KBO) and a small
-// dispatcher mirroring thvm_lpo lines 691-748 (LPO -- the slice path
-// is file-static in src/lpo/_.c, so we reproduce the encode +
-// lpo_flat_rec_compute wiring locally with the same epoch bump and
-// var-set incomparability check).
+// dispatcher mirroring thvm_lpo's flat path (LPO: the encode, the
+// var-set incomparability check, then lpo_flat_cmp, file-static in
+// src/lpo/_.c).
 //
 // Gated on THVM_ATPFT_CONVERT (same envelope as ft.c).  Double-include
 // guard mirrors ft_alloc.c / ft.c: tests/test_ft_order.c #includes this
@@ -44,8 +43,7 @@
 //   * thvm_kbo_flat_slice(const KboFlatNode *a, u32 na,
 //                         const KboFlatNode *b, u32 nb,
 //                         const KboConfig *cfg)
-//   * lpo_flat_rec_compute / g_lpo_flat_a / g_lpo_flat_b /
-//     g_lpo_flat_epoch / g_lpo_flat_memo / LPO_FLAT_MEMO_SIZE
+//   * lpo_flat_cmp / g_lpo_flat_a / g_lpo_flat_b
 //
 // thvm.h forward-declares struct KboFlatNode + thvm_kbo_flat_slice for
 // us (src/thvm.h:3041-3044).  The lpo_flat_* symbols are file-static
@@ -61,12 +59,11 @@
 // shared g_kbo_st KBO scratch -- that is fine because the slice path
 // owns g_kbo_st for the duration of the call (no interleave).
 //
-// For the LPO path we need to encode into g_lpo_flat_a/g_lpo_flat_b
-// directly: lpo_flat_rec stamps `side` based on the
-// (a == g_lpo_flat_a) pointer-identity check, so the memo lookups
-// inside the recursion only stay consistent if our flat arrays ARE
-// the same buffers.  The Term-tree thvm_lpo path uses the same
-// buffers -- the ATP layer serialises calls.
+// For the LPO path we encode into g_lpo_flat_a/g_lpo_flat_b directly:
+// lpo_flat_cmp compares those two buffers (and its flat-recursion
+// fallback keys its memo on `a == g_lpo_flat_a`).  The Term-tree
+// thvm_lpo path uses the same buffers -- the ATP layer serialises
+// calls.
 
 #define ATPFT_KBO_FLAT_CAP 4096u
 
@@ -924,16 +921,12 @@ fn int thvm_ftsj_rule_simpler_cached(u32 slot, const AtpFtCell *rl,
 
 // === LPO public entry ================================================
 //
-// Mirrors the dispatcher in thvm_lpo (src/lpo/_.c:680-748): encode
-// both sides into g_lpo_flat_a/b (the buffers lpo_flat_rec keys its
-// memo against via the `side` bit), run the cheap var-set
-// incomparability check, bump the per-call memo epoch, and call
-// lpo_flat_rec_compute directly.
+// Mirrors thvm_lpo's flat path: encode both sides into g_lpo_flat_a/b,
+// run the cheap var-set incomparability check, then lpo_flat_cmp.
 //
 // We do NOT take the (s, t) -> verdict top-level memo path (that one
 // is keyed on heap-Term cells; AtpFtCell* is a different namespace
-// and would alias incorrectly).  We DO bump g_lpo_flat_epoch so the
-// inner (pa, pb, side) memo stays consistent for THIS call.
+// and would alias incorrectly).
 //
 // On encode overflow we return LPO_UN (same caller-visible fallback
 // as the KBO path).
@@ -976,13 +969,7 @@ fn LpoCmp thvm_lpo_ft(const AtpFtCell *a, const AtpFtCell *b,
       if (s_extra && t_extra) return LPO_UN;
     }
   }
-  // Bump the per-call (pa, pb, side) memo epoch -- positions are
-  // only meaningful for THIS encode pair (the buffers get reused).
-  if (++g_lpo_flat_epoch == 0u) {
-    for (u32 i = 0; i < LPO_FLAT_MEMO_SIZE; i++) g_lpo_flat_memo[i].epoch = 0u;
-    g_lpo_flat_epoch = 1u;
-  }
-  return lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
+  return lpo_flat_cmp(na, nb, cfg);
 }
 
 #endif // !ATPFT_FT_ORDER_C_INCLUDED

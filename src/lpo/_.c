@@ -654,6 +654,756 @@ static LpoCmp lpo_flat_rec(const KboFlatNode *a, u32 pa,
   return c;
 }
 
+// The flat recursion on g_lpo_flat_a / g_lpo_flat_b as encoded, with a
+// fresh position memo: the reference verdict lpo_flat_cmp reproduces.
+static LpoCmp lpo_flat_ref(const LpoConfig *cfg) {
+  if (++g_lpo_flat_epoch == 0) {
+    for (u32 i = 0; i < LPO_FLAT_MEMO_SIZE; i++) {
+      g_lpo_flat_memo[i].epoch = 0;
+    }
+    g_lpo_flat_epoch = 1;
+  }
+  return lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
+}
+
+// === DAG comparator (the flat path's evaluator) ==========================
+// lpo_flat_rec_compute is a pure function of the two subterms it is
+// handed: slice equality, variable occurrence, the Vortest pretests, the
+// precedences and the children it recurses on all read only the two
+// slices.  So its verdict can be memoized on subterm CONTENT instead of
+// position.  lpo_flat_cmp hash-conses both flat arrays into one DAG
+// (equal subterms share a class) and lpo_dag_compute runs the same case
+// analysis, in the same order, over class pairs with a lossless memo:
+// each class pair is computed once, and every per-pair test is O(1)
+// from per-class summaries except the strict-subterm Vortest, a binary
+// search in an occurrence list.  The position memo above is direct-
+// mapped, so once a compare reaches more pairs than it holds (the deep,
+// repetitive terms of a run-order interreduction, ten thousand nodes and
+// more) evicted pairs are recomputed, each with O(|slice|) Vortest
+// scans, and one compare ran for tens of millions of steps.
+//
+// Class equality is slice equality only when every symbol has one arity
+// and one precedence across both operands (the preorder symbol sequence
+// then parses to one tree).  A compare that breaks this goes to the flat
+// recursion unchanged (lpo_flat_ref).
+
+typedef struct {
+  i32 sym;      // KboFlatNode.sym of the class root
+  i32 w;        // KboFlatNode.w: the precedence the recursion dispatches on
+  u32 p;        // the precedence the Vortest reads (0 past n_labels)
+  u32 sz;       // nodes in the subterm
+  u32 arity;
+  u32 kids;     // first child class in g_ld_kids
+  u32 maxp;     // max p over the function-symbol nodes of the subterm
+  u32 rep;      // one occurrence: (side << 31) | position
+  u64 vmask;    // variables with id < 64 in the subterm
+  u8  hasvar;
+  u8  bigvar;   // a variable with id >= 64 in the subterm
+} LpoDagNode;
+
+typedef struct {
+  i32 sym;
+  i32 w;
+  u32 arity;
+  u32 used;
+} LpoDagSym;
+
+typedef struct {
+  u32 k1;       // c1 + 1; 0 marks an empty slot
+  u32 k2;
+  u32 v;
+} LpoDagMemo;
+
+// Memo slots one compare may grow to (12 bytes each), and the size above
+// which the next compare frees the table instead of reusing it.
+#define LPO_DAG_MEMO_MAX  (1u << 25)
+#define LPO_DAG_MEMO_KEEP (1u << 20)
+
+static LpoDagNode        *g_ld_node      = NULL;
+static u32               *g_ld_kids      = NULL;
+static u32               *g_ld_cls[2]    = {NULL, NULL};
+static u32               *g_ld_occ_beg[2] = {NULL, NULL};
+static u32               *g_ld_occ_pos[2] = {NULL, NULL};
+static u32               *g_ld_tab       = NULL;
+static LpoDagSym         *g_ld_sym       = NULL;
+static u32                g_ld_cap       = 0;
+static u32                g_ld_tab_mask  = 0;
+static LpoDagMemo        *g_ld_memo      = NULL;
+static u32                g_ld_memo_cap  = 0;
+static u32                g_ld_memo_mask = 0;
+static u32                g_ld_memo_cnt  = 0;
+static u8                 g_ld_memo_full = 0;
+static u32                g_ld_n         = 0;
+static u32                g_ld_nkids     = 0;
+static const KboFlatNode *g_ld_arr[2]    = {NULL, NULL};
+static u32                g_ld_len[2]    = {0, 0};
+static u8                 g_ld_occ_ok[2] = {0, 0};
+static u64                g_lpo_dag_fallbacks = 0;
+
+static void lpo_dag_free(void) {
+  free(g_ld_node);
+  free(g_ld_kids);
+  free(g_ld_tab);
+  free(g_ld_sym);
+  for (u32 s = 0; s < 2u; s++) {
+    free(g_ld_cls[s]);
+    free(g_ld_occ_beg[s]);
+    free(g_ld_occ_pos[s]);
+    g_ld_cls[s] = g_ld_occ_beg[s] = g_ld_occ_pos[s] = NULL;
+  }
+  g_ld_node = NULL;
+  g_ld_kids = g_ld_tab = NULL;
+  g_ld_sym  = NULL;
+  g_ld_cap  = 0;
+}
+
+// Size the per-compare arrays for n = na + nb nodes and clear the two
+// hash tables over the slots this compare uses.  0 on allocation
+// failure (the caller then takes the flat recursion).
+static u8 lpo_dag_reserve(u32 n) {
+  if (n > g_ld_cap) {
+    u32 cap = 256u;
+    while (cap < n) {
+      cap <<= 1;
+    }
+    lpo_dag_free();
+    g_ld_node = (LpoDagNode *)malloc((size_t)cap * sizeof(LpoDagNode));
+    g_ld_kids = (u32 *)malloc((size_t)cap * sizeof(u32));
+    g_ld_tab  = (u32 *)malloc((size_t)cap * 2u * sizeof(u32));
+    g_ld_sym  = (LpoDagSym *)malloc((size_t)cap * 2u * sizeof(LpoDagSym));
+    u8 ok = (g_ld_node != NULL && g_ld_kids != NULL &&
+             g_ld_tab != NULL && g_ld_sym != NULL);
+    for (u32 s = 0; s < 2u; s++) {
+      g_ld_cls[s]     = (u32 *)malloc((size_t)cap * sizeof(u32));
+      g_ld_occ_beg[s] = (u32 *)malloc(((size_t)cap + 1u) * sizeof(u32));
+      g_ld_occ_pos[s] = (u32 *)malloc((size_t)cap * sizeof(u32));
+      ok = (u8)(ok && g_ld_cls[s] != NULL && g_ld_occ_beg[s] != NULL &&
+                g_ld_occ_pos[s] != NULL);
+    }
+    if (!ok) {
+      lpo_dag_free();
+      return 0u;
+    }
+    g_ld_cap = cap;
+  }
+  u32 t = 64u;
+  while (t < 2u * n) {
+    t <<= 1;
+  }
+  g_ld_tab_mask = t - 1u;
+  memset(g_ld_tab, 0, (size_t)t * sizeof(u32));
+  memset(g_ld_sym, 0, (size_t)t * sizeof(LpoDagSym));
+  return 1u;
+}
+
+static inline u32 lpo_dag_hash(u64 h) {
+  h *= 0x9E3779B97F4A7C15ull;
+  h ^= h >> 29;
+  h *= 0xBF58476D1CE4E5B9ull;
+  h ^= h >> 32;
+  return (u32)h;
+}
+
+// Record (sym -> w, arity); 0 if sym was already seen with another.
+static u8 lpo_dag_sym_ok(i32 sym, i32 w, u32 arity) {
+  u32 slot = lpo_dag_hash((u64)(u32)sym) & g_ld_tab_mask;
+  for (;;) {
+    LpoDagSym *e = &g_ld_sym[slot];
+    if (!e->used) {
+      e->used  = 1u;
+      e->sym   = sym;
+      e->w     = w;
+      e->arity = arity;
+      return 1u;
+    }
+    if (e->sym == sym) {
+      return (u8)(e->w == w && e->arity == arity);
+    }
+    slot = (slot + 1u) & g_ld_tab_mask;
+  }
+}
+
+// Hash-cons one side into the DAG, children before parents (reverse
+// preorder), recording each position's class in g_ld_cls[side].
+static u8 lpo_dag_side(u32 side, const KboFlatNode *x, u32 n,
+                       const LpoConfig *cfg) {
+  u32 *cls = g_ld_cls[side];
+  for (u32 i = n; i-- > 0u; ) {
+    const KboFlatNode *nd  = &x[i];
+    u32               *kv  = &g_ld_kids[g_ld_nkids];
+    u32                ar  = 0u;
+    u32                end = i + nd->sz;
+    for (u32 c = i + 1u; c < end; c += x[c].sz) {
+      kv[ar++] = cls[c];
+    }
+    if (nd->sym >= 0 && !lpo_dag_sym_ok(nd->sym, nd->w, ar)) {
+      return 0u;
+    }
+    u64 h = ((u64)(u32)nd->sym << 32) ^ (u64)(u32)nd->w ^ ((u64)ar << 56);
+    for (u32 k = 0; k < ar; k++) {
+      h = (u64)lpo_dag_hash(h ^ ((u64)kv[k] << 20)) ^ (h << 7);
+    }
+    u32 slot = lpo_dag_hash(h) & g_ld_tab_mask;
+    u32 c    = 0u;
+    for (;;) {
+      u32 e = g_ld_tab[slot];
+      if (e == 0u) {
+        c = g_ld_n++;
+        g_ld_tab[slot] = c + 1u;
+        LpoDagNode *q = &g_ld_node[c];
+        q->sym   = nd->sym;
+        q->w     = nd->w;
+        q->sz    = nd->sz;
+        q->arity = ar;
+        q->kids  = g_ld_nkids;
+        q->rep   = (side << 31) | i;
+        g_ld_nkids += ar;
+        if (nd->sym < 0) {
+          u32 v = (u32)(-nd->sym - 1);
+          q->p      = 0u;
+          q->maxp   = 0u;
+          q->hasvar = 1u;
+          q->vmask  = (v < 64u) ? ((u64)1 << v) : 0u;
+          q->bigvar = (u8)(v >= 64u);
+        } else {
+          u32 lab = (u32)nd->sym;
+          q->p      = (lab < cfg->n_labels) ? cfg->precedence[lab] : 0u;
+          q->maxp   = q->p;
+          q->hasvar = 0u;
+          q->vmask  = 0u;
+          q->bigvar = 0u;
+          for (u32 k = 0; k < ar; k++) {
+            const LpoDagNode *kn = &g_ld_node[kv[k]];
+            if (kn->maxp > q->maxp) {
+              q->maxp = kn->maxp;
+            }
+            q->vmask  |= kn->vmask;
+            q->hasvar |= kn->hasvar;
+            q->bigvar |= kn->bigvar;
+          }
+        }
+        break;
+      }
+      const LpoDagNode *q = &g_ld_node[e - 1u];
+      if (q->sym == nd->sym && q->w == nd->w && q->arity == ar &&
+          memcmp(&g_ld_kids[q->kids], kv, (size_t)ar * sizeof(u32)) == 0) {
+        c = e - 1u;
+        break;
+      }
+      slot = (slot + 1u) & g_ld_tab_mask;
+    }
+    cls[i] = c;
+  }
+  return 1u;
+}
+
+static inline u32 lpo_dag_memo_slot(u32 c1, u32 c2) {
+  return lpo_dag_hash(((u64)c1 << 32) | (u64)c2) & g_ld_memo_mask;
+}
+
+// Clear `want` or more slots (a power of two) for this compare, reusing
+// the table unless it is too small or a monster compare left it large.
+static u8 lpo_dag_memo_init(u32 want) {
+  u32 m = 256u;
+  while (m < want) {
+    m <<= 1;
+  }
+  if (m > g_ld_memo_cap || (g_ld_memo_cap > LPO_DAG_MEMO_KEEP && m <= LPO_DAG_MEMO_KEEP)) {
+    free(g_ld_memo);
+    g_ld_memo     = (LpoDagMemo *)malloc((size_t)m * sizeof(LpoDagMemo));
+    g_ld_memo_cap = (g_ld_memo != NULL) ? m : 0u;
+    if (g_ld_memo == NULL) {
+      return 0u;
+    }
+  }
+  g_ld_memo_cnt  = 0u;
+  g_ld_memo_full = 0u;
+  g_ld_memo_mask = m - 1u;
+  memset(g_ld_memo, 0, (size_t)m * sizeof(LpoDagMemo));
+  return 1u;
+}
+
+// Double the slots this compare uses; past LPO_DAG_MEMO_MAX (or on an
+// allocation failure) the memo stops taking entries -- a missing entry
+// is recomputed, never wrong.
+static void lpo_dag_memo_grow(void) {
+  u32 old_n = g_ld_memo_mask + 1u;
+  u32 new_n = old_n << 1;
+  if (new_n > LPO_DAG_MEMO_MAX) {
+    g_ld_memo_full = 1u;
+    return;
+  }
+  LpoDagMemo *nm = (LpoDagMemo *)calloc(new_n, sizeof(LpoDagMemo));
+  if (nm == NULL) {
+    g_ld_memo_full = 1u;
+    return;
+  }
+  LpoDagMemo *old = g_ld_memo;
+  g_ld_memo      = nm;
+  g_ld_memo_cap  = new_n;
+  g_ld_memo_mask = new_n - 1u;
+  for (u32 i = 0; i < old_n; i++) {
+    if (old[i].k1 != 0u) {
+      u32 s = lpo_dag_memo_slot(old[i].k1 - 1u, old[i].k2);
+      while (nm[s].k1 != 0u) {
+        s = (s + 1u) & g_ld_memo_mask;
+      }
+      nm[s] = old[i];
+    }
+  }
+  free(old);
+}
+
+static void lpo_dag_memo_put(u32 c1, u32 c2, LpoCmp r) {
+  if (2u * (g_ld_memo_cnt + 1u) > g_ld_memo_mask + 1u) {
+    lpo_dag_memo_grow();
+  }
+  if (g_ld_memo_full) {
+    return;
+  }
+  u32 s = lpo_dag_memo_slot(c1, c2);
+  while (g_ld_memo[s].k1 != 0u) {
+    s = (s + 1u) & g_ld_memo_mask;
+  }
+  g_ld_memo[s].k1 = c1 + 1u;
+  g_ld_memo[s].k2 = c2;
+  g_ld_memo[s].v  = (u32)(u8)(i8)r;
+  g_ld_memo_cnt++;
+}
+
+// Positions of every class on one side in increasing order, bucketed by
+// class (counting sort); built on the first strict-subterm Vortest.
+static void lpo_dag_occ(u32 side) {
+  u32       *beg = g_ld_occ_beg[side];
+  u32       *pos = g_ld_occ_pos[side];
+  const u32 *cls = g_ld_cls[side];
+  u32        n   = g_ld_len[side];
+  memset(beg, 0, ((size_t)g_ld_n + 1u) * sizeof(u32));
+  for (u32 i = 0; i < n; i++) {
+    beg[cls[i] + 1u]++;
+  }
+  for (u32 c = 0; c < g_ld_n; c++) {
+    beg[c + 1u] += beg[c];
+  }
+  for (u32 i = 0; i < n; i++) {
+    pos[beg[cls[i]]++] = i;
+  }
+  for (u32 c = g_ld_n; c > 0u; c--) {
+    beg[c] = beg[c - 1u];
+  }
+  beg[0] = 0u;
+  g_ld_occ_ok[side] = 1u;
+}
+
+// 1 iff class `small` occurs strictly inside class `big`.  Any
+// occurrence of `big` has the same content, so its representative's
+// slice is searched.
+static u8 lpo_dag_sub(u32 big, u32 small) {
+  u32 rep  = g_ld_node[big].rep;
+  u32 side = rep >> 31;
+  u32 at   = rep & 0x7FFFFFFFu;
+  if (!g_ld_occ_ok[side]) {
+    lpo_dag_occ(side);
+  }
+  const u32 *beg = g_ld_occ_beg[side];
+  const u32 *pos = g_ld_occ_pos[side];
+  u32 lo = beg[small];
+  u32 hi = beg[small + 1u];
+  u32 e  = hi;
+  while (lo < hi) {
+    u32 mid = lo + ((hi - lo) >> 1);
+    if (pos[mid] <= at) {
+      lo = mid + 1u;
+    } else {
+      hi = mid;
+    }
+  }
+  return (u8)(lo < e && pos[lo] < at + g_ld_node[big].sz);
+}
+
+// lpo_flat_var_occurs over a class.
+static u8 lpo_dag_var_in(u32 c, i32 vsym) {
+  const LpoDagNode *q = &g_ld_node[c];
+  u32 v = (u32)(-vsym - 1);
+  if (v < 64u) {
+    return (u8)((q->vmask >> v) & 1u);
+  }
+  if (!q->bigvar) {
+    return 0u;
+  }
+  const KboFlatNode *x  = g_ld_arr[q->rep >> 31];
+  u32                at = q->rep & 0x7FFFFFFFu;
+  for (u32 i = at; i < at + q->sz; i++) {
+    if (x[i].sym == vsym) {
+      return 1u;
+    }
+  }
+  return 0u;
+}
+
+// lpo_pretest_groesser_flat(x, y) > 0 for non-variable roots.
+static u8 lpo_dag_vortest(u32 cx, u32 cy) {
+  const LpoDagNode *x = &g_ld_node[cx];
+  const LpoDagNode *y = &g_ld_node[cy];
+  if (x->sz == 1u) {
+    return (u8)(!y->hasvar && y->maxp < x->p);
+  }
+  if (y->sz == 1u) {
+    return (u8)(x->maxp >= y->p);
+  }
+  if (x->sz <= y->sz) {
+    return 0u;
+  }
+  return lpo_dag_sub(cx, cy);
+}
+
+static LpoCmp lpo_dag_compute(u32 c1, u32 c2);
+
+static LpoCmp lpo_dag_rec(u32 c1, u32 c2) {
+  g_lpo_flat_rec_calls++;
+  if (c1 == c2) {
+    return LPO_EQ;
+  }
+  if (lpo_deadline_fired()) {
+    return LPO_UN;
+  }
+  u32 s = lpo_dag_memo_slot(c1, c2);
+  while (g_ld_memo[s].k1 != 0u) {
+    if (g_ld_memo[s].k1 == c1 + 1u && g_ld_memo[s].k2 == c2) {
+      g_lpo_flat_memo_hits++;
+      return (LpoCmp)(i8)(u8)g_ld_memo[s].v;
+    }
+    s = (s + 1u) & g_ld_memo_mask;
+  }
+  g_lpo_flat_compute_calls++;
+  LpoCmp r = lpo_dag_compute(c1, c2);
+  lpo_dag_memo_put(c1, c2, r);
+  return r;
+}
+
+// lpo_flat_rec_compute, case for case, over classes.
+static LpoCmp lpo_dag_compute(u32 c1, u32 c2) {
+  if (c1 == c2) {
+    return LPO_EQ;
+  }
+  const LpoDagNode *x  = &g_ld_node[c1];
+  const LpoDagNode *y  = &g_ld_node[c2];
+  u8                xv = (u8)(x->sym < 0);
+  u8                yv = (u8)(y->sym < 0);
+  if (xv | yv) {
+    if (xv && yv) {
+      return LPO_UN;
+    }
+    if (xv) {
+      return lpo_dag_var_in(c2, x->sym) ? LPO_LT : LPO_UN;
+    }
+    return lpo_dag_var_in(c1, y->sym) ? LPO_GT : LPO_UN;
+  }
+  if (lpo_dag_vortest(c1, c2)) {
+    return LPO_GT;
+  }
+  if (lpo_dag_vortest(c2, c1)) {
+    return LPO_LT;
+  }
+  const u32 *kx = &g_ld_kids[x->kids];
+  const u32 *ky = &g_ld_kids[y->kids];
+  u32        nx = x->arity;
+  u32        ny = y->arity;
+  if (x->w > y->w) {
+    u32 j = 0u;
+    while (j < ny && lpo_dag_rec(c1, ky[j]) == LPO_GT) {
+      j++;
+    }
+    if (j == ny) {
+      return LPO_GT;
+    }
+    for (j = 0u; j < ny; j++) {
+      LpoCmp c = lpo_dag_rec(ky[j], c1);
+      if (c == LPO_EQ || c == LPO_GT) {
+        return LPO_LT;
+      }
+    }
+    return LPO_UN;
+  }
+  if (x->w < y->w) {
+    u32 i = 0u;
+    while (i < nx && lpo_dag_rec(c2, kx[i]) == LPO_GT) {
+      i++;
+    }
+    if (i == nx) {
+      return LPO_LT;
+    }
+    for (i = 0u; i < nx; i++) {
+      LpoCmp c = lpo_dag_rec(kx[i], c2);
+      if (c == LPO_EQ || c == LPO_GT) {
+        return LPO_GT;
+      }
+    }
+    return LPO_UN;
+  }
+  for (u32 i = 0; i < nx; i++) {
+    LpoCmp c = lpo_dag_rec(kx[i], c2);
+    if (c == LPO_EQ || c == LPO_GT) {
+      return LPO_GT;
+    }
+  }
+  for (u32 j = 0; j < ny; j++) {
+    LpoCmp c = lpo_dag_rec(ky[j], c1);
+    if (c == LPO_EQ || c == LPO_GT) {
+      return LPO_LT;
+    }
+  }
+  u32    n   = (nx < ny) ? nx : ny;
+  u32    d   = 0u;
+  LpoCmp lex = LPO_EQ;
+  while (d < n) {
+    lex = lpo_dag_rec(kx[d], ky[d]);
+    if (lex != LPO_EQ) {
+      break;
+    }
+    d++;
+  }
+  if (lex == LPO_EQ) {
+    return LPO_EQ;
+  }
+  // As lpo_flat_rec_compute: an UN lex verdict takes the LT leg.
+  if (lex == LPO_GT) {
+    for (u32 j = d; j < ny; j++) {
+      if (lpo_dag_rec(c1, ky[j]) != LPO_GT) {
+        return LPO_UN;
+      }
+    }
+    return LPO_GT;
+  }
+  for (u32 i = d; i < nx; i++) {
+    if (lpo_dag_rec(c2, kx[i]) != LPO_GT) {
+      return LPO_UN;
+    }
+  }
+  return LPO_LT;
+}
+
+// Hash-cons g_lpo_flat_a[0, na) and g_lpo_flat_b[0, nb).  0 when a
+// symbol has two arities or precedences, or on allocation failure.
+static u8 lpo_dag_build(u32 na, u32 nb, const LpoConfig *cfg) {
+  if (!lpo_dag_reserve(na + nb)) {
+    return 0u;
+  }
+  g_ld_n         = 0u;
+  g_ld_nkids     = 0u;
+  g_ld_arr[0]    = g_lpo_flat_a;
+  g_ld_arr[1]    = g_lpo_flat_b;
+  g_ld_len[0]    = na;
+  g_ld_len[1]    = nb;
+  g_ld_occ_ok[0] = 0u;
+  g_ld_occ_ok[1] = 0u;
+  if (!lpo_dag_side(0u, g_lpo_flat_a, na, cfg) ||
+      !lpo_dag_side(1u, g_lpo_flat_b, nb, cfg)) {
+    return 0u;
+  }
+  return lpo_dag_memo_init(4u * g_ld_n);
+}
+
+// The DAG verdict on the encoded pair; the flat recursion when the DAG
+// cannot represent the pair (a symbol with two arities) or allocate.
+static LpoCmp lpo_dag_cmp(u32 na, u32 nb, const LpoConfig *cfg) {
+  if (!lpo_dag_build(na, nb, cfg)) {
+    g_lpo_dag_fallbacks++;
+    return lpo_flat_ref(cfg);
+  }
+  return lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
+}
+
+// Pairs of at most LPO_DAG_MIN_NODES nodes stay on the flat recursion:
+// there hash-consing costs more than the recursion it saves (on RNG
+// runs the DAG took 1.4x the flat time up to 16 nodes and 1.2x up to
+// 32, and 0.8x down to 0.07x above).  The self-check build sends every
+// pair through the DAG so the differential covers all sizes.
+#ifdef THVM_LPO_SELFCHECK
+#define LPO_DAG_MIN_NODES 0u
+#else
+#define LPO_DAG_MIN_NODES 32u
+#endif
+
+static LpoCmp lpo_flat_cmp_run(u32 na, u32 nb, const LpoConfig *cfg) {
+  g_lpo_top_calls++;
+  g_lpo_flat_compute_calls++;
+  if (na + nb <= LPO_DAG_MIN_NODES) {
+    return lpo_flat_ref(cfg);
+  }
+  return lpo_dag_cmp(na, nb, cfg);
+}
+
+#ifdef THVM_LPO_SELFCHECK
+#include <time.h>
+
+// Differential self-check (-DTHVM_LPO_SELFCHECK): every top-level flat
+// compare also runs lpo_flat_ref and counts disagreements; both are
+// timed.  A compare whose deadline fires is not counted.  With
+// THVM_LPO_SELFCHECK_DUMP=<file>, a pair on which the DAG computes at
+// least THVM_LPO_SELFCHECK_DUMP_MIN (default 2000) class pairs, or any
+// mismatch, is appended to <file> BEFORE the reference runs, so pairs
+// the reference cannot finish are still checked offline
+// (bin/test_lpo <file>).
+static u64 g_lpo_sc_pairs    = 0;
+static u64 g_lpo_sc_mismatch = 0;
+static u64 g_lpo_sc_skipped  = 0;
+static u64 g_lpo_sc_dumped   = 0;
+static u64 g_lpo_sc_ns_new   = 0;
+static u64 g_lpo_sc_ns_ref   = 0;
+static u64 g_lpo_sc_max_ref  = 0;
+static u64 g_lpo_sc_max_new  = 0;   // the DAG's time on the max_ref pair
+static u32 g_lpo_sc_max_n    = 0;   // na + nb of the max_ref pair
+static u64 g_lpo_sc_max_dag  = 0;   // slowest DAG compare
+static u32 g_lpo_sc_max_dag_n = 0;
+static u8  g_lpo_sc_reg      = 0;
+// Per-size buckets (na + nb <= 16, 32, ..., 2^15, more): pairs and the
+// time each evaluator spent on them.
+#define LPO_SC_NB 13
+static u64 g_lpo_sc_b_n[LPO_SC_NB];
+static u64 g_lpo_sc_b_new[LPO_SC_NB];
+static u64 g_lpo_sc_b_ref[LPO_SC_NB];
+
+static u32 lpo_sc_bucket(u32 n) {
+  u32 b = 0u;
+  while (b + 1u < LPO_SC_NB && n > (16u << b)) {
+    b++;
+  }
+  return b;
+}
+
+static u64 lpo_sc_now(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (u64)ts.tv_sec * 1000000000ull + (u64)ts.tv_nsec;
+}
+
+fn void thvm_lpo_selfcheck_report(FILE *f) {
+  fprintf(f, "   lpo-selfcheck: pairs=%llu mismatches=%llu skipped=%llu "
+             "dumped=%llu fallbacks=%llu new=%.3fs ref=%.3fs "
+             "max-ref=%.3fms (n=%u, new %.3fms) max-new=%.3fms (n=%u)\n",
+          (unsigned long long)g_lpo_sc_pairs,
+          (unsigned long long)g_lpo_sc_mismatch,
+          (unsigned long long)g_lpo_sc_skipped,
+          (unsigned long long)g_lpo_sc_dumped,
+          (unsigned long long)g_lpo_dag_fallbacks,
+          (double)g_lpo_sc_ns_new / 1e9, (double)g_lpo_sc_ns_ref / 1e9,
+          (double)g_lpo_sc_max_ref / 1e6, g_lpo_sc_max_n,
+          (double)g_lpo_sc_max_new / 1e6,
+          (double)g_lpo_sc_max_dag / 1e6, g_lpo_sc_max_dag_n);
+  fprintf(f, "   lpo-selfcheck-sizes:");
+  for (u32 b = 0; b < LPO_SC_NB; b++) {
+    if (g_lpo_sc_b_n[b] != 0u) {
+      fprintf(f, " <=%u:%llu/%.0f/%.0f", 16u << b,
+              (unsigned long long)g_lpo_sc_b_n[b],
+              (double)g_lpo_sc_b_new[b] / (double)g_lpo_sc_b_n[b],
+              (double)g_lpo_sc_b_ref[b] / (double)g_lpo_sc_b_n[b]);
+    }
+  }
+  fprintf(f, " (pairs/new-ns/ref-ns per pair)\n");
+}
+
+static void lpo_sc_atexit(void) {
+  thvm_lpo_selfcheck_report(stderr);
+}
+
+// Record: "LPOP", na, nb, n_labels, precedence[n_labels], then na + nb
+// nodes (sym, w, sz), then the DAG verdict as i32.
+static void lpo_sc_dump(u32 na, u32 nb, const LpoConfig *cfg, LpoCmp r) {
+  static FILE *f   = NULL;
+  static int   off = 0;
+  if (off) {
+    return;
+  }
+  if (f == NULL) {
+    const char *p = getenv("THVM_LPO_SELFCHECK_DUMP");
+    f = (p != NULL && p[0] != '\0') ? fopen(p, "ab") : NULL;
+    if (f == NULL) {
+      off = 1;
+      return;
+    }
+  }
+  u32 hdr[4] = {0x504F504Cu, na, nb, cfg->n_labels};
+  i32 rv     = (i32)r;
+  fwrite(hdr, sizeof(u32), 4, f);
+  fwrite(cfg->precedence, sizeof(u32), cfg->n_labels, f);
+  fwrite(g_lpo_flat_a, sizeof(KboFlatNode), na, f);
+  fwrite(g_lpo_flat_b, sizeof(KboFlatNode), nb, f);
+  fwrite(&rv, sizeof(i32), 1, f);
+  fflush(f);
+  g_lpo_sc_dumped++;
+}
+
+static LpoCmp lpo_flat_cmp(u32 na, u32 nb, const LpoConfig *cfg) {
+  static i64 dump_min = -1;
+  if (!g_lpo_sc_reg) {
+    g_lpo_sc_reg = 1u;
+    atexit(lpo_sc_atexit);
+  }
+  if (dump_min < 0) {
+    const char *e = getenv("THVM_LPO_SELFCHECK_DUMP_MIN");
+    dump_min = (e != NULL && e[0] != '\0') ? atoll(e) : 2000;
+  }
+  u64 c0 = g_lpo_flat_compute_calls;
+  u64 t0 = lpo_sc_now();
+  LpoCmp r = lpo_flat_cmp_run(na, nb, cfg);
+  u64 t1 = lpo_sc_now();
+  if (g_lpo_past_deadline) {
+    g_lpo_sc_skipped++;
+    return r;
+  }
+  if (t1 - t0 > g_lpo_sc_max_dag) {
+    g_lpo_sc_max_dag   = t1 - t0;
+    g_lpo_sc_max_dag_n = na + nb;
+  }
+  u8 dumped = 0u;
+  if ((i64)(g_lpo_flat_compute_calls - c0) >= dump_min) {
+    lpo_sc_dump(na, nb, cfg, r);
+    dumped = 1u;
+  }
+  u64 sr = g_lpo_flat_rec_calls, sh = g_lpo_flat_memo_hits;
+  u64 sc = g_lpo_flat_compute_calls;
+  LpoCmp ref = lpo_flat_ref(cfg);
+  u64 t2 = lpo_sc_now();
+  g_lpo_flat_rec_calls     = sr;
+  g_lpo_flat_memo_hits     = sh;
+  g_lpo_flat_compute_calls = sc;
+  if (g_lpo_past_deadline) {
+    g_lpo_sc_skipped++;
+    return r;
+  }
+  g_lpo_sc_pairs++;
+  g_lpo_sc_ns_new += t1 - t0;
+  g_lpo_sc_ns_ref += t2 - t1;
+  {
+    u32 b = lpo_sc_bucket(na + nb);
+    g_lpo_sc_b_n[b]++;
+    g_lpo_sc_b_new[b] += t1 - t0;
+    g_lpo_sc_b_ref[b] += t2 - t1;
+  }
+  if (t2 - t1 > g_lpo_sc_max_ref) {
+    g_lpo_sc_max_ref = t2 - t1;
+    g_lpo_sc_max_new = t1 - t0;
+    g_lpo_sc_max_n   = na + nb;
+  }
+  if (ref != r) {
+    g_lpo_sc_mismatch++;
+    if (!dumped) {
+      lpo_sc_dump(na, nb, cfg, r);
+    }
+    if (g_lpo_sc_mismatch <= 20u) {
+      fprintf(stderr, "LPO-SELFCHECK MISMATCH na=%u nb=%u dag=%d ref=%d\n",
+              na, nb, (int)r, (int)ref);
+    }
+  }
+  return r;
+}
+#else
+static inline LpoCmp lpo_flat_cmp(u32 na, u32 nb, const LpoConfig *cfg) {
+  return lpo_flat_cmp_run(na, nb, cfg);
+}
+#endif
+
 static int lpo_pretest_flat_dispatch(Term s, Term t,
                                      const LpoConfig *cfg, LpoCmp *out) {
   // Borrow KBO's encoder -- LPO does not care about weights, only sym/sz.
@@ -776,17 +1526,7 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
         }
         if (s_extra && t_extra) return LPO_UN;
       }
-      // Bump epoch -- positions are only meaningful for THIS encode pair.
-      if (++g_lpo_flat_epoch == 0) {
-        for (u32 i = 0; i < LPO_FLAT_MEMO_SIZE; i++) g_lpo_flat_memo[i].epoch = 0;
-        g_lpo_flat_epoch = 1;
-      }
-      // Skip memo for the top-level (0,0) call -- it always hits slot 0 so
-      // the memo lookup is pure overhead.  The recursive calls below this
-      // still memoize.
-      g_lpo_top_calls++;
-      g_lpo_flat_compute_calls++;
-      LpoCmp rr = lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
+      LpoCmp rr = lpo_flat_cmp(na, nb, cfg);
       if (g_lpo_persist) {
         u32 idx2 = (u32)((u64)s * 0x9E3779B97F4A7C15ull
                        ^ (u64)t * 0xBF58476D1CE4E5B9ull) & LPO_MEMO_MASK;

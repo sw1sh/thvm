@@ -3777,6 +3777,10 @@ int main(int argc, char **argv) {
            "(rec/top=%.1f compute/top=%.1f)\n",
            (unsigned long long)ltop, (unsigned long long)lrec,
            (unsigned long long)lcomp, hr, rec_per_top, comp_per_top);
+#ifdef THVM_LPO_SELFCHECK
+    fflush(stdout);
+    thvm_lpo_selfcheck_report(stdout);
+#endif
   }
   printf("   right-reduced (RHS composed) rules: %u\n", s->n_right_reduced);
   printf("   lazy-normalize=%u  push-time full-R normalizes=%llu\n",

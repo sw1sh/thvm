@@ -4060,6 +4060,11 @@ fn void   thvm_lpo_set_deadline_hook(int (*hook)(void));
 fn void thvm_lpo_flat_stats(u64 *rec_calls, u64 *memo_hits,
                             u64 *compute_calls, u64 *top_calls);
 fn void thvm_lpo_flat_stats_reset(void);
+#ifdef THVM_LPO_SELFCHECK
+// -DTHVM_LPO_SELFCHECK: every flat compare is also run through the
+// reference flat recursion; prints pairs, mismatches and timings.
+fn void thvm_lpo_selfcheck_report(FILE *f);
+#endif
 
 // === rewrite/ ===
 // One-shot equational rewriter on TAG_CTR + TAG_FVR (stage 3 of
