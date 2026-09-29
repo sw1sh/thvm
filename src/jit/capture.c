@@ -1753,6 +1753,23 @@ static u64 uop_content_hash_rec(Term t, u32 depth) {
       break;
     }
 
+    // --- indexed ops: Term children, then the NUM payload -----------
+    // GATHER [src, idx, NUM(dim)]; SCATTER [base, idx, src, NUM(dim),
+    // NUM(kind), NUM(include_self)].  The generic descent walks only the
+    // children, so a gather along another axis or a scatter of another
+    // kind would hash equal.
+    case UOP_GATHER: case UOP_SCATTER: {
+      u32 n_src  = (op == UOP_GATHER) ? 2u : 3u;
+      u32 n_cell = (op == UOP_GATHER) ? 3u : 6u;
+      for (u32 i = 0; i < n_src; i++) {
+        h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + i), depth + 1));
+      }
+      for (u32 i = n_src; i < n_cell; i++) {
+        h = uop_content_hash_atom(h, heap_read(loc + i));
+      }
+      break;
+    }
+
     // --- UOP_AFTER [node, after_node]: ordering between sibling -----
     // side-effects in a multi-store kernel.  uop_arity returns 0 for
     // AFTER (it's a boundary-ish marker for the generic rewriter), so

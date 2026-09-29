@@ -61,6 +61,8 @@ static u32 lam_body_arity(Term t) {
         // (axes / dims / pad amounts) which can't be VAR(lam_loc).
         case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
         case UOP_PAD:     case UOP_SHRINK:                 return 1;
+        // A select, index- or value-level (uop_where): [cond, then, else].
+        case UOP_IWHERE:                                   return 3;
         // Indexed ops: the Term children lead the NUM payload.
         case UOP_GATHER:                                   return 2;
         case UOP_SCATTER:                                  return 3;

@@ -13,6 +13,10 @@
 // uop_where builds a select without the index-layer folds: h's inner and
 // outer selects share an else branch, which uop_iwhere collapses into a
 // tensor-level IAND that materialize cannot schedule.
+//
+// The WL lambda tables see a select's three children: the book snapshot
+// owns them, ALO realize wraps each in an ALO, and a binder used only
+// inside a branch counts as used.
 #include "../src/thvm.c"
 #include "test.h"
 
@@ -175,6 +179,32 @@ static void grad_target(Term (*build)(Term), double (*host)(double),
   }
 }
 
+static void test_lambda_tables(void) {
+  u32  tid;
+  Term w = f_graph(x_ten(&tid));
+  CHECK_EQ(term_ext(w), UOP_IWHERE);
+  Term bw = thvm_book_from_dynamic(w);
+  CHECK_EQ(term_ext(bw), UOP_IWHERE);
+  CHECK_EQ(term_ext(book_read(term_val(bw) + 0)), UOP_CMPLT);
+  CHECK_EQ(term_ext(book_read(term_val(bw) + 1)), UOP_MUL);
+  CHECK_EQ(term_ext(book_read(term_val(bw) + 2)), UOP_MUL);
+  Term dw = alo_realize(bw, 0);
+  CHECK_EQ(term_ext(dw), UOP_IWHERE);
+  for (u32 k = 0; k < 3; k++) {
+    CHECK_EQ(term_tag(heap_read(term_val(dw) + k)), TAG_ALO);
+  }
+  Shape vs = {0};
+  vs.ndim    = 1;
+  vs.dims[0] = N;
+  u64 lam = heap_alloc(1);
+  heap_set(lam, 0);
+  lam_shape_set(lam, &vs);
+  Term c = uop_binary(UOP_CMPLT, x_ten(&tid), fconst(0.0f));
+  heap_set(lam, uop_where(c, term_new(0, TAG_VAR, 0, lam), fconst(0.0f)));
+  CHECK_EQ(term_ext(heap_read(lam)), UOP_IWHERE);
+  CHECK(lam_body_uses_var(lam));
+}
+
 int main(void) {
   thvm_init();
   TEST_BEGIN("iwhere-grad/uop-where-folds");
@@ -187,6 +217,8 @@ int main(void) {
   TEST_BEGIN("iwhere-grad/target");
   grad_target(f_graph, f_host, "f target");
   grad_target(h_graph, h_host, "h target");
+  TEST_BEGIN("iwhere-grad/lambda-tables");
+  test_lambda_tables();
   thvm_free();
   TEST_REPORT();
 }

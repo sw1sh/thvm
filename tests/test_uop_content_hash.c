@@ -17,8 +17,8 @@
 //       SHOULD share a PSO -- that's correct, not a collision).
 //   (4) DISTINCTNESS: structurally-different kernels (different op,
 //       different dtype, different shape, different const, different
-//       operand slots) hash DISTINCT (a collision here = wrong PSO =
-//       silent wrong result).
+//       operand slots, a different gather / scatter payload) hash
+//       DISTINCT (a collision here = wrong PSO = silent wrong result).
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -189,6 +189,31 @@ int main(void) {
     CHECK_EQ(uop_dag_content_hash(xxy), uop_dag_content_hash(xxy2));
   }
 
+  // Same children, different NUM payload: a gather along another axis, a
+  // scatter of another kind, include_self or axis.  The generic descent
+  // walks only the Term children, so these hashed equal.
+  TEST_BEGIN("content-hash/distinct-indexed-payload");
+  {
+    u32 d4[1] = {4};
+    Term bs = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d4, 1);
+    Term bi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_INT32, 1, d4, 2);
+    Term i  = uop_range(0, KAX_LOOP, 4);
+    Term s  = uop_index_e(bs, i);
+    Term ix = uop_index_e(bi, i);
+    u64 g0 = uop_dag_content_hash(uop_gather_node(s, ix, 0));
+    u64 g1 = uop_dag_content_hash(uop_gather_node(s, ix, 1));
+    CHECK(g0 != g1);
+    CHECK_EQ(uop_dag_content_hash(uop_gather_node(s, ix, 0)), g0);
+    u64 sum  = uop_dag_content_hash(uop_scatter_node(s, ix, s, 0, SCATTER_SUM, 1));
+    u64 max  = uop_dag_content_hash(uop_scatter_node(s, ix, s, 0, SCATTER_MAX, 1));
+    u64 noin = uop_dag_content_hash(uop_scatter_node(s, ix, s, 0, SCATTER_SUM, 0));
+    u64 dim1 = uop_dag_content_hash(uop_scatter_node(s, ix, s, 1, SCATTER_SUM, 1));
+    CHECK(sum != max);
+    CHECK(sum != noin);
+    CHECK(sum != dim1);
+    CHECK_EQ(uop_dag_content_hash(uop_scatter_node(s, ix, s, 0, SCATTER_SUM, 1)), sum);
+  }
+
   // === (2b) GC-INVARIANT for every heap layout the hash reads ========
   // Each node must move into the new from-space and keep its hash.  A
   // layout the collector under-sizes loses its trailing cells (RANGE's
@@ -216,6 +241,8 @@ int main(void) {
       uop_stack(2, srcs),
       uop_placeholder(DT_FP32, 5),
       uop_end(val, 1, &rng),
+      uop_gather_node(val, rng, 1),
+      uop_scatter_node(val, rng, val, 1, SCATTER_MAX, 0),
     };
     u32 n = sizeof(nodes) / sizeof(nodes[0]);
     u64 before[sizeof(nodes) / sizeof(nodes[0])];
