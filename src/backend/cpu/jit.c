@@ -14,10 +14,9 @@
 // dtype-typed pointer in the prologue, so the generated kernel
 // stays uniform across dtypes from the caller's POV.
 //
-// Cache key: cached_lift.store_root + n_inputs + per-input numel.
-// Numel goes in because the codegen embeds broadcast checks
-// (numel==1) at emit time, so a program with the same lifted DAG
-// but different input numels needs a fresh build.
+// Cache key: the hash of the rendered source (cpu_src_hash), so a
+// structurally identical kernel reuses the build across steps, and the
+// .dylib on disk across processes.
 
 #ifndef _WIN32
 #include <dlfcn.h>  // Windows: dlopen family shimmed in util/portable_win.h
@@ -51,7 +50,6 @@ static void cpu_jit_kvar_vals(KernelEntry const *ke, unsigned *out_vals) {
   for (u32 i = 0; i < nkv; i++) out_vals[i] = (unsigned)kvar_runtime(ids[i]);
 }
 
-#define CPU_JIT_CACHE_CAP 256
 // JIT warmup gate: a kernel source must fire CPU_JIT_WARMUP times before
 // it runs compiled; the UOp walker runs it until then.  Default 0 =
 // compile on first fire (tinygrad always compiles).  At BS=128 an
@@ -115,6 +113,11 @@ static int cpu_jit_dylib_cached(u64 key) {
   return stat(dl_path, &st) == 0;
 }
 
+// In-memory kernel cache: source hash -> compiled fn, open addressing.  It
+// doubles before it passes half full, so a run that compiles many distinct
+// kernels (a decode loop whose position is baked into each step's kernels)
+// keeps every one on the JIT; a kernel with no cache slot would run on the
+// UOp walker instead.
 typedef struct {
   u64       key;          // 0 = empty
   CpuJitFn  func;         // NULL until compile completes
@@ -122,7 +125,10 @@ typedef struct {
   u32       n_inputs;
   u32       fire_count;   // # of dispatches before func was set
 } CpuJitSlot;
-static CpuJitSlot CPU_JIT_CACHE[CPU_JIT_CACHE_CAP];
+#define CPU_JIT_CACHE_INIT_CAP 256u
+static CpuJitSlot *CPU_JIT_CACHE     = NULL;
+static u32         CPU_JIT_CACHE_CAP = 0;    // slots, a power of two
+static u32         CPU_JIT_CACHE_LEN = 0;    // claimed slots
 
 fn u64 cpu_jit_hash(KernelEntry const *ke) {
   u64 h = 0xcbf29ce484222325ULL;
@@ -204,13 +210,14 @@ fn u64 cpu_jit_hash(KernelEntry const *ke) {
 // SIGSEGV).  Allocated by init_ctx_arrays; cleared on cpu_jit_cache_reset.
 fn void cpu_jit_cache_reset(void) {
   for (u32 i = 0; i < CPU_JIT_CACHE_CAP; i++) {
-    if (CPU_JIT_CACHE[i].dl_handle) dlclose(CPU_JIT_CACHE[i].dl_handle);
-    CPU_JIT_CACHE[i].key        = 0;
-    CPU_JIT_CACHE[i].func       = NULL;
-    CPU_JIT_CACHE[i].dl_handle  = NULL;
-    CPU_JIT_CACHE[i].n_inputs   = 0;
-    CPU_JIT_CACHE[i].fire_count = 0;
+    if (CPU_JIT_CACHE[i].dl_handle) {
+      dlclose(CPU_JIT_CACHE[i].dl_handle);
+    }
   }
+  if (CPU_JIT_CACHE != NULL) {
+    memset(CPU_JIT_CACHE, 0, (size_t)CPU_JIT_CACHE_CAP * sizeof *CPU_JIT_CACHE);
+  }
+  CPU_JIT_CACHE_LEN = 0;
   // Per-kid resolved-fn pointers reset too: the KERNELS table is
   // re-bumped from 0 by ctx init so stale pointers would otherwise
   // alias fresh kids that happen to land on the same slot.
@@ -219,37 +226,105 @@ fn void cpu_jit_cache_reset(void) {
   }
 }
 
-static CpuJitSlot *cpu_jit_lookup_slot(u64 key) {
+static u32 cpu_jit_slot_home(u64 key, u32 mask) {
   u32 h = (u32)(key ^ (key >> 32));
   h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
-  for (u32 probe = 0; probe < CPU_JIT_CACHE_CAP; probe++) {
-    u32 i = (h + probe) & (CPU_JIT_CACHE_CAP - 1);
-    if (CPU_JIT_CACHE[i].key == key) return &CPU_JIT_CACHE[i];
-    if (CPU_JIT_CACHE[i].key == 0)   return &CPU_JIT_CACHE[i];
+  return h & mask;
+}
+
+// The slot holding `key`, or NULL.  A slot pointer is valid until the next
+// cpu_jit_claim_slot, which may move the table.
+static CpuJitSlot *cpu_jit_find_slot(u64 key) {
+  if (CPU_JIT_CACHE_CAP == 0) {
+    return NULL;
+  }
+  u32 mask = CPU_JIT_CACHE_CAP - 1;
+  u32 i    = cpu_jit_slot_home(key, mask);
+  for (u32 probe = 0; probe < CPU_JIT_CACHE_CAP; probe++, i = (i + 1) & mask) {
+    if (CPU_JIT_CACHE[i].key == key) {
+      return &CPU_JIT_CACHE[i];
+    }
+    if (CPU_JIT_CACHE[i].key == 0) {
+      return NULL;
+    }
   }
   return NULL;
 }
 
+static int cpu_jit_cache_grow(void) {
+  u32 cap = CPU_JIT_CACHE_CAP ? 2 * CPU_JIT_CACHE_CAP : CPU_JIT_CACHE_INIT_CAP;
+  CpuJitSlot *t = (CpuJitSlot *)calloc(cap, sizeof *t);
+  if (t == NULL) {
+    return 0;
+  }
+  for (u32 j = 0; j < CPU_JIT_CACHE_CAP; j++) {
+    if (CPU_JIT_CACHE[j].key == 0) {
+      continue;
+    }
+    u32 i = cpu_jit_slot_home(CPU_JIT_CACHE[j].key, cap - 1);
+    while (t[i].key != 0) {
+      i = (i + 1) & (cap - 1);
+    }
+    t[i] = CPU_JIT_CACHE[j];
+  }
+  free(CPU_JIT_CACHE);
+  CPU_JIT_CACHE     = t;
+  CPU_JIT_CACHE_CAP = cap;
+  return 1;
+}
+
+// The slot holding `key`, claimed with every other field zero when absent;
+// NULL only when the table cannot grow (out of memory).
+static CpuJitSlot *cpu_jit_claim_slot(u64 key) {
+  CpuJitSlot *s = cpu_jit_find_slot(key);
+  if (s != NULL) {
+    return s;
+  }
+  if (2 * (CPU_JIT_CACHE_LEN + 1) > CPU_JIT_CACHE_CAP && !cpu_jit_cache_grow()) {
+    return NULL;
+  }
+  u32 i = cpu_jit_slot_home(key, CPU_JIT_CACHE_CAP - 1);
+  while (CPU_JIT_CACHE[i].key != 0) {
+    i = (i + 1) & (CPU_JIT_CACHE_CAP - 1);
+  }
+  s = &CPU_JIT_CACHE[i];
+  memset(s, 0, sizeof *s);
+  s->key = key;
+  CPU_JIT_CACHE_LEN++;
+  return s;
+}
+
+// Record a resolved kernel under `key`.
+static void cpu_jit_cache_store(u64 key, CpuJitFn jfn, void *dl_handle,
+                                u32 n_inputs) {
+  CpuJitSlot *s = cpu_jit_claim_slot(key);
+  if (s != NULL) {
+    s->func      = jfn;
+    s->dl_handle = dl_handle;
+    s->n_inputs  = n_inputs;
+  }
+}
+
 // Warmup gate.  A key's fires are counted in its cache slot until it runs
 // compiled, and fire number n may run compiled once n >= the threshold.
-// The precompile asks whether the key's NEXT fire gets there; the dispatch
-// counts the fire it is making.  A slot holds a compiled func only for a key
-// that got there, so a cached func needs no count.  A full table (s == NULL)
-// has nowhere to count: there only an ungated run takes a dylib already on
-// disk, and nothing is compiled.
-static int cpu_jit_next_fire_warm(CpuJitSlot const *s, u64 key) {
-  u32 fired = (s != NULL && s->key == key) ? s->fire_count : 0;
+// The precompile asks whether the key's NEXT fire gets there (`s` is the
+// key's slot or NULL); the dispatch counts the fire it is making.  A slot
+// holds a compiled func only for a key that got there, so a cached func
+// needs no count.  When no slot can be claimed (out of memory) there is
+// nowhere to count: only an ungated run takes a dylib already on disk, and
+// nothing is compiled.
+static int cpu_jit_next_fire_warm(CpuJitSlot const *s) {
+  u32 fired = (s != NULL) ? s->fire_count : 0;
   return fired + 1 >= cpu_jit_warmup();
 }
 
-static int cpu_jit_count_fire(CpuJitSlot *s, u64 key, u32 n_inputs) {
-  if (s == NULL) return cpu_jit_warmup() <= 1 && cpu_jit_dylib_cached(key);
-  if (s->key == 0) {
-    s->key        = key;
-    s->func       = NULL;
-    s->dl_handle  = NULL;
-    s->n_inputs   = n_inputs;
-    s->fire_count = 0;
+static int cpu_jit_count_fire(u64 key, u32 n_inputs) {
+  CpuJitSlot *s = cpu_jit_claim_slot(key);
+  if (s == NULL) {
+    return cpu_jit_warmup() <= 1 && cpu_jit_dylib_cached(key);
+  }
+  if (s->fire_count == 0) {
+    s->n_inputs = n_inputs;
   }
   s->fire_count++;
   return s->fire_count >= cpu_jit_warmup();
@@ -384,8 +459,7 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
     if (!h) return NULL;
     CpuJitFn jfn = (CpuJitFn)dlsym(h, "k");
     if (!jfn) { dlclose(h); return NULL; }
-    CpuJitSlot *s = cpu_jit_lookup_slot(key);
-    if (s) { s->key = key; s->func = jfn; s->dl_handle = h; s->n_inputs = ke->n_inputs; }
+    cpu_jit_cache_store(key, jfn, h, ke->n_inputs);
     return jfn;
   }
 
@@ -404,8 +478,7 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   CpuJitFn jfn = (CpuJitFn)dlsym(h, "k");
   if (!jfn) { dlclose(h); return NULL; }
 
-  CpuJitSlot *s = cpu_jit_lookup_slot(key);
-  if (s) { s->key = key; s->func = jfn; s->dl_handle = h; s->n_inputs = ke->n_inputs; }
+  cpu_jit_cache_store(key, jfn, h, ke->n_inputs);
   return jfn;
 }
 
@@ -630,10 +703,10 @@ fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
 
     // Warmup gate, ahead of both caches: build only a kernel whose next
     // fire reaches the threshold.
-    CpuJitSlot *s = cpu_jit_lookup_slot(key);
-    if (!cpu_jit_next_fire_warm(s, key)) { free(src); continue; }
+    CpuJitSlot *s = cpu_jit_find_slot(key);
+    if (!cpu_jit_next_fire_warm(s)) { free(src); continue; }
     // Already compiled in-memory?  Skip.
-    if (s != NULL && s->key == key && s->func != NULL) { free(src); continue; }
+    if (s != NULL && s->func != NULL) { free(src); continue; }
     // On disk: the dispatch loads it.
     if (cpu_jit_dylib_cached(key)) { free(src); continue; }
 
@@ -732,9 +805,8 @@ fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
     for (u32 i = 0; i < njobs; i++) {
       CpuJitFn jfn = (CpuJitFn)dlsym(h, jobs[i].func_name);
       if (jfn == NULL) continue;
-      CpuJitSlot *s = cpu_jit_lookup_slot(jobs[i].key);
+      CpuJitSlot *s = cpu_jit_claim_slot(jobs[i].key);
       if (s != NULL && s->func == NULL) {
-        s->key = jobs[i].key;
         s->func = jfn;
         s->dl_handle = handle_owned ? NULL : h;
         handle_owned = 1;
@@ -811,8 +883,8 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
       fprintf(stderr, "] out_buf=%u out_numel=%u\n", out_buf_id, ke->output_numel);
     }
   }
-  CpuJitSlot *s = cpu_jit_lookup_slot(key);
-  CpuJitFn jfn = (s && s->key == key) ? s->func : NULL;
+  CpuJitSlot *s = cpu_jit_find_slot(key);
+  CpuJitFn jfn = (s != NULL) ? s->func : NULL;
 
   if (jfn == NULL) {
     // Warmup gate, ahead of the on-disk dylib: until this kernel has
@@ -820,7 +892,7 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     // it.  Mirrors what tinygrad does implicitly via its compile
     // cache: one-shot kernels pay no compile cost; training-loop
     // kernels cross the threshold almost immediately.
-    if (!cpu_jit_count_fire(s, key, ke->n_inputs)) { free(src); return 0; }
+    if (!cpu_jit_count_fire(key, ke->n_inputs)) { free(src); return 0; }
     jfn = cpu_jit_build(ke, key, src);
     if (!jfn) { free(src); return 0; }
   }

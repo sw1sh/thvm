@@ -77,12 +77,12 @@ Compute paths:
   `TMatMul` and routes them to `cblas_{s,d}{dot,gemv,gemm}`. Returns
   a `KDispatchKind` (`KDISPATCH_BLAS_DOT` / `_GEMV` / `_GEMM`) on
   hit, 0 on miss.
-- [jit.c](../src/backend/cpu/jit.c): clang JIT. Hashes the program,
-  looks up `CPU_JIT_CACHE[CPU_JIT_CACHE_CAP]`, on miss renders C99
-  source by calling `cg_render_uop_kernel_c_root` against
-  `ke->cached_lift.store_root`, writes
-  `/tmp/thvm_jit_<hash>.c`, shells out to `clang -O2 -fPIC -shared`,
-  `dlopen`s the resulting `.dylib`, and `dlsym`s the `k` symbol.
+- [jit.c](../src/backend/cpu/jit.c): clang JIT. Renders C99 source by
+  calling `cg_render_uop_kernel_c_root` against
+  `ke->cached_lift.store_root`, hashes it, looks the hash up in the
+  in-memory `CPU_JIT_CACHE`, and on a miss writes
+  `/tmp/thvm_jit_<hash>.c`, shells out to the C compiler, `dlopen`s the
+  resulting `.dylib`, and `dlsym`s the `k` symbol.
 
 ### Dispatch order
 
@@ -203,16 +203,16 @@ CPU JIT path, end to end:
    the program (movement op, mid-program REDUCE, mixed dtype, ...)
    or if `ke->cached_lift.store_root == 0` (lifter declined at
    materialize time).
-3. It computes `key = cpu_jit_hash(ke)`, which folds `n_ops`,
-   `n_inputs`, every per-input `numel`, every per-input view stride
-   pattern (and any `ShapeTracker` prior-view chain), either the
-   lifted `store_root` Term value (preferred) or the raw `KProgOp[]`
-   bytes (fallback), and every entry of `applied_opts[]`. The high
-   bit is forced on so `key == 0` means empty slot. This is the
-   cache key.
-4. `cpu_jit_lookup_slot(key)` linear-probes
-   `CPU_JIT_CACHE[CPU_JIT_CACHE_CAP]`. On hit, the cached `CpuJitFn`
-   is reused.
+3. It renders the kernel's C source (`cpu_jit_render_canon`) and
+   computes `key = cpu_src_hash(src)`, an FNV-1a hash of that source
+   with the high bit forced on so `key == 0` means empty slot. This is
+   the cache key: structurally identical kernels render byte-identical
+   source and share it.
+4. `cpu_jit_find_slot(key)` linear-probes `CPU_JIT_CACHE`. On hit, the
+   cached `CpuJitFn` is reused.  The table is open-addressed and doubles
+   before it passes half full (`cpu_jit_claim_slot`), so every kernel a
+   process compiles keeps a slot; a fixed 256-slot table used to leave
+   each kernel past its capacity on the UOp walker.
 5. On miss, the warmup gate counts the fire in the key's slot and,
    until the count reaches `THVM_CPU_JIT_WARMUP`, returns 0 so the
    UOp walker runs the kernel. Only past the gate does
@@ -235,10 +235,10 @@ CPU JIT path, end to end:
    `K_PROFILE[kid]` for the `TKernelProfile` / `TKernelDispatchKind`
    surfaces to read.
 
-The cache is keyed at the granularity of "program shape": same
-opcodes + same per-input numels + same applied opts hash to the
-same slot. Two kernels with identical bodies share one `.dylib`.
-A persistent `/tmp/thvm_jit_<hash>_<opt>.dylib` is honored across
+The cache is keyed by rendered source, so two kernels with identical
+bodies share one slot and one `.dylib`, and a kernel whose source
+carries a different constant (a decode step's position, say) gets its
+own.  A persistent `/tmp/thvm_jit_<hash>_<opt>.dylib` is honored across
 processes once the kernel is past the warmup gate (a stat-only
 freshness check; no source-content verification).
 

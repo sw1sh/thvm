@@ -295,6 +295,7 @@ TESTS := \
   $(BIN)/test_view_flip \
   $(BIN)/test_cpu_free_list \
   $(BIN)/test_cpu_jit_warmup \
+  $(BIN)/test_cpu_jit_cache \
   $(BIN)/test_cpu_jit_via_uop \
   $(BIN)/test_cpu_jit_nonfinite \
   $(BIN)/test_cpu_jit_f64_reduce \

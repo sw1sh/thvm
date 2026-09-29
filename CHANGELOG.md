@@ -200,6 +200,13 @@ for the per-commit story.
   last iteration.
 
 ### Backends
+- CPU JIT: the in-memory kernel cache grows (open addressing, doubled before
+  half full) instead of holding a fixed 256 kernels.  Past 256 distinct
+  kernel sources a process ran every new kernel on the UOp walker, slow and,
+  on kernels the walker mis-evaluates, wrong: GPT-2 decoding a second prompt
+  with the native gather embedding (each step's position is a constant in
+  its kernels) decoded garbage from its ninth token, and is token-identical
+  to the host path with the growable cache.
 - The CPU UOp walker declines a kernel whose value holds an op it has no rule for (a DETACH, say), with one stderr line naming the op, instead of reading it as 0, and its int evaluator converts a float ADD, MUL, NEG, RECIP, EXP2, LOG2 or SQRT through its float result instead of truncating the operands or reading 0. `test_uop_walk_domains` runs hand-built kernels (a CAST of a RANGE, int ops in float math, a float CMPLT / CMPEQ under IAND, the IWHERE-of-IWHERE collapse a scatter-max read-modify-write builds, a float sum cast or stored to int, a float select under CAST and BITCAST, a float mask, a CAST to bool) through the rendered C and the walker and holds both to a host reference byte for byte.
 - The CPU UOp walker types a load, a CONST and an op of fixed type (a CAST, a comparison, EXP2 / LOG2 / SQRT, index math) directly and memoizes only the ops that take their operands' type; a float op's operand of known type walks without a lookup, a reduce types its body and a store its value once. The C typing's memo lookups had made the walker's hot kernel in `test_fuse_matmul_input_cpu` 35% slower (118 ms to 158 ms); it is now 11% slower (131 ms), and the other walker-heavy NN tests within 2%.
 - `docs/dtypes.md` says the CPU JIT's legacy C emit declines a kernel that reads a bool buffer, whose DT_BOOL (0) its untyped-slot check takes for untyped, so that kernel runs in the UOp walker; the coverage table listed bool among the JIT's dtypes. `docs/ENV_KNOBS.md` says `THVM_CPU_JIT_WARMUP` W runs fires 1 to W-1 in the walker and compiles fire W, where "fires before it runs compiled" read as W walked fires.
