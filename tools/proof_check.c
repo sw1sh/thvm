@@ -2445,20 +2445,44 @@ static void pc_parse_source(const char *src, PcStep *st) {
   pc_gt_free(g);
 }
 
+// A record name as a citation spells it: one pair of outer quotes
+// dropped and backslash escapes resolved, exactly as pc_gt_parse reads a
+// quoted file()/parent name ('Zneg\'' and a citation of it both name
+// Zneg').  Truncated at PC_NAME like the citation.
+static void pc_name_copy(char *out, const char *nm) {
+  size_t ln = strlen(nm), k = 0;
+  if (ln >= 2 && nm[0] == '\'' && nm[ln - 1] == '\'') {
+    for (size_t i = 1; i + 1 < ln && k < PC_NAME - 1; i++) {
+      if (nm[i] == '\\' && i + 2 < ln) {
+        i++;
+      }
+      out[k++] = nm[i];
+    }
+  } else {
+    for (; k < ln && k < PC_NAME - 1; k++) {
+      out[k] = nm[k];
+    }
+  }
+  out[k] = '\0';
+}
+
 // Split fof(...)/cnf(...) inner content on TOP-LEVEL commas (respecting
 // (), [] and quotes).  Each returned args[i] is heap-allocated (caller
 // frees) and carries the FULL argument -- the old fixed 8K buffers
 // silently truncated large formulas, which corrupted the record instead
 // of failing it.  Returns the argument count (clamped to max).
 static int pc_split_args(const char *s, char **args, int max) {
-  int depth = 0, inq = 0, na = 0;
+  int depth = 0, na = 0;
   const char *seg = s;
   const char *p = s;
   for (;; p++) {
     char c = *p;
     if (c != '\0') {
-      if (inq) { if (c == '\'') inq = 0; continue; }
-      if (c == '\'') { inq = 1; continue; }
+      if (c == '\'' || c == '"') {
+        const char *e = tp_quote_end(p);
+        p = (e != NULL) ? e : p + strlen(p) - 1;
+        continue;
+      }
       if (c == '(' || c == '[') { depth++; continue; }
       if (c == ')' || c == ']') { depth--; continue; }
       if (c != ',' || depth != 0) continue;
@@ -2533,13 +2557,7 @@ static int pc_parse_record(const char *rec) {
     PcStep *st = &pc_steps[pc_nstep];
     memset(st, 0, sizeof *st);
     pc_trim(args[0]);
-    {
-      // A quoted record name cites unquoted ('n1' and n1 are one name).
-      char *nm = args[0];
-      size_t ln = strlen(nm);
-      if (ln >= 2 && nm[0] == '\'' && nm[ln - 1] == '\'') { nm[ln - 1] = '\0'; nm++; }
-      snprintf(st->name, PC_NAME, "%s", nm);
-    }
+    pc_name_copy(st->name, args[0]);
     pc_trim(args[1]);
     st->role = pc_role_of(args[1]);
 
@@ -2605,10 +2623,7 @@ static int pc_parse_problem_record(const char *rec) {
     Term f = pc_parse_formula(args[2], &scope);
     if (f != 0) {
       PcProb *pr = &pc_prob[pc_nprob];
-      char *nm = args[0];
-      size_t ln = strlen(nm);
-      if (ln >= 2 && nm[0] == '\'' && nm[ln - 1] == '\'') { nm[ln - 1] = '\0'; nm++; }
-      snprintf(pr->name, PC_NAME, "%s", nm);
+      pc_name_copy(pr->name, args[0]);
       pr->role    = pc_role_of(args[1]);
       pr->formula = f;
       pc_nprob++;
@@ -2645,17 +2660,15 @@ static void pc_load_include(const char *rec, const char *path) {
 // read -- an unparseable record, an include that does not expand, an
 // unterminated tail -- counts in pc_prob_unparsed.
 static void pc_load_problem_text(char *text, const char *path) {
-  int depth = 0, inq = 0;
+  int depth = 0;
   char *start = text;
   for (char *p = text; *p != '\0'; p++) {
-    if (inq) {
-      if (*p == '\'') {
-        inq = 0;
+    if (*p == '\'' || *p == '"') {
+      const char *e = tp_quote_end(p);
+      if (e == NULL) {
+        break;
       }
-      continue;
-    }
-    if (*p == '\'') {
-      inq = 1;
+      p = (char *)e;
     } else if (*p == '(' || *p == '[') {
       depth++;
     } else if (*p == ')' || *p == ']') {
@@ -4489,12 +4502,16 @@ static char *pc_read(const char *file, size_t *len) {
 // again on the same buffer.
 static void pc_parse_all(char *text) {
   pc_nstep = 0;
-  int depth = 0, inq = 0;
+  int depth = 0;
   char *start = text;
   char *p = text;
   for (; *p; p++) {
-    if (inq) { if (*p == '\'') inq = 0; continue; }
-    if (*p == '\'') { inq = 1; continue; }
+    if (*p == '\'' || *p == '"') {
+      const char *e = tp_quote_end(p);
+      if (e == NULL) break;
+      p = (char *)e;
+      continue;
+    }
     if (*p == '(' || *p == '[') depth++;
     else if (*p == ')' || *p == ']') depth--;
     else if (*p == '.' && depth == 0) {

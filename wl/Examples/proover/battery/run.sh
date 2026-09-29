@@ -17,6 +17,8 @@
 # H33: an existential under 17 universals: a Skolem term over all of them
 # passed the unifier whole (VerifiedGood); the witness takes the universals
 # its body mentions, and the step's countermodel is found.
+# H34-H35: a formula name with an escaped quote ('a\'1') neither hides
+# the records after it nor escapes the leaf check.
 # Usage: run.sh [CheckProof]
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=${1:-$HERE/../../../../bin/CheckProof}

@@ -32,3 +32,5 @@ H30_curry_horn_valid.s	VerifiedGood	VALID control: a Horn first-order step over 
 H31_curry_arity_alias.s	VerifiedBad	one name at arities 17 and 20 is two symbols: the curried heads must not share a name
 H32_curry_quoted_alias.s	Unknown	quoted atoms spelling the encoding's own symbol names are not read
 H33_wide_skolem.s	VerifiedBad	an existential under 17 universals whose body mentions one: its witness stays narrow, the countermodel is found (never VerifiedGood)
+H34_escaped_name_valid.s	VerifiedGood	VALID control: leaves cite a name with an escaped quote and a formula after it
+H35_escaped_name_misstated.s	VerifiedBad	leaf misstates the formula of a name with an escaped quote

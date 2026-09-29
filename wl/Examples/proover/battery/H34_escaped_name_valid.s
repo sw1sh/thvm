@@ -1,0 +1,6 @@
+% Proof    : Problems/ESC000+1.p
+fof(l1, axiom, p(a), file('Problems/ESC000+1.p','a\'1')).
+fof(l2, axiom, ![X]: (p(X) => q(X)), file('Problems/ESC000+1.p',a2)).
+fof(c, conjecture, q(a), file('Problems/ESC000+1.p',c)).
+fof(s1, negated_conjecture, ~q(a), inference(negated_conjecture, [status(cth)], [c])).
+fof(f1, plain, $false, inference(consequence, [status(thm)], [s1, l1, l2])).
