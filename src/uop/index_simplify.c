@@ -1404,16 +1404,22 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           return uop_int_binary(UOP_ILT, lhs, uop_iconst(q));
         }
       }
-      // (x // d) < c -> x < (c * d) for d>0 and nonneg(x).  Under nonneg(x)
-      // C-truncating IDIV equals floor.  tinygrad/uop/symbolic.py:279-280.
+      // (x // d) < c -> x < c*d for d > 0, and -> c*d < x for d < 0.
+      // tinygrad/uop/symbolic.py:289-291.  tinygrad's // floors; thvm's IDIV
+      // truncates, which equals floor where x/d >= 0 or |d| == 1: nonneg(x)
+      // for d > 0, x <= 0 (or d == -1) for d < 0.  c*d must fit the int32
+      // constant.
       if (b_const && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IDIV) {
         Term inner_num = heap_read(term_val(a) + 0);
-        i64 d;
-        if (uop_iconst_value(heap_read(term_val(a) + 1), &d) && d > 0
-            && uop_term_nonneg(inner_num)) {
-          i64 cd;
-          if (uop_chk_mul(bv, d, &cd))
+        i64 d, cd, lo, hi;
+        if (uop_iconst_value(heap_read(term_val(a) + 1), &d) && uop_chk_mul(bv, d, &cd)
+            && cd >= INT32_MIN && cd <= INT32_MAX) {
+          if (d > 0 && uop_term_nonneg(inner_num)) {
             return uop_int_binary(UOP_ILT, inner_num, uop_iconst(cd));
+          }
+          if (d < 0 && (d == -1 || (uop_int_bounds(inner_num, &lo, &hi) && hi <= 0))) {
+            return uop_int_binary(UOP_ILT, uop_iconst(cd), inner_num);
+          }
         }
       }
       // x*-1 < y*-1 -> y < x.  Pure comparison flip, all signs.

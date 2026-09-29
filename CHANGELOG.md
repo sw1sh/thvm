@@ -53,6 +53,7 @@ for the per-commit story.
 - `bin/test_materialize_v2`: a same-kind REDUCE chain is one multi-axis
   REDUCE (one boundary); a max-then-sum chain keeps two boundaries in fire
   order.  The old chain reduced axis 0 of an already fully reduced value.
+- The `(x // d) < c` index rewrite handles negative divisors where truncating and floor division agree (x provably <= 0, or d == -1), and both signs decline when `c*d` leaves int32 (it folded `x // 65536 < 65536` to false).
 - `fast_idiv` retries with the divisor's powers of two shifted out of both operands when the magic multiply overflows int32, as tinygrad does: `x // 448` over `[0, 2^20)` renders `((x >> 6) * 18725) >> 17` instead of a divide.
 - `test_limit_bufs` covers the per-kernel buffer cap on CPU (`THVM_MAX_KERNEL_BUFFERS`, now in docs/ENV_KNOBS.md). The device table cites tinygrad master, which caps only WebGPU, and says why thvm keeps Metal at 31.
 - A reduce over `reshape(shrink(x))` that merges a shrunk axis into its neighbour reads the right elements again on the CPU JIT and the UOp walker (`x.shrink(...).reshape(2,6).sum(1)` was off by 1.8, and the walker applied every offset shrink twice). materialize commits the chain-composed input flags with every rewritten store, and the BEAM isolated bench sizes a composed slot's scratch buffer to the extent its view spans in the raw buffer (it was the view numel, and the bench read past it).

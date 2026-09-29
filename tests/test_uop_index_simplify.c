@@ -1040,6 +1040,77 @@ int main(void) {
     CHECK_EQ(term_ext(r20s), UOP_ILT);
     CHECK_EQ(term_ext(heap_read(term_val(r20s) + 0)), UOP_IDIV);
 
+    // c*d outside int32 must not be packed into a truncated constant.  A
+    // kvar id past the registry has no static bound, which leaves the
+    // numerator non-negative but unbounded, so the bound fold cannot decide
+    // first; x//65536 < 65536 holds for every int32 x >= 0, while the
+    // truncated x < 0 is always false.
+    TEST_BEGIN("ported/ilt-div-eliminate-skips-int32-overflow");
+    Term rk = uop_range(505, KAX_LOOP, kvar_pack_extent(KVAR_CAP));
+    {
+      i64 blo, bhi;
+      CHECK_EQ(uop_int_bounds(rk, &blo, &bhi), 0);
+    }
+    Term r20o = uop_int_binary(UOP_ILT,
+                  uop_int_binary(UOP_IDIV, rk, uop_iconst(65536)), uop_iconst(65536));
+    CHECK_EQ(term_ext(r20o), UOP_ILT);
+    CHECK_EQ(term_ext(heap_read(term_val(r20o) + 0)), UOP_IDIV);
+
+    // (x//d) < c -> c*d < x for d < 0 (tinygrad/uop/symbolic.py:289-291).
+    // tinygrad's // floors and thvm's IDIV truncates; they agree where x <= 0
+    // or d == -1.  x = r - 64 spans [-64, 0] for r in [0, 64] and [-64, 64]
+    // for r in [0, 128].
+    Term xneg = uop_int_binary(UOP_ISUB, uop_range(503, KAX_LOOP, 65), uop_iconst(64));
+    Term xmix = uop_int_binary(UOP_ISUB, uop_range(504, KAX_LOOP, 129), uop_iconst(64));
+    TEST_BEGIN("ported/ilt-div-neg-divisor-eliminate");
+    // (x // -3) < 5 over x in [-64, 0] -> -15 < x.
+    CHECK_EQ(uop_int_binary(UOP_ILT, uop_int_binary(UOP_IDIV, xneg, uop_iconst(-3)), c5),
+             uop_int_binary(UOP_ILT, uop_iconst(-15), xneg));
+    TEST_BEGIN("ported/ilt-div-neg-divisor-minus-one-any-numerator");
+    // x // -1 is exact, so the rewrite needs no bound on x.
+    CHECK_EQ(uop_int_binary(UOP_ILT, uop_int_binary(UOP_IDIV, xo, uop_iconst(-1)), c5),
+             uop_int_binary(UOP_ILT, uop_iconst(-5), xo));
+    TEST_BEGIN("ported/ilt-div-neg-divisor-skips-positive-numerator");
+    // x = 1 in [-64, 64]: 1 / -3 truncates to 0 where floor gives -1, so
+    // (x // -3) < 0 must not become 0 < x.
+    Term r20n = uop_int_binary(UOP_ILT, uop_int_binary(UOP_IDIV, xmix, uop_iconst(-3)), zero);
+    CHECK_EQ(term_ext(r20n), UOP_ILT);
+    CHECK_EQ(term_ext(heap_read(term_val(r20n) + 0)), UOP_IDIV);
+    TEST_BEGIN("ported/ilt-div-neg-divisor-skips-int32-overflow");
+    // 65536 * -65536 does not fit int32; (x // -65536) < 65536 is true on
+    // [-64, 0], and the truncated 0 < x would be false.
+    Term r20no = uop_int_binary(UOP_ILT,
+                   uop_int_binary(UOP_IDIV, xneg, uop_iconst(-65536)), uop_iconst(65536));
+    CHECK_EQ(term_ext(r20no), UOP_ILT);
+    CHECK_EQ(term_ext(heap_read(term_val(r20no) + 0)), UOP_IDIV);
+    TEST_BEGIN("ported/ilt-div-neg-divisor-exhaustive");
+    {
+      // Every d in [-7, -1] and c in [-20, 20]: the rule removes the IDIV
+      // on [-64, 0] (287 cases) and on [-64, 64] only for d == -1 (41), and
+      // each built predicate matches C `(x / d) < c` at every point.
+      Term xs[2]   = { xneg, xmix };
+      i64  rmax[2] = { 64, 128 };
+      int  bad     = 0;
+      int  folded  = 0;
+      ieval_bad = 0;
+      for (int xi = 0; xi < 2; xi++) {
+        for (i64 d = -7; d <= -1; d++) {
+          for (i64 c = -20; c <= 20; c++) {
+            Term p = uop_int_binary(UOP_ILT, uop_int_binary(UOP_IDIV, xs[xi], uop_iconst(d)),
+                                    uop_iconst(c));
+            folded += !(term_ext(p) == UOP_ILT
+                        && term_ext(heap_read(term_val(p) + 0)) == UOP_IDIV);
+            for (i64 r = 0; r <= rmax[xi]; r++) {
+              bad += ieval(p, r) != ((r - 64) / d < c);
+            }
+          }
+        }
+      }
+      CHECK_EQ(bad, 0);
+      CHECK_EQ(ieval_bad, 0);
+      CHECK_EQ(folded, 287 + 41);
+    }
+
     // Rule 21: lt_folding.  (rb*4 + ra) < 8, ra in [0,7] < 4? no.  Use a
     // p-term that fits: (rb*4 + r0p) < 8 with r0p in [0,3].
     TEST_BEGIN("ported/lt-folding-gcd");
