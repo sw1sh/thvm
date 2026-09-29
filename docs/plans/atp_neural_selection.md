@@ -97,6 +97,32 @@ problems outside J13. The training pool is the TPTP library's unit-equality
 problems minus the J13 400. The J13 lesson: we tied Twee on the problems we
 had tuned against and trailed it by 18 on the rest.
 
+## Phase 0 result so far (2026-09-29)
+
+Infrastructure, verified on a pod: the opt-in history export
+(`THVM_ATP_HISTORY_EXPORT`, `src/atp/history.c`) is observation-only (twee
+lane, identical selections, proofs and stats with it on), and rebuilding the
+queue from it puts the engine's actual pick at rank 0 in all 353,143
+selections checked. Harvest (twee lane, 60s, `--proof`): 485 of 664 train
+and 134 of 171 held-out problems solved, 12.6M critical pairs, about 25 proof
+pairs per problem. The trainer (`tools/atp_enigma/history_net.py`) runs on
+the tinygrad API.
+
+On the validation slice carved from train (64 problems), the engine's own
+priority already places the pending proof pairs at a median percentile of
+0.108, and its top 10 holds a proof pair at 60% of sampled steps. Every
+trained model is worse: best median 0.127 (ratio 1.17; the gate needs 0.5 or
+less). The held-out gate has not run yet; the expected verdict is FAIL.
+
+Two lessons. The pre-registered top-10 criterion (twice the engine's hit
+rate) was unattainable once the engine exceeds 0.5, a flaw in the gate, not
+the model. And the objective does not match the gate: class-balanced
+cross-entropy scores each pair in isolation, while selection ranks it against
+the rest of the queue at that step. Phase 0b trains a listwise objective
+(softmax over the queue at each sampled step, the supervised form of the
+[Sud25] policy gradient) under a new gate: median percentile ratio at most
+0.5, and top-10 miss rate (1 - hit) at most half the engine's.
+
 ## Risks
 
 - Volume: history embeddings for 10M+ CPs cost memory (32 floats per CP is
