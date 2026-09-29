@@ -200,6 +200,23 @@ static void check_conversions(void) {
   u16 const h[4] = { 0x3C00, 0x0400, 0xFC00, 0xC500 };
   f64 const h_as_f64[4] = { 1.0, 0x1p-14, -INFINITY, -5.0 };
   check_convert("assign/converts/f16-to-f64", DT_FP16, h, DT_FP64, h_as_f64);
+
+  // A bool is x != 0, tinygrad's bool(x): 0.5 is true.
+  f32 const t[4] = { 0.5f, 2.0f, -0.0f, -3.0f };
+  u8  const t_as_bool[4] = { 1, 1, 0, 1 };
+  check_convert("assign/converts/f32-to-bool", DT_FP32, t, DT_BOOL, t_as_bool);
+
+  // An int reaches f32 rounded once: 2^60 + 2^36 + 1 is past the halfway
+  // point 2^60 + 2^36, where a double already lands.
+  i64 const big = ((i64)1 << 60) + ((i64)1 << 36) + 1;
+  i64 const l[4] = { big, 3, -5, -big };
+  f32 const l_as_f32[4] = { 0x1.000002p+60f, 3.0f, -5.0f, -0x1.000002p+60f };
+  check_convert("assign/converts/i64-to-f32", DT_INT64, l, DT_FP32, l_as_f32);
+
+  u64 const u[4] = { ((u64)1 << 63) + ((u64)1 << 39) + 1, 1, UINT64_MAX,
+                     ((u64)1 << 53) + 1 };
+  f32 const u_as_f32[4] = { 0x1.000002p+63f, 1.0f, 0x1p+64f, 0x1p+53f };
+  check_convert("assign/converts/u64-to-f32", DT_UINT64, u, DT_FP32, u_as_f32);
 }
 
 // A captured ASSIGN of a narrow dtype replays: the second write reads

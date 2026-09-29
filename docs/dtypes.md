@@ -188,9 +188,11 @@ ASSIGN copies the source's storage bytes into the destination when
 the dtypes match, for every dtype, so NaN payloads, subnormals and
 packed nibbles survive.  When they differ it stores the source values
 at the destination dtype as a CAST kernel would (`tensor_assign` in
-[src/tensor/assign.c](../src/tensor/assign.c)).  tinygrad casts a weak
-(Python-scalar) value before assigning and raises on any other
-mismatch (tensor.py:243-244).
+[src/tensor/assign.c](../src/tensor/assign.c)): it reads each value in
+the source's lane, so a float stored into a bool is x != 0 and an int
+reaches a float rounded once.  tinygrad casts a weak (Python-scalar)
+value before assigning and raises on any other mismatch
+(tensor.py:243-244).
 
 A CONST's payload is a u32.  A float payload is the f32 bits of the
 value truncated to the CONST's dtype: `uop_const` rounds f16 / bf16 /

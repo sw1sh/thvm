@@ -5,12 +5,13 @@
 // buffer at 0, a KV-cache append writes one row of the cache.  Matching
 // dtypes copy the storage bytes, so every dtype's bit patterns survive
 // (NaN payloads, subnormals, packed nibbles).  Differing dtypes store
-// each value at dst's dtype as the CPU walker's CAST does (uwalk_load_* /
-// uwalk_store_* in backend/cpu/uop_walk.c, so an fp8 dst saturates like
-// a kernel store).  tinygrad casts a weak (Python-scalar) value to the
-// target dtype before it assigns and raises on any other mismatch
-// (tensor.py:243-244 at 365f87a8a); a fired ASSIGN cannot tell the two
-// apart, so it converts both.
+// each value at dst's dtype as a CAST kernel stores it, through the CPU
+// walker's loads and stores (uwalk_load_* / uwalk_store_* in
+// backend/cpu/uop_walk.c, so an fp8 dst saturates like a kernel store).
+// tinygrad casts a weak (Python-scalar) value to the target dtype
+// before it assigns and raises on any other mismatch (tensor.py:243-244
+// at 365f87a8a); a fired ASSIGN cannot tell the two apart, so it
+// converts both.
 //
 // Same backend and dtype: the backend's native copy.  Otherwise a host
 // round trip that reads through src's backend and writes through dst's,
@@ -18,8 +19,11 @@
 // exec_copy).  Returns 0 once dst is written, -1 if a host buffer could
 // not be allocated.
 
-// Packed nibbles have no walker load or store; their values are small
-// integers, which f32 holds exactly.
+// Each value leaves src in src's own lane, as a CAST kernel reads it: a
+// float as a double, which a bool dst tests for != 0 and an int dst
+// truncates; an int or bool as an i64, which a float dst rounds once (a
+// u64 from its unsigned value).  Packed nibbles have no walker load or
+// store; their values are small integers, which f32 holds exactly.
 static int tensor_assign_convert(void *dst, u32 ddt, void *src, u32 sdt, u32 n) {
   if (dtype_is_packed(ddt) || dtype_is_packed(sdt)) {
     f32 *tmp = (f32 *)malloc((size_t)n * sizeof(f32));
@@ -31,10 +35,12 @@ static int tensor_assign_convert(void *dst, u32 ddt, void *src, u32 sdt, u32 n) 
     free(tmp);
     return 0;
   }
-  int to_float = dtype_is_float(ddt);
   for (u32 i = 0; i < n; i++) {
-    if (to_float) {
+    if (dtype_is_float(sdt)) {
       uwalk_store_f64(dst, i, ddt, uwalk_load_f64(src, i, sdt));
+    } else if (sdt == DT_UINT64 && dtype_is_float(ddt)) {
+      u64 u = ((u64 *)src)[i];
+      uwalk_store_f64(dst, i, ddt, (ddt == DT_FP64) ? (double)u : (double)(f32)u);
     } else {
       uwalk_store_i64(dst, i, ddt, uwalk_load_i64(src, i, sdt));
     }
