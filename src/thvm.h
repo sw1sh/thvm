@@ -4828,14 +4828,17 @@ typedef struct { u32 w; u32 tid; u32 nt; } AtpRjEv;
 // Waldmeister's signature analysis pre-reserves `SO_const1` /
 // `SO_const2` at the top of the symbol table (SymbolOperationen.c:386-
 // 389) so the FVI rewrite has a constant to substitute for free
-// variables when generating a grounded instance.  thvm reserves the
-// SAME role at the BOTTOM of the user-label range (labels 1 and 2);
-// the WL encoder pre-seeds its symbol table with these so user labels
-// start at 3, and the C engine materializes the 0-arity terms in
-// `thvm_atp_init` and ranks them LOWEST in any auto-generated
-// precedence (`atp_generate_precedence` / `atp_occurrence_precedence` /
-// `atp_reverse_frequency_precedence` all skip them; precedence.c
-// gives reserved labels rank 0).
+// variables when generating a grounded instance, and ranks both below
+// every signature symbol (NeueFunktionenEinbauen, "install new
+// functions", :210-216).  thvm reserves the SAME role at the BOTTOM of
+// the user-label range (labels 1 and 2); the WL encoder pre-seeds its
+// symbol table with these so user labels start at 3, and the C engine
+// materializes the 0-arity terms in `thvm_atp_init`.  In the .pr layout
+// the reserved labels take precedence 1 and 2 and every user symbol a
+// value from 3 up; `atp_precedence_floor_reserved` restores that after a
+// precedence scheme ranks the user labels from 1 (the Vampire ports,
+// --precedence) or leaves the reserved labels at the unseen rank 0 (the
+// frequency ports).
 #define ATP_RESERVED_LABEL_MIN_CONST 1u   // SO_minimaleKonstante
 #define ATP_RESERVED_LABEL_MIN_CONST2 2u  // SO_const2 (reserved, unused)
 #define ATP_RESERVED_LABEL_FIRST     1u
@@ -7914,6 +7917,13 @@ fn u32  atp_vampire_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
                                  Term goal_l, Term goal_r, u32 base,
                                  u32 n_labels, const u32 *arity, int scheme,
                                  int boost_goal, u32 *prec);
+
+// Lift the user labels (3..n_labels-1) of a finished precedence, order and
+// ties kept, so they all sit above the reserved constants, and give label
+// 1 precedence 1 and label 2 precedence 2: Waldmeister's reserved
+// constants below every symbol.  Identity on the .pr layout.  See
+// src/atp/precedence.c.
+fn void atp_precedence_floor_reserved(u32 *prec, u32 n_labels);
 
 // KBO weight-generation schemes (Vampire kbo_weight_scheme / -kws,
 // Kernel/KBO.cpp weightsFromOpts), goal-inclusive.  atp_arity_weights_g

@@ -6930,6 +6930,128 @@ int main(void) {
     CHECK(prec[LAB_e] > prec[LAB_a]);
   }
 
+  TEST_BEGIN("atp/precedence/reserved-constants-below-every-symbol");
+  {
+    // Waldmeister ranks its two reserved constants below every signature
+    // symbol (NeueFunktionenEinbauen, "install new functions",
+    // WASIC/SymbolOperationen.c, "symbol operations", :210-216, enters
+    // f > const1 > const2 for every symbol f), so the constant
+    // that grounds free variables keeps the precedence total on ground
+    // terms.  The .pr layout reserves labels 1 and 2 for them
+    // (ATP_RESERVED_LABEL_*) and numbers user symbols from 3.  Every
+    // generator's output, passed through atp_precedence_floor_reserved,
+    // must put label 1 below label 2 below every user label, and must
+    // keep the order of every user pair, ties included.
+    //   labels: 3 e (constant), 4 a (goal-only constant), 5 i (unary),
+    //           6 f (binary), 7 g (binary)
+    #define PF_E 3u
+    #define PF_A 4u
+    #define PF_I 5u
+    #define PF_F 6u
+    #define PF_G 7u
+    #define PF_N 8u
+    #define PF_C0(lab)       term_new_ctr((lab), NULL, 0)
+    #define PF_C1(lab, x)    ({ Term _c[1] = {(x)}; term_new_ctr((lab), _c, 1); })
+    #define PF_C2(lab, x, y) ({ Term _c[2] = {(x), (y)}; term_new_ctr((lab), _c, 2); })
+    Term ax_l[4], ax_r[4];
+    ax_l[0] = PF_C2(PF_F, PF_C2(PF_F, mk_v(0u), mk_v(1u)), mk_v(2u));
+    ax_r[0] = PF_C2(PF_F, mk_v(0u), PF_C2(PF_F, mk_v(1u), mk_v(2u)));
+    ax_l[1] = PF_C2(PF_F, PF_C0(PF_E), mk_v(0u));
+    ax_r[1] = mk_v(0u);
+    ax_l[2] = PF_C2(PF_F, PF_C1(PF_I, mk_v(0u)), mk_v(0u));
+    ax_r[2] = PF_C0(PF_E);
+    ax_l[3] = PF_C2(PF_G, mk_v(0u), PF_C2(PF_F, mk_v(1u), mk_v(2u)));
+    ax_r[3] = PF_C2(PF_F, PF_C2(PF_G, mk_v(0u), mk_v(1u)),
+                    PF_C2(PF_G, mk_v(0u), mk_v(2u)));
+    Term goal_l = PF_C2(PF_G, PF_C0(PF_A), PF_C0(PF_A));
+    Term goal_r = PF_C1(PF_I, PF_C0(PF_A));
+    u32 arity[PF_N] = { 0u, 0u, 0u, 0u, 0u, 1u, 2u, 2u };
+    // pr_load_header's layout: reserved 1 and 2, the ORDERING chain from 3.
+    static const u32 layout[PF_N] = { 0u, 1u, 2u, 7u, 3u, 4u, 5u, 6u };
+
+    u32 outs[32][PF_N];
+    u32 n_out = 0u;
+    memcpy(outs[n_out++], layout, sizeof layout);
+    memset(outs[n_out], 0, sizeof outs[0]);
+    atp_auto_precedence(ax_l, ax_r, 4u, PF_N, outs[n_out++]);
+    memset(outs[n_out], 0, sizeof outs[0]);
+    atp_occurrence_precedence(ax_l, ax_r, 4u, PF_N, outs[n_out++]);
+    memset(outs[n_out], 0, sizeof outs[0]);
+    atp_reverse_frequency_precedence(ax_l, ax_r, 4u, PF_N, outs[n_out++]);
+    for (int hi = 0; hi <= 1; hi++) {
+      memset(outs[n_out], 0, sizeof outs[0]);
+      atp_frequency_precedence_g(ax_l, ax_r, 4u, goal_l, goal_r, PF_N,
+                                 outs[n_out++], hi);
+    }
+    u32 cmin_idx = 0u;
+    for (int scheme = 0; scheme <= ATP_VSP_LADR; scheme++) {
+      for (int boost = 0; boost <= 1; boost++) {
+        if (scheme == ATP_VSP_CONST_MIN && boost == 0) {
+          cmin_idx = n_out;
+        }
+        memcpy(outs[n_out], layout, sizeof layout);
+        atp_vampire_precedence_g(ax_l, ax_r, 4u, goal_l, goal_r, 3u, PF_N,
+                                 arity, scheme, boost, outs[n_out++]);
+      }
+    }
+    // --precedence's shape: the user labels ranked 1..5 over the layout.
+    {
+      static const u32 expl[PF_N] = { 0u, 1u, 2u, 1u, 5u, 2u, 3u, 4u };
+      memcpy(outs[n_out++], expl, sizeof expl);
+    }
+
+    for (u32 k = 0; k < n_out; k++) {
+      u32 q[PF_N];
+      memcpy(q, outs[k], sizeof q);
+      atp_precedence_floor_reserved(q, PF_N);
+      CHECK(q[ATP_RESERVED_LABEL_MIN_CONST] < q[ATP_RESERVED_LABEL_MIN_CONST2]);
+      for (u32 u = PF_E; u < PF_N; u++) {
+        CHECK(q[ATP_RESERVED_LABEL_MIN_CONST2] < q[u]);
+        for (u32 v = u + 1u; v < PF_N; v++) {
+          int before = (outs[k][u] > outs[k][v]) - (outs[k][u] < outs[k][v]);
+          int after  = (q[u] > q[v]) - (q[u] < q[v]);
+          CHECK_EQ(before, after);
+        }
+      }
+    }
+    // A precedence already in the layout is left byte-identical (the .pr
+    // chain and the Waldmeister-derived precedence of the WM preset).
+    {
+      u32 q[PF_N];
+      memcpy(q, layout, sizeof q);
+      atp_precedence_floor_reserved(q, PF_N);
+      CHECK(memcmp(q, layout, sizeof q) == 0);
+    }
+    // The LPO lanes' const-min ranking gives e rank 1, the grounding
+    // constant's value: the two are incomparable heads until the floor
+    // lifts e, after which every pair of ground constants is ordered.
+    {
+      Term mc = PF_C0(ATP_RESERVED_LABEL_MIN_CONST);
+      Term e  = PF_C0(PF_E);
+      Term a  = PF_C0(PF_A);
+      LpoConfig raw = { .precedence = outs[cmin_idx], .n_labels = PF_N };
+      CHECK_EQ(outs[cmin_idx][PF_E], outs[cmin_idx][ATP_RESERVED_LABEL_MIN_CONST]);
+      CHECK_EQ((int)thvm_lpo(e, mc, &raw), (int)LPO_UN);
+      u32 q[PF_N];
+      memcpy(q, outs[cmin_idx], sizeof q);
+      atp_precedence_floor_reserved(q, PF_N);
+      LpoConfig fl = { .precedence = q, .n_labels = PF_N };
+      CHECK_EQ((int)thvm_lpo(e, mc, &fl), (int)LPO_GT);
+      CHECK_EQ((int)thvm_lpo(a, mc, &fl), (int)LPO_GT);
+      CHECK_EQ((int)thvm_lpo(mc, a, &fl), (int)LPO_LT);
+      CHECK((int)thvm_lpo(e, a, &fl) != (int)LPO_UN);
+    }
+    #undef PF_E
+    #undef PF_A
+    #undef PF_I
+    #undef PF_F
+    #undef PF_G
+    #undef PF_N
+    #undef PF_C0
+    #undef PF_C1
+    #undef PF_C2
+  }
+
   TEST_BEGIN("atp/otter-raw-stash-and-select");
   {
     // --otter-raw keeps each pushed critical pair's raw overlap beside

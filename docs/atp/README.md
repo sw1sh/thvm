@@ -117,7 +117,7 @@ into one binary via
 | `src/atp/ft_ac_match.c` | 434 | AC matching on flatterms | `ft_ac_match` |
 | `src/atp/ac.c` | 974 | the AC subsystem: AC-operator detection, AC-canonical flatten, Stickel AC-unification | `thvm_atp_auto_ac`, `thvm_atp_set_ac_mask` |
 | `src/atp/goal_narrow.c` | 695 | ground congruence-closure + goal-cone e-matching endgame (`--goal-narrow`) | `gn_*`, switched by `thvm_atp_set_use_goal_narrow` |
-| `src/atp/precedence.c` | 508 | automatic precedence from algebraic-structure analysis (Waldmeister PhilMarlow port) | `atp_auto_precedence`, `atp_analyze_axioms` |
+| `src/atp/precedence.c` | 976 | automatic precedence from algebraic-structure analysis (Waldmeister PhilMarlow port), the Vampire `sp=` / `spb=goal` / LADR precedence ports, KBO weight schemes, and the floor that keeps the reserved grounding constants below every user symbol | `atp_auto_precedence`, `atp_analyze_axioms`, `atp_vampire_precedence_g`, `atp_precedence_floor_reserved` |
 | `src/atp/lpo_cache.c` | 139 | LPO orientability cache (build-gated) | `atp_lpo_orient_cache_invalidate`, `thvm_atp_orient_stats` |
 | `src/atp/wm_intake.c` | 462 | Waldmeister intake ordering / CP classification | `thvm_atp_wm_intake_order` |
 | `src/atp/wm_order.c` | 2989 | Waldmeister CP-selection order: MixWeight comparator, rank trie, N-way rank cache | `atp_wmo_insert_fact`, `wmo_*` |

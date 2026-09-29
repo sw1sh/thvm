@@ -2116,6 +2116,13 @@ int main(int argc, char **argv) {
         }
       }
     }
+    // Every scheme above ranks the user labels among themselves; the
+    // reserved grounding constants go below all of them, as Waldmeister
+    // places its const1/const2 (see atp_precedence_floor_reserved).  The
+    // Vampire ports and --precedence rank from 1 and the frequency ports
+    // leave the reserved labels at 0; the .pr chain and the
+    // Waldmeister-derived precedence are already in this layout.
+    atp_precedence_floor_reserved(prp.precedence, prp.n_syms + PR_LABEL_BASE);
     // Otter-lane exit-fast (THVM_ATP_OTTER_EXIT / --otter-exit): the
     // lane's lever is LPO orienting a distributivity law as EXPANSION
     // (the goal operator above the one it distributes over, via

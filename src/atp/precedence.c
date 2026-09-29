@@ -612,7 +612,9 @@ fn u32 atp_frequency_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
 // sortAuxBySymbolPrecedence + BoostWrapper), the `sp=` schemes of the
 // UEQ schedule plus `spb=goal`.  Every declared label in [base, n_labels)
 // is sorted ascending under the scheme's comparator chain and ranked
-// 1..N (N = greatest); labels below `base` keep their value.  Chains:
+// 1..N (N = greatest); labels below `base` keep their value, and the
+// caller lifts the ranked band above them (atp_precedence_floor_reserved).
+// Chains:
 //   arity              higher arity greater
 //   reverse-arity      lower arity greater
 //   unary-first        unary greatest, then arity, then frequency
@@ -798,6 +800,43 @@ fn u32 atp_vampire_precedence_g(const Term *lhs, const Term *rhs, u32 n_eqns,
   for (u32 i = 0; i < n; i++) prec[order[i]] = i + 1u;
   free(count); free(goal); free(order);
   return n;
+}
+
+// Reserved constants below every user symbol.  Waldmeister enters f > c
+// for each reserved constant c in {const1, const2} and every symbol f
+// numbered below c (NeueFunktionenEinbauen, "install new functions",
+// WASIC/SymbolOperationen.c, "symbol operations", :210-216), so both
+// sit under the whole signature with const1 > const2, and the grounding
+// constant SO_minimaleKonstante (the minimal constant) is the bottom
+// constant of that total chain (minimaleKonstanteBestimmen, "determine
+// the minimal constant", :112-126).  thvm keeps the two at labels 1 and
+// 2, label 1 grounding free variables (s->min_const), and numbers user
+// symbols from label 3.  The generators rank user labels among
+// themselves: the Vampire ports and --precedence from 1, which ties the
+// lowest user symbol with the grounding constant (an incomparable head
+// pair under LPO), and the frequency ports leave both reserved labels
+// at the unseen rank 0, tied with each other.  This lifts the user
+// band, its order and ties unchanged, so that its least value is 3, and
+// gives label 1 precedence 1 and label 2 precedence 2.  A precedence
+// already in that layout (the .pr ORDERING chain, the
+// Waldmeister-derived one) is left as it is.
+fn void atp_precedence_floor_reserved(u32 *prec, u32 n_labels) {
+  u32 first_user = ATP_RESERVED_LABEL_LAST + 1u;
+  u32 lo = 0xFFFFFFFFu;
+  for (u32 l = first_user; l < n_labels; l++) {
+    if (prec[l] < lo) {
+      lo = prec[l];
+    }
+  }
+  if (lo < first_user) {
+    u32 lift = first_user - lo;
+    for (u32 l = first_user; l < n_labels; l++) {
+      prec[l] += lift;
+    }
+  }
+  for (u32 l = ATP_RESERVED_LABEL_FIRST; l <= ATP_RESERVED_LABEL_LAST && l < n_labels; l++) {
+    prec[l] = l - ATP_RESERVED_LABEL_FIRST + 1u;
+  }
 }
 
 // Vampire KBO FREQUENCY weight-generation scheme (Kernel/KBO.cpp
