@@ -326,6 +326,15 @@ for the per-commit story.
   near step 230.  `-DTHVM_LPO_SELFCHECK` runs both evaluators on every
   compare (0 mismatches) and dumps hard pairs that `bin/test_lpo FILE`
   rechecks.
+- Otter interreduction reads each older rule side's symbol mask from a
+  cache keyed on the side's Term and FT span (gc-epoch and session
+  stamped) instead of rescanning every rule on every pass, and the
+  run-order walk skips rules whose pattern head differs from the node's
+  before the orientation lookup.  Both leave the pass unchanged
+  (clock-free capped otter runs match main step for step); the rescan
+  was half of an `otter-lpo-cmin --ir-run-order` run once its rules
+  reached thousands of symbols, and RNG029-5 on `otter-lpo` with both
+  options proves in 45s instead of 80s (instruction clock).
 - Prover9's clause-weight penalties (`--nest-penalty` / `--depth-penalty`)
   now weigh every critical pair: the FT-treated push route, which forms
   almost all of them, scored its pairs without the penalty.  With them on,

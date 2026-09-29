@@ -689,6 +689,67 @@ static u64 atp_ft_symmask(const AtpFtCell *c) {
   }
   return m;
 }
+
+// Symbol masks of older rules' sides for the Otter prefilter below.  The
+// prefilter reads every older rule on every interreduce pass, and a full
+// span scan per rule per pass was half of an otter-lpo-cmin
+// --ir-run-order run once its rules reached thousands of symbols.  A
+// side's mask is a function of its span, and a live rule's span changes
+// only with its Term, so the mask is memoized on the (Term, span root)
+// pair, stamped like atp_orient_memo_gt's entries by the gc epoch
+// (collections recycle handles) and the init generation (sessions
+// recycle them too): a stale hit is impossible.  Linear probing over
+// ATP_SYMMASK_PROBE slots keeps the live rules' sides resident (a
+// direct-mapped table evicted one side in eight, each a full rescan);
+// when every probed slot holds another live key the first is replaced,
+// which only costs a recompute.
+enum { ATP_SYMMASK_N = 1u << 16, ATP_SYMMASK_PROBE = 16u };
+typedef struct { Term t; const AtpFtCell *c; u64 m; u64 epoch; u64 gen; } AtpSymMaskEnt;
+static AtpSymMaskEnt g_atp_symmask[ATP_SYMMASK_N];
+
+static u64 atp_side_symmask(Term t, const AtpFtCell *c) {
+  // A lazy-store sentinel handle is shared by many rules: not a key.
+  if (term_tag(t) != TAG_CTR && term_tag(t) != TAG_FVR) {
+    return atp_ft_symmask(c);
+  }
+  u64            h    = ((u64)t * 0x9E3779B97F4A7C15ull) ^
+                        ((u64)(uintptr_t)c * 0xBF58476D1CE4E5B9ull);
+  u32            slot = (u32)(h >> 40) & (ATP_SYMMASK_N - 1u);
+  AtpSymMaskEnt *put  = NULL;
+  for (u32 k = 0; k < ATP_SYMMASK_PROBE; k++) {
+    AtpSymMaskEnt *e    = &g_atp_symmask[(slot + k) & (ATP_SYMMASK_N - 1u)];
+    u8             live = (u8)(e->c != NULL && e->epoch == g_atp_gc_epoch &&
+                               e->gen == g_atp_orient_memo_gen);
+    if (live && e->c == c && e->t == t) {
+      return e->m;
+    }
+    if (!live && put == NULL) {
+      put = e;
+    }
+    if (e->c == NULL) {
+      break;
+    }
+  }
+  if (put == NULL) {
+    put = &g_atp_symmask[slot];
+  }
+  put->t     = t;
+  put->c     = c;
+  put->m     = atp_ft_symmask(c);
+  put->epoch = g_atp_gc_epoch;
+  put->gen   = g_atp_orient_memo_gen;
+  return put->m;
+}
+
+// 1 iff some mask in pm[0, n) is a subset of m.
+static inline u8 atp_symmask_covers_any(u64 m, const u64 *pm, u32 n) {
+  for (u32 q = 0; q < n; q++) {
+    if ((pm[q] & ~m) == 0u) {
+      return 1u;
+    }
+  }
+  return 0u;
+}
 #endif
 
 // --ir-run-order: rewrite `t` by the new-rule slice one leftmost-
@@ -808,15 +869,14 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
 #endif
   while (i < added.first - dropped) {
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
-    if (ir_skip && s->lhs_ft[i] != NULL && s->rhs_ft[i] != NULL) {
-      u64 ml = atp_ft_symmask(s->lhs_ft[i]);
-      u64 mr = s->right_reduce ? atp_ft_symmask(s->rhs_ft[i]) : 0u;
-      u8 may = 0u;
-      for (u32 q = 0; q < ir_npm && !may; q++) {
-        if ((ir_pm[q] & ~ml) == 0u) may = 1u;
-        if (s->right_reduce && (ir_pm[q] & ~mr) == 0u) may = 1u;
-      }
-      if (!may) { i++; continue; }
+    if (ir_skip && s->lhs_ft[i] != NULL && s->rhs_ft[i] != NULL &&
+        !atp_symmask_covers_any(atp_side_symmask(s->lhs[i], s->lhs_ft[i]),
+                                ir_pm, ir_npm) &&
+        !(s->right_reduce &&
+          atp_symmask_covers_any(atp_side_symmask(s->rhs[i], s->rhs_ft[i]),
+                                 ir_pm, ir_npm))) {
+      i++;
+      continue;
     }
 #endif
     // Bound the interreduce transient: this loop runs O(n_rules) normalizes

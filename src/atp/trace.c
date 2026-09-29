@@ -191,6 +191,12 @@ static Term atp_proof_rewrite_step(AtpState *s, Term t, u8 *pos, u8 depth,
   return t;
 }
 
+// 1 iff pattern p is a CTR whose head cannot match at a node with the
+// given head (thvm_match fails on the head before anything else).
+static inline u8 atp_head_misses(Term p, u8 t_ctr, u32 t_lab) {
+  return (u8)(term_tag(p) == TAG_CTR && (!t_ctr || term_ext(p) != t_lab));
+}
+
 // Slice-aware port of atp_proof_rewrite_step above: same outermost-
 // leftmost rule pick (with the ORDERED_REWRITE both-directions/order-
 // gated branch for unorientable equations), but the candidate rule
@@ -210,8 +216,15 @@ static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
   // rules first at this position, unorientable equations only when no
   // oriented rule matched here -- the same two-pass order as
   // atp_ordered_try_top / find_redex_ft, so the recorded chain replays
-  // the slice normalizers' redex picks exactly.
+  // the slice normalizers' redex picks exactly.  A rule whose pattern
+  // head differs from the node's is skipped before its orientation
+  // lookup and substitution setup: it could not match here.
+  u8  t_ctr = (u8)(term_tag(t) == TAG_CTR);
+  u32 t_lab = t_ctr ? term_ext(t) : 0u;
   for (u32 i = 0; i < n; i++) {
+    if (atp_head_misses(lhs_arr[i], t_ctr, t_lab)) {
+      continue;
+    }
 #ifdef ATP_ORDERED_REWRITE
     if (!atp_orient_memo_gt(s, lhs_arr[i], rhs_arr[i])) continue;
 #endif
@@ -223,8 +236,13 @@ static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
   }
 #ifdef ATP_ORDERED_REWRITE
   for (u32 i = 0; i < n; i++) {
+    u8 l_miss = atp_head_misses(lhs_arr[i], t_ctr, t_lab);
+    u8 r_miss = atp_head_misses(rhs_arr[i], t_ctr, t_lab);
+    if (l_miss && r_miss) {
+      continue;
+    }
     if (atp_orient_memo_gt(s, lhs_arr[i], rhs_arr[i])) continue;
-    {                                                         // l -> r
+    if (!l_miss) {                                            // l -> r
       RewriteSubst sub = {{0}};
       if (thvm_match(lhs_arr[i], t, &sub)) {
         Term tmpl = atp_unorient_template(s, lhs_arr[i], rhs_arr[i]);
@@ -237,7 +255,7 @@ static Term atp_proof_rewrite_step_slice(AtpState *s, Term t,
         }
       }
     }
-    {                                                         // r -> l
+    if (!r_miss) {                                            // r -> l
       RewriteSubst sub = {{0}};
       if (thvm_match(rhs_arr[i], t, &sub)) {
         Term tmpl = atp_unorient_template(s, rhs_arr[i], lhs_arr[i]);
