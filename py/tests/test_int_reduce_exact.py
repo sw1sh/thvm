@@ -134,17 +134,18 @@ class TestIntReduceExact(unittest.TestCase):
         self.assertEqual(bad, [], "an int32 reduce is not exact")
 
     def test_default_path(self):
-        out = _run_child({})
+        # Warmup 0 compiles each kernel on its first fire, whatever warmup
+        # the suite runs under.
+        out = _run_child({"THVM_CPU_JIT_WARMUP": "0"})
         self._check_child(out)
         walked = re.findall(r"^uop_walk: ", out.stderr, re.M)
         self.assertEqual(walked, [], "a kernel fell to the walker: the JIT did not run")
 
     def test_uop_walker(self):
-        # A warmup the JIT never reaches, no batched precompile, and an opt
-        # tag no cached dylib carries: every kernel falls to the UOp walker.
-        out = _run_child({"THVM_CPU_JIT_WARMUP": "1000000000",
-                          "THVM_CPU_JIT_PARALLEL": "0",
-                          "THVM_CPU_JIT_OPT": "O0"})
+        # A warmup the JIT never reaches.  The gate holds every JIT path, the
+        # batched precompile and the cached dylibs included, so every kernel
+        # falls to the UOp walker.
+        out = _run_child({"THVM_CPU_JIT_WARMUP": "1000000000"})
         self._check_child(out)
         walked = re.findall(r"^uop_walk: n_inputs=\d+ root_op=\d+ rc=(\d)$",
                             out.stderr, re.M)
