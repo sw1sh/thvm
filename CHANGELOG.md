@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- ASSIGN writes every dtype, and a JIT capture replays it: matching dtypes copy the storage bytes (an fp8, f16, bf16, bool, 1-, 2- or 8-byte int or packed-nibble destination was left unwritten; only f32 and i32 copied). Differing dtypes store the source values at the destination dtype, as a CAST kernel would (an i32 source was copied into an f32 buffer as raw bits). tinygrad casts a weak value to the target dtype before assigning (tensor.py:243) and raises on a strong mismatch (tensor.py:244).
 - The kernel content hash (Metal pipeline cache and autotune cache key) includes each buffer's input slot: `x*x+y` and `x*y+y` hashed equal, so on Metal one kernel could reuse the other's pipeline. Autotune caches on disk re-tune once.
 - The garbage collector refuses to build when a UOp opcode is added without a heap size in `gc_node_size` (a missing size leaves live nodes of that op unevacuated), and the UOP_BUFFER constructor documents its instance cell.
 - Fix: the copying collector keeps every UOp node whole.  A live RANGE lost

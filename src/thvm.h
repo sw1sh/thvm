@@ -2232,6 +2232,10 @@ fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref
 // to make `new_outermost` the new public view and push the previous
 // public view onto the prior_views chain.  Buf is shared (incref bumped).
 fn u32  tensor_view_chain_append(u32 src_id, View new_outermost);
+// Write src's elements into dst's buffer from element `dst_off` on:
+// the bytes when the dtypes match, the values at dst's dtype when they
+// differ.  0 on success.  ASSIGN and its JIT replay both write this way.
+fn int  tensor_assign(u32 dst_id, u32 src_id, u64 dst_off);
 
 // === view/ ===
 // Map an output flat index to the underlying buffer index through

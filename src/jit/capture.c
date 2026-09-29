@@ -4235,44 +4235,20 @@ fn u32 jit_replay(u32 slot) {
                            TENS[dst].buf_id, TENS[src].buf_id);
         TenDesc *dd = &TENS[dst], *sd = &TENS[src];
         if (dd->backend == NULL || dd->backend != sd->backend) break;
-        u32 numel = dd->view.numel;
-        if (sd->view.numel != numel) break;
-        // Phase A: dtype_storage_bytes aborts on unwired dtypes; gate
-        // on the kinds we actually fire ASSIGN for (everything wired
-        // through Phase B onward goes here too once enabled).
-        if (dd->dtype != DT_FP32 && dd->dtype != DT_INT32) break;
-        u64 nbytes = dtype_storage_bytes(dd->dtype, numel);
+        if (sd->view.numel != dd->view.numel) break;
         // Offset-aware write (mirrors interact_assign_with).  A KV-cache append
         // dst (assign_kvar_id != 0) re-resolves its row from the LIVE kvar at
         // FIRE -- so a step captured at start_pos=2 replays at the rebound
         // start_pos=3, landing at row 3 (the offset baked into view.offset at
-        // capture is only that one step's row).  Byte offset = row *
+        // capture is only that one step's row).  Element offset = row *
         // leading-stride.  A plain weight ASSIGN (assign_kvar_id 0, view.offset
-        // 0) gets byte_off 0 -> byte-identical to the old whole-buffer copy.
+        // 0) writes the whole buffer at 0.
         u64 off_elems = (dd->assign_kvar_id != 0)
             ? (u64)kvar_runtime(dd->assign_kvar_id) * (u32)dd->view.strides[0]
             : (u64)(u32)dd->view.offset;
-        u64 byte_off  = dtype_storage_bytes(dd->dtype, off_elems);
-        if (dd->backend->buf_copy_at != NULL
-            && dd->backend->buf_copy_at(dd->buf_id, byte_off, sd->buf_id, nbytes) == 0) {
+        if (tensor_assign(dst, src, off_elems) == 0) {
           ITRS++;
-          break;
         }
-        if (byte_off == 0 && dd->backend->buf_copy != NULL
-            && dd->backend->buf_copy(dd->buf_id, sd->buf_id, nbytes) == 0) {
-          ITRS++;
-          break;
-        }
-        void *tmp = malloc((size_t)nbytes);
-        if (tmp == NULL) break;
-        dd->backend->buf_read (sd->buf_id, tmp, nbytes);
-        if (dd->backend->buf_write_at != NULL) {
-          dd->backend->buf_write_at(dd->buf_id, byte_off, tmp, nbytes);
-        } else {
-          dd->backend->buf_write(dd->buf_id, tmp, nbytes);   // whole-buffer (byte_off == 0)
-        }
-        free(tmp);
-        ITRS++;
         break;
       }
       case JIT_OP_GATHER: {

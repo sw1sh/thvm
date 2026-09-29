@@ -267,6 +267,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "tensor/release.c"
 #include "tensor/mark_buf_preserved.c"
 #include "tensor/view_of.c"
+#include "tensor/assign.c"
 
 // === uop/ ===
 // Constructors for raw UOp graph nodes.  Each helper allocates the

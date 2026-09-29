@@ -233,6 +233,7 @@ TESTS := \
   $(BIN)/test_uop_symbolic_shape \
   $(BIN)/test_uop_const_fold_dtype \
   $(BIN)/test_fp8_nonfinite \
+  $(BIN)/test_assign_dtypes \
   $(BIN)/test_sym_reshape \
   $(BIN)/test_sym_expand \
   $(BIN)/test_sym_gather \
