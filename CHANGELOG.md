@@ -184,6 +184,14 @@ for the per-commit story.
   retired passive rules.  `THVM_ATP_RJ_CHECK=1` replays it against the
   live rule slots after every step (clean on the 108-pair battery and on
   the OA, DN and raw-descriptor pins).
+- `--proof` re-derives each treatment chain over the journal's rule set
+  for its record -- the rules alive then, in slot order, with the content
+  and orientation they had -- and, inside an interreduction pass, over the
+  pass's new-rule slice (the victim reduct and the slice-only RHS
+  compose).  TOP052-1 t100893 (wm) and RNG027-8 t115364 (otter-lpo-cmin),
+  printed underived and VerifiedBad before, re-derive: the trace-only
+  model kept joined victims and retired passives in the window and had
+  no slice replay.
 - Vampire Otter-loop simplification set (`--otter`, `src/atp/otter.c`):
   orientable queued critical pairs rewrite as passive rules before
   selection.  With Vampire's symbol-precedence port (`--sym-prec`
