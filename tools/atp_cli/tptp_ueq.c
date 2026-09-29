@@ -33,12 +33,23 @@ static const char *g_cli_probpath = "";
 static int g_prov_on;
 static int g_cli_fof_applied;
 
+// Runs (once) before a give-up takes effect; may exit(0) with a result.
+// The FOF front-end arms it while its clausal pre-pass is deferred: an
+// equational stage that cannot run hands the wall to the saturation.
+static void (*g_tp_giveup_hook)(void) = NULL;
+
 static void tp_giveup(const char *why) {
   if (g_cli_fe_decided) {
     // The status is out; only the proof reconstruction gives up.
     fprintf(stderr, "FindProof: %s (proof not reconstructed)\n", why);
     fflush(stdout);
     exit(0);
+  }
+  if (g_tp_giveup_hook != NULL) {
+    void (*h)(void) = g_tp_giveup_hook;
+    g_tp_giveup_hook = NULL;
+    fprintf(stderr, "FindProof: %s -- the clausal pre-pass takes the wall\n", why);
+    h();
   }
   // Under a schedule slice the wrapper owns the single final status, so
   // stay silent on stdout and let the non-zero exit advance the slice.
@@ -857,9 +868,12 @@ static void tp_sine_select(TpProblem *tp) {
   // KBs hold a goal cone wider than the engine's equation capacity:
   // 26 of 29 schedule lanes died HERE on AGT011+2, spending the whole
   // wall on nothing).  Truncate deterministically instead of dying:
-  // negatives + conjecture units all stay, then the kept axioms in
-  // selection order up to the cap.  A subset is sound for Theorem;
-  // saturation already reports GaveUp under g_cli_sine_applied.
+  // negatives all stay, then the positive conjecture units and the
+  // kept axioms in selection order up to the cap -- a conjecture that
+  // clausifies to more hypothesis units than the cap (LCL646+1.010:
+  // 356, every one conjecture-derived) keeps its first PR_MAX_EQNS.
+  // A subset is sound for Theorem; saturation already reports GaveUp
+  // under g_cli_sine_applied.
   {
     int n = tp->n_cls;
     int w = 0, n_ax = 0, ax_cap = (int)PR_MAX_EQNS;
@@ -868,6 +882,7 @@ static void tp_sine_select(TpProblem *tp) {
         int is_goal = tp->cls[c].neg || tp->cls[c].conj;
         if ((pass == 0) != (is_goal != 0)) continue;
         if (pass == 1 && n_ax >= ax_cap) continue;
+        if (pass == 0 && !tp->cls[c].neg && ax_cap <= 0) continue;
         if (pass == 1) n_ax++;
         else if (!tp->cls[c].neg) ax_cap--;   // positive conjecture units
                                               // count against the eqn cap

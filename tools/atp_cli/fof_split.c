@@ -1203,6 +1203,9 @@ static int fof_u64_cmp(const void *a, const void *b) {
   return (x < y) ? -1 : (x > y) ? 1 : 0;
 }
 
+// Floor on the pre-pass share of the remaining wall (fof_prepass_run).
+static double g_fof_pp_min_frac = 0.0;
+
 // --- clausal-saturation pre-pass ------------------------------------------
 // Non-Horn refutations regularly need case analysis (paramodulation
 // from equality literals inside multi-literal clauses; PUZ001+1's
@@ -1403,6 +1406,7 @@ static int fof_clausal_prepass_once(FolClause **cls, const u8 *ccnj, int ncl,
       if (p > 0 && p <= 100) wall_frac = (double)p / 100.0;
     }
   }
+  if (wall_frac < g_fof_pp_min_frac) wall_frac = g_fof_pp_min_frac;
   double wall_guard = wall_frac * (g_cli_wall_sec - (horn_now() - g_cli_main_t0));
   if (wall_guard < 0.0) wall_guard = 0.0;
   double t0 = horn_now();
@@ -2088,6 +2092,62 @@ static int fof_clausal_prepass(FolClause **cls, const u8 *ccnj, int ncl) {
   return r;
 }
 
+// --- deferred pre-pass ---------------------------------------------------
+static FolClause **g_fof_pp_cls = NULL;
+static u8         *g_fof_pp_ccnj = NULL;
+static int         g_fof_pp_ncl = 0;
+static int         g_fof_pp_pending = 0;
+static jmp_buf     g_fof_pp_oom_jb;
+
+static void cli_proof_write(FILE *out, const char *text, size_t len);   // szs.c
+
+static int fof_prepass_enabled(void) {
+  const char *e = getenv("THVM_ATP_FOF_SAT");
+  return !(e != NULL && atol(e) <= 0);
+}
+
+// Run the deferred pre-pass (once) with at least `min_frac` of the
+// remaining wall; releases the clause set.  1 = refuted.
+static int fof_prepass_run(double min_frac) {
+  if (!g_fof_pp_pending) return 0;
+  g_fof_pp_pending = 0;
+  g_tp_giveup_hook = NULL;
+  thvm_heap_exhausted = 0;
+  thvm_heap_exhaust_jmp = &g_fof_pp_oom_jb;
+  if (setjmp(g_fof_pp_oom_jb) != 0) {
+    thvm_heap_exhaust_jmp = NULL;
+    tp_giveup("FOF clausification exhausted the term heap "
+              "(raise --heap-cells)");
+  }
+  g_fof_pp_min_frac = min_frac;
+  int r = fof_clausal_prepass(g_fof_pp_cls, g_fof_pp_ccnj, g_fof_pp_ncl);
+  g_fof_pp_min_frac = 0.0;
+  thvm_heap_exhaust_jmp = NULL;
+  for (int c = 0; c < g_fof_pp_ncl; c++) fol_clause_free(g_fof_pp_cls[c]);
+  free(g_fof_pp_cls); free(g_fof_pp_ccnj);
+  g_fof_pp_cls = NULL; g_fof_pp_ccnj = NULL; g_fof_pp_ncl = 0;
+  if (r) g_cli_fof_satref = 1;
+  return r;
+}
+
+// The pre-pass refutation IS the result: status line (+ the recorded
+// proof under --proof), as main prints it for a front-end win.
+static void fof_prepass_report(void) {
+  if (g_cli_szs_wanted)
+    printf("%% SZS status %s for %s\n",
+           g_cli_fof_conjecture ? "Theorem" : "Unsatisfiable", g_cli_probpath);
+  if (g_cli_want_proof && g_cli_prepass_proof != NULL)
+    cli_proof_write(stdout, g_cli_prepass_proof, strlen(g_cli_prepass_proof));
+  fflush(stdout);
+}
+
+static void fof_prepass_fallback(void) {
+  if (fof_prepass_run(0.95)) {
+    fof_prepass_report();
+    exit(0);
+  }
+}
+
 // --- the front-end ------------------------------------------------------
 // Next fof( / cnf( record keyword at an identifier boundary, scanning
 // forward from p (quote-aware); NULL at the end.  One pass over the
@@ -2471,13 +2531,24 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
       !g_cli_fof_trivial)
     tp_giveup("fof-split slice: no k-bounded ground or-split");
   // Non-Horn input: bounded clausal saturation on the original
-  // clauses first (case analysis lives there, not in any equational
+  // clauses (case analysis lives there, not in any equational
   // encoding).  Under --proof a win emits the recorded resolution
-  // refutation with its conversion lineage (prepass_emit_proof);
-  // main prints the stash and skips the engine.
-  if (g_fof_or_ncl > 0 && !g_cli_fof_trivial && !g_fof_split_pending &&
-      fof_clausal_prepass(cls, ccnj, ncl))
-    g_cli_fof_satref = 1;
+  // refutation with its conversion lineage (prepass_emit_proof).
+  // DEFERRED: main runs it (fof_prepass_run) once every equational
+  // capacity gate has passed, with its usual share of the wall; a gate
+  // that gives up first -- equation/symbol capacity, currying, axiom
+  // selection -- runs it through the tp_giveup hook with the whole
+  // remaining wall instead of ending the lane after 60% of it (the
+  // SEV606+1 / LCL646+1.010 early-give-up class).
+  int defer_prepass = (g_fof_or_ncl > 0 && !g_cli_fof_trivial &&
+                       !g_fof_split_pending && fof_prepass_enabled());
+  if (defer_prepass) {
+    g_fof_pp_cls = cls;
+    g_fof_pp_ccnj = ccnj;
+    g_fof_pp_ncl = ncl;
+    g_fof_pp_pending = 1;
+    g_tp_giveup_hook = fof_prepass_fallback;
+  }
   if (g_cli_fof_trivial && g_cli_want_proof && g_prov_trivial_cnf >= 0 &&
       g_cli_prepass_proof == NULL && g_prov_cnf != NULL) {
     // Clausification itself derived $false: the whole proof is that
@@ -2630,8 +2701,11 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
   }
   g_cur_prov_kind = PROV_NONE;
   g_cur_prov_ix   = 0;
-  for (int c = 0; c < ncl; c++) fol_clause_free(cls[c]);
-  free(cls); free(ccnj); free(neg_ix);
+  if (!defer_prepass) {
+    for (int c = 0; c < ncl; c++) fol_clause_free(cls[c]);
+    free(cls); free(ccnj);
+  }
+  free(neg_ix);
   thvm_heap_exhaust_jmp = NULL;
   // Signature + variable table + the existential-goal flag, exactly as
   // tp_parse computes them.

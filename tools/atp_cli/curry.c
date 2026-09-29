@@ -25,10 +25,10 @@
 // and the backward chainer's refutations of the curried table refute
 // the original, and a saturation of it (Satisfiable) is a model of the
 // original.  The lanes that reason over non-Horn clauses -- the clausal
-// pre-pass, the one-element gate and the fof-split detection -- run in
-// tp_fof_load on the uncurried clauses, before this pass.  A no-op
-// unless some functor exceeds 8, so it never perturbs the byte-exact WM
-// emulation on existing corpora.
+// pre-pass, the one-element gate and the fof-split detection -- read
+// tp_fof_load's uncurried clauses (the deferred pre-pass runs after this
+// pass, never on its output).  A no-op unless some functor exceeds 8, so
+// it never perturbs the byte-exact WM emulation on existing corpora.
 #define CURRY_ARITY_CAP 8
 
 // Recursive-descent term rewriter over a clause-side string.  Returns a
@@ -94,11 +94,10 @@ static char *curry_term(const char *s, const char **endp, const char *ap2) {
 // The curried signature, kept for the proof output: every emitted
 // record prints in the ORIGINAL signature (tp_uncurry_text), since a
 // leaf in the ap2 encoding states a formula the problem never gives.
-#define CURRY_MAX_WIDE 64
 static char g_curry_ap2[TP_NAME_LEN];
-static char g_curry_fn[CURRY_MAX_WIDE][TP_NAME_LEN];
-static int  g_curry_ar[CURRY_MAX_WIDE];
-static int  g_curry_nfn = 0;
+static char (*g_curry_fn)[TP_NAME_LEN] = NULL;   // g_curry_nfn entries
+static int  *g_curry_ar = NULL;
+static int   g_curry_nfn = 0;
 
 static void tp_curry_wide(TpProblem *tp) {
   int wide = 0;
@@ -109,34 +108,53 @@ static void tp_curry_wide(TpProblem *tp) {
   tp_fresh_sym(tp, "ap2", ap2, sizeof ap2);
   snprintf(g_curry_ap2, sizeof g_curry_ap2, "%s", ap2);
   g_curry_nfn = 0;
-  for (int i = 0; i < tp->n_syms && g_curry_nfn < CURRY_MAX_WIDE; i++) {
+  int nwide = 0;
+  for (int i = 0; i < tp->n_syms; i++)
+    if (tp->syms[i].arity > CURRY_ARITY_CAP) nwide++;
+  g_curry_fn = realloc(g_curry_fn, (size_t)nwide * sizeof *g_curry_fn);
+  g_curry_ar = (int *)realloc(g_curry_ar, (size_t)nwide * sizeof(int));
+  if (g_curry_fn == NULL || g_curry_ar == NULL) tp_giveup("OOM in currying");
+  for (int i = 0; i < tp->n_syms; i++) {
     if (tp->syms[i].arity <= CURRY_ARITY_CAP) continue;
     snprintf(g_curry_fn[g_curry_nfn], TP_NAME_LEN, "%s", tp->syms[i].name);
     g_curry_ar[g_curry_nfn++] = tp->syms[i].arity;
   }
-  int changed = 0;
+  // A curried side past the side buffer cannot be represented: such an
+  // AXIOM-side unit drops (a subset refutation is still a refutation,
+  // and the equational lanes never claim satisfiability); only an
+  // unrepresentable goal ends the lane.
+  int changed = 0, dropped = 0, w = 0;
   for (int c = 0; c < tp->n_cls; c++) {
     TpClause *cl = &tp->cls[c];
     char *sides[2] = { cl->lhs, cl->rhs };
-    for (int sd = 0; sd < 2; sd++) {
+    int keep = 1;
+    for (int sd = 0; sd < 2 && keep; sd++) {
       const char *e;
       char *rw = curry_term(sides[sd], &e, ap2);
       if (strcmp(rw, sides[sd]) != 0) {
-        if (strlen(rw) >= TP_SIDE_LEN) { free(rw); tp_giveup("curried term exceeds side buffer"); }
-        memcpy(sides[sd], rw, strlen(rw) + 1u);
-        changed++;
+        if (strlen(rw) >= TP_SIDE_LEN) {
+          if (cl->neg) { free(rw); tp_giveup("curried goal exceeds side buffer"); }
+          keep = 0;
+        } else {
+          memcpy(sides[sd], rw, strlen(rw) + 1u);
+          changed++;
+        }
       }
       free(rw);
     }
+    if (!keep) { dropped++; continue; }
+    if (w != c) tp->cls[w] = tp->cls[c];
+    w++;
   }
+  tp->n_cls = w;
   tp_syms_reset(tp);
   for (int i = 0; i < tp->n_cls; i++) {
     tp_scan_term(tp, tp->cls[i].lhs);
     tp_scan_term(tp, tp->cls[i].rhs);
   }
   fprintf(stderr,
-          "FindProof: curried %d wide-functor side(s) via %s (bijective n-ary decomposition)\n",
-          changed, ap2);
+          "FindProof: curried %d wide-functor side(s) via %s (bijective n-ary decomposition)"
+          "%s\n", changed, ap2, dropped ? ", oversized axiom unit(s) dropped" : "");
 }
 
 

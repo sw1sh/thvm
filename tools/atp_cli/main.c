@@ -1286,6 +1286,14 @@ int main(int argc, char **argv) {
       // representation, so give up cleanly instead of aborting the reader.
       for (int i = 0; i < tp.n_syms; i++)
         if (tp.syms[i].arity > 8) tp_giveup("functor arity exceeds 8");
+      // Every equational capacity gate has passed: the deferred FOF
+      // clausal pre-pass takes its usual share of the wall here, the
+      // engine the rest (see tp_fof_load).
+      if (fof_prepass_run(0.0)) {
+        fof_prepass_report();
+        free(tpp);
+        return 0;
+      }
       // Canonical presentation (orientation + order + variable names):
       // AFTER every content transform and capacity gate, BEFORE .pr
       // emission, so the emitted .pr is invariant across the corpus
