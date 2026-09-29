@@ -616,9 +616,21 @@ static void rmu_emit_term(Term t, FILE *fp) {
         // for f64, `float` for f16/bf16/fp8 -- see rmu_c_type_name).
         // Emitting `(int)bits` here would inject the raw bit pattern
         // (e.g. 1065353216 for 1.0f) into the kernel.  f32->double is
-        // exact, so %.17g round-trips losslessly.
+        // exact, so %.17g round-trips losslessly.  %.17g spells a
+        // non-finite value `inf` / `nan`, which are not tokens, so those
+        // take the target's names, as in tinygrad (renderer/cstyle.py:
+        // 25-26): INFINITY / NAN (math.h on C, metal_stdlib on Metal;
+        // nvrtc has no NAN, and the CUDA prologue defines INFINITY).  A
+        // negative literal is parenthesized so a NEG in front of it
+        // cannot form `--`.
         f32 fv; memcpy(&fv, &bits, sizeof(fv));
-        fprintf(fp, "%.17g", (double)fv);
+        if (isnan(fv)) {
+          fputs(RMU_TARGET == CG_TARGET_CUDA ? "__int_as_float(0x7fffffff)" : "NAN", fp);
+        } else if (isinf(fv)) {
+          fputs(fv < 0.0f ? "(-INFINITY)" : "INFINITY", fp);
+        } else {
+          fprintf(fp, signbit(fv) ? "(%.17g)" : "%.17g", (double)fv);
+        }
       } else {
         fprintf(fp, "%d", (int)bits);
       }
