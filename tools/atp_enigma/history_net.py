@@ -2,7 +2,15 @@
 # Neural clause selection, phase 0: a derivation-history network scoring
 # critical pairs (CPs), trained offline on np0_extract.py datasets, plus
 # the pre-registered offline gate (~/.cache/thvm/casc/J13/neural_p0/
-# gate_spec.txt).  Pure numpy, CPU.
+# gate_spec.txt).
+#
+# The model runs on the tinygrad Tensor API (the spec thvm's Python
+# bridge py/thvm mirrors, so moving it onto thvm is an import change):
+# nn.Linear, relu, Tensor.gather (parent lookups), Tensor.scatter_reduce
+# (simplifier aggregation), log_softmax (the binary cross-entropy),
+# nn.optim.Adam and TinyJit; tinygrad computes every gradient.  numpy only loads
+# data, lays out the batches, rebuilds the queues and computes the gate
+# metrics.
 #
 # Model ([Sud25] minus the input GNN; see docs/plans/atp_neural_selection.md):
 #   axiom a        E = act(W_ax [role(a) ; phi_ax(a)] + b_ax)
@@ -13,25 +21,38 @@
 #                  free-variable instance, RHS-composed rule
 #   requeued simplification s of old rule r by S:
 #                  E = act(W_sq [E(r) ; mean E(S)] + b_sq)
-#   score(c) = w2 . relu(W1 [E(c) ; phi(c)] + b1) + b2   (logit, fixed at push)
-# act = tanh (bounded: derivation recursion runs hundreds of levels deep).
+#   score(c) = W2 relu(W1 [E(c) ; phi(c)] + b1) + b2   (logit, fixed at push)
+# act(x) = relu(x) - relu(x - 6): a relu kept bounded, since the
+# derivation recursion runs up to ~200 levels deep.
 # phi(c): the export's structural features, the engine priority at push,
 # formation depth, overlap depth, origin kind and flags, standardized.
 #
+# The recursion is evaluated level by level over the derivation DAG
+# (every input of a node sits on a lower level): per level, one batched
+# Linear per inference kind over the parents' embeddings, gathered from
+# the table of all embeddings computed so far.  Block sizes and the table
+# are padded to power-of-two buckets so tinygrad reuses its compiled
+# kernels across problems (padding rows point at the learned "missing"
+# row and carry zero loss weight).
+#
 # Usage:
-#   history_net.py train  <npz_dir> <pool.tsv> <out.npz> [dim=32 hid=32 epochs=40 seed=0
-#                         weighting=uniform|residence]
-#   history_net.py gate   <model.npz> <npz_dir> <pool.tsv> <out_prefix>
-#   history_net.py valgate <model.npz> <npz_dir> <pool.tsv> <out_prefix>
+#   history_net.py train  <npz_dir> <pool.tsv> <out_prefix> [dim=32 hid=32
+#                         epochs=30 seed=0 weighting=uniform|residence]
+#   history_net.py gate   <model_prefix> <npz_dir> <pool.tsv> <out_prefix>
+#   history_net.py valgate <model_prefix> <npz_dir> <pool.tsv> <out_prefix>
 #                  (the same statistics on the train-carved validation slice)
+#   history_net.py sanity <npz_dir> <pool.tsv>   (Adam moves the parameters,
+#                  the loss falls, subset batches score like the full batch)
 #   history_net.py summary <harvest.tsv> <npz_dir> <out.txt>
-#   history_net.py gradcheck
+#   history_net.py recon  <npz_dir> <pool.tsv> <out.txt>
 import hashlib
 import os
 import sys
 import time
 
 import numpy as np
+from tinygrad import Tensor, TinyJit, nn
+from tinygrad.nn.state import get_parameters, get_state_dict, safe_load, safe_save, load_state_dict
 
 NONE = 0xFFFFFFFF
 TRACE_AXIOM, TRACE_ORIENT, TRACE_CP, TRACE_SIMPLIFY = 1, 2, 3, 4
@@ -288,246 +309,360 @@ def fix_levels(p):
 
 
 # --------------------------------------------------------------------------
-# batched forward / backward over a disjoint union of problem DAGs
+# batch layout (numpy) + model (tinygrad)
 
-class Batch:
-    def __init__(self, probs, rows, weights=None):
-        """rows[i] = indices of problem i's scored CPs to include; the
-        batch carries each problem's core DAG plus the scored leaves.
-        weights[i] = per-row loss weights (class-normalized per problem)."""
+def pow2(n):
+    return 1 << max(0, int(np.ceil(np.log2(max(1, n)))))
+
+
+class Std:
+    """Feature standardizer fitted on the train problems."""
+
+    def __init__(self, probs=None, arrays=None):
+        if arrays is not None:
+            self.mu_phi, self.sd_phi, self.mu_ax, self.sd_ax = arrays
+            return
+        phis = np.concatenate([p.phi for p in probs])
+        self.mu_phi = phis.mean(0)
+        self.sd_phi = phis.std(0) + 1e-6
+        axs = np.concatenate([p.ax_phi[:p.n_core][p.ntype[:p.n_core] == NT_AXIOM]
+                              for p in probs])
+        self.mu_ax = axs.mean(0) if len(axs) else np.zeros(N_PHI_AX)
+        self.sd_ax = (axs.std(0) + 1e-6) if len(axs) else np.ones(N_PHI_AX)
+
+
+class Block:
+    pass
+
+
+class DagLayout:
+    """The core derivation DAGs of a set of problems as one disjoint
+    union, laid out level-major in power-of-two padded blocks (table row
+    0 is the learned 'missing' embedding).  Every input of a block sits
+    on a lower level, so a block gathers from the rows computed so far."""
+
+    def __init__(self, probs, std, dim):
+        self.dim = dim
         off = 0
-        nt, a1, a2, rk, lv, axp = [], [], [], [], [], []
-        so, sm, sc = [], [], []
-        cn, ph, lab, grp, rws = [], [], [], [], []
-        if weights is None:
-            weights = [np.ones(len(rr)) for rr in rows]
-        for gi, (p, rr) in enumerate(zip(probs, rows)):
-            rws.append(weights[gi])
+        nt, a1, a2, rk, lv, axp, sc = [], [], [], [], [], [], []
+        so, sm = [], []
+        self.offsets = []
+        for p in probs:
             C = p.n_core
-            nodes = p.cp_node[rr]
-            leaves = np.unique(nodes[nodes >= C])
-            take = np.concatenate([np.arange(C), leaves])
-            nt.append(p.ntype[take])
-            a1.append(np.where(p.in1[take] >= 0, p.in1[take] + off, -1))
-            a2.append(np.where(p.in2[take] >= 0, p.in2[take] + off, -1))
-            rk.append(p.rkind[take]); lv.append(p.level[take])
-            axp.append(p.ax_phi[take])
+            self.offsets.append(off)
+            nt.append(p.ntype[:C])
+            a1.append(np.where(p.in1[:C] >= 0, p.in1[:C] + off, -1))
+            a2.append(np.where(p.in2[:C] >= 0, p.in2[:C] + off, -1))
+            rk.append(p.rkind[:C]); lv.append(p.level[:C])
+            axp.append(p.ax_phi[:C]); sc.append(p.s_cnt[:C])
             so.append(p.s_owner + off); sm.append(p.s_member + off)
-            sc.append(p.s_cnt[take])
-            loc = np.where(nodes >= C, C + np.searchsorted(leaves, nodes),
-                           nodes)
-            cn.append(np.where(nodes >= 0, loc + off, -1))
-            ph.append(p.phi[rr]); lab.append(p.label[rr])
-            grp.append(np.full(len(rr), gi))
-            off += len(take)
-        self.N = off
-        self.ntype = np.concatenate(nt) if nt else np.zeros(0, np.int64)
-        self.in1 = np.concatenate(a1); self.in2 = np.concatenate(a2)
-        self.rkind = np.concatenate(rk); self.level = np.concatenate(lv)
-        self.ax_phi = np.concatenate(axp)
-        self.s_owner = np.concatenate(so); self.s_member = np.concatenate(sm)
-        self.s_cnt = np.concatenate(sc)
-        self.cp_node = np.concatenate(cn); self.phi = np.concatenate(ph)
-        self.label = np.concatenate(lab); self.group = np.concatenate(grp)
-        self.rw = np.concatenate(rws).astype(np.float64)
-        self.n_groups = len(probs)
-        L = int(self.level.max()) + 1 if self.N else 1
-        order = np.argsort(self.level, kind="stable")
-        bounds = np.searchsorted(self.level[order], np.arange(L + 1))
-        self.lv_nodes = []
+            off += C
+        ntype = np.concatenate(nt); in1 = np.concatenate(a1)
+        in2 = np.concatenate(a2); rkind = np.concatenate(rk)
+        level = np.concatenate(lv); ax_phi = np.concatenate(axp)
+        s_cnt = np.concatenate(sc)
+        s_owner = np.concatenate(so); s_member = np.concatenate(sm)
+        N = len(ntype)
+        axn = (ax_phi - std.mu_ax) / std.sd_ax
+        self.pos = np.zeros(N, dtype=np.int64)
+        cur = 1
+        self.blocks = []
+        L = int(level.max()) + 1 if N else 0
+        if len(s_owner):
+            order = np.argsort(s_owner, kind="stable")
+            sm_s = s_member[order]
+            so_s = s_owner[order]
+            starts = np.searchsorted(so_s, np.arange(N))
+            ends = np.searchsorted(so_s, np.arange(N), side="right")
+        lvl_order = np.argsort(level, kind="stable")
+        lb = np.searchsorted(level[lvl_order], np.arange(L + 1))
         for l in range(L):
-            vs = order[bounds[l]:bounds[l + 1]]
-            per = {}
-            for t in (NT_AXIOM, NT_CP, NT_RULE, NT_SIMPQ):
-                sel = vs[self.ntype[vs] == t]
-                if len(sel):
-                    per[t] = sel
-            self.lv_nodes.append(per)
-        # simplifier edges grouped by owner level
-        if len(self.s_owner):
-            olv = self.level[self.s_owner]
-            o2 = np.argsort(olv, kind="stable")
-            b2 = np.searchsorted(olv[o2], np.arange(L + 1))
-            self.lv_simp = [o2[b2[l]:b2[l + 1]] for l in range(L)]
-        else:
-            self.lv_simp = [np.zeros(0, np.int64) for _ in range(L)]
-
-
-def init_params(dim, hid, rng):
-    def lin(o, i):
-        return rng.normal(0.0, 1.0 / np.sqrt(i), size=(o, i))
-    return {
-        "W_ax": lin(dim, N_PHI_AX), "b_ax": np.zeros(dim),
-        "W_cp": lin(dim, 2 * dim), "b_cp": np.zeros(dim),
-        "W_or": lin(dim, 2 * dim + N_RULE_KINDS), "b_or": np.zeros(dim),
-        "W_sq": lin(dim, 2 * dim), "b_sq": np.zeros(dim),
-        "miss": rng.normal(0.0, 0.1, size=dim),
-        "W1": lin(hid, dim + N_PHI), "b1": np.zeros(hid),
-        "w2": lin(1, hid)[0], "b2": np.zeros(1),
-        "mu_phi": np.zeros(N_PHI), "sd_phi": np.ones(N_PHI),
-        "mu_ax": np.zeros(N_PHI_AX), "sd_ax": np.ones(N_PHI_AX),
-    }
-
-
-TRAINABLE = ["W_ax", "b_ax", "W_cp", "b_cp", "W_or", "b_or", "W_sq", "b_sq",
-             "miss", "W1", "b1", "w2", "b2"]
-
-
-def forward(P, B, need_cache=True):
-    dim = P["b_cp"].shape[0]
-    H = np.zeros((B.N, dim))
-    cache = []
-    miss = P["miss"]
-
-    def gather(idx):
-        g = H[np.maximum(idx, 0)]
-        m = idx < 0
-        if m.any():
-            g[m] = miss
-        return g
-
-    axn = (B.ax_phi - P["mu_ax"]) / P["sd_ax"]
-    for l, per in enumerate(B.lv_nodes):
-        se = B.lv_simp[l]      # simplifier edges owned by this level
-        lc = {}
-        for t, vs in per.items():
-            if t == NT_AXIOM:
-                X = axn[vs]
-                Z = X @ P["W_ax"].T + P["b_ax"]
-            elif t == NT_CP:
-                X = np.concatenate([gather(B.in1[vs]), gather(B.in2[vs])], 1)
-                Z = X @ P["W_cp"].T + P["b_cp"]
-            else:
-                A = np.zeros((len(vs), dim))
-                if len(se):
-                    pos = np.full(B.N, -1, dtype=np.int64)
-                    pos[vs] = np.arange(len(vs))
-                    own = B.s_owner[se]
-                    keep = pos[own] >= 0
-                    if keep.any():
-                        np.add.at(A, pos[own[keep]], H[B.s_member[se[keep]]])
-                        A /= B.s_cnt[vs][:, None]
-                src = gather(B.in1[vs])
-                if t == NT_RULE:
-                    oh = np.zeros((len(vs), N_RULE_KINDS))
-                    oh[np.arange(len(vs)), B.rkind[vs]] = 1.0
-                    X = np.concatenate([src, A, oh], 1)
-                    Z = X @ P["W_or"].T + P["b_or"]
+            vs_l = lvl_order[lb[l]:lb[l + 1]]
+            for kind in (NT_AXIOM, NT_CP, NT_RULE, NT_SIMPQ):
+                vs = vs_l[ntype[vs_l] == kind]
+                if len(vs) == 0:
+                    continue
+                n = len(vs); P = pow2(n)
+                blk = Block()
+                blk.kind, blk.n, blk.P = kind, n, P
+                blk.Ptab = pow2(cur)
+                if kind == NT_AXIOM:
+                    X = np.zeros((P, N_PHI_AX), dtype=np.float32)
+                    X[:n] = axn[vs]
+                    blk.X = Tensor(X)
+                elif kind == NT_CP:
+                    blk.i1 = self.idx_rows(self.gpos(in1[vs]), P)
+                    blk.i2 = self.idx_rows(self.gpos(in2[vs]), P)
                 else:
-                    X = np.concatenate([src, A], 1)
-                    Z = X @ P["W_sq"].T + P["b_sq"]
-            Hv = np.tanh(Z)
-            H[vs] = Hv
-            if need_cache:
-                lc[t] = (vs, X, Hv)
-        cache.append(lc)
-    E = gather(B.cp_node)
-    phin = (B.phi - P["mu_phi"]) / P["sd_phi"]
-    F = np.concatenate([E, phin], 1)
-    Z1 = F @ P["W1"].T + P["b1"]
-    A1 = np.maximum(Z1, 0.0)
-    logit = A1 @ P["w2"] + P["b2"][0]
-    return logit, (H, cache, E, F, Z1, A1)
+                    blk.i1 = self.idx_rows(self.gpos(in1[vs]), P)
+                    own, mem, w = [], [], []
+                    if len(s_owner):
+                        for k, v in enumerate(vs.tolist()):
+                            for e in range(starts[v], ends[v]):
+                                own.append(k); mem.append(sm_s[e])
+                                w.append(1.0 / s_cnt[v])
+                    M = pow2(len(own))
+                    ow = np.zeros(M, dtype=np.int32); ow[:len(own)] = own
+                    me = np.full(M, -1, dtype=np.int64); me[:len(mem)] = mem
+                    ww = np.zeros((M, 1), dtype=np.float32); ww[:len(w), 0] = w
+                    blk.own = Tensor(np.repeat(ow[:, None], dim, axis=1))
+                    blk.mem = self.idx_rows(self.gpos(me), M)
+                    blk.w = Tensor(ww)
+                    if kind == NT_RULE:
+                        oh = np.zeros((P, N_RULE_KINDS), dtype=np.float32)
+                        oh[np.arange(n), rkind[vs]] = 1.0
+                        blk.onehot = Tensor(oh)
+                self.pos[vs] = cur + np.arange(n)
+                cur += P
+                self.blocks.append(blk)
+        self.n_table = cur
+        self.Pfinal = pow2(cur)
+
+    def gpos(self, arr):
+        """Merged node index -> table row (-1 -> the 'missing' row 0)."""
+        arr = np.asarray(arr, dtype=np.int64)
+        return np.where(arr >= 0, self.pos[np.maximum(arr, 0)], 0)
+
+    def idx_rows(self, ix, P):
+        full = np.zeros(P, dtype=np.int32)
+        full[:len(ix)] = ix
+        return Tensor(np.repeat(full[:, None], self.dim, axis=1))
 
 
-def loss_grad(P, B, logit, fw, pos_w=0.5):
-    """Class-balanced logistic loss, each problem weighted equally."""
-    y = B.label.astype(np.float64)
-    G = B.n_groups
-    rw = B.rw
-    npos = np.bincount(B.group, weights=y * rw, minlength=G)
-    nneg = np.bincount(B.group, weights=(1 - y) * rw, minlength=G)
-    wpos = np.where(npos > 0, pos_w / np.maximum(npos, 1e-12), 0.0)
-    wneg = np.where(nneg > 0, (1 - pos_w) / np.maximum(nneg, 1e-12), 0.0)
-    w = rw * np.where(y > 0, wpos[B.group], wneg[B.group]) / G
-    # stable log-sigmoid
-    lp = -np.logaddexp(0.0, -logit)      # log sigma(z)
-    ln = -np.logaddexp(0.0, logit)       # log (1 - sigma(z))
-    loss = -np.sum(w * (y * lp + (1 - y) * ln))
-    sig = 1.0 / (1.0 + np.exp(-logit))
-    dlogit = w * (sig - y)
-    return loss, dlogit
+def row_parts(p, rr, off):
+    """Split scored rows by how their embedding is formed: CP-kind rows
+    from their two parents (merged node ids), the rest (queued axioms and
+    requeued simplifications) are table nodes themselves."""
+    nodes = p.cp_node[rr]
+    kind = p.kind[rr]
+    is_cp = (kind == TRACE_CP) | (nodes < 0)
+    v = np.maximum(nodes, 0)
+    pa = np.where((nodes >= 0) & (p.in1[v] >= 0), p.in1[v] + off, -1)
+    pb = np.where((nodes >= 0) & (p.in2[v] >= 0), p.in2[v] + off, -1)
+    node = np.where(nodes >= 0, nodes + off, -1)
+    return is_cp, pa, pb, node
 
 
-def backward(P, B, fw, dlogit):
-    H, cache, E, F, Z1, A1 = fw
-    dim = P["b_cp"].shape[0]
-    g = {k: np.zeros_like(P[k]) for k in TRAINABLE}
-    g["w2"] = A1.T @ dlogit
-    g["b2"] = np.array([dlogit.sum()])
-    dA1 = np.outer(dlogit, P["w2"])
-    dZ1 = dA1 * (Z1 > 0)
-    g["W1"] = dZ1.T @ F
-    g["b1"] = dZ1.sum(0)
-    dF = dZ1 @ P["W1"]
-    dE = dF[:, :dim]
-    dH = np.zeros((B.N, dim))
+def balance_weights(y, rw, group, n_groups, pos_w=0.5):
+    """Class-balanced per problem, every problem weighted equally."""
+    w = np.zeros(len(y))
+    for gi in range(n_groups):
+        m = group == gi
+        sp = rw[m & (y > 0)].sum(); sn = rw[m & (y == 0)].sum()
+        w[m & (y > 0)] = rw[m & (y > 0)] * (pos_w / sp if sp > 0 else 0.0)
+        w[m & (y == 0)] = rw[m & (y == 0)] * ((1 - pos_w) / sn if sn > 0 else 0.0)
+    return w / max(1, n_groups)
 
-    def scatter(idx, grad):
-        m = idx >= 0
-        if m.any():
-            np.add.at(dH, idx[m], grad[m])
-        if (~m).any():
-            g["miss"] += grad[~m].sum(0)
 
-    scatter(B.cp_node, dE)
-    for l in range(len(cache) - 1, -1, -1):
-        lc = cache[l]
-        for t, (vs, X, Hv) in lc.items():
-            dZ = dH[vs] * (1.0 - Hv * Hv)
-            if t == NT_AXIOM:
-                g["W_ax"] += dZ.T @ X
-                g["b_ax"] += dZ.sum(0)
-                continue
-            if t == NT_CP:
-                g["W_cp"] += dZ.T @ X
-                g["b_cp"] += dZ.sum(0)
-                dX = dZ @ P["W_cp"]
-                scatter(B.in1[vs], dX[:, :dim])
-                scatter(B.in2[vs], dX[:, dim:2 * dim])
-                continue
-            if t == NT_RULE:
-                g["W_or"] += dZ.T @ X
-                g["b_or"] += dZ.sum(0)
-                dX = dZ @ P["W_or"]
+class Plan:
+    """Scoring layout for arbitrary rows (inference): CP-kind rows in
+    chunked parent-gather blocks, the other rows gathered from the table.
+    self.group / self.row map every output position back (row -1 = pad)."""
+
+    def __init__(self, probs, rows, weights, std, dim, leaf_chunk=16384):
+        self.layout = DagLayout(probs, std, dim)
+        L = self.layout
+        cp_g, cp_r, cp_a, cp_b, ot_g, ot_r, ot_n = [], [], [], [], [], [], []
+        for gi, (p, rr) in enumerate(zip(probs, rows)):
+            is_cp, pa, pb, node = row_parts(p, rr, L.offsets[gi])
+            j = np.arange(len(rr))
+            cp_g.append(np.full(int(is_cp.sum()), gi)); cp_r.append(j[is_cp])
+            cp_a.append(pa[is_cp]); cp_b.append(pb[is_cp])
+            ot_g.append(np.full(int((~is_cp).sum()), gi)); ot_r.append(j[~is_cp])
+            ot_n.append(node[~is_cp])
+        cp_g = np.concatenate(cp_g); cp_r = np.concatenate(cp_r)
+        cp_a = np.concatenate(cp_a); cp_b = np.concatenate(cp_b)
+        ot_g = np.concatenate(ot_g); ot_r = np.concatenate(ot_r)
+        ot_n = np.concatenate(ot_n)
+        grp, rix = [], []
+        self.cp_blocks = []
+        for c0 in range(0, len(cp_g), leaf_chunk):
+            sl = slice(c0, c0 + leaf_chunk)
+            n = len(cp_g[sl]); P = pow2(n)
+            self.cp_blocks.append((L.idx_rows(L.gpos(cp_a[sl]), P),
+                                   L.idx_rows(L.gpos(cp_b[sl]), P)))
+            grp.append(np.concatenate([cp_g[sl], np.zeros(P - n, np.int64)]))
+            rix.append(np.concatenate([cp_r[sl], np.full(P - n, -1)]))
+        self.other_idx = None
+        if len(ot_g):
+            P = pow2(len(ot_g))
+            self.other_idx = L.idx_rows(L.gpos(ot_n), P)
+            grp.append(np.concatenate([ot_g, np.zeros(P - len(ot_g), np.int64)]))
+            rix.append(np.concatenate([ot_r, np.full(P - len(ot_g), -1)]))
+        self.group = np.concatenate(grp).astype(np.int64)
+        self.row = np.concatenate(rix).astype(np.int64)
+        real = self.row >= 0
+        R = len(self.row)
+        phi = np.zeros((R, N_PHI), dtype=np.float32)
+        y = np.zeros(R, dtype=np.float32)
+        rw = np.zeros(R, dtype=np.float64)
+        for gi, (p, rr) in enumerate(zip(probs, rows)):
+            m = real & (self.group == gi)
+            src = rr[self.row[m]]
+            phi[m] = (p.phi[src] - std.mu_phi) / std.sd_phi
+            y[m] = p.label[src]
+            rw[m] = weights[gi][self.row[m]]
+        w = balance_weights(y, rw, self.group, len(probs))
+        w[~real] = 0.0
+        self.phi = Tensor(phi)
+        self.y = Tensor(y)
+        self.w = Tensor(w.astype(np.float32))
+        self.n_real = int(real.sum())
+
+
+class FixedBatch:
+    """A training batch with FIXED shapes across steps, so its train step
+    is captured once by TinyJit and replayed.  The batch's problems share
+    one merged DAG layout (one block per level and inference kind for the
+    whole batch; make_batches caps the merged table, since the one-hot
+    gather cost grows with batch rows x batch table).  The layout and the
+    non-CP rows are constants; each step feeds, per problem, every CP-kind
+    positive plus K freshly sampled CP-kind negatives in a fixed segment
+    of one index / feature / label / weight tensor."""
+
+    def __init__(self, probs, std, dim, K):
+        self.probs, self.std, self.K, self.dim = probs, std, K, dim
+        self.layout = DagLayout(probs, std, dim)
+        L = self.layout
+        self.pos_rows, self.neg_pool = [], []
+        ot_g, ot_rows, ot_n = [], [], []
+        for gi, p in enumerate(probs):
+            rr = np.nonzero(p.label | p.in_sample | (p.selected_at >= 0))[0]
+            is_cp, pa, pb, node = row_parts(p, rr, L.offsets[gi])
+            self.pos_rows.append(rr[is_cp & p.label[rr]])
+            self.neg_pool.append(rr[is_cp & ~p.label[rr]])
+            ot_g.append(np.full(int((~is_cp).sum()), gi))
+            ot_rows.append(rr[~is_cp]); ot_n.append(node[~is_cp])
+        self.ot_g = np.concatenate(ot_g)
+        self.ot_rows = np.concatenate(ot_rows)
+        ot_n = np.concatenate(ot_n)
+        self.seg = np.array([len(x) + K for x in self.pos_rows])
+        self.seg_off = np.concatenate([[0], np.cumsum(self.seg)])
+        self.R_cp = pow2(int(self.seg.sum()))
+        self.R_o = pow2(max(1, len(self.ot_g)))
+        self.other_idx = L.idx_rows(L.gpos(ot_n), self.R_o)
+        phi_o = np.zeros((self.R_o, N_PHI), dtype=np.float32)
+        self.y_o = np.zeros(self.R_o, dtype=np.float32)
+        for gi, p in enumerate(probs):
+            m = np.nonzero(self.ot_g == gi)[0]
+            phi_o[m] = (p.phi[self.ot_rows[m]] - std.mu_phi) / std.sd_phi
+            self.y_o[m] = p.label[self.ot_rows[m]]
+        self.phi_o = Tensor(phi_o)
+        self.jit = None
+
+    def sample(self, rng, weighting):
+        """Numpy-built inputs of one step: CP-row parent indices (two),
+        features, labels and weights (labels / weights cover the CP rows,
+        then the other rows)."""
+        L = self.layout
+        B = len(self.probs)
+        I1 = np.zeros(self.R_cp, np.int32); I2 = np.zeros_like(I1)
+        PH = np.zeros((self.R_cp, N_PHI), np.float32)
+        Y = np.zeros(self.R_cp + self.R_o, np.float32)
+        RW = np.zeros(self.R_cp + self.R_o)
+        G = np.full(self.R_cp + self.R_o, -1)
+        self.last_rows = []
+        for gi, p in enumerate(self.probs):
+            neg = self.neg_pool[gi]
+            if len(neg) > self.K:
+                neg = rng.choice(neg, size=self.K, replace=False)
+            rr = np.concatenate([self.pos_rows[gi], neg])
+            self.last_rows.append(rr)
+            _, pa, pb, _ = row_parts(p, rr, L.offsets[gi])
+            c0, n = int(self.seg_off[gi]), len(rr)
+            I1[c0:c0 + n] = L.gpos(pa); I2[c0:c0 + n] = L.gpos(pb)
+            PH[c0:c0 + n] = (p.phi[rr] - self.std.mu_phi) / self.std.sd_phi
+            Y[c0:c0 + n] = p.label[rr]
+            RW[c0:c0 + n] = row_weights(p, rr, weighting)
+            G[c0:c0 + n] = gi
+        no = len(self.ot_g)
+        Y[self.R_cp:self.R_cp + no] = self.y_o[:no]
+        G[self.R_cp:self.R_cp + no] = self.ot_g
+        for gi, p in enumerate(self.probs):
+            m = np.nonzero(self.ot_g == gi)[0]
+            RW[self.R_cp + m] = row_weights(p, self.ot_rows[m], weighting)
+        W = balance_weights(Y, RW, G, B)
+        W[G < 0] = 0.0
+        d = self.dim
+        return (Tensor(np.repeat(I1[:, None], d, 1)),
+                Tensor(np.repeat(I2[:, None], d, 1)),
+                Tensor(PH), Tensor(Y), Tensor(W.astype(np.float32)))
+
+
+def act(x):
+    return x.relu() - (x - 6.0).relu()
+
+
+class HistoryNet:
+    def __init__(self, dim=32, hid=32):
+        self.dim, self.hid = dim, hid
+        self.ax = nn.Linear(N_PHI_AX, dim)
+        self.cp = nn.Linear(2 * dim, dim)
+        self.orl = nn.Linear(2 * dim + N_RULE_KINDS, dim)
+        self.sq = nn.Linear(2 * dim, dim)
+        self.miss = Tensor.uniform(1, dim, low=-0.1, high=0.1)
+        self.h1 = nn.Linear(dim + N_PHI, hid)
+        self.out = nn.Linear(hid, 1)
+
+    def table(self, layout):
+        """Embeddings of every DAG node, level by level (padded rows)."""
+        table = self.miss
+        for b in layout.blocks:
+            T = table.pad(((0, b.Ptab - table.shape[0]), None))
+            if b.kind == NT_AXIOM:
+                Z = self.ax(b.X)
+            elif b.kind == NT_CP:
+                Z = self.cp(T.gather(0, b.i1).cat(T.gather(0, b.i2), dim=1))
             else:
-                g["W_sq"] += dZ.T @ X
-                g["b_sq"] += dZ.sum(0)
-                dX = dZ @ P["W_sq"]
-            scatter(B.in1[vs], dX[:, :dim])
-            dA = dX[:, dim:2 * dim]
-            se = B.lv_simp[l]
-            if len(se):
-                pos = np.full(B.N, -1, dtype=np.int64)
-                pos[vs] = np.arange(len(vs))
-                own = B.s_owner[se]
-                keep = pos[own] >= 0
-                if keep.any():
-                    rows = pos[own[keep]]
-                    gm = dA[rows] / B.s_cnt[vs][rows][:, None]
-                    np.add.at(dH, B.s_member[se[keep]], gm)
-    return g
+                src = T.gather(0, b.i1)
+                agg = Tensor.zeros(b.P, self.dim).scatter_reduce(
+                    0, b.own, T.gather(0, b.mem) * b.w, reduce="sum")
+                if b.kind == NT_RULE:
+                    Z = self.orl(src.cat(agg, b.onehot, dim=1))
+                else:
+                    Z = self.sq(src.cat(agg, dim=1))
+            table = table.cat(act(Z), dim=0)
+        return table.pad(((0, layout.Pfinal - table.shape[0]), None))
+
+    def score(self, T, cp_blocks, other_idx, phi):
+        parts = [act(self.cp(T.gather(0, i1).cat(T.gather(0, i2), dim=1)))
+                 for i1, i2 in cp_blocks]
+        if other_idx is not None:
+            parts.append(T.gather(0, other_idx))
+        E = parts[0].cat(*parts[1:], dim=0) if len(parts) > 1 else parts[0]
+        return self.out(self.h1(E.cat(phi, dim=1)).relu()).reshape(-1)
+
+    def __call__(self, plan):
+        T = self.table(plan.layout)
+        return self.score(T, plan.cp_blocks, plan.other_idx, plan.phi)
 
 
-class Adam:
-    def __init__(self, P, lr):
-        self.lr = lr
-        self.m = {k: np.zeros_like(P[k]) for k in TRAINABLE}
-        self.v = {k: np.zeros_like(P[k]) for k in TRAINABLE}
-        self.t = 0
+def train_mode():
+    """tinygrad's training switch: Tensor.train() on the PyPI releases,
+    Context(TRAINING=1) on master (where Tensor.training is inert)."""
+    if hasattr(Tensor, "train"):
+        return Tensor.train()
+    from tinygrad.helpers import Context
+    return Context(TRAINING=1)
 
-    def step(self, P, g, clip=5.0):
-        self.t += 1
-        norm = np.sqrt(sum(float(np.sum(g[k] ** 2)) for k in TRAINABLE))
-        sc = min(1.0, clip / (norm + 1e-12))
-        for k in TRAINABLE:
-            gk = g[k] * sc
-            self.m[k] = 0.9 * self.m[k] + 0.1 * gk
-            self.v[k] = 0.999 * self.v[k] + 0.001 * gk * gk
-            mh = self.m[k] / (1 - 0.9 ** self.t)
-            vh = self.v[k] / (1 - 0.999 ** self.t)
-            P[k] -= self.lr * mh / (np.sqrt(vh) + 1e-8)
-        return norm
+
+def plan_loss(model, plan):
+    logit = model(plan)
+    return (bce_rows(logit, plan.y) * plan.w).sum(), logit
+
+
+def save_model(prefix, model, std, meta):
+    safe_save(get_state_dict(model), prefix + ".safetensors")
+    np.savez(prefix + "_std.npz", mu_phi=std.mu_phi, sd_phi=std.sd_phi,
+             mu_ax=std.mu_ax, sd_ax=std.sd_ax, **meta)
+
+
+def load_model(prefix):
+    m = dict(np.load(prefix + "_std.npz"))
+    model = HistoryNet(int(m["dim"]), int(m["hid"]))
+    load_state_dict(model, safe_load(prefix + ".safetensors"))
+    std = Std(arrays=(m["mu_phi"], m["sd_phi"], m["mu_ax"], m["sd_ax"]))
+    return model, std, m
 
 
 # --------------------------------------------------------------------------
@@ -560,48 +695,56 @@ def load_problems(npz_dir, names):
     return probs
 
 
-def train_rows(p, rng, max_neg, weighting="uniform"):
-    """Rows (all positives + a uniform negative subsample) and per-row
-    weights: uniform, or queue residence (selections alive), which is
-    how often a CP enters the gate's (step, queue) samples."""
-    pos = np.nonzero(p.label & (p.cp_node >= 0))[0]
-    neg = np.nonzero((~p.label) & (p.in_sample | (p.selected_at >= 0))
-                     & (p.cp_node >= 0))[0]
-    if len(neg) > max_neg:
-        neg = rng.choice(neg, size=max_neg, replace=False)
-    rr = np.concatenate([pos, neg])
+def row_weights(p, rr, weighting):
+    """Per-row loss weights: uniform, or queue residence (selections the
+    CP stays queued), which is how often it enters the gate's (step,
+    queue) samples."""
     if weighting == "residence":
         end = np.minimum(p.end_step[rr], p.n_sel)
-        w = np.maximum(1, end - p.push_step[rr]).astype(np.float64)
-    else:
-        w = np.ones(len(rr))
-    return rr, w
+        return np.maximum(1, end - p.push_step[rr]).astype(np.float64)
+    return np.ones(len(rr))
 
 
-def fit_standardizer(P, probs):
-    phis = np.concatenate([p.phi for p in probs])
-    P["mu_phi"] = phis.mean(0)
-    P["sd_phi"] = phis.std(0) + 1e-6
-    axs = np.concatenate([p.ax_phi[p.ntype == NT_AXIOM] for p in probs])
-    if len(axs):
-        P["mu_ax"] = axs.mean(0)
-        P["sd_ax"] = axs.std(0) + 1e-6
+def make_batches(probs, core_cap=4096, max_n=64):
+    """Fixed batches (one TinyJit capture each): problems of similar
+    derivation depth merged while their summed core DAG stays under
+    core_cap (a larger problem trains alone).  Blocks per batch = its
+    deepest problem's levels x kinds."""
+    order = sorted(range(len(probs)),
+                   key=lambda i: (probs[i].n_levels, probs[i].n_core))
+    out, cur, csum = [], [], 0
+    for i in order:
+        c = probs[i].n_core
+        if cur and (csum + c > core_cap or len(cur) >= max_n):
+            out.append(cur); cur, csum = [], 0
+        cur.append(i); csum += c
+    if cur:
+        out.append(cur)
+    return out
 
 
-def eval_loss(P, probs, rng, max_neg=4096, weighting="uniform"):
-    tot = 0.0
-    for p in probs:
-        rr, w = train_rows(p, rng, max_neg, weighting)
-        B = Batch([p], [rr], [w])
-        logit, fw = forward(P, B, need_cache=False)
-        l, _ = loss_grad(P, B, logit, fw)
-        tot += l
-    return tot / max(1, len(probs))
+def batch_logits(model, fb, i1, i2, ph):
+    """Logits of a FixedBatch: its CP rows, then its other rows."""
+    T = model.table(fb.layout)
+    return model.score(T, [(i1, i2)], fb.other_idx, ph.cat(fb.phi_o, dim=0))
 
 
-def cmd_train(npz_dir, pool_path, out_path, dim=32, hid=32, epochs=40,
-              seed=0, batch=8, max_neg=4096, lr=2e-3, patience=6,
-              weighting="uniform"):
+def bce_rows(logit, y):
+    """Per-row binary cross-entropy from a logit, as a 2-class
+    log_softmax over [0, logit] (log_softmax is in py/thvm; tinygrad's
+    binary_crossentropy_logits / logsigmoid are not)."""
+    n = logit.shape[0]
+    ls = Tensor.zeros(n, 1).cat(logit.reshape(n, 1), dim=1).log_softmax(1)
+    return -(ls[:, 1] * y + ls[:, 0] * (1.0 - y))
+
+
+def batch_loss(model, fb, i1, i2, ph, y, w):
+    logit = batch_logits(model, fb, i1, i2, ph)
+    return (bce_rows(logit, y) * w).sum()
+
+
+def cmd_train(npz_dir, pool_path, out_prefix, dim=32, hid=32, epochs=60,
+              seed=0, K=512, lr=3e-3, patience=8, weighting="uniform"):
     split = load_pool(pool_path)
     names = sorted(n for n, s in split.items() if s == "train")
     tr_names = [n for n in names if not is_val(n)]
@@ -609,50 +752,72 @@ def cmd_train(npz_dir, pool_path, out_path, dim=32, hid=32, epochs=40,
     t0 = time.time()
     tr = load_problems(npz_dir, tr_names)
     va = load_problems(npz_dir, va_names)
-    print(f"loaded train={len(tr)} val={len(va)} in {time.time()-t0:.0f}s; "
-          f"levels max={max(p.n_levels for p in tr)} "
-          f"nodes max={max(len(p.ntype) for p in tr)}", flush=True)
+    Tensor.manual_seed(seed)
     rng = np.random.default_rng(seed)
-    P = init_params(dim, hid, rng)
-    fit_standardizer(P, tr)
-    opt = Adam(P, lr)
-    best = (np.inf, None, -1)
+    std = Std(tr)
+    model = HistoryNet(dim, hid)
+    opt = nn.optim.Adam(get_parameters(model), lr=lr)
+    tb = [FixedBatch([tr[i] for i in b], std, dim, K) for b in make_batches(tr)]
+    vb = [FixedBatch([va[i] for i in b], std, dim, K) for b in make_batches(va)]
+    print(f"loaded train={len(tr)} ({len(tb)} batches) val={len(va)} "
+          f"({len(vb)} batches) in {time.time()-t0:.0f}s; levels max="
+          f"{max(p.n_levels for p in tr)} core max={max(p.n_core for p in tr)}",
+          flush=True)
+    for fb in tb:
+        def step(i1, i2, ph, y, w, fb=fb):
+            loss = batch_loss(model, fb, i1, i2, ph, y, w)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            return loss.realize()
+        fb.jit = TinyJit(step)
     vrng = np.random.default_rng(1234)
+    for fb in vb:
+        def fwd(i1, i2, ph, y, w, fb=fb):
+            return batch_loss(model, fb, i1, i2, ph, y, w).realize()
+        fb.jit = TinyJit(fwd)
+        fb.fixed = [x.realize() for x in fb.sample(vrng, weighting)]
+    ntr = sum(len(fb.probs) for fb in tb); nva = sum(len(fb.probs) for fb in vb)
+    meta = dict(dim=dim, hid=hid, weighting=weighting, seed=seed, lr=lr, K=K)
+    best = (np.inf, -1)
     for ep in range(epochs):
-        order = rng.permutation(len(tr))
-        tl, nb = 0.0, 0
         te = time.time()
-        for bi in range(0, len(order), batch):
-            ps = [tr[i] for i in order[bi:bi + batch]]
-            rw = [train_rows(p, rng, max_neg, weighting) for p in ps]
-            B = Batch(ps, [x[0] for x in rw], [x[1] for x in rw])
-            logit, fw = forward(P, B)
-            l, dl = loss_grad(P, B, logit, fw)
-            g = backward(P, B, fw, dl)
-            opt.step(P, g)
-            tl += l; nb += 1
-        vrng = np.random.default_rng(1234)
-        vl = eval_loss(P, va, vrng, weighting=weighting)
-        print(f"epoch {ep} train {tl/max(1,nb):.4f} val {vl:.4f} "
+        tl = 0.0
+        with train_mode():
+            for bi in rng.permutation(len(tb)):
+                fb = tb[bi]
+                tb0 = time.time()
+                ins = [x.realize() for x in fb.sample(rng, weighting)]
+                tl += fb.jit(*ins).item() * len(fb.probs)
+                if ep < 2:
+                    print(f"  batch {bi}: {len(fb.probs)} problems, "
+                          f"{len(fb.layout.blocks)} blocks, table "
+                          f"{fb.layout.Pfinal}, rows {fb.R_cp}+{fb.R_o}: "
+                          f"{time.time()-tb0:.1f}s", flush=True)
+        vl = sum(fb.jit(*fb.fixed).item() * len(fb.probs) for fb in vb) / nva
+        print(f"epoch {ep} train {tl/ntr:.4f} val {vl:.4f} "
               f"({time.time()-te:.0f}s)", flush=True)
         if vl < best[0]:
-            best = (vl, {k: v.copy() for k, v in P.items()}, ep)
-        elif ep - best[2] >= patience:
+            best = (vl, ep)
+            save_model(out_prefix, model, std,
+                       dict(meta, best_epoch=ep, best_val=vl))
+        elif ep - best[1] >= patience:
             break
-    Pb = best[1]
-    np.savez(out_path, **Pb, dim=dim, hid=hid, best_epoch=best[2],
-             best_val=best[0], weighting=weighting)
-    print(f"saved {out_path} best epoch {best[2]} val {best[0]:.4f}")
+    print(f"saved {out_prefix} best epoch {best[1]} val {best[0]:.4f}")
 
 
 # --------------------------------------------------------------------------
 # pre-registered gate (gate_spec.txt)
 
-def score_problem(P, p):
+def score_problem(model, std, p, leaf_chunk=16384):
+    """Logit for every kept CP of problem p, in table order."""
     rr = np.arange(len(p.seq))
-    B = Batch([p], [rr])
-    logit, _ = forward(P, B, need_cache=False)
-    return logit
+    plan = Plan([p], [rr], [np.ones(len(rr))], std, model.dim, leaf_chunk)
+    logit = model(plan).numpy()
+    out = np.zeros(len(rr))
+    real = plan.row >= 0
+    out[plan.row[real]] = logit[real]
+    return out
 
 
 def engine_pri_at(p, t):
@@ -731,10 +896,8 @@ def bootstrap(vals_by_prob, stat, n=10000, seed=0):
     return np.percentile(out, [2.5, 97.5]), out
 
 
-def cmd_gate(model_path, npz_dir, pool_path, out_prefix, which="heldout"):
-    M = dict(np.load(model_path))
-    P = {k: M[k] for k in M.files
-         if k not in ("dim", "hid", "best_epoch", "best_val", "weighting")}
+def cmd_gate(model_prefix, npz_dir, pool_path, out_prefix, which="heldout"):
+    model, std, _ = load_model(model_prefix)
     split = load_pool(pool_path)
     if which == "heldout":
         names = sorted(n for n, s in split.items() if s == "heldout")
@@ -751,7 +914,7 @@ def cmd_gate(model_path, npz_dir, pool_path, out_prefix, which="heldout"):
             fix_levels(p)
         if p.label.sum() == 0:
             continue
-        logit = score_problem(P, p)
+        logit = score_problem(model, std, p)
         r = gate_problem(p, logit)
         if r is None:
             continue
@@ -854,49 +1017,59 @@ def cmd_summary(harvest_tsv, npz_dir, out_path):
 
 
 # --------------------------------------------------------------------------
-# gradient check on a synthetic DAG
+# sanity: the optimizer moves the parameters, the loss falls, and a batch
+# scoring a row subset agrees with the full-problem scoring
 
-def cmd_gradcheck():
+def cmd_sanity(npz_dir, pool_path, n_probs=6, steps=30, dim=16, hid=16):
+    split = load_pool(pool_path)
+    names = sorted(n for n, s in split.items() if s == "train" and not is_val(n))
+    probs = load_problems(npz_dir, names[:40])
+    probs = sorted(probs, key=lambda p: -p.n_core)[:n_probs]
+    Tensor.manual_seed(0)
     rng = np.random.default_rng(0)
+    std = Std(probs)
+    model = HistoryNet(dim, hid)
+    fb = FixedBatch(probs, std, dim, 64)
+    i1, i2, ph, y, w = fb.sample(rng, "uniform")
+    lg = batch_logits(model, fb, i1, i2, ph).numpy()
+    # the same rows through the inference layout
+    rows = [np.concatenate([rr, fb.ot_rows[fb.ot_g == gi]])
+            for gi, rr in enumerate(fb.last_rows)]
+    plan = Plan(probs, rows, [np.ones(len(r)) for r in rows], std, dim)
+    lp = model(plan).numpy()
+    ref = {(g, rows[g][r]): v for g, r, v in zip(plan.group, plan.row, lp) if r >= 0}
+    got = []
+    for gi, rr in enumerate(fb.last_rows):
+        c0 = int(fb.seg_off[gi])
+        for k, r in enumerate(rr.tolist()):
+            got.append(abs(lg[c0 + k] - ref[(gi, r)]))
+    for k, (gi, r) in enumerate(zip(fb.ot_g.tolist(), fb.ot_rows.tolist())):
+        got.append(abs(lg[fb.R_cp + k] - ref[(gi, r)]))
+    print(f"{len(probs)} problems (core {[p.n_core for p in probs]}): "
+          f"fixed-batch vs inference layout max |diff| {max(got):.2e} "
+          f"over {len(got)} rows")
+    params = get_parameters(model)
+    before = [x.numpy().copy() for x in params]
+    opt = nn.optim.Adam(params, lr=5e-3)
 
-    class Fake:
-        pass
-    p = Fake()
-    nn = 12
-    p.ntype = np.array([0, 0, 0, 1, 2, 1, 2, 3, 1, 2, 1, 1])
-    p.in1 = np.array([-1, -1, -1, 0, 3, 4, 5, 4, 6, 8, 9, 6])
-    p.in2 = np.array([-1, -1, -1, 1, -1, 2, -1, -1, 4, -1, 7, -1])
-    p.rkind = np.array([0, 0, 0, 0, 1, 0, 0, 0, 0, 4, 0, 0])
-    p.s_owner = np.array([6, 6, 9, 7]); p.s_member = np.array([4, 2, 6, 4])
-    p.s_cnt = np.maximum(np.bincount(p.s_owner, minlength=nn), 1).astype(float)
-    p.ax_phi = rng.normal(size=(nn, N_PHI_AX))
-    p.level = np.zeros(nn, dtype=np.int64)
-    fix_levels(p)
-    p.n_core = 10   # nodes 10, 11 are leaf CPs (scored, used by no node)
-    p.cp_node = np.array([3, 5, 8, 10, 11, 7, -1])
-    p.phi = rng.normal(size=(7, N_PHI))
-    p.label = np.array([1, 0, 0, 1, 0, 0, 1], dtype=bool)
-    B = Batch([p], [np.arange(7)], [rng.uniform(0.5, 3.0, 7)])
-    P = init_params(6, 5, rng)
-    logit, fw = forward(P, B)
-    l, dl = loss_grad(P, B, logit, fw)
-    g = backward(P, B, fw, dl)
-    worst = 0.0
-    for k in TRAINABLE:
-        flat = P[k].reshape(-1)
-        for j in rng.choice(len(flat), size=min(6, len(flat)), replace=False):
-            old = flat[j]
-            flat[j] = old + 1e-6
-            lp, _ = loss_grad(P, B, forward(P, B, False)[0], None)
-            flat[j] = old - 1e-6
-            lm, _ = loss_grad(P, B, forward(P, B, False)[0], None)
-            flat[j] = old
-            num = (lp - lm) / 2e-6
-            ana = g[k].reshape(-1)[j]
-            err = abs(num - ana) / max(1e-8, abs(num) + abs(ana))
-            worst = max(worst, err)
-    print(f"gradcheck worst relative error {worst:.2e} "
-          f"({'OK' if worst < 1e-4 else 'FAIL'})")
+    def step(i1, i2, ph, y, w):
+        loss = batch_loss(model, fb, i1, i2, ph, y, w)
+        opt.zero_grad(); loss.backward(); opt.step()
+        return loss.realize()
+    jit = TinyJit(step)
+    fixed = [x.realize() for x in fb.sample(rng, "uniform")]
+    losses, times = [], []
+    with train_mode():
+        for it in range(steps):
+            t0 = time.time()
+            losses.append(jit(*fixed).item())
+            times.append(time.time() - t0)
+    moved = max(float(np.max(np.abs(x.numpy() - b0)))
+                for x, b0 in zip(params, before))
+    print(f"loss {losses[0]:.4f} -> {losses[-1]:.4f} over {steps} jitted Adam "
+          f"steps; max |param delta| {moved:.3e}; step s: first "
+          f"{times[0]:.1f} second {times[1]:.1f} replay {np.median(times[2:]):.3f}; "
+          f"{'OK' if losses[-1] < 0.8 * losses[0] and moved > 0 else 'FAIL'}")
 
 
 def cmd_recon(npz_dir, pool_path, out_path, max_probs=10 ** 9):
@@ -968,23 +1141,6 @@ def cmd_recon(npz_dir, pool_path, out_path, max_probs=10 ** 9):
         f.write(txt + "\n")
 
 
-def cmd_selftest(npz_path):
-    """Real-data consistency: subset batches score like the full batch."""
-    p = Problem(npz_path)
-    print(f"{p.name}: nodes {len(p.ntype)} core {p.n_core} levels "
-          f"{p.n_levels} levels-valid {validate_levels(p)} cps {len(p.seq)} "
-          f"pos {int(p.label.sum())} unmapped {int((p.cp_node < 0).sum())}")
-    rng = np.random.default_rng(0)
-    P = init_params(16, 16, rng)
-    full = score_problem(P, p)
-    rr = rng.choice(len(p.seq), size=min(50, len(p.seq)), replace=False)
-    B = Batch([p, p], [rr, rr[::-1]])
-    lg, _ = forward(P, B, need_cache=False)
-    err = max(np.max(np.abs(lg[:len(rr)] - full[rr])),
-              np.max(np.abs(lg[len(rr):] - full[rr[::-1]])))
-    print(f"subset-vs-full max |diff| {err:.2e} ({'OK' if err < 1e-9 else 'FAIL'})")
-
-
 def main():
     cmd = sys.argv[1]
     if cmd == "train":
@@ -1000,12 +1156,10 @@ def main():
         cmd_gate(*sys.argv[2:6])
     elif cmd == "valgate":
         cmd_gate(*sys.argv[2:6], which="val")
-    elif cmd == "gradcheck":
-        cmd_gradcheck()
+    elif cmd == "sanity":
+        cmd_sanity(sys.argv[2], sys.argv[3])
     elif cmd == "summary":
         cmd_summary(*sys.argv[2:5])
-    elif cmd == "selftest":
-        cmd_selftest(sys.argv[2])
     elif cmd == "recon":
         cmd_recon(sys.argv[2], sys.argv[3], sys.argv[4],
                   int(sys.argv[5]) if len(sys.argv) > 5 else 10 ** 9)
