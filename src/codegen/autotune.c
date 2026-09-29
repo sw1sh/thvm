@@ -859,16 +859,34 @@ static int kautotune_stat_accept(KautotuneOutStat const *baseline,
   return wdiff <= wbound;
 }
 
+// " op=O axis=A arg=G + op=..." for every opt of `seq`, for a trace line.
+static char const *kautotune_seq_str(KOptSeq const *seq, char *buf,
+                                     size_t cap) {
+  size_t len = 0;
+  buf[0] = '\0';
+  for (u32 i = 0; i < seq->n && len < cap; i++) {
+    int w = snprintf(buf + len, cap - len, "%s op=%u axis=%u arg=%u",
+                     i > 0 ? " +" : "", seq->opts[i].op, seq->opts[i].axis,
+                     seq->opts[i].arg);
+    if (w < 0) {
+      break;
+    }
+    len += (size_t)w;
+  }
+  return buf;
+}
+
 static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
                                u32 n_runs, KautotuneOutStat const *baseline,
                                u64 early_stop, u64 *out_us) {
   static int seq_tr = -1;
   if (seq_tr < 0) seq_tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
+  char ops[48 * KAUTOTUNE_SEQ_MAX];
   axes_reset_to_default(ke);
   if (!kautotune_apply_seq(ke, seq)) {
-    if (seq_tr && seq->n == 1) {
-      fprintf(stderr, "[seq] kid=%u op=%u axis=%u arg=%u APPLY-FAIL\n",
-              kid, seq->opts[0].op, seq->opts[0].axis, seq->opts[0].arg);
+    if (seq_tr) {
+      fprintf(stderr, "[seq] kid=%u%s APPLY-FAIL\n", kid,
+              kautotune_seq_str(seq, ops, sizeof(ops)));
     }
     axes_reset_to_default(ke);
     return 0;
@@ -880,11 +898,11 @@ static int kautotune_bench_seq(u32 kid, KernelEntry *ke, KOptSeq const *seq,
   // skips it -- it can never win the search or be cached.
   KautotuneOutStat cand = kautotune_output_stat(ke);
   if (!kautotune_stat_accept(baseline, &cand, kautotune_stat_tol(ke->output_dtype))) {
-    if (seq_tr && seq->n == 1) {
+    if (seq_tr) {
       fprintf(stderr,
-              "[seq] kid=%u op=%u axis=%u arg=%u NAN-REJECT "
+              "[seq] kid=%u%s NAN-REJECT "
               "(base sum=%g finite=%d / cand sum=%g finite=%d)\n",
-              kid, seq->opts[0].op, seq->opts[0].axis, seq->opts[0].arg,
+              kid, kautotune_seq_str(seq, ops, sizeof(ops)),
               baseline ? baseline->sum_abs : 0.0, baseline ? baseline->all_finite : -1,
               cand.sum_abs, cand.all_finite);
     }

@@ -16,9 +16,13 @@
 //       still produces a correct (finite, baseline-matching) output.
 //   (5) the dtype-keyed tolerance is loose for bf16, tight for f32.
 //   (6) KAUTOTUNE_CACHE_VERSION was bumped past the gate-less version.
+//   (7) THVM_AUTOTUNE_TRACE names a rejected sequence of any length.
 
 #include "../src/thvm.c"
 #include "test.h"
+
+#include <sys/wait.h>
+#include <unistd.h>
 
 static u32 alloc_f32(u32 *dims, u32 ndim) {
   Shape s = {0};
@@ -35,6 +39,47 @@ static void fill_f32(Term t, f32 const *v, u32 n) {
   u32 buf   = TENS[tid].buf_id;
   Backend *b = TENS[tid].backend;
   b->buf_write(buf, v, (u64)n * sizeof(f32));
+}
+
+// Bench `seq` against `base` in a forked child with THVM_AUTOTUNE_TRACE
+// set, and collect the child's stderr into `err`.  The trace flag latches
+// on the first bench, so only the child's copy turns on.
+static void bench_seq_traced(u32 kid, KernelEntry *ke, KOptSeq const *seq,
+                             KautotuneOutStat const *base, char *err,
+                             size_t cap) {
+  err[0] = 0;
+  int fds[2];
+  if (pipe(fds) != 0) {
+    return;
+  }
+  fflush(stdout);
+  fflush(stderr);
+  pid_t pid = fork();
+  if (pid == 0) {
+    close(fds[0]);
+    dup2(fds[1], 2);
+    close(fds[1]);
+    setenv("THVM_AUTOTUNE_TRACE", "1", 1);
+    u64 us = 0;
+    _exit(kautotune_bench_seq(kid, ke, seq, 1, base, 0, &us));
+  }
+  close(fds[1]);
+  char   sink[256];
+  size_t len = 0;
+  for (;;) {
+    char   *dst  = (len + 1 < cap) ? err + len : sink;
+    size_t  room = (len + 1 < cap) ? cap - 1 - len : sizeof(sink);
+    ssize_t got  = read(fds[0], dst, room);
+    if (got <= 0) {
+      break;
+    }
+    if (dst != sink) {
+      len += (size_t)got;
+    }
+  }
+  err[len] = 0;
+  close(fds[0]);
+  waitpid(pid, NULL, 0);
 }
 
 int main(void) {
@@ -148,6 +193,40 @@ int main(void) {
                                    kautotune_stat_tol(DT_FP32)), 0);
     // Restore so the kernel buffer is clean for the e2e test below.
     kernel_bench_fire(kadd);
+  }
+
+  // === (7) the trace names a rejected sequence of any length =========
+  // A depth-2 beam step benches two-op sequences.  Against a wrong
+  // baseline the gate rejects the pair (or it fails to apply), and the
+  // trace has to say so with both ops; it used to name only one-op
+  // sequences, so a rejected pair left no line.  Runs before any bench in
+  // this process so the child is the first to latch the trace flag.
+  TEST_BEGIN("autotune-gate/trace-names-a-rejected-2-op-sequence");
+  {
+    KOpt cands[16];
+    u32  n_cand = kernel_opts_propose(Kadd, cands, 16);
+    CHECK(n_cand > 0);
+    if (n_cand > 0) {
+      KautotuneOutStat wrong = { .valid = 1, .all_finite = 1,
+                                 .sum_abs = base.sum_abs * 0.5 };
+      KOptSeq pair = {0};
+      pair.n       = 2;
+      pair.opts[0] = cands[n_cand - 1];
+      pair.opts[1] = cands[n_cand - 1];
+      char err[4096];
+      bench_seq_traced(kadd, Kadd, &pair, &wrong, err, sizeof(err));
+      char want[96];
+      snprintf(want, sizeof(want), "[seq] kid=%u op=%u axis=%u arg=%u + op=%u",
+               kadd, pair.opts[0].op, pair.opts[0].axis, pair.opts[0].arg,
+               pair.opts[1].op);
+      CHECK(strstr(err, want) != NULL);
+      CHECK(strstr(err, "NAN-REJECT") != NULL
+            || strstr(err, "APPLY-FAIL") != NULL);
+      if (strstr(err, want) == NULL) {
+        fprintf(stderr, "  want \"%s\", the child printed:\n%s\n", want, err);
+      }
+      axes_reset_to_default(Kadd);
+    }
   }
 
   // === (3b) bench_seq itself rejects vs a divergent baseline =========
