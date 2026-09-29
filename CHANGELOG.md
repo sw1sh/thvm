@@ -65,6 +65,7 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- `try_inline_bufferize_1axis_via_decomp` is `noinline`, like the other bufferize helpers of the walker rewrite: its decomposition stacks make a 4784-byte frame (gcc 11 -O2), which inlined into `unified_rewrite_rec_sub` would sit on every level of that recursion, the frame growth that overflowed the 8 MB Linux stack on a 2000-deep chain before 911589c0. gcc 11 and clang 14 keep it out of line today; the attribute holds that.
 - A gather's index and a scatter's base that are views of storage (a
   view-alias TEN with an offset or a PERMUTE, a lazy SHRINK or FLIP) are
   read through their storage like the other indexed operands

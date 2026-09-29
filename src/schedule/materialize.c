@@ -2812,7 +2812,11 @@ static int uop_value_subtree_has_mask_op(Term root) {
 //     type=0 (no reduce-axis); a type=1 leaf would bind closed_range
 //     to a value varying across consumer's REDUCE iter.
 //
-// Returns the substituted Term on hit, 0 to signal no match.
+// Returns the substituted Term on hit, 0 to signal no match.  Out of line,
+// like the other bufferize helpers: its decomposition stacks make a 4.7 KB
+// frame, which inlined into unified_rewrite_rec_sub would sit on every
+// level of that recursion (see unified_rewrite_rec_extend).
+__attribute__((noinline))
 static Term try_inline_bufferize_1axis_via_decomp(
     UnifiedRewriteState *st, UnifiedSubst const *sub,
     Term inner_buf, Term v, Term addr_term, u32 depth) {
