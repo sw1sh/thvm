@@ -2078,7 +2078,7 @@ fn void cnf_set_wall_deadline(double seconds_from_now) {
   g_cnf_wall_deadline_us = now + (u64)(seconds_from_now * 1e6);
 }
 
-// The same self-abort against a WORK budget (atp_work_now_us: process
+// The same self-abort against a WORK budget (atp_work_peek_us: process
 // CPU, or the instruction count under --work-clock=instr): a caller that
 // budgets the saturation in work time (the FOF pre-pass guard) stops it
 // inside a step at the same point of the search whatever else shares
@@ -2094,7 +2094,7 @@ fn void cnf_set_work_deadline(double seconds_from_now) {
     g_cnf_work_deadline_us = 0u;
     return;
   }
-  g_cnf_work_deadline_us = atp_work_now_us() + (u64)(seconds_from_now * 1e6);
+  g_cnf_work_deadline_us = atp_work_peek_us() + (u64)(seconds_from_now * 1e6);
 }
 
 // The work clock is read on one poll in 64: a CPU-clock read is a
@@ -2114,7 +2114,7 @@ static inline int cnf_wall_fired(void) {
   if (g_cnf_work_deadline_us == 0u || (++g_cnf_work_tick & 0x3fu) != 0u) {
     return 0;
   }
-  return atp_work_now_us() >= g_cnf_work_deadline_us;
+  return atp_work_peek_us() >= g_cnf_work_deadline_us;
 }
 
 // The deadline inside one conclusion's simplification scans: forward

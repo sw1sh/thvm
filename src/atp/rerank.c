@@ -1583,13 +1583,24 @@ static void atp_work_resume(void) {
   }
 }
 
-static u64 atp_work_now_us(void) {
-  g_atp_work_live = 1u;
+// The work clock without arming the windows: a reader outside the
+// engine's disciplines (the FOF front end's budgets, goal-narrow's
+// endgame) reads it here.  Arming makes every trace entry past the cap
+// pay two clock syscalls; a front-end read that armed them cost
+// LCL556+1's fof-sos lane 6.7M reads, a fifth of its CPU.
+static u64 atp_work_peek_us(void) {
   int mode = 0;
   u64 raw = atp_work_raw(&mode);
   u64 eff = (raw > g_atp_work_excl[mode]) ? raw - g_atp_work_excl[mode] : 0u;
-  if (mode == 1) return eff / ATP_WORK_INSTR_PER_US + 1u;
+  if (mode == 1) {
+    return eff / ATP_WORK_INSTR_PER_US + 1u;
+  }
   return eff ? eff : 1u;
+}
+
+static u64 atp_work_now_us(void) {
+  g_atp_work_live = 1u;
+  return atp_work_peek_us();
 }
 
 // THVM_ATP_CLOCK_TRACE=<dir>: one line per clock-gated search decision

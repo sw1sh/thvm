@@ -97,32 +97,39 @@ static void cli_fe_check(const char *stage) {
 
 // The work clock of the front-end budgets that steer the search -- the
 // Horn release budget and its fractions, the clausal pre-pass guard --
-// in seconds: atp_work_now_us, process CPU by default and the
-// deterministic instruction count under --work-clock=instr, so a stage
-// does the same work for the same budget whatever else shares the
-// machine.  On the wall clock the Horn release kept ~55k units in one
-// loaded GEO535+1 run and ~60k in another, and SInE then kept a
-// different clause set.  The wall stays the hard stop.
+// in seconds: atp_work_peek_us (it leaves the engine's --proof windows
+// unarmed), process CPU by default and the deterministic instruction
+// count under --work-clock=instr, less the front end's own windows
+// below, so a stage does the same work for the same budget whatever
+// else shares the machine.  On the wall clock the Horn release kept ~55k
+// units in one loaded GEO535+1 run and ~60k in another, and SInE then
+// kept a different clause set.  The wall stays the hard stop.
+static double g_cli_work_excl   = 0.0;
+static double g_cli_work_pause0 = 0.0;
+
 static double cli_work_now(void) {
-  return (double)atp_work_now_us() * 1e-6;
+  return (double)atp_work_peek_us() * 1e-6 - g_cli_work_excl;
 }
 
 // Exclusion window around one --proof bookkeeping record, open only on
 // the instruction clock.  A window costs two clock reads; on the CPU
 // clock each is a syscall (~1 us on the reference pods) against the
 // ~0.1 us the record takes, so the window would cost the budget more
-// than the record it keeps off it (GEO535+1 --proof: 112k reads, 4% of
-// the Horn release).  On the instruction clock the reads' kernel side
-// is not counted and the window stays exact.
+// than the record it keeps off it (GEO535+1 --proof: 129k reads, 63911
+// units released against the no-proof run's 64135).  On the instruction
+// clock the reads' kernel side is not counted and the window stays
+// exact.  Windows nest.
+static u32 g_cli_work_depth = 0u;
+
 static void cli_work_pause(void) {
-  if (atp_work_mode() == 1) {
-    atp_work_pause();
+  if (atp_work_mode() == 1 && g_cli_work_depth++ == 0u) {
+    g_cli_work_pause0 = (double)atp_work_peek_us() * 1e-6;
   }
 }
 
 static void cli_work_resume(void) {
-  if (atp_work_mode() == 1) {
-    atp_work_resume();
+  if (atp_work_mode() == 1 && g_cli_work_depth > 0u && --g_cli_work_depth == 0u) {
+    g_cli_work_excl += (double)atp_work_peek_us() * 1e-6 - g_cli_work_pause0;
   }
 }
 

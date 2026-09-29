@@ -320,9 +320,9 @@ static int bk_pf_commit_impl(const TpProblem *tp, int id, int gl, int gr,
   return ix;
 }
 static int bk_pf_commit(const TpProblem *tp, int id, int gl, int gr, int lo) {
-  atp_work_pause();   // off the search budget
+  cli_work_pause();   // off the search budget
   int ix = bk_pf_commit_impl(tp, id, gl, gr, lo);
-  atp_work_resume();
+  cli_work_resume();
   return ix;
 }
 
