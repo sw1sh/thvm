@@ -377,37 +377,88 @@ lanes of the CLI's exit-fast lanes, the static replica that T7 checks.
 `FindProof --emit-ifeq10 problem.p` prints a CNF or FOF Horn problem in
 TPTP's -10 unit-equality encoding ([CS18]) and exits.  It is a port of the
 jukebox `horn-to-unit` pipeline that produced TPTP's -10 files (clausifier,
-encoding and output naming, `tools/atp_cli/ifeq10.c`), so the dispatcher
-axioms, names, clause order and goal form are TPTP's.  The FOF front end
-(`fof_prepass.c`) is not used for this: it encodes for proving, with one
-dispatcher and a `false != true` goal.  Exit codes: 0 encoded, 2 input
+encoding and output naming, `tools/atp_cli/ifeq10.c`), written to
+reproduce their dispatcher axioms, names, clause order and goal form.  None
+of it has run yet: the checks below run on pods, and until they pass the
+match with TPTP's files is a claim about the eleven reference cases, with
+the ALL=1 survey as its held-out test.  The FOF front end (`fof_prepass.c`)
+is not used: it encodes for proving, with one dispatcher and a
+`false != true` goal; plan section 5.4 records this departure from the
+wording of M2 deliverable 5.  Exit codes: 0 encoded, 2 input or write
 error, 3 not Horn (the first non-Horn clause is named on stderr), 4 a
 one-element model exists (an SZS Satisfiable line).  The header carries
 the source's Status, mapped (Theorem becomes Unsatisfiable), with the SPC
-that `np0_pool.py` reads.
+that `np0_pool.py` reads, and an Encoding line,
+`% Encoding : dispatchers D, tuples T, predicates P, definitions S`: the
+ifeq dispatchers, the tuple symbols, the predicates turned into functions
+into bool and the clausifier's sP<n> definition predicates.  D = T = P = 0
+means that the source is unit equality already.
+
+On a pod, in this order (the Mac only edits and syntax-checks):
+
+1. `make -f tools/casc/Makefile bin/FindProof` with `CC=gcc` and with
+   `CC=clang-14` (const-object initializers broke clang 14, c59b353b), and
+   the static musl build of `tools/casc/mk_bin_tarball.sh`.
+2. `make bin/test_atp_ifeq10 && bin/test_atp_ifeq10`: the ten cases
+   inlined from TPTP v9.2.1, the exits, the header and Encoding lines.
+3. `TPTP=<TPTP root> ALL=1 tests/atp_ifeq10_tptp.sh bin/FindProof`: the
+   eleven cases (the ten plus SYN143-1) and every other [CS18] pair of the
+   tree outside the J13 stems, judged by the decision rule in the
+   script's header.  A pass writes `bin/FindProof.ifeq10-pass`.
+4. G2.3: ifeq10.c is part of FindProof's translation unit, so `bin/test_atp`
+   in full and the OA and DN pins must not move (the commands are in the
+   lane matrix's `pod_gates.sh`).
+5. `tests/atp_ifeq10_corpus.sh bin/FindProof`: the driver on a fake
+   TPTP-v9.3.1 tree.
+6. Only then the corpus, on the TPTP-v9.3.1 tree:
 
 ```
-make_ifeq10_corpus.sh bin/FindProof <TPTP_root> <out_dir> \
-  ~/.cache/thvm/casc/J13/neural_p0/j13_ueq_names.txt [exclude_names.txt ...]
+P=~/.cache/thvm/casc/J13/neural_p0
+awk -F'\t' '$5 == "heldout" { print $1 }' $P/pool.tsv > devh_names.txt
+awk -F'\t' '$5 == "train" { print $1 }' $P/pool.tsv > pool_train_names.txt
+TRAIN_NAMES=pool_train_names.txt tools/atp_enigma/make_ifeq10_corpus.sh \
+  bin/FindProof <TPTP-v9.3.1 root> <out_dir> $P/j13_ueq_names.txt \
+  devh_names.txt ~/.cache/thvm/enigma/matrix/dev_t.tsv
 ```
 
 walks the tree's CNF and FOF problems with status Unsatisfiable or Theorem
 and writes `TRAIN-X/` and `DEV-X/`, each a TPTP-style root (`Problems/DOM/`,
 emitted name = source name + `-10`) with a `pool.tsv` in `np0_pool.py`'s
-columns, split 80/20 by sha256 of the name stem (the DOMNNN prefix,
-`matrix_tables.py`'s `stem_hash`).  Skipped, with the reason in
-`manifest.tsv`: every stem of a J13 name (which drops the -1/-2/-3 sources
-of J13's -10 theorems), every stem of an `exclude_names` list, problems
-that are unit equality already (the pool's domain) and stems that TPTP
-already ships as -10 problems (the pool holds them).  `summary.txt` counts
-the outcomes (emitted, nonhorn, timeout, ...).  Resumable; pods only.
+columns, split 80/20 by `matrix_tables.py`'s `stem_hash` of the stem.
+Skipped, with the reason in `manifest.tsv`: every stem of a J13 name (which
+drops the -1/-2/-3 sources of J13's -10 theorems), every stem of an
+exclusion list (above: DEV-H and DEV-T, so that neither has an encoded copy
+in the corpus), problems that are unit equality already (by their SPC, or
+after clausification by the Encoding line: the FOF versions of UEQ
+problems), stems that TPTP already ships as -10 problems (the pool holds
+them), and DEV-X problems whose stem occurs in the pool's train split.
+DEV-X is a held-out set: its stems are disjoint from TRAIN-X, J13, DEV-H,
+DEV-T and the pool's train split.  The manifest also carries each source's
+rating (training weights, plan section 3.2), its includes (the axiom sets
+behind the axiom-novel subset, section 1.4) and its number of sP
+definitions (encodings that no TPTP -10 file is a reference for).
+
+The driver fingerprints its inputs (the binary, the lists, the TPTP
+release and problem list, itself, TIMEOUT_S, MEM_MB) and resumes only on
+the same inputs; it requires the pass file of step 3, refuses a tree other
+than TPTP v9.3.1 (T-NEW counts from that release, and at L2 T-NEW must
+also drop every stem that `manifest.tsv` lists as emitted), checks the
+data rule on its own output before it writes `.done`, and writes ALERT
+lines for what can only be an encoder bug: sat1 on an unsatisfiable
+source, nonhorn on an `_HRN` source, a truncated output.
+
+The stem of a name is its DOMNNN prefix (`^[A-Z]{3}[0-9]{3}`).  A tool that
+needs the stem or the split of a corpus problem reads `manifest.tsv` (stem,
+split) or `pool.tsv`, or takes that prefix; it never recomputes either from
+`name.split("-")[0]`, which is `PUZ131+1` for `PUZ131+1-10` and would
+separate a FOF-derived problem from its CNF siblings.  `matrix_tables.py`'s
+`stem()` is that split: it agrees with the prefix on every pool and J13 name
+and is not for corpus names.
 
 `ifeq10_diff.py OURS THEIRS` compares two CNF files modulo clause order and
 variable renaming, and on a miss says whether they agree with generated
-symbols renumbered or ifeq conditions taken as sets.  The encoder's
-reference cases are `tests/test_atp_ifeq10.c` (ten TPTP problems inlined,
-in `make test`) and `tests/atp_ifeq10_tptp.sh` (the same ten from a TPTP
-tree through the binary).
+symbols renumbered or ifeq conditions taken as sets; it exits 2 on an
+unreadable file or a term nested too deep to compare.
 
 ## Typical flow
 

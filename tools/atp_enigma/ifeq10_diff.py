@@ -7,7 +7,7 @@ Built for FindProof --emit-ifeq10 against TPTP's own -10 files.  Each cnf
 record becomes (role, literals) with variables renamed by first occurrence
 inside the clause; the files match when these multisets are equal (clause
 names are ignored, equation orientation is kept).  Exit 0 on a match, 1 on
-a mismatch, 2 on unreadable input.
+a mismatch, 2 on unreadable input or a term nested too deep to compare.
 
 On a mismatch two coarser readings say where the difference lies:
   generated  the generated symbol families (ifeqN, tupleN, sK<n>_..,
@@ -21,7 +21,14 @@ Text processing only.
 """
 import re
 import sys
+import threading
 from collections import Counter
+
+# Parsing and rendering recurse once per nesting level, so they run in a
+# thread with a large stack and a raised limit, and a deeper term exits 2
+# rather than reading as a mismatch.
+DEPTH_LIMIT = 200000
+STACK_BYTES = 256 * 1024 * 1024
 
 TOKEN = re.compile(r"""
     (?P<ws>\s+)
@@ -256,5 +263,31 @@ def main():
     return 1
 
 
+def guarded_main():
+    try:
+        return main()
+    except RecursionError:
+        print("ifeq10_diff: a term is nested deeper than %d levels" % DEPTH_LIMIT,
+              file=sys.stderr)
+        return 2
+    except MemoryError:
+        print("ifeq10_diff: out of memory", file=sys.stderr)
+        return 2
+
+
+def run_deep(fn):
+    sys.setrecursionlimit(DEPTH_LIMIT)
+    threading.stack_size(STACK_BYTES)
+    rc = [2]
+
+    def body():
+        rc[0] = fn()
+
+    t = threading.Thread(target=body)
+    t.start()
+    t.join()
+    return rc[0]
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_deep(guarded_main))
