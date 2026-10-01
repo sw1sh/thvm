@@ -1255,11 +1255,15 @@ class Tensor(metaclass=_TensorMeta):
             dt = dtypes.float32 if reduce == "mean" else self._dtype
             return Tensor(np.zeros(self._shape, dtype=dt.np_dtype), dtype=dt)
         if index.numel() == 0:
-            # Nothing lands.  tinygrad still computes 0 + self for sum and mean
-            # (a -0.0 comes back +0.0) and selects self for reduce=None.
+            # Nothing lands.  tinygrad's sum and mean keep self exactly (a -0.0
+            # stays -0.0; mean in float32), and its reduce=None merge cannot
+            # broadcast the empty one-hot axis (mixin/op.py:1077-1093, 1170-1176).
             if reduce is None:
-                return self * 1
-            return (self.cast(dtypes.float32) if reduce == "mean" else self) + 0
+                moved = list(index._shape) + [self._shape[dim]]
+                moved[dim], moved[-1] = moved[-1], moved[dim]
+                raise IndexError("shape mismatch: objects cannot be broadcast to a single shape "
+                                 f"({tuple(moved)}, {tuple(moved)}, {tuple(self._shape)})")
+            return (self.cast(dtypes.float32) if reduce == "mean" else self) * 1
         if not _native_indexing():
             return self._scatter_host(dim, index, src, reduce, include_self)
         if reduce is None:

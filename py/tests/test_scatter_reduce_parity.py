@@ -456,19 +456,28 @@ class TestScatterReduce(unittest.TestCase):
         self.assertEqual(got.dtype, np.int32)
 
     def test_empty(self):
-        # Nothing lands: sum keeps self, mean gives self as float32.
-        x0 = np.arange(6, dtype=np.float32).reshape(2, 3)
+        # Nothing lands: sum and mean keep self exactly (a -0.0 stays -0.0;
+        # mean in float32), and scatter(reduce=None) raises tinygrad's
+        # IndexError: its one-hot merge cannot broadcast an empty axis.
+        x0 = np.array([[-0.0, 1, -0.0], [2, -0.0, 3]], np.float32)
         idx = Tensor(np.zeros((0, 3), np.int32))
         src = Tensor(np.zeros((0, 3), np.float32))
+        for reduce in ("sum", "mean"):
+            for inc in (True, False):
+                got = Tensor(x0).scatter_reduce(0, idx, src, reduce, include_self=inc).numpy()
+                np.testing.assert_array_equal(got, x0)
+                np.testing.assert_array_equal(np.signbit(got), np.signbit(x0))
         x = Tensor(x0)
         out = x.scatter_reduce(0, idx, src, "sum")
         (out * 2.0).sum().backward()
-        np.testing.assert_array_equal(out.numpy(), x0)
         np.testing.assert_array_equal(x.grad.numpy(), np.full((2, 3), 2.0))
-        np.testing.assert_array_equal(
-            Tensor(x0.astype(np.int32)).scatter_reduce(
-                0, idx, Tensor(np.zeros((0, 3), np.int32)), "mean").numpy(), x0)
-        np.testing.assert_array_equal(Tensor(x0).scatter(0, idx, src).numpy(), x0)
+        xi = np.arange(6, dtype=np.int32).reshape(2, 3)
+        mean = Tensor(xi).scatter_reduce(0, idx, Tensor(np.zeros((0, 3), np.int32)), "mean").numpy()
+        self.assertEqual(mean.dtype, np.float32)
+        np.testing.assert_array_equal(mean, xi.astype(np.float32))
+        for s in (src, 5.0):
+            with self.assertRaisesRegex(IndexError, r"\(\(2, 3, 0\), \(2, 3, 0\), \(2, 3\)\)"):
+                Tensor(x0).scatter(0, idx, s)
         empty = Tensor(np.zeros((0, 3), np.float32)).scatter_reduce(0, idx, src, "sum")
         self.assertEqual(empty.numpy().shape, (0, 3))
 
