@@ -27,16 +27,19 @@
 //   4. NaN: a NaN src never wins (acc < NaN and NaN < acc are false), a NaN
 //      base yields to S where it is combined, and an untouched NaN base
 //      becomes I (MAX(I, NaN) = I), with or without include_self;
-//   5. exact identity bits per dtype (f32, f16, bf16, i32, u32, i8, u8,
-//      bool): an identity-CONST base leaves I's bytes where nothing lands,
-//      and hits equal to I without include_self give I (the f16, bf16 and
-//      bool kernels run on the walker in both modes: the CPU JIT declines
-//      them);
+//   5. exact identity bits per dtype (f32, f16, bf16, fp8e4m3, fp8e5m2,
+//      i32, u32, i8, u8, bool): an identity-CONST base leaves I's stored
+//      bytes where nothing lands (an fp8e5m2 kernel store saturates +-inf to
+//      +-57344, as tinygrad's does, codegen/decomp/dtype.py:127-134), and
+//      hits equal to I without include_self give I (the 16- and 8-bit float
+//      and the bool kernels run on the walker in both modes: the CPU JIT
+//      declines them);
 //   6. kernel shape: one kernel, 2 stores for an identity-CONST base with
 //      include_self and 3 otherwise, no REDUCE, at most max(|base|, |idx|)
 //      iterations per store, no_opts set;
 //   7. operand forms: a computed src (2 kernels), idx expanded from an {E}
-//      tensor, a SHRINK view of the base;
+//      tensor, a SHRINK view of the base, a computed base fused into the
+//      stores;
 //   8. JIT capture, then replays with the index rewritten in place;
 //   9. BEAM=2 AUTOTUNE_CACHE=0: no scatter kernel is searched and the
 //      values stay exact;
@@ -94,6 +97,8 @@ static double load_d(u32 dt, void const *buf, u32 i) {
     case DT_FP32: { f32 v; memcpy(&v, b + 4 * (size_t)i, 4); return (double)v; }
     case DT_FP16: { u16 v; memcpy(&v, b + 2 * (size_t)i, 2); return (double)fp16_to_f32(v); }
     case DT_BF16: { u16 v; memcpy(&v, b + 2 * (size_t)i, 2); return (double)bf16_to_f32(v); }
+    case DT_FP8E4M3: return (double)fp8e4m3_to_f32(b[i]);
+    case DT_FP8E5M2: return (double)fp8e5m2_to_f32(b[i]);
     case DT_INT32: { i32 v; memcpy(&v, b + 4 * (size_t)i, 4); return (double)v; }
     case DT_UINT32: { u32 v; memcpy(&v, b + 4 * (size_t)i, 4); return (double)v; }
     case DT_INT8: return (double)(i8)b[i];
@@ -109,6 +114,8 @@ static void store_d(u32 dt, void *buf, u32 i, double v) {
     case DT_FP32: { f32 x = (f32)v; memcpy(b + 4 * (size_t)i, &x, 4); break; }
     case DT_FP16: { u16 x = f32_to_fp16((f32)v); memcpy(b + 2 * (size_t)i, &x, 2); break; }
     case DT_BF16: { u16 x = f32_to_bf16((f32)v); memcpy(b + 2 * (size_t)i, &x, 2); break; }
+    case DT_FP8E4M3: b[i] = f32_to_fp8e4m3_sat((f32)v); break;
+    case DT_FP8E5M2: b[i] = f32_to_fp8e5m2_sat((f32)v); break;
     case DT_INT32: { i32 x = (i32)v; memcpy(b + 4 * (size_t)i, &x, 4); break; }
     case DT_UINT32: { u32 x = (u32)v; memcpy(b + 4 * (size_t)i, &x, 4); break; }
     case DT_INT8: b[i] = (u8)(i8)v; break;
@@ -118,11 +125,14 @@ static void store_d(u32 dt, void *buf, u32 i, double v) {
   }
 }
 
-// I for `kind` over `dt` as a value: tinygrad dtypes.min / dtypes.max.
+// I for `kind` over `dt` as a value: tinygrad dtypes.min / dtypes.max
+// (fp8e4m3 has no inf: +-448, its largest normal).
 static double ident_d(u32 kind, u32 dt) {
   int mx = (kind == SCATTER_MAX);
   switch (dt) {
-    case DT_FP32: case DT_FP16: case DT_BF16: return mx ? -INFINITY : INFINITY;
+    case DT_FP32: case DT_FP16: case DT_BF16: case DT_FP8E5M2:
+      return mx ? -INFINITY : INFINITY;
+    case DT_FP8E4M3: return mx ? -448.0 : 448.0;
     case DT_INT32: return mx ? -2147483648.0 : 2147483647.0;
     case DT_UINT32: return mx ? 0.0 : 4294967295.0;
     case DT_INT8: return mx ? -128.0 : 127.0;
@@ -131,14 +141,17 @@ static double ident_d(u32 kind, u32 dt) {
   }
 }
 
-// I's storage bytes, written out by hand: the reference never derives them
-// from the runtime.
+// The bytes a kernel stores for I, written out by hand: the reference never
+// derives them from the runtime.  An fp8e5m2 store saturates +-inf to its
+// largest normal, +-57344.
 static u32 ident_storage(u32 kind, u32 dt) {
   int mx = (kind == SCATTER_MAX);
   switch (dt) {
     case DT_FP32: return mx ? 0xFF800000u : 0x7F800000u;
     case DT_FP16: return mx ? 0xFC00u : 0x7C00u;
     case DT_BF16: return mx ? 0xFF80u : 0x7F80u;
+    case DT_FP8E4M3: return mx ? 0xFEu : 0x7Eu;
+    case DT_FP8E5M2: return mx ? 0xFBu : 0x7Bu;
     case DT_INT32: return mx ? 0x80000000u : 0x7FFFFFFFu;
     case DT_UINT32: return mx ? 0u : 0xFFFFFFFFu;
     case DT_INT8: return mx ? 0x80u : 0x7Fu;
@@ -151,7 +164,8 @@ static u32 ident_storage(u32 kind, u32 dt) {
 // bits.
 static u32 ident_payload(u32 kind, u32 dt) {
   if (dtype_is_float(dt)) {
-    f32 v = (kind == SCATTER_MAX) ? -INFINITY : INFINITY;
+    f32 v = (dt == DT_FP8E4M3) ? 448.0f : INFINITY;
+    v = (kind == SCATTER_MAX) ? -v : v;
     u32 bits;
     memcpy(&bits, &v, sizeof bits);
     return bits;
@@ -539,8 +553,8 @@ static void test_identity_and_nan(void) {
 }
 
 // === 5. exact identity bits per dtype ===
-static u32 const DTYPES[8] = { DT_FP32, DT_FP16, DT_BF16, DT_INT32, DT_UINT32,
-                               DT_INT8, DT_UINT8, DT_BOOL };
+static u32 const DTYPES[10] = { DT_FP32, DT_FP16, DT_BF16, DT_FP8E4M3, DT_FP8E5M2,
+                                DT_INT32, DT_UINT32, DT_INT8, DT_UINT8, DT_BOOL };
 
 // n values of dt from a pattern that crosses the dtype's range; every
 // fourth one is I of `kind` when with_ident is set.
@@ -549,7 +563,7 @@ static void gen(u32 dt, u32 kind, u32 n, u32 seed, int with_ident, void *out) {
     u32 h = (q + 1u) * 2654435761u + seed * 40503u;
     double v;
     switch (dt) {
-      case DT_FP32: case DT_FP16: case DT_BF16:
+      case DT_FP32: case DT_FP16: case DT_BF16: case DT_FP8E4M3: case DT_FP8E5M2:
         v = 0.25 * (double)((i32)(h % 41u) - 20);
         break;
       case DT_INT32: v = (double)(i32)h; break;
@@ -570,7 +584,7 @@ static void test_identity_bits(void) {
   Shape bs = shape_of(2, bd), is = shape_of(2, id);
   // Rows 2 and 5 are never written; row 4 only by ids equal to I.
   static i32 const idx[10] = { 1, 0,  -1, 4,  3, 1,  6, 10982377,  0, 3 };
-  for (u32 di = 0; di < 8; di++) {
+  for (u32 di = 0; di < 10; di++) {
     u32 dt = DTYPES[di];
     u32 sz = dtype_itemsize(dt);
     for (u32 k = SCATTER_MAX; k <= SCATTER_MIN; k++) {
@@ -651,6 +665,14 @@ static void test_operand_forms(void) {
       Term  bv = uop_shrink(ten(mk(DT_FP32, &rs, raw)), 2, be);
       snprintf(what, sizeof what, "%s self %u base view", kname(k), s);
       scatter_case(k, DT_FP32, &bs, &is, 0, s, raw + 2 * D, bv, grid, src, 3, what);
+      // A computed base fuses into the stores (one kernel).
+      f32 negb[V * D];
+      for (u32 q = 0; q < V * D; q++) {
+        negb[q] = -base[q];
+      }
+      snprintf(what, sizeof what, "%s self %u computed base", kname(k), s);
+      scatter_case(k, DT_FP32, &bs, &is, 0, s, negb,
+                   uop_unary(UOP_NEG, ten(mk(DT_FP32, &bs, base))), grid, src, 3, what);
     }
   }
 }
