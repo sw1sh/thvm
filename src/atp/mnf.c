@@ -153,32 +153,12 @@ typedef struct AtpMnf {
 // Groundness (no free variables) -- the antiWOVar eligibility test for
 // reversed-rule steps (WM MNF_ConvertRegelToAntiRegel, MNF.c:1419-1430).
 static u8 mnf_term_is_ground(Term t) {
-  if (term_tag(t) == TAG_FVR) return 0u;
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    for (u32 i = 0; i < n; i++) {
-      if (!mnf_term_is_ground(term_ctr_at(t, i))) return 0u;
-    }
-  }
-  return 1u;
+  return (u8)atp_term_is_ground(t);
 }
 
 // Structural hash of a term (FNV-ish mix over the preorder).
 static u32 mnf_hash(Term t) {
-  switch (term_tag(t)) {
-    case TAG_CTR: {
-      u32 h = 0x811c9dc5u ^ (term_ext(t) * 0x01000193u);
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        h = (h ^ mnf_hash(term_ctr_at(t, i))) * 0x01000193u;
-      }
-      return h ^ (n + 0x9e3779b9u);
-    }
-    case TAG_FVR:
-      return (0x2545f491u ^ term_ext(t)) * 0x01000193u;
-    default:
-      return (0xdeadbeefu ^ (u32)term_tag(t)) * 0x01000193u;
-  }
+  return atp_term_fnv32(t);
 }
 
 // Find a node whose term is kbo_eq to `t` (hash `h`); MNF_MAX_NODES if
@@ -200,16 +180,53 @@ static u32 mnf_lookup(const AtpMnf *m, Term t, u32 h) {
 // == term_ext, arity == term_ctr_n by the ft encoding contract; NUM
 // markers never appear in member NFs).
 static u32 mnf_hash_span(const AtpFtCell *c) {
-  if ((c->sym & WF_VAR_BIT) != 0u)
-    return (0x2545f491u ^ (c->sym & ~WF_VAR_BIT)) * 0x01000193u;
-  u32 h = 0x811c9dc5u ^ (ft_ctr_sym(c) * 0x01000193u);
-  u32 n = (u32)c->arity;
-  const AtpFtCell *k = c->next;
-  for (u32 i = 0; i < n; i++) {
-    h = (h ^ mnf_hash_span(k)) * 0x01000193u;
-    k = k->end->next;
+  // `h` per open CTR cell: child hashes fold in as they finish.
+  typedef struct { const AtpFtCell *child; u32 left; u32 n; u32 h; } SpanHashFrame;
+  SpanHashFrame  fr_inl[FT_WALK_INL];
+  SpanHashFrame *fr  = fr_inl;
+  u32            nfr = 0u;
+  u32            cfr = FT_WALK_INL;
+  u32            v   = 0u;
+  for (;;) {
+    u8 leaf = 1u;
+    if ((c->sym & WF_VAR_BIT) != 0u) {
+      v = (0x2545f491u ^ (c->sym & ~WF_VAR_BIT)) * 0x01000193u;
+    } else {
+      u32 h = 0x811c9dc5u ^ (ft_ctr_sym(c) * 0x01000193u);
+      u32 n = (u32)c->arity;
+      if (n == 0u) {
+        v = h ^ 0x9e3779b9u;
+      } else {
+        if (nfr == cfr) {
+          fr = (SpanHashFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].child = c->next;
+        fr[nfr].left  = n;
+        fr[nfr].n     = n;
+        fr[nfr].h     = h;
+        nfr++;
+        leaf = 0u;
+      }
+    }
+    if (leaf) {
+      while (nfr > 0u) {
+        SpanHashFrame *f = &fr[nfr - 1u];
+        f->h = (f->h ^ v) * 0x01000193u;
+        if (f->left > 0u) break;
+        v = f->h ^ (f->n + 0x9e3779b9u);
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    SpanHashFrame *f = &fr[nfr - 1u];
+    c        = f->child;
+    f->child = c->end->next;
+    f->left--;
   }
-  return h ^ (n + 0x9e3779b9u);
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 
 // Span-subject lookup: same probe sequence as mnf_lookup, the exact

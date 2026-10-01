@@ -203,6 +203,20 @@ static Term atp_ic_rewrite_try_top(Term t, const Term *lhs, const Term *rhs,
   return t;
 }
 
+// Explicit-stack walks over heap Terms (this file and the ATP modules
+// included after it): a CTR whose children are being visited, child i
+// at heap_read(base + 1 + i).  Frames start in ATP_WALK_INL entries on
+// the C stack and move to the heap only for a deeper term
+// (term_stack_grow), so term depth costs heap, never C stack.  Each walk
+// visits in the recursion's left-to-right depth-first order.
+enum { ATP_WALK_INL = 64 };
+typedef struct {
+  Term t;
+  u64  base;
+  u32  i;
+  u32  n;
+} AtpWalkFrame;
+
 // 8.3e-ii: IC-routed analog of `thvm_rewrite_step`.  Same outermost-
 // leftmost strategy (try top, else descend into CTR children
 // left-to-right); per-rule matching dispatches through APP-PRI
@@ -210,26 +224,57 @@ static Term atp_ic_rewrite_try_top(Term t, const Term *lhs, const Term *rhs,
 // (parity-tested in `tests/test_atp.c`).
 static Term atp_ic_rewrite_step(Term t, const Term *lhs, const Term *rhs,
                             u32 n_rules) {
-  u8 fired = 0;
-  Term r = atp_ic_rewrite_try_top(t, lhs, rhs, n_rules, &fired);
-  if (fired) return r;
-
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    if (n > REWRITE_MAX_ARITY) return t;
-    Term children[REWRITE_MAX_ARITY];
-    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
-    for (u32 i = 0; i < n; i++) {
-      Term original = children[i];
-      Term rewritten = atp_ic_rewrite_step(original, lhs, rhs, n_rules);
-      if (!kbo_eq(rewritten, original)) {
-        children[i] = rewritten;
-        return term_new_ctr(term_ext(t), children, n);
+  // One frame per open CTR (`i` = the child being stepped): a child's
+  // result returns to its frame, which rebuilds around a changed child
+  // and returns in turn, or moves on to the next child.
+  AtpWalkFrame  fr_inl[ATP_WALK_INL];
+  AtpWalkFrame *fr  = fr_inl;
+  u32           nfr = 0u;
+  u32           cfr = ATP_WALK_INL;
+  Term          res;
+  for (;;) {
+    u8 fired = 0;
+    res = atp_ic_rewrite_try_top(t, lhs, rhs, n_rules, &fired);
+    if (!fired) {
+      u32 n = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+      if (n > 0u && n <= REWRITE_MAX_ARITY) {
+        if (nfr == cfr) {
+          fr = (AtpWalkFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].t    = t;
+        fr[nfr].base = term_val(t);
+        fr[nfr].i    = 0u;
+        fr[nfr].n    = n;
+        nfr++;
+        t = heap_read(term_val(t) + 1u);
+        continue;
       }
+      res = t;
+    }
+    for (;;) {
+      if (nfr == 0u) {
+        term_stack_release(fr, fr_inl);
+        return res;
+      }
+      AtpWalkFrame *f = &fr[nfr - 1u];
+      if (!kbo_eq(res, heap_read(f->base + 1u + (u64)f->i))) {
+        Term children[REWRITE_MAX_ARITY];
+        for (u32 k = 0; k < f->n; k++) {
+          children[k] = (k == f->i) ? res : heap_read(f->base + 1u + (u64)k);
+        }
+        res = term_new_ctr(term_ext(f->t), children, f->n);
+        nfr--;
+        continue;
+      }
+      f->i++;
+      if (f->i < f->n) {
+        t = heap_read(f->base + 1u + (u64)f->i);
+        break;
+      }
+      res = f->t;
+      nfr--;
     }
   }
-
-  return t;
 }
 
 // 8.3e-ii: IC-routed rewrite normalization.  Iterates
@@ -527,24 +572,121 @@ static u32 g_atp_unf_memo_epoch = 1u;
 static u32 g_atp_unf_step_epoch = 1u;
 static u32 g_atp_last_r_revision = 0u;
 
-// Bounded preorder FNV-64 hash.  Recurses to subterms; on Sheffer-size
-// terms (<= 100 symbols) the cost is O(|term|) and amortizes well
-// against the saved per-position unorientable scan.
+// Bounded preorder FNV-64 hash, folded post-order over an explicit
+// stack; on Sheffer-size terms (<= 100 symbols) the cost is O(|term|)
+// and amortizes well against the saved per-position unorientable scan.
 static u64 atp_term_struct_hash(Term t) {
-  switch (term_tag(t)) {
-    case TAG_CTR: {
-      u64 h = 0xcbf29ce484222325ull ^ ((u64)term_ext(t) * 0x100000001b3ull);
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        h ^= atp_term_struct_hash(term_ctr_at(t, i));
-        h *= 0x100000001b3ull;
+  // `h` per open CTR: child hashes fold in as they finish.
+  typedef struct { u64 base; u32 i; u32 n; u64 h; } HashFrame;
+  HashFrame  fr_inl[ATP_WALK_INL];
+  HashFrame *fr  = fr_inl;
+  u32        nfr = 0u;
+  u32        cfr = ATP_WALK_INL;
+  u64        v   = 0u;
+  for (;;) {
+    u8 leaf = 1u;
+    switch (term_tag(t)) {
+      case TAG_CTR: {
+        u64 h = 0xcbf29ce484222325ull ^ ((u64)term_ext(t) * 0x100000001b3ull);
+        u32 n = term_ctr_n(t);
+        if (n == 0u) {
+          v = h;
+        } else {
+          if (nfr == cfr) {
+            fr = (HashFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].base = term_val(t);
+          fr[nfr].i    = 0u;
+          fr[nfr].n    = n;
+          fr[nfr].h    = h;
+          nfr++;
+          leaf = 0u;
+        }
+        break;
       }
-      return h ^ ((u64)n * 0x9e3779b97f4a7c15ull);
+      case TAG_FVR:
+        v = 0xfacefacefaceull ^ ((u64)term_ext(t) * 0x100000001b3ull);
+        break;
+      default:
+        v = 0xdeadbeefcafebabeull ^ ((u64)term_tag(t) * 0x100000001b3ull);
+        break;
     }
-    case TAG_FVR:
-      return 0xfacefacefaceull ^ ((u64)term_ext(t) * 0x100000001b3ull);
-    default:
-      return 0xdeadbeefcafebabeull ^ ((u64)term_tag(t) * 0x100000001b3ull);
+    if (leaf) {
+      while (nfr > 0u) {
+        HashFrame *f = &fr[nfr - 1u];
+        f->h ^= v;
+        f->h *= 0x100000001b3ull;
+        if (++f->i < f->n) break;
+        v = f->h ^ ((u64)f->n * 0x9e3779b97f4a7c15ull);
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    HashFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
   }
+  term_stack_release(fr, fr_inl);
+  return v;
+}
+
+// 32-bit structural hash (an FNV-ish mix, folded post-order): CTR
+// h = (0x811c9dc5 ^ lab*P), then h = (h ^ child)*P per child, finally
+// h ^ (n + 0x9e3779b9); FVR (0x2545f491 ^ id)*P; any other tag
+// (0xdeadbeef ^ tag)*P.  The connectedness BFS (atp_struct_hash) and
+// the MNF node table (mnf_hash) key on it.
+static u32 atp_term_fnv32(Term t) {
+  typedef struct { u64 base; u32 i; u32 n; u32 h; } Fnv32Frame;
+  Fnv32Frame  fr_inl[ATP_WALK_INL];
+  Fnv32Frame *fr  = fr_inl;
+  u32         nfr = 0u;
+  u32         cfr = ATP_WALK_INL;
+  u32         v   = 0u;
+  for (;;) {
+    u8 leaf = 1u;
+    switch (term_tag(t)) {
+      case TAG_CTR: {
+        u32 h = 0x811c9dc5u ^ (term_ext(t) * 0x01000193u);
+        u32 n = term_ctr_n(t);
+        if (n == 0u) {
+          v = h ^ 0x9e3779b9u;
+        } else {
+          if (nfr == cfr) {
+            fr = (Fnv32Frame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].base = term_val(t);
+          fr[nfr].i    = 0u;
+          fr[nfr].n    = n;
+          fr[nfr].h    = h;
+          nfr++;
+          leaf = 0u;
+        }
+        break;
+      }
+      case TAG_FVR:
+        v = (0x2545f491u ^ term_ext(t)) * 0x01000193u;
+        break;
+      default:
+        v = (0xdeadbeefu ^ (u32)term_tag(t)) * 0x01000193u;
+        break;
+    }
+    if (leaf) {
+      while (nfr > 0u) {
+        Fnv32Frame *f = &fr[nfr - 1u];
+        f->h = (f->h ^ v) * 0x01000193u;
+        if (++f->i < f->n) break;
+        v = f->h ^ (f->n + 0x9e3779b9u);
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    Fnv32Frame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
+  }
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 

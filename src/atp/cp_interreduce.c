@@ -83,17 +83,28 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
 // fallback bit 63 ("any").  Used by atp_cp_set_interreduce's incremental
 // fast-path to skip CPs that cannot be rewritten by recently-added rules.
 static u64 atp_term_sym_bitmap(Term t) {
-  if (t == 0u) return 0u;
-  switch (term_tag(t)) {
-    case TAG_CTR: {
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u64   m   = 0u;
+  for (;;) {
+    if (t != 0u && term_tag(t) == TAG_CTR) {
       u32 lab = term_ext(t);
-      u64 m = (lab < 63u) ? ((u64)1 << lab) : ((u64)1 << 63u);
+      m |= (lab < 63u) ? ((u64)1 << lab) : ((u64)1 << 63u);
       u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) m |= atp_term_sym_bitmap(term_ctr_at(t, i));
-      return m;
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = 0; i < n; i++) st[nst++] = term_ctr_at(t, i);
     }
-    default: return 0u;
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return m;
 }
 
 // Should the budget-disciplined CP-set sweep run now?  A faithful port

@@ -5,33 +5,67 @@
 
 // Does variable id `id` occur in `t`?
 static int atp_term_has_var(Term t, u32 id) {
-  switch (term_tag(t)) {
-    case TAG_FVR: return term_ext(t) == id;
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        if (atp_term_has_var(term_ctr_at(t, i), id)) return 1;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  int   hit = 0;
+  for (;;) {
+    switch (term_tag(t)) {
+      case TAG_FVR:
+        hit = (term_ext(t) == id);
+        break;
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
       }
-      return 0;
+      default:
+        break;
     }
-    default: return 0;
+    if (hit || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 // Every variable of `a` also occurs in `b`?  A rewrite direction is
 // variable-safe only when the result side's variables are contained
 // in the matched side's -- else the rewrite would introduce variables.
 static int atp_vars_contained(Term a, Term b) {
-  switch (term_tag(a)) {
-    case TAG_FVR: return atp_term_has_var(b, term_ext(a));
-    case TAG_CTR: {
-      u32 n = term_ctr_n(a);
-      for (u32 i = 0; i < n; i++) {
-        if (!atp_vars_contained(term_ctr_at(a, i), b)) return 0;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  int   all = 1;
+  for (;;) {
+    switch (term_tag(a)) {
+      case TAG_FVR:
+        all = atp_term_has_var(b, term_ext(a));
+        break;
+      case TAG_CTR: {
+        u32 n = term_ctr_n(a);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(a, i);
+        break;
       }
-      return 1;
+      default:
+        break;
     }
-    default: return 1;
+    if (!all || nst == 0u) {
+      break;
+    }
+    a = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return all;
 }
 #endif /* ATP_ORDERED_REWRITE || ATP_MNF */
 
@@ -281,36 +315,68 @@ static Term atp_ordered_try_top(AtpState *s, Term t,
 static Term atp_ordered_rewrite_step(AtpState *s, Term t,
                                      const Term *lhs, const Term *rhs,
                                      u32 n_rules, u8 *fired) {
-  // DIAG (THVM_ATP_NORMLOG): trip when a normalize subject grows large, to
-  // locate the rule-250 lazy-normalize blowup (grow-per-step vs many-steps).
-  {
-    static int dl = -1; static u32 mx = 0u;
-    if (dl < 0) dl = (getenv("THVM_ATP_NORMLOG") != NULL) ? 1 : 0;
-    if (dl) { u32 sz = atp_symbol_count(t);
-      if (sz > mx && sz > 5000u) { mx = sz;
-        fprintf(stderr, "NORMLOG t_size=%u\n", sz); } }
-  }
-  Term top = atp_ordered_try_top(s, t, lhs, rhs, n_rules, fired);
-  if (*fired) return top;
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    if (n > REWRITE_MAX_ARITY) { *fired = 0; return t; }
-    for (u32 i = 0; i < n; i++) {
-      u8 cf = 0;
-      Term nch = atp_ordered_rewrite_step(s, term_ctr_at(t, i),
-                                          lhs, rhs, n_rules, &cf);
-      if (cf) {
-        Term children[REWRITE_MAX_ARITY];
-        for (u32 j = 0; j < n; j++) {
-          children[j] = (j == i) ? nch : term_ctr_at(t, j);
+  // One frame per open CTR (`i` = the child being stepped): the first
+  // child that fires is rebuilt into its parent, which returns fired in
+  // turn; a quiet child passes to the next sibling.
+  AtpWalkFrame  fr_inl[ATP_WALK_INL];
+  AtpWalkFrame *fr  = fr_inl;
+  u32           nfr = 0u;
+  u32           cfr = ATP_WALK_INL;
+  Term          res;
+  u8            hit;
+  for (;;) {
+    // DIAG (THVM_ATP_NORMLOG): trip when a normalize subject grows large, to
+    // locate the rule-250 lazy-normalize blowup (grow-per-step vs many-steps).
+    {
+      static int dl = -1; static u32 mx = 0u;
+      if (dl < 0) dl = (getenv("THVM_ATP_NORMLOG") != NULL) ? 1 : 0;
+      if (dl) { u32 sz = atp_symbol_count(t);
+        if (sz > mx && sz > 5000u) { mx = sz;
+          fprintf(stderr, "NORMLOG t_size=%u\n", sz); } }
+    }
+    hit = 0;
+    res = atp_ordered_try_top(s, t, lhs, rhs, n_rules, &hit);
+    if (!hit) {
+      u32 n = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+      if (n > 0u && n <= REWRITE_MAX_ARITY) {
+        if (nfr == cfr) {
+          fr = (AtpWalkFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
         }
-        *fired = 1;
-        return term_new_ctr(term_ext(t), children, n);
+        fr[nfr].t    = t;
+        fr[nfr].base = term_val(t);
+        fr[nfr].i    = 0u;
+        fr[nfr].n    = n;
+        nfr++;
+        t = heap_read(term_val(t) + 1u);
+        continue;
       }
+      res = t;
+    }
+    for (;;) {
+      if (nfr == 0u) {
+        term_stack_release(fr, fr_inl);
+        *fired = hit;
+        return res;
+      }
+      AtpWalkFrame *f = &fr[nfr - 1u];
+      if (hit) {
+        Term children[REWRITE_MAX_ARITY];
+        for (u32 j = 0; j < f->n; j++) {
+          children[j] = (j == f->i) ? res : heap_read(f->base + 1u + (u64)j);
+        }
+        res = term_new_ctr(term_ext(f->t), children, f->n);
+        nfr--;
+        continue;
+      }
+      f->i++;
+      if (f->i < f->n) {
+        t = heap_read(f->base + 1u + (u64)f->i);
+        break;
+      }
+      res = f->t;
+      nfr--;
     }
   }
-  *fired = 0;
-  return t;
 }
 
 // Ordered normalization to fixpoint.  step_cap is a safety bound only
@@ -513,17 +579,27 @@ static Term atp_rewrite_normalize_ordered(AtpState *s, Term t,
 // ("classification heuristics") -- the simplest CP-priority
 // function: cheapest-by-size wins.
 static u32 atp_symbol_count(Term t) {
-  switch (term_tag(t)) {
-    case TAG_CTR: {
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u32   c   = 0u;
+  for (;;) {
+    c++;   // one per node: FVR / atoms / NUM / CTR head
+    if (term_tag(t) == TAG_CTR) {
       u32 n = term_ctr_n(t);
-      u32 c = 1;
-      for (u32 i = 0; i < n; i++) {
-        c += atp_symbol_count(term_ctr_at(t, i));
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      return c;
+      for (u32 i = 0; i < n; i++) st[nst++] = term_ctr_at(t, i);
     }
-    default: return 1;   // FVR / atoms / NUM / etc.
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return c;
 }
 
 // Capped variant: accumulate `t`'s node count into *acc, stopping the
@@ -532,14 +608,26 @@ static u32 atp_symbol_count(Term t) {
 // result >= cap iff the true count is -- while an over-cap giant pays
 // O(cap) instead of O(|t|).
 static void atp_symbol_count_upto(Term t, u32 cap, u32 *acc) {
-  if (*acc >= cap) return;
-  (*acc)++;
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    for (u32 i = 0; i < n && *acc < cap; i++) {
-      atp_symbol_count_upto(term_ctr_at(t, i), cap, acc);
+  // Preorder count that stops for good once *acc reaches cap.
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  while (*acc < cap) {
+    (*acc)++;
+    if (term_tag(t) == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
     }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
 }
 
 // Same node count as atp_symbol_count, but with Twee's shared-subterm
@@ -642,26 +730,72 @@ static u8 atp_twee_sd_on(void) {
 // Deep structural containment: does needle occur as a subterm of hay?
 // Both are TAG_CTR trees; equality is label + arity + children.
 static u8 atp_twee_sd_eq(Term a, Term b) {
-  if (a == b) return 1u;
-  u32 ta = term_tag(a), tb = term_tag(b);
-  if (ta != tb) return 0u;
-  if (ta == TAG_FVR || ta == TAG_NUM) return term_ext(a) == term_ext(b) &&
-                                             term_val(a) == term_val(b);
-  if (ta != TAG_CTR) return 0u;
-  if (term_ext(a) != term_ext(b)) return 0u;
-  u32 n = term_ctr_n(a);
-  if (n != term_ctr_n(b)) return 0u;
-  for (u32 i = 0; i < n; i++)
-    if (!atp_twee_sd_eq(term_ctr_at(a, i), term_ctr_at(b, i))) return 0u;
-  return 1u;
+  typedef struct { Term a; Term b; } SdPair;
+  SdPair  st_inl[ATP_WALK_INL];
+  SdPair *st  = st_inl;
+  u32     nst = 0u;
+  u32     cst = ATP_WALK_INL;
+  u8      eq  = 1u;
+  for (;;) {
+    if (a != b) {
+      u32 ta = term_tag(a), tb = term_tag(b);
+      if (ta != tb) {
+        eq = 0u;
+      } else if (ta == TAG_FVR || ta == TAG_NUM) {
+        eq = (u8)(term_ext(a) == term_ext(b) && term_val(a) == term_val(b));
+      } else if (ta != TAG_CTR || term_ext(a) != term_ext(b)) {
+        eq = 0u;
+      } else {
+        u32 n = term_ctr_n(a);
+        if (n != term_ctr_n(b)) {
+          eq = 0u;
+        } else {
+          while (nst + n > cst) {
+            st = (SdPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+          }
+          for (u32 i = n; i-- > 0u;) {
+            st[nst].a = term_ctr_at(a, i);
+            st[nst].b = term_ctr_at(b, i);
+            nst++;
+          }
+        }
+      }
+    }
+    if (!eq || nst == 0u) {
+      break;
+    }
+    nst--;
+    a = st[nst].a;
+    b = st[nst].b;
+  }
+  term_stack_release(st, st_inl);
+  return eq;
 }
 static u8 atp_twee_sd_contains(Term hay, Term needle) {
-  if (atp_twee_sd_eq(hay, needle)) return 1u;
-  if (term_tag(hay) != TAG_CTR) return 0u;
-  u32 n = term_ctr_n(hay);
-  for (u32 i = 0; i < n; i++)
-    if (atp_twee_sd_contains(term_ctr_at(hay, i), needle)) return 1u;
-  return 0u;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u8    hit = 0u;
+  for (;;) {
+    if (atp_twee_sd_eq(hay, needle)) {
+      hit = 1u;
+      break;
+    }
+    if (term_tag(hay) == TAG_CTR) {
+      u32 n = term_ctr_n(hay);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(hay, i);
+    }
+    if (nst == 0u) {
+      break;
+    }
+    hay = st[--nst];
+  }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 // Twee size' with the structural discount, literal port: preorder

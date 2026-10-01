@@ -1077,6 +1077,13 @@ $(BIN)/test_atp_session_reuse: tests/test_atp_session_reuse.c \
 	  -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)
 
+# Deep-term walks pinned to their recursive originals, in FindProof's
+# configuration (AC and MNF compiled in).
+$(BIN)/test_atp_deep: tests/test_atp_deep.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC -DATP_MNF \
+	  -o $@ $< $(TEST_LDFLAGS)
+
 # FindProof: WL-independent ATP CLI (the CASC UEQ entry) with the
 # TFindProof-Method knob surface over the same engine + configuration
 # path as the bench (includes its TU, so a CLI run with equal knobs is

@@ -948,6 +948,718 @@ static int ref_atp_term_label_set(Term t, u64 *labels) {
   }
   return 0;
 }
+static Term ref_atp_ic_rewrite_step(Term t, const Term *lhs, const Term *rhs,
+                            u32 n_rules);
+static u64 ref_atp_term_struct_hash(Term t);
+static u8 ref_atp_cp_perm_subsumed(Term lhs, Term rhs);
+static u32 ref_atp_struct_hash(Term t);
+static u32 ref_atp_conn_successors(AtpState *s, Term t, Term peak,
+                               Term *out_buf, u32 *n, u32 cap);
+static u8 ref_mnf_term_is_ground(Term t);
+static u32 ref_mnf_hash(Term t);
+static u32 ref_mnf_hash_span(const AtpFtCell *c);
+static int ref_atp_term_has_var(Term t, u32 id);
+static int ref_atp_vars_contained(Term a, Term b);
+static Term ref_atp_ordered_rewrite_step(AtpState *s, Term t,
+                                     const Term *lhs, const Term *rhs,
+                                     u32 n_rules, u8 *fired);
+static u32 ref_atp_symbol_count(Term t);
+static void ref_atp_symbol_count_upto(Term t, u32 cap, u32 *acc);
+static u8 ref_atp_twee_sd_eq(Term a, Term b);
+static u8 ref_atp_twee_sd_contains(Term hay, Term needle);
+static u32 ref_atp_term_depth(Term t);
+static int ref_atp_var_occurs(Term t, u32 var_id);
+static u32 ref_atp_unif_measure_rec(Term a, Term b, u32 d);
+static u32 ref_atp_goal_match_cov(Term pat, Term subj, RewriteSubst base);
+static u32 ref_atp_goal_doppel(Term cl, Term cr, Term sx, Term gy,
+                           RewriteSubst base);
+static void ref_atp_goal_sub_collect_rec(AtpState *s, Term t);
+static u32 ref_atp_goal_subterm_overlap_rec(const AtpState *s, Term t, u32 best);
+static u32 ref_atp_ladr_nest(Term t);
+static u32 ref_atp_ladr_depth(Term t);
+static u32 ref_atp_ladr_nest_ft(const AtpFtCell *t);
+static u32 ref_atp_ladr_depth_ft(const AtpFtCell *t);
+static Term ref_atp_grounded_instance(AtpState *s, Term t, Term lhs,
+                                  Term min_const);
+static AtpFtCell *ref_ft_ground_absent_vars(AtpFt *a, const AtpFtCell *t,
+                                        const AtpFtCell *keep, u32 mc,
+                                        u8 *changed);
+static int ref_atp_lr_sortieren_rec(Term lhs, Term rhs);
+static int ref_atp_lr_sortieren_rec_ft(const AtpFtCell *lhs,
+                                   const AtpFtCell *rhs);
+static u8 ref_atp_term_has_ctr(Term t, u32 ext);
+static void ref_atp_sym_mask_collect(Term t, u32 mask[8]);
+static int ref_atp_term_touches_goal(const AtpState *s, Term t);
+static u64 ref_atp_term_sym_bitmap(Term t);
+static u8 ref_atp_mgu_reducible(AtpState *s, Term face, Term peak);
+
+// src/atp/prim.c:211
+static Term ref_atp_ic_rewrite_step(Term t, const Term *lhs, const Term *rhs,
+                            u32 n_rules) {
+  u8 fired = 0;
+  Term r = atp_ic_rewrite_try_top(t, lhs, rhs, n_rules, &fired);
+  if (fired) return r;
+
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) return t;
+    Term children[REWRITE_MAX_ARITY];
+    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
+    for (u32 i = 0; i < n; i++) {
+      Term original = children[i];
+      Term rewritten = ref_atp_ic_rewrite_step(original, lhs, rhs, n_rules);
+      if (!kbo_eq(rewritten, original)) {
+        children[i] = rewritten;
+        return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+
+  return t;
+}
+
+// src/atp/prim.c:533
+static u64 ref_atp_term_struct_hash(Term t) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u64 h = 0xcbf29ce484222325ull ^ ((u64)term_ext(t) * 0x100000001b3ull);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        h ^= ref_atp_term_struct_hash(term_ctr_at(t, i));
+        h *= 0x100000001b3ull;
+      }
+      return h ^ ((u64)n * 0x9e3779b97f4a7c15ull);
+    }
+    case TAG_FVR:
+      return 0xfacefacefaceull ^ ((u64)term_ext(t) * 0x100000001b3ull);
+    default:
+      return 0xdeadbeefcafebabeull ^ ((u64)term_tag(t) * 0x100000001b3ull);
+  }
+}
+
+// src/atp/diag.c:370
+static u8 ref_atp_cp_perm_subsumed(Term lhs, Term rhs) {
+  if (lhs == rhs) return 0;                      // identical handled elsewhere
+#ifdef THVM_ATP_AC
+  // WM-faithful path: when the AC operators have been detected and
+  // registered in the perm-subsume mask (thvm_atp_set_perm_subsume_mask
+  // from thvm_atp_auto_ac), use the full flattened AC-dispensability
+  // test (GZ_ACVerzichtbar).  This catches the n-ary associativity
+  // permutations the binary swap below misses.  The mask is a LOCAL
+  // AtpAcInfo, NOT the engine-global g_atp_ac_info -- so the engine
+  // stays in standard (non-AC) completion exactly like Waldmeister.
+  if (g_atp_perm_subsume_mask != 0ull) {
+    AtpAcInfo ac = { .ac_mask = g_atp_perm_subsume_mask };
+    return atp_cp_ac_dispensable(lhs, rhs, &ac);
+  }
+#endif
+  if (term_tag(lhs) != TAG_CTR || term_tag(rhs) != TAG_CTR) return 0;
+  if (term_ext(lhs) != term_ext(rhs)) return 0;
+  // Per-symbol mask gate: when set, only fire perm_sub for symbols in
+  // the mask.  Top-symbol bit outside the mask -> keep (return 0).
+  if (g_atp_perm_subsume_mask != 0ull) {
+    u32 lab = term_ext(lhs);
+    if (lab >= 64u || ((g_atp_perm_subsume_mask >> lab) & 1ull) == 0ull) {
+      return 0;
+    }
+  }
+  u32 nl = term_ctr_n(lhs), nr = term_ctr_n(rhs);
+  if (nl != nr || nl != 2u) return 0;
+  Term l0 = term_ctr_at(lhs, 0), l1 = term_ctr_at(lhs, 1);
+  Term r0 = term_ctr_at(rhs, 0), r1 = term_ctr_at(rhs, 1);
+  // Two children are AC-same iff structurally equal OR they themselves
+  // are an AC-permutation -- recurse.  This catches deep commutativity.
+  u8 l0_r0 = kbo_eq(l0, r0) || ref_atp_cp_perm_subsumed(l0, r0);
+  u8 l1_r1 = kbo_eq(l1, r1) || ref_atp_cp_perm_subsumed(l1, r1);
+  if (l0_r0 && l1_r1) {
+    // Identical (as multisets, same order):  caller (trivial-join /
+    // duplicate-rule guard) handles this; we don't drop it because
+    // the equation is `t = t` which should have been spotted upstream.
+    // But pure structural equality (l0 == r0 && l1 == r1 with no
+    // perm) is already caught earlier; this branch fires only when
+    // the children are AC-equal under deeper permutation.  Treat it
+    // as perm-subsumed: the equation says nothing new beyond what
+    // its (already-derived) children-AC-equality said.
+    return 1;
+  }
+  u8 l0_r1 = kbo_eq(l0, r1) || ref_atp_cp_perm_subsumed(l0, r1);
+  u8 l1_r0 = kbo_eq(l1, r0) || ref_atp_cp_perm_subsumed(l1, r0);
+  return l0_r1 && l1_r0;
+}
+
+// src/atp/diag.c:495
+static u32 ref_atp_struct_hash(Term t) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 h = 0x811c9dc5u ^ (term_ext(t) * 0x01000193u);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        h = (h ^ ref_atp_struct_hash(term_ctr_at(t, i))) * 0x01000193u;
+      }
+      return h ^ (n + 0x9e3779b9u);
+    }
+    case TAG_FVR:
+      return (0x2545f491u ^ term_ext(t)) * 0x01000193u;
+    default:
+      return (0xdeadbeefu ^ (u32)term_tag(t)) * 0x01000193u;
+  }
+}
+
+// src/atp/diag.c:516
+static u32 ref_atp_conn_successors(AtpState *s, Term t, Term peak,
+                               Term *out_buf, u32 *n, u32 cap) {
+  u32 size = 1u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 m = term_ctr_n(t);
+    if (m > REWRITE_MAX_ARITY) return size;
+    for (u32 i = 0; i < m; i++) {
+      u32 base = *n;
+      (void)ref_atp_conn_successors(s, term_ctr_at(t, i), peak, out_buf, n, cap);
+      for (u32 k = base; k < *n; k++) {
+        Term ch[REWRITE_MAX_ARITY];
+        for (u32 c = 0; c < m; c++) {
+          ch[c] = (c == i) ? out_buf[k] : term_ctr_at(t, c);
+        }
+        out_buf[k] = term_new_ctr(term_ext(t), ch, m);
+      }
+    }
+  }
+  for (u32 j = 0; j < s->n_rules && *n < cap; j++) {
+    RewriteSubst sub = {{0}};
+    if (thvm_match(s->lhs[j], t, &sub)) {                 // l -> r
+      Term repl = thvm_subst_apply(s->rhs[j], &sub);
+      out_buf[(*n)++] = repl;
+    }
+    if (*n >= cap) break;
+    if (ref_atp_vars_contained(s->lhs[j], s->rhs[j])) {       // r -> l (var-safe)
+      RewriteSubst sb = {{0}};
+      if (thvm_match(s->rhs[j], t, &sb)) {
+        Term repl = thvm_subst_apply(s->lhs[j], &sb);
+        out_buf[(*n)++] = repl;
+      }
+    }
+  }
+  // NOTE: no peak gate here.  Inner-position steps are wrapped back
+  // into the parent by the recursion above, so a bare-reduct compare
+  // gates the WRONG term -- the criterion constrains the FULL rewritten
+  // term, which only the BFS caller sees (it filters every successor
+  // against the peak before insertion).  The earlier per-reduct gate
+  // admitted >=-peak intermediates and over-dropped: McCune
+  // Associativity falsely SATURATED under THVM_ATP_CONNECT=1.
+  return size;
+}
+
+// src/atp/mnf.c:155
+static u8 ref_mnf_term_is_ground(Term t) {
+  if (term_tag(t) == TAG_FVR) return 0u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      if (!ref_mnf_term_is_ground(term_ctr_at(t, i))) return 0u;
+    }
+  }
+  return 1u;
+}
+
+// src/atp/mnf.c:167
+static u32 ref_mnf_hash(Term t) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 h = 0x811c9dc5u ^ (term_ext(t) * 0x01000193u);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        h = (h ^ ref_mnf_hash(term_ctr_at(t, i))) * 0x01000193u;
+      }
+      return h ^ (n + 0x9e3779b9u);
+    }
+    case TAG_FVR:
+      return (0x2545f491u ^ term_ext(t)) * 0x01000193u;
+    default:
+      return (0xdeadbeefu ^ (u32)term_tag(t)) * 0x01000193u;
+  }
+}
+
+// src/atp/mnf.c:202
+static u32 ref_mnf_hash_span(const AtpFtCell *c) {
+  if ((c->sym & WF_VAR_BIT) != 0u)
+    return (0x2545f491u ^ (c->sym & ~WF_VAR_BIT)) * 0x01000193u;
+  u32 h = 0x811c9dc5u ^ (ft_ctr_sym(c) * 0x01000193u);
+  u32 n = (u32)c->arity;
+  const AtpFtCell *k = c->next;
+  for (u32 i = 0; i < n; i++) {
+    h = (h ^ ref_mnf_hash_span(k)) * 0x01000193u;
+    k = k->end->next;
+  }
+  return h ^ (n + 0x9e3779b9u);
+}
+
+// src/atp/ordered_rewrite.c:7
+static int ref_atp_term_has_var(Term t, u32 id) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) == id;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (ref_atp_term_has_var(term_ctr_at(t, i), id)) return 1;
+      }
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
+// src/atp/ordered_rewrite.c:23
+static int ref_atp_vars_contained(Term a, Term b) {
+  switch (term_tag(a)) {
+    case TAG_FVR: return ref_atp_term_has_var(b, term_ext(a));
+    case TAG_CTR: {
+      u32 n = term_ctr_n(a);
+      for (u32 i = 0; i < n; i++) {
+        if (!ref_atp_vars_contained(term_ctr_at(a, i), b)) return 0;
+      }
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// src/atp/ordered_rewrite.c:281
+static Term ref_atp_ordered_rewrite_step(AtpState *s, Term t,
+                                     const Term *lhs, const Term *rhs,
+                                     u32 n_rules, u8 *fired) {
+  // DIAG (THVM_ATP_NORMLOG): trip when a normalize subject grows large, to
+  // locate the rule-250 lazy-normalize blowup (grow-per-step vs many-steps).
+  {
+    static int dl = -1; static u32 mx = 0u;
+    if (dl < 0) dl = (getenv("THVM_ATP_NORMLOG") != NULL) ? 1 : 0;
+    if (dl) { u32 sz = ref_atp_symbol_count(t);
+      if (sz > mx && sz > 5000u) { mx = sz;
+        fprintf(stderr, "NORMLOG t_size=%u\n", sz); } }
+  }
+  Term top = atp_ordered_try_top(s, t, lhs, rhs, n_rules, fired);
+  if (*fired) return top;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) { *fired = 0; return t; }
+    for (u32 i = 0; i < n; i++) {
+      u8 cf = 0;
+      Term nch = ref_atp_ordered_rewrite_step(s, term_ctr_at(t, i),
+                                          lhs, rhs, n_rules, &cf);
+      if (cf) {
+        Term children[REWRITE_MAX_ARITY];
+        for (u32 j = 0; j < n; j++) {
+          children[j] = (j == i) ? nch : term_ctr_at(t, j);
+        }
+        *fired = 1;
+        return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+  *fired = 0;
+  return t;
+}
+
+// src/atp/ordered_rewrite.c:515
+static u32 ref_atp_symbol_count(Term t) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      u32 c = 1;
+      for (u32 i = 0; i < n; i++) {
+        c += ref_atp_symbol_count(term_ctr_at(t, i));
+      }
+      return c;
+    }
+    default: return 1;   // FVR / atoms / NUM / etc.
+  }
+}
+
+// src/atp/ordered_rewrite.c:534
+static void ref_atp_symbol_count_upto(Term t, u32 cap, u32 *acc) {
+  if (*acc >= cap) return;
+  (*acc)++;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n && *acc < cap; i++) {
+      ref_atp_symbol_count_upto(term_ctr_at(t, i), cap, acc);
+    }
+  }
+}
+
+// src/atp/ordered_rewrite.c:644
+static u8 ref_atp_twee_sd_eq(Term a, Term b) {
+  if (a == b) return 1u;
+  u32 ta = term_tag(a), tb = term_tag(b);
+  if (ta != tb) return 0u;
+  if (ta == TAG_FVR || ta == TAG_NUM) return term_ext(a) == term_ext(b) &&
+                                             term_val(a) == term_val(b);
+  if (ta != TAG_CTR) return 0u;
+  if (term_ext(a) != term_ext(b)) return 0u;
+  u32 n = term_ctr_n(a);
+  if (n != term_ctr_n(b)) return 0u;
+  for (u32 i = 0; i < n; i++)
+    if (!ref_atp_twee_sd_eq(term_ctr_at(a, i), term_ctr_at(b, i))) return 0u;
+  return 1u;
+}
+
+// src/atp/ordered_rewrite.c:658
+static u8 ref_atp_twee_sd_contains(Term hay, Term needle) {
+  if (ref_atp_twee_sd_eq(hay, needle)) return 1u;
+  if (term_tag(hay) != TAG_CTR) return 0u;
+  u32 n = term_ctr_n(hay);
+  for (u32 i = 0; i < n; i++)
+    if (ref_atp_twee_sd_contains(term_ctr_at(hay, i), needle)) return 1u;
+  return 0u;
+}
+
+// src/atp/cp_weight.c:9
+static u32 ref_atp_term_depth(Term t) {
+  if (term_tag(t) != TAG_CTR) return 0;
+  u32 n = term_ctr_n(t);
+  u32 d = 0;
+  for (u32 i = 0; i < n; i++) {
+    u32 cd = ref_atp_term_depth(term_ctr_at(t, i));
+    if (cd > d) d = cd;
+  }
+  return n == 0 ? 0 : d + 1;
+}
+
+// src/atp/cp_weight.c:22
+static int ref_atp_var_occurs(Term t, u32 var_id) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) == var_id;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (ref_atp_var_occurs(term_ctr_at(t, i), var_id)) return 1;
+      }
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
+// src/atp/cp_weight.c:45
+static u32 ref_atp_unif_measure_rec(Term a, Term b, u32 d) {
+  u8 ta = term_tag(a), tb = term_tag(b);
+  if (ta == TAG_CTR && tb == TAG_CTR
+      && term_ext(a) == term_ext(b)
+      && term_ctr_n(a) == term_ctr_n(b)) {
+    u32 nd = d > 1 ? d - 1 : 1;
+    u32 n = term_ctr_n(a);
+    u32 mass = 0;
+    for (u32 i = 0; i < n; i++) {
+      mass += ref_atp_unif_measure_rec(term_ctr_at(a, i),
+                                   term_ctr_at(b, i), nd);
+    }
+    return mass;
+  }
+  if (ta == TAG_FVR) {
+    return ref_atp_var_occurs(b, term_ext(a)) ? 2u * d : 0u;
+  }
+  if (tb == TAG_FVR) {
+    return ref_atp_var_occurs(a, term_ext(b)) ? 2u * d : 0u;
+  }
+  // Function-symbol (or non-CTR) clash.
+  return d;
+}
+
+// src/atp/cp_weight.c:387
+static u32 ref_atp_goal_match_cov(Term pat, Term subj, RewriteSubst base) {
+  if (term_tag(pat) != TAG_CTR) return 0u;
+  u32 best = 0u;
+  RewriteSubst t = base;
+  if (thvm_match(pat, subj, &t)) {
+    u32 c = ref_atp_symbol_count(subj);
+    if (c > best) best = c;
+  }
+  if (term_tag(subj) == TAG_CTR) {
+    u32 n = term_ctr_n(subj);
+    for (u32 i = 0; i < n; i++) {
+      u32 c = ref_atp_goal_match_cov(pat, term_ctr_at(subj, i), base);
+      if (c > best) best = c;
+    }
+  }
+  return best;
+}
+
+// src/atp/cp_weight.c:409
+static u32 ref_atp_goal_doppel(Term cl, Term cr, Term sx, Term gy,
+                           RewriteSubst base) {
+  u32 best = 0u;
+  if (term_tag(cl) == TAG_CTR) {
+    RewriteSubst t1 = base;
+    if (thvm_match(cl, sx, &t1)) {
+      u32 cov_a = ref_atp_symbol_count(sx);
+      u32 cov_b = ref_atp_goal_match_cov(cr, gy, t1);
+      if (cov_b && cov_a + cov_b > best) best = cov_a + cov_b;
+    }
+  }
+  if (term_tag(sx) == TAG_CTR) {
+    u32 n = term_ctr_n(sx);
+    for (u32 i = 0; i < n; i++) {
+      u32 c = ref_atp_goal_doppel(cl, cr, term_ctr_at(sx, i), gy, base);
+      if (c > best) best = c;
+    }
+  }
+  return best;
+}
+
+// src/atp/cp_weight.c:444
+static void ref_atp_goal_sub_collect_rec(AtpState *s, Term t) {
+  if (term_tag(t) != TAG_CTR) return;
+  if (atp_term_is_ground(t)) {
+    u32 sz = ref_atp_symbol_count(t);
+    if (sz >= 2u && s->goal_sub_n < 128u) {   // skip bare constants
+      u64 h = ref_atp_term_struct_hash(t);
+      u8 dup = 0u;
+      for (u32 i = 0; i < s->goal_sub_n; i++)
+        if (s->goal_sub_hash[i] == h) { dup = 1u; break; }
+      if (!dup) {
+        s->goal_sub_hash[s->goal_sub_n] = h;
+        s->goal_sub_size[s->goal_sub_n] = (u16)(sz > 0xffffu ? 0xffffu : sz);
+        s->goal_sub_n++;
+      }
+    }
+  }
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) ref_atp_goal_sub_collect_rec(s, term_ctr_at(t, i));
+}
+
+// src/atp/cp_weight.c:470
+static u32 ref_atp_goal_subterm_overlap_rec(const AtpState *s, Term t, u32 best) {
+  if (term_tag(t) != TAG_CTR) return best;
+  if (atp_term_is_ground(t)) {
+    u32 sz = ref_atp_symbol_count(t);
+    if (sz > best) {
+      u64 h = ref_atp_term_struct_hash(t);
+      for (u32 i = 0; i < s->goal_sub_n; i++)
+        if (s->goal_sub_hash[i] == h) { best = sz; break; }
+    }
+  }
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++)
+    best = ref_atp_goal_subterm_overlap_rec(s, term_ctr_at(t, i), best);
+  return best;
+}
+
+// src/atp/cp_weight.c:688
+static u32 ref_atp_ladr_nest(Term t) {
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 n = term_ctr_n(t), c = 0u;
+  for (u32 i = 0; i < n; i++) {
+    Term ch = term_ctr_at(t, i);
+    if (n <= 2u && term_tag(ch) == TAG_CTR && term_ext(ch) == term_ext(t)) c++;
+    c += ref_atp_ladr_nest(ch);
+  }
+  return c;
+}
+
+// src/atp/cp_weight.c:698
+static u32 ref_atp_ladr_depth(Term t) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) == 0u) return 0u;
+  u32 n = term_ctr_n(t), d = 0u;
+  for (u32 i = 0; i < n; i++) {
+    u32 k = ref_atp_ladr_depth(term_ctr_at(t, i));
+    if (k > d) d = k;
+  }
+  return d + 1u;
+}
+
+// src/atp/cp_weight.c:715
+static u32 ref_atp_ladr_nest_ft(const AtpFtCell *t) {
+  if (atp_ladr_leaf_ft(t)) return 0u;
+  u32 c = 0u;
+  const AtpFtCell *ch = t->next;
+  for (u32 i = 0; i < t->arity; i++) {
+    if (t->arity <= 2u && (ch->sym & WF_VAR_BIT) == 0u && ch->sym == t->sym) c++;
+    c += ref_atp_ladr_nest_ft(ch);
+    ch = ch->end->next;
+  }
+  return c;
+}
+
+// src/atp/cp_weight.c:726
+static u32 ref_atp_ladr_depth_ft(const AtpFtCell *t) {
+  if (atp_ladr_leaf_ft(t)) return 0u;
+  u32 d = 0u;
+  const AtpFtCell *ch = t->next;
+  for (u32 i = 0; i < t->arity; i++) {
+    u32 k = ref_atp_ladr_depth_ft(ch);
+    if (k > d) d = k;
+    ch = ch->end->next;
+  }
+  return d + 1u;
+}
+
+// src/atp/step.c:1882
+static Term ref_atp_grounded_instance(AtpState *s, Term t, Term lhs,
+                                  Term min_const) {
+  switch (term_tag(t)) {
+    case TAG_FVR:
+      // Variable: ground it iff it does not occur on the LHS.  The
+      // not-on-LHS guard mirrors PCL_FreieVarInstanz's "frei in r"
+      // condition -- a bound variable is left alone, so the resulting
+      // rule still unifies with redexes that previously matched lhs.
+      return ref_atp_term_has_var(lhs, term_ext(t)) ? t : min_const;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n == 0) return t;
+      if (n > REWRITE_MAX_ARITY) return t;
+      Term children[REWRITE_MAX_ARITY];
+      u8 changed = 0;
+      for (u32 i = 0; i < n; i++) {
+        Term ch = term_ctr_at(t, i);
+        Term sub = ref_atp_grounded_instance(s, ch, lhs, min_const);
+        children[i] = sub;
+        if (sub != ch) changed = 1;
+      }
+      if (!changed) return t;
+      return term_new_ctr(term_ext(t), children, n);
+    }
+    default: return t;
+  }
+}
+
+// src/atp/step.c:1923
+static AtpFtCell *ref_ft_ground_absent_vars(AtpFt *a, const AtpFtCell *t,
+                                        const AtpFtCell *keep, u32 mc,
+                                        u8 *changed) {
+  if ((t->sym & WF_VAR_BIT) != 0u) {
+    u32 id = t->sym & ~WF_VAR_BIT;
+    if (!ft_span_has_var(keep, id)) {
+      *changed = 1u;
+      return ftnew_const(a, mc, 0);
+    }
+    return ftnew_var(a, id, 0);
+  }
+  u32 n = (u32)t->arity;
+  if (n == 0u) return ftnew_const(a, ft_ctr_sym(t), 0);
+  // Term sibling returns the subtree UNCHANGED above REWRITE_MAX_ARITY
+  // (ref_atp_grounded_instance's stack-children cap): clone verbatim, no
+  // grounding below it, no changed mark.
+  if (n > REWRITE_MAX_ARITY) return ft_clone_span(a, t, 0);
+  AtpFtCell *kids[REWRITE_MAX_ARITY];
+  const AtpFtCell *kid = t->next;
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = ref_ft_ground_absent_vars(a, kid, keep, mc, changed);
+    kid = kid->end->next;
+  }
+  return ftnew_ctr(a, ft_ctr_sym(t), (u16)n, kids, 0);
+}
+
+// src/atp/step.c:2044
+static int ref_atp_lr_sortieren_rec(Term lhs, Term rhs) {
+  u8 lv = (term_tag(lhs) == TAG_FVR);
+  u8 rv = (term_tag(rhs) == TAG_FVR);
+  if (lv && rv) return 0;          // both variables -> Gleich
+  if (lv) return -1;               // variable < non-variable -> Kleiner
+  if (rv) return 1;                // non-variable > variable -> Groesser
+  // Both constructors.  Single-operator Sheffer signature: SymbolVergleich
+  // is Gleich for equal functors; differing functors fall back to the
+  // label code (a stable total order mirroring the precedence index).
+  u32 lf = term_ext(lhs), rf = term_ext(rhs);
+  if (lf != rf) return (lf < rf) ? -1 : 1;
+  u32 ln = term_ctr_n(lhs), rn = term_ctr_n(rhs);
+  if (ln != rn) return (ln < rn) ? -1 : 1;
+  for (u32 i = 0; i < ln; i++) {
+    int c = ref_atp_lr_sortieren_rec(term_ctr_at(lhs, i), term_ctr_at(rhs, i));
+    if (c != 0) return c;
+  }
+  return 0;
+}
+
+// src/atp/step.c:2067
+static int ref_atp_lr_sortieren_rec_ft(const AtpFtCell *lhs,
+                                   const AtpFtCell *rhs) {
+  u8 lv = (u8)((lhs->sym & WF_VAR_BIT) != 0u);
+  u8 rv = (u8)((rhs->sym & WF_VAR_BIT) != 0u);
+  if (lv && rv) return 0;
+  if (lv) return -1;
+  if (rv) return 1;
+  u32 lf = lhs->sym, rf = rhs->sym;
+  if (lf != rf) return (lf < rf) ? -1 : 1;
+  u32 ln = (u32)lhs->arity, rn = (u32)rhs->arity;
+  if (ln != rn) return (ln < rn) ? -1 : 1;
+  const AtpFtCell *lk = lhs->next, *rk = rhs->next;
+  for (u32 i = 0; i < ln; i++) {
+    int c = ref_atp_lr_sortieren_rec_ft(lk, rk);
+    if (c != 0) return c;
+    lk = lk->end->next;
+    rk = rk->end->next;
+  }
+  return 0;
+}
+
+// src/atp/step.c:2101
+static u8 ref_atp_term_has_ctr(Term t, u32 ext) {
+  if (term_tag(t) != TAG_CTR) return 0u;
+  if (term_ext(t) == ext) return 1u;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++)
+    if (ref_atp_term_has_ctr(term_ctr_at(t, i), ext)) return 1u;
+  return 0u;
+}
+
+// src/atp/rerank.c:986
+static void ref_atp_sym_mask_collect(Term t, u32 mask[8]) {
+  if (term_tag(t) == TAG_CTR) {
+    u32 lbl = term_ext(t);
+    mask[(lbl >> 5) & 7u] |= 1u << (lbl & 31u);
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) return;
+    for (u32 i = 0; i < n; i++) {
+      ref_atp_sym_mask_collect(term_ctr_at(t, i), mask);
+    }
+  }
+}
+
+// src/atp/rerank.c:998
+static int ref_atp_term_touches_goal(const AtpState *s, Term t) {
+  if (s == NULL || !s->use_sos) return 0;
+  if (term_tag(t) == TAG_CTR) {
+    u32 lbl = term_ext(t);
+    if (s->goal_sym_mask[(lbl >> 5) & 7u] & (1u << (lbl & 31u))) return 1;
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) return 0;
+    for (u32 i = 0; i < n; i++) {
+      if (ref_atp_term_touches_goal(s, term_ctr_at(t, i))) return 1;
+    }
+  }
+  return 0;
+}
+
+// src/atp/cp_interreduce.c:85
+static u64 ref_atp_term_sym_bitmap(Term t) {
+  if (t == 0u) return 0u;
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 lab = term_ext(t);
+      u64 m = (lab < 63u) ? ((u64)1 << lab) : ((u64)1 << 63u);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) m |= ref_atp_term_sym_bitmap(term_ctr_at(t, i));
+      return m;
+    }
+    default: return 0u;
+  }
+}
+
+// src/atp/cp_gen.c:160
+static u8 ref_atp_mgu_reducible(AtpState *s, Term face, Term peak) {
+  if (face == 0 || peak == 0) return 0u;
+  if (term_tag(face) == TAG_FVR) {
+    if (term_tag(peak) != TAG_CTR) return 0u;   // sigma(x) a bare var: irred.
+    return (u8)(!kbo_eq(atp_rules_only_normalize(s, peak, 4096u), peak));
+  }
+  if (term_tag(face) == TAG_CTR && term_tag(peak) == TAG_CTR) {
+    u32 n = term_ctr_n(face);
+    if (term_ctr_n(peak) != n) return 0u;
+    for (u32 c = 0; c < n; c++)
+      if (ref_atp_mgu_reducible(s, term_ctr_at(face, c), term_ctr_at(peak, c)))
+        return 1u;
+  }
+  return 0u;
+}
 
 // ---- Random terms ---------------------------------------------------------
 
@@ -2203,6 +2915,432 @@ static void deep_serialize(void) {
   free(buf);
 }
 
+// ---- prim / ordered_rewrite / cp_weight / step / rerank / diag / mnf ------
+
+static u32 g_wo_weights[32];
+static u32 g_wo_prec[32];
+static KboConfig g_wo_cfg;
+
+// An engine over labels 0..31 (unit weights, precedence = label) with a
+// few rules lifted from random terms: generalized subterms (oriented or
+// not) and a commutativity rule.
+static AtpState *wo_state(u32 *seed) {
+  for (u32 i = 0; i < 32u; i++) { g_wo_weights[i] = 1u; g_wo_prec[i] = i; }
+  g_wo_cfg.weights    = g_wo_weights;
+  g_wo_cfg.precedence = g_wo_prec;
+  g_wo_cfg.n_labels   = 32u;
+  g_wo_cfg.var_weight = 1u;
+  AtpState *s = thvm_atp_init(&g_wo_cfg, 100u);
+  Term xy[2] = { term_new_fvr(0u), term_new_fvr(1u) };
+  Term yx[2] = { xy[1], xy[0] };
+  (void)atp_push_rule(s, term_new_ctr(3u, xy, 2u), term_new_ctr(3u, yx, 2u));
+  for (u32 k = 0; k < 10u; k++) {
+    Term u = pick_sub(seed, mk_random(seed));
+    if (term_tag(u) != TAG_CTR || term_ctr_n(u) == 0u) continue;
+    Term l = generalize(seed, u);
+    if (term_tag(l) != TAG_CTR) continue;
+    Term r = (rng32(seed) & 1u) ? term_new_fvr(rng32(seed) & 3u) : mk_small(seed);
+    (void)atp_push_rule(s, l, r);
+  }
+  return s;
+}
+
+enum { WO_N = 2000 };
+
+static void pin_weight_order(u32 *seed) {
+  AtpState *s = wo_state(seed);
+  AtpFt a;
+  ft_init(&a);
+
+  TEST_BEGIN("atp_deep/pin-hashes-ground");
+  {
+    u32 ok = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < WO_N; i++) {
+      Term t = mk_random(seed);
+      if (i % 7u == 0u) {
+        Term kids[2] = { t, term_new(0, TAG_ERA, 0, 0) };
+        t = term_new_ctr(4u, kids, 2u);
+      }
+      AtpFtCell *x = ft_from_term(&a, t, 0);
+      if (ref_atp_term_struct_hash(t) == atp_term_struct_hash(t) &&
+          ref_atp_struct_hash(t) == atp_struct_hash(t) &&
+          ref_mnf_hash(t) == mnf_hash(t) &&
+          ref_mnf_hash_span(x) == mnf_hash_span(x) &&
+          ref_mnf_term_is_ground(t) == mnf_term_is_ground(t)) {
+        ok++;
+      }
+    }
+    g_wide = 16u;
+    CHECK_EQ(ok, (u32)WO_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-term-predicates-counts");
+  {
+    u32 ok = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < WO_N; i++) {
+      Term t = mk_random(seed);
+      Term u = (i & 1u) ? copy_term(t) : mk_random(seed);
+      Term sub = pick_sub(seed, t);
+      u32 id = rng32(seed) % 12u;
+      u32 cap = 1u + rng32(seed) % 64u;
+      u32 ra = 0u, na = 0u;
+      if (i & 2u) { ra = 3u; na = 3u; }
+      ref_atp_symbol_count_upto(t, cap, &ra);
+      atp_symbol_count_upto(t, cap, &na);
+      u32 lab = rng32(seed) % 12u;
+      if (ref_atp_term_has_var(t, id) == atp_term_has_var(t, id) &&
+          ref_atp_vars_contained(t, u) == atp_vars_contained(t, u) &&
+          ref_atp_symbol_count(t) == atp_symbol_count(t) && ra == na &&
+          ref_atp_twee_sd_eq(t, u) == atp_twee_sd_eq(t, u) &&
+          ref_atp_twee_sd_contains(t, sub) == atp_twee_sd_contains(t, sub) &&
+          ref_atp_twee_sd_contains(u, sub) == atp_twee_sd_contains(u, sub) &&
+          ref_atp_term_depth(t) == atp_term_depth(t) &&
+          ref_atp_var_occurs(t, id) == atp_var_occurs(t, id) &&
+          ref_atp_ladr_nest(t) == atp_ladr_nest(t) &&
+          ref_atp_ladr_depth(t) == atp_ladr_depth(t) &&
+          ref_atp_term_has_ctr(t, lab) == atp_term_has_ctr(t, lab) &&
+          ref_atp_term_sym_bitmap(t) == atp_term_sym_bitmap(t) &&
+          ref_atp_lr_sortieren_rec(t, u) == atp_lr_sortieren_rec(t, u)) {
+        ok++;
+      }
+    }
+    g_wide = 16u;
+    CHECK_EQ(ok, (u32)WO_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-span-ladr-lr");
+  {
+    u32 ok = 0;
+    for (u32 i = 0; i < WO_N; i++) {
+      Term t = mk_random(seed);
+      Term u = (i & 1u) ? copy_term(t) : mk_mutant(seed, t);
+      AtpFtCell *x = ft_from_term(&a, t, 0);
+      AtpFtCell *y = ft_from_term(&a, u, 0);
+      if (ref_atp_ladr_nest_ft(x) == atp_ladr_nest_ft(x) &&
+          ref_atp_ladr_depth_ft(x) == atp_ladr_depth_ft(x) &&
+          ref_atp_lr_sortieren_rec_ft(x, y) == atp_lr_sortieren_rec_ft(x, y)) {
+        ok++;
+      }
+    }
+    CHECK_EQ(ok, (u32)WO_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-unif-goal-measures");
+  {
+    u32 ok = 0;
+    for (u32 i = 0; i < WO_N; i++) {
+      Term t = mk_random(seed);
+      Term u = (i & 1u) ? mk_mutant(seed, t) : mk_random(seed);
+      u32 d = rng32(seed) % 9u;
+      g_plain = 1u;
+      Term pat = generalize(seed, pick_sub(seed, t));
+      Term pr  = mk_small(seed);
+      g_plain = 0u;
+      RewriteSubst base;
+      memset(&base, 0, sizeof base);
+      if (i & 4u) base.bindings[1] = mk_small(seed);
+      if (ref_atp_unif_measure_rec(t, u, d) == atp_unif_measure_rec(t, u, d) &&
+          ref_atp_goal_match_cov(pat, t, base) == atp_goal_match_cov(pat, t, base) &&
+          ref_atp_goal_doppel(pat, pr, t, u, base) == atp_goal_doppel(pat, pr, t, u, base)) {
+        ok++;
+      }
+    }
+    CHECK_EQ(ok, (u32)WO_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-goal-subterms");
+  {
+    u32 ok = 0;
+    for (u32 i = 0; i < WO_N / 4u; i++) {
+      Term g = mk_random(seed);
+      s->goal_sub_n = 0u;
+      ref_atp_goal_sub_collect_rec(s, g);
+      u32 rn = s->goal_sub_n;
+      u64 rh[128];
+      u16 rz[128];
+      memcpy(rh, s->goal_sub_hash, rn * sizeof(u64));
+      memcpy(rz, s->goal_sub_size, rn * sizeof(u16));
+      s->goal_sub_n = 0u;
+      atp_goal_sub_collect_rec(s, g);
+      u8 same = (u8)(rn == s->goal_sub_n &&
+                     memcmp(rh, s->goal_sub_hash, rn * sizeof(u64)) == 0 &&
+                     memcmp(rz, s->goal_sub_size, rn * sizeof(u16)) == 0);
+      for (u32 k = 0; k < 4u; k++) {
+        Term t = (k == 0u) ? g : mk_random(seed);
+        u32 b0 = rng32(seed) % 4u;
+        same &= (u8)(ref_atp_goal_subterm_overlap_rec(s, t, b0) ==
+                     atp_goal_subterm_overlap_rec(s, t, b0));
+      }
+      ok += same;
+    }
+    s->goal_sub_n = 0u;
+    CHECK_EQ(ok, (u32)WO_N / 4u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-masks-touch-goal");
+  {
+    u32 ok = 0;
+    u8 sos = s->use_sos;
+    s->use_sos = 1u;
+    for (u32 i = 0; i < WO_N; i++) {
+      g_wide = (i & 1u) ? 20u : 16u;
+      Term t = mk_random(seed);
+      g_wide = 16u;
+      u32 rm[8] = {0}, nm[8] = {0};
+      ref_atp_sym_mask_collect(t, rm);
+      atp_sym_mask_collect(t, nm);
+      for (u32 w = 0; w < 8u; w++) s->goal_sym_mask[w] = rng32(seed) & rng32(seed) & rng32(seed);
+      if (memcmp(rm, nm, sizeof rm) == 0 &&
+          ref_atp_term_touches_goal(s, t) == atp_term_touches_goal(s, t)) {
+        ok++;
+      }
+    }
+    s->use_sos = sos;
+    memset(s->goal_sym_mask, 0, sizeof s->goal_sym_mask);
+    CHECK_EQ(ok, (u32)WO_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-grounded-instance-heap-layout");
+  {
+    u32 ok = 0;
+    Term minc = term_new_ctr(2u, NULL, 0u);
+    for (u32 i = 0; i < WO_N; i++) {
+      Term t = mk_random(seed);
+      Term l = mk_random(seed);
+      u64 h0 = HEAP_NEXT;
+      Term r = ref_atp_grounded_instance(s, t, l, minc);
+      u64 h1 = HEAP_NEXT;
+      Term n = atp_grounded_instance(s, t, l, minc);
+      u64 h2 = HEAP_NEXT;
+      AtpFt ra, na;
+      ft_init(&ra);
+      ft_init(&na);
+      AtpFtCell *rb = ft_alloc_persistent(&ra);
+      AtpFtCell *nb = ft_alloc_persistent(&na);
+      AtpFtCell *x  = ft_from_term(&a, t, 0);
+      AtpFtCell *k  = ft_from_term(&a, l, 0);
+      u8 rc = 0u, nc = 0u;
+      AtpFtCell *rx = ref_ft_ground_absent_vars(&ra, x, k, 2u, &rc);
+      AtpFtCell *nx = ft_ground_absent_vars(&na, x, k, 2u, &nc);
+      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n &&
+          rc == nc && span_layout_same(rx, rb, nx, nb)) {
+        ok++;
+      }
+      ft_destroy(&ra);
+      ft_destroy(&na);
+    }
+    CHECK_EQ(ok, (u32)WO_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-ordered-rewrite-step-heap-layout");
+  {
+    u32 ok = 0, fired = 0;
+    for (u32 i = 0; i < WO_N; i++) {
+      Term t = mk_random(seed);
+      u8 rf = 7u, nf = 9u;
+      u64 h0 = HEAP_NEXT;
+      Term r = ref_atp_ordered_rewrite_step(s, t, s->lhs, s->rhs, s->n_rules, &rf);
+      u64 h1 = HEAP_NEXT;
+      Term n = atp_ordered_rewrite_step(s, t, s->lhs, s->rhs, s->n_rules, &nf);
+      u64 h2 = HEAP_NEXT;
+      if (rf == nf && heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) ok++;
+      fired += nf;
+    }
+    CHECK_EQ(ok, (u32)WO_N);
+    CHECK(fired > WO_N / 10u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-mgu-reducible-conn-successors");
+  {
+    u32 ok = 0;
+    for (u32 i = 0; i < WO_N / 2u; i++) {
+      Term peak = mk_random(seed);
+      Term face = generalize(seed, peak);
+      u64 h0 = HEAP_NEXT;
+      u8 r = ref_atp_mgu_reducible(s, face, peak);
+      u64 h1 = HEAP_NEXT;
+      u8 n = atp_mgu_reducible(s, face, peak);
+      u64 h2 = HEAP_NEXT;
+      u8 same = (u8)(r == n && h1 - h0 == h2 - h1);
+      Term rbuf[64], nbuf[64];
+      u32 rn = 0u, nn = 0u;
+      if (i & 1u) { rn = nn = 60u; for (u32 k = 0; k < 60u; k++) rbuf[k] = nbuf[k] = peak; }
+      u64 g0 = HEAP_NEXT;
+      (void)ref_atp_conn_successors(s, peak, peak, rbuf, &rn, 64u);
+      u64 g1 = HEAP_NEXT;
+      (void)atp_conn_successors(s, peak, peak, nbuf, &nn, 64u);
+      u64 g2 = HEAP_NEXT;
+      same &= (u8)(rn == nn && heap_regions_same(g0, g1, g1, g2));
+      for (u32 k = 0; k < nn && same; k++) same &= (u8)(reloc(rbuf[k], g0, g1, g1) == nbuf[k]);
+      ok += same;
+    }
+    CHECK_EQ(ok, (u32)WO_N / 2u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-perm-subsumed");
+  {
+    u32 ok = 0, hits = 0;
+    for (u32 i = 0; i < WO_N; i++) {
+      // binary label-3 trees, some of them permutations of each other
+      Term t = mk_random(seed);
+      Term kids[2] = { t, mk_random(seed) };
+      Term l = term_new_ctr(3u, kids, 2u);
+      Term sw[2] = { kids[1], kids[0] };
+      Term r = (i & 1u) ? term_new_ctr(3u, sw, 2u) : mk_mutant(seed, l);
+      if (i % 5u == 0u) {
+        Term inner[2] = { l, r };
+        Term outer[2] = { r, l };
+        l = term_new_ctr(3u, inner, 2u);
+        r = term_new_ctr(3u, outer, 2u);
+      }
+      u8 rv = ref_atp_cp_perm_subsumed(l, r);
+      u8 nv = atp_cp_perm_subsumed(l, r);
+      if (rv == nv) ok++;
+      hits += nv;
+    }
+    CHECK_EQ(ok, (u32)WO_N);
+    CHECK(hits > WO_N / 10u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-ic-rewrite-step");
+  {
+    atp_register_primitives();
+    u32 ok = 0;
+    for (u32 i = 0; i < WO_N / 4u; i++) {
+      Term t = mk_random(seed);
+      u64 h0 = HEAP_NEXT;
+      Term r = ref_atp_ic_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
+      u64 h1 = HEAP_NEXT;
+      Term n = atp_ic_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
+      u64 h2 = HEAP_NEXT;
+      if (h1 - h0 == h2 - h1 && kbo_eq(r, n) && ((r == t) == (n == t))) ok++;
+    }
+    CHECK_EQ(ok, (u32)WO_N / 4u);
+  }
+
+  ft_destroy(&a);
+  thvm_atp_free(s);
+}
+
+static void deep_weight_order(u32 *seed) {
+  AtpState *s = wo_state(seed);
+  Term vals[5];
+  for (u32 v = 0; v < 5u; v++) {
+    Term kid = term_new_ctr(9u, NULL, 0u);
+    vals[v] = term_new_ctr(20u + v, &kid, v & 1u);
+  }
+  Term pat  = mk_deep(DEEP, 1u, term_new_fvr(4u), NULL, 1u);
+  Term subj = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+  Term near = mk_deep(DEEP, 1u, vals[3], vals, 1u);
+  u32  size = term_size_iter(subj);
+  AtpFt a;
+  ft_init(&a);
+
+  TEST_BEGIN("atp_deep/deep-weight-order-walks");
+  {
+    CHECK_EQ(atp_term_struct_hash(subj), atp_term_struct_hash(mk_deep(DEEP, 1u, vals[4], vals, 1u)));
+    CHECK(atp_term_struct_hash(subj) != atp_term_struct_hash(near));
+    CHECK(atp_struct_hash(subj) != atp_struct_hash(near));
+    AtpFtCell *xs = ft_from_term(&a, subj, 0);
+    CHECK_EQ(mnf_hash_span(xs), mnf_hash(subj));
+    CHECK(mnf_term_is_ground(subj));
+    CHECK(!mnf_term_is_ground(pat));
+    CHECK(atp_term_has_var(pat, 4u));
+    CHECK(!atp_term_has_var(pat, 7u));
+    CHECK(atp_vars_contained(pat, pat));
+    CHECK(!atp_vars_contained(pat, subj));
+    CHECK_EQ(atp_symbol_count(subj), size);
+    u32 acc = 0u;
+    atp_symbol_count_upto(subj, size - 5u, &acc);
+    CHECK_EQ(acc, size - 5u);
+    CHECK(atp_twee_sd_eq(subj, mk_deep(DEEP, 1u, vals[4], vals, 1u)));
+    CHECK(!atp_twee_sd_eq(subj, near));
+    CHECK(atp_twee_sd_contains(subj, vals[4]));
+    CHECK(!atp_twee_sd_contains(near, mk_deep(3u, 1u, vals[4], vals, 1u)));
+    CHECK_EQ(atp_term_depth(subj), (u32)DEEP);       // leaves are depth 0
+    CHECK_EQ(atp_ladr_depth(subj), (u32)DEEP);
+    CHECK_EQ(atp_ladr_depth_ft(xs), (u32)DEEP);
+    CHECK_EQ(atp_ladr_nest(subj), atp_ladr_nest_ft(xs));
+    CHECK(atp_term_has_ctr(subj, 24u));
+    CHECK(!atp_term_has_ctr(subj, 30u));
+    CHECK_EQ(atp_term_sym_bitmap(subj),
+             (1ull << 1) | (1ull << 2) | (1ull << 5) | (1ull << 6) | (1ull << 9) |
+             (0x1full << 20));
+    CHECK_EQ(atp_lr_sortieren_rec(subj, near), 1);
+    CHECK_EQ(atp_lr_sortieren_rec_ft(xs, ft_from_term(&a, near, 0)), 1);
+    CHECK_EQ(atp_unif_measure_rec(pat, subj, 3u), 0u);
+    CHECK(atp_unif_measure_rec(subj, near, 3u) > 0u);
+  }
+
+  TEST_BEGIN("atp_deep/deep-goal-and-grounding");
+  {
+    RewriteSubst base;
+    memset(&base, 0, sizeof base);
+    CHECK_EQ(atp_goal_match_cov(pat, subj, base), size);
+    CHECK_EQ(atp_goal_doppel(pat, vals[4], subj, vals[4], base), size + 1u);
+    u32 mask[8] = {0};
+    atp_sym_mask_collect(subj, mask);
+    CHECK_EQ(mask[0], (1u << 1) | (1u << 2) | (1u << 5) | (1u << 6) | (1u << 9) |
+                      (0x1fu << 20));
+    s->use_sos = 1u;
+    memset(s->goal_sym_mask, 0, sizeof s->goal_sym_mask);
+    s->goal_sym_mask[0] = 1u << 24;
+    CHECK(atp_term_touches_goal(s, subj));
+    s->goal_sym_mask[0] = 1u << 30;
+    CHECK(!atp_term_touches_goal(s, subj));
+    s->use_sos = 0u;
+    memset(s->goal_sym_mask, 0, sizeof s->goal_sym_mask);
+    // The overlap walk re-tests groundness and size at every subterm,
+    // quadratic in depth, so it runs on a 3,000-deep spine.
+    Term mid = mk_deep(3000u, 1u, vals[4], vals, 1u);
+    s->goal_sub_n = 0u;
+    atp_goal_sub_collect_rec(s, vals[1]);
+    CHECK_EQ(s->goal_sub_n, 1u);
+    CHECK_EQ(atp_goal_subterm_overlap_rec(s, mid, 0u), 2u);
+    s->goal_sub_n = 0u;
+    Term minc = term_new_ctr(2u, NULL, 0u);
+    Term vars10[5];
+    for (u32 v = 0; v < 5u; v++) vars10[v] = (v == 2u) ? term_new_fvr(2u) : minc;
+    Term keep = term_new_fvr(2u);
+    CHECK(term_eq_iter(atp_grounded_instance(s, pat, keep, minc),
+                       mk_deep(DEEP, 1u, minc, vars10, 1u)));
+    u8 changed = 0u;
+    AtpFtCell *g = ft_ground_absent_vars(&a, ft_from_term(&a, pat, 0),
+                                         ft_from_term(&a, keep, 0), 2u, &changed);
+    CHECK(changed);
+    CHECK(ft_eq_term(g, mk_deep(DEEP, 1u, minc, vars10, 1u)));
+  }
+
+  TEST_BEGIN("atp_deep/deep-perm-conn-step");
+  {
+    // f(x, y) = f(y, x) applied at depth: the two sides are permutations.
+    Term l = subj, r = subj;
+    for (u32 k = 0; k < DEEP / 4u; k++) {
+      Term c = term_new_ctr(5u, NULL, 0u);
+      Term lk[2] = { l, c }, rk[2] = { c, r };
+      l = term_new_ctr(3u, lk, 2u);
+      r = term_new_ctr(3u, rk, 2u);
+    }
+    CHECK(atp_cp_perm_subsumed(l, r));
+    CHECK(!atp_cp_perm_subsumed(l, near));
+    Term buf[64];
+    u32 nb = 0u;
+    (void)atp_conn_successors(s, l, l, buf, &nb, 64u);
+    CHECK(nb >= 1u);
+    u8 fired = 0u;
+    Term st = atp_ordered_rewrite_step(s, l, s->lhs, s->rhs, s->n_rules, &fired);
+    CHECK(fired);
+    CHECK(!kbo_eq(st, l));
+    u8 mr = atp_mgu_reducible(s, pat, subj);
+    CHECK(mr <= 1u);
+  }
+
+  ft_destroy(&a);
+  thvm_atp_free(s);
+}
+
 int main(void) {
   thvm_init();
   u32 seed = 0x6c8e9cf5u;
@@ -2212,6 +3350,8 @@ int main(void) {
   deep_term_libs();
   pin_serialize(&seed);
   deep_serialize();
+  pin_weight_order(&seed);
+  deep_weight_order(&seed);
   thvm_free();
   TEST_REPORT();
 }
