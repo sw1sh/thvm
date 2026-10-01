@@ -347,6 +347,31 @@ It beats R32h32 on both state distributions (held-out top-1 proof-CP hit
 further online, yet solves twee's set at 60 s and one more problem of the 37
 twee misses at 300 s; it stays opt-in as well.
 
+## Lane matrix (docs/plans/enigma_portfolio.md section 5)
+
+`matrix_tables.py` turns the harvested lane matrix
+(`~/.cache/thvm/enigma/matrix`, described by its `FORMAT.txt`) into the M0
+artifacts.  It only processes text, so it runs on the Mac.
+
+```
+matrix_tables.py --seal       # j13 rows -> ~/.cache/thvm/enigma/sealed (read-only); train + heldout -> matrix.tsv
+matrix_tables.py --validate   # G0.1 -> g01.txt, rerun.tsv
+matrix_tables.py --tables     # T1-T8 per split -> tables/ (summary.txt lists them)
+matrix_tables.py --decisions  # section 5.3 -> decisions_5_3.txt, dev_t.tsv, train_t.tsv, supplement_jobs.tsv,
+                              #   label_harvest_jobs.tsv, oracle_rerun_jobs.tsv
+matrix_tables.py --all        # --validate, --tables, --decisions
+```
+
+The J13 rows stay sealed until the plan's final look.  After `--seal` every
+mode reads `matrix.tsv` only and stops on a j13 row or on a path under the
+sealed directory; the only j13 facts it prints are the sealed row count and
+the archive sha256, and it checks that its outputs name no j13 problem.
+Re-running `--seal` rebuilds both files from the sealed raw shards and checks
+that they are byte-identical.  The job lists use the runner's shard format
+(name, path, split, lane), so `runner.sh` takes them as they are.
+`static_gates.py <tptp_root> <problem.p>...` prints the gate bits and live
+lanes of the CLI's exit-fast lanes, the static replica that T7 checks.
+
 ## Typical flow
 
 ```
