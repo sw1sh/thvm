@@ -657,6 +657,7 @@ What is running now:
 | sealed J13 matrix rows       | 005488de020d08293a2dd70c54d8fb4ed274c1932ddac22f3fd53078fd072864 (18,400 rows) | 2026-10-02 |
 | matrix_tables.py             | dfb13207ae82afa7cb3b443abe3b1aac170f601d2d5fc94d55ace422859ba475 (627aabb2) | 2026-10-02 |
 | WDEP and delta per wall      | at L0           | |
+| G0.4 (amendment A1)          | at the pod gate: script and binary sha256, main commit, exit code of each mode | |
 | section 5.3 outputs          | ~/.cache/thvm/enigma/matrix/decisions_5_3.txt; summary below | 2026-10-02 |
 
 Section 5.3 outputs (2026-10-02, from the sealed matrix; train and held-out only):
@@ -673,7 +674,17 @@ Decisions recorded (2026-10-01, by the user):
 - D1: yes. Training may include synthetic -10 encodings of non-UEQ TPTP problems from our FOF front end; J13 names and stems are excluded in every division.
 - D3: no. Every calibration stays on pods; WDEP is estimated from the submission build's official J13 result as in section 1.3.
 
-Amendments: none yet.
+Amendments:
+- A1 (2026-10-02, before any G0.4 data exists): how G0.4 is decided.
+  - The judge is tests/atp_sched_teardown.sh, sha256 93dff179d724d0e40b8f006b8d75152ae1e1660ec12b0ea057794adf6b1a29c6, run on a current-main binary that includes the PID fix. The pod log records the script's and the binary's sha256.
+  - Teardown, the SIGTERM clause: LAT071-1, a TRAIN problem whose TPTP status is Open, with all 46 lanes racing. The brief named a J13 problem; J13 stays sealed. 5 s into a --wall=60 run the script sends:
+    - SIGTERM, SIGINT and SIGALRM to the parent of a --schedule run;
+    - SIGTERM to the parent of a --lane run of the last lane;
+    - SIGTERM to the last lane's slice process alone, in a --schedule run and in a --lane run;
+    - the matrix runner's pkill -TERM -f "^BIN --lane=" to a --lane run.
+  - A signalled parent must end through its teardown handler (exit 128 + the signal; pkill excepted). After the slice-only signal the slice's process group must be gone, a --schedule parent and its other lanes must go on, and a --lane parent must end by itself. 3 s after each stop no process of the run and no slice output file in /tmp may be left. A case whose run ends before its signal, or whose last lane is not alive at 5 s, is inconclusive. A --wall=10 run must also end by 20 s and leave nothing; that case can only fail.
+  - Dry run, the W + 10 s clause: the 20 rows of tools/atp_enigma/g04_dryrun.tsv, sha256 8fe06a9ee76bf5c1a7abdf697f65f8572d159bf69cd6d237725372e9601e77bc. They are the first 20, by sha256 of the name, of the 81 TRAIN problems that no lane solves at 60 s and whose every searching lane ended at the wall. WALL = 180 s, and again at WDEP once G0.3 fixes it, each in the environment of section 1.3. Every run must end by W + 10 s and leave no process. At least 10 of the 20 must reach the wall, meaning the parent's wall stop or alarm, or an end at W - 4 s or later (each lane stops itself on its CPU clock at the wall less 3 s); otherwise the dry run is inconclusive.
+  - G0.4 passes only when the teardown mode and every dry run exit 0. Exit 3 (inconclusive) does not pass. A changed script or list needs a new amendment.
 
 ## 6. Risks and what we will not do
 
