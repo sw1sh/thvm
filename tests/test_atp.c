@@ -183,6 +183,50 @@ static Term tt_hx_decode(const u8 *b, u32 len, u32 *at, int *ok) {
   return term_new_ctr((u32)(v >> 1), kids, n);
 }
 
+// The group axioms' signature as the driver would name it ('Y').
+static const char *const TT_HX_NAMES[4] = { "e", "i", "f", "a" };
+static const u32 TT_HX_ARITY[4] = { 0u, 1u, 2u, 0u };
+
+// The group axioms for 40 steps under plain completion (an age pick every
+// third selection) or under the Otter loop, recorded to `path` (rate 1,
+// lane "hx-unit") unless it is NULL; *heap gets the IC heap cells the run
+// allocated.
+static AtpState *tt_hx_group_run(u8 otter, const char *path, u64 *heap) {
+  u64 h0 = thvm_atp_heap_checkpoint();
+  if (path != NULL) {
+    setenv("THVM_ATP_HISTORY_EXPORT", path, 1);
+    setenv("THVM_ATP_HISTORY_RATE", "1", 1);
+    setenv("FINDPROOF_SLICE", "hx-unit", 1);
+  }
+  AtpState *s = thvm_atp_init(&DUMMY_CFG, 200);
+  if (path != NULL) {
+    unsetenv("THVM_ATP_HISTORY_EXPORT");
+    unsetenv("THVM_ATP_HISTORY_RATE");
+    unsetenv("FINDPROOF_SLICE");
+  }
+  if (otter) {
+    thvm_atp_set_use_mixmost_nf(s, 1u);
+    thvm_atp_set_use_otter(s, 1u);
+  } else {
+    thvm_atp_set_selection_ratio(s, 3u);
+  }
+  for (u32 k = 0; k < 4u; k++) {
+    thvm_atp_history_symbol(s, LAB_e + k, TT_HX_ARITY[k], (u8)(k == 3u),
+                            TT_HX_NAMES[k]);
+  }
+  thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+  thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
+  thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                        mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+  for (u32 k = 0; k < 40u; k++) {
+    if (thvm_atp_step(s) != ATP_RUNNING) {
+      break;
+    }
+  }
+  *heap = thvm_atp_heap_checkpoint() - h0;
+  return s;
+}
+
 #ifdef ATP_CP_GROUND_JOIN
 // Differential soundness cross-check for a DELETE verdict.  When the
 // symbolic ground-join test says DELETE, we INDEPENDENTLY verify that a
@@ -7483,106 +7527,169 @@ int main(void) {
     for (u32 k = 0; k < ATP_HX_NFEAT; k++) {
       CHECK_EQ(q.feat[k], feat[k]);
     }
-    free(g_hx.enc);   // no session is open: g_hx is zero apart from this
-    g_hx.enc = NULL;
-    g_hx.enc_cap = 0u;
+    atp_hx_scratch_free();   // no session is open: nothing else to free
+    thvm_atp_free(s);
+    // f(...f(f(x, e), e)..., e) -> x with 100 f cells: the lhs is 401
+    // bytes (2 per f, 1 for x, 2 per e) at depth 101, the content spans
+    // seven continuation records, and it decodes back to the rule.
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term deep = mk_v(VAR_x);
+    for (u32 k = 0; k < 100u; k++) {
+      deep = mk_f(deep, mk_e());
+    }
+    AtpAddedRange r1 = thvm_atp_orient_and_add(s, deep, mk_v(VAR_x));
+    CHECK_EQ(r1.count, 1u);
+    memset(&q, 0, sizeof q);
+    len = atp_hx_rule_encode(s, r1.first, &q);
+    CHECK_EQ(len, 402u);
+    CHECK_EQ(q.pa, 401u);
+    CHECK_EQ(q.pb, 1u);
+    CHECK_EQ(q.pos_len, 7u);
+    CHECK_EQ(q.feat[0], 201u);
+    CHECK_EQ(q.feat[1], 1u);
+    CHECK_EQ(q.feat[2], 101u);
+    CHECK_EQ(q.feat[3], 1u);
+    CHECK_EQ(q.flags & (ATP_HX_Q_TRUNC | ATP_HX_Q_NOCONTENT), 0u);
+    if (r1.count == 1u && len == 402u && g_hx.enc != NULL) {
+      int ok = 1;
+      u32 at = 0u;
+      Term dl = tt_hx_decode(g_hx.enc, len, &at, &ok);
+      CHECK(ok && at == q.pa);
+      CHECK(ok && kbo_eq(dl, atp_rule_term(s, r1.first, 0u)));
+      Term dr = tt_hx_decode(g_hx.enc, len, &at, &ok);
+      CHECK(ok && at == len && kbo_eq(dr, mk_v(VAR_x)));
+    }
+    atp_hx_scratch_free();
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/history-export/v2-install");
+  {
+    // A pre-oriented rule (the WL Rule[] surface) is recorded as installed
+    // and oriented with its content, though KBO orients the pair the
+    // other way.
+    char path[] = "/tmp/thvm_hx_v2_XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+      close(fd);
+    }
+    setenv("THVM_ATP_HISTORY_EXPORT", path, 1);
+    setenv("THVM_ATP_HISTORY_RATE", "1", 1);
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    unsetenv("THVM_ATP_HISTORY_EXPORT");
+    unsetenv("THVM_ATP_HISTORY_RATE");
+    CHECK(atp_hx_on(s));
+    AtpAddedRange r0 = thvm_atp_install_oriented_rule(s, mk_e(),
+                                                      mk_f(mk_a(), mk_a()));
+    CHECK_EQ(r0.count, 1u);
+    u32 uid = (r0.count == 1u) ? s->r_uid[r0.first] : 0u;
+    u32 tid = (r0.count == 1u) ? s->r_trace[r0.first] : 0u;
+    CHECK(r0.count == 1u && s->r_orient[r0.first]);
+    thvm_atp_history_finish(s, 0xffu);
+    TtHx h;
+    CHECK(tt_hx_load(path, &h));
+    unlink(path);
+    u32 n_q = 0u;
+    for (size_t i = 1u; i < h.n; i++) {
+      AtpHxRec r;
+      memcpy(&r, h.buf + i * ATP_HX_REC_SIZE, sizeof r);
+      if (r.tag != 'Q') {
+        continue;
+      }
+      n_q++;
+      CHECK_EQ(r.kind, ATP_HX_RULE_INSTALL);
+      CHECK_EQ(r.flags & ATP_HX_Q_ORIENTED, ATP_HX_Q_ORIENTED);
+      CHECK_EQ(r.trace, uid);
+      CHECK_EQ(r.seq, tid);
+      CHECK_EQ(r.pri, ATP_TRACE_NONE);
+      CHECK_EQ(r.pos_len, 1u);
+      CHECK(i + 1u < h.n);
+      if (r.pos_len != 1u || i + 1u >= h.n) {
+        continue;
+      }
+      AtpHxContRec c;
+      memcpy(&c, h.buf + (i + 1u) * ATP_HX_REC_SIZE, sizeof c);
+      CHECK_EQ(c.tag, 'q');
+      int ok = 1;
+      u32 at = 0u;
+      Term l = tt_hx_decode(c.bytes, r.pa + r.pb, &at, &ok);
+      Term rr = tt_hx_decode(c.bytes, r.pa + r.pb, &at, &ok);
+      CHECK(ok && at == r.pa + r.pb);
+      CHECK(ok && kbo_eq(l, mk_e()) && kbo_eq(rr, mk_f(mk_a(), mk_a())));
+    }
+    CHECK_EQ(n_q, 1u);
+    free(h.buf);
     thvm_atp_free(s);
   }
 
   TEST_BEGIN("atp/history-export/v2-stream");
   {
-    // Two recorded runs of the group axioms: plain completion with an age
-    // pick every third selection, then the Otter loop.  The stream starts
-    // with the version-2 header and the symbol table; every rule born has
-    // its content ('Q' + 'q'), and is either live at the end -- the last
-    // 'Q' of its uid then decodes to the live rule -- or has exactly one
-    // death ('Z'); every 'S' names the dimension that picked it.  The
-    // plain run is also made with the export off first: with it on, the
-    // run must keep the same rules, selections and heap cells (the hooks
-    // decode nothing onto the IC heap).
-    enum { REF_RULES = 512 };
-    static Term ref_l[REF_RULES], ref_r[REF_RULES];
-    static u32  ref_uid[REF_RULES];
-    static u8   ref_dead[REF_RULES];
-    u32 ref_n = 0u, ref_sel = 0u, ref_cps = 0u, ref_seq = 0u;
-    u64 ref_heap = 0u;
-    {
-      u64 h0 = thvm_atp_heap_checkpoint();
-      AtpState *s = thvm_atp_init(&DUMMY_CFG, 200);
-      thvm_atp_set_selection_ratio(s, 3u);
-      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
-      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
-      thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
-                            mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
-      for (u32 k = 0; k < 40u; k++) {
-        if (thvm_atp_step(s) != ATP_RUNNING) {
-          break;
-        }
-      }
-      ref_heap = thvm_atp_heap_checkpoint() - h0;
-      ref_n    = s->n_rules;
-      ref_sel  = s->cp_select_count;
-      ref_cps  = s->n_cps;
-      ref_seq  = s->cp_seq_next;
-      CHECK(ref_n <= REF_RULES);
-      for (u32 k = 0; k < ref_n && k < REF_RULES; k++) {
-        ref_uid[k]  = s->r_uid[k];
-        ref_dead[k] = s->r_dead[k];
-        ref_l[k]    = atp_rule_term(s, k, 0u);
-        ref_r[k]    = atp_rule_term(s, k, 1u);
-      }
-      thvm_atp_free(s);
-    }
+    // The group axioms under plain completion (an age pick every third
+    // selection) and under the Otter loop, each run with the export off
+    // and then on.  With it on, the run keeps the rules, selections and IC
+    // heap cells of the run without it: the hooks decode nothing onto the
+    // heap.  The stream starts with the version-2 header and the symbol
+    // table; every rule born has its content ('Q' + 'q') and is either
+    // live at the end -- the last 'Q' of its uid then decodes to the live
+    // rule -- or has exactly one death ('Z'); every 'S' names the
+    // dimension that picked it.
     for (u8 otter = 0; otter <= 1u; otter++) {
+      u64 ref_heap = 0u;
+      AtpState *ref = tt_hx_group_run(otter, NULL, &ref_heap);
+      u32 ref_n   = ref->n_rules;
+      u32 ref_sel = ref->cp_select_count;
+      u32 ref_cps = ref->n_cps;
+      u32 ref_seq = ref->cp_seq_next;
+      u32 ref_uid_next = ref->next_rule_uid;
+      u32  *ref_uid  = (u32 *)calloc(ref_n + 1u, sizeof *ref_uid);
+      u8   *ref_dead = (u8 *)calloc(ref_n + 1u, 1u);
+      Term *ref_l    = (Term *)calloc(ref_n + 1u, sizeof *ref_l);
+      Term *ref_r    = (Term *)calloc(ref_n + 1u, sizeof *ref_r);
+      CHECK(ref_uid != NULL && ref_dead != NULL && ref_l != NULL &&
+            ref_r != NULL);
+      if (ref_uid == NULL || ref_dead == NULL || ref_l == NULL ||
+          ref_r == NULL) {
+        free(ref_uid);
+        free(ref_dead);
+        free(ref_l);
+        free(ref_r);
+        thvm_atp_free(ref);
+        continue;
+      }
+      for (u32 k = 0; k < ref_n; k++) {
+        ref_uid[k]  = ref->r_uid[k];
+        ref_dead[k] = ref->r_dead[k];
+        ref_l[k]    = atp_rule_term(ref, k, 0u);
+        ref_r[k]    = atp_rule_term(ref, k, 1u);
+      }
+      thvm_atp_free(ref);
+
       char path[] = "/tmp/thvm_hx_v2_XXXXXX";
       int fd = mkstemp(path);
       CHECK(fd >= 0);
       if (fd >= 0) {
         close(fd);
       }
-      u64 h0 = thvm_atp_heap_checkpoint();
-      setenv("THVM_ATP_HISTORY_EXPORT", path, 1);
-      setenv("THVM_ATP_HISTORY_RATE", "1", 1);
-      setenv("FINDPROOF_SLICE", "hx-unit", 1);
-      AtpState *s = thvm_atp_init(&DUMMY_CFG, 200);
-      unsetenv("THVM_ATP_HISTORY_EXPORT");
-      unsetenv("THVM_ATP_HISTORY_RATE");
-      unsetenv("FINDPROOF_SLICE");
+      u64 heap = 0u;
+      AtpState *s = tt_hx_group_run(otter, path, &heap);
       CHECK(atp_hx_on(s));
-      if (otter) {
-        thvm_atp_set_use_mixmost_nf(s, 1u);
-        thvm_atp_set_use_otter(s, 1u);
-      } else {
-        thvm_atp_set_selection_ratio(s, 3u);
+      CHECK_EQ(heap, ref_heap);
+      CHECK_EQ(s->n_rules, ref_n);
+      CHECK_EQ(s->cp_select_count, ref_sel);
+      CHECK_EQ(s->n_cps, ref_cps);
+      CHECK_EQ(s->cp_seq_next, ref_seq);
+      CHECK_EQ(s->next_rule_uid, ref_uid_next);
+      for (u32 k = 0; k < s->n_rules && k < ref_n; k++) {
+        CHECK_EQ(s->r_uid[k], ref_uid[k]);
+        CHECK_EQ(s->r_dead[k], ref_dead[k]);
+        CHECK(kbo_eq(atp_rule_term(s, k, 0u), ref_l[k]));
+        CHECK(kbo_eq(atp_rule_term(s, k, 1u), ref_r[k]));
       }
-      static const char *const names[4] = { "e", "i", "f", "a" };
-      static const u32 arity[4] = { 0u, 1u, 2u, 0u };
-      for (u32 k = 0; k < 4u; k++) {
-        thvm_atp_history_symbol(s, LAB_e + k, arity[k], (u8)(k == 3u),
-                                names[k]);
-      }
-      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
-      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
-      thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
-                            mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
-      for (u32 k = 0; k < 40u; k++) {
-        if (thvm_atp_step(s) != ATP_RUNNING) {
-          break;
-        }
-      }
-      if (!otter) {
-        CHECK_EQ(thvm_atp_heap_checkpoint() - h0, ref_heap);
-        CHECK_EQ(s->n_rules, ref_n);
-        CHECK_EQ(s->cp_select_count, ref_sel);
-        CHECK_EQ(s->n_cps, ref_cps);
-        CHECK_EQ(s->cp_seq_next, ref_seq);
-        for (u32 k = 0; k < s->n_rules && k < ref_n && k < REF_RULES; k++) {
-          CHECK_EQ(s->r_uid[k], ref_uid[k]);
-          CHECK_EQ(s->r_dead[k], ref_dead[k]);
-          CHECK(kbo_eq(atp_rule_term(s, k, 0u), ref_l[k]));
-          CHECK(kbo_eq(atp_rule_term(s, k, 1u), ref_r[k]));
-        }
-      }
+      free(ref_uid);
+      free(ref_dead);
+      free(ref_l);
+      free(ref_r);
       thvm_atp_history_finish(s, 0xffu);
       CHECK(!atp_hx_on(s));
       TtHx h;
@@ -7606,17 +7713,33 @@ int main(void) {
         memcpy(&y, h.buf + (size_t)(1u + k) * ATP_HX_REC_SIZE, sizeof y);
         CHECK_EQ(y.tag, 'Y');
         CHECK_EQ(y.label, LAB_e + k);
-        CHECK_EQ(y.arity, arity[k]);
+        CHECK_EQ(y.arity, TT_HX_ARITY[k]);
         CHECK_EQ(y.flags, (k == 3u) ? 2u : 0u);
         CHECK_EQ(y.name_len, 1u);
-        CHECK_EQ((u8)y.name[0], (u8)names[k][0]);
+        CHECK_EQ((u8)y.name[0], (u8)TT_HX_NAMES[k][0]);
       }
-      enum { UIDS = 4096 };
-      static u8   born[UIDS], died[UIDS], seen_orient[UIDS];
-      static u32  last_tid[UIDS];
-      static Term last_l[UIDS], last_r[UIDS];
-      memset(born, 0, sizeof born);
-      memset(died, 0, sizeof died);
+      // Per-uid state, uids 1 .. next_rule_uid.
+      u32   n_uid       = s->next_rule_uid + 1u;
+      u8   *born        = (u8 *)calloc(n_uid, 1u);
+      u8   *died        = (u8 *)calloc(n_uid, 1u);
+      u8   *seen_orient = (u8 *)calloc(n_uid, 1u);
+      u32  *last_tid    = (u32 *)calloc(n_uid, sizeof *last_tid);
+      Term *last_l      = (Term *)calloc(n_uid, sizeof *last_l);
+      Term *last_r      = (Term *)calloc(n_uid, sizeof *last_r);
+      CHECK(born != NULL && died != NULL && seen_orient != NULL &&
+            last_tid != NULL && last_l != NULL && last_r != NULL);
+      if (born == NULL || died == NULL || seen_orient == NULL ||
+          last_tid == NULL || last_l == NULL || last_r == NULL) {
+        free(born);
+        free(died);
+        free(seen_orient);
+        free(last_tid);
+        free(last_l);
+        free(last_r);
+        free(h.buf);
+        thvm_atp_free(s);
+        continue;
+      }
       u32 n_born = 0u, n_died = 0u, n_sel = 0u, n_age = 0u, n_weight = 0u;
       u32 n_adopt = 0u, n_retire = 0u, n_drop = 0u, n_bad = 0u;
       u32 last_s_seq = 0xffffffffu;
@@ -7650,8 +7773,8 @@ int main(void) {
             CHECK(ok && at == r.pa);
             Term rr = tt_hx_decode(buf, len, &at, &ok);
             CHECK(ok && at == len);
-            CHECK(r.trace > 0u && r.trace < UIDS);
-            if (!ok || r.trace == 0u || r.trace >= UIDS) {
+            CHECK(r.trace > 0u && r.trace < n_uid);
+            if (!ok || r.trace == 0u || r.trace >= n_uid) {
               n_bad++;
               break;
             }
@@ -7676,8 +7799,8 @@ int main(void) {
             n_bad++;   // a continuation outside its 'Q' run
             break;
           case 'Z':
-            CHECK(r.trace > 0u && r.trace < UIDS);
-            if (r.trace > 0u && r.trace < UIDS) {
+            CHECK(r.trace > 0u && r.trace < n_uid);
+            if (r.trace > 0u && r.trace < n_uid) {
               CHECK(born[r.trace]);
               CHECK(!died[r.trace]);
               died[r.trace] = 1u;
@@ -7705,7 +7828,7 @@ int main(void) {
           case 'O':
             CHECK(otter);
             if (r.kind == ATP_HX_OT_ADOPT) {
-              CHECK(r.trace > 0u && r.trace < UIDS && born[r.trace]);
+              CHECK(r.trace > 0u && r.trace < n_uid && born[r.trace]);
               n_adopt++;
             }
             if (r.kind == ATP_HX_OT_RETIRE_SEL) {
@@ -7714,7 +7837,7 @@ int main(void) {
             }
             if (r.kind == ATP_HX_OT_DROP) {
               // Born and dropped before any content record.
-              if (r.trace > 0u && r.trace < UIDS) {
+              if (r.trace > 0u && r.trace < n_uid) {
                 born[r.trace] = 1u;
               }
               n_drop++;
@@ -7731,6 +7854,7 @@ int main(void) {
       CHECK_EQ(n_bad, 0u);
       CHECK_EQ(er.tag, 'E');
       CHECK_EQ(er.uid_b, n_sel);
+      CHECK_EQ(n_sel, s->cp_select_count);
       CHECK(n_sel > 6u);
       CHECK(n_born > 0u);
       if (!otter) {
@@ -7748,8 +7872,8 @@ int main(void) {
         }
         n_live++;
         u32 uid = s->r_uid[k];
-        CHECK(uid > 0u && uid < UIDS);
-        if (uid == 0u || uid >= UIDS) {
+        CHECK(uid > 0u && uid < n_uid);
+        if (uid == 0u || uid >= n_uid) {
           continue;
         }
         CHECK(born[uid] && !died[uid]);
@@ -7760,6 +7884,12 @@ int main(void) {
         CHECK(kbo_eq(last_r[uid], atp_rule_term(s, k, 1u)));
       }
       CHECK_EQ(n_born + n_drop, n_live + n_died);
+      free(born);
+      free(died);
+      free(seen_orient);
+      free(last_tid);
+      free(last_l);
+      free(last_r);
       free(h.buf);
       thvm_atp_free(s);
     }

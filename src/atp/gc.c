@@ -2610,9 +2610,9 @@ fn AtpAddedRange thvm_atp_install_oriented_rule(AtpState *s, Term lhs,
     if (or_t != ATP_TRACE_NONE) {
       s->r_trace[i] = or_t;
       atp_rj_content(s, i);
-      atp_hx_rule(s, i, ATP_HX_RULE_INSTALL, ATP_TRACE_NONE);
     }
   }
+  atp_hx_rule(s, i, ATP_HX_RULE_INSTALL, ATP_TRACE_NONE);
   if (s->use_emission_order) atp_wmo_insert_fact(s, i);
   r.first = idx;
   r.count = 1;

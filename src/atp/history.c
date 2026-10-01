@@ -111,6 +111,14 @@
 // names from the 'Y' records and takes the smaller
 // (tools/atp_enigma/np0_extract.py).
 //
+// Coverage: every CP queue insert, pop and removal, every rule birth,
+// in-place compose and death, and the Otter replay, in every lane family
+// that runs the completion loop.  Searches outside the CP queue and R
+// leave no records: the critical-goal queue and the greedy walk of the
+// narrowing lanes (narrow.c), whose proofs cite the rules they narrowed
+// with, and the CLI front ends (Horn release, horn-cd chaining), which
+// run before the engine exists.
+//
 // Features are read off the queue's packed byte string (acp_pack
 // preorder), the structural subset of thvm_atp_cp_features: the
 // remaining columns there (KBO orientability, three weight modes) need
@@ -280,6 +288,8 @@ typedef struct {
   u64   n_rec_sel;
   u8   *enc;            // rule-content encoding scratch
   u32   enc_cap;
+  u32  *open;           // rule-content walk: arguments left per open cell
+  u32   open_cap;
 } AtpHx;
 
 static AtpHx g_hx;
@@ -654,37 +664,79 @@ static u32 atp_hx_fnv(const u8 *p, u32 n) {
   return h;
 }
 
+// The export's malloc'd scratch, freed at session end (and by the unit
+// tests that encode outside a session).
+static void atp_hx_scratch_free(void) {
+  free(g_hx.enc);
+  free(g_hx.open);
+  g_hx.enc      = NULL;
+  g_hx.enc_cap  = 0u;
+  g_hx.open     = NULL;
+  g_hx.open_cap = 0u;
+}
+
 #ifdef THVM_ATPFT_RULES
-// One flatterm side in preorder: encodes it and accumulates the 'P'
-// feature walk's counters; returns its depth.
-static u32 atp_hx_ft_walk(AtpHxFeat *f, AtpHxEnc *e, const AtpFtCell *c,
-                          u32 side, u8 top) {
-  f->nodes[side]++;
-  if ((c->sym & WF_VAR_BIT) != 0u) {
-    u32 id = c->sym & ~WF_VAR_BIT;
-    atp_hx_feat_var(f, id, side);
-    if (top) {
-      f->top_var[side] = 1u;
+// Open a function cell at walk depth `at` with `arity` arguments to come;
+// 0 when the walk stack cannot grow.
+static u8 atp_hx_open_push(u32 at, u32 arity) {
+  if (at >= g_hx.open_cap) {
+    u32 ncap = g_hx.open_cap ? g_hx.open_cap * 2u : 64u;
+    u32 *no = (u32 *)realloc(g_hx.open, (size_t)ncap * sizeof *no);
+    if (no == NULL) {
+      return 0u;
     }
-    atp_hx_enc_varint(e, ((u64)id << 1) | 1u);
-    return 1u;
+    g_hx.open     = no;
+    g_hx.open_cap = ncap;
   }
-  atp_hx_feat_sym(f, c->sym);
-  if (top) {
-    f->top_sym[side] = c->sym;
-  }
-  atp_hx_enc_varint(e, (u64)c->sym << 1);
-  atp_hx_enc_varint(e, c->arity);
-  u32 d = 0u;
-  const AtpFtCell *k = c->next;
-  for (u32 i = 0; i < c->arity; i++) {
-    u32 cd = atp_hx_ft_walk(f, e, k, side, 0u);
-    if (cd > d) {
-      d = cd;
+  g_hx.open[at] = arity;
+  return 1u;
+}
+
+// One flatterm side, the cells of its span in preorder: encodes it and
+// accumulates the 'P' feature walk's counters; returns its depth.  The
+// open function cells live on a growable stack instead of the C stack: a
+// rule is as deep as the engine let it grow.
+static u32 atp_hx_ft_side(AtpHxFeat *f, AtpHxEnc *e, const AtpFtCell *c,
+                          u32 side) {
+  const AtpFtCell *stop = (c->end != NULL) ? c->end->next : NULL;
+  u32 depth  = 0u;
+  u32 n_open = 0u;
+  for (const AtpFtCell *p = c; p != stop; p = p->next) {
+    f->nodes[side]++;
+    if (n_open + 1u > depth) {
+      depth = n_open + 1u;
     }
-    k = k->end->next;
+    if ((p->sym & WF_VAR_BIT) != 0u) {
+      u32 id = p->sym & ~WF_VAR_BIT;
+      atp_hx_feat_var(f, id, side);
+      if (p == c) {
+        f->top_var[side] = 1u;
+      }
+      atp_hx_enc_varint(e, ((u64)id << 1) | 1u);
+    } else {
+      atp_hx_feat_sym(f, p->sym);
+      if (p == c) {
+        f->top_sym[side] = p->sym;
+      }
+      atp_hx_enc_varint(e, (u64)p->sym << 1);
+      atp_hx_enc_varint(e, p->arity);
+      if (p->arity > 0u) {
+        if (!atp_hx_open_push(n_open, p->arity)) {
+          e->over     = 1u;
+          f->overflow = 1u;
+          break;
+        }
+        n_open++;
+        continue;
+      }
+    }
+    // A leaf ends an argument of the innermost open cell; a cell whose
+    // last argument ended ends an argument of its parent in turn.
+    while (n_open > 0u && --g_hx.open[n_open - 1u] == 0u) {
+      n_open--;
+    }
   }
-  return d + 1u;
+  return depth;
 }
 #endif
 
@@ -702,9 +754,9 @@ static u32 atp_hx_rule_encode(const AtpState *s, u32 slot, AtpHxRec *r) {
   AtpHxFeat f;
   memset(&f, 0, sizeof f);
   AtpHxEnc e = { g_hx.enc, g_hx.enc_cap, 0u, 0u };
-  f.depth[0] = atp_hx_ft_walk(&f, &e, l, 0u, 1u);
+  f.depth[0] = atp_hx_ft_side(&f, &e, l, 0u);
   r->pa = e.len;
-  f.depth[1] = atp_hx_ft_walk(&f, &e, rr, 1u, 1u);
+  f.depth[1] = atp_hx_ft_side(&f, &e, rr, 1u);
   r->pb = e.len - r->pa;
   g_hx.enc     = e.buf;
   g_hx.enc_cap = e.cap;
@@ -1222,6 +1274,6 @@ fn void thvm_atp_history_finish(AtpState *s, u32 status) {
   fclose(g_hx.fp);
   free(g_hx.tstep);
   free(g_hx.gsym);
-  free(g_hx.enc);
+  atp_hx_scratch_free();
   memset(&g_hx, 0, sizeof g_hx);
 }
