@@ -1732,6 +1732,11 @@ fn Term term_ctr_at  (Term ctr_term, u32 i);
 // when n fits, a heap block otherwise; release with term_kids_release.
 fn Term *term_kids_buf    (Term *stk, u32 n);
 fn void  term_kids_release(Term *kids, Term *stk);
+// Work stack of an iterative term walk: `buf` starts as the caller's
+// inline array `inl` of *cap entries of `esz` bytes; grow doubles it
+// onto the heap (updating *cap), release frees a heap block.
+fn void *term_stack_grow   (void *buf, const void *inl, u32 *cap, size_t esz);
+fn void  term_stack_release(void *buf, const void *inl);
 
 // === lazy outermost-layer resolver ===
 // Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);

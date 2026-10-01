@@ -298,7 +298,7 @@ static u32 acp_count_term(Term t) {
 // Decode one packed preorder term STRAIGHT into AtpFt cells -- the
 // byte-side sibling of ft_from_term(acp_unpack_term(pp)) with the
 // heap-Term intermediate removed.  Builds through the same ftnew_*
-// constructors ft_from_term_rec uses, so every cell (sym / arity /
+// constructors ft_from_term uses, so every cell (sym / arity /
 // flags / next / end threading, NUM-marker encoding, GROUND folding)
 // is bit-identical to the two-hop route; only the heap Terms are
 // never materialised.  The pop-time treatment uses this to source
