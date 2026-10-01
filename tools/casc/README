@@ -23,7 +23,7 @@ RUN (manual)
   bin/FindProof --szs PROBLEM.p                                 # single config
   bin/FindProof --check --szs PROOF.p                           # verify a proof
   bin/FindProof --list-knobs                                    # strategy surface
-  bin/FindProof --list-lanes                                    # schedule lanes
+  bin/FindProof --list-lanes                                    # schedule lanes: name TAB flags
   bin/FindProof --lane=twee --szs --wall=120 PROBLEM.p          # one lane alone
 
 INPUT   TPTP CNF unit-equality problems; FOF (and non-unit CNF) is

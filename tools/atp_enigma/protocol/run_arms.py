@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Pod-side runner for one ENIGMA arm comparison.
 
-Implements the run protocol of docs/plans/enigma_portfolio.md section 1.3.
-Python 3.8 or later, standard library only, Linux only (it reads /proc).
+Implements the run protocol of docs/plans/enigma_portfolio.md section 1.3
+and the readings registered in its section 5.4.  Python 3.8 or later,
+standard library only, Linux only (it reads /proc and /sys/fs/cgroup).
 
 Every run of an arm, one problem at a time on the whole pod:
 
@@ -11,11 +12,22 @@ Every run of an arm, one problem at a time on the whole pod:
     timeout -k 5 <W+15> <binary> <arm flags> --szs --proof --wall=<W> <problem>
     < /dev/null
 
-THVM_ATP_RSS_ABORT_MB=3500 is set when MemTotal is below 72 GiB (16 slices
-at the schedule's default 4500 MiB cap do not fit).  THVM_ATP_SCHED_ERRDIR
-only redirects each slice's stderr from /dev/null to a file; the runner
-reads it for the end class of every lane and deletes it (--no-errdir drops
-it, and with it the end classes).
+Pod rules (preflight refuses a pod that breaks one):
+- 16 effective CPUs: the affinity mask, capped by a cgroup cpu quota.
+- The memory cap is fixed per comparison (--rss-cap default|3500).
+  "default" keeps the schedule's own 4500 MiB slice cap and needs an
+  effective memory limit, min(MemTotal, the cgroup memory limit), of at
+  least 16 x 4500 MiB, so 16 slices at the cap fit; "3500" sets
+  THVM_ATP_RSS_ABORT_MB=3500 on every run.  Each run's row records the
+  memory facts and the OOM kills the cgroup (else the kernel) counted
+  during the run.
+- One binary for every arm (--allow-binaries to override, logged).  Each
+  arm's lane table comes from its own binary ("<flags> --list-lanes":
+  name TAB flags); two arms with different flags but the same binary and
+  the same lane table are refused unless declared (--same-lanes A,B).
+THVM_ATP_SCHED_ERRDIR only redirects each slice's stderr from /dev/null to
+a file; the runner reads it for the end class of every lane and deletes it
+(--no-errdir drops it, and with it the end classes).
 
 Solution (all three): SZS status Unsatisfiable; a complete CNFRefutation
 block, with the run ended within W; a strict CheckProof verdict of
@@ -24,35 +36,52 @@ under env -i TPTP=<root> and timeout -k 5 75).
 
 Order and repeats:
 - The pod first runs the calibration problems of --calib-ref with the
-  calibration binary; a pod whose geometric-mean time ratio to the
-  reference is outside [0.85, 1.15] is flagged (calibration.verdict,
-  run.done status=calibration-failed) and the runner stops.
+  calibration binary, CALIB_PASSES passes; per problem the median time
+  over the reference time.  A pod whose geometric mean of those ratios is
+  outside [0.85, 1.15], or with one problem more than 30% off, or with a
+  calibration problem unsolved, fails (calibration.verdict, run.done
+  status=calibration-failed) and the runner stops.
 - Problems run in sha256(seed, name) order.  For each problem, its pass-1
   jobs (every wall x arm) run in sha256(seed, problem, pass, wall, arm)
   order, so the arm order is a fixed-seed shuffle per problem.
 - With --passes 1 (the default) and repeats on: at each wall, when the
   arms' pass-1 Solution flags disagree or any arm's pass-1 winning lane is
-  clock-gated (--lrs, --fol-lrs, --cp-set-ir-budget in its flags; a lane
-  missing from the lane table counts as gated), every arm runs passes 2
-  and 3 there.  The decision goes to decisions.tsv; the majority of three
+  clock-gated (its flags in that arm's own lane table hold --lrs,
+  --fol-lrs or --cp-set-ir-budget), every arm runs passes 2 and 3 there.
+  A winning lane missing from its arm's table stops the runner
+  (run.failed).  The decision goes to decisions.tsv; the majority of three
   decides (stats.py).
 - With --passes N > 1 (the L0 A/A design) every arm runs N independent
   passes and no repeats.
 
-Outputs in --out (all of it per-problem data: sealed for J13):
+Outputs in --out:
   rows.tsv        one row per run, header line first (columns below)
   decisions.tsv   problem, wall, repeat (0/1), reason
   lanes.jsonl     per run: every launched lane's end class and detail
   runs/<problem>/w<W>_<arm>_p<pass>.{out,err,chk}.gz  stdout (the proof),
                   stderr, checker output
+  superseded.tsv, superseded/  rows and runs of problems moved aside on a
+                  resume (below)
+  lanes_<arm>.tsv the arm binary's lane table
   calibration.tsv, calibration.verdict
-  run.started (config), run.done (status=complete|deadline|terminated|
-  verifiedbad|calibration-failed), run.failed (preflight or crash),
-  run.stop (a VerifiedBad: the line stops until its cause is fixed),
-  run.log
-Resumable: a rerun with the same arguments skips every run that has a row.
-With J13 problems (or --sealed on) the log and the sentinels carry only
-job counts, never a per-problem outcome.
+  run.config      the configuration fingerprint of the first start
+  run.started     one block per start (appended)
+  run.done (status=complete|deadline|terminated|verifiedbad|
+  calibration-failed), run.failed (preflight or crash), run.stop (a
+  VerifiedBad: the line stops until its cause is fixed), run.log
+Sealed runs (J13 problems, or --sealed on): every per-problem output
+(rows, decisions, lanes.jsonl, runs/, superseded) is packed into
+sealed.tgz (mode 0400) whenever the runner stops, and unpacked at the
+next start; the log carries a heartbeat every 15 min (base-job progress
+rounded down to 10%) and no per-job line; run.stop names no problem.
+
+Resume: a rerun with the same configuration skips every run that has a
+row.  A different configuration (arms with their sha and flags, walls,
+passes, repeats, seed, problems, max_par, rss cap, checker and its wall,
+errdir, sealed, protocol fingerprint) is refused (--force-config to
+override, logged).  A problem whose runs are incomplete and include a row
+from another pod is moved to superseded.tsv / superseded/ and rerun whole
+here, so all arms of a problem run on one pod.
 
 rows.tsv columns:
    1 problem   2 split   3 arm   4 wall   5 pass
@@ -65,7 +94,8 @@ rows.tsv columns:
                NoOutput), "-" when not checked
   11 solution  1 when status Unsatisfiable, proof 1, in_wall 1 and verdict
                VerifiedGood
-  12 lscpu     model name, threads per core, CPUs, cores per socket, sockets
+  12 lscpu     model name, threads per core, CPUs, cores per socket,
+               sockets, affinity CPUs, cgroup CPU quota
   13 bin_sha   sha256 of the arm binary
   14 in_wall   1 when wall_s <= W
   15 rc        exit code of the timeout process (124/137 outer timeout,
@@ -76,25 +106,35 @@ rows.tsv columns:
   19 lane_classes   class:count over the launched lanes
   20 proof_recs     cnf/fof records inside the SZS output block
   21 check_s   checker seconds  22 strays  processes killed after the run
-  23 host   24 cond (max_par, rss cap, errdir, proof, check wall)   25 utc
+  23 host
+  24 cond      maxpar, rss cap, errdir, proof, check wall, protocol
+               fingerprint (identical on every pod of one comparison)
+  25 utc
+  26 mem       MemTotal, cgroup limit, effective limit (kB)
+  27 oom_kills OOM kills counted during the run ("?" when unreadable)
 
 Subcommands:
   run        the comparison
   calib-ref  measure the calibration reference table on this pod
-  lane-flags print "lane TAB flags" from a FindProof source tools/atp_cli/main.c
-  plan       print the job plan and the first command; runs nothing
+  plan       print the job plan, the first command and a worst-case time
+             estimate; runs nothing
+  hostfacts  print this pod's effective memory and CPUs (key=value)
 Exit codes of run: 0 complete, 7 deadline, 5 terminated, 4 VerifiedBad,
-3 calibration failed, 2 preflight error.
+3 calibration failed, 2 preflight error or crash.
 
-Typical pod use (from a snapshot copy, detached):
+Typical pod use (from a snapshot copy, detached; the Mac driver passes an
+absolute --deadline-utc and polls the sentinels):
   cp run_arms.py ~/run_arms.snapshot.py
   nohup setsid python3 ~/run_arms.snapshot.py run --problems j13.tsv \\
-    --arms arms.tsv --walls 180,56 --root ~/j13 --checker ~/thvm/bin/CheckProof \\
-    --src-main ~/thvm/tools/atp_cli/main.c --calib-ref calib_ref.tsv \\
+    --arms arms.tsv --walls 180,56 --rss-cap default --root ~/j13 \\
+    --checker ~/thvm/bin/CheckProof --calib-ref calib_ref.tsv \\
     --calib-bin ~/sub/FindProof/bin/FindProof --calib-root ~/tptp_pool \\
-    --shard 1/4 --out ~/out_L0_1 </dev/null >~/run_arms_1.log 2>&1 &
+    --shard 1/4 --deadline-utc 2026-10-05T06:00:00Z --out ~/out_L0_1 \\
+    </dev/null >~/run_arms_1.log 2>&1 &
 """
 import argparse
+import calendar
+import collections
 import fcntl
 import glob
 import gzip
@@ -109,26 +149,38 @@ import socket
 import statistics
 import subprocess
 import sys
+import tarfile
+import threading
 import time
 
 ROW_COLUMNS = [
     "problem", "split", "arm", "wall", "pass", "status", "wall_s", "lane",
     "proof", "verdict", "solution", "lscpu", "bin_sha",
     "in_wall", "rc", "cpu_s", "maxrss_kb", "end_class", "lane_classes",
-    "proof_recs", "check_s", "strays", "host", "cond", "utc",
+    "proof_recs", "check_s", "strays", "host", "cond", "utc", "mem", "oom_kills",
 ]
 DECISION_COLUMNS = ["problem", "wall", "repeat", "reason"]
 CALIB_COLUMNS = ["name", "pass", "status", "wall_s", "ref_s", "ratio",
                  "host", "lscpu", "bin_sha", "utc"]
 
 MAX_PAR = 16
-RAM_FOR_DEFAULT_CAPS_KB = 72 * 1024 * 1024
+SLICE_RSS_MB = 4500          # SCHED_SLICE_RSS_MB in tools/atp_cli/main.c
 SMALL_POD_RSS_MB = 3500
+RSS_CAPS = ("default", str(SMALL_POD_RSS_MB))
 SPEED_TOLERANCE = 0.15
+SINGLE_TOLERANCE = 0.30
+CALIB_PASSES = 2
 CHECK_WALL_S = 60
+DEFAULT_SEED = "20261001"
 REPEAT_PASSES = (2, 3)
 GATED_FLAGS = ("--lrs", "--fol-lrs", "--cp-set-ir-budget")
-SCHED_ENTRY = re.compile(r'^\s*\{"([^"]+)",\s*"((?:[^"\\]|\\.)*)",\s*[-+0-9.eE]+\s*\},')
+REPEAT_READING = ("disagree=pass-1 Solution flags differ at the wall;"
+                  "gated=winning lane's flags in its own arm's lane table;per-wall")
+HEARTBEAT_S = 900
+PROBLEM_NAME = re.compile(r"^[A-Za-z0-9_.+=^-]+$")
+ARM_NAME = re.compile(r"^[A-Za-z0-9_.+-]+$")
+SEALED_MEMBERS = ("rows.tsv", "decisions.tsv", "lanes.jsonl", "superseded.tsv", "runs",
+                  "superseded")
 TMP_GLOBS = ("/tmp/thvm_sched_*", "/tmp/thvm_split_*", "/tmp/thvm_atp_*",
              "/tmp/pc_ob_*")
 LOCK_PATH = "/tmp/thvm_run_arms.lock"
@@ -151,6 +203,13 @@ def utc_now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def parse_utc(text):
+    try:
+        return calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        raise SystemExit("run_arms: --deadline-utc takes YYYY-MM-DDTHH:MM:SSZ, got %r" % text)
+
+
 def clean_field(s):
     return str(s).replace("\t", " ").replace("\n", " ").replace("\r", " ")
 
@@ -164,6 +223,10 @@ def sha256_file(path):
                 break
             h.update(b)
     return h.hexdigest()
+
+
+def sha256_text(text):
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def order_key(seed, *parts):
@@ -219,6 +282,13 @@ def write_file(path, text):
     os.replace(tmp, path)
 
 
+def append_file(path, text):
+    with open(path, "a") as fp:
+        fp.write(text)
+        fp.flush()
+        os.fsync(fp.fileno())
+
+
 def read_tsv(path):
     """Rows of a TSV written by this runner: (header, list of dicts)."""
     header = None
@@ -257,8 +327,17 @@ def ensure_header(path, columns):
             fp.write(b"\n")
 
 
+def protocol_fingerprint(check_wall, seed):
+    """(sha12, text) of the protocol parameters that change outcomes."""
+    text = ("check_wall=%s;seed=%s;gated=%s;repeat=%s;calib=gm%.2f/single%.2f/passes%d;"
+            "caps=%dx%dMiB|%d" % (check_wall, seed, ",".join(GATED_FLAGS), REPEAT_READING,
+                                  SPEED_TOLERANCE, SINGLE_TOLERANCE, CALIB_PASSES, MAX_PAR,
+                                  SLICE_RSS_MB, SMALL_POD_RSS_MB))
+    return sha256_text(text)[:12], text
+
+
 # ----------------------------------------------------------------------------
-# Output parsing (pure functions; unit-tested in test_run_arms.py)
+# Output parsing (pure functions; unit-tested in test_stats.py)
 
 
 def parse_szs_status(stdout_text):
@@ -421,26 +500,44 @@ def is_clock_gated(flags):
     return False
 
 
-def parse_schedule_source(text):
-    """lane -> flags for every {"name", "flags", frac}, entry in a source."""
-    lanes = {}
+def parse_lane_listing(text):
+    """[(lane, flags)] from FindProof --list-lanes ("name TAB flags" per
+    line); None when the listing has no flags column or is empty."""
+    lanes = []
     for line in text.splitlines():
-        m = SCHED_ENTRY.match(line)
-        if m:
-            lanes[m.group(1)] = m.group(2)
-    return lanes
+        if not line.strip():
+            continue
+        name, tab, flags = line.partition("\t")
+        if not tab:
+            return None
+        lanes.append((name.strip(), flags.strip()))
+    return lanes or None
 
 
-def repeat_decision(pass1, gated_lanes, known_lanes):
-    """pass1: arm -> (solution 0/1, winning lane).  Returns (repeat, reason)."""
+class UnknownLane(Exception):
+    pass
+
+
+def repeat_decision(pass1, tables):
+    """pass1: arm -> (solution 0/1, winning lane); tables: arm -> {lane:
+    flags}, each arm's own lane table.  Returns (repeat, reason); raises
+    UnknownLane for a winning lane its arm's table lacks."""
     sols = {v[0] for v in pass1.values()}
     reasons = []
     if len(sols) > 1:
         reasons.append("disagree")
-    gated = sorted({lane for _sol, lane in pass1.values()
-                    if lane and (lane in gated_lanes or lane not in known_lanes)})
+    gated = set()
+    for arm in sorted(pass1):
+        lane = pass1[arm][1]
+        if not lane:
+            continue
+        table = tables.get(arm)
+        if table is None or lane not in table:
+            raise UnknownLane("arm %s won with lane %r, which its lane table lacks" % (arm, lane))
+        if is_clock_gated(table[lane]):
+            gated.add(lane)
     if gated:
-        reasons.append("clock-gated:" + "+".join(gated))
+        reasons.append("clock-gated:" + "+".join(sorted(gated)))
     return (1 if reasons else 0), (";".join(reasons) if reasons else "-")
 
 
@@ -454,15 +551,175 @@ def shard_select(names, k, n):
     return [x for i, x in enumerate(ordered) if i % n == k - 1]
 
 
+def problem_complete(rows, decisions, problem, arms, walls, passes, repeats):
+    """rows: this problem's row dicts; walls as fmt_num strings."""
+    have = {(r["arm"], r["wall"], r["pass"]) for r in rows}
+    for w in walls:
+        for a in arms:
+            for k in range(1, passes + 1):
+                if (a, w, str(k)) not in have:
+                    return False
+        if repeats:
+            dec = decisions.get((problem, w))
+            if dec is None:
+                return False
+            if dec[0]:
+                for a in arms:
+                    for k in REPEAT_PASSES:
+                        if (a, w, str(k)) not in have:
+                            return False
+    return True
+
+
+def problems_to_supersede(rows, decisions, arms, walls, passes, repeats, host):
+    """Problems whose runs are incomplete and include a row from another
+    pod: they are rerun whole on this pod (all arms of a problem on one)."""
+    by = collections.defaultdict(list)
+    for r in rows:
+        by[r["problem"]].append(r)
+    out = []
+    for p, rs in by.items():
+        if all(r["host"] == host for r in rs):
+            continue
+        if problem_complete(rs, decisions, p, arms, walls, passes, repeats):
+            continue
+        out.append(p)
+    return sorted(out)
+
+
+def calibration_verdict(results):
+    """Per problem the median time ratio over its passes; the pod passes
+    when every problem is solved in every pass, the geometric mean of the
+    ratios is within SPEED_TOLERANCE of 1 and no ratio is more than
+    SINGLE_TOLERANCE off."""
+    by = collections.OrderedDict()
+    for r in results:
+        by.setdefault(r["name"], []).append(r)
+    ratios = {}
+    unsolved = 0
+    for name, rs in by.items():
+        if not all(x["ok"] for x in rs) or not rs[0].get("ref_s"):
+            unsolved += 1
+            continue
+        ratios[name] = statistics.median(x["wall_s"] for x in rs) / rs[0]["ref_s"]
+    vals = list(ratios.values())
+    gm = math.exp(sum(math.log(x) for x in vals) / len(vals)) if vals else float("nan")
+    worst_name = max(ratios, key=lambda k: abs(ratios[k] - 1.0)) if ratios else "-"
+    worst = abs(ratios[worst_name] - 1.0) if ratios else float("nan")
+    ok = bool(unsolved == 0 and vals and abs(gm - 1.0) <= SPEED_TOLERANCE
+              and worst <= SINGLE_TOLERANCE)
+    return {"ok": ok, "geomean": gm, "n": len(vals), "unsolved": unsolved,
+            "worst": worst, "worst_name": worst_name}
+
+
 # ----------------------------------------------------------------------------
 # Host facts and process control
 
 
-def lscpu_summary():
+def _cgroup_dirs(controller):
+    """[(version, dir)] for `controller`, from this process's own cgroup
+    up to the hierarchy root, the existing ones only."""
+    v2 = None
+    v1 = {}
+    for line in read_text("/proc/self/cgroup").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        hid, ctrls, path = parts
+        if hid == "0" and ctrls == "":
+            v2 = path
+        else:
+            for c in ctrls.split(","):
+                v1[c] = path
+
+    def up(base, path):
+        out = []
+        p = (path or "").strip("/")
+        while p:
+            out.append(os.path.join(base, p))
+            p = os.path.dirname(p)
+        out.append(base)
+        return [d for d in out if os.path.isdir(d)]
+
+    dirs = []
+    if v2 is not None and os.path.exists("/sys/fs/cgroup/cgroup.controllers"):
+        dirs += [("v2", d) for d in up("/sys/fs/cgroup", v2)]
+    if controller in v1:
+        try:
+            mounts = [os.path.join("/sys/fs/cgroup", n) for n in os.listdir("/sys/fs/cgroup")
+                      if controller in n.split(",")]
+        except OSError:
+            mounts = []
+        for m in mounts:
+            dirs += [("v1", d) for d in up(m, v1[controller])]
+    return dirs
+
+
+def mem_facts():
+    """MemTotal, the tightest cgroup memory limit, and their minimum (kB)."""
+    m = re.search(r"^MemTotal:\s+(\d+)\s+kB", read_text("/proc/meminfo"), re.M)
+    total = int(m.group(1)) if m else 0
+    limits = []
+    for ver, d in _cgroup_dirs("memory"):
+        f = "memory.max" if ver == "v2" else "memory.limit_in_bytes"
+        v = read_text(os.path.join(d, f)).strip()
+        if v.isdigit() and int(v) < (1 << 60):
+            limits.append(int(v) // 1024)
+    cg = min(limits) if limits else None
+    eff = min([total] + ([cg] if cg is not None else []))
+    return {"memtotal_kb": total, "cgroup_kb": cg, "eff_kb": eff}
+
+
+def mem_text(f):
+    return "memtotal=%d;cgroup=%s;eff=%d" % (f["memtotal_kb"], f["cgroup_kb"] or "none",
+                                            f["eff_kb"])
+
+
+def caps_need_kb(max_par):
+    return max_par * SLICE_RSS_MB * 1024
+
+
+def oom_count():
+    """OOM kills counted by this cgroup (memory.events / oom_control), else
+    by the kernel (/proc/vmstat); None when neither is readable."""
+    for ver, d in _cgroup_dirs("memory"):
+        f = "memory.events" if ver == "v2" else "memory.oom_control"
+        m = re.search(r"^oom_kill (\d+)", read_text(os.path.join(d, f)), re.M)
+        if m:
+            return int(m.group(1))
+    m = re.search(r"^oom_kill (\d+)", read_text("/proc/vmstat"), re.M)
+    return int(m.group(1)) if m else None
+
+
+def cpu_facts():
+    """Affinity CPUs, the tightest cgroup CPU quota (CPUs), and the
+    effective count: the affinity capped by the floor of the quota."""
+    try:
+        aff = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        aff = os.cpu_count() or 0
+    quotas = []
+    for ver, d in _cgroup_dirs("cpu"):
+        if ver == "v2":
+            v = read_text(os.path.join(d, "cpu.max")).split()
+            if len(v) == 2 and v[0] != "max" and v[0].isdigit() and v[1].isdigit():
+                quotas.append(int(v[0]) / float(int(v[1])))
+        else:
+            q = read_text(os.path.join(d, "cpu.cfs_quota_us")).strip()
+            per = read_text(os.path.join(d, "cpu.cfs_period_us")).strip()
+            if q.lstrip("-").isdigit() and int(q) > 0 and per.isdigit() and int(per) > 0:
+                quotas.append(int(q) / float(int(per)))
+    quota = min(quotas) if quotas else None
+    eff = aff if quota is None else min(aff, int(math.floor(quota + 1e-9)))
+    return {"affinity": aff, "quota": quota, "eff": eff}
+
+
+def lscpu_summary(cpu=None):
+    cpu = cpu or cpu_facts()
     info = {}
     try:
         out = subprocess.run(["lscpu"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                             universal_newlines=True, timeout=30,
+                             universal_newlines=True, timeout=30, stdin=subprocess.DEVNULL,
                              env={"LC_ALL": "C", "PATH": "/usr/bin:/bin"}).stdout
         for line in out.splitlines():
             k, _, v = line.partition(":")
@@ -474,19 +731,10 @@ def lscpu_summary():
         txt = read_text("/proc/cpuinfo")
         m = re.search(r"^model name\s*:\s*(.*)$", txt, re.M)
         model = m.group(1).strip() if m else "unknown"
-    return clean_field("%s|tpc=%s|cpus=%s|cps=%s|sockets=%s" % (
+    return clean_field("%s|tpc=%s|cpus=%s|cps=%s|sockets=%s|aff=%d|quota=%s" % (
         model, info.get("Thread(s) per core", "?"), info.get("CPU(s)", "?"),
-        info.get("Core(s) per socket", "?"), info.get("Socket(s)", "?")))
-
-
-def mem_total_kb():
-    txt = read_text("/proc/meminfo")
-    m = re.search(r"^MemTotal:\s+(\d+)\s+kB", txt, re.M)
-    return int(m.group(1)) if m else 0
-
-
-def rss_cap_for(mem_kb):
-    return SMALL_POD_RSS_MB if mem_kb < RAM_FOR_DEFAULT_CAPS_KB else None
+        info.get("Core(s) per socket", "?"), info.get("Socket(s)", "?"), cpu["affinity"],
+        "%g" % cpu["quota"] if cpu["quota"] is not None else "none"))
 
 
 def proc_entries():
@@ -614,6 +862,25 @@ def wall_of_flags(flags):
     return float(m.group(1)) if m else None
 
 
+def read_lane_table(timeout_bin, binary, flags):
+    """The arm binary's own lane table under the arm's flags: ([(lane,
+    flags)], "") or (None, reason)."""
+    argv = (["/usr/bin/env", "-i", timeout_bin, "-k", "5", "30", binary] + flags.split()
+            + ["--list-lanes"])
+    try:
+        r = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, universal_newlines=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, clean_field(e)
+    if r.returncode != 0:
+        first = (r.stderr.strip().splitlines() or [""])[0]
+        return None, "exit %d: %s" % (r.returncode, clean_field(first))
+    lanes = parse_lane_listing(r.stdout)
+    if lanes is None:
+        return None, "no 'name TAB flags' listing (the binary predates it)"
+    return lanes, ""
+
+
 # ----------------------------------------------------------------------------
 # Inputs
 
@@ -631,6 +898,8 @@ class Arm(object):
         self.binary = binary
         self.flags = flags
         self.sha = ""
+        self.lanes = None
+        self.lanes_note = ""
 
 
 def load_problems(path):
@@ -645,6 +914,10 @@ def load_problems(path):
             if len(f) < 3:
                 raise SystemExit("run_arms: problem line needs name, path, split: %r" % line)
             name, ppath, split = f[0].strip(), f[1].strip(), f[2].strip()
+            # The name is a path component (runs/<name>/).
+            if not PROBLEM_NAME.match(name) or name in (".", ".."):
+                raise SystemExit("run_arms: problem name %r: use letters, digits, _ . + = ^ -"
+                                 % name)
             if name in seen:
                 raise SystemExit("run_arms: duplicate problem %s" % name)
             seen.add(name)
@@ -667,12 +940,13 @@ def load_arms(path):
                 raise SystemExit("run_arms: arm line needs name, binary[, flags]: %r" % line)
             name, binary = f[0].strip(), f[1].strip()
             flags = f[2].strip() if len(f) > 2 else ""
-            if not re.match(r"^[A-Za-z0-9_.+-]+$", name):
+            if not ARM_NAME.match(name) or name in (".", ".."):
                 raise SystemExit("run_arms: arm name %r: use letters, digits, _ . + -" % name)
             if name in seen:
                 raise SystemExit("run_arms: duplicate arm %s" % name)
-            if re.search(r"(?:^|\s)--(?:wall|szs|proof)(?:=|\s|$)", flags):
-                raise SystemExit("run_arms: arm %s: --szs, --proof and --wall are added by the runner" % name)
+            if re.search(r"(?:^|\s)--(?:wall|szs|proof|list-lanes)(?:=|\s|$)", flags):
+                raise SystemExit("run_arms: arm %s: --szs, --proof and --wall are added by the "
+                                 "runner (and --list-lanes is not a run)" % name)
             seen.add(name)
             arms.append(Arm(name, os.path.abspath(os.path.expanduser(binary)), flags))
     if not arms:
@@ -699,7 +973,7 @@ def load_calib_ref(path):
             rows.append({"name": f[0], "path": f[1], "ref_s": float(f[2])})
     if not rows:
         raise SystemExit("run_arms: no calibration rows in %s" % path)
-    for k in ("bin_sha", "flags"):
+    for k in ("bin_sha", "flags", "rss_cap", "max_par"):
         if k not in meta:
             raise SystemExit("run_arms: calibration reference %s lacks #%s=" % (path, k))
     return meta, rows
@@ -730,6 +1004,22 @@ def parse_split_roots(items):
     return roots
 
 
+def parse_same_lanes(items):
+    out = set()
+    for it in items or []:
+        a, _, b = it.partition(",")
+        if not a or not b:
+            raise SystemExit("run_arms: --same-lanes takes A,B")
+        out.add(frozenset((a, b)))
+    return out
+
+
+def job_worst_s(wall, check_wall):
+    """The runner's bound on one job: the hard kill at W + 50, plus the
+    checker's at its wall + 50 (check_wall None: no checker)."""
+    return wall + 50 + ((check_wall + 50) if check_wall is not None else 0)
+
+
 # ----------------------------------------------------------------------------
 # The runner
 
@@ -750,6 +1040,7 @@ class Runner(object):
         self.root = os.path.abspath(os.path.expanduser(args.root))
         self.split_roots = parse_split_roots(args.split_root)
         all_probs = load_problems(args.problems)
+        self.n_all_problems = len(all_probs)
         if args.shard:
             k, _, n = args.shard.partition("/")
             k, n = int(k), int(n)
@@ -773,30 +1064,26 @@ class Runner(object):
             sealed = "on" if any(p.split == "j13" for p in self.problems) else "off"
         self.sealed = sealed == "on"
         self.errdir_on = not args.no_errdir
-        self.lane_flags = {}
-        if args.lane_flags:
-            with open(args.lane_flags) as fp:
-                for line in fp:
-                    line = line.rstrip("\n")
-                    if not line.strip() or line.startswith("#"):
-                        continue
-                    name, _, flags = line.partition("\t")
-                    self.lane_flags[name.strip()] = flags
-        if args.src_main:
-            self.lane_flags.update(parse_schedule_source(read_text(args.src_main)))
-        if self.repeats and not self.lane_flags:
-            raise SystemExit("run_arms: the repeat rule needs the lane flags: "
-                             "--src-main <tools/atp_cli/main.c> or --lane-flags <tsv>")
-        self.gated = {k for k, v in self.lane_flags.items() if is_clock_gated(v)}
+        self.rss_label = args.rss_cap
+        self.rss_cap = None if args.rss_cap == "default" else int(args.rss_cap)
+        self.same_lanes = parse_same_lanes(args.same_lanes)
+        self.protocol_sha, self.protocol_text = protocol_fingerprint(self.check_wall, self.seed)
         self.deadline = None
         self.max_par = args.max_par
         self.lscpu = ""
         self.host = socket.gethostname()
-        self.rss_cap = None
+        self.mem = {"memtotal_kb": 0, "cgroup_kb": None, "eff_kb": 0}
+        self.cpu = {"affinity": 0, "quota": None, "eff": 0}
         self.done_keys = set()
+        self.rows_by_key = {}
         self.decisions = {}
         self.jobs_run = 0
+        self.base_total = len(self.problems) * len(self.walls) * len(self.arms) * self.passes
+        self.base_done = 0
         self.real_bins = set()
+        self.locked = False
+        self.deviations = []
+        self.hb_stop = threading.Event()
 
     # -- logging
 
@@ -809,6 +1096,10 @@ class Runner(object):
         except OSError:
             pass
 
+    def deviation(self, msg):
+        self.deviations.append(msg)
+        self.log("DEVIATION: " + msg)
+
     def root_for(self, split):
         return self.split_roots.get(split, self.root)
 
@@ -817,24 +1108,49 @@ class Runner(object):
 
     # -- preflight
 
+    def check_pod(self):
+        """Effective CPUs and memory against the protocol (also calib-ref)."""
+        self.cpu = cpu_facts()
+        if self.cpu["eff"] != self.max_par:
+            if not self.args.allow_nproc:
+                raise SystemExit("run_arms: %d effective CPUs (affinity %d, cgroup quota %s); "
+                                 "the protocol is %d (--allow-nproc to override, logged)" % (
+                                     self.cpu["eff"], self.cpu["affinity"],
+                                     self.cpu["quota"], self.max_par))
+            self.deviation("%d effective CPUs (protocol: %d)" % (self.cpu["eff"], self.max_par))
+        self.mem = mem_facts()
+        need = caps_need_kb(self.max_par)
+        if self.rss_cap is None and self.mem["eff_kb"] < need:
+            raise SystemExit("run_arms: --rss-cap default needs an effective memory limit of "
+                             "%d x %d MiB = %d kB; this pod has %d kB (%s); use a larger pod or "
+                             "run the whole comparison with --rss-cap %d" % (
+                                 self.max_par, SLICE_RSS_MB, need, self.mem["eff_kb"],
+                                 mem_text(self.mem), SMALL_POD_RSS_MB))
+        self.lscpu = lscpu_summary(self.cpu)
+
     def preflight(self):
-        for tool in ("/usr/bin/env",):
-            if not os.access(tool, os.X_OK):
-                raise SystemExit("run_arms: missing %s" % tool)
+        if not os.access("/usr/bin/env", os.X_OK):
+            raise SystemExit("run_arms: missing /usr/bin/env")
         self.timeout_bin = shutil.which("timeout", path="/usr/bin:/bin")
         if not self.timeout_bin:
             raise SystemExit("run_arms: missing coreutils timeout")
         if not os.path.isdir("/proc/self"):
             raise SystemExit("run_arms: needs Linux /proc")
-        nproc = os.cpu_count() or 0
-        if nproc != self.max_par and not self.args.allow_nproc:
-            raise SystemExit("run_arms: this pod has %d vCPUs; the protocol is %d-vCPU pods "
-                             "(--allow-nproc to override, logged)" % (nproc, self.max_par))
+        self.check_pod()
         for arm in self.arms:
             if not os.access(arm.binary, os.X_OK):
                 raise SystemExit("run_arms: arm %s: no executable %s" % (arm.name, arm.binary))
             arm.sha = sha256_file(arm.binary)
             self.real_bins.add(os.path.realpath(arm.binary))
+        shas = {a.sha for a in self.arms}
+        if len(shas) > 1:
+            if not self.args.allow_binaries:
+                raise SystemExit("run_arms: the arms use %d different binaries; section 1.1 "
+                                 "runs every arm on one binary (--allow-binaries to override, "
+                                 "logged)" % len(shas))
+            self.deviation("arms on %d binaries: %s" % (len(shas), " ".join(
+                "%s:%s" % (a.name, a.sha[:12]) for a in self.arms)))
+        self.read_lane_tables()
         if self.checker:
             if not os.access(self.checker, os.X_OK):
                 raise SystemExit("run_arms: no executable checker %s" % self.checker)
@@ -847,10 +1163,6 @@ class Runner(object):
         for split in {p.split for p in self.problems}:
             if not os.path.isdir(self.root_for(split)):
                 raise SystemExit("run_arms: no root directory for split %s" % split)
-        self.lscpu = lscpu_summary()
-        mem = mem_total_kb()
-        self.mem_kb = mem
-        self.rss_cap = rss_cap_for(mem)
         if self.args.calib_bin:
             self.real_bins.add(os.path.realpath(os.path.abspath(os.path.expanduser(self.args.calib_bin))))
         busy = running_binaries(self.real_bins)
@@ -858,6 +1170,34 @@ class Runner(object):
             raise SystemExit("run_arms: %d prover/checker processes already running; "
                              "the protocol needs an idle pod" % len(busy))
         self.wait_idle()
+
+    def read_lane_tables(self):
+        for arm in self.arms:
+            lanes, why = read_lane_table(self.timeout_bin, arm.binary, arm.flags)
+            if lanes is None:
+                if self.repeats or len(self.arms) > 1:
+                    raise SystemExit("run_arms: arm %s: no lane table from '%s --list-lanes' "
+                                     "(%s); the repeat rule and the arm check need it" % (
+                                         arm.name, arm.flags, why))
+                arm.lanes_note = why
+                continue
+            names = [n for n, _f in lanes]
+            if len(set(names)) != len(names):
+                raise SystemExit("run_arms: arm %s: duplicate lane names in its table" % arm.name)
+            arm.lanes = collections.OrderedDict(lanes)
+            write_file(os.path.join(self.out, "lanes_%s.tsv" % arm.name),
+                       "".join("%s\t%s\n" % kv for kv in lanes))
+        for i, a in enumerate(self.arms):
+            for b in self.arms[i + 1:]:
+                if a.lanes is None or b.lanes is None:
+                    continue
+                if (a.flags != b.flags and a.sha == b.sha and list(a.lanes.items())
+                        == list(b.lanes.items())
+                        and frozenset((a.name, b.name)) not in self.same_lanes):
+                    raise SystemExit(
+                        "run_arms: arms %s and %s differ in flags but list the same lanes on "
+                        "one binary: a schedule mode may be ignored (declare an intended pair "
+                        "with --same-lanes %s,%s)" % (a.name, b.name, a.name, b.name))
 
     def wait_idle(self):
         t0 = time.monotonic()
@@ -870,12 +1210,14 @@ class Runner(object):
                 return
             if time.monotonic() - t0 > 600:
                 raise SystemExit("run_arms: 1-minute load %.2f after 10 min: the pod is not idle" % load1)
+            if STOP["signal"]:
+                raise SystemExit("run_arms: terminated while waiting for an idle pod")
             time.sleep(15)
 
     def cond(self):
-        return "maxpar=%d;rss=%s;errdir=%d;proof=1;check_wall=%s" % (
-            self.max_par, self.rss_cap if self.rss_cap else "default",
-            1 if self.errdir_on else 0, self.check_wall if self.checker else "none")
+        return "maxpar=%d;rss=%s;errdir=%d;proof=1;check_wall=%s;protocol=%s" % (
+            self.max_par, self.rss_label, 1 if self.errdir_on else 0,
+            self.check_wall if self.checker else "none", self.protocol_sha)
 
     def job_env(self, root, errdir):
         env = ["TPTP=" + root, "THVM_ATP_SCHED_MAX_PAR=%d" % self.max_par]
@@ -892,16 +1234,145 @@ class Runner(object):
                 + arm.flags.split()
                 + ["--szs", "--proof", "--wall=" + fmt_num(wall), self.problem_abs(prob)])
 
-    # -- state
+    # -- configuration and state
+
+    def config(self):
+        prob_text = "".join("%s\t%s\t%s\n" % (p.name, p.path, p.split)
+                            for p in sorted(self.problems, key=lambda p: p.name))
+        cfg = collections.OrderedDict([
+            ("arms", [[a.name, a.sha, a.flags] for a in self.arms]),
+            ("walls", [fmt_num(w) for w in self.walls]),
+            ("passes", self.passes), ("repeats", int(self.repeats)), ("seed", str(self.seed)),
+            ("problems_sha", sha256_text(prob_text)), ("problems", len(self.problems)),
+            ("max_par", self.max_par), ("rss_cap", self.rss_label),
+            ("checker_sha", getattr(self, "checker_sha", "none")),
+            ("check_wall", self.check_wall if self.checker else "none"),
+            ("errdir", int(self.errdir_on)), ("sealed", int(self.sealed)),
+            ("protocol", self.protocol_sha),
+        ])
+        text = json.dumps(cfg, sort_keys=True)
+        return sha256_text(text)[:16], text
+
+    def check_config(self):
+        fp, text = self.config()
+        path = os.path.join(self.out, "run.config")
+        old = read_text(path)
+        if not old:
+            write_file(path, "fingerprint=%s\n%s\n" % (fp, text))
+            return fp
+        m = re.match(r"fingerprint=(\S+)\n(.*)", old, re.S)
+        if m is None or m.group(1) != fp:
+            old_fp = m.group(1) if m else "?"
+            if not self.args.force_config:
+                raise SystemExit("run_arms: %s holds configuration %s; this launch is %s.  "
+                                 "Rows of different configurations do not mix (compare %s with "
+                                 "this run's); --force-config to override, logged" % (
+                                     path, old_fp, fp, path))
+            self.deviation("resume under configuration %s over %s (--force-config)" % (fp, old_fp))
+        return fp
 
     def load_state(self):
         _h, rows = read_tsv(self.rows_path)
-        for r in rows:
-            self.done_keys.add((r["problem"], r["arm"], r["wall"], r["pass"]))
-        self.rows_by_key = {(r["problem"], r["arm"], r["wall"], r["pass"]): r for r in rows}
         _h, decs = read_tsv(self.dec_path)
-        for d in decs:
-            self.decisions[(d["problem"], d["wall"])] = (int(d["repeat"]), d["reason"])
+        decisions = {(d["problem"], d["wall"]): (int(d["repeat"]), d["reason"]) for d in decs}
+        names = {p.name for p in self.problems}
+        sup = problems_to_supersede([r for r in rows if r["problem"] in names], decisions,
+                                    [a.name for a in self.arms],
+                                    [fmt_num(w) for w in self.walls], self.passes,
+                                    self.repeats, self.host)
+        if sup:
+            self.supersede(set(sup), rows, decs)
+            rows = [r for r in rows if r["problem"] not in sup]
+            decisions = {k: v for k, v in decisions.items() if k[0] not in sup}
+            self.log("resume: %d problems had partial runs from another pod; they rerun whole "
+                     "here (rows in superseded.tsv)" % len(sup))
+        for r in rows:
+            key = (r["problem"], r["arm"], r["wall"], r["pass"])
+            self.done_keys.add(key)
+            self.rows_by_key[key] = r
+            if r["problem"] in names and int(r["pass"]) <= self.passes:
+                self.base_done += 1
+        self.decisions = decisions
+
+    def supersede(self, probs, rows, decs):
+        sup_path = os.path.join(self.out, "superseded.tsv")
+        ensure_header(sup_path, ROW_COLUMNS)
+        with open(sup_path, "a") as fp:
+            for r in rows:
+                if r["problem"] in probs:
+                    fp.write("\t".join(r.get(c, "") for c in ROW_COLUMNS) + "\n")
+        keep = [r for r in rows if r["problem"] not in probs]
+        write_file(self.rows_path, "#" + "\t".join(ROW_COLUMNS) + "\n" + "".join(
+            "\t".join(r.get(c, "") for c in ROW_COLUMNS) + "\n" for r in keep))
+        write_file(self.dec_path, "#" + "\t".join(DECISION_COLUMNS) + "\n" + "".join(
+            "\t".join(d[c] for c in DECISION_COLUMNS) + "\n" for d in decs
+            if d["problem"] not in probs))
+        if os.path.exists(self.lanes_path):
+            kept = []
+            with open(self.lanes_path) as fp:
+                for line in fp:
+                    try:
+                        if json.loads(line).get("problem") in probs:
+                            continue
+                    except ValueError:
+                        continue
+                    kept.append(line)
+            write_file(self.lanes_path, "".join(kept))
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        for p in probs:
+            src = os.path.join(self.out, "runs", p)
+            if os.path.isdir(src):
+                dst = os.path.join(self.out, "superseded", "%s.%s" % (p, stamp))
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.move(src, dst)
+
+    # -- the seal
+
+    def unpack_sealed(self):
+        path = os.path.join(self.out, "sealed.tgz")
+        if not os.path.exists(path):
+            return
+        os.chmod(path, 0o600)
+        with tarfile.open(path, "r:gz") as tf:
+            for m in tf.getmembers():
+                if m.name.startswith("/") or ".." in m.name.split("/"):
+                    raise SystemExit("run_arms: %s holds an unsafe path %r" % (path, m.name))
+            try:
+                tf.extractall(self.out, filter="data")
+            except TypeError:
+                tf.extractall(self.out)
+        os.unlink(path)
+
+    def pack_sealed(self):
+        """Every per-problem output into sealed.tgz (mode 0400); the scratch
+        files of the last job are deleted."""
+        shutil.rmtree(self.scratch, ignore_errors=True)
+        members = [m for m in SEALED_MEMBERS if os.path.exists(os.path.join(self.out, m))]
+        if not members:
+            return
+        path = os.path.join(self.out, "sealed.tgz")
+        if os.path.exists(path):
+            raise SystemExit("run_arms: %s exists next to unpacked outputs" % path)
+        tmp = path + ".tmp"
+        with tarfile.open(tmp, "w:gz") as tf:
+            for m in members:
+                tf.add(os.path.join(self.out, m), arcname=m)
+        os.chmod(tmp, 0o400)
+        os.replace(tmp, path)
+        for m in members:
+            p = os.path.join(self.out, m)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                os.unlink(p)
+
+    def heartbeat(self):
+        pct = (100 * self.base_done // self.base_total) // 10 * 10 if self.base_total else 100
+        self.log("alive; base jobs done: %d%% (rounded down to 10%%; outcomes sealed)" % pct)
+
+    def heartbeat_loop(self):
+        while not self.hb_stop.wait(HEARTBEAT_S):
+            self.heartbeat()
 
     # -- one run
 
@@ -921,7 +1392,7 @@ class Runner(object):
                  self.timeout_bin, "-k", "5", str(self.check_wall + 15),
                  self.checker, "--szs", proof_path])
         rc, elapsed, _cpu, _rss, sid, _killed = spawn(argv, root, out, err,
-                                                     self.check_wall + 15 + 5 + 30)
+                                                     self.check_wall + 50)
         self.reap(sid)
         txt = read_text(out)
         m = re.search(r"^% SZS status (\S+)", txt, re.M)
@@ -946,7 +1417,8 @@ class Runner(object):
         out = os.path.join(self.scratch, "stdout.p")
         err = os.path.join(self.scratch, "stderr.txt")
         argv = self.argv_for(arm, prob, wall, errdir)
-        rc, elapsed, cpu, rss, sid, killed = spawn(argv, self.scratch, out, err, wall + 15 + 5 + 30)
+        oom0 = oom_count()
+        rc, elapsed, cpu, rss, sid, killed = spawn(argv, self.scratch, out, err, wall + 50)
         strays = self.reap(sid)
         if STOP["signal"]:
             # The runner itself was told to stop: this run is not a result.
@@ -975,6 +1447,8 @@ class Runner(object):
             check_s = "%.2f" % ce
             if STOP["signal"]:
                 return "terminated"
+        oom1 = oom_count()
+        ooms = (oom1 - oom0) if (oom0 is not None and oom1 is not None) else "?"
         sol = solution_flag(status, present, form, in_wall, verdict)
         gzip_copy(out, os.path.join(jobdir, tag + ".out.gz"))
         gzip_copy(err, os.path.join(jobdir, tag + ".err.gz"))
@@ -988,24 +1462,27 @@ class Runner(object):
         row = [prob.name, prob.split, arm.name, wall_s, pass_no, status, "%.2f" % elapsed,
                winner, int(present and form == "CNFRefutation"), verdict, sol, self.lscpu,
                arm.sha, in_wall, rc, "%.2f" % cpu, rss, end_class, histogram_text(counts),
-               proof_records(stdout), check_s, strays, self.host, self.cond(), utc_now()]
+               proof_records(stdout), check_s, strays, self.host, self.cond(), utc_now(),
+               mem_text(self.mem), ooms]
         append_line(self.rows_path, row)
         key = (prob.name, arm.name, wall_s, str(pass_no))
         self.done_keys.add(key)
         self.rows_by_key[key] = dict(zip(ROW_COLUMNS, [str(x) for x in row]))
         self.jobs_run += 1
-        if self.sealed:
-            self.log("jobs done in this run: %d (outcomes sealed)" % self.jobs_run)
-        else:
-            self.log("%s %s w%s p%d %s %.1fs %s proof=%d %s sol=%d %s" % (
+        if pass_no <= self.passes:
+            self.base_done += 1
+        if not self.sealed:
+            self.log("%s %s w%s p%d %s %.1fs %s proof=%d %s sol=%d %s oom=%s" % (
                 prob.name, arm.name, wall_s, pass_no, status, elapsed, winner or "-",
-                int(present), verdict, sol, end_class))
+                int(present), verdict, sol, end_class, ooms))
         if verdict == "VerifiedBad":
-            # The cause must be found, so the stop file names the run even
-            # under the seal; the log does not.
+            if self.sealed:
+                evidence = ("sealed.tgz (the row with verdict VerifiedBad); opening it for "
+                            "this cause is the section 1.3 exception")
+            else:
+                evidence = "runs/%s/%s.*" % (prob.name, tag)
             write_file(os.path.join(self.out, "run.stop"),
-                       "stopped=%s reason=VerifiedBad job=%d evidence=runs/%s/%s.*\n" % (
-                           utc_now(), self.jobs_run, prob.name, tag))
+                       "stopped=%s reason=VerifiedBad evidence=%s\n" % (utc_now(), evidence))
             self.log("VerifiedBad: the line stops (see run.stop)")
             return "verifiedbad"
         return "ok"
@@ -1017,53 +1494,68 @@ class Runner(object):
         verdict_path = os.path.join(self.out, "calibration.verdict")
         if a.no_calib:
             write_file(verdict_path, "status=skipped host=%s utc=%s\n" % (self.host, utc_now()))
-            self.log("calibration skipped (--no-calib)")
-            return True
+            self.deviation("calibration skipped (--no-calib)")
+            return "pass"
         if not (a.calib_ref and a.calib_bin and a.calib_root):
             raise SystemExit("run_arms: the pod calibration needs --calib-ref, --calib-bin "
                              "and --calib-root (or --no-calib)")
         old = read_text(verdict_path)
         ref_sha = sha256_file(a.calib_ref)
         if ("status=pass" in old and ("host=%s " % self.host) in old
-                and ("ref_sha=%s" % ref_sha) in old):
+                and ("ref_sha=%s " % ref_sha) in old and ("rss=%s\n" % self.rss_label) in old):
             self.log("calibration already passed on this host; skipping")
-            return True
+            return "pass"
         meta, ref_rows = load_calib_ref(a.calib_ref)
-        if meta.get("max_par", str(self.max_par)) != str(self.max_par):
+        if meta["max_par"] != str(self.max_par):
             raise SystemExit("run_arms: the calibration reference ran at width %s, this run at %d"
-                             % (meta.get("max_par"), self.max_par))
+                             % (meta["max_par"], self.max_par))
+        if meta["rss_cap"] != self.rss_label:
+            raise SystemExit("run_arms: the calibration reference ran with rss cap %s, this run "
+                             "with %s" % (meta["rss_cap"], self.rss_label))
         cbin = os.path.abspath(os.path.expanduser(a.calib_bin))
         csha = sha256_file(cbin)
         if csha != meta["bin_sha"]:
             raise SystemExit("run_arms: --calib-bin sha256 %s differs from the reference's %s"
                              % (csha[:12], meta["bin_sha"][:12]))
-        res = run_calibration_set(self, cbin, csha, meta["flags"], a.calib_root, ref_rows, 1,
-                                  os.path.join(self.out, "calibration.tsv"))
-        ratios = []
-        unsolved = 0
-        for r in res:
-            if r["ok"]:
-                ratios.append(r["wall_s"] / r["ref_s"])
-            else:
-                unsolved += 1
-        gm = math.exp(sum(math.log(x) for x in ratios) / len(ratios)) if ratios else float("nan")
-        ok = (unsolved == 0 and ratios and abs(gm - 1.0) <= SPEED_TOLERANCE)
-        worst = max((abs(x - 1.0) for x in ratios), default=float("nan"))
+        res, terminated = run_calibration_set(self, cbin, csha, meta["flags"], a.calib_root,
+                                              ref_rows, CALIB_PASSES,
+                                              os.path.join(self.out, "calibration.tsv"))
+        if terminated:
+            return "terminated"
+        v = calibration_verdict(res)
         write_file(verdict_path, (
-            "status=%s host=%s utc=%s ref_sha=%s\n"
-            "geomean_ratio=%.4f tolerance=%.2f n=%d unsolved=%d worst_single=%.3f\n"
-            "lscpu=%s\n") % ("pass" if ok else "fail", self.host, utc_now(), ref_sha,
-                            gm, SPEED_TOLERANCE, len(ratios), unsolved, worst, self.lscpu))
-        self.log("calibration %s: geomean time ratio %.3f over %d problems (%d unsolved); "
-                 "tolerance +-%.0f%%" % ("PASS" if ok else "FAIL", gm, len(ratios), unsolved,
-                                        100 * SPEED_TOLERANCE))
-        return ok
+            "status=%s host=%s utc=%s ref_sha=%s rss=%s\n"
+            "geomean_ratio=%.4f tolerance=%.2f n=%d unsolved=%d worst_single=%.3f (%s) "
+            "single_tolerance=%.2f passes=%d\n"
+            "lscpu=%s\n") % ("pass" if v["ok"] else "fail", self.host, utc_now(), ref_sha,
+                            self.rss_label, v["geomean"], SPEED_TOLERANCE, v["n"],
+                            v["unsolved"], v["worst"], v["worst_name"], SINGLE_TOLERANCE,
+                            CALIB_PASSES, self.lscpu))
+        self.log("calibration %s: geomean time ratio %.3f over %d problems (%d unsolved), worst "
+                 "single %.3f off; tolerance +-%.0f%% (single +-%.0f%%)" % (
+                     "PASS" if v["ok"] else "FAIL", v["geomean"], v["n"], v["unsolved"],
+                     v["worst"], 100 * SPEED_TOLERANCE, 100 * SINGLE_TOLERANCE))
+        return "pass" if v["ok"] else "fail"
 
     # -- the loop
 
+    def acquire_lock(self):
+        self.lock_fp = open(LOCK_PATH, "a+")
+        try:
+            fcntl.flock(self.lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.lock_fp.seek(0)
+            holder = self.lock_fp.read().strip()
+            raise LockHeld(holder)
+        self.lock_fp.seek(0)
+        self.lock_fp.truncate()
+        self.lock_fp.write(self.out + "\n")
+        self.lock_fp.flush()
+        self.locked = True
+
     def run(self):
         os.makedirs(self.out, exist_ok=True)
-        os.makedirs(self.scratch, exist_ok=True)
+        self.acquire_lock()
         for f in ("run.done", "run.failed"):
             try:
                 os.unlink(os.path.join(self.out, f))
@@ -1072,45 +1564,59 @@ class Runner(object):
         if os.path.exists(os.path.join(self.out, "run.stop")):
             raise SystemExit("run_arms: %s/run.stop exists (a VerifiedBad stopped the line); "
                              "fix the cause, then remove it" % self.out)
-        lock = open(LOCK_PATH, "w")
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise SystemExit("run_arms: another run_arms holds %s on this pod" % LOCK_PATH)
+        if self.sealed:
+            self.unpack_sealed()
+        os.makedirs(self.scratch, exist_ok=True)
         self.preflight()
+        cfg_fp = self.check_config()
         ensure_header(self.rows_path, ROW_COLUMNS)
         ensure_header(self.dec_path, DECISION_COLUMNS)
         self.load_state()
         start = time.time()
         self.deadline = start + self.args.deadline_s
-        n_base = len(self.problems) * len(self.walls) * len(self.arms) * self.passes
+        if self.args.deadline_utc:
+            self.deadline = min(self.deadline, parse_utc(self.args.deadline_utc))
         me = os.path.abspath(sys.argv[0])
-        write_file(os.path.join(self.out, "run.started"), "\n".join([
+        append_file(os.path.join(self.out, "run.started"), "\n".join([
+            "--- start",
             "started=%s" % utc_now(),
-            "host=%s nproc=%d mem_kb=%d rss_cap=%s" % (self.host, os.cpu_count() or 0,
-                                                      self.mem_kb, self.rss_cap or "default"),
+            "host=%s cpus_affinity=%d cpu_quota=%s cpus_effective=%d" % (
+                self.host, self.cpu["affinity"], self.cpu["quota"], self.cpu["eff"]),
+            "mem %s caps_need_kb=%d rss_cap=%s" % (mem_text(self.mem),
+                                                  caps_need_kb(self.max_par), self.rss_label),
             "lscpu=%s" % self.lscpu,
             "runner=%s sha256=%s" % (me, sha256_file(me)),
             "argv=%s" % " ".join(sys.argv),
-            "problems=%d walls=%s passes=%d repeats=%d seed=%s sealed=%d deadline_s=%d" % (
+            "config=%s (run.config)" % cfg_fp,
+            "protocol=%s %s" % (self.protocol_sha, self.protocol_text),
+            "problems=%d walls=%s passes=%d repeats=%d seed=%s sealed=%d deadline_utc=%s" % (
                 len(self.problems), ",".join(fmt_num(w) for w in self.walls), self.passes,
-                int(self.repeats), self.seed, int(self.sealed), self.args.deadline_s),
-            "base_jobs=%d with_rows=%d" % (n_base, len(self.done_keys)),
+                int(self.repeats), self.seed, int(self.sealed),
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.deadline))),
+            "base_jobs=%d with_rows=%d" % (self.base_total, len(self.done_keys)),
             "checker=%s sha256=%s wall=%d" % (self.checker or "none",
                                               getattr(self, "checker_sha", "-"), self.check_wall),
             "cond=%s" % self.cond(),
-            "gated_lanes=%s" % ",".join(sorted(self.gated)),
-        ] + ["arm=%s bin=%s sha256=%s flags=%s" % (a.name, a.binary, a.sha, a.flags)
+        ] + ["arm=%s bin=%s sha256=%s flags=%s lanes=%s gated=%s" % (
+            a.name, a.binary, a.sha, a.flags,
+            ("%d sha256=%s" % (len(a.lanes), sha256_text("".join(
+                "%s\t%s\n" % kv for kv in a.lanes.items()))[:12])) if a.lanes else
+            "unavailable(%s)" % a.lanes_note,
+            ",".join(k for k, v in a.lanes.items() if is_clock_gated(v)) if a.lanes else "-")
              for a in self.arms]
+          + ["DEVIATION %s" % d for d in self.deviations]
           + ["example_argv=%s" % " ".join(self.argv_for(self.arms[0], self.problems[0],
                                                          self.walls[0],
                                                          "<scratch>/errdir" if self.errdir_on else None))])
             + "\n")
-        if self.args.allow_nproc and (os.cpu_count() or 0) != self.max_par:
-            self.log("DEVIATION: %d vCPUs (protocol: %d)" % (os.cpu_count() or 0, self.max_par))
-        if not self.calibrate():
-            self.finish("calibration-failed")
-            return 3
+        if self.sealed:
+            threading.Thread(target=self.heartbeat_loop, daemon=True).start()
+            self.heartbeat()
+        cal = self.calibrate()
+        if cal != "pass":
+            status = "terminated" if cal == "terminated" else "calibration-failed"
+            self.finish(status)
+            return 5 if cal == "terminated" else 3
         status = self.loop()
         self.finish(status)
         return {"complete": 0, "deadline": 7, "terminated": 5, "verifiedbad": 4}.get(status, 1)
@@ -1149,7 +1655,11 @@ class Runner(object):
             if r is None:
                 return None
             pass1[arm.name] = (int(r["solution"]), r["lane"])
-        dec = repeat_decision(pass1, self.gated, set(self.lane_flags))
+        try:
+            dec = repeat_decision(pass1, {a.name: a.lanes for a in self.arms})
+        except UnknownLane as e:
+            raise SystemExit("run_arms: %s; the repeat rule cannot decide (see lanes_<arm>.tsv)"
+                             % e)
         append_line(self.dec_path, [prob.name, ws, dec[0], dec[1]])
         self.decisions[key] = dec
         return dec
@@ -1175,16 +1685,28 @@ class Runner(object):
         return "complete"
 
     def finish(self, status):
+        self.hb_stop.set()
         with_rows = len(self.done_keys)
+        if self.sealed:
+            self.pack_sealed()
+        else:
+            shutil.rmtree(self.scratch, ignore_errors=True)
         write_file(os.path.join(self.out, "run.done"),
-                   "status=%s\nfinished=%s\nrows=%d jobs_this_run=%d\n" % (
-                       status, utc_now(), with_rows, self.jobs_run))
-        self.log("runner: %s; %d rows in %s" % (status, with_rows, self.rows_path))
+                   "status=%s\nfinished=%s\nrows=%d jobs_this_run=%d base_jobs=%d/%d\n" % (
+                       status, utc_now(), with_rows, self.jobs_run, self.base_done,
+                       self.base_total))
+        self.log("runner: %s; %d rows; base jobs %d/%d" % (status, with_rows, self.base_done,
+                                                           self.base_total))
+
+
+class LockHeld(Exception):
+    pass
 
 
 def run_calibration_set(runner, cbin, csha, flags, croot, ref_rows, passes, out_tsv):
     """Run every calibration problem `passes` times with the calibration
-    binary under the arms' environment rules.  Returns one dict per run."""
+    binary under the arms' environment rules.  Returns (one dict per run,
+    terminated)."""
     croot = os.path.abspath(os.path.expanduser(croot))
     cwall = wall_of_flags(flags)
     if cwall is None:
@@ -1207,6 +1729,8 @@ def run_calibration_set(runner, cbin, csha, flags, croot, ref_rows, passes, out_
             kill_session(sid)
             kill_binaries(real)
             clean_tmp()
+            if STOP["signal"]:
+                return results, True
             status = parse_szs_status(read_text(out))
             ok = status in ("Unsatisfiable", "Theorem") and elapsed <= cwall
             ref = r.get("ref_s")
@@ -1218,15 +1742,14 @@ def run_calibration_set(runner, cbin, csha, flags, croot, ref_rows, passes, out_
                 r["name"], p, status, elapsed, (" ratio %.3f" % ratio) if ok and ref else ""))
             results.append({"name": r["name"], "path": r["path"], "pass": p, "ok": ok,
                             "wall_s": elapsed, "ref_s": ref})
-            if STOP["signal"]:
-                raise SystemExit("run_arms: terminated during calibration")
-    return results
+    return results, False
 
 
 def select_reference(results, keep, min_s, max_s, max_spread):
     """Pick the calibration problems for the reference table: solved in
     every pass, median time in [min_s, max_s], spread (max - min) / median
-    at most max_spread; the `keep` with the smallest spread."""
+    at most max_spread; of those, the `keep` with the longest median time
+    (fixed start-up costs weigh least there)."""
     by = {}
     for r in results:
         by.setdefault((r["name"], r["path"]), []).append(r)
@@ -1239,7 +1762,7 @@ def select_reference(results, keep, min_s, max_s, max_spread):
         spread = (ts[-1] - ts[0]) / med if med > 0 else float("inf")
         if min_s <= med <= max_s and spread <= max_spread:
             cands.append((spread, name, path, med, ts))
-    cands.sort()
+    cands.sort(key=lambda c: (-c[3], c[0], c[1]))
     return cands[:keep]
 
 
@@ -1252,21 +1775,18 @@ def cmd_calib_ref(args):
     r.host = socket.gethostname()
     r.max_par = args.max_par
     r.real_bins = set()
+    r.deviations = []
+    r.rss_label = args.rss_cap
+    r.rss_cap = None if args.rss_cap == "default" else int(args.rss_cap)
     os.makedirs(r.out, exist_ok=True)
     r.timeout_bin = shutil.which("timeout", path="/usr/bin:/bin")
     if not r.timeout_bin or not os.path.isdir("/proc/self"):
         raise SystemExit("run_arms: calib-ref needs Linux with coreutils timeout")
-    nproc = os.cpu_count() or 0
-    if nproc != args.max_par and not args.allow_nproc:
-        raise SystemExit("run_arms: this pod has %d vCPUs; the protocol is %d" % (nproc, args.max_par))
-    r.lscpu = lscpu_summary()
-    r.mem_kb = mem_total_kb()
-    r.rss_cap = rss_cap_for(r.mem_kb)
-    lock = open(LOCK_PATH, "w")
+    Runner.check_pod(r)
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        raise SystemExit("run_arms: another run_arms holds %s on this pod" % LOCK_PATH)
+        Runner.acquire_lock(r)
+    except LockHeld as e:
+        raise SystemExit("run_arms: another run_arms (%s) holds %s on this pod" % (e, LOCK_PATH))
     cbin = os.path.abspath(os.path.expanduser(args.calib_bin))
     csha = sha256_file(cbin)
     r.real_bins = {os.path.realpath(cbin)}
@@ -1281,15 +1801,20 @@ def cmd_calib_ref(args):
                 continue
             f = line.split("\t")
             cands.append({"name": f[0], "path": f[1], "ref_s": None})
-    res = run_calibration_set(r, cbin, csha, args.calib_flags, args.calib_root, cands,
-                              args.calib_passes, os.path.join(r.out, "calib_ref_runs.tsv"))
+    res, terminated = run_calibration_set(r, cbin, csha, args.calib_flags, args.calib_root,
+                                          cands, args.calib_passes,
+                                          os.path.join(r.out, "calib_ref_runs.tsv"))
+    if terminated:
+        r.log("calib-ref: terminated")
+        return 5
     chosen = select_reference(res, args.keep, args.min_s, args.max_s, args.max_spread)
-    lines = ["#calib_ref v1",
+    lines = ["#calib_ref v2",
              "#bin_sha=%s" % csha,
              "#flags=%s" % args.calib_flags,
-             "#rss_cap=%s" % (r.rss_cap or "default"),
+             "#rss_cap=%s" % r.rss_label,
              "#max_par=%d" % args.max_par,
              "#lscpu=%s" % r.lscpu,
+             "#mem=%s" % mem_text(r.mem),
              "#host=%s" % r.host,
              "#utc=%s" % utc_now(),
              "#passes=%d keep=%d min_s=%g max_s=%g max_spread=%g candidates=%d chosen=%d" % (
@@ -1300,32 +1825,56 @@ def cmd_calib_ref(args):
         lines.append("%s\t%s\t%.3f\t%.4f\t%s" % (name, path, med, spread,
                                                   ",".join("%.2f" % t for t in ts)))
     write_file(args.ref_out, "\n".join(lines) + "\n")
-    r.log("calib-ref: %d of %d candidates chosen -> %s (sha256 %s)" % (
-        len(chosen), len(cands), args.ref_out, sha256_file(args.ref_out)))
+    r.log("calib-ref: %d of %d candidates chosen -> %s (sha256 %s); record this sha256 and the "
+          "lscpu line in section 5.4 before any pod is judged against it" % (
+              len(chosen), len(cands), args.ref_out, sha256_file(args.ref_out)))
     if len(chosen) < args.keep:
         r.log("WARNING: fewer than %d stable calibration problems; widen the candidates" % args.keep)
         return 6
     return 0
 
 
-def cmd_lane_flags(args):
-    lanes = parse_schedule_source(read_text(args.src_main))
-    for name in lanes:
-        print("%s\t%s" % (name, lanes[name]))
-    print("# %d lanes, %d clock-gated: %s" % (
-        len(lanes), sum(1 for v in lanes.values() if is_clock_gated(v)),
-        " ".join(k for k, v in lanes.items() if is_clock_gated(v))), file=sys.stderr)
+def cmd_hostfacts(args):
+    mem = mem_facts()
+    cpu = cpu_facts()
+    need = caps_need_kb(args.max_par)
+    print("memtotal_kb=%d" % mem["memtotal_kb"])
+    print("cgroup_mem_kb=%s" % (mem["cgroup_kb"] if mem["cgroup_kb"] is not None else "none"))
+    print("eff_mem_kb=%d" % mem["eff_kb"])
+    print("caps_need_kb=%d" % need)
+    print("default_caps_fit=%d" % int(mem["eff_kb"] >= need))
+    print("affinity_cpus=%d" % cpu["affinity"])
+    print("cpu_quota=%s" % ("%g" % cpu["quota"] if cpu["quota"] is not None else "none"))
+    print("eff_cpus=%d" % cpu["eff"])
+    oc = oom_count()
+    print("oom_kill=%s" % (oc if oc is not None else "?"))
     return 0
 
 
 def cmd_plan(args):
     r = Runner(args)
     r.timeout_bin = "timeout"
-    n_base = len(r.problems) * len(r.walls) * len(r.arms) * r.passes
-    print("problems=%d walls=%s arms=%s passes=%d repeats=%s sealed=%s base_jobs=%d" % (
+    print("problems=%d walls=%s arms=%s passes=%d repeats=%s sealed=%s rss_cap=%s base_jobs=%d" % (
         len(r.problems), ",".join(fmt_num(w) for w in r.walls),
-        ",".join(a.name for a in r.arms), r.passes, r.repeats, r.sealed, n_base))
-    print("gated lanes: %s" % (",".join(sorted(r.gated)) or "-"))
+        ",".join(a.name for a in r.arms), r.passes, r.repeats, r.sealed, r.rss_label,
+        r.base_total))
+    print("protocol=%s %s" % (r.protocol_sha, r.protocol_text))
+    print("lane tables: read from each arm binary ('<flags> --list-lanes') at preflight")
+    cw = r.check_wall if r.checker else None
+    per_problem = sum(job_worst_s(w, cw) for w in r.walls) * len(r.arms)
+    base_h = per_problem * r.passes * len(r.problems) / 3600.0
+    rep_h = (per_problem * len(REPEAT_PASSES) * len(r.problems) / 3600.0) if r.repeats else 0.0
+    deadline_s = args.deadline_s
+    if args.deadline_utc:
+        deadline_s = min(deadline_s, parse_utc(args.deadline_utc) - time.time())
+    deadline_h = deadline_s / 3600.0
+    print("worst case on this shard (every job to its hard bound): base %.1f h; repeats on every "
+          "problem add %.1f h; the runner deadline is %.1f h" % (base_h, rep_h, deadline_h))
+    full_h = base_h * r.n_all_problems / float(len(r.problems))
+    need = int(math.ceil(full_h / deadline_h)) if deadline_h > 0 else 0
+    print("shards for the base worst case of all %d problems to fit the deadline: %d%s" % (
+        r.n_all_problems, need, "" if base_h <= deadline_h else
+        "  WARNING: this shard's base worst case exceeds the deadline"))
     first = r.problems[0]
     r.done_keys = set()
     jobs = r.pending_jobs(first, range(1, r.passes + 1), r.walls)
@@ -1348,6 +1897,9 @@ def build_parser():
         p.add_argument("--problems", required=True, help="TSV: name, path, split")
         p.add_argument("--arms", required=True, help="TSV: name, binary, flags")
         p.add_argument("--walls", required=True, help="comma list, e.g. 180,56")
+        p.add_argument("--rss-cap", required=True, choices=RSS_CAPS,
+                       help="the memory cap of the whole comparison: default (the schedule's "
+                            "own; needs 16 x 4500 MiB of effective memory) or 3500")
         p.add_argument("--passes", type=int, default=1,
                        help="independent passes per arm (1 = protocol with repeats; 2 = L0 A/A)")
         p.add_argument("--no-repeats", action="store_true",
@@ -1358,15 +1910,20 @@ def build_parser():
         p.add_argument("--checker", help="strict CheckProof binary (tools/proover/Makefile)")
         p.add_argument("--no-check", action="store_true", help="no CheckProof (WDEP calibration)")
         p.add_argument("--check-wall", type=int, default=CHECK_WALL_S)
-        p.add_argument("--lane-flags", help="TSV: lane, flags (for the clock-gated test)")
-        p.add_argument("--src-main", help="FindProof tools/atp_cli/main.c to read SCHEDULE[] from")
+        p.add_argument("--same-lanes", action="append", metavar="A,B",
+                       help="arms A and B may list the same lanes (e.g. PD and E)")
+        p.add_argument("--allow-binaries", action="store_true",
+                       help="arms on different binaries (a deviation from section 1.1, logged)")
+        p.add_argument("--force-config", action="store_true",
+                       help="resume under a different configuration (logged)")
         p.add_argument("--calib-ref", help="calibration reference table (calib-ref output)")
         p.add_argument("--calib-bin", help="the calibration binary the reference was measured with")
         p.add_argument("--calib-root", help="TPTP root of the calibration problems")
         p.add_argument("--no-calib", action="store_true", help="skip the pod calibration (logged)")
-        p.add_argument("--seed", default="20261001")
+        p.add_argument("--seed", default=DEFAULT_SEED)
         p.add_argument("--deadline-s", type=int, default=43200,
-                       help="no run starts after this many seconds")
+                       help="no run starts after this many seconds from launch")
+        p.add_argument("--deadline-utc", help="no run starts after this time (YYYY-MM-DDTHH:MM:SSZ)")
         p.add_argument("--shard", help="K/N: this pod's share of the problems")
         p.add_argument("--sealed", choices=("auto", "on", "off"), default="auto")
         p.add_argument("--no-errdir", action="store_true",
@@ -1377,29 +1934,52 @@ def build_parser():
 
     run = sub.add_parser("run", help="run the comparison")
     common_run(run)
-    plan = sub.add_parser("plan", help="print the plan; runs nothing")
+    plan = sub.add_parser("plan", help="print the plan and a time estimate; runs nothing")
     common_run(plan)
     cr = sub.add_parser("calib-ref", help="measure the calibration reference on this pod")
     cr.add_argument("--calib", required=True, help="candidates TSV: name, path")
     cr.add_argument("--calib-bin", required=True)
     cr.add_argument("--calib-root", required=True)
-    cr.add_argument("--calib-flags", default="--schedule --szs --wall=120")
+    cr.add_argument("--calib-flags", default="--szs --wall=120",
+                    help="one deterministic configuration (the default preset)")
     cr.add_argument("--calib-passes", type=int, default=3)
     cr.add_argument("--keep", type=int, default=10)
-    cr.add_argument("--min-s", type=float, default=2.0)
+    cr.add_argument("--min-s", type=float, default=3.0)
     cr.add_argument("--max-s", type=float, default=60.0)
     cr.add_argument("--max-spread", type=float, default=0.10)
+    cr.add_argument("--rss-cap", required=True, choices=RSS_CAPS)
     cr.add_argument("--ref-out", required=True)
     cr.add_argument("--max-par", type=int, default=MAX_PAR)
     cr.add_argument("--allow-nproc", action="store_true")
     cr.add_argument("--out", required=True)
-    lf = sub.add_parser("lane-flags", help="print lane TAB flags from a source main.c")
-    lf.add_argument("--src-main", required=True)
+    hf = sub.add_parser("hostfacts", help="print this pod's effective memory and CPUs")
+    hf.add_argument("--max-par", type=int, default=MAX_PAR)
     return ap
 
 
 def on_signal(signum, _frame):
     STOP["signal"] = signum
+
+
+def fail_sentinel(out, msg):
+    try:
+        os.makedirs(out, exist_ok=True)
+        write_file(os.path.join(out, "run.failed"),
+                   "failed=%s reason=%s\n" % (utc_now(), clean_field(msg)))
+    except OSError:
+        pass
+
+
+def seal_after_failure(runner):
+    """Pack the sealed outputs of a runner that stopped on an error."""
+    if runner is None or not runner.locked or not runner.sealed:
+        return ""
+    runner.hb_stop.set()
+    try:
+        runner.pack_sealed()
+    except (SystemExit, Exception) as e:  # noqa: BLE001
+        return " (packing sealed.tgz failed: %s)" % clean_field(e)
+    return ""
 
 
 def main(argv=None):
@@ -1408,8 +1988,8 @@ def main(argv=None):
     if args.cmd is None:
         ap.print_help()
         return 2
-    if args.cmd == "lane-flags":
-        return cmd_lane_flags(args)
+    if args.cmd == "hostfacts":
+        return cmd_hostfacts(args)
     if args.cmd == "plan":
         return cmd_plan(args)
     signal.signal(signal.SIGTERM, on_signal)
@@ -1417,19 +1997,26 @@ def main(argv=None):
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     if args.cmd == "calib-ref":
         return cmd_calib_ref(args)
-    runner = Runner(args)
-    os.makedirs(runner.out, exist_ok=True)
+    out = os.path.abspath(os.path.expanduser(args.out))
+    runner = None
     try:
+        runner = Runner(args)
         return runner.run()
+    except LockHeld as e:
+        msg = "another run_arms (%s) holds %s on this pod" % (e, LOCK_PATH)
+        # The live run owns its own out dir's sentinels.
+        if str(e) != out:
+            fail_sentinel(out, msg)
+        print("run_arms: " + msg, file=sys.stderr)
+        return 2
     except SystemExit as e:
         msg = str(e.code) if e.code is not None else "exit"
-        write_file(os.path.join(runner.out, "run.failed"),
-                   "failed=%s reason=%s\n" % (utc_now(), clean_field(msg)))
+        msg += seal_after_failure(runner)
+        fail_sentinel(out, msg)
         print(msg, file=sys.stderr)
         return 2
     except Exception as e:  # noqa: BLE001 - every crash must leave its sentinel
-        write_file(os.path.join(runner.out, "run.failed"),
-                   "failed=%s reason=%s: %s\n" % (utc_now(), type(e).__name__, clean_field(e)))
+        fail_sentinel(out, "%s: %s%s" % (type(e).__name__, e, seal_after_failure(runner)))
         raise
 
 

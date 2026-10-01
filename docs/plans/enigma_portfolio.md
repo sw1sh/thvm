@@ -657,6 +657,9 @@ What is running now:
 | sealed J13 matrix rows       | 005488de020d08293a2dd70c54d8fb4ed274c1932ddac22f3fd53078fd072864 (18,400 rows) | 2026-10-02 |
 | matrix_tables.py             | dfb13207ae82afa7cb3b443abe3b1aac170f601d2d5fc94d55ace422859ba475 (627aabb2) | 2026-10-02 |
 | WDEP and delta per wall      | at L0           | |
+| protocol fingerprint (run_arms.py; amendment A3) | e820fb2367a1 | 2026-10-02 |
+| calib_ref.tsv (pod-speed reference) and its pod's lscpu line | before any pod is judged against it | |
+| L2 unseal token | after the freeze (stats.py --look L2 needs it) | |
 | section 5.3 outputs          | ~/.cache/thvm/enigma/matrix/decisions_5_3.txt; summary below | 2026-10-02 |
 
 Section 5.3 outputs (2026-10-02, from the sealed matrix; train and held-out only):
@@ -673,7 +676,16 @@ Decisions recorded (2026-10-01, by the user):
 - D1: yes. Training may include synthetic -10 encodings of non-UEQ TPTP problems from our FOF front end; J13 names and stems are excluded in every division.
 - D3: no. Every calibration stays on pods; WDEP is estimated from the submission build's official J13 result as in section 1.3.
 
-Amendments: none yet.
+Amendments (2026-10-02, before any protocol run; tools/atp_enigma/protocol implements each):
+- A1 Memory. "At least 72 GB" reads as an effective memory limit, min(MemTotal, the pod's cgroup limit), of at least 16 x 4500 MiB, so 16 slices at the schedule's cap fit. The cap is fixed per comparison (--rss-cap default or 3500, the same on every pod and look of it); a pod that cannot honour it is refused, stats.py refuses rows of one wall with mixed caps, and every row records its OOM kills. WDEP is calibrated only under the default cap (J13's); rows at 3500 make G0.3 uncalibrated.
+- A2 CPUs and binaries. 16 vCPUs means 16 effective CPUs: the affinity mask capped by the cgroup CPU quota. Every arm runs one binary (another needs --allow-binaries and is logged as a deviation). FindProof rejects an unknown --schedule mode (exit 2), and two arms with different flags whose binary lists the same lanes are refused unless declared (PD and E).
+- A3 Protocol parameters, hashed into the protocol fingerprint on every row: CheckProof wall 60 s (THVM_PROOFCHECK_WALL=60 under timeout -k 5 75); seed 20261001 for the arm shuffle and the bootstrap, 10,000 resamples (another value at a look needs a named amendment); the clock-gated set is --lrs, --fol-lrs (the FOF front end's LRS) and --cp-set-ir-budget, read from the winning lane's flags in that arm's own binary lane table, and a winning lane missing from the table stops the runner; "the arms disagree" means their pass-1 Solution flags differ at that wall, and repeats run per wall.
+- A4 Slice stderr. The runner adds THVM_ATP_SCHED_ERRDIR (slice stderr to files, for the end class of every lane). Before L0, P0 runs on DEV-H at WDEP with and without it, paired on one pod. If the paired |net| exceeds 2, or the median time ratio over the problems both solve is more than 2% off 1, every timed pass runs without it and end classes come from an untimed rerun of the misses.
+- A5 Pod-speed calibration. The --schedule races 46 lanes and solves almost every TRAIN problem in under 3 s, so the calibration runs one deterministic configuration (the default preset, --szs --wall=120) on TRAIN problems of 2.6-30 s (protocol/calib_candidates.tsv); the reference keeps the 10 longest stable ones. Each pod runs 2 passes; it fails when a problem is unsolved, the geometric mean of the per-problem median ratios is more than 15% off, or one problem is more than 30% off; the reference's rss cap must match. Width contention is measured separately (M0 deliverable 5).
+- A6 The seal. The WDEP runs are J13 runs of look L0: only the per-wall aggregates and the G0.3 decision are read, and the per-problem agreement table is sealed. Sealed runners log a heartbeat (base-job progress rounded down to 10%) instead of per-job lines and pack every per-problem output into sealed.tgz; run.stop names no problem, and opening the archive for a VerifiedBad is the section 1.3 exception. A look reads all 400 J13 problems together, and --look L2 needs the unseal token above.
+- A7 Aggregates at L0 and L1. Domains with fewer than 10 compared problems are pooled into OTHER (while OTHER holds 1-9, the smallest named domain joins it); DROP-BEST picks among the pooled buckets; per-domain gains and losses are printed, and M5's "no TPTP domain loses more than 3 problems" reads a pooled bucket's loss count. Unknowns are printed per arm; the per-lane counts are sealed.
+- A8 Completeness. At L0-L2 a problem without complete cells in every compared arm makes that wall INVALID, and the runner resumes until it is complete; dev analyses compare such a problem on pass 1 of every arm and count it. Every comparison at a wall uses one problem set, and NL is chosen once per wall on it, a tie broken against the first comparison that names NL. G0.2 and delta need both A/A passes on all 400 problems. A resume never splits a problem across pods: a problem incomplete on a dead pod reruns whole on its replacement, and a resume under another configuration is refused.
+- A9 Readings. G3.3's "McNemar p < 0.05" is the one-sided exact sign test, as in section 1.5. An unsolved cell whose passes tie between Unknown and another non-Solution outcome counts as Unknown (conservative toward INCONCLUSIVE); the number decided by that tie is printed per arm.
 
 ## 6. Risks and what we will not do
 

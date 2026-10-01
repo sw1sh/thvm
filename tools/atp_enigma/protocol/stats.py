@@ -2,9 +2,10 @@
 """ENIGMA comparison statistics.
 
 The analysis of docs/plans/enigma_portfolio.md section 1.5, the delta of
-section 1.2, the J13 seal of section 1.4 and gates G0.2 and G0.3, over the
-rows run_arms.py writes.  Python 3.8 or later, standard library only; it
-processes text and runs nothing.
+section 1.2, the J13 seal of section 1.4, gates G0.2 and G0.3, and the
+readings registered in section 5.4, over the rows run_arms.py writes.
+Python 3.8 or later, standard library only; it processes text and runs
+nothing.
 
 Subcommands:
   compare  paired comparisons of arms at each wall
@@ -24,35 +25,53 @@ Definitions (fixed here, before the data):
   names pass K of ARM alone (the A/A passes of L0).
 - A cell is complete when its pass set is the one the runner's
   decisions.tsv requires ({1} or {1, 2, 3}), or, without decisions, the
-  union of the passes the other arms ran there.  A comparison uses the
-  problems whose cells are complete in both arms; the rest are counted.
+  union of the passes the other arms ran there.  At each wall every
+  comparison uses one problem set: the problems complete in every arm
+  named at that wall.  At looks L0, L1 and L2 a problem incomplete in any
+  named arm (or, for J13, fewer than the 400 problems) makes the wall
+  INVALID: nothing is compared there and the exit code is 3; the runner
+  must resume until the cells are complete.  In dev analyses such a
+  problem is compared on pass 1 of every arm (when every arm has one) and
+  counted on the FALLBACK line.
 - net(A - B) = gains - losses over the compared problems, a gain being a
   problem A solves and B does not.
 - Sign test: exact binomial on the discordant problems, p = 1/2.  The
   one-sided p is P(X >= gains); the two-sided p is twice the smaller tail,
-  capped at 1.  A DEV gate "net >= +k" also needs one-sided p < 0.05.
+  capped at 1.  Gates use the one-sided p (gate_p): a DEV gate "net >= +k"
+  also needs gate_p < 0.05, and so does G3.3's "McNemar p < 0.05".
 - Bootstrap CI: problems clustered by name stem (the domain letters and the
   number, e.g. COL042 for COL042-6), stems resampled with replacement,
   10,000 resamples, seed 20261001 (Mersenne Twister, indices by rejection
   from getrandbits), percentile interval: the ceil(a B)-th and
   ceil((1 - a) B)-th smallest of the B resampled nets, a = (1 - level) / 2.
-  Levels 95% and 97.5% (claim A's per-wall test).
-- Best domain: the TPTP domain (leading letters of the name) with the
-  largest net (ties: alphabetical first); the drop-best net is the net
-  without it.
+  Levels 95% and 97.5% (claim A's per-wall test).  At L0-L2 another seed
+  or count needs --amendment naming a section 5.4 entry.
+- Domains: per TPTP domain (leading letters of the name) the gains,
+  losses and net.  At L0 and L1 every domain with fewer than 10 compared
+  problems is pooled into OTHER (and while OTHER holds 1-9 problems, the
+  smallest named domain joins it); the unpooled table is sealed.  The
+  harm reading of M5's "no TPTP domain loses more than 3 problems" is a
+  domain's (or OTHER's) loss count.
+- Best domain: the domain (OTHER included when pooled) with the largest
+  net (ties: alphabetical first); the drop-best net is the net without it.
 - Near-wall band: an arm's Solutions with time in (W/2, W]; and its misses
   at W that are Solutions in a run of the same arm at 2W, when rows at 2W
   exist.
 - Unknown: a cell that is not a Solution and whose most frequent outcome
   among its non-Solution passes is "Unsatisfiable, proof within the wall,
-  verdict neither VerifiedGood nor VerifiedBad" (ties go to Unknown).  The
-  lane of an Unknown is that pass's winning lane.  If two arms' Unknown
-  counts differ by more than delta, their comparison is INCONCLUSIVE.
+  verdict neither VerifiedGood nor VerifiedBad"; a tie with another
+  category goes to Unknown (conservative toward INCONCLUSIVE) and is
+  counted as tie_decided.  The lane of an Unknown is that pass's winning
+  lane.  If two arms' Unknown counts differ by more than delta, their
+  comparison is INCONCLUSIVE.  At L0 and L1 Unknowns are printed per arm;
+  the per-lane counts are sealed.
 - delta = min(4, max(2, ceil(sqrt(D)))), D = problems where the two A/A
-  passes disagree on Solution at that wall.  G0.2: D <= 12 at each wall.
+  passes disagree on Solution at that wall.  G0.2: D <= 12 at each wall,
+  with both passes present on every expected problem (400 for J13).
 - NL at a wall: of the --nl arms, the one with the most Solutions on the
-  compared problems; a tie goes to the arm that gives the comparison the
-  lowest 95% CI lower bound (then the higher one-sided p, then list order).
+  wall's problem set, chosen once per wall; a tie goes to the arm that
+  gives the first comparison naming NL the lowest 95% CI lower bound (then
+  the higher one-sided p, then list order).
 - J13 subsets (when every compared problem is a j13 row): casc30-recurring
   (in the CASC-30 UEQ list), casc28-only (in the CASC-28 list, not
   CASC-30), new (in neither); minus10 (version -10, size suffix allowed)
@@ -71,22 +90,31 @@ Definitions (fixed here, before the data):
   total closer to the official count, then the lower wall).  Otherwise
   WDEP = 180 / c, c the geometric mean of official / pod time over the
   problems solved in both with official time >= 1 s in the largest wall's
-  run, labelled uncalibrated.
-- Validity counts, printed in every mode: pod types, run conditions,
-  binaries per arm, runs past W and past W + 10 s, problems whose runs
-  span several pods, complete and incomplete cells, VerifiedBad runs.
+  run, labelled uncalibrated.  Rows run under the 3500 MB cap cannot
+  calibrate: they are refused, or (--allow-capped) the result is labelled
+  uncalibrated.
+- Validity, printed in every mode: pod types, run conditions, binaries per
+  arm, runs past W and past W + 10 s, problems whose runs span several
+  pods, OOM kills, complete and incomplete cells, VerifiedBad runs.  Rows
+  of one wall with different rss caps are INVALID (exit 3).  Any
+  VerifiedBad stops the line (exit 4): at L0-L2 nothing is compared, in
+  dev analyses every comparison line is tagged VOID.
 
-The seal (section 1.4): rows with split j13 are read only with
---aggregates-only (looks L0 and L1) or --look L2.  --aggregates-only prints
-only the pre-registered aggregates (totals, nets and CIs per arm and wall,
-discordant counts and sign tests, nets per domain, band counts, Unknown
-counts, delta and the inconclusive rule) and writes every per-problem
-table, the end states and the J13 subsets into a read-only gzip under
-~/.cache/thvm/enigma/sealed/ without printing them.  Without either flag,
-a j13 row is an error: every other analysis reads no J13 row.
+The seal (section 1.4): rows with split j13 are read only at a look.
+--look L0 and L1 print only the pre-registered aggregates (totals, nets
+and CIs per arm and wall, discordant counts and sign tests, pooled domain
+counts, band counts, Unknown counts per arm, delta and the inconclusive
+rule) and write every per-problem table, the end states, the per-lane
+Unknowns, the unpooled domains and the J13 subsets into a read-only gzip
+under ~/.cache/thvm/enigma/sealed/ without printing them.  --look L2 needs
+--l2-token equal to the "L2 unseal token" entered in the plan's section
+5.4 registry after the freeze.  delta and wdep need --look L0 for j13
+rows.  Without a look, a j13 row is an error: every other analysis reads
+no J13 row.
 """
 import argparse
 import collections
+import fractions
 import gzip
 import hashlib
 import io
@@ -105,11 +133,19 @@ DEFAULT_RESAMPLES = 10000
 G02_MAX_D = 12
 G03_MIN_AGREEMENT = 0.95
 G03_MAX_TOTAL_DIFF = 8
+J13_PROBLEMS = 400
+DOMAIN_POOL_MIN = 10
+HERE = os.path.dirname(os.path.abspath(__file__))
+PLAN = os.path.normpath(os.path.join(HERE, "..", "..", "..", "docs", "plans",
+                                     "enigma_portfolio.md"))
 J13_DIR = os.path.expanduser("~/.cache/thvm/casc/J13")
 SEALED_DIR = os.path.expanduser("~/.cache/thvm/enigma/sealed")
 CATEGORY_ORDER = ("unknown", "verified-bad", "no-proof", "unchecked", "miss")
 MISS_CLASSES = ("memory-guard", "wall", "saturated", "immediate-exit", "alarm",
                 "step-cap", "crash", "unknown")
+LOOKS = ("dev", "L0", "L1", "L2")
+EXIT_INVALID = 3
+EXIT_VBAD = 4
 
 
 # ----------------------------------------------------------------------------
@@ -139,6 +175,14 @@ def is_minus10(name):
     return re.match(r"^[A-Z]{3}\d{3}-10(\.\d+)?$", name) is not None
 
 
+def cond_field(cond, key):
+    for part in cond.split(";"):
+        k, eq, v = part.partition("=")
+        if eq and k == key:
+            return v
+    return ""
+
+
 # ----------------------------------------------------------------------------
 # Loading run_arms output
 
@@ -146,7 +190,7 @@ def is_minus10(name):
 class Run(object):
     __slots__ = ("problem", "split", "arm", "wall", "pass_no", "status", "wall_s", "lane",
                  "proof", "verdict", "solution", "lscpu", "bin_sha", "in_wall", "end_class",
-                 "lane_classes", "host", "cond", "proof_recs")
+                 "lane_classes", "host", "cond", "proof_recs", "oom_kills")
 
     def __init__(self, d):
         self.problem = d["problem"]
@@ -168,6 +212,7 @@ class Run(object):
         self.host = d.get("host", "")
         self.cond = d.get("cond", "")
         self.proof_recs = int(d.get("proof_recs", "-1") or -1)
+        self.oom_kills = d.get("oom_kills", "?")
 
 
 MALFORMED = {"rows": 0}
@@ -195,14 +240,29 @@ def parse_tsv_text(text):
     return out
 
 
-def _read_member(tf, m):
-    fp = tf.extractfile(m)
-    return fp.read().decode("utf-8", "replace") if fp is not None else ""
+def _texts_from_tar(tf):
+    """rows.tsv and decisions.tsv members, also inside a nested sealed.tgz
+    (a sealed run directory packs them there)."""
+    texts = []
+    for m in tf.getmembers():
+        if not m.isfile():
+            continue
+        base = os.path.basename(m.name)
+        if base in ("rows.tsv", "decisions.tsv"):
+            fp = tf.extractfile(m)
+            texts.append((base, fp.read().decode("utf-8", "replace") if fp else ""))
+        elif base == "sealed.tgz":
+            fp = tf.extractfile(m)
+            if fp is not None:
+                with tarfile.open(fileobj=io.BytesIO(fp.read()), mode="r:*") as inner:
+                    texts.extend(_texts_from_tar(inner))
+    return texts
 
 
 def load_runs(paths):
-    """(runs, decisions) from rows.tsv files, run directories, or tar
-    archives holding them.  decisions: (problem, wall) -> repeat flag."""
+    """(runs, decisions) from rows.tsv files, run directories (plain or
+    sealed), or tar archives holding them.  decisions: (problem, wall) ->
+    repeat flag."""
     texts = []
     for path in paths:
         path = os.path.expanduser(path)
@@ -212,12 +272,13 @@ def load_runs(paths):
                 if os.path.exists(f):
                     with open(f) as fp:
                         texts.append((name, fp.read()))
+            sealed = os.path.join(path, "sealed.tgz")
+            if os.path.exists(sealed):
+                with tarfile.open(sealed, "r:*") as tf:
+                    texts.extend(_texts_from_tar(tf))
         elif tarfile.is_tarfile(path):
             with tarfile.open(path, "r:*") as tf:
-                for m in tf.getmembers():
-                    base = os.path.basename(m.name)
-                    if m.isfile() and base in ("rows.tsv", "decisions.tsv"):
-                        texts.append((base, _read_member(tf, m)))
+                texts.extend(_texts_from_tar(tf))
         else:
             opener = gzip.open if path.endswith(".gz") else open
             with opener(path, "rt") as fp:
@@ -267,6 +328,57 @@ def read_classes(path):
 
 
 # ----------------------------------------------------------------------------
+# Looks and the plan's registry
+
+
+def plan_registry(plan_path):
+    """(registry rows {item: value}, section 5.4 text) of the plan."""
+    try:
+        with open(plan_path) as fp:
+            text = fp.read()
+    except OSError:
+        raise SystemExit("stats: cannot read the plan %s" % plan_path)
+    m = re.search(r"^### 5\.4 .*?(?=^## |\Z)", text, re.M | re.S)
+    sec = m.group(0) if m else ""
+    rows = {}
+    for line in sec.splitlines():
+        f = [x.strip() for x in line.strip().strip("|").split("|")]
+        if len(f) >= 2 and line.lstrip().startswith("|"):
+            rows[f[0]] = f[1]
+    return rows, sec
+
+
+def check_look(args, has_j13, what):
+    """Refuse a look the seal does not allow; return the look."""
+    look = args.look or "dev"
+    if has_j13 and look == "dev":
+        raise SystemExit("stats: %s: J13 rows are sealed; give the look (--look L0, L1 or L2)"
+                         % what)
+    if look == "L2":
+        rows, _sec = plan_registry(args.plan)
+        token = rows.get("L2 unseal token", "")
+        if not args.l2_token or not re.match(r"^[0-9a-f]{12,64}$", token) \
+                or args.l2_token != token:
+            raise SystemExit("stats: --look L2 needs --l2-token equal to the 'L2 unseal token' "
+                             "row of %s section 5.4 (entered after the freeze; now %r)"
+                             % (args.plan, token))
+    return look
+
+
+def check_conditions(args, look):
+    """Another seed or resample count at a look needs a registered amendment."""
+    if look == "dev":
+        return
+    if args.seed == DEFAULT_SEED and args.resamples == DEFAULT_RESAMPLES:
+        return
+    _rows, sec = plan_registry(args.plan)
+    if not args.amendment or args.amendment not in sec:
+        raise SystemExit("stats: --seed %d --resamples %d at look %s: the plan registers %d and "
+                         "%d; give --amendment TAG naming a section 5.4 entry" % (
+                             args.seed, args.resamples, look, DEFAULT_SEED, DEFAULT_RESAMPLES))
+
+
+# ----------------------------------------------------------------------------
 # Cells: the majority rule
 
 
@@ -284,7 +396,8 @@ def pass_category(r):
 
 class Cell(object):
     __slots__ = ("problem", "arm", "wall", "runs", "sol", "szs", "time", "lane",
-                 "category", "end_class", "lane_classes", "unknown_lane", "split")
+                 "category", "end_class", "lane_classes", "unknown_lane", "split",
+                 "unknown_tie")
 
     def __init__(self, runs):
         runs = sorted(runs, key=lambda r: r.pass_no)
@@ -304,6 +417,7 @@ class Cell(object):
         self.end_class = "proved" if self.sol else ""
         self.lane_classes = ""
         self.unknown_lane = ""
+        self.unknown_tie = False
         if self.sol:
             for r in runs:
                 if r.solution and r.wall_s == self.time:
@@ -317,6 +431,8 @@ class Cell(object):
             if cats.get(c) == top:
                 self.category = c
                 break
+        self.unknown_tie = (self.category == "unknown"
+                            and sum(1 for v in cats.values() if v == top) > 1)
         ends = collections.Counter(r.end_class for r in rest)
         etop = max(ends.values())
         for r in rest:
@@ -338,7 +454,10 @@ def parse_arm_spec(spec):
 
 
 def build_cells(runs, decisions, wall, arm_specs):
-    """cells[spec][problem] -> Cell at `wall`; incomplete[spec] -> count."""
+    """(cells, incomplete, first) at `wall`: cells[spec][problem] the
+    complete cells, incomplete[spec] the problems whose pass set is not
+    the required one, first[spec][problem] the pass-1 cell (the dev
+    fallback)."""
     by = collections.defaultdict(list)
     for r in runs:
         if r.wall == wall:
@@ -349,10 +468,12 @@ def build_cells(runs, decisions, wall, arm_specs):
             passes_at[prob].add(r.pass_no)
     cells = {}
     incomplete = {}
+    first = {}
     for spec in arm_specs:
         arm, only = parse_arm_spec(spec)
         cells[spec] = {}
-        incomplete[spec] = 0
+        incomplete[spec] = set()
+        first[spec] = {}
         for (a, prob), rs in by.items():
             if a != arm:
                 continue
@@ -360,17 +481,23 @@ def build_cells(runs, decisions, wall, arm_specs):
                 sel = [r for r in rs if r.pass_no == only]
                 if sel:
                     cells[spec][prob] = Cell(sel)
+                    first[spec][prob] = cells[spec][prob]
+                else:
+                    incomplete[spec].add(prob)
                 continue
+            p1 = [r for r in rs if r.pass_no == 1]
+            if p1:
+                first[spec][prob] = Cell(p1)
             have = {r.pass_no for r in rs}
             if (prob, wall) in decisions:
                 want = {1, 2, 3} if decisions[(prob, wall)] else {1}
             else:
                 want = passes_at[prob]
             if have != want:
-                incomplete[spec] += 1
+                incomplete[spec].add(prob)
                 continue
             cells[spec][prob] = Cell(rs)
-    return cells, incomplete
+    return cells, incomplete, first
 
 
 # ----------------------------------------------------------------------------
@@ -378,12 +505,12 @@ def build_cells(runs, decisions, wall, arm_specs):
 
 
 def binom_tail_ge(k, n):
-    """P(X >= k) for X ~ Binomial(n, 1/2), exactly."""
+    """P(X >= k) for X ~ Binomial(n, 1/2), exactly (no float overflow)."""
     if k <= 0:
         return 1.0
     if k > n:
         return 0.0
-    return sum(math.comb(n, i) for i in range(k, n + 1)) / float(2 ** n)
+    return float(fractions.Fraction(sum(math.comb(n, i) for i in range(k, n + 1)), 1 << n))
 
 
 def sign_test(gains, losses):
@@ -443,6 +570,33 @@ def cluster_ci(diffs, stems, levels=LEVELS, resamples=DEFAULT_RESAMPLES, seed=DE
     return {lev: percentile_ci(nets, lev) for lev in levels}
 
 
+def pool_domains(domains, k=DOMAIN_POOL_MIN):
+    """Domains with fewer than k problems pooled into OTHER; while OTHER
+    holds 1..k-1 problems the smallest named domain joins it."""
+    named = {d: dict(v) for d, v in domains.items() if v["n"] >= k}
+    other = {"net": 0, "n": 0, "gains": 0, "losses": 0}
+    for d, v in domains.items():
+        if v["n"] < k:
+            for f in other:
+                other[f] += v[f]
+    while 0 < other["n"] < k and named:
+        d = sorted(named, key=lambda x: (named[x]["n"], x))[0]
+        for f in other:
+            other[f] += named[d][f]
+        del named[d]
+    out = collections.OrderedDict((d, named[d]) for d in sorted(named))
+    if other["n"]:
+        out["OTHER"] = other
+    return out
+
+
+def drop_best(domains, net):
+    if not domains:
+        return "-", 0
+    best = sorted(domains, key=lambda d: (-domains[d]["net"], d))[0]
+    return best, net - domains[best]["net"]
+
+
 def compare_cells(ca, cb, problems, wall, two_w=None, levels=LEVELS,
                   resamples=DEFAULT_RESAMPLES, seed=DEFAULT_SEED, with_ci=True):
     """Paired comparison of two arms' cells on `problems` at `wall`.
@@ -461,24 +615,21 @@ def compare_cells(ca, cb, problems, wall, two_w=None, levels=LEVELS,
            "szs_a": sum(ca[p].szs for p in problems),
            "szs_b": sum(cb[p].szs for p in problems)}
     res["ci"] = cluster_ci(diffs, stems, levels, resamples, seed) if with_ci else {}
-    dom = collections.defaultdict(int)
-    dom_n = collections.Counter()
-    for p in problems:
-        dom[domain_of(p)] += diffs[p]
-        dom_n[domain_of(p)] += 1
-    res["domains"] = {d: (dom[d], dom_n[d]) for d in sorted(dom_n)}
-    if dom_n:
-        best = sorted(dom_n, key=lambda d: (-dom[d], d))[0]
-        res["best_domain"] = best
-        res["net_drop_best"] = net - dom[best]
-    else:
-        res["best_domain"] = "-"
-        res["net_drop_best"] = 0
+    dom = collections.OrderedDict()
+    for p in sorted(problems, key=lambda x: (domain_of(x), x)):
+        v = dom.setdefault(domain_of(p), {"net": 0, "n": 0, "gains": 0, "losses": 0})
+        v["net"] += diffs[p]
+        v["n"] += 1
+        v["gains"] += int(diffs[p] > 0)
+        v["losses"] += int(diffs[p] < 0)
+    res["domains"] = dom
+    res["best_domain"], res["net_drop_best"] = drop_best(dom, net)
     for side, cells in (("a", ca), ("b", cb)):
         band = sum(1 for p in problems if cells[p].sol and w / 2.0 < cells[p].time <= w)
         res["band_" + side] = band
         unknown = [p for p in problems if cells[p].category == "unknown"]
         res["unknown_" + side] = len(unknown)
+        res["unknown_tie_" + side] = sum(1 for p in unknown if cells[p].unknown_tie)
         res["unknown_lanes_" + side] = collections.Counter(cells[p].unknown_lane for p in unknown)
         # A miss whose search proved (checker Unknown, no proof block, proof
         # past the wall) is reported by that category, not as "proved".
@@ -511,7 +662,8 @@ def _t(cell):
 
 
 def choose_nl(nl_arms, cells, problems, other, wall, resamples, seed):
-    """The NL arm for the comparison other - NL (see the module docstring)."""
+    """The NL arm of a wall (see the module docstring); `other` is the arm
+    of the first comparison naming NL, which breaks a tie."""
     totals = {a: sum(cells[a][p].sol for p in problems) for a in nl_arms}
     best = max(totals.values())
     tied = [a for a in nl_arms if totals[a] == best]
@@ -598,15 +750,29 @@ def _ci_text(ci):
     return " ".join(out)
 
 
-def delta_by_wall(runs, arm, walls):
+def _dom_text(domains):
+    return " ".join("%s:%+d/%d(+%d,-%d)" % (d, v["net"], v["n"], v["gains"], v["losses"])
+                    for d, v in domains.items())
+
+
+def delta_by_wall(runs, arm, walls, expect=None):
+    """wall -> (D, delta, n) from the A/A passes 1 and 2 of `arm`; refuses
+    a wall where a problem lacks one of the passes, or with fewer than
+    `expect` problems."""
     out = {}
     for w in walls:
         p1 = {r.problem: r.solution for r in runs if r.arm == arm and r.wall == w and r.pass_no == 1}
         p2 = {r.problem: r.solution for r in runs if r.arm == arm and r.wall == w and r.pass_no == 2}
         common = set(p1) & set(p2)
-        if common:
-            d = sum(1 for p in common if p1[p] != p2[p])
-            out[w] = (d, delta_from_d(d), len(common))
+        union = set(p1) | set(p2)
+        if not union:
+            continue
+        if common != union or (expect is not None and len(common) != expect):
+            raise SystemExit("stats: INVALID A/A rows of %s at wall %s: %d problems with both "
+                             "passes of %d with any (expected %s); delta is not set from "
+                             "partial data" % (arm, w, len(common), len(union), expect or "all"))
+        d = sum(1 for p in common if p1[p] != p2[p])
+        out[w] = (d, delta_from_d(d), len(common))
     return out
 
 
@@ -622,52 +788,9 @@ def parse_delta_args(items):
     return out
 
 
-def cmd_compare(args):
-    runs, decisions = load_runs(args.rows)
-    if not runs:
-        raise SystemExit("stats: no rows")
-    has_j13 = any(r.split == "j13" for r in runs)
-    sealed = args.aggregates_only
-    if has_j13 and not sealed and args.look != "L2":
-        raise SystemExit("stats: J13 rows are sealed: --aggregates-only (looks L0, L1) or "
-                         "--look L2 (the confirmatory look)")
-    if sealed and not args.label:
-        raise SystemExit("stats: --aggregates-only needs --label (it names the sealed file)")
-    pairs = []
-    for spec in args.pair:
-        a, _, b = spec.partition(",")
-        if not a or not b:
-            raise SystemExit("stats: --pair A,B")
-        pairs.append((a, b))
-    nl_arms = [x for x in (args.nl or "").split(",") if x]
-    walls = [fmt_num(w) for w in args.wall] if args.wall else sorted(
-        {r.wall for r in runs}, key=float)
-    deltas = parse_delta_args(args.delta)
-    if args.aa_rows:
-        aa_runs, _ = load_runs(args.aa_rows)
-        for w, (d, dl, _n) in delta_by_wall(aa_runs, args.aa_arm, walls).items():
-            deltas.setdefault(w, dl)
-            deltas.setdefault("D@" + w, d)
-    casc30 = casc28 = None
-    if os.path.exists(os.path.expanduser(args.casc30)):
-        casc30 = read_names(args.casc30)
-    if os.path.exists(os.path.expanduser(args.casc28)):
-        casc28 = read_names(args.casc28)
-    axiom_novel = read_names(args.axiom_novel) if args.axiom_novel else None
-    residue = read_classes(args.residue) if args.residue else None
-
-    out = []
-    sealed_sections = []
-    say = out.append
-    n_vbad = sum(1 for r in runs if r.verdict == "VerifiedBad")
+def validity_lines(runs, walls, say):
     lscpu = collections.Counter(r.lscpu for r in runs)
     conds = collections.Counter(r.cond for r in runs)
-    hosts = {r.host for r in runs}
-    say("CONDITIONS rows=%d walls=%s hosts=%d count=Solutions(SZS Unsatisfiable + CNFRefutation "
-        "within W + strict CheckProof VerifiedGood, strict majority of the passes run) also=SZS "
-        "solves(Unsatisfiable within W) look=%s" % (
-            len(runs), ",".join(walls), len(hosts),
-            "aggregates-only" if sealed else (args.look or "dev")))
     for k, v in sorted(lscpu.items()):
         say("POD %s rows=%d" % (k or "-", v))
     for k, v in sorted(conds.items()):
@@ -680,21 +803,86 @@ def cmd_compare(args):
                                                    sorted(shas[arm].items())),
                                     "" if len(shas[arm]) == 1 else " WARNING: several binaries"))
     for w in walls:
-        over = sum(1 for r in runs if r.wall == w and r.wall_s > float(w))
-        over10 = sum(1 for r in runs if r.wall == w and r.wall_s > float(w) + 10)
+        sel = [r for r in runs if r.wall == w]
+        over = sum(1 for r in sel if r.wall_s > float(w))
+        over10 = sum(1 for r in sel if r.wall_s > float(w) + 10)
         say("OVERRUN wall=%s runs_past_W=%d runs_past_W+10=%d" % (w, over, over10))
         hosts_by_prob = collections.defaultdict(set)
-        for r in runs:
-            if r.wall == w:
-                hosts_by_prob[r.problem].add(r.host)
+        for r in sel:
+            hosts_by_prob[r.problem].add(r.host)
         say("PAIRING wall=%s problems_with_runs_on_several_pods=%d (all arms of a problem "
             "belong on one pod)" % (w, sum(1 for v in hosts_by_prob.values() if len(v) > 1)))
+        kills = sum(1 for r in sel if r.oom_kills not in ("?", "", "0"))
+        unread = sum(1 for r in sel if r.oom_kills in ("?", ""))
+        say("OOM wall=%s runs_with_oom_kills=%d runs_unreadable=%d" % (w, kills, unread))
     if MALFORMED["rows"]:
         say("MALFORMED rows skipped=%d (cut lines; the runner re-ran those jobs)"
             % MALFORMED["rows"])
+
+
+def cmd_compare(args):
+    runs, decisions = load_runs(args.rows)
+    if not runs:
+        raise SystemExit("stats: no rows")
+    has_j13 = any(r.split == "j13" for r in runs)
+    look = check_look(args, has_j13, "compare")
+    check_conditions(args, look)
+    sealed = look in ("L0", "L1")
+    strict = look in ("L0", "L1", "L2")
+    if sealed and not args.label:
+        raise SystemExit("stats: --look %s needs --label (it names the sealed file)" % look)
+    expect = args.expect_problems
+    if expect is None and has_j13:
+        expect = J13_PROBLEMS
+    pairs = []
+    for spec in args.pair:
+        a, _, b = spec.partition(",")
+        if not a or not b:
+            raise SystemExit("stats: --pair A,B")
+        pairs.append((a, b))
+    nl_arms = [x for x in (args.nl or "").split(",") if x]
+    if any("NL" in pr for pr in pairs) and not nl_arms:
+        raise SystemExit("stats: a pair names NL: give --nl P0,P1,PD")
+    walls = [fmt_num(w) for w in args.wall] if args.wall else sorted(
+        {r.wall for r in runs}, key=float)
+    deltas = parse_delta_args(args.delta)
+    if args.aa_rows:
+        aa_runs, _ = load_runs(args.aa_rows)
+        aa_expect = J13_PROBLEMS if any(r.split == "j13" for r in aa_runs) else None
+        for w, (d, dl, _n) in delta_by_wall(aa_runs, args.aa_arm, walls, aa_expect).items():
+            deltas.setdefault(w, dl)
+            deltas.setdefault("D@" + w, d)
+    casc30 = casc28 = None
+    if os.path.exists(os.path.expanduser(args.casc30)):
+        casc30 = read_names(args.casc30)
+    if os.path.exists(os.path.expanduser(args.casc28)):
+        casc28 = read_names(args.casc28)
+    axiom_novel = read_names(args.axiom_novel) if args.axiom_novel else None
+    residue = read_classes(args.residue) if args.residue else None
+
+    out = []
+    sealed_sections = []
+    tag = {"void": ""}
+
+    def say(line):
+        out.append(tag["void"] + line)
+
+    rc = 0
+    n_vbad = sum(1 for r in runs if r.verdict == "VerifiedBad")
+    say("CONDITIONS rows=%d walls=%s hosts=%d count=Solutions(SZS Unsatisfiable + CNFRefutation "
+        "within W + strict CheckProof VerifiedGood, strict majority of the passes run) also=SZS "
+        "solves(Unsatisfiable within W) look=%s seed=%d resamples=%d%s" % (
+            len(runs), ",".join(walls), len({r.host for r in runs}), look, args.seed,
+            args.resamples, (" amendment=%s" % args.amendment) if args.amendment else ""))
+    validity_lines(runs, walls, say)
     if n_vbad:
         say("STOP-THE-LINE VerifiedBad runs=%d: no result here stands until the cause is fixed"
             % n_vbad)
+        rc = EXIT_VBAD
+        if strict:
+            print("\n".join(out))
+            return rc
+        tag["void"] = "VOID "
 
     all_specs = set()
     for a, b in pairs:
@@ -702,16 +890,59 @@ def cmd_compare(args):
             if x != "NL":
                 all_specs.add(x)
     all_specs.update(nl_arms)
+    spec_arms = {parse_arm_spec(s)[0] for s in all_specs}
+    if strict and has_j13:
+        names = {r.problem for r in runs if r.split == "j13" and r.arm in spec_arms}
+        if len(names) != expect:
+            say("INVALID rows name %d J13 problems for the compared arms; a look reads all %d "
+                "together (every shard)" % (len(names), expect))
+            print("\n".join(out))
+            return EXIT_INVALID
     cell_rows = []
+    lane_rows = []
+    dom_rows = []
     for w in walls:
-        cells, incomplete = build_cells(runs, decisions, w, sorted(all_specs))
+        rss = {cond_field(r.cond, "rss") for r in runs if r.wall == w and r.arm in spec_arms}
+        conds = {r.cond for r in runs if r.wall == w and r.arm in spec_arms}
+        if len(rss) > 1:
+            say("INVALID wall=%s rows run under different rss caps (%s); a comparison runs "
+                "under one cap" % (w, ",".join(sorted(rss))))
+            rc = rc or EXIT_INVALID
+            continue
+        if len(conds) > 1:
+            say("COND-MIX wall=%s %d run conditions among the compared arms (see COND lines)"
+                % (w, len(conds)))
+        cells, incomplete, first = build_cells(runs, decisions, w, sorted(all_specs))
         w2 = fmt_num(2 * float(w))
         has_2w = any(r.wall == w2 for r in runs)
         cells2 = build_cells(runs, decisions, w2, sorted(all_specs))[0] if has_2w else None
         for spec in sorted(all_specs):
             say("CELLS wall=%s arm=%s complete=%d incomplete=%d" % (
-                w, spec, len(cells[spec]), incomplete[spec]))
-            for p, c in sorted(cells[spec].items()):
+                w, spec, len(cells[spec]), len(incomplete[spec])))
+        seen = set()
+        for spec in all_specs:
+            seen |= set(cells[spec]) | incomplete[spec]
+        complete = set.intersection(*[set(cells[s]) for s in all_specs]) if all_specs else set()
+        missing = seen - complete
+        if strict and (missing or (has_j13 and len(complete) != expect)):
+            say("INVALID wall=%s %d problems complete in every arm, %d not%s: nothing is "
+                "compared at this look until the runner completes them" % (
+                    w, len(complete), len(missing),
+                    (" (expected %d)" % expect) if has_j13 else ""))
+            rc = rc or EXIT_INVALID
+            continue
+        if missing:
+            fb = {p for p in missing if all(p in first[s] for s in all_specs)}
+            for s in all_specs:
+                for p in fb:
+                    cells[s][p] = first[s][p]
+            complete |= fb
+            say("FALLBACK wall=%s problems_on_pass_1=%d dropped=%d (dev rule: pass 1 of every "
+                "arm where a pass set is incomplete)" % (w, len(fb), len(missing) - len(fb)))
+        problems = sorted(complete)
+        for spec in sorted(all_specs):
+            for p in problems:
+                c = cells[spec][p]
                 cell_rows.append([w, spec, p, c.split, c.sol, c.szs, _t(c), c.lane or "-",
                                   c.category, c.end_class or "-", c.lane_classes or "-",
                                   len(c.runs)])
@@ -723,30 +954,26 @@ def cmd_compare(args):
             say("DELTA wall=%s delta=%d (given)" % (w, dl))
         else:
             say("DELTA wall=%s not given: the inconclusive rule is not applied" % w)
+        if not problems:
+            say("COMPARE wall=%s: no problem complete in every arm" % w)
+            continue
+        nl = None
+        if nl_arms:
+            first_nl = [pr for pr in pairs if "NL" in pr]
+            other = None
+            if first_nl:
+                a0, b0 = first_nl[0]
+                other = b0 if a0 == "NL" else a0
+                other = None if other == "NL" else other
+            nl, tied, totals = choose_nl(nl_arms, cells, problems, other, w,
+                                         args.resamples, args.seed)
+            say("NL wall=%s = %s (totals %s%s)" % (
+                w, nl, " ".join("%s:%d" % (k, totals[k]) for k in nl_arms),
+                "; tie among %s broken conservatively against %s" % (",".join(tied), other)
+                if len(tied) > 1 else ""))
         for a, b in pairs:
-            specs = [x for x in (a, b) if x != "NL"] + (nl_arms if "NL" in (a, b) else [])
-            if "NL" in (a, b) and not nl_arms:
-                raise SystemExit("stats: a pair names NL: give --nl P0,P1,PD")
-            common = set.intersection(*[set(cells[s]) for s in specs]) if specs else set()
-            problems = sorted(common)
-            if not problems:
-                say("COMPARE wall=%s %s-%s: no common complete problems" % (w, a, b))
-                continue
-            resolved = {}
-            for x in (a, b):
-                if x == "NL":
-                    other = b if a == "NL" else a
-                    other = None if other == "NL" else other
-                    nl, tied, totals = choose_nl(nl_arms, cells, problems, other, w,
-                                                 args.resamples, args.seed)
-                    resolved[x] = nl
-                    say("NL wall=%s = %s (totals %s%s)" % (
-                        w, nl, " ".join("%s:%d" % (k, totals[k]) for k in nl_arms),
-                        "; tie among %s broken conservatively" % ",".join(tied)
-                        if len(tied) > 1 else ""))
-                else:
-                    resolved[x] = x
-            ra, rb = resolved[a], resolved[b]
+            ra = nl if a == "NL" else a
+            rb = nl if b == "NL" else b
             two_w = None
             if cells2 is not None:
                 two_w = (cells2.get(ra, {}), cells2.get(rb, {}))
@@ -756,14 +983,19 @@ def cmd_compare(args):
             say("TOTALS wall=%s n=%d %s: solutions=%d szs=%d | %s: solutions=%d szs=%d" % (
                 w, res["n"], ra, res["total_a"], res["szs_a"], rb, res["total_b"], res["szs_b"]))
             say("COMPARE wall=%s %s n=%d gains=%d losses=%d net=%+d sign_p_one=%s sign_p_two=%s "
-                "%s" % (w, label, res["n"], res["gains"], res["losses"], res["net"],
-                        _fmt_p(res["p_one"]), _fmt_p(res["p_two"]), _ci_text(res["ci"])))
-            say("DOMAINS wall=%s %s %s" % (w, label, " ".join(
-                "%s:%+d/%d" % (d, v[0], v[1]) for d, v in res["domains"].items())))
+                "%s gate_p=%s" % (w, label, res["n"], res["gains"], res["losses"], res["net"],
+                                  _fmt_p(res["p_one"]), _fmt_p(res["p_two"]), _ci_text(res["ci"]),
+                                  _fmt_p(res["p_one"])))
+            doms = pool_domains(res["domains"]) if sealed else res["domains"]
+            best, without = drop_best(doms, res["net"])
+            say("DOMAINS wall=%s %s %s%s" % (w, label, _dom_text(doms),
+                                            " (domains under %d problems pooled into OTHER)"
+                                            % DOMAIN_POOL_MIN if sealed else ""))
             say("DROP-BEST wall=%s %s best_domain=%s net_without_it=%+d" % (
-                w, label, res["best_domain"], res["net_drop_best"]))
+                w, label, best, without))
+            for d, v in res["domains"].items():
+                dom_rows.append([w, label, d, v["n"], v["gains"], v["losses"], v["net"]])
             for side, arm in (("a", ra), ("b", rb)):
-                b2 = ""
                 if ("band2w_" + side) in res:
                     b2 = " misses_solved_at_%s=%d/%d" % (w2, res["band2w_" + side],
                                                           res["band2w_n_" + side])
@@ -772,9 +1004,14 @@ def cmd_compare(args):
                 say("BAND wall=%s arm=%s solves_in_(%s,%s]=%d%s" % (
                     w, arm, fmt_num(float(w) / 2), w, res["band_" + side], b2))
                 lanes = res["unknown_lanes_" + side]
-                say("UNKNOWN wall=%s arm=%s unknown=%d by_lane=%s" % (
-                    w, arm, res["unknown_" + side],
-                    ",".join("%s:%d" % (k, lanes[k]) for k in sorted(lanes)) or "-"))
+                by_lane = ",".join("%s:%d" % (k, lanes[k]) for k in sorted(lanes)) or "-"
+                if sealed:
+                    say("UNKNOWN wall=%s arm=%s unknown=%d tie_decided=%d" % (
+                        w, arm, res["unknown_" + side], res["unknown_tie_" + side]))
+                    lane_rows.append([w, label, arm, by_lane])
+                else:
+                    say("UNKNOWN wall=%s arm=%s unknown=%d tie_decided=%d by_lane=%s" % (
+                        w, arm, res["unknown_" + side], res["unknown_tie_" + side], by_lane))
             if dl is not None:
                 du = abs(res["unknown_a"] - res["unknown_b"])
                 say("INCONCLUSIVE wall=%s %s %s (|%d-%d|=%d vs delta %d)" % (
@@ -796,12 +1033,12 @@ def cmd_compare(args):
                     rs = compare_cells(cells[ra], cells[rb], mem, w,
                                        resamples=args.resamples, seed=args.seed)
                     lo, hi = rs["ci"][0.95]
-                    expect = J13_SUBSET_SIZES.get(name)
+                    exp = J13_SUBSET_SIZES.get(name)
                     subs_rows.append([w, label, name, rs["n"], rs["total_a"], rs["total_b"],
                                       rs["gains"], rs["losses"], "%+d" % rs["net"],
                                       "[%+d,%+d]" % (lo, hi),
-                                      ("size-ok" if expect in (None, rs["n"])
-                                       else "size-%d-expected-%d" % (rs["n"], expect))])
+                                      ("size-ok" if exp in (None, rs["n"])
+                                       else "size-%d-expected-%d" % (rs["n"], exp))])
             if sealed:
                 sealed_sections.append(("disagreements wall=%s %s" % (w, label),
                                         ["problem", "domain", "stem", "winner", "a_time", "a_lane",
@@ -823,12 +1060,17 @@ def cmd_compare(args):
                 for row in res["table"]:
                     say("  " + "\t".join(str(x) for x in row))
     if sealed:
+        sealed_sections.append(("unpooled domains", ["wall", "pair", "domain", "n", "gains",
+                                                     "losses", "net"], dom_rows))
+        sealed_sections.append(("unknown by lane", ["wall", "pair", "arm", "by_lane"], lane_rows))
         sealed_sections.append(("cells", ["wall", "arm", "problem", "split", "solution", "szs",
                                           "time", "lane", "category", "end_class",
                                           "lane_classes", "passes"], cell_rows))
         path, sha = write_sealed(args.sealed_dir, args.label, sealed_sections)
         say("SEALED per-problem tables -> %s sha256=%s (not printed; open after L2)" % (path, sha))
     elif args.table_out:
+        if has_j13:
+            raise SystemExit("stats: --table-out writes per-problem rows; not with J13 rows")
         with open(args.table_out, "w") as fp:
             fp.write("#wall\tarm\tproblem\tsplit\tsolution\tszs\ttime\tlane\tcategory\t"
                      "end_class\tlane_classes\tpasses\n")
@@ -836,7 +1078,7 @@ def cmd_compare(args):
                 fp.write("\t".join(str(x) for x in row) + "\n")
         say("TABLE per-problem cells -> %s" % args.table_out)
     print("\n".join(out))
-    return 0
+    return rc
 
 
 # ----------------------------------------------------------------------------
@@ -845,9 +1087,16 @@ def cmd_compare(args):
 
 def cmd_delta(args):
     runs, _dec = load_runs(args.rows)
+    has_j13 = any(r.split == "j13" for r in runs)
+    look = check_look(args, has_j13, "delta")
+    if has_j13 and look != "L0":
+        raise SystemExit("stats: delta reads the L0 A/A rows: --look L0")
+    expect = args.expect if args.expect is not None else (J13_PROBLEMS if has_j13 else None)
     walls = [fmt_num(w) for w in args.wall] if args.wall else sorted(
         {r.wall for r in runs if r.arm == args.arm}, key=float)
-    ok_all = True
+    print("CONDITIONS rows=%d arm=%s walls=%s look=%s expect=%s" % (
+        len(runs), args.arm, ",".join(walls), look, expect if expect is not None else "all"))
+    status = "PASS"
     for w in walls:
         sel = [r for r in runs if r.arm == args.arm and r.wall == w]
         t1 = sum(r.solution for r in sel if r.pass_no == 1)
@@ -855,22 +1104,35 @@ def cmd_delta(args):
         s1 = {r.problem: r for r in sel if r.pass_no == 1}
         s2 = {r.problem: r for r in sel if r.pass_no == 2}
         common = set(s1) & set(s2)
+        union = set(s1) | set(s2)
         d = sum(1 for p in common if s1[p].solution != s2[p].solution)
         dz = sum(1 for p in common if (s1[p].status == "Unsatisfiable" and s1[p].in_wall)
                  != (s2[p].status == "Unsatisfiable" and s2[p].in_wall))
         u1 = sum(1 for p in common if pass_category(s1[p]) == "unknown")
         u2 = sum(1 for p in common if pass_category(s2[p]) == "unknown")
+        complete = common == union and (expect is None or len(common) == expect)
         ok = d <= G02_MAX_D
-        ok_all = ok_all and ok
+        verdict = ("PASS" if ok else "FAIL") if complete else "INCOMPLETE"
+        if verdict == "INCOMPLETE":
+            status = "INCOMPLETE"
+        elif verdict == "FAIL" and status == "PASS":
+            status = "FAIL"
         print("AA wall=%s arm=%s problems=%d pass1_solutions=%d pass2_solutions=%d D=%d "
-              "D_szs=%d unknown=%d/%d delta=%d G0.2=%s (D <= %d)" % (
-                  w, args.arm, len(common), t1, t2, d, dz, u1, u2, delta_from_d(d),
-                  "PASS" if ok else "FAIL", G02_MAX_D))
-        if len(common) != len(set(s1) | set(s2)):
-            print("AA wall=%s WARNING: %d problems lack one of the two passes" % (
-                w, len(set(s1) | set(s2)) - len(common)))
-    print("G0.2 %s" % ("PASS at every wall" if ok_all else "FAIL: find the noise source first"))
-    return 0 if ok_all else 1
+              "D_szs=%d unknown=%d/%d delta=%s G0.2=%s (D <= %d)" % (
+                  w, args.arm, len(common), t1, t2, d, dz, u1, u2,
+                  delta_from_d(d) if complete else "-", verdict, G02_MAX_D))
+        if not complete:
+            print("AA wall=%s INCOMPLETE: %d problems with both passes, %d with either, %s "
+                  "expected; neither G0.2 nor delta is decided" % (
+                      w, len(common), len(union), expect if expect is not None else "all"))
+    if status == "PASS":
+        print("G0.2 PASS at every wall")
+        return 0
+    if status == "FAIL":
+        print("G0.2 FAIL: find the noise source first")
+        return 1
+    print("G0.2 INCOMPLETE: resume the A/A runs until both passes cover every problem")
+    return EXIT_INVALID
 
 
 # ----------------------------------------------------------------------------
@@ -964,6 +1226,23 @@ def wdep_analysis(runs, official, arm, min_official_s=1.0, wall_for_c=None,
 
 def cmd_wdep(args):
     runs, _dec = load_runs(args.rows)
+    has_j13 = any(r.split == "j13" for r in runs)
+    look = check_look(args, has_j13, "wdep")
+    if has_j13 and look != "L0":
+        raise SystemExit("stats: the WDEP calibration is part of look L0: --look L0")
+    sel = [r for r in runs if r.arm == args.arm]
+    rss = collections.Counter(cond_field(r.cond, "rss") or "?" for r in sel)
+    capped = sum(v for k, v in rss.items() if k != "default")
+    print("CONDITIONS rows=%d arm=%s look=%s hosts=%d rss=%s" % (
+        len(sel), args.arm, look, len({r.host for r in sel}),
+        ",".join("%s:%d" % kv for kv in sorted(rss.items()))))
+    walls = sorted({r.wall for r in sel}, key=float)
+    validity_lines(sel, walls, print)
+    if capped and not args.allow_capped:
+        print("INVALID %d rows ran under another rss cap than the schedule's default; J13 ran "
+              "with the default cap, so these rows cannot calibrate WDEP (--allow-capped "
+              "labels the result uncalibrated)" % capped)
+        return EXIT_INVALID
     official = read_official(args.official, args.system)
     res = wdep_analysis(runs, official, args.arm, args.min_official_s, args.c_wall)
     n_off = res["n_official"]
@@ -978,10 +1257,15 @@ def cmd_wdep(args):
                   "QUALIFIES" if q["qualifies"] else
                   ("incomplete" if not q["complete"] else "no")))
     fb = res["fallback"]
-    if res["choice"] is not None:
+    rc = 1
+    if capped:
+        print("G0.3 UNCALIBRATED: %d rows ran under the 3500 MB cap; no wall is WDEP from "
+              "these rows" % capped)
+    elif res["choice"] is not None:
         q = res["per_wall"][res["choice"]]
         print("G0.3 PASS: WDEP = %s s (agreement %.4f, total %d, official %d)" % (
             res["choice"], q["agreement"], q["total"], n_off))
+        rc = 0
     elif fb is not None:
         print("G0.3 FAIL: no wall qualifies; WDEP = 180 / c = %.1f s, UNCALIBRATED "
               "(c = %.3f, 95%% CI [%.3f, %.3f], geometric mean of official / pod time over "
@@ -990,16 +1274,15 @@ def cmd_wdep(args):
                   args.min_official_s, fb["wall"]))
     else:
         print("G0.3 FAIL: no rows")
-    if args.table_out:
-        with open(args.table_out, "w") as fp:
-            fp.write("#wall\tproblem\tofficial_solved\tpod_solved\tofficial_s\tpod_s\tstatus\t"
-                     "proof\tlane\n")
-            for w, q in res["per_wall"].items():
-                for row in q["rows"]:
-                    fp.write("\t".join([w] + [str(x) for x in row]) + "\n")
-        print("TABLE per-problem agreement -> %s (public calibration data, outside the seal)"
-              % args.table_out)
-    return 0 if res["choice"] is not None else 1
+    rows = [[w] + list(row) for w, q in res["per_wall"].items() for row in q["rows"]]
+    if rows:
+        path, sha = write_sealed(args.sealed_dir, args.label, [(
+            "wdep per-problem agreement", ["wall", "problem", "official_solved", "pod_solved",
+                                           "official_s", "pod_s", "status", "proof", "lane"],
+            rows)])
+        print("SEALED per-problem agreement -> %s sha256=%s (not printed; open after L2)"
+              % (path, sha))
+    return rc
 
 
 # ----------------------------------------------------------------------------
@@ -1009,6 +1292,14 @@ def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
+
+    def look_args(p):
+        p.add_argument("--look", choices=LOOKS, default="dev",
+                       help="L0, L1: aggregates only, the rest sealed; L2: unsealed (needs "
+                            "--l2-token); dev: no J13 rows")
+        p.add_argument("--l2-token", help="the plan's section 5.4 'L2 unseal token'")
+        p.add_argument("--plan", default=PLAN, help="the plan (its section 5.4 registry)")
+
     c = sub.add_parser("compare", help="paired comparisons (section 1.5)")
     c.add_argument("--rows", nargs="+", required=True,
                    help="rows.tsv files, run_arms output directories, or .tgz archives")
@@ -1019,22 +1310,26 @@ def build_parser():
     c.add_argument("--delta", action="append", metavar="N|W=N")
     c.add_argument("--aa-rows", nargs="+", help="L0 A/A rows to compute delta from")
     c.add_argument("--aa-arm", default="P0")
-    c.add_argument("--aggregates-only", action="store_true",
-                   help="looks L0 and L1: print the pre-registered aggregates, seal the rest")
-    c.add_argument("--look", choices=("dev", "L2"), help="L2: the confirmatory look, unsealed")
-    c.add_argument("--label", help="name of the sealed file (aggregates-only)")
+    look_args(c)
+    c.add_argument("--label", help="name of the sealed file (looks L0, L1)")
     c.add_argument("--sealed-dir", default=SEALED_DIR)
+    c.add_argument("--expect-problems", type=int,
+                   help="problems a look must cover (default 400 with J13 rows)")
     c.add_argument("--casc30", default=os.path.join(J13_DIR, "casc30_ueq_names.txt"))
     c.add_argument("--casc28", default=os.path.join(J13_DIR, "casc28_ueq_names.txt"))
     c.add_argument("--axiom-novel", help="names of the axiom-novel J13 problems")
     c.add_argument("--residue", help="name TAB class for the J13 residue")
     c.add_argument("--seed", type=int, default=DEFAULT_SEED)
     c.add_argument("--resamples", type=int, default=DEFAULT_RESAMPLES)
-    c.add_argument("--table-out", help="write the per-problem cells (not with the seal)")
+    c.add_argument("--amendment", help="the section 5.4 entry behind a non-default seed or count")
+    c.add_argument("--table-out", help="write the per-problem cells (dev rows only)")
     d = sub.add_parser("delta", help="A/A disagreement D, delta, G0.2")
     d.add_argument("--rows", nargs="+", required=True)
     d.add_argument("--arm", default="P0")
     d.add_argument("--wall", action="append")
+    d.add_argument("--expect", type=int, help="problems both passes must cover (default 400 "
+                                              "with J13 rows)")
+    look_args(d)
     w = sub.add_parser("wdep", help="G0.3 against the official J13 result")
     w.add_argument("--rows", nargs="+", required=True)
     w.add_argument("--official", default=os.path.join(J13_DIR, "official", "ueq_official.tsv"))
@@ -1042,7 +1337,11 @@ def build_parser():
     w.add_argument("--arm", default="SUB")
     w.add_argument("--min-official-s", type=float, default=1.0)
     w.add_argument("--c-wall", help="the run c comes from (default: the largest wall)")
-    w.add_argument("--table-out")
+    w.add_argument("--allow-capped", action="store_true",
+                   help="read rows run under the 3500 MB cap (the result is uncalibrated)")
+    w.add_argument("--label", default="wdep", help="name of the sealed per-problem table")
+    w.add_argument("--sealed-dir", default=SEALED_DIR)
+    look_args(w)
     return ap
 
 

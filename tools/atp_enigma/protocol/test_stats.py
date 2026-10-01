@@ -9,6 +9,7 @@ import gzip
 import io
 import math
 import os
+import re
 import shutil
 import stat
 import sys
@@ -22,11 +23,16 @@ import run_arms  # noqa: E402
 import stats  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+AMEND = "- A-TEST: the synthetic tests use fewer bootstrap resamples\n"
+TEST_PLAN = os.path.join(tempfile.mkdtemp(), "plan.md")
+with open(TEST_PLAN, "w") as _fp:
+    _fp.write("### 5.4 Registry and amendments\n\nAmendments:\n" + AMEND)
+FAST = ["--plan", TEST_PLAN, "--amendment", "A-TEST"]
 
 
 def row(problem, arm, wall, pass_no, sol, split="heldout", wall_s=1.0, lane="twee",
         status=None, proof=None, verdict=None, in_wall=1, end_class=None, host="podA",
-        lane_classes=""):
+        lane_classes="", rss="default", oom="0"):
     """One rows.tsv row in run_arms.py's format."""
     if status is None:
         status = "Unsatisfiable" if sol else "Timeout"
@@ -44,8 +50,10 @@ def row(problem, arm, wall, pass_no, sol, split="heldout", wall_s=1.0, lane="twe
         "in_wall": str(in_wall), "rc": "0" if sol else "1", "cpu_s": "1.0", "maxrss_kb": "1000",
         "end_class": end_class, "lane_classes": lane_classes,
         "proof_recs": "12" if proof else "0", "check_s": "0.5", "strays": "0",
-        "host": host, "cond": "maxpar=16;rss=default;errdir=1;proof=1;check_wall=60",
-        "utc": "2026-10-01T00:00:00Z",
+        "host": host,
+        "cond": "maxpar=16;rss=%s;errdir=1;proof=1;check_wall=60;protocol=0123456789ab" % rss,
+        "utc": "2026-10-01T00:00:00Z", "mem": "memtotal=135000000;cgroup=none;eff=135000000",
+        "oom_kills": oom,
     }
     return [vals[c] for c in run_arms.ROW_COLUMNS]
 
@@ -61,6 +69,12 @@ def write_rows(path, rows, decisions=None):
             fp.write("#" + "\t".join(run_arms.DECISION_COLUMNS) + "\n")
             for d in decisions:
                 fp.write("\t".join(str(x) for x in d) + "\n")
+
+
+def chmod_tree(path):
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            os.chmod(os.path.join(root, f), 0o600)
 
 
 def run_cli(argv):
@@ -227,6 +241,9 @@ class Cells(unittest.TestCase):
         self.assertEqual(c.category, "miss")
         c = self.cell([0, 0], cats=["unknown", None])
         self.assertEqual(c.category, "unknown")  # ties go to Unknown
+        self.assertTrue(c.unknown_tie)
+        c = self.cell([0, 0, 0], cats=["unknown", "unknown", None])
+        self.assertEqual((c.category, c.unknown_tie), ("unknown", False))
 
 
 def synthetic_j13(tmp):
@@ -283,8 +300,8 @@ class Compare(unittest.TestCase):
     def test_compare_cells_known(self):
         d, names, sets = synthetic_j13(self.tmp)
         runs, dec = stats.load_runs([d])
-        cells, inc = stats.build_cells(runs, dec, "180", ["E", "P0", "P1", "PD"])
-        self.assertEqual(inc, {"E": 0, "P0": 0, "P1": 0, "PD": 0})
+        cells, inc, _first = stats.build_cells(runs, dec, "180", ["E", "P0", "P1", "PD"])
+        self.assertEqual({k: len(v) for k, v in inc.items()}, {"E": 0, "P0": 0, "P1": 0, "PD": 0})
         probs = sorted(cells["E"])
         self.assertEqual(len(probs), 40)
         r = stats.compare_cells(cells["E"], cells["P1"], probs, "180", resamples=2000)
@@ -292,9 +309,9 @@ class Compare(unittest.TestCase):
         self.assertEqual(r["total_a"], 32)
         self.assertEqual(r["total_b"], 31)
         self.assertEqual((r["gains"], r["losses"], r["net"]), (3, 2, 1))
-        self.assertEqual(r["domains"]["GRP"], (-1, 16))
-        self.assertEqual(r["domains"]["LCL"], (-1, 12))
-        self.assertEqual(r["domains"]["LAT"], (3, 12))
+        self.assertEqual(r["domains"]["GRP"], {"net": -1, "n": 16, "gains": 0, "losses": 1})
+        self.assertEqual(r["domains"]["LCL"], {"net": -1, "n": 12, "gains": 0, "losses": 1})
+        self.assertEqual(r["domains"]["LAT"], {"net": 3, "n": 12, "gains": 3, "losses": 0})
         self.assertEqual((r["best_domain"], r["net_drop_best"]), ("LAT", -2))
         self.assertEqual(r["band_a"], 1)
         self.assertEqual(r["band_b"], 0)
@@ -308,7 +325,7 @@ class Compare(unittest.TestCase):
     def test_nl_choice(self):
         d, names, sets = synthetic_j13(self.tmp)
         runs, dec = stats.load_runs([d])
-        cells, _ = stats.build_cells(runs, dec, "180", ["E", "P0", "P1", "PD"])
+        cells, _, _f = stats.build_cells(runs, dec, "180", ["E", "P0", "P1", "PD"])
         probs = sorted(cells["E"])
         nl, tied, totals = stats.choose_nl(["P0", "P1", "PD"], cells, probs, "E", "180",
                                            2000, stats.DEFAULT_SEED)
@@ -331,7 +348,7 @@ class Compare(unittest.TestCase):
         dd = os.path.join(self.tmp, "tie")
         write_rows(dd, rows)
         runs, dec = stats.load_runs([dd])
-        cells, _ = stats.build_cells(runs, dec, "180", ["E", "P1", "PD"])
+        cells, _, _f = stats.build_cells(runs, dec, "180", ["E", "P1", "PD"])
         nl, tied, totals = stats.choose_nl(["P1", "PD"], cells, sorted(names), "E", "180",
                                            2000, stats.DEFAULT_SEED)
         self.assertEqual(totals, {"P1": 20, "PD": 20})
@@ -345,9 +362,15 @@ class Compare(unittest.TestCase):
         d = os.path.join(self.tmp, "inc")
         write_rows(d, rows, [("GRP001-1", 180, 1, "disagree"), ("GRP002-1", 180, 0, "-")])
         runs, dec = stats.load_runs([d])
-        cells, inc = stats.build_cells(runs, dec, "180", ["E", "P0"])
-        self.assertEqual(inc, {"E": 1, "P0": 1})
+        cells, inc, first = stats.build_cells(runs, dec, "180", ["E", "P0"])
+        self.assertEqual(inc, {"E": {"GRP001-1"}, "P0": {"GRP001-1"}})
         self.assertEqual(sorted(cells["E"]), ["GRP002-1"])
+        self.assertEqual(sorted(first["E"]), ["GRP001-1", "GRP002-1"])
+        # Dev: the incomplete problem is compared on pass 1 and counted.
+        rc, out = run_cli(["compare", "--rows", d, "--pair", "E,P0", "--resamples", "200"])
+        self.assertEqual(rc, 0)
+        self.assertIn("FALLBACK wall=180 problems_on_pass_1=1 dropped=0", out)
+        self.assertIn("COMPARE wall=180 E-P0 n=2 gains=1 losses=0 net=+1", out)
 
     def test_two_w_band(self):
         rows = []
@@ -380,9 +403,9 @@ class Compare(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run_cli(["compare"] + common)                       # J13 rows need the seal
         with self.assertRaises(SystemExit):
-            run_cli(["compare", "--aggregates-only"] + common)  # and a label
-        rc, out = run_cli(["compare", "--aggregates-only", "--label", "L1test",
-                           "--sealed-dir", sealed] + common)
+            run_cli(["compare", "--look", "L1"] + common)       # and a label
+        rc, out = run_cli(["compare", "--look", "L1", "--label", "L1test", "--expect-problems",
+                           "40", "--sealed-dir", sealed] + common + FAST)
         self.assertEqual(rc, 0)
         for n in names:
             self.assertNotIn(n, out)
@@ -394,7 +417,11 @@ class Compare(unittest.TestCase):
         self.assertIn("INCONCLUSIVE wall=180 E-PD no (|3-1|=2 vs delta 2)", out)
         self.assertIn("COMPARE wall=180 E-NL (E-P1) n=40 gains=3 losses=2 net=+1", out)
         self.assertIn("COMPARE wall=180 E-PD n=40 gains=4 losses=2 net=+2", out)
-        self.assertIn("DOMAINS wall=180 E-NL (E-P1) GRP:-1/16 LAT:+3/12 LCL:-1/12", out)
+        self.assertIn("DOMAINS wall=180 E-NL (E-P1) GRP:-1/16(+0,-1) LAT:+3/12(+3,-0) "
+                      "LCL:-1/12(+0,-1) (domains under 10 problems pooled into OTHER)", out)
+        self.assertIn("UNKNOWN wall=180 arm=E unknown=3 tie_decided=0\n", out)
+        self.assertNotIn("by_lane", out)
+        self.assertIn("gate_p=", out)
         self.assertIn("DROP-BEST wall=180 E-NL (E-P1) best_domain=LAT net_without_it=-2", out)
         self.assertIn("BAND wall=180 arm=E solves_in_(90,180]=1 misses_solved_at_360=no-2W-run",
                       out)
@@ -409,8 +436,26 @@ class Compare(unittest.TestCase):
         self.assertIn("## j13 subsets", body)
         self.assertIn(names[0], body)
         self.assertIn("casc28-only", body)
+        self.assertIn("## unknown by lane", body)
         self.assertIn("SEALED per-problem tables -> %s" % path, out)
-        rc, out2 = run_cli(["compare", "--look", "L2"] + common)
+        with self.assertRaises(SystemExit):
+            run_cli(["compare", "--look", "L2", "--expect-problems", "40"] + common)
+        plan = os.path.join(self.tmp, "plan.md")
+        with open(plan, "w") as fp:
+            fp.write("### 5.4 Registry and amendments\n\n| Item | value | Date |\n|---|---|---|\n"
+                     "| L2 unseal token | after the freeze | |\n")
+        with self.assertRaises(SystemExit):
+            run_cli(["compare", "--look", "L2", "--plan", plan, "--l2-token", "after the freeze",
+                     "--expect-problems", "40"] + common)
+        with open(plan, "w") as fp:
+            fp.write("### 5.4 Registry and amendments\n\n| Item | value | Date |\n|---|---|---|\n"
+                     "| L2 unseal token | 0123456789abcdef | 2027-06-01 |\n" + AMEND)
+        with self.assertRaises(SystemExit):
+            run_cli(["compare", "--look", "L2", "--plan", plan, "--l2-token", "0123456789abcdee",
+                     "--expect-problems", "40"] + common)
+        rc, out2 = run_cli(["compare", "--look", "L2", "--plan", plan, "--l2-token",
+                            "0123456789abcdef", "--expect-problems", "40", "--amendment",
+                            "A-TEST"] + common)
         self.assertIn("DISAGREEMENTS wall=180 E-NL (E-P1) n=5", out2)
         self.assertIn("SUBSET wall=180 E-NL (E-P1) minus10 n=12", out2)
 
@@ -445,9 +490,10 @@ class Compare(unittest.TestCase):
         rows[1][run_arms.ROW_COLUMNS.index("bin_sha")] = "cd" * 32
         d = os.path.join(self.tmp, "aa")
         write_rows(d, rows)
-        rc, out = run_cli(["compare", "--rows", d, "--pair", "P0@1,P0@2", "--aggregates-only",
+        rc, out = run_cli(["compare", "--rows", d, "--pair", "P0@1,P0@2", "--look", "L0",
                            "--label", "L0aa", "--sealed-dir", os.path.join(self.tmp, "s"),
-                           "--resamples", "300"])
+                           "--expect-problems", "12", "--resamples", "300"] + FAST)
+        self.assertIn("look=L0 seed=20261001 resamples=300", out)
         self.assertIn("COMPARE wall=180 P0@1-P0@2 n=12 gains=3 losses=0 net=+3", out)
         self.assertIn("PAIRING wall=180 problems_with_runs_on_several_pods=1", out)
         self.assertIn("BINARY arm=P0 abababababab:23 cdcdcdcdcdcd:1 WARNING: several binaries", out)
@@ -466,7 +512,7 @@ class Compare(unittest.TestCase):
         write_rows(d, rows)
         rc, out = run_cli(["compare", "--rows", d, "--pair", "E,P0", "--delta", "3",
                            "--resamples", "200"])
-        self.assertIn("UNKNOWN wall=180 arm=P0 unknown=4 by_lane=twee:4", out)
+        self.assertIn("UNKNOWN wall=180 arm=P0 unknown=4 tie_decided=0 by_lane=twee:4", out)
         self.assertIn("INCONCLUSIVE wall=180 E-P0 YES (|0-4|=4 vs delta 3)", out)
         rc, out = run_cli(["compare", "--rows", d, "--pair", "E,P0", "--delta", "4",
                            "--resamples", "200"])
@@ -484,7 +530,13 @@ class DeltaCmd(unittest.TestCase):
                     rows.append(row(p, "P0", w, 1, 1, split="j13"))
                     rows.append(row(p, "P0", w, 2, 0 if i < dis else 1, split="j13"))
             write_rows(os.path.join(tmp, "l0"), rows)
-            rc, out = run_cli(["delta", "--rows", os.path.join(tmp, "l0")])
+            with self.assertRaises(SystemExit):
+                run_cli(["delta", "--rows", os.path.join(tmp, "l0")])  # J13: --look L0
+            rc, out = run_cli(["delta", "--rows", os.path.join(tmp, "l0"), "--look", "L0"])
+            self.assertEqual(rc, stats.EXIT_INVALID)  # 30 of the 400 J13 problems
+            self.assertIn("G0.2=INCOMPLETE", out)
+            rc, out = run_cli(["delta", "--rows", os.path.join(tmp, "l0"), "--look", "L0",
+                               "--expect", "30"])
             self.assertEqual(rc, 1)
             self.assertIn("AA wall=56 arm=P0 problems=30 pass1_solutions=30 pass2_solutions=17 "
                           "D=13 D_szs=13 unknown=0/0 delta=4 G0.2=FAIL", out)
@@ -495,6 +547,11 @@ class DeltaCmd(unittest.TestCase):
             runs, _ = stats.load_runs([os.path.join(tmp, "l0")])
             self.assertEqual(stats.delta_by_wall(runs, "P0", ["180", "56"]),
                              {"180": (5, 3, 30), "56": (13, 4, 30)})
+            with self.assertRaises(SystemExit):
+                stats.delta_by_wall(runs, "P0", ["180"], expect=400)
+            part = [r for r in runs if not (r.problem == "LAT000-1" and r.pass_no == 2)]
+            with self.assertRaises(SystemExit):
+                stats.delta_by_wall(part, "P0", ["180"])
         finally:
             shutil.rmtree(tmp)
 
@@ -531,8 +588,16 @@ class Wdep(unittest.TestCase):
             plan[60] = dict(pod, **{probs[0]: None, probs[19]: 30.0})        # 0.90
             plan[70] = dict(pod, **{probs[19]: 30.0})                        # 0.95, total 13
             offp, cal = self.make(tmp, plan, official)
-            rc, out = run_cli(["wdep", "--rows", cal, "--official", offp])
+            sealed = os.path.join(tmp, "sealed")
+            with self.assertRaises(SystemExit):
+                run_cli(["wdep", "--rows", cal, "--official", offp, "--sealed-dir", sealed])
+            rc, out = run_cli(["wdep", "--rows", cal, "--official", offp, "--look", "L0",
+                               "--sealed-dir", sealed])
             self.assertEqual(rc, 0)
+            for p in probs:
+                self.assertNotIn(p, out)
+            self.assertIn("SEALED per-problem agreement -> ", out)
+            self.assertEqual(len(os.listdir(sealed)), 1)
             self.assertIn("OFFICIAL FindProof---0.1 solved=12 of 20", out)
             self.assertIn("WALL 45 covered=20/20 total=10 (diff -2) szs=10 empty_blocks=0 "
                           "agreement=0.9000", out)
@@ -544,13 +609,16 @@ class Wdep(unittest.TestCase):
             tmp2 = tempfile.mkdtemp()
             try:
                 offp2, cal2 = self.make(tmp2, plan2, official)
-                rc, out = run_cli(["wdep", "--rows", cal2, "--official", offp2])
+                rc, out = run_cli(["wdep", "--rows", cal2, "--official", offp2, "--look", "L0",
+                                   "--sealed-dir", os.path.join(tmp2, "s")])
                 self.assertEqual(rc, 1)
                 self.assertIn("G0.3 FAIL: no wall qualifies; WDEP = 180 / c = 60.0 s, UNCALIBRATED "
                               "(c = 3.000", out)
             finally:
+                chmod_tree(tmp2)
                 shutil.rmtree(tmp2)
         finally:
+            chmod_tree(tmp)
             shutil.rmtree(tmp)
 
     def test_floor_excludes_startup(self):
@@ -659,24 +727,40 @@ class RunArmsParsers(unittest.TestCase):
         main_c = os.path.join(REPO, "tools", "atp_cli", "main.c")
         if not os.path.exists(main_c):
             self.skipTest("no main.c")
-        lanes = run_arms.parse_schedule_source(run_arms.read_text(main_c))
+        # The SCHEDULE table as --list-lanes prints it (name TAB flags).
+        listing = "".join("%s\t%s\n" % m for m in re.findall(
+            r'^  \{"([^"]+)",\s*"([^"]*)",\s*[0-9.]+\},', run_arms.read_text(main_c), re.M))
+        lanes = dict(run_arms.parse_lane_listing(listing))
         self.assertEqual(len(lanes), 46)
         gated = sorted(k for k, v in lanes.items() if g(v))
         self.assertEqual(gated, sorted(["equals-twee", "fof-wall", "unfold-tgt-awr", "twee",
                                         "twee-freq", "tgt-sel", "otter-lpo", "otter-lpo-cmin",
                                         "otter-ladr", "twee-raw"]))
 
+    def test_lane_listing(self):
+        self.assertEqual(run_arms.parse_lane_listing("wm\t\ntwee\t--lrs --cp-weight=8\n"),
+                         [("wm", ""), ("twee", "--lrs --cp-weight=8")])
+        self.assertIsNone(run_arms.parse_lane_listing("wm\ntwee\n"))  # names only: old build
+        self.assertIsNone(run_arms.parse_lane_listing(""))
+
     def test_repeat_decision(self):
-        known = {"twee", "wm", "tgt-sel"}
-        gated = {"twee", "tgt-sel"}
-        self.assertEqual(run_arms.repeat_decision({"E": (1, "wm"), "P0": (1, "wm")}, gated, known),
+        p0 = {"twee": "--cp-set-ir-budget=5", "wm": "", "tgt-sel": "--lrs"}
+        e = dict(p0, **{"twee-g": "--cp-set-ir-budget=5 --guide=1", "wm-g": "--guide=1",
+                        "wm": "--lrs"})
+        t = {"E": e, "P0": p0}
+        rd = run_arms.repeat_decision
+        self.assertEqual(rd({"E": (1, "wm-g"), "P0": (1, "tgt-sel")}, {"E": e, "P0": {"tgt-sel": ""}}),
                          (0, "-"))
-        self.assertEqual(run_arms.repeat_decision({"E": (1, "wm"), "P0": (0, "")}, gated, known),
-                         (1, "disagree"))
-        self.assertEqual(run_arms.repeat_decision({"E": (1, "twee"), "P0": (1, "wm")}, gated,
-                                                  known), (1, "clock-gated:twee"))
-        self.assertEqual(run_arms.repeat_decision({"E": (0, "enigma-x"), "P0": (0, "")}, gated,
-                                                  known), (1, "clock-gated:enigma-x"))
+        self.assertEqual(rd({"E": (1, "wm-g"), "P0": (0, "")}, t), (1, "disagree"))
+        self.assertEqual(rd({"E": (1, "twee-g"), "P0": (1, "wm")}, t), (1, "clock-gated:twee-g"))
+        # Each arm's lane reads its own table: wm is gated in E's, not in P0's.
+        self.assertEqual(rd({"E": (1, "wm-g"), "P0": (1, "wm")}, t), (0, "-"))
+        self.assertEqual(rd({"E": (1, "wm"), "P0": (1, "wm")}, t),
+                         (1, "clock-gated:wm"))
+        with self.assertRaises(run_arms.UnknownLane):
+            rd({"E": (0, "enigma-x"), "P0": (0, "")}, t)
+        with self.assertRaises(run_arms.UnknownLane):
+            rd({"E": (1, "wm-g"), "P0": (1, "wm-g")}, t)  # P0's table lacks E's twin
 
     def test_order_and_shard(self):
         names = ["GRP%03d-1" % i for i in range(10)] + ["LAT%03d-1" % i for i in range(7)]
@@ -689,8 +773,7 @@ class RunArmsParsers(unittest.TestCase):
         self.assertNotEqual(k1, run_arms.order_key(20261001, "GRP001-1", 1, "180", "P0"))
         self.assertEqual(run_arms.fmt_num(180.0), "180")
         self.assertEqual(run_arms.fmt_num(53.5), "53.5")
-        self.assertEqual(run_arms.rss_cap_for(64 * 1024 * 1024), 3500)
-        self.assertIsNone(run_arms.rss_cap_for(128 * 1024 * 1024))
+        self.assertEqual(run_arms.caps_need_kb(16), 16 * 4500 * 1024)
 
     def test_select_reference(self):
         res = []
@@ -701,6 +784,314 @@ class RunArmsParsers(unittest.TestCase):
                             "wall_s": t if t is not None else 120.0, "ref_s": None})
         chosen = run_arms.select_reference(res, 10, 2.0, 60.0, 0.10)
         self.assertEqual([c[1] for c in chosen], ["D", "A"])
+
+
+def j13_like(n_per_domain, extra=None):
+    """Problem names per domain: {"GRP": 30, "HEN": 1, ...}."""
+    names = []
+    for dom, n in sorted(n_per_domain.items()):
+        names += ["%s%03d-1" % (dom, i) for i in range(n)]
+    return names
+
+
+class SealedLooks(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        chmod_tree(self.tmp)
+        shutil.rmtree(self.tmp)
+
+    def write(self, name, rows, decisions=None):
+        d = os.path.join(self.tmp, name)
+        write_rows(d, rows, decisions)
+        return d
+
+    def test_small_domains_pooled_and_never_named(self):
+        # Singleton and small domains (as HEN, NUM, SWV, TOP, ANA, DAT in J13).
+        names = j13_like({"GRP": 30, "LAT": 12, "HEN": 1, "NUM": 1, "SWV": 1, "ANA": 2,
+                          "PUZ": 3})
+        small = [n for n in names if not n.startswith(("GRP", "LAT"))]
+        rows = []
+        for i, p in enumerate(names):
+            e = p in small or i % 3 == 0
+            rows.append(row(p, "E", 180, 1, e, split="j13"))
+            rows.append(row(p, "P0", 180, 1, i % 3 == 0, split="j13"))
+        d = self.write("pool", rows)
+        rc, out = run_cli(["compare", "--rows", d, "--pair", "E,P0", "--look", "L1",
+                           "--label", "pool", "--sealed-dir", os.path.join(self.tmp, "s"),
+                           "--expect-problems", str(len(names)), "--resamples", "300"] + FAST)
+        self.assertEqual(rc, 0)
+        for dom in ("HEN", "NUM", "SWV", "ANA", "PUZ"):
+            self.assertNotIn(dom, out)
+        for p in names:
+            self.assertNotIn(p, out)
+        # OTHER holds 8 problems, so the smallest named domain (LAT, 12) joins it.
+        self.assertIn("DOMAINS wall=180 E-P0 GRP:+0/30(+0,-0) OTHER:+", out)
+        self.assertIn("/20(", out)
+        self.assertIn("DROP-BEST wall=180 E-P0 best_domain=OTHER", out)
+
+    def test_pool_domains_rule(self):
+        def v(n, net=0):
+            return {"n": n, "net": net, "gains": max(net, 0), "losses": max(-net, 0)}
+        doms = {"GRP": v(79), "LAT": v(78), "KLE": v(10, -2), "HEN": v(1, 1), "NUM": v(1, -1),
+                "SWX": v(8)}
+        pooled = stats.pool_domains(doms)
+        self.assertEqual(list(pooled), ["GRP", "KLE", "LAT", "OTHER"])
+        self.assertEqual(pooled["OTHER"]["n"], 10)
+        self.assertEqual((pooled["OTHER"]["gains"], pooled["OTHER"]["losses"]), (1, 1))
+        pooled = stats.pool_domains({"GRP": v(79), "HEN": v(1), "KLE": v(10)})
+        self.assertEqual(list(pooled), ["GRP", "OTHER"])
+        self.assertEqual(pooled["OTHER"]["n"], 11)
+
+    def test_incomplete_cells_invalid_at_a_look(self):
+        names = j13_like({"GRP": 12})
+        rows, decs = [], []
+        for p in names:
+            rep = p == names[0]
+            decs.append((p, 180, int(rep), "disagree" if rep else "-"))
+            for arm in ("E", "P0"):
+                rows.append(row(p, arm, 180, 1, arm == "E" if rep else 1, split="j13"))
+        # names[0] needs passes 2 and 3; the runner stopped before them.
+        d = self.write("inc", rows, decs)
+        rc, out = run_cli(["compare", "--rows", d, "--pair", "E,P0", "--look", "L1",
+                           "--label", "inc", "--sealed-dir", os.path.join(self.tmp, "s"),
+                           "--expect-problems", "12", "--resamples", "200"] + FAST)
+        self.assertEqual(rc, stats.EXIT_INVALID)
+        self.assertIn("INVALID wall=180 11 problems complete in every arm, 1 not", out)
+        self.assertNotIn("COMPARE", out)
+        # A look reads all problems together: one shard of them is refused.
+        d2 = self.write("shard", [r for r in rows if r[0] != names[5]],
+                        [x for x in decs if x[0] != names[5]])
+        rc, out = run_cli(["compare", "--rows", d2, "--pair", "E,P0", "--look", "L1",
+                           "--label", "inc", "--sealed-dir", os.path.join(self.tmp, "s"),
+                           "--expect-problems", "12", "--resamples", "200"] + FAST)
+        self.assertEqual(rc, stats.EXIT_INVALID)
+        self.assertIn("INVALID rows name 11 J13 problems", out)
+
+    def test_one_problem_set_and_one_nl_per_wall(self):
+        names = j13_like({"GRP": 10})
+        rows = []
+        for i, p in enumerate(names):
+            rows.append(row(p, "E", 180, 1, i < 6))
+            rows.append(row(p, "P1", 180, 1, i < 5))
+            rows.append(row(p, "PD", 180, 1, i < 5))
+            if i != 9:
+                rows.append(row(p, "E8", 180, 1, i < 4))
+        d = self.write("nl", rows)
+        rc, out = run_cli(["compare", "--rows", d, "--pair", "E,NL", "--pair", "E8,NL",
+                           "--pair", "E,PD", "--nl", "P1,PD", "--resamples", "200"])
+        self.assertEqual(out.count("NL wall=180 = "), 1)
+        self.assertIn("FALLBACK wall=180 problems_on_pass_1=0 dropped=1", out)
+        for pair in ("E-NL", "E8-NL", "E-PD"):
+            self.assertRegex(out, r"COMPARE wall=180 %s(?: \([^)]*\))? n=9 " % pair)
+
+    def test_verified_bad_stops_the_line(self):
+        names = j13_like({"GRP": 6})
+        rows = []
+        for i, p in enumerate(names):
+            rows.append(row(p, "E", 180, 1, i < 3, split="j13"))
+            rows.append(row(p, "P0", 180, 1, i < 2, split="j13"))
+        rows[-1] = row(names[-1], "P0", 180, 1, 0, split="j13", status="Unsatisfiable",
+                       verdict="VerifiedBad")
+        d = self.write("vbad", rows)
+        rc, out = run_cli(["compare", "--rows", d, "--pair", "E,P0", "--look", "L1",
+                           "--label", "vb", "--sealed-dir", os.path.join(self.tmp, "s"),
+                           "--expect-problems", "6", "--resamples", "200"] + FAST)
+        self.assertEqual(rc, stats.EXIT_VBAD)
+        self.assertIn("STOP-THE-LINE", out)
+        self.assertNotIn("COMPARE", out)
+        dev_rows = [r[:1] + ["heldout"] + r[2:] for r in rows]
+        d2 = self.write("vbad_dev", dev_rows)
+        rc, out = run_cli(["compare", "--rows", d2, "--pair", "E,P0", "--resamples", "200"])
+        self.assertEqual(rc, stats.EXIT_VBAD)
+        self.assertIn("VOID COMPARE wall=180 E-P0", out)
+
+    def test_mixed_rss_caps_invalid(self):
+        rows = []
+        for i, p in enumerate(j13_like({"GRP": 6})):
+            rows.append(row(p, "E", 180, 1, 1, rss="default"))
+            rows.append(row(p, "P0", 180, 1, 1, rss="3500" if i == 0 else "default"))
+        d = self.write("rss", rows)
+        rc, out = run_cli(["compare", "--rows", d, "--pair", "E,P0", "--resamples", "200"])
+        self.assertEqual(rc, stats.EXIT_INVALID)
+        self.assertIn("INVALID wall=180 rows run under different rss caps (3500,default)", out)
+
+    def test_seed_and_resamples_registered_at_a_look(self):
+        names = j13_like({"GRP": 4})
+        rows = [row(p, a, 180, 1, 1, split="j13") for p in names for a in ("E", "P0")]
+        d = self.write("seed", rows)
+        base = ["compare", "--rows", d, "--pair", "E,P0", "--look", "L1", "--label", "sd",
+                "--sealed-dir", os.path.join(self.tmp, "s"), "--expect-problems", "4"]
+        with self.assertRaises(SystemExit):
+            run_cli(base + ["--resamples", "200"])
+        plan = os.path.join(self.tmp, "plan.md")
+        with open(plan, "w") as fp:
+            fp.write("### 5.4 Registry and amendments\n\nAmendments:\n- A7: 200 resamples\n")
+        with self.assertRaises(SystemExit):
+            run_cli(base + ["--resamples", "200", "--plan", plan, "--amendment", "A8"])
+        rc, out = run_cli(base + ["--resamples", "200", "--plan", plan, "--amendment", "A7"])
+        self.assertEqual(rc, 0)
+        self.assertIn("seed=20261001 resamples=200 amendment=A7", out)
+
+    def test_sign_test_large_n(self):
+        p1, p2 = stats.sign_test(1100, 1000)
+        self.assertTrue(0.0 < p1 < 0.05 and 0.0 < p2 < 0.1, (p1, p2))
+        self.assertAlmostEqual(stats.sign_test(1050, 1050)[1], 1.0)
+
+    def test_wdep_capped_rows(self):
+        probs = ["GRP%03d-1" % i for i in range(4)]
+        offp = os.path.join(self.tmp, "off.tsv")
+        with open(offp, "w") as fp:
+            fp.write("problem\tFindProof---0.1\n" + "".join("%s\t+2.00\n" % p for p in probs))
+        rows = [row(p, "SUB", 53, 1, 0, split="j13", status="Unsatisfiable", verdict="-",
+                    rss="3500") for p in probs]
+        d = self.write("capped", rows)
+        args = ["wdep", "--rows", d, "--official", offp, "--look", "L0", "--sealed-dir",
+                os.path.join(self.tmp, "s")]
+        rc, out = run_cli(args)
+        self.assertEqual(rc, stats.EXIT_INVALID)
+        rc, out = run_cli(args + ["--allow-capped"])
+        self.assertEqual(rc, 1)
+        self.assertIn("G0.3 UNCALIBRATED", out)
+
+    def test_reads_sealed_run_dirs(self):
+        import tarfile
+        rows = [row("GRP001-1", "E", 180, 1, 1, split="j13")]
+        d = self.write("plain", rows)
+        sealed_dir = os.path.join(self.tmp, "sealedrun")
+        os.makedirs(sealed_dir)
+        with tarfile.open(os.path.join(sealed_dir, "sealed.tgz"), "w:gz") as tf:
+            tf.add(os.path.join(d, "rows.tsv"), arcname="rows.tsv")
+        self.assertEqual(len(stats.load_runs([sealed_dir])[0]), 1)
+        outer = os.path.join(self.tmp, "harvest.tgz")
+        with tarfile.open(outer, "w:gz") as tf:
+            tf.add(sealed_dir, arcname="out_L0_1")
+        self.assertEqual(len(stats.load_runs([outer])[0]), 1)
+
+
+class RealPlan(unittest.TestCase):
+    def test_l2_is_locked_until_the_token_is_registered(self):
+        rows, _sec = stats.plan_registry(stats.PLAN)
+        self.assertIn("L2 unseal token", rows)
+        args = stats.build_parser().parse_args(["compare", "--rows", "x", "--pair", "A,B",
+                                                "--look", "L2", "--l2-token", "0" * 16])
+        with self.assertRaises(SystemExit):
+            stats.check_look(args, True, "compare")
+
+
+class RunnerState(unittest.TestCase):
+    """The runner's resume and seal bookkeeping, on synthetic files only."""
+
+    ARMS = ["E", "P0"]
+
+    def rowd(self, p, arm, wall, k, host):
+        return dict(zip(run_arms.ROW_COLUMNS, row(p, arm, wall, k, 1, host=host)))
+
+    def test_problem_complete_and_supersede(self):
+        rows = [self.rowd("A001-1", a, 180, 1, "old") for a in self.ARMS]
+        rows += [self.rowd("B001-1", "E", 180, 1, "old")]           # P0 never ran
+        rows += [self.rowd("C001-1", a, 180, 1, "old") for a in self.ARMS]
+        rows += [self.rowd("C001-1", "E", 180, 2, "old")]           # repeats cut short
+        rows += [self.rowd("D001-1", "E", 180, 1, "new")]           # this pod's own
+        decisions = {("A001-1", "180"): (0, "-"), ("C001-1", "180"): (1, "disagree")}
+        self.assertTrue(run_arms.problem_complete(
+            [r for r in rows if r["problem"] == "A001-1"], decisions, "A001-1", self.ARMS,
+            ["180"], 1, True))
+        sup = run_arms.problems_to_supersede(rows, decisions, self.ARMS, ["180"], 1, True, "new")
+        self.assertEqual(sup, ["B001-1", "C001-1"])
+        # Without the repeat rule A's and C's pass 1 are complete.
+        sup = run_arms.problems_to_supersede(rows, {}, self.ARMS, ["180"], 1, False, "new")
+        self.assertEqual(sup, ["B001-1"])
+
+    def fake_runner(self, out):
+        r = run_arms.Runner.__new__(run_arms.Runner)
+        r.out = out
+        r.scratch = os.path.join(out, "scratch")
+        r.rows_path = os.path.join(out, "rows.tsv")
+        r.dec_path = os.path.join(out, "decisions.tsv")
+        r.lanes_path = os.path.join(out, "lanes.jsonl")
+        return r
+
+    def test_supersede_and_seal_files(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            out = os.path.join(tmp, "out")
+            r = self.fake_runner(out)
+            rows = [self.rowd("A001-1", "E", 180, 1, "old"), self.rowd("B001-1", "E", 180, 1, "x")]
+            write_rows(out, [[d[c] for c in run_arms.ROW_COLUMNS] for d in rows],
+                       [("A001-1", 180, 0, "-"), ("B001-1", 180, 0, "-")])
+            with open(r.lanes_path, "w") as fp:
+                fp.write('{"problem": "A001-1"}\n{"problem": "B001-1"}\n')
+            os.makedirs(os.path.join(out, "runs", "A001-1"))
+            os.makedirs(r.scratch)
+            with open(os.path.join(r.scratch, "stdout.p"), "w") as fp:
+                fp.write("% SZS status Unsatisfiable\n")
+            _h, decs = run_arms.read_tsv(r.dec_path)
+            r.supersede({"A001-1"}, rows, decs)
+            _h, left = run_arms.read_tsv(r.rows_path)
+            self.assertEqual([x["problem"] for x in left], ["B001-1"])
+            _h, moved = run_arms.read_tsv(os.path.join(out, "superseded.tsv"))
+            self.assertEqual([x["problem"] for x in moved], ["A001-1"])
+            _h, decs = run_arms.read_tsv(r.dec_path)
+            self.assertEqual([x["problem"] for x in decs], ["B001-1"])
+            with open(r.lanes_path) as fp:
+                self.assertNotIn("A001-1", fp.read())
+            self.assertFalse(os.path.exists(os.path.join(out, "runs", "A001-1")))
+            self.assertEqual(len(os.listdir(os.path.join(out, "superseded"))), 1)
+            # Seal: everything per-problem goes into sealed.tgz, the last
+            # job's scratch output is deleted; unpack restores it.
+            with open(os.path.join(out, "run.done"), "w") as fp:
+                fp.write("status=complete\n")
+            r.pack_sealed()
+            self.assertEqual(sorted(os.listdir(out)), ["run.done", "sealed.tgz"])
+            mode = os.stat(os.path.join(out, "sealed.tgz")).st_mode
+            self.assertFalse(mode & (stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH))
+            self.assertEqual(len(stats.load_runs([out])[0]), 1)
+            r.unpack_sealed()
+            self.assertIn("rows.tsv", os.listdir(out))
+            self.assertNotIn("sealed.tgz", os.listdir(out))
+        finally:
+            chmod_tree(tmp)
+            shutil.rmtree(tmp)
+
+    def test_calibration_verdict(self):
+        def res(name, ts, ref, ok=True):
+            return [{"name": name, "path": name, "ok": ok, "wall_s": t, "ref_s": ref} for t in ts]
+        good = res("A", [10.0, 10.4], 10.0) + res("B", [21.0, 19.0], 20.0)
+        self.assertTrue(run_arms.calibration_verdict(good)["ok"])
+        # The geometric mean is fine, one problem is 40% off: fail.
+        skew = (res("A", [6.0, 6.0], 10.0) + res("B", [26.0, 26.0], 20.0)
+                + res("C", [11.0, 11.0], 10.0))
+        v = run_arms.calibration_verdict(skew)
+        self.assertTrue(abs(v["geomean"] - 1.0) <= run_arms.SPEED_TOLERANCE)
+        self.assertFalse(v["ok"])
+        self.assertEqual(v["worst_name"], "A")
+        bad = res("A", [10.0, 120.0], 10.0, ok=False)
+        self.assertEqual(run_arms.calibration_verdict(good + bad)["unsolved"], 1)
+        self.assertFalse(run_arms.calibration_verdict(good + bad)["ok"])
+
+    def test_problem_names_and_protocol(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "p.tsv")
+            for bad in ("../etc\tx.p\tj13\n", "a/b\tx.p\tj13\n", "..\tx.p\tj13\n"):
+                with open(p, "w") as fp:
+                    fp.write(bad)
+                with self.assertRaises(SystemExit):
+                    run_arms.load_problems(p)
+            with open(p, "w") as fp:
+                fp.write("NUN135-1.006\tx.p\tj13\nSYN986-10.005\ty.p\tj13\n")
+            self.assertEqual(len(run_arms.load_problems(p)), 2)
+        finally:
+            shutil.rmtree(tmp)
+        a = run_arms.protocol_fingerprint(60, "20261001")
+        rows, _sec = stats.plan_registry(stats.PLAN)
+        reg = [v for k, v in rows.items() if k.startswith("protocol fingerprint")]
+        self.assertEqual(reg, [a[0]])  # the registered value is this code's
+        self.assertEqual(a, run_arms.protocol_fingerprint(60, "20261001"))
+        self.assertNotEqual(a[0], run_arms.protocol_fingerprint(28, "20261001")[0])
+        self.assertNotEqual(a[0], run_arms.protocol_fingerprint(60, "1")[0])
 
 
 if __name__ == "__main__":
