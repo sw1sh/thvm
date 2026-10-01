@@ -659,6 +659,10 @@ What is running now:
 | WDEP and delta per wall      | at L0           | |
 | section 5.3 outputs          | at harvest      | |
 
+Decisions recorded (2026-10-01, by the user):
+- D1: yes. Training may include synthetic -10 encodings of non-UEQ TPTP problems from our FOF front end; J13 names and stems are excluded in every division.
+- D3: no. Every calibration stays on pods; WDEP is estimated from the submission build's official J13 result as in section 1.3.
+
 Amendments: none yet.
 
 ## 6. Risks and what we will not do
