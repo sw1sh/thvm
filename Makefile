@@ -394,6 +394,7 @@ TESTS := \
   $(BIN)/test_ft \
   $(BIN)/test_ft_deep \
   $(BIN)/test_atp_deep \
+  $(BIN)/test_atp_cli_deep \
   $(BIN)/test_ft_order \
   $(BIN)/test_atp_ft_rules \
   $(BIN)/test_atp_ft \
@@ -1080,6 +1081,15 @@ $(BIN)/test_atp_session_reuse: tests/test_atp_session_reuse.c \
 # Deep-term walks pinned to their recursive originals, in FindProof's
 # configuration (AC and MNF compiled in).
 $(BIN)/test_atp_deep: tests/test_atp_deep.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC -DATP_MNF \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# FindProof's proof-output walks (tools/atp_cli/szs.c, tools/proof_check.c)
+# on deep terms, over FindProof's translation unit without its main.
+$(BIN)/test_atp_cli_deep: tests/test_atp_cli_deep.c tools/thvm_atp_cli.c \
+    tools/proof_check.c $(wildcard tools/atp_cli/*.c) \
+    tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)

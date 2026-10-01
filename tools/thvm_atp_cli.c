@@ -77,4 +77,7 @@
 #include "atp_cli/provenance.c"
 #include "atp_cli/fof_split.c"
 #include "atp_cli/szs.c"
+// tests/test_atp_cli_deep.c includes this unit without the entry point.
+#ifndef THVM_ATP_CLI_NO_MAIN
 #include "atp_cli/main.c"
+#endif

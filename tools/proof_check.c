@@ -1253,32 +1253,92 @@ static int pc_leaf_syn_eq(Term a, Term b) {
 }
 
 // One-step rewrites of `t` by l->r at every position (both the term
-// itself and its subterms); calls `emit` per reduct.  Bounded fanout.
+// itself and its subterms), into `acc`.  Bounded fanout.
 #define PC_RW_MAX 512
 typedef struct { Term out[PC_RW_MAX]; int n; } PcRwSet;
 static void pc_rw_add(PcRwSet *s, Term t) {
   if (s->n < PC_RW_MAX) s->out[s->n++] = t;
 }
+
+// A position's reducts: its own, then each argument's (wrapped back into
+// the position's term), each set capped at PC_RW_MAX.  One frame per open
+// position: a proof term can be deeper than the C stack holds a 4 KB
+// result set per level.  The sets share one stack, each directly above
+// its parent's, so an argument's reducts are rewrapped in place.
 static void pc_rewrite_all(Term t, Term l, Term r, PcRwSet *acc) {
-  RewriteSubst sub = {{0}};
-  if (thvm_match(l, t, &sub)) pc_rw_add(acc, thvm_subst_apply(r, &sub));
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    if (n > 8u) return;
-    Term kids[8];
-    for (u32 i = 0; i < n; i++) kids[i] = term_ctr_at(t, i);
-    for (u32 i = 0; i < n; i++) {
-      PcRwSet inner;
-      inner.n = 0;
-      pc_rewrite_all(kids[i], l, r, &inner);
-      for (int k = 0; k < inner.n; k++) {
-        Term save = kids[i];
-        kids[i] = inner.out[k];
-        pc_rw_add(acc, term_new_ctr(term_ext(t), kids, n));
-        kids[i] = save;
+  typedef struct { Term t; u32 n; u32 i; u32 base; u32 cnt; u32 room; } PcRwFrame;
+  PcRwFrame  fr_inl[ATP_WALK_INL];
+  PcRwFrame *fr  = fr_inl;
+  u32        nfr = 0u;
+  u32        cfr = ATP_WALK_INL;
+  Term       rs_inl[ATP_WALK_INL];
+  Term      *rs  = rs_inl;
+  u32        crs = ATP_WALK_INL;
+  fr[0].base = 0u;
+  fr[0].room = (acc->n < PC_RW_MAX) ? (u32)(PC_RW_MAX - acc->n) : 0u;
+  for (;;) {
+    // Enter `t` at fr[nfr]: its own reduct, then its arguments.
+    PcRwFrame *f = &fr[nfr++];
+    f->t   = t;
+    f->n   = 0u;
+    f->i   = 0u;
+    f->cnt = 0u;
+    RewriteSubst sub = {{0}};
+    if (thvm_match(l, t, &sub)) {
+      Term x = thvm_subst_apply(r, &sub);
+      if (f->cnt < f->room) {
+        while (f->base + f->cnt >= crs) {
+          rs = (Term *)term_stack_grow(rs, rs_inl, &crs, sizeof *rs);
+        }
+        rs[f->base + f->cnt++] = x;
       }
     }
+    if (term_tag(t) == TAG_CTR && term_ctr_n(t) <= 8u) {
+      f->n = term_ctr_n(t);
+    }
+    // Hand finished positions' reducts to their parents; stop at the
+    // next argument to enter.
+    u8 next = 0u;
+    for (;;) {
+      PcRwFrame *c = &fr[nfr - 1u];
+      if (c->i < c->n) {
+        if (nfr == cfr) {
+          fr = (PcRwFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          c  = &fr[nfr - 1u];
+        }
+        t = term_ctr_at(c->t, c->i);
+        fr[nfr].base = c->base + c->cnt;
+        fr[nfr].room = PC_RW_MAX;
+        next = 1u;
+        break;
+      }
+      if (nfr == 1u) {
+        break;
+      }
+      PcRwFrame *p = &fr[nfr - 2u];
+      for (u32 k = 0; k < c->cnt; k++) {
+        Term kids[8];
+        for (u32 j = 0; j < p->n; j++) {
+          kids[j] = term_ctr_at(p->t, j);
+        }
+        kids[p->i] = rs[c->base + k];
+        Term x = term_new_ctr(term_ext(p->t), kids, p->n);
+        if (p->cnt < p->room) {
+          rs[p->base + p->cnt++] = x;
+        }
+      }
+      nfr--;
+      p->i++;
+    }
+    if (!next) {
+      break;
+    }
   }
+  for (u32 k = 0; k < fr[0].cnt; k++) {
+    acc->out[acc->n++] = rs[k];
+  }
+  term_stack_release(rs, rs_inl);
+  term_stack_release(fr, fr_inl);
 }
 
 // Modulo-renaming pair equality: (a1,b1) == (a2,b2) up to one variable
