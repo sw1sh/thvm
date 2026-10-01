@@ -143,7 +143,9 @@ static const SchedSlice SCHEDULE[] = {
   {"fof-wall",  "--fof-slice=2 --fof-sat-wall=95 --fol-lrs=1", 0.0},
   {"fof-selL",  "--fof-slice=2 --fol-select=3 --fol-sp=1 --fof-sat-wall=95", 0.0},
   {"fof-spb",   "--fof-slice=2 --fol-spb=1 --fol-nwc=5", 0.0},
-  // FULL AC-completion stays OUT of the competition schedule -- for
+  // FULL AC-completion (AC operators detected from their commutativity
+  // and associativity axioms, AC-matching and Stickel AC-unification,
+  // src/atp/ac.c) stays OUT of the competition schedule -- for
   // VALUE now, not soundness.  Both AC-match soundness bugs are fixed
   // (bare-variable multiplicity drop, then the deferred-count re-scan
   // double-charge; the CASC-J13-reported false refutations LAT016-1 /
@@ -442,18 +444,6 @@ static const SchedSlice SCHEDULE[] = {
   // (not replacing it): on problems where the deep definitions win by
   // chance the old lane still carries them.
   {"tgt-fold", "--tgt=1 --tgt-fold=1 --preset=none --horn=0 --fof-sat=0", 0.0},
-  // FULL AC-COMPLETION: auto-detect AC operators (add/meet/join/mult from
-  // their commutativity+associativity axioms) and run AC-matching +
-  // Stickel AC-unification.  The WM preset only uses AC to FILTER CPs
-  // (perm-subsume); leaving the engine mask set activates the full
-  // AC-saturation path, which on the ring/lattice families finds the
-  // SHORT proof the plain KB completion drowns in commutativity-CP
-  // explosion trying to reach (RNG021-6/021-7/025-5/027-7 prove in 1-3s
-  // where every non-AC slice Times Out -- competitors solve these in
-  // 0.3s BECAUSE they reason modulo AC).  The mechanism existed
-  // (src/atp/ac.c, built into the CLI) but was inert: nothing set the
-  // engine ac_mask.  No-AC problems detect an empty mask and fall
-  // straight through to plain completion, so this is a near-free lane.
   // RAW-PRESENTATION recovery lanes: canonical input (default ON) is
   // score-neutral in aggregate but systematically flips individual
   // problems BOTH ways (pod A/B, identical hardware: ON-only gains
@@ -470,7 +460,7 @@ static const SchedSlice SCHEDULE[] = {
   {"lazy-gj", "--preset=waldmeister-lazy --ground-join --connectedness --fof-sat=0", 0.0},
   {"bare-gj", "--preset=none --ground-join --connectedness --fof-sat=0", 0.0},
 };
-static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
+enum { N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0])) };
 
 // Per-slice RSS cap (MB) when running slices concurrently, so K parallel
 // engines stay well under the machine ceiling.  Each child inherits it as
@@ -486,18 +476,32 @@ static const int N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0]));
 // external SIGTERM/SIGINT to THIS process (e.g. a wrapping `timeout`) would
 // otherwise kill the parent while its slice subtrees (child -> shell ->
 // FindProof engine) keep running orphaned and accumulate across problems.
-// The handler killpg's every launched child group before exiting.  pids are
-// stored by slice index; a reaped slot is set back to -1.
-#define SCHED_PID_MAX 32
-static pid_t g_sched_pids[SCHED_PID_MAX];
+// The handler removes the slices' output files and killpg's every launched
+// child group before exiting.  pids and output paths are stored by slice
+// index, one slot per lane; a reaped pid slot is set back to -1.  A slice's
+// own copies name only the slice itself (see run_schedule).
+static volatile sig_atomic_t g_sched_pids[N_SCHED];
+_Static_assert(sizeof g_sched_pids / sizeof g_sched_pids[0] >= (size_t)N_SCHED,
+               "the teardown registry needs a slot for every schedule lane");
+_Static_assert(sizeof(sig_atomic_t) >= sizeof(pid_t) && (sig_atomic_t)-1 < 0,
+               "a teardown registry slot holds any pid and the empty mark -1");
+static char g_sched_outs[N_SCHED][64];
 static volatile sig_atomic_t g_sched_active = 0;
 static void sched_sig_teardown(int sig) {
   if (g_sched_active) {
-    for (int i = 0; i < SCHED_PID_MAX; i++)
+    // Before the kills: in a slice the killpg of its own group ends the
+    // slice itself.
+    for (int i = 0; i < N_SCHED; i++) {
+      if (g_sched_outs[i][0] != '\0') {
+        unlink(g_sched_outs[i]);
+      }
+    }
+    for (int i = 0; i < N_SCHED; i++) {
       if (g_sched_pids[i] > 0) {
         killpg(g_sched_pids[i], SIGKILL);
         kill(g_sched_pids[i], SIGKILL);
       }
+    }
   }
   _exit(128 + sig);
 }
@@ -519,19 +523,24 @@ static void cli_alarm_fire(int sig) {
   (void)sig;
   if (g_alarm_fd >= 0 && g_alarm_szs[0] != '\0') {
     size_t n = 0;
-    while (g_alarm_szs[n] != '\0') n++;
+    while (g_alarm_szs[n] != '\0') {
+      n++;
+    }
     ssize_t w = write(g_alarm_fd, g_alarm_szs, n);
     (void)w;
   }
-  if (g_sched_active) sched_sig_teardown(SIGALRM);
+  if (g_sched_active) {
+    sched_sig_teardown(SIGALRM);
+  }
   _exit(g_alarm_exit_code);
 }
 static void cli_arm_wall_alarm(double wall, int grace, int fd,
                                const char *szs_line) {
-  if (szs_line != NULL)
+  if (szs_line != NULL) {
     snprintf(g_alarm_szs, sizeof g_alarm_szs, "%s", szs_line);
-  else
+  } else {
     g_alarm_szs[0] = '\0';
+  }
   g_alarm_fd = fd;
   struct sigaction sa;
   sa.sa_handler = cli_alarm_fire;
@@ -599,7 +608,10 @@ static int run_schedule(const char *self, const char *file, double wall,
                         int szs, int want_proof, int only) {
   // Install the teardown handler + register the (initially empty) pid slots
   // so an external timeout can't orphan the slice subtrees.
-  for (int i = 0; i < SCHED_PID_MAX; i++) g_sched_pids[i] = -1;
+  for (int i = 0; i < N_SCHED; i++) {
+    g_sched_pids[i] = -1;
+    g_sched_outs[i][0] = '\0';
+  }
   struct sigaction sa, old_term, old_int;
   sa.sa_handler = sched_sig_teardown;
   sigemptyset(&sa.sa_mask);
@@ -607,13 +619,24 @@ static int run_schedule(const char *self, const char *file, double wall,
   sigaction(SIGTERM, &sa, &old_term);
   sigaction(SIGINT,  &sa, &old_int);
   g_sched_active = 1;
+  // The signals whose handlers tear the schedule down.  Each launch holds
+  // them from recording the slice's output path until the new slice is
+  // registered: delivered after fork(), the handler would kill every slice
+  // but the one just forked.
+  sigset_t teardown_sigs, prev_mask;
+  sigemptyset(&teardown_sigs);
+  sigaddset(&teardown_sigs, SIGTERM);
+  sigaddset(&teardown_sigs, SIGINT);
+  sigaddset(&teardown_sigs, SIGALRM);
   // Belt-and-braces: the wait loop below stops the slices at the wall;
   // should the parent itself stall, the alarm still emits one status
   // line a second past the wall and reaps the subtrees.
   {
     char line[1100];
     line[0] = '\0';
-    if (szs) snprintf(line, sizeof line, "%% SZS status Timeout for %s\n", file);
+    if (szs) {
+      snprintf(line, sizeof line, "%% SZS status Timeout for %s\n", file);
+    }
     cli_arm_wall_alarm(wall, 1, 1, line[0] ? line : NULL);
   }
 #ifdef PR_SET_CHILD_SUBREAPER
@@ -632,9 +655,11 @@ static int run_schedule(const char *self, const char *file, double wall,
     setenv("THVM_ATP_RSS_ABORT_MB", capbuf, 1);
   }
   pid_t pids[N_SCHED];
-  char  outs[N_SCHED][64];
   int   done[N_SCHED];
-  for (int i = 0; i < N_SCHED; i++) { pids[i] = -1; done[i] = 0; outs[i][0] = 0; }
+  for (int i = 0; i < N_SCHED; i++) {
+    pids[i] = -1;
+    done[i] = 0;
+  }
   int first = (only >= 0) ? only : 0;
   int end   = (only >= 0) ? only + 1 : N_SCHED;
   int launched = 0, next = first, winner = -1, n_inerr = 0;
@@ -648,7 +673,9 @@ static int run_schedule(const char *self, const char *file, double wall,
     const char *mp = getenv("THVM_ATP_SCHED_MAX_PAR");
     if (mp != NULL && mp[0] != '\0') {
       int v = atoi(mp);
-      if (v >= 1 && v <= N_SCHED) max_par = v;
+      if (v >= 1 && v <= N_SCHED) {
+        max_par = v;
+      }
     }
   }
   // Global wall deadline: the schedule shares ONE wall budget across all
@@ -673,14 +700,18 @@ static int run_schedule(const char *self, const char *file, double wall,
   while (winner < 0 && (next < end || launched > 0)) {
     while (winner < 0 && launched < max_par && next < end) {
       double rem = budget - (horn_now() - sched_t0);
-      if (rem < 2.0) break;   // no wall budget left: stop launching slices
+      if (rem < 2.0) {
+        break;   // no wall budget left: stop launching slices
+      }
       int i = next++;
       double slice_wall = rem;
-      snprintf(outs[i], sizeof outs[i], "/tmp/thvm_sched_%d_%d.out",
-               (int)getpid(), i);
-      if (g_cli_verbose)
+      if (g_cli_verbose) {
         fprintf(stderr, "%% FindProof schedule slice %s (%.0fs, remaining wall)\n",
                 SCHEDULE[i].name, slice_wall);
+      }
+      sigprocmask(SIG_BLOCK, &teardown_sigs, &prev_mask);
+      snprintf(g_sched_outs[i], sizeof g_sched_outs[i],
+               "/tmp/thvm_sched_%d_%d.out", (int)getpid(), i);
       pid_t pid = fork();
       if (pid == 0) {
         // Child: own process group so the parent can kill the WHOLE
@@ -689,9 +720,27 @@ static int run_schedule(const char *self, const char *file, double wall,
         // blocked in system() would orphan the grandchild engine, which
         // keeps running to its wall and could overlap the next problem.
         setpgid(0, 0);
+        // The slice keeps the parent's teardown handlers, so its copies of
+        // the registry and of the output paths name the slice alone: a
+        // SIGTERM that reaches the slice (a pkill matching the command line
+        // it shares with the parent) takes its shell, its engine and its
+        // output file with it, and never a sibling.
+        for (int k = 0; k < N_SCHED; k++) {
+          g_sched_pids[k] = -1;
+          if (k != i) {
+            g_sched_outs[k][0] = '\0';
+          }
+        }
+        g_sched_pids[i] = getpid();
+        // The slice's shell and engine inherit the mask: with SIGALRM
+        // held, the engine's own wall alarm would never fire.
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         // Redirect stdout to the slice temp file, run the slice.
-        int fd = open(outs[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (fd >= 0) { dup2(fd, 1); close(fd); }
+        int fd = open(g_sched_outs[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+          dup2(fd, 1);
+          close(fd);
+        }
         // Silence the slice's diagnostics (bench PRSYM/stats/progress all
         // go to stderr): the grandchild engine inherits this fd 2, so the
         // whole portfolio stays quiet.  The winner's proof is on stdout
@@ -706,10 +755,16 @@ static int run_schedule(const char *self, const char *file, double wall,
           char ep[1024];
           snprintf(ep, sizeof ep, "%s/%s.err", ed, SCHEDULE[i].name);
           int ef = open(ep, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-          if (ef >= 0) { dup2(ef, 2); close(ef); }
+          if (ef >= 0) {
+            dup2(ef, 2);
+            close(ef);
+          }
         } else if (!g_cli_verbose && only < 0) {
           int dn = open("/dev/null", O_WRONLY);
-          if (dn >= 0) { dup2(dn, 2); close(dn); }
+          if (dn >= 0) {
+            dup2(dn, 2);
+            close(dn);
+          }
         }
         // FINDPROOF_SLICE carries the slice name: every consumer tests
         // only its presence, and the name labels the process for
@@ -742,12 +797,17 @@ static int run_schedule(const char *self, const char *file, double wall,
       }
       // Set the child's pgid parent-side too (race-free: whichever of
       // parent/child wins, the group id equals the child pid).
-      if (pid > 0) setpgid(pid, pid);
+      if (pid > 0) {
+        setpgid(pid, pid);
+      }
       pids[i] = pid;
-      if (i < SCHED_PID_MAX) g_sched_pids[i] = pid;   // for the signal handler
+      g_sched_pids[i] = pid;   // for the signal handler
+      sigprocmask(SIG_SETMASK, &prev_mask, NULL);
       launched++;
     }
-    if (launched == 0) break;
+    if (launched == 0) {
+      break;
+    }
     int status = 0;
     pid_t w = waitpid(-1, &status, WNOHANG);
     if (w == 0) {
@@ -759,13 +819,20 @@ static int run_schedule(const char *self, const char *file, double wall,
       nanosleep(&nap, NULL);
       continue;
     }
-    if (w < 0) break;
+    if (w < 0) {
+      break;
+    }
     for (int i = 0; i < N_SCHED; i++) {
       if (pids[i] == w) {
-        done[i] = 1; launched--;
-        if (i < SCHED_PID_MAX) g_sched_pids[i] = -1;   // reaped: clear
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) winner = i;
-        if (WIFEXITED(status) && WEXITSTATUS(status) == 2) n_inerr++;
+        done[i] = 1;
+        launched--;
+        g_sched_pids[i] = -1;   // reaped: clear
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+          winner = i;
+        }
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 2) {
+          n_inerr++;
+        }
         break;
       }
     }
@@ -784,11 +851,11 @@ static int run_schedule(const char *self, const char *file, double wall,
       }
     }
     for (int i = 0; i < N_SCHED && winner < 0; i++) {
-      if (pids[i] <= 0 || done[i] || outs[i][0] == '\0') {
+      if (pids[i] <= 0 || done[i] || g_sched_outs[i][0] == '\0') {
         continue;
       }
       size_t len = 0;
-      char *txt = tp_read_file(outs[i], &len);
+      char *txt = tp_read_file(g_sched_outs[i], &len);
       size_t keep = (txt != NULL) ? sched_salvage_len(txt, len) : 0;
       if (keep > 0) {
         winner = i;
@@ -804,11 +871,19 @@ static int run_schedule(const char *self, const char *file, double wall,
   // Kill + reap any still-running slices (the winner made them redundant).
   // killpg on the child's group takes down the shell + FindProof grandchild
   // too, so no engine is left orphaned to run to its wall.
-  for (int i = 0; i < N_SCHED; i++)
-    if (pids[i] > 0 && !done[i]) { killpg(pids[i], SIGKILL); kill(pids[i], SIGKILL); }
-  for (int i = 0; i < N_SCHED; i++)
-    if (pids[i] > 0 && !done[i]) { int st; waitpid(pids[i], &st, 0);
-      if (i < SCHED_PID_MAX) g_sched_pids[i] = -1; }
+  for (int i = 0; i < N_SCHED; i++) {
+    if (pids[i] > 0 && !done[i]) {
+      killpg(pids[i], SIGKILL);
+      kill(pids[i], SIGKILL);
+    }
+  }
+  for (int i = 0; i < N_SCHED; i++) {
+    if (pids[i] > 0 && !done[i]) {
+      int st;
+      waitpid(pids[i], &st, 0);
+      g_sched_pids[i] = -1;
+    }
+  }
   // The killed slice's orphans, reparented here (subreaper above).
   if (only >= 0) {
     double reap_until = horn_now() + 1.0;
@@ -843,10 +918,13 @@ static int run_schedule(const char *self, const char *file, double wall,
     if (salvage != NULL) {
       fwrite(salvage, 1, salvage_len, stdout);
     } else {
-      FILE *fp = fopen(outs[winner], "r");
+      FILE *fp = fopen(g_sched_outs[winner], "r");
       if (fp != NULL) {
-        char buf[4096]; size_t n;
-        while ((n = fread(buf, 1, sizeof buf, fp)) > 0) fwrite(buf, 1, n, stdout);
+        char   buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, fp)) > 0) {
+          fwrite(buf, 1, n, stdout);
+        }
         fclose(fp);
       }
     }
@@ -856,13 +934,19 @@ static int run_schedule(const char *self, const char *file, double wall,
     // per-slice transforms, so it hits all of them identically): this is
     // a broken input or environment, not a give-up.
     fprintf(stderr, "FindProof: all schedule slices reported an input error\n");
-    if (szs) printf("%% SZS status Error for %s\n", file);
+    if (szs) {
+      printf("%% SZS status Error for %s\n", file);
+    }
     rc = 2;
   } else if (szs) {
     printf("%% SZS status %s for %s\n", stopped ? "Timeout" : "GaveUp", file);
   }
   free(salvage);
-  for (int i = 0; i < N_SCHED; i++) if (outs[i][0]) unlink(outs[i]);
+  for (int i = 0; i < N_SCHED; i++) {
+    if (g_sched_outs[i][0] != '\0') {
+      unlink(g_sched_outs[i]);
+    }
+  }
   return rc;
 }
 

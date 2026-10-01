@@ -371,6 +371,10 @@ that they are byte-identical.  The job lists use the runner's shard format
 (name, path, split, lane), so `runner.sh` takes them as they are.
 `static_gates.py <tptp_root> <problem.p>...` prints the gate bits and live
 lanes of the CLI's exit-fast lanes, the static replica that T7 checks.
+`g04_dryrun.tsv` holds the 20 TRAIN problems of gate G0.4's dry run
+(`tests/atp_sched_teardown.sh FINDPROOF TPTP_ROOT dryrun
+tools/atp_enigma/g04_dryrun.tsv 180`); its header says how they were drawn,
+and the plan's amendment A1 records its sha256.
 
 ## Typical flow
 

@@ -1,0 +1,28 @@
+# ENIGMA gate G0.4 dry-run list (docs/plans/enigma_portfolio.md, amendment A1):
+#   tests/atp_sched_teardown.sh FINDPROOF TPTP_ROOT dryrun tools/atp_enigma/g04_dryrun.tsv 180
+# problems.tsv rows: name, path under the TPTP root (the pool tree or a full
+# TPTP v9.3.1 tree), split, source.  The first 20, in order of the sha256 of
+# the name, of the 81 TRAIN problems that no lane solves at 60 s and whose
+# every searching lane ended at the wall: the T3_unsolved_train rows of
+# matrix_tables.py with end_pattern wall (82, 2026-10-02), less RNG028-9,
+# whose stem is that of a J13 problem.
+BOO102-1	Problems/BOO/BOO102-1.p	train	tptp
+BOO108-1	Problems/BOO/BOO108-1.p	train	tptp
+SWX231-1	Problems/SWX/SWX231-1.p	train	tptp
+ROB024-1	Problems/ROB/ROB024-1.p	train	tptp
+BOO087-1	Problems/BOO/BOO087-1.p	train	tptp
+RNG033-9	Problems/RNG/RNG033-9.p	train	tptp
+BOO051-10	Problems/BOO/BOO051-10.p	train	tptp
+GRP771-1	Problems/GRP/GRP771-1.p	train	tptp
+SWX230-1	Problems/SWX/SWX230-1.p	train	tptp
+ROB033-1	Problems/ROB/ROB033-1.p	train	tptp
+SWX215-1	Problems/SWX/SWX215-1.p	train	tptp
+MVA012-1	Problems/MVA/MVA012-1.p	train	tptp
+MVA015-1	Problems/MVA/MVA015-1.p	train	tptp
+SWX198-1	Problems/SWX/SWX198-1.p	train	tptp
+RNG036-7	Problems/RNG/RNG036-7.p	train	tptp
+BOO081-1	Problems/BOO/BOO081-1.p	train	tptp
+BOO084-1	Problems/BOO/BOO084-1.p	train	tptp
+LCL315-10	Problems/LCL/LCL315-10.p	train	tptp
+SWX229-1	Problems/SWX/SWX229-1.p	train	tptp
+RNG033-8	Problems/RNG/RNG033-8.p	train	tptp

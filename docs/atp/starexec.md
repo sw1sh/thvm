@@ -256,12 +256,20 @@ bin/FindProof --schedule --szs --proof --wall=<limit> PROBLEM.p
 - `--schedule` runs a CONCURRENT portfolio: the configuration slices launch as
   child processes in a bounded pool (`THVM_ATP_SCHED_MAX_PAR` at once --
   default 5 for the bare binary, pinned to the core count by the run script --
-  each with the FULL wall limit and a per-child RSS cap), and the first proof
-  wins; the losers are killed and reaped. The slice set (29 slices, the
-  `SCHEDULE[]` table in `tools/thvm_atp_cli.c`) is documented in
+  each with the remaining wall less 3 s, stopped by the parent half a second
+  before the wall, and a per-child RSS cap), and the first proof wins; the
+  losers are killed and reaped. A SIGTERM or SIGINT to the parent, or its own
+  wall alarm, removes the slices' output files and kills the process group of
+  every launched slice before the parent exits, so a run stopped that way
+  leaves no engine behind (`tests/atp_sched_teardown.sh`); a SIGTERM to a
+  slice process kills that slice's group and removes its output file. A
+  SIGKILL of the parent (a kernel OOM kill included) runs no handler: its
+  slices run on to their own walls. The slice set (the `SCHEDULE[]`
+  table in `tools/atp_cli/main.c`; `FindProof --list-lanes` prints the lane
+  names) is documented in
   `docs/atp/casc_strategy.md` section 3: the Waldmeister preset, the
   existential-goal lanes (equals encoding + narrowing queue), the forward and
-  backward condensed-detachment lanes, the 7-slice FOF pack, AC completion,
+  backward condensed-detachment lanes, the FOF pack,
   definition unfolding (alone and composed with goal naming), goal flattening
   (dressed and bare), the Twee-scored completion lane, the MNF goal-directed
   front, encompassment demodulation, bare completion, the ifeq-guard and tgt
