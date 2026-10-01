@@ -143,7 +143,9 @@ static const SchedSlice SCHEDULE[] = {
   {"fof-wall",  "--fof-slice=2 --fof-sat-wall=95 --fol-lrs=1", 0.0},
   {"fof-selL",  "--fof-slice=2 --fol-select=3 --fol-sp=1 --fof-sat-wall=95", 0.0},
   {"fof-spb",   "--fof-slice=2 --fol-spb=1 --fol-nwc=5", 0.0},
-  // FULL AC-completion stays OUT of the competition schedule -- for
+  // FULL AC-completion (AC operators detected from their commutativity
+  // and associativity axioms, AC-matching and Stickel AC-unification,
+  // src/atp/ac.c) stays OUT of the competition schedule -- for
   // VALUE now, not soundness.  Both AC-match soundness bugs are fixed
   // (bare-variable multiplicity drop, then the deferred-count re-scan
   // double-charge; the CASC-J13-reported false refutations LAT016-1 /
@@ -442,18 +444,6 @@ static const SchedSlice SCHEDULE[] = {
   // (not replacing it): on problems where the deep definitions win by
   // chance the old lane still carries them.
   {"tgt-fold", "--tgt=1 --tgt-fold=1 --preset=none --horn=0 --fof-sat=0", 0.0},
-  // FULL AC-COMPLETION: auto-detect AC operators (add/meet/join/mult from
-  // their commutativity+associativity axioms) and run AC-matching +
-  // Stickel AC-unification.  The WM preset only uses AC to FILTER CPs
-  // (perm-subsume); leaving the engine mask set activates the full
-  // AC-saturation path, which on the ring/lattice families finds the
-  // SHORT proof the plain KB completion drowns in commutativity-CP
-  // explosion trying to reach (RNG021-6/021-7/025-5/027-7 prove in 1-3s
-  // where every non-AC slice Times Out -- competitors solve these in
-  // 0.3s BECAUSE they reason modulo AC).  The mechanism existed
-  // (src/atp/ac.c, built into the CLI) but was inert: nothing set the
-  // engine ac_mask.  No-AC problems detect an empty mask and fall
-  // straight through to plain completion, so this is a near-free lane.
   // RAW-PRESENTATION recovery lanes: canonical input (default ON) is
   // score-neutral in aggregate but systematically flips individual
   // problems BOTH ways (pod A/B, identical hardware: ON-only gains
