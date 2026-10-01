@@ -89,20 +89,54 @@ static inline u8 ft_ac_is_ac_top(const AtpAcInfo *ac, const AtpFtCell *t) {
 // emits `t` as a single leaf.
 static u8 ft_ac_flatten_under(const AtpFtCell *t, u32 top_label,
                               const AtpFtCell **out, u32 *n, u32 cap) {
-  if (t == NULL) return 0;
-  u8 is_ctr = (u8)((t->sym & WF_VAR_BIT) == 0u);
-  if (is_ctr && t->sym == top_label && t->arity > 0u) {
-    const AtpFtCell *c = t->next;
-    for (u16 i = 0; i < t->arity; i++) {
-      if (!ft_ac_flatten_under(c, top_label, out, n, cap)) return 0;
-      c = c->end->next;
+  // Pending cells in preorder on an explicit stack.  A NULL child ends
+  // the walk where the recursion met it, so the siblings after it are
+  // never stepped to.
+  const AtpFtCell  *st_inl[FT_WALK_INL];
+  const AtpFtCell **st  = st_inl;
+  u32               nst = 0u;
+  u32               cst = FT_WALK_INL;
+  u8                ok  = 1u;
+  for (;;) {
+    if (t == NULL) {
+      ok = 0u;
+      break;
     }
-    return 1;
+    u8 is_ctr = (u8)((t->sym & WF_VAR_BIT) == 0u);
+    if (is_ctr && t->sym == top_label && t->arity > 0u) {
+      u32 arity = (u32)t->arity;
+      while (nst + arity > cst) {
+        st = (const AtpFtCell **)term_stack_grow((void *)st, (const void *)st_inl,
+                                                 &cst, sizeof *st);
+      }
+      u32 lo = nst;
+      const AtpFtCell *c = t->next;
+      for (u32 i = 0; i < arity; i++) {
+        st[nst++] = c;
+        if (c == NULL) {
+          break;
+        }
+        c = c->end->next;
+      }
+      for (u32 a = lo, b = nst - 1u; a < b; a++, b--) {
+        const AtpFtCell *x = st[a];
+        st[a] = st[b];
+        st[b] = x;
+      }
+    } else if (*n >= cap) {
+      ok = 0u;
+      break;
+    } else {
+      out[*n] = t;
+      *n += 1u;
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
-  if (*n >= cap) return 0;
-  out[*n] = t;
-  *n += 1u;
-  return 1;
+  term_stack_release((void *)st, (const void *)st_inl);
+  return ok;
 }
 
 // Public entry: flatten under `t`'s top label, if AC.  Otherwise emit

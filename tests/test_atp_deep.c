@@ -4605,6 +4605,326 @@ static void deep_index_queue(u32 *seed) {
   thvm_atp_free(s);
 }
 
+// ---- ac.c / ft_ac_match.c / ft_ac_eq.c: AC flattening, canon, equality -----
+
+// src/atp/ac.c:94
+static u8 ref_atp_ac_flatten_under(Term t, u32 top_label,
+                                   Term *out, u32 *n, u32 cap) {
+  if (term_tag(t) == TAG_CTR && term_ext(t) == top_label) {
+    u32 n_kids = term_ctr_n(t);
+    for (u32 i = 0; i < n_kids; i++) {
+      if (!ref_atp_ac_flatten_under(term_ctr_at(t, i), top_label,
+                                    out, n, cap)) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+  if (*n >= cap) return 0;
+  out[*n] = t;
+  *n += 1u;
+  return 1;
+}
+
+// src/atp/ac.c:182
+static Term ref_atp_ac_canon_rec(Term t, const AtpAcInfo *ac) {
+  if (term_tag(t) != TAG_CTR) return t;
+  u32 label = term_ext(t);
+  if (atp_ac_is_ac_label(ac, label)) {
+    Term leaves[ATP_AC_FLATTEN_CAP];
+    u32  n = 0u;
+    if (!ref_atp_ac_flatten_under(t, label, leaves, &n, ATP_AC_FLATTEN_CAP)) {
+      return t;        // overflow: leave node as-is
+    }
+    for (u32 i = 0; i < n; i++) {
+      leaves[i] = ref_atp_ac_canon_rec(leaves[i], ac);
+    }
+    atp_ac_sort_leaves(leaves, n);
+    return atp_ac_build_chain(label, leaves, n);
+  }
+  u32 n_kids = term_ctr_n(t);
+  if (n_kids == 0u) return t;
+  if (n_kids > REWRITE_MAX_ARITY) return t;
+  Term kids[REWRITE_MAX_ARITY];
+  u8 changed = 0u;
+  for (u32 i = 0; i < n_kids; i++) {
+    Term orig = term_ctr_at(t, i);
+    kids[i] = ref_atp_ac_canon_rec(orig, ac);
+    if (kids[i] != orig) changed = 1u;
+  }
+  if (!changed) return t;
+  return term_new_ctr(label, kids, n_kids);
+}
+
+// src/atp/ft_ac_match.c:90
+static u8 ref_ft_ac_flatten_under(const AtpFtCell *t, u32 top_label,
+                                  const AtpFtCell **out, u32 *n, u32 cap) {
+  if (t == NULL) return 0;
+  u8 is_ctr = (u8)((t->sym & WF_VAR_BIT) == 0u);
+  if (is_ctr && t->sym == top_label && t->arity > 0u) {
+    const AtpFtCell *c = t->next;
+    for (u16 i = 0; i < t->arity; i++) {
+      if (!ref_ft_ac_flatten_under(c, top_label, out, n, cap)) return 0;
+      c = c->end->next;
+    }
+    return 1;
+  }
+  if (*n >= cap) return 0;
+  out[*n] = t;
+  *n += 1u;
+  return 1;
+}
+
+// src/atp/ft_ac_eq.c:48
+static u8 ref_ft_ac_eq(const AtpFtCell *a, const AtpFtCell *b,
+                       const AtpAcInfo *ac) {
+  if (a == NULL && b == NULL) return 1u;
+  if (a == NULL || b == NULL) return 0u;
+  u8 a_var = (u8)((a->sym & WF_VAR_BIT) != 0u);
+  u8 b_var = (u8)((b->sym & WF_VAR_BIT) != 0u);
+  if (a_var && b_var) return (u8)(ft_eq(a, b) ? 1u : 0u);
+  if (a_var != b_var) return 0u;
+  if (a->sym != b->sym) return 0u;
+  if (a->arity != b->arity) return 0u;
+  if (ft_ac_eq_is_ac_label(ac, a->sym)) {
+    const AtpFtCell *A[ATPFT_AC_FLATTEN_CAP];
+    const AtpFtCell *B[ATPFT_AC_FLATTEN_CAP];
+    u32 na = 0u, nb = 0u;
+    if (!ref_ft_ac_flatten_under(a, a->sym, A, &na, ATPFT_AC_FLATTEN_CAP)) {
+      return (u8)(ft_eq(a, b) ? 1u : 0u);
+    }
+    if (!ref_ft_ac_flatten_under(b, b->sym, B, &nb, ATPFT_AC_FLATTEN_CAP)) {
+      return (u8)(ft_eq(a, b) ? 1u : 0u);
+    }
+    if (na != nb) return 0u;
+    u8 used[ATPFT_AC_FLATTEN_CAP] = {0};
+    for (u32 i = 0; i < na; i++) {
+      u8 matched = 0u;
+      for (u32 j = 0; j < nb; j++) {
+        if (used[j]) continue;
+        if (ref_ft_ac_eq(A[i], B[j], ac)) {
+          used[j] = 1u;
+          matched = 1u;
+          break;
+        }
+      }
+      if (!matched) return 0u;
+    }
+    return 1u;
+  }
+  u16 arity = a->arity;
+  const AtpFtCell *ca = a->next;
+  const AtpFtCell *cb = b->next;
+  for (u16 i = 0; i < arity; i++) {
+    if (!ref_ft_ac_eq(ca, cb, ac)) return 0u;
+    ca = ca->end->next;
+    cb = cb->end->next;
+  }
+  return 1u;
+}
+
+// An AC-equal variant of a shallow term: the children of every binary
+// node over a label in `mask` swapped at random, and f(f(a, b), c)
+// sometimes re-associated to f(a, f(b, c)).
+static Term ac_shuffle(u32 *seed, Term t, u64 mask) {
+  if (term_tag(t) != TAG_CTR) {
+    return t;
+  }
+  u32  n = term_ctr_n(t);
+  u32  lab = term_ext(t);
+  Term kids[20];
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = ac_shuffle(seed, term_ctr_at(t, i), mask);
+  }
+  if (n == 2u && lab < 64u && ((mask >> lab) & 1ull) != 0ull) {
+    u32 r = rng32(seed);
+    if (r & 1u) {
+      Term x  = kids[0];
+      kids[0] = kids[1];
+      kids[1] = x;
+    }
+    if ((r & 2u) && term_tag(kids[0]) == TAG_CTR && term_ext(kids[0]) == lab &&
+        term_ctr_n(kids[0]) == 2u) {
+      Term bc[2] = { term_ctr_at(kids[0], 1), kids[1] };
+      kids[0] = term_ctr_at(kids[0], 0);
+      kids[1] = term_new_ctr(lab, bc, 2u);
+    }
+  }
+  return term_new_ctr(lab, kids, n);
+}
+
+enum { AC_N = 3000 };
+#define AC_TEST_MASK ((1ull << 3) | (1ull << 7))
+
+static void pin_ac(u32 *seed) {
+  AtpAcInfo ac;
+  ac.ac_mask = AC_TEST_MASK;
+  AtpFt a;
+  ft_init(&a);
+
+  TEST_BEGIN("atp_deep/pin-ac-flatten");
+  {
+    u32 ok = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < AC_N; i++) {
+      Term t = mk_random(seed);
+      u32 lab = (i & 1u) ? 3u : 7u;
+      if (i % 3u == 0u && term_tag(t) == TAG_CTR) {
+        lab = term_ext(t);
+      }
+      u32 cap = rng32(seed) % 70u;
+      Term ro[80], no[80];
+      u32  rn = (i & 4u) ? 2u : 0u, nn = rn;
+      ro[0] = no[0] = ro[1] = no[1] = 0;
+      u8 rr = ref_atp_ac_flatten_under(t, lab, ro, &rn, cap);
+      u8 nr = atp_ac_flatten_under(t, lab, no, &nn, cap);
+      AtpFtCell *x = ft_from_term(&a, t, 0);
+      const AtpFtCell *rf[80], *nf[80];
+      u32 rfn = 0u, nfn = 0u;
+      u8 rfr = ref_ft_ac_flatten_under(x, lab, rf, &rfn, cap);
+      u8 nfr = ft_ac_flatten_under(x, lab, nf, &nfn, cap);
+      if (rr == nr && rn == nn && memcmp(ro, no, rn * sizeof(Term)) == 0 &&
+          rfr == nfr && rfn == nfn &&
+          memcmp(rf, nf, rfn * sizeof(const AtpFtCell *)) == 0) {
+        ok++;
+      }
+    }
+    g_wide = 16u;
+    CHECK_EQ(ok, (u32)AC_N);
+    const AtpFtCell *one[1];
+    u32 z = 0u;
+    CHECK_EQ(ft_ac_flatten_under(NULL, 3u, one, &z, 1u),
+             ref_ft_ac_flatten_under(NULL, 3u, one, &z, 1u));
+  }
+
+  TEST_BEGIN("atp_deep/pin-ac-canon-heap-layout");
+  {
+    u32 ok = 0, changed = 0;
+    for (u32 i = 0; i < AC_N; i++) {
+      Term t = (i & 1u) ? mk_random(seed)
+                        : ac_shuffle(seed, mk_random(seed), AC_TEST_MASK);
+      u64  h0 = HEAP_NEXT;
+      Term r  = ref_atp_ac_canon_rec(t, &ac);
+      u64  h1 = HEAP_NEXT;
+      Term n  = atp_ac_canon_rec(t, &ac);
+      u64  h2 = HEAP_NEXT;
+      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) {
+        ok++;
+      }
+      changed += (n != t);
+    }
+    CHECK_EQ(ok, (u32)AC_N);
+    CHECK(changed > 0u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-ft-ac-eq");
+  {
+    u32 ok = 0, hits = 0;
+    for (u32 i = 0; i < AC_N; i++) {
+      Term t = mk_random(seed);
+      Term u = (i % 3u == 0u) ? ac_shuffle(seed, t, AC_TEST_MASK)
+             : (i % 3u == 1u) ? mk_mutant(seed, ac_shuffle(seed, t, AC_TEST_MASK))
+                              : mk_random(seed);
+      AtpFtCell *x = ft_from_term(&a, t, 0);
+      AtpFtCell *y = ft_from_term(&a, u, 0);
+      u8 r = ref_ft_ac_eq(x, y, &ac);
+      u8 n = ft_ac_eq(x, y, &ac);
+      if (r == n) {
+        ok++;
+      }
+      hits += n;
+    }
+    CHECK_EQ(ok, (u32)AC_N);
+    CHECK(hits > 0u);
+    CHECK_EQ(ft_ac_eq(NULL, NULL, &ac), ref_ft_ac_eq(NULL, NULL, &ac));
+  }
+
+  ft_destroy(&a);
+}
+
+static void deep_ac(void) {
+  AtpAcInfo ac;
+  ac.ac_mask = AC_TEST_MASK;
+  AtpFt a;
+  ft_init(&a);
+  // AC leaves f3(c_{20+v}, c9) along a non-AC spine, and the same spine
+  // with every leaf's children swapped.
+  Term c9 = term_new_ctr(9u, NULL, 0u);
+  Term vals[5], svals[5];
+  for (u32 v = 0; v < 5u; v++) {
+    Term cv = term_new_ctr(20u + v, NULL, 0u);
+    Term k1[2] = { cv, c9 }, k2[2] = { c9, cv };
+    vals[v]  = term_new_ctr(3u, k1, 2u);
+    svals[v] = term_new_ctr(3u, k2, 2u);
+  }
+  Term t    = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+  Term sw   = mk_deep(DEEP, 1u, svals[4], svals, 1u);
+  Term near = mk_deep(DEEP, 1u, vals[3], vals, 1u);
+
+  TEST_BEGIN("atp_deep/deep-ac-canon-eq");
+  {
+    CHECK(atp_ac_eq(t, sw, &ac));
+    CHECK(!atp_ac_eq(t, near, &ac));
+    CHECK(term_eq_iter(atp_ac_canon(t, &ac), atp_ac_canon(sw, &ac)));
+    AtpFtCell *xt = ft_from_term(&a, t, 0);
+    AtpFtCell *xs = ft_from_term(&a, sw, 0);
+    AtpFtCell *xn = ft_from_term(&a, near, 0);
+    CHECK(ft_ac_eq(xt, xs, &ac));
+    CHECK(!ft_ac_eq(xt, xn, &ac));
+    // A 3,000-deep spine stays within the reference recursions' reach.
+    Term mt = mk_deep(3000u, 1u, vals[4], vals, 1u);
+    Term ms = mk_deep(3000u, 1u, svals[4], svals, 1u);
+    u64  h0 = HEAP_NEXT;
+    Term r  = ref_atp_ac_canon_rec(ms, &ac);
+    u64  h1 = HEAP_NEXT;
+    Term n  = atp_ac_canon_rec(ms, &ac);
+    u64  h2 = HEAP_NEXT;
+    CHECK(heap_regions_same(h0, h1, h1, h2));
+    CHECK(reloc(r, h0, h1, h1) == n);
+    AtpFtCell *mxt = ft_from_term(&a, mt, 0);
+    AtpFtCell *mxs = ft_from_term(&a, ms, 0);
+    CHECK_EQ(ft_ac_eq(mxt, mxs, &ac), ref_ft_ac_eq(mxt, mxs, &ac));
+  }
+
+  TEST_BEGIN("atp_deep/deep-ac-chain");
+  {
+    // A left-nested AC chain f3(f3(... f3(c5, c6) ..., c5), c5).
+    Term c5 = term_new_ctr(5u, NULL, 0u);
+    Term c6 = term_new_ctr(6u, NULL, 0u);
+    Term chain = c6;
+    for (u32 k = 0; k < DEEP; k++) {
+      Term kids[2] = { chain, c5 };
+      chain = term_new_ctr(3u, kids, 2u);
+    }
+    Term *out = (Term *)malloc((DEEP + 1u) * sizeof(Term));
+    u32 n = 0u;
+    CHECK(atp_ac_flatten_under(chain, 3u, out, &n, DEEP + 1u));
+    CHECK_EQ(n, (u32)DEEP + 1u);
+    CHECK(out[0] == c6);
+    CHECK(out[DEEP] == c5);
+    n = 0u;
+    CHECK(!atp_ac_flatten_under(chain, 3u, out, &n, ATP_AC_FLATTEN_CAP));
+    CHECK_EQ(n, (u32)ATP_AC_FLATTEN_CAP);
+    CHECK(atp_ac_canon(chain, &ac) == chain);     // over the leaf cap
+    AtpFtCell *xc = ft_from_term(&a, chain, 0);
+    const AtpFtCell **fout =
+        (const AtpFtCell **)malloc((DEEP + 1u) * sizeof(const AtpFtCell *));
+    n = 0u;
+    CHECK(ft_ac_flatten_under(xc, 3u, fout, &n, DEEP + 1u));
+    CHECK_EQ(n, (u32)DEEP + 1u);
+    CHECK_EQ(fout[0]->sym, 6u);
+    n = 0u;
+    CHECK(!ft_ac_flatten_under(xc, 3u, fout, &n, ATPFT_AC_FLATTEN_CAP));
+    CHECK_EQ(n, (u32)ATPFT_AC_FLATTEN_CAP);
+    // Over the cap the comparison falls back to syntactic equality.
+    CHECK(ft_ac_eq(xc, ft_clone_span(&a, xc, 0), &ac));
+    free(fout);
+    free(out);
+  }
+
+  ft_destroy(&a);
+}
+
 int main(void) {
   thvm_init();
   u32 seed = 0x6c8e9cf5u;
@@ -4620,6 +4940,8 @@ int main(void) {
   deep_gc_gj(&seed);
   pin_index_queue(&seed);
   deep_index_queue(&seed);
+  pin_ac(&seed);
+  deep_ac();
   thvm_free();
   TEST_REPORT();
 }
