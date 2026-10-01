@@ -1150,9 +1150,15 @@ class Tensor(metaclass=_TensorMeta):
     def pad(self, begin_end) -> "Tensor":
         """Pad each axis with zeros.  Accepts either the tinygrad
         tuple-of-pairs form (one `(before, after)` pair or `None` per
-        axis) or the flat form [b0, e0, b1, e1, ...]."""
+        axis) or the flat form [b0, e0, b1, e1, ...].  A negative pad
+        shrinks that side first, as tinygrad's _pad_constant does
+        (mixin/op.py:282-288)."""
         begin_end = _normalize_pairs(begin_end, self._shape,
                                      full=lambda n: (0, 0))
+        if any(int(x) < 0 for x in begin_end):
+            kept = [(-min(int(begin_end[2*i]), 0), min(int(begin_end[2*i+1]) + s, s))
+                    for i, s in enumerate(self._shape)]
+            return self.shrink(kept).pad([max(int(x), 0) for x in begin_end])
         new_shape = tuple(self._shape[i] + int(begin_end[2*i]) + int(begin_end[2*i+1])
                           for i in range(self.ndim))
         t = _TH.pad(self.term, [int(x) for x in begin_end])
