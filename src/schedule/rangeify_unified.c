@@ -3165,9 +3165,13 @@ static Term ru_index_leaf(Term t, Term const *coords, u32 ndim) {
       }
       return uop_index_e(out, ru_ten_leaf_addr((u32)term_val(out), c, ndim));
     }
+    // A realized node is storage, whatever realized it: its kernel binds
+    // its buffer (visit_indexed_leaf) and the arena keeps that buffer alive
+    // for this read, while the nodes under it may already be recycled.
     u32 idx = bufferize_info_find(loc);
     if (idx != 0xFFFFFFFFu
-        && (BUFFERIZE_NODES[idx].reasons & BUFFERIZE_REASON_INDEXED_SRC)) {
+        && ((BUFFERIZE_NODES[idx].reasons & BUFFERIZE_REASON_INDEXED_SRC)
+            || RU_REALIZE_MAP[idx].realized_full)) {
       Term  b = RU_SUBST[idx];
       Shape ns;
       if (b == 0 || term_tag(b) != TAG_UOP || term_ext(b) != UOP_BUFFERIZE

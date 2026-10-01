@@ -20,6 +20,7 @@
 //      place through their storage, as idx and src are (a view-alias TEN
 //      with an offset or a PERMUTE, lazy row / column SHRINK and FLIP
 //      views), and a computed base fused into the stores, one kernel each;
+//      a src viewing a realized view reads that view's buffer;
 //   5. the scatter is an intermediate: its output buffer may be a reused
 //      arena slot, and the init store covers it;
 //   6. every store loops at most max(|base|, |idx|) times, no REDUCE, and
@@ -570,6 +571,53 @@ static void test_message_passing(void) {
   check_scatter_kernel(tid, k0, 2, V * D, E * D);
 }
 
+// A src viewing a realized view: the adjoints of three gathers from one
+// table, as the backward of a dim-1 cat over a dim-0 cat of gathered pieces
+// builds them.  dE = C[:, :4] of a computed C is read through three
+// different row views, so it realizes; two pieces scale their rows, the
+// third feeds its scatter as a bare view of dE.  That src reads dE's
+// buffer, the storage its kernel binds and the arena keeps alive: an
+// address composed on down to C read bytes the arena had already handed to
+// a later kernel.  Integer data keeps every sum exact in any order.
+static void test_src_view_of_realized_view(void) {
+  enum { V = 8, D = 4, Q = 4, W = 6, N = 3 * Q };
+  static i32 const ids[3][Q] = { { 2, 7, 2, 6 }, { 1, 3, 1, 1 }, { 7, 6, 0, 7 } };
+  f32 x[N * W];
+  for (u32 q = 0; q < N * W; q++) {
+    x[q] = (f32)(q + 1);
+  }
+  u32 nw[2] = { N, W }, vd[2] = { V, D }, qd[2] = { Q, D }, q1[1] = { Q };
+  Term c = uop_binary(UOP_MUL, ten(mk(DT_FP32, 2, nw, x)), fconst(2, nw, 1.0f));
+  u32 cols[4] = { 0, N, 0, D };
+  Term de = uop_shrink(c, 2, cols);
+  Term sum = 0;
+  f32 want[V * D];
+  memset(want, 0, sizeof want);
+  for (u32 j = 0; j < 3; j++) {
+    u32 be[4] = { j * Q, (j + 1) * Q, 0, D };
+    Term piece = uop_shrink(de, 2, be);
+    f32 scale = 1.0f;
+    if (j < 2) {
+      piece = uop_binary(UOP_MUL, piece, fconst(2, qd, 2.0f));
+      scale = 2.0f;
+    }
+    Term s = uop_scatter(fconst(2, vd, 0.0f), rows(ten(mk(DT_INT32, 1, q1, ids[j])), Q, D),
+                         piece, 0, SCATTER_SUM, 1);
+    CHECK(s != 0);
+    sum = (sum == 0) ? s : uop_binary(UOP_ADD, sum, s);
+    for (u32 r = 0; r < Q; r++) {
+      for (u32 d = 0; d < D; d++) {
+        want[(u32)ids[j][r] * D + d] += x[(j * Q + r) * W + d] * scale;
+      }
+    }
+  }
+  f32 got[V * D];
+  u32 k0 = KERNELS_NEXT;
+  realize_into(sum, got, V * D);
+  check_bytes(got, want, V * D, "src view of a realized view");
+  check_dispatch(k0);
+}
+
 // === 5. the scatter as an intermediate ===
 static void test_intermediate(void) {
   Shape bs = shape2(SV, SD), is = shape2(SE, SD);
@@ -678,6 +726,8 @@ int main(void) {
   test_base_views();
   TEST_BEGIN("scatter/message-passing");
   test_message_passing();
+  TEST_BEGIN("scatter/src-view-of-a-realized-view");
+  test_src_view_of_realized_view();
   TEST_BEGIN("scatter/intermediate");
   test_intermediate();
   TEST_BEGIN("scatter/jit-replay");

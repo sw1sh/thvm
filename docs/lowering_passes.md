@@ -171,10 +171,13 @@ range.  No REDUCE is created, so a gather costs one load per output
 element and fuses into its consumer like an elementwise op.  src is read
 at an address the gather builds itself, so `ru_index_leaf` walks its views
 down to storage, and the gather hands its ranges to idx only
-(`ru_consumer_passes_rngs`).  A src that is not a view of a TEN, VAR,
-KERNEL output or CONST (`uop_indexed_operand_is_structural`) realizes its
-compute source first (`BUFFERIZE_REASON_INDEXED_SRC`), and `visit` binds
-the storage itself as the kernel input, never a view alias.  idx is read
+(`ru_consumer_passes_rngs`).  A view the walk meets that realized for
+another reason (several consumers read it differently) is storage too:
+the kernel reads its buffer, the one `visit` binds and the arena keeps
+alive.  A src that is not a view of a TEN, VAR, KERNEL output or CONST
+(`uop_indexed_operand_is_structural`) realizes its compute source first
+(`BUFFERIZE_REASON_INDEXED_SRC`), and `visit` binds the storage itself as
+the kernel input, never a view alias.  idx is read
 at the node's ranges (`ru_read_operand_at_ranges`): a structural idx
 through its storage the same way, so a view-alias TEN's offset and
 strides or a lazy SHRINK / FLIP compose into the address exactly, and a
