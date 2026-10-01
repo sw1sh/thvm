@@ -216,6 +216,10 @@ Measured on the Linux CPU pod (C JIT):
   tinygrad master and its dense formulation in float64 numpy: ties,
   include_self, dims 0 / 1 / -1, -inf bases, -1 padded ids, int32, the
   host fallback, both CPU routes.
+- [py/tests/test_segment_log_softmax.py](../py/tests/test_segment_log_softmax.py):
+  the ATP listwise loss (amax shift, sum mass) against tinygrad master and
+  float64 numpy, and 10 TinyJit Adam steps whose parameters track
+  tinygrad's step by step, on both CPU routes.
 - [py/tests/test_graphsage_train.py](../py/tests/test_graphsage_train.py):
   10 TinyJit Adam steps of a mean-aggregation GraphSAGE on fresh -1
   padded edge buffers, against a float64 numpy run.
