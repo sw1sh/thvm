@@ -1860,7 +1860,6 @@ static u32 atp_trace_push_norm_step(AtpState *s, u32 p_a, u32 rule_idx,
   u32 idx = s->n_trace;
   if (s->trace_pack) s->trace_eq_off[idx] = eq_off;
   s->n_trace++;
-  atp_hx_trace_stamp(s, idx);
   return idx;
 }
 
@@ -1890,7 +1889,6 @@ static u32 atp_trace_push_norm_step_off(AtpState *s, u32 p_a, u32 rule_idx,
   u32 idx = s->n_trace;
   s->trace_eq_off[idx] = eq_off;
   s->n_trace++;
-  atp_hx_trace_stamp(s, idx);
   return idx;
 }
 

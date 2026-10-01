@@ -9,18 +9,20 @@
 // allocation, no flatterm arena traffic, no cache traffic, no RNG -- the
 // recorded run follows the unrecorded trajectory exactly.  Their feature
 // walks and writes run inside work-clock exclusion windows
-// (atp_work_pause / atp_work_resume), so the clock-gated disciplines
-// (CP-set interreduction sweeps, LRS) fire at the same point of the
-// search as in the unrecorded run.  The windows are not free: under
-// --work-clock=instr the instructions that open and close one (a few
-// dozen per record, the hook's own test and calls up to the counter
-// read) still count, so a long recorded run reads a slightly later
-// clock; tests/atp_history_v2_obs.sh (gate G2.1) measures whether that
-// ever moves a decision.
+// (atp_work_pause / atp_work_resume), so under the CPU and instruction
+// clocks the clock-gated disciplines (CP-set interreduction sweeps, LRS)
+// fire at about the same point of the search as in the unrecorded run --
+// about, because the hook's test, the call and the window's own framing
+// still count.  Exact identity is tested under the logical step clock
+// (THVM_ATP_WORK_CLOCK=steps, rerank.c), which no hook can advance:
+// tests/atp_history_v2_obs.sh (gate G2.1) runs there.
 //
 // Format: fixed 64-byte little-endian records, appended to <path>.  One
-// exporting process per file: sessions are delimited by their 'B'
-// record, so two processes appending to one path interleave sessions.
+// exporting process per file at a time: sessions are delimited by their
+// 'B' record, so two processes appending to one path at once interleave
+// sessions.  A --schedule run therefore gives each slice its own file
+// (<path>.<slice>, tools/atp_cli/main.c); fof-split branches run one
+// after another and append to their lane's file, tagged in 'B'.
 // Version 2 keeps every version-1 record and adds the lane tag, the
 // symbol table, rule content, rule deaths and the Otter replay.  Record
 // tags (AtpHxRec layout unless named otherwise):
@@ -43,7 +45,10 @@
 //                       dimension that chose it (ATP_HX_PICK_*; 0 in
 //                       version 1, where it was not recorded)
 //   'X' pop outcome     kind = ATP_HX_OUT_*, for the last 'S';
-//                       aux = live queue after the pop
+//                       aux = live queue after the pop, pa = trace size
+//                       at that 'S', pb = trace size now (an 'R'
+//                       entry's step is the step of the last 'X' whose
+//                       pa <= its id: derived offline, np0_extract.py)
 //   'W' reweight        queued CP re-scored in place (SAMPLED CPs
 //                       only): pri = new cp_pri, aux = old, kind = 1
 //                       when the content was repacked, feat = content
@@ -79,7 +84,7 @@
 //                       seq = trace id, kind = reason, trace = child 0
 //                       (parent / chain predecessor), pa = child 1
 //                       (NORM_STEP: the rewriting rule's trace id),
-//                       step = creation step, feat = the equation's
+//                       step = 0xffffffff (see 'X'), feat = the equation's
 //                       features when its pair is materialized, flags
 //                       bit 0 = pushed after the search ended (proof
 //                       emission), which a search-time model never sees
@@ -105,11 +110,12 @@
 // without a collector.  Encoding: the lhs cells in preorder, then the rhs
 // cells; a variable is varint(id << 1 | 1), a function symbol or constant
 // is varint(label << 1) followed by varint(arity).  The mirror holds the
-// stored orientation with variables numbered densely by first occurrence
-// (lhs first), so the encoding is canonical up to orientation; a key that
-// matches equations across lanes renders both orientations with symbol
-// names from the 'Y' records and takes the smaller
-// (tools/atp_enigma/np0_extract.py).
+// stored orientation with the rule's own variable ids (dense only as far
+// as atp_push_rule's normalization makes them; an in-place compose keeps
+// them), so neither the encoding nor its FNV in aux is a canonical id.
+// The cross-lane key comes from the reader: it renames variables by first
+// occurrence, renders both orientations with symbol names from the 'Y'
+// records and takes the smaller (tools/atp_enigma/np0_extract.py).
 //
 // Coverage: every CP queue insert, pop and removal, every rule birth,
 // in-place compose and death, and the Otter replay, in every lane family
@@ -274,8 +280,6 @@ typedef struct {
   const AtpState *s;
   u32   thresh;
   u32   session;
-  u32  *tstep;          // creation step per trace id (last write wins)
-  u32   tstep_cap;
   u8   *gsym;           // goal symbol membership by label
   u32   gsym_cap;
   u8    gsym_ready;
@@ -283,6 +287,7 @@ typedef struct {
   u8    repacked;       // next reweight follows an in-place repack
   u8    cpfeat;         // THVM_ATP_HISTORY_CPFEAT: 'F' records
   u32   last_sel_seq;
+  u32   sel_ntrace;     // trace size at the last 'S'
   u32   n_trace_search;   // trace size when the search ended (0 = unmarked)
   u64   n_rec_push;
   u64   n_rec_sel;
@@ -900,9 +905,14 @@ static void atp_hx_open(const AtpState *s) {
   h.seq   = g_hx.session;
   h.step  = s->cp_select_count;
   h.trace = ATP_TRACE_NONE;
-  h.pa    = ATP_TRACE_NONE;
+  h.pa    = (u32)getpid();
   h.pb    = ATP_TRACE_NONE;
   h.pri   = thresh;
+  const char *br = getenv("THVM_ATP_FOF_BRANCH_ID");
+  if (br != NULL && br[0] != '\0') {
+    h.pb     = (u32)atoi(br);
+    h.flags |= 2u;
+  }
   const char *lane = getenv("FINDPROOF_SLICE");
   if (lane != NULL) {
     size_t n = strlen(lane);
@@ -943,27 +953,6 @@ fn void thvm_atp_history_symbol(AtpState *s, u32 label, u32 arity,
   y.name_len = (u8)n;
   fwrite(&y, ATP_HX_REC_SIZE, 1u, g_hx.fp);
   atp_work_resume();
-}
-
-static void atp_hx_trace_stamp(const AtpState *s, u32 idx) {
-  if (!atp_hx_on(s) || idx == ATP_TRACE_NONE) {
-    return;
-  }
-  if (idx >= g_hx.tstep_cap) {
-    u32 ncap = g_hx.tstep_cap ? g_hx.tstep_cap : 4096u;
-    while (ncap <= idx) {
-      ncap *= 2u;
-    }
-    u32 *nt = (u32 *)realloc(g_hx.tstep, (size_t)ncap * sizeof *nt);
-    if (nt == NULL) {
-      return;
-    }
-    memset(nt + g_hx.tstep_cap, 0xff,
-           (size_t)(ncap - g_hx.tstep_cap) * sizeof *nt);
-    g_hx.tstep = nt;
-    g_hx.tstep_cap = ncap;
-  }
-  g_hx.tstep[idx] = s->cp_select_count;
 }
 
 // Queue insert, row `row` fully stamped.  `packed` = the slot's bytes
@@ -1044,6 +1033,7 @@ static void atp_hx_select(const AtpState *s, u32 row, u8 pick) {
   atp_hx_feat_packed(&r, s->cp_packed[row]);
   atp_hx_write(&r);
   g_hx.last_sel_seq = r.seq;
+  g_hx.sel_ntrace   = s->n_trace;
   g_hx.n_rec_sel++;
   atp_work_resume();
 }
@@ -1084,6 +1074,8 @@ static void atp_hx_outcome(const AtpState *s, u8 code) {
   atp_hx_rec_init(&r, 'X', s);
   r.kind = code;
   r.seq  = g_hx.last_sel_seq;
+  r.pa   = g_hx.sel_ntrace;
+  r.pb   = s->n_trace;
   r.aux  = s->n_cps;
   atp_hx_write(&r);
   atp_work_resume();
@@ -1239,8 +1231,7 @@ fn void thvm_atp_history_finish(AtpState *s, u32 status) {
     r.seq   = i;
     r.trace = (u32)term_val(term_ctr_at(e, 0));
     r.pa    = (u32)term_val(term_ctr_at(e, 1));
-    r.step  = (g_hx.tstep != NULL && i < g_hx.tstep_cap)
-                ? g_hx.tstep[i] : 0xffffffffu;
+    r.step  = 0xffffffffu;
     if (g_hx.n_trace_search != 0u && i >= g_hx.n_trace_search) {
       r.flags |= 1u;
     }
@@ -1272,7 +1263,6 @@ fn void thvm_atp_history_finish(AtpState *s, u32 status) {
   r.aux   = g_hx.n_trace_search;
   atp_hx_write(&r);
   fclose(g_hx.fp);
-  free(g_hx.tstep);
   free(g_hx.gsym);
   atp_hx_scratch_free();
   memset(&g_hx, 0, sizeof g_hx);

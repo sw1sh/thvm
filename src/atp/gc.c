@@ -725,7 +725,6 @@ static u32 atp_trace_push_impl(AtpState *s, u8 proof_only, u32 reason,
     s->trace_x_bytes += (s->trace_eq_len - eq0) + 2u * sizeof(u64);
   if (reason == TRACE_ORIENT || reason == TRACE_FVI || reason == TRACE_SIMPLIFY)
     atp_rj_view(s, idx);
-  atp_hx_trace_stamp(s, idx);
   return idx;
 }
 

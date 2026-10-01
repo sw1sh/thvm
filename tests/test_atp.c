@@ -187,11 +187,33 @@ static Term tt_hx_decode(const u8 *b, u32 len, u32 *at, int *ok) {
 static const char *const TT_HX_NAMES[4] = { "e", "i", "f", "a" };
 static const u32 TT_HX_ARITY[4] = { 0u, 1u, 2u, 0u };
 
-// The group axioms for 40 steps under plain completion (an age pick every
-// third selection) or under the Otter loop, recorded to `path` (rate 1,
-// lane "hx-unit") unless it is NULL; *heap gets the IC heap cells the run
-// allocated.
-static AtpState *tt_hx_group_run(u8 otter, const char *path, u64 *heap) {
+// Selection setups of tt_hx_group_run.
+#define TT_HX_PLAIN 0u   // an age pick every third selection
+#define TT_HX_OTTER 1u   // the Otter loop
+#define TT_HX_W2    2u   // w2 pick every 4th selection, goal pick every 5th
+                         // (ahead of the default 1-in-11 age pick)
+
+// The S record's expected pick dimension under `mode` at selection
+// `step` (1-based; the engine tests its count before the increment).
+static u32 tt_hx_want_pick(u8 mode, u32 step) {
+  u32 c = step - 1u;
+  if (mode == TT_HX_PLAIN) {
+    return (c % 3u == 2u) ? ATP_HX_PICK_AGE : ATP_HX_PICK_WEIGHT;
+  }
+  if (c % 4u == 0u) {
+    return ATP_HX_PICK_W2;
+  }
+  if (c % 5u == 0u) {
+    return ATP_HX_PICK_GOAL;
+  }
+  // The default FIFO dimension: the 11th of every 11 selections.
+  return (c % 11u == 10u) ? ATP_HX_PICK_AGE : ATP_HX_PICK_WEIGHT;
+}
+
+// The group axioms for 40 steps under setup `mode` (TT_HX_*), recorded to
+// `path` (rate 1, lane "hx-unit") unless it is NULL; *heap gets the IC
+// heap cells the run allocated.
+static AtpState *tt_hx_group_run(u8 mode, const char *path, u64 *heap) {
   u64 h0 = thvm_atp_heap_checkpoint();
   if (path != NULL) {
     setenv("THVM_ATP_HISTORY_EXPORT", path, 1);
@@ -204,9 +226,12 @@ static AtpState *tt_hx_group_run(u8 otter, const char *path, u64 *heap) {
     unsetenv("THVM_ATP_HISTORY_RATE");
     unsetenv("FINDPROOF_SLICE");
   }
-  if (otter) {
+  if (mode == TT_HX_OTTER) {
     thvm_atp_set_use_mixmost_nf(s, 1u);
     thvm_atp_set_use_otter(s, 1u);
+  } else if (mode == TT_HX_W2) {
+    thvm_atp_set_w2(s, 4u, 0u);
+    thvm_atp_set_goal_interleave(s, 5u);
   } else {
     thvm_atp_set_selection_ratio(s, 3u);
   }
@@ -225,6 +250,63 @@ static AtpState *tt_hx_group_run(u8 otter, const char *path, u64 *heap) {
   }
   *heap = thvm_atp_heap_checkpoint() - h0;
   return s;
+}
+
+// What an observer must not change: the rules, the selections, the queue
+// and the IC heap cells of a run.
+typedef struct {
+  u64   heap;
+  u32   n, sel, cps, seq, uid_next;
+  u32  *uid;
+  u8   *dead;
+  Term *l;
+  Term *r;
+} TtHxSnap;
+
+static int tt_hx_snap(const AtpState *s, u64 heap, TtHxSnap *o) {
+  memset(o, 0, sizeof *o);
+  o->heap     = heap;
+  o->n        = s->n_rules;
+  o->sel      = s->cp_select_count;
+  o->cps      = s->n_cps;
+  o->seq      = s->cp_seq_next;
+  o->uid_next = s->next_rule_uid;
+  o->uid  = (u32 *)calloc(o->n + 1u, sizeof *o->uid);
+  o->dead = (u8 *)calloc(o->n + 1u, 1u);
+  o->l    = (Term *)calloc(o->n + 1u, sizeof *o->l);
+  o->r    = (Term *)calloc(o->n + 1u, sizeof *o->r);
+  if (o->uid == NULL || o->dead == NULL || o->l == NULL || o->r == NULL) {
+    return 0;
+  }
+  for (u32 k = 0; k < o->n; k++) {
+    o->uid[k]  = s->r_uid[k];
+    o->dead[k] = s->r_dead[k];
+    o->l[k]    = atp_rule_term((AtpState *)s, k, 0u);
+    o->r[k]    = atp_rule_term((AtpState *)s, k, 1u);
+  }
+  return 1;
+}
+
+static void tt_hx_snap_free(TtHxSnap *o) {
+  free(o->uid);
+  free(o->dead);
+  free(o->l);
+  free(o->r);
+  memset(o, 0, sizeof *o);
+}
+
+static int tt_hx_snap_eq(const TtHxSnap *a, const TtHxSnap *b) {
+  if (a->heap != b->heap || a->n != b->n || a->sel != b->sel ||
+      a->cps != b->cps || a->seq != b->seq || a->uid_next != b->uid_next) {
+    return 0;
+  }
+  for (u32 k = 0; k < a->n; k++) {
+    if (a->uid[k] != b->uid[k] || a->dead[k] != b->dead[k] ||
+        !kbo_eq(a->l[k], b->l[k]) || !kbo_eq(a->r[k], b->r[k])) {
+      return 0;
+    }
+  }
+  return 1;
 }
 
 #ifdef ATP_CP_GROUND_JOIN
@@ -7626,44 +7708,26 @@ int main(void) {
   TEST_BEGIN("atp/history-export/v2-stream");
   {
     // The group axioms under plain completion (an age pick every third
-    // selection) and under the Otter loop, each run with the export off
-    // and then on.  With it on, the run keeps the rules, selections and IC
-    // heap cells of the run without it: the hooks decode nothing onto the
-    // heap.  The stream starts with the version-2 header and the symbol
+    // selection), under the Otter loop and under w2 + goal-interleave
+    // picks, each run with the export off, on and off again.  With it on,
+    // the run keeps the rules, selections and IC heap cells of the runs
+    // without it: the hooks decode nothing onto the heap.  The stream starts with the version-2 header and the symbol
     // table; every rule born has its content ('Q' + 'q') and is either
     // live at the end -- the last 'Q' of its uid then decodes to the live
     // rule -- or has exactly one death ('Z'); every 'S' names the
-    // dimension that picked it.
-    for (u8 otter = 0; otter <= 1u; otter++) {
-      u64 ref_heap = 0u;
-      AtpState *ref = tt_hx_group_run(otter, NULL, &ref_heap);
-      u32 ref_n   = ref->n_rules;
-      u32 ref_sel = ref->cp_select_count;
-      u32 ref_cps = ref->n_cps;
-      u32 ref_seq = ref->cp_seq_next;
-      u32 ref_uid_next = ref->next_rule_uid;
-      u32  *ref_uid  = (u32 *)calloc(ref_n + 1u, sizeof *ref_uid);
-      u8   *ref_dead = (u8 *)calloc(ref_n + 1u, 1u);
-      Term *ref_l    = (Term *)calloc(ref_n + 1u, sizeof *ref_l);
-      Term *ref_r    = (Term *)calloc(ref_n + 1u, sizeof *ref_r);
-      CHECK(ref_uid != NULL && ref_dead != NULL && ref_l != NULL &&
-            ref_r != NULL);
-      if (ref_uid == NULL || ref_dead == NULL || ref_l == NULL ||
-          ref_r == NULL) {
-        free(ref_uid);
-        free(ref_dead);
-        free(ref_l);
-        free(ref_r);
-        thvm_atp_free(ref);
-        continue;
-      }
-      for (u32 k = 0; k < ref_n; k++) {
-        ref_uid[k]  = ref->r_uid[k];
-        ref_dead[k] = ref->r_dead[k];
-        ref_l[k]    = atp_rule_term(ref, k, 0u);
-        ref_r[k]    = atp_rule_term(ref, k, 1u);
-      }
-      thvm_atp_free(ref);
+    // dimension that picked it; every 'X' carries the trace sizes an 'R'
+    // step is derived from.
+    for (u8 mode = TT_HX_PLAIN; mode <= TT_HX_W2; mode++) {
+      u8 otter = (u8)(mode == TT_HX_OTTER);
+      // A/B/A: off, on, off again.  The second off run is the control:
+      // file-static engine state (caches, lazily probed getenv) carries
+      // across sessions in one process, so off == off2 must hold before
+      // on == off says anything about the export.
+      u64 heap_a = 0u, heap = 0u, heap_a2 = 0u;
+      AtpState *ra = tt_hx_group_run(mode, NULL, &heap_a);
+      TtHxSnap snap_a;
+      int ok_a = tt_hx_snap(ra, heap_a, &snap_a);
+      thvm_atp_free(ra);
 
       char path[] = "/tmp/thvm_hx_v2_XXXXXX";
       int fd = mkstemp(path);
@@ -7671,27 +7735,25 @@ int main(void) {
       if (fd >= 0) {
         close(fd);
       }
-      u64 heap = 0u;
-      AtpState *s = tt_hx_group_run(otter, path, &heap);
+      AtpState *s = tt_hx_group_run(mode, path, &heap);
       CHECK(atp_hx_on(s));
-      CHECK_EQ(heap, ref_heap);
-      CHECK_EQ(s->n_rules, ref_n);
-      CHECK_EQ(s->cp_select_count, ref_sel);
-      CHECK_EQ(s->n_cps, ref_cps);
-      CHECK_EQ(s->cp_seq_next, ref_seq);
-      CHECK_EQ(s->next_rule_uid, ref_uid_next);
-      for (u32 k = 0; k < s->n_rules && k < ref_n; k++) {
-        CHECK_EQ(s->r_uid[k], ref_uid[k]);
-        CHECK_EQ(s->r_dead[k], ref_dead[k]);
-        CHECK(kbo_eq(atp_rule_term(s, k, 0u), ref_l[k]));
-        CHECK(kbo_eq(atp_rule_term(s, k, 1u), ref_r[k]));
-      }
-      free(ref_uid);
-      free(ref_dead);
-      free(ref_l);
-      free(ref_r);
+      TtHxSnap snap_on;
+      int ok_on = tt_hx_snap(s, heap, &snap_on);
+      // The on run's session is still open: finishing it first keeps the
+      // control run unarmed (one recorded engine at a time).
       thvm_atp_history_finish(s, 0xffu);
       CHECK(!atp_hx_on(s));
+
+      AtpState *ra2 = tt_hx_group_run(mode, NULL, &heap_a2);
+      TtHxSnap snap_a2;
+      int ok_a2 = tt_hx_snap(ra2, heap_a2, &snap_a2);
+      thvm_atp_free(ra2);
+      CHECK(ok_a && ok_on && ok_a2);
+      CHECK(ok_a && ok_a2 && tt_hx_snap_eq(&snap_a, &snap_a2));
+      CHECK(ok_a && ok_on && tt_hx_snap_eq(&snap_on, &snap_a));
+      tt_hx_snap_free(&snap_a);
+      tt_hx_snap_free(&snap_on);
+      tt_hx_snap_free(&snap_a2);
       TtHx h;
       CHECK(tt_hx_load(path, &h));
       unlink(path);
@@ -7742,7 +7804,8 @@ int main(void) {
       }
       u32 n_born = 0u, n_died = 0u, n_sel = 0u, n_age = 0u, n_weight = 0u;
       u32 n_adopt = 0u, n_retire = 0u, n_drop = 0u, n_bad = 0u;
-      u32 last_s_seq = 0xffffffffu;
+      u32 n_w2 = 0u, n_goal = 0u;
+      u32 last_s_seq = 0xffffffffu, last_x_pa = 0xffffffffu;
       AtpHxRec er;
       memset(&er, 0, sizeof er);
       for (size_t i = 1u + 4u; i < h.n; i++) {
@@ -7752,8 +7815,16 @@ int main(void) {
           case 'Q': {
             u32 len = r.pa + r.pb;
             u8 buf[ATP_HX_CONT_MAX * ATP_HX_CONT_BYTES];
+            memset(buf, 0, sizeof buf);
             CHECK_EQ(r.flags & (ATP_HX_Q_TRUNC | ATP_HX_Q_NOCONTENT), 0u);
             CHECK_EQ(r.pos_len, (len + ATP_HX_CONT_BYTES - 1u) / ATP_HX_CONT_BYTES);
+            if ((r.flags & (ATP_HX_Q_TRUNC | ATP_HX_Q_NOCONTENT)) != 0u ||
+                len > (u32)r.pos_len * ATP_HX_CONT_BYTES ||
+                len > (u32)sizeof buf) {
+              n_bad++;
+              i += r.pos_len;
+              break;
+            }
             for (u32 k = 0; k < r.pos_len; k++) {
               AtpHxContRec c;
               CHECK(i + 1u + k < h.n);
@@ -7812,19 +7883,32 @@ int main(void) {
             u32 kind = (u32)r.kind & 0x0fu;
             CHECK(kind == TRACE_AXIOM || kind == TRACE_CP || kind == TRACE_SIMPLIFY);
             if (!otter) {
-              u32 want_pick = ((r.step - 1u) % 3u == 2u) ? ATP_HX_PICK_AGE
-                                                          : ATP_HX_PICK_WEIGHT;
-              CHECK_EQ(pick, want_pick);
+              CHECK_EQ(pick, tt_hx_want_pick(mode, r.step));
             }
             if (pick == ATP_HX_PICK_AGE) {
               n_age++;
             } else if (pick == ATP_HX_PICK_WEIGHT) {
               n_weight++;
+            } else if (pick == ATP_HX_PICK_W2) {
+              n_w2++;
+            } else if (pick == ATP_HX_PICK_GOAL) {
+              n_goal++;
             }
             last_s_seq = r.seq;
             n_sel++;
             break;
           }
+          case 'X':
+            // pa = trace size at the pick, pb = trace size now; the pick
+            // sizes never decrease (an 'R' step is derived from them).
+            CHECK_EQ(r.seq, last_s_seq);
+            CHECK(r.pa <= r.pb);
+            CHECK(last_x_pa == 0xffffffffu || r.pa >= last_x_pa);
+            last_x_pa = r.pa;
+            break;
+          case 'R':
+            CHECK_EQ(r.step, 0xffffffffu);
+            break;
           case 'O':
             CHECK(otter);
             if (r.kind == ATP_HX_OT_ADOPT) {
@@ -7857,8 +7941,12 @@ int main(void) {
       CHECK_EQ(n_sel, s->cp_select_count);
       CHECK(n_sel > 6u);
       CHECK(n_born > 0u);
-      if (!otter) {
+      if (mode == TT_HX_PLAIN) {
         CHECK(n_age > 0u);
+        CHECK(n_weight > 0u);
+      } else if (mode == TT_HX_W2) {
+        CHECK(n_w2 > 0u);
+        CHECK(n_goal > 0u);
         CHECK(n_weight > 0u);
       } else {
         CHECK(n_adopt > 0u);

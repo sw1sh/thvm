@@ -711,6 +711,14 @@ static int run_schedule(const char *self, const char *file, double wall,
           int dn = open("/dev/null", O_WRONLY);
           if (dn >= 0) { dup2(dn, 2); close(dn); }
         }
+        // Concurrent slices must not append to one history export: each
+        // gets <path>.<slice>.  A --lane run (one slice) keeps the path.
+        const char *hx = getenv("THVM_ATP_HISTORY_EXPORT");
+        if (only < 0 && hx != NULL && hx[0] != '\0') {
+          char hp[1024];
+          snprintf(hp, sizeof hp, "%s.%s", hx, SCHEDULE[i].name);
+          setenv("THVM_ATP_HISTORY_EXPORT", hp, 1);
+        }
         // FINDPROOF_SLICE carries the slice name: every consumer tests
         // only its presence, and the name labels the process for
         // diagnostics (THVM_ATP_CLOCK_TRACE headers, /proc environ).
@@ -961,9 +969,10 @@ static int fof_split_orchestrate(const char *self, const char *file,
              (int)getpid(), b);
     char cmd[4096];
     snprintf(cmd, sizeof cmd,
-             "FINDPROOF_SLICE='%s' THVM_ATP_FOF_BRANCH='%s' '%s' --preset=%s "
+             "FINDPROOF_SLICE='%s' THVM_ATP_FOF_BRANCH='%s' "
+             "THVM_ATP_FOF_BRANCH_ID=%d '%s' --preset=%s "
              "--max-steps=%s --wall=%.1f --szs%s '%s' > '%s'%s",
-             branch_slice, picks[b], self, preset, max_steps, wb,
+             branch_slice, picks[b], b, self, preset, max_steps, wb,
              want_proof ? " --proof" : "", file, outs[b],
              g_cli_verbose ? "" : " 2>/dev/null");
     int st = system(cmd);
