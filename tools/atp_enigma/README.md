@@ -372,6 +372,76 @@ that they are byte-identical.  The job lists use the runner's shard format
 `static_gates.py <tptp_root> <problem.p>...` prints the gate bits and live
 lanes of the CLI's exit-fast lanes, the static replica that T7 checks.
 
+## Comparison protocol (`protocol/`)
+
+The tools that run and judge every arm comparison of
+[docs/plans/enigma_portfolio.md](../../docs/plans/enigma_portfolio.md)
+(sections 1.3 to 1.5, gates G0.2 and G0.3).  Each file's header holds its
+exact definitions.
+
+| file | what | where |
+|---|---|---|
+| `protocol/run_arms.py` | one comparison: every arm on every problem, one problem at a time, under the section 1.3 command, calibration, shuffles, repeats and strict CheckProof; resumable, sentinels, sealed logs for J13 | pod |
+| `protocol/calibrate_wdep.sh` | gate G0.3: the J13 submission build at 45, 53, 60 and 70 s, in shards; `report` runs `stats.py wdep` | pod (report: Mac) |
+| `protocol/stats.py` | `compare` (section 1.5), `delta` (D, delta, G0.2), `wdep` (G0.3); `--aggregates-only` prints only the L0/L1 aggregates and seals the per-problem tables under `~/.cache/thvm/enigma/sealed/` | Mac (text only) |
+| `protocol/calib_candidates.tsv` | the TRAIN problems the pod-speed reference is chosen from | |
+| `protocol/test_stats.py` | known-answer tests on synthetic rows: `python3 tools/atp_enigma/protocol/test_stats.py` | Mac |
+
+A pod needs 16 vCPUs (`run_arms.py` refuses another count), python3,
+coreutils `timeout` and `lscpu`; below 72 GiB every run gets
+`THVM_ATP_RSS_ABORT_MB=3500`.  Inputs: `~/.cache/thvm/casc/FindProof.tgz`
+(the submission build: the WDEP arm and the pod-speed calibration binary),
+`~/.cache/thvm/enigma/matrix/{j13_ueq.tgz,tptp_pool.tgz,problems.tsv}`, and
+for current-main arms a source tree built with
+`make -f tools/casc/Makefile bin/FindProof` and
+`make -f tools/proover/Makefile bin/CheckProof`.
+
+WDEP calibration, 4 pods (`~/in` holds the four protocol files and the three
+tarballs):
+
+```
+bash ~/in/calibrate_wdep.sh setup ~/wdep ~/in/FindProof.tgz ~/in/j13_ueq.tgz ~/in/tptp_pool.tgz
+bash ~/wdep/bin/calibrate_wdep.sh calib-ref ~/wdep ~/in/calib_candidates.tsv   # pod 1 only, first
+# copy ~/wdep/calib_ref.tsv to the Mac and to ~/wdep/ on the other pods, then on pod K:
+nohup setsid bash ~/wdep/bin/calibrate_wdep.sh run ~/wdep K/4 ~/wdep/calib_ref.tsv \
+  </dev/null >~/wdep/run_K.log 2>&1 &
+# done when ~/wdep/out_K/run.done exists; harvest: tar czf ~/wdep_K.tgz -C ~/wdep out_K setup.txt
+bash tools/atp_enigma/protocol/calibrate_wdep.sh report \
+  --table-out ~/.cache/thvm/enigma/wdep/agreement.tsv -- ~/.cache/thvm/enigma/wdep/wdep_*.tgz
+```
+
+L0 (P0 at W180 and at the WDEP of G0.3, two passes; `arms.tsv` is
+`P0<TAB>/root/l0/thvm/bin/FindProof<TAB>--schedule`, `j13.tsv` the `j13`
+rows of the matrix `problems.tsv`, `calib_ref.tsv` the one table from the
+WDEP calibration):
+
+```
+mkdir -p ~/sub ~/tptp_pool ~/j13
+tar xzf ~/in/FindProof.tgz -C ~/sub; tar xzf ~/in/tptp_pool.tgz -C ~/tptp_pool
+tar xzf ~/in/j13_ueq.tgz -C ~/j13; cp ~/in/run_arms.py ~/run_arms.snapshot.py
+nohup setsid python3 ~/run_arms.snapshot.py run --problems ~/in/j13.tsv --arms ~/in/arms.tsv \
+  --walls 180,WDEP --passes 2 --root ~/j13 --checker ~/l0/thvm/bin/CheckProof \
+  --calib-ref ~/in/calib_ref.tsv --calib-bin ~/sub/FindProof/bin/FindProof \
+  --calib-root ~/tptp_pool --shard K/N --out ~/out_L0_K </dev/null >~/L0_K.log 2>&1 &
+```
+
+A comparison of arms (L1, L2, DEV gates) is the same command with one line
+per arm in `arms.tsv`, `--passes 1` (the default: repeats on disagreements
+and clock-gated winners) and `--src-main ~/l0/thvm/tools/atp_cli/main.c` for
+the lane flags.  J13 output is never read: on the pod
+`tar czf ~/L0_K.tgz -C ~ out_L0_K`, copy the archive into
+`~/.cache/thvm/enigma/sealed/` on the Mac and leave it packed; `stats.py`
+reads the archives directly:
+
+```
+python3 tools/atp_enigma/protocol/stats.py delta --rows ~/.cache/thvm/enigma/sealed/L0_*.tgz
+python3 tools/atp_enigma/protocol/stats.py compare --rows ~/.cache/thvm/enigma/sealed/L0_*.tgz \
+  --pair P0@1,P0@2 --aggregates-only --label L0
+python3 tools/atp_enigma/protocol/stats.py compare --rows ~/.cache/thvm/enigma/sealed/L1_*.tgz \
+  --pair E,NL --pair E,PD --pair P1,P0 --nl P0,P1,PD --aa-rows ~/.cache/thvm/enigma/sealed/L0_*.tgz \
+  --aggregates-only --label L1
+```
+
 ## Typical flow
 
 ```

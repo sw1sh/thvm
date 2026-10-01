@@ -1,0 +1,19 @@
+# Pod-speed calibration candidates (run_arms.py calib-ref --calib): name TAB path (relative to the
+# TPTP pool root of ~/.cache/thvm/enigma/matrix/tptp_pool.tgz).  TRAIN problems, stem-disjoint
+# from J13, that the twee lane proved in 3.3-8.1 s at 60 s in the neural_p0 harvest: their
+# fastest lane needs less than 10 s, so none is in the hard tail (DEV-T).  calib-ref keeps the
+# 10 most stable under the calibration binary's schedule.
+GRP440-1	Problems/GRP/GRP440-1.p
+ROB023-1	Problems/ROB/ROB023-1.p
+GRP444-1	Problems/GRP/GRP444-1.p
+ROB022-1	Problems/ROB/ROB022-1.p
+GRP406-1	Problems/GRP/GRP406-1.p
+ALG030-10	Problems/ALG/ALG030-10.p
+GRP501-1	Problems/GRP/GRP501-1.p
+GRP471-1	Problems/GRP/GRP471-1.p
+GRP688-1	Problems/GRP/GRP688-1.p
+GRP408-1	Problems/GRP/GRP408-1.p
+GRP438-1	Problems/GRP/GRP438-1.p
+GRP504-1	Problems/GRP/GRP504-1.p
+GRP499-1	Problems/GRP/GRP499-1.p
+GRP480-1	Problems/GRP/GRP480-1.p
