@@ -638,6 +638,14 @@ static void rmu_emit_term(Term t, FILE *fp) {
                            ? ".0" : "";
           fprintf(fp, signbit(fv) ? "(%s%s)" : "%s%s", lit, frac);
         }
+      } else if (dtype_kind(dtype) == DK_UINT) {
+        // An unsigned int payload zero-extends and wraps to the dtype's
+        // width, the value const_to_tendesc fills, and spells an unsigned
+        // literal, as tinygrad renders a uint32 / uint64 const
+        // (renderer/cstyle.py:29-30): `%d` spelled a u32 0xFFFFFFFF `-1`,
+        // which a CAST to float kept.
+        u32 width = dtype_info(dtype)->bits;
+        fprintf(fp, "%uu", (width < 32) ? (bits & ((1u << width) - 1u)) : bits);
       } else {
         fprintf(fp, "%d", (int)bits);
       }

@@ -6,7 +6,8 @@
 // truncated to the dtype, as tinygrad's DType.const truncates in every
 // UOp.const (dtype.py:79-84); f64 values are therefore f32-precise.
 // An integer payload is the low 32 bits of the value, so a signed
-// narrow int is sign-extended.  Every reader decodes this way
+// narrow int is sign-extended, and an unsigned int payload zero-extends
+// (a u32 0xFFFFFFFF is 4294967295).  Every reader decodes this way
 // (const_to_tendesc, the renderers, uop_walk).
 //
 // Cache: a fixed-size open-addressed hash table keyed by (dtype, bits)

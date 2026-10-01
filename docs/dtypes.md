@@ -219,7 +219,10 @@ value truncated to the CONST's dtype: `uop_const` rounds f16 / bf16 /
 fp8 payloads through their storage encoding, as tinygrad's
 `DType.const` truncates in every `UOp.const` (dtype.py:79-84).  An
 f64 CONST is therefore f32-precise.  An integer payload is the low 32
-bits of the value, so a signed narrow int is sign-extended.
+bits of the value, so a signed narrow int is sign-extended, and an
+unsigned int payload zero-extends: a u32 0xFFFFFFFF reads as 4294967295
+in `const_to_tendesc`, in the legacy C emit (`4294967295u`, as tinygrad
+renders it, renderer/cstyle.py:29-30) and in the UOp walker.
 
 Folding rules, all at the constructor level:
 - `CAST(x, x.dtype) -> x`

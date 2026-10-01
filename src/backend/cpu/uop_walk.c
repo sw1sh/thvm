@@ -335,6 +335,17 @@ static i64 uwalk_int_wrap(u32 dt, i64 v) {
   return (i64)u;
 }
 
+// The value of an int or bool CONST of dtype `dt` with payload `bits`, as
+// const_to_tendesc fills it and the C emit spells it: an unsigned int
+// payload zero-extends and wraps to the dtype's width (a u32 0xFFFFFFFF is
+// 4294967295, not -1), any other sign-extends from 32 bits.
+static i64 uwalk_const_int(u32 dt, u32 bits) {
+  if (dtype_kind(dt) == DK_UINT) {
+    return uwalk_int_wrap(dt, (i64)bits);
+  }
+  return (i64)(i32)bits;
+}
+
 // Int or bool value v of dtype `dt` as a double; a u64 is unsigned.
 static double uwalk_int_to_f64(u32 dt, i64 v) {
   return (dt == DT_UINT64) ? (double)(u64)v : (double)v;
@@ -777,8 +788,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
         union { u32 b; f32 f; } pun = { .b = bits };
         return (double)pun.f;
       }
-      // Integer const widened to double.
-      return (double)(i32)bits;
+      return uwalk_int_to_f64(dt, uwalk_const_int(dt, bits));
     }
     case UOP_INDEX_E: {
       Term buf  = heap_read(loc + 0);
@@ -877,7 +887,7 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
         union { u32 b; f32 f; } pun = { .b = bits };
         return (i64)pun.f;
       }
-      return (i64)(i32)bits;
+      return uwalk_const_int(dt, bits);
     }
     case UOP_RANGE: {
       u32 axis_id = term_val(heap_read(loc + 0));

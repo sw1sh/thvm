@@ -35,6 +35,15 @@
 // 10 where the double quotient truncates to 9.  The walker's int evaluator
 // added the truncated operands of a float ADD, MUL or NEG and read RECIP,
 // EXP2, LOG2 and SQRT as 0.
+//
+// The unsigned-CONST kernels hold a CONST of an unsigned dtype whose payload
+// has its high bit set.  Such a CONST is the value const_to_tendesc fills:
+// its 32-bit payload zero-extended and wrapped to the dtype, as tinygrad
+// renders it (`4294967295u`, renderer/cstyle.py:29-30).  Both routes read
+// the payload sign-extended: the C emit spelled a u32 0xFFFFFFFF `-1`, which
+// a CAST to float kept at -1 and a u64 compare widened to 2^64 - 1, and the
+// walker compared a u32 load with -1, so `x < 0xFFFFFFFFu` was false for
+// every x (a scatter-min's identity, uint32's max).
 #include "../src/thvm.c"
 #include "test.h"
 #include <dlfcn.h>
@@ -464,6 +473,64 @@ static void build_lane_blocks(void) {
 }
 
 // out[i] = <index op>(a(x[i], y[i]), b(x[i], y[i])) over f32 x and y.
+static Term below(Term x, Term c) {
+  return uop_iwhere(uop_binary(UOP_CMPLT, x, c), uop_const(DT_INT32, 1),
+                    uop_const(DT_INT32, 0));
+}
+
+static void build_unsigned_consts(void) {
+  {
+    u32 const v[NO] = { 0, 1, 0x7FFFFFFFu, 0x80000000u, 0xFFFFFFFEu, 0xFFFFFFFFu,
+                        12345, 0xC0000000u };
+    i32 w[NO];
+    for (u32 i = 0; i < NO; i++) {
+      w[i] = (v[i] < 0xFFFFFFFFu) ? 1 : 0;
+    }
+    Kern *k = kern("u32-below-u32-max-const", DT_INT32, NO);
+    input(k, DT_UINT32, NO, v);
+    k->root = uop_store(k->out, at_i(),
+                        below(ld(k, 0, at_i()), uop_const(DT_UINT32, 0xFFFFFFFFu)));
+    want(k, w);
+  }
+  {
+    f32 const f[NO] = { 0.0f, 1.0f, -1.0f, 0.5f, 256.0f, -4294967296.0f, 3.0f, -0.0f };
+    f32 w[NO];
+    for (u32 i = 0; i < NO; i++) {
+      w[i] = (f32)0xFFFFFFFFu + f[i];
+    }
+    Kern *k = kern("u32-max-const-to-f32", DT_FP32, NO);
+    input(k, DT_FP32, NO, f);
+    Term c = uop_cast(uop_const(DT_UINT32, 0xFFFFFFFFu), DT_FP32);
+    k->root = uop_store(k->out, at_i(), uop_binary(UOP_ADD, c, ld(k, 0, at_i())));
+    want(k, w);
+  }
+  {
+    u8 const v[NO] = { 0, 1, 127, 128, 254, 255, 200, 2 };
+    i32 w[NO];
+    for (u32 i = 0; i < NO; i++) {
+      w[i] = (v[i] < 255) ? 1 : 0;
+    }
+    Kern *k = kern("u8-below-all-ones-const", DT_INT32, NO);
+    input(k, DT_UINT8, NO, v);
+    k->root = uop_store(k->out, at_i(),
+                        below(ld(k, 0, at_i()), uop_const(DT_UINT8, 0xFFFFFFFFu)));
+    want(k, w);
+  }
+  {
+    u64 const v[NO] = { 0, 0xFFFFFFFEull, 0xFFFFFFFFull, 0x100000000ull,
+                        (u64)1 << 63, UINT64_MAX, 1, (u64)1 << 40 };
+    i32 w[NO];
+    for (u32 i = 0; i < NO; i++) {
+      w[i] = (v[i] < 0xFFFFFFFFull) ? 1 : 0;
+    }
+    Kern *k = kern("u64-below-zero-extended-const", DT_INT32, NO);
+    input(k, DT_UINT64, NO, v);
+    k->root = uop_store(k->out, at_i(),
+                        below(ld(k, 0, at_i()), uop_const(DT_UINT64, 0xFFFFFFFFu)));
+    want(k, w);
+  }
+}
+
 static Kern *index_op_kern(char const *name, f32 const *x, f32 const *y) {
   Kern *k = kern(name, DT_INT32, NO);
   input(k, DT_FP32, NO, x);
@@ -691,6 +758,7 @@ int main(void) {
   build_guards();
   build_lane_blocks();
   build_index_ops();
+  build_unsigned_consts();
   check_walker();
   check_rendered();
   thvm_free();
