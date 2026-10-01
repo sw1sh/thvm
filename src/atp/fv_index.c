@@ -155,6 +155,19 @@ static u32 atp_dtree_flatsym(Term t, AtpDTreeVarMap *vm) {
   }
 }
 
+// Explicit-stack preorder walks over a heap Term (index insert, subject
+// flatten): a CTR whose children are being visited -- child i of the
+// layout cell at `base` is heap_read(base + 1 + i) -- at flat position
+// `here`.  Frames start in a small array on the C stack and move to the
+// heap only for a deeper term, so term depth costs heap, not C stack.
+typedef struct {
+  u64 base;
+  u32 i;
+  u32 n;
+  u32 here;
+} AtpDTreeWalkFrame;
+enum { ATP_DTREE_WALK_INL = 64 };
+
 // A discrimination-tree node: left-child / right-sibling in a flat
 // realloc-grown pool addressed by u32 INDEX (no pointers, so a pool
 // realloc never invalidates the structure).  `sym` is the flat symbol
@@ -234,16 +247,28 @@ typedef struct {
   /* creating edges as needed.  `vm` renumbers variables by first        */   \
   /* appearance.  Returns the node reached after `t`'s whole preorder    */   \
   /* string.  A TAG_CTR's children extend the string in left-to-right    */   \
-  /* order; a TAG_FVR / TAG_NUM is one symbol.                           */   \
+  /* order; a TAG_FVR / TAG_NUM is one symbol.  Pending subterms sit on  */   \
+  /* an explicit stack (children pushed right to left), so the preorder  */   \
+  /* and every flatsym renumbering are the recursion's, at any depth.    */   \
   static u32 atp_##stem##_insert_term(IndexT *ix, u32 node, Term t,           \
                                       AtpDTreeVarMap *vm) {                   \
-    node = atp_##stem##_child(ix, node, atp_dtree_flatsym(t, vm));            \
-    if (term_tag(t) == TAG_CTR) {                                             \
-      u32 n = term_ctr_n(t);                                                  \
-      for (u32 i = 0; i < n; i++) {                                           \
-        node = atp_##stem##_insert_term(ix, node, term_ctr_at(t, i), vm);     \
+    Term  st_inl[ATP_DTREE_WALK_INL];                                         \
+    Term *st  = st_inl;                                                       \
+    u32   nst = 0u;                                                           \
+    u32   cst = ATP_DTREE_WALK_INL;                                           \
+    st[nst++] = t;                                                            \
+    while (nst > 0u) {                                                        \
+      Term x = st[--nst];                                                     \
+      node = atp_##stem##_child(ix, node, atp_dtree_flatsym(x, vm));          \
+      if (term_tag(x) == TAG_CTR) {                                           \
+        u32 n = term_ctr_n(x);                                                \
+        while (nst + n > cst) {                                               \
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);         \
+        }                                                                     \
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(x, i);             \
       }                                                                       \
     }                                                                         \
+    term_stack_release(st, st_inl);                                           \
     return node;                                                              \
   }
 
@@ -514,19 +539,46 @@ static void atp_fv_index_rebuild(AtpState *s) {
 // -- never silently under-retrieves).
 static u8 atp_dt_flatten(Term t, u32 *subsz, u32 *flatsym,
                          AtpDTreeVarMap *vm, u32 cap, u32 *pos) {
-  u32 here = *pos;
-  if (here >= cap) return 0;
-  flatsym[here] = atp_dtree_flatsym(t, vm);
-  *pos = here + 1u;
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    for (u32 i = 0; i < n; i++) {
-      if (!atp_dt_flatten(term_ctr_at(t, i), subsz, flatsym, vm, cap, pos))
-        return 0;
+  AtpDTreeWalkFrame  fr_inl[ATP_DTREE_WALK_INL];
+  AtpDTreeWalkFrame *fr  = fr_inl;
+  u32                nfr = 0u;
+  u32                cfr = ATP_DTREE_WALK_INL;
+  u8                 ok  = 1u;
+  for (;;) {
+    u32 here = *pos;
+    if (here >= cap) {
+      ok = 0u;
+      break;
     }
+    flatsym[here] = atp_dtree_flatsym(t, vm);
+    *pos = here + 1u;
+    u32 n = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+    if (n > 0u) {
+      if (nfr == cfr) {
+        fr = (AtpDTreeWalkFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].base = term_val(t);
+      fr[nfr].i    = 0u;
+      fr[nfr].n    = n;
+      fr[nfr].here = here;
+      nfr++;
+    } else {
+      subsz[here] = 1u;
+    }
+    // positions covered by each finished subtree
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      subsz[fr[nfr - 1u].here] = *pos - fr[nfr - 1u].here;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    AtpDTreeWalkFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
-  subsz[here] = *pos - here;          // positions covered by t's subtree
-  return 1;
+  term_stack_release(fr, fr_inl);
+  return ok;
 }
 
 // One retrieval's immutable parameters, threaded through the

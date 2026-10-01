@@ -393,6 +393,7 @@ TESTS := \
   $(BIN)/test_ft_alloc \
   $(BIN)/test_ft \
   $(BIN)/test_ft_deep \
+  $(BIN)/test_atp_deep \
   $(BIN)/test_ft_order \
   $(BIN)/test_atp_ft_rules \
   $(BIN)/test_atp_ft \
