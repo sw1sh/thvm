@@ -178,6 +178,9 @@ static Term rc_collapse_one(Term red) {
   if (uop_reduce_n_axes(red) != 1) return 0;          // single-axis only
   u32 aid = uop_reduce_axis(red, 0);
   Term body = uop_reduce_src(red);
+  // Only rule (2) folds, and only an IWHERE body: decline before walking
+  // the body, which costs a pass over it per reduce.
+  if (term_tag(body) != TAG_UOP || term_ext(body) != UOP_IWHERE) return 0;
 
   // Locate the reduce axis's RANGE leaf to read its static extent.  The
   // axis_id is the numeric reduce axis; scan the body for RANGE(aid).
@@ -195,7 +198,6 @@ static Term rc_collapse_one(Term red) {
   if (ext == 0 || ext > (1u << 24)) return 0;          // guard absurd extents
 
   // Rule (2): bound-collapse of IWHERE(cmp(affine(r)), val, 0).
-  if (term_ext(body) != UOP_IWHERE) return 0;
   u64 bloc = term_val(body);
   Term cond = heap_read(bloc + 0);
   Term then_v = heap_read(bloc + 1);
@@ -249,58 +251,77 @@ static Term rc_collapse_one(Term red) {
 // Bottom-up rewrite: collapse every foldable single-axis SUM-reduce in
 // the DAG rooted at `root`.  Rebuilds parents around folded children via
 // the simplifying constructors (which hash-cons).  Returns the rewritten
-// root (== root when nothing folded).  Bounded recursion; a small memo
-// avoids re-walking shared sub-DAGs.
-// Open-addressed memo (Term key -> rewritten Term).  Was a LINEAR-scan array:
-// rc_memo_get scanned all `n` entries per node, so visiting K nodes cost O(K^2)
-// -- the dominant deep-graph JIT-capture cost (per-kernel store_root of O(depth)
-// nodes, rewritten for every kernel: 0.98 ms @ 4 blocks -> 7.5 ms @ 8 blocks in
-// profiling, ~O(N^2.7)).  A hash makes each lookup O(1).  Key 0 = empty (the
-// caller never memoizes a 0 Term: rc_rewrite_rec returns early on non-UOP and
-// guards root==0).  Power-of-2 capacity; mask-index open addressing.  At load
-// the table just stops memoizing (correct, slow -- the prior >CAP behavior).
+// root (== root when nothing folded).  Bounded recursion; the memo visits
+// each shared sub-DAG once.
 // Open-addressed memo (Term key -> rewritten Term), generation-stamped so the
 // per-call reset is O(1) (bump `cur_gen`) instead of memset'ing the whole
-// table.  A slot is "live" iff slot_gen[i] == m->cur_gen.  This replaces the
-// old LINEAR-scan array whose rc_memo_get scanned all `n` entries per node
-// (O(K^2) over a K-node store_root; the dominant deep-graph JIT-capture cost:
-// 0.98 ms @ 4 blocks -> 7.5 ms @ 8 blocks before this).  Key 0 never memoized
-// (caller guards root==0; non-UOP returns early).  Power-of-2 capacity.
-#define RC_MEMO_CAP 16384            /* power of 2 */
+// table.  A slot is "live" iff slot_gen[i] == m->cur_gen.  Key 0 is never
+// memoized (the caller guards root==0; non-UOP returns early).  The capacity
+// is a power of 2 and doubles at half load, never giving up on memoizing:
+// without the memo every path to a shared sub-DAG re-walks it (and re-runs
+// rc_find_range over each REDUCE body in it), a cost that doubles with each
+// level of sharing, which a deep chain of table.cat steps has one of per step.
+#define RC_MEMO_INIT_CAP 16384            /* power of 2 */
 typedef struct {
-  u64 key[RC_MEMO_CAP];
-  Term val[RC_MEMO_CAP];
-  u32 slot_gen[RC_MEMO_CAP];
-  u32 cur_gen;
-  u32 n;
+  u64  *key;
+  Term *val;
+  u32  *slot_gen;
+  u32   cap;
+  u32   cur_gen;
+  u32   n;
 } RcMemo;
-static inline u32 rc_memo_hash(Term t) {
+static inline u32 rc_memo_hash(Term t, u32 cap) {
   u64 v = (u64)t;
   v ^= v >> 33; v *= 0xff51afd7ed558ccdULL;
   v ^= v >> 33; v *= 0xc4ceb9fe1a85ec53ULL;
   v ^= v >> 33;
-  return (u32)v & (RC_MEMO_CAP - 1);
+  return (u32)v & (cap - 1);
 }
 static Term rc_memo_get(RcMemo *m, Term t, int *hit) {
-  u32 h = rc_memo_hash(t);
-  for (u32 probe = 0; probe < RC_MEMO_CAP; probe++) {
-    u32 i = (h + probe) & (RC_MEMO_CAP - 1);
+  u32 h = rc_memo_hash(t, m->cap);
+  for (u32 probe = 0; probe < m->cap; probe++) {
+    u32 i = (h + probe) & (m->cap - 1);
     if (m->slot_gen[i] != m->cur_gen) { *hit = 0; return 0; }  // empty (this gen)
     if (m->key[i] == (u64)t) { *hit = 1; return m->val[i]; }
   }
   *hit = 0; return 0;
 }
-static void rc_memo_put(RcMemo *m, Term t, Term v) {
-  if (m->n * 2 >= RC_MEMO_CAP) return;                 // keep load < 0.5: stop memoizing
-  u32 h = rc_memo_hash(t);
-  for (u32 probe = 0; probe < RC_MEMO_CAP; probe++) {
-    u32 i = (h + probe) & (RC_MEMO_CAP - 1);
+static void rc_memo_insert(RcMemo *m, Term t, Term v) {
+  u32 h = rc_memo_hash(t, m->cap);
+  for (u32 probe = 0; probe < m->cap; probe++) {
+    u32 i = (h + probe) & (m->cap - 1);
     if (m->slot_gen[i] != m->cur_gen) {                // empty (this gen): claim
       m->key[i] = (u64)t; m->val[i] = v;
       m->slot_gen[i] = m->cur_gen; m->n++; return;
     }
     if (m->key[i] == (u64)t) { m->val[i] = v; return; }  // update
   }
+}
+// Double the table, re-inserting this generation's entries.  The fresh
+// stamps are 0 and cur_gen >= 1, so every new slot reads empty.
+static void rc_memo_grow(RcMemo *m) {
+  u32   cap  = m->cap ? m->cap * 2 : RC_MEMO_INIT_CAP;
+  u64  *key  = (u64  *)malloc((size_t)cap * sizeof(u64));
+  Term *val  = (Term *)malloc((size_t)cap * sizeof(Term));
+  u32  *gen  = (u32  *)calloc(cap, sizeof(u32));
+  if (key == NULL || val == NULL || gen == NULL) {
+    fprintf(stderr, "thvm: reduce-collapse memo: out of memory at %u entries\n", cap);
+    exit(1);
+  }
+  RcMemo old = *m;
+  m->key = key; m->val = val; m->slot_gen = gen; m->cap = cap; m->n = 0;
+  for (u32 i = 0; i < old.cap; i++) {
+    if (old.slot_gen[i] == m->cur_gen) {
+      rc_memo_insert(m, (Term)old.key[i], old.val[i]);
+    }
+  }
+  free(old.key); free(old.val); free(old.slot_gen);
+}
+static void rc_memo_put(RcMemo *m, Term t, Term v) {
+  if ((m->n + 1) * 2 > m->cap) {
+    rc_memo_grow(m);
+  }
+  rc_memo_insert(m, t, v);
 }
 
 static Term rc_rewrite_rec(Term t, RcMemo *m, u32 depth) {
@@ -394,13 +415,16 @@ fn Term uop_reduce_arange_collapse(Term root) {
   }
   if (!enabled) return root;
   if (root == 0) return root;
-  // File-scope static (single-threaded per realize; ~384 KB, too big for the
-  // stack).  Zero-initialized once at load (slot_gen all 0, cur_gen 0); each
-  // call bumps cur_gen so all prior stamps read as empty -- an O(1) reset.
+  // File-scope static (single-threaded per realize), kept across calls with
+  // the capacity it grew to.  Each call bumps cur_gen so all prior stamps
+  // read as empty -- an O(1) reset.
   static RcMemo memo;
+  if (memo.cap == 0) {
+    rc_memo_grow(&memo);
+  }
   memo.n = 0;
   if (++memo.cur_gen == 0) {            // wrap (astronomically rare): hard-clear
-    memset(memo.slot_gen, 0, sizeof(memo.slot_gen));
+    memset(memo.slot_gen, 0, (size_t)memo.cap * sizeof(u32));
     memo.cur_gen = 1;
   }
   return uop_root_map_stores(root, rc_collapse_store, &memo);

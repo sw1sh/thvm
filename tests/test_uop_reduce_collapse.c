@@ -10,6 +10,7 @@
 
 #include "../src/thvm.c"
 #include "test.h"
+#include <unistd.h>
 
 // 1 iff the DAG rooted at `t` still contains a UOP_REDUCE.
 static int has_reduce(Term t, u32 depth) {
@@ -144,6 +145,48 @@ int main(void) {
     Term red = uop_reduce(REDUCE_SUM, INNER, body);
     Term folded = uop_reduce_arange_collapse(red);
     CHECK_EQ(folded, red);
+  }
+
+  // === a wide shared DAG beside a foldable reduce ===
+  // A 64-lane, 160-level ladder (each node adds two nodes of the level
+  // below) has 10240 distinct nodes but 2^160 paths from the top, the
+  // sharing a chain of table.cat steps builds.  The rewrite has to visit
+  // each node once at any DAG size; alarm() turns a path-by-path walk into
+  // a failure instead of a hang.  (The helpers above walk paths, so they
+  // only see the folded reduce, never the ladder.)
+  TEST_BEGIN("reduce-collapse/wide-shared-dag-visits-each-node-once");
+  {
+    enum { W = 64, L = 160 };
+    Term lane[W];
+    for (u32 i = 0; i < W; i++) {
+      lane[i] = uop_range(1000 + i, KAX_LOOP, 2);
+    }
+    for (u32 k = 0; k < L; k++) {
+      Term next[W];
+      for (u32 i = 0; i < W; i++) {
+        next[i] = uop_int_binary(UOP_IADD, lane[i], lane[(i + 1) % W]);
+      }
+      memcpy(lane, next, sizeof lane);
+    }
+    Term ladder = lane[0];
+    for (u32 i = 1; i < W; i++) {
+      ladder = uop_int_binary(UOP_IADD, ladder, lane[i]);
+    }
+    u32 OUTER = 10, INNER = 11;
+    Term r0 = uop_range(OUTER, KAX_LOOP, 8);
+    Term r1 = uop_range(INNER, KAX_LOOP, 8);
+    Term cond = uop_int_binary(UOP_ILT, r1, r0);
+    Term body = uop_iwhere(cond, uop_const(DT_INT32, 1), uop_const(DT_INT32, 0));
+    Term red = uop_reduce(REDUCE_SUM, INNER, body);
+    Term root = uop_int_binary(UOP_IADD, ladder, red);
+    alarm(60);
+    Term folded = uop_reduce_arange_collapse(root);
+    alarm(0);
+    CHECK(term_tag(folded) == TAG_UOP && term_ext(folded) == UOP_IADD);
+    CHECK_EQ(heap_read(term_val(folded) + 0), ladder);
+    Term fred = heap_read(term_val(folded) + 1);
+    CHECK(!has_reduce(fred, 0));
+    for (i64 v = 0; v <= 7; v++) CHECK_EQ(eval_idx(fred, OUTER, v, 0), v);
   }
 
   // === skips: MAX reduce (only SUM folds) ===
