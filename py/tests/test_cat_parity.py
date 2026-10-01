@@ -513,11 +513,14 @@ class TestCatATP(unittest.TestCase):
 @unittest.skipUnless(NATIVE, "native gather runs on the CPU backend")
 class TestCatJit(unittest.TestCase):
     """The trainer's step under TinyJit: a fixed layout, fresh index /
-    feature / label / weight tensors every call.  The losses compare under
-    tinygrad's train step, loss.realize(*opt.schedule_step()), which reads
-    every loss before its update; the trainer's own step
-    (history_net.py:875-881) realizes the loss after opt.step(), so only
-    the parameters it trains compare there."""
+    feature / label / weight tensors every call.  Losses compare under
+    loss.realize(*opt.schedule_step()).  The trainer's own step
+    (history_net.py:875-881) realizes the loss after opt.step(); there only
+    the parameters compare, because of an open thvm bug that predates cat
+    (it reproduces at 2185bba8 without it): a loss realized after opt.step()
+    reads the post-step parameters in eager mode but the pre-step ones on
+    TinyJit replays, while tinygrad master returns the same loss eager and
+    jitted.  The parameters themselves match tinygrad in every form."""
 
     STEPS = 5
 

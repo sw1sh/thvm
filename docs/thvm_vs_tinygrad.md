@@ -416,8 +416,9 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
   unequal ones (`mixin/op.py:731-746`, `test_uops_stats.py:132`); its
   `stack` is the STACK op (`mixin/movement.py:256-272`).  thvm's py `cat`
   pads and sums every piece list and `stack` is unsqueeze, then cat: the
-  same values and gradients, one add per extra piece, and a -0.0 reads
-  +0.0, as it does in tinygrad's pad path.
+  same values and gradients, one add per extra piece, except that a -0.0
+  reads +0.0 (0 + -0.0), where tinygrad keeps -0.0 on both its stack and
+  its pad paths.
 - **MULTI / AFTER / TUPLE / FUNCTION+grad_fxn** - *large*. No custom grad functions; blocks higher-order grads.
 - **Higher-order gradients (grad of grad)** - *large*. thvm grads are AST Terms, not differentiable Tensors; would need `TENS[tid].grad` rearchitected as a Tensor.
 - **LARS / Muon optimizers** - *medium each*. Only SGD + Adam; Muon aliased to Adam.

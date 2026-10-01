@@ -1172,7 +1172,7 @@ class Tensor(metaclass=_TensorMeta):
         input's gradient is its slice of the output's (PAD's adjoint is a
         SHRINK).  thvm has no STACK op, so equal pieces take this path too,
         where tinygrad stacks them (mixin/movement.py:256-272): one add per
-        extra piece, and a -0.0 comes out as +0.0."""
+        extra piece, and a -0.0 comes out as +0.0, where tinygrad keeps it."""
         dim = self._resolve_dim(dim)
         for arg in args:
             assert arg.ndim == self.ndim and all(
