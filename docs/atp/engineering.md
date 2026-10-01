@@ -519,18 +519,29 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
   measurement path (`tests/atp_lane_cli.sh`).
 * `bin/FindProof --problem-features problem.p` prints one TSV row of
   the problem's features phi(p), the per-problem input of the ENIGMA
-  selection layer (`AtpPhi` in `src/thvm.h`;
-  docs/plans/enigma_portfolio.md, section 3.1): the lanes' exit-fast
-  gate bits, computed by the gates' own predicates; Waldmeister's
-  structure detection over the loaded .pr (AC pairs, units, inverses,
-  distributivity); sizes and goal shape; the TPTP SPC and rating
-  header fields when the file has them.  `--header` prints the column
-  names.  `--lanes` prints the static gate replica instead, one row per
-  schedule lane: live, dead, or undet (a Horn release runs before the
-  failing gate), the give-up line it predicts, and whether a run
-  without `--szs` prints exactly that line.  `tests/atp_problem_features.sh`
-  checks the replica against the live lanes;
-  `bin/test_atp_problem_features` checks the features on inline problems.
+  selection layer (`AtpPhi` in `src/thvm.h`, layout version
+  `ATP_PHI_VERSION`; docs/plans/enigma_portfolio.md, section 3.1): the
+  lanes' exit-fast gate bits, computed by the gates' own predicates;
+  Waldmeister's structure detection over the loaded .pr (AC pairs,
+  units, inverses, distributivity); sizes as floor(log2(1 + n)); then
+  the `meta_*` columns, which are never selection inputs: the layout
+  version and the TPTP rating and SPC header fields (training files
+  have them, deployed problems do not).  phi(p) is computed under the
+  default front-end configuration whatever the environment holds, and
+  knob flags are refused.  `--header` prints the column names.
+  `--lanes` prints the static gate replica instead
+  (`tools/atp_cli/lane_gates.c`), one row per schedule lane: live, dead,
+  or undet (a Horn release runs before the failing gate), the give-up
+  line it predicts, and whether a run without `--szs` prints exactly
+  that line.  Both run in a forked child (`tp_problem_features`), so the
+  replay's environment variable, term-heap copies, /tmp file and exits
+  never reach the caller; a schedule parent can call it before it
+  launches the lanes.  `bin/test_atp_problem_features` checks the
+  features, verdicts and isolation on inline and generated problems;
+  `tests/atp_problem_features.sh` (pods, with `OLD_FP` set to a build
+  from before the gate refactor) checks the replica's lines and phi(p)'s
+  gate bits against live lane runs; `tools/atp_enigma/matrix_tables.py
+  --t7c` checks the replica against the pool rows of the lane matrix.
 * `docs/ENV_KNOBS.md` carries the repo-wide index; its ATP section
   points here.
 

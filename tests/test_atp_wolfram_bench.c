@@ -694,9 +694,12 @@ typedef struct {
 
 // The static gate replica (tools/atp_cli/problem_features.c) reads back the
 // .pr it emits; while it holds this trap a parse error returns there with
-// its message instead of ending the process.
+// its message instead of ending the process, and the replica closes the
+// file a walk had open (g_pr_walk_fp).
 static jmp_buf *g_pr_die_trap = NULL;
 static char     g_pr_die_trap_why[256];
+static FILE    *g_pr_walk_fp = NULL;
+#define PR_DIE_OPEN "cannot open file"
 
 static void pr_die(const PrProblem *pr, const char *msg, const char *at) {
   if (g_pr_die_trap != NULL) {
@@ -1109,7 +1112,8 @@ typedef enum {
 static void pr_walk(PrProblem *pr,
                     void (*on_line)(PrProblem *, PrSec, const char *)) {
   FILE *fp = fopen(pr->path, "r");
-  if (fp == NULL) pr_die(pr, "cannot open file", NULL);
+  if (fp == NULL) pr_die(pr, PR_DIE_OPEN, NULL);
+  g_pr_walk_fp = fp;
   char line[8192];
   PrSec sec = PR_SEC_NONE;
   while (fgets(line, sizeof line, fp) != NULL) {
@@ -1124,6 +1128,7 @@ static void pr_walk(PrProblem *pr,
     }
     on_line(pr, sec, body);
   }
+  g_pr_walk_fp = NULL;
   fclose(fp);
 }
 

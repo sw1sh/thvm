@@ -1,38 +1,23 @@
 // ===================================================================
-// Problem features phi(p) and the static gate replica
+// Problem features phi(p)
 // ===================================================================
 //
-// tp_problem_features reads a TPTP unit-equality problem the way a
-// schedule lane does and computes phi(p), the per-problem input of the
-// selection layer (AtpPhi, src/thvm.h; docs/plans/enigma_portfolio.md,
-// section 3.1), and, for every SCHEDULE lane, the verdict of its
-// exit-fast gates.  FindProof --problem-features prints both, so training
-// rows and the deployed layer read the same numbers.
+// tp_problem_features computes phi(p) (AtpPhi, src/thvm.h) and, when asked,
+// the static gate replica's verdict for every SCHEDULE lane (lane_gates.c),
+// in a forked child that hands back only the numbers.  The replay inside
+// calls thvm_init, which sets an environment variable every lane would
+// inherit (and the environment's size moves the instruction work clock);
+// it loads .pr copies into the term heap, which FindProof never collects;
+// it writes a .pr under /tmp; and an input error exits.  None of that may
+// reach a schedule parent.
 //
-// A gate bit is the gate's own predicate -- tp_has_ifeq_dispatcher,
-// horn_slice_gate (through tp_horn_probe), tp_def_unfold_applies,
-// tp_has_ax_ground_compound, tp_equals_goal_applies, tp_conj_syms,
-// pr_otter_expands, the parse's g_cli_goal_existential -- read at the
-// stage of main's front end where the gate reads it.  The stages
-// themselves (currying, def-unfold, the equals encoding, axiom selection,
-// the capacity gates, the canonical presentation, the .pr the bench
-// loads) are replayed once per distinct lane configuration; a give-up
-// returns through g_tp_giveup_trap, and a .pr the bench's reader rejects
-// through g_pr_die_trap, as the line a lane would print.
-//
-// Not replayed: the Horn release, whose budget runs on the work clock.
-// It can decide the problem (a lane run with --szs then proves it before
-// any later gate) and it adds units that later gates read.  A lane that
-// runs the release on a problem with an ifeq dispatcher and fails a gate
-// after it is "undet"; "strict" says whether the predicted give-up line
-// is still exactly what that lane prints without --szs.  The equals and
-// narrowq gates read only the goals, so their lines stay strict; the
-// def-unfold gate, the capacity gates near their bounds and axiom
-// selection read the released units too.
-//
-// The replay writes process state no lane shares (the symbol hash, the
-// curry table, the transform flags); all of it is reset on return, so
-// call it before the process parses a problem of its own.
+// The front end is replayed stage by stage in main's order, once per
+// distinct configuration: phi(p)'s own (var[0]: the defaults, whatever the
+// environment holds) and, for the replica, each lane's.  A stage's give-up
+// returns through g_tp_giveup_trap and the bench's .pr reader's through
+// g_pr_die_trap, as the line a lane would print.  An allocation failure is
+// the replay's own (it holds several copies of the problem, a lane one),
+// so it fails the features instead.
 
 static const char *const PHI_NAMES[ATP_PHI_N] = {
   [ATP_PHI_GOAL_EXISTENTIAL]   = "goal_existential",
@@ -75,236 +60,101 @@ static const char *const PHI_NAMES[ATP_PHI_N] = {
   [ATP_PHI_GOAL_DEPTH_MAX]     = "goal_depth_max",
   [ATP_PHI_GOAL_VARS_MAX]      = "goal_vars_max",
   [ATP_PHI_CONJ_SYM_FRAC]      = "conj_sym_frac",
-  [ATP_PHI_RATING]             = "rating",
-  [ATP_PHI_SPC_KNOWN]          = "spc_known",
-  [ATP_PHI_SPC_UNS]            = "spc_uns",
-  [ATP_PHI_SPC_SAT]            = "spc_sat",
-  [ATP_PHI_SPC_OPEN]           = "spc_open",
-  [ATP_PHI_SPC_UEQ]            = "spc_ueq",
+};
+
+// Columns printed after phi(p) and never fed to the selection layer: the
+// layout version, and the TPTP header fields that build and weight the
+// training sets (plan section 3.2).  Deployed problems carry no header,
+// and the SPC status is the label.
+enum {
+  PHI_META_PHI_VERSION,
+  PHI_META_RATING,
+  PHI_META_SPC_KNOWN,
+  PHI_META_SPC_UNS,
+  PHI_META_SPC_SAT,
+  PHI_META_SPC_OPEN,
+  PHI_META_SPC_UEQ,
+  PHI_META_N
+};
+typedef struct { float v[PHI_META_N]; } PhiMeta;
+
+static const char *const PHI_META_NAMES[PHI_META_N] = {
+  [PHI_META_PHI_VERSION] = "meta_phi_version",
+  [PHI_META_RATING]      = "meta_rating",
+  [PHI_META_SPC_KNOWN]   = "meta_spc_known",
+  [PHI_META_SPC_UNS]     = "meta_spc_uns",
+  [PHI_META_SPC_SAT]     = "meta_spc_sat",
+  [PHI_META_SPC_OPEN]    = "meta_spc_open",
+  [PHI_META_SPC_UEQ]     = "meta_spc_ueq",
 };
 
 #define PHI_WHY_LEN 256
 
-// Static gate replica verdicts.
 enum { TP_LANE_LIVE = 0, TP_LANE_DEAD, TP_LANE_UNDET };
 
+// One lane's replica verdict.  strict: the predicted line (or none, for a
+// live lane) is exactly what a run of the lane without --szs prints.
 typedef struct {
-  u8   verdict;            // TP_LANE_*
-  u8   strict;             // why (or no gate line) is what a run without --szs prints
-  char gates[64];          // the exit-fast gates the lane arms, comma-separated
-  char why[PHI_WHY_LEN];   // the first gate's give-up line ("" when none fails)
+  u8   verdict;
+  u8   strict;
+  char gates[64];
+  char why[PHI_WHY_LEN];
 } TpLaneGate;
 
-// The front-end knobs one lane's child reads, from its SCHEDULE flags and
-// the environment, parsed as the gate sites parse them.
-typedef struct {
-  u8   fof;            // --fof-slice >= 2
-  u8   ifeq;           // --ifeq-guard >= 2
-  u8   horn;           // the Horn release runs (--horn not 0)
-  u8   horn_cd;        // --horn-cd >= 2
-  u8   horn_back;      // --horn-back >= 2
-  u8   def;            // --def-unfold 1 or 2: the transform runs
-  u8   def_gate;       // --def-unfold=2
-  u8   tgt_exit;       // --tgt-exit
-  u8   eq;             // --equals-goal not 0: the encoding runs
-  u8   eq_gate;        // --equals-goal >= 2
-  u8   sine;           // axiom selection (THVM_ATP_SINE not 0)
-  u8   canon;          // --canon-input not 0
-  u8   tgt_sel_exit;   // --tgt-sel with --tgt-sel-exit
-  u8   nq;             // --narrow-queue >= 2
-  u8   otter;          // --otter-exit
-  u8   prec_extra;     // a .pr transform or explicit precedence the replica leaves out
-  u8   unmodelled;     // a gate the replica does not evaluate (--full-ac=2)
-  char sym_prec[64];   // --sym-prec ("" when unset)
-  char spb[16];        // --spb-prec ("" when unset)
-} PhiKnobs;
+static const char *phi_verdict_name(int verdict) {
+  switch (verdict) {
+    case TP_LANE_LIVE:  return "live";
+    case TP_LANE_DEAD:  return "dead";
+    default:            return "undet";
+  }
+}
 
-// The front end replayed for one lane configuration.
+// --- the replayed front end --------------------------------------------
+
 typedef struct {
-  u8   def, eq, sine;          // the configuration
-  u8   eq_applied;             // g_cli_equals_applied after the encoding
-  u8   ax_ground;              // the tgt-exit gate's input
-  u8   pr_io;                  // the .pr could not be written or allocated
-  int  n_hit, n_syms;          // the tgt-sel gate's input
-  char why[PHI_WHY_LEN];       // the replayed stages' give-up line
-  char canon_why[PHI_WHY_LEN]; // the canonical presentation's give-up line
-  char pr_why[PHI_WHY_LEN];    // the bench's .pr reader's give-up line (pr_die)
-  PrProblem *prp;              // the .pr the bench loads (NULL: not reached)
+  u8 def, eq, sine, canon;
+  u8 sine_env;   // axiom selection under the environment's tolerances
+} PhiCfg;
+
+typedef struct {
+  PhiCfg     cfg;
+  u8         eq_applied;
+  u8         ax_ground;
+  u8         reached_sel;          // past the capacity gates and canon
+  int        n_hit, n_syms;
+  char       why[PHI_WHY_LEN];     // def-unfold .. the capacity gates
+  char       canon_why[PHI_WHY_LEN];
+  char       pr_why[PHI_WHY_LEN];  // the bench's .pr reader
+  PrProblem *prp;
 } PhiVariant;
 
-#define PHI_MAX_VARIANTS 8
+#define PHI_MAX_VARIANTS 16
 
 typedef struct {
-  int  fof_input;
-  char parse_why[PHI_WHY_LEN];
-  int  no_goal;
-  int  ifeq;
-  char curry_why[PHI_WHY_LEN];
-  int  horn_gate;              // HORN_GATE_*, -1 before the probe
-  int  n_disp;
-  int  def_bit, eq_bit, goal_existential;
-  int  n_syms, n_vars;         // after currying
-  int  n_pos, n_neg, n_hyp;
+  int        parsed;
+  char       parse_why[PHI_WHY_LEN];
+  int        no_goal;
+  int        goal_existential;
+  int        ifeq;
+  int        curried;              // currying rewrote a wide functor
+  char       curry_why[PHI_WHY_LEN];
+  int        bits;                 // the stated problem's gate bits exist
+  int        horn_gate, n_disp, def_bit, eq_bit, ax_ground;
+  int        n_syms, n_vars, n_pos, n_neg, n_hyp;
+  char       fail[PHI_WHY_LEN];
   PhiVariant var[PHI_MAX_VARIANTS];
-  int  n_var;
+  int        n_var;
 } PhiCtx;
+
+// The replica (lane_gates.c, included after this file).
+static void tp_lane_configs(PhiCtx *c);
+static void tp_lane_gates(PhiCtx *c, TpLaneGate *lanes);
 
 static int g_phi_thvm_ready = 0;
 
-static int phi_on(const char *v) {
-  return v != NULL && v[0] != '\0' && v[0] != '0';
-}
-
-// The value lane `lane`'s child reads for knob env `env`: its flag in the
-// lane's SCHEDULE string (the last one wins, as main's setenv
-// overwrites), else the environment the schedule hands down.  NULL when
-// unset.
-static const char *phi_lane_knob(int lane, const char *env, char *buf,
-                                 size_t cap) {
-  const char *val = getenv(env);
-  const char *p = SCHEDULE[lane].flags;
-  while (*p != '\0') {
-    while (*p == ' ') {
-      p++;
-    }
-    const char *tok = p;
-    while (*p != '\0' && *p != ' ') {
-      p++;
-    }
-    size_t tl = (size_t)(p - tok);
-    if (tl < 3 || tok[0] != '-' || tok[1] != '-') {
-      continue;
-    }
-    const char *name = tok + 2;
-    const char *eq = memchr(name, '=', tl - 2);
-    size_t nl = (eq != NULL) ? (size_t)(eq - name) : tl - 2;
-    for (int k = 0; k < N_KNOBS; k++) {
-      if (strlen(KNOBS[k].flag) != nl || strncmp(KNOBS[k].flag, name, nl) != 0) {
-        continue;
-      }
-      if (strcmp(KNOBS[k].env, env) == 0) {
-        if (eq != NULL) {
-          size_t vl = (size_t)(p - eq - 1);
-          if (vl >= cap) {
-            vl = cap - 1;
-          }
-          memcpy(buf, eq + 1, vl);
-          buf[vl] = '\0';
-          val = buf;
-        } else {
-          val = "1";
-        }
-      }
-      break;
-    }
-  }
-  return val;
-}
-
-static void phi_lane_knobs(int lane, PhiKnobs *k) {
-  char b1[64], b2[64];
-  const char *v, *w;
-  memset(k, 0, sizeof *k);
-  v = phi_lane_knob(lane, "THVM_ATP_FOF_SLICE", b1, sizeof b1);
-  k->fof = (v != NULL && atoi(v) >= 2);
-  v = phi_lane_knob(lane, "THVM_ATP_IFEQ_GUARD", b1, sizeof b1);
-  k->ifeq = (v != NULL && atoi(v) >= 2);
-  v = phi_lane_knob(lane, "THVM_ATP_HORN", b1, sizeof b1);
-  k->horn = (v == NULL || v[0] != '0');
-  v = phi_lane_knob(lane, "THVM_ATP_HORN_CD", b1, sizeof b1);
-  k->horn_cd = (v != NULL && v[0] != '0' && atoi(v) >= 2);
-  v = phi_lane_knob(lane, "THVM_ATP_HORN_BACK", b1, sizeof b1);
-  k->horn_back = (v != NULL && v[0] != '0' && atoi(v) >= 2);
-  v = phi_lane_knob(lane, "THVM_ATP_DEF_UNFOLD", b1, sizeof b1);
-  k->def = (v != NULL && (v[0] == '1' || v[0] == '2'));
-  k->def_gate = (v != NULL && v[0] == '2');
-  v = phi_lane_knob(lane, "THVM_ATP_TGT_EXIT", b1, sizeof b1);
-  k->tgt_exit = (u8)phi_on(v);
-  v = phi_lane_knob(lane, "THVM_ATP_EQUALS_GOAL", b1, sizeof b1);
-  k->eq = (v != NULL && v[0] != '0');
-  k->eq_gate = (v != NULL && atoi(v) >= 2);
-  v = phi_lane_knob(lane, "THVM_ATP_SINE", b1, sizeof b1);
-  k->sine = (v == NULL || v[0] != '0');
-  v = phi_lane_knob(lane, "THVM_ATP_CANON_INPUT", b1, sizeof b1);
-  k->canon = (v == NULL || v[0] != '0');
-  v = phi_lane_knob(lane, "THVM_ATP_TGT_SEL", b1, sizeof b1);
-  w = phi_lane_knob(lane, "THVM_ATP_TGT_SEL_EXIT", b2, sizeof b2);
-  k->tgt_sel_exit = (u8)(phi_on(v) && phi_on(w));
-  v = phi_lane_knob(lane, "THVM_ATP_NARROW_QUEUE", b1, sizeof b1);
-  k->nq = (v != NULL && atoi(v) >= 2);
-  v = phi_lane_knob(lane, "THVM_ATP_OTTER_EXIT", b1, sizeof b1);
-  k->otter = (u8)phi_on(v);
-  v = phi_lane_knob(lane, "THVM_ATP_SYM_PREC", b1, sizeof b1);
-  snprintf(k->sym_prec, sizeof k->sym_prec, "%s", (v != NULL) ? v : "");
-  v = phi_lane_knob(lane, "THVM_ATP_SPB_PREC", b1, sizeof b1);
-  snprintf(k->spb, sizeof k->spb, "%s", (v != NULL) ? v : "");
-  // The bench rewrites the .pr (tgt, goal flattening, distributivity
-  // definitions) or the precedence (an explicit chain, the -auto path)
-  // before the otter gate reads it; the replica does not.
-  static const char *const extra[] = {
-    "THVM_ATP_TGT", "THVM_ATP_FLATTEN_GOAL", "THVM_ATP_DISTRIB",
-    "THVM_ATP_PRECEDENCE",
-  };
-  for (size_t i = 0; i < sizeof extra / sizeof extra[0]; i++) {
-    v = phi_lane_knob(lane, extra[i], b1, sizeof b1);
-    if (v != NULL && v[0] != '\0' && strcmp(v, "0") != 0) {
-      k->prec_extra = 1;
-    }
-  }
-  if (getenv("ATP_BENCH_AUTO_WEIGHTS") != NULL) {
-    k->prec_extra = 1;
-  }
-  v = phi_lane_knob(lane, "THVM_ATP_FULL_AC", b1, sizeof b1);
-  k->unmodelled = (v != NULL && v[0] == '2');
-}
-
-static void phi_gate_names(const PhiKnobs *k, char *buf, size_t cap) {
-  const char *names[9];
-  int n = 0;
-  if (k->fof) {
-    names[n++] = "fof";
-  }
-  if (k->ifeq) {
-    names[n++] = "ifeq";
-  }
-  if (k->horn && (k->horn_cd || k->horn_back)) {
-    names[n++] = "horn";
-  }
-  if (k->def_gate) {
-    names[n++] = "def";
-  }
-  if (k->tgt_exit) {
-    names[n++] = "tgt-ax";
-  }
-  if (k->tgt_sel_exit) {
-    names[n++] = "tgt-sel";
-  }
-  if (k->eq_gate) {
-    names[n++] = "equals";
-  }
-  if (k->nq) {
-    names[n++] = "narrowq";
-  }
-  if (k->otter) {
-    names[n++] = "otter";
-  }
-  size_t o = 0;
-  buf[0] = '\0';
-  for (int i = 0; i < n && o < cap; i++) {
-    o += (size_t)snprintf(buf + o, cap - o, "%s%s", (i > 0) ? "," : "",
-                          names[i]);
-  }
-  if (n == 0) {
-    snprintf(buf, cap, "-");
-  }
-}
-
-// --- front-end replay -------------------------------------------------
-
 typedef void (*PhiStage)(TpProblem *tp, void *arg);
 
-// Run one front-end stage with the give-up trap held: 0 when it returns,
-// 1 when it gives up (its line is in g_tp_giveup_trap_why).
+// 0 when the stage returns, 1 when it gives up (g_tp_giveup_trap_why).
 static int phi_run(PhiStage stage, TpProblem *tp, void *arg) {
   jmp_buf jb;
   g_tp_giveup_trap = &jb;
@@ -317,6 +167,14 @@ static int phi_run(PhiStage stage, TpProblem *tp, void *arg) {
   return 0;
 }
 
+static void phi_trapped(PhiCtx *c, char *line) {
+  if (strncmp(g_tp_giveup_trap_why, "OOM", 3) == 0) {
+    snprintf(c->fail, sizeof c->fail, "%s", g_tp_giveup_trap_why);
+  } else {
+    snprintf(line, PHI_WHY_LEN, "%s", g_tp_giveup_trap_why);
+  }
+}
+
 static int phi_count_neg(const TpProblem *tp) {
   int n = 0;
   for (int i = 0; i < tp->n_cls; i++) {
@@ -325,8 +183,19 @@ static int phi_count_neg(const TpProblem *tp) {
   return n;
 }
 
+static void phi_stage_unquote(TpProblem *tp, void *arg) {
+  (void)tp;
+  char **pre = (char **)arg;
+  *pre = tp_unquote_names(*pre);
+  tp_shorten_names(*pre);
+}
+
 static void phi_stage_parse(TpProblem *tp, void *arg) {
   tp_parse(tp, (const char *)arg);
+}
+
+static void phi_stage_ifeq(TpProblem *tp, void *arg) {
+  ((PhiCtx *)arg)->ifeq = tp_has_ifeq_dispatcher(tp);
 }
 
 static void phi_stage_curry(TpProblem *tp, void *arg) {
@@ -334,21 +203,33 @@ static void phi_stage_curry(TpProblem *tp, void *arg) {
   tp_curry_wide(tp);
 }
 
-// main's front end from def-unfold to the capacity gates, for one lane
-// configuration; the gates on the way are evaluated per lane.
+static void phi_stage_bits(TpProblem *tp, void *arg) {
+  PhiCtx *c = (PhiCtx *)arg;
+  char eqn[TP_NAME_LEN], tru[TP_NAME_LEN], fls[TP_NAME_LEN];
+  int n_nonground = 0;
+  c->n_disp = tp_horn_probe(tp, &c->horn_gate);
+  c->def_bit = tp_def_unfold_applies(tp);
+  c->eq_bit = tp_equals_goal_applies(tp, eqn, tru, fls, &n_nonground);
+  c->ax_ground = tp_has_ax_ground_compound(tp);
+}
+
 static void phi_stage_front(TpProblem *tp, void *arg) {
   PhiVariant *v = (PhiVariant *)arg;
-  if (v->def) {
+  if (v->cfg.def) {
     tp_def_unfold(tp);
   }
   v->ax_ground = (u8)tp_has_ax_ground_compound(tp);
-  if (v->eq) {
+  if (v->cfg.eq) {
     tp_equals_goal(tp);
     v->eq_applied = (u8)g_cli_equals_applied;
   }
   int n_neg = phi_count_neg(tp);
-  if (v->sine && tp->n_cls - n_neg > (int)PR_MAX_EQNS) {
-    tp_sine_select(tp);
+  if (v->cfg.sine && tp->n_cls - n_neg > (int)PR_MAX_EQNS) {
+    if (v->cfg.sine_env) {
+      tp_sine_select(tp);
+    } else {
+      tp_sine_select_cfg(tp, &TP_SINE_DEFAULT);
+    }
     n_neg = phi_count_neg(tp);
   }
   tp_check_capacity(tp, n_neg);
@@ -359,84 +240,87 @@ static void phi_stage_canon(TpProblem *tp, void *arg) {
   tp_canon_input(tp);
 }
 
-// The bench's .pr reader with its give-up trapped: 0 when the .pr loads, 1
-// when the reader gives up (its line is in g_pr_die_trap_why).  A give-up
-// inside the reader's line walk leaves that walk's FILE open.
+enum { PHI_PR_OK, PHI_PR_DIED, PHI_PR_IO };
+
+// The bench's .pr reader under its trap.  A file the reader cannot open is
+// this process's failure, not the lane's verdict.
 static int phi_pr_read(const char *path, PrProblem *p) {
   jmp_buf jb;
   g_pr_die_trap = &jb;
   if (setjmp(jb) != 0) {
     g_pr_die_trap = NULL;
-    return 1;
+    if (g_pr_walk_fp != NULL) {
+      fclose(g_pr_walk_fp);
+      g_pr_walk_fp = NULL;
+    }
+    return (strcmp(g_pr_die_trap_why, PR_DIE_OPEN) == 0) ? PHI_PR_IO
+                                                          : PHI_PR_DIED;
   }
   pr_load_header(path, p);
   pr_load_terms(p);
   g_pr_die_trap = NULL;
-  return 0;
+  return PHI_PR_OK;
 }
 
-// The .pr the bench would load, read by the bench's own reader: v->prp, or
-// the reader's give-up line in v->pr_why, or v->pr_io when the file cannot
-// be written.
-static void phi_load_pr(TpProblem *tp, PhiVariant *v) {
+static void phi_load_pr(PhiCtx *c, TpProblem *tp, PhiVariant *v) {
   char path[64];
   snprintf(path, sizeof path, "/tmp/thvm_phi_%d.pr", (int)getpid());
   char *text = tp_emit_pr(tp, "phi");
   FILE *fp = fopen(path, "w");
-  if (fp == NULL) {
-    free(text);
-    v->pr_io = 1;
-    return;
+  int ok = (fp != NULL);
+  if (ok) {
+    ok = (fputs(text, fp) >= 0);
+    ok = (fclose(fp) == 0) && ok;
   }
-  int ok = (fputs(text, fp) >= 0);
-  ok = (fclose(fp) == 0) && ok;
   free(text);
   PrProblem *p = ok ? (PrProblem *)malloc(sizeof *p) : NULL;
   if (p == NULL) {
     unlink(path);
-    v->pr_io = 1;
+    snprintf(c->fail, sizeof c->fail, "cannot write the replayed .pr to /tmp");
     return;
   }
   if (!g_phi_thvm_ready) {
     thvm_init();
     g_phi_thvm_ready = 1;
   }
-  if (phi_pr_read(path, p)) {
-    snprintf(v->pr_why, sizeof v->pr_why, "%s", g_pr_die_trap_why);
-    free(p);
-    p = NULL;
-  }
+  int r = phi_pr_read(path, p);
   unlink(path);
-  v->prp = p;
+  if (r == PHI_PR_OK) {
+    v->prp = p;
+    return;
+  }
+  free(p);
+  if (r == PHI_PR_IO) {
+    snprintf(c->fail, sizeof c->fail, "cannot read the replayed .pr back");
+  } else {
+    snprintf(v->pr_why, sizeof v->pr_why, "pr parse error: %.200s",
+             g_pr_die_trap_why);
+  }
 }
 
-// The bench's .pr reader gives up on this front end's output: its line.
-static const char *phi_pr_why(const PhiVariant *v) {
-  return (v->pr_why[0] != '\0') ? v->pr_why : NULL;
-}
-
-static void phi_variant_run(TpProblem *tp, PhiVariant *v) {
+static void phi_variant_run(PhiCtx *c, TpProblem *tp, PhiVariant *v) {
   g_cli_defunfold_n = 0;
   g_cli_equals_applied = 0;
   if (phi_run(phi_stage_front, tp, v)) {
-    snprintf(v->why, sizeof v->why, "%s", g_tp_giveup_trap_why);
+    phi_trapped(c, v->why);
     return;
   }
+  if (v->cfg.canon && phi_run(phi_stage_canon, tp, NULL)) {
+    phi_trapped(c, v->canon_why);
+    return;
+  }
+  v->reached_sel = 1;
   v->n_hit = tp_conj_syms(tp, NULL);
   v->n_syms = tp->n_syms;
-  if (phi_run(phi_stage_canon, tp, NULL)) {
-    snprintf(v->canon_why, sizeof v->canon_why, "%s", g_tp_giveup_trap_why);
-    return;
-  }
-  phi_load_pr(tp, v);
+  phi_load_pr(c, tp, v);
 }
 
-// The configuration (def, eq, sine), added when `add` and not yet there.
-static PhiVariant *phi_variant(PhiCtx *c, int def, int eq, int sine, int add) {
+static PhiVariant *phi_variant(PhiCtx *c, const PhiCfg *cfg, int add) {
   for (int i = 0; i < c->n_var; i++) {
-    PhiVariant *v = &c->var[i];
-    if (v->def == def && v->eq == eq && v->sine == sine) {
-      return v;
+    const PhiCfg *h = &c->var[i].cfg;
+    if (h->def == cfg->def && h->eq == cfg->eq && h->sine == cfg->sine &&
+        h->canon == cfg->canon && h->sine_env == cfg->sine_env) {
+      return &c->var[i];
     }
   }
   if (!add || c->n_var >= PHI_MAX_VARIANTS) {
@@ -444,17 +328,8 @@ static PhiVariant *phi_variant(PhiCtx *c, int def, int eq, int sine, int add) {
   }
   PhiVariant *v = &c->var[c->n_var++];
   memset(v, 0, sizeof *v);
-  v->def = (u8)def;
-  v->eq = (u8)eq;
-  v->sine = (u8)sine;
+  v->cfg = *cfg;
   return v;
-}
-
-// A lane's configuration: a transform it arms that changes nothing on
-// this problem leaves it with the default one.
-static PhiVariant *phi_lane_variant(PhiCtx *c, const PhiKnobs *k, int add) {
-  return phi_variant(c, k->def && c->def_bit, k->eq && c->eq_bit, k->sine,
-                     add);
 }
 
 static TpProblem *phi_clone(const TpProblem *src) {
@@ -471,8 +346,7 @@ static TpProblem *phi_clone(const TpProblem *src) {
   return w;
 }
 
-// Point the symbol hash at tp's table: a stage replayed on a clone rebuilt
-// it for the clone.
+// A stage replayed on a clone rebuilt the symbol hash for the clone.
 static void phi_sym_hash_rebuild(const TpProblem *tp) {
   for (int i = 0; i < TP_SYM_HASH_SLOTS; i++) {
     g_tp_sym_hash[i] = -1;
@@ -488,121 +362,80 @@ static void phi_sym_hash_rebuild(const TpProblem *tp) {
   }
 }
 
-// The otter gate under one lane's precedence knobs: 1 expands, 0 not,
-// -1 when the .pr was never reached.
-static int phi_otter_expands(const PhiVariant *v, const PhiKnobs *k) {
-  static u32 prec[PR_MAX_SYMS + PR_LABEL_BASE], wts[PR_MAX_SYMS + PR_LABEL_BASE];
-  PrProblem *p = v->prp;
-  if (p == NULL) {
-    return -1;
+// var[0] runs last, on tp itself.
+static void phi_variants(PhiCtx *c, TpProblem *tp, int lanes) {
+  static const PhiCfg dflt = { 0, 0, 1, 1, 0 };
+  phi_variant(c, &dflt, 1);
+  if (lanes) {
+    tp_lane_configs(c);
   }
-  memcpy(prec, p->precedence, sizeof prec);
-  memcpy(wts, p->weights, sizeof wts);
-  pr_sym_prec(p, (k->sym_prec[0] != '\0') ? k->sym_prec : NULL,
-              (k->spb[0] != '\0') ? k->spb : NULL);
-  atp_precedence_floor_reserved(p->precedence, p->n_syms + PR_LABEL_BASE);
-  int e = pr_otter_expands(p);
-  memcpy(p->precedence, prec, sizeof prec);
-  memcpy(p->weights, wts, sizeof wts);
-  return e;
-}
-
-// Released units reuse the signature and add at most HORN_REL_VARS
-// variable names (V0, V1, ...) and no conjecture unit: with this much room
-// the capacity gates and axiom selection's own give-up decide alike with
-// and without them.
-static int phi_release_neutral(const PhiCtx *c, const PhiVariant *v) {
-  int syms = c->n_syms + (v->eq ? 3 : 0);
-  int goal_units = c->n_neg + c->n_hyp + (v->eq ? 2 : 0);
-  return syms <= (int)PR_MAX_SYMS &&
-         c->n_vars + HORN_REL_VARS <= (int)PR_MAX_VARS &&
-         goal_units <= (int)PR_MAX_EQNS;
-}
-
-static void phi_lane_set(TpLaneGate *g, int verdict, int strict,
-                         const char *why) {
-  g->verdict = (u8)verdict;
-  g->strict = (u8)strict;
-  snprintf(g->why, sizeof g->why, "%s", (why != NULL) ? why : "");
-}
-
-// The lane's gates in main's order.  Up to the horn-cd / horn-back gate no
-// Horn release has run; after it, a lane with the release on a dispatcher
-// problem may have proved the problem or read released units.
-static void phi_lane_gate(PhiCtx *c, int lane, TpLaneGate *g) {
-  PhiKnobs k;
-  phi_lane_knobs(lane, &k);
-  phi_gate_names(&k, g->gates, sizeof g->gates);
-  const char *why = NULL;
-  int release = 0, dep = 0;
-  if (k.fof && !c->fof_input) {
-    why = TP_GATE_FOF;
-  } else if (c->parse_why[0] != '\0') {
-    why = c->parse_why;
-  } else if (c->no_goal) {
-    why = TP_GATE_NO_GOAL;
-  } else if (k.ifeq && !c->ifeq) {
-    why = TP_GATE_IFEQ;
-  } else if (c->curry_why[0] != '\0') {
-    why = c->curry_why;
-  } else if (k.horn && (k.horn_cd || k.horn_back) &&
-             c->horn_gate > HORN_GATE_LIVE) {
-    why = horn_slice_why(c->horn_gate, k.horn_cd, k.horn_back);
-  } else {
-    release = k.horn && c->n_disp > 0;
-    const PhiVariant *v = phi_lane_variant(c, &k, 0);
-    if (v == NULL) {
-      phi_lane_set(g, TP_LANE_UNDET, 0, NULL);
+  for (int i = 1; i < c->n_var && c->fail[0] == '\0'; i++) {
+    TpProblem *w = phi_clone(tp);
+    if (w == NULL) {
+      snprintf(c->fail, sizeof c->fail, "OOM in problem features");
       return;
     }
-    int ex = 1;
-    if (k.def_gate && !c->def_bit) {
-      why = TP_GATE_DEF;
-      dep = 1;
-    } else if (k.tgt_exit && !v->ax_ground) {
-      why = TP_GATE_TGT_AX;
-      dep = 1;
-    } else if (v->why[0] != '\0') {
-      why = v->why;
-      dep = !phi_release_neutral(c, v);
-    } else if (k.canon && v->canon_why[0] != '\0') {
-      why = v->canon_why;
-      dep = 1;
-    } else if (k.tgt_sel_exit && !tp_conj_cone_partial(v->n_hit, v->n_syms)) {
-      why = TP_GATE_TGT_SEL;
-      dep = 1;
-    } else if (k.eq_gate && !v->eq_applied) {
-      why = TP_GATE_EQUALS;
-    } else if (k.nq && !c->goal_existential) {
-      why = TP_GATE_NARROWQ;
-    } else if (phi_pr_why(v) != NULL) {
-      why = phi_pr_why(v);
-    } else if (k.unmodelled) {
-      phi_lane_set(g, TP_LANE_UNDET, 0, NULL);
-      return;
-    } else if (k.otter && (k.prec_extra || (ex = phi_otter_expands(v, &k)) < 0)) {
-      phi_lane_set(g, TP_LANE_UNDET, 0, NULL);
-      return;
-    } else if (k.otter && ex == 0) {
-      why = PR_GATE_OTTER;
-      dep = 1;
-    }
-    if (why == NULL && release && (k.def || !phi_release_neutral(c, v))) {
-      phi_lane_set(g, TP_LANE_UNDET, 0, NULL);
-      return;
-    }
+    phi_variant_run(c, w, &c->var[i]);
+    free(w);
+    phi_sym_hash_rebuild(tp);
   }
-  if (why == NULL) {
-    phi_lane_set(g, TP_LANE_LIVE, 1, NULL);
-  } else {
-    phi_lane_set(g, release ? TP_LANE_UNDET : TP_LANE_DEAD,
-                 !(release && dep), why);
+  if (c->fail[0] == '\0') {
+    phi_variant_run(c, tp, &c->var[0]);
   }
 }
 
-// --- the problem as stated ----------------------------------------------
+// main's front end over the parsed problem: the dispatcher probe, currying,
+// then the stated problem's gate bits, whose predicates print no lane's
+// line when they give up; then the replayed configurations.  The bits are
+// computed on a problem without a goal too, which every lane gives up on
+// before reading them.
+static void phi_front(PhiCtx *c, TpProblem *tp, int lanes) {
+  if (phi_run(phi_stage_ifeq, tp, c)) {
+    snprintf(c->fail, sizeof c->fail, "%s", g_tp_giveup_trap_why);
+    return;
+  }
+  for (int i = 0; i < tp->n_syms; i++) {
+    if (tp->syms[i].arity > CURRY_ARITY_CAP) {
+      c->curried = 1;
+    }
+  }
+  if (phi_run(phi_stage_curry, tp, NULL)) {
+    phi_trapped(c, c->curry_why);
+    return;
+  }
+  if (phi_run(phi_stage_bits, tp, c)) {
+    snprintf(c->fail, sizeof c->fail, "%s", g_tp_giveup_trap_why);
+    return;
+  }
+  c->bits = 1;
+  c->n_syms = tp->n_syms;
+  c->n_vars = tp->n_vars;
+  c->n_neg = phi_count_neg(tp);
+  c->n_pos = tp->n_cls - c->n_neg;
+  for (int i = 0; i < tp->n_cls; i++) {
+    c->n_hyp += (!tp->cls[i].neg && tp->cls[i].conj);
+  }
+  if (!c->no_goal) {
+    phi_variants(c, tp, lanes);
+  }
+}
 
-// Term depth of a clause side: a constant or a variable is 1.
+// --- phi(p) ----------------------------------------------------------------
+
+// floor(log2(1 + x)) for x >= 0, on the integer part: floor(log2(y)) ==
+// floor(log2(floor(y))) for y >= 1, and the integer form has no rounding
+// at the powers of two.
+static float phi_log2_bucket(double x) {
+  double y = 1.0 + x;
+  u64 n = (y < 1.8e19) ? (u64)y : UINT64_MAX;
+  int b = 0;
+  while (n > 1u) {
+    n >>= 1;
+    b++;
+  }
+  return (float)b;
+}
+
 static int phi_side_depth(const char *s) {
   int d = 0, best = 0;
   for (; *s != '\0'; s++) {
@@ -657,7 +490,9 @@ static int phi_clause_vars(const TpClause *cl) {
 
 static void phi_stated(const TpProblem *tp, AtpPhi *phi) {
   float *v = phi->v;
-  int n_ax = 0, n_goal = 0;
+  int n_ax = 0, n_hyp = 0, n_goal = 0, n_ground = 0;
+  int ax_size_max = 0, ax_depth_max = 0, ax_vars_max = 0;
+  int goal_size_max = 0, goal_depth_max = 0, goal_vars_max = 0;
   double ax_size = 0.0, ax_depth = 0.0, ax_vars = 0.0, goal_size = 0.0;
   for (int c = 0; c < tp->n_cls; c++) {
     const TpClause *cl = &tp->cls[c];
@@ -668,46 +503,55 @@ static void phi_stated(const TpProblem *tp, AtpPhi *phi) {
     if (cl->neg) {
       n_goal++;
       goal_size += size;
-      v[ATP_PHI_GOAL_SIZE_MAX]  = fmaxf(v[ATP_PHI_GOAL_SIZE_MAX], (float)size);
-      v[ATP_PHI_GOAL_DEPTH_MAX] = fmaxf(v[ATP_PHI_GOAL_DEPTH_MAX], (float)depth);
-      v[ATP_PHI_GOAL_VARS_MAX]  = fmaxf(v[ATP_PHI_GOAL_VARS_MAX], (float)vars);
+      goal_size_max  = (size > goal_size_max) ? size : goal_size_max;
+      goal_depth_max = (depth > goal_depth_max) ? depth : goal_depth_max;
+      goal_vars_max  = (vars > goal_vars_max) ? vars : goal_vars_max;
     } else if (cl->conj) {
-      v[ATP_PHI_HYPOTHESES] += 1.0f;
+      n_hyp++;
     } else {
       n_ax++;
       ax_size += size;
       ax_depth += depth;
       ax_vars += vars;
-      v[ATP_PHI_AX_SIZE_MAX]  = fmaxf(v[ATP_PHI_AX_SIZE_MAX], (float)size);
-      v[ATP_PHI_AX_DEPTH_MAX] = fmaxf(v[ATP_PHI_AX_DEPTH_MAX], (float)depth);
-      v[ATP_PHI_AX_VARS_MAX]  = fmaxf(v[ATP_PHI_AX_VARS_MAX], (float)vars);
-      if (vars == 0) {
-        v[ATP_PHI_AX_GROUND] += 1.0f;
-      }
+      ax_size_max  = (size > ax_size_max) ? size : ax_size_max;
+      ax_depth_max = (depth > ax_depth_max) ? depth : ax_depth_max;
+      ax_vars_max  = (vars > ax_vars_max) ? vars : ax_vars_max;
+      n_ground += (vars == 0);
     }
   }
-  v[ATP_PHI_AXIOMS] = (float)n_ax;
-  v[ATP_PHI_GOALS] = (float)n_goal;
-  if (n_ax > 0) {
-    v[ATP_PHI_AX_SIZE_MEAN]  = (float)(ax_size / n_ax);
-    v[ATP_PHI_AX_DEPTH_MEAN] = (float)(ax_depth / n_ax);
-    v[ATP_PHI_AX_VARS_MEAN]  = (float)(ax_vars / n_ax);
-  }
-  if (n_goal > 0) {
-    v[ATP_PHI_GOAL_SIZE_MEAN] = (float)(goal_size / n_goal);
-  }
-  v[ATP_PHI_SYMS] = (float)tp->n_syms;
+  int by_arity[5] = { 0, 0, 0, 0, 0 };
+  int max_arity = 0;
   for (int i = 0; i < tp->n_syms; i++) {
     int ar = tp->syms[i].arity;
-    v[(ar >= 4) ? ATP_PHI_SYMS_AR4P : ATP_PHI_SYMS_AR0 + ar] += 1.0f;
-    v[ATP_PHI_MAX_ARITY] = fmaxf(v[ATP_PHI_MAX_ARITY], (float)ar);
+    by_arity[(ar >= 4) ? 4 : ar]++;
+    max_arity = (ar > max_arity) ? ar : max_arity;
   }
-  v[ATP_PHI_VAR_NAMES] = (float)tp->n_vars;
+  v[ATP_PHI_AXIOMS]         = phi_log2_bucket(n_ax);
+  v[ATP_PHI_HYPOTHESES]     = phi_log2_bucket(n_hyp);
+  v[ATP_PHI_GOALS]          = phi_log2_bucket(n_goal);
+  v[ATP_PHI_SYMS]           = phi_log2_bucket(tp->n_syms);
+  v[ATP_PHI_SYMS_AR0]       = phi_log2_bucket(by_arity[0]);
+  v[ATP_PHI_SYMS_AR1]       = phi_log2_bucket(by_arity[1]);
+  v[ATP_PHI_SYMS_AR2]       = phi_log2_bucket(by_arity[2]);
+  v[ATP_PHI_SYMS_AR3]       = phi_log2_bucket(by_arity[3]);
+  v[ATP_PHI_SYMS_AR4P]      = phi_log2_bucket(by_arity[4]);
+  v[ATP_PHI_MAX_ARITY]      = phi_log2_bucket(max_arity);
+  v[ATP_PHI_VAR_NAMES]      = phi_log2_bucket(tp->n_vars);
+  v[ATP_PHI_AX_SIZE_MAX]    = phi_log2_bucket(ax_size_max);
+  v[ATP_PHI_AX_SIZE_MEAN]   = phi_log2_bucket((n_ax > 0) ? ax_size / n_ax : 0.0);
+  v[ATP_PHI_AX_DEPTH_MAX]   = phi_log2_bucket(ax_depth_max);
+  v[ATP_PHI_AX_DEPTH_MEAN]  = phi_log2_bucket((n_ax > 0) ? ax_depth / n_ax : 0.0);
+  v[ATP_PHI_AX_VARS_MAX]    = phi_log2_bucket(ax_vars_max);
+  v[ATP_PHI_AX_VARS_MEAN]   = phi_log2_bucket((n_ax > 0) ? ax_vars / n_ax : 0.0);
+  v[ATP_PHI_AX_GROUND]      = phi_log2_bucket(n_ground);
+  v[ATP_PHI_GOAL_SIZE_MAX]  = phi_log2_bucket(goal_size_max);
+  v[ATP_PHI_GOAL_SIZE_MEAN] = phi_log2_bucket((n_goal > 0) ? goal_size / n_goal : 0.0);
+  v[ATP_PHI_GOAL_DEPTH_MAX] = phi_log2_bucket(goal_depth_max);
+  v[ATP_PHI_GOAL_VARS_MAX]  = phi_log2_bucket(goal_vars_max);
 }
 
 // A TPTP header field ("% SPC      : ..." / "% Rating   : ...") of the raw
-// text, copied into buf; 0 when the file has none (CASC copies carry no
-// header).
+// text, copied into buf; 0 when the file has none.
 static int phi_header_field(const char *raw, const char *key, char *buf,
                             size_t cap) {
   size_t kl = strlen(key);
@@ -752,28 +596,28 @@ static int phi_header_field(const char *raw, const char *key, char *buf,
   return 0;
 }
 
-static void phi_header(const char *raw, AtpPhi *phi) {
+static void phi_header(const char *raw, PhiMeta *meta) {
   char buf[256];
   if (phi_header_field(raw, "Rating", buf, sizeof buf)) {
     char *e = NULL;
     double r = strtod(buf, &e);
     if (e != buf) {
-      phi->v[ATP_PHI_RATING] = (float)r;
+      meta->v[PHI_META_RATING] = (float)r;
     }
   }
   if (phi_header_field(raw, "SPC", buf, sizeof buf)) {
-    phi->v[ATP_PHI_SPC_KNOWN] = 1.0f;
+    meta->v[PHI_META_SPC_KNOWN] = 1.0f;
     int field = 0;
     for (char *tok = buf; *tok != '\0'; field++) {
       size_t tl = strcspn(tok, "_ \t");
       if (field == 1) {
-        phi->v[ATP_PHI_SPC_UNS]  = (tl == 3 && strncmp(tok, "UNS", 3) == 0);
-        phi->v[ATP_PHI_SPC_SAT]  = (tl == 3 && strncmp(tok, "SAT", 3) == 0);
-        phi->v[ATP_PHI_SPC_OPEN] = (tl == 3 && (strncmp(tok, "UNK", 3) == 0 ||
-                                                strncmp(tok, "OPN", 3) == 0));
+        meta->v[PHI_META_SPC_UNS]  = (tl == 3 && strncmp(tok, "UNS", 3) == 0);
+        meta->v[PHI_META_SPC_SAT]  = (tl == 3 && strncmp(tok, "SAT", 3) == 0);
+        meta->v[PHI_META_SPC_OPEN] = (tl == 3 && (strncmp(tok, "UNK", 3) == 0 ||
+                                                  strncmp(tok, "OPN", 3) == 0));
       }
       if (tl == 3 && strncmp(tok, "UEQ", 3) == 0) {
-        phi->v[ATP_PHI_SPC_UEQ] = 1.0f;
+        meta->v[PHI_META_SPC_UEQ] = 1.0f;
       }
       tok += tl;
       if (*tok != '_') {
@@ -814,13 +658,41 @@ static void phi_algebra(const PrProblem *p, AtpPhi *phi) {
   }
 }
 
-// The replayed stages narrate on stderr; a schedule parent stays silent.
+static void phi_fill(const PhiCtx *c, AtpPhi *phi) {
+  float *v = phi->v;
+  v[ATP_PHI_GOAL_EXISTENTIAL] = (float)c->goal_existential;
+  v[ATP_PHI_IFEQ_DISPATCHER]  = (float)c->ifeq;
+  if (c->bits) {
+    v[ATP_PHI_EQUALS_GOAL]        = (float)c->eq_bit;
+    v[ATP_PHI_HORN_SLICE]         = (float)(c->horn_gate == HORN_GATE_LIVE);
+    v[ATP_PHI_DEF_UNFOLD]         = (float)c->def_bit;
+    v[ATP_PHI_AX_GROUND_COMPOUND] = (float)c->ax_ground;
+    v[ATP_PHI_SINE]               = (float)(c->n_pos > (int)PR_MAX_EQNS);
+  }
+  const PhiVariant *base = (c->n_var > 0) ? &c->var[0] : NULL;
+  if (base == NULL || !base->reached_sel) {
+    return;
+  }
+  v[ATP_PHI_CONJ_CONE_PARTIAL] =
+      (float)tp_conj_cone_partial(base->n_hit, base->n_syms);
+  v[ATP_PHI_CONJ_SYM_FRAC] =
+      (base->n_syms > 0) ? (float)base->n_hit / (float)base->n_syms : 0.0f;
+  if (base->prp != NULL) {
+    v[ATP_PHI_FE_LIVE] = 1.0f;
+    phi_algebra(base->prp, phi);
+  }
+}
+
+// The replayed stages narrate on stderr.
 static int phi_quiet_begin(void) {
   if (g_cli_verbose) {
     return -1;
   }
   fflush(stderr);
   int saved = dup(2);
+  if (saved < 0) {
+    return -1;
+  }
   int dn = open("/dev/null", O_WRONLY);
   if (dn >= 0) {
     dup2(dn, 2);
@@ -838,56 +710,18 @@ static void phi_quiet_end(int saved) {
   close(saved);
 }
 
-// The gates and the replayed front end over the parsed, still uncurried
-// problem tp, which the base configuration consumes last.
-static void phi_front(PhiCtx *c, TpProblem *tp) {
-  c->ifeq = tp_has_ifeq_dispatcher(tp);
-  const char *ce = getenv("THVM_ATP_CURRY");
-  if ((ce == NULL || ce[0] != '0') && phi_run(phi_stage_curry, tp, NULL)) {
-    snprintf(c->curry_why, sizeof c->curry_why, "%s", g_tp_giveup_trap_why);
-    return;
-  }
-  c->n_disp = tp_horn_probe(tp, &c->horn_gate);
-  c->def_bit = tp_def_unfold_applies(tp);
-  char eqn[TP_NAME_LEN], tru[TP_NAME_LEN], fls[TP_NAME_LEN];
-  int n_nonground = 0;
-  c->eq_bit = tp_equals_goal_applies(tp, eqn, tru, fls, &n_nonground);
-  c->n_syms = tp->n_syms;
-  c->n_vars = tp->n_vars;
-  c->n_neg = phi_count_neg(tp);
-  c->n_pos = tp->n_cls - c->n_neg;
-  for (int i = 0; i < tp->n_cls; i++) {
-    c->n_hyp += (!tp->cls[i].neg && tp->cls[i].conj);
-  }
-  const char *se = getenv("THVM_ATP_SINE");
-  phi_variant(c, 0, 0, se == NULL || se[0] != '0', 1);   // var[0]: the default
-  for (int lane = 0; lane < N_SCHED; lane++) {
-    PhiKnobs k;
-    phi_lane_knobs(lane, &k);
-    phi_lane_variant(c, &k, 1);
-  }
-  for (int i = 1; i < c->n_var; i++) {
-    TpProblem *w = phi_clone(tp);
-    if (w == NULL) {
-      snprintf(c->var[i].why, sizeof c->var[i].why, "OOM in problem features");
-      continue;
-    }
-    phi_variant_run(w, &c->var[i]);
-    free(w);
-    phi_sym_hash_rebuild(tp);
-  }
-  phi_variant_run(tp, &c->var[0]);
-}
-
-// phi(p) of the TPTP problem in `file` and, when lanes is not NULL, the
-// static gate replica for every SCHEDULE lane (lanes[N_SCHED]).  Returns 0,
-// or 2 when the file cannot be read or is not unit-equality CNF (FOF and
-// non-unit CNF go through the clausal front end, which this does not
-// replay) or when the replayed .pr cannot be written.
-static int tp_problem_features(const char *file, AtpPhi *phi,
-                               TpLaneGate *lanes) {
+// phi(p) and, when lanes is not NULL, the replica (lanes[N_SCHED]), in this
+// process: tp_problem_features runs it in a child.  Returns 0, or 2 when the
+// file cannot be read, is not unit-equality CNF (FOF and non-unit CNF go
+// through the clausal front end, which is not replayed) or the replay
+// fails.  The front-end state it writes (the symbol hash, the curry table,
+// the transform flags) is reset on return.
+static int phi_compute(const char *file, AtpPhi *phi, PhiMeta *meta,
+                       TpLaneGate *lanes) {
   memset(phi, 0, sizeof *phi);
-  phi->v[ATP_PHI_RATING] = -1.0f;
+  memset(meta, 0, sizeof *meta);
+  meta->v[PHI_META_PHI_VERSION] = (float)ATP_PHI_VERSION;
+  meta->v[PHI_META_RATING] = -1.0f;
   size_t rl = 0;
   char *raw = tp_read_file(file, &rl);
   if (raw == NULL) {
@@ -900,7 +734,13 @@ static int tp_problem_features(const char *file, AtpPhi *phi,
     free(raw);
     return 2;
   }
-  phi_header(raw, phi);
+  if (tp_input_is_fof(raw)) {
+    fprintf(stderr, "FindProof: problem features: %s needs the clausal front "
+            "end (FOF or non-unit CNF); they cover unit-equality CNF\n", file);
+    free(raw);
+    return 2;
+  }
+  phi_header(raw, meta);
   PhiCtx *c = (PhiCtx *)calloc(1, sizeof *c);
   TpProblem *tp = (TpProblem *)calloc(1, sizeof *tp);
   if (c == NULL || tp == NULL) {
@@ -910,20 +750,9 @@ static int tp_problem_features(const char *file, AtpPhi *phi,
     free(raw);
     return 2;
   }
-  c->fof_input = tp_input_is_fof(raw);
   c->horn_gate = -1;
   char *pre = tp_preprocess(file, raw);
-  pre = tp_unquote_names(pre);
-  tp_shorten_names(pre);
-  if (c->fof_input || tp_needs_clausal(pre)) {
-    fprintf(stderr, "FindProof: problem features: %s needs the clausal front "
-            "end (FOF or non-unit CNF); they cover unit-equality CNF\n", file);
-    free(pre);
-    free(raw);
-    free(c);
-    free(tp);
-    return 2;
-  }
+  free(raw);
   int saved_goal_ex = g_cli_goal_existential;
   int saved_equals  = g_cli_equals_applied;
   int saved_defun   = g_cli_defunfold_n;
@@ -936,61 +765,37 @@ static int tp_problem_features(const char *file, AtpPhi *phi,
   // A --proof run's lineage capture would record the replayed transforms
   // into the tables its proof cites.
   g_prov_on = 0;
+  int rc = 0;
+  if (phi_run(phi_stage_unquote, tp, &pre)) {
+    phi_trapped(c, c->parse_why);
+  } else if (tp_needs_clausal(pre)) {
+    fprintf(stderr, "FindProof: problem features: %s needs the clausal front "
+            "end (FOF or non-unit CNF); they cover unit-equality CNF\n", file);
+    rc = 2;
+  } else if (phi_run(phi_stage_parse, tp, pre)) {
+    phi_trapped(c, c->parse_why);
+  } else {
+    c->parsed = 1;
+  }
   // The parse speaks only to end the process on malformed input (exit 2),
   // and that line must reach the caller: quiet after it.
-  int parsed = !phi_run(phi_stage_parse, tp, pre);
-  if (!parsed) {
-    snprintf(c->parse_why, sizeof c->parse_why, "%s", g_tp_giveup_trap_why);
-  }
-  int quiet = phi_quiet_begin();
-  if (parsed) {
-    phi_stated(tp, phi);
-    c->goal_existential = g_cli_goal_existential;
-    int n_neg = phi_count_neg(tp);
-    c->no_goal = (n_neg == 0 || tp->n_cls == n_neg);
-    if (!c->no_goal) {
-      phi_front(c, tp);
+  if (rc == 0) {
+    int quiet = phi_quiet_begin();
+    if (c->parsed) {
+      phi_stated(tp, phi);
+      c->goal_existential = g_cli_goal_existential;
+      int n_neg = phi_count_neg(tp);
+      c->no_goal = (n_neg == 0 || tp->n_cls == n_neg);
+      phi_front(c, tp, lanes != NULL);
     }
-  }
-  float *v = phi->v;
-  const PhiVariant *base = (c->n_var > 0) ? &c->var[0] : NULL;
-  int fe_live = base != NULL && base->why[0] == '\0' &&
-                base->canon_why[0] == '\0' && phi_pr_why(base) == NULL;
-  v[ATP_PHI_GOAL_EXISTENTIAL]   = (float)c->goal_existential;
-  v[ATP_PHI_EQUALS_GOAL]        = (float)c->eq_bit;
-  v[ATP_PHI_IFEQ_DISPATCHER]    = (float)c->ifeq;
-  v[ATP_PHI_HORN_SLICE]         = (float)(c->horn_gate == HORN_GATE_LIVE);
-  v[ATP_PHI_DEF_UNFOLD]         = (float)c->def_bit;
-  v[ATP_PHI_FE_LIVE]            = (float)fe_live;
-  v[ATP_PHI_SINE]               = (float)(c->n_pos > (int)PR_MAX_EQNS);
-  if (base != NULL) {
-    v[ATP_PHI_AX_GROUND_COMPOUND] = (float)base->ax_ground;
-  }
-  if (fe_live) {
-    v[ATP_PHI_CONJ_CONE_PARTIAL] =
-        (float)tp_conj_cone_partial(base->n_hit, base->n_syms);
-    v[ATP_PHI_CONJ_SYM_FRAC] =
-        (base->n_syms > 0) ? (float)base->n_hit / (float)base->n_syms : 0.0f;
-    if (base->prp != NULL) {
-      phi_algebra(base->prp, phi);
+    phi_fill(c, phi);
+    if (lanes != NULL && c->fail[0] == '\0') {
+      tp_lane_gates(c, lanes);
     }
+    phi_quiet_end(quiet);
   }
-  if (lanes != NULL) {
-    for (int lane = 0; lane < N_SCHED; lane++) {
-      phi_lane_gate(c, lane, &lanes[lane]);
-    }
-  }
-  phi_quiet_end(quiet);
-  int rc = 0;
   for (int i = 0; i < c->n_var; i++) {
-    if (c->var[i].pr_io) {
-      rc = 2;
-    }
     free(c->var[i].prp);
-  }
-  if (rc != 0) {
-    fprintf(stderr, "FindProof: problem features: cannot write the "
-            "replayed .pr to /tmp\n");
   }
   tp_syms_reset(tp);
   g_cli_goal_existential = saved_goal_ex;
@@ -1000,22 +805,126 @@ static int tp_problem_features(const char *file, AtpPhi *phi,
   g_curry_nfn            = saved_curry_n;
   g_prov_on              = saved_prov;
   snprintf(g_curry_ap2, sizeof g_curry_ap2, "%s", saved_ap2);
+  if (c->fail[0] != '\0') {
+    fprintf(stderr, "FindProof: problem features: %s: %s\n", file, c->fail);
+    rc = 2;
+  }
   free(pre);
-  free(raw);
   free(tp);
   free(c);
   return rc;
 }
 
-static const char *phi_verdict_name(int verdict) {
-  switch (verdict) {
-    case TP_LANE_LIVE:  return "live";
-    case TP_LANE_DEAD:  return "dead";
-    default:            return "undet";
+static int phi_write_all(int fd, const char *buf, size_t n) {
+  while (n > 0) {
+    ssize_t w = write(fd, buf, n);
+    if (w < 0 && errno == EINTR) {
+      continue;
+    }
+    if (w <= 0) {
+      return 0;
+    }
+    buf += w;
+    n -= (size_t)w;
   }
+  return 1;
 }
 
-// The problem's name: the file's base name less a ".p".
+static size_t phi_read_all(int fd, char *buf, size_t n) {
+  size_t got = 0;
+  while (got < n) {
+    ssize_t r = read(fd, buf + got, n - got);
+    if (r < 0 && errno == EINTR) {
+      continue;
+    }
+    if (r <= 0) {
+      break;
+    }
+    got += (size_t)r;
+  }
+  return got;
+}
+
+// phi(p) of the TPTP problem in `file` and, when lanes is not NULL, the
+// static gate replica for every SCHEDULE lane (lanes[N_SCHED]), computed
+// in a child process.  Returns 0, or 2 when the child fails (it names the
+// reason on stderr).
+static int tp_problem_features(const char *file, AtpPhi *phi, PhiMeta *meta,
+                               TpLaneGate *lanes) {
+  size_t n_lanes = (lanes != NULL) ? (size_t)N_SCHED : 0u;
+  size_t off_meta = sizeof(AtpPhi);
+  size_t off_lanes = off_meta + sizeof(PhiMeta);
+  size_t want = off_lanes + n_lanes * sizeof(TpLaneGate);
+  char *buf = (char *)malloc(want);
+  int fd[2];
+  if (buf == NULL || pipe(fd) != 0) {
+    fprintf(stderr, "FindProof: problem features: cannot start the replay\n");
+    free(buf);
+    return 2;
+  }
+  fflush(stdout);
+  fflush(stderr);
+  pid_t pid = fork();
+  if (pid < 0) {
+    fprintf(stderr, "FindProof: problem features: cannot fork\n");
+    close(fd[0]);
+    close(fd[1]);
+    free(buf);
+    return 2;
+  }
+  if (pid == 0) {
+    close(fd[0]);
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGINT, SIG_DFL);
+    signal(SIGALRM, SIG_DFL);
+    AtpPhi cp;
+    PhiMeta cm;
+    TpLaneGate *cl = (n_lanes > 0)
+        ? (TpLaneGate *)calloc(n_lanes, sizeof(TpLaneGate)) : NULL;
+    int rc = (n_lanes > 0 && cl == NULL) ? 2 : phi_compute(file, &cp, &cm, cl);
+    if (rc == 0) {
+      memcpy(buf, &cp, sizeof cp);
+      memcpy(buf + off_meta, &cm, sizeof cm);
+      if (n_lanes > 0) {
+        memcpy(buf + off_lanes, cl, n_lanes * sizeof(TpLaneGate));
+      }
+      rc = phi_write_all(fd[1], buf, want) ? 0 : 2;
+    }
+    _exit(rc);
+  }
+  close(fd[1]);
+  size_t got = phi_read_all(fd[0], buf, want);
+  close(fd[0]);
+  int st = 0;
+  pid_t w;
+  do {
+    w = waitpid(pid, &st, 0);
+  } while (w < 0 && errno == EINTR);
+  if (w != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0 || got != want) {
+    // Exit 2 has named its reason already.
+    if (w != pid) {
+      fprintf(stderr, "FindProof: problem features: %s: lost the replay\n", file);
+    } else if (WIFSIGNALED(st)) {
+      fprintf(stderr, "FindProof: problem features: %s: the replay died "
+              "(signal %d)\n", file, WTERMSIG(st));
+    } else if (WEXITSTATUS(st) != 2) {
+      fprintf(stderr, "FindProof: problem features: %s: the replay ended "
+              "(exit %d, %zu of %zu bytes)\n", file, WEXITSTATUS(st), got, want);
+    }
+    free(buf);
+    return 2;
+  }
+  memcpy(phi, buf, sizeof *phi);
+  memcpy(meta, buf + off_meta, sizeof *meta);
+  if (lanes != NULL) {
+    memcpy(lanes, buf + off_lanes, n_lanes * sizeof(TpLaneGate));
+  }
+  free(buf);
+  return 0;
+}
+
+// --- FindProof --problem-features ---------------------------------------
+
 static void phi_problem_name(const char *file, char *buf, size_t cap) {
   const char *base = strrchr(file, '/');
   base = (base != NULL) ? base + 1 : file;
@@ -1026,20 +935,44 @@ static void phi_problem_name(const char *file, char *buf, size_t cap) {
   snprintf(buf, cap, "%.*s", (int)n, base);
 }
 
+// The column names of a phi(p) row, tab-separated: problem, the ATP_PHI_N
+// columns, the PHI_META_N columns.  Its length, or -1 when it does not fit.
+static int phi_format_header(char *buf, size_t cap) {
+  int o = snprintf(buf, cap, "problem");
+  for (int i = 0; i < ATP_PHI_N && o >= 0 && (size_t)o < cap; i++) {
+    o += snprintf(buf + o, cap - (size_t)o, "\t%s", PHI_NAMES[i]);
+  }
+  for (int i = 0; i < PHI_META_N && o >= 0 && (size_t)o < cap; i++) {
+    o += snprintf(buf + o, cap - (size_t)o, "\t%s", PHI_META_NAMES[i]);
+  }
+  return (o >= 0 && (size_t)o < cap) ? o : -1;
+}
+
+// One phi(p) row under phi_format_header.  %.9g reads back as the same
+// float (FLT_DECIMAL_DIG digits).
+static int phi_format_row(char *buf, size_t cap, const char *name,
+                          const AtpPhi *phi, const PhiMeta *meta) {
+  int o = snprintf(buf, cap, "%s", name);
+  for (int i = 0; i < ATP_PHI_N && o >= 0 && (size_t)o < cap; i++) {
+    o += snprintf(buf + o, cap - (size_t)o, "\t%.9g", (double)phi->v[i]);
+  }
+  for (int i = 0; i < PHI_META_N && o >= 0 && (size_t)o < cap; i++) {
+    o += snprintf(buf + o, cap - (size_t)o, "\t%.9g", (double)meta->v[i]);
+  }
+  return (o >= 0 && (size_t)o < cap) ? o : -1;
+}
+
 // FindProof --problem-features [--header] [--lanes] [problem]: one
-// tab-separated row of phi(p) with the replica's live and undet lane
-// counts, or with --lanes one row per SCHEDULE lane; --header prints the
-// column names first (alone when no problem is given).
+// tab-separated row of phi(p) and its meta columns, or with --lanes one row
+// per SCHEDULE lane; --header prints the column names first (alone when no
+// problem is given).
 static int cli_problem_features_main(const char *file, int header, int lanes) {
+  char line[8192];
   if (header) {
     if (lanes) {
       printf("problem\tlane\tverdict\tstrict\tgates\treason\n");
-    } else {
-      printf("problem");
-      for (int i = 0; i < ATP_PHI_N; i++) {
-        printf("\t%s", PHI_NAMES[i]);
-      }
-      printf("\tlanes_live\tlanes_undet\n");
+    } else if (phi_format_header(line, sizeof line) >= 0) {
+      printf("%s\n", line);
     }
     if (file == NULL) {
       return 0;
@@ -1050,11 +983,16 @@ static int cli_problem_features_main(const char *file, int header, int lanes) {
     return 2;
   }
   AtpPhi phi;
-  TpLaneGate *g = (TpLaneGate *)calloc((size_t)N_SCHED, sizeof *g);
-  if (g == NULL) {
-    return 2;
+  PhiMeta meta;
+  TpLaneGate *g = NULL;
+  if (lanes) {
+    g = (TpLaneGate *)calloc((size_t)N_SCHED, sizeof *g);
+    if (g == NULL) {
+      fprintf(stderr, "FindProof: OOM\n");
+      return 2;
+    }
   }
-  int rc = tp_problem_features(file, &phi, g);
+  int rc = tp_problem_features(file, &phi, &meta, g);
   if (rc != 0) {
     free(g);
     return rc;
@@ -1067,19 +1005,14 @@ static int cli_problem_features_main(const char *file, int header, int lanes) {
              phi_verdict_name(g[i].verdict), g[i].strict, g[i].gates,
              (g[i].why[0] != '\0') ? g[i].why : "-");
     }
+  } else if (phi_format_row(line, sizeof line, name, &phi, &meta) >= 0) {
+    printf("%s\n", line);
   } else {
-    int live = 0, undet = 0;
-    for (int i = 0; i < N_SCHED; i++) {
-      live  += (g[i].verdict == TP_LANE_LIVE);
-      undet += (g[i].verdict == TP_LANE_UNDET);
-    }
-    printf("%s", name);
-    for (int i = 0; i < ATP_PHI_N; i++) {
-      printf("\t%.9g", (double)phi.v[i]);
-    }
-    printf("\t%d\t%d\n", live, undet);
+    fprintf(stderr, "FindProof: problem features: %s: the row is too long\n",
+            file);
+    rc = 2;
   }
   fflush(stdout);
   free(g);
-  return 0;
+  return rc;
 }

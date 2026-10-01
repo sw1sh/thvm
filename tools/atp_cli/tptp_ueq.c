@@ -888,6 +888,47 @@ static void tp_sine_dump(const TpProblem *tp, const char *path, int n) {
   fclose(df);
 }
 
+typedef struct {
+  double      tol0;
+  u32         gt, rc;
+  const char *dump;
+} TpSineCfg;
+
+// Problem features (tp_problem_features) select under these, whatever the
+// environment holds.
+static const TpSineCfg TP_SINE_DEFAULT = { 1.5, 1u, 64u, NULL };
+
+static TpSineCfg tp_sine_cfg_env(void) {
+  TpSineCfg cfg = TP_SINE_DEFAULT;
+  {
+    const char *e = getenv("THVM_ATP_SINE_TOL");
+    if (e != NULL && e[0] != '\0') cfg.tol0 = atof(e);
+    if (cfg.tol0 < 1.0) cfg.tol0 = 1.0;
+  }
+  {
+    const char *e = getenv("THVM_ATP_SINE_GT");
+    if (e != NULL && e[0] != '\0') {
+      long v = atol(e);
+      cfg.gt = (v < 0) ? 0u : (u32)v;
+    }
+  }
+  {
+    const char *e = getenv("THVM_ATP_SINE_RC");
+    if (e != NULL && e[0] != '\0') {
+      long v = atol(e);
+      cfg.rc = (v < 0) ? 0u : (u32)v;
+    }
+  }
+  cfg.dump = getenv("THVM_ATP_SINE_DUMP");
+  return cfg;
+}
+
+static int tp_sine_cfg_is_default(const TpSineCfg *cfg) {
+  return cfg->tol0 == TP_SINE_DEFAULT.tol0 && cfg->gt == TP_SINE_DEFAULT.gt &&
+         cfg->rc == TP_SINE_DEFAULT.rc &&
+         (cfg->dump == NULL || cfg->dump[0] == '\0');
+}
+
 // Driver: progressively tighten until the selection fits the engine
 // caps -- TOLERANCE first at full depth, rounds only as a last resort.
 // The CSR knowledge-base proofs ride 15+-trigger-deep chains (CSR036's
@@ -899,30 +940,11 @@ static void tp_sine_dump(const TpProblem *tp, const char *path, int n) {
 // dropped ones own most of the 10k-symbol table).  THVM_ATP_SINE=0
 // disables; THVM_ATP_SINE_TOL overrides the first tolerance;
 // THVM_ATP_SINE_GT overrides the generality threshold.
-static void tp_sine_select(TpProblem *tp) {
-  double tol0 = 1.5;
-  {
-    const char *e = getenv("THVM_ATP_SINE_TOL");
-    if (e != NULL && e[0] != '\0') tol0 = atof(e);
-    if (tol0 < 1.0) tol0 = 1.0;
-  }
-  u32 gt = 1;
-  {
-    const char *e = getenv("THVM_ATP_SINE_GT");
-    if (e != NULL && e[0] != '\0') {
-      long v = atol(e);
-      gt = (v < 0) ? 0u : (u32)v;
-    }
-  }
-  u32 rc = 64;
-  {
-    const char *e = getenv("THVM_ATP_SINE_RC");
-    if (e != NULL && e[0] != '\0') {
-      long v = atol(e);
-      rc = (v < 0) ? 0u : (u32)v;
-    }
-  }
-  const char *dump = getenv("THVM_ATP_SINE_DUMP");
+static void tp_sine_select_cfg(TpProblem *tp, const TpSineCfg *cfg) {
+  double tol0 = cfg->tol0;
+  u32 gt = cfg->gt;
+  u32 rc = cfg->rc;
+  const char *dump = cfg->dump;
   if (dump != NULL && dump[0] != '\0') {
     char inpath[1024];
     snprintf(inpath, sizeof inpath, "%s.in", dump);
@@ -1003,6 +1025,11 @@ static void tp_sine_select(TpProblem *tp) {
     if (dump != NULL && dump[0] != '\0') tp_sine_dump(tp, dump, w);
     g_cli_sine_applied = 1;
   }
+}
+
+static void tp_sine_select(TpProblem *tp) {
+  TpSineCfg cfg = tp_sine_cfg_env();
+  tp_sine_select_cfg(tp, &cfg);
 }
 
 

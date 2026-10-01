@@ -1069,9 +1069,10 @@ static void usage(FILE *fp) {
     "                              schedule launches it (its stderr kept)\n"
     "  --list-lanes                print the schedule's lane names in order and exit\n"
     "  --problem-features          print the problem's features phi(p), one TSV row\n"
-    "                              (TPTP unit-equality input), and exit; --header\n"
-    "                              prints the column names, --lanes the static gate\n"
-    "                              replica instead: one row per schedule lane\n"
+    "                              (TPTP unit-equality input; no knob flags), and\n"
+    "                              exit; --header prints the column names, --lanes\n"
+    "                              the static gate replica instead: one row per\n"
+    "                              schedule lane\n"
     "  --proof                     print an SZS CNFRefutation block on success\n"
     "  --keep-pr                   keep (and name) the .pr generated from TPTP input\n"
     "  --list-knobs                print the knob table and exit\n"
@@ -1091,6 +1092,7 @@ int main(int argc, char **argv) {
   const char *wall = "120";
   int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0;
   int want_features = 0, features_header = 0, features_lanes = 0;
+  int n_knob_flags = 0;
   const char *lane = NULL;
   double main_t0 = horn_now();
   g_cli_main_t0 = main_t0;
@@ -1226,12 +1228,19 @@ int main(int argc, char **argv) {
         }
         setenv(KNOBS[k].env, (val != NULL) ? val : "1", 1);
         hit = 1;
+        n_knob_flags++;
         break;
       }
     }
     if (!hit) { fprintf(stderr, "FindProof: unknown option --%.*s\n", (int)nlen, name); usage(stderr); return 2; }
   }
   if (want_features) {
+    if (n_knob_flags > 0) {
+      fprintf(stderr, "FindProof: --problem-features takes no knob flags: "
+              "phi(p) reads the default configuration and --lanes each "
+              "lane's own flags\n");
+      return 2;
+    }
     return cli_problem_features_main(file, features_header, features_lanes);
   }
   if (features_header || features_lanes) {

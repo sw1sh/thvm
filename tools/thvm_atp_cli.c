@@ -87,5 +87,6 @@
 #undef main
 #endif
 // Problem features phi(p) and the static gate replica: after main.c, whose
-// SCHEDULE[] it reads (main.c declares its entry).
+// SCHEDULE[] they read (main.c declares the CLI entry).
 #include "atp_cli/problem_features.c"
+#include "atp_cli/lane_gates.c"
