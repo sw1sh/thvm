@@ -21,6 +21,8 @@ Symbolic dims, real JIT, and grad-flow through backward() are Phase
 from __future__ import annotations
 
 import ctypes as _ct
+import functools
+import itertools
 import math
 import warnings
 import weakref
@@ -30,7 +32,7 @@ import numpy as np
 
 from .device import Device
 from .dtypes import DType, dtypes
-from .helpers import TRAINING
+from .helpers import TRAINING, argfix
 from .thvm import K, Term, Thvm, _uop_binary
 
 
@@ -565,13 +567,6 @@ class Tensor(metaclass=_TensorMeta):
     @classmethod
     def zeros_like(cls, t: "Tensor") -> "Tensor":
         return cls.zeros(*t._shape, dtype=t._dtype)
-
-    @classmethod
-    def cat(cls, *tensors: "Tensor", dim: int = 0) -> "Tensor":
-        """Concat along `dim` (Phase 3A: host-side numpy)."""
-        arrs = [t.realize().numpy() for t in tensors]
-        out = np.concatenate(arrs, axis=dim)
-        return cls(out, dtype=tensors[0]._dtype)
 
     # ---- broadcasting (tinygrad rule: align trailing, expand 1s) ------
 
@@ -1164,6 +1159,41 @@ class Tensor(metaclass=_TensorMeta):
         out._view_begin_end = [int(x) for x in begin_end]
         return out
 
+    def unsqueeze(self, dim: int) -> "Tensor":
+        """A new axis of size 1 at `dim` (tinygrad mixin/movement.py:308-321)."""
+        dim = self._resolve_dim(dim, extra=1)
+        return self.reshape(*self._shape[:dim], 1, *self._shape[dim:])
+
+    def cat(self, *args: "Tensor", dim: int = 0) -> "Tensor":
+        """Concatenate self and `args` along `dim` (tinygrad
+        mixin/op.py:731-746, with its dim check and shape assert): each piece
+        is zero-padded to the output extent along dim and the pads are
+        summed.  The result is lazy and fuses into its consumer, and each
+        input's gradient is its slice of the output's (PAD's adjoint is a
+        SHRINK).  thvm has no STACK op, so equal pieces take this path too,
+        where tinygrad stacks them (mixin/movement.py:256-272): one add per
+        extra piece, and a -0.0 comes out as +0.0."""
+        dim = self._resolve_dim(dim)
+        for arg in args:
+            assert arg.ndim == self.ndim and all(
+                ti == ai for i, (ti, ai) in enumerate(zip(self._shape, arg._shape)) if i != dim)
+        tensors = [self, *args]
+        dim_cumsum = list(itertools.accumulate([t._shape[dim] for t in tensors], initial=0))
+        padded = [t.pad(tuple((dim_cumsum[i], dim_cumsum[-1] - dim_cumsum[i + 1]) if j == dim else None
+                              for j in range(t.ndim)))
+                  for i, t in enumerate(tensors)]
+        return functools.reduce(Tensor.__add__, padded[1:], padded[0])
+
+    def stack(self, *args: "Tensor", dim: int = 0) -> "Tensor":
+        """Stack self and `args` along a new axis `dim` (tinygrad
+        mixin/movement.py:256-272: argfix, dim resolved one past ndim, the
+        shape assert).  Without a STACK op it is unsqueeze, then cat."""
+        tensors = argfix(self, *args)
+        dim = tensors[0]._resolve_dim(dim, extra=1)
+        assert all(t._shape == tensors[0]._shape for t in tensors), \
+            f"all shapes must match for stack, got {[t._shape for t in tensors]}"
+        return tensors[0].unsqueeze(dim).cat(*[t.unsqueeze(dim) for t in tensors[1:]], dim=dim)
+
     # ---- indexed ops (native UOP_GATHER on the CPU backend) -----------
 
     def _resolve_dim(self, dim: int, *, extra: int = 0) -> int:
@@ -1669,15 +1699,6 @@ class Tensor(metaclass=_TensorMeta):
         tinygrad/mixin/__init__.py:tril."""
         mask = self._tri(self._shape[-2], self._shape[-1], diagonal + 1)
         return mask.where(self.const_like(0), self)
-
-    @classmethod
-    def stack(cls, *tensors: "Tensor", dim: int = 0) -> "Tensor":
-        """Concatenate along a NEW dim (tinygrad Tensor.stack)."""
-        unsq = [t.reshape(*t._shape[:dim if dim >= 0 else dim + t.ndim + 1],
-                          1,
-                          *t._shape[dim if dim >= 0 else dim + t.ndim + 1:])
-                for t in tensors]
-        return cls.cat(*unsq, dim=dim)
 
     def embedding(self, idx: "Tensor") -> "Tensor":
         """Rows of self (vocab, embed) at the integer ids `idx`, shape

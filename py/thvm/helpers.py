@@ -13,6 +13,16 @@ from typing import Any
 OSX, WIN = sys.platform == "darwin", sys.platform == "win32"
 
 
+def argfix(*x):
+    """A single tuple or list argument stands for the arguments themselves
+    (tinygrad helpers.py:24-28)."""
+    if x and x[0].__class__ in (tuple, list):
+        if len(x) != 1:
+            raise ValueError(f"bad arg {x}")
+        return tuple(x[0])
+    return x
+
+
 def getenv(key: str, default: Any = 0):
     """Read an env var and cast to the default's type (tinygrad-compatible)."""
     return type(default)(os.environ.get(key, default))
