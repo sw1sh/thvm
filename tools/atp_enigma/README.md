@@ -372,6 +372,18 @@ that they are byte-identical.  The job lists use the runner's shard format
 `static_gates.py <tptp_root> <problem.p>...` prints the gate bits and live
 lanes of the CLI's exit-fast lanes, the static replica that T7 checks.
 
+Two pod scripts check the explicit-stack branch (enigma-ftdeep) before
+it merges.  `crash_rows.sh <tptp_root> <out_dir>` reruns the 24
+(problem, lane) rows that crashed in G0.1 (SWX233-1 on 14 lanes,
+SYN986-10.005 / .006 on 5 each) with `--lane=NAME --szs --wall=60`,
+once on the competition build under `ulimit -s 8192` and once on an
+AddressSanitizer build under `ulimit -s 1024`, and fails on any signal
+end or ASan report.  `ftdeep_pod.sh <main_tree> <branch_tree>
+<tptp_root> <problems.txt> <out_dir>` runs the deep-term tests and
+test_atp with their peak RSS, the OA / DN pins on both builds, and
+paired main / branch lane runs (twee, wm, otter-lpo, tgt-sel) with
+instruction counts and CPU time.
+
 ## Typical flow
 
 ```

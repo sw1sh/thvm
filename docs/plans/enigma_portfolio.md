@@ -658,6 +658,8 @@ What is running now:
 | matrix_tables.py             | dfb13207ae82afa7cb3b443abe3b1aac170f601d2d5fc94d55ace422859ba475 (627aabb2) | 2026-10-02 |
 | WDEP and delta per wall      | at L0           | |
 | section 5.3 outputs          | ~/.cache/thvm/enigma/matrix/decisions_5_3.txt; summary below | 2026-10-02 |
+| engine change: explicit-stack term walks (branch enigma-ftdeep) | not merged; L0 and the WDEP calibration run on the binary recorded in the next row | 2026-10-02 |
+| L0 binary                    | sha256 at L0    | |
 
 Section 5.3 outputs (2026-10-02, from the sealed matrix; train and held-out only):
 - Pool: TRAIN 664 problems, VBS at 60 s 550 (528 within 1 s), best single lane twee-raw 488, greedy cover reaches the union at k = 9. HELDOUT 171: VBS 143, best lane twee / twee-raw 134, union at k = 3. G0.1 passes (56,810 of 56,810 rows; 24 crashes, 0.062%).
@@ -666,12 +668,18 @@ Section 5.3 outputs (2026-10-02, from the sealed matrix; train and held-out only
 - M4c pre-gate: FAIL, final. 8 TRAIN Unsatisfiable problems rated below 1.0 are unsolved at 60 s (25 needed). No invention pilot.
 - P1 retirement candidates by the letter of the rule: wm, horn-back, mnf-gj-amw, ifeq, tgt, tgt-fold, wm-gj, lazy-gj, bare-gj, plus 13 fof-* lanes the CNF pool cannot judge. wm is the fastest lane on 39 pool problems and owns REL033-3, so it stays for M1's paired test. All candidates wait for the 180 s supplement.
 - Twin families: provisional, decided by ties because TRAIN-T has 4 problems: horn-cd, twee, encompass, flatten-bare-raw. Revisited after the supplement and DEV-S.
-- Supplement: 142 problems, 2,882 jobs (SYN986-10.005/.006 segfault until the deep-term fix lands). Label harvest: 8,574 pairs on 500 TRAIN problems.
+- Supplement: 142 problems, 2,882 jobs (SYN986-10.005/.006 segfault until the deep-term fix lands; SWX233-1's 14 crash rows are on other lanes and not yet diagnosed, so the depth class is not known to be closed: tools/atp_enigma/crash_rows.sh reruns all 24 rows, deployed and under AddressSanitizer, before the supplement runs). Label harvest: 8,574 pairs on 500 TRAIN problems.
 - T7: 40 front-end proofs come from equals, narrowq and unfold, which the static replica calls dead. These lanes run the Horn front end before their exit test (the M1 liveness item).
 
 Decisions recorded (2026-10-01, by the user):
 - D1: yes. Training may include synthetic -10 encodings of non-UEQ TPTP problems from our FOF front end; J13 names and stems are excluded in every division.
 - D3: no. Every calibration stays on pods; WDEP is estimated from the submission build's official J13 result as in section 1.3.
+
+Engine change staging (enigma-ftdeep, recorded 2026-10-02).  The branch replaces the per-level recursion of about 40 term walks with explicit stacks.  Results, arena cells and heap words are pinned to the recursion, but every rewritten walk costs different instructions and CPU time, so lanes whose decisions read a clock (`--lrs`, the CP-set and Horn-release budgets, the FOF budgets, under the CPU or the instruction clock) and runs that end near the wall can change.  It therefore lands in stages, each after its own pins pass on a pod:
+1. ft.c with term_stack_grow, and atp_ri_flatten (the two SYN986-10 overflows), once their pins, test_atp, the OA / DN pins and tools/atp_enigma/crash_rows.sh pass on the stage-1 build;
+2. the remaining walk commits in branch order (term primitives, flatterm spans, CP packing, weights and orientation, ground join, overlap index and mirror, AC, the discrimination-tree descent, KBO, LPO, the proof printers), each with its own pin binary;
+3. the brace and wmo_dfs re-entry commit and the test upgrade (mid-depth pins, small-stack deep blocks, test_atp_deep_cp) last.
+Before stage 1 and after stage 3, tools/atp_enigma/ftdeep_pod.sh measures the paired instruction and CPU overhead on the OA / DN pins and about 20 TRAIN problems on twee, wm, otter-lpo and tgt-sel.  The change is accepted when the overhead is within noise (at most 2% instructions) and every changed search is explained by a clock or the wall; the numbers go into this registry and the CHANGELOG.  If L0 has already run when a stage lands, L0's binary stays the one recorded above and the change is an amendment.
 
 Amendments: none yet.
 
