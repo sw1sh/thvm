@@ -488,9 +488,12 @@ enum { N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0])) };
 // FindProof engine) keep running orphaned and accumulate across problems.
 // The handler killpg's every launched child group before exiting.  pids are
 // stored by slice index, one slot per lane; a reaped slot is set back to -1.
-static pid_t g_sched_pids[N_SCHED];
+// A slice's own copy names only the slice itself (see run_schedule).
+static volatile sig_atomic_t g_sched_pids[N_SCHED];
 _Static_assert(sizeof g_sched_pids / sizeof g_sched_pids[0] >= (size_t)N_SCHED,
                "the teardown registry needs a slot for every schedule lane");
+_Static_assert(sizeof(sig_atomic_t) >= sizeof(pid_t) && (sig_atomic_t)-1 < 0,
+               "a teardown registry slot holds any pid and the empty mark -1");
 static volatile sig_atomic_t g_sched_active = 0;
 static void sched_sig_teardown(int sig) {
   if (g_sched_active) {
@@ -712,15 +715,24 @@ static int run_schedule(const char *self, const char *file, double wall,
       sigprocmask(SIG_BLOCK, &teardown_sigs, &prev_mask);
       pid_t pid = fork();
       if (pid == 0) {
-        // The slice's shell and engine inherit the mask: with SIGALRM
-        // held, the engine's own wall alarm would never fire.
-        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         // Child: own process group so the parent can kill the WHOLE
         // subtree (this child + the shell system() forks + its FindProof
         // grandchild) with one killpg -- otherwise killing the child
         // blocked in system() would orphan the grandchild engine, which
         // keeps running to its wall and could overlap the next problem.
         setpgid(0, 0);
+        // The slice keeps the parent's teardown handlers, so its copy of
+        // the registry names its own group alone: a SIGTERM that reaches
+        // the slice (a pkill matching the command line it shares with the
+        // parent) takes its shell and engine with it, and never a sibling
+        // pid the parent has reaped since.
+        for (int k = 0; k < N_SCHED; k++) {
+          g_sched_pids[k] = -1;
+        }
+        g_sched_pids[i] = getpid();
+        // The slice's shell and engine inherit the mask: with SIGALRM
+        // held, the engine's own wall alarm would never fire.
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         // Redirect stdout to the slice temp file, run the slice.
         int fd = open(outs[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd >= 0) {
