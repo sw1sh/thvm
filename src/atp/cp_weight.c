@@ -48,7 +48,34 @@ static u32 atp_term_depth(Term t) {
 // Does variable `var_id` (a TAG_FVR id) occur anywhere in `t`?
 // The occur-check used by the unification-measure weight.
 static int atp_var_occurs(Term t, u32 var_id) {
-  return atp_term_has_var(t, var_id);
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  int   hit = 0;
+  for (;;) {
+    switch (term_tag(t)) {
+      case TAG_FVR:
+        hit = (term_ext(t) == var_id);
+        break;
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
+      }
+      default:
+        break;
+    }
+    if (hit || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 // Depth-weighted term-disagreement count -- a port of Waldmeister's

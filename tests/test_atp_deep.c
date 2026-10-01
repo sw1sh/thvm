@@ -3341,6 +3341,713 @@ static void deep_weight_order(u32 *seed) {
   thvm_atp_free(s);
 }
 
+// ---- gc.c / ground_join.c: ifeq, tgt, fold and ground-join walks -----------
+
+// src/atp/gc.c:1410
+static u8 ref_atp_ifeq_term_eq(Term a, Term b) {
+  u8 ta = term_tag(a), tb = term_tag(b);
+  if (ta != tb) return 0;
+  if (ta == TAG_FVR) return term_ext(a) == term_ext(b);
+  if (ta != TAG_CTR) return a == b;
+  if (term_ext(a) != term_ext(b)) return 0;
+  u32 n = term_ctr_n(a);
+  if (n != term_ctr_n(b)) return 0;
+  for (u32 i = 0; i < n; i++)
+    if (!ref_atp_ifeq_term_eq(term_ctr_at(a, i), term_ctr_at(b, i))) return 0;
+  return 1;
+}
+
+// src/atp/gc.c:1426
+static u32 ref_atp_ifeq_guard_count(const AtpState *s, Term t) {
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 n = term_ctr_n(t);
+  u32 c = 0u;
+  if ((n == 3u || n == 4u) && atp_ifeq_sym_is(s, term_ext(t)) &&
+      !ref_atp_ifeq_term_eq(term_ctr_at(t, 0), term_ctr_at(t, 1))) c = 1u;
+  for (u32 i = 0; i < n; i++)
+    c += ref_atp_ifeq_guard_count(s, term_ctr_at(t, i));
+  return c;
+}
+
+// src/atp/gc.c:1467
+static void ref_atp_ifeq_var_mask(Term t, u64 *mask) {
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) { *mask |= 1ull << (term_ext(t) & 63u); return; }
+  if (tg != TAG_CTR) return;
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) ref_atp_ifeq_var_mask(term_ctr_at(t, i), mask);
+}
+
+// src/atp/gc.c:1722
+static u64 ref_atp_ifeq_guard_hash_ft_rec(const AtpFtCell *t, AtpIfeqVarMap *vm) {
+  if (ft_is_var(t)) {
+    u32 cid = atp_ifeq_canon_var(vm, ft_var_id(t));
+    return 0xfacefacefaceull ^ ((u64)cid * 0x100000001b3ull);
+  }
+  u32 n = t->arity;
+  u64 h = 0xcbf29ce484222325ull ^ ((u64)ft_ctr_sym(t) * 0x100000001b3ull);
+  const AtpFtCell *k = t->next;
+  for (u32 i = 0; i < n; i++) {
+    h ^= ref_atp_ifeq_guard_hash_ft_rec(k, vm);
+    h *= 0x100000001b3ull;
+    k = k->end->next;
+  }
+  return h ^ ((u64)n * 0x9e3779b97f4a7c15ull);
+}
+
+// src/atp/gc.c:2060
+static void ref_atp_tgt_mask_collect(AtpState *s, Term t) {
+  if (term_tag(t) != TAG_CTR) return;
+  u32 lbl = term_ext(t);
+  s->tgt_sym_mask[(lbl >> 6) & (ATP_TGT_MASK_WORDS - 1u)] |=
+      1ull << (lbl & 63u);
+  u32 n = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY) return;
+  for (u32 i = 0; i < n; i++) ref_atp_tgt_mask_collect(s, term_ctr_at(t, i));
+}
+
+// src/atp/gc.c:2122
+static void ref_atp_tgt_count_rec(const AtpState *s, Term t,
+                                  u32 *gc, u32 *oc, u32 *vc) {
+  u8 tg = term_tag(t);
+  if (tg == TAG_FVR) { (*vc)++; return; }
+  if (tg != TAG_CTR) return;
+  if (atp_tgt_sym_hit(s, term_ext(t))) (*gc)++; else (*oc)++;
+  u32 n = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY) return;
+  for (u32 i = 0; i < n; i++)
+    ref_atp_tgt_count_rec(s, term_ctr_at(t, i), gc, oc, vc);
+}
+
+// src/atp/gc.c:2302
+static u8 ref_atp_term_has_fold(const AtpState *s, Term t) {
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 lbl = term_ext(t);
+  if (lbl >= s->fold_lo && lbl < s->fold_hi) return 1u;
+  u32 n = term_ctr_n(t);
+  if (n > REWRITE_MAX_ARITY) return 0u;
+  for (u32 i = 0; i < n; i++)
+    if (ref_atp_term_has_fold(s, term_ctr_at(t, i))) return 1u;
+  return 0u;
+}
+
+// src/atp/gc.c:3198
+static int ref_atp_term_is_ground(Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return 0;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (!ref_atp_term_is_ground(term_ctr_at(t, i))) return 0;
+      }
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// src/atp/ground_join.c:57
+static u8 ref_atp_gj_collect_vars(Term t, u32 *ids, u32 *n, u32 cap) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      for (u32 i = 0; i < *n; i++) {
+        if (ids[i] == id) return 1;       // already seen
+      }
+      if (*n >= cap) return 0;            // too many distinct vars
+      ids[*n] = id;
+      (*n)++;
+      return 1;
+    }
+    case TAG_CTR: {
+      u32 k = term_ctr_n(t);
+      for (u32 i = 0; i < k; i++) {
+        if (!ref_atp_gj_collect_vars(term_ctr_at(t, i), ids, n, cap)) return 0;
+      }
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// src/atp/ground_join.c:156
+static void ref_gj_form_addto(Term t, int sign, const KboConfig *cfg,
+                              long long *c0, long long *var_coeff) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      if (id < KBO_MAX_VAR) var_coeff[id] += sign;
+      return;
+    }
+    case TAG_CTR: {
+      u32 lab = term_ext(t);
+      *c0 += (long long)sign *
+             (long long)((lab < cfg->n_labels) ? cfg->weights[lab] : 0);
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++)
+        ref_gj_form_addto(term_ctr_at(t, i), sign, cfg, c0, var_coeff);
+      return;
+    }
+    default: return;
+  }
+}
+
+// src/atp/ground_join.c:651
+static int ref_gj_has_var(Term t, u32 id) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) == id;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) if (ref_gj_has_var(term_ctr_at(t, i), id)) return 1;
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
+// src/atp/ground_join.c:665
+static u8 ref_gj_vars_subset(Term sub, Term sup) {
+  switch (term_tag(sub)) {
+    case TAG_FVR: return ref_gj_has_var(sup, term_ext(sub)) ? 1 : 0;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(sub);
+      for (u32 i = 0; i < n; i++)
+        if (!ref_gj_vars_subset(term_ctr_at(sub, i), sup)) return 0;
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// src/atp/ground_join.c:740
+static u8 ref_gj_has_big_var(Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) >= KBO_MAX_VAR ? 1u : 0u;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++)
+        if (ref_gj_has_big_var(term_ctr_at(t, i))) return 1u;
+      return 0u;
+    }
+    default: return 0u;
+  }
+}
+
+// src/atp/ground_join.c:870, with the top-position rule scan (unchanged)
+// factored out as gj_rewrite_top.
+static Term ref_gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
+                                const u32 *cp_vars, u32 n_cp_vars, u8 *fired,
+                                Term protect) {
+  if (protect == 0 && gj_nf_hit(t)) { *fired = 0; return t; }
+  u8 top = 0u;
+  Term red = gj_rewrite_top(s, m, t, cp_vars, n_cp_vars, protect, &top);
+  if (top) { *fired = 1; return red; }
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) {
+      if (protect == 0) gj_nf_add(t);
+      *fired = 0;
+      return t;
+    }
+    Term children[REWRITE_MAX_ARITY];
+    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
+    for (u32 i = 0; i < n; i++) {
+      u8 sub_fired = 0;
+      Term rc = ref_gj_rewrite_step(s, m, children[i], cp_vars, n_cp_vars,
+                                    &sub_fired, 0);
+      if (sub_fired) {
+        children[i] = rc;
+        *fired = 1;
+        return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+  if (protect == 0) gj_nf_add(t);
+  *fired = 0;
+  return t;
+}
+
+// src/atp/ground_join.c:1006, with the top-position scan (unchanged)
+// factored out as gj_prenorm_top.
+static Term ref_gj_prenorm_step(AtpState *s, Term t, u8 *fired) {
+  u8 top = 0u;
+  Term red = gj_prenorm_top(s, t, &top);
+  if (top) { *fired = 1; return red; }
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    if (n > REWRITE_MAX_ARITY) { *fired = 0; return t; }
+    Term children[REWRITE_MAX_ARITY];
+    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
+    for (u32 i = 0; i < n; i++) {
+      u8 sub_fired = 0;
+      Term rc = ref_gj_prenorm_step(s, children[i], &sub_fired);
+      if (sub_fired) {
+        children[i] = rc;
+        *fired = 1;
+        return term_new_ctr(term_ext(t), children, n);
+      }
+    }
+  }
+  *fired = 0;
+  return t;
+}
+
+// src/atp/ground_join.c:1097
+static u8 ref_gj_collect_consts(Term t, u32 *labs, u32 *n, u32 cap) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 k = term_ctr_n(t);
+      if (k == 0) {
+        u32 lab = term_ext(t);
+        for (u32 i = 0; i < *n; i++) if (labs[i] == lab) return 1;
+        if (*n >= cap) return 0;
+        labs[(*n)++] = lab;
+        return 1;
+      }
+      for (u32 i = 0; i < k; i++)
+        if (!ref_gj_collect_consts(term_ctr_at(t, i), labs, n, cap)) return 0;
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// src/atp/ground_join.c:1432
+static int ref_gj_has_const(Term t, u32 lab) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n == 0) return term_ext(t) == lab;
+      for (u32 i = 0; i < n; i++)
+        if (ref_gj_has_const(term_ctr_at(t, i), lab)) return 1;
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
+// A random term, often under a dispatcher node ifeq(a, b, then[, else])
+// over label 3 or 7 whose guard pair is a fresh copy (resolved) half the
+// time, and sometimes one level below the root.
+static Term mk_ifeq_term(u32 *seed) {
+  Term t = mk_random(seed);
+  u32  r = rng32(seed);
+  if ((r & 3u) == 0u) {
+    return t;
+  }
+  Term a       = mk_small(seed);
+  Term kids[4] = { a, (r & 4u) ? copy_term(a) : mk_small(seed), t,
+                   mk_small(seed) };
+  Term g       = term_new_ctr((r & 8u) ? 3u : 7u, kids, (r & 16u) ? 4u : 3u);
+  if ((r & 32u) == 0u) {
+    return g;
+  }
+  Term outer[2] = { mk_small(seed), g };
+  return term_new_ctr(2u, outer, 2u);
+}
+
+// A fresh normal-form memo generation, as gj_normalize opens one.
+static void gj_nf_fresh(void) {
+  if (++g_gj_nf_cur == 0u) {
+    memset(g_gj_nf_gen, 0, sizeof g_gj_nf_gen);
+    g_gj_nf_cur = 1u;
+  }
+  g_gj_nf_n = 0u;
+}
+
+// The memo's live entries (slot, key) in slot order; the count.
+static u32 gj_nf_snapshot(u32 *slots, Term *keys) {
+  u32 n = 0u;
+  for (u32 i = 0; i < GJ_NF_SIZE; i++) {
+    if (g_gj_nf_gen[i] == g_gj_nf_cur) {
+      slots[n] = i;
+      keys[n]  = g_gj_nf_key[i];
+      n++;
+    }
+  }
+  return n;
+}
+
+static void sort_u32(u32 *a, u32 n) {
+  for (u32 i = 1u; i < n; i++) {
+    u32 v = a[i], j = i;
+    while (j > 0u && a[j - 1u] > v) {
+      a[j] = a[j - 1u];
+      j--;
+    }
+    a[j] = v;
+  }
+}
+
+enum { GC_N = 3000 };
+
+static void pin_gc_gj(u32 *seed) {
+  AtpState *s = wo_state(seed);
+  s->ifeq_syms[0] = 3u;
+  s->ifeq_syms[1] = 7u;
+  s->n_ifeq_syms  = 2u;
+  AtpFt a;
+  ft_init(&a);
+
+  TEST_BEGIN("atp_deep/pin-ifeq-tgt-fold-ground");
+  {
+    u32 ok = 0, guards = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < GC_N; i++) {
+      Term t = mk_ifeq_term(seed);
+      Term u = (i % 3u == 0u) ? copy_term(t)
+             : (i % 3u == 1u) ? mk_mutant(seed, t) : mk_ifeq_term(seed);
+      u64 rm = 0ull, nm = 0ull;
+      ref_atp_ifeq_var_mask(t, &rm);
+      atp_ifeq_var_mask(t, &nm);
+      AtpFtCell *x = ft_from_term(&a, t, 0);
+      AtpIfeqVarMap rv, nv;
+      rv.n = 0u;
+      nv.n = 0u;
+      u64 rh = ref_atp_ifeq_guard_hash_ft_rec(x, &rv);
+      u64 nh = atp_ifeq_guard_hash_ft_rec(x, &nv);
+      u64 rmask[ATP_TGT_MASK_WORDS];
+      memset(s->tgt_sym_mask, 0, sizeof s->tgt_sym_mask);
+      ref_atp_tgt_mask_collect(s, t);
+      memcpy(rmask, s->tgt_sym_mask, sizeof rmask);
+      memset(s->tgt_sym_mask, 0, sizeof s->tgt_sym_mask);
+      atp_tgt_mask_collect(s, t);
+      int mask_same = memcmp(rmask, s->tgt_sym_mask, sizeof rmask) == 0;
+      memset(s->tgt_sym_mask, 0, sizeof s->tgt_sym_mask);
+      s->tgt_sym_mask[0] = ((u64)rng32(seed) << 32) | rng32(seed);
+      u32 rg = 0u, ro = 0u, rvc = 0u, ng = 0u, no = 0u, nvc = 0u;
+      ref_atp_tgt_count_rec(s, t, &rg, &ro, &rvc);
+      atp_tgt_count_rec(s, t, &ng, &no, &nvc);
+      s->fold_lo = rng32(seed) % 12u;
+      s->fold_hi = s->fold_lo + rng32(seed) % 4u;
+      u32 rgc = ref_atp_ifeq_guard_count(s, t);
+      if (ref_atp_ifeq_term_eq(t, u) == atp_ifeq_term_eq(t, u) &&
+          rgc == atp_ifeq_guard_count(s, t) &&
+          rm == nm && rh == nh && rv.n == nv.n &&
+          memcmp(rv.raw, nv.raw, sizeof rv.raw[0] * rv.n) == 0 &&
+          mask_same && rg == ng && ro == no && rvc == nvc &&
+          ref_atp_term_has_fold(s, t) == atp_term_has_fold(s, t) &&
+          ref_atp_term_is_ground(t) == atp_term_is_ground(t)) {
+        ok++;
+      }
+      guards += (rgc != 0u);
+    }
+    g_wide = 16u;
+    s->fold_lo = 0u;
+    s->fold_hi = 0u;
+    memset(s->tgt_sym_mask, 0, sizeof s->tgt_sym_mask);
+    CHECK_EQ(ok, (u32)GC_N);
+    CHECK(guards > 0u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-gj-collect-form-vars-consts");
+  {
+    u32 ok = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < GC_N; i++) {
+      Term t = mk_random(seed);
+      Term u = (i & 1u) ? mk_mutant(seed, t) : generalize(seed, t);
+      u32 rids[16], nids[16], rn = 0u, nn = 0u;
+      if (i & 2u) {
+        rids[0] = nids[0] = 3u;
+        rn = nn = 1u;
+      }
+      u32 cap = rng32(seed) % 9u;
+      u8 rc = ref_atp_gj_collect_vars(t, rids, &rn, cap);
+      u8 nc = atp_gj_collect_vars(t, nids, &nn, cap);
+      long long rc0 = 5, nc0 = 5;
+      long long rvc[KBO_MAX_VAR], nvc[KBO_MAX_VAR];
+      memset(rvc, 0, sizeof rvc);
+      memset(nvc, 0, sizeof nvc);
+      int sign = (i & 4u) ? -1 : 1;
+      ref_gj_form_addto(t, sign, &g_wo_cfg, &rc0, rvc);
+      gj_form_addto(t, sign, &g_wo_cfg, &nc0, nvc);
+      u32 rl[20], nl[20], rk = 0u, nk = 0u;
+      u32 lcap = rng32(seed) % 17u;
+      u8 rcc = ref_gj_collect_consts(t, rl, &rk, lcap);
+      u8 ncc = gj_collect_consts(t, nl, &nk, lcap);
+      u32 id  = (rng32(seed) & 1u) ? rng32(seed) % 12u : 60u + rng32(seed) % 8u;
+      u32 lab = rng32(seed) % 12u;
+      if (rc == nc && rn == nn && memcmp(rids, nids, rn * sizeof(u32)) == 0 &&
+          rc0 == nc0 && memcmp(rvc, nvc, sizeof rvc) == 0 &&
+          rcc == ncc && rk == nk && memcmp(rl, nl, rk * sizeof(u32)) == 0 &&
+          ref_gj_has_var(t, id) == gj_has_var(t, id) &&
+          ref_gj_vars_subset(t, u) == gj_vars_subset(t, u) &&
+          ref_gj_vars_subset(u, t) == gj_vars_subset(u, t) &&
+          ref_gj_has_big_var(t) == gj_has_big_var(t) &&
+          ref_gj_has_const(t, lab) == gj_has_const(t, lab)) {
+        ok++;
+      }
+    }
+    g_wide = 16u;
+    CHECK_EQ(ok, (u32)GC_N);
+  }
+
+  // The rewrite and pre-normalization steps on an engine whose rules
+  // include a surely-firing oriented one, f3(x0, x1) -> x0.
+  AtpState *g = wo_state(seed);
+  {
+    Term xy[2] = { term_new_fvr(0u), term_new_fvr(1u) };
+    (void)atp_push_rule(g, term_new_ctr(3u, xy, 2u), xy[0]);
+  }
+  GjModel m3;
+  memset(&m3, 0, sizeof m3);
+  m3.atom[0].is_const = 0u; m3.atom[0].id = 0u; m3.major[0] = 0u;
+  m3.atom[1].is_const = 0u; m3.atom[1].id = 1u; m3.major[1] = 1u;
+  m3.atom[2].is_const = 1u; m3.atom[2].id = 5u; m3.major[2] = 1u;
+  m3.n = 3u;
+  GjModel m0;
+  memset(&m0, 0, sizeof m0);
+  const u32 cpv[3] = { 0u, 1u, 2u };
+  {
+    // Warm the lazily built rule flags and top-scan index.
+    u8 f = 0u;
+    gj_sess_arm(&m0, g->kbo, cpv, 3u);
+    gj_nf_fresh();
+    (void)gj_rewrite_step(g, &m0, mk_random(seed), cpv, 3u, &f, 0);
+    gj_sess_disarm();
+  }
+
+  TEST_BEGIN("atp_deep/pin-gj-rewrite-step-heap-layout");
+  {
+    static u32  rsl[GJ_NF_SIZE], nsl[GJ_NF_SIZE];
+    static Term rky[GJ_NF_SIZE], nky[GJ_NF_SIZE];
+    u32 ok = 0, fires = 0;
+    for (u32 i = 0; i < GC_N; i++) {
+      Term t = mk_random(seed);
+      Term protect = (i % 5u == 0u) ? t : 0;
+      const GjModel *mm = (i & 2u) ? &m3 : &m0;
+      g_gj_orient_free = (u8)(i & 1u);
+      gj_sess_arm(mm, g->kbo, cpv, 3u);
+      gj_nf_fresh();
+      u64 q0 = g_atp_gjp_top_q, p0 = g_atp_gjp_gate_pass;
+      u64 h0 = HEAP_NEXT;
+      u8   rf = 0u;
+      Term r  = ref_gj_rewrite_step(g, mm, t, cpv, 3u, &rf, protect);
+      u64 h1 = HEAP_NEXT;
+      u64 q1 = g_atp_gjp_top_q, p1 = g_atp_gjp_gate_pass;
+      u32 rk = gj_nf_snapshot(rsl, rky);
+      gj_nf_fresh();
+      u8   nf = 0u;
+      Term n  = gj_rewrite_step(g, mm, t, cpv, 3u, &nf, protect);
+      u64 h2 = HEAP_NEXT;
+      u64 q2 = g_atp_gjp_top_q, p2 = g_atp_gjp_gate_pass;
+      u32 nk = gj_nf_snapshot(nsl, nky);
+      gj_sess_disarm();
+      if (rf == nf && heap_regions_same(h0, h1, h1, h2) &&
+          reloc(r, h0, h1, h1) == n && rk == nk &&
+          memcmp(rsl, nsl, rk * sizeof(u32)) == 0 &&
+          memcmp(rky, nky, rk * sizeof(Term)) == 0 &&
+          q1 - q0 == q2 - q1 && p1 - p0 == p2 - p1) {
+        ok++;
+      }
+      fires += nf;
+    }
+    g_gj_orient_free = 0u;
+    CHECK_EQ(ok, (u32)GC_N);
+    CHECK(fires > 0u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-gj-prenorm-step-heap-layout");
+  {
+    u32 ok = 0, fires = 0;
+    for (u32 i = 0; i < GC_N; i++) {
+      Term t = mk_random(seed);
+      u64  h0 = HEAP_NEXT;
+      u8   rf = 0u;
+      Term r  = ref_gj_prenorm_step(g, t, &rf);
+      u64  h1 = HEAP_NEXT;
+      u8   nf = 0u;
+      Term n  = gj_prenorm_step(g, t, &nf);
+      u64  h2 = HEAP_NEXT;
+      if (rf == nf && heap_regions_same(h0, h1, h1, h2) &&
+          reloc(r, h0, h1, h1) == n) {
+        ok++;
+      }
+      fires += nf;
+    }
+    CHECK_EQ(ok, (u32)GC_N);
+    CHECK(fires > 0u);
+  }
+
+  ft_destroy(&a);
+  thvm_atp_free(g);
+  thvm_atp_free(s);
+}
+
+static void deep_gc_gj(u32 *seed) {
+  AtpState *s = wo_state(seed);
+  s->ifeq_syms[0] = 25u;
+  s->n_ifeq_syms  = 1u;
+  Term vals[5], vvar[5];
+  for (u32 v = 0; v < 5u; v++) {
+    Term kid = term_new_ctr(9u, NULL, 0u);
+    vals[v] = term_new_ctr(20u + v, &kid, v & 1u);
+    vvar[v] = term_new_fvr(10u + v);
+  }
+  Term pat  = mk_deep(DEEP, 1u, term_new_fvr(4u), NULL, 1u);
+  Term ren  = mk_deep(DEEP, 1u, vvar[4], vvar, 1u);   // pat, vars renamed
+  Term subj = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+  Term same = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+  Term near = mk_deep(DEEP, 1u, vals[3], vals, 1u);
+  u32  size = term_size_iter(subj);
+  AtpFt a;
+  ft_init(&a);
+
+  TEST_BEGIN("atp_deep/deep-ifeq-tgt-fold-ground");
+  {
+    CHECK(atp_ifeq_term_eq(subj, same));
+    CHECK(!atp_ifeq_term_eq(subj, near));
+    // DEEP nested guards ifeq(c5, d, below), resolved (d == c5) at every
+    // third level.
+    Term chain = term_new_ctr(9u, NULL, 0u);
+    u32  open  = 0u;
+    for (u32 k = 0; k < DEEP; k++) {
+      Term kids[3] = { term_new_ctr(5u, NULL, 0u),
+                       term_new_ctr((k % 3u == 0u) ? 5u : 6u, NULL, 0u),
+                       chain };
+      chain = term_new_ctr(25u, kids, 3u);
+      open += (k % 3u != 0u);
+    }
+    CHECK_EQ(atp_ifeq_guard_count(s, chain), open);
+    u64 vm = 0ull;
+    atp_ifeq_var_mask(pat, &vm);
+    CHECK_EQ(vm, 0x1full);
+    AtpIfeqVarMap v1, v2, v3, v4;
+    v1.n = v2.n = v3.n = v4.n = 0u;
+    AtpFtCell *xs = ft_from_term(&a, subj, 0);
+    AtpFtCell *zs = ft_from_term(&a, near, 0);
+    u64 hs = atp_ifeq_guard_hash_ft_rec(xs, &v1);
+    CHECK_EQ(hs, atp_ifeq_guard_hash_ft_rec(ft_from_term(&a, same, 0), &v1));
+    CHECK(hs != atp_ifeq_guard_hash_ft_rec(zs, &v1));
+    // Canonical variable numbering: a renamed copy hashes alike.
+    CHECK_EQ(atp_ifeq_guard_hash_ft_rec(ft_from_term(&a, pat, 0), &v2),
+             atp_ifeq_guard_hash_ft_rec(ft_from_term(&a, ren, 0), &v3));
+    CHECK_EQ(v2.n, 5u);
+    CHECK_EQ(v3.n, 5u);
+    // A 3,000-deep spine stays within the reference recursion's reach.
+    Term mid = mk_deep(3000u, 1u, term_new_fvr(4u), NULL, 1u);
+    AtpFtCell *ms = ft_from_term(&a, mid, 0);
+    AtpIfeqVarMap r5;
+    r5.n = 0u;
+    CHECK_EQ(atp_ifeq_guard_hash_ft_rec(ms, &v4),
+             ref_atp_ifeq_guard_hash_ft_rec(ms, &r5));
+    memset(s->tgt_sym_mask, 0, sizeof s->tgt_sym_mask);
+    atp_tgt_mask_collect(s, subj);
+    CHECK_EQ(s->tgt_sym_mask[0],
+             (1ull << 1) | (1ull << 2) | (1ull << 5) | (1ull << 6) |
+             (1ull << 9) | (0x1full << 20));
+    memset(s->tgt_sym_mask, 0, sizeof s->tgt_sym_mask);
+    s->tgt_sym_mask[0] = (1ull << 1) | (1ull << 2);   // the spine labels
+    u32 gc = 0u, oc = 0u, vc = 0u;
+    atp_tgt_count_rec(s, subj, &gc, &oc, &vc);
+    CHECK_EQ(gc, (u32)DEEP);
+    CHECK_EQ(gc + oc, size);
+    CHECK_EQ(vc, 0u);
+    memset(s->tgt_sym_mask, 0, sizeof s->tgt_sym_mask);
+    s->fold_lo = 24u;
+    s->fold_hi = 25u;
+    CHECK(atp_term_has_fold(s, subj));
+    s->fold_lo = 30u;
+    s->fold_hi = 32u;
+    CHECK(!atp_term_has_fold(s, subj));
+    s->fold_lo = 0u;
+    s->fold_hi = 0u;
+    CHECK(atp_term_is_ground(subj));
+    CHECK(!atp_term_is_ground(pat));
+  }
+
+  TEST_BEGIN("atp_deep/deep-gj-walks");
+  {
+    u32 ids[8], n = 0u;
+    CHECK(atp_gj_collect_vars(pat, ids, &n, 8u));
+    CHECK_EQ(n, 5u);
+    sort_u32(ids, n);
+    for (u32 v = 0; v < 5u; v++) {
+      CHECK_EQ(ids[v], v);
+    }
+    n = 0u;
+    CHECK(!atp_gj_collect_vars(pat, ids, &n, 3u));
+    CHECK_EQ(n, 3u);
+    u32 labs[16], nl = 0u;
+    CHECK(gj_collect_consts(subj, labs, &nl, 16u));
+    CHECK_EQ(nl, 6u);
+    sort_u32(labs, nl);
+    static const u32 want[6] = { 5u, 6u, 9u, 20u, 22u, 24u };
+    for (u32 k = 0; k < 6u; k++) {
+      CHECK_EQ(labs[k], want[k]);
+    }
+    nl = 0u;
+    CHECK(!gj_collect_consts(subj, labs, &nl, 2u));
+    CHECK(gj_has_var(pat, 4u));
+    CHECK(!gj_has_var(pat, 7u));
+    CHECK(gj_vars_subset(pat, ren) == 0u);
+    CHECK(gj_vars_subset(pat, pat));
+    CHECK(gj_vars_subset(subj, pat));
+    CHECK(!gj_vars_subset(pat, subj));
+    CHECK(!gj_has_big_var(pat));
+    CHECK(gj_has_big_var(mk_deep(DEEP, 1u, term_new_fvr(70u), NULL, 1u)));
+    CHECK(gj_has_const(subj, 24u));
+    CHECK(!gj_has_const(subj, 30u));
+    long long c0 = 0;
+    long long vc[KBO_MAX_VAR];
+    memset(vc, 0, sizeof vc);
+    gj_form_addto(subj, +1, &g_wo_cfg, &c0, vc);
+    CHECK_EQ(c0, (long long)size);                    // unit weights
+    c0 = 0;
+    gj_form_addto(pat, -1, &g_wo_cfg, &c0, vc);
+    long long vsum = 0;
+    for (u32 v = 0; v < KBO_MAX_VAR; v++) {
+      vsum += vc[v];
+    }
+    CHECK_EQ(c0 + vsum, -(long long)term_size_iter(pat));
+  }
+
+  TEST_BEGIN("atp_deep/deep-gj-rewrite-prenorm");
+  {
+    // One oriented rule c31 -> c30 (precedence = label) whose only
+    // redex is the bottom of a deep spine: the leftmost-outermost step
+    // walks the whole spine and rebuilds it.  The rewrite step's indexed
+    // top scan flattens every subterm it visits (quadratic in depth), so
+    // that walk runs on a 10,000-deep spine; the pre-normalization step
+    // scans rules linearly and runs on DEEP.
+    AtpState *g = thvm_atp_init(&g_wo_cfg, 100u);
+    (void)atp_push_rule(g, term_new_ctr(31u, NULL, 0u),
+                        term_new_ctr(30u, NULL, 0u));
+    CHECK(g->r_orient[0]);
+    enum { GJ_DEEP = 10000 };
+    Term c31   = term_new_ctr(31u, NULL, 0u);
+    Term c30   = term_new_ctr(30u, NULL, 0u);
+    Term chain = mk_deep(GJ_DEEP, 1u, c31, vals, 1u);
+    Term want  = mk_deep(GJ_DEEP, 1u, c30, vals, 1u);
+    GjModel em;
+    memset(&em, 0, sizeof em);
+    const u32 cpv[1] = { 0u };
+    g_gj_orient_free = 1u;
+    gj_sess_arm(&em, g->kbo, cpv, 0u);
+    gj_nf_fresh();
+    u8   fired = 0u;
+    Term out   = gj_rewrite_step(g, &em, chain, cpv, 0u, &fired, 0);
+    gj_sess_disarm();
+    g_gj_orient_free = 0u;
+    CHECK(fired);
+    CHECK(term_eq_iter(out, want));
+    Term dchain = mk_deep(DEEP, 1u, c31, vals, 1u);
+    fired = 0u;
+    out = gj_prenorm_step(g, dchain, &fired);
+    CHECK(fired);
+    CHECK(term_eq_iter(out, mk_deep(DEEP, 1u, c30, vals, 1u)));
+    fired = 1u;
+    out = gj_prenorm_step(g, subj, &fired);
+    CHECK(!fired);
+    CHECK(out == subj);
+    thvm_atp_free(g);
+  }
+
+  ft_destroy(&a);
+  thvm_atp_free(s);
+}
+
 int main(void) {
   thvm_init();
   u32 seed = 0x6c8e9cf5u;
@@ -3352,6 +4059,8 @@ int main(void) {
   deep_serialize();
   pin_weight_order(&seed);
   deep_weight_order(&seed);
+  pin_gc_gj(&seed);
+  deep_gc_gj(&seed);
   thvm_free();
   TEST_REPORT();
 }

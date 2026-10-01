@@ -1408,29 +1408,73 @@ static u8 atp_ifeq_sym_is(const AtpState *s, u32 sym) {
 // nodes; early-exits on the first mismatch (guards differ at the head
 // in practice: theorem(...) vs true).
 static u8 atp_ifeq_term_eq(Term a, Term b) {
-  u8 ta = term_tag(a), tb = term_tag(b);
-  if (ta != tb) return 0;
-  if (ta == TAG_FVR) return term_ext(a) == term_ext(b);
-  if (ta != TAG_CTR) return a == b;
-  if (term_ext(a) != term_ext(b)) return 0;
-  u32 n = term_ctr_n(a);
-  if (n != term_ctr_n(b)) return 0;
-  for (u32 i = 0; i < n; i++)
-    if (!atp_ifeq_term_eq(term_ctr_at(a, i), term_ctr_at(b, i))) return 0;
-  return 1;
+  typedef struct { Term a; Term b; } EqPair;
+  EqPair  st_inl[ATP_WALK_INL];
+  EqPair *st  = st_inl;
+  u32     nst = 0u;
+  u32     cst = ATP_WALK_INL;
+  u8      eq  = 1u;
+  for (;;) {
+    u8 ta = term_tag(a), tb = term_tag(b);
+    if (ta != tb) {
+      eq = 0u;
+    } else if (ta == TAG_FVR) {
+      eq = (u8)(term_ext(a) == term_ext(b));
+    } else if (ta != TAG_CTR) {
+      eq = (u8)(a == b);
+    } else if (term_ext(a) != term_ext(b)) {
+      eq = 0u;
+    } else {
+      u32 n = term_ctr_n(a);
+      if (n != term_ctr_n(b)) {
+        eq = 0u;
+      } else {
+        while (nst + n > cst) {
+          st = (EqPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) {
+          st[nst].a = term_ctr_at(a, i);
+          st[nst].b = term_ctr_at(b, i);
+          nst++;
+        }
+      }
+    }
+    if (!eq || nst == 0u) {
+      break;
+    }
+    nst--;
+    a = st[nst].a;
+    b = st[nst].b;
+  }
+  term_stack_release(st, st_inl);
+  return eq;
 }
 
 // Count UNDECIDED guards: detected ifeq nodes whose args 1,2 are not
 // syntactically equal (a decided one collapses at the next normalize
 // via the dispatcher rule itself, so it must NOT be penalized).
 static u32 atp_ifeq_guard_count(const AtpState *s, Term t) {
-  if (term_tag(t) != TAG_CTR) return 0u;
-  u32 n = term_ctr_n(t);
-  u32 c = 0u;
-  if ((n == 3u || n == 4u) && atp_ifeq_sym_is(s, term_ext(t)) &&
-      !atp_ifeq_term_eq(term_ctr_at(t, 0), term_ctr_at(t, 1))) c = 1u;
-  for (u32 i = 0; i < n; i++)
-    c += atp_ifeq_guard_count(s, term_ctr_at(t, i));
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u32   c   = 0u;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      if ((n == 3u || n == 4u) && atp_ifeq_sym_is(s, term_ext(t)) &&
+          !atp_ifeq_term_eq(term_ctr_at(t, 0), term_ctr_at(t, 1))) c++;
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
   return c;
 }
 
@@ -1465,11 +1509,27 @@ static u32 atp_ifeq_scale_pri(u32 base, u32 guards) {
 // Distinct-variable bitmask (var ids mod 64 -- an over-approximation
 // dedupe, exact for the engine's REWRITE_MAX_VAR-bounded rule space).
 static void atp_ifeq_var_mask(Term t, u64 *mask) {
-  u8 tg = term_tag(t);
-  if (tg == TAG_FVR) { *mask |= 1ull << (term_ext(t) & 63u); return; }
-  if (tg != TAG_CTR) return;
-  u32 n = term_ctr_n(t);
-  for (u32 i = 0; i < n; i++) atp_ifeq_var_mask(term_ctr_at(t, i), mask);
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    u8 tg = term_tag(t);
+    if (tg == TAG_FVR) {
+      *mask |= 1ull << (term_ext(t) & 63u);
+    } else if (tg == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
 }
 // THVM_ATP_IFEQ_VARCAP (default 3): distinct-variable budget; every
 // variable beyond it costs one penalty step.  The oracle proofs'
@@ -1720,19 +1780,56 @@ static u32 atp_ifeq_decide_scale(const AtpState *s, Term lhs, Term rhs,
 // walk copies the recurrence shape from -- so the two hashes agree on
 // shared content by construction).
 static u64 atp_ifeq_guard_hash_ft_rec(const AtpFtCell *t, AtpIfeqVarMap *vm) {
-  if (ft_is_var(t)) {
-    u32 cid = atp_ifeq_canon_var(vm, ft_var_id(t));
-    return 0xfacefacefaceull ^ ((u64)cid * 0x100000001b3ull);
+  // Folded post-order over an explicit stack; variables are
+  // canonicalized as they are reached, in the recursion's preorder.
+  typedef struct { const AtpFtCell *child; u32 left; u32 n; u64 h; } GhFrame;
+  GhFrame  fr_inl[ATP_WALK_INL];
+  GhFrame *fr  = fr_inl;
+  u32      nfr = 0u;
+  u32      cfr = ATP_WALK_INL;
+  u64      v   = 0u;
+  for (;;) {
+    u8 leaf = 1u;
+    if (ft_is_var(t)) {
+      u32 cid = atp_ifeq_canon_var(vm, ft_var_id(t));
+      v = 0xfacefacefaceull ^ ((u64)cid * 0x100000001b3ull);
+    } else {
+      u32 n = t->arity;
+      u64 h = 0xcbf29ce484222325ull ^ ((u64)ft_ctr_sym(t) * 0x100000001b3ull);
+      if (n == 0u) {
+        v = h;
+      } else {
+        if (nfr == cfr) {
+          fr = (GhFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].child = t->next;
+        fr[nfr].left  = n;
+        fr[nfr].n     = n;
+        fr[nfr].h     = h;
+        nfr++;
+        leaf = 0u;
+      }
+    }
+    if (leaf) {
+      while (nfr > 0u) {
+        GhFrame *f = &fr[nfr - 1u];
+        f->h ^= v;
+        f->h *= 0x100000001b3ull;
+        if (f->left > 0u) break;
+        v = f->h ^ ((u64)f->n * 0x9e3779b97f4a7c15ull);
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    GhFrame *f = &fr[nfr - 1u];
+    t        = f->child;
+    f->child = t->end->next;
+    f->left--;
   }
-  u32 n = t->arity;
-  u64 h = 0xcbf29ce484222325ull ^ ((u64)ft_ctr_sym(t) * 0x100000001b3ull);
-  const AtpFtCell *k = t->next;
-  for (u32 i = 0; i < n; i++) {
-    h ^= atp_ifeq_guard_hash_ft_rec(k, vm);
-    h *= 0x100000001b3ull;
-    k = k->end->next;
-  }
-  return h ^ ((u64)n * 0x9e3779b97f4a7c15ull);
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 static u32 atp_ifeq_guard_bucket_ft(const AtpFtCell *t) {
   AtpIfeqVarMap vm; vm.n = 0u;
@@ -2058,13 +2155,29 @@ static u8 atp_tgt_sym_hit(const AtpState *s, u32 lbl) {
                >> (lbl & 63u)) & 1ull);
 }
 static void atp_tgt_mask_collect(AtpState *s, Term t) {
-  if (term_tag(t) != TAG_CTR) return;
-  u32 lbl = term_ext(t);
-  s->tgt_sym_mask[(lbl >> 6) & (ATP_TGT_MASK_WORDS - 1u)] |=
-      1ull << (lbl & 63u);
-  u32 n = term_ctr_n(t);
-  if (n > REWRITE_MAX_ARITY) return;
-  for (u32 i = 0; i < n; i++) atp_tgt_mask_collect(s, term_ctr_at(t, i));
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      u32 lbl = term_ext(t);
+      s->tgt_sym_mask[(lbl >> 6) & (ATP_TGT_MASK_WORDS - 1u)] |=
+          1ull << (lbl & 63u);
+      u32 n = term_ctr_n(t);
+      if (n <= REWRITE_MAX_ARITY) {
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
 }
 // Collect the goal-symbol bitset lazily (union over every conjunct,
 // like SOS's goal_sym_mask, plus the externally-declared goal-cone
@@ -2121,14 +2234,30 @@ static u32 atp_tgt_scale_counts(u32 base, u32 gc, u32 oc, u32 vc) {
 }
 static void atp_tgt_count_rec(const AtpState *s, Term t,
                               u32 *gc, u32 *oc, u32 *vc) {
-  u8 tg = term_tag(t);
-  if (tg == TAG_FVR) { (*vc)++; return; }
-  if (tg != TAG_CTR) return;
-  if (atp_tgt_sym_hit(s, term_ext(t))) (*gc)++; else (*oc)++;
-  u32 n = term_ctr_n(t);
-  if (n > REWRITE_MAX_ARITY) return;
-  for (u32 i = 0; i < n; i++)
-    atp_tgt_count_rec(s, term_ctr_at(t, i), gc, oc, vc);
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    u8 tg = term_tag(t);
+    if (tg == TAG_FVR) {
+      (*vc)++;
+    } else if (tg == TAG_CTR) {
+      if (atp_tgt_sym_hit(s, term_ext(t))) (*gc)++; else (*oc)++;
+      u32 n = term_ctr_n(t);
+      if (n <= REWRITE_MAX_ARITY) {
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
 }
 static u32 atp_tgt_weight_scale(const AtpState *s, Term lhs, Term rhs,
                                 u32 base) {
@@ -2300,14 +2429,33 @@ static u8 atp_drc_armed(const AtpState *s) {
 }
 // Does the Term carry a folded-band symbol?
 static u8 atp_term_has_fold(const AtpState *s, Term t) {
-  if (term_tag(t) != TAG_CTR) return 0u;
-  u32 lbl = term_ext(t);
-  if (lbl >= s->fold_lo && lbl < s->fold_hi) return 1u;
-  u32 n = term_ctr_n(t);
-  if (n > REWRITE_MAX_ARITY) return 0u;
-  for (u32 i = 0; i < n; i++)
-    if (atp_term_has_fold(s, term_ctr_at(t, i))) return 1u;
-  return 0u;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u8    hit = 0u;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      u32 lbl = term_ext(t);
+      if (lbl >= s->fold_lo && lbl < s->fold_hi) {
+        hit = 1u;
+        break;
+      }
+      u32 n = term_ctr_n(t);
+      if (n <= REWRITE_MAX_ARITY) {
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
 // FT-span twin (prefix walk, the atp_tgt_weight_scale_ft shape).
@@ -3196,17 +3344,34 @@ static int atp_col3_tuple(Term s, Term t, u32 apply) {
 }
 
 static int atp_term_is_ground(Term t) {
-  switch (term_tag(t)) {
-    case TAG_FVR: return 0;
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        if (!atp_term_is_ground(term_ctr_at(t, i))) return 0;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  int   ground = 1;
+  for (;;) {
+    switch (term_tag(t)) {
+      case TAG_FVR:
+        ground = 0;
+        break;
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
       }
-      return 1;
+      default:
+        break;
     }
-    default: return 1;
+    if (!ground || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return ground;
 }
 
 static int atp_col3_test(Term s, Term t, u32 apply) {

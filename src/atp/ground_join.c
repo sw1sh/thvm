@@ -55,26 +55,48 @@
 // cap).  *n is the running count; returns 0 if it would overflow `cap`
 // (caller treats overflow as "too many vars -> keep").
 static u8 atp_gj_collect_vars(Term t, u32 *ids, u32 *n, u32 cap) {
-  switch (term_tag(t)) {
-    case TAG_FVR: {
-      u32 id = term_ext(t);
-      for (u32 i = 0; i < *n; i++) {
-        if (ids[i] == id) return 1;       // already seen
+  // Distinct variables in preorder; more than `cap` fails the walk.
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u8    ok  = 1u;
+  for (;;) {
+    switch (term_tag(t)) {
+      case TAG_FVR: {
+        u32 id = term_ext(t);
+        u8 seen = 0u;
+        for (u32 i = 0; i < *n; i++) {
+          if (ids[i] == id) { seen = 1u; break; }
+        }
+        if (!seen) {
+          if (*n >= cap) {
+            ok = 0u;                      // too many distinct vars
+          } else {
+            ids[*n] = id;
+            (*n)++;
+          }
+        }
+        break;
       }
-      if (*n >= cap) return 0;            // too many distinct vars
-      ids[*n] = id;
-      (*n)++;
-      return 1;
-    }
-    case TAG_CTR: {
-      u32 k = term_ctr_n(t);
-      for (u32 i = 0; i < k; i++) {
-        if (!atp_gj_collect_vars(term_ctr_at(t, i), ids, n, cap)) return 0;
+      case TAG_CTR: {
+        u32 k = term_ctr_n(t);
+        while (nst + k > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = k; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
       }
-      return 1;
+      default:
+        break;
     }
-    default: return 1;
+    if (!ok || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return ok;
 }
 
 // ── Atoms ───────────────────────────────────────────────────────────
@@ -155,23 +177,37 @@ static int gj_model_cmp(const GjModel *m, GjAtom a, GjAtom b) {
 // "cannot decide" (Incomparable -> KEEP-safe).
 static void gj_form_addto(Term t, int sign, const KboConfig *cfg,
                           long long *c0, long long *var_coeff) {
-  switch (term_tag(t)) {
-    case TAG_FVR: {
-      u32 id = term_ext(t);
-      if (id < KBO_MAX_VAR) var_coeff[id] += sign;
-      return;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    switch (term_tag(t)) {
+      case TAG_FVR: {
+        u32 id = term_ext(t);
+        if (id < KBO_MAX_VAR) var_coeff[id] += sign;
+        break;
+      }
+      case TAG_CTR: {
+        u32 lab = term_ext(t);
+        *c0 += (long long)sign *
+               (long long)((lab < cfg->n_labels) ? cfg->weights[lab] : 0);
+        u32 n = term_ctr_n(t);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
+      }
+      default:
+        break;
     }
-    case TAG_CTR: {
-      u32 lab = term_ext(t);
-      *c0 += (long long)sign *
-             (long long)((lab < cfg->n_labels) ? cfg->weights[lab] : 0);
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++)
-        gj_form_addto(term_ctr_at(t, i), sign, cfg, c0, var_coeff);
-      return;
+    if (nst == 0u) {
+      break;
     }
-    default: return;
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
 }
 
 // minimumIn (gj_spec.md D, note "kbo under assumptions").  Compute the
@@ -649,30 +685,67 @@ static int gj_lex_less_in(const GjModel *m, const KboConfig *cfg,
 // Does variable id `id` occur in `t`?  (Local copy so GJ does not depend
 // on the ATP_ORDERED_REWRITE/ATP_MNF build flags.)
 static int gj_has_var(Term t, u32 id) {
-  switch (term_tag(t)) {
-    case TAG_FVR: return term_ext(t) == id;
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) if (gj_has_var(term_ctr_at(t, i), id)) return 1;
-      return 0;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  int   hit = 0;
+  for (;;) {
+    switch (term_tag(t)) {
+      case TAG_FVR:
+        hit = (term_ext(t) == id);
+        break;
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
+      }
+      default:
+        break;
     }
-    default: return 0;
+    if (hit || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 // Is every TAG_FVR variable of `sub` also a variable of `sup`?  Used to
 // reject malformed (extra-variable) rule applications during GJ rewrite.
 static u8 gj_vars_subset(Term sub, Term sup) {
-  switch (term_tag(sub)) {
-    case TAG_FVR: return gj_has_var(sup, term_ext(sub)) ? 1 : 0;
-    case TAG_CTR: {
-      u32 n = term_ctr_n(sub);
-      for (u32 i = 0; i < n; i++)
-        if (!gj_vars_subset(term_ctr_at(sub, i), sup)) return 0;
-      return 1;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u8    all = 1u;
+  for (;;) {
+    switch (term_tag(sub)) {
+      case TAG_FVR:
+        all = gj_has_var(sup, term_ext(sub)) ? 1u : 0u;
+        break;
+      case TAG_CTR: {
+        u32 n = term_ctr_n(sub);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(sub, i);
+        break;
+      }
+      default:
+        break;
     }
-    default: return 1;
+    if (!all || nst == 0u) {
+      break;
+    }
+    sub = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return all;
 }
 
 // ── C-parameterised rewriting (gj_spec.md C/D) ──────────────────────
@@ -738,16 +811,34 @@ static const AtpState *g_gj_rflags_owner = NULL;
 // gj_form_addto coefficient table)?  Such rules are excluded from the
 // SIZENEUT shortcut (the form is not fully representable).
 static u8 gj_has_big_var(Term t) {
-  switch (term_tag(t)) {
-    case TAG_FVR: return term_ext(t) >= KBO_MAX_VAR ? 1u : 0u;
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++)
-        if (gj_has_big_var(term_ctr_at(t, i))) return 1u;
-      return 0u;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u8    hit = 0u;
+  for (;;) {
+    switch (term_tag(t)) {
+      case TAG_FVR:
+        hit = term_ext(t) >= KBO_MAX_VAR ? 1u : 0u;
+        break;
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
+      }
+      default:
+        break;
     }
-    default: return 0u;
+    if (hit || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 static u8 gj_rule_flags(AtpState *s, u32 i) {
@@ -867,11 +958,13 @@ static u8 gj_try_top_indexed(AtpState *s, const GjModel *m, Term t,
   return 0u;
 }
 
-static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
-                            const u32 *cp_vars, u32 n_cp_vars, u8 *fired,
-                            Term protect) {
+// The top-position attempt of gj_rewrite_step: sets *hit and returns
+// the reduct when a rule fires at the root of `t`.
+static Term gj_rewrite_top(AtpState *s, const GjModel *m, Term t,
+                           const u32 *cp_vars, u32 n_cp_vars, Term protect,
+                           u8 *hit) {
   const KboConfig *cfg = s->kbo;
-  if (protect == 0 && gj_nf_hit(t)) { *fired = 0; return t; }
+  *hit = 0u;
   // Discrimination-tree top scan: byte-parity with the linear scan by
   // construction (candidates gated in ascending rule order), measured
   // trajectory-identical on GRP753-1/LAT138-1 tickers and 3.6-10x
@@ -887,7 +980,7 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
   if (gjidx) {
     Term red = 0;
     u8 rc = gj_try_top_indexed(s, m, t, cp_vars, n_cp_vars, protect, &red);
-    if (rc == 1u) { *fired = 1; return red; }
+    if (rc == 1u) { *hit = 1u; return red; }
     if (rc == 0u) did_top = 1u;       // index authoritative: no top redex
     // rc == 2u: bail -> run the exact linear top scan below
   }
@@ -920,7 +1013,7 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
       u8 rf = gj_rule_flags(s, i);
       if (!(rf & GJ_RF_VARSOK) && !gj_vars_subset(reduct, t)) continue;
       if (g_gj_orient_free && s->r_orient[i]) {
-        *fired = 1;
+        *hit = 1u;
         return reduct;
       }
       if (kbo_eq(reduct, t)) continue;     // no-op image
@@ -930,34 +1023,80 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
           ? gj_lex_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0)
           : gj_less_in(m, cfg, reduct, t, cp_vars, n_cp_vars, 0);
       if (r == GJ_STRICT || r == GJ_NONSTRICT) {
-        *fired = 1;
+        *hit = 1u;
         return reduct;
       }
     }
   }
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    if (n > REWRITE_MAX_ARITY) {
-      if (protect == 0) gj_nf_add(t);
-      *fired = 0;
-      return t;
-    }
-    Term children[REWRITE_MAX_ARITY];
-    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
-    for (u32 i = 0; i < n; i++) {
-      u8 sub_fired = 0;
-      Term rc = gj_rewrite_step(s, m, children[i], cp_vars, n_cp_vars,
-                                &sub_fired, 0);
-      if (sub_fired) {
-        children[i] = rc;
-        *fired = 1;
-        return term_new_ctr(term_ext(t), children, n);
+  return t;
+}
+
+static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
+                            const u32 *cp_vars, u32 n_cp_vars, u8 *fired,
+                            Term protect) {
+  // Leftmost-outermost over an explicit stack, one frame per open CTR
+  // (`i` = the child being stepped, `protect` = the node's own gate:
+  // the caller's at the root, 0 below).  A node already known to be a
+  // normal form is quiet at once; a node whose top and children are all
+  // quiet is remembered as one (gj_nf_add) unless protected.
+  typedef struct { Term t; u64 base; u32 i; u32 n; Term protect; } GjStepFrame;
+  GjStepFrame  fr_inl[ATP_WALK_INL];
+  GjStepFrame *fr  = fr_inl;
+  u32          nfr = 0u;
+  u32          cfr = ATP_WALK_INL;
+  Term         res = t;
+  u8           hit = 0u;
+  for (;;) {
+    hit = 0u;
+    res = t;
+    if (!(protect == 0 && gj_nf_hit(t))) {
+      res = gj_rewrite_top(s, m, t, cp_vars, n_cp_vars, protect, &hit);
+      if (!hit) {
+        u32 n = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+        if (n > 0u && n <= REWRITE_MAX_ARITY) {
+          if (nfr == cfr) {
+            fr = (GjStepFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].t       = t;
+          fr[nfr].base    = term_val(t);
+          fr[nfr].i       = 0u;
+          fr[nfr].n       = n;
+          fr[nfr].protect = protect;
+          nfr++;
+          t = heap_read(term_val(t) + 1u);
+          protect = 0;
+          continue;
+        }
+        if (protect == 0) gj_nf_add(t);
       }
     }
+    for (;;) {
+      if (nfr == 0u) {
+        term_stack_release(fr, fr_inl);
+        *fired = hit;
+        return res;
+      }
+      GjStepFrame *f = &fr[nfr - 1u];
+      if (hit) {
+        Term children[REWRITE_MAX_ARITY];
+        for (u32 i = 0; i < f->n; i++) {
+          children[i] = (i == f->i) ? res : term_ctr_at(f->t, i);
+        }
+        res = term_new_ctr(term_ext(f->t), children, f->n);
+        nfr--;
+        continue;
+      }
+      f->i++;
+      if (f->i < f->n) {
+        t = heap_read(f->base + 1u + (u64)f->i);
+        protect = 0;
+        break;
+      }
+      if (f->protect == 0) gj_nf_add(f->t);
+      res = f->t;
+      nfr--;
+    }
   }
-  if (protect == 0) gj_nf_add(t);
-  *fired = 0;
-  return t;
 }
 
 // Normalise `t` under model C with C-parameterised steps (step_cap).
@@ -1003,7 +1142,9 @@ static Term gj_normalize(AtpState *s, const GjModel *m, Term t,
 // raw pair under each of the ~B(n_vars) models).  Applied ONLY on the
 // forward CP path (no protect anchors, no exclude): the fact-level WM
 // -gj test keeps its exact WM-faithful evaluation order.
-static Term gj_prenorm_step(AtpState *s, Term t, u8 *fired) {
+// The top-position attempt of gj_prenorm_step.
+static Term gj_prenorm_top(AtpState *s, Term t, u8 *hit) {
+  *hit = 0u;
   for (u32 i = 0; i < s->n_rules; i++) {
     if (!s->r_orient[i]) continue;
     if (term_tag(s->lhs[i]) == TAG_FVR) continue;
@@ -1011,27 +1152,63 @@ static Term gj_prenorm_step(AtpState *s, Term t, u8 *fired) {
     if (thvm_match(s->lhs[i], t, &subst)) {
       Term reduct = thvm_subst_apply(s->rhs[i], &subst);
       if (!gj_vars_subset(reduct, t)) continue;
-      *fired = 1;
+      *hit = 1u;
       return reduct;
     }
   }
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    if (n > REWRITE_MAX_ARITY) { *fired = 0; return t; }
-    Term children[REWRITE_MAX_ARITY];
-    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
-    for (u32 i = 0; i < n; i++) {
-      u8 sub_fired = 0;
-      Term rc = gj_prenorm_step(s, children[i], &sub_fired);
-      if (sub_fired) {
-        children[i] = rc;
-        *fired = 1;
-        return term_new_ctr(term_ext(t), children, n);
+  return t;
+}
+
+static Term gj_prenorm_step(AtpState *s, Term t, u8 *fired) {
+  // Leftmost-outermost over an explicit stack (see gj_rewrite_step).
+  AtpWalkFrame  fr_inl[ATP_WALK_INL];
+  AtpWalkFrame *fr  = fr_inl;
+  u32           nfr = 0u;
+  u32           cfr = ATP_WALK_INL;
+  Term          res;
+  u8            hit;
+  for (;;) {
+    res = gj_prenorm_top(s, t, &hit);
+    if (!hit) {
+      u32 n = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+      if (n > 0u && n <= REWRITE_MAX_ARITY) {
+        if (nfr == cfr) {
+          fr = (AtpWalkFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].t    = t;
+        fr[nfr].base = term_val(t);
+        fr[nfr].i    = 0u;
+        fr[nfr].n    = n;
+        nfr++;
+        t = heap_read(term_val(t) + 1u);
+        continue;
       }
     }
+    for (;;) {
+      if (nfr == 0u) {
+        term_stack_release(fr, fr_inl);
+        *fired = hit;
+        return res;
+      }
+      AtpWalkFrame *f = &fr[nfr - 1u];
+      if (hit) {
+        Term children[REWRITE_MAX_ARITY];
+        for (u32 i = 0; i < f->n; i++) {
+          children[i] = (i == f->i) ? res : term_ctr_at(f->t, i);
+        }
+        res = term_new_ctr(term_ext(f->t), children, f->n);
+        nfr--;
+        continue;
+      }
+      f->i++;
+      if (f->i < f->n) {
+        t = heap_read(f->base + 1u + (u64)f->i);
+        break;
+      }
+      res = f->t;
+      nfr--;
+    }
   }
-  *fired = 0;
-  return t;
 }
 
 static Term gj_prenorm(AtpState *s, Term t) {
@@ -1095,22 +1272,42 @@ static u8 gj_joins_under(AtpState *s, const GjModel *m, Term lhs, Term rhs,
 
 // Collect distinct nullary-constant labels in `t`.
 static u8 gj_collect_consts(Term t, u32 *labs, u32 *n, u32 cap) {
-  switch (term_tag(t)) {
-    case TAG_CTR: {
+  // Distinct constants (0-ary CTRs) in preorder; more than `cap` fails.
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u8    ok  = 1u;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
       u32 k = term_ctr_n(t);
       if (k == 0) {
         u32 lab = term_ext(t);
-        for (u32 i = 0; i < *n; i++) if (labs[i] == lab) return 1;
-        if (*n >= cap) return 0;
-        labs[(*n)++] = lab;
-        return 1;
+        u8 seen = 0u;
+        for (u32 i = 0; i < *n; i++) {
+          if (labs[i] == lab) { seen = 1u; break; }
+        }
+        if (!seen) {
+          if (*n >= cap) {
+            ok = 0u;
+          } else {
+            labs[(*n)++] = lab;
+          }
+        }
+      } else {
+        while (nst + k > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = k; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
       }
-      for (u32 i = 0; i < k; i++)
-        if (!gj_collect_consts(term_ctr_at(t, i), labs, n, cap)) return 0;
-      return 1;
     }
-    default: return 1;
+    if (!ok || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return ok;
 }
 
 // Build a Model from a STRICT order on variables interleaved with the
@@ -1430,16 +1627,30 @@ static u8 gj_cover(AtpState *s, Term lhs, Term rhs,
 // rests on the same primitives (gj_normalize / gj_less_in, P2); every
 // stuck / overflow / budget case returns 0 = KEEP.
 static int gj_has_const(Term t, u32 lab) {
-  switch (term_tag(t)) {
-    case TAG_CTR: {
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  int   hit = 0;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
       u32 n = term_ctr_n(t);
-      if (n == 0) return term_ext(t) == lab;
-      for (u32 i = 0; i < n; i++)
-        if (gj_has_const(term_ctr_at(t, i), lab)) return 1;
-      return 0;
+      if (n == 0) {
+        hit = (term_ext(t) == lab);
+      } else {
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      }
     }
-    default: return 0;
+    if (hit || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 // Incremental gj_build_model consistency: would const x (weight wx) at
