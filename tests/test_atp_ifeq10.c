@@ -983,13 +983,42 @@ static const char *const k_header_out[] = {
 static const char *const k_header_raw[] = {
   "% Status   : Unsatisfiable\n",
   "% SPC      : CNF_UNS_RFO_PEQ_UEQ\n",
+  "% Encoding : dispatchers 0, tuples 0, predicates 1, definitions 0\n",
   NULL
 };
 
-// Without a header there is no status to carry.
-static const char *const k_noheader_raw[] = {
+// Without a header there is no status to carry.  The Encoding line counts
+// what the encoding added.
+static const char *const k_lcl096_raw[] = {
   "!% Status",
   "!% SPC",
+  "% Encoding : dispatchers 1, tuples 0, predicates 1, definitions 0\n",
+  NULL
+};
+
+static const char *const k_lcl423_raw[] = {
+  "% Encoding : dispatchers 1, tuples 1, predicates 1, definitions 0\n",
+  NULL
+};
+
+// Unit equality already: the encoding is the identity and says so, which
+// is how make_ifeq10_corpus.sh tells it from a real encoding.
+static const char *const k_unit_in[] = {
+  "cnf(left_identity,axiom, f(e,X) = X ).",
+  "cnf(prove_it,negated_conjecture, f(e,a) != a ).",
+  NULL
+};
+
+static const char *const k_unit_out[] = {
+  "cnf(left_identity,axiom,",
+  "    f(e,X) = X ).",
+  "cnf(prove_it,negated_conjecture,",
+  "    f(e,a) != a ).",
+  NULL
+};
+
+static const char *const k_unit_raw[] = {
+  "% Encoding : dispatchers 0, tuples 0, predicates 0, definitions 0\n",
   NULL
 };
 
@@ -1128,8 +1157,8 @@ static void check_case(const char *name, const char *const *in, const char *cons
 
 int main(void) {
   printf("test_atp_ifeq10\n");
-  check_case("LCL096-1", k_lcl096_in, k_lcl096_out, I10_RC_OK, NULL, k_noheader_raw);
-  check_case("LCL423-1", k_lcl423_in, k_lcl423_out, I10_RC_OK, NULL, NULL);
+  check_case("LCL096-1", k_lcl096_in, k_lcl096_out, I10_RC_OK, NULL, k_lcl096_raw);
+  check_case("LCL423-1", k_lcl423_in, k_lcl423_out, I10_RC_OK, NULL, k_lcl423_raw);
   check_case("ANA004-1", k_ana004_in, k_ana004_out, I10_RC_OK, NULL, NULL);
   check_case("PUZ131+1", k_puz131_in, k_puz131_out, I10_RC_OK, NULL, NULL);
   check_case("KLE090+1", k_kle090_in, k_kle090_out, I10_RC_OK, NULL, NULL);
@@ -1141,6 +1170,7 @@ int main(void) {
   // Global state resets between runs: a repeat is byte-identical.
   check_case("LCL096-1 again", k_lcl096_in, k_lcl096_out, I10_RC_OK, NULL, NULL);
   check_case("header status", k_header_in, k_header_out, I10_RC_OK, NULL, k_header_raw);
+  check_case("unit equality", k_unit_in, k_unit_out, I10_RC_OK, NULL, k_unit_raw);
   check_case("non-Horn", k_nonhorn_in, NULL, I10_RC_NONHORN, "not Horn", NULL);
   check_case("one-element model", k_sat1_in, NULL, I10_RC_SAT1, "one-element model", NULL);
   check_case("include without a path", k_include_in, NULL, I10_RC_INPUT,

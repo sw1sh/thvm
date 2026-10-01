@@ -343,6 +343,7 @@ static I10Name g_i10_ty_i = {I10_FIXED, -1, "$i", NULL, NULL, 0, NULL, NULL, NUL
 static long long g_i10_interned;
 static long long g_i10_counter;
 static int g_i10_bulk_done;
+static int g_i10_ndefs;
 static const char *g_i10_tag;
 static I10Vec g_i10_inputs;
 static I10FunTab g_i10_funs;
@@ -1423,6 +1424,7 @@ static I10Term *i10_skolem(I10Name *v, I10VSet vs) {
 
 static I10Atom *i10_definition(const char *w, I10VSet vs) {
   I10Name *n = i10_skolem_name("sP", w);
+  g_i10_ndefs++;
   I10Fun *f = i10_fun_new(n, vs.n, 1, NULL);
   I10Term **args = (I10Term **)i10_alloc(sizeof(I10Term *) * (size_t)(vs.n + 1));
   for (int i = 0; i < vs.n; i++) {
@@ -1877,13 +1879,10 @@ static I10Form *i10_unique_names(I10Form *f) {
 
 // --- clausifier: CNF and its simplification ------------------------------
 
-static I10LL *i10_ll(I10Lit **l, int n) {
+static I10LL *i10_ll(int n) {
   I10LL *c = (I10LL *)i10_alloc(sizeof(I10LL));
   c->n = n;
   c->l = (I10Lit **)i10_alloc(sizeof(I10Lit *) * (size_t)(n > 0 ? n : 1));
-  for (int i = 0; i < n; i++) {
-    c->l[i] = l[i];
-  }
   return c;
 }
 
@@ -1898,13 +1897,14 @@ static void i10_cnf(I10Form *f, I10Vec *out) {
       }
       return;
     case I10F_LIT: {
-      I10Lit *l = f->lit;
-      i10_push(out, i10_ll(&l, 1));
+      I10LL *c = i10_ll(1);
+      c->l[0] = f->lit;
+      i10_push(out, c);
       return;
     }
     case I10F_OR: {
       I10Vec acc = {NULL, 0, 0};
-      i10_push(&acc, i10_ll(NULL, 0));
+      i10_push(&acc, i10_ll(0));
       for (int i = f->n - 1; i >= 0; i--) {
         I10Vec cs = {NULL, 0, 0};
         i10_cnf(f->k[i], &cs);
@@ -1913,7 +1913,10 @@ static void i10_cnf(I10Form *f, I10Vec *out) {
           I10LL *c = (I10LL *)cs.v[a];
           for (int b = 0; b < acc.n; b++) {
             I10LL *d = (I10LL *)acc.v[b];
-            I10LL *cd = i10_ll(c->l, c->n + d->n);
+            I10LL *cd = i10_ll(c->n + d->n);
+            for (int j = 0; j < c->n; j++) {
+              cd->l[j] = c->l[j];
+            }
             for (int j = 0; j < d->n; j++) {
               cd->l[c->n + j] = d->l[j];
             }
@@ -1953,7 +1956,7 @@ static I10LL *i10_unify(I10LL *c) {
     }
     acc[nacc++] = l;
   }
-  I10LL *r = i10_ll(NULL, nacc);
+  I10LL *r = i10_ll(nacc);
   for (int i = 0; i < nacc; i++) {
     r->l[i] = acc[nacc - 1 - i];
   }
@@ -1991,7 +1994,7 @@ static I10LL *i10_taut_elim(I10LL *c) {
   I10Vec na = {NULL, 0, 0}, pa = {NULL, 0, 0};
   i10_stolist(neg, &na);
   i10_stolist(pos, &pa);
-  I10LL *r = i10_ll(NULL, na.n + pa.n);
+  I10LL *r = i10_ll(na.n + pa.n);
   for (int i = 0; i < na.n; i++) {
     r->l[i] = i10_lit(1, (I10Atom *)na.v[i]);
   }
@@ -2089,6 +2092,7 @@ typedef struct I10Horn {
   I10Name *zvar;
   I10Vec tuples;
   I10Vec ifeqs;
+  int npreds;
 } I10Horn;
 
 static I10Horn g_i10_h;
@@ -2250,6 +2254,7 @@ static I10Term *i10_true_term(void) {
 static I10Fun *i10_bool_fun(I10Fun *p) {
   if (p->boolfun == NULL) {
     p->boolfun = i10_fun_new(p->name, p->arity, 0, g_i10_h.bool_ty);
+    g_i10_h.npreds++;
   }
   return p->boolfun;
 }
@@ -2575,6 +2580,11 @@ static void i10_print(FILE *out, I10Vec *clauses, const char *source, const char
     fprintf(out, "%% Status   : %s\n", status);
     fprintf(out, "%% SPC      : CNF_%s_RFO_PEQ_UEQ\n", spc);
   }
+  // No dispatcher, tuple or predicate: the source is unit equality
+  // already and the encoding adds nothing (make_ifeq10_corpus.sh does
+  // not emit it).  Definitions are the clausifier's sP<n> predicates.
+  fprintf(out, "%% Encoding : dispatchers %d, tuples %d, predicates %d, definitions %d\n",
+          g_i10_h.ifeqs.n, g_i10_h.tuples.n, g_i10_h.npreds, g_i10_ndefs);
   fprintf(out, "%% Comments : Converted to UEQ with TPTP's -10 scheme [CS18] (a port of\n");
   fprintf(out, "%%            jukebox horn-to-unit, no conjunctive or disjunctive goals).\n");
   fprintf(out, "%%------------------------------------------------------------------------------\n");
@@ -2849,19 +2859,23 @@ static int i10_p_args(I10Parser *ps, I10Scope *sc, I10Vec *args) {
 }
 
 static I10Term *i10_p_term(I10Parser *ps, I10Scope *sc) {
-  if (ps->tok == I10T_VAR) {
-    return i10_p_var(ps, sc);
+  switch (ps->tok) {
+    case I10T_VAR:
+      return i10_p_var(ps, sc);
+    case I10T_ATOM: {
+      const char *name = ps->text;
+      i10_lex(ps);
+      I10Vec args = {NULL, 0, 0};
+      int n = i10_p_args(ps, sc, &args);
+      return i10_app(i10_symbol(name, n, 0), (I10Term **)args.v, n);
+    }
+    case I10T_NUM:
+    case I10T_DQ:
+    case I10T_DOLLAR:
+      i10_syntax(ps, "numbers, distinct objects and $-symbols are not supported");
+    default:
+      i10_syntax(ps, "expected a term");
   }
-  if (ps->tok != I10T_ATOM) {
-    i10_syntax(ps, (ps->tok == I10T_NUM || ps->tok == I10T_DQ || ps->tok == I10T_DOLLAR)
-                       ? "numbers, distinct objects and $-symbols are not supported"
-                       : "expected a term");
-  }
-  const char *name = ps->text;
-  i10_lex(ps);
-  I10Vec args = {NULL, 0, 0};
-  int n = i10_p_args(ps, sc, &args);
-  return i10_app(i10_symbol(name, n, 0), (I10Term **)args.v, n);
 }
 
 static I10Form *i10_p_formula(I10Parser *ps, I10Scope *sc);
@@ -2875,88 +2889,91 @@ static I10Form *i10_p_equation(I10Parser *ps, I10Scope *sc, I10Term *lhs) {
 }
 
 static I10Form *i10_p_literal(I10Parser *ps, I10Scope *sc) {
-  if (ps->tok == I10T_DOLLAR) {
-    if (strcmp(ps->text, "$true") == 0) {
+  switch (ps->tok) {
+    case I10T_DOLLAR: {
+      int truth = (strcmp(ps->text, "$true") == 0);
+      if (!truth && strcmp(ps->text, "$false") != 0) {
+        i10_syntax(ps, i10_fmt("unsupported symbol %s", ps->text));
+      }
       i10_lex(ps);
-      return i10_ftrue();
+      return truth ? i10_ftrue() : i10_ffalse();
     }
-    if (strcmp(ps->text, "$false") == 0) {
+    case I10T_LP: {
       i10_lex(ps);
-      return i10_ffalse();
+      I10Form *f = i10_p_formula(ps, sc);
+      i10_expect(ps, I10T_RP, "')'");
+      if (ps->tok == I10T_EQ || ps->tok == I10T_NEQ) {
+        i10_syntax(ps, "a formula cannot be an equation side");
+      }
+      return f;
     }
-    i10_syntax(ps, i10_fmt("unsupported symbol %s", ps->text));
-  }
-  if (ps->tok == I10T_LP) {
-    i10_lex(ps);
-    I10Form *f = i10_p_formula(ps, sc);
-    i10_expect(ps, I10T_RP, "')'");
-    if (ps->tok == I10T_EQ || ps->tok == I10T_NEQ) {
-      i10_syntax(ps, "a formula cannot be an equation side");
+    case I10T_VAR: {
+      I10Term *t = i10_p_var(ps, sc);
+      if (ps->tok != I10T_EQ && ps->tok != I10T_NEQ) {
+        i10_syntax(ps, "a variable is not a formula");
+      }
+      return i10_p_equation(ps, sc, t);
     }
-    return f;
-  }
-  if (ps->tok == I10T_VAR) {
-    I10Term *t = i10_p_var(ps, sc);
-    if (ps->tok != I10T_EQ && ps->tok != I10T_NEQ) {
-      i10_syntax(ps, "a variable is not a formula");
+    case I10T_ATOM: {
+      const char *name = ps->text;
+      i10_lex(ps);
+      I10Vec args = {NULL, 0, 0};
+      int n = i10_p_args(ps, sc, &args);
+      if (ps->tok == I10T_EQ || ps->tok == I10T_NEQ) {
+        return i10_p_equation(ps, sc, i10_app(i10_symbol(name, n, 0), (I10Term **)args.v, n));
+      }
+      I10Term *p = i10_app(i10_symbol(name, n, 1), (I10Term **)args.v, n);
+      return i10_flit(i10_lit(0, i10_atom(0, p, NULL)));
     }
-    return i10_p_equation(ps, sc, t);
+    default:
+      i10_syntax(ps, "expected a literal");
   }
-  if (ps->tok != I10T_ATOM) {
-    i10_syntax(ps, "expected a literal");
-  }
-  const char *name = ps->text;
-  i10_lex(ps);
-  I10Vec args = {NULL, 0, 0};
-  int n = i10_p_args(ps, sc, &args);
-  if (ps->tok == I10T_EQ || ps->tok == I10T_NEQ) {
-    return i10_p_equation(ps, sc, i10_app(i10_symbol(name, n, 0), (I10Term **)args.v, n));
-  }
-  I10Term *p = i10_app(i10_symbol(name, n, 1), (I10Term **)args.v, n);
-  return i10_flit(i10_lit(0, i10_atom(0, p, NULL)));
 }
 
 static I10Form *i10_p_unitary(I10Parser *ps, I10Scope *sc) {
-  if (ps->tok == I10T_NOT) {
-    i10_lex(ps);
-    return i10_f1(I10F_NOT, i10_p_unitary(ps, sc));
-  }
-  if (ps->tok == I10T_ALL || ps->tok == I10T_EX) {
-    int kind = (ps->tok == I10T_ALL) ? I10F_ALL : I10F_EX;
-    if (sc->cnf) {
-      i10_syntax(ps, "a quantifier in a CNF clause");
-    }
-    i10_lex(ps);
-    i10_expect(ps, I10T_LB, "'['");
-    I10Vec vars = {NULL, 0, 0};
-    int mark = sc->names.n;
-    for (;;) {
-      if (ps->tok != I10T_VAR) {
-        i10_syntax(ps, "expected a bound variable");
-      }
-      I10Name *v = i10_name_var(ps->text, g_i10_counter++);
-      i10_push(&vars, v);
+  switch (ps->tok) {
+    case I10T_NOT:
       i10_lex(ps);
-      if (ps->tok == I10T_COLON) {
-        i10_syntax(ps, "typed quantification is not supported");
-      }
-      if (ps->tok != I10T_COMMA) {
-        break;
+      return i10_f1(I10F_NOT, i10_p_unitary(ps, sc));
+    case I10T_ALL:
+    case I10T_EX: {
+      int kind = (ps->tok == I10T_ALL) ? I10F_ALL : I10F_EX;
+      if (sc->cnf) {
+        i10_syntax(ps, "a quantifier in a CNF clause");
       }
       i10_lex(ps);
+      i10_expect(ps, I10T_LB, "'['");
+      I10Vec vars = {NULL, 0, 0};
+      int mark = sc->names.n;
+      for (;;) {
+        if (ps->tok != I10T_VAR) {
+          i10_syntax(ps, "expected a bound variable");
+        }
+        I10Name *v = i10_name_var(ps->text, g_i10_counter++);
+        i10_push(&vars, v);
+        i10_lex(ps);
+        if (ps->tok == I10T_COLON) {
+          i10_syntax(ps, "typed quantification is not supported");
+        }
+        if (ps->tok != I10T_COMMA) {
+          break;
+        }
+        i10_lex(ps);
+      }
+      i10_expect(ps, I10T_RB, "']'");
+      i10_expect(ps, I10T_COLON, "':'");
+      for (int i = 0; i < vars.n; i++) {
+        i10_push(&sc->names, (void *)((I10Name *)vars.v[i])->base);
+        i10_push(&sc->vars, vars.v[i]);
+      }
+      I10Form *body = i10_p_unitary(ps, sc);
+      sc->names.n = mark;
+      sc->vars.n = mark;
+      return i10_fq(kind, i10_vs_of((I10Name **)vars.v, vars.n), body);
     }
-    i10_expect(ps, I10T_RB, "']'");
-    i10_expect(ps, I10T_COLON, "':'");
-    for (int i = 0; i < vars.n; i++) {
-      i10_push(&sc->names, (void *)((I10Name *)vars.v[i])->base);
-      i10_push(&sc->vars, vars.v[i]);
-    }
-    I10Form *body = i10_p_unitary(ps, sc);
-    sc->names.n = mark;
-    sc->vars.n = mark;
-    return i10_fq(kind, i10_vs_of((I10Name **)vars.v, vars.n), body);
+    default:
+      return i10_p_literal(ps, sc);
   }
-  return i10_p_literal(ps, sc);
 }
 
 static I10Form *i10_p_formula(I10Parser *ps, I10Scope *sc) {
@@ -3201,6 +3218,7 @@ static void i10_reset(void) {
   g_i10_interned = 0;
   g_i10_counter = 0;
   g_i10_bulk_done = 0;
+  g_i10_ndefs = 0;
   g_i10_tag = "";
   memset(&g_i10_inputs, 0, sizeof g_i10_inputs);
   memset(&g_i10_funs, 0, sizeof g_i10_funs);
@@ -3310,6 +3328,9 @@ static int ifeq10_main(const char *path) {
   } else if (rc != I10_RC_OK) {
     fprintf(stderr, "FindProof --emit-ifeq10: %s\n", g_i10_msg);
   }
-  fflush(stdout);
+  if (fflush(stdout) != 0 || ferror(stdout)) {
+    fprintf(stderr, "FindProof --emit-ifeq10: write error on standard output\n");
+    return I10_RC_INPUT;
+  }
   return rc;
 }
