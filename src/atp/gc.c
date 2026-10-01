@@ -109,6 +109,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   n_roots += cgq_gc_count(s->cgq);
   // Top-K re-ranker: the goal normal forms it scores CPs against.
   n_roots += atp_topk_gc_count(s);
+  // Selection layer: likewise.
+  n_roots += atp_guide_gc_count(s);
   Term *roots = (Term *)malloc((size_t)n_roots * sizeof(Term));
   if (roots == NULL) return 0;
 
@@ -189,6 +191,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   cgq_gc_gather(s->cgq, roots, &w);
   u32 topk_root = w;
   atp_topk_gc_gather(s, roots, &w);
+  u32 guide_root = w;
+  atp_guide_gc_gather(s, roots, &w);
 
   gc_collect(roots, w);
   g_atp_gc_epoch++;   // invalidate handle-keyed caches (cells moved)
@@ -278,6 +282,7 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
 #endif
   cgq_gc_writeback(s->cgq, roots, cgq_node_root);
   atp_topk_gc_writeback(s, roots, topk_root);
+  atp_guide_gc_writeback(s, roots, guide_root);
 
   free(roots);
 
@@ -2816,8 +2821,8 @@ fn u8 thvm_atp_set_goal(AtpState *s, Term lhs, Term rhs) {
 // relevance levels are computed over the UNION of all goals' symbols.
 // Returns 1 on success, 0 on n > ATP_MAX_GOALS or any sort-check
 // rejection (state unmodified on failure).
-fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
-                         u32 n) {
+static u8 atp_set_goals_impl(AtpState *s, const Term *lhs, const Term *rhs,
+                             u32 n) {
   if (s == NULL) return 0;
   if (n > ATP_MAX_GOALS) return 0;
   // Clearing the goal: n == 0 means "completion mode", always
@@ -2953,6 +2958,16 @@ fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
     s->goal_levels_ready = 1u;
   }
   return 1;
+}
+
+fn u8 thvm_atp_set_goals(AtpState *s, const Term *lhs, const Term *rhs,
+                         u32 n) {
+  u8 ok = atp_set_goals_impl(s, lhs, rhs, n);
+  // The selection layer scores later pushes against the new goal.
+  if (s != NULL && s->guide != NULL) {
+    atp_guide_on_goal(s);
+  }
+  return ok;
 }
 
 // 8.4d: attach a WaldSpec for sort-check gating.

@@ -1933,6 +1933,9 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     // Weight dimension under the opt-in top-K re-ranker (src/atp/topk.c):
     // the head's pick among the root's K best, 0 when it keeps the root.
     j = atp_topk_pick(s);
+  } else if (s->guide != NULL) {
+    // Weight dimension of a guided twin (src/atp/guide.c).
+    j = atp_guide(s);
   }
 
   // The chosen CP: j is its heap POSITION, v its stationary payload
@@ -2016,6 +2019,9 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     else               atp_cp_slot_read(s, v, lhs_out, rhs_out);
     atp_hx_select(s, v);
     atp_topk_on_select(s);
+    if (s->guide != NULL) {
+      atp_guide_on_select(s);
+    }
     // ifeq guard-DECIDING telemetry: did the CP the main loop actually
     // picked decide a live guard (see atp_ifeq_decide_hit)?  Counts
     // distinct SELECTIONS, complementing g_ifeq_decide_n_hit's scoring-

@@ -2011,9 +2011,17 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     atp_wm_intake_canonicalize(s);
     atp_hx_restamp_queue(s);
     atp_topk_on_intake(s);
+    if (s->guide != NULL) {
+      atp_guide_on_intake(s);
+    }
   }
 
   AtpStatus goal = thvm_atp_goal_check(s);
+  // The goal check may move the goal's normal form: the selection layer
+  // scores later pushes against the new one.
+  if (s->guide != NULL) {
+    atp_guide_on_goal(s);
+  }
   if (goal != ATP_RUNNING) return goal;
 
   if (s->step >= s->step_cap) return ATP_TIMEOUT;
@@ -2105,6 +2113,10 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
       long long rss = thvm_atp_live_rss_bytes();
       // Proof-only trace bytes are not the search's (atp_trace_node).
       if (rss > 0) rss -= (long long)s->trace_x_bytes;
+      if (s->guide != NULL && rss > 0 && s->rss_guard_baseline != 0) {
+        s->rss_guard_growth = rss - s->rss_guard_baseline;
+        s->rss_guard_cap    = rss_cap_bytes;
+      }
       if (rss > 0 && s->rss_guard_baseline == 0) {
         s->rss_guard_baseline = rss;   // first successful poll: baseline
       } else if (rss > 0 && rss - s->rss_guard_baseline > rss_cap_bytes) {
@@ -3072,6 +3084,9 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   g_ft_region = 4u;
   goal = thvm_atp_goal_check(s);
   g_ft_region = 0u;
+  if (s->guide != NULL) {
+    atp_guide_on_goal(s);
+  }
   if (g_atp_phase_enabled) g_atp_phase_us_goal_check += atp_now_us() - _ph_gc_t0;
   if (goal != ATP_RUNNING) return goal;
 

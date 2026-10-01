@@ -4243,6 +4243,10 @@ int main(int argc, char **argv) {
   printf("   steps/sec=%.1f  cps/step=%.1f\n",
          (el > 0.0) ? (double)i / el : 0.0,
          (i > 0) ? (double)max_cps / (double)i : 0.0);
+  // Selection-layer cost counters (--guide), STDERR only: the stdout
+  // stream of a zero-correction twin stays byte-identical to its base
+  // lane's (gate G2.2).
+  thvm_atp_guide_print_stats(s, stderr);
   // Raw-desc lane coverage evidence, STDERR only (the stdout stream must
   // stay byte-identical to the eager reference for the trajectory gates;
   // eager runs leave stderr empty here since neither flag arms the lane).
