@@ -793,7 +793,6 @@ static u32 atp_trace_push_cp_impl(AtpState *s, u8 proof_only,
   s->n_trace++;
   if (proof_only)
     s->trace_x_bytes += (s->trace_eq_len - eq0) + 2u * sizeof(u64);
-  atp_hx_trace_stamp(s, idx);
   return idx;
 }
 
@@ -2611,6 +2610,7 @@ fn AtpAddedRange thvm_atp_install_oriented_rule(AtpState *s, Term lhs,
     if (or_t != ATP_TRACE_NONE) {
       s->r_trace[i] = or_t;
       atp_rj_content(s, i);
+      atp_hx_rule(s, i, ATP_HX_RULE_INSTALL, ATP_TRACE_NONE);
     }
   }
   if (s->use_emission_order) atp_wmo_insert_fact(s, i);

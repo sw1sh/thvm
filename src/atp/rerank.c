@@ -2152,7 +2152,9 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   }
   // Otter loop: the selected CP stops being a passive demodulator
   // before its selection-time normalize (else it joins against itself).
-  if (s->use_otter) atp_otter_popkill(s, s->last_popped_seq);
+  if (s->use_otter) {
+    atp_otter_popkill(s, s->last_popped_seq, ATP_HX_OT_RETIRE_SEL);
+  }
   // The rule set this CP normalizes on: its orient records' view.
   const u32 rj_pop = s->rj_n;
 
@@ -2887,6 +2889,9 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
                              ATP_TRACE_NONE, rl, rr);
     s->r_trace[rid] = t;
     atp_rj_content(s, rid);
+    atp_hx_rule(s, rid, (reason == TRACE_FVI) ? ATP_HX_RULE_FVI
+                                              : ATP_HX_RULE_BORN,
+                s->last_popped_seq);
   }
   s->rj_hold = 0u;
 

@@ -916,7 +916,13 @@ static int fof_split_orchestrate(const char *self, const char *file,
   int nor = g_fof_split_nor;
   int B = 1;
   for (int j = 0; j < nor; j++) B *= g_fof_split_or[j].width;
-  int slice = getenv("FINDPROOF_SLICE") != NULL;
+  const char *slice_env = getenv("FINDPROOF_SLICE");
+  int slice = slice_env != NULL;
+  // The branches keep the slice's lane name: it tags their history
+  // export sessions.  "1" outside a slice (only presence is tested).
+  const char *branch_slice =
+      (slice_env != NULL && slice_env[0] != '\0' &&
+       strchr(slice_env, '\'') == NULL) ? slice_env : "1";
   fprintf(stderr, "FindProof: fof-split: %d ground or-clause(s), "
           "%d branch(es)\n", nor, B);
   // Hard wall over the whole case analysis (grace covers a child's
@@ -955,9 +961,9 @@ static int fof_split_orchestrate(const char *self, const char *file,
              (int)getpid(), b);
     char cmd[4096];
     snprintf(cmd, sizeof cmd,
-             "FINDPROOF_SLICE=1 THVM_ATP_FOF_BRANCH='%s' '%s' --preset=%s "
+             "FINDPROOF_SLICE='%s' THVM_ATP_FOF_BRANCH='%s' '%s' --preset=%s "
              "--max-steps=%s --wall=%.1f --szs%s '%s' > '%s'%s",
-             picks[b], self, preset, max_steps, wb,
+             branch_slice, picks[b], self, preset, max_steps, wb,
              want_proof ? " --proof" : "", file, outs[b],
              g_cli_verbose ? "" : " 2>/dev/null");
     int st = system(cmd);

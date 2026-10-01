@@ -8290,10 +8290,15 @@ fn void      thvm_atp_set_cp_pri2_by_seq(AtpState *s, const u32 *seq,
 // Derivation-history export (src/atp/history.c): THVM_ATP_HISTORY_EXPORT
 // =<path> arms an observation-only record stream of pushes (sampled at
 // THVM_ATP_HISTORY_RATE, default 1/16), selections, deletions, parent
-// deaths and the rule-side trace DAG.  search_end marks where the search
-// stopped (entries after it came from proof emission); finish dumps the
-// trace entries and closes the session; call it after proof emission.
-// No-op when unarmed.
+// deaths, rule content and deaths, the Otter replay and the rule-side
+// trace DAG, headed by the format version and the lane (FINDPROOF_SLICE).
+// symbol records one signature entry (label, arity, name; fresh = made by
+// an input transform) for name-keyed rule content; call it after init.
+// search_end marks where the search stopped (entries after it came from
+// proof emission); finish dumps the trace entries and closes the session;
+// call it after proof emission.  No-op when unarmed.
+fn void      thvm_atp_history_symbol(AtpState *s, u32 label, u32 arity,
+                                     u8 fresh, const char *name);
 fn void      thvm_atp_history_finish(AtpState *s, u32 status);
 fn void      thvm_atp_history_search_end(AtpState *s);
 

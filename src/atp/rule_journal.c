@@ -56,6 +56,7 @@ static void atp_rj_content(AtpState *s, u32 slot) {
 
 // The rule in slot `slot` leaves R (called before the slot is vacated).
 static void atp_rj_death(AtpState *s, u32 slot) {
+  atp_hx_rule_death(s, slot);
   atp_rj_push(s, ATP_RJ_DEATH, s->r_uid[slot], 0u, ATP_TRACE_NONE);
 }
 

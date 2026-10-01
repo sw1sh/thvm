@@ -1570,7 +1570,9 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
     atp_hx_del(s, s->cp_seq[vv], ATP_HX_DEL_LRS);
     // Vampire LRS discards the clause from passive, which also takes it
     // out of the Otter simplification set (Otter::onPassiveRemoved).
-    if (s->use_otter) atp_otter_popkill(s, s->cp_seq[vv]);
+    if (s->use_otter) {
+      atp_otter_popkill(s, s->cp_seq[vv], ATP_HX_OT_RETIRE_LRS);
+    }
     free(s->cp_packed[vv]);
     s->cp_packed[vv] = NULL;
     atp_cp_stash_clear(s, vv);
@@ -1755,6 +1757,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
   // CPdimension: FIFO pick on the last THRESHOLD of every MODULO
   // selections, weight pick (heap root) otherwise.
   u32 j = 0;
+  u8  hx_pick = ATP_HX_PICK_WEIGHT;   // the history export's 'S' dimension
   // WM 2-D KD-heap selection (opt-in THVM_ATP_KDHEAP): the queue IS a faithful
   // KDHeap.c port, so selection is KDH_deleteMin(d) with d = CPdimension() =
   // (n_rules % 51 < 1) ? 1 : 0 (itl(mi) 1:50).  find_min(1,d,d) locates the
@@ -1782,7 +1785,10 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     atp_kdh_find_min(s, 1u, d, d, &mn, &ml);
     j = mn - 1u;
     g_kdh_last_d = d;
-    if (d == 1u) s->n_cps_w2_picks++;
+    if (d == 1u) {
+      s->n_cps_w2_picks++;
+      hx_pick = ATP_HX_PICK_KDH;
+    }
   } else if (wm_itl && (s->n_rules % 51u) == 0u) {
     // WM KDH_deleteMin(d=1) searches only the TOP d+1 = 2 heap levels
     // (find_min, KDHeap.c:641 "in den obersten d+1 Ebenen suchen"), i.e.
@@ -1802,6 +1808,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     }
     j = best;
     s->n_cps_w2_picks++;
+    hx_pick = ATP_HX_PICK_KDH;
   } else if (s->w2_modulo > 0u &&
       (s->cp_select_count % s->w2_modulo) == 0u) {
     // K-D Heap secondary dimension (WM CPdimension d=1): every
@@ -1824,6 +1831,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     }
     j = best;
     s->n_cps_w2_picks++;
+    hx_pick = ATP_HX_PICK_W2;
   } else if (s->use_goal_interleave > 0u &&
       (s->cp_select_count % s->use_goal_interleave) == 0u) {
     // Goal-directed pick: the most goal-relevant queued CP (min
@@ -1838,6 +1846,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
       }
     }
     j = best;
+    hx_pick = ATP_HX_PICK_GOAL;
   } else if (s->random_modulo > 0u &&
              (s->cp_select_count % s->random_modulo) == 0u) {
     // Vampire-style random pick: advance xorshift64 once, take the
@@ -1848,7 +1857,9 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     x ^= x << 13; x ^= x >> 7; x ^= x << 17;
     s->rng_state = x;
     j = (u32)(x % (u64)s->n_cps);
+    hx_pick = ATP_HX_PICK_RANDOM;
   } else if (atp_cp_fifo_dimension(s)) {
+    hx_pick = ATP_HX_PICK_AGE;
     // FIFO dimension: the oldest queued LIVE CP is the lowest cp_seq
     // among entries whose parents still live.  Skipping corpses inside
     // this one O(n_cps) scan replaces the old drain (pop + heap-repair
@@ -1933,6 +1944,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
     // Weight dimension under the opt-in top-K re-ranker (src/atp/topk.c):
     // the head's pick among the root's K best, 0 when it keeps the root.
     j = atp_topk_pick(s);
+    hx_pick = ATP_HX_PICK_TOPK;
   }
 
   // The chosen CP: j is its heap POSITION, v its stationary payload
@@ -2014,7 +2026,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
                        s->cp_raw != NULL) ? s->cp_raw[v] : NULL;
     if (raw_b != NULL) acp_unpack(raw_b, lhs_out, rhs_out);
     else               atp_cp_slot_read(s, v, lhs_out, rhs_out);
-    atp_hx_select(s, v);
+    atp_hx_select(s, v, hx_pick);
     atp_topk_on_select(s);
     // ifeq guard-DECIDING telemetry: did the CP the main loop actually
     // picked decide a live guard (see atp_ifeq_decide_hit)?  Counts
