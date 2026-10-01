@@ -3978,6 +3978,10 @@ typedef struct {
 } LpoConfig;
 
 fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg);
+// thvm_lpo's verdict for an observer, leaving the persistent memo, the
+// statistics and the deadline poll as they were.  0 when a side is too
+// large for the flat encoding (use thvm_lpo).
+fn int    thvm_lpo_quiet(Term s, Term t, const LpoConfig *cfg, LpoCmp *out);
 
 // === rpo/ ===
 // Recursive Path Ordering (Dershowitz 1982).  Generalises LPO with
