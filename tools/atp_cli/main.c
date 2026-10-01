@@ -1174,6 +1174,9 @@ static void usage(FILE *fp) {
     "                              exit; --header prints the column names, --lanes\n"
     "                              the static gate replica instead: one row per\n"
     "                              schedule lane\n"
+    "  --emit-ifeq10               print the problem in TPTP's -10 unit-equality\n"
+    "                              encoding and exit (3: not Horn, 4: a one-element\n"
+    "                              model exists)\n"
     "  --proof                     print an SZS CNFRefutation block on success\n"
     "  --keep-pr                   keep (and name) the .pr generated from TPTP input\n"
     "  --list-knobs                print the knob table and exit\n"
@@ -1194,6 +1197,7 @@ int main(int argc, char **argv) {
   int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0;
   int want_features = 0, features_header = 0, features_lanes = 0;
   int n_knob_flags = 0;
+  int want_ifeq10 = 0, check_flag = 0;
   const char *lane = NULL;
   double main_t0 = horn_now();
   g_cli_main_t0 = main_t0;
@@ -1276,9 +1280,14 @@ int main(int argc, char **argv) {
       features_lanes = 1;
       continue;
     }
+    if (nlen == 11 && strncmp(name, "emit-ifeq10", 11) == 0) {
+      if (val != NULL) { usage(stderr); return 2; }
+      want_ifeq10 = 1;
+      continue;
+    }
     if (nlen == 3 && strncmp(name, "szs", 3) == 0) { szs = 1; continue; }
     if (nlen == 8 && strncmp(name, "schedule", 8) == 0) { want_schedule = 1; continue; }
-    if (nlen == 5 && strncmp(name, "check", 5) == 0) { want_check = 1; continue; }
+    if (nlen == 5 && strncmp(name, "check", 5) == 0) { want_check = 1; check_flag = 1; continue; }
     if (nlen == 7 && strncmp(name, "verbose", 7) == 0) { g_cli_verbose = 1; continue; }
     if (nlen == 5 && strncmp(name, "proof", 5) == 0) {
       g_cli_want_proof = 1;
@@ -1376,6 +1385,13 @@ int main(int argc, char **argv) {
     }
   }
   if (file == NULL) { usage(stderr); return 2; }
+  if (want_ifeq10) {
+    if (want_schedule || lane != NULL || check_flag) {
+      fprintf(stderr, "FindProof: --emit-ifeq10 takes no --schedule, --lane or --check\n");
+      return 2;
+    }
+    return ifeq10_main(file);
+  }
   // Engine wall, set BEFORE any front-end work: the FOF clausal
   // pre-pass budgets itself as a fraction of the remaining wall.
   g_cli_wall_sec = (atof(wall) > 0.0) ? atof(wall) : 120.0;

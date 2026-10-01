@@ -360,6 +360,7 @@ TESTS := \
   $(BIN)/test_atp_guide_ac \
   $(BIN)/test_atp_gnn_score \
   $(BIN)/test_atp_problem_features \
+  $(BIN)/test_atp_ifeq10 \
   $(BIN)/test_bench_atp \
   $(BIN)/test_pri \
   $(BIN)/test_app_sup \
@@ -1148,6 +1149,11 @@ $(BIN)/test_atp_problem_features: tests/test_atp_problem_features.c tools/thvm_a
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)
+
+# FindProof --emit-ifeq10 (tools/atp_cli/ifeq10.c, self-contained) against
+# TPTP's own -10 files; the source lives outside src/, so it is named here.
+$(BIN)/test_atp_ifeq10: tests/test_atp_ifeq10.c tools/atp_cli/ifeq10.c | $(BIN)
+	$(CC) $(CFLAGS) -o $@ $<
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
