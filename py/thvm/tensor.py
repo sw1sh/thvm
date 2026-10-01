@@ -226,14 +226,16 @@ class Tensor(metaclass=_TensorMeta):
 
     # ---- live-tensor pinning (cross-step buffer reclaim) --------------
 
-    def _pin(self) -> None:
-        """Pin the current term if it is a realized TAG_TEN, so reclaim()
-        keeps its buffer, AND register it in _LEAF_TENSORS so backward()
-        can route the leaf's tid back to this Tensor.  Re-pinning (term
-        changed via realize/assign) drops the stale handle entry first to
-        avoid leaking pin slots."""
+    def _pin(self, lazy: bool = False) -> None:
+        """Pin the current term if it is a realized TAG_TEN (or, with
+        `lazy`, whatever it is), so reclaim() keeps every buffer it reaches,
+        AND register a TAG_TEN in _LEAF_TENSORS so backward() can route the
+        leaf's tid back to this Tensor.  Re-pinning (term changed via
+        realize/assign) drops the stale handle entry first to avoid leaking
+        pin slots."""
         global _PIN_NEXT
-        if int(_TH.term_tag(self.term)) != _TAG_TEN:
+        is_ten = int(_TH.term_tag(self.term)) == _TAG_TEN
+        if not is_ten and not lazy:
             return
         if self._pin_id == 0:
             self._pin_id = _PIN_NEXT
@@ -241,7 +243,7 @@ class Tensor(metaclass=_TensorMeta):
         else:
             _TH.pin_drop(self._pin_id)
         _TH.pin_set(self._pin_id, self.term)
-        tid = int(_TH.term_val(self.term))
+        tid = int(_TH.term_val(self.term)) if is_ten else 0
         if tid > 0:
             _LEAF_TENSORS[tid] = self
 
@@ -350,9 +352,15 @@ class Tensor(metaclass=_TensorMeta):
         """tinygrad detach -- stop-gradient.  Wraps in UOP_DETACH:
         identity forward (unwrapped before materialize), zero backward
         (the cotangent dies at the detach).  Used e.g. by BatchNorm to
-        keep the variance gradient from flowing through the mean."""
-        return Tensor._from_term(_TH.detach(self.term), self._dtype,
-                                 self._shape)
+        keep the variance gradient from flowing through the mean.
+
+        The result reads self's storage, as tinygrad's DETACH UOp keeps its
+        source's buffer (mixin/elementwise.py:43-47), so it pins its term:
+        a detached tensor held across a reclaim() (data or targets kept
+        between training steps) keeps that storage after self is gone."""
+        t = Tensor._from_term(_TH.detach(self.term), self._dtype, self._shape)
+        t._pin(lazy=True)
+        return t
 
     def assign(self, x: "Tensor") -> "Tensor":
         """tinygrad assign -- lazy IN-PLACE update.  Builds UOP_ASSIGN(self,
