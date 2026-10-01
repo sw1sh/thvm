@@ -8,22 +8,31 @@
 # its header Status carried over) and compared with TPTP's -10 file by
 # tools/atp_enigma/ifeq10_diff.py, modulo clause order and variable
 # renaming; the clause names must agree as well, as in
-# tests/test_atp_ifeq10.c.  A miss also says whether the two agree once
+# tests/test_atp_ifeq10.c (a case whose clause order alone differs passes
+# but does not count as exact).  A miss also says whether the two agree once
 # generated symbols are renumbered ("generated") or the conditions of each
 # ifeq tower are taken as a set ("nest").  Then the command's other exits:
 # a non-Horn problem exits 3 with a message and no output, a one-element
 # model exits 4 with the SZS line, an unreadable file exits 2.
 #
 # ALL=1 adds every other [CS18] pair of the tree outside the J13 stems,
-# the held-out test of the port, and then needs J13_NAMES.  Its decision
-# rule, fixed before the first run: the run fails if a case fails, or a
-# surveyed source exits non-zero (2, 3, 4, timeout, crash), lands at
-# "differs" or cannot be compared ("differror").  "names", "generated"
-# and "nest" are reported and pass; the verdict is "exact" only when every
-# case and every surveyed pair matches, clause names included, and
-# "equivalent" otherwise.  A passing ALL=1 run writes PASS_FILE (default
-# <binary>.ifeq10-pass): the binary's sha256, the counts and the verdict,
-# which tools/atp_enigma/make_ifeq10_corpus.sh requires.
+# the held-out test of the port, and then needs J13_NAMES and timeout(1).
+# Its decision rule (plan section 5.4, gate G2.6): the run fails if a case
+# fails, or a surveyed source exits non-zero (2, 3, 4, timeout, crash),
+# lands at "differs" or cannot be compared ("differror"), or the survey
+# does not finish by DEADLINE_S ("status=deadline").  "names", "order",
+# "generated" and "nest" are reported and pass, and so is "drift": a
+# "differs" whose source has a "% Bugfixes : vX.Y.Z" line newer than the
+# release that added the -10 file (the oldest release in its Rating
+# line), a source TPTP edited after the conversion.  The verdict is
+# "exact" only when every case and every surveyed pair matches, clause
+# names and order included, and "equivalent" otherwise.  A passing ALL=1
+# run writes PASS_FILE (default <binary>.ifeq10-pass): the binary's
+# sha256, the counts and the verdict, which
+# tools/atp_enigma/make_ifeq10_corpus.sh requires.  Env for ALL=1: JOBS
+# (parallel pairs, default the core count), TIMEOUT_S (per encoding and
+# per diff, 120), MEM_MB (virtual memory per encoding, 3072), DEADLINE_S
+# (no pair starts after this many seconds, 14400).
 #
 # Usage: TPTP=/path/to/TPTP-v9.x [ALL=1] tests/atp_ifeq10_tptp.sh [bin/FindProof]
 #   J13_NAMES defaults to ~/.cache/thvm/casc/J13/neural_p0/j13_ueq_names.txt
@@ -47,6 +56,15 @@ if [ "$ALL" = 1 ] && [ ! -s "$J13_NAMES" ]; then
   echo "  FAIL: ALL=1 needs the J13 name list (J13_NAMES=$J13_NAMES is missing or empty)"
   exit 2
 fi
+if [ "$ALL" = 1 ] && ! command -v timeout > /dev/null 2>&1; then
+  echo "  FAIL: ALL=1 needs timeout(1)"
+  exit 2
+fi
+JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 8)}
+TIMEOUT_S=${TIMEOUT_S:-120}
+MEM_MB=${MEM_MB:-3072}
+DEADLINE_S=${DEADLINE_S:-14400}
+DEADLINE_AT=$(($(date +%s) + DEADLINE_S))
 # Absolute: the encoder runs in a scratch directory, so that no include
 # resolves against the caller's working directory.
 TPTP=$(cd "$TPTP" && pwd)
@@ -59,7 +77,7 @@ else
 fi
 TMO=""
 if command -v timeout > /dev/null 2>&1; then
-  TMO="timeout -k 5 120"
+  TMO="timeout -k 5 $TIMEOUT_S"
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -123,6 +141,8 @@ while read -r src ten; do
     if grep -q 'clause names differ' "$TMP/$src.diff"; then
       echo "  FAIL: $src -> $ten: $(head -1 "$TMP/$src.diff")"
       fail=1
+    elif grep -q 'clause order differs' "$TMP/$src.diff"; then
+      echo "  ok (not exact): $src -> $ten: $(head -1 "$TMP/$src.diff")"
     else
       echo "  ok: $src -> $ten: $(head -1 "$TMP/$src.diff")"
       exact=$((exact + 1))
@@ -135,64 +155,93 @@ while read -r src ten; do
 done <<EOF
 $CASES
 EOF
-echo "  $exact/$ncases cases match TPTP's -10 files modulo clause order and variable renaming"
+echo "  $exact/$ncases cases match TPTP's -10 files clause for clause, in order, modulo variable renaming"
+
+# One [CS18] pair: a line "level<TAB>source<TAB>-10 name" in
+# $TMP/sv/NAME.res, or NAME.skip; neither when the deadline has passed.
+survey_one() {
+  local tp=$1 ten src stem sp rc level
+  ten=$(basename "$tp" .p)
+  src=$(sed -n 's/^% Comments : Converted from \([^ ]*\) to UEQ using \[CS18\].*/\1/p' "$tp" | head -1)
+  stem=$(printf '%s' "$src" | cut -c1-6)
+  sp=$TPTP/Problems/$(printf '%s' "$src" | cut -c1-3)/$src.p
+  if [ -z "$src" ] || [ ! -f "$sp" ] || grep -qx "$src" "$TMP/cases" || grep -qx "$stem" "$TMP/j13_stems"; then
+    : > "$TMP/sv/$ten.skip"
+    return 0
+  fi
+  [ "$(date +%s)" -lt "$DEADLINE_AT" ] || return 0
+  local out=$TMP/sv/$ten.out dif=$TMP/sv/$ten.diff
+  (
+    cd "$TMP/sv" || exit 2
+    ulimit -v $((MEM_MB * 1024))
+    exec env TPTP="$TPTP" timeout -k 5 "$TIMEOUT_S" "$BIN" --emit-ifeq10 "$sp"
+  ) < /dev/null > "$out" 2> /dev/null
+  rc=$?
+  if [ $rc -ne 0 ]; then
+    level="exit$rc"
+  else
+    timeout -k 5 "$TIMEOUT_S" python3 "$DIFF" "$out" "$tp" < /dev/null > "$dif" 2>&1
+    case $? in
+      0)
+        level=exact
+        if grep -q 'clause names differ' "$dif"; then
+          level=names
+        elif grep -q 'clause order differs' "$dif"; then
+          level=order
+        fi
+        ;;
+      1)
+        if grep -q '^  generated match' "$dif"; then
+          level=generated
+        elif grep -q '^  nest *match' "$dif"; then
+          level=nest
+        else
+          level=differs
+          local made fixed
+          made=$(sed -n '/^% Rating *:/{s/.*\(v[0-9][0-9.]*[0-9]\).*$/\1/p;q;}' "$tp")
+          fixed=$(sed -n 's/^% Bugfixes *: *\(v[0-9][0-9.]*\).*/\1/p' "$sp" | sort -V | tail -n 1)
+          if [ -n "$made" ] && [ -n "$fixed" ] && [ "$fixed" != "$made" ] \
+             && [ "$(printf '%s\n%s\n' "$made" "$fixed" | sort -V | tail -n 1)" = "$fixed" ]; then
+            level=drift
+          fi
+        fi
+        ;;
+      *)
+        level=differror
+        ;;
+    esac
+  fi
+  rm -f "$out" "$dif"
+  printf '%s\t%s\t%s\n' "$level" "$src" "$ten" > "$TMP/sv/$ten.res"
+}
 
 nsurv=0
 nexact=0
 if [ "$ALL" = 1 ]; then
-  : > "$TMP/survey"
+  mkdir -p "$TMP/sv"
   printf '%s\n' "$CASES" | cut -d' ' -f1 > "$TMP/cases"
-  nskip=0
   grep -l 'to UEQ using \[CS18\]' "$TPTP"/Problems/*/*-10*.p > "$TMP/cs18" 2> /dev/null
-  while read -r tp; do
-    src=$(sed -n 's/^% Comments : Converted from \([^ ]*\) to UEQ using \[CS18\].*/\1/p' "$tp" | head -1)
-    stem=$(printf '%s' "$src" | cut -c1-6)
-    sp=$TPTP/Problems/$(printf '%s' "$src" | cut -c1-3)/$src.p
-    if [ -z "$src" ] || [ ! -f "$sp" ] || grep -qx "$src" "$TMP/cases" || grep -qx "$stem" "$TMP/j13_stems"; then
-      nskip=$((nskip + 1))
-      continue
-    fi
-    # shellcheck disable=SC2086
-    (cd "$TMP" && TPTP="$TPTP" $TMO "$BIN" --emit-ifeq10 "$sp" < /dev/null > "$TMP/s.out" 2> /dev/null)
-    rc=$?
-    if [ $rc -ne 0 ]; then
-      level="exit$rc"
-    else
-      python3 "$DIFF" "$TMP/s.out" "$tp" < /dev/null > "$TMP/s.diff" 2>&1
-      case $? in
-        0)
-          level=exact
-          if grep -q 'clause names differ' "$TMP/s.diff"; then
-            level=names
-          fi
-          ;;
-        1)
-          if grep -q '^  generated match' "$TMP/s.diff"; then
-            level=generated
-          elif grep -q '^  nest *match' "$TMP/s.diff"; then
-            level=nest
-          else
-            level=differs
-          fi
-          ;;
-        *)
-          level=differror
-          ;;
-      esac
-    fi
-    printf '%s\t%s\t%s\n' "$level" "$src" "$(basename "$tp" .p)" >> "$TMP/survey"
-  done < "$TMP/cs18"
+  export -f survey_one
+  export TMP TPTP BIN DIFF MEM_MB TIMEOUT_S DEADLINE_AT
+  tr '\n' '\0' < "$TMP/cs18" | xargs -0 -r -P "$JOBS" -n 1 bash -c 'survey_one "$1"' _
+  find "$TMP/sv" -name '*.res' -exec cat {} + 2> /dev/null | LC_ALL=C sort -t "$(printf '\t')" -k3 > "$TMP/survey"
+  nskip=$(find "$TMP/sv" -name '*.skip' | wc -l | tr -d ' ')
   nsurv=$(wc -l < "$TMP/survey" | tr -d ' ')
+  npend=$(($(wc -l < "$TMP/cs18" | tr -d ' ') - nskip - nsurv))
   nexact=$(awk -F'\t' '$1 == "exact"' "$TMP/survey" | wc -l | tr -d ' ')
   echo "  survey of $nsurv further [CS18] pairs ($nskip skipped: a J13 stem, a case or no source):"
   cut -f1 "$TMP/survey" | sort | uniq -c | sed 's/^ */      /'
-  awk -F'\t' '$1 ~ /^(names|generated|nest)$/ { print "      not exact: " $1 ": " $2 " -> " $3 }' \
+  awk -F'\t' '$1 ~ /^(names|order|generated|nest|drift)$/ { print "      not exact: " $1 ": " $2 " -> " $3 }' \
     "$TMP/survey" | head -n 40
-  nbad=$(awk -F'\t' '$1 !~ /^(exact|names|generated|nest)$/' "$TMP/survey" | wc -l | tr -d ' ')
+  nbad=$(awk -F'\t' '$1 !~ /^(exact|names|order|generated|nest|drift)$/' "$TMP/survey" | wc -l | tr -d ' ')
   if [ "$nbad" -gt 0 ]; then
     echo "  FAIL: $nbad surveyed sources exit non-zero, differ or cannot be compared:"
-    awk -F'\t' '$1 !~ /^(exact|names|generated|nest)$/ { print "      " $1 ": " $2 " -> " $3 }' \
+    awk -F'\t' '$1 !~ /^(exact|names|order|generated|nest|drift)$/ { print "      " $1 ": " $2 " -> " $3 }' \
       "$TMP/survey" | head -n 60
+    fail=1
+  fi
+  if [ "$npend" -gt 0 ]; then
+    echo "  FAIL: status=deadline pending=$npend: DEADLINE_S=$DEADLINE_S passed before every pair ran"
     fail=1
   fi
 fi

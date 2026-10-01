@@ -394,7 +394,21 @@ ifeq dispatchers, the tuple symbols, the predicates turned into functions
 into bool and the clausifier's sP<n> definition predicates.  D = T = P = 0
 means that the source is unit equality already.
 
-On a pod, in this order (the Mac only edits and syntax-checks):
+On a pod, in this order (the Mac only edits and syntax-checks).  Steps 2,
+3, 5 and 6 are `tools/atp_enigma/ifeq10_pod.sh TPTP_ROOT INPUT_DIR OUT_DIR`
+(step 6 with `CORPUS=1`), which also runs `tests/atp_ifeq10_diff.sh`, gives
+every step a deadline, stops at the first failure and leaves sentinels;
+steps 1 and 4 are the lane matrix's `pod_gates.sh`.  Copy to INPUT_DIR,
+with a `SHA256SUMS` file the script checks:
+
+| File | From the Mac | sha256 (2026-10-02) |
+|------|--------------|---------------------|
+| j13_ueq_names.txt | ~/.cache/thvm/casc/J13/neural_p0/ | c43f0c4914bb4b295040f2a3186631da7a8955f991a81e5b15939d7b9cd69410 |
+| pool.tsv | ~/.cache/thvm/casc/J13/neural_p0/ | 9fdb0135c608d6ed49e54b77dc94d20810ea4494aeb7974a4d75965181130594 |
+| dev_t.tsv | ~/.cache/thvm/enigma/matrix/ | c66cc386aa51e99f36960a79d1ba0667c38db8de078f39711701d9daebddae88 |
+
+The TPTP-v9.3.1 tree is downloaded on the pod (as `pod_gates.sh` does);
+the driver records its release and the sha256 of its problem list.
 
 1. `make -f tools/casc/Makefile bin/FindProof` with `CC=gcc` and with
    `CC=clang-14` (const-object initializers broke clang 14, c59b353b), and
@@ -431,7 +445,13 @@ exclusion list (above: DEV-H and DEV-T, so that neither has an encoded copy
 in the corpus), problems that are unit equality already (by their SPC, or
 after clausification by the Encoding line: the FOF versions of UEQ
 problems), stems that TPTP already ships as -10 problems (the pool holds
-them), and DEV-X problems whose stem occurs in the pool's train split.
+them), DEV-X problems whose stem occurs in the pool's train split, and
+files whose header could not be read (`noheader`).  An encoding that
+equals a J13 problem file modulo variable and symbol renaming, clause
+order and names (`ifeq10_keys.py`) is dropped as `j13dup` whatever its
+stem.  The exclusion lists and TRAIN_NAMES are required; `ALLOW_LEAKY=1`
+runs without them and ends `status=complete-unguarded`, which M3 must not
+train on.
 DEV-X is a held-out set: its stems are disjoint from TRAIN-X, J13, DEV-H,
 DEV-T and the pool's train split.  The manifest also carries each source's
 rating (training weights, plan section 3.2), its includes (the axiom sets
@@ -439,11 +459,13 @@ behind the axiom-novel subset, section 1.4) and its number of sP
 definitions (encodings that no TPTP -10 file is a reference for).
 
 The driver fingerprints its inputs (the binary, the lists, the TPTP
-release and problem list, itself, TIMEOUT_S, MEM_MB) and resumes only on
+release and problem list, itself, `ifeq10_keys.py` and `ifeq10_diff.py`,
+TIMEOUT_S, MEM_MB, ALLOW_LEAKY) and resumes only on
 the same inputs; it requires the pass file of step 3, refuses a tree other
 than TPTP v9.3.1 (T-NEW counts from that release, and at L2 T-NEW must
 also drop every stem that `manifest.tsv` lists as emitted), checks the
-data rule on its own output before it writes `.done`, and writes ALERT
+data rule on its own output (J13 duplicate keys included) before it
+writes `.done`, and writes ALERT
 lines for what can only be an encoder bug: sat1 on an unsatisfiable
 source, nonhorn on an `_HRN` source, a truncated output.
 
@@ -453,12 +475,18 @@ split) or `pool.tsv`, or takes that prefix; it never recomputes either from
 `name.split("-")[0]`, which is `PUZ131+1` for `PUZ131+1-10` and would
 separate a FOF-derived problem from its CNF siblings.  `matrix_tables.py`'s
 `stem()` is that split: it agrees with the prefix on every pool and J13 name
-and is not for corpus names.
+and is not for corpus names.  DEV-X's `pool.tsv` labels its rows
+`heldout`, as `np0_harvest.sh` expects of an evaluation set: never
+concatenate it with the pool's `pool.tsv`, whose `heldout` rows are DEV-H.
 
 `ifeq10_diff.py OURS THEIRS` compares two CNF files modulo clause order and
-variable renaming, and on a miss says whether they agree with generated
+variable renaming; on a match it says whether the (name, clause) pairs or
+the clause order differ, on a miss whether they agree with generated
 symbols renumbered or ifeq conditions taken as sets; it exits 2 on an
 unreadable file or a term nested too deep to compare.
+`ifeq10_keys.py TPTP_ROOT LIST` prints a key per problem file that is
+blind to variable and symbol renaming, clause order and names (includes
+resolved), the corpus's J13 duplicate check.
 
 ## Typical flow
 

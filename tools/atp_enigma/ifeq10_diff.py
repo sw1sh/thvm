@@ -5,9 +5,12 @@ Usage: ifeq10_diff.py OURS THEIRS [--show N]
 
 Built for FindProof --emit-ifeq10 against TPTP's own -10 files.  Each cnf
 record becomes (role, literals) with variables renamed by first occurrence
-inside the clause; the files match when these multisets are equal (clause
-names are ignored, equation orientation is kept).  Exit 0 on a match, 1 on
-a mismatch, 2 on unreadable input or a term nested too deep to compare.
+inside the clause; the files match when these multisets are equal
+(equation orientation is kept).  A match then says "(clause names differ)"
+when the multisets of (name, clause) pairs differ, so a swapped name is
+caught, and "(clause order differs)" when the clauses come in another
+order.  Exit 0 on a match, 1 on a mismatch, 2 on unreadable input or a
+term nested too deep to compare.
 
 On a mismatch two coarser readings say where the difference lies:
   generated  the generated symbol families (ifeqN, tupleN, sK<n>_..,
@@ -19,6 +22,8 @@ On a mismatch two coarser readings say where the difference lies:
              another order (the symbol order behind the atom order).
 Text processing only.
 """
+import hashlib
+import os
 import re
 import sys
 import threading
@@ -39,12 +44,19 @@ TOKEN = re.compile(r"""
   | (?P<op><=>|<~>|=>|<=|~\||~&|!=|[()\[\],.:|&~=!?*])
 """, re.X | re.S)
 
+# Symbols the symbols and shape levels keep by name.
+FIXED = {"true", "IFEQ", "TUPLE", "SK", "SP"}
+
 GENERATED = [
     (re.compile(r"^ifeq\d*$"), "IFEQ"),
     (re.compile(r"^tuple\d*$"), "TUPLE"),
     (re.compile(r"^sK\d+(_.*)?$"), "SK"),
     (re.compile(r"^sP\d+(_.*)?$"), "SP"),
 ]
+
+
+# The name slot of an include record: "@" starts no TPTP formula name.
+INCLUDE = "@include"
 
 
 class ParseError(Exception):
@@ -142,11 +154,39 @@ class Parser:
                     return
                 depth -= 1
 
-    def records(self):
+    def include(self):
+        kind, text = self.take()
+        if kind != "squote":
+            raise ParseError("expected a quoted file name, found %r" % text)
+        path = re.sub(r"\\(.)", r"\1", text[1:-1])
+        sel = None
+        if self.peek()[1] == ",":
+            self.take(",")
+            if self.peek()[1] == "*":
+                self.take("*")
+            else:
+                self.take("[")
+                sel = []
+                while self.peek()[1] != "]":
+                    sel.append(self.take()[1])
+                    if self.peek()[1] == ",":
+                        self.take(",")
+                self.take("]")
+        self.take(")")
+        self.take(".")
+        return path, sel
+
+    def records(self, includes=False):
+        """The cnf records; with includes, an include(F[, sel]) record
+        becomes (INCLUDE, F, sel) in place (sel None when absent)."""
         out = []
         while self.peek()[0] is not None:
             _, kw = self.take()
             self.take("(")
+            if kw == "include" and includes:
+                path, sel = self.include()
+                out.append((INCLUDE, path, sel))
+                continue
             if kw != "cnf":
                 raise ParseError("not a cnf record: %s" % kw)
             name = self.take()[1]
@@ -168,6 +208,35 @@ def read_records(path):
         return Parser(tokens(fp.read())).records()
 
 
+def read_problem(path, tptp_root, sel=None, depth=0):
+    """The cnf records of a problem file with its include()s resolved
+    against dirname(path), then tptp_root, as FindProof resolves them; a
+    selection list keeps only the named records, nested selections
+    intersect."""
+    if depth > 8:
+        raise ParseError("includes nested too deep in %s" % path)
+    with open(path, encoding="utf-8", errors="replace") as fp:
+        recs = Parser(tokens(fp.read())).records(includes=True)
+    out = []
+    for rec in recs:
+        if rec[0] == INCLUDE:
+            inc, sub = rec[1], rec[2]
+            if sel is None:
+                merged = sub
+            elif sub is None:
+                merged = sel
+            else:
+                merged = [n for n in sel if n in sub]
+            cands = [os.path.join(os.path.dirname(path), inc), os.path.join(tptp_root, inc)]
+            hit = next((c for c in cands if os.path.isfile(c)), None)
+            if hit is None:
+                raise ParseError("cannot read include '%s' of %s" % (inc, path))
+            out.extend(read_problem(hit, tptp_root, merged, depth + 1))
+        elif sel is None or rec[0] in sel:
+            out.append(rec)
+    return out
+
+
 def rename_symbol(name, level):
     if level == "exact" or name.startswith("?"):
         return name
@@ -180,12 +249,19 @@ def rename_symbol(name, level):
 def render(term, names, level):
     head = term[0]
     if head.startswith("?"):
-        if level == "nest":
+        if level in ("nest", "shape"):
             return "V"
         if head not in names:
             names[head] = "V%d" % len(names)
         return names[head]
     head = rename_symbol(head, level)
+    if level == "shape" and head not in FIXED:
+        head = "F"
+    elif level == "symbols" and head not in FIXED:
+        key = "!" + head
+        if key not in names:
+            names[key] = "F%d" % len(names)
+        head = names[key]
     if not term[1]:
         return head
     return head + "(" + ",".join(render(a, names, level) for a in term[1]) + ")"
@@ -201,9 +277,30 @@ def flatten_nest(lhs, rhs):
     return conds, t
 
 
+def canonical_literals(lits):
+    """The literals with each equation oriented and the clause sorted by a
+    renaming-free shape, so that the symbols level is blind to literal
+    order and orientation (ties keep their input order)."""
+    out = []
+    for sign, lhs, rhs in lits:
+        a, b = render(lhs, {}, "shape"), render(rhs, {}, "shape")
+        if b < a:
+            lhs, rhs, a, b = rhs, lhs, b, a
+        out.append(((not sign, a, b), (sign, lhs, rhs)))
+    out.sort(key=lambda x: x[0])
+    return [lit for _, lit in out]
+
+
 def clause_key(role, lits, level):
+    """One clause as a string.  Levels: exact; generated (generated symbol
+    families collapsed); nest (ifeq towers as condition sets); symbols
+    (every non-generated symbol and variable renamed by first occurrence,
+    literals in canonical order: equal for two clauses that are the same
+    modulo variable and symbol renaming)."""
     names = {}
     parts = []
+    if level == "symbols":
+        lits = canonical_literals(lits)
     for sign, lhs, rhs in lits:
         if level == "nest":
             conds, then = flatten_nest(lhs, rhs)
@@ -216,6 +313,22 @@ def clause_key(role, lits, level):
             parts.append("%s%s=%s" % ("+" if sign else "-", render(lhs, names, level),
                                       render(rhs, names, level)))
     return role + ":" + "|".join(parts)
+
+
+def problem_key(records):
+    """A key equal for two problems that are the same modulo variable and
+    symbol renaming, clause order and clause names: the sorted goal
+    (negated_conjecture) clause keys, then the sorted keys of the rest, at
+    the symbols level.  Symbols are renamed per clause, so the key is
+    coarser than the problem: two problems with one key need not be
+    renamings of each other, which makes a duplicate check built on it
+    err only towards dropping a problem."""
+    goals = sorted(clause_key("c", l, "symbols") for _, r, l in records
+                   if r == "negated_conjecture")
+    rest = sorted(clause_key("c", l, "symbols") for _, r, l in records
+                  if r != "negated_conjecture")
+    text = "\n".join(goals) + "\n#\n" + "\n".join(rest)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def compare(ours, theirs, level):
@@ -247,9 +360,13 @@ def main():
         return 2
     only_ours, only_theirs = compare(ours, theirs, "exact")
     if not only_ours and not only_theirs:
-        same_names = Counter(n for n, _, _ in ours) == Counter(n for n, _, _ in theirs)
-        print("match: %d clauses%s" % (len(ours), "" if same_names else
-                                       " (clause names differ)"))
+        ka = [clause_key(r, l, "exact") for _, r, l in ours]
+        kb = [clause_key(r, l, "exact") for _, r, l in theirs]
+        same_names = Counter(zip((n for n, _, _ in ours), ka)) == \
+            Counter(zip((n for n, _, _ in theirs), kb))
+        print("match: %d clauses%s%s" % (len(ours),
+                                         "" if same_names else " (clause names differ)",
+                                         "" if ka == kb else " (clause order differs)"))
         return 0
     print("MISMATCH: %d clauses only in ours, %d only in theirs (of %d / %d)"
           % (sum(only_ours.values()), sum(only_theirs.values()), len(ours), len(theirs)))

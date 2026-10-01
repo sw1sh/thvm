@@ -5,7 +5,13 @@
 # TPTP's -10 unit-equality scheme, split 80/20 into TRAIN-X and DEV-X by
 # sha256 of the name stem.  Pods only.
 #
-# Usage: make_ifeq10_corpus.sh FINDPROOF TPTP_ROOT OUT_DIR J13_NAMES [EXCLUDE_NAMES ...]
+# Usage: TRAIN_NAMES=FILE make_ifeq10_corpus.sh FINDPROOF TPTP_ROOT OUT_DIR J13_NAMES EXCLUDE_NAMES ...
+#
+# At least one EXCLUDE_NAMES file and TRAIN_NAMES are required, so that
+# no DEV-H or DEV-T stem lands in either split and no pool train stem in
+# DEV-X; ALLOW_LEAKY=1 runs without them, records allow_leaky=1 in the
+# inputs and ends status=complete-unguarded, a corpus M3 must not train
+# on.
 #
 # The stem of a name is its DOMNNN prefix (^[A-Z]{3}[0-9]{3}), so a FOF
 # source shares the stem of its CNF siblings; a stem goes to TRAIN-X when
@@ -24,13 +30,23 @@
 #   pooltrain  it would go to DEV-X and its stem is the stem of a name in
 #              the file TRAIN_NAMES (the pool's train names), so that DEV-X
 #              is held out from everything a model trains on;
-# and it is not emitted when the encoding adds nothing or fails:
+#   noheader   no formula line starts in column 0, so the header was not
+#              read (the file is accounted for, not encoded);
+# and it is not emitted when the encoding adds nothing, duplicates J13 or
+# fails:
 #   unit       the output's Encoding line counts no dispatcher, tuple or
 #              predicate: unit equality after clausification (the FOF
 #              version of a UEQ problem), the ueq rule applied late;
+#   j13dup     the output equals a J13 problem file modulo variable and
+#              symbol renaming, clause order and names
+#              (ifeq10_keys.py; the J13 files are keyed once per launch,
+#              the statistics plan section 1.4 allows on them), whatever
+#              its stem;
+#   keyerror   ifeq10_keys.py could not key the output;
 #   nonhorn (exit 3), sat1 (exit 4, a one-element model), memory, write or
-#   input (exit 2), timeout, crash, truncated (exit 0 without the Encoding
-#   line or the closing line).
+#   input (exit 2), timeout (exit 124, or 137 at the time limit), killed
+#   (137 before it: the OOM killer), crash, truncated (exit 0 without the
+#   Encoding line or the closing line).
 #
 # Output in OUT_DIR:
 #   TRAIN-X/Problems/DOM/NAME.p and DEV-X/Problems/DOM/NAME.p, where NAME
@@ -38,7 +54,10 @@
 #     name collides with a TPTP problem;
 #   TRAIN-X/pool.tsv, DEV-X/pool.tsv: name, relpath, status, spc, split
 #     (np0_pool.py's columns, split train or heldout), relpath relative to
-#     that split's root, so the np0 tools take TPTP=OUT_DIR/TRAIN-X;
+#     that split's root, so the np0 tools take TPTP=OUT_DIR/TRAIN-X.  The
+#     DEV-X label is heldout, as np0_harvest.sh expects of an evaluation
+#     set, so DEV-X/pool.tsv must never be concatenated with the pool's
+#     pool.tsv, whose heldout rows are DEV-H;
 #   manifest.tsv: one row per candidate (header line first): source, name,
 #     stem, status, spc, outcome, split, clauses, dispatchers, definitions
 #     (sP<n> predicates the clausifier introduced; no TPTP -10 file has
@@ -47,15 +66,17 @@
 #   summary.txt: the inputs, counts per outcome and split, ALERT lines;
 #   .started (this launch) and .done: status=complete; complete-alerts
 #     (sat1 on any candidate, nonhorn on an _HRN source, or a truncated
-#     output: encoder bugs by construction); incomplete pending=N (the
-#     deadline, or write errors: rerun to resume); error (the corpus check
-#     failed: a J13 or excluded stem emitted, a stem in both splits, a
-#     split that is not the stem's hash, pool.tsv out of step with the
-#     files; exit 1).
+#     output: encoder bugs by construction); complete-unguarded (ALLOW_LEAKY
+#     =1, alerts=N appended); incomplete pending=N (the deadline, or write
+#     errors: rerun to resume); error (the corpus check failed: a J13 or
+#     excluded stem emitted, an emitted problem without a key or with a
+#     J13 key, a stem in both splits, a split that is not the stem's hash,
+#     pool.tsv out of step with the files; exit 1).
 #
 # OUT_DIR/.work/inputs fingerprints the run: the sha256 of FINDPROOF, of
-# this script and of every name list, the TPTP release and problem list,
-# TIMEOUT_S and MEM_MB.  A rerun resumes only when they match and exits 2
+# this script, of ifeq10_keys.py and ifeq10_diff.py and of every name
+# list, the TPTP release and problem list, TIMEOUT_S, MEM_MB and
+# ALLOW_LEAKY.  A rerun resumes only when they match and exits 2
 # otherwise, so one corpus never mixes two encoder builds or two sets of
 # exclusions.  FINDPROOF must have passed ALL=1 tests/atp_ifeq10_tptp.sh,
 # whose pass file FINDPROOF.ifeq10-pass names its sha256 (IFEQ10_PASS
@@ -65,10 +86,11 @@
 #
 # Env: JOBS (parallel encoders, default the core count), TIMEOUT_S (per
 # problem, 120), MEM_MB (virtual memory per encoder, 3072), DEADLINE_S
-# (no launch after this many seconds, 14400), TRAIN_NAMES.  The run
-# executes a private copy of this script under OUT_DIR, so editing the
-# file mid-run cannot break it, and holds OUT_DIR/.work/.lock (flock), so
-# a second launch on the same OUT_DIR exits 2.
+# (no launch after this many seconds, 14400), TRAIN_NAMES, ALLOW_LEAKY.  The run
+# executes a private copy of this script, ifeq10_keys.py and
+# ifeq10_diff.py under OUT_DIR, so editing them mid-run cannot break it,
+# and holds OUT_DIR/.work/.lock (flock), so a second launch on the same
+# OUT_DIR exits 2.
 set -u
 
 usage() {
@@ -84,11 +106,18 @@ die() {
 if [ "${IFEQ10_SNAPSHOT:-}" != 1 ]; then
   [ $# -ge 4 ] || usage
   mkdir -p "$3" || exit 2
-  snap=$(mktemp "$3/.make_ifeq10_corpus.XXXXXX") || exit 2
-  cp "$0" "$snap" || exit 2
-  exec env IFEQ10_SNAPSHOT=1 IFEQ10_SELF="$snap" bash "$snap" "$@"
+  snap=$(mktemp -d "$3/.make_ifeq10_corpus.XXXXXX") || exit 2
+  here=$(dirname "$0")
+  if ! cp "$0" "$snap/make_ifeq10_corpus.sh" || ! cp "$here/ifeq10_keys.py" "$here/ifeq10_diff.py" "$snap/"; then
+    rm -rf "$snap"
+    exit 2
+  fi
+  exec env IFEQ10_SNAPSHOT=1 IFEQ10_SELF="$snap" bash "$snap/make_ifeq10_corpus.sh" "$@"
 fi
-trap 'rm -f "${IFEQ10_SELF:-}"' EXIT
+case ${IFEQ10_SELF:-} in
+  */.make_ifeq10_corpus.*) trap 'rm -rf "$IFEQ10_SELF"' EXIT ;;
+  *) die "run make_ifeq10_corpus.sh itself, not its snapshot" ;;
+esac
 
 FP=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 TPTP_ROOT=$(cd "$2" && pwd)
@@ -102,6 +131,7 @@ TIMEOUT_S=${TIMEOUT_S:-120}
 MEM_MB=${MEM_MB:-3072}
 DEADLINE_S=${DEADLINE_S:-14400}
 TRAIN_NAMES=${TRAIN_NAMES:-}
+ALLOW_LEAKY=${ALLOW_LEAKY:-0}
 IFEQ10_PASS=${IFEQ10_PASS:-$FP.ifeq10-pass}
 WORK=$OUT/.work
 
@@ -109,13 +139,17 @@ WORK=$OUT/.work
 "$FP" --help 2> /dev/null | grep -q -- '--emit-ifeq10' || die "$FP has no --emit-ifeq10"
 [ -d "$TPTP_ROOT/Problems" ] || die "$2 has no Problems/"
 [ -s "$J13" ] || die "the J13 name list $J13 is missing or empty"
+if [ "$ALLOW_LEAKY" != 1 ]; then
+  [ ${#EXTRA[@]} -gt 0 ] || die "no EXCLUDE_NAMES (DEV-H and DEV-T names): ALLOW_LEAKY=1 runs without and marks the corpus unguarded"
+  [ -n "$TRAIN_NAMES" ] || die "no TRAIN_NAMES (the pool's train names): ALLOW_LEAKY=1 runs without and marks the corpus unguarded"
+fi
 for f in "${EXTRA[@]+"${EXTRA[@]}"}"; do
   [ -s "$f" ] || die "the exclusion list $f is missing or empty"
 done
 if [ -n "$TRAIN_NAMES" ]; then
   [ -s "$TRAIN_NAMES" ] || die "TRAIN_NAMES=$TRAIN_NAMES is missing or empty"
 fi
-for c in timeout flock; do
+for c in timeout flock python3; do
   command -v "$c" > /dev/null 2>&1 || die "no $c(1)"
 done
 if command -v sha256sum > /dev/null 2>&1; then
@@ -127,6 +161,8 @@ fi
 sha_of() {
   $SHA "$1" | cut -d' ' -f1
 }
+
+KEYS=$IFEQ10_SELF/ifeq10_keys.py
 
 mkdir -p "$WORK/res" "$WORK/err" "$WORK/tmp" "$OUT/TRAIN-X/Problems" "$OUT/DEV-X/Problems" || exit 2
 exec 9> "$WORK/.lock" || exit 2
@@ -155,6 +191,7 @@ fi
 {
   echo "findproof_sha256=$FP_SHA"
   echo "driver_sha256=$(sha_of "$0")"
+  echo "keys_sha256=$(sha_of "$KEYS") diff_sha256=$(sha_of "$(dirname "$KEYS")/ifeq10_diff.py")"
   echo "tptp_release=${TPTP_RELEASE:-unknown}"
   echo "tptp_problems_sha256=$(sha_of "$WORK/all_problems") ($(wc -l < "$WORK/all_problems" | tr -d ' ') files)"
   echo "j13_names_sha256=$(sha_of "$J13")"
@@ -165,6 +202,7 @@ fi
     echo "train_names_sha256=$(sha_of "$TRAIN_NAMES")"
   fi
   echo "timeout_s=$TIMEOUT_S mem_mb=$MEM_MB"
+  echo "allow_leaky=$ALLOW_LEAKY"
 } > "$WORK/inputs.now"
 if [ -f "$WORK/inputs" ]; then
   if ! cmp -s "$WORK/inputs" "$WORK/inputs.now"; then
@@ -214,6 +252,28 @@ else
   : > "$WORK/train_stems"
 fi
 
+# The keys of the J13 problem files, against which every emitted problem
+# is checked; a J13 name without a file, or a file without a key, stops
+# the run, since its duplicates could not be found.
+mkdir -p "$WORK/keys"
+sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/\.p$//' "$J13" | grep -v '^$' | LC_ALL=C sort -u > "$WORK/j13_list"
+awk -v r="$TPTP_ROOT/" 'FILENAME == ARGV[1] { want[$0] = 1; next }
+  { n = $0; sub(/.*\//, "", n); sub(/\.p$/, "", n); if (n in want) { print r $0; seen[n] = 1 } }
+  END { for (n in want) if (!(n in seen)) print "MISSING " n > "/dev/stderr" }' \
+  "$WORK/j13_list" "$WORK/all_problems" > "$WORK/j13_files" 2> "$WORK/j13_missing"
+[ -s "$WORK/j13_missing" ] && die "J13 names without a problem file in $TPTP_ROOT: $(head -n 5 "$WORK/j13_missing" | tr '\n' ' ')"
+(
+  cd "$WORK/tmp" || exit 2
+  ulimit -v $((MEM_MB * 1024))
+  exec timeout -k 5 $((TIMEOUT_S * 10)) python3 "$KEYS" "$TPTP_ROOT" "$WORK/j13_files"
+) < /dev/null > "$WORK/j13_keys.tsv" 2> "$WORK/j13_keys.err" || die "ifeq10_keys.py failed on the J13 files: $(head -n 1 "$WORK/j13_keys.err")"
+[ "$(wc -l < "$WORK/j13_keys.tsv" | tr -d ' ')" = "$(wc -l < "$WORK/j13_files" | tr -d ' ')" ] \
+  || die "ifeq10_keys.py keyed $(wc -l < "$WORK/j13_keys.tsv" | tr -d ' ') of $(wc -l < "$WORK/j13_files" | tr -d ' ') J13 files"
+if awk -F'\t' '$2 == "ERROR"' "$WORK/j13_keys.tsv" | grep -q .; then
+  die "J13 files without a key: $(awk -F'\t' '$2 == "ERROR" { print $1 ": " $3 }' "$WORK/j13_keys.tsv" | head -n 3 | tr '\n' ' ')"
+fi
+cut -f2 "$WORK/j13_keys.tsv" | LC_ALL=C sort -u > "$WORK/j13_keyset"
+
 # The candidates: CNF (-) and FOF (+) problem files, with their header's
 # Status, SPC, first Rating number and the include()s before the first
 # formula.
@@ -231,6 +291,13 @@ awk -v r="$TPTP_ROOT/" '{ print r $0 }' "$WORK/files" | tr '\n' '\0' | xargs -0 
     nextfile
   }
 ' > "$WORK/headers.tsv"
+
+# A file whose header awk printed no row is accounted for as noheader.
+awk -F'\t' -v root="$TPTP_ROOT/" 'FILENAME == ARGV[1] { seen[substr($1, length(root) + 1)] = 1; next }
+  !($0 in seen) {
+    n = $0; sub(/.*\//, "", n); sub(/\.p$/, "", n)
+    print $0 "\t-\t" substr(n, 1, 6) "\t-\t-\tnoheader\t-\t-\t-\t-\t-\t-\t-"
+  }' "$WORK/headers.tsv" "$WORK/files" > "$WORK/noheader.tsv"
 
 awk -F'\t' -v root="$TPTP_ROOT/" '
   $2 == "Unsatisfiable" || $2 == "Theorem" {
@@ -269,8 +336,11 @@ awk -F'\t' -v jf="$WORK/j13_stems" -v ef="$WORK/excl_stems" -v tf="$WORK/tptp10_
     print $1 "\t" $2 "\t" stem "\t" $4 "\t" $5 "\t" $6 "\t" sp "\t" $7 "\t" $8 "\t" out
   }' "$WORK/cands0.tsv" > "$WORK/candidates.tsv"
 
-awk -F'\t' '$10 != "encode" { print $1 "\t-\t" $3 "\t" $5 "\t" $6 "\t" $10 "\t-\t-\t-\t-\t-\t" $8 "\t" $9 }' \
-  "$WORK/candidates.tsv" > "$WORK/skipped.tsv"
+{
+  awk -F'\t' '$10 != "encode" { print $1 "\t-\t" $3 "\t" $5 "\t" $6 "\t" $10 "\t-\t-\t-\t-\t-\t" $8 "\t" $9 }' \
+    "$WORK/candidates.tsv"
+  cat "$WORK/noheader.tsv"
+} > "$WORK/skipped.tsv"
 awk -F'\t' '$10 == "encode" { print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $8 "\t" $9 }' \
   "$WORK/candidates.tsv" > "$WORK/jobs.tsv"
 
@@ -302,7 +372,8 @@ encode_one() {
     2) outcome=input ;;
     3) outcome=nonhorn ;;
     4) outcome=sat1 ;;
-    124 | 137) outcome=timeout ;;
+    124) outcome=timeout ;;
+    137) outcome=killed ;;
     *) outcome=crash ;;
   esac
   if [ "$outcome" = input ]; then
@@ -314,6 +385,10 @@ encode_one() {
   fi
   local out_name=- nc=- nd=- ndef=- ntup npred enc secs
   secs=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", b - a }')
+  # 137 is any SIGKILL: timeout's -k after the limit, or the OOM killer.
+  if [ "$outcome" = killed ] && awk -v s="$secs" -v t="$TIMEOUT_S" 'BEGIN { exit !(s >= t) }'; then
+    outcome=timeout
+  fi
   if [ "$outcome" = emitted ]; then
     enc=$(sed -n 's/^% Encoding : dispatchers \([0-9]*\), tuples \([0-9]*\), predicates \([0-9]*\), definitions \([0-9]*\)$/\1 \2 \3 \4/p' "$tmp")
     if [ -z "$enc" ] || [ "$(tail -n 1 "$tmp" | cut -c1-10)" != '%---------' ]; then
@@ -325,8 +400,24 @@ encode_one() {
       fi
     fi
   fi
+  local key=
+  if [ "$outcome" = emitted ]; then
+    printf '%s\n' "$tmp" > "$WORK/tmp/$name.list"
+    key=$(
+      cd "$WORK/tmp" || exit 2
+      ulimit -v $((MEM_MB * 1024))
+      timeout -k 5 "$TIMEOUT_S" python3 "$KEYS" "$TPTP_ROOT" "$WORK/tmp/$name.list" < /dev/null 2>> "$err" | cut -f2
+    )
+    rm -f "$WORK/tmp/$name.list"
+    if [ -z "$key" ] || [ "$key" = ERROR ]; then
+      outcome=keyerror
+    elif grep -qxF "$key" "$WORK/j13_keyset"; then
+      outcome=j13dup
+    fi
+  fi
   if [ "$outcome" = emitted ]; then
     out_name=$name-10
+    printf '%s\n' "$key" > "$WORK/keys/$out_name.key"
     nc=$(grep -c '^cnf(' "$tmp")
     mkdir -p "$OUT/$split/Problems/$dom"
     mv "$tmp" "$OUT/$split/Problems/$dom/$out_name.p"
@@ -341,7 +432,7 @@ encode_one() {
   mv "$res.part" "$res"
 }
 export -f encode_one
-export WORK OUT FP TPTP_ROOT TIMEOUT_S MEM_MB DEADLINE_AT
+export WORK OUT FP TPTP_ROOT TIMEOUT_S MEM_MB DEADLINE_AT KEYS
 
 if [ -s "$WORK/jobs.tsv" ]; then
   tr '\n' '\0' < "$WORK/jobs.tsv" | xargs -0 -r -P "$JOBS" -n 1 bash -c 'encode_one "$1"' _
@@ -391,6 +482,13 @@ check_corpus() {
       if ((st in seen) && seen[st] != $7) print "the stem " st " is in both splits"
       seen[st] = $7
     }' "$OUT/manifest.tsv"
+  awk -F'\t' 'NR > 1 && $6 == "emitted" { print $2 }' "$OUT/manifest.tsv" | while IFS= read -r n; do
+    if [ ! -s "$WORK/keys/$n.key" ]; then
+      echo "the emitted $n has no duplicate key"
+    elif grep -qxF "$(cat "$WORK/keys/$n.key")" "$WORK/j13_keyset"; then
+      echo "the emitted $n has the key of a J13 problem"
+    fi
+  done
   awk -F'\t' 'NR > 1 && $6 == "emitted" { print $3 "\t" $7 }' "$OUT/manifest.tsv" | LC_ALL=C sort -u \
     | while IFS=$'\t' read -r st sp; do
         h=$(printf '%s' "$st" | $SHA | cut -c1-8)
@@ -430,11 +528,12 @@ awk -F'\t' 'NR > 1 && ($6 == "sat1" || $6 == "truncated" || ($5 ~ /_HRN$/ && $6 
   sed 's/^/  /' "$WORK/inputs"
   cat "$OUT/.started"
   if [ ${#EXTRA[@]} -eq 0 ]; then
-    echo "WARNING: no EXCLUDE_NAMES: DEV-H and DEV-T stems are not excluded"
+    echo "UNGUARDED: no EXCLUDE_NAMES: DEV-H and DEV-T stems are not excluded"
   fi
   if [ -z "$TRAIN_NAMES" ]; then
-    echo "WARNING: no TRAIN_NAMES: DEV-X may share stems with the pool's train split"
+    echo "UNGUARDED: no TRAIN_NAMES: DEV-X may share stems with the pool's train split"
   fi
+  echo "j13_files=$(wc -l < "$WORK/j13_files" | tr -d ' ') keyed ($(wc -l < "$WORK/j13_keyset" | tr -d ' ') distinct keys)"
   echo "candidates=$(wc -l < "$WORK/candidates.tsv" | tr -d ' ') (CNF and FOF, Unsatisfiable or Theorem)"
   echo "j13_stems=$(wc -l < "$WORK/j13_stems" | tr -d ' ')"
   echo "j13_10_variants_skipped=$(awk -F'\t' 'FILENAME == ARGV[1] { s[$1] = 1; next }
@@ -467,6 +566,8 @@ if [ -s "$WORK/check_errors" ]; then
 fi
 if [ "$left" -gt 0 ]; then
   echo "status=incomplete pending=$left" > "$OUT/.done"
+elif [ "$ALLOW_LEAKY" = 1 ]; then
+  echo "status=complete-unguarded alerts=$(wc -l < "$WORK/alerts" | tr -d ' ')" > "$OUT/.done"
 elif [ -s "$WORK/alerts" ]; then
   echo "status=complete-alerts alerts=$(wc -l < "$WORK/alerts" | tr -d ' ')" > "$OUT/.done"
 else
