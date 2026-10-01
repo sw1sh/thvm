@@ -512,6 +512,11 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
 * `bin/FindProof --list-knobs` prints the 127-row `--flag -> env ->
   Method-name` table (every CLI flag is exactly an env setter, so
   the table is also the env catalog for the strategy surface).
+* `bin/FindProof --list-lanes` prints the schedule's lane names in
+  `SCHEDULE[]` order, and `--lane=NAME` runs one lane exactly as
+  `--schedule` launches it (its flags, `FINDPROOF_SLICE`, slice RSS
+  cap, slice wall and wall stop) with its stderr kept: the per-lane
+  measurement path (`tests/atp_lane_cli.sh`).
 * `docs/ENV_KNOBS.md` carries the repo-wide index; its ATP section
   points here.
 

@@ -53,6 +53,9 @@
 #include <sys/time.h>
 #include <signal.h>
 #include <fcntl.h>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
 
 // TPTP include() expansion: the checker's problem loading and the TPTP
 // front-end below read problems through the same code.

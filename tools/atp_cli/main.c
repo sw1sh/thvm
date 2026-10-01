@@ -589,8 +589,14 @@ static size_t sched_salvage_len(const char *text, size_t len) {
 // the 0.22 slice gave it 6.6s).  First slice to exit 0 (proof found) wins;
 // the rest are killed.  Each child writes its stdout to a temp file; only
 // the winner's is replayed, so SZS/proof output never interleaves.
+//
+// only >= 0 (--lane=NAME) runs SCHEDULE[only] alone through this same
+// path -- its env defaults, slice wall, command line, deadline and final
+// status -- so a single-lane result is what that lane's slot does inside
+// a schedule run at the same --wall.  The slice keeps its stderr (the
+// schedule discards it) and reports how it ended, for per-lane harvests.
 static int run_schedule(const char *self, const char *file, double wall,
-                        int szs, int want_proof) {
+                        int szs, int want_proof, int only) {
   // Install the teardown handler + register the (initially empty) pid slots
   // so an external timeout can't orphan the slice subtrees.
   for (int i = 0; i < SCHED_PID_MAX; i++) g_sched_pids[i] = -1;
@@ -610,6 +616,15 @@ static int run_schedule(const char *self, const char *file, double wall,
     if (szs) snprintf(line, sizeof line, "%% SZS status Timeout for %s\n", file);
     cli_arm_wall_alarm(wall, 1, 1, line[0] ? line : NULL);
   }
+#ifdef PR_SET_CHILD_SUBREAPER
+  // A lane run's resource use is its slice's.  The wall stop kills the
+  // slice's group, orphaning its shell and engine; as their subreaper
+  // this process waits for them below, so their CPU time and peak RSS
+  // reach whoever measures it (the per-lane harvest's GNU time).
+  if (only >= 0) {
+    prctl(PR_SET_CHILD_SUBREAPER, 1);
+  }
+#endif
   // Bound each child's RSS unless the caller set a tighter cap already.
   if (getenv("THVM_ATP_RSS_ABORT_MB") == NULL) {
     char capbuf[16];
@@ -620,7 +635,9 @@ static int run_schedule(const char *self, const char *file, double wall,
   char  outs[N_SCHED][64];
   int   done[N_SCHED];
   for (int i = 0; i < N_SCHED; i++) { pids[i] = -1; done[i] = 0; outs[i][0] = 0; }
-  int launched = 0, next = 0, winner = -1, n_inerr = 0;
+  int first = (only >= 0) ? only : 0;
+  int end   = (only >= 0) ? only + 1 : N_SCHED;
+  int launched = 0, next = first, winner = -1, n_inerr = 0;
   // Concurrency width: SCHED_MAX_PAR by default (a laptop can only run a
   // few slices at once), env-overridable so a many-core box runs the
   // WHOLE portfolio in one concurrent wave -- the fair CASC condition is
@@ -653,8 +670,8 @@ static int run_schedule(const char *self, const char *file, double wall,
   double deadline = sched_t0 + ((wall > 2.0) ? wall - 0.5 : wall);
   int stopped = 0;
   // Launch up to max_par, then refill as children exit.
-  while (winner < 0 && (next < N_SCHED || launched > 0)) {
-    while (winner < 0 && launched < max_par && next < N_SCHED) {
+  while (winner < 0 && (next < end || launched > 0)) {
+    while (winner < 0 && launched < max_par && next < end) {
       double rem = budget - (horn_now() - sched_t0);
       if (rem < 2.0) break;   // no wall budget left: stop launching slices
       int i = next++;
@@ -690,7 +707,7 @@ static int run_schedule(const char *self, const char *file, double wall,
           snprintf(ep, sizeof ep, "%s/%s.err", ed, SCHEDULE[i].name);
           int ef = open(ep, O_WRONLY | O_CREAT | O_TRUNC, 0644);
           if (ef >= 0) { dup2(ef, 2); close(ef); }
-        } else if (!g_cli_verbose) {
+        } else if (!g_cli_verbose && only < 0) {
           int dn = open("/dev/null", O_WRONLY);
           if (dn >= 0) { dup2(dn, 2); close(dn); }
         }
@@ -706,6 +723,21 @@ static int run_schedule(const char *self, const char *file, double wall,
         // (searched and gave up) so the parent doesn't mask a broken
         // input as an honest GaveUp.
         int st = system(cmd);
+        // The exit code below folds a signal into 1, the code of an
+        // honest give-up; a lane run names the real end on stderr so a
+        // crash stays distinguishable from a search that gave up.
+        if (only >= 0) {
+          if (st == -1) {
+            fprintf(stderr, "%% FindProof lane %s: launch failed\n",
+                    SCHEDULE[i].name);
+          } else if (WIFSIGNALED(st)) {
+            fprintf(stderr, "%% FindProof lane %s: signal %d\n",
+                    SCHEDULE[i].name, WTERMSIG(st));
+          } else {
+            fprintf(stderr, "%% FindProof lane %s: exit %d\n",
+                    SCHEDULE[i].name, WEXITSTATUS(st));
+          }
+        }
         _exit((st != -1 && WIFEXITED(st)) ? WEXITSTATUS(st) : 1);
       }
       // Set the child's pgid parent-side too (race-free: whichever of
@@ -777,6 +809,24 @@ static int run_schedule(const char *self, const char *file, double wall,
   for (int i = 0; i < N_SCHED; i++)
     if (pids[i] > 0 && !done[i]) { int st; waitpid(pids[i], &st, 0);
       if (i < SCHED_PID_MAX) g_sched_pids[i] = -1; }
+  // The killed slice's orphans, reparented here (subreaper above).
+  if (only >= 0) {
+    double reap_until = horn_now() + 1.0;
+    for (;;) {
+      int st;
+      pid_t r = waitpid(-1, &st, WNOHANG);
+      if (r < 0) {
+        break;
+      }
+      if (r == 0) {
+        if (horn_now() >= reap_until) {
+          break;
+        }
+        struct timespec nap = { 0, 5000000L };
+        nanosleep(&nap, NULL);
+      }
+    }
+  }
   // Teardown handler no longer needed: restore the previous dispositions.
   alarm(0);
   g_sched_active = 0;
@@ -801,7 +851,7 @@ static int run_schedule(const char *self, const char *file, double wall,
       }
     }
     rc = 0;
-  } else if (n_inerr == N_SCHED) {
+  } else if (n_inerr == end - first) {
     // Every slice failed before searching (the input error precedes the
     // per-slice transforms, so it hits all of them identically): this is
     // a broken input or environment, not a give-up.
@@ -1011,6 +1061,9 @@ static void usage(FILE *fp) {
     "  --szs                       print an SZS status line (CNF ontology for TPTP input)\n"
     "  --schedule                  time-sliced portfolio of configurations (child\n"
     "                              process per slice; first proof wins)\n"
+    "  --lane=NAME                 run one schedule lane alone, exactly as the\n"
+    "                              schedule launches it (its stderr kept)\n"
+    "  --list-lanes                print the schedule's lane names in order and exit\n"
     "  --proof                     print an SZS CNFRefutation block on success\n"
     "  --keep-pr                   keep (and name) the .pr generated from TPTP input\n"
     "  --list-knobs                print the knob table and exit\n"
@@ -1029,6 +1082,7 @@ int main(int argc, char **argv) {
   const char *max_steps = "500000";
   const char *wall = "120";
   int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0;
+  const char *lane = NULL;
   double main_t0 = horn_now();
   g_cli_main_t0 = main_t0;
   // Bench-intake give-ups (e.g. --full-ac=2 with no AC operator) route
@@ -1072,6 +1126,20 @@ int main(int argc, char **argv) {
       for (int k = 0; k < N_KNOBS; k++)
         printf("  --%-26s %-34s %s\n", KNOBS[k].flag, KNOBS[k].env, KNOBS[k].method);
       return 0;
+    }
+    if (nlen == 10 && strncmp(name, "list-lanes", 10) == 0) {
+      for (int k = 0; k < N_SCHED; k++) {
+        printf("%s\n", SCHEDULE[k].name);
+      }
+      return 0;
+    }
+    if (nlen == 4 && strncmp(name, "lane", 4) == 0) {
+      if (val == NULL || val[0] == '\0') {
+        fprintf(stderr, "FindProof: --lane needs a lane name (--list-lanes)\n");
+        return 2;
+      }
+      lane = val;
+      continue;
     }
     if (nlen == 3 && strncmp(name, "szs", 3) == 0) { szs = 1; continue; }
     if (nlen == 8 && strncmp(name, "schedule", 8) == 0) { want_schedule = 1; continue; }
@@ -1142,6 +1210,20 @@ int main(int argc, char **argv) {
     }
     if (!hit) { fprintf(stderr, "FindProof: unknown option --%.*s\n", (int)nlen, name); usage(stderr); return 2; }
   }
+  int lane_ix = -1;
+  if (lane != NULL) {
+    for (int k = 0; k < N_SCHED; k++) {
+      if (strcmp(lane, SCHEDULE[k].name) == 0) {
+        lane_ix = k;
+        break;
+      }
+    }
+    if (lane_ix < 0) {
+      fprintf(stderr, "FindProof: unknown lane '%s' (--list-lanes prints the "
+              "%d schedule lanes)\n", lane, N_SCHED);
+      return 2;
+    }
+  }
   if (file == NULL) { usage(stderr); return 2; }
   // Engine wall, set BEFORE any front-end work: the FOF clausal
   // pre-pass budgets itself as a fraction of the remaining wall.
@@ -1149,8 +1231,9 @@ int main(int argc, char **argv) {
 
   if (want_check) return proof_check_main(file, szs);
 
-  if (want_schedule) {
-    return run_schedule(argv[0], file, atof(wall), szs, g_cli_want_proof);
+  if (want_schedule || lane_ix >= 0) {
+    return run_schedule(argv[0], file, atof(wall), szs, g_cli_want_proof,
+                        lane_ix);
   }
 
   // Front-end wall (cli_fe_check): every stage before the engine abstains
