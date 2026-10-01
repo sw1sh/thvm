@@ -730,36 +730,79 @@ fn WaldSection wald_parse_variables(WaldSpec *spec, WaldLex *lex) {
 // pass without sort policing.
 fn u32 wald_term_sort(const WaldSpec *spec, Term t) {
   if (spec == NULL || spec->n_sorts == 0) return 0;
-
-  switch (term_tag(t)) {
-    case TAG_FVR: {
-      u32 id = term_ext(t);
-      for (u32 i = 0; i < spec->n_vars; i++) {
-        if (spec->vars[i].var_id == id) return spec->vars[i].sort;
-      }
-      return WALD_MAX_SORTS;
-    }
-    case TAG_CTR: {
-      u32 lab = term_ext(t);
-      u32 n   = term_ctr_n(t);
-      const WaldSym *sym = NULL;
-      for (u32 i = 0; i < spec->n_symbols; i++) {
-        if (spec->symbols[i].label == lab) {
-          sym = &spec->symbols[i];
-          break;
+  // A CTR whose children's sorts are being checked (child i at
+  // heap_read(base + 1 + i)), on an explicit stack: a child sort that
+  // misses its argument sort ends the parent with WALD_MAX_SORTS at
+  // once, as the recursion returned.
+  typedef struct { const WaldSym *sym; u64 base; u32 i; } SortFrame;
+  enum { SORT_INL = 64 };
+  SortFrame  fr_inl[SORT_INL];
+  SortFrame *fr  = fr_inl;
+  u32        nfr = 0u;
+  u32        cfr = SORT_INL;
+  u32        v   = WALD_MAX_SORTS;
+  for (;;) {
+    u8 leaf = 1u;
+    switch (term_tag(t)) {
+      case TAG_FVR: {
+        u32 id = term_ext(t);
+        v = WALD_MAX_SORTS;
+        for (u32 i = 0; i < spec->n_vars; i++) {
+          if (spec->vars[i].var_id == id) { v = spec->vars[i].sort; break; }
         }
+        break;
       }
-      if (sym == NULL)         return WALD_MAX_SORTS;
-      if (sym->arity != n)     return WALD_MAX_SORTS;
-      for (u32 i = 0; i < n; i++) {
-        u32 child_sort = wald_term_sort(spec, term_ctr_at(t, i));
-        if (child_sort != sym->arg_sorts[i]) return WALD_MAX_SORTS;
+      case TAG_CTR: {
+        u32 lab = term_ext(t);
+        u32 n   = term_ctr_n(t);
+        const WaldSym *sym = NULL;
+        for (u32 i = 0; i < spec->n_symbols; i++) {
+          if (spec->symbols[i].label == lab) {
+            sym = &spec->symbols[i];
+            break;
+          }
+        }
+        if (sym == NULL || sym->arity != n) {
+          v = WALD_MAX_SORTS;
+        } else if (n == 0u) {
+          v = sym->result_sort;
+        } else {
+          if (nfr == cfr) {
+            fr = (SortFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].sym  = sym;
+          fr[nfr].base = term_val(t);
+          fr[nfr].i    = 0u;
+          nfr++;
+          leaf = 0u;
+        }
+        break;
       }
-      return sym->result_sort;
+      default:
+        v = WALD_MAX_SORTS;
+        break;
     }
-    default:
-      return WALD_MAX_SORTS;
+    if (leaf) {
+      while (nfr > 0u) {
+        SortFrame *f = &fr[nfr - 1u];
+        if (v != f->sym->arg_sorts[f->i]) {
+          v = WALD_MAX_SORTS;
+        } else if (++f->i < f->sym->arity) {
+          break;
+        } else {
+          v = f->sym->result_sort;
+        }
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    SortFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
   }
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 
 fn u8 wald_sort_check(const WaldSpec *spec, Term t) {

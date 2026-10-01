@@ -489,6 +489,465 @@ static void ref_thvm_normalize_vars(Term *lhs, Term *rhs) {
   *lhs = ref_nv_rewrite(*lhs, &m);
   *rhs = ref_nv_rewrite(*rhs, &m);
 }
+// src/atp/cp_store.c:166
+static void ref_acp_pack_term(Term t, u32 *pos, u32 *nodes) {
+  (*nodes)++;
+  acp_scratch_ensure(*pos, 21u);
+  u8 *p = g_acp_scratch + *pos;
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      *p++ = (u8)'C';
+      acp_put_varint(&p, term_ext(t));
+      acp_put_varint(&p, n);
+      *pos = (u32)(p - g_acp_scratch);
+      for (u32 i = 0; i < n; i++) ref_acp_pack_term(term_ctr_at(t, i), pos, nodes);
+      return;
+    }
+    case TAG_NUM:
+      *p++ = (u8)'N';
+      acp_put_varint(&p, term_ext(t));
+      acp_put_varint(&p, term_val(t));
+      break;
+    case TAG_FVR:
+      *p++ = (u8)'V';
+      acp_put_varint(&p, term_ext(t));
+      break;
+    default:
+      *p++ = (u8)'E';
+      break;
+  }
+  *pos = (u32)(p - g_acp_scratch);
+}
+
+// src/atp/cp_store.c:197
+static Term ref_acp_unpack_term(const u8 **pp) {
+  if (g_atp_phase_detail) { extern u64 g_acp_unterm_nodes; g_acp_unterm_nodes++; }
+  u8 disc = *(*pp)++;
+  switch (disc) {
+    case 'C': {
+      u32 label = (u32)acp_get_varint(pp);
+      u32 n     = (u32)acp_get_varint(pp);
+      if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
+      Term kids[REWRITE_MAX_ARITY];
+      for (u32 i = 0; i < n; i++) kids[i] = ref_acp_unpack_term(pp);
+      return term_new_ctr(label, kids, n);
+    }
+    case 'N': {
+      u32 dtype = (u32)acp_get_varint(pp);
+      u64 val   = acp_get_varint(pp);
+      return term_new(0, TAG_NUM, dtype, val);
+    }
+    case 'V':
+    default:
+      return term_new_fvr((u32)acp_get_varint(pp));
+  }
+}
+
+// src/atp/cp_store.c:227
+static AtpFtCell *ref_acp_unpack_ft(AtpFt *a, const u8 **pp) {
+  u8 disc = *(*pp)++;
+  switch (disc) {
+    case 'C': {
+      u32 label = (u32)acp_get_varint(pp);
+      u32 n     = (u32)acp_get_varint(pp);
+      if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
+      if (n == 0u) return ftnew_const(a, label, 0);
+      AtpFtCell *kids[REWRITE_MAX_ARITY];
+      for (u32 i = 0; i < n; i++) kids[i] = ref_acp_unpack_ft(a, pp);
+      return ftnew_ctr(a, label, (u16)n, kids, 0);
+    }
+    case 'N': {
+      u32 dtype = (u32)acp_get_varint(pp);
+      u64 val   = acp_get_varint(pp);
+      AtpFtCell *kids[2] = {
+        ftnew_const(a, dtype & ~WF_VAR_BIT, 0),
+        ftnew_const(a, (u32)val & ~WF_VAR_BIT, 0),
+      };
+      return ftnew_ctr(a, ATPFT_NUM_MARKER, 2u, kids, 0);
+    }
+    case 'V':
+    default:
+      return ftnew_var(a, (u32)acp_get_varint(pp), 0);
+  }
+}
+
+// src/atp/cp_store.c:288
+static u32 ref_acp_count_term(Term t) {
+  u32 n = 1u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 k = term_ctr_n(t);
+    for (u32 i = 0; i < k; i++) n += ref_acp_count_term(term_ctr_at(t, i));
+  }
+  return n;
+}
+
+// src/atp/cp_store.c:307
+static AtpFtCell *ref_acp_unpack_term_ft(AtpFt *a, const u8 **pp, int scratch) {
+  u8 disc = *(*pp)++;
+  switch (disc) {
+    case 'C': {
+      u32 label = (u32)acp_get_varint(pp);
+      u32 n     = (u32)acp_get_varint(pp);
+      if (n == 0u) return ftnew_const(a, label, scratch);
+      enum { KIDS_STACK = 16 };
+      AtpFtCell *kids_stack[KIDS_STACK];
+      AtpFtCell **kids      = kids_stack;
+      AtpFtCell **kids_heap = NULL;
+      if (n > KIDS_STACK) {
+        kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)n);
+        if (kids_heap == NULL) thvm_fatal("ref_acp_unpack_term_ft: kids OOM");
+        kids = kids_heap;
+      }
+      for (u32 i = 0; i < n; i++) kids[i] = ref_acp_unpack_term_ft(a, pp, scratch);
+      AtpFtCell *c = ftnew_ctr(a, label, (u16)n, kids, scratch);
+      free(kids_heap);
+      return c;
+    }
+    case 'N': {
+      u32 dtype = (u32)acp_get_varint(pp);
+      u64 val   = acp_get_varint(pp);
+      AtpFtCell *dt_cell  = ftnew_const(a, dtype & ~WF_VAR_BIT, scratch);
+      AtpFtCell *raw_cell = ftnew_const(a, ((u32)val) & ~WF_VAR_BIT, scratch);
+      AtpFtCell *kids[2]  = { dt_cell, raw_cell };
+      return ftnew_ctr(a, ATPFT_NUM_MARKER, 2u, kids, scratch);
+    }
+    case 'V':
+    default:
+      return ftnew_var(a, (u32)acp_get_varint(pp), scratch);
+  }
+}
+
+// src/atp/cp_store.c:462
+static u32 ref_wald_term_sort_ft(const WaldSpec *spec, const AtpFtCell *c) {
+  if (spec == NULL || spec->n_sorts == 0) return 0;
+  if ((c->sym & WF_VAR_BIT) != 0u) {
+    u32 id = c->sym & ~WF_VAR_BIT;
+    for (u32 i = 0; i < spec->n_vars; i++) {
+      if (spec->vars[i].var_id == id) return spec->vars[i].sort;
+    }
+    return WALD_MAX_SORTS;
+  }
+  u32 lab = c->sym;
+  if (lab == ATPFT_NUM_MARKER) return WALD_MAX_SORTS;   // non-FOL tag
+  u32 n = (u32)c->arity;
+  const WaldSym *sym = NULL;
+  for (u32 i = 0; i < spec->n_symbols; i++) {
+    if (spec->symbols[i].label == lab) {
+      sym = &spec->symbols[i];
+      break;
+    }
+  }
+  if (sym == NULL)     return WALD_MAX_SORTS;
+  if (sym->arity != n) return WALD_MAX_SORTS;
+  const AtpFtCell *kid = c->next;
+  for (u32 i = 0; i < n; i++) {
+    u32 child_sort = ref_wald_term_sort_ft(spec, kid);
+    if (child_sort != sym->arg_sorts[i]) return WALD_MAX_SORTS;
+    kid = kid->end->next;
+  }
+  return sym->result_sort;
+}
+
+// src/atp/cp_store.c:1216
+static u8 ref_sjp_map_walk_term(Term t, AcpNvMap *m) {
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n > REWRITE_MAX_ARITY) return 0;
+      for (u32 i = 0; i < n; i++) {
+        if (!ref_sjp_map_walk_term(term_ctr_at(t, i), m)) return 0;
+      }
+      return 1;
+    }
+    case TAG_FVR: {
+      u32 old = term_ext(t);
+      u32 d = 0;
+      for (; d < m->n; d++) {
+        if (m->old_id[d] == old) break;
+      }
+      if (d == m->n) {
+        if (m->n >= REWRITE_MAX_VAR) return 0;
+        m->old_id[m->n++] = old;
+      }
+      return 1;
+    }
+    default:
+      return 0;   // NUM/ERA atom: the sj compare never sees these
+  }
+}
+
+// src/atp/cp_store.c:1246
+static u8 ref_sjp_emit_term(Term t, AcpNvMap *m, u32 *pos) {
+  sjp_ensure(*pos, 21u);
+  u8 *p = g_sjp_scratch + *pos;
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      if (n > REWRITE_MAX_ARITY) return 0;
+      *p++ = (u8)'C';
+      acp_put_varint(&p, term_ext(t));
+      acp_put_varint(&p, n);
+      *pos = (u32)(p - g_sjp_scratch);
+      for (u32 i = 0; i < n; i++) {
+        if (!ref_sjp_emit_term(term_ctr_at(t, i), m, pos)) return 0;
+      }
+      return 1;
+    }
+    case TAG_FVR: {
+      u32 old = term_ext(t);
+      u32 d = 0;
+      for (; d < m->n; d++) {
+        if (m->old_id[d] == old) break;
+      }
+      if (d == m->n) {
+        if (m->n >= REWRITE_MAX_VAR) return 0;
+        m->old_id[m->n++] = old;
+      }
+      *p++ = (u8)'V';
+      acp_put_varint(&p, d);
+      *pos = (u32)(p - g_sjp_scratch);
+      return 1;
+    }
+    default:
+      return 0;
+  }
+}
+
+// src/atp/cp_emit.c:1452
+static u32 ref_acp_term_nodes_skip(const u8 **pp) {
+  u8 disc = *(*pp)++;
+  switch (disc) {
+    case 'C': {
+      (void)acp_get_varint(pp);           // label
+      u32 n = (u32)acp_get_varint(pp);    // arity
+      if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
+      u32 tot = 1u;
+      for (u32 i = 0; i < n; i++) tot += ref_acp_term_nodes_skip(pp);
+      return tot;
+    }
+    case 'N':
+      (void)acp_get_varint(pp);           // dtype
+      (void)acp_get_varint(pp);           // val
+      return 1u;
+    case 'V':
+    default:
+      (void)acp_get_varint(pp);           // ext
+      return 1u;
+  }
+}
+
+// src/atp/cp_emit.c:1498
+static u8 ref_acp_match_term(const u8 **pp, Term subj, RewriteSubst *sub) {
+  u8 disc = *(*pp)++;
+  switch (disc) {
+    case 'C': {
+      u32 label = (u32)acp_get_varint(pp);
+      u32 n     = (u32)acp_get_varint(pp);
+      if (term_tag(subj) != TAG_CTR) return 0;
+      if (term_ext(subj) != label)   return 0;
+      if (term_ctr_n(subj) != n)     return 0;
+      for (u32 i = 0; i < n; i++) {
+        if (!ref_acp_match_term(pp, term_ctr_at(subj, i), sub)) return 0;
+      }
+      return 1;
+    }
+    case 'V': {
+      u32 id = (u32)acp_get_varint(pp);
+      if (id >= REWRITE_MAX_VAR) return 0;
+      if (sub->bindings[id] == 0) { sub->bindings[id] = subj; return 1; }
+      return kbo_eq(sub->bindings[id], subj);
+    }
+    default:         // 'N' (NUM) / 'E' -- thvm_match's default: no match
+      return 0;
+  }
+}
+
+// src/wald/_.c:731
+static u32 ref_wald_term_sort(const WaldSpec *spec, Term t) {
+  if (spec == NULL || spec->n_sorts == 0) return 0;
+
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      for (u32 i = 0; i < spec->n_vars; i++) {
+        if (spec->vars[i].var_id == id) return spec->vars[i].sort;
+      }
+      return WALD_MAX_SORTS;
+    }
+    case TAG_CTR: {
+      u32 lab = term_ext(t);
+      u32 n   = term_ctr_n(t);
+      const WaldSym *sym = NULL;
+      for (u32 i = 0; i < spec->n_symbols; i++) {
+        if (spec->symbols[i].label == lab) {
+          sym = &spec->symbols[i];
+          break;
+        }
+      }
+      if (sym == NULL)         return WALD_MAX_SORTS;
+      if (sym->arity != n)     return WALD_MAX_SORTS;
+      for (u32 i = 0; i < n; i++) {
+        u32 child_sort = ref_wald_term_sort(spec, term_ctr_at(t, i));
+        if (child_sort != sym->arg_sorts[i]) return WALD_MAX_SORTS;
+      }
+      return sym->result_sort;
+    }
+    default:
+      return WALD_MAX_SORTS;
+  }
+}
+
+// src/atp/trace.c:16
+static u32 ref_atp_pretty_term(Term t, char *buf, u32 cap);
+static u32 ref_atp_pretty_ctr(Term t, char *buf, u32 cap) {
+  if (cap <= 1) return 0;
+  u32 lab = term_ext(t);
+  u32 n   = term_ctr_n(t);
+  int n_w = snprintf(buf, cap, "C%u", lab);
+  if (n_w < 0) return 0;
+  u32 w = (u32)n_w;
+  if (w >= cap) return cap - 1;
+  if (n == 0) return w;
+  if (w + 1 >= cap) return w;
+  w += (u32)snprintf(buf + w, cap - w, "(");
+  for (u32 i = 0; i < n; i++) {
+    if (w + 2 >= cap) break;
+    if (i > 0) w += (u32)snprintf(buf + w, cap - w, ", ");
+    if (w >= cap) return cap - 1;
+    w += ref_atp_pretty_term(term_ctr_at(t, i), buf + w, cap - w);
+    if (w >= cap) return cap - 1;
+  }
+  if (w + 1 < cap) w += (u32)snprintf(buf + w, cap - w, ")");
+  return w;
+}
+
+// src/atp/trace.c:38
+static u32 ref_atp_pretty_term(Term t, char *buf, u32 cap) {
+  if (cap == 0) return 0;
+  switch (term_tag(t)) {
+    case TAG_FVR: return (u32)snprintf(buf, cap, "x_%u", term_ext(t));
+    case TAG_NUM: return (u32)snprintf(buf, cap, "#%u", (u32)term_val(t));
+    case TAG_ERA: return (u32)snprintf(buf, cap, "ERA");
+    case TAG_CTR: return ref_atp_pretty_ctr(t, buf, cap);
+    default:      return (u32)snprintf(buf, cap, "?T%u", term_tag(t));
+  }
+}
+
+// src/atp/history.c:250
+static u32 ref_atp_hx_feat_bytes(AtpHxFeat *f, const u8 **pp, u32 side, u8 top) {
+  f->nodes[side]++;
+  u8 disc = *(*pp)++;
+  switch (disc) {
+    case 'C': {
+      u32 label = (u32)atp_hx_varint(pp);
+      u32 n     = (u32)atp_hx_varint(pp);
+      atp_hx_feat_sym(f, label);
+      if (top) f->top_sym[side] = label;
+      u32 d = 0u;
+      for (u32 i = 0; i < n; i++) {
+        u32 cd = ref_atp_hx_feat_bytes(f, pp, side, 0u);
+        if (cd > d) d = cd;
+      }
+      return d + 1u;
+    }
+    case 'N': {
+      (void)atp_hx_varint(pp);
+      (void)atp_hx_varint(pp);
+      return 1u;
+    }
+    case 'V': {
+      u32 id = (u32)atp_hx_varint(pp);
+      atp_hx_feat_var(f, id, side);
+      if (top) f->top_var[side] = 1u;
+      return 1u;
+    }
+    default:
+      return 1u;
+  }
+}
+
+// src/atp/history.c:282
+static u32 ref_atp_hx_feat_term(AtpHxFeat *f, Term t, u32 side, u8 top) {
+  f->nodes[side]++;
+  switch (term_tag(t)) {
+    case TAG_CTR: {
+      u32 label = term_ext(t);
+      u32 n     = term_ctr_n(t);
+      atp_hx_feat_sym(f, label);
+      if (top) f->top_sym[side] = label;
+      u32 d = 0u;
+      for (u32 i = 0; i < n; i++) {
+        u32 cd = ref_atp_hx_feat_term(f, term_ctr_at(t, i), side, 0u);
+        if (cd > d) d = cd;
+      }
+      return d + 1u;
+    }
+    case TAG_FVR: {
+      atp_hx_feat_var(f, term_ext(t), side);
+      if (top) f->top_var[side] = 1u;
+      return 1u;
+    }
+    default:
+      return 1u;
+  }
+}
+
+// src/atp/history.c:350
+static void ref_atp_hx_gsym_mark(Term t) {
+  if (t == 0 || term_tag(t) != TAG_CTR) return;
+  u32 label = term_ext(t);
+  if (label < (1u << 20)) {
+    if (label >= g_hx.gsym_cap) {
+      u32 ncap = g_hx.gsym_cap ? g_hx.gsym_cap : 256u;
+      while (ncap <= label) ncap *= 2u;
+      u8 *ng = (u8 *)realloc(g_hx.gsym, ncap);
+      if (ng == NULL) return;
+      memset(ng + g_hx.gsym_cap, 0, ncap - g_hx.gsym_cap);
+      g_hx.gsym = ng;
+      g_hx.gsym_cap = ncap;
+    }
+    g_hx.gsym[label] = 1u;
+  }
+  u32 n = term_ctr_n(t);
+  for (u32 i = 0; i < n; i++) ref_atp_hx_gsym_mark(term_ctr_at(t, i));
+}
+
+// src/atp/enigma_data.c:11
+static void ref_atp_cp_var_stats_rec(Term t, u64 *seen, u32 *distinct,
+                                 u32 *occ) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      (*occ)++;
+      u32 bit = id & 63u;
+      if (!((*seen >> bit) & 1u)) {
+        *seen |= (1ull << bit);
+        (*distinct)++;
+      }
+      return;
+    }
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        ref_atp_cp_var_stats_rec(term_ctr_at(t, i), seen, distinct, occ);
+      }
+      return;
+    }
+    default: return;
+  }
+}
+
+// src/atp/enigma_data.c:47
+static int ref_atp_term_label_set(Term t, u64 *labels) {
+  if (term_tag(t) == TAG_CTR) {
+    u32 lab = term_ext(t);
+    *labels |= (1ull << (lab & 63u));
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) ref_atp_term_label_set(term_ctr_at(t, i), labels);
+  }
+  return 0;
+}
 
 // ---- Random terms ---------------------------------------------------------
 
@@ -581,6 +1040,29 @@ static int heap_regions_same(u64 a0, u64 a1, u64 b0, u64 b1) {
     if (reloc(heap_read(a0 + k), a0, a1, b0) != heap_read(b0 + k)) return 0;
   }
   return 1;
+}
+
+static long cell_off(const AtpFtCell *c, const AtpFtCell *base) {
+  return c == NULL ? -1L : (long)((const char *)c - (const char *)base);
+}
+
+// Same preorder cells (sym / arity / flags) at the same offsets from
+// each arena's first cell, with the same next / end links: the two
+// walks built the same span AND allocated its cells in the same order.
+static int span_layout_same(const AtpFtCell *x, const AtpFtCell *xb,
+                            const AtpFtCell *y, const AtpFtCell *yb) {
+  const AtpFtCell *px = x;
+  const AtpFtCell *py = y;
+  for (;;) {
+    if (px->sym != py->sym || px->arity != py->arity || px->flags != py->flags) return 0;
+    if (cell_off(px, xb) != cell_off(py, yb)) return 0;
+    if (cell_off(px->end, xb) != cell_off(py->end, yb)) return 0;
+    if (cell_off(px->next, xb) != cell_off(py->next, yb)) return 0;
+    if (px == x->end) return py == y->end;
+    if (py == y->end) return 0;
+    px = px->next;
+    py = py->next;
+  }
 }
 
 // ---- Deep terms ------------------------------------------------------------
@@ -1283,6 +1765,444 @@ static void deep_term_libs(void) {
   }
 }
 
+// ---- cp_store.c / cp_emit.c / trace.c / history.c / enigma_data.c / wald ---
+
+// Pack `t` with `pack` at scratch offset `start`; copy the bytes out.
+static u32 pack_copy(void (*pack)(Term, u32 *, u32 *), Term t, u32 start,
+                     u8 *out, u32 *nodes) {
+  u32 pos = start;
+  *nodes = 0u;
+  acp_scratch_ensure(start, 1u);
+  memset(g_acp_scratch, 0x5a, start);
+  pack(t, &pos, nodes);
+  memcpy(out, g_acp_scratch, pos);
+  return pos;
+}
+
+// Labels 0..7: arity (lab >> 1) % 3, result sort lab & 1, argument i of
+// sort (lab >> (i + 1)) & 1; variable x_v has sort v & 1.
+static void sort_spec_init(WaldSpec *ws) {
+  memset(ws, 0, sizeof *ws);
+  ws->n_sorts = 2u;
+  for (u32 lab = 0; lab < 8u; lab++) {
+    WaldSym *sy = &ws->symbols[ws->n_symbols++];
+    sy->label = lab;
+    sy->arity = (lab >> 1) % 3u;
+    sy->result_sort = lab & 1u;
+    for (u32 i = 0; i < sy->arity; i++) sy->arg_sorts[i] = (lab >> (i + 1u)) & 1u;
+  }
+  for (u32 v = 0; v < 10u; v++) {
+    ws->vars[ws->n_vars].var_id = v;
+    ws->vars[ws->n_vars].sort   = v & 1u;
+    ws->n_vars++;
+  }
+}
+
+// A term of sort `sort` over sort_spec_init's signature, now and then
+// broken by a wrong-sort argument.
+static Term mk_sorted(u32 *seed, u32 sort, u32 depth) {
+  u32 r = rng32(seed);
+  if ((r & 63u) == 0u) sort ^= 1u;
+  if (depth == 0u || (r & 3u) == 0u) {
+    if (r & 4u) return term_new_fvr(((r >> 3) % 5u) * 2u + sort);
+    return term_new_ctr((r & 8u) ? 6u + sort : sort, NULL, 0u);
+  }
+  u32  lab = ((r >> 4) & 1u) ? 4u + sort : 2u + sort;
+  u32  n   = (lab >> 1) % 3u;
+  Term kids[2];
+  for (u32 i = 0; i < n; i++) kids[i] = mk_sorted(seed, (lab >> (i + 1u)) & 1u, depth - 1u);
+  return term_new_ctr(lab, kids, n);
+}
+
+enum { SER_N = 3000, SER_BUF = 1u << 16 };
+
+static void pin_serialize(u32 *seed) {
+  u8 *rb = (u8 *)malloc(SER_BUF);
+  u8 *nb = (u8 *)malloc(SER_BUF);
+  extern u64 g_acp_unterm_nodes;
+
+  TEST_BEGIN("atp_deep/pin-acp-pack-count");
+  {
+    u32 ok = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < SER_N; i++) {
+      Term t = mk_random(seed);
+      u32 start = (i & 1u) ? 7u : 0u;
+      u32 rn, nn;
+      u32 rl = pack_copy(ref_acp_pack_term, t, start, rb, &rn);
+      u32 nl = pack_copy(acp_pack_term, t, start, nb, &nn);
+      if (rl == nl && rn == nn && memcmp(rb, nb, rl) == 0 &&
+          ref_acp_count_term(t) == acp_count_term(t)) {
+        ok++;
+      }
+    }
+    g_wide = 16u;
+    CHECK_EQ(ok, (u32)SER_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-acp-unpack");
+  {
+    u32 ok = 0;
+    g_atp_phase_detail = 1u;
+    for (u32 i = 0; i < SER_N; i++) {
+      g_wide = (i & 1u) ? 20u : 16u;
+      Term t = mk_random(seed);
+      g_wide = 16u;
+      u32 nodes;
+      u32 len = pack_copy(acp_pack_term, t, 0u, nb, &nodes);
+      u8 ok_i = 1u;
+      if ((i & 1u) == 0u) {
+        // Clamped decoders: fed only terms within REWRITE_MAX_ARITY.
+        const u8 *rp = nb, *np = nb;
+        u64 c0 = g_acp_unterm_nodes;
+        u64 h0 = HEAP_NEXT;
+        Term r = ref_acp_unpack_term(&rp);
+        u64 h1 = HEAP_NEXT;
+        u64 c1 = g_acp_unterm_nodes;
+        Term n = acp_unpack_term(&np);
+        u64 h2 = HEAP_NEXT;
+        u64 c2 = g_acp_unterm_nodes;
+        ok_i &= (u8)(rp == np && np == nb + len && c1 - c0 == c2 - c1 &&
+                     heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n);
+        rp = nb;
+        np = nb;
+        ok_i &= (u8)(ref_acp_term_nodes_skip(&rp) == acp_term_nodes_skip(&np) && rp == np);
+        AtpFt ra, na;
+        ft_init(&ra);
+        ft_init(&na);
+        AtpFtCell *rb0 = ft_alloc_persistent(&ra);
+        AtpFtCell *nb0 = ft_alloc_persistent(&na);
+        rp = nb;
+        np = nb;
+        AtpFtCell *rx = ref_acp_unpack_ft(&ra, &rp);
+        AtpFtCell *nx = acp_unpack_ft(&na, &np);
+        ok_i &= (u8)(rp == np && span_layout_same(rx, rb0, nx, nb0));
+        ft_destroy(&ra);
+        ft_destroy(&na);
+      }
+      for (int scratch = 0; scratch < 2; scratch++) {
+        AtpFt ra, na;
+        ft_init(&ra);
+        ft_init(&na);
+        AtpFtCell *rb0 = scratch ? ft_alloc_scratch(&ra) : ft_alloc_persistent(&ra);
+        AtpFtCell *nb0 = scratch ? ft_alloc_scratch(&na) : ft_alloc_persistent(&na);
+        const u8 *rp = nb, *np = nb;
+        AtpFtCell *rx = ref_acp_unpack_term_ft(&ra, &rp, scratch);
+        AtpFtCell *nx = acp_unpack_term_ft(&na, &np, scratch);
+        ok_i &= (u8)(rp == np && np == nb + len && span_layout_same(rx, rb0, nx, nb0));
+        ft_destroy(&ra);
+        ft_destroy(&na);
+      }
+      ok += ok_i;
+    }
+    g_atp_phase_detail = 0u;
+    CHECK_EQ(ok, (u32)SER_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-acp-match-term");
+  {
+    u32 ok = 0, hits = 0;
+    for (u32 i = 0; i < SER_N; i++) {
+      g_plain = (u8)(i & 1u);
+      Term p = mk_random(seed);
+      g_plain = 0u;
+      RewriteSubst inst;
+      memset(&inst, 0, sizeof inst);
+      for (u32 v = 0; v < 10u; v++) inst.bindings[v] = mk_small(seed);
+      Term s = thvm_subst_apply(p, &inst);
+      Term subj[3] = { s, mk_mutant(seed, s), mk_random(seed) };
+      u32 nodes;
+      (void)pack_copy(acp_pack_term, p, 0u, nb, &nodes);
+      for (u32 k = 0; k < 3u; k++) {
+        RewriteSubst rs, ns;
+        memset(&rs, 0, sizeof rs);
+        ns = rs;
+        const u8 *rp = nb, *np = nb;
+        u8 r = ref_acp_match_term(&rp, subj[k], &rs);
+        u8 n = acp_match_term(&np, subj[k], &ns);
+        if (r == n && rp == np && memcmp(&rs, &ns, sizeof rs) == 0) ok++;
+        hits += (u32)((i & 1u) && k == 0u && n);
+      }
+    }
+    CHECK_EQ(ok, 3u * SER_N);
+    CHECK_EQ(hits, (u32)SER_N / 2u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-sjp-map-emit");
+  {
+    u32 ok = 0, hits = 0;
+    for (u32 i = 0; i < SER_N; i++) {
+      g_plain = (u8)((i & 3u) != 0u);
+      g_wide = (i % 7u == 0u) ? 20u : 16u;
+      Term t = mk_random(seed);
+      g_plain = 0u;
+      g_wide = 16u;
+      AcpNvMap rm, nm;
+      memset(&rm, 0, sizeof rm);
+      memset(&nm, 0, sizeof nm);
+      if (i & 8u) { rm.old_id[rm.n++] = 3u; nm = rm; }
+      u8 r = ref_sjp_map_walk_term(t, &rm);
+      u8 n = sjp_map_walk_term(t, &nm);
+      u8 same = (u8)(r == n && memcmp(&rm, &nm, sizeof rm) == 0);
+      memset(&rm, 0, sizeof rm);
+      memset(&nm, 0, sizeof nm);
+      u32 rpos = 5u, npos = 5u;
+      sjp_ensure(0u, 64u);
+      memset(g_sjp_scratch, 0x5a, 5u);
+      r = ref_sjp_emit_term(t, &rm, &rpos);
+      memcpy(rb, g_sjp_scratch, rpos);
+      n = sjp_emit_term(t, &nm, &npos);
+      if (same && r == n && rpos == npos && memcmp(&rm, &nm, sizeof rm) == 0 &&
+          memcmp(rb, g_sjp_scratch, npos) == 0) {
+        ok++;
+      }
+      hits += n;
+    }
+    CHECK_EQ(ok, (u32)SER_N);
+    CHECK(hits > SER_N / 3u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-wald-term-sort");
+  {
+    WaldSpec *ws = (WaldSpec *)malloc(sizeof *ws);
+    sort_spec_init(ws);
+    AtpFt a;
+    ft_init(&a);
+    u32 ok = 0, sorted = 0;
+    for (u32 i = 0; i < SER_N; i++) {
+      Term t = (i % 5u == 4u) ? mk_random(seed) : mk_sorted(seed, i & 1u, 6u);
+      AtpFtCell *x = ft_from_term(&a, t, 0);
+      u32 r = ref_wald_term_sort(ws, t);
+      u32 n = wald_term_sort(ws, t);
+      if (r == n && ref_wald_term_sort_ft(ws, x) == wald_term_sort_ft(ws, x) &&
+          wald_term_sort(NULL, t) == 0u) {
+        ok++;
+      }
+      sorted += (u32)(n != WALD_MAX_SORTS);
+    }
+    CHECK_EQ(ok, (u32)SER_N);
+    CHECK(sorted > SER_N / 3u);
+    ft_destroy(&a);
+    free(ws);
+  }
+
+  TEST_BEGIN("atp_deep/pin-pretty-term");
+  {
+    static const u32 caps[14] = { 0u, 1u, 2u, 3u, 4u, 5u, 7u, 8u, 13u, 16u,
+                                  33u, 128u, 1024u, 65536u };
+    u32 ok = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < SER_N; i++) {
+      Term t = mk_random(seed);
+      if (i % 9u == 0u) {
+        Term kids[2] = { t, term_new(0, TAG_ERA, 0, 0) };
+        t = term_new_ctr(4u, kids, 2u);
+      }
+      for (u32 k = 0; k < 14u; k++) {
+        memset(rb, 0x5a, (size_t)caps[k] + 8u);
+        memset(nb, 0x5a, (size_t)caps[k] + 8u);
+        u32 r = ref_atp_pretty_term(t, (char *)rb, caps[k]);
+        u32 n = atp_pretty_term(t, (char *)nb, caps[k]);
+        if (r == n && memcmp(rb, nb, (size_t)caps[k] + 8u) == 0) ok++;
+      }
+    }
+    g_wide = 16u;
+    CHECK_EQ(ok, 14u * SER_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-history-enigma-features");
+  {
+    u32 ok = 0;
+    u8 *saved_gsym = g_hx.gsym;
+    u32 saved_cap  = g_hx.gsym_cap;
+    for (u32 i = 0; i < SER_N; i++) {
+      Term l = mk_random(seed), r = mk_random(seed);
+      // goal-symbol marks: the same table for both feature walks
+      g_hx.gsym = NULL;
+      g_hx.gsym_cap = 0u;
+      ref_atp_hx_gsym_mark(l);
+      u8 *rg = g_hx.gsym;
+      u32 rc = g_hx.gsym_cap;
+      g_hx.gsym = NULL;
+      g_hx.gsym_cap = 0u;
+      atp_hx_gsym_mark(l);
+      u8 same = (u8)(rc == g_hx.gsym_cap && (rc == 0u || memcmp(rg, g_hx.gsym, rc) == 0));
+      free(rg);
+      u32 nodes = 0u, pos = 0u;
+      acp_pack_term(l, &pos, &nodes);
+      acp_pack_term(r, &pos, &nodes);
+      memcpy(nb, g_acp_scratch, pos);
+      AtpHxFeat rf, nf;
+      memset(&rf, 0, sizeof rf);
+      memset(&nf, 0, sizeof nf);
+      const u8 *rp = nb, *np = nb;
+      rf.depth[0] = ref_atp_hx_feat_bytes(&rf, &rp, 0u, 1u);
+      rf.depth[1] = ref_atp_hx_feat_bytes(&rf, &rp, 1u, 1u);
+      nf.depth[0] = atp_hx_feat_bytes(&nf, &np, 0u, 1u);
+      nf.depth[1] = atp_hx_feat_bytes(&nf, &np, 1u, 1u);
+      same &= (u8)(rp == np && memcmp(&rf, &nf, sizeof rf) == 0);
+      memset(&rf, 0, sizeof rf);
+      memset(&nf, 0, sizeof nf);
+      rf.depth[0] = ref_atp_hx_feat_term(&rf, l, 0u, 1u);
+      rf.depth[1] = ref_atp_hx_feat_term(&rf, r, 1u, 1u);
+      nf.depth[0] = atp_hx_feat_term(&nf, l, 0u, 1u);
+      nf.depth[1] = atp_hx_feat_term(&nf, r, 1u, 1u);
+      same &= (u8)(memcmp(&rf, &nf, sizeof rf) == 0);
+      free(g_hx.gsym);
+      g_hx.gsym = NULL;
+      g_hx.gsym_cap = 0u;
+      u64 rs = 0u, ns = 0u, rlb = 0u, nlb = 0u;
+      u32 rd = 0u, nd = 0u, ro = 0u, no = 0u;
+      ref_atp_cp_var_stats_rec(l, &rs, &rd, &ro);
+      atp_cp_var_stats_rec(l, &ns, &nd, &no);
+      (void)ref_atp_term_label_set(r, &rlb);
+      (void)atp_term_label_set(r, &nlb);
+      if (same && rs == ns && rd == nd && ro == no && rlb == nlb) ok++;
+    }
+    g_hx.gsym = saved_gsym;
+    g_hx.gsym_cap = saved_cap;
+    CHECK_EQ(ok, (u32)SER_N);
+  }
+
+  free(rb);
+  free(nb);
+}
+
+static void deep_serialize(void) {
+  Term vals[5];
+  for (u32 v = 0; v < 5u; v++) {
+    Term kid = term_new_ctr(9u, NULL, 0u);
+    vals[v] = term_new_ctr(20u + v, &kid, v & 1u);
+  }
+  Term pat  = mk_deep(DEEP, 1u, term_new_fvr(4u), NULL, 1u);
+  Term subj = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+  Term num  = mk_deep(DEEP, 1u, vals[4], vals, 0u);
+  u32  size = term_size_iter(num);
+  u32  cap  = 24u * size;
+  u8  *buf  = (u8 *)malloc(cap);
+
+  TEST_BEGIN("atp_deep/deep-acp-pack-unpack");
+  {
+    u32 nodes = 0u, pos = 0u;
+    acp_pack_term(num, &pos, &nodes);
+    CHECK_EQ(nodes, size);
+    CHECK_EQ(acp_count_term(num), size);
+    memcpy(buf, g_acp_scratch, pos);
+    const u8 *p = buf;
+    CHECK(term_eq_iter(acp_unpack_term(&p), num));
+    CHECK(p == buf + pos);
+    p = buf;
+    CHECK_EQ(acp_term_nodes_skip(&p), size);
+    AtpFt a;
+    ft_init(&a);
+    p = buf;
+    CHECK(ft_eq_term(acp_unpack_term_ft(&a, &p, 0), num));
+    p = buf;
+    CHECK(ft_eq_term(acp_unpack_ft(&a, &p), num));
+    ft_destroy(&a);
+    pos = 0u;
+    acp_pack_term(pat, &pos, &nodes);
+    memcpy(buf, g_acp_scratch, pos);
+    RewriteSubst sub;
+    memset(&sub, 0, sizeof sub);
+    p = buf;
+    CHECK(acp_match_term(&p, subj, &sub));
+    CHECK(p == buf + pos);
+    for (u32 v = 0; v < 5u; v++) CHECK(sub.bindings[v] == vals[v]);
+  }
+
+  TEST_BEGIN("atp_deep/deep-sjp-emit");
+  {
+    AcpNvMap m;
+    memset(&m, 0, sizeof m);
+    CHECK(sjp_map_walk_term(pat, &m));
+    CHECK_EQ(m.n, 5u);
+    memset(&m, 0, sizeof m);
+    u32 epos = 0u;
+    CHECK(sjp_emit_term(subj, &m, &epos));
+    u32 nodes = 0u, pos = 0u;
+    acp_pack_term(subj, &pos, &nodes);
+    CHECK_EQ(epos, pos);
+    CHECK(memcmp(g_sjp_scratch, g_acp_scratch, pos) == 0);   // ground: same records
+    memset(&m, 0, sizeof m);
+    epos = 0u;
+    CHECK(!sjp_emit_term(num, &m, &epos));                     // a NUM leaf bails
+  }
+
+  TEST_BEGIN("atp_deep/deep-wald-term-sort");
+  {
+    WaldSpec *ws = (WaldSpec *)malloc(sizeof *ws);
+    sort_spec_init(ws);
+    // 3(3(...3(c1)...)) is sort 1 (label 3: arity 1, argument sort 1).
+    Term chain = term_new_ctr(1u, NULL, 0u);
+    Term bad   = term_new_ctr(0u, NULL, 0u);
+    for (u32 k = 0; k < DEEP; k++) {
+      chain = term_new_ctr(3u, &chain, 1u);
+      bad   = term_new_ctr(3u, &bad, 1u);
+    }
+    CHECK_EQ(wald_term_sort(ws, chain), 1u);
+    CHECK_EQ(wald_term_sort(ws, bad), (u32)WALD_MAX_SORTS);
+    AtpFt a;
+    ft_init(&a);
+    CHECK_EQ(wald_term_sort_ft(ws, ft_from_term(&a, chain, 0)), 1u);
+    CHECK_EQ(wald_term_sort_ft(ws, ft_from_term(&a, bad, 0)), (u32)WALD_MAX_SORTS);
+    ft_destroy(&a);
+    free(ws);
+  }
+
+  TEST_BEGIN("atp_deep/deep-pretty-term");
+  {
+    u32 pcap = 16u * DEEP + 64u;
+    char *pt = (char *)malloc(pcap);
+    char *pf = (char *)malloc(pcap);
+    AtpFt a;
+    ft_init(&a);
+    u32 nt = atp_pretty_term(num, pt, pcap);
+    u32 nf = atp_pretty_ft(ft_from_term(&a, num, 0), pf, pcap);
+    CHECK(nt + 1u < pcap);
+    CHECK_EQ(nt, nf);
+    CHECK(memcmp(pt, pf, (size_t)nt + 1u) == 0);
+    ft_destroy(&a);
+    free(pt);
+    free(pf);
+  }
+
+  TEST_BEGIN("atp_deep/deep-history-enigma-features");
+  {
+    u32 nodes = 0u, pos = 0u;
+    acp_pack_term(pat, &pos, &nodes);
+    memcpy(buf, g_acp_scratch, pos);
+    AtpHxFeat fb, ft;
+    memset(&fb, 0, sizeof fb);
+    memset(&ft, 0, sizeof ft);
+    const u8 *p = buf;
+    u32 db = atp_hx_feat_bytes(&fb, &p, 0u, 1u);
+    u32 dt = atp_hx_feat_term(&ft, pat, 0u, 1u);
+    CHECK_EQ(db, (u32)DEEP + 1u);
+    CHECK_EQ(dt, db);
+    CHECK(memcmp(&fb, &ft, sizeof fb) == 0);
+    u64 seen = 0u, labels = 0u;
+    u32 distinct = 0u, occ = 0u;
+    atp_cp_var_stats_rec(pat, &seen, &distinct, &occ);
+    CHECK_EQ(distinct, 5u);
+    CHECK_EQ(occ, (u32)DEEP / 3u + 2u);
+    (void)atp_term_label_set(subj, &labels);
+    CHECK_EQ(labels, (1ull << 1) | (1ull << 2) | (1ull << 5) | (1ull << 6) |
+                     (1ull << 9) | (0x1full << 20));
+    u8 *saved_gsym = g_hx.gsym;
+    u32 saved_cap  = g_hx.gsym_cap;
+    g_hx.gsym = NULL;
+    g_hx.gsym_cap = 0u;
+    atp_hx_gsym_mark(subj);
+    CHECK(g_hx.gsym != NULL && g_hx.gsym[1] && g_hx.gsym[2] && g_hx.gsym[24] && !g_hx.gsym[3]);
+    free(g_hx.gsym);
+    g_hx.gsym = saved_gsym;
+    g_hx.gsym_cap = saved_cap;
+  }
+
+  free(buf);
+}
+
 int main(void) {
   thvm_init();
   u32 seed = 0x6c8e9cf5u;
@@ -1290,6 +2210,8 @@ int main(void) {
   deep_ri_walks();
   pin_term_libs(&seed);
   deep_term_libs();
+  pin_serialize(&seed);
+  deep_serialize();
   thvm_free();
   TEST_REPORT();
 }

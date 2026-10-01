@@ -1450,25 +1450,33 @@ static void vcp_emit_certify(const KboConfig *kbo, Term lo, const u32 *p,
 // Non-allocating (unlike acp_unpack_term) so it is safe to call from the
 // hot CP-selection comparator without touching the term heap.
 static u32 acp_term_nodes_skip(const u8 **pp) {
-  u8 disc = *(*pp)++;
-  switch (disc) {
-    case 'C': {
-      (void)acp_get_varint(pp);           // label
-      u32 n = (u32)acp_get_varint(pp);    // arity
-      if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
-      u32 tot = 1u;
-      for (u32 i = 0; i < n; i++) tot += acp_term_nodes_skip(pp);
-      return tot;
+  // Preorder records are self-delimiting: count records until every
+  // CTR's (clamped) children have been read -- no stack needed.
+  u32 tot     = 0u;
+  u32 pending = 1u;
+  while (pending > 0u) {
+    pending--;
+    tot++;
+    u8 disc = *(*pp)++;
+    switch (disc) {
+      case 'C': {
+        (void)acp_get_varint(pp);           // label
+        u32 n = (u32)acp_get_varint(pp);    // arity
+        if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
+        pending += n;
+        break;
+      }
+      case 'N':
+        (void)acp_get_varint(pp);           // dtype
+        (void)acp_get_varint(pp);           // val
+        break;
+      case 'V':
+      default:
+        (void)acp_get_varint(pp);           // ext
+        break;
     }
-    case 'N':
-      (void)acp_get_varint(pp);           // dtype
-      (void)acp_get_varint(pp);           // val
-      return 1u;
-    case 'V':
-    default:
-      (void)acp_get_varint(pp);           // ext
-      return 1u;
   }
+  return tot;
 }
 
 // Total node count of a packed CP's rhs (skip lhs, size rhs).  Used by the
@@ -1496,28 +1504,67 @@ static u32 acp_rhs_nodes(const u8 *buf) {
 // default branch returns 0); a variable id past the REWRITE_MAX_VAR
 // matcher cliff fails; a repeated variable is confirmed with kbo_eq.
 static u8 acp_match_term(const u8 **pp, Term subj, RewriteSubst *sub) {
-  u8 disc = *(*pp)++;
-  switch (disc) {
-    case 'C': {
-      u32 label = (u32)acp_get_varint(pp);
-      u32 n     = (u32)acp_get_varint(pp);
-      if (term_tag(subj) != TAG_CTR) return 0;
-      if (term_ext(subj) != label)   return 0;
-      if (term_ctr_n(subj) != n)     return 0;
-      for (u32 i = 0; i < n; i++) {
-        if (!acp_match_term(pp, term_ctr_at(subj, i), sub)) return 0;
+  // Open CTR records on an explicit stack: child i of the subject is
+  // heap_read(base + 1 + i); the pattern's children follow in the byte
+  // stream, so a failure stops the cursor where the recursion did.
+  typedef struct { u64 base; u32 i; u32 n; } PkFrame;
+  PkFrame  fr_inl[ACP_WALK_INL];
+  PkFrame *fr  = fr_inl;
+  u32      nfr = 0u;
+  u32      cfr = ACP_WALK_INL;
+  u8       ok  = 1u;
+  for (;;) {
+    u8 disc = *(*pp)++;
+    switch (disc) {
+      case 'C': {
+        u32 label = (u32)acp_get_varint(pp);
+        u32 n     = (u32)acp_get_varint(pp);
+        if (term_tag(subj) != TAG_CTR || term_ext(subj) != label ||
+            term_ctr_n(subj) != n) {
+          ok = 0u;
+          break;
+        }
+        if (n > 0u) {
+          if (nfr == cfr) {
+            fr = (PkFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].base = term_val(subj);
+          fr[nfr].i    = 0u;
+          fr[nfr].n    = n;
+          nfr++;
+        }
+        break;
       }
-      return 1;
+      case 'V': {
+        u32 id = (u32)acp_get_varint(pp);
+        if (id >= REWRITE_MAX_VAR) {
+          ok = 0u;
+        } else if (sub->bindings[id] == 0) {
+          sub->bindings[id] = subj;
+        } else if (!kbo_eq(sub->bindings[id], subj)) {
+          ok = 0u;
+        }
+        break;
+      }
+      default:         // 'N' (NUM) / 'E' -- thvm_match's default: no match
+        ok = 0u;
+        break;
     }
-    case 'V': {
-      u32 id = (u32)acp_get_varint(pp);
-      if (id >= REWRITE_MAX_VAR) return 0;
-      if (sub->bindings[id] == 0) { sub->bindings[id] = subj; return 1; }
-      return kbo_eq(sub->bindings[id], subj);
+    if (!ok) {
+      break;
     }
-    default:         // 'N' (NUM) / 'E' -- thvm_match's default: no match
-      return 0;
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    PkFrame *f = &fr[nfr - 1u];
+    subj = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
+  term_stack_release(fr, fr_inl);
+  return ok;
 }
 
 // Two-sided one-way match: does the packed CP `pack(plhs)++pack(prhs)`

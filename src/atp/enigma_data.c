@@ -10,26 +10,40 @@
 // this records; the count is exact for k <= 64).
 static void atp_cp_var_stats_rec(Term t, u64 *seen, u32 *distinct,
                                  u32 *occ) {
-  switch (term_tag(t)) {
-    case TAG_FVR: {
-      u32 id = term_ext(t);
-      (*occ)++;
-      u32 bit = id & 63u;
-      if (!((*seen >> bit) & 1u)) {
-        *seen |= (1ull << bit);
-        (*distinct)++;
+  enum { STATS_INL = 64 };
+  Term  st_inl[STATS_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = STATS_INL;
+  for (;;) {
+    switch (term_tag(t)) {
+      case TAG_FVR: {
+        u32 id = term_ext(t);
+        (*occ)++;
+        u32 bit = id & 63u;
+        if (!((*seen >> bit) & 1u)) {
+          *seen |= (1ull << bit);
+          (*distinct)++;
+        }
+        break;
       }
-      return;
-    }
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        atp_cp_var_stats_rec(term_ctr_at(t, i), seen, distinct, occ);
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
       }
-      return;
+      default:
+        break;
     }
-    default: return;
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
 }
 
 // Top CTR label of a term (the feature's "top symbol"); 0 for a
@@ -45,12 +59,27 @@ static u32 atp_cp_top_symbol(Term t) {
 // goal signal (a var generalizes everything), mirroring the MinStruct
 // spirit of the CPinGoal classifier.
 static int atp_term_label_set(Term t, u64 *labels) {
-  if (term_tag(t) == TAG_CTR) {
-    u32 lab = term_ext(t);
-    *labels |= (1ull << (lab & 63u));
-    u32 n = term_ctr_n(t);
-    for (u32 i = 0; i < n; i++) atp_term_label_set(term_ctr_at(t, i), labels);
+  enum { LABEL_INL = 64 };
+  Term  st_inl[LABEL_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = LABEL_INL;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      u32 lab = term_ext(t);
+      *labels |= (1ull << (lab & 63u));
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
   return 0;
 }
 static int atp_cp_shares_goal_symbol_vs(Term gl, Term gr, Term l, Term r) {

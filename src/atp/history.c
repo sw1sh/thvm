@@ -248,60 +248,132 @@ static inline u64 atp_hx_varint(const u8 **pp) {
 
 // One packed preorder term (acp_pack_term layout); returns its depth.
 static u32 atp_hx_feat_bytes(AtpHxFeat *f, const u8 **pp, u32 side, u8 top) {
-  f->nodes[side]++;
-  u8 disc = *(*pp)++;
-  switch (disc) {
-    case 'C': {
-      u32 label = (u32)atp_hx_varint(pp);
-      u32 n     = (u32)atp_hx_varint(pp);
-      atp_hx_feat_sym(f, label);
-      if (top) f->top_sym[side] = label;
-      u32 d = 0u;
-      for (u32 i = 0; i < n; i++) {
-        u32 cd = atp_hx_feat_bytes(f, pp, side, 0u);
-        if (cd > d) d = cd;
+  // Open CTR records on an explicit stack: `left` children still to
+  // read, `d` the deepest child depth so far.  Records are read and
+  // counted in preorder, as the recursion did.
+  typedef struct { u32 left; u32 d; } HxFrame;
+  enum { HX_INL = 64 };
+  HxFrame  fr_inl[HX_INL];
+  HxFrame *fr  = fr_inl;
+  u32      nfr = 0u;
+  u32      cfr = HX_INL;
+  u32      v   = 1u;
+  for (;;) {
+    f->nodes[side]++;
+    u8 leaf = 1u;
+    u8 disc = *(*pp)++;
+    switch (disc) {
+      case 'C': {
+        u32 label = (u32)atp_hx_varint(pp);
+        u32 n     = (u32)atp_hx_varint(pp);
+        atp_hx_feat_sym(f, label);
+        if (top) f->top_sym[side] = label;
+        if (n > 0u) {
+          if (nfr == cfr) {
+            fr = (HxFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].left = n;
+          fr[nfr].d    = 0u;
+          nfr++;
+          leaf = 0u;
+        }
+        break;
       }
-      return d + 1u;
+      case 'N': {
+        (void)atp_hx_varint(pp);
+        (void)atp_hx_varint(pp);
+        break;
+      }
+      case 'V': {
+        u32 id = (u32)atp_hx_varint(pp);
+        atp_hx_feat_var(f, id, side);
+        if (top) f->top_var[side] = 1u;
+        break;
+      }
+      default:
+        break;
     }
-    case 'N': {
-      (void)atp_hx_varint(pp);
-      (void)atp_hx_varint(pp);
-      return 1u;
+    top = 0u;
+    if (leaf) {
+      v = 1u;
+      // A finished child's depth folds into its parent; a parent whose
+      // last child finished is one deeper than its deepest child.
+      while (nfr > 0u) {
+        HxFrame *h = &fr[nfr - 1u];
+        if (v > h->d) h->d = v;
+        if (--h->left > 0u) break;
+        v = h->d + 1u;
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
     }
-    case 'V': {
-      u32 id = (u32)atp_hx_varint(pp);
-      atp_hx_feat_var(f, id, side);
-      if (top) f->top_var[side] = 1u;
-      return 1u;
-    }
-    default:
-      return 1u;
   }
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 
 static u32 atp_hx_feat_term(AtpHxFeat *f, Term t, u32 side, u8 top) {
-  f->nodes[side]++;
-  switch (term_tag(t)) {
-    case TAG_CTR: {
-      u32 label = term_ext(t);
-      u32 n     = term_ctr_n(t);
-      atp_hx_feat_sym(f, label);
-      if (top) f->top_sym[side] = label;
-      u32 d = 0u;
-      for (u32 i = 0; i < n; i++) {
-        u32 cd = atp_hx_feat_term(f, term_ctr_at(t, i), side, 0u);
-        if (cd > d) d = cd;
+  // Open CTRs on an explicit stack (child i at heap_read(base + 1 + i));
+  // `d` is the deepest child depth so far.  Preorder visits, as the
+  // recursion made.
+  typedef struct { u64 base; u32 i; u32 n; u32 d; } HxTermFrame;
+  enum { HX_INL = 64 };
+  HxTermFrame  fr_inl[HX_INL];
+  HxTermFrame *fr  = fr_inl;
+  u32          nfr = 0u;
+  u32          cfr = HX_INL;
+  u32          v   = 1u;
+  for (;;) {
+    f->nodes[side]++;
+    u8 leaf = 1u;
+    switch (term_tag(t)) {
+      case TAG_CTR: {
+        u32 label = term_ext(t);
+        u32 n     = term_ctr_n(t);
+        atp_hx_feat_sym(f, label);
+        if (top) f->top_sym[side] = label;
+        if (n > 0u) {
+          if (nfr == cfr) {
+            fr = (HxTermFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].base = term_val(t);
+          fr[nfr].i    = 0u;
+          fr[nfr].n    = n;
+          fr[nfr].d    = 0u;
+          nfr++;
+          leaf = 0u;
+        }
+        break;
       }
-      return d + 1u;
+      case TAG_FVR: {
+        atp_hx_feat_var(f, term_ext(t), side);
+        if (top) f->top_var[side] = 1u;
+        break;
+      }
+      default:
+        break;
     }
-    case TAG_FVR: {
-      atp_hx_feat_var(f, term_ext(t), side);
-      if (top) f->top_var[side] = 1u;
-      return 1u;
+    top = 0u;
+    if (leaf) {
+      v = 1u;
+      while (nfr > 0u) {
+        HxTermFrame *h = &fr[nfr - 1u];
+        if (v > h->d) h->d = v;
+        if (++h->i < h->n) break;
+        v = h->d + 1u;
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
     }
-    default:
-      return 1u;
+    HxTermFrame *h = &fr[nfr - 1u];
+    t = heap_read(h->base + 1u + (u64)h->i);
   }
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 
 static inline u16 atp_hx_sat16(u32 v) {
@@ -348,22 +420,44 @@ static void atp_hx_feat_finish(const AtpHxFeat *f, u16 *out) {
 }
 
 static void atp_hx_gsym_mark(Term t) {
-  if (t == 0 || term_tag(t) != TAG_CTR) return;
-  u32 label = term_ext(t);
-  if (label < (1u << 20)) {
-    if (label >= g_hx.gsym_cap) {
-      u32 ncap = g_hx.gsym_cap ? g_hx.gsym_cap : 256u;
-      while (ncap <= label) ncap *= 2u;
-      u8 *ng = (u8 *)realloc(g_hx.gsym, ncap);
-      if (ng == NULL) return;
-      memset(ng + g_hx.gsym_cap, 0, ncap - g_hx.gsym_cap);
-      g_hx.gsym = ng;
-      g_hx.gsym_cap = ncap;
+  // Pending subterms on an explicit stack, children pushed right to
+  // left: the recursion's preorder.
+  enum { HX_INL = 64 };
+  Term  st_inl[HX_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = HX_INL;
+  for (;;) {
+    if (t != 0 && term_tag(t) == TAG_CTR) {
+      u32 label = term_ext(t);
+      u8  grown = 1u;   // a failed grow skips this subterm, as the recursion did
+      if (label < (1u << 20)) {
+        if (label >= g_hx.gsym_cap) {
+          u32 ncap = g_hx.gsym_cap ? g_hx.gsym_cap : 256u;
+          while (ncap <= label) ncap *= 2u;
+          u8 *ng = (u8 *)realloc(g_hx.gsym, ncap);
+          if (ng == NULL) {
+            grown = 0u;
+          } else {
+            memset(ng + g_hx.gsym_cap, 0, ncap - g_hx.gsym_cap);
+            g_hx.gsym = ng;
+            g_hx.gsym_cap = ncap;
+          }
+        }
+        if (grown) g_hx.gsym[label] = 1u;
+      }
+      u32 n = grown ? term_ctr_n(t) : 0u;
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
     }
-    g_hx.gsym[label] = 1u;
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
-  u32 n = term_ctr_n(t);
-  for (u32 i = 0; i < n; i++) atp_hx_gsym_mark(term_ctr_at(t, i));
+  term_stack_release(st, st_inl);
 }
 
 // The goal is installed after the axioms are queued: build the symbol

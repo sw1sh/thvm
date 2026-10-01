@@ -143,6 +143,21 @@ static u64 acp_get_varint(const u8 **pp) {
 static u8 *g_acp_scratch     = NULL;
 static u32 g_acp_scratch_cap = 0u;
 
+// The walks between Terms, spans and packed bytes below keep their
+// pending nodes on an explicit stack (ACP_WALK_INL entries on the C
+// stack, then the heap via term_stack_grow), so a deep critical pair
+// costs heap, not C stack.  Each emits, reads and allocates in the
+// recursion's preorder / post-order, so the bytes, cells and heap words
+// are unchanged.
+enum { ACP_WALK_INL = 64 };
+
+// A packed CTR record whose `left` children are still to be decoded.
+typedef struct {
+  u32 label;
+  u32 n;
+  u32 left;
+} AcpUnpackFrame;
+
 // Ensure `extra` more bytes fit at scratch position `pos`.
 static void acp_scratch_ensure(u32 pos, u32 extra) {
   if (pos + extra <= g_acp_scratch_cap) return;
@@ -164,57 +179,115 @@ static void acp_scratch_ensure(u32 pos, u32 extra) {
 // count (its selection weight) falls out for free, sparing
 // atp_cp_priority a second full traversal.
 static void acp_pack_term(Term t, u32 *pos, u32 *nodes) {
-  (*nodes)++;
-  acp_scratch_ensure(*pos, 21u);
-  u8 *p = g_acp_scratch + *pos;
-  switch (term_tag(t)) {
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      *p++ = (u8)'C';
-      acp_put_varint(&p, term_ext(t));
-      acp_put_varint(&p, n);
-      *pos = (u32)(p - g_acp_scratch);
-      for (u32 i = 0; i < n; i++) acp_pack_term(term_ctr_at(t, i), pos, nodes);
-      return;
+  Term  st_inl[ACP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ACP_WALK_INL;
+  for (;;) {
+    (*nodes)++;
+    acp_scratch_ensure(*pos, 21u);
+    u8 *p = g_acp_scratch + *pos;
+    switch (term_tag(t)) {
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        *p++ = (u8)'C';
+        acp_put_varint(&p, term_ext(t));
+        acp_put_varint(&p, n);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
+      }
+      case TAG_NUM:
+        *p++ = (u8)'N';
+        acp_put_varint(&p, term_ext(t));
+        acp_put_varint(&p, term_val(t));
+        break;
+      case TAG_FVR:
+        *p++ = (u8)'V';
+        acp_put_varint(&p, term_ext(t));
+        break;
+      default:
+        *p++ = (u8)'E';
+        break;
     }
-    case TAG_NUM:
-      *p++ = (u8)'N';
-      acp_put_varint(&p, term_ext(t));
-      acp_put_varint(&p, term_val(t));
+    *pos = (u32)(p - g_acp_scratch);
+    if (nst == 0u) {
       break;
-    case TAG_FVR:
-      *p++ = (u8)'V';
-      acp_put_varint(&p, term_ext(t));
-      break;
-    default:
-      *p++ = (u8)'E';
-      break;
+    }
+    t = st[--nst];
   }
-  *pos = (u32)(p - g_acp_scratch);
+  term_stack_release(st, st_inl);
 }
 
 // Rebuild one preorder-packed term, advancing `*pp` past it.
 static Term acp_unpack_term(const u8 **pp) {
-  if (g_atp_phase_detail) { extern u64 g_acp_unterm_nodes; g_acp_unterm_nodes++; }
-  u8 disc = *(*pp)++;
-  switch (disc) {
-    case 'C': {
-      u32 label = (u32)acp_get_varint(pp);
-      u32 n     = (u32)acp_get_varint(pp);
-      if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
-      Term kids[REWRITE_MAX_ARITY];
-      for (u32 i = 0; i < n; i++) kids[i] = acp_unpack_term(pp);
-      return term_new_ctr(label, kids, n);
+  AcpUnpackFrame  fr_inl[ACP_WALK_INL];
+  Term            val_inl[ACP_WALK_INL];
+  AcpUnpackFrame *fr   = fr_inl;
+  Term           *val  = val_inl;
+  u32             nfr  = 0u;
+  u32             cfr  = ACP_WALK_INL;
+  u32             nval = 0u;
+  u32             cval = ACP_WALK_INL;
+  for (;;) {
+    if (g_atp_phase_detail) { extern u64 g_acp_unterm_nodes; g_acp_unterm_nodes++; }
+    u8   leaf = 1u;
+    Term v    = 0;
+    u8   disc = *(*pp)++;
+    switch (disc) {
+      case 'C': {
+        u32 label = (u32)acp_get_varint(pp);
+        u32 n     = (u32)acp_get_varint(pp);
+        if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
+        if (n == 0u) {
+          v = term_new_ctr(label, NULL, 0u);
+        } else {
+          if (nfr == cfr) {
+            fr = (AcpUnpackFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].label = label;
+          fr[nfr].n     = n;
+          fr[nfr].left  = n;
+          nfr++;
+          leaf = 0u;
+        }
+        break;
+      }
+      case 'N': {
+        u32 dtype = (u32)acp_get_varint(pp);
+        u64 val0  = acp_get_varint(pp);
+        v = term_new(0, TAG_NUM, dtype, val0);
+        break;
+      }
+      case 'V':
+      default:
+        v = term_new_fvr((u32)acp_get_varint(pp));
+        break;
     }
-    case 'N': {
-      u32 dtype = (u32)acp_get_varint(pp);
-      u64 val   = acp_get_varint(pp);
-      return term_new(0, TAG_NUM, dtype, val);
+    if (leaf) {
+      if (nval == cval) {
+        val = (Term *)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = v;
     }
-    case 'V':
-    default:
-      return term_new_fvr((u32)acp_get_varint(pp));
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      AcpUnpackFrame *f = &fr[nfr - 1u];
+      nval -= f->n;
+      val[nval] = term_new_ctr(f->label, &val[nval], f->n);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    fr[nfr - 1u].left--;
   }
+  Term out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
 
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
@@ -223,32 +296,10 @@ static Term acp_unpack_term(const u8 **pp) {
 // pair into the span world costs zero interchange.  Total: the NUM
 // case builds the ATPFT_NUM_MARKER pair exactly as ft_from_term
 // would (never present in a rule pair, but the format allows it).
-static AtpFtCell *acp_unpack_ft(AtpFt *a, const u8 **pp);
+static AtpFtCell *acp_unpack_term_ft_cap(AtpFt *a, const u8 **pp,
+                                         int scratch, u32 arity_cap);
 static AtpFtCell *acp_unpack_ft(AtpFt *a, const u8 **pp) {
-  u8 disc = *(*pp)++;
-  switch (disc) {
-    case 'C': {
-      u32 label = (u32)acp_get_varint(pp);
-      u32 n     = (u32)acp_get_varint(pp);
-      if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
-      if (n == 0u) return ftnew_const(a, label, 0);
-      AtpFtCell *kids[REWRITE_MAX_ARITY];
-      for (u32 i = 0; i < n; i++) kids[i] = acp_unpack_ft(a, pp);
-      return ftnew_ctr(a, label, (u16)n, kids, 0);
-    }
-    case 'N': {
-      u32 dtype = (u32)acp_get_varint(pp);
-      u64 val   = acp_get_varint(pp);
-      AtpFtCell *kids[2] = {
-        ftnew_const(a, dtype & ~WF_VAR_BIT, 0),
-        ftnew_const(a, (u32)val & ~WF_VAR_BIT, 0),
-      };
-      return ftnew_ctr(a, ATPFT_NUM_MARKER, 2u, kids, 0);
-    }
-    case 'V':
-    default:
-      return ftnew_var(a, (u32)acp_get_varint(pp), 0);
-  }
+  return acp_unpack_term_ft_cap(a, pp, 0, REWRITE_MAX_ARITY);
 }
 #endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
@@ -286,15 +337,103 @@ static u8 *acp_pack(Term lhs, Term rhs, u32 *out_len, u32 *out_nodes) {
 // retirement push path to recover cp_nodes / lhs_nodes when the byte
 // pack is skipped (nothing reads cp_packed under that config).
 static u32 acp_count_term(Term t) {
-  u32 n = 1u;
-  if (term_tag(t) == TAG_CTR) {
-    u32 k = term_ctr_n(t);
-    for (u32 i = 0; i < k; i++) n += acp_count_term(term_ctr_at(t, i));
+  Term  st_inl[ACP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ACP_WALK_INL;
+  u32   n   = 0u;
+  for (;;) {
+    n++;
+    if (term_tag(t) == TAG_CTR) {
+      u32 k = term_ctr_n(t);
+      while (nst + k > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = 0; i < k; i++) st[nst++] = term_ctr_at(t, i);
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
   return n;
 }
 
 #ifdef THVM_ATPFT_RULES
+// Decode one packed record tree into AtpFt cells, bottom-up over an
+// explicit stack (children before ftnew_ctr).  A CTR record reads at
+// most `arity_cap` children: acp_unpack_ft keeps the historical
+// REWRITE_MAX_ARITY clamp, acp_unpack_term_ft none.
+static AtpFtCell *acp_unpack_term_ft_cap(AtpFt *a, const u8 **pp,
+                                         int scratch, u32 arity_cap) {
+  AcpUnpackFrame  fr_inl[ACP_WALK_INL];
+  AtpFtCell      *val_inl[ACP_WALK_INL];
+  AcpUnpackFrame *fr   = fr_inl;
+  AtpFtCell     **val  = val_inl;
+  u32             nfr  = 0u;
+  u32             cfr  = ACP_WALK_INL;
+  u32             nval = 0u;
+  u32             cval = ACP_WALK_INL;
+  for (;;) {
+    AtpFtCell *done = NULL;
+    u8 disc = *(*pp)++;
+    switch (disc) {
+      case 'C': {
+        u32 label = (u32)acp_get_varint(pp);
+        u32 n     = (u32)acp_get_varint(pp);
+        if (n > arity_cap) n = arity_cap;
+        if (n == 0u) {
+          done = ftnew_const(a, label, scratch);
+        } else {
+          if (nfr == cfr) {
+            fr = (AcpUnpackFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].label = label;
+          fr[nfr].n     = n;
+          fr[nfr].left  = n;
+          nfr++;
+        }
+        break;
+      }
+      case 'N': {
+        u32 dtype = (u32)acp_get_varint(pp);
+        u64 val0  = acp_get_varint(pp);
+        AtpFtCell *dt_cell  = ftnew_const(a, dtype & ~WF_VAR_BIT, scratch);
+        AtpFtCell *raw_cell = ftnew_const(a, ((u32)val0) & ~WF_VAR_BIT, scratch);
+        AtpFtCell *kids[2]  = { dt_cell, raw_cell };
+        done = ftnew_ctr(a, ATPFT_NUM_MARKER, 2u, kids, scratch);
+        break;
+      }
+      case 'V':
+      default:
+        done = ftnew_var(a, (u32)acp_get_varint(pp), scratch);
+        break;
+    }
+    if (done != NULL) {
+      if (nval == cval) {
+        val = (AtpFtCell **)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = done;
+    }
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      AcpUnpackFrame *f = &fr[nfr - 1u];
+      nval -= f->n;
+      val[nval] = ftnew_ctr(a, f->label, (u16)f->n, &val[nval], scratch);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    fr[nfr - 1u].left--;
+  }
+  AtpFtCell *out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
+}
+
 // Decode one packed preorder term STRAIGHT into AtpFt cells -- the
 // byte-side sibling of ft_from_term(acp_unpack_term(pp)) with the
 // heap-Term intermediate removed.  Builds through the same ftnew_*
@@ -305,38 +444,7 @@ static u32 acp_count_term(Term t) {
 // the mixmost normalize input from the queue's byte string with zero
 // ft_from_term.
 static AtpFtCell *acp_unpack_term_ft(AtpFt *a, const u8 **pp, int scratch) {
-  u8 disc = *(*pp)++;
-  switch (disc) {
-    case 'C': {
-      u32 label = (u32)acp_get_varint(pp);
-      u32 n     = (u32)acp_get_varint(pp);
-      if (n == 0u) return ftnew_const(a, label, scratch);
-      enum { KIDS_STACK = 16 };
-      AtpFtCell *kids_stack[KIDS_STACK];
-      AtpFtCell **kids      = kids_stack;
-      AtpFtCell **kids_heap = NULL;
-      if (n > KIDS_STACK) {
-        kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)n);
-        if (kids_heap == NULL) thvm_fatal("acp_unpack_term_ft: kids OOM");
-        kids = kids_heap;
-      }
-      for (u32 i = 0; i < n; i++) kids[i] = acp_unpack_term_ft(a, pp, scratch);
-      AtpFtCell *c = ftnew_ctr(a, label, (u16)n, kids, scratch);
-      free(kids_heap);
-      return c;
-    }
-    case 'N': {
-      u32 dtype = (u32)acp_get_varint(pp);
-      u64 val   = acp_get_varint(pp);
-      AtpFtCell *dt_cell  = ftnew_const(a, dtype & ~WF_VAR_BIT, scratch);
-      AtpFtCell *raw_cell = ftnew_const(a, ((u32)val) & ~WF_VAR_BIT, scratch);
-      AtpFtCell *kids[2]  = { dt_cell, raw_cell };
-      return ftnew_ctr(a, ATPFT_NUM_MARKER, 2u, kids, scratch);
-    }
-    case 'V':
-    default:
-      return ftnew_var(a, (u32)acp_get_varint(pp), scratch);
-  }
+  return acp_unpack_term_ft_cap(a, pp, scratch, 0xFFFFFFFFu);
 }
 
 // FT sibling of thvm_normalize_vars: canonically renumber the pair's
@@ -461,32 +569,72 @@ static const AtpFtCell *atp_lazy_span_of(Term t) {
 // non-FOL-tag verdict).
 static u32 wald_term_sort_ft(const WaldSpec *spec, const AtpFtCell *c) {
   if (spec == NULL || spec->n_sorts == 0) return 0;
-  if ((c->sym & WF_VAR_BIT) != 0u) {
-    u32 id = c->sym & ~WF_VAR_BIT;
-    for (u32 i = 0; i < spec->n_vars; i++) {
-      if (spec->vars[i].var_id == id) return spec->vars[i].sort;
+  // A constructor whose children's sorts are being checked: `kid` is
+  // the next child, `i` its argument index.  A child sort that misses
+  // its argument sort ends the parent with WALD_MAX_SORTS at once.
+  typedef struct { const WaldSym *sym; const AtpFtCell *kid; u32 i; } SortFrame;
+  SortFrame  fr_inl[ACP_WALK_INL];
+  SortFrame *fr  = fr_inl;
+  u32        nfr = 0u;
+  u32        cfr = ACP_WALK_INL;
+  u32        v   = WALD_MAX_SORTS;
+  for (;;) {
+    u8 leaf = 1u;
+    if ((c->sym & WF_VAR_BIT) != 0u) {
+      u32 id = c->sym & ~WF_VAR_BIT;
+      v = WALD_MAX_SORTS;
+      for (u32 i = 0; i < spec->n_vars; i++) {
+        if (spec->vars[i].var_id == id) { v = spec->vars[i].sort; break; }
+      }
+    } else {
+      u32 lab = c->sym;
+      u32 n   = (u32)c->arity;
+      const WaldSym *sym = NULL;
+      if (lab != ATPFT_NUM_MARKER) {          // the marker is a non-FOL tag
+        for (u32 i = 0; i < spec->n_symbols; i++) {
+          if (spec->symbols[i].label == lab) {
+            sym = &spec->symbols[i];
+            break;
+          }
+        }
+      }
+      if (sym == NULL || sym->arity != n) {
+        v = WALD_MAX_SORTS;
+      } else if (n == 0u) {
+        v = sym->result_sort;
+      } else {
+        if (nfr == cfr) {
+          fr = (SortFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].sym = sym;
+        fr[nfr].kid = c->next;
+        fr[nfr].i   = 0u;
+        nfr++;
+        leaf = 0u;
+      }
     }
-    return WALD_MAX_SORTS;
-  }
-  u32 lab = c->sym;
-  if (lab == ATPFT_NUM_MARKER) return WALD_MAX_SORTS;   // non-FOL tag
-  u32 n = (u32)c->arity;
-  const WaldSym *sym = NULL;
-  for (u32 i = 0; i < spec->n_symbols; i++) {
-    if (spec->symbols[i].label == lab) {
-      sym = &spec->symbols[i];
-      break;
+    if (leaf) {
+      while (nfr > 0u) {
+        SortFrame *f = &fr[nfr - 1u];
+        if (v != f->sym->arg_sorts[f->i]) {
+          v = WALD_MAX_SORTS;
+        } else if (++f->i < f->sym->arity) {
+          break;
+        } else {
+          v = f->sym->result_sort;
+        }
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
     }
+    SortFrame *f = &fr[nfr - 1u];
+    c      = f->kid;
+    f->kid = c->end->next;
   }
-  if (sym == NULL)     return WALD_MAX_SORTS;
-  if (sym->arity != n) return WALD_MAX_SORTS;
-  const AtpFtCell *kid = c->next;
-  for (u32 i = 0; i < n; i++) {
-    u32 child_sort = wald_term_sort_ft(spec, kid);
-    if (child_sort != sym->arg_sorts[i]) return WALD_MAX_SORTS;
-    kid = kid->end->next;
-  }
-  return sym->result_sort;
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 
 // Decode-on-demand for a lazy rule slot: a TAG_NUM handle in a rule
@@ -1214,69 +1362,111 @@ static void sjp_ensure(u32 pos, u32 extra) {
 // First-occurrence dense-map walk over a Term (no emit): the exact
 // nv_rewrite / acp_fuse_walk numbering order.  0 on an anomaly.
 static u8 sjp_map_walk_term(Term t, AcpNvMap *m) {
-  switch (term_tag(t)) {
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      if (n > REWRITE_MAX_ARITY) return 0;
-      for (u32 i = 0; i < n; i++) {
-        if (!sjp_map_walk_term(term_ctr_at(t, i), m)) return 0;
+  Term  st_inl[ACP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ACP_WALK_INL;
+  u8    ok  = 1u;
+  for (;;) {
+    switch (term_tag(t)) {
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        if (n > REWRITE_MAX_ARITY) {
+          ok = 0u;
+          break;
+        }
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
       }
-      return 1;
+      case TAG_FVR: {
+        u32 old = term_ext(t);
+        u32 d = 0;
+        for (; d < m->n; d++) {
+          if (m->old_id[d] == old) break;
+        }
+        if (d == m->n) {
+          if (m->n >= REWRITE_MAX_VAR) {
+            ok = 0u;
+            break;
+          }
+          m->old_id[m->n++] = old;
+        }
+        break;
+      }
+      default:
+        ok = 0u;   // NUM/ERA atom: the sj compare never sees these
+        break;
     }
-    case TAG_FVR: {
-      u32 old = term_ext(t);
-      u32 d = 0;
-      for (; d < m->n; d++) {
-        if (m->old_id[d] == old) break;
-      }
-      if (d == m->n) {
-        if (m->n >= REWRITE_MAX_VAR) return 0;
-        m->old_id[m->n++] = old;
-      }
-      return 1;
+    if (!ok || nst == 0u) {
+      break;
     }
-    default:
-      return 0;   // NUM/ERA atom: the sj compare never sees these
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return ok;
 }
 
 // Emit `t` renumbered through (an extension of) `m` into the private
 // scratch at *pos -- byte-format identical to acp_pack_term's 'C'/'V'
 // records, so acp_unpack_term_ft decodes it.  0 on an anomaly.
 static u8 sjp_emit_term(Term t, AcpNvMap *m, u32 *pos) {
-  sjp_ensure(*pos, 21u);
-  u8 *p = g_sjp_scratch + *pos;
-  switch (term_tag(t)) {
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      if (n > REWRITE_MAX_ARITY) return 0;
-      *p++ = (u8)'C';
-      acp_put_varint(&p, term_ext(t));
-      acp_put_varint(&p, n);
-      *pos = (u32)(p - g_sjp_scratch);
-      for (u32 i = 0; i < n; i++) {
-        if (!sjp_emit_term(term_ctr_at(t, i), m, pos)) return 0;
+  Term  st_inl[ACP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ACP_WALK_INL;
+  u8    ok  = 1u;
+  for (;;) {
+    sjp_ensure(*pos, 21u);
+    u8 *p = g_sjp_scratch + *pos;
+    switch (term_tag(t)) {
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        if (n > REWRITE_MAX_ARITY) {
+          ok = 0u;
+          break;
+        }
+        *p++ = (u8)'C';
+        acp_put_varint(&p, term_ext(t));
+        acp_put_varint(&p, n);
+        *pos = (u32)(p - g_sjp_scratch);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        break;
       }
-      return 1;
+      case TAG_FVR: {
+        u32 old = term_ext(t);
+        u32 d = 0;
+        for (; d < m->n; d++) {
+          if (m->old_id[d] == old) break;
+        }
+        if (d == m->n) {
+          if (m->n >= REWRITE_MAX_VAR) {
+            ok = 0u;
+            break;
+          }
+          m->old_id[m->n++] = old;
+        }
+        *p++ = (u8)'V';
+        acp_put_varint(&p, d);
+        *pos = (u32)(p - g_sjp_scratch);
+        break;
+      }
+      default:
+        ok = 0u;
+        break;
     }
-    case TAG_FVR: {
-      u32 old = term_ext(t);
-      u32 d = 0;
-      for (; d < m->n; d++) {
-        if (m->old_id[d] == old) break;
-      }
-      if (d == m->n) {
-        if (m->n >= REWRITE_MAX_VAR) return 0;
-        m->old_id[m->n++] = old;
-      }
-      *p++ = (u8)'V';
-      acp_put_varint(&p, d);
-      *pos = (u32)(p - g_sjp_scratch);
-      return 1;
+    if (!ok || nst == 0u) {
+      break;
     }
-    default:
-      return 0;
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return ok;
 }
 
 // Span siblings: linear preorder over the ->next chain (a span's chain
