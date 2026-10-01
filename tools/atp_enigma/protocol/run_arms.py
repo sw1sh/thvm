@@ -74,8 +74,9 @@ rows.tsv columns:
   18 end_class proved | wall | memory-guard | step-cap | saturated |
                immediate-exit | alarm | crash | unknown
   19 lane_classes   class:count over the launched lanes
-  20 check_s   checker seconds  21 strays  processes killed after the run
-  22 host   23 cond (max_par, rss cap, errdir, proof, check wall)   24 utc
+  20 proof_recs     cnf/fof records inside the SZS output block
+  21 check_s   checker seconds  22 strays  processes killed after the run
+  23 host   24 cond (max_par, rss cap, errdir, proof, check wall)   25 utc
 
 Subcommands:
   run        the comparison
@@ -114,7 +115,7 @@ ROW_COLUMNS = [
     "problem", "split", "arm", "wall", "pass", "status", "wall_s", "lane",
     "proof", "verdict", "solution", "lscpu", "bin_sha",
     "in_wall", "rc", "cpu_s", "maxrss_kb", "end_class", "lane_classes",
-    "check_s", "strays", "host", "cond", "utc",
+    "proof_recs", "check_s", "strays", "host", "cond", "utc",
 ]
 DECISION_COLUMNS = ["problem", "wall", "repeat", "reason"]
 CALIB_COLUMNS = ["name", "pass", "status", "wall_s", "ref_s", "ratio",
@@ -275,6 +276,15 @@ def proof_block(stdout_text):
     if end.search(stdout_text, start.end()) is None:
         return False, form
     return True, form
+
+
+def proof_records(stdout_text):
+    """Number of cnf/fof records inside the SZS output block (0 for an
+    empty block, as in J13's "no single-NF chain extractable" class)."""
+    m = re.search(r"^% SZS output start.*?$(.*?)^% SZS output end", stdout_text, re.M | re.S)
+    if m is None:
+        return 0
+    return len(re.findall(r"^(?:cnf|fof|tff)\(", m.group(1), re.M))
 
 
 def parse_winner(stderr_text):
@@ -978,7 +988,7 @@ class Runner(object):
         row = [prob.name, prob.split, arm.name, wall_s, pass_no, status, "%.2f" % elapsed,
                winner, int(present and form == "CNFRefutation"), verdict, sol, self.lscpu,
                arm.sha, in_wall, rc, "%.2f" % cpu, rss, end_class, histogram_text(counts),
-               check_s, strays, self.host, self.cond(), utc_now()]
+               proof_records(stdout), check_s, strays, self.host, self.cond(), utc_now()]
         append_line(self.rows_path, row)
         key = (prob.name, arm.name, wall_s, str(pass_no))
         self.done_keys.add(key)

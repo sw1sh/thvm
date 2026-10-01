@@ -20,7 +20,8 @@
 # same binary on the first pod (calib-ref).
 #
 # report compares each wall's solved set (SZS Unsatisfiable and a complete
-# CNFRefutation block within the wall: CASC's "+", a solution output) with
+# CNFRefutation block within the wall: CASC's "+", a solution output; empty
+# blocks count and are reported apart) with
 # the official J13 UEQ result (FindProof column, 269 solved), per problem:
 # G0.3 passes at the wall with the highest agreement among those with
 # agreement >= 95% and a total within 8 of 269 (ties: total closer to 269,

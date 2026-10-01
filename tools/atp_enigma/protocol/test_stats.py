@@ -42,7 +42,8 @@ def row(problem, arm, wall, pass_no, sol, split="heldout", wall_s=1.0, lane="twe
         "proof": str(proof), "verdict": verdict, "solution": str(int(sol)),
         "lscpu": "AMD EPYC 9554|tpc=2|cpus=16|cps=8|sockets=1", "bin_sha": "ab" * 32,
         "in_wall": str(in_wall), "rc": "0" if sol else "1", "cpu_s": "1.0", "maxrss_kb": "1000",
-        "end_class": end_class, "lane_classes": lane_classes, "check_s": "0.5", "strays": "0",
+        "end_class": end_class, "lane_classes": lane_classes,
+        "proof_recs": "12" if proof else "0", "check_s": "0.5", "strays": "0",
         "host": host, "cond": "maxpar=16;rss=default;errdir=1;proof=1;check_wall=60",
         "utc": "2026-10-01T00:00:00Z",
     }
@@ -533,8 +534,10 @@ class Wdep(unittest.TestCase):
             rc, out = run_cli(["wdep", "--rows", cal, "--official", offp])
             self.assertEqual(rc, 0)
             self.assertIn("OFFICIAL FindProof---0.1 solved=12 of 20", out)
-            self.assertIn("WALL 45 covered=20/20 total=10 (diff -2) szs=10 agreement=0.9000", out)
-            self.assertIn("WALL 70 covered=20/20 total=13 (diff +1) szs=13 agreement=0.9500", out)
+            self.assertIn("WALL 45 covered=20/20 total=10 (diff -2) szs=10 empty_blocks=0 "
+                          "agreement=0.9000", out)
+            self.assertIn("WALL 70 covered=20/20 total=13 (diff +1) szs=13 empty_blocks=0 "
+                          "agreement=0.9500", out)
             self.assertIn("G0.3 PASS: WDEP = 53 s (agreement 1.0000, total 12", out)
             # No wall qualifies: c = 3 exactly from the 70 s run (official >= 1 s).
             plan2 = {w: dict(pod, **{probs[i]: None for i in range(4)}) for w in (45, 53, 60, 70)}
@@ -580,6 +583,11 @@ class RunArmsParsers(unittest.TestCase):
         cut = self.PROOF.rsplit("% SZS output end", 1)[0]
         self.assertEqual(run_arms.proof_block(cut), (False, "CNFRefutation"))
         self.assertEqual(run_arms.proof_block("% SZS status Timeout for x\n"), (False, ""))
+        self.assertEqual(run_arms.proof_records(self.PROOF), 1)
+        empty = ("% SZS output start CNFRefutation for x\n"
+                 "% goal 0: no single-NF chain extractable\n% SZS output end CNFRefutation for x\n")
+        self.assertEqual(run_arms.proof_block(empty), (True, "CNFRefutation"))
+        self.assertEqual(run_arms.proof_records(empty), 0)
         self.assertEqual(run_arms.solution_flag("Unsatisfiable", True, "CNFRefutation", 1,
                                                 "VerifiedGood"), 1)
         for args in (("Unsatisfiable", True, "CNFRefutation", 0, "VerifiedGood"),

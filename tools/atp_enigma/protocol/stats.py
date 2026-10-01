@@ -61,6 +61,17 @@ Definitions (fixed here, before the data):
 - Miss end states: the runner's end class of the cell's most frequent
   non-Solution end; a miss whose search proved is counted by why it is not
   a Solution instead (unknown, verified-bad, no-proof).
+- G0.3 (wdep): a pod run solved a problem when it printed SZS status
+  Unsatisfiable and a complete CNFRefutation block within the wall (CASC's
+  "+" marks a solution output; blocks holding no record are counted apart
+  as empty_blocks).  Agreement is the share of the official problems whose
+  solved flag matches the official "+".  A wall qualifies with every
+  problem run, agreement >= 0.95 and a total within 8 of the official
+  count; WDEP is the qualifying wall with the highest agreement (ties: the
+  total closer to the official count, then the lower wall).  Otherwise
+  WDEP = 180 / c, c the geometric mean of official / pod time over the
+  problems solved in both with official time >= 1 s in the largest wall's
+  run, labelled uncalibrated.
 - Validity counts, printed in every mode: pod types, run conditions,
   binaries per arm, runs past W and past W + 10 s, problems whose runs
   span several pods, complete and incomplete cells, VerifiedBad runs.
@@ -135,7 +146,7 @@ def is_minus10(name):
 class Run(object):
     __slots__ = ("problem", "split", "arm", "wall", "pass_no", "status", "wall_s", "lane",
                  "proof", "verdict", "solution", "lscpu", "bin_sha", "in_wall", "end_class",
-                 "lane_classes", "host", "cond")
+                 "lane_classes", "host", "cond", "proof_recs")
 
     def __init__(self, d):
         self.problem = d["problem"]
@@ -156,6 +167,7 @@ class Run(object):
         self.lane_classes = d.get("lane_classes", "")
         self.host = d.get("host", "")
         self.cond = d.get("cond", "")
+        self.proof_recs = int(d.get("proof_recs", "-1") or -1)
 
 
 MALFORMED = {"rows": 0}
@@ -904,6 +916,7 @@ def wdep_analysis(runs, official, arm, min_official_s=1.0, wall_for_c=None,
         covered = [p for p in official if p in sel]
         solved = {p for p in covered if pod_solved(sel[p])}
         szs = {p for p in covered if sel[p].status == "Unsatisfiable" and sel[p].in_wall}
+        empty = {p for p in solved if sel[p].proof_recs == 0}
         both = len(solved & off_solved)
         pod_only = len(solved - off_solved)
         off_only = len([p for p in covered if p in off_solved and p not in solved])
@@ -911,7 +924,8 @@ def wdep_analysis(runs, official, arm, min_official_s=1.0, wall_for_c=None,
         agree = (both + neither) / float(len(covered)) if covered else 0.0
         pairs = [(official[p], sel[p].wall_s) for p in sorted(solved & off_solved)]
         pairs_floor = [(o, t) for o, t in pairs if o >= min_official_s]
-        per[w] = {"covered": len(covered), "total": len(solved), "szs": len(szs), "both": both,
+        per[w] = {"covered": len(covered), "total": len(solved), "szs": len(szs),
+                  "empty_blocks": len(empty), "both": both,
                   "pod_only": pod_only, "official_only": off_only, "neither": neither,
                   "agreement": agree, "c_all": geomean_ratio(pairs),
                   "c_floor": geomean_ratio(pairs_floor), "n_floor": len(pairs_floor),
@@ -955,9 +969,10 @@ def cmd_wdep(args):
     n_off = res["n_official"]
     print("OFFICIAL %s solved=%d of %d (%s)" % (args.system, n_off, len(official), args.official))
     for w, q in res["per_wall"].items():
-        print("WALL %s covered=%d/%d total=%d (diff %+d) szs=%d agreement=%.4f both=%d "
-              "official_only=%d pod_only=%d neither=%d c_all=%.3f c_floor=%.3f(n=%d) %s" % (
+        print("WALL %s covered=%d/%d total=%d (diff %+d) szs=%d empty_blocks=%d agreement=%.4f "
+              "both=%d official_only=%d pod_only=%d neither=%d c_all=%.3f c_floor=%.3f(n=%d) %s" % (
                   w, q["covered"], len(official), q["total"], q["total"] - n_off, q["szs"],
+                  q["empty_blocks"],
                   q["agreement"], q["both"], q["official_only"], q["pod_only"], q["neither"],
                   q["c_all"], q["c_floor"], q["n_floor"],
                   "QUALIFIES" if q["qualifies"] else
