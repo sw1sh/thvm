@@ -147,7 +147,9 @@ static AtpFtCell *ft_splice_build_rhs(AtpFt *a, const AtpFtCell *tmpl,
       done = ft_splice_deep_copy(a, binding);
     } else if (tmpl->arity == 0u) {
       done = ftnew_const(a, tmpl->sym, 0);
-      if (skel_fresh_cached) done->flags |= ATPFT_FLAG_SUBST_FRESH;
+      if (skel_fresh_cached) {
+        done->flags |= ATPFT_FLAG_SUBST_FRESH;
+      }
     } else {
       if (nfr == cfr) {
         fr = (FtSpanFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
@@ -168,7 +170,9 @@ static AtpFtCell *ft_splice_build_rhs(AtpFt *a, const AtpFtCell *tmpl,
       FtSpanFrame *f = &fr[nfr - 1u];
       nval -= f->arity;
       AtpFtCell *c = ftnew_ctr(a, f->sym, (u16)f->arity, &val[nval], 0);
-      if (skel_fresh_cached) c->flags |= ATPFT_FLAG_SUBST_FRESH;
+      if (skel_fresh_cached) {
+        c->flags |= ATPFT_FLAG_SUBST_FRESH;
+      }
       val[nval++] = c;
       nfr--;
     }

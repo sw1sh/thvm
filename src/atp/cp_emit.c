@@ -1462,7 +1462,9 @@ static u32 acp_term_nodes_skip(const u8 **pp) {
       case 'C': {
         (void)acp_get_varint(pp);           // label
         u32 n = (u32)acp_get_varint(pp);    // arity
-        if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
+        if (n > REWRITE_MAX_ARITY) {
+          n = REWRITE_MAX_ARITY;
+        }
         pending += n;
         break;
       }

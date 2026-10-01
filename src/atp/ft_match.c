@@ -366,8 +366,14 @@ static AtpFtCell *ft_build_pre(AtpFt *a, const AtpFtCell *src,
     // child is stitched is finished in turn.
     while (done != NULL && nfr > 0u) {
       FtPreSpanFrame *f = &fr[nfr - 1u];
-      if (f->prev_end == NULL) f->c->next = done; else f->prev_end->next = done;
-      if ((done->flags & ATPFT_FLAG_GROUND) == 0u) f->c->flags = 0;
+      if (f->prev_end == NULL) {
+        f->c->next = done;
+      } else {
+        f->prev_end->next = done;
+      }
+      if ((done->flags & ATPFT_FLAG_GROUND) == 0u) {
+        f->c->flags = 0;
+      }
       f->prev_end = done->end;
       if (f->left > 0u) {
         done = NULL;

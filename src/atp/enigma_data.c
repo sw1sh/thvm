@@ -32,7 +32,9 @@ static void atp_cp_var_stats_rec(Term t, u64 *seen, u32 *distinct,
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       default:
@@ -72,7 +74,9 @@ static int atp_term_label_set(Term t, u64 *labels) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;

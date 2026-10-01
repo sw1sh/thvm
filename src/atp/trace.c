@@ -94,7 +94,9 @@ static u32 atp_pretty_term(Term t, char *buf, u32 cap) {
         f->i++;
       }
       if (f->i < f->n && f->w + 2 < f->cap) {
-        if (f->i > 0) f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ", ");
+        if (f->i > 0) {
+          f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ", ");
+        }
         if (f->w >= f->cap) {
           ret = f->cap - 1;
           nfr--;
@@ -106,7 +108,9 @@ static u32 atp_pretty_term(Term t, char *buf, u32 cap) {
         cap = f->cap - f->w;
         break;
       }
-      if (f->w + 1 < f->cap) f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ")");
+      if (f->w + 1 < f->cap) {
+        f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ")");
+      }
       ret = f->w;
       nfr--;
       have = 1u;

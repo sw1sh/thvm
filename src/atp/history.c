@@ -267,7 +267,9 @@ static u32 atp_hx_feat_bytes(AtpHxFeat *f, const u8 **pp, u32 side, u8 top) {
         u32 label = (u32)atp_hx_varint(pp);
         u32 n     = (u32)atp_hx_varint(pp);
         atp_hx_feat_sym(f, label);
-        if (top) f->top_sym[side] = label;
+        if (top) {
+          f->top_sym[side] = label;
+        }
         if (n > 0u) {
           if (nfr == cfr) {
             fr = (HxFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
@@ -287,7 +289,9 @@ static u32 atp_hx_feat_bytes(AtpHxFeat *f, const u8 **pp, u32 side, u8 top) {
       case 'V': {
         u32 id = (u32)atp_hx_varint(pp);
         atp_hx_feat_var(f, id, side);
-        if (top) f->top_var[side] = 1u;
+        if (top) {
+          f->top_var[side] = 1u;
+        }
         break;
       }
       default:
@@ -300,8 +304,12 @@ static u32 atp_hx_feat_bytes(AtpHxFeat *f, const u8 **pp, u32 side, u8 top) {
       // last child finished is one deeper than its deepest child.
       while (nfr > 0u) {
         HxFrame *h = &fr[nfr - 1u];
-        if (v > h->d) h->d = v;
-        if (--h->left > 0u) break;
+        if (v > h->d) {
+          h->d = v;
+        }
+        if (--h->left > 0u) {
+          break;
+        }
         v = h->d + 1u;
         nfr--;
       }
@@ -333,7 +341,9 @@ static u32 atp_hx_feat_term(AtpHxFeat *f, Term t, u32 side, u8 top) {
         u32 label = term_ext(t);
         u32 n     = term_ctr_n(t);
         atp_hx_feat_sym(f, label);
-        if (top) f->top_sym[side] = label;
+        if (top) {
+          f->top_sym[side] = label;
+        }
         if (n > 0u) {
           if (nfr == cfr) {
             fr = (HxTermFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
@@ -349,7 +359,9 @@ static u32 atp_hx_feat_term(AtpHxFeat *f, Term t, u32 side, u8 top) {
       }
       case TAG_FVR: {
         atp_hx_feat_var(f, term_ext(t), side);
-        if (top) f->top_var[side] = 1u;
+        if (top) {
+          f->top_var[side] = 1u;
+        }
         break;
       }
       default:
@@ -360,8 +372,12 @@ static u32 atp_hx_feat_term(AtpHxFeat *f, Term t, u32 side, u8 top) {
       v = 1u;
       while (nfr > 0u) {
         HxTermFrame *h = &fr[nfr - 1u];
-        if (v > h->d) h->d = v;
-        if (++h->i < h->n) break;
+        if (v > h->d) {
+          h->d = v;
+        }
+        if (++h->i < h->n) {
+          break;
+        }
         v = h->d + 1u;
         nfr--;
       }
@@ -434,7 +450,9 @@ static void atp_hx_gsym_mark(Term t) {
       if (label < (1u << 20)) {
         if (label >= g_hx.gsym_cap) {
           u32 ncap = g_hx.gsym_cap ? g_hx.gsym_cap : 256u;
-          while (ncap <= label) ncap *= 2u;
+          while (ncap <= label) {
+            ncap *= 2u;
+          }
           u8 *ng = (u8 *)realloc(g_hx.gsym, ncap);
           if (ng == NULL) {
             grown = 0u;
@@ -444,13 +462,17 @@ static void atp_hx_gsym_mark(Term t) {
             g_hx.gsym_cap = ncap;
           }
         }
-        if (grown) g_hx.gsym[label] = 1u;
+        if (grown) {
+          g_hx.gsym[label] = 1u;
+        }
       }
       u32 n = grown ? term_ctr_n(t) : 0u;
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;

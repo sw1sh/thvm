@@ -756,7 +756,9 @@ static Term atp_ri_build(const Term *flat, const u32 *subsz,
       Term *kids    = &val[nval - f->n];
       u8    changed = 0u;
       for (u32 k = 0; k < f->n; k++) {
-        if (kids[k] != term_ctr_at(f->src, k)) changed = 1u;
+        if (kids[k] != term_ctr_at(f->src, k)) {
+          changed = 1u;
+        }
       }
       // subtree untouched -- share
       Term out = changed ? term_new_ctr(term_ext(f->src), kids, f->n) : f->src;

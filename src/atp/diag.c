@@ -441,7 +441,9 @@ static u8 atp_cp_perm_subsumed(Term lhs, Term rhs) {
           return v;
         }
         PermFrame *f = &fr[nfr - 1u];
-        if (v) f->res |= (u8)(1u << f->st);
+        if (v) {
+          f->res |= (u8)(1u << f->st);
+        }
         f->st++;
       }
       open = 0u;
@@ -624,7 +626,9 @@ static u32 atp_conn_successors(AtpState *s, Term t, Term peak,
       t = heap_read(term_val(t) + 1u);
       continue;
     }
-    if (!wide) atp_conn_top(s, t, out_buf, n, cap);
+    if (!wide) {
+      atp_conn_top(s, t, out_buf, n, cap);
+    }
     for (;;) {
       if (nfr == 0u) {
         term_stack_release(fr, fr_inl);

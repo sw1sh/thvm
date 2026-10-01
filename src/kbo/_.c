@@ -121,7 +121,9 @@ static u8 kbo_eq(Term s, Term t) {
           break;
         }
         default:
-          if (term_val(s) != term_val(t)) eq = 0u;
+          if (term_val(s) != term_val(t)) {
+            eq = 0u;
+          }
           break;
       }
       if (!eq) {
@@ -587,7 +589,9 @@ static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t) {
     KboTHashEnt *th = &g_kbo_thash[kbo_thash_slot(t)];
     if (th->epoch == g_kbo_epoch && th->t == t) {
       KboWMemoEnt *e = &g_kbo_wmemo[th->wmemo_idx];
-      if (e->epoch == g_kbo_epoch && e->hash == th->hash) return e;
+      if (e->epoch == g_kbo_epoch && e->hash == th->hash) {
+        return e;
+      }
       // Slot evicted under collision; fall through to re-fill.
     }
   }
@@ -747,7 +751,9 @@ static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t) {
               k->w += (long long)cfg->var_weight;
               u32 id = term_ext(c);
               if (id < KBO_MAX_VAR && !k->ovf) {
-                if (!kbo_vprof_add(k->vid, k->vcnt, &k->vc, id, +1)) k->ovf = 1u;
+                if (!kbo_vprof_add(k->vid, k->vcnt, &k->vc, id, +1)) {
+                  k->ovf = 1u;
+                }
               }
             } else if (term_tag(c) == TAG_CTR) {
               // Child must have a g_kbo_thash entry (post-order); from

@@ -84,7 +84,9 @@ static u8 atp_gj_collect_vars(Term t, u32 *ids, u32 *n, u32 cap) {
         while (nst + k > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = k; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = k; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       default:
@@ -185,7 +187,9 @@ static void gj_form_addto(Term t, int sign, const KboConfig *cfg,
     switch (term_tag(t)) {
       case TAG_FVR: {
         u32 id = term_ext(t);
-        if (id < KBO_MAX_VAR) var_coeff[id] += sign;
+        if (id < KBO_MAX_VAR) {
+          var_coeff[id] += sign;
+        }
         break;
       }
       case TAG_CTR: {
@@ -196,7 +200,9 @@ static void gj_form_addto(Term t, int sign, const KboConfig *cfg,
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       default:
@@ -700,7 +706,9 @@ static int gj_has_var(Term t, u32 id) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       default:
@@ -733,7 +741,9 @@ static u8 gj_vars_subset(Term sub, Term sup) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(sub, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(sub, i);
+        }
         break;
       }
       default:
@@ -826,7 +836,9 @@ static u8 gj_has_big_var(Term t) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       default:
@@ -1067,7 +1079,9 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
           protect = 0;
           continue;
         }
-        if (protect == 0) gj_nf_add(t);
+        if (protect == 0) {
+          gj_nf_add(t);
+        }
       }
     }
     for (;;) {
@@ -1092,7 +1106,9 @@ static Term gj_rewrite_step(AtpState *s, const GjModel *m, Term t,
         protect = 0;
         break;
       }
-      if (f->protect == 0) gj_nf_add(f->t);
+      if (f->protect == 0) {
+        gj_nf_add(f->t);
+      }
       res = f->t;
       nfr--;
     }
@@ -1298,7 +1314,9 @@ static u8 gj_collect_consts(Term t, u32 *labs, u32 *n, u32 cap) {
         while (nst + k > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = k; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = k; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
       }
     }
     if (!ok || nst == 0u) {
@@ -1641,7 +1659,9 @@ static int gj_has_const(Term t, u32 lab) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
       }
     }
     if (hit || nst == 0u) {

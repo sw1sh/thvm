@@ -83,8 +83,12 @@ static u8 ft_ac_eq_head(const AtpFtCell *a, const AtpFtCell *b,
     if (!ft_ac_flatten_under(b, b->sym, B, nb, ATPFT_AC_FLATTEN_CAP)) {
       return (u8)(ft_eq(a, b) ? 1u : 0u);
     }
-    if (*na != *nb) return 0u;
-    if (*na == 0u) return 1u;
+    if (*na != *nb) {
+      return 0u;
+    }
+    if (*na == 0u) {
+      return 1u;
+    }
   } else if (a->arity == 0u) {
     return 1u;
   }

@@ -1467,7 +1467,9 @@ static u32 atp_ifeq_guard_count(const AtpState *s, Term t) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;
@@ -1522,7 +1524,9 @@ static void atp_ifeq_var_mask(Term t, u64 *mask) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;
@@ -1815,7 +1819,9 @@ static u64 atp_ifeq_guard_hash_ft_rec(const AtpFtCell *t, AtpIfeqVarMap *vm) {
         GhFrame *f = &fr[nfr - 1u];
         f->h ^= v;
         f->h *= 0x100000001b3ull;
-        if (f->left > 0u) break;
+        if (f->left > 0u) {
+          break;
+        }
         v = f->h ^ ((u64)f->n * 0x9e3779b97f4a7c15ull);
         nfr--;
       }
@@ -2169,7 +2175,9 @@ static void atp_tgt_mask_collect(AtpState *s, Term t) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
       }
     }
     if (nst == 0u) {
@@ -2243,13 +2251,19 @@ static void atp_tgt_count_rec(const AtpState *s, Term t,
     if (tg == TAG_FVR) {
       (*vc)++;
     } else if (tg == TAG_CTR) {
-      if (atp_tgt_sym_hit(s, term_ext(t))) (*gc)++; else (*oc)++;
+      if (atp_tgt_sym_hit(s, term_ext(t))) {
+        (*gc)++;
+      } else {
+        (*oc)++;
+      }
       u32 n = term_ctr_n(t);
       if (n <= REWRITE_MAX_ARITY) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
       }
     }
     if (nst == 0u) {
@@ -2446,7 +2460,9 @@ static u8 atp_term_has_fold(const AtpState *s, Term t) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
       }
     }
     if (nst == 0u) {
@@ -3359,7 +3375,9 @@ static int atp_term_is_ground(Term t) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       default:

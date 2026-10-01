@@ -1804,8 +1804,11 @@ typedef struct {
 // Every open frame sits at a distinct query cell (each step moves qi
 // right, and a frame opens only at qi < q_len <= WMO_MAX_CELLS), so the
 // stack never outgrows this one allocation and frames never move --
-// bindings into a frame's `vcell` stay valid while it is open.
-static WmoDfsFrame *g_wmo_dfs_fr = NULL;
+// bindings into a frame's `vcell` stay valid while it is open.  The
+// array (and wmo_dfs_enter's leaf scratch) is shared, so wmo_dfs must
+// not re-enter: a nested walk would overwrite the outer walk's frames.
+static WmoDfsFrame *g_wmo_dfs_fr     = NULL;
+static u8           g_wmo_dfs_active = 0u;
 
 // A wmo_dfs visit's entry: a leaf is unified against the rest of the
 // query and emitted at once; an inner node at a query cell opens a
@@ -1867,6 +1870,10 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
       thvm_fatal("wmo_dfs: frame stack OOM");
     }
   }
+  if (g_wmo_dfs_active) {
+    thvm_fatal("wmo_dfs: re-entered");
+  }
+  g_wmo_dfs_active = 1u;
   u32 nfr = 0u;
   (void)wmo_dfs_enter(d, n_raw, is_leaf, qi, spos, u, WMO_DFS_UROOT,
                       depth_guard, &nfr);
@@ -1967,6 +1974,7 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
       nfr--;
     }
   }
+  g_wmo_dfs_active = 0u;
 }
 
 // ---------- public mirror API ----------

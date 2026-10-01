@@ -997,7 +997,9 @@ static void atp_sym_mask_collect(Term t, u32 mask[8]) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
       }
     }
     if (nst == 0u) {
@@ -1027,7 +1029,9 @@ static int atp_term_touches_goal(const AtpState *s, Term t) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
       }
     }
     if (nst == 0u) {

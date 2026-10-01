@@ -54,7 +54,9 @@ static inline Term rewrite_node_rebuild(const RewriteNodeFrame *f,
                                         const Term *kids) {
   u8 changed = 0u;
   for (u32 k = 0; k < f->n; k++) {
-    if (kids[k] != heap_read(f->base + 1u + (u64)k)) changed = 1u;
+    if (kids[k] != heap_read(f->base + 1u + (u64)k)) {
+      changed = 1u;
+    }
   }
   return changed ? term_new_ctr(term_ext(f->t), kids, f->n) : f->t;
 }

@@ -20,7 +20,9 @@ static int atp_term_has_var(Term t, u32 id) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       default:
@@ -53,7 +55,9 @@ static int atp_vars_contained(Term a, Term b) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(a, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(a, i);
+        }
         break;
       }
       default:
@@ -329,7 +333,9 @@ static Term atp_ordered_rewrite_step(AtpState *s, Term t,
     // locate the rule-250 lazy-normalize blowup (grow-per-step vs many-steps).
     {
       static int dl = -1; static u32 mx = 0u;
-      if (dl < 0) dl = (getenv("THVM_ATP_NORMLOG") != NULL) ? 1 : 0;
+      if (dl < 0) {
+        dl = (getenv("THVM_ATP_NORMLOG") != NULL) ? 1 : 0;
+      }
       if (dl) { u32 sz = atp_symbol_count(t);
         if (sz > mx && sz > 5000u) { mx = sz;
           fprintf(stderr, "NORMLOG t_size=%u\n", sz); } }
@@ -591,7 +597,9 @@ static u32 atp_symbol_count(Term t) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = 0; i < n; i++) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = 0; i < n; i++) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;
@@ -620,7 +628,9 @@ static void atp_symbol_count_upto(Term t, u32 cap, u32 *acc) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;
@@ -787,7 +797,9 @@ static u8 atp_twee_sd_contains(Term hay, Term needle) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(hay, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(hay, i);
+      }
     }
     if (nst == 0u) {
       break;

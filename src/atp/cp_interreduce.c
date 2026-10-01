@@ -96,7 +96,9 @@ static u64 atp_term_sym_bitmap(Term t) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = 0; i < n; i++) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = 0; i < n; i++) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;

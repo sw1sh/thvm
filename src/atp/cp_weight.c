@@ -29,8 +29,12 @@ static u32 atp_term_depth(Term t) {
       v = 0u;
       while (nfr > 0u) {
         DepthFrame *f = &fr[nfr - 1u];
-        if (v > f->d) f->d = v;
-        if (++f->i < f->n) break;
+        if (v > f->d) {
+          f->d = v;
+        }
+        if (++f->i < f->n) {
+          break;
+        }
         v = f->d + 1u;
         nfr--;
       }
@@ -63,7 +67,9 @@ static int atp_var_occurs(Term t, u32 var_id) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       default:
@@ -469,7 +475,9 @@ static u32 atp_goal_match_cov(Term pat, Term subj, RewriteSubst base) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(subj, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(subj, i);
+      }
     }
     if (nst == 0u) {
       break;
@@ -498,7 +506,9 @@ static u32 atp_goal_doppel(Term cl, Term cr, Term sx, Term gy,
       if (thvm_match(cl, sx, &t1)) {
         u32 cov_a = atp_symbol_count(sx);
         u32 cov_b = atp_goal_match_cov(cr, gy, t1);
-        if (cov_b && cov_a + cov_b > best) best = cov_a + cov_b;
+        if (cov_b && cov_a + cov_b > best) {
+          best = cov_a + cov_b;
+        }
       }
     }
     if (term_tag(sx) == TAG_CTR) {
@@ -506,7 +516,9 @@ static u32 atp_goal_doppel(Term cl, Term cr, Term sx, Term gy,
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(sx, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(sx, i);
+      }
     }
     if (nst == 0u) {
       break;
@@ -557,7 +569,9 @@ static void atp_goal_sub_collect_rec(AtpState *s, Term t) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;
@@ -593,7 +607,9 @@ static u32 atp_goal_subterm_overlap_rec(const AtpState *s, Term t, u32 best) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;
@@ -822,7 +838,9 @@ static u32 atp_ladr_nest(Term t) {
       }
       for (u32 i = 0; i < n; i++) {
         Term ch = term_ctr_at(t, i);
-        if (n <= 2u && term_tag(ch) == TAG_CTR && term_ext(ch) == term_ext(t)) c++;
+        if (n <= 2u && term_tag(ch) == TAG_CTR && term_ext(ch) == term_ext(t)) {
+          c++;
+        }
         st[nst++] = ch;
       }
     }
@@ -857,8 +875,12 @@ static u32 atp_ladr_depth(Term t) {
       v = 0u;
       while (nfr > 0u) {
         DepthFrame *f = &fr[nfr - 1u];
-        if (v > f->d) f->d = v;
-        if (++f->i < f->n) break;
+        if (v > f->d) {
+          f->d = v;
+        }
+        if (++f->i < f->n) {
+          break;
+        }
         v = f->d + 1u;
         nfr--;
       }
@@ -893,7 +915,9 @@ static u32 atp_ladr_nest_ft(const AtpFtCell *t) {
     }
     const AtpFtCell *ch = p->next;
     for (u32 i = 0; i < p->arity; i++) {
-      if (p->arity <= 2u && (ch->sym & WF_VAR_BIT) == 0u && ch->sym == p->sym) c++;
+      if (p->arity <= 2u && (ch->sym & WF_VAR_BIT) == 0u && ch->sym == p->sym) {
+        c++;
+      }
       ch = ch->end->next;
     }
     p = p->next;
@@ -921,8 +945,12 @@ static u32 atp_ladr_depth_ft(const AtpFtCell *t) {
       v = 0u;
       while (nfr > 0u) {
         DepthFrame *f = &fr[nfr - 1u];
-        if (v > f->d) f->d = v;
-        if (f->left > 0u) break;
+        if (v > f->d) {
+          f->d = v;
+        }
+        if (f->left > 0u) {
+          break;
+        }
         v = f->d + 1u;
         nfr--;
       }

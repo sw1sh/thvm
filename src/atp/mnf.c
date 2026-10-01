@@ -212,7 +212,9 @@ static u32 mnf_hash_span(const AtpFtCell *c) {
       while (nfr > 0u) {
         SpanHashFrame *f = &fr[nfr - 1u];
         f->h = (f->h ^ v) * 0x01000193u;
-        if (f->left > 0u) break;
+        if (f->left > 0u) {
+          break;
+        }
         v = f->h ^ (f->n + 0x9e3779b9u);
         nfr--;
       }

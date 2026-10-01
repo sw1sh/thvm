@@ -1932,7 +1932,9 @@ static Term atp_grounded_instance(AtpState *s, Term t, Term lhs,
       Term *kids    = &val[nval - f->n];
       u8    changed = 0u;
       for (u32 k = 0; k < f->n; k++) {
-        if (kids[k] != term_ctr_at(f->t, k)) changed = 1u;
+        if (kids[k] != term_ctr_at(f->t, k)) {
+          changed = 1u;
+        }
       }
       Term out = changed ? term_new_ctr(term_ext(f->t), kids, f->n) : f->t;
       nval -= f->n;
@@ -2263,7 +2265,9 @@ static u8 atp_term_has_ctr(Term t, u32 ext) {
       while (nst + n > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;

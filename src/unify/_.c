@@ -85,18 +85,24 @@ static u8 unify_occurs(u32 var_id, Term t, const RewriteSubst *subst) {
     t = unify_walk(t, subst);
     switch (term_tag(t)) {
       case TAG_FVR:
-        if (term_ext(t) == var_id) hit = 1u;
+        if (term_ext(t) == var_id) {
+          hit = 1u;
+        }
         break;
       case TAG_CTR: {
         // Direct heap_read for arity + children.
         u64  base   = term_val(t);
         Term n_cell = heap_read(base);
-        if (term_tag(n_cell) != TAG_NUM) break;
+        if (term_tag(n_cell) != TAG_NUM) {
+          break;
+        }
         u32 n = (u32)term_val(n_cell);
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = heap_read(base + 1u + (u64)i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = heap_read(base + 1u + (u64)i);
+        }
         break;
       }
       default:
@@ -396,12 +402,16 @@ static Term nv_rewrite(Term t, NvMap *m) {
       case TAG_FVR: {
         u32 old = term_ext(t);
         u32 i   = 0u;
-        while (i < m->n && m->old_id[i] != old) i++;
+        while (i < m->n && m->old_id[i] != old) {
+          i++;
+        }
         if (i == m->n) {
           if (m->n >= REWRITE_MAX_VAR) break;   // full map: keep id
           m->old_id[m->n++] = old;
         }
-        if (i != old) v = term_new_fvr(i);
+        if (i != old) {
+          v = term_new_fvr(i);
+        }
         break;
       }
       case TAG_CTR: {

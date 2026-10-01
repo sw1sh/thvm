@@ -196,7 +196,9 @@ static void acp_pack_term(Term t, u32 *pos, u32 *nodes) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       case TAG_NUM:
@@ -240,7 +242,9 @@ static Term acp_unpack_term(const u8 **pp) {
       case 'C': {
         u32 label = (u32)acp_get_varint(pp);
         u32 n     = (u32)acp_get_varint(pp);
-        if (n > REWRITE_MAX_ARITY) n = REWRITE_MAX_ARITY;
+        if (n > REWRITE_MAX_ARITY) {
+          n = REWRITE_MAX_ARITY;
+        }
         if (n == 0u) {
           v = term_new_ctr(label, NULL, 0u);
         } else {
@@ -349,7 +353,9 @@ static u32 acp_count_term(Term t) {
       while (nst + k > cst) {
         st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      for (u32 i = 0; i < k; i++) st[nst++] = term_ctr_at(t, i);
+      for (u32 i = 0; i < k; i++) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
     if (nst == 0u) {
       break;
@@ -382,7 +388,9 @@ static AtpFtCell *acp_unpack_term_ft_cap(AtpFt *a, const u8 **pp,
       case 'C': {
         u32 label = (u32)acp_get_varint(pp);
         u32 n     = (u32)acp_get_varint(pp);
-        if (n > arity_cap) n = arity_cap;
+        if (n > arity_cap) {
+          n = arity_cap;
+        }
         if (n == 0u) {
           done = ftnew_const(a, label, scratch);
         } else {
@@ -1382,14 +1390,18 @@ static u8 sjp_map_walk_term(Term t, AcpNvMap *m) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       case TAG_FVR: {
         u32 old = term_ext(t);
         u32 d = 0;
         for (; d < m->n; d++) {
-          if (m->old_id[d] == old) break;
+          if (m->old_id[d] == old) {
+            break;
+          }
         }
         if (d == m->n) {
           if (m->n >= REWRITE_MAX_VAR) {
@@ -1439,14 +1451,18 @@ static u8 sjp_emit_term(Term t, AcpNvMap *m, u32 *pos) {
         while (nst + n > cst) {
           st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
         }
-        for (u32 i = n; i-- > 0u;) st[nst++] = term_ctr_at(t, i);
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
         break;
       }
       case TAG_FVR: {
         u32 old = term_ext(t);
         u32 d = 0;
         for (; d < m->n; d++) {
-          if (m->old_id[d] == old) break;
+          if (m->old_id[d] == old) {
+            break;
+          }
         }
         if (d == m->n) {
           if (m->n >= REWRITE_MAX_VAR) {

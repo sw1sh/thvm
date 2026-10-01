@@ -421,7 +421,9 @@ static AtpFtCell *ft_from_term_pre(AtpFt *a, Term t, int scratch) {
       FtPreFrame *f = &fr[nfr - 1u];
       if (f->i == 0u) f->c->next = done;         // done is the physically next cell
       else            f->prev_end->next = done;
-      if ((done->flags & ATPFT_FLAG_GROUND) == 0u) f->c->flags = 0;
+      if ((done->flags & ATPFT_FLAG_GROUND) == 0u) {
+        f->c->flags = 0;
+      }
       f->prev_end = done->end;
       f->i++;
       if (f->i < f->n) {
@@ -1107,7 +1109,9 @@ u32 atp_pretty_ft(const AtpFtCell *x, char *buf, u32 cap) {
         f->i++;
       }
       if (f->i < f->n && f->w + 2u < f->cap) {
-        if (f->i > 0u) f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ", ");
+        if (f->i > 0u) {
+          f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ", ");
+        }
         if (f->w >= f->cap) {
           ret = f->cap - 1u;
           nfr--;
@@ -1119,7 +1123,9 @@ u32 atp_pretty_ft(const AtpFtCell *x, char *buf, u32 cap) {
         cap = f->cap - f->w;
         break;
       }
-      if (f->w + 1u < f->cap) f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ")");
+      if (f->w + 1u < f->cap) {
+        f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ")");
+      }
       ret = f->w;
       nfr--;
       have = 1u;

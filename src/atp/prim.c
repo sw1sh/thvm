@@ -616,7 +616,9 @@ static u64 atp_term_struct_hash(Term t) {
         HashFrame *f = &fr[nfr - 1u];
         f->h ^= v;
         f->h *= 0x100000001b3ull;
-        if (++f->i < f->n) break;
+        if (++f->i < f->n) {
+          break;
+        }
         v = f->h ^ ((u64)f->n * 0x9e3779b97f4a7c15ull);
         nfr--;
       }
@@ -675,7 +677,9 @@ static u32 atp_term_fnv32(Term t) {
       while (nfr > 0u) {
         Fnv32Frame *f = &fr[nfr - 1u];
         f->h = (f->h ^ v) * 0x01000193u;
-        if (++f->i < f->n) break;
+        if (++f->i < f->n) {
+          break;
+        }
         v = f->h ^ (f->n + 0x9e3779b9u);
         nfr--;
       }
