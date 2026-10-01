@@ -32,10 +32,12 @@
 # tree); a LIST line with tabs (a problems.tsv or shard row) names its
 # file in the second column.  Unless THVM_ATP_RSS_ABORT_MB is set, each
 # slice is capped at min(4500, 0.9 * MemTotal / width) MB, so the caps of
-# the racing slices fit the machine.  Runs go through a per-run symlink
-# to FINDPROOF: every process of a run carries its path on the command
-# line (a slice re-execs its parent's argv[0]), and only those processes
-# are counted or killed.  Linux only (/proc, procps ps): run it on a pod.
+# the racing slices fit the machine.  Each run goes through its own
+# symlink to FINDPROOF in this script's temporary directory: every process
+# of a run carries that path on its command line (a slice re-execs its
+# parent's argv[0]), and only those processes are counted or killed, never
+# another FindProof on the machine.  Linux only (/proc, procps ps): run it
+# on a pod.
 # Exit: 0 pass, 1 a check failed, 2 usage or setup error, 3 inconclusive.
 set -u
 export LC_ALL=C
@@ -60,9 +62,12 @@ fi
 FP=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 ROOT=$(cd "$2" && pwd)
 MODE=${3:-teardown}
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/sched_teardown.XXXXXX")
-LINK=$WORK/FindProof
-ln -s "$FP" "$LINK"
+if ! WORK=$(mktemp -d "${TMPDIR:-/tmp}/sched_teardown.XXXXXX") || [ ! -d "$WORK" ]; then
+  echo "$0: cannot create a temporary directory" >&2
+  exit 2
+fi
+LINK=""
+RUN=0
 PARENT=""
 PARENTS=""
 CAP=""
@@ -88,17 +93,36 @@ at_least() {
   awk -v a="$1" -v b="$2" 'BEGIN { exit !(a >= b) }'
 }
 
-# Every live process of this script's runs, "pid stat args" per line.  The
-# tag travels in awk's environment, so awk's own command line cannot match
-# it; zombies are already dead.
+# Each run gets its own symlink to FINDPROOF, so that a process outliving
+# one run is never taken for part of the next.
+new_link() {
+  RUN=$((RUN + 1))
+  mkdir "$WORK/run$RUN"
+  LINK=$WORK/run$RUN/FindProof
+  ln -s "$FP" "$LINK"
+}
+
+# Every live process whose command line holds the tag $1 (default: the
+# current run's link), "pid stat args" per line.  A tag outside this
+# script's own directory matches nothing, so no other FindProof run on the
+# machine is ever listed or killed.  The tag travels in awk's environment,
+# so awk's own command line cannot match it; zombies are already dead.
 run_procs() {
+  local tag=${1:-$LINK}
+  case $tag in
+    "$WORK"/run*)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
   ps -ww -eo pid=,stat=,args= 2> /dev/null |
-    TAG=$LINK awk 'index($0, ENVIRON["TAG"]) > 0 && $2 !~ /^Z/'
+    TAG=$tag awk 'index($0, ENVIRON["TAG"]) > 0 && $2 !~ /^Z/'
 }
 
 kill_run() {
   local pids
-  pids=$(run_procs | awk '{ print $1 }')
+  pids=$(run_procs "${1:-$LINK}" | awk '{ print $1 }')
   if [ -n "$pids" ]; then
     kill -KILL $pids 2> /dev/null
   fi
@@ -106,7 +130,7 @@ kill_run() {
 
 cleanup() {
   local p
-  kill_run
+  kill_run "$WORK/run"
   for p in $PARENTS; do
     rm -f /tmp/thvm_sched_"$p"_*.out
   done
@@ -228,8 +252,9 @@ set_env() {
 
 # Launch one schedule run in the background: $1 wall, $2 problem.
 start_run() {
+  new_link
   env -i "${ENVV[@]}" "$LINK" --schedule --szs --proof --wall="$1" "$2" \
-    < /dev/null > "$WORK/run.out" 2> "$WORK/run.err" &
+    < /dev/null > "$WORK/last.out" 2> "$WORK/last.err" &
   PARENT=$!
   PARENTS="$PARENTS $PARENT"
   T0=$(now)
@@ -359,10 +384,11 @@ dryrun() {
   echo "dryrun: ${#probs[@]} problems at --wall=$w, each must end by $((w + 10)) s"
   for p in "${probs[@]}"; do
     name=$(basename "$p" .p)
+    new_link
     T0=$(now)
     env -i "${ENVV[@]}" "$timeout_bin" -k 5 $((w + 15)) \
       "$LINK" --schedule --szs --proof --wall="$w" "$p" \
-      < /dev/null > "$WORK/dry.out" 2> "$WORK/dry.err"
+      < /dev/null > "$WORK/last.out" 2> "$WORK/last.err"
     rc=$?
     el=$(since "$T0")
     if at_least "$el" "$longest"; then
