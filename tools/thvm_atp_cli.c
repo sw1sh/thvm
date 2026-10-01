@@ -77,4 +77,5 @@
 #include "atp_cli/provenance.c"
 #include "atp_cli/fof_split.c"
 #include "atp_cli/szs.c"
+#include "atp_cli/ifeq10.c"
 #include "atp_cli/main.c"

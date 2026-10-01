@@ -357,6 +357,7 @@ TESTS := \
   $(BIN)/test_atp_cp_graph \
   $(BIN)/test_atp_rerank \
   $(BIN)/test_atp_gnn_score \
+  $(BIN)/test_atp_ifeq10 \
   $(BIN)/test_bench_atp \
   $(BIN)/test_pri \
   $(BIN)/test_app_sup \
@@ -1087,6 +1088,11 @@ $(BIN)/FindProof: tools/thvm_atp_cli.c tools/proof_check.c $(wildcard tools/atp_
 
 $(BIN)/thvm-atp: $(BIN)/FindProof
 	cp $< $@
+
+# FindProof --emit-ifeq10 (tools/atp_cli/ifeq10.c, self-contained) against
+# TPTP's own -10 files; the source lives outside src/, so it is named here.
+$(BIN)/test_atp_ifeq10: tests/test_atp_ifeq10.c tools/atp_cli/ifeq10.c | $(BIN)
+	$(CC) $(CFLAGS) -o $@ $<
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
