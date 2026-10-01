@@ -342,6 +342,8 @@ typedef struct I10FunTab {
 static I10Name g_i10_ty_i = {I10_FIXED, -1, "$i", NULL, NULL, 0, NULL, NULL, NULL};
 static long long g_i10_interned;
 static long long g_i10_counter;
+// 0 before the first cnf or fof record, then 1 for cnf, 2 for fof.
+static int g_i10_kind;
 static int g_i10_bulk_done;
 static int g_i10_ndefs;
 static const char *g_i10_tag;
@@ -2635,9 +2637,6 @@ static void i10_print(FILE *out, I10Vec *clauses, const char *source, const char
     fputs("cnf(", out);
     i10_put_atom(out, name);
     fprintf(out, ",%s,\n    ", c->role);
-    if (c->n == 0) {
-      fputs("$false", out);
-    }
     for (int j = 0; j < c->n; j++) {
       if (j > 0) {
         fputs(" | ", out);
@@ -3155,6 +3154,12 @@ static void i10_parse_text(const char *text, const char *file, const I10Sel *sel
     if (!cnf && strcmp(kw, "fof") != 0) {
       i10_syntax(&ps, i10_fmt("unsupported record '%s' (CNF and FOF only)", kw));
     }
+    // CNF free variables take ++counter ids and FOF bound variables
+    // counter++ ids, so in mixed input two variables could share an id.
+    if (g_i10_kind != 0 && g_i10_kind != (cnf ? 1 : 2)) {
+      i10_syntax(&ps, "the problem mixes cnf and fof records");
+    }
+    g_i10_kind = cnf ? 1 : 2;
     i10_expect(&ps, I10T_LP, "'('");
     if (ps.tok != I10T_ATOM && ps.tok != I10T_NUM) {
       i10_syntax(&ps, "expected a formula name");
@@ -3217,6 +3222,7 @@ static void i10_reset(void) {
   i10_arena_free();
   g_i10_interned = 0;
   g_i10_counter = 0;
+  g_i10_kind = 0;
   g_i10_bulk_done = 0;
   g_i10_ndefs = 0;
   g_i10_tag = "";

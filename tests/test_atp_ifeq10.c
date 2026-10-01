@@ -12,7 +12,15 @@
 // same ten, and SYN143-1 (too big to inline), through FindProof against a
 // TPTP tree.
 
+// mkdtemp and unlink: on glibc a strict -std=c11 build hides them unless
+// a POSIX level is requested, while on macOS requesting one hides them.
+#if defined(__linux__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "../tools/atp_cli/ifeq10.c"
+
+#include <unistd.h>
 
 static int g_total = 0;
 static int g_fail = 0;
@@ -955,6 +963,12 @@ static const char *const k_include_in[] = {
   NULL
 };
 
+static const char *const k_mixed_in[] = {
+  "cnf(c1,axiom, p(a) ).",
+  "fof(g,conjecture, p(a) ).",
+  NULL
+};
+
 static const char *const k_twoconj_in[] = {
   "fof(g1,conjecture, p(a) ).",
   "fof(g2,conjecture, p(b) ).",
@@ -1156,6 +1170,115 @@ static void check_case(const char *name, const char *const *in, const char *cons
   }
 }
 
+// Two encodings of one input, compared byte for byte (the header's
+// Encoding line included): no global state leaks from one run to the next.
+static void check_repeat(const char *name, const char *const *in) {
+  g_total++;
+  char *text = join_lines(in);
+  FILE *t1 = tmpfile();
+  FILE *t2 = tmpfile();
+  int ok = (text != NULL && t1 != NULL && t2 != NULL);
+  char *a = NULL;
+  char *b = NULL;
+  if (ok) {
+    int r1 = ifeq10_encode(text, NULL, t1);
+    int r2 = ifeq10_encode(text, NULL, t2);
+    a = slurp(t1);
+    b = slurp(t2);
+    ok = (r1 == I10_RC_OK && r2 == I10_RC_OK && a != NULL && b != NULL && a[0] != '\0' &&
+          strcmp(a, b) == 0);
+  }
+  if (!ok) {
+    fprintf(stderr, "  FAIL %s: two encodings of one input differ\n", name);
+    if (a != NULL && b != NULL) {
+      show_diff(a, b);
+    }
+    g_fail++;
+  }
+  free(a);
+  free(b);
+  free(text);
+  if (t1 != NULL) {
+    fclose(t1);
+  }
+  if (t2 != NULL) {
+    fclose(t2);
+  }
+}
+
+static int write_text(const char *path, const char *text) {
+  FILE *f = fopen(path, "wb");
+  if (f == NULL) {
+    return 0;
+  }
+  int ok = (fputs(text, f) >= 0);
+  return (fclose(f) == 0) && ok;
+}
+
+// include('outer.ax',[o1,i1,i2,zz]) of an axiom file that itself does
+// include('inner.ax',[i1,i3]): the nested selection is the intersection,
+// so exactly o1 and i1 arrive (the merged list is longer than the inner
+// one, the case whose allocation was once too small).
+static void check_nested_include(void) {
+  g_total++;
+  static const char *const want[] = {
+    "cnf(o1,", "cnf(i1,", "cnf(c3,", "!cnf(o2,", "!cnf(i2,", "!cnf(i3,", "!w2", "!w3", "!w4", NULL
+  };
+  const char *td = getenv("TMPDIR");
+  char dir[1024];
+  snprintf(dir, sizeof dir, "%s/test_atp_ifeq10.XXXXXX", (td != NULL && td[0] != '\0') ? td : "/tmp");
+  if (mkdtemp(dir) == NULL) {
+    fprintf(stderr, "  FAIL nested include: mkdtemp\n");
+    g_fail++;
+    return;
+  }
+  char inner[1040], outer[1040], prob[1040];
+  snprintf(inner, sizeof inner, "%s/inner.ax", dir);
+  snprintf(outer, sizeof outer, "%s/outer.ax", dir);
+  snprintf(prob, sizeof prob, "%s/prob.p", dir);
+  const char *prob_text =
+    "include('outer.ax',[o1,i1,i2,zz]).\n"
+    "cnf(c3,negated_conjecture, ~ q(a) ).\n";
+  int ok = write_text(inner,
+                      "cnf(i1,axiom, ~ p(X) | q(X) ).\n"
+                      "cnf(i2,axiom, w2(a) ).\n"
+                      "cnf(i3,axiom, w3(a) ).\n") &&
+           write_text(outer,
+                      "cnf(o1,axiom, p(a) ).\n"
+                      "cnf(o2,axiom, w4(a) ).\n"
+                      "include('inner.ax',[i1,i3]).\n") &&
+           write_text(prob, prob_text);
+  FILE *tmp = ok ? tmpfile() : NULL;
+  char *got = NULL;
+  int rc = -1;
+  if (tmp != NULL) {
+    rc = ifeq10_encode(prob_text, prob, tmp);
+    got = slurp(tmp);
+    fclose(tmp);
+  }
+  ok = (rc == I10_RC_OK && got != NULL);
+  if (!ok) {
+    fprintf(stderr, "  FAIL nested include: exit %d (%s)\n", rc, g_i10_msg);
+  }
+  for (int i = 0; ok && want[i] != NULL; i++) {
+    int absent = (want[i][0] == '!');
+    const char *needle = want[i] + absent;
+    if ((strstr(got, needle) != NULL) == absent) {
+      fprintf(stderr, "  FAIL nested include: the output %s '%s'\n",
+              absent ? "contains" : "lacks", needle);
+      ok = 0;
+    }
+  }
+  free(got);
+  unlink(inner);
+  unlink(outer);
+  unlink(prob);
+  rmdir(dir);
+  if (!ok) {
+    g_fail++;
+  }
+}
+
 int main(void) {
   printf("test_atp_ifeq10\n");
   check_case("LCL096-1", k_lcl096_in, k_lcl096_out, I10_RC_OK, NULL, k_lcl096_raw);
@@ -1169,13 +1292,15 @@ int main(void) {
   check_case("ALG069+1", k_alg069_in, k_alg069_out, I10_RC_OK, NULL, NULL);
   check_case("CAT010-4", k_cat010_in, k_cat010_out, I10_RC_OK, NULL, NULL);
   // Global state resets between runs: a repeat is byte-identical.
-  check_case("LCL096-1 again", k_lcl096_in, k_lcl096_out, I10_RC_OK, NULL, NULL);
+  check_repeat("LCL096-1 twice", k_lcl096_in);
   check_case("header status", k_header_in, k_header_out, I10_RC_OK, NULL, k_header_raw);
   check_case("unit equality", k_unit_in, k_unit_out, I10_RC_OK, NULL, k_unit_raw);
   check_case("non-Horn", k_nonhorn_in, NULL, I10_RC_NONHORN, "not Horn", NULL);
   check_case("one-element model", k_sat1_in, NULL, I10_RC_SAT1, "one-element model", NULL);
   check_case("include without a path", k_include_in, NULL, I10_RC_INPUT,
              "cannot read include", NULL);
+  check_nested_include();
+  check_case("cnf and fof mixed", k_mixed_in, NULL, I10_RC_INPUT, "mixes cnf and fof", NULL);
   check_case("two conjectures", k_twoconj_in, NULL, I10_RC_INPUT, "more than one conjecture",
              NULL);
   if (g_fail == 0) {

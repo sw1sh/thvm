@@ -1084,7 +1084,7 @@ int main(int argc, char **argv) {
   const char *file = NULL;
   const char *max_steps = "500000";
   const char *wall = "120";
-  int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0, want_ifeq10 = 0;
+  int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0, want_ifeq10 = 0, check_flag = 0;
   const char *lane = NULL;
   double main_t0 = horn_now();
   g_cli_main_t0 = main_t0;
@@ -1144,10 +1144,14 @@ int main(int argc, char **argv) {
       lane = val;
       continue;
     }
-    if (nlen == 11 && strncmp(name, "emit-ifeq10", 11) == 0) { want_ifeq10 = 1; continue; }
+    if (nlen == 11 && strncmp(name, "emit-ifeq10", 11) == 0) {
+      if (val != NULL) { usage(stderr); return 2; }
+      want_ifeq10 = 1;
+      continue;
+    }
     if (nlen == 3 && strncmp(name, "szs", 3) == 0) { szs = 1; continue; }
     if (nlen == 8 && strncmp(name, "schedule", 8) == 0) { want_schedule = 1; continue; }
-    if (nlen == 5 && strncmp(name, "check", 5) == 0) { want_check = 1; continue; }
+    if (nlen == 5 && strncmp(name, "check", 5) == 0) { want_check = 1; check_flag = 1; continue; }
     if (nlen == 7 && strncmp(name, "verbose", 7) == 0) { g_cli_verbose = 1; continue; }
     if (nlen == 5 && strncmp(name, "proof", 5) == 0) {
       g_cli_want_proof = 1;
@@ -1230,6 +1234,10 @@ int main(int argc, char **argv) {
   }
   if (file == NULL) { usage(stderr); return 2; }
   if (want_ifeq10) {
+    if (want_schedule || lane != NULL || check_flag) {
+      fprintf(stderr, "FindProof: --emit-ifeq10 takes no --schedule, --lane or --check\n");
+      return 2;
+    }
     return ifeq10_main(file);
   }
   // Engine wall, set BEFORE any front-end work: the FOF clausal
