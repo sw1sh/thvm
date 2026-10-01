@@ -1457,10 +1457,20 @@ int (*thvm_atp_abort_hook)(void) = NULL;
 // macOS / freebsd and good enough for a >=1 second deadline budget.
 // Every deadline and wall-limit test reads this clock: the competition
 // kills on wall.
+#ifdef THVM_ATP_TEST_CLOCK
+// Test builds set the wall and CPU clocks by hand (tests/test_atp_guide.c
+// drives --lrs to a deterministic prune with it).
+static u64 g_atp_test_clock_us = 1u;
+#endif
+
 static u64 atp_now_us(void) {
+#ifdef THVM_ATP_TEST_CLOCK
+  return g_atp_test_clock_us;
+#else
   struct timespec ts;
   if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
   return (u64)ts.tv_sec * 1000000ull + (u64)(ts.tv_nsec / 1000);
+#endif
 }
 
 // Process CPU microseconds (CLOCK_PROCESS_CPUTIME_ID) -- the clock of
@@ -1472,7 +1482,7 @@ static u64 atp_now_us(void) {
 // engine is single-threaded, so the process clock is the prover's own
 // CPU.  Falls back to the wall clock where the CPU clock is missing.
 static u64 atp_cpu_now_us(void) {
-#ifdef CLOCK_PROCESS_CPUTIME_ID
+#if defined(CLOCK_PROCESS_CPUTIME_ID) && !defined(THVM_ATP_TEST_CLOCK)
   struct timespec ts;
   if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0) {
     return (u64)ts.tv_sec * 1000000ull + (u64)(ts.tv_nsec / 1000);
@@ -2113,10 +2123,8 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
       long long rss = thvm_atp_live_rss_bytes();
       // Proof-only trace bytes are not the search's (atp_trace_node).
       if (rss > 0) rss -= (long long)s->trace_x_bytes;
-      if (s->guide != NULL && rss > 0 && s->rss_guard_baseline != 0) {
-        s->rss_guard_growth = rss - s->rss_guard_baseline;
-        s->rss_guard_cap    = rss_cap_bytes;
-      }
+      // Nor are the selection layer's own allocations (src/atp/guide.c).
+      if (rss > 0 && s->guide != NULL) rss -= atp_guide_bytes(s);
       if (rss > 0 && s->rss_guard_baseline == 0) {
         s->rss_guard_baseline = rss;   // first successful poll: baseline
       } else if (rss > 0 && rss - s->rss_guard_baseline > rss_cap_bytes) {

@@ -6,7 +6,15 @@ every weight pick (the heap-root branch of `thvm_atp_select_cp`, once the
 KD-heap, w2, goal, random and FIFO / age dimensions declined) a
 compiled-in head chooses the CP to extract.  FIFO and age picks are
 untouched.  The layer generalizes the top-K re-ranker `src/atp/topk.c`:
-its 18-input heads compile in as layout `topk18`.
+its 18-input heads compile in as layout `topk18`, with one divergence:
+topk.c materializes a deferred (implicit) slot and scores its real push
+features, while the layer reads them as missing (zeros), so a topk18
+head picks differently from `--rerank-model` on raw-desc and deferred
+lanes.
+
+The layer does not pick under `THVM_ATP_KDHEAP` (the KD-heap branch takes
+every pick; arming prints a warning) and refuses to arm beside the top-K
+re-ranker (`THVM_ATP_RERANK_TOPK`), whose branch precedes it.
 
 ## Knobs
 
@@ -21,9 +29,19 @@ creates.  Development overrides (env only): `THVM_ATP_GUIDE_MODE=topk:<k>`
 or `lazy:<k>[:<tau>]`, and `THVM_ATP_GUIDE_COOP=<r>`, replace the
 family's integration, for choosing a family's mode on VAL.
 `THVM_ATP_GUIDE_DUMP=<path>` (with `THVM_ATP_GUIDE_DUMP_MAX`, default 400
-picks) writes every scored candidate for the parity check.  Hosts and
-tests arm with `thvm_atp_guide_arm(s, family, model_id, zero)` before the
-engine's first push.
+picks) writes every scored candidate for the parity check; each armed
+engine appends one `# guide` header (model, integration, zero, lane) and
+its rows.  Hosts and tests arm with
+`thvm_atp_guide_arm(s, family, model_id, zero, lane)` before the engine's
+first push.
+
+**The lane.**  The lane one-hot is the lane's own: the head's lane table
+(`LaneNames`) is searched for `THVM_ATP_GUIDE_LANE`, else
+`FINDPROOF_SLICE` (the name every schedule slice and `--lane` run
+carries), a twin `enigma-<base>` reading as `<base>`; a lane the table
+does not name takes the family entry's index.  So every twin of a
+family that spans several lanes (the twee lanes, say) sees the column
+its harvest's lane tag gave it in training.
 
 ## The score and the integrations
 
@@ -41,9 +59,12 @@ One hidden layer of at most 128 units; kappa >= 0.
   accepted: the best scored one.  None reachable: the root.  Every
   candidate is the engine's next one when it is scored, so its rank input
   is 0.
-- **coop**: every r-th weight pick goes to the plain engine (the root,
-  unscored), counted by the layer's own counter.  The w2_modulo branch is
-  not used: it scans the whole heap.
+- **coop**: the r-th, 2r-th, ... non-trivial weight selection goes to the
+  plain engine (the root, unscored).  The layer's own counter advances
+  when the pick survives the orphan test, so an orphan re-pick repeats
+  its selection's decision, and trivial picks (one CP queued, an
+  ultimate root) do not count.  The w2_modulo branch is not used: it
+  scans the whole heap.
 
 Demotion is a side key: a bitmap by seq.  A CP keeps its seq while it is
 queued and no seq is stamped twice, so a set bit names one CP across
@@ -73,7 +94,7 @@ export's `F` record).
 | 6 | log1p(f5, GT weight) * | 15 | log1p(cp_depth) * |
 | 7 | log1p(f6, MIX2 weight) * | 16 | 1 when the push features are missing (a deferred slot; 2-11, 13, 14 are then 0) |
 | 8 | log1p(f7, goal weight) * | | |
-| 17 | log1p(n_cps) | 19 | RSS growth / cap at the RSS guard's last poll, floored to 1/64, at most 2 |
+| 17 | log1p(n_cps) | 19 | term-heap growth since arming, in bytes, over the RSS guard's cap (`THVM_ATP_RSS_ABORT_MB`, default 8 GB), floored to 1/64, at most 2 |
 | 18 | log1p(pushes per selection over the last 64 selections) | 20.. | phi(p), then the one-hot of the family's lane id |
 
 f4 (a copy of f0) is dropped.  `*` marks the columns normalized per
@@ -82,15 +103,25 @@ candidate scored at each pick: exact over the first 256 such picks, then
 an exponential mean with weight 1/256, updated before the pick's
 candidates are scored.
 
+Column 19 measures memory by the search's own term heap (FindProof runs
+no collector, so it only grows), not by the process RSS: the RSS depends
+on the allocator, page faults and the host, and counts the layer's own
+memory, so a head reading it would not pick reproducibly.
+
+In a lazy integration every candidate is the engine's next one when it
+is scored, so x[0] = 0: a lazy family's head is trained on rows with
+x[0] = 0 (the parity tool checks a lazy dump for it).
+
 Layout `topk18` is `src/atp/topk.c`'s input: log1p(rank), log1p(n_cps),
 log1p(cp_pri), f0..f13 raw, log1p(selections since push).
 
 **phi(p) seam.** The layer reads problem features from
 `thvm_atp_guide_set_phi(const AtpGuidePhi *)` (`n` values, at most 64),
 set in the process that runs the engine before its first weight pick; it
-folds them in at that pick and again whenever they are set anew.
-FindProof does not call it yet, so each phi column reads as its training
-mean (z = 0).  The seam for the plan's phi(p) function (section 3.1: one
+folds them in at that pick and again whenever they are set anew.  A
+non-finite value reads as its training mean.  FindProof does not call it
+yet, so each phi column reads as its training mean (z = 0); see the open
+items.  The seam for the plan's phi(p) function (section 3.1: one
 function serves `--problem-features` and deployment) is this call, with
 the same row, in the lane's process before `atp_bench_main` runs.
 
@@ -129,20 +160,75 @@ Unarmed, `s->guide` is NULL and every hook is one predictable branch.
 - A deferred (implicit) slot is not decoded: its content is the raw
   overlap from the trace, and past the default trace cap that exists
   only with `--proof`.  The layer never reads `cp_uid_a/b`.
-- The per-pick work runs in a work-clock exclusion window.  Outside it an
-  armed layer runs a few dozen instructions per step: the selection log,
-  the two goal compares, the window's own edges, and the coop and trivial
-  picks.  `--work-clock=instr` still counts them, so in a clock-gated
-  lane (`--lrs`, `--cp-set-ir-budget`) a decision can land one selection
-  apart from the base lane's; under the CPU clock such lanes differ from
-  run to run anyway.  Lanes without a clock-gated discipline never read
-  the clock and are exact.  Gate G2.2 runs should keep the clock trace
-  (`THVM_ATP_CLOCK_TRACE`) to tell a drifted decision from a layer bug.
+- In a `--guide-zero` twin the per-pick work runs in a work-clock
+  exclusion window, so its clock-gated disciplines see the base lane's
+  clock.  A deployed (non-zero) twin keeps its selection work on the
+  clock: `--lrs` predicts its reach from the selection rate and the
+  cp-set-ir budget meters the search, and both must see what a guided
+  selection really costs, or LRS would prune too little.
+- Outside the window an armed layer runs a few dozen instructions per
+  step: the selection log, the two goal compares, the window's own edges,
+  and the coop and trivial picks.  The twin's environment is also longer
+  by its `THVM_ATP_GUIDE*` variables, and an uncached getenv in a hot
+  path costs work in proportion to the environment's size.
+  `--work-clock=instr` counts both, so in a clock-gated lane (`--lrs`,
+  `--cp-set-ir-budget`) a decision can land a few selections apart from
+  the base lane's; under the CPU clock such lanes differ from run to run
+  anyway.  Lanes without a clock-gated discipline never read the clock
+  and are exact.
+- The RSS guard discounts the layer's own allocations (about 120 KB plus
+  4 bytes per selection, the goal versions and the demotion bitmap), but
+  not heap pages a pick's scratch decode touches past the base lane's
+  high-water mark, so near the cap a twin's guard can abort a few polls
+  apart from its base lane's.
+- A non-finite correction (none can arise from validated weights and
+  finite inputs) reads as 0 and is counted (`nonfinite=`).
 - Per-pick cost counters print as one `% guide:` line on stderr after
   the engine stats: picks, scored, coop and trivial picks, changed picks,
-  evaluations, feature decodes, missing features, heap nodes visited,
-  demotions, accepted / fallback / blocked lazy picks, dirty picks, total
-  time, microseconds per scored pick and per pick, and the slowest pick.
+  weight and coop selections, evaluations, feature decodes, missing
+  features, heap nodes visited, demotions, accepted / fallback / blocked
+  lazy picks, dirty picks, non-finite corrections, total time, the
+  layer's time as a fraction of the time since arming (`frac_wall`, the
+  plan's 5% cost gate), microseconds per scored pick and per pick, and
+  the slowest pick.  Wall-stopped bench runs print it too (the bench
+  stops at the wall and prints its stats); only the alarm backstop a
+  second later does not.
+
+## Gates G2.2 and G2.4
+
+`tests/atp_guide_gates.sh` (pods only) runs, per family, lane and
+problem, the base lane and its zero twin with `--proof --szs
+--work-clock=instr`, the selection trace and the clock trace, and prints
+one PASS or FAIL line each:
+
+- stdout (status, proof) and the engine stats (LRS prune and recompute
+  counters included) are compared after masking timings, the goal path
+  and the twin's `% guide:` line; the selections are compared pick by
+  pick.
+- A lane that logs no clock-gated decision must agree on everything.  A
+  clock-gated lane must agree on every selection up to its first
+  clock-gated decision whose line differs (plan section 5.4, amendment
+  A1); the script prints that selection index.
+- The base run carries `THVM_ATP_GUIDP*` variables of the same lengths as
+  the twin's `THVM_ATP_GUIDE*`, so both environments cost the same to
+  scan.
+- The twin must print a `% guide:` line with picks > 0 and `frac_wall`.
+
+With `HEAD=<head.safetensors>` (compiled in, `MODEL=<id>`) it also runs
+the non-zero twin with the dump and `weights_to_c.py parity` (G2.4);
+`FEATPARITY=1` adds the history export, `np0_extract.py` and
+`weights_to_c.py featparity`.
+
+## Open items
+
+- FindProof copies the plan's phi(p) row into an `AtpGuidePhi` and calls
+  `thvm_atp_guide_set_phi` before `atp_bench_main`, once enigma-phi
+  lands; a test then checks that a FindProof-shaped run dumps x[20..] equal
+  to it.
+- Columns 13, 14 (goal symbols), 19 (term-heap growth), phi and the lane
+  are not in history export v2: the M3 harvest reads them from the
+  `THVM_ATP_GUIDE_DUMP` channel (guide_net.py consumes dumps), and
+  `featparity` checks the other columns against the export.
 
 ## Heads and the generator
 
@@ -166,16 +252,38 @@ with the one family `*:0:topk:K:0:0`.  Heads total at most 2 MB.  The
 shipped head `example` (v1, 22 inputs, hidden 4, family `*` top-K 16)
 exists so the build compiles.
 
-`parity` rescores a `THVM_ATP_GUIDE_DUMP` file in float64: each
-candidate's correction and score to 1e-9, and each pick's decision
-(gate G2.4).
+Metadata `LaneNames` (optional) lists the `Lanes` lane names in one-hot
+order; `weights_to_c.py lanes head.safetensors listed.txt` checks them
+against `FindProof --list-lanes` (every name a lane, in that order).
+Model ids, family and lane names match `[A-Za-z0-9_.-]{1,47}` (a family
+may be `*`), so a name is a safe C string literal.
 
-Tests: `tests/test_atp_guide.c` (zero-correction exactness on synthetic
-queues and on whole KBO, LPO, completion, goal-after-axioms and
-CP-set-interreduction runs; forward parity against a plain reference;
-the input columns; phi set after arming; topk18 inputs against
-`thvm_atp_cp_features`; push features against the history export's `F`
-records; the goal versions; a decoding pick leaving the heap pointer,
-the memo epochs and the LPO statistics unchanged; per-problem
-normalization; layered-lazy semantics; coop cadence; LRS side-key
-isolation; cost counters; the dump; arming from the environment).
+`parity` rescores a `THVM_ATP_GUIDE_DUMP` file in float64, each session
+(armed engine) apart: each candidate's correction and score to 1e-9,
+each pick's decision (gate G2.4), and rank input 0 on every lazy row.
+`featparity run.npz dump.tsv` rebuilds the first session's columns 0-12
+and 15-18, and each top-K pick's candidate set, from the same run's
+history export (`np0_extract.py` of a `THVM_ATP_HISTORY_RATE=1
+THVM_ATP_HISTORY_CPFEAT=1` run, no negative subsampling) to 1e-9: the
+per-problem running means, the selections since push and the queue
+growth included.
+
+Tests: `tests/test_atp_guide.c`, built with `THVM_ATP_GUIDE_CHECK` (a
+clean pick that writes a cell-keyed KBO or LPO memo aborts) and
+`THVM_ATP_TEST_CLOCK` (the test sets the wall and CPU clocks), and again
+as `test_atp_guide_ac` with FindProof's AC and MNF defines: zero-correction
+exactness on synthetic queues and on whole KBO, LPO, RPO, AC (in the AC
+build), completion, goal-after-axioms and CP-set-interreduction runs,
+selections, counters, trace length and extracted proof alike, with the
+dirty fallback asserted under RPO and AC; whole `--lrs` runs pruned under
+the test clock (zero twins prune as the engine; a non-zero lazy head's
+demotions and the heap's keys survive each prune); the engineering traps
+(no `cp_uid_a/b` without orphan murder; the trace cap does not steer a
+non-zero pick); the lane one-hot; non-finite phi and corrections; forward
+parity against a plain reference; the input columns; phi set after
+arming; topk18 inputs against `thvm_atp_cp_features`; push features
+against the history export's `F` records; the goal versions; a decoding
+pick leaving the heap pointer, the memo epochs and the LPO statistics
+unchanged; per-problem normalization; layered-lazy semantics; coop
+cadence, orphan re-picks included; LRS side-key isolation; cost counters;
+the dump; arming from the environment.

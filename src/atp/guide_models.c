@@ -181,6 +181,7 @@ static const AtpGuideModel atp_guide_model_table[1] = {
     .kappa  = 0x1p+0f,
     .n_fam  = 1u,
     .fam    = atp_guide_m0_fam,
+    .lanes  = NULL,
   },
 };
 

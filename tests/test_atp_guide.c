@@ -20,12 +20,25 @@
 //                     memo epoch or LPO statistic (KBO and LPO lanes)
 //   normalization     the per-problem running mean
 //   lazy              accept / demote / fallback / blocked, the k cap
-//   coop              every coop-th call returns the root unscored
+//   coop              every coop-th weight selection takes the root
+//                     unscored, orphan re-picks included
 //   lrs-side-key      demotion never touches cp_pri, cp_seq or the heap,
 //                     and follows its CP across row moves
+//   lrs-run           whole --lrs runs pruned under the test clock: zero
+//                     twins prune exactly as the engine; a non-zero lazy
+//                     head's demotion survives the prune's row moves
+//   traps             the plan's engineering traps: no cp_uid_a/b without
+//                     orphan murder; the trace cap does not steer a pick
+//   lanes             the lane one-hot from the lane's name
+//   nonfinite         a non-finite phi reads as its mean; a non-finite
+//                     correction counts and reads as 0
 //   cost-counters     the counters' invariants and the stats line
 //   dump              the parity dump's rows
 //   env               arming from THVM_ATP_GUIDE* in thvm_atp_init
+//
+// Built with THVM_ATP_GUIDE_CHECK (a clean pick that writes a cell-keyed
+// memo aborts) and THVM_ATP_TEST_CLOCK (the wall and CPU clocks read
+// g_atp_test_clock_us); test_atp_guide_ac adds FindProof's AC and MNF.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -43,12 +56,32 @@
 #define LAB_g 6u
 #define VAR_x 0u
 
-static Term mk_e(void) { return term_new_ctr(LAB_e, NULL, 0); }
-static Term mk_a(void) { return term_new_ctr(LAB_a, NULL, 0); }
-static Term mk_b(void) { return term_new_ctr(LAB_b, NULL, 0); }
-static Term mk_f(Term x, Term y) { Term cs[2] = {x, y}; return term_new_ctr(LAB_f, cs, 2); }
-static Term mk_i(Term x)         { Term cs[1] = {x};    return term_new_ctr(LAB_i, cs, 1); }
-static Term mk_g(Term x)         { Term cs[1] = {x};    return term_new_ctr(LAB_g, cs, 1); }
+static Term mk_e(void) {
+  return term_new_ctr(LAB_e, NULL, 0);
+}
+
+static Term mk_a(void) {
+  return term_new_ctr(LAB_a, NULL, 0);
+}
+
+static Term mk_b(void) {
+  return term_new_ctr(LAB_b, NULL, 0);
+}
+
+static Term mk_f(Term x, Term y) {
+  Term cs[2] = {x, y};
+  return term_new_ctr(LAB_f, cs, 2);
+}
+
+static Term mk_i(Term x) {
+  Term cs[1] = {x};
+  return term_new_ctr(LAB_i, cs, 1);
+}
+
+static Term mk_g(Term x) {
+  Term cs[1] = {x};
+  return term_new_ctr(LAB_g, cs, 1);
+}
 
 // KBO: i weight 0 and greatest; precedence i > f > g > b > e > a.
 static u32 gw[7] = {0, 1, 0, 1, 1, 1, 1};
@@ -58,6 +91,7 @@ static const KboConfig CFG = {
 };
 static u32 lp[7] = {0, 1, 6, 5, 2, 3, 4};
 static const LpoConfig LPO = { .precedence = lp, .n_labels = 7 };
+static const RpoConfig RPO = { .precedence = lp, .status = NULL, .n_labels = 7 };
 
 // --- heads built at run time -------------------------------------------
 
@@ -157,7 +191,7 @@ static int arm(AtpState *s, TestHead *t, u32 mode, u32 k, double tau, u32 coop, 
   t->fam.k    = k;
   t->fam.tau  = tau;
   t->fam.coop = coop;
-  return atp_guide_arm(s, &t->m, &t->fam, "test", zero);
+  return atp_guide_arm(s, &t->m, &t->fam, "test", zero, NULL);
 }
 
 // A temporary file path (mkstemp template) under $TMPDIR.
@@ -177,12 +211,26 @@ static void tmp_template(char *buf, size_t n, const char *stem) {
 //   5 problem 0 with CP-set interreduction every 4 rules and orphan murder
 //   6 the goal i(f(a, b)) = f(i(b), i(a)) set after the axioms, KBO
 //   7 problem 6 under LPO
-#define N_PROBLEMS 8u
+//   8 problem 0 under RPO: every decoding pick is dirty
+//   9 (AC builds) f associative-commutative, the goal i(f(a, b)) =
+//     f(i(a), i(b)): every decoding pick is dirty
+#define N_DIRTY0 8u
+#ifdef THVM_ATP_AC
+#define N_PROBLEMS 10u
+#else
+#define N_PROBLEMS 9u
+#endif
 
 static AtpState *problem(u32 which) {
+#ifdef THVM_ATP_AC
+  thvm_atp_set_ac_mask((which == 9u) ? (1ull << LAB_f) : 0ull);
+#endif
   AtpState *s = thvm_atp_init(&CFG, 5000u);
   if (which == 2u || which == 4u || which == 7u) {
     thvm_atp_set_lpo(s, &LPO);
+  }
+  if (which == 8u) {
+    thvm_atp_set_rpo(s, &RPO);
   }
   if (which == 5u) {
     thvm_atp_set_cp_set_interreduce(s, 1u);
@@ -192,8 +240,17 @@ static AtpState *problem(u32 which) {
   return s;
 }
 
+static void problem_free(AtpState *s) {
+  thvm_atp_free(s);
+#ifdef THVM_ATP_AC
+  thvm_atp_set_ac_mask(0ull);
+#endif
+}
+
 static void problem_goal(AtpState *s, u32 which) {
-  if (which >= 6u) {
+  if (which == 9u) {
+    thvm_atp_set_goal(s, mk_i(mk_f(mk_a(), mk_b())), mk_f(mk_i(mk_a()), mk_i(mk_b())));
+  } else if (which >= 6u && which != 8u) {
     thvm_atp_set_goal(s, mk_i(mk_f(mk_a(), mk_b())), mk_f(mk_i(mk_b()), mk_i(mk_a())));
   } else {
     thvm_atp_set_goal(s, mk_i(mk_i(mk_a())), mk_a());
@@ -201,8 +258,8 @@ static void problem_goal(AtpState *s, u32 which) {
 }
 
 static void problem_load(AtpState *s, u32 which) {
-  u8 goal_first = (which == 0u || which == 2u || which == 5u);
-  u8 goal_last  = (which == 3u || which == 4u || which >= 6u);
+  u8 goal_first = (which == 0u || which == 2u || which == 5u || which >= 8u);
+  u8 goal_last  = (which == 3u || which == 4u || which == 6u || which == 7u);
   if (goal_first) {
     problem_goal(s, which);
   }
@@ -224,14 +281,48 @@ typedef struct {
   u32 rules;
   u32 cps;
   u32 steps;
+  u32 lrs_recomputes;
+  u32 lrs_dropped;
+  u32 n_trace;
+  u32 proof_steps;    // PROVED: thvm_atp_proof_extract's step count
+  u32 proof_len;      // and the serialized proof's length and hash
+  u64 proof_hash;
 } Traj;
 
 static Traj T_BASE, T_ARM;
+
+static AtpProofStep PROOF[ATP_PROOF_MAX_STEPS];
+static char         PROOF_TXT[1u << 20];
+
+// Before step k the test clock reads T0 + k * DT (lrs-run); 0: untouched.
+static u64 g_clock_t0 = 0u;
+#define CLOCK_DT 1000u
+
+static void traj_proof(AtpState *s, Traj *t) {
+  t->proof_steps = 0u;
+  t->proof_len   = 0u;
+  t->proof_hash  = 0u;
+  if (t->status != (int)ATP_PROVED) {
+    return;
+  }
+  u32 n = thvm_atp_proof_extract(s, PROOF, ATP_PROOF_MAX_STEPS);
+  u32 len = thvm_atp_proof_serialize(PROOF, n, PROOF_TXT, (u32)sizeof PROOF_TXT);
+  u64 h = 1469598103934665603ull;
+  for (u32 i = 0; i < len; i++) {
+    h = (h ^ (u8)PROOF_TXT[i]) * 1099511628211ull;
+  }
+  t->proof_steps = n;
+  t->proof_len   = len;
+  t->proof_hash  = h;
+}
 
 static void run_traj(AtpState *s, u32 max_steps, Traj *t) {
   t->n = 0u;
   AtpStatus st = ATP_RUNNING;
   for (u32 k = 0; k < max_steps; k++) {
+    if (g_clock_t0 != 0u) {
+      g_atp_test_clock_us = g_clock_t0 + (u64)k * CLOCK_DT;
+    }
     u32 before = s->cp_select_count;
     st = thvm_atp_step(s);
     if (s->cp_select_count != before && t->n < TRAJ_MAX) {
@@ -241,16 +332,22 @@ static void run_traj(AtpState *s, u32 max_steps, Traj *t) {
       break;
     }
   }
-  t->status = (int)st;
-  t->sel    = s->cp_select_count;
-  t->rules  = s->n_rules;
-  t->cps    = s->n_cps;
-  t->steps  = s->step;
+  t->status         = (int)st;
+  t->sel            = s->cp_select_count;
+  t->rules          = s->n_rules;
+  t->cps            = s->n_cps;
+  t->steps          = s->step;
+  t->lrs_recomputes = s->n_lrs_recomputes;
+  t->lrs_dropped    = s->n_cps_dropped_lrs;
+  t->n_trace        = s->n_trace;
+  traj_proof(s, t);
 }
 
-static int traj_eq(const Traj *a, const Traj *b) {
+// The search: every selection, the status and the end counters.
+static int traj_eq_search(const Traj *a, const Traj *b) {
   if (a->n != b->n || a->status != b->status || a->sel != b->sel || a->rules != b->rules ||
-      a->cps != b->cps || a->steps != b->steps) {
+      a->cps != b->cps || a->steps != b->steps || a->lrs_recomputes != b->lrs_recomputes ||
+      a->lrs_dropped != b->lrs_dropped) {
     return 0;
   }
   for (u32 i = 0; i < a->n; i++) {
@@ -259,6 +356,13 @@ static int traj_eq(const Traj *a, const Traj *b) {
     }
   }
   return 1;
+}
+
+// The search, the trace and the proof.
+static int traj_eq(const Traj *a, const Traj *b) {
+  return traj_eq_search(a, b) && a->n_trace == b->n_trace &&
+         a->proof_steps == b->proof_steps && a->proof_len == b->proof_len &&
+         a->proof_hash == b->proof_hash;
 }
 
 // --- synthetic queues ------------------------------------------------------
@@ -475,13 +579,21 @@ int main(void) {
     CHECK(!atp_guide_parse_mode("wide:4", &p));
 
     AtpState *s = thvm_atp_init(&CFG, 100u);
-    CHECK_EQ(thvm_atp_guide_arm(s, "twee", NULL, 1u), 1);
+    CHECK_EQ(thvm_atp_guide_arm(s, "twee", NULL, 1u, NULL), 1);
     CHECK(s->guide != NULL && G(s)->m == m && G(s)->zero == 1u);
-    CHECK_EQ(thvm_atp_guide_arm(s, "twee", NULL, 1u), 0);
+    CHECK_EQ(thvm_atp_guide_arm(s, "twee", NULL, 1u, NULL), 0);
     thvm_atp_free(s);
     s = thvm_atp_init(&CFG, 100u);
-    CHECK_EQ(thvm_atp_guide_arm(s, "twee", "no-such-head", 0u), 0);
+    CHECK_EQ(thvm_atp_guide_arm(s, "twee", "no-such-head", 0u, NULL), 0);
     CHECK(s->guide == NULL);
+    thvm_atp_free(s);
+    // The top-K re-ranker's branch precedes the layer's: never both.
+    s = thvm_atp_init(&CFG, 100u);
+    static int topk_stub;
+    s->topk = &topk_stub;
+    CHECK_EQ(thvm_atp_guide_arm(s, "twee", NULL, 1u, NULL), 0);
+    CHECK(s->guide == NULL);
+    s->topk = NULL;
     thvm_atp_free(s);
   }
 
@@ -705,13 +817,16 @@ int main(void) {
 
   TEST_BEGIN("atp/guide/zero-exact-run");
   {
-    // Whole runs: every selection, the status and the end counters of a
-    // zero-correction twin equal its unguided run's.  Every run starts at
-    // the same heap cell: the persistent LPO memo is keyed on cell
-    // addresses, so two runs at different offsets could differ by
-    // themselves.
+    // Whole runs: every selection, the status, the end counters, the
+    // trace length and the extracted proof of a zero-correction twin
+    // equal its unguided run's.  Every run starts at the same heap cell:
+    // the persistent LPO memo is keyed on cell addresses, so two runs at
+    // different offsets could differ by themselves.  Problems N_DIRTY0 on
+    // take the dirty fallback (RPO; AC in AC builds) at every decoding
+    // pick.
     u64 hc0 = thvm_atp_heap_checkpoint();
     u64 gc0 = gc_count();
+    u32 proved = 0u;
     for (u32 which = 0; which < N_PROBLEMS; which++) {
       if (gc_count() == gc0) {
         thvm_atp_heap_reset(hc0);
@@ -719,15 +834,16 @@ int main(void) {
       AtpState *s = problem(which);
       problem_load(s, which);
       run_traj(s, 600u, &T_BASE);
-      thvm_atp_free(s);
+      problem_free(s);
       CHECK(T_BASE.n > 3u);
+      proved += (u32)(T_BASE.proof_steps > 0u);
       for (u32 cfg = 0; cfg < 5u; cfg++) {
         if (gc_count() == gc0) {
           thvm_atp_heap_reset(hc0);
         }
         s = problem(which);
         switch (cfg) {
-          case 0u: CHECK_EQ(thvm_atp_guide_arm(s, "twee", NULL, 1u), 1); break;
+          case 0u: CHECK_EQ(thvm_atp_guide_arm(s, "twee", NULL, 1u, NULL), 1); break;
           case 1u: CHECK(arm(s, &H_RAND, ATP_GUIDE_TOPK, 8u, 0.0, 0u, 1u)); break;
           case 2u: CHECK(arm(s, &H_RAND, ATP_GUIDE_LAZY, 8u, 0.0, 0u, 1u)); break;
           case 3u: CHECK(arm(s, &H_TOPK18, ATP_GUIDE_TOPK, 64u, 0.0, 3u, 1u)); break;
@@ -740,10 +856,15 @@ int main(void) {
         CHECK(G(s)->n_feat > 0u);
         CHECK_EQ(G(s)->n_changed, 0u);
         CHECK_EQ(G(s)->n_demote, 0u);
-        CHECK_EQ(G(s)->n_dirty, 0u);
-        thvm_atp_free(s);
+        if (which < N_DIRTY0) {
+          CHECK_EQ(G(s)->n_dirty, 0u);
+        } else {
+          CHECK(G(s)->n_dirty > 0u);
+        }
+        problem_free(s);
       }
     }
+    CHECK(proved > 0u);
   }
 
   TEST_BEGIN("atp/guide/forward-parity");
@@ -761,8 +882,10 @@ int main(void) {
     for (u32 k = 0; k < 40u && thvm_atp_step(s) == ATP_RUNNING; k++) {
     }
     AtpGuide *g = G(s);
-    s->rss_guard_cap    = 1000;
-    s->rss_guard_growth = 300;
+    // Column 19: the term heap's growth since arming over the cap; the
+    // pick's checkpoint is the current HEAP_NEXT.
+    CHECK(HEAP_NEXT > g->heap0);
+    g->mem_cap = (double)(HEAP_NEXT - g->heap0) * (double)sizeof(Term) / (19.5 / 64.0);
     if (s->n_cps >= 2u) {
       u32 pos = atp_guide(s);
       u32 n = (s->n_cps < 16u) ? s->n_cps : 16u;
@@ -966,39 +1089,55 @@ int main(void) {
 
   TEST_BEGIN("atp/guide/coop");
   {
-    // Top-K 4 prefers rank 3; every 3rd call returns the root unscored,
-    // through the layer's own counter (no w2 pick).
+    // Top-K 4 prefers rank 3; every 3rd weight selection takes the root
+    // unscored, through the layer's own counter (no w2 pick).  Pris 2..11
+    // at seqs 0..9; the last pick (one CP queued) is trivial.
     AtpState *s = thvm_atp_init(&CFG, 100u);
     CHECK(arm(s, &H_RANK, ATP_GUIDE_TOPK, 4u, 0.0, 3u, 0u));
     rank_queue(s);
     AtpGuide *g = G(s);
-    u32 p5 = pos_of_pri(s, 5u);
-    CHECK(p5 != 0u && p5 != 0xffffffffu);
-    for (u32 call = 1; call <= 9u; call++) {
-      u64 ev0 = g->n_eval;
-      u32 pos = atp_guide(s);
-      if (call % 3u == 0u) {
-        CHECK_EQ(pos, 0u);
-        CHECK_EQ(g->n_eval, ev0);
-      } else {
-        CHECK_EQ(pos, p5);
-        CHECK_EQ(g->n_eval, ev0 + 4u);
-      }
+    static const u32 want[10] = {3u, 4u, 0u, 6u, 7u, 1u, 9u, 8u, 2u, 5u};
+    for (u32 k = 0; k < 10u; k++) {
+      CHECK_EQ(pop_seq(s), want[k]);
     }
-    CHECK_EQ(g->n_pick, 9u);
+    CHECK_EQ(g->n_pick, 10u);
+    CHECK_EQ(g->n_trivial, 1u);
     CHECK_EQ(g->n_coop, 3u);
     CHECK_EQ(g->n_scored, 6u);
     CHECK_EQ(g->n_changed, 6u);
+    CHECK_EQ(g->n_wsel, 9u);
+    CHECK_EQ(g->n_coop_sel, 3u);
+    CHECK_EQ(g->n_bounds, 10u);
     CHECK_EQ(s->w2_modulo, 0u);
     CHECK_EQ(s->n_cps_w2_picks, 0u);
-    // Through select_cp: calls 10, 11 pop pri 5 and pri 6 (seq 3, 4),
-    // call 12 the root (pri 2, seq 0).
-    CHECK_EQ(pop_seq(s), 3u);
-    CHECK_EQ(pop_seq(s), 4u);
-    CHECK_EQ(pop_seq(s), 0u);
-    CHECK_EQ(g->n_coop, 4u);
-    CHECK_EQ(g->n_bounds, 3u);
+    // Calls that select nothing do not advance the cadence.
     thvm_atp_free(s);
+    s = thvm_atp_init(&CFG, 100u);
+    CHECK(arm(s, &H_RANK, ATP_GUIDE_TOPK, 4u, 0.0, 3u, 0u));
+    rank_queue(s);
+    g = G(s);
+    for (u32 call = 0; call < 5u; call++) {
+      CHECK(atp_guide(s) != 0u);
+    }
+    CHECK_EQ(g->n_coop, 0u);
+    thvm_atp_free(s);
+
+    // Orphan murder on the completion problem (rules interreduced away
+    // leave orphans queued until they are popped): an orphan re-pick
+    // repeats its selection's decision, so the coop selections are
+    // exactly every 3rd weight selection.
+    s = problem(1u);
+    thvm_atp_set_use_orphan_murder(s, 1u);
+    CHECK(arm(s, &H_RAND, ATP_GUIDE_TOPK, 8u, 0.0, 3u, 1u));
+    problem_load(s, 1u);
+    run_traj(s, 600u, &T_ARM);
+    g = G(s);
+    CHECK(g->n_wsel > 6u);
+    CHECK_EQ(g->n_coop_sel, g->n_wsel / 3u);
+    CHECK_EQ(g->n_pick, g->n_trivial + g->n_coop + g->n_scored);
+    // Re-picks happened: more non-trivial calls than weight selections.
+    CHECK(g->n_scored + g->n_coop > g->n_wsel);
+    problem_free(s);
   }
 
   TEST_BEGIN("atp/guide/lrs-side-key");
@@ -1044,6 +1183,218 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/guide/lrs-run");
+  {
+    // Whole --lrs runs of problem 1 (completion) under the test clock:
+    // before step k both clocks read T0 + k * DT and the deadline is K
+    // steps away, so the horizon shrinks into prunes at the same
+    // selections in every run.  Zero twins (top-K and lazy) prune exactly
+    // as the engine; under a non-zero lazy head (no goal: every candidate
+    // is rejected and demoted) each prune's backfill and rebuild keep
+    // every demotion with its CP and the heap's keys with their rows.
+    u64 hc0 = thvm_atp_heap_checkpoint();
+    u64 gc0 = gc_count();
+    AtpState *s = problem(1u);
+    problem_load(s, 1u);
+    run_traj(s, 600u, &T_BASE);
+    problem_free(s);
+    u32 K = T_BASE.steps / 2u;
+    if (K < 12u) {
+      K = 12u;
+    }
+    static Traj T_LRS;
+    static u8 was_dem[1u << 16];
+    for (u32 cfg = 0; cfg < 4u; cfg++) {
+      if (gc_count() == gc0) {
+        thvm_atp_heap_reset(hc0);
+      }
+      s = problem(1u);
+      switch (cfg) {
+        case 1u: CHECK(arm(s, &H_RAND, ATP_GUIDE_TOPK, 8u, 0.0, 0u, 1u)); break;
+        case 2u: CHECK(arm(s, &H_RAND, ATP_GUIDE_LAZY, 8u, 0.0, 0u, 1u)); break;
+        case 3u: CHECK(arm(s, &H_LAZY, ATP_GUIDE_LAZY, 8u, 0.5, 0u, 0u)); break;
+        default: break;
+      }
+      s->use_lrs               = 1u;
+      s->lrs_recompute_period  = 4u;
+      s->lrs_warmup_selections = 4u;
+      g_clock_t0               = 1000000u;
+      g_atp_test_clock_us      = g_clock_t0;
+      s->wall_deadline_us      = g_clock_t0 + (u64)K * CLOCK_DT;
+      problem_load(s, 1u);
+      if (cfg < 3u) {
+        run_traj(s, K + 8u, (cfg == 0u) ? &T_LRS : &T_ARM);
+        if (cfg == 0u) {
+          CHECK(T_LRS.lrs_recomputes > 0u);
+          CHECK(T_LRS.lrs_dropped > 0u);
+        } else {
+          CHECK(traj_eq(&T_LRS, &T_ARM));
+          CHECK_EQ(G(s)->n_changed, 0u);
+          CHECK_EQ(G(s)->n_demote, 0u);
+        }
+      } else {
+        u32 prunes = 0u, lost = 0u, keys = 0u, order = 0u;
+        AtpStatus st = ATP_RUNNING;
+        for (u32 k = 0; k < K + 8u && st == ATP_RUNNING; k++) {
+          g_atp_test_clock_us = g_clock_t0 + (u64)k * CLOCK_DT;
+          memset(was_dem, 0, sizeof was_dem);
+          for (u32 r = 0; r < s->n_cps; r++) {
+            u32 q = s->cp_seq[r];
+            if (q < (1u << 16) && atp_guide_demoted(s, G(s), r)) {
+              was_dem[q] = 1u;
+            }
+          }
+          u32 dropped = s->n_cps_dropped_lrs;
+          st = thvm_atp_step(s);
+          if (s->n_cps_dropped_lrs == dropped) {
+            continue;
+          }
+          prunes++;
+          for (u32 r = 0; r < s->n_cps; r++) {
+            u32 q = s->cp_seq[r];
+            if (q < (1u << 16) && was_dem[q] && !atp_guide_demoted(s, G(s), r)) {
+              lost++;
+            }
+          }
+          for (u32 p = 0; p < s->n_cps; p++) {
+            u32 r = s->cp_heap[p].row;
+            if (s->cp_heap[p].pri != s->cp_pri[r] || s->cp_heap[p].seq != s->cp_seq[r]) {
+              keys++;
+            }
+            if (p > 0u && atp_cp_before(s, p, (p - 1u) / 2u)) {
+              order++;
+            }
+          }
+        }
+        CHECK(prunes > 0u);
+        CHECK(G(s)->n_demote > 0u);
+        CHECK_EQ(lost, 0u);
+        CHECK_EQ(keys, 0u);
+        CHECK_EQ(order, 0u);
+      }
+      g_clock_t0 = 0u;
+      problem_free(s);
+    }
+    g_atp_test_clock_us = 1u;
+  }
+
+  TEST_BEGIN("atp/guide/traps");
+  {
+    // cp_uid_a/b exist only under orphan murder (src/atp/state.c), and
+    // the uid orphan test fires whenever they do: a non-zero guided run
+    // without orphan murder leaves them unallocated.
+    AtpState *s = problem(0u);
+    CHECK(arm(s, &H_RAND, ATP_GUIDE_TOPK, 16u, 0.0, 0u, 0u));
+    problem_load(s, 0u);
+    run_traj(s, 300u, &T_ARM);
+    CHECK(G(s)->n_changed > 0u);
+    CHECK(s->cp_uid_a == NULL);
+    CHECK(s->cp_uid_b == NULL);
+    problem_free(s);
+
+    // Trace entries past the soft cap exist only with --proof (main.c
+    // raises the cap): a non-zero guided run selects the same with the
+    // cap cut to 32 entries as with --proof's 16.7M, in both integrations.
+    u64 hc0 = thvm_atp_heap_checkpoint();
+    u64 gc0 = gc_count();
+    for (u32 mode = 0; mode < 3u; mode++) {
+      u64 ch[2] = {0u, 0u}, dm[2] = {0u, 0u};
+      for (u32 cap = 0; cap < 2u; cap++) {
+        if (gc_count() == gc0) {
+          thvm_atp_heap_reset(hc0);
+        }
+        s = problem(0u);
+        if (mode == 1u) {
+          CHECK(arm(s, &H_RAND, ATP_GUIDE_TOPK, 16u, 0.0, 0u, 0u));
+        } else if (mode == 2u) {
+          CHECK(arm(s, &H_LAZY, ATP_GUIDE_LAZY, 8u, 0.5, 0u, 0u));
+        }
+        s->t_max = (cap == 0u) ? 32u : 16777216u;
+        problem_load(s, 0u);
+        run_traj(s, 300u, (cap == 0u) ? &T_BASE : &T_ARM);
+        if (mode > 0u) {
+          ch[cap] = G(s)->n_changed;
+          dm[cap] = G(s)->n_demote;
+        }
+        CHECK(cap == 1u || s->n_trace >= 32u);
+        problem_free(s);
+      }
+      CHECK(traj_eq_search(&T_BASE, &T_ARM));
+      CHECK_EQ(ch[0], ch[1]);
+      CHECK_EQ(dm[0], dm[1]);
+      if (mode == 1u) {
+        CHECK(ch[0] > 0u);
+      }
+      if (mode == 2u) {
+        CHECK(dm[0] > 0u);
+      }
+    }
+  }
+
+  TEST_BEGIN("atp/guide/lanes");
+  {
+    // The lane one-hot comes from the lane's name through the head's lane
+    // table ("enigma-<base>" reads as <base>), else from the family entry.
+    static const char *const names[4] = {"wm", "twee", "flatten", "bare"};
+    H_RAND.m.lanes = names;
+    static const char *const ask[5] = {"twee", "enigma-bare", "wm", "no-such-lane", NULL};
+    static const u32 want[5] = {1u, 3u, 0u, 2u, 2u};
+    for (u32 k = 0; k < 5u; k++) {
+      AtpState *s = thvm_atp_init(&CFG, 100u);
+      H_RAND.fam.mode = ATP_GUIDE_TOPK;
+      H_RAND.fam.k    = 8u;
+      CHECK(atp_guide_arm(s, &H_RAND.m, &H_RAND.fam, "test", 0u, ask[k]));
+      CHECK_EQ(G(s)->lane, want[k]);
+      AtpGuide *g = G(s);
+      u32 l0 = ATP_GUIDE_NC + ATP_GUIDE_NS + H_RAND.m.n_phi;
+      for (u32 j = 0; j < H_RAND.m.n_lane; j++) {
+        CHECK(g->xs[l0 + j] == ((j == want[k]) ? 1.0 : 0.0));
+      }
+      thvm_atp_free(s);
+    }
+    H_RAND.m.lanes = NULL;
+    CHECK_EQ(atp_guide_lane_ix(&H_RAND.m, "twee"), ATP_GUIDE_NONE);
+  }
+
+  TEST_BEGIN("atp/guide/nonfinite");
+  {
+    // A non-finite phi reads as its training mean; the finite ones stay.
+    AtpGuidePhi phi;
+    memset(&phi, 0, sizeof phi);
+    phi.n    = 3u;
+    phi.v[0] = NAN;
+    phi.v[1] = 0.5f;
+    phi.v[2] = INFINITY;
+    thvm_atp_guide_set_phi(&phi);
+    AtpState *s = thvm_atp_init(&CFG, 100u);
+    CHECK(arm(s, &H_RAND, ATP_GUIDE_TOPK, 4u, 0.0, 0u, 0u));
+    rank_queue(s);
+    (void)atp_guide(s);
+    AtpGuide *g = G(s);
+    CHECK(g->x[0][20] == (double)H_RAND.mu[20]);
+    CHECK(g->x[0][21] == 0.5);
+    CHECK(g->x[0][22] == (double)H_RAND.mu[22]);
+    CHECK_EQ(g->n_nonfinite, 0u);
+    thvm_atp_guide_set_phi(NULL);
+    thvm_atp_free(s);
+
+    // A non-finite correction reads as 0 (with kappa > 0, the engine's
+    // root) and is counted.  The weights are validated finite, so the
+    // test plants an infinite folded bias.
+    H_RANK.m.kappa = 1.0f;
+    s = thvm_atp_init(&CFG, 100u);
+    CHECK(arm(s, &H_RANK, ATP_GUIDE_TOPK, 4u, 0.0, 0u, 0u));
+    rank_queue(s);
+    G(s)->base[0] = INFINITY;
+    CHECK_EQ(atp_guide(s), 0u);
+    CHECK_EQ(G(s)->n_nonfinite, 4u);
+    for (u32 i = 0; i < 4u; i++) {
+      CHECK(G(s)->cand[i].corr == 0.0);
+    }
+    thvm_atp_free(s);
+    H_RANK.m.kappa = 0.0f;
+  }
+
   TEST_BEGIN("atp/guide/cost-counters");
   {
     FILE *tf = tmpfile();
@@ -1062,6 +1413,7 @@ int main(void) {
       CHECK(g->n_pick > 0u);
       CHECK_EQ(g->n_pick, g->n_trivial + g->n_coop + g->n_scored);
       CHECK(g->n_coop <= g->n_pick / 4u);
+      CHECK_EQ(g->n_coop_sel, g->n_wsel / (mode == 0u ? 5u : 4u));
       if (mode == 0u) {
         CHECK_EQ(g->n_scored, g->n_accept + g->n_fallback + g->n_blocked);
         CHECK(g->n_demote <= g->n_eval);
@@ -1096,6 +1448,9 @@ int main(void) {
         snprintf(want, sizeof want, " dirty=%llu ", (unsigned long long)g->n_dirty);
         CHECK(strstr(line, want) != NULL);
         CHECK(strstr(line, " us_per_scored=") != NULL);
+        CHECK(strstr(line, " frac_wall=") != NULL);
+        snprintf(want, sizeof want, " weight_selections=%llu ", (unsigned long long)g->n_wsel);
+        CHECK(strstr(line, want) != NULL);
       }
       thvm_atp_free(s);
     }
@@ -1174,6 +1529,7 @@ int main(void) {
     setenv("THVM_ATP_GUIDE_ZERO", "1", 1);
     setenv("THVM_ATP_GUIDE_MODE", "lazy:4:0.5", 1);
     setenv("THVM_ATP_GUIDE_COOP", "5", 1);
+    setenv("THVM_ATP_GUIDE_LANE", "enigma-twee", 1);
     g_atp_guide_env = -1;
     for (u32 rep = 0; rep < 2u; rep++) {
       AtpState *s = thvm_atp_init(&CFG, 100u);
@@ -1189,9 +1545,24 @@ int main(void) {
         CHECK(strcmp(g->family, "twee") == 0);
         CHECK_EQ(g->n_gv, 1u);
         CHECK_EQ(g->gv[0].seq, 0u);
+        CHECK(strcmp(g_atp_guide_env_cfg.lane, "enigma-twee") == 0);
+        // The example head names no lanes: the family entry's index.
+        CHECK_EQ(g->lane, g->fam.lane);
       }
       thvm_atp_free(s);
     }
+
+    // No THVM_ATP_GUIDE_LANE: the schedule slice's name.
+    unsetenv("THVM_ATP_GUIDE_LANE");
+    setenv("FINDPROOF_SLICE", "bare", 1);
+    g_atp_guide_env = -1;
+    {
+      AtpState *s = thvm_atp_init(&CFG, 100u);
+      CHECK(s->guide != NULL);
+      CHECK(strcmp(g_atp_guide_env_cfg.lane, "bare") == 0);
+      thvm_atp_free(s);
+    }
+    unsetenv("FINDPROOF_SLICE");
 
     setenv("THVM_ATP_GUIDE_MODE", "lazy:65", 1);
     g_atp_guide_env = -1;

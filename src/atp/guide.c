@@ -11,8 +11,10 @@
 //   correction = w2 . relu(W1 z + b1) + b2,   z = (x - mu) / sd
 //
 // The layer generalizes the top-K re-ranker (src/atp/topk.c), whose
-// 18-input heads compile in as layout TOPK18.  The family names the
-// head's integration (its family table; "*" matches any family):
+// 18-input heads compile in as layout TOPK18 (deferred slots excepted:
+// topk.c materializes them, the layer reads zero push features there).
+// The family names the head's integration (its family table; "*" matches
+// any family):
 //   top-K  the engine's k best queued CPs (k <= 64, a best-first walk of
 //          the binary heap) are scored and the argmax is extracted (ties:
 //          the lower engine rank).
@@ -22,17 +24,21 @@
 //          heap nodes per pick.  None accepted: the best scored candidate.
 //          None reachable: the root.  A demoted CP stays demoted while it
 //          is queued.  Every candidate is the engine's next one when it
-//          is scored, so its rank input is 0.
+//          is scored, so its rank input is 0 (a lazy head trains so).
 // Demotion is a side key, a bitmap by seq that the walk skips; cp_pri,
 // cp_seq and the heap order never change, so an --lrs lane prunes on the
-// keys of its unguided run.  Every coop-th call (the layer's own counter;
-// the w2_modulo branch scans the whole heap) returns the engine's root
-// unscored.  --guide-zero sets the correction to 0 after the forward
-// pass: top-K then takes rank 0 (kappa >= 0) and lazy accepts it
-// (tau >= 0), so the twin selects as its base lane (gate G2.2) at the
+// keys of its unguided run.  Coop: the coop-th, 2 coop-th, ... non-trivial
+// weight SELECTION (the layer's own counter, advanced when the pick
+// survives the orphan test, so an orphan re-pick repeats its pick's
+// decision; the w2_modulo branch scans the whole heap) takes the
+// engine's root unscored.  --guide-zero sets the correction to 0 after
+// the forward pass: top-K then takes rank 0 (kappa >= 0) and lazy accepts
+// it (tau >= 0), so the twin selects as its base lane (gate G2.2) at the
 // layer's full cost.  THVM_ATP_GUIDE_MODE=topk:<k> | lazy:<k>[:<tau>] and
 // THVM_ATP_GUIDE_COOP=<r> override the family's integration (choosing a
-// family's mode on VAL).
+// family's mode on VAL).  The lane one-hot comes from the lane the twin
+// runs (THVM_ATP_GUIDE_LANE, else FINDPROOF_SLICE; "enigma-<base>" reads
+// as <base>) through the head's lane table, else from the family entry.
 //
 // Inputs, layout V1: 17 candidate columns, 3 state columns, phi, lane.
 //    0 log1p(rank)                    9 f11, shares a goal symbol
@@ -47,10 +53,12 @@
 //                                       13 and 14 are then 0
 //   17 log1p(n_cps)
 //   18 log1p(pushes per selection over the last 64 selections)
-//   19 RSS growth / cap at the RSS guard's last poll, floored to 1/64, <= 2
+//   19 term-heap growth since arming, in bytes, over the RSS guard's cap
+//      (THVM_ATP_RSS_ABORT_MB, default 8 GB), floored to 1/64, <= 2: a
+//      function of the search alone, unlike the process RSS
 //   then n_phi problem features (thvm_atp_guide_set_phi before the first
-//   scored pick; a missing one reads as its mu) and the one-hot of the
-//   family's lane id.
+//   scored pick; a missing or non-finite one reads as its mu) and the
+//   one-hot of the lane id.
 // f0..f13 are thvm_atp_cp_features at age = seq against the goal normal
 // form at the CP's push (the history export's 'F' record); f4 (= f0) is
 // dropped, f8 (the seq) gives way to column 12 and the symbol ids f9 /
@@ -64,7 +72,10 @@
 // change: thvm_atp_set_goals, both goal checks of a step, the WM intake),
 // the cp_seq_next of every non-orphan selection, the demotion bitmap and
 // a feature cache by seq.  No push and no row move reaches the layer.
-// The per-pick work runs in a work-clock exclusion window; outside it an
+// In a --guide-zero twin the per-pick work runs in a work-clock exclusion
+// window, so its clock-gated disciplines see the base lane's clock; a
+// deployed twin's selection work stays on the clock, so --lrs and the
+// cp-set-ir budget see its real selection rate.  Outside the window an
 // armed layer runs a few dozen instructions per step (the selection log,
 // the goal compares, the window's own edges), which --work-clock=instr
 // still counts.
@@ -74,12 +85,13 @@
 // plain-LPO or combinator lane the orientation comes from
 // thvm_kbo_nomemo / thvm_lpo_quiet / atp_col3: no memo caches a scratch
 // cell and no statistic moves, so the pop retires no memo and the
-// engine's later work is as unguided.  Under WPO / RPO / AC the pop
-// retires the KBO and LPO memos as topk.c does (counted as dirty picks);
-// the memos are caches, so the selections stay the base lane's, but the
-// engine's later work, and the work clock with it, are not.  A deferred
-// slot is not decoded: its content is the raw overlap from the trace,
-// and past the default cap the trace exists only with --proof.
+// engine's later work is as unguided (THVM_ATP_GUIDE_CHECK builds abort
+// when a clean pick wrote a cell-keyed memo).  Under WPO / RPO / AC the
+// pop retires the KBO and LPO memos as topk.c does (counted as dirty
+// picks); the memos are caches, so the selections stay the base lane's,
+// but the engine's later work, and the work clock with it, are not.  A
+// deferred slot is not decoded: its content is the raw overlap from the
+// trace, and past the default cap the trace exists only with --proof.
 //
 // Unarmed, s->guide stays NULL and every hook is one predictable branch.
 
@@ -105,7 +117,8 @@
 // One integration of a head: what --guide=<name> selects.
 typedef struct {
   const char *name;    // family name; "*" matches any
-  u32         lane;    // lane one-hot index (>= the head's lanes: none)
+  u32         lane;    // lane one-hot index when the lane's own name is
+                       // not in the head's lane table (>= n_lane: none)
   u32         mode;    // ATP_GUIDE_TOPK / ATP_GUIDE_LAZY
   u32         k;       // candidates (top-K) or evaluations (lazy) per pick
   double      tau;     // lazy: accept a candidate scoring at least -tau
@@ -129,6 +142,7 @@ typedef struct {
   float                 kappa;
   u32                   n_fam;
   const AtpGuideFamily *fam;
+  const char *const    *lanes;    // [n_lane] lane names of the one-hot, or NULL
 } AtpGuideModel;
 
 // A candidate's push features, cached by seq.
@@ -169,6 +183,11 @@ typedef struct {
   AtpGuideFamily       fam;
   char                 family[48];
   u8                   zero;
+  u8                   pending;      // this selection's call: 1 scored, 2 coop
+  u32                  lane;         // the one-hot index (>= n_lane: none)
+  u64                  heap0;        // HEAP_NEXT at arming
+  u64                  pick_hc;      // HEAP_NEXT when the pick began
+  double               mem_cap;      // bytes; 0: column 19 reads 0
   u32                 *bounds;       // cp_seq_next at every non-orphan pick
   u32                  n_bounds;
   u32                  cap_bounds;
@@ -192,6 +211,8 @@ typedef struct {
   u64                  n_pick;
   u64                  n_trivial;
   u64                  n_coop;
+  u64                  n_wsel;       // non-trivial weight selections
+  u64                  n_coop_sel;   // of which coop
   u64                  n_scored;
   u64                  n_changed;
   u64                  n_eval;
@@ -203,8 +224,10 @@ typedef struct {
   u64                  n_fallback;
   u64                  n_blocked;
   u64                  n_dirty;
+  u64                  n_nonfinite;
   u64                  t_ns;
   u64                  t_max_ns;
+  u64                  t_arm_ns;
   FILE                *dump;
   u32                  dump_left;
 } AtpGuide;
@@ -213,6 +236,9 @@ typedef struct {
 typedef struct {
   u64 hc;
   u8  dirty;       // a memo-backed ordering compared scratch terms
+#ifdef THVM_ATP_GUIDE_CHECK
+  u64 memo_writes;
+#endif
 } AtpGuideScratch;
 
 // Binary min-heap of CP-heap positions under the engine's own order.
@@ -222,6 +248,7 @@ typedef struct {
 } AtpGuideFront;
 
 static AtpGuidePhi g_atp_guide_phi;
+static u8          g_atp_guide_phi_ok[ATP_GUIDE_PHI_MAX];
 static u32         g_atp_guide_phi_rev = 1u;
 
 // Defined further down the translation unit.
@@ -238,6 +265,7 @@ static u32  atp_goal_weight_vs(Term gl, Term gr, Term cl, Term cr);
 static void atp_cp_var_stats_rec(Term t, u64 *seen, u32 *distinct, u32 *occ);
 static u32  atp_cp_top_symbol(Term t);
 static int  atp_cp_shares_goal_symbol_vs(Term gl, Term gr, Term l, Term r);
+static int  atp_kdheap_on(void);
 
 // The per-problem normalized V1 columns, in norm_m order.
 static const u32 ATP_GUIDE_NORM_COL[ATP_GUIDE_NNORM] = {
@@ -343,12 +371,13 @@ static void atp_guide_fold(AtpGuide *g) {
   }
   u32 p0 = ATP_GUIDE_NC + ATP_GUIDE_NS;
   for (u32 i = 0; i < m->n_phi; i++) {
-    g->xs[p0 + i] = (i < g_atp_guide_phi.n) ? (double)g_atp_guide_phi.v[i]
-                                            : (double)m->mu[p0 + i];
+    g->xs[p0 + i] = (i < g_atp_guide_phi.n && g_atp_guide_phi_ok[i])
+                        ? (double)g_atp_guide_phi.v[i]
+                        : (double)m->mu[p0 + i];
   }
   u32 l0 = p0 + m->n_phi;
   for (u32 i = 0; i < m->n_lane; i++) {
-    g->xs[l0 + i] = (i == g->fam.lane) ? 1.0 : 0.0;
+    g->xs[l0 + i] = (i == g->lane) ? 1.0 : 0.0;
   }
   for (u32 h = 0; h < m->hid; h++) {
     const float *w = m->w1 + (size_t)h * m->n_x;
@@ -472,12 +501,60 @@ static void atp_guide_demote(const AtpState *s, AtpGuide *g, u32 row) {
 
 // --- arming ----------------------------------------------------------------
 
-// Arm s with head m and integration f.  Call before the engine's first
-// push: the goal version logged here covers the pushes up to the first
-// goal change.
+// The one-hot index of lane `name` in m's lane table; a twin
+// "enigma-<base>" takes its base lane's.  ATP_GUIDE_NONE: not listed.
+static u32 atp_guide_lane_ix(const AtpGuideModel *m, const char *name) {
+  if (m->lanes == NULL || name == NULL || name[0] == '\0') {
+    return ATP_GUIDE_NONE;
+  }
+  if (strncmp(name, "enigma-", 7) == 0) {
+    name += 7;
+  }
+  for (u32 i = 0; i < m->n_lane; i++) {
+    if (m->lanes[i] != NULL && strcmp(m->lanes[i], name) == 0) {
+      return i;
+    }
+  }
+  return ATP_GUIDE_NONE;
+}
+
+// The lane a process runs: THVM_ATP_GUIDE_LANE, else the schedule
+// slice's name.
+static const char *atp_guide_lane_env(void) {
+  const char *l = getenv("THVM_ATP_GUIDE_LANE");
+  if (l != NULL && l[0] != '\0') {
+    return l;
+  }
+  return getenv("FINDPROOF_SLICE");
+}
+
+// The RSS guard's cap in bytes (THVM_ATP_RSS_ABORT_MB, default 8 GB, 0
+// off), parsed as the guard parses it.
+static double atp_guide_mem_cap(void) {
+  double cap = 8.0 * 1024.0 * 1024.0 * 1024.0;
+  const char *e = getenv("THVM_ATP_RSS_ABORT_MB");
+  if (e != NULL && *e != '\0') {
+    char *end = NULL;
+    long long mb = strtoll(e, &end, 10);
+    if (end != NULL && *end == '\0' && mb >= 0) {
+      cap = (double)mb * 1024.0 * 1024.0;
+    }
+  }
+  return cap;
+}
+
+// Arm s with head m and integration f, the one-hot of lane `lane` (NULL
+// or unlisted: f->lane).  Call before the engine's first push: the goal
+// version logged here covers the pushes up to the first goal change.
 static int atp_guide_arm(AtpState *s, const AtpGuideModel *m, const AtpGuideFamily *f,
-                         const char *family, u8 zero) {
+                         const char *family, u8 zero, const char *lane) {
   if (s == NULL || s->guide != NULL || !atp_guide_valid(m, f)) {
+    return 0;
+  }
+  if (s->topk != NULL || atp_topk_env_k() != 0u) {
+    // The top-K branch precedes the layer's in thvm_atp_select_cp: armed
+    // together, the layer would never pick.
+    fprintf(stderr, "guide: the top-K re-ranker is armed; selection layer off\n");
     return 0;
   }
   AtpGuide *g = (AtpGuide *)calloc(1, sizeof(AtpGuide));
@@ -489,6 +566,12 @@ static int atp_guide_arm(AtpState *s, const AtpGuideModel *m, const AtpGuideFami
   g->zero        = zero ? 1u : 0u;
   g->cache_epoch = 1u;
   g->cache_ir    = s->n_cp_set_ir_reweighted;
+  u32 lix        = atp_guide_lane_ix(m, lane);
+  g->lane        = (lix != ATP_GUIDE_NONE) ? lix : f->lane;
+  g->heap0       = HEAP_NEXT;
+  g->pick_hc     = HEAP_NEXT;
+  g->mem_cap     = atp_guide_mem_cap();
+  g->t_arm_ns    = atp_guide_now_ns();
   snprintf(g->family, sizeof g->family, "%s", family != NULL ? family : f->name);
   atp_guide_fold(g);
   Term gl, gr;
@@ -501,10 +584,10 @@ static int atp_guide_arm(AtpState *s, const AtpGuideModel *m, const AtpGuideFami
     g->dump_left = (dm != NULL && dm[0] != '\0') ? (u32)strtoul(dm, NULL, 10) : 400u;
     if (g->dump != NULL) {
       fprintf(g->dump, "# guide model=%s layout=%s n_x=%u hidden=%u family=%s mode=%s "
-              "k=%u tau=%.17g coop=%u zero=%u kappa=%.17g\n",
+              "k=%u tau=%.17g coop=%u zero=%u kappa=%.17g lane=%u\n",
               m->id, m->layout == ATP_GUIDE_LAYOUT_V1 ? "v1" : "topk18", m->n_x, m->hid,
               g->family, g->fam.mode == ATP_GUIDE_LAZY ? "lazy" : "topk", g->fam.k,
-              g->fam.tau, g->fam.coop, (u32)g->zero, (double)m->kappa);
+              g->fam.tau, g->fam.coop, (u32)g->zero, (double)m->kappa, g->lane);
     }
   }
   s->guide = g;
@@ -518,6 +601,7 @@ static struct {
   const AtpGuideModel *m;
   AtpGuideFamily       fam;
   char                 family[48];
+  char                 lane[64];
   u8                   zero;
 } g_atp_guide_env_cfg;
 
@@ -587,11 +671,18 @@ static void atp_guide_env_probe(void) {
             m->id, fam);
     return;
   }
+  if (atp_kdheap_on()) {
+    fprintf(stderr, "guide: THVM_ATP_KDHEAP selects every pick through the KD-heap; "
+            "the selection layer will not pick\n");
+  }
   const char *z = getenv("THVM_ATP_GUIDE_ZERO");
+  const char *ln = atp_guide_lane_env();
   g_atp_guide_env_cfg.m    = m;
   g_atp_guide_env_cfg.fam  = cf;
   g_atp_guide_env_cfg.zero = (z != NULL && z[0] != '\0' && z[0] != '0') ? 1u : 0u;
   snprintf(g_atp_guide_env_cfg.family, sizeof g_atp_guide_env_cfg.family, "%s", fam);
+  snprintf(g_atp_guide_env_cfg.lane, sizeof g_atp_guide_env_cfg.lane, "%s",
+           ln != NULL ? ln : "");
   g_atp_guide_env = 1;
 }
 
@@ -602,7 +693,8 @@ static void atp_guide_on_init(AtpState *s) {
   }
   if (g_atp_guide_env == 1) {
     (void)atp_guide_arm(s, g_atp_guide_env_cfg.m, &g_atp_guide_env_cfg.fam,
-                        g_atp_guide_env_cfg.family, g_atp_guide_env_cfg.zero);
+                        g_atp_guide_env_cfg.family, g_atp_guide_env_cfg.zero,
+                        g_atp_guide_env_cfg.lane);
   }
 }
 
@@ -627,9 +719,17 @@ static void atp_guide_on_intake(AtpState *s) {
   atp_guide_gv_log(g, 0u, gl, gr);
 }
 
-// Non-orphan pick.
+// Non-orphan pick.  A weight call of this selection (the last one, after
+// any orphan re-picks) advances the coop counter.
 static void atp_guide_on_select(AtpState *s) {
   AtpGuide *g = (AtpGuide *)s->guide;
+  if (g->pending != 0u) {
+    g->n_wsel++;
+    if (g->pending == 2u) {
+      g->n_coop_sel++;
+    }
+    g->pending = 0u;
+  }
   if (g->n_bounds == g->cap_bounds) {
     u32 nc = g->cap_bounds ? 2u * g->cap_bounds : 1024u;
     u32 *nb = (u32 *)realloc(g->bounds, nc * sizeof(u32));
@@ -668,6 +768,17 @@ static void atp_guide_gc_writeback(AtpState *s, const Term *roots, u32 base) {
     g->gv[i].l = roots[base + 2u * i];
     g->gv[i].r = roots[base + 2u * i + 1u];
   }
+}
+
+// The layer's own allocations, which the RSS guard discounts.
+static long long atp_guide_bytes(const AtpState *s) {
+  const AtpGuide *g = (const AtpGuide *)s->guide;
+  long long b = (long long)sizeof(AtpGuide) + (long long)g->cap_bounds * (long long)sizeof(u32) +
+                (long long)g->cap_gv * (long long)sizeof(AtpGuideGoal) + (long long)g->dem_cap;
+  for (u32 i = 0; i < g->n_gv; i++) {
+    b += (long long)g->gv[i].n_lab * (long long)sizeof(u32);
+  }
+  return b;
 }
 
 static void atp_guide_free(AtpState *s) {
@@ -874,8 +985,24 @@ static void atp_guide_feat(AtpState *s, AtpGuide *g, AtpGuideCand *c, AtpGuideSc
   c->ft = f;
 }
 
+static void atp_guide_scratch_begin(AtpGuide *g, AtpGuideScratch *sc) {
+  sc->hc    = thvm_atp_heap_checkpoint();
+  sc->dirty = 0u;
+  g->pick_hc = sc->hc;
+#ifdef THVM_ATP_GUIDE_CHECK
+  sc->memo_writes = g_cell_memo_writes;
+#endif
+}
+
 // The pick's decoded pairs are dead: pop them.
 static void atp_guide_scratch_end(AtpGuide *g, const AtpGuideScratch *sc) {
+#ifdef THVM_ATP_GUIDE_CHECK
+  if (!sc->dirty && g_cell_memo_writes != sc->memo_writes) {
+    // A clean pick pops without retiring the memos, so a memo entry
+    // keyed on a scratch cell would alias the next term built there.
+    thvm_fatal("guide: a clean pick wrote a cell-keyed memo");
+  }
+#endif
   if (sc->dirty) {
     // As topk.c: the reset retires the KBO memo epoch; the persistent
     // LPO memo is keyed on cell values too.
@@ -944,11 +1071,11 @@ static double atp_guide_growth(const AtpState *s, const AtpGuide *g) {
   return (double)(s->cp_seq_next - g->bounds[n - w]) / (double)w;
 }
 
-static double atp_guide_rss(const AtpState *s) {
-  if (s->rss_guard_cap <= 0 || s->rss_guard_growth <= 0) {
+static double atp_guide_mem(const AtpGuide *g) {
+  if (!(g->mem_cap > 0.0) || g->pick_hc <= g->heap0) {
     return 0.0;
   }
-  double f = (double)s->rss_guard_growth / (double)s->rss_guard_cap;
+  double f = (double)(g->pick_hc - g->heap0) * (double)sizeof(Term) / g->mem_cap;
   if (f > 2.0) {
     f = 2.0;
   }
@@ -970,7 +1097,7 @@ static void atp_guide_shared(const AtpState *s, AtpGuide *g) {
   u32 s0 = ATP_GUIDE_NC;
   g->xs[s0]      = log1p((double)s->n_cps);
   g->xs[s0 + 1u] = log1p(atp_guide_growth(s, g));
-  g->xs[s0 + 2u] = atp_guide_rss(s);
+  g->xs[s0 + 2u] = atp_guide_mem(g);
   for (u32 h = 0; h < m->hid; h++) {
     const float *w = m->w1 + (size_t)h * m->n_x;
     double a = g->base[h];
@@ -1054,6 +1181,10 @@ static void atp_guide_eval(const AtpState *s, AtpGuide *g, u32 i) {
     nc = ATP_GUIDE_NX_TOPK18;
   }
   c->corr  = atp_guide_forward(m, x, nc, g->act);
+  if (!isfinite(c->corr)) {
+    c->corr = 0.0;
+    g->n_nonfinite++;
+  }
   c->score = -(double)m->kappa * x[0] + (g->zero ? 0.0 : c->corr);
   g->n_eval++;
 }
@@ -1131,8 +1262,7 @@ static u32 atp_guide_topk(AtpState *s, AtpGuide *g) {
   fr.n = 0u;
   atp_guide_front_push(s, &fr, 0u);
   AtpGuideScratch sc;
-  sc.hc    = thvm_atp_heap_checkpoint();
-  sc.dirty = 0u;
+  atp_guide_scratch_begin(g, &sc);
   atp_guide_cache_check(s, g);
   u32 n = 0u;
   while (n < g->fam.k && fr.n > 0u) {
@@ -1164,8 +1294,7 @@ static u32 atp_guide_lazy(AtpState *s, AtpGuide *g) {
   fr.n = 0u;
   atp_guide_front_push(s, &fr, 0u);
   AtpGuideScratch sc;
-  sc.hc    = thvm_atp_heap_checkpoint();
-  sc.dirty = 0u;
+  atp_guide_scratch_begin(g, &sc);
   atp_guide_cache_check(s, g);
   double floor_score = -g->fam.tau;
   u32 n = 0u, visits = 0u, chosen = ATP_GUIDE_NONE;
@@ -1218,16 +1347,21 @@ static u32 atp_guide_lazy(AtpState *s, AtpGuide *g) {
 static u32 atp_guide(AtpState *s) {
   AtpGuide *g = (AtpGuide *)s->guide;
   g->n_pick++;
+  g->pending = 0u;
   if (s->n_cps < 2u || ((s->use_initial_ultimate || s->use_database_ultimate) &&
                         s->cp_ultimate != NULL && s->cp_ultimate[s->cp_heap[0].row])) {
     g->n_trivial++;
     return 0u;
   }
-  if (g->fam.coop > 0u && g->n_pick % g->fam.coop == 0u) {
+  if (g->fam.coop > 0u && (g->n_wsel + 1u) % g->fam.coop == 0u) {
     g->n_coop++;
+    g->pending = 2u;
     return 0u;
   }
-  atp_work_pause();
+  g->pending = 1u;
+  if (g->zero) {
+    atp_work_pause();
+  }
   u64 t0 = atp_guide_now_ns();
   u32 pos = (g->fam.mode == ATP_GUIDE_LAZY) ? atp_guide_lazy(s, g) : atp_guide_topk(s, g);
   u64 dt = atp_guide_now_ns() - t0;
@@ -1239,7 +1373,9 @@ static u32 atp_guide(AtpState *s) {
   if (pos != 0u) {
     g->n_changed++;
   }
-  atp_work_resume();
+  if (g->zero) {
+    atp_work_resume();
+  }
   return pos;
 }
 
@@ -1247,16 +1383,23 @@ static u32 atp_guide(AtpState *s) {
 
 fn void thvm_atp_guide_set_phi(const AtpGuidePhi *phi) {
   memset(&g_atp_guide_phi, 0, sizeof g_atp_guide_phi);
+  memset(g_atp_guide_phi_ok, 0, sizeof g_atp_guide_phi_ok);
   g_atp_guide_phi_rev++;
   if (phi == NULL) {
     return;
   }
   u32 n = (phi->n < ATP_GUIDE_PHI_MAX) ? phi->n : ATP_GUIDE_PHI_MAX;
   g_atp_guide_phi.n = n;
-  memcpy(g_atp_guide_phi.v, phi->v, (size_t)n * sizeof(float));
+  for (u32 i = 0; i < n; i++) {
+    if (isfinite(phi->v[i])) {
+      g_atp_guide_phi.v[i]  = phi->v[i];
+      g_atp_guide_phi_ok[i] = 1u;
+    }
+  }
 }
 
-fn int thvm_atp_guide_arm(AtpState *s, const char *family, const char *model_id, u8 zero) {
+fn int thvm_atp_guide_arm(AtpState *s, const char *family, const char *model_id, u8 zero,
+                          const char *lane) {
   if (family == NULL) {
     return 0;
   }
@@ -1264,7 +1407,7 @@ fn int thvm_atp_guide_arm(AtpState *s, const char *family, const char *model_id,
   if (m == NULL) {
     return 0;
   }
-  return atp_guide_arm(s, m, atp_guide_family(m, family), family, zero);
+  return atp_guide_arm(s, m, atp_guide_family(m, family), family, zero, lane);
 }
 
 fn void thvm_atp_guide_print_stats(const AtpState *s, FILE *f) {
@@ -1272,21 +1415,25 @@ fn void thvm_atp_guide_print_stats(const AtpState *s, FILE *f) {
   if (g == NULL || f == NULL) {
     return;
   }
-  fprintf(f, "%% guide: model=%s family=%s mode=%s k=%u tau=%g coop=%u zero=%u "
+  u64 life = atp_guide_now_ns() - g->t_arm_ns;
+  fprintf(f, "%% guide: model=%s family=%s mode=%s k=%u tau=%g coop=%u zero=%u lane=%u "
           "picks=%llu scored=%llu coop_picks=%llu trivial=%llu changed=%llu "
+          "weight_selections=%llu coop_selections=%llu "
           "evals=%llu feats=%llu nofeat=%llu visits=%llu demoted=%llu "
-          "accepted=%llu fallback=%llu blocked=%llu dirty=%llu time=%.6fs "
-          "us_per_scored=%.3f us_per_pick=%.3f max_pick_us=%.3f\n",
+          "accepted=%llu fallback=%llu blocked=%llu dirty=%llu nonfinite=%llu time=%.6fs "
+          "frac_wall=%.6f us_per_scored=%.3f us_per_pick=%.3f max_pick_us=%.3f\n",
           g->m->id, g->family, g->fam.mode == ATP_GUIDE_LAZY ? "lazy" : "topk",
-          g->fam.k, g->fam.tau, g->fam.coop, (u32)g->zero,
+          g->fam.k, g->fam.tau, g->fam.coop, (u32)g->zero, g->lane,
           (unsigned long long)g->n_pick, (unsigned long long)g->n_scored,
           (unsigned long long)g->n_coop, (unsigned long long)g->n_trivial,
-          (unsigned long long)g->n_changed, (unsigned long long)g->n_eval,
+          (unsigned long long)g->n_changed, (unsigned long long)g->n_wsel,
+          (unsigned long long)g->n_coop_sel, (unsigned long long)g->n_eval,
           (unsigned long long)g->n_feat, (unsigned long long)g->n_nofeat,
           (unsigned long long)g->n_visit, (unsigned long long)g->n_demote,
           (unsigned long long)g->n_accept, (unsigned long long)g->n_fallback,
           (unsigned long long)g->n_blocked, (unsigned long long)g->n_dirty,
-          (double)g->t_ns / 1e9,
+          (unsigned long long)g->n_nonfinite, (double)g->t_ns / 1e9,
+          life > 0u ? (double)g->t_ns / (double)life : 0.0,
           g->n_scored ? (double)g->t_ns / 1e3 / (double)g->n_scored : 0.0,
           g->n_pick ? (double)g->t_ns / 1e3 / (double)g->n_pick : 0.0,
           (double)g->t_max_ns / 1e3);

@@ -7298,11 +7298,6 @@ typedef struct {
   // protection (a diverging saturation still grows multi-GB and trips)
   // while an idle-but-large host process no longer counts against runs.
   long long rss_guard_baseline;
-  // The guard's last poll while the selection layer (src/atp/guide.c) is
-  // armed: that growth (proof-only trace bytes discounted) and the cap it
-  // was held to.  0 until a poll past the baseline; the layer reads them.
-  long long rss_guard_growth;
-  long long rss_guard_cap;
 
   // === ENIGMA-style learned CP-selector training data ===============
   // When `record_cp_features` is set (via thvm_atp_set_record_cp_
@@ -8319,8 +8314,8 @@ fn int       thvm_atp_topk_load(const char *path);
 // phi(p) it reads (docs/plans/enigma_portfolio.md 3.1), one row per
 // problem: set them in the process that runs the engine before its first
 // weight pick (the layer folds them in then, and again whenever they are
-// set anew); a head reading more than `n` takes its training mean for
-// the rest.
+// set anew); a head reading more than `n`, or a non-finite value, takes
+// its training mean there.
 #define ATP_GUIDE_PHI_MAX 64u
 typedef struct {
   u32   n;
@@ -8329,12 +8324,18 @@ typedef struct {
 fn void      thvm_atp_guide_set_phi(const AtpGuidePhi *phi);
 // Arm s with the compiled-in head `model_id` (NULL: the default) and the
 // integration its family table gives `family`; zero = 1 forces a zero
-// correction.  Call before the first push.  Returns 1 on success.
-// thvm_atp_init arms from THVM_ATP_GUIDE / _MODEL / _ZERO.
+// correction; `lane` names the lane the engine runs, for the head's lane
+// one-hot (NULL or not in the head's lane table: the family entry's
+// index).  Call before the first push.  Returns 1 on success; 0 also
+// when the top-K re-ranker is armed (it would take every weight pick).
+// thvm_atp_init arms from THVM_ATP_GUIDE / _MODEL / _ZERO, the lane from
+// THVM_ATP_GUIDE_LANE or FINDPROOF_SLICE.
 fn int       thvm_atp_guide_arm(AtpState *s, const char *family,
-                                const char *model_id, u8 zero);
-// The layer's per-pick cost counters as one "% guide:" line; nothing
-// when s is unarmed.
+                                const char *model_id, u8 zero,
+                                const char *lane);
+// The layer's per-pick cost counters as one "% guide:" line, with the
+// layer's time as a fraction of the time since arming (frac_wall);
+// nothing when s is unarmed.
 fn void      thvm_atp_guide_print_stats(const AtpState *s, FILE *f);
 
 // Enable/disable recording of processed-CP feature rows.  OFF (0) by

@@ -673,7 +673,27 @@ Decisions recorded (2026-10-01, by the user):
 - D1: yes. Training may include synthetic -10 encodings of non-UEQ TPTP problems from our FOF front end; J13 names and stems are excluded in every division.
 - D3: no. Every calibration stays on pods; WDEP is estimated from the submission build's official J13 result as in section 1.3.
 
-Amendments: none yet.
+Amendments:
+- A1 (2026-10-02, before any G2.2 run): how G2.2 reads a clock-gated lane.
+  An armed zero twin runs a few dozen user-space instructions per step
+  outside its work-clock exclusion window (the selection log, the goal
+  compares, the coop and trivial picks, the window's edges), and its
+  environment is longer by the `--guide` variables.  Under the
+  instruction clock, a decision of a clock-gated discipline (`--lrs`,
+  `--cp-set-ir-budget`) can therefore land a few selections from the
+  base lane's.  G2.2 is decided by tests/atp_guide_gates.sh, with the
+  base run's environment padded to the twin's length:
+  - a lane that logs no clock-gated decision (THVM_ATP_CLOCK_TRACE) passes
+    only when the selections, the proof and the stats, LRS prune counts
+    included, are identical;
+  - a clock-gated lane passes when every selection up to its first
+    clock-gated decision whose trace line differs is identical, and when
+    the decisions are identical, everything is; the selection index of
+    that first drifted decision is reported per run.
+  Columns 13, 14 and 19 of the layer's input, phi and the lane are not
+  in export v2; the M3 harvest reads them from THVM_ATP_GUIDE_DUMP, and
+  `weights_to_c.py featparity` checks the remaining columns against the
+  export.
 
 ## 6. Risks and what we will not do
 

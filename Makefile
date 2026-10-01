@@ -357,6 +357,7 @@ TESTS := \
   $(BIN)/test_atp_cp_graph \
   $(BIN)/test_atp_rerank \
   $(BIN)/test_atp_guide \
+  $(BIN)/test_atp_guide_ac \
   $(BIN)/test_atp_gnn_score \
   $(BIN)/test_bench_atp \
   $(BIN)/test_pri \
@@ -1012,6 +1013,21 @@ test-cpq-pr: $(BIN)/test_atp_wolfram_bench_cpq
 $(BIN)/test_lpo_cache: tests/test_lpo_cache.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_LPO_ORIENT_CACHE \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# ENIGMA selection layer (src/atp/guide.c).  THVM_ATP_GUIDE_CHECK aborts
+# when a clean pick writes a cell-keyed memo; THVM_ATP_TEST_CLOCK lets the
+# test drive the wall and CPU clocks (--lrs prunes at fixed selections).
+# The _ac build adds FindProof's AC and MNF defines, so the layer's AC
+# orientation branch is compiled and run.
+$(BIN)/test_atp_guide: tests/test_atp_guide.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_GUIDE_CHECK -DTHVM_ATP_TEST_CLOCK \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+$(BIN)/test_atp_guide_ac: tests/test_atp_guide.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_GUIDE_CHECK -DTHVM_ATP_TEST_CLOCK -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)
 
 # AC reasoning (src/atp/ac.c).  Gated by THVM_ATP_AC.  With the mask
