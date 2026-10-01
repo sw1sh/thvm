@@ -98,49 +98,109 @@ static void atp_cp_index_leaf(u32 node) {
 // Collect EVERY rule in the whole subtree rooted at `node` -- the action
 // when a query variable consumes the corresponding stored subtree (a var
 // unifies with anything, so any stored continuation is a candidate).
+// Preorder over an explicit stack of each open node's next child; an
+// overflow ends every open node at its next child, as the recursion's
+// per-child check did.
 static void atp_cp_index_collect_subtree(u32 node) {
   AtpRuleIndex *ix = g_atp_cp_ix;
+  u32  st_inl[ATP_WALK_INL];
+  u32 *st  = st_inl;
+  u32  nst = 0u;
+  u32  cst = ATP_WALK_INL;
   atp_cp_index_leaf(node);
-  for (u32 c = ix->nodes[node].child; c != ATP_DTREE_NIL;
-       c = ix->nodes[c].sibling) {
-    if (g_atp_cp_overflow) return;
-    atp_cp_index_collect_subtree(c);
+  st[nst++] = ix->nodes[node].child;
+  while (nst > 0u) {
+    u32 c = st[nst - 1u];
+    if (c == ATP_DTREE_NIL || g_atp_cp_overflow) {
+      nst--;
+      continue;
+    }
+    st[nst - 1u] = ix->nodes[c].sibling;
+    atp_cp_index_leaf(c);
+    if (nst == cst) {
+      st = (u32 *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+    }
+    st[nst++] = ix->nodes[c].child;
   }
+  term_stack_release(st, st_inl);
 }
 
 // Descend cp_index from `node` against the flat query subject slice
 // starting at preorder position `pos` (which spans the query subterm).
 // Collects every reachable leaf's rules (unification-compatible filter).
+// One frame per open node (`c` = its next child), in the recursion's
+// order; a child at the end of the query slice is a leaf at once.
 static void atp_cp_index_descend(u32 node, u32 pos, u32 qend) {
+  typedef struct { u32 node; u32 pos; u32 c; } CpDescFrame;
   AtpRuleIndex *ix = g_atp_cp_ix;
-  if (pos == qend) { atp_cp_index_leaf(node); return; }
-  u32 qsym = g_atp_cp_qflatsym[pos];
-  u8  q_is_star = (qsym >= ATP_DTREE_STAR_BASE && qsym < ATP_DTREE_CTR_BASE);
-  u32 sz   = g_atp_cp_qsubsz[pos];
-  for (u32 c = ix->nodes[node].child; c != ATP_DTREE_NIL;
-       c = ix->nodes[c].sibling) {
-    if (g_atp_cp_overflow) return;
-    u32 csym = ix->nodes[c].sym;
-    if (csym >= ATP_DTREE_STAR_BASE && csym < ATP_DTREE_CTR_BASE) {
-      // Stored rule var unifies with the whole query subterm at `pos`:
-      // the stored side consumed one tree edge (the STAR), the query
-      // consumed its whole subterm (sz positions).
-      atp_cp_index_descend(c, pos + sz, qend);
-    } else if (csym == qsym) {
-      // Stored CTR/NUM head equals the query head: consume both heads
-      // (one tree edge, one query position).
-      atp_cp_index_descend(c, pos + 1u, qend);
+  if (pos == qend) {
+    atp_cp_index_leaf(node);
+    return;
+  }
+  CpDescFrame  fr_inl[ATP_WALK_INL];
+  CpDescFrame *fr  = fr_inl;
+  u32          nfr = 0u;
+  u32          cfr = ATP_WALK_INL;
+  fr[0].node = node;
+  fr[0].pos  = pos;
+  fr[0].c    = ix->nodes[node].child;
+  nfr = 1u;
+  while (nfr > 0u) {
+    CpDescFrame *f = &fr[nfr - 1u];
+    u32 qsym = g_atp_cp_qflatsym[f->pos];
+    u32 sz   = g_atp_cp_qsubsz[f->pos];
+    u32 next = ATP_DTREE_NIL;
+    u32 npos = 0u;
+    u8  done = 0u;
+    while (f->c != ATP_DTREE_NIL) {
+      if (g_atp_cp_overflow) {
+        done = 1u;
+        break;
+      }
+      u32 c    = f->c;
+      u32 csym = ix->nodes[c].sym;
+      f->c = ix->nodes[c].sibling;
+      if (csym >= ATP_DTREE_STAR_BASE && csym < ATP_DTREE_CTR_BASE) {
+        // Stored rule var unifies with the whole query subterm at `pos`:
+        // the stored side consumed one tree edge (the STAR), the query
+        // consumed its whole subterm (sz positions).
+        npos = f->pos + sz;
+      } else if (csym == qsym) {
+        // Stored CTR/NUM head equals the query head: consume both heads
+        // (one tree edge, one query position).
+        npos = f->pos + 1u;
+      } else {
+        // A non-matching stored CTR vs a concrete query CTR cannot
+        // unify -- pruned (the discrimination-tree win).
+        continue;
+      }
+      if (npos == qend) {
+        atp_cp_index_leaf(c);
+        continue;
+      }
+      next = c;
+      break;
     }
-    // A non-matching stored CTR vs a concrete query CTR cannot unify --
-    // pruned (the discrimination-tree win).
+    if (next != ATP_DTREE_NIL) {
+      if (nfr == cfr) {
+        fr = (CpDescFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].node = next;
+      fr[nfr].pos  = npos;
+      fr[nfr].c    = ix->nodes[next].child;
+      nfr++;
+      continue;
+    }
+    if (!done && qsym >= ATP_DTREE_STAR_BASE && qsym < ATP_DTREE_CTR_BASE) {
+      // Query var unifies with ANY stored subtree at this node: collect
+      // every rule reachable below `node` (var-vs-anything).  The query
+      // already advanced past the var (a single position) at the caller's
+      // continuation; here we simply harvest the whole stored remainder.
+      atp_cp_index_collect_subtree(f->node);
+    }
+    nfr--;
   }
-  if (q_is_star) {
-    // Query var unifies with ANY stored subtree at this node: collect
-    // every rule reachable below `node` (var-vs-anything).  The query
-    // already advanced past the var (a single position) at the caller's
-    // continuation; here we simply harvest the whole stored remainder.
-    atp_cp_index_collect_subtree(node);
-  }
+  term_stack_release(fr, fr_inl);
 }
 
 // Insert one whole-face term `t` (a rule's lhs OR rhs) into the cp_index,
@@ -273,17 +333,31 @@ static u32 atp_cp_index_collect(AtpState *s, u32 f) {
 // subterm is skipped (cp_visit never overlaps at a variable position).
 static void atp_cp_subindex_insert(AtpRuleIndex *ix, Term t, u32 rule,
                                    AtpDTreeVarMap *vm) {
-  if (term_tag(t) == TAG_CTR) {
-    u32 node = atp_ri_insert_term(ix, ix->root, t, vm);
-    u32 rec  = atp_ri_rec_new(ix);
-    ix->recs[rec].rule       = rule;
-    ix->recs[rec].next       = ix->nodes[node].rec_head;
-    ix->nodes[node].rec_head = rec;
-    u32 n = term_ctr_n(t);
-    for (u32 i = 0; i < n; i++) {
-      atp_cp_subindex_insert(ix, term_ctr_at(t, i), rule, vm);
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      u32 node = atp_ri_insert_term(ix, ix->root, t, vm);
+      u32 rec  = atp_ri_rec_new(ix);
+      ix->recs[rec].rule       = rule;
+      ix->recs[rec].next       = ix->nodes[node].rec_head;
+      ix->nodes[node].rec_head = rec;
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
 }
 
 // Build cp_subindex: every non-var subterm of BOTH faces of every rule ->

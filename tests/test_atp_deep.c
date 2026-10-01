@@ -4048,6 +4048,563 @@ static void deep_gc_gj(u32 *seed) {
   thvm_atp_free(s);
 }
 
+// ---- overlap_index.c / wm_order.c / narrow.c: indexes and goal queues ------
+
+// src/atp/overlap_index.c:101
+static void ref_atp_cp_index_collect_subtree(u32 node) {
+  AtpRuleIndex *ix = g_atp_cp_ix;
+  atp_cp_index_leaf(node);
+  for (u32 c = ix->nodes[node].child; c != ATP_DTREE_NIL;
+       c = ix->nodes[c].sibling) {
+    if (g_atp_cp_overflow) return;
+    ref_atp_cp_index_collect_subtree(c);
+  }
+}
+
+// src/atp/overlap_index.c:114
+static void ref_atp_cp_index_descend(u32 node, u32 pos, u32 qend) {
+  AtpRuleIndex *ix = g_atp_cp_ix;
+  if (pos == qend) { atp_cp_index_leaf(node); return; }
+  u32 qsym = g_atp_cp_qflatsym[pos];
+  u8  q_is_star = (qsym >= ATP_DTREE_STAR_BASE && qsym < ATP_DTREE_CTR_BASE);
+  u32 sz   = g_atp_cp_qsubsz[pos];
+  for (u32 c = ix->nodes[node].child; c != ATP_DTREE_NIL;
+       c = ix->nodes[c].sibling) {
+    if (g_atp_cp_overflow) return;
+    u32 csym = ix->nodes[c].sym;
+    if (csym >= ATP_DTREE_STAR_BASE && csym < ATP_DTREE_CTR_BASE) {
+      ref_atp_cp_index_descend(c, pos + sz, qend);
+    } else if (csym == qsym) {
+      ref_atp_cp_index_descend(c, pos + 1u, qend);
+    }
+  }
+  if (q_is_star) {
+    ref_atp_cp_index_collect_subtree(node);
+  }
+}
+
+// src/atp/overlap_index.c:274
+static void ref_atp_cp_subindex_insert(AtpRuleIndex *ix, Term t, u32 rule,
+                                       AtpDTreeVarMap *vm) {
+  if (term_tag(t) == TAG_CTR) {
+    u32 node = atp_ri_insert_term(ix, ix->root, t, vm);
+    u32 rec  = atp_ri_rec_new(ix);
+    ix->recs[rec].rule       = rule;
+    ix->recs[rec].next       = ix->nodes[node].rec_head;
+    ix->nodes[node].rec_head = rec;
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      ref_atp_cp_subindex_insert(ix, term_ctr_at(t, i), rule, vm);
+    }
+  }
+}
+
+// src/atp/wm_order.c:266
+static u32 ref_wmo_term_depth(Term t) {
+  if (term_tag(t) != TAG_CTR) return 1;
+  u32 n = term_ctr_n(t), d = 0;
+  for (u32 i = 0; i < n; i++) {
+    u32 cd = ref_wmo_term_depth(term_ctr_at(t, i));
+    if (cd > d) d = cd;
+  }
+  return d + 1;
+}
+
+// src/atp/wm_order.c:360
+static u32 ref_wmo_term_depth_ft(const struct AtpFtCell *c) {
+  if ((c->sym & WF_VAR_BIT) != 0u || c->arity == 0u) return 1;
+  u32 d = 0;
+  const struct AtpFtCell *kid = c->next;
+  for (u32 i = 0; i < (u32)c->arity; i++) {
+    u32 cd = ref_wmo_term_depth_ft(kid);
+    if (cd > d) d = cd;
+    kid = kid->end->next;
+  }
+  return d + 1;
+}
+
+// src/atp/wm_order.c:2116
+static u8 ref_wmo_term_is_ground(Term t) {
+  if (t == 0) return 1u;
+  if (term_tag(t) == TAG_FVR) return 0u;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) {
+      if (!ref_wmo_term_is_ground(term_ctr_at(t, i))) return 0u;
+    }
+  }
+  return 1u;
+}
+
+// src/atp/wm_order.c:2929
+static void ref_wmo_var_counts(Term t, u16 *cnt) {
+  if (term_tag(t) == TAG_FVR) {
+    u32 v = term_ext(t);
+    if (v < WMO_VAR_CNT_CAP && cnt[v] < 0xffffu) cnt[v]++;
+    return;
+  }
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    for (u32 i = 0; i < n; i++) ref_wmo_var_counts(term_ctr_at(t, i), cnt);
+  }
+}
+
+// src/atp/wm_order.c:1712
+static void ref_wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
+                        const WmoUnif *u, u32 depth_guard) {
+  if (depth_guard == 0u) return;
+  if (is_leaf) {
+    WmoLeaf *leaf = (WmoLeaf *)n_raw;
+    WmoUnif u2;
+    wmo_unif_copy(&u2, u);
+    u32 si = (spos != 0xffffffffu) ? spos : leaf->hang + 1u;
+    if (wmo_unify_rest(d, leaf, si, qi, &u2)) wmo_dfs_emit(d, leaf);
+    return;
+  }
+  WmoNode *n = (WmoNode *)n_raw;
+  if (qi >= d->q_len) return;
+  const WmoCell *qc = &d->q[qi];
+  if (!qc->is_var) {
+    for (u32 k = 0; k < n->n_kids; k++) {
+      if (!n->kids[k].sym.is_var && n->kids[k].sym.sym == qc->sym) {
+        ref_wmo_dfs(d, n->kids[k].child, n->kids[k].is_leaf, qi + 1u,
+                    0xffffffffu, u, depth_guard - 1u);
+      }
+    }
+    WmoKid vkids[32];
+    u32 nv = 0;
+    for (u32 k = 0; k < n->n_kids && nv < 32u; k++) {
+      if (n->kids[k].sym.is_var) vkids[nv++] = n->kids[k];
+    }
+    if (nv > 1u) wmo_sort_vkids_vardesc(vkids, nv);
+    u32 qe = wmo_sub_end(d->q, qi);
+    for (u32 k = 0; k < nv; k++) {
+      WmoUnif u2;
+      wmo_unif_copy(&u2, u);
+      if (wmo_unify_var(1u, vkids[k].sym.sym, d->q + qi, qe - qi, 0u,
+                        &u2, 64u)) {
+        ref_wmo_dfs(d, vkids[k].child, vkids[k].is_leaf, qe, 0xffffffffu,
+                    &u2, depth_guard - 1u);
+      }
+    }
+  } else {
+    WmoKid vkids[32];
+    u32 nv = 0;
+    for (u32 k = 0; k < n->n_kids && nv < 32u; k++) {
+      if (n->kids[k].sym.is_var) vkids[nv++] = n->kids[k];
+    }
+    if (nv > 1u) wmo_sort_vkids_vardesc(vkids, nv);
+    for (u32 k = 0; k < nv; k++) {
+      WmoUnif u2;
+      wmo_unif_copy(&u2, u);
+      WmoCell vcell = vkids[k].sym;
+      if (wmo_unify_cells(&d->q[qi], 1u, 0u, &vcell, 1u, 1u, &u2, 64u)) {
+        ref_wmo_dfs(d, vkids[k].child, vkids[k].is_leaf, qi + 1u,
+                    0xffffffffu, &u2, depth_guard - 1u);
+      }
+    }
+    for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
+      if (wmo_jump_dedup_on()) {
+        u8 shadowed = 0u;
+        for (WmoEntry *e2 = e->next; e2 != NULL; e2 = e2->next) {
+          if (e2->ziel == e->ziel && e2->ziel_leaf == e->ziel_leaf &&
+              e2->sub_len == e->sub_len &&
+              wmo_cells_eq(e2->sub, e->sub, e->sub_len)) {
+            shadowed = 1u;
+            break;
+          }
+        }
+        if (shadowed) continue;
+      }
+      WmoUnif u2;
+      wmo_unif_copy(&u2, u);
+      if (wmo_unify_var(0u, qc->sym, e->sub, e->sub_len, 1u, &u2,
+                        64u)) {
+        u32 land = wmo_node_depth(e->start) + e->sub_len;
+        ref_wmo_dfs(d, e->ziel, e->ziel_leaf, qi + 1u,
+                    e->ziel_leaf ? land : 0xffffffffu, &u2, depth_guard - 1u);
+      }
+    }
+  }
+}
+
+// src/atp/narrow.c:617
+static u32 ref_cgq_term_size(Term t) {
+  if (term_tag(t) != TAG_CTR) return 1u;
+  u32 n = term_ctr_n(t);
+  u32 sz = 1u;
+  for (u32 i = 0; i < n; i++) sz += ref_cgq_term_size(term_ctr_at(t, i));
+  return sz;
+}
+
+// src/atp/narrow.c:625
+static u32 ref_cgq_term_max_var(Term t) {
+  if (term_tag(t) == TAG_FVR) return term_ext(t) + 1u;
+  if (term_tag(t) != TAG_CTR) return 0u;
+  u32 n = term_ctr_n(t);
+  u32 m = 0u;
+  for (u32 i = 0; i < n; i++) {
+    u32 v = ref_cgq_term_max_var(term_ctr_at(t, i));
+    if (v > m) m = v;
+  }
+  return m;
+}
+
+// src/atp/narrow.c:637
+static u64 ref_cgq_term_hash(Term t, u64 h) {
+  h = (h ^ ((u64)term_tag(t) << 32 ^ (u64)term_ext(t)))
+      * 0x100000001B3ull;
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    h = (h ^ n) * 0x100000001B3ull;
+    for (u32 i = 0; i < n; i++) h = ref_cgq_term_hash(term_ctr_at(t, i), h);
+  }
+  return h;
+}
+
+// An empty overlap index, as atp_cp_subindex_rebuild starts one.
+static AtpRuleIndex *cp_index_new(void) {
+  AtpRuleIndex *ix = atp_ri_new();
+  ix->n_nodes = 0u;
+  ix->n_recs  = 0u;
+  ix->root    = atp_ri_node_new(ix, ATP_DTREE_NIL);
+  return ix;
+}
+
+// The candidates the overlap index yields for query face `q`: as
+// atp_cp_subindex_collect_face (`whole`, one descent from the root over
+// the whole face) or atp_cp_index_collect_face (one descent per non-var
+// position).  `ref` picks the recursive descent.  Returns the count (or
+// 0xffffffff when the face does not flatten) and the overflow flag.
+static u32 cp_index_query(AtpRuleIndex *ix, Term q, u8 whole, u8 ref,
+                          u32 *out, u8 *ovf) {
+  static Term qflat[ATP_RI_FLAT_CAP];
+  static u32  qsubsz[ATP_RI_FLAT_CAP];
+  static u32  qflatsym[ATP_RI_FLAT_CAP];
+  u8  folded = 0u;
+  u32 pos    = 0u;
+  if (!atp_ri_flatten(q, qflat, qsubsz, qflatsym, &folded, ATP_RI_FLAT_CAP,
+                      &pos)) {
+    return 0xffffffffu;
+  }
+  atp_cp_collect_begin();
+  g_atp_cp_ix       = ix;
+  g_atp_cp_qflat    = qflat;
+  g_atp_cp_qsubsz   = qsubsz;
+  g_atp_cp_qflatsym = qflatsym;
+  if (whole) {
+    if (ref) {
+      ref_atp_cp_index_descend(ix->root, 0u, pos);
+    } else {
+      atp_cp_index_descend(ix->root, 0u, pos);
+    }
+  } else {
+    for (u32 p = 0; p < pos && !g_atp_cp_overflow; p++) {
+      u32 qsym = qflatsym[p];
+      if (qsym >= ATP_DTREE_STAR_BASE && qsym < ATP_DTREE_CTR_BASE) {
+        continue;
+      }
+      if (ref) {
+        ref_atp_cp_index_descend(ix->root, p, p + qsubsz[p]);
+      } else {
+        atp_cp_index_descend(ix->root, p, p + qsubsz[p]);
+      }
+    }
+  }
+  memcpy(out, g_atp_cp_cand, (size_t)g_atp_cp_ncand * sizeof(u32));
+  *ovf = g_atp_cp_overflow;
+  return g_atp_cp_ncand;
+}
+
+// A unary chain s^depth(bottom) over label `s`.
+static Term mk_chain(u32 depth, u32 s, Term bottom) {
+  Term t = bottom;
+  for (u32 k = 0; k < depth; k++) {
+    t = term_new_ctr(s, &t, 1u);
+  }
+  return t;
+}
+
+// A random term of at most `budget` nodes.
+static Term mk_sized(u32 *seed, u32 budget) {
+  return mk_term(seed, 6u, &budget);
+}
+
+enum { IX_N = 3000, IX_FACES = 300, WMO_FACES = 400, WMO_Q = 2000 };
+
+static void pin_index_queue(u32 *seed) {
+  AtpState *s = wo_state(seed);
+  atp_cp_seen_ensure(s);
+
+  TEST_BEGIN("atp_deep/pin-cp-subindex-insert");
+  AtpRuleIndex *rx = cp_index_new();
+  AtpRuleIndex *nx = cp_index_new();
+  {
+    u32 ok = 0;
+    for (u32 i = 0; i < IX_FACES; i++) {
+      Term f = (i % 3u == 0u) ? mk_small(seed)
+                              : generalize(seed, pick_sub(seed, mk_random(seed)));
+      AtpDTreeVarMap rv, nv;
+      vm_reset(&rv);
+      vm_reset(&nv);
+      ref_atp_cp_subindex_insert(rx, f, i, &rv);
+      atp_cp_subindex_insert(nx, f, i, &nv);
+      if (memcmp(&rv, &nv, sizeof rv) == 0) {
+        ok++;
+      }
+    }
+    CHECK_EQ(ok, (u32)IX_FACES);
+    CHECK_EQ(rx->n_nodes, nx->n_nodes);
+    CHECK(memcmp(rx->nodes, nx->nodes, (size_t)rx->n_nodes * sizeof(AtpDTreeNode)) == 0);
+    CHECK_EQ(rx->n_recs, nx->n_recs);
+    CHECK(memcmp(rx->recs, nx->recs, (size_t)rx->n_recs * sizeof(AtpRiRec)) == 0);
+  }
+
+  TEST_BEGIN("atp_deep/pin-cp-index-descend");
+  {
+    static u32 rc[ATP_CP_MAXCAND], nc[ATP_CP_MAXCAND];
+    u32 ok = 0, hits = 0;
+    for (u32 i = 0; i < IX_N; i++) {
+      Term q = (i & 1u) ? mk_random(seed) : generalize(seed, mk_random(seed));
+      u8   whole = (u8)((i >> 1) & 1u);
+      u8   ro = 0u, no = 0u;
+      u32  rn = cp_index_query(nx, q, whole, 1u, rc, &ro);
+      u32  nn = cp_index_query(nx, q, whole, 0u, nc, &no);
+      if (rn == nn && ro == no &&
+          (rn == 0xffffffffu || memcmp(rc, nc, (size_t)rn * sizeof(u32)) == 0)) {
+        ok++;
+      }
+      hits += (rn != 0xffffffffu && rn > 0u);
+    }
+    CHECK_EQ(ok, (u32)IX_N);
+    CHECK(hits > 0u);
+  }
+  atp_ri_free(rx);
+  atp_ri_free(nx);
+
+  TEST_BEGIN("atp_deep/pin-wmo-term-walks");
+  {
+    AtpFt a;
+    ft_init(&a);
+    u32 ok = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < IX_N; i++) {
+      Term t = mk_random(seed);
+      AtpFtCell *x = ft_from_term(&a, t, 0);
+      u16 rcnt[WMO_VAR_CNT_CAP], ncnt[WMO_VAR_CNT_CAP];
+      memset(rcnt, 0, sizeof rcnt);
+      memset(ncnt, 0, sizeof ncnt);
+      ref_wmo_var_counts(t, rcnt);
+      wmo_var_counts(t, ncnt);
+      if (ref_wmo_term_depth(t) == wmo_term_depth(t) &&
+          ref_wmo_term_depth_ft(x) == wmo_term_depth_ft(x) &&
+          ref_wmo_term_is_ground(t) == wmo_term_is_ground(t) &&
+          memcmp(rcnt, ncnt, sizeof rcnt) == 0) {
+        ok++;
+      }
+    }
+    g_wide = 16u;
+    CHECK_EQ(ok, (u32)IX_N);
+    CHECK_EQ(ref_wmo_term_is_ground(0), wmo_term_is_ground(0));
+    ft_destroy(&a);
+  }
+
+  TEST_BEGIN("atp_deep/pin-wmo-dfs");
+  {
+    AtpWmOrder *w = atp_wmo_new();
+    WmoCell cells[WMO_MAX_CELLS];
+    for (u32 k = 0; k < WMO_FACES; k++) {
+      Term f = (k % 3u == 0u) ? mk_small(seed)
+                              : generalize(seed, pick_sub(seed, mk_sized(seed, 200u)));
+      u32 n = wmo_face_cells(f, cells, WMO_MAX_CELLS);
+      if (n == 0u) {
+        continue;
+      }
+      wmo_register(w, k + 1u, (u8)(k & 1u), (u8)((k >> 1) & 1u), cells, n,
+                   wmo_term_depth(f), 0u);
+    }
+    static WmoLeaf *ro[WMO_TOPS_ARR_CAP], *no[WMO_TOPS_ARR_CAP];
+    u32 ok = 0, runs = 0, hits = 0;
+    for (u32 i = 0; i < WMO_Q; i++) {
+      Term q = (i & 1u) ? mk_sized(seed, 200u)
+                        : generalize(seed, mk_sized(seed, 200u));
+      WmoCell qc[WMO_MAX_CELLS];
+      u32 qn = wmo_face_cells(q, qc, WMO_MAX_CELLS);
+      for (u32 tree = 0; tree < 2u && qn != 0u; tree++) {
+        if (w->tree[tree].root == NULL) {
+          continue;
+        }
+        WmoUnif u;
+        memset(&u, 0, sizeof u);
+        WmoDfs rd = { qc, qn, ro, 0u, WMO_TOPS_ARR_CAP };
+        WmoDfs nd = { qc, qn, no, 0u, WMO_TOPS_ARR_CAP };
+        ref_wmo_dfs(&rd, w->tree[tree].root, 0u, 0u, 0xffffffffu, &u, 4000u);
+        wmo_dfs(&nd, w->tree[tree].root, 0u, 0u, 0xffffffffu, &u, 4000u);
+        runs++;
+        if (rd.n_out == nd.n_out &&
+            memcmp(ro, no, (size_t)rd.n_out * sizeof(WmoLeaf *)) == 0) {
+          ok++;
+        }
+        hits += (nd.n_out > 0u);
+      }
+    }
+    CHECK_EQ(ok, runs);
+    CHECK(runs > 0u);
+    CHECK(hits > 0u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-cgq-term-walks");
+  {
+    u32 ok = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < IX_N; i++) {
+      Term t  = mk_random(seed);
+      u64  h0 = ((u64)rng32(seed) << 32) | rng32(seed);
+      if (ref_cgq_term_size(t) == cgq_term_size(t) &&
+          ref_cgq_term_max_var(t) == cgq_term_max_var(t) &&
+          ref_cgq_term_hash(t, h0) == cgq_term_hash(t, h0)) {
+        ok++;
+      }
+    }
+    g_wide = 16u;
+    CHECK_EQ(ok, (u32)IX_N);
+  }
+
+  thvm_atp_free(s);
+}
+
+static void deep_index_queue(u32 *seed) {
+  AtpState *s = wo_state(seed);
+  atp_cp_seen_ensure(s);
+  Term vals[5];
+  for (u32 v = 0; v < 5u; v++) {
+    Term kid = term_new_ctr(9u, NULL, 0u);
+    vals[v] = term_new_ctr(20u + v, &kid, v & 1u);
+  }
+  Term pat  = mk_deep(DEEP, 1u, term_new_fvr(4u), NULL, 1u);
+  Term subj = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+  Term same = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+  Term near = mk_deep(DEEP, 1u, vals[3], vals, 1u);
+  AtpFt a;
+  ft_init(&a);
+
+  TEST_BEGIN("atp_deep/deep-cp-subindex");
+  {
+    // Every CTR subterm of a face is its own tree path, so the insert is
+    // quadratic in depth: a 10,000-deep chain.
+    enum { IX_DEEP = 10000 };
+    Term c5    = term_new_ctr(5u, NULL, 0u);
+    Term chain = mk_chain(IX_DEEP, 3u, c5);
+    Term vchn  = mk_chain(IX_DEEP, 3u, term_new_fvr(0u));
+    AtpRuleIndex *ix = cp_index_new();
+    AtpDTreeVarMap vm;
+    vm_reset(&vm);
+    atp_cp_subindex_insert(ix, chain, 7u, &vm);
+    vm_reset(&vm);
+    atp_cp_subindex_insert(ix, vchn, 8u, &vm);
+    CHECK_EQ(ix->n_recs, 2u * IX_DEEP + 1u);
+    static u32 out[ATP_CP_MAXCAND];
+    u8 ovf = 1u;
+    u32 n = cp_index_query(ix, chain, 1u, 0u, out, &ovf);
+    CHECK_EQ(n, 2u);
+    CHECK(!ovf);
+    sort_u32(out, n);
+    CHECK_EQ(out[0], 7u);
+    CHECK_EQ(out[1], 8u);
+    // A variable bottom harvests the stored subtree under it.
+    n = cp_index_query(ix, mk_chain(IX_DEEP, 3u, term_new_fvr(5u)), 1u, 0u,
+                       out, &ovf);
+    sort_u32(out, n);
+    CHECK_EQ(n, 2u);
+    CHECK_EQ(out[0], 7u);
+    CHECK_EQ(out[1], 8u);
+    // One descent per position: every suffix of the chain meets a path.
+    n = cp_index_query(ix, chain, 0u, 0u, out, &ovf);
+    sort_u32(out, n);
+    CHECK_EQ(n, 2u);
+    // A 1,000-deep instance agrees with the recursive descent.
+    static u32 rout[ATP_CP_MAXCAND];
+    Term mid = mk_chain(1000u, 3u, c5);
+    u8 rovf = 1u;
+    u32 rn = cp_index_query(ix, mid, 0u, 1u, rout, &rovf);
+    n = cp_index_query(ix, mid, 0u, 0u, out, &ovf);
+    CHECK_EQ(rn, n);
+    CHECK(memcmp(rout, out, (size_t)n * sizeof(u32)) == 0);
+    atp_ri_free(ix);
+  }
+
+  TEST_BEGIN("atp_deep/deep-wmo-term-walks");
+  {
+    CHECK_EQ(wmo_term_depth(subj), (u32)DEEP + 1u);
+    CHECK_EQ(wmo_term_depth(pat), (u32)DEEP + 1u);
+    AtpFtCell *xs = ft_from_term(&a, subj, 0);
+    CHECK_EQ(wmo_term_depth_ft(xs), (u32)DEEP + 1u);
+    CHECK(wmo_term_is_ground(subj));
+    CHECK(!wmo_term_is_ground(pat));
+    u16 cnt[WMO_VAR_CNT_CAP];
+    memset(cnt, 0, sizeof cnt);
+    wmo_var_counts(pat, cnt);
+    u32 total = 0u;
+    for (u32 v = 0; v < WMO_VAR_CNT_CAP; v++) {
+      total += cnt[v];
+    }
+    CHECK_EQ(total, (u32)((DEEP + 2u) / 3u) + 1u);
+  }
+
+  TEST_BEGIN("atp_deep/deep-wmo-dfs");
+  {
+    // Faces s^k(x) for k = 1..40, 700, 759 against chain queries up to
+    // the 768-cell face cap: the descent opens one frame per query cell.
+    AtpWmOrder *w = atp_wmo_new();
+    WmoCell cells[WMO_MAX_CELLS];
+    static const u32 lens[3] = { 700u, 759u, 0u };
+    u32 nf = 0u;
+    for (u32 k = 1u; k <= 42u; k++) {
+      u32 len = (k <= 40u) ? k : lens[k - 41u];
+      Term f = mk_chain(len, 3u, term_new_fvr(0u));
+      u32  n = wmo_face_cells(f, cells, WMO_MAX_CELLS);
+      CHECK_EQ(n, len + 1u);
+      wmo_register(w, k, 0u, 0u, cells, n, wmo_term_depth(f), 0u);
+      nf++;
+    }
+    static WmoLeaf *out[WMO_TOPS_ARR_CAP], *rout[WMO_TOPS_ARR_CAP];
+    WmoCell qc[WMO_MAX_CELLS];
+    WmoUnif u;
+    memset(&u, 0, sizeof u);
+    static const u32 qlen[3]  = { 759u, 700u, 200u };
+    static const u32 qwant[3] = { 42u, 41u, 40u };
+    for (u32 j = 0; j < 3u; j++) {
+      Term q  = mk_chain(qlen[j], 3u, term_new_ctr(5u, NULL, 0u));
+      u32  qn = wmo_face_cells(q, qc, WMO_MAX_CELLS);
+      WmoDfs d = { qc, qn, out, 0u, WMO_TOPS_ARR_CAP };
+      wmo_dfs(&d, w->tree[0].root, 0u, 0u, 0xffffffffu, &u, 4000u);
+      CHECK_EQ(d.n_out, qwant[j]);
+      if (j == 2u) {
+        WmoDfs rd = { qc, qn, rout, 0u, WMO_TOPS_ARR_CAP };
+        ref_wmo_dfs(&rd, w->tree[0].root, 0u, 0u, 0xffffffffu, &u, 4000u);
+        CHECK_EQ(rd.n_out, d.n_out);
+        CHECK(memcmp(rout, out, (size_t)d.n_out * sizeof(WmoLeaf *)) == 0);
+      }
+    }
+    CHECK_EQ(nf, 42u);
+  }
+
+  TEST_BEGIN("atp_deep/deep-cgq-term-walks");
+  {
+    CHECK_EQ(cgq_term_size(subj), term_size_iter(subj));
+    CHECK_EQ(cgq_term_max_var(pat), 5u);
+    CHECK_EQ(cgq_term_max_var(subj), 0u);
+    CHECK_EQ(cgq_term_hash(subj, 7u), cgq_term_hash(same, 7u));
+    CHECK(cgq_term_hash(subj, 7u) != cgq_term_hash(near, 7u));
+    Term mid = mk_deep(3000u, 1u, vals[4], vals, 1u);
+    CHECK_EQ(cgq_term_hash(mid, 7u), ref_cgq_term_hash(mid, 7u));
+    CHECK_EQ(cgq_term_size(mid), ref_cgq_term_size(mid));
+  }
+
+  ft_destroy(&a);
+  thvm_atp_free(s);
+}
+
 int main(void) {
   thvm_init();
   u32 seed = 0x6c8e9cf5u;
@@ -4061,6 +4618,8 @@ int main(void) {
   deep_weight_order(&seed);
   pin_gc_gj(&seed);
   deep_gc_gj(&seed);
+  pin_index_queue(&seed);
+  deep_index_queue(&seed);
   thvm_free();
   TEST_REPORT();
 }
