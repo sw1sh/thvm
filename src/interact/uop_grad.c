@@ -1041,8 +1041,8 @@ static Term grad_zero_written(Term g, Term idx, u32 dim) {
 //   g_src  = (c * G(1 / cnt)) * G(g_M)
 // G gathers along dim (an invalid id reads 0, so its g_src is 0) and SA
 // scatter-adds.  The count accumulates in sum_acc_dtype (dtype.py:220), as
-// tinygrad casts its tie mask.  MIN mirrors it (tinygrad's negated MAX
-// gives the same values up to the sign of a zero).  Returns 0 when an
+// tinygrad casts its tie mask.  MIN mirrors it, down to the -0.0 that
+// tinygrad's negated MAX gives a losing branch.  Returns 0 when an
 // operand does not fit.
 static int grad_scatter_maxmin(Term y, Term base, Term idx, Term src, Term g,
                                Term *g_base, Term *g_src) {
@@ -1070,7 +1070,9 @@ static int grad_scatter_maxmin(Term y, Term base, Term idx, Term src, Term g,
   Term t_wins = (kind == SCATTER_MAX) ? uop_binary(UOP_CMPLT, m, t)
                                       : uop_binary(UOP_CMPLT, t, m);
   Term tie    = uop_binary(UOP_CMPEQ, m, t);
-  Term zero   = uop_const(dt, 0);
+  // A losing branch is +0 for MAX and -0 for MIN: tinygrad's amin is
+  // NEG(MAX(NEG R, NEG T)), so its losing branch is -1 * +0.
+  Term zero   = uop_const(dt, (kind == SCATTER_MIN && dtype_is_float(dt)) ? 0x80000000u : 0u);
   Term split  = uop_where(tie, uop_binary(UOP_MUL, g, uop_const(dt, half_bits)), zero);
   Term g_m    = uop_where(m_wins, g, split);
   Term g_t    = uop_where(t_wins, g, split);

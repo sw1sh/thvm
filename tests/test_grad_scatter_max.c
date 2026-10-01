@@ -16,8 +16,7 @@
 //               valid p, else 0
 // so tied maxima split the cotangent evenly, the base takes half of a tie
 // with M, and an untouched base of I keeps half (its M is I too).  amin is
-// the mirror image (tinygrad's negated MAX gives the same values up to the
-// sign of a zero).  The host reference computes exactly this in f32, the
+// the mirror image, down to the -0.0 of a losing branch.  The host reference computes exactly this in f32, the
 // order tinygrad's kernels round in.
 //
 //   1. a case pinned to tinygrad master 365f87a8a's own gradients: a

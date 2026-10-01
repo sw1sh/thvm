@@ -57,7 +57,10 @@ or inverted (int) MAX (`mixin/op.py:494`, `elementwise.py:404-408`).  So
 among equal values the first in p order stays (-0.0 then +0.0 gives
 -0.0), a NaN src never wins, a NaN base yields to `S` where it is
 combined, and an untouched NaN base becomes the identity, as
-`MAX(I, NaN) = I` does in tinygrad.
+`MAX(I, NaN) = I`.  tinygrad keeps a NaN base at positions outside the
+index's extent along the other dims for some shapes and folds it to I for
+others (its codegen folds `MAX(-inf, x)` shape by shape); thvm always
+gives I there, which also agrees with tinygrad's gradient (0 to the base).
 
 ## Lowering
 
@@ -157,7 +160,8 @@ of them carries a gradient there.
   the head of a chunk wins that chunk: with [nan, 1, 2] landing on one
   position, master gives nan among 8 ids and -inf among 40 ids with
   include_self, and 2.0 without it, where thvm gives 2.0.  Without a NaN
-  src the values match tinygrad bit for bit.
+  src, and without a NaN base outside the index's extent (see above), the
+  values match tinygrad bit for bit.
 - A position or offset in an index view is compiled into the kernel (see
   Lowering); tinygrad keeps a bound Variable symbolic.
 - A scatter_reduce mean divides as every thvm division does, `sum *
@@ -187,7 +191,7 @@ Measured on the Linux CPU pod (C JIT):
   fusion, loop bounds, JIT replay.
 - [tests/test_uop_scatter_max.c](../tests/test_uop_scatter_max.c): MAX
   and MIN forward on both CPU backends: ties, signed zeros, identity hits,
-  NaN, the exact identity bytes of eight dtypes, BEAM=2, JIT replay and a
+  NaN, the exact identity bytes of ten dtypes, BEAM=2, JIT replay and a
   GC of live graphs.
 - [tests/test_grad_gather_scatter.c](../tests/test_grad_gather_scatter.c):
   gradients in every chain-rule mode, finite differences, second order.

@@ -472,7 +472,6 @@ static void build_lane_blocks(void) {
   }
 }
 
-// out[i] = <index op>(a(x[i], y[i]), b(x[i], y[i])) over f32 x and y.
 static Term below(Term x, Term c) {
   return uop_iwhere(uop_binary(UOP_CMPLT, x, c), uop_const(DT_INT32, 1),
                     uop_const(DT_INT32, 0));
@@ -531,6 +530,7 @@ static void build_unsigned_consts(void) {
   }
 }
 
+// out[i] = <index op>(a(x[i], y[i]), b(x[i], y[i])) over f32 x and y.
 static Kern *index_op_kern(char const *name, f32 const *x, f32 const *y) {
   Kern *k = kern(name, DT_INT32, NO);
   input(k, DT_FP32, NO, x);

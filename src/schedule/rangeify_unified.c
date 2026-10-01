@@ -3260,8 +3260,9 @@ static Term ru_scatter_combine(u32 kind, Term acc, Term x) {
 //                   SUM; OUT[t] = valid ? I : OUT[t]; accumulate;
 //   REPLACE         OUT[R] = base[R]; accumulate.
 // Without include_self a written position thus holds S, and an untouched
-// one I (op) base, which is base except that MAX(I, NaN) = I, as in
-// tinygrad.  The node's BUFFERIZE wraps the SCATTER itself, so no consumer
+// one I (op) base, which is base except that MAX(I, NaN) = I (tinygrad
+// keeps a NaN base outside the index's extent for some shapes; thvm always
+// gives I).  The node's BUFFERIZE wraps the SCATTER itself, so no consumer
 // can inline it.  PROD has no lowering yet: the node still becomes a
 // boundary, and visit() declines its kernel.
 static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {

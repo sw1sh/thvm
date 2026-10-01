@@ -401,8 +401,11 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
   an index view's offset (a decode position) is a kernel constant, so each
   position compiles its own kernel, where tinygrad binds a symbolic Variable;
   a NaN src never wins an amax / amin scatter, where tinygrad's unrolled
-  one-hot reduce lets a NaN at the head of an unrolled chunk win; an amin
-  scatter's gradient gives +0.0 where tinygrad's negated MAX gives -0.0.  The
+  one-hot reduce lets a NaN at the head of an unrolled chunk win; a NaN base
+  outside the index's extent along the other dims becomes the identity, where
+  tinygrad's codegen keeps the NaN for some shapes; an int64 MAX / MIN or a
+  uint64 MIN scatter is rejected, its identity not fitting the 32-bit CONST
+  payload.  The
   PROD scatter lowering and the PROD / REPLACE scatter gradients are still to
   come; `backward()` raises for the missing gradients, and py's
   `scatter_reduce` takes `"sum"` and `"mean"` (the other kinds raise

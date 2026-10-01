@@ -135,8 +135,8 @@ linear in its operand sizes: no one-hot mask and no REDUCE.
     (every hit is then the identity too), so `cnt = e * K + SA(c - G(e))`
     with `e = (M == I)` and `c = (src == G(M))`.  The count accumulates in
     `sum_acc_dtype`; the mask is multiplied in as tinygrad multiplies it,
-    `(c * (1 / cnt)) * g_M`.  MIN mirrors MAX: tinygrad's negated MAX gives
-    the same values except that some zero cotangents come back as -0.0.
+    `(c * (1 / cnt)) * g_M`.  MIN mirrors MAX, down to the -0.0 that
+    tinygrad's negated MAX gives a losing branch.
   - `PROD` and `REPLACE` scatters have no rule yet.  Their
     cell fires to zero and the chain rule records the first such node in
     its error slot (`grad_err_set`; the message also goes to stderr).
