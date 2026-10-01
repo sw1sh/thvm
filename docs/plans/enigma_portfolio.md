@@ -654,10 +654,20 @@ What is running now:
 |------------------------------|-----------------|------|
 | tptp_pool.tgz                | f3db85ff0268595c741369192ec76c4078b6a39680ca06ef94a724d4c941ce86 | 2026-10-01 |
 | matrix binary (b8443afb)     | d3946ff1a965a9be4678f932a6abeec697768a690feb34b4f0e5d723cd2af5c0 | 2026-10-01 |
-| sealed J13 matrix rows       | at harvest      | |
-| matrix_tables.py             | at commit       | |
+| sealed J13 matrix rows       | 005488de020d08293a2dd70c54d8fb4ed274c1932ddac22f3fd53078fd072864 (18,400 rows) | 2026-10-02 |
+| matrix_tables.py             | dfb13207ae82afa7cb3b443abe3b1aac170f601d2d5fc94d55ace422859ba475 (627aabb2) | 2026-10-02 |
 | WDEP and delta per wall      | at L0           | |
-| section 5.3 outputs          | at harvest      | |
+| section 5.3 outputs          | ~/.cache/thvm/enigma/matrix/decisions_5_3.txt; summary below | 2026-10-02 |
+
+Section 5.3 outputs (2026-10-02, from the sealed matrix; train and held-out only):
+- Pool: TRAIN 664 problems, VBS at 60 s 550 (528 within 1 s), best single lane twee-raw 488, greedy cover reaches the union at k = 9. HELDOUT 171: VBS 143, best lane twee / twee-raw 134, union at k = 3. G0.1 passes (56,810 of 56,810 rows; 24 crashes, 0.062%).
+- Hard tail: TRAIN 10 problems (fastest lane over 10 s), HELDOUT 1 (REL033-3). After the J13 stem exclusion, DEV-T = 5 and TRAIN-T = 4 problems. The pool has almost no band, so DEV-S (M2) and the 180 s supplement carry the gates.
+- M4b pre-gate: FAIL. The oracle plan and simulated P1 both solve 505 on TRAIN + DEV-T at 60, 53 and 45 s; only 10 problems are solved by exactly one lane. No learned launch plan.
+- M4c pre-gate: FAIL, final. 8 TRAIN Unsatisfiable problems rated below 1.0 are unsolved at 60 s (25 needed). No invention pilot.
+- P1 retirement candidates by the letter of the rule: wm, horn-back, mnf-gj-amw, ifeq, tgt, tgt-fold, wm-gj, lazy-gj, bare-gj, plus 13 fof-* lanes the CNF pool cannot judge. wm is the fastest lane on 39 pool problems and owns REL033-3, so it stays for M1's paired test. All candidates wait for the 180 s supplement.
+- Twin families: provisional, decided by ties because TRAIN-T has 4 problems: horn-cd, twee, encompass, flatten-bare-raw. Revisited after the supplement and DEV-S.
+- Supplement: 142 problems, 2,882 jobs (SYN986-10.005/.006 segfault until the deep-term fix lands). Label harvest: 8,574 pairs on 500 TRAIN problems.
+- T7: 40 front-end proofs come from equals, narrowq and unfold, which the static replica calls dead. These lanes run the Horn front end before their exit test (the M1 liveness item).
 
 Decisions recorded (2026-10-01, by the user):
 - D1: yes. Training may include synthetic -10 encodings of non-UEQ TPTP problems from our FOF front end; J13 names and stems are excluded in every division.
