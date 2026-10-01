@@ -8311,6 +8311,78 @@ fn void      thvm_atp_history_search_end(AtpState *s);
 // THVM_ATP_RERANK_MODEL; this entry is for hosts and tests.
 fn int       thvm_atp_topk_load(const char *path);
 
+// Problem features phi(p) (docs/plans/enigma_portfolio.md, section 3.1),
+// the per-problem input of the selection layer.  tp_problem_features
+// (tools/atp_cli/problem_features.c) fills it and FindProof
+// --problem-features prints it, so training rows and the deployed layer
+// read the same numbers.
+//   gate bits   GOAL_EXISTENTIAL .. AX_GROUND_COMPOUND and CONJ_CONE_PARTIAL
+//               are the exit-fast predicates of narrowq, equals*, ifeq,
+//               horn-cd/horn-back, unfold*, tgt-ax and tgt-sel, read where
+//               the gate reads them.  DISTRIB_LAW is only the shape the
+//               otter-* gate looks for: that gate also needs the law to
+//               orient as expansion under the lane's precedence.  FE_LIVE:
+//               the front end's own gates pass; SINE: axiom selection runs.
+//   algebra     AC_PAIRS .. DISTRIB_SYMS: operator counts from
+//               Waldmeister's structure detection over the loaded .pr.
+//   sizes       AXIOMS .. GOAL_VARS_MAX hold floor(log2(1 + n)) of the
+//               problem as stated (a constant or a variable has depth 1).
+//   CONJ_SYM_FRAC  conjecture-clause symbols / signature.
+// CONJ_CONE_PARTIAL, DISTRIB_LAW, the algebra and CONJ_SYM_FRAC read the
+// problem as the engine loads it, after axiom selection and the canonical
+// presentation.  Everything is computed under the default front-end
+// configuration, whatever the environment holds; a column whose stage
+// the front end never reaches (it gave up first) is 0.  No TPTP header
+// field is here: the deployed problems carry none, and the status is the
+// label.
+// ATP_PHI_VERSION changes with any column or its meaning; trained weights
+// record the version they were trained on.
+#define ATP_PHI_VERSION 1
+enum {
+  ATP_PHI_GOAL_EXISTENTIAL,
+  ATP_PHI_EQUALS_GOAL,
+  ATP_PHI_IFEQ_DISPATCHER,
+  ATP_PHI_HORN_SLICE,
+  ATP_PHI_DEF_UNFOLD,
+  ATP_PHI_AX_GROUND_COMPOUND,
+  ATP_PHI_CONJ_CONE_PARTIAL,
+  ATP_PHI_DISTRIB_LAW,
+  ATP_PHI_FE_LIVE,
+  ATP_PHI_SINE,
+  ATP_PHI_AC_PAIRS,
+  ATP_PHI_COMM_SYMS,
+  ATP_PHI_ASSOC_SYMS,
+  ATP_PHI_IDEM_SYMS,
+  ATP_PHI_UNIT_SYMS,
+  ATP_PHI_INVERSE_SYMS,
+  ATP_PHI_DISTRIB_SYMS,
+  ATP_PHI_AXIOMS,
+  ATP_PHI_HYPOTHESES,
+  ATP_PHI_GOALS,
+  ATP_PHI_SYMS,
+  ATP_PHI_SYMS_AR0,
+  ATP_PHI_SYMS_AR1,
+  ATP_PHI_SYMS_AR2,
+  ATP_PHI_SYMS_AR3,
+  ATP_PHI_SYMS_AR4P,
+  ATP_PHI_MAX_ARITY,
+  ATP_PHI_VAR_NAMES,
+  ATP_PHI_AX_SIZE_MAX,
+  ATP_PHI_AX_SIZE_MEAN,
+  ATP_PHI_AX_DEPTH_MAX,
+  ATP_PHI_AX_DEPTH_MEAN,
+  ATP_PHI_AX_VARS_MAX,
+  ATP_PHI_AX_VARS_MEAN,
+  ATP_PHI_AX_GROUND,
+  ATP_PHI_GOAL_SIZE_MAX,
+  ATP_PHI_GOAL_SIZE_MEAN,
+  ATP_PHI_GOAL_DEPTH_MAX,
+  ATP_PHI_GOAL_VARS_MAX,
+  ATP_PHI_CONJ_SYM_FRAC,
+  ATP_PHI_N
+};
+typedef struct { float v[ATP_PHI_N]; } AtpPhi;
+
 // Enable/disable recording of processed-CP feature rows.  OFF (0) by
 // default: select_cp records nothing and the engine is byte-identical.
 // ON (1): every CP returned by thvm_atp_select_cp appends a row

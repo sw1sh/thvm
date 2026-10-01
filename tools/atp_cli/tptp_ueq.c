@@ -38,7 +38,17 @@ static int g_cli_fof_applied;
 // equational stage that cannot run hands the wall to the saturation.
 static void (*g_tp_giveup_hook)(void) = NULL;
 
+// The static gate replica (tp_problem_features) replays front-end stages
+// that may give up; while it holds the trap, a give-up returns there with
+// its reason instead of ending the process.
+static jmp_buf *g_tp_giveup_trap = NULL;
+static char     g_tp_giveup_trap_why[256];
+
 static void tp_giveup(const char *why) {
+  if (g_tp_giveup_trap != NULL) {
+    snprintf(g_tp_giveup_trap_why, sizeof g_tp_giveup_trap_why, "%s", why);
+    longjmp(*g_tp_giveup_trap, 1);
+  }
   if (g_cli_fe_decided) {
     // The status is out; only the proof reconstruction gives up.
     fprintf(stderr, "FindProof: %s (proof not reconstructed)\n", why);
@@ -58,6 +68,17 @@ static void tp_giveup(const char *why) {
   fprintf(stderr, "FindProof: %s\n", why);
   exit(1);
 }
+
+// The give-up lines of the schedule lanes' exit-fast gates, shared by each
+// gate and the static gate replica, which predicts them per lane.
+#define TP_GATE_FOF     "fof slice: input has no fof() record"
+#define TP_GATE_NO_GOAL "no negated conjecture (satisfiability problem; not refutable)"
+#define TP_GATE_IFEQ    "ifeq-guard slice: no ifeq dispatcher axiom"
+#define TP_GATE_DEF     "def-unfold slice: no function definition"
+#define TP_GATE_TGT_AX  "tgt-ax slice: no axiom-side ground compound subterm"
+#define TP_GATE_TGT_SEL "tgt-sel slice: conjecture symbols cover the signature"
+#define TP_GATE_EQUALS  "equals-goal slice: no existential goal to encode"
+#define TP_GATE_NARROWQ "narrow-queue slice: goal is ground"
 
 // --- front-end wall ----------------------------------------------------
 // The engine measures its wall from its own start; the stages before it
@@ -867,6 +888,47 @@ static void tp_sine_dump(const TpProblem *tp, const char *path, int n) {
   fclose(df);
 }
 
+typedef struct {
+  double      tol0;
+  u32         gt, rc;
+  const char *dump;
+} TpSineCfg;
+
+// Problem features (tp_problem_features) select under these, whatever the
+// environment holds.
+static const TpSineCfg TP_SINE_DEFAULT = { 1.5, 1u, 64u, NULL };
+
+static TpSineCfg tp_sine_cfg_env(void) {
+  TpSineCfg cfg = TP_SINE_DEFAULT;
+  {
+    const char *e = getenv("THVM_ATP_SINE_TOL");
+    if (e != NULL && e[0] != '\0') cfg.tol0 = atof(e);
+    if (cfg.tol0 < 1.0) cfg.tol0 = 1.0;
+  }
+  {
+    const char *e = getenv("THVM_ATP_SINE_GT");
+    if (e != NULL && e[0] != '\0') {
+      long v = atol(e);
+      cfg.gt = (v < 0) ? 0u : (u32)v;
+    }
+  }
+  {
+    const char *e = getenv("THVM_ATP_SINE_RC");
+    if (e != NULL && e[0] != '\0') {
+      long v = atol(e);
+      cfg.rc = (v < 0) ? 0u : (u32)v;
+    }
+  }
+  cfg.dump = getenv("THVM_ATP_SINE_DUMP");
+  return cfg;
+}
+
+// Whether cfg selects as the defaults do; the dump path selects nothing.
+static int tp_sine_cfg_is_default(const TpSineCfg *cfg) {
+  return cfg->tol0 == TP_SINE_DEFAULT.tol0 && cfg->gt == TP_SINE_DEFAULT.gt &&
+         cfg->rc == TP_SINE_DEFAULT.rc;
+}
+
 // Driver: progressively tighten until the selection fits the engine
 // caps -- TOLERANCE first at full depth, rounds only as a last resort.
 // The CSR knowledge-base proofs ride 15+-trigger-deep chains (CSR036's
@@ -878,30 +940,11 @@ static void tp_sine_dump(const TpProblem *tp, const char *path, int n) {
 // dropped ones own most of the 10k-symbol table).  THVM_ATP_SINE=0
 // disables; THVM_ATP_SINE_TOL overrides the first tolerance;
 // THVM_ATP_SINE_GT overrides the generality threshold.
-static void tp_sine_select(TpProblem *tp) {
-  double tol0 = 1.5;
-  {
-    const char *e = getenv("THVM_ATP_SINE_TOL");
-    if (e != NULL && e[0] != '\0') tol0 = atof(e);
-    if (tol0 < 1.0) tol0 = 1.0;
-  }
-  u32 gt = 1;
-  {
-    const char *e = getenv("THVM_ATP_SINE_GT");
-    if (e != NULL && e[0] != '\0') {
-      long v = atol(e);
-      gt = (v < 0) ? 0u : (u32)v;
-    }
-  }
-  u32 rc = 64;
-  {
-    const char *e = getenv("THVM_ATP_SINE_RC");
-    if (e != NULL && e[0] != '\0') {
-      long v = atol(e);
-      rc = (v < 0) ? 0u : (u32)v;
-    }
-  }
-  const char *dump = getenv("THVM_ATP_SINE_DUMP");
+static void tp_sine_select_cfg(TpProblem *tp, const TpSineCfg *cfg) {
+  double tol0 = cfg->tol0;
+  u32 gt = cfg->gt;
+  u32 rc = cfg->rc;
+  const char *dump = cfg->dump;
   if (dump != NULL && dump[0] != '\0') {
     char inpath[1024];
     snprintf(inpath, sizeof inpath, "%s.in", dump);
@@ -984,6 +1027,11 @@ static void tp_sine_select(TpProblem *tp) {
   }
 }
 
+static void tp_sine_select(TpProblem *tp) {
+  TpSineCfg cfg = tp_sine_cfg_env();
+  tp_sine_select_cfg(tp, &cfg);
+}
+
 
 // --- tgt-ax lane prescreen -----------------------------------------
 // Does any NON-conjecture positive unit carry a ground compound
@@ -1017,4 +1065,78 @@ static int tp_has_ax_ground_compound(const TpProblem *tp) {
         tp_side_has_ground_compound(tp->cls[c].rhs)) return 1;
   }
   return 0;
+}
+
+// --- tgt-sel lane prescreen ------------------------------------------
+// The signature symbols occurring in a conjecture-role clause (a
+// word-boundary match on the clause strings): their number, and their
+// names, space-separated, into buf when buf is not NULL (room for every
+// symbol name plus a separator).  The tgt-sel lane taxes the symbols
+// outside this cone; when the cone is empty or covers the signature the
+// scale is uniform and the lane duplicates bare.
+static int tp_conj_syms(const TpProblem *tp, char *buf) {
+  size_t len = 0;
+  int n_hit = 0;
+  if (buf != NULL) {
+    buf[0] = '\0';
+  }
+  for (int i = 0; i < tp->n_syms; i++) {
+    const char *nm = tp->syms[i].name;
+    size_t nl = strlen(nm);
+    int hit = 0;
+    for (int c = 0; c < tp->n_cls && !hit; c++) {
+      if (!tp->cls[c].conj) {
+        continue;
+      }
+      for (int side = 0; side < 2 && !hit; side++) {
+        const char *hay = side ? tp->cls[c].rhs : tp->cls[c].lhs;
+        for (const char *p = strstr(hay, nm); p != NULL; p = strstr(p + 1, nm)) {
+          int lb = (p == hay) ||
+                   !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+          int rb = !(isalnum((unsigned char)p[nl]) || p[nl] == '_');
+          if (lb && rb) {
+            hit = 1;
+            break;
+          }
+        }
+      }
+    }
+    if (hit) {
+      n_hit++;
+      if (buf != NULL) {
+        if (len > 0) {
+          buf[len++] = ' ';
+        }
+        memcpy(buf + len, nm, nl);
+        len += nl;
+        buf[len] = '\0';
+      }
+    }
+  }
+  return n_hit;
+}
+
+static int tp_conj_cone_partial(int n_hit, int n_syms) {
+  return n_hit > 0 && n_hit < n_syms;
+}
+
+// The engine's capacity gates, after axiom selection: an oversized
+// problem gives up cleanly instead of aborting the .pr reader (PR_MAX_*
+// come from the bench TU).  The flatterm reader holds at most 8
+// arguments per node (TOP052's tuple/16 is curried before this).
+static void tp_check_capacity(const TpProblem *tp, int n_neg) {
+  if ((tp->n_cls - n_neg) > (int)PR_MAX_EQNS) {
+    tp_giveup("problem exceeds equation capacity");
+  }
+  if (tp->n_syms > (int)PR_MAX_SYMS) {
+    tp_giveup("problem exceeds symbol capacity");
+  }
+  if (tp->n_vars > (int)PR_MAX_VARS) {
+    tp_giveup("problem exceeds variable capacity");
+  }
+  for (int i = 0; i < tp->n_syms; i++) {
+    if (tp->syms[i].arity > 8) {
+      tp_giveup("functor arity exceeds 8");
+    }
+  }
 }

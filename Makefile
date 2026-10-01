@@ -357,6 +357,7 @@ TESTS := \
   $(BIN)/test_atp_cp_graph \
   $(BIN)/test_atp_rerank \
   $(BIN)/test_atp_gnn_score \
+  $(BIN)/test_atp_problem_features \
   $(BIN)/test_bench_atp \
   $(BIN)/test_pri \
   $(BIN)/test_app_sup \
@@ -1123,6 +1124,13 @@ $(BIN)/FindProof: tools/thvm_atp_cli.c tools/proof_check.c $(wildcard tools/atp_
 
 $(BIN)/thvm-atp: $(BIN)/FindProof
 	cp $< $@
+
+# Problem features phi(p) and the static gate replica: the FindProof TU
+# with its main renamed (FINDPROOF_LIB), the same defines as FindProof.
+$(BIN)/test_atp_problem_features: tests/test_atp_problem_features.c tools/thvm_atp_cli.c tools/proof_check.c $(wildcard tools/atp_cli/*.c) tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC -DATP_MNF \
+	  -o $@ $< $(TEST_LDFLAGS)
 
 $(BIN)/test_%: tests/test_%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)

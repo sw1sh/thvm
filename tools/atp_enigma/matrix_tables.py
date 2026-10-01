@@ -22,6 +22,17 @@ Modes, in order:
   --tables     T1-T8 per split -> tables/.
   --decisions  The section 5.3 rules -> decisions_5_3.txt and job lists.
   --all        --validate, --tables, --decisions.
+  --t7c FILE   T7-C: the C static gate replica (FILE: FindProof
+               --problem-features --lanes over the 835 pool problems,
+               concatenated; header lines are skipped) against the pool rows
+               of the binary that produced the matrix.  A dead lane must end
+               fast-exit with exactly the predicted line (a .pr reader line:
+               an input-error exit), a live lane must not end fast-exit, a
+               strict undet lane either ends with its line or the Horn
+               release proves the problem first.  It also cross-checks
+               static_gates.py, the replica T7 used, against the C one.
+               -> tables/T7C_*.tsv, tables/T7C_summary.txt; exit 1 on a
+               violation.
 
 Every mode after --seal reads matrix.tsv only, asserts that no row has
 split j13 and that every problem is a train or heldout problem of
@@ -1104,6 +1115,134 @@ def mode_tables(paths, pf):
     print("\n".join(summary))
 
 
+# ---------------------------------------------------------------- T7-C
+
+
+PR_LINE = "pr parse error: "
+
+
+def load_replica(paths, path, problems, lanes):
+    """(problem, lane) -> (verdict, strict, gates, reason) from the C
+    replica's rows; dies on a j13 or unknown problem, an unknown lane, a
+    malformed or repeated row."""
+    out = {}
+    known = set(lanes)
+    with open(paths.guard(path)) as fp:
+        for line in fp:
+            f = line.rstrip("\n").split("\t")
+            if f == [""] or f[0] == "problem":
+                continue
+            if len(f) != 6:
+                die("replica: a row without 6 columns")
+            p, lane, verdict, strict, gates, reason = f
+            split = problems.get(p, ("", ""))[1]
+            if split == "j13":
+                die("the replica file holds a j13 row")
+            if split not in SPLITS:
+                die(f"replica: {p} is not a train or heldout problem")
+            if lane not in known:
+                die(f"replica: unknown lane {lane}")
+            if verdict not in ("live", "dead", "undet") or strict not in ("0", "1"):
+                die(f"replica: bad verdict for {p} {lane}")
+            if (p, lane) in out:
+                die(f"replica: {p} {lane} twice")
+            out[(p, lane)] = (verdict, strict == "1", gates, reason)
+    return out
+
+
+def t7c_ok(verdict, strict, reason, r):
+    """Whether a pool row is what the C replica predicts for it; None when
+    the prediction is not judged (undet without a strict line)."""
+    fe = r.cls == "fast-exit-not-applicable"
+    pr_line = reason.startswith(PR_LINE)
+    ended = (r.cls == "crash" and r.detail.startswith("input error")
+             if pr_line else fe and r.detail == reason)
+    if verdict == "dead":
+        return ended
+    if verdict == "live":
+        return not fe
+    if strict and reason != "-":
+        return ended or (r.cls == "proved" and r.detail.startswith("front end"))
+    return None
+
+
+def mode_t7c(paths, pf, replica_path):
+    problems, lanes, rows, pool = context(paths)
+    rep = load_replica(paths, replica_path, problems, lanes)
+    missing = sum(1 for p in pool.by for l in lanes if (p, l) not in rep)
+    if missing:
+        die(f"the replica file lacks {missing} (problem, lane) pairs of the pool")
+    gates = {p: static_gates.gates(os.path.join(pf.root, pool.path[p]), pf.root)
+             for p in pool.by}
+    os.makedirs(paths.tables, exist_ok=True)
+    written = []
+    summary = ["T7-C: the C static gate replica (FindProof --problem-features "
+               "--lanes) against the pool rows; " + os.path.basename(replica_path),
+               ""]
+    n_viol = 0
+    for split in SPLITS:
+        probs = pool.problems([split])
+
+        def T(name):
+            f = os.path.join(paths.tables, f"{name}_{split}.tsv")
+            written.append(f)
+            return f
+
+        counts = collections.Counter()
+        viol = []
+        cross = []
+        judged = 0
+        for lane in lanes:
+            for p in probs:
+                r = pool.by[p][lane]
+                verdict, strict, _g, reason = rep[(p, lane)]
+                ok = t7c_ok(verdict, strict, reason, r)
+                judged += ok is not None
+                end = ("fast-exit" if r.cls == "fast-exit-not-applicable"
+                       else r.cls if r.cls in ("proved", "crash")
+                       else "searched")
+                counts[(lane, verdict, end)] += 1
+                if ok is False:
+                    viol.append((p, lane, verdict, int(strict), reason, r.cls,
+                                 r.detail))
+                sv = static_gates.lane_live(lane, gates[p])
+                if sv is not None and verdict != "undet" and \
+                        sv != (verdict == "live"):
+                    cross.append((p, lane, "live" if sv else "dead", verdict,
+                                  reason))
+        ends = ("fast-exit", "proved", "searched", "crash")
+        write_tsv(T("T7C_replica"), ["lane"] + [
+            f"{v}_{e}" for v in ("live", "dead", "undet") for e in ends],
+            [[lane] + [counts[(lane, v, e)] for v in ("live", "dead", "undet")
+                       for e in ends] for lane in lanes])
+        write_tsv(T("T7C_violations"), ["problem", "lane", "verdict", "strict",
+                                        "predicted", "class", "detail"], viol)
+        write_tsv(T("T7C_static_gates"), ["problem", "lane", "static_gates",
+                                          "c_replica", "c_reason"], cross)
+        n_viol += len(viol)
+        by_lane = collections.Counter(v[1] for v in viol)
+        cross_lane = collections.Counter(c[1] for c in cross)
+        summary += [
+            f"== {split}: {len(probs)} problems x {len(lanes)} lanes, "
+            f"{judged} judged rows",
+            f"T7-C violations: {len(viol)} (must be 0)"
+            + ("" if not viol else ": " + ", ".join(
+                f"{l} {n}" for l, n in by_lane.most_common())),
+            f"static_gates.py disagrees with the C replica on {len(cross)} "
+            "(problem, lane) pairs (live/dead only)"
+            + ("" if not cross else ": " + ", ".join(
+                f"{l} {n}" for l, n in cross_lane.most_common())),
+            "",
+        ]
+    out = os.path.join(paths.tables, "T7C_summary.txt")
+    with open(out, "w") as fp:
+        fp.write("\n".join(summary))
+    written.append(out)
+    assert_no_j13(paths, problems, written)
+    print("\n".join(summary))
+    return n_viol == 0
+
+
 # ---------------------------------------------------------------- 5.3
 
 # Documented unique solves on a CASC problem, read from each lane's comment
@@ -1592,11 +1731,19 @@ def main():
     g = ap.add_mutually_exclusive_group(required=True)
     for m in ("seal", "validate", "tables", "decisions", "all"):
         g.add_argument("--" + m, action="store_true")
+    g.add_argument("--t7c", metavar="REPLICA_TSV")
     a = ap.parse_args()
     paths = Paths(a.matrix_dir, a.sealed_dir)
     if a.seal:
         mode_seal(paths)
         return
+    if a.t7c is not None:
+        pf = PoolFiles(paths)
+        try:
+            ok = mode_t7c(paths, pf, a.t7c)
+        finally:
+            pf.tmp.cleanup()
+        sys.exit(0 if ok else 1)
     if a.validate or a.all:
         mode_validate(paths)
     if a.tables or a.decisions or a.all:

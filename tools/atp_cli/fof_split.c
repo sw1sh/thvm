@@ -2949,6 +2949,7 @@ static void tp_fof_load(TpProblem *tp, const char *text) {
 static char *tp_emit_pr(TpProblem *tp, const char *name) {
   size_t cap = 1u << 20;
   char *out = (char *)malloc(cap);
+  if (out == NULL) tp_giveup("OOM in .pr emission");
   size_t o = 0;
 #define EMIT(...) do { o += (size_t)snprintf(out + o, cap - o, __VA_ARGS__); } while (0)
   EMIT("NAME          %s\n", name);
@@ -2956,6 +2957,7 @@ static char *tp_emit_pr(TpProblem *tp, const char *name) {
   EMIT("SORTS         ANY\n");
   // SIGNATURE: alphabetical (wmBuildPr sorts the sig listing by name)
   TpSym *alpha = (TpSym *)malloc(sizeof(TpSym) * (size_t)(tp->n_syms + 1));
+  if (alpha == NULL) tp_giveup("OOM in .pr emission");
   memcpy(alpha, tp->syms, sizeof(TpSym) * (size_t)tp->n_syms);
   for (int i = 0; i < tp->n_syms; i++)
     for (int j = i + 1; j < tp->n_syms; j++)
@@ -2972,6 +2974,7 @@ static char *tp_emit_pr(TpProblem *tp, const char *name) {
   for (int i = 0; i < tp->n_syms; i++) EMIT("%s%s=1", (i > 0) ? ", " : "", alpha[i].name);
   EMIT("\n");
   TpSym *prec = (TpSym *)malloc(sizeof(TpSym) * (size_t)(tp->n_syms + 1));
+  if (prec == NULL) tp_giveup("OOM in .pr emission");
   memcpy(prec, tp->syms, sizeof(TpSym) * (size_t)tp->n_syms);
   qsort(prec, (size_t)tp->n_syms, sizeof(TpSym), tp_sym_cmp);
   EMIT("              ");

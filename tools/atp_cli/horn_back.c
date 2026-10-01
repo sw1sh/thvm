@@ -625,6 +625,83 @@ static int tp_has_ifeq_dispatcher(TpProblem *tp) {
   return found;
 }
 
+// The --horn-cd=2 / --horn-back=2 slice gate over tp_horn_release's parse:
+// the dispatcher count and the parsed goals (at most 64).  The CD lanes
+// target ground condensed-detachment goals; the existential (planning)
+// and oversized-KB families crack via the v2 steered forward lane in the
+// wm slice.
+enum { HORN_GATE_LIVE = 0, HORN_GATE_NO_DISP, HORN_GATE_EXISTENTIAL,
+       HORN_GATE_OVERSIZED };
+
+static int horn_slice_gate(int n_disp, const int *gl, const int *gr, int ng,
+                           int n_cls) {
+  if (n_disp == 0) {
+    return HORN_GATE_NO_DISP;
+  }
+  for (int g = 0; g < ng; g++) {
+    if (horn_has_var(gl[g]) || horn_has_var(gr[g])) {
+      return HORN_GATE_EXISTENTIAL;
+    }
+  }
+  return (n_cls > 4000) ? HORN_GATE_OVERSIZED : HORN_GATE_LIVE;
+}
+
+// The give-up line of a failed slice gate.  With both lanes armed the
+// dispatcher test names horn-cd and the other two horn-back, the order
+// the release checks them in.
+static const char *const HORN_SLICE_WHY[4][2] = {
+  {"", ""},
+  {"horn-cd slice: no encoded-Horn dispatcher",
+   "horn-back slice: no encoded-Horn dispatcher"},
+  {"horn-cd slice: existential goal (v2 lane covers it)",
+   "horn-back slice: existential goal (v2 lane covers it)"},
+  {"horn-cd slice: oversized KB",
+   "horn-back slice: oversized KB"},
+};
+
+static const char *horn_slice_why(int gate, int cd, int back) {
+  if (gate == HORN_GATE_NO_DISP) {
+    return HORN_SLICE_WHY[gate][cd ? 0 : 1];
+  }
+  return HORN_SLICE_WHY[gate][back ? 1 : 0];
+}
+
+// The same parse as tp_horn_release's, without its release machinery (so
+// it works under --horn=0): the number of dispatcher axioms, and in
+// *gate the horn-cd / horn-back slice gate that release would apply.
+static int tp_horn_probe(TpProblem *tp, int *gate) {
+  HParse *ps = (HParse *)malloc(sizeof(HParse));
+  if (ps == NULL) {
+    tp_giveup("OOM in Horn release");
+  }
+  int mark_n = g_hn_n, mark_a = g_ha_n, n_disp = 0, ng = 0;
+  int gl[64], gr[64];
+  for (int c = 0; c < tp->n_cls; c++) {
+    ps->nv = 0;
+    int l = horn_parse_side(tp, ps, tp->cls[c].lhs);
+    int r = (l >= 0) ? horn_parse_side(tp, ps, tp->cls[c].rhs) : -1;
+    if (l < 0 || r < 0) {
+      continue;
+    }
+    if (tp->cls[c].neg) {
+      if (ng < 64) {
+        gl[ng] = l;
+        gr[ng] = r;
+        ng++;
+      }
+      continue;
+    }
+    if (horn_disp_check(l, r) || horn_disp_check(r, l)) {
+      n_disp++;
+    }
+  }
+  *gate = horn_slice_gate(n_disp, gl, gr, ng, tp->n_cls);
+  g_hn_n = mark_n;
+  g_ha_n = mark_a;
+  free(ps);
+  return n_disp;
+}
+
 static void tp_horn_release(TpProblem *tp) {
   int n = tp->n_cls;
   // CD lane flag before any fact is added: fingerprints ride the adds.
@@ -667,33 +744,16 @@ static void tp_horn_release(TpProblem *tp) {
     }
   }
   int released_kept = 0;
+  // Slice mode: free the pool slot at once where the CD lanes do not
+  // apply (horn_slice_gate).
+  if (g_horn_cd >= 2 || g_bk_on >= 2) {
+    int gate = horn_slice_gate(n_disp, g_hg_l, g_hg_r, g_hg_n, tp->n_cls);
+    if (gate != HORN_GATE_LIVE) {
+      tp_giveup(horn_slice_why(gate, g_horn_cd >= 2, g_bk_on >= 2));
+    }
+  }
   if (n_disp == 0) {
-    // Slice mode: free the pool slot at once on a non-CD problem.
-    if (g_horn_cd >= 2)
-      tp_giveup("horn-cd slice: no encoded-Horn dispatcher");
-    if (g_bk_on >= 2)
-      tp_giveup("horn-back slice: no encoded-Horn dispatcher");
     goto done;   // not an encoded-Horn problem
-  }
-  if (g_bk_on >= 2) {
-    // The backward lane targets ground condensed-detachment goals; the
-    // existential (planning) and oversized-KB families crack via the v2
-    // steered forward lane in the wm slice.
-    int ex = 0;
-    for (int g = 0; g < g_hg_n && !ex; g++)
-      ex = horn_has_var(g_hg_l[g]) || horn_has_var(g_hg_r[g]);
-    if (ex) tp_giveup("horn-back slice: existential goal (v2 lane covers it)");
-    if (tp->n_cls > 4000) tp_giveup("horn-back slice: oversized KB");
-  }
-  if (g_horn_cd >= 2) {
-    // The CD discipline targets ground saturation-style goals; the
-    // existential (planning) and oversized-KB families already crack
-    // via the v2 steered lane in the wm slice.
-    int ex = 0;
-    for (int g = 0; g < g_hg_n && !ex; g++)
-      ex = horn_has_var(g_hg_l[g]) || horn_has_var(g_hg_r[g]);
-    if (ex) tp_giveup("horn-cd slice: existential goal (v2 lane covers it)");
-    if (tp->n_cls > 4000) tp_giveup("horn-cd slice: oversized KB");
   }
   g_hix_head = (int *)malloc((size_t)TP_MAX_SYMS * sizeof(int));
   g_hdup_slots = g_horn_cd ? (HORN_DEDUP_SLOTS << 2) : HORN_DEDUP_SLOTS;
