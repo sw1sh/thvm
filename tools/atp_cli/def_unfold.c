@@ -198,44 +198,81 @@ static int tp_du_expand_side(const char *side, char *out,
   return 1;
 }
 
+// One round of the definition search: the first candidate definition in
+// clause order whose symbol is not in skip[], dry-run against every other
+// clause.  Returns the definition's clause index with fname, args, nargs
+// and body filled; TP_DU_NONE when no candidate is left; TP_DU_SKIPPED
+// when the candidate's dry run failed, its symbol then joins skip[].
+enum { TP_DU_NONE = -1, TP_DU_SKIPPED = -2 };
+
+static int tp_du_round(const TpProblem *tp, char skip[][TP_NAME_LEN],
+                       int *n_skip, char *fname,
+                       char args[][TP_NAME_LEN], int *nargs,
+                       const char **body) {
+  int def_ix = -1;
+  for (int i = 0; i < tp->n_cls && def_ix < 0; i++) {
+    const TpClause *cl = &tp->cls[i];
+    if (cl->neg || cl->conj) {
+      continue;
+    }
+    for (int side = 0; side < 2 && def_ix < 0; side++) {
+      const char *h = side ? cl->rhs : cl->lhs;
+      const char *t = side ? cl->lhs : cl->rhs;
+      int na = tp_du_parse_head(h, fname, TP_NAME_LEN, args);
+      if (na < 1) {
+        continue;
+      }
+      if (!tp_du_body_ok(t, fname, args, na)) {
+        continue;
+      }
+      int skipped = 0;
+      for (int k = 0; k < *n_skip && !skipped; k++) {
+        skipped = (strcmp(skip[k], fname) == 0);
+      }
+      if (skipped) {
+        continue;
+      }
+      *nargs = na;
+      def_ix = i;
+      *body = t;
+    }
+  }
+  if (def_ix < 0) {
+    return TP_DU_NONE;
+  }
+  // Dry-run: every side of every other clause must expand within the
+  // side buffer -- unfolding is all-or-nothing per symbol (a partial
+  // unfold that dropped the axiom would be unsound).
+  char tmp[TP_SIDE_LEN];
+  int ok = 1;
+  for (int i = 0; i < tp->n_cls && ok; i++) {
+    if (i == def_ix) {
+      continue;
+    }
+    ok = tp_du_expand_side(tp->cls[i].lhs, tmp, fname, *nargs, args, *body) &&
+         tp_du_expand_side(tp->cls[i].rhs, tmp, fname, *nargs, args, *body);
+  }
+  if (!ok) {
+    if (*n_skip < 64) {
+      snprintf(skip[(*n_skip)++], TP_NAME_LEN, "%s", fname);
+    }
+    return TP_DU_SKIPPED;
+  }
+  return def_ix;
+}
+
 static void tp_def_unfold(TpProblem *tp) {
   char skip[64][TP_NAME_LEN];
   int  n_skip = 0;
   for (int round = 0; round < 64; round++) {
     char fname[TP_NAME_LEN], args[TP_DU_MAX_ARGS][TP_NAME_LEN];
-    int  nargs = -1, def_ix = -1;
+    int  nargs = -1;
     const char *body = NULL;
-    for (int i = 0; i < tp->n_cls && def_ix < 0; i++) {
-      TpClause *cl = &tp->cls[i];
-      if (cl->neg || cl->conj) continue;
-      for (int side = 0; side < 2 && def_ix < 0; side++) {
-        const char *h = side ? cl->rhs : cl->lhs;
-        const char *t = side ? cl->lhs : cl->rhs;
-        int na = tp_du_parse_head(h, fname, sizeof fname, args);
-        if (na < 1) continue;
-        if (!tp_du_body_ok(t, fname, args, na)) continue;
-        int skipped = 0;
-        for (int k = 0; k < n_skip && !skipped; k++)
-          skipped = (strcmp(skip[k], fname) == 0);
-        if (skipped) continue;
-        nargs = na;
-        def_ix = i;
-        body = t;
-      }
+    int def_ix = tp_du_round(tp, skip, &n_skip, fname, args, &nargs, &body);
+    if (def_ix == TP_DU_NONE) {
+      break;
     }
-    if (def_ix < 0) break;
-    // Dry-run: every side of every other clause must expand within the
-    // side buffer -- unfolding is all-or-nothing per symbol (a partial
-    // unfold that dropped the axiom would be unsound).
-    char tmp[TP_SIDE_LEN];
-    int ok = 1;
-    for (int i = 0; i < tp->n_cls && ok; i++) {
-      if (i == def_ix) continue;
-      ok = tp_du_expand_side(tp->cls[i].lhs, tmp, fname, nargs, args, body) &&
-           tp_du_expand_side(tp->cls[i].rhs, tmp, fname, nargs, args, body);
-    }
-    if (!ok) {
-      if (n_skip < 64) snprintf(skip[n_skip++], TP_NAME_LEN, "%s", fname);
+    if (def_ix == TP_DU_SKIPPED) {
       continue;
     }
     // Commit: rewrite every clause, then drop the definition axiom.
@@ -302,25 +339,46 @@ static void tp_fresh_sym(const TpProblem *tp, const char *base,
   }
 }
 
-static void tp_equals_goal(TpProblem *tp) {
-  int n_nonground = 0;
-  for (int i = 0; i < tp->n_cls; i++)
-    if (tp->cls[i].neg && (tp_side_has_var(tp->cls[i].lhs) ||
-                           tp_side_has_var(tp->cls[i].rhs)))
-      n_nonground++;
-  if (n_nonground == 0) return;
-  // Fall back to the narrowing lane if the encoding cannot fit.
-  if (tp->n_cls + 2 > TP_MAX_CLAUSES) return;
-  char eqn[TP_NAME_LEN], tru[TP_NAME_LEN], fls[TP_NAME_LEN];
-  tp_fresh_sym(tp, "eq",     eqn, sizeof eqn);
-  tp_fresh_sym(tp, "etrue",  tru, sizeof tru);
-  tp_fresh_sym(tp, "efalse", fls, sizeof fls);
+// Does the equals encoding apply?  A non-ground goal, room for the two
+// clauses it adds, and every encoded goal inside the side bound; else the
+// narrowing lane keeps the goal.  Fills the fresh eq / true / false names
+// (TP_NAME_LEN each) and the number of non-ground goals.  The
+// --equals-goal=2 gate.
+static int tp_equals_goal_applies(const TpProblem *tp, char *eqn, char *tru,
+                                  char *fls, int *n_nonground) {
+  *n_nonground = 0;
   for (int i = 0; i < tp->n_cls; i++) {
-    TpClause *cl = &tp->cls[i];
-    if (!cl->neg || (!tp_side_has_var(cl->lhs) && !tp_side_has_var(cl->rhs)))
+    if (tp->cls[i].neg && (tp_side_has_var(tp->cls[i].lhs) ||
+                           tp_side_has_var(tp->cls[i].rhs))) {
+      (*n_nonground)++;
+    }
+  }
+  if (*n_nonground == 0) {
+    return 0;
+  }
+  if (tp->n_cls + 2 > TP_MAX_CLAUSES) {
+    return 0;
+  }
+  tp_fresh_sym(tp, "eq",     eqn, TP_NAME_LEN);
+  tp_fresh_sym(tp, "etrue",  tru, TP_NAME_LEN);
+  tp_fresh_sym(tp, "efalse", fls, TP_NAME_LEN);
+  for (int i = 0; i < tp->n_cls; i++) {
+    const TpClause *cl = &tp->cls[i];
+    if (!cl->neg || (!tp_side_has_var(cl->lhs) && !tp_side_has_var(cl->rhs))) {
       continue;
-    if (strlen(eqn) + strlen(cl->lhs) + strlen(cl->rhs) + 4 >= TP_SIDE_LEN)
-      return;
+    }
+    if (strlen(eqn) + strlen(cl->lhs) + strlen(cl->rhs) + 4 >= TP_SIDE_LEN) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static void tp_equals_goal(TpProblem *tp) {
+  char eqn[TP_NAME_LEN], tru[TP_NAME_LEN], fls[TP_NAME_LEN];
+  int n_nonground = 0;
+  if (!tp_equals_goal_applies(tp, eqn, tru, fls, &n_nonground)) {
+    return;
   }
   // Rewrite each non-ground goal in place:  eq(s,t) = false.
   for (int i = 0; i < tp->n_cls; i++) {

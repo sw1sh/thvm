@@ -1285,7 +1285,7 @@ int main(int argc, char **argv) {
       if (fs != NULL && atoi(fs) >= 2 && !tp_input_is_fof(raw)) {
         g_cli_szs_wanted = szs;
         g_cli_probpath   = file;
-        tp_giveup("fof slice: input has no fof() record");
+        tp_giveup(TP_GATE_FOF);
       }
     }
     // TPTP input is recognized by a cnf(/fof( record OR an include()
@@ -1361,7 +1361,7 @@ int main(int argc, char **argv) {
         // run and stays silent under a schedule slice.
         g_cli_szs_wanted = szs;
         g_cli_probpath   = file;
-        tp_giveup("no negated conjecture (satisfiability problem; not refutable)");
+        tp_giveup(TP_GATE_NO_GOAL);
       }
       // --ifeq-guard=2 (the schedule's ifeq slice): exit cleanly when
       // the problem carries no ifeq dispatcher axiom, freeing the pool
@@ -1370,7 +1370,7 @@ int main(int argc, char **argv) {
       {
         const char *ig = getenv("THVM_ATP_IFEQ_GUARD");
         if (ig != NULL && atoi(ig) >= 2 && !tp_has_ifeq_dispatcher(&tp))
-          tp_giveup("ifeq-guard slice: no ifeq dispatcher axiom");
+          tp_giveup(TP_GATE_IFEQ);
       }
       // Wide-functor currying: decompose any n-ary functor (n > 8) into
       // nested binary ap2 applications so the arity-8 term reader can
@@ -1459,7 +1459,7 @@ int main(int argc, char **argv) {
         if (du != NULL && (du[0] == '1' || du[0] == '2')) {
           tp_def_unfold(&tp);
           if (du[0] == '2' && g_cli_defunfold_n == 0 && !g_cli_fe_decided)
-            tp_giveup("def-unfold slice: no function definition");
+            tp_giveup(TP_GATE_DEF);
           n_neg = 0;
           for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
         }
@@ -1475,7 +1475,7 @@ int main(int argc, char **argv) {
         const char *tx = getenv("THVM_ATP_TGT_EXIT");
         if (tx != NULL && tx[0] != '\0' && tx[0] != '0'
             && !tp_has_ax_ground_compound(&tp) && !g_cli_fe_decided)
-          tp_giveup("tgt-ax slice: no axiom-side ground compound subterm");
+          tp_giveup(TP_GATE_TGT_AX);
       }
       // Existential (non-ground) goals, opt-in: encode them
       // equationally the way Twee's addNarrowing does, BEFORE SInE
@@ -1503,17 +1503,7 @@ int main(int argc, char **argv) {
           for (int i = 0; i < tp.n_cls; i++) n_neg += tp.cls[i].neg;
         }
       }
-      // Never hand the .pr reader more than it can hold: an oversized
-      // problem exits cleanly as GaveUp rather than aborting downstream
-      // with no SZS line.  PR_MAX_* come from the included bench TU.
-      if ((tp.n_cls - n_neg) > (int)PR_MAX_EQNS) tp_giveup("problem exceeds equation capacity");
-      if (tp.n_syms          > (int)PR_MAX_SYMS) tp_giveup("problem exceeds symbol capacity");
-      if (tp.n_vars          > (int)PR_MAX_VARS) tp_giveup("problem exceeds variable capacity");
-      // The flatterm term reader holds at most 8 arguments per node; a
-      // higher-arity functor (e.g. TOP052's tuple/16) is beyond the term
-      // representation, so give up cleanly instead of aborting the reader.
-      for (int i = 0; i < tp.n_syms; i++)
-        if (tp.syms[i].arity > 8) tp_giveup("functor arity exceeds 8");
+      tp_check_capacity(&tp, n_neg);
       // Canonical presentation (orientation + order + variable names):
       // AFTER every content transform and capacity gate, BEFORE .pr
       // emission, so the emitted .pr is invariant across the corpus
@@ -1565,35 +1555,10 @@ int main(int argc, char **argv) {
           for (int i = 0; i < tp.n_syms; i++)
             cap += strlen(tp.syms[i].name) + 1;
           char *buf = (char *)malloc(cap);
-          size_t len = 0;
-          int n_hit = 0;
-          buf[0] = '\0';
-          for (int i = 0; i < tp.n_syms; i++) {
-            const char *nm = tp.syms[i].name;
-            size_t nl = strlen(nm);
-            int hit = 0;
-            for (int c = 0; c < tp.n_cls && !hit; c++) {
-              if (!tp.cls[c].conj) continue;
-              for (int side = 0; side < 2 && !hit; side++) {
-                const char *hay = side ? tp.cls[c].rhs : tp.cls[c].lhs;
-                for (const char *p = strstr(hay, nm); p != NULL;
-                     p = strstr(p + 1, nm)) {
-                  int lb = (p == hay) ||
-                           !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
-                  int rb = !(isalnum((unsigned char)p[nl]) || p[nl] == '_');
-                  if (lb && rb) { hit = 1; break; }
-                }
-              }
-            }
-            if (hit) {
-              n_hit++;
-              if (len > 0) buf[len++] = ' ';
-              memcpy(buf + len, nm, nl);
-              len += nl;
-              buf[len] = '\0';
-            }
+          int n_hit = tp_conj_syms(&tp, buf);
+          if (buf[0] != '\0') {
+            setenv("THVM_ATP_TGT_SYMS", buf, 1);
           }
-          if (len > 0) setenv("THVM_ATP_TGT_SYMS", buf, 1);
           free(buf);
           // tgt-sel lane exit-fast (--tgt-sel-exit): the lane's content
           // is the conjecture-symbol discrimination -- non-goal symbols
@@ -1606,8 +1571,8 @@ int main(int argc, char **argv) {
           {
             const char *tx = getenv("THVM_ATP_TGT_SEL_EXIT");
             if (tx != NULL && tx[0] != '\0' && tx[0] != '0'
-                && (n_hit == 0 || n_hit >= tp.n_syms) && !g_cli_fe_decided)
-              tp_giveup("tgt-sel slice: conjecture symbols cover the signature");
+                && !tp_conj_cone_partial(n_hit, tp.n_syms) && !g_cli_fe_decided)
+              tp_giveup(TP_GATE_TGT_SEL);
           }
         }
       }
@@ -1663,7 +1628,7 @@ int main(int argc, char **argv) {
     const char *ee = getenv("THVM_ATP_EQUALS_GOAL");
     if (ee != NULL && atoi(ee) >= 2 && !g_cli_equals_applied &&
         !g_cli_fe_decided)
-      tp_giveup("equals-goal slice: no existential goal to encode");
+      tp_giveup(TP_GATE_EQUALS);
   }
   // --narrow-queue=2 (the schedule's narrowq slice): same exit-fast
   // discipline -- the critical-goal queue lane only differs from the
@@ -1672,7 +1637,7 @@ int main(int argc, char **argv) {
     const char *nqe = getenv("THVM_ATP_NARROW_QUEUE");
     if (nqe != NULL && atoi(nqe) >= 2 && !g_cli_goal_existential &&
         !g_cli_fe_decided)
-      tp_giveup("narrow-queue slice: goal is ground");
+      tp_giveup(TP_GATE_NARROWQ);
   }
 
   // The front end spent the wall: nothing is left for the engine, which

@@ -1722,6 +1722,128 @@ static void pr_distrib_transform(PrProblem *pr) {
     fprintf(stderr, "[distrib] %u definitions introduced\n", added);
 }
 
+// The otter lanes' exit-fast gate (--otter-exit): the lane's lever is LPO
+// orienting a distributivity law as EXPANSION (the goal operator above the
+// one it distributes over, via --spb-prec), which turns the ring's defined
+// operators into folds and linearizes the alternative laws.  Without such
+// an axiom under the final precedence the slot goes back to the schedule.
+#define PR_GATE_OTTER "otter slice: no distributivity law orients as expansion"
+
+static int pr_otter_expands(const PrProblem *prp) {
+  for (u32 e = 0; e < prp->n_eqns; e++) {
+    u32 f = 0, g = 0;
+    if ((pr_distrib_shape(prp->eq_l[e], prp->eq_r[e], &f, &g) ||
+         pr_distrib_shape(prp->eq_r[e], prp->eq_l[e], &f, &g)) &&
+        prp->precedence[f] > prp->precedence[g]) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// The symbol precedence --sym-prec / --spb-prec derive for the loaded
+// problem (symprec, spbp: THVM_ATP_SYM_PREC, THVM_ATP_SPB_PREC; NULL when
+// unset), written into prp->precedence (and prp->weights for
+// weighted-frequency).  A no-op when neither knob applies.  The bench main
+// and the static gate replica (the otter lanes' exit-fast gate) both
+// derive it here.
+static void pr_sym_prec(PrProblem *prp, const char *symprec,
+                        const char *spbp) {
+  // Vampire symbol-precedence knob on the REAL completion path
+  // (THVM_ATP_SYM_PREC), opt-in.  RESURRECTS what only ever ran under
+  // the never-CLI-set ATP_BENCH_AUTO_WEIGHTS gate in main: recompute the
+  // KBO ordering from an occurrence census of the loaded problem
+  // (axioms + goal, post tgt/tgt-fold), REPLACING the .pr's declared
+  // ORDERING chain.  On unit equalities the simplification ordering is
+  // what decides which superpositions fire (Vampire's `sp=` lever), so
+  // this is the discrimination the .pr's uniform weight-1 + arity-ladder
+  // precedence cannot express.  Unset = byte-identical .pr ordering, so
+  // the wm/twee competition lanes never move.  Gated off when the -auto
+  // matrix path owns SYM_PREC (ATP_BENCH_AUTO_WEIGHTS) so the two never
+  // interact.
+  //   frequency          = Vampire `sp=frequency`  (rarest sym highest)
+  //   reverse-frequency  = Vampire `sp=reverse_frequency` (common highest)
+  //   weighted-frequency = sp=frequency precedence + the KBO FREQUENCY
+  //                        weight scheme (weight = occurrence count,
+  //                        Kernel/KBO.cpp), so orientation follows symbol
+  //                        frequency, not just the precedence tie-break.
+  {
+    if (symprec != NULL && symprec[0] != '\0'
+        && getenv("ATP_BENCH_AUTO_WEIGHTS") == NULL) {
+      u32 cap = prp->n_syms + PR_LABEL_BASE;
+      if (strcmp(symprec, "reverse-frequency") == 0) {
+        atp_frequency_precedence_g(prp->eq_l, prp->eq_r, prp->n_eqns,
+            prp->goal_l, prp->goal_r, cap, prp->precedence, /*common_high=*/1);
+      } else if (strcmp(symprec, "weighted-frequency") == 0) {
+        atp_frequency_precedence_g(prp->eq_l, prp->eq_r, prp->n_eqns,
+            prp->goal_l, prp->goal_r, cap, prp->precedence, /*common_high=*/0);
+        atp_frequency_weights_g(prp->eq_l, prp->eq_r, prp->n_eqns,
+            prp->goal_l, prp->goal_r, cap, prp->weights);
+      } else if (strcmp(symprec, "frequency") == 0) {
+        atp_frequency_precedence_g(prp->eq_l, prp->eq_r, prp->n_eqns,
+            prp->goal_l, prp->goal_r, cap, prp->precedence, /*common_high=*/0);
+      }
+      if (getenv("THVM_ATP_DEBUG_SYMPREC") != NULL) {
+        fprintf(stderr, "SYM-PREC[%s] label: prec / weight\n", symprec);
+        for (u32 l = PR_LABEL_BASE; l < cap; l++) {
+          fprintf(stderr, "  %-22s %u / %u\n",
+                  prp->syms[l - PR_LABEL_BASE].name,
+                  prp->precedence[l], prp->weights[l]);
+        }
+      }
+    }
+  }
+  // Vampire symbol precedence port (Kernel/Ordering.cpp
+  // sortAuxBySymbolPrecedence): --sym-prec=arity|reverse-arity|
+  // unary-first|const-max|const-min|const-frequency|unary-frequency|
+  // occurrence ranks the signature with Vampire's comparator chain,
+  // and --spb-prec (THVM_ATP_SPB_PREC, Vampire spb=goal) wraps any
+  // scheme -- including frequency / reverse-frequency, and Vampire's
+  // default sp=frequency when --sym-prec is unset -- in the goal band:
+  // every goal-occurring symbol outranks every other.  Distinct from
+  // --spb-goal, which scales CP WEIGHTS by conjecture ancestry.  The
+  // RNG Moufang lever under --ord=lpo: multiply above the additive
+  // theory orients distributivity as expansion and the associator /
+  // commutator definitions as folds (Vampire's RNG027-5 winner
+  // lrs+10_2_to=lpo:sp=const_frequency:spb=goal:... ranks
+  // additive_identity < add < additive_inverse < associator <
+  // commutator < cx < cz < cy < multiply).  The existing
+  // frequency / reverse-frequency / weighted-frequency paths above
+  // stay byte-identical when --spb-prec is unset.
+  {
+    const char *spn = symprec;
+    int boost = (spbp != NULL && spbp[0] != '\0' && spbp[0] != '0');
+    int scheme = atp_vampire_sp_scheme(spn);
+    if (boost && scheme < 0) {
+      scheme = ATP_VSP_FREQUENCY;   // sp default, weighted too
+    }
+    int legacy = (spn != NULL && (strcmp(spn, "frequency") == 0 ||
+                                  strcmp(spn, "reverse-frequency") == 0));
+    if (scheme >= 0 && (boost || !legacy)
+        && getenv("ATP_BENCH_AUTO_WEIGHTS") == NULL) {
+      u32 cap2 = prp->n_syms + PR_LABEL_BASE;
+      u32 *ar = (u32 *)calloc((size_t)cap2, sizeof(u32));
+      if (ar != NULL) {
+        for (u32 l = PR_LABEL_BASE; l < cap2; l++) {
+          ar[l] = prp->syms[l - PR_LABEL_BASE].arity;
+        }
+        atp_vampire_precedence_g(prp->eq_l, prp->eq_r, prp->n_eqns,
+                                 prp->goal_l, prp->goal_r, PR_LABEL_BASE,
+                                 cap2, ar, scheme, boost, prp->precedence);
+        free(ar);
+      }
+      if (getenv("THVM_ATP_DEBUG_SYMPREC") != NULL) {
+        fprintf(stderr, "VAMPIRE-SP[%s%s] label: prec\n",
+                spn != NULL ? spn : "frequency", boost ? "+spb=goal" : "");
+        for (u32 l = PR_LABEL_BASE; l < cap2; l++) {
+          fprintf(stderr, "  %-22s %u\n",
+                  prp->syms[l - PR_LABEL_BASE].name, prp->precedence[l]);
+        }
+      }
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   thvm_init();
 
@@ -1832,97 +1954,8 @@ int main(int argc, char **argv) {
     cfg.var_weight = 1u;
     use_lpo  = 0;
     use_kbo0 = 0;
-    // Vampire symbol-precedence knob on the REAL completion path
-    // (THVM_ATP_SYM_PREC), opt-in.  RESURRECTS what only ever ran under
-    // the never-CLI-set ATP_BENCH_AUTO_WEIGHTS gate below: recompute the
-    // KBO ordering from an occurrence census of the loaded problem
-    // (axioms + goal, post tgt/tgt-fold), REPLACING the .pr's declared
-    // ORDERING chain.  On unit equalities the simplification ordering is
-    // what decides which superpositions fire (Vampire's `sp=` lever), so
-    // this is the discrimination the .pr's uniform weight-1 + arity-ladder
-    // precedence cannot express.  Unset = byte-identical .pr ordering, so
-    // the wm/twee competition lanes never move.  Gated off when the -auto
-    // matrix path owns SYM_PREC (ATP_BENCH_AUTO_WEIGHTS) so the two never
-    // interact.
-    //   frequency          = Vampire `sp=frequency`  (rarest sym highest)
-    //   reverse-frequency  = Vampire `sp=reverse_frequency` (common highest)
-    //   weighted-frequency = sp=frequency precedence + the KBO FREQUENCY
-    //                        weight scheme (weight = occurrence count,
-    //                        Kernel/KBO.cpp), so orientation follows symbol
-    //                        frequency, not just the precedence tie-break.
-    {
-      const char *symprec = getenv("THVM_ATP_SYM_PREC");
-      if (symprec != NULL && symprec[0] != '\0'
-          && getenv("ATP_BENCH_AUTO_WEIGHTS") == NULL) {
-        u32 cap = prp.n_syms + PR_LABEL_BASE;
-        if (strcmp(symprec, "reverse-frequency") == 0) {
-          atp_frequency_precedence_g(prp.eq_l, prp.eq_r, prp.n_eqns,
-              prp.goal_l, prp.goal_r, cap, prp.precedence, /*common_high=*/1);
-        } else if (strcmp(symprec, "weighted-frequency") == 0) {
-          atp_frequency_precedence_g(prp.eq_l, prp.eq_r, prp.n_eqns,
-              prp.goal_l, prp.goal_r, cap, prp.precedence, /*common_high=*/0);
-          atp_frequency_weights_g(prp.eq_l, prp.eq_r, prp.n_eqns,
-              prp.goal_l, prp.goal_r, cap, prp.weights);
-        } else if (strcmp(symprec, "frequency") == 0) {
-          atp_frequency_precedence_g(prp.eq_l, prp.eq_r, prp.n_eqns,
-              prp.goal_l, prp.goal_r, cap, prp.precedence, /*common_high=*/0);
-        }
-        if (getenv("THVM_ATP_DEBUG_SYMPREC") != NULL) {
-          fprintf(stderr, "SYM-PREC[%s] label: prec / weight\n", symprec);
-          for (u32 l = PR_LABEL_BASE; l < cap; l++)
-            fprintf(stderr, "  %-22s %u / %u\n",
-                    prp.syms[l - PR_LABEL_BASE].name,
-                    prp.precedence[l], prp.weights[l]);
-        }
-      }
-    }
-    // Vampire symbol precedence port (Kernel/Ordering.cpp
-    // sortAuxBySymbolPrecedence): --sym-prec=arity|reverse-arity|
-    // unary-first|const-max|const-min|const-frequency|unary-frequency|
-    // occurrence ranks the signature with Vampire's comparator chain,
-    // and --spb-prec (THVM_ATP_SPB_PREC, Vampire spb=goal) wraps any
-    // scheme -- including frequency / reverse-frequency, and Vampire's
-    // default sp=frequency when --sym-prec is unset -- in the goal band:
-    // every goal-occurring symbol outranks every other.  Distinct from
-    // --spb-goal, which scales CP WEIGHTS by conjecture ancestry.  The
-    // RNG Moufang lever under --ord=lpo: multiply above the additive
-    // theory orients distributivity as expansion and the associator /
-    // commutator definitions as folds (Vampire's RNG027-5 winner
-    // lrs+10_2_to=lpo:sp=const_frequency:spb=goal:... ranks
-    // additive_identity < add < additive_inverse < associator <
-    // commutator < cx < cz < cy < multiply).  The existing
-    // frequency / reverse-frequency / weighted-frequency paths above
-    // stay byte-identical when --spb-prec is unset.
-    {
-      const char *spbp = getenv("THVM_ATP_SPB_PREC");
-      const char *spn  = getenv("THVM_ATP_SYM_PREC");
-      int boost = (spbp != NULL && spbp[0] != '\0' && spbp[0] != '0');
-      int scheme = atp_vampire_sp_scheme(spn);
-      if (boost && scheme < 0) scheme = ATP_VSP_FREQUENCY;  // sp default,
-                                                          // weighted too
-      int legacy = (spn != NULL && (strcmp(spn, "frequency") == 0 ||
-                                    strcmp(spn, "reverse-frequency") == 0));
-      if (scheme >= 0 && (boost || !legacy)
-          && getenv("ATP_BENCH_AUTO_WEIGHTS") == NULL) {
-        u32 cap2 = prp.n_syms + PR_LABEL_BASE;
-        u32 *ar = (u32 *)calloc((size_t)cap2, sizeof(u32));
-        if (ar != NULL) {
-          for (u32 l = PR_LABEL_BASE; l < cap2; l++)
-            ar[l] = prp.syms[l - PR_LABEL_BASE].arity;
-          atp_vampire_precedence_g(prp.eq_l, prp.eq_r, prp.n_eqns,
-                                   prp.goal_l, prp.goal_r, PR_LABEL_BASE,
-                                   cap2, ar, scheme, boost, prp.precedence);
-          free(ar);
-        }
-        if (getenv("THVM_ATP_DEBUG_SYMPREC") != NULL) {
-          fprintf(stderr, "VAMPIRE-SP[%s%s] label: prec\n",
-                  spn != NULL ? spn : "frequency", boost ? "+spb=goal" : "");
-          for (u32 l = PR_LABEL_BASE; l < cap2; l++)
-            fprintf(stderr, "  %-22s %u\n",
-                    prp.syms[l - PR_LABEL_BASE].name, prp.precedence[l]);
-        }
-      }
-    }
+    pr_sym_prec(&prp, getenv("THVM_ATP_SYM_PREC"),
+                getenv("THVM_ATP_SPB_PREC"));
     // KBO per-symbol WEIGHT generation scheme (Vampire kbo_weight_scheme
     // / -kws), opt-in and orthogonal to --sym-prec above: sym-prec fills
     // prp.precedence, kws fills prp.weights.  Both feed the SAME KboConfig
@@ -2123,23 +2156,9 @@ int main(int argc, char **argv) {
     // leave the reserved labels at 0; the .pr chain and the
     // Waldmeister-derived precedence are already in this layout.
     atp_precedence_floor_reserved(prp.precedence, prp.n_syms + PR_LABEL_BASE);
-    // Otter-lane exit-fast (THVM_ATP_OTTER_EXIT / --otter-exit): the
-    // lane's lever is LPO orienting a distributivity law as EXPANSION
-    // (the goal operator above the one it distributes over, via
-    // --spb-prec), which turns the ring's defined operators into folds
-    // and linearizes the alternative laws.  Without such an axiom under
-    // the final precedence the slot goes back to the schedule.
-    if (atp_env_on("THVM_ATP_OTTER_EXIT")) {
-      int expands = 0;
-      for (u32 e = 0; e < prp.n_eqns && !expands; e++) {
-        u32 f = 0, g = 0;
-        if ((pr_distrib_shape(prp.eq_l[e], prp.eq_r[e], &f, &g) ||
-             pr_distrib_shape(prp.eq_r[e], prp.eq_l[e], &f, &g)) &&
-            prp.precedence[f] > prp.precedence[g])
-          expands = 1;
-      }
-      if (!expands)
-        tp_bench_giveup("otter slice: no distributivity law orients as expansion");
+    // Otter-lane exit-fast (THVM_ATP_OTTER_EXIT / --otter-exit).
+    if (atp_env_on("THVM_ATP_OTTER_EXIT") && !pr_otter_expands(&prp)) {
+      tp_bench_giveup(PR_GATE_OTTER);
     }
     // LPO-ordering slice (Vampire-port).  Vampire's UEQ schedule is
     // dominated by `to=lpo` (65+ of ~400 strategies) -- lexicographic

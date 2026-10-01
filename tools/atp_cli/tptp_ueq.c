@@ -59,6 +59,17 @@ static void tp_giveup(const char *why) {
   exit(1);
 }
 
+// The give-up lines of the schedule lanes' exit-fast gates, shared by each
+// gate and the static gate replica, which predicts them per lane.
+#define TP_GATE_FOF     "fof slice: input has no fof() record"
+#define TP_GATE_NO_GOAL "no negated conjecture (satisfiability problem; not refutable)"
+#define TP_GATE_IFEQ    "ifeq-guard slice: no ifeq dispatcher axiom"
+#define TP_GATE_DEF     "def-unfold slice: no function definition"
+#define TP_GATE_TGT_AX  "tgt-ax slice: no axiom-side ground compound subterm"
+#define TP_GATE_TGT_SEL "tgt-sel slice: conjecture symbols cover the signature"
+#define TP_GATE_EQUALS  "equals-goal slice: no existential goal to encode"
+#define TP_GATE_NARROWQ "narrow-queue slice: goal is ground"
+
 // --- front-end wall ----------------------------------------------------
 // The engine measures its wall from its own start; the stages before it
 // (clausification, the one-element gate, the equational encoding, the
@@ -1017,4 +1028,78 @@ static int tp_has_ax_ground_compound(const TpProblem *tp) {
         tp_side_has_ground_compound(tp->cls[c].rhs)) return 1;
   }
   return 0;
+}
+
+// --- tgt-sel lane prescreen ------------------------------------------
+// The signature symbols occurring in a conjecture-role clause (a
+// word-boundary match on the clause strings): their number, and their
+// names, space-separated, into buf when buf is not NULL (room for every
+// symbol name plus a separator).  The tgt-sel lane taxes the symbols
+// outside this cone; when the cone is empty or covers the signature the
+// scale is uniform and the lane duplicates bare.
+static int tp_conj_syms(const TpProblem *tp, char *buf) {
+  size_t len = 0;
+  int n_hit = 0;
+  if (buf != NULL) {
+    buf[0] = '\0';
+  }
+  for (int i = 0; i < tp->n_syms; i++) {
+    const char *nm = tp->syms[i].name;
+    size_t nl = strlen(nm);
+    int hit = 0;
+    for (int c = 0; c < tp->n_cls && !hit; c++) {
+      if (!tp->cls[c].conj) {
+        continue;
+      }
+      for (int side = 0; side < 2 && !hit; side++) {
+        const char *hay = side ? tp->cls[c].rhs : tp->cls[c].lhs;
+        for (const char *p = strstr(hay, nm); p != NULL; p = strstr(p + 1, nm)) {
+          int lb = (p == hay) ||
+                   !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+          int rb = !(isalnum((unsigned char)p[nl]) || p[nl] == '_');
+          if (lb && rb) {
+            hit = 1;
+            break;
+          }
+        }
+      }
+    }
+    if (hit) {
+      n_hit++;
+      if (buf != NULL) {
+        if (len > 0) {
+          buf[len++] = ' ';
+        }
+        memcpy(buf + len, nm, nl);
+        len += nl;
+        buf[len] = '\0';
+      }
+    }
+  }
+  return n_hit;
+}
+
+static int tp_conj_cone_partial(int n_hit, int n_syms) {
+  return n_hit > 0 && n_hit < n_syms;
+}
+
+// The engine's capacity gates, after axiom selection: an oversized
+// problem gives up cleanly instead of aborting the .pr reader (PR_MAX_*
+// come from the bench TU).  The flatterm reader holds at most 8
+// arguments per node (TOP052's tuple/16 is curried before this).
+static void tp_check_capacity(const TpProblem *tp, int n_neg) {
+  if ((tp->n_cls - n_neg) > (int)PR_MAX_EQNS) {
+    tp_giveup("problem exceeds equation capacity");
+  }
+  if (tp->n_syms > (int)PR_MAX_SYMS) {
+    tp_giveup("problem exceeds symbol capacity");
+  }
+  if (tp->n_vars > (int)PR_MAX_VARS) {
+    tp_giveup("problem exceeds variable capacity");
+  }
+  for (int i = 0; i < tp->n_syms; i++) {
+    if (tp->syms[i].arity > 8) {
+      tp_giveup("functor arity exceeds 8");
+    }
+  }
 }
