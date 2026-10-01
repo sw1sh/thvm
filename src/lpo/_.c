@@ -39,24 +39,58 @@
 // No per-sort awareness in v0; same conservative single-sort
 // treatment as KBO.
 
+// Every walk below keeps its pending work on an explicit stack: LPO_WALK_INL
+// entries on the C stack, then the heap (term_stack_grow), so term depth
+// costs heap, never C stack.  Each visits in the recursion's order.
+enum { LPO_WALK_INL = 64 };
+
 // === structural equality (local copy of kbo_eq's pattern) ============
 
 static u8 lpo_eq(Term s, Term t) {
-  if (term_tag(s) != term_tag(t)) return 0;
-  if (term_ext(s) != term_ext(t)) return 0;
-  switch (term_tag(s)) {
-    case TAG_FVR: return 1;  // same id (ext) already checked
-    case TAG_CTR: {
-      u32 ns = term_ctr_n(s);
-      u32 nt = term_ctr_n(t);
-      if (ns != nt) return 0;
-      for (u32 i = 0; i < ns; i++) {
-        if (!lpo_eq(term_ctr_at(s, i), term_ctr_at(t, i))) return 0;
+  typedef struct { Term s; Term t; } LpoEqPair;
+  LpoEqPair  st_inl[LPO_WALK_INL];
+  LpoEqPair *st  = st_inl;
+  u32        nst = 0u;
+  u32        cst = LPO_WALK_INL;
+  u8         eq  = 1u;
+  for (;;) {
+    if (term_tag(s) != term_tag(t) || term_ext(s) != term_ext(t)) {
+      eq = 0u;
+    } else {
+      switch (term_tag(s)) {
+        case TAG_FVR:
+          break;   // same id (ext) already checked
+        case TAG_CTR: {
+          u32 ns = term_ctr_n(s);
+          u32 nt = term_ctr_n(t);
+          if (ns != nt) {
+            eq = 0u;
+            break;
+          }
+          while (nst + ns > cst) {
+            st = (LpoEqPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+          }
+          for (u32 i = ns; i-- > 0u;) {
+            st[nst].s = term_ctr_at(s, i);
+            st[nst].t = term_ctr_at(t, i);
+            nst++;
+          }
+          break;
+        }
+        default:
+          eq = (u8)(term_val(s) == term_val(t));
+          break;
       }
-      return 1;
     }
-    default: return term_val(s) == term_val(t);
+    if (!eq || nst == 0u) {
+      break;
+    }
+    nst--;
+    s = st[nst].s;
+    t = st[nst].t;
   }
+  term_stack_release(st, st_inl);
+  return eq;
 }
 
 // === variable subterm-occurrence check ==============================
@@ -65,17 +99,30 @@ static u8 lpo_eq(Term s, Term t) {
 // case separately.
 
 static u8 lpo_var_occurs_in(Term t, u32 var_id) {
-  switch (term_tag(t)) {
-    case TAG_FVR: return term_ext(t) == var_id;
-    case TAG_CTR: {
+  Term  st_inl[LPO_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = LPO_WALK_INL;
+  u8    hit = 0u;
+  for (;;) {
+    if (term_tag(t) == TAG_FVR) {
+      hit = (u8)(term_ext(t) == var_id);
+    } else if (term_tag(t) == TAG_CTR) {
       u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        if (lpo_var_occurs_in(term_ctr_at(t, i), var_id)) return 1;
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      return 0;
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
-    default: return 0;
+    if (hit || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 // === pretests (Waldmeister `LPOVortests`) ============================
@@ -97,19 +144,31 @@ static u8 lpo_var_occurs_in(Term t, u32 var_id) {
 
 // OR-accumulate a presence bit per variable id into `seen`.
 static void lpo_var_set_acc(Term t, u32 *seen) {
-  switch (term_tag(t)) {
-    case TAG_FVR: {
+  Term  st_inl[LPO_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = LPO_WALK_INL;
+  for (;;) {
+    if (term_tag(t) == TAG_FVR) {
       u32 id = term_ext(t);
-      if (id < LPO_MAX_VAR) seen[id] = 1;
-      return;
-    }
-    case TAG_CTR: {
+      if (id < LPO_MAX_VAR) {
+        seen[id] = 1;
+      }
+    } else if (term_tag(t) == TAG_CTR) {
       u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) lpo_var_set_acc(term_ctr_at(t, i), seen);
-      return;
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
-    default: return;
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
 }
 
 // True iff `var_id < LPO_MAX_VAR` for every FVR reachable in `t`.
@@ -117,17 +176,30 @@ static void lpo_var_set_acc(Term t, u32 *seen) {
 // bitset-representable; out-of-range ids fall back to the full
 // recursion.
 static u8 lpo_vars_in_range(Term t) {
-  switch (term_tag(t)) {
-    case TAG_FVR: return term_ext(t) < LPO_MAX_VAR;
-    case TAG_CTR: {
+  Term  st_inl[LPO_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = LPO_WALK_INL;
+  u8    in  = 1u;
+  for (;;) {
+    if (term_tag(t) == TAG_FVR) {
+      in = (u8)(term_ext(t) < LPO_MAX_VAR);
+    } else if (term_tag(t) == TAG_CTR) {
       u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        if (!lpo_vars_in_range(term_ctr_at(t, i))) return 0;
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
-      return 1;
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
-    default: return 1;
+    if (!in || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return in;
 }
 
 // Variable-set pretest.  Writes one of LPO_GT / LPO_LT / LPO_EQ /
@@ -165,7 +237,6 @@ static u8 lpo_pretest_varset(Term s, Term t, LpoCmp *out) {
 // === main comparator =================================================
 
 static LpoCmp lpo_rec(Term s, Term t, const LpoConfig *cfg);
-static LpoCmp lpo_rec_compute(Term s, Term t, const LpoConfig *cfg);
 
 // Memoization of lpo_rec.  The naive LPO recursion is worst-case
 // exponential: lpo_some_arg_dominates(s,t), lpo_some_arg_dominates(t,s),
@@ -204,7 +275,7 @@ static u8 g_lpo_persist = 0;
 // polls its wall BETWEEN steps, so such a comparison overruns --wall by
 // its full duration (the run must be externally killed, RC=124, instead
 // of reporting a clean GaveUp).  The engine installs a zero-arg deadline
-// hook here; lpo_rec / lpo_flat_rec poll it every 8192 recursion entries
+// hook here; lpo_rec and the flat and DAG walks poll it every 8192 calls
 // and, once it fires, unwind immediately returning LPO_UN.  A verdict is
 // perturbed ONLY after the wall has already passed -- by which point the
 // run reports GaveUp regardless -- so every comparison that COMPLETES
@@ -239,6 +310,35 @@ static inline u32 lpo_memo_hash(Term s, Term t) {
   return (u32)h & LPO_MEMO_MASK;
 }
 
+// lpo_rec on an explicit stack.  One frame per open lpo_rec_compute(s, t)
+// of the recursion this replaces: `step` is the case it is evaluating and
+// `i` the argument it has reached; its verdict is memoized at slot `idx`
+// when the frame finishes.  A call lpo_rec(x, y) settles at once
+// (identical cells, a fired deadline, a memo hit) or opens a frame, and
+// its verdict goes back to the frame that made it.
+//
+// For s = f(s_1..s_m), t = g(t_1..t_n), after equality and the variable
+// cases: case (1) both ways (some s_i >= t gives GT, some t_j >= s gives
+// LT); then the top symbols -- f >_F g needs s > every t_j (GT, else
+// UN), g >_F f the converse, and equal heads compare the arguments
+// lexicographically, the winner needing to dominate the loser's
+// arguments.
+typedef struct {
+  Term s;
+  Term t;
+  u32  idx;
+  u32  i;
+  u8   step;
+} LpoRecFrame;
+enum {
+  LPO_R_BEGIN,     // equality, variables, then case (1)
+  LPO_R_SOME_ST,   // case (1): some s_i >=_lpo t
+  LPO_R_SOME_TS,   //           some t_j >=_lpo s
+  LPO_R_DOM_ST,    // s >_lpo every t_j: GT, else UN
+  LPO_R_DOM_TS,    // t >_lpo every s_i: LT, else UN
+  LPO_R_LEX        // case (3): the first argument pair that is not EQ
+};
+
 static LpoCmp lpo_rec(Term s, Term t, const LpoConfig *cfg) {
   if (s == t) return LPO_EQ;            // pointer-identical, no memo
   if (lpo_deadline_fired()) return LPO_UN;   // wall passed: unwind fast
@@ -246,47 +346,205 @@ static LpoCmp lpo_rec(Term s, Term t, const LpoConfig *cfg) {
   LpoMemoEnt *e = &g_lpo_memo[idx];
   if (e->epoch == g_lpo_epoch && e->s == s && e->t == t)
     return (LpoCmp)(i8)e->cmp;
-  LpoCmp c = lpo_rec_compute(s, t, cfg);
-  e->s = s; e->t = t; e->epoch = g_lpo_epoch; e->cmp = (u8)c;
-  return c;
-}
-
-// True iff every t_j satisfies s >_lpo t_j (case (2) and (3) condition).
-static u8 lpo_dominates_all_args(Term s, Term t_parent,
-                                 const LpoConfig *cfg) {
-  if (term_tag(t_parent) != TAG_CTR) return 1;
-  u32 n = term_ctr_n(t_parent);
-  for (u32 j = 0; j < n; j++) {
-    if (lpo_rec(s, term_ctr_at(t_parent, j), cfg) != LPO_GT) return 0;
+  LpoRecFrame  fr_inl[LPO_WALK_INL];
+  LpoRecFrame *fr  = fr_inl;
+  u32          nfr = 1u;
+  u32          cfr = LPO_WALK_INL;
+  fr[0].s    = s;
+  fr[0].t    = t;
+  fr[0].idx  = idx;
+  fr[0].i    = 0u;
+  fr[0].step = LPO_R_BEGIN;
+  LpoCmp val  = LPO_UN;   // a call's verdict, pending for the top frame
+  u8     have = 0u;
+  for (;;) {
+    LpoRecFrame *f   = &fr[nfr - 1u];
+    u8           fin = 0u;
+    LpoCmp       res = LPO_UN;
+    if (have) {
+      have = 0u;
+      switch (f->step) {
+        case LPO_R_SOME_ST:
+          if (val == LPO_EQ || val == LPO_GT) {
+            fin = 1u;
+            res = LPO_GT;
+          } else {
+            f->i++;
+          }
+          break;
+        case LPO_R_SOME_TS:
+          if (val == LPO_EQ || val == LPO_GT) {
+            fin = 1u;
+            res = LPO_LT;
+          } else {
+            f->i++;
+          }
+          break;
+        case LPO_R_DOM_ST:
+        case LPO_R_DOM_TS:
+          if (val != LPO_GT) {
+            fin = 1u;
+            res = LPO_UN;
+          } else {
+            f->i++;
+          }
+          break;
+        default:   // LPO_R_LEX
+          if (val == LPO_EQ) {
+            f->i++;
+          } else if (val == LPO_GT) {
+            f->step = LPO_R_DOM_ST;
+            f->i    = 0u;
+          } else if (val == LPO_LT) {
+            f->step = LPO_R_DOM_TS;
+            f->i    = 0u;
+          } else {
+            // An incomparable argument pair decides neither lex direction.
+            fin = 1u;
+            res = LPO_UN;
+          }
+          break;
+      }
+    }
+    Term x    = 0;
+    Term y    = 0;
+    u8   call = 0u;
+    while (!fin && !call) {
+      switch (f->step) {
+        case LPO_R_BEGIN: {
+          if (lpo_eq(f->s, f->t)) {
+            fin = 1u;
+            res = LPO_EQ;
+            break;
+          }
+          u8 s_is_fvr = (term_tag(f->s) == TAG_FVR);
+          u8 t_is_fvr = (term_tag(f->t) == TAG_FVR);
+          if (s_is_fvr && t_is_fvr) {
+            // Distinct FVR ids: incomparable.
+            fin = 1u;
+            res = LPO_UN;
+          } else if (s_is_fvr) {
+            // s >_lpo t is false; t > x iff x occurs in t.
+            fin = 1u;
+            res = lpo_var_occurs_in(f->t, term_ext(f->s)) ? LPO_LT : LPO_UN;
+          } else if (t_is_fvr) {
+            // s >_lpo x iff x occurs strictly in s.
+            fin = 1u;
+            res = lpo_var_occurs_in(f->s, term_ext(f->t)) ? LPO_GT : LPO_UN;
+          } else if (term_tag(f->s) != TAG_CTR || term_tag(f->t) != TAG_CTR) {
+            fin = 1u;
+            res = LPO_UN;
+          } else {
+            f->step = LPO_R_SOME_ST;
+            f->i    = 0u;
+          }
+          break;
+        }
+        case LPO_R_SOME_ST:
+          if (f->i < term_ctr_n(f->s)) {
+            x    = term_ctr_at(f->s, f->i);
+            y    = f->t;
+            call = 1u;
+          } else {
+            f->step = LPO_R_SOME_TS;
+            f->i    = 0u;
+          }
+          break;
+        case LPO_R_SOME_TS:
+          if (f->i < term_ctr_n(f->t)) {
+            x    = term_ctr_at(f->t, f->i);
+            y    = f->s;
+            call = 1u;
+          } else {
+            u32 lab_s  = term_ext(f->s);
+            u32 lab_t  = term_ext(f->t);
+            u32 prec_s = (lab_s < cfg->n_labels) ? cfg->precedence[lab_s] : 0;
+            u32 prec_t = (lab_t < cfg->n_labels) ? cfg->precedence[lab_t] : 0;
+            if (prec_s > prec_t) {
+              f->step = LPO_R_DOM_ST;
+              f->i    = 0u;
+            } else if (prec_s < prec_t) {
+              f->step = LPO_R_DOM_TS;
+              f->i    = 0u;
+            } else if (lab_s != lab_t || term_ctr_n(f->s) != term_ctr_n(f->t)) {
+              fin = 1u;
+              res = LPO_UN;
+            } else {
+              f->step = LPO_R_LEX;
+              f->i    = 0u;
+            }
+          }
+          break;
+        case LPO_R_DOM_ST:
+          if (f->i < term_ctr_n(f->t)) {
+            x    = f->s;
+            y    = term_ctr_at(f->t, f->i);
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_GT;
+          }
+          break;
+        case LPO_R_DOM_TS:
+          if (f->i < term_ctr_n(f->s)) {
+            x    = f->t;
+            y    = term_ctr_at(f->s, f->i);
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_LT;
+          }
+          break;
+        default:   // LPO_R_LEX
+          if (f->i < term_ctr_n(f->s)) {
+            x    = term_ctr_at(f->s, f->i);
+            y    = term_ctr_at(f->t, f->i);
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_EQ;   // can't happen: lpo_eq fired earlier
+          }
+          break;
+      }
+    }
+    if (call) {
+      if (x == y) {
+        val  = LPO_EQ;
+        have = 1u;
+        continue;
+      }
+      if (lpo_deadline_fired()) {
+        val  = LPO_UN;
+        have = 1u;
+        continue;
+      }
+      u32 cidx = lpo_memo_hash(x, y);
+      LpoMemoEnt *ce = &g_lpo_memo[cidx];
+      if (ce->epoch == g_lpo_epoch && ce->s == x && ce->t == y) {
+        val  = (LpoCmp)(i8)ce->cmp;
+        have = 1u;
+        continue;
+      }
+      if (nfr == cfr) {
+        fr = (LpoRecFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].s    = x;
+      fr[nfr].t    = y;
+      fr[nfr].idx  = cidx;
+      fr[nfr].i    = 0u;
+      fr[nfr].step = LPO_R_BEGIN;
+      nfr++;
+      continue;
+    }
+    LpoMemoEnt *me = &g_lpo_memo[f->idx];
+    me->s = f->s; me->t = f->t; me->epoch = g_lpo_epoch; me->cmp = (u8)res;
+    if (--nfr == 0u) {
+      term_stack_release(fr, fr_inl);
+      return res;
+    }
+    val  = res;
+    have = 1u;
   }
-  return 1;
-}
-
-// True iff some s_i >=_lpo t (case (1) condition).
-static u8 lpo_some_arg_dominates(Term s_parent, Term t,
-                                 const LpoConfig *cfg) {
-  if (term_tag(s_parent) != TAG_CTR) return 0;
-  u32 m = term_ctr_n(s_parent);
-  for (u32 i = 0; i < m; i++) {
-    Term s_i = term_ctr_at(s_parent, i);
-    LpoCmp c = lpo_rec(s_i, t, cfg);
-    if (c == LPO_EQ || c == LPO_GT) return 1;
-  }
-  return 0;
-}
-
-// Lexicographic argument comparison: the verdict of the first argument
-// pair that is not LPO_EQ (GT, LT or UN), else LPO_EQ.  Assumes equal
-// arity.
-static LpoCmp lpo_lex(Term s_parent, Term t_parent,
-                      const LpoConfig *cfg) {
-  u32 n = term_ctr_n(s_parent);
-  for (u32 i = 0; i < n; i++) {
-    LpoCmp c = lpo_rec(term_ctr_at(s_parent, i),
-                       term_ctr_at(t_parent, i), cfg);
-    if (c != LPO_EQ) return c;
-  }
-  return LPO_EQ;
 }
 
 // Invalidate the whole (s,t)->verdict memo in O(1) by bumping the epoch.
@@ -396,7 +654,7 @@ static KboFlatNode g_lpo_flat_b[KBO_FLAT_CAP];
 // a much smaller key space than (Term, Term) and stays stable for the
 // duration of one thvm_lpo call.
 
-// Position-keyed (pa, pb, side) memo for lpo_flat_rec.  Raised 14 -> 20
+// Position-keyed (pa, pb, side) memo for the flat walk.  Raised 14 -> 20
 // (16K -> 1M entries, ~16 MB) together with KBO_FLAT_CAP 4096 -> 65536:
 // once ~32k-node peaks stay on the flat path, one comparison touches a
 // position space of up to |s|*|t| ~ 10^9, so a 16K direct-mapped memo
@@ -409,7 +667,8 @@ static KboFlatNode g_lpo_flat_b[KBO_FLAT_CAP];
 #define LPO_FLAT_MEMO_SIZE (1u << LPO_FLAT_MEMO_BITS)
 #define LPO_FLAT_MEMO_MASK (LPO_FLAT_MEMO_SIZE - 1u)
 
-// Diagnostic counters for lpo_flat_rec.  Exposed via thvm_lpo_flat_stats.
+// Diagnostic counters for the flat and DAG walks.  Exposed via
+// thvm_lpo_flat_stats.
 static u64 g_lpo_flat_rec_calls    = 0;   // total wrapper invocations
 static u64 g_lpo_flat_memo_hits    = 0;   // (pa,pb,side,epoch) cache hit
 static u64 g_lpo_flat_compute_calls = 0;  // compute body invocations
@@ -439,34 +698,74 @@ static u32 g_lpo_flat_epoch = 0;
 // indexing cfg->precedence[sym] per node.
 static u8 lpo_flat_encode_rec(Term t, const LpoConfig *cfg,
                               KboFlatNode *out, u32 *pos) {
-  u32 here = *pos;
-  if (__builtin_expect(here >= KBO_FLAT_CAP, 0)) return 0;
-  *pos = here + 1u;
-  u32 tag = term_tag(t);
-  if (tag == TAG_FVR) {
-    out[here].sym = -(i32)(term_ext(t) + 1u);
-    out[here].w   = 0;
-    out[here].sz  = 1u;
-    return 1;
+  // One frame per open CTR: its slot `here` (its span is set when its
+  // last child is done) and the child `i` being encoded.
+  typedef struct { u64 base; u32 here; u32 i; u32 n; } LpoEncFrame;
+  LpoEncFrame  fr_inl[LPO_WALK_INL];
+  LpoEncFrame *fr  = fr_inl;
+  u32          nfr = 0u;
+  u32          cfr = LPO_WALK_INL;
+  u8           ok  = 1u;
+  for (;;) {
+    u32 here = *pos;
+    if (__builtin_expect(here >= KBO_FLAT_CAP, 0)) {
+      ok = 0u;
+      break;
+    }
+    *pos = here + 1u;
+    u32 tag = term_tag(t);
+    if (tag == TAG_FVR) {
+      out[here].sym = -(i32)(term_ext(t) + 1u);
+      out[here].w   = 0;
+      out[here].sz  = 1u;
+    } else if (__builtin_expect(tag != TAG_CTR, 0)) {
+      ok = 0u;
+      break;
+    } else {
+      u32 lab = term_ext(t);
+      out[here].sym = (i32)lab;
+      out[here].w   = (lab < cfg->n_labels) ? (i32)cfg->precedence[lab] : 0;
+      // Cache the children base loc once -- term_ctr_at would re-read
+      // the arity cell via term_ctr_n per call.
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (__builtin_expect(term_tag(n_cell) != TAG_NUM, 0)) {
+        out[here].sz = 1u;
+      } else {
+        u32 n = (u32)term_val(n_cell);
+        if (n > 0u) {
+          if (nfr == cfr) {
+            fr = (LpoEncFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].base = base;
+          fr[nfr].here = here;
+          fr[nfr].i    = 0u;
+          fr[nfr].n    = n;
+          nfr++;
+          t = heap_read(base + 1u);
+          continue;
+        }
+        out[here].sz = *pos - here;
+      }
+    }
+    u8 next = 0u;
+    while (nfr > 0u) {
+      LpoEncFrame *f = &fr[nfr - 1u];
+      f->i++;
+      if (f->i < f->n) {
+        t    = heap_read(f->base + 1u + (u64)f->i);
+        next = 1u;
+        break;
+      }
+      out[f->here].sz = *pos - f->here;
+      nfr--;
+    }
+    if (!next) {
+      break;
+    }
   }
-  if (__builtin_expect(tag != TAG_CTR, 0)) return 0;
-  u32 lab = term_ext(t);
-  out[here].sym = (i32)lab;
-  out[here].w   = (lab < cfg->n_labels) ? (i32)cfg->precedence[lab] : 0;
-  // Cache the children base loc once -- term_ctr_at would re-read the
-  // arity cell via term_ctr_n per call.
-  u64 base = term_val(t);
-  Term n_cell = heap_read(base);
-  if (__builtin_expect(term_tag(n_cell) != TAG_NUM, 0)) {
-    out[here].sz = 1u; return 1;
-  }
-  u32 n = (u32)term_val(n_cell);
-  for (u32 i = 0; i < n; i++) {
-    Term child = heap_read(base + 1u + (u64)i);
-    if (!lpo_flat_encode_rec(child, cfg, out, pos)) return 0;
-  }
-  out[here].sz = *pos - here;
-  return 1;
+  term_stack_release(fr, fr_inl);
+  return ok;
 }
 
 static inline u32 lpo_flat_hash(u32 pa, u32 pb, u8 side) {
@@ -475,10 +774,6 @@ static inline u32 lpo_flat_hash(u32 pa, u32 pb, u8 side) {
   h ^= h >> 29;
   return (u32)h & LPO_FLAT_MEMO_MASK;
 }
-
-static LpoCmp lpo_flat_rec(const KboFlatNode *a, u32 pa,
-                           const KboFlatNode *b, u32 pb,
-                           const LpoConfig *cfg);
 
 static inline __attribute__((always_inline))
 u8 lpo_flat_slice_eq(const KboFlatNode *a, u32 pa,
@@ -498,183 +793,346 @@ static u8 lpo_flat_var_occurs(const KboFlatNode *t, u32 pos, i32 vsym) {
   return 0;
 }
 
-static inline __attribute__((always_inline))
-u8 lpo_flat_dominates_all_args(const KboFlatNode *a, u32 pa,
-                               const KboFlatNode *b, u32 pb,
-                               const LpoConfig *cfg) {
-  // b[pb] must be a CTR; iterate its children via Ende skip.
-  if (b[pb].sym < 0) return 1;
-  u32 child = pb + 1u;
-  u32 end   = pb + b[pb].sz;
-  while (child < end) {
-    if (lpo_flat_rec(a, pa, b, child, cfg) != LPO_GT) return 0;
-    child += b[child].sz;
-  }
-  return 1;
-}
+// lpo_flat_rec_compute on an explicit stack, as lpo_rec above: one frame
+// per open compute of the recursion this replaces.  (a, pa) and (b, pb)
+// are the two subterms (either array may be on either side), `cur` /
+// `cur2` the child cursors the step has reached; a wrapped frame (one
+// lpo_flat_rec opened) memoizes its verdict at `idx` / `side`, the root
+// (lpo_flat_ref) is unwrapped.
+//
+// After slice equality, the variable cases and the per-level Vortest:
+// prec(a) > prec(b) needs a > every child of b (GT), else some child of
+// b >= a gives LT; the converse for prec(a) < prec(b); equal precedences
+// try case (1) both ways, then (same symbol) the children
+// lexicographically, the winner dominating the loser's children from
+// the differing one on (WM's LPOGroesserAlleDiff, LPO.c:261/287).
+typedef struct {
+  const KboFlatNode *a;
+  const KboFlatNode *b;
+  u32 pa;
+  u32 pb;
+  u32 cur;
+  u32 cur2;
+  u32 idx;
+  u8  side;
+  u8  wrapped;
+  u8  step;
+} LpoFlatFrame;
+enum {
+  LPO_F_BEGIN,
+  LPO_F_GT_DOM,     // prec(a) > prec(b): a > every child of b -> GT
+  LPO_F_GT_SOME,    //   else some child of b >= a -> LT, else UN
+  LPO_F_LT_DOM,     // prec(a) < prec(b): b > every child of a -> LT
+  LPO_F_LT_SOME,    //   else some child of a >= b -> GT, else UN
+  LPO_F_EQ_SOME_A,  // equal: some child of a >= b -> GT
+  LPO_F_EQ_SOME_B,  //        some child of b >= a -> LT
+  LPO_F_LEX,        //        children pairwise, the first not EQ
+  LPO_F_FROM_B,     // lex GT: a > every child of b from cur -> GT, else UN
+  LPO_F_FROM_A      // lex LT: b > every child of a from cur -> LT, else UN
+};
 
-static inline __attribute__((always_inline))
-u8 lpo_flat_some_arg_dominates(const KboFlatNode *a, u32 pa,
-                               const KboFlatNode *b, u32 pb,
-                               const LpoConfig *cfg) {
-  if (a[pa].sym < 0) return 0;
-  u32 child = pa + 1u;
-  u32 end   = pa + a[pa].sz;
-  while (child < end) {
-    LpoCmp c = lpo_flat_rec(a, child, b, pb, cfg);
-    if (c == LPO_EQ || c == LPO_GT) return 1;
-    child += a[child].sz;
-  }
-  return 0;
-}
-
-// Returns lex verdict.  When verdict is LPO_GT or LPO_LT, sets *diff_a /
-// *diff_b to the positions of the differing children -- dominates_all_args
-// can skip earlier EQ children via WM's LPOGroesserAlleDiff trick.
-static inline __attribute__((always_inline))
-LpoCmp lpo_flat_lex_diff(const KboFlatNode *a, u32 pa,
-                         const KboFlatNode *b, u32 pb,
-                         const LpoConfig *cfg, u32 *diff_a, u32 *diff_b) {
-  u32 ca = pa + 1u, cb = pb + 1u;
-  u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
-  // Fast path for the common arity-2 case (e.g. Sheffer's nand).
-  if (ca < ea && cb < eb) {
-    LpoCmp c = lpo_flat_rec(a, ca, b, cb, cfg);
-    if (c != LPO_EQ) { *diff_a = ca; *diff_b = cb; return c; }
-    ca += a[ca].sz;
-    cb += b[cb].sz;
-  }
-  if (ca < ea && cb < eb) {
-    LpoCmp c = lpo_flat_rec(a, ca, b, cb, cfg);
-    if (c != LPO_EQ) { *diff_a = ca; *diff_b = cb; return c; }
-    ca += a[ca].sz;
-    cb += b[cb].sz;
-  }
-  while (ca < ea && cb < eb) {
-    LpoCmp c = lpo_flat_rec(a, ca, b, cb, cfg);
-    if (c != LPO_EQ) { *diff_a = ca; *diff_b = cb; return c; }
-    ca += a[ca].sz;
-    cb += b[cb].sz;
-  }
-  return LPO_EQ;
-}
-
-// dominates_all_args starting from a given child position in b (used by
-// the post-lex path so we skip the children that were already proven
-// EQ to a's children via lex).
-static inline __attribute__((always_inline))
-u8 lpo_flat_dominates_from(const KboFlatNode *a, u32 pa,
+static LpoCmp lpo_flat_run(const KboFlatNode *a, u32 pa,
                            const KboFlatNode *b, u32 pb,
-                           u32 start_child,
                            const LpoConfig *cfg) {
-  u32 child = start_child;
-  u32 end   = pb + b[pb].sz;
-  while (child < end) {
-    if (lpo_flat_rec(a, pa, b, child, cfg) != LPO_GT) return 0;
-    child += b[child].sz;
-  }
-  return 1;
-}
-
-static LpoCmp lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
-                                   const KboFlatNode *b, u32 pb,
-                                   const LpoConfig *cfg) {
-  if (lpo_flat_slice_eq(a, pa, b, pb)) return LPO_EQ;
-  u8 a_is_var = (a[pa].sym < 0);
-  u8 b_is_var = (b[pb].sym < 0);
-  if (__builtin_expect(a_is_var | b_is_var, 0)) {
-    if (a_is_var && b_is_var) return LPO_UN;
-    if (a_is_var) {
-      if (lpo_flat_var_occurs(b, pb, a[pa].sym)) return LPO_LT;
-      return LPO_UN;
+  LpoFlatFrame  fr_inl[LPO_WALK_INL];
+  LpoFlatFrame *fr  = fr_inl;
+  u32           nfr = 1u;
+  u32           cfr = LPO_WALK_INL;
+  fr[0].a       = a;
+  fr[0].b       = b;
+  fr[0].pa      = pa;
+  fr[0].pb      = pb;
+  fr[0].cur     = 0u;
+  fr[0].cur2    = 0u;
+  fr[0].idx     = 0u;
+  fr[0].side    = 0u;
+  fr[0].wrapped = 0u;
+  fr[0].step    = LPO_F_BEGIN;
+  LpoCmp val  = LPO_UN;   // a call's verdict, pending for the top frame
+  u8     have = 0u;
+  for (;;) {
+    LpoFlatFrame      *f   = &fr[nfr - 1u];
+    const KboFlatNode *fa  = f->a;
+    const KboFlatNode *fb  = f->b;
+    u8                 fin = 0u;
+    LpoCmp             res = LPO_UN;
+    if (have) {
+      have = 0u;
+      switch (f->step) {
+        case LPO_F_GT_DOM:
+          if (val != LPO_GT) {
+            f->step = LPO_F_GT_SOME;
+            f->cur  = f->pb + 1u;
+          } else {
+            f->cur += fb[f->cur].sz;
+          }
+          break;
+        case LPO_F_LT_DOM:
+          if (val != LPO_GT) {
+            f->step = LPO_F_LT_SOME;
+            f->cur  = f->pa + 1u;
+          } else {
+            f->cur += fa[f->cur].sz;
+          }
+          break;
+        case LPO_F_GT_SOME:
+        case LPO_F_EQ_SOME_B:
+          if (val == LPO_EQ || val == LPO_GT) {
+            fin = 1u;
+            res = LPO_LT;
+          } else {
+            f->cur += fb[f->cur].sz;
+          }
+          break;
+        case LPO_F_LT_SOME:
+        case LPO_F_EQ_SOME_A:
+          if (val == LPO_EQ || val == LPO_GT) {
+            fin = 1u;
+            res = LPO_GT;
+          } else {
+            f->cur += fa[f->cur].sz;
+          }
+          break;
+        case LPO_F_LEX:
+          if (val == LPO_EQ) {
+            f->cur  += fa[f->cur].sz;
+            f->cur2 += fb[f->cur2].sz;
+          } else if (val == LPO_GT) {
+            f->step = LPO_F_FROM_B;
+            f->cur  = f->cur2;
+          } else if (val == LPO_LT) {
+            f->step = LPO_F_FROM_A;
+          } else {
+            // An incomparable argument pair decides neither lex direction,
+            // and case (1) failed both ways above (LPO.c:300-306).
+            fin = 1u;
+            res = LPO_UN;
+          }
+          break;
+        case LPO_F_FROM_B:
+          if (val != LPO_GT) {
+            fin = 1u;
+            res = LPO_UN;
+          } else {
+            f->cur += fb[f->cur].sz;
+          }
+          break;
+        default:   // LPO_F_FROM_A
+          if (val != LPO_GT) {
+            fin = 1u;
+            res = LPO_UN;
+          } else {
+            f->cur += fa[f->cur].sz;
+          }
+          break;
+      }
     }
-    if (lpo_flat_var_occurs(a, pa, b[pb].sym)) return LPO_GT;
-    return LPO_UN;
+    // The next call lpo_flat_rec(x, px, y, py), or the verdict.
+    const KboFlatNode *x  = NULL;
+    const KboFlatNode *y  = NULL;
+    u32                px = 0u;
+    u32                py = 0u;
+    u8                 call = 0u;
+    while (!fin && !call) {
+      u32 ea = f->pa + fa[f->pa].sz;
+      u32 eb = f->pb + fb[f->pb].sz;
+      switch (f->step) {
+        case LPO_F_BEGIN: {
+          if (lpo_flat_slice_eq(fa, f->pa, fb, f->pb)) {
+            fin = 1u;
+            res = LPO_EQ;
+            break;
+          }
+          u8 a_is_var = (fa[f->pa].sym < 0);
+          u8 b_is_var = (fb[f->pb].sym < 0);
+          if (__builtin_expect(a_is_var | b_is_var, 0)) {
+            fin = 1u;
+            if (a_is_var && b_is_var) {
+              res = LPO_UN;
+            } else if (a_is_var) {
+              res = lpo_flat_var_occurs(fb, f->pb, fa[f->pa].sym) ? LPO_LT : LPO_UN;
+            } else {
+              res = lpo_flat_var_occurs(fa, f->pa, fb[f->pb].sym) ? LPO_GT : LPO_UN;
+            }
+            break;
+          }
+          // Per-level subterm Vortest: pretest at each recursion level
+          // catches the strict-subterm cases without paying the cost of the
+          // some_arg_dom recursion below.  Mirrors WM's LP_LPOGroesser
+          // structure where each recursive call enters via
+          // LV_VortestLPOGroesser before the some-arg-dominates dispatch.
+          if (lpo_pretest_groesser_flat(fa + f->pa, fa[f->pa].sz,
+                                        fb + f->pb, fb[f->pb].sz, cfg) > 0) {
+            fin = 1u;
+            res = LPO_GT;
+            break;
+          }
+          if (lpo_pretest_groesser_flat(fb + f->pb, fb[f->pb].sz,
+                                        fa + f->pa, fa[f->pa].sz, cfg) > 0) {
+            fin = 1u;
+            res = LPO_LT;
+            break;
+          }
+          // Precedence dispatch first (WM's structure): when precs differ,
+          // case (2) dominates_all_args resolves directly; case (1) only
+          // fires for the OTHER direction.  When precs are equal, lex +
+          // case (3) applies and case (1) is checked symmetrically.
+          i32 prec_a = fa[f->pa].w;
+          i32 prec_b = fb[f->pb].w;
+          if (__builtin_expect(prec_a > prec_b, 0)) {
+            f->step = LPO_F_GT_DOM;
+            f->cur  = f->pb + 1u;
+          } else if (__builtin_expect(prec_a < prec_b, 0)) {
+            f->step = LPO_F_LT_DOM;
+            f->cur  = f->pa + 1u;
+          } else {
+            f->step = LPO_F_EQ_SOME_A;
+            f->cur  = f->pa + 1u;
+          }
+          break;
+        }
+        case LPO_F_GT_DOM:
+          if (f->cur < eb) {
+            x = fa; px = f->pa; y = fb; py = f->cur;
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_GT;
+          }
+          break;
+        case LPO_F_GT_SOME:
+          if (f->cur < eb) {
+            x = fb; px = f->cur; y = fa; py = f->pa;
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_UN;
+          }
+          break;
+        case LPO_F_LT_DOM:
+          if (f->cur < ea) {
+            x = fb; px = f->pb; y = fa; py = f->cur;
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_LT;
+          }
+          break;
+        case LPO_F_LT_SOME:
+          if (f->cur < ea) {
+            x = fa; px = f->cur; y = fb; py = f->pb;
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_UN;
+          }
+          break;
+        case LPO_F_EQ_SOME_A:
+          if (f->cur < ea) {
+            x = fa; px = f->cur; y = fb; py = f->pb;
+            call = 1u;
+          } else {
+            f->step = LPO_F_EQ_SOME_B;
+            f->cur  = f->pb + 1u;
+          }
+          break;
+        case LPO_F_EQ_SOME_B:
+          if (f->cur < eb) {
+            x = fb; px = f->cur; y = fa; py = f->pa;
+            call = 1u;
+          } else if (fa[f->pa].sym != fb[f->pb].sym) {
+            fin = 1u;
+            res = LPO_UN;
+          } else {
+            // Same head symbol implies same arity (signature constraint),
+            // but subtree sizes (`sz`) may differ when children have
+            // different shapes -- so DO NOT short-circuit on sz mismatch.
+            f->step = LPO_F_LEX;
+            f->cur  = f->pa + 1u;
+            f->cur2 = f->pb + 1u;
+          }
+          break;
+        case LPO_F_LEX:
+          if (f->cur < ea && f->cur2 < eb) {
+            x = fa; px = f->cur; y = fb; py = f->cur2;
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_EQ;
+          }
+          break;
+        case LPO_F_FROM_B:
+          if (f->cur < eb) {
+            x = fa; px = f->pa; y = fb; py = f->cur;
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_GT;
+          }
+          break;
+        default:   // LPO_F_FROM_A
+          if (f->cur < ea) {
+            x = fb; px = f->pb; y = fa; py = f->cur;
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_LT;
+          }
+          break;
+      }
+    }
+    if (call) {
+      // lpo_flat_rec(x, px, y, py): the memoized wrapper.
+      g_lpo_flat_rec_calls++;
+      if (x == y && px == py) {
+        val  = LPO_EQ;
+        have = 1u;
+        continue;
+      }
+      if (lpo_deadline_fired()) {   // wall passed: unwind fast
+        val  = LPO_UN;
+        have = 1u;
+        continue;
+      }
+      u8  side = (x == g_lpo_flat_a) ? 0u : 1u;
+      u32 cidx = lpo_flat_hash(px, py, side);
+      LpoFlatMemoEnt *ce = &g_lpo_flat_memo[cidx];
+      if (ce->epoch == g_lpo_flat_epoch && ce->pa == px && ce->pb == py &&
+          ce->side == side) {
+        g_lpo_flat_memo_hits++;
+        val  = (LpoCmp)(i8)ce->cmp;
+        have = 1u;
+        continue;
+      }
+      g_lpo_flat_compute_calls++;
+      if (nfr == cfr) {
+        fr = (LpoFlatFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      LpoFlatFrame *nf = &fr[nfr++];
+      nf->a       = x;
+      nf->b       = y;
+      nf->pa      = px;
+      nf->pb      = py;
+      nf->cur     = 0u;
+      nf->cur2    = 0u;
+      nf->idx     = cidx;
+      nf->side    = side;
+      nf->wrapped = 1u;
+      nf->step    = LPO_F_BEGIN;
+      continue;
+    }
+    if (f->wrapped) {
+      LpoFlatMemoEnt *me = &g_lpo_flat_memo[f->idx];
+      me->pa = f->pa; me->pb = f->pb; me->epoch = g_lpo_flat_epoch;
+      me->cmp = (u8)res; me->side = f->side;
+    }
+    if (--nfr == 0u) {
+      term_stack_release(fr, fr_inl);
+      return res;
+    }
+    val  = res;
+    have = 1u;
   }
-  // Per-level subterm Vortest: pretest at each recursion level catches
-  // the strict-subterm cases without paying the cost of the some_arg_dom
-  // recursion below.  Mirrors WM's LP_LPOGroesser structure where each
-  // recursive call enters via LV_VortestLPOGroesser before the
-  // some-arg-dominates dispatch.
-  {
-    int r1 = lpo_pretest_groesser_flat(a + pa, a[pa].sz,
-                                       b + pb, b[pb].sz, cfg);
-    if (r1 > 0) return LPO_GT;
-    int r2 = lpo_pretest_groesser_flat(b + pb, b[pb].sz,
-                                       a + pa, a[pa].sz, cfg);
-    if (r2 > 0) return LPO_LT;
-  }
-  // Precedence dispatch first (WM's structure): when precs differ, case
-  // (2) dominates_all_args resolves directly; case (1) only fires for
-  // the OTHER direction (children of the smaller-prec side might still
-  // dominate via deeper subterm).  When precs are equal, lex + case (3)
-  // applies and case (1) some_arg_dom is checked symmetrically.
-  i32 prec_a = a[pa].w;
-  i32 prec_b = b[pb].w;
-  // For most signatures (e.g. Sheffer = single nand internal) precedences
-  // are equal on the dominant recursive path; mark unequal-prec as cold.
-  if (__builtin_expect(prec_a > prec_b, 0)) {
-    if (lpo_flat_dominates_all_args(a, pa, b, pb, cfg)) return LPO_GT;
-    // case (1) symmetric: some child of b might still dominate a (rare).
-    if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
-    return LPO_UN;
-  }
-  if (__builtin_expect(prec_a < prec_b, 0)) {
-    if (lpo_flat_dominates_all_args(b, pb, a, pa, cfg)) return LPO_LT;
-    if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
-    return LPO_UN;
-  }
-  // Equal precedence: case (1) both directions can fire, then case (3)
-  // lex.
-  if (lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) {
-    return LPO_GT;
-  }
-  if (lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) {
-    return LPO_LT;
-  }
-  if (a[pa].sym != b[pb].sym) {
-    return LPO_UN;
-  }
-  // Same head symbol implies same arity (signature constraint), but
-  // subtree sizes (`sz`) may differ when children have different shapes
-  // -- so DO NOT short-circuit on sz mismatch.  lex compare handles it.
-  u32 diff_a = 0, diff_b = 0;
-  LpoCmp lex = lpo_flat_lex_diff(a, pa, b, pb, cfg, &diff_a, &diff_b);
-  if (lex == LPO_EQ) {
-    return LPO_EQ;
-  }
-  // After lex finds the differing position, earlier children are
-  // pairwise EQ -- so dominates_all_args trivially holds for them via
-  // case (1) at that child position.  Skip to the differing position
-  // (WM's LPOGroesserAlleDiff structure, LPO.c:261/287).
-  if (lex == LPO_GT) {
-    return lpo_flat_dominates_from(a, pa, b, pb, diff_b, cfg) ? LPO_GT : LPO_UN;
-  }
-  if (lex == LPO_LT) {
-    return lpo_flat_dominates_from(b, pb, a, pa, diff_a, cfg) ? LPO_LT : LPO_UN;
-  }
-  // An incomparable argument pair decides neither lex direction, and
-  // case (1) failed both ways above (LPO.c:300-306).
-  return LPO_UN;
-}
-
-static LpoCmp lpo_flat_rec(const KboFlatNode *a, u32 pa,
-                           const KboFlatNode *b, u32 pb,
-                           const LpoConfig *cfg) {
-  g_lpo_flat_rec_calls++;
-  if (a == b && pa == pb) return LPO_EQ;
-  if (lpo_deadline_fired()) return LPO_UN;   // wall passed: unwind fast
-  u8 side = (a == g_lpo_flat_a) ? 0u : 1u;
-  u32 idx = lpo_flat_hash(pa, pb, side);
-  LpoFlatMemoEnt *e = &g_lpo_flat_memo[idx];
-  if (e->epoch == g_lpo_flat_epoch && e->pa == pa && e->pb == pb && e->side == side) {
-    g_lpo_flat_memo_hits++;
-    return (LpoCmp)(i8)e->cmp;
-  }
-  g_lpo_flat_compute_calls++;
-  LpoCmp c = lpo_flat_rec_compute(a, pa, b, pb, cfg);
-  e->pa = pa; e->pb = pb; e->epoch = g_lpo_flat_epoch; e->cmp = (u8)c; e->side = side;
-  return c;
 }
 
 // The flat recursion on g_lpo_flat_a / g_lpo_flat_b as encoded, with a
@@ -686,12 +1144,12 @@ static LpoCmp lpo_flat_ref(const LpoConfig *cfg) {
     }
     g_lpo_flat_epoch = 1;
   }
-  return lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
+  return lpo_flat_run(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, cfg);
 }
 
 // === DAG comparator (the flat path's evaluator) ==========================
-// lpo_flat_rec_compute is a pure function of the two subterms it is
-// handed: slice equality, variable occurrence, the Vortest pretests, the
+// A flat-walk compute (lpo_flat_run) is a pure function of the two
+// subterms it is handed: slice equality, variable occurrence, the Vortest pretests, the
 // precedences and the children it recurses on all read only the two
 // slices.  So its verdict can be memoized on subterm CONTENT instead of
 // position.  lpo_flat_cmp hash-conses both flat arrays into one DAG
@@ -1085,135 +1543,298 @@ static u8 lpo_dag_vortest(u32 cx, u32 cy) {
   return lpo_dag_sub(cx, cy);
 }
 
-static LpoCmp lpo_dag_compute(u32 c1, u32 c2);
+// The flat machine's case analysis over class pairs, on an explicit stack:
+// one frame per open lpo_dag_compute(c1, c2) of the recursion this
+// replaces, `k` / `d` the kid cursors its step has reached.  A wrapped
+// frame (one lpo_dag_rec opened) records its verdict in the lossless memo
+// when it finishes; the root, run by lpo_dag_cmp, is unwrapped.
+typedef struct {
+  u32 c1;
+  u32 c2;
+  u32 k;
+  u32 d;
+  u8  wrapped;
+  u8  step;
+} LpoDagFrame;
+enum {
+  LPO_D_BEGIN,
+  LPO_D_GT_DOM,     // w(x) > w(y): x > every kid of y -> GT
+  LPO_D_GT_SOME,    //   else some kid of y >= x -> LT, else UN
+  LPO_D_LT_DOM,     // w(x) < w(y): y > every kid of x -> LT
+  LPO_D_LT_SOME,    //   else some kid of x >= y -> GT, else UN
+  LPO_D_EQ_SOME_X,  // equal: some kid of x >= y -> GT
+  LPO_D_EQ_SOME_Y,  //        some kid of y >= x -> LT
+  LPO_D_LEX,        //        kids pairwise, the first not EQ
+  LPO_D_TAIL_GT,    // lex GT: x > every kid of y from d -> GT, else UN
+  LPO_D_TAIL_LT     // lex LT: y > every kid of x from d -> LT, else UN
+};
 
-static LpoCmp lpo_dag_rec(u32 c1, u32 c2) {
-  g_lpo_flat_rec_calls++;
-  if (c1 == c2) {
-    return LPO_EQ;
-  }
-  if (lpo_deadline_fired()) {
-    return LPO_UN;
-  }
-  u32 s = lpo_dag_memo_slot(c1, c2);
-  while (g_ld_memo[s].k1 != 0u) {
-    if (g_ld_memo[s].k1 == c1 + 1u && g_ld_memo[s].k2 == c2) {
-      g_lpo_flat_memo_hits++;
-      return (LpoCmp)(i8)(u8)g_ld_memo[s].v;
-    }
-    s = (s + 1u) & g_ld_memo_mask;
-  }
-  g_lpo_flat_compute_calls++;
-  LpoCmp r = lpo_dag_compute(c1, c2);
-  lpo_dag_memo_put(c1, c2, r);
-  return r;
-}
-
-// lpo_flat_rec_compute, case for case, over classes.
 static LpoCmp lpo_dag_compute(u32 c1, u32 c2) {
-  if (c1 == c2) {
-    return LPO_EQ;
-  }
-  const LpoDagNode *x  = &g_ld_node[c1];
-  const LpoDagNode *y  = &g_ld_node[c2];
-  u8                xv = (u8)(x->sym < 0);
-  u8                yv = (u8)(y->sym < 0);
-  if (xv | yv) {
-    if (xv && yv) {
-      return LPO_UN;
-    }
-    if (xv) {
-      return lpo_dag_var_in(c2, x->sym) ? LPO_LT : LPO_UN;
-    }
-    return lpo_dag_var_in(c1, y->sym) ? LPO_GT : LPO_UN;
-  }
-  if (lpo_dag_vortest(c1, c2)) {
-    return LPO_GT;
-  }
-  if (lpo_dag_vortest(c2, c1)) {
-    return LPO_LT;
-  }
-  const u32 *kx = &g_ld_kids[x->kids];
-  const u32 *ky = &g_ld_kids[y->kids];
-  u32        nx = x->arity;
-  u32        ny = y->arity;
-  if (x->w > y->w) {
-    u32 j = 0u;
-    while (j < ny && lpo_dag_rec(c1, ky[j]) == LPO_GT) {
-      j++;
-    }
-    if (j == ny) {
-      return LPO_GT;
-    }
-    for (j = 0u; j < ny; j++) {
-      LpoCmp c = lpo_dag_rec(ky[j], c1);
-      if (c == LPO_EQ || c == LPO_GT) {
-        return LPO_LT;
+  LpoDagFrame  fr_inl[LPO_WALK_INL];
+  LpoDagFrame *fr  = fr_inl;
+  u32          nfr = 1u;
+  u32          cfr = LPO_WALK_INL;
+  fr[0].c1      = c1;
+  fr[0].c2      = c2;
+  fr[0].k       = 0u;
+  fr[0].d       = 0u;
+  fr[0].wrapped = 0u;
+  fr[0].step    = LPO_D_BEGIN;
+  LpoCmp val  = LPO_UN;   // a call's verdict, pending for the top frame
+  u8     have = 0u;
+  for (;;) {
+    LpoDagFrame      *f   = &fr[nfr - 1u];
+    const LpoDagNode *x   = &g_ld_node[f->c1];
+    const LpoDagNode *y   = &g_ld_node[f->c2];
+    const u32        *kx  = &g_ld_kids[x->kids];
+    const u32        *ky  = &g_ld_kids[y->kids];
+    u32               nx  = x->arity;
+    u32               ny  = y->arity;
+    u8                fin = 0u;
+    LpoCmp            res = LPO_UN;
+    if (have) {
+      have = 0u;
+      switch (f->step) {
+        case LPO_D_GT_DOM:
+          if (val == LPO_GT) {
+            f->k++;
+          } else {
+            f->step = LPO_D_GT_SOME;
+            f->k    = 0u;
+          }
+          break;
+        case LPO_D_LT_DOM:
+          if (val == LPO_GT) {
+            f->k++;
+          } else {
+            f->step = LPO_D_LT_SOME;
+            f->k    = 0u;
+          }
+          break;
+        case LPO_D_GT_SOME:
+        case LPO_D_EQ_SOME_Y:
+          if (val == LPO_EQ || val == LPO_GT) {
+            fin = 1u;
+            res = LPO_LT;
+          } else {
+            f->k++;
+          }
+          break;
+        case LPO_D_LT_SOME:
+        case LPO_D_EQ_SOME_X:
+          if (val == LPO_EQ || val == LPO_GT) {
+            fin = 1u;
+            res = LPO_GT;
+          } else {
+            f->k++;
+          }
+          break;
+        case LPO_D_LEX:
+          if (val == LPO_EQ) {
+            f->d++;
+          } else if (val == LPO_GT) {
+            f->step = LPO_D_TAIL_GT;
+            f->k    = f->d;
+          } else if (val == LPO_LT) {
+            f->step = LPO_D_TAIL_LT;
+            f->k    = f->d;
+          } else {
+            fin = 1u;
+            res = LPO_UN;
+          }
+          break;
+        default:   // LPO_D_TAIL_GT, LPO_D_TAIL_LT
+          if (val != LPO_GT) {
+            fin = 1u;
+            res = LPO_UN;
+          } else {
+            f->k++;
+          }
+          break;
       }
     }
-    return LPO_UN;
-  }
-  if (x->w < y->w) {
-    u32 i = 0u;
-    while (i < nx && lpo_dag_rec(c2, kx[i]) == LPO_GT) {
-      i++;
-    }
-    if (i == nx) {
-      return LPO_LT;
-    }
-    for (i = 0u; i < nx; i++) {
-      LpoCmp c = lpo_dag_rec(kx[i], c2);
-      if (c == LPO_EQ || c == LPO_GT) {
-        return LPO_GT;
+    // The next call lpo_dag_rec(p, q), or the verdict.
+    u32 p    = 0u;
+    u32 q    = 0u;
+    u8  call = 0u;
+    while (!fin && !call) {
+      switch (f->step) {
+        case LPO_D_BEGIN: {
+          if (f->c1 == f->c2) {
+            fin = 1u;
+            res = LPO_EQ;
+            break;
+          }
+          u8 xv = (u8)(x->sym < 0);
+          u8 yv = (u8)(y->sym < 0);
+          if (xv | yv) {
+            fin = 1u;
+            if (xv && yv) {
+              res = LPO_UN;
+            } else if (xv) {
+              res = lpo_dag_var_in(f->c2, x->sym) ? LPO_LT : LPO_UN;
+            } else {
+              res = lpo_dag_var_in(f->c1, y->sym) ? LPO_GT : LPO_UN;
+            }
+            break;
+          }
+          if (lpo_dag_vortest(f->c1, f->c2)) {
+            fin = 1u;
+            res = LPO_GT;
+            break;
+          }
+          if (lpo_dag_vortest(f->c2, f->c1)) {
+            fin = 1u;
+            res = LPO_LT;
+            break;
+          }
+          f->k = 0u;
+          if (x->w > y->w) {
+            f->step = LPO_D_GT_DOM;
+          } else if (x->w < y->w) {
+            f->step = LPO_D_LT_DOM;
+          } else {
+            f->step = LPO_D_EQ_SOME_X;
+          }
+          break;
+        }
+        case LPO_D_GT_DOM:
+          if (f->k < ny) {
+            p = f->c1; q = ky[f->k];
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_GT;
+          }
+          break;
+        case LPO_D_GT_SOME:
+          if (f->k < ny) {
+            p = ky[f->k]; q = f->c1;
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_UN;
+          }
+          break;
+        case LPO_D_LT_DOM:
+          if (f->k < nx) {
+            p = f->c2; q = kx[f->k];
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_LT;
+          }
+          break;
+        case LPO_D_LT_SOME:
+          if (f->k < nx) {
+            p = kx[f->k]; q = f->c2;
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_UN;
+          }
+          break;
+        case LPO_D_EQ_SOME_X:
+          if (f->k < nx) {
+            p = kx[f->k]; q = f->c2;
+            call = 1u;
+          } else {
+            f->step = LPO_D_EQ_SOME_Y;
+            f->k    = 0u;
+          }
+          break;
+        case LPO_D_EQ_SOME_Y:
+          if (f->k < ny) {
+            p = ky[f->k]; q = f->c1;
+            call = 1u;
+          } else if (x->sym != y->sym) {
+            fin = 1u;
+            res = LPO_UN;
+          } else {
+            f->step = LPO_D_LEX;
+            f->d    = 0u;
+          }
+          break;
+        case LPO_D_LEX:
+          if (f->d < ((nx < ny) ? nx : ny)) {
+            p = kx[f->d]; q = ky[f->d];
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_EQ;
+          }
+          break;
+        case LPO_D_TAIL_GT:
+          if (f->k < ny) {
+            p = f->c1; q = ky[f->k];
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_GT;
+          }
+          break;
+        default:   // LPO_D_TAIL_LT
+          if (f->k < nx) {
+            p = f->c2; q = kx[f->k];
+            call = 1u;
+          } else {
+            fin = 1u;
+            res = LPO_LT;
+          }
+          break;
       }
     }
-    return LPO_UN;
-  }
-  for (u32 i = 0; i < nx; i++) {
-    LpoCmp c = lpo_dag_rec(kx[i], c2);
-    if (c == LPO_EQ || c == LPO_GT) {
-      return LPO_GT;
-    }
-  }
-  for (u32 j = 0; j < ny; j++) {
-    LpoCmp c = lpo_dag_rec(ky[j], c1);
-    if (c == LPO_EQ || c == LPO_GT) {
-      return LPO_LT;
-    }
-  }
-  if (x->sym != y->sym) {
-    return LPO_UN;
-  }
-  u32    n   = (nx < ny) ? nx : ny;
-  u32    d   = 0u;
-  LpoCmp lex = LPO_EQ;
-  while (d < n) {
-    lex = lpo_dag_rec(kx[d], ky[d]);
-    if (lex != LPO_EQ) {
-      break;
-    }
-    d++;
-  }
-  if (lex == LPO_EQ) {
-    return LPO_EQ;
-  }
-  if (lex == LPO_UN) {
-    return LPO_UN;
-  }
-  if (lex == LPO_GT) {
-    for (u32 j = d; j < ny; j++) {
-      if (lpo_dag_rec(c1, ky[j]) != LPO_GT) {
-        return LPO_UN;
+    if (call) {
+      // lpo_dag_rec(p, q): the memoized wrapper.
+      g_lpo_flat_rec_calls++;
+      if (p == q) {
+        val  = LPO_EQ;
+        have = 1u;
+        continue;
       }
+      if (lpo_deadline_fired()) {
+        val  = LPO_UN;
+        have = 1u;
+        continue;
+      }
+      u32 sl  = lpo_dag_memo_slot(p, q);
+      u8  hit = 0u;
+      while (g_ld_memo[sl].k1 != 0u) {
+        if (g_ld_memo[sl].k1 == p + 1u && g_ld_memo[sl].k2 == q) {
+          g_lpo_flat_memo_hits++;
+          val = (LpoCmp)(i8)(u8)g_ld_memo[sl].v;
+          hit = 1u;
+          break;
+        }
+        sl = (sl + 1u) & g_ld_memo_mask;
+      }
+      if (hit) {
+        have = 1u;
+        continue;
+      }
+      g_lpo_flat_compute_calls++;
+      if (nfr == cfr) {
+        fr = (LpoDagFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      LpoDagFrame *nf = &fr[nfr++];
+      nf->c1      = p;
+      nf->c2      = q;
+      nf->k       = 0u;
+      nf->d       = 0u;
+      nf->wrapped = 1u;
+      nf->step    = LPO_D_BEGIN;
+      continue;
     }
-    return LPO_GT;
-  }
-  for (u32 i = d; i < nx; i++) {
-    if (lpo_dag_rec(c2, kx[i]) != LPO_GT) {
-      return LPO_UN;
+    if (f->wrapped) {
+      lpo_dag_memo_put(f->c1, f->c2, res);
     }
+    if (--nfr == 0u) {
+      term_stack_release(fr, fr_inl);
+      return res;
+    }
+    val  = res;
+    have = 1u;
   }
-  return LPO_LT;
 }
 
 // Hash-cons g_lpo_flat_a[0, na) and g_lpo_flat_b[0, nb).  0 when a
@@ -1499,8 +2120,8 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
     // Safe default: fresh memo every call.
     thvm_lpo_invalidate();
   }
-  // lpo_eq is a recursive Term-tree walk -- redundant on the flatrec
-  // path since slice_eq at the top of lpo_flat_rec_compute catches the
+  // lpo_eq is a Term-tree walk -- redundant on the flatrec path since
+  // slice_eq at the top of the flat walk's compute catches the
   // EQ case faster (it operates on the cache-dense KboFlatNode spine
   // instead of dereferencing heap cells).  Skip the early-eq check
   // when flatrec is on.
@@ -1558,7 +2179,7 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
         if (r2 > 0) return LPO_LT;
       }
       // Fast var-set incomparability check directly on the flat spines.
-      // Avoids the recursive lpo_var_set_acc / lpo_vars_in_range walk over
+      // Avoids the lpo_var_set_acc / lpo_vars_in_range walk over
       // Term trees that the pre-flatrec lpo_pretest_varset would do.
       u32 vs[LPO_MAX_VAR] = {0};
       u32 vt[LPO_MAX_VAR] = {0};
@@ -1595,76 +2216,9 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
       return rr;
     }
   }
-  // Term-tree fallback (encode overflow or flatrec disabled): the recursive
+  // Term-tree fallback (encode overflow or flatrec disabled):
   // lpo_pretest_varset is the only remaining safety net for the UN case.
   LpoCmp pre2;
   if (lpo_pretest_varset(s, t, &pre2)) return pre2;
   return lpo_rec(s, t, cfg);
-}
-
-static LpoCmp lpo_rec_compute(Term s, Term t, const LpoConfig *cfg) {
-  if (lpo_eq(s, t)) return LPO_EQ;
-
-  u8 s_is_fvr = (term_tag(s) == TAG_FVR);
-  u8 t_is_fvr = (term_tag(t) == TAG_FVR);
-
-  // Variable cases.
-  if (s_is_fvr && t_is_fvr) {
-    // Distinct FVR ids: incomparable.
-    return LPO_UN;
-  }
-  if (s_is_fvr) {
-    // s is FVR, t is CTR.  s >_lpo t is false; check t >_lpo s
-    // via subterm-occurrence: t > x iff x occurs in t.
-    if (lpo_var_occurs_in(t, term_ext(s))) return LPO_LT;
-    return LPO_UN;
-  }
-  if (t_is_fvr) {
-    // s is CTR, t is FVR.  s >_lpo x iff x occurs strictly in s.
-    if (lpo_var_occurs_in(s, term_ext(t))) return LPO_GT;
-    return LPO_UN;
-  }
-
-  // Both are CTRs (or non-CTR/non-FVR which we treat as UN).
-  if (term_tag(s) != TAG_CTR || term_tag(t) != TAG_CTR) return LPO_UN;
-
-  // Case (1) check both directions: subterm domination.
-  if (lpo_some_arg_dominates(s, t, cfg)) return LPO_GT;
-  if (lpo_some_arg_dominates(t, s, cfg)) return LPO_LT;
-
-  // Cases (2) and (3): compare top symbols.
-  u32 lab_s = term_ext(s);
-  u32 lab_t = term_ext(t);
-  u32 prec_s = (lab_s < cfg->n_labels) ? cfg->precedence[lab_s] : 0;
-  u32 prec_t = (lab_t < cfg->n_labels) ? cfg->precedence[lab_t] : 0;
-
-  if (prec_s > prec_t) {
-    // f >_F g: case (2), s >_lpo t iff s >_lpo every t_j.
-    if (lpo_dominates_all_args(s, t, cfg)) return LPO_GT;
-    return LPO_UN;
-  }
-  if (prec_s < prec_t) {
-    // g >_F f: symmetric.
-    if (lpo_dominates_all_args(t, s, cfg)) return LPO_LT;
-    return LPO_UN;
-  }
-
-  // Equal precedence: distinct symbols are incomparable heads, which
-  // case (1) above did not order.  Equal head symbols: case (3).  Lex
-  // compare args; the winning direction must dominate the loser's args.
-  if (lab_s != lab_t || term_ctr_n(s) != term_ctr_n(t)) {
-    return LPO_UN;
-  }
-  LpoCmp lex = lpo_lex(s, t, cfg);
-  if (lex == LPO_EQ) {
-    return LPO_EQ;   // can't happen if lpo_eq fired earlier
-  }
-  if (lex == LPO_GT) {
-    return lpo_dominates_all_args(s, t, cfg) ? LPO_GT : LPO_UN;
-  }
-  if (lex == LPO_LT) {
-    return lpo_dominates_all_args(t, s, cfg) ? LPO_LT : LPO_UN;
-  }
-  // An incomparable argument pair decides neither lex direction.
-  return LPO_UN;
 }

@@ -5745,6 +5745,915 @@ static void deep_kbo_memo(void) {
   }
 }
 
+// ---- src/lpo/_.c: the Term, flat and DAG evaluators and their walks --------
+
+static LpoCmp ref_lpo_rec_compute(Term s, Term t, const LpoConfig *cfg);
+static LpoCmp ref_lpo_flat_rec(const KboFlatNode *a, u32 pa,
+                               const KboFlatNode *b, u32 pb,
+                               const LpoConfig *cfg);
+static LpoCmp ref_lpo_dag_compute(u32 c1, u32 c2);
+
+// src/lpo/_.c lpo_eq
+static u8 ref_lpo_eq(Term s, Term t) {
+  if (term_tag(s) != term_tag(t)) return 0;
+  if (term_ext(s) != term_ext(t)) return 0;
+  switch (term_tag(s)) {
+    case TAG_FVR: return 1;  // same id (ext) already checked
+    case TAG_CTR: {
+      u32 ns = term_ctr_n(s);
+      u32 nt = term_ctr_n(t);
+      if (ns != nt) return 0;
+      for (u32 i = 0; i < ns; i++) {
+        if (!ref_lpo_eq(term_ctr_at(s, i), term_ctr_at(t, i))) return 0;
+      }
+      return 1;
+    }
+    default: return term_val(s) == term_val(t);
+  }
+}
+
+// src/lpo/_.c lpo_var_occurs_in
+static u8 ref_lpo_var_occurs_in(Term t, u32 var_id) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) == var_id;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (ref_lpo_var_occurs_in(term_ctr_at(t, i), var_id)) return 1;
+      }
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
+// src/lpo/_.c lpo_var_set_acc
+static void ref_lpo_var_set_acc(Term t, u32 *seen) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      if (id < LPO_MAX_VAR) seen[id] = 1;
+      return;
+    }
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) ref_lpo_var_set_acc(term_ctr_at(t, i), seen);
+      return;
+    }
+    default: return;
+  }
+}
+
+// src/lpo/_.c lpo_vars_in_range
+static u8 ref_lpo_vars_in_range(Term t) {
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) < LPO_MAX_VAR;
+    case TAG_CTR: {
+      u32 n = term_ctr_n(t);
+      for (u32 i = 0; i < n; i++) {
+        if (!ref_lpo_vars_in_range(term_ctr_at(t, i))) return 0;
+      }
+      return 1;
+    }
+    default: return 1;
+  }
+}
+
+// src/lpo/_.c lpo_rec
+static LpoCmp ref_lpo_rec(Term s, Term t, const LpoConfig *cfg) {
+  if (s == t) return LPO_EQ;            // pointer-identical, no memo
+  if (lpo_deadline_fired()) return LPO_UN;   // wall passed: unwind fast
+  u32 idx = lpo_memo_hash(s, t);
+  LpoMemoEnt *e = &g_lpo_memo[idx];
+  if (e->epoch == g_lpo_epoch && e->s == s && e->t == t)
+    return (LpoCmp)(i8)e->cmp;
+  LpoCmp c = ref_lpo_rec_compute(s, t, cfg);
+  e->s = s; e->t = t; e->epoch = g_lpo_epoch; e->cmp = (u8)c;
+  return c;
+}
+
+// src/lpo/_.c lpo_dominates_all_args
+static u8 ref_lpo_dominates_all_args(Term s, Term t_parent,
+                                     const LpoConfig *cfg) {
+  if (term_tag(t_parent) != TAG_CTR) return 1;
+  u32 n = term_ctr_n(t_parent);
+  for (u32 j = 0; j < n; j++) {
+    if (ref_lpo_rec(s, term_ctr_at(t_parent, j), cfg) != LPO_GT) return 0;
+  }
+  return 1;
+}
+
+// src/lpo/_.c lpo_some_arg_dominates
+static u8 ref_lpo_some_arg_dominates(Term s_parent, Term t,
+                                     const LpoConfig *cfg) {
+  if (term_tag(s_parent) != TAG_CTR) return 0;
+  u32 m = term_ctr_n(s_parent);
+  for (u32 i = 0; i < m; i++) {
+    Term s_i = term_ctr_at(s_parent, i);
+    LpoCmp c = ref_lpo_rec(s_i, t, cfg);
+    if (c == LPO_EQ || c == LPO_GT) return 1;
+  }
+  return 0;
+}
+
+// src/lpo/_.c lpo_lex
+static LpoCmp ref_lpo_lex(Term s_parent, Term t_parent,
+                          const LpoConfig *cfg) {
+  u32 n = term_ctr_n(s_parent);
+  for (u32 i = 0; i < n; i++) {
+    LpoCmp c = ref_lpo_rec(term_ctr_at(s_parent, i),
+                           term_ctr_at(t_parent, i), cfg);
+    if (c != LPO_EQ) return c;
+  }
+  return LPO_EQ;
+}
+
+// src/lpo/_.c lpo_rec_compute
+static LpoCmp ref_lpo_rec_compute(Term s, Term t, const LpoConfig *cfg) {
+  if (ref_lpo_eq(s, t)) return LPO_EQ;
+
+  u8 s_is_fvr = (term_tag(s) == TAG_FVR);
+  u8 t_is_fvr = (term_tag(t) == TAG_FVR);
+
+  // Variable cases.
+  if (s_is_fvr && t_is_fvr) {
+    // Distinct FVR ids: incomparable.
+    return LPO_UN;
+  }
+  if (s_is_fvr) {
+    // s is FVR, t is CTR.  s >_lpo t is false; check t >_lpo s
+    // via subterm-occurrence: t > x iff x occurs in t.
+    if (ref_lpo_var_occurs_in(t, term_ext(s))) return LPO_LT;
+    return LPO_UN;
+  }
+  if (t_is_fvr) {
+    // s is CTR, t is FVR.  s >_lpo x iff x occurs strictly in s.
+    if (ref_lpo_var_occurs_in(s, term_ext(t))) return LPO_GT;
+    return LPO_UN;
+  }
+
+  // Both are CTRs (or non-CTR/non-FVR which we treat as UN).
+  if (term_tag(s) != TAG_CTR || term_tag(t) != TAG_CTR) return LPO_UN;
+
+  // Case (1) check both directions: subterm domination.
+  if (ref_lpo_some_arg_dominates(s, t, cfg)) return LPO_GT;
+  if (ref_lpo_some_arg_dominates(t, s, cfg)) return LPO_LT;
+
+  // Cases (2) and (3): compare top symbols.
+  u32 lab_s = term_ext(s);
+  u32 lab_t = term_ext(t);
+  u32 prec_s = (lab_s < cfg->n_labels) ? cfg->precedence[lab_s] : 0;
+  u32 prec_t = (lab_t < cfg->n_labels) ? cfg->precedence[lab_t] : 0;
+
+  if (prec_s > prec_t) {
+    // f >_F g: case (2), s >_lpo t iff s >_lpo every t_j.
+    if (ref_lpo_dominates_all_args(s, t, cfg)) return LPO_GT;
+    return LPO_UN;
+  }
+  if (prec_s < prec_t) {
+    // g >_F f: symmetric.
+    if (ref_lpo_dominates_all_args(t, s, cfg)) return LPO_LT;
+    return LPO_UN;
+  }
+
+  // Equal precedence: distinct symbols are incomparable heads, which
+  // case (1) above did not order.  Equal head symbols: case (3).  Lex
+  // compare args; the winning direction must dominate the loser's args.
+  if (lab_s != lab_t || term_ctr_n(s) != term_ctr_n(t)) {
+    return LPO_UN;
+  }
+  LpoCmp lex = ref_lpo_lex(s, t, cfg);
+  if (lex == LPO_EQ) {
+    return LPO_EQ;   // can't happen if lpo_eq fired earlier
+  }
+  if (lex == LPO_GT) {
+    return ref_lpo_dominates_all_args(s, t, cfg) ? LPO_GT : LPO_UN;
+  }
+  if (lex == LPO_LT) {
+    return ref_lpo_dominates_all_args(t, s, cfg) ? LPO_LT : LPO_UN;
+  }
+  // An incomparable argument pair decides neither lex direction.
+  return LPO_UN;
+}
+
+// src/lpo/_.c lpo_flat_encode_rec
+static u8 ref_lpo_flat_encode_rec(Term t, const LpoConfig *cfg,
+                                  KboFlatNode *out, u32 *pos) {
+  u32 here = *pos;
+  if (__builtin_expect(here >= KBO_FLAT_CAP, 0)) return 0;
+  *pos = here + 1u;
+  u32 tag = term_tag(t);
+  if (tag == TAG_FVR) {
+    out[here].sym = -(i32)(term_ext(t) + 1u);
+    out[here].w   = 0;
+    out[here].sz  = 1u;
+    return 1;
+  }
+  if (__builtin_expect(tag != TAG_CTR, 0)) return 0;
+  u32 lab = term_ext(t);
+  out[here].sym = (i32)lab;
+  out[here].w   = (lab < cfg->n_labels) ? (i32)cfg->precedence[lab] : 0;
+  // Cache the children base loc once -- term_ctr_at would re-read the
+  // arity cell via term_ctr_n per call.
+  u64 base = term_val(t);
+  Term n_cell = heap_read(base);
+  if (__builtin_expect(term_tag(n_cell) != TAG_NUM, 0)) {
+    out[here].sz = 1u; return 1;
+  }
+  u32 n = (u32)term_val(n_cell);
+  for (u32 i = 0; i < n; i++) {
+    Term child = heap_read(base + 1u + (u64)i);
+    if (!ref_lpo_flat_encode_rec(child, cfg, out, pos)) return 0;
+  }
+  out[here].sz = *pos - here;
+  return 1;
+}
+
+// src/lpo/_.c lpo_flat_dominates_all_args
+static u8 ref_lpo_flat_dominates_all_args(const KboFlatNode *a, u32 pa,
+                                          const KboFlatNode *b, u32 pb,
+                                          const LpoConfig *cfg) {
+  // b[pb] must be a CTR; iterate its children via Ende skip.
+  if (b[pb].sym < 0) return 1;
+  u32 child = pb + 1u;
+  u32 end   = pb + b[pb].sz;
+  while (child < end) {
+    if (ref_lpo_flat_rec(a, pa, b, child, cfg) != LPO_GT) return 0;
+    child += b[child].sz;
+  }
+  return 1;
+}
+
+// src/lpo/_.c lpo_flat_some_arg_dominates
+static u8 ref_lpo_flat_some_arg_dominates(const KboFlatNode *a, u32 pa,
+                                          const KboFlatNode *b, u32 pb,
+                                          const LpoConfig *cfg) {
+  if (a[pa].sym < 0) return 0;
+  u32 child = pa + 1u;
+  u32 end   = pa + a[pa].sz;
+  while (child < end) {
+    LpoCmp c = ref_lpo_flat_rec(a, child, b, pb, cfg);
+    if (c == LPO_EQ || c == LPO_GT) return 1;
+    child += a[child].sz;
+  }
+  return 0;
+}
+
+// src/lpo/_.c lpo_flat_lex_diff
+static LpoCmp ref_lpo_flat_lex_diff(const KboFlatNode *a, u32 pa,
+                                    const KboFlatNode *b, u32 pb,
+                                    const LpoConfig *cfg, u32 *diff_a, u32 *diff_b) {
+  u32 ca = pa + 1u, cb = pb + 1u;
+  u32 ea = pa + a[pa].sz, eb = pb + b[pb].sz;
+  // Fast path for the common arity-2 case (e.g. Sheffer's nand).
+  if (ca < ea && cb < eb) {
+    LpoCmp c = ref_lpo_flat_rec(a, ca, b, cb, cfg);
+    if (c != LPO_EQ) { *diff_a = ca; *diff_b = cb; return c; }
+    ca += a[ca].sz;
+    cb += b[cb].sz;
+  }
+  if (ca < ea && cb < eb) {
+    LpoCmp c = ref_lpo_flat_rec(a, ca, b, cb, cfg);
+    if (c != LPO_EQ) { *diff_a = ca; *diff_b = cb; return c; }
+    ca += a[ca].sz;
+    cb += b[cb].sz;
+  }
+  while (ca < ea && cb < eb) {
+    LpoCmp c = ref_lpo_flat_rec(a, ca, b, cb, cfg);
+    if (c != LPO_EQ) { *diff_a = ca; *diff_b = cb; return c; }
+    ca += a[ca].sz;
+    cb += b[cb].sz;
+  }
+  return LPO_EQ;
+}
+
+// src/lpo/_.c lpo_flat_dominates_from
+static u8 ref_lpo_flat_dominates_from(const KboFlatNode *a, u32 pa,
+                                      const KboFlatNode *b, u32 pb,
+                                      u32 start_child,
+                                      const LpoConfig *cfg) {
+  u32 child = start_child;
+  u32 end   = pb + b[pb].sz;
+  while (child < end) {
+    if (ref_lpo_flat_rec(a, pa, b, child, cfg) != LPO_GT) return 0;
+    child += b[child].sz;
+  }
+  return 1;
+}
+
+// src/lpo/_.c lpo_flat_rec_compute
+static LpoCmp ref_lpo_flat_rec_compute(const KboFlatNode *a, u32 pa,
+                                       const KboFlatNode *b, u32 pb,
+                                       const LpoConfig *cfg) {
+  if (lpo_flat_slice_eq(a, pa, b, pb)) return LPO_EQ;
+  u8 a_is_var = (a[pa].sym < 0);
+  u8 b_is_var = (b[pb].sym < 0);
+  if (__builtin_expect(a_is_var | b_is_var, 0)) {
+    if (a_is_var && b_is_var) return LPO_UN;
+    if (a_is_var) {
+      if (lpo_flat_var_occurs(b, pb, a[pa].sym)) return LPO_LT;
+      return LPO_UN;
+    }
+    if (lpo_flat_var_occurs(a, pa, b[pb].sym)) return LPO_GT;
+    return LPO_UN;
+  }
+  // Per-level subterm Vortest: pretest at each recursion level catches
+  // the strict-subterm cases without paying the cost of the some_arg_dom
+  // recursion below.  Mirrors WM's LP_LPOGroesser structure where each
+  // recursive call enters via LV_VortestLPOGroesser before the
+  // some-arg-dominates dispatch.
+  {
+    int r1 = lpo_pretest_groesser_flat(a + pa, a[pa].sz,
+                                       b + pb, b[pb].sz, cfg);
+    if (r1 > 0) return LPO_GT;
+    int r2 = lpo_pretest_groesser_flat(b + pb, b[pb].sz,
+                                       a + pa, a[pa].sz, cfg);
+    if (r2 > 0) return LPO_LT;
+  }
+  // Precedence dispatch first (WM's structure): when precs differ, case
+  // (2) dominates_all_args resolves directly; case (1) only fires for
+  // the OTHER direction (children of the smaller-prec side might still
+  // dominate via deeper subterm).  When precs are equal, lex + case (3)
+  // applies and case (1) some_arg_dom is checked symmetrically.
+  i32 prec_a = a[pa].w;
+  i32 prec_b = b[pb].w;
+  // For most signatures (e.g. Sheffer = single nand internal) precedences
+  // are equal on the dominant recursive path; mark unequal-prec as cold.
+  if (__builtin_expect(prec_a > prec_b, 0)) {
+    if (ref_lpo_flat_dominates_all_args(a, pa, b, pb, cfg)) return LPO_GT;
+    // case (1) symmetric: some child of b might still dominate a (rare).
+    if (ref_lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) return LPO_LT;
+    return LPO_UN;
+  }
+  if (__builtin_expect(prec_a < prec_b, 0)) {
+    if (ref_lpo_flat_dominates_all_args(b, pb, a, pa, cfg)) return LPO_LT;
+    if (ref_lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) return LPO_GT;
+    return LPO_UN;
+  }
+  // Equal precedence: case (1) both directions can fire, then case (3)
+  // lex.
+  if (ref_lpo_flat_some_arg_dominates(a, pa, b, pb, cfg)) {
+    return LPO_GT;
+  }
+  if (ref_lpo_flat_some_arg_dominates(b, pb, a, pa, cfg)) {
+    return LPO_LT;
+  }
+  if (a[pa].sym != b[pb].sym) {
+    return LPO_UN;
+  }
+  // Same head symbol implies same arity (signature constraint), but
+  // subtree sizes (`sz`) may differ when children have different shapes
+  // -- so DO NOT short-circuit on sz mismatch.  lex compare handles it.
+  u32 diff_a = 0, diff_b = 0;
+  LpoCmp lex = ref_lpo_flat_lex_diff(a, pa, b, pb, cfg, &diff_a, &diff_b);
+  if (lex == LPO_EQ) {
+    return LPO_EQ;
+  }
+  // After lex finds the differing position, earlier children are
+  // pairwise EQ -- so dominates_all_args trivially holds for them via
+  // case (1) at that child position.  Skip to the differing position
+  // (WM's LPOGroesserAlleDiff structure, LPO.c:261/287).
+  if (lex == LPO_GT) {
+    return ref_lpo_flat_dominates_from(a, pa, b, pb, diff_b, cfg) ? LPO_GT : LPO_UN;
+  }
+  if (lex == LPO_LT) {
+    return ref_lpo_flat_dominates_from(b, pb, a, pa, diff_a, cfg) ? LPO_LT : LPO_UN;
+  }
+  // An incomparable argument pair decides neither lex direction, and
+  // case (1) failed both ways above (LPO.c:300-306).
+  return LPO_UN;
+}
+
+// src/lpo/_.c lpo_flat_rec
+static LpoCmp ref_lpo_flat_rec(const KboFlatNode *a, u32 pa,
+                               const KboFlatNode *b, u32 pb,
+                               const LpoConfig *cfg) {
+  g_lpo_flat_rec_calls++;
+  if (a == b && pa == pb) return LPO_EQ;
+  if (lpo_deadline_fired()) return LPO_UN;   // wall passed: unwind fast
+  u8 side = (a == g_lpo_flat_a) ? 0u : 1u;
+  u32 idx = lpo_flat_hash(pa, pb, side);
+  LpoFlatMemoEnt *e = &g_lpo_flat_memo[idx];
+  if (e->epoch == g_lpo_flat_epoch && e->pa == pa && e->pb == pb && e->side == side) {
+    g_lpo_flat_memo_hits++;
+    return (LpoCmp)(i8)e->cmp;
+  }
+  g_lpo_flat_compute_calls++;
+  LpoCmp c = ref_lpo_flat_rec_compute(a, pa, b, pb, cfg);
+  e->pa = pa; e->pb = pb; e->epoch = g_lpo_flat_epoch; e->cmp = (u8)c; e->side = side;
+  return c;
+}
+
+// src/lpo/_.c lpo_dag_rec
+static LpoCmp ref_lpo_dag_rec(u32 c1, u32 c2) {
+  g_lpo_flat_rec_calls++;
+  if (c1 == c2) {
+    return LPO_EQ;
+  }
+  if (lpo_deadline_fired()) {
+    return LPO_UN;
+  }
+  u32 s = lpo_dag_memo_slot(c1, c2);
+  while (g_ld_memo[s].k1 != 0u) {
+    if (g_ld_memo[s].k1 == c1 + 1u && g_ld_memo[s].k2 == c2) {
+      g_lpo_flat_memo_hits++;
+      return (LpoCmp)(i8)(u8)g_ld_memo[s].v;
+    }
+    s = (s + 1u) & g_ld_memo_mask;
+  }
+  g_lpo_flat_compute_calls++;
+  LpoCmp r = ref_lpo_dag_compute(c1, c2);
+  lpo_dag_memo_put(c1, c2, r);
+  return r;
+}
+
+// src/lpo/_.c lpo_dag_compute
+static LpoCmp ref_lpo_dag_compute(u32 c1, u32 c2) {
+  if (c1 == c2) {
+    return LPO_EQ;
+  }
+  const LpoDagNode *x  = &g_ld_node[c1];
+  const LpoDagNode *y  = &g_ld_node[c2];
+  u8                xv = (u8)(x->sym < 0);
+  u8                yv = (u8)(y->sym < 0);
+  if (xv | yv) {
+    if (xv && yv) {
+      return LPO_UN;
+    }
+    if (xv) {
+      return lpo_dag_var_in(c2, x->sym) ? LPO_LT : LPO_UN;
+    }
+    return lpo_dag_var_in(c1, y->sym) ? LPO_GT : LPO_UN;
+  }
+  if (lpo_dag_vortest(c1, c2)) {
+    return LPO_GT;
+  }
+  if (lpo_dag_vortest(c2, c1)) {
+    return LPO_LT;
+  }
+  const u32 *kx = &g_ld_kids[x->kids];
+  const u32 *ky = &g_ld_kids[y->kids];
+  u32        nx = x->arity;
+  u32        ny = y->arity;
+  if (x->w > y->w) {
+    u32 j = 0u;
+    while (j < ny && ref_lpo_dag_rec(c1, ky[j]) == LPO_GT) {
+      j++;
+    }
+    if (j == ny) {
+      return LPO_GT;
+    }
+    for (j = 0u; j < ny; j++) {
+      LpoCmp c = ref_lpo_dag_rec(ky[j], c1);
+      if (c == LPO_EQ || c == LPO_GT) {
+        return LPO_LT;
+      }
+    }
+    return LPO_UN;
+  }
+  if (x->w < y->w) {
+    u32 i = 0u;
+    while (i < nx && ref_lpo_dag_rec(c2, kx[i]) == LPO_GT) {
+      i++;
+    }
+    if (i == nx) {
+      return LPO_LT;
+    }
+    for (i = 0u; i < nx; i++) {
+      LpoCmp c = ref_lpo_dag_rec(kx[i], c2);
+      if (c == LPO_EQ || c == LPO_GT) {
+        return LPO_GT;
+      }
+    }
+    return LPO_UN;
+  }
+  for (u32 i = 0; i < nx; i++) {
+    LpoCmp c = ref_lpo_dag_rec(kx[i], c2);
+    if (c == LPO_EQ || c == LPO_GT) {
+      return LPO_GT;
+    }
+  }
+  for (u32 j = 0; j < ny; j++) {
+    LpoCmp c = ref_lpo_dag_rec(ky[j], c1);
+    if (c == LPO_EQ || c == LPO_GT) {
+      return LPO_LT;
+    }
+  }
+  if (x->sym != y->sym) {
+    return LPO_UN;
+  }
+  u32    n   = (nx < ny) ? nx : ny;
+  u32    d   = 0u;
+  LpoCmp lex = LPO_EQ;
+  while (d < n) {
+    lex = ref_lpo_dag_rec(kx[d], ky[d]);
+    if (lex != LPO_EQ) {
+      break;
+    }
+    d++;
+  }
+  if (lex == LPO_EQ) {
+    return LPO_EQ;
+  }
+  if (lex == LPO_UN) {
+    return LPO_UN;
+  }
+  if (lex == LPO_GT) {
+    for (u32 j = d; j < ny; j++) {
+      if (ref_lpo_dag_rec(c1, ky[j]) != LPO_GT) {
+        return LPO_UN;
+      }
+    }
+    return LPO_GT;
+  }
+  for (u32 i = d; i < nx; i++) {
+    if (ref_lpo_dag_rec(c2, kx[i]) != LPO_GT) {
+      return LPO_UN;
+    }
+  }
+  return LPO_LT;
+}
+
+// A deadline that never fires: every evaluator call then polls it, so the
+// poll counter counts the calls.
+static int lpo_hook_never(void) {
+  return 0;
+}
+
+// FNV over the Term memo's live entries.
+static u64 lpo_memo_digest(void) {
+  u64 h = 0xcbf29ce484222325ull;
+  for (u32 i = 0; i < LPO_MEMO_SIZE; i++) {
+    const LpoMemoEnt *e = &g_lpo_memo[i];
+    if (e->epoch != g_lpo_epoch) continue;
+    h = (h ^ i) * 0x100000001b3ull;
+    h = (h ^ (u64)e->s) * 0x100000001b3ull;
+    h = (h ^ (u64)e->t) * 0x100000001b3ull;
+    h = (h ^ e->cmp) * 0x100000001b3ull;
+  }
+  return h;
+}
+
+// FNV over the flat memo's live entries at every slot a pair of
+// positions below `n` can hash to.
+static u64 lpo_flat_memo_digest(u32 n) {
+  u64 h = 0xcbf29ce484222325ull;
+  for (u32 pa = 0; pa < n; pa++) {
+    for (u32 pb = 0; pb < n; pb++) {
+      for (u8 side = 0; side < 2u; side++) {
+        u32 i = lpo_flat_hash(pa, pb, side);
+        const LpoFlatMemoEnt *e = &g_lpo_flat_memo[i];
+        if (e->epoch != g_lpo_flat_epoch) continue;
+        h = (h ^ i) * 0x100000001b3ull;
+        h = (h ^ e->pa) * 0x100000001b3ull;
+        h = (h ^ e->pb) * 0x100000001b3ull;
+        h = (h ^ e->cmp) * 0x100000001b3ull;
+        h = (h ^ e->side) * 0x100000001b3ull;
+      }
+    }
+  }
+  return h;
+}
+
+// A fresh flat-memo epoch, as lpo_flat_ref opens one.
+static void lpo_flat_epoch_bump(void) {
+  if (++g_lpo_flat_epoch == 0) {
+    for (u32 i = 0; i < LPO_FLAT_MEMO_SIZE; i++) {
+      g_lpo_flat_memo[i].epoch = 0;
+    }
+    g_lpo_flat_epoch = 1;
+  }
+}
+
+// FNV over the DAG memo (every slot) and its counters.
+static u64 lpo_dag_memo_digest(void) {
+  u64 h = 0xcbf29ce484222325ull;
+  for (u32 i = 0; i <= g_ld_memo_mask; i++) {
+    h = (h ^ g_ld_memo[i].k1) * 0x100000001b3ull;
+    h = (h ^ g_ld_memo[i].k2) * 0x100000001b3ull;
+    h = (h ^ g_ld_memo[i].v) * 0x100000001b3ull;
+  }
+  h = (h ^ g_ld_memo_cnt) * 0x100000001b3ull;
+  h = (h ^ g_ld_memo_full) * 0x100000001b3ull;
+  return h;
+}
+
+static u32       g_lpo_prec[32];
+static LpoConfig g_lpo_cfg;
+
+// Precedences over labels 0..31 with ties (distinct symbols of equal
+// precedence are incomparable heads).
+static void lpo_cfg_init(void) {
+  for (u32 i = 0; i < 32u; i++) {
+    g_lpo_prec[i] = i / 2u;
+  }
+  g_lpo_cfg.precedence = g_lpo_prec;
+  g_lpo_cfg.n_labels   = 32u;
+}
+
+// A partner for `s`: itself, a copy, a mutant, a subterm, a
+// generalization or an unrelated term.
+static Term lpo_partner(u32 *seed, Term s) {
+  switch (rng32(seed) % 6u) {
+    case 0:  return s;
+    case 1:  return copy_term(s);
+    case 2:  return mk_mutant(seed, s);
+    case 3:  return pick_sub(seed, s);
+    case 4:  return generalize(seed, s);
+    default: return mk_sized(seed, 40u);
+  }
+}
+
+// A term over a fixed signature (labels 0..3 constants, 4..7 unary,
+// 8..11 binary; variables x0..x5), so the DAG walk can hash-cons it.
+static Term mk_sig_term(u32 *seed, u32 depth, u32 *budget) {
+  u32 r = rng32(seed);
+  if (depth == 0u || *budget == 0u || (r & 7u) < 2u) {
+    if (*budget > 0u) {
+      (*budget)--;
+    }
+    return (r & 8u) ? term_new_fvr((r >> 4) % 6u)
+                    : term_new_ctr((r >> 4) % 4u, NULL, 0u);
+  }
+  (*budget)--;
+  u32  lab = 4u + (r >> 4) % 8u;
+  u32  n   = (lab < 8u) ? 1u : 2u;
+  Term kids[2];
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = mk_sig_term(seed, depth - 1u, budget);
+  }
+  return term_new_ctr(lab, kids, n);
+}
+
+static Term mk_sig(u32 *seed) {
+  u32 budget = 40u;
+  return mk_sig_term(seed, 7u, &budget);
+}
+
+// `t` with one random subterm replaced by a fresh signature term.
+static Term sig_mutant(u32 *seed, Term t) {
+  u32 n = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+  if (n == 0u || (rng32(seed) % 3u) == 0u) {
+    return mk_sig(seed);
+  }
+  Term kids[2];
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = term_ctr_at(t, i);
+  }
+  u32 k = rng32(seed) % n;
+  kids[k] = sig_mutant(seed, kids[k]);
+  return term_new_ctr(term_ext(t), kids, n);
+}
+
+// A pair (s, t) for the evaluators: over the fixed signature or over
+// random labels, t related to s or not.
+static void lpo_pair(u32 *seed, u32 i, Term *s, Term *t) {
+  if (i & 2u) {
+    *s = mk_sig(seed);
+    switch (rng32(seed) % 5u) {
+      case 0:  *t = copy_term(*s); break;
+      case 1:  *t = sig_mutant(seed, *s); break;
+      case 2:  *t = pick_sub(seed, *s); break;
+      case 3:  *t = generalize(seed, *s); break;
+      default: *t = mk_sig(seed); break;
+    }
+  } else {
+    *s = mk_sized(seed, 40u);
+    *t = lpo_partner(seed, *s);
+  }
+  if (i & 1u) {
+    Term x = *s;
+    *s = *t;
+    *t = x;
+  }
+}
+
+enum { LPO_N = 2000 };
+
+static void pin_lpo(u32 *seed) {
+  lpo_cfg_init();
+  thvm_lpo_set_deadline_hook(lpo_hook_never);
+  KboFlatNode *ra = (KboFlatNode *)malloc(KBO_FLAT_CAP * sizeof(KboFlatNode));
+
+  TEST_BEGIN("atp_deep/pin-lpo-term-walks");
+  {
+    u32 ok = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < LPO_N; i++) {
+      Term t = mk_random(seed);
+      Term u = lpo_partner(seed, t);
+      u32 id = (rng32(seed) & 1u) ? rng32(seed) % 10u : 60u + rng32(seed) % 8u;
+      u32 rs[LPO_MAX_VAR], ns[LPO_MAX_VAR];
+      memset(rs, 0, sizeof rs);
+      memset(ns, 0, sizeof ns);
+      ref_lpo_var_set_acc(t, rs);
+      lpo_var_set_acc(t, ns);
+      if (ref_lpo_eq(t, u) == lpo_eq(t, u) &&
+          ref_lpo_var_occurs_in(t, id) == lpo_var_occurs_in(t, id) &&
+          ref_lpo_vars_in_range(t) == lpo_vars_in_range(t) &&
+          memcmp(rs, ns, sizeof rs) == 0) {
+        ok++;
+      }
+    }
+    g_wide = 16u;
+    CHECK_EQ(ok, (u32)LPO_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-lpo-rec");
+  {
+    u32 ok = 0, gt = 0, lt = 0;
+    for (u32 i = 0; i < LPO_N; i++) {
+      Term s, t;
+      lpo_pair(seed, i, &s, &t);
+      thvm_lpo_invalidate();
+      u64 p0 = g_lpo_poll_ctr;
+      LpoCmp r = ref_lpo_rec(s, t, &g_lpo_cfg);
+      u64 p1 = g_lpo_poll_ctr;
+      u64 rd = lpo_memo_digest();
+      thvm_lpo_invalidate();
+      LpoCmp n = lpo_rec(s, t, &g_lpo_cfg);
+      u64 p2 = g_lpo_poll_ctr;
+      u64 nd = lpo_memo_digest();
+      if (r == n && p1 - p0 == p2 - p1 && rd == nd) {
+        ok++;
+      }
+      gt += (n == LPO_GT);
+      lt += (n == LPO_LT);
+    }
+    CHECK_EQ(ok, (u32)LPO_N);
+    CHECK(gt > 0u);
+    CHECK(lt > 0u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-lpo-flat-encode-walk-dag");
+  {
+    u32 ok_enc = 0, ok_flat = 0, ok_dag = 0, dags = 0;
+    for (u32 i = 0; i < LPO_N; i++) {
+      Term s, t;
+      lpo_pair(seed, i, &s, &t);
+      // the encoder, against the recursive one
+      u32 rn = 0u, nn = 0u, nb = 0u;
+      u8  re = ref_lpo_flat_encode_rec(s, &g_lpo_cfg, ra, &rn);
+      u8  ne = lpo_flat_encode_rec(s, &g_lpo_cfg, g_lpo_flat_a, &nn);
+      if (re == ne && rn == nn &&
+          (!ne || memcmp(ra, g_lpo_flat_a, (size_t)nn * sizeof(KboFlatNode)) == 0)) {
+        ok_enc++;
+      }
+      if (!ne || !lpo_flat_encode_rec(t, &g_lpo_cfg, g_lpo_flat_b, &nb)) {
+        ok_flat++;
+        ok_dag++;
+        continue;
+      }
+      u32 span = (nn > nb) ? nn : nb;
+      // the flat walk
+      lpo_flat_epoch_bump();
+      u64 c0 = g_lpo_flat_rec_calls, h0 = g_lpo_flat_memo_hits;
+      u64 k0 = g_lpo_flat_compute_calls, p0 = g_lpo_poll_ctr;
+      LpoCmp r = ref_lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u,
+                                          &g_lpo_cfg);
+      u64 c1 = g_lpo_flat_rec_calls, h1 = g_lpo_flat_memo_hits;
+      u64 k1 = g_lpo_flat_compute_calls, p1 = g_lpo_poll_ctr;
+      u64 rd = lpo_flat_memo_digest(span);
+      lpo_flat_epoch_bump();
+      LpoCmp n = lpo_flat_run(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, &g_lpo_cfg);
+      u64 c2 = g_lpo_flat_rec_calls, h2 = g_lpo_flat_memo_hits;
+      u64 k2 = g_lpo_flat_compute_calls, p2 = g_lpo_poll_ctr;
+      u64 nd = lpo_flat_memo_digest(span);
+      if (r == n && rd == nd && c1 - c0 == c2 - c1 && h1 - h0 == h2 - h1 &&
+          k1 - k0 == k2 - k1 && p1 - p0 == p2 - p1) {
+        ok_flat++;
+      }
+      // the DAG walk, over the same encoding
+      if (!lpo_dag_build(nn, nb, &g_lpo_cfg)) {
+        ok_dag++;
+        continue;
+      }
+      dags++;
+      c0 = g_lpo_flat_rec_calls; h0 = g_lpo_flat_memo_hits;
+      k0 = g_lpo_flat_compute_calls; p0 = g_lpo_poll_ctr;
+      r = ref_lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
+      c1 = g_lpo_flat_rec_calls; h1 = g_lpo_flat_memo_hits;
+      k1 = g_lpo_flat_compute_calls; p1 = g_lpo_poll_ctr;
+      rd = lpo_dag_memo_digest();
+      (void)lpo_dag_build(nn, nb, &g_lpo_cfg);
+      n = lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
+      c2 = g_lpo_flat_rec_calls; h2 = g_lpo_flat_memo_hits;
+      k2 = g_lpo_flat_compute_calls; p2 = g_lpo_poll_ctr;
+      nd = lpo_dag_memo_digest();
+      if (r == n && rd == nd && c1 - c0 == c2 - c1 && h1 - h0 == h2 - h1 &&
+          k1 - k0 == k2 - k1 && p1 - p0 == p2 - p1) {
+        ok_dag++;
+      }
+    }
+    CHECK_EQ(ok_enc, (u32)LPO_N);
+    CHECK_EQ(ok_flat, (u32)LPO_N);
+    CHECK_EQ(ok_dag, (u32)LPO_N);
+    CHECK(dags > 0u);
+  }
+
+  thvm_lpo_set_deadline_hook(NULL);
+  free(ra);
+}
+
+static void deep_lpo(u32 *seed) {
+  (void)seed;
+  lpo_cfg_init();
+  // g (label 2) and c (label 3) share precedence 5; a (label 4) is below
+  // them (3), b (label 5) above (9).  g^k(a) against c is UN at every
+  // level, decided only at the bottom; g^k(b) against c is GT.
+  g_lpo_prec[2] = 5u;
+  g_lpo_prec[3] = 5u;
+  g_lpo_prec[4] = 3u;
+  g_lpo_prec[5] = 9u;
+  Term c = term_new_ctr(3u, NULL, 0u);
+  Term a = term_new_ctr(4u, NULL, 0u);
+  Term b = term_new_ctr(5u, NULL, 0u);
+  Term vals[5];
+  for (u32 v = 0; v < 5u; v++) {
+    Term kid = term_new_ctr(9u, NULL, 0u);
+    vals[v] = term_new_ctr(20u + v, &kid, v & 1u);
+  }
+  Term pat  = mk_deep(DEEP, 1u, term_new_fvr(4u), NULL, 1u);
+  Term subj = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+  Term same = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+  Term near = mk_deep(DEEP, 1u, vals[3], vals, 1u);
+
+  TEST_BEGIN("atp_deep/deep-lpo-term-walks");
+  {
+    CHECK(lpo_eq(subj, same));
+    CHECK(!lpo_eq(subj, near));
+    CHECK(lpo_var_occurs_in(pat, 4u));
+    CHECK(!lpo_var_occurs_in(pat, 7u));
+    u32 seen[LPO_MAX_VAR];
+    memset(seen, 0, sizeof seen);
+    lpo_var_set_acc(pat, seen);
+    u32 nseen = 0u;
+    for (u32 v = 0; v < LPO_MAX_VAR; v++) {
+      nseen += seen[v];
+    }
+    CHECK_EQ(nseen, 5u);
+    CHECK(lpo_vars_in_range(pat));
+    CHECK(!lpo_vars_in_range(mk_deep(DEEP, 1u, term_new_fvr(70u), NULL, 1u)));
+  }
+
+  TEST_BEGIN("atp_deep/deep-lpo-rec");
+  {
+    // Past the 65536-node flat encoding: thvm_lpo falls back to lpo_rec.
+    Term ga = mk_chain(DEEP, 2u, a);
+    Term gb = mk_chain(DEEP, 2u, b);
+    CHECK_EQ(thvm_lpo(ga, c, &g_lpo_cfg), LPO_UN);
+    CHECK_EQ(thvm_lpo(c, ga, &g_lpo_cfg), LPO_UN);
+    CHECK_EQ(thvm_lpo(gb, c, &g_lpo_cfg), LPO_GT);
+    CHECK_EQ(thvm_lpo(c, gb, &g_lpo_cfg), LPO_LT);
+    CHECK_EQ(thvm_lpo(gb, gb, &g_lpo_cfg), LPO_EQ);
+    // 2,000 deep against the recursion.
+    Term ma = mk_chain(2000u, 2u, a);
+    thvm_lpo_invalidate();
+    LpoCmp r = ref_lpo_rec(ma, c, &g_lpo_cfg);
+    u64 rd = lpo_memo_digest();
+    thvm_lpo_invalidate();
+    LpoCmp n = lpo_rec(ma, c, &g_lpo_cfg);
+    u64 nd = lpo_memo_digest();
+    CHECK_EQ(r, n);
+    CHECK_EQ(rd, nd);
+  }
+
+  TEST_BEGIN("atp_deep/deep-lpo-dag-flat");
+  {
+    // Within the flat encoding cap: the DAG walk, 60,000 levels.
+    Term ga = mk_chain(60000u, 2u, a);
+    CHECK_EQ(thvm_lpo(ga, c, &g_lpo_cfg), LPO_UN);
+    CHECK_EQ(thvm_lpo(c, ga, &g_lpo_cfg), LPO_UN);
+    // The flat walk re-scans each level's slice in its Vortest
+    // (quadratic in depth): 3,000 levels, and 1,000 against the
+    // recursion, flat and DAG.
+    u32 na = 0u, nb = 0u;
+    CHECK(lpo_flat_encode_rec(mk_chain(3000u, 2u, a), &g_lpo_cfg, g_lpo_flat_a, &na));
+    CHECK(lpo_flat_encode_rec(c, &g_lpo_cfg, g_lpo_flat_b, &nb));
+    CHECK_EQ(lpo_flat_ref(&g_lpo_cfg), LPO_UN);
+    na = 0u;
+    CHECK(lpo_flat_encode_rec(mk_chain(1000u, 2u, a), &g_lpo_cfg, g_lpo_flat_a, &na));
+    lpo_flat_epoch_bump();
+    LpoCmp r = ref_lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, &g_lpo_cfg);
+    u64 rd = lpo_flat_memo_digest(na);
+    lpo_flat_epoch_bump();
+    LpoCmp n = lpo_flat_run(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, &g_lpo_cfg);
+    u64 nd = lpo_flat_memo_digest(na);
+    CHECK_EQ(r, n);
+    CHECK_EQ(rd, nd);
+    CHECK(lpo_dag_build(na, nb, &g_lpo_cfg));
+    r = ref_lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
+    rd = lpo_dag_memo_digest();
+    CHECK(lpo_dag_build(na, nb, &g_lpo_cfg));
+    n = lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
+    nd = lpo_dag_memo_digest();
+    CHECK_EQ(r, n);
+    CHECK_EQ(rd, nd);
+    CHECK_EQ(n, LPO_UN);
+  }
+  lpo_cfg_init();
+}
+
 int main(void) {
   thvm_init();
   u32 seed = 0x6c8e9cf5u;
@@ -5766,6 +6675,8 @@ int main(void) {
   deep_ftdt();
   pin_kbo_memo(&seed);
   deep_kbo_memo();
+  pin_lpo(&seed);
+  deep_lpo(&seed);
   thvm_free();
   TEST_REPORT();
 }
