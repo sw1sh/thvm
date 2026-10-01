@@ -8303,6 +8303,66 @@ fn void      thvm_atp_history_search_end(AtpState *s);
 // THVM_ATP_RERANK_MODEL; this entry is for hosts and tests.
 fn int       thvm_atp_topk_load(const char *path);
 
+// Problem features phi(p) (docs/plans/enigma_portfolio.md, section 3.1):
+// one row of numbers per problem, the per-problem input of the selection
+// layer.  tp_problem_features (tools/atp_cli/problem_features.c) fills it
+// from the parsed problem, and FindProof --problem-features prints the same
+// struct as a tab-separated (TSV) row, so training rows and the deployed
+// layer read identical values.  The gate bits are the schedule lanes' exit-fast
+// predicates (each named for the lanes it gates); the engine-view columns
+// (marked) read the problem as the engine loads it: after axiom selection,
+// with 0 when the front end gives up.
+enum {
+  ATP_PHI_GOAL_EXISTENTIAL,    // a goal has a variable (narrowq)
+  ATP_PHI_EQUALS_GOAL,         // the equals encoding applies (equals, equals-twee)
+  ATP_PHI_IFEQ_DISPATCHER,     // an ifeqN(X,X,Y[,Z]) = Y axiom (ifeq)
+  ATP_PHI_HORN_SLICE,          // dispatcher, ground goals, <= 4000 clauses (horn-cd, horn-back)
+  ATP_PHI_DEF_UNFOLD,          // a pure function definition unfolds (unfold*)
+  ATP_PHI_AX_GROUND_COMPOUND,  // a non-conjecture axiom has a ground compound subterm (tgt-ax)
+  ATP_PHI_CONJ_CONE_PARTIAL,   // engine view: the conjecture symbols are a proper subset (tgt-sel)
+  ATP_PHI_DISTRIB_LAW,         // engine view: an axiom has the distributivity shape (otter-*)
+  ATP_PHI_FE_LIVE,             // the front end's own gates pass (goal, axioms, capacity)
+  ATP_PHI_SINE,                // more than 256 positive units: axiom selection runs
+  ATP_PHI_AC_PAIRS,            // engine view: associative-commutative (AC) operators
+  ATP_PHI_COMM_SYMS,           // engine view, as are the five below
+  ATP_PHI_ASSOC_SYMS,
+  ATP_PHI_IDEM_SYMS,
+  ATP_PHI_UNIT_SYMS,           // operators with a left or right identity law
+  ATP_PHI_INVERSE_SYMS,        // operators with an inverse law
+  ATP_PHI_DISTRIB_SYMS,        // operators that distribute over another
+  ATP_PHI_AXIOMS,              // positive non-conjecture units, as stated
+  ATP_PHI_HYPOTHESES,          // positive conjecture-role units
+  ATP_PHI_GOALS,               // negative units
+  ATP_PHI_SYMS,
+  ATP_PHI_SYMS_AR0,
+  ATP_PHI_SYMS_AR1,
+  ATP_PHI_SYMS_AR2,
+  ATP_PHI_SYMS_AR3,
+  ATP_PHI_SYMS_AR4P,
+  ATP_PHI_MAX_ARITY,
+  ATP_PHI_VAR_NAMES,           // distinct variable names (the engine's variable capacity)
+  ATP_PHI_AX_SIZE_MAX,         // symbol and variable occurrences per axiom
+  ATP_PHI_AX_SIZE_MEAN,
+  ATP_PHI_AX_DEPTH_MAX,        // term depth; a constant or a variable is 1
+  ATP_PHI_AX_DEPTH_MEAN,
+  ATP_PHI_AX_VARS_MAX,         // distinct variables per axiom
+  ATP_PHI_AX_VARS_MEAN,
+  ATP_PHI_AX_GROUND,           // axioms without a variable
+  ATP_PHI_GOAL_SIZE_MAX,
+  ATP_PHI_GOAL_SIZE_MEAN,
+  ATP_PHI_GOAL_DEPTH_MAX,
+  ATP_PHI_GOAL_VARS_MAX,
+  ATP_PHI_CONJ_SYM_FRAC,       // engine view: conjecture symbols / signature
+  ATP_PHI_RATING,              // TPTP header: the first rating, -1 without one
+  ATP_PHI_SPC_KNOWN,           // TPTP header: a Specialist Problem Class (SPC) line
+  ATP_PHI_SPC_UNS,             // SPC status Unsatisfiable
+  ATP_PHI_SPC_SAT,             // SPC status Satisfiable
+  ATP_PHI_SPC_OPEN,            // SPC status unknown or open
+  ATP_PHI_SPC_UEQ,             // SPC unit equality
+  ATP_PHI_N
+};
+typedef struct { float v[ATP_PHI_N]; } AtpPhi;
+
 // Enable/disable recording of processed-CP feature rows.  OFF (0) by
 // default: select_cp records nothing and the engine is byte-identical.
 // ON (1): every CP returned by thvm_atp_select_cp appends a row

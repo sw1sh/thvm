@@ -1048,6 +1048,10 @@ static int fof_split_orchestrate(const char *self, const char *file,
   return rc;
 }
 
+// --problem-features (tools/atp_cli/problem_features.c, included after
+// this file: it reads SCHEDULE[]).
+static int cli_problem_features_main(const char *file, int header, int lanes);
+
 static void usage(FILE *fp) {
   fprintf(fp,
     "usage: FindProof [options] problem.pr | problem.p\n"
@@ -1064,6 +1068,10 @@ static void usage(FILE *fp) {
     "  --lane=NAME                 run one schedule lane alone, exactly as the\n"
     "                              schedule launches it (its stderr kept)\n"
     "  --list-lanes                print the schedule's lane names in order and exit\n"
+    "  --problem-features          print the problem's features phi(p), one TSV row\n"
+    "                              (TPTP unit-equality input), and exit; --header\n"
+    "                              prints the column names, --lanes the static gate\n"
+    "                              replica instead: one row per schedule lane\n"
     "  --proof                     print an SZS CNFRefutation block on success\n"
     "  --keep-pr                   keep (and name) the .pr generated from TPTP input\n"
     "  --list-knobs                print the knob table and exit\n"
@@ -1082,6 +1090,7 @@ int main(int argc, char **argv) {
   const char *max_steps = "500000";
   const char *wall = "120";
   int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0;
+  int want_features = 0, features_header = 0, features_lanes = 0;
   const char *lane = NULL;
   double main_t0 = horn_now();
   g_cli_main_t0 = main_t0;
@@ -1139,6 +1148,18 @@ int main(int argc, char **argv) {
         return 2;
       }
       lane = val;
+      continue;
+    }
+    if (nlen == 16 && strncmp(name, "problem-features", 16) == 0) {
+      want_features = 1;
+      continue;
+    }
+    if (nlen == 6 && strncmp(name, "header", 6) == 0) {
+      features_header = 1;
+      continue;
+    }
+    if (nlen == 5 && strncmp(name, "lanes", 5) == 0) {
+      features_lanes = 1;
       continue;
     }
     if (nlen == 3 && strncmp(name, "szs", 3) == 0) { szs = 1; continue; }
@@ -1209,6 +1230,13 @@ int main(int argc, char **argv) {
       }
     }
     if (!hit) { fprintf(stderr, "FindProof: unknown option --%.*s\n", (int)nlen, name); usage(stderr); return 2; }
+  }
+  if (want_features) {
+    return cli_problem_features_main(file, features_header, features_lanes);
+  }
+  if (features_header || features_lanes) {
+    fprintf(stderr, "FindProof: --header and --lanes go with --problem-features\n");
+    return 2;
   }
   int lane_ix = -1;
   if (lane != NULL) {

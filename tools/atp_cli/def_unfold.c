@@ -261,6 +261,26 @@ static int tp_du_round(const TpProblem *tp, char skip[][TP_NAME_LEN],
   return def_ix;
 }
 
+// Would tp_def_unfold eliminate a definition?  Its rounds up to the first
+// commit, which leave the problem untouched: the --def-unfold=2 gate.
+static int tp_def_unfold_applies(const TpProblem *tp) {
+  char skip[64][TP_NAME_LEN];
+  int  n_skip = 0;
+  for (int round = 0; round < 64; round++) {
+    char fname[TP_NAME_LEN], args[TP_DU_MAX_ARGS][TP_NAME_LEN];
+    int  nargs = -1;
+    const char *body = NULL;
+    int def_ix = tp_du_round(tp, skip, &n_skip, fname, args, &nargs, &body);
+    if (def_ix == TP_DU_NONE) {
+      return 0;
+    }
+    if (def_ix >= 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static void tp_def_unfold(TpProblem *tp) {
   char skip[64][TP_NAME_LEN];
   int  n_skip = 0;

@@ -38,7 +38,17 @@ static int g_cli_fof_applied;
 // equational stage that cannot run hands the wall to the saturation.
 static void (*g_tp_giveup_hook)(void) = NULL;
 
+// The static gate replica (tp_problem_features) replays front-end stages
+// that may give up; while it holds the trap, a give-up returns there with
+// its reason instead of ending the process.
+static jmp_buf *g_tp_giveup_trap = NULL;
+static char     g_tp_giveup_trap_why[256];
+
 static void tp_giveup(const char *why) {
+  if (g_tp_giveup_trap != NULL) {
+    snprintf(g_tp_giveup_trap_why, sizeof g_tp_giveup_trap_why, "%s", why);
+    longjmp(*g_tp_giveup_trap, 1);
+  }
   if (g_cli_fe_decided) {
     // The status is out; only the proof reconstruction gives up.
     fprintf(stderr, "FindProof: %s (proof not reconstructed)\n", why);

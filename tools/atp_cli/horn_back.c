@@ -666,6 +666,42 @@ static const char *horn_slice_why(int gate, int cd, int back) {
   return HORN_SLICE_WHY[gate][back ? 1 : 0];
 }
 
+// The same parse as tp_horn_release's, without its release machinery (so
+// it works under --horn=0): the number of dispatcher axioms, and in
+// *gate the horn-cd / horn-back slice gate that release would apply.
+static int tp_horn_probe(TpProblem *tp, int *gate) {
+  HParse *ps = (HParse *)malloc(sizeof(HParse));
+  if (ps == NULL) {
+    tp_giveup("OOM in Horn release");
+  }
+  int mark_n = g_hn_n, mark_a = g_ha_n, n_disp = 0, ng = 0;
+  int gl[64], gr[64];
+  for (int c = 0; c < tp->n_cls; c++) {
+    ps->nv = 0;
+    int l = horn_parse_side(tp, ps, tp->cls[c].lhs);
+    int r = (l >= 0) ? horn_parse_side(tp, ps, tp->cls[c].rhs) : -1;
+    if (l < 0 || r < 0) {
+      continue;
+    }
+    if (tp->cls[c].neg) {
+      if (ng < 64) {
+        gl[ng] = l;
+        gr[ng] = r;
+        ng++;
+      }
+      continue;
+    }
+    if (horn_disp_check(l, r) || horn_disp_check(r, l)) {
+      n_disp++;
+    }
+  }
+  *gate = horn_slice_gate(n_disp, gl, gr, ng, tp->n_cls);
+  g_hn_n = mark_n;
+  g_ha_n = mark_a;
+  free(ps);
+  return n_disp;
+}
+
 static void tp_horn_release(TpProblem *tp) {
   int n = tp->n_cls;
   // CD lane flag before any fact is added: fingerprints ride the adds.

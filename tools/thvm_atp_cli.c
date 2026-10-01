@@ -77,4 +77,15 @@
 #include "atp_cli/provenance.c"
 #include "atp_cli/fof_split.c"
 #include "atp_cli/szs.c"
+// FINDPROOF_LIB: the CLI without its main, for a test that calls the
+// front end directly (tests/test_atp_problem_features.c).
+#ifdef FINDPROOF_LIB
+#define main findproof_main
+#endif
 #include "atp_cli/main.c"
+#ifdef FINDPROOF_LIB
+#undef main
+#endif
+// Problem features phi(p) and the static gate replica: after main.c, whose
+// SCHEDULE[] it reads (main.c declares its entry).
+#include "atp_cli/problem_features.c"

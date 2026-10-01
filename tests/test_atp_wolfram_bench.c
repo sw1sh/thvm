@@ -692,7 +692,17 @@ typedef struct {
   Term  goal_l, goal_r;
 } PrProblem;
 
+// The static gate replica (tools/atp_cli/problem_features.c) reads back the
+// .pr it emits; while it holds this trap a parse error returns there with
+// its message instead of ending the process.
+static jmp_buf *g_pr_die_trap = NULL;
+static char     g_pr_die_trap_why[256];
+
 static void pr_die(const PrProblem *pr, const char *msg, const char *at) {
+  if (g_pr_die_trap != NULL) {
+    snprintf(g_pr_die_trap_why, sizeof g_pr_die_trap_why, "%s", msg);
+    longjmp(*g_pr_die_trap, 1);
+  }
   fprintf(stderr, "pr parse error (%s): %s%s%.40s\n",
           pr->path, msg, (at != NULL) ? " at: " : "", (at != NULL) ? at : "");
   exit(2);

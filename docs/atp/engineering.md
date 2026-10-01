@@ -517,6 +517,20 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
   `--schedule` launches it (its flags, `FINDPROOF_SLICE`, slice RSS
   cap, slice wall and wall stop) with its stderr kept: the per-lane
   measurement path (`tests/atp_lane_cli.sh`).
+* `bin/FindProof --problem-features problem.p` prints one TSV row of
+  the problem's features phi(p), the per-problem input of the ENIGMA
+  selection layer (`AtpPhi` in `src/thvm.h`;
+  docs/plans/enigma_portfolio.md, section 3.1): the lanes' exit-fast
+  gate bits, computed by the gates' own predicates; Waldmeister's
+  structure detection over the loaded .pr (AC pairs, units, inverses,
+  distributivity); sizes and goal shape; the TPTP SPC and rating
+  header fields when the file has them.  `--header` prints the column
+  names.  `--lanes` prints the static gate replica instead, one row per
+  schedule lane: live, dead, or undet (a Horn release runs before the
+  failing gate), the give-up line it predicts, and whether a run
+  without `--szs` prints exactly that line.  `tests/atp_problem_features.sh`
+  checks the replica against the live lanes;
+  `bin/test_atp_problem_features` checks the features on inline problems.
 * `docs/ENV_KNOBS.md` carries the repo-wide index; its ATP section
   points here.
 
