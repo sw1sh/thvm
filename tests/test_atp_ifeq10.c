@@ -8,7 +8,8 @@
 // clause splitting, equivalences, the hypothesis role, the a != b goal
 // funnel, tuple goals in an axiom (ALG069) and a conjecture (LCL423), and
 // the lazily interned symbol order (PLA023, SEU323).  No case shares a
-// name stem with a CASC-J13 problem.
+// name stem with a CASC-J13 problem; tests/atp_ifeq10_tptp.sh runs the
+// same ten through FindProof against a TPTP tree.
 
 #include "../tools/atp_cli/ifeq10.c"
 
