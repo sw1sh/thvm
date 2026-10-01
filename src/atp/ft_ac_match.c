@@ -450,69 +450,105 @@ static u8 ft_match_ac_flat(AtpFt *a, u32 label,
   return 1u;
 }
 
+// AC top: flatten both sides and run the AC-flat multiset matcher.  Kept
+// out of ft_match_ac so the leaf arrays sit in a frame only an AC node
+// opens.
+static u8 ft_match_ac_node(AtpFt *a, const AtpFtCell *pat,
+                           const AtpFtCell *subj, const AtpAcInfo *ac,
+                           AtpFtSubst *subst, u32 wm_save) {
+  const AtpFtCell *P[ATPFT_AC_FLATTEN_CAP];
+  const AtpFtCell *S[ATPFT_AC_FLATTEN_CAP];
+  u32 np = 0u, ns = 0u;
+  if (!ft_ac_flatten_under(pat,  pat->sym, P, &np, ATPFT_AC_FLATTEN_CAP)) {
+    ft_subst_rewind(subst, wm_save);
+    return 0;
+  }
+  if (!ft_ac_flatten_under(subj, subj->sym, S, &ns, ATPFT_AC_FLATTEN_CAP)) {
+    ft_subst_rewind(subst, wm_save);
+    return 0;
+  }
+  return ft_match_ac_flat(a, pat->sym, P, np, S, ns, ac, subst);
+}
+
+typedef struct { const AtpFtCell *p; const AtpFtCell *s; } FtAcMatchPair;
+
 // Top-level AC match: same shape as ft_match, but routes through the
 // AC-flat multiset matcher when the top symbol is an AC label.
 //
 // On any failure WE rewind to whatever watermark the caller staged
 // before invoking us -- callers don't have to track partial state.
+//
+// Variable pattern: bind on first sight, ft_eq on second (ft_match's
+// rule).  CTR pattern: subj must be CTR with matching sym.  For an AC
+// top we ignore the arity equality (the two sides can be flattened to
+// different leaf counts and still match -- e.g. f(x, y) vs f(a, b, c)
+// with x bound to a, y absorbing the AC-chain f(b, c)).  For non-AC
+// CTR top, arity must match exactly.
+//
+// The non-AC descent keeps an explicit stack of (pattern, subject)
+// pairs in the recursion's left-to-right preorder.  The recursion
+// rewound at every level a failure passed through; those watermarks
+// only decrease outward, so one rewind to the entry watermark leaves
+// the same substitution.
 static u8 ft_match_ac(AtpFt *a, const AtpFtCell *pat, const AtpFtCell *subj,
                       const AtpAcInfo *ac, AtpFtSubst *subst) {
   if (pat == NULL || subj == NULL) return 0;
-  u32 wm_save = subst->wm;
-
-  // Variable pattern: bind on first sight, ft_eq on second.  Same as
-  // ft_match (ft_match.c:155).
-  if ((pat->sym & WF_VAR_BIT) != 0u) {
-    u32 id = pat->sym & ~WF_VAR_BIT;
-    if (id >= ATPFT_MAX_VARS) return 0;
-    AtpFtCell *prev = subst->bind[id];
-    if (prev == NULL) {
-      subst->bind[id]              = (AtpFtCell *)subj;
-      subst->bound_ids[subst->wm]  = id;
-      subst->wm                   += 1u;
-      return 1u;
+  u32            wm_save = subst->wm;
+  FtAcMatchPair  st_inl[FT_WALK_INL];
+  FtAcMatchPair *st  = st_inl;
+  u32            nst = 0u;
+  u32            cst = FT_WALK_INL;
+  u8             ok  = 1u;
+  for (;;) {
+    if (pat == NULL || subj == NULL) {
+      ok = 0u;
+    } else if ((pat->sym & WF_VAR_BIT) != 0u) {
+      u32 id = pat->sym & ~WF_VAR_BIT;
+      if (id >= ATPFT_MAX_VARS) {
+        ok = 0u;
+      } else {
+        AtpFtCell *prev = subst->bind[id];
+        if (prev == NULL) {
+          subst->bind[id]              = (AtpFtCell *)subj;
+          subst->bound_ids[subst->wm]  = id;
+          subst->wm                   += 1u;
+        } else {
+          ok = ft_eq(prev, subj) ? 1u : 0u;
+        }
+      }
+    } else if ((subj->sym & WF_VAR_BIT) != 0u || pat->sym != subj->sym) {
+      ok = 0u;
+    } else if (ft_ac_is_ac_label(ac, pat->sym)) {
+      ok = ft_match_ac_node(a, pat, subj, ac, subst, subst->wm);
+    } else if (pat->arity != subj->arity) {
+      ok = 0u;
+    } else {
+      u16 arity = pat->arity;
+      while (nst + arity > cst) {
+        st = (FtAcMatchPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      const AtpFtCell *pc = pat->next;
+      const AtpFtCell *sc = subj->next;
+      nst += arity;
+      for (u16 i = 0; i < arity; i++) {
+        st[nst - 1u - i].p = pc;
+        st[nst - 1u - i].s = sc;
+        pc = pc->end->next;
+        sc = sc->end->next;
+      }
     }
-    return ft_eq(prev, subj) ? 1u : 0u;
+    if (!ok || nst == 0u) {
+      break;
+    }
+    nst--;
+    pat  = st[nst].p;
+    subj = st[nst].s;
   }
-
-  // CTR pattern: subj must be CTR with matching sym.  For an AC top
-  // we ignore the arity equality (the two sides can be flattened to
-  // different leaf counts and still match -- e.g. f(x, y) vs f(a, b, c)
-  // with x bound to a, y absorbing the AC-chain f(b, c)).  For non-AC
-  // CTR top, arity must match exactly.
-  if ((subj->sym & WF_VAR_BIT) != 0u) return 0;        // subj is var, pat is CTR -> fail
-  if (pat->sym != subj->sym) return 0;
-
-  if (ft_ac_is_ac_label(ac, pat->sym)) {
-    const AtpFtCell *P[ATPFT_AC_FLATTEN_CAP];
-    const AtpFtCell *S[ATPFT_AC_FLATTEN_CAP];
-    u32 np = 0u, ns = 0u;
-    if (!ft_ac_flatten_under(pat,  pat->sym, P, &np, ATPFT_AC_FLATTEN_CAP)) {
-      ft_subst_rewind(subst, wm_save);
-      return 0;
-    }
-    if (!ft_ac_flatten_under(subj, subj->sym, S, &ns, ATPFT_AC_FLATTEN_CAP)) {
-      ft_subst_rewind(subst, wm_save);
-      return 0;
-    }
-    return ft_match_ac_flat(a, pat->sym, P, np, S, ns, ac, subst);
+  term_stack_release(st, st_inl);
+  if (!ok) {
+    ft_subst_rewind(subst, wm_save);
   }
-
-  // Non-AC CTR: same-arity recursive descent.  Walks the FT sibling
-  // chain like ft_match does.
-  if (pat->arity != subj->arity) return 0;
-  u16 arity = pat->arity;
-  const AtpFtCell *pc = pat->next;
-  const AtpFtCell *sc = subj->next;
-  for (u16 i = 0; i < arity; i++) {
-    if (!ft_match_ac(a, pc, sc, ac, subst)) {
-      ft_subst_rewind(subst, wm_save);
-      return 0;
-    }
-    pc = pc->end->next;
-    sc = sc->end->next;
-  }
-  return 1u;
+  return ok;
 }
 
 #endif // !ATPFT_FT_AC_MATCH_C_INCLUDED

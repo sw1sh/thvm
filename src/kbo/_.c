@@ -24,7 +24,9 @@
 //   * thvm_kbo_naive: the original Baader-Nipkow recursion.  Each
 //     lexicographic level re-runs a full weight/var-balance traversal
 //     and zeroes a fixed array -- O(n^2) on a left/right spine.  Kept
-//     as the reference oracle for differential testing.
+//     as the reference oracle for differential testing; it recurses per
+//     term level and runs only under THVM_ATP_ORIENT_KBO_CHECK=1 or
+//     -DKBO_WMEMO_SELFCHECK.
 //   * thvm_kbo (production): Loechner's linear-time comparison
 //     ("Things to Know when Implementing KBO", JAR 36(4):289-310,
 //     2006), ported from Waldmeister's sources/ORD/KBO.c

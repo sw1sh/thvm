@@ -4925,6 +4925,276 @@ static void deep_ac(void) {
   ft_destroy(&a);
 }
 
+// ---- ac.c / ft_ac_match.c: AC matching -----------------------------------
+
+// src/atp/ac.c:661
+static u8 ref_atp_match_ac(Term pattern, Term subject,
+                           const AtpAcInfo *ac, RewriteSubst *subst) {
+  if (term_tag(pattern) == TAG_FVR) {
+    u32 id = term_ext(pattern);
+    if (id >= REWRITE_MAX_VAR) return 0;
+    if (subst->bindings[id] == 0) {
+      subst->bindings[id] = subject;
+      return 1;
+    }
+    return kbo_eq(subst->bindings[id], subject);
+  }
+  if (term_tag(pattern) != TAG_CTR) {
+    return kbo_eq(pattern, subject) ? 1u : 0u;
+  }
+  if (term_tag(subject) != TAG_CTR) return 0;
+  if (term_ext(pattern) != term_ext(subject)) return 0;
+  u32 lab = term_ext(pattern);
+  if (atp_ac_is_ac_label(ac, lab)) {
+    Term P[ATP_AC_FLATTEN_CAP];
+    Term S[ATP_AC_FLATTEN_CAP];
+    u32  np = 0u, ns = 0u;
+    if (!atp_ac_flatten_under(pattern, lab, P, &np, ATP_AC_FLATTEN_CAP))
+      return 0;
+    if (!atp_ac_flatten_under(subject, lab, S, &ns, ATP_AC_FLATTEN_CAP))
+      return 0;
+    return atp_match_ac_flat(lab, P, np, S, ns, ac, subst);
+  }
+  u32 np = term_ctr_n(pattern);
+  u32 ns = term_ctr_n(subject);
+  if (np != ns) return 0;
+  for (u32 i = 0; i < np; i++) {
+    if (!ref_atp_match_ac(term_ctr_at(pattern, i),
+                          term_ctr_at(subject, i),
+                          ac, subst)) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+// src/atp/ft_ac_match.c:458
+static u8 ref_ft_match_ac(AtpFt *a, const AtpFtCell *pat, const AtpFtCell *subj,
+                          const AtpAcInfo *ac, AtpFtSubst *subst) {
+  if (pat == NULL || subj == NULL) return 0;
+  u32 wm_save = subst->wm;
+  if ((pat->sym & WF_VAR_BIT) != 0u) {
+    u32 id = pat->sym & ~WF_VAR_BIT;
+    if (id >= ATPFT_MAX_VARS) return 0;
+    AtpFtCell *prev = subst->bind[id];
+    if (prev == NULL) {
+      subst->bind[id]              = (AtpFtCell *)subj;
+      subst->bound_ids[subst->wm]  = id;
+      subst->wm                   += 1u;
+      return 1u;
+    }
+    return ft_eq(prev, subj) ? 1u : 0u;
+  }
+  if ((subj->sym & WF_VAR_BIT) != 0u) return 0;
+  if (pat->sym != subj->sym) return 0;
+  if (ft_ac_is_ac_label(ac, pat->sym)) {
+    const AtpFtCell *P[ATPFT_AC_FLATTEN_CAP];
+    const AtpFtCell *S[ATPFT_AC_FLATTEN_CAP];
+    u32 np = 0u, ns = 0u;
+    if (!ft_ac_flatten_under(pat,  pat->sym, P, &np, ATPFT_AC_FLATTEN_CAP)) {
+      ft_subst_rewind(subst, wm_save);
+      return 0;
+    }
+    if (!ft_ac_flatten_under(subj, subj->sym, S, &ns, ATPFT_AC_FLATTEN_CAP)) {
+      ft_subst_rewind(subst, wm_save);
+      return 0;
+    }
+    return ft_match_ac_flat(a, pat->sym, P, np, S, ns, ac, subst);
+  }
+  if (pat->arity != subj->arity) return 0;
+  u16 arity = pat->arity;
+  const AtpFtCell *pc = pat->next;
+  const AtpFtCell *sc = subj->next;
+  for (u16 i = 0; i < arity; i++) {
+    if (!ref_ft_match_ac(a, pc, sc, ac, subst)) {
+      ft_subst_rewind(subst, wm_save);
+      return 0;
+    }
+    pc = pc->end->next;
+    sc = sc->end->next;
+  }
+  return 1u;
+}
+
+// The watermark, the binding order and every binding slot.
+static int ft_subst_same(const AtpFtSubst *x, const AtpFtSubst *y) {
+  if (x->wm != y->wm) return 0;
+  if (memcmp(x->bound_ids, y->bound_ids, x->wm * sizeof x->bound_ids[0]) != 0) {
+    return 0;
+  }
+  return memcmp(x->bind, y->bind, sizeof x->bind) == 0;
+}
+
+// A pattern for `subj`: generalized, sometimes over an AC-shuffled or
+// mutated copy, sometimes unrelated (variables past the substitution
+// range included).
+static Term ac_match_pattern(u32 *seed, Term subj, u32 i) {
+  switch (i % 5u) {
+    case 0:  return generalize(seed, subj);
+    case 1:  return generalize(seed, ac_shuffle(seed, subj, AC_TEST_MASK));
+    case 2:  return generalize(seed, mk_mutant(seed, subj));
+    case 3:  return subj;
+    default: return mk_random(seed);
+  }
+}
+
+static void pin_ac_match(void) {
+  u32 seed = 0x2b7e1516u;
+  AtpAcInfo ac;
+  ac.ac_mask = AC_TEST_MASK;
+  AtpFt a;
+  ft_init(&a);
+
+  TEST_BEGIN("atp_deep/pin-ac-match");
+  {
+    u32 ok = 0, hits = 0, misses = 0;
+    for (u32 i = 0; i < AC_N; i++) {
+      Term subj = (i & 1u) ? mk_random(&seed)
+                           : ac_shuffle(&seed, mk_random(&seed), AC_TEST_MASK);
+      Term pat  = ac_match_pattern(&seed, subj, i);
+      RewriteSubst rs, ns;
+      memset(&rs, 0, sizeof rs);
+      if (i & 8u) {
+        rs.bindings[rng32(&seed) & 3u] = mk_small(&seed);
+      }
+      ns = rs;
+      u8 r = ref_atp_match_ac(pat, subj, &ac, &rs);
+      u8 n = atp_match_ac(pat, subj, &ac, &ns);
+      if (r == n && memcmp(&rs, &ns, sizeof rs) == 0) {
+        ok++;
+      }
+      hits += n;
+      misses += !n;
+    }
+    CHECK_EQ(ok, (u32)AC_N);
+    CHECK(hits > 0u);
+    CHECK(misses > 0u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-ft-ac-match");
+  {
+    u32 ok = 0, hits = 0, misses = 0;
+    for (u32 i = 0; i < AC_N; i++) {
+      Term subj = (i & 1u) ? mk_random(&seed)
+                           : ac_shuffle(&seed, mk_random(&seed), AC_TEST_MASK);
+      Term pat  = ac_match_pattern(&seed, subj, i);
+      AtpFtCell *x = ft_from_term(&a, pat, 0);
+      AtpFtCell *y = ft_from_term(&a, subj, 0);
+      AtpFtSubst rs, ns;
+      memset(&rs, 0, sizeof rs);
+      if (i & 8u) {
+        u32 id = rng32(&seed) & 3u;
+        rs.bind[id] = ft_from_term(&a, mk_small(&seed), 0);
+        rs.bound_ids[rs.wm++] = id;
+      }
+      ns = rs;
+      // Both runs start from an empty scratch arena, so AC-chain
+      // bindings land at equal addresses only if built in the same order.
+      ft_scratch_reset(&a);
+      u8 r = ref_ft_match_ac(&a, x, y, &ac, &rs);
+      ft_scratch_reset(&a);
+      u8 n = ft_match_ac(&a, x, y, &ac, &ns);
+      if (r == n && ft_subst_same(&rs, &ns)) {
+        ok++;
+      }
+      hits += n;
+      misses += !n;
+    }
+    ft_scratch_reset(&a);
+    CHECK_EQ(ok, (u32)AC_N);
+    CHECK(hits > 0u);
+    CHECK(misses > 0u);
+    AtpFtSubst z;
+    memset(&z, 0, sizeof z);
+    CHECK_EQ(ft_match_ac(&a, NULL, NULL, &ac, &z), 0u);
+  }
+
+  ft_destroy(&a);
+}
+
+static void deep_ac_match(void) {
+  AtpAcInfo ac;
+  ac.ac_mask = AC_TEST_MASK;
+  AtpFt a;
+  ft_init(&a);
+  // A non-AC spine over AC leaves f3(c_{20+v}, c9); the pattern has x_v
+  // at those leaves and, at the bottom, the AC node f3(c9, x6), which
+  // only matches the subject's f3(c24, c9) modulo commutativity.
+  Term c9 = term_new_ctr(9u, NULL, 0u);
+  Term vals[5];
+  for (u32 v = 0; v < 5u; v++) {
+    Term k1[2] = { term_new_ctr(20u + v, NULL, 0u), c9 };
+    vals[v] = term_new_ctr(3u, k1, 2u);
+  }
+  Term pk[2]  = { c9, term_new_fvr(6u) };
+  Term pbot   = term_new_ctr(3u, pk, 2u);
+
+  TEST_BEGIN("atp_deep/deep-ac-match");
+  {
+    Term pat  = mk_deep(DEEP, 1u, pbot, NULL, 1u);
+    Term subj = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+    Term bad  = mk_deep(DEEP, 1u, c9, vals, 1u);
+    RewriteSubst sb;
+    memset(&sb, 0, sizeof sb);
+    CHECK_EQ(atp_match_ac(pat, subj, &ac, &sb), 1u);
+    for (u32 v = 0; v < 5u; v++) {
+      CHECK(sb.bindings[v] == vals[v]);
+    }
+    CHECK(sb.bindings[6] == term_ctr_at(vals[4], 0));
+    memset(&sb, 0, sizeof sb);
+    CHECK_EQ(atp_match_ac(pat, bad, &ac, &sb), 0u);
+    CHECK(sb.bindings[6] == 0);
+
+    AtpFtCell *xp = ft_from_term(&a, pat, 0);
+    AtpFtCell *xs = ft_from_term(&a, subj, 0);
+    AtpFtCell *xb = ft_from_term(&a, bad, 0);
+    AtpFtSubst fs;
+    memset(&fs, 0, sizeof fs);
+    CHECK_EQ(ft_match_ac(&a, xp, xs, &ac, &fs), 1u);
+    CHECK_EQ(fs.wm, 6u);
+    CHECK(fs.bind[6] != NULL && fs.bind[6]->sym == 24u);
+    ft_scratch_reset(&a);
+    memset(&fs, 0, sizeof fs);
+    CHECK_EQ(ft_match_ac(&a, xp, xb, &ac, &fs), 0u);
+    CHECK_EQ(fs.wm, 0u);
+    u32 left = 0u;
+    for (u32 v = 0; v < ATPFT_MAX_VARS; v++) {
+      left += (fs.bind[v] != NULL);
+    }
+    CHECK_EQ(left, 0u);
+    ft_scratch_reset(&a);
+  }
+
+  TEST_BEGIN("atp_deep/deep-ac-match-vs-ref");
+  {
+    // 3,000 deep stays within the reference recursions' reach.
+    Term pat  = mk_deep(3000u, 1u, pbot, NULL, 1u);
+    Term subj = mk_deep(3000u, 1u, vals[4], vals, 1u);
+    Term bad  = mk_deep(3000u, 1u, c9, vals, 1u);
+    for (u32 k = 0; k < 2u; k++) {
+      Term s = k ? bad : subj;
+      RewriteSubst rs, ns;
+      memset(&rs, 0, sizeof rs);
+      memset(&ns, 0, sizeof ns);
+      CHECK_EQ(atp_match_ac(pat, s, &ac, &ns), ref_atp_match_ac(pat, s, &ac, &rs));
+      CHECK(memcmp(&rs, &ns, sizeof rs) == 0);
+      AtpFtCell *xp = ft_from_term(&a, pat, 0);
+      AtpFtCell *xs = ft_from_term(&a, s, 0);
+      AtpFtSubst fsr, fsn;
+      memset(&fsr, 0, sizeof fsr);
+      memset(&fsn, 0, sizeof fsn);
+      ft_scratch_reset(&a);
+      u8 r = ref_ft_match_ac(&a, xp, xs, &ac, &fsr);
+      ft_scratch_reset(&a);
+      CHECK_EQ(ft_match_ac(&a, xp, xs, &ac, &fsn), r);
+      CHECK(ft_subst_same(&fsr, &fsn));
+    }
+    ft_scratch_reset(&a);
+  }
+
+  ft_destroy(&a);
+}
+
 // ---- ft_norm.c: the full-depth discrimination-tree descent -----------------
 
 // src/atp/ft_norm.c:1905, the v3 walk as it recursed
@@ -6671,6 +6941,8 @@ int main(void) {
   deep_index_queue(&seed);
   pin_ac(&seed);
   deep_ac();
+  pin_ac_match();
+  deep_ac_match();
   pin_ftdt(&seed);
   deep_ftdt();
   pin_kbo_memo(&seed);

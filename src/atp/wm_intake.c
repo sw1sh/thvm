@@ -53,6 +53,9 @@
 // encoder) reach the queue through thvm_atp_add_equation, so this one
 // engine-level hook canonicalizes both identically.
 
+// The statistics and sort walks below recurse once per term level.  They
+// run once, on the input axioms and goals, so their depth is the input's,
+// which the parser that read it already descended recursively.
 #define ATP_WMI_MAX_VARS 64u
 
 // --- per-symbol statistics (kodierung_typ = uint32_t in WM; all

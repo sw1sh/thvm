@@ -34,6 +34,10 @@
 //
 // Included from src/atp/_.c after ft_unify.c so the ft_unify /
 // ft_unify_apply prototypes are in scope.
+//
+// Only the THVM_ATPFT_UNIFY bench targets compile this file; FindProof
+// does not.  Its rename, copy, replace and position walks recurse once
+// per term level (the position walks under CP_MAX_DEPTH).
 
 #ifdef THVM_ATPFT_UNIFY
 

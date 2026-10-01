@@ -658,54 +658,78 @@ static u8 atp_match_ac_flat(u32 label,
   return 1u;
 }
 
+// AC top: flatten both sides and do the AC-flat match.  Kept out of
+// atp_match_ac so the leaf arrays sit in a frame only an AC node opens.
+static u8 atp_match_ac_node(Term pattern, Term subject, u32 lab,
+                            const AtpAcInfo *ac, RewriteSubst *subst) {
+  Term P[ATP_AC_FLATTEN_CAP];
+  Term S[ATP_AC_FLATTEN_CAP];
+  u32  np = 0u, ns = 0u;
+  if (!atp_ac_flatten_under(pattern, lab, P, &np, ATP_AC_FLATTEN_CAP)) {
+    return 0;
+  }
+  if (!atp_ac_flatten_under(subject, lab, S, &ns, ATP_AC_FLATTEN_CAP)) {
+    return 0;
+  }
+  return atp_match_ac_flat(lab, P, np, S, ns, ac, subst);
+}
+
+typedef struct { Term p; Term s; } AcMatchPair;
+
+// thvm_match lifted to AC: the non-AC descent runs on an explicit stack
+// of (pattern, subject) pairs in the recursion's left-to-right preorder,
+// so a deep rule pattern costs heap, not C stack.  Only an AC node
+// re-enters through the flat matcher's leaves.
 fn u8 atp_match_ac(Term pattern, Term subject,
                    const AtpAcInfo *ac, RewriteSubst *subst) {
-  // Fast path: pattern is a var -- standard thvm_match handling
-  // (bind on first sighting / kbo_eq on second).
-  if (term_tag(pattern) == TAG_FVR) {
-    u32 id = term_ext(pattern);
-    if (id >= REWRITE_MAX_VAR) return 0;
-    if (subst->bindings[id] == 0) {
-      subst->bindings[id] = subject;
-      return 1;
+  AcMatchPair  st_inl[ATP_WALK_INL];
+  AcMatchPair *st  = st_inl;
+  u32          nst = 0u;
+  u32          cst = ATP_WALK_INL;
+  u8           ok  = 1u;
+  for (;;) {
+    if (term_tag(pattern) == TAG_FVR) {
+      // Bind on first sighting, kbo_eq on second (thvm_match's rule).
+      u32 id = term_ext(pattern);
+      if (id >= REWRITE_MAX_VAR) {
+        ok = 0u;
+      } else if (subst->bindings[id] == 0) {
+        subst->bindings[id] = subject;
+      } else {
+        ok = kbo_eq(subst->bindings[id], subject) ? 1u : 0u;
+      }
+    } else if (term_tag(pattern) != TAG_CTR) {
+      ok = kbo_eq(pattern, subject) ? 1u : 0u;
+    } else if (term_tag(subject) != TAG_CTR ||
+               term_ext(pattern) != term_ext(subject)) {
+      ok = 0u;
+    } else if (atp_ac_is_ac_label(ac, term_ext(pattern))) {
+      ok = atp_match_ac_node(pattern, subject, term_ext(pattern), ac, subst);
+    } else {
+      u32 np = term_ctr_n(pattern);
+      u32 ns = term_ctr_n(subject);
+      if (np != ns) {
+        ok = 0u;
+      } else {
+        while (nst + np > cst) {
+          st = (AcMatchPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = np; i-- > 0u;) {
+          st[nst].p = term_ctr_at(pattern, i);
+          st[nst].s = term_ctr_at(subject, i);
+          nst++;
+        }
+      }
     }
-    return kbo_eq(subst->bindings[id], subject);
-  }
-
-  // Pattern is not a CTR? (NUM etc.) Use kbo_eq.
-  if (term_tag(pattern) != TAG_CTR) {
-    return kbo_eq(pattern, subject) ? 1u : 0u;
-  }
-
-  // Pattern is CTR.  Subject must also be CTR.
-  if (term_tag(subject) != TAG_CTR) return 0;
-  if (term_ext(pattern) != term_ext(subject)) return 0;
-
-  u32 lab = term_ext(pattern);
-  if (atp_ac_is_ac_label(ac, lab)) {
-    // AC top: flatten both sides and do AC-flat match.
-    Term P[ATP_AC_FLATTEN_CAP];
-    Term S[ATP_AC_FLATTEN_CAP];
-    u32  np = 0u, ns = 0u;
-    if (!atp_ac_flatten_under(pattern, lab, P, &np, ATP_AC_FLATTEN_CAP))
-      return 0;
-    if (!atp_ac_flatten_under(subject, lab, S, &ns, ATP_AC_FLATTEN_CAP))
-      return 0;
-    return atp_match_ac_flat(lab, P, np, S, ns, ac, subst);
-  }
-
-  // Non-AC CTR: same-arity recursive match.
-  u32 np = term_ctr_n(pattern);
-  u32 ns = term_ctr_n(subject);
-  if (np != ns) return 0;
-  for (u32 i = 0; i < np; i++) {
-    if (!atp_match_ac(term_ctr_at(pattern, i),
-                      term_ctr_at(subject, i),
-                      ac, subst)) {
-      return 0;
+    if (!ok || nst == 0u) {
+      break;
     }
+    nst--;
+    pattern = st[nst].p;
+    subject = st[nst].s;
   }
-  return 1;
+  term_stack_release(st, st_inl);
+  return ok;
 }
 
 // --- AC rule extension (Bachmair-Plaisted) -------------------------

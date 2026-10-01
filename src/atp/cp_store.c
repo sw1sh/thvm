@@ -934,7 +934,11 @@ static u8 acp_fuse_walk_rec(Term t, const KboConfig *cfg, AcpNvMap *m,
 // call bracket.  A tree deeper than the frame stack returns 0 -- the
 // caller's classic fallback emits the identical bytes, so the cap is
 // a performance edge, not a semantic one (OA's deepest CP sides run
-// ~1000 frames; the cap is 4x that).
+// ~1000 frames; the cap is 4x that).  It is also the C-stack bound of
+// the walks over what this pack produced or its depth admits: the flat
+// KBO acpf_vortest / acpf_rek and cp_emit.c's vcp_ft_build_emit_rec
+// (vcp_ft_build_rec and acp_fuse_walk_rec run only under their kill
+// switches, behind a walk that fails first past this depth).
 enum { ACP_FUSE_MAX_DEPTH = 4096 };
 typedef struct { u64 base; u32 n; u32 i; u32 here; } AcpFuseFrame;
 static AcpFuseFrame g_acp_fuse_stk[ACP_FUSE_MAX_DEPTH];

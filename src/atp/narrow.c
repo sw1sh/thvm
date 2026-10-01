@@ -1209,6 +1209,10 @@ u64 g_goal_drive_closes   = 0;      // BASE closures (NF or fact-unify)
 u64 g_goal_drive_discharg = 0;      // successful ifeq-guard STEP regressions
 u64 g_goal_drive_proved   = 0;      // top goals proved
 
+// The goal driver's term walks recurse once per term level (gd_hash and
+// gd_size stop at 64).  The driver is off by default (THVM_ATP_GOAL_DRIVE=1
+// or thvm_atp_set_use_goal_drive turns it on; no FindProof schedule lane
+// does).
 static u8 gd_ground(Term t) {
   switch (term_tag(t)) {
     case TAG_FVR: return 0u;
