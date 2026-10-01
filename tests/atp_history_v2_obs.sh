@@ -18,7 +18,10 @@
 # already differ within their common prefix; WALL when a run reached the
 # wall and the sequences agree up to where the shorter one stopped (the
 # exporting run is slower in wall time, so its wall falls at an earlier
-# pick: inconclusive -- replace the problem or raise the wall).  A family
+# pick: inconclusive -- replace the problem or raise the wall).  Each row
+# also names the first diverging pick, the first clock-gated decision
+# (THVM_ATP_CLOCK_TRACE) that differs, and the work-clock drift, export on
+# minus off, at the last decision both runs took alike.  A family
 # passes G2.1 when all of its problems PASS (the plan asks for 7).  The
 # exporting run's file is also read back (np0_extract.py --stats, when
 # python3 with numpy is available): it must be format version 2, carry
@@ -127,8 +130,9 @@ run_one() {
     else
       echo done > "$d/$mode.end"
     fi
-    cat "$d"/$mode.clk/clock.*.tsv 2>/dev/null | grep -v '^#' |
-      sed -E 's/ (wall|cpu|work|el|spent|cost|rem|pred)=[0-9]+//g' > "$d/$mode.clock"
+    cat "$d"/$mode.clk/clock.*.tsv 2>/dev/null | grep -v '^#' > "$d/$mode.clockraw"
+    sed -E 's/ (wall|cpu|work|el|spent|cost|rem|pred)=[0-9]+//g' "$d/$mode.clockraw" \
+      > "$d/$mode.clock"
     rm -f "$d/$mode.err"
   done
   szs_off=$(grep -a -m1 -o 'SZS status [A-Za-z]*' "$d/off.out" | awk '{print $3}')
@@ -150,6 +154,24 @@ run_one() {
   clock_div=$(diff "$d/off.clock" "$d/on.clock" 2>/dev/null | grep -m1 '^[<>]' |
               cut -c1-160 | tr '\t' ' ')
   [ -z "$clock_div" ] && clock_div=-
+  # Work-clock drift (export on minus off, nominal microseconds) at the
+  # last clock-gated decision both runs took alike: the cost the
+  # exclusion windows leave on the clock.
+  drift=$(awk '
+    FNR == NR { off[FNR] = $0; n = FNR; next }
+    FNR <= n {
+      a = off[FNR]; b = $0
+      sa = a; sb = b
+      gsub(/ (wall|cpu|work|el|spent|cost|rem|pred)=[0-9]+/, "", sa)
+      gsub(/ (wall|cpu|work|el|spent|cost|rem|pred)=[0-9]+/, "", sb)
+      if (sa != sb) exit
+      wa = a; sub(/.* work=/, "", wa); sub(/ .*/, "", wa)
+      wb = b; sub(/.* work=/, "", wb); sub(/ .*/, "", wb)
+      sel = a; sub(/.* sel=/, "", sel); sub(/ .*/, "", sel)
+      last = (wb - wa) "us@sel" sel
+    }
+    END { print (last == "" ? "-" : last) }' "$d/off.clockraw" "$d/on.clockraw" 2>/dev/null)
+  [ -z "$drift" ] && drift=-
   end_off=$(cat "$d/off.end"); end_on=$(cat "$d/on.end")
   if [ "$sel" = same ] && [ "$prf" = same ] && [ "$st" = same ]; then
     verdict=PASS
@@ -174,10 +196,11 @@ run_one() {
     fi
   fi
   [ "$KEEP_HX" = 1 ] || rm -f "$d/hx.bin"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tselection=%s\tproof=%s\tstats=%s\tend=%s/%s\thx=%s\texport=%s\tclock=%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tselection=%s\tproof=%s\tstats=%s\tend=%s/%s\thx=%s\texport=%s\tdrift=%s\tclock=%s\n' \
     "$fam" "$lane" "$nm" "$verdict" "${szs_off:-none}" "${szs_on:-none}" \
     "$picks_off" "$picks_on" "$first_div" "$sel" "$prf" "$st" \
-    "$end_off" "$end_on" "$hx_bytes" "$export_check" "$clock_div" >> "$OUT/g21.tsv"
+    "$end_off" "$end_on" "$hx_bytes" "$export_check" "$drift" "$clock_div" \
+    >> "$OUT/g21.tsv"
 }
 export -f run_one
 
