@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# Neural-selection phase 0: turn one problem's history export
-# (THVM_ATP_HISTORY_EXPORT, src/atp/history.c) plus the TSTP proof the
-# same run emitted (--proof) into a compact labelled dataset.
+# Turn one problem's history export (THVM_ATP_HISTORY_EXPORT,
+# src/atp/history.c, format version 1 or 2) plus the TSTP proof the same
+# run emitted (--proof) into a compact labelled dataset.
 #
 # Labels: positives are the trace-DAG ancestors of every trace record the
 # emitted proof names or cites (cnf(t<N>...) records and their inference
@@ -16,11 +16,24 @@
 # selected CP ('S'), the rule-side DAG ('R'), per-selection seq
 # boundaries, parent-death events, and -- when the run armed
 # THVM_ATP_HISTORY_CPFEAT -- each pushed CP's 14 engine features ('F':
-# thvm_atp_cp_features at push, cpfeat / has_cpfeat); see save() for
-# the arrays.
+# thvm_atp_cp_features at push, cpfeat / has_cpfeat).  Version 2 adds the
+# lane, the selection dimension of every pick (pick; 255 = not recorded,
+# as in version 1), every rule's content ('Q' + 'q') with its canonical
+# equation key (q_key / q_text), rule deaths ('Z'), the Otter replay
+# ('O'), the key of the rule each selected CP became (rule_key) and the
+# keys of the rules in the proof's derivation DAG (proof_keys) -- the
+# cross-lane label source.  See extract() for the arrays.
+#
+# The canonical equation key renders both orientations of an equation with
+# symbol names from the 'Y' records (c<label> where a name is missing) and
+# variables renamed X0, X1, ... by first occurrence, and keeps the smaller
+# text; q_key is its 64-bit BLAKE2b digest.  Keys compare across lanes
+# that share the same input transform (the plan's cross-lane rule).
 #
 # Usage: np0_extract.py <hx.bin> <proof.out> <out.npz> [max_neg=300000]
 #        np0_extract.py --stats <hx.bin>
+#        np0_extract.py --rules <hx.bin>   (TSV of every rule record)
+import hashlib
 import re
 import sys
 
@@ -38,10 +51,33 @@ FREC = np.dtype([
     ("seq", "<u4"), ("f", "<f4", (14,)),
 ])
 assert FREC.itemsize == 64
+HREC = np.dtype([                     # 'B' (version 2 layout)
+    ("tag", "u1"), ("kind", "u1"), ("flags", "u1"), ("lane_len", "u1"),
+    ("seq", "<u4"), ("step", "<u4"), ("trace", "<u4"), ("pa", "<u4"),
+    ("pb", "<u4"), ("pri", "<u4"), ("lane", "S36"),
+])
+assert HREC.itemsize == 64
+YREC = np.dtype([                     # 'Y' symbol
+    ("tag", "u1"), ("arity", "u1"), ("flags", "u1"), ("name_len", "u1"),
+    ("label", "<u4"), ("name", "S56"),
+])
+assert YREC.itemsize == 64
+CREC = np.dtype([                     # 'q' continuation
+    ("tag", "u1"), ("index", "u1"), ("bytes", "u1", (62,)),
+])
+assert CREC.itemsize == 64
 NONE = 0xFFFFFFFF
 TRACE_AXIOM, TRACE_ORIENT, TRACE_CP, TRACE_SIMPLIFY = 1, 2, 3, 4
 TRACE_NORM_STEP, TRACE_FVI = 5, 6
-T = {c: ord(c) for c in "BPSXDKkRWEF"}
+T = {c: ord(c) for c in "BPSXDKkRWEFYQqZO"}
+PICK = {0: "weight", 1: "age", 2: "w2", 3: "goal", 4: "random", 5: "kdh",
+        6: "topk", 255: "unknown"}
+RULE_BORN, RULE_FVI, RULE_COMPOSE, RULE_PASSIVE, RULE_INSTALL = 1, 2, 3, 4, 5
+RULE_KIND = {1: "born", 2: "fvi", 3: "compose", 4: "passive", 5: "install"}
+Q_ORIENTED, Q_TRUNC, Q_NOCONTENT, Q_PASSIVE = 0x01, 0x02, 0x04, 0x40
+OT_KIND = {1: "adopt", 2: "joined", 3: "unorient", 4: "refused", 5: "lrs",
+           6: "deferred", 7: "gone", 8: "drop", 9: "retire-sel",
+           10: "retire-lrs"}
 
 
 def hx_hash(x):
@@ -67,6 +103,144 @@ def sessions(recs):
         es = np.nonzero(recs["tag"][b:stop] == T["E"])[0]
         e = b + es[-1] if len(es) else None
         out.append((b, stop, e))
+    return out
+
+
+def header(recs, b):
+    """(format version, lane) of the session starting at record b."""
+    h = recs[b:b + 1].view(HREC)[0]
+    version = int(h["kind"])
+    if version < 2:
+        return version, ""
+    lane = bytes(h["lane"])[:int(h["lane_len"])]
+    return version, lane.decode("utf-8", "replace")
+
+
+def symbols(recs, b, stop):
+    """label -> (name, arity, flags) from the session's 'Y' records."""
+    r = recs[b:stop]
+    y = r.view(YREC)[r["tag"] == T["Y"]]
+    out = {}
+    for rec in y:
+        name = bytes(rec["name"])[:int(rec["name_len"])].decode(
+            "utf-8", "replace")
+        out[int(rec["label"])] = (name, int(rec["arity"]), int(rec["flags"]))
+    return out
+
+
+def _varint(buf, at):
+    v, shift = 0, 0
+    while True:
+        if at >= len(buf):
+            raise ValueError("truncated varint")
+        c = buf[at]
+        at += 1
+        v |= (c & 0x7F) << shift
+        if not c & 0x80:
+            return v, at
+        shift += 7
+
+
+def decode_term(buf, at=0):
+    """One preorder side of a 'Q' encoding: ('v', id) or (label, kids).
+
+    Iterative: a rule's depth is unbounded and Python's recursion is not."""
+    stack = []                    # [label, arity, kids so far]
+    while True:
+        v, at = _varint(buf, at)
+        if v & 1:
+            node = ("v", v >> 1)
+        else:
+            n, at = _varint(buf, at)
+            if n:
+                stack.append([v >> 1, n, []])
+                continue
+            node = (v >> 1, ())
+        while stack:
+            top = stack[-1]
+            top[2].append(node)
+            if len(top[2]) < top[1]:
+                break
+            stack.pop()
+            node = (top[0], tuple(top[2]))
+        else:
+            return node, at
+
+
+def render(t, names, var):
+    """Text of term t; variables become X<k> in first-occurrence order
+    (var carries the numbering across both sides of an equation)."""
+    out = []
+    stack = [t]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, str):
+            out.append(x)
+        elif x[0] == "v":
+            if x[1] not in var:
+                var[x[1]] = len(var)
+            out.append("X%d" % var[x[1]])
+        elif not x[1]:
+            out.append(names.get(x[0], ("c%d" % x[0], 0, 0))[0])
+        else:
+            out.append(names.get(x[0], ("c%d" % x[0], 0, 0))[0] + "(")
+            stack.append(")")
+            for j in range(len(x[1]) - 1, -1, -1):
+                stack.append(x[1][j])
+                if j:
+                    stack.append(",")
+    return "".join(out)
+
+
+def canonical_key(lhs, rhs, names):
+    """Orientation-free equation text and its 64-bit digest."""
+    texts = []
+    for a, b in ((lhs, rhs), (rhs, lhs)):
+        var = {}
+        sa = render(a, names, var)
+        sb = render(b, names, var)
+        texts.append(sa + "=" + sb)
+    text = min(texts)
+    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "little"), text
+
+
+def rule_records(recs, b, stop, names):
+    """Every 'Q' record of the session with its decoded content.
+
+    Returns a list of dicts: idx, kind, flags, trace, uid, step, src, depth,
+    feat, lhs, rhs (None when the content is absent), key, text."""
+    r = recs[b:stop]
+    qi = np.nonzero(r["tag"] == T["Q"])[0]
+    cont = r.view(CREC)
+    out = []
+    for i in qi.tolist():
+        q = r[i]
+        flags = int(q["flags"])
+        n = int(q["pos_len"])
+        lhs = rhs = None
+        key, text = 0, ""
+        if not flags & (Q_TRUNC | Q_NOCONTENT):
+            span = cont[i + 1:i + 1 + n]
+            ok = (len(span) == n and np.all(span["tag"] == T["q"]) and
+                  np.array_equal(span["index"], np.arange(n)))
+            if ok:
+                ln = int(q["pa"]) + int(q["pb"])
+                buf = bytes(span["bytes"].reshape(-1)[:ln])
+                try:
+                    lhs, at = decode_term(buf, 0)
+                    rhs, at2 = decode_term(buf, at)
+                    if at != int(q["pa"]) or at2 != ln:
+                        lhs = rhs = None
+                except ValueError:
+                    lhs = rhs = None
+            if lhs is not None:
+                key, text = canonical_key(lhs, rhs, names)
+        out.append(dict(idx=b + i, kind=int(q["kind"]), flags=flags,
+                        trace=int(q["seq"]), uid=int(q["trace"]),
+                        step=int(q["step"]), src=int(q["pri"]),
+                        depth=int(q["depth"]), feat=q["feat"].copy(),
+                        lhs=lhs, rhs=rhs, key=key, text=text))
     return out
 
 
@@ -99,10 +273,41 @@ def stats(path):
         desc = " ".join(f"{chr(t)}={c}" for t, c in zip(tags, cnt))
         er = recs[e] if e is not None else None
         st = int(er["kind"]) if er is not None else -1
-        print(f"session@{b}: status={st} {desc}"
-              + (f" n_trace={er['seq']} sel={er['step']} pushed={er['trace']}"
-                 f" flags={er['pb']} rules={er['pri']} live={er['uid_a']}"
-                 if er is not None else ""))
+        version, lane = header(recs, b)
+        line = (f"session@{b}: v{version} lane={lane or '-'} status={st} "
+                f"{desc}")
+        if er is not None:
+            line += (f" n_trace={er['seq']} sel={er['step']} "
+                     f"pushed={er['trace']} flags={er['pb']} "
+                     f"rules={er['pri']} live={er['uid_a']}")
+        if version >= 2:
+            S = r[r["tag"] == T["S"]]
+            picks, pc = np.unique(S["kind"] >> 4, return_counts=True)
+            line += " picks=" + ",".join(
+                f"{PICK.get(int(p), p)}:{c}" for p, c in zip(picks, pc))
+            names = symbols(recs, b, stop)
+            rules = rule_records(recs, b, stop, names)
+            bad = sum(1 for q in rules if q["lhs"] is None and
+                      not q["flags"] & (Q_TRUNC | Q_NOCONTENT))
+            line += (f" symbols={len(names)} rules={len(rules)} "
+                     f"rule_decode_errors={bad}")
+        print(line)
+
+
+def rules_tsv(path):
+    recs = load(path)
+    print("session\tstep\tkind\ttrace\tuid\tsrc\toriented\tpassive\tkey\ttext")
+    for (b, stop, _e) in sessions(recs):
+        names = symbols(recs, b, stop)
+        for q in rule_records(recs, b, stop, names):
+            src = "-" if q["src"] == NONE else str(q["src"])
+            trace = "-" if q["trace"] == NONE else str(q["trace"])
+            text = q["text"] if q["lhs"] is not None else "-"
+            print(f"{b}\t{q['step']}\t{RULE_KIND.get(q['kind'], q['kind'])}"
+                  f"\t{trace}\t{q['uid']}\t{src}"
+                  f"\t{1 if q['flags'] & Q_ORIENTED else 0}"
+                  f"\t{1 if q['flags'] & Q_PASSIVE else 0}"
+                  f"\t{q['key']:016x}\t{text}")
 
 
 def extract(hx_path, proof_path, out_path, max_neg=300000):
@@ -116,21 +321,30 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
     r = recs[b:stop]
     E = recs[e]
     thresh_c = int(recs[b]["pri"])
+    version, lane = header(recs, b)
     P = r[r["tag"] == T["P"]]
     # last 'P' per seq wins (the WM intake re-stamps the queued axioms)
     _, last = np.unique(P["seq"][::-1], return_index=True)
     P = P[len(P) - 1 - last]
-    S = r[r["tag"] == T["S"]]
+    S = r[r["tag"] == T["S"]].copy()
+    # Version 2 packs the selection dimension into the high nibble.
+    sel_pick = (S["kind"] >> 4).astype(np.uint8) if version >= 2 else \
+        np.full(len(S), 255, dtype=np.uint8)
+    S["kind"] &= 0x0F
     X = r[r["tag"] == T["X"]]
     D = r[r["tag"] == T["D"]]
     K = r[r["tag"] == T["K"]]
     k = r[r["tag"] == T["k"]]
     R = r[r["tag"] == T["R"]]
     W = r[r["tag"] == T["W"]]
+    Z = r[r["tag"] == T["Z"]]
+    O = r[r["tag"] == T["O"]]
     F = recs.view(FREC)[b:stop][r["tag"] == T["F"]]
     if len(F):   # last 'F' per seq wins, as for 'P'
         _, lastf = np.unique(F["seq"][::-1], return_index=True)
         F = F[len(F) - 1 - lastf]
+    names = symbols(recs, b, stop)
+    rules = rule_records(recs, b, stop, names)
     text = open(proof_path, errors="replace").read()
     blk = proof_block(text)
     if blk is None:
@@ -197,6 +411,8 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
         cpfeat[idx_f[okf]] = F["f"][okf]
         has_cpfeat[idx_f[okf]] = True
     pri[idx_s] = S["pri"]
+    pick = col(np.uint8, 255)
+    pick[idx_s] = sel_pick
     has_push = np.zeros(n, bool); has_push[idx_p] = True
     # push step from the selection boundaries: #{t : bounds_t <= seq}
     push_step = np.searchsorted(bounds, seqs, side="right").astype(np.int64)
@@ -239,6 +455,35 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
     label = np.array([t in anc for t in trace.tolist()], dtype=bool)
     label &= selected_at >= 0
 
+    # --- rule content (version 2): keys per rule record, the key each
+    # selected CP's rule got, and the keys of the proof DAG's rules.
+    q_n = len(rules)
+    q_trace = np.array([q["trace"] for q in rules], dtype=np.uint32)
+    q_uid = np.array([q["uid"] for q in rules], dtype=np.uint32)
+    q_step = np.array([q["step"] for q in rules], dtype=np.uint32)
+    q_kind = np.array([q["kind"] for q in rules], dtype=np.uint8)
+    q_flags = np.array([q["flags"] for q in rules], dtype=np.uint8)
+    q_src = np.array([q["src"] for q in rules], dtype=np.uint32)
+    q_depth = np.array([q["depth"] for q in rules], dtype=np.uint32)
+    q_feat = (np.stack([q["feat"] for q in rules]) if q_n
+              else np.zeros((0, 10), dtype=np.uint16))
+    q_key = np.array([q["key"] for q in rules], dtype=np.uint64)
+    # One newline-joined string: a fixed-width array would size every row
+    # by the longest rule.  Read back the first len(q_key) items of
+    # str(npz["q_text"]).split("\n").
+    q_text = np.array("\n".join(q["text"] for q in rules))
+    q_ok = np.array([q["lhs"] is not None for q in rules], dtype=bool)
+    rule_key = np.zeros(n, dtype=np.uint64)
+    for q in rules:
+        if q["kind"] != RULE_BORN or q["lhs"] is None or q["src"] == NONE:
+            continue
+        j = np.searchsorted(seqs, q["src"])
+        if j < n and seqs[j] == q["src"] and rule_key[j] == 0:
+            rule_key[j] = q["key"]
+    proof_keys = np.unique(np.array(
+        [q["key"] for q in rules if q["lhs"] is not None and q["trace"] in anc],
+        dtype=np.uint64))
+
     # --- kept set: positives + selected + uniform seq-hash sample of the
     # pushed CPs at rate_p <= the export rate (all of them when small).
     n_push_rec = int(has_push.sum())
@@ -263,29 +508,48 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
         push_step=push_step[keep], end_step=end_step[keep],
         selected_at=selected_at[keep], label=label[keep],
         in_sample=in_sample[keep], has_push=has_push[keep],
+        pick=pick[keep], rule_key=rule_key[keep],
         r_id=R["seq"], r_kind=R["kind"], r_c0=R["trace"], r_c1=R["pa"],
         r_step=R["step"], r_flags=R["flags"], r_feat=R["feat"],
-        bounds=bounds.astype(np.uint32),
+        bounds=bounds.astype(np.uint32), sel_pick=sel_pick,
         x_kind=X["kind"], x_seq=X["seq"], x_step=X["step"], x_live=X["aux"],
         w_seq=W["seq"], w_step=W["step"], w_pri=W["pri"], w_kind=W["kind"],
         w_feat=W["feat"], cpfeat=cpfeat[keep], has_cpfeat=has_cpfeat[keep],
+        q_trace=q_trace, q_uid=q_uid, q_step=q_step, q_kind=q_kind,
+        q_flags=q_flags, q_src=q_src, q_depth=q_depth, q_feat=q_feat,
+        q_key=q_key, q_text=q_text, q_ok=q_ok, proof_keys=proof_keys,
+        z_trace=Z["seq"], z_uid=Z["trace"], z_step=Z["step"],
+        z_flags=Z["flags"],
+        o_kind=O["kind"], o_seq=O["seq"], o_step=O["step"], o_uid=O["trace"],
+        o_trace=O["pa"], o_flags=O["flags"],
+        version=np.array(version), lane=np.array(lane),
+        sym_label=np.array(sorted(names), dtype=np.uint32),
+        sym_name=np.array([names[x][0] for x in sorted(names)],
+                          dtype=np.str_),
+        sym_arity=np.array([names[x][1] for x in sorted(names)],
+                           dtype=np.uint8),
         meta=np.array([
             rate_p, rate_c, float(len(S)), float(E["trace"]),
             float(n_push_rec), float(len(cited)), float(len(anc)),
             float(label.sum()), float(n_cited_unknown), float(E["seq"]),
             float(orphan_on), float(uid_on),
         ]))
-    print(f"ok sel={len(S)} pushed={int(E['trace'])} P={n_push_rec} "
+    print(f"ok v{version} lane={lane or '-'} sel={len(S)} "
+          f"pushed={int(E['trace'])} P={n_push_rec} "
           f"kept={int(keep.sum())} rate_p={rate_p:.4g} cited={len(cited)} "
           f"anc={len(anc)} pos={int(label.sum())} "
           f"cited_unknown={n_cited_unknown} R={len(R)} "
-          f"F={int(has_cpfeat[keep].sum())}/{int(keep.sum())}")
+          f"F={int(has_cpfeat[keep].sum())}/{int(keep.sum())} "
+          f"Q={q_n} proof_keys={len(proof_keys)} Z={len(Z)} O={len(O)}")
     return 0
 
 
 def main():
     if sys.argv[1] == "--stats":
         stats(sys.argv[2])
+        return 0
+    if sys.argv[1] == "--rules":
+        rules_tsv(sys.argv[2])
         return 0
     max_neg = int(sys.argv[4]) if len(sys.argv) > 4 else 300000
     return extract(sys.argv[1], sys.argv[2], sys.argv[3], max_neg)

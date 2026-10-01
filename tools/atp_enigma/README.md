@@ -372,6 +372,34 @@ that they are byte-identical.  The job lists use the runner's shard format
 `static_gates.py <tptp_root> <problem.p>...` prints the gate bits and live
 lanes of the CLI's exit-fast lanes, the static replica that T7 checks.
 
+## History export, version 2
+
+`THVM_ATP_HISTORY_EXPORT=<file>` (`THVM_ATP_HISTORY_RATE`, default 1/16)
+makes one engine process append its derivation history to `<file>` as
+64-byte records; the format is specified in the header of
+[src/atp/history.c](../../src/atp/history.c). Version 2 (ENIGMA plan
+section 3.2) adds to the version-1 stream the lane tag (`FINDPROOF_SLICE`,
+set by `--lane=NAME`), the symbol table, the content of every rule as it
+enters R (`Q` + `q`, read off the flatterm mirror), rule deaths, the Otter
+replay and the selection dimension of each pick. One exporting process per
+file: harvest with `--lane`, not `--schedule`.
+
+```
+env THVM_ATP_HISTORY_EXPORT=run.hx THVM_ATP_HISTORY_RATE=1 THVM_ATP_WORK_CLOCK=instr \
+  bin/FindProof --lane=twee --szs --proof --wall=180 problem.p > proof.out
+np0_extract.py --stats run.hx                  # version, lane, record counts, picks
+np0_extract.py --rules run.hx > rules.tsv      # every rule: kind, trace, uid, key, text
+np0_extract.py run.hx proof.out run.npz        # labelled dataset (reads version 1 too)
+```
+
+In the `.npz`, `q_key` is each rule's canonical equation key (64-bit),
+`rule_key` the key of the rule each selected CP became, and `proof_keys`
+the keys of the rules in the proof's derivation DAG: matching one lane's
+`proof_keys` against another lane's `rule_key` / `q_key` on the same
+problem gives cross-lane labels, between lanes that share the input
+transform. Gate G2.1 (the export only observes) is
+`tests/atp_history_v2_obs.sh` (pods only).
+
 ## Typical flow
 
 ```
