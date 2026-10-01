@@ -442,6 +442,7 @@ Gates:
   - it has at least 60 band problems at WDEP and at least 30 at W180;
   - they come from at least 15 axiom systems;
   - P0's A/A disagreement on DEV-S is at most 5%.
+- G2.6 (amendment A1, section 5.4): the synthetic -10 corpus is valid. It governs only deliverable 5; G2.3 covers the encoder's effect on unarmed runs.
 
 Kill:
 - A family that fails G2.1 or G2.2 is not guided.
@@ -565,7 +566,7 @@ After L2:
 |---------------------|--------------------|----------------------------------------------|------|
 | M0 Truth            | 10-01 to 10-28     | G0.1 to G0.4 (validity)                      | none; blocks the rest |
 | M1 P1               | 10-19 to 11-20     | per change: net >= 0 at both walls, at most 1 loss | none (P1 = P0) |
-| M2 Substrate, data  | 10-26 to 12-18     | G2.1 to G2.5                                 | family not guided; DEV-S fallback |
+| M2 Substrate, data  | 10-26 to 12-18     | G2.1 to G2.6                                 | family not guided; DEV-S fallback; no -10 corpus |
 | M3 Guided selection | 12-01 to 03-19     | G3.1 (Jan 8), G3.2 (Feb 12), G3.3 (Mar 19)   | K3a (Jan), K3b (Feb), K3c |
 | M4a Freezer         | pre-gate by Nov 13 | recall; conversions beyond the non-learned freeze | pre-gate or gate |
 | M4b Launch plan     | pre-gate by Nov 13 | oracle >= +5; 15 single-solver problems; simulator fidelity | pre-gate or gate |
@@ -659,7 +660,7 @@ What is running now:
 | WDEP and delta per wall      | at L0           | |
 | section 5.3 outputs          | ~/.cache/thvm/enigma/matrix/decisions_5_3.txt; summary below | 2026-10-02 |
 | synthetic -10 encoder (D1)   | tools/atp_cli/ifeq10.c (FindProof --emit-ifeq10), a port of jukebox horn-to-unit [CS18], not tools/atp_cli/fof_prepass.c as M2 deliverable 5 says: fof_prepass encodes for proving (one dispatcher, a false != true goal), while TPTP's -10 files have one dispatcher per type pair and keep the source's goals. A record, not a gate amendment; the user to confirm that it is within D1's wording ("from our FOF front end") | 2026-10-02 |
-| synthetic -10 corpus         | at its pod run: manifest.tsv sha256, FindProof sha256 and its ifeq10 pass file, TPTP release (v9.3.1) | |
+| synthetic -10 corpus         | gate G2.6 (amendment A1). At its pod run: manifest.tsv sha256, FindProof sha256 and its ifeq10 pass file (verdict, drift count), TPTP release (v9.3.1), .done status, j13dup count, TRAIN-X and DEV-X sizes and domains | |
 
 Section 5.3 outputs (2026-10-02, from the sealed matrix; train and held-out only):
 - Pool: TRAIN 664 problems, VBS at 60 s 550 (528 within 1 s), best single lane twee-raw 488, greedy cover reaches the union at k = 9. HELDOUT 171: VBS 143, best lane twee / twee-raw 134, union at k = 3. G0.1 passes (56,810 of 56,810 rows; 24 crashes, 0.062%).
@@ -675,7 +676,13 @@ Decisions recorded (2026-10-01, by the user):
 - D1: yes. Training may include synthetic -10 encodings of non-UEQ TPTP problems from our FOF front end; J13 names and stems are excluded in every division.
 - D3: no. Every calibration stays on pods; WDEP is estimated from the submission build's official J13 result as in section 1.3.
 
-Amendments: none yet.
+Amendments:
+- A1 (2026-10-02, before any pod run of the -10 encoder; no data for it exists): gate G2.6, the validity of the synthetic -10 corpus (M2 deliverable 5, decision D1). The corpus may be used for training (TRAIN-X) or as a gate set (DEV-X) only if all of the following hold, on one FindProof binary:
+  1. ALL=1 tests/atp_ifeq10_tptp.sh passes and writes its pass file. Decision rule: it fails if one of the eleven cases fails (a mismatch, or clause names that differ), if a surveyed [CS18] source exits non-zero (input, nonhorn, sat1, timeout, crash), lands at "differs" or cannot be compared, or if the survey does not finish by its deadline (status=deadline; DEADLINE_S 14400 s, 120 s and 3 GB per encoding). These levels are reported and pass: names, order, generated, nest, and drift, a "differs" whose source carries a "% Bugfixes" release newer than the oldest release in the -10 file's Rating line (TPTP edited the source after the conversion). The verdict is exact only if every case and every surveyed pair matches with names and order; otherwise it is equivalent, and both pass. The drift count is reported in the registry row.
+  2. The corpus run ends with .done status=complete or complete-alerts with 0 alerts: no sat1 on any candidate, no nonhorn on an _HRN source, no truncated output. complete-unguarded (ALLOW_LEAKY=1) and incomplete fail.
+  3. The corpus check is ok, including the content check: no emitted problem has the renaming-blind key of a J13 problem file (ifeq10_keys.py); the j13dup count is reported.
+  4. TRAIN-X holds at least 500 emitted problems and DEV-X at least 100, each from at least 10 domains. Below that the corpus adds less than the pool's own TRAIN (664) and DEV-H (171), and D1 is not worth its cost.
+  Kill: if G2.6 fails, M3 trains on the pool alone and DEV-X is not a gate set; the encoder is not tuned against the survey's results to pass.
 
 ## 6. Risks and what we will not do
 
