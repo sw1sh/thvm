@@ -2,6 +2,8 @@
 
 Scoping plan (2026-09-28). Not a landed change; go / no-go gates per phase.
 
+Superseded 2026-10-01 for all ENIGMA work by docs/plans/enigma_portfolio.md (ENIGMA versus the CASC portfolio); the phase results below stay as the record.
+
 ## Why now
 
 At CASC-J13, Vampire 5.0.1 scored 370/400 in UEQ against Vampire 5.0's 322,
