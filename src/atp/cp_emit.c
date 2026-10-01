@@ -1651,6 +1651,7 @@ fn void thvm_atp_cp_set(AtpState *s, u32 i, Term lhs, Term rhs) {
   // FIFO key untouched on reweight (C_ReClassify, CLAS/
   // NewClassification.c:399-406 "w2 wird nicht geaendert").
   s->cp_seq[row] = s->cp_seq_next++;
+  g_atp_work_ticks++;
   // Refresh the packed seq cache at position i (cp_seq[row] just
   // changed for a possibly-QUEUED row).  The pri cache is left to the
   // contract-mandated reheapify, exactly like cp_pri[row] itself.

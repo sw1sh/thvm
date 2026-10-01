@@ -492,6 +492,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
           g_ir_rhs_nf_ft = NULL;
           atp_ft_rules_verify_push(s, i);
 #endif
+          atp_hx_rule(s, i, ATP_HX_RULE_COMPOSE, ATP_TRACE_NONE);
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
           // WM-policy FT mirror: the RHS compose is the one rule-set
           // mutation without an r_revision bump, so the flat splice
@@ -1272,6 +1273,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             g_ir_rhs_nf_ft = NULL;
             atp_ft_rules_verify_push(s, i);
 #endif
+            atp_hx_rule(s, i, ATP_HX_RULE_COMPOSE, ATP_TRACE_NONE);
             // RHS does not feed the LHS discrimination tree, so the
             // rule-LHS index stays valid; no dirty flag needed.
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)

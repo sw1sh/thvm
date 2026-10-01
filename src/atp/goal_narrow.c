@@ -666,13 +666,15 @@ static u8 atp_goal_narrow_joined(AtpState *s, Term gl, Term gr) {
   // quota so the remaining instance budget converts a near-miss CC
   // before the deadline (the mission's post-saturation endgame).  The
   // span is the wall from the first check to the deadline; the progress
-  // through it is read on the work clock (atp_work_peek_us), so the burst
-  // starts at the same point of the search under any load, as the LRS
-  // reach estimate does.
+  // through it is read on the work clock (atp_work_engine_peek_us), so
+  // the burst starts at the same point of the search under any load, as
+  // the LRS reach estimate does; under a deterministic work clock the
+  // span is the configured budget less the work before the first check,
+  // as the LRS budget is.
   u8 endgame = 0u;
   {
     u64 now = atp_now_us();
-    u64 work = atp_work_peek_us();
+    u64 work = atp_work_engine_peek_us();
     if (g->t0_us == 0ull && now != 0ull) {
       g->t0_us = now;
       g->w0_us = work;
@@ -680,6 +682,11 @@ static u8 atp_goal_narrow_joined(AtpState *s, Term gl, Term gr) {
     if (s->wall_deadline_us != 0ull && g->t0_us != 0ull &&
         now != 0ull && s->wall_deadline_us > g->t0_us) {
       u64 span = s->wall_deadline_us - g->t0_us;
+      if (s->wall_budget_us != 0ull && atp_work_fixed()) {
+        u64 used = (g->w0_us > s->wall_set_work_us)
+                     ? g->w0_us - s->wall_set_work_us : 0ull;
+        span = (used < s->wall_budget_us) ? s->wall_budget_us - used : 0ull;
+      }
       if (work >= g->w0_us + (span * 85ull) / 100ull) endgame = 1u;
     }
   }

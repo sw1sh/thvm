@@ -512,6 +512,11 @@ static u64 g_atp_perm_subsume_mask = 0ull;
 static u64 atp_now_us(void);
 static u64 atp_cpu_now_us(void);
 static u64 atp_work_now_us(void);
+static u64 atp_work_peek_us(void);
+static u8  atp_work_fixed(void);
+// Search events (CP queue inserts and selection attempts): the unit of
+// the gate-only logical work clock, THVM_ATP_WORK_CLOCK=steps (rerank.c).
+static u64 g_atp_work_ticks = 0u;
 static void atp_work_pause(void);
 static void atp_work_resume(void);
 static FILE *atp_clock_trace(void);

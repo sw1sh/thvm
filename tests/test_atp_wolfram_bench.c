@@ -1433,6 +1433,17 @@ static void pr_print_term(FILE *fp, const PrProblem *pr, Term t) {
   fputc(')', fp);
 }
 
+// History export ('Y' records): the signature with names, so rule content
+// can be keyed by name across lanes.  No-op unless the export records s.
+static void pr_history_symbols(AtpState *s, const PrProblem *pr) {
+  for (u32 i = 0; i < pr->n_syms; i++) {
+    u8 fresh = (u8)(i >= pr->fresh_sym_base &&
+                    i < pr->fresh_sym_base + pr->n_fresh_syms);
+    thvm_atp_history_symbol(s, PR_LABEL_BASE + i, pr->syms[i].arity, fresh,
+                            pr->syms[i].name);
+  }
+}
+
 // Fold-mode (Vampire "born already inter-reduced", TweeGoalTransformation
 // .cpp:23-28 + the bottom-up transformSubterm returning `res` at :218):
 // rewrite each maximal proper compound subterm of `t` that matches a
@@ -2229,6 +2240,9 @@ int main(int argc, char **argv) {
   }
 
   AtpState *s = thvm_atp_init(&cfg, step_cap);
+  if (pr_mode) {
+    pr_history_symbols(s, &prp);
+  }
   // Off-heap packed proof trace, always.  The on-heap trace is ~99.9%
   // of the GC live set on a deep completion (WolframAxioms/
   // OrAssociativity: trace 32.4M of 46.8M live K-nodes vs rules 11K;

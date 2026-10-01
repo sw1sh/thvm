@@ -6860,7 +6860,9 @@ typedef struct {
   u8   use_lrs;
   u64  lrs_start_us;              // epoch (atp_work_now_us at first select)
   u64  lrs_start_wall_us;         // epoch on the wall clock: the simulated
-                                  // CPU budget is deadline - this
+                                  // CPU budget is deadline - this (under
+                                  // a deterministic work clock, see
+                                  // wall_budget_us)
   u32  lrs_recompute_period;      // selections between horizon recomputes
   u32  lrs_warmup_selections;     // selections before the first horizon
   u32  lrs_last_recompute_at;     // cp_select_count at the last recompute
@@ -7293,6 +7295,12 @@ typedef struct {
   // generates infinite CP fan-out and would otherwise spin until
   // the OS sends SIGKILL).
   u64  wall_deadline_us;
+  // The deadline's budget (us) and the engine's work clock when it was
+  // set: under a deterministic work clock (atp_work_fixed) the LRS
+  // budget is wall_budget_us less the work done before the LRS epoch,
+  // not a wall reading, so it repeats run to run.
+  u64  wall_budget_us;
+  u64  wall_set_work_us;
 
   // Process-RSS baseline for the growth-relative memory guard, sampled
   // at the run's FIRST RSS poll (step 0).  0 = not yet sampled (calloc).
@@ -8305,10 +8313,15 @@ fn void      thvm_atp_set_cp_pri2_by_seq(AtpState *s, const u32 *seq,
 // Derivation-history export (src/atp/history.c): THVM_ATP_HISTORY_EXPORT
 // =<path> arms an observation-only record stream of pushes (sampled at
 // THVM_ATP_HISTORY_RATE, default 1/16), selections, deletions, parent
-// deaths and the rule-side trace DAG.  search_end marks where the search
-// stopped (entries after it came from proof emission); finish dumps the
-// trace entries and closes the session; call it after proof emission.
-// No-op when unarmed.
+// deaths, rule content and deaths, the Otter replay and the rule-side
+// trace DAG, headed by the format version and the lane (FINDPROOF_SLICE).
+// symbol records one signature entry (label, arity, name; fresh = made by
+// an input transform) for name-keyed rule content; call it after init.
+// search_end marks where the search stopped (entries after it came from
+// proof emission); finish dumps the trace entries and closes the session;
+// call it after proof emission.  No-op when unarmed.
+fn void      thvm_atp_history_symbol(AtpState *s, u32 label, u32 arity,
+                                     u8 fresh, const char *name);
 fn void      thvm_atp_history_finish(AtpState *s, u32 status);
 fn void      thvm_atp_history_search_end(AtpState *s);
 

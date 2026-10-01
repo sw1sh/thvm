@@ -134,7 +134,9 @@ static u64 atp_term_sym_bitmap(Term t) {
 // gates, and both cost accruals (here and around the sweep in
 // thvm_atp_step_impl) -- reads atp_work_now_us: by default PROCESS CPU
 // time, Twee's clock (THVM_ATP_WORK_CLOCK=instr swaps in a deterministic
-// instruction count; see atp_work_now_us).  Task.hs
+// instruction count, =steps the gate's logical event count, which charges
+// a check one event per sampled CP and a sweep one per queued CP; see
+// atp_work_now_us).  Task.hs
 // stamps task_start / task_last / task_spent with getCPUTime (Task.hs:4,
 // :32, :39, :42), which GHC implements as clock_gettime(
 // CLOCK_PROCESS_CPUTIME_ID) (base System/CPUTime/Posix/ClockGetTime.hsc).
@@ -214,6 +216,7 @@ static u8 atp_cp_set_ir_due(AtpState *s) {
 #endif
     thvm_atp_heap_reset(hcp);
   }
+  g_atp_work_ticks += sample;
   u64 after = atp_work_now_us();
   s->cp_set_ir_spent_us += after - now;
   s->cp_set_ir_last_us   = after;
@@ -231,6 +234,8 @@ static u8 atp_cp_set_ir_due(AtpState *s) {
 
 static void atp_cp_set_interreduce(AtpState *s) {
   if (s == NULL || s->n_cps == 0u || s->n_rules == 0u) return;
+  // The step clock charges the sweep one event per queued CP it visits.
+  g_atp_work_ticks += s->n_cps;
   const u32 NORM_CAP = 64u;
   u32 w = 0u;
   int touched = 0;

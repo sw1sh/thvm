@@ -113,6 +113,202 @@ static Term tt_norm_rhs(Term exp_l, Term exp_r) {
   return exp_r;
 }
 
+// History export reader (src/atp/history.c, format version 2): the
+// whole file as 64-byte records, and a decoder for the 'Q' rule-content
+// encoding (preorder; varint(id << 1 | 1) for a variable, varint(label
+// << 1) then varint(arity) for a function symbol).
+typedef struct {
+  u8    *buf;
+  size_t n;
+} TtHx;
+
+static int tt_hx_load(const char *path, TtHx *h) {
+  h->buf = NULL;
+  h->n   = 0u;
+  FILE *fp = fopen(path, "rb");
+  if (fp == NULL) {
+    return 0;
+  }
+  fseek(fp, 0, SEEK_END);
+  long sz = ftell(fp);
+  fseek(fp, 0, SEEK_SET);
+  if (sz <= 0 || sz % (long)ATP_HX_REC_SIZE != 0) {
+    fclose(fp);
+    return 0;
+  }
+  h->buf = (u8 *)malloc((size_t)sz);
+  size_t got = (h->buf != NULL) ? fread(h->buf, 1u, (size_t)sz, fp) : 0u;
+  fclose(fp);
+  h->n = got / ATP_HX_REC_SIZE;
+  return got == (size_t)sz;
+}
+
+static u64 tt_hx_varint(const u8 *b, u32 len, u32 *at, int *ok) {
+  u64 v = 0u;
+  for (u32 shift = 0u; shift < 64u; shift += 7u) {
+    if (*at >= len) {
+      *ok = 0;
+      return 0u;
+    }
+    u8 c = b[(*at)++];
+    v |= (u64)(c & 0x7fu) << shift;
+    if ((c & 0x80u) == 0u) {
+      return v;
+    }
+  }
+  *ok = 0;
+  return 0u;
+}
+
+static Term tt_hx_decode(const u8 *b, u32 len, u32 *at, int *ok) {
+  u64 v = tt_hx_varint(b, len, at, ok);
+  if (!*ok) {
+    return 0;
+  }
+  if (v & 1u) {
+    return mk_v((u32)(v >> 1));
+  }
+  u32 n = (u32)tt_hx_varint(b, len, at, ok);
+  if (!*ok || n > 16u) {
+    *ok = 0;
+    return 0;
+  }
+  Term kids[16];
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = tt_hx_decode(b, len, at, ok);
+    if (!*ok) {
+      return 0;
+    }
+  }
+  return term_new_ctr((u32)(v >> 1), kids, n);
+}
+
+// The group axioms' signature as the driver would name it ('Y').
+static const char *const TT_HX_NAMES[4] = { "e", "i", "f", "a" };
+static const u32 TT_HX_ARITY[4] = { 0u, 1u, 2u, 0u };
+
+// Selection setups of tt_hx_group_run.
+#define TT_HX_PLAIN 0u   // an age pick every third selection
+#define TT_HX_OTTER 1u   // the Otter loop
+#define TT_HX_W2    2u   // w2 pick every 4th selection, goal pick every 5th
+                         // (ahead of the default 1-in-11 age pick)
+
+// The S record's expected pick dimension under `mode` at selection
+// `step` (1-based; the engine tests its count before the increment).
+static u32 tt_hx_want_pick(u8 mode, u32 step) {
+  u32 c = step - 1u;
+  if (mode == TT_HX_PLAIN) {
+    return (c % 3u == 2u) ? ATP_HX_PICK_AGE : ATP_HX_PICK_WEIGHT;
+  }
+  if (c % 4u == 0u) {
+    return ATP_HX_PICK_W2;
+  }
+  if (c % 5u == 0u) {
+    return ATP_HX_PICK_GOAL;
+  }
+  // The default FIFO dimension: the 11th of every 11 selections.
+  return (c % 11u == 10u) ? ATP_HX_PICK_AGE : ATP_HX_PICK_WEIGHT;
+}
+
+// The group axioms for 40 steps under setup `mode` (TT_HX_*), recorded to
+// `path` (rate 1, lane "hx-unit") unless it is NULL; *heap gets the IC
+// heap cells the run allocated.
+static AtpState *tt_hx_group_run(u8 mode, const char *path, u64 *heap) {
+  u64 h0 = thvm_atp_heap_checkpoint();
+  if (path != NULL) {
+    setenv("THVM_ATP_HISTORY_EXPORT", path, 1);
+    setenv("THVM_ATP_HISTORY_RATE", "1", 1);
+    setenv("FINDPROOF_SLICE", "hx-unit", 1);
+  }
+  AtpState *s = thvm_atp_init(&DUMMY_CFG, 200);
+  if (path != NULL) {
+    unsetenv("THVM_ATP_HISTORY_EXPORT");
+    unsetenv("THVM_ATP_HISTORY_RATE");
+    unsetenv("FINDPROOF_SLICE");
+  }
+  if (mode == TT_HX_OTTER) {
+    thvm_atp_set_use_mixmost_nf(s, 1u);
+    thvm_atp_set_use_otter(s, 1u);
+  } else if (mode == TT_HX_W2) {
+    thvm_atp_set_w2(s, 4u, 0u);
+    thvm_atp_set_goal_interleave(s, 5u);
+  } else {
+    thvm_atp_set_selection_ratio(s, 3u);
+  }
+  for (u32 k = 0; k < 4u; k++) {
+    thvm_atp_history_symbol(s, LAB_e + k, TT_HX_ARITY[k], (u8)(k == 3u),
+                            TT_HX_NAMES[k]);
+  }
+  thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+  thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
+  thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                        mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+  for (u32 k = 0; k < 40u; k++) {
+    if (thvm_atp_step(s) != ATP_RUNNING) {
+      break;
+    }
+  }
+  *heap = thvm_atp_heap_checkpoint() - h0;
+  return s;
+}
+
+// What an observer must not change: the rules, the selections, the queue
+// and the IC heap cells of a run.
+typedef struct {
+  u64   heap;
+  u32   n, sel, cps, seq, uid_next;
+  u32  *uid;
+  u8   *dead;
+  Term *l;
+  Term *r;
+} TtHxSnap;
+
+static int tt_hx_snap(const AtpState *s, u64 heap, TtHxSnap *o) {
+  memset(o, 0, sizeof *o);
+  o->heap     = heap;
+  o->n        = s->n_rules;
+  o->sel      = s->cp_select_count;
+  o->cps      = s->n_cps;
+  o->seq      = s->cp_seq_next;
+  o->uid_next = s->next_rule_uid;
+  o->uid  = (u32 *)calloc(o->n + 1u, sizeof *o->uid);
+  o->dead = (u8 *)calloc(o->n + 1u, 1u);
+  o->l    = (Term *)calloc(o->n + 1u, sizeof *o->l);
+  o->r    = (Term *)calloc(o->n + 1u, sizeof *o->r);
+  if (o->uid == NULL || o->dead == NULL || o->l == NULL || o->r == NULL) {
+    return 0;
+  }
+  for (u32 k = 0; k < o->n; k++) {
+    o->uid[k]  = s->r_uid[k];
+    o->dead[k] = s->r_dead[k];
+    o->l[k]    = atp_rule_term((AtpState *)s, k, 0u);
+    o->r[k]    = atp_rule_term((AtpState *)s, k, 1u);
+  }
+  return 1;
+}
+
+static void tt_hx_snap_free(TtHxSnap *o) {
+  free(o->uid);
+  free(o->dead);
+  free(o->l);
+  free(o->r);
+  memset(o, 0, sizeof *o);
+}
+
+static int tt_hx_snap_eq(const TtHxSnap *a, const TtHxSnap *b) {
+  if (a->heap != b->heap || a->n != b->n || a->sel != b->sel ||
+      a->cps != b->cps || a->seq != b->seq || a->uid_next != b->uid_next) {
+    return 0;
+  }
+  for (u32 k = 0; k < a->n; k++) {
+    if (a->uid[k] != b->uid[k] || a->dead[k] != b->dead[k] ||
+        !kbo_eq(a->l[k], b->l[k]) || !kbo_eq(a->r[k], b->r[k])) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 #ifdef ATP_CP_GROUND_JOIN
 // Differential soundness cross-check for a DELETE verdict.  When the
 // symbolic ground-join test says DELETE, we INDEPENDENTLY verify that a
@@ -7349,6 +7545,442 @@ int main(void) {
       thvm_atp_free(s);
     }
     #undef V
+  }
+
+  TEST_BEGIN("atp/history-export/v2-record-layout");
+  {
+    // Every record is 64 bytes; the 'B' header keeps version 1's seq and
+    // pri offsets, so an old reader still finds the session and the
+    // sample threshold.
+    CHECK_EQ(sizeof(AtpHxRec), 64u);
+    CHECK_EQ(sizeof(AtpHxFeatRec), 64u);
+    CHECK_EQ(sizeof(AtpHxHdrRec), 64u);
+    CHECK_EQ(sizeof(AtpHxSymRec), 64u);
+    CHECK_EQ(sizeof(AtpHxContRec), 64u);
+    CHECK_EQ(offsetof(AtpHxRec, seq), 4u);
+    CHECK_EQ(offsetof(AtpHxRec, pri), 24u);
+    CHECK_EQ(offsetof(AtpHxRec, aux), 40u);
+    CHECK_EQ(offsetof(AtpHxRec, feat), 44u);
+    CHECK_EQ(offsetof(AtpHxHdrRec, seq), 4u);
+    CHECK_EQ(offsetof(AtpHxHdrRec, pri), 24u);
+    CHECK_EQ(offsetof(AtpHxHdrRec, lane), 28u);
+    CHECK_EQ(offsetof(AtpHxSymRec, label), 4u);
+    CHECK_EQ(offsetof(AtpHxSymRec, name), 8u);
+    CHECK_EQ(offsetof(AtpHxContRec, bytes), 2u);
+    CHECK_EQ(ATP_HX_LANE_MAX + 28u, 64u);
+    CHECK_EQ(ATP_HX_NAME_MAX + 8u, 64u);
+    CHECK_EQ(ATP_HX_CONT_BYTES + 2u, 64u);
+    // Little-endian base-128 varints, low group first.
+    AtpHxEnc e = { NULL, 0u, 0u, 0u };
+    atp_hx_enc_varint(&e, 400u);
+    atp_hx_enc_varint(&e, 5u);
+    CHECK_EQ(e.len, 3u);
+    CHECK(e.buf != NULL && e.buf[0] == 0x90u && e.buf[1] == 0x03u &&
+          e.buf[2] == 0x05u);
+    CHECK_EQ(e.over, 0u);
+    free(e.buf);
+  }
+
+  TEST_BEGIN("atp/history-export/v2-rule-encoding");
+  {
+    // f(x, e) -> x off the rule's flatterm mirror: f/2 = 6 2, x = 1,
+    // e/0 = 2 0 | x = 1.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    AtpAddedRange r0 = thvm_atp_orient_and_add(s, mk_f(mk_v(VAR_x), mk_e()),
+                                               mk_v(VAR_x));
+    CHECK_EQ(r0.count, 1u);
+    AtpHxRec q;
+    memset(&q, 0, sizeof q);
+    u32 len = atp_hx_rule_encode(s, r0.first, &q);
+    static const u8 want[6] = { 6u, 2u, 1u, 2u, 0u, 1u };
+    CHECK_EQ(len, 6u);
+    CHECK_EQ(q.pa, 5u);
+    CHECK_EQ(q.pb, 1u);
+    CHECK_EQ(q.pos_len, 1u);
+    CHECK(g_hx.enc != NULL && memcmp(g_hx.enc, want, sizeof want) == 0);
+    CHECK_EQ(q.aux, 0x42bb5049u);   // FNV-1a of the six bytes
+    CHECK_EQ(q.flags & (ATP_HX_Q_TRUNC | ATP_HX_Q_NOCONTENT), 0u);
+    CHECK(q.flags & ATP_HX_F_FEAT);
+    // The 'P' feature layout: nodes 3/1, depths 2/1, one variable seen
+    // twice, symbols f and e, shape = rhs top var | vars(rhs) in vars(lhs)
+    // | vars(lhs) in vars(rhs).
+    static const u16 feat[ATP_HX_NFEAT] = { 3u, 1u, 2u, 1u, 1u, 2u, 2u, 0u,
+                                            2u, 98u };
+    for (u32 k = 0; k < ATP_HX_NFEAT; k++) {
+      CHECK_EQ(q.feat[k], feat[k]);
+    }
+    atp_hx_scratch_free();   // no session is open: nothing else to free
+    thvm_atp_free(s);
+    // f(...f(f(x, e), e)..., e) -> x with 100 f cells: the lhs is 401
+    // bytes (2 per f, 1 for x, 2 per e) at depth 101, the content spans
+    // seven continuation records, and it decodes back to the rule.
+    s = thvm_atp_init(&DUMMY_CFG, 100);
+    Term deep = mk_v(VAR_x);
+    for (u32 k = 0; k < 100u; k++) {
+      deep = mk_f(deep, mk_e());
+    }
+    AtpAddedRange r1 = thvm_atp_orient_and_add(s, deep, mk_v(VAR_x));
+    CHECK_EQ(r1.count, 1u);
+    memset(&q, 0, sizeof q);
+    len = atp_hx_rule_encode(s, r1.first, &q);
+    CHECK_EQ(len, 402u);
+    CHECK_EQ(q.pa, 401u);
+    CHECK_EQ(q.pb, 1u);
+    CHECK_EQ(q.pos_len, 7u);
+    CHECK_EQ(q.feat[0], 201u);
+    CHECK_EQ(q.feat[1], 1u);
+    CHECK_EQ(q.feat[2], 101u);
+    CHECK_EQ(q.feat[3], 1u);
+    CHECK_EQ(q.flags & (ATP_HX_Q_TRUNC | ATP_HX_Q_NOCONTENT), 0u);
+    if (r1.count == 1u && len == 402u && g_hx.enc != NULL) {
+      int ok = 1;
+      u32 at = 0u;
+      Term dl = tt_hx_decode(g_hx.enc, len, &at, &ok);
+      CHECK(ok && at == q.pa);
+      CHECK(ok && kbo_eq(dl, atp_rule_term(s, r1.first, 0u)));
+      Term dr = tt_hx_decode(g_hx.enc, len, &at, &ok);
+      CHECK(ok && at == len && kbo_eq(dr, mk_v(VAR_x)));
+    }
+    atp_hx_scratch_free();
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/history-export/v2-install");
+  {
+    // A pre-oriented rule (the WL Rule[] surface) is recorded as installed
+    // and oriented with its content, though KBO orients the pair the
+    // other way.
+    char path[] = "/tmp/thvm_hx_v2_XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+      close(fd);
+    }
+    setenv("THVM_ATP_HISTORY_EXPORT", path, 1);
+    setenv("THVM_ATP_HISTORY_RATE", "1", 1);
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    unsetenv("THVM_ATP_HISTORY_EXPORT");
+    unsetenv("THVM_ATP_HISTORY_RATE");
+    CHECK(atp_hx_on(s));
+    AtpAddedRange r0 = thvm_atp_install_oriented_rule(s, mk_e(),
+                                                      mk_f(mk_a(), mk_a()));
+    CHECK_EQ(r0.count, 1u);
+    u32 uid = (r0.count == 1u) ? s->r_uid[r0.first] : 0u;
+    u32 tid = (r0.count == 1u) ? s->r_trace[r0.first] : 0u;
+    CHECK(r0.count == 1u && s->r_orient[r0.first]);
+    thvm_atp_history_finish(s, 0xffu);
+    TtHx h;
+    CHECK(tt_hx_load(path, &h));
+    unlink(path);
+    u32 n_q = 0u;
+    for (size_t i = 1u; i < h.n; i++) {
+      AtpHxRec r;
+      memcpy(&r, h.buf + i * ATP_HX_REC_SIZE, sizeof r);
+      if (r.tag != 'Q') {
+        continue;
+      }
+      n_q++;
+      CHECK_EQ(r.kind, ATP_HX_RULE_INSTALL);
+      CHECK_EQ(r.flags & ATP_HX_Q_ORIENTED, ATP_HX_Q_ORIENTED);
+      CHECK_EQ(r.trace, uid);
+      CHECK_EQ(r.seq, tid);
+      CHECK_EQ(r.pri, ATP_TRACE_NONE);
+      CHECK_EQ(r.pos_len, 1u);
+      CHECK(i + 1u < h.n);
+      if (r.pos_len != 1u || i + 1u >= h.n) {
+        continue;
+      }
+      AtpHxContRec c;
+      memcpy(&c, h.buf + (i + 1u) * ATP_HX_REC_SIZE, sizeof c);
+      CHECK_EQ(c.tag, 'q');
+      int ok = 1;
+      u32 at = 0u;
+      Term l = tt_hx_decode(c.bytes, r.pa + r.pb, &at, &ok);
+      Term rr = tt_hx_decode(c.bytes, r.pa + r.pb, &at, &ok);
+      CHECK(ok && at == r.pa + r.pb);
+      CHECK(ok && kbo_eq(l, mk_e()) && kbo_eq(rr, mk_f(mk_a(), mk_a())));
+    }
+    CHECK_EQ(n_q, 1u);
+    free(h.buf);
+    thvm_atp_free(s);
+  }
+
+  TEST_BEGIN("atp/history-export/v2-stream");
+  {
+    // The group axioms under plain completion (an age pick every third
+    // selection), under the Otter loop and under w2 + goal-interleave
+    // picks, each run with the export off, on and off again.  With it on,
+    // the run keeps the rules, selections and IC heap cells of the runs
+    // without it: the hooks decode nothing onto the heap.  The stream starts with the version-2 header and the symbol
+    // table; every rule born has its content ('Q' + 'q') and is either
+    // live at the end -- the last 'Q' of its uid then decodes to the live
+    // rule -- or has exactly one death ('Z'); every 'S' names the
+    // dimension that picked it; every 'X' carries the trace sizes an 'R'
+    // step is derived from.
+    for (u8 mode = TT_HX_PLAIN; mode <= TT_HX_W2; mode++) {
+      u8 otter = (u8)(mode == TT_HX_OTTER);
+      // A/B/A: off, on, off again.  The second off run is the control:
+      // file-static engine state (caches, lazily probed getenv) carries
+      // across sessions in one process, so off == off2 must hold before
+      // on == off says anything about the export.
+      u64 heap_a = 0u, heap = 0u, heap_a2 = 0u;
+      AtpState *ra = tt_hx_group_run(mode, NULL, &heap_a);
+      TtHxSnap snap_a;
+      int ok_a = tt_hx_snap(ra, heap_a, &snap_a);
+      thvm_atp_free(ra);
+
+      char path[] = "/tmp/thvm_hx_v2_XXXXXX";
+      int fd = mkstemp(path);
+      CHECK(fd >= 0);
+      if (fd >= 0) {
+        close(fd);
+      }
+      AtpState *s = tt_hx_group_run(mode, path, &heap);
+      CHECK(atp_hx_on(s));
+      TtHxSnap snap_on;
+      int ok_on = tt_hx_snap(s, heap, &snap_on);
+      // The on run's session is still open: finishing it first keeps the
+      // control run unarmed (one recorded engine at a time).
+      thvm_atp_history_finish(s, 0xffu);
+      CHECK(!atp_hx_on(s));
+
+      AtpState *ra2 = tt_hx_group_run(mode, NULL, &heap_a2);
+      TtHxSnap snap_a2;
+      int ok_a2 = tt_hx_snap(ra2, heap_a2, &snap_a2);
+      thvm_atp_free(ra2);
+      CHECK(ok_a && ok_on && ok_a2);
+      CHECK(ok_a && ok_a2 && tt_hx_snap_eq(&snap_a, &snap_a2));
+      CHECK(ok_a && ok_on && tt_hx_snap_eq(&snap_on, &snap_a));
+      tt_hx_snap_free(&snap_a);
+      tt_hx_snap_free(&snap_on);
+      tt_hx_snap_free(&snap_a2);
+      TtHx h;
+      CHECK(tt_hx_load(path, &h));
+      unlink(path);
+      CHECK(h.n > 5u);
+      if (h.n <= 5u) {
+        free(h.buf);
+        thvm_atp_free(s);
+        continue;
+      }
+      AtpHxHdrRec hd;
+      memcpy(&hd, h.buf, sizeof hd);
+      CHECK_EQ(hd.tag, 'B');
+      CHECK_EQ(hd.kind, ATP_HX_VERSION);
+      CHECK_EQ(hd.pri, 0xffffffffu);
+      CHECK_EQ(hd.lane_len, 7u);
+      CHECK(memcmp(hd.lane, "hx-unit", 7u) == 0);
+      for (u32 k = 0; k < 4u; k++) {
+        AtpHxSymRec y;
+        memcpy(&y, h.buf + (size_t)(1u + k) * ATP_HX_REC_SIZE, sizeof y);
+        CHECK_EQ(y.tag, 'Y');
+        CHECK_EQ(y.label, LAB_e + k);
+        CHECK_EQ(y.arity, TT_HX_ARITY[k]);
+        CHECK_EQ(y.flags, (k == 3u) ? 2u : 0u);
+        CHECK_EQ(y.name_len, 1u);
+        CHECK_EQ((u8)y.name[0], (u8)TT_HX_NAMES[k][0]);
+      }
+      // Per-uid state, uids 1 .. next_rule_uid.
+      u32   n_uid       = s->next_rule_uid + 1u;
+      u8   *born        = (u8 *)calloc(n_uid, 1u);
+      u8   *died        = (u8 *)calloc(n_uid, 1u);
+      u8   *seen_orient = (u8 *)calloc(n_uid, 1u);
+      u32  *last_tid    = (u32 *)calloc(n_uid, sizeof *last_tid);
+      Term *last_l      = (Term *)calloc(n_uid, sizeof *last_l);
+      Term *last_r      = (Term *)calloc(n_uid, sizeof *last_r);
+      CHECK(born != NULL && died != NULL && seen_orient != NULL &&
+            last_tid != NULL && last_l != NULL && last_r != NULL);
+      if (born == NULL || died == NULL || seen_orient == NULL ||
+          last_tid == NULL || last_l == NULL || last_r == NULL) {
+        free(born);
+        free(died);
+        free(seen_orient);
+        free(last_tid);
+        free(last_l);
+        free(last_r);
+        free(h.buf);
+        thvm_atp_free(s);
+        continue;
+      }
+      u32 n_born = 0u, n_died = 0u, n_sel = 0u, n_age = 0u, n_weight = 0u;
+      u32 n_adopt = 0u, n_retire = 0u, n_drop = 0u, n_bad = 0u;
+      u32 n_w2 = 0u, n_goal = 0u;
+      u32 last_s_seq = 0xffffffffu, last_x_pa = 0xffffffffu;
+      AtpHxRec er;
+      memset(&er, 0, sizeof er);
+      for (size_t i = 1u + 4u; i < h.n; i++) {
+        AtpHxRec r;
+        memcpy(&r, h.buf + i * ATP_HX_REC_SIZE, sizeof r);
+        switch (r.tag) {
+          case 'Q': {
+            u32 len = r.pa + r.pb;
+            u8 buf[ATP_HX_CONT_MAX * ATP_HX_CONT_BYTES];
+            memset(buf, 0, sizeof buf);
+            CHECK_EQ(r.flags & (ATP_HX_Q_TRUNC | ATP_HX_Q_NOCONTENT), 0u);
+            CHECK_EQ(r.pos_len, (len + ATP_HX_CONT_BYTES - 1u) / ATP_HX_CONT_BYTES);
+            if ((r.flags & (ATP_HX_Q_TRUNC | ATP_HX_Q_NOCONTENT)) != 0u ||
+                len > (u32)r.pos_len * ATP_HX_CONT_BYTES ||
+                len > (u32)sizeof buf) {
+              n_bad++;
+              i += r.pos_len;
+              break;
+            }
+            for (u32 k = 0; k < r.pos_len; k++) {
+              AtpHxContRec c;
+              CHECK(i + 1u + k < h.n);
+              if (i + 1u + k >= h.n) {
+                break;
+              }
+              memcpy(&c, h.buf + (i + 1u + k) * ATP_HX_REC_SIZE, sizeof c);
+              CHECK_EQ(c.tag, 'q');
+              CHECK_EQ(c.index, k);
+              memcpy(buf + k * ATP_HX_CONT_BYTES, c.bytes, ATP_HX_CONT_BYTES);
+            }
+            i += r.pos_len;
+            CHECK_EQ(atp_hx_fnv(buf, len), r.aux);
+            int ok = 1;
+            u32 at = 0u;
+            Term l = tt_hx_decode(buf, len, &at, &ok);
+            CHECK(ok && at == r.pa);
+            Term rr = tt_hx_decode(buf, len, &at, &ok);
+            CHECK(ok && at == len);
+            CHECK(r.trace > 0u && r.trace < n_uid);
+            if (!ok || r.trace == 0u || r.trace >= n_uid) {
+              n_bad++;
+              break;
+            }
+            if (r.kind != ATP_HX_RULE_COMPOSE) {
+              CHECK(!born[r.trace]);
+              born[r.trace] = 1u;
+              n_born++;
+            } else {
+              CHECK(born[r.trace] && !died[r.trace]);
+            }
+            if (r.kind == ATP_HX_RULE_PASSIVE) {
+              CHECK(r.flags & ATP_HX_Q_PASSIVE);
+              CHECK(r.flags & ATP_HX_Q_ORIENTED);
+            }
+            last_tid[r.trace]    = r.seq;
+            last_l[r.trace]      = l;
+            last_r[r.trace]      = rr;
+            seen_orient[r.trace] = (u8)(r.flags & ATP_HX_Q_ORIENTED);
+            break;
+          }
+          case 'q':
+            n_bad++;   // a continuation outside its 'Q' run
+            break;
+          case 'Z':
+            CHECK(r.trace > 0u && r.trace < n_uid);
+            if (r.trace > 0u && r.trace < n_uid) {
+              CHECK(born[r.trace]);
+              CHECK(!died[r.trace]);
+              died[r.trace] = 1u;
+              n_died++;
+            }
+            break;
+          case 'S': {
+            u32 pick = (u32)r.kind >> 4;
+            u32 kind = (u32)r.kind & 0x0fu;
+            CHECK(kind == TRACE_AXIOM || kind == TRACE_CP || kind == TRACE_SIMPLIFY);
+            if (!otter) {
+              CHECK_EQ(pick, tt_hx_want_pick(mode, r.step));
+            }
+            if (pick == ATP_HX_PICK_AGE) {
+              n_age++;
+            } else if (pick == ATP_HX_PICK_WEIGHT) {
+              n_weight++;
+            } else if (pick == ATP_HX_PICK_W2) {
+              n_w2++;
+            } else if (pick == ATP_HX_PICK_GOAL) {
+              n_goal++;
+            }
+            last_s_seq = r.seq;
+            n_sel++;
+            break;
+          }
+          case 'X':
+            // pa = trace size at the pick, pb = trace size now; the pick
+            // sizes never decrease (an 'R' step is derived from them).
+            CHECK_EQ(r.seq, last_s_seq);
+            CHECK(r.pa <= r.pb);
+            CHECK(last_x_pa == 0xffffffffu || r.pa >= last_x_pa);
+            last_x_pa = r.pa;
+            break;
+          case 'R':
+            CHECK_EQ(r.step, 0xffffffffu);
+            break;
+          case 'O':
+            CHECK(otter);
+            if (r.kind == ATP_HX_OT_ADOPT) {
+              CHECK(r.trace > 0u && r.trace < n_uid && born[r.trace]);
+              n_adopt++;
+            }
+            if (r.kind == ATP_HX_OT_RETIRE_SEL) {
+              CHECK_EQ(r.seq, last_s_seq);   // retired by its own selection
+              n_retire++;
+            }
+            if (r.kind == ATP_HX_OT_DROP) {
+              // Born and dropped before any content record.
+              if (r.trace > 0u && r.trace < n_uid) {
+                born[r.trace] = 1u;
+              }
+              n_drop++;
+            }
+            break;
+          case 'E':
+            memcpy(&er, &r, sizeof er);
+            CHECK_EQ(i, h.n - 1u);
+            break;
+          default:
+            break;
+        }
+      }
+      CHECK_EQ(n_bad, 0u);
+      CHECK_EQ(er.tag, 'E');
+      CHECK_EQ(er.uid_b, n_sel);
+      CHECK_EQ(n_sel, s->cp_select_count);
+      CHECK(n_sel > 6u);
+      CHECK(n_born > 0u);
+      if (mode == TT_HX_PLAIN) {
+        CHECK(n_age > 0u);
+        CHECK(n_weight > 0u);
+      } else if (mode == TT_HX_W2) {
+        CHECK(n_w2 > 0u);
+        CHECK(n_goal > 0u);
+        CHECK(n_weight > 0u);
+      } else {
+        CHECK(n_adopt > 0u);
+        CHECK(n_retire > 0u);
+        CHECK_EQ(er.pb & 16u, 16u);   // E flags: the Otter loop ran
+      }
+      u32 n_live = 0u;
+      for (u32 k = 0; k < s->n_rules; k++) {
+        if (s->r_dead[k]) {
+          continue;
+        }
+        n_live++;
+        u32 uid = s->r_uid[k];
+        CHECK(uid > 0u && uid < n_uid);
+        if (uid == 0u || uid >= n_uid) {
+          continue;
+        }
+        CHECK(born[uid] && !died[uid]);
+        CHECK_EQ(last_tid[uid], s->r_trace[k]);
+        CHECK_EQ(seen_orient[uid] ? 1u : 0u, s->r_orient[k] ? 1u : 0u);
+        // atp_rule_term decodes a slot a lazy compose left as a sentinel.
+        CHECK(kbo_eq(last_l[uid], atp_rule_term(s, k, 0u)));
+        CHECK(kbo_eq(last_r[uid], atp_rule_term(s, k, 1u)));
+      }
+      CHECK_EQ(n_born + n_drop, n_live + n_died);
+      free(born);
+      free(died);
+      free(seen_orient);
+      free(last_tid);
+      free(last_l);
+      free(last_r);
+      free(h.buf);
+      thvm_atp_free(s);
+    }
   }
 
   thvm_free();

@@ -329,9 +329,9 @@ to convergence. `models/topk_rerank_D32h64_dagger1.safetensors` (K 32,
 hidden 64) was made by exactly these commands (the harvest on 8 vCPUs):
 
 ```
-THVM_ATP_HISTORY_CPFEAT=1 np0_harvest.sh bin/FindProof <TPTP> pool.tsv twee-rerank \
-  "<twee lane flags> --rerank-topk=32 --rerank-model=models/topk_rerank_R32h32.safetensors" \
-  rr_harvest 60 8 1 3500 100000 400000
+THVM_ATP_HISTORY_CPFEAT=1 CLOCK=cpu \
+FLAGS="<twee lane flags> --rerank-topk=32 --rerank-model=models/topk_rerank_R32h32.safetensors" \
+  np0_harvest.sh bin/FindProof <TPTP> pool.tsv twee-rerank rr_harvest 60 8 1 3500 100000 400000
 topk_net.py prep  harvest/npz pool.tsv prep_eng precheck_eng.txt 8 engine   # the phase-0c harvest
 topk_net.py prep  rr_harvest/npz pool.tsv prep_rr precheck_rr.txt 8 \
   rerank:32:models/topk_rerank_R32h32.safetensors                            # + replay of the head
@@ -413,6 +413,57 @@ HEAD=head.safetensors MODEL=id FEATPARITY=1 tests/atp_guide_gates.sh bin/FindPro
 `weights_to_c.py example ex.safetensors` writes the tiny head the shipped
 `src/atp/guide_models.c` is built from; rebuilding from it reproduces the
 file byte for byte.
+
+## History export, version 2
+
+`THVM_ATP_HISTORY_EXPORT=<file>` (`THVM_ATP_HISTORY_RATE`, default 1/16)
+makes one engine process append its derivation history to `<file>` as
+64-byte records; the format is specified in the header of
+[src/atp/history.c](../../src/atp/history.c). Version 2 (ENIGMA plan
+section 3.2) adds to the version-1 stream the lane tag (`FINDPROOF_SLICE`,
+set by `--lane=NAME`), the symbol table, the content of every rule as it
+enters R (`Q` + `q`, read off the flatterm mirror), rule deaths, the Otter
+replay and the selection dimension of each pick. One exporting process per
+file: harvest with `--lane` (`np0_harvest.sh <FindProof> <TPTP> pool.tsv
+<lane> <outdir>`, instruction clock, proved and failed runs alike);
+`--schedule` gives each slice its own file, `<path>.<slice>`.
+
+```
+env THVM_ATP_HISTORY_EXPORT=run.hx THVM_ATP_HISTORY_RATE=1 THVM_ATP_WORK_CLOCK=instr \
+  bin/FindProof --lane=twee --szs --proof --wall=180 problem.p > proof.out
+np0_extract.py --stats run.hx                  # version, lane, record counts, picks
+np0_extract.py --rules run.hx > rules.tsv      # every rule: kind, trace, uid, key, text
+np0_extract.py run.hx proof.out run.npz        # labelled dataset (reads version 1 too)
+np0_extract.py run.hx - run.npz                # failed run: hindsight labels only
+np0_extract.py --selftest                      # reads synthetic v1 / v2 files back (pods)
+```
+
+In the `.npz`, `q_key` is each rule's canonical equation key (64-bit),
+`rule_key` the key of the rule each selected CP became, and `proof_keys`
+the keys of the rules in the proof's derivation DAG: matching one lane's
+`proof_keys` against another lane's `rule_key` / `q_key` on the same
+problem gives cross-lane labels, between lanes that share the input
+transform. The export records the completion loop of every lane family;
+the narrowing lanes' critical-goal queue and the CLI front ends (Horn
+release, horn-cd chaining) are searches outside it and leave no records.
+
+Gate G2.1 (the export only observes) is `tests/atp_history_v2_obs.sh`
+(pods only) over `tests/atp_history_v2_obs.tsv` (10 TRAIN problems per
+family, picked from the sealed lane matrix by `--pick`): each problem runs
+with the export off, on and off again under the gate's step clock
+(`THVM_ATP_WORK_CLOCK=steps`, which the export cannot advance). A row is
+PASS (on = off and the export saw selections), NONDET (the two off runs
+differ), UNOBSERVED (on = off but the export holds no selection), FAIL
+(any other difference, a crash only with the export, or an export that
+does not read back or was never closed) or WALL (a run reached the wall
+first). A family passes when its first 7 conclusive rows are PASS and no
+row FAILs (plan amendments A3 and A4).
+
+In the `.npz`, `sig` fingerprints the session's input signature (the
+`Y` records): cross-lane keys are compared only between equal `sig`s, and
+`n_unnamed` counts function symbols without a name, whose keys cannot
+match. `r_step` (each trace entry's creation step) is derived from the `X`
+records, which carry the trace size at each pick.
 
 ## Typical flow
 

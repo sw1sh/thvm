@@ -191,13 +191,17 @@ static void atp_otter_drop_slot(AtpState *s, u32 i) {
 // The queued CP `seq` leaves passive (selected or LRS-discarded): retire
 // its demodulator.  A passive rule an interreduction already removed has
 // a dead uid; a soft-deleted slot keeps its proof-reconstruction saves.
-static void atp_otter_popkill(AtpState *s, u32 seq) {
+// `why` = ATP_HX_OT_RETIRE_SEL / _LRS, for the history export.
+static void atp_otter_popkill(AtpState *s, u32 seq, u8 why) {
   u32 uid = atp_otter_map_take(s, seq);
   if (uid == 0u) return;
   atp_otter_mark(s, uid, 0u);
-  if (atp_uid_is_dead(s, uid)) return;
-  u32 i = sw_uid_to_idx(s, uid);
-  if (i == 0xffffffffu || s->r_dead[i]) return;
+  u32 i = atp_uid_is_dead(s, uid) ? 0xffffffffu : sw_uid_to_idx(s, uid);
+  if (i == 0xffffffffu || s->r_dead[i]) {
+    atp_hx_otter(s, why, seq, 0xffffffffu, uid, ATP_TRACE_NONE, 1u);
+    return;
+  }
+  atp_hx_otter(s, why, seq, 0xffffffffu, uid, s->r_trace[i], 0u);
   atp_otter_drop_slot(s, i);
   s->n_otter_retired++;
 }
@@ -219,15 +223,23 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
   return;
 #else
   row = atp_otter_row_of(s, row, seq);
-  if (row == 0xffffffffu) return;
-  if (atp_cp_slot_implicit(s, row) || s->cp_packed[row] == NULL) return;
+  if (row == 0xffffffffu) {
+    atp_hx_otter(s, ATP_HX_OT_GONE, seq, row, 0u, ATP_TRACE_NONE, 0u);
+    return;
+  }
+  if (atp_cp_slot_implicit(s, row) || s->cp_packed[row] == NULL) {
+    atp_hx_otter(s, ATP_HX_OT_DEFERRED, seq, row, 0u, ATP_TRACE_NONE, 0u);
+    return;
+  }
   // Vampire LRS discards a new clause beyond the limits at retention
   // (it never enters passive); ours waits for the next horizon prune,
   // so do not adopt it meanwhile.
   if (s->use_lrs && s->lrs_horizon != 0u && s->cp_pri[row] > s->lrs_horizon &&
       (!s->use_lrs_age ||
-       atp_lrs_age_key(s, s->cp_pos[row], row) > s->lrs_age_horizon))
+       atp_lrs_age_key(s, s->cp_pos[row], row) > s->lrs_age_horizon)) {
+    atp_hx_otter(s, ATP_HX_OT_LRS, seq, row, 0u, ATP_TRACE_NONE, 0u);
     return;
+  }
   // FT-native normalize (the push-time treatment's normalizer): its
   // pattern index appends new rules incrementally, where the Term-side
   // rule index rebuilds after every push.
@@ -283,6 +295,8 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
     else        s->n_otter_unorient++;
     s->n_trace = trace_mark;
     thvm_atp_heap_reset(hc);
+    atp_hx_otter(s, joined ? ATP_HX_OT_JOINED : ATP_HX_OT_UNORIENT, seq, row,
+                 0u, ATP_TRACE_NONE, 0u);
     return;
   }
   Term big   = (c == KBO_GT) ? nl : nr;
@@ -299,12 +313,14 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
   s->last_popped_gd    = sv_gd;
   if (!ok || s->n_rules == n0) {
     s->n_otter_refused++;
+    atp_hx_otter(s, ATP_HX_OT_REFUSED, seq, row, 0u, ATP_TRACE_NONE, 0u);
     return;
   }
   u32 i = s->n_rules - 1u;
   if (!s->r_orient[i]) {
     // Orientation is renaming-invariant, so this cannot happen; keep the
     // invariant (passive rules are oriented) regardless.
+    atp_hx_otter(s, ATP_HX_OT_DROP, seq, row, s->r_uid[i], ATP_TRACE_NONE, 0u);
     atp_otter_drop_slot(s, i);
     s->n_otter_refused++;
     return;
@@ -321,6 +337,8 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
                                  ATP_TRACE_NONE, s->lhs[i], s->rhs[i]);
   s->rj_hold = 0u;
   atp_rj_content(s, i);
+  atp_hx_rule(s, i, ATP_HX_RULE_PASSIVE, seq);
+  atp_hx_otter(s, ATP_HX_OT_ADOPT, seq, row, s->r_uid[i], s->r_trace[i], 0u);
   s->n_otter_adopted++;
   // bd=preordered: the new demodulator backward-simplifies R.  May
   // collect garbage -- no Term above is read past this point.
