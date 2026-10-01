@@ -33,9 +33,12 @@
 # Usage: np0_extract.py <hx.bin> <proof.out> <out.npz> [max_neg=300000]
 #        np0_extract.py --stats <hx.bin>
 #        np0_extract.py --rules <hx.bin>   (TSV of every rule record)
+#        np0_extract.py --selftest         (reads synthetic v1 and v2 files)
 import hashlib
+import os
 import re
 import sys
+import tempfile
 
 import numpy as np
 
@@ -109,7 +112,7 @@ def sessions(recs):
 def header(recs, b):
     """(format version, lane) of the session starting at record b."""
     h = recs[b:b + 1].view(HREC)[0]
-    version = int(h["kind"])
+    version = int(h["kind"]) or 1    # version 1 left the kind byte 0
     if version < 2:
         return version, ""
     lane = bytes(h["lane"])[:int(h["lane_len"])]
@@ -117,14 +120,20 @@ def header(recs, b):
 
 
 def symbols(recs, b, stop):
-    """label -> (name, arity, flags) from the session's 'Y' records."""
+    """label -> (name, arity, flags) from the session's 'Y' records.  A
+    name cut at 56 bytes (flags bit 0) gets "#<label>" appended, so two
+    long names that share their first 56 bytes stay apart."""
     r = recs[b:stop]
     y = r.view(YREC)[r["tag"] == T["Y"]]
     out = {}
     for rec in y:
+        label = int(rec["label"])
+        flags = int(rec["flags"])
         name = bytes(rec["name"])[:int(rec["name_len"])].decode(
             "utf-8", "replace")
-        out[int(rec["label"])] = (name, int(rec["arity"]), int(rec["flags"]))
+        if flags & 1:
+            name += f"#{label}"
+        out[label] = (name, int(rec["arity"]), flags)
     return out
 
 
@@ -544,7 +553,175 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
     return 0
 
 
+# --- self-test: synthetic version-1 and version-2 files ------------------
+
+def _st_fnv(data):
+    h = 2166136261
+    for b in data:
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def _st_rec(dtype, tag, **fields):
+    """One record of `dtype` (64 bytes), returned as a length-1 REC array."""
+    r = np.zeros(1, dtype=dtype)
+    r["tag"] = ord(tag)
+    if dtype is REC:
+        r["pos_len"] = 255
+        r["trace"] = NONE
+        r["pa"] = NONE
+        r["pb"] = NONE
+    for k, v in fields.items():
+        r[k] = v
+    return r.view(REC)
+
+
+def _st_session(version):
+    """A proved session: axioms t0 and t1 queued as seqs 0 and 1; seq 0 is
+    picked by weight and becomes the rule f(X, e) = X (uid 1, ORIENT t2),
+    seq 1 is picked by age and joins.  Version 2 adds the lane, the symbol
+    table, the rule's content, its death and an Otter adoption."""
+    v2 = version >= 2
+    out = []
+    if v2:
+        out.append(_st_rec(HREC, "B", kind=2, seq=0, trace=NONE, pa=NONE,
+                           pb=NONE, pri=NONE, lane=b"twee", lane_len=4))
+        for label, name, arity in ((1, b"e", 0), (2, b"i", 1), (3, b"f", 2)):
+            out.append(_st_rec(YREC, "Y", label=label, name=name,
+                               name_len=len(name), arity=arity))
+    else:
+        out.append(_st_rec(REC, "B", seq=0, pri=NONE))
+    for seq in (0, 1):
+        out.append(_st_rec(REC, "P", kind=TRACE_AXIOM, seq=seq, trace=seq,
+                           pri=10 + seq))
+    out.append(_st_rec(REC, "S", kind=TRACE_AXIOM, seq=0, step=1, trace=0,
+                       pri=10, aux=2))
+    out.append(_st_rec(REC, "X", kind=1, seq=0, step=1, aux=1))
+    if v2:
+        enc = bytes([6, 2, 1, 2, 0, 1])        # f(X0, e) | X0
+        out.append(_st_rec(REC, "Q", kind=RULE_BORN, flags=Q_ORIENTED,
+                           pos_len=1, seq=2, step=1, trace=1, pri=0, pa=5,
+                           pb=1, aux=_st_fnv(enc)))
+        c = np.zeros(1, dtype=CREC)
+        c["tag"] = ord("q")
+        c["bytes"][0, :len(enc)] = list(enc)
+        out.append(c.view(REC))
+        out.append(_st_rec(REC, "O", kind=1, seq=1, step=1, trace=2))
+    out.append(_st_rec(REC, "S", kind=TRACE_AXIOM | ((1 << 4) if v2 else 0),
+                       seq=1, step=2, trace=1, pri=11, aux=2))
+    out.append(_st_rec(REC, "X", kind=2, seq=1, step=2, aux=0))
+    if v2:
+        out.append(_st_rec(REC, "Z", seq=2, step=2, trace=1))
+    out.append(_st_rec(REC, "R", kind=TRACE_AXIOM, seq=0, step=0))
+    out.append(_st_rec(REC, "R", kind=TRACE_AXIOM, seq=1, step=0))
+    out.append(_st_rec(REC, "R", kind=TRACE_ORIENT, seq=2, step=1, trace=0))
+    out.append(_st_rec(REC, "E", kind=1, seq=3, step=2, trace=2, pa=2, pb=0,
+                       pri=1, uid_a=0, uid_b=2, depth=0, aux=3))
+    return np.concatenate(out)
+
+
+_ST_PROOF = (
+    "% SZS status Unsatisfiable for selftest\n"
+    "% SZS output start CNFRefutation for selftest\n"
+    "cnf(t0, axiom, f(X, e) = X).\n"
+    "cnf(t2, plain, f(X, e) = X, inference(orient, [status(thm)], [t0])).\n"
+    "% SZS output end CNFRefutation for selftest\n")
+
+
+def selftest():
+    """Reads synthetic version-1 and version-2 files back (pods only, like
+    every test).  Prints the mismatches; returns 0 when there are none."""
+    fails = []
+
+    def check(cond, what):
+        if not cond:
+            fails.append(what)
+
+    key_text = "X0=f(X0,e)"
+    key = int.from_bytes(hashlib.blake2b(key_text.encode("utf-8"),
+                                         digest_size=8).digest(), "little")
+    names = {1: ("e", 0, 0), 3: ("f", 2, 0)}
+    lhs, at = decode_term(bytes([6, 2, 1, 2, 0, 1]), 0)
+    rhs, at2 = decode_term(bytes([6, 2, 1, 2, 0, 1]), at)
+    check(at == 5 and at2 == 6, "decode lengths")
+    check(lhs == (3, (("v", 0), (1, ()))) and rhs == ("v", 0), "decode terms")
+    check(canonical_key(lhs, rhs, names) == (key, key_text), "key")
+    check(canonical_key(rhs, lhs, names) == (key, key_text),
+          "key ignores the orientation")
+    check(canonical_key((3, (("v", 5), (1, ()))), ("v", 5), names)[0] == key,
+          "key ignores variable ids")
+    # i^5000(X0): deeper than Python's recursion limit.  Walked down, not
+    # compared with ==, which would recurse.
+    buf = bytes([4, 1] * 5000 + [1])
+    got, at = decode_term(buf, 0)
+    node, depth = got, 0
+    while isinstance(node, tuple) and node[0] == 2 and len(node[1]) == 1:
+        node, depth = node[1][0], depth + 1
+    check(depth == 5000 and node == ("v", 0) and at == len(buf),
+          "deep decode")
+    check(len(render(got, names, {})) == len("c2(") * 5000 + 2 + 5000,
+          "deep render")
+
+    with tempfile.TemporaryDirectory() as d:
+        proof = os.path.join(d, "proof.out")
+        with open(proof, "w") as fp:
+            fp.write(_ST_PROOF)
+        for version in (1, 2):
+            hx = os.path.join(d, f"v{version}.hx")
+            _st_session(version).tofile(hx)
+            recs = load(hx)
+            ss = sessions(recs)
+            check(len(ss) == 1 and ss[0][2] is not None,
+                  f"v{version}: one session with its E record")
+            lane = "twee" if version == 2 else ""
+            check(header(recs, 0) == (version, lane), f"v{version}: header")
+            npz = os.path.join(d, f"v{version}.npz")
+            check(extract(hx, proof, npz) == 0, f"v{version}: extract")
+            z = np.load(npz)
+            check(int(z["version"]) == version, f"v{version}: version")
+            check(str(z["lane"]) == lane, f"v{version}: lane")
+            check(z["seq"].tolist() == [0, 1], f"v{version}: seqs")
+            check(z["kind"].tolist() == [TRACE_AXIOM, TRACE_AXIOM],
+                  f"v{version}: kinds without the pick")
+            check(z["selected_at"].tolist() == [1, 2],
+                  f"v{version}: selection steps")
+            check(z["label"].tolist() == [True, False], f"v{version}: labels")
+            check(z["pick"].tolist() == ([0, 1] if version == 2
+                                         else [255, 255]),
+                  f"v{version}: picks")
+            if version == 2:
+                check(z["q_key"].tolist() == [key], "v2: q_key")
+                check(str(z["q_text"]).split("\n")[0] == key_text,
+                      "v2: q_text")
+                check(z["rule_key"].tolist() == [key, 0], "v2: rule_key")
+                check(z["proof_keys"].tolist() == [key], "v2: proof_keys")
+                check(z["z_uid"].tolist() == [1], "v2: rule death")
+                check(z["o_kind"].tolist() == [1], "v2: Otter adoption")
+                check(z["sym_name"].tolist() == ["e", "i", "f"],
+                      "v2: symbol table")
+            else:
+                check(len(z["q_key"]) == 0 and len(z["proof_keys"]) == 0,
+                      "v1: no rule records")
+                check(z["rule_key"].tolist() == [0, 0], "v1: rule_key")
+            z.close()
+            stats(hx)
+            rules_tsv(hx)
+        both = os.path.join(d, "both.hx")
+        np.concatenate([_st_session(1), _st_session(2)]).tofile(both)
+        recs = load(both)
+        ss = sessions(recs)
+        check([header(recs, b)[0] for b, _stop, _e in ss] == [1, 2],
+              "a v1 and a v2 session in one file")
+    for f in fails:
+        print(f"selftest FAILED: {f}")
+    if not fails:
+        print("selftest ok")
+    return 1 if fails else 0
+
+
 def main():
+    if sys.argv[1] == "--selftest":
+        return selftest()
     if sys.argv[1] == "--stats":
         stats(sys.argv[2])
         return 0
