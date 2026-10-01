@@ -390,6 +390,7 @@ env THVM_ATP_HISTORY_EXPORT=run.hx THVM_ATP_HISTORY_RATE=1 THVM_ATP_WORK_CLOCK=i
 np0_extract.py --stats run.hx                  # version, lane, record counts, picks
 np0_extract.py --rules run.hx > rules.tsv      # every rule: kind, trace, uid, key, text
 np0_extract.py run.hx proof.out run.npz        # labelled dataset (reads version 1 too)
+np0_extract.py --selftest                      # reads synthetic v1 / v2 files back (pods)
 ```
 
 In the `.npz`, `q_key` is each rule's canonical equation key (64-bit),
@@ -397,8 +398,20 @@ In the `.npz`, `q_key` is each rule's canonical equation key (64-bit),
 the keys of the rules in the proof's derivation DAG: matching one lane's
 `proof_keys` against another lane's `rule_key` / `q_key` on the same
 problem gives cross-lane labels, between lanes that share the input
-transform. Gate G2.1 (the export only observes) is
-`tests/atp_history_v2_obs.sh` (pods only).
+transform. The export records the completion loop of every lane family;
+the narrowing lanes' critical-goal queue and the CLI front ends (Horn
+release, horn-cd chaining) are searches outside it and leave no records.
+
+Gate G2.1 (the export only observes) is `tests/atp_history_v2_obs.sh`
+(pods only) over `tests/atp_history_v2_obs.tsv` (7 TRAIN problems per
+family, picked from the sealed lane matrix by `--pick`): each problem runs
+with the export off, on and off again under the instruction clock. A row
+is PASS (on = off), NONDET (the two off runs differ), DRIFT (the first
+difference follows a clock-gated decision that moved: the exclusion
+windows' own instructions still count on the instruction clock), FAIL (a
+difference before any clock-gated decision moved, a crash only with the
+export, or an unreadable export file) or WALL (a run reached the wall
+first).
 
 ## Typical flow
 

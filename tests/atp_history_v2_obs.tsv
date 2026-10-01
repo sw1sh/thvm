@@ -1,0 +1,66 @@
+# Gate G2.1 problem list (tests/atp_history_v2_obs.sh): family, lane, problem
+# path under the TPTP root (the pool, tptp_pool.tgz).  Made by --pick from the
+# sealed lane matrix of 2026-10-02 (TRAIN rows only, engine proofs at 60 s in
+# 1-40 s, 7 per family; horn-cd has 5).  Regenerate: tests/atp_history_v2_obs.sh
+#   --pick ~/.cache/thvm/enigma/matrix/matrix.tsv ~/.cache/thvm/enigma/matrix/problems.tsv
+twee	twee	Problems/GRP/GRP436-1.p
+twee	twee	Problems/BOO/BOO071-1.p
+twee	twee	Problems/BOO/BOO031-1.p
+twee	twee	Problems/GRP/GRP718-1.p
+twee	twee	Problems/GRP/GRP444-1.p
+twee	twee	Problems/GRP/GRP499-1.p
+twee	twee	Problems/GRP/GRP180-2.p
+wm	wm	Problems/REL/REL018-1.p
+wm	wm	Problems/SEU/SEU323-10.p
+wm	wm	Problems/LCL/LCL109-10.p
+wm	wm	Problems/GRP/GRP179-2.p
+wm	wm	Problems/GRP/GRP184-2.p
+wm	wm	Problems/REL/REL037-1.p
+wm	wm	Problems/GRP/GRP718-1.p
+flatten	flatten	Problems/GRP/GRP444-1.p
+flatten	flatten	Problems/LCL/LCL158-1.p
+flatten	flatten	Problems/GRP/GRP479-1.p
+flatten	flatten	Problems/BOO/BOO004-10.p
+flatten	flatten	Problems/GRP/GRP474-1.p
+flatten	flatten	Problems/GRP/GRP183-1.p
+flatten	flatten	Problems/GRP/GRP405-1.p
+otter	otter-lpo	Problems/GRP/GRP166-1.p
+otter	otter-lpo	Problems/REL/REL018-1.p
+otter	otter-lpo	Problems/BOO/BOO008-4.p
+otter	otter-lpo	Problems/GRP/GRP186-3.p
+otter	otter-lpo	Problems/REL/REL005-1.p
+otter	otter-lpo	Problems/GRP/GRP715-11.p
+otter	otter-lpo	Problems/BOO/BOO015-4.p
+tgt	tgt-sel	Problems/REL/REL004-2.p
+tgt	tgt-sel	Problems/GRP/GRP754-1.p
+tgt	tgt-sel	Problems/LCL/LCL416-10.p
+tgt	tgt-sel	Problems/ROB/ROB022-1.p
+tgt	tgt-sel	Problems/GRP/GRP183-1.p
+tgt	tgt-sel	Problems/GRP/GRP190-2.p
+tgt	tgt-sel	Problems/GRP/GRP185-2.p
+narrow	narrowq	Problems/GRP/GRP658-10.p
+narrow	narrowq	Problems/COL/COL026-1.p
+narrow	narrowq	Problems/SWX/SWX217-1.p
+narrow	narrowq	Problems/COL/COL035-1.p
+narrow	narrowq	Problems/COL/COL027-1.p
+narrow	narrowq	Problems/COL/COL020-1.p
+narrow	narrowq	Problems/GRP/GRP659-10.p
+encompass	encompass	Problems/GRP/GRP184-3.p
+encompass	encompass	Problems/GRP/GRP184-2.p
+encompass	encompass	Problems/GRP/GRP669-1.p
+encompass	encompass	Problems/CAT/CAT010-10.p
+encompass	encompass	Problems/BOO/BOO067-1.p
+encompass	encompass	Problems/REL/REL008-1.p
+encompass	encompass	Problems/LAT/LAT230-10.p
+horn-cd	horn-cd	Problems/CAT/CAT010-10.p
+horn-cd	horn-cd	Problems/LCL/LCL416-10.p
+horn-cd	horn-cd	Problems/KLE/KLE090-10.p
+horn-cd	horn-cd	Problems/BOO/BOO025-1.p
+horn-cd	horn-cd	Problems/LAT/LAT268-10.p
+flatten-bare-raw	flatten-bare-raw	Problems/GRP/GRP437-1.p
+flatten-bare-raw	flatten-bare-raw	Problems/LCL/LCL158-1.p
+flatten-bare-raw	flatten-bare-raw	Problems/GRP/GRP682-11.p
+flatten-bare-raw	flatten-bare-raw	Problems/GRP/GRP436-1.p
+flatten-bare-raw	flatten-bare-raw	Problems/GRP/GRP474-1.p
+flatten-bare-raw	flatten-bare-raw	Problems/REL/REL037-1.p
+flatten-bare-raw	flatten-bare-raw	Problems/BOO/BOO031-1.p
