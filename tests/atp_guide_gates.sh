@@ -5,7 +5,7 @@
 #
 # G2.2 (zero correction is exact): for every (family, lane, problem) the
 # base lane run
-#   FindProof --lane=L --proof --szs --work-clock=instr --wall=W p
+#   THVM_ATP_WORK_CLOCK=steps FindProof --lane=L --proof --szs --wall=W p
 # and its zero twin (the same plus --guide=F --guide-zero) must agree on
 #   - stdout (status and proof), after masking timings;
 #   - the engine stats on stderr (LRS prune and recompute counters
@@ -97,8 +97,8 @@ run() {
   done
   shift
   mkdir -p "$dir/clock"
-  env ${envs[@]+"${envs[@]}"} THVM_ATP_CP_PICK_TRACE=1 THVM_ATP_CLOCK_TRACE="$dir/clock" \
-    "$BIN" "$@" --proof --szs --work-clock=instr --wall="$WALL" \
+  env ${envs[@]+"${envs[@]}"} THVM_ATP_WORK_CLOCK=steps THVM_ATP_CP_PICK_TRACE=1 THVM_ATP_CLOCK_TRACE="$dir/clock" \
+    "$BIN" "$@" --proof --szs --wall="$WALL" \
     > "$dir/out" 2> "$dir/err" < /dev/null
 }
 

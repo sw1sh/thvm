@@ -732,6 +732,8 @@ Amendments (each written before the run it governs):
   4. TRAIN-X holds at least 500 emitted problems and DEV-X at least 100, each from at least 10 domains. Below that the corpus adds less than the pool's own TRAIN (664) and DEV-H (171), and D1 is not worth its cost.
   Kill: if G2.6 fails, M3 trains on the pool alone and DEV-X is not a gate set; the encoder is not tuned against the survey's results to pass.
 
+- A8 (2026-10-02, before any G2.1 or G2.2 run): A3 governs G2.2; the clock-gated drift class of A2 is withdrawn. Both identity gates run under THVM_ATP_WORK_CLOCK=steps, where an observer cannot advance the clock, and pass only on exact identity of selections, proof and stats (LRS prune counts included). tests/atp_guide_gates.sh runs under the steps clock. A2's padding of the base run's environment and its note on columns 13, 14 and 19 stay.
+
 ## 6. Risks and what we will not do
 
 ### 6.1 Risks
