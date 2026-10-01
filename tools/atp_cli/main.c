@@ -476,17 +476,26 @@ enum { N_SCHED = (int)(sizeof(SCHEDULE) / sizeof(SCHEDULE[0])) };
 // external SIGTERM/SIGINT to THIS process (e.g. a wrapping `timeout`) would
 // otherwise kill the parent while its slice subtrees (child -> shell ->
 // FindProof engine) keep running orphaned and accumulate across problems.
-// The handler killpg's every launched child group before exiting.  pids are
-// stored by slice index, one slot per lane; a reaped slot is set back to -1.
-// A slice's own copy names only the slice itself (see run_schedule).
+// The handler removes the slices' output files and killpg's every launched
+// child group before exiting.  pids and output paths are stored by slice
+// index, one slot per lane; a reaped pid slot is set back to -1.  A slice's
+// own copies name only the slice itself (see run_schedule).
 static volatile sig_atomic_t g_sched_pids[N_SCHED];
 _Static_assert(sizeof g_sched_pids / sizeof g_sched_pids[0] >= (size_t)N_SCHED,
                "the teardown registry needs a slot for every schedule lane");
 _Static_assert(sizeof(sig_atomic_t) >= sizeof(pid_t) && (sig_atomic_t)-1 < 0,
                "a teardown registry slot holds any pid and the empty mark -1");
+static char g_sched_outs[N_SCHED][64];
 static volatile sig_atomic_t g_sched_active = 0;
 static void sched_sig_teardown(int sig) {
   if (g_sched_active) {
+    // Before the kills: in a slice the killpg of its own group ends the
+    // slice itself.
+    for (int i = 0; i < N_SCHED; i++) {
+      if (g_sched_outs[i][0] != '\0') {
+        unlink(g_sched_outs[i]);
+      }
+    }
     for (int i = 0; i < N_SCHED; i++) {
       if (g_sched_pids[i] > 0) {
         killpg(g_sched_pids[i], SIGKILL);
@@ -601,6 +610,7 @@ static int run_schedule(const char *self, const char *file, double wall,
   // so an external timeout can't orphan the slice subtrees.
   for (int i = 0; i < N_SCHED; i++) {
     g_sched_pids[i] = -1;
+    g_sched_outs[i][0] = '\0';
   }
   struct sigaction sa, old_term, old_int;
   sa.sa_handler = sched_sig_teardown;
@@ -610,8 +620,9 @@ static int run_schedule(const char *self, const char *file, double wall,
   sigaction(SIGINT,  &sa, &old_int);
   g_sched_active = 1;
   // The signals whose handlers tear the schedule down.  Each launch holds
-  // them from fork() until the new slice is registered: delivered in
-  // between, the handler would kill every slice but the one just forked.
+  // them from recording the slice's output path until the new slice is
+  // registered: delivered after fork(), the handler would kill every slice
+  // but the one just forked.
   sigset_t teardown_sigs, prev_mask;
   sigemptyset(&teardown_sigs);
   sigaddset(&teardown_sigs, SIGTERM);
@@ -644,12 +655,10 @@ static int run_schedule(const char *self, const char *file, double wall,
     setenv("THVM_ATP_RSS_ABORT_MB", capbuf, 1);
   }
   pid_t pids[N_SCHED];
-  char  outs[N_SCHED][64];
   int   done[N_SCHED];
   for (int i = 0; i < N_SCHED; i++) {
     pids[i] = -1;
     done[i] = 0;
-    outs[i][0] = 0;
   }
   int first = (only >= 0) ? only : 0;
   int end   = (only >= 0) ? only + 1 : N_SCHED;
@@ -696,13 +705,13 @@ static int run_schedule(const char *self, const char *file, double wall,
       }
       int i = next++;
       double slice_wall = rem;
-      snprintf(outs[i], sizeof outs[i], "/tmp/thvm_sched_%d_%d.out",
-               (int)getpid(), i);
       if (g_cli_verbose) {
         fprintf(stderr, "%% FindProof schedule slice %s (%.0fs, remaining wall)\n",
                 SCHEDULE[i].name, slice_wall);
       }
       sigprocmask(SIG_BLOCK, &teardown_sigs, &prev_mask);
+      snprintf(g_sched_outs[i], sizeof g_sched_outs[i],
+               "/tmp/thvm_sched_%d_%d.out", (int)getpid(), i);
       pid_t pid = fork();
       if (pid == 0) {
         // Child: own process group so the parent can kill the WHOLE
@@ -711,20 +720,23 @@ static int run_schedule(const char *self, const char *file, double wall,
         // blocked in system() would orphan the grandchild engine, which
         // keeps running to its wall and could overlap the next problem.
         setpgid(0, 0);
-        // The slice keeps the parent's teardown handlers, so its copy of
-        // the registry names its own group alone: a SIGTERM that reaches
-        // the slice (a pkill matching the command line it shares with the
-        // parent) takes its shell and engine with it, and never a sibling
-        // pid the parent has reaped since.
+        // The slice keeps the parent's teardown handlers, so its copies of
+        // the registry and of the output paths name the slice alone: a
+        // SIGTERM that reaches the slice (a pkill matching the command line
+        // it shares with the parent) takes its shell, its engine and its
+        // output file with it, and never a sibling.
         for (int k = 0; k < N_SCHED; k++) {
           g_sched_pids[k] = -1;
+          if (k != i) {
+            g_sched_outs[k][0] = '\0';
+          }
         }
         g_sched_pids[i] = getpid();
         // The slice's shell and engine inherit the mask: with SIGALRM
         // held, the engine's own wall alarm would never fire.
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         // Redirect stdout to the slice temp file, run the slice.
-        int fd = open(outs[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        int fd = open(g_sched_outs[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd >= 0) {
           dup2(fd, 1);
           close(fd);
@@ -839,11 +851,11 @@ static int run_schedule(const char *self, const char *file, double wall,
       }
     }
     for (int i = 0; i < N_SCHED && winner < 0; i++) {
-      if (pids[i] <= 0 || done[i] || outs[i][0] == '\0') {
+      if (pids[i] <= 0 || done[i] || g_sched_outs[i][0] == '\0') {
         continue;
       }
       size_t len = 0;
-      char *txt = tp_read_file(outs[i], &len);
+      char *txt = tp_read_file(g_sched_outs[i], &len);
       size_t keep = (txt != NULL) ? sched_salvage_len(txt, len) : 0;
       if (keep > 0) {
         winner = i;
@@ -906,7 +918,7 @@ static int run_schedule(const char *self, const char *file, double wall,
     if (salvage != NULL) {
       fwrite(salvage, 1, salvage_len, stdout);
     } else {
-      FILE *fp = fopen(outs[winner], "r");
+      FILE *fp = fopen(g_sched_outs[winner], "r");
       if (fp != NULL) {
         char   buf[4096];
         size_t n;
@@ -931,8 +943,8 @@ static int run_schedule(const char *self, const char *file, double wall,
   }
   free(salvage);
   for (int i = 0; i < N_SCHED; i++) {
-    if (outs[i][0]) {
-      unlink(outs[i]);
+    if (g_sched_outs[i][0] != '\0') {
+      unlink(g_sched_outs[i]);
     }
   }
   return rc;
