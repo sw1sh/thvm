@@ -158,19 +158,45 @@ static Term g_kapur_face = 0;
 // NEW redex at a non-variable position (a genuine other overlap WM keeps) is
 // not dropped.  g_kapur_face is the outer face set per-combo before the gate.
 static u8 atp_mgu_reducible(AtpState *s, Term face, Term peak) {
-  if (face == 0 || peak == 0) return 0u;
-  if (term_tag(face) == TAG_FVR) {
-    if (term_tag(peak) != TAG_CTR) return 0u;   // sigma(x) a bare var: irred.
-    return (u8)(!kbo_eq(atp_rules_only_normalize(s, peak, 4096u), peak));
+  // (face, peak) pairs in the recursion's left-to-right depth-first
+  // order: the first variable position whose peak reduces decides, and
+  // the normalizations before it run in the same order.
+  typedef struct { Term face; Term peak; } MguPair;
+  MguPair  st_inl[ATP_WALK_INL];
+  MguPair *st  = st_inl;
+  u32      nst = 0u;
+  u32      cst = ATP_WALK_INL;
+  u8       hit = 0u;
+  for (;;) {
+    if (face != 0 && peak != 0) {
+      if (term_tag(face) == TAG_FVR) {
+        // sigma(x) a bare var: irreducible.
+        if (term_tag(peak) == TAG_CTR) {
+          hit = (u8)(!kbo_eq(atp_rules_only_normalize(s, peak, 4096u), peak));
+        }
+      } else if (term_tag(face) == TAG_CTR && term_tag(peak) == TAG_CTR) {
+        u32 n = term_ctr_n(face);
+        if (term_ctr_n(peak) == n) {
+          while (nst + n > cst) {
+            st = (MguPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+          }
+          for (u32 c = n; c-- > 0u;) {
+            st[nst].face = term_ctr_at(face, c);
+            st[nst].peak = term_ctr_at(peak, c);
+            nst++;
+          }
+        }
+      }
+    }
+    if (hit || nst == 0u) {
+      break;
+    }
+    nst--;
+    face = st[nst].face;
+    peak = st[nst].peak;
   }
-  if (term_tag(face) == TAG_CTR && term_tag(peak) == TAG_CTR) {
-    u32 n = term_ctr_n(face);
-    if (term_ctr_n(peak) != n) return 0u;
-    for (u32 c = 0; c < n; c++)
-      if (atp_mgu_reducible(s, term_ctr_at(face, c), term_ctr_at(peak, c)))
-        return 1u;
-  }
-  return 0u;
+  term_stack_release(st, st_inl);
+  return hit;
 }
 static u32 atp_kapur_gate(AtpState *s, CriticalPair *buf, u32 lo, u32 hi) {
   if (!atp_kapur_on() || g_kapur_face == 0) return hi;

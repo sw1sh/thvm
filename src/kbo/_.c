@@ -24,7 +24,9 @@
 //   * thvm_kbo_naive: the original Baader-Nipkow recursion.  Each
 //     lexicographic level re-runs a full weight/var-balance traversal
 //     and zeroes a fixed array -- O(n^2) on a left/right spine.  Kept
-//     as the reference oracle for differential testing.
+//     as the reference oracle for differential testing; it recurses per
+//     term level and runs only under THVM_ATP_ORIENT_KBO_CHECK=1 or
+//     -DKBO_WMEMO_SELFCHECK.
 //   * thvm_kbo (production): Loechner's linear-time comparison
 //     ("Things to Know when Implementing KBO", JAR 36(4):289-310,
 //     2006), ported from Waldmeister's sources/ORD/KBO.c
@@ -60,38 +62,83 @@ static inline u32 kbo_thash_slot(Term t) {
 }
 
 // === structural equality ============================================
+//
+// Pairs still to compare sit on an explicit stack, children pushed
+// right to left so pairs are compared in the recursion's left-to-right
+// depth-first order: equality of two deep terms costs heap, not C
+// stack.
+typedef struct { Term s; Term t; } KboEqPair;
+enum { KBO_EQ_INL = 64 };
 
 static u8 kbo_eq(Term s, Term t) {
-  if (s == t) return 1;   // pointer-identical -- rewriting/subst_apply
-                          // share subterm cells, so this fires often
-  if (term_tag(s) != term_tag(t)) return 0;
-  if (term_ext(s) != term_ext(t)) return 0;
-  // CTR-tagged: structural-hash short-circuit before the recursive walk.
-  // KBO orientation + match consistency checks call kbo_eq on terms that
-  // have already been through the KBO weight memo, so their hashes are
-  // often cached in g_kbo_thash.  When both ends have a current-epoch
-  // entry and the hashes differ, the terms are guaranteed unequal -- the
-  // recursive walk would discover the same answer but pay an O(|t|) cost.
-  if (term_tag(s) == TAG_CTR) {
-    KboTHashEnt *cs = &g_kbo_thash[kbo_thash_slot(s)];
-    KboTHashEnt *ct = &g_kbo_thash[kbo_thash_slot(t)];
-    if (cs->epoch == g_kbo_epoch && cs->t == s
-        && ct->epoch == g_kbo_epoch && ct->t == t
-        && cs->hash != ct->hash) return 0;
-  }
-  switch (term_tag(s)) {
-    case TAG_FVR: return 1;  // same id (ext) already checked
-    case TAG_CTR: {
-      u32 ns = term_ctr_n(s);
-      u32 nt = term_ctr_n(t);
-      if (ns != nt) return 0;
-      for (u32 i = 0; i < ns; i++) {
-        if (!kbo_eq(term_ctr_at(s, i), term_ctr_at(t, i))) return 0;
+  KboEqPair  st_inl[KBO_EQ_INL];
+  KboEqPair *st  = st_inl;
+  u32        nst = 0u;
+  u32        cst = KBO_EQ_INL;
+  u8         eq  = 1u;
+  for (;;) {
+    // Pointer-identical pairs are equal outright -- rewriting and
+    // subst_apply share subterm cells, so this fires often.
+    if (s != t) {
+      if (term_tag(s) != term_tag(t) || term_ext(s) != term_ext(t)) {
+        eq = 0u;
+        break;
       }
-      return 1;
+      switch (term_tag(s)) {
+        case TAG_FVR:
+          break;   // same id (ext) already checked
+        case TAG_CTR: {
+          // Structural-hash short-circuit before walking the children.
+          // KBO orientation + match consistency checks call kbo_eq on
+          // terms that have already been through the KBO weight memo, so
+          // their hashes are often cached in g_kbo_thash.  When both ends
+          // have a current-epoch entry and the hashes differ, the terms
+          // are guaranteed unequal -- the walk would discover the same
+          // answer but pay an O(|t|) cost.
+          KboTHashEnt *cs = &g_kbo_thash[kbo_thash_slot(s)];
+          KboTHashEnt *ct = &g_kbo_thash[kbo_thash_slot(t)];
+          if (cs->epoch == g_kbo_epoch && cs->t == s
+              && ct->epoch == g_kbo_epoch && ct->t == t
+              && cs->hash != ct->hash) {
+            eq = 0u;
+            break;
+          }
+          u32 ns = term_ctr_n(s);
+          u32 nt = term_ctr_n(t);
+          if (ns != nt) {
+            eq = 0u;
+            break;
+          }
+          while (nst + ns > cst) {
+            st = (KboEqPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+          }
+          u64 sb = term_val(s), tb = term_val(t);
+          for (u32 i = ns; i-- > 0u;) {
+            st[nst].s = heap_read(sb + 1u + (u64)i);
+            st[nst].t = heap_read(tb + 1u + (u64)i);
+            nst++;
+          }
+          break;
+        }
+        default:
+          if (term_val(s) != term_val(t)) {
+            eq = 0u;
+          }
+          break;
+      }
+      if (!eq) {
+        break;
+      }
     }
-    default: return term_val(s) == term_val(t);
+    if (nst == 0u) {
+      break;
+    }
+    nst--;
+    s = st[nst].s;
+    t = st[nst].t;
   }
+  term_stack_release(st, st_inl);
+  return eq;
 }
 
 // === naive reference oracle =========================================
@@ -339,11 +386,12 @@ static inline u64 kbo_node_hash_fini(u64 h, u32 n) {
   return h ^ ((u64)n * 0x9e3779b97f4a7c15ull);
 }
 
+static u64 kbo_leaf_hash_walk(Term t);
+
 // Compute a leaf's contribution to the structural hash.  Inlined so
 // the iterative combine pass can mix child hashes without an O(|t|)
-// recursive walk per child -- children's hashes come from their
-// already-filled g_kbo_thash entry (when CTR) or from inline compute
-// (when FVR/atom).
+// walk per child -- children's hashes come from their already-filled
+// g_kbo_thash entry (when CTR) or from inline compute (when FVR/atom).
 static inline u64 kbo_leaf_hash(Term t) {
   u32 tg = term_tag(t);
   if (tg == TAG_FVR) {
@@ -355,17 +403,63 @@ static inline u64 kbo_leaf_hash(Term t) {
     // CTR child has been visited before its parent's combine fires.
     KboTHashEnt *ce = &g_kbo_thash[kbo_thash_slot(t)];
     if (ce->epoch == g_kbo_epoch && ce->t == t) return ce->hash;
-    // Slot evicted under collision; fall back to inline recurse.
+    // Slot evicted under collision; recompute from the children.
     // (Rare -- only on a same-walk thash collision.)
-    u32 lab = term_ext(t);
-    u64 base; u32 n = kbo_ctr_children(t, &base);
-    u64 h = kbo_node_hash_init(lab);
-    for (u32 i = 0; i < n; i++) {
-      h = kbo_node_hash_add(h, i, kbo_leaf_hash(heap_read(base + i)));
-    }
-    return kbo_node_hash_fini(h, n);
+    return kbo_leaf_hash_walk(t);
   }
   return kbo_mix64(0xdeadbeefcafebabeull ^ ((u64)tg * 0x100000001b3ull));
+}
+
+// kbo_leaf_hash of a CTR whose slot was evicted: the node hash folded
+// over its children in order, a CTR child taken from its live slot or
+// folded the same way below -- post-order on an explicit stack, since an
+// evicted spine can be as deep as the term.
+static u64 kbo_leaf_hash_walk(Term t) {
+  typedef struct { u64 base; u64 h; u32 n; u32 i; } KboLeafHashFrame;
+  KboLeafHashFrame  fr_inl[64];
+  KboLeafHashFrame *fr  = fr_inl;
+  u32               nfr = 0u;
+  u32               cfr = 64u;
+  fr[0].n = kbo_ctr_children(t, &fr[0].base);
+  fr[0].h = kbo_node_hash_init(term_ext(t));
+  fr[0].i = 0u;
+  nfr = 1u;
+  u64 v = 0u;
+  for (;;) {
+    KboLeafHashFrame *f = &fr[nfr - 1u];
+    if (f->i < f->n) {
+      Term c  = heap_read(f->base + f->i);
+      u32  tg = term_tag(c);
+      if (tg == TAG_CTR) {
+        KboTHashEnt *ce = &g_kbo_thash[kbo_thash_slot(c)];
+        if (!(ce->epoch == g_kbo_epoch && ce->t == c)) {
+          if (nfr == cfr) {
+            fr = (KboLeafHashFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          KboLeafHashFrame *nf = &fr[nfr++];
+          nf->n = kbo_ctr_children(c, &nf->base);
+          nf->h = kbo_node_hash_init(term_ext(c));
+          nf->i = 0u;
+          continue;
+        }
+        v = ce->hash;
+      } else if (tg == TAG_FVR) {
+        v = kbo_mix64(0xfacefacefaceull ^ ((u64)term_ext(c) * 0x100000001b3ull));
+      } else {
+        v = kbo_mix64(0xdeadbeefcafebabeull ^ ((u64)tg * 0x100000001b3ull));
+      }
+    } else {
+      v = kbo_node_hash_fini(f->h, f->n);
+      if (--nfr == 0u) {
+        break;
+      }
+      f = &fr[nfr - 1u];
+    }
+    f->h = kbo_node_hash_add(f->h, f->i, v);
+    f->i++;
+  }
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 
 // Invalidate the whole per-term memo in O(1) by bumping the epoch.
@@ -395,8 +489,6 @@ static inline int kbo_vprof_add(u8 *vid, i16 *vcnt, u8 *vc, u32 id, int delta) {
   return 1;
 }
 
-static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t);
-
 // Combine one CTR node's own weight + the profiles of its children
 // into the memo slot for `t`.  Computes the node's structural hash
 // from its children's hashes (read from g_kbo_thash, filled by
@@ -409,180 +501,321 @@ static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t);
 // many fresh Term IDs for the same structural shape, so the wmemo
 // hit rate jumps from ~35% (Term-ID keyed) toward ~70% (struct-hash
 // keyed).
-static KboWMemoEnt *kbo_memo_combine(const KboConfig *cfg, Term t) {
-  // Compute this node's structural hash from children (children's
-  // hashes are in g_kbo_thash since post-order put them there first).
-  // Position-sensitive + per-child avalanche (kbo_node_hash) so distinct
-  // variable ids in symmetric positions can never cancel into a collision.
-  u32 lab = term_ext(t);
-  u64 base; u32 n = kbo_ctr_children(t, &base);
-  u64 sh = kbo_node_hash_init(lab);
-  for (u32 i = 0; i < n; i++) {
-    sh = kbo_node_hash_add(sh, i, kbo_leaf_hash(heap_read(base + i)));
-  }
-  sh = kbo_node_hash_fini(sh, n);
-
-  // Register this Term ID in the per-Term-ID cache.
-  u32 thidx = kbo_thash_slot(t);
-  KboTHashEnt *th = &g_kbo_thash[thidx];
-  u32 widx = kbo_wmemo_slot(sh);
-  th->t = t; th->hash = sh; th->epoch = g_kbo_epoch; th->wmemo_idx = widx;
-
-  // Wmemo hit?  Reuse precomputed weight + profile.
-  KboWMemoEnt *e = &g_kbo_wmemo[widx];
-  if (e->epoch == g_kbo_epoch && e->hash == sh) return e;
-
-  // Wmemo miss: compute weight + profile.
-  long long w = (long long)kbo_weight(cfg, t);
-  u8 vc = 0u;
-  u8 vid[KBO_VPROF_CAP];
-  i16 vcnt[KBO_VPROF_CAP];
-  int ovf = 0;
-  for (u32 i = 0; i < n; i++) {
-    Term c = heap_read(base + i);
-    if (term_tag(c) == TAG_FVR) {
-      w += (long long)cfg->var_weight;
-      u32 id = term_ext(c);
-      if (id < KBO_MAX_VAR && !ovf) {
-        if (!kbo_vprof_add(vid, vcnt, &vc, id, +1)) ovf = 1;
-      }
-    } else if (term_tag(c) == TAG_CTR) {
-      // Child must have a g_kbo_thash entry (post-order); from that,
-      // read the wmemo slot.  If the slot still holds the child's
-      // entry, use it; else recompute via kbo_subtree_memo.
-      KboTHashEnt *cth = &g_kbo_thash[kbo_thash_slot(c)];
-      KboWMemoEnt *ce;
-      if (cth->epoch == g_kbo_epoch && cth->t == c) {
-        ce = &g_kbo_wmemo[cth->wmemo_idx];
-        if (!(ce->epoch == g_kbo_epoch && ce->hash == cth->hash)) {
-          ce = kbo_subtree_memo(cfg, c);
-        }
-      } else {
-        ce = kbo_subtree_memo(cfg, c);
-      }
-      w += ce->w;
-      if (ce->vc == KBO_VPROF_OVF) ovf = 1;
-      else if (!ovf) {
-        for (u8 k = 0; k < ce->vc; k++) {
-          if (!kbo_vprof_add(vid, vcnt, &vc, ce->vid[k], ce->vcnt[k])) {
-            ovf = 1; break;
-          }
-        }
-      }
-    }
-    // a non-CTR/non-FVR child contributes 0 weight, no vars.
-  }
-  e->hash = sh; e->epoch = g_kbo_epoch; e->w = w;
-  if (ovf) {
-    e->vc = KBO_VPROF_OVF;
-  } else {
-    e->vc = vc;
-    for (u8 k = 0; k < vc; k++) { e->vid[k] = vid[k]; e->vcnt[k] = vcnt[k]; }
-  }
-  return e;
-}
+//
+// A child whose wmemo slot was evicted is recomputed by a nested
+// subtree walk before the merge goes on.  Combines and subtree walks
+// therefore nest -- along an evicted spine as deep as the term -- so
+// both run as tasks on an explicit stack (kbo_subtree_memo below), in
+// the order the mutual recursion made them.
 
 // Explicit-stack post-order traversal used to fill the per-subtree memo
 // without native C recursion, so an arbitrarily deep term cannot overflow
 // the stack.  Each frame holds the CTR node and a cursor over its children;
 // a child CTR not yet memoized this epoch is pushed and processing of the
 // parent suspends until it returns.  When a node's children are exhausted it
-// is combined (kbo_memo_combine) into its slot.  The recursive version this
-// replaces was the diagnosed SIGSEGV site on the deeper WM-FPA normal forms.
+// is combined into its slot.  The recursive version this replaces was the
+// diagnosed SIGSEGV site on the deeper WM-FPA normal forms.
 typedef struct {
   Term t;
   u64  base;
   u32  n;
   u32  i;
 } KboMemoFrame;
-// A worklist stack of CTR frames.  Starts in a generous static buffer and,
-// only if a term is deeper than that, grows onto the heap -- so depth is
-// unbounded yet the common case never allocates.
+// The walk frames of every open subtree task share one stack.  It starts
+// in a generous static buffer and, only if a term is deeper than that,
+// grows onto the heap -- so depth is unbounded yet the common case never
+// allocates.
 #define KBO_MEMO_STACK_CAP 8192
 static KboMemoFrame g_kbo_memo_stack[KBO_MEMO_STACK_CAP];
-// Re-entrancy guard: kbo_memo_combine recomputes a child whose memo slot a
-// sibling's subtree evicted via a hash collision by calling back into
-// kbo_subtree_memo (matching the original recursion's per-child lookup).  The
-// outer call still owns g_kbo_memo_stack, so the nested call must NOT reuse
-// it -- it allocates its own heap worklist instead.  Collisions are rare, so
-// the static buffer is the common (non-reentrant) case.
-static u8 g_kbo_memo_active = 0u;
+
+// One open task of kbo_subtree_memo.  A subtree task walks the subtree
+// at `t` (its frames above `walk0`), combining each finished node, then
+// reads `t`'s slot; a combine task hashes and registers `t`, then merges
+// its children's weights and profiles from child `i` on.
+enum { KBO_TASK_SUBTREE = 0, KBO_TASK_COMBINE = 1 };
+enum {
+  KBO_SUB_ENTER = 0,       // fast check, then open the walk
+  KBO_SUB_WALK  = 1,       // walk on
+  KBO_SUB_AFTER = 2,       // a walk node's combine returned: pop it
+  KBO_SUB_READ  = 3,       // walk done: read t's slot
+  KBO_SUB_FINAL = 4,       // the re-combine of t returned: that is the result
+  KBO_CMB_ENTER = 0,       // hash, register, look up
+  KBO_CMB_MERGE = 1,       // merge children from i on
+  KBO_CMB_CHILD = 2        // child i's nested walk returned: merge it
+};
+typedef struct {
+  Term      t;
+  u64       base;
+  u64       sh;
+  long long w;
+  u32       n;
+  u32       i;
+  u32       widx;
+  u32       walk0;
+  u8        kind;
+  u8        step;
+  u8        vc;
+  u8        ovf;
+  u8        vid[KBO_VPROF_CAP];
+  i16       vcnt[KBO_VPROF_CAP];
+} KboMemoTask;
+
+// Merge one child's memo entry into a combine task's weight and profile.
+static inline void kbo_memo_merge(KboMemoTask *k, const KboWMemoEnt *ce) {
+  k->w += ce->w;
+  if (ce->vc == KBO_VPROF_OVF) {
+    k->ovf = 1u;
+  } else if (!k->ovf) {
+    for (u8 j = 0; j < ce->vc; j++) {
+      if (!kbo_vprof_add(k->vid, k->vcnt, &k->vc, ce->vid[j], ce->vcnt[j])) {
+        k->ovf = 1u;
+        break;
+      }
+    }
+  }
+}
 
 // Compute (and cache) the weight + variable profile of subtree `t`.
 // Memoizes every CTR node, so a node already seen this epoch is O(1).
 // Variable ids >= KBO_MAX_VAR are out of balance range and are counted only
-// toward the weight (matching kbo_bump's id guard).  Iterative post-order
-// over an explicit worklist stack so an arbitrarily deep term cannot
+// toward the weight (matching kbo_bump's id guard).  Iterative over
+// explicit task and walk stacks so an arbitrarily deep term cannot
 // overflow the C stack (the diagnosed SIGSEGV site under WM-FPA).
 static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t) {
   // Fast Term-ID path: same Term ID seen this epoch -> O(1) jump to
   // its wmemo slot (verified by struct-hash equality to catch any
   // wmemo slot eviction since).
-  u32 thidx = kbo_thash_slot(t);
-  KboTHashEnt *th = &g_kbo_thash[thidx];
-  if (th->epoch == g_kbo_epoch && th->t == t) {
-    KboWMemoEnt *e = &g_kbo_wmemo[th->wmemo_idx];
-    if (e->epoch == g_kbo_epoch && e->hash == th->hash) return e;
-    // Slot evicted under collision; fall through to re-fill.
-  }
-
-  u8 reentrant = g_kbo_memo_active;
-  g_kbo_memo_active = 1u;
-  KboMemoFrame *heap_stack = NULL;
-  KboMemoFrame *stack;
-  u32 cap = KBO_MEMO_STACK_CAP;
-  if (reentrant) {
-    heap_stack = (KboMemoFrame *)malloc((size_t)cap * sizeof *heap_stack);
-    stack = heap_stack;
-  } else {
-    stack = g_kbo_memo_stack;
-  }
-  u32 sp = 0u;
-  KboMemoFrame *f = &stack[sp++];
-  f->t = t; f->n = kbo_ctr_children(t, &f->base); f->i = 0u;
-  while (sp > 0u) {
-    f = &stack[sp - 1u];
-    // Advance over children that are leaves or already memoized; push the
-    // first CTR child still needing computation.
-    int descended = 0;
-    while (f->i < f->n) {
-      Term c = heap_read(f->base + f->i);
-      f->i++;
-      if (term_tag(c) != TAG_CTR) continue;          // FVR/atom: combined later
-      KboTHashEnt *cth = &g_kbo_thash[kbo_thash_slot(c)];
-      if (cth->epoch == g_kbo_epoch && cth->t == c) continue;  // already memoized this walk
-      if (sp >= cap) {
-        u32 ncap = cap * 2u;
-        KboMemoFrame *nh = (KboMemoFrame *)malloc((size_t)ncap * sizeof *nh);
-        for (u32 k = 0; k < sp; k++) nh[k] = stack[k];
-        if (heap_stack) free(heap_stack);
-        heap_stack = nh; stack = nh; cap = ncap;
-        f = &stack[sp - 1u];
+  {
+    KboTHashEnt *th = &g_kbo_thash[kbo_thash_slot(t)];
+    if (th->epoch == g_kbo_epoch && th->t == t) {
+      KboWMemoEnt *e = &g_kbo_wmemo[th->wmemo_idx];
+      if (e->epoch == g_kbo_epoch && e->hash == th->hash) {
+        return e;
       }
-      KboMemoFrame *nf = &stack[sp++];
-      nf->t = c; nf->n = kbo_ctr_children(c, &nf->base); nf->i = 0u;
-      descended = 1;
-      break;
+      // Slot evicted under collision; fall through to re-fill.
     }
-    if (descended) continue;
-    // children exhausted: combine this node, pop.
-    kbo_memo_combine(cfg, f->t);
-    sp--;
   }
-  if (heap_stack) free(heap_stack);
-  // Read t's thash entry (filled by the combine above); from it, locate
-  // the wmemo slot.  A late wmemo collision may have evicted it -- in
-  // that case re-combine.
-  th = &g_kbo_thash[thidx];
-  KboWMemoEnt *e;
-  if (th->epoch == g_kbo_epoch && th->t == t) {
-    e = &g_kbo_wmemo[th->wmemo_idx];
-    if (!(e->epoch == g_kbo_epoch && e->hash == th->hash)) e = kbo_memo_combine(cfg, t);
-  } else {
-    e = kbo_memo_combine(cfg, t);
+  KboMemoTask   tk_inl[16];
+  KboMemoTask  *tk  = tk_inl;
+  u32           ntk = 0u;
+  u32           ctk = 16u;
+  KboMemoFrame *wk  = g_kbo_memo_stack;
+  u32           nwk = 0u;
+  u32           cwk = KBO_MEMO_STACK_CAP;
+  KboWMemoEnt  *ret = NULL;
+  tk[0].kind = KBO_TASK_SUBTREE;
+  tk[0].step = KBO_SUB_ENTER;
+  tk[0].t    = t;
+  ntk = 1u;
+  for (;;) {
+    KboMemoTask *k    = &tk[ntk - 1u];
+    u8           done = 0u;   // the task finished with result `ret`
+    u8           call = 0u;   // the task opened a nested task
+    if (k->kind == KBO_TASK_SUBTREE) {
+      switch (k->step) {
+        case KBO_SUB_ENTER: {
+          KboTHashEnt *th = &g_kbo_thash[kbo_thash_slot(k->t)];
+          if (th->epoch == g_kbo_epoch && th->t == k->t) {
+            KboWMemoEnt *e = &g_kbo_wmemo[th->wmemo_idx];
+            if (e->epoch == g_kbo_epoch && e->hash == th->hash) {
+              ret  = e;
+              done = 1u;
+              break;
+            }
+          }
+          k->walk0 = nwk;
+          if (nwk == cwk) {
+            wk = (KboMemoFrame *)term_stack_grow(wk, g_kbo_memo_stack, &cwk, sizeof *wk);
+          }
+          wk[nwk].t = k->t;
+          wk[nwk].n = kbo_ctr_children(k->t, &wk[nwk].base);
+          wk[nwk].i = 0u;
+          nwk++;
+          k->step = KBO_SUB_WALK;
+          break;
+        }
+        case KBO_SUB_AFTER:
+          nwk--;
+          k->step = KBO_SUB_WALK;
+          break;
+        case KBO_SUB_WALK: {
+          if (nwk == k->walk0) {
+            k->step = KBO_SUB_READ;
+            break;
+          }
+          KboMemoFrame *f = &wk[nwk - 1u];
+          // Advance over children that are leaves or already memoized; push
+          // the first CTR child still needing computation.
+          u8 descended = 0u;
+          while (f->i < f->n) {
+            Term c = heap_read(f->base + f->i);
+            f->i++;
+            if (term_tag(c) != TAG_CTR) continue;          // FVR/atom: combined later
+            KboTHashEnt *cth = &g_kbo_thash[kbo_thash_slot(c)];
+            if (cth->epoch == g_kbo_epoch && cth->t == c) continue;  // already memoized this walk
+            if (nwk == cwk) {
+              wk = (KboMemoFrame *)term_stack_grow(wk, g_kbo_memo_stack, &cwk, sizeof *wk);
+            }
+            wk[nwk].t = c;
+            wk[nwk].n = kbo_ctr_children(c, &wk[nwk].base);
+            wk[nwk].i = 0u;
+            nwk++;
+            descended = 1u;
+            break;
+          }
+          if (descended) {
+            break;
+          }
+          // children exhausted: combine this node, then pop it.
+          k->step = KBO_SUB_AFTER;
+          call    = 1u;
+          t       = f->t;
+          break;
+        }
+        case KBO_SUB_READ: {
+          // Read t's thash entry (filled by the combine above); from it,
+          // locate the wmemo slot.  A late wmemo collision may have evicted
+          // it -- in that case re-combine.
+          KboTHashEnt *th = &g_kbo_thash[kbo_thash_slot(k->t)];
+          if (th->epoch == g_kbo_epoch && th->t == k->t) {
+            KboWMemoEnt *e = &g_kbo_wmemo[th->wmemo_idx];
+            if (e->epoch == g_kbo_epoch && e->hash == th->hash) {
+              ret  = e;
+              done = 1u;
+              break;
+            }
+          }
+          k->step = KBO_SUB_FINAL;
+          call    = 1u;
+          t       = k->t;
+          break;
+        }
+        default:   // KBO_SUB_FINAL: the re-combine's entry is the result
+          done = 1u;
+          break;
+      }
+      if (call) {
+        // A combine task for node `t`.
+        if (ntk == ctk) {
+          tk = (KboMemoTask *)term_stack_grow(tk, tk_inl, &ctk, sizeof *tk);
+        }
+        tk[ntk].kind = KBO_TASK_COMBINE;
+        tk[ntk].step = KBO_CMB_ENTER;
+        tk[ntk].t    = t;
+        ntk++;
+        continue;
+      }
+    } else {
+      switch (k->step) {
+        case KBO_CMB_ENTER: {
+          // Compute this node's structural hash from children (children's
+          // hashes are in g_kbo_thash since post-order put them there
+          // first).  Position-sensitive + per-child avalanche
+          // (kbo_node_hash) so distinct variable ids in symmetric
+          // positions can never cancel into a collision.
+          k->n = kbo_ctr_children(k->t, &k->base);
+          u64 sh = kbo_node_hash_init(term_ext(k->t));
+          for (u32 i = 0; i < k->n; i++) {
+            sh = kbo_node_hash_add(sh, i, kbo_leaf_hash(heap_read(k->base + i)));
+          }
+          sh = kbo_node_hash_fini(sh, k->n);
+          // Register this Term ID in the per-Term-ID cache.
+          KboTHashEnt *th = &g_kbo_thash[kbo_thash_slot(k->t)];
+          k->sh   = sh;
+          k->widx = kbo_wmemo_slot(sh);
+          th->t = k->t; th->hash = sh; th->epoch = g_kbo_epoch; th->wmemo_idx = k->widx;
+          // Wmemo hit?  Reuse precomputed weight + profile.
+          KboWMemoEnt *e = &g_kbo_wmemo[k->widx];
+          if (e->epoch == g_kbo_epoch && e->hash == sh) {
+            ret  = e;
+            done = 1u;
+            break;
+          }
+          // Wmemo miss: compute weight + profile.
+          k->w    = (long long)kbo_weight(cfg, k->t);
+          k->vc   = 0u;
+          k->ovf  = 0u;
+          k->i    = 0u;
+          k->step = KBO_CMB_MERGE;
+          break;
+        }
+        case KBO_CMB_CHILD:
+          kbo_memo_merge(k, ret);
+          k->i++;
+          k->step = KBO_CMB_MERGE;
+          break;
+        default: {   // KBO_CMB_MERGE
+          while (k->i < k->n) {
+            Term c = heap_read(k->base + k->i);
+            if (term_tag(c) == TAG_FVR) {
+              k->w += (long long)cfg->var_weight;
+              u32 id = term_ext(c);
+              if (id < KBO_MAX_VAR && !k->ovf) {
+                if (!kbo_vprof_add(k->vid, k->vcnt, &k->vc, id, +1)) {
+                  k->ovf = 1u;
+                }
+              }
+            } else if (term_tag(c) == TAG_CTR) {
+              // Child must have a g_kbo_thash entry (post-order); from
+              // that, read the wmemo slot.  If the slot still holds the
+              // child's entry, use it; else recompute it by a nested walk.
+              KboTHashEnt *cth = &g_kbo_thash[kbo_thash_slot(c)];
+              if (cth->epoch == g_kbo_epoch && cth->t == c) {
+                KboWMemoEnt *ce = &g_kbo_wmemo[cth->wmemo_idx];
+                if (ce->epoch == g_kbo_epoch && ce->hash == cth->hash) {
+                  kbo_memo_merge(k, ce);
+                  k->i++;
+                  continue;
+                }
+              }
+              k->step = KBO_CMB_CHILD;
+              call    = 1u;
+              t       = c;
+              break;
+            }
+            // a non-CTR/non-FVR child contributes 0 weight, no vars.
+            k->i++;
+          }
+          if (call) {
+            break;
+          }
+          KboWMemoEnt *e = &g_kbo_wmemo[k->widx];
+          e->hash = k->sh; e->epoch = g_kbo_epoch; e->w = k->w;
+          if (k->ovf) {
+            e->vc = KBO_VPROF_OVF;
+          } else {
+            e->vc = k->vc;
+            for (u8 j = 0; j < k->vc; j++) {
+              e->vid[j]  = k->vid[j];
+              e->vcnt[j] = k->vcnt[j];
+            }
+          }
+          ret  = e;
+          done = 1u;
+          break;
+        }
+      }
+      if (call) {
+        // A nested subtree task for child `t`.
+        if (ntk == ctk) {
+          tk = (KboMemoTask *)term_stack_grow(tk, tk_inl, &ctk, sizeof *tk);
+        }
+        tk[ntk].kind = KBO_TASK_SUBTREE;
+        tk[ntk].step = KBO_SUB_ENTER;
+        tk[ntk].t    = t;
+        ntk++;
+        continue;
+      }
+    }
+    if (done) {
+      if (--ntk == 0u) {
+        break;
+      }
+    }
   }
-  if (!reentrant) g_kbo_memo_active = 0u;
-  return e;
+  term_stack_release(tk, tk_inl);
+  term_stack_release(wk, g_kbo_memo_stack);
+  return ret;
 }
 
 // Inlined fast path for kbo_subtree_memo: the SAME Term-ID seen this epoch
@@ -1085,8 +1318,11 @@ typedef struct KboFlatNode {
 
 // Flatterm encode cap for the KBO/LPO cache-dense comparators.  A term
 // over this many nodes cannot be encoded and the comparator falls back
-// to the Term-tree recursion (thvm_kbo / lpo_rec), which pays a heap_read
-// per child step.  Raised 4096 -> 65536: under --ord=lpo on hard UEQ
+// to the Term-tree walk (thvm_kbo / lpo_rec), which pays a heap_read
+// per child step.  The KBO flat walks (kbo_flat_encode, kbo_flat_vortest,
+// kbo_flat_rek) recurse once per term level: the default path feeds them
+// ft_order.c's ATPFT_KBO_FLAT_CAP-node encodings, and only thvm_kbo_flat
+// (THVM_ATP_KBO_FLAT=1) encodes up to this cap.  Raised 4096 -> 65536: under --ord=lpo on hard UEQ
 // (GRP690-1) the completion produces CP peaks up to ~32k nodes, and every
 // LPO comparison on them was overflowing the 4096 cap and dropping to the
 // O(|s|*|t|) heap-indirected Term-tree lpo_rec -- ~100% of the late-game

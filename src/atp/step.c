@@ -1881,30 +1881,77 @@ fn u32 thvm_atp_generate_cps(AtpState *s, AtpAddedRange added) {
 // original unorientable RHS) drops cleanly with no extra rule push.
 static Term atp_grounded_instance(AtpState *s, Term t, Term lhs,
                                   Term min_const) {
-  switch (term_tag(t)) {
-    case TAG_FVR:
-      // Variable: ground it iff it does not occur on the LHS.  The
-      // not-on-LHS guard mirrors PCL_FreieVarInstanz's "frei in r"
-      // condition -- a bound variable is left alone, so the resulting
-      // rule still unifies with redexes that previously matched lhs.
-      return atp_term_has_var(lhs, term_ext(t)) ? t : min_const;
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      if (n == 0) return t;
-      if (n > REWRITE_MAX_ARITY) return t;
-      Term children[REWRITE_MAX_ARITY];
-      u8 changed = 0;
-      for (u32 i = 0; i < n; i++) {
-        Term ch = term_ctr_at(t, i);
-        Term sub = atp_grounded_instance(s, ch, lhs, min_const);
-        children[i] = sub;
-        if (sub != ch) changed = 1;
+  (void)s;
+  // Rebuilt bottom-up over an explicit stack; a node whose children all
+  // come back unchanged is returned as-is (no term_new_ctr).
+  AtpWalkFrame  fr_inl[ATP_WALK_INL];
+  Term          val_inl[ATP_WALK_INL];
+  AtpWalkFrame *fr   = fr_inl;
+  Term         *val  = val_inl;
+  u32           nfr  = 0u;
+  u32           cfr  = ATP_WALK_INL;
+  u32           nval = 0u;
+  u32           cval = ATP_WALK_INL;
+  for (;;) {
+    u8   leaf = 1u;
+    Term v    = t;
+    switch (term_tag(t)) {
+      case TAG_FVR:
+        // Variable: ground it iff it does not occur on the LHS.  The
+        // not-on-LHS guard mirrors PCL_FreieVarInstanz's "frei in r"
+        // condition -- a bound variable is left alone, so the resulting
+        // rule still unifies with redexes that previously matched lhs.
+        v = atp_term_has_var(lhs, term_ext(t)) ? t : min_const;
+        break;
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        if (n > 0u && n <= REWRITE_MAX_ARITY) {
+          if (nfr == cfr) {
+            fr = (AtpWalkFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].t    = t;
+          fr[nfr].base = term_val(t);
+          fr[nfr].i    = 0u;
+          fr[nfr].n    = n;
+          nfr++;
+          leaf = 0u;
+        }
+        break;
       }
-      if (!changed) return t;
-      return term_new_ctr(term_ext(t), children, n);
+      default:
+        break;
     }
-    default: return t;
+    if (leaf) {
+      if (nval == cval) {
+        val = (Term *)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = v;
+    }
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      AtpWalkFrame *f = &fr[nfr - 1u];
+      Term *kids    = &val[nval - f->n];
+      u8    changed = 0u;
+      for (u32 k = 0; k < f->n; k++) {
+        if (kids[k] != term_ctr_at(f->t, k)) {
+          changed = 1u;
+        }
+      }
+      Term out = changed ? term_new_ctr(term_ext(f->t), kids, f->n) : f->t;
+      nval -= f->n;
+      val[nval++] = out;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    AtpWalkFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
+  Term out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
 
 // One leg of the Waldmeister FVI two-direction wrapper.  Grounds the
@@ -1923,27 +1970,67 @@ static Term atp_grounded_instance(AtpState *s, Term t, Term lhs,
 static AtpFtCell *ft_ground_absent_vars(AtpFt *a, const AtpFtCell *t,
                                         const AtpFtCell *keep, u32 mc,
                                         u8 *changed) {
-  if ((t->sym & WF_VAR_BIT) != 0u) {
-    u32 id = t->sym & ~WF_VAR_BIT;
-    if (!ft_span_has_var(keep, id)) {
-      *changed = 1u;
-      return ftnew_const(a, mc, 0);
+  // Bottom-up over an explicit stack, children before ftnew_ctr.
+  FtSpanFrame  fr_inl[FT_WALK_INL];
+  AtpFtCell   *val_inl[FT_WALK_INL];
+  FtSpanFrame *fr   = fr_inl;
+  AtpFtCell  **val  = val_inl;
+  u32          nfr  = 0u;
+  u32          cfr  = FT_WALK_INL;
+  u32          nval = 0u;
+  u32          cval = FT_WALK_INL;
+  for (;;) {
+    AtpFtCell *done = NULL;
+    if ((t->sym & WF_VAR_BIT) != 0u) {
+      u32 id = t->sym & ~WF_VAR_BIT;
+      if (!ft_span_has_var(keep, id)) {
+        *changed = 1u;
+        done = ftnew_const(a, mc, 0);
+      } else {
+        done = ftnew_var(a, id, 0);
+      }
+    } else if (t->arity == 0u) {
+      done = ftnew_const(a, ft_ctr_sym(t), 0);
+    } else if ((u32)t->arity > REWRITE_MAX_ARITY) {
+      // Term sibling returns the subtree UNCHANGED above REWRITE_MAX_ARITY
+      // (atp_grounded_instance's stack-children cap): clone verbatim, no
+      // grounding below it, no changed mark.
+      done = ft_clone_span(a, t, 0);
+    } else {
+      if (nfr == cfr) {
+        fr = (FtSpanFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].child = t->next;
+      fr[nfr].left  = t->arity;
+      fr[nfr].sym   = ft_ctr_sym(t);
+      fr[nfr].arity = t->arity;
+      nfr++;
     }
-    return ftnew_var(a, id, 0);
+    if (done != NULL) {
+      if (nval == cval) {
+        val = (AtpFtCell **)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = done;
+    }
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      FtSpanFrame *f = &fr[nfr - 1u];
+      nval -= f->arity;
+      val[nval] = ftnew_ctr(a, f->sym, (u16)f->arity, &val[nval], 0);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    FtSpanFrame *f = &fr[nfr - 1u];
+    t        = f->child;
+    f->child = t->end->next;
+    f->left--;
   }
-  u32 n = (u32)t->arity;
-  if (n == 0u) return ftnew_const(a, ft_ctr_sym(t), 0);
-  // Term sibling returns the subtree UNCHANGED above REWRITE_MAX_ARITY
-  // (atp_grounded_instance's stack-children cap): clone verbatim, no
-  // grounding below it, no changed mark.
-  if (n > REWRITE_MAX_ARITY) return ft_clone_span(a, t, 0);
-  AtpFtCell *kids[REWRITE_MAX_ARITY];
-  const AtpFtCell *kid = t->next;
-  for (u32 i = 0; i < n; i++) {
-    kids[i] = ft_ground_absent_vars(a, kid, keep, mc, changed);
-    kid = kid->end->next;
-  }
-  return ftnew_ctr(a, ft_ctr_sym(t), (u16)n, kids, 0);
+  AtpFtCell *out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
 
 // Span sibling of atp_try_ground_and_push: verdicts off the spans, the
@@ -2042,23 +2129,53 @@ static void atp_emit_fvi_pair(AtpState *s, Term lhs, Term rhs,
 //    0 (Gleich):  indistinguishable -> keep
 //   >0 (Groesser): lhs structurally larger -> swap
 static int atp_lr_sortieren_rec(Term lhs, Term rhs) {
-  u8 lv = (term_tag(lhs) == TAG_FVR);
-  u8 rv = (term_tag(rhs) == TAG_FVR);
-  if (lv && rv) return 0;          // both variables -> Gleich
-  if (lv) return -1;               // variable < non-variable -> Kleiner
-  if (rv) return 1;                // non-variable > variable -> Groesser
-  // Both constructors.  Single-operator Sheffer signature: SymbolVergleich
-  // is Gleich for equal functors; differing functors fall back to the
-  // label code (a stable total order mirroring the precedence index).
-  u32 lf = term_ext(lhs), rf = term_ext(rhs);
-  if (lf != rf) return (lf < rf) ? -1 : 1;
-  u32 ln = term_ctr_n(lhs), rn = term_ctr_n(rhs);
-  if (ln != rn) return (ln < rn) ? -1 : 1;
-  for (u32 i = 0; i < ln; i++) {
-    int c = atp_lr_sortieren_rec(term_ctr_at(lhs, i), term_ctr_at(rhs, i));
-    if (c != 0) return c;
+  // Pairs compared in the recursion's left-to-right depth-first order;
+  // the first difference decides.
+  typedef struct { Term l; Term r; } LrPair;
+  LrPair  st_inl[ATP_WALK_INL];
+  LrPair *st  = st_inl;
+  u32     nst = 0u;
+  u32     cst = ATP_WALK_INL;
+  int     c   = 0;
+  for (;;) {
+    u8 lv = (term_tag(lhs) == TAG_FVR);
+    u8 rv = (term_tag(rhs) == TAG_FVR);
+    if (lv && rv) {
+      c = 0;                         // both variables -> Gleich
+    } else if (lv) {
+      c = -1;                        // variable < non-variable -> Kleiner
+    } else if (rv) {
+      c = 1;                         // non-variable > variable -> Groesser
+    } else {
+      // Both constructors.  Single-operator Sheffer signature: SymbolVergleich
+      // is Gleich for equal functors; differing functors fall back to the
+      // label code (a stable total order mirroring the precedence index).
+      u32 lf = term_ext(lhs), rf = term_ext(rhs);
+      u32 ln = term_ctr_n(lhs), rn = term_ctr_n(rhs);
+      if (lf != rf) {
+        c = (lf < rf) ? -1 : 1;
+      } else if (ln != rn) {
+        c = (ln < rn) ? -1 : 1;
+      } else {
+        while (nst + ln > cst) {
+          st = (LrPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = ln; i-- > 0u;) {
+          st[nst].l = term_ctr_at(lhs, i);
+          st[nst].r = term_ctr_at(rhs, i);
+          nst++;
+        }
+      }
+    }
+    if (c != 0 || nst == 0u) {
+      break;
+    }
+    nst--;
+    lhs = st[nst].l;
+    rhs = st[nst].r;
   }
-  return 0;
+  term_stack_release(st, st_inl);
+  return c;
 }
 
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
@@ -2066,23 +2183,57 @@ static int atp_lr_sortieren_rec(Term lhs, Term rhs) {
 // mirror cells (var < non-var, label code, arity, argument-wise).
 static int atp_lr_sortieren_rec_ft(const AtpFtCell *lhs,
                                    const AtpFtCell *rhs) {
-  u8 lv = (u8)((lhs->sym & WF_VAR_BIT) != 0u);
-  u8 rv = (u8)((rhs->sym & WF_VAR_BIT) != 0u);
-  if (lv && rv) return 0;
-  if (lv) return -1;
-  if (rv) return 1;
-  u32 lf = lhs->sym, rf = rhs->sym;
-  if (lf != rf) return (lf < rf) ? -1 : 1;
-  u32 ln = (u32)lhs->arity, rn = (u32)rhs->arity;
-  if (ln != rn) return (ln < rn) ? -1 : 1;
-  const AtpFtCell *lk = lhs->next, *rk = rhs->next;
-  for (u32 i = 0; i < ln; i++) {
-    int c = atp_lr_sortieren_rec_ft(lk, rk);
-    if (c != 0) return c;
-    lk = lk->end->next;
-    rk = rk->end->next;
+  // Open CTR pairs: the next children of both sides and how many remain.
+  typedef struct { const AtpFtCell *l; const AtpFtCell *r; u32 left; } LrFrame;
+  LrFrame  fr_inl[FT_WALK_INL];
+  LrFrame *fr  = fr_inl;
+  u32      nfr = 0u;
+  u32      cfr = FT_WALK_INL;
+  int      c   = 0;
+  for (;;) {
+    u8 lv = (u8)((lhs->sym & WF_VAR_BIT) != 0u);
+    u8 rv = (u8)((rhs->sym & WF_VAR_BIT) != 0u);
+    if (lv && rv) {
+      c = 0;
+    } else if (lv) {
+      c = -1;
+    } else if (rv) {
+      c = 1;
+    } else {
+      u32 lf = lhs->sym, rf = rhs->sym;
+      u32 ln = (u32)lhs->arity, rn = (u32)rhs->arity;
+      if (lf != rf) {
+        c = (lf < rf) ? -1 : 1;
+      } else if (ln != rn) {
+        c = (ln < rn) ? -1 : 1;
+      } else if (ln > 0u) {
+        if (nfr == cfr) {
+          fr = (LrFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].l    = lhs->next;
+        fr[nfr].r    = rhs->next;
+        fr[nfr].left = ln;
+        nfr++;
+      }
+    }
+    if (c != 0) {
+      break;
+    }
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    LrFrame *f = &fr[nfr - 1u];
+    lhs  = f->l;
+    rhs  = f->r;
+    f->l = lhs->end->next;
+    f->r = rhs->end->next;
+    f->left--;
   }
-  return 0;
+  term_stack_release(fr, fr_inl);
+  return c;
 }
 
 // Bracket dispatch: verdict off the spans when the operands are lazy
@@ -2099,12 +2250,32 @@ static int atp_lr_sortieren_disp(Term lhs, Term rhs) {
 
 // True iff term `t` contains a constructor with external id `ext` anywhere.
 static u8 atp_term_has_ctr(Term t, u32 ext) {
-  if (term_tag(t) != TAG_CTR) return 0u;
-  if (term_ext(t) == ext) return 1u;
-  u32 n = term_ctr_n(t);
-  for (u32 i = 0; i < n; i++)
-    if (atp_term_has_ctr(term_ctr_at(t, i), ext)) return 1u;
-  return 0u;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u8    hit = 0u;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      if (term_ext(t) == ext) {
+        hit = 1u;
+        break;
+      }
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 // True iff `a` is a combinator REDEX relative to reduct `b`: descend a's

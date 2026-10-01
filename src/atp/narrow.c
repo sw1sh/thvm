@@ -615,33 +615,86 @@ typedef struct AtpCgq {
 } AtpCgq;
 
 static u32 cgq_term_size(Term t) {
-  if (term_tag(t) != TAG_CTR) return 1u;
-  u32 n = term_ctr_n(t);
-  u32 sz = 1u;
-  for (u32 i = 0; i < n; i++) sz += cgq_term_size(term_ctr_at(t, i));
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u32   sz  = 0u;
+  for (;;) {
+    sz++;
+    if (term_tag(t) == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
   return sz;
 }
 
 static u32 cgq_term_max_var(Term t) {
-  if (term_tag(t) == TAG_FVR) return term_ext(t) + 1u;
-  if (term_tag(t) != TAG_CTR) return 0u;
-  u32 n = term_ctr_n(t);
-  u32 m = 0u;
-  for (u32 i = 0; i < n; i++) {
-    u32 v = cgq_term_max_var(term_ctr_at(t, i));
-    if (v > m) m = v;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u32   m   = 0u;
+  for (;;) {
+    if (term_tag(t) == TAG_FVR) {
+      if (term_ext(t) + 1u > m) {
+        m = term_ext(t) + 1u;
+      }
+    } else if (term_tag(t) == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
   return m;
 }
 
+// A preorder fold: each node mixes its tag/label, a CTR its arity, then
+// its children left to right.
 static u64 cgq_term_hash(Term t, u64 h) {
-  h = (h ^ ((u64)term_tag(t) << 32 ^ (u64)term_ext(t)))
-      * 0x100000001B3ull;
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    h = (h ^ n) * 0x100000001B3ull;
-    for (u32 i = 0; i < n; i++) h = cgq_term_hash(term_ctr_at(t, i), h);
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    h = (h ^ ((u64)term_tag(t) << 32 ^ (u64)term_ext(t)))
+        * 0x100000001B3ull;
+    if (term_tag(t) == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      h = (h ^ n) * 0x100000001B3ull;
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
   return h;
 }
 
@@ -1156,6 +1209,10 @@ u64 g_goal_drive_closes   = 0;      // BASE closures (NF or fact-unify)
 u64 g_goal_drive_discharg = 0;      // successful ifeq-guard STEP regressions
 u64 g_goal_drive_proved   = 0;      // top goals proved
 
+// The goal driver's term walks recurse once per term level (gd_hash and
+// gd_size stop at 64).  The driver is off by default (THVM_ATP_GOAL_DRIVE=1
+// or thvm_atp_set_use_goal_drive turns it on; no FindProof schedule lane
+// does).
 static u8 gd_ground(Term t) {
   switch (term_tag(t)) {
     case TAG_FVR: return 0u;

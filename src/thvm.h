@@ -1732,6 +1732,11 @@ fn Term term_ctr_at  (Term ctr_term, u32 i);
 // when n fits, a heap block otherwise; release with term_kids_release.
 fn Term *term_kids_buf    (Term *stk, u32 n);
 fn void  term_kids_release(Term *kids, Term *stk);
+// Work stack of an iterative term walk: `buf` starts as the caller's
+// inline array `inl` of *cap entries of `esz` bytes; grow doubles it
+// onto the heap (updating *cap), release frees a heap block.
+fn void *term_stack_grow   (void *buf, const void *inl, u32 *cap, size_t esz);
+fn void  term_stack_release(void *buf, const void *inl);
 
 // === lazy outermost-layer resolver ===
 // Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);
@@ -4253,6 +4258,9 @@ fn void thvm_normalize_vars(Term *lhs, Term *rhs);
 // WolframAxioms DoubleNegation run (250 missing CPs in batch-637 alone
 // -- the @1288 alignment fork vs wmcli -auto).  The pos[] arrays are
 // transient per-CP buffers, so the cost is bytes, not asymptotics.
+// The position walks recurse once per path step (cp_walk_positions,
+// cp_replace_at, ft_walk_positions, ft_replace_at_span): this cap is
+// also their C-stack bound.
 #define CP_MAX_DEPTH 64
 typedef struct {
   Term lhs;

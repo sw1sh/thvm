@@ -193,8 +193,8 @@ AtpFtCell *ftnew_ctr(AtpFt *a, u32 sym, u16 arity,
 
 // --- Boundary: Term -> AtpFt -----------------------------------------
 //
-// Recursive walk over a heap-cell Term.  TAG_FVR -> ftnew_var, TAG_CTR
-// -> ftnew_ctr (recursing into children), everything else falls back
+// Walk over a heap-cell Term.  TAG_FVR -> ftnew_var, TAG_CTR ->
+// ftnew_ctr over the converted children, everything else falls back
 // to a constant cell keyed by tag (the only other thing the ATP layer
 // ever puts into a term position is TAG_NUM, which we encode as a
 // 0-arity constructor with sym = (TAG_NUM << 24) | dtype<<16 |
@@ -203,9 +203,6 @@ AtpFtCell *ftnew_ctr(AtpFt *a, u32 sym, u16 arity,
 // boundary is exactly TAG_FVR + TAG_CTR; the fallback exists so a
 // stray sibling-tagged Term doesn't crash the converter during
 // bring-up.
-
-// Forward decls for mutual recursion through term_ctr_at children.
-static AtpFtCell *ft_from_term_rec(AtpFt *a, Term t, int scratch);
 
 // Pack a TAG_NUM into a constructor sym + a child carrying the raw
 // bits.  TAG_NUM has no children in heap-cell land (atom; val = raw
@@ -221,51 +218,89 @@ static AtpFtCell *ft_from_term_rec(AtpFt *a, Term t, int scratch);
 // WF_VAR_BIT and well above any plausible label).
 #define ATPFT_NUM_MARKER 0x40000000u
 
-static AtpFtCell *ft_from_term_rec(AtpFt *a, Term t, int scratch) {
+// Every walk below keeps its pending frames on an explicit stack
+// (FT_WALK_INL entries on the C stack, then the heap via
+// term_stack_grow), so a deep term costs heap, never C stack.  Each
+// walk visits nodes in the order the recursive form did and allocates
+// cells / heap words in the same order, so outputs and arena / heap
+// layout are those of the recursion.
+enum { FT_WALK_INL = 64 };
+
+// A Term CTR whose children are being converted: child i of the
+// layout cell at `base` is heap_read(base + 1 + i).
+typedef struct {
+  u64 base;
+  u32 i;
+  u32 n;
+  u32 label;
+} FtFromFrame;
+
+// Bottom-up: a CTR's children are built (left to right, each subtree
+// whole) before ftnew_ctr stitches them under the parent.
+static AtpFtCell *ft_from_term_up(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern u64 g_ft_from_nodes; g_ft_from_nodes++; }
-  u8 tag = term_tag(t);
-  if (tag == TAG_FVR) {
-    return ftnew_var(a, term_ext(t), scratch);
-  }
-  if (tag == TAG_CTR) {
-    u32 label = term_ext(t);
-    u32 n     = term_ctr_n(t);
-    if (n == 0u) return ftnew_const(a, label, scratch);
-    // Build children first, then ftnew_ctr stitches them.  Stack
-    // buffer of fixed size for the typical small arity (constructors
-    // in the harvested ATP corpora are <= 4-ary; even Sheffer maxes
-    // at 2).  Fall back to a heap alloc for the unlikely large case.
-    enum { KIDS_STACK = 16 };
-    AtpFtCell *kids_stack[KIDS_STACK];
-    AtpFtCell **kids = kids_stack;
-    AtpFtCell **kids_heap = NULL;
-    if (n > KIDS_STACK) {
-      kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)n);
-      if (kids_heap == NULL) { fprintf(stderr, "ft_from_term: kids OOM\n"); exit(1); }
-      kids = kids_heap;
+  FtFromFrame  fr_inl[FT_WALK_INL];
+  AtpFtCell   *val_inl[FT_WALK_INL];
+  FtFromFrame *fr   = fr_inl;
+  AtpFtCell  **val  = val_inl;
+  u32          nfr  = 0u;
+  u32          cfr  = FT_WALK_INL;
+  u32          nval = 0u;
+  u32          cval = FT_WALK_INL;
+  for (;;) {
+    if (g_atp_phase_detail) { extern u64 g_ft_from_nodes; g_ft_from_nodes++; }
+    AtpFtCell *done = NULL;
+    u8 tag = term_tag(t);
+    if (tag == TAG_FVR) {
+      done = ftnew_var(a, term_ext(t), scratch);
+    } else if (tag == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      if (n == 0u) {
+        done = ftnew_const(a, term_ext(t), scratch);
+      } else {
+        if (nfr == cfr) {
+          fr = (FtFromFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].base  = term_val(t);
+        fr[nfr].i     = 0u;
+        fr[nfr].n     = n;
+        fr[nfr].label = term_ext(t);
+        nfr++;
+      }
+    } else if (tag == TAG_NUM) {
+      u32 dtype = term_ext(t);
+      u32 raw   = (u32)term_val(t);
+      AtpFtCell *dt_cell  = ftnew_const(a, dtype & ~WF_VAR_BIT, scratch);
+      AtpFtCell *raw_cell = ftnew_const(a, raw   & ~WF_VAR_BIT, scratch);
+      AtpFtCell *kids[2]  = { dt_cell, raw_cell };
+      done = ftnew_ctr(a, ATPFT_NUM_MARKER, 2u, kids, scratch);
+    } else {
+      done = ftnew_const(a, 0x20000000u | (u32)tag, scratch);
     }
-    for (u32 i = 0; i < n; i++) {
-      kids[i] = ft_from_term_rec(a, term_ctr_at(t, i), scratch);
+    if (done != NULL) {
+      if (nval == cval) {
+        val = (AtpFtCell **)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = done;
     }
-    AtpFtCell *c = ftnew_ctr(a, label, (u16)n, kids, scratch);
-    free(kids_heap);
-    return c;
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      FtFromFrame *f = &fr[nfr - 1u];
+      nval -= f->n;
+      val[nval] = ftnew_ctr(a, f->label, (u16)f->n, &val[nval], scratch);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    FtFromFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
-  if (tag == TAG_NUM) {
-    u32 dtype = term_ext(t);
-    u32 raw   = (u32)term_val(t);
-    AtpFtCell *dt_cell  = ftnew_const(a, dtype & ~WF_VAR_BIT, scratch);
-    AtpFtCell *raw_cell = ftnew_const(a, raw   & ~WF_VAR_BIT, scratch);
-    AtpFtCell *kids[2]  = { dt_cell, raw_cell };
-    return ftnew_ctr(a, ATPFT_NUM_MARKER, 2u, kids, scratch);
-  }
-  // Fallback: encode any other tag as a 0-arity constant whose sym
-  // carries the tag id ORed with a tag-namespace marker so distinct
-  // tags don't collide with constructor labels.  No live ATP path
-  // produces these, but Stage 2 needs the converter to be total to
-  // simplify bring-up.
-  return ftnew_const(a, 0x20000000u | (u32)tag, scratch);
+  AtpFtCell *out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
 
 // Preorder-streaming term builder (FT-representation P1): allocate the
@@ -274,12 +309,12 @@ static AtpFtCell *ft_from_term_rec(AtpFt *a, Term t, int scratch) {
 // PHYSICALLY-CONSECUTIVE cells on the bump/adjacency-preserving arena --
 // Waldmeister's SigmaRGanzNeu discipline (MatchOperationen.c:1397),
 // where a term is materialised straight down the free list so a
-// pre-order walk is a near-sequential memory scan.  ft_from_term_rec
+// pre-order walk is a near-sequential memory scan.  ft_from_term_up
 // (the default) builds BOTTOM-UP (children before parent), so a
 // pre-order walk hops backward in memory and every ->next is a
 // dependent random load; this walk removes that on freshly-built terms.
 //
-// Byte-identical RESULT to ft_from_term_rec: same sym/arity/flags/next/
+// Byte-identical RESULT to ft_from_term_up: same sym/arity/flags/next/
 // end on every cell (the GROUND flag is OR-folded identically -- cleared
 // as soon as a non-ground child is seen).  Only the cell ADDRESSES
 // differ, and no normal form / hash / KBO verdict observes an address
@@ -292,74 +327,123 @@ static inline int ft_preorder_on(void) {
   if (g_ft_preorder < 0) g_ft_preorder = getenv("THVM_ATP_FT_PREORDER") ? 1 : 0;
   return g_ft_preorder;
 }
+
+// A parent cell (already allocated) whose children are being built;
+// `prev_end` is the last cell of the child stitched last.
+typedef struct {
+  u64        base;
+  u32        i;
+  u32        n;
+  AtpFtCell *c;
+  AtpFtCell *prev_end;
+} FtPreFrame;
+
 static AtpFtCell *ft_from_term_pre(AtpFt *a, Term t, int scratch) {
   extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern u64 g_ft_from_nodes; g_ft_from_nodes++; }
-  u8 tag = term_tag(t);
-  if (tag == TAG_FVR) {
-    AtpFtCell *c = ft_alloc_one(a, scratch);
-    c->next  = NULL;
-    c->end   = c;
-    c->sym   = WF_VAR_BIT | (term_ext(t) & ~WF_VAR_BIT);
-    c->arity = 0;
-    c->flags = 0;
-    ft_raw_check(c);
-    return c;
-  }
-  if (tag == TAG_CTR) {
-    u32 label = term_ext(t);
-    u32 n     = term_ctr_n(t);
-    AtpFtCell *c = ft_alloc_one(a, scratch);   // PARENT FIRST (pre-order)
-    c->sym   = label & ~WF_VAR_BIT;
-    c->arity = (u16)n;
-    c->flags = ATPFT_FLAG_GROUND;              // OR-folded below
-    if (n == 0u) { c->next = NULL; c->end = c; ft_raw_check(c); return c; }
-    AtpFtCell *prev_end = NULL;
-    for (u32 i = 0; i < n; i++) {
-      AtpFtCell *kid = ft_from_term_pre(a, term_ctr_at(t, i), scratch);
-      if (i == 0u) c->next = kid;              // kid is the physically next cell
-      else         prev_end->next = kid;
-      if ((kid->flags & ATPFT_FLAG_GROUND) == 0u) c->flags = 0;
-      prev_end = kid->end;
+  FtPreFrame  fr_inl[FT_WALK_INL];
+  FtPreFrame *fr  = fr_inl;
+  u32         nfr = 0u;
+  u32         cfr = FT_WALK_INL;
+  AtpFtCell  *done;
+  for (;;) {
+    if (g_atp_phase_detail) { extern u64 g_ft_from_nodes; g_ft_from_nodes++; }
+    done = NULL;
+    u8 tag = term_tag(t);
+    if (tag == TAG_FVR) {
+      AtpFtCell *c = ft_alloc_one(a, scratch);
+      c->next  = NULL;
+      c->end   = c;
+      c->sym   = WF_VAR_BIT | (term_ext(t) & ~WF_VAR_BIT);
+      c->arity = 0;
+      c->flags = 0;
+      ft_raw_check(c);
+      done = c;
+    } else if (tag == TAG_CTR) {
+      u32 label = term_ext(t);
+      u32 n     = term_ctr_n(t);
+      AtpFtCell *c = ft_alloc_one(a, scratch);   // PARENT FIRST (pre-order)
+      c->sym   = label & ~WF_VAR_BIT;
+      c->arity = (u16)n;
+      c->flags = ATPFT_FLAG_GROUND;              // OR-folded below
+      if (n == 0u) {
+        c->next = NULL;
+        c->end  = c;
+        ft_raw_check(c);
+        done = c;
+      } else {
+        if (nfr == cfr) {
+          fr = (FtPreFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].base     = term_val(t);
+        fr[nfr].i        = 0u;
+        fr[nfr].n        = n;
+        fr[nfr].c        = c;
+        fr[nfr].prev_end = NULL;
+        nfr++;
+      }
+    } else if (tag == TAG_NUM) {
+      // Marker parent, then the two field constants, pre-order.
+      u32 dtype = term_ext(t);
+      u32 raw   = (u32)term_val(t);
+      AtpFtCell *c = ft_alloc_one(a, scratch);
+      c->sym   = ATPFT_NUM_MARKER;
+      c->arity = 2u;
+      c->flags = ATPFT_FLAG_GROUND;
+      AtpFtCell *dt_cell = ft_alloc_one(a, scratch);
+      dt_cell->next = NULL; dt_cell->end = dt_cell;
+      dt_cell->sym = dtype & ~WF_VAR_BIT; dt_cell->arity = 0;
+      dt_cell->flags = ATPFT_FLAG_GROUND;
+      ft_raw_check(dt_cell);
+      AtpFtCell *raw_cell = ft_alloc_one(a, scratch);
+      raw_cell->next = NULL; raw_cell->end = raw_cell;
+      raw_cell->sym = raw & ~WF_VAR_BIT; raw_cell->arity = 0;
+      raw_cell->flags = ATPFT_FLAG_GROUND;
+      ft_raw_check(raw_cell);
+      c->next        = dt_cell;
+      dt_cell->next  = raw_cell;
+      c->end         = raw_cell;
+      raw_cell->next = NULL;
+      ft_raw_check(c);
+      done = c;
+    } else {
+      AtpFtCell *c = ft_alloc_one(a, scratch);
+      c->next  = NULL;
+      c->end   = c;
+      c->sym   = 0x20000000u | (u32)tag;
+      c->arity = 0;
+      c->flags = ATPFT_FLAG_GROUND;
+      ft_raw_check(c);
+      done = c;
     }
-    c->end         = prev_end;
-    c->end->next   = NULL;
-    ft_raw_check(c);
-    return c;
+    // Stitch the finished span under its parent; a parent whose last
+    // child is stitched is finished in turn.
+    while (done != NULL && nfr > 0u) {
+      FtPreFrame *f = &fr[nfr - 1u];
+      if (f->i == 0u) f->c->next = done;         // done is the physically next cell
+      else            f->prev_end->next = done;
+      if ((done->flags & ATPFT_FLAG_GROUND) == 0u) {
+        f->c->flags = 0;
+      }
+      f->prev_end = done->end;
+      f->i++;
+      if (f->i < f->n) {
+        done = NULL;
+        break;
+      }
+      AtpFtCell *c = f->c;
+      c->end       = f->prev_end;
+      c->end->next = NULL;
+      ft_raw_check(c);
+      done = c;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    t = heap_read(fr[nfr - 1u].base + 1u + (u64)fr[nfr - 1u].i);
   }
-  if (tag == TAG_NUM) {
-    // Marker parent, then the two field constants, pre-order.
-    u32 dtype = term_ext(t);
-    u32 raw   = (u32)term_val(t);
-    AtpFtCell *c = ft_alloc_one(a, scratch);
-    c->sym   = ATPFT_NUM_MARKER;
-    c->arity = 2u;
-    c->flags = ATPFT_FLAG_GROUND;
-    AtpFtCell *dt_cell = ft_alloc_one(a, scratch);
-    dt_cell->next = NULL; dt_cell->end = dt_cell;
-    dt_cell->sym = dtype & ~WF_VAR_BIT; dt_cell->arity = 0;
-    dt_cell->flags = ATPFT_FLAG_GROUND;
-    ft_raw_check(dt_cell);
-    AtpFtCell *raw_cell = ft_alloc_one(a, scratch);
-    raw_cell->next = NULL; raw_cell->end = raw_cell;
-    raw_cell->sym = raw & ~WF_VAR_BIT; raw_cell->arity = 0;
-    raw_cell->flags = ATPFT_FLAG_GROUND;
-    ft_raw_check(raw_cell);
-    c->next        = dt_cell;
-    dt_cell->next  = raw_cell;
-    c->end         = raw_cell;
-    raw_cell->next = NULL;
-    ft_raw_check(c);
-    return c;
-  }
-  AtpFtCell *c = ft_alloc_one(a, scratch);
-  c->next  = NULL;
-  c->end   = c;
-  c->sym   = 0x20000000u | (u32)tag;
-  c->arity = 0;
-  c->flags = ATPFT_FLAG_GROUND;
-  ft_raw_check(c);
-  return c;
+  term_stack_release(fr, fr_inl);
+  return done;
 }
 
 __attribute__((noinline)) void ft_region2_to_hook(void) {
@@ -395,11 +479,76 @@ AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
     }
   }
   if (ft_preorder_on()) return ft_from_term_pre(a, t, scratch);
-  return ft_from_term_rec(a, t, scratch);
+  return ft_from_term_up(a, t, scratch);
+}
+
+// A span CTR cell whose children are being visited: `child` is the
+// next child's head cell, `left` the children not yet visited.
+typedef struct {
+  const AtpFtCell *child;
+  u32              left;
+  u32              sym;
+  u32              arity;
+} FtSpanFrame;
+
+// Bottom-up span copy through the ftnew_* constructors with every var
+// id shifted by `offset` (0 = plain clone): children are built before
+// ftnew_ctr stitches them, as ft_from_term_up does.
+static AtpFtCell *ft_copy_span(AtpFt *a, const AtpFtCell *x, u32 offset,
+                               int scratch) {
+  FtSpanFrame  fr_inl[FT_WALK_INL];
+  AtpFtCell   *val_inl[FT_WALK_INL];
+  FtSpanFrame *fr   = fr_inl;
+  AtpFtCell  **val  = val_inl;
+  u32          nfr  = 0u;
+  u32          cfr  = FT_WALK_INL;
+  u32          nval = 0u;
+  u32          cval = FT_WALK_INL;
+  for (;;) {
+    AtpFtCell *done = NULL;
+    if (ft_is_var(x)) {
+      done = ftnew_var(a, ft_var_id(x) + offset, scratch);
+    } else if (x->arity == 0u) {
+      done = ftnew_const(a, ft_ctr_sym(x), scratch);
+    } else {
+      if (nfr == cfr) {
+        fr = (FtSpanFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].child = x->next;
+      fr[nfr].left  = x->arity;
+      fr[nfr].sym   = ft_ctr_sym(x);
+      fr[nfr].arity = x->arity;
+      nfr++;
+    }
+    if (done != NULL) {
+      if (nval == cval) {
+        val = (AtpFtCell **)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = done;
+    }
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      FtSpanFrame *f = &fr[nfr - 1u];
+      nval -= f->arity;
+      val[nval] = ftnew_ctr(a, f->sym, (u16)f->arity, &val[nval], scratch);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    FtSpanFrame *f = &fr[nfr - 1u];
+    x        = f->child;
+    f->child = x->end->next;
+    f->left--;
+  }
+  AtpFtCell *out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
 
 // Structural clone of a cell span through the same ftnew_* constructors
-// ft_from_term_rec uses -- the output is bit-identical to
+// ft_from_term_up uses -- the output is bit-identical to
 // ft_from_term(a, ft_to_term(x), scratch) with both Term hops removed
 // (sym / arity / next / end threading and the GROUND fold all come from
 // ftnew_ctr, exactly as a fresh conversion would).  Runtime-only flag
@@ -408,29 +557,7 @@ AtpFtCell *ft_from_term(AtpFt *a, Term t, int scratch) {
 // DESTRUCTIVE normalize a private copy of a live mirror span (rule or
 // goal) without re-encoding the Term side.
 AtpFtCell *ft_clone_span(AtpFt *a, const AtpFtCell *x, int scratch) {
-  if (ft_is_var(x)) {
-    return ftnew_var(a, ft_var_id(x), scratch);
-  }
-  u32 sym   = ft_ctr_sym(x);
-  u16 arity = x->arity;
-  if (arity == 0u) return ftnew_const(a, sym, scratch);
-  enum { KIDS_STACK = 16 };
-  AtpFtCell *kids_stack[KIDS_STACK];
-  AtpFtCell **kids      = kids_stack;
-  AtpFtCell **kids_heap = NULL;
-  if (arity > KIDS_STACK) {
-    kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
-    if (kids_heap == NULL) { fprintf(stderr, "ft_clone_span: kids OOM\n"); exit(1); }
-    kids = kids_heap;
-  }
-  const AtpFtCell *child = x->next;
-  for (u16 i = 0; i < arity; i++) {
-    kids[i] = ft_clone_span(a, child, scratch);
-    child = child->end->next;
-  }
-  AtpFtCell *c = ftnew_ctr(a, sym, arity, kids, scratch);
-  free(kids_heap);
-  return c;
+  return ft_copy_span(a, x, 0u, scratch);
 }
 
 // Subterm addressing on a span: the cell at child-index path
@@ -458,79 +585,17 @@ const AtpFtCell *ft_subterm_at(const AtpFtCell *c, const u32 *p,
 // Term hops removed.
 AtpFtCell *ft_rename_span(AtpFt *a, const AtpFtCell *x, u32 offset,
                           int scratch) {
-  if (ft_is_var(x)) {
-    return ftnew_var(a, ft_var_id(x) + offset, scratch);
-  }
-  u32 sym   = ft_ctr_sym(x);
-  u16 arity = x->arity;
-  if (arity == 0u) return ftnew_const(a, sym, scratch);
-  enum { KIDS_STACK = 16 };
-  AtpFtCell *kids_stack[KIDS_STACK];
-  AtpFtCell **kids      = kids_stack;
-  AtpFtCell **kids_heap = NULL;
-  if (arity > KIDS_STACK) {
-    kids_heap = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
-    if (kids_heap == NULL) { fprintf(stderr, "ft_rename_span: kids OOM\n"); exit(1); }
-    kids = kids_heap;
-  }
-  const AtpFtCell *child = x->next;
-  for (u16 i = 0; i < arity; i++) {
-    kids[i] = ft_rename_span(a, child, offset, scratch);
-    child = child->end->next;
-  }
-  AtpFtCell *c = ftnew_ctr(a, sym, arity, kids, scratch);
-  free(kids_heap);
-  return c;
+  return ft_copy_span(a, x, offset, scratch);
 }
 
 // --- Boundary: AtpFt -> Term -----------------------------------------
 //
 // Mirror of the above: a var cell becomes term_new_fvr; a 0-arity
 // CTR cell becomes term_new_ctr with no children; an arity>0 CTR
-// recurses over its children (walked via cell->end->next sibling
-// jumps).  ATPFT_NUM_MARKER round-trips back to a TAG_NUM via
-// term_new(0, TAG_NUM, dtype, raw).
-
-static Term ft_to_term_rec(const AtpFtCell *x);
-
-static Term ft_to_term_rec(const AtpFtCell *x) {
-  extern unsigned char g_atp_phase_detail;
-  if (g_atp_phase_detail) { extern u64 g_ft_to_nodes; g_ft_to_nodes++; }
-  if (ft_is_var(x)) {
-    return term_new_fvr(ft_var_id(x));
-  }
-  u32 sym   = ft_ctr_sym(x);
-  u16 arity = x->arity;
-  if (sym == ATPFT_NUM_MARKER && arity == 2u) {
-    // Recover (dtype, raw) from the two child constant cells.
-    const AtpFtCell *dt_cell  = x->next;
-    const AtpFtCell *raw_cell = dt_cell->end->next;
-    u32 dtype = ft_ctr_sym(dt_cell);
-    u32 raw   = ft_ctr_sym(raw_cell);
-    return term_new(0, TAG_NUM, dtype, raw);
-  }
-  if (arity == 0u) {
-    return term_new_ctr(sym, NULL, 0u);
-  }
-  enum { KIDS_STACK = 16 };
-  Term  kids_stack[KIDS_STACK];
-  Term *kids      = kids_stack;
-  Term *kids_heap = NULL;
-  if (arity > KIDS_STACK) {
-    kids_heap = (Term *)malloc(sizeof(Term) * (size_t)arity);
-    if (kids_heap == NULL) { fprintf(stderr, "ft_to_term: kids OOM\n"); exit(1); }
-    kids = kids_heap;
-  }
-  const AtpFtCell *child = x->next;
-  for (u16 i = 0; i < arity; i++) {
-    kids[i] = ft_to_term_rec(child);
-    child = child->end->next;
-  }
-  Term out = term_new_ctr(sym, kids, (u32)arity);
-  free(kids_heap);
-  return out;
-}
-
+// becomes term_new_ctr over its converted children (walked via
+// cell->end->next sibling jumps), allocated after its last child as
+// the recursion did.  ATPFT_NUM_MARKER round-trips back to a TAG_NUM
+// via term_new(0, TAG_NUM, dtype, raw).
 Term ft_to_term(const AtpFtCell *x) {
   extern unsigned char g_atp_phase_detail;
   if (g_atp_phase_detail) {
@@ -545,8 +610,77 @@ Term ft_to_term(const AtpFtCell *x) {
     if (g_ft_region == 2u) ft_region2_to_hook();
     if (g_ft_region == 0u) ft_region0_to_hook();
   }
-  return ft_to_term_rec(x);
+  FtSpanFrame  fr_inl[FT_WALK_INL];
+  Term         val_inl[FT_WALK_INL];
+  FtSpanFrame *fr   = fr_inl;
+  Term        *val  = val_inl;
+  u32          nfr  = 0u;
+  u32          cfr  = FT_WALK_INL;
+  u32          nval = 0u;
+  u32          cval = FT_WALK_INL;
+  for (;;) {
+    if (g_atp_phase_detail) { extern u64 g_ft_to_nodes; g_ft_to_nodes++; }
+    u8   leaf = 1u;
+    Term v    = 0;
+    if (ft_is_var(x)) {
+      v = term_new_fvr(ft_var_id(x));
+    } else {
+      u32 sym   = ft_ctr_sym(x);
+      u16 arity = x->arity;
+      if (sym == ATPFT_NUM_MARKER && arity == 2u) {
+        // Recover (dtype, raw) from the two child constant cells.
+        const AtpFtCell *dt_cell  = x->next;
+        const AtpFtCell *raw_cell = dt_cell->end->next;
+        v = term_new(0, TAG_NUM, ft_ctr_sym(dt_cell), ft_ctr_sym(raw_cell));
+      } else if (arity == 0u) {
+        v = term_new_ctr(sym, NULL, 0u);
+      } else {
+        if (nfr == cfr) {
+          fr = (FtSpanFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].child = x->next;
+        fr[nfr].left  = arity;
+        fr[nfr].sym   = sym;
+        fr[nfr].arity = arity;
+        nfr++;
+        leaf = 0u;
+      }
+    }
+    if (leaf) {
+      if (nval == cval) {
+        val = (Term *)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = v;
+    }
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      FtSpanFrame *f = &fr[nfr - 1u];
+      nval -= f->arity;
+      val[nval] = term_new_ctr(f->sym, &val[nval], f->arity);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    FtSpanFrame *f = &fr[nfr - 1u];
+    x        = f->child;
+    f->child = x->end->next;
+    f->left--;
+  }
+  Term out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
+
+// A span cell walked in lockstep with a Term CTR: `kid` is the next
+// span child, child i of the Term is heap_read(base + 1 + i).
+typedef struct {
+  const AtpFtCell *kid;
+  u64              base;
+  u32              i;
+  u32              n;
+} FtTermFrame;
 
 // Exact FT-vs-Term structural compare -- 1 iff `c` is the span
 // ft_from_term(a, t) would build (same encoding contract: FVR <-> var
@@ -555,30 +689,71 @@ Term ft_to_term(const AtpFtCell *x) {
 // adoption gates use it to prove a candidate span IS a Term's image
 // before adopting it in place of a fresh conversion.
 int ft_eq_term(const AtpFtCell *c, Term t) {
-  u8 tag = term_tag(t);
-  if (tag == TAG_FVR) {
-    return ft_is_var(c) && ft_var_id(c) == (term_ext(t) & ~WF_VAR_BIT);
-  }
-  if (ft_is_var(c)) return 0;
-  if (tag == TAG_CTR) {
-    if (ft_ctr_sym(c) != (term_ext(t) & ~WF_VAR_BIT)) return 0;
-    u32 n = term_ctr_n(t);
-    if ((u32)c->arity != n) return 0;
-    const AtpFtCell *child = c->next;
-    for (u32 i = 0; i < n; i++) {
-      if (!ft_eq_term(child, term_ctr_at(t, i))) return 0;
-      child = child->end->next;
+  FtTermFrame  fr_inl[FT_WALK_INL];
+  FtTermFrame *fr  = fr_inl;
+  u32          nfr = 0u;
+  u32          cfr = FT_WALK_INL;
+  int          eq  = 1;
+  for (;;) {
+    u8 tag = term_tag(t);
+    if (tag == TAG_FVR) {
+      if (!ft_is_var(c) || ft_var_id(c) != (term_ext(t) & ~WF_VAR_BIT)) {
+        eq = 0;
+        break;
+      }
+    } else if (ft_is_var(c)) {
+      eq = 0;
+      break;
+    } else if (tag == TAG_CTR) {
+      if (ft_ctr_sym(c) != (term_ext(t) & ~WF_VAR_BIT)) {
+        eq = 0;
+        break;
+      }
+      u32 n = term_ctr_n(t);
+      if ((u32)c->arity != n) {
+        eq = 0;
+        break;
+      }
+      if (n > 0u) {
+        if (nfr == cfr) {
+          fr = (FtTermFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].kid  = c->next;
+        fr[nfr].base = term_val(t);
+        fr[nfr].i    = 0u;
+        fr[nfr].n    = n;
+        nfr++;
+      }
+    } else if (tag == TAG_NUM) {
+      if (ft_ctr_sym(c) != ATPFT_NUM_MARKER || c->arity != 2u) {
+        eq = 0;
+        break;
+      }
+      const AtpFtCell *dt_cell  = c->next;
+      const AtpFtCell *raw_cell = dt_cell->end->next;
+      if (ft_ctr_sym(dt_cell)  != (term_ext(t) & ~WF_VAR_BIT) ||
+          ft_ctr_sym(raw_cell) != (((u32)term_val(t)) & ~WF_VAR_BIT)) {
+        eq = 0;
+        break;
+      }
+    } else {
+      eq = 0;
+      break;
     }
-    return 1;
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    FtTermFrame *f = &fr[nfr - 1u];
+    c      = f->kid;
+    f->kid = c->end->next;
+    t      = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
-  if (tag == TAG_NUM) {
-    if (ft_ctr_sym(c) != ATPFT_NUM_MARKER || c->arity != 2u) return 0;
-    const AtpFtCell *dt_cell  = c->next;
-    const AtpFtCell *raw_cell = dt_cell->end->next;
-    return ft_ctr_sym(dt_cell)  == (term_ext(t) & ~WF_VAR_BIT)
-        && ft_ctr_sym(raw_cell) == (((u32)term_val(t)) & ~WF_VAR_BIT);
-  }
-  return 0;
+  term_stack_release(fr, fr_inl);
+  return eq;
 }
 
 // Span-pattern one-way match against a HEAP-TERM subject -- the exact
@@ -587,29 +762,65 @@ int ft_eq_term(const AtpFtCell *c, Term t) {
 // kbo_eq), constructor cells compare label + arity + children, and a
 // TAG_NUM-marker pattern never matches (thvm_match's default arm).
 // Bindings land in the same RewriteSubst (Term-typed), so the caller's
-// substitution application is unchanged.
+// substitution application is unchanged.  Children are matched left to
+// right, depth first, so a failed match leaves the same partial
+// bindings the recursion did.
 int ft_match_term(const AtpFtCell *pat, Term term, RewriteSubst *subst) {
-  if (ft_is_var(pat)) {
-    u32 id = ft_var_id(pat);
-    if (id >= REWRITE_MAX_VAR) return 0;
-    if (subst->bindings[id] == 0) {
-      subst->bindings[id] = term;
-      return 1;
+  FtTermFrame  fr_inl[FT_WALK_INL];
+  FtTermFrame *fr  = fr_inl;
+  u32          nfr = 0u;
+  u32          cfr = FT_WALK_INL;
+  int          ok  = 1;
+  for (;;) {
+    if (ft_is_var(pat)) {
+      u32 id = ft_var_id(pat);
+      if (id >= REWRITE_MAX_VAR) {
+        ok = 0;
+        break;
+      }
+      if (subst->bindings[id] == 0) {
+        subst->bindings[id] = term;
+      } else if (!kbo_eq(subst->bindings[id], term)) {
+        ok = 0;
+        break;
+      }
+    } else {
+      u32 sym = ft_ctr_sym(pat);
+      if (sym == ATPFT_NUM_MARKER || term_tag(term) != TAG_CTR ||
+          sym != term_ext(term)) {
+        ok = 0;
+        break;
+      }
+      u32 n = (u32)pat->arity;
+      if (term_ctr_n(term) != n) {
+        ok = 0;
+        break;
+      }
+      if (n > 0u) {
+        if (nfr == cfr) {
+          fr = (FtTermFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].kid  = pat->next;
+        fr[nfr].base = term_val(term);
+        fr[nfr].i    = 0u;
+        fr[nfr].n    = n;
+        nfr++;
+      }
     }
-    return kbo_eq(subst->bindings[id], term);
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    FtTermFrame *f = &fr[nfr - 1u];
+    pat    = f->kid;
+    f->kid = pat->end->next;
+    term   = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
-  u32 sym = ft_ctr_sym(pat);
-  if (sym == ATPFT_NUM_MARKER) return 0;   // thvm_match default: no match
-  if (term_tag(term) != TAG_CTR) return 0;
-  if (sym != term_ext(term)) return 0;
-  u32 n = (u32)pat->arity;
-  if (term_ctr_n(term) != n) return 0;
-  const AtpFtCell *kid = pat->next;
-  for (u32 i = 0; i < n; i++) {
-    if (!ft_match_term(kid, term_ctr_at(term, i), subst)) return 0;
-    kid = kid->end->next;
-  }
-  return 1;
+  term_stack_release(fr, fr_inl);
+  return ok;
 }
 
 // Instantiate a span TEMPLATE under a Term-typed substitution,
@@ -617,37 +828,82 @@ int ft_match_term(const AtpFtCell *pat, Term term, RewriteSubst *subst) {
 // thvm_subst_apply(template_term, subst) minus the hash-cons reuse of
 // unchanged subtrees (there is no original Term to reuse; downstream
 // reads are content-based).  Unbound vars pass through as fresh FVRs;
-// the TAG_NUM marker round-trips to its NUM.
+// the TAG_NUM marker round-trips to its NUM; a node wider than
+// REWRITE_MAX_ARITY yields 0 in its parent's child slot.
 Term ft_subst_apply_term(const AtpFtCell *tmpl, const RewriteSubst *subst) {
-  if (ft_is_var(tmpl)) {
-    u32 id = ft_var_id(tmpl);
-    if (id < REWRITE_MAX_VAR && subst->bindings[id] != 0) {
-      return subst->bindings[id];
+  FtSpanFrame  fr_inl[FT_WALK_INL];
+  Term         val_inl[FT_WALK_INL];
+  FtSpanFrame *fr   = fr_inl;
+  Term        *val  = val_inl;
+  u32          nfr  = 0u;
+  u32          cfr  = FT_WALK_INL;
+  u32          nval = 0u;
+  u32          cval = FT_WALK_INL;
+  for (;;) {
+    u8   leaf = 1u;
+    Term v    = 0;
+    if (ft_is_var(tmpl)) {
+      u32 id = ft_var_id(tmpl);
+      if (id < REWRITE_MAX_VAR && subst->bindings[id] != 0) {
+        v = subst->bindings[id];
+      } else {
+        v = term_new_fvr(id);
+      }
+    } else {
+      u32 sym = ft_ctr_sym(tmpl);
+      u32 n   = (u32)tmpl->arity;
+      if (sym == ATPFT_NUM_MARKER && n == 2u) {
+        const AtpFtCell *dt_cell  = tmpl->next;
+        const AtpFtCell *raw_cell = dt_cell->end->next;
+        v = term_new(0, TAG_NUM, ft_ctr_sym(dt_cell), ft_ctr_sym(raw_cell));
+      } else if (n > REWRITE_MAX_ARITY) {
+        v = 0;
+      } else if (n == 0u) {
+        v = term_new_ctr(sym, NULL, 0u);
+      } else {
+        if (nfr == cfr) {
+          fr = (FtSpanFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].child = tmpl->next;
+        fr[nfr].left  = n;
+        fr[nfr].sym   = sym;
+        fr[nfr].arity = n;
+        nfr++;
+        leaf = 0u;
+      }
     }
-    return term_new_fvr(id);
+    if (leaf) {
+      if (nval == cval) {
+        val = (Term *)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = v;
+    }
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      FtSpanFrame *f = &fr[nfr - 1u];
+      nval -= f->arity;
+      val[nval] = term_new_ctr(f->sym, &val[nval], f->arity);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    FtSpanFrame *f = &fr[nfr - 1u];
+    tmpl     = f->child;
+    f->child = tmpl->end->next;
+    f->left--;
   }
-  u32 sym = ft_ctr_sym(tmpl);
-  u32 n   = (u32)tmpl->arity;
-  if (sym == ATPFT_NUM_MARKER && n == 2u) {
-    const AtpFtCell *dt_cell  = tmpl->next;
-    const AtpFtCell *raw_cell = dt_cell->end->next;
-    return term_new(0, TAG_NUM, ft_ctr_sym(dt_cell), ft_ctr_sym(raw_cell));
-  }
-  if (n > REWRITE_MAX_ARITY) return 0;
-  Term children[REWRITE_MAX_ARITY];
-  const AtpFtCell *kid = tmpl->next;
-  for (u32 i = 0; i < n; i++) {
-    children[i] = ft_subst_apply_term(kid, subst);
-    kid = kid->end->next;
-  }
-  return term_new_ctr(sym, children, n);
+  Term out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
 
 // --- Structural equality ----------------------------------------------
 //
-// Recursive: same shape, same sym at every cell (which also captures
+// Same shape, same sym at every cell (which also captures
 // var-id identity, since the high-bit-set sym carries the id).
-// Walks the AtpFt sibling chain via cell->end->next at each level.
+// One linear scan of the two preorders (see below).
 
 int ft_eq(const AtpFtCell *x, const AtpFtCell *y) {
   if (x == y) return 1;
@@ -695,26 +951,68 @@ int ft_eq(const AtpFtCell *x, const AtpFtCell *y) {
 #define ATPFT_HASH_ARITY_MIX    0x9e3779b97f4a7c15ull
 #define ATPFT_HASH_FVR_TAG      0xfacefacefaceull
 
+// A CTR cell whose child hashes are being folded into `h`.
+typedef struct {
+  const AtpFtCell *child;
+  u64              h;
+  u32              left;
+  u32              arity;
+} FtHashFrame;
+
 u64 ft_hash(const AtpFtCell *x) {
-  if (x == NULL) {
-    // Match atp_term_struct_hash's default branch for "no real
-    // term": 0xdeadbeefcafebabe ^ (0 * FNV_PRIME) == 0xdeadbeef..be.
-    return 0xdeadbeefcafebabeull;
+  FtHashFrame  fr_inl[FT_WALK_INL];
+  FtHashFrame *fr  = fr_inl;
+  u32          nfr = 0u;
+  u32          cfr = FT_WALK_INL;
+  u64          v   = 0u;
+  for (;;) {
+    u8 leaf = 1u;
+    if (x == NULL) {
+      // Match atp_term_struct_hash's default branch for "no real
+      // term": 0xdeadbeefcafebabe ^ (0 * FNV_PRIME) == 0xdeadbeef..be.
+      v = 0xdeadbeefcafebabeull;
+    } else if (ft_is_var(x)) {
+      v = ATPFT_HASH_FVR_TAG ^ ((u64)ft_var_id(x) * ATPFT_HASH_FNV_PRIME);
+    } else {
+      u64 h = ATPFT_HASH_FNV_OFFSET ^ ((u64)ft_ctr_sym(x) * ATPFT_HASH_FNV_PRIME);
+      if (x->arity == 0u) {
+        v = h;
+      } else {
+        if (nfr == cfr) {
+          fr = (FtHashFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].child = x->next;
+        fr[nfr].h     = h;
+        fr[nfr].left  = x->arity;
+        fr[nfr].arity = x->arity;
+        nfr++;
+        leaf = 0u;
+      }
+    }
+    if (leaf) {
+      // Fold the finished child hash into its parent; a parent whose
+      // last child is folded finishes in turn.
+      while (nfr > 0u) {
+        FtHashFrame *f = &fr[nfr - 1u];
+        f->h ^= v;
+        f->h *= ATPFT_HASH_FNV_PRIME;
+        f->left--;
+        if (f->left > 0u) {
+          break;
+        }
+        v = f->h ^ ((u64)f->arity * ATPFT_HASH_ARITY_MIX);
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    FtHashFrame *f = &fr[nfr - 1u];
+    x        = f->child;
+    f->child = x->end->next;
   }
-  if (ft_is_var(x)) {
-    return ATPFT_HASH_FVR_TAG
-         ^ ((u64)ft_var_id(x) * ATPFT_HASH_FNV_PRIME);
-  }
-  u32 sym   = ft_ctr_sym(x);
-  u16 arity = x->arity;
-  u64 h = ATPFT_HASH_FNV_OFFSET ^ ((u64)sym * ATPFT_HASH_FNV_PRIME);
-  const AtpFtCell *child = x->next;
-  for (u16 i = 0; i < arity; i++) {
-    h ^= ft_hash(child);
-    h *= ATPFT_HASH_FNV_PRIME;
-    child = child->end->next;
-  }
-  return h ^ ((u64)arity * ATPFT_HASH_ARITY_MIX);
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 
 // --- Pretty print -----------------------------------------------------
@@ -722,55 +1020,117 @@ u64 ft_hash(const AtpFtCell *x) {
 // Byte-identical mirror of atp_pretty_term (_.c:7028-7058): "x_<id>"
 // for FVR, "C<lab>" or "C<lab>(c0, c1, ...)" for CTR, "#<val>" for
 // the NUM marker, with the ", " (comma+space) separator on CTR
-// children.  Buffer-aware, truncates silently.
-
-static u32 atp_pretty_ft_rec(const AtpFtCell *x, char *buf, u32 cap);
-
-static u32 atp_pretty_ft_ctr(const AtpFtCell *x, char *buf, u32 cap) {
-  if (cap <= 1u) return 0u;
-  u32 sym = ft_ctr_sym(x);
-  u16 n   = x->arity;
-  // Detect the NUM-marker shape so the pretty print round-trips back
-  // to the "#<val>" format atp_pretty_term emits for TAG_NUM.
-  if (sym == ATPFT_NUM_MARKER && n == 2u) {
-    const AtpFtCell *raw_cell = x->next->end->next;
-    u32 raw = ft_ctr_sym(raw_cell);
-    int n_w = snprintf(buf, cap, "#%u", raw);
-    if (n_w < 0) return 0u;
-    u32 w = (u32)n_w;
-    return w >= cap ? cap - 1u : w;
-  }
-  int n_w = snprintf(buf, cap, "C%u", sym);
-  if (n_w < 0) return 0u;
-  u32 w = (u32)n_w;
-  if (w >= cap) return cap - 1u;
-  if (n == 0u) return w;
-  if (w + 1u >= cap) return w;
-  w += (u32)snprintf(buf + w, cap - w, "(");
-  const AtpFtCell *child = x->next;
-  for (u16 i = 0; i < n; i++) {
-    if (w + 2u >= cap) break;
-    if (i > 0u) w += (u32)snprintf(buf + w, cap - w, ", ");
-    if (w >= cap) return cap - 1u;
-    w += atp_pretty_ft_rec(child, buf + w, cap - w);
-    if (w >= cap) return cap - 1u;
-    child = child->end->next;
-  }
-  if (w + 1u < cap) w += (u32)snprintf(buf + w, cap - w, ")");
-  return w;
-}
-
-static u32 atp_pretty_ft_rec(const AtpFtCell *x, char *buf, u32 cap) {
-  if (cap == 0u) return 0u;
-  if (x == NULL) return (u32)snprintf(buf, cap, "?T0");
-  if (ft_is_var(x)) {
-    return (u32)snprintf(buf, cap, "x_%u", ft_var_id(x));
-  }
-  return atp_pretty_ft_ctr(x, buf, cap);
-}
+// children.  Buffer-aware, truncates silently.  Each open CTR level
+// keeps the locals the recursive form had: its own buffer window
+// (buf, cap), written length w and child cursor; a finished child's
+// length is added to its parent's w exactly as the recursive return.
+typedef struct {
+  const AtpFtCell *child;
+  char            *buf;
+  u32              cap;
+  u32              w;
+  u16              i;
+  u16              n;
+} FtPrettyFrame;
 
 u32 atp_pretty_ft(const AtpFtCell *x, char *buf, u32 cap) {
-  return atp_pretty_ft_rec(x, buf, cap);
+  FtPrettyFrame  fr_inl[FT_WALK_INL];
+  FtPrettyFrame *fr  = fr_inl;
+  u32            nfr = 0u;
+  u32            cfr = FT_WALK_INL;
+  u32            ret = 0u;
+  for (;;) {
+    u8 opened = 0u;
+    if (cap == 0u) {
+      ret = 0u;
+    } else if (x == NULL) {
+      ret = (u32)snprintf(buf, cap, "?T0");
+    } else if (ft_is_var(x)) {
+      ret = (u32)snprintf(buf, cap, "x_%u", ft_var_id(x));
+    } else if (cap <= 1u) {
+      ret = 0u;
+    } else {
+      u32 sym = ft_ctr_sym(x);
+      u16 n   = x->arity;
+      // Detect the NUM-marker shape so the pretty print round-trips back
+      // to the "#<val>" format atp_pretty_term emits for TAG_NUM.
+      if (sym == ATPFT_NUM_MARKER && n == 2u) {
+        const AtpFtCell *raw_cell = x->next->end->next;
+        int n_w = snprintf(buf, cap, "#%u", ft_ctr_sym(raw_cell));
+        if (n_w < 0) {
+          ret = 0u;
+        } else {
+          ret = ((u32)n_w >= cap) ? cap - 1u : (u32)n_w;
+        }
+      } else {
+        int n_w = snprintf(buf, cap, "C%u", sym);
+        u32 w   = (u32)n_w;
+        if (n_w < 0) {
+          ret = 0u;
+        } else if (w >= cap) {
+          ret = cap - 1u;
+        } else if (n == 0u || w + 1u >= cap) {
+          ret = w;
+        } else {
+          w += (u32)snprintf(buf + w, cap - w, "(");
+          if (nfr == cfr) {
+            fr = (FtPrettyFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].child = x->next;
+          fr[nfr].buf   = buf;
+          fr[nfr].cap   = cap;
+          fr[nfr].w     = w;
+          fr[nfr].i     = 0u;
+          fr[nfr].n     = n;
+          nfr++;
+          opened = 1u;
+        }
+      }
+    }
+    // Run open levels until one starts a child.  `have` = a child just
+    // returned `ret` to the innermost level.
+    u8 have = (u8)!opened;
+    for (;;) {
+      if (nfr == 0u) {
+        term_stack_release(fr, fr_inl);
+        return ret;
+      }
+      FtPrettyFrame *f = &fr[nfr - 1u];
+      if (have) {
+        have = 0u;
+        f->w += ret;
+        if (f->w >= f->cap) {
+          ret = f->cap - 1u;
+          nfr--;
+          have = 1u;
+          continue;
+        }
+        f->child = f->child->end->next;
+        f->i++;
+      }
+      if (f->i < f->n && f->w + 2u < f->cap) {
+        if (f->i > 0u) {
+          f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ", ");
+        }
+        if (f->w >= f->cap) {
+          ret = f->cap - 1u;
+          nfr--;
+          have = 1u;
+          continue;
+        }
+        x   = f->child;
+        buf = f->buf + f->w;
+        cap = f->cap - f->w;
+        break;
+      }
+      if (f->w + 1u < f->cap) {
+        f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ")");
+      }
+      ret = f->w;
+      nfr--;
+      have = 1u;
+    }
+  }
 }
 
 #endif // !ATPFT_FT_C_INCLUDED

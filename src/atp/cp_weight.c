@@ -7,30 +7,81 @@
 // CTR has 1 + max child depth.  Used by the unification-measure
 // weight, mirroring Waldmeister's `TO_Termtiefe` ("term depth").
 static u32 atp_term_depth(Term t) {
-  if (term_tag(t) != TAG_CTR) return 0;
-  u32 n = term_ctr_n(t);
-  u32 d = 0;
-  for (u32 i = 0; i < n; i++) {
-    u32 cd = atp_term_depth(term_ctr_at(t, i));
-    if (cd > d) d = cd;
+  // `d` per open CTR: the deepest child so far.
+  typedef struct { u64 base; u32 i; u32 n; u32 d; } DepthFrame;
+  DepthFrame  fr_inl[ATP_WALK_INL];
+  DepthFrame *fr  = fr_inl;
+  u32         nfr = 0u;
+  u32         cfr = ATP_WALK_INL;
+  u32         v   = 0u;
+  for (;;) {
+    u32 n = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+    if (n > 0u) {
+      if (nfr == cfr) {
+        fr = (DepthFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].base = term_val(t);
+      fr[nfr].i    = 0u;
+      fr[nfr].n    = n;
+      fr[nfr].d    = 0u;
+      nfr++;
+    } else {
+      v = 0u;
+      while (nfr > 0u) {
+        DepthFrame *f = &fr[nfr - 1u];
+        if (v > f->d) {
+          f->d = v;
+        }
+        if (++f->i < f->n) {
+          break;
+        }
+        v = f->d + 1u;
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    DepthFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
   }
-  return n == 0 ? 0 : d + 1;
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 
 // Does variable `var_id` (a TAG_FVR id) occur anywhere in `t`?
 // The occur-check used by the unification-measure weight.
 static int atp_var_occurs(Term t, u32 var_id) {
-  switch (term_tag(t)) {
-    case TAG_FVR: return term_ext(t) == var_id;
-    case TAG_CTR: {
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        if (atp_var_occurs(term_ctr_at(t, i), var_id)) return 1;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  int   hit = 0;
+  for (;;) {
+    switch (term_tag(t)) {
+      case TAG_FVR:
+        hit = (term_ext(t) == var_id);
+        break;
+      case TAG_CTR: {
+        u32 n = term_ctr_n(t);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
+        break;
       }
-      return 0;
+      default:
+        break;
     }
-    default: return 0;
+    if (hit || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 // Depth-weighted term-disagreement count -- a port of Waldmeister's
@@ -43,27 +94,47 @@ static int atp_var_occurs(Term t, u32 var_id) {
 // Waldmeister's `if (!(--d)) d = 1;` step-down.  Result is 0 iff
 // the terms are syntactically unifiable.
 static u32 atp_unif_measure_rec(Term a, Term b, u32 d) {
-  u8 ta = term_tag(a), tb = term_tag(b);
-  if (ta == TAG_CTR && tb == TAG_CTR
-      && term_ext(a) == term_ext(b)
-      && term_ctr_n(a) == term_ctr_n(b)) {
-    u32 nd = d > 1 ? d - 1 : 1;
-    u32 n = term_ctr_n(a);
-    u32 mass = 0;
-    for (u32 i = 0; i < n; i++) {
-      mass += atp_unif_measure_rec(term_ctr_at(a, i),
-                                   term_ctr_at(b, i), nd);
+  // Pairs still to measure, each with its working depth; the masses add
+  // up in any order (u32 wraparound included).
+  typedef struct { Term a; Term b; u32 d; } UnifPair;
+  UnifPair  st_inl[ATP_WALK_INL];
+  UnifPair *st   = st_inl;
+  u32       nst  = 0u;
+  u32       cst  = ATP_WALK_INL;
+  u32       mass = 0u;
+  for (;;) {
+    u8 ta = term_tag(a), tb = term_tag(b);
+    if (ta == TAG_CTR && tb == TAG_CTR
+        && term_ext(a) == term_ext(b)
+        && term_ctr_n(a) == term_ctr_n(b)) {
+      u32 nd = d > 1 ? d - 1 : 1;
+      u32 n = term_ctr_n(a);
+      while (nst + n > cst) {
+        st = (UnifPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst].a = term_ctr_at(a, i);
+        st[nst].b = term_ctr_at(b, i);
+        st[nst].d = nd;
+        nst++;
+      }
+    } else if (ta == TAG_FVR) {
+      mass += atp_var_occurs(b, term_ext(a)) ? 2u * d : 0u;
+    } else if (tb == TAG_FVR) {
+      mass += atp_var_occurs(a, term_ext(b)) ? 2u * d : 0u;
+    } else {
+      mass += d;   // function-symbol (or non-CTR) clash
     }
-    return mass;
+    if (nst == 0u) {
+      break;
+    }
+    nst--;
+    a = st[nst].a;
+    b = st[nst].b;
+    d = st[nst].d;
   }
-  if (ta == TAG_FVR) {
-    return atp_var_occurs(b, term_ext(a)) ? 2u * d : 0u;
-  }
-  if (tb == TAG_FVR) {
-    return atp_var_occurs(a, term_ext(b)) ? 2u * d : 0u;
-  }
-  // Function-symbol (or non-CTR) clash.
-  return d;
+  term_stack_release(st, st_inl);
+  return mass;
 }
 
 static u32 atp_unif_measure(Term lhs, Term rhs) {
@@ -386,19 +457,34 @@ static u32 atp_goal_none_factor(void) {
 // MinStruct spirit of Clas_CP_Goal).
 static u32 atp_goal_match_cov(Term pat, Term subj, RewriteSubst base) {
   if (term_tag(pat) != TAG_CTR) return 0u;
-  u32 best = 0u;
-  RewriteSubst t = base;
-  if (thvm_match(pat, subj, &t)) {
-    u32 c = atp_symbol_count(subj);
-    if (c > best) best = c;
-  }
-  if (term_tag(subj) == TAG_CTR) {
-    u32 n = term_ctr_n(subj);
-    for (u32 i = 0; i < n; i++) {
-      u32 c = atp_goal_match_cov(pat, term_ctr_at(subj, i), base);
+  // Every subterm of `subj`, preorder, each matched against `pat` from
+  // the same `base`.
+  Term  st_inl[ATP_WALK_INL];
+  Term *st   = st_inl;
+  u32   nst  = 0u;
+  u32   cst  = ATP_WALK_INL;
+  u32   best = 0u;
+  for (;;) {
+    RewriteSubst t = base;
+    if (thvm_match(pat, subj, &t)) {
+      u32 c = atp_symbol_count(subj);
       if (c > best) best = c;
     }
+    if (term_tag(subj) == TAG_CTR) {
+      u32 n = term_ctr_n(subj);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(subj, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    subj = st[--nst];
   }
+  term_stack_release(st, st_inl);
   return best;
 }
 
@@ -408,22 +494,38 @@ static u32 atp_goal_match_cov(Term pat, Term subj, RewriteSubst base) {
 // consistent sigma, maximizing total coverage (= minimal residual).
 static u32 atp_goal_doppel(Term cl, Term cr, Term sx, Term gy,
                            RewriteSubst base) {
-  u32 best = 0u;
-  if (term_tag(cl) == TAG_CTR) {
-    RewriteSubst t1 = base;
-    if (thvm_match(cl, sx, &t1)) {
-      u32 cov_a = atp_symbol_count(sx);
-      u32 cov_b = atp_goal_match_cov(cr, gy, t1);
-      if (cov_b && cov_a + cov_b > best) best = cov_a + cov_b;
+  // Every subterm of `sx`, preorder, tried as the cl-match position.
+  Term  st_inl[ATP_WALK_INL];
+  Term *st   = st_inl;
+  u32   nst  = 0u;
+  u32   cst  = ATP_WALK_INL;
+  u32   best = 0u;
+  for (;;) {
+    if (term_tag(cl) == TAG_CTR) {
+      RewriteSubst t1 = base;
+      if (thvm_match(cl, sx, &t1)) {
+        u32 cov_a = atp_symbol_count(sx);
+        u32 cov_b = atp_goal_match_cov(cr, gy, t1);
+        if (cov_b && cov_a + cov_b > best) {
+          best = cov_a + cov_b;
+        }
+      }
     }
-  }
-  if (term_tag(sx) == TAG_CTR) {
-    u32 n = term_ctr_n(sx);
-    for (u32 i = 0; i < n; i++) {
-      u32 c = atp_goal_doppel(cl, cr, term_ctr_at(sx, i), gy, base);
-      if (c > best) best = c;
+    if (term_tag(sx) == TAG_CTR) {
+      u32 n = term_ctr_n(sx);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(sx, i);
+      }
     }
+    if (nst == 0u) {
+      break;
+    }
+    sx = st[--nst];
   }
+  term_stack_release(st, st_inl);
   return best;
 }
 
@@ -442,23 +544,41 @@ static u32 atp_goal_doppel(Term cl, Term cr, Term sx, Term gy,
 // the heap key changes; no CP is dropped, completeness preserved.
 #define ATP_GOAL_SUBTERM_FACTOR 4u
 static void atp_goal_sub_collect_rec(AtpState *s, Term t) {
-  if (term_tag(t) != TAG_CTR) return;
-  if (atp_term_is_ground(t)) {
-    u32 sz = atp_symbol_count(t);
-    if (sz >= 2u && s->goal_sub_n < 128u) {   // skip bare constants
-      u64 h = atp_term_struct_hash(t);
-      u8 dup = 0u;
-      for (u32 i = 0; i < s->goal_sub_n; i++)
-        if (s->goal_sub_hash[i] == h) { dup = 1u; break; }
-      if (!dup) {
-        s->goal_sub_hash[s->goal_sub_n] = h;
-        s->goal_sub_size[s->goal_sub_n] = (u16)(sz > 0xffffu ? 0xffffu : sz);
-        s->goal_sub_n++;
+  // Preorder over the CTR subterms of `t` (explicit stack).
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      if (atp_term_is_ground(t)) {
+        u32 sz = atp_symbol_count(t);
+        if (sz >= 2u && s->goal_sub_n < 128u) {   // skip bare constants
+          u64 h = atp_term_struct_hash(t);
+          u8 dup = 0u;
+          for (u32 i = 0; i < s->goal_sub_n; i++)
+            if (s->goal_sub_hash[i] == h) { dup = 1u; break; }
+          if (!dup) {
+            s->goal_sub_hash[s->goal_sub_n] = h;
+            s->goal_sub_size[s->goal_sub_n] = (u16)(sz > 0xffffu ? 0xffffu : sz);
+            s->goal_sub_n++;
+          }
+        }
+      }
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
       }
     }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
-  u32 n = term_ctr_n(t);
-  for (u32 i = 0; i < n; i++) atp_goal_sub_collect_rec(s, term_ctr_at(t, i));
+  term_stack_release(st, st_inl);
 }
 static void atp_goal_sub_ensure(AtpState *s) {
   if (s->goal_sub_ready || s->goal_lhs == 0) return;
@@ -468,18 +588,35 @@ static void atp_goal_sub_ensure(AtpState *s) {
   s->goal_sub_ready = 1u;
 }
 static u32 atp_goal_subterm_overlap_rec(const AtpState *s, Term t, u32 best) {
-  if (term_tag(t) != TAG_CTR) return best;
-  if (atp_term_is_ground(t)) {
-    u32 sz = atp_symbol_count(t);
-    if (sz > best) {
-      u64 h = atp_term_struct_hash(t);
-      for (u32 i = 0; i < s->goal_sub_n; i++)
-        if (s->goal_sub_hash[i] == h) { best = sz; break; }
+  // Preorder over the CTR subterms of `t`, threading `best`.
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      if (atp_term_is_ground(t)) {
+        u32 sz = atp_symbol_count(t);
+        if (sz > best) {
+          u64 h = atp_term_struct_hash(t);
+          for (u32 i = 0; i < s->goal_sub_n; i++)
+            if (s->goal_sub_hash[i] == h) { best = sz; break; }
+        }
+      }
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
     }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
-  u32 n = term_ctr_n(t);
-  for (u32 i = 0; i < n; i++)
-    best = atp_goal_subterm_overlap_rec(s, term_ctr_at(t, i), best);
+  term_stack_release(st, st_inl);
   return best;
 }
 
@@ -686,23 +823,76 @@ static u32 atp_cp_twee_fused_base(Term lhs, Term rhs) {
 // parent/child pairs sharing a symbol under an arity <= 2 parent; depth
 // is the term depth with variables and constants at 0.
 static u32 atp_ladr_nest(Term t) {
-  if (term_tag(t) != TAG_CTR) return 0u;
-  u32 n = term_ctr_n(t), c = 0u;
-  for (u32 i = 0; i < n; i++) {
-    Term ch = term_ctr_at(t, i);
-    if (n <= 2u && term_tag(ch) == TAG_CTR && term_ext(ch) == term_ext(t)) c++;
-    c += atp_ladr_nest(ch);
+  // Every CTR node adds its same-symbol children (when at most binary);
+  // the counts sum in any order.
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u32   c   = 0u;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = 0; i < n; i++) {
+        Term ch = term_ctr_at(t, i);
+        if (n <= 2u && term_tag(ch) == TAG_CTR && term_ext(ch) == term_ext(t)) {
+          c++;
+        }
+        st[nst++] = ch;
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
   return c;
 }
 static u32 atp_ladr_depth(Term t) {
-  if (term_tag(t) != TAG_CTR || term_ctr_n(t) == 0u) return 0u;
-  u32 n = term_ctr_n(t), d = 0u;
-  for (u32 i = 0; i < n; i++) {
-    u32 k = atp_ladr_depth(term_ctr_at(t, i));
-    if (k > d) d = k;
+  // `d` per open CTR: the deepest child so far; leaves are depth 0.
+  typedef struct { u64 base; u32 i; u32 n; u32 d; } DepthFrame;
+  DepthFrame  fr_inl[ATP_WALK_INL];
+  DepthFrame *fr  = fr_inl;
+  u32         nfr = 0u;
+  u32         cfr = ATP_WALK_INL;
+  u32         v   = 0u;
+  for (;;) {
+    u32 n = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+    if (n > 0u) {
+      if (nfr == cfr) {
+        fr = (DepthFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].base = term_val(t);
+      fr[nfr].i    = 0u;
+      fr[nfr].n    = n;
+      fr[nfr].d    = 0u;
+      nfr++;
+    } else {
+      v = 0u;
+      while (nfr > 0u) {
+        DepthFrame *f = &fr[nfr - 1u];
+        if (v > f->d) {
+          f->d = v;
+        }
+        if (++f->i < f->n) {
+          break;
+        }
+        v = f->d + 1u;
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    DepthFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
   }
-  return d + 1u;
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 #if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
 // Span twins for the treated push route, whose Term args are zero
@@ -713,26 +903,68 @@ static u8 atp_ladr_leaf_ft(const AtpFtCell *c) {
               c->sym == ATPFT_NUM_MARKER);
 }
 static u32 atp_ladr_nest_ft(const AtpFtCell *t) {
-  if (atp_ladr_leaf_ft(t)) return 0u;
+  // One linear pass over the span's preorder: a non-leaf cell adds its
+  // same-symbol children (when at most binary); the cells a leaf hides
+  // (a NUM marker's two fields) are skipped with it.
+  const AtpFtCell *stop = t->end->next;
   u32 c = 0u;
-  const AtpFtCell *ch = t->next;
-  for (u32 i = 0; i < t->arity; i++) {
-    if (t->arity <= 2u && (ch->sym & WF_VAR_BIT) == 0u && ch->sym == t->sym) c++;
-    c += atp_ladr_nest_ft(ch);
-    ch = ch->end->next;
+  for (const AtpFtCell *p = t; p != stop;) {
+    if (atp_ladr_leaf_ft(p)) {
+      p = p->end->next;
+      continue;
+    }
+    const AtpFtCell *ch = p->next;
+    for (u32 i = 0; i < p->arity; i++) {
+      if (p->arity <= 2u && (ch->sym & WF_VAR_BIT) == 0u && ch->sym == p->sym) {
+        c++;
+      }
+      ch = ch->end->next;
+    }
+    p = p->next;
   }
   return c;
 }
 static u32 atp_ladr_depth_ft(const AtpFtCell *t) {
-  if (atp_ladr_leaf_ft(t)) return 0u;
-  u32 d = 0u;
-  const AtpFtCell *ch = t->next;
-  for (u32 i = 0; i < t->arity; i++) {
-    u32 k = atp_ladr_depth_ft(ch);
-    if (k > d) d = k;
-    ch = ch->end->next;
+  // `d` per open non-leaf cell: the deepest child so far.
+  typedef struct { const AtpFtCell *child; u32 left; u32 d; } DepthFrame;
+  DepthFrame  fr_inl[ATP_WALK_INL];
+  DepthFrame *fr  = fr_inl;
+  u32         nfr = 0u;
+  u32         cfr = ATP_WALK_INL;
+  u32         v   = 0u;
+  for (;;) {
+    if (!atp_ladr_leaf_ft(t)) {
+      if (nfr == cfr) {
+        fr = (DepthFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].child = t->next;
+      fr[nfr].left  = t->arity;
+      fr[nfr].d     = 0u;
+      nfr++;
+    } else {
+      v = 0u;
+      while (nfr > 0u) {
+        DepthFrame *f = &fr[nfr - 1u];
+        if (v > f->d) {
+          f->d = v;
+        }
+        if (f->left > 0u) {
+          break;
+        }
+        v = f->d + 1u;
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    DepthFrame *f = &fr[nfr - 1u];
+    t        = f->child;
+    f->child = t->end->next;
+    f->left--;
   }
-  return d + 1u;
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 #endif
 

@@ -74,67 +74,123 @@ static Term unify_walk(Term t, const RewriteSubst *subst) {
 }
 
 // Occurs check: does the free variable `var_id` appear (after walking)
-// anywhere in `t`?
+// anywhere in `t`?  Pending subterms sit on an explicit stack.
 static u8 unify_occurs(u32 var_id, Term t, const RewriteSubst *subst) {
-  t = unify_walk(t, subst);
-  switch (term_tag(t)) {
-    case TAG_FVR: return term_ext(t) == var_id;
-    case TAG_CTR: {
-      // Direct heap_read for arity + children.
-      u64 base = term_val(t);
-      Term n_cell = heap_read(base);
-      if (term_tag(n_cell) != TAG_NUM) return 0;
-      u32 n = (u32)term_val(n_cell);
-      for (u32 i = 0; i < n; i++) {
-        Term c = heap_read(base + 1u + (u64)i);
-        if (unify_occurs(var_id, c, subst)) return 1;
+  Term  st_inl[REWRITE_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = REWRITE_WALK_INL;
+  u8    hit = 0u;
+  for (;;) {
+    t = unify_walk(t, subst);
+    switch (term_tag(t)) {
+      case TAG_FVR:
+        if (term_ext(t) == var_id) {
+          hit = 1u;
+        }
+        break;
+      case TAG_CTR: {
+        // Direct heap_read for arity + children.
+        u64  base   = term_val(t);
+        Term n_cell = heap_read(base);
+        if (term_tag(n_cell) != TAG_NUM) {
+          break;
+        }
+        u32 n = (u32)term_val(n_cell);
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = heap_read(base + 1u + (u64)i);
+        }
+        break;
       }
-      return 0;
+      default:
+        break;
     }
-    default: return 0;
+    if (hit || nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 fn u8 thvm_unify(Term s, Term t, RewriteSubst *subst) {
-  s = unify_walk(s, subst);
-  t = unify_walk(t, subst);
-  if (kbo_eq(s, t)) return 1;
-
-  if (term_tag(s) == TAG_FVR) {
-    u32 id = term_ext(s);
-    if (id >= REWRITE_MAX_VAR) return 0;
-    if (unify_occurs(id, t, subst)) return 0;
-    subst->bindings[id] = t;
-    un_log_bind(id);
-    return 1;
-  }
-  if (term_tag(t) == TAG_FVR) {
-    u32 id = term_ext(t);
-    if (id >= REWRITE_MAX_VAR) return 0;
-    if (unify_occurs(id, s, subst)) return 0;
-    subst->bindings[id] = s;
-    un_log_bind(id);
-    return 1;
-  }
-  if (term_tag(s) == TAG_CTR && term_tag(t) == TAG_CTR) {
-    if (term_ext(s) != term_ext(t)) return 0;
-    // Direct heap_read for both arities + children.
-    u64 sbase = term_val(s);
-    u64 tbase = term_val(t);
-    Term sn_cell = heap_read(sbase);
-    Term tn_cell = heap_read(tbase);
-    if (term_tag(sn_cell) != TAG_NUM || term_tag(tn_cell) != TAG_NUM) return 0;
-    u32 ns = (u32)term_val(sn_cell);
-    u32 nt = (u32)term_val(tn_cell);
-    if (ns != nt) return 0;
-    for (u32 i = 0; i < ns; i++) {
-      Term sc = heap_read(sbase + 1u + (u64)i);
-      Term tc = heap_read(tbase + 1u + (u64)i);
-      if (!thvm_unify(sc, tc, subst)) return 0;
+  RewritePairFrame  fr_inl[REWRITE_WALK_INL];
+  RewritePairFrame *fr  = fr_inl;
+  u32               nfr = 0u;
+  u32               cfr = REWRITE_WALK_INL;
+  u8                ok  = 1u;
+  for (;;) {
+    s = unify_walk(s, subst);
+    t = unify_walk(t, subst);
+    if (kbo_eq(s, t)) {
+      // equal pair: nothing to bind
+    } else if (term_tag(s) == TAG_FVR) {
+      u32 id = term_ext(s);
+      if (id >= REWRITE_MAX_VAR || unify_occurs(id, t, subst)) {
+        ok = 0u;
+        break;
+      }
+      subst->bindings[id] = t;
+      un_log_bind(id);
+    } else if (term_tag(t) == TAG_FVR) {
+      u32 id = term_ext(t);
+      if (id >= REWRITE_MAX_VAR || unify_occurs(id, s, subst)) {
+        ok = 0u;
+        break;
+      }
+      subst->bindings[id] = s;
+      un_log_bind(id);
+    } else if (term_tag(s) == TAG_CTR && term_tag(t) == TAG_CTR) {
+      if (term_ext(s) != term_ext(t)) {
+        ok = 0u;
+        break;
+      }
+      // Direct heap_read for both arities + children.
+      u64 sbase = term_val(s);
+      u64 tbase = term_val(t);
+      Term sn_cell = heap_read(sbase);
+      Term tn_cell = heap_read(tbase);
+      if (term_tag(sn_cell) != TAG_NUM || term_tag(tn_cell) != TAG_NUM) {
+        ok = 0u;
+        break;
+      }
+      u32 ns = (u32)term_val(sn_cell);
+      u32 nt = (u32)term_val(tn_cell);
+      if (ns != nt) {
+        ok = 0u;
+        break;
+      }
+      if (ns > 0u) {
+        if (nfr == cfr) {
+          fr = (RewritePairFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].pbase = sbase;
+        fr[nfr].tbase = tbase;
+        fr[nfr].i     = 0u;
+        fr[nfr].n     = ns;
+        nfr++;
+      }
+    } else {
+      ok = 0u;
+      break;
     }
-    return 1;
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    RewritePairFrame *f = &fr[nfr - 1u];
+    s = heap_read(f->pbase + 1u + (u64)f->i);
+    t = heap_read(f->tbase + 1u + (u64)f->i);
+    f->i++;
   }
-  return 0;
+  term_stack_release(fr, fr_inl);
+  return ok;
 }
 
 // Rebuild `t` with every FVR id shifted by `offset` so two rules can
@@ -142,31 +198,69 @@ fn u8 thvm_unify(Term s, Term t, RewriteSubst *subst) {
 // rename rule_j's variables apart from rule_i's before the overlap.
 fn Term thvm_rename_vars(Term t, u32 offset) {
   if (offset == 0) return t;  // identity rename -- no work needed
-  switch (term_tag(t)) {
-    case TAG_FVR: return term_new_fvr(term_ext(t) + offset);
-    case TAG_CTR: {
-      // Direct heap_read for arity + children (skip term_ctr_at's
-      // redundant arity refetch).
-      u64 base = term_val(t);
-      Term n_cell = heap_read(base);
-      if (term_tag(n_cell) != TAG_NUM) return t;
-      u32 n = (u32)term_val(n_cell);
-      Term stk[REWRITE_MAX_ARITY];
-      Term *children = term_kids_buf(stk, n);
-      u8 changed = 0;
-      for (u32 i = 0; i < n; i++) {
-        Term orig = heap_read(base + 1u + (u64)i);
-        children[i] = thvm_rename_vars(orig, offset);
-        if (children[i] != orig) changed = 1;
+  RewriteNodeFrame  fr_inl[REWRITE_WALK_INL];
+  Term              val_inl[REWRITE_WALK_INL];
+  RewriteNodeFrame *fr   = fr_inl;
+  Term             *val  = val_inl;
+  u32               nfr  = 0u;
+  u32               cfr  = REWRITE_WALK_INL;
+  u32               nval = 0u;
+  u32               cval = REWRITE_WALK_INL;
+  for (;;) {
+    u8   leaf = 1u;
+    Term v    = t;
+    switch (term_tag(t)) {
+      case TAG_FVR:
+        v = term_new_fvr(term_ext(t) + offset);
+        break;
+      case TAG_CTR: {
+        // Direct heap_read for arity + children (skip term_ctr_at's
+        // redundant arity refetch).  A node whose children all come
+        // back unchanged (no variables below) is returned as-is -- no
+        // wasted term_new_ctr on a closed subterm.
+        u64  base   = term_val(t);
+        Term n_cell = heap_read(base);
+        u32  n      = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 0u;
+        if (n > 0u) {
+          if (nfr == cfr) {
+            fr = (RewriteNodeFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].t    = t;
+          fr[nfr].base = base;
+          fr[nfr].i    = 0u;
+          fr[nfr].n    = n;
+          nfr++;
+          leaf = 0u;
+        }
+        break;
       }
-      // If t had no variables, every child returned itself -- avoid the
-      // wasted term_new_ctr (closed-term case, e.g. ground goal sides).
-      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
-      term_kids_release(children, stk);
-      return r;
+      default:
+        break;
     }
-    default: return t;
+    if (leaf) {
+      if (nval == cval) {
+        val = (Term *)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = v;
+    }
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      RewriteNodeFrame *f = &fr[nfr - 1u];
+      nval -= f->n;
+      val[nval] = rewrite_node_rebuild(f, &val[nval]);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    RewriteNodeFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
+  Term out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
 
 // Node/taint tally for thvm_unify_apply: one invocation resolves
@@ -187,33 +281,63 @@ u64 g_unify_apply_taint = 0;
 // links) recursively, returning a fully-resolved term.  Differs from
 // thvm_subst_apply in that it follows chains via unify_walk.
 fn Term thvm_unify_apply(Term t, const RewriteSubst *subst) {
-  t = unify_walk(t, subst);
-  g_unify_apply_cells++;
-  switch (term_tag(t)) {
-    case TAG_FVR: return t;  // unbound -- leave as-is
-    case TAG_CTR: {
+  RewriteNodeFrame  fr_inl[REWRITE_WALK_INL];
+  Term              val_inl[REWRITE_WALK_INL];
+  RewriteNodeFrame *fr   = fr_inl;
+  Term             *val  = val_inl;
+  u32               nfr  = 0u;
+  u32               cfr  = REWRITE_WALK_INL;
+  u32               nval = 0u;
+  u32               cval = REWRITE_WALK_INL;
+  for (;;) {
+    t = unify_walk(t, subst);
+    g_unify_apply_cells++;
+    u8 leaf = 1u;
+    if (term_tag(t) == TAG_CTR) {
       // Read arity and base once via direct heap_read -- term_ctr_at
-      // would re-fetch the arity cell per call.
-      u64 base = term_val(t);
+      // would re-fetch the arity cell per call.  An untouched subterm
+      // comes back as itself (hash-cons skip: no term_new_ctr per
+      // untouched subterm during CP-gen).
+      u64  base   = term_val(t);
       Term n_cell = heap_read(base);
-      if (term_tag(n_cell) != TAG_NUM) { g_unify_apply_taint++; return t; }
-      u32 n = (u32)term_val(n_cell);
-      Term stk[REWRITE_MAX_ARITY];
-      Term *children = term_kids_buf(stk, n);
-      u8 changed = 0;
-      for (u32 i = 0; i < n; i++) {
-        Term orig = heap_read(base + 1u + (u64)i);
-        children[i] = thvm_unify_apply(orig, subst);
-        if (children[i] != orig) changed = 1;
+      if (term_tag(n_cell) != TAG_NUM) {
+        g_unify_apply_taint++;
+      } else if ((u32)term_val(n_cell) > 0u) {
+        if (nfr == cfr) {
+          fr = (RewriteNodeFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].t    = t;
+        fr[nfr].base = base;
+        fr[nfr].i    = 0u;
+        fr[nfr].n    = (u32)term_val(n_cell);
+        nfr++;
+        leaf = 0u;
       }
-      // Hash-cons skip: if no child rewrote, return original t (saves
-      // a term_new_ctr allocation per untouched subterm during CP-gen).
-      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
-      term_kids_release(children, stk);
-      return r;
     }
-    default: return t;
+    if (leaf) {                // unbound FVR / atom / leaf: as-is
+      if (nval == cval) {
+        val = (Term *)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = t;
+    }
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      RewriteNodeFrame *f = &fr[nfr - 1u];
+      nval -= f->n;
+      val[nval] = rewrite_node_rebuild(f, &val[nval]);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    RewriteNodeFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
+  Term out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
 
 // === 7c: canonical variable normalization ==========================
@@ -263,41 +387,78 @@ typedef struct {
 // missed, leaving the term untouched (pathological: more distinct vars
 // than REWRITE_MAX_VAR).
 static Term nv_rewrite(Term t, NvMap *m) {
-  switch (term_tag(t)) {
-    case TAG_FVR: {
-      u32 old = term_ext(t);
-      for (u32 i = 0; i < m->n; i++) {
-        if (m->old_id[i] == old) {
-          if (i == old) return t;
-          return term_new_fvr(i);
+  RewriteNodeFrame  fr_inl[REWRITE_WALK_INL];
+  Term              val_inl[REWRITE_WALK_INL];
+  RewriteNodeFrame *fr   = fr_inl;
+  Term             *val  = val_inl;
+  u32               nfr  = 0u;
+  u32               cfr  = REWRITE_WALK_INL;
+  u32               nval = 0u;
+  u32               cval = REWRITE_WALK_INL;
+  for (;;) {
+    u8   leaf = 1u;
+    Term v    = t;
+    switch (term_tag(t)) {
+      case TAG_FVR: {
+        u32 old = term_ext(t);
+        u32 i   = 0u;
+        while (i < m->n && m->old_id[i] != old) {
+          i++;
         }
+        if (i == m->n) {
+          if (m->n >= REWRITE_MAX_VAR) break;   // full map: keep id
+          m->old_id[m->n++] = old;
+        }
+        if (i != old) {
+          v = term_new_fvr(i);
+        }
+        break;
       }
-      if (m->n >= REWRITE_MAX_VAR) return t;   // full map: keep id
-      u32 i = m->n;
-      m->old_id[m->n++] = old;
-      if (i == old) return t;
-      return term_new_fvr(i);
-    }
-    case TAG_CTR: {
-      // Direct heap_read for arity + children.
-      u64 base = term_val(t);
-      Term n_cell = heap_read(base);
-      if (term_tag(n_cell) != TAG_NUM) return t;
-      u32 n = (u32)term_val(n_cell);
-      Term stk[REWRITE_MAX_ARITY];
-      Term *children = term_kids_buf(stk, n);
-      u8 changed = 0;
-      for (u32 i = 0; i < n; i++) {
-        Term orig = heap_read(base + 1u + (u64)i);
-        children[i] = nv_rewrite(orig, m);
-        if (children[i] != orig) changed = 1;
+      case TAG_CTR: {
+        // Direct heap_read for arity + children.
+        u64  base   = term_val(t);
+        Term n_cell = heap_read(base);
+        u32  n      = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 0u;
+        if (n > 0u) {
+          if (nfr == cfr) {
+            fr = (RewriteNodeFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].t    = t;
+          fr[nfr].base = base;
+          fr[nfr].i    = 0u;
+          fr[nfr].n    = n;
+          nfr++;
+          leaf = 0u;
+        }
+        break;
       }
-      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
-      term_kids_release(children, stk);
-      return r;
+      default:
+        break;
     }
-    default: return t;
+    if (leaf) {
+      if (nval == cval) {
+        val = (Term *)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = v;
+    }
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      RewriteNodeFrame *f = &fr[nfr - 1u];
+      nval -= f->n;
+      val[nval] = rewrite_node_rebuild(f, &val[nval]);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    RewriteNodeFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
+  Term out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
 
 // Canonically renumber the variables of the equation/rule

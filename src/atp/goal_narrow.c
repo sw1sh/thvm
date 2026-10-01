@@ -170,6 +170,11 @@ static void gn_free(struct AtpGoalNarrow *g) {
   free(g);
 }
 
+// The walks in this file recurse once per term level.  Goal-narrow is off
+// by default (THVM_ATP_GOAL_NARROW=1 or thvm_atp_set_use_goal_narrow turns
+// it on; no FindProof schedule lane does), so a deep rule reaches them
+// only in that opt-in mode.
+
 // Groundness (goal-narrow's own copy: mnf_term_is_ground lives behind
 // -DATP_MNF, which the C test builds do not define).
 static u8 gn_term_is_ground(Term t) {

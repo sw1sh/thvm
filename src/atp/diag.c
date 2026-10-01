@@ -367,21 +367,10 @@ static u8 atp_cp_ac_dispensable(Term lhs, Term rhs, const AtpAcInfo *ac) {
 }
 #endif
 
-static u8 atp_cp_perm_subsumed(Term lhs, Term rhs) {
-  if (lhs == rhs) return 0;                      // identical handled elsewhere
-#ifdef THVM_ATP_AC
-  // WM-faithful path: when the AC operators have been detected and
-  // registered in the perm-subsume mask (thvm_atp_set_perm_subsume_mask
-  // from thvm_atp_auto_ac), use the full flattened AC-dispensability
-  // test (GZ_ACVerzichtbar).  This catches the n-ary associativity
-  // permutations the binary swap below misses.  The mask is a LOCAL
-  // AtpAcInfo, NOT the engine-global g_atp_ac_info -- so the engine
-  // stays in standard (non-AC) completion exactly like Waldmeister.
-  if (g_atp_perm_subsume_mask != 0ull) {
-    AtpAcInfo ac = { .ac_mask = g_atp_perm_subsume_mask };
-    return atp_cp_ac_dispensable(lhs, rhs, &ac);
-  }
-#endif
+// The structural gates of one perm-subsumption call: two binary CTRs
+// over the same label, the label inside the perm-subsume mask when one
+// is set.
+static u8 atp_perm_binary_pair(Term lhs, Term rhs) {
   if (term_tag(lhs) != TAG_CTR || term_tag(rhs) != TAG_CTR) return 0;
   if (term_ext(lhs) != term_ext(rhs)) return 0;
   // Per-symbol mask gate: when set, only fire perm_sub for symbols in
@@ -393,27 +382,106 @@ static u8 atp_cp_perm_subsumed(Term lhs, Term rhs) {
     }
   }
   u32 nl = term_ctr_n(lhs), nr = term_ctr_n(rhs);
-  if (nl != nr || nl != 2u) return 0;
-  Term l0 = term_ctr_at(lhs, 0), l1 = term_ctr_at(lhs, 1);
-  Term r0 = term_ctr_at(rhs, 0), r1 = term_ctr_at(rhs, 1);
-  // Two children are AC-same iff structurally equal OR they themselves
-  // are an AC-permutation -- recurse.  This catches deep commutativity.
-  u8 l0_r0 = kbo_eq(l0, r0) || atp_cp_perm_subsumed(l0, r0);
-  u8 l1_r1 = kbo_eq(l1, r1) || atp_cp_perm_subsumed(l1, r1);
-  if (l0_r0 && l1_r1) {
-    // Identical (as multisets, same order):  caller (trivial-join /
-    // duplicate-rule guard) handles this; we don't drop it because
-    // the equation is `t = t` which should have been spotted upstream.
-    // But pure structural equality (l0 == r0 && l1 == r1 with no
-    // perm) is already caught earlier; this branch fires only when
-    // the children are AC-equal under deeper permutation.  Treat it
-    // as perm-subsumed: the equation says nothing new beyond what
-    // its (already-derived) children-AC-equality said.
-    return 1;
+  return (u8)(nl == nr && nl == 2u);
+}
+
+static u8 atp_cp_perm_subsumed(Term lhs, Term rhs) {
+  // Two binary nodes are AC-same iff their children pair up -- in order
+  // (l0~r0 and l1~r1) or swapped (l0~r1 and l1~r0) -- where a child pair
+  // is AC-same iff structurally equal OR itself a permutation; this
+  // catches deep commutativity.  Each open pair is a frame stepping
+  // through those four child tests (`st` = the next, `res` = results by
+  // bit), evaluated in the recursion's order: both in-order tests, and
+  // the two swapped ones only when that fails.  A test kbo_eq does not
+  // settle opens the nested pair (cl, cr).
+  typedef struct { Term l; Term r; u8 st; u8 res; } PermFrame;
+  enum { PERM_INL = 64 };
+  PermFrame  fr_inl[PERM_INL];
+  PermFrame *fr  = fr_inl;
+  u32        nfr = 0u;
+  u32        cfr = PERM_INL;
+  Term       cl  = lhs, cr = rhs;
+  u8         v   = 0u;
+  for (;;) {
+    u8 open = 0u;
+    if (cl == cr) {
+      v = 0u;                                    // identical handled elsewhere
+    }
+#ifdef THVM_ATP_AC
+    // WM-faithful path: when the AC operators have been detected and
+    // registered in the perm-subsume mask (thvm_atp_set_perm_subsume_mask
+    // from thvm_atp_auto_ac), use the full flattened AC-dispensability
+    // test (GZ_ACVerzichtbar).  This catches the n-ary associativity
+    // permutations the binary swap below misses.  The mask is a LOCAL
+    // AtpAcInfo, NOT the engine-global g_atp_ac_info -- so the engine
+    // stays in standard (non-AC) completion exactly like Waldmeister.
+    else if (g_atp_perm_subsume_mask != 0ull) {
+      AtpAcInfo ac = { .ac_mask = g_atp_perm_subsume_mask };
+      v = atp_cp_ac_dispensable(cl, cr, &ac);
+    }
+#endif
+    else if (!atp_perm_binary_pair(cl, cr)) {
+      v = 0u;
+    } else {
+      if (nfr == cfr) {
+        fr = (PermFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].l   = cl;
+      fr[nfr].r   = cr;
+      fr[nfr].st  = 0u;
+      fr[nfr].res = 0u;
+      nfr++;
+      open = 1u;
+    }
+    u8 call = 0u;
+    while (!call) {
+      if (!open) {
+        if (nfr == 0u) {
+          term_stack_release(fr, fr_inl);
+          return v;
+        }
+        PermFrame *f = &fr[nfr - 1u];
+        if (v) {
+          f->res |= (u8)(1u << f->st);
+        }
+        f->st++;
+      }
+      open = 0u;
+      PermFrame *f = &fr[nfr - 1u];
+      for (;;) {
+        if (f->st == 2u && (f->res & 3u) == 3u) {
+          // Identical (as multisets, same order):  caller (trivial-join /
+          // duplicate-rule guard) handles this; we don't drop it because
+          // the equation is `t = t` which should have been spotted upstream.
+          // But pure structural equality (l0 == r0 && l1 == r1 with no
+          // perm) is already caught earlier; this branch fires only when
+          // the children are AC-equal under deeper permutation.  Treat it
+          // as perm-subsumed: the equation says nothing new beyond what
+          // its (already-derived) children-AC-equality said.
+          v = 1u;
+          break;
+        }
+        if (f->st == 4u) {
+          v = (u8)((f->res & 12u) == 12u);
+          break;
+        }
+        Term x = term_ctr_at(f->l, (f->st == 0u || f->st == 2u) ? 0u : 1u);
+        Term y = term_ctr_at(f->r, (f->st == 0u || f->st == 3u) ? 0u : 1u);
+        if (kbo_eq(x, y)) {
+          f->res |= (u8)(1u << f->st);
+          f->st++;
+          continue;
+        }
+        cl   = x;
+        cr   = y;
+        call = 1u;
+        break;
+      }
+      if (!call) {
+        nfr--;                                   // decided: v goes to the parent
+      }
+    }
   }
-  u8 l0_r1 = kbo_eq(l0, r1) || atp_cp_perm_subsumed(l0, r1);
-  u8 l1_r0 = kbo_eq(l1, r0) || atp_cp_perm_subsumed(l1, r0);
-  return l0_r1 && l1_r0;
 }
 
 // Stage 7.2b: source-rule-disjoint connectedness check.  Returns 1
@@ -493,44 +561,17 @@ static u8 atp_cp_source_disjoint_connected(AtpState *s, Term lhs, Term rhs,
 // with distinct heap cells hash identically.  Fast pre-filter before a
 // kbo_eq in the connectedness reachability set.
 static u32 atp_struct_hash(Term t) {
-  switch (term_tag(t)) {
-    case TAG_CTR: {
-      u32 h = 0x811c9dc5u ^ (term_ext(t) * 0x01000193u);
-      u32 n = term_ctr_n(t);
-      for (u32 i = 0; i < n; i++) {
-        h = (h ^ atp_struct_hash(term_ctr_at(t, i))) * 0x01000193u;
-      }
-      return h ^ (n + 0x9e3779b9u);
-    }
-    case TAG_FVR:
-      return (0x2545f491u ^ term_ext(t)) * 0x01000193u;
-    default:
-      return (0xdeadbeefu ^ (u32)term_tag(t)) * 0x01000193u;
-  }
+  return atp_term_fnv32(t);
 }
 
 // Collect every one-step rewrite of `t` (all positions, both
 // variable-safe directions of each rule) whose result is strictly
 // below `peak`, into out_buf[*n .. ).  Mirrors mnf_successors' shape
 // but order-gated against the peak rather than the redex.
-static u32 atp_conn_successors(AtpState *s, Term t, Term peak,
-                               Term *out_buf, u32 *n, u32 cap) {
-  u32 size = 1u;
-  if (term_tag(t) == TAG_CTR) {
-    u32 m = term_ctr_n(t);
-    if (m > REWRITE_MAX_ARITY) return size;
-    for (u32 i = 0; i < m; i++) {
-      u32 base = *n;
-      (void)atp_conn_successors(s, term_ctr_at(t, i), peak, out_buf, n, cap);
-      for (u32 k = base; k < *n; k++) {
-        Term ch[REWRITE_MAX_ARITY];
-        for (u32 c = 0; c < m; c++) {
-          ch[c] = (c == i) ? out_buf[k] : term_ctr_at(t, c);
-        }
-        out_buf[k] = term_new_ctr(term_ext(t), ch, m);
-      }
-    }
-  }
+// The one-step rewrites of `t` at its root (every l->r, and r->l when
+// its variables are contained), appended to out_buf up to `cap`.
+static void atp_conn_top(AtpState *s, Term t, Term *out_buf, u32 *n,
+                         u32 cap) {
   for (u32 j = 0; j < s->n_rules && *n < cap; j++) {
     RewriteSubst sub = {{0}};
     if (thvm_match(s->lhs[j], t, &sub)) {                 // l -> r
@@ -546,14 +587,71 @@ static u32 atp_conn_successors(AtpState *s, Term t, Term peak,
       }
     }
   }
+}
+
+static u32 atp_conn_successors(AtpState *s, Term t, Term peak,
+                               Term *out_buf, u32 *n, u32 cap) {
+  (void)peak;
+  // Post-order over an explicit stack: a CTR's children's successors
+  // are wrapped back into it (child i replaced) as each child finishes,
+  // then the CTR's own root rewrites follow; `mark` is *n when the
+  // current child began.  A node wider than REWRITE_MAX_ARITY adds
+  // nothing, not even root rewrites.
+  //
   // NOTE: no peak gate here.  Inner-position steps are wrapped back
-  // into the parent by the recursion above, so a bare-reduct compare
-  // gates the WRONG term -- the criterion constrains the FULL rewritten
-  // term, which only the BFS caller sees (it filters every successor
-  // against the peak before insertion).  The earlier per-reduct gate
-  // admitted >=-peak intermediates and over-dropped: McCune
-  // Associativity falsely SATURATED under THVM_ATP_CONNECT=1.
-  return size;
+  // into the parent, so a bare-reduct compare gates the WRONG term --
+  // the criterion constrains the FULL rewritten term, which only the
+  // BFS caller sees (it filters every successor against the peak
+  // before insertion).  The earlier per-reduct gate admitted >=-peak
+  // intermediates and over-dropped: McCune Associativity falsely
+  // SATURATED under THVM_ATP_CONNECT=1.
+  typedef struct { Term t; u64 base; u32 i; u32 m; u32 mark; } ConnFrame;
+  ConnFrame  fr_inl[ATP_WALK_INL];
+  ConnFrame *fr  = fr_inl;
+  u32        nfr = 0u;
+  u32        cfr = ATP_WALK_INL;
+  for (;;) {
+    u32 m    = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+    u8  wide = (u8)(m > REWRITE_MAX_ARITY);
+    if (!wide && m > 0u) {
+      if (nfr == cfr) {
+        fr = (ConnFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].t    = t;
+      fr[nfr].base = term_val(t);
+      fr[nfr].i    = 0u;
+      fr[nfr].m    = m;
+      fr[nfr].mark = *n;
+      nfr++;
+      t = heap_read(term_val(t) + 1u);
+      continue;
+    }
+    if (!wide) {
+      atp_conn_top(s, t, out_buf, n, cap);
+    }
+    for (;;) {
+      if (nfr == 0u) {
+        term_stack_release(fr, fr_inl);
+        return 1u;
+      }
+      ConnFrame *f = &fr[nfr - 1u];
+      for (u32 k = f->mark; k < *n; k++) {
+        Term ch[REWRITE_MAX_ARITY];
+        for (u32 c = 0; c < f->m; c++) {
+          ch[c] = (c == f->i) ? out_buf[k] : term_ctr_at(f->t, c);
+        }
+        out_buf[k] = term_new_ctr(term_ext(f->t), ch, f->m);
+      }
+      f->i++;
+      if (f->i < f->m) {
+        f->mark = *n;
+        t = heap_read(f->base + 1u + (u64)f->i);
+        break;
+      }
+      atp_conn_top(s, f->t, out_buf, n, cap);
+      nfr--;
+    }
+  }
 }
 
 static u8 atp_cp_connected_below_peak(AtpState *s, Term lhs, Term rhs,

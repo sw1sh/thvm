@@ -984,29 +984,63 @@ fn void thvm_atp_set_use_lrs_age(AtpState *s, u8 on) {
 // "touches goal" check is a sound over-approximation -- it never rules
 // out a CP that genuinely shares a symbol with the goal.
 static void atp_sym_mask_collect(Term t, u32 mask[8]) {
-  if (term_tag(t) == TAG_CTR) {
-    u32 lbl = term_ext(t);
-    mask[(lbl >> 5) & 7u] |= 1u << (lbl & 31u);
-    u32 n = term_ctr_n(t);
-    if (n > REWRITE_MAX_ARITY) return;
-    for (u32 i = 0; i < n; i++) {
-      atp_sym_mask_collect(term_ctr_at(t, i), mask);
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      u32 lbl = term_ext(t);
+      mask[(lbl >> 5) & 7u] |= 1u << (lbl & 31u);
+      u32 n = term_ctr_n(t);
+      if (n <= REWRITE_MAX_ARITY) {
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
+      }
     }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
+  term_stack_release(st, st_inl);
 }
 
 static int atp_term_touches_goal(const AtpState *s, Term t) {
   if (s == NULL || !s->use_sos) return 0;
-  if (term_tag(t) == TAG_CTR) {
-    u32 lbl = term_ext(t);
-    if (s->goal_sym_mask[(lbl >> 5) & 7u] & (1u << (lbl & 31u))) return 1;
-    u32 n = term_ctr_n(t);
-    if (n > REWRITE_MAX_ARITY) return 0;
-    for (u32 i = 0; i < n; i++) {
-      if (atp_term_touches_goal(s, term_ctr_at(t, i))) return 1;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  int   hit = 0;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR) {
+      u32 lbl = term_ext(t);
+      if (s->goal_sym_mask[(lbl >> 5) & 7u] & (1u << (lbl & 31u))) {
+        hit = 1;
+        break;
+      }
+      u32 n = term_ctr_n(t);
+      if (n <= REWRITE_MAX_ARITY) {
+        while (nst + n > cst) {
+          st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = n; i-- > 0u;) {
+          st[nst++] = term_ctr_at(t, i);
+        }
+      }
     }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
-  return 0;
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 // Set-of-Support: a CP whose sides share symbols with the goal gets a

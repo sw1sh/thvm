@@ -9,40 +9,112 @@
 // Term printer handles TAG_CTR (as "C<lab>(args...)"), TAG_FVR (as
 // "x_<id>"), TAG_NUM (as "#<val>"), TAG_ERA (as "ERA"), with a
 // "?T<tag>" fallback for any other tag.  Truncates silently on
-// buffer overflow.
+// buffer overflow.  Each open CTR level keeps the locals a recursive
+// printer would -- its own buffer window (buf, cap), written length w
+// and child index -- on an explicit stack, and a finished child's
+// length is added to its parent's w as a recursive return would be.
 
-static u32 atp_pretty_term(Term t, char *buf, u32 cap);
-
-static u32 atp_pretty_ctr(Term t, char *buf, u32 cap) {
-  if (cap <= 1) return 0;
-  u32 lab = term_ext(t);
-  u32 n   = term_ctr_n(t);
-  int n_w = snprintf(buf, cap, "C%u", lab);
-  if (n_w < 0) return 0;
-  u32 w = (u32)n_w;
-  if (w >= cap) return cap - 1;
-  if (n == 0) return w;
-  if (w + 1 >= cap) return w;
-  w += (u32)snprintf(buf + w, cap - w, "(");
-  for (u32 i = 0; i < n; i++) {
-    if (w + 2 >= cap) break;
-    if (i > 0) w += (u32)snprintf(buf + w, cap - w, ", ");
-    if (w >= cap) return cap - 1;
-    w += atp_pretty_term(term_ctr_at(t, i), buf + w, cap - w);
-    if (w >= cap) return cap - 1;
-  }
-  if (w + 1 < cap) w += (u32)snprintf(buf + w, cap - w, ")");
-  return w;
-}
+typedef struct {
+  u64   base;
+  char *buf;
+  u32   cap;
+  u32   w;
+  u32   i;
+  u32   n;
+} AtpPrettyFrame;
 
 static u32 atp_pretty_term(Term t, char *buf, u32 cap) {
-  if (cap == 0) return 0;
-  switch (term_tag(t)) {
-    case TAG_FVR: return (u32)snprintf(buf, cap, "x_%u", term_ext(t));
-    case TAG_NUM: return (u32)snprintf(buf, cap, "#%u", (u32)term_val(t));
-    case TAG_ERA: return (u32)snprintf(buf, cap, "ERA");
-    case TAG_CTR: return atp_pretty_ctr(t, buf, cap);
-    default:      return (u32)snprintf(buf, cap, "?T%u", term_tag(t));
+  enum { PRETTY_INL = 64 };
+  AtpPrettyFrame  fr_inl[PRETTY_INL];
+  AtpPrettyFrame *fr  = fr_inl;
+  u32             nfr = 0u;
+  u32             cfr = PRETTY_INL;
+  u32             ret = 0u;
+  for (;;) {
+    u8 opened = 0u;
+    if (cap == 0) {
+      ret = 0u;
+    } else {
+      switch (term_tag(t)) {
+        case TAG_FVR: ret = (u32)snprintf(buf, cap, "x_%u", term_ext(t)); break;
+        case TAG_NUM: ret = (u32)snprintf(buf, cap, "#%u", (u32)term_val(t)); break;
+        case TAG_ERA: ret = (u32)snprintf(buf, cap, "ERA"); break;
+        case TAG_CTR: {
+          if (cap <= 1) {
+            ret = 0u;
+            break;
+          }
+          u32 lab = term_ext(t);
+          u32 n   = term_ctr_n(t);
+          int n_w = snprintf(buf, cap, "C%u", lab);
+          u32 w   = (u32)n_w;
+          if (n_w < 0) {
+            ret = 0u;
+          } else if (w >= cap) {
+            ret = cap - 1;
+          } else if (n == 0 || w + 1 >= cap) {
+            ret = w;
+          } else {
+            w += (u32)snprintf(buf + w, cap - w, "(");
+            if (nfr == cfr) {
+              fr = (AtpPrettyFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+            }
+            fr[nfr].base = term_val(t);
+            fr[nfr].buf  = buf;
+            fr[nfr].cap  = cap;
+            fr[nfr].w    = w;
+            fr[nfr].i    = 0u;
+            fr[nfr].n    = n;
+            nfr++;
+            opened = 1u;
+          }
+          break;
+        }
+        default: ret = (u32)snprintf(buf, cap, "?T%u", term_tag(t)); break;
+      }
+    }
+    // Run open levels until one starts a child.  `have` = a child just
+    // returned `ret` to the innermost level.
+    u8 have = (u8)!opened;
+    for (;;) {
+      if (nfr == 0u) {
+        term_stack_release(fr, fr_inl);
+        return ret;
+      }
+      AtpPrettyFrame *f = &fr[nfr - 1u];
+      if (have) {
+        have = 0u;
+        f->w += ret;
+        if (f->w >= f->cap) {
+          ret = f->cap - 1;
+          nfr--;
+          have = 1u;
+          continue;
+        }
+        f->i++;
+      }
+      if (f->i < f->n && f->w + 2 < f->cap) {
+        if (f->i > 0) {
+          f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ", ");
+        }
+        if (f->w >= f->cap) {
+          ret = f->cap - 1;
+          nfr--;
+          have = 1u;
+          continue;
+        }
+        t   = heap_read(f->base + 1u + (u64)f->i);
+        buf = f->buf + f->w;
+        cap = f->cap - f->w;
+        break;
+      }
+      if (f->w + 1 < f->cap) {
+        f->w += (u32)snprintf(f->buf + f->w, f->cap - f->w, ")");
+      }
+      ret = f->w;
+      nfr--;
+      have = 1u;
+    }
   }
 }
 

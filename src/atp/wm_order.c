@@ -101,6 +101,11 @@
 // slot compaction).  A side registry records every face inserted per
 // trace id so removal needs no live Terms.
 
+// The most cells a trie key (a face in preorder) holds.  The encoders
+// wmo_cells_from_term / _ft recurse once per cell and a trie level holds
+// one cell, so this is also the depth bound of the encoders and of the
+// trie walks (wmo_walk_entries, wmo_free_subtree, the check and dump
+// walks).
 #define WMO_MAX_CELLS  768u
 #define WMO_MAX_VARS   64u
 
@@ -264,13 +269,46 @@ static u32 wmo_sub_end(const WmoCell *c, u32 i) {
 }
 
 static u32 wmo_term_depth(Term t) {
-  if (term_tag(t) != TAG_CTR) return 1;
-  u32 n = term_ctr_n(t), d = 0;
-  for (u32 i = 0; i < n; i++) {
-    u32 cd = wmo_term_depth(term_ctr_at(t, i));
-    if (cd > d) d = cd;
+  // `d` per open CTR: the deepest child so far.
+  typedef struct { u64 base; u32 i; u32 n; u32 d; } WmoDepthFrame;
+  WmoDepthFrame  fr_inl[ATP_WALK_INL];
+  WmoDepthFrame *fr  = fr_inl;
+  u32            nfr = 0u;
+  u32            cfr = ATP_WALK_INL;
+  u32            v   = 0u;
+  for (;;) {
+    u32 n = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+    if (n > 0u) {
+      if (nfr == cfr) {
+        fr = (WmoDepthFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].base = term_val(t);
+      fr[nfr].i    = 0u;
+      fr[nfr].n    = n;
+      fr[nfr].d    = 0u;
+      nfr++;
+    } else {
+      v = 1u;
+      while (nfr > 0u) {
+        WmoDepthFrame *f = &fr[nfr - 1u];
+        if (v > f->d) {
+          f->d = v;
+        }
+        if (++f->i < f->n) {
+          break;
+        }
+        v = f->d + 1u;
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    WmoDepthFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
   }
-  return d + 1;
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 
 // Flatten `t` into cells with canonical first-occurrence var numbering
@@ -358,15 +396,46 @@ static u32 wmo_face_cells_ft(const struct AtpFtCell *face, WmoCell *out,
 }
 
 static u32 wmo_term_depth_ft(const struct AtpFtCell *c) {
-  if ((c->sym & WF_VAR_BIT) != 0u || c->arity == 0u) return 1;
-  u32 d = 0;
-  const struct AtpFtCell *kid = c->next;
-  for (u32 i = 0; i < (u32)c->arity; i++) {
-    u32 cd = wmo_term_depth_ft(kid);
-    if (cd > d) d = cd;
-    kid = kid->end->next;
+  // `kid` = the open cell's next child, `left` = children not yet begun.
+  typedef struct { const struct AtpFtCell *kid; u32 left; u32 d; } WmoDepthFtFrame;
+  WmoDepthFtFrame  fr_inl[ATP_WALK_INL];
+  WmoDepthFtFrame *fr  = fr_inl;
+  u32              nfr = 0u;
+  u32              cfr = ATP_WALK_INL;
+  u32              v   = 0u;
+  for (;;) {
+    if ((c->sym & WF_VAR_BIT) == 0u && c->arity != 0u) {
+      if (nfr == cfr) {
+        fr = (WmoDepthFtFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].kid  = c->next;
+      fr[nfr].left = (u32)c->arity;
+      fr[nfr].d    = 0u;
+      nfr++;
+    } else {
+      v = 1u;
+      while (nfr > 0u) {
+        WmoDepthFtFrame *f = &fr[nfr - 1u];
+        if (v > f->d) {
+          f->d = v;
+        }
+        if (f->left > 0u) {
+          break;
+        }
+        v = f->d + 1u;
+        nfr--;
+      }
+      if (nfr == 0u) {
+        break;
+      }
+    }
+    WmoDepthFtFrame *f = &fr[nfr - 1u];
+    c      = f->kid;
+    f->kid = c->end->next;
+    f->left--;
   }
-  return d + 1;
+  term_stack_release(fr, fr_inl);
+  return v;
 }
 #endif // THVM_ATPFT_NORM && THVM_ATPFT_RULES
 
@@ -1709,63 +1778,165 @@ static inline void wmo_sort_vkids_vardesc(WmoKid *v, u32 n) {
   }
 }
 
-static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
-                    const WmoUnif *u, u32 depth_guard) {
-  if (depth_guard == 0u) return;
+// One open inner-node visit of wmo_dfs.  A query-function cell runs
+// phase 0 (exact-symbol children) then 1 (variable children); a
+// query-variable cell runs 2 (variable children) then 3 (jump exits).
+// `u_ref` names the unifier the visit was entered with: the caller's
+// (WMO_DFS_UROOT) or that in the `u2` of the ancestor frame at that
+// index.  `u2` and `vcell` are the branch scratch the recursion kept in
+// locals; the bindings a branch makes may point at `vcell`, and they
+// live exactly as long as the frame.
+#define WMO_DFS_UROOT 0xffffffffu
+typedef struct {
+  WmoNode  *n;
+  WmoEntry *e;
+  u32       qi;
+  u32       qe;
+  u32       guard;
+  u32       u_ref;
+  u32       k;
+  u32       nv;
+  u8        phase;
+  WmoCell   vcell;
+  WmoKid    vkids[32];
+  WmoUnif   u2;
+} WmoDfsFrame;
+// Every open frame sits at a distinct query cell (each step moves qi
+// right, and a frame opens only at qi < q_len <= WMO_MAX_CELLS), so the
+// stack never outgrows this one allocation and frames never move --
+// bindings into a frame's `vcell` stay valid while it is open.  The
+// array (and wmo_dfs_enter's leaf scratch) is shared, so wmo_dfs must
+// not re-enter: a nested walk would overwrite the outer walk's frames.
+static WmoDfsFrame *g_wmo_dfs_fr     = NULL;
+static u8           g_wmo_dfs_active = 0u;
+
+// A wmo_dfs visit's entry: a leaf is unified against the rest of the
+// query and emitted at once; an inner node at a query cell opens a
+// frame (returns 1).
+static u8 wmo_dfs_enter(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
+                        const WmoUnif *u, u32 u_ref, u32 guard, u32 *nfr) {
+  if (guard == 0u) {
+    return 0u;
+  }
   if (is_leaf) {
+    static WmoUnif leaf_u;
     WmoLeaf *leaf = (WmoLeaf *)n_raw;
-    WmoUnif u2;
-    wmo_unif_copy(&u2, u);
+    wmo_unif_copy(&leaf_u, u);
     u32 si = (spos != 0xffffffffu) ? spos : leaf->hang + 1u;
-    if (wmo_unify_rest(d, leaf, si, qi, &u2)) wmo_dfs_emit(d, leaf);
-    return;
+    if (wmo_unify_rest(d, leaf, si, qi, &leaf_u)) {
+      wmo_dfs_emit(d, leaf);
+    }
+    return 0u;
   }
   WmoNode *n = (WmoNode *)n_raw;
-  if (qi >= d->q_len) return;
-  const WmoCell *qc = &d->q[qi];
-  if (!qc->is_var) {
-    // exact-symbol child first
-    for (u32 k = 0; k < n->n_kids; k++) {
-      if (!n->kids[k].sym.is_var && n->kids[k].sym.sym == qc->sym) {
-        wmo_dfs(d, n->kids[k].child, n->kids[k].is_leaf, qi + 1u,
-                0xffffffffu, u, depth_guard - 1u);
+  if (qi >= d->q_len) {
+    return 0u;
+  }
+  if (*nfr >= WMO_MAX_CELLS) {
+    thvm_fatal("wmo_dfs: frame stack overflow");
+  }
+  WmoDfsFrame *f = &g_wmo_dfs_fr[(*nfr)++];
+  f->n     = n;
+  f->e     = n->exits;
+  f->qi    = qi;
+  f->qe    = wmo_sub_end(d->q, qi);
+  f->guard = guard;
+  f->u_ref = u_ref;
+  f->k     = 0u;
+  f->phase = d->q[qi].is_var ? 2u : 0u;
+  // var children, descending var index
+  u32 nv = 0u;
+  for (u32 k = 0; k < n->n_kids && nv < 32u; k++) {
+    if (n->kids[k].sym.is_var) {
+      f->vkids[nv++] = n->kids[k];
+    }
+  }
+  if (nv > 1u) {
+    wmo_sort_vkids_vardesc(f->vkids, nv);
+  }
+  f->nv = nv;
+  return 1u;
+}
+
+// Depth-first in the recursion's order -- per frame the phases above,
+// a child's whole subtree before the next sibling -- over the frame
+// array instead of the C stack.
+static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
+                    const WmoUnif *u, u32 depth_guard) {
+  if (g_wmo_dfs_fr == NULL) {
+    g_wmo_dfs_fr = (WmoDfsFrame *)malloc((size_t)WMO_MAX_CELLS *
+                                         sizeof *g_wmo_dfs_fr);
+    if (g_wmo_dfs_fr == NULL) {
+      thvm_fatal("wmo_dfs: frame stack OOM");
+    }
+  }
+  if (g_wmo_dfs_active) {
+    thvm_fatal("wmo_dfs: re-entered");
+  }
+  g_wmo_dfs_active = 1u;
+  u32 nfr = 0u;
+  (void)wmo_dfs_enter(d, n_raw, is_leaf, qi, spos, u, WMO_DFS_UROOT,
+                      depth_guard, &nfr);
+  while (nfr > 0u) {
+    u32            fi = nfr - 1u;
+    WmoDfsFrame   *f  = &g_wmo_dfs_fr[fi];
+    const WmoUnif *fu = (f->u_ref == WMO_DFS_UROOT)
+                            ? u : &g_wmo_dfs_fr[f->u_ref].u2;
+    const WmoCell *qc = &d->q[f->qi];
+    WmoNode       *n  = f->n;
+    u8             in = 0u;
+    if (f->phase == 0u) {
+      // exact-symbol child first
+      while (!in && f->k < n->n_kids) {
+        WmoKid *kid = &n->kids[f->k];
+        f->k++;
+        if (!kid->sym.is_var && kid->sym.sym == qc->sym) {
+          in = wmo_dfs_enter(d, kid->child, kid->is_leaf, f->qi + 1u,
+                             0xffffffffu, fu, f->u_ref, f->guard - 1u, &nfr);
+        }
       }
-    }
-    // var children, descending var index
-    WmoKid vkids[32];
-    u32 nv = 0;
-    for (u32 k = 0; k < n->n_kids && nv < 32u; k++) {
-      if (n->kids[k].sym.is_var) vkids[nv++] = n->kids[k];
-    }
-    if (nv > 1u) wmo_sort_vkids_vardesc(vkids, nv);
-    u32 qe = wmo_sub_end(d->q, qi);
-    for (u32 k = 0; k < nv; k++) {
-      WmoUnif u2;
-      wmo_unif_copy(&u2, u);
-      if (wmo_unify_var(1u, vkids[k].sym.sym, d->q + qi, qe - qi, 0u,
-                        &u2, 64u)) {
-        wmo_dfs(d, vkids[k].child, vkids[k].is_leaf, qe, 0xffffffffu, &u2,
-                depth_guard - 1u);
+      if (in) {
+        continue;
       }
+      f->phase = 1u;
+      f->k     = 0u;
     }
-  } else {
-    // var children first (descending index), then jump exits in order
-    WmoKid vkids[32];
-    u32 nv = 0;
-    for (u32 k = 0; k < n->n_kids && nv < 32u; k++) {
-      if (n->kids[k].sym.is_var) vkids[nv++] = n->kids[k];
-    }
-    if (nv > 1u) wmo_sort_vkids_vardesc(vkids, nv);
-    for (u32 k = 0; k < nv; k++) {
-      WmoUnif u2;
-      wmo_unif_copy(&u2, u);
-      WmoCell vcell = vkids[k].sym;
-      if (wmo_unify_cells(&d->q[qi], 1u, 0u, &vcell, 1u, 1u, &u2, 64u)) {
-        wmo_dfs(d, vkids[k].child, vkids[k].is_leaf, qi + 1u, 0xffffffffu,
-                &u2, depth_guard - 1u);
+    if (f->phase == 1u) {
+      while (!in && f->k < f->nv) {
+        WmoKid *vk = &f->vkids[f->k];
+        f->k++;
+        wmo_unif_copy(&f->u2, fu);
+        if (wmo_unify_var(1u, vk->sym.sym, d->q + f->qi, f->qe - f->qi, 0u,
+                          &f->u2, 64u)) {
+          in = wmo_dfs_enter(d, vk->child, vk->is_leaf, f->qe, 0xffffffffu,
+                             &f->u2, fi, f->guard - 1u, &nfr);
+        }
       }
+      if (!in) {
+        nfr--;
+      }
+      continue;
     }
-    for (WmoEntry *e = n->exits; e != NULL; e = e->next) {
+    if (f->phase == 2u) {
+      while (!in && f->k < f->nv) {
+        WmoKid *vk = &f->vkids[f->k];
+        f->k++;
+        wmo_unif_copy(&f->u2, fu);
+        f->vcell = vk->sym;
+        if (wmo_unify_cells(&d->q[f->qi], 1u, 0u, &f->vcell, 1u, 1u, &f->u2,
+                            64u)) {
+          in = wmo_dfs_enter(d, vk->child, vk->is_leaf, f->qi + 1u,
+                             0xffffffffu, &f->u2, fi, f->guard - 1u, &nfr);
+        }
+      }
+      if (in) {
+        continue;
+      }
+      f->phase = 3u;
+    }
+    while (!in && f->e != NULL) {
+      WmoEntry *e = f->e;
+      f->e = e->next;
       // WM-faithful duplicate-jump shadow skip (kill switch
       // THVM_ATP_WMO_JUMP_DEDUP=0): the historical deep-hang construction
       // leaves jumps that a later collapse retargets onto a node another
@@ -1787,18 +1958,23 @@ static void wmo_dfs(WmoDfs *d, void *n_raw, u8 is_leaf, u32 qi, u32 spos,
             break;
           }
         }
-        if (shadowed) continue;
+        if (shadowed) {
+          continue;
+        }
       }
-      WmoUnif u2;
-      wmo_unif_copy(&u2, u);
-      if (wmo_unify_var(0u, qc->sym, e->sub, e->sub_len, 1u, &u2,
-                        64u)) {
+      wmo_unif_copy(&f->u2, fu);
+      if (wmo_unify_var(0u, qc->sym, e->sub, e->sub_len, 1u, &f->u2, 64u)) {
         u32 land = wmo_node_depth(e->start) + e->sub_len;
-        wmo_dfs(d, e->ziel, e->ziel_leaf, qi + 1u,
-                e->ziel_leaf ? land : 0xffffffffu, &u2, depth_guard - 1u);
+        in = wmo_dfs_enter(d, e->ziel, e->ziel_leaf, f->qi + 1u,
+                           e->ziel_leaf ? land : 0xffffffffu, &f->u2, fi,
+                           f->guard - 1u, &nfr);
       }
     }
+    if (!in) {
+      nfr--;
+    }
   }
+  g_wmo_dfs_active = 0u;
 }
 
 // ---------- public mirror API ----------
@@ -2114,15 +2290,35 @@ static u8 atp_wmo_dist_rhs_of(AtpState *s, u32 uid) {
 
 // Whether `t` contains no free variables (is a ground term).
 static u8 wmo_term_is_ground(Term t) {
-  if (t == 0) return 1u;
-  if (term_tag(t) == TAG_FVR) return 0u;
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    for (u32 i = 0; i < n; i++) {
-      if (!wmo_term_is_ground(term_ctr_at(t, i))) return 0u;
-    }
+  if (t == 0) {
+    return 1u;
   }
-  return 1u;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st     = st_inl;
+  u32   nst    = 0u;
+  u32   cst    = ATP_WALK_INL;
+  u8    ground = 1u;
+  for (;;) {
+    if (term_tag(t) == TAG_FVR) {
+      ground = 0u;
+      break;
+    }
+    if (term_tag(t) == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
+  return ground;
 }
 
 // Register the faces of the fact at `slot` (call right after
@@ -2927,15 +3123,31 @@ static u8 atp_wmo_eq_tops_rank(AtpState *s, u32 trace, u8 thvm_dir,
 // (indexed by variable id, capped at WMO_VAR_CNT_CAP).
 enum { WMO_VAR_CNT_CAP = 64u };
 static void wmo_var_counts(Term t, u16 *cnt) {
-  if (term_tag(t) == TAG_FVR) {
-    u32 v = term_ext(t);
-    if (v < WMO_VAR_CNT_CAP && cnt[v] < 0xffffu) cnt[v]++;
-    return;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    if (term_tag(t) == TAG_FVR) {
+      u32 v = term_ext(t);
+      if (v < WMO_VAR_CNT_CAP && cnt[v] < 0xffffu) {
+        cnt[v]++;
+      }
+    } else if (term_tag(t) == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    for (u32 i = 0; i < n; i++) wmo_var_counts(term_ctr_at(t, i), cnt);
-  }
+  term_stack_release(st, st_inl);
 }
 
 // Whether the two sides of an equation are NOT variable permutations of

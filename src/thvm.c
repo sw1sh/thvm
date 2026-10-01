@@ -80,6 +80,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "term/new_inc.c"
 #include "term/new_ctr.c"
 #include "term/kids_buf.c"
+#include "term/stack_grow.c"
 #include "term/new_when.c"
 #include "term/new_fvr.c"
 #include "term/new_ann.c"

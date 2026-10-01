@@ -279,20 +279,46 @@ static void atp_ri_rebuild(AtpState *s) {
 // set to a redex position -- to splice a rewritten subtree in place.
 static u8 atp_ri_flatten(Term t, Term *flat, u32 *subsz, u32 *flatsym,
                          u8 *folded, u32 cap, u32 *pos) {
-  u32 here = *pos;
-  if (here >= cap) return 0;
-  flat[here]    = t;
-  flatsym[here] = atp_ri_flatsym_raw(t, folded);
-  *pos = here + 1u;
-  if (term_tag(t) == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    for (u32 i = 0; i < n; i++) {
-      if (!atp_ri_flatten(term_ctr_at(t, i), flat, subsz, flatsym, folded,
-                          cap, pos)) return 0;
+  AtpDTreeWalkFrame  fr_inl[ATP_DTREE_WALK_INL];
+  AtpDTreeWalkFrame *fr  = fr_inl;
+  u32                nfr = 0u;
+  u32                cfr = ATP_DTREE_WALK_INL;
+  u8                 ok  = 1u;
+  for (;;) {
+    u32 here = *pos;
+    if (here >= cap) {
+      ok = 0u;
+      break;
     }
+    flat[here]    = t;
+    flatsym[here] = atp_ri_flatsym_raw(t, folded);
+    *pos = here + 1u;
+    u32 n = (term_tag(t) == TAG_CTR) ? term_ctr_n(t) : 0u;
+    if (n > 0u) {
+      if (nfr == cfr) {
+        fr = (AtpDTreeWalkFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].base = term_val(t);
+      fr[nfr].i    = 0u;
+      fr[nfr].n    = n;
+      fr[nfr].here = here;
+      nfr++;
+    } else {
+      subsz[here] = 1u;
+    }
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      subsz[fr[nfr - 1u].here] = *pos - fr[nfr - 1u].here;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    AtpDTreeWalkFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
-  subsz[here] = *pos - here;
-  return 1;
+  term_stack_release(fr, fr_inl);
+  return ok;
 }
 
 // One retrieval's immutable parameters (single-threaded saturation, so
@@ -682,22 +708,76 @@ static u8 atp_ri_find_redex(u32 flatlen, u32 clean_before,
 // each node's pre-splice Term, so a subtree no splice touched rebuilds
 // child-for-child equal to its original cell and is returned as-is --
 // untouched subtrees cost zero allocation, only the union of the
-// rewrite paths gets fresh CTR blocks.
+// rewrite paths gets fresh CTR blocks.  Built bottom-up over an
+// explicit stack: children left to right, each before its parent's
+// term_new_ctr -- the recursion's allocation order, at any depth.
+typedef struct {
+  Term src;
+  u32  c;      // flat position of the next child
+  u32  i;
+  u32  n;
+} AtpRiBuildFrame;
+
 static Term atp_ri_build(const Term *flat, const u32 *subsz,
                          const u32 *flatsym, u32 pos) {
-  if (flatsym[pos] < ATP_DTREE_CTR_BASE) return flat[pos];  // NUM / variable leaf
-  Term src = flat[pos];
-  u32  n   = term_ctr_n(src);
-  Term children[REWRITE_MAX_ARITY];
-  u8   changed = 0u;
-  u32  c = pos + 1u;
-  for (u32 i = 0; i < n; i++) {
-    children[i] = atp_ri_build(flat, subsz, flatsym, c);
-    if (children[i] != term_ctr_at(src, i)) changed = 1u;
-    c += subsz[c];
+  AtpRiBuildFrame  fr_inl[ATP_DTREE_WALK_INL];
+  Term             val_inl[ATP_DTREE_WALK_INL];
+  AtpRiBuildFrame *fr   = fr_inl;
+  Term            *val  = val_inl;
+  u32              nfr  = 0u;
+  u32              cfr  = ATP_DTREE_WALK_INL;
+  u32              nval = 0u;
+  u32              cval = ATP_DTREE_WALK_INL;
+  for (;;) {
+    u8   leaf = 1u;
+    Term v    = flat[pos];                      // NUM / variable leaf, or CTR src
+    if (flatsym[pos] >= ATP_DTREE_CTR_BASE) {
+      u32 n = term_ctr_n(v);
+      if (n > 0u) {
+        if (nfr == cfr) {
+          fr = (AtpRiBuildFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].src = v;
+        fr[nfr].c   = pos + 1u;
+        fr[nfr].i   = 0u;
+        fr[nfr].n   = n;
+        nfr++;
+        leaf = 0u;
+      }
+    }
+    if (leaf) {
+      if (nval == cval) {
+        val = (Term *)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = v;
+    }
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      AtpRiBuildFrame *f = &fr[nfr - 1u];
+      Term *kids    = &val[nval - f->n];
+      u8    changed = 0u;
+      for (u32 k = 0; k < f->n; k++) {
+        if (kids[k] != term_ctr_at(f->src, k)) {
+          changed = 1u;
+        }
+      }
+      // subtree untouched -- share
+      Term out = changed ? term_new_ctr(term_ext(f->src), kids, f->n) : f->src;
+      nval -= f->n;
+      val[nval++] = out;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    AtpRiBuildFrame *f = &fr[nfr - 1u];
+    pos   = f->c;
+    f->c += subsz[f->c];
+    f->i++;
   }
-  if (!changed) return src;                       // subtree untouched -- share
-  return term_new_ctr(term_ext(src), children, n);
+  Term out = val[0];
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
+  return out;
 }
 
 // Splice scratch: `repl` is flattened here first so its preorder
@@ -854,16 +934,35 @@ static u8 atp_subst_apply_to_flat(Term rule_rhs,
                                   u32 *dst_pos,
                                   u8 *folded,
                                   u32 cap) {
-  u32 here = *dst_pos;
-  if (here >= cap) return 0;
-  switch (term_tag(rule_rhs)) {
-    case TAG_FVR: {
-      u32 vid = term_ext(rule_rhs);
-      if (vid >= ATP_DTREE_MAXVARS) return 0;     // folded: fall back to tree path
+  AtpDTreeWalkFrame  fr_inl[ATP_DTREE_WALK_INL];
+  AtpDTreeWalkFrame *fr  = fr_inl;
+  u32                nfr = 0u;
+  u32                cfr = ATP_DTREE_WALK_INL;
+  u8                 ok  = 1u;
+  Term               t   = rule_rhs;
+  for (;;) {
+    u32 here = *dst_pos;
+    if (here >= cap) {
+      ok = 0u;
+      break;
+    }
+    u8 tag = term_tag(t);
+    if (tag == TAG_FVR) {
+      u32 vid = term_ext(t);
+      if (vid >= ATP_DTREE_MAXVARS) {           // folded: fall back to tree path
+        ok = 0u;
+        break;
+      }
       u32 spos = star[vid];
-      if (spos == ATP_DTREE_NIL) return 0;        // unbound: fall back
+      if (spos == ATP_DTREE_NIL) {              // unbound: fall back
+        ok = 0u;
+        break;
+      }
       u32 ssz = subj_subsz[spos];
-      if (here + ssz > cap) return 0;
+      if (here + ssz > cap) {
+        ok = 0u;
+        break;
+      }
       memcpy(&dst_flat[here],    &subj_flat[spos],
              (size_t)ssz * sizeof(Term));
       memcpy(&dst_subsz[here],   &subj_subsz[spos],
@@ -871,38 +970,44 @@ static u8 atp_subst_apply_to_flat(Term rule_rhs,
       memcpy(&dst_flatsym[here], &subj_flatsym[spos],
              (size_t)ssz * sizeof(u32));
       *dst_pos = here + ssz;
-      return 1;
-    }
-    case TAG_CTR: {
-      dst_flat[here]    = rule_rhs;
-      dst_flatsym[here] = atp_ri_flatsym_raw(rule_rhs, folded);
+    } else if (tag == TAG_CTR) {
+      dst_flat[here]    = t;
+      dst_flatsym[here] = atp_ri_flatsym_raw(t, folded);
       *dst_pos = here + 1u;
-      u64 base = term_val(rule_rhs);
+      u64  base   = term_val(t);
       Term n_cell = heap_read(base);
-      if (term_tag(n_cell) != TAG_NUM) {
-        dst_subsz[here] = 1u;
-        return 1;
-      }
-      u32 n = (u32)term_val(n_cell);
-      for (u32 i = 0; i < n; i++) {
-        Term child = heap_read(base + 1u + (u64)i);
-        if (!atp_subst_apply_to_flat(child, star, subj_flat, subj_subsz,
-                                     subj_flatsym, dst_flat, dst_subsz,
-                                     dst_flatsym, dst_pos, folded, cap)) {
-          return 0;
+      u32  n      = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 0u;
+      if (n > 0u) {
+        if (nfr == cfr) {
+          fr = (AtpDTreeWalkFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
         }
+        fr[nfr].base = base;
+        fr[nfr].i    = 0u;
+        fr[nfr].n    = n;
+        fr[nfr].here = here;
+        nfr++;
+      } else {
+        dst_subsz[here] = 1u;
       }
-      dst_subsz[here] = *dst_pos - here;
-      return 1;
-    }
-    default: {
-      dst_flat[here]    = rule_rhs;
-      dst_flatsym[here] = atp_ri_flatsym_raw(rule_rhs, folded);
+    } else {
+      dst_flat[here]    = t;
+      dst_flatsym[here] = atp_ri_flatsym_raw(t, folded);
       dst_subsz[here]   = 1u;
       *dst_pos = here + 1u;
-      return 1;
     }
+    while (nfr > 0u && fr[nfr - 1u].i == fr[nfr - 1u].n) {
+      dst_subsz[fr[nfr - 1u].here] = *dst_pos - fr[nfr - 1u].here;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    AtpDTreeWalkFrame *f = &fr[nfr - 1u];
+    t = heap_read(f->base + 1u + (u64)f->i);
+    f->i++;
   }
+  term_stack_release(fr, fr_inl);
+  return ok;
 }
 
 // Splice a rewrite into the persistent flat arrays.  A normalize step

@@ -1617,6 +1617,9 @@ typedef struct {
   u8               want;
 } FtDtDesc;
 
+// Recurses once per branch node on the tree path (pattern length); it runs
+// only under THVM_NO_FT_DTV2=1 and the THVM_FT_DTV2_DIFF harness -- the
+// default ftdt_descend3 below keeps an explicit stack.
 static void ftdt_descend(const FtDtDesc *d, u32 node,
                          const AtpFtCell *sc, u32 nbound, u8 pure) {
   FtPiIndex *ix = d->ix;
@@ -1742,6 +1745,7 @@ static void ftdt_descend(const FtDtDesc *d, u32 node,
 //      failing subtree is ~2.5 cells) and only calls ft_eq on a root
 //      match.  Identical verdict: ft_eq's first lockstep step is this
 //      exact compare (same-sym CTR cells always agree on arity).
+// Recursive like ftdt_descend; it runs only under THVM_NO_FT_DTV3=1.
 static void ftdt_descend2(const FtDtDesc *d, u32 node,
                           const AtpFtCell *sc, u32 nbound, u8 pure) {
   FtPiIndex *ix = d->ix;
@@ -1902,182 +1906,342 @@ out:
 //      nd->kid_mask[e] (a sequential byte array maintained at insert
 //      time) instead of ix->dt_nodes[kids[e]].sub_mask (a dependent
 //      random load of the child's ~90B struct per considered edge).
+// ftdt_descend3 is v3 on an explicit stack: one frame per invocation of
+// the recursion it replaces.  A frame walks its chain of single-edge hops;
+// at a branch node it tries the var / star edges in order, each a child
+// frame entered with the parent suspended at `e`, then takes the one
+// matching concrete edge itself.  Each frame's chain bindings sit on one
+// shared undo log above `ub0` and unwind when the frame exits, as the
+// recursion's per-call log did; a canonical variable binds at most once
+// along a path, so the log never holds more than ATPFT_MAX_VARS entries.
+#define FTDT_NO_UNBIND 0xFFFFFFFFu
+typedef struct {
+  const AtpFtCell *sc;
+  const AtpFtCell *skip;
+  u32              node;
+  u32              nbound;
+  u32              dp;
+  u32              ub0;
+  u32              e;
+  u32              unbind;
+  u8               pure;
+} FtDt3Frame;
+
 static void ftdt_descend3(const FtDtDesc *d, u32 node,
                           const AtpFtCell *sc, u32 nbound, u8 pure) {
+  enum { DT3_CALL, DT3_WALK, DT3_BRANCH, DT3_EDGES, DT3_OUT, DT3_RET };
   FtPiIndex *ix = d->ix;
-  const FtDtNode *nd = &ix->dt_nodes[node];
   const u8 want = d->want;
   const AtpFtCell **bind = d->bind;
-  u16 ub[ATPFT_MAX_VARS];
-  u32 un = 0u;
-  u32 dp = 0u;
-  if (g_ftdt_pd) dp = g_ftdt_dp;
-  // Entry prune: only the root call arrives unchecked -- recursions and
-  // iterative hops below pre-check the child mask before advancing.
-  if ((nd->sub_mask & want) == 0u) {
-    if (g_ftdt_pd) g_atp_pushn_dt_prune++;
-    return;
-  }
+  FtDt3Frame  fr_inl[FT_WALK_INL];
+  FtDt3Frame *fr   = fr_inl;
+  u32         nfr  = 0u;
+  u32         cfr  = FT_WALK_INL;
+  u16         ub[ATPFT_MAX_VARS];
+  u32         un   = 0u;
+  u8          step = DT3_CALL;
   for (;;) {
-    if (g_ftdt_pd) {
-      g_atp_pushn_dt_node++;
-      g_atp_pushn_dt_hist[(dp < ATP_DT_HIST_N - 1u) ? dp
-                                                    : ATP_DT_HIST_N - 1u]++;
-    }
-    if (sc == d->sc_end) {            // subject consumed: emit this node's leaves
-      if (g_ftdt_pd) g_atp_pushn_dt_emit++;
-      ftdt_emit_leaf(ix, node, d->out, want, bind, nbound, pure);
-      goto out;
-    }
-    if (nd->n_edge == 1u) {
-      u32 label0 = nd->label0;
-      if (label0 < FTDT_VAR0) {
-        // Single concrete edge: lockstep hop (as descend2's chain).
-        if ((sc->sym & WF_VAR_BIT) != 0u || label0 != sc->sym) goto out;
-        if (((nd->n_inline ? nd->kmask8[0] : nd->kid_mask[0]) & want) == 0u) {
-          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
-          goto out;
+    switch (step) {
+      case DT3_CALL: {
+        // A call of (node, sc, nbound, pure).  Entry prune: only the root
+        // call arrives unchecked -- recursions and iterative hops below
+        // pre-check the child mask before advancing.
+        u32 dp = 0u;
+        if (g_ftdt_pd) {
+          dp = g_ftdt_dp;
         }
-        if (g_ftdt_pd) { g_atp_pushn_dt_chain++; dp++; }
-        node = nd->kid0;
-        nd   = &ix->dt_nodes[node];
-        sc   = sc->next;
-        continue;
-      }
-      if (label0 != FTDT_STAR) {
-        // Single variable edge V_k: follow iteratively.  Filter order:
-        // the one-byte child mask first, then the two O(1) cell
-        // fail-fasts (first + last cell of the spans -- equal spans
-        // end in equal cells), the full walk last.  Pure conjunction:
-        // same edges survive, same candidates in the same order.
-        u32 k = label0 - FTDT_VAR0;
-        const AtpFtCell *bk = bind[k];
-        if (((nd->n_inline ? nd->kmask8[0] : nd->kid_mask[0]) & want) == 0u) {
-          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
-          goto out;
-        }
-        if (bk != NULL) {
+        if ((ix->dt_nodes[node].sub_mask & want) == 0u) {
           if (g_ftdt_pd) {
-            g_atp_pushn_dt_fteq++;
-            g_atp_pushn_dt_fteq_chain++;
-            g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
+            g_atp_pushn_dt_prune++;
           }
-          if (bk->sym != sc->sym) {             // first-cell fail-fast
-            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
-            goto out;
-          }
-          if (bk->end != NULL && sc->end != NULL &&
-              bk->end->sym != sc->end->sym) {   // last-cell fail-fast
-            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
-            goto out;
-          }
-          if (!ft_eq(bk, sc)) goto out;
-          if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
-        }
-        if (bk == NULL) {
-          if (g_ftdt_pd) g_atp_pushn_dt_bind1++;
-          bind[k] = sc;
-          ub[un++] = (u16)k;
-          if (k + 1u > nbound) nbound = k + 1u;
-        }
-        if (g_ftdt_pd) { g_atp_pushn_dt_chain++; dp++; }
-        node = nd->kid0;
-        nd   = &ix->dt_nodes[node];
-        sc   = (sc->end != NULL) ? sc->end->next : d->sc_end;
-        continue;
-      }
-      // Single STAR edge: fall through to the branch path below.
-    }
-    // Branch node (or single STAR edge).  Var/star region first, then
-    // the ascending concrete region.  All per-edge prune tests read the
-    // parent-side kid_mask mirror.
-    {
-      const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : d->sc_end;
-      u32 nv = nd->n_var_edge;
-      const u32 *lbl = nd->n_inline ? nd->labels8 : nd->labels;
-      const u32 *kds = nd->n_inline ? nd->kids8   : nd->kids;
-      const u8  *kmk = nd->n_inline ? nd->kmask8  : nd->kid_mask;
-      if (g_ftdt_pd) {
-        g_atp_pushn_dt_edge += nd->n_edge;
-        g_atp_pushn_dt_branch++;
-        g_atp_pushn_dt_vedge += nv;
-        u32 fb = (nd->n_edge < ATP_DT_FAN_N) ? nd->n_edge
-                                             : ATP_DT_FAN_N - 1u;
-        g_atp_pushn_dt_fan_visit[fb]++;
-        g_atp_pushn_dt_fan_edge[fb] += nd->n_edge;
-        ftdt_visit_bump(ix, node);
-      }
-      for (u32 e = 0; e < nv; e++) {
-        u32 label = lbl[e];
-        if (label == FTDT_STAR) {
-          if ((kmk[e] & want) == 0u) {
-            if (g_ftdt_pd) g_atp_pushn_dt_prune++;
-            continue;
-          }
-          if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
-          ftdt_descend3(d, kds[e], skip, nbound, 0u);
-          continue;
-        }
-        u32 k = label - FTDT_VAR0;
-        const AtpFtCell *bk = bind[k];
-        if ((kmk[e] & want) == 0u) {
-          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
-          continue;
-        }
-        if (bk != NULL) {
-          if (g_ftdt_pd) {
-            g_atp_pushn_dt_fteq++;
-            g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
-          }
-          if (bk->sym != sc->sym) {             // first-cell fail-fast
-            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
-            continue;
-          }
-          if (bk->end != NULL && sc->end != NULL &&
-              bk->end->sym != sc->end->sym) {   // last-cell fail-fast
-            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
-            continue;
-          }
-          if (!ft_eq(bk, sc)) continue;
-          if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
-        }
-        if (bk == NULL) {
-          if (g_ftdt_pd) { g_atp_pushn_dt_bind1++; g_ftdt_dp = dp + 1u; }
-          bind[k] = sc;
-          ftdt_descend3(d, kds[e], skip,
-                        (k + 1u > nbound) ? k + 1u : nbound, pure);
-          bind[k] = NULL;
-        } else {
-          if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
-          ftdt_descend3(d, kds[e], skip, nbound, pure);
-        }
-      }
-      if ((sc->sym & WF_VAR_BIT) == 0u) {
-        for (u32 e = nv; e < nd->n_edge; e++) {
-          u32 label = lbl[e];
-          if (g_ftdt_pd) g_atp_pushn_dt_cprobe++;
-          if (label < sc->sym) continue;
-          if (label == sc->sym) {
-            if ((kmk[e] & want) != 0u) {
-              // Last exploration step at this node: iterate instead of
-              // recursing (descend2 recursed here and then fell out).
-              if (g_ftdt_pd) dp++;
-              node = kds[e];
-              nd   = &ix->dt_nodes[node];
-              sc   = sc->next;
-              goto next_node;
-            }
-            if (g_ftdt_pd) g_atp_pushn_dt_prune++;
-          }
+          step = DT3_RET;
           break;
         }
+        if (nfr == cfr) {
+          fr = (FtDt3Frame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        FtDt3Frame *f = &fr[nfr++];
+        f->sc     = sc;
+        f->skip   = NULL;
+        f->node   = node;
+        f->nbound = nbound;
+        f->dp     = dp;
+        f->ub0    = un;
+        f->e      = 0u;
+        f->unbind = FTDT_NO_UNBIND;
+        f->pure   = pure;
+        step = DT3_WALK;
+        break;
+      }
+      case DT3_WALK: {
+        FtDt3Frame     *f  = &fr[nfr - 1u];
+        const FtDtNode *nd = &ix->dt_nodes[f->node];
+        const AtpFtCell *c = f->sc;
+        step = DT3_OUT;
+        for (;;) {
+          if (g_ftdt_pd) {
+            g_atp_pushn_dt_node++;
+            g_atp_pushn_dt_hist[(f->dp < ATP_DT_HIST_N - 1u) ? f->dp
+                                                            : ATP_DT_HIST_N - 1u]++;
+          }
+          if (c == d->sc_end) {            // subject consumed: emit this node's leaves
+            if (g_ftdt_pd) {
+              g_atp_pushn_dt_emit++;
+            }
+            ftdt_emit_leaf(ix, f->node, d->out, want, bind, f->nbound, f->pure);
+            break;
+          }
+          if (nd->n_edge == 1u) {
+            u32 label0 = nd->label0;
+            if (label0 < FTDT_VAR0) {
+              // Single concrete edge: lockstep hop (as descend2's chain).
+              if ((c->sym & WF_VAR_BIT) != 0u || label0 != c->sym) {
+                break;
+              }
+              if (((nd->n_inline ? nd->kmask8[0] : nd->kid_mask[0]) & want) == 0u) {
+                if (g_ftdt_pd) {
+                  g_atp_pushn_dt_prune++;
+                }
+                break;
+              }
+              if (g_ftdt_pd) {
+                g_atp_pushn_dt_chain++;
+                f->dp++;
+              }
+              f->node = nd->kid0;
+              nd      = &ix->dt_nodes[f->node];
+              c       = c->next;
+              continue;
+            }
+            if (label0 != FTDT_STAR) {
+              // Single variable edge V_k: follow iteratively.  Filter order:
+              // the one-byte child mask first, then the two O(1) cell
+              // fail-fasts (first + last cell of the spans -- equal spans
+              // end in equal cells), the full walk last.  Pure conjunction:
+              // same edges survive, same candidates in the same order.
+              u32 k = label0 - FTDT_VAR0;
+              const AtpFtCell *bk = bind[k];
+              if (((nd->n_inline ? nd->kmask8[0] : nd->kid_mask[0]) & want) == 0u) {
+                if (g_ftdt_pd) {
+                  g_atp_pushn_dt_prune++;
+                }
+                break;
+              }
+              if (bk != NULL) {
+                if (g_ftdt_pd) {
+                  g_atp_pushn_dt_fteq++;
+                  g_atp_pushn_dt_fteq_chain++;
+                  g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(c);
+                }
+                if (bk->sym != c->sym) {              // first-cell fail-fast
+                  if (g_ftdt_pd) {
+                    g_atp_pushn_dt_fteq_symfail++;
+                  }
+                  break;
+                }
+                if (bk->end != NULL && c->end != NULL &&
+                    bk->end->sym != c->end->sym) {    // last-cell fail-fast
+                  if (g_ftdt_pd) {
+                    g_atp_pushn_dt_fteq_symfail++;
+                  }
+                  break;
+                }
+                if (!ft_eq(bk, c)) {
+                  break;
+                }
+                if (g_ftdt_pd) {
+                  g_atp_pushn_dt_fteq_ok++;
+                }
+              }
+              if (bk == NULL) {
+                if (g_ftdt_pd) {
+                  g_atp_pushn_dt_bind1++;
+                }
+                bind[k] = c;
+                ub[un++] = (u16)k;
+                if (k + 1u > f->nbound) {
+                  f->nbound = k + 1u;
+                }
+              }
+              if (g_ftdt_pd) {
+                g_atp_pushn_dt_chain++;
+                f->dp++;
+              }
+              f->node = nd->kid0;
+              nd      = &ix->dt_nodes[f->node];
+              c       = (c->end != NULL) ? c->end->next : d->sc_end;
+              continue;
+            }
+            // Single STAR edge: fall through to the branch path below.
+          }
+          step = DT3_BRANCH;
+          break;
+        }
+        f->sc = c;
+        break;
+      }
+      case DT3_BRANCH: {
+        // Branch node (or single STAR edge).  Var/star region first, then
+        // the ascending concrete region.  All per-edge prune tests read the
+        // parent-side kid_mask mirror.
+        FtDt3Frame     *f  = &fr[nfr - 1u];
+        const FtDtNode *nd = &ix->dt_nodes[f->node];
+        f->skip = (f->sc->end != NULL) ? f->sc->end->next : d->sc_end;
+        f->e    = 0u;
+        if (g_ftdt_pd) {
+          g_atp_pushn_dt_edge += nd->n_edge;
+          g_atp_pushn_dt_branch++;
+          g_atp_pushn_dt_vedge += nd->n_var_edge;
+          u32 fb = (nd->n_edge < ATP_DT_FAN_N) ? nd->n_edge
+                                               : ATP_DT_FAN_N - 1u;
+          g_atp_pushn_dt_fan_visit[fb]++;
+          g_atp_pushn_dt_fan_edge[fb] += nd->n_edge;
+          ftdt_visit_bump(ix, f->node);
+        }
+        step = DT3_EDGES;
+        break;
+      }
+      case DT3_EDGES: {
+        FtDt3Frame      *f   = &fr[nfr - 1u];
+        const FtDtNode  *nd  = &ix->dt_nodes[f->node];
+        const AtpFtCell *c   = f->sc;
+        u32              nv  = nd->n_var_edge;
+        const u32       *lbl = nd->n_inline ? nd->labels8 : nd->labels;
+        const u32       *kds = nd->n_inline ? nd->kids8   : nd->kids;
+        const u8        *kmk = nd->n_inline ? nd->kmask8  : nd->kid_mask;
+        u8               in  = 0u;
+        while (!in && f->e < nv) {
+          u32 e     = f->e++;
+          u32 label = lbl[e];
+          if (label == FTDT_STAR) {
+            if ((kmk[e] & want) == 0u) {
+              if (g_ftdt_pd) {
+                g_atp_pushn_dt_prune++;
+              }
+              continue;
+            }
+            if (g_ftdt_pd) {
+              g_ftdt_dp = f->dp + 1u;
+            }
+            f->unbind = FTDT_NO_UNBIND;
+            node   = kds[e];
+            sc     = f->skip;
+            nbound = f->nbound;
+            pure   = 0u;
+            in     = 1u;
+            continue;
+          }
+          u32 k = label - FTDT_VAR0;
+          const AtpFtCell *bk = bind[k];
+          if ((kmk[e] & want) == 0u) {
+            if (g_ftdt_pd) {
+              g_atp_pushn_dt_prune++;
+            }
+            continue;
+          }
+          if (bk != NULL) {
+            if (g_ftdt_pd) {
+              g_atp_pushn_dt_fteq++;
+              g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(c);
+            }
+            if (bk->sym != c->sym) {               // first-cell fail-fast
+              if (g_ftdt_pd) {
+                g_atp_pushn_dt_fteq_symfail++;
+              }
+              continue;
+            }
+            if (bk->end != NULL && c->end != NULL &&
+                bk->end->sym != c->end->sym) {     // last-cell fail-fast
+              if (g_ftdt_pd) {
+                g_atp_pushn_dt_fteq_symfail++;
+              }
+              continue;
+            }
+            if (!ft_eq(bk, c)) {
+              continue;
+            }
+            if (g_ftdt_pd) {
+              g_atp_pushn_dt_fteq_ok++;
+            }
+          }
+          if (bk == NULL) {
+            if (g_ftdt_pd) {
+              g_atp_pushn_dt_bind1++;
+              g_ftdt_dp = f->dp + 1u;
+            }
+            bind[k]   = c;
+            f->unbind = k;
+            nbound    = (k + 1u > f->nbound) ? k + 1u : f->nbound;
+          } else {
+            if (g_ftdt_pd) {
+              g_ftdt_dp = f->dp + 1u;
+            }
+            f->unbind = FTDT_NO_UNBIND;
+            nbound    = f->nbound;
+          }
+          node = kds[e];
+          sc   = f->skip;
+          pure = f->pure;
+          in   = 1u;
+        }
+        if (in) {
+          step = DT3_CALL;
+          break;
+        }
+        step = DT3_OUT;
+        if ((c->sym & WF_VAR_BIT) == 0u) {
+          for (u32 e = nv; e < nd->n_edge; e++) {
+            u32 label = lbl[e];
+            if (g_ftdt_pd) {
+              g_atp_pushn_dt_cprobe++;
+            }
+            if (label < c->sym) {
+              continue;
+            }
+            if (label == c->sym) {
+              if ((kmk[e] & want) != 0u) {
+                // Last exploration step at this node: iterate instead of
+                // recursing (descend2 recursed here and then fell out).
+                if (g_ftdt_pd) {
+                  f->dp++;
+                }
+                f->node = kds[e];
+                f->sc   = c->next;
+                step    = DT3_WALK;
+              } else if (g_ftdt_pd) {
+                g_atp_pushn_dt_prune++;
+              }
+            }
+            break;
+          }
+        }
+        break;
+      }
+      case DT3_OUT: {
+        FtDt3Frame *f = &fr[nfr - 1u];
+        while (un > f->ub0) {
+          bind[ub[--un]] = NULL;
+        }
+        nfr--;
+        step = DT3_RET;
+        break;
+      }
+      default: {
+        // DT3_RET: the call returned to the frame that made it.
+        if (nfr == 0u) {
+          term_stack_release(fr, fr_inl);
+          return;
+        }
+        FtDt3Frame *f = &fr[nfr - 1u];
+        if (f->unbind != FTDT_NO_UNBIND) {
+          bind[f->unbind] = NULL;
+          f->unbind = FTDT_NO_UNBIND;
+        }
+        step = DT3_EDGES;
+        break;
       }
     }
-    goto out;
-  next_node:;
   }
-out:
-  while (un > 0u) bind[ub[--un]] = NULL;
 }
 
 // Order-preserving ascending-u32 sort of a[0..n) -- the byte-identical

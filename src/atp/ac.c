@@ -93,20 +93,34 @@ static u8 atp_ac_is_ac_top(const AtpAcInfo *ac, Term t) {
 // non-AC top and still get a one-element "multiset".
 static u8 atp_ac_flatten_under(Term t, u32 top_label,
                                Term *out, u32 *n, u32 cap) {
-  if (term_tag(t) == TAG_CTR && term_ext(t) == top_label) {
-    u32 n_kids = term_ctr_n(t);
-    for (u32 i = 0; i < n_kids; i++) {
-      if (!atp_ac_flatten_under(term_ctr_at(t, i), top_label,
-                                out, n, cap)) {
-        return 0;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  u8    ok  = 1u;
+  for (;;) {
+    if (term_tag(t) == TAG_CTR && term_ext(t) == top_label) {
+      u32 n_kids = term_ctr_n(t);
+      while (nst + n_kids > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
       }
+      for (u32 i = n_kids; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
+    } else if (*n >= cap) {
+      ok = 0u;
+      break;
+    } else {
+      out[*n] = t;
+      *n += 1u;
     }
-    return 1;
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
-  if (*n >= cap) return 0;
-  out[*n] = t;
-  *n += 1u;
-  return 1;
+  term_stack_release(st, st_inl);
+  return ok;
 }
 
 // Public entry: flatten under whatever top-label `t` has, if AC.
@@ -180,34 +194,93 @@ static Term atp_ac_build_chain(u32 label, const Term *leaves, u32 n) {
 }
 
 static Term atp_ac_canon_rec(Term t, const AtpAcInfo *ac) {
-  if (term_tag(t) != TAG_CTR) return t;
-  u32 label = term_ext(t);
-  if (atp_ac_is_ac_label(ac, label)) {
-    Term leaves[ATP_AC_FLATTEN_CAP];
-    u32  n = 0u;
-    if (!atp_ac_flatten_under(t, label, leaves, &n, ATP_AC_FLATTEN_CAP)) {
-      return t;        // overflow: leave node as-is
+  // One frame per open node: an AC node canonicalizes its flattened
+  // leaves, a plain CTR its children, each list held at
+  // pool[base, base + n) and overwritten in order by the canonical
+  // forms; the node then sorts and chains (AC) or rebuilds when a child
+  // changed -- the recursion's order of visits and allocations.
+  typedef struct { Term t; u32 base; u32 n; u32 i; u8 ac; u8 changed; } AcCanonFrame;
+  AcCanonFrame  fr_inl[ATP_WALK_INL];
+  AcCanonFrame *fr    = fr_inl;
+  u32           nfr   = 0u;
+  u32           cfr   = ATP_WALK_INL;
+  Term          pool_inl[4u * ATP_AC_FLATTEN_CAP];
+  Term         *pool  = pool_inl;
+  u32           npool = 0u;
+  u32           cpool = 4u * ATP_AC_FLATTEN_CAP;
+  Term          res;
+  for (;;) {
+    res = t;
+    if (term_tag(t) == TAG_CTR) {
+      u32 label = term_ext(t);
+      u32 n     = 0u;
+      u8  is_ac = atp_ac_is_ac_label(ac, label);
+      if (is_ac) {
+        while (npool + ATP_AC_FLATTEN_CAP > cpool) {
+          pool = (Term *)term_stack_grow(pool, pool_inl, &cpool, sizeof *pool);
+        }
+        // Overflow leaves the node as-is.
+        if (!atp_ac_flatten_under(t, label, pool + npool, &n,
+                                  ATP_AC_FLATTEN_CAP)) {
+          n = 0u;
+        }
+      } else {
+        n = term_ctr_n(t);
+        if (n > REWRITE_MAX_ARITY) {
+          n = 0u;
+        }
+        while (npool + n > cpool) {
+          pool = (Term *)term_stack_grow(pool, pool_inl, &cpool, sizeof *pool);
+        }
+        for (u32 i = 0; i < n; i++) {
+          pool[npool + i] = term_ctr_at(t, i);
+        }
+      }
+      if (n > 0u) {
+        if (nfr == cfr) {
+          fr = (AcCanonFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].t       = t;
+        fr[nfr].base    = npool;
+        fr[nfr].n       = n;
+        fr[nfr].i       = 0u;
+        fr[nfr].ac      = is_ac;
+        fr[nfr].changed = 0u;
+        nfr++;
+        t = pool[npool];
+        npool += n;
+        continue;
+      }
     }
-    // Recurse into each leaf so nested AC nodes canonicalize too.
-    for (u32 i = 0; i < n; i++) {
-      leaves[i] = atp_ac_canon_rec(leaves[i], ac);
+    for (;;) {
+      if (nfr == 0u) {
+        term_stack_release(fr, fr_inl);
+        term_stack_release(pool, pool_inl);
+        return res;
+      }
+      AcCanonFrame *f = &fr[nfr - 1u];
+      Term *slot = &pool[f->base + f->i];
+      if (res != *slot) {
+        f->changed = 1u;
+      }
+      *slot = res;
+      f->i++;
+      if (f->i < f->n) {
+        t = pool[f->base + f->i];
+        break;
+      }
+      Term *items = &pool[f->base];
+      u32   label = term_ext(f->t);
+      if (f->ac) {
+        atp_ac_sort_leaves(items, f->n);
+        res = atp_ac_build_chain(label, items, f->n);
+      } else {
+        res = f->changed ? term_new_ctr(label, items, f->n) : f->t;
+      }
+      npool = f->base;
+      nfr--;
     }
-    atp_ac_sort_leaves(leaves, n);
-    return atp_ac_build_chain(label, leaves, n);
   }
-  // Non-AC CTR: recurse into children, rebuild only if any changed.
-  u32 n_kids = term_ctr_n(t);
-  if (n_kids == 0u) return t;
-  if (n_kids > REWRITE_MAX_ARITY) return t;
-  Term kids[REWRITE_MAX_ARITY];
-  u8 changed = 0u;
-  for (u32 i = 0; i < n_kids; i++) {
-    Term orig = term_ctr_at(t, i);
-    kids[i] = atp_ac_canon_rec(orig, ac);
-    if (kids[i] != orig) changed = 1u;
-  }
-  if (!changed) return t;
-  return term_new_ctr(label, kids, n_kids);
 }
 
 static Term atp_ac_canon(Term t, const AtpAcInfo *ac) {
@@ -585,54 +658,78 @@ static u8 atp_match_ac_flat(u32 label,
   return 1u;
 }
 
+// AC top: flatten both sides and do the AC-flat match.  Kept out of
+// atp_match_ac so the leaf arrays sit in a frame only an AC node opens.
+static u8 atp_match_ac_node(Term pattern, Term subject, u32 lab,
+                            const AtpAcInfo *ac, RewriteSubst *subst) {
+  Term P[ATP_AC_FLATTEN_CAP];
+  Term S[ATP_AC_FLATTEN_CAP];
+  u32  np = 0u, ns = 0u;
+  if (!atp_ac_flatten_under(pattern, lab, P, &np, ATP_AC_FLATTEN_CAP)) {
+    return 0;
+  }
+  if (!atp_ac_flatten_under(subject, lab, S, &ns, ATP_AC_FLATTEN_CAP)) {
+    return 0;
+  }
+  return atp_match_ac_flat(lab, P, np, S, ns, ac, subst);
+}
+
+typedef struct { Term p; Term s; } AcMatchPair;
+
+// thvm_match lifted to AC: the non-AC descent runs on an explicit stack
+// of (pattern, subject) pairs in the recursion's left-to-right preorder,
+// so a deep rule pattern costs heap, not C stack.  Only an AC node
+// re-enters through the flat matcher's leaves.
 fn u8 atp_match_ac(Term pattern, Term subject,
                    const AtpAcInfo *ac, RewriteSubst *subst) {
-  // Fast path: pattern is a var -- standard thvm_match handling
-  // (bind on first sighting / kbo_eq on second).
-  if (term_tag(pattern) == TAG_FVR) {
-    u32 id = term_ext(pattern);
-    if (id >= REWRITE_MAX_VAR) return 0;
-    if (subst->bindings[id] == 0) {
-      subst->bindings[id] = subject;
-      return 1;
+  AcMatchPair  st_inl[ATP_WALK_INL];
+  AcMatchPair *st  = st_inl;
+  u32          nst = 0u;
+  u32          cst = ATP_WALK_INL;
+  u8           ok  = 1u;
+  for (;;) {
+    if (term_tag(pattern) == TAG_FVR) {
+      // Bind on first sighting, kbo_eq on second (thvm_match's rule).
+      u32 id = term_ext(pattern);
+      if (id >= REWRITE_MAX_VAR) {
+        ok = 0u;
+      } else if (subst->bindings[id] == 0) {
+        subst->bindings[id] = subject;
+      } else {
+        ok = kbo_eq(subst->bindings[id], subject) ? 1u : 0u;
+      }
+    } else if (term_tag(pattern) != TAG_CTR) {
+      ok = kbo_eq(pattern, subject) ? 1u : 0u;
+    } else if (term_tag(subject) != TAG_CTR ||
+               term_ext(pattern) != term_ext(subject)) {
+      ok = 0u;
+    } else if (atp_ac_is_ac_label(ac, term_ext(pattern))) {
+      ok = atp_match_ac_node(pattern, subject, term_ext(pattern), ac, subst);
+    } else {
+      u32 np = term_ctr_n(pattern);
+      u32 ns = term_ctr_n(subject);
+      if (np != ns) {
+        ok = 0u;
+      } else {
+        while (nst + np > cst) {
+          st = (AcMatchPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+        }
+        for (u32 i = np; i-- > 0u;) {
+          st[nst].p = term_ctr_at(pattern, i);
+          st[nst].s = term_ctr_at(subject, i);
+          nst++;
+        }
+      }
     }
-    return kbo_eq(subst->bindings[id], subject);
-  }
-
-  // Pattern is not a CTR? (NUM etc.) Use kbo_eq.
-  if (term_tag(pattern) != TAG_CTR) {
-    return kbo_eq(pattern, subject) ? 1u : 0u;
-  }
-
-  // Pattern is CTR.  Subject must also be CTR.
-  if (term_tag(subject) != TAG_CTR) return 0;
-  if (term_ext(pattern) != term_ext(subject)) return 0;
-
-  u32 lab = term_ext(pattern);
-  if (atp_ac_is_ac_label(ac, lab)) {
-    // AC top: flatten both sides and do AC-flat match.
-    Term P[ATP_AC_FLATTEN_CAP];
-    Term S[ATP_AC_FLATTEN_CAP];
-    u32  np = 0u, ns = 0u;
-    if (!atp_ac_flatten_under(pattern, lab, P, &np, ATP_AC_FLATTEN_CAP))
-      return 0;
-    if (!atp_ac_flatten_under(subject, lab, S, &ns, ATP_AC_FLATTEN_CAP))
-      return 0;
-    return atp_match_ac_flat(lab, P, np, S, ns, ac, subst);
-  }
-
-  // Non-AC CTR: same-arity recursive match.
-  u32 np = term_ctr_n(pattern);
-  u32 ns = term_ctr_n(subject);
-  if (np != ns) return 0;
-  for (u32 i = 0; i < np; i++) {
-    if (!atp_match_ac(term_ctr_at(pattern, i),
-                      term_ctr_at(subject, i),
-                      ac, subst)) {
-      return 0;
+    if (!ok || nst == 0u) {
+      break;
     }
+    nst--;
+    pattern = st[nst].p;
+    subject = st[nst].s;
   }
-  return 1;
+  term_stack_release(st, st_inl);
+  return ok;
 }
 
 // --- AC rule extension (Bachmair-Plaisted) -------------------------

@@ -92,42 +92,11 @@ extern u32        ft_subst_max_vars(void);
 // the next ft_scratch_reset; the caller controls when the Arena B
 // scratch resets.
 
-#define FT_SPLICE_KIDS_STACK 16u
-
-// Forward decl for the deep-copy of bound-var bindings.
-static AtpFtCell *ft_splice_deep_copy(AtpFt *a, const AtpFtCell *src);
-
+// Deep-copied subject subterms KEEP SUBST_FRESH cleared -- they are
+// the matched-binding contents, not freshly introduced by the rule.
 static AtpFtCell *ft_splice_deep_copy(AtpFt *a, const AtpFtCell *src) {
   if (src == NULL) return NULL;
-  if (ft_s_is_var(src)) {
-    return ftnew_var(a, ft_s_var_id(src), 0);
-  }
-  u32 sym   = src->sym;
-  u16 arity = src->arity;
-  if (arity == 0u) {
-    return ftnew_const(a, sym, 0);
-  }
-  AtpFtCell *stack_kids[FT_SPLICE_KIDS_STACK];
-  AtpFtCell **kids = stack_kids;
-  AtpFtCell **heap_kids = NULL;
-  if (arity > FT_SPLICE_KIDS_STACK) {
-    heap_kids = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
-    if (heap_kids == NULL) {
-      fprintf(stderr, "ft_splice/deep_copy: kids OOM\n");
-      exit(1);
-    }
-    kids = heap_kids;
-  }
-  const AtpFtCell *child = src->next;
-  for (u16 i = 0; i < arity; i++) {
-    kids[i] = ft_splice_deep_copy(a, child);
-    child   = child->end->next;
-  }
-  AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, 0);
-  free(heap_kids);
-  // Deep-copied subject subterms KEEP SUBST_FRESH cleared -- they are
-  // the matched-binding contents, not freshly introduced by the rule.
-  return out;
+  return ft_copy_span(a, src, 0u, 0);
 }
 
 // Build the instantiated `rhs_tmpl[subst]` into Arena A, marking every
@@ -142,13 +111,6 @@ static AtpFtCell *ft_splice_deep_copy(AtpFt *a, const AtpFtCell *src) {
 static AtpFtCell *ft_splice_build_rhs(AtpFt *a, const AtpFtCell *tmpl,
                                       const void *subst) {
   if (tmpl == NULL) return NULL;
-  if (ft_s_is_var(tmpl)) {
-    u32 id = ft_s_var_id(tmpl);
-    if (id >= ft_subst_max_vars()) return NULL;
-    AtpFtCell *binding = ft_subst_lookup(subst, id);
-    if (binding == NULL) return NULL;
-    return ft_splice_deep_copy(a, binding);
-  }
   // THVM_ATPFT_SKEL_FRESH controls whether rule-RHS skeleton cells are
   // flagged SUBST_FRESH.  Default 0: clear the flag so composition
   // matches fire (mccune's R89 -> R40, see project_ft_normalize_drift).
@@ -162,37 +124,69 @@ static AtpFtCell *ft_splice_build_rhs(AtpFt *a, const AtpFtCell *tmpl,
     const char *e = getenv("THVM_ATPFT_SKEL_FRESH");
     skel_fresh_cached = (e != NULL && e[0] == '1') ? 1 : 0;
   }
-  u32 sym   = tmpl->sym;
-  u16 arity = tmpl->arity;
-  if (arity == 0u) {
-    AtpFtCell *c = ftnew_const(a, sym, 0);
-    if (skel_fresh_cached) c->flags |= ATPFT_FLAG_SUBST_FRESH;
-    return c;
-  }
-  AtpFtCell *stack_kids[FT_SPLICE_KIDS_STACK];
-  AtpFtCell **kids = stack_kids;
-  AtpFtCell **heap_kids = NULL;
-  if (arity > FT_SPLICE_KIDS_STACK) {
-    heap_kids = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
-    if (heap_kids == NULL) {
-      fprintf(stderr, "ft_splice/build_rhs: kids OOM\n");
-      exit(1);
+  // Bottom-up over an explicit stack: each child is built before
+  // ftnew_ctr stitches its parent, the recursion's allocation order.
+  FtSpanFrame  fr_inl[FT_WALK_INL];
+  AtpFtCell   *val_inl[FT_WALK_INL];
+  FtSpanFrame *fr   = fr_inl;
+  AtpFtCell  **val  = val_inl;
+  u32          nfr  = 0u;
+  u32          cfr  = FT_WALK_INL;
+  u32          nval = 0u;
+  u32          cval = FT_WALK_INL;
+  AtpFtCell   *out  = NULL;
+  for (;;) {
+    AtpFtCell *done = NULL;
+    if (ft_s_is_var(tmpl)) {
+      u32 id = ft_s_var_id(tmpl);
+      AtpFtCell *binding = (id < ft_subst_max_vars()) ? ft_subst_lookup(subst, id)
+                                                      : NULL;
+      if (binding == NULL) {
+        break;
+      }
+      done = ft_splice_deep_copy(a, binding);
+    } else if (tmpl->arity == 0u) {
+      done = ftnew_const(a, tmpl->sym, 0);
+      if (skel_fresh_cached) {
+        done->flags |= ATPFT_FLAG_SUBST_FRESH;
+      }
+    } else {
+      if (nfr == cfr) {
+        fr = (FtSpanFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].child = tmpl->next;
+      fr[nfr].left  = tmpl->arity;
+      fr[nfr].sym   = tmpl->sym;
+      fr[nfr].arity = tmpl->arity;
+      nfr++;
     }
-    kids = heap_kids;
-  }
-  const AtpFtCell *child = tmpl->next;
-  for (u16 i = 0; i < arity; i++) {
-    AtpFtCell *k = ft_splice_build_rhs(a, child, subst);
-    if (k == NULL) {
-      free(heap_kids);
-      return NULL;
+    if (done != NULL) {
+      if (nval == cval) {
+        val = (AtpFtCell **)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = done;
     }
-    kids[i] = k;
-    child   = child->end->next;
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      FtSpanFrame *f = &fr[nfr - 1u];
+      nval -= f->arity;
+      AtpFtCell *c = ftnew_ctr(a, f->sym, (u16)f->arity, &val[nval], 0);
+      if (skel_fresh_cached) {
+        c->flags |= ATPFT_FLAG_SUBST_FRESH;
+      }
+      val[nval++] = c;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      out = val[0];
+      break;
+    }
+    FtSpanFrame *f = &fr[nfr - 1u];
+    tmpl     = f->child;
+    f->child = tmpl->end->next;
+    f->left--;
   }
-  AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, 0);
-  if (skel_fresh_cached) out->flags |= ATPFT_FLAG_SUBST_FRESH;
-  free(heap_kids);
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
   return out;
 }
 

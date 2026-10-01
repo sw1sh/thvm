@@ -144,21 +144,61 @@ static int cli_is_flat_label(const PrProblem *pr, u32 l) {
 }
 
 static int cli_term_has_flat_sym(const PrProblem *pr, Term t) {
-  if (t == 0 || term_tag(t) != TAG_CTR) return 0;
-  if (cli_is_flat_label(pr, term_ext(t))) return 1;
-  u32 n = term_ctr_n(t);
-  for (u32 i = 0; i < n; i++)
-    if (cli_term_has_flat_sym(pr, term_ctr_at(t, i))) return 1;
-  return 0;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  int   hit = 0;
+  for (;;) {
+    if (t != 0 && term_tag(t) == TAG_CTR) {
+      if (cli_is_flat_label(pr, term_ext(t))) {
+        hit = 1;
+        break;
+      }
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 static int cli_term_has_label(Term t, u32 l) {
-  if (t == 0 || term_tag(t) != TAG_CTR) return 0;
-  if (term_ext(t) == l) return 1;
-  u32 n = term_ctr_n(t);
-  for (u32 i = 0; i < n; i++)
-    if (cli_term_has_label(term_ctr_at(t, i), l)) return 1;
-  return 0;
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  int   hit = 0;
+  for (;;) {
+    if (t != 0 && term_tag(t) == TAG_CTR) {
+      if (term_ext(t) == l) {
+        hit = 1;
+        break;
+      }
+      u32 n = term_ctr_n(t);
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
+    }
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
+  }
+  term_stack_release(st, st_inl);
+  return hit;
 }
 
 // The fresh symbol a definitional axiom introduces: `d` is a fresh
@@ -179,31 +219,65 @@ static u32 cli_def_label(const PrProblem *pr, Term d, Term body) {
 }
 
 static void cli_print_term(FILE *fp, const PrProblem *pr, Term t) {
-  if (t == 0) { fputs("_", fp); return; }
-  u32 tag = term_tag(t);
-  if (tag == TAG_FVR) {
-    u32 v = term_ext(t);
-    if (pr != NULL && v < pr->n_vars) fputs(pr->vars[v], fp);
-    else fprintf(fp, "%s%u", cli_var_prefix(pr), v);
-    return;
-  }
-  if (tag == TAG_CTR) {
-    u32 lab = term_ext(t);
-    u32 n = term_ctr_n(t);
-    if (pr != NULL && lab >= PR_LABEL_BASE && lab - PR_LABEL_BASE < pr->n_syms)
-      fputs(pr->syms[lab - PR_LABEL_BASE].name, fp);
-    else fprintf(fp, "f%u", lab);
-    if (n > 0) {
-      fputc('(', fp);
-      for (u32 i = 0; i < n; i++) {
-        if (i > 0) fputc(',', fp);
-        cli_print_term(fp, pr, term_ctr_at(t, i));
+  // One frame per open argument list: the CTR and the argument `i` being
+  // printed.  A proof's terms can be as deep as the search made them.
+  typedef struct { Term t; u32 i; u32 n; } CliPrintFrame;
+  CliPrintFrame  fr_inl[ATP_WALK_INL];
+  CliPrintFrame *fr  = fr_inl;
+  u32            nfr = 0u;
+  u32            cfr = ATP_WALK_INL;
+  for (;;) {
+    u32 tag = (t == 0) ? 0u : term_tag(t);
+    if (t == 0) {
+      fputs("_", fp);
+    } else if (tag == TAG_FVR) {
+      u32 v = term_ext(t);
+      if (pr != NULL && v < pr->n_vars) {
+        fputs(pr->vars[v], fp);
+      } else {
+        fprintf(fp, "%s%u", cli_var_prefix(pr), v);
+      }
+    } else if (tag == TAG_CTR) {
+      u32 lab = term_ext(t);
+      u32 n = term_ctr_n(t);
+      if (pr != NULL && lab >= PR_LABEL_BASE && lab - PR_LABEL_BASE < pr->n_syms) {
+        fputs(pr->syms[lab - PR_LABEL_BASE].name, fp);
+      } else {
+        fprintf(fp, "f%u", lab);
+      }
+      if (n > 0) {
+        fputc('(', fp);
+        if (nfr == cfr) {
+          fr = (CliPrintFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].t = t;
+        fr[nfr].i = 0u;
+        fr[nfr].n = n;
+        nfr++;
+        t = term_ctr_at(t, 0);
+        continue;
+      }
+    } else {
+      fprintf(fp, "?t%u", tag);
+    }
+    u8 next = 0u;
+    while (nfr > 0u) {
+      CliPrintFrame *f = &fr[nfr - 1u];
+      f->i++;
+      if (f->i < f->n) {
+        fputc(',', fp);
+        t    = term_ctr_at(f->t, f->i);
+        next = 1u;
+        break;
       }
       fputc(')', fp);
+      nfr--;
     }
-    return;
+    if (!next) {
+      break;
+    }
   }
-  fprintf(fp, "?t%u", tag);
+  term_stack_release(fr, fr_inl);
 }
 
 // Buffer variant of cli_print_term: the provenance leaf-match key.
@@ -211,40 +285,95 @@ static void cli_print_term(FILE *fp, const PrProblem *pr, Term t) {
 // falls back to the legacy file() citation).
 static void cli_sprint_term(char *buf, size_t cap, size_t *o, int *fail,
                             const PrProblem *pr, Term t) {
+  // One frame per open argument list (`i` the argument being printed),
+  // with the recursion's failure behaviour: a node that does not fit sets
+  // *fail and ends; a list closes with ')' after its last argument or
+  // after a failure below it when the bracket still fits, and a separator
+  // that does not fit ends the list without one.
+  typedef struct { Term t; u32 i; u32 n; } CliSprintFrame;
+  CliSprintFrame  fr_inl[ATP_WALK_INL];
+  CliSprintFrame *fr  = fr_inl;
+  u32             nfr = 0u;
+  u32             cfr = ATP_WALK_INL;
   char nm[TP_NAME_LEN + 32];
-  if (*fail) return;
-  if (t == 0) { nm[0] = '_'; nm[1] = '\0'; }
-  else if (term_tag(t) == TAG_FVR) {
-    u32 v = term_ext(t);
-    if (pr != NULL && v < pr->n_vars) snprintf(nm, sizeof nm, "%s", pr->vars[v]);
-    else snprintf(nm, sizeof nm, "%s%u", cli_var_prefix(pr), v);
-  } else if (term_tag(t) == TAG_CTR) {
-    u32 lab = term_ext(t);
-    if (pr != NULL && lab >= PR_LABEL_BASE && lab - PR_LABEL_BASE < pr->n_syms)
-      snprintf(nm, sizeof nm, "%s", pr->syms[lab - PR_LABEL_BASE].name);
-    else snprintf(nm, sizeof nm, "f%u", lab);
-  } else {
-    *fail = 1;
+  if (*fail) {
     return;
   }
-  size_t l = strlen(nm);
-  if (*o + l + 2 >= cap) { *fail = 1; return; }
-  memcpy(buf + *o, nm, l);
-  *o += l;
-  if (t != 0 && term_tag(t) == TAG_CTR && term_ctr_n(t) > 0) {
-    u32 n = term_ctr_n(t);
-    buf[(*o)++] = '(';
-    for (u32 i = 0; i < n && !*fail; i++) {
-      if (i > 0) {
-        if (*o + 1 >= cap) { *fail = 1; return; }
-        buf[(*o)++] = ',';
+  for (;;) {
+    u8 ok = 1u;
+    if (t == 0) {
+      nm[0] = '_';
+      nm[1] = '\0';
+    } else if (term_tag(t) == TAG_FVR) {
+      u32 v = term_ext(t);
+      if (pr != NULL && v < pr->n_vars) {
+        snprintf(nm, sizeof nm, "%s", pr->vars[v]);
+      } else {
+        snprintf(nm, sizeof nm, "%s%u", cli_var_prefix(pr), v);
       }
-      cli_sprint_term(buf, cap, o, fail, pr, term_ctr_at(t, i));
+    } else if (term_tag(t) == TAG_CTR) {
+      u32 lab = term_ext(t);
+      if (pr != NULL && lab >= PR_LABEL_BASE && lab - PR_LABEL_BASE < pr->n_syms) {
+        snprintf(nm, sizeof nm, "%s", pr->syms[lab - PR_LABEL_BASE].name);
+      } else {
+        snprintf(nm, sizeof nm, "f%u", lab);
+      }
+    } else {
+      *fail = 1;
+      ok = 0u;
     }
-    if (*o + 1 >= cap) { *fail = 1; return; }
-    buf[(*o)++] = ')';
+    if (ok) {
+      size_t l = strlen(nm);
+      if (*o + l + 2 >= cap) {
+        *fail = 1;
+        ok = 0u;
+      } else {
+        memcpy(buf + *o, nm, l);
+        *o += l;
+        if (t != 0 && term_tag(t) == TAG_CTR && term_ctr_n(t) > 0) {
+          buf[(*o)++] = '(';
+          if (nfr == cfr) {
+            fr = (CliSprintFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].t = t;
+          fr[nfr].i = 0u;
+          fr[nfr].n = term_ctr_n(t);
+          nfr++;
+          t = term_ctr_at(t, 0);
+          continue;
+        }
+        buf[*o] = '\0';
+      }
+    }
+    // The node is done: close the lists it ends.
+    u8 next = 0u;
+    while (nfr > 0u) {
+      CliSprintFrame *f = &fr[nfr - 1u];
+      f->i++;
+      if (f->i < f->n && !*fail) {
+        if (*o + 1 >= cap) {
+          *fail = 1;
+          nfr--;
+          continue;
+        }
+        buf[(*o)++] = ',';
+        t    = term_ctr_at(f->t, f->i);
+        next = 1u;
+        break;
+      }
+      nfr--;
+      if (*o + 1 >= cap) {
+        *fail = 1;
+        continue;
+      }
+      buf[(*o)++] = ')';
+      buf[*o] = '\0';
+    }
+    if (!next) {
+      break;
+    }
   }
-  buf[*o] = '\0';
+  term_stack_release(fr, fr_inl);
 }
 
 // Provenance lookup for one (lhs, rhs) unit: prints the conversion
@@ -323,24 +452,41 @@ static void cli_bridge_cands(AtpState *s, Term st, Term u, Term v,
 // matches are RE-VERIFIED with the real compare, so a collision can
 // only cost a retry, never a wrong bridge).
 static u64 cli_ct_hash_walk(Term t, int *vmap, u32 *vn, u64 h) {
-  u8 tg = term_tag(t);
-  if (tg == TAG_FVR) {
-    u32 id = term_ext(t);
-    u32 c = id;
-    if (id < 256u) {
-      if (vmap[id] < 0) vmap[id] = (int)(*vn)++;
-      c = (u32)vmap[id];
+  Term  st_inl[ATP_WALK_INL];
+  Term *st  = st_inl;
+  u32   nst = 0u;
+  u32   cst = ATP_WALK_INL;
+  for (;;) {
+    u8 tg = term_tag(t);
+    if (tg == TAG_FVR) {
+      u32 id = term_ext(t);
+      u32 c = id;
+      if (id < 256u) {
+        if (vmap[id] < 0) {
+          vmap[id] = (int)(*vn)++;
+        }
+        c = (u32)vmap[id];
+      }
+      h = (h ^ (0x9E3779B97F4A7C15ull + c)) * 0x100000001B3ull;
+    } else if (tg == TAG_CTR) {
+      u32 n = term_ctr_n(t);
+      h = (h ^ ((u64)term_ext(t) * 2654435761ull + n)) * 0x100000001B3ull;
+      while (nst + n > cst) {
+        st = (Term *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+      }
+      for (u32 i = n; i-- > 0u;) {
+        st[nst++] = term_ctr_at(t, i);
+      }
+    } else {
+      h = (h ^ (u64)t) * 0x100000001B3ull;
     }
-    return (h ^ (0x9E3779B97F4A7C15ull + c)) * 0x100000001B3ull;
+    if (nst == 0u) {
+      break;
+    }
+    t = st[--nst];
   }
-  if (tg == TAG_CTR) {
-    u32 n = term_ctr_n(t);
-    h = (h ^ ((u64)term_ext(t) * 2654435761ull + n)) * 0x100000001B3ull;
-    for (u32 i = 0; i < n; i++)
-      h = cli_ct_hash_walk(term_ctr_at(t, i), vmap, vn, h);
-    return h;
-  }
-  return (h ^ (u64)t) * 0x100000001B3ull;
+  term_stack_release(st, st_inl);
+  return h;
 }
 
 static u64 cli_pair_canon_hash(Term l, Term r) {
