@@ -725,6 +725,40 @@ static int ru_all_same_axis(RuConsumerRangs const *rs, u32 n, u8 axis) {
   return 1;
 }
 
+// The ranges an EXPAND shares as a view when its consumers diverge.  Each
+// consumer splices the EXPAND's value with every bare RANGE of the shared
+// ranges rebound to its own range (ru_build_axis_subst), and nothing else
+// rebinds.  On a broadcast axis the source reads index 0, so consumer 0's
+// range stays whatever it is.  On an axis the EXPAND passes through, a
+// compound consumer-0 range (a PAD's valid, a SHRINK offset) would put
+// consumer 0's index into the other consumers' kernels: such an axis gets a
+// fresh range, which every consumer rebinds.  tinygrad realizes the
+// diverging EXPAND and remove_bufferize then substitutes each consumer's
+// ranges for the buffer's (schedule/rangeify.py:50-91), the same reads.
+static void ru_expand_shared_rngs(u64 loc, RuConsumerRangs const *rs, u32 n,
+                                  Shape const *shape, u8 ndim, Term *out_rngs) {
+  Shape src;
+  int have_src = ru_node_src_shape(loc, &src);
+  u32 rank_diff = (have_src && ndim > src.ndim) ? ndim - src.ndim : 0;
+  for (u8 a = 0; a < ndim; a++) {
+    out_rngs[a] = rs[0].rngs[a];
+    if (ru_all_same_axis(rs, n, a)) {
+      continue;
+    }
+    if (have_src) {
+      u32 in_dim = (a < rank_diff) ? 1 : src.dims[a - rank_diff];
+      if (in_dim != shape->dims[a]) {
+        continue;
+      }
+    }
+    Term r = out_rngs[a];
+    if (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE) {
+      continue;
+    }
+    out_rngs[a] = ru_new_range(shape->dims[a], KAX_LOOP);
+  }
+}
+
 // Mirror source: indexing.py:246
 //   `if x.op in GroupOp.Movement: rngs = apply_movement_op(...)`
 // We call into the Phase-1c apply_movement_op_* family in indexing.c.
@@ -1759,7 +1793,8 @@ fn void run_rangeify_unified_impl(Term root) {
       // tinygrad never materializes it (a conv-bwd out_grad broadcast is
       // 1.3 GB).  thvm's ru_all_same_axis compares RANGE Term identity,
       // seeing those reduce-injected axes as divergent; the share-as-view
-      // shortcut recovers the fused EXPAND.
+      // shortcut recovers the fused EXPAND, with ranges every consumer can
+      // rebind (ru_expand_shared_rngs).
       //
       // SHRINK / RESHAPE / PERMUTE / PAD / FLIP are partial-realized on
       // genuine divergence, faithful to tinygrad: a SHRINK (getitem) or
@@ -1774,9 +1809,9 @@ fn void run_rangeify_unified_impl(Term root) {
       // BUFFERIZE boundary (see the RU_SUBST = BUFFERIZE keep further
       // down).  Restrict the share-as-view shortcut to EXPAND only.
       if (!all_all_same && info->op == UOP_EXPAND) {
-        all_all_same = 1;
-      }
-      if (all_all_same) {
+        ru_expand_shared_rngs(info->loc, consumer_rngs, n_crngs, &shape,
+                              my_ndim, out_rngs);
+      } else if (all_all_same) {
         // Mirror "OR of valids" path (indexing.py:211-213). Without a
         // full symbolic-bool merger we collapse to consumer 0's range
         // -- safe because all_all_same means they're equal anyway.
