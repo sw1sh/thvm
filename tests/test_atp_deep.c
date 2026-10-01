@@ -4925,6 +4925,438 @@ static void deep_ac(void) {
   ft_destroy(&a);
 }
 
+// ---- ft_norm.c: the full-depth discrimination-tree descent -----------------
+
+// src/atp/ft_norm.c:1905, the v3 walk as it recursed
+static void ref_ftdt_descend3(const FtDtDesc *d, u32 node,
+                              const AtpFtCell *sc, u32 nbound, u8 pure) {
+  FtPiIndex *ix = d->ix;
+  const FtDtNode *nd = &ix->dt_nodes[node];
+  const u8 want = d->want;
+  const AtpFtCell **bind = d->bind;
+  u16 ub[ATPFT_MAX_VARS];
+  u32 un = 0u;
+  u32 dp = 0u;
+  if (g_ftdt_pd) dp = g_ftdt_dp;
+  // Entry prune: only the root call arrives unchecked -- recursions and
+  // iterative hops below pre-check the child mask before advancing.
+  if ((nd->sub_mask & want) == 0u) {
+    if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+    return;
+  }
+  for (;;) {
+    if (g_ftdt_pd) {
+      g_atp_pushn_dt_node++;
+      g_atp_pushn_dt_hist[(dp < ATP_DT_HIST_N - 1u) ? dp
+                                                    : ATP_DT_HIST_N - 1u]++;
+    }
+    if (sc == d->sc_end) {            // subject consumed: emit this node's leaves
+      if (g_ftdt_pd) g_atp_pushn_dt_emit++;
+      ftdt_emit_leaf(ix, node, d->out, want, bind, nbound, pure);
+      goto out;
+    }
+    if (nd->n_edge == 1u) {
+      u32 label0 = nd->label0;
+      if (label0 < FTDT_VAR0) {
+        // Single concrete edge: lockstep hop (as descend2's chain).
+        if ((sc->sym & WF_VAR_BIT) != 0u || label0 != sc->sym) goto out;
+        if (((nd->n_inline ? nd->kmask8[0] : nd->kid_mask[0]) & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          goto out;
+        }
+        if (g_ftdt_pd) { g_atp_pushn_dt_chain++; dp++; }
+        node = nd->kid0;
+        nd   = &ix->dt_nodes[node];
+        sc   = sc->next;
+        continue;
+      }
+      if (label0 != FTDT_STAR) {
+        // Single variable edge V_k: follow iteratively.  Filter order:
+        // the one-byte child mask first, then the two O(1) cell
+        // fail-fasts (first + last cell of the spans -- equal spans
+        // end in equal cells), the full walk last.  Pure conjunction:
+        // same edges survive, same candidates in the same order.
+        u32 k = label0 - FTDT_VAR0;
+        const AtpFtCell *bk = bind[k];
+        if (((nd->n_inline ? nd->kmask8[0] : nd->kid_mask[0]) & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          goto out;
+        }
+        if (bk != NULL) {
+          if (g_ftdt_pd) {
+            g_atp_pushn_dt_fteq++;
+            g_atp_pushn_dt_fteq_chain++;
+            g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
+          }
+          if (bk->sym != sc->sym) {             // first-cell fail-fast
+            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
+            goto out;
+          }
+          if (bk->end != NULL && sc->end != NULL &&
+              bk->end->sym != sc->end->sym) {   // last-cell fail-fast
+            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
+            goto out;
+          }
+          if (!ft_eq(bk, sc)) goto out;
+          if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
+        }
+        if (bk == NULL) {
+          if (g_ftdt_pd) g_atp_pushn_dt_bind1++;
+          bind[k] = sc;
+          ub[un++] = (u16)k;
+          if (k + 1u > nbound) nbound = k + 1u;
+        }
+        if (g_ftdt_pd) { g_atp_pushn_dt_chain++; dp++; }
+        node = nd->kid0;
+        nd   = &ix->dt_nodes[node];
+        sc   = (sc->end != NULL) ? sc->end->next : d->sc_end;
+        continue;
+      }
+      // Single STAR edge: fall through to the branch path below.
+    }
+    // Branch node (or single STAR edge).  Var/star region first, then
+    // the ascending concrete region.  All per-edge prune tests read the
+    // parent-side kid_mask mirror.
+    {
+      const AtpFtCell *skip = (sc->end != NULL) ? sc->end->next : d->sc_end;
+      u32 nv = nd->n_var_edge;
+      const u32 *lbl = nd->n_inline ? nd->labels8 : nd->labels;
+      const u32 *kds = nd->n_inline ? nd->kids8   : nd->kids;
+      const u8  *kmk = nd->n_inline ? nd->kmask8  : nd->kid_mask;
+      if (g_ftdt_pd) {
+        g_atp_pushn_dt_edge += nd->n_edge;
+        g_atp_pushn_dt_branch++;
+        g_atp_pushn_dt_vedge += nv;
+        u32 fb = (nd->n_edge < ATP_DT_FAN_N) ? nd->n_edge
+                                             : ATP_DT_FAN_N - 1u;
+        g_atp_pushn_dt_fan_visit[fb]++;
+        g_atp_pushn_dt_fan_edge[fb] += nd->n_edge;
+        ftdt_visit_bump(ix, node);
+      }
+      for (u32 e = 0; e < nv; e++) {
+        u32 label = lbl[e];
+        if (label == FTDT_STAR) {
+          if ((kmk[e] & want) == 0u) {
+            if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+            continue;
+          }
+          if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
+          ref_ftdt_descend3(d, kds[e], skip, nbound, 0u);
+          continue;
+        }
+        u32 k = label - FTDT_VAR0;
+        const AtpFtCell *bk = bind[k];
+        if ((kmk[e] & want) == 0u) {
+          if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          continue;
+        }
+        if (bk != NULL) {
+          if (g_ftdt_pd) {
+            g_atp_pushn_dt_fteq++;
+            g_atp_pushn_dt_fteq_cell += ftdt_prof_cells(sc);
+          }
+          if (bk->sym != sc->sym) {             // first-cell fail-fast
+            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
+            continue;
+          }
+          if (bk->end != NULL && sc->end != NULL &&
+              bk->end->sym != sc->end->sym) {   // last-cell fail-fast
+            if (g_ftdt_pd) g_atp_pushn_dt_fteq_symfail++;
+            continue;
+          }
+          if (!ft_eq(bk, sc)) continue;
+          if (g_ftdt_pd) g_atp_pushn_dt_fteq_ok++;
+        }
+        if (bk == NULL) {
+          if (g_ftdt_pd) { g_atp_pushn_dt_bind1++; g_ftdt_dp = dp + 1u; }
+          bind[k] = sc;
+          ref_ftdt_descend3(d, kds[e], skip,
+                            (k + 1u > nbound) ? k + 1u : nbound, pure);
+          bind[k] = NULL;
+        } else {
+          if (g_ftdt_pd) g_ftdt_dp = dp + 1u;
+          ref_ftdt_descend3(d, kds[e], skip, nbound, pure);
+        }
+      }
+      if ((sc->sym & WF_VAR_BIT) == 0u) {
+        for (u32 e = nv; e < nd->n_edge; e++) {
+          u32 label = lbl[e];
+          if (g_ftdt_pd) g_atp_pushn_dt_cprobe++;
+          if (label < sc->sym) continue;
+          if (label == sc->sym) {
+            if ((kmk[e] & want) != 0u) {
+              // Last exploration step at this node: iterate instead of
+              // recursing (descend2 recursed here and then fell out).
+              if (g_ftdt_pd) dp++;
+              node = kds[e];
+              nd   = &ix->dt_nodes[node];
+              sc   = sc->next;
+              goto next_node;
+            }
+            if (g_ftdt_pd) g_atp_pushn_dt_prune++;
+          }
+          break;
+        }
+      }
+    }
+    goto out;
+  next_node:;
+  }
+out:
+  while (un > 0u) bind[ub[--un]] = NULL;
+}
+
+
+// The descent's profile-tier counters (live under g_ftdt_pd).
+typedef struct {
+  u64 c[14];
+  u64 hist[ATP_DT_HIST_N];
+  u64 fan_visit[ATP_DT_FAN_N];
+  u64 fan_edge[ATP_DT_FAN_N];
+  u32 dp;
+} DtProf;
+
+static void dt_prof_snap(DtProf *p) {
+  p->c[0]  = g_atp_pushn_dt_node;
+  p->c[1]  = g_atp_pushn_dt_edge;
+  p->c[2]  = g_atp_pushn_dt_chain;
+  p->c[3]  = g_atp_pushn_dt_branch;
+  p->c[4]  = g_atp_pushn_dt_prune;
+  p->c[5]  = g_atp_pushn_dt_emit;
+  p->c[6]  = g_atp_pushn_dt_bind1;
+  p->c[7]  = g_atp_pushn_dt_fteq;
+  p->c[8]  = g_atp_pushn_dt_fteq_ok;
+  p->c[9]  = g_atp_pushn_dt_fteq_cell;
+  p->c[10] = g_atp_pushn_dt_cprobe;
+  p->c[11] = g_atp_pushn_dt_fteq_symfail;
+  p->c[12] = g_atp_pushn_dt_fteq_chain;
+  p->c[13] = g_atp_pushn_dt_vedge;
+  memcpy(p->hist, g_atp_pushn_dt_hist, sizeof p->hist);
+  memcpy(p->fan_visit, g_atp_pushn_dt_fan_visit, sizeof p->fan_visit);
+  memcpy(p->fan_edge, g_atp_pushn_dt_fan_edge, sizeof p->fan_edge);
+  p->dp = g_ftdt_dp;
+}
+
+// The counters moved alike from a to b and from b to c, and the depth
+// hand-off ended alike.
+static int dt_prof_same(const DtProf *a, const DtProf *b, const DtProf *c) {
+  for (u32 i = 0; i < 14u; i++) {
+    if (b->c[i] - a->c[i] != c->c[i] - b->c[i]) return 0;
+  }
+  for (u32 i = 0; i < ATP_DT_HIST_N; i++) {
+    if (b->hist[i] - a->hist[i] != c->hist[i] - b->hist[i]) return 0;
+  }
+  for (u32 i = 0; i < ATP_DT_FAN_N; i++) {
+    if (b->fan_visit[i] - a->fan_visit[i] != c->fan_visit[i] - b->fan_visit[i]) return 0;
+    if (b->fan_edge[i] - a->fan_edge[i] != c->fan_edge[i] - b->fan_edge[i]) return 0;
+  }
+  return b->dp == c->dp;
+}
+
+// What one descent left behind: candidates, records, binding snapshots.
+typedef struct {
+  u32              n, n_rec, n_snap;
+  u32             *cand;
+  FtDtRec         *rec;
+  const AtpFtCell **snap;
+} DtRun;
+
+static void dt_run_init(DtRun *r) {
+  r->cand = (u32 *)malloc(65536u * sizeof(u32));
+  r->rec  = (FtDtRec *)malloc(65536u * sizeof(FtDtRec));
+  r->snap = (const AtpFtCell **)malloc(65536u * sizeof(const AtpFtCell *));
+}
+
+static void dt_run_free(DtRun *r) {
+  free(r->cand);
+  free(r->rec);
+  free(r->snap);
+}
+
+// One descent from the root at subject cell `p` (the reference walk when
+// `ref`), as ftdt_candidates opens it; 0 when a binding stayed set.
+static int dt_query(FtPiIndex *ix, const AtpFtCell *p, u8 want, u8 pure,
+                    u8 ref, DtRun *r) {
+  static const AtpFtCell *bind[ATPFT_MAX_VARS];
+  ix->dtb_snap_n = 0u;
+  ix->dtb_rec_n  = 0u;
+  if (g_ftdt_pd) {
+    g_ftdt_dp = 0u;
+  }
+  u32 out = 0u;
+  FtDtDesc d = { ix, (p->end != NULL) ? p->end->next : NULL, &out, bind, want };
+  if (ref) {
+    ref_ftdt_descend3(&d, 0u, p, 0u, pure);
+  } else {
+    ftdt_descend3(&d, 0u, p, 0u, pure);
+  }
+  r->n      = out < 65536u ? out : 65536u;
+  r->n_rec  = ix->dtb_rec_n < 65536u ? ix->dtb_rec_n : 65536u;
+  r->n_snap = ix->dtb_snap_n < 65536u ? ix->dtb_snap_n : 65536u;
+  memcpy(r->cand, ix->cand, (size_t)r->n * sizeof(u32));
+  if (r->n_rec > 0u) {
+    memcpy(r->rec, ix->dtb_rec, (size_t)r->n_rec * sizeof(FtDtRec));
+  }
+  if (r->n_snap > 0u) {
+    memcpy(r->snap, ix->dtb_snap, (size_t)r->n_snap * sizeof(const AtpFtCell *));
+  }
+  for (u32 k = 0; k < ATPFT_MAX_VARS; k++) {
+    if (bind[k] != NULL) return 0;
+  }
+  return 1;
+}
+
+static int dt_runs_same(const DtRun *a, const DtRun *b) {
+  if (a->n != b->n || a->n_rec != b->n_rec || a->n_snap != b->n_snap ||
+      memcmp(a->cand, b->cand, (size_t)a->n * sizeof(u32)) != 0 ||
+      memcmp(a->snap, b->snap,
+             (size_t)a->n_snap * sizeof(const AtpFtCell *)) != 0) {
+    return 0;
+  }
+  for (u32 i = 0; i < a->n_rec; i++) {
+    const FtDtRec *x = &a->rec[i], *y = &b->rec[i];
+    if (x->rule != y->rule || x->snap_ofs != y->snap_ofs ||
+        x->idmap_ofs != y->idmap_ofs || x->nvar != y->nvar ||
+        x->face != y->face) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+enum { DT_PATTERNS = 400, DT_N = 3000 };
+
+static void pin_ftdt(u32 *seed) {
+  FtPiIndex ix;
+  memset(&ix, 0, sizeof ix);
+  ftdt_reset(&ix);
+  AtpFt a;
+  ft_init(&a);
+  // Generalized subterms (some with variables past ATPFT_MAX_VARS: star
+  // edges) and small terms, in both orientation classes and faces.
+  for (u32 r = 0; r < DT_PATTERNS; r++) {
+    Term pt = (r % 4u == 0u) ? mk_small(seed)
+                             : generalize(seed, pick_sub(seed, mk_random(seed)));
+    ftdt_insert_pattern(&ix, ft_from_term(&a, pt, 0), r, (u8)(r & 1u),
+                        (u8)((r >> 1) & 1u));
+  }
+  DtRun ra, na;
+  dt_run_init(&ra);
+  dt_run_init(&na);
+
+  TEST_BEGIN("atp_deep/pin-ftdt-descend");
+  {
+    u32 ok = 0, hits = 0, recs = 0;
+    for (u32 i = 0; i < DT_N; i++) {
+      Term t = (i & 1u) ? mk_random(seed) : generalize(seed, mk_random(seed));
+      AtpFtCell *x = ft_from_term(&a, t, 0);
+      const AtpFtCell *p = x;
+      if (i % 3u == 0u) {
+        // a random subterm cell
+        u32 skip = rng32(seed) % 16u;
+        while (skip-- > 0u && p != x->end) {
+          p = p->next;
+        }
+      }
+      u8 want = (u8)(1u + rng32(seed) % 3u);
+      u8 pure = (u8)((i >> 2) & 1u);
+      g_ftdt_pd = (u8)(i % 4u == 0u);
+      DtProf p0, p1, p2;
+      dt_prof_snap(&p0);
+      int rb = dt_query(&ix, p, want, pure, 1u, &ra);
+      dt_prof_snap(&p1);
+      int nb = dt_query(&ix, p, want, pure, 0u, &na);
+      dt_prof_snap(&p2);
+      if (rb && nb && dt_runs_same(&ra, &na) && dt_prof_same(&p0, &p1, &p2)) {
+        ok++;
+      }
+      hits += (na.n > 0u);
+      recs += na.n_rec;
+    }
+    g_ftdt_pd = 0u;
+    CHECK_EQ(ok, (u32)DT_N);
+    CHECK(hits > 0u);
+    CHECK(recs > 0u);
+  }
+
+  dt_run_free(&ra);
+  dt_run_free(&na);
+  ft_destroy(&a);
+}
+
+static void deep_ftdt(void) {
+  AtpFt a;
+  ft_init(&a);
+  DtRun ra, na;
+  dt_run_init(&ra);
+  dt_run_init(&na);
+  Term c5 = term_new_ctr(5u, NULL, 0u);
+  Term c6 = term_new_ctr(6u, NULL, 0u);
+  // g(Y, g(Y, ... g(Y, c5))) with Y = x70 (past ATPFT_MAX_VARS): every Y
+  // is a star edge, so the walk branches at each level; and the same
+  // shape over x0, a single-variable chain with repeat consistency tests.
+  Term qs = c5, qv = c5, s = c5, mqs = c5, ms = c5;
+  for (u32 k = 0; k < DEEP; k++) {
+    Term k1[2] = { term_new_fvr(70u), qs };
+    Term k2[2] = { term_new_fvr(0u), qv };
+    Term k3[2] = { c6, s };
+    qs = term_new_ctr(3u, k1, 2u);
+    qv = term_new_ctr(3u, k2, 2u);
+    s  = term_new_ctr(3u, k3, 2u);
+    if (k < 2000u) {
+      Term k4[2] = { term_new_fvr(70u), mqs };
+      Term k5[2] = { c6, ms };
+      mqs = term_new_ctr(3u, k4, 2u);
+      ms  = term_new_ctr(3u, k5, 2u);
+    }
+  }
+  AtpFtCell *ss  = ft_from_term(&a, s, 0);
+  AtpFtCell *mss = ft_from_term(&a, ms, 0);
+
+  TEST_BEGIN("atp_deep/deep-ftdt-descend");
+  {
+    FtPiIndex ix;
+    memset(&ix, 0, sizeof ix);
+    ftdt_reset(&ix);
+    ftdt_insert_pattern(&ix, ft_from_term(&a, qs, 0), 7u, 0u, 0u);
+    ftdt_insert_pattern(&ix, ft_from_term(&a, qv, 0), 8u, 1u, 0u);
+    CHECK(dt_query(&ix, ss, 3u, 1u, 0u, &na));
+    CHECK_EQ(na.n, 2u);
+    sort_u32(na.cand, na.n);
+    CHECK_EQ(na.cand[0], 7u);
+    CHECK_EQ(na.cand[1], 8u);
+    CHECK_EQ(na.n_rec, 1u);                 // the star path records nothing
+    CHECK_EQ(na.rec[0].rule, 8u);
+    CHECK_EQ(na.rec[0].nvar, 1u);
+    CHECK(dt_query(&ix, ss, 1u, 1u, 0u, &na));   // oriented class only
+    CHECK_EQ(na.n, 1u);
+    CHECK_EQ(na.cand[0], 7u);
+    // A different leaf deep down: nothing matches.
+    Term k6[2] = { c6, c6 };
+    Term bad = term_new_ctr(3u, k6, 2u);
+    Term sb = bad;
+    for (u32 k = 1; k < DEEP; k++) {
+      Term kk[2] = { c6, sb };
+      sb = term_new_ctr(3u, kk, 2u);
+    }
+    CHECK(dt_query(&ix, ft_from_term(&a, sb, 0), 3u, 1u, 0u, &na));
+    CHECK_EQ(na.n, 0u);
+    // A 2,000-deep star spine against the reference.
+    FtPiIndex mx;
+    memset(&mx, 0, sizeof mx);
+    ftdt_reset(&mx);
+    ftdt_insert_pattern(&mx, ft_from_term(&a, mqs, 0), 3u, 0u, 1u);
+    CHECK(dt_query(&mx, mss, 3u, 1u, 1u, &ra));
+    CHECK(dt_query(&mx, mss, 3u, 1u, 0u, &na));
+    CHECK(dt_runs_same(&ra, &na));
+    CHECK_EQ(na.n, 1u);
+  }
+
+  dt_run_free(&ra);
+  dt_run_free(&na);
+  ft_destroy(&a);
+}
+
 int main(void) {
   thvm_init();
   u32 seed = 0x6c8e9cf5u;
@@ -4942,6 +5374,8 @@ int main(void) {
   deep_index_queue(&seed);
   pin_ac(&seed);
   deep_ac();
+  pin_ftdt(&seed);
+  deep_ftdt();
   thvm_free();
   TEST_REPORT();
 }
