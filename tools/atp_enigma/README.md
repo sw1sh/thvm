@@ -581,6 +581,107 @@ unreadable file or a term nested too deep to compare.
 blind to variable and symbol renaming, clause order and names (includes
 resolved), the corpus's J13 duplicate check.
 
+## Comparison protocol (`protocol/`)
+
+The tools that run and judge every arm comparison of
+[docs/plans/enigma_portfolio.md](../../docs/plans/enigma_portfolio.md)
+(sections 1.3 to 1.5, gates G0.2 and G0.3, and the readings registered in
+section 5.4).  Each file's header holds its exact definitions.
+
+| file | what | where |
+|---|---|---|
+| `protocol/run_arms.py` | one comparison: every arm on every problem, one problem at a time, under the section 1.3 command, pod checks, calibration, shuffles, repeats and strict CheckProof; resumable, sentinels, sealed outputs for J13; `plan` prints a worst-case time estimate, `hostfacts` the pod's effective CPUs and memory | pod (`plan`: anywhere) |
+| `protocol/calibrate_wdep.sh` | gate G0.3: the J13 submission build at 45, 53, 60 and 70 s, in shards, under the seal; `report` runs `stats.py wdep --look L0` | pod (report: Mac) |
+| `protocol/stats.py` | `compare` (section 1.5), `delta` (D, delta, G0.2), `wdep` (G0.3); `--look L0`/`L1` print only the pre-registered aggregates and seal the per-problem tables under `~/.cache/thvm/enigma/sealed/`; `--look L2` needs the registry's unseal token | Mac (text only) |
+| `protocol/calib_candidates.tsv` | the TRAIN problems the pod-speed reference is chosen from | |
+| `protocol/test_stats.py` | known-answer tests on synthetic rows: `python3 tools/atp_enigma/protocol/test_stats.py` | Mac |
+
+Pod rules (the runner refuses a pod that breaks one): 16 effective CPUs
+(affinity mask, capped by a cgroup CPU quota); python3, coreutils `timeout`
+and `lscpu`; one memory cap for the whole comparison, `--rss-cap default`
+(the schedule's own 4500 MiB slice cap; needs an effective memory limit,
+min(MemTotal, cgroup limit), of 16 x 4500 MiB) or `--rss-cap 3500` on every
+pod of it; every arm on one binary.  Each arm's lane table comes from its
+own binary (`<flags> --list-lanes=flags`, name TAB flags, which needs a build with
+this listing); arms that differ in flags but list the same lanes are
+refused unless declared (`--same-lanes PD,E`).  Inputs:
+`~/.cache/thvm/casc/FindProof.tgz` (the submission build: the WDEP arm and
+the pod-speed calibration binary),
+`~/.cache/thvm/enigma/matrix/{j13_ueq.tgz,tptp_pool.tgz,problems.tsv}`, and
+for current-main arms a source tree built with
+`make -f tools/casc/Makefile bin/FindProof` and
+`make -f tools/proover/Makefile bin/CheckProof`.
+
+Driver (Mac side, one per pod, in the foreground): pick the shard count
+from `run_arms.py plan` (it prints the worst case per shard and the shards
+the deadline needs), launch with an absolute `--deadline-utc`, then poll
+`out/run.done`, `out/run.failed` and `out/run.stop` up to twice the
+worst-case estimate.  A `run.log` older than 45 minutes means the runner is
+dead (sealed runs log a heartbeat every 15 minutes, open runs one line per
+job).  On any sentinel or a dead runner: harvest (`tar czf` of the out
+directory, copied to the Mac), then terminate the pod, then check
+`prime pods list`.  A sealed out directory holds `sealed.tgz`; no agent
+lists its contents (`tar t`, `ls -l`, `du` included): it opens only after
+L2, or for a VerifiedBad under the section 1.3 exception.
+
+WDEP calibration, 4 pods (`~/in` holds the four protocol files and the three
+tarballs):
+
+```
+bash ~/in/calibrate_wdep.sh setup ~/wdep ~/in/FindProof.tgz ~/in/j13_ueq.tgz ~/in/tptp_pool.tgz
+bash ~/wdep/bin/calibrate_wdep.sh calib-ref ~/wdep ~/in/calib_candidates.tsv   # pod 1 only, first
+# record calib_ref.tsv's sha256 and lscpu line in the plan's section 5.4, copy the file to the
+# Mac and to ~/wdep/ on the other pods, then on pod K:
+nohup setsid bash ~/wdep/bin/calibrate_wdep.sh run ~/wdep K/4 ~/wdep/calib_ref.tsv \
+  --deadline-utc YYYY-MM-DDTHH:MM:SSZ </dev/null >~/wdep/run_K.log 2>&1 &
+# harvest: tar czf ~/wdep_K.tgz -C ~/wdep out_K setup.txt
+bash tools/atp_enigma/protocol/calibrate_wdep.sh report -- ~/.cache/thvm/enigma/sealed/wdep_*.tgz
+```
+
+Before L0, the slice-stderr overhead (section 5.4): P0 on DEV-H at WDEP,
+once as arm `P0e` and once as arm `P0n` with `--no-errdir` (two out
+directories, same pod, same binary), then
+`stats.py compare --rows OUT_E OUT_N --pair P0e,P0n`.
+
+L0 (P0 at W180 and at the WDEP of G0.3, two passes; `arms.tsv` is
+`P0<TAB>/root/l0/thvm/bin/FindProof<TAB>--schedule`, `j13.tsv` the `j13`
+rows of the matrix `problems.tsv`, `calib_ref.tsv` the one table from the
+WDEP calibration):
+
+```
+mkdir -p ~/sub ~/tptp_pool ~/j13
+tar xzf ~/in/FindProof.tgz -C ~/sub; tar xzf ~/in/tptp_pool.tgz -C ~/tptp_pool
+tar xzf ~/in/j13_ueq.tgz -C ~/j13; cp ~/in/run_arms.py ~/run_arms.snapshot.py
+nohup setsid python3 ~/run_arms.snapshot.py run --problems ~/in/j13.tsv --arms ~/in/arms.tsv \
+  --walls 180,WDEP --passes 2 --rss-cap default --root ~/j13 --checker ~/l0/thvm/bin/CheckProof \
+  --calib-ref ~/in/calib_ref.tsv --calib-bin ~/sub/FindProof/bin/FindProof \
+  --calib-root ~/tptp_pool --shard K/N --deadline-utc YYYY-MM-DDTHH:MM:SSZ --out ~/out_L0_K \
+  </dev/null >~/L0_K.log 2>&1 &
+```
+
+A comparison of arms (L1, L2, DEV gates) is the same command with one line
+per arm in `arms.tsv` and `--passes 1` (the default: repeats on
+disagreements and clock-gated winners, read from each arm's own lane
+table).  J13 output is never read: on the pod
+`tar czf ~/L0_K.tgz -C ~ out_L0_K`, copy the archive into
+`~/.cache/thvm/enigma/sealed/` on the Mac and leave it packed; `stats.py`
+reads the archives (and the `sealed.tgz` inside) directly, all shards of a
+look together:
+
+```
+python3 tools/atp_enigma/protocol/stats.py delta --look L0 --rows ~/.cache/thvm/enigma/sealed/L0_*.tgz
+python3 tools/atp_enigma/protocol/stats.py compare --rows ~/.cache/thvm/enigma/sealed/L0_*.tgz \
+  --pair P0@1,P0@2 --look L0 --label L0
+python3 tools/atp_enigma/protocol/stats.py compare --rows ~/.cache/thvm/enigma/sealed/L1_*.tgz \
+  --pair E,NL --pair E,PD --pair P1,P0 --nl P0,P1,PD --aa-rows ~/.cache/thvm/enigma/sealed/L0_*.tgz \
+  --look L1 --label L1
+```
+
+Exit codes: `stats.py` 3 INVALID (incomplete cells or problems at a look,
+mixed rss caps, incomplete A/A passes), 4 VerifiedBad (stop the line);
+`run_arms.py run` 0 complete, 7 deadline (resume), 5 terminated, 4
+VerifiedBad, 3 calibration failed, 2 preflight error or crash.
+
 ## Typical flow
 
 ```

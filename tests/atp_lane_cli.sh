@@ -1,7 +1,9 @@
 #!/bin/bash
-# FindProof --list-lanes / --lane=NAME.  --list-lanes prints the names of
-# the SCHEDULE table in order; an unknown or missing lane name is an input
-# error (exit 2, nothing on stdout); and a lane run is the schedule's slice
+# FindProof --list-lanes / --lane=NAME.  --list-lanes prints the SCHEDULE
+# table's names in order and --list-lanes=flags the table (name TAB
+# flags); an unknown schedule mode
+# (--schedule=NAME) and an unknown or missing lane name are input errors
+# (exit 2, nothing on stdout); and a lane run is the schedule's slice
 # child for that lane: its status line, its engine stats and the exit code
 # it reports match the child command built by hand from the table
 # (FINDPROOF_SLICE, the slice RSS cap, the lane's flags, the slice wall the
@@ -36,17 +38,49 @@ fail=0
 
 # The table as the source spells it: name TAB flags, one lane per line.
 sed -n 's/^  {"\([^"]*\)", *"\([^"]*\)", *[0-9.]*},.*$/\1\t\2/p' "$SRC" > "$TMP/table"
-cut -f1 "$TMP/table" > "$TMP/names"
 rss=$(sed -n 's/^#define SCHED_SLICE_RSS_MB \([0-9]*\).*/\1/p' "$SRC")
 
-"$BIN" --list-lanes > "$TMP/listed"
+cut -f1 "$TMP/table" > "$TMP/names"
+
+"$BIN" --schedule --list-lanes=flags > "$TMP/listed"
 rc=$?
-if [ $rc -ne 0 ] || [ ! -s "$TMP/names" ] || ! cmp -s "$TMP/names" "$TMP/listed"; then
-  echo "  FAIL: --list-lanes (exit $rc) differs from the SCHEDULE table"
+if [ $rc -ne 0 ] || [ ! -s "$TMP/table" ] || ! cmp -s "$TMP/table" "$TMP/listed"; then
+  echo "  FAIL: --list-lanes=flags (exit $rc) differs from the SCHEDULE table (name TAB flags)"
   fail=1
 else
-  echo "  ok: --list-lanes prints the $(wc -l < "$TMP/listed" | tr -d ' ') schedule lanes in order"
+  echo "  ok: --list-lanes=flags prints the $(wc -l < "$TMP/listed" | tr -d ' ') schedule lanes in order"
 fi
+
+"$BIN" --list-lanes > "$TMP/listed_names"
+rc=$?
+if [ $rc -ne 0 ] || [ ! -s "$TMP/names" ] || ! cmp -s "$TMP/names" "$TMP/listed_names"; then
+  echo "  FAIL: --list-lanes (exit $rc) differs from the SCHEDULE table's names"
+  fail=1
+else
+  echo "  ok: --list-lanes prints the lane names in order"
+fi
+
+"$BIN" --list-lanes=names > "$TMP/bad.out" 2> "$TMP/bad.err"
+rc=$?
+if [ $rc -ne 2 ] || [ -s "$TMP/bad.out" ]; then
+  echo "  FAIL: --list-lanes=names exits $rc (want 2, no stdout)"
+  fail=1
+else
+  echo "  ok: --list-lanes=names -> exit 2: $(head -1 "$TMP/bad.err")"
+fi
+
+for bad in --schedule=p1 --schedule=; do
+  for tail in --list-lanes "${PROBS[0]}"; do
+    "$BIN" "$bad" --szs "$tail" > "$TMP/bad.out" 2> "$TMP/bad.err"
+    rc=$?
+    if [ $rc -ne 2 ] || [ -s "$TMP/bad.out" ] || ! grep -q "schedule mode" "$TMP/bad.err"; then
+      echo "  FAIL: $bad $tail exits $rc (want 2, a message, no stdout)"
+      fail=1
+    else
+      echo "  ok: $bad $tail -> exit 2: $(head -1 "$TMP/bad.err")"
+    fi
+  done
+done
 
 for bad in --lane=no-such-lane --lane= --lane; do
   "$BIN" "$bad" --szs "${PROBS[0]}" > "$TMP/bad.out" 2> "$TMP/bad.err"

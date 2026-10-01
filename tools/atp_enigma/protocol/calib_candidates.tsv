@@ -1,0 +1,20 @@
+# Pod-speed calibration candidates (run_arms.py calib-ref --calib): name TAB path (relative to the
+# TPTP pool root of ~/.cache/thvm/enigma/matrix/tptp_pool.tgz).  The calibration runs one
+# deterministic configuration, the default preset (calib-ref --calib-flags "--szs --wall=120";
+# the wm lane's flags are empty, and no clock-gated discipline is on), because --schedule races
+# 46 lanes and solves all but a handful of TRAIN problems in under 3 s, where start-up and fixed
+# real-time costs dominate.  These are TRAIN problems, stem-disjoint from J13, not -10, not in
+# DEV-T, that the wm lane proved in 2.6-29.5 s at 60 s in the lane matrix (2026-10-02).
+# calib-ref keeps the 10 longest whose spread over its passes is at most 10%.
+GRP701-1	Problems/GRP/GRP701-1.p
+GRP506-1	Problems/GRP/GRP506-1.p
+BOO067-1	Problems/BOO/BOO067-1.p
+GRP184-2	Problems/GRP/GRP184-2.p
+GRP184-3	Problems/GRP/GRP184-3.p
+GRP767-1	Problems/GRP/GRP767-1.p
+LAT143-1	Problems/LAT/LAT143-1.p
+GRP185-2	Problems/GRP/GRP185-2.p
+GRP728-1	Problems/GRP/GRP728-1.p
+GRP729-1	Problems/GRP/GRP729-1.p
+GRP730-1	Problems/GRP/GRP730-1.p
+GRP718-1	Problems/GRP/GRP718-1.p

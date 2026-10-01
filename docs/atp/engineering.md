@@ -513,7 +513,10 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
   Method-name` table (every CLI flag is exactly an env setter, so
   the table is also the env catalog for the strategy surface).
 * `bin/FindProof --list-lanes` prints the schedule's lane names in
-  `SCHEDULE[]` order, and `--lane=NAME` runs one lane exactly as
+  `SCHEDULE[]` order, one per line, and `--list-lanes=flags` one
+  `name TAB flags` line each (both after every other option, so
+  `--schedule=MODE --list-lanes` fails as the run would: an unknown
+  schedule mode exits 2), and `--lane=NAME` runs one lane exactly as
   `--schedule` launches it (its flags, `FINDPROOF_SLICE`, slice RSS
   cap, slice wall and wall stop) with its stderr kept: the per-lane
   measurement path (`tests/atp_lane_cli.sh`).

@@ -1166,7 +1166,8 @@ static void usage(FILE *fp) {
     "                              process per slice; first proof wins)\n"
     "  --lane=NAME                 run one schedule lane alone, exactly as the\n"
     "                              schedule launches it (its stderr kept)\n"
-    "  --list-lanes                print the schedule's lane names in order and exit\n"
+    "  --list-lanes                print the schedule's lane names in order and exit;\n"
+    "                              --list-lanes=flags prints name TAB flags\n"
     "  --lane-flags=NAME           print the flags the schedule gives lane NAME\n"
     "  --problem-features          print the problem's features phi(p), one TSV row\n"
     "                              (TPTP unit-equality input; no knob flags, no\n"
@@ -1194,7 +1195,7 @@ int main(int argc, char **argv) {
   const char *file = NULL;
   const char *max_steps = "500000";
   const char *wall = "120";
-  int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0;
+  int szs = 0, keep_pr = 0, want_schedule = 0, want_check = 0, want_list_lanes = 0;
   int want_features = 0, features_header = 0, features_lanes = 0;
   int n_knob_flags = 0;
   int want_ifeq10 = 0, check_flag = 0;
@@ -1244,10 +1245,17 @@ int main(int argc, char **argv) {
       return 0;
     }
     if (nlen == 10 && strncmp(name, "list-lanes", 10) == 0) {
-      for (int k = 0; k < N_SCHED; k++) {
-        printf("%s\n", SCHEDULE[k].name);
+      // Names only, one per line, is the form the G0.4 judge
+      // (tests/atp_sched_teardown.sh, pinned by sha256) reads.
+      if (val == NULL) {
+        want_list_lanes = 1;
+      } else if (strcmp(val, "flags") == 0) {
+        want_list_lanes = 2;
+      } else {
+        fprintf(stderr, "FindProof: --list-lanes takes no value or =flags\n");
+        return 2;
       }
-      return 0;
+      continue;
     }
     if (nlen == 10 && strncmp(name, "lane-flags", 10) == 0) {
       for (int k = 0; k < N_SCHED; k++) {
@@ -1286,7 +1294,17 @@ int main(int argc, char **argv) {
       continue;
     }
     if (nlen == 3 && strncmp(name, "szs", 3) == 0) { szs = 1; continue; }
-    if (nlen == 8 && strncmp(name, "schedule", 8) == 0) { want_schedule = 1; continue; }
+    if (nlen == 8 && strncmp(name, "schedule", 8) == 0) {
+      // One schedule table exists; a mode name this build does not know
+      // must not silently run it (an arm comparison would become A/A).
+      if (val != NULL) {
+        fprintf(stderr, "FindProof: unknown schedule mode '%s' (this build has only "
+                "--schedule)\n", val);
+        return 2;
+      }
+      want_schedule = 1;
+      continue;
+    }
     if (nlen == 5 && strncmp(name, "check", 5) == 0) { want_check = 1; check_flag = 1; continue; }
     if (nlen == 7 && strncmp(name, "verbose", 7) == 0) { g_cli_verbose = 1; continue; }
     if (nlen == 5 && strncmp(name, "proof", 5) == 0) {
@@ -1354,6 +1372,18 @@ int main(int argc, char **argv) {
       }
     }
     if (!hit) { fprintf(stderr, "FindProof: unknown option --%.*s\n", (int)nlen, name); usage(stderr); return 2; }
+  }
+  // After every option, so a rejected option (an unknown schedule mode)
+  // fails the listing too.
+  if (want_list_lanes) {
+    for (int k = 0; k < N_SCHED; k++) {
+      if (want_list_lanes == 2) {
+        printf("%s\t%s\n", SCHEDULE[k].name, SCHEDULE[k].flags);
+      } else {
+        printf("%s\n", SCHEDULE[k].name);
+      }
+    }
+    return 0;
   }
   if (want_features) {
     // --proof has requested its trace cap and heap tail already, which the
