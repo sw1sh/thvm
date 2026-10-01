@@ -408,9 +408,11 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
   payload.  The
   PROD scatter lowering and the PROD / REPLACE scatter gradients are still to
   come; `backward()` raises for the missing gradients, and py's
-  `scatter_reduce` takes `"sum"` and `"mean"` (the other kinds raise
-  NotImplementedError).  A mean multiplies by the reciprocal count, so it can
-  sit one ulp from tinygrad's CPU division.
+  `scatter_reduce` takes `"sum"`, `"mean"`, `"amax"` and `"amin"` (`"prod"`
+  raises NotImplementedError).  A mean multiplies by the reciprocal count, so
+  it can sit one ulp from tinygrad's CPU division.  An amax / amin with an
+  empty index keeps self, where tinygrad's `MAX(identity, self)` turns a NaN
+  self into the identity and halves the gradient of a self equal to it.
 - **cat / stack have no STACK op** (deviation).  tinygrad's `cat` stacks
   equal pieces with `Ops.STACK`, pure data movement, and pads and sums
   unequal ones (`mixin/op.py:731-746`, `test_uops_stats.py:132`); its

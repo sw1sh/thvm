@@ -253,9 +253,9 @@ def segment_inputs(seed=13):
 def case_segment_lse(seed=13):
     """The ATP listwise loss (tools/atp_enigma/listwise_net.py list_loss):
     sum over (step k, segment b) of sw[k, b] * log(sum exp(x[k, r]) over the
-    r with seg[k, r] = b), each segment shifted by a detached statistic.  The
-    trainer shifts by the segment max (amax, not native yet); a detached
-    segment mean gives the same log-sum-exp.  Forward and the gradient (sw
+    r with seg[k, r] = b), each segment shifted by a detached statistic: a
+    segment mean here, the trainer's segment max in
+    test_segment_log_softmax.py; both give the same log-sum-exp.  Forward and the gradient (sw
     times the in-segment softmax) against numpy."""
     seg, x0, sw0 = segment_inputs(seed)
     S, R = x0.shape
@@ -681,11 +681,10 @@ class TestScatterErrors(unittest.TestCase):
             self.x.scatter(0, self.idx, self.src, reduce="add")
 
     def test_unimplemented_kinds_name_themselves(self):
-        # prod / amax / amin have no native combine yet; each raises naming
-        # itself rather than computing something else.
-        for reduce in ("prod", "amax", "amin"):
-            with self.assertRaisesRegex(NotImplementedError, repr(reduce)):
-                self.x.scatter_reduce(0, self.idx, self.src, reduce)
+        # prod has no native combine yet; it raises naming itself rather
+        # than computing something else.
+        with self.assertRaisesRegex(NotImplementedError, "'prod'"):
+            self.x.scatter_reduce(0, self.idx, self.src, "prod")
         with self.assertRaisesRegex(NotImplementedError, "'prod'"):
             self.x.scatter(0, self.idx, 2.0, reduce="multiply")
 

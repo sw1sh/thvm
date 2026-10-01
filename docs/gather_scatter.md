@@ -131,9 +131,11 @@ On the CPU backend (`Device.DEFAULT == "CPU"`):
   nothing lands, without include_self) does (`:1131-1133`): a SUM scatter
   of ones onto ones.  sum keeps self's dtype (tinygrad's `sum_acc_dtype`
   on float32 and int32); a mean is float32, an int one included.
-  `"prod"`, `"amax"` and `"amin"` raise NotImplementedError naming the
-  kind until their scatter lowerings land.  Both reductions are
-  differentiable (a mean's gradient goes through the division); an index
+  `"amax"` and `"amin"` are one `SCATTER(MAX)` / `SCATTER(MIN)` with
+  include_self passed through (`:1128-1129`), keeping self's dtype, and
+  differentiate through `grad_scatter_maxmin`.  `"prod"` raises
+  NotImplementedError naming the kind until its scatter lowering lands.
+  sum and mean are differentiable too (a mean's gradient goes through the division); an index
   outside `[0, self.shape[dim])` is dropped, so -1 padding is inert.
 - `Tensor.scatter(dim, index, src, reduce=None)` is a `REPLACE` scatter:
   the last write along `dim` wins (`:1136-1168`).  A scalar src fills
@@ -209,6 +211,11 @@ Measured on the Linux CPU pod (C JIT):
   tests, with gradients against tinygrad's autograd, numpy and finite
   differences; -1 padded indices; the ATP aggregation; TinyJit replays
   with fresh index buffers; both CPU routes.
+- [py/tests/test_scatter_amax_parity.py](../py/tests/test_scatter_amax_parity.py):
+  scatter_reduce amax and amin, forward bit for bit and gradients against
+  tinygrad master and its dense formulation in float64 numpy: ties,
+  include_self, dims 0 / 1 / -1, -inf bases, -1 padded ids, int32, the
+  host fallback, both CPU routes.
 - [py/tests/test_graphsage_train.py](../py/tests/test_graphsage_train.py):
   10 TinyJit Adam steps of a mean-aggregation GraphSAGE on fresh -1
   padded edge buffers, against a float64 numpy run.

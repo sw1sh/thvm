@@ -86,6 +86,27 @@ def _finite_sentinel(value, dt: "DType"):
     return value
 
 
+def _host_scatter_extreme(base, flat, vals, is_max: bool, include_self: bool):
+    """amax / amin scatter on the host, as the native kernel folds it:
+    S[j] starts at the dtype's identity and takes x when (S < x) (amax) or
+    (x < S) (amin), in index order; then out = S (op) T with T = base, or
+    the identity where something lands without include_self."""
+    if base.dtype.kind == "f":
+        ident = base.dtype.type(-np.inf if is_max else np.inf)
+    else:
+        info = np.iinfo(base.dtype)
+        ident = base.dtype.type(info.min if is_max else info.max)
+    acc = np.full(base.size, ident, base.dtype)
+    for j, x in zip(flat.tolist(), vals.tolist()):
+        if (acc[j] < x) if is_max else (x < acc[j]):
+            acc[j] = x
+    T = base.reshape(-1).copy()
+    if not include_self:
+        T[np.unique(flat)] = ident
+    take = (acc < T) if is_max else (T < acc)
+    return np.where(take, T, acc).reshape(base.shape)
+
+
 def _native_indexing() -> bool:
     """Gather / scatter kernels run on the CPU backend only (emit refuses
     them on a GPU backend), so the frontends build the native UOP_GATHER /
@@ -1277,17 +1298,20 @@ class Tensor(metaclass=_TensorMeta):
 
     def _scatter_reduced(self, dim: int, index: "Tensor", src: "Tensor",
                          reduce: "str | None", include_self: bool) -> "Tensor":
-        """The checked scatter: reduce "sum", "mean" or None (the last write
-        along dim wins).  On the CPU backend one native UOP_SCATTER (two for
-        mean) that differentiates through the C rules; an empty index or self
-        has no kernel to run, and another device runs it on the host."""
+        """The checked scatter: reduce "sum", "mean", "amax", "amin" or None
+        (the last write along dim wins).  On the CPU backend one native
+        UOP_SCATTER (two for mean) that differentiates through the C rules;
+        an empty index or self has no kernel to run, and another device runs
+        it on the host."""
         if self.numel() == 0:
             dt = dtypes.float32 if reduce == "mean" else self._dtype
             return Tensor(np.zeros(self._shape, dtype=dt.np_dtype), dtype=dt)
         if index.numel() == 0:
             # Nothing lands.  tinygrad's sum and mean keep self exactly (a -0.0
-            # stays -0.0; mean in float32), and its reduce=None merge cannot
-            # broadcast the empty one-hot axis (mixin/op.py:1077-1093, 1170-1176).
+            # stays -0.0; mean in float32), as amax / amin do apart from a NaN
+            # self, which tinygrad's MAX(identity, self) turns into the
+            # identity; its reduce=None merge cannot broadcast the empty
+            # one-hot axis (mixin/op.py:1077-1093, 1128-1129, 1170-1176).
             if reduce is None:
                 moved = list(index._shape) + [self._shape[dim]]
                 moved[dim], moved[-1] = moved[-1], moved[dim]
@@ -1298,6 +1322,9 @@ class Tensor(metaclass=_TensorMeta):
             return self._scatter_host(dim, index, src, reduce, include_self)
         if reduce is None:
             return self._scatter_native(dim, index, src, K.SCATTER_REPLACE, False)
+        if reduce in ("amax", "amin"):
+            kind = K.SCATTER_MAX if reduce == "amax" else K.SCATTER_MIN
+            return self._scatter_native(dim, index, src, kind, include_self)
         total = self._scatter_native(dim, index, src, K.SCATTER_SUM, include_self)
         if reduce == "sum":
             return total
@@ -1319,6 +1346,9 @@ class Tensor(metaclass=_TensorMeta):
         pos = list(np.indices(idx.shape))
         pos[dim] = np.where(valid, idx, 0)
         flat = np.ravel_multi_index(tuple(pos), self._shape)[valid]
+        if reduce in ("amax", "amin"):
+            return Tensor(_host_scatter_extreme(base, flat, vals[valid], reduce == "amax",
+                                                include_self), dtype=self._dtype)
         if reduce is None:
             # Positions that meet differ only along dim, so the last write
             # along dim is the last one in row-major order.
@@ -1346,15 +1376,20 @@ class Tensor(metaclass=_TensorMeta):
         divides that sum by the number of values summed.  Without include_self
         a position some value lands on leaves self out (the sum starts from 0,
         the mean counts only the values); a position nothing lands on keeps
-        self.  An index outside [0, self.shape[dim]) is dropped.  sum keeps
-        self's dtype (tinygrad's sum_acc_dtype on float32 and int32); mean is
-        float32.  "prod", "amax" and "amin" raise NotImplementedError: the
-        native scatter has no such combine yet."""
+        self.  "amax" / "amin" fold the values from the dtype's minimum /
+        maximum (mixin/op.py:1128-1129) with tinygrad's CPU compare-select:
+        among equal values the first in index order stays, a NaN src never
+        wins, and a NaN self becomes that identity where it is combined;
+        their gradient splits ties as tinygrad's MAX does.  An index outside
+        [0, self.shape[dim]) is dropped.  sum, amax and amin keep self's
+        dtype (tinygrad's sum_acc_dtype on float32 and int32); mean is
+        float32.  "prod" raises NotImplementedError: the native scatter has
+        no such combine yet."""
         dim, src = self._pre_scatter(dim, index, src)
-        if reduce in ("prod", "amax", "amin"):
+        if reduce == "prod":
             raise NotImplementedError(
                 f"scatter_reduce: reduce={reduce!r} has no native scatter combine yet")
-        if reduce not in ("sum", "mean"):
+        if reduce not in ("sum", "mean", "amax", "amin"):
             raise RuntimeError(f"{reduce=} must be one of 'sum', 'prod', 'mean', 'amax', 'amin'")
         return self._scatter_reduced(dim, index, src, reduce, include_self)
 
