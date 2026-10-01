@@ -4018,11 +4018,10 @@ fn void pm_apply_rangeify(Term root) {
       // wrong element (this is what gd-loss / mse-grad / SGD-step / etc.
       // exercise -- their dot-product chains realize through PERMUTE
       // and RESHAPE).  Unwrap the shell in those cases so the swizzled
-      // INDEX_E survives.  EXPAND / PAD / SHRINK / FLIP stick with
-      // bare-forward; the bn_grad dgamma chain has an EXPAND whose
-      // realized BUFFERIZE producer is laid out so the consumer's own
-      // re-wrap is correct, and injecting the pre-swizzled INDEX_E
-      // there reads stale data.
+      // INDEX_E survives.  EXPAND / PAD / SHRINK / FLIP do not reuse the
+      // shell's pre-swizzled INDEX_E (the bn_grad dgamma chain's EXPAND
+      // reads stale data through it); each builds a fresh INDEX_E at its
+      // own input addr below.
       Term producer = term_resolve(heap_read(info->loc));
       if (term_tag(producer) == TAG_UOP) {
         u32 pidx = bufferize_info_find(term_val(producer));
@@ -4055,7 +4054,8 @@ fn void pm_apply_rangeify(Term root) {
               }
               fwd = ru_pad_wrap_where(info->loc, rm, fwd);
             } else if (psub_is_bufferize
-                       && (info->op == UOP_SHRINK || info->op == UOP_FLIP)) {
+                       && (info->op == UOP_SHRINK || info->op == UOP_FLIP
+                        || info->op == UOP_EXPAND)) {
               // A non-realized SHRINK (getitem) / FLIP over a producer that
               // realized to a BUFFERIZE must read that buffer at its OWN
               // swizzled iter, NOT forward the bare buffer.  The SHRINK's
@@ -4068,7 +4068,12 @@ fn void pm_apply_rangeify(Term root) {
               // both reads collapse to the same element.  Mirror tinygrad
               // create_bufferize_and_index_based_on_ranges (indexing.py:78,
               // BUFFERIZE.index(*consumer_ranges)) + the realized-source
-              // SHRINK in apply_movement_op (indexing.py:131).
+              // SHRINK in apply_movement_op (indexing.py:131).  A broadcast
+              // EXPAND likewise: its in_rngs read 0 on the axes it
+              // broadcasts, where the consumer's own addr runs over the
+              // expanded extent and reads past the buffer (one weight's
+              // RESHAPE realized for two matmuls, one of them over
+              // broadcast rows: test_shared_weight_levels).
               Term in_addr = ru_build_input_addr_for(rm, info->loc);
               fwd = uop_index_e(psub, in_addr);
               ru_index_axes_register(fwd, rm->in_rngs, rm->in_ndim);

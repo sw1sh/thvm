@@ -468,6 +468,26 @@ class TestCatATP(unittest.TestCase):
             np.testing.assert_allclose(logit, want_logit, rtol=1e-4, atol=1e-5)
             np.testing.assert_allclose(loss, want_loss, rtol=1e-4, atol=1e-5)
 
+    def test_levels_of_different_widths_share_one_linear(self):
+        # history_net.py's table with levels of P = 1, 4, 8, 2 rows through
+        # one nn.Linear: each level's matmul broadcasts the weight over its
+        # own rows, so the weight's view is realized for consumers of
+        # different extents, and a level read past the weight's buffer.
+        rng = np.random.default_rng(13)
+        W0 = rng.standard_normal((D, 2 * D)).astype(np.float32)
+        b0 = rng.standard_normal(D).astype(np.float32)
+        lin = nn.Linear(2 * D, D)
+        lin.weight, lin.bias = Tensor(W0), Tensor(b0)
+        t0 = rng.standard_normal((1, D)).astype(np.float32)
+        table, ref = Tensor(t0), t0.astype(np.float64)
+        for P in (1, 4, 8, 2):
+            i1 = np.repeat(rng.integers(0, ref.shape[0], (P, 1)), D, 1).astype(np.int32)
+            i2 = np.repeat(rng.integers(0, ref.shape[0], (P, 1)), D, 1).astype(np.int32)
+            Z = lin(table.gather(0, Tensor(i1)).cat(table.gather(0, Tensor(i2)), dim=1))
+            Zr = np.concatenate([np_rows(ref, i1), np_rows(ref, i2)], 1) @ W0.T + b0
+            table, ref = table.cat(Z, dim=0), np.concatenate([ref, Zr], 0)
+        np.testing.assert_allclose(table.numpy(), ref, rtol=1e-5, atol=1e-5)
+
     def test_table_cat_forward_is_exact_rows(self):
         # table.cat(act(Z), dim=0) keeps every earlier row and appends act(Z).
         rng = np.random.default_rng(10)

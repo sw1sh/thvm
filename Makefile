@@ -313,6 +313,7 @@ TESTS := \
   $(BIN)/test_bufferize_classify \
   $(BIN)/test_rangeify_unified \
   $(BIN)/test_expand_shared_view \
+  $(BIN)/test_shared_weight_levels \
   $(BIN)/test_limit_bufs \
   $(BIN)/test_kernel_width \
   $(BIN)/test_bufferize \
