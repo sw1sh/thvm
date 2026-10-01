@@ -155,9 +155,9 @@ of them carries a gradient there.
   shape-dependent factor and fold each unrolled chunk left to right
   (`expand_horizontal_reduce`, `codegen/__init__.py:206-209`), so a NaN at
   the head of a chunk wins that chunk: with [nan, 1, 2] landing on one
-  position, master gives nan (8 ids, include_self), 2.0 (8 ids, no
-  include_self) or -inf (40 ids), where thvm gives 2.0.  Without a NaN src
-  the values match tinygrad bit for bit.
+  position, master gives nan among 8 ids and -inf among 40 ids with
+  include_self, and 2.0 without it, where thvm gives 2.0.  Without a NaN
+  src the values match tinygrad bit for bit.
 - A position or offset in an index view is compiled into the kernel (see
   Lowering); tinygrad keeps a bound Variable symbolic.
 - A scatter_reduce mean divides as every thvm division does, `sum *
