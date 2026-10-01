@@ -133,6 +133,362 @@ static u8 ref_atp_dt_flatten(Term t, u32 *subsz, u32 *flatsym,
   subsz[here] = *pos - here;          // positions covered by t's subtree
   return 1;
 }
+// src/kbo/_.c:64
+static u8 ref_kbo_eq(Term s, Term t) {
+  if (s == t) return 1;   // pointer-identical -- rewriting/subst_apply
+                          // share subterm cells, so this fires often
+  if (term_tag(s) != term_tag(t)) return 0;
+  if (term_ext(s) != term_ext(t)) return 0;
+  // CTR-tagged: structural-hash short-circuit before the recursive walk.
+  // KBO orientation + match consistency checks call ref_kbo_eq on terms that
+  // have already been through the KBO weight memo, so their hashes are
+  // often cached in g_kbo_thash.  When both ends have a current-epoch
+  // entry and the hashes differ, the terms are guaranteed unequal -- the
+  // recursive walk would discover the same answer but pay an O(|t|) cost.
+  if (term_tag(s) == TAG_CTR) {
+    KboTHashEnt *cs = &g_kbo_thash[kbo_thash_slot(s)];
+    KboTHashEnt *ct = &g_kbo_thash[kbo_thash_slot(t)];
+    if (cs->epoch == g_kbo_epoch && cs->t == s
+        && ct->epoch == g_kbo_epoch && ct->t == t
+        && cs->hash != ct->hash) return 0;
+  }
+  switch (term_tag(s)) {
+    case TAG_FVR: return 1;  // same id (ext) already checked
+    case TAG_CTR: {
+      u32 ns = term_ctr_n(s);
+      u32 nt = term_ctr_n(t);
+      if (ns != nt) return 0;
+      for (u32 i = 0; i < ns; i++) {
+        if (!ref_kbo_eq(term_ctr_at(s, i), term_ctr_at(t, i))) return 0;
+      }
+      return 1;
+    }
+    default: return term_val(s) == term_val(t);
+  }
+}
+
+// src/rewrite/_.c:27
+static u8 ref_thvm_match(Term pattern, Term term, RewriteSubst *subst) {
+  switch (term_tag(pattern)) {
+    case TAG_FVR: {
+      u32 id = term_ext(pattern);
+      if (id >= REWRITE_MAX_VAR) return 0;
+      if (subst->bindings[id] == 0) {
+        subst->bindings[id] = term;
+        return 1;
+      }
+      return ref_kbo_eq(subst->bindings[id], term);
+    }
+    case TAG_CTR: {
+      if (term_tag(term) != TAG_CTR) return 0;
+      if (term_ext(pattern) != term_ext(term)) return 0;
+      // Direct heap_read for both pattern and term's arity + children
+      // (avoids term_ctr_at's redundant arity refetch per call).
+      u64 pbase = term_val(pattern);
+      u64 tbase = term_val(term);
+      Term pn_cell = heap_read(pbase);
+      Term tn_cell = heap_read(tbase);
+      if (term_tag(pn_cell) != TAG_NUM || term_tag(tn_cell) != TAG_NUM) return 0;
+      u32 np = (u32)term_val(pn_cell);
+      u32 nt = (u32)term_val(tn_cell);
+      if (np != nt) return 0;
+      for (u32 i = 0; i < np; i++) {
+        Term pc = heap_read(pbase + 1u + (u64)i);
+        Term tc = heap_read(tbase + 1u + (u64)i);
+        if (!ref_thvm_match(pc, tc, subst)) return 0;
+      }
+      return 1;
+    }
+    default:
+      // ATP lazy-rule sentinel tripwire (THVM_ATP_SENTINEL_STRICT=1):
+      // a TAG_NUM pattern with the lazy-store value tags reaching the
+      // matcher means some consumer read a rule slot raw instead of
+      // materializing through atp_rule_term/the mirrors -- the silent
+      // never-matches failure class behind the lazy+classic formation
+      // collapse (e798dba8).  Abort loudly so the blind site can be
+      // enumerated empirically instead of by code audit.  Zero cost
+      // unset (one cached getenv).
+      if (term_tag(pattern) == TAG_NUM &&
+          (term_val(pattern) == 0xFA151u || term_val(pattern) == 0xFA152u)) {
+        static int strict = -1;
+        if (strict < 0) {
+          const char *e = getenv("THVM_ATP_SENTINEL_STRICT");
+          strict = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+        }
+        if (strict) {
+          fprintf(stderr,
+                  "SENTINEL-STRICT: lazy rule sentinel 0x%llX reached "
+                  "ref_thvm_match as a pattern\n",
+                  (unsigned long long)term_val(pattern));
+          abort();
+        }
+      }
+      return 0;
+  }
+}
+
+// src/rewrite/_.c:88
+static Term ref_thvm_subst_apply(Term t, const RewriteSubst *subst) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 id = term_ext(t);
+      if (id < REWRITE_MAX_VAR && subst->bindings[id] != 0) {
+        return subst->bindings[id];
+      }
+      return t;
+    }
+    case TAG_CTR: {
+      // Direct heap_read for arity + children (avoids term_ctr_at's
+      // redundant arity refetch per call).
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return t;
+      u32 n = (u32)term_val(n_cell);
+      Term stk[REWRITE_MAX_ARITY];
+      Term *children = term_kids_buf(stk, n);
+      u8 changed = 0;
+      for (u32 i = 0; i < n; i++) {
+        Term orig = heap_read(base + 1u + (u64)i);
+        children[i] = ref_thvm_subst_apply(orig, subst);
+        if (children[i] != orig) changed = 1;
+      }
+      // Hash-cons skip: if no child rewrote, reuse original t pointer
+      // (saves a term_new_ctr allocation per unchanged subtree).
+      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
+      term_kids_release(children, stk);
+      return r;
+    }
+    default: return t;
+  }
+}
+
+// src/rewrite/_.c:136
+static Term ref_rewrite_try_top(Term t, const Term *lhs, const Term *rhs,
+                            u32 n_rules, u8 *fired) {
+#ifdef THVM_ATP_AC
+  u64 ac_mask = thvm_atp_get_ac_mask();
+#endif
+  for (u32 i = 0; i < n_rules; i++) {
+    RewriteSubst subst = {{0}};
+#ifdef THVM_ATP_AC
+    if (ac_mask != 0ull) {
+      AtpAcInfo ac = { .ac_mask = ac_mask };
+      if (atp_match_ac(lhs[i], t, &ac, &subst)) {
+        *fired = 1;
+        return ref_thvm_subst_apply(rhs[i], &subst);
+      }
+      continue;
+    }
+#endif
+    if (ref_thvm_match(lhs[i], t, &subst)) {
+      *fired = 1;
+      return ref_thvm_subst_apply(rhs[i], &subst);
+    }
+  }
+  *fired = 0;
+  return t;
+}
+
+// src/rewrite/_.c:171
+static Term ref_thvm_rewrite_step(Term t, const Term *lhs, const Term *rhs, u32 n_rules) {
+  u8 fired = 0;
+  Term r = ref_rewrite_try_top(t, lhs, rhs, n_rules, &fired);
+  if (fired) return r;
+
+  // Descend into CTR children, left-to-right; first sub-rewrite wins.
+  if (term_tag(t) == TAG_CTR) {
+    u32 n = term_ctr_n(t);
+    Term stk[REWRITE_MAX_ARITY];
+    Term *children = term_kids_buf(stk, n);
+    for (u32 i = 0; i < n; i++) children[i] = term_ctr_at(t, i);
+    for (u32 i = 0; i < n; i++) {
+      Term original = children[i];
+      Term rewritten = ref_thvm_rewrite_step(original, lhs, rhs, n_rules);
+      if (!ref_kbo_eq(rewritten, original)) {
+        children[i] = rewritten;
+        Term r = term_new_ctr(term_ext(t), children, n);
+        term_kids_release(children, stk);
+        return r;
+      }
+    }
+    term_kids_release(children, stk);
+  }
+
+  return t;
+}
+
+// src/unify/_.c:78
+static u8 ref_unify_occurs(u32 var_id, Term t, const RewriteSubst *subst) {
+  t = unify_walk(t, subst);
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_ext(t) == var_id;
+    case TAG_CTR: {
+      // Direct heap_read for arity + children.
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return 0;
+      u32 n = (u32)term_val(n_cell);
+      for (u32 i = 0; i < n; i++) {
+        Term c = heap_read(base + 1u + (u64)i);
+        if (ref_unify_occurs(var_id, c, subst)) return 1;
+      }
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
+// src/unify/_.c:98
+static u8 ref_thvm_unify(Term s, Term t, RewriteSubst *subst) {
+  s = unify_walk(s, subst);
+  t = unify_walk(t, subst);
+  if (ref_kbo_eq(s, t)) return 1;
+
+  if (term_tag(s) == TAG_FVR) {
+    u32 id = term_ext(s);
+    if (id >= REWRITE_MAX_VAR) return 0;
+    if (ref_unify_occurs(id, t, subst)) return 0;
+    subst->bindings[id] = t;
+    un_log_bind(id);
+    return 1;
+  }
+  if (term_tag(t) == TAG_FVR) {
+    u32 id = term_ext(t);
+    if (id >= REWRITE_MAX_VAR) return 0;
+    if (ref_unify_occurs(id, s, subst)) return 0;
+    subst->bindings[id] = s;
+    un_log_bind(id);
+    return 1;
+  }
+  if (term_tag(s) == TAG_CTR && term_tag(t) == TAG_CTR) {
+    if (term_ext(s) != term_ext(t)) return 0;
+    // Direct heap_read for both arities + children.
+    u64 sbase = term_val(s);
+    u64 tbase = term_val(t);
+    Term sn_cell = heap_read(sbase);
+    Term tn_cell = heap_read(tbase);
+    if (term_tag(sn_cell) != TAG_NUM || term_tag(tn_cell) != TAG_NUM) return 0;
+    u32 ns = (u32)term_val(sn_cell);
+    u32 nt = (u32)term_val(tn_cell);
+    if (ns != nt) return 0;
+    for (u32 i = 0; i < ns; i++) {
+      Term sc = heap_read(sbase + 1u + (u64)i);
+      Term tc = heap_read(tbase + 1u + (u64)i);
+      if (!ref_thvm_unify(sc, tc, subst)) return 0;
+    }
+    return 1;
+  }
+  return 0;
+}
+
+// src/unify/_.c:143
+static Term ref_thvm_rename_vars(Term t, u32 offset) {
+  if (offset == 0) return t;  // identity rename -- no work needed
+  switch (term_tag(t)) {
+    case TAG_FVR: return term_new_fvr(term_ext(t) + offset);
+    case TAG_CTR: {
+      // Direct heap_read for arity + children (skip term_ctr_at's
+      // redundant arity refetch).
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return t;
+      u32 n = (u32)term_val(n_cell);
+      Term stk[REWRITE_MAX_ARITY];
+      Term *children = term_kids_buf(stk, n);
+      u8 changed = 0;
+      for (u32 i = 0; i < n; i++) {
+        Term orig = heap_read(base + 1u + (u64)i);
+        children[i] = ref_thvm_rename_vars(orig, offset);
+        if (children[i] != orig) changed = 1;
+      }
+      // If t had no variables, every child returned itself -- avoid the
+      // wasted term_new_ctr (closed-term case, e.g. ground goal sides).
+      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
+      term_kids_release(children, stk);
+      return r;
+    }
+    default: return t;
+  }
+}
+
+// src/unify/_.c:189
+static Term ref_thvm_unify_apply(Term t, const RewriteSubst *subst) {
+  t = unify_walk(t, subst);
+  g_unify_apply_cells++;
+  switch (term_tag(t)) {
+    case TAG_FVR: return t;  // unbound -- leave as-is
+    case TAG_CTR: {
+      // Read arity and base once via direct heap_read -- term_ctr_at
+      // would re-fetch the arity cell per call.
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) { g_unify_apply_taint++; return t; }
+      u32 n = (u32)term_val(n_cell);
+      Term stk[REWRITE_MAX_ARITY];
+      Term *children = term_kids_buf(stk, n);
+      u8 changed = 0;
+      for (u32 i = 0; i < n; i++) {
+        Term orig = heap_read(base + 1u + (u64)i);
+        children[i] = ref_thvm_unify_apply(orig, subst);
+        if (children[i] != orig) changed = 1;
+      }
+      // Hash-cons skip: if no child rewrote, return original t (saves
+      // a term_new_ctr allocation per untouched subterm during CP-gen).
+      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
+      term_kids_release(children, stk);
+      return r;
+    }
+    default: return t;
+  }
+}
+
+// src/unify/_.c:265
+static Term ref_nv_rewrite(Term t, NvMap *m) {
+  switch (term_tag(t)) {
+    case TAG_FVR: {
+      u32 old = term_ext(t);
+      for (u32 i = 0; i < m->n; i++) {
+        if (m->old_id[i] == old) {
+          if (i == old) return t;
+          return term_new_fvr(i);
+        }
+      }
+      if (m->n >= REWRITE_MAX_VAR) return t;   // full map: keep id
+      u32 i = m->n;
+      m->old_id[m->n++] = old;
+      if (i == old) return t;
+      return term_new_fvr(i);
+    }
+    case TAG_CTR: {
+      // Direct heap_read for arity + children.
+      u64 base = term_val(t);
+      Term n_cell = heap_read(base);
+      if (term_tag(n_cell) != TAG_NUM) return t;
+      u32 n = (u32)term_val(n_cell);
+      Term stk[REWRITE_MAX_ARITY];
+      Term *children = term_kids_buf(stk, n);
+      u8 changed = 0;
+      for (u32 i = 0; i < n; i++) {
+        Term orig = heap_read(base + 1u + (u64)i);
+        children[i] = ref_nv_rewrite(orig, m);
+        if (children[i] != orig) changed = 1;
+      }
+      Term r = changed ? term_new_ctr(term_ext(t), children, n) : t;
+      term_kids_release(children, stk);
+      return r;
+    }
+    default: return t;
+  }
+}
+
+// src/unify/_.c:308
+static void ref_thvm_normalize_vars(Term *lhs, Term *rhs) {
+  if (lhs == NULL || rhs == NULL) return;
+  NvMap m;
+  m.n = 0;
+  *lhs = ref_nv_rewrite(*lhs, &m);
+  *rhs = ref_nv_rewrite(*rhs, &m);
+}
 
 // ---- Random terms ---------------------------------------------------------
 
@@ -611,11 +967,329 @@ static void deep_ri_walks(void) {
   free(flatsym2);
 }
 
+// ---- src/rewrite, src/unify, kbo_eq: match, apply, step, unify, eq --------
+
+// A structurally equal copy in fresh cells (shallow random terms only).
+static Term copy_term(Term t) {
+  if (term_tag(t) != TAG_CTR) return t;
+  u32  n = term_ctr_n(t);
+  Term kids[20];
+  for (u32 i = 0; i < n; i++) kids[i] = copy_term(term_ctr_at(t, i));
+  return term_new_ctr(term_ext(t), kids, n);
+}
+
+// A random subterm of `t`.
+static Term pick_sub(u32 *seed, Term t) {
+  while (term_tag(t) == TAG_CTR && term_ctr_n(t) > 0u && (rng32(seed) & 3u) != 0u) {
+    t = term_ctr_at(t, rng32(seed) % term_ctr_n(t));
+  }
+  return t;
+}
+
+// `t` with each variable / constant leaf turned into x_{0..3} at random.
+static Term generalize(u32 *seed, Term t) {
+  if (term_tag(t) != TAG_CTR || term_ctr_n(t) == 0u) {
+    return (rng32(seed) & 1u) ? term_new_fvr(rng32(seed) & 3u) : t;
+  }
+  u32  n = term_ctr_n(t);
+  Term kids[20];
+  for (u32 i = 0; i < n; i++) kids[i] = generalize(seed, term_ctr_at(t, i));
+  return term_new_ctr(term_ext(t), kids, n);
+}
+
+// A small ground term: c or c(d).
+static Term mk_ground(u32 *seed) {
+  u32  r   = rng32(seed);
+  Term kid = term_new_ctr((r >> 4) % 12u, NULL, 0u);
+  return term_new_ctr(r % 12u, &kid, (r >> 8) & 1u);
+}
+
+enum { LIB_N = 3000, LIB_RULES = 6 };
+
+static void pin_term_libs(u32 *seed) {
+  Term *src  = (Term *)malloc(sizeof(Term) * LIB_N);
+  Term *psrc = (Term *)malloc(sizeof(Term) * LIB_N);
+  for (u32 i = 0; i < LIB_N; i++) src[i] = mk_random(seed);
+  g_plain = 1u;
+  for (u32 i = 0; i < LIB_N; i++) psrc[i] = mk_random(seed);
+  g_plain = 0u;
+
+  TEST_BEGIN("atp_deep/pin-kbo-eq");
+  {
+    u32 ok = 0, hits = 0;
+    for (u32 i = 0; i < LIB_N; i++) {
+      Term t = src[i];
+      Term other[4] = { t, copy_term(t), mk_mutant(seed, t), src[(i + 1u) % LIB_N] };
+      for (u32 k = 0; k < 4u; k++) {
+        u8 r = ref_kbo_eq(t, other[k]);
+        u8 n = kbo_eq(t, other[k]);
+        if (r == n) ok++;
+        hits += n;
+      }
+    }
+    CHECK_EQ(ok, 4u * LIB_N);
+    CHECK(hits >= 2u * LIB_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-match");
+  {
+    u32 ok = 0, hits = 0;
+    for (u32 c = 0; c < 2u; c++) {
+      Term *ts = c ? psrc : src;
+      for (u32 i = 0; i < LIB_N; i++) {
+        RewriteSubst inst;
+        memset(&inst, 0, sizeof inst);
+        for (u32 v = 0; v < 10u; v++) inst.bindings[v] = mk_small(seed);
+        Term s_inst = thvm_subst_apply(ts[i], &inst);
+        Term subj[3] = { s_inst, ts[(i + 7u) % LIB_N], mk_mutant(seed, s_inst) };
+        for (u32 k = 0; k < 3u; k++) {
+          RewriteSubst rs, ns;
+          memset(&rs, 0, sizeof rs);
+          if (k == 0u && (i & 3u) == 0u) rs.bindings[(i >> 2) % 10u] = inst.bindings[(i >> 2) % 10u];
+          ns = rs;
+          u8 r = ref_thvm_match(ts[i], subj[k], &rs);
+          u8 n = thvm_match(ts[i], subj[k], &ns);
+          if (r == n && memcmp(&rs, &ns, sizeof rs) == 0) ok++;
+          hits += (u32)(c == 1u && k == 0u && n);
+        }
+      }
+    }
+    CHECK_EQ(ok, 6u * LIB_N);
+    CHECK_EQ(hits, (u32)LIB_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-subst-apply-heap-layout");
+  {
+    u32 ok = 0;
+    g_wide = 20u;
+    for (u32 i = 0; i < LIB_N; i++) {
+      Term t = mk_random(seed);
+      RewriteSubst sub;
+      memset(&sub, 0, sizeof sub);
+      for (u32 v = 0; v < 10u; v++) {
+        if (rng32(seed) & 1u) sub.bindings[v] = mk_small(seed);
+      }
+      sub.bindings[63] = term_new_ctr(3u, NULL, 0u);
+      u64 h0 = HEAP_NEXT;
+      Term r = ref_thvm_subst_apply(t, &sub);
+      u64 h1 = HEAP_NEXT;
+      Term n = thvm_subst_apply(t, &sub);
+      u64 h2 = HEAP_NEXT;
+      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) ok++;
+    }
+    g_wide = 16u;
+    CHECK_EQ(ok, (u32)LIB_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-rewrite-step-heap-layout");
+  {
+    u32 ok = 0, fired = 0;
+    for (u32 i = 0; i < LIB_N; i++) {
+      Term t = src[i];
+      Term lhs[LIB_RULES], rhs[LIB_RULES];
+      for (u32 k = 0; k < LIB_RULES; k++) {
+        if (k == 0u) {
+          // a permutation rule: fires to an equal term on f(a, a)
+          Term xy[2] = { term_new_fvr(0u), term_new_fvr(1u) };
+          Term yx[2] = { xy[1], xy[0] };
+          u32 lab = rng32(seed) % 12u;
+          lhs[k] = term_new_ctr(lab, xy, 2u);
+          rhs[k] = term_new_ctr(lab, yx, 2u);
+          continue;
+        }
+        Term u = pick_sub(seed, (k == 1u) ? t : src[(i + k) % LIB_N]);
+        if (term_tag(u) != TAG_CTR) u = term_new_ctr(3u, NULL, 0u);
+        lhs[k] = generalize(seed, u);
+        if (term_tag(lhs[k]) != TAG_CTR) lhs[k] = u;
+        rhs[k] = (rng32(seed) & 1u) ? term_new_fvr(rng32(seed) & 3u) : mk_small(seed);
+      }
+      u64 h0 = HEAP_NEXT;
+      Term r = ref_thvm_rewrite_step(t, lhs, rhs, LIB_RULES);
+      u64 h1 = HEAP_NEXT;
+      Term n = thvm_rewrite_step(t, lhs, rhs, LIB_RULES);
+      u64 h2 = HEAP_NEXT;
+      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) ok++;
+      fired += (u32)(n != t);
+    }
+    CHECK_EQ(ok, (u32)LIB_N);
+    CHECK(fired > LIB_N / 4u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-unify");
+  {
+    u32 ok = 0, hits = 0;
+    for (u32 i = 0; i < LIB_N; i++) {
+      Term s = psrc[i];
+      Term t;
+      switch (i % 4u) {
+        case 0: {   // an instance of s renamed apart: unifiable
+          RewriteSubst inst;
+          memset(&inst, 0, sizeof inst);
+          for (u32 v = 0; v < 10u; v++) {
+            inst.bindings[v] = (rng32(seed) & 1u) ? mk_ground(seed) : term_new_fvr(20u + v);
+          }
+          t = thvm_subst_apply(s, &inst);
+          break;
+        }
+        case 1:     // another pattern over the same variables
+          t = psrc[(i + 1u) % LIB_N];
+          break;
+        case 2: {   // occurs check: x0 against a term holding x0
+          Term kid = s;
+          t = term_new_ctr(7u, &kid, 1u);
+          s = term_new_fvr(0u);
+          break;
+        }
+        default:
+          t = mk_mutant(seed, s);
+          break;
+      }
+      RewriteSubst rs, ns;
+      memset(&rs, 0, sizeof rs);
+      ns = rs;
+      u8 r = ref_thvm_unify(s, t, &rs);
+      u8 n = thvm_unify(s, t, &ns);
+      if (r == n && memcmp(&rs, &ns, sizeof rs) == 0) {
+        // The unifier applies the same way, heap words and tallies included.
+        u64 c0 = g_unify_apply_cells, x0 = g_unify_apply_taint;
+        u64 h0 = HEAP_NEXT;
+        Term ra = ref_thvm_unify_apply(s, &rs);
+        u64 h1 = HEAP_NEXT;
+        u64 c1 = g_unify_apply_cells, x1 = g_unify_apply_taint;
+        Term na = thvm_unify_apply(s, &ns);
+        u64 h2 = HEAP_NEXT;
+        u64 c2 = g_unify_apply_cells, x2 = g_unify_apply_taint;
+        u32 id = rng32(seed) % 12u;
+        if (heap_regions_same(h0, h1, h1, h2) && reloc(ra, h0, h1, h1) == na &&
+            c1 - c0 == c2 - c1 && x1 - x0 == x2 - x1 &&
+            ref_unify_occurs(id, t, &rs) == unify_occurs(id, t, &ns)) {
+          ok++;
+        }
+      }
+      hits += n;
+    }
+    CHECK_EQ(ok, (u32)LIB_N);
+    CHECK(hits > LIB_N / 5u);
+  }
+
+  TEST_BEGIN("atp_deep/pin-rename-normalize-heap-layout");
+  {
+    static const u32 offs[3] = { 0u, 1u, 70u };
+    u32 ok = 0;
+    for (u32 i = 0; i < LIB_N; i++) {
+      Term t = src[i];
+      u32 off = offs[i % 3u];
+      u64 h0 = HEAP_NEXT;
+      Term r = ref_thvm_rename_vars(t, off);
+      u64 h1 = HEAP_NEXT;
+      Term n = thvm_rename_vars(t, off);
+      u64 h2 = HEAP_NEXT;
+      u8 same = (u8)(heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n);
+      Term rl = src[i], rr = src[(i + 3u) % LIB_N];
+      Term nl = rl, nr = rr;
+      u64 g0 = HEAP_NEXT;
+      ref_thvm_normalize_vars(&rl, &rr);
+      u64 g1 = HEAP_NEXT;
+      thvm_normalize_vars(&nl, &nr);
+      u64 g2 = HEAP_NEXT;
+      if (same && heap_regions_same(g0, g1, g1, g2) &&
+          reloc(rl, g0, g1, g1) == nl && reloc(rr, g0, g1, g1) == nr) {
+        ok++;
+      }
+    }
+    CHECK_EQ(ok, (u32)LIB_N);
+  }
+
+  free(src);
+  free(psrc);
+}
+
+static void deep_term_libs(void) {
+  Term vals[5];
+  for (u32 v = 0; v < 5u; v++) {
+    Term kid = term_new_ctr(9u, NULL, 0u);
+    vals[v] = term_new_ctr(20u + v, &kid, v & 1u);
+  }
+  // Matching treats a NUM pattern leaf as a mismatch, so the patterns
+  // here are plain (constants and variables); kbo_eq also sees NUMs.
+  Term bottom = term_new_ctr(99u, NULL, 0u);
+  Term pat  = mk_deep(DEEP, 1u, term_new_fvr(4u), NULL, 1u);
+  Term subj = mk_deep(DEEP, 1u, vals[4], vals, 1u);
+  Term near = mk_deep(DEEP, 1u, vals[3], vals, 1u);   // differs at the bottom
+  Term mark = mk_deep(DEEP, 1u, bottom, vals, 1u);
+
+  TEST_BEGIN("atp_deep/deep-kbo-eq");
+  {
+    CHECK(kbo_eq(subj, mk_deep(DEEP, 1u, vals[4], vals, 1u)));
+    CHECK(!kbo_eq(subj, near));
+    Term num = mk_deep(DEEP, 1u, vals[4], vals, 0u);
+    CHECK(kbo_eq(num, mk_deep(DEEP, 1u, vals[4], vals, 0u)));
+    CHECK(!kbo_eq(num, mk_deep(DEEP, 1u, vals[3], vals, 0u)));
+    CHECK(!kbo_eq(num, subj));
+  }
+
+  TEST_BEGIN("atp_deep/deep-match-subst-apply");
+  {
+    RewriteSubst sub;
+    memset(&sub, 0, sizeof sub);
+    CHECK(thvm_match(pat, subj, &sub));
+    for (u32 v = 0; v < 5u; v++) CHECK(sub.bindings[v] == vals[v]);
+    RewriteSubst miss;
+    memset(&miss, 0, sizeof miss);
+    CHECK(!thvm_match(pat, near, &miss));
+    CHECK(term_eq_iter(thvm_subst_apply(pat, &sub), subj));
+    CHECK(term_eq_iter(thvm_unify_apply(pat, &sub), subj));
+  }
+
+  TEST_BEGIN("atp_deep/deep-rewrite-step");
+  {
+    // The only redex is the bottom constant: the step rebuilds the spine.
+    Term l = bottom;
+    Term r = term_new_ctr(98u, NULL, 0u);
+    Term out = thvm_rewrite_step(mark, &l, &r, 1u);
+    CHECK(term_eq_iter(out, mk_deep(DEEP, 1u, r, vals, 1u)));
+    Term none = term_new_ctr(97u, NULL, 0u);
+    CHECK(thvm_rewrite_step(mark, &none, &r, 1u) == mark);
+  }
+
+  TEST_BEGIN("atp_deep/deep-unify-occurs");
+  {
+    RewriteSubst sub;
+    memset(&sub, 0, sizeof sub);
+    CHECK(thvm_unify(pat, subj, &sub));
+    for (u32 v = 0; v < 5u; v++) CHECK(kbo_eq(sub.bindings[v], vals[v]));
+    RewriteSubst occ;
+    memset(&occ, 0, sizeof occ);
+    CHECK(!thvm_unify(term_new_fvr(4u), pat, &occ));   // x4 sits at the bottom
+    CHECK(unify_occurs(4u, pat, &occ));
+    CHECK(!unify_occurs(9u, pat, &occ));
+  }
+
+  TEST_BEGIN("atp_deep/deep-rename-normalize");
+  {
+    Term vars10[5];
+    for (u32 v = 0; v < 5u; v++) vars10[v] = term_new_fvr(10u + v);
+    CHECK(term_eq_iter(thvm_rename_vars(pat, 10u),
+                       mk_deep(DEEP, 1u, term_new_fvr(14u), vars10, 1u)));
+    Term l = thvm_rename_vars(pat, 10u), r = subj;
+    thvm_normalize_vars(&l, &r);
+    CHECK(r == subj);                      // ground: untouched, shared
+    Term l2 = l, r2 = r;
+    thvm_normalize_vars(&l2, &r2);
+    CHECK(l2 == l);                        // canonical: a fixpoint
+    RewriteSubst back;
+    memset(&back, 0, sizeof back);
+    CHECK(thvm_match(l, pat, &back));      // still a variant of pat
+  }
+}
+
 int main(void) {
   thvm_init();
   u32 seed = 0x6c8e9cf5u;
   pin_ri_walks(&seed);
   deep_ri_walks();
+  pin_term_libs(&seed);
+  deep_term_libs();
   thvm_free();
   TEST_REPORT();
 }

@@ -60,38 +60,81 @@ static inline u32 kbo_thash_slot(Term t) {
 }
 
 // === structural equality ============================================
+//
+// Pairs still to compare sit on an explicit stack, children pushed
+// right to left so pairs are compared in the recursion's left-to-right
+// depth-first order: equality of two deep terms costs heap, not C
+// stack.
+typedef struct { Term s; Term t; } KboEqPair;
+enum { KBO_EQ_INL = 64 };
 
 static u8 kbo_eq(Term s, Term t) {
-  if (s == t) return 1;   // pointer-identical -- rewriting/subst_apply
-                          // share subterm cells, so this fires often
-  if (term_tag(s) != term_tag(t)) return 0;
-  if (term_ext(s) != term_ext(t)) return 0;
-  // CTR-tagged: structural-hash short-circuit before the recursive walk.
-  // KBO orientation + match consistency checks call kbo_eq on terms that
-  // have already been through the KBO weight memo, so their hashes are
-  // often cached in g_kbo_thash.  When both ends have a current-epoch
-  // entry and the hashes differ, the terms are guaranteed unequal -- the
-  // recursive walk would discover the same answer but pay an O(|t|) cost.
-  if (term_tag(s) == TAG_CTR) {
-    KboTHashEnt *cs = &g_kbo_thash[kbo_thash_slot(s)];
-    KboTHashEnt *ct = &g_kbo_thash[kbo_thash_slot(t)];
-    if (cs->epoch == g_kbo_epoch && cs->t == s
-        && ct->epoch == g_kbo_epoch && ct->t == t
-        && cs->hash != ct->hash) return 0;
-  }
-  switch (term_tag(s)) {
-    case TAG_FVR: return 1;  // same id (ext) already checked
-    case TAG_CTR: {
-      u32 ns = term_ctr_n(s);
-      u32 nt = term_ctr_n(t);
-      if (ns != nt) return 0;
-      for (u32 i = 0; i < ns; i++) {
-        if (!kbo_eq(term_ctr_at(s, i), term_ctr_at(t, i))) return 0;
+  KboEqPair  st_inl[KBO_EQ_INL];
+  KboEqPair *st  = st_inl;
+  u32        nst = 0u;
+  u32        cst = KBO_EQ_INL;
+  u8         eq  = 1u;
+  for (;;) {
+    // Pointer-identical pairs are equal outright -- rewriting and
+    // subst_apply share subterm cells, so this fires often.
+    if (s != t) {
+      if (term_tag(s) != term_tag(t) || term_ext(s) != term_ext(t)) {
+        eq = 0u;
+        break;
       }
-      return 1;
+      switch (term_tag(s)) {
+        case TAG_FVR:
+          break;   // same id (ext) already checked
+        case TAG_CTR: {
+          // Structural-hash short-circuit before walking the children.
+          // KBO orientation + match consistency checks call kbo_eq on
+          // terms that have already been through the KBO weight memo, so
+          // their hashes are often cached in g_kbo_thash.  When both ends
+          // have a current-epoch entry and the hashes differ, the terms
+          // are guaranteed unequal -- the walk would discover the same
+          // answer but pay an O(|t|) cost.
+          KboTHashEnt *cs = &g_kbo_thash[kbo_thash_slot(s)];
+          KboTHashEnt *ct = &g_kbo_thash[kbo_thash_slot(t)];
+          if (cs->epoch == g_kbo_epoch && cs->t == s
+              && ct->epoch == g_kbo_epoch && ct->t == t
+              && cs->hash != ct->hash) {
+            eq = 0u;
+            break;
+          }
+          u32 ns = term_ctr_n(s);
+          u32 nt = term_ctr_n(t);
+          if (ns != nt) {
+            eq = 0u;
+            break;
+          }
+          while (nst + ns > cst) {
+            st = (KboEqPair *)term_stack_grow(st, st_inl, &cst, sizeof *st);
+          }
+          u64 sb = term_val(s), tb = term_val(t);
+          for (u32 i = ns; i-- > 0u;) {
+            st[nst].s = heap_read(sb + 1u + (u64)i);
+            st[nst].t = heap_read(tb + 1u + (u64)i);
+            nst++;
+          }
+          break;
+        }
+        default:
+          if (term_val(s) != term_val(t)) eq = 0u;
+          break;
+      }
+      if (!eq) {
+        break;
+      }
     }
-    default: return term_val(s) == term_val(t);
+    if (nst == 0u) {
+      break;
+    }
+    nst--;
+    s = st[nst].s;
+    t = st[nst].t;
   }
+  term_stack_release(st, st_inl);
+  return eq;
 }
 
 // === naive reference oracle =========================================
