@@ -7496,7 +7496,43 @@ int main(void) {
     // with the version-2 header and the symbol table; every rule born has
     // its content ('Q' + 'q'), and is either live at the end -- the last
     // 'Q' of its uid then decodes to the live rule -- or has exactly one
-    // death ('Z'); every 'S' names the dimension that picked it.
+    // death ('Z'); every 'S' names the dimension that picked it.  The
+    // plain run is also made with the export off first: with it on, the
+    // run must keep the same rules, selections and heap cells (the hooks
+    // decode nothing onto the IC heap).
+    enum { REF_RULES = 512 };
+    static Term ref_l[REF_RULES], ref_r[REF_RULES];
+    static u32  ref_uid[REF_RULES];
+    static u8   ref_dead[REF_RULES];
+    u32 ref_n = 0u, ref_sel = 0u, ref_cps = 0u, ref_seq = 0u;
+    u64 ref_heap = 0u;
+    {
+      u64 h0 = thvm_atp_heap_checkpoint();
+      AtpState *s = thvm_atp_init(&DUMMY_CFG, 200);
+      thvm_atp_set_selection_ratio(s, 3u);
+      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
+      thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                            mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+      for (u32 k = 0; k < 40u; k++) {
+        if (thvm_atp_step(s) != ATP_RUNNING) {
+          break;
+        }
+      }
+      ref_heap = thvm_atp_heap_checkpoint() - h0;
+      ref_n    = s->n_rules;
+      ref_sel  = s->cp_select_count;
+      ref_cps  = s->n_cps;
+      ref_seq  = s->cp_seq_next;
+      CHECK(ref_n <= REF_RULES);
+      for (u32 k = 0; k < ref_n && k < REF_RULES; k++) {
+        ref_uid[k]  = s->r_uid[k];
+        ref_dead[k] = s->r_dead[k];
+        ref_l[k]    = atp_rule_term(s, k, 0u);
+        ref_r[k]    = atp_rule_term(s, k, 1u);
+      }
+      thvm_atp_free(s);
+    }
     for (u8 otter = 0; otter <= 1u; otter++) {
       char path[] = "/tmp/thvm_hx_v2_XXXXXX";
       int fd = mkstemp(path);
@@ -7504,6 +7540,7 @@ int main(void) {
       if (fd >= 0) {
         close(fd);
       }
+      u64 h0 = thvm_atp_heap_checkpoint();
       setenv("THVM_ATP_HISTORY_EXPORT", path, 1);
       setenv("THVM_ATP_HISTORY_RATE", "1", 1);
       setenv("FINDPROOF_SLICE", "hx-unit", 1);
@@ -7531,6 +7568,19 @@ int main(void) {
       for (u32 k = 0; k < 40u; k++) {
         if (thvm_atp_step(s) != ATP_RUNNING) {
           break;
+        }
+      }
+      if (!otter) {
+        CHECK_EQ(thvm_atp_heap_checkpoint() - h0, ref_heap);
+        CHECK_EQ(s->n_rules, ref_n);
+        CHECK_EQ(s->cp_select_count, ref_sel);
+        CHECK_EQ(s->n_cps, ref_cps);
+        CHECK_EQ(s->cp_seq_next, ref_seq);
+        for (u32 k = 0; k < s->n_rules && k < ref_n && k < REF_RULES; k++) {
+          CHECK_EQ(s->r_uid[k], ref_uid[k]);
+          CHECK_EQ(s->r_dead[k], ref_dead[k]);
+          CHECK(kbo_eq(atp_rule_term(s, k, 0u), ref_l[k]));
+          CHECK(kbo_eq(atp_rule_term(s, k, 1u), ref_r[k]));
         }
       }
       thvm_atp_history_finish(s, 0xffu);
