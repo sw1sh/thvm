@@ -31,8 +31,8 @@ If you are new to the project, read these in order:
    cache key.
 9. [gather_scatter.md](gather_scatter.md): the native `UOP_GATHER` /
    `UOP_SCATTER` indexed ops -- semantics, lowering, gradients, the py
-   `gather` / `embedding` / `x[idx]` surface, and where they deviate
-   from tinygrad.
+   `gather` / `embedding` / `x[idx]` / `scatter_reduce` / `scatter`
+   surface, and where they deviate from tinygrad.
 
 ## What's not here yet
 

@@ -98,9 +98,27 @@ On the CPU backend (`Device.DEFAULT == "CPU"`):
   a zero row, a non-int index raises IndexError.  Other advanced forms
   still raise NotImplementedError.
 - All three are differentiable: the weight's gradient is a scatter-add.
+- `Tensor.scatter_reduce(dim, index, src, reduce, include_self=True)`
+  with reduce `"sum"` is one `SCATTER(SUM)`, after `_pre_scatter`'s checks
+  and exception types (`mixin/op.py:1077-1093`; src is shrunk to index's
+  shape first).  `"mean"` divides it by a second one that counts, as
+  tinygrad's `mask.where(1, 0).sum(-1)` plus 1 (or plus 1 only where
+  nothing lands, without include_self) does (`:1131-1133`): a SUM scatter
+  of ones onto ones.  sum keeps self's dtype (tinygrad's `sum_acc_dtype`
+  on float32 and int32); a mean is float32, an int one included.
+  `"prod"`, `"amax"` and `"amin"` raise NotImplementedError naming the
+  kind until their scatter lowerings land.  Both reductions are
+  differentiable (a mean's gradient goes through the division); an index
+  outside `[0, self.shape[dim])` is dropped, so -1 padding is inert.
+- `Tensor.scatter(dim, index, src, reduce=None)` is a `REPLACE` scatter:
+  the last write along `dim` wins (`:1136-1168`).  A scalar src fills
+  index's shape in self's dtype; `reduce="add"` is scatter_reduce `"sum"`
+  and `"multiply"` is `"prod"`.  `backward()` through the reduce=None form
+  raises until `REPLACE` has a gradient rule.
 
-On another device these keep the host numpy path they had before, which
-carries no gradient.
+On another device gather, embedding and `x[idx]` keep the host numpy path
+they had before, and scatter_reduce and scatter compute on the host; none
+of them carries a gradient there.
 
 ## Deviations from tinygrad
 
@@ -112,6 +130,10 @@ carries no gradient.
 - Native gather and scatter run on the CPU backend only.
 - A position or offset in an index view is compiled into the kernel (see
   Lowering); tinygrad keeps a bound Variable symbolic.
+- A scatter_reduce mean divides as every thvm division does, `sum *
+  (1/count)`.  tinygrad's CPU renderer turns `a * (1/b)` into a true
+  division (`codegen/decomp/op.py:122-125`), so a mean can land one ulp
+  away: 59 / 3 is 19.666668 in thvm and 19.666666 in tinygrad.
 
 ## Performance
 
@@ -138,3 +160,8 @@ Measured on the Linux CPU pod (C JIT):
   ports of tinygrad's gather, embedding and index tests.
 - [py/tests/test_gather_scale.py](../py/tests/test_gather_scale.py): the
   table size barely moves an embedding step.
+- [py/tests/test_scatter_reduce_parity.py](../py/tests/test_scatter_reduce_parity.py):
+  ports of tinygrad's scatter, scatter_add and scatter_reduce (sum, mean)
+  tests, with gradients against tinygrad's autograd, numpy and finite
+  differences; -1 padded indices; the ATP aggregation; TinyJit replays
+  with fresh index buffers; both CPU routes.

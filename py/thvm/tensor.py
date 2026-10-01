@@ -1206,6 +1206,140 @@ class Tensor(metaclass=_TensorMeta):
             out = np.where(valid, vals, out)
         return Tensor(out, dtype=self._dtype)
 
+    def _pre_scatter(self, dim: int, index: "Tensor", src: "Tensor"
+                     ) -> "tuple[int, Tensor]":
+        """tinygrad's _pre_scatter checks, in its order and with its exception
+        types (mixin/op.py:1077-1093); returns the resolved dim and src shrunk
+        to index's shape (:1088).  The int check on index is the one
+        _one_hot_along_dim makes when _pre_scatter builds the mask (:1006)."""
+        dim = self._resolve_dim(dim)
+        assert index.ndim == self.ndim == src.ndim, (
+            f"self.ndim, index.ndim and src.ndim must all equal, "
+            f"{self.ndim=} {index.ndim=} {src.ndim=}")
+        assert all((d == dim or s >= i) and r >= i for d, (s, i, r) in
+                   enumerate(zip(self._shape, index._shape, src._shape))), (
+            f"All dimensions of {index.shape=} should be <= to all dimensions of "
+            f"{src.shape=} and all dimensions except dimension {dim} of {self.shape=}")
+        if self._dtype != src._dtype:
+            raise RuntimeError(f"expect {self.dtype=} to be equal to {src.dtype=}")
+        if src._shape != index._shape:
+            src = src.shrink_to(index._shape)
+        if not dtypes.is_int(index._dtype):
+            raise RuntimeError(
+                f"_one_hot_along_dim expects int index tensor, getting {index._dtype}")
+        return dim, src
+
+    def _scatter_native(self, dim: int, index: "Tensor", src: "Tensor", kind: int,
+                        include_self: bool) -> "Tensor":
+        t = _TH.scatter(self.term, index.term, src.term, dim, kind, include_self)
+        if int(t) == 0:
+            raise RuntimeError(f"scatter: cannot scatter {src._shape} into "
+                               f"{self._shape} along {dim} by {index._shape}")
+        return Tensor._from_term(t, self._dtype, self._shape)
+
+    def _scatter_reduced(self, dim: int, index: "Tensor", src: "Tensor",
+                         reduce: "str | None", include_self: bool) -> "Tensor":
+        """The checked scatter: reduce "sum", "mean" or None (the last write
+        along dim wins).  On the CPU backend one native UOP_SCATTER (two for
+        mean) that differentiates through the C rules; an empty index or self
+        has no kernel to run, and another device runs it on the host."""
+        if self.numel() == 0:
+            dt = dtypes.float32 if reduce == "mean" else self._dtype
+            return Tensor(np.zeros(self._shape, dtype=dt.np_dtype), dtype=dt)
+        if index.numel() == 0:
+            # Nothing lands.  tinygrad still computes 0 + self for sum and mean
+            # (a -0.0 comes back +0.0) and selects self for reduce=None.
+            if reduce is None:
+                return self * 1
+            return (self.cast(dtypes.float32) if reduce == "mean" else self) + 0
+        if not _native_indexing():
+            return self._scatter_host(dim, index, src, reduce, include_self)
+        if reduce is None:
+            return self._scatter_native(dim, index, src, K.SCATTER_REPLACE, False)
+        total = self._scatter_native(dim, index, src, K.SCATTER_SUM, include_self)
+        if reduce == "sum":
+            return total
+        # tinygrad's count (mixin/op.py:1132): the hits, plus 1 where self
+        # takes part.  A SUM scatter of ones onto ones adds exactly that.
+        count = _const_broadcast(1, self._shape, dtypes.float32)._scatter_native(
+            dim, index, _const_broadcast(1, index._shape, dtypes.float32),
+            K.SCATTER_SUM, include_self)
+        return total.cast(dtypes.float32) / count
+
+    def _scatter_host(self, dim: int, index: "Tensor", src: "Tensor",
+                      reduce: "str | None", include_self: bool) -> "Tensor":
+        """_scatter_reduced on the host, for a device without native scatter
+        kernels: the same values, no gradient."""
+        base = self.numpy()
+        idx = index.numpy().astype(np.int64)
+        vals = src.numpy()
+        valid = (idx >= 0) & (idx < self._shape[dim])
+        pos = list(np.indices(idx.shape))
+        pos[dim] = np.where(valid, idx, 0)
+        flat = np.ravel_multi_index(tuple(pos), self._shape)[valid]
+        if reduce is None:
+            # Positions that meet differ only along dim, so the last write
+            # along dim is the last one in row-major order.
+            out = base.copy().reshape(-1)
+            targets, first_rev = np.unique(flat[::-1], return_index=True)
+            out[targets] = vals[valid][len(flat) - 1 - first_rev]
+            return Tensor(out.reshape(self._shape), dtype=self._dtype)
+        acc = np.float32 if dtypes.is_float(self._dtype) else np.int32
+        S = np.zeros(base.size, acc)
+        np.add.at(S, flat, vals[valid].astype(acc))
+        hits = np.bincount(flat, minlength=base.size)
+        keep = base.reshape(-1) if include_self else np.where(hits == 0, base.reshape(-1), 0)
+        total = (S + keep.astype(acc)).reshape(self._shape)
+        if reduce == "sum":
+            return Tensor(total, dtype=self._dtype)
+        count = (hits + (1 if include_self else (hits == 0))).astype(np.float32)
+        out = total.astype(np.float32) * (np.float32(1) / count.reshape(self._shape))
+        return Tensor(out, dtype=dtypes.float32)
+
+    def scatter_reduce(self, dim: int, index: "Tensor", src: "Tensor", reduce: str,
+                       include_self: bool = True) -> "Tensor":
+        """src combined into self at the positions index names along dim
+        (tinygrad mixin/op.py:1095-1134, with its checks and exception types):
+        "sum" adds every src value that lands on a position to it, "mean"
+        divides that sum by the number of values summed.  Without include_self
+        a position some value lands on leaves self out (the sum starts from 0,
+        the mean counts only the values); a position nothing lands on keeps
+        self.  An index outside [0, self.shape[dim]) is dropped.  sum keeps
+        self's dtype (tinygrad's sum_acc_dtype on float32 and int32); mean is
+        float32.  "prod", "amax" and "amin" raise NotImplementedError: the
+        native scatter has no such combine yet."""
+        dim, src = self._pre_scatter(dim, index, src)
+        if reduce in ("prod", "amax", "amin"):
+            raise NotImplementedError(
+                f"scatter_reduce: reduce={reduce!r} has no native scatter combine yet")
+        if reduce not in ("sum", "mean"):
+            raise RuntimeError(f"{reduce=} must be one of 'sum', 'prod', 'mean', 'amax', 'amin'")
+        return self._scatter_reduced(dim, index, src, reduce, include_self)
+
+    def scatter(self, dim: int, index: "Tensor", src, reduce: "str | None" = None
+                ) -> "Tensor":
+        """src written into self at the positions index names along dim
+        (tinygrad mixin/op.py:1136-1168): the last write along dim wins, and a
+        scalar src fills index's shape in self's dtype.  reduce="add" is
+        scatter_reduce "sum" (a scalar src only); "multiply" is "prod", which
+        raises NotImplementedError.  The reduce=None form has no gradient yet:
+        backward() through it raises."""
+        if reduce not in {None, "add", "multiply"}:
+            raise TypeError(f"{reduce=} must be one of None, 'multiply', or 'add'")
+        if isinstance(src, (int, float, bool)):
+            if index.numel() == 0:
+                src = Tensor(np.zeros(index._shape, self._dtype.np_dtype), dtype=self._dtype)
+            else:
+                src = _const_broadcast(src, index._shape, self._dtype)
+        elif reduce:
+            raise TypeError("non-scalar src is not supported with reduce arg. use scatter_reduce")
+        if reduce == "add":
+            return self.scatter_reduce(dim, index, src, "sum", include_self=True)
+        if reduce == "multiply":
+            return self.scatter_reduce(dim, index, src, "prod", include_self=True)
+        dim, src = self._pre_scatter(dim, index, src)
+        return self._scatter_reduced(dim, index, src, None, False)
+
     def _gather_rows(self, idx: "Tensor", wrap: bool) -> "Tensor":
         """self[idx] along axis 0: shape idx.shape + self.shape[1:], a row
         of 0 for an index out of range.  With `wrap` a negative index first

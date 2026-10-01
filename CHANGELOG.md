@@ -257,6 +257,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- py: `Tensor.scatter_reduce` with reduce "sum" or "mean" and `Tensor.scatter` (tinygrad mixin/op.py:1077-1168, with its checks, exception types and `src.shrink_to(index.shape)`) are native `UOP_SCATTER`s on the CPU backend and differentiate through the C rules, the mean through its division.  A mean divides by a second scatter that counts as tinygrad does (the hits, plus 1 where self takes part) and is float32; sum keeps self's float32 / int32 dtype (tinygrad's `sum_acc_dtype`).  An index outside the axis, -1 padding included, is dropped.  "prod", "amax" and "amin" raise NotImplementedError naming the kind, `scatter(reduce=None)`'s backward raises until REPLACE has a rule, and other devices compute on the host without gradients.  thvm divides as `a * (1/b)`, so a mean can sit one ulp from tinygrad's CPU division (codegen/decomp/op.py:122-125).
 - py: `test_gather_parity`'s tinygrad cross-check builds its tensor as tinygrad master does, with no `requires_grad` argument (master's `backward` fills `.grad` for every float tensor in the graph, tensor.py:486-488); with tinygrad on the path it raised a TypeError.
 - py: `Tensor.gather` (tinygrad mixin/op.py:1023-1041, with its checks and
   exception types), and `Tensor.embedding` / `nn.Embedding` and `x[idx]` with
