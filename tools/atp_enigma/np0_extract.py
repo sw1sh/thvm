@@ -30,7 +30,15 @@
 # text; q_key is its 64-bit BLAKE2b digest.  Keys compare across lanes
 # that share the same input transform (the plan's cross-lane rule).
 #
-# Usage: np0_extract.py <hx.bin> <proof.out> <out.npz> [max_neg=300000]
+# Runs without a proof (failed runs, or proof.out "-") are extracted in
+# no-proof mode: no proof labels, but the rule records and the hindsight
+# labels (hind_label: ancestors of the rules born in the run's second
+# half; q_late marks those rules), the plan's section 3.2 hindsight
+# positives.  sig fingerprints the input signature ('Y' records): match
+# proof_keys across lanes only between equal sigs; n_unnamed counts the
+# function symbols without a name (their keys cannot match).
+#
+# Usage: np0_extract.py <hx.bin> <proof.out|-> <out.npz> [max_neg=300000]
 #        np0_extract.py --stats <hx.bin>
 #        np0_extract.py --rules <hx.bin>   (TSV of every rule record)
 #        np0_extract.py --selftest         (reads synthetic v1 and v2 files)
@@ -117,6 +125,61 @@ def header(recs, b):
         return version, ""
     lane = bytes(h["lane"])[:int(h["lane_len"])]
     return version, lane.decode("utf-8", "replace")
+
+
+def fof_branch(recs, b):
+    """The fof-split branch index of the session at record b, or None.
+    A fof-split proof stitches every branch's proof; one session holds
+    one branch's search only."""
+    h = recs[b:b + 1].view(HREC)[0]
+    if int(h["kind"]) >= 2 and int(h["flags"]) & 2:
+        return int(h["pb"])
+    return None
+
+
+def signature(names):
+    """Fingerprint of the session's input signature: a hash of the sorted
+    (name, arity, fresh) 'Y' records.  Cross-lane keys are comparable only
+    between sessions with equal signatures (the same input transform)."""
+    txt = "\n".join(f"{nm}/{ar}/{(fl >> 1) & 1}"
+                    for nm, ar, fl in sorted(names.values()))
+    d = hashlib.blake2b(txt.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(d, "little")
+
+
+def unnamed_labels(rules, names):
+    """Function symbols in the decoded rules with no 'Y' record (rendered
+    c<label>, so their keys cannot match across lanes)."""
+    seen = set()
+    for q in rules:
+        if q["lhs"] is None:
+            continue
+        stack = [q["lhs"], q["rhs"]]
+        while stack:
+            t = stack.pop()
+            if t[0] == "v":
+                continue
+            if t[0] not in names:
+                seen.add(t[0])
+            stack.extend(t[1])
+    return seen
+
+
+def r_steps(R, X, start_step):
+    """Creation step of every 'R' entry.  Version 2 derives it from the
+    'X' records: pa = trace size at the pick, step = the pick's step, so an
+    entry's step is the step of the last pick whose pa <= its id (the
+    session's start step before the first pick).  Older files stored it."""
+    st = R["step"].astype(np.int64)
+    if len(R) == 0 or not np.all(R["step"] == NONE):
+        return st
+    xs = X[X["pa"] != NONE]
+    if len(xs) == 0:
+        return np.full(len(R), start_step, dtype=np.int64)
+    ntr = xs["pa"].astype(np.int64)
+    j = np.searchsorted(ntr, R["seq"].astype(np.int64), side="right") - 1
+    xstep = xs["step"].astype(np.int64)
+    return np.where(j >= 0, xstep[np.maximum(j, 0)], start_step)
 
 
 def symbols(recs, b, stop):
@@ -283,8 +346,12 @@ def stats(path):
         er = recs[e] if e is not None else None
         st = int(er["kind"]) if er is not None else -1
         version, lane = header(recs, b)
+        br = fof_branch(recs, b)
         line = (f"session@{b}: v{version} lane={lane or '-'} status={st} "
-                f"{desc}")
+                f"closed={1 if er is not None else 0} "
+                f"branch={'-' if br is None else br} "
+                f"n_sel={int(np.sum(r['tag'] == T['S']))} "
+                f"n_r={int(np.sum(r['tag'] == T['R']))} {desc}")
         if er is not None:
             line += (f" n_trace={er['seq']} sel={er['step']} "
                      f"pushed={er['trace']} flags={er['pb']} "
@@ -299,7 +366,9 @@ def stats(path):
             bad = sum(1 for q in rules if q["lhs"] is None and
                       not q["flags"] & (Q_TRUNC | Q_NOCONTENT))
             line += (f" symbols={len(names)} rules={len(rules)} "
-                     f"rule_decode_errors={bad}")
+                     f"rule_decode_errors={bad} "
+                     f"unnamed={len(unnamed_labels(rules, names))} "
+                     f"sig={signature(names):016x}")
         print(line)
 
 
@@ -319,14 +388,51 @@ def rules_tsv(path):
                   f"\t{q['key']:016x}\t{text}")
 
 
-def extract(hx_path, proof_path, out_path, max_neg=300000):
+def _ancestors(par, seeds):
+    anc = set()
+    stack = [t for t in seeds if t in par]
+    while stack:
+        t = stack.pop()
+        if t in anc:
+            continue
+        anc.add(t)
+        for p in par.get(t, ()):
+            if p != NONE and p not in anc and p in par:
+                stack.append(p)
+    return anc
+
+
+def extract(hx_path, proof_path, out_path, max_neg=300000, hind_frac=0.5):
+    """Proof mode: the last PROVED session and its proof (proof_path).
+    No-proof mode (proof_path "-", or no PROVED session): the last closed
+    session, with hindsight labels instead -- the trace-DAG ancestors of
+    the rules born ('Q' born / fvi / passive) at or after hind_frac of the
+    run's selections (hind_label, q_late).  fof-split branch sessions are
+    skipped: their stitched proof cites br<b>_t<N> records across
+    sessions, which one session's DAG cannot label."""
     recs = load(hx_path)
-    ss = [s for s in sessions(recs) if s[2] is not None
-          and int(recs[s[2]]["kind"]) == 1]
-    if not ss:
-        print("no PROVED session")
+    closed = [s for s in sessions(recs) if s[2] is not None]
+    n_branch = sum(1 for s in closed if fof_branch(recs, s[0]) is not None)
+    closed = [s for s in closed if fof_branch(recs, s[0]) is None]
+    if n_branch:
+        print(f"skipped {n_branch} fof-split branch session(s)")
+    proved = [s for s in closed if int(recs[s[2]]["kind"]) == 1]
+    blk = None
+    if proof_path != "-" and proved:
+        text = open(proof_path, errors="replace").read()
+        blk = proof_block(text)
+        if blk is None:
+            print("no proof block")
+            return 1
+        if re.search(r"cnf\(\s*br\d+_", blk):
+            print("fof-split proof: not labelled")
+            return 1
+        b, stop, e = proved[-1]
+    elif closed:
+        b, stop, e = closed[-1]
+    else:
+        print("no closed session")
         return 1
-    b, stop, e = ss[-1]
     r = recs[b:stop]
     E = recs[e]
     thresh_c = int(recs[b]["pri"])
@@ -354,12 +460,7 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
         F = F[len(F) - 1 - lastf]
     names = symbols(recs, b, stop)
     rules = rule_records(recs, b, stop, names)
-    text = open(proof_path, errors="replace").read()
-    blk = proof_block(text)
-    if blk is None:
-        print("no proof block")
-        return 1
-    cited = cited_trace_ids(blk)
+    cited = cited_trace_ids(blk) if blk is not None else set()
 
     # --- trace-DAG closure over R (rules/simplify/norm/axioms) + CP nodes.
     par = {}
@@ -371,17 +472,15 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
                                src["pb"].tolist()):
             if tid != NONE and tid not in par:
                 par[tid] = (pa, pb)
-    anc = set()
-    stack = [t for t in cited if t in par]
+    anc = _ancestors(par, cited)
     n_cited_unknown = sum(1 for t in cited if t not in par)
-    while stack:
-        t = stack.pop()
-        if t in anc:
-            continue
-        anc.add(t)
-        for p in par.get(t, ()):
-            if p != NONE and p not in anc and p in par:
-                stack.append(p)
+    # hindsight seeds: rules born late in the run
+    late_from = int(hind_frac * int(E["step"]))
+    q_late = np.array([q["kind"] in (RULE_BORN, RULE_FVI, RULE_PASSIVE) and
+                       q["step"] >= late_from and q["trace"] != NONE
+                       for q in rules], dtype=bool)
+    hind_anc = _ancestors(par, [q["trace"] for q, late in zip(rules, q_late)
+                                if late])
 
     # --- per-CP table: union of pushed (P) and selected (S) seqs.
     sel_seq = S["seq"].astype(np.int64)
@@ -463,6 +562,8 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
     end_step = np.minimum(end_step, orphan_step)
     label = np.array([t in anc for t in trace.tolist()], dtype=bool)
     label &= selected_at >= 0
+    hind_label = np.array([t in hind_anc for t in trace.tolist()], dtype=bool)
+    hind_label &= selected_at >= 0
 
     # --- rule content (version 2): keys per rule record, the key each
     # selected CP's rule got, and the keys of the proof DAG's rules.
@@ -507,6 +608,10 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
     if thresh_p >= NONE:
         in_sample = has_push.copy()
     keep = in_sample | (selected_at >= 0)
+    start_step = int(recs[b:b + 1].view(HREC)[0]["step"])
+    r_step = r_steps(R, X, start_step)
+    sig = signature(names)
+    n_unnamed = len(unnamed_labels(rules, names))
 
     np.savez_compressed(
         out_path,
@@ -516,12 +621,16 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
         pos_len=pos_len[keep], feat=feat[keep],
         push_step=push_step[keep], end_step=end_step[keep],
         selected_at=selected_at[keep], label=label[keep],
+        hind_label=hind_label[keep], q_late=q_late,
+        proved=np.array(blk is not None), status=np.array(int(E["kind"])),
+        sig=np.array(sig, dtype=np.uint64), n_unnamed=np.array(n_unnamed),
         in_sample=in_sample[keep], has_push=has_push[keep],
         pick=pick[keep], rule_key=rule_key[keep],
         r_id=R["seq"], r_kind=R["kind"], r_c0=R["trace"], r_c1=R["pa"],
-        r_step=R["step"], r_flags=R["flags"], r_feat=R["feat"],
+        r_step=r_step, r_flags=R["flags"], r_feat=R["feat"],
         bounds=bounds.astype(np.uint32), sel_pick=sel_pick,
         x_kind=X["kind"], x_seq=X["seq"], x_step=X["step"], x_live=X["aux"],
+        x_ntrace_pick=X["pa"], x_ntrace=X["pb"],
         w_seq=W["seq"], w_step=W["step"], w_pri=W["pri"], w_kind=W["kind"],
         w_feat=W["feat"], cpfeat=cpfeat[keep], has_cpfeat=has_cpfeat[keep],
         q_trace=q_trace, q_uid=q_uid, q_step=q_step, q_kind=q_kind,
@@ -543,7 +652,10 @@ def extract(hx_path, proof_path, out_path, max_neg=300000):
             float(label.sum()), float(n_cited_unknown), float(E["seq"]),
             float(orphan_on), float(uid_on),
         ]))
-    print(f"ok v{version} lane={lane or '-'} sel={len(S)} "
+    print(f"ok v{version} lane={lane or '-'} "
+          f"mode={'proof' if blk is not None else 'hindsight'} "
+          f"sig={sig:016x} unnamed={n_unnamed} "
+          f"hind_pos={int(hind_label.sum())} sel={len(S)} "
           f"pushed={int(E['trace'])} P={n_push_rec} "
           f"kept={int(keep.sum())} rate_p={rate_p:.4g} cited={len(cited)} "
           f"anc={len(anc)} pos={int(label.sum())} "
@@ -576,7 +688,7 @@ def _st_rec(dtype, tag, **fields):
     return r.view(REC)
 
 
-def _st_session(version):
+def _st_session(version, branch=None):
     """A proved session: axioms t0 and t1 queued as seqs 0 and 1; seq 0 is
     picked by weight and becomes the rule f(X, e) = X (uid 1, ORIENT t2),
     seq 1 is picked by age and joins.  Version 2 adds the lane, the symbol
@@ -584,8 +696,10 @@ def _st_session(version):
     v2 = version >= 2
     out = []
     if v2:
-        out.append(_st_rec(HREC, "B", kind=2, seq=0, trace=NONE, pa=NONE,
-                           pb=NONE, pri=NONE, lane=b"twee", lane_len=4))
+        out.append(_st_rec(HREC, "B", kind=2, seq=0, trace=NONE, pa=1234,
+                           pb=NONE if branch is None else branch,
+                           flags=0 if branch is None else 2,
+                           pri=NONE, lane=b"twee", lane_len=4))
         for label, name, arity in ((1, b"e", 0), (2, b"i", 1), (3, b"f", 2)):
             out.append(_st_rec(YREC, "Y", label=label, name=name,
                                name_len=len(name), arity=arity))
@@ -596,7 +710,11 @@ def _st_session(version):
                            pri=10 + seq))
     out.append(_st_rec(REC, "S", kind=TRACE_AXIOM, seq=0, step=1, trace=0,
                        pri=10, aux=2))
-    out.append(_st_rec(REC, "X", kind=1, seq=0, step=1, aux=1))
+    if v2:   # pa = trace size at the pick, pb = trace size after it
+        out.append(_st_rec(REC, "X", kind=1, seq=0, step=1, aux=1, pa=2,
+                           pb=3))
+    else:
+        out.append(_st_rec(REC, "X", kind=1, seq=0, step=1, aux=1))
     if v2:
         enc = bytes([6, 2, 1, 2, 0, 1])        # f(X0, e) | X0
         out.append(_st_rec(REC, "Q", kind=RULE_BORN, flags=Q_ORIENTED,
@@ -609,12 +727,19 @@ def _st_session(version):
         out.append(_st_rec(REC, "O", kind=1, seq=1, step=1, trace=2))
     out.append(_st_rec(REC, "S", kind=TRACE_AXIOM | ((1 << 4) if v2 else 0),
                        seq=1, step=2, trace=1, pri=11, aux=2))
-    out.append(_st_rec(REC, "X", kind=2, seq=1, step=2, aux=0))
+    if v2:
+        out.append(_st_rec(REC, "X", kind=2, seq=1, step=2, aux=0, pa=3,
+                           pb=3))
+    else:
+        out.append(_st_rec(REC, "X", kind=2, seq=1, step=2, aux=0))
     if v2:
         out.append(_st_rec(REC, "Z", seq=2, step=2, trace=1))
-    out.append(_st_rec(REC, "R", kind=TRACE_AXIOM, seq=0, step=0))
-    out.append(_st_rec(REC, "R", kind=TRACE_AXIOM, seq=1, step=0))
-    out.append(_st_rec(REC, "R", kind=TRACE_ORIENT, seq=2, step=1, trace=0))
+    # Version 2 leaves the step to the reader (derived from 'X').
+    st = (lambda v: NONE) if v2 else (lambda v: v)
+    out.append(_st_rec(REC, "R", kind=TRACE_AXIOM, seq=0, step=st(0)))
+    out.append(_st_rec(REC, "R", kind=TRACE_AXIOM, seq=1, step=st(0)))
+    out.append(_st_rec(REC, "R", kind=TRACE_ORIENT, seq=2, step=st(1),
+                       trace=0))
     out.append(_st_rec(REC, "E", kind=1, seq=3, step=2, trace=2, pa=2, pb=0,
                        pri=1, uid_a=0, uid_b=2, depth=0, aux=3))
     return np.concatenate(out)
@@ -689,6 +814,8 @@ def selftest():
             check(z["pick"].tolist() == ([0, 1] if version == 2
                                          else [255, 255]),
                   f"v{version}: picks")
+            check(z["r_step"].tolist() == [0, 0, 1], f"v{version}: R steps")
+            check(bool(z["proved"]), f"v{version}: proof mode")
             if version == 2:
                 check(z["q_key"].tolist() == [key], "v2: q_key")
                 check(str(z["q_text"]).split("\n")[0] == key_text,
@@ -706,6 +833,25 @@ def selftest():
             z.close()
             stats(hx)
             rules_tsv(hx)
+        # No-proof mode: the rule born at step 1 of 2 is late; its
+        # ancestors are t2 and t0, so seq 0 (trace 0) is a hindsight
+        # positive.
+        hx = os.path.join(d, "v2.hx")
+        npz = os.path.join(d, "hind.npz")
+        check(extract(hx, "-", npz) == 0, "hindsight: extract")
+        z = np.load(npz)
+        check(not bool(z["proved"]), "hindsight: no proof")
+        check(z["label"].tolist() == [False, False], "hindsight: no labels")
+        check(z["hind_label"].tolist() == [True, False], "hindsight: labels")
+        check(z["q_late"].tolist() == [True], "hindsight: late rule")
+        check(int(z["n_unnamed"]) == 0, "hindsight: every symbol named")
+        z.close()
+        # A fof-split branch session is skipped.
+        br = os.path.join(d, "branch.hx")
+        _st_session(2, branch=1).tofile(br)
+        check(fof_branch(load(br), 0) == 1, "branch: header")
+        check(extract(br, proof, os.path.join(d, "br.npz")) == 1,
+              "branch: skipped")
         both = os.path.join(d, "both.hx")
         np.concatenate([_st_session(1), _st_session(2)]).tofile(both)
         recs = load(both)

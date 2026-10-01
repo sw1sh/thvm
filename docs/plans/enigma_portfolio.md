@@ -434,7 +434,7 @@ Deliverables:
    - split 80/20 into TRAIN-X and DEV-X.
 
 Gates:
-- G2.1: Export v2 only observes. On 7 problems per family, with export on and off, the selection sequence, the proof and the stats are identical (instruction clock).
+- G2.1: Export v2 only observes. On 7 problems per family, with export on and off, the selection sequence, the proof and the stats are identical (step clock, amendments A1 and A2).
 - G2.2: Zero correction is exact. On 8 problems per family, a twin with zero-correction weights is byte-identical to its base lane: same selections, proof, stats and LRS prune counts. This makes PD a pure duplicate and isolates the effect of learning.
 - G2.3: Unarmed builds are byte-identical. test_atp passes in full (136835/136835 on b8443afb), the OA pin is 257971/735/2461555, and the DN pin is 2848/254/768876.
 - G2.4: C and Python agree to 1e-9, with the same argmax on 8 problems per family.
@@ -665,7 +665,7 @@ Section 5.3 outputs (2026-10-02, from the sealed matrix; train and held-out only
 - M4b pre-gate: FAIL. The oracle plan and simulated P1 both solve 505 on TRAIN + DEV-T at 60, 53 and 45 s; only 10 problems are solved by exactly one lane. No learned launch plan.
 - M4c pre-gate: FAIL, final. 8 TRAIN Unsatisfiable problems rated below 1.0 are unsolved at 60 s (25 needed). No invention pilot.
 - P1 retirement candidates by the letter of the rule: wm, horn-back, mnf-gj-amw, ifeq, tgt, tgt-fold, wm-gj, lazy-gj, bare-gj, plus 13 fof-* lanes the CNF pool cannot judge. wm is the fastest lane on 39 pool problems and owns REL033-3, so it stays for M1's paired test. All candidates wait for the 180 s supplement.
-- Twin families: provisional, decided by ties because TRAIN-T has 4 problems: horn-cd, twee, encompass, flatten-bare-raw. Revisited after the supplement and DEV-S.
+- Twin families: provisional, decided by ties because TRAIN-T has 4 problems: horn-cd, twee, encompass, flatten-bare-raw. Revisited after the supplement and DEV-S. horn-cd left the set by amendment A3.
 - Supplement: 142 problems, 2,882 jobs (SYN986-10.005/.006 segfault until the deep-term fix lands). Label harvest: 8,574 pairs on 500 TRAIN problems.
 - T7: 40 front-end proofs come from equals, narrowq and unfold, which the static replica calls dead. These lanes run the Horn front end before their exit test (the M1 liveness item).
 
@@ -673,7 +673,11 @@ Decisions recorded (2026-10-01, by the user):
 - D1: yes. Training may include synthetic -10 encodings of non-UEQ TPTP problems from our FOF front end; J13 names and stems are excluded in every division.
 - D3: no. Every calibration stays on pods; WDEP is estimated from the submission build's official J13 result as in section 1.3.
 
-Amendments: none yet.
+Amendments (each written before the run it governs):
+- A1 (2026-10-02, before any G2.1 or G2.2 run): the identity gates run under a gate-only logical work clock, THVM_ATP_WORK_CLOCK=steps. The engine's clock-gated disciplines (CP-set interreduction, LRS, the goal-narrow endgame) then read a count of CP inserts and selections, which an observer (the export, a zero-correction guide) cannot advance. Under the instruction clock the hooks' own framing still counts, so identity could fail by construction on twee, otter-lpo and tgt-sel. Under any deterministic clock (instr or steps), the LRS budget and the endgame span are the configured wall less the work done before their epoch, not a wall reading. A G2.1 or G2.2 row passes only on exact identity; a moved clock-gated decision is a FAIL, and there is no DRIFT class. Identity holds within one binary: instruction-clock baselines pinned on an earlier build are re-verified against the build under test.
+- A2 (2026-10-02): G2.1 lists 10 TRAIN problems per family and judges the first 7 conclusive rows in list order (PASS, FAIL or UNOBSERVED); any FAIL fails the family, and NONDET or WALL rows are replaced by the next listed row. A row whose export holds no selection is UNOBSERVED, never PASS.
+- A3 (2026-10-02): horn-cd leaves the provisional twin set. Its search runs mostly in the CLI condensed-detachment loop (tools/atp_cli/horn_release.c, horn_back.c), which export v2 does not record, and the sealed matrix holds 5 engine proofs for it at 60 s, below G2.1's 7. It returns only if that loop gets export hooks and 7 observable problems exist before G2.1 runs.
+- A4 (2026-10-02): landing the history-export v2 branch requires G2.1 (A1, A2) and G2.3 (test_atp in full, the OA and DN pins) on pods, both passing.
 
 ## 6. Risks and what we will not do
 
