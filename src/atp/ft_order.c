@@ -64,6 +64,10 @@
 // fallback keys its memo on `a == g_lpo_flat_a`).  The Term-tree
 // thvm_lpo path uses the same buffers -- the ATP layer serialises
 // calls.
+//
+// The encoders and skolem compares below recurse once per term level,
+// as do the flat Vortest and decision behind thvm_kbo_flat_slice: this
+// cap is their C-stack bound.
 
 #define ATPFT_KBO_FLAT_CAP 4096u
 

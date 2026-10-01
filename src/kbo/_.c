@@ -1310,8 +1310,11 @@ typedef struct KboFlatNode {
 
 // Flatterm encode cap for the KBO/LPO cache-dense comparators.  A term
 // over this many nodes cannot be encoded and the comparator falls back
-// to the Term-tree recursion (thvm_kbo / lpo_rec), which pays a heap_read
-// per child step.  Raised 4096 -> 65536: under --ord=lpo on hard UEQ
+// to the Term-tree walk (thvm_kbo / lpo_rec), which pays a heap_read
+// per child step.  The KBO flat walks (kbo_flat_encode, kbo_flat_vortest,
+// kbo_flat_rek) recurse once per term level: the default path feeds them
+// ft_order.c's ATPFT_KBO_FLAT_CAP-node encodings, and only thvm_kbo_flat
+// (THVM_ATP_KBO_FLAT=1) encodes up to this cap.  Raised 4096 -> 65536: under --ord=lpo on hard UEQ
 // (GRP690-1) the completion produces CP peaks up to ~32k nodes, and every
 // LPO comparison on them was overflowing the 4096 cap and dropping to the
 // O(|s|*|t|) heap-indirected Term-tree lpo_rec -- ~100% of the late-game

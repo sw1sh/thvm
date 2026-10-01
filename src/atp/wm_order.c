@@ -101,6 +101,11 @@
 // slot compaction).  A side registry records every face inserted per
 // trace id so removal needs no live Terms.
 
+// The most cells a trie key (a face in preorder) holds.  The encoders
+// wmo_cells_from_term / _ft recurse once per cell and a trie level holds
+// one cell, so this is also the depth bound of the encoders and of the
+// trie walks (wmo_walk_entries, wmo_free_subtree, the check and dump
+// walks).
 #define WMO_MAX_CELLS  768u
 #define WMO_MAX_VARS   64u
 

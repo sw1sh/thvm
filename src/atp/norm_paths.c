@@ -176,6 +176,8 @@ static int wf_eng_cache_update_rhs(AtpState *s, u32 r) {
   return 1;
 }
 
+// Also the depth bound of wf_eng_decode_rec, which recurses once per
+// level of a normal form held in these buffers.
 #define WF_ENG_SUBJ_CAP 8192u
 
 // Gated correctness probe: assert the incrementally-maintained tree is
