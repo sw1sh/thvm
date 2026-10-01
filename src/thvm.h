@@ -3983,6 +3983,10 @@ typedef struct {
 } LpoConfig;
 
 fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg);
+// thvm_lpo's verdict for an observer, leaving the persistent memo, the
+// statistics and the deadline poll as they were.  0 when a side is too
+// large for the flat encoding (use thvm_lpo).
+fn int    thvm_lpo_quiet(Term s, Term t, const LpoConfig *cfg, LpoCmp *out);
 
 // === rpo/ ===
 // Recursive Path Ordering (Dershowitz 1982).  Generalises LPO with
@@ -6890,6 +6894,9 @@ typedef struct {
   // Selection-time top-K re-ranker state (src/atp/topk.c, an AtpTopk):
   // NULL unless THVM_ATP_RERANK_TOPK / THVM_ATP_RERANK_MODEL arm it.
   void *topk;
+  // ENIGMA selection layer state (src/atp/guide.c, an AtpGuide): NULL
+  // unless THVM_ATP_GUIDE or thvm_atp_guide_arm arms it.
+  void *guide;
 
   // Indexed unorientable-rewrite pass.  When set, the default tree mixed
   // normalizer replaces its O(n_rules) linear KBO-gated unorientable step
@@ -8382,6 +8389,34 @@ enum {
   ATP_PHI_N
 };
 typedef struct { float v[ATP_PHI_N]; } AtpPhi;
+
+// ENIGMA selection layer (src/atp/guide.c).  The problem features
+// phi(p) it reads (docs/plans/enigma_portfolio.md 3.1), one row per
+// problem: set them in the process that runs the engine before its first
+// weight pick (the layer folds them in then, and again whenever they are
+// set anew); a head reading more than `n`, or a non-finite value, takes
+// its training mean there.
+#define ATP_GUIDE_PHI_MAX 64u
+typedef struct {
+  u32   n;
+  float v[ATP_GUIDE_PHI_MAX];
+} AtpGuidePhi;
+fn void      thvm_atp_guide_set_phi(const AtpGuidePhi *phi);
+// Arm s with the compiled-in head `model_id` (NULL: the default) and the
+// integration its family table gives `family`; zero = 1 forces a zero
+// correction; `lane` names the lane the engine runs, for the head's lane
+// one-hot (NULL or not in the head's lane table: the family entry's
+// index).  Call before the first push.  Returns 1 on success; 0 also
+// when the top-K re-ranker is armed (it would take every weight pick).
+// thvm_atp_init arms from THVM_ATP_GUIDE / _MODEL / _ZERO, the lane from
+// THVM_ATP_GUIDE_LANE or FINDPROOF_SLICE.
+fn int       thvm_atp_guide_arm(AtpState *s, const char *family,
+                                const char *model_id, u8 zero,
+                                const char *lane);
+// The layer's per-pick cost counters as one "% guide:" line, with the
+// layer's time as a fraction of the time since arming (frac_wall);
+// nothing when s is unarmed.
+fn void      thvm_atp_guide_print_stats(const AtpState *s, FILE *f);
 
 // Enable/disable recording of processed-CP feature rows.  OFF (0) by
 // default: select_cp records nothing and the engine is byte-identical.

@@ -388,6 +388,32 @@ test_atp with their peak RSS, the OA / DN pins on both builds, and
 paired main / branch lane runs (twee, wm, otter-lpo, tgt-sel) with
 instruction counts and CPU time.
 
+## ENIGMA selection layer: compiled-in heads (`weights_to_c.py`)
+
+The guided twins' layer (`src/atp/guide.c`, [docs/atp/guide.md](../../docs/atp/guide.md))
+reads its heads from `src/atp/guide_models.c`, which `weights_to_c.py`
+generates from safetensors heads (metadata `Layout`, `Phi`, `Lanes`,
+optional `LaneNames`, `Families`; a `topk_net.py export` file is a
+`topk18` head). Pod-only:
+
+```
+weights_to_c.py build example=ex.safetensors \
+  d32h64=models/topk_rerank_D32h64_dagger1.safetensors -o src/atp/guide_models.c
+# engine: FindProof <base lane flags> --guide=<family> [--guide-model=d32h64] [--guide-zero]
+# THVM_ATP_GUIDE_DUMP=<tsv> dumps every scored candidate's inputs and scores:
+weights_to_c.py parity models/topk_rerank_D32h64_dagger1.safetensors dump.tsv out.txt
+# the same run with THVM_ATP_HISTORY_EXPORT (RATE=1, CPFEAT=1), through np0_extract.py:
+weights_to_c.py featparity run.npz dump.tsv out.txt
+# a head's LaneNames against the binary's lanes:
+FindProof --list-lanes > listed.txt; weights_to_c.py lanes head.safetensors listed.txt
+# gates G2.2 / G2.4 / featparity over a spec of "family lane problem..." lines:
+HEAD=head.safetensors MODEL=id FEATPARITY=1 tests/atp_guide_gates.sh bin/FindProof spec.txt
+```
+
+`weights_to_c.py example ex.safetensors` writes the tiny head the shipped
+`src/atp/guide_models.c` is built from; rebuilding from it reproduces the
+file byte for byte.
+
 ## Typical flow
 
 ```

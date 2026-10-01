@@ -698,6 +698,26 @@ Amendments:
   - A signalled parent must end through its teardown handler (exit 128 + the signal; pkill excepted). After the slice-only signal the slice's process group must be gone, a --schedule parent and its other lanes must go on, and a --lane parent must end by itself. 3 s after each stop no process of the run and no slice output file in /tmp may be left. A case whose run ends before its signal, or whose last lane is not alive at 5 s, is inconclusive. A --wall=10 run must also end by 20 s and leave nothing; that case can only fail.
   - Dry run, the W + 10 s clause: the 20 rows of tools/atp_enigma/g04_dryrun.tsv, sha256 8fe06a9ee76bf5c1a7abdf697f65f8572d159bf69cd6d237725372e9601e77bc. They are the first 20, by sha256 of the name, of the 81 TRAIN problems that no lane solves at 60 s and whose every searching lane ended at the wall. WALL = 180 s, and again at WDEP once G0.3 fixes it, each in the environment of section 1.3. Every run must end by W + 10 s and leave no process. At least 10 of the 20 must reach the wall, meaning the parent's wall stop or alarm, or an end at W - 4 s or later (each lane stops itself on its CPU clock at the wall less 3 s); otherwise the dry run is inconclusive.
   - G0.4 passes only when the teardown mode and every dry run exit 0. Exit 3 (inconclusive) does not pass. A changed script or list needs a new amendment.
+- A2 (2026-10-02, before any G2.2 run): how G2.2 reads a clock-gated lane.
+  An armed zero twin runs a few dozen user-space instructions per step
+  outside its work-clock exclusion window (the selection log, the goal
+  compares, the coop and trivial picks, the window's edges), and its
+  environment is longer by the `--guide` variables.  Under the
+  instruction clock, a decision of a clock-gated discipline (`--lrs`,
+  `--cp-set-ir-budget`) can therefore land a few selections from the
+  base lane's.  G2.2 is decided by tests/atp_guide_gates.sh, with the
+  base run's environment padded to the twin's length:
+  - a lane that logs no clock-gated decision (THVM_ATP_CLOCK_TRACE) passes
+    only when the selections, the proof and the stats, LRS prune counts
+    included, are identical;
+  - a clock-gated lane passes when every selection up to its first
+    clock-gated decision whose trace line differs is identical, and when
+    the decisions are identical, everything is; the selection index of
+    that first drifted decision is reported per run.
+  Columns 13, 14 and 19 of the layer's input, phi and the lane are not
+  in export v2; the M3 harvest reads them from THVM_ATP_GUIDE_DUMP, and
+  `weights_to_c.py featparity` checks the remaining columns against the
+  export.
 
 ## 6. Risks and what we will not do
 

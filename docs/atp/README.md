@@ -58,6 +58,9 @@ Living documents (kept current with the code):
   data structures: rule storage, CP queue, discrimination trees,
   memos, the flatterm representation, controls (build defines, C
   setters, env knobs), soundness probes, profiling.
+* **[guide.md](guide.md)** -- the ENIGMA selection layer
+  (`--guide`): integrations, the input layout, compiled-in heads and
+  their generator, the exactness discipline, cost counters.
 * **[starexec.md](starexec.md)** -- building and running the
   competition tarballs (FindProof + CheckProof) the way StarExec does.
 * **[cli_process_methods.md](cli_process_methods.md)** -- the WL

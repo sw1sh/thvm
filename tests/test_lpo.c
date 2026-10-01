@@ -1028,6 +1028,50 @@ int main(int argc, char **argv) {
 #endif
   }
 
+  TEST_BEGIN("lpo/quiet-leaves-memo-and-stats");
+  {
+    // An observer's verdict: thvm_lpo's on every pair, with the
+    // persistent memo, its epoch and the statistics as they were.
+    static LpoMemoEnt memo0[LPO_MEMO_SIZE];
+    static Term       qs[400], qt[400];
+    static LpoCmp     qv[400];
+    thvm_lpo_set_persist(1u);
+    thvm_lpo_invalidate();
+    Term    pool[24];
+    RndSpec sp = { .nvar = 4u, .vbase = 0u, .pool = pool, .npool = 0u };
+    for (u32 k = 0; k < 24u; k++) {
+      pool[k] = rnd_term(&sp, 3u);
+    }
+    sp.npool = 24u;
+    for (u32 it = 0; it < 200u; it++) {
+      Term s = rnd_term(&sp, 5u);
+      Term t = rnd_term(&sp, 5u);
+      (void)thvm_lpo(s, t, &DEMO_LPO);
+    }
+    for (u32 it = 0; it < 400u; it++) {
+      qs[it] = rnd_term(&sp, 5u);
+      qt[it] = (it % 2u == 0u) ? rnd_term(&sp, 5u) : rnd_edit(&sp, qs[it], (it % 4u == 1u) ? 0u : 1u);
+    }
+    memcpy(memo0, g_lpo_memo, sizeof memo0);
+    u32 epoch0 = g_lpo_epoch;
+    u64 a0 = 0, b0 = 0, c0 = 0, d0 = 0;
+    thvm_lpo_flat_stats(&a0, &b0, &c0, &d0);
+    u32 quiet = 0u;
+    for (u32 it = 0; it < 400u; it++) {
+      quiet += (u32)thvm_lpo_quiet(qs[it], qt[it], &DEMO_LPO, &qv[it]);
+    }
+    u64 a1 = 0, b1 = 0, c1 = 0, d1 = 0;
+    thvm_lpo_flat_stats(&a1, &b1, &c1, &d1);
+    CHECK_EQ(quiet, 400u);
+    CHECK(a0 == a1 && b0 == b1 && c0 == c1 && d0 == d1);
+    CHECK_EQ(g_lpo_epoch, epoch0);
+    CHECK(memcmp(memo0, g_lpo_memo, sizeof memo0) == 0);
+    for (u32 it = 0; it < 400u; it++) {
+      CHECK_EQ((int)qv[it], (int)thvm_lpo(qs[it], qt[it], &DEMO_LPO));
+    }
+    thvm_lpo_set_persist(0u);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

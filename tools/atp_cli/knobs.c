@@ -206,6 +206,12 @@ static const AtpKnob KNOBS[] = {
   // default): byte-identical selection.
   {"rerank-topk",            "THVM_ATP_RERANK_TOPK",     1, "(top-K re-ranker: candidates per weight pick; needs --rerank-model)"},
   {"rerank-model",           "THVM_ATP_RERANK_MODEL",    1, "(top-K re-ranker weights: safetensors from tools/atp_enigma/topk_net.py export)"},
+  // ENIGMA selection layer (src/atp/guide.c): a guided twin routes its
+  // weight picks through a compiled-in head.  All unset (the default):
+  // byte-identical selection.
+  {"guide",                  "THVM_ATP_GUIDE",           1, "(ENIGMA selection layer: route weight picks through the compiled-in head, with the integration its family table gives this lane family)"},
+  {"guide-zero",             "THVM_ATP_GUIDE_ZERO",      0, "(ENIGMA selection layer: zero correction -- the twin selects exactly as its base lane, at the layer's full cost)"},
+  {"guide-model",            "THVM_ATP_GUIDE_MODEL",     1, "(ENIGMA selection layer: compiled-in head id from tools/atp_enigma/weights_to_c.py; default the first)"},
 };
 static const int N_KNOBS = (int)(sizeof(KNOBS) / sizeof(KNOBS[0]));
 

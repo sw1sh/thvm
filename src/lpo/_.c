@@ -537,6 +537,7 @@ static LpoCmp lpo_rec(Term s, Term t, const LpoConfig *cfg) {
       continue;
     }
     LpoMemoEnt *me = &g_lpo_memo[f->idx];
+    CELL_MEMO_WRITE();
     me->s = f->s; me->t = f->t; me->epoch = g_lpo_epoch; me->cmp = (u8)res;
     if (--nfr == 0u) {
       term_stack_release(fr, fr_inl);
@@ -2211,6 +2212,7 @@ fn LpoCmp thvm_lpo(Term s, Term t, const LpoConfig *cfg) {
         u32 idx2 = (u32)((u64)s * 0x9E3779B97F4A7C15ull
                        ^ (u64)t * 0xBF58476D1CE4E5B9ull) & LPO_MEMO_MASK;
         LpoMemoEnt *e3 = &g_lpo_memo[idx2];
+        CELL_MEMO_WRITE();
         e3->s = s; e3->t = t; e3->epoch = g_lpo_epoch; e3->cmp = (u8)rr;
       }
       return rr;

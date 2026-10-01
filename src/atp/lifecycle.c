@@ -361,6 +361,8 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
     s->gnn_topk = (tk != NULL && tk[0] != '\0') ? (u32)strtoul(tk, NULL, 10)
                                                 : 512u;
   }
+  // ENIGMA selection layer: THVM_ATP_GUIDE arms it before the first push.
+  atp_guide_on_init(s);
   return s;
 }
 
@@ -391,6 +393,7 @@ fn void thvm_atp_free(AtpState *s) {
   if (s == NULL) return;
   thvm_atp_history_finish(s, 0xffu);   // no-op unless still recording
   atp_topk_free(s);
+  atp_guide_free(s);
   atp_wmo_free((struct AtpWmOrder *)s->wmo);
   free(s->trace);
   free(s->lhs);

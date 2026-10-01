@@ -55,6 +55,15 @@ typedef struct {
 } KboTHashEnt;
 static KboTHashEnt g_kbo_thash[KBO_THASH_SIZE];
 static u32 g_kbo_epoch = 1;
+// THVM_ATP_GUIDE_CHECK builds count writes to the memos keyed on cell
+// addresses (here and in src/lpo/_.c): the selection layer's clean
+// scratch pop is sound only while its pick writes none (src/atp/guide.c).
+#ifdef THVM_ATP_GUIDE_CHECK
+static u64 g_cell_memo_writes = 0u;
+#define CELL_MEMO_WRITE() (g_cell_memo_writes++)
+#else
+#define CELL_MEMO_WRITE() ((void)0)
+#endif
 static inline u32 kbo_thash_slot(Term t) {
   u64 h = (u64)t * 0x9E3779B97F4A7C15ull;
   h ^= h >> 29;
@@ -723,6 +732,7 @@ static KboWMemoEnt *kbo_subtree_memo(const KboConfig *cfg, Term t) {
           KboTHashEnt *th = &g_kbo_thash[kbo_thash_slot(k->t)];
           k->sh   = sh;
           k->widx = kbo_wmemo_slot(sh);
+          CELL_MEMO_WRITE();
           th->t = k->t; th->hash = sh; th->epoch = g_kbo_epoch; th->wmemo_idx = k->widx;
           // Wmemo hit?  Reuse precomputed weight + profile.
           KboWMemoEnt *e = &g_kbo_wmemo[k->widx];
