@@ -9,13 +9,16 @@
 // recursive originals are kept here, verbatim, as references: on a few
 // thousand random terms each walk must print the same text, fail at the
 // same byte, hash the same and allocate the same heap words in the same
-// order, and a term 100,000 levels deep must go through.  The test
-// includes FindProof's translation unit without its entry point.
+// order, and a term 100,000 levels deep must go through, on a 1 MB
+// thread stack (tests/deep_stack.h) so a regression to recursion fails
+// whatever `ulimit -s` the machine has.  The test includes FindProof's
+// translation unit without its entry point.
 
 #define THVM_ATP_CLI_NO_MAIN 1
 #include "../tools/thvm_atp_cli.c"
 
 #include "test.h"
+#include "deep_stack.h"
 
 // ---- References: the recursive walks, as FindProof had them --------------
 
@@ -564,6 +567,16 @@ static void deep_szs(void) {
     CHECK(cli_pair_canon_hash(comb0, inv_e) != cli_pair_canon_hash(comb0, inv_f));
   }
 
+  free(iexp);
+  free(cexp);
+}
+
+// The 2,000-deep comparisons against the recursions, on the reference
+// stack.
+static void mid_szs(void) {
+  Term sflat = term_new_ctr(CD_SFLAT, NULL, 0u);
+  Term x0    = term_new_fvr(0u);
+
   TEST_BEGIN("atp_cli_deep/mid-depth-szs-vs-recursion");
   {
     // 2,000 levels, within the recursion's reach.
@@ -589,8 +602,6 @@ static void deep_szs(void) {
     CHECK_EQ(ref_cli_ct_hash_walk(t, va, &na, 7u), cli_ct_hash_walk(t, vb, &nb, 7u));
     CHECK_EQ(ref_cli_term_has_flat_sym(&g_cd_pr, t), cli_term_has_flat_sym(&g_cd_pr, t));
   }
-  free(iexp);
-  free(cexp);
 }
 
 // ---- The one-step rewrites of tools/proof_check.c ------------------------
@@ -685,6 +696,13 @@ static void deep_pc_rewrite(void) {
     pc_rewrite_all(cd_comb(D, sflat, e), e, sflat, &acc);
     CHECK_EQ(acc.n, 1);
   }
+}
+
+// 600 levels against the recursion (about 4.8 KB of C stack a level),
+// on the reference stack.
+static void mid_pc_rewrite(void) {
+  Term e     = term_new_ctr(CD_E, NULL, 0u);
+  Term sflat = term_new_ctr(CD_SFLAT, NULL, 0u);
 
   TEST_BEGIN("atp_cli_deep/mid-depth-pc-rewrite-vs-recursion");
   {
@@ -704,10 +722,14 @@ int main(void) {
   thvm_init();
   cd_pr_init();
   u32 seed = 0x3c1a9e57u;
+  TEST_BEGIN("atp_cli_deep/negative-control");
+  CHECK(deep_stack_catches_recursion());
   pin_szs(&seed);
-  deep_szs();
+  deep_stack_call(deep_szs);
+  ref_stack_call(mid_szs);
   pin_pc_rewrite(&seed);
-  deep_pc_rewrite();
+  deep_stack_call(deep_pc_rewrite);
+  ref_stack_call(mid_pc_rewrite);
   thvm_free();
   TEST_REPORT();
 }

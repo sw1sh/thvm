@@ -9,10 +9,20 @@
 // produce the same results, side effects and heap words in the same
 // order.  The flatterm walks of src/atp/ft.c are pinned the same way in
 // test_ft_deep.c.
+//
+// Each deep block runs on a 1 MB thread stack (tests/deep_stack.h), so a
+// walk that slips back to per-level recursion over 100,000 levels
+// overflows it whatever `ulimit -s` the machine has.  The reference
+// recursions those blocks compare against at 1,000-3,000 levels and
+// that need more than a few hundred KB there (the AC, LPO and WM-mirror
+// references) hop to a 512 MB stack.  The two 10,000-deep blocks (the ground-join
+// rewrite and the CP subindex, quadratic in depth) are caught that way
+// only for a recursion of more than 100 bytes a level.
 
 #include "../src/thvm.c"
 
 #include "test.h"
+#include "deep_stack.h"
 
 // ---- References: the recursive walks, as the engine had them -------------
 
@@ -1700,14 +1710,20 @@ static u32 g_wide = 16u;
 static Term mk_term(u32 *seed, u32 depth, u32 *budget) {
   u32 r = rng32(seed);
   if (depth == 0u || *budget == 0u || (r & 7u) < 2u) {
-    if (*budget > 0u) (*budget)--;
+    if (*budget > 0u) {
+      (*budget)--;
+    }
     return mk_leaf(seed);
   }
   (*budget)--;
   u32 n = 1u + ((r >> 9) % 3u);
-  if (depth == 1u && ((r >> 3) & 31u) == 0u) n = g_wide - 3u + ((r >> 12) & 3u);
+  if (depth == 1u && ((r >> 3) & 31u) == 0u) {
+    n = g_wide - 3u + ((r >> 12) & 3u);
+  }
   Term kids[20];
-  for (u32 i = 0; i < n; i++) kids[i] = mk_term(seed, depth - 1u, budget);
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = mk_term(seed, depth - 1u, budget);
+  }
   return term_new_ctr((r >> 14) % 12u, kids, n);
 }
 
@@ -1727,11 +1743,15 @@ static Term mk_mutant(u32 *seed, Term t) {
   u32 n = term_tag(t) == TAG_CTR ? term_ctr_n(t) : 0u;
   if (n == 0u || (r % 3u) == 0u) {
     Term leaf = mk_leaf(seed);
-    if (leaf == t) leaf = term_new_ctr(11u, NULL, 0u);
+    if (leaf == t) {
+      leaf = term_new_ctr(11u, NULL, 0u);
+    }
     return leaf;
   }
   Term kids[20];
-  for (u32 i = 0; i < n; i++) kids[i] = term_ctr_at(t, i);
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = term_ctr_at(t, i);
+  }
   u32 k = (r >> 4) % n;
   kids[k] = mk_mutant(seed, kids[k]);
   return term_new_ctr(term_ext(t), kids, n);
@@ -1747,9 +1767,13 @@ static Term reloc(Term w, u64 lo, u64 hi, u64 to) {
 
 // Heap words [a0, a1) and [b0, b1) are the same allocation sequence.
 static int heap_regions_same(u64 a0, u64 a1, u64 b0, u64 b1) {
-  if (a1 - a0 != b1 - b0) return 0;
+  if (a1 - a0 != b1 - b0) {
+    return 0;
+  }
   for (u64 k = 0; k < a1 - a0; k++) {
-    if (reloc(heap_read(a0 + k), a0, a1, b0) != heap_read(b0 + k)) return 0;
+    if (reloc(heap_read(a0 + k), a0, a1, b0) != heap_read(b0 + k)) {
+      return 0;
+    }
   }
   return 1;
 }
@@ -1766,12 +1790,24 @@ static int span_layout_same(const AtpFtCell *x, const AtpFtCell *xb,
   const AtpFtCell *px = x;
   const AtpFtCell *py = y;
   for (;;) {
-    if (px->sym != py->sym || px->arity != py->arity || px->flags != py->flags) return 0;
-    if (cell_off(px, xb) != cell_off(py, yb)) return 0;
-    if (cell_off(px->end, xb) != cell_off(py->end, yb)) return 0;
-    if (cell_off(px->next, xb) != cell_off(py->next, yb)) return 0;
-    if (px == x->end) return py == y->end;
-    if (py == y->end) return 0;
+    if (px->sym != py->sym || px->arity != py->arity || px->flags != py->flags) {
+      return 0;
+    }
+    if (cell_off(px, xb) != cell_off(py, yb)) {
+      return 0;
+    }
+    if (cell_off(px->end, xb) != cell_off(py->end, yb)) {
+      return 0;
+    }
+    if (cell_off(px->next, xb) != cell_off(py->next, yb)) {
+      return 0;
+    }
+    if (px == x->end) {
+      return py == y->end;
+    }
+    if (py == y->end) {
+      return 0;
+    }
     px = px->next;
     py = py->next;
   }
@@ -1817,13 +1853,17 @@ static int term_eq_iter(Term a, Term b) {
     Term x = st[--n];
     if (term_tag(x) != term_tag(y) || term_ext(x) != term_ext(y)) { eq = 0; break; }
     if (term_tag(x) != TAG_CTR) {
-      if (term_val(x) != term_val(y) && term_tag(x) != TAG_FVR) eq = 0;
+      if (term_val(x) != term_val(y) && term_tag(x) != TAG_FVR) {
+        eq = 0;
+      }
       continue;
     }
     u32 k = term_ctr_n(x);
     if (k != term_ctr_n(y)) { eq = 0; break; }
     if (n + 2u * k > 2u * cap) {
-      while (n + 2u * k > 2u * cap) cap *= 2u;
+      while (n + 2u * k > 2u * cap) {
+        cap *= 2u;
+      }
       st = (Term *)realloc(st, 2u * cap * sizeof(Term));
     }
     for (u32 i = 0; i < k; i++) {
@@ -1843,13 +1883,19 @@ static u32 term_size_iter(Term t) {
   while (n > 0u) {
     Term x = st[--n];
     size++;
-    if (term_tag(x) != TAG_CTR) continue;
+    if (term_tag(x) != TAG_CTR) {
+      continue;
+    }
     u32 k = term_ctr_n(x);
     if (n + k > cap) {
-      while (n + k > cap) cap *= 2u;
+      while (n + k > cap) {
+        cap *= 2u;
+      }
       st = (Term *)realloc(st, cap * sizeof(Term));
     }
-    for (u32 i = 0; i < k; i++) st[n++] = term_ctr_at(x, i);
+    for (u32 i = 0; i < k; i++) {
+      st[n++] = term_ctr_at(x, i);
+    }
   }
   free(st);
   return size;
@@ -1920,7 +1966,9 @@ static void pin_ri_walks(u32 *seed) {
         u32 rp = start, np = start;
         u8  r = ref_atp_ri_flatten(t, ra->flat, ra->subsz, ra->flatsym, &rf, caps[k], &rp);
         u8  n = atp_ri_flatten(t, na->flat, na->subsz, na->flatsym, &nf, caps[k], &np);
-        if (r == n && rp == np && rf == nf && memcmp(ra, na, sizeof *ra) == 0) ok++;
+        if (r == n && rp == np && rf == nf && memcmp(ra, na, sizeof *ra) == 0) {
+          ok++;
+        }
       }
     }
     CHECK_EQ(ok, 2u * RI_N);
@@ -1976,7 +2024,9 @@ static void pin_ri_walks(u32 *seed) {
       u64 h1 = HEAP_NEXT;
       Term n = atp_ri_build(na->flat, na->subsz, na->flatsym, pos);
       u64 h2 = HEAP_NEXT;
-      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) ok++;
+      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) {
+        ok++;
+      }
       rebuilt += (u32)(h1 != h0);
     }
     CHECK_EQ(ok, (u32)RI_N);
@@ -1997,9 +2047,13 @@ static void pin_ri_walks(u32 *seed) {
       ri_fill(sa);
       (void)atp_ri_flatten(s, sa->flat, sa->subsz, sa->flatsym, &sf, RI_CAP, &slen);
       u32 star[ATP_DTREE_MAXVARS];
-      for (u32 v = 0; v < ATP_DTREE_MAXVARS; v++) star[v] = ATP_DTREE_NIL;
+      for (u32 v = 0; v < ATP_DTREE_MAXVARS; v++) {
+        star[v] = ATP_DTREE_NIL;
+      }
       u32 nbound = (i % 3u == 0u) ? 7u : 10u;
-      for (u32 v = 0; v < nbound; v++) star[v] = rng32(seed) % slen;
+      for (u32 v = 0; v < nbound; v++) {
+        star[v] = rng32(seed) % slen;
+      }
       u32 caps[2] = { RI_CAP, 1u + rng32(seed) % 64u };
       for (u32 k = 0; k < 2u; k++) {
         ri_fill(ra);
@@ -2010,7 +2064,9 @@ static void pin_ri_walks(u32 *seed) {
                                            ra->flat, ra->subsz, ra->flatsym, &rp, &rf, caps[k]);
         u8 n = atp_subst_apply_to_flat(rhs, star, sa->flat, sa->subsz, sa->flatsym,
                                        na->flat, na->subsz, na->flatsym, &np, &nf, caps[k]);
-        if (r == n && rp == np && rf == nf && memcmp(ra, na, sizeof *ra) == 0) ok++;
+        if (r == n && rp == np && rf == nf && memcmp(ra, na, sizeof *ra) == 0) {
+          ok++;
+        }
         hits += (u32)(n != 0u);
       }
     }
@@ -2038,7 +2094,9 @@ static void pin_ri_walks(u32 *seed) {
       vm_reset(&nv);
       r = ref_dt_insert_term(rd, rd->root, t, &rv);
       n = atp_dt_insert_term(nd, nd->root, t, &nv);
-      if (same && r == n && memcmp(&rv, &nv, sizeof rv) == 0) ok++;
+      if (same && r == n && memcmp(&rv, &nv, sizeof rv) == 0) {
+        ok++;
+      }
     }
     CHECK_EQ(ok, (u32)RI_N);
     CHECK_EQ(rx->n_nodes, nx->n_nodes);
@@ -2092,7 +2150,9 @@ static void deep_ri_walks(void) {
     }
     CHECK(nvar > DEEP / 3u);
     Term vars10[5];
-    for (u32 v = 0; v < 5u; v++) vars10[v] = term_new_fvr(10u + v);
+    for (u32 v = 0; v < 5u; v++) {
+      vars10[v] = term_new_fvr(10u + v);
+    }
     Term want = mk_deep(DEEP, 1u, term_new_fvr(14u), vars10, 1u);
     CHECK(term_eq_iter(atp_ri_build(flat, subsz, flatsym, 0u), want));
     u32 cap_fail = 0u;
@@ -2125,13 +2185,17 @@ static void deep_ri_walks(void) {
   {
     // Bind x_v to the subject-flat slice of vals[v].
     Term holder_kids[5];
-    for (u32 v = 0; v < 5u; v++) holder_kids[v] = vals[v];
+    for (u32 v = 0; v < 5u; v++) {
+      holder_kids[v] = vals[v];
+    }
     Term holder = term_new_ctr(30u, holder_kids, 5u);
     u8  fd = 0u;
     u32 hlen = 0u;
     CHECK(atp_ri_flatten(holder, flat, subsz, flatsym, &fd, BIG, &hlen));
     u32 star[ATP_DTREE_MAXVARS];
-    for (u32 v = 0; v < ATP_DTREE_MAXVARS; v++) star[v] = ATP_DTREE_NIL;
+    for (u32 v = 0; v < ATP_DTREE_MAXVARS; v++) {
+      star[v] = ATP_DTREE_NIL;
+    }
     u32 q = 1u;
     for (u32 v = 0; v < 5u; v++) { star[v] = q; q += subsz[q]; }
     u32 dlen = 0u;
@@ -2165,10 +2229,14 @@ static void deep_ri_walks(void) {
 
 // A structurally equal copy in fresh cells (shallow random terms only).
 static Term copy_term(Term t) {
-  if (term_tag(t) != TAG_CTR) return t;
+  if (term_tag(t) != TAG_CTR) {
+    return t;
+  }
   u32  n = term_ctr_n(t);
   Term kids[20];
-  for (u32 i = 0; i < n; i++) kids[i] = copy_term(term_ctr_at(t, i));
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = copy_term(term_ctr_at(t, i));
+  }
   return term_new_ctr(term_ext(t), kids, n);
 }
 
@@ -2187,7 +2255,9 @@ static Term generalize(u32 *seed, Term t) {
   }
   u32  n = term_ctr_n(t);
   Term kids[20];
-  for (u32 i = 0; i < n; i++) kids[i] = generalize(seed, term_ctr_at(t, i));
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = generalize(seed, term_ctr_at(t, i));
+  }
   return term_new_ctr(term_ext(t), kids, n);
 }
 
@@ -2203,9 +2273,13 @@ enum { LIB_N = 3000, LIB_RULES = 6 };
 static void pin_term_libs(u32 *seed) {
   Term *src  = (Term *)malloc(sizeof(Term) * LIB_N);
   Term *psrc = (Term *)malloc(sizeof(Term) * LIB_N);
-  for (u32 i = 0; i < LIB_N; i++) src[i] = mk_random(seed);
+  for (u32 i = 0; i < LIB_N; i++) {
+    src[i] = mk_random(seed);
+  }
   g_plain = 1u;
-  for (u32 i = 0; i < LIB_N; i++) psrc[i] = mk_random(seed);
+  for (u32 i = 0; i < LIB_N; i++) {
+    psrc[i] = mk_random(seed);
+  }
   g_plain = 0u;
 
   TEST_BEGIN("atp_deep/pin-kbo-eq");
@@ -2217,7 +2291,9 @@ static void pin_term_libs(u32 *seed) {
       for (u32 k = 0; k < 4u; k++) {
         u8 r = ref_kbo_eq(t, other[k]);
         u8 n = kbo_eq(t, other[k]);
-        if (r == n) ok++;
+        if (r == n) {
+          ok++;
+        }
         hits += n;
       }
     }
@@ -2233,17 +2309,23 @@ static void pin_term_libs(u32 *seed) {
       for (u32 i = 0; i < LIB_N; i++) {
         RewriteSubst inst;
         memset(&inst, 0, sizeof inst);
-        for (u32 v = 0; v < 10u; v++) inst.bindings[v] = mk_small(seed);
+        for (u32 v = 0; v < 10u; v++) {
+          inst.bindings[v] = mk_small(seed);
+        }
         Term s_inst = thvm_subst_apply(ts[i], &inst);
         Term subj[3] = { s_inst, ts[(i + 7u) % LIB_N], mk_mutant(seed, s_inst) };
         for (u32 k = 0; k < 3u; k++) {
           RewriteSubst rs, ns;
           memset(&rs, 0, sizeof rs);
-          if (k == 0u && (i & 3u) == 0u) rs.bindings[(i >> 2) % 10u] = inst.bindings[(i >> 2) % 10u];
+          if (k == 0u && (i & 3u) == 0u) {
+            rs.bindings[(i >> 2) % 10u] = inst.bindings[(i >> 2) % 10u];
+          }
           ns = rs;
           u8 r = ref_thvm_match(ts[i], subj[k], &rs);
           u8 n = thvm_match(ts[i], subj[k], &ns);
-          if (r == n && memcmp(&rs, &ns, sizeof rs) == 0) ok++;
+          if (r == n && memcmp(&rs, &ns, sizeof rs) == 0) {
+            ok++;
+          }
           hits += (u32)(c == 1u && k == 0u && n);
         }
       }
@@ -2261,7 +2343,9 @@ static void pin_term_libs(u32 *seed) {
       RewriteSubst sub;
       memset(&sub, 0, sizeof sub);
       for (u32 v = 0; v < 10u; v++) {
-        if (rng32(seed) & 1u) sub.bindings[v] = mk_small(seed);
+        if (rng32(seed) & 1u) {
+          sub.bindings[v] = mk_small(seed);
+        }
       }
       sub.bindings[63] = term_new_ctr(3u, NULL, 0u);
       u64 h0 = HEAP_NEXT;
@@ -2269,7 +2353,9 @@ static void pin_term_libs(u32 *seed) {
       u64 h1 = HEAP_NEXT;
       Term n = thvm_subst_apply(t, &sub);
       u64 h2 = HEAP_NEXT;
-      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) ok++;
+      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) {
+        ok++;
+      }
     }
     g_wide = 16u;
     CHECK_EQ(ok, (u32)LIB_N);
@@ -2292,9 +2378,13 @@ static void pin_term_libs(u32 *seed) {
           continue;
         }
         Term u = pick_sub(seed, (k == 1u) ? t : src[(i + k) % LIB_N]);
-        if (term_tag(u) != TAG_CTR) u = term_new_ctr(3u, NULL, 0u);
+        if (term_tag(u) != TAG_CTR) {
+          u = term_new_ctr(3u, NULL, 0u);
+        }
         lhs[k] = generalize(seed, u);
-        if (term_tag(lhs[k]) != TAG_CTR) lhs[k] = u;
+        if (term_tag(lhs[k]) != TAG_CTR) {
+          lhs[k] = u;
+        }
         rhs[k] = (rng32(seed) & 1u) ? term_new_fvr(rng32(seed) & 3u) : mk_small(seed);
       }
       u64 h0 = HEAP_NEXT;
@@ -2302,7 +2392,9 @@ static void pin_term_libs(u32 *seed) {
       u64 h1 = HEAP_NEXT;
       Term n = thvm_rewrite_step(t, lhs, rhs, LIB_RULES);
       u64 h2 = HEAP_NEXT;
-      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) ok++;
+      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) {
+        ok++;
+      }
       fired += (u32)(n != t);
     }
     CHECK_EQ(ok, (u32)LIB_N);
@@ -2427,7 +2519,9 @@ static void deep_term_libs(void) {
     RewriteSubst sub;
     memset(&sub, 0, sizeof sub);
     CHECK(thvm_match(pat, subj, &sub));
-    for (u32 v = 0; v < 5u; v++) CHECK(sub.bindings[v] == vals[v]);
+    for (u32 v = 0; v < 5u; v++) {
+      CHECK(sub.bindings[v] == vals[v]);
+    }
     RewriteSubst miss;
     memset(&miss, 0, sizeof miss);
     CHECK(!thvm_match(pat, near, &miss));
@@ -2451,7 +2545,9 @@ static void deep_term_libs(void) {
     RewriteSubst sub;
     memset(&sub, 0, sizeof sub);
     CHECK(thvm_unify(pat, subj, &sub));
-    for (u32 v = 0; v < 5u; v++) CHECK(kbo_eq(sub.bindings[v], vals[v]));
+    for (u32 v = 0; v < 5u; v++) {
+      CHECK(kbo_eq(sub.bindings[v], vals[v]));
+    }
     RewriteSubst occ;
     memset(&occ, 0, sizeof occ);
     CHECK(!thvm_unify(term_new_fvr(4u), pat, &occ));   // x4 sits at the bottom
@@ -2462,7 +2558,9 @@ static void deep_term_libs(void) {
   TEST_BEGIN("atp_deep/deep-rename-normalize");
   {
     Term vars10[5];
-    for (u32 v = 0; v < 5u; v++) vars10[v] = term_new_fvr(10u + v);
+    for (u32 v = 0; v < 5u; v++) {
+      vars10[v] = term_new_fvr(10u + v);
+    }
     CHECK(term_eq_iter(thvm_rename_vars(pat, 10u),
                        mk_deep(DEEP, 1u, term_new_fvr(14u), vars10, 1u)));
     Term l = thvm_rename_vars(pat, 10u), r = subj;
@@ -2501,7 +2599,9 @@ static void sort_spec_init(WaldSpec *ws) {
     sy->label = lab;
     sy->arity = (lab >> 1) % 3u;
     sy->result_sort = lab & 1u;
-    for (u32 i = 0; i < sy->arity; i++) sy->arg_sorts[i] = (lab >> (i + 1u)) & 1u;
+    for (u32 i = 0; i < sy->arity; i++) {
+      sy->arg_sorts[i] = (lab >> (i + 1u)) & 1u;
+    }
   }
   for (u32 v = 0; v < 10u; v++) {
     ws->vars[ws->n_vars].var_id = v;
@@ -2514,15 +2614,21 @@ static void sort_spec_init(WaldSpec *ws) {
 // broken by a wrong-sort argument.
 static Term mk_sorted(u32 *seed, u32 sort, u32 depth) {
   u32 r = rng32(seed);
-  if ((r & 63u) == 0u) sort ^= 1u;
+  if ((r & 63u) == 0u) {
+    sort ^= 1u;
+  }
   if (depth == 0u || (r & 3u) == 0u) {
-    if (r & 4u) return term_new_fvr(((r >> 3) % 5u) * 2u + sort);
+    if (r & 4u) {
+      return term_new_fvr(((r >> 3) % 5u) * 2u + sort);
+    }
     return term_new_ctr((r & 8u) ? 6u + sort : sort, NULL, 0u);
   }
   u32  lab = ((r >> 4) & 1u) ? 4u + sort : 2u + sort;
   u32  n   = (lab >> 1) % 3u;
   Term kids[2];
-  for (u32 i = 0; i < n; i++) kids[i] = mk_sorted(seed, (lab >> (i + 1u)) & 1u, depth - 1u);
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = mk_sorted(seed, (lab >> (i + 1u)) & 1u, depth - 1u);
+  }
   return term_new_ctr(lab, kids, n);
 }
 
@@ -2620,7 +2726,9 @@ static void pin_serialize(u32 *seed) {
       g_plain = 0u;
       RewriteSubst inst;
       memset(&inst, 0, sizeof inst);
-      for (u32 v = 0; v < 10u; v++) inst.bindings[v] = mk_small(seed);
+      for (u32 v = 0; v < 10u; v++) {
+        inst.bindings[v] = mk_small(seed);
+      }
       Term s = thvm_subst_apply(p, &inst);
       Term subj[3] = { s, mk_mutant(seed, s), mk_random(seed) };
       u32 nodes;
@@ -2632,7 +2740,9 @@ static void pin_serialize(u32 *seed) {
         const u8 *rp = nb, *np = nb;
         u8 r = ref_acp_match_term(&rp, subj[k], &rs);
         u8 n = acp_match_term(&np, subj[k], &ns);
-        if (r == n && rp == np && memcmp(&rs, &ns, sizeof rs) == 0) ok++;
+        if (r == n && rp == np && memcmp(&rs, &ns, sizeof rs) == 0) {
+          ok++;
+        }
         hits += (u32)((i & 1u) && k == 0u && n);
       }
     }
@@ -2715,7 +2825,9 @@ static void pin_serialize(u32 *seed) {
         memset(nb, 0x5a, (size_t)caps[k] + 8u);
         u32 r = ref_atp_pretty_term(t, (char *)rb, caps[k]);
         u32 n = atp_pretty_term(t, (char *)nb, caps[k]);
-        if (r == n && memcmp(rb, nb, (size_t)caps[k] + 8u) == 0) ok++;
+        if (r == n && memcmp(rb, nb, (size_t)caps[k] + 8u) == 0) {
+          ok++;
+        }
       }
     }
     g_wide = 16u;
@@ -2769,7 +2881,9 @@ static void pin_serialize(u32 *seed) {
       atp_cp_var_stats_rec(l, &ns, &nd, &no);
       (void)ref_atp_term_label_set(r, &rlb);
       (void)atp_term_label_set(r, &nlb);
-      if (same && rs == ns && rd == nd && ro == no && rlb == nlb) ok++;
+      if (same && rs == ns && rd == nd && ro == no && rlb == nlb) {
+        ok++;
+      }
     }
     g_hx.gsym = saved_gsym;
     g_hx.gsym_cap = saved_cap;
@@ -2820,7 +2934,9 @@ static void deep_serialize(void) {
     p = buf;
     CHECK(acp_match_term(&p, subj, &sub));
     CHECK(p == buf + pos);
-    for (u32 v = 0; v < 5u; v++) CHECK(sub.bindings[v] == vals[v]);
+    for (u32 v = 0; v < 5u; v++) {
+      CHECK(sub.bindings[v] == vals[v]);
+    }
   }
 
   TEST_BEGIN("atp_deep/deep-sjp-emit");
@@ -2936,9 +3052,13 @@ static AtpState *wo_state(u32 *seed) {
   (void)atp_push_rule(s, term_new_ctr(3u, xy, 2u), term_new_ctr(3u, yx, 2u));
   for (u32 k = 0; k < 10u; k++) {
     Term u = pick_sub(seed, mk_random(seed));
-    if (term_tag(u) != TAG_CTR || term_ctr_n(u) == 0u) continue;
+    if (term_tag(u) != TAG_CTR || term_ctr_n(u) == 0u) {
+      continue;
+    }
     Term l = generalize(seed, u);
-    if (term_tag(l) != TAG_CTR) continue;
+    if (term_tag(l) != TAG_CTR) {
+      continue;
+    }
     Term r = (rng32(seed) & 1u) ? term_new_fvr(rng32(seed) & 3u) : mk_small(seed);
     (void)atp_push_rule(s, l, r);
   }
@@ -3040,7 +3160,9 @@ static void pin_weight_order(u32 *seed) {
       g_plain = 0u;
       RewriteSubst base;
       memset(&base, 0, sizeof base);
-      if (i & 4u) base.bindings[1] = mk_small(seed);
+      if (i & 4u) {
+        base.bindings[1] = mk_small(seed);
+      }
       if (ref_atp_unif_measure_rec(t, u, d) == atp_unif_measure_rec(t, u, d) &&
           ref_atp_goal_match_cov(pat, t, base) == atp_goal_match_cov(pat, t, base) &&
           ref_atp_goal_doppel(pat, pr, t, u, base) == atp_goal_doppel(pat, pr, t, u, base)) {
@@ -3091,7 +3213,9 @@ static void pin_weight_order(u32 *seed) {
       u32 rm[8] = {0}, nm[8] = {0};
       ref_atp_sym_mask_collect(t, rm);
       atp_sym_mask_collect(t, nm);
-      for (u32 w = 0; w < 8u; w++) s->goal_sym_mask[w] = rng32(seed) & rng32(seed) & rng32(seed);
+      for (u32 w = 0; w < 8u; w++) {
+        s->goal_sym_mask[w] = rng32(seed) & rng32(seed) & rng32(seed);
+      }
       if (memcmp(rm, nm, sizeof rm) == 0 &&
           ref_atp_term_touches_goal(s, t) == atp_term_touches_goal(s, t)) {
         ok++;
@@ -3145,7 +3269,9 @@ static void pin_weight_order(u32 *seed) {
       u64 h1 = HEAP_NEXT;
       Term n = atp_ordered_rewrite_step(s, t, s->lhs, s->rhs, s->n_rules, &nf);
       u64 h2 = HEAP_NEXT;
-      if (rf == nf && heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) ok++;
+      if (rf == nf && heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) {
+        ok++;
+      }
       fired += nf;
     }
     CHECK_EQ(ok, (u32)WO_N);
@@ -3173,7 +3299,9 @@ static void pin_weight_order(u32 *seed) {
       (void)atp_conn_successors(s, peak, peak, nbuf, &nn, 64u);
       u64 g2 = HEAP_NEXT;
       same &= (u8)(rn == nn && heap_regions_same(g0, g1, g1, g2));
-      for (u32 k = 0; k < nn && same; k++) same &= (u8)(reloc(rbuf[k], g0, g1, g1) == nbuf[k]);
+      for (u32 k = 0; k < nn && same; k++) {
+        same &= (u8)(reloc(rbuf[k], g0, g1, g1) == nbuf[k]);
+      }
       ok += same;
     }
     CHECK_EQ(ok, (u32)WO_N / 2u);
@@ -3197,7 +3325,9 @@ static void pin_weight_order(u32 *seed) {
       }
       u8 rv = ref_atp_cp_perm_subsumed(l, r);
       u8 nv = atp_cp_perm_subsumed(l, r);
-      if (rv == nv) ok++;
+      if (rv == nv) {
+        ok++;
+      }
       hits += nv;
     }
     CHECK_EQ(ok, (u32)WO_N);
@@ -3215,7 +3345,9 @@ static void pin_weight_order(u32 *seed) {
       u64 h1 = HEAP_NEXT;
       Term n = atp_ic_rewrite_step(t, s->lhs, s->rhs, s->n_rules);
       u64 h2 = HEAP_NEXT;
-      if (h1 - h0 == h2 - h1 && kbo_eq(r, n) && ((r == t) == (n == t))) ok++;
+      if (h1 - h0 == h2 - h1 && kbo_eq(r, n) && ((r == t) == (n == t))) {
+        ok++;
+      }
     }
     CHECK_EQ(ok, (u32)WO_N / 4u);
   }
@@ -3302,7 +3434,9 @@ static void deep_weight_order(u32 *seed) {
     s->goal_sub_n = 0u;
     Term minc = term_new_ctr(2u, NULL, 0u);
     Term vars10[5];
-    for (u32 v = 0; v < 5u; v++) vars10[v] = (v == 2u) ? term_new_fvr(2u) : minc;
+    for (u32 v = 0; v < 5u; v++) {
+      vars10[v] = (v == 2u) ? term_new_fvr(2u) : minc;
+    }
     Term keep = term_new_fvr(2u);
     CHECK(term_eq_iter(atp_grounded_instance(s, pat, keep, minc),
                        mk_deep(DEEP, 1u, minc, vars10, 1u)));
@@ -4473,6 +4607,26 @@ static void pin_index_queue(u32 *seed) {
   thvm_atp_free(s);
 }
 
+// ref_wmo_dfs (about 4 KB of C stack a level) against wmo_dfs's
+// result, run on the reference stack from inside a deep block.
+typedef struct {
+  const WmoCell *qc;
+  u32            qn;
+  void          *root;
+  const WmoUnif *u;
+  WmoLeaf      **out;
+  u32            n_out;
+} WmoDfsVsRef;
+
+static void wmo_dfs_vs_ref(void *p) {
+  WmoDfsVsRef     *c = (WmoDfsVsRef *)p;
+  static WmoLeaf *rout[WMO_TOPS_ARR_CAP];
+  WmoDfs rd = { c->qc, c->qn, rout, 0u, WMO_TOPS_ARR_CAP };
+  ref_wmo_dfs(&rd, c->root, 0u, 0u, 0xffffffffu, c->u, 4000u);
+  CHECK_EQ(rd.n_out, c->n_out);
+  CHECK(memcmp(rout, c->out, (size_t)c->n_out * sizeof(WmoLeaf *)) == 0);
+}
+
 static void deep_index_queue(u32 *seed) {
   AtpState *s = wo_state(seed);
   atp_cp_seen_ensure(s);
@@ -4567,7 +4721,7 @@ static void deep_index_queue(u32 *seed) {
       wmo_register(w, k, 0u, 0u, cells, n, wmo_term_depth(f), 0u);
       nf++;
     }
-    static WmoLeaf *out[WMO_TOPS_ARR_CAP], *rout[WMO_TOPS_ARR_CAP];
+    static WmoLeaf *out[WMO_TOPS_ARR_CAP];
     WmoCell qc[WMO_MAX_CELLS];
     WmoUnif u;
     memset(&u, 0, sizeof u);
@@ -4580,10 +4734,8 @@ static void deep_index_queue(u32 *seed) {
       wmo_dfs(&d, w->tree[0].root, 0u, 0u, 0xffffffffu, &u, 4000u);
       CHECK_EQ(d.n_out, qwant[j]);
       if (j == 2u) {
-        WmoDfs rd = { qc, qn, rout, 0u, WMO_TOPS_ARR_CAP };
-        ref_wmo_dfs(&rd, w->tree[0].root, 0u, 0u, 0xffffffffu, &u, 4000u);
-        CHECK_EQ(rd.n_out, d.n_out);
-        CHECK(memcmp(rout, out, (size_t)d.n_out * sizeof(WmoLeaf *)) == 0);
+        WmoDfsVsRef rc = { qc, qn, w->tree[0].root, &u, out, d.n_out };
+        deep_stack_run(REF_STACK_BYTES, wmo_dfs_vs_ref, &rc);
       }
     }
     CHECK_EQ(nf, 42u);
@@ -4842,6 +4994,34 @@ static void pin_ac(u32 *seed) {
   ft_destroy(&a);
 }
 
+// The reference recursions of the AC walks (about 1 KB of C stack a
+// level) at 3,000 levels, run on the reference stack from inside the
+// deep blocks.
+typedef struct {
+  AtpAcInfo  *ac;
+  AtpFt      *a;
+  const Term *vals;
+  const Term *svals;
+  const Term *pbot;
+  Term        c9;
+} AcVsRef;
+
+static void ac_canon_eq_vs_ref(void *p) {
+  AcVsRef *m  = (AcVsRef *)p;
+  Term     mt = mk_deep(3000u, 1u, m->vals[4], m->vals, 1u);
+  Term     ms = mk_deep(3000u, 1u, m->svals[4], m->svals, 1u);
+  u64      h0 = HEAP_NEXT;
+  Term     r  = ref_atp_ac_canon_rec(ms, m->ac);
+  u64      h1 = HEAP_NEXT;
+  Term     n  = atp_ac_canon_rec(ms, m->ac);
+  u64      h2 = HEAP_NEXT;
+  CHECK(heap_regions_same(h0, h1, h1, h2));
+  CHECK(reloc(r, h0, h1, h1) == n);
+  AtpFtCell *mxt = ft_from_term(m->a, mt, 0);
+  AtpFtCell *mxs = ft_from_term(m->a, ms, 0);
+  CHECK_EQ(ft_ac_eq(mxt, mxs, m->ac), ref_ft_ac_eq(mxt, mxs, m->ac));
+}
+
 static void deep_ac(void) {
   AtpAcInfo ac;
   ac.ac_mask = AC_TEST_MASK;
@@ -4871,19 +5051,9 @@ static void deep_ac(void) {
     AtpFtCell *xn = ft_from_term(&a, near, 0);
     CHECK(ft_ac_eq(xt, xs, &ac));
     CHECK(!ft_ac_eq(xt, xn, &ac));
-    // A 3,000-deep spine stays within the reference recursions' reach.
-    Term mt = mk_deep(3000u, 1u, vals[4], vals, 1u);
-    Term ms = mk_deep(3000u, 1u, svals[4], svals, 1u);
-    u64  h0 = HEAP_NEXT;
-    Term r  = ref_atp_ac_canon_rec(ms, &ac);
-    u64  h1 = HEAP_NEXT;
-    Term n  = atp_ac_canon_rec(ms, &ac);
-    u64  h2 = HEAP_NEXT;
-    CHECK(heap_regions_same(h0, h1, h1, h2));
-    CHECK(reloc(r, h0, h1, h1) == n);
-    AtpFtCell *mxt = ft_from_term(&a, mt, 0);
-    AtpFtCell *mxs = ft_from_term(&a, ms, 0);
-    CHECK_EQ(ft_ac_eq(mxt, mxs, &ac), ref_ft_ac_eq(mxt, mxs, &ac));
+    // A 3,000-deep spine against the reference recursions, on their stack.
+    AcVsRef m = { &ac, &a, vals, svals, NULL, 0 };
+    deep_stack_run(REF_STACK_BYTES, ac_canon_eq_vs_ref, &m);
   }
 
   TEST_BEGIN("atp_deep/deep-ac-chain");
@@ -5018,7 +5188,9 @@ static u8 ref_ft_match_ac(AtpFt *a, const AtpFtCell *pat, const AtpFtCell *subj,
 
 // The watermark, the binding order and every binding slot.
 static int ft_subst_same(const AtpFtSubst *x, const AtpFtSubst *y) {
-  if (x->wm != y->wm) return 0;
+  if (x->wm != y->wm) {
+    return 0;
+  }
   if (memcmp(x->bound_ids, y->bound_ids, x->wm * sizeof x->bound_ids[0]) != 0) {
     return 0;
   }
@@ -5112,6 +5284,32 @@ static void pin_ac_match(void) {
   ft_destroy(&a);
 }
 
+static void ac_match_vs_ref(void *p) {
+  AcVsRef *m    = (AcVsRef *)p;
+  Term     pat  = mk_deep(3000u, 1u, *m->pbot, NULL, 1u);
+  Term     subj = mk_deep(3000u, 1u, m->vals[4], m->vals, 1u);
+  Term     bad  = mk_deep(3000u, 1u, m->c9, m->vals, 1u);
+  for (u32 k = 0; k < 2u; k++) {
+    Term s = k ? bad : subj;
+    RewriteSubst rs, ns;
+    memset(&rs, 0, sizeof rs);
+    memset(&ns, 0, sizeof ns);
+    CHECK_EQ(atp_match_ac(pat, s, m->ac, &ns), ref_atp_match_ac(pat, s, m->ac, &rs));
+    CHECK(memcmp(&rs, &ns, sizeof rs) == 0);
+    AtpFtCell *xp = ft_from_term(m->a, pat, 0);
+    AtpFtCell *xs = ft_from_term(m->a, s, 0);
+    AtpFtSubst fsr, fsn;
+    memset(&fsr, 0, sizeof fsr);
+    memset(&fsn, 0, sizeof fsn);
+    ft_scratch_reset(m->a);
+    u8 r = ref_ft_match_ac(m->a, xp, xs, m->ac, &fsr);
+    ft_scratch_reset(m->a);
+    CHECK_EQ(ft_match_ac(m->a, xp, xs, m->ac, &fsn), r);
+    CHECK(ft_subst_same(&fsr, &fsn));
+  }
+  ft_scratch_reset(m->a);
+}
+
 static void deep_ac_match(void) {
   AtpAcInfo ac;
   ac.ac_mask = AC_TEST_MASK;
@@ -5167,29 +5365,9 @@ static void deep_ac_match(void) {
 
   TEST_BEGIN("atp_deep/deep-ac-match-vs-ref");
   {
-    // 3,000 deep stays within the reference recursions' reach.
-    Term pat  = mk_deep(3000u, 1u, pbot, NULL, 1u);
-    Term subj = mk_deep(3000u, 1u, vals[4], vals, 1u);
-    Term bad  = mk_deep(3000u, 1u, c9, vals, 1u);
-    for (u32 k = 0; k < 2u; k++) {
-      Term s = k ? bad : subj;
-      RewriteSubst rs, ns;
-      memset(&rs, 0, sizeof rs);
-      memset(&ns, 0, sizeof ns);
-      CHECK_EQ(atp_match_ac(pat, s, &ac, &ns), ref_atp_match_ac(pat, s, &ac, &rs));
-      CHECK(memcmp(&rs, &ns, sizeof rs) == 0);
-      AtpFtCell *xp = ft_from_term(&a, pat, 0);
-      AtpFtCell *xs = ft_from_term(&a, s, 0);
-      AtpFtSubst fsr, fsn;
-      memset(&fsr, 0, sizeof fsr);
-      memset(&fsn, 0, sizeof fsn);
-      ft_scratch_reset(&a);
-      u8 r = ref_ft_match_ac(&a, xp, xs, &ac, &fsr);
-      ft_scratch_reset(&a);
-      CHECK_EQ(ft_match_ac(&a, xp, xs, &ac, &fsn), r);
-      CHECK(ft_subst_same(&fsr, &fsn));
-    }
-    ft_scratch_reset(&a);
+    // 3,000 deep against the reference recursions, on their stack.
+    AcVsRef m = { &ac, &a, vals, NULL, &pbot, c9 };
+    deep_stack_run(REF_STACK_BYTES, ac_match_vs_ref, &m);
   }
 
   ft_destroy(&a);
@@ -5411,14 +5589,22 @@ static void dt_prof_snap(DtProf *p) {
 // hand-off ended alike.
 static int dt_prof_same(const DtProf *a, const DtProf *b, const DtProf *c) {
   for (u32 i = 0; i < 14u; i++) {
-    if (b->c[i] - a->c[i] != c->c[i] - b->c[i]) return 0;
+    if (b->c[i] - a->c[i] != c->c[i] - b->c[i]) {
+      return 0;
+    }
   }
   for (u32 i = 0; i < ATP_DT_HIST_N; i++) {
-    if (b->hist[i] - a->hist[i] != c->hist[i] - b->hist[i]) return 0;
+    if (b->hist[i] - a->hist[i] != c->hist[i] - b->hist[i]) {
+      return 0;
+    }
   }
   for (u32 i = 0; i < ATP_DT_FAN_N; i++) {
-    if (b->fan_visit[i] - a->fan_visit[i] != c->fan_visit[i] - b->fan_visit[i]) return 0;
-    if (b->fan_edge[i] - a->fan_edge[i] != c->fan_edge[i] - b->fan_edge[i]) return 0;
+    if (b->fan_visit[i] - a->fan_visit[i] != c->fan_visit[i] - b->fan_visit[i]) {
+      return 0;
+    }
+    if (b->fan_edge[i] - a->fan_edge[i] != c->fan_edge[i] - b->fan_edge[i]) {
+      return 0;
+    }
   }
   return b->dp == c->dp;
 }
@@ -5471,7 +5657,9 @@ static int dt_query(FtPiIndex *ix, const AtpFtCell *p, u8 want, u8 pure,
     memcpy(r->snap, ix->dtb_snap, (size_t)r->n_snap * sizeof(const AtpFtCell *));
   }
   for (u32 k = 0; k < ATPFT_MAX_VARS; k++) {
-    if (bind[k] != NULL) return 0;
+    if (bind[k] != NULL) {
+      return 0;
+    }
   }
   return 1;
 }
@@ -5810,7 +5998,9 @@ static u64 kbo_memo_digest(void) {
   u64 h = 0xcbf29ce484222325ull;
   for (u32 i = 0; i < KBO_THASH_SIZE; i++) {
     const KboTHashEnt *e = &g_kbo_thash[i];
-    if (e->epoch != g_kbo_epoch) continue;
+    if (e->epoch != g_kbo_epoch) {
+      continue;
+    }
     h = (h ^ i) * 0x100000001b3ull;
     h = (h ^ (u64)e->t) * 0x100000001b3ull;
     h = (h ^ e->hash) * 0x100000001b3ull;
@@ -5818,7 +6008,9 @@ static u64 kbo_memo_digest(void) {
   }
   for (u32 i = 0; i < KBO_WMEMO_SIZE; i++) {
     const KboWMemoEnt *e = &g_kbo_wmemo[i];
-    if (e->epoch != g_kbo_epoch) continue;
+    if (e->epoch != g_kbo_epoch) {
+      continue;
+    }
     h = (h ^ i) * 0x100000001b3ull;
     h = (h ^ e->hash) * 0x100000001b3ull;
     h = (h ^ (u64)e->w) * 0x100000001b3ull;
@@ -5835,7 +6027,9 @@ static u64 kbo_memo_digest(void) {
 
 // The CTR subterms of a shallow term, preorder.
 static u32 ctr_subterms(Term t, Term *out, u32 n, u32 cap) {
-  if (term_tag(t) != TAG_CTR || n >= cap) return n;
+  if (term_tag(t) != TAG_CTR || n >= cap) {
+    return n;
+  }
   out[n++] = t;
   u32 k = term_ctr_n(t);
   for (u32 i = 0; i < k; i++) {
@@ -5848,7 +6042,9 @@ static u32 ctr_subterms(Term t, Term *out, u32 n, u32 cap) {
 // one, the weight slot it points at (wmemo).
 static void kbo_evict(Term u, u8 wmemo) {
   KboTHashEnt *th = &g_kbo_thash[kbo_thash_slot(u)];
-  if (th->epoch != g_kbo_epoch || th->t != u) return;
+  if (th->epoch != g_kbo_epoch || th->t != u) {
+    return;
+  }
   if (wmemo) {
     g_kbo_wmemo[th->wmemo_idx].hash ^= 1ull;
   } else {
@@ -6555,7 +6751,9 @@ static u64 lpo_memo_digest(void) {
   u64 h = 0xcbf29ce484222325ull;
   for (u32 i = 0; i < LPO_MEMO_SIZE; i++) {
     const LpoMemoEnt *e = &g_lpo_memo[i];
-    if (e->epoch != g_lpo_epoch) continue;
+    if (e->epoch != g_lpo_epoch) {
+      continue;
+    }
     h = (h ^ i) * 0x100000001b3ull;
     h = (h ^ (u64)e->s) * 0x100000001b3ull;
     h = (h ^ (u64)e->t) * 0x100000001b3ull;
@@ -6573,7 +6771,9 @@ static u64 lpo_flat_memo_digest(u32 n) {
       for (u8 side = 0; side < 2u; side++) {
         u32 i = lpo_flat_hash(pa, pb, side);
         const LpoFlatMemoEnt *e = &g_lpo_flat_memo[i];
-        if (e->epoch != g_lpo_flat_epoch) continue;
+        if (e->epoch != g_lpo_flat_epoch) {
+          continue;
+        }
         h = (h ^ i) * 0x100000001b3ull;
         h = (h ^ e->pa) * 0x100000001b3ull;
         h = (h ^ e->pb) * 0x100000001b3ull;
@@ -6825,6 +7025,52 @@ static void pin_lpo(u32 *seed) {
   free(ra);
 }
 
+// The LPO reference recursions (a few frames of about 100 bytes a
+// level) at 1,000-2,000 levels, run on the reference stack from inside
+// the deep blocks.
+typedef struct {
+  Term a;    // the chain's bottom
+  Term c;    // the constant it is compared with
+  u32  na;
+  u32  nb;   // c's flat encoding, already in g_lpo_flat_b
+} LpoVsRef;
+
+static void lpo_rec_vs_ref(void *p) {
+  LpoVsRef *m  = (LpoVsRef *)p;
+  Term      ma = mk_chain(2000u, 2u, m->a);
+  thvm_lpo_invalidate();
+  LpoCmp r  = ref_lpo_rec(ma, m->c, &g_lpo_cfg);
+  u64    rd = lpo_memo_digest();
+  thvm_lpo_invalidate();
+  LpoCmp n  = lpo_rec(ma, m->c, &g_lpo_cfg);
+  u64    nd = lpo_memo_digest();
+  CHECK_EQ(r, n);
+  CHECK_EQ(rd, nd);
+}
+
+static void lpo_flat_dag_vs_ref(void *p) {
+  LpoVsRef *m  = (LpoVsRef *)p;
+  u32       na = 0u;
+  CHECK(lpo_flat_encode_rec(mk_chain(1000u, 2u, m->a), &g_lpo_cfg, g_lpo_flat_a, &na));
+  lpo_flat_epoch_bump();
+  LpoCmp r  = ref_lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, &g_lpo_cfg);
+  u64    rd = lpo_flat_memo_digest(na);
+  lpo_flat_epoch_bump();
+  LpoCmp n  = lpo_flat_run(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, &g_lpo_cfg);
+  u64    nd = lpo_flat_memo_digest(na);
+  CHECK_EQ(r, n);
+  CHECK_EQ(rd, nd);
+  CHECK(lpo_dag_build(na, m->nb, &g_lpo_cfg));
+  r  = ref_lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
+  rd = lpo_dag_memo_digest();
+  CHECK(lpo_dag_build(na, m->nb, &g_lpo_cfg));
+  n  = lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
+  nd = lpo_dag_memo_digest();
+  CHECK_EQ(r, n);
+  CHECK_EQ(rd, nd);
+  CHECK_EQ(n, LPO_UN);
+}
+
 static void deep_lpo(u32 *seed) {
   (void)seed;
   lpo_cfg_init();
@@ -6876,16 +7122,9 @@ static void deep_lpo(u32 *seed) {
     CHECK_EQ(thvm_lpo(gb, c, &g_lpo_cfg), LPO_GT);
     CHECK_EQ(thvm_lpo(c, gb, &g_lpo_cfg), LPO_LT);
     CHECK_EQ(thvm_lpo(gb, gb, &g_lpo_cfg), LPO_EQ);
-    // 2,000 deep against the recursion.
-    Term ma = mk_chain(2000u, 2u, a);
-    thvm_lpo_invalidate();
-    LpoCmp r = ref_lpo_rec(ma, c, &g_lpo_cfg);
-    u64 rd = lpo_memo_digest();
-    thvm_lpo_invalidate();
-    LpoCmp n = lpo_rec(ma, c, &g_lpo_cfg);
-    u64 nd = lpo_memo_digest();
-    CHECK_EQ(r, n);
-    CHECK_EQ(rd, nd);
+    // 2,000 deep against the recursion, on its stack.
+    LpoVsRef m = { a, c, 0u, 0u };
+    deep_stack_run(REF_STACK_BYTES, lpo_rec_vs_ref, &m);
   }
 
   TEST_BEGIN("atp_deep/deep-lpo-dag-flat");
@@ -6901,54 +7140,39 @@ static void deep_lpo(u32 *seed) {
     CHECK(lpo_flat_encode_rec(mk_chain(3000u, 2u, a), &g_lpo_cfg, g_lpo_flat_a, &na));
     CHECK(lpo_flat_encode_rec(c, &g_lpo_cfg, g_lpo_flat_b, &nb));
     CHECK_EQ(lpo_flat_ref(&g_lpo_cfg), LPO_UN);
-    na = 0u;
-    CHECK(lpo_flat_encode_rec(mk_chain(1000u, 2u, a), &g_lpo_cfg, g_lpo_flat_a, &na));
-    lpo_flat_epoch_bump();
-    LpoCmp r = ref_lpo_flat_rec_compute(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, &g_lpo_cfg);
-    u64 rd = lpo_flat_memo_digest(na);
-    lpo_flat_epoch_bump();
-    LpoCmp n = lpo_flat_run(g_lpo_flat_a, 0u, g_lpo_flat_b, 0u, &g_lpo_cfg);
-    u64 nd = lpo_flat_memo_digest(na);
-    CHECK_EQ(r, n);
-    CHECK_EQ(rd, nd);
-    CHECK(lpo_dag_build(na, nb, &g_lpo_cfg));
-    r = ref_lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
-    rd = lpo_dag_memo_digest();
-    CHECK(lpo_dag_build(na, nb, &g_lpo_cfg));
-    n = lpo_dag_compute(g_ld_cls[0][0], g_ld_cls[1][0]);
-    nd = lpo_dag_memo_digest();
-    CHECK_EQ(r, n);
-    CHECK_EQ(rd, nd);
-    CHECK_EQ(n, LPO_UN);
+    LpoVsRef m = { a, c, 0u, nb };
+    deep_stack_run(REF_STACK_BYTES, lpo_flat_dag_vs_ref, &m);
   }
   lpo_cfg_init();
 }
 
 int main(void) {
   thvm_init();
+  TEST_BEGIN("atp_deep/negative-control");
+  CHECK(deep_stack_catches_recursion());
   u32 seed = 0x6c8e9cf5u;
   pin_ri_walks(&seed);
-  deep_ri_walks();
+  deep_stack_call(deep_ri_walks);
   pin_term_libs(&seed);
-  deep_term_libs();
+  deep_stack_call(deep_term_libs);
   pin_serialize(&seed);
-  deep_serialize();
+  deep_stack_call(deep_serialize);
   pin_weight_order(&seed);
-  deep_weight_order(&seed);
+  deep_stack_call_seed(deep_weight_order, &seed);
   pin_gc_gj(&seed);
-  deep_gc_gj(&seed);
+  deep_stack_call_seed(deep_gc_gj, &seed);
   pin_index_queue(&seed);
-  deep_index_queue(&seed);
+  deep_stack_call_seed(deep_index_queue, &seed);
   pin_ac(&seed);
-  deep_ac();
+  deep_stack_call(deep_ac);
   pin_ac_match();
-  deep_ac_match();
+  deep_stack_call(deep_ac_match);
   pin_ftdt(&seed);
-  deep_ftdt();
+  deep_stack_call(deep_ftdt);
   pin_kbo_memo(&seed);
-  deep_kbo_memo();
+  deep_stack_call(deep_kbo_memo);
   pin_lpo(&seed);
-  deep_lpo(&seed);
+  deep_stack_call_seed(deep_lpo, &seed);
   thvm_free();
   TEST_REPORT();
 }

@@ -395,6 +395,7 @@ TESTS := \
   $(BIN)/test_ft_deep \
   $(BIN)/test_atp_deep \
   $(BIN)/test_atp_cli_deep \
+  $(BIN)/test_atp_deep_cp \
   $(BIN)/test_ft_order \
   $(BIN)/test_atp_ft_rules \
   $(BIN)/test_atp_ft \
@@ -1079,15 +1080,31 @@ $(BIN)/test_atp_session_reuse: tests/test_atp_session_reuse.c \
 	  -o $@ $< $(TEST_LDFLAGS)
 
 # Deep-term walks pinned to their recursive originals, in FindProof's
-# configuration (AC and MNF compiled in).
-$(BIN)/test_atp_deep: tests/test_atp_deep.c $(SRC) | $(BIN)
+# configuration (AC and MNF compiled in).  test_ft_deep, test_atp_deep,
+# test_atp_cli_deep and test_atp_deep_cp build many 100,000-deep terms
+# and reserve a 512 MB reference thread stack (tests/deep_stack.h):
+# run them one at a time, never in parallel with other heavy jobs.
+# tools/atp_enigma/ftdeep_pod.sh runs them on a pod and records each
+# one's peak RSS; the G2.3 pod run lists them next to test_atp.
+$(BIN)/test_ft_deep: tests/test_ft_deep.c tests/deep_stack.h $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC -DATP_MNF \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+$(BIN)/test_atp_deep: tests/test_atp_deep.c tests/deep_stack.h $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
+	  -DTHVM_ATP_AC -DATP_MNF \
+	  -o $@ $< $(TEST_LDFLAGS)
+
+# The deep critical-pair push of the G0.1 crash rows, end to end.
+$(BIN)/test_atp_deep_cp: tests/test_atp_deep_cp.c tests/deep_stack.h $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_AC -DATP_MNF \
 	  -o $@ $< $(TEST_LDFLAGS)
 
 # FindProof's proof-output walks (tools/atp_cli/szs.c, tools/proof_check.c)
 # on deep terms, over FindProof's translation unit without its main.
-$(BIN)/test_atp_cli_deep: tests/test_atp_cli_deep.c tools/thvm_atp_cli.c \
+$(BIN)/test_atp_cli_deep: tests/test_atp_cli_deep.c tests/deep_stack.h tools/thvm_atp_cli.c \
     tools/proof_check.c $(wildcard tools/atp_cli/*.c) \
     tests/test_atp_wolfram_bench.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \

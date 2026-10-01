@@ -6,25 +6,25 @@
 // stack, so a term 100,000 levels deep converts Term -> span -> Term
 // (and hashes, compares, matches, copies, instantiates, unifies and
 // prints) where the recursive walks overflow the 8 MB C stack.  Those
-// recursive walks are kept below, verbatim, as references: on a few
-// thousand random terms the iterative walks must return the same values
-// and allocate the same arena cells and heap words in the same order
-// (the WM parity pins depend on the heap layout).
+// recursive walks are kept below, verbatim, as references.  The
+// iterative walks must return the same values and allocate the same
+// arena cells and heap words in the same order (the WM parity pins
+// depend on the heap layout) on three corpora: a few thousand random
+// terms at most 6 deep, a few hundred 60..3,000 deep (past the walks'
+// 64 inline frames, so the move of the frames to the heap is pinned
+// too), and one 100,000 deep, the last against the recursion on a 512 MB
+// thread stack.  The 100,000-deep blocks themselves run on a 1 MB stack
+// (tests/deep_stack.h), so a walk that slips back to recursion fails
+// whatever `ulimit -s` the machine has.
 
 #include "../src/thvm.c"
-
-#ifndef THVM_ATPFT_ALLOC
-#define THVM_ATPFT_ALLOC 1
-#endif
-#ifndef THVM_ATPFT_CONVERT
-#define THVM_ATPFT_CONVERT 1
-#endif
 
 #include "../src/atp/ft.h"
 #include "../src/atp/ft_alloc.c"
 #include "../src/atp/ft.c"
 
 #include "test.h"
+#include "deep_stack.h"
 
 // ---- Reference: the recursive walks, as ft.c had them -----------------
 
@@ -761,7 +761,9 @@ static u32 rng32(u32 *seed) {
 static u8 g_plain = 0u;
 static Term mk_leaf(u32 *seed) {
   u32 r = rng32(seed);
-  if (!g_plain && (r & 255u) == 0u) return term_new(0, TAG_ERA, 0, 0);
+  if (!g_plain && (r & 255u) == 0u) {
+    return term_new(0, TAG_ERA, 0, 0);
+  }
   switch ((r >> 6) % (g_plain ? 7u : 10u)) {
     case 0: case 1: case 2: case 3:
       return term_new_fvr((r >> 10) % 10u);
@@ -782,14 +784,20 @@ static Term mk_leaf(u32 *seed) {
 static Term mk_term(u32 *seed, u32 depth, u32 *budget) {
   u32 r = rng32(seed);
   if (depth == 0u || *budget == 0u || (r & 7u) < 2u) {
-    if (*budget > 0u) (*budget)--;
+    if (*budget > 0u) {
+      (*budget)--;
+    }
     return mk_leaf(seed);
   }
   (*budget)--;
   u32 n = 1u + ((r >> 9) % 3u);
-  if (depth == 1u && ((r >> 3) & 31u) == 0u) n = 17u + ((r >> 12) & 3u);
+  if (depth == 1u && ((r >> 3) & 31u) == 0u) {
+    n = 17u + ((r >> 12) & 3u);
+  }
   Term kids[20];
-  for (u32 i = 0; i < n; i++) kids[i] = mk_term(seed, depth - 1u, budget);
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = mk_term(seed, depth - 1u, budget);
+  }
   return term_new_ctr((r >> 14) % 12u, kids, n);
 }
 
@@ -804,11 +812,15 @@ static Term mk_mutant(u32 *seed, Term t) {
   u32 n = term_tag(t) == TAG_CTR ? term_ctr_n(t) : 0u;
   if (n == 0u || (r % 3u) == 0u) {
     Term leaf = mk_leaf(seed);
-    if (leaf == t) leaf = term_new_ctr(11u, NULL, 0u);
+    if (leaf == t) {
+      leaf = term_new_ctr(11u, NULL, 0u);
+    }
     return leaf;
   }
   Term kids[20];
-  for (u32 i = 0; i < n; i++) kids[i] = term_ctr_at(t, i);
+  for (u32 i = 0; i < n; i++) {
+    kids[i] = term_ctr_at(t, i);
+  }
   u32 k = (r >> 4) % n;
   kids[k] = mk_mutant(seed, kids[k]);
   return term_new_ctr(term_ext(t), kids, n);
@@ -816,27 +828,82 @@ static Term mk_mutant(u32 *seed, Term t) {
 
 // ---- Layout comparisons -------------------------------------------------
 
-static long cell_off(const AtpFtCell *c, const AtpFtCell *base) {
-  return c == NULL ? -1L : (long)((const char *)c - (const char *)base);
+// A cell's allocation rank in arena `a`: its index in the scratch region,
+// or, for a persistent cell, its slab's creation ordinal times the slab
+// size plus its index there (slabs are separate mallocs, so a raw
+// pointer offset means nothing past the first slab).  -1 for NULL, -2
+// for a cell the arena does not own.
+static long cell_rank(const AtpFt *a, const AtpFtCell *c) {
+  if (c == NULL) {
+    return -1L;
+  }
+  size_t      stride = ft_stride();
+  const char *p      = (const char *)c;
+  if (a->scratch_base != NULL && p >= (const char *)a->scratch_base &&
+      p < (const char *)a->scratch_end) {
+    return (long)((size_t)(p - (const char *)a->scratch_base) / stride);
+  }
+  long k = (long)a->n_blocks;
+  for (const AtpFtBlock *b = a->blocks; b != NULL; b = b->next_block) {
+    k--;
+    const char *lo = (const char *)b->cells;
+    if (p >= lo && p < lo + (size_t)ATPFT_CELLS_PER_BLOCK * stride) {
+      return (1L << 40) + k * (long)ATPFT_CELLS_PER_BLOCK +
+             (long)((size_t)(p - lo) / stride);
+    }
+  }
+  return -2L;
 }
 
-// Same preorder cells (sym / arity / flags) at the same offsets from
-// each arena's first cell, with the same next / end links: the two
-// walks built the same span AND allocated its cells in the same order.
-static int span_layout_same(const AtpFtCell *x, const AtpFtCell *xb,
-                            const AtpFtCell *y, const AtpFtCell *yb) {
+// The same allocation rank in their arenas, or the very same cell when
+// neither arena owns it.
+static int cells_same(const AtpFt *xa, const AtpFtCell *x,
+                      const AtpFt *ya, const AtpFtCell *y) {
+  long rx = cell_rank(xa, x);
+  long ry = cell_rank(ya, y);
+  if (rx == -2L && ry == -2L) {
+    return x == y;
+  }
+  return rx == ry;
+}
+
+// Same preorder cells (sym / arity / flags) at the same allocation
+// ranks, with the same next / end links: the two walks built the same
+// span AND allocated its cells in the same order.
+static int span_layout_same(const AtpFt *xa, const AtpFtCell *x,
+                            const AtpFt *ya, const AtpFtCell *y) {
   const AtpFtCell *px = x;
   const AtpFtCell *py = y;
   for (;;) {
-    if (px->sym != py->sym || px->arity != py->arity || px->flags != py->flags) return 0;
-    if (cell_off(px, xb) != cell_off(py, yb)) return 0;
-    if (cell_off(px->end, xb) != cell_off(py->end, yb)) return 0;
-    if (cell_off(px->next, xb) != cell_off(py->next, yb)) return 0;
-    if (px == x->end) return py == y->end;
-    if (py == y->end) return 0;
+    if (px->sym != py->sym || px->arity != py->arity || px->flags != py->flags) {
+      return 0;
+    }
+    if (!cells_same(xa, px, ya, py) || !cells_same(xa, px->end, ya, py->end) ||
+        !cells_same(xa, px->next, ya, py->next)) {
+      return 0;
+    }
+    if (px == x->end) {
+      return py == y->end;
+    }
+    if (py == y->end) {
+      return 0;
+    }
     px = px->next;
     py = py->next;
   }
+}
+
+// A fresh arena with its first cell (scratch or persistent) taken, as
+// the walks under test find it.  `reserve` > 0 pre-sizes the scratch
+// region so a mid-depth build never moves it: a move leaves the cells
+// built before it dangling, in the recursion and the iterative walk
+// alike.
+static void arena_open(AtpFt *a, int scratch, u32 reserve) {
+  ft_init(a);
+  if (scratch && reserve > 0u) {
+    ft_scratch_grow(a, reserve);
+  }
+  (void)(scratch ? ft_alloc_scratch(a) : ft_alloc_persistent(a));
 }
 
 // A CTR word pointing into [lo, hi) moved to the same offset from `to`.
@@ -849,9 +916,13 @@ static Term reloc(Term w, u64 lo, u64 hi, u64 to) {
 
 // Heap words [a0, a1) and [b0, b1) are the same allocation sequence.
 static int heap_regions_same(u64 a0, u64 a1, u64 b0, u64 b1) {
-  if (a1 - a0 != b1 - b0) return 0;
+  if (a1 - a0 != b1 - b0) {
+    return 0;
+  }
   for (u64 k = 0; k < a1 - a0; k++) {
-    if (reloc(heap_read(a0 + k), a0, a1, b0) != heap_read(b0 + k)) return 0;
+    if (reloc(heap_read(a0 + k), a0, a1, b0) != heap_read(b0 + k)) {
+      return 0;
+    }
   }
   return 1;
 }
@@ -869,13 +940,17 @@ static int term_eq_iter(Term a, Term b) {
     Term x = st[--n];
     if (term_tag(x) != term_tag(y) || term_ext(x) != term_ext(y)) { eq = 0; break; }
     if (term_tag(x) != TAG_CTR) {
-      if (term_val(x) != term_val(y) && term_tag(x) != TAG_FVR) eq = 0;
+      if (term_val(x) != term_val(y) && term_tag(x) != TAG_FVR) {
+        eq = 0;
+      }
       continue;
     }
     u32 k = term_ctr_n(x);
     if (k != term_ctr_n(y)) { eq = 0; break; }
     if (n + 2u * k > 2u * cap) {
-      while (n + 2u * k > 2u * cap) cap *= 2u;
+      while (n + 2u * k > 2u * cap) {
+        cap *= 2u;
+      }
       st = (Term *)realloc(st, 2u * cap * sizeof(Term));
     }
     for (u32 i = 0; i < k; i++) {
@@ -925,11 +1000,15 @@ static u64 term_hash_iter(Term t) {
         Fr *f = &st[n - 1u];
         f->h = (f->h ^ v) * 0x100000001b3ull;
         f->i++;
-        if (f->i < f->n) break;
+        if (f->i < f->n) {
+          break;
+        }
         v = f->h ^ ((u64)f->n * 0x9e3779b97f4a7c15ull);
         n--;
       }
-      if (n == 0u) break;
+      if (n == 0u) {
+        break;
+      }
     }
     t = term_ctr_at(st[n - 1u].t, st[n - 1u].i);
   }
@@ -961,7 +1040,9 @@ static u32 pretty_iter(Term t, char *buf, u32 cap) {
       w += (u32)snprintf(buf + w, cap - w, ")");
       n--;
     }
-    if (n == 0u) break;
+    if (n == 0u) {
+      break;
+    }
     st[n - 1u].i++;
     w += (u32)snprintf(buf + w, cap - w, ", ");
     t = term_ctr_at(st[n - 1u].t, st[n - 1u].i);
@@ -994,7 +1075,9 @@ static Term mk_deep(u32 depth, u32 lab, Term bottom, const Term *vals) {
 
 static u64 span_cells(const AtpFtCell *x) {
   u64 n = 1u;
-  for (const AtpFtCell *c = x; c != x->end; c = c->next) n++;
+  for (const AtpFtCell *c = x; c != x->end; c = c->next) {
+    n++;
+  }
   return n;
 }
 
@@ -1009,13 +1092,19 @@ static u64 term_cells_iter(Term t) {
     Term x = st[--n];
     if (term_tag(x) == TAG_NUM) { cells += 3u; continue; }
     cells++;
-    if (term_tag(x) != TAG_CTR) continue;
+    if (term_tag(x) != TAG_CTR) {
+      continue;
+    }
     u32 k = term_ctr_n(x);
     if (n + k > cap) {
-      while (n + k > cap) cap *= 2u;
+      while (n + k > cap) {
+        cap *= 2u;
+      }
       st = (Term *)realloc(st, cap * sizeof(Term));
     }
-    for (u32 i = 0; i < k; i++) st[n++] = term_ctr_at(x, i);
+    for (u32 i = 0; i < k; i++) {
+      st[n++] = term_ctr_at(x, i);
+    }
   }
   free(st);
   return cells;
@@ -1023,28 +1112,49 @@ static u64 term_cells_iter(Term t) {
 
 // ---- ft_match.c / ft_splice.c / ft_unify.c ------------------------------------
 
-// Cells a fresh arena has handed out since its sentinel `base`: the
-// offset of the next cell it allocates.
-static long arena_next_off(AtpFt *a, const AtpFtCell *base, int scratch) {
-  AtpFtCell *c = scratch ? ft_alloc_scratch(a) : ft_alloc_persistent(a);
-  return cell_off(c, base);
+// Same result (or both NULL) built from the same allocation sequence:
+// the next cell each arena hands out has the same rank.
+static int built_same(AtpFt *ra, const AtpFtCell *rx, AtpFt *na,
+                      const AtpFtCell *nx, int scratch) {
+  if ((rx == NULL) != (nx == NULL)) {
+    return 0;
+  }
+  if (rx != NULL && !span_layout_same(ra, rx, na, nx)) {
+    return 0;
+  }
+  AtpFtCell *rn = scratch ? ft_alloc_scratch(ra) : ft_alloc_persistent(ra);
+  AtpFtCell *nn = scratch ? ft_alloc_scratch(na) : ft_alloc_persistent(na);
+  return cell_rank(ra, rn) == cell_rank(na, nn);
 }
 
-// Same result (or both NULL) built from the same allocation sequence.
-static int built_same(AtpFt *ra, const AtpFtCell *rb, const AtpFtCell *rx,
-                      AtpFt *na, const AtpFtCell *nb, const AtpFtCell *nx,
-                      int scratch) {
-  if ((rx == NULL) != (nx == NULL)) return 0;
-  if (rx != NULL && !span_layout_same(rx, rb, nx, nb)) return 0;
-  return arena_next_off(ra, rb, scratch) == arena_next_off(na, nb, scratch);
+// Set while the pins run on the mid-depth corpus.
+static u8 g_mid = 0u;
+
+// The test name, tagged "@mid" on the mid-depth corpus.  TEST_BEGIN keeps
+// the pointer only until the next TEST_BEGIN, so one buffer serves.
+static const char *pin_name(const char *base) {
+  static char buf[128];
+  snprintf(buf, sizeof buf, "%s%s", base, g_mid ? "@mid" : "");
+  return buf;
+}
+
+// Scratch cells an instance of a template with `cells` cells can take:
+// each variable cell becomes at most one mk_ft_subst binding (a depth-2
+// term of at most 30 nodes, a NUM atom three cells).  0 off the
+// mid-depth corpus, whose terms fit the initial region.
+static u32 apply_reserve(u64 cells) {
+  return g_mid ? (u32)(96u * cells + 64u) : 0u;
 }
 
 // A substitution over spans: x_v -> a span of a small random term for
 // a random subset of v < 10 (plus x_62, so an id past nothing is bound).
+// On the mid-depth corpus every v < 10 is bound, so an instance of a
+// plain template (variables x_0..x_9 only) exists however many of them
+// a deep template holds.
 static void mk_ft_subst(u32 *seed, AtpFt *a, AtpFtSubst *fs) {
   memset(fs, 0, sizeof *fs);
   for (u32 v = 0; v < 10u; v++) {
-    if (rng32(seed) % 4u != 0u) {
+    if (g_mid || rng32(seed) % 4u != 0u) {
       u32 budget = 30u;
       fs->bind[v] = ft_from_term(a, mk_term(seed, 2u, &budget), 0);
       fs->bound_ids[fs->wm++] = v;
@@ -1054,22 +1164,23 @@ static void mk_ft_subst(u32 *seed, AtpFt *a, AtpFtSubst *fs) {
 
 enum { FTL_N = 2000 };
 
-static void pin_ft_layer(u32 *seed, AtpFt *sa, AtpFtCell **sp,
+static void pin_ft_layer(u32 *seed, u32 npin, AtpFt *sa, AtpFtCell **sp,
                          Term *psrc, AtpFtCell **psp) {
-  TEST_BEGIN("ft_deep/pin-ft-match-copy-apply");
+  u32 nl = npin < (u32)FTL_N ? npin : (u32)FTL_N;
+
+  TEST_BEGIN(pin_name("ft_deep/pin-ft-match-copy-apply"));
   {
     u32 ok = 0, built = 0;
-    for (u32 i = 0; i < FTL_N; i++) {
+    for (u32 i = 0; i < nl; i++) {
       AtpFtSubst fs;
       mk_ft_subst(seed, sa, &fs);
       const AtpFtCell *tmpl = (i & 1u) ? psp[i] : sp[i];
+      u32 rsv = apply_reserve(span_cells(tmpl));
       for (u32 k = 0; k < 8u; k++) {
         int scratch = (int)(k & 1u);
         AtpFt ra, na;
-        ft_init(&ra);
-        ft_init(&na);
-        AtpFtCell *rb = scratch ? ft_alloc_scratch(&ra) : ft_alloc_persistent(&ra);
-        AtpFtCell *nb = scratch ? ft_alloc_scratch(&na) : ft_alloc_persistent(&na);
+        arena_open(&ra, scratch, rsv);
+        arena_open(&na, scratch, rsv);
         AtpFtCell *rx, *nx;
         switch (k >> 1) {
           case 0:
@@ -1089,45 +1200,51 @@ static void pin_ft_layer(u32 *seed, AtpFt *sa, AtpFtCell **sp,
             nx = ft_subst_apply_pre(&na, tmpl, &fs, scratch);
             break;
         }
-        if (built_same(&ra, rb, rx, &na, nb, nx, scratch)) ok++;
+        if (built_same(&ra, rx, &na, nx, scratch)) {
+          ok++;
+        }
         built += (u32)(nx != NULL && k >= 4u);
         ft_destroy(&ra);
         ft_destroy(&na);
       }
     }
-    CHECK_EQ(ok, 8u * FTL_N);
-    CHECK(built > FTL_N / 4u);
+    CHECK_EQ(ok, 8u * nl);
+    CHECK(built > nl / 4u);
   }
 
-  TEST_BEGIN("ft_deep/pin-ft-splice");
+  TEST_BEGIN(pin_name("ft_deep/pin-ft-splice"));
   {
     u32 ok = 0;
-    for (u32 i = 0; i < FTL_N; i++) {
+    for (u32 i = 0; i < nl; i++) {
       AtpFtSubst fs;
       mk_ft_subst(seed, sa, &fs);
       const AtpFtCell *tmpl = (i & 1u) ? psp[i] : sp[i];
       for (u32 k = 0; k < 2u; k++) {
         AtpFt ra, na;
-        ft_init(&ra);
-        ft_init(&na);
-        AtpFtCell *rb = ft_alloc_persistent(&ra);
-        AtpFtCell *nb = ft_alloc_persistent(&na);
+        arena_open(&ra, 0, 0u);
+        arena_open(&na, 0, 0u);
         AtpFtCell *rx = k ? ref_ft_splice_build_rhs(&ra, tmpl, &fs)
                           : ref_ft_splice_deep_copy(&ra, tmpl);
         AtpFtCell *nx = k ? ft_splice_build_rhs(&na, tmpl, &fs)
                           : ft_splice_deep_copy(&na, tmpl);
-        if (built_same(&ra, rb, rx, &na, nb, nx, 0)) ok++;
+        if (built_same(&ra, rx, &na, nx, 0)) {
+          ok++;
+        }
         ft_destroy(&ra);
         ft_destroy(&na);
       }
     }
-    CHECK_EQ(ok, 2u * FTL_N);
+    CHECK_EQ(ok, 2u * nl);
   }
 
-  TEST_BEGIN("ft_deep/pin-ft-unify-occurs-apply");
+  TEST_BEGIN(pin_name("ft_deep/pin-ft-unify-occurs-apply"));
   {
+    // The mid-depth corpus applies in the persistent arena: a binding
+    // there can be a deep subterm copied at every occurrence, past any
+    // fixed scratch reserve.
+    int usc = g_mid ? 0 : 1;
     u32 ok = 0, hits = 0;
-    for (u32 i = 0; i < FTL_N; i++) {
+    for (u32 i = 0; i < nl; i++) {
       const AtpFtCell *s = psp[i];
       const AtpFtCell *t;
       switch (i % 4u) {
@@ -1142,7 +1259,7 @@ static void pin_ft_layer(u32 *seed, AtpFt *sa, AtpFtCell **sp,
           break;
         }
         case 1:
-          t = psp[(i + 1u) % FTL_N];
+          t = psp[(i + 1u) % nl];
           break;
         case 2:
           t = sp[i];
@@ -1160,19 +1277,19 @@ static void pin_ft_layer(u32 *seed, AtpFt *sa, AtpFtCell **sp,
       u32 id = rng32(seed) % 12u;
       same &= (u8)(ref_ft_unify_occurs(id, t, &rs) == ft_unify_occurs(id, t, &ns));
       AtpFt ra, na;
-      ft_init(&ra);
-      ft_init(&na);
-      AtpFtCell *rb = ft_alloc_scratch(&ra);
-      AtpFtCell *nb = ft_alloc_scratch(&na);
-      AtpFtCell *rx = ref_ft_unify_apply(&ra, s, &rs, 1);
-      AtpFtCell *nx = ft_unify_apply(&na, s, &ns, 1);
-      if (same && built_same(&ra, rb, rx, &na, nb, nx, 1)) ok++;
+      arena_open(&ra, usc, 0u);
+      arena_open(&na, usc, 0u);
+      AtpFtCell *rx = ref_ft_unify_apply(&ra, s, &rs, usc);
+      AtpFtCell *nx = ft_unify_apply(&na, s, &ns, usc);
+      if (same && built_same(&ra, rx, &na, nx, usc)) {
+        ok++;
+      }
       hits += (u32)(n != 0);
       ft_destroy(&ra);
       ft_destroy(&na);
     }
-    CHECK_EQ(ok, (u32)FTL_N);
-    CHECK(hits > FTL_N / 5u);
+    CHECK_EQ(ok, nl);
+    CHECK(hits > nl / 5u);
   }
 }
 
@@ -1207,7 +1324,9 @@ static void deep_ft_layer(AtpFt *da, Term pat, Term subj, const Term *vals) {
     memset(&us, 0, sizeof us);
     CHECK(ft_unify(xp, xs, &us));
     CHECK_EQ(us.wm, 5u);
-    for (u32 v = 0; v < 5u; v++) CHECK(us.bind[v] != NULL && ft_eq_term(us.bind[v], vals[v]));
+    for (u32 v = 0; v < 5u; v++) {
+      CHECK(us.bind[v] != NULL && ft_eq_term(us.bind[v], vals[v]));
+    }
     CHECK(ft_eq(ft_unify_apply(da, xp, &us, 0), xs));
     AtpFtSubst none;
     memset(&none, 0, sizeof none);
@@ -1218,109 +1337,150 @@ static void deep_ft_layer(AtpFt *da, Term pat, Term subj, const Term *vals) {
   }
 }
 
-int main(void) {
-  thvm_init();
+// ---- Mid-depth corpus ---------------------------------------------------
+
+// A random spine 65..3,000 levels deep (one term in eight 60..71, across
+// the walks' 64 inline frames): each level a node of arity 1..3 with the
+// spine at a random argument and a leaf or a small random term at the
+// others.  Past 64 levels every walk has moved its frames to the heap,
+// so the pins compare the inline-to-heap copy and every pointer the
+// walks re-derive after a reallocation against the recursion.
+static Term mk_mid(u32 *seed) {
+  u32 r     = rng32(seed);
+  u32 depth = ((r & 7u) == 0u) ? 60u + (r >> 3) % 12u : 65u + (r >> 3) % 2936u;
+  u32 budget = 8u;
+  Term t = mk_term(seed, 2u, &budget);
+  for (u32 k = 0; k < depth; k++) {
+    u32  q  = rng32(seed);
+    u32  n  = 1u + q % 3u;
+    u32  at = (q >> 2) % n;
+    Term kids[3];
+    for (u32 i = 0; i < n; i++) {
+      if (i == at) {
+        kids[i] = t;
+      } else if ((q >> (4u + i)) & 1u) {
+        kids[i] = mk_leaf(seed);
+      } else {
+        u32 b = 3u;
+        kids[i] = mk_term(seed, 2u, &b);
+      }
+    }
+    t = term_new_ctr((q >> 8) % 12u, kids, n);
+  }
+  return t;
+}
+
+// ---- Pins: the iterative walks equal the recursive ones ------------------
+
+typedef struct {
+  u32  *seed;
+  u32   n;
+  Term *src;    // random terms
+  Term *psrc;   // the same shape over variables x_0..x_9 and constants
+} PinCorpus;
+
+static void run_pins(void *p) {
+  PinCorpus *pc   = (PinCorpus *)p;
+  u32       *seed = pc->seed;
+  u32        npin = pc->n;
+  Term      *src  = pc->src;
+  Term      *psrc = pc->psrc;
   extern u8  g_atp_phase_detail;
   extern u64 g_ft_from_nodes;
   extern u64 g_ft_to_nodes;
 
-  enum { N_PIN = 3000 };
-  u32 seed = 0x2545f491u;
-  Term *src = (Term *)malloc(sizeof(Term) * N_PIN);
-  for (u32 i = 0; i < N_PIN; i++) src[i] = mk_random(&seed);
-
-  // ---- Pins: the iterative walks equal the recursive ones ----------------
   g_atp_phase_detail = 1u;   // also pin the per-node counters
 
-  TEST_BEGIN("ft_deep/pin-from-term-up");
+  TEST_BEGIN(pin_name("ft_deep/pin-from-term-up"));
   {
     u32 ok = 0;
-    for (u32 i = 0; i < N_PIN; i++) {
+    for (u32 i = 0; i < npin; i++) {
+      u32 rsv = g_mid ? (u32)term_cells_iter(src[i]) + 64u : 0u;
       for (int scratch = 0; scratch < 2; scratch++) {
         AtpFt ra, na;
-        ft_init(&ra);
-        ft_init(&na);
-        AtpFtCell *rb = scratch ? ft_alloc_scratch(&ra) : ft_alloc_persistent(&ra);
-        AtpFtCell *nb = scratch ? ft_alloc_scratch(&na) : ft_alloc_persistent(&na);
+        arena_open(&ra, scratch, rsv);
+        arena_open(&na, scratch, rsv);
         u64 c0 = g_ft_from_nodes;
         AtpFtCell *rx = ref_ft_from_term_rec(&ra, src[i], scratch);
         u64 c1 = g_ft_from_nodes;
         AtpFtCell *nx = ft_from_term_up(&na, src[i], scratch);
         u64 c2 = g_ft_from_nodes;
-        if (span_layout_same(rx, rb, nx, nb) && c1 - c0 == c2 - c1) ok++;
+        if (span_layout_same(&ra, rx, &na, nx) && c1 - c0 == c2 - c1) {
+          ok++;
+        }
         ft_destroy(&ra);
         ft_destroy(&na);
       }
     }
-    CHECK_EQ(ok, 2u * N_PIN);
+    CHECK_EQ(ok, 2u * npin);
   }
 
-  TEST_BEGIN("ft_deep/pin-from-term-pre");
+  TEST_BEGIN(pin_name("ft_deep/pin-from-term-pre"));
   {
     u32 ok = 0;
-    for (u32 i = 0; i < N_PIN; i++) {
+    for (u32 i = 0; i < npin; i++) {
+      u32 rsv = g_mid ? (u32)term_cells_iter(src[i]) + 64u : 0u;
       for (int scratch = 0; scratch < 2; scratch++) {
         AtpFt ra, na;
-        ft_init(&ra);
-        ft_init(&na);
-        AtpFtCell *rb = scratch ? ft_alloc_scratch(&ra) : ft_alloc_persistent(&ra);
-        AtpFtCell *nb = scratch ? ft_alloc_scratch(&na) : ft_alloc_persistent(&na);
+        arena_open(&ra, scratch, rsv);
+        arena_open(&na, scratch, rsv);
         u64 c0 = g_ft_from_nodes;
         AtpFtCell *rx = ref_ft_from_term_pre(&ra, src[i], scratch);
         u64 c1 = g_ft_from_nodes;
         AtpFtCell *nx = ft_from_term_pre(&na, src[i], scratch);
         u64 c2 = g_ft_from_nodes;
-        if (span_layout_same(rx, rb, nx, nb) && c1 - c0 == c2 - c1) ok++;
+        if (span_layout_same(&ra, rx, &na, nx) && c1 - c0 == c2 - c1) {
+          ok++;
+        }
         ft_destroy(&ra);
         ft_destroy(&na);
       }
     }
-    CHECK_EQ(ok, 2u * N_PIN);
+    CHECK_EQ(ok, 2u * npin);
   }
 
-  // Spans of the corpus for the span-side walks, in one arena, plus a
+  // Spans of the corpus for the span-side walks, in one arena, plus the
   // corpus of variable / constant patterns whose instances match.
   AtpFt sa;
   ft_init(&sa);
-  AtpFtCell **sp = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * N_PIN);
-  for (u32 i = 0; i < N_PIN; i++) sp[i] = ft_from_term(&sa, src[i], 0);
-  Term       *psrc = (Term *)malloc(sizeof(Term) * N_PIN);
-  AtpFtCell **psp  = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * N_PIN);
-  g_plain = 1u;
-  for (u32 i = 0; i < N_PIN; i++) {
-    psrc[i] = mk_random(&seed);
-    psp[i]  = ft_from_term(&sa, psrc[i], 0);
+  AtpFtCell **sp  = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * npin);
+  AtpFtCell **psp = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * npin);
+  for (u32 i = 0; i < npin; i++) {
+    sp[i] = ft_from_term(&sa, src[i], 0);
   }
-  g_plain = 0u;
+  for (u32 i = 0; i < npin; i++) {
+    psp[i] = ft_from_term(&sa, psrc[i], 0);
+  }
 
-  TEST_BEGIN("ft_deep/pin-clone-rename-span");
+  TEST_BEGIN(pin_name("ft_deep/pin-clone-rename-span"));
   {
     static const u32 offs[3] = { 0u, 3u, 70u };
     u32 ok = 0;
-    for (u32 i = 0; i < N_PIN; i++) {
+    for (u32 i = 0; i < npin; i++) {
+      u32 rsv = g_mid ? (u32)span_cells(sp[i]) + 64u : 0u;
       for (u32 k = 0; k < 4u; k++) {
         AtpFt ra, na;
-        ft_init(&ra);
-        ft_init(&na);
         int scratch = (int)(i & 1u);
-        AtpFtCell *rb = scratch ? ft_alloc_scratch(&ra) : ft_alloc_persistent(&ra);
-        AtpFtCell *nb = scratch ? ft_alloc_scratch(&na) : ft_alloc_persistent(&na);
+        arena_open(&ra, scratch, rsv);
+        arena_open(&na, scratch, rsv);
         AtpFtCell *rx = k == 3u ? ref_ft_clone_span(&ra, sp[i], scratch)
                                 : ref_ft_rename_span(&ra, sp[i], offs[k], scratch);
         AtpFtCell *nx = k == 3u ? ft_clone_span(&na, sp[i], scratch)
                                 : ft_rename_span(&na, sp[i], offs[k], scratch);
-        if (span_layout_same(rx, rb, nx, nb)) ok++;
+        if (span_layout_same(&ra, rx, &na, nx)) {
+          ok++;
+        }
         ft_destroy(&ra);
         ft_destroy(&na);
       }
     }
-    CHECK_EQ(ok, 4u * N_PIN);
+    CHECK_EQ(ok, 4u * npin);
   }
 
-  TEST_BEGIN("ft_deep/pin-to-term-heap-layout");
+  TEST_BEGIN(pin_name("ft_deep/pin-to-term-heap-layout"));
   {
     u32 ok = 0;
-    for (u32 i = 0; i < N_PIN; i++) {
+    for (u32 i = 0; i < npin; i++) {
       u64 h0 = HEAP_NEXT;
       u64 c0 = g_ft_to_nodes;
       Term r = ref_ft_to_term_rec(sp[i]);
@@ -1334,42 +1494,44 @@ int main(void) {
         ok++;
       }
     }
-    CHECK_EQ(ok, (u32)N_PIN);
+    CHECK_EQ(ok, npin);
   }
 
   g_atp_phase_detail = 0u;
 
-  TEST_BEGIN("ft_deep/pin-eq-term");
+  TEST_BEGIN(pin_name("ft_deep/pin-eq-term"));
   {
     u32 ok = 0, hits = 0;
-    for (u32 i = 0; i < N_PIN; i++) {
-      Term other[3] = { src[i], src[(i + 1u) % N_PIN], mk_mutant(&seed, src[i]) };
+    for (u32 i = 0; i < npin; i++) {
+      Term other[3] = { src[i], src[(i + 1u) % npin], mk_mutant(seed, src[i]) };
       for (u32 k = 0; k < 3u; k++) {
         int r = ref_ft_eq_term(sp[i], other[k]);
         int n = ft_eq_term(sp[i], other[k]);
-        if (r == n) ok++;
+        if (r == n) {
+          ok++;
+        }
         hits += (u32)(n != 0);
       }
     }
-    CHECK_EQ(ok, 3u * N_PIN);
-    CHECK(hits >= (u32)N_PIN / 2u);
+    CHECK_EQ(ok, 3u * npin);
+    CHECK(hits >= npin / 2u);
   }
 
-  TEST_BEGIN("ft_deep/pin-match-term");
+  TEST_BEGIN(pin_name("ft_deep/pin-match-term"));
   {
     u32 ok = 0, hits = 0;
     for (u32 c = 0; c < 2u; c++) {
       Term       *ts = c ? psrc : src;
       AtpFtCell **ss = c ? psp  : sp;
-      for (u32 i = 0; i < N_PIN; i++) {
+      for (u32 i = 0; i < npin; i++) {
         RewriteSubst inst;
         memset(&inst, 0, sizeof inst);
         for (u32 v = 0; v < 10u; v++) {
           u32 budget = 30u;
-          inst.bindings[v] = mk_term(&seed, 2u, &budget);
+          inst.bindings[v] = mk_term(seed, 2u, &budget);
         }
         Term s_inst = thvm_subst_apply(ts[i], &inst);
-        Term subj[3] = { s_inst, ts[(i + 7u) % N_PIN], mk_mutant(&seed, s_inst) };
+        Term subj[3] = { s_inst, ts[(i + 7u) % npin], mk_mutant(seed, s_inst) };
         for (u32 k = 0; k < 3u; k++) {
           RewriteSubst rs, ns;
           memset(&rs, 0, sizeof rs);
@@ -1379,25 +1541,27 @@ int main(void) {
           ns = rs;
           int r = ref_ft_match_term(ss[i], subj[k], &rs);
           int n = ft_match_term(ss[i], subj[k], &ns);
-          if (r == n && memcmp(&rs, &ns, sizeof rs) == 0) ok++;
+          if (r == n && memcmp(&rs, &ns, sizeof rs) == 0) {
+            ok++;
+          }
           hits += (u32)(c == 1u && k == 0u && n != 0);
         }
       }
     }
-    CHECK_EQ(ok, 6u * N_PIN);
-    CHECK_EQ(hits, (u32)N_PIN);
+    CHECK_EQ(ok, 6u * npin);
+    CHECK_EQ(hits, npin);
   }
 
-  TEST_BEGIN("ft_deep/pin-subst-apply-term-heap-layout");
+  TEST_BEGIN(pin_name("ft_deep/pin-subst-apply-term-heap-layout"));
   {
     u32 ok = 0;
-    for (u32 i = 0; i < N_PIN; i++) {
+    for (u32 i = 0; i < npin; i++) {
       RewriteSubst sub;
       memset(&sub, 0, sizeof sub);
       for (u32 v = 0; v < 10u; v++) {
-        if (rng32(&seed) & 1u) {
+        if (rng32(seed) & 1u) {
           u32 budget = 30u;
-          sub.bindings[v] = mk_term(&seed, 2u, &budget);
+          sub.bindings[v] = mk_term(seed, 2u, &budget);
         }
       }
       sub.bindings[62] = term_new_ctr(3u, NULL, 0u);
@@ -1406,22 +1570,26 @@ int main(void) {
       u64 h1 = HEAP_NEXT;
       Term n = ft_subst_apply_term(sp[i], &sub);
       u64 h2 = HEAP_NEXT;
-      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) ok++;
+      if (heap_regions_same(h0, h1, h1, h2) && reloc(r, h0, h1, h1) == n) {
+        ok++;
+      }
     }
-    CHECK_EQ(ok, (u32)N_PIN);
+    CHECK_EQ(ok, npin);
   }
 
-  TEST_BEGIN("ft_deep/pin-hash");
+  TEST_BEGIN(pin_name("ft_deep/pin-hash"));
   {
     u32 ok = 0;
-    for (u32 i = 0; i < N_PIN; i++) {
-      if (ref_ft_hash(sp[i]) == ft_hash(sp[i])) ok++;
+    for (u32 i = 0; i < npin; i++) {
+      if (ref_ft_hash(sp[i]) == ft_hash(sp[i])) {
+        ok++;
+      }
     }
-    CHECK_EQ(ok, (u32)N_PIN);
+    CHECK_EQ(ok, npin);
     CHECK_EQ(ref_ft_hash(NULL), ft_hash(NULL));
   }
 
-  TEST_BEGIN("ft_deep/pin-pretty");
+  TEST_BEGIN(pin_name("ft_deep/pin-pretty"));
   {
     static const u32 caps[14] = { 0u, 1u, 2u, 3u, 4u, 5u, 7u, 8u, 13u, 16u,
                                   33u, 128u, 1024u, 65536u };
@@ -1429,16 +1597,18 @@ int main(void) {
     char *rbuf = (char *)malloc(PBUF);
     char *nbuf = (char *)malloc(PBUF);
     u32 ok = 0;
-    for (u32 i = 0; i < N_PIN; i++) {
+    for (u32 i = 0; i < npin; i++) {
       for (u32 k = 0; k < 14u; k++) {
         memset(rbuf, 0x5a, (size_t)caps[k] + 8u);
         memset(nbuf, 0x5a, (size_t)caps[k] + 8u);
         u32 r = ref_atp_pretty_ft(sp[i], rbuf, caps[k]);
         u32 n = atp_pretty_ft(sp[i], nbuf, caps[k]);
-        if (r == n && memcmp(rbuf, nbuf, (size_t)caps[k] + 8u) == 0) ok++;
+        if (r == n && memcmp(rbuf, nbuf, (size_t)caps[k] + 8u) == 0) {
+          ok++;
+        }
       }
     }
-    CHECK_EQ(ok, 14u * N_PIN);
+    CHECK_EQ(ok, 14u * npin);
     memset(rbuf, 0x5a, PBUF);
     memset(nbuf, 0x5a, PBUF);
     CHECK_EQ(ref_atp_pretty_ft(NULL, rbuf, 64u), atp_pretty_ft(NULL, nbuf, 64u));
@@ -1447,21 +1617,190 @@ int main(void) {
     free(nbuf);
   }
 
-  pin_ft_layer(&seed, &sa, sp, psrc, psp);
+  pin_ft_layer(seed, npin, &sa, sp, psrc, psp);
 
-  // ---- A 100,000-deep term, both ways ------------------------------------
-  enum { DEEP = 100000 };
+  ft_destroy(&sa);
+  free(psp);
+  free(sp);
+}
+
+// ---- A 100,000-deep term ------------------------------------------------
+
+typedef struct {
+  Term pat;    // x_v leaves, x_4 at the bottom
+  Term subj;   // pat with x_v := vals[v]
+  Term near;   // subj with a different bottom
   Term vals[5];
-  for (u32 v = 0; v < 5u; v++) {
-    Term kid = term_new_ctr(9u, NULL, 0u);
-    vals[v] = term_new_ctr(20u + v, &kid, v & 1u);
+} DeepTerms;
+
+// The 100,000-deep term against the recursion, on REF_STACK_BYTES: the
+// same cells, heap words and counters in the same order at full depth,
+// not only at the depths the pins reach.
+static void deep_vs_recursion(void *p) {
+  const DeepTerms *d = (const DeepTerms *)p;
+  extern u8  g_atp_phase_detail;
+  extern u64 g_ft_from_nodes;
+  extern u64 g_ft_to_nodes;
+  g_atp_phase_detail = 1u;
+
+  TEST_BEGIN("ft_deep/deep-vs-recursion-from-term");
+  {
+    for (int pre = 0; pre < 2; pre++) {
+      AtpFt ra, na;
+      arena_open(&ra, 0, 0u);
+      arena_open(&na, 0, 0u);
+      u64 c0 = g_ft_from_nodes;
+      AtpFtCell *rx = pre ? ref_ft_from_term_pre(&ra, d->subj, 0)
+                          : ref_ft_from_term_rec(&ra, d->subj, 0);
+      u64 c1 = g_ft_from_nodes;
+      AtpFtCell *nx = pre ? ft_from_term_pre(&na, d->subj, 0)
+                          : ft_from_term_up(&na, d->subj, 0);
+      u64 c2 = g_ft_from_nodes;
+      CHECK(span_layout_same(&ra, rx, &na, nx));
+      CHECK_EQ(c1 - c0, c2 - c1);
+      CHECK(ra.n_blocks > 1u);   // past one slab: the ranks span slabs
+      ft_destroy(&ra);
+      ft_destroy(&na);
+    }
   }
-  Term pat  = mk_deep(DEEP, 1u, term_new_fvr(4u), NULL);
-  Term subj = mk_deep(DEEP, 1u, vals[4], vals);
-  Term near = mk_deep(DEEP, 1u, vals[3], vals);   // differs only at the bottom
+
+  AtpFt sa;
+  ft_init(&sa);
+  AtpFtCell *xs = ft_from_term(&sa, d->subj, 0);
+  AtpFtCell *xp = ft_from_term(&sa, d->pat, 0);
+
+  TEST_BEGIN("ft_deep/deep-vs-recursion-to-term-heap-layout");
+  {
+    u64 h0 = HEAP_NEXT;
+    u64 c0 = g_ft_to_nodes;
+    Term r = ref_ft_to_term_rec(xs);
+    u64 h1 = HEAP_NEXT;
+    u64 c1 = g_ft_to_nodes;
+    Term n = ft_to_term(xs);
+    u64 h2 = HEAP_NEXT;
+    u64 c2 = g_ft_to_nodes;
+    CHECK(heap_regions_same(h0, h1, h1, h2));
+    CHECK(reloc(r, h0, h1, h1) == n);
+    CHECK_EQ(c1 - c0, c2 - c1);
+  }
+
+  g_atp_phase_detail = 0u;
+
+  TEST_BEGIN("ft_deep/deep-vs-recursion-subst-apply-term-heap-layout");
+  {
+    RewriteSubst sub;
+    memset(&sub, 0, sizeof sub);
+    for (u32 v = 0; v < 5u; v++) {
+      sub.bindings[v] = d->vals[v];
+    }
+    u64 h0 = HEAP_NEXT;
+    Term r = ref_ft_subst_apply_term(xp, &sub);
+    u64 h1 = HEAP_NEXT;
+    Term n = ft_subst_apply_term(xp, &sub);
+    u64 h2 = HEAP_NEXT;
+    CHECK(heap_regions_same(h0, h1, h1, h2));
+    CHECK(reloc(r, h0, h1, h1) == n);
+  }
+
+  TEST_BEGIN("ft_deep/deep-vs-recursion-span-walks");
+  {
+    for (u32 k = 0; k < 2u; k++) {
+      AtpFt ra, na;
+      arena_open(&ra, 0, 0u);
+      arena_open(&na, 0, 0u);
+      AtpFtCell *rx = k ? ref_ft_rename_span(&ra, xp, 10u, 0) : ref_ft_clone_span(&ra, xs, 0);
+      AtpFtCell *nx = k ? ft_rename_span(&na, xp, 10u, 0) : ft_clone_span(&na, xs, 0);
+      CHECK(span_layout_same(&ra, rx, &na, nx));
+      ft_destroy(&ra);
+      ft_destroy(&na);
+    }
+    CHECK_EQ(ref_ft_hash(xs), ft_hash(xs));
+    CHECK_EQ(ref_ft_hash(xp), ft_hash(xp));
+    CHECK_EQ(ref_ft_eq_term(xs, d->subj), ft_eq_term(xs, d->subj));
+    CHECK_EQ(ref_ft_eq_term(xs, d->near), ft_eq_term(xs, d->near));
+    for (u32 k = 0; k < 2u; k++) {
+      Term s = k ? d->near : d->subj;
+      RewriteSubst rs, ns;
+      memset(&rs, 0, sizeof rs);
+      memset(&ns, 0, sizeof ns);
+      CHECK_EQ(ref_ft_match_term(xp, s, &rs), ft_match_term(xp, s, &ns));
+      CHECK(memcmp(&rs, &ns, sizeof rs) == 0);
+    }
+  }
+
+  TEST_BEGIN("ft_deep/deep-vs-recursion-ft-layer");
+  {
+    AtpFtSubst fs;
+    memset(&fs, 0, sizeof fs);
+    for (u32 v = 0; v < 5u; v++) {
+      fs.bind[v] = ft_from_term(&sa, d->vals[v], 0);
+      fs.bound_ids[fs.wm++] = v;
+    }
+    for (u32 k = 0; k < 6u; k++) {
+      AtpFt ra, na;
+      arena_open(&ra, 0, 0u);
+      arena_open(&na, 0, 0u);
+      AtpFtCell *rx, *nx;
+      switch (k) {
+        case 0:
+          rx = ref_ft_deep_copy_rec(&ra, xs, 0);
+          nx = ft_deep_copy_rec(&na, xs, 0);
+          break;
+        case 1:
+          rx = ref_ft_deep_copy_pre(&ra, xs, 0);
+          nx = ft_deep_copy_pre(&na, xs, 0);
+          break;
+        case 2:
+          rx = ref_ft_subst_apply_rec(&ra, xp, &fs, 0);
+          nx = ft_subst_apply_rec(&na, xp, &fs, 0);
+          break;
+        case 3:
+          rx = ref_ft_subst_apply_pre(&ra, xp, &fs, 0);
+          nx = ft_subst_apply_pre(&na, xp, &fs, 0);
+          break;
+        case 4:
+          rx = ref_ft_splice_deep_copy(&ra, xs);
+          nx = ft_splice_deep_copy(&na, xs);
+          break;
+        default:
+          rx = ref_ft_splice_build_rhs(&ra, xp, &fs);
+          nx = ft_splice_build_rhs(&na, xp, &fs);
+          break;
+      }
+      CHECK(nx != NULL);
+      CHECK(built_same(&ra, rx, &na, nx, 0));
+      ft_destroy(&ra);
+      ft_destroy(&na);
+    }
+    AtpFtSubst rs, ns;
+    memset(&rs, 0, sizeof rs);
+    memset(&ns, 0, sizeof ns);
+    CHECK_EQ(ref_ft_unify(xp, xs, &rs), ft_unify(xp, xs, &ns));
+    CHECK(memcmp(&rs, &ns, sizeof rs) == 0);
+    CHECK_EQ(ref_ft_unify_occurs(4u, xp, &rs), ft_unify_occurs(4u, xp, &ns));
+    AtpFt ra, na;
+    arena_open(&ra, 0, 0u);
+    arena_open(&na, 0, 0u);
+    AtpFtCell *rx = ref_ft_unify_apply(&ra, xp, &rs, 0);
+    AtpFtCell *nx = ft_unify_apply(&na, xp, &ns, 0);
+    CHECK(built_same(&ra, rx, &na, nx, 0));
+    ft_destroy(&ra);
+    ft_destroy(&na);
+  }
+
+  ft_destroy(&sa);
+}
+
+// The 100,000-deep blocks, on DEEP_STACK_BYTES.
+static void deep_blocks(void *p) {
+  const DeepTerms *d    = (const DeepTerms *)p;
+  enum { DEEP = DEEP_LEVELS };
+  Term             pat  = d->pat;
+  Term             subj = d->subj;
+  Term             near = d->near;
+  const Term      *vals = d->vals;
   AtpFt da;
   ft_init(&da);
-
   TEST_BEGIN("ft_deep/deep-from-to-term");
   {
     AtpFtCell *xs = ft_from_term(&da, subj, 0);
@@ -1484,7 +1823,9 @@ int main(void) {
     // Pre-grow the scratch region so the conversion never moves it.
     AtpFt sc;
     ft_init(&sc);
-    for (u32 k = 0; k < 4u * DEEP; k++) (void)ft_alloc_scratch(&sc);
+    for (u32 k = 0; k < 4u * DEEP; k++) {
+      (void)ft_alloc_scratch(&sc);
+    }
     ft_scratch_reset(&sc);
     AtpFtCell *xs = ft_from_term(&sc, subj, 1);
     CHECK(ft_eq(xs, up));
@@ -1505,8 +1846,12 @@ int main(void) {
     for (;;) {
       cells++;
       u32 want = ft_is_var(p) ? (WF_VAR_BIT | (ft_var_id(p) + 10u)) : p->sym;
-      if (q->sym == want && q->arity == p->arity) same++;
-      if (p == xp->end) break;
+      if (q->sym == want && q->arity == p->arity) {
+        same++;
+      }
+      if (p == xp->end) {
+        break;
+      }
       p = p->next;
       q = q->next;
     }
@@ -1520,7 +1865,9 @@ int main(void) {
     RewriteSubst sub;
     memset(&sub, 0, sizeof sub);
     CHECK(ft_match_term(xp, subj, &sub));
-    for (u32 v = 0; v < 5u; v++) CHECK(sub.bindings[v] == vals[v]);
+    for (u32 v = 0; v < 5u; v++) {
+      CHECK(sub.bindings[v] == vals[v]);
+    }
     RewriteSubst miss;
     memset(&miss, 0, sizeof miss);
     CHECK(!ft_match_term(xp, near, &miss));
@@ -1558,10 +1905,60 @@ int main(void) {
   deep_ft_layer(&da, pat, subj, vals);
 
   ft_destroy(&da);
-  ft_destroy(&sa);
-  free(psp);
+}
+
+int main(void) {
+  thvm_init();
+
+  TEST_BEGIN("ft_deep/negative-control");
+  CHECK(deep_stack_catches_recursion());
+
+  enum { N_PIN = 3000, N_MID = 300 };
+  u32 seed = 0x2545f491u;
+  Term *src  = (Term *)malloc(sizeof(Term) * N_PIN);
+  Term *psrc = (Term *)malloc(sizeof(Term) * N_PIN);
+  for (u32 i = 0; i < N_PIN; i++) {
+    src[i] = mk_random(&seed);
+  }
+  g_plain = 1u;
+  for (u32 i = 0; i < N_PIN; i++) {
+    psrc[i] = mk_random(&seed);
+  }
+  g_plain = 0u;
+  PinCorpus shallow = { &seed, N_PIN, src, psrc };
+  run_pins(&shallow);
+
+  // The same pins on a few hundred mid-depth terms, on a stack that
+  // holds the reference recursions at 3,000 levels on any machine.
+  Term *msrc  = (Term *)malloc(sizeof(Term) * N_MID);
+  Term *mpsrc = (Term *)malloc(sizeof(Term) * N_MID);
+  for (u32 i = 0; i < N_MID; i++) {
+    msrc[i] = mk_mid(&seed);
+  }
+  g_plain = 1u;
+  for (u32 i = 0; i < N_MID; i++) {
+    mpsrc[i] = mk_mid(&seed);
+  }
+  g_plain = 0u;
+  PinCorpus mid = { &seed, N_MID, msrc, mpsrc };
+  g_mid = 1u;
+  deep_stack_run(REF_STACK_BYTES, run_pins, &mid);
+  g_mid = 0u;
+
+  DeepTerms d;
+  for (u32 v = 0; v < 5u; v++) {
+    Term kid = term_new_ctr(9u, NULL, 0u);
+    d.vals[v] = term_new_ctr(20u + v, &kid, v & 1u);
+  }
+  d.pat  = mk_deep(DEEP_LEVELS, 1u, term_new_fvr(4u), NULL);
+  d.subj = mk_deep(DEEP_LEVELS, 1u, d.vals[4], d.vals);
+  d.near = mk_deep(DEEP_LEVELS, 1u, d.vals[3], d.vals);   // differs only at the bottom
+  deep_stack_run(REF_STACK_BYTES, deep_vs_recursion, &d);
+  deep_stack_run(DEEP_STACK_BYTES, deep_blocks, &d);
+
+  free(mpsrc);
+  free(msrc);
   free(psrc);
-  free(sp);
   free(src);
   thvm_free();
   TEST_REPORT();
