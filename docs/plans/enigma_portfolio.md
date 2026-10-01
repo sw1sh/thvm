@@ -658,6 +658,8 @@ What is running now:
 | matrix_tables.py             | dfb13207ae82afa7cb3b443abe3b1aac170f601d2d5fc94d55ace422859ba475 (627aabb2) | 2026-10-02 |
 | WDEP and delta per wall      | at L0           | |
 | section 5.3 outputs          | ~/.cache/thvm/enigma/matrix/decisions_5_3.txt; summary below | 2026-10-02 |
+| synthetic -10 encoder (D1)   | tools/atp_cli/ifeq10.c (FindProof --emit-ifeq10), a port of jukebox horn-to-unit [CS18], not tools/atp_cli/fof_prepass.c as M2 deliverable 5 says: fof_prepass encodes for proving (one dispatcher, a false != true goal), while TPTP's -10 files have one dispatcher per type pair and keep the source's goals. A record, not a gate amendment; the user to confirm that it is within D1's wording ("from our FOF front end") | 2026-10-02 |
+| synthetic -10 corpus         | at its pod run: manifest.tsv sha256, FindProof sha256 and its ifeq10 pass file, TPTP release (v9.3.1) | |
 
 Section 5.3 outputs (2026-10-02, from the sealed matrix; train and held-out only):
 - Pool: TRAIN 664 problems, VBS at 60 s 550 (528 within 1 s), best single lane twee-raw 488, greedy cover reaches the union at k = 9. HELDOUT 171: VBS 143, best lane twee / twee-raw 134, union at k = 3. G0.1 passes (56,810 of 56,810 rows; 24 crashes, 0.062%).
