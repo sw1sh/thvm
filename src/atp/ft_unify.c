@@ -56,19 +56,42 @@ static const AtpFtCell *ft_unify_walk(const AtpFtCell *t,
 // Does the variable `var_id` (after walking) appear anywhere in `t`?
 static u8 ft_unify_occurs(u32 var_id, const AtpFtCell *t,
                           const AtpFtSubst *s) {
-  t = ft_unify_walk(t, s);
-  if (t == NULL) return 0;
-  if (ft_u_is_var(t)) {
-    return ft_u_var_id(t) == var_id;
+  // Open CTRs on an explicit stack: `child` is the next (unwalked)
+  // child cell, `left` how many remain.
+  typedef struct { const AtpFtCell *child; u32 left; } OccFrame;
+  OccFrame  fr_inl[FT_WALK_INL];
+  OccFrame *fr  = fr_inl;
+  u32       nfr = 0u;
+  u32       cfr = FT_WALK_INL;
+  u8        hit = 0u;
+  for (;;) {
+    t = ft_unify_walk(t, s);
+    if (t != NULL) {
+      if (ft_u_is_var(t)) {
+        hit = (u8)(ft_u_var_id(t) == var_id);
+      } else if (t->arity > 0u) {
+        // CTR: scan children via the next/end sibling stride.
+        if (nfr == cfr) {
+          fr = (OccFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].child = t->next;
+        fr[nfr].left  = t->arity;
+        nfr++;
+      }
+    }
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      nfr--;
+    }
+    if (hit || nfr == 0u) {
+      break;
+    }
+    OccFrame *f = &fr[nfr - 1u];
+    t        = f->child;
+    f->child = t->end->next;
+    f->left--;
   }
-  // CTR: scan children via the next/end sibling stride.
-  u16 arity = t->arity;
-  const AtpFtCell *c = t->next;
-  for (u16 i = 0; i < arity; i++) {
-    if (ft_unify_occurs(var_id, c, s)) return 1;
-    c = c->end->next;
-  }
-  return 0;
+  term_stack_release(fr, fr_inl);
+  return hit;
 }
 
 // --- Bind helper: install a fresh binding, updating bound_ids[] ------
@@ -90,53 +113,83 @@ static inline void ft_unify_bind(AtpFtSubst *s, u32 id,
 // substitution accumulates incrementally and `bound_ids[]` records
 // every id installed so the caller can rewind via ft_subst_reset.
 int ft_unify(const AtpFtCell *s, const AtpFtCell *t, AtpFtSubst *subst) {
-  if (s == NULL || t == NULL) return 0;
-  s = ft_unify_walk(s, subst);
-  t = ft_unify_walk(t, subst);
-  // Same cell after walking -> definitely equal (no work).
-  if (s == t) return 1;
-
-  int s_is_var = ft_u_is_var(s);
-  int t_is_var = ft_u_is_var(t);
-
-  // Two variables: bind the lower-id (or s -> t) without occurs check.
-  if (s_is_var && t_is_var) {
-    u32 sid = ft_u_var_id(s);
-    u32 tid = ft_u_var_id(t);
-    if (sid == tid) return 1;
-    if (sid >= ATPFT_MAX_VARS) return 0;
-    ft_unify_bind(subst, sid, t);
-    return 1;
+  // Open CTR pairs on an explicit stack: `sc` / `tc` are the next
+  // children of the two (walked) parents, `left` how many remain.
+  typedef struct { const AtpFtCell *sc; const AtpFtCell *tc; u32 left; } UniFrame;
+  UniFrame  fr_inl[FT_WALK_INL];
+  UniFrame *fr  = fr_inl;
+  u32       nfr = 0u;
+  u32       cfr = FT_WALK_INL;
+  int       ok  = 1;
+  for (;;) {
+    if (s == NULL || t == NULL) {
+      ok = 0;
+      break;
+    }
+    s = ft_unify_walk(s, subst);
+    t = ft_unify_walk(t, subst);
+    // Same cell after walking -> definitely equal (no work).
+    if (s != t) {
+      int s_is_var = ft_u_is_var(s);
+      int t_is_var = ft_u_is_var(t);
+      if (s_is_var && t_is_var) {
+        // Two variables: bind the lower-id (or s -> t) without occurs check.
+        u32 sid = ft_u_var_id(s);
+        u32 tid = ft_u_var_id(t);
+        if (sid != tid) {
+          if (sid >= ATPFT_MAX_VARS) {
+            ok = 0;
+            break;
+          }
+          ft_unify_bind(subst, sid, t);
+        }
+      } else if (s_is_var) {
+        u32 id = ft_u_var_id(s);
+        if (id >= ATPFT_MAX_VARS || ft_unify_occurs(id, t, subst)) {
+          ok = 0;
+          break;
+        }
+        ft_unify_bind(subst, id, t);
+      } else if (t_is_var) {
+        u32 id = ft_u_var_id(t);
+        if (id >= ATPFT_MAX_VARS || ft_unify_occurs(id, s, subst)) {
+          ok = 0;
+          break;
+        }
+        ft_unify_bind(subst, id, s);
+      } else {
+        // Both CTR: heads must match (sym + arity), then each child
+        // pair via the AtpFt sibling stride.
+        if (s->sym != t->sym || s->arity != t->arity) {
+          ok = 0;
+          break;
+        }
+        if (s->arity > 0u) {
+          if (nfr == cfr) {
+            fr = (UniFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+          }
+          fr[nfr].sc   = s->next;
+          fr[nfr].tc   = t->next;
+          fr[nfr].left = s->arity;
+          nfr++;
+        }
+      }
+    }
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    UniFrame *f = &fr[nfr - 1u];
+    s     = f->sc;
+    t     = f->tc;
+    f->sc = s->end->next;
+    f->tc = t->end->next;
+    f->left--;
   }
-
-  if (s_is_var) {
-    u32 id = ft_u_var_id(s);
-    if (id >= ATPFT_MAX_VARS) return 0;
-    if (ft_unify_occurs(id, t, subst)) return 0;
-    ft_unify_bind(subst, id, t);
-    return 1;
-  }
-  if (t_is_var) {
-    u32 id = ft_u_var_id(t);
-    if (id >= ATPFT_MAX_VARS) return 0;
-    if (ft_unify_occurs(id, s, subst)) return 0;
-    ft_unify_bind(subst, id, s);
-    return 1;
-  }
-
-  // Both CTR: heads must match (sym + arity), then recurse on each
-  // child pair via the AtpFt sibling stride.
-  if (s->sym != t->sym) return 0;
-  if (s->arity != t->arity) return 0;
-  u16 arity = s->arity;
-  const AtpFtCell *sc = s->next;
-  const AtpFtCell *tc = t->next;
-  for (u16 i = 0; i < arity; i++) {
-    if (!ft_unify(sc, tc, subst)) return 0;
-    sc = sc->end->next;
-    tc = tc->end->next;
-  }
-  return 1;
+  term_stack_release(fr, fr_inl);
+  return ok;
 }
 
 // --- ft_unify_apply ---------------------------------------------------
@@ -154,44 +207,68 @@ extern AtpFtCell *ftnew_const(AtpFt *a, u32 sym, int scratch);
 extern AtpFtCell *ftnew_ctr  (AtpFt *a, u32 sym, u16 arity,
                               AtpFtCell *const *kids, int scratch);
 
-#define FT_UNIFY_APPLY_KIDS_STACK 16u
 
 AtpFtCell *ft_unify_apply(AtpFt *a, const AtpFtCell *t,
                           const AtpFtSubst *s, int scratch) {
-  if (t == NULL) return NULL;
-  t = ft_unify_walk(t, s);
-  if (t == NULL) return NULL;
-  if (ft_u_is_var(t)) {
-    // Walked to an unbound var -- emit a fresh var cell with the id.
-    return ftnew_var(a, ft_u_var_id(t), scratch);
-  }
-  u32 sym   = t->sym;
-  u16 arity = t->arity;
-  if (arity == 0u) {
-    return ftnew_const(a, sym, scratch);
-  }
-  AtpFtCell *stack_kids[FT_UNIFY_APPLY_KIDS_STACK];
-  AtpFtCell **kids = stack_kids;
-  AtpFtCell **heap_kids = NULL;
-  if (arity > FT_UNIFY_APPLY_KIDS_STACK) {
-    heap_kids = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
-    if (heap_kids == NULL) {
-      fprintf(stderr, "ft_unify_apply: kids OOM\n");
-      exit(1);
+  // Bottom-up over an explicit stack: children (of the WALKED cell) are
+  // built before ftnew_ctr stitches them, the recursion's order.
+  FtSpanFrame  fr_inl[FT_WALK_INL];
+  AtpFtCell   *val_inl[FT_WALK_INL];
+  FtSpanFrame *fr   = fr_inl;
+  AtpFtCell  **val  = val_inl;
+  u32          nfr  = 0u;
+  u32          cfr  = FT_WALK_INL;
+  u32          nval = 0u;
+  u32          cval = FT_WALK_INL;
+  AtpFtCell   *out  = NULL;
+  for (;;) {
+    if (t == NULL) {
+      break;
     }
-    kids = heap_kids;
-  }
-  const AtpFtCell *child = t->next;
-  for (u16 i = 0; i < arity; i++) {
-    kids[i] = ft_unify_apply(a, child, s, scratch);
-    if (kids[i] == NULL) {
-      free(heap_kids);
-      return NULL;
+    t = ft_unify_walk(t, s);
+    if (t == NULL) {
+      break;
     }
-    child = child->end->next;
+    AtpFtCell *done = NULL;
+    if (ft_u_is_var(t)) {
+      // Walked to an unbound var -- emit a fresh var cell with the id.
+      done = ftnew_var(a, ft_u_var_id(t), scratch);
+    } else if (t->arity == 0u) {
+      done = ftnew_const(a, t->sym, scratch);
+    } else {
+      if (nfr == cfr) {
+        fr = (FtSpanFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].child = t->next;
+      fr[nfr].left  = t->arity;
+      fr[nfr].sym   = t->sym;
+      fr[nfr].arity = t->arity;
+      nfr++;
+    }
+    if (done != NULL) {
+      if (nval == cval) {
+        val = (AtpFtCell **)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = done;
+    }
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      FtSpanFrame *f = &fr[nfr - 1u];
+      nval -= f->arity;
+      val[nval] = ftnew_ctr(a, f->sym, (u16)f->arity, &val[nval], scratch);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      out = val[0];
+      break;
+    }
+    FtSpanFrame *f = &fr[nfr - 1u];
+    t        = f->child;
+    f->child = t->end->next;
+    f->left--;
   }
-  AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, scratch);
-  free(heap_kids);
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
   return out;
 }
 

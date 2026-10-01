@@ -1,14 +1,15 @@
-// test_ft_deep.c - the ft.c walks on deep terms, pinned to the
+// test_ft_deep.c - the flatterm walks on deep terms, pinned to the
 // recursion they replaced.
 //
-// Every walk in src/atp/ft.c keeps an explicit work stack, so a term
-// 100,000 levels deep converts Term -> span -> Term (and hashes,
-// compares, matches, copies, instantiates and prints) where the
-// recursive walks overflow the 8 MB C stack.  Those recursive walks are
-// kept below, verbatim, as references: on a few thousand random terms
-// the iterative walks must return the same values and allocate the
-// same arena cells and heap words in the same order (the WM parity
-// pins depend on the heap layout).
+// Every walk in src/atp/ft.c, and the copy / instantiate / unify walks
+// of ft_match.c, ft_splice.c and ft_unify.c, keeps an explicit work
+// stack, so a term 100,000 levels deep converts Term -> span -> Term
+// (and hashes, compares, matches, copies, instantiates, unifies and
+// prints) where the recursive walks overflow the 8 MB C stack.  Those
+// recursive walks are kept below, verbatim, as references: on a few
+// thousand random terms the iterative walks must return the same values
+// and allocate the same arena cells and heap words in the same order
+// (the WM parity pins depend on the heap layout).
 
 #include "../src/thvm.c"
 
@@ -395,6 +396,352 @@ static u32 ref_atp_pretty_ft(const AtpFtCell *x, char *buf, u32 cap) {
   return ref_atp_pretty_ft_rec(x, buf, cap);
 }
 
+// The kid-buffer sizes the recursive FT builders used.
+#define ATPFT_APPLY_KIDS_STACK    16u
+#define FT_SPLICE_KIDS_STACK      16u
+#define FT_UNIFY_APPLY_KIDS_STACK 16u
+
+// src/atp/ft_match.c:232
+static AtpFtCell *ref_ft_deep_copy_rec(AtpFt *a, const AtpFtCell *src, int scratch) {
+  if (src == NULL) return NULL;
+  if (ft_m_is_var(src)) {
+    return ftnew_var(a, ft_m_var_id(src), scratch);
+  }
+  u32 sym   = src->sym;
+  u16 arity = src->arity;
+  if (arity == 0u) {
+    return ftnew_const(a, sym, scratch);
+  }
+  AtpFtCell *stack_kids[ATPFT_APPLY_KIDS_STACK];
+  AtpFtCell **kids = stack_kids;
+  AtpFtCell **heap_kids = NULL;
+  if (arity > ATPFT_APPLY_KIDS_STACK) {
+    heap_kids = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
+    if (heap_kids == NULL) {
+      fprintf(stderr, "ft_subst_apply/deep_copy: kids OOM\n");
+      exit(1);
+    }
+    kids = heap_kids;
+  }
+  const AtpFtCell *child = src->next;
+  for (u16 i = 0; i < arity; i++) {
+    kids[i] = ref_ft_deep_copy_rec(a, child, scratch);
+    child   = child->end->next;
+  }
+  AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, scratch);
+  free(heap_kids);
+  return out;
+}
+
+// src/atp/ft_match.c:263
+static AtpFtCell *ref_ft_subst_apply_rec(AtpFt *a, const AtpFtCell *tmpl,
+                                     const AtpFtSubst *s, int scratch) {
+  if (tmpl == NULL) return NULL;
+  if (ft_m_is_var(tmpl)) {
+    u32 id = ft_m_var_id(tmpl);
+    if (id >= ATPFT_MAX_VARS) return NULL;
+    AtpFtCell *binding = s->bind[id];
+    if (binding == NULL) return NULL;
+    return ref_ft_deep_copy_rec(a, binding, scratch);
+  }
+  u32 sym   = tmpl->sym;
+  u16 arity = tmpl->arity;
+  if (arity == 0u) {
+    return ftnew_const(a, sym, scratch);
+  }
+  AtpFtCell *stack_kids[ATPFT_APPLY_KIDS_STACK];
+  AtpFtCell **kids = stack_kids;
+  AtpFtCell **heap_kids = NULL;
+  if (arity > ATPFT_APPLY_KIDS_STACK) {
+    heap_kids = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
+    if (heap_kids == NULL) {
+      fprintf(stderr, "ft_subst_apply: kids OOM\n");
+      exit(1);
+    }
+    kids = heap_kids;
+  }
+  const AtpFtCell *child = tmpl->next;
+  for (u16 i = 0; i < arity; i++) {
+    AtpFtCell *kid = ref_ft_subst_apply_rec(a, child, s, scratch);
+    if (kid == NULL) {
+      // Bubble the NULL up -- defensive bail-out for an unbound var
+      // referenced by tmpl.  Frees the heap kid buffer if used.
+      free(heap_kids);
+      return NULL;
+    }
+    kids[i] = kid;
+    child   = child->end->next;
+  }
+  AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, scratch);
+  free(heap_kids);
+  return out;
+}
+
+// src/atp/ft_match.c:318
+static AtpFtCell *ref_ft_deep_copy_pre(AtpFt *a, const AtpFtCell *src, int scratch) {
+  if (src == NULL) return NULL;
+  if (ft_m_is_var(src)) {
+    AtpFtCell *c = ft_alloc_one(a, scratch);
+    c->next = NULL; c->end = c;
+    c->sym = WF_VAR_BIT | (ft_m_var_id(src) & ~WF_VAR_BIT);
+    c->arity = 0; c->flags = 0;
+    ft_raw_check(c);
+    return c;
+  }
+  u16 arity = src->arity;
+  AtpFtCell *c = ft_alloc_one(a, scratch);          // parent first
+  c->sym = src->sym & ~WF_VAR_BIT;
+  c->arity = arity;
+  c->flags = ATPFT_FLAG_GROUND;
+  if (arity == 0u) { c->next = NULL; c->end = c; ft_raw_check(c); return c; }
+  const AtpFtCell *child = src->next;
+  AtpFtCell *prev_end = NULL;
+  for (u16 i = 0; i < arity; i++) {
+    AtpFtCell *kid = ref_ft_deep_copy_pre(a, child, scratch);
+    if (kid == NULL) return NULL;
+    if (i == 0u) c->next = kid; else prev_end->next = kid;
+    if ((kid->flags & ATPFT_FLAG_GROUND) == 0u) c->flags = 0;
+    prev_end = kid->end;
+    child = child->end->next;
+  }
+  c->end = prev_end; c->end->next = NULL;
+  ft_raw_check(c);
+  return c;
+}
+
+// src/atp/ft_match.c:348
+static AtpFtCell *ref_ft_subst_apply_pre(AtpFt *a, const AtpFtCell *tmpl,
+                                     const AtpFtSubst *s, int scratch) {
+  if (tmpl == NULL) return NULL;
+  if (ft_m_is_var(tmpl)) {
+    u32 id = ft_m_var_id(tmpl);
+    if (id >= ATPFT_MAX_VARS) return NULL;
+    AtpFtCell *binding = s->bind[id];
+    if (binding == NULL) return NULL;
+    return ref_ft_deep_copy_pre(a, binding, scratch);
+  }
+  u16 arity = tmpl->arity;
+  AtpFtCell *c = ft_alloc_one(a, scratch);          // parent first
+  c->sym = tmpl->sym & ~WF_VAR_BIT;
+  c->arity = arity;
+  c->flags = ATPFT_FLAG_GROUND;
+  if (arity == 0u) { c->next = NULL; c->end = c; ft_raw_check(c); return c; }
+  const AtpFtCell *child = tmpl->next;
+  AtpFtCell *prev_end = NULL;
+  for (u16 i = 0; i < arity; i++) {
+    AtpFtCell *kid = ref_ft_subst_apply_pre(a, child, s, scratch);
+    if (kid == NULL) return NULL;
+    if (i == 0u) c->next = kid; else prev_end->next = kid;
+    if ((kid->flags & ATPFT_FLAG_GROUND) == 0u) c->flags = 0;
+    prev_end = kid->end;
+    child = child->end->next;
+  }
+  c->end = prev_end; c->end->next = NULL;
+  ft_raw_check(c);
+  return c;
+}
+
+// src/atp/ft_splice.c:100
+static AtpFtCell *ref_ft_splice_deep_copy(AtpFt *a, const AtpFtCell *src) {
+  if (src == NULL) return NULL;
+  if (ft_s_is_var(src)) {
+    return ftnew_var(a, ft_s_var_id(src), 0);
+  }
+  u32 sym   = src->sym;
+  u16 arity = src->arity;
+  if (arity == 0u) {
+    return ftnew_const(a, sym, 0);
+  }
+  AtpFtCell *stack_kids[FT_SPLICE_KIDS_STACK];
+  AtpFtCell **kids = stack_kids;
+  AtpFtCell **heap_kids = NULL;
+  if (arity > FT_SPLICE_KIDS_STACK) {
+    heap_kids = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
+    if (heap_kids == NULL) {
+      fprintf(stderr, "ft_splice/deep_copy: kids OOM\n");
+      exit(1);
+    }
+    kids = heap_kids;
+  }
+  const AtpFtCell *child = src->next;
+  for (u16 i = 0; i < arity; i++) {
+    kids[i] = ref_ft_splice_deep_copy(a, child);
+    child   = child->end->next;
+  }
+  AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, 0);
+  free(heap_kids);
+  // Deep-copied subject subterms KEEP SUBST_FRESH cleared -- they are
+  // the matched-binding contents, not freshly introduced by the rule.
+  return out;
+}
+
+// src/atp/ft_splice.c:142
+static AtpFtCell *ref_ft_splice_build_rhs(AtpFt *a, const AtpFtCell *tmpl,
+                                      const void *subst) {
+  if (tmpl == NULL) return NULL;
+  if (ft_s_is_var(tmpl)) {
+    u32 id = ft_s_var_id(tmpl);
+    if (id >= ft_subst_max_vars()) return NULL;
+    AtpFtCell *binding = ft_subst_lookup(subst, id);
+    if (binding == NULL) return NULL;
+    return ref_ft_splice_deep_copy(a, binding);
+  }
+  // THVM_ATPFT_SKEL_FRESH controls whether rule-RHS skeleton cells are
+  // flagged SUBST_FRESH.  Default 0: clear the flag so composition
+  // matches fire (mccune's R89 -> R40, see project_ft_normalize_drift).
+  // The per-step cost increase from the corrected NF is offset by
+  // dropping MNF from the WM preset, which under SKEL_FRESH=1 + MNF
+  // diverts the saturator -- mccune cracks in 28s under the dual-flip
+  // (vs 49s under the legacy SKEL_FRESH=1 + MNF=1 baseline).  Legacy
+  // policy still accessible via THVM_ATPFT_SKEL_FRESH=1.
+  static int skel_fresh_cached = -1;
+  if (skel_fresh_cached < 0) {
+    const char *e = getenv("THVM_ATPFT_SKEL_FRESH");
+    skel_fresh_cached = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  u32 sym   = tmpl->sym;
+  u16 arity = tmpl->arity;
+  if (arity == 0u) {
+    AtpFtCell *c = ftnew_const(a, sym, 0);
+    if (skel_fresh_cached) c->flags |= ATPFT_FLAG_SUBST_FRESH;
+    return c;
+  }
+  AtpFtCell *stack_kids[FT_SPLICE_KIDS_STACK];
+  AtpFtCell **kids = stack_kids;
+  AtpFtCell **heap_kids = NULL;
+  if (arity > FT_SPLICE_KIDS_STACK) {
+    heap_kids = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
+    if (heap_kids == NULL) {
+      fprintf(stderr, "ft_splice/build_rhs: kids OOM\n");
+      exit(1);
+    }
+    kids = heap_kids;
+  }
+  const AtpFtCell *child = tmpl->next;
+  for (u16 i = 0; i < arity; i++) {
+    AtpFtCell *k = ref_ft_splice_build_rhs(a, child, subst);
+    if (k == NULL) {
+      free(heap_kids);
+      return NULL;
+    }
+    kids[i] = k;
+    child   = child->end->next;
+  }
+  AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, 0);
+  if (skel_fresh_cached) out->flags |= ATPFT_FLAG_SUBST_FRESH;
+  free(heap_kids);
+  return out;
+}
+
+// src/atp/ft_unify.c:57
+static u8 ref_ft_unify_occurs(u32 var_id, const AtpFtCell *t,
+                          const AtpFtSubst *s) {
+  t = ft_unify_walk(t, s);
+  if (t == NULL) return 0;
+  if (ft_u_is_var(t)) {
+    return ft_u_var_id(t) == var_id;
+  }
+  // CTR: scan children via the next/end sibling stride.
+  u16 arity = t->arity;
+  const AtpFtCell *c = t->next;
+  for (u16 i = 0; i < arity; i++) {
+    if (ref_ft_unify_occurs(var_id, c, s)) return 1;
+    c = c->end->next;
+  }
+  return 0;
+}
+
+// src/atp/ft_unify.c:92
+static int ref_ft_unify(const AtpFtCell *s, const AtpFtCell *t, AtpFtSubst *subst) {
+  if (s == NULL || t == NULL) return 0;
+  s = ft_unify_walk(s, subst);
+  t = ft_unify_walk(t, subst);
+  // Same cell after walking -> definitely equal (no work).
+  if (s == t) return 1;
+
+  int s_is_var = ft_u_is_var(s);
+  int t_is_var = ft_u_is_var(t);
+
+  // Two variables: bind the lower-id (or s -> t) without occurs check.
+  if (s_is_var && t_is_var) {
+    u32 sid = ft_u_var_id(s);
+    u32 tid = ft_u_var_id(t);
+    if (sid == tid) return 1;
+    if (sid >= ATPFT_MAX_VARS) return 0;
+    ft_unify_bind(subst, sid, t);
+    return 1;
+  }
+
+  if (s_is_var) {
+    u32 id = ft_u_var_id(s);
+    if (id >= ATPFT_MAX_VARS) return 0;
+    if (ref_ft_unify_occurs(id, t, subst)) return 0;
+    ft_unify_bind(subst, id, t);
+    return 1;
+  }
+  if (t_is_var) {
+    u32 id = ft_u_var_id(t);
+    if (id >= ATPFT_MAX_VARS) return 0;
+    if (ref_ft_unify_occurs(id, s, subst)) return 0;
+    ft_unify_bind(subst, id, s);
+    return 1;
+  }
+
+  // Both CTR: heads must match (sym + arity), then recurse on each
+  // child pair via the AtpFt sibling stride.
+  if (s->sym != t->sym) return 0;
+  if (s->arity != t->arity) return 0;
+  u16 arity = s->arity;
+  const AtpFtCell *sc = s->next;
+  const AtpFtCell *tc = t->next;
+  for (u16 i = 0; i < arity; i++) {
+    if (!ref_ft_unify(sc, tc, subst)) return 0;
+    sc = sc->end->next;
+    tc = tc->end->next;
+  }
+  return 1;
+}
+
+// src/atp/ft_unify.c:159
+static AtpFtCell *ref_ft_unify_apply(AtpFt *a, const AtpFtCell *t,
+                          const AtpFtSubst *s, int scratch) {
+  if (t == NULL) return NULL;
+  t = ft_unify_walk(t, s);
+  if (t == NULL) return NULL;
+  if (ft_u_is_var(t)) {
+    // Walked to an unbound var -- emit a fresh var cell with the id.
+    return ftnew_var(a, ft_u_var_id(t), scratch);
+  }
+  u32 sym   = t->sym;
+  u16 arity = t->arity;
+  if (arity == 0u) {
+    return ftnew_const(a, sym, scratch);
+  }
+  AtpFtCell *stack_kids[FT_UNIFY_APPLY_KIDS_STACK];
+  AtpFtCell **kids = stack_kids;
+  AtpFtCell **heap_kids = NULL;
+  if (arity > FT_UNIFY_APPLY_KIDS_STACK) {
+    heap_kids = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
+    if (heap_kids == NULL) {
+      fprintf(stderr, "ref_ft_unify_apply: kids OOM\n");
+      exit(1);
+    }
+    kids = heap_kids;
+  }
+  const AtpFtCell *child = t->next;
+  for (u16 i = 0; i < arity; i++) {
+    kids[i] = ref_ft_unify_apply(a, child, s, scratch);
+    if (kids[i] == NULL) {
+      free(heap_kids);
+      return NULL;
+    }
+    child = child->end->next;
+  }
+  AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, scratch);
+  free(heap_kids);
+  return out;
+}
+
 // ---- Random terms -------------------------------------------------------
 
 static u32 rng32(u32 *seed) {
@@ -674,6 +1021,203 @@ static u64 term_cells_iter(Term t) {
   return cells;
 }
 
+// ---- ft_match.c / ft_splice.c / ft_unify.c ------------------------------------
+
+// Cells a fresh arena has handed out since its sentinel `base`: the
+// offset of the next cell it allocates.
+static long arena_next_off(AtpFt *a, const AtpFtCell *base, int scratch) {
+  AtpFtCell *c = scratch ? ft_alloc_scratch(a) : ft_alloc_persistent(a);
+  return cell_off(c, base);
+}
+
+// Same result (or both NULL) built from the same allocation sequence.
+static int built_same(AtpFt *ra, const AtpFtCell *rb, const AtpFtCell *rx,
+                      AtpFt *na, const AtpFtCell *nb, const AtpFtCell *nx,
+                      int scratch) {
+  if ((rx == NULL) != (nx == NULL)) return 0;
+  if (rx != NULL && !span_layout_same(rx, rb, nx, nb)) return 0;
+  return arena_next_off(ra, rb, scratch) == arena_next_off(na, nb, scratch);
+}
+
+// A substitution over spans: x_v -> a span of a small random term for
+// a random subset of v < 10 (plus x_62, so an id past nothing is bound).
+static void mk_ft_subst(u32 *seed, AtpFt *a, AtpFtSubst *fs) {
+  memset(fs, 0, sizeof *fs);
+  for (u32 v = 0; v < 10u; v++) {
+    if (rng32(seed) % 4u != 0u) {
+      u32 budget = 30u;
+      fs->bind[v] = ft_from_term(a, mk_term(seed, 2u, &budget), 0);
+      fs->bound_ids[fs->wm++] = v;
+    }
+  }
+}
+
+enum { FTL_N = 2000 };
+
+static void pin_ft_layer(u32 *seed, AtpFt *sa, AtpFtCell **sp,
+                         Term *psrc, AtpFtCell **psp) {
+  TEST_BEGIN("ft_deep/pin-ft-match-copy-apply");
+  {
+    u32 ok = 0, built = 0;
+    for (u32 i = 0; i < FTL_N; i++) {
+      AtpFtSubst fs;
+      mk_ft_subst(seed, sa, &fs);
+      const AtpFtCell *tmpl = (i & 1u) ? psp[i] : sp[i];
+      for (u32 k = 0; k < 8u; k++) {
+        int scratch = (int)(k & 1u);
+        AtpFt ra, na;
+        ft_init(&ra);
+        ft_init(&na);
+        AtpFtCell *rb = scratch ? ft_alloc_scratch(&ra) : ft_alloc_persistent(&ra);
+        AtpFtCell *nb = scratch ? ft_alloc_scratch(&na) : ft_alloc_persistent(&na);
+        AtpFtCell *rx, *nx;
+        switch (k >> 1) {
+          case 0:
+            rx = ref_ft_deep_copy_rec(&ra, tmpl, scratch);
+            nx = ft_deep_copy_rec(&na, tmpl, scratch);
+            break;
+          case 1:
+            rx = ref_ft_deep_copy_pre(&ra, tmpl, scratch);
+            nx = ft_deep_copy_pre(&na, tmpl, scratch);
+            break;
+          case 2:
+            rx = ref_ft_subst_apply_rec(&ra, tmpl, &fs, scratch);
+            nx = ft_subst_apply_rec(&na, tmpl, &fs, scratch);
+            break;
+          default:
+            rx = ref_ft_subst_apply_pre(&ra, tmpl, &fs, scratch);
+            nx = ft_subst_apply_pre(&na, tmpl, &fs, scratch);
+            break;
+        }
+        if (built_same(&ra, rb, rx, &na, nb, nx, scratch)) ok++;
+        built += (u32)(nx != NULL && k >= 4u);
+        ft_destroy(&ra);
+        ft_destroy(&na);
+      }
+    }
+    CHECK_EQ(ok, 8u * FTL_N);
+    CHECK(built > FTL_N / 4u);
+  }
+
+  TEST_BEGIN("ft_deep/pin-ft-splice");
+  {
+    u32 ok = 0;
+    for (u32 i = 0; i < FTL_N; i++) {
+      AtpFtSubst fs;
+      mk_ft_subst(seed, sa, &fs);
+      const AtpFtCell *tmpl = (i & 1u) ? psp[i] : sp[i];
+      for (u32 k = 0; k < 2u; k++) {
+        AtpFt ra, na;
+        ft_init(&ra);
+        ft_init(&na);
+        AtpFtCell *rb = ft_alloc_persistent(&ra);
+        AtpFtCell *nb = ft_alloc_persistent(&na);
+        AtpFtCell *rx = k ? ref_ft_splice_build_rhs(&ra, tmpl, &fs)
+                          : ref_ft_splice_deep_copy(&ra, tmpl);
+        AtpFtCell *nx = k ? ft_splice_build_rhs(&na, tmpl, &fs)
+                          : ft_splice_deep_copy(&na, tmpl);
+        if (built_same(&ra, rb, rx, &na, nb, nx, 0)) ok++;
+        ft_destroy(&ra);
+        ft_destroy(&na);
+      }
+    }
+    CHECK_EQ(ok, 2u * FTL_N);
+  }
+
+  TEST_BEGIN("ft_deep/pin-ft-unify-occurs-apply");
+  {
+    u32 ok = 0, hits = 0;
+    for (u32 i = 0; i < FTL_N; i++) {
+      const AtpFtCell *s = psp[i];
+      const AtpFtCell *t;
+      switch (i % 4u) {
+        case 0: {   // an instance renamed apart: unifiable
+          RewriteSubst inst;
+          memset(&inst, 0, sizeof inst);
+          for (u32 v = 0; v < 10u; v++) {
+            inst.bindings[v] = (rng32(seed) & 1u) ? term_new_ctr(rng32(seed) % 12u, NULL, 0u)
+                                                  : term_new_fvr(20u + v);
+          }
+          t = ft_from_term(sa, thvm_subst_apply(psrc[i], &inst), 0);
+          break;
+        }
+        case 1:
+          t = psp[(i + 1u) % FTL_N];
+          break;
+        case 2:
+          t = sp[i];
+          break;
+        default:
+          t = ft_from_term(sa, mk_mutant(seed, psrc[i]), 0);
+          break;
+      }
+      AtpFtSubst rs, ns;
+      memset(&rs, 0, sizeof rs);
+      memset(&ns, 0, sizeof ns);
+      int r = ref_ft_unify(s, t, &rs);
+      int n = ft_unify(s, t, &ns);
+      u8 same = (u8)(r == n && memcmp(&rs, &ns, sizeof rs) == 0);
+      u32 id = rng32(seed) % 12u;
+      same &= (u8)(ref_ft_unify_occurs(id, t, &rs) == ft_unify_occurs(id, t, &ns));
+      AtpFt ra, na;
+      ft_init(&ra);
+      ft_init(&na);
+      AtpFtCell *rb = ft_alloc_scratch(&ra);
+      AtpFtCell *nb = ft_alloc_scratch(&na);
+      AtpFtCell *rx = ref_ft_unify_apply(&ra, s, &rs, 1);
+      AtpFtCell *nx = ft_unify_apply(&na, s, &ns, 1);
+      if (same && built_same(&ra, rb, rx, &na, nb, nx, 1)) ok++;
+      hits += (u32)(n != 0);
+      ft_destroy(&ra);
+      ft_destroy(&na);
+    }
+    CHECK_EQ(ok, (u32)FTL_N);
+    CHECK(hits > FTL_N / 5u);
+  }
+}
+
+static void deep_ft_layer(AtpFt *da, Term pat, Term subj, const Term *vals) {
+  AtpFtCell *xp = ft_from_term(da, pat, 0);
+  AtpFtCell *xs = ft_from_term(da, subj, 0);
+  AtpFtSubst fs;
+  memset(&fs, 0, sizeof fs);
+  for (u32 v = 0; v < 5u; v++) {
+    fs.bind[v] = ft_from_term(da, vals[v], 0);
+    fs.bound_ids[fs.wm++] = v;
+  }
+
+  TEST_BEGIN("ft_deep/deep-ft-copy-apply-splice");
+  {
+    CHECK(ft_eq(ft_deep_copy_rec(da, xs, 0), xs));
+    CHECK(ft_eq(ft_deep_copy_pre(da, xs, 0), xs));
+    CHECK(ft_eq(ft_subst_apply_rec(da, xp, &fs, 0), xs));
+    CHECK(ft_eq(ft_subst_apply_pre(da, xp, &fs, 0), xs));
+    CHECK(ft_eq(ft_splice_deep_copy(da, xs), xs));
+    CHECK(ft_eq(ft_splice_build_rhs(da, xp, &fs), xs));
+    AtpFtSubst part = fs;
+    part.bind[3] = NULL;                       // x_3 unbound: no instance
+    CHECK(ft_subst_apply_rec(da, xp, &part, 0) == NULL);
+    CHECK(ft_subst_apply_pre(da, xp, &part, 0) == NULL);
+    CHECK(ft_splice_build_rhs(da, xp, &part) == NULL);
+  }
+
+  TEST_BEGIN("ft_deep/deep-ft-unify");
+  {
+    AtpFtSubst us;
+    memset(&us, 0, sizeof us);
+    CHECK(ft_unify(xp, xs, &us));
+    CHECK_EQ(us.wm, 5u);
+    for (u32 v = 0; v < 5u; v++) CHECK(us.bind[v] != NULL && ft_eq_term(us.bind[v], vals[v]));
+    CHECK(ft_eq(ft_unify_apply(da, xp, &us, 0), xs));
+    AtpFtSubst none;
+    memset(&none, 0, sizeof none);
+    CHECK(ft_unify_occurs(4u, xp, &none));
+    CHECK(!ft_unify_occurs(9u, xp, &none));
+    AtpFtCell *x4 = ftnew_var(da, 4u, 0);
+    CHECK(!ft_unify(x4, xp, &none));            // occurs check, at depth
+  }
+}
+
 int main(void) {
   thvm_init();
   extern u8  g_atp_phase_detail;
@@ -903,6 +1447,8 @@ int main(void) {
     free(nbuf);
   }
 
+  pin_ft_layer(&seed, &sa, sp, psrc, psp);
+
   // ---- A 100,000-deep term, both ways ------------------------------------
   enum { DEEP = 100000 };
   Term vals[5];
@@ -1008,6 +1554,8 @@ int main(void) {
     free(want);
     free(got);
   }
+
+  deep_ft_layer(&da, pat, subj, vals);
 
   ft_destroy(&da);
   ft_destroy(&sa);

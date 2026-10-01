@@ -201,8 +201,9 @@ int ft_match(const AtpFtCell *pat, const AtpFtCell *subj, AtpFtSubst *out) {
 
 // --- ft_subst_apply ---------------------------------------------------
 //
-// Recursive construction of a fresh AtpFt term mirroring `tmpl` with
-// every variable replaced by its binding from `s`.
+// Construction of a fresh AtpFt term mirroring `tmpl` with every
+// variable replaced by its binding from `s`, bottom-up over an explicit
+// stack (children before ftnew_ctr, the recursion's allocation order).
 //
 //   * tmpl var: look up bind[id]; if NULL, return NULL (defensive --
 //     a valid CP-RHS template should only mention vars bound by the
@@ -211,19 +212,11 @@ int ft_match(const AtpFtCell *pat, const AtpFtCell *subj, AtpFtSubst *out) {
 //     the binding into the destination arena (no aliasing back into
 //     Arena A from a scratch result, and vice versa).
 //
-//   * tmpl CTR(sym, c0..c_{n-1}): recurse on each child, then stitch
-//     via ftnew_ctr.  The arity is bounded by AtpFt's REWRITE_MAX_ARITY
-//     analog (we use the same 16-cap in scratch/persistent paths;
-//     a CTR with arity > 16 cannot be expressed in a RewriteSubst-
-//     compatible flow anyway -- thvm_subst_apply enforces the same
-//     bound at rewrite/_.c:80).
+//   * tmpl CTR(sym, c0..c_{n-1}): build each child, then stitch
+//     via ftnew_ctr.
 //
 // scratch flag is threaded through every allocation so the returned
 // term lives in a single arena (caller chooses).
-#define ATPFT_APPLY_KIDS_STACK 16u
-
-// Forward decl for the mutually-recursive deep-copy + apply.
-static AtpFtCell *ft_deep_copy_rec(AtpFt *a, const AtpFtCell *src, int scratch);
 
 // Deep copy: rebuild `src` cell-for-cell into the destination arena.
 // Variables stay variables (they're real subterm contents now -- a
@@ -231,75 +224,69 @@ static AtpFtCell *ft_deep_copy_rec(AtpFt *a, const AtpFtCell *src, int scratch);
 // which may itself contain free variables).
 static AtpFtCell *ft_deep_copy_rec(AtpFt *a, const AtpFtCell *src, int scratch) {
   if (src == NULL) return NULL;
-  if (ft_m_is_var(src)) {
-    return ftnew_var(a, ft_m_var_id(src), scratch);
-  }
-  u32 sym   = src->sym;
-  u16 arity = src->arity;
-  if (arity == 0u) {
-    return ftnew_const(a, sym, scratch);
-  }
-  AtpFtCell *stack_kids[ATPFT_APPLY_KIDS_STACK];
-  AtpFtCell **kids = stack_kids;
-  AtpFtCell **heap_kids = NULL;
-  if (arity > ATPFT_APPLY_KIDS_STACK) {
-    heap_kids = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
-    if (heap_kids == NULL) {
-      fprintf(stderr, "ft_subst_apply/deep_copy: kids OOM\n");
-      exit(1);
-    }
-    kids = heap_kids;
-  }
-  const AtpFtCell *child = src->next;
-  for (u16 i = 0; i < arity; i++) {
-    kids[i] = ft_deep_copy_rec(a, child, scratch);
-    child   = child->end->next;
-  }
-  AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, scratch);
-  free(heap_kids);
-  return out;
+  return ft_copy_span(a, src, 0u, scratch);
 }
 
 static AtpFtCell *ft_subst_apply_rec(AtpFt *a, const AtpFtCell *tmpl,
                                      const AtpFtSubst *s, int scratch) {
   if (tmpl == NULL) return NULL;
-  if (ft_m_is_var(tmpl)) {
-    u32 id = ft_m_var_id(tmpl);
-    if (id >= ATPFT_MAX_VARS) return NULL;
-    AtpFtCell *binding = s->bind[id];
-    if (binding == NULL) return NULL;
-    return ft_deep_copy_rec(a, binding, scratch);
-  }
-  u32 sym   = tmpl->sym;
-  u16 arity = tmpl->arity;
-  if (arity == 0u) {
-    return ftnew_const(a, sym, scratch);
-  }
-  AtpFtCell *stack_kids[ATPFT_APPLY_KIDS_STACK];
-  AtpFtCell **kids = stack_kids;
-  AtpFtCell **heap_kids = NULL;
-  if (arity > ATPFT_APPLY_KIDS_STACK) {
-    heap_kids = (AtpFtCell **)malloc(sizeof(AtpFtCell *) * (size_t)arity);
-    if (heap_kids == NULL) {
-      fprintf(stderr, "ft_subst_apply: kids OOM\n");
-      exit(1);
+  FtSpanFrame  fr_inl[FT_WALK_INL];
+  AtpFtCell   *val_inl[FT_WALK_INL];
+  FtSpanFrame *fr   = fr_inl;
+  AtpFtCell  **val  = val_inl;
+  u32          nfr  = 0u;
+  u32          cfr  = FT_WALK_INL;
+  u32          nval = 0u;
+  u32          cval = FT_WALK_INL;
+  AtpFtCell   *out  = NULL;
+  for (;;) {
+    AtpFtCell *done = NULL;
+    if (ft_m_is_var(tmpl)) {
+      // An unbound (or out-of-range) template var fails the whole
+      // apply -- a defensive bail-out; cells built so far stay in the
+      // arena as garbage, as with the recursion.
+      u32 id = ft_m_var_id(tmpl);
+      AtpFtCell *binding = (id < ATPFT_MAX_VARS) ? s->bind[id] : NULL;
+      if (binding == NULL) {
+        break;
+      }
+      done = ft_deep_copy_rec(a, binding, scratch);
+    } else if (tmpl->arity == 0u) {
+      done = ftnew_const(a, tmpl->sym, scratch);
+    } else {
+      if (nfr == cfr) {
+        fr = (FtSpanFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+      }
+      fr[nfr].child = tmpl->next;
+      fr[nfr].left  = tmpl->arity;
+      fr[nfr].sym   = tmpl->sym;
+      fr[nfr].arity = tmpl->arity;
+      nfr++;
     }
-    kids = heap_kids;
-  }
-  const AtpFtCell *child = tmpl->next;
-  for (u16 i = 0; i < arity; i++) {
-    AtpFtCell *kid = ft_subst_apply_rec(a, child, s, scratch);
-    if (kid == NULL) {
-      // Bubble the NULL up -- defensive bail-out for an unbound var
-      // referenced by tmpl.  Frees the heap kid buffer if used.
-      free(heap_kids);
-      return NULL;
+    if (done != NULL) {
+      if (nval == cval) {
+        val = (AtpFtCell **)term_stack_grow(val, val_inl, &cval, sizeof *val);
+      }
+      val[nval++] = done;
     }
-    kids[i] = kid;
-    child   = child->end->next;
+    while (nfr > 0u && fr[nfr - 1u].left == 0u) {
+      FtSpanFrame *f = &fr[nfr - 1u];
+      nval -= f->arity;
+      val[nval] = ftnew_ctr(a, f->sym, (u16)f->arity, &val[nval], scratch);
+      nval++;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      out = val[0];
+      break;
+    }
+    FtSpanFrame *f = &fr[nfr - 1u];
+    tmpl     = f->child;
+    f->child = tmpl->end->next;
+    f->left--;
   }
-  AtpFtCell *out = ftnew_ctr(a, sym, arity, kids, scratch);
-  free(heap_kids);
+  term_stack_release(fr, fr_inl);
+  term_stack_release(val, val_inl);
   return out;
 }
 
@@ -315,65 +302,103 @@ static AtpFtCell *ft_subst_apply_rec(AtpFt *a, const AtpFtCell *tmpl,
 // verdict.  Gated by ft.c's g_ft_preorder (same TU).  On an unbound-var
 // NULL, bubble NULL exactly like *_rec; the half-built parent is arena
 // garbage on an error path that cannot arise for well-formed rules.
+// A parent cell (already allocated) whose children are being built from
+// a span: `child` is the next source child, `prev_end` the last cell of
+// the child stitched last (NULL before the first).
+typedef struct {
+  const AtpFtCell *child;
+  u32              left;
+  AtpFtCell       *c;
+  AtpFtCell       *prev_end;
+} FtPreSpanFrame;
+
+// Pre-order copy of the span `src` (s == NULL) or instantiation of the
+// template `src` under `s` (each bound var deep-copied, pre-order too).
+// An unbound / out-of-range var yields NULL; the half-built parents are
+// arena garbage, as with the recursion.
+static AtpFtCell *ft_build_pre(AtpFt *a, const AtpFtCell *src,
+                               const AtpFtSubst *s, int scratch) {
+  FtPreSpanFrame  fr_inl[FT_WALK_INL];
+  FtPreSpanFrame *fr   = fr_inl;
+  u32             nfr  = 0u;
+  u32             cfr  = FT_WALK_INL;
+  AtpFtCell      *done = NULL;
+  for (;;) {
+    done = NULL;
+    if (ft_m_is_var(src)) {
+      if (s != NULL) {
+        u32 id = ft_m_var_id(src);
+        AtpFtCell *binding = (id < ATPFT_MAX_VARS) ? s->bind[id] : NULL;
+        if (binding == NULL) {
+          break;
+        }
+        done = ft_build_pre(a, binding, NULL, scratch);
+      } else {
+        AtpFtCell *c = ft_alloc_one(a, scratch);
+        c->next = NULL; c->end = c;
+        c->sym = WF_VAR_BIT | (ft_m_var_id(src) & ~WF_VAR_BIT);
+        c->arity = 0; c->flags = 0;
+        ft_raw_check(c);
+        done = c;
+      }
+    } else {
+      u16 arity = src->arity;
+      AtpFtCell *c = ft_alloc_one(a, scratch);          // parent first
+      c->sym = src->sym & ~WF_VAR_BIT;
+      c->arity = arity;
+      c->flags = ATPFT_FLAG_GROUND;
+      if (arity == 0u) {
+        c->next = NULL; c->end = c;
+        ft_raw_check(c);
+        done = c;
+      } else {
+        if (nfr == cfr) {
+          fr = (FtPreSpanFrame *)term_stack_grow(fr, fr_inl, &cfr, sizeof *fr);
+        }
+        fr[nfr].child    = src->next;
+        fr[nfr].left     = arity;
+        fr[nfr].c        = c;
+        fr[nfr].prev_end = NULL;
+        nfr++;
+      }
+    }
+    // Stitch the finished span under its parent; a parent whose last
+    // child is stitched is finished in turn.
+    while (done != NULL && nfr > 0u) {
+      FtPreSpanFrame *f = &fr[nfr - 1u];
+      if (f->prev_end == NULL) f->c->next = done; else f->prev_end->next = done;
+      if ((done->flags & ATPFT_FLAG_GROUND) == 0u) f->c->flags = 0;
+      f->prev_end = done->end;
+      if (f->left > 0u) {
+        done = NULL;
+        break;
+      }
+      AtpFtCell *c = f->c;
+      c->end = f->prev_end; c->end->next = NULL;
+      ft_raw_check(c);
+      done = c;
+      nfr--;
+    }
+    if (nfr == 0u) {
+      break;
+    }
+    FtPreSpanFrame *f = &fr[nfr - 1u];
+    src      = f->child;
+    f->child = src->end->next;
+    f->left--;
+  }
+  term_stack_release(fr, fr_inl);
+  return (nfr == 0u) ? done : NULL;
+}
+
 static AtpFtCell *ft_deep_copy_pre(AtpFt *a, const AtpFtCell *src, int scratch) {
   if (src == NULL) return NULL;
-  if (ft_m_is_var(src)) {
-    AtpFtCell *c = ft_alloc_one(a, scratch);
-    c->next = NULL; c->end = c;
-    c->sym = WF_VAR_BIT | (ft_m_var_id(src) & ~WF_VAR_BIT);
-    c->arity = 0; c->flags = 0;
-    ft_raw_check(c);
-    return c;
-  }
-  u16 arity = src->arity;
-  AtpFtCell *c = ft_alloc_one(a, scratch);          // parent first
-  c->sym = src->sym & ~WF_VAR_BIT;
-  c->arity = arity;
-  c->flags = ATPFT_FLAG_GROUND;
-  if (arity == 0u) { c->next = NULL; c->end = c; ft_raw_check(c); return c; }
-  const AtpFtCell *child = src->next;
-  AtpFtCell *prev_end = NULL;
-  for (u16 i = 0; i < arity; i++) {
-    AtpFtCell *kid = ft_deep_copy_pre(a, child, scratch);
-    if (kid == NULL) return NULL;
-    if (i == 0u) c->next = kid; else prev_end->next = kid;
-    if ((kid->flags & ATPFT_FLAG_GROUND) == 0u) c->flags = 0;
-    prev_end = kid->end;
-    child = child->end->next;
-  }
-  c->end = prev_end; c->end->next = NULL;
-  ft_raw_check(c);
-  return c;
+  return ft_build_pre(a, src, NULL, scratch);
 }
 static AtpFtCell *ft_subst_apply_pre(AtpFt *a, const AtpFtCell *tmpl,
                                      const AtpFtSubst *s, int scratch) {
   if (tmpl == NULL) return NULL;
-  if (ft_m_is_var(tmpl)) {
-    u32 id = ft_m_var_id(tmpl);
-    if (id >= ATPFT_MAX_VARS) return NULL;
-    AtpFtCell *binding = s->bind[id];
-    if (binding == NULL) return NULL;
-    return ft_deep_copy_pre(a, binding, scratch);
-  }
-  u16 arity = tmpl->arity;
-  AtpFtCell *c = ft_alloc_one(a, scratch);          // parent first
-  c->sym = tmpl->sym & ~WF_VAR_BIT;
-  c->arity = arity;
-  c->flags = ATPFT_FLAG_GROUND;
-  if (arity == 0u) { c->next = NULL; c->end = c; ft_raw_check(c); return c; }
-  const AtpFtCell *child = tmpl->next;
-  AtpFtCell *prev_end = NULL;
-  for (u16 i = 0; i < arity; i++) {
-    AtpFtCell *kid = ft_subst_apply_pre(a, child, s, scratch);
-    if (kid == NULL) return NULL;
-    if (i == 0u) c->next = kid; else prev_end->next = kid;
-    if ((kid->flags & ATPFT_FLAG_GROUND) == 0u) c->flags = 0;
-    prev_end = kid->end;
-    child = child->end->next;
-  }
-  c->end = prev_end; c->end->next = NULL;
-  ft_raw_check(c);
-  return c;
+  return ft_build_pre(a, tmpl, s, scratch);
 }
 
 AtpFtCell *ft_subst_apply(AtpFt *a, const AtpFtCell *tmpl,
