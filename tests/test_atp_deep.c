@@ -5357,6 +5357,394 @@ static void deep_ftdt(void) {
   ft_destroy(&a);
 }
 
+// ---- src/kbo/_.c: the weight-memo eviction paths ---------------------------
+
+// src/kbo/_.c:390 / :455 / :560, the memo fill as it recursed (an evicted
+// child's walk nested inside its parent's combine).
+static KboMemoFrame g_ref_kbo_memo_stack[KBO_MEMO_STACK_CAP];
+static u8 g_ref_kbo_memo_active = 0u;
+static KboWMemoEnt *ref_kbo_subtree_memo(const KboConfig *cfg, Term t);
+
+static u64 ref_kbo_leaf_hash(Term t) {
+  u32 tg = term_tag(t);
+  if (tg == TAG_FVR) {
+    return kbo_mix64(0xfacefacefaceull ^ ((u64)term_ext(t) * 0x100000001b3ull));
+  }
+  if (tg == TAG_CTR) {
+    // A CTR child's hash MUST come from g_kbo_thash (filled by an
+    // earlier post-order combine step).  Caller invariant: every
+    // CTR child has been visited before its parent's combine fires.
+    KboTHashEnt *ce = &g_kbo_thash[kbo_thash_slot(t)];
+    if (ce->epoch == g_kbo_epoch && ce->t == t) return ce->hash;
+    // Slot evicted under collision; fall back to inline recurse.
+    // (Rare -- only on a same-walk thash collision.)
+    u32 lab = term_ext(t);
+    u64 base; u32 n = kbo_ctr_children(t, &base);
+    u64 h = kbo_node_hash_init(lab);
+    for (u32 i = 0; i < n; i++) {
+      h = kbo_node_hash_add(h, i, ref_kbo_leaf_hash(heap_read(base + i)));
+    }
+    return kbo_node_hash_fini(h, n);
+  }
+  return kbo_mix64(0xdeadbeefcafebabeull ^ ((u64)tg * 0x100000001b3ull));
+}
+
+static KboWMemoEnt *ref_kbo_memo_combine(const KboConfig *cfg, Term t) {
+  // Compute this node's structural hash from children (children's
+  // hashes are in g_kbo_thash since post-order put them there first).
+  // Position-sensitive + per-child avalanche (kbo_node_hash) so distinct
+  // variable ids in symmetric positions can never cancel into a collision.
+  u32 lab = term_ext(t);
+  u64 base; u32 n = kbo_ctr_children(t, &base);
+  u64 sh = kbo_node_hash_init(lab);
+  for (u32 i = 0; i < n; i++) {
+    sh = kbo_node_hash_add(sh, i, ref_kbo_leaf_hash(heap_read(base + i)));
+  }
+  sh = kbo_node_hash_fini(sh, n);
+
+  // Register this Term ID in the per-Term-ID cache.
+  u32 thidx = kbo_thash_slot(t);
+  KboTHashEnt *th = &g_kbo_thash[thidx];
+  u32 widx = kbo_wmemo_slot(sh);
+  th->t = t; th->hash = sh; th->epoch = g_kbo_epoch; th->wmemo_idx = widx;
+
+  // Wmemo hit?  Reuse precomputed weight + profile.
+  KboWMemoEnt *e = &g_kbo_wmemo[widx];
+  if (e->epoch == g_kbo_epoch && e->hash == sh) return e;
+
+  // Wmemo miss: compute weight + profile.
+  long long w = (long long)kbo_weight(cfg, t);
+  u8 vc = 0u;
+  u8 vid[KBO_VPROF_CAP];
+  i16 vcnt[KBO_VPROF_CAP];
+  int ovf = 0;
+  for (u32 i = 0; i < n; i++) {
+    Term c = heap_read(base + i);
+    if (term_tag(c) == TAG_FVR) {
+      w += (long long)cfg->var_weight;
+      u32 id = term_ext(c);
+      if (id < KBO_MAX_VAR && !ovf) {
+        if (!kbo_vprof_add(vid, vcnt, &vc, id, +1)) ovf = 1;
+      }
+    } else if (term_tag(c) == TAG_CTR) {
+      // Child must have a g_kbo_thash entry (post-order); from that,
+      // read the wmemo slot.  If the slot still holds the child's
+      // entry, use it; else recompute via kbo_subtree_memo.
+      KboTHashEnt *cth = &g_kbo_thash[kbo_thash_slot(c)];
+      KboWMemoEnt *ce;
+      if (cth->epoch == g_kbo_epoch && cth->t == c) {
+        ce = &g_kbo_wmemo[cth->wmemo_idx];
+        if (!(ce->epoch == g_kbo_epoch && ce->hash == cth->hash)) {
+          ce = ref_kbo_subtree_memo(cfg, c);
+        }
+      } else {
+        ce = ref_kbo_subtree_memo(cfg, c);
+      }
+      w += ce->w;
+      if (ce->vc == KBO_VPROF_OVF) ovf = 1;
+      else if (!ovf) {
+        for (u8 k = 0; k < ce->vc; k++) {
+          if (!kbo_vprof_add(vid, vcnt, &vc, ce->vid[k], ce->vcnt[k])) {
+            ovf = 1; break;
+          }
+        }
+      }
+    }
+    // a non-CTR/non-FVR child contributes 0 weight, no vars.
+  }
+  e->hash = sh; e->epoch = g_kbo_epoch; e->w = w;
+  if (ovf) {
+    e->vc = KBO_VPROF_OVF;
+  } else {
+    e->vc = vc;
+    for (u8 k = 0; k < vc; k++) { e->vid[k] = vid[k]; e->vcnt[k] = vcnt[k]; }
+  }
+  return e;
+}
+
+static KboWMemoEnt *ref_kbo_subtree_memo(const KboConfig *cfg, Term t) {
+  // Fast Term-ID path: same Term ID seen this epoch -> O(1) jump to
+  // its wmemo slot (verified by struct-hash equality to catch any
+  // wmemo slot eviction since).
+  u32 thidx = kbo_thash_slot(t);
+  KboTHashEnt *th = &g_kbo_thash[thidx];
+  if (th->epoch == g_kbo_epoch && th->t == t) {
+    KboWMemoEnt *e = &g_kbo_wmemo[th->wmemo_idx];
+    if (e->epoch == g_kbo_epoch && e->hash == th->hash) return e;
+    // Slot evicted under collision; fall through to re-fill.
+  }
+
+  u8 reentrant = g_ref_kbo_memo_active;
+  g_ref_kbo_memo_active = 1u;
+  KboMemoFrame *heap_stack = NULL;
+  KboMemoFrame *stack;
+  u32 cap = KBO_MEMO_STACK_CAP;
+  if (reentrant) {
+    heap_stack = (KboMemoFrame *)malloc((size_t)cap * sizeof *heap_stack);
+    stack = heap_stack;
+  } else {
+    stack = g_ref_kbo_memo_stack;
+  }
+  u32 sp = 0u;
+  KboMemoFrame *f = &stack[sp++];
+  f->t = t; f->n = kbo_ctr_children(t, &f->base); f->i = 0u;
+  while (sp > 0u) {
+    f = &stack[sp - 1u];
+    // Advance over children that are leaves or already memoized; push the
+    // first CTR child still needing computation.
+    int descended = 0;
+    while (f->i < f->n) {
+      Term c = heap_read(f->base + f->i);
+      f->i++;
+      if (term_tag(c) != TAG_CTR) continue;          // FVR/atom: combined later
+      KboTHashEnt *cth = &g_kbo_thash[kbo_thash_slot(c)];
+      if (cth->epoch == g_kbo_epoch && cth->t == c) continue;  // already memoized this walk
+      if (sp >= cap) {
+        u32 ncap = cap * 2u;
+        KboMemoFrame *nh = (KboMemoFrame *)malloc((size_t)ncap * sizeof *nh);
+        for (u32 k = 0; k < sp; k++) nh[k] = stack[k];
+        if (heap_stack) free(heap_stack);
+        heap_stack = nh; stack = nh; cap = ncap;
+        f = &stack[sp - 1u];
+      }
+      KboMemoFrame *nf = &stack[sp++];
+      nf->t = c; nf->n = kbo_ctr_children(c, &nf->base); nf->i = 0u;
+      descended = 1;
+      break;
+    }
+    if (descended) continue;
+    // children exhausted: combine this node, pop.
+    ref_kbo_memo_combine(cfg, f->t);
+    sp--;
+  }
+  if (heap_stack) free(heap_stack);
+  // Read t's thash entry (filled by the combine above); from it, locate
+  // the wmemo slot.  A late wmemo collision may have evicted it -- in
+  // that case re-combine.
+  th = &g_kbo_thash[thidx];
+  KboWMemoEnt *e;
+  if (th->epoch == g_kbo_epoch && th->t == t) {
+    e = &g_kbo_wmemo[th->wmemo_idx];
+    if (!(e->epoch == g_kbo_epoch && e->hash == th->hash)) e = ref_kbo_memo_combine(cfg, t);
+  } else {
+    e = ref_kbo_memo_combine(cfg, t);
+  }
+  if (!reentrant) g_ref_kbo_memo_active = 0u;
+  return e;
+}
+
+
+// FNV over the memo tables' live entries (current epoch), their stored
+// fields only: what a fill wrote, wherever it wrote it.
+static u64 kbo_memo_digest(void) {
+  u64 h = 0xcbf29ce484222325ull;
+  for (u32 i = 0; i < KBO_THASH_SIZE; i++) {
+    const KboTHashEnt *e = &g_kbo_thash[i];
+    if (e->epoch != g_kbo_epoch) continue;
+    h = (h ^ i) * 0x100000001b3ull;
+    h = (h ^ (u64)e->t) * 0x100000001b3ull;
+    h = (h ^ e->hash) * 0x100000001b3ull;
+    h = (h ^ e->wmemo_idx) * 0x100000001b3ull;
+  }
+  for (u32 i = 0; i < KBO_WMEMO_SIZE; i++) {
+    const KboWMemoEnt *e = &g_kbo_wmemo[i];
+    if (e->epoch != g_kbo_epoch) continue;
+    h = (h ^ i) * 0x100000001b3ull;
+    h = (h ^ e->hash) * 0x100000001b3ull;
+    h = (h ^ (u64)e->w) * 0x100000001b3ull;
+    h = (h ^ e->vc) * 0x100000001b3ull;
+    if (e->vc != KBO_VPROF_OVF) {
+      for (u8 k = 0; k < e->vc; k++) {
+        h = (h ^ e->vid[k]) * 0x100000001b3ull;
+        h = (h ^ (u64)(u16)e->vcnt[k]) * 0x100000001b3ull;
+      }
+    }
+  }
+  return h;
+}
+
+// The CTR subterms of a shallow term, preorder.
+static u32 ctr_subterms(Term t, Term *out, u32 n, u32 cap) {
+  if (term_tag(t) != TAG_CTR || n >= cap) return n;
+  out[n++] = t;
+  u32 k = term_ctr_n(t);
+  for (u32 i = 0; i < k; i++) {
+    n = ctr_subterms(term_ctr_at(t, i), out, n, cap);
+  }
+  return n;
+}
+
+// Evict a live entry of `u`: its Term-ID slot (thash) or, behind a live
+// one, the weight slot it points at (wmemo).
+static void kbo_evict(Term u, u8 wmemo) {
+  KboTHashEnt *th = &g_kbo_thash[kbo_thash_slot(u)];
+  if (th->epoch != g_kbo_epoch || th->t != u) return;
+  if (wmemo) {
+    g_kbo_wmemo[th->wmemo_idx].hash ^= 1ull;
+  } else {
+    th->t = 0;
+  }
+}
+
+static KboConfig g_km_cfg;
+static u32       g_km_w[32];
+static u32       g_km_p[32];
+
+static void km_cfg_init(void) {
+  for (u32 i = 0; i < 32u; i++) {
+    g_km_w[i] = 1u + (i % 3u);
+    g_km_p[i] = i;
+  }
+  g_km_cfg.weights    = g_km_w;
+  g_km_cfg.precedence = g_km_p;
+  g_km_cfg.n_labels   = 32u;
+  g_km_cfg.var_weight = 1u;
+}
+
+enum { KM_N = 800, KM_SUBS = 4096 };
+
+// A fresh epoch, unrelated fills, partial fills of `t` and evictions of
+// its subterms -- all decided by `seed`, so a replay rebuilds the same
+// live table contents.
+static void kbo_memo_setup(u32 seed, Term t, const Term *pre, u32 npre,
+                           const Term *subs, u32 nsub) {
+  thvm_kbo_invalidate();
+  for (u32 j = 0; j < npre; j++) {
+    (void)kbo_subtree_memo(&g_km_cfg, pre[j]);
+  }
+  for (u32 j = 0; j < nsub; j++) {
+    if ((rng32(&seed) & 3u) == 0u) {
+      (void)kbo_subtree_memo(&g_km_cfg, subs[j]);
+    }
+  }
+  (void)t;
+  for (u32 j = 0; j < nsub; j++) {
+    u32 r = rng32(&seed);
+    if ((r & 3u) == 0u) {
+      kbo_evict(subs[j], (u8)((r >> 2) & 1u));
+    }
+  }
+}
+
+static void pin_kbo_memo(u32 *seed) {
+  km_cfg_init();
+  Term *subs = (Term *)malloc(KM_SUBS * sizeof(Term));
+  Term  pre[8];
+
+  TEST_BEGIN("atp_deep/pin-kbo-leaf-hash");
+  {
+    u32 ok = 0;
+    for (u32 i = 0; i < KM_N; i++) {
+      Term t = mk_random(seed);
+      if (term_tag(t) != TAG_CTR) {
+        t = term_new_ctr(4u, &t, 1u);
+      }
+      u32 ns = ctr_subterms(t, subs, 0u, KM_SUBS);
+      kbo_memo_setup(rng32(seed), t, pre, 0u, subs, ns);
+      if (ref_kbo_leaf_hash(t) == kbo_leaf_hash(t)) {
+        ok++;
+      }
+    }
+    CHECK_EQ(ok, (u32)KM_N);
+  }
+
+  TEST_BEGIN("atp_deep/pin-kbo-subtree-memo");
+  {
+    u32 ok = 0;
+    for (u32 i = 0; i < KM_N; i++) {
+      Term t = mk_random(seed);
+      if (term_tag(t) != TAG_CTR) {
+        t = term_new_ctr(4u, &t, 1u);
+      }
+      for (u32 j = 0; j < 8u; j++) {
+        pre[j] = mk_small(seed);
+        if (term_tag(pre[j]) != TAG_CTR) {
+          pre[j] = term_new_ctr(4u, &pre[j], 1u);
+        }
+      }
+      u32 ns = ctr_subterms(t, subs, 0u, KM_SUBS);
+      u32 sd = rng32(seed);
+      kbo_memo_setup(sd, t, pre, 8u, subs, ns);
+      KboWMemoEnt *re = ref_kbo_subtree_memo(&g_km_cfg, t);
+      u64 rd = kbo_memo_digest();
+      long long rw = re->w;
+      u32 ri = (u32)(re - g_kbo_wmemo);
+      kbo_memo_setup(sd, t, pre, 8u, subs, ns);
+      KboWMemoEnt *ne = kbo_subtree_memo(&g_km_cfg, t);
+      u64 nd = kbo_memo_digest();
+      if (rd == nd && rw == ne->w && ri == (u32)(ne - g_kbo_wmemo)) {
+        ok++;
+      }
+    }
+    CHECK_EQ(ok, (u32)KM_N);
+  }
+
+  thvm_kbo_invalidate();
+  free(subs);
+}
+
+static void deep_kbo_memo(void) {
+  km_cfg_init();
+  Term c5 = term_new_ctr(5u, NULL, 0u);
+  Term x0 = term_new_fvr(0u);
+  // s^DEEP(f(x0, c5)): weight 2 per s (label 2), 3 + 1 + 3 below.
+  Term kids[2] = { x0, c5 };
+  Term base = term_new_ctr(6u, kids, 2u);
+  Term chain = mk_chain(DEEP, 2u, base);
+  long long want = 3LL * DEEP + (1LL + 1LL + 3LL);
+
+  TEST_BEGIN("atp_deep/deep-kbo-memo");
+  {
+    thvm_kbo_invalidate();
+    KboWMemoEnt *e = kbo_subtree_memo(&g_km_cfg, chain);
+    CHECK_EQ(e->w, want);
+    CHECK_EQ(e->vc, 1u);
+    CHECK_EQ(e->vid[0], 0u);
+    CHECK_EQ(e->vcnt[0], 1);
+    u64 sh = g_kbo_thash[kbo_thash_slot(chain)].hash;
+    // Every Term-ID slot evicted: the leaf hash folds the whole spine.
+    thvm_kbo_invalidate();
+    CHECK_EQ(kbo_leaf_hash(chain), sh);
+    // Refill, then evict the weight slot behind every live Term-ID slot
+    // of the spine: a parent's combine must recompute its child by a
+    // nested walk, which finds the same at the next level -- nesting as
+    // deep as the spine.
+    thvm_kbo_invalidate();
+    (void)kbo_subtree_memo(&g_km_cfg, chain);
+    for (Term u = chain; term_tag(u) == TAG_CTR && term_ext(u) == 2u;
+         u = term_ctr_at(u, 0)) {
+      kbo_evict(u, 1u);
+    }
+    Term top = term_new_ctr(2u, &chain, 1u);
+    e = kbo_subtree_memo(&g_km_cfg, top);
+    CHECK_EQ(e->w, want + 3LL);
+    CHECK_EQ(thvm_kbo_term_weight(&g_km_cfg, top), want + 3LL);
+    // A 200-deep spine, the same eviction, against the reference.
+    Term mid = mk_chain(200u, 2u, base);
+    Term mtop = term_new_ctr(2u, &mid, 1u);
+    u64 rd = 0u, nd = 0u;
+    long long rw = 0, nw = 0;
+    for (u32 pass = 0; pass < 2u; pass++) {
+      thvm_kbo_invalidate();
+      (void)kbo_subtree_memo(&g_km_cfg, mid);
+      for (Term u = mid; term_tag(u) == TAG_CTR && term_ext(u) == 2u;
+           u = term_ctr_at(u, 0)) {
+        kbo_evict(u, 1u);
+      }
+      if (pass == 0u) {
+        rw = ref_kbo_subtree_memo(&g_km_cfg, mtop)->w;
+        rd = kbo_memo_digest();
+      } else {
+        nw = kbo_subtree_memo(&g_km_cfg, mtop)->w;
+        nd = kbo_memo_digest();
+      }
+    }
+    CHECK_EQ(rw, nw);
+    CHECK_EQ(rd, nd);
+    thvm_kbo_invalidate();
+  }
+}
+
 int main(void) {
   thvm_init();
   u32 seed = 0x6c8e9cf5u;
@@ -5376,6 +5764,8 @@ int main(void) {
   deep_ac();
   pin_ftdt(&seed);
   deep_ftdt();
+  pin_kbo_memo(&seed);
+  deep_kbo_memo();
   thvm_free();
   TEST_REPORT();
 }
