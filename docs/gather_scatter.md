@@ -145,6 +145,7 @@ Measured on the Linux CPU pod (C JIT):
 | embedding forward + backward, N = 1e5, D = 64, V = 1e3 | 17 ms |
 | same, V = 1e4 | 17 ms |
 | same, V = 1e5 | 32 ms (the extra V x D gradient init) |
+| 2-layer GraphSAGE, mean aggregation, N = 1000, E = 1e4, D = 32: one TinyJit replay of forward + backward + Adam | 8-23 ms |
 
 ## Tests
 
@@ -165,3 +166,6 @@ Measured on the Linux CPU pod (C JIT):
   tests, with gradients against tinygrad's autograd, numpy and finite
   differences; -1 padded indices; the ATP aggregation; TinyJit replays
   with fresh index buffers; both CPU routes.
+- [py/tests/test_graphsage_train.py](../py/tests/test_graphsage_train.py):
+  10 TinyJit Adam steps of a mean-aggregation GraphSAGE on fresh -1
+  padded edge buffers, against a float64 numpy run.
