@@ -26,8 +26,9 @@
 //      |idx|) times per store;
 //   7. JIT capture of the gather gradient, then replays with the index
 //      rewritten in place;
-//   8. differentiating a PROD / MAX / MIN / REPLACE scatter raises the grad
-//      error (grad_err_take) instead of leaving the cell unfired.
+//   8. differentiating a PROD or REPLACE scatter raises the grad error
+//      (grad_err_take) instead of leaving the cell unfired; MAX and MIN have
+//      their rule (test_grad_scatter_max.c).
 //
 // Run twice, as test_uop_gather: as is (C JIT) and with
 // THVM_CPU_JIT_WARMUP=1000000000 (the UOp walker).
@@ -840,8 +841,8 @@ static void test_grad_err(void) {
   fill(base, 15, 19);
   fill(src, 12, 20);
   fill(c, 15, 21);
-  u32 kinds[4] = { SCATTER_PROD, SCATTER_MAX, SCATTER_MIN, SCATTER_REPLACE };
-  for (u32 k = 0; k < 4; k++) {
+  u32 kinds[2] = { SCATTER_PROD, SCATTER_REPLACE };
+  for (u32 k = 0; k < 2; k++) {
     u32 bt = mk(DT_FP32, &bs, base);
     u32 st = mk(DT_FP32, &is, src);
     u32 ct = mk(DT_FP32, &bs, c);

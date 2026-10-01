@@ -83,6 +83,7 @@ plus an outer combiner. The adjoint table mirrors tinygrad / JAX:
 | `IWHERE(c, t, e)` | `gy_for_t = where(c, gy, 0)`; `gy_for_e = where(c, 0, gy)`; `c` gets none (tinygrad `mixin/gradient.py:81`) |
 | `GATHER(s, i, d)` | `gy_for_s = SCATTER(SUM, zeros(s.shape), i, gy, d, include_self=1)`: `gy` summed back into the positions `i` read; `i` gets none |
 | `SCATTER(b, i, s, d, SUM, self)` | `gy_for_s = GATHER(gy, i, d)`; `gy_for_b = gy` when `self`, else `SCATTER(REPLACE, gy, i, zeros(i.shape), d)` (`gy` with every written position zeroed); `i` gets none |
+| `SCATTER(b, i, s, d, MAX, self)` | With `M = SCATTER(MAX, full(I), i, s, d, 1)` and `T = b` (`self`) or `SCATTER(REPLACE, b, i, full(I), d)`: `g_M` / `g_T` = `gy` where `M` / `T` is larger, `gy * 0.5` where `M == T`, else 0; `gy_for_b = g_T`, written positions zeroed unless `self`; `gy_for_s = (s == G(M)) * G(1 / cnt) * G(g_M)` with `G` a gather along `d` and `cnt` the ties of `M` among the `K = i.shape[d]` one-hot entries; MIN mirrors it; `i` gets none |
 | `CMPLT/CMPEQ`     | non-differentiable; emits scalar zero                               |
 | `BITCAST/CONST/LOAD/ASSIGN` | non-differentiable; cotangent dies                        |
 | `KERNEL(...)`     | `grad_kernel_backprop` (see below)                                  |
@@ -110,9 +111,9 @@ never an index), so no slot waits for an arrival that never comes.
 
 ### Indexed ops
 
-The `GATHER` and `SCATTER(SUM)` rules are the gradients of tinygrad's
-one-hot formulations (`Tensor.gather`, `mixin/op.py:1023-1041`, and
-`scatter_reduce` sum, `mixin/op.py:1126-1127`, through
+The `GATHER` and `SCATTER` rules are the gradients of tinygrad's one-hot
+formulations (`Tensor.gather`, `mixin/op.py:1023-1041`, and
+`scatter_reduce` sum / amax / amin, `mixin/op.py:1126-1130`, through
 `mixin/gradient.py`), built from the same two native ops, so a backward is
 linear in its operand sizes: no one-hot mask and no REDUCE.
 
@@ -125,7 +126,18 @@ linear in its operand sizes: no one-hot mask and no REDUCE.
     cotangent at a written position becomes an exact 0, as `where` gives.
   - A one-element cotangent (the scalar-zero convention of
     `grad_zero_at`) is broadcast to the node's shape first.
-  - `PROD`, `MAX`, `MIN` and `REPLACE` scatters have no rule yet.  Their
+  - `MAX` and `MIN` (`grad_scatter_maxmin`) follow tinygrad's amax
+    `M.maximum(T)` through its `MAX` rule (`mixin/gradient.py:78-79`), its
+    `REDUCE MAX` rule (`:10-13`) and `WHERE`'s (`:81`): `M`, the src-only
+    max, is recomputed as a scatter from the identity, tied maxima split
+    `g_M` evenly, a tie between `M` and the base gives each side half, and
+    the tie count includes the one-hot's non-hits when `M` is the identity
+    (every hit is then the identity too), so `cnt = e * K + SA(c - G(e))`
+    with `e = (M == I)` and `c = (src == G(M))`.  The count accumulates in
+    `sum_acc_dtype`; the mask is multiplied in as tinygrad multiplies it,
+    `(c * (1 / cnt)) * g_M`.  MIN mirrors MAX: tinygrad's negated MAX gives
+    the same values except that some zero cotangents come back as -0.0.
+  - `PROD` and `REPLACE` scatters have no rule yet.  Their
     cell fires to zero and the chain rule records the first such node in
     its error slot (`grad_err_set`; the message also goes to stderr).
     `grad_err_take()` returns the pending message and clears it, or NULL;

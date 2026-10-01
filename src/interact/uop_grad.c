@@ -57,6 +57,15 @@
 //                    gy_for_b = gy if self, else
 //                               SCATTER(REPLACE, gy, i, zeros(i.shape), d)
 //                    gy_for_s = GATHER(gy, i, d)            (i gets none)
+//   SCATTER(b, i, s, d, MAX, self)   (MIN mirrors it)
+//                    M = SCATTER(MAX, full(I), i, s, d, 1); T = b if self,
+//                    else SCATTER(REPLACE, b, i, full(I), d)
+//                    g_M = gy where M > T, gy/2 where M == T, else 0;
+//                    g_T likewise with M < T
+//                    gy_for_b = g_T, written positions zeroed unless self
+//                    gy_for_s = (s == G(M)) * G(1/cnt) * G(g_M), cnt the
+//                               ties of M among the K one-hot entries
+//                               (grad_scatter_maxmin)       (i gets none)
 //   CONST/LOAD/CMP   no children to differentiate (leaf cotangent dies)
 
 // Forward decl: grad_target_dtype reads the target stack defined
@@ -1017,6 +1026,80 @@ static Term grad_zero_written(Term g, Term idx, u32 dim) {
   return uop_scatter(g, idx, grad_full(dt, &is, 0), dim, SCATTER_REPLACE, 0);
 }
 
+// The base and src gradients of y = SCATTER(MAX | MIN, base, idx, src, dim,
+// s) at cotangent g (y's shape): tinygrad's gradient of its dense amax
+// M.maximum(T), M = mask.where(src, I).max(-1), T = self or
+// _inv_mask(self, I) (mixin/op.py:1129), through MAX's rule
+// (mixin/gradient.py:78-79), REDUCE MAX's (:10-13) and WHERE's (:81):
+//   M      = SCATTER(MAX, full(I), idx, src, 1)    (src-only; the forward's
+//            values, as both fold src serially from I)
+//   g_M    = M > T ? g : M == T ? g * 0.5 : 0      (g_T: M < T)
+//   g_base = g_T, zeroed at the written positions unless s
+//   cnt    = #{k < K : W[j, k] == M} = e * K + SA(c - G(e)), with
+//            e = (M == I), c = (src == G(M)) and K = idx.shape[dim]: the
+//            one-hot's non-hits are I too, so they tie an M of I
+//   g_src  = (c * G(1 / cnt)) * G(g_M)
+// G gathers along dim (an invalid id reads 0, so its g_src is 0) and SA
+// scatter-adds.  The count accumulates in sum_acc_dtype (dtype.py:220), as
+// tinygrad casts its tie mask.  MIN mirrors it (tinygrad's negated MAX
+// gives the same values up to the sign of a zero).  Returns 0 when an
+// operand does not fit.
+static int grad_scatter_maxmin(Term y, Term base, Term idx, Term src, Term g,
+                               Term *g_base, Term *g_src) {
+  u32   kind = uop_scatter_kind(y), dim = uop_scatter_dim(y);
+  u32   dt, ident;
+  f32   half = 0.5f;
+  u32   half_bits;
+  Shape bs, is;
+  if (!term_dtype_in(y, 0, &dt) || !term_shape_in(y, 0, &bs)
+      || !term_shape_in(idx, 0, &is) || !scatter_identity_bits(kind, dt, &ident)) {
+    return 0;
+  }
+  memcpy(&half_bits, &half, sizeof half_bits);
+  u32  acc  = grad_acc_dtype(dt);
+  Term idn  = grad_full(dt, &bs, ident);
+  Term m    = uop_scatter(idn, idx, src, dim, kind, 1);
+  Term t    = uop_scatter_include_self(y)
+            ? base
+            : uop_scatter(base, idx, grad_full(dt, &is, ident), dim, SCATTER_REPLACE, 0);
+  if (m == 0 || t == 0) {
+    return 0;
+  }
+  Term m_wins = (kind == SCATTER_MAX) ? uop_binary(UOP_CMPLT, t, m)
+                                      : uop_binary(UOP_CMPLT, m, t);
+  Term t_wins = (kind == SCATTER_MAX) ? uop_binary(UOP_CMPLT, m, t)
+                                      : uop_binary(UOP_CMPLT, t, m);
+  Term tie    = uop_binary(UOP_CMPEQ, m, t);
+  Term zero   = uop_const(dt, 0);
+  Term split  = uop_where(tie, uop_binary(UOP_MUL, g, uop_const(dt, half_bits)), zero);
+  Term g_m    = uop_where(m_wins, g, split);
+  Term g_t    = uop_where(t_wins, g, split);
+  *g_base = uop_scatter_include_self(y) ? g_t : grad_zero_written(g_t, idx, dim);
+  f32  k_f = (f32)is.dims[dim];
+  u32  k_bits;
+  memcpy(&k_bits, &k_f, sizeof k_bits);
+  Term e   = uop_cast(uop_binary(UOP_CMPEQ, m, idn), acc);
+  Term gm  = uop_gather(m, idx, dim);
+  Term ge  = uop_gather(e, idx, dim);
+  if (gm == 0 || ge == 0) {
+    return 0;
+  }
+  Term c   = uop_cast(uop_binary(UOP_CMPEQ, src, gm), acc);
+  Term sa  = uop_scatter(grad_full(acc, &bs, 0), idx,
+                         uop_binary(UOP_ADD, c, uop_unary(UOP_NEG, ge)), dim, SCATTER_SUM, 1);
+  if (sa == 0) {
+    return 0;
+  }
+  Term cnt = uop_binary(UOP_ADD, uop_binary(UOP_MUL, e, uop_const(acc, k_bits)), sa);
+  Term gr  = uop_gather(uop_unary(UOP_RECIP, cnt), idx, dim);
+  Term ggm = uop_gather(g_m, idx, dim);
+  if (gr == 0 || ggm == 0 || *g_base == 0) {
+    return 0;
+  }
+  *g_src = uop_binary(UOP_MUL, uop_cast(uop_binary(UOP_MUL, c, gr), dt), ggm);
+  return 1;
+}
+
 static char const *const GRAD_SCATTER_KIND_NAME[] = {
   [SCATTER_SUM] = "sum", [SCATTER_PROD] = "prod", [SCATTER_MAX] = "amax",
   [SCATTER_MIN] = "amin", [SCATTER_REPLACE] = "replace",
@@ -1359,11 +1442,12 @@ static Term interact_grad_dispatch(Term grad_term) {
     // tinygrad's mask.where(src, 0).sum(-1).add(self if include_self else
     // _inv_mask(self, 0)) (mixin/op.py:1127): src reads gy back at the
     // positions it was written to; base gets gy, with those positions zeroed
-    // unless include_self.  idx gets none.  A kind with no rule yet fires to
-    // zero and names itself in the error slot.
+    // unless include_self.  MAX and MIN differentiate the amax / amin form
+    // (grad_scatter_maxmin).  idx gets none.  A kind with no rule yet (PROD,
+    // REPLACE) fires to zero and names itself in the error slot.
     case UOP_SCATTER: {
       u32 kind = uop_scatter_kind(y);
-      if (kind != SCATTER_SUM) {
+      if (kind != SCATTER_SUM && kind != SCATTER_MAX && kind != SCATTER_MIN) {
         char msg[96];
         snprintf(msg, sizeof msg, "grad: no gradient rule yet for a '%s' scatter",
                  kind <= SCATTER_REPLACE ? GRAD_SCATTER_KIND_NAME[kind] : "?");
@@ -1377,10 +1461,18 @@ static Term interact_grad_dispatch(Term grad_term) {
       u64  ci     = grad_cell_alloc(idx);
       Term idx_fw = grad_fwd_inline(ci, idx);
       Term g      = grad_gy_at(gy, y);
-      Term g_src  = g != 0 ? uop_gather(g, idx_fw, dim) : 0;
-      Term g_base = g;
-      if (g != 0 && !uop_scatter_include_self(y)) {
-        g_base = grad_zero_written(g, idx_fw, dim);
+      Term g_src  = 0;
+      Term g_base = 0;
+      if (g != 0 && kind == SCATTER_SUM) {
+        g_src  = uop_gather(g, idx_fw, dim);
+        g_base = uop_scatter_include_self(y) ? g : grad_zero_written(g, idx_fw, dim);
+      } else if (g != 0) {
+        u64 cb = grad_cell_alloc(base);
+        u64 cs = grad_cell_alloc(src);
+        if (!grad_scatter_maxmin(y, grad_fwd_inline(cb, base), idx_fw,
+                                 grad_fwd_inline(cs, src), g, &g_base, &g_src)) {
+          g_src = 0;
+        }
       }
       if (g_src == 0 || g_base == 0) {
         grad_err_set("grad: the cotangent of a scatter does not fit its shape");

@@ -345,9 +345,9 @@ class TestBridge(unittest.TestCase):
         base = Tensor(np.zeros((4, 2), np.float32))
         src = Tensor(np.ones((3, 2), np.float32))
         idx = Tensor(np.array([[0, 1], [2, 3], [1, 1]], np.int32))
-        t = _TH.scatter(base.term, idx.term, src.term, 0, K.SCATTER_MAX, True)
+        t = _TH.scatter(base.term, idx.term, src.term, 0, K.SCATTER_PROD, True)
         y = Tensor._from_term(t, dtypes.float32, (4, 2))
-        with self.assertRaisesRegex(RuntimeError, "amax"):
+        with self.assertRaisesRegex(RuntimeError, "prod"):
             y.sum().backward()
         self.assertIsNone(_TH.grad_err_take())
 

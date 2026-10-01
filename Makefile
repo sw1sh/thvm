@@ -272,6 +272,7 @@ TESTS := \
   $(BIN)/test_grad \
   $(BIN)/test_iwhere_grad \
   $(BIN)/test_grad_gather_scatter \
+  $(BIN)/test_grad_scatter_max \
   $(BIN)/test_ref \
   $(BIN)/test_mat_op2 \
   $(BIN)/test_wnf_n \

@@ -91,10 +91,18 @@ The chain rule ([grad.md](grad.md)) follows the one-hot formulations:
 - `SCATTER(SUM)`: src gets the cotangent gathered back; base gets it as
   is, or without `include_self` with every written position zeroed (a
   `REPLACE` scatter, tinygrad's `_inv_mask`).
+- `SCATTER(MAX)` and `SCATTER(MIN)`: tinygrad's gradient of its dense
+  `M.maximum(T)` (`mixin/gradient.py:10-13, 78-79, 81`).  Tied maxima split
+  the cotangent evenly, a tie between the src maximum and the base gives
+  each side half, an untouched base equal to the identity keeps half (its
+  src maximum is the identity too), and an invalid index gets 0.  The src
+  maximum is recomputed by a scatter; the tie count is one more scatter-add
+  and every other step a gather or an elementwise op, so the backward stays
+  O(|base| + |idx|).
 - The index gets no gradient.
-- `PROD`, `MAX`, `MIN` and `REPLACE` scatters have no rule yet: their cell
-  fires to zero and `grad_err_take()` returns the message, which py's
-  `backward()` raises as a RuntimeError.
+- `PROD` and `REPLACE` scatters have no rule yet: their cell fires to zero
+  and `grad_err_take()` returns the message, which py's `backward()` raises
+  as a RuntimeError.
 
 ## Python
 
@@ -183,6 +191,11 @@ Measured on the Linux CPU pod (C JIT):
   GC of live graphs.
 - [tests/test_grad_gather_scatter.c](../tests/test_grad_gather_scatter.c):
   gradients in every chain-rule mode, finite differences, second order.
+- [tests/test_grad_scatter_max.c](../tests/test_grad_scatter_max.c): MAX
+  and MIN gradients in every chain-rule mode: a case pinned to tinygrad
+  master's own gradients, tie-rich data, finite differences, a computed
+  src, linear backward kernels under JIT capture and replay, half, and a GC
+  between firing the chain rule and realizing it.
 - [py/tests/test_gather_parity.py](../py/tests/test_gather_parity.py):
   ports of tinygrad's gather, embedding and index tests.
 - [py/tests/test_gather_scale.py](../py/tests/test_gather_scale.py): the
