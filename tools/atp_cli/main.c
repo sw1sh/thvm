@@ -1068,8 +1068,10 @@ static void usage(FILE *fp) {
     "  --lane=NAME                 run one schedule lane alone, exactly as the\n"
     "                              schedule launches it (its stderr kept)\n"
     "  --list-lanes                print the schedule's lane names in order and exit\n"
+    "  --lane-flags=NAME           print the flags the schedule gives lane NAME\n"
     "  --problem-features          print the problem's features phi(p), one TSV row\n"
-    "                              (TPTP unit-equality input; no knob flags), and\n"
+    "                              (TPTP unit-equality input; no knob flags, no\n"
+    "                              --proof; exit 3 past its CPU budget), and\n"
     "                              exit; --header prints the column names, --lanes\n"
     "                              the static gate replica instead: one row per\n"
     "                              schedule lane\n"
@@ -1143,6 +1145,17 @@ int main(int argc, char **argv) {
         printf("%s\n", SCHEDULE[k].name);
       }
       return 0;
+    }
+    if (nlen == 10 && strncmp(name, "lane-flags", 10) == 0) {
+      for (int k = 0; k < N_SCHED; k++) {
+        if (val != NULL && strcmp(val, SCHEDULE[k].name) == 0) {
+          printf("%s\n", SCHEDULE[k].flags);
+          return 0;
+        }
+      }
+      fprintf(stderr, "FindProof: unknown lane '%s' (--list-lanes)\n",
+              (val != NULL) ? val : "");
+      return 2;
     }
     if (nlen == 4 && strncmp(name, "lane", 4) == 0) {
       if (val == NULL || val[0] == '\0') {
@@ -1235,10 +1248,12 @@ int main(int argc, char **argv) {
     if (!hit) { fprintf(stderr, "FindProof: unknown option --%.*s\n", (int)nlen, name); usage(stderr); return 2; }
   }
   if (want_features) {
-    if (n_knob_flags > 0) {
-      fprintf(stderr, "FindProof: --problem-features takes no knob flags: "
-              "phi(p) reads the default configuration and --lanes each "
-              "lane's own flags\n");
+    // --proof has requested its trace cap and heap tail already, which the
+    // replay would inherit.
+    if (n_knob_flags > 0 || g_cli_want_proof) {
+      fprintf(stderr, "FindProof: --problem-features takes no knob flags "
+              "and no --proof: phi(p) reads the default configuration and "
+              "--lanes each lane's own flags\n");
       return 2;
     }
     return cli_problem_features_main(file, features_header, features_lanes);

@@ -12,9 +12,10 @@
 // the release on a problem with an ifeq dispatcher and fails a gate after
 // it is "undet"; "strict" says whether the predicted line is still exactly
 // what that lane prints without --szs.  The equals and narrowq gates read
-// only the goals, so their lines stay strict; the def-unfold gate, the
-// capacity gates near their bounds and axiom selection read the released
-// units too.
+// only the goals (the equals gate also the clause count, far from its
+// bound), so their lines stay strict; the def-unfold gate, the capacity
+// gates near their bounds and axiom selection read the released units
+// too.
 
 // The knobs one lane's front end reads: its SCHEDULE flags, else the
 // environment the schedule hands down.
@@ -188,7 +189,7 @@ static void phi_gate_names(const PhiKnobs *k, char *buf, size_t cap) {
 // A lane's configuration: a transform it arms that changes nothing on this
 // problem leaves it with the default one.
 static PhiVariant *phi_lane_variant(PhiCtx *c, const PhiKnobs *k, int add) {
-  TpSineCfg env = tp_sine_cfg_env();
+  TpSineCfg env = phi_sine_cfg_env();
   PhiCfg cfg;
   cfg.def = (u8)(k->def && c->def_bit);
   cfg.eq = (u8)(k->eq && c->eq_bit);
@@ -213,16 +214,37 @@ static int phi_otter_expands(const PhiVariant *v, const PhiKnobs *k) {
   return e;
 }
 
+// The most units a Horn release adds: it fills the positive units up to
+// the engine's equation capacity, or adds that many past it.
+static int phi_release_max(const PhiCtx *c) {
+  return (c->n_pos < (int)PR_MAX_EQNS) ? (int)PR_MAX_EQNS - c->n_pos
+                                       : (int)PR_MAX_EQNS;
+}
+
+// The equals encoding gives up when two more clauses would cross the
+// clause bound, which released units move closer.
+static int phi_release_clause_room(const PhiCtx *c) {
+  return c->n_pos + c->n_neg + phi_release_max(c) + 2 <= (int)TP_MAX_CLAUSES;
+}
+
 // Released units reuse the signature and add at most HORN_REL_VARS
-// variable names (V0, V1, ...) and no conjecture unit: with this much room
-// the capacity gates and axiom selection's own give-up decide alike with
-// and without them.
+// variable names (V0, V1, ...) and no conjecture unit.  A release that
+// fills the positive units to capacity leaves the equation count under
+// it, unless the equals encoding then turns goals into positive units:
+// whether the count crosses the capacity (axiom selection runs, or with
+// it off the capacity gate fires) must not depend on the release.  With
+// this much room the capacity gates and axiom selection's own give-up
+// decide alike with and without them.
 static int phi_release_neutral(const PhiCtx *c, const PhiVariant *v) {
   int syms = c->n_syms + (v->cfg.eq ? 3 : 0);
   int goal_units = c->n_neg + c->n_hyp + (v->cfg.eq ? 2 : 0);
+  int over = v->n_pos_fe > (int)PR_MAX_EQNS;
+  int over_rel = v->n_pos_fe + phi_release_max(c) > (int)PR_MAX_EQNS;
   return syms <= (int)PR_MAX_SYMS &&
          c->n_vars + HORN_REL_VARS <= (int)PR_MAX_VARS &&
-         goal_units <= (int)PR_MAX_EQNS;
+         goal_units <= (int)PR_MAX_EQNS &&
+         over == over_rel &&
+         (!v->cfg.eq || phi_release_clause_room(c));
 }
 
 static void phi_lane_set(TpLaneGate *g, int verdict, int strict,
@@ -282,6 +304,7 @@ static void phi_lane_gate(PhiCtx *c, int lane, TpLaneGate *g) {
       dep = 1;
     } else if (k.eq_gate && !v->eq_applied) {
       why = TP_GATE_EQUALS;
+      dep = !phi_release_clause_room(c);
     } else if (k.nq && !c->goal_existential) {
       why = TP_GATE_NARROWQ;
     } else if (v->pr_why[0] != '\0') {

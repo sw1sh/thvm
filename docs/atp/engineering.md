@@ -535,13 +535,19 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
   line it predicts, and whether a run without `--szs` prints exactly
   that line.  Both run in a forked child (`tp_problem_features`), so the
   replay's environment variable, term-heap copies, /tmp file and exits
-  never reach the caller; a schedule parent can call it before it
-  launches the lanes.  `bin/test_atp_problem_features` checks the
-  features, verdicts and isolation on inline and generated problems;
+  never reach the caller; phi(p) alone gets a 1 s CPU budget
+  (`PHI_CPU_BUDGET_S`, exit 3 past it), so a schedule parent can call it
+  before it launches the lanes.  `--lane-flags=NAME` prints a lane's
+  flags.  `tools/atp_enigma/phi.py` loads the rows for a trainer
+  (pinned columns, layout version, float32).
+  `bin/test_atp_problem_features` checks the features, verdicts and
+  isolation on inline and generated problems;
   `tests/atp_problem_features.sh` (pods, with `OLD_FP` set to a build
-  from before the gate refactor) checks the replica's lines and phi(p)'s
-  gate bits against live lane runs; `tools/atp_enigma/matrix_tables.py
-  --t7c` checks the replica against the pool rows of the lane matrix.
+  from before the gate refactor) checks the replica's lines, the lanes'
+  .pr files and phi(p)'s gate bits against live lane runs on the pool,
+  and with `-s` only phi(p) and the replica (the J13 set);
+  `tools/atp_enigma/matrix_tables.py --t7c` checks the replica against
+  the pool rows of the lane matrix.
 * `docs/ENV_KNOBS.md` carries the repo-wide index; its ATP section
   points here.
 

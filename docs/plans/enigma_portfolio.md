@@ -290,6 +290,11 @@ FindProof --schedule=enigma problem.p
   weights: static const float arrays generated into the binary
 ```
 
+phi(p) holds only what a deployed problem carries.
+- The TPTP rating and SPC header fields, which build and weight the training sets (section 3.2), are printed after phi(p) as meta_* columns with the layout version. They are never selection inputs: deployed problems have no header, and the SPC status is the label.
+- Size features are floor(log2(1 + n)) buckets, so the layer needs no fitted normalization.
+- The parent computes phi(p) in a forked child under a 1 s CPU budget. A problem past the budget runs without the selection layer instead of delaying the lanes.
+
 The selection layer generalizes src/atp/topk.c.
 - Inputs for each candidate:
   - the engine's rank, the queue size and the CP's priority (phase 0b showed that the signal is relative to the queue);

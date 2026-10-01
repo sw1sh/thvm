@@ -109,7 +109,7 @@ static int features_via(const char *text, AtpPhi *phi, PhiMeta *meta,
     return -1;
   }
   int rc = local ? phi_compute(path, phi, meta, g)
-                 : tp_problem_features(path, phi, meta, g);
+                 : tp_problem_features(path, phi, meta, g, 0.0);
   unlink(path);
   return rc;
 }
@@ -188,6 +188,16 @@ static const char *const P_NOGOAL =
 static const char *const P_SPACE =
   "cnf(comm, axiom, f(X , Y) = f(Y , X)).\n"
   "cnf(goal, negated_conjecture, f(a , b) != f(b , a)).\n";
+
+// A symbol whose name holds "LPO": the bench's .pr reader takes any
+// ORDERING line holding that substring for an LPO ordering
+// (pr_ord_line's strstr, tests/test_atp_wolfram_bench.c) and ends the run,
+// so every lane that reaches the reader dies on a problem it could
+// search.  This pins that known reader bug and the replica's prediction
+// of it; both flip once pr_ord_line matches the token, not the substring.
+static const char *const P_LPO =
+  "cnf(a1, axiom, fLPO(fLPO(X)) = X).\n"
+  "cnf(goal, negated_conjecture, fLPO(a) != a).\n";
 
 // A dispatcher problem with 120 variable names: a Horn release (at most
 // HORN_REL_VARS more) could cross the engine's 128-variable capacity.
@@ -575,6 +585,40 @@ static void test_sine(TpLaneGate *g) {
   check_lane(p, g, "bare", TP_LANE_DEAD, 1, "problem exceeds equation capacity");
 }
 
+static void test_lpo_reader_bug(TpLaneGate *g) {
+  const char *p = "lpo-reader";
+  AtpPhi phi;
+  PhiMeta meta;
+  check(features(P_LPO, &phi, &meta, g) == 0, p, "features computed");
+  check_phi(p, &phi, ATP_PHI_FE_LIVE, 0);
+  check_phi(p, &phi, ATP_PHI_CONJ_CONE_PARTIAL, 0);
+  check_lane(p, g, "wm", TP_LANE_DEAD, 1,
+             "pr parse error: LPO ordering unsupported");
+  check_lane(p, g, "otter-lpo", TP_LANE_DEAD, 1,
+             "pr parse error: LPO ordering unsupported");
+  // The gates before the reader still decide first.
+  check_lane(p, g, "narrowq", TP_LANE_DEAD, 1, TP_GATE_NARROWQ);
+  check_lane(p, g, "tgt-ax", TP_LANE_DEAD, 1, TP_GATE_TGT_AX);
+}
+
+// phi(p) under a CPU budget: a budget no replay meets ends the child and
+// says so; the default budget holds a small problem.
+static void test_budget(void) {
+  const char *p = "budget";
+  char path[512];
+  AtpPhi phi;
+  PhiMeta meta;
+  if (write_temp(P_GROUP, path, sizeof path) != 0) {
+    check(0, p, "wrote the problem");
+    return;
+  }
+  check(tp_problem_features(path, &phi, &meta, NULL, 1e-6) == PHI_OVER_BUDGET,
+        p, "a 1 us budget is exceeded");
+  check(tp_problem_features(path, &phi, &meta, NULL, PHI_CPU_BUDGET_S) == PHI_OK,
+        p, "the default budget holds a small problem");
+  unlink(path);
+}
+
 // The TSV row: as many columns as the header, and every value reads back
 // as the float it was printed from.
 static void test_row(void) {
@@ -773,6 +817,8 @@ int main(void) {
   test_nogoal(g);
   test_raw(g);
   test_sine(g);
+  test_lpo_reader_bug(g);
+  test_budget();
   test_row();
   test_stable(0);
   test_proof_invariant(g);

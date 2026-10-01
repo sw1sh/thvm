@@ -122,6 +122,7 @@ typedef struct {
   u8         ax_ground;
   u8         reached_sel;          // past the capacity gates and canon
   int        n_hit, n_syms;
+  int        n_pos_fe;             // positive units before axiom selection
   char       why[PHI_WHY_LEN];     // def-unfold .. the capacity gates
   char       canon_why[PHI_WHY_LEN];
   char       pr_why[PHI_WHY_LEN];  // the bench's .pr reader
@@ -213,6 +214,14 @@ static void phi_stage_bits(TpProblem *tp, void *arg) {
   c->ax_ground = tp_has_ax_ground_compound(tp);
 }
 
+// Axiom selection under the environment's tolerances.  The replay never
+// writes THVM_ATP_SINE_DUMP's files: they belong to a real run.
+static TpSineCfg phi_sine_cfg_env(void) {
+  TpSineCfg cfg = tp_sine_cfg_env();
+  cfg.dump = NULL;
+  return cfg;
+}
+
 static void phi_stage_front(TpProblem *tp, void *arg) {
   PhiVariant *v = (PhiVariant *)arg;
   if (v->cfg.def) {
@@ -224,9 +233,11 @@ static void phi_stage_front(TpProblem *tp, void *arg) {
     v->eq_applied = (u8)g_cli_equals_applied;
   }
   int n_neg = phi_count_neg(tp);
+  v->n_pos_fe = tp->n_cls - n_neg;
   if (v->cfg.sine && tp->n_cls - n_neg > (int)PR_MAX_EQNS) {
     if (v->cfg.sine_env) {
-      tp_sine_select(tp);
+      TpSineCfg env = phi_sine_cfg_env();
+      tp_sine_select_cfg(tp, &env);
     } else {
       tp_sine_select_cfg(tp, &TP_SINE_DEFAULT);
     }
@@ -262,10 +273,18 @@ static int phi_pr_read(const char *path, PrProblem *p) {
   return PHI_PR_OK;
 }
 
+static void phi_stage_emit(TpProblem *tp, void *arg) {
+  *(char **)arg = tp_emit_pr(tp, "phi");
+}
+
 static void phi_load_pr(PhiCtx *c, TpProblem *tp, PhiVariant *v) {
   char path[64];
   snprintf(path, sizeof path, "/tmp/thvm_phi_%d.pr", (int)getpid());
-  char *text = tp_emit_pr(tp, "phi");
+  char *text = NULL;
+  if (phi_run(phi_stage_emit, tp, &text)) {
+    snprintf(c->fail, sizeof c->fail, "%s", g_tp_giveup_trap_why);
+    return;
+  }
   FILE *fp = fopen(path, "w");
   int ok = (fp != NULL);
   if (ok) {
@@ -299,6 +318,7 @@ static void phi_load_pr(PhiCtx *c, TpProblem *tp, PhiVariant *v) {
 }
 
 static void phi_variant_run(PhiCtx *c, TpProblem *tp, PhiVariant *v) {
+  v->n_pos_fe = c->n_pos;
   g_cli_defunfold_n = 0;
   g_cli_equals_applied = 0;
   if (phi_run(phi_stage_front, tp, v)) {
@@ -715,7 +735,7 @@ static void phi_quiet_end(int saved) {
 // file cannot be read, is not unit-equality CNF (FOF and non-unit CNF go
 // through the clausal front end, which is not replayed) or the replay
 // fails.  The front-end state it writes (the symbol hash, the curry table,
-// the transform flags) is reset on return.
+// the transform flags, the rename recording) is reset on return.
 static int phi_compute(const char *file, AtpPhi *phi, PhiMeta *meta,
                        TpLaneGate *lanes) {
   memset(phi, 0, sizeof *phi);
@@ -758,13 +778,19 @@ static int phi_compute(const char *file, AtpPhi *phi, PhiMeta *meta,
   int saved_defun   = g_cli_defunfold_n;
   int saved_sine    = g_cli_sine_applied;
   int saved_curry_n = g_curry_nfn;
+  char (*saved_curry_fn)[TP_NAME_LEN] = g_curry_fn;
+  int *saved_curry_ar = g_curry_ar;
   int saved_prov    = g_prov_on;
+  int saved_ren_on  = g_tp_ren_on;
   char saved_ap2[TP_NAME_LEN];
   snprintf(saved_ap2, sizeof saved_ap2, "%s", g_curry_ap2);
+  g_curry_fn = NULL;
+  g_curry_ar = NULL;
   g_cli_goal_existential = 0;
-  // A --proof run's lineage capture would record the replayed transforms
-  // into the tables its proof cites.
+  // A --proof run's lineage capture and rename table would record the
+  // replayed transforms into the tables its proof cites.
   g_prov_on = 0;
+  g_tp_ren_on = 0;
   int rc = 0;
   if (phi_run(phi_stage_unquote, tp, &pre)) {
     phi_trapped(c, c->parse_why);
@@ -802,8 +828,13 @@ static int phi_compute(const char *file, AtpPhi *phi, PhiMeta *meta,
   g_cli_equals_applied   = saved_equals;
   g_cli_defunfold_n      = saved_defun;
   g_cli_sine_applied     = saved_sine;
+  free(g_curry_fn);
+  free(g_curry_ar);
+  g_curry_fn             = saved_curry_fn;
+  g_curry_ar             = saved_curry_ar;
   g_curry_nfn            = saved_curry_n;
   g_prov_on              = saved_prov;
+  g_tp_ren_on            = saved_ren_on;
   snprintf(g_curry_ap2, sizeof g_curry_ap2, "%s", saved_ap2);
   if (c->fail[0] != '\0') {
     fprintf(stderr, "FindProof: problem features: %s: %s\n", file, c->fail);
@@ -845,12 +876,22 @@ static size_t phi_read_all(int fd, char *buf, size_t n) {
   return got;
 }
 
+// The CPU time phi(p) may take: a schedule parent computes it before it
+// launches the lanes, so a problem past it goes without phi(p) (the
+// selection layer stays unarmed) instead of delaying every lane.  CPU
+// rather than wall time, so that load does not decide which problems
+// have phi(p).
+#define PHI_CPU_BUDGET_S 1.0
+
+enum { PHI_OK = 0, PHI_FAILED = 2, PHI_OVER_BUDGET = 3 };
+
 // phi(p) of the TPTP problem in `file` and, when lanes is not NULL, the
 // static gate replica for every SCHEDULE lane (lanes[N_SCHED]), computed
-// in a child process.  Returns 0, or 2 when the child fails (it names the
-// reason on stderr).
+// in a child process that gets cpu_budget_s seconds of CPU (0: no limit).
+// Returns PHI_OK, PHI_OVER_BUDGET, or PHI_FAILED when the child fails (it
+// names the reason on stderr).
 static int tp_problem_features(const char *file, AtpPhi *phi, PhiMeta *meta,
-                               TpLaneGate *lanes) {
+                               TpLaneGate *lanes, double cpu_budget_s) {
   size_t n_lanes = (lanes != NULL) ? (size_t)N_SCHED : 0u;
   size_t off_meta = sizeof(AtpPhi);
   size_t off_lanes = off_meta + sizeof(PhiMeta);
@@ -864,6 +905,7 @@ static int tp_problem_features(const char *file, AtpPhi *phi, PhiMeta *meta,
   }
   fflush(stdout);
   fflush(stderr);
+  pid_t parent = getpid();
   pid_t pid = fork();
   if (pid < 0) {
     fprintf(stderr, "FindProof: problem features: cannot fork\n");
@@ -874,21 +916,43 @@ static int tp_problem_features(const char *file, AtpPhi *phi, PhiMeta *meta,
   }
   if (pid == 0) {
     close(fd[0]);
+#if defined(__linux__) && defined(PR_SET_PDEATHSIG)
+    // A parent stopped while phi(p) runs takes the replay with it.
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if (getppid() != parent) {
+      _exit(PHI_FAILED);
+    }
+#else
+    (void)parent;
+#endif
     signal(SIGTERM, SIG_DFL);
     signal(SIGINT, SIG_DFL);
     signal(SIGALRM, SIG_DFL);
+    signal(SIGPROF, SIG_DFL);
+    if (cpu_budget_s > 0.0) {
+      struct itimerval it;
+      memset(&it, 0, sizeof it);
+      it.it_value.tv_sec = (time_t)cpu_budget_s;
+      it.it_value.tv_usec =
+          (suseconds_t)((cpu_budget_s - (double)it.it_value.tv_sec) * 1e6);
+      if (it.it_value.tv_sec == 0 && it.it_value.tv_usec == 0) {
+        it.it_value.tv_usec = 1;
+      }
+      setitimer(ITIMER_PROF, &it, NULL);
+    }
     AtpPhi cp;
     PhiMeta cm;
     TpLaneGate *cl = (n_lanes > 0)
         ? (TpLaneGate *)calloc(n_lanes, sizeof(TpLaneGate)) : NULL;
-    int rc = (n_lanes > 0 && cl == NULL) ? 2 : phi_compute(file, &cp, &cm, cl);
+    int rc = (n_lanes > 0 && cl == NULL) ? PHI_FAILED
+                                         : phi_compute(file, &cp, &cm, cl);
     if (rc == 0) {
       memcpy(buf, &cp, sizeof cp);
       memcpy(buf + off_meta, &cm, sizeof cm);
       if (n_lanes > 0) {
         memcpy(buf + off_lanes, cl, n_lanes * sizeof(TpLaneGate));
       }
-      rc = phi_write_all(fd[1], buf, want) ? 0 : 2;
+      rc = phi_write_all(fd[1], buf, want) ? PHI_OK : PHI_FAILED;
     }
     _exit(rc);
   }
@@ -901,9 +965,19 @@ static int tp_problem_features(const char *file, AtpPhi *phi, PhiMeta *meta,
     w = waitpid(pid, &st, 0);
   } while (w < 0 && errno == EINTR);
   if (w != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0 || got != want) {
+    // A child stopped while it held the replayed .pr leaves it behind.
+    char pr_path[64];
+    snprintf(pr_path, sizeof pr_path, "/tmp/thvm_phi_%d.pr", (int)pid);
+    unlink(pr_path);
     // Exit 2 has named its reason already.
     if (w != pid) {
       fprintf(stderr, "FindProof: problem features: %s: lost the replay\n", file);
+    } else if (WIFSIGNALED(st) && WTERMSIG(st) == SIGPROF &&
+               cpu_budget_s > 0.0) {
+      fprintf(stderr, "FindProof: problem features: %s: phi(p) exceeded its "
+              "%.2f s CPU budget\n", file, cpu_budget_s);
+      free(buf);
+      return PHI_OVER_BUDGET;
     } else if (WIFSIGNALED(st)) {
       fprintf(stderr, "FindProof: problem features: %s: the replay died "
               "(signal %d)\n", file, WTERMSIG(st));
@@ -912,7 +986,7 @@ static int tp_problem_features(const char *file, AtpPhi *phi, PhiMeta *meta,
               "(exit %d, %zu of %zu bytes)\n", file, WEXITSTATUS(st), got, want);
     }
     free(buf);
-    return 2;
+    return PHI_FAILED;
   }
   memcpy(phi, buf, sizeof *phi);
   memcpy(meta, buf + off_meta, sizeof *meta);
@@ -920,7 +994,7 @@ static int tp_problem_features(const char *file, AtpPhi *phi, PhiMeta *meta,
     memcpy(lanes, buf + off_lanes, n_lanes * sizeof(TpLaneGate));
   }
   free(buf);
-  return 0;
+  return PHI_OK;
 }
 
 // --- FindProof --problem-features ---------------------------------------
@@ -965,7 +1039,7 @@ static int phi_format_row(char *buf, size_t cap, const char *name,
 // FindProof --problem-features [--header] [--lanes] [problem]: one
 // tab-separated row of phi(p) and its meta columns, or with --lanes one row
 // per SCHEDULE lane; --header prints the column names first (alone when no
-// problem is given).
+// problem is given).  Exits 3 when phi(p) exceeds PHI_CPU_BUDGET_S.
 static int cli_problem_features_main(const char *file, int header, int lanes) {
   char line[8192];
   if (header) {
@@ -992,7 +1066,10 @@ static int cli_problem_features_main(const char *file, int header, int lanes) {
       return 2;
     }
   }
-  int rc = tp_problem_features(file, &phi, &meta, g);
+  // The replica is an offline tool and replays many configurations;
+  // phi(p) alone runs under the budget a schedule parent gives it.
+  int rc = tp_problem_features(file, &phi, &meta, g,
+                               lanes ? 0.0 : PHI_CPU_BUDGET_S);
   if (rc != 0) {
     free(g);
     return rc;

@@ -923,10 +923,10 @@ static TpSineCfg tp_sine_cfg_env(void) {
   return cfg;
 }
 
+// Whether cfg selects as the defaults do; the dump path selects nothing.
 static int tp_sine_cfg_is_default(const TpSineCfg *cfg) {
   return cfg->tol0 == TP_SINE_DEFAULT.tol0 && cfg->gt == TP_SINE_DEFAULT.gt &&
-         cfg->rc == TP_SINE_DEFAULT.rc &&
-         (cfg->dump == NULL || cfg->dump[0] == '\0');
+         cfg->rc == TP_SINE_DEFAULT.rc;
 }
 
 // Driver: progressively tighten until the selection fits the engine
