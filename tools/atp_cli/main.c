@@ -616,6 +616,14 @@ static int run_schedule(const char *self, const char *file, double wall,
   sigaction(SIGTERM, &sa, &old_term);
   sigaction(SIGINT,  &sa, &old_int);
   g_sched_active = 1;
+  // The signals whose handlers tear the schedule down.  Each launch holds
+  // them from fork() until the new slice is registered: delivered in
+  // between, the handler would kill every slice but the one just forked.
+  sigset_t teardown_sigs, prev_mask;
+  sigemptyset(&teardown_sigs);
+  sigaddset(&teardown_sigs, SIGTERM);
+  sigaddset(&teardown_sigs, SIGINT);
+  sigaddset(&teardown_sigs, SIGALRM);
   // Belt-and-braces: the wait loop below stops the slices at the wall;
   // should the parent itself stall, the alarm still emits one status
   // line a second past the wall and reaps the subtrees.
@@ -701,8 +709,12 @@ static int run_schedule(const char *self, const char *file, double wall,
         fprintf(stderr, "%% FindProof schedule slice %s (%.0fs, remaining wall)\n",
                 SCHEDULE[i].name, slice_wall);
       }
+      sigprocmask(SIG_BLOCK, &teardown_sigs, &prev_mask);
       pid_t pid = fork();
       if (pid == 0) {
+        // The slice's shell and engine inherit the mask: with SIGALRM
+        // held, the engine's own wall alarm would never fire.
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         // Child: own process group so the parent can kill the WHOLE
         // subtree (this child + the shell system() forks + its FindProof
         // grandchild) with one killpg -- otherwise killing the child
@@ -776,6 +788,7 @@ static int run_schedule(const char *self, const char *file, double wall,
       }
       pids[i] = pid;
       g_sched_pids[i] = pid;   // for the signal handler
+      sigprocmask(SIG_SETMASK, &prev_mask, NULL);
       launched++;
     }
     if (launched == 0) {
