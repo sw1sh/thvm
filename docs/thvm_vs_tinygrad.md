@@ -399,12 +399,14 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
   backward clips the id into range (`nn/__init__.py:356`); an index outside
   the int32 range reads the row its low 32 bits name, where tinygrad reads 0;
   an index view's offset (a decode position) is a kernel constant, so each
-  position compiles its own kernel, where tinygrad binds a symbolic Variable.
-  PROD / MAX / MIN scatter lowerings and the PROD / MAX / MIN / REPLACE
-  scatter gradients are still to come; `backward()` raises for the missing
-  gradients, and py's `scatter_reduce` takes `"sum"` and `"mean"` (the
-  other kinds raise NotImplementedError).  A mean multiplies by the
-  reciprocal count, so it can sit one ulp from tinygrad's CPU division.
+  position compiles its own kernel, where tinygrad binds a symbolic Variable;
+  a NaN src never wins an amax / amin scatter, where tinygrad's unrolled
+  one-hot reduce lets a NaN at the head of an unrolled chunk win.  The PROD
+  scatter lowering and the PROD / MAX / MIN / REPLACE scatter gradients are
+  still to come; `backward()` raises for the missing gradients, and py's
+  `scatter_reduce` takes `"sum"` and `"mean"` (the other kinds raise
+  NotImplementedError).  A mean multiplies by the reciprocal count, so it can
+  sit one ulp from tinygrad's CPU division.
 - **MULTI / AFTER / TUPLE / FUNCTION+grad_fxn** - *large*. No custom grad functions; blocks higher-order grads.
 - **Higher-order gradients (grad of grad)** - *large*. thvm grads are AST Terms, not differentiable Tensors; would need `TENS[tid].grad` rearchitected as a Tensor.
 - **LARS / Muon optimizers** - *medium each*. Only SGD + Adam; Muon aliased to Adam.

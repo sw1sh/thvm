@@ -26,7 +26,8 @@
 //      the kernel is flagged no_opts;
 //   7. JIT capture, then replays with the index rewritten in place and the
 //      output poisoned first;
-//   8. kinds without a lowering yet (MAX) are declined, not mis-run.
+//   8. a kind without a lowering yet (PROD) is declined, not mis-run;
+//      MAX and MIN are covered by test_uop_scatter_max.c.
 #include "../src/thvm.c"
 #include "test.h"
 
@@ -655,7 +656,7 @@ static void test_declined_kind(void) {
   fill(base, SV * SD, 0.5f, 0.25f);
   fill(src, SE * SD, 0.37f, 0.11f);
   Term s = uop_scatter(ten(mk(DT_FP32, 2, bd, base)), ten(mk(DT_INT32, 2, id, IDX0)),
-                       ten(mk(DT_FP32, 2, id, src)), 0, SCATTER_MAX, 1);
+                       ten(mk(DT_FP32, 2, id, src)), 0, SCATTER_PROD, 1);
   CHECK(s != 0);
   u32 k0 = KERNELS_NEXT;
   Term r = term_resolve(thvm_realize(s));

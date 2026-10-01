@@ -189,19 +189,22 @@ read at the node's ranges, as a gather's idx is (through its storage when
 structural; a computed base fuses into the stores); idx and src at fresh
 loop ranges over idx's shape, both through `ru_index_leaf` (a computed idx
 or src realizes first).  The accumulate store is a serial
-read-modify-write, `OUT[t] = valid ? OUT[t] + src : OUT[t]`, where `t`
+read-modify-write, `OUT[t] = valid ? OUT[t] (op) src : OUT[t]`, where `t`
 puts the clamped loaded index on axis `dim`, so an invalid index writes
-the old value back.  Positions that meet at one output differ only on
-`dim` and are visited in ascending order: tinygrad's reduce order, and
-REPLACE's last write wins.  SUM with
-include_self stores the identity, accumulates, then adds base (S + self,
-as tinygrad; the last store drops when base is the identity CONST);
-without include_self it stores base, resets every touched position to the
-identity, then accumulates; REPLACE stores base, then writes.  The
-scatter's BUFFERIZE wraps the SCATTER itself, so no consumer inlines it,
-and every store of a gather or scatter kernel is checked for unbound
-leaves after the walker rewrite.  PROD, MAX and MIN have no lowering yet:
-emit declines their kernel with a stderr line.  The ops' semantics,
+the old value back; `(op)` is `+` for SUM, `(acc < x) ? x : acc` for MAX
+and `(x < acc) ? x : acc` for MIN (tinygrad's CPU MAX,
+`codegen/decomp/op.py:84`).  Positions that meet at one output differ
+only on `dim` and are visited in ascending order: tinygrad's reduce
+order, and REPLACE's last write wins.  SUM, MAX and MIN with
+include_self store the identity, accumulate, then combine with base
+(S (op) self, as tinygrad; the last store drops when base is the
+identity CONST); without include_self they store base (`I (op) base` for
+MAX and MIN, so an untouched NaN base becomes I as in tinygrad), reset
+every touched position to the identity, then accumulate; REPLACE stores
+base, then writes.  The scatter's BUFFERIZE wraps the SCATTER itself, so
+no consumer inlines it, and every store of a gather or scatter kernel is
+checked for unbound leaves after the walker rewrite.  PROD has no
+lowering yet: emit declines its kernel with a stderr line.  The ops' semantics,
 gradients and py surface are in [gather_scatter.md](gather_scatter.md).
 
 ## Pass 4: Render

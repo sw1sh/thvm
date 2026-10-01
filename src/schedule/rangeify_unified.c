@@ -3224,25 +3224,45 @@ static Term ru_lower_gather(Term self, u64 loc, RuRangeMap const *rm) {
   return uop_iwhere(valid, ru_index_leaf(src, coords, rm->in_ndim), uop_invalid());
 }
 
+// acc (op) x for a SUM, MAX or MIN scatter.  MAX is tinygrad's
+// (acc < x) ? x : acc, the CPU form of Ops.MAX (codegen/decomp/op.py:84)
+// that a reduce folds as acc = MAX(acc, x) (codegen/__init__.py:203); MIN
+// is its mirror (x < acc) ? x : acc, which tinygrad's negated (float) or
+// inverted (int) MAX computes (mixin/op.py:494, elementwise.py:404-408).
+// A NaN x never replaces acc.
+static Term ru_scatter_combine(u32 kind, Term acc, Term x) {
+  switch (kind) {
+    case SCATTER_MAX:
+      return uop_where(uop_binary(UOP_CMPLT, acc, x), x, acc);
+    case SCATTER_MIN:
+      return uop_where(uop_binary(UOP_CMPLT, x, acc), x, acc);
+    default:
+      return uop_binary(UOP_ADD, acc, x);
+  }
+}
+
 // SCATTER(base, idx, src, dim, kind, include_self) at node i: always its
 // own kernel over its output OUT.  base is read at the node's ranges R
 // over base.shape (ru_read_operand_at_ranges); idx and src through
 // ru_index_leaf at fresh loop ranges E over idx.shape.  With t = E where
 // t_dim is the loaded index clamped to 0, and valid its range check, the
 // accumulate store is
-//   OUT[t] = valid ? OUT[t] + src[E] : OUT[t]     (SUM; src[E] for REPLACE)
-// so an invalid index writes the old value back.  The src positions that
-// meet at one output share t's other coordinates, so every loop order
-// visits them in ascending t_dim: tinygrad's reduce order, and the
-// last-write-wins order of REPLACE.  The stores run in AFTER order:
-//   SUM, include_self   OUT[R] = 0; accumulate; OUT[R] = OUT[R] + base[R]
-//                       (the last store drops when base is the CONST 0):
-//                       S + self, as tinygrad adds (mixin/op.py:1127);
-//   SUM, no self        OUT[R] = base[R]; OUT[t] = valid ? 0 : OUT[t];
-//                       accumulate;
-//   REPLACE             OUT[R] = base[R]; accumulate.
-// The node's BUFFERIZE wraps the SCATTER itself, so no consumer can inline
-// it.  PROD / MAX / MIN have no lowering yet: the node still becomes a
+//   OUT[t] = valid ? OUT[t] (op) src[E] : OUT[t]    (src[E] for REPLACE)
+// with (op) the kind's ru_scatter_combine, so an invalid index writes the
+// old value back.  The src positions that meet at one output share t's
+// other coordinates, so every loop order visits them in ascending t_dim:
+// tinygrad's reduce order, and the last-write-wins order of REPLACE.  With
+// I the kind's identity (scatter_identity_bits), the stores run in AFTER
+// order and give tinygrad's out = S (op) T (mixin/op.py:1127-1130):
+//   include_self    OUT[R] = I; accumulate; OUT[R] = OUT[R] (op) base[R]
+//                   (the last store drops when base is the CONST I);
+//   no self         OUT[R] = I (op) base[R] for MAX / MIN, base[R] for
+//                   SUM; OUT[t] = valid ? I : OUT[t]; accumulate;
+//   REPLACE         OUT[R] = base[R]; accumulate.
+// Without include_self a written position thus holds S, and an untouched
+// one I (op) base, which is base except that MAX(I, NaN) = I, as in
+// tinygrad.  The node's BUFFERIZE wraps the SCATTER itself, so no consumer
+// can inline it.  PROD has no lowering yet: the node still becomes a
 // boundary, and visit() declines its kernel.
 static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {
   u64  loc  = BUFFERIZE_NODES[i].loc;
@@ -3254,7 +3274,7 @@ static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {
   RU_SUBST[i]          = b;
   RU_LAST_BUFFERIZES_EMITTED++;
   u32 kind = uop_scatter_kind(self);
-  if (kind != SCATTER_SUM && kind != SCATTER_REPLACE) {
+  if (kind == SCATTER_PROD) {
     return;
   }
   u32   dim = uop_scatter_dim(self);
@@ -3283,24 +3303,25 @@ static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {
     t[a] = e[a];
   }
   t[dim] = uop_iwhere(valid, iv, uop_const(DT_INT32, 0));
-  Term t_addr = ru_build_addr_with_dims(t, (u8)bs.ndim, bs.dims);
-  Term old    = uop_index_e(out, t_addr);
-  Term upd    = (kind == SCATTER_SUM) ? uop_binary(UOP_ADD, old, sv) : sv;
-  Term acc    = uop_store(out, t_addr, uop_where(valid, upd, old));
+  Term t_addr   = ru_build_addr_with_dims(t, (u8)bs.ndim, bs.dims);
+  Term old      = uop_index_e(out, t_addr);
+  Term upd      = (kind == SCATTER_REPLACE) ? sv : ru_scatter_combine(kind, old, sv);
+  Term acc      = uop_store(out, t_addr, uop_where(valid, upd, old));
+  Term identity = uop_const(dtype, ident);
   Term root;
-  if (kind == SCATTER_SUM && uop_scatter_include_self(self)) {
-    Term identity = uop_const(dtype, ident);
+  if (kind == SCATTER_REPLACE) {
+    root = uop_after(acc, uop_store(out, my_addr, base));
+  } else if (uop_scatter_include_self(self)) {
     root = uop_after(acc, uop_store(out, my_addr, identity));
     if (base != identity) {
-      Term sum = uop_binary(UOP_ADD, uop_index_e(out, my_addr), base);
-      root = uop_after(uop_store(out, my_addr, sum), root);
+      Term fin = ru_scatter_combine(kind, uop_index_e(out, my_addr), base);
+      root = uop_after(uop_store(out, my_addr, fin), root);
     }
-  } else if (kind == SCATTER_SUM) {
-    Term reset = uop_store(out, t_addr,
-                           uop_where(valid, uop_const(dtype, ident), old));
-    root = uop_after(acc, uop_after(reset, uop_store(out, my_addr, base)));
   } else {
-    root = uop_after(acc, uop_store(out, my_addr, base));
+    Term init  = (kind == SCATTER_SUM) ? base
+                                       : ru_scatter_combine(kind, identity, base);
+    Term reset = uop_store(out, t_addr, uop_where(valid, identity, old));
+    root = uop_after(acc, uop_after(reset, uop_store(out, my_addr, init)));
   }
   RU_STORE_ROOT[i] = root;
 }

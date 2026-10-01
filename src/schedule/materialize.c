@@ -6308,11 +6308,11 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
 
   // SCATTER (always its own kernel root): idx and src are read at lowered
   // addresses composed against their storage; base is bound as rangeify
-  // reads it.  Kinds without a lowering decline the kernel.
+  // reads it.  PROD has no lowering yet and declines the kernel.
   if (op == UOP_SCATTER) {
     memo->indexed = 1;
     u32 kind = uop_scatter_kind(t);
-    if (kind != SCATTER_SUM && kind != SCATTER_REPLACE) {
+    if (kind == SCATTER_PROD) {
       fprintf(stderr, "thvm: scatter kind %u has no lowering yet; "
                       "its kernel was not emitted\n", kind);
       return VISIT_BAIL;

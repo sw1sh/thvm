@@ -43,7 +43,21 @@ range:
   (`scatter`, `_masked_merge`, `mixin/op.py:1170-1177`).
 
 `scatter_identity_bits` gives tinygrad's exact identities (0, 1, the dtype
-minimum or maximum, `dtype.py:69-77`).
+minimum or maximum, `dtype.py:69-77`): -inf / +inf for a float (-448 /
+448 for fp8e4m3), the ends of the integer range, False / True for bool.
+`uop_scatter` returns 0 for a MAX or MIN whose identity does not fit the
+CONST's 32-bit payload (an i64, a u64 MIN).
+
+MAX and MIN combine as tinygrad's CPU backend does: `max(acc, x)` is
+`(acc < x) ? x : acc`, the CPU form of `Ops.MAX`
+(`codegen/decomp/op.py:84`) that a reduce folds as `acc = MAX(acc, x)`
+(`codegen/__init__.py:203`), and `min(acc, x)` is its mirror
+`(x < acc) ? x : acc`, which tinygrad computes through a negated (float)
+or inverted (int) MAX (`mixin/op.py:494`, `elementwise.py:404-408`).  So
+among equal values the first in p order stays (-0.0 then +0.0 gives
+-0.0), a NaN src never wins, a NaN base yields to `S` where it is
+combined, and an untouched NaN base becomes the identity, as
+`MAX(I, NaN) = I` does in tinygrad.
 
 ## Lowering
 
@@ -58,8 +72,8 @@ has the detail.
   `x[idx]`) fuses too; a src that is not a view of storage realizes first.
 - A scatter is always its own kernel: an AFTER chain of stores, with a
   serial read-modify-write over the index space.  An invalid index writes
-  the old value back.  SUM and REPLACE lower today; PROD, MAX and MIN are
-  declined with a stderr line until they get a lowering.
+  the old value back.  SUM, MAX, MIN and REPLACE lower today; PROD is
+  declined with a stderr line until it gets a lowering.
 - Kernels holding either op are flagged `no_opts` and run on the CPU
   backend only: emit declines them on a GPU backend.
 - The index is read from its buffer at run time, so a JIT capture replays
@@ -128,6 +142,14 @@ of them carries a gradient there.
   positions' gradient into row 0; thvm drops it, as the forward reads it
   as 0 and tinygrad's default path does.
 - Native gather and scatter run on the CPU backend only.
+- A NaN src never wins an amax / amin scatter in thvm, which folds every
+  position serially.  tinygrad's CPU kernels unroll the one-hot axis by a
+  shape-dependent factor and fold each unrolled chunk left to right
+  (`expand_horizontal_reduce`, `codegen/__init__.py:206-209`), so a NaN at
+  the head of a chunk wins that chunk: with [nan, 1, 2] landing on one
+  position, master gives nan (8 ids, include_self), 2.0 (8 ids, no
+  include_self) or -inf (40 ids), where thvm gives 2.0.  Without a NaN src
+  the values match tinygrad bit for bit.
 - A position or offset in an index view is compiled into the kernel (see
   Lowering); tinygrad keeps a bound Variable symbolic.
 - A scatter_reduce mean divides as every thvm division does, `sum *
@@ -155,6 +177,10 @@ Measured on the Linux CPU pod (C JIT):
   [tests/test_uop_scatter.c](../tests/test_uop_scatter.c): forward values
   against host loops on both CPU backends, operand forms and views,
   fusion, loop bounds, JIT replay.
+- [tests/test_uop_scatter_max.c](../tests/test_uop_scatter_max.c): MAX
+  and MIN forward on both CPU backends: ties, signed zeros, identity hits,
+  NaN, the exact identity bytes of eight dtypes, BEAM=2, JIT replay and a
+  GC of live graphs.
 - [tests/test_grad_gather_scatter.c](../tests/test_grad_gather_scatter.c):
   gradients in every chain-rule mode, finite differences, second order.
 - [py/tests/test_gather_parity.py](../py/tests/test_gather_parity.py):
