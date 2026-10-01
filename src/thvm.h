@@ -6848,7 +6848,9 @@ typedef struct {
   u8   use_lrs;
   u64  lrs_start_us;              // epoch (atp_work_now_us at first select)
   u64  lrs_start_wall_us;         // epoch on the wall clock: the simulated
-                                  // CPU budget is deadline - this
+                                  // CPU budget is deadline - this (under
+                                  // a deterministic work clock, see
+                                  // wall_budget_us)
   u32  lrs_recompute_period;      // selections between horizon recomputes
   u32  lrs_warmup_selections;     // selections before the first horizon
   u32  lrs_last_recompute_at;     // cp_select_count at the last recompute
@@ -7278,6 +7280,12 @@ typedef struct {
   // generates infinite CP fan-out and would otherwise spin until
   // the OS sends SIGKILL).
   u64  wall_deadline_us;
+  // The deadline's budget (us) and the engine's work clock when it was
+  // set: under a deterministic work clock (atp_work_fixed) the LRS
+  // budget is wall_budget_us less the work done before the LRS epoch,
+  // not a wall reading, so it repeats run to run.
+  u64  wall_budget_us;
+  u64  wall_set_work_us;
 
   // Process-RSS baseline for the growth-relative memory guard, sampled
   // at the run's FIRST RSS poll (step 0).  0 = not yet sampled (calloc).

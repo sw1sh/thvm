@@ -1507,10 +1507,21 @@ static u64 atp_cpu_now_us(void) {
 // done alone: the disciplines then fire at the same selection indices
 // on every run, loaded or not, on any host running the same binary.
 // Linux only; where the counter cannot be opened the CPU clock is used.
+// THVM_ATP_WORK_CLOCK=steps is the gate clock (G2.1 / G2.2 in
+// docs/plans/enigma_portfolio.md): the engine's disciplines read a
+// logical clock, ATP_WORK_STEP_US nominal microseconds per search event
+// (g_atp_work_ticks: CP queue inserts and selection attempts), which code
+// that only observes the search -- the history export, a guide's scoring
+// -- cannot advance, so an observer's run and the plain run take every
+// clock-gated decision at the same point by construction.  Its scale is
+// arbitrary (it is not a deployment clock); the front-end budgets, which
+// see no search events, keep the instruction counter (or the CPU clock).
 // Never returns 0: the disciplines use 0 as their unlatched sentinel.
 // The clock's mode, probed once: 1 = instructions (the counter opened),
-// 0 = CPU.
+// 0 = CPU; g_atp_work_steps = the step clock drives the engine.
+#define ATP_WORK_STEP_US 10ull
 static int g_atp_work_mode = -1;
+static u8  g_atp_work_steps = 0u;
 #if defined(__linux__)
 static int g_atp_work_fd   = -1;
 #endif
@@ -1518,9 +1529,12 @@ static int g_atp_work_fd   = -1;
 static int atp_work_mode(void) {
   if (g_atp_work_mode < 0) {
     g_atp_work_mode = 0;
-#if defined(__linux__)
     const char *e = getenv("THVM_ATP_WORK_CLOCK");
-    if (e != NULL && strcmp(e, "instr") == 0) {
+    if (e != NULL && strcmp(e, "steps") == 0) {
+      g_atp_work_steps = 1u;
+    }
+#if defined(__linux__)
+    if (e != NULL && (strcmp(e, "instr") == 0 || g_atp_work_steps)) {
       struct perf_event_attr pe;
       memset(&pe, 0, sizeof pe);
       pe.type           = PERF_TYPE_HARDWARE;
@@ -1598,9 +1612,30 @@ static u64 atp_work_peek_us(void) {
   return eff ? eff : 1u;
 }
 
+// The clock-gated disciplines' own reading.  Under the step clock the
+// exclusion windows stay unarmed: there is no proof-only work on it.
 static u64 atp_work_now_us(void) {
+  (void)atp_work_mode();
+  if (g_atp_work_steps) {
+    return g_atp_work_ticks * ATP_WORK_STEP_US + 1u;
+  }
   g_atp_work_live = 1u;
   return atp_work_peek_us();
+}
+
+// The engine's clock without arming the windows (the LRS budget's start).
+static u64 atp_work_engine_peek_us(void) {
+  (void)atp_work_mode();
+  if (g_atp_work_steps) {
+    return g_atp_work_ticks * ATP_WORK_STEP_US + 1u;
+  }
+  return atp_work_peek_us();
+}
+
+// 1 when the engine's work clock is a function of the work done alone
+// (instructions or steps): the LRS budget is then derived from it too.
+static u8 atp_work_fixed(void) {
+  return (u8)(atp_work_mode() == 1 || g_atp_work_steps);
 }
 
 // THVM_ATP_CLOCK_TRACE=<dir>: one line per clock-gated search decision
@@ -1681,10 +1716,16 @@ static int atp_lpo_wall_hook(void) {
 
 fn void thvm_atp_set_wall_deadline(AtpState *s, double seconds_from_now) {
   if (s == NULL) return;
-  if (seconds_from_now <= 0.0) { s->wall_deadline_us = 0u; return; }
+  if (seconds_from_now <= 0.0) {
+    s->wall_deadline_us = 0u;
+    s->wall_budget_us   = 0u;
+    return;
+  }
   u64 now = atp_now_us();
   if (now == 0u) return;  // clock_gettime failed; leave deadline off
   s->wall_deadline_us = now + (u64)(seconds_from_now * 1e6);
+  s->wall_budget_us   = (u64)(seconds_from_now * 1e6);
+  s->wall_set_work_us = atp_work_fixed() ? atp_work_engine_peek_us() : 0u;
 }
 
 // Arm (seconds>0) or disarm (seconds<=0) the LPO comparator's mid-

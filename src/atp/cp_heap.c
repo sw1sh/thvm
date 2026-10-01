@@ -644,6 +644,7 @@ static void atp_cp_heap_insert_packed(AtpState *s, u8 *packed, u32 cp_nodes,
                  :                        0u;
   if (g_atp_phase_detail) g_atp_cpg_us_kbo += atp_now_us() - _dkb_t0;
   u32 seq        = s->cp_seq_next++;
+  g_atp_work_ticks++;
   s->cp_seq[i]   = seq;
   if (s->otter_rec) atp_otter_record(s, i, seq);
   if (s->cp_uid_a != NULL) { s->cp_uid_a[i] = g_cp_uid_a; s->cp_uid_b[i] = g_cp_uid_b; }
@@ -1248,6 +1249,7 @@ static u8 atp_cp_implicit_push(AtpState *s, Term lhs, Term rhs,
                                                               s->w2_mode)
                   :                        0u;
   s->cp_seq[i]    = s->cp_seq_next++;
+  g_atp_work_ticks++;
   if (s->cp_uid_a != NULL) { s->cp_uid_a[i] = g_cp_uid_a; s->cp_uid_b[i] = g_cp_uid_b; }
   atp_cp_form_trace(s->cp_seq[i], cp_nodes, lhs, rhs);
   // No THVM_ATPFT_CPQ mirror: the FT queue's slot-occupied invariant
@@ -1484,7 +1486,18 @@ static void atp_lrs_recompute_horizon(AtpState *s) {
   if (s->cp_select_count < s->lrs_warmup_selections) {
     return;
   }
-  u64 budget  = s->wall_deadline_us - s->lrs_start_wall_us;
+  u64 budget = s->wall_deadline_us - s->lrs_start_wall_us;
+  if (s->wall_budget_us != 0u && atp_work_fixed()) {
+    // The wall reading at the epoch carries load and the time any
+    // observer spent before it; the configured budget less the work done
+    // before the epoch does not.
+    u64 used = (s->lrs_start_us > s->wall_set_work_us)
+                 ? s->lrs_start_us - s->wall_set_work_us : 0u;
+    if (used >= s->wall_budget_us) {
+      return;
+    }
+    budget = s->wall_budget_us - used;
+  }
   u64 elapsed = now - s->lrs_start_us;
   if (elapsed >= budget) {
     return;
@@ -1992,6 +2005,7 @@ fn u8 thvm_atp_select_cp(AtpState *s, Term *lhs_out, Term *rhs_out) {
               (u8)atp_cp_uid_orphan(s, v));
     }
   }
+  g_atp_work_ticks++;
   if (!orphan) s->cp_select_count++;
   else atp_hx_del(s, s->cp_seq[v], ATP_HX_DEL_ORPHAN_POP);
 
