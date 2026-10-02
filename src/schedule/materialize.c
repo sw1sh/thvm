@@ -7663,11 +7663,15 @@ fn Term thvm_materialize_impl(Term term) {
     // through to the kernel-op-emit path -- it emits a kernel that
     // wnf fires AFTER the producer, keeping the producer reachable.
     // Static-data sources (producer_kid == 0 -- external tensors, the
-    // abort-repro case) gather safely.  Non-chained aliases (nviews ==
-    // 0) keep the existing behaviour.
+    // abort-repro case) gather safely.  The same holds for an unchained
+    // strided alias (a broadcast EXPAND of a kernel output a sibling
+    // root's pass cached, Bp's grad in `(Bp + h.gather(0, i)).sum(1)`):
+    // the gather would copy the producer's buffer before it is written.
+    // Only a plain contiguous alias needs no gather and stays an alias.
     if (alias_tid != 0) {
       TenDesc const *ad = &TENS[alias_tid];
-      int unsafe_chain_root = (ad->nviews > 0 && ad->producer_kid != 0);
+      int plain = ad->view.contiguous && ad->view.offset == 0 && ad->nviews == 0;
+      int unsafe_chain_root = (!plain && ad->producer_kid != 0);
       if (!unsafe_chain_root) {
         Term alias_term = term_new(0, TAG_TEN, ad->dtype, alias_tid);
         // Under TJit capture, record the host gather as a replayable
