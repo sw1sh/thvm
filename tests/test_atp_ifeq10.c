@@ -1279,6 +1279,48 @@ static void check_nested_include(void) {
   }
 }
 
+// An n-deep f(...f(a)...) side: refused past I10_NEST_MAX as an input
+// error, not a stack overflow; encoded below it.
+static void check_deep(int n, int want_rc) {
+  g_total++;
+  const char *pre = "cnf(ax, axiom, ";
+  const char *post = " = b).\ncnf(goal, negated_conjecture, c != b).\n";
+  size_t len = strlen(pre) + 3u * (size_t)n + 1u + strlen(post) + 1u;
+  char *text = malloc(len);
+  FILE *tmp = tmpfile();
+  if (text == NULL || tmp == NULL) {
+    fprintf(stderr, "  FAIL deep %d: cannot set up the case\n", n);
+    g_fail++;
+    free(text);
+    if (tmp != NULL) {
+      fclose(tmp);
+    }
+    return;
+  }
+  char *w = text;
+  w += sprintf(w, "%s", pre);
+  for (int i = 0; i < n; i++) {
+    *w++ = 'f';
+    *w++ = '(';
+  }
+  *w++ = 'a';
+  for (int i = 0; i < n; i++) {
+    *w++ = ')';
+  }
+  sprintf(w, "%s", post);
+  int rc = ifeq10_encode(text, NULL, tmp);
+  fclose(tmp);
+  free(text);
+  int ok = (rc == want_rc);
+  if (ok && want_rc == I10_RC_INPUT && strstr(g_i10_msg, "nesting deeper than") == NULL) {
+    ok = 0;
+  }
+  if (!ok) {
+    fprintf(stderr, "  FAIL deep %d: exit %d, want %d (%s)\n", n, rc, want_rc, g_i10_msg);
+    g_fail++;
+  }
+}
+
 int main(void) {
   printf("test_atp_ifeq10\n");
   check_case("LCL096-1", k_lcl096_in, k_lcl096_out, I10_RC_OK, NULL, k_lcl096_raw);
@@ -1303,6 +1345,8 @@ int main(void) {
   check_case("cnf and fof mixed", k_mixed_in, NULL, I10_RC_INPUT, "mixes cnf and fof", NULL);
   check_case("two conjectures", k_twoconj_in, NULL, I10_RC_INPUT, "more than one conjecture",
              NULL);
+  check_deep(I10_NEST_MAX - 8, I10_RC_OK);
+  check_deep(100000, I10_RC_INPUT);
   if (g_fail == 0) {
     printf("  ok    %d/%d\n", g_total, g_total);
     return 0;

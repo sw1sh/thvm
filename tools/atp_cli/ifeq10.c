@@ -53,6 +53,12 @@ enum {
 };
 
 #define I10_MAX_INCLUDE_DEPTH 8
+// The reader and every later pass walk terms and formulas by recursion,
+// so the input's nesting is bounded where it is read (a deeper input is
+// refused as I10_RC_INPUT, not a stack overflow).  FindProof's own
+// reader refuses an equation side of 2048 characters or more, so no
+// input it can prove comes near this.
+#define I10_NEST_MAX 10000
 #define I10_COST_CAP ((long long)1 << 60)
 
 // --- arena, vectors, strings ------------------------------------------
@@ -2666,6 +2672,7 @@ typedef struct I10Parser {
   int line;
   int tok;
   const char *text;
+  int nest;
 } I10Parser;
 
 typedef struct I10Scope {
@@ -2857,7 +2864,22 @@ static int i10_p_args(I10Parser *ps, I10Scope *sc, I10Vec *args) {
   }
 }
 
+static void i10_nest_in(I10Parser *ps) {
+  if (++ps->nest > I10_NEST_MAX) {
+    i10_syntax(ps, i10_fmt("nesting deeper than %d", I10_NEST_MAX));
+  }
+}
+
+static I10Term *i10_p_term_at(I10Parser *ps, I10Scope *sc);
+
 static I10Term *i10_p_term(I10Parser *ps, I10Scope *sc) {
+  i10_nest_in(ps);
+  I10Term *t = i10_p_term_at(ps, sc);
+  ps->nest--;
+  return t;
+}
+
+static I10Term *i10_p_term_at(I10Parser *ps, I10Scope *sc) {
   switch (ps->tok) {
     case I10T_VAR:
       return i10_p_var(ps, sc);
@@ -2929,7 +2951,16 @@ static I10Form *i10_p_literal(I10Parser *ps, I10Scope *sc) {
   }
 }
 
+static I10Form *i10_p_unitary_at(I10Parser *ps, I10Scope *sc);
+
 static I10Form *i10_p_unitary(I10Parser *ps, I10Scope *sc) {
+  i10_nest_in(ps);
+  I10Form *f = i10_p_unitary_at(ps, sc);
+  ps->nest--;
+  return f;
+}
+
+static I10Form *i10_p_unitary_at(I10Parser *ps, I10Scope *sc) {
   switch (ps->tok) {
     case I10T_NOT:
       i10_lex(ps);
@@ -2975,7 +3006,16 @@ static I10Form *i10_p_unitary(I10Parser *ps, I10Scope *sc) {
   }
 }
 
+static I10Form *i10_p_formula_at(I10Parser *ps, I10Scope *sc);
+
 static I10Form *i10_p_formula(I10Parser *ps, I10Scope *sc) {
+  i10_nest_in(ps);
+  I10Form *f = i10_p_formula_at(ps, sc);
+  ps->nest--;
+  return f;
+}
+
+static I10Form *i10_p_formula_at(I10Parser *ps, I10Scope *sc) {
   I10Form *x = i10_p_unitary(ps, sc);
   int tok = ps->tok;
   switch (tok) {
@@ -3139,6 +3179,7 @@ static void i10_parse_text(const char *text, const char *file, const I10Sel *sel
   ps.file = file;
   ps.line = 1;
   ps.text = NULL;
+  ps.nest = 0;
   i10_lex(&ps);
   while (ps.tok != I10T_EOF) {
     if (ps.tok != I10T_ATOM) {
