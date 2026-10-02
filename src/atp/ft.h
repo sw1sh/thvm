@@ -88,9 +88,17 @@ _Static_assert(_Alignof(AtpFtCell) == 8, "AtpFtCell must be 8-byte aligned");
 //                       head; ft_free_span chain-pushes a pre-linked
 //                       span without walking it.
 // `scratch_base/top/end`
-//                     = bump pointer over a single contiguous region.
+//                     = bump pointer over the current scratch region.
 //                       `top` is the next allocation; `end` is one past
-//                       the last cell.  Reset = `top = base`.
+//                       the last cell.  A full region is retired, not
+//                       moved: scratch cells point at each other and are
+//                       held across allocations (an AC chain copies
+//                       subject leaves that live in scratch), so growth
+//                       parks the full region in `scratch_old` until the
+//                       reset, which frees it, and opens one twice the
+//                       size of all regions so far (so the last region
+//                       soon holds a whole round, and a reset reuses it).
+//                       Reset = `top = base`.
 // `n_persistent_alive`= live count in Arena A.
 // `n_scratch_alive`   = high-water for the current scratch region (reset
 //                       to 0 on ft_scratch_reset).
@@ -113,6 +121,10 @@ typedef struct AtpFt {
   AtpFtCell  *scratch_base; // scratch arena: bump region [base, end)
   AtpFtCell  *scratch_top;  // next bump slot
   AtpFtCell  *scratch_end;  // one past last cell in the region
+  AtpFtCell **scratch_old;  // retired regions, freed at the reset
+  u32         n_scratch_old;
+  u32         cap_scratch_old;
+  u64         old_scratch_cells; // cells in the retired regions
   u64         n_persistent_alive;
   u64         n_scratch_alive;
   u64         session;      // process-unique instance id (never 0)

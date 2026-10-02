@@ -189,6 +189,10 @@ void ft_init(AtpFt *a) {
   a->scratch_base       = NULL;
   a->scratch_top        = NULL;
   a->scratch_end        = NULL;
+  a->scratch_old        = NULL;
+  a->n_scratch_old      = 0;
+  a->cap_scratch_old    = 0;
+  a->old_scratch_cells  = 0;
   a->n_persistent_alive = 0;
   a->n_scratch_alive    = 0;
   a->session            = ++g_ft_session_next;
@@ -213,6 +217,10 @@ void ft_destroy(AtpFt *a) {
     b = nx;
   }
   free(a->scratch_base);
+  for (u32 i = 0; i < a->n_scratch_old; i++) {
+    free(a->scratch_old[i]);
+  }
+  free(a->scratch_old);
   ft_init(a);
 }
 
@@ -338,13 +346,32 @@ void ft_free_span(AtpFt *a, AtpFtCell *first, AtpFtCell *last) {
 static void ft_scratch_grow(AtpFt *a, u32 want_cells) {
   size_t stride = ft_stride();
   u32 cur_cells = (u32)((size_t)((char *)a->scratch_end - (char *)a->scratch_base) / stride);
-  u32 new_cells = cur_cells ? cur_cells : (ATPFT_SCRATCH_INIT_BYTES / (u32)sizeof(AtpFtCell));
-  while (new_cells < want_cells) new_cells *= 2u;
-  AtpFtCell *p = (AtpFtCell *)realloc(a->scratch_base, (size_t)new_cells * stride);
-  if (p == NULL) { fprintf(stderr, "ft_alloc: scratch arena OOM\n"); exit(1); }
-  size_t used_bytes = (size_t)((char *)a->scratch_top - (char *)a->scratch_base);
+  u64 total     = a->old_scratch_cells + cur_cells;
+  u64 new_cells = total ? 2u * total : (ATPFT_SCRATCH_INIT_BYTES / (u32)sizeof(AtpFtCell));
+  while (new_cells < want_cells) {
+    new_cells *= 2u;
+  }
+  if (a->scratch_base != NULL) {
+    if (a->n_scratch_old == a->cap_scratch_old) {
+      u32 cap = a->cap_scratch_old ? 2u * a->cap_scratch_old : 8u;
+      AtpFtCell **v = (AtpFtCell **)realloc(a->scratch_old, (size_t)cap * sizeof *v);
+      if (v == NULL) {
+        fprintf(stderr, "ft_alloc: scratch arena OOM\n");
+        exit(1);
+      }
+      a->scratch_old     = v;
+      a->cap_scratch_old = cap;
+    }
+    a->scratch_old[a->n_scratch_old++] = a->scratch_base;
+    a->old_scratch_cells += cur_cells;
+  }
+  AtpFtCell *p = (AtpFtCell *)malloc((size_t)new_cells * stride);
+  if (p == NULL) {
+    fprintf(stderr, "ft_alloc: scratch arena OOM\n");
+    exit(1);
+  }
   a->scratch_base = p;
-  a->scratch_top  = (AtpFtCell *)((char *)p + used_bytes);
+  a->scratch_top  = p;
   a->scratch_end  = (AtpFtCell *)((char *)p + (size_t)new_cells * stride);
 }
 
@@ -369,7 +396,12 @@ AtpFtCell *ft_alloc_scratch(AtpFt *a) {
 }
 
 void ft_scratch_reset(AtpFt *a) {
-  a->scratch_top     = a->scratch_base;
+  for (u32 i = 0; i < a->n_scratch_old; i++) {
+    free(a->scratch_old[i]);
+  }
+  a->n_scratch_old     = 0;
+  a->old_scratch_cells = 0;
+  a->scratch_top       = a->scratch_base;
   a->n_scratch_alive = 0;
 }
 
