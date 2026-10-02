@@ -336,6 +336,7 @@ TESTS := \
   $(BIN)/test_render_uop \
   $(BIN)/test_render_uop_metal \
   $(BIN)/test_render_uop_cuda \
+  $(BIN)/test_realize_gc_roots \
   $(BIN)/test_materialize_v2 \
   $(BIN)/test_collapse \
   $(BIN)/test_cnf \

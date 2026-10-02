@@ -3679,6 +3679,10 @@ fn Term thvm_materialize(Term term);
 // a cycle, and thvm_realize_error() then says why ("" otherwise).
 fn Term thvm_realize(Term expr);
 fn Term thvm_realize_many(Term ctr_term);
+// Deferred heap collection for a host that holds raw Terms (realize.c).
+fn void thvm_gc_defer(int on);
+fn int  thvm_gc_pending(void);
+fn void thvm_gc_collect_deferred(Term *roots, u32 n_roots);
 fn char const *thvm_realize_error(void);
 // Ceiling-abort cleanup: hard-rolls a failed (longjmp'd-out) realize's pools
 // back to its entry watermarks so an over-budget run doesn't leak across

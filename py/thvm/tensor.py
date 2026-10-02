@@ -56,9 +56,11 @@ _LEAF_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
 # training step via GlobalCounters.reset) then frees every backend
 # buffer NOT reachable from a pinned tensor -- the cross-step buffer
 # reclaim that keeps device memory flat in the eager (no-JIT) loop.
-# Requires THVM_GC=0 (no copying heap GC) so the raw term integers
-# Python caches never move.
 _PIN_NEXT = 1
+
+# Every Tensor's raw term is a root of the deferred heap collection, which
+# rebinds it when its cells move (Thvm._collect).
+_LIVE_ADD = Thvm.live_terms.add
 
 
 # thvm's `where`/`maximum`/`minimum` compose through a 0/1 mask MULTIPLY
@@ -230,6 +232,7 @@ class Tensor(metaclass=_TensorMeta):
         self._pin_id = 0
         self._view_base = None
         self._view_begin_end = None
+        _LIVE_ADD(self)
         self._pin()
 
     @classmethod
@@ -244,6 +247,7 @@ class Tensor(metaclass=_TensorMeta):
         t._pin_id = 0
         t._view_base = None
         t._view_begin_end = None
+        _LIVE_ADD(t)
         t._pin()
         return t
 

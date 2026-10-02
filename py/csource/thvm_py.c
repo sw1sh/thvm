@@ -19,7 +19,13 @@
 #define EXPORT __attribute__((visibility("default")))
 
 // ---------------- runtime lifecycle ----------------
-EXPORT void py_thvm_init(void) { thvm_init(); }
+// Python objects hold raw heap Terms (every lazy Tensor's graph), so the
+// heap collection a realize wants is deferred: Thvm runs it through
+// py_gc_collect with its live Terms as roots and rebinds them.
+EXPORT void py_thvm_init(void) {
+  thvm_init();
+  thvm_gc_defer(1);
+}
 EXPORT void py_thvm_free(void) { thvm_free(); }
 
 // ---------------- term inspection ----------------
@@ -288,6 +294,15 @@ EXPORT uint64_t py_realize_many(uint64_t *terms, uint32_t n) {
 
 EXPORT const char *py_realize_error(void) { return thvm_realize_error(); }
 
+// The deferred heap collection: `roots[]` are the Terms Python holds, and
+// come back relocated.
+EXPORT int32_t py_gc_pending(void) {
+  return thvm_gc_pending();
+}
+EXPORT void py_gc_collect(uint64_t *roots, uint32_t n) {
+  thvm_gc_collect_deferred((Term *)roots, n);
+}
+
 // --- live-tensor pinning + cross-step buffer reclaim ---
 // The eager py path realizes a fresh forward/backward/optimizer graph
 // every step; the per-realize pool only recycles THAT realize's scratch,
@@ -295,9 +310,7 @@ EXPORT const char *py_realize_error(void) { return thvm_realize_error(); }
 // the next watermark and accumulate -> the GPU saturates.  Fix: every
 // live Python Tensor pins its realized term (so it's a GC/preserve root);
 // py_reclaim then marks everything reachable from the pinned set live and
-// frees ALL other backend buffers globally (watermark 1).  Run with
-// THVM_GC=0 so the Cheney heap-Term collector stays off and raw term
-// integers held in Python never move (no handle-refresh needed).
+// frees ALL other backend buffers globally (watermark 1).
 EXPORT void py_pin_set(uint64_t handle, uint64_t term) {
   extern_pin_handle_set(handle, term);
 }

@@ -170,14 +170,48 @@ fn void thvm_realize_fwd_reclaim(void) {
 // past a bound since the last GC (default 512MB; THVM_GC_DEVICE_MB overrides,
 // 0 disables).  Off-Metal thvm_metal_live_bytes() returns 0 -> never fires.
 // `*res_io` rides the GC root set and is re-fetched after the space swap.
+//
+// A host whose own objects hold raw heap Terms (the py frontend: every lazy
+// Tensor keeps its UOp graph as an integer) defers the collection: the
+// realize only notes it, and the host runs it with its live Terms as extra
+// roots through thvm_gc_collect_deferred, which relocates them in place.
+// Collected here, the host's lazy graphs would point into the dead space.
+static int GC_DEFER   = 0;
+static int GC_PENDING = 0;
+static u64 GC_DEVICE_BASELINE = 0;
+static u64 GC_CUDA_BASELINE   = 0;
+
+fn void thvm_gc_defer(int on) {
+  GC_DEFER = on;
+}
+
+fn int thvm_gc_pending(void) {
+  return GC_PENDING;
+}
+
+static void thvm_realize_gc_run(Term *roots, u32 n_roots) {
+  GC_PENDING = 0;
+  gc_collect(roots, n_roots);
+  GC_DEVICE_BASELINE = thvm_metal_live_bytes();
+#ifdef THVM_HAS_CUDA
+  GC_CUDA_BASELINE = cuda_buf_live_bytes();
+#endif
+}
+
+fn void thvm_gc_collect_deferred(Term *roots, u32 n_roots) {
+  if (!gc_enabled()) {
+    GC_PENDING = 0;
+    return;
+  }
+  thvm_realize_gc_run(roots, n_roots);
+}
+
 fn void thvm_realize_maybe_gc(Term *res_io) {
   if (!gc_enabled()) return;
   static int gc_disabled_env  = -1;
   static int gc_kb_env        = -1;
   static int gc_device_mb_env = -1;
   static int gc_cuda_floor_gb = -1;
-  static u64 gc_device_baseline = 0;
-  static u64 gc_cuda_baseline   = 0;
   if (gc_disabled_env == -1) {
     const char *e = getenv("THVM_GC");
     gc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
@@ -202,7 +236,7 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
   int device_pressure = 0;
   if (gc_device_mb_env > 0) {
     u64 dev = thvm_metal_live_bytes();
-    if (dev > gc_device_baseline + (u64)gc_device_mb_env * (1ull << 20))
+    if (dev > GC_DEVICE_BASELINE + (u64)gc_device_mb_env * (1ull << 20))
       device_pressure = 1;
   }
   // CUDA device-pressure trigger (opt-in via THVM_CUDA_GC_FLOOR_GB).  Counting
@@ -221,19 +255,18 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
   if (gc_cuda_floor_gb > 0) {
     u64 cdev = cuda_buf_live_bytes();
     u64 floor = (u64)gc_cuda_floor_gb * (1ull << 30);
-    if (cdev > floor && cdev > gc_cuda_baseline + (u64)gc_device_mb_env * (1ull << 20))
+    if (cdev > floor && cdev > GC_CUDA_BASELINE + (u64)gc_device_mb_env * (1ull << 20))
       device_pressure = 1;
   }
 #endif
-  if (heap_pressure || device_pressure) {
-    Term roots[1] = { *res_io };
-    gc_collect(roots, 1);
-    *res_io = roots[0];
-    gc_device_baseline = thvm_metal_live_bytes();
-#ifdef THVM_HAS_CUDA
-    gc_cuda_baseline = cuda_buf_live_bytes();
-#endif
+  if (!heap_pressure && !device_pressure) return;
+  if (GC_DEFER) {
+    GC_PENDING = 1;
+    return;
   }
+  Term roots[1] = { *res_io };
+  thvm_realize_gc_run(roots, 1);
+  *res_io = roots[0];
 }
 
 // === Ceiling-abort cleanup (Q2: the THVM_MAX_LIVE_BYTES retry-leak) ===

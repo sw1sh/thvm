@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import weakref
 from ctypes import c_char_p, c_float, c_int32, c_uint32, c_uint64, c_void_p
 from pathlib import Path
 from typing import NewType
@@ -118,6 +119,8 @@ _realize = _bind("py_realize", c_uint64, c_uint64)
 _realize_many = _bind("py_realize_many", c_uint64,
                       ctypes.POINTER(c_uint64), c_uint32)
 _realize_error = _bind("py_realize_error", c_char_p)
+_gc_pending = _bind("py_gc_pending", c_int32)
+_gc_collect = _bind("py_gc_collect", None, ctypes.POINTER(c_uint64), c_uint32)
 _pin_set = _bind("py_pin_set", None, c_uint64, c_uint64)
 _pin_drop = _bind("py_pin_drop", None, c_uint64)
 _reclaim = _bind("py_reclaim", None)
@@ -384,6 +387,12 @@ class Thvm:
 
     _initialized = False
 
+    # Objects whose `.term` holds a raw heap Term (tensor.py registers every
+    # Tensor).  A realize that wants a heap collection leaves it pending;
+    # _collect runs it with these Terms as roots and rebinds each to its
+    # moved cell, so no lazy graph Python keeps points into the dead space.
+    live_terms: "weakref.WeakSet" = weakref.WeakSet()
+
     def __init__(self):
         if not Thvm._initialized:
             _thvm_init()
@@ -616,7 +625,20 @@ class Thvm:
         r = _realize(c_uint64(int(t)))
         if r == 0 and _realize_error():
             raise RuntimeError(_realize_error().decode())
-        return Term(r)
+        return self._collect([Term(r)])[0]
+
+    def _collect(self, held: "list[Term]") -> "list[Term]":
+        """Run a pending heap collection with every live Tensor's term and
+        `held` as roots; returns `held` relocated."""
+        if not _gc_pending():
+            return held
+        live = list(Thvm.live_terms)
+        n = len(live) + len(held)
+        arr = (c_uint64 * n)(*[int(x.term) for x in live], *[int(h) for h in held])
+        _gc_collect(arr, c_uint32(n))
+        for i, x in enumerate(live):
+            x.term = Term(arr[i])
+        return [Term(arr[len(live) + j]) for j in range(len(held))]
 
     def realize_many(self, terms: "list[Term]") -> "list[Term]":
         """Realize several terms in ONE scheduler pass (tinygrad
@@ -629,7 +651,7 @@ class Thvm:
         arr = (c_uint64 * n)(*[int(t) for t in terms])
         if _realize_many(arr, c_uint32(n)) == 0 and _realize_error():
             raise RuntimeError(_realize_error().decode())
-        return [Term(arr[i]) for i in range(n)]
+        return self._collect([Term(arr[i]) for i in range(n)])
 
     # ---- live-tensor pinning + cross-step buffer reclaim ----
     def pin_set(self, handle: int, t: Term) -> None:
