@@ -554,6 +554,12 @@ static u8 atp_cp_source_disjoint_connected(AtpState *s, Term lhs, Term rhs,
 // sides is the join point -> redundant.  Bounded by ATP_CONN_MAX_NODES
 // (return 0 = KEEP on overflow, so the criterion never wrongly deletes).
 #define ATP_CONN_MAX_NODES 256u
+// Heap cells one connectedness search may spend.  A successor at depth
+// d is wrapped back through its d ancestors, so a CP thousands of levels
+// deep costs O(d) cells per successor and O(d^2) per search; past the
+// budget the search keeps the CP (sound).  Shallow searches stay far
+// below it (256 nodes x 64 successors x a few hundred cells).
+#define ATP_CONN_HEAP_CELLS (1ull << 24)
 #define ATP_CONN_SIDE_S 1u
 #define ATP_CONN_SIDE_T 2u
 
@@ -681,9 +687,13 @@ static u8 atp_cp_connected_below_peak(AtpState *s, Term lhs, Term rhs,
   terms[n] = l; hash[n] = atp_struct_hash(l); side[n] = ATP_CONN_SIDE_S; n++;
   terms[n] = r; hash[n] = atp_struct_hash(r); side[n] = ATP_CONN_SIDE_T; n++;
   Term succ[64];
+  u64  h0 = HEAP_NEXT;
   for (u32 cur = 0; cur < n; cur++) {
     u32 ns = 0u;
     (void)atp_conn_successors(s, terms[cur], peak, succ, &ns, 64u);
+    if (HEAP_NEXT - h0 > ATP_CONN_HEAP_CELLS) {
+      return 0;                              // over budget -> KEEP (sound)
+    }
     for (u32 k = 0; k < ns; k++) {
       Term u  = succ[k];
       // The criterion's load-bearing gate: every term on the

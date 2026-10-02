@@ -3260,9 +3260,21 @@ static void pin_weight_order(u32 *seed) {
 
   TEST_BEGIN("atp_deep/pin-ordered-rewrite-step-heap-layout");
   {
+    // Every other term is an instance of a rule's lhs (from a seed of its
+    // own, so the later pins draw the same terms): a random term alone
+    // meets a rule in under a tenth of the steps.
     u32 ok = 0, fired = 0;
+    u32 iseed = 0x2545f491u;
     for (u32 i = 0; i < WO_N; i++) {
       Term t = mk_random(seed);
+      if ((i & 1u) != 0u && s->n_rules > 0u) {
+        RewriteSubst sub;
+        memset(&sub, 0, sizeof sub);
+        for (u32 v = 0; v < 10u; v++) {
+          sub.bindings[v] = mk_small(&iseed);
+        }
+        t = ref_thvm_subst_apply(s->lhs[(i >> 1) % s->n_rules], &sub);
+      }
       u8 rf = 7u, nf = 9u;
       u64 h0 = HEAP_NEXT;
       Term r = ref_atp_ordered_rewrite_step(s, t, s->lhs, s->rhs, s->n_rules, &rf);
@@ -4778,7 +4790,9 @@ static u8 ref_atp_ac_flatten_under(Term t, u32 top_label,
   return 1;
 }
 
-// src/atp/ac.c:182
+// src/atp/ac.c:182.  An AC-labelled constant has no leaves: the
+// recursion chained leaves[-1] there; it is left as-is, as the explicit
+// stack leaves it.
 static Term ref_atp_ac_canon_rec(Term t, const AtpAcInfo *ac) {
   if (term_tag(t) != TAG_CTR) return t;
   u32 label = term_ext(t);
@@ -4787,6 +4801,9 @@ static Term ref_atp_ac_canon_rec(Term t, const AtpAcInfo *ac) {
     u32  n = 0u;
     if (!ref_atp_ac_flatten_under(t, label, leaves, &n, ATP_AC_FLATTEN_CAP)) {
       return t;        // overflow: leave node as-is
+    }
+    if (n == 0u) {
+      return t;
     }
     for (u32 i = 0; i < n; i++) {
       leaves[i] = ref_atp_ac_canon_rec(leaves[i], ac);
@@ -4838,7 +4855,9 @@ static u8 ref_ft_ac_eq(const AtpFtCell *a, const AtpFtCell *b,
   if (a_var != b_var) return 0u;
   if (a->sym != b->sym) return 0u;
   if (a->arity != b->arity) return 0u;
-  if (ft_ac_eq_is_ac_label(ac, a->sym)) {
+  // The recursion recursed on an AC-labelled constant forever (it
+  // flattens to itself); the engine compares it as a constant.
+  if (ft_ac_eq_is_ac_label(ac, a->sym) && a->arity > 0u) {
     const AtpFtCell *A[ATPFT_AC_FLATTEN_CAP];
     const AtpFtCell *B[ATPFT_AC_FLATTEN_CAP];
     u32 na = 0u, nb = 0u;

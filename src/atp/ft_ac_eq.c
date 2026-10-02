@@ -69,8 +69,9 @@ static u8 ft_ac_eq_head(const AtpFtCell *a, const AtpFtCell *b,
   if (a->sym != b->sym) return 0u;
   if (a->arity != b->arity) return 0u;
 
-  // AC top: flatten both and compare as multisets.
-  *is_ac = ft_ac_eq_is_ac_label(ac, a->sym);
+  // AC top: flatten both and compare as multisets.  An AC-labelled
+  // constant flattens to itself, so it compares as a constant.
+  *is_ac = (u8)(ft_ac_eq_is_ac_label(ac, a->sym) && a->arity > 0u);
   if (*is_ac) {
     *na = 0u;
     *nb = 0u;

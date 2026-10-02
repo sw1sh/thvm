@@ -105,12 +105,20 @@ int main(void) {
   // Read once by the engine, at first use: set before anything runs.
   setenv("THVM_ATP_TGT_SEL", "1", 1);
   thvm_init();
+  // Each case starts on the heap the first one did: the test runs no
+  // collector, and eight deep runs in a row exhaust the from-space.
+  u64 hc0 = thvm_atp_heap_checkpoint();
   static const u32 depths[2] = { 20000u, DEEP_LEVELS };
   for (u32 d = 0; d < 2u; d++) {
     for (u32 k = 0; k < 4u; k++) {
       DeepCpCase c = { depths[d], (u8)(k & 1u), (u8)(k >> 1) };
       TEST_BEGIN(d == 0u ? "atp_deep_cp/push-20k" : "atp_deep_cp/push-100k");
+      thvm_atp_heap_reset(hc0);
       deep_stack_run(DEPLOY_STACK_BYTES, deep_cp_case, &c);
+      if (getenv("THVM_DEEP_CP_HEAP") != NULL) {
+        fprintf(stderr, "deep_cp case %u/%u: heap %llu cells\n", d, k,
+                (unsigned long long)(HEAP_NEXT - hc0));
+      }
     }
   }
   thvm_free();

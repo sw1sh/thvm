@@ -1055,15 +1055,16 @@ static u32 pretty_iter(Term t, char *buf, u32 cap) {
 // even k and f(leaf k, node k-1) for odd k, so the deep path runs
 // through both argument positions.  Leaves cycle through a variable
 // x_{k mod 5} (or vals[k mod 5] when `vals` is given), a constant and a
-// NUM atom.
-static Term mk_deep(u32 depth, u32 lab, Term bottom, const Term *vals) {
+// NUM atom (a second constant when `nums` is 0: a NUM pattern never
+// matches, as in thvm_match).
+static Term mk_deep(u32 depth, u32 lab, Term bottom, const Term *vals, u8 nums) {
   Term t = bottom;
   for (u32 k = 0; k < depth; k++) {
     Term leaf;
     switch (k % 3u) {
       case 0:  leaf = vals ? vals[k % 5u] : term_new_fvr(k % 5u); break;
       case 1:  leaf = term_new_ctr(5u, NULL, 0u); break;
-      default: leaf = term_new(0, TAG_NUM, 1u, k); break;
+      default: leaf = nums ? term_new(0, TAG_NUM, 1u, k) : term_new_ctr(6u, NULL, 0u); break;
     }
     Term kids[2];
     if (k & 1u) { kids[0] = leaf; kids[1] = t; }
@@ -1501,20 +1502,27 @@ static void run_pins(void *p) {
 
   TEST_BEGIN(pin_name("ft_deep/pin-eq-term"));
   {
+    // src's leaves include ERA, NUM and variable ids a span does not
+    // round-trip, so a mid-depth src term almost never equals its own
+    // span; the plain corpus always does.
     u32 ok = 0, hits = 0;
-    for (u32 i = 0; i < npin; i++) {
-      Term other[3] = { src[i], src[(i + 1u) % npin], mk_mutant(seed, src[i]) };
-      for (u32 k = 0; k < 3u; k++) {
-        int r = ref_ft_eq_term(sp[i], other[k]);
-        int n = ft_eq_term(sp[i], other[k]);
-        if (r == n) {
-          ok++;
+    for (u32 c = 0; c < 2u; c++) {
+      Term       *ts = c ? psrc : src;
+      AtpFtCell **ss = c ? psp  : sp;
+      for (u32 i = 0; i < npin; i++) {
+        Term other[3] = { ts[i], ts[(i + 1u) % npin], mk_mutant(seed, ts[i]) };
+        for (u32 k = 0; k < 3u; k++) {
+          int r = ref_ft_eq_term(ss[i], other[k]);
+          int n = ft_eq_term(ss[i], other[k]);
+          if (r == n) {
+            ok++;
+          }
+          hits += (u32)(c == 1u && k == 0u && n != 0);
         }
-        hits += (u32)(n != 0);
       }
     }
-    CHECK_EQ(ok, 3u * npin);
-    CHECK(hits >= npin / 2u);
+    CHECK_EQ(ok, 6u * npin);
+    CHECK_EQ(hits, npin);
   }
 
   TEST_BEGIN(pin_name("ft_deep/pin-match-term"));
@@ -1630,6 +1638,9 @@ typedef struct {
   Term pat;    // x_v leaves, x_4 at the bottom
   Term subj;   // pat with x_v := vals[v]
   Term near;   // subj with a different bottom
+  Term mpat;   // pat, subj and near without NUM leaves, for the matches
+  Term msubj;
+  Term mnear;
   Term vals[5];
 } DeepTerms;
 
@@ -1718,12 +1729,16 @@ static void deep_vs_recursion(void *p) {
     CHECK_EQ(ref_ft_hash(xp), ft_hash(xp));
     CHECK_EQ(ref_ft_eq_term(xs, d->subj), ft_eq_term(xs, d->subj));
     CHECK_EQ(ref_ft_eq_term(xs, d->near), ft_eq_term(xs, d->near));
-    for (u32 k = 0; k < 2u; k++) {
-      Term s = k ? d->near : d->subj;
+    AtpFtCell *mxp = ft_from_term(&sa, d->mpat, 0);
+    for (u32 k = 0; k < 4u; k++) {
+      const AtpFtCell *x = (k < 2u) ? xp : mxp;
+      Term s = (k == 0u) ? d->subj : (k == 1u) ? d->near : (k == 2u) ? d->msubj : d->mnear;
       RewriteSubst rs, ns;
       memset(&rs, 0, sizeof rs);
       memset(&ns, 0, sizeof ns);
-      CHECK_EQ(ref_ft_match_term(xp, s, &rs), ft_match_term(xp, s, &ns));
+      int r = ref_ft_match_term(x, s, &rs);
+      CHECK_EQ(r, ft_match_term(x, s, &ns));
+      CHECK_EQ(r, (int)(k == 2u));
       CHECK(memcmp(&rs, &ns, sizeof rs) == 0);
     }
   }
@@ -1861,21 +1876,28 @@ static void deep_blocks(void *p) {
 
   TEST_BEGIN("ft_deep/deep-match-and-instantiate");
   {
-    AtpFtCell *xp = ft_from_term(&da, pat, 0);
+    AtpFtCell *xp = ft_from_term(&da, d->mpat, 0);
     RewriteSubst sub;
     memset(&sub, 0, sizeof sub);
-    CHECK(ft_match_term(xp, subj, &sub));
+    CHECK(ft_match_term(xp, d->msubj, &sub));
     for (u32 v = 0; v < 5u; v++) {
       CHECK(sub.bindings[v] == vals[v]);
     }
     RewriteSubst miss;
     memset(&miss, 0, sizeof miss);
-    CHECK(!ft_match_term(xp, near, &miss));
+    CHECK(!ft_match_term(xp, d->mnear, &miss));
     Term inst = ft_subst_apply_term(xp, &sub);
-    CHECK(term_eq_iter(inst, subj));
+    CHECK(term_eq_iter(inst, d->msubj));
     RewriteSubst none;
     memset(&none, 0, sizeof none);
-    CHECK(term_eq_iter(ft_subst_apply_term(xp, &none), pat));
+    CHECK(term_eq_iter(ft_subst_apply_term(xp, &none), d->mpat));
+    // A NUM leaf in the pattern never matches (thvm_match), at any depth.
+    AtpFtCell *np = ft_from_term(&da, pat, 0);
+    RewriteSubst nm;
+    memset(&nm, 0, sizeof nm);
+    CHECK(!ft_match_term(np, subj, &nm));
+    memset(&none, 0, sizeof none);
+    CHECK(term_eq_iter(ft_subst_apply_term(np, &none), pat));
   }
 
   TEST_BEGIN("ft_deep/deep-pretty");
@@ -1950,9 +1972,12 @@ int main(void) {
     Term kid = term_new_ctr(9u, NULL, 0u);
     d.vals[v] = term_new_ctr(20u + v, &kid, v & 1u);
   }
-  d.pat  = mk_deep(DEEP_LEVELS, 1u, term_new_fvr(4u), NULL);
-  d.subj = mk_deep(DEEP_LEVELS, 1u, d.vals[4], d.vals);
-  d.near = mk_deep(DEEP_LEVELS, 1u, d.vals[3], d.vals);   // differs only at the bottom
+  d.pat   = mk_deep(DEEP_LEVELS, 1u, term_new_fvr(4u), NULL, 1u);
+  d.subj  = mk_deep(DEEP_LEVELS, 1u, d.vals[4], d.vals, 1u);
+  d.near  = mk_deep(DEEP_LEVELS, 1u, d.vals[3], d.vals, 1u);   // differs only at the bottom
+  d.mpat  = mk_deep(DEEP_LEVELS, 1u, term_new_fvr(4u), NULL, 0u);
+  d.msubj = mk_deep(DEEP_LEVELS, 1u, d.vals[4], d.vals, 0u);
+  d.mnear = mk_deep(DEEP_LEVELS, 1u, d.vals[3], d.vals, 0u);
   deep_stack_run(REF_STACK_BYTES, deep_vs_recursion, &d);
   deep_stack_run(DEEP_STACK_BYTES, deep_blocks, &d);
 

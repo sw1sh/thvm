@@ -126,8 +126,11 @@ fn u8 thvm_unify(Term s, Term t, RewriteSubst *subst) {
   for (;;) {
     s = unify_walk(s, subst);
     t = unify_walk(t, subst);
-    if (kbo_eq(s, t)) {
-      // equal pair: nothing to bind
+    // Equal pair: nothing to bind.  Two constructors are compared by the
+    // descent itself (equal ones bind nothing there either): a full
+    // kbo_eq at every pair walked an equal-sized pair to its bottom at
+    // each level, O(d^2) on a d-deep pair.
+    if (s == t || (term_tag(s) != TAG_CTR && kbo_eq(s, t))) {
     } else if (term_tag(s) == TAG_FVR) {
       u32 id = term_ext(s);
       if (id >= REWRITE_MAX_VAR || unify_occurs(id, t, subst)) {
