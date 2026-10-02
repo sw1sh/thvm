@@ -14,7 +14,9 @@
 # Output (.npz): every queued CP the export saw ('P' records; the export
 # rate and a further uniform seq-hash subsample are recorded), every
 # selected CP ('S'), the rule-side DAG ('R'), per-selection seq
-# boundaries, parent-death events, and -- when the run armed
+# boundaries, parent-death events, the queue deletions ('D': d_seq,
+# d_step, d_kind; end_step also ends a CP at its parent's death, which
+# leaves it queued until it is popped), and -- when the run armed
 # THVM_ATP_HISTORY_CPFEAT -- each pushed CP's 14 engine features ('F':
 # thvm_atp_cp_features at push, cpfeat / has_cpfeat).  Version 2 adds the
 # lane, the selection dimension of every pick (pick; 255 = not recorded,
@@ -638,6 +640,7 @@ def extract(hx_path, proof_path, out_path, max_neg=300000, hind_frac=0.5):
         q_key=q_key, q_text=q_text, q_ok=q_ok, proof_keys=proof_keys,
         z_trace=Z["seq"], z_uid=Z["trace"], z_step=Z["step"],
         z_flags=Z["flags"],
+        d_seq=D["seq"], d_step=D["step"], d_kind=D["kind"],
         o_kind=O["kind"], o_seq=O["seq"], o_step=O["step"], o_uid=O["trace"],
         o_trace=O["pa"], o_flags=O["flags"],
         version=np.array(version), lane=np.array(lane),

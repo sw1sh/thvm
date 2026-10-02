@@ -40,7 +40,8 @@
 # session from the same run's history export (np0_extract.py .npz of a
 # THVM_ATP_HISTORY_RATE=1 THVM_ATP_HISTORY_CPFEAT=1 run, no negative
 # subsampling): columns 0-12 and 15-18 and the top-K candidate sets, to
-# 1e-9.  Columns 13, 14 (goal symbols), 19 (term-heap growth), phi and
+# 1e-9, against the engine's queue (a dead parent's CP stays queued until
+# a pop or a 'D' deletion removes it).  Columns 13, 14 (goal symbols), 19 (term-heap growth), phi and
 # the lane are not in the export; training reads them from the dump.
 # lanes checks a head's LaneNames against FindProof --list-lanes output.
 
@@ -392,8 +393,17 @@ def cmd_featparity(args):
     has_push = d["has_push"].astype(bool)
     pri0 = np.where(has_push, d["pri_push"], d["pri"]).astype(np.int64)
     push_step = d["push_step"].astype(np.int64)
-    end_step = d["end_step"].astype(np.int64)
     selected_at = d["selected_at"].astype(np.int64)
+    if "d_seq" not in d:
+        die(f"{args[0]}: no queue deletions (re-extract with this np0_extract.py)")
+    # The engine's queue, not end_step's liveness: a CP whose parent died
+    # stays queued (and a top-K candidate, counted in n_cps) until a pop
+    # or a deletion removes it.
+    q_end = np.where(selected_at >= 0, selected_at, np.int64(1) << 40)
+    d_seq = d["d_seq"].astype(np.int64)
+    jd = np.searchsorted(seq, d_seq)
+    okd = (jd < len(seq)) & (seq[np.minimum(jd, len(seq) - 1)] == d_seq)
+    np.minimum.at(q_end, jd[okd], d["d_step"].astype(np.int64)[okd])
     depth = d["depth"].astype(np.float64)
     bounds = d["bounds"].astype(np.int64)
     if "cpfeat" not in d:
@@ -434,10 +444,24 @@ def cmd_featparity(args):
     last_block = {}
     for bi, (s0, s1) in enumerate(blocks):
         last_block[int(t_col[s0])] = bi
+    # An orphan popped while pick t is retried is deleted at step t - 1
+    # (selections so far), after the blocks of t that scored it: it is
+    # queued for its own block and the earlier blocks of t.
+    popped_from = {}
+    for bi, (s0, s1) in enumerate(blocks):
+        hit = np.nonzero(chosen[s0:s1])[0]
+        if len(hit) == 1:
+            popped_from[int(seq_c[s0 + hit[0]])] = bi
     for bi, (s0, s1) in enumerate(blocks):
         t = int(t_col[s0])
         pri_t = pri_at(t)
-        alive = np.nonzero((push_step <= t - 1) & (end_step >= t))[0]
+        queued = (push_step <= t - 1) & (q_end >= t)
+        late = np.nonzero((push_step <= t - 1) & (q_end == t - 1))[0]
+        for j in late:
+            bj = popped_from.get(int(seq[j]))
+            if bj is not None and bj >= bi and int(t_col[blocks[bj][0]]) == t:
+                queued[j] = True
+        alive = np.nonzero(queued)[0]
         js = np.searchsorted(seq, seq_c[s0:s1])
         found = (js < len(seq)) & (seq[np.minimum(js, len(seq) - 1)] == seq_c[s0:s1])
         if not found.all():
