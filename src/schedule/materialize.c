@@ -365,7 +365,14 @@ static void subst_journal_restore(void) {
 // last_root = 1 + the HIGHEST CTR-child-root index that reaches loc (0 =
 //   unset).  Identifies the LAST consuming sub-pass -- the only one after
 //   which a shared buffer is safe to recycle (no later sibling reads it).
-typedef struct { u64 loc; u32 count; u32 last_root; } XPassCCEntry;
+// held      = 1 when loc is a realize root (or the buffer a root's movement
+//   chain views): the realize hands that buffer back to its caller, so no
+//   per-pass planner may recycle it -- tinygrad's held_bufs, which
+//   memory_plan_rewrite never plans (schedule/memory.py:11-12,
+//   schedule/__init__.py:303).  A root that ANOTHER root also reads (Bp's
+//   grad feeding W's grad) has an in-pass consumer, so the last_use == 0
+//   sink test alone does not catch it.
+typedef struct { u64 loc; u32 count; u32 last_root; u8 held; } XPassCCEntry;
 static XPassCCEntry XPASS_CC[XPASS_CC_CAP];
 static u32          XPASS_CC_LEN    = 0;
 static u8           XPASS_CC_ACTIVE = 0;  // 1 once a realize populated it
@@ -426,6 +433,11 @@ static u32 xpass_last_root(u64 loc) {
 // tid).  The genuine recycle is deferred to the consuming sub-pass via the
 // shared-input free path (see xpass_shared_input_plan).
 static int xpass_is_shared(u64 loc) { return xpass_root_reach(loc) >= 2; }
+
+static int xpass_is_held(u64 loc) {
+  XPassCCEntry *e = xpass_cc_find(loc);
+  return e ? e->held : 0;
+}
 
 // Non-mutating resolve of SUB-bit VAR / DP indirection.  Unlike
 // term_resolve it does NOT call alo_force: this walk runs BEFORE
@@ -516,9 +528,30 @@ static void xpass_cc_walk_rec(Term t, u8 *visited, u64 cap, u32 root_idx) {
 fn void xpass_cc_reset(void) {
   for (u32 i = 0; i < XPASS_CC_CAP; i++) {
     XPASS_CC[i].loc = 0; XPASS_CC[i].count = 0; XPASS_CC[i].last_root = 0;
+    XPASS_CC[i].held = 0;
   }
   XPASS_CC_LEN = 0;
   XPASS_CC_ACTIVE = 0;
+}
+
+static u8 op_is_view_movement(u8 op);
+
+// Mark a realize root's loc held, and every loc down its movement chain:
+// a view root returns a view of that buffer.  The walk already bumped
+// each of these locs, so the entries exist.
+static void xpass_cc_mark_held(Term root) {
+  Term t = xpass_resolve_uop(root, 0);
+  for (int hops = 0; t != 0 && hops < 256; hops++) {
+    XPassCCEntry *e = xpass_cc_find(term_val(t));
+    if (e == NULL) {
+      return;
+    }
+    e->held = 1;
+    if (!op_is_view_movement((u8)term_ext(t))) {
+      return;
+    }
+    t = xpass_resolve_uop(heap_read(term_val(t)), 0);
+  }
 }
 
 // Populate XPASS_CC from a realize root (single Term or a TAG_CTR
@@ -542,6 +575,14 @@ fn void xpass_cc_populate(Term root) {
   }
   free(visited);
   XPASS_CC_ACTIVE = 1;
+  if (term_tag(root) == TAG_CTR) {
+    u32 n = term_ctr_n(root);
+    for (u32 i = 0; i < n && i < 256; i++) {
+      xpass_cc_mark_held(term_ctr_at(root, i));
+    }
+  } else {
+    xpass_cc_mark_held(root);
+  }
 }
 
 // Current TAG_CTR child-root index being materialized (0 for a single root /
@@ -1930,6 +1971,11 @@ static int arena_boundary_is_plannable(u32 ord_idx) {
   // equivalent: held_bufs excludes result bufs from
   // memory_plan_rewrite (schedule/memory.py:22).
   if (BOUNDARY_LAST_USE[binfo] == 0) return 0;
+  // A root that another root also reads has an in-pass consumer; it is
+  // still held (see XPassCCEntry.held).
+  if (xpass_is_held(loc)) {
+    return 0;
+  }
   // Single-consumer gate (matches mem_plan_record at line 596):
   // multi-consumer outputs may be aliased through DUP/SUP / read by
   // a NEXT realize pass's chain rule.  thvm_realize runs wnf +
@@ -7134,7 +7180,8 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // buf live across sub-schedules is freed exactly after its last real
   // reader, not pinned to the end.
   if (BOUNDARY_LAST_USE[idx] > 0
-      && BUFFERIZE_NODES[idx].consumer_count == 1) {
+      && BUFFERIZE_NODES[idx].consumer_count == 1
+      && !xpass_is_held(boundary_loc)) {
     if (mem_plan_debug_enabled()) MEM_PLAN_DBG_REC_OK++;
     if (xpass_is_shared(boundary_loc)) {
       mem_plan_record(TENS[out_tid].buf_id, MEM_PLAN_LAST_USE_NEVER,
