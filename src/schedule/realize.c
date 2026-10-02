@@ -64,6 +64,19 @@ fn char const *thvm_realize_error(void) {
   return REALIZE_ERROR;
 }
 
+// A realize that fired a GC-stripped kernel computed on stale bytes
+// (kernel_fire_by_id): fail it, as a cycle fails it, rather than return
+// the result.
+static int realize_stale_fire_failed(void) {
+  u32 kid = kernel_stale_fire_take();
+  if (kid == 0) {
+    return 0;
+  }
+  snprintf(REALIZE_ERROR, sizeof REALIZE_ERROR,
+           "realize fired kernel kid=%u, which the kernel GC stripped", kid);
+  return 1;
+}
+
 // Forward-only reclaim (default ON; THVM_FWD_RECLAIM=0 disables).  The
 // per-realize watermark rollback only reclaims buffers allocated DURING the
 // current realize; a buffer an EARLIER realize allocated, that was `preserved`
@@ -321,6 +334,7 @@ fn void thvm_realize_ceiling_cleanup(void) {
 fn Term thvm_realize(Term expr) {
   HOT_REALIZE_CALLS++;
   REALIZE_ERROR[0] = '\0';
+  (void)kernel_stale_fire_take();
   // TEN short-circuit: a Term that's already a TAG_TEN (typical when
   // the user holds onto a TTerm wrapper and re-realizes it) has no
   // remaining compute -- skip the wnf+materialize loop entirely so
@@ -601,6 +615,9 @@ fn Term thvm_realize(Term expr) {
   // Restore the session default device (scoped device routing, above).
   CURRENT_CTX->default_device = saved_default_device;
   if (sched_prof_enabled()) sched_prof_add(SCHED_PROF_REALIZE_TOTAL, _rt0);
+  if (realize_stale_fire_failed()) {
+    return 0;
+  }
   return res;
 }
 
@@ -640,6 +657,7 @@ static int realize_wave_done(Term const *all, u32 lo, u32 hi) {
 fn Term thvm_realize_many(Term ctr_term) {
   HOT_REALIZE_CALLS++;
   REALIZE_ERROR[0] = '\0';
+  (void)kernel_stale_fire_take();
   if (term_tag(ctr_term) != TAG_CTR) return thvm_realize(ctr_term);
   u32 n = term_ctr_n(ctr_term);
   if (n == 0) return ctr_term;
@@ -795,5 +813,8 @@ fn Term thvm_realize_many(Term ctr_term) {
   materialized_loc_clear();
   materialized_loc_scope_leave();
   xpass_cc_reset();
+  if (realize_stale_fire_failed()) {
+    return 0;
+  }
   return res;
 }

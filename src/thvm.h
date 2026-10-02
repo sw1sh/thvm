@@ -1125,6 +1125,9 @@ typedef struct KernelEntry {
                                    // by the refcount-driven free pass to
                                    // decide when this kernel's output buf
                                    // is no longer needed.
+  u8        stripped;              // kernel_gc_sweep freed its input
+                                   // arrays + lift; firing it again is a
+                                   // stale reference (kernel_fire_by_id).
   u32       fire_gen;              // last KERNEL_FIRE_GEN this kernel
                                    // dispatched at.  kernel_fire_by_id skips
                                    // when fire_gen == current gen so a
@@ -3844,6 +3847,9 @@ fn void backend_dispatch_begin_all(void);
 fn void backend_dispatch_flush_all(void);
 fn void backend_dispatch_end_all(void);
 fn void kernel_fire_gen_bump(void);
+// The first GC-stripped kernel a realize tried to fire (0 = none); the
+// realize then fails (uop_kernel.c, realize.c).
+fn u32  kernel_stale_fire_take(void);
 fn void kernel_assign_write_record(void *backend, u32 buf_id);
 fn void kernel_fire_scope_begin(void);
 fn void kernel_fire_scope_end(void);

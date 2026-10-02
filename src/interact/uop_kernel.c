@@ -316,10 +316,33 @@ static u32 kernel_input_on_backend(u32 src_tid, Backend *dst_b) {
   return dst_tid;
 }
 
+// A kernel the kernel GC stripped has no inputs left: re-firing it ran
+// nothing and left whatever its output buffer held, so a downstream read
+// took stale bytes.  Reaching one is a stale reference somewhere upstream;
+// the realize fails with its kid instead of computing on it.
+static u32 KERNEL_STALE_FIRE_KID = 0;
+
+fn u32 kernel_stale_fire_take(void) {
+  u32 kid = KERNEL_STALE_FIRE_KID;
+  KERNEL_STALE_FIRE_KID = 0;
+  return kid;
+}
+
 fn void kernel_fire_by_id(u32 kid) {
   if (kid == 0 || kid >= KERNELS_NEXT) return;
   KernelEntry *ke = &KERNELS[kid];
   if (ke->fire_gen == KERNEL_FIRE_GEN) return;     // already fired this pass
+  if (ke->stripped) {
+    if (KERNEL_FIRE_SCOPE_DEPTH == 0) {
+      fprintf(stderr, "thvm fatal: fired kernel kid=%u, which the kernel GC "
+              "stripped (its inputs were freed)\n", kid);
+      abort();
+    }
+    if (KERNEL_STALE_FIRE_KID == 0) {
+      KERNEL_STALE_FIRE_KID = kid;
+    }
+    return;
+  }
   u32 prev_fire_gen = ke->fire_gen;                // 0 = never actually fired
   ke->fire_gen = KERNEL_FIRE_GEN;
 

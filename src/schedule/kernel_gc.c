@@ -9,12 +9,14 @@
 // and we do NOT recycle slot ids (no freelist pop in kernel_alloc):
 // kid references survive in heap UOP_KERNEL terms, and a future
 // realize that touches a still-pinned TenDesc could DFS-fire its
-// producer kid.  Freeing only the input arrays keeps that path
-// safe -- a re-fire of a stripped kernel just no-ops (n_inputs=0)
-// and doesn't corrupt buffers.  See M4 in
+// producer kid.  Freeing only the input arrays keeps the arena
+// bounded; a re-fire of a stripped kernel would read freed inputs, so
+// it fails the realize (kernel_fire_by_id).  See M4 in
 // docs/plans/beautiful_mnist_parity.md for the architectural
 // trade-offs and the orphan-kernel-emission issue that blocks the
-// more ambitious slot-reuse design.
+// more ambitious slot-reuse design.  A re-fire is a stale reference:
+// the slot is marked `stripped` and kernel_fire_by_id fails the realize
+// instead of running it.
 //
 // Liveness signal: CPU_BUFS[buf_id].refcount.  After
 // cpu_buf_pool_rollback_with_preserve runs (in thvm_realize), a
@@ -89,6 +91,7 @@ fn u32 kernel_gc_sweep(Term result) {
     // pointing at the (now-empty) TenDesc so existing kid
     // references on the heap can resolve without faulting.
     kernel_free_arrays(ke);
+    ke->stripped = 1;
     freed++;
   }
   // A view of a kernel output (a reshape the realize returned, the
