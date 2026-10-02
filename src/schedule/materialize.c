@@ -843,6 +843,56 @@ fn void materialized_loc_insert(u64 loc, u32 tid) {
   }
 }
 
+// A heap collection (gc_collect) moves every live cell.  This half runs
+// BEFORE the evacuation: it undoes this realize's in-place TAG_TEN
+// substitutions while their cells still sit at the journaled locs, so the
+// collector copies the original graph.  Undone after the copy, the restore
+// wrote into dead from-space and the surviving graph kept the substituted
+// leaves: tids whose buffers the pool rollback had freed, whose producer
+// kernels the kernel GC then stripped, so a later realize fired them as
+// no-ops and read stale bytes.
+fn void materialized_loc_gc_before(void) {
+  subst_journal_restore();
+}
+
+// This half runs AFTER the evacuation, before the space swap: it re-keys
+// the loc -> tid map and the shared-tid locs to the moved cells and drops
+// the cells that died.  A JIT-capture span keeps the map across realizes,
+// so a stale key there would hand an unrelated cell's lookup a tid.
+fn void materialized_loc_gc_after(void) {
+  u32 n = 0;
+  MaterializedLocEntry *keep = NULL;
+  if (MATERIALIZED_LOC_LEN > 0) {
+    keep = (MaterializedLocEntry *)malloc(sizeof(MaterializedLocEntry) * MATERIALIZED_LOC_LEN);
+  }
+  for (u32 i = 0; i < MATERIALIZED_LOC_CAP; i++) {
+    if (MATERIALIZED_LOC_TABLE[i].loc == MATERIALIZED_LOC_EMPTY) {
+      continue;
+    }
+    u64 nl = gc_forward_loc(MATERIALIZED_LOC_TABLE[i].loc);
+    if (keep != NULL && nl != ~0ull && n < MATERIALIZED_LOC_LEN) {
+      keep[n].loc = nl;
+      keep[n].tid = MATERIALIZED_LOC_TABLE[i].tid;
+      n++;
+    }
+    MATERIALIZED_LOC_TABLE[i].loc = MATERIALIZED_LOC_EMPTY;
+    MATERIALIZED_LOC_TABLE[i].tid = 0;
+  }
+  MATERIALIZED_LOC_LEN = 0;
+  for (u32 i = 0; i < n; i++) {
+    materialized_loc_insert(keep[i].loc, keep[i].tid);
+  }
+  free(keep);
+  for (u32 i = 0; i < XPASS_SHARED_TID_LEN; i++) {
+    u64 nl = gc_forward_loc(XPASS_SHARED_TIDS[i].loc);
+    if (nl == ~0ull) {
+      XPASS_SHARED_TIDS[i].tid = 0;
+    } else {
+      XPASS_SHARED_TIDS[i].loc = nl;
+    }
+  }
+}
+
 // === UOP_COPY persistent device-upload cache ========================
 // Maps (copy_node_heap_loc, target_backend_id) -> uploaded TenDesc tid.
 // Unlike MATERIALIZED_LOC_TABLE (per-realize), this survives ACROSS

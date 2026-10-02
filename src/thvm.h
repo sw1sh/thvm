@@ -1647,6 +1647,7 @@ fn u64  gc_from_start(void);
 fn u64  gc_from_end(void);
 fn u64  gc_count(void);
 fn void gc_collect(Term *roots, u32 n_roots);
+fn u64  gc_forward_loc(u64 loc);
 
 // === book heap (static templates) ===
 fn u64  book_alloc(u64 size);
@@ -2303,6 +2304,8 @@ fn u32 tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 fn u32  materialized_loc_lookup       (u64 loc);
 fn void materialized_loc_insert       (u64 loc, u32 tid);
 fn void materialized_loc_clear        (void);
+fn void materialized_loc_gc_before    (void);
+fn void materialized_loc_gc_after     (void);
 fn void thvm_free_fp8_transients      (u32 result_tid);
 // UOP_COPY persistent device-upload cache (schedule/materialize.c).
 // Reset on GC compaction / thvm reset / free (its keys are heap locs).

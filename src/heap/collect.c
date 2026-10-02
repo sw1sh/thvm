@@ -19,8 +19,8 @@
 //     stored Terms would otherwise dangle into the now-unused
 //     to-space).
 //   - extern_pinned_terms, EXTERN_PIN_HANDLES, DEFS, WNF_LAST_STACK,
-//     KernelEntry.source_uop / input_terms[]: re-evacuated as part
-//     of the root set so their stored Terms get the new locs.
+//     TenDesc.grad, KernelEntry.source_uop / input_terms[]: re-evacuated
+//     as part of the root set so their stored Terms get the new locs.
 
 #define GC_FWD_TAG 0x7E
 #define GC_MARGIN  1024
@@ -425,6 +425,14 @@ static void gc_evacuate_side_tables(u64 *alloc) {
   for (u32 i = 0; i < WNF_LAST_STACK_LEN; i++) {
     WNF_LAST_STACK[i] = gc_evacuate(WNF_LAST_STACK[i], alloc);
   }
+  // TenDesc.grad: the lazy gradient a backward accumulated onto a leaf,
+  // read back by the host (and summed onto by the next backward) after
+  // the realize that collects.
+  for (u32 t = 0; t < TENS_NEXT; t++) {
+    if (TENS[t].grad != 0) {
+      TENS[t].grad = gc_evacuate(TENS[t].grad, alloc);
+    }
+  }
   // KernelEntry: source_uop + cached_lift + symbolic input_terms[].
   // output_tid and input_tids[] are TenDesc ids, not Terms.
   // cached_lift.store_root carries the post-lift UOp DAG root + the
@@ -471,6 +479,16 @@ static void gc_evacuate_side_tables(u64 *alloc) {
   }
 }
 
+// Where a from-space node's base cell lives after evacuation; ~0 when the
+// node died.  A loc outside from-space does not move.
+fn u64 gc_forward_loc(u64 loc) {
+  if (loc < GC_FROM_START || loc >= GC_FROM_END) {
+    return loc;
+  }
+  Term c = HEAP[loc];
+  return term_tag(c) == GC_FWD_TAG ? term_val(c) : ~0ull;
+}
+
 // Run a full collection.  Roots are evacuated in place; side tables
 // (extern pins, DEFS, kernels, lam_shape, etc.) are remapped via the
 // per-cell forward pointers.  After this call, HEAP_NEXT points
@@ -480,6 +498,7 @@ fn void gc_collect(Term *roots, u32 n_roots) {
 
   GC_COUNT++;
   u64 alloc = GC_TO_START;
+  materialized_loc_gc_before();
 
   // 1. Evacuate the explicit root list (caller's wnf result, etc.).
   for (u32 i = 0; i < n_roots; i++) {
@@ -504,11 +523,10 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   uop_mov_cache_reset();
   // The cross-realize loc -> tid cache (schedule/materialize.c) keys
   // off heap loc; after Cheney compacts the heap those locs name
-  // entirely different cells (or fall outside HEAP_NEXT).  Clear so
-  // a stale loc never resolves to an unrelated tid.  Cost: lose the
-  // cross-realize sharing on the first realize after a GC; the next
-  // emit_kernel_for_boundary repopulates it.
-  materialized_loc_clear();
+  // entirely different cells (or fall outside HEAP_NEXT).  Re-key it
+  // through the forward pointers so a stale loc never resolves to an
+  // unrelated tid.
+  materialized_loc_gc_after();
   // UOP_COPY device-upload cache (schedule/materialize.c) also keys off
   // the copy-node heap loc; clear it for the same reason.  The next
   // cross-backend realize re-uploads + repopulates.
