@@ -411,8 +411,9 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
   `scatter_reduce` takes `"sum"`, `"mean"`, `"amax"` and `"amin"` (`"prod"`
   raises NotImplementedError).  A mean multiplies by the reciprocal count, so
   it can sit one ulp from tinygrad's CPU division.  An amax / amin with an
-  empty index keeps self, where tinygrad's `MAX(identity, self)` turns a NaN
-  self into the identity and halves the gradient of a self equal to it.
+  empty index keeps self (a NaN self stays NaN, as in tinygrad), but its
+  gradient to a self equal to the identity is the full cotangent, where
+  tinygrad's `MAX(identity, self)` halves it.
 - **cat / stack have no STACK op** (deviation).  tinygrad's `cat` stacks
   equal pieces with `Ops.STACK`, pure data movement, and pads and sums
   unequal ones (`mixin/op.py:731-746`, `test_uops_stats.py:132`); its
