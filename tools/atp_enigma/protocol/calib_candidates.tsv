@@ -4,8 +4,11 @@
 # the wm lane's flags are empty, and no clock-gated discipline is on), because --schedule races
 # 46 lanes and solves all but a handful of TRAIN problems in under 3 s, where start-up and fixed
 # real-time costs dominate.  These are TRAIN problems, stem-disjoint from J13, not -10, not in
-# DEV-T, that the wm lane proved in 2.6-29.5 s at 60 s in the lane matrix (2026-10-02).
-# calib-ref keeps the 10 longest whose spread over its passes is at most 10%.
+# DEV-T, that the wm lane proved in 2.6-29.5 s at 60 s in the lane matrix (2026-10-02), and
+# (amendment A18) GRP750-1 and GRP754-1, the only others the configuration proves within its
+# 120 s wall in a survey of the 133 such problems the wm lane did not prove at 60 s (43.8 s and
+# 43.3 s alone on an EPYC 9654 pod at --rss-cap 3500).  calib-ref keeps the 10 longest whose
+# median is at least 2.5 s and whose spread over its passes is at most 10%.
 GRP701-1	Problems/GRP/GRP701-1.p
 GRP506-1	Problems/GRP/GRP506-1.p
 BOO067-1	Problems/BOO/BOO067-1.p
@@ -18,3 +21,5 @@ GRP728-1	Problems/GRP/GRP728-1.p
 GRP729-1	Problems/GRP/GRP729-1.p
 GRP730-1	Problems/GRP/GRP730-1.p
 GRP718-1	Problems/GRP/GRP718-1.p
+GRP750-1	Problems/GRP/GRP750-1.p
+GRP754-1	Problems/GRP/GRP754-1.p

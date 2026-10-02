@@ -1944,7 +1944,7 @@ def build_parser():
                     help="one deterministic configuration (the default preset)")
     cr.add_argument("--calib-passes", type=int, default=3)
     cr.add_argument("--keep", type=int, default=10)
-    cr.add_argument("--min-s", type=float, default=3.0)
+    cr.add_argument("--min-s", type=float, default=2.5)
     cr.add_argument("--max-s", type=float, default=60.0)
     cr.add_argument("--max-spread", type=float, default=0.10)
     cr.add_argument("--rss-cap", required=True, choices=RSS_CAPS)
