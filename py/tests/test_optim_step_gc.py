@@ -93,6 +93,46 @@ def gather_step_runs(Tensor, nn, TinyJit, Context):
     return out
 
 
+def head_step_runs(Tensor, nn, TinyJit, Context):
+    """W1 / W2 / Bp after STEPS2 steps of o = Bp + gather(x @ W1, idx) over
+    repeated random ids, read by a head out = o @ W2 (three params) or
+    out = o.sum(1, keepdim=True) (Bp's grad is then a broadcast of the
+    loss grad), per optimizer and with / without TinyJit."""
+    out = {}
+    B, D, H = 16, 32, 64
+    for head in ("W2", "sum"):
+        for opt_name in ("SGD", "Adam"):
+            for jit in (False, True):
+                rng = np.random.default_rng(0)
+                W1 = Tensor((rng.standard_normal((D, H)) * 0.1).astype(np.float32)).realize()
+                W2 = Tensor((rng.standard_normal((H, 1)) * 0.1).astype(np.float32)).realize()
+                Bp = Tensor((rng.standard_normal((B, H)) * 0.1).astype(np.float32)).realize()
+                Wt = rng.standard_normal((D, 1)).astype(np.float32)
+                params = [W1, W2, Bp] if head == "W2" else [W1, Bp]
+                with Context(TRAINING=1):
+                    opt = getattr(nn.optim, opt_name)(params, lr=0.01)
+
+                    def step(x, y, dst):
+                        opt.zero_grad()
+                        o = Bp + (x @ W1).gather(0, dst)
+                        o = o @ W2 if head == "W2" else o.sum(1, keepdim=True)
+                        d = o - y
+                        loss = (d * d).mean()
+                        loss.backward()
+                        return loss.realize(*opt.schedule_step())
+
+                    f = TinyJit(step) if jit else step
+                    for _ in range(STEPS2):
+                        xn = rng.standard_normal((B, D)).astype(np.float32)
+                        ids = rng.integers(0, B, B)
+                        idx = np.repeat(ids[:, None], H, 1).astype(np.int32)
+                        f(Tensor(xn).realize(), Tensor(xn @ Wt).realize(), Tensor(idx).realize())
+                key = f"{head}-{opt_name}-{'jit' if jit else 'eager'}"
+                for name, p in (("W1", W1), ("W2", W2), ("Bp", Bp)):
+                    out[f"{key}-{name}"] = p.numpy()
+    return out
+
+
 _CHILD = r"""
 import os, sys
 import numpy as np
@@ -103,6 +143,7 @@ from test_muon_lars_parity import _thvm_run
 from thvm import Context, Tensor, TinyJit, nn, optim
 res = t.muon_lars_runs(_thvm_run, optim)
 res.update(t.gather_step_runs(Tensor, nn, TinyJit, Context))
+res.update(t.head_step_runs(Tensor, nn, TinyJit, Context))
 np.savez(os.environ["OUT"], **res)
 print("DONE", flush=True)
 """
@@ -129,6 +170,7 @@ class TestOptimStepGC(unittest.TestCase):
         from _tinygrad_compat import tg_muon_decays
         cls.want = muon_lars_runs(_tg_run, optim)
         cls.want.update(gather_step_runs(Tensor, nn, TinyJit, Context))
+        cls.want.update(head_step_runs(Tensor, nn, TinyJit, Context))
         cls.muon_decays = tg_muon_decays()
 
     def _check(self, gc_kb, walker):

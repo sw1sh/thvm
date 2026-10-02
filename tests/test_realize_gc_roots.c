@@ -11,6 +11,8 @@
 // - TenDesc.grad (a lazy backward graph) moves with the heap.
 // - A deferred collection leaves the realize pending and relocates the
 //   roots its host passes.
+// - A view of a realized kernel output is a leaf, a strided view root
+//   waits for its producer, and a stripped kernel is never fired.
 #include "../src/thvm.c"
 #include "test.h"
 
@@ -151,6 +153,72 @@ int main(void) {
     CHECK(ok);
     TENS[ht].grad = 0;
     TENS[bt].grad = 0;
+  }
+
+  // v = reshape(b) is a root that aliases b's buffer, a boundary of a's
+  // pass: the realize returns the alias, which carries b's producer kid.
+  TEST_BEGIN("realize-gc-roots/view-of-a-realized-output-is-a-leaf");
+  {
+    Term x = tenNN();
+    Term a, b;
+    build(x, &a, &b);
+    u32  dn1[2] = {N, 1};
+    Term kids[2] = {a, uop_reshape(b, 2, dn1)};
+    Term r = thvm_realize_many(term_new_ctr(0, kids, 2));
+    CHECK(r != 0);
+    Term rv = term_resolve(term_ctr_at(r, 1));
+    CHECK(term_tag(rv) == TAG_TEN);
+    CHECK_EQ(TENS[(u32)term_val(rv)].producer_kid, 0);
+    float got[N];
+    readN(rv, got);
+    CHECK(closeN(got, want_b));
+  }
+
+  // e = expand(reshape(b)) is a strided view of b, which a's pass caches
+  // before any kernel fires: the root must wait for b's kernel.
+  TEST_BEGIN("realize-gc-roots/strided-view-root-waits-for-its-producer");
+  {
+    Term x = tenNN();
+    Term a, b;
+    build(x, &a, &b);
+    u32  dn1[2] = {N, 1};
+    u32  dnn[2] = {N, N};
+    Term kids[2] = {a, uop_expand(uop_reshape(b, 2, dn1), 2, dnn)};
+    Term r = thvm_realize_many(term_new_ctr(0, kids, 2));
+    CHECK(r != 0);
+    Term re = term_resolve(term_ctr_at(r, 1));
+    CHECK(term_tag(re) == TAG_TEN);
+    float ge[N * N];
+    CPU_BACKEND.buf_read(TENS[(u32)term_val(re)].buf_id, ge, sizeof ge);
+    int ok = 1;
+    for (u32 i = 0; i < N; i++) {
+      for (u32 j = 0; j < N; j++) {
+        float d = (ge[N * i + j] - want_b[i]) / want_b[i];
+        ok &= d > -1e-4f && d < 1e-4f;
+      }
+    }
+    CHECK(ok);
+  }
+
+  // Reaching a kernel the kernel GC stripped fails the realize instead of
+  // running nothing and handing back whatever the buffer held.
+  TEST_BEGIN("realize-gc-roots/firing-a-stripped-kernel-fails-the-realize");
+  {
+    Term x = tenNN();
+    u32  k0 = KERNELS_NEXT;
+    Term y  = term_resolve(thvm_realize(uop_binary(UOP_MUL, x, x)));
+    CHECK(term_tag(y) == TAG_TEN && KERNELS_NEXT > k0);
+    u32 t   = (u32)term_val(y);
+    u32 kid = KERNELS_NEXT - 1;
+    CHECK_EQ(KERNELS[kid].output_tid, t);
+    TENS[t].producer_kid = kid;
+    KERNELS[kid].stripped = 1;
+    CHECK(thvm_realize(uop_binary(UOP_ADD, y, y)) == 0);
+    CHECK(strstr(thvm_realize_error(), "stripped") != NULL);
+    KERNELS[kid].stripped = 0;
+    TENS[t].producer_kid = 0;
+    CHECK(thvm_realize(uop_binary(UOP_ADD, y, y)) != 0);
+    CHECK(thvm_realize_error()[0] == '\0');
   }
 
   TEST_BEGIN("realize-gc-roots/collection-copies-the-unsubstituted-graph");
