@@ -91,5 +91,30 @@ fn u32 kernel_gc_sweep(Term result) {
     kernel_free_arrays(ke);
     freed++;
   }
+  // A view of a kernel output (a reshape the realize returned, the
+  // aliases view_resolve hands out) is its own TenDesc with a copy of
+  // the producer kid; detaching only the output tid above left it
+  // attached, so a later read through the view re-fired the producer
+  // over stripped upstream kernels and overwrote the committed buffer.
+  // A view of a buffer that survived holds committed bytes, as the
+  // output tid does.
+  for (u32 t = 1; t < TENS_NEXT; t++) {
+    u32 kid = TENS[t].producer_kid;
+    if (kid == 0 || kid >= KERNELS_NEXT) {
+      continue;
+    }
+    u32 otid = KERNELS[kid].output_tid;
+    if (otid == t || otid == 0 || otid >= TENS_NEXT) {
+      continue;
+    }
+    Backend *b = TENS[t].backend;
+    u32 bid = TENS[t].buf_id;
+    if (b == NULL || b != TENS[otid].backend || bid == 0 || bid != TENS[otid].buf_id) {
+      continue;
+    }
+    if (b->buf_refcount != NULL && b->buf_refcount(bid) > 0) {
+      TENS[t].producer_kid = 0;
+    }
+  }
   return freed;
 }
