@@ -719,11 +719,25 @@ class RunArmsParsers(unittest.TestCase):
 
     def test_clock_gated_and_schedule_source(self):
         g = run_arms.is_clock_gated
-        self.assertTrue(g("--tgt-sel=1 --lrs --preset=none"))
-        self.assertTrue(g("--cp-set-interreduce --cp-set-ir-budget=5"))
-        self.assertTrue(g("--fof-slice=2 --fol-lrs=1"))
-        self.assertFalse(g("--fol-lrs=0 --lrs=0"))
-        self.assertFalse(g("--cp-set-interreduce --tgt=1"))
+        f = run_arms.clock_gated_flags
+        off = "--horn=0 --fof-sat=0"  # the two default-on budgets disabled
+        self.assertTrue(g("--tgt-sel=1 --lrs --preset=none " + off))
+        self.assertTrue(g("--cp-set-interreduce --cp-set-ir-budget=5 " + off))
+        self.assertTrue(g("--fof-slice=2 --fol-lrs=1 " + off))
+        self.assertFalse(g("--fol-lrs=0 --lrs=0 --cp-set-ir-budget=0 " + off))
+        self.assertFalse(g("--cp-set-interreduce --tgt=1 " + off))
+        # A19: the goal-narrow endgame, the Horn release and the clausal
+        # pre-pass; the last value of a repeated flag wins (setenv).
+        self.assertEqual(f("--goal-narrow " + off), ["--goal-narrow"])
+        self.assertEqual(f("--goal-narrow=0 " + off), [])
+        self.assertEqual(f("--fof-sat=0"), ["--horn"])
+        self.assertEqual(f("--horn=0"), ["--fof-sat"])
+        self.assertEqual(f(""), ["--horn", "--fof-sat"])  # wm: both on by default
+        self.assertEqual(f("--horn=1 --fof-sat=1000000"), ["--horn", "--fof-sat"])
+        self.assertEqual(f("--horn=0 --horn=1 --fof-sat=0"), ["--horn"])
+        self.assertEqual(f("--lrs --lrs=0 " + off), [])
+        self.assertEqual(f("--fof-sat=-1 --horn=00"), [])
+        self.assertEqual(f("--horn-cd=2 --horn-wall=4 --fof-sat=0"), ["--horn"])
         main_c = os.path.join(REPO, "tools", "atp_cli", "main.c")
         if not os.path.exists(main_c):
             self.skipTest("no main.c")
@@ -732,10 +746,15 @@ class RunArmsParsers(unittest.TestCase):
             r'^  \{"([^"]+)",\s*"([^"]*)",\s*[0-9.]+\},', run_arms.read_text(main_c), re.M))
         lanes = dict(run_arms.parse_lane_listing(listing))
         self.assertEqual(len(lanes), 46)
-        gated = sorted(k for k, v in lanes.items() if g(v))
-        self.assertEqual(gated, sorted(["equals-twee", "fof-wall", "unfold-tgt-awr", "twee",
-                                        "twee-freq", "tgt-sel", "otter-lpo", "otter-lpo-cmin",
-                                        "otter-ladr", "twee-raw"]))
+        ungated = sorted(k for k, v in lanes.items() if not g(v))
+        self.assertEqual(ungated, sorted(["unfold-tgt", "flatten-bare", "tgt-ax", "bare", "ifeq",
+                                          "tgt", "tgt-fold", "bare-raw", "flatten-bare-raw"]))
+        lrs = sorted(k for k, v in lanes.items()
+                     if set(f(v)) & {"--lrs", "--fol-lrs", "--cp-set-ir-budget"})
+        self.assertEqual(lrs, sorted(["equals-twee", "fof-wall", "unfold-tgt-awr", "twee",
+                                      "twee-freq", "tgt-sel", "otter-lpo", "otter-lpo-cmin",
+                                      "otter-ladr", "twee-raw"]))
+        self.assertEqual([k for k, v in lanes.items() if "--goal-narrow" in f(v)], [])
 
     def test_lane_listing(self):
         self.assertEqual(run_arms.parse_lane_listing("wm\t\ntwee\t--lrs --cp-weight=8\n"),
@@ -744,13 +763,17 @@ class RunArmsParsers(unittest.TestCase):
         self.assertIsNone(run_arms.parse_lane_listing(""))
 
     def test_repeat_decision(self):
-        p0 = {"twee": "--cp-set-ir-budget=5", "wm": "", "tgt-sel": "--lrs"}
-        e = dict(p0, **{"twee-g": "--cp-set-ir-budget=5 --guide=1", "wm-g": "--guide=1",
-                        "wm": "--lrs"})
+        o = "--horn=0 --fof-sat=0 "  # the default-on Horn release and pre-pass off
+        p0 = {"twee": o + "--cp-set-ir-budget=5", "wm": o, "tgt-sel": o + "--lrs"}
+        e = dict(p0, **{"twee-g": o + "--cp-set-ir-budget=5 --guide=1", "wm-g": o + "--guide=1",
+                        "wm": o + "--lrs"})
         t = {"E": e, "P0": p0}
         rd = run_arms.repeat_decision
-        self.assertEqual(rd({"E": (1, "wm-g"), "P0": (1, "tgt-sel")}, {"E": e, "P0": {"tgt-sel": ""}}),
+        self.assertEqual(rd({"E": (1, "wm-g"), "P0": (1, "tgt-sel")}, {"E": e, "P0": {"tgt-sel": o}}),
                          (0, "-"))
+        # The real wm lane (no flags) runs the Horn release and the pre-pass.
+        self.assertEqual(rd({"E": (1, "wm-g"), "P0": (1, "wm")}, {"E": e, "P0": {"wm": ""}}),
+                         (1, "clock-gated:wm"))
         self.assertEqual(rd({"E": (1, "wm-g"), "P0": (0, "")}, t), (1, "disagree"))
         self.assertEqual(rd({"E": (1, "twee-g"), "P0": (1, "wm")}, t), (1, "clock-gated:twee-g"))
         # Each arm's lane reads its own table: wm is gated in E's, not in P0's.

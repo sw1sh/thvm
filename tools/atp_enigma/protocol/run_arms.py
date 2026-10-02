@@ -46,8 +46,11 @@ Order and repeats:
   order, so the arm order is a fixed-seed shuffle per problem.
 - With --passes 1 (the default) and repeats on: at each wall, when the
   arms' pass-1 Solution flags disagree or any arm's pass-1 winning lane is
-  clock-gated (its flags in that arm's own lane table hold --lrs,
-  --fol-lrs or --cp-set-ir-budget), every arm runs passes 2 and 3 there.
+  clock-gated (its flags in that arm's own lane table leave one of
+  GATED_RULES on: --lrs, --fol-lrs, --cp-set-ir-budget, --goal-narrow, or
+  the default-on Horn release and clausal pre-pass, which only --horn=0
+  and --fof-sat=0 turn off; amendment A19), every arm runs passes 2 and 3
+  there.
   A winning lane missing from its arm's table stops the runner
   (run.failed).  The decision goes to decisions.tsv; the majority of three
   decides (stats.py).
@@ -173,7 +176,31 @@ CALIB_PASSES = 2
 CHECK_WALL_S = 60
 DEFAULT_SEED = "20261001"
 REPEAT_PASSES = (2, 3)
-GATED_FLAGS = ("--lrs", "--fol-lrs", "--cp-set-ir-budget")
+# The lane flags whose disciplines read the work clock or the wall for a
+# search decision (amendments A11, A19), each with the reading FindProof
+# gives the flag's last value (None: the flag is absent; a bare boolean
+# knob is "1").  --horn and --fof-sat are on unless disabled: the Horn
+# release runs unless THVM_ATP_HORN starts with '0' (main.c), the clausal
+# pre-pass unless atol(THVM_ATP_FOF_SAT) <= 0 (fof_split.c).
+def _env_on(v):
+    return v is not None and v != "" and v[0] != "0"
+
+
+def _atoi(v):
+    m = re.match(r"\s*([+-]?\d+)", v or "")
+    return int(m.group(1)) if m else 0
+
+
+GATED_RULES = (
+    ("--lrs", _env_on),                                       # engine LRS
+    ("--fol-lrs", lambda v: v is not None and _atoi(v) != 0),  # pre-pass LRS
+    ("--cp-set-ir-budget", lambda v: v is not None and _atoi(v) > 0),
+    ("--goal-narrow", _env_on),                               # its 85% endgame burst
+    ("--horn", lambda v: v is None or v[:1] != "0"),          # the Horn release budget
+    ("--fof-sat", lambda v: v is None or _atoi(v) > 0),       # the pre-pass wall share
+)
+GATED_FLAGS = tuple(name for name, _on in GATED_RULES)
+GATED_DEFAULT_ON = tuple(name for name, on in GATED_RULES if on(None))
 REPEAT_READING = ("disagree=pass-1 Solution flags differ at the wall;"
                   "gated=winning lane's flags in its own arm's lane table;per-wall")
 HEARTBEAT_S = 900
@@ -329,8 +356,9 @@ def ensure_header(path, columns):
 
 def protocol_fingerprint(check_wall, seed):
     """(sha12, text) of the protocol parameters that change outcomes."""
-    text = ("check_wall=%s;seed=%s;gated=%s;repeat=%s;calib=gm%.2f/single%.2f/passes%d;"
-            "caps=%dx%dMiB|%d" % (check_wall, seed, ",".join(GATED_FLAGS), REPEAT_READING,
+    text = ("check_wall=%s;seed=%s;gated=%s;default-on=%s;repeat=%s;calib=gm%.2f/single%.2f/passes%d;"
+            "caps=%dx%dMiB|%d" % (check_wall, seed, ",".join(GATED_FLAGS),
+                                  ",".join(GATED_DEFAULT_ON), REPEAT_READING,
                                   SPEED_TOLERANCE, SINGLE_TOLERANCE, CALIB_PASSES, MAX_PAR,
                                   SLICE_RSS_MB, SMALL_POD_RSS_MB))
     return sha256_text(text)[:12], text
@@ -490,14 +518,18 @@ def histogram_text(counts):
     return ",".join("%s:%d" % (k, counts[k]) for k in sorted(counts))
 
 
-def is_clock_gated(flags):
+def clock_gated_flags(flags):
+    """The GATED_RULES flags a lane's flags leave on, the last value of a
+    repeated flag winning as in FindProof's setenv."""
+    last = {}
     for tok in flags.split():
         name, eq, val = tok.partition("=")
-        if name in GATED_FLAGS:
-            if eq and val in ("0", ""):
-                continue
-            return True
-    return False
+        last[name] = val if eq else "1"
+    return [name for name, on in GATED_RULES if on(last.get(name))]
+
+
+def is_clock_gated(flags):
+    return bool(clock_gated_flags(flags))
 
 
 def parse_lane_listing(text):
