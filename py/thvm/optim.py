@@ -279,10 +279,11 @@ class LARS(Optimizer):
             if self.momentum:
                 self.b[i].assign(self.b[i] * self.momentum + g)
                 moments.append(self.b[i])
-                g = (g + self.b[i] * self.momentum) if self.nesterov else self.b[i]
             if ns:
-                pre.append((p, r, g))
+                pre.append((i, p, r, g))
                 continue
+            if self.momentum:
+                g = (g + self.b[i] * self.momentum) if self.nesterov else self.b[i]
             # popular momentum applies the learning rate after momentum.
             if not self.classic:
                 g = (g * r * self.lr) if isinstance(r, Tensor) else (g * (r * self.lr))
@@ -293,14 +294,19 @@ class LARS(Optimizer):
             out.append(p)
         if not ns:
             return out
-        # NS path: realize the momentum buffers, then orthogonalize.
+        # NS path: realize the momentum buffers, then orthogonalize.  The
+        # nesterov term reads b[i] only after that realize, as Adam's phase 2
+        # reads m and v: built before it, g would hold the unrealized ASSIGN
+        # node, and realizing p would fire the momentum write a second time.
         if moments:
             Tensor.realize(*moments)
         out = list(moments)
         for entry in pre:
             if entry is None:
                 continue
-            p, r, g = entry
+            i, p, r, g = entry
+            if self.momentum:
+                g = (g + self.b[i] * self.momentum) if self.nesterov else self.b[i]
             # orthogonalize the (reshaped-2D) momentum update, reshape back
             # (tinygrad nn/optim.py:127).
             gshape = g.shape
