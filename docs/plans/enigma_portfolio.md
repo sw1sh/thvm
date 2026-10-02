@@ -665,7 +665,7 @@ What is running now:
 | WDEP and delta per wall      | at L0           | |
 | G0.4 (amendment A1)          | at the pod gate: script and binary sha256, main commit, exit code of each mode | |
 | protocol fingerprint (run_arms.py; amendments A11, A19) | efeb738a5185 | 2026-10-02 |
-| calib_ref.tsv (pod-speed reference) and its pod's lscpu line | before any pod is judged against it | |
+| calib_ref.tsv (pod-speed reference) and its pod's lscpu line | f1172af032ba5af32d9c70c2171843868a48d85bbc56e0e5e0925bafe9ef3dba (10 of 14 candidates, 3 passes, ref 3.10-43.59 s; GRP750-1 43.59 s, GRP754-1 43.08 s, as on the A18 EPYC 9654 pod). lscpu: "AMD EPYC-Genoa Processor, tpc=2, cpus=32, cps=16, sockets=1, aff=16, quota=none"; bin_sha 65abe487887f (the submission build), rss cap default. Pod atp-m0-1, nebius cpu-d3 32 vCPU / 128 GB (MemTotal 131,896,592 kB): no 16-vCPU type offers 16 x 4500 MiB (all are 64 GB), so every WDEP run is pinned by affinity to CPUs 0-15 (8 cores x 2 threads, the nebius 16-vCPU shape), the effective-CPU reading of run_arms.py and the README pod rules | 2026-10-02 |
 | L2 unseal token | after the freeze (stats.py --look L2 needs it) | |
 | section 5.3 outputs          | ~/.cache/thvm/enigma/matrix/decisions_5_3.txt; summary below | 2026-10-02 |
 | engine change: explicit-stack term walks (branch enigma-ftdeep) | not merged; L0 runs on the binary recorded in the L0 binary row below. Corrected by A19: this row first said the WDEP calibration does too, but it runs the J13 submission build (section 1.3) | 2026-10-02 |
