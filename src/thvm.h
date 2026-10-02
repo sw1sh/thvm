@@ -6021,6 +6021,12 @@ typedef struct {
   u32   n_trace;
   u32   t_cap;
   u32   t_max;
+  // The default cap the search sees (ATP_MAX_TRACE): an entry at or past
+  // it exists only when a proof raised t_max, and the search treats it
+  // as absent (orphan tests, death marks, implicit CPs, the heap tail,
+  // the work-clock window), so a proof run searches as the no-proof run.
+  // Only a test lowers it, to emulate a no-proof run at a small cap.
+  u32   t_vis;
   // Bytes held only by entries past the default cap (ATP_MAX_TRACE),
   // which exist only when the cap is raised for a proof: their nodes
   // live in the permanent heap tail and their cost is off the work

@@ -278,6 +278,7 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // trace buffer itself starts NULL and grows on demand (atp_trace_ensure)
   // up to t_max; thvm_atp_trace_cap resolves and bounds the env value.
   s->t_max = thvm_atp_trace_cap();
+  s->t_vis = ATP_MAX_TRACE;
 #ifdef ATP_FV_INDEX
   // 7d: an empty FV subsumption index; CPs enter it on enqueue.
   s->fv_index = atp_fv_index_new();

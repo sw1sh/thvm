@@ -1017,7 +1017,10 @@ int main(void) {
     for (u32 i = 0; i < ATP_GUIDE_NNORM; i++) {
       CHECK(G(s)->x[0][ATP_GUIDE_NORM_COL[i]] == 0.0);
     }
-    CHECK(G(s)->x[1][1] == log1p(3.0) - log1p(2.0));
+    // The engine's libm, not a compile-time fold (gcc folds log1p
+    // correctly rounded; glibc's log1p(3) is an ulp off).
+    volatile double three = 3.0, two = 2.0;
+    CHECK(G(s)->x[1][1] == log1p(three) - log1p(two));
     thvm_atp_free(s);
   }
 
@@ -1128,6 +1131,10 @@ int main(void) {
     // exactly every 3rd weight selection.
     s = problem(1u);
     thvm_atp_set_use_orphan_murder(s, 1u);
+    // WM's configuration (Method -> "Waldmeister"): the eager sweep at
+    // interreduction (ATP_ORPHAN_KILL) would drop the orphans before any
+    // pop sees them.
+    thvm_atp_set_use_eager_orphan_sweep(s, 0u);
     CHECK(arm(s, &H_RAND, ATP_GUIDE_TOPK, 8u, 0.0, 3u, 1u));
     problem_load(s, 1u);
     run_traj(s, 600u, &T_ARM);
@@ -1295,6 +1302,9 @@ int main(void) {
     // Trace entries past the soft cap exist only with --proof (main.c
     // raises the cap): a non-zero guided run selects the same with the
     // cap cut to 32 entries as with --proof's 16.7M, in both integrations.
+    // The search sees the default cap (t_vis) in both runs, as a deployed
+    // proof run sees ATP_MAX_TRACE; without it the engine's own orphan
+    // sweep reads entries 32.. that the capped run never wrote.
     u64 hc0 = thvm_atp_heap_checkpoint();
     u64 gc0 = gc_count();
     for (u32 mode = 0; mode < 3u; mode++) {
@@ -1310,6 +1320,7 @@ int main(void) {
           CHECK(arm(s, &H_LAZY, ATP_GUIDE_LAZY, 8u, 0.5, 0u, 0u));
         }
         s->t_max = (cap == 0u) ? 32u : 16777216u;
+        s->t_vis = 32u;
         problem_load(s, 0u);
         run_traj(s, 300u, (cap == 0u) ? &T_BASE : &T_ARM);
         if (mode > 0u) {

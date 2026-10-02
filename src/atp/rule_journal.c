@@ -69,7 +69,7 @@ static void atp_rj_slice(AtpState *s, u32 first, u32 n) {
 // Record `t` (ORIENT / FVI / SIMPLIFY) was just pushed.
 static void atp_rj_view(AtpState *s, u32 t) {
   u32 pos = s->rj_hold ? s->rj_hold - 1u : s->rj_n;
-  if (t < ATP_MAX_TRACE) {
+  if (t < s->t_vis) {
     atp_rj_push(s, ATP_RJ_VIEW, 0u, 0u, pos);
     return;
   }

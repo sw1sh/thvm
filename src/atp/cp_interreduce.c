@@ -28,7 +28,7 @@ static void atp_cp_kill_orphans(AtpState *s, const u32 *dead, u32 n_dead) {
     u32 vv = s->cp_heap[i].row;
     int orphan = 0;
     u32 ti = s->cp_trace[vv];
-    if (ti != ATP_TRACE_NONE && ti < s->n_trace && ti < ATP_MAX_TRACE) {
+    if (ti != ATP_TRACE_NONE && ti < s->n_trace && ti < s->t_vis) {
       Term te = s->trace[ti];
       if (term_tag(te) == TAG_CTR && term_ext(te) == TRACE_CP) {
         u32 pa = (u32)term_val(term_ctr_at(te, 0));

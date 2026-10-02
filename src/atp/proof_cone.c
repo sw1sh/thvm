@@ -480,7 +480,7 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
           for (u32 q = 0; q < n; q++) ch[q] = term_ctr_at(e, q);
           ch[0] = term_new(0, TAG_NUM, 0, chain);
           s->trace[ti] = term_new_ctr(reason, ch, n);
-          if (ti >= ATP_MAX_TRACE) s->trace_x_heap = 1u;
+          if (ti >= s->t_vis) s->trace_x_heap = 1u;
           success = 1;
           n_fixed++;
         } else {

@@ -66,8 +66,8 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   // Trace entries past the default cap live in the permanent heap tail
   // (atp_trace_node) and need no collection: rooting only the default-
   // cap prefix keeps a proof run's collection work the no-proof run's.
-  u32 n_trace_roots = (s->trace_x_heap || s->n_trace < ATP_MAX_TRACE)
-                        ? s->n_trace : ATP_MAX_TRACE;
+  u32 n_trace_roots = (s->trace_x_heap || s->n_trace < s->t_vis)
+                        ? s->n_trace : s->t_vis;
 
   // needle (THVM_ATP_DRC_NEEDLE): fold_def_body[0..fold_width) and
   // needle_ax_l/r[0..n_needle_ax) are long-lived Term arrays (set once
@@ -601,7 +601,7 @@ fn void thvm_atp_materialize_trace(AtpState *s) {
     ch[2] = lhs;
     ch[3] = rhs;
     s->trace[i] = term_new_ctr(reason, ch, n);
-    if (i >= ATP_MAX_TRACE) s->trace_x_heap = 1u;
+    if (i >= s->t_vis) s->trace_x_heap = 1u;
     s->trace_eq_off[i] = 0u;                              // now materialized
     n_mat++;
   }
@@ -624,10 +624,10 @@ fn void thvm_atp_materialize_trace(AtpState *s) {
 // no-proof run too (where the attempt just fails): a window's own
 // entry/exit work then counts the same in both runs.
 static u8 atp_trace_windowed(const AtpState *s) {
-  return (u8)(s->n_trace >= ATP_MAX_TRACE);
+  return (u8)(s->n_trace >= s->t_vis);
 }
 static u8 atp_trace_proof_only(const AtpState *s) {
-  return (u8)(s->n_trace >= ATP_MAX_TRACE && s->t_max > ATP_MAX_TRACE);
+  return (u8)(s->n_trace >= s->t_vis && s->t_max > s->t_vis);
 }
 
 // Entry node: atom-only nodes of a proof-only entry take the permanent
@@ -827,7 +827,7 @@ static void atp_trace_cp_rematerialize(AtpState *s, u32 tid, Term lhs, Term rhs)
   for (u8 k = 0; k < pos_len; k++) children[5 + k] = term_ctr_at(old, 5 + k);
   children[5u + pos_len] = term_ctr_at(old, 5u + pos_len);  // combo
   s->trace[tid] = term_new_ctr(TRACE_CP, children, 6u + pos_len);
-  if (tid >= ATP_MAX_TRACE) s->trace_x_heap = 1u;
+  if (tid >= s->t_vis) s->trace_x_heap = 1u;
 }
 
 // WM-distinguished-face flag (dist_rhs) for a newly-added unorientable
@@ -867,7 +867,7 @@ static u8 atp_wmo_eq_dist_rhs_base(const AtpState *s, u32 src_trace) {
   if (s == NULL) return 1u;
   // A proof-only entry (past the default cap) is absent to the search.
   if (src_trace == ATP_TRACE_NONE || src_trace >= s->n_trace ||
-      src_trace >= ATP_MAX_TRACE) {
+      src_trace >= s->t_vis) {
     // Past the proof-trace soft cap the trace entry is gone, but the
     // popped CP's origin class survives on the queue (cp_kind ->
     // last_popped_kind).  Apply the SAME class rule as the tagged

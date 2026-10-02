@@ -1445,7 +1445,7 @@ static void atp_irv_push(AtpState *s, Term lhs, Term rhs, u32 parent,
 static void atp_trace_mark_dead(AtpState *s, u32 trace_id) {
   // Ids past the default trace cap exist only in a proof run: the
   // search treats them as absent, as the no-proof run must.
-  if (trace_id == ATP_TRACE_NONE || trace_id >= ATP_MAX_TRACE) return;
+  if (trace_id == ATP_TRACE_NONE || trace_id >= s->t_vis) return;
   atp_hx_kill(s, 'k', trace_id);
   u32 byte = trace_id >> 3;
   if (byte >= s->r_trace_dead_cap >> 3) {
@@ -1474,7 +1474,7 @@ static int atp_trace_is_dead(const AtpState *s, u32 trace_id) {
 // `aP->lebtNoch && oP->lebtNoch` test (KPVerwaltung.c:540).
 static int atp_cp_is_orphan(const AtpState *s, u32 cp_trace) {
   if (cp_trace == ATP_TRACE_NONE || cp_trace >= s->n_trace ||
-      cp_trace >= ATP_MAX_TRACE)   // proof-only entry: absent to the search
+      cp_trace >= s->t_vis)   // proof-only entry: absent to the search
     return 0;
   Term te = s->trace[cp_trace];
   if (term_tag(te) != TAG_CTR || term_ext(te) != TRACE_CP) return 0;
@@ -1898,7 +1898,7 @@ static u32 atp_trace_push_norm_step(AtpState *s, u32 p_a, u32 rule_idx,
   }
   children[5u + pos_len]      = term_new(0, TAG_NUM, 0, side);
   children[5u + pos_len + 1u] = term_new(0, TAG_NUM, 0, fwd);
-  if (s->n_trace >= ATP_MAX_TRACE) s->trace_x_heap = 1u;
+  if (s->n_trace >= s->t_vis) s->trace_x_heap = 1u;
   s->trace[s->n_trace] = term_new_ctr(TRACE_NORM_STEP, children,
                                       7u + pos_len);
   u32 idx = s->n_trace;
@@ -1927,7 +1927,7 @@ static u32 atp_trace_push_norm_step_off(AtpState *s, u32 p_a, u32 rule_idx,
   }
   children[5u + pos_len]      = term_new(0, TAG_NUM, 0, side);
   children[5u + pos_len + 1u] = term_new(0, TAG_NUM, 0, fwd);
-  if (s->n_trace >= ATP_MAX_TRACE) s->trace_x_heap = 1u;
+  if (s->n_trace >= s->t_vis) s->trace_x_heap = 1u;
   s->trace[s->n_trace] = term_new_ctr(TRACE_NORM_STEP, children,
                                       7u + pos_len);
   u32 idx = s->n_trace;
