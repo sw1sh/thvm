@@ -356,11 +356,21 @@ artifacts.  It only processes text, so it runs on the Mac.
 ```
 matrix_tables.py --seal       # j13 rows -> ~/.cache/thvm/enigma/sealed (read-only); train + heldout -> matrix.tsv
 matrix_tables.py --validate   # G0.1 -> g01.txt, rerun.tsv
-matrix_tables.py --tables     # T1-T8 per split -> tables/ (summary.txt lists them)
+matrix_tables.py --supplement # supplement/sup_K.tsv (180 s runner rows) -> supplement.tsv, supplement/validate.txt
+matrix_tables.py --tables     # T1-T8 per split -> tables/ (summary.txt lists them); T1-T4 of the 180 s view too
 matrix_tables.py --decisions  # section 5.3 -> decisions_5_3.txt, dev_t.tsv, train_t.tsv, supplement_jobs.tsv,
                               #   label_harvest_jobs.tsv, oracle_rerun_jobs.tsv
-matrix_tables.py --all        # --validate, --tables, --decisions
+matrix_tables.py --all        # --validate, --supplement (when its rows exist), --tables, --decisions
 ```
+
+The 180 s supplement reruns `supplement_jobs.tsv` with `runner.sh` at
+`RUNNER_WALL=180 RUNNER_TIMEOUT=195`, its rows in
+`supplement/sup_K.tsv` with their `.started` and `.done` sentinels.  Once
+`supplement.tsv` exists, `--tables` adds `<table>_180_<split>.tsv` (T1-T4 of
+the 180 s view: the matrix rows, each rerun job's 180 s row in place of its
+60 s row) and `--decisions` reads that view wherever a section 5.3 rule reads
+180 s: unique solves and the cover for P1 retirement, condition 2 of the
+hard tail (DEV-T, TRAIN-T, the twin owners) and the M4c count.
 
 The J13 rows stay sealed until the plan's final look.  After `--seal` every
 mode reads `matrix.tsv` only and stops on a j13 row or on a path under the

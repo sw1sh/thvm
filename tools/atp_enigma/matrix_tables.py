@@ -19,9 +19,19 @@ Modes, in order:
                them in seal.txt.  A re-run reads the sealed raw shards,
                rebuilds both files and checks that they are byte-identical.
   --validate   G0.1 on the train and heldout rows -> g01.txt, rerun.tsv.
-  --tables     T1-T8 per split -> tables/.
-  --decisions  The section 5.3 rules -> decisions_5_3.txt and job lists.
-  --all        --validate, --tables, --decisions.
+  --tables     T1-T8 per split -> tables/; once supplement.tsv exists,
+               also T1-T4 of the 180 s view, <table>_180_<split>.tsv: the
+               matrix rows with each rerun job's 180 s row in place of its
+               60 s row.
+  --supplement The 180 s supplement's rows (supplement/sup_K.tsv, the
+               runner's 14 columns, with .started / .done) against
+               supplement_jobs.tsv -> supplement.tsv (15 = runner slot,
+               16 = its width) and supplement/validate.txt.
+  --decisions  The section 5.3 rules -> decisions_5_3.txt and job lists;
+               the rules that read 180 s use the 180 s view once
+               supplement.tsv exists.
+  --all        --validate, --supplement (when supplement/ holds rows),
+               --tables, --decisions.
   --t7c FILE   T7-C: the C static gate replica (FILE: FindProof
                --problem-features --lanes over the 835 pool problems,
                concatenated; header lines are skipped) against the pool rows
@@ -489,19 +499,26 @@ def num(s, kind=float):
 
 def load_matrix(paths, problems, lanes):
     """The train and heldout rows; dies on any j13 row."""
+    return load_rows(paths.matrix_tsv, paths, problems, lanes)
+
+
+def load_rows(path, paths, problems, lanes):
+    """16-column rows (matrix.tsv, supplement.tsv) of train and heldout
+    problems only; dies on any j13 row."""
     rows = []
     known = set(lanes)
-    with open(paths.guard(paths.matrix_tsv)) as fp:
+    label = os.path.basename(path)
+    with open(paths.guard(path)) as fp:
         for line in fp:
             f = line.rstrip("\n").split("\t")
             if len(f) != 16:
-                die("matrix.tsv: a row without 16 columns")
+                die(f"{label}: a row without 16 columns")
             if f[2] == "j13":
-                die("matrix.tsv holds a j13 row")
+                die(f"{label} holds a j13 row")
             if f[2] not in SPLITS or problems.get(f[0], ("", ""))[1] != f[2]:
-                die("matrix.tsv: a row that is not a train or heldout problem")
+                die(f"{label}: a row that is not a train or heldout problem")
             if f[1] not in known:
-                die("matrix.tsv: a row with an unknown lane")
+                die(f"{label}: a row with an unknown lane")
             r = Row()
             r.problem, r.lane, r.split = f[0], f[1], f[2]
             r.exit = int(f[3])
@@ -657,6 +674,127 @@ def context(paths):
     lanes = load_lanes(paths)
     rows = load_matrix(paths, problems, lanes)
     return problems, lanes, rows, Pool(rows, problems, lanes)
+
+
+# ---------------------------------------------------------- supplement
+
+SUP_WALL = 180
+SUP_TIMEOUT = 195
+
+
+def load_supplement(paths, problems, lanes):
+    """supplement.tsv (built by --supplement), or None before it exists."""
+    p = paths.m("supplement.tsv")
+    if not os.path.exists(p):
+        return None
+    return load_rows(p, paths, problems, lanes)
+
+
+def view180(rows, sup):
+    """The 180 s view: the matrix rows, each supplement row in place of
+    the 60 s row of its (problem, lane).  Only the problems no lane solves
+    at 60 s were rerun, so for every other problem the view is the 60 s
+    row set and a lane's count there is a lower bound at 180 s."""
+    rep = {(r.problem, r.lane): r for r in sup}
+    keys = {(r.problem, r.lane) for r in rows}
+    if not set(rep) <= keys:
+        die("supplement.tsv: a (problem, lane) the matrix does not hold")
+    return [rep.get((r.problem, r.lane), r) for r in rows]
+
+
+def context180(paths, problems, lanes, rows):
+    """(supplement rows, the 180 s Pool, the problems only the supplement
+    solves), or (None, None, empty) before the supplement exists."""
+    sup = load_supplement(paths, problems, lanes)
+    if sup is None:
+        return None, None, frozenset()
+    pool180 = Pool(view180(rows, sup), problems, lanes)
+    return sup, pool180, frozenset(r.problem for r in sup
+                                   if r.cls == "proved")
+
+
+def mode_supplement(paths):
+    """The 180 s supplement's rows (supplement/sup_K.tsv, the runner's 14
+    columns, with sentinels) against supplement_jobs.tsv -> supplement.tsv
+    (16 columns: 15 = runner slot K, 16 = its width) and
+    supplement/validate.txt."""
+    problems = load_problems(paths)
+    lanes = load_lanes(paths)
+    sdir = paths.m("supplement")
+    jobs = []
+    with open(paths.guard(paths.m("supplement_jobs.tsv"))) as fp:
+        for line in fp:
+            f = line.rstrip("\n").split("\t")
+            if len(f) == 4:
+                jobs.append(f)
+    want = collections.Counter((j[0], j[3]) for j in jobs)
+    slots = sorted(int(m.group(1)) for m in (
+        re.fullmatch(r"sup_(\d+)\.tsv", f) for f in os.listdir(sdir)) if m)
+    out = []
+    rows = []
+    shas = set()
+    ok = True
+    for k in slots:
+        base = os.path.join(sdir, f"sup_{k}.tsv")
+        st = read_started(paths.guard(base + ".started")) \
+            if os.path.exists(base + ".started") else {}
+        dn = read_started(paths.guard(base + ".done")) \
+            if os.path.exists(base + ".done") else {}
+        shas.add(st.get("sha256"))
+        par = st.get("par", "0")
+        n = 0
+        with open(paths.guard(base)) as fp:
+            for line in fp:
+                f = line.rstrip("\n").split("\t")
+                if len(f) != 14:
+                    die(f"sup_{k}.tsv: a row without 14 columns")
+                if f[2] not in SPLITS or problems.get(f[0], ("", ""))[1] != f[2]:
+                    die(f"sup_{k}.tsv: a row that is not a train or heldout "
+                        "problem")
+                rows.append(f + [str(k), par])
+                n += 1
+        good = dn.get("status") == "complete" and dn.get("pending_left") == "0"
+        ok = ok and good and st.get("wall") == str(SUP_WALL)
+        out.append(f"slot {k}: {n} rows; host {st.get('host')} nproc "
+                   f"{st.get('nproc')} mem_gb {st.get('mem_gb')} par {par} "
+                   f"wall {st.get('wall')} timeout {st.get('timeout')} env "
+                   f"'{st.get('env', '')}'; .done status={dn.get('status')} "
+                   f"pending_left={dn.get('pending_left')}")
+    got = collections.Counter((r[0], r[1]) for r in rows)
+    missing = sum((want - got).values())
+    extra = sum((got - want).values())
+    dup = sum(c - 1 for c in got.values() if c > 1)
+    ok = ok and missing == 0 and extra == 0 and dup == 0 and len(shas) == 1
+    cls = collections.Counter(r[8] for r in rows)
+    bad = cls["crash"] + cls["killed-by-timeout"]
+    szs = collections.Counter(r[4] for r in rows if r[8] == "proved")
+    ok = ok and set(szs) <= {"Unsatisfiable"}
+    idx = {l: i for i, l in enumerate(lanes)}
+    rows.sort(key=lambda r: (r[0], idx[r[1]]))
+    data = "".join("\t".join(r) + "\n" for r in rows).encode()
+    with open(paths.m("supplement.tsv"), "wb") as fp:
+        fp.write(data)
+    solved = sorted({r[0] for r in rows if r[8] == "proved"})
+    head = [
+        f"180 s supplement (docs/plans/enigma_portfolio.md M0 deliverable 3): "
+        f"{len(jobs)} jobs on {len({j[0] for j in jobs})} pool problems",
+        f"overall: {'PASS' if ok else 'FAIL'}",
+        f"rows {len(rows)}; missing {missing}, extra {extra}, duplicate {dup}",
+        f"binary sha256: {', '.join(sorted(str(x) for x in shas))}",
+        "end classes: " + ", ".join(f"{c} {cls[c]}" for c in CLASSES
+                                     if cls[c]),
+        f"crash plus killed-by-timeout: {bad} ({100.0 * bad / max(1, len(rows)):.2f}%)",
+        f"SZS of proved rows: {dict(szs)}",
+        f"problems proved by some lane at 180 s: {len(solved)}",
+        f"supplement.tsv sha256 {sha256_bytes(data)}",
+        "",
+    ]
+    text = "\n".join(head + out) + "\n"
+    with open(os.path.join(sdir, "validate.txt"), "w") as fp:
+        fp.write(text)
+    assert_no_j13(paths, problems, [paths.m("supplement.tsv"),
+                                    os.path.join(sdir, "validate.txt")])
+    print(text)
 
 
 # ---------------------------------------------------------------- G0.1
@@ -837,6 +975,8 @@ def mode_validate(paths):
 
 VBS_GRID = [0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 10, 20, 30, 40, 50, 57, 59.5]
 WITHIN = [1, 3, 10, 30, 57]
+VBS_GRID_180 = VBS_GRID + [90, 120, 150, 177, 179.5]
+WITHIN_180 = WITHIN + [177]
 TAIL_SEC = 10.0
 
 
@@ -857,9 +997,14 @@ def greedy_cover(pool, probs, lanes):
     return picks, union
 
 
-def hard_tail(pool, probs):
+def hard_tail(pool, probs, sup_solved=frozenset()):
+    """The section 1.4 tail: condition 2 (only the 180 s supplement solves
+    it) from sup_solved, conditions 1 and 3 from the 60 s pool."""
     out = []
     for p in probs:
+        if p in sup_solved:
+            out.append((p, "only-180s-supplement"))
+            continue
         v = pool.vbs(p)
         if v is not None:
             if v > TAIL_SEC:
@@ -880,6 +1025,154 @@ def t5_rates(pool, probs, lane):
     return rates, long_rates
 
 
+def tables_t1_t4(pool, probs, lanes, T, within, grid, tail):
+    """Writes T1-T4 for one split of one view (60 s, or the 180 s view)
+    and returns what the summary reads.  tail: (problem, condition) pairs."""
+    n = len(probs)
+    solved = [p for p in probs if pool.vbs(p) is not None]
+
+    # T1
+    rowsT1 = []
+    for lane in lanes:
+        rs = [pool.by[p][lane] for p in probs]
+        pr = [r for r in rs if r.cls == "proved"]
+        alone = sum(1 for r in pr if len(pool.solvers(r.problem)) == 1)
+        cls = collections.Counter(r.cls for r in rs)
+        rowsT1.append([lane, len(pr), alone]
+                      + [sum(1 for r in pr if r.wall <= t) for t in within]
+                      + [cls[c] for c in CLASSES])
+    write_tsv(T("T1_lanes"), ["lane", "proved", "proved_alone"]
+              + [f"proved_le{t}s" for t in within] + CLASSES, rowsT1)
+
+    # T2
+    curve = [(t, sum(1 for p in solved if pool.vbs(p) <= t)) for t in grid]
+    write_tsv(T("T2_vbs_curve"), ["t_s", "vbs_solved", "of"],
+              [(t, c, n) for t, c in curve])
+    totals = {r[0]: r[1] for r in rowsT1}
+    best_n = max(totals.values())
+    best = [l for l in lanes if totals[l] == best_n]
+    picks, union = greedy_cover(pool, probs, lanes)
+    write_tsv(T("T2_greedy_cover"),
+              ["k", "lane", "gain", "covered", "of_oracle", "tied_gain"],
+              [(k, l, g, c, len(union), ",".join(ti))
+               for k, (l, g, c, ti) in enumerate(picks, 1)])
+    cov = {k: c for k, (_l, _g, c, _t) in enumerate(picks, 1)}
+
+    # T3
+    unsolved = [p for p in probs if pool.vbs(p) is None]
+    endc = [c for c in CLASSES if c not in ("proved",
+                                            "fast-exit-not-applicable")]
+    rowsT3 = []
+    groups = collections.Counter()
+    for p in unsolved:
+        s = pool.searchers(p)
+        c = collections.Counter(r.cls for r in s)
+        pattern = "+".join(x for x in endc if c[x]) or "no-searcher"
+        groups[pattern] += 1
+        rowsT3.append([p, len(s)] + [c[x] for x in endc] + [pattern])
+    write_tsv(T("T3_unsolved"), ["problem", "searching_lanes"] + endc
+              + ["end_pattern"], rowsT3)
+    write_tsv(T("T3_groups"), ["end_pattern", "problems"],
+              sorted(groups.items(), key=lambda kv: (-kv[1], kv[0])))
+
+    # T4
+    rowsT4 = []
+    owners = collections.Counter()
+    for p, cond in tail:
+        v = pool.vbs(p)
+        f = pool.fastest(p)
+        for l in f:
+            owners[l] += 1
+        s = sorted(pool.solvers(p).items(), key=lambda kv: kv[1])
+        runner = s[1] if len(s) > 1 else None
+        rowsT4.append([p, cond, v, ",".join(f), len(s),
+                       runner[0] if runner else "-",
+                       runner[1] if runner else None, stem(p)])
+    write_tsv(T("T4_tail"), ["problem", "condition", "fastest_s",
+                             "owner", "solving_lanes", "runner_up",
+                             "runner_up_s", "stem"], rowsT4)
+    write_tsv(T("T4_owners"), ["lane", "tail_problems_owned"],
+              sorted(owners.items(), key=lambda kv: (-kv[1],
+                                                     pool.idx[kv[0]])))
+    return {"T1": rowsT1, "curve": curve, "best": best, "best_n": best_n,
+            "picks": picks, "cov": cov, "full_k": len(picks),
+            "unsolved": unsolved, "groups": groups, "tail": tail,
+            "owners": owners, "solved": solved}
+
+
+def tables_180(paths, problems, lanes, rows, pool):
+    """T1-T4 of the 180 s view (<table>_180_<split>.tsv) once the
+    supplement exists; returns the summary lines."""
+    sup, pool180, solved180 = context180(paths, problems, lanes, rows)
+    if sup is None:
+        return []
+    summary = [
+        "== 180 s view: the matrix rows, with the supplement's 180 s row in "
+        "place of each rerun job's 60 s row (supplement.tsv, "
+        f"{len(sup)} rows: every non-fast-exit lane of the pool problems no "
+        "lane solves at 60 s).  The problems some lane solves at 60 s were "
+        "not rerun, so their rows and times are the 60 s ones and per-lane "
+        "counts on them are lower bounds at 180 s.",
+        "",
+    ]
+    for split in SPLITS:
+        probs = pool180.problems([split])
+
+        def T(name):
+            return os.path.join(paths.tables, f"{name}_180_{split}.tsv")
+
+        tail = hard_tail(pool, probs, solved180)
+        t = tables_t1_t4(pool180, probs, lanes, T, WITHIN_180, VBS_GRID_180,
+                         tail)
+        new = sorted(p for p in probs if p in solved180)
+        sup_probs = {r.problem for r in sup if r.split == split}
+        uniq = collections.Counter()
+        for p in new:
+            s = pool180.solvers(p)
+            if len(s) == 1:
+                uniq[next(iter(s))] += 1
+        by_lane = collections.Counter(r.lane for r in sup
+                                      if r.split == split
+                                      and r.cls == "proved")
+        cls = collections.Counter(r.cls for r in sup if r.split == split)
+        conds = collections.Counter(c for _p, c in tail)
+        summary += [
+            f"== {split} at 180 s: {len(probs)} problems; supplement "
+            f"{len(sup_probs)} problems, "
+            f"{sum(1 for r in sup if r.split == split)} rows",
+            f"supplement solves (no lane at 60 s, some lane at 180 s): "
+            f"{len(new)}" + (": " + ", ".join(
+                f"{p} {fmt(pool180.vbs(p))} s {','.join(pool180.fastest(p))}"
+                f" ({len(pool180.solvers(p))} lanes)" for p in new)
+                if new else ""),
+            "supplement rows proved per lane: " + (", ".join(
+                f"{l} {by_lane[l]}" for l in lanes if by_lane[l]) or "none"),
+            "supplement solves by exactly one lane: " + (", ".join(
+                f"{l} {uniq[l]}" for l in lanes if uniq[l]) or "none"),
+            "supplement end classes: " + ", ".join(
+                f"{c} {cls[c]}" for c in CLASSES if cls[c]),
+            f"T2 oracle (VBS) at 180 s: {len(t['solved'])} of {len(probs)}; "
+            f"unsolved {len(t['unsolved'])}",
+            "T2 VBS curve: " + ", ".join(f"<={x}s {c}" for x, c in
+                                         t["curve"]),
+            f"T2 best single lane: {', '.join(t['best'])} {t['best_n']} "
+            f"({t['best_n'] - len(t['solved'])} vs oracle)",
+            "T2 greedy picks: " + ", ".join(
+                f"{l}(+{g})" for l, g, _c, _t in t["picks"])
+            + f"; full union at k={t['full_k']}",
+            "T3 unsolved groups: " + ", ".join(
+                f"{g} {c}" for g, c in sorted(t["groups"].items(),
+                                              key=lambda kv: -kv[1])),
+            f"T4 hard tail: {len(tail)} (" + ", ".join(
+                f"{c} {n}" for c, n in sorted(conds.items())) + "); owners: "
+            + ", ".join(f"{l} {c}" for l, c in sorted(
+                t["owners"].items(), key=lambda kv: (-kv[1],
+                                                     pool180.idx[kv[0]]))),
+            "",
+        ]
+    return summary
+
+
 def mode_tables(paths, pf):
     problems, lanes, rows, pool = context(paths)
     os.makedirs(paths.tables, exist_ok=True)
@@ -895,72 +1188,13 @@ def mode_tables(paths, pf):
         n = len(probs)
         solved = [p for p in probs if pool.vbs(p) is not None]
 
-        # T1
-        rowsT1 = []
-        for lane in lanes:
-            rs = [pool.by[p][lane] for p in probs]
-            pr = [r for r in rs if r.cls == "proved"]
-            alone = sum(1 for r in pr if len(pool.solvers(r.problem)) == 1)
-            cls = collections.Counter(r.cls for r in rs)
-            rowsT1.append([lane, len(pr), alone]
-                          + [sum(1 for r in pr if r.wall <= t) for t in WITHIN]
-                          + [cls[c] for c in CLASSES])
-        write_tsv(T("T1_lanes"), ["lane", "proved", "proved_alone"]
-                  + [f"proved_le{t}s" for t in WITHIN] + CLASSES, rowsT1)
-
-        # T2
-        curve = [(t, sum(1 for p in solved if pool.vbs(p) <= t))
-                 for t in VBS_GRID]
-        write_tsv(T("T2_vbs_curve"), ["t_s", "vbs_solved", "of"],
-                  [(t, c, n) for t, c in curve])
-        totals = {r[0]: r[1] for r in rowsT1}
-        best_n = max(totals.values())
-        best = [l for l in lanes if totals[l] == best_n]
-        picks, union = greedy_cover(pool, probs, lanes)
-        write_tsv(T("T2_greedy_cover"),
-                  ["k", "lane", "gain", "covered", "of_oracle", "tied_gain"],
-                  [(k, l, g, c, len(union), ",".join(ti))
-                   for k, (l, g, c, ti) in enumerate(picks, 1)])
-        cov = {k: c for k, (_l, _g, c, _t) in enumerate(picks, 1)}
-        full_k = len(picks)
-
-        # T3
-        unsolved = [p for p in probs if pool.vbs(p) is None]
-        endc = [c for c in CLASSES if c not in ("proved",
-                                                "fast-exit-not-applicable")]
-        rowsT3 = []
-        groups = collections.Counter()
-        for p in unsolved:
-            s = pool.searchers(p)
-            c = collections.Counter(r.cls for r in s)
-            pattern = "+".join(x for x in endc if c[x]) or "no-searcher"
-            groups[pattern] += 1
-            rowsT3.append([p, len(s)] + [c[x] for x in endc] + [pattern])
-        write_tsv(T("T3_unsolved"), ["problem", "searching_lanes"] + endc
-                  + ["end_pattern"], rowsT3)
-        write_tsv(T("T3_groups"), ["end_pattern", "problems"],
-                  sorted(groups.items(), key=lambda kv: (-kv[1], kv[0])))
-
-        # T4
-        tail = hard_tail(pool, probs)
-        rowsT4 = []
-        owners = collections.Counter()
-        for p, cond in tail:
-            v = pool.vbs(p)
-            f = pool.fastest(p)
-            for l in f:
-                owners[l] += 1
-            s = sorted(pool.solvers(p).items(), key=lambda kv: kv[1])
-            runner = s[1] if len(s) > 1 else None
-            rowsT4.append([p, cond, v, ",".join(f), len(s),
-                           runner[0] if runner else "-",
-                           runner[1] if runner else None, stem(p)])
-        write_tsv(T("T4_tail"), ["problem", "condition", "fastest_s",
-                                 "owner", "solving_lanes", "runner_up",
-                                 "runner_up_s", "stem"], rowsT4)
-        write_tsv(T("T4_owners"), ["lane", "tail_problems_owned"],
-                  sorted(owners.items(), key=lambda kv: (-kv[1],
-                                                         pool.idx[kv[0]])))
+        t = tables_t1_t4(pool, probs, lanes, T, WITHIN, VBS_GRID,
+                         hard_tail(pool, probs))
+        rowsT1, curve, best, best_n, picks, cov, full_k = (
+            t["T1"], t["curve"], t["best"], t["best_n"], t["picks"],
+            t["cov"], t["full_k"])
+        unsolved, groups, tail, owners = (t["unsolved"], t["groups"],
+                                          t["tail"], t["owners"])
 
         # T5
         rowsT5 = []
@@ -1108,6 +1342,7 @@ def mode_tables(paths, pf):
             f"{sum(r[9] for r in rowsT8)}, over 6 GB {sum(r[10] for r in rowsT8)}",
             "",
         ]
+    summary += tables_180(paths, problems, lanes, rows, pool)
     with open(os.path.join(paths.tables, "summary.txt"), "w") as fp:
         fp.write("\n".join(TABLES_README + summary))
     assert_no_j13(paths, problems, [os.path.join(paths.tables, f)
@@ -1347,6 +1582,10 @@ def schedule_time(pool, p, lanes, wall, width):
 
 def mode_decisions(paths, pf):
     problems, lanes, rows, pool = context(paths)
+    sup, pool180, S = context180(paths, problems, lanes, rows)
+    have = sup is not None
+    # P: the 180 s view once the supplement is in, else the 60 s pool.
+    P = pool180 if have else pool
     seal = read_seal(paths)
     j13_stems = {stem(n) for n, (_p, s) in problems.items() if s == "j13"}
     train = pool.problems(["train"])
@@ -1359,8 +1598,8 @@ def mode_decisions(paths, pf):
     def half(p):
         return "DEV-T" if stem_hash(stem(p)) < DEV_T_HASH_BELOW else "TRAIN-T"
 
-    tail_train = hard_tail(pool, train)
-    tail_held = hard_tail(pool, held)
+    tail_train = hard_tail(pool, train, S)
+    tail_held = hard_tail(pool, held, S)
     dev_t = [(p, c, "heldout") for p, c in tail_held] + \
         [(p, c, "train") for p, c in tail_train if half(p) == "DEV-T"]
     train_t = [(p, c) for p, c in tail_train
@@ -1381,14 +1620,24 @@ def mode_decisions(paths, pf):
       f"archive sha256 {seal['archive_sha256']}).")
     W("60 s wall, single lane, no --proof, CPU clock; shards 1 and 3 at "
       "width 8 on 8-vCPU pods, the others at width 16 (shard 4's first "
-      "1184 jobs at width 4 on a 4-vCPU pod).  The 180 s supplement has "
-      "not run, so every rule that reads it is provisional where noted.")
+      "1184 jobs at width 4 on a 4-vCPU pod).  "
+      + (f"The 180 s supplement is in (supplement.tsv, {len(sup)} rows, "
+         f"sha256 {sha256_bytes(open(paths.m('supplement.tsv'), 'rb').read())}"
+         "; supplement/validate.txt): the rules that read 180 s use the "
+         "180 s view, the matrix rows with each rerun job's 180 s row in "
+         "place of its 60 s row." if have else
+         "The 180 s supplement has not run, so every rule that reads it is "
+         "provisional where noted."))
     W("")
     W("Sets (section 1.4)")
     W(f"  pool = train {len(train)} + heldout {len(held)} = {len(allp)} "
       f"problems; solved at 60 s by some lane: "
       f"{sum(1 for p in allp if pool.vbs(p) is not None)}; unsolved "
-      f"{len(unsolved)}")
+      f"{len(unsolved)}"
+      + (f"; solved at 180 s by the supplement: {len(S)} (train "
+         f"{sum(1 for p in S if pool.split[p] == 'train')}, heldout "
+         f"{sum(1 for p in S if pool.split[p] == 'heldout')}); unsolved at "
+         f"180 s {len(unsolved) - len(S)}" if have else ""))
     W(f"  J13 stem-mates in the pool (stem = name up to '-'): {len(mates)} "
       f"(train {sum(1 for p in mates if pool.split[p] == 'train')}, heldout "
       f"{sum(1 for p in mates if pool.split[p] == 'heldout')}); J13 "
@@ -1405,7 +1654,12 @@ def mode_decisions(paths, pf):
         s = pool.solvers(p)
         if len(s) == 1:
             uniq[next(iter(s))] += 1
-    picks, union = greedy_cover(pool, allp, lanes)
+    uniq180 = collections.Counter()
+    for p in S:
+        s = P.solvers(p)
+        if len(s) == 1:
+            uniq180[next(iter(s))] += 1
+    picks, union = greedy_cover(P, allp, lanes)
     picked = {l: (k, g) for k, (l, g, _c, _t) in enumerate(picks, 1)}
     tied = collections.defaultdict(list)
     for k, (l, _g, _c, ti) in enumerate(picks, 1):
@@ -1416,19 +1670,29 @@ def mode_decisions(paths, pf):
       "solve at 60 s (and at 180 s, once the supplement is in); no marginal "
       "value in the pool cover; no documented unique solve on a CASC "
       "problem in the lane's main.c comment.")
-    W(f"   Pool cover: greedy to the full union ({len(union)} problems) over "
+    W(f"   Pool cover{' at 180 s (the 180 s view)' if have else ''}: greedy "
+      f"to the full union ({len(union)} problems) over "
       f"train + heldout, gain then total solves then SCHEDULE order: "
       + ", ".join(f"{l}(+{g})" for l, g, _c, _t in picks))
-    W("   lane              unique60  cover            documented  qualifies")
+    if have:
+        W("   unique180 counts the supplement problems one lane alone solves "
+          "at 180 s; the problems some lane solves at 60 s were not rerun, "
+          "so their uniqueness is read at 60 s.")
+    W("   lane              unique60  "
+      + ("unique180  " if have else "")
+      + "cover            documented  qualifies")
     cands = []
     for l in lanes:
         doc = DOC_UNIQUE.get(l)
         cov = f"pick {picked[l][0]} +{picked[l][1]}" if l in picked else \
             ("tied at " + ",".join(map(str, tied[l])) if tied[l] else "none")
-        q = uniq[l] == 0 and l not in picked and doc is None
+        q = uniq[l] == 0 and uniq180[l] == 0 and l not in picked \
+            and doc is None
         if q:
             cands.append(l)
-        W(f"   {l:17s} {uniq[l]:8d}  {cov:16s} {'yes' if doc else 'no':10s}  "
+        W(f"   {l:17s} {uniq[l]:8d}  "
+          + (f"{uniq180[l]:9d}  " if have else "")
+          + f"{cov:16s} {'yes' if doc else 'no':10s}  "
           f"{'YES' if q else 'no'}")
     fof = [l for l in cands if l.startswith("fof-")]
     ueq = [l for l in cands if not l.startswith("fof-")]
@@ -1440,17 +1704,17 @@ def mode_decisions(paths, pf):
             fastest_tied[l] += 1
         if len(f) == 1:
             fastest_strict[f[0]] += 1
-    W(f"   Qualify (provisional until the 180 s supplement): {len(cands)}")
+    W(f"   Qualify{' at 60 s and 180 s' if have else ' (provisional until the 180 s supplement)'}: {len(cands)}")
     W(f"     UEQ lanes: {', '.join(ueq) if ueq else 'none'}")
     for l in ueq:
         W(f"       {l}: {DOC_NOTE.get(l, '')}; tied at a cover step: "
           f"{'yes (step ' + ','.join(map(str, tied[l])) + ')' if tied[l] else 'no'}"
-          f"; pool solves {sum(1 for p in allp if l in pool.solvers(p))}, "
+          f"; pool solves {sum(1 for p in allp if l in P.solvers(p))}, "
           f"fastest on {fastest_tied[l]} (strictly {fastest_strict[l]})")
     keep = [l for l in lanes if l not in cands]
-    kept = {p for p in allp if any(l in pool.solvers(p) for l in keep)}
+    kept = {p for p in allp if any(l in P.solvers(p) for l in keep)}
     W(f"     joint check: without all {len(cands)} the pool union is "
-      f"{len(kept)} of {len(union)} at 60 s")
+      f"{len(kept)} of {len(union)} at {'180' if have else '60'} s")
     W("     The rule reads coverage only.  A qualifying lane can still be "
       "the fastest on many problems (wm is strictly fastest on "
       f"{fastest_strict['wm']} and owns the heldout tail problem"
@@ -1470,11 +1734,11 @@ def mode_decisions(paths, pf):
     # 2. Twin families.
     owners_t = collections.Counter()
     for p, c in train_t:
-        for l in pool.fastest(p):
+        for l in P.fastest(p):
             owners_t[l] += 1
     owners_all = collections.Counter()
     for p, _c in tail_train:
-        for l in pool.fastest(p):
+        for l in P.fastest(p):
             owners_all[l] += 1
     rate_all = {}
     rate_long = {}
@@ -1521,10 +1785,16 @@ def mode_decisions(paths, pf):
     for head in HEAD_US:
         W(f"   (whole train-split tail, T5 median, head {head:.0f} us: "
           f"{', '.join(twins(owners_all, rate_all, head)) or 'none'})")
-    W("   The tail is tiny (the pool has no band, section 2.3): every owner "
-      "holds 1-2 problems, so this ranking is set by ties and the stem "
-      "split.  It is provisional until the 180 s supplement adds the "
-      "problems only it solves (condition 2 of the tail rule).")
+    if have:
+        W("   Owners read the 180 s view: a problem only the supplement "
+          "solves is owned by its fastest lane at 180 s.  Selection rates "
+          "stay the 60 s TRAIN rows (T5).  Final: the supplement's problems "
+          "are in (condition 2 of the tail rule).")
+    else:
+        W("   The tail is tiny (the pool has no band, section 2.3): every "
+          "owner holds 1-2 problems, so this ranking is set by ties and the "
+          "stem split.  It is provisional until the 180 s supplement adds "
+          "the problems only it solves (condition 2 of the tail rule).")
     W("")
 
     # 3. DEV-T and TRAIN-T.
@@ -1533,31 +1803,51 @@ def mode_decisions(paths, pf):
       "more than 10 s at 60 s; only the 180 s supplement solves it; every "
       "lane that searched it ended on the memory guard); the train tail "
       "problems split by sha256 of the stem.")
-    W("   Condition 2 waits on the supplement; conditions 1 and 3 give:")
+    if have:
+        W("   Final: condition 2 from the 180 s supplement; conditions 1 "
+          "and 3 from the 60 s matrix (condition 3 stays the 60 s reading "
+          "the rule was first applied at); times are the fastest lane's in "
+          "the 180 s view:")
+    else:
+        W("   Condition 2 waits on the supplement; conditions 1 and 3 give:")
     W(f"   DEV-T ({len(dev_t)}): " + ", ".join(
-        f"{p} ({s}, {c}, {fmt(pool.vbs(p))} s {','.join(pool.fastest(p))})"
+        f"{p} ({s}, {c}, {fmt(P.vbs(p))} s {','.join(P.fastest(p))})"
         for p, c, s in dev_t))
     W(f"   TRAIN-T ({len(train_t)}): " + ", ".join(
-        f"{p} ({c}, {fmt(pool.vbs(p))} s {','.join(pool.fastest(p))})"
+        f"{p} ({c}, {fmt(P.vbs(p))} s {','.join(P.fastest(p))})"
         for p, c in train_t))
     if dropped:
         W(f"   dropped (J13 stem-mates in the TRAIN-T half): "
           + ", ".join(p for p, _c in dropped))
-    W(f"   pending condition 2: the {len(unsolved)} pool problems no lane "
-      "solves at 60 s join DEV-T (heldout, or train in the DEV-T half) or "
-      "TRAIN-T (train in the TRAIN-T half, not a stem-mate) if only the "
-      "180 s supplement solves them: train DEV-T half "
-      f"{sum(1 for p in unsolved if pool.split[p] == 'train' and half(p) == 'DEV-T')}, "
-      f"train TRAIN-T half {sum(1 for p in unsolved if pool.split[p] == 'train' and half(p) == 'TRAIN-T' and p not in mates)}, "
-      f"heldout {sum(1 for p in unsolved if pool.split[p] == 'heldout')}")
+    if not have:
+        W(f"   pending condition 2: the {len(unsolved)} pool problems no "
+          "lane solves at 60 s join DEV-T (heldout, or train in the DEV-T "
+          "half) or TRAIN-T (train in the TRAIN-T half, not a stem-mate) if "
+          "only the 180 s supplement solves them: train DEV-T half "
+          f"{sum(1 for p in unsolved if pool.split[p] == 'train' and half(p) == 'DEV-T')}, "
+          f"train TRAIN-T half {sum(1 for p in unsolved if pool.split[p] == 'train' and half(p) == 'TRAIN-T' and p not in mates)}, "
+          f"heldout {sum(1 for p in unsolved if pool.split[p] == 'heldout')}")
+    else:
+        W(f"   condition 2 (only the supplement solves it): {len(S)} of the "
+          f"{len(unsolved)} problems; DEV-T gains "
+          f"{sum(1 for p, c, _s in dev_t if c == 'only-180s-supplement')}, "
+          f"TRAIN-T gains "
+          f"{sum(1 for p, c in train_t if c == 'only-180s-supplement')}, "
+          "J13 stem-mates dropped "
+          f"{sum(1 for p, c in dropped if c == 'only-180s-supplement')}")
+        mg180 = [p for p in allp if p not in S and pool.vbs(p) is None
+                 and P.searchers(p)
+                 and all(r.cls == "memory-guard" for r in P.searchers(p))]
+        W(f"   (condition 3 read at 180 s instead would hold for {len(mg180)} "
+          "problems; not applied)")
     write_tsv(paths.m("dev_t.tsv"), ["problem", "split", "condition",
                                      "fastest_s", "owner", "stem",
                                      "stem_hash"],
-              [(p, s, c, pool.vbs(p), ",".join(pool.fastest(p)), stem(p),
+              [(p, s, c, P.vbs(p), ",".join(P.fastest(p)), stem(p),
                 stem_hash(stem(p))) for p, c, s in dev_t])
     write_tsv(paths.m("train_t.tsv"), ["problem", "condition", "fastest_s",
                                        "owner", "stem", "stem_hash"],
-              [(p, c, pool.vbs(p), ",".join(pool.fastest(p)), stem(p),
+              [(p, c, P.vbs(p), ",".join(P.fastest(p)), stem(p),
                 stem_hash(stem(p))) for p, c in train_t])
     W("   files: dev_t.tsv, train_t.tsv")
     W("")
@@ -1667,6 +1957,13 @@ def mode_decisions(paths, pf):
     W(f"   at 60 s: {len(m4c)} (an upper bound: the 180 s supplement can "
       "only remove problems); the pre-gate needs at least 25")
     W("   " + ", ".join(f"{p} {r:.2f}" for p, r in sorted(m4c)))
+    if have:
+        m4c180 = [(p, r) for p, r in m4c if p not in S]
+        gone = sorted(p for p, _r in m4c if p in S)
+        W(f"   at 60 s and 180 s: {len(m4c180)}"
+          + (f" (the supplement solves {', '.join(gone)})" if gone else
+             " (the supplement solves none of them)"))
+        m4c = m4c180
     W(f"   pre-gate verdict: {'FAIL' if len(m4c) < 25 else 'open'} "
       + ("(final: the supplement cannot raise the count).  There is no "
          "invention pilot." if len(m4c) < 25 else
@@ -1729,7 +2026,8 @@ def main():
     ap.add_argument("--matrix-dir", default="~/.cache/thvm/enigma/matrix")
     ap.add_argument("--sealed-dir", default="~/.cache/thvm/enigma/sealed")
     g = ap.add_mutually_exclusive_group(required=True)
-    for m in ("seal", "validate", "tables", "decisions", "all"):
+    for m in ("seal", "validate", "supplement", "tables", "decisions",
+              "all"):
         g.add_argument("--" + m, action="store_true")
     g.add_argument("--t7c", metavar="REPLICA_TSV")
     a = ap.parse_args()
@@ -1746,6 +2044,10 @@ def main():
         sys.exit(0 if ok else 1)
     if a.validate or a.all:
         mode_validate(paths)
+    if a.supplement or (a.all and os.path.isdir(paths.m("supplement"))
+                        and any(re.fullmatch(r"sup_\d+\.tsv", f) for f in
+                                os.listdir(paths.m("supplement")))):
+        mode_supplement(paths)
     if a.tables or a.decisions or a.all:
         pf = PoolFiles(paths)
         try:
