@@ -51,11 +51,16 @@ _LEAF_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
     weakref.WeakValueDictionary()
 
 # Monotonic handle ids for live-tensor pinning.  Each realized Tensor
-# pins its term via _TH.pin_set(handle, term) so it is a GC/preserve
-# root; __del__ drops the handle.  _TH.reclaim() (driven once per
-# training step via GlobalCounters.reset) then frees every backend
-# buffer NOT reachable from a pinned tensor -- the cross-step buffer
-# reclaim that keeps device memory flat in the eager (no-JIT) loop.
+# pins its term via _TH.pin_set(handle, term), a root of a realize's own
+# pool rollback; __del__ drops the handle.
+#
+# A dead Tensor's buffer is freed by _TH.reclaim(), which traces from every
+# live Tensor's term (lazy graphs included) and frees what nothing reaches.
+# Allocating a tensor and finishing a realize call _TH.reclaim_if_due(),
+# which reclaims once resident bytes outgrow the last reclaim's survivors,
+# so memory stays bounded without GlobalCounters.reset().  Both are safe
+# points: every term the frontend still needs is held by a live Tensor
+# there, never only as a raw integer in a local.
 _PIN_NEXT = 1
 
 # Every Tensor's raw term is a root of the deferred heap collection, which
@@ -218,6 +223,7 @@ class Tensor(metaclass=_TensorMeta):
                 arr = np.ascontiguousarray(arr)
             self._dtype = dtype
             self._shape = tuple(int(d) for d in arr.shape)
+            _TH.reclaim_if_due()
             self.term = _TH.ten_create(dtype.thvm_id, list(self._shape))
             if arr.size > 0:
                 _TH.ten_write(self.term, arr.tobytes())
@@ -327,6 +333,7 @@ class Tensor(metaclass=_TensorMeta):
         if not lst:
             self.term = _TH.realize(self.term)
             self._pin()
+            _TH.reclaim_if_due()
             return self
         terms_all = [self.term] + [x.term for x in lst]
         out = _TH.realize_many(terms_all)
@@ -335,6 +342,7 @@ class Tensor(metaclass=_TensorMeta):
         for x, r in zip(lst, out[1:]):
             x.term = r
             x._pin()
+        _TH.reclaim_if_due()
         return self
 
     def contiguous(self) -> "Tensor":
@@ -350,6 +358,7 @@ class Tensor(metaclass=_TensorMeta):
         backward() does not reach self through it, where tinygrad passes
         the gradient to the source (mixin/gradient.py:100-101)."""
         del device
+        _TH.reclaim_if_due()
         dst = Tensor._from_term(
             _TH.ten_create(self._dtype.thvm_id, list(self._shape)),
             self._dtype, self._shape)
@@ -383,8 +392,7 @@ class Tensor(metaclass=_TensorMeta):
 
         The result reads self's storage, as tinygrad's DETACH UOp keeps its
         source's buffer (mixin/elementwise.py:43-47), so it pins its term:
-        a detached tensor held across a reclaim() (data or targets kept
-        between training steps) keeps that storage after self is gone."""
+        a detached tensor keeps that storage after self is gone."""
         t = Tensor._from_term(_TH.detach(self.term), self._dtype, self._shape)
         t._pin(lazy=True)
         return t

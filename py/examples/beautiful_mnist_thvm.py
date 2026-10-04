@@ -6,10 +6,6 @@
 # getenv/colored/trange, GlobalCounters, function).
 #
 #   DEV=cuda STEPS=70 BS=512 python3 py/examples/beautiful_mnist_thvm.py
-#
-# NOTE: thvm's py frontend is eager (no JIT) and does not yet reclaim GPU
-# buffers across steps, so a long run grows memory and a 16GB GPU
-# saturates after a handful of steps -- see the commit message / docs.
 # model based off https://medium.com/data-science/going-beyond-99-mnist-handwritten-digits-recognition-cfff96337392
 import sys
 from pathlib import Path

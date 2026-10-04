@@ -84,12 +84,12 @@ fn void cpu_buf_pool_rollback_with_preserve(u32 wm) {
   // No CPU_BUFS_NEXT reset; preserved bufs would block it anyway.
 }
 
-// Cross-step global reclaim: plain-free (NOT freelist-recycle) every
+// Global reclaim: plain-free (NOT freelist-recycle) every
 // live, non-preserved buffer.  Recycling a globally-reclaimed buffer
 // risks handing it to a new allocation while a stale TenDesc still names
 // the slot; plain free returns the storage and leaves the slot
 // data==NULL so the next try_pop skips it and allocates fresh.  Used by
-// py_reclaim between training steps.  refcount==0 (already freelisted)
+// py_reclaim.  refcount==0 (already freelisted)
 // is skipped so we never double-free.
 fn void cpu_buf_pool_free_unpreserved(u32 wm) {
   if (wm < 1) wm = 1;

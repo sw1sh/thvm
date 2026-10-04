@@ -331,14 +331,15 @@ class TestBridge(unittest.TestCase):
         base = np.arange(15, dtype=np.float32).reshape(5, 3)
         idx = np.array([[1, 4, 0], [1, -1, 0], [5, 2, 2]], np.int32)
         src = np.arange(9, dtype=np.float32).reshape(3, 3) + 0.5
-        t = _TH.scatter(Tensor(base).term, Tensor(idx).term, Tensor(src).term,
-                        0, K.SCATTER_SUM, True)
+        # The operand Tensors stay alive while their raw terms are in use: a
+        # Tensor allocation may reclaim the buffer of a Tensor already gone.
+        tb, ti, ts, ts2 = Tensor(base), Tensor(idx), Tensor(src), Tensor(src[:2])
+        t = _TH.scatter(tb.term, ti.term, ts.term, 0, K.SCATTER_SUM, True)
         self.assertNotEqual(int(t), 0)
         want = base + np_scatter_add((5, 3), 0, idx, src)
         got = Tensor._from_term(t, dtypes.float32, (5, 3)).numpy()
         np.testing.assert_array_equal(got, want)
-        self.assertEqual(int(_TH.scatter(Tensor(base).term, Tensor(idx).term,
-                                         Tensor(src[:2]).term, 0, K.SCATTER_SUM, True)), 0)
+        self.assertEqual(int(_TH.scatter(tb.term, ti.term, ts2.term, 0, K.SCATTER_SUM, True)), 0)
 
     def test_backward_raises_grad_error(self):
         # A scatter kind with no gradient rule yet: backward() raises.

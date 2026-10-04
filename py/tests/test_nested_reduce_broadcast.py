@@ -52,7 +52,10 @@ def run_case(neg_before, scale, final_expand):
     rng = np.random.default_rng(0)
     w = rng.standard_normal(SHAPE).astype(np.float32)
     s = rng.standard_normal((2,)).astype(np.float32)
-    x = int(Tensor(w).term)
+    # The leaf Tensors stay alive while their raw terms are in use: a Tensor
+    # allocation may reclaim the buffer of a Tensor already gone.
+    tw, ts = Tensor(w), Tensor(s)
+    x = int(tw.term)
     mean = _reshape(_red(x), (1, 2, 1, 1))
     if neg_before:
         m = _expand(_unary(K.NEG, mean), SHAPE)
@@ -64,7 +67,7 @@ def run_case(neg_before, scale, final_expand):
         r = _binary(K.MUL, r, _expand(_reshape(_fconst(1 / 36), (1,)), (2,)))
         want = want * np.float32(1 / 36)
     elif scale == "buffer":
-        r = _binary(K.MUL, r, int(Tensor(s).term))
+        r = _binary(K.MUL, r, int(ts.term))
         want = want * s
     shape = (2,)
     if final_expand:

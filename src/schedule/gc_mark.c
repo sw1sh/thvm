@@ -9,6 +9,12 @@
 // Tag dispatch covers the live runtime set per src/thvm.h.
 // term_resolve unwraps SUB-tagged variables before recursing
 // so the graph view matches what the runtime would see.
+
+// Set only by mark_gc_preserve_host_roots: a reached tensor also keeps the
+// lazy gradient in its TenDesc.grad, which a later backward() accumulates
+// into even after the frontend dropped its own grad handle.
+static u8 *GC_MARK_GRAD_SEEN = NULL;
+
 fn void gc_mark_term(Term t, u8 *heap_visited) {
   if (t == 0) return;
   Term r = term_resolve(t);
@@ -19,6 +25,10 @@ fn void gc_mark_term(Term t, u8 *heap_visited) {
     case TAG_TEN: {
       u32 tid = (u32)v;
       tensor_mark_buf_preserved(tid);
+      if (GC_MARK_GRAD_SEEN != NULL && tid < TENS_NEXT && !GC_MARK_GRAD_SEEN[tid]) {
+        GC_MARK_GRAD_SEEN[tid] = 1;
+        gc_mark_term(TENS[tid].grad, heap_visited);
+      }
       return;
     }
     case TAG_UOP: {
@@ -83,13 +93,15 @@ fn void gc_mark_term(Term t, u8 *heap_visited) {
 // 10GB because the resident bf16 weights had been recycled out from under
 // the WL cache).  Walks the root tables directly, no cap.  Returns 1 on
 // success; 0 when the visited bitmap can't be allocated -- the caller MUST
-// then skip its sweep (marks would be incomplete).
-fn int mark_gc_preserve_all_roots(Term result) {
+// then skip its sweep (marks would be incomplete).  `extra` holds n_extra
+// more roots.
+fn int mark_gc_preserve_all_roots_plus(Term result, Term const *extra, u32 n_extra) {
   u64 cells = HEAP_NEXT;
   if (cells == 0) cells = 1;
   u8 *visited = (u8 *)calloc(cells, 1);
   if (visited == NULL) return 0;
   if (result != 0) gc_mark_term(result, visited);
+  for (u32 i = 0; i < n_extra; i++) gc_mark_term(extra[i], visited);
   for (u32 i = 0; i < WNF_LAST_STACK_LEN; i++) {
     if (WNF_LAST_STACK[i] != 0) gc_mark_term(WNF_LAST_STACK[i], visited);
   }
@@ -105,6 +117,10 @@ fn int mark_gc_preserve_all_roots(Term result) {
   return 1;
 }
 
+fn int mark_gc_preserve_all_roots(Term result) {
+  return mark_gc_preserve_all_roots_plus(result, NULL, 0);
+}
+
 // Preserve every buffer reachable from the live root set.  Delegates to the
 // UNTRUNCATED walk (mark_gc_preserve_all_roots): the old fixed-4096 root array
 // silently dropped roots past 4096, and a cold JIT capture holds well over
@@ -115,4 +131,19 @@ fn int mark_gc_preserve_all_roots(Term result) {
 // (the visited bitmap is still sized to HEAP_NEXT, not full capacity).
 fn void mark_gc_preserve(Term result) {
   (void)mark_gc_preserve_all_roots(result);
+}
+
+// The host's root set for a table-wide buffer reclaim: every Term the host
+// holds (`roots`, e.g. each live py Tensor's lazy or realized term) plus the
+// runtime roots above, following TenDesc.grad of every tensor reached.
+// Returns 0 when a bitmap can't be allocated; the caller must then free
+// nothing.
+fn int mark_gc_preserve_host_roots(Term const *roots, u32 n) {
+  u64 tens = TENS_NEXT > 0 ? TENS_NEXT : 1;
+  GC_MARK_GRAD_SEEN = (u8 *)calloc(tens, 1);
+  if (GC_MARK_GRAD_SEEN == NULL) return 0;
+  int ok = mark_gc_preserve_all_roots_plus(0, roots, n);
+  free(GC_MARK_GRAD_SEEN);
+  GC_MARK_GRAD_SEEN = NULL;
+  return ok;
 }

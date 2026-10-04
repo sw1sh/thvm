@@ -303,31 +303,90 @@ EXPORT void py_gc_collect(uint64_t *roots, uint32_t n) {
   thvm_gc_collect_deferred((Term *)roots, n);
 }
 
-// --- live-tensor pinning + cross-step buffer reclaim ---
-// The eager py path realizes a fresh forward/backward/optimizer graph
-// every step; the per-realize pool only recycles THAT realize's scratch,
-// so each step's result-chain buffers (activations, grads) survive below
-// the next watermark and accumulate -> the GPU saturates.  Fix: every
-// live Python Tensor pins its realized term (so it's a GC/preserve root);
-// py_reclaim then marks everything reachable from the pinned set live and
-// frees ALL other backend buffers globally (watermark 1).
+// --- live-tensor pinning + buffer reclaim ---
+// A backend buffer is freed once nothing can read it, as tinygrad frees a
+// Buffer when its last reference dies (device.py:136-140 Buffer.deallocate,
+// device.py:160-163 Buffer.__del__).  thvm's references are not counted:
+// lazy UOp graphs name a tensor by its TAG_TEN leaf in heap cells, and
+// TenDescs, views, JIT captures and pins share buffers by id, so liveness
+// is decided by tracing.  py_reclaim marks every buffer reachable from the
+// frontend's live terms (`roots`: each live Tensor's lazy or realized term)
+// and from the runtime roots (pins, WNF stack, DEFS), following each reached
+// TenDesc.grad, then frees every other buffer that no JIT capture retains.
+// Every realized Tensor also pins its term, which roots it inside a
+// realize's own pool rollback.
 EXPORT void py_pin_set(uint64_t handle, uint64_t term) {
   extern_pin_handle_set(handle, term);
 }
 EXPORT void py_pin_drop(uint64_t handle) {
   extern_pin_handle_drop(handle);
 }
-EXPORT void py_reclaim(void) {
-  mark_gc_preserve(0);   // preserve chains reachable from EXTERN_PINNED + WNF stack + DEFS
-  cpu_buf_pool_free_unpreserved(1);
+
+static uint64_t PY_RECLAIM_AFTER = 0;   // resident bytes after the last reclaim
+
+static uint64_t py_resident_bytes(void) {
 #ifdef THVM_HAS_CUDA
-  cuda_buf_pool_free_unpreserved(1);
+  return cpu_buf_live_bytes() + cuda_buf_live_bytes();
+#else
+  return cpu_buf_live_bytes();
 #endif
+}
+
+static void py_clear_preserved(void) {
   cpu_buf_clear_preserved(1);
   thvm_metal_buf_clear_preserved(1);
 #ifdef THVM_HAS_CUDA
   cuda_buf_clear_preserved(1);
 #endif
+}
+
+// A realize clears the preserve bits only above its own watermark, so a
+// buffer allocated before it (an input it read) keeps a stale bit; clear the
+// table first so the mark alone decides.
+EXPORT void py_reclaim(uint64_t const *roots, uint32_t n) {
+  py_clear_preserved();
+  if (!mark_gc_preserve_host_roots((Term const *)roots, n)) return;
+  cpu_buf_pool_free_unpreserved(1);
+#ifdef THVM_HAS_CUDA
+  cuda_buf_pool_free_unpreserved(1);
+#endif
+  py_clear_preserved();
+  PY_RECLAIM_AFTER = py_resident_bytes();
+}
+
+// Whether resident bytes grew past the last reclaim's survivors by
+// max(THVM_RECLAIM_MB (default 64), half the survivors): the trigger the
+// frontend checks before it allocates a tensor and after a realize, so
+// garbage stays bounded and each reclaim's cost (proportional to the live
+// set) is amortized over at least that much allocation.  `force` (and
+// THVM_RECLAIM_MB=0) drops the slack: any growth is due.  Never due while a
+// JIT capture records, whose buffers the capture finalize retains.
+EXPORT int32_t py_reclaim_due(int32_t force) {
+  static int64_t floor_bytes = -1;
+  if (floor_bytes < 0) {
+    char const *e = getenv("THVM_RECLAIM_MB");
+    floor_bytes = (e != NULL && e[0] != 0) ? (int64_t)atoll(e) << 20 : (int64_t)64 << 20;
+  }
+  if (jit_is_capturing()) return 0;
+  uint64_t live = py_resident_bytes();
+  if (force || floor_bytes == 0) return live > PY_RECLAIM_AFTER;
+  uint64_t slack = PY_RECLAIM_AFTER / 2;
+  if (slack < (uint64_t)floor_bytes) slack = (uint64_t)floor_bytes;
+  return live > PY_RECLAIM_AFTER + slack;
+}
+
+// Backend buffers that hold storage for a tensor (freelisted ones excluded).
+EXPORT uint32_t py_buf_live_count(void) {
+  uint32_t n = 0;
+  for (u64 i = 1; CPU_BUFS != NULL && i < CPU_BUFS_NEXT; i++) {
+    if (CPU_BUFS[i].refcount > 0 && (CPU_BUFS[i].data != NULL || CPU_BUFS[i].handle != NULL)) n++;
+  }
+#ifdef THVM_HAS_CUDA
+  for (u64 i = 1; CUDA_BUFS != NULL && i < CUDA_BUFS_NEXT; i++) {
+    if (CUDA_BUFS[i].refcount > 0 && CUDA_BUFS[i].dptr != 0) n++;
+  }
+#endif
+  return n;
 }
 
 // --- JIT capture / replay (TinyJit) ---

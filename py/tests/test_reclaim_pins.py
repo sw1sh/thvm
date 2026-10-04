@@ -1,9 +1,9 @@
 """A live detached tensor keeps the storage it reads across reclaim().
 
 GlobalCounters.reset() runs reclaim(), which frees every backend buffer that
-no pinned tensor reaches: thvm's stand-in for tinygrad's reference-counted
+no live tensor reaches: thvm's stand-in for tinygrad's reference-counted
 buffers, where a live Tensor keeps the buffers its UOp graph reads.  A
-realized tensor pins its own buffer.  A detached one reads its source's
+detached tensor reads its source's
 storage (tinygrad's detach is a DETACH UOp over the source, mixin/
 elementwise.py:43-47), so holding only `Tensor(x).realize().detach()` across
 a training step, as one holds data or targets, must keep x's buffer, and a

@@ -213,15 +213,14 @@ class GlobalCounters:
     def reset(cls):
         cls.global_ops = cls.global_mem = cls.kernel_count = 0
         cls.time_sum_s = 0.0
-        # Cross-step buffer reclaim: free every backend buffer not
-        # reachable from a live (pinned) Tensor.  beautiful_mnist's loop
-        # calls GlobalCounters.reset() once per step, so this keeps the
-        # eager no-JIT device memory flat.  Lazy import avoids a cycle.
-        try:
-            from .tensor import _TH
-            _TH.reclaim()
-        except Exception:
-            pass
+        # A step boundary: free the buffers that died since the last
+        # reclaim, if any were allocated since.  Tensor allocation and
+        # realize reclaim on their own once garbage outgrows a bound, so
+        # this only tightens the peak of a loop that calls it; with nothing
+        # allocated since the last reclaim it is one C call.  Lazy import
+        # avoids a cycle.
+        from .tensor import _TH
+        _TH.reclaim_if_due(force=True)
 
 
 def function(fn):

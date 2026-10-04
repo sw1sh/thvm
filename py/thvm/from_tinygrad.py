@@ -310,7 +310,8 @@ def _emit(u, memo: dict[int, int]) -> int:
     """Translate one tinygrad UOp `u` to a thvm Term, recursing on srcs.
 
     `memo` maps id(uop) -> thvm Term so a shared subgraph (DAG) is built
-    once.  Returns the raw u64 Term.
+    once, and None -> the leaf Tensors the walk keeps alive.  Returns the
+    raw u64 Term.
     """
     Ops = _ops()
     key = id(u)
@@ -330,6 +331,10 @@ def _emit(u, memo: dict[int, int]) -> int:
         leaf = Tensor._from_numpy(arr.astype(dt.np_dtype, copy=False), dt)
         term = int(leaf.term)
         memo[key] = term
+        # The walk holds the leaf's term as a raw integer until the result
+        # Tensor wraps it; keep the leaf alive so a reclaim triggered by the
+        # next leaf's allocation does not free its buffer.
+        memo.setdefault(None, []).append(leaf)
         return term
 
     # A COPY's value is its src[0] (a single-device COPY is an identity,

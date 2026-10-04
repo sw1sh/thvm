@@ -123,7 +123,9 @@ _gc_pending = _bind("py_gc_pending", c_int32)
 _gc_collect = _bind("py_gc_collect", None, ctypes.POINTER(c_uint64), c_uint32)
 _pin_set = _bind("py_pin_set", None, c_uint64, c_uint64)
 _pin_drop = _bind("py_pin_drop", None, c_uint64)
-_reclaim = _bind("py_reclaim", None)
+_reclaim = _bind("py_reclaim", None, ctypes.POINTER(c_uint64), c_uint32)
+_reclaim_due = _bind("py_reclaim_due", c_int32, c_int32)
+_buf_live_count = _bind("py_buf_live_count", c_uint32)
 _jit_begin = _bind("py_jit_begin", c_uint32)
 _jit_end = _bind("py_jit_end", None)
 _jit_end_with_result = _bind("py_jit_end_with_result", None, c_uint64)
@@ -653,7 +655,7 @@ class Thvm:
             raise RuntimeError(_realize_error().decode())
         return self._collect([Term(arr[i]) for i in range(n)])
 
-    # ---- live-tensor pinning + cross-step buffer reclaim ----
+    # ---- live-tensor pinning + buffer reclaim ----
     def pin_set(self, handle: int, t: Term) -> None:
         _pin_set(c_uint64(handle), c_uint64(int(t)))
 
@@ -661,9 +663,24 @@ class Thvm:
         _pin_drop(c_uint64(handle))
 
     def reclaim(self) -> None:
-        """Free every backend buffer not reachable from a pinned tensor.
-        Call between training steps to keep device memory flat."""
-        _reclaim()
+        """Free every backend buffer that no live Tensor (lazy or realized),
+        pin or JIT capture can read: tinygrad frees a Buffer when its last
+        reference dies (device.py:160-163), thvm finds the dead ones by
+        tracing from every live Tensor's term (py_reclaim).  Only call it
+        where every term the caller still needs is held by a live Tensor."""
+        live = list(Thvm.live_terms)
+        arr = (c_uint64 * max(len(live), 1))(*[int(x.term) for x in live])
+        _reclaim(arr, c_uint32(len(live)))
+
+    def reclaim_if_due(self, force: bool = False) -> None:
+        """reclaim() once resident buffer bytes outgrew the last reclaim's
+        survivors (py_reclaim_due); `force` reclaims after any growth."""
+        if _reclaim_due(c_int32(1 if force else 0)):
+            self.reclaim()
+
+    def buf_live_count(self) -> int:
+        """Backend buffers currently holding a tensor's storage."""
+        return int(_buf_live_count())
 
     # ---- JIT capture / replay (TinyJit) ----
     def jit_begin(self) -> int:       return int(_jit_begin())

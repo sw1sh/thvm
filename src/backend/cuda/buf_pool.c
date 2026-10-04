@@ -57,11 +57,11 @@ fn void cuda_buf_pool_rollback_with_preserve(u32 wm) {
   }
 }
 
-// Cross-step global reclaim: plain cuMemFree (NOT freelist-recycle)
+// Global reclaim: plain cuMemFree (NOT freelist-recycle)
 // every live, non-preserved device buffer.  Recycling a globally-
 // reclaimed buffer risks aliasing it into a new allocation while a stale
 // TenDesc still names the slot; plain free returns the device storage.
-// Used by py_reclaim between training steps.
+// Used by py_reclaim.
 fn void cuda_buf_pool_free_unpreserved(u32 wm) {
   if (wm < 1) wm = 1;
   if (wm > CUDA_BUFS_NEXT) return;
