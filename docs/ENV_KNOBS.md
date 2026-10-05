@@ -85,6 +85,7 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 | --- | --- | --- |
 | `THVM_GC` | on | Heap GC; `0` disables. |
 | `THVM_GC_KB` | (impl) | Heap GC trigger threshold (KB). |
+| `THVM_RECLAIM_MB` | 64 | py: free dead tensors' backend buffers once resident bytes exceed the last reclaim's survivors by max(this many MB, half the survivors); 0 reclaims after any growth. |
 | `THVM_KGC` | (impl) | Kernel GC control. |
 | `THVM_HEAP_CELLS` | (impl) | Initial heap cell count. |
 | `THVM_MAX_BUF_BYTES` | (impl) | Max single-buffer allocation (KB). |

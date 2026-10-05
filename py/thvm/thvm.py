@@ -665,7 +665,7 @@ class Thvm:
     def reclaim(self) -> None:
         """Free every backend buffer that no live Tensor (lazy or realized),
         pin or JIT capture can read: tinygrad frees a Buffer when its last
-        reference dies (device.py:160-163), thvm finds the dead ones by
+        reference dies (device.py:133-134), thvm finds the dead ones by
         tracing from every live Tensor's term (py_reclaim).  Only call it
         where every term the caller still needs is held by a live Tensor."""
         live = list(Thvm.live_terms)

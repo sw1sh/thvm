@@ -134,6 +134,27 @@ for k in range(6):
     ok &= bool(np.array_equal(out.numpy(), (x + k) * 0.5 + 1.0))
 print("JIT", ok, flush=True)
 
+# Two TinyJits read one leaf that Python rebinds; one of them re-captures (a
+# changed int argument) and drops its old capture.  The other's replay still
+# reads the leaf: the reclaim marks what live captures retain.
+W = Tensor(np.full(N, 0.5, np.float32)).realize()
+
+def mk():
+    @TinyJit
+    def g(a, k):
+        return (a * W + float(k)).realize()
+    return g
+
+A, B = mk(), mk()
+for _ in range(3):
+    A(Tensor(x).realize(), 1)
+    B(Tensor(x).realize(), 1)
+W = Tensor(np.full(N, 2.0, np.float32)).realize()
+churn()
+A(Tensor(x).realize(), 2)
+churn()
+check("JIT_SHARED", B(Tensor(x).realize(), 1).numpy(), x * 0.5 + 1)
+
 # A gradient of a dead loss, and TenDesc.grad: backward() accumulates into it
 # even after the frontend dropped its grad handle without zero_grad().
 p = Tensor(x)
@@ -196,7 +217,7 @@ class TestTensorFree(unittest.TestCase):
     def test_readable_buffers_survive(self):
         out = _run(_SURVIVE, THVM_RECLAIM_MB="0").split()
         names = ["LAZY", "VIEW_LAZY", "VIEW_REAL", "VIEW_PERM", "VIEW_SHRINK", "JIT",
-                 "GRAD", "GRAD_ACC", "DETACH", "CLONE"]
+                 "JIT_SHARED", "GRAD", "GRAD_ACC", "DETACH", "CLONE"]
         self.assertEqual(out, [w for n in names for w in (n, "True")])
 
 

@@ -67,6 +67,7 @@ fn void cuda_buf_pool_free_unpreserved(u32 wm) {
   if (wm > CUDA_BUFS_NEXT) return;
   for (u64 i = wm; i < CUDA_BUFS_NEXT; i++) {
     if (CUDA_BUFS[i].preserved) continue;
+    if (CUDA_BUFS[i].jit_pinned) continue;   // JIT capture holds this buf
     if (CUDA_BUFS[i].refcount == 0) continue;
     if (CUDA_BUFS[i].dptr == 0) continue;
     cuda_buf_free((u32)i);

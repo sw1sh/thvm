@@ -305,8 +305,8 @@ EXPORT void py_gc_collect(uint64_t *roots, uint32_t n) {
 
 // --- live-tensor pinning + buffer reclaim ---
 // A backend buffer is freed once nothing can read it, as tinygrad frees a
-// Buffer when its last reference dies (device.py:136-140 Buffer.deallocate,
-// device.py:160-163 Buffer.__del__).  thvm's references are not counted:
+// Buffer when its last reference dies (device.py:194 Buffer.deallocate,
+// device.py:133-134 Buffer.__del__).  thvm's references are not counted:
 // lazy UOp graphs name a tensor by its TAG_TEN leaf in heap cells, and
 // TenDescs, views, JIT captures and pins share buffers by id, so liveness
 // is decided by tracing.  py_reclaim marks every buffer reachable from the
@@ -346,6 +346,10 @@ static void py_clear_preserved(void) {
 EXPORT void py_reclaim(uint64_t const *roots, uint32_t n) {
   py_clear_preserved();
   if (!mark_gc_preserve_host_roots((Term const *)roots, n)) return;
+  // A live TinyJit capture reads buffers no Python Tensor reaches; jit_pinned
+  // alone cannot protect them (one dropped capture unpins a buffer another
+  // still retains, and CUDA has no such skip).
+  jit_capture_mark_preserved();
   cpu_buf_pool_free_unpreserved(1);
 #ifdef THVM_HAS_CUDA
   cuda_buf_pool_free_unpreserved(1);
