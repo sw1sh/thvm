@@ -7,12 +7,11 @@ inputs into a kernel, so a sum of 65 or more distinct tensors lifted nothing:
 every CPU dispatch rung declined and the output kept its zero fill.
 
 Every sum here fuses into one kernel with one input per tensor.  Each mode
-runs in a child process with the lift-reject and walker-decline traces on:
-the default path, where the CPU JIT compiles the kernel, and a walker path,
-where the JIT never compiles and the UOp walker executes every kernel.  The
-parent checks the values, that the widest kernel really took every tensor as
-an input, and that no trace reports a declined lift or a dispatch that ran
-nothing.
+runs in a child process with the walker-decline trace on: the default path,
+where the CPU JIT compiles the kernel, and a walker path, where the JIT
+never compiles and the UOp walker executes every kernel.  The parent checks
+the values, that the widest kernel really took every tensor as an input,
+and that no trace reports a declined lift or a dispatch that ran nothing.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_kernel_width.py -q
 """
@@ -36,7 +35,7 @@ CASES = [("left", n) for n in LEFT_DEEP] + [("tree", n) for n in BALANCED]
 WIDEST = max(LEFT_DEEP)
 
 # Traces that mean a kernel ran without its lift, or ran nothing at all.
-FORBIDDEN = ("entry/n-inputs-over-cap", "lift_declined", "ran no dispatch rung")
+FORBIDDEN = ("lift_declined", "ran no dispatch rung")
 
 
 def _arrays(n):
@@ -78,8 +77,7 @@ def _run_child(extra_env):
     env = dict(os.environ, DEV="cpu",
                THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
                THVM_TESTS=str(pathlib.Path(__file__).resolve().parent),
-               THVM_DUMP_LIFT_REJECT="1", THVM_TRACE_UOP_WALK_DECLINE="1",
-               **extra_env)
+               THVM_TRACE_UOP_WALK_DECLINE="1", **extra_env)
     return subprocess.run([sys.executable, "-c", _CHILD], env=env,
                           capture_output=True, text=True, timeout=600)
 

@@ -31,18 +31,6 @@ fn void kernel_lift_release(KernelUopLift *lift) {
   lift->out_buf    = 0;
 }
 
-static void lift_reject_log(u32 sid, const char *where) {
-  static int reject_log_inited = 0;
-  static int reject_log_on     = 0;
-  if (!reject_log_inited) {
-    char const *e = getenv("THVM_DUMP_LIFT_REJECT");
-    reject_log_on    = (e != NULL && e[0] == '1');
-    reject_log_inited = 1;
-  }
-  if (!reject_log_on) return;
-  fprintf(stderr, "lift reject: %s sid=%u\n", where, sid);
-}
-
 // Build a UOP_BUFFER for kernel input slot `slot` from the TenDesc
 // shape.  Falls back to a 1D dummy when the slot has no TenDesc
 // (test fixtures or paths where TenDesc isn't wired).
@@ -71,17 +59,14 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   // site reads (in_bufs[], n_inputs, out_buf).  store_root is the raw
   // unified root; the caller in materialize.c rewrites it for the walker.
   if (ke->source_uop == 0) {
-    lift_reject_log(0, "entry/no-source-uop");
     return 0;
   }
   u32 ru_idx = bufferize_info_find(term_val(ke->source_uop));
   if (ru_idx == 0xFFFFFFFFu) {
-    lift_reject_log(0, "entry/no-bufferize-info");
     return 0;
   }
   Term ru_root = rangeify_unified_store_root_at(ru_idx);
   if (ru_root == 0) {
-    lift_reject_log(0, "entry/no-unified-store-root");
     return 0;
   }
   kernel_lift_reserve(out, ke->n_inputs);
@@ -89,7 +74,6 @@ fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   for (u32 i = 0; i < ke->n_inputs; i++) {
     Term in_buf = lift_input_buffer(ke, i);
     if (in_buf == 0) {
-      lift_reject_log(0, "entry/in-buf-build-fail");
       return 0;
     }
     out->in_bufs[i] = in_buf;

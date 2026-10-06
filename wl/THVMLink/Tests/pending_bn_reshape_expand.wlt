@@ -9,14 +9,9 @@
    This is the per-channel mean broadcast inside TBatchNormTrain.  The
    fused reduce->reshape->expand chain produces all-zero output -- only
    element [0] of the post-reshape buffer survives, and the consumer
-   reads zeros at every other index.  Diagnostic: setting
-   `THVM_DUMP_LIFT_REJECT=1` prints
-
-       lift reject: index/ndim-mismatch buf_ndim=4 src_count=4
-         ndim-mismatch: outer_rank=3 dims=[B,C,H,W] range_extents=[...]
-
-   for every such kernel.  The lift bails and the legacy program[] path
-   also computes wrong values.
+   reads zeros at every other index.  The kernel lift rejected every
+   such kernel with an index / ndim mismatch (outer_rank=3 against dims
+   [B,C,H,W]), and the legacy program[] path also computed wrong values.
 
    Effect on beautiful_mnist:  TBatchNormTrain outputs all zeros for any
    shape where B*C > 4.  Forward produces all-zero post-BN activations,
