@@ -169,11 +169,12 @@ lanes and a lowered inner reduce included, and combines a bool SUM as
 it does a MAX, which is an OR on {0, 1}.
 
 Packed nibble lanes -- i4, u4.  Storage is 2 nibbles per byte, low
-nibble first ([src/dtype/nibble.c](../src/dtype/nibble.c)).  No CPU
+nibble first ([src/dtype/nibble.c](../src/dtype/nibble.c)).  No
 kernel handles them: the UOp walker has no nibble load or store, and
-materialize sizes buffers with `dtype_itemsize`, which aborts on a
-packed dtype.  An elementwise or movement op over an i4 / u4 tensor
-aborts in `bufferize_compute_costs`, and a reduce or a CAST to f32
+the C renderer would type an i4 / u4 buffer as float.  A realize that
+would compute one (an elementwise, movement or reduce op over an i4 /
+u4 tensor) stops in `bufferize_classify` with `thvm fatal: bufferize:
+no kernel computes a buffer of dtype i4` (or u4), and a CAST to f32
 returns wrong values.  Only storage works: pack / unpack, tensor
 creation and readback.
 

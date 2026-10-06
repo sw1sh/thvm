@@ -1715,6 +1715,23 @@ static u32 bufferize_rmsnorm_feeds_matmul(UOpInfo const *info) {
   return marked;
 }
 
+// No backend computes a packed int4 / uint4 buffer (docs/dtypes.md): the C
+// renderer would type it as float and write past its nibbles.
+static void bufferize_reject_packed(void) {
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo const *info = &BUFFERIZE_NODES[i];
+    u32 dt = 0;
+    if (info->realized
+        && term_dtype_in(term_new(0, TAG_UOP, info->op, info->loc), 0, &dt)
+        && dtype_is_packed(dt)) {
+      char msg[96];
+      snprintf(msg, sizeof msg, "bufferize: no kernel computes a buffer of dtype %s",
+               dtype_name(dt));
+      thvm_fatal(msg);
+    }
+  }
+}
+
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
   // Always touch the bufferize graph so its state stays in sync with
@@ -2317,6 +2334,7 @@ fn void bufferize_classify(Term root) {
     // boundary set reflects every other rule first.
     bufferize_rule_metal_tile_fanin_cap(root);
     bufferize_seed_indexed_operands();
+    bufferize_reject_packed();
     bufferize_seed_from_nodes(root);
     // The unified walk writes RU_RANGE_MAP / RU_REALIZE_MAP and the
     // main-heap UOP_BUFFERIZE Terms (one per realize boundary).
