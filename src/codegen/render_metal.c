@@ -1,8 +1,8 @@
-// Public bridge for WL FFI (thvmlink.c) and tests (test_bufferize)
-// that want to peek at the rendered MSL without going through Metal
-// dispatch. After the dispatch ladder collapse (88f536c3 / 4e30432b),
-// the only Metal MSL emit path is metal_tile_jit_encode -> render_uop;
-// cg_emit_metal forwards to cg_emit_tile_metal which routes there.
+// Public bridge for the WL FFI (thvmlink.c), which peeks at the
+// rendered MSL without going through Metal dispatch.  After the
+// dispatch ladder collapse (88f536c3 / 4e30432b), the only Metal MSL
+// emit path is metal_tile_jit_encode -> render_uop; cg_emit_metal
+// forwards to cg_emit_tile_metal which routes there.
 char *cg_emit_metal(KernelEntry const *ke) {
   return cg_emit_tile_metal((KernelEntry *)ke);
 }

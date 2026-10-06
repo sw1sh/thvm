@@ -317,7 +317,6 @@ TESTS := \
   $(BIN)/test_uop_mov_cache_growth \
   $(BIN)/test_limit_bufs \
   $(BIN)/test_kernel_width \
-  $(BIN)/test_bufferize \
   $(BIN)/test_uop_buffer \
   $(BIN)/test_uop_store_after \
   $(BIN)/test_after_root_kernel \

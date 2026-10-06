@@ -120,8 +120,6 @@ after.
 | First-step compile + JIT trace time | `warmup step 1: wall=%.1fms` | step 0 wall (when `JIT=2`) |
 | Autotune / BEAM time | included in warmup wall when `AUTOTUNE=1` | env-gated (`BEAM=2`); reported separately by `Timing` |
 | Per-rule fusion stats | `realize_rewrite_summary` (when `DUMP_REWRITE=1`) — `<rule_name> hits=N` | not exposed; requires `DEBUG_RANGEIFY=1` and parsing |
-| Bufferize candidates not removed | `DUMP_BUFFERIZE_CANDIDATES=1` lists top-N by removal score | not exposed (rangeify decisions are internal) |
-| Schedule key | `bufferize_schedule_key()` stable hash (when `DUMP_BUFFERIZE=1`) | not exposed |
 
 ### 3.2 Per-Kernel Metrics
 
@@ -145,9 +143,9 @@ after.
 | Metric | thvm exposure | tinygrad exposure |
 |--------|---------------|-------------------|
 | Realize boundaries (pre-rewrite) | `REALIZE_INFO_LEN` after `realize_classify` | `BUFFERIZE` count in scheduled graph |
-| Buffer count after fusion | `bufferize_buffer_count()` | post-`limit_bufs` count |
+| Buffer count after fusion | `materialize_boundary_count()` | post-`limit_bufs` count |
 | Per-rule hit count | `realize_rewrite_stat_hits(name)` | not exposed per-rule |
-| Memory plan / lifetime | `BOUNDARY_DEPTH[]`, `BOUNDARY_LAST_USE[]`, `bufferize_buffer_lifetime()` | tinygrad's `MemoryPlanner` (engine internal) |
+| Memory plan / lifetime | `BOUNDARY_DEPTH[]`, `BOUNDARY_LAST_USE[]` | tinygrad's `MemoryPlanner` (engine internal) |
 | JIT trace size | `n_jit_ops` from canary printout | `len(big_linear.src) + len(onetime_linear.src)` after JIT capture |
 | Schedule cache hit/miss | `kernel_program_cache_lookup()` | `JIT.cache_size` |
 

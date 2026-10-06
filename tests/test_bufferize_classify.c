@@ -48,6 +48,7 @@ int main(void) {
   CHECK_EQ(bufferize_consumer_count(add2), 1);
   CHECK_EQ(bufferize_is_realized(add2), 0);
   CHECK_EQ(bufferize_is_realized(mul2), 1);
+  CHECK(bufferize_reasons(mul2) & BUFFERIZE_REASON_ROOT);
 
   TEST_BEGIN("realize-classify/shared-subexpr-multi-consumer-realized");
   // shared = a + b; out = shared * shared (two distinct parents
@@ -72,6 +73,7 @@ int main(void) {
   CHECK_EQ(bufferize_is_realized(right), 0);
   // The root is always realized.
   CHECK_EQ(bufferize_is_realized(root), 1);
+  CHECK(bufferize_reasons(root) & BUFFERIZE_REASON_ROOT);
 
   TEST_BEGIN("realize-classify/dup-child-counts-as-one-consumer");
   // MUL[x, x] where x is a UOp.  x is referenced by MUL's two
@@ -111,6 +113,20 @@ int main(void) {
   // TAG_TEN leaves should never appear in the table.
   CHECK_EQ(bufferize_is_realized(a), 0);
   CHECK_EQ(bufferize_is_realized(b), 0);
+
+  TEST_BEGIN("realize-classify/non-uop-root-leaves-table-empty");
+  // A TAG_TEN root has nothing to schedule: classify clears the table.
+  bufferize_classify(a);
+  CHECK_EQ(BUFFERIZE_NODES_LEN, 0);
+
+  TEST_BEGIN("realize-classify/reduce-read-twice-by-one-op-realizes");
+  // MUL[r, r] reads the REDUCE through one consumer; a REDUCE realizes
+  // regardless.
+  Term rr    = uop_reduce(REDUCE_SUM, 0, a);
+  Term rr_sq = uop_binary(UOP_MUL, rr, rr);
+  bufferize_classify(rr_sq);
+  CHECK_EQ(bufferize_is_realized(rr), 1);
+  CHECK_EQ(bufferize_is_realized(rr_sq), 1);
 
   TEST_BEGIN("realize-classify/thvm-materialize-populates-table");
   // thvm_materialize must call realize_classify before its walk so
@@ -226,6 +242,23 @@ int main(void) {
   CHECK_EQ(bufferize_is_realized(ep2_r), 0);             // reduce fused away
   CHECK(bufferize_reasons(ep2_r) & BUFFERIZE_REASON_INLINE);
   unsetenv("THVM_FUSE_REDUCE_EPILOGUE");
+
+  TEST_BEGIN("kernel-output-accessors/single-output-kernel");
+  // A materialized kernel has one output: slot 0 reads the output_tid
+  // family, any other slot reads 0.
+  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
+  Term mo_a   = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(3));
+  Term mo_b   = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(3));
+  Term mo_out = thvm_materialize(uop_binary(UOP_ADD, mo_a, mo_b));
+  u32  mo_kid = (u32)term_val(heap_read(term_val(mo_out) + 1));
+  CHECK_EQ(kernel_entry_output_count(mo_kid), 1);
+  CHECK(kernel_entry_output_tid_at(mo_kid, 0) != 0);
+  CHECK_EQ(kernel_entry_output_tid_at(mo_kid, 0), KERNELS[mo_kid].output_tid);
+  CHECK_EQ(kernel_entry_output_tid_at(mo_kid, 1), 0);
+  CHECK_EQ(kernel_entry_output_dtype_at(mo_kid, 1), 0);
+  Shape mo_sh;
+  CHECK_EQ(kernel_entry_output_shape_at(mo_kid, 1, &mo_sh), 0);
+  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
   thvm_free();
   TEST_REPORT();

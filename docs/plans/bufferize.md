@@ -1,6 +1,16 @@
 # Bufferize Schedule IR Plan
 
-Status: the realize_classify schedule layer is retired
+Status (2026-10-07): the data layer this page plans is deleted.
+`src/schedule/bufferize.c` (`BUFFERIZE_BUFS`, the B_STORE and B_INDEX
+tables, the cost fields, lifetimes, schedule key and the
+`DUMP_BUFFERIZE*` dumps), `KernelEntry.input_source_buffer_ids` and
+`tests/test_bufferize.c` are gone: nothing outside those tests and
+dumps read them, and building them walked every realized buffer's
+producer tree on every realize.  Boundary selection is
+`bufferize_classify` and the unified rangeify pass.  The rest of this
+page is the plan as it stood.
+
+Earlier status: the realize_classify schedule layer is retired
 (commits 0fafd96..e8d6815, 2026-05-04): every public symbol, file,
 internal helper, REASON macro, and storage variable is now under
 the `bufferize_*` / `BUFFERIZE_*` namespace.  Phases 0-7 landed at

@@ -1048,13 +1048,6 @@ typedef struct KernelEntry {
   // store the symbolic Term value here.  kernel_fire_by_id resolves
   // each non-zero entry through term_resolve before reading buffers.
   Term     *input_terms;
-  // per-input-slot bufferize source-buffer id.  visit() populates
-  // this whenever the input slot was created for another realized
-  // boundary, so rangeify and other consumers can call
-  // bufferize_edge_summary with `(this kernel's loc, source loc)`
-  // to read the canonical edge-local chain.  0 means "leaf input
-  // or unknown source".
-  u32      *input_source_buffer_ids;
   // Per-slot flag (heap array): 1 iff rangeify folded this input's
   // ShapeTracker prior_views chain into the kernel INDEX expression
   // (composed-index, the tinygrad approach -- the strided view is
@@ -1788,10 +1781,9 @@ u32          kernel_kvar_value(struct KernelEntry const *ke, u32 var_id);
 // === schedule ===
 // bufferize_classify walks the UOp DAG rooted at `root`, marks
 // kernel boundaries (root + multi-consumer + REDUCE), runs the named
-// realize-rewrite rules, and finalises the bufferize graph.
+// realize-rewrite rules and then the unified rangeify pass.
 // UOpInfo / BUFFERIZE_NODES is the dense per-walked-UOp table that
-// the classifier populates; materialize.c still walks it directly
-// 
+// the classifier populates and materialize.c walks.
 #define BUFFERIZE_NODES_CAP 16384
 typedef struct {
   u64 loc;
@@ -1821,13 +1813,7 @@ extern u32      CMAP_LL_LEN;
 // (may exceed cap; caller is responsible for sizing).
 fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 
-// === bufferize schedule IR ===
-// Explicit B_BUFFERIZE/B_STORE/B_INDEX graph that future phases of
-// docs/plans/bufferize.md make authoritative.  Today the graph is
-// seeded from BUFFERIZE_NODES, mirrored through every named rule's
-// mark/unmark, and finalised with one B_STORE for the realize root.
-// `DUMP_BUFFERIZE=1` prints the per-buffer table after each pass.
-#define BUFFERIZE_GRAPH_CAP BUFFERIZE_NODES_CAP
+// Why bufferize_classify realizes a node (UOpInfo.reasons bits).
 #define BUFFERIZE_REASON_ROOT        (1u << 0)
 #define BUFFERIZE_REASON_MULTI       (1u << 1)
 #define BUFFERIZE_REASON_REDUCE      (1u << 2)
@@ -1883,174 +1869,10 @@ fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 // Every SCATTER is its own kernel: a serial read-modify-write of its
 // output (rangeify_unified.c ru_lower_scatter).  The faithful seed honors it.
 #define BUFFERIZE_REASON_SCATTER (1u << 11)
-typedef struct {
-  u64 loc;             // heap loc of the underlying UOp value
-  u32 buffer_id;       // 1-based stable id within this graph
-  u32 reasons;         // BUFFERIZE_REASON_*
-  u32 consumer_count;  // direct UOp consumer count
-  u8  op;              // UOP_* of the value being bufferized
-  u8  is_root;         // 1 iff this buffer is the realize root
-  u8  realized;        // 1 = currently realized, 0 = removed by a rule
-  char const *removed_by; // name of the rule that cleared realized; NULL otherwise
-  char const *added_by;   // name of the rule that introduced this buffer; NULL if seeded
-  // Cost-model inputs (populated by bufferize_finalize_stores).
-  // recompute_ops counts the pure UOps in this buffer's producer
-  // subtree (constants and loads excluded; reduces stop the walk).
-  // output_numel is the element count of the buffer's value shape;
-  // 0 means "shape was unavailable at compute time".
-  // recompute_total is recompute_ops * max(consumer_count, 1) -- a
-  // first-cut estimate of the work multiplier if this buffer were
-  // removed and every consumer recomputed it independently.
-  // subtree_has_reduce is 1 iff the producer subtree
-  // contains a REDUCE (the buffer's own op being REDUCE counts);
-  // future reduce-aware rules use it to gate recompute removals
-  // because reductions amplify recompute cost.
-  u32 recompute_ops;
-  u64 output_numel;
-  u64 recompute_total;
-  u8  subtree_has_reduce;
-  // Reduce metadata.  Populated only when this buffer's
-  // op is UOP_REDUCE; otherwise all three fields stay 0.
-  //   reduce_kind  : REDUCE_SUM / REDUCE_MAX / ... (the kind cell)
-  //   reduce_axis  : axis being reduced (post-rewrite collapsed)
-  //   reduce_axis_size : extent of that axis on the source side
-  // Future reduce-aware rules consult these to gate accumulator
-  // schedules, broadcast fusion, and group-reduce decisions.
-  u8  reduce_kind;
-  u8  reduce_axis;
-  u32 reduce_axis_size;
-  // Lifetime fields (populated by bufferize_finalize_stores):
-  // lifetime_start is this buffer's topological depth (1 for
-  // buffers with no producer-buffer source); lifetime_end is the
-  // max depth among its consumer buffers (== lifetime_start for
-  // buffers with no consumer, e.g. the realize root).  output_bytes
-  // is `output_numel * dtype_itemsize(dtype)`; 0 when the dtype
-  // could not be resolved.
-  u32 lifetime_start;
-  u32 lifetime_end;
-  u64 output_bytes;
-} BBufferize;
-typedef struct {
-  u32 buffer_id;      // destination B_BUFFERIZE id
-  u64 loc;            // heap loc of the stored value
-} BStore;
-// B_INDEX records one producer-buffer to consumer-buffer edge with
-// the movement-op chain that sits between them in the consumer's
-// compute tree.  Stops at producer buffers and skips leaf
-// (TEN/VAR) inputs; later phases will add leaf edges and the full
-// edge-local index expression / valid mask once rangeify consumes
-// them.  has_* flags are independent: a chain can have multiple
-// movement ops of different kinds.
-//
-// Each chain entry carries enough per-op data (op, src_dims,
-// out_dims, pad_widths, axis_perm, flip_mask) for rangeify to
-// drive RngsCtx from the bufferize edge graph.
-#define BUFFERIZE_INDEX_CHAIN_MAX 8
-typedef struct {
-  u8  op;                        // UOP_RESHAPE/PERMUTE/EXPAND/PAD/SHRINK/FLIP
-  u8  src_ndim;
-  u8  out_ndim;
-  u8  flip_mask;                 // FLIP only: per-axis bitmask
-  u32 src_dims [MAX_DIM];
-  u32 out_dims [MAX_DIM];
-  u32 pad_widths[2 * MAX_DIM];   // PAD/SHRINK: interleaved {b0,e0,b1,e1,...}
-  u8  axis_perm [MAX_DIM];       // PERMUTE: out axis i comes from src axis_perm[i]
-} BIndexChainOp;
-typedef struct {
-  u32 source_buffer_id;       // 1-based id of producer B_BUFFERIZE
-  u32 consumer_buffer_id;     // 1-based id of consumer B_BUFFERIZE
-  u8  movement_chain_len;     // total movement ops on the edge (>= sum of has_* flags only when no op repeats)
-  u8  has_pad;
-  u8  has_reshape;
-  u8  has_permute;
-  u8  has_expand;
-  u8  has_shrink;
-  u8  has_flip;
-  u8  chain_op_count;         // length of chain_ops below
-  BIndexChainOp chain_ops[BUFFERIZE_INDEX_CHAIN_MAX];
-} BIndex;
-// bufferize_classify is the public schedule entry point.  Walks the
+// bufferize_classify is the public schedule entry point: it walks the
 // UOp DAG rooted at `root`, marks ROOT/MULTI/REDUCE boundaries, runs
-// the named realize-rewrite rules, and finalises the bufferize graph
-// (B_BUFFERIZE + B_INDEX + B_STORE).  Replaces realize_classify; the
-// old name is retained as a 1-line forward in realize_classify.c.
-fn void              bufferize_classify(Term root);
-fn void              bufferize_seed_from_nodes(Term root);
-fn void              bufferize_finalize_stores(Term root);
-fn u32               bufferize_buffer_count(void);
-fn u32               bufferize_realized_count(void);
-fn BBufferize const *bufferize_buffer_at(u32 i);
-fn u32               bufferize_find_by_loc(u64 loc);
-fn u32               bufferize_store_count(void);
-fn BStore const     *bufferize_store_at(u32 i);
-fn u32               bufferize_index_count(void);
-fn BIndex const     *bufferize_index_at(u32 i);
-// Fill `out` with the indices of every B_INDEX whose
-// consumer_buffer_id matches `consumer_buffer_id`.  Returns the
-// number written (capped at `cap`).  Pass cap=0 to just count.
-fn u32               bufferize_indexes_for_consumer(u32 consumer_buffer_id,
-                                                    u32 *out, u32 cap);
-// Symmetric to bufferize_indexes_for_consumer: enumerate every
-// B_INDEX edge whose source_buffer_id matches `source_buffer_id`,
-// returning the count and writing up to `cap` indices into `out`.
-fn u32               bufferize_indexes_for_source(u32 source_buffer_id,
-                                                  u32 *out, u32 cap);
-// Look up the first B_INDEX edge for the
-// (consumer_loc -> source_loc) pair and copy its chain summary into
-// `out`.  Returns 1 if an edge was found, 0 otherwise.  Both locs
-// must be heap locs of B_BUFFERIZEs.  Future rangeify and
-// materialize callers can use this to consult the canonical
-// edge-local context instead of recovering it from the heap walk.
-fn int               bufferize_edge_summary(u64 consumer_loc, u64 source_loc,
-                                            BIndex *out);
-// Named edge rewrite rules.  Each kind of movement op
-// becomes one rule that "fires" once per B_INDEX edge carrying
-// that op flag.  Hit counts are populated by bufferize_finalize_stores
-// and surfaced through these accessors so DUMP_BUFFERIZE can show
-// "index-reshape hits=N" alongside the realize-rule stats.
-fn u32               bufferize_index_rule_count(void);
-fn char const       *bufferize_index_rule_name(u32 i);
-fn u32               bufferize_index_rule_hits(char const *name);
-// Edge transform: number of identity reshape ops elided
-// from B_INDEX chains during the most recent realize_classify
-// pass.  Each elision drops one chain entry whose
-// src_dims == out_dims and decrements the edge's
-// movement_chain_len; future transforms can read this counter to
-// gauge how much trivial folding the bufferize graph absorbed.
-fn u32               bufferize_identity_reshape_elision_hits(void);
-
-// Removal-candidate score.  Higher score = more attractive
-// removal (single-use, small recompute budget).  The score is a
-// first-cut heuristic; future cost-model rules will refine it.
-// Returns 0 for unknown buffer ids and for buffers whose score was
-// not computed (non-realized or no shape).
-fn u64               bufferize_removal_score(u32 buffer_id);
-
-// Lifetime accessors for memory-planning callers.  Returns
-// 1 on success and writes the start/end topological depths through
-// the out pointers; returns 0 for unknown or non-realized buffers
-// and leaves the outputs unchanged.  Depth 1 is the leaf-most
-// buffer (no producer source); higher depth = later in execution.
-fn int               bufferize_buffer_lifetime(u32 buffer_id,
-                                               u32 *lifetime_start,
-                                               u32 *lifetime_end);
-
-// Deterministic schedule key over the post-rewrite
-// bufferize graph.  Hash mixes each realized buffer's
-// (op, reasons, recompute_ops, output_numel) and each B_INDEX
-// (source, consumer, chain flags) -- fields that depend on the
-// schedule shape but not on heap locs, so the key stays stable
-// across runs that produce the same schedule.  Autotune uses this
-// to look up cached decisions per (graph, schedule) pair.
-fn u64               bufferize_schedule_key(void);
-// Aggregates: sum of output_bytes across realized buffers,
-// max lifetime_end (the highest topological depth reached), and
-// sum of recompute_ops across realized buffers.  These give
-// autotune one-number summaries to pre-filter schedule candidates
-// before the full per-buffer cost walk.
-fn u64               bufferize_total_realized_bytes(void);
-fn u32               bufferize_max_lifetime_depth(void);
-fn u64               bufferize_total_recompute_ops(void);
+// the named realize-rewrite rules and then the unified rangeify pass.
+fn void bufferize_classify(Term root);
 
 // g2a: after realize_classify populates the boundary set, the
 // scheduler topo-sorts those boundaries by producer-to-consumer
@@ -2060,23 +1882,9 @@ fn u32  materialize_boundary_count(void);
 fn u64  materialize_boundary_at(u32 i);
 // Depth + last-use lookup for the i-th boundary in BOUNDARY_ORDER.
 // Returns 0 when the boundary index is out of range.
-// validation: these should agree with bufferize's lifetime_start
-// and lifetime_end for the same loc, since both are computed from
-// the same edge structure (just at different times in the
-// pipeline).  Memory planning will eventually consume the
-// bufferize lifetimes once the parity is established.
 fn u32  materialize_boundary_depth_at(u32 i);
 fn u32  materialize_boundary_last_use_at(u32 i);
 
-// Per-input-slot bufferize source id read from a
-// materialized KernelEntry.  Returns the 1-based buffer id stored
-// during visit() (0 when the slot's source is a leaf or was not
-// resolvable to a bufferize buffer).  Pass `kid = 0` to query the
-// default-context kernel pool.  The companion
-// kernel_entry_input_edge_summary pulls the BIndex chain summary
-// for that slot via bufferize_edge_summary, looking up the
-// consumer loc from the kernel's source_uop.
-fn u32  kernel_entry_input_source_buffer_id(u32 kid, u32 slot);
 // Single-output kernel accessors.  Slot 0 returns the legacy
 // `output_tid` family; other slots return 0 / sentinels.
 // `kernel_entry_output_count` returns 1 for every live kernel.
@@ -2084,13 +1892,6 @@ fn u32  kernel_entry_output_count(u32 kid);
 fn u32  kernel_entry_output_tid_at(u32 kid, u32 idx);
 fn u32  kernel_entry_output_dtype_at(u32 kid, u32 idx);
 fn int  kernel_entry_output_shape_at(u32 kid, u32 idx, Shape *out);
-fn int  kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out);
-// Per-USE variant: select the `edge_idx`-th BIndex record whose
-// (consumer, source) pair matches the kernel's source_uop and the
-// slot's source buffer.  Returns 1 on success, 0 when there are
-// fewer than `edge_idx + 1` matching records.
-fn int  kernel_entry_input_edge_at(u32 kid, u32 slot, u32 edge_idx,
-                                   BIndex *out);
 
 // Leaf utilities other compilation units (realize_classify,
 // gc_mark, wnf/redex, interact/uop_kernel) reference.

@@ -65,7 +65,7 @@ already exists; design memos for not-yet-built layers live under
 - [plans/bufferize.md](plans/bufferize.md): comprehensive plan for
   first-class `BUFFERIZE`/`INDEX` schedule IR, edge-local movement
   contexts, bufferize rewrites, memory planning, and autotune
-  integration.
+  integration.  Its data layer was deleted unread (2026-10).
 - [bench/history.md](bench/history.md): consolidated benchmark
   history and current canaries for training, GPT-2, Metal, tile, and
   autotune work.

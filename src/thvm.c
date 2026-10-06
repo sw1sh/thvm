@@ -367,7 +367,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "schedule/uop_meta.c"
 #include "schedule/sched_prof.c"
 #include "schedule/consumer_count.c"
-#include "schedule/bufferize.c"
 #include "schedule/bufferize_classify.c"
 // Phase 2 (ideal_pipeline_v2): unified rangeify pass. Must follow
 // bufferize_classify.c (uses BUFFERIZE_NODES + CMAP_LL +

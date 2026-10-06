@@ -5401,102 +5401,6 @@ fn u32 materialize_boundary_last_use_at(u32 i) {
   return BOUNDARY_LAST_USE[ridx];
 }
 
-// Accessors: read the per-input-slot bufferize source id and look
-// up the BIndex chain summary for the (this kernel's loc, source
-// buffer's loc) edge.
-fn u32 kernel_entry_input_source_buffer_id(u32 kid, u32 slot) {
-  if (kid >= KERNELS_NEXT) return 0;
-  KernelEntry const *ke = &KERNELS[kid];
-  if (slot >= ke->n_inputs || ke->input_source_buffer_ids == NULL) return 0;
-  return ke->input_source_buffer_ids[slot];
-}
-
-fn int kernel_entry_input_edge_summary(u32 kid, u32 slot, BIndex *out) {
-  // Convenience wrapper: returns the first matching edge.
-  return kernel_entry_input_edge_at(kid, slot, 0, out);
-}
-
-fn int kernel_entry_input_edge_at(u32 kid, u32 slot, u32 edge_idx,
-                                  BIndex *out) {
-  if (kid >= KERNELS_NEXT) return 0;
-  KernelEntry const *ke = &KERNELS[kid];
-  if (slot >= ke->n_inputs) return 0;
-  if (ke->input_source_buffer_ids == NULL) return 0;
-  u32 src_id = ke->input_source_buffer_ids[slot];
-  if (src_id == 0) return 0;
-  Term src_uop = ke->source_uop;
-  if (term_tag(src_uop) != TAG_UOP) return 0;
-  u64 consumer_loc = term_val(src_uop);
-  u32 consumer_idx = bufferize_find_by_loc(consumer_loc);
-  if (consumer_idx == 0xFFFFFFFFu) return 0;
-  BBufferize const *consumer_buf = bufferize_buffer_at(consumer_idx);
-  if (consumer_buf == NULL) return 0;
-  u32 consumer_id = consumer_buf->buffer_id;
-  // Walk all edges and pick the edge_idx-th one whose
-  // (consumer, source) pair matches.
-  u32 seen = 0;
-  for (u32 i = 0; i < bufferize_index_count(); i++) {
-    BIndex const *e = bufferize_index_at(i);
-    if (e == NULL) continue;
-    if (e->consumer_buffer_id != consumer_id) continue;
-    if (e->source_buffer_id != src_id) continue;
-    if (seen == edge_idx) {
-      if (out != NULL) *out = *e;
-      return 1;
-    }
-    seen++;
-  }
-  return 0;
-}
-
-// Diagnostic: print the bufferize edge summary for every input
-// slot of every emitted kernel.  Gated by
-// DUMP_BUFFERIZE_KERNEL_EDGES=1; useful for verifying
-// input_source_buffer_ids wiring against the bufferize edge table.
-static int materialize_dump_kernel_edges_enabled(void) {
-  char const *e = getenv("DUMP_BUFFERIZE_KERNEL_EDGES");
-  return e != NULL && e[0] == '1';
-}
-
-static void materialize_dump_kernel_edges(u32 kernels_start) {
-  if (!materialize_dump_kernel_edges_enabled()) return;
-  for (u32 kid = kernels_start; kid < KERNELS_NEXT; kid++) {
-    KernelEntry const *ke = &KERNELS[kid];
-    fprintf(stderr,
-            "kernel_edges kid=%u inputs=%u source_uop=%llu\n",
-            (unsigned)kid,
-            (unsigned)ke->n_inputs,
-            (unsigned long long)(term_tag(ke->source_uop) == TAG_UOP
-                                   ? term_val(ke->source_uop) : 0));
-    for (u32 slot = 0; slot < ke->n_inputs; slot++) {
-      u32 src_id = kernel_entry_input_source_buffer_id(kid, slot);
-      if (src_id == 0) {
-        fprintf(stderr, "  slot=%u source=leaf tid=%u\n",
-                (unsigned)slot, (unsigned)ke->input_tids[slot]);
-        continue;
-      }
-      BIndex edge;
-      if (!kernel_entry_input_edge_summary(kid, slot, &edge)) {
-        fprintf(stderr, "  slot=%u source_buffer=%u (no edge summary)\n",
-                (unsigned)slot, (unsigned)src_id);
-        continue;
-      }
-      fprintf(stderr,
-              "  slot=%u source_buffer=%u chain_len=%u ops=%u%s%s%s%s%s%s\n",
-              (unsigned)slot,
-              (unsigned)src_id,
-              (unsigned)edge.movement_chain_len,
-              (unsigned)edge.chain_op_count,
-              edge.has_reshape ? " reshape" : "",
-              edge.has_permute ? " permute" : "",
-              edge.has_expand  ? " expand"  : "",
-              edge.has_pad     ? " pad"     : "",
-              edge.has_shrink  ? " shrink"  : "",
-              edge.has_flip    ? " flip"    : "");
-    }
-  }
-}
-
 // === view-only path for movement ops (g2c1) ===
 //
 // RESHAPE / EXPAND / PERMUTE / SHRINK / FLIP rewrite a TenDesc's
@@ -6298,9 +6202,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
     u32 tid  = (u32)term_val(outbuf);
     u32 slot = input_slot_dedup(ke, tid, t);
     if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
-    // No bufferize source id: UOP_KERNEL is post-materialize and
-    // the bufferize graph operates on pre-kernel locs, so we leave
-    // this slot's source_buffer_id at 0 (the leaf-input sentinel).
     u32 ref = KSRC_AS_INPUT(slot);
     visit_memo_store(memo, loc, ref);
     return ref;
@@ -6324,19 +6225,6 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
       if (tid == 0) return VISIT_BAIL;
       u32 slot = input_slot_dedup(ke, tid, boundary_term);
       if (slot == 0xFFFFFFFFu) return VISIT_BAIL;
-      // Record the source buffer id so rangeify and other consumers
-      // can call bufferize_edge_summary with (root_loc, loc).
-      // bufferize_find_by_loc returns the index (0-based); store the
-      // buffer_id (1-based) here.  When the source isn't in the
-      // bufferize graph (defensive case for boundaries inserted
-      // post-classify), leave the sentinel 0.
-      u32 sidx = bufferize_find_by_loc(loc);
-      if (sidx != 0xFFFFFFFFu && ke->input_source_buffer_ids != NULL) {
-        BBufferize const *src_buf = bufferize_buffer_at(sidx);
-        if (src_buf != NULL) {
-          ke->input_source_buffer_ids[slot] = src_buf->buffer_id;
-        }
-      }
       u32 ref = KSRC_AS_INPUT(slot);
       visit_memo_store(memo, loc, ref);
       return ref;
@@ -7810,9 +7698,5 @@ fn Term thvm_materialize_impl(Term term) {
 #ifdef THVM_HAS_CUDA
   ARENA_DPTR   = 0;
 #endif
-  // Diagnostic: print per-kernel input edge data for every kernel
-  // emitted in this pass.  No-op unless
-  // DUMP_BUFFERIZE_KERNEL_EDGES=1.
-  materialize_dump_kernel_edges(kernels_at_start);
   return sink_kernel != 0 ? sink_kernel : term;
 }

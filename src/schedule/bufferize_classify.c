@@ -1734,17 +1734,7 @@ static void bufferize_reject_packed(void) {
 
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
-  // Always touch the bufferize graph so its state stays in sync with
-  // BUFFERIZE_NODES.  Both seed/finalize short-circuit on non-UOp roots
-  // after zeroing their own tables.
-  if (term_tag(root) != TAG_UOP) {
-    bufferize_seed_from_nodes(root);
-    bufferize_finalize_stores(root);
-    return;
-  }
-  if (term_ext(root) == UOP_KERNEL) {
-    bufferize_seed_from_nodes(root);
-    bufferize_finalize_stores(root);
+  if (term_tag(root) != TAG_UOP || term_ext(root) == UOP_KERNEL) {
     return;
   }
 
@@ -2335,11 +2325,9 @@ fn void bufferize_classify(Term root) {
     bufferize_rule_metal_tile_fanin_cap(root);
     bufferize_seed_indexed_operands();
     bufferize_reject_packed();
-    bufferize_seed_from_nodes(root);
     // The unified walk writes RU_RANGE_MAP / RU_REALIZE_MAP and the
     // main-heap UOP_BUFFERIZE Terms (one per realize boundary).
     run_rangeify_unified(root);
-    bufferize_finalize_stores(root);
     return;
 }
 

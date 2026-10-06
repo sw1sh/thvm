@@ -19,12 +19,11 @@ How a high-level UOp DAG gets compiled into GPU/CPU dispatches.
       |     FLIP rewrite to symbolic INDEX trees);
       |     range-bound-aware simplifier folds.
       |
-      |  pass 2: schedule                        <- src/schedule/bufferize.c
-      |     walk DAG, mark ROOT/MULTI/REDUCE
-      |     boundaries.  Each boundary becomes
-      |     a B_BUFFERIZE node; rewrite rules
-      |     promote / remove buffers based on
-      |     cost.
+      |  pass 2: schedule                        <- src/schedule/bufferize_classify.c
+      |     walk DAG, mark ROOT/MULTI/REDUCE          src/schedule/rangeify_unified.c
+      |     boundaries; rewrite rules promote /
+      |     remove them.  Rangeify gives each
+      |     boundary a UOP_BUFFERIZE.
       v
    for each boundary in topo order:               <- src/schedule/materialize.c
       |
@@ -78,27 +77,25 @@ shader compiler can't reduce.
 
 ## Pass 2: Schedule (bufferize)
 
-- File: [src/schedule/bufferize.c](../src/schedule/bufferize.c)
+- Files: [src/schedule/bufferize_classify.c](../src/schedule/bufferize_classify.c),
+  [src/schedule/rangeify_unified.c](../src/schedule/rangeify_unified.c)
 
 The bufferize pass walks the simplified DAG and decides which UOp
 nodes get a backing buffer (kernel boundaries).  ROOT (the value the
 user asked to realize), MULTI (consumed by more than one downstream),
 and REDUCE (output of a reduce that can't fuse into the consumer's
 loop) are seeds.  Named rewrite rules then promote or remove buffer
-boundaries based on a cost model (op count, output bytes, recompute
-budget).
+boundaries.
 
-After this pass the DAG is annotated with `B_BUFFERIZE` /
-`B_STORE` / `B_INDEX` UOps that name kernel boundaries and per-
-boundary input edges.
-
-See `docs/plans/bufferize.md` for the data layer + cost model.
+The unified rangeify walk then writes one `UOP_BUFFERIZE` term and
+one store root per boundary (`rangeify_unified_store_root_at`), which
+the lift reads.
 
 ## Pass 3: Lift kernel boundary to UOp DAG root
 
 - File: [src/schedule/kernel_lift.c](../src/schedule/kernel_lift.c)
 
-For each `B_BUFFERIZE` boundary,
+For each boundary,
 [materialize.c](../src/schedule/materialize.c) calls
 `emit_kernel_for_boundary` which reserves a `KernelEntry` slot.
 `kernel_lift_to_uop` then synthesises the `UOP_STORE` root that
@@ -274,7 +271,7 @@ GROUP_REDUCE modes).  Threads-per-threadgroup are configured from
 | Movement-as-INDEX rewrites | [src/uop/movement_index.c](../src/uop/movement_index.c) |
 | Symbolic index folds | [src/uop/index_simplify.c](../src/uop/index_simplify.c) |
 | New UOp opcodes | [src/uop/buffer.c](../src/uop/buffer.c), [store.c](../src/uop/store.c), [opt.c](../src/uop/opt.c), [index.c](../src/uop/index.c) |
-| Bufferize / schedule | [src/schedule/bufferize.c](../src/schedule/bufferize.c) |
+| Bufferize / schedule | [src/schedule/bufferize_classify.c](../src/schedule/bufferize_classify.c), [rangeify_unified.c](../src/schedule/rangeify_unified.c) |
 | Kernel boundary -> UOp DAG | [src/schedule/kernel_lift.c](../src/schedule/kernel_lift.c) |
 | MSL renderer | [src/codegen/render_uop.c](../src/codegen/render_uop.c) |
 | Metal dispatch | [src/backend/metal/_.m](../src/backend/metal/_.m) |

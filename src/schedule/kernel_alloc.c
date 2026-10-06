@@ -25,8 +25,6 @@ fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
   ke->input_numels = (u32  *)realloc(ke->input_numels, (size_t)new_cap * sizeof(u32));
   ke->input_terms  = (Term *)realloc(ke->input_terms,  (size_t)new_cap * sizeof(Term));
   ke->input_views  = (View *)realloc(ke->input_views,  (size_t)new_cap * sizeof(View));
-  ke->input_source_buffer_ids = (u32 *)realloc(
-      ke->input_source_buffer_ids, (size_t)new_cap * sizeof(u32));
   // Per-slot ShapeTracker-chain composed flag (set by rangeify when it
   // folds the prior_views chain into the kernel INDEX; the CPU / Metal
   // backends gate the per-input pre-mat skip on it).
@@ -39,8 +37,7 @@ fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
     ke->input_dtypes[i] = 0;
     ke->input_numels[i] = 0;
     ke->input_terms [i] = 0;
-    ke->input_source_buffer_ids[i] = 0;
-    ke->input_chain_composed[i]    = 0;
+    ke->input_chain_composed[i] = 0;
     memset(&ke->input_views[i], 0, sizeof(View));
   }
   ke->inputs_cap = new_cap;
@@ -59,8 +56,7 @@ fn void kernel_free_arrays(KernelEntry *ke) {
   free(ke->input_numels); ke->input_numels = NULL;
   free(ke->input_terms);  ke->input_terms  = NULL;
   free(ke->input_views);  ke->input_views  = NULL;
-  free(ke->input_source_buffer_ids); ke->input_source_buffer_ids = NULL;
-  free(ke->input_chain_composed);    ke->input_chain_composed    = NULL;
+  free(ke->input_chain_composed); ke->input_chain_composed = NULL;
   free(ke->custom_program); ke->custom_program = NULL;
   free(ke->custom_name);    ke->custom_name    = NULL;
   ke->n_inputs   = 0;
