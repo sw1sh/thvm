@@ -56,6 +56,11 @@ Modes, in order:
                split, the -10 lane tables X10_*), label_harvest_jobs.tsv;
                exit 1 when a validation item fails.  Both X modes read the
                J13 names (--j13-names) as a stem exclusion list only.
+  --xtwins     Section 5.3's twin-family rule over TRAIN and TRAIN-X
+               together (amendment A24): the tail is TRAIN-T (train_t.tsv
+               of --decisions) plus the TRAIN-X hard tail of xmatrix.tsv,
+               and the time per selection is T5's median over the pooled
+               TRAIN and TRAIN-X rows -> <x-dir>/decisions_a24.txt.
 
 Every pool mode after --seal reads matrix.tsv only, asserts that no row has
 split j13 and that every problem is a train or heldout problem of
@@ -516,9 +521,9 @@ def load_matrix(paths, problems, lanes):
     return load_rows(paths.matrix_tsv, paths, problems, lanes)
 
 
-def load_rows(path, paths, problems, lanes):
-    """16-column rows (matrix.tsv, supplement.tsv) of train and heldout
-    problems only; dies on any j13 row."""
+def load_rows(path, paths, problems, lanes, splits=SPLITS):
+    """16-column rows (matrix.tsv, supplement.tsv; xmatrix.tsv with the X
+    splits) of the given splits only; dies on any j13 row."""
     rows = []
     known = set(lanes)
     label = os.path.basename(path)
@@ -529,8 +534,9 @@ def load_rows(path, paths, problems, lanes):
                 die(f"{label}: a row without 16 columns")
             if f[2] == "j13":
                 die(f"{label} holds a j13 row")
-            if f[2] not in SPLITS or problems.get(f[0], ("", ""))[1] != f[2]:
-                die(f"{label}: a row that is not a train or heldout problem")
+            if f[2] not in splits or problems.get(f[0], ("", ""))[1] != f[2]:
+                die(f"{label}: a row that is not a {' or '.join(splits)} "
+                    "problem")
             if f[1] not in known:
                 die(f"{label}: a row with an unknown lane")
             r = Row()
@@ -2696,6 +2702,139 @@ def mode_xmatrix(xp):
     return overall
 
 
+TWIN_COUNT = 4
+# Base lanes a twin cannot guide.  They search in the CLI's Horn loops,
+# which have no queue for a head to reorder: horn-cd's condensed detachment
+# (amendment A5) and horn-back's backward chaining (amendment A24).
+TWIN_INELIGIBLE = ("horn-cd", "horn-back")
+
+
+def read_tsv_dicts(path, guard):
+    with open(guard(path)) as fp:
+        lines = fp.read().splitlines()
+    head = lines[0].split("\t")
+    return [dict(zip(head, l.split("\t"))) for l in lines[1:] if l]
+
+
+def us_per_selection(rates):
+    m = median(rates)
+    return 1e6 / m if m else None
+
+
+def twin_ranking(owners, us, head, idx):
+    """The eligible base lanes in the rule's order: owned tail problems
+    (descending; ties in SCHEDULE order), at least TWIN_FACTOR x head us
+    per selection, not TWIN_INELIGIBLE.  The first TWIN_COUNT are the
+    families; the rest are the replacements, in order."""
+    ranked = sorted((l for l in owners if owners[l] > 0),
+                    key=lambda l: (-owners[l], idx[l]))
+    return [l for l in ranked if l not in TWIN_INELIGIBLE
+            and us[l] is not None and us[l] >= TWIN_FACTOR * head]
+
+
+def mode_xtwins(paths, xp):
+    """Amendment A24: section 5.3's twin-family rule over TRAIN and TRAIN-X
+    together -> <x-dir>/decisions_a24.txt."""
+    problems = load_problems(paths)
+    lanes = load_lanes(paths)
+    if x_read_lanes(xp, xp.m("lanes.txt")) != lanes:
+        die("the X matrix's lanes.txt is not the pool's lane order")
+    idx = {l: i for i, l in enumerate(lanes)}
+    pool = Pool(load_matrix(paths, problems, lanes), problems, lanes)
+    xproblems = x_problems(xp)
+    xpool = Pool(load_rows(xp.m("xmatrix.tsv"), xp, xproblems, lanes,
+                           X_SPLITS), xproblems, lanes)
+    j13 = {stem(n) for n, (_p, s) in problems.items() if s == "j13"}
+    xj13 = x_j13_stems(xp)
+    train_t = read_tsv_dicts(paths.m("train_t.tsv"), paths.guard)
+    dev_t = read_tsv_dicts(paths.m("dev_t.tsv"), paths.guard)
+    if any(stem(r["problem"]) in j13 for r in train_t):
+        die("train_t.tsv names a J13 stem-mate")
+    dev_t_train = {r["problem"] for r in dev_t if r["split"] == "train"}
+    train = [p for p in pool.problems(["train"])
+             if stem(p) not in j13 and p not in dev_t_train]
+    trainx = xpool.problems(["TRAIN-X"])
+    tail_x = hard_tail(xpool, trainx)
+    if any(x_stem(p) in xj13 for p, _c in tail_x):
+        die("the TRAIN-X tail names a J13 stem")
+    own_t = collections.Counter(l for r in train_t
+                                for l in r["owner"].split(",") if l)
+    own_x = collections.Counter(l for p, _c in tail_x
+                                for l in xpool.fastest(p))
+    own = own_t + own_x
+    us_t, us_x, us_u = {}, {}, {}
+    for l in lanes:
+        r, _ = t5_rates(pool, train, l)
+        rx, _ = t5_rates(xpool, trainx, l)
+        us_t[l] = us_per_selection(r)
+        us_x[l] = us_per_selection(rx)
+        us_u[l] = us_per_selection(r + rx)
+    order = twin_ranking(own, us_u, HEAD_US[0], idx)
+    twins = order[:TWIN_COUNT]
+
+    def sha(name, base):
+        with open(base.guard(base.m(name)), "rb") as fp:
+            return sha256_bytes(fp.read())
+
+    cond = collections.Counter(c for _p, c in tail_x)
+    out = []
+    W = out.append
+    W("Twin families: section 5.3's rule over TRAIN and TRAIN-X together "
+      "(docs/plans/enigma_portfolio.md, amendment A24)")
+    W("Built by tools/atp_enigma/matrix_tables.py --xtwins.  Inputs "
+      "(sha256):")
+    W(f"  matrix.tsv {sha('matrix.tsv', paths)} (train and heldout rows; "
+      "the j13 rows are sealed)")
+    W(f"  train_t.tsv {sha('train_t.tsv', paths)}, dev_t.tsv "
+      f"{sha('dev_t.tsv', paths)} (--decisions, the 180 s view)")
+    W(f"  xmatrix.tsv {sha('xmatrix.tsv', xp)} (amendment A22)")
+    W("Rule: rank base lanes by how many tail problems they solve fastest "
+      "(every tied fastest lane counts; equal counts rank in SCHEDULE "
+      f"order); take the top {TWIN_COUNT} eligible lanes whose median time "
+      f"per selection is at least {TWIN_FACTOR:.0f}x the head's per-pick "
+      "cost.  Ineligible: " + ", ".join(TWIN_INELIGIBLE) + " (amendments "
+      "A5 and A24).")
+    W(f"Tail: TRAIN-T, {len(train_t)} problems (train_t.tsv, owners in the "
+      f"180 s view), plus the TRAIN-X hard tail, {len(tail_x)} of "
+      f"{len(trainx)} problems (section 1.4: "
+      + ", ".join(f"{c} {n}" for c, n in sorted(cond.items()))
+      + "; condition 2 needs a 180 s run, which A22 does not make).")
+    W(f"Time per selection: T5's median of steps / CPU over the rows with "
+      f"steps and CPU > 0, pooled over TRAIN ({len(train)} problems, the "
+      f"60 s matrix) and TRAIN-X ({len(trainx)} problems); each alone for "
+      "the record.")
+    W("")
+    W("   lane              TRAIN-T  TRAIN-X  total   us per selection: "
+      "TRAIN  TRAIN-X  pooled")
+    for l in sorted(own, key=lambda l: (-own[l], idx[l])):
+        W(f"   {l:17s} {own_t[l]:7d} {own_x[l]:8d} {own[l]:6d}   "
+          f"{fmt(us_t[l], 0):>24s} {fmt(us_x[l], 0):>8s} "
+          f"{fmt(us_u[l], 0):>7s}")
+    W("")
+    W(f"Twin families (pooled, head {HEAD_US[0]:.0f} us: at least "
+      f"{TWIN_FACTOR * HEAD_US[0]:.0f} us per selection): "
+      + (", ".join(twins) or "none"))
+    W("Replacements, in order (a family that fails G2.1 or G2.2): "
+      + (", ".join(order[TWIN_COUNT:]) or "none"))
+    W("Other readings, for the record (not decisive):")
+    W(f"  pooled, head {HEAD_US[1]:.0f} us: "
+      + (", ".join(twin_ranking(own, us_u, HEAD_US[1], idx)[:TWIN_COUNT])
+         or "none"))
+    W(f"  TRAIN alone (TRAIN-T owners, TRAIN rates), head {HEAD_US[0]:.0f} "
+      "us: " + (", ".join(twin_ranking(own_t, us_t, HEAD_US[0],
+                                       idx)[:TWIN_COUNT]) or "none"))
+    W(f"  TRAIN-X alone, head {HEAD_US[0]:.0f} us: "
+      + (", ".join(twin_ranking(own_x, us_x, HEAD_US[0], idx)[:TWIN_COUNT])
+         or "none"))
+    W("")
+    W("TRAIN-X tail: problem, condition, fastest s, fastest lanes")
+    for p, c in sorted(tail_x):
+        W(f"  {p}\t{c}\t{fmt(xpool.vbs(p))}\t{','.join(xpool.fastest(p))}")
+    with open(xp.m("decisions_a24.txt"), "w") as fp:
+        fp.write("\n".join(out) + "\n")
+    print("\n".join(out))
+
+
 TABLES_README = [
     "Lane-matrix pool tables (docs/plans/enigma_portfolio.md 5.2 step 4),",
     "built by tools/atp_enigma/matrix_tables.py --tables from matrix.tsv",
@@ -2749,15 +2888,18 @@ def main():
     ap.add_argument("--lanes", default="~/.cache/thvm/enigma/matrix/lanes.txt")
     g = ap.add_mutually_exclusive_group(required=True)
     for m in ("seal", "validate", "supplement", "tables", "decisions",
-              "all", "xjobs", "xmatrix"):
+              "all", "xjobs", "xmatrix", "xtwins"):
         g.add_argument("--" + m, action="store_true")
     g.add_argument("--t7c", metavar="REPLICA_TSV")
     a = ap.parse_args()
-    if a.xjobs or a.xmatrix:
+    if a.xjobs or a.xmatrix or a.xtwins:
         xp = XPaths(a.x_dir, a.corpus_dir, a.j13_names, a.lanes, a.sealed_dir)
         os.makedirs(xp.x, exist_ok=True)
         if a.xjobs:
             mode_xjobs(xp)
+            return
+        if a.xtwins:
+            mode_xtwins(Paths(a.matrix_dir, a.sealed_dir), xp)
             return
         sys.exit(0 if mode_xmatrix(xp) else 1)
     paths = Paths(a.matrix_dir, a.sealed_dir)

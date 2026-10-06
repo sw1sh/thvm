@@ -363,6 +363,7 @@ matrix_tables.py --decisions  # section 5.3 -> decisions_5_3.txt, dev_t.tsv, tra
 matrix_tables.py --all        # --validate, --supplement (when its rows exist), --tables, --decisions
 matrix_tables.py --xjobs      # the synthetic -10 corpus's matrix (amendment A22): job lists in ~/.cache/thvm/enigma/ifeq10/matrix
 matrix_tables.py --xmatrix    # its rows -> validate.txt, xmatrix.tsv, tables/ (T1-T4, T8, X10 per split), label_harvest_jobs.tsv
+matrix_tables.py --xtwins     # section 5.3's twin rule over TRAIN and TRAIN-X (amendment A24) -> decisions_a24.txt
 ```
 
 The X modes run the same matrix on the corpus that passed G2.6 (section
@@ -381,8 +382,15 @@ prefix, and X10, which singles out the six lanes gated on the -10 shape
 (horn-cd, horn-back and ifeq on an ifeq dispatcher; equals, narrowq and
 equals-twee on a non-ground goal) against the Horn-release, Horn-free and
 FOF groups.  `label_harvest_jobs.tsv` lists every TRAIN-X pair proved at
-60 s.  `test_matrix_tables.py` holds known-answer tests of both modes on
-synthetic data (pods only).
+60 s.  `--xtwins` applies section 5.3's twin-family rule to TRAIN and
+TRAIN-X together (amendment A24): the tail is TRAIN-T (`train_t.tsv`)
+plus the TRAIN-X hard tail of `xmatrix.tsv`, each tail problem owned by
+its fastest lanes, and the time per selection is T5's median over the
+pooled TRAIN and TRAIN-X rows; horn-cd and horn-back, which search in
+the CLI's Horn loops, are ineligible.  It writes the four families, the
+replacement order and the other readings to `decisions_a24.txt` in the
+X directory.  `test_matrix_tables.py` holds known-answer tests of the
+three X modes on synthetic data (pods only).
 
 The X matrix ran on 2026-10-06 (plan section 5.4, registry row "lane
 matrix of the synthetic -10 corpus"): 85,560 of 85,560 rows on binary

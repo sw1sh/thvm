@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Known-answer tests for the X modes of matrix_tables.py (plan amendment
-A22): the job lists of the synthetic -10 corpus (--xjobs) and the
-validation and tables of its lane matrix (--xmatrix).
+"""Known-answer tests for the X modes of matrix_tables.py (plan amendments
+A22 and A24): the job lists of the synthetic -10 corpus (--xjobs), the
+validation and tables of its lane matrix (--xmatrix), and the twin-family
+rule over TRAIN and TRAIN-X (--xtwins).
 
 Synthetic data only; nothing here runs a prover.  Pods only, like every
 test of this repository:
@@ -387,6 +388,135 @@ class XModes(unittest.TestCase):
             last = fp.read().splitlines()[1].split("\t")
         self.assertEqual((last[0], last[3], last[-1]),
                          ("GRP001-1", "wm", "GRP001"))
+
+
+# --xtwins (amendment A24).  Pool: two TRAIN problems, a J13 stem-mate and
+# a DEV-T train problem (both out of TRAIN), a heldout one.  TRAIN-T owners
+# come from train_t.tsv.  X: five TRAIN-X problems whose fastest lane needs
+# more than 10 s, one where every lane ends on the memory guard, one easy
+# one, and a DEV-X problem that must not count.
+POOL = {"LAT001-1": "train", "GRP001-1": "train", "BOO001-2": "train",
+        "REL001-1": "train", "COL001-1": "heldout"}
+TRAIN_T = {"LAT001-1": "encompass", "GRP001-1": "horn-cd,twee"}
+XSPLIT = {"LCL001-1-10": "TRAIN-X", "LCL002-1-10": "TRAIN-X",
+          "SYN001-1-10": "TRAIN-X", "KLE001-1-10": "TRAIN-X",
+          "GRP002-1-10": "TRAIN-X", "ALG001-1-10": "TRAIN-X",
+          "PUZ001-1-10": "TRAIN-X", "LAT001-1-10": "DEV-X"}
+XPROVED = {("LCL001-1-10", "tgt-sel"): 12.0, ("LCL001-1-10", "twee"): 20.0,
+           ("LCL002-1-10", "tgt-sel"): 15.0,
+           ("LCL002-1-10", "twee-deep"): 15.0,
+           ("SYN001-1-10", "horn-cd"): 11.0, ("KLE001-1-10", "wm"): 30.0,
+           ("GRP002-1-10", "tgt-ax"): 40.0, ("ALG001-1-10", "twee"): 2.0,
+           ("LAT001-1-10", "bare"): 20.0}
+
+
+def rate(problem, lane, side):
+    """Selections per CPU second: 1000 (1000 us per selection) except
+    tgt-ax, 10000 everywhere (100 us, under every bar), and wm, 10000 on
+    the pool (it passes the bar only pooled).  The problems outside TRAIN
+    select at 1 per second, so including them would move the medians."""
+    if side == "pool" and problem in ("BOO001-2", "REL001-1"):
+        return 1
+    if lane == "tgt-ax" or (lane == "wm" and side == "pool"):
+        return 10000
+    return 1000
+
+
+def row16(problem, lane, split, side):
+    if (problem, lane) in XPROVED:
+        w, cls, ex, szs = XPROVED[(problem, lane)], "proved", "0", \
+            "Unsatisfiable"
+    elif problem == "PUZ001-1-10":
+        w, cls, ex, szs = 20.0, "memory-guard", "1", "GaveUp"
+    else:
+        w, cls, ex, szs = 59.5, "wall", "1", "Timeout"
+    steps = rate(problem, lane, side) * int(w)
+    return "\t".join([problem, lane, split, ex, szs, f"{w:.2f}",
+                      f"{int(w)}.00", "20000", cls, str(steps), "10", "1000",
+                      "", "synthetic", "1", "14"])
+
+
+class XTwins(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="test_matrix_tables_xtwins_")
+        t = self.tmp
+        self.m = os.path.join(t, "matrix")
+        self.x = os.path.join(t, "x")
+        os.makedirs(self.m)
+        os.makedirs(self.x)
+
+        def w(path, text):
+            with open(path, "w") as fp:
+                fp.write(text)
+
+        lanes = "".join(l + "\n" for l in LANES)
+        w(os.path.join(self.m, "lanes.txt"), lanes)
+        w(os.path.join(self.x, "lanes.txt"), lanes)
+        w(os.path.join(self.m, "problems.tsv"),
+          "".join(f"{p}\tProblems/{p[:3]}/{p}.p\t{s}\ttptp\n"
+                  for p, s in POOL.items())
+          + "BOO001-1\tUEQ/BOO001-1.p\tj13\tj13local\n")
+        w(os.path.join(self.m, "matrix.tsv"),
+          "".join(row16(p, l, s, "pool") + "\n"
+                  for p, s in POOL.items() for l in LANES))
+        w(os.path.join(self.m, "train_t.tsv"),
+          "problem\tcondition\tfastest_s\towner\tstem\tstem_hash\n"
+          + "".join(f"{p}\tfastest>10s\t11.00\t{o}\t{p[:6]}\t60\n"
+                    for p, o in TRAIN_T.items()))
+        w(os.path.join(self.m, "dev_t.tsv"),
+          "problem\tsplit\tcondition\tfastest_s\towner\tstem\tstem_hash\n"
+          "REL001-1\ttrain\tfastest>10s\t12.00\twm\tREL001\t10\n"
+          "COL001-1\theldout\tfastest>10s\t13.00\twm\tCOL001\t20\n")
+        w(os.path.join(self.x, "problems.tsv"),
+          "".join(f"{p}\t{s}/Problems/{p[:3]}/{p}.p\t{s}\t{p[:6]}\n"
+                  for p, s in XSPLIT.items()))
+        w(os.path.join(self.x, "xmatrix.tsv"),
+          "".join(row16(p, l, s, "x") + "\n"
+                  for p, s in XSPLIT.items() for l in LANES))
+        self.j13 = os.path.join(t, "j13_names.txt")
+        w(self.j13, "BOO001-1\n")
+        sealed = os.path.join(t, "sealed")
+        self.paths = mt.Paths(self.m, sealed)
+        self.xp = mt.XPaths(self.x, os.path.join(t, "corpus"), self.j13,
+                            os.path.join(self.x, "lanes.txt"), sealed)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def run_mode(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            mt.mode_xtwins(self.paths, self.xp)
+        with open(os.path.join(self.x, "decisions_a24.txt")) as fp:
+            return fp.read()
+
+    def test_known_answer(self):
+        t = self.run_mode()
+        # Owners: tgt-sel 2 (one tie with twee-deep), horn-cd 2 (TRAIN-T's
+        # tie with twee, and SYN001), then 1 each, in SCHEDULE order: wm,
+        # twee, twee-deep, tgt-ax, encompass.  horn-cd is ineligible (A5),
+        # tgt-ax is under 700 us per selection, wm passes only pooled.
+        self.assertIn("at least 700 us per selection): tgt-sel, wm, twee, "
+                      "twee-deep\n", t)
+        self.assertIn("(a family that fails G2.1 or G2.2): encompass\n", t)
+        self.assertIn("  pooled, head 113 us: none\n", t)
+        self.assertIn("head 35 us: twee, encompass\n", t)
+        self.assertIn("  TRAIN-X alone, head 35 us: tgt-sel, wm, "
+                      "twee-deep\n", t)
+        self.assertIn("the TRAIN-X hard tail, 6 of 7 problems (section 1.4: "
+                      "all-searchers-memory-guard 1, fastest>10s 5;", t)
+        self.assertIn("pooled over TRAIN (2 problems", t)
+        wm = [l for l in t.splitlines() if l.startswith("   wm ")][0].split()
+        self.assertEqual(wm[1:], ["0", "1", "1", "100", "1000", "1000"])
+        self.assertIn("  LCL002-1-10\tfastest>10s\t15.00\ttwee-deep,tgt-sel",
+                      t)
+        self.assertNotIn("LAT001-1-10", t)
+
+    def test_refuses_a_j13_stem_mate_in_train_t(self):
+        with open(os.path.join(self.m, "train_t.tsv"), "a") as fp:
+            fp.write("BOO001-2\tfastest>10s\t11.00\twm\tBOO001\t60\n")
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.run_mode()
 
 
 if __name__ == "__main__":
