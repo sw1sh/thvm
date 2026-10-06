@@ -398,7 +398,7 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     CUDA_JIT_DISK_WRITES++;
   }
 
-module_load:
+module_load:;
   // --- module load + function lookup -------------------------------
   CUmodule module;
   CUresult cr = cuModuleLoadData(&module, ptx);

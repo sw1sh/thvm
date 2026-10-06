@@ -165,13 +165,10 @@ int main(void) {
   Term pd = uop_pad(rs, 2, pad_be);
 
   // 3-level nested UPat: PAD(RESHAPE(SHRINK(?0))).
-  static UPat const wild_in     = {0, 0xFF, 0, 0, NULL, NULL};
-  static UPat const shrink_kids[1] = {wild_in};
-  static UPat const pat_shrink = {UOP_SHRINK, 1, 0, -1, shrink_kids, NULL};
-  static UPat const reshape_kids[1] = {pat_shrink};
-  static UPat const pat_reshape = {UOP_RESHAPE, 1, 0, -1, reshape_kids, NULL};
-  static UPat const pad_kids[1] = {pat_reshape};
-  static UPat const pat_pad_chain = {UOP_PAD, 1, 0, -1, pad_kids, NULL};
+  static UPat const shrink_kids[1]  = {{0, 0xFF, 0, 0, NULL, NULL}};
+  static UPat const reshape_kids[1] = {{UOP_SHRINK, 1, 0, -1, shrink_kids, NULL}};
+  static UPat const pad_kids[1]     = {{UOP_RESHAPE, 1, 0, -1, reshape_kids, NULL}};
+  static UPat const pat_pad_chain   = {UOP_PAD, 1, 0, -1, pad_kids, NULL};
 
   Term bindings_chain[UPAT_NUM_BINDINGS] = {0};
   CHECK(upat_match(&pat_pad_chain, pd, bindings_chain));
@@ -197,9 +194,7 @@ int main(void) {
   Term zero  = term_new(0, TAG_NUM, DT_INT32, 0);
   Term ie    = uop_index_e(buf_a, zero);
 
-  static UPat const ie_buf_pat  = {UOP_BUFFER, 0, 0, 0, NULL, NULL};
-  static UPat const ie_addr_pat = {0, 0xFF,    0, 1, NULL, NULL};
-  static UPat const ie_kids[2]  = {ie_buf_pat, ie_addr_pat};
+  static UPat const ie_kids[2]  = {{UOP_BUFFER, 0, 0, 0, NULL, NULL}, {0, 0xFF, 0, 1, NULL, NULL}};
   static UPat const pat_index_e = {UOP_INDEX_E, 2, 0, -1, ie_kids, NULL};
 
   Term bindings_ie[UPAT_NUM_BINDINGS] = {0};
