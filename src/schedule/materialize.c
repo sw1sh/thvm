@@ -4781,44 +4781,6 @@ static void topo_sort_buffers_unified(Term root) {
 fn u32 materialize_boundary_count(void)         { return BOUNDARY_ORDER_LEN; }
 fn u64 materialize_boundary_at(u32 i)           { return i < BOUNDARY_ORDER_LEN ? BOUNDARY_ORDER[i] : 0; }
 
-// Single-output kernel accessors.  Every kernel writes exactly one
-// output buffer (output_tid family); slot 0 maps to the per-kernel
-// fields, all other slots return 0 / sentinels.
-fn u32 kernel_entry_output_count(u32 kid) {
-  if (kid >= KERNELS_NEXT) return 0;
-  return 1u;
-}
-
-fn u32 kernel_entry_output_tid_at(u32 kid, u32 idx) {
-  if (kid >= KERNELS_NEXT || idx != 0) return 0;
-  return KERNELS[kid].output_tid;
-}
-
-fn u32 kernel_entry_output_dtype_at(u32 kid, u32 idx) {
-  if (kid >= KERNELS_NEXT || idx != 0) return 0;
-  return KERNELS[kid].output_dtype;
-}
-
-fn int kernel_entry_output_shape_at(u32 kid, u32 idx, Shape *out) {
-  if (kid >= KERNELS_NEXT || out == NULL || idx != 0) return 0;
-  *out = KERNELS[kid].output_shape;
-  return 1;
-}
-
-fn u32 materialize_boundary_depth_at(u32 i) {
-  if (i >= BOUNDARY_ORDER_LEN) return 0;
-  u32 ridx = bufferize_info_find(BOUNDARY_ORDER[i]);
-  if (ridx == 0xFFFFFFFFu) return 0;
-  return BOUNDARY_DEPTH[ridx];
-}
-
-fn u32 materialize_boundary_last_use_at(u32 i) {
-  if (i >= BOUNDARY_ORDER_LEN) return 0;
-  u32 ridx = bufferize_info_find(BOUNDARY_ORDER[i]);
-  if (ridx == 0xFFFFFFFFu) return 0;
-  return BOUNDARY_LAST_USE[ridx];
-}
-
 // === view-only path for movement ops (g2c1) ===
 //
 // RESHAPE / EXPAND / PERMUTE / SHRINK / FLIP rewrite a TenDesc's

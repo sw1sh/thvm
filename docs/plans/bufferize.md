@@ -3,8 +3,9 @@
 Status (2026-10-07): the data layer this page plans is deleted.
 `src/schedule/bufferize.c` (`BUFFERIZE_BUFS`, the B_STORE and B_INDEX
 tables, the cost fields, lifetimes, schedule key and the
-`DUMP_BUFFERIZE*` dumps), `KernelEntry.input_source_buffer_ids` and
-`tests/test_bufferize.c` are gone: nothing outside those tests and
+`DUMP_BUFFERIZE*` dumps), `KernelEntry.input_source_buffer_ids`, the
+`kernel_entry_output_*` accessors and `tests/test_bufferize.c` are
+gone: nothing outside those tests and
 dumps read them, and building them walked every realized buffer's
 producer tree on every realize.  Boundary selection is
 `bufferize_classify` and the unified rangeify pass.  The rest of this

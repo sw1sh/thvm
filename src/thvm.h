@@ -1880,18 +1880,6 @@ fn void bufferize_classify(Term root);
 // code-emit can iterate boundaries in dependency order.
 fn u32  materialize_boundary_count(void);
 fn u64  materialize_boundary_at(u32 i);
-// Depth + last-use lookup for the i-th boundary in BOUNDARY_ORDER.
-// Returns 0 when the boundary index is out of range.
-fn u32  materialize_boundary_depth_at(u32 i);
-fn u32  materialize_boundary_last_use_at(u32 i);
-
-// Single-output kernel accessors.  Slot 0 returns the legacy
-// `output_tid` family; other slots return 0 / sentinels.
-// `kernel_entry_output_count` returns 1 for every live kernel.
-fn u32  kernel_entry_output_count(u32 kid);
-fn u32  kernel_entry_output_tid_at(u32 kid, u32 idx);
-fn u32  kernel_entry_output_dtype_at(u32 kid, u32 idx);
-fn int  kernel_entry_output_shape_at(u32 kid, u32 idx, Shape *out);
 
 // Leaf utilities other compilation units (realize_classify,
 // gc_mark, wnf/redex, interact/uop_kernel) reference.
