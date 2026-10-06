@@ -2632,7 +2632,8 @@ static Term mk_sorted(u32 *seed, u32 sort, u32 depth) {
   return term_new_ctr(lab, kids, n);
 }
 
-enum { SER_N = 3000, SER_BUF = 1u << 16 };
+// The pretty-term pin fills its largest cap (1 << 16) plus an 8-byte canary.
+enum { SER_N = 3000, SER_BUF = (1u << 16) + 8u };
 
 static void pin_serialize(u32 *seed) {
   u8 *rb = (u8 *)malloc(SER_BUF);

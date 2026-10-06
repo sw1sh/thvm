@@ -885,6 +885,17 @@ static size_t phi_read_all(int fd, char *buf, size_t n) {
 
 enum { PHI_OK = 0, PHI_FAILED = 2, PHI_OVER_BUDGET = 3 };
 
+// The calling process's CPU seconds; a forked child's clock starts at zero.
+static double phi_cpu_s(void) {
+#if defined(CLOCK_PROCESS_CPUTIME_ID)
+  struct timespec ts;
+  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0) {
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+  }
+#endif
+  return 0.0;
+}
+
 // phi(p) of the TPTP problem in `file` and, when lanes is not NULL, the
 // static gate replica for every SCHEDULE lane (lanes[N_SCHED]), computed
 // in a child process that gets cpu_budget_s seconds of CPU (0: no limit).
@@ -946,6 +957,11 @@ static int tp_problem_features(const char *file, AtpPhi *phi, PhiMeta *meta,
         ? (TpLaneGate *)calloc(n_lanes, sizeof(TpLaneGate)) : NULL;
     int rc = (n_lanes > 0 && cl == NULL) ? PHI_FAILED
                                          : phi_compute(file, &cp, &cm, cl);
+    // The profiling timer fires only on a scheduler tick, so a replay that
+    // ends inside its first tick would pass any budget below one tick.
+    if (rc == 0 && cpu_budget_s > 0.0 && phi_cpu_s() > cpu_budget_s) {
+      rc = PHI_OVER_BUDGET;
+    }
     if (rc == 0) {
       memcpy(buf, &cp, sizeof cp);
       memcpy(buf + off_meta, &cm, sizeof cm);
@@ -972,8 +988,9 @@ static int tp_problem_features(const char *file, AtpPhi *phi, PhiMeta *meta,
     // Exit 2 has named its reason already.
     if (w != pid) {
       fprintf(stderr, "FindProof: problem features: %s: lost the replay\n", file);
-    } else if (WIFSIGNALED(st) && WTERMSIG(st) == SIGPROF &&
-               cpu_budget_s > 0.0) {
+    } else if (cpu_budget_s > 0.0 &&
+               ((WIFSIGNALED(st) && WTERMSIG(st) == SIGPROF) ||
+                (WIFEXITED(st) && WEXITSTATUS(st) == PHI_OVER_BUDGET))) {
       fprintf(stderr, "FindProof: problem features: %s: phi(p) exceeded its "
               "%.2f s CPU budget\n", file, cpu_budget_s);
       free(buf);

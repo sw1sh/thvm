@@ -540,7 +540,10 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
   replay's environment variable, term-heap copies, /tmp file and exits
   never reach the caller; phi(p) alone gets a 1 s CPU budget
   (`PHI_CPU_BUDGET_S`, exit 3 past it), so a schedule parent can call it
-  before it launches the lanes.  `--lane-flags=NAME` prints a lane's
+  before it launches the lanes.  The child's profiling timer stops a
+  replay past the budget, and the child also reads its own CPU clock
+  when it ends: the timer fires only on a scheduler tick, so a replay
+  shorter than one tick would pass any budget below one tick.  `--lane-flags=NAME` prints a lane's
   flags.  `tools/atp_enigma/phi.py` loads the rows for a trainer
   (pinned columns, layout version, float32).
   `bin/test_atp_problem_features` checks the features, verdicts and
