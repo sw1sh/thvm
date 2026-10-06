@@ -481,10 +481,12 @@ records, which carry the trace size at each pick.
 TPTP's -10 unit-equality encoding ([CS18]) and exits.  It is a port of the
 jukebox `horn-to-unit` pipeline that produced TPTP's -10 files (clausifier,
 encoding and output naming, `tools/atp_cli/ifeq10.c`), written to
-reproduce their dispatcher axioms, names, clause order and goal form.  None
-of it has run yet: the checks below run on pods, and until they pass the
-match with TPTP's files is a claim about the eleven reference cases, with
-the ALL=1 survey as its held-out test.  The FOF front end (`fof_prepass.c`)
+reproduce their dispatcher axioms, names, clause order and goal form.  On
+the binary of main 6a4b244b the eleven reference cases match exactly, and
+the ALL=1 survey, the held-out test of the port, matches all 158 further
+[CS18] pairs outside the J13 stems: 152 exactly, 5 with other clause names,
+1 with its ifeq conditions stacked in another order (gate G2.6, plan
+section 5.4, 2026-10-06).  The FOF front end (`fof_prepass.c`)
 is not used: it encodes for proving, with one dispatcher and a
 `false != true` goal; plan section 5.4 records this departure from the
 wording of M2 deliverable 5.  Exit codes: 0 encoded, 2 input or write
@@ -565,6 +567,11 @@ DEV-T and the pool's train split.  The manifest also carries each source's
 rating (training weights, plan section 3.2), its includes (the axiom sets
 behind the axiom-novel subset, section 1.4) and its number of sP
 definitions (encodings that no TPTP -10 file is a reference for).
+
+The corpus that passed G2.6 (2026-10-06, binary 11fad6a4cb94..., the
+registry row "synthetic -10 corpus" holds every sha256) is in
+`~/.cache/thvm/enigma/ifeq10/corpus/`: TRAIN-X 1,464 problems from 36
+domains, DEV-X 396 from 28, 53 encodings dropped as J13 duplicates.
 
 The driver fingerprints its inputs (the binary, the lists, the TPTP
 release and problem list, itself, `ifeq10_keys.py` and `ifeq10_diff.py`,
