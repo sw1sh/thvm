@@ -651,16 +651,12 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 // including multi-input X im2col, elementwise, reduce,
 // movement-fused subtrees).
 //
-// Bumps KERNEL_LIFT_ATTEMPTS / SUCCESSES counters as it goes; readable
-// via kernel_lift_attempts() / kernel_lift_successes() for diagnostics.
-//
 // Passes cached_lift.store_root directly into
 // cg_render_uop_kernel_root, which discovers buffer slots structurally
 // from the DAG via UOP_BUFFER.instance.  No in_bufs[] dependency:
 // kernel_lift.c stamps instance=slot+1 on each input BUFFER, so the
 // renderer reconstructs slot positions from the DAG itself.
 static char *cg_emit_via_uop(KernelEntry const *ke) {
-  kernel_lift_count_attempt();
   // THVM_DBG_REJECT: env-gated reject diagnostic.  These metal-render rejects
   // fall the kernel back to the CPU uop_walk interpreter (KDISPATCH_INTERPRETER)
   // -- a single-element scalar reduce, ~1000x slower for a matmul.  The print
@@ -698,7 +694,6 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
               (unsigned long long)ke->output_numel);
     return NULL;
   }
-  kernel_lift_count_success();
   // Render to a malloc'd string, matching cg_emit_tile_metal's
   // contract.  Use kernel name "k" so MTLLibrary lookup behaves like
   // the existing path.

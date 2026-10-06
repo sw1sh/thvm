@@ -2602,8 +2602,8 @@ static u32 ru_collect_closed_ranges(u32 i, Term *out_ranges, u32 cap) {
 // reached in topological order); a different consumer reading the same
 // shared producer has its own in_rngs at the same axis positions.
 // Without rewiring, the spliced subtree carries the producer-scope
-// axis_ids verbatim and uop_subtree_has_stranded_range trips because
-// cpu_uop_walk only sets up loop slots for the consumer's iter axes.
+// axis_ids verbatim, and cpu_uop_walk sets up loop slots only for the
+// consumer's iter axes.
 //
 // CAP at 2*RU_MAX_AXES so we have room for the OUT_RNGS rewire pairs
 // (one per axis, up to RU_MAX_AXES) PLUS the fresh-range injections
@@ -3734,9 +3734,9 @@ fn void pm_apply_rangeify(Term root) {
     // Any other free axis_id is a "stranded" producer-internal range:
     // a partial-realize child's closed_range leaked through the
     // BUFFERIZE inline rewriter, or a REDUCE-axis whose enclosing
-    // REDUCE got stripped past ru_rewrite_subtree.  Splicing such a
-    // subtree into a consumer trips uop_subtree_has_stranded_range
-    // because the consumer's iter scope has no slot for that axis.
+    // REDUCE got stripped past ru_rewrite_subtree.  Spliced into a
+    // consumer, such a subtree reads that axis at iter 0: the
+    // consumer's iter scope has no slot for it.
     // Force-realize converts the producer to a UOP_BUFFERIZE leaf so
     // the consumer reads via INDEX_E(BUFFERIZE, addr) at its own iter
     // and the inner ranges stay scoped to the producer's BUFFERIZE

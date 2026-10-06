@@ -61,13 +61,6 @@ static u32 tile_conv2d_reduce_unroll_from_opts(KernelEntry const *ke,
   return unroll;
 }
 
-// Coverage counter for the conv2d-flat DAG classifier.  Fires when
-// `cached_lift.store_root != 0` AND
-// `uop_dag_classify_conv2d_flat_shape` accepts.
-static u64 TILE_CONV2D_FLAT_DAG    = 0;
-
-fn u64 tile_conv2d_flat_dag_count   (void) { return TILE_CONV2D_FLAT_DAG; }
-
 static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
                                          TileConv2DInfo *out,
                                          int allow_cin1) {
@@ -89,7 +82,6 @@ static int tile_analyze_conv2d_flat_impl(KernelEntry const *ke,
   if (!uop_dag_classify_conv2d_flat_shape(ke->cached_lift.store_root)) {
     return 0;
   }
-  TILE_CONV2D_FLAT_DAG++;
 
   // Try the DAG-side full-shape extractor first.  When the lift
   // took the single-input path AND the address tree wasn't

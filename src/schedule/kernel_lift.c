@@ -2,19 +2,6 @@
 // UOP_STORE root for a scheduled kernel's boundary and package it as
 // KernelUopLift for the renderer / dispatcher.  KernelUopLift is
 // declared in thvm.h.
-//
-// Coverage counters track how many cg_emit_via_uop attempts the lift
-// fielded vs how many produced a usable store_root.  Bumped from
-// render_metal.c (which is #include'd before this TU in the unity
-// build and reaches the static globals via the count_attempt /
-// count_success accessors); read from thvm.c's lift-coverage dump.
-static u64 KERNEL_LIFT_ATTEMPTS;
-static u64 KERNEL_LIFT_SUCCESSES;
-
-fn u64 kernel_lift_attempts(void)        { return KERNEL_LIFT_ATTEMPTS; }
-fn u64 kernel_lift_successes(void)       { return KERNEL_LIFT_SUCCESSES; }
-fn void kernel_lift_count_attempt (void) { KERNEL_LIFT_ATTEMPTS++; }
-fn void kernel_lift_count_success (void) { KERNEL_LIFT_SUCCESSES++; }
 
 fn void kernel_lift_reserve(KernelUopLift *lift, u32 needed) {
   if (needed <= lift->in_cap) {

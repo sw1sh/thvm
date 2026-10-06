@@ -133,7 +133,7 @@ The key code is `ru_seed_boundary_holds` (`rangeify_unified.c:163-166`): in defa
 ### 3.5 Recompute-vs-materialize decision
 
 - **tinygrad**: implicit in the walk; `pm_remove_bufferize` later inlines buffers whose recompute cost is acceptable, relying on symbolic coverage proofs.
-- **thvm**: explicit strand checks - `bufferize_value_would_strand` (`materialize.c:2465-2499`) and `strand_loop_product` (`materialize.c:2841-2865`) detect a RANGE axis that would be left unbound (a reduce loop iterating 0 or wrong times) and force a boundary. `THVM_FUSE_CONV_BWD`'s strand cap (`RU_STRAND_REALIZE_MAX_NUMEL`, ~4M elem / ~16 MB f32) lets large unfold products fuse as views while still catching genuinely stranded axes. These are correct but more conservative than tinygrad's symbolic proof, so they gate some legal fusions.
+- **thvm**: an explicit strand check - `bufferize_value_would_strand` (`materialize.c`) detects a RANGE axis that would be left unbound (a reduce loop iterating 0 or wrong times) and forces a boundary. `THVM_FUSE_CONV_BWD`'s strand cap (`RU_STRAND_REALIZE_MAX_NUMEL`, ~4M elem / ~16 MB f32) lets large unfold products fuse as views while still catching genuinely stranded axes. These are correct but more conservative than tinygrad's symbolic proof, so they gate some legal fusions.
 
 ### 3.6 Multi-consumer validity union
 
@@ -263,7 +263,7 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 | `THVM_CUDA_GPU_TIME` | CUDA-event timing | off |
 | `CUDA_PATH` / `CUDA_HOME` | Toolchain location | env |
 
-**Debug / trace** (no behavior change): `THVM_BUFFERIZE_DEBUG`, `DUMP_MATMUL_DETECT`, `THVM_DUMP_BOUNDARY_ORDER`, `THVM_DUMP_STORE_TREE`, `THVM_DUMP_DIRECT_COUNT`, `THVM_DUMP_STRAND_GUARD`, `THVM_DUMP_KERNEL_SHAPE`, `THVM_DUMP_KERNEL_SRC`, `THVM_DUMP_LIFT_REJECT`, `THVM_DUMP_LIFT_COVERAGE`, `THVM_UPCAST_TRACE`, `THVM_GROUP_REDUCE_TRACE`, `THVM_HANDOPT_TRACE`, `THVM_ROUTE_TRACE`, `THVM_KCNT`, `THVM_KERNEL_PROFILE`, `THVM_DISPATCH_TRACE`, `THVM_UOP_GRAPH_SIMPLIFY`, `DUMP_UOP_REWRITE`, `THVM_CUDA_*` (LOG_COMPILES, DUMP_ALL_PTX, DUMP_FAIL_PTX, DUMP_KID, DUMP_SHARED, DUMP_FAILED_KERNEL, DUMP_DISPATCH, LAUNCH_TRACE, RENDER_TRACE, ALLOC_TRACE, JIT_GRAPH_TRACE), `THVM_CPU_UOP_WALK_TRACE`, `THVM_TRACE_UOP_WALK_DECLINE`, `THVM_JIT_REPLAY_TRACE`, `THVM_JIT_REPLAY_DEDUP_TRACE`, `THVM_ARENA_DUMP[_BUFS]`, `THVM_WL_TENSOR_VIEW_DEBUG`, `THVM_AOT_METAL_DUMP`.
+**Debug / trace** (no behavior change): `THVM_BUFFERIZE_DEBUG`, `DUMP_MATMUL_DETECT`, `THVM_DUMP_BOUNDARY_ORDER`, `THVM_DUMP_DIRECT_COUNT`, `THVM_DUMP_KERNEL_SHAPE`, `THVM_DUMP_KERNEL_SRC`, `THVM_DUMP_LIFT_REJECT`, `THVM_UPCAST_TRACE`, `THVM_GROUP_REDUCE_TRACE`, `THVM_HANDOPT_TRACE`, `THVM_ROUTE_TRACE`, `THVM_KCNT`, `THVM_KERNEL_PROFILE`, `THVM_DISPATCH_TRACE`, `THVM_UOP_GRAPH_SIMPLIFY`, `DUMP_UOP_REWRITE`, `THVM_CUDA_*` (LOG_COMPILES, DUMP_ALL_PTX, DUMP_FAIL_PTX, DUMP_KID, DUMP_SHARED, DUMP_FAILED_KERNEL, DUMP_DISPATCH, LAUNCH_TRACE, RENDER_TRACE, ALLOC_TRACE, JIT_GRAPH_TRACE), `THVM_CPU_UOP_WALK_TRACE`, `THVM_TRACE_UOP_WALK_DECLINE`, `THVM_JIT_REPLAY_TRACE`, `THVM_JIT_REPLAY_DEDUP_TRACE`, `THVM_ARENA_DUMP[_BUFS]`, `THVM_WL_TENSOR_VIEW_DEBUG`, `THVM_AOT_METAL_DUMP`.
 
 **ATP / Wolfram (out of ML-kernel scope):** `THVM_ATP_TRACE_MAX`, `THVM_ATP_FLATTERM`, `THVM_ATP_CP_WEIGHT`, `THVM_ATP_AUTO_MAXW`, `THVM_ATP_MNF`, `THVM_ATP_CP_DATASET`, `THVM_NF_PARALLEL_STEP_SESSION`.
 

@@ -168,12 +168,8 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 | `THVM_DUMP_KERNEL_SHAPE` | off | Dump kernel shapes. |
 | `THVM_DUMP_KERNEL_SRC` | off | Dump generated kernel source. |
 | `THVM_DUMP_TILE_JIT_SRC` | off | Dump tiled-JIT kernel source. |
-| `THVM_DUMP_LIFT_COVERAGE` | off | Dump kernel-lift coverage stats. |
 | `THVM_DUMP_LIFT_REJECT` | off | Dump rejected lifts. |
 | `THVM_DUMP_MATMUL_DETECT` | off | Dump matmul detection. |
-| `THVM_DUMP_STORE_TREE` | off | Dump the store tree. |
-| `THVM_DUMP_STRAND_GUARD` | off | Dump stranded-buffer guards. |
-| `THVM_DEBUG_BYPASS_LAST` | off | Debug last-kernel bypass. |
 | `THVM_ROUTE_TRACE` | off | Trace PTX routing. |
 | `THVM_KCNT` | off | Kernel-count debug. |
 

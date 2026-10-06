@@ -136,9 +136,9 @@ accumulate and finish stores).  `uop_arity(UOP_AFTER)` stays 0 because
 the devectorizer's AFTER chains rely on it, so every materialize-time
 pass over a kernel root goes through `uop_root_map_stores` /
 `uop_root_each_store` ([src/uop/root_map_stores.c](../src/uop/root_map_stores.c)):
-the arange collapse, the walker rewrite with its REDUCE repair, the
-chain-fold scan and the resid / stranded / broadcast gates each see every
-store; `uop_dag_renumber_axes` gives all stores one dense axis-id space;
+the arange collapse, the walker rewrite with its REDUCE repair and the
+chain-fold scan each see every store; `uop_dag_renumber_axes` gives all
+stores one dense axis-id space;
 and `out_buf` is the buffer the stores write (`uop_root_store_buf`).
 Emit sets `KernelEntry.no_opts` for such a root, and for any kernel whose
 address holds a load (`uop_dag_has_dynamic_index`, a gather or scatter
@@ -149,9 +149,7 @@ The walker rewrite composes an input's view (a SHRINK offset, a permute,
 a prior-view chain) into the addresses over its underlying buffer, and the
 chain-fold scan marks those slots `input_chain_composed` so the backends
 bind that buffer as is: no pre-materialization, and no view-offset bias on
-the UOp walker's pointer.  The marks commit with the rewritten root
-whatever the resid / stranded / broadcast gates would report (the gates
-only count, under `THVM_DEBUG_BYPASS_LAST` / `THVM_DUMP_LIFT_COVERAGE`).
+the UOp walker's pointer.  The marks commit with the rewritten root.
 Such a slot reads past its view's numel (row `t` of `W` reaches `W`'s
 element `t*D+D-1`), so the BEAM / AUTOTUNE / JITBEAM isolated search gives
 a raw-buffer slot a scratch buffer of the whole buffer behind it, as

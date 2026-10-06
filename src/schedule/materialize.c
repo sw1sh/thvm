@@ -45,18 +45,6 @@ static u64  BOUNDARY_ORDER[BOUNDARY_ORDER_CAP];
 static u32  BOUNDARY_TID  [BOUNDARY_ORDER_CAP];   // emitted output TenDesc id
 static Term BOUNDARY_TERM [BOUNDARY_ORDER_CAP];   // emitted UOP_KERNEL term
 
-// Bypass-substitution telemetry: per-kernel counts for each safety
-// gate.  Read via bypass_kernel_*_count() from thvm.c's coverage dump.
-static u64 BYPASS_KERNEL_TOTAL         = 0;
-static u64 BYPASS_KERNEL_USED_UNIFIED  = 0;
-static u64 BYPASS_GATE_RESID           = 0;
-static u64 BYPASS_GATE_STRANDED        = 0;
-static u64 BYPASS_GATE_BCAST           = 0;
-fn u64  bypass_kernel_total_count       (void) { return BYPASS_KERNEL_TOTAL;        }
-fn u64  bypass_kernel_used_unified_count(void) { return BYPASS_KERNEL_USED_UNIFIED; }
-fn u64  bypass_gate_resid_count         (void) { return BYPASS_GATE_RESID;          }
-fn u64  bypass_gate_stranded_count      (void) { return BYPASS_GATE_STRANDED;       }
-fn u64  bypass_gate_bcast_count         (void) { return BYPASS_GATE_BCAST;          }
 // Per-BOUNDARY_ORDER slot, the UOP_BUFFERIZE Term the unified
 // rangeify pass emitted at this boundary (0 when the boundary has
 // no unified-pass record).  Populated by topo_sort_boundaries when
@@ -3913,18 +3901,13 @@ static Term unified_store_root_for_walker(KernelEntry *ke, Term root) {
   return uop_root_map_stores(root, unified_rewrite_store_for_walker, &st);
 }
 
-// Walk a (post-rewrite) UOp subtree and return 1 if any UOP_BUFFERIZE
-// survives.  Used as the unified-bypass safety gate: cpu_uop_walk's
-// INDEX_E handler only resolves UOP_BUFFER leaves, so a residual
-// BUFFERIZE means the kernel cannot execute via the bypass.
-//
-// Visited-set: the terms are hash-consed, so a resolved UOP `r` has a
-// stable heap loc `term_val(r) < HEAP_NEXT`.  We key a generation-stamped
-// loc-indexed array on that loc -> O(1) seen/mark, unbounded over the
-// whole DAG.  A shared `BufferizeScanArena` (one calloc'd `stamp` array of
-// size HEAP_NEXT + a monotonic `next_gen`) is opened once at each
-// top-level scan entry.  A `BufferizeScanVisited` is a lightweight handle
-// holding the arena + its own `gen`.
+// Visited-set for the emit-time DAG scans: the terms are hash-consed, so
+// a resolved UOP `r` has a stable heap loc `term_val(r) < HEAP_NEXT`.  We
+// key a generation-stamped loc-indexed array on that loc -> O(1)
+// seen/mark, unbounded over the whole DAG.  A shared `BufferizeScanArena`
+// (one calloc'd `stamp` array of size HEAP_NEXT + a monotonic `next_gen`)
+// is opened once at each top-level scan entry.  A `BufferizeScanVisited`
+// is a lightweight handle holding the arena + its own `gen`.
 //
 // Several of these walks are PATH-SENSITIVE on a bound axis set (`iter`):
 // at every BUFFERIZE / REDUCE descent the bound set changes, so cached
@@ -3947,13 +3930,11 @@ typedef struct {
 
 // PERSISTENT stamp buffer shared by every bufferize_scan: grown once to
 // HEAP_NEXT and reused across scans, with a global monotonic generation so each
-// open is an O(1) gen bump instead of a per-call calloc(HEAP_NEXT).  These
-// scans run in the 3 per-kernel emit gates (has_resid / has_stranded /
-// has_bcast); a fresh calloc per gate per kernel was O(N_kernels x HEAP_NEXT) =
-// O(N^2), the dominant deep-chain JIT-capture cost (28-block emit: ~7.8 ms of
-// 9.3 ms rewrite at N=8 lived in these gate callocs).  `gen` never resets per
-// scan -- it advances globally, so stale marks from a prior scan read as a
-// different gen ("unvisited").  64-bit gen never wraps in practice.
+// open is an O(1) gen bump instead of a per-call calloc(HEAP_NEXT): a fresh
+// calloc per scan per kernel is O(N_kernels x HEAP_NEXT) = O(N^2) on a deep
+// chain.  `gen` never resets per scan -- it advances globally, so stale marks
+// from a prior scan read as a different gen ("unvisited").  64-bit gen never
+// wraps in practice.
 static u32 *BUFSCAN_STAMP     = NULL;
 static u64  BUFSCAN_STAMP_CAP = 0;
 static u32  BUFSCAN_GEN       = 0;
@@ -4017,36 +3998,6 @@ static int bufferize_scan_seen(BufferizeScanVisited *v, Term t) {
   if (a->stamp[loc] == v->gen) return 1;
   a->stamp[loc] = v->gen;
   return 0;
-}
-
-static int bufferize_scan_rec(BufferizeScanVisited *v, Term t, u32 depth) {
-  if (depth > MAT_MAX_WALK_DEPTH) return 0;
-  Term r = term_resolve(t);
-  if (term_tag(r) != TAG_UOP) return 0;
-  if (bufferize_scan_seen(v, r)) return 0;
-  u8  op  = term_ext(r);
-  u64 loc = term_val(r);
-  if (op == UOP_BUFFERIZE) return 1;
-  if (op == UOP_KERNEL || op == UOP_BUFFER) return 0;
-  u8 ar = uop_arity(op);
-  for (u8 i = 0; i < ar; i++) {
-    if (bufferize_scan_rec(v, heap_read(loc + i), depth + 1)) return 1;
-  }
-  return 0;
-}
-
-static int bufferize_scan_store(Term store, void *ctx) {
-  return bufferize_scan_rec((BufferizeScanVisited *)ctx, store, 0);
-}
-
-static int uop_subtree_has_residual_bufferize(Term root) {
-  if (root == 0) return 0;
-  BufferizeScanArena arena;
-  BufferizeScanVisited v;
-  bufferize_scan_open(&v, &arena);
-  int rc = uop_root_each_store(root, bufferize_scan_store, &v);
-  bufferize_scan_close(&arena);
-  return rc;
 }
 
 // 1 iff a store of a gather / scatter kernel still holds a TAG_TEN, a
@@ -4202,16 +4153,11 @@ static void unified_fold_chain_commit_flags(KernelEntry *ke,
   marks->n_slots = 0;
 }
 
-// Per-kernel bypass safety gate: collect every UOP_RANGE axis_id
-// that appears in a STORE's addr or as the axis of a UOP_REDUCE
-// found anywhere in the value subtree.  Then verify every UOP_RANGE
-// leaf in the value subtree has an axis_id in that set.  A "stranded
-// range" -- one whose axis_id isn't iterated by the cpu_uop_walk loop
-// scaffolding -- silently reads only iter=0 and the kernel produces
-// wrong results.  Mirror: cpu_uop_walk only sets up loop slots for
-// ranges that appear in the STORE's addr (via uwalk_split_ranges) plus
-// the REDUCE axis (pushed in uwalk_run_reduce).  Anything else has no
-// home and reads as 0.
+// A "stranded" range is a UOP_RANGE whose axis_id cpu_uop_walk does not
+// iterate: it sets up loop slots only for the ranges in the STORE's addr
+// (uwalk_split_ranges) and the REDUCE axes (uwalk_run_reduce), so any
+// other range reads iter=0 and the kernel computes wrong results.
+// stranded_range_collect_addr gathers the addr axes into a RangeAxisSet.
 #define RANGE_AXIS_CAP 256
 typedef struct {
   u32   axes[RANGE_AXIS_CAP];
@@ -4252,56 +4198,7 @@ static void stranded_range_collect_addr(RangeAxisSet *iter_axes,
   }
 }
 
-static int stranded_range_check_value(RangeAxisSet const *iter_axes,
-                                      BufferizeScanVisited *v, Term t,
-                                      u32 depth) {
-  if (depth > MAT_MAX_WALK_DEPTH) return 0;
-  Term r = term_resolve(t);
-  if (term_tag(r) != TAG_UOP) return 0;
-  if (bufferize_scan_seen(v, r)) return 0;
-  u8  op  = term_ext(r);
-  u64 loc = term_val(r);
-  if (op == UOP_RANGE) {
-    u32 aid = (u32)term_val(heap_read(loc + 0));
-    if (range_axis_has(iter_axes, aid)) return 0;
-    // THVM_FUSE_CONV_BWD: a hash-cons-aliased REDUCE / realized-scope axis
-    // from a disjoint scope is bound when the fusing conv-bwd product
-    // splices into its contraction reduce; mirror the rangeify-side
-    // covered-check so it is not re-flagged stranded here.  (No-op when
-    // the fuse flag is off -- the fuse-bound set is empty.)
-    if (rangeify_unified_aid_is_fuse_bound(aid)) return 0;
-    return 1;
-  }
-  // UOP_BUFFERIZE is opaque: its stored value subtree carries closed_ranges
-  // (its own iter scope), not the consumer's.  cpu_uop_walk's INDEX_E case
-  // dispatches via uwalk_resolve_buf for a BUFFERIZE leaf (either a kernel
-  // input slot or, if unresolved, caught by has_resid before this gate
-  // matters) and never iterates the stored-value subtree at this consumer's
-  // iter.  Descending here yielded false-positive stranded reports for any
-  // unresolved BUFFERIZE residual whose body referenced producer-side
-  // RANGE leaves -- entirely unobservable from the walker's perspective.
-  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
-  if (op == UOP_REDUCE) {
-    // Enter every reduce axis into the iterated set for the body walk.
-    Term t = term_new(0, TAG_UOP, op, loc);
-    u32 n_axes = uop_reduce_n_axes(t);
-    RangeAxisSet inner = *iter_axes;
-    for (u32 i = 0; i < n_axes; i++) range_axis_add(&inner, uop_reduce_axis(t, i));
-    BufferizeScanVisited iv;
-    bufferize_scan_fresh(&iv, v);
-    return stranded_range_check_value(&inner, &iv, uop_reduce_src(t),
-                                      depth + 1);
-  }
-  u8 ar = uop_arity(op);
-  for (u8 i = 0; i < ar; i++) {
-    if (stranded_range_check_value(iter_axes, v, heap_read(loc + i),
-                                   depth + 1)) return 1;
-  }
-  return 0;
-}
-
-// Deep strand check: unlike stranded_range_check_value (which stops at
-// any BUFFERIZE), this DESCENDS into nested bufferizes that would be
+// Deep strand check: DESCENDS into nested bufferizes that would be
 // inlined, accumulating each one's closed_ranges into the bound set
 // (the inline substitutes those by the consumer's addr, so they are NOT
 // stranded).  A UOP_RANGE that survives -- not a closed_range of any
@@ -4408,8 +4305,9 @@ static int bufferize_strand_check_deep(RangeAxisSet const *iter,
   for (u32 i = 0; i < free->n; i++) {
     u32 aid = free->axes[i];
     if (range_axis_has(iter, aid)) continue;
-    // THVM_FUSE_CONV_BWD: hash-cons-aliased foreign reduce/realized axis
-    // (see stranded_range_check_value) -- bound at splice, not stranded.
+    // THVM_FUSE_CONV_BWD: a hash-cons-aliased REDUCE / realized-scope axis
+    // from a disjoint scope is bound when the fusing conv-bwd product
+    // splices into its contraction reduce, so it is not stranded.
     if (rangeify_unified_aid_is_fuse_bound(aid)) continue;
     return 1;
   }
@@ -4478,45 +4376,6 @@ static int bufferize_value_would_strand_c(Term buf, u32 node_idx,
   return rc;
 }
 
-// Returns 1 when a store of `root` has a UOP_RANGE leaf in its value
-// subtree whose axis_id is neither in the STORE's addr nor inside the
-// scope of an enclosing UOP_REDUCE.  cpu_uop_walk's loop scaffolding
-// has no slot for such a "stranded" range, so it reads iter=0 forever
-// and the kernel writes only the slice-0 result.
-static int stranded_range_in_store(Term store, void *ctx) {
-  (void)ctx;
-  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
-  u64 sloc = term_val(store);
-  Term s_addr  = heap_read(sloc + 1);
-  Term s_value = heap_read(sloc + 2);
-  BufferizeScanArena arena;
-  BufferizeScanVisited v;
-  bufferize_scan_open(&v, &arena);
-  RangeAxisSet iter_axes;
-  iter_axes.n = 0;
-  stranded_range_collect_addr(&iter_axes, &v, s_addr, 0);
-  BufferizeScanVisited vv;
-  bufferize_scan_fresh(&vv, &v);
-  int rc = stranded_range_check_value(&iter_axes, &vv, s_value, 0);
-  bufferize_scan_close(&arena);
-  return rc;
-}
-
-static int uop_subtree_has_stranded_range(Term root) {
-  if (root == 0) return 0;
-  return uop_root_each_store(root, stranded_range_in_store, NULL);
-}
-
-// Safety gate: scan the rewritten subtree for any UOP_INDEX_E reading
-// from a UOP_BUFFER input slot whose static numel is smaller than the
-// consumer's iter footprint (output STORE numel + any enclosing REDUCE
-// extents).  This indicates a stride-0 broadcast view where the
-// per-slot input_views[slot].strides would fold the broadcast axis to
-// CONST(0).  The unified bypass builds addr expressions from per-axis
-// ranges without consulting strides and reads out-of-bounds on the
-// 1-element backing store.  Until ru_pass threads view strides through
-// INDEX_E address construction, decline the bypass for these inputs.
-//
 // Compute the static numel of a UOP_BUFFER (product of dims).  Returns
 // 0 if t is not a UOP_BUFFER.
 static u64 uop_buffer_numel(Term t) {
@@ -4527,233 +4386,7 @@ static u64 uop_buffer_numel(Term t) {
   return n;
 }
 
-// Upper bound on the value an addr expression can produce, evaluated
-// statically from its UOP tree.  Returns UINT64_MAX when the expression
-// uses an op the estimator doesn't model (in which case the caller must
-// treat the read as potentially out-of-bounds).  The estimator's
-// purpose is to let `broadcast_input_scan_rec` decide whether an
-// INDEX_E read can statically exceed its BUFFER's numel.  If it can't,
-// the read is safe even though the consumer's REDUCE-multiplied iter
-// footprint exceeds buf_numel -- the addr just doesn't span the full
-// iter cube.
-#define ADDR_MAX_UNKNOWN ((u64)~0ull)
-static u64 addr_max_value(Term t, u32 depth) {
-  if (depth > 64) return ADDR_MAX_UNKNOWN;
-  Term r = term_resolve(t);
-  if (term_tag(r) != TAG_UOP) return ADDR_MAX_UNKNOWN;
-  u8  op  = term_ext(r);
-  u64 loc = term_val(r);
-  if (op == UOP_CONST) {
-    u64 bits = term_val(heap_read(loc + 0));
-    return bits;
-  }
-  if (op == UOP_RANGE) {
-    u32 ext = (u32)term_val(heap_read(loc + 2));
-    if (ext == 0) return 0;
-    return (u64)(ext - 1);
-  }
-  if (op == UOP_IADD) {
-    u64 a = addr_max_value(heap_read(loc + 0), depth + 1);
-    u64 b = addr_max_value(heap_read(loc + 1), depth + 1);
-    if (a == ADDR_MAX_UNKNOWN || b == ADDR_MAX_UNKNOWN) return ADDR_MAX_UNKNOWN;
-    if (a + b < a) return ADDR_MAX_UNKNOWN;
-    return a + b;
-  }
-  if (op == UOP_IMUL) {
-    u64 a = addr_max_value(heap_read(loc + 0), depth + 1);
-    u64 b = addr_max_value(heap_read(loc + 1), depth + 1);
-    if (a == ADDR_MAX_UNKNOWN || b == ADDR_MAX_UNKNOWN) return ADDR_MAX_UNKNOWN;
-    if (a != 0 && b > ADDR_MAX_UNKNOWN / a) return ADDR_MAX_UNKNOWN;
-    return a * b;
-  }
-  if (op == UOP_IDIV) {
-    // a / b: max <= max(a) / min(b).  When b is CONST > 0, that's
-    // max(a) / b_val.  Otherwise fall back to max(a) (b >= 1).
-    Term b_t = term_resolve(heap_read(loc + 1));
-    if (term_tag(b_t) == TAG_UOP && term_ext(b_t) == UOP_CONST) {
-      u64 bv = term_val(heap_read(term_val(b_t) + 0));
-      if (bv > 0) {
-        u64 a = addr_max_value(heap_read(loc + 0), depth + 1);
-        if (a == ADDR_MAX_UNKNOWN) return ADDR_MAX_UNKNOWN;
-        return a / bv;
-      }
-    }
-    return addr_max_value(heap_read(loc + 0), depth + 1);
-  }
-  if (op == UOP_IMOD) {
-    // a % b: max <= b - 1 when b is CONST > 0.
-    Term b_t = term_resolve(heap_read(loc + 1));
-    if (term_tag(b_t) == TAG_UOP && term_ext(b_t) == UOP_CONST) {
-      u64 bv = term_val(heap_read(term_val(b_t) + 0));
-      if (bv > 0) return bv - 1;
-    }
-    return ADDR_MAX_UNKNOWN;
-  }
-  return ADDR_MAX_UNKNOWN;
-}
-
-static int broadcast_input_scan_rec(KernelEntry const *ke,
-                                    BufferizeScanVisited *v, Term t,
-                                    u64 out_numel,
-                                    u32 depth) {
-  if (depth > MAT_MAX_WALK_DEPTH) return 0;
-  Term r = term_resolve(t);
-  if (term_tag(r) != TAG_UOP) return 0;
-  if (bufferize_scan_seen(v, r)) return 0;
-  u8  op  = term_ext(r);
-  u64 loc = term_val(r);
-  // INDEX_E(BUFFER, addr): the read is safe iff the addr expression's
-  // statically-bounded max value is < BUFFER.numel.  A bare
-  // numel-vs-iter-footprint check fires false positives on
-  //   - INDEX_E inside a REDUCE body whose addr is a bare reduce-axis
-  //     RANGE (max addr = extent-1, fully in-bounds of dims=[extent])
-  //   - INDEX_E whose addr uses fewer axes than the enclosing iter
-  //     cube (broadcast over the missing axes -- addr stays small)
-  // When `addr_max_value` returns UINT64_MAX (estimator doesn't model
-  // some op in the addr tree), fall back to the conservative
-  // numel-vs-footprint check.
-  //
-  // INDEX_E(TAG_TEN, addr): the unified pass inlines a producer
-  // BUFFERIZE's value subtree into the consumer.  When that subtree
-  // referenced a TAG_TEN that the consumer's input_tids[] does NOT
-  // carry, materialize.c's unified_rewrite_buffer_for_tid returns 0
-  // and the TAG_TEN is left in the rewritten tree -- cpu_uop_walk
-  // can't bind a runtime buffer for it and the kernel reads garbage.
-  // Decline so the bypass substitution skips this kernel.
-  if (op == UOP_INDEX_E) {
-    Term buf_t = term_resolve(heap_read(loc + 0));
-    if (term_tag(buf_t) == TAG_TEN) {
-      return 1;
-    }
-    if (term_tag(buf_t) == TAG_UOP && term_ext(buf_t) == UOP_BUFFER) {
-      u32 inst = uop_buffer_inst_get(buf_t);
-      // Output buf (inst=0) is the writer's own slot; skip the size check.
-      if (inst >= 1) {
-        u64 buf_numel = uop_buffer_numel(buf_t);
-        Term addr_t = term_resolve(heap_read(loc + 1));
-        u64 max_addr = addr_max_value(addr_t, 0);
-        if (max_addr != ADDR_MAX_UNKNOWN) {
-          if (buf_numel > 0 && max_addr >= buf_numel) {
-            return 1;
-          }
-          // addr is bounded < buf_numel -> safe regardless of out_numel.
-        } else {
-          int addr_is_zero = (term_tag(addr_t) == TAG_UOP
-                           && term_ext(addr_t) == UOP_CONST
-                           && term_val(heap_read(term_val(addr_t) + 0)) == 0);
-          if (!addr_is_zero
-              && buf_numel > 0 && out_numel > 0 && buf_numel < out_numel) {
-            return 1;
-          }
-        }
-      }
-    }
-  }
-  if (op == UOP_KERNEL || op == UOP_BUFFERIZE) return 0;
-  // IWHERE(cond, then, else) where one branch is UOP_INVALID is the
-  // PAD/OOB-mask pattern (conv2d-grad uses it to guard windowed reads
-  // against shifted-window OOB).  The walker only evaluates the picked
-  // branch at runtime, so the surviving INDEX_E reads are runtime-
-  // guarded by the cond.  Scan the cond (no buffer reads there) but
-  // skip address-bound checks inside the guarded branch -- the static
-  // addr_max_value can't see the IWHERE guard and would conservatively
-  // flag the read as OOB on the iter cube where cond=0.  The other
-  // INVALID-paired branch is skipped entirely (returns 0 at runtime).
-  if (op == UOP_IWHERE) {
-    Term then_t = term_resolve(heap_read(loc + 1));
-    Term else_t = term_resolve(heap_read(loc + 2));
-    int then_invalid = (term_tag(then_t) == TAG_UOP
-                     && term_ext(then_t) == UOP_INVALID);
-    int else_invalid = (term_tag(else_t) == TAG_UOP
-                     && term_ext(else_t) == UOP_INVALID);
-    if (then_invalid || else_invalid) {
-      // Scan the cond (no INDEX_E in here for conv2d grads, but stay
-      // strict for the rare case where a cond pulls from a kernel
-      // input).  Skip the guarded branch -- runtime cond keeps its
-      // reads in-bounds; only the non-INVALID branch needs scanning.
-      if (broadcast_input_scan_rec(ke, v, heap_read(loc + 0),
-                                   out_numel, depth + 1)) {
-        return 1;
-      }
-      return 0;
-    }
-  }
-  // Multiply REDUCE extent (every reduce axis) into out_numel when
-  // descending into a reduce body so the broadcast check counts the full
-  // iteration footprint.  Multi-axis REDUCE folds N axes simultaneously
-  // (mirrors tinygrad's REDUCE.src[1:] range list).
-  if (op == UOP_REDUCE) {
-    Term t = term_new(0, TAG_UOP, op, loc);
-    u64 inner_out = out_numel;
-    Term body = uop_reduce_src(t);
-    u32 n_axes = uop_reduce_n_axes(t);
-    // Find each reduce range's extent by scanning the body for UOP_RANGE
-    // with each axis_id, then multiply all extents into the footprint.
-    for (u32 ai = 0; ai < n_axes; ai++) {
-      u32 r_aid = uop_reduce_axis(t, ai);
-      u32 r_ext = 0;
-      Term stack[64];
-      u32  top = 0;
-      stack[top++] = body;
-      while (top > 0 && r_ext == 0) {
-        Term cur = term_resolve(stack[--top]);
-        if (term_tag(cur) != TAG_UOP) continue;
-        u8  cop = term_ext(cur);
-        u64 cloc = term_val(cur);
-        if (cop == UOP_RANGE) {
-          u32 aid = (u32)term_val(heap_read(cloc + 0));
-          if (aid == r_aid) {
-            r_ext = (u32)term_val(heap_read(cloc + 2));
-            break;
-          }
-          continue;
-        }
-        if (cop == UOP_BUFFER || cop == UOP_BUFFERIZE || cop == UOP_KERNEL) continue;
-        u8 car = uop_arity(cop);
-        for (u8 i = 0; i < car && top < 64; i++) {
-          stack[top++] = heap_read(cloc + i);
-        }
-      }
-      if (r_ext > 0) inner_out *= (u64)r_ext;
-    }
-    return broadcast_input_scan_rec(ke, v, body, inner_out, depth + 1);
-  }
-  u8 ar = uop_arity(op);
-  for (u8 i = 0; i < ar; i++) {
-    if (broadcast_input_scan_rec(ke, v, heap_read(loc + i),
-                                 out_numel, depth + 1)) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
-// A store's iter footprint is its output BUFFER's numel.
-static int broadcast_input_in_store(Term store, void *ctx) {
-  KernelEntry const *ke = (KernelEntry const *)ctx;
-  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
-  u64 sloc = term_val(store);
-  Term out_buf = heap_read(sloc + 0);
-  Term s_value = heap_read(sloc + 2);
-  u64 out_numel = uop_buffer_numel(out_buf);
-  if (out_numel == 0) return 0;
-  BufferizeScanArena arena;
-  BufferizeScanVisited v;
-  bufferize_scan_open(&v, &arena);
-  int rc = broadcast_input_scan_rec(ke, &v, s_value, out_numel, 0);
-  bufferize_scan_close(&arena);
-  return rc;
-}
-
-static int uop_subtree_has_broadcast_input(KernelEntry const *ke,
-                                            Term root) {
-  if (root == 0 || ke == NULL) return 0;
-  return uop_root_each_store(root, broadcast_input_in_store, (void *)ke);
-}
-
-// === Debug dumper for THVM_DEBUG_BYPASS_LAST=1 ===
-// Pretty-prints a UOp subtree with indent + opcode name + key fields.
-// Used to bisect bypass-substitution divergences when a gate trips.
+// Opcode name for the stderr diagnostics.
 static char const *bypass_dbg_op_name(u8 op) {
   switch (op) {
     case UOP_CONST:       return "CONST";
@@ -4792,219 +4425,6 @@ static char const *bypass_dbg_op_name(u8 op) {
     case UOP_SCATTER:     return "SCATTER";
     default:              return "?";
   }
-}
-
-// Debug-only: product of the extents of every LOOP-typed RANGE leaf in
-// `t` that is NOT in `bound` (the STORE addr axes + any enclosing
-// REDUCE axes).  A stranded reduce window rendered as outer LOOP loops
-// shows up here as a huge product (the conv-bwd 24x24 window strand).
-static u64 strand_loop_product_rec(RangeAxisSet const *bound,
-                                   BufferizeScanVisited *v, Term t,
-                                   u32 depth) {
-  if (depth > MAT_MAX_WALK_DEPTH) return 1;
-  Term r = term_resolve(t);
-  if (term_tag(r) != TAG_UOP) return 1;
-  if (bufferize_scan_seen(v, r)) return 1;
-  u8  op  = term_ext(r);
-  u64 loc = term_val(r);
-  if (op == UOP_RANGE) {
-    u32 aid   = (u32)term_val(heap_read(loc + 0));
-    u32 atype = (u32)term_val(heap_read(loc + 1));
-    u32 ext   = (u32)term_val(heap_read(loc + 2));
-    if (atype == 0 /*LOOP*/ && !range_axis_has(bound, aid) && ext > 1)
-      return (u64)ext;
-    return 1;
-  }
-  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 1;
-  if (op == UOP_REDUCE) {
-    RangeAxisSet inner = *bound;
-    u32 n_axes = uop_reduce_n_axes(r);
-    for (u32 i = 0; i < n_axes; i++) range_axis_add(&inner, uop_reduce_axis(r, i));
-    BufferizeScanVisited iv;
-    bufferize_scan_fresh(&iv, v);
-    return strand_loop_product_rec(&inner, &iv, uop_reduce_src(r), depth + 1);
-  }
-  u64 prod = 1;
-  u8 ar = uop_arity(op);
-  for (u8 i = 0; i < ar; i++) {
-    u64 c = strand_loop_product_rec(bound, v, heap_read(loc + i), depth + 1);
-    if (c > 1 && prod > (u64)~0ull / c) return (u64)~0ull;
-    prod *= c;
-  }
-  return prod;
-}
-
-static u64 strand_loop_product(Term store_root) {
-  if (store_root == 0 || term_tag(store_root) != TAG_UOP
-      || term_ext(store_root) != UOP_STORE) return 0;
-  u64 sloc = term_val(store_root);
-  Term s_addr  = heap_read(sloc + 1);
-  Term s_value = heap_read(sloc + 2);
-  BufferizeScanArena arena;
-  BufferizeScanVisited av;
-  bufferize_scan_open(&av, &arena);
-  RangeAxisSet bound;
-  bound.n = 0;
-  stranded_range_collect_addr(&bound, &av, s_addr, 0);
-  BufferizeScanVisited vv;
-  bufferize_scan_fresh(&vv, &av);
-  u64 prod = strand_loop_product_rec(&bound, &vv, s_value, 0);
-  bufferize_scan_close(&arena);
-  return prod;
-}
-
-// Debug-only: total iteration product of every DISTINCT RANGE leaf (LOOP
-// and REDUCE) in the store's value subtree, regardless of addr-binding.
-// A correct-but-infeasible reduce (the conv data-grad's 144-padded window
-// absorbed into the reduce -> ~6.8e12) surfaces here even though its
-// stranded-LOOP product is 1.  Distinct by axis_id so a leaf referenced
-// in both legs of a MUL isn't double-counted.
-static void total_iter_collect_rec(BufferizeScanVisited *seen,
-                                   u32 *aids, u32 *exts, u32 *n, u32 cap,
-                                   Term t, u32 depth) {
-  if (depth > 256 || *n >= cap) return;
-  Term r = term_resolve(t);
-  if (term_tag(r) != TAG_UOP) return;
-  if (bufferize_scan_seen(seen, r)) return;
-  u8  op  = term_ext(r);
-  u64 loc = term_val(r);
-  if (op == UOP_RANGE) {
-    u32 aid = (u32)term_val(heap_read(loc + 0));
-    u32 ext = (u32)term_val(heap_read(loc + 2));
-    for (u32 i = 0; i < *n; i++) if (aids[i] == aid) return;
-    if (ext > 1) { aids[*n] = aid; exts[*n] = ext; (*n)++; }
-    return;
-  }
-  if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return;
-  u8 ar = uop_arity(op);
-  for (u8 i = 0; i < ar; i++)
-    total_iter_collect_rec(seen, aids, exts, n, cap, heap_read(loc + i),
-                           depth + 1);
-}
-
-static u64 total_iter_product(Term store_root) {
-  if (store_root == 0 || term_tag(store_root) != TAG_UOP
-      || term_ext(store_root) != UOP_STORE) return 0;
-  u64 sloc = term_val(store_root);
-  Term s_value = heap_read(sloc + 2);
-  u32 aids[64], exts[64], n = 0;
-  BufferizeScanArena arena;
-  BufferizeScanVisited seen;
-  bufferize_scan_open(&seen, &arena);
-  total_iter_collect_rec(&seen, aids, exts, &n, 64, s_value, 0);
-  bufferize_scan_close(&arena);
-  u64 prod = 1;
-  for (u32 i = 0; i < n; i++) {
-    if (prod > (u64)~0ull / exts[i]) return (u64)~0ull;
-    prod *= exts[i];
-  }
-  return prod;
-}
-
-static void bypass_dbg_dump_rec(Term t, u32 indent, u32 depth) {
-  if (depth > 40) {
-    for (u32 i = 0; i < indent; i++) fputc(' ', stderr);
-    fputs("...max-depth...\n", stderr);
-    return;
-  }
-  Term r = term_resolve(t);
-  for (u32 i = 0; i < indent; i++) fputc(' ', stderr);
-  u8  tag = term_tag(r);
-  if (tag == TAG_TEN) {
-    fprintf(stderr, "TEN tid=%u\n", (u32)term_val(r));
-    return;
-  }
-  if (tag == TAG_NUM) {
-    fprintf(stderr, "NUM %llu\n", (unsigned long long)term_val(r));
-    return;
-  }
-  if (tag != TAG_UOP) {
-    fprintf(stderr, "TAG=%u val=%llx\n", tag, (unsigned long long)term_val(r));
-    return;
-  }
-  u8  op  = term_ext(r);
-  u64 loc = term_val(r);
-  char const *name = bypass_dbg_op_name(op);
-  if (op == UOP_CONST) {
-    u64 bits = term_val(heap_read(loc + 0));
-    union { u64 u; f64 f; } u;
-    u.u = bits;
-    f32 f = 0.0f;
-    memcpy(&f, &bits, sizeof(f));
-    fprintf(stderr, "CONST dtype=%u bits=%llx f32=%g\n",
-            term_ext(r), (unsigned long long)bits, (double)f);
-    return;
-  }
-  if (op == UOP_RANGE) {
-    u32 aid    = (u32)term_val(heap_read(loc + 0));
-    u32 atype  = (u32)term_val(heap_read(loc + 1));
-    u32 extent = (u32)term_val(heap_read(loc + 2));
-    fprintf(stderr, "RANGE aid=%u type=%u extent=%u\n", aid, atype, extent);
-    return;
-  }
-  if (op == UOP_BUFFER) {
-    u32 scope = (u32)term_val(heap_read(loc + 0));
-    u32 dtype = (u32)term_val(heap_read(loc + 1));
-    u32 ndim  = (u32)term_val(heap_read(loc + 2));
-    u32 inst  = uop_buffer_inst_get(r);
-    fprintf(stderr, "BUFFER scope=%u dtype=%u ndim=%u inst=%u dims=[",
-            scope, dtype, ndim, inst);
-    for (u32 d = 0; d < ndim && d < 8; d++) {
-      fprintf(stderr, "%s%u", d ? "," : "", uop_buffer_dim(r, d));
-    }
-    fputs("]\n", stderr);
-    return;
-  }
-  if (op == UOP_BUFFERIZE) {
-    // Print closed_ranges as identity-only summary (axis_id/type/ext)
-    // so the bypass-bisect log captures the producer's row-major
-    // layout context that uop_arity(BUFFERIZE)==1 would otherwise
-    // drop.  Then recurse into the value subtree for the body.
-    u32 n_r = uop_bufferize_n_ranges(r);
-    fprintf(stderr, "BUFFERIZE n_r=%u closed=[", n_r);
-    for (u32 i = 0; i < n_r && i < 8; i++) {
-      Term cr = uop_bufferize_range_at(r, i);
-      if (term_tag(cr) == TAG_UOP && term_ext(cr) == UOP_RANGE) {
-        u32 aid = (u32)term_val(heap_read(term_val(cr) + 0));
-        u32 atp = (u32)term_val(heap_read(term_val(cr) + 1));
-        u32 ext = (u32)term_val(heap_read(term_val(cr) + 2));
-        fprintf(stderr, "%said=%u/t=%u/ext=%u", i ? "," : "", aid, atp, ext);
-      } else {
-        fprintf(stderr, "%s?", i ? "," : "");
-      }
-    }
-    fputs("]\n", stderr);
-    Term v = uop_bufferize_value(r);
-    if (v != 0) bypass_dbg_dump_rec(v, indent + 2, depth + 1);
-    return;
-  }
-  if (op == UOP_REDUCE) {
-    u32 kind = uop_reduce_kind(r);
-    u32 n_axes = uop_reduce_n_axes(r);
-    fprintf(stderr, "REDUCE kind=%u axes=[", kind);
-    for (u32 i = 0; i < n_axes; i++) {
-      fprintf(stderr, "%s%u", i ? "," : "", uop_reduce_axis(r, i));
-    }
-    fputs("]\n", stderr);
-    bypass_dbg_dump_rec(uop_reduce_src(r), indent + 2, depth + 1);
-    return;
-  }
-  fprintf(stderr, "%s (ext=%u, loc=%llx)\n", name, term_ext(r),
-          (unsigned long long)loc);
-  u8 ar = uop_arity(op);
-  for (u8 i = 0; i < ar; i++) {
-    bypass_dbg_dump_rec(heap_read(loc + i), indent + 2, depth + 1);
-  }
-}
-
-static void bypass_dbg_dump(char const *label, u32 kid, Term root) {
-  fprintf(stderr, "=== BYPASS_DBG kid=%u %s root=%llx ===\n",
-          kid, label, (unsigned long long)root);
-  if (root == 0) {
-    fputs("<null>\n", stderr);
-    return;
-  }
-  bypass_dbg_dump_rec(root, 0, 0);
 }
 
 // A `realized_full` view boundary whose closed_range count is below its
@@ -5310,8 +4730,6 @@ static void topo_sort_boundaries(Term root) {
                 idx, (unsigned long long)items[i].loc,
                 (unsigned)op, reasons,
                 (unsigned long long)items[i].buf);
-        if (getenv("THVM_DUMP_STORE_TREE"))
-          bypass_dbg_dump("boundary-value", idx, items[i].buf);
       }
     }
   }
@@ -6867,72 +6285,11 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // view); the marks are committed below with the store_root.
     ChainFoldMarks _cf_marks;
     ru_rewritten = unified_fold_chain(ke, ru_rewritten, &_cf_marks);
-    // Per-kernel coverage diagnostics, counted for THVM_DUMP_LIFT_COVERAGE
-    // and printed by THVM_DEBUG_BYPASS_LAST.  They select nothing: every
-    // kernel runs the rewritten store_root, so the three DAG walks run
-    // only under those two knobs.
-    //
-    //   has_resid:   the cpu_uop_walk INDEX_E handler only resolves
-    //                UOP_BUFFER leaves; a residual UOP_BUFFERIZE in
-    //                the value tree (an in-kernel intermediate the
-    //                rangeify_unified pass didn't realize) reads as
-    //                0.0 default and the kernel zeroes its output.
-    //
-    //   has_stranded: the value subtree references a UOP_RANGE
-    //                whose axis_id is neither in the STORE addr nor
-    //                in scope of an enclosing UOP_REDUCE.  The
-    //                walker sets up loop slots only for addr ranges
-    //                + REDUCE axes, so any other RANGE leaf reads
-    //                iter=0 forever -- producing only the slice-0
-    //                result.  This happens when ru_rewrite_subtree
-    //                splices a non-realized producer's RU_SUBST
-    //                verbatim into a consumer whose iter space has
-    //                different RANGE.axis_ids (the producer's
-    //                ru_build_input_addr_for ranges leak through
-    //                into the consumer's value tree).  Conv2d
-    //                grad-w hits this in the dY*X matmul-back
-    //                kernel where one INDEX_E feeds from a non-
-    //                realized PERMUTE/RESHAPE chain.
-    //
-    //   has_bcast:   an INDEX_E still names a raw TAG_TEN, or its
-    //                address can reach past its UOP_BUFFER's element
-    //                count (with no static bound: the buffer is smaller
-    //                than the iteration footprint).  A load composed
-    //                over a shrunk base trips it by design: the slot's
-    //                BUFFER takes the view's shape while the address
-    //                spans the base buffer.
-    int bypass_dbg = getenv("THVM_DEBUG_BYPASS_LAST") != NULL;
-    if (bypass_dbg || getenv("THVM_DUMP_LIFT_COVERAGE") != NULL) {
-      int has_resid    = uop_subtree_has_residual_bufferize(ru_rewritten);
-      int has_stranded = uop_subtree_has_stranded_range(ru_rewritten);
-      int has_bcast    = uop_subtree_has_broadcast_input(ke, ru_rewritten);
-      if (bypass_dbg) {
-        fprintf(stderr,
-                "BYPASS_DBG kid=%u resid=%d stranded=%d bcast=%d\n",
-                kid, has_resid, has_stranded, has_bcast);
-        bypass_dbg_dump("lift_root", kid, ke->cached_lift.store_root);
-        bypass_dbg_dump("ru_rewrit", kid, ru_rewritten);
-      }
-      BYPASS_KERNEL_TOTAL++;
-      if (has_resid) {
-        BYPASS_GATE_RESID++;
-      }
-      if (has_stranded) {
-        BYPASS_GATE_STRANDED++;
-      }
-      if (has_bcast) {
-        BYPASS_GATE_BCAST++;
-      }
-      if (!has_resid && !has_stranded && !has_bcast) {
-        BYPASS_KERNEL_USED_UNIFIED++;
-      }
-    }
-    // Always substitute the rewritten store_root.  The raw unified
-    // ru_root carries TAG_TEN / UOP_BUFFERIZE leaves that the
-    // renderer can't name (falls through to the buf%llu fallback
-    // -> undeclared identifier in MSL).  The rewriter replaces
-    // those with proper UOP_BUFFER terms carrying input-slot
-    // instance, which is benign regardless of gate outcome.
+    // Substitute the rewritten store_root.  The raw unified ru_root
+    // carries TAG_TEN / UOP_BUFFERIZE leaves that the renderer can't
+    // name (falls through to the buf%llu fallback -> undeclared
+    // identifier in MSL); the rewriter replaces those with UOP_BUFFER
+    // terms carrying the input-slot instance.
     ke->cached_lift.store_root = ru_rewritten;
     // A gather / scatter address holds loads, so an unbound leaf read as 0
     // would misplace data, not just misvalue it.  Stop rather than run it.
@@ -7014,25 +6371,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
     if (rendered < ke->n_inputs) {
       ke->n_inputs = rendered;
       ke->cached_lift.n_inputs = rendered;
-    }
-  }
-
-  // Schedule-time explosion guard (debug-only): walk the finalized
-  // store_root, multiply every LOOP-typed RANGE leaf in the value
-  // subtree that is NOT in the STORE addr (i.e. a stranded loop), and
-  // report when the product blows past a threshold.  Lets us diagnose
-  // the conv-bwd window-strand WITHOUT dispatching the ~6.8e12-iter
-  // kernel that otherwise hangs.  Gated behind THVM_DUMP_STRAND_GUARD.
-  if (ke->cached_lift.store_root != 0 && getenv("THVM_DUMP_STRAND_GUARD")) {
-    u64 strand_prod = strand_loop_product(ke->cached_lift.store_root);
-    u64 total_prod  = total_iter_product(ke->cached_lift.store_root);
-    if (strand_prod >= 100ull || total_prod >= 100000000ull) {
-      fprintf(stderr,
-              "STRAND_GUARD kid=%u op=%s strand_loop_product=%llu "
-              "total_iter_product=%llu\n",
-              kid, bypass_dbg_op_name(op), (unsigned long long)strand_prod,
-              (unsigned long long)total_prod);
-      bypass_dbg_dump("strand_root", kid, ke->cached_lift.store_root);
     }
   }
 

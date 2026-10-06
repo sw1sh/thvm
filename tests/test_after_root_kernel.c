@@ -10,8 +10,8 @@
 //   2. AFTER(acc, init) scatter-sum with duplicate and invalid ids;
 //   3. a three-store scatter-max with an exact -inf identity;
 //   4. every materialize-time pass sees every store of an AFTER root: the
-//      unified rewrite leaves no TEN/BUFFERIZE leaf, the arange collapse, the
-//      chain-fold scan and the resid/stranded/broadcast gates;
+//      unified rewrite leaves no TEN/BUFFERIZE leaf, and the arange collapse
+//      and the chain-fold scan reach the later store;
 //   5. renumbering sparse axis ids 17/40/41 gives one dense 0..n space;
 //   6. kernel_lift_to_uop names the output buffer of an AFTER root;
 //   7. uop_dag_has_dynamic_index, and no_opts closing every opt gate.
@@ -285,32 +285,16 @@ static void test_unified_rewrite_every_store(void) {
   kernel_dealloc_last(kid);
 }
 
-static void test_gates_see_every_store(void) {
+static void test_folds_see_every_store(void) {
   u32 odims[1] = { 8 };
   u32 idims[1] = { 8 };
-  u32 sdims[1] = { 2 };
   Term out   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, odims, 0);
   Term in8   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, idims, 1);
-  Term in2   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, sdims, 1);
   Term a0    = uop_range(0, KAX_LOOP, 8);
-  Term a5    = uop_range(5, KAX_LOOP, 8);
   Term first = uop_store(out, a0, kh_f32(0.0f));
   u32 kid = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
-  // A value RANGE that neither the address nor a REDUCE binds.
-  Term stranded = uop_after(uop_store(out, a0, uop_index_e(in8, a5)), first);
-  CHECK(uop_subtree_has_stranded_range(stranded));
   Term clean = uop_after(uop_store(out, a0, uop_index_e(in8, a0)), first);
-  CHECK(!uop_subtree_has_stranded_range(clean));
-  // A BUFFERIZE the rewrite could not resolve.
-  Term bz    = uop_bufferize_new(uop_index_e(in8, a0), UOP_SCOPE_GLOBAL, 1, 1, &a0);
-  Term resid = uop_after(uop_store(out, a0, uop_index_e(bz, a0)), first);
-  CHECK(uop_subtree_has_residual_bufferize(resid));
-  CHECK(!uop_subtree_has_residual_bufferize(clean));
-  // A read past a 2-element input.
-  Term bcast = uop_after(uop_store(out, a0, uop_index_e(in2, a0)), first);
-  CHECK(uop_subtree_has_broadcast_input(ke, bcast));
-  CHECK(!uop_subtree_has_broadcast_input(ke, clean));
   // The chain-fold scan flags a strided input slot read by the second store.
   f32 data[16] = {0};
   u32 tid = kh_tensor(DT_FP32, 16, data);
@@ -439,8 +423,8 @@ int main(void) {
   test_scatter_max_three_stores();
   TEST_BEGIN("after-root/unified-rewrite-every-store");
   test_unified_rewrite_every_store();
-  TEST_BEGIN("after-root/gates-see-every-store");
-  test_gates_see_every_store();
+  TEST_BEGIN("after-root/folds-see-every-store");
+  test_folds_see_every_store();
   TEST_BEGIN("after-root/renumber-every-store");
   test_renumber_every_store();
   TEST_BEGIN("after-root/lift-out-buf");

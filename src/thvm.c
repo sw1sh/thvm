@@ -778,26 +778,6 @@ void thvm_free(void) {
   // sharing -- otherwise a worker that wakes mid-shutdown would
   // dereference freed memory.  no-op if no nf call has happened yet.
   nf_pool_global_release();
-  // Lifter coverage dump.  Env-gated so the noise doesn't pollute
-  // normal test output; turn on with THVM_DUMP_LIFT_COVERAGE=1 to
-  // see how many cg_emit_tile_metal calls the lifter handled.
-  if (getenv("THVM_DUMP_LIFT_COVERAGE")) {
-    fprintf(stderr,
-            "thvm: kernel_lift coverage -- attempts=%llu successes=%llu\n",
-            (unsigned long long)kernel_lift_attempts(),
-            (unsigned long long)kernel_lift_successes());
-    fprintf(stderr,
-            "thvm: tile_conv2d_flat -- dag=%llu\n",
-            (unsigned long long)tile_conv2d_flat_dag_count());
-    fprintf(stderr,
-            "thvm: bypass coverage -- total=%llu used_unified=%llu "
-            "(resid=%llu stranded=%llu bcast=%llu)\n",
-            (unsigned long long)bypass_kernel_total_count(),
-            (unsigned long long)bypass_kernel_used_unified_count(),
-            (unsigned long long)bypass_gate_resid_count(),
-            (unsigned long long)bypass_gate_stranded_count(),
-            (unsigned long long)bypass_gate_bcast_count());
-  }
   // Per-kernel wall-time profile. THVM_KERNEL_PROFILE=N -> top N rows
   // (N=0 / unset disables; setting "" or "1" defaults to 20).
   {
