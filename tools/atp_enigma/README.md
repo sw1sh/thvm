@@ -384,6 +384,17 @@ FOF groups.  `label_harvest_jobs.tsv` lists every TRAIN-X pair proved at
 60 s.  `test_matrix_tables.py` holds known-answer tests of both modes on
 synthetic data (pods only).
 
+The X matrix ran on 2026-10-06 (plan section 5.4, registry row "lane
+matrix of the synthetic -10 corpus"): 85,560 of 85,560 rows on binary
+11fad6a4cb94..., every validation item PASS, no crash and no OOM kill.
+TRAIN-X: VBS 1,180 / 1,215 / 1,228 of 1,464 at 10 / 30 / 60 s, best
+single lane twee-deep 972, union at k = 14, hard tail 48.  DEV-X: VBS
+336 / 344 / 346 of 396, best twee 281, union at k = 8, hard tail 10.
+The six gated lanes alone solve 140 TRAIN-X and 40 DEV-X problems.
+`label_harvest_jobs.tsv` holds 19,913 TRAIN-X pairs on 1,228 problems,
+8,348 of them front-end proofs.  Everything is in
+`~/.cache/thvm/enigma/ifeq10/matrix/`.
+
 The 180 s supplement reruns `supplement_jobs.tsv` with `runner.sh` at
 `RUNNER_WALL=180 RUNNER_TIMEOUT=195`, its rows in
 `supplement/sup_K.tsv` with their `.started` and `.done` sentinels.  Once
