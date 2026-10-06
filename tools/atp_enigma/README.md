@@ -361,7 +361,28 @@ matrix_tables.py --tables     # T1-T8 per split -> tables/ (summary.txt lists th
 matrix_tables.py --decisions  # section 5.3 -> decisions_5_3.txt, dev_t.tsv, train_t.tsv, supplement_jobs.tsv,
                               #   label_harvest_jobs.tsv, oracle_rerun_jobs.tsv
 matrix_tables.py --all        # --validate, --supplement (when its rows exist), --tables, --decisions
+matrix_tables.py --xjobs      # the synthetic -10 corpus's matrix (amendment A22): job lists in ~/.cache/thvm/enigma/ifeq10/matrix
+matrix_tables.py --xmatrix    # its rows -> validate.txt, xmatrix.tsv, tables/ (T1-T4, T8, X10 per split), label_harvest_jobs.tsv
 ```
+
+The X modes run the same matrix on the corpus that passed G2.6 (section
+"Synthetic -10 corpus" below), in their own directory.  `--xjobs` deals
+the 1,860 TRAIN-X and DEV-X problems to 24 slots of the runner's job
+format, all 46 lanes of a problem in one slot, with paths relative to the
+corpus root (the jobs' TPTP root); it stops on a split above its cap.
+`--xmatrix` reads the harvested slots (`results/slot_K.tsv`, their
+`.started` copies, `.done`), the OOM reruns (`results/rerun_K.tsv`) and
+the pod records (`results/pods/<pod>/`: hostname, the kernel log's
+OOM-killer lines, `--list-lanes=flags`), writes validate.txt (G0.1's bars:
+completeness, sentinels and binary, crashes, OOM, row sanity, the lane
+groups against the binary's flags) and, when no row is missing, the
+tables of each split: T1-T4 and T8 as above, with the stem as the DOMNNN
+prefix, and X10, which singles out the six lanes gated on the -10 shape
+(horn-cd, horn-back and ifeq on an ifeq dispatcher; equals, narrowq and
+equals-twee on a non-ground goal) against the Horn-release, Horn-free and
+FOF groups.  `label_harvest_jobs.tsv` lists every TRAIN-X pair proved at
+60 s.  `test_matrix_tables.py` holds known-answer tests of both modes on
+synthetic data (pods only).
 
 The 180 s supplement reruns `supplement_jobs.tsv` with `runner.sh` at
 `RUNNER_WALL=180 RUNNER_TIMEOUT=195`, its rows in

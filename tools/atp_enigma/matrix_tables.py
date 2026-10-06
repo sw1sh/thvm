@@ -43,11 +43,25 @@ Modes, in order:
                static_gates.py, the replica T7 used, against the C one.
                -> tables/T7C_*.tsv, tables/T7C_summary.txt; exit 1 on a
                violation.
+  --xjobs      The lane matrix of the synthetic -10 corpus (amendment A22),
+               in its own directory (--x-dir): the job lists of every
+               TRAIN-X and DEV-X problem (--corpus-dir, the corpus pools)
+               on the 46 lanes (--lanes), dealt to 24 slots ->
+               problems.tsv, lanes.txt, slots/slot_K.tsv, jobs.tsv,
+               corpus_files.sha256, jobs.txt.  A split above its cap
+               (TRAIN-X 2,000, DEV-X 400) stops it.
+  --xmatrix    The X matrix's rows (results/slot_K.tsv with sentinels,
+               OOM reruns results/rerun_K.tsv, pod records results/pods/)
+               -> validate.txt, xmatrix.tsv, tables/ (T1-T4 and T8 per
+               split, the -10 lane tables X10_*), label_harvest_jobs.tsv;
+               exit 1 when a validation item fails.  Both X modes read the
+               J13 names (--j13-names) as a stem exclusion list only.
 
-Every mode after --seal reads matrix.tsv only, asserts that no row has
+Every pool mode after --seal reads matrix.tsv only, asserts that no row has
 split j13 and that every problem is a train or heldout problem of
 problems.tsv, and never opens a path under <sealed>.  The only j13 facts it
 reports are the sealed row count and the archive sha256 (from seal.txt).
+The X modes read no pool row and no sealed path either.
 
 matrix.tsv: the 14 raw columns of FORMAT.txt, plus 15 shard (1-6) and
 16 par (the runner width of the pod that produced the row: 8 on the
@@ -1025,9 +1039,10 @@ def t5_rates(pool, probs, lane):
     return rates, long_rates
 
 
-def tables_t1_t4(pool, probs, lanes, T, within, grid, tail):
+def tables_t1_t4(pool, probs, lanes, T, within, grid, tail, stem_of=stem):
     """Writes T1-T4 for one split of one view (60 s, or the 180 s view)
-    and returns what the summary reads.  tail: (problem, condition) pairs."""
+    and returns what the summary reads.  tail: (problem, condition) pairs;
+    stem_of: the stem column of T4 (x_stem for corpus names)."""
     n = len(probs)
     solved = [p for p in probs if pool.vbs(p) is not None]
 
@@ -1087,7 +1102,7 @@ def tables_t1_t4(pool, probs, lanes, T, within, grid, tail):
         runner = s[1] if len(s) > 1 else None
         rowsT4.append([p, cond, v, ",".join(f), len(s),
                        runner[0] if runner else "-",
-                       runner[1] if runner else None, stem(p)])
+                       runner[1] if runner else None, stem_of(p)])
     write_tsv(T("T4_tail"), ["problem", "condition", "fastest_s",
                              "owner", "solving_lanes", "runner_up",
                              "runner_up_s", "stem"], rowsT4)
@@ -1981,6 +1996,706 @@ def mode_decisions(paths, pf):
     print(text)
 
 
+# ------------------------------------- the synthetic -10 corpus (A22)
+
+# The lane matrix of the G2.6 corpus (plan amendment A22): every TRAIN-X
+# and DEV-X problem on all 46 lanes at 60 s.  It lives in its own
+# directory, reads no pool row and opens nothing under the sealed
+# directory; the J13 names serve only as a stem exclusion list.
+X_SPLITS = ["TRAIN-X", "DEV-X"]
+X_POOL_LABEL = {"TRAIN-X": "train", "DEV-X": "heldout"}
+X_CAP = {"TRAIN-X": 2000, "DEV-X": 400}
+X_SLOTS = 24
+X_BIN_SHA = ("11fad6a4cb9452f51bcf0544072fdb306878723538234e32293a6ebdd3"
+             "1f9350")
+X_PAR = 14
+X_RERUN_PAR = 7
+X_WALL = 60
+X_TIMEOUT = 75
+X_STEM = re.compile(r"[A-Z]{3}[0-9]{3}")
+# A22's lane groups, from the flags of SCHEDULE[] (tools/atp_cli/main.c at
+# 6a4b244b) and checked against the binary's --list-lanes=flags (x_group):
+# an =2 discipline that exits unless the problem has an ifeq dispatcher
+# axiom (horn-cd and horn-back also need a ground goal) or a non-ground
+# goal; the FOF pack, which exits on cnf input; then the Horn release,
+# which acts on dispatcher problems in every other lane without --horn=0.
+X_GROUPS = ["gated-dispatcher", "gated-existential", "horn-release",
+            "horn-free", "fof"]
+X_GATED = ("gated-dispatcher", "gated-existential")
+X_LANE_GROUPS = {
+    "gated-dispatcher": ("horn-cd", "horn-back", "ifeq"),
+    "gated-existential": ("equals", "narrowq", "equals-twee"),
+    "horn-release": ("wm", "unfold", "flatten", "twee", "twee-deep",
+                     "twee-freq", "mnf-gj-amw", "encompass", "twee-raw",
+                     "wm-gj", "lazy-gj", "bare-gj"),
+    "horn-free": ("unfold-tgt", "unfold-tgt-awr", "flatten-bare", "tgt-ax",
+                  "tgt-sel", "otter-lpo", "otter-lpo-cmin", "otter-ladr",
+                  "bare", "tgt", "tgt-fold", "bare-raw", "flatten-bare-raw"),
+    "fof": ("fof-fifo", "fof-best", "fof-flat", "fof-deep", "fof-nopre",
+            "fof-or2", "fof-full", "fof-split", "fof-avatar", "fof-avatar2",
+            "fof-freq", "fof-sos", "fof-wall", "fof-selL", "fof-spb"),
+}
+X_WITHIN = [10, 30]
+
+
+def x_stem(name):
+    """A corpus name's stem, its DOMNNN prefix (tools/atp_enigma/README.md);
+    stem() would give PUZ131+1 for PUZ131+1-10."""
+    m = X_STEM.match(name)
+    if m is None:
+        die(f"{name}: no DOMNNN stem")
+    return m.group(0)
+
+
+def x_group(flags):
+    """A lane's A22 group from its flags (the last value of a repeated flag
+    does not matter here: no lane repeats these)."""
+    f = set(flags.split())
+    if f & {"--ifeq-guard=2", "--horn-cd=2", "--horn-back=2"}:
+        return "gated-dispatcher"
+    if f & {"--equals-goal=2", "--narrow-queue=2"}:
+        return "gated-existential"
+    if "--fof-slice=2" in f:
+        return "fof"
+    if "--horn=0" in f:
+        return "horn-free"
+    return "horn-release"
+
+
+class XPaths:
+    def __init__(self, x_dir, corpus_dir, j13_names, lanes, sealed_dir):
+        def ab(p):
+            return os.path.abspath(os.path.expanduser(p))
+        self.x = ab(x_dir)
+        self.corpus = ab(corpus_dir)
+        self.j13_names = ab(j13_names)
+        self.lanes_src = ab(lanes)
+        self.sealed = ab(sealed_dir)
+        self.results = os.path.join(self.x, "results")
+        self.tables = os.path.join(self.x, "tables")
+
+    def m(self, *p):
+        return os.path.join(self.x, *p)
+
+    def guard(self, path):
+        a = os.path.abspath(path)
+        if a == self.sealed or a.startswith(self.sealed + os.sep):
+            die(f"X mode tried to open a sealed path: {a}")
+        return a
+
+
+def x_read_lanes(xp, path):
+    with open(xp.guard(path)) as fp:
+        lanes = [l.strip() for l in fp if l.strip()]
+    known = [l for g in X_GROUPS for l in X_LANE_GROUPS[g]]
+    if len(lanes) != len(set(lanes)) or sorted(lanes) != sorted(known):
+        die(f"{path}: not the 46 lanes of A22's groups")
+    return lanes
+
+
+def x_j13_stems(xp):
+    """The stems of the J13 names: an exclusion list, names only."""
+    stems = set()
+    with open(xp.guard(xp.j13_names)) as fp:
+        for line in fp:
+            n = line.strip()
+            if n.endswith(".p"):
+                n = n[:-2]
+            if n:
+                stems.add(x_stem(n))
+    return stems
+
+
+def x_problems(xp):
+    """name -> (path, split) of problems.tsv (written by --xjobs)."""
+    out = {}
+    with open(xp.guard(xp.m("problems.tsv"))) as fp:
+        for line in fp:
+            f = line.rstrip("\n").split("\t")
+            if len(f) != 4 or f[2] not in X_SPLITS:
+                die("problems.tsv: a line that is not name, path, split, stem")
+            out[f[0]] = (f[1], f[2])
+    return out
+
+
+def x_jobs(xp, k):
+    jobs = []
+    with open(xp.guard(xp.m("slots", f"slot_{k}.tsv"))) as fp:
+        for line in fp:
+            f = line.rstrip("\n").split("\t")
+            if len(f) != 4:
+                die(f"slot_{k}.tsv: a line without 4 fields")
+            jobs.append(f)
+    return jobs
+
+
+def mode_xjobs(xp):
+    """The X matrix's job lists from the corpus pools: problems.tsv,
+    lanes.txt, slots/slot_K.tsv, jobs.tsv, corpus_files.sha256, jobs.txt."""
+    lanes = x_read_lanes(xp, xp.lanes_src)
+    j13 = x_j13_stems(xp)
+    probs = []
+    n = collections.Counter()
+    for split in X_SPLITS:
+        pool = os.path.join(xp.corpus, split, "pool.tsv")
+        with open(xp.guard(pool)) as fp:
+            for line in fp:
+                f = line.rstrip("\n").split("\t")
+                if f == [""]:
+                    continue
+                if len(f) != 5:
+                    die(f"{split}/pool.tsv: a line without 5 fields")
+                name, path, status, _spc, label = f
+                if label != X_POOL_LABEL[split] or status != "Unsatisfiable":
+                    die(f"{split}/pool.tsv: {name} is not an Unsatisfiable "
+                        f"{X_POOL_LABEL[split]} row")
+                if x_stem(name) in j13:
+                    die(f"{split}/pool.tsv: {name} has a J13 stem")
+                dom = re.match(r"[A-Z]+", name).group(0)
+                if not name.endswith("-10") or \
+                        path != f"Problems/{dom}/{name}.p":
+                    die(f"{split}/pool.tsv: {name} has path {path}")
+                rel = f"{split}/{path}"
+                if not os.path.isfile(xp.guard(os.path.join(xp.corpus, rel))):
+                    die(f"no problem file {rel}")
+                probs.append((name, rel, split, x_stem(name)))
+                n[split] += 1
+        if n[split] > X_CAP[split]:
+            die(f"{split} holds {n[split]} problems, above its cap "
+                f"{X_CAP[split]}: a capped subsample needs its own amendment")
+    names = [p[0] for p in probs]
+    if len(names) != len(set(names)):
+        die("a problem name occurs twice")
+    st = {s: {p[3] for p in probs if p[2] == s} for s in X_SPLITS}
+    if st["TRAIN-X"] & st["DEV-X"]:
+        die("a stem is in both splits")
+
+    def key(p):
+        return (X_SPLITS.index(p[2]), re.match(r"[A-Z]+", p[0]).group(0), p[0])
+
+    probs.sort(key=key)
+    os.makedirs(xp.m("slots"), exist_ok=True)
+    slots = [[] for _ in range(X_SLOTS)]
+    for i, p in enumerate(probs):
+        for lane in lanes:
+            slots[i % X_SLOTS].append((p[0], p[1], p[2], lane))
+    rec = [f"X matrix job lists (plan amendment A22), {len(probs)} problems "
+           f"({', '.join(f'{s} {n[s]}' for s in X_SPLITS)}) x {len(lanes)} "
+           f"lanes = {len(probs) * len(lanes)} jobs in {X_SLOTS} slots"]
+    blobs = []
+    for k, jobs in enumerate(slots, 1):
+        jobs.sort(key=lambda j: hashlib.sha256(
+            (j[0] + "\t" + j[3]).encode()).hexdigest())
+        b = "".join("\t".join(j) + "\n" for j in jobs).encode()
+        blobs.append(b)
+        with open(xp.m("slots", f"slot_{k}.tsv"), "wb") as fp:
+            fp.write(b)
+        rec.append(f"slots/slot_{k}.tsv {len(jobs) // len(lanes)} problems "
+                   f"{len(jobs)} jobs sha256 {sha256_bytes(b)}")
+    files = {
+        "problems.tsv": "".join("\t".join(p) + "\n" for p in probs).encode(),
+        "lanes.txt": "".join(l + "\n" for l in lanes).encode(),
+        "jobs.tsv": b"".join(blobs),
+    }
+    sums = []
+    for rel in sorted([os.path.join(s, "pool.tsv") for s in X_SPLITS]
+                      + [p[1] for p in probs]):
+        with open(xp.guard(os.path.join(xp.corpus, rel)), "rb") as fp:
+            sums.append(f"{sha256_bytes(fp.read())}  {rel}\n")
+    files["corpus_files.sha256"] = "".join(sums).encode()
+    for name, b in files.items():
+        with open(xp.m(name), "wb") as fp:
+            fp.write(b)
+        rec.append(f"{name} sha256 {sha256_bytes(b)}")
+    with open(xp.guard(xp.lanes_src), "rb") as fp:
+        rec.append(f"lanes source {xp.lanes_src} sha256 "
+                   f"{sha256_bytes(fp.read())}")
+    rec.append(f"corpus files: {len(sums)} (the problem files and the two "
+               "pool.tsv), paths relative to the corpus root")
+    with open(xp.m("jobs.txt"), "w") as fp:
+        fp.write("\n".join(rec) + "\n")
+    print("\n".join(rec))
+
+
+def x_load_rows(xp, path, problems, lanes, slot, par):
+    """A runner file's 14-column rows, as Rows with shard = slot."""
+    rows = []
+    known = set(lanes)
+    label = os.path.relpath(path, xp.x)
+    with open(xp.guard(path)) as fp:
+        for line in fp:
+            f = line.rstrip("\n").split("\t")
+            if len(f) != 14:
+                die(f"{label}: a row without 14 columns")
+            if f[2] not in X_SPLITS or problems.get(f[0], ("", ""))[1] != f[2]:
+                die(f"{label}: a row that is not a TRAIN-X or DEV-X problem")
+            if f[1] not in known:
+                die(f"{label}: a row with an unknown lane")
+            r = Row()
+            r.problem, r.lane, r.split = f[0], f[1], f[2]
+            r.exit = int(f[3])
+            r.szs = f[4]
+            r.wall = float(f[5])
+            r.cpu = num(f[6])
+            r.rss = num(f[7], int)
+            r.cls = f[8]
+            r.steps = num(f[9], int)
+            r.rules = num(f[10], int)
+            r.cps = num(f[11], int)
+            r.slice_end = f[12]
+            r.detail = f[13]
+            r.shard = slot
+            r.par = par
+            rows.append(r)
+    return rows
+
+
+def x_oom_suspect(r):
+    """A SIGKILL end that the outer timeout did not cause (G0.1's reading)."""
+    return r.cls == "crash" and (r.slice_end in ("signal 9", "exit 137")
+                                 or r.exit == 137 or "signal 9" in r.detail)
+
+
+def x_row_text(r):
+    vals = [r.problem, r.lane, r.split, r.exit, r.szs, f"{r.wall:.2f}",
+            "" if r.cpu is None else f"{r.cpu:.2f}",
+            "" if r.rss is None else r.rss, r.cls,
+            "" if r.steps is None else r.steps,
+            "" if r.rules is None else r.rules,
+            "" if r.cps is None else r.cps, r.slice_end, r.detail, r.shard,
+            r.par]
+    return "\t".join(str(v) for v in vals)
+
+
+def x_started_files(xp, k):
+    """Every launch's .started of slot k: the last one and the copies the
+    pod launcher kept (slot_K.tsv.started.<epoch>)."""
+    out = []
+    for f in sorted(os.listdir(xp.results)):
+        if f == f"slot_{k}.tsv.started" or \
+                re.fullmatch(rf"slot_{k}\.tsv\.started\.\d+", f):
+            out.append(os.path.join(xp.results, f))
+    return out
+
+
+def x_vbs_within(pool, probs, lanes, t=None):
+    """Problems some lane of lanes proves, within t seconds when t is set."""
+    n = 0
+    for p in probs:
+        s = pool.solvers(p)
+        if any(l in s and (t is None or s[l] <= t) for l in lanes):
+            n += 1
+    return n
+
+
+def mode_xmatrix(xp):
+    """Validation, xmatrix.tsv, the tables of TRAIN-X and DEV-X, the
+    -10 lane tables and the TRAIN-X label-harvest list (plan A22)."""
+    problems = x_problems(xp)
+    lanes = x_read_lanes(xp, xp.m("lanes.txt"))
+    j13 = x_j13_stems(xp)
+    if any(x_stem(p) in j13 for p in problems):
+        die("problems.tsv holds a problem with a J13 stem")
+    idx = {l: i for i, l in enumerate(lanes)}
+    out = []
+    verdicts = []
+
+    def item(name, ok, lines):
+        verdicts.append((name, ok))
+        out.append(f"[{'PASS' if ok else 'FAIL'}] {name}")
+        out.extend("    " + l for l in lines)
+        out.append("")
+
+    # Rows, sentinels and launches per slot.
+    rows = []
+    want_all = collections.Counter()
+    lines_c = []
+    lines_s = []
+    ok_c = True
+    ok_s = True
+    slot_host = {}
+    for k in range(1, X_SLOTS + 1):
+        jobs = x_jobs(xp, k)
+        want = collections.Counter((j[0], j[3]) for j in jobs)
+        want_all += want
+        base = os.path.join(xp.results, f"slot_{k}.tsv")
+        if not os.path.exists(base):
+            lines_c.append(f"slot {k}: {len(jobs)} jobs, no rows file")
+            ok_c = False
+            continue
+        sts = [read_started(xp.guard(f)) for f in x_started_files(xp, k)]
+        st = read_started(xp.guard(base + ".started")) \
+            if os.path.exists(base + ".started") else {}
+        dn = read_started(xp.guard(base + ".done")) \
+            if os.path.exists(base + ".done") else {}
+        par = int(st.get("par", "0") or 0)
+        rs = x_load_rows(xp, base, problems, lanes, k, par)
+        got = collections.Counter((r.problem, r.lane) for r in rs)
+        missing = sum((want - got).values())
+        extra = sum((got - want).values())
+        dup = sum(c - 1 for c in got.values() if c > 1)
+        ok_c = ok_c and missing == 0 and extra == 0 and dup == 0
+        lines_c.append(f"slot {k}: {len(jobs)} jobs, {len(rs)} rows; missing "
+                       f"{missing}, extra {extra}, duplicate {dup}")
+        good = (dn.get("status") == "complete"
+                and dn.get("pending_left") == "0" and bool(sts)
+                and all(s.get("sha256") == X_BIN_SHA
+                        and s.get("host") == st.get("host")
+                        and s.get("par") == str(X_PAR)
+                        and s.get("nproc") == "16"
+                        and s.get("wall") == str(X_WALL)
+                        and s.get("timeout") == str(X_TIMEOUT)
+                        and s.get("env", "") == "" for s in sts))
+        ok_s = ok_s and good
+        slot_host[k] = st.get("host")
+        lines_s.append(
+            f"slot {k}: {len(sts)} launch(es); host {st.get('host')} nproc "
+            f"{st.get('nproc')} mem_gb {st.get('mem_gb')} par {st.get('par')} "
+            f"wall {st.get('wall')} timeout {st.get('timeout')} env "
+            f"'{st.get('env', '')}' sha256 "
+            + ",".join(sorted({str(s.get('sha256'))[:12] for s in sts}))
+            + f"; .done status={dn.get('status')} "
+            f"pending_left={dn.get('pending_left')}")
+        rows.extend(rs)
+    n_jobs = sum(want_all.values())
+    lines_c.append(f"all slots: {len(rows)} rows for {n_jobs} jobs "
+                   f"({len(problems)} problems x {len(lanes)} lanes = "
+                   f"{len(problems) * len(lanes)})")
+    ok_c = ok_c and n_jobs == len(problems) * len(lanes) == len(rows)
+    item("completeness: one row for every job of the slot lists", ok_c,
+         lines_c)
+    item(f"sentinels: every launch on binary {X_BIN_SHA[:12]}, width "
+         f"{X_PAR} on 16 CPUs, wall {X_WALL} s, timeout {X_TIMEOUT} s, no "
+         "extra environment, a slot's launches on one host; every .done "
+         "complete", ok_s, lines_s)
+
+    # OOM: the pods' kernel logs, the SIGKILL ends and their reruns.
+    lines = []
+    host_pod = {}
+    kills = 0
+    pdir = os.path.join(xp.results, "pods")
+    pods = sorted(os.listdir(pdir)) if os.path.isdir(pdir) else []
+    for pod in pods:
+        hp = os.path.join(pdir, pod, "hostname.txt")
+        dp = os.path.join(pdir, pod, "dmesg_oom.txt")
+        if os.path.exists(hp):
+            with open(xp.guard(hp)) as fp:
+                host_pod[fp.read().strip()] = pod
+        if not os.path.exists(dp):
+            lines.append(f"pod {pod}: no kernel-log capture")
+            kills += 1
+            continue
+        with open(xp.guard(dp), errors="replace") as fp:
+            hits = [l for l in fp if l.strip()]
+        kills += len(hits)
+        lines.append(f"pod {pod}: {len(hits)} oom / killed-process lines in "
+                     "sudo dmesg")
+    nohost = sorted(k for k, h in slot_host.items() if h not in host_pod)
+    if nohost:
+        lines.append("slots whose host has no pod record: "
+                     + ", ".join(map(str, nohost)))
+    sus = [r for r in rows if x_oom_suspect(r)]
+    reruns = {}
+    for k in range(1, X_SLOTS + 1):
+        rp = os.path.join(xp.results, f"rerun_{k}.tsv")
+        if os.path.exists(rp):
+            rst = read_started(xp.guard(rp + ".started")) \
+                if os.path.exists(rp + ".started") else {}
+            for r in x_load_rows(xp, rp, problems, lanes, k,
+                                 int(rst.get("par", "0") or 0)):
+                reruns[(r.problem, r.lane)] = (r, rst)
+    bad_rerun = [r for r in sus if (r.problem, r.lane) not in reruns
+                 or reruns[(r.problem, r.lane)][1].get("par")
+                 != str(X_RERUN_PAR)
+                 or reruns[(r.problem, r.lane)][1].get("sha256") != X_BIN_SHA
+                 or slot_host.get(r.shard)
+                 != reruns[(r.problem, r.lane)][1].get("host")]
+    stray = sorted(set(reruns) - {(r.problem, r.lane) for r in sus})
+    lines.append(f"rows with a SIGKILL end (class crash; slice signal 9 or "
+                 f"exit 137, or the lane parent killed): {len(sus)}; rerun at "
+                 f"width {X_RERUN_PAR} on their slot's pod: "
+                 f"{len(sus) - len(bad_rerun)}")
+    for r in sus:
+        lines.append(f"  {r.problem} {r.lane} maxrss {r.rss} kB slot "
+                     f"{r.shard}")
+    if stray:
+        lines.append(f"rerun rows that replace no SIGKILL row: {len(stray)}")
+    hi = [r for r in rows if r.rss is not None and r.rss > 4500 * 1024]
+    lines.append(f"rows whose maxrss exceeds the 4.5 GB slice cap: {len(hi)} "
+                 f"(max {max((r.rss for r in rows if r.rss), default=0) // 1024}"
+                 " MB; the RSS guard is polled, not a hard cap)")
+    item("kernel OOM: no kill line in any pod's kernel log, every SIGKILL "
+         "end rerun", kills == 0 and not bad_rerun and not stray and
+         not nohost, lines)
+    if not bad_rerun:
+        rows = [reruns[(r.problem, r.lane)][0] if x_oom_suspect(r) else r
+                for r in rows]
+
+    # Crashes plus killed-by-timeout, and the rows themselves.
+    bad = [r for r in rows if r.cls in ("crash", "killed-by-timeout")]
+    frac = 100.0 * len(bad) / max(1, len(rows))
+    lines = [f"{c}: {sum(1 for r in bad if r.cls == c)} ("
+             + ", ".join(f"{s} {sum(1 for r in bad if r.cls == c and r.split == s)}"
+                         for s in X_SPLITS) + ")"
+             for c in ("crash", "killed-by-timeout")]
+    lines.append(f"together {len(bad)} of {len(rows)} rows = {frac:.3f}% "
+                 "(at most 1%)")
+    byp = collections.defaultdict(list)
+    for r in bad:
+        byp[(r.problem, r.split, r.cls, r.detail[:100])].append(r.lane)
+    for (p, sp, c, d), ls in sorted(byp.items()):
+        lines.append(f"  {p} ({sp}) {c}: {d}: {len(ls)} lanes "
+                     f"({', '.join(sorted(ls, key=idx.get))})")
+    item("crashes plus killed-by-timeout at most 1%", frac <= 1.0, lines)
+    szs = collections.Counter(r.szs for r in rows if r.cls == "proved")
+    exits = collections.Counter(r.exit for r in rows)
+    keys = collections.Counter((r.problem, r.lane) for r in rows)
+    lines = [f"SZS of proved rows: {dict(szs)} (every corpus problem is "
+             "Unsatisfiable: another claim is a soundness alarm)",
+             f"SZS words of all rows: "
+             f"{dict(collections.Counter(r.szs for r in rows))}",
+             f"exit codes: {dict(sorted(exits.items()))}",
+             f"rows without CPU or maxrss: "
+             f"{sum(1 for r in rows if r.cpu is None or r.rss is None)}"]
+    claims = [r for r in rows if r.szs in ("Satisfiable",
+                                           "CounterSatisfiable")]
+    for r in claims:
+        lines.append(f"  satisfiable claim: {r.problem} {r.lane}")
+    item("row sanity: proved rows Unsatisfiable, no satisfiable claim, no "
+         "duplicate key", set(szs) <= {"Unsatisfiable"} and not claims
+         and all(c == 1 for c in keys.values()), lines)
+
+    # The lane groups against the binary's own lane table.
+    lines = []
+    flags = {}
+    seen = set()
+    for pod in pods:
+        fp_ = os.path.join(pdir, pod, "list_lanes_flags.txt")
+        if not os.path.exists(fp_):
+            continue
+        with open(xp.guard(fp_)) as fp:
+            t = fp.read()
+        seen.add(sha256_bytes(t.encode()))
+        for line in t.splitlines():
+            name, _tab, fl = line.partition("\t")
+            flags[name] = fl
+    groups = {l: g for g in X_GROUPS for l in X_LANE_GROUPS[g]}
+    diff = [l for l in lanes if l not in flags or x_group(flags[l]) != groups[l]]
+    lines.append(f"--list-lanes=flags copies: {len(seen)} distinct over "
+                 f"{len(pods)} pods; lanes whose flags give another group: "
+                 + (", ".join(diff) if diff else "none"))
+    for g in X_GROUPS:
+        lines.append(f"{g} ({len(X_LANE_GROUPS[g])}): "
+                     + ", ".join(X_LANE_GROUPS[g]))
+    item("lane groups: the binary's lane flags give A22's groups",
+         len(seen) == 1 and not diff and list(flags) == lanes, lines)
+
+    overall = all(ok for _n, ok in verdicts)
+    order = {s: i for i, s in enumerate(X_SPLITS)}
+    rows.sort(key=lambda r: (order[r.split], r.problem, idx[r.lane]))
+    blob = "".join(x_row_text(r) + "\n" for r in rows).encode()
+    with open(xp.m("xmatrix.tsv"), "wb") as fp:
+        fp.write(blob)
+    head = [
+        "X matrix validation (docs/plans/enigma_portfolio.md amendment A22): "
+        "the synthetic -10 corpus, TRAIN-X and DEV-X, on all 46 lanes at 60 s",
+        f"overall: {'PASS' if overall else 'FAIL'}",
+        f"xmatrix.tsv: {len(rows)} rows, sha256 {sha256_bytes(blob)} (the 14 "
+        "runner columns, 15 = slot, 16 = width; OOM reruns in place)",
+        "",
+    ]
+    with open(xp.m("validate.txt"), "w") as fp:
+        fp.write("\n".join(head + out) + "\n")
+    for name, ok in verdicts:
+        print(f"{'PASS' if ok else 'FAIL'}  {name}")
+    if not ok_c:
+        die("rows are missing: no tables (validate.txt)")
+
+    # Tables per split.
+    os.makedirs(xp.tables, exist_ok=True)
+    pool = Pool(rows, problems, lanes)
+    summary = [
+        "X matrix tables (plan amendment A22), built by tools/atp_enigma/"
+        "matrix_tables.py --xmatrix from xmatrix.tsv.  One file per table and",
+        "split, <table>_<split>.tsv with a header row; T1-T4 and T8 as in the",
+        "pool tables (tables/summary.txt of the M0 matrix).  Times are the",
+        "single-lane wall_s of a 60 s run (slice wall 57 s, stopped at",
+        "59.5 s), so 'at 60 s' counts every proved row.  The hard tail is",
+        "condition 1 of plan section 1.4 (fastest lane over 10 s); condition",
+        "3 (every searching lane on the memory guard) is listed in T4 with",
+        "its own label; condition 2 needs a 180 s run that does not exist.",
+        "X10_lanes: every lane by A22 group; X10_groups: the groups' unions;",
+        "X10_only_gated: problems only the six gated lanes solve.",
+        f"Validation: {'PASS' if overall else 'FAIL'} (validate.txt).",
+        "",
+    ]
+    lab = []
+    for split in X_SPLITS:
+        probs = pool.problems([split])
+
+        def T(name):
+            return os.path.join(xp.tables, f"{name}_{split}.tsv")
+
+        t = tables_t1_t4(pool, probs, lanes, T, WITHIN, VBS_GRID,
+                         hard_tail(pool, probs), stem_of=x_stem)
+        unsolved = set(t["unsolved"])
+        rowsT8 = []
+        for lane in lanes:
+            rs = [pool.by[p][lane] for p in probs]
+            mg = [r for r in rs if r.cls == "memory-guard"]
+            rss = [r.rss / 1024.0 for r in rs if r.rss is not None
+                   and r.cls != "fast-exit-not-applicable"]
+            rowsT8.append([lane, len(mg),
+                           sum(1 for r in mg if r.problem in unsolved),
+                           sum(1 for r in mg if "term heap" in r.detail),
+                           len(rss), quantile(rss, 0.5), quantile(rss, 0.9),
+                           quantile(rss, 0.99), max(rss) if rss else None,
+                           sum(1 for x in rss if x > 4500),
+                           sum(1 for x in rss if x > 6000)])
+        write_tsv(T("T8_memory"), ["lane", "memory_guard", "memory_guard_on_"
+                                   "unsolved", "term_heap_exhausted",
+                                   "n_searched", "maxrss_p50_mb",
+                                   "maxrss_p90_mb", "maxrss_p99_mb",
+                                   "maxrss_max_mb", "n_over_4500mb",
+                                   "n_over_6000mb"], rowsT8)
+
+        # The -10 lanes.
+        sets = {l: {p for p in probs if l in pool.solvers(p)} for l in lanes}
+        picked = {l: k for k, (l, _g, _c, _t) in enumerate(t["picks"], 1)}
+        tied = collections.Counter()
+        strict = collections.Counter()
+        for p in t["solved"]:
+            f = pool.fastest(p)
+            for l in f:
+                tied[l] += 1
+            if len(f) == 1:
+                strict[f[0]] += 1
+        rowsX = []
+        for g in X_GROUPS:
+            for lane in X_LANE_GROUPS[g]:
+                rs = [pool.by[p][lane] for p in probs]
+                pr = [r for r in rs if r.cls == "proved"]
+                c = collections.Counter(r.cls for r in rs)
+                fe = c["fast-exit-not-applicable"]
+                rowsX.append([lane, g, len(pr),
+                              sum(1 for r in pr
+                                  if len(pool.solvers(r.problem)) == 1)]
+                             + [sum(1 for r in pr if r.wall <= w)
+                                for w in X_WITHIN]
+                             + [tied[lane], strict[lane], fe, len(rs) - fe,
+                                c["memory-guard"], c["wall"],
+                                picked.get(lane)])
+        write_tsv(T("X10_lanes"), ["lane", "group", "proved", "proved_alone"]
+                  + [f"proved_le{w}s" for w in X_WITHIN]
+                  + ["fastest_incl_ties", "fastest_strict", "fast_exit",
+                     "searched", "memory_guard", "wall", "cover_pick"], rowsX)
+        gated = [l for g in X_GATED for l in X_LANE_GROUPS[g]]
+        rest = [l for l in lanes if l not in gated]
+        def vb(ls):
+            return [x_vbs_within(pool, probs, ls, w) for w in X_WITHIN] + \
+                [x_vbs_within(pool, probs, ls)]
+
+        def union(ls):
+            return set().union(*(sets[l] for l in ls)) if ls else set()
+
+        rowsG = []
+        for label, ls in ([(g, list(X_LANE_GROUPS[g])) for g in X_GROUPS]
+                          + [("gated (both)", gated),
+                             ("all but gated", rest),
+                             ("all", list(lanes))]):
+            others = union([l for l in lanes if l not in ls])
+            u = union(ls)
+            rowsG.append([label, len(ls), len(u), len(u - others)] + vb(ls))
+        write_tsv(T("X10_groups"), ["group", "lanes", "solved_union",
+                                    "solved_only_by_group"]
+                  + [f"vbs_le{w}s" for w in X_WITHIN] + ["vbs_at60s"], rowsG)
+        only = sorted(union(gated) - union(rest))
+        write_tsv(T("X10_only_gated"), ["problem", "fastest_s", "lanes"],
+                  [(p, pool.vbs(p), ",".join(sorted(pool.solvers(p),
+                                                    key=idx.get)))
+                   for p in only])
+
+        n = len(probs)
+        curve = dict(t["curve"])
+        T1 = {r[0]: r for r in t["T1"]}
+
+        def best_at(col):
+            m = max(T1[l][col] for l in lanes)
+            return f"{', '.join(l for l in lanes if T1[l][col] == m)} {m}"
+
+        conds = collections.Counter(c for _p, c in t["tail"])
+        top = sorted(t["owners"].items(), key=lambda kv: (-kv[1],
+                                                          idx[kv[0]]))
+        g6 = {r[0]: r for r in rowsG}
+        summary += [
+            f"== {split}: {n} problems, "
+            f"{sum(1 for r in rows if r.split == split)} rows",
+            f"VBS at 10 s {curve[10]}, at 30 s {curve[30]}, at 60 s "
+            f"{len(t['solved'])} of {n}; unsolved {len(t['unsolved'])}",
+            "VBS curve: " + ", ".join(f"<={x}s {c}" for x, c in t["curve"]),
+            f"best single lane at 60 s: {', '.join(t['best'])} {t['best_n']} "
+            f"({t['best_n'] - len(t['solved'])} vs VBS); at 30 s: "
+            f"{best_at(3 + WITHIN.index(30))}; at 10 s: "
+            f"{best_at(3 + WITHIN.index(10))}",
+            "greedy cover: " + ", ".join(
+                f"k={k} {t['cov'][k]}" for k in range(1, 17) if k in t["cov"])
+            + f"; full union at k={t['full_k']}",
+            "greedy picks: " + ", ".join(
+                f"{l}(+{g})" for l, g, _c, _t in t["picks"]),
+            f"hard tail, fastest lane over 10 s: "
+            f"{conds['fastest>10s']}; every searching lane on the memory "
+            f"guard (unsolved): {conds['all-searchers-memory-guard']}; "
+            "owners (fastest lane, ties count): "
+            + (", ".join(f"{l} {c}" for l, c in top) or "none"),
+            "unsolved end patterns: " + ", ".join(
+                f"{g} {c}" for g, c in sorted(t["groups"].items(),
+                                              key=lambda kv: -kv[1])),
+            "per-lane solved at 60 s: " + ", ".join(
+                f"{l} {T1[l][1]}" for l in lanes),
+            "-10 lanes, gated (proved / alone / fastest strict / fast-exit): "
+            + ", ".join(f"{r[0]} {r[2]}/{r[3]}/{r[7]}/{r[8]}"
+                        for r in rowsX if r[1] in X_GATED),
+            f"-10 lanes, the six gated together: union "
+            f"{g6['gated (both)'][2]}, only they solve "
+            f"{g6['gated (both)'][3]}; VBS without them at 10/30/60 s "
+            + "/".join(str(x) for x in g6["all but gated"][4:])
+            + " against " + "/".join(str(x) for x in g6["all"][4:]),
+            "groups (union / only that group): " + ", ".join(
+                f"{r[0]} {r[2]}/{r[3]}" for r in rowsG[:len(X_GROUPS)]),
+            f"memory-guard ends {sum(r[1] for r in rowsT8)} "
+            f"({sum(r[2] for r in rowsT8)} on unsolved problems, "
+            f"{sum(r[3] for r in rowsT8)} term heap); rows over 4.5 GB "
+            f"{sum(r[9] for r in rowsT8)}, over 6 GB "
+            f"{sum(r[10] for r in rowsT8)}",
+            "",
+        ]
+        if split == "TRAIN-X":
+            lab = [(p, l) for p in probs for l in lanes
+                   if pool.by[p][l].cls == "proved"]
+    write_jobs(xp.m("label_harvest_jobs.tsv"), pool, lab)
+    with open(xp.m("label_harvest_jobs.tsv"), "rb") as fp:
+        lab_sha = sha256_bytes(fp.read())
+    fe = sum(1 for p, l in lab if pool.by[p][l].detail.startswith("front end"))
+    summary += [
+        f"label harvest: every TRAIN-X (problem, lane) pair proved at 60 s: "
+        f"{len(lab)} pairs on {len({p for p, _l in lab})} problems "
+        f"({fe} front-end proofs) -> label_harvest_jobs.tsv (runner job "
+        f"format, paths relative to the corpus root), sha256 {lab_sha}",
+        "",
+    ]
+    with open(os.path.join(xp.tables, "summary.txt"), "w") as fp:
+        fp.write("\n".join(summary))
+    j13re = re.compile(r"(?<![A-Za-z0-9])(" + "|".join(sorted(j13)) +
+                       r")(?![0-9])") if j13 else None
+    for f in [xp.m("validate.txt"), xp.m("label_harvest_jobs.tsv")] + [
+            os.path.join(xp.tables, x) for x in os.listdir(xp.tables)]:
+        with open(f, errors="replace") as fp:
+            if j13re and j13re.search(fp.read()):
+                die(f"{f} names a J13 stem")
+    print("\n".join(summary))
+    return overall
+
+
 TABLES_README = [
     "Lane-matrix pool tables (docs/plans/enigma_portfolio.md 5.2 step 4),",
     "built by tools/atp_enigma/matrix_tables.py --tables from matrix.tsv",
@@ -2025,12 +2740,26 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--matrix-dir", default="~/.cache/thvm/enigma/matrix")
     ap.add_argument("--sealed-dir", default="~/.cache/thvm/enigma/sealed")
+    ap.add_argument("--x-dir", default="~/.cache/thvm/enigma/ifeq10/matrix")
+    ap.add_argument("--corpus-dir",
+                    default="~/.cache/thvm/enigma/ifeq10/corpus")
+    ap.add_argument("--j13-names",
+                    default="~/.cache/thvm/casc/J13/neural_p0/"
+                            "j13_ueq_names.txt")
+    ap.add_argument("--lanes", default="~/.cache/thvm/enigma/matrix/lanes.txt")
     g = ap.add_mutually_exclusive_group(required=True)
     for m in ("seal", "validate", "supplement", "tables", "decisions",
-              "all"):
+              "all", "xjobs", "xmatrix"):
         g.add_argument("--" + m, action="store_true")
     g.add_argument("--t7c", metavar="REPLICA_TSV")
     a = ap.parse_args()
+    if a.xjobs or a.xmatrix:
+        xp = XPaths(a.x_dir, a.corpus_dir, a.j13_names, a.lanes, a.sealed_dir)
+        os.makedirs(xp.x, exist_ok=True)
+        if a.xjobs:
+            mode_xjobs(xp)
+            return
+        sys.exit(0 if mode_xmatrix(xp) else 1)
     paths = Paths(a.matrix_dir, a.sealed_dir)
     if a.seal:
         mode_seal(paths)
