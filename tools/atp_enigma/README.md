@@ -504,11 +504,15 @@ every step a deadline, stops at the first failure and leaves sentinels;
 steps 1 and 4 are the lane matrix's `pod_gates.sh`.  Copy to INPUT_DIR,
 with a `SHA256SUMS` file the script checks:
 
-| File | From the Mac | sha256 (2026-10-02) |
-|------|--------------|---------------------|
+| File | From the Mac | sha256 (plan amendment A21) |
+|------|--------------|-----------------------------|
 | j13_ueq_names.txt | ~/.cache/thvm/casc/J13/neural_p0/ | c43f0c4914bb4b295040f2a3186631da7a8955f991a81e5b15939d7b9cd69410 |
 | pool.tsv | ~/.cache/thvm/casc/J13/neural_p0/ | 9fdb0135c608d6ed49e54b77dc94d20810ea4494aeb7974a4d75965181130594 |
-| dev_t.tsv | ~/.cache/thvm/enigma/matrix/ | c66cc386aa51e99f36960a79d1ba0667c38db8de078f39711701d9daebddae88 |
+| dev_t.tsv | ~/.cache/thvm/enigma/matrix/ | 4468a73697631ecfd0f973198d3879254efef504ca5a9734e5f6338819a8219b |
+| train_t.tsv | ~/.cache/thvm/enigma/matrix/ | 6061641e745d437e6e1b5cdc36ac0f22b7def5c5a73628c81df71ec0e8c6fdd8 |
+
+dev_t.tsv and train_t.tsv are the final DEV-T and TRAIN-T of the 180 s
+decisions (`matrix_tables.py --decisions`, 7 problems each).
 
 The TPTP-v9.3.1 tree is downloaded on the pod (as `pod_gates.sh` does);
 the driver records its release and the sha256 of its problem list.
@@ -535,7 +539,8 @@ awk -F'\t' '$5 == "heldout" { print $1 }' $P/pool.tsv > devh_names.txt
 awk -F'\t' '$5 == "train" { print $1 }' $P/pool.tsv > pool_train_names.txt
 TRAIN_NAMES=pool_train_names.txt tools/atp_enigma/make_ifeq10_corpus.sh \
   bin/FindProof <TPTP-v9.3.1 root> <out_dir> $P/j13_ueq_names.txt \
-  devh_names.txt ~/.cache/thvm/enigma/matrix/dev_t.tsv
+  devh_names.txt ~/.cache/thvm/enigma/matrix/dev_t.tsv \
+  ~/.cache/thvm/enigma/matrix/train_t.tsv
 ```
 
 walks the tree's CNF and FOF problems with status Unsatisfiable or Theorem
@@ -544,8 +549,8 @@ emitted name = source name + `-10`) with a `pool.tsv` in `np0_pool.py`'s
 columns, split 80/20 by `matrix_tables.py`'s `stem_hash` of the stem.
 Skipped, with the reason in `manifest.tsv`: every stem of a J13 name (which
 drops the -1/-2/-3 sources of J13's -10 theorems), every stem of an
-exclusion list (above: DEV-H and DEV-T, so that neither has an encoded copy
-in the corpus), problems that are unit equality already (by their SPC, or
+exclusion list (above: DEV-H, DEV-T and TRAIN-T, so that no gate or tail
+problem has an encoded copy in the corpus), problems that are unit equality already (by their SPC, or
 after clausification by the Encoding line: the FOF versions of UEQ
 problems), stems that TPTP already ships as -10 problems (the pool holds
 them), DEV-X problems whose stem occurs in the pool's train split, and

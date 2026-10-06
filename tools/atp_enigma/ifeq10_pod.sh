@@ -19,7 +19,10 @@
 #   j13_ueq_names.txt  ~/.cache/thvm/casc/J13/neural_p0/j13_ueq_names.txt
 #   pool.tsv           ~/.cache/thvm/casc/J13/neural_p0/pool.tsv
 #   dev_t.tsv          ~/.cache/thvm/enigma/matrix/dev_t.tsv
-# (their sha256 on 2026-10-02 are in README.md).  TPTP_ROOT is the
+#   train_t.tsv        ~/.cache/thvm/enigma/matrix/train_t.tsv
+# (their sha256 are in README.md).  The corpus excludes the stems of the
+# pool's held-out names, DEV-T and TRAIN-T (plan amendment A21) and keeps
+# the pool's train stems out of DEV-X.  TPTP_ROOT is the
 # TPTP-v9.3.1 tree, which the driver fingerprints itself.  Sentinels in
 # OUT_DIR/sentinels: STEP.started, STEP.done (ok or FAIL rc=N) and
 # ALL_DONE; logs in OUT_DIR/logs.  Env: JOBS, DEADLINE_S (passed to the
@@ -40,7 +43,7 @@ export JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 8)}
 
 [ -x "$ROOT/bin/FindProof" ] || { echo "ifeq10_pod: no bin/FindProof under $ROOT" >&2; exit 2; }
 [ -f "$ROOT/tests/atp_ifeq10_tptp.sh" ] || { echo "ifeq10_pod: run from the repository root" >&2; exit 2; }
-for f in j13_ueq_names.txt pool.tsv dev_t.tsv SHA256SUMS; do
+for f in j13_ueq_names.txt pool.tsv dev_t.tsv train_t.tsv SHA256SUMS; do
   [ -s "$IN/$f" ] || { echo "ifeq10_pod: $IN/$f is missing" >&2; exit 2; }
 done
 if ! (cd "$IN" && sha256sum -c --quiet SHA256SUMS) > "$OUT/logs/inputs.log" 2>&1; then
@@ -76,7 +79,7 @@ if [ "${CORPUS:-0}" = 1 ]; then
   awk -F'\t' '$5 == "train" { print $1 }' "$IN/pool.tsv" > "$OUT/pool_train_names.txt"
   step corpus $((DEADLINE_S + 3600)) env TRAIN_NAMES="$OUT/pool_train_names.txt" DEADLINE_S="$DEADLINE_S" \
     bash tools/atp_enigma/make_ifeq10_corpus.sh bin/FindProof "$TPTP_ROOT" "$OUT/corpus" \
-    "$IN/j13_ueq_names.txt" "$OUT/devh_names.txt" "$IN/dev_t.tsv"
+    "$IN/j13_ueq_names.txt" "$OUT/devh_names.txt" "$IN/dev_t.tsv" "$IN/train_t.tsv"
   # The driver exits 0 on an incomplete or alerted run; its .done says which.
   cat "$OUT/corpus/.done" >> "$S/corpus.done"
 fi
