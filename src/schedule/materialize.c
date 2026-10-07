@@ -3527,9 +3527,7 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
         Term axis_hit = try_inline_bufferize_via_axis_table(
             st, sub, resolved, inner_buf, v, n_ranges, depth);
         if (axis_hit != 0) return axis_hit;
-        Term hit = try_inline_bufferize_1axis_via_decomp(
-            st, sub, inner_buf, v, addr_term, depth);
-        if (hit != 0) return hit;
+        thvm_fatal("BUFFERIZE has no per-axis side-table entry");
       }
       // Multi-axis BUFFERIZE: addr is IADD/IMUL tree encoding row-major
       // (per-axis stride * iter) sum.  Mirror ru_build_addr_with_dims
@@ -3559,9 +3557,7 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
         Term axis_hit = try_inline_bufferize_via_axis_table(
             st, sub, resolved, inner_buf, v, n_ranges, depth);
         if (axis_hit != 0) return axis_hit;
-        Term stride_hit = try_inline_bufferize_multi_via_stride_match(
-            st, sub, inner_buf, v, addr_term, n_ranges, depth);
-        if (stride_hit != 0) return stride_hit;
+        thvm_fatal("BUFFERIZE has no per-axis side-table entry");
       }
     }
     // Fall through: rebuild the INDEX_E with possibly-substituted
@@ -3884,7 +3880,10 @@ static Term unified_rewrite_store_for_walker(Term store, void *ctx) {
   AxExtMap axm;
   axm.n = 0;
   axext_collect(&axm, store);
-  return repair_collapsed_reduces_rec(rewritten, &axm, 0);
+  if (repair_collapsed_reduces_rec(rewritten, &axm, 0) != rewritten) {
+    thvm_fatal("walker rewrite: a broadcast-collapsed REDUCE needs the post-inline repair");
+  }
+  return rewritten;
 }
 
 static Term unified_store_root_for_walker(KernelEntry *ke, Term root) {
@@ -4664,8 +4663,12 @@ static void topo_sort_boundaries(Term root) {
                                    BUFFERIZE_NODES[i].loc, 0, &rloc)
                               && reduce_is_conv_weight_grad(rloc, ond));
       if (!rangeify_unified_is_realized(i)) continue;
-      if (!effectively_full
-          && !bufferize_value_would_strand_c(buf, i, &strand_cache)) continue;
+      if (!effectively_full) {
+        if (bufferize_value_would_strand_c(buf, i, &strand_cache)) {
+          thvm_fatal("boundary scan: inlining a partial realize would strand a range");
+        }
+        continue;
+      }
     }
     items[n].loc   = BUFFERIZE_NODES[i].loc;
     items[n].depth = BOUNDARY_DEPTH[i];

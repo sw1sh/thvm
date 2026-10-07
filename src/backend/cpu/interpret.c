@@ -94,6 +94,7 @@ static int cpu_premat_chained_input(KernelEntry *ke, u32 slot,
   }
   if (src_buf == 0 || src_buf >= CPU_BUFS_NEXT) return 0;
   if (CPU_BUFS[src_buf].data == NULL) return 0;
+  thvm_fatal("CPU dispatch: a ShapeTracker-chained input reached the kernel uncomposed");
   u32 numel = td->view.numel;
   u32 new_tid = tensor_alloc(td->backend, td->view.shape, td->dtype);
   if (new_tid == 0) return 0;

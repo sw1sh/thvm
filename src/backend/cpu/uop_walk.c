@@ -1365,20 +1365,24 @@ static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
     for (u32 ai = 0; ai < cn && chain_len < UWALK_MAX_RANGES; ai++) {
       u32 caxis = uop_reduce_axis(cur, ai);
       u32 cext = 0;
+      int found = 0;
       for (u32 i = 0; i < n_src_r; i++) {
         u32 ax = term_val(heap_read(term_val(src_ranges[i]) + 0));
         if (ax == caxis) {
           // kvar_extent_runtime: a symbolic reduce axis loops the BOUND
           // value (kvar_hi if unbound), a literal axis its own extent.
           cext = kvar_extent_runtime(term_val(heap_read(term_val(src_ranges[i]) + 2)));
+          found = 1;
           break;
         }
       }
+      // A reduce axis with no RANGE in its body lost its extent upstream;
+      // the identity would be a wrong value, not an empty reduction.
+      if (!found) {
+        thvm_fatal("uop walk: a REDUCE axis has no RANGE in its body");
+      }
       if (cext == 0) {
-        // No contributions on this axis -> the whole chain yields
-        // identity.  (Identity-or-bail matches the old single-axis
-        // r_extent==0 short-circuit.)
-        return identity;
+        return identity;   // an empty axis reduces to the identity
       }
       axes[chain_len]    = caxis;
       extents[chain_len] = cext;
