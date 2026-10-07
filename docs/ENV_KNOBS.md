@@ -114,8 +114,6 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 | Knob | Default | Effect |
 | --- | --- | --- |
 | `THVM_CUDA_FAST_MATH` | on | Enable PTX fast-math. |
-| `THVM_CUDA_PTX` | (impl) | PTX emission control. |
-| `THVM_CUDA_PTX_MAX` | (impl) | Max PTX register count. |
 | `THVM_CUDA_SYNC` | off | Force a CUDA sync after each kernel. |
 | `THVM_CUDA_GPU_TIME` | off | Print GPU execution time. |
 | `THVM_CUDA_JIT_GRAPH` | (impl) | Enable the CUDA JIT graph. |
@@ -130,7 +128,6 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 | `THVM_CUDA_RENDER_TRACE` | off | Trace CUDA PTX rendering. |
 | `THVM_CUDA_DUMP_DISPATCH` | off | Dump dispatch metadata. |
 | `THVM_CUDA_DUMP_KID` | off | Dump kernel IDs. |
-| `THVM_CUDA_DUMP_ALL_PTX` | off | Dump all generated PTX. |
 | `THVM_CUDA_DUMP_FAIL_PTX` | off | Dump PTX for failed compiles. |
 | `THVM_CUDA_DUMP_FAILED_KERNEL` | off | Dump the failed kernel program. |
 | `THVM_CUDA_DUMP_SHARED` | off | Dump shared-memory usage. |
@@ -166,7 +163,6 @@ Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
 | `THVM_DUMP_KERNEL_SRC` | off | Dump generated kernel source. |
 | `THVM_DUMP_TILE_JIT_SRC` | off | Dump tiled-JIT kernel source. |
 | `THVM_DUMP_MATMUL_DETECT` | off | Dump matmul detection. |
-| `THVM_ROUTE_TRACE` | off | Trace PTX routing. |
 | `THVM_KCNT` | off | Kernel-count debug. |
 
 ## ATP (automated theorem proving)

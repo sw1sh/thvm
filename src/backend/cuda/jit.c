@@ -45,7 +45,6 @@ static CudaJitSlot CUDA_JIT_CACHE[CUDA_JIT_CACHE_CAP];
 // correlates with cache thrashing.
 u64 CUDA_JIT_COMPILES = 0;
 u64 CUDA_JIT_EVICTIONS = 0;
-u64 CUDA_JIT_PTX_LOADS = 0;   // of the compiles, how many were PTX passthrough
 fn u64 cuda_jit_compiles(void)  { return CUDA_JIT_COMPILES; }
 fn u64 cuda_jit_evictions(void) { return CUDA_JIT_EVICTIONS; }
 
@@ -188,17 +187,7 @@ static CudaJitSlot *cuda_jit_probe(u64 key, int *found) {
   return &CUDA_JIT_CACHE[h0];   // table full -> evict home (degenerate)
 }
 
-// Detect a PTX-assembly source (emitted by render_ptx.c) vs a CUDA-C
-// source (render_uop / render_linearized).  PTX modules start with a
-// `.version` directive (after optional leading whitespace).
-static int cuda_src_is_ptx(const char *s) {
-  if (s == NULL) return 0;
-  while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-  return strncmp(s, ".version", 8) == 0;
-}
-
-// Compile a CUDA-C source string with nvrtc (or load a PTX source
-// directly, bypassing nvrtc) and load it as a module.  Returns a
+// Compile a CUDA-C source string with nvrtc and load it as a module.  Returns a
 // resolved CUfunction for `kernel_name`, or NULL on any nvrtc / driver
 // failure (the reason lands in thvm_cuda_last_error).
 fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
@@ -250,140 +239,112 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
         p = line_start - 1;
         if (p <= cu_src) break;
       }
-      fprintf(stderr, "[cuda-compile #%llu] %s sz=%zu %.100s\n",
+      fprintf(stderr, "[cuda-compile #%llu] sz=%zu %.100s\n",
               (unsigned long long)CUDA_JIT_COMPILES,
-              cuda_src_is_ptx(cu_src) ? "PTX  " : "nvrtc",
               sz, last_out[0] ? last_out : "(no store found)");
       fflush(stderr);
     }
   }
 
-  // PTX passthrough: if the rendered source is already PTX assembly
-  // (the render_ptx.c emitter, detected by a leading `.version`), skip
-  // nvrtc entirely and hand the text straight to cuModuleLoadData.  This
-  // is the whole point of the PTX renderer -- bypass nvrtc's C++ frontend,
-  // which is what blows up on the opt-rich conv kernels.  `ptx` borrows
-  // cu_src in this branch (ptx_owned == 0, so we don't free it).
-  char *ptx = NULL;
-  int   ptx_owned = 0;
-  int   is_ptx = cuda_src_is_ptx(cu_src);
+  // --- nvrtc compile (with on-disk PTX cache lookup first) -------
+  char arch_opt[32];
+  int sm = cuda_device_sm();
+  if (sm <= 0) sm = 70;   // safe default if the probe failed
+  snprintf(arch_opt, sizeof arch_opt, "--gpu-architecture=compute_%d", sm);
+  char const *_fme = getenv("THVM_CUDA_FAST_MATH");
+  int fast_math_on = (_fme != NULL && _fme[0] == '1');
 
-  if (is_ptx) {
-    ptx = (char *)cu_src;   // borrowed; freed by the caller's render buffer
-    CUDA_JIT_PTX_LOADS++;
-    if (getenv("THVM_CUDA_DUMP_ALL_PTX")) {
-      fprintf(stderr, "--- our PTX (#%llu) ---\n%s--- end ---\n",
-              (unsigned long long)CUDA_JIT_PTX_LOADS, ptx);
-    }
-  } else {
-    // --- nvrtc compile (with on-disk PTX cache lookup first) -------
-    char arch_opt[32];
-    int sm = cuda_device_sm();
-    if (sm <= 0) sm = 70;   // safe default if the probe failed
-    snprintf(arch_opt, sizeof arch_opt, "--gpu-architecture=compute_%d", sm);
-    char const *_fme = getenv("THVM_CUDA_FAST_MATH");
-    int fast_math_on = (_fme != NULL && _fme[0] == '1');
+  // Disk cache key: hash src bytes, then mix in arch sm + fast_math
+  // flag so PTX compiled for a different target doesn't collide.
+  u64 disk_key = key;
+  disk_key ^= ((u64)sm) << 1;
+  disk_key ^= ((u64)fast_math_on) << 33;
+  disk_key |= (1ULL << 63);
 
-    // Disk cache key: hash src bytes, then mix in arch sm + fast_math
-    // flag so PTX compiled for a different target doesn't collide.
-    u64 disk_key = key;
-    disk_key ^= ((u64)sm) << 1;
-    disk_key ^= ((u64)fast_math_on) << 33;
-    disk_key |= (1ULL << 63);
-
-    char *cached_ptx = cuda_disk_cache_get(disk_key);
-    if (cached_ptx != NULL) {
-      ptx = cached_ptx;
-      ptx_owned = 1;
-      goto module_load;
-    }
-
-    nvrtcProgram prog;
-    nvrtcResult nr = nvrtcCreateProgram(&prog, cu_src, kernel_name,
-                                        0, NULL, NULL);
-    if (nr != NVRTC_SUCCESS) {
-      snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR,
-               "nvrtcCreateProgram: %s", nvrtcGetErrorString(nr));
-      return NULL;
-    }
-    // --use_fast_math: enable fast-math intrinsics (rsqrt -> rsqrtf,
-    // div -> approx, etc.).  Default ON; THVM_CUDA_NO_FAST_MATH=1
-    // restores precise math.  For beautiful_mnist / similar training
-    // workloads the small numeric difference doesn't change loss
-    // convergence.  This compiler-flag fast-math is the spec-faithful
-    // mechanism (tinygrad does the same via the renderer / compiler
-    // flag, not an IR OptOp).
-    const char *opts[16];
-    u32 n_opts = 0;
-    opts[n_opts++] = arch_opt;
-    // nvrtc has no default filesystem include search path, so a WMMA
-    // tensor-core matmul kernel's `#include <mma.h>` fails to compile
-    // ("could not open source file mma.h") -- the kernel then never
-    // dispatches, its output stays zero, the forward produces degenerate
-    // logits, and training stalls at the random-guess loss with frozen
-    // params.  Mirror tinygrad (runtime/support/compiler_cuda.py): point
-    // nvrtc at the toolkit include dir from $CUDA_PATH/$CUDA_HOME, else
-    // the standard locations.
-    char inc_opt[512];
-    const char *cuda_path = getenv("CUDA_PATH");
-    if (cuda_path == NULL || cuda_path[0] == '\0') cuda_path = getenv("CUDA_HOME");
-    if (cuda_path != NULL && cuda_path[0] != '\0') {
-      snprintf(inc_opt, sizeof inc_opt, "-I%s/include", cuda_path);
-      opts[n_opts++] = inc_opt;
-    } else {
-      opts[n_opts++] = "-I/usr/local/cuda/include";
-      opts[n_opts++] = "-I/usr/include";
-      opts[n_opts++] = "-I/opt/cuda/include";
-    }
-    // Default OFF: a 10% regression at BS=64 surfaced when
-    // --use_fast_math was on by default (warm 154ms -> 140ms with
-    // THVM_CUDA_NO_FAST_MATH=1).  Opt in per workload until cross-BS
-    // validation proves a positive default; loss byte-identical at
-    // BS=128 with vs without it, but BS=64 hurts measurably.
-    // THVM_CUDA_FAST_MATH=1 enables (fast_math_on captured above).
-    if (fast_math_on) {
-      opts[n_opts++] = "--use_fast_math";
-      // --ftz=true flushes denormals to zero (V100 fp32 normally takes
-      // denormal stalls).  Implied by --use_fast_math on some toolkits
-      // but explicit is safer.
-      opts[n_opts++] = "--ftz=true";
-    }
-    // NOTE: --restrict would be wrong here -- arena view buffers can
-    // share the same dptr via parent_buf_id at the runtime layer, and
-    // two kernel args holding view bufs of the same arena alias each
-    // other.  Don't enable.
-    nr = nvrtcCompileProgram(prog, (int)n_opts, opts);
-    if (nr != NVRTC_SUCCESS) {
-      size_t log_sz = 0;
-      nvrtcGetProgramLogSize(prog, &log_sz);
-      char *log = (char *)malloc(log_sz + 1);
-      if (log != NULL) {
-        nvrtcGetProgramLog(prog, log);
-        log[log_sz] = '\0';
-        fprintf(stderr, "thvm: nvrtc compile failed:\n%s\n", log);
-        snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR,
-                 "nvrtcCompileProgram: %s (see stderr for log)",
-                 nvrtcGetErrorString(nr));
-        free(log);
-      }
-      nvrtcDestroyProgram(&prog);
-      return NULL;
-    }
-    size_t ptx_sz = 0;
-    nvrtcGetPTXSize(prog, &ptx_sz);
-    ptx = (char *)malloc(ptx_sz);
-    if (ptx == NULL) {
-      nvrtcDestroyProgram(&prog);
-      snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR, "PTX alloc failed");
-      return NULL;
-    }
-    nvrtcGetPTX(prog, ptx);
-    nvrtcDestroyProgram(&prog);
-    ptx_owned = 1;
-    // Persist to disk so subsequent invocations skip nvrtc entirely.
-    // ptx_sz includes the trailing NUL nvrtcGetPTX writes.
-    cuda_disk_cache_put(disk_key, ptx, ptx_sz > 0 ? ptx_sz - 1 : 0);
+  char *ptx = cuda_disk_cache_get(disk_key);
+  if (ptx != NULL) {
+    goto module_load;
   }
+
+  nvrtcProgram prog;
+  nvrtcResult nr = nvrtcCreateProgram(&prog, cu_src, kernel_name,
+                                      0, NULL, NULL);
+  if (nr != NVRTC_SUCCESS) {
+    snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR,
+             "nvrtcCreateProgram: %s", nvrtcGetErrorString(nr));
+    return NULL;
+  }
+  // Fast math is a compiler flag (--use_fast_math, below), as in tinygrad,
+  // not an IR OptOp.
+  const char *opts[16];
+  u32 n_opts = 0;
+  opts[n_opts++] = arch_opt;
+  // nvrtc has no default filesystem include search path, so a WMMA
+  // tensor-core matmul kernel's `#include <mma.h>` fails to compile
+  // ("could not open source file mma.h") -- the kernel then never
+  // dispatches, its output stays zero, the forward produces degenerate
+  // logits, and training stalls at the random-guess loss with frozen
+  // params.  Mirror tinygrad (runtime/support/compiler_cuda.py): point
+  // nvrtc at the toolkit include dir from $CUDA_PATH/$CUDA_HOME, else
+  // the standard locations.
+  char inc_opt[512];
+  const char *cuda_path = getenv("CUDA_PATH");
+  if (cuda_path == NULL || cuda_path[0] == '\0') cuda_path = getenv("CUDA_HOME");
+  if (cuda_path != NULL && cuda_path[0] != '\0') {
+    snprintf(inc_opt, sizeof inc_opt, "-I%s/include", cuda_path);
+    opts[n_opts++] = inc_opt;
+  } else {
+    opts[n_opts++] = "-I/usr/local/cuda/include";
+    opts[n_opts++] = "-I/usr/include";
+    opts[n_opts++] = "-I/opt/cuda/include";
+  }
+  // Default OFF: a 10% regression at BS=64 surfaced when
+  // --use_fast_math was on by default (warm 154ms -> 140ms with
+  // THVM_CUDA_NO_FAST_MATH=1).  Opt in per workload until cross-BS
+  // validation proves a positive default; loss byte-identical at
+  // BS=128 with vs without it, but BS=64 hurts measurably.
+  // THVM_CUDA_FAST_MATH=1 enables (fast_math_on captured above).
+  if (fast_math_on) {
+    opts[n_opts++] = "--use_fast_math";
+    // --ftz=true flushes denormals to zero (V100 fp32 normally takes
+    // denormal stalls).  Implied by --use_fast_math on some toolkits
+    // but explicit is safer.
+    opts[n_opts++] = "--ftz=true";
+  }
+  // NOTE: --restrict would be wrong here -- arena view buffers can
+  // share the same dptr via parent_buf_id at the runtime layer, and
+  // two kernel args holding view bufs of the same arena alias each
+  // other.  Don't enable.
+  nr = nvrtcCompileProgram(prog, (int)n_opts, opts);
+  if (nr != NVRTC_SUCCESS) {
+    size_t log_sz = 0;
+    nvrtcGetProgramLogSize(prog, &log_sz);
+    char *log = (char *)malloc(log_sz + 1);
+    if (log != NULL) {
+      nvrtcGetProgramLog(prog, log);
+      log[log_sz] = '\0';
+      fprintf(stderr, "thvm: nvrtc compile failed:\n%s\n", log);
+      snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR,
+               "nvrtcCompileProgram: %s (see stderr for log)",
+               nvrtcGetErrorString(nr));
+      free(log);
+    }
+    nvrtcDestroyProgram(&prog);
+    return NULL;
+  }
+  size_t ptx_sz = 0;
+  nvrtcGetPTXSize(prog, &ptx_sz);
+  ptx = (char *)malloc(ptx_sz);
+  if (ptx == NULL) {
+    nvrtcDestroyProgram(&prog);
+    snprintf(CUDA_LAST_ERROR, sizeof CUDA_LAST_ERROR, "PTX alloc failed");
+    return NULL;
+  }
+  nvrtcGetPTX(prog, ptx);
+  nvrtcDestroyProgram(&prog);
+  // Persist to disk so subsequent invocations skip nvrtc entirely.
+  // ptx_sz includes the trailing NUL nvrtcGetPTX writes.
+  cuda_disk_cache_put(disk_key, ptx, ptx_sz > 0 ? ptx_sz - 1 : 0);
 
 module_load:;
   // --- module load + function lookup -------------------------------
@@ -393,11 +354,11 @@ module_load:;
     if (getenv("THVM_CUDA_DUMP_FAIL_PTX")) {
       fprintf(stderr, "--- INVALID PTX (cuModuleLoadData failed) ---\n%s\n--- end ---\n", ptx);
     }
-    if (ptx_owned) free(ptx);
+    free(ptx);
     cuda_set_error("cuModuleLoadData", cr);
     return NULL;
   }
-  if (ptx_owned) free(ptx);
+  free(ptx);
   CUfunction func;
   cr = cuModuleGetFunction(&func, module, kernel_name);
   if (cr != CUDA_SUCCESS) {
