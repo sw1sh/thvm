@@ -14,7 +14,7 @@ How a high-level UOp DAG gets compiled into GPU/CPU dispatches.
       |   annotations) live here as opcodes.
       |
       |  pass 1: simplify                        <- src/uop/graph_simplify.c
-      |     algebraic folds; movement-as-INDEX        src/uop/movement_index.c
+      |     algebraic folds; movement-as-INDEX        src/schedule/indexing.c
       |     (PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/        src/uop/index_simplify.c
       |     FLIP rewrite to symbolic INDEX trees);
       |     range-bound-aware simplifier folds.
@@ -55,7 +55,7 @@ How a high-level UOp DAG gets compiled into GPU/CPU dispatches.
 ## Pass 1: UOp graph simplify
 
 - File: [src/uop/graph_simplify.c](../src/uop/graph_simplify.c)
-- Movement: [src/uop/movement_index.c](../src/uop/movement_index.c)
+- Movement: [src/schedule/indexing.c](../src/schedule/indexing.c)
 - Index simplifier: [src/uop/index_simplify.c](../src/uop/index_simplify.c)
 
 A peephole rewriter on the heap-allocated UOp DAG.  Each rule
@@ -266,7 +266,7 @@ GROUP_REDUCE modes).  Threads-per-threadgroup are configured from
 
 | Concern | File |
 |---|---|
-| Movement-as-INDEX rewrites | [src/uop/movement_index.c](../src/uop/movement_index.c) |
+| Movement-as-INDEX rewrites | [src/schedule/indexing.c](../src/schedule/indexing.c) |
 | Symbolic index folds | [src/uop/index_simplify.c](../src/uop/index_simplify.c) |
 | New UOp opcodes | [src/uop/buffer.c](../src/uop/buffer.c), [store.c](../src/uop/store.c), [opt.c](../src/uop/opt.c), [index.c](../src/uop/index.c) |
 | Bufferize / schedule | [src/schedule/bufferize_classify.c](../src/schedule/bufferize_classify.c), [rangeify_unified.c](../src/schedule/rangeify_unified.c) |
