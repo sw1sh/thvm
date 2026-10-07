@@ -24,11 +24,8 @@ update the matching row here in the same change.
 | --- | --- | --- |
 | `THVM_JIT` (Python) | on (`1`) | Enable the Python JIT capture/replay. `0` disables. |
 | `THVM_JIT_NO_PIN` | off | Disable JIT buffer pinning. |
-| `THVM_JIT_STRIDED` | off | Allow strided JIT capture of movement-op views. |
 | `THVM_JIT_REPLAY_NOSKIP` | off | Disable replay skip optimization. |
 | `THVM_JIT_REPLAY_PACK` | off | Experimental: pack replay dispatch records. |
-| `THVM_JIT_REPLAY_TRACE` | off | Trace JIT replay execution. |
-| `THVM_NF_PARALLEL_STEP_SESSION` | off | Parallel normal-form step session. |
 | `THVM_PRECISE_FIRE_MEMO` | off | Precise dispatch-fire memoization. |
 | `THVM_DISPATCH_TRACE` | off | Trace dispatch memoization. |
 | `THVM_MAX_KERNEL_BUFFERS` | Metal 31, else no cap | tinygrad's `MAX_KERNEL_BUFFERS`: a positive value caps the distinct buffers (output included) one kernel may bind on every device, splitting wider elementwise fusions (`ru_limit_bufs_node`). `0` turns the cap off everywhere, Metal included. |
@@ -61,12 +58,10 @@ update the matching row here in the same change.
 | `THVM_CPU_JIT_PARALLEL` | on | Batched cold-start precompile: at realize, every kernel whose next fire passes `THVM_CPU_JIT_WARMUP` compiles into one combined dylib before the dispatch fires it. `0` leaves each kernel to compile at its own fire. |
 | `THVM_CPU_CC` | `$CC`, else clang / cc / gcc | C compiler for CPU JIT kernels (clang-only flags are added only for clang). |
 | `THVM_CPU_JIT_VERBOSE` | off | Show the C compiler's diagnostics when a JIT compile fails (a failed kernel runs in the interpreter; thvm warns once). |
-| `THVM_CPU_UOP_WALK` | (impl) | CPU UOp-walk control. |
 | `THVM_CPU_UOP_WALK_TRACE` | off | Trace each UOp-walk entry (lift outcome + root op). |
 | `THVM_TRACE_RENDER_DECLINE` | off | Print why the C kernel renderer declined a kernel (overflow, untyped slot, or a body reading an unclaimed input slot), sending it to the CPU walker. |
 | `THVM_TRACE_UOP_WALK_DECLINE` | off | Trace why the UOp walk declined a kernel. |
 | `THVM_CPU_BLAS_DISABLE` | off | Disable the cblas dispatch path (force the generic walker). |
-| `THVM_BLAS_CONTRACTION_TRACE` | off | Trace BLAS contraction dispatch. |
 
 ## CUDA backend
 

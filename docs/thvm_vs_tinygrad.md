@@ -207,7 +207,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 |---|---|---|
 | `THVM_JIT_REPLAY_NOSKIP` | Force every dispatch to run | off |
 | `THVM_JIT_REPLAY_PACK` | Pack replay ops (inline inputs -> sidecar) | on |
-| `THVM_JIT_STRIDED` | Strided-load sidecar slab in replay | off |
 | `THVM_JIT_NO_PIN` | Disable buffer pinning during capture | off |
 | `THVM_METAL_GRAPH_REPLAY` / `THVM_METAL_GRAPH_MAX_DISPATCHES` | Metal command-buffer graph replay + cap | off / unset |
 | `THVM_PRECISE_FIRE_MEMO` | Precise fire memoization | off |
@@ -227,14 +226,14 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 |---|---|---|
 | `DEV` | `cpu`\|`cuda`\|`metal` | system |
 | `THVM_THREADS` / `AOT_THREADS` | Worker / AOT thread counts | auto / built-in |
-| `THVM_CPU_UOP_WALK` / `THVM_CPU_JIT_WARMUP` | CPU interpreter vs clang-JIT; warmup | off / built-in |
+| `THVM_CPU_JIT_WARMUP` | CPU clang-JIT warmup | 0 |
 | `THVM_CUDA_FAST_MATH` | `--use_fast_math` | off |
 | `THVM_CUDA_SYNC` | Synchronize after each kernel | on |
 | `THVM_CUDA_JIT_GRAPH` / `THVM_CUDA_KE_CACHE` / `THVM_CUDA_DISK_CACHE` / `THVM_CUDA_CACHE_DIR` | CUDA graph cache / KE cache / disk cache / dir | off / off / off / computed |
 | `THVM_CUDA_GPU_TIME` | CUDA-event timing | off |
 | `CUDA_PATH` / `CUDA_HOME` | Toolchain location | env |
 
-**Debug / trace** (no behavior change): `THVM_DUMP_KERNEL_SRC`, `THVM_KCNT`, `THVM_KERNEL_PROFILE`, `THVM_DISPATCH_TRACE`, `DUMP_UOP_REWRITE`, `THVM_CUDA_*` (LOG_COMPILES, DUMP_FAIL_PTX, DUMP_KID, DUMP_SHARED, DUMP_FAILED_KERNEL, DUMP_DISPATCH, LAUNCH_TRACE, RENDER_TRACE, ALLOC_TRACE, JIT_GRAPH_TRACE), `THVM_CPU_UOP_WALK_TRACE`, `THVM_TRACE_UOP_WALK_DECLINE`, `THVM_JIT_REPLAY_TRACE`, `THVM_WL_TENSOR_VIEW_DEBUG`, `THVM_AOT_METAL_DUMP`.
+**Debug / trace** (no behavior change): `THVM_DUMP_KERNEL_SRC`, `THVM_KCNT`, `THVM_KERNEL_PROFILE`, `THVM_DISPATCH_TRACE`, `DUMP_UOP_REWRITE`, `THVM_CUDA_*` (LOG_COMPILES, DUMP_FAIL_PTX, DUMP_KID, DUMP_SHARED, DUMP_FAILED_KERNEL, DUMP_DISPATCH, LAUNCH_TRACE, RENDER_TRACE, ALLOC_TRACE, JIT_GRAPH_TRACE), `THVM_CPU_UOP_WALK_TRACE`, `THVM_TRACE_UOP_WALK_DECLINE`, `THVM_WL_TENSOR_VIEW_DEBUG`, `THVM_AOT_METAL_DUMP`.
 
 **ATP / Wolfram (out of ML-kernel scope):** `THVM_ATP_TRACE_MAX`, `THVM_ATP_FLATTERM`, `THVM_ATP_CP_WEIGHT`, `THVM_ATP_AUTO_MAXW`, `THVM_ATP_MNF`, `THVM_ATP_CP_DATASET`, `THVM_NF_PARALLEL_STEP_SESSION`.
 

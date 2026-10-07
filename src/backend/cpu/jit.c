@@ -778,8 +778,6 @@ fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
 
   if (njobs == 0) { free(jobs); return; }
 
-  int dbg = (getenv("THVM_CPU_JIT_PARALLEL_DBG") != NULL);
-  u64 t0 = dbg ? cg_now_us() : 0;
   // Build ONE combined dylib holding every fresh kernel (entry points
   // renamed k_<hex>), then dlopen it ONCE.  This collapses the N slow
   // first-dlopen syspolicyd provenance checks (the dominant cold cost on
@@ -789,9 +787,6 @@ fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
   // one fork/exec instead of N.
   char comb_dl[256] = {0};
   void *h = cpu_jit_build_combined(jobs, njobs, comb_dl, sizeof comb_dl);
-  if (dbg)
-    fprintf(stderr, "[jit-pre] combined-compiled %u kernels in %.0f ms (range [%u,%u))\n",
-            njobs, (double)(cg_now_us() - t0) / 1000.0, kid_lo, kid_hi);
 
   // dlsym every kernel's k_<hex> entry point out of the single combined
   // image and populate the in-memory cache so the dispatch loop finds a
@@ -831,9 +826,6 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // through to the full source-hash path which has its own warmup
   // gate + on-disk dylib reuse.
   u32 _kid = (u32)(ke - KERNELS);
-  if (getenv("THVM_CPU_JIT_PARALLEL_DBG"))
-    fprintf(stderr, "[jit-disp] kid=%u kidfn=%p\n", _kid,
-            (KID_JIT_FN != NULL && _kid < KERNELS_CAP) ? KID_JIT_FN[_kid] : (void*)1);
   if (_kid < KERNELS_CAP && KID_JIT_FN != NULL && KID_JIT_FN[_kid] != NULL) {
     CpuJitFn _jfn = (CpuJitFn)KID_JIT_FN[_kid];
     u32 ni = ke->n_inputs;
@@ -898,39 +890,9 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   }
   free(src);                               // source no longer needed (hit or compiled)
 
-  // Skip the JIT path if any input is a non-contiguous view --
-  // gated behind THVM_JIT_STRIDED=1.  Each unique stride pattern
-  // hits a fresh clang compile (cpu_jit_hash includes view stride
-  // info), which doubles LeNet wallclock for one-shot training
-  // kernels without persistent compile-cache amortization.
-  // Render_uop_c (post-F6) handles non-contig views correctly via
-  // kernel_lift's view.strides path -- the gate is purely a perf
-  // knob, not a correctness one.
-  // Strided/chained-input kernels (the conv im2col unfold reads the
-  // _pool view) are now DEFAULT-JIT'd: the source-keyed cache amortizes
-  // the compile across the whole training run (the old "doubles LeNet
-  // wall" concern assumed the term-loc key never reused the dylib, so
-  // every step recompiled).  THVM_JIT_STRIDED=0 reverts to the walker
-  // for these.  A single conv2 unfold STORE drops from ~1s interpreted
-  // to a compiled strided loop.
-  static int strided_jit_known = 0, strided_jit_enabled = 1;
-  if (!strided_jit_known) {
-    char const *e = getenv("THVM_JIT_STRIDED");
-    if (e != NULL) strided_jit_enabled = (e[0] != '0');
-    strided_jit_known = 1;
-  }
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 tid = ke->input_tids[i];
-    if (tid == 0 || tid >= TENS_NEXT) continue;
-    if (TENS[tid].nviews > 0 || !TENS[tid].view.contiguous) {
-      if (!strided_jit_enabled) return 0;
-    }
-  }
   // Cache the resolved (kid -> fn) so the next fire of this kid
   // skips render+hash+lookup (the early-return at the top of this
-  // function).  Only cached when jfn is non-NULL AND the per-input
-  // strided-jit gate above didn't reject -- this means a future call
-  // with identical inputs is safe to short-circuit.
+  // function).  Only cached when jfn is non-NULL.
   if (_kid < KERNELS_CAP && KID_JIT_FN != NULL) KID_JIT_FN[_kid] = (void *)jfn;
   // Pack input pointers + numels into local arrays and call the
   // generated function.  Stack-sized to ke->n_inputs (covered by

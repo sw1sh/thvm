@@ -31,20 +31,6 @@ void cpu_arena_alloc_inflight_set(int on) { CPU_ARENA_ALLOC_INFLIGHT = on; }
 int  cpu_arena_alloc_inflight(void) { return CPU_ARENA_ALLOC_INFLIGHT; }
 
 fn u32 cpu_buf_alloc(u64 nbytes) {
-  // THVM_DEBUG_BIG_ALLOC=<bytes>: trace every allocation at or above the given
-  // size (decimal bytes) so a large materialization can be attributed by size
-  // (e.g. distinguishing the planner arena block from an unfused im2col).
-  // Diagnostic only; off unless set.
-  {
-    char const *dbg = getenv("THVM_DEBUG_BIG_ALLOC");
-    if (dbg != NULL && dbg[0] != '\0') {
-      u64 thresh = strtoull(dbg, NULL, 10);
-      if (thresh != 0 && nbytes >= thresh)
-        fprintf(stderr, "cpu_buf_alloc: BIG %llu bytes (%llu f32 elems)%s\n",
-                (unsigned long long)nbytes, (unsigned long long)(nbytes / 4),
-                CPU_ARENA_ALLOC_INFLIGHT ? " [arena]" : "");
-    }
-  }
   // Refuse a pathologically large single allocation rather than
   // calloc() it and thrash the host.  See thvm_buf_byte_ceiling.
   //

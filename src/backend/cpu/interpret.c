@@ -135,24 +135,6 @@ static void cpu_premat_restore(KernelEntry *ke, u32 slot, CpuPrematSlot *st) {
   st->swapped = 0;
 }
 
-// Does the per-call gate let cpu_uop_walk fire?  Default-ON; the
-// walker fires AHEAD of cpu_jit_dispatch in the dispatch ladder, so
-// every kernel the lifter accepts goes through the UOp DAG evaluator
-// -- no clang-compile, no warmup gate.
-//
-// Bisection knob `THVM_CPU_UOP_WALK=0` is retained for diagnosis.
-// With the walker disabled, dispatch flows BLAS -> JIT only; if both
-// decline, cpu_dispatch_kernel reports that no rung ran.
-static int cpu_uop_walk_enabled(void) {
-  static int known = 0, enabled = 0;
-  if (!known) {
-    char const *e = getenv("THVM_CPU_UOP_WALK");
-    enabled = (e == NULL) ? 1 : (e[0] != '0');
-    known = 1;
-  }
-  return enabled;
-}
-
 static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // Recover kid by pointer arithmetic into KERNELS[].  Used for
   // per-kid profiling (cg_profile_record).
@@ -179,11 +161,9 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
     return 0;
   }
   // 3. UOp DAG walker (interpreter): warmup + JIT-declined kernels.
-  if (cpu_uop_walk_enabled()) {
-    if (cpu_uop_walk(ke, in_buf_ids, out_buf_id)) {
-      cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
-      return 0;
-    }
+  if (cpu_uop_walk(ke, in_buf_ids, out_buf_id)) {
+    cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
+    return 0;
   }
   cg_profile_record(kid, KDISPATCH_NONE, cg_now_us() - t0);
   return -1;
@@ -217,9 +197,7 @@ fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
     fprintf(stderr,
             "thvm: CPU kernel kid=%u n_inputs=%u ran no dispatch rung "
             "(walker: %s); its output holds no result\n",
-            (u32)(ke - KERNELS), ke->n_inputs,
-            cpu_uop_walk_enabled() ? cpu_uop_walk_last_decline()
-                                   : "disabled");
+            (u32)(ke - KERNELS), ke->n_inputs, cpu_uop_walk_last_decline());
   }
   return rc;
 }

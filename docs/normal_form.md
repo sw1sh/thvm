@@ -441,10 +441,9 @@ shape.  Listed so the next maintainer doesn't have to rediscover them.
 
 6. **Two parallel re-enumerate paths in `nf`**.  T=1 uses the step
    session's inverse index; T>1 falls back to O(HEAP_NEXT) re-enumerate
-   after every drain round.  The MT inverse-index path is gated by
-   `THVM_NF_PARALLEL_STEP_SESSION=1` and has "remaining ordering bugs
-   that surface as duplicate fires on some shared-substructure
-   workloads" (per [src/wnf/nf.c:138](../src/wnf/nf.c#L138)).  Until
+   after every drain round.  The MT inverse-index path is off: it has
+   "remaining ordering bugs that surface as duplicate fires on some
+   shared-substructure workloads" (per [src/wnf/nf.c](../src/wnf/nf.c)).  Until
    that's fixed, T>1 perf suffers on heaps where most fires are
    parent-promotions of a long chain.
 

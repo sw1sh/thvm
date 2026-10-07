@@ -98,8 +98,7 @@ through `Backend.dispatch_kernel`. The body lives at the bottom of
    `KDISPATCH_JIT` and stop. It declines during warmup
    (`THVM_CPU_JIT_WARMUP`, default 0 = compile on first fire) and
    for kernels it cannot render or compile.
-4. If `THVM_CPU_UOP_WALK` is not set to `0`, call
-   `cpu_uop_walk(ke, ...)`. On success, record
+4. `cpu_uop_walk(ke, ...)`. On success, record
    `KDISPATCH_INTERPRETER` and stop.
 5. Otherwise record `KDISPATCH_NONE` and return -1:
    `cpu_dispatch_kernel` counts it (`cpu_dispatch_no_rung_count`)

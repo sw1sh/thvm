@@ -3061,25 +3061,6 @@ static void jit_capture_build_input_sites(JitCapture *c) {
       c->n_sites = count;
     }
   }
-  // THVM_JIT_SITES_TRACE=1: per declared JIT input, how many rebind sites
-  // were found.  A declared input with 0 sites is NOT rebound on replay --
-  // it silently keeps its capture-time bytes.  The usual cause: the input
-  // is a lazy / non-contiguous tensor that a kernel stages into an internal
-  // copy whose tid differs from the declared input, so input_replace finds
-  // no matching buf_id (realize the input contiguous to fix).
-  if (getenv("THVM_JIT_SITES_TRACE") != NULL) {
-    fprintf(stderr, "[jit-sites] n_inputs_decl=%u n_sites=%u n_ops=%u\n",
-            c->n_inputs_decl, c->n_sites, c->n_ops);
-    for (u32 k = 0; k < c->n_inputs_decl; k++) {
-      u32 sc = 0;
-      for (u32 s = 0; s < c->n_sites; s++) if (c->sites[s].slot_index == k) sc++;
-      fprintf(stderr, "  decl[%u] buf=%u -> %u site(s):", k, c->input_buf_ids[k], sc);
-      for (u32 s = 0; s < c->n_sites; s++)
-        if (c->sites[s].slot_index == k)
-          fprintf(stderr, " op%u/pos%d", c->sites[s].op_index, (int)c->sites[s].pos);
-      fprintf(stderr, "\n");
-    }
-  }
 }
 
 // Rebind the captured input sites to this call's fresh input buffers,
@@ -3175,8 +3156,6 @@ fn u32 jit_replay(u32 slot) {
   if (c->n_ops == 0) return 0;
   HOT_JIT_REPLAY_CALLS++;
   backend_dispatch_begin_all();
-  int trace = getenv("THVM_JIT_REPLAY_TRACE") != NULL;
-  if (trace) fprintf(stderr, "[replay] start n_ops=%u\n", c->n_ops);
 
 #ifdef THVM_HAS_CUDA
   // CUDA Graph fast path: if every op is a CUDA-backend dispatch/copy
@@ -3202,7 +3181,6 @@ fn u32 jit_replay(u32 slot) {
   int cuda_graph_replayed = 0;
   int cuda_capturing = 0;
   if (cuda_only && cuda_jit_graph_replay(slot) == 0) {
-    if (trace) fprintf(stderr, "[replay] CUDA graph hit (n_ops=%u)\n", c->n_ops);
     cuda_graph_replayed = 1;
     HOT_JIT_GRAPH_RUNS++;
     for (u32 i = 0; i < c->n_ops; i++) {
@@ -3221,7 +3199,6 @@ fn u32 jit_replay(u32 slot) {
     // Cache miss -- capture into a CUgraph as we go through the op loop.
     if (cuda_jit_graph_capture_begin() == 0) {
       cuda_capturing = 1;
-      if (trace) fprintf(stderr, "[replay] CUDA graph capturing slot=%u\n", slot);
     }
   }
   if (cuda_graph_replayed) {
@@ -3250,18 +3227,13 @@ fn u32 jit_replay(u32 slot) {
     }
     switch (op->kind) {
       case JIT_OP_DISPATCH: {
-        if (trace) fprintf(stderr, "[replay] op%u DISPATCH kid=%u out_buf=%u\n",
-                           i, op->kid, op->out_buf_id);
         if (op->kid == 0 || op->kid >= KERNELS_NEXT) {
-          if (trace) fprintf(stderr, "[replay]   skip: invalid kid\n");
           i++;
           continue;
         }
         KernelEntry *ke = &KERNELS[op->kid];
         Backend *b = TENS[ke->output_tid].backend;
         if (b == NULL || b->dispatch_kernel == NULL) {
-          if (trace) fprintf(stderr, "[replay]   skip: ke->output_tid=%u backend=%p\n",
-                             ke->output_tid, (void*)b);
           i++;
           continue;
         }
@@ -3286,7 +3258,6 @@ fn u32 jit_replay(u32 slot) {
           b->buf_zero(op->out_buf_id);
         }
         int rc = b->dispatch_kernel(ke, ids, op->out_buf_id);
-        if (trace) fprintf(stderr, "[replay]   dispatch rc=%d\n", rc);
         if (rc == 0) {
           HOT_KERNEL_FIRES++;
           HOT_JIT_REPLAY_DISPATCHES++;
@@ -3297,12 +3268,8 @@ fn u32 jit_replay(u32 slot) {
       case JIT_OP_ASSIGN: {
         HOT_JIT_REPLAY_ASSIGNS++;
         u32 dst = op->assign_dst_tid, src = op->assign_src_tid;
-        if (trace) fprintf(stderr, "[replay] op%u ASSIGN dst_tid=%u src_tid=%u\n",
-                           i, dst, src);
         if (dst == 0 || dst >= TENS_NEXT) break;
         if (src == 0 || src >= TENS_NEXT) break;
-        if (trace) fprintf(stderr, "[replay]   dst_buf=%u src_buf=%u\n",
-                           TENS[dst].buf_id, TENS[src].buf_id);
         TenDesc *dd = &TENS[dst], *sd = &TENS[src];
         if (dd->backend == NULL || dd->backend != sd->backend) break;
         if (sd->view.numel != dd->view.numel) break;
@@ -3383,8 +3350,6 @@ fn u32 jit_replay(u32 slot) {
           default: free(raw); free(dst); raw = NULL; dst = NULL; break;
         }
         if (dst != NULL) b->buf_write(op->gather_dst_buf, dst, dst_bytes);
-        if (trace) fprintf(stderr, "[replay] op%u GATHER src=%u dst=%u numel=%u dt=%u\n",
-                           i, op->gather_src_buf, op->gather_dst_buf, numel, op->gather_dtype);
         free(raw);
         free(dst);
         ITRS++;
@@ -3396,9 +3361,8 @@ fn u32 jit_replay(u32 slot) {
 #ifdef THVM_HAS_CUDA
   if (cuda_capturing) {
     if (cuda_jit_graph_capture_end_and_launch(slot) != 0) {
-      if (trace) fprintf(stderr, "[replay] CUDA graph capture FAILED -- per-op work already ran on capture stream, results may be missing\n");
-    } else if (trace) {
-      fprintf(stderr, "[replay] CUDA graph captured + launched slot=%u\n", slot);
+      fprintf(stderr, "thvm: CUDA graph capture failed for JIT slot %u; the "
+                      "replayed results may be missing\n", slot);
     }
   }
 #endif

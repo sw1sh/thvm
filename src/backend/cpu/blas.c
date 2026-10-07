@@ -352,13 +352,6 @@ static int blas_try_contraction(KernelEntry *ke, u32 *in_buf_ids,
   if (!uop_dag_classify_contraction_shape(ke->cached_lift.store_root, ke, &c)) {
     return 0;
   }
-  static int trace_slot = -1;
-  if (env_flag_on(&trace_slot, "THVM_BLAS_CONTRACTION_TRACE")) {
-    fprintf(stderr, "blas_try_contraction: K=%u N=%u inner_M=%u batch=%u "
-            "ldA=%u ldB=%u ldC=%u bsa=%u bsb=%u bsc=%u\n",
-            c.K, c.N, c.inner_M, c.batch, c.ldA, c.ldB, c.ldC,
-            c.batch_stride_a, c.batch_stride_b, c.batch_stride_c);
-  }
   // Skip degenerate shapes a simpler classifier handles better.
   if (c.K < 2) return 0;
   if (c.inner_M < 2 && c.N < 2) return 0;
@@ -452,16 +445,6 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
   UopDagIm2colShape c;
   if (!uop_dag_classify_im2col_contraction(ke->cached_lift.store_root, ke, &c)) {
     return 0;
-  }
-  static int trace_slot = -1;
-  if (env_flag_on(&trace_slot, "THVM_BLAS_CONTRACTION_TRACE")) {
-    // K_row/K_col now hold OH/OW (pixel extents) in both directions; the
-    // KH/KW kernel extents live in patch_extent[].
-    fprintf(stderr, "blas_try_im2col: dir=%s Cout=%u OH=%u OW=%u KH=%u KW=%u "
-            "Cin=%u Bouter=%u X[H,W]=[%u,%u]\n",
-            c.forward_conv ? "fwd" : "bwd", c.M, c.K_row, c.K_col,
-            c.patch_extent[0], c.patch_extent[1], c.N_patchless,
-            c.N_outer_extent, c.X_H, c.X_W);
   }
   if (c.dtype != DT_FP32) return 0;
   // Sanity bounds (defensive).
