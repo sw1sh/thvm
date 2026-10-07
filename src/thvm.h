@@ -2428,7 +2428,7 @@ int uop_dag_classify_batched_gemm(Term root,
 // address pattern for the matmul A operand under a 3-axis [M,K,N] lift
 // is either `IADD(IMUL(r_m, ICONST(K)), r_k)` (untransposed; ldA=K) or
 // `IADD(r_m, IMUL(r_k, ICONST(M)))` (transposed; ldA=M) -- and similarly
-// for B with the {k,n} pair, GEMV-W with {m,k}.  Both arms are decoded
+// for B with the {k,n} pair.  Both arms are decoded
 // raw: each is either bare RANGE (coefficient = 1) or IMUL(RANGE, ICONST)
 // (coefficient = ICONST.value).  The caller derives `ld` / `trans` from
 // the side-specific BLAS convention:
@@ -2440,7 +2440,6 @@ int uop_dag_classify_batched_gemm(Term root,
 //   matmul B: ldB = max(red_coeff, other_coeff)
 //             transB = (other_coeff != 1)   -- B's "natural" layout
 //                                              has red_coeff != 1
-//   gemv W : same as matmul A
 // Returns 1 on success.  Returns 0 when the address doesn't match
 // IADD-of-(arm,arm) with each arm RANGE or IMUL(RANGE,ICONST), or when
 // neither arm references `red_axis_id`, or when both arms reference the
@@ -2449,68 +2448,6 @@ int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
                                              u32 *out_red_coeff,
                                              u32 *out_other_coeff,
                                              u32 *out_other_axis_id);
-
-// DAG-side shape extractors for DOT and GEMV.  Mirror
-// uop_dag_classify_matmul_shape for the two simpler BLAS shapes.
-//
-// DOT: STORE(out_buf, _, REDUCE_SUM(MUL(INDEX_E(A, k), INDEX_E(B, k))))
-//   - out_buf is rank-0 or rank-1 numel=1
-//   - A, B are rank-1 contig with K elements
-//   - Recovers (dtype, K, a_input, b_input).
-//
-// GEMV: STORE(out_buf, _, REDUCE_SUM(MUL(INDEX_E(W, m*K+k),
-//                                         INDEX_E(x, k))))
-//   - out_buf is rank-1 numel=M
-//   - W view is rank-2 {M, K} contig with strides {K, 1}
-//   - x view is rank-2 {M, K} broadcast strides {0, 1} or rank-1 {K}
-//     strides {1}, etc.
-//   - Recovers (dtype, M, K, w_input, x_input, ldW, transW).
-typedef struct {
-  u32 dtype;
-  u32 K;
-  u32 a_input;
-  u32 b_input;
-} UopDagDotShape;
-
-typedef struct {
-  u32 dtype;
-  u32 M;
-  u32 K;
-  u32 w_input;
-  u32 x_input;
-  u32 ldW;
-  u32 flags;     // bit 0 = transposed W (storage strides {1, M})
-} UopDagGemvShape;
-
-// Vector-times-matrix: out{1,N} = a{1,K} @ B{K,N}.  The M==1 leading
-// unit row is elided by the lift, so the A operand's address collapses
-// to a bare RANGE(k) (1 range) and the matmul classifier (which needs
-// 2 ranges per operand) declines, while the gemv emit can't express the
-// {K,N}-matrix orientation.  This shape routes to a cblas_sgemm with
-// M=1 (which cblas handles natively) -- the single-token-decode
-// projection / LM-head matvec path.  Recovers (dtype, N, K, a_input,
-// b_input, ldB, transB).
-typedef struct {
-  u32 dtype;
-  u32 N;
-  u32 K;
-  u32 a_input;   // the {1,K} vector (contraction operand)
-  u32 b_input;   // the {K,N} matrix
-  u32 ldB;
-  u32 flags;     // bit 0 = transposed B (storage strides {1, K})
-} UopDagVecmatShape;
-
-int uop_dag_classify_dot_shape (Term root,
-                                struct KernelEntry const *ke,
-                                UopDagDotShape *out);
-
-int uop_dag_classify_gemv_shape(Term root,
-                                struct KernelEntry const *ke,
-                                UopDagGemvShape *out);
-
-int uop_dag_classify_vecmat_shape(Term root,
-                                  struct KernelEntry const *ke,
-                                  UopDagVecmatShape *out);
 
 // DAG-side structural gate for conv2d_flat kernels.  Checks that
 // cached_lift.store_root's STORE.value is a UOP_REDUCE with
@@ -2779,16 +2716,6 @@ fn Term uop_recognise_batched_tc_parallel(Term root);
 // parallel-TC wrap needs this prototype to call it.
 fn Term uop_dag_apply_global(Term root, u32 axis_id);
 
-// Structural classifiers for the DOT and GEMV
-// shapes.  Mirrors uop_classify_matmul but with different range-count
-// signatures: DOT addresses each touch exactly 1 distinct UOP_RANGE
-// (the reduce axis); GEMV has one address with 2 ranges (matrix m,k)
-// and the other with 1 (broadcast vector k).  *out_w_first selects
-// which MUL operand carries the matrix (1 = src[0], 0 = src[1]).
-// Both return 1 + reduce-axis extent on match; 0 otherwise.
-fn int uop_classify_dot (Term root, u32 *out_k_extent);
-fn int uop_classify_gemv(Term root, u32 *out_k_extent, int *out_w_first);
-
 // === Kernel lift to UOp DAG ===
 // Package the unified-rangeify pass's store_root for a kernel entry
 // into a UOp DAG root suitable for cg_render_uop_kernel.  The lifter
@@ -3017,9 +2944,7 @@ fn Term interact_assign_with(Term dst, Term src);
 // stable across TUs.
 typedef enum {
   KDISPATCH_NONE        = 0,
-  KDISPATCH_BLAS_DOT    = 1,
-  KDISPATCH_BLAS_GEMV   = 2,
-  KDISPATCH_BLAS_GEMM   = 3,
+  KDISPATCH_BLAS_GEMM   = 3,   // 1 and 2 are unused
   KDISPATCH_JIT         = 4,   // CPU JIT (clang -shared)
   KDISPATCH_INTERPRETER = 5,   // CPU interpreter
   KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (DAG-side encoder over cached_lift)

@@ -74,10 +74,10 @@ Compute paths:
   all been deleted; the UOp DAG walker in `uop_walk.c` is the
   primary compute path.
 - [blas.c](../src/backend/cpu/blas.c): pattern matcher. Recognizes
-  the exact `KProgOp[]` shapes produced by `TDot`, `TMatVec`,
-  `TMatMul` and routes them to `cblas_{s,d}{dot,gemv,gemm}`. Returns
-  a `KDispatchKind` (`KDISPATCH_BLAS_DOT` / `_GEMV` / `_GEMM`) on
-  hit, 0 on miss.
+  matmul-shaped kernels (gemm, batched gemm, contraction, im2col) in
+  the lifted UOp DAG and routes them to `cblas_{s,d}gemm`. Returns
+  `KDISPATCH_BLAS_GEMM` on a hit, 0 on a miss; dot and matvec kernels
+  run in the JIT.
 - [jit.c](../src/backend/cpu/jit.c): clang JIT. Renders C99 source by
   calling `cg_render_uop_kernel_c_root` against
   `ke->cached_lift.store_root`, hashes it, looks the hash up in the

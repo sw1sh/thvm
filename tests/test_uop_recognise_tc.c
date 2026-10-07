@@ -405,8 +405,8 @@ int main(void) {
   // unchanged (no OPT wrap installed).
   CHECK_EQ(uop_recognise_tc(stC), stC);
 
-  // === DOT classifier coverage ===
-  TEST_BEGIN("recognise-tc/dot-classifier-positive");
+  // === Matmul classifier on a dot shape ===
+  TEST_BEGIN("recognise-tc/matmul-rejects-dot-shape");
   {
     // Build STORE(C{1}, 0, REDUCE_SUM(MUL(INDEX_E(A, k), INDEX_E(B, k)))).
     // Use _inst variants with distinct instance ids so A/B don't hash-
@@ -425,22 +425,14 @@ int main(void) {
     Term redD = uop_reduce(REDUCE_SUM, /*axis=*/40, mulD);
     Term zero = uop_const(DT_INT32, 0);
     Term stD  = uop_store(Cv, zero, redD);
-    u32 dk = 0;
-    CHECK(uop_classify_dot(stD, &dk));
-    CHECK_EQ(dk, 64u);
     // Matmul classifier rejects this shape (1 range per addr, not 2).
     u32 mk = 99;
     CHECK(!uop_classify_matmul(stD, &mk, NULL));
     CHECK_EQ(mk, 0u);
-    // GEMV classifier also rejects (needs 1+2 ranges, has 1+1).
-    u32 gk = 99; int wf = 1;
-    CHECK(!uop_classify_gemv(stD, &gk, &wf));
-    CHECK_EQ(gk, 0u);
-    CHECK_EQ(wf, 0);
   }
 
-  // === GEMV classifier coverage ===
-  TEST_BEGIN("recognise-tc/gemv-classifier-positive");
+  // === Matmul classifier on a matvec shape ===
+  TEST_BEGIN("recognise-tc/matmul-takes-matvec-as-unit-axis");
   {
     // Build STORE(c{M}, m, REDUCE_SUM(MUL(INDEX_E(W, m*K+k),
     //                                      INDEX_E(x, k)))).
@@ -461,15 +453,7 @@ int main(void) {
     Term mulG = uop_binary(UOP_MUL, ldW2, ldXg);
     Term redG = uop_reduce(REDUCE_SUM, /*axis=*/51, mulG);
     Term stG  = uop_store(Co, r_mg, redG);
-    u32 gk = 0; int wf = 0;
-    CHECK(uop_classify_gemv(stG, &gk, &wf));
-    CHECK_EQ(gk, (u32)GK);
-    CHECK_EQ(wf, 1);  // matrix is on src[0] of MUL
-    // DOT classifier rejects (needs 1+1, here 2+1).
-    u32 dk = 99;
-    CHECK(!uop_classify_dot(stG, &dk));
-    CHECK_EQ(dk, 0u);
-    // Matmul classifier ALSO accepts the gemv shape as a collapsed-
+    // The matmul classifier accepts the matvec shape as a collapsed-
     // unit-axis GEMM (B carries only the reduce axis, so N==1) and
     // reports unit_axis=2; uop_recognise_tc itself stays strict
     // (unit_axis != 0 skips the TC wrapper).
@@ -478,125 +462,6 @@ int main(void) {
     CHECK_EQ(mk, (u32)GK);
     CHECK_EQ(mu, 2u);
     CHECK_EQ(uop_recognise_tc(stG), stG);
-
-    TEST_BEGIN("recognise-tc/gemv-classifier-w-on-src-1");
-    // Same shape but MUL operands swapped: W on src[1], x on src[0].
-    Term mulG2 = uop_binary(UOP_MUL, ldXg, ldW2);
-    Term redG2 = uop_reduce(REDUCE_SUM, /*axis=*/51, mulG2);
-    Term stG2  = uop_store(Co, r_mg, redG2);
-    u32 gk2 = 0; int wf2 = 1;
-    CHECK(uop_classify_gemv(stG2, &gk2, &wf2));
-    CHECK_EQ(gk2, (u32)GK);
-    CHECK_EQ(wf2, 0);
-  }
-
-  // === DAG-side shape extractor for DOT ===
-  TEST_BEGIN("recognise-tc/dag-classify-dot-shape");
-  {
-    KernelEntry ke = {0};
-    ke.n_inputs = 2;
-    ke.output_dtype = DT_FP32;
-    static u32 dts2[2] = {DT_FP32, DT_FP32};
-    static View vws2[2];
-    vws2[0].shape.ndim = 1; vws2[0].shape.dims[0] = 64;
-    vws2[0].strides[0] = 1;
-    vws2[1].shape.ndim = 1; vws2[1].shape.dims[0] = 64;
-    vws2[1].strides[0] = 1;
-    ke.input_dtypes = dts2;
-    ke.input_views  = vws2;
-
-    u32 dimsAv[1] = {64};
-    u32 dimsBv[1] = {64};
-    u32 dimsCv[1] = {1};
-    Term Ai2 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsAv, 1);
-    Term Bi2 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsBv, 2);
-    Term Ci2 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsCv, 0);
-    Term r_kd2 = uop_range(60, 1, 64);
-    Term ldAv2 = uop_index_e(Ai2, r_kd2);
-    Term ldBv2 = uop_index_e(Bi2, r_kd2);
-    Term mulD2 = uop_binary(UOP_MUL, ldAv2, ldBv2);
-    Term redD2 = uop_reduce(REDUCE_SUM, /*axis=*/60, mulD2);
-    Term zero2 = uop_const(DT_INT32, 0);
-    Term stD2  = uop_store(Ci2, zero2, redD2);
-    ke.cached_lift.store_root = stD2;
-
-    UopDagDotShape ds = {0};
-    CHECK(uop_dag_classify_dot_shape(stD2, &ke, &ds));
-    CHECK_EQ(ds.dtype,   (u32)DT_FP32);
-    CHECK_EQ(ds.K,       64u);
-    CHECK_EQ(ds.a_input, 0u);
-    CHECK_EQ(ds.b_input, 1u);
-
-    // Sentinel: classifier must not overwrite output struct on reject.
-    Term zero_v = uop_const(DT_FP32, 0);
-    Term store_zero = uop_store(Ci2, zero2, zero_v);
-    UopDagDotShape ds2 = {0};
-    ds2.K = 0xCAFEu;
-    CHECK(!uop_dag_classify_dot_shape(store_zero, &ke, &ds2));
-    CHECK_EQ(ds2.K, 0xCAFEu);
-  }
-
-  // === DAG-side shape extractor for GEMV ===
-  TEST_BEGIN("recognise-tc/dag-classify-gemv-shape");
-  {
-    enum { GM2 = 16, GK2 = 24 };
-    KernelEntry ke = {0};
-    ke.n_inputs = 2;
-    ke.output_dtype = DT_FP32;
-    static u32 dts3[2] = {DT_FP32, DT_FP32};
-    static View vws3[2];
-    // W: rank-2 {GM, GK} contiguous strides {GK, 1}.
-    vws3[0].shape.ndim = 2;
-    vws3[0].shape.dims[0] = GM2; vws3[0].shape.dims[1] = GK2;
-    vws3[0].strides[0]    = GK2; vws3[0].strides[1]    = 1;
-    // x: rank-1 {GK} contig strides {1}.
-    vws3[1].shape.ndim = 1;
-    vws3[1].shape.dims[0] = GK2;
-    vws3[1].strides[0]    = 1;
-    ke.input_dtypes = dts3;
-    ke.input_views  = vws3;
-
-    u32 dimsW[2]  = {GM2, GK2};
-    u32 dimsX[1]  = {GK2};
-    u32 dimsCo[1] = {GM2};
-    Term Wi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsW, 1);
-    Term Xi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsX, 2);
-    Term Coi= uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsCo,0);
-    Term r_mg2 = uop_range(70, 0,            GM2);
-    Term r_kg2 = uop_range(71, 1 /*REDUCE*/, GK2);
-    Term kKv   = uop_const(DT_INT32, GK2);
-    Term mK2   = uop_int_binary(UOP_IMUL, r_mg2, kKv);
-    Term aW2   = uop_int_binary(UOP_IADD, mK2, r_kg2);
-    Term ldW3  = uop_index_e(Wi, aW2);
-    Term ldXg2 = uop_index_e(Xi, r_kg2);
-    Term mulG3 = uop_binary(UOP_MUL, ldW3, ldXg2);
-    Term redG3 = uop_reduce(REDUCE_SUM, /*axis=*/71, mulG3);
-    Term stG3  = uop_store(Coi, r_mg2, redG3);
-    ke.cached_lift.store_root = stG3;
-
-    UopDagGemvShape gs = {0};
-    CHECK(uop_dag_classify_gemv_shape(stG3, &ke, &gs));
-    CHECK_EQ(gs.dtype,   (u32)DT_FP32);
-    CHECK_EQ(gs.M,       (u32)GM2);
-    CHECK_EQ(gs.K,       (u32)GK2);
-    CHECK_EQ(gs.w_input, 0u);
-    CHECK_EQ(gs.x_input, 1u);
-    CHECK_EQ(gs.ldW,     (u32)GK2);
-    CHECK_EQ(gs.flags,   0u);
-
-    TEST_BEGIN("recognise-tc/dag-classify-gemv-x-broadcast-rank2");
-    // Re-use ke but swap x view to rank-2 {M,K} broadcast strides {0,1}
-    // (the WL TMatVec representation post-EXPAND).  Classifier must
-    // accept this layout too.
-    vws3[1].shape.ndim = 2;
-    vws3[1].shape.dims[0] = GM2; vws3[1].shape.dims[1] = GK2;
-    vws3[1].strides[0]    = 0;   vws3[1].strides[1]    = 1;
-    UopDagGemvShape gs2 = {0};
-    CHECK(uop_dag_classify_gemv_shape(stG3, &ke, &gs2));
-    CHECK_EQ(gs2.M, (u32)GM2);
-    CHECK_EQ(gs2.K, (u32)GK2);
-    CHECK_EQ(gs2.w_input, 0u);
-    CHECK_EQ(gs2.x_input, 1u);
   }
 
   // === addr-stride extractor =============================================
@@ -856,106 +721,6 @@ int main(void) {
     CHECK_EQ(g.ldA, 16u);    // M
     CHECK_EQ(g.ldB, 32u);    // K
     CHECK_EQ(g.flags, 3u);   // both bits set
-  }
-
-  TEST_BEGIN("recognise-tc/dag-classify-gemv-no-input-views");
-  {
-    enum { GM3 = 16, GK3 = 24 };
-    KernelEntry ke = {0};
-    ke.n_inputs = 2;
-    ke.output_dtype = DT_FP32;
-    static u32 dts3v[2] = {DT_FP32, DT_FP32};
-    ke.input_dtypes = dts3v;
-    ke.input_views  = NULL;          // <-- decoupling proof
-
-    u32 dimsW[2]  = {GM3, GK3};
-    u32 dimsX[1]  = {GK3};
-    u32 dimsCo[1] = {GM3};
-    Term Wi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsW, 1);
-    Term Xi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsX, 2);
-    Term Coi= uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsCo,0);
-    Term r_mg = uop_range(300, 0,            GM3);
-    Term r_kg = uop_range(301, 1 /*REDUCE*/, GK3);
-    Term kKg  = uop_const(DT_INT32, GK3);
-    // W non-trans: m*K + k
-    Term aW   = uop_int_binary(UOP_IADD,
-                               uop_int_binary(UOP_IMUL, r_mg, kKg),
-                               r_kg);
-    Term ldW  = uop_index_e(Wi, aW);
-    Term ldX  = uop_index_e(Xi, r_kg);
-    Term mul  = uop_binary(UOP_MUL, ldW, ldX);
-    Term red  = uop_reduce(REDUCE_SUM, 301, mul);
-    Term st   = uop_store(Coi, r_mg, red);
-    UopDagGemvShape g = {0};
-    CHECK(uop_dag_classify_gemv_shape(st, &ke, &g));
-    CHECK_EQ(g.M, (u32)GM3);
-    CHECK_EQ(g.K, (u32)GK3);
-    CHECK_EQ(g.ldW, (u32)GK3);
-    CHECK_EQ(g.flags, 0u);
-  }
-
-  TEST_BEGIN("recognise-tc/dag-classify-gemv-no-input-views-trans-W");
-  {
-    enum { GM4 = 16, GK4 = 24 };
-    KernelEntry ke = {0};
-    ke.n_inputs = 2;
-    ke.output_dtype = DT_FP32;
-    static u32 dts4v[2] = {DT_FP32, DT_FP32};
-    ke.input_dtypes = dts4v;
-    ke.input_views  = NULL;
-
-    u32 dimsWt[2] = {GK4, GM4};   // storage [K,M]
-    u32 dimsX[1]  = {GK4};
-    u32 dimsCo[1] = {GM4};
-    Term Wt = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dimsWt, 1);
-    Term Xi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsX, 2);
-    Term Coi= uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsCo,0);
-    Term r_mg = uop_range(310, 0, GM4);
-    Term r_kg = uop_range(311, 1, GK4);
-    Term kMg  = uop_const(DT_INT32, GM4);
-    // W transposed: addr = m + k*M
-    Term aW   = uop_int_binary(UOP_IADD, r_mg,
-                               uop_int_binary(UOP_IMUL, r_kg, kMg));
-    Term ldW  = uop_index_e(Wt, aW);
-    Term ldX  = uop_index_e(Xi, r_kg);
-    Term mul  = uop_binary(UOP_MUL, ldW, ldX);
-    Term red  = uop_reduce(REDUCE_SUM, 311, mul);
-    Term st   = uop_store(Coi, r_mg, red);
-    UopDagGemvShape g = {0};
-    CHECK(uop_dag_classify_gemv_shape(st, &ke, &g));
-    CHECK_EQ(g.M, (u32)GM4);
-    CHECK_EQ(g.K, (u32)GK4);
-    CHECK_EQ(g.ldW, (u32)GM4);
-    CHECK_EQ(g.flags, 1u);   // transW
-  }
-
-  TEST_BEGIN("recognise-tc/dag-classify-dot-no-input-views");
-  {
-    KernelEntry ke = {0};
-    ke.n_inputs = 2;
-    ke.output_dtype = DT_FP32;
-    static u32 dts2v[2] = {DT_FP32, DT_FP32};
-    ke.input_dtypes = dts2v;
-    ke.input_views  = NULL;          // <-- decoupling proof
-
-    u32 dimsAv[1] = {64};
-    u32 dimsBv[1] = {64};
-    u32 dimsCv[1] = {1};
-    Term Ai = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsAv, 1);
-    Term Bi = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsBv, 2);
-    Term Co = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsCv, 0);
-    Term r_kd = uop_range(400, 1, 64);
-    Term ldA  = uop_index_e(Ai, r_kd);
-    Term ldB  = uop_index_e(Bi, r_kd);
-    Term mul  = uop_binary(UOP_MUL, ldA, ldB);
-    Term red  = uop_reduce(REDUCE_SUM, 400, mul);
-    Term zero = uop_const(DT_INT32, 0);
-    Term st   = uop_store(Co, zero, red);
-    UopDagDotShape g = {0};
-    CHECK(uop_dag_classify_dot_shape(st, &ke, &g));
-    CHECK_EQ(g.K, 64u);
-    CHECK_EQ(g.a_input, 0u);
-    CHECK_EQ(g.b_input, 1u);
   }
 
   thvm_free();

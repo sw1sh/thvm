@@ -127,7 +127,7 @@ static void check_dispatch(u32 k0) {
   for (u32 k = k0; k < KERNELS_NEXT; k++) {
     u32 kind = cg_kernel_dispatch_kind(k);
     if (kind == KDISPATCH_NONE
-        || (kind >= KDISPATCH_BLAS_DOT && kind <= KDISPATCH_BLAS_GEMM)) {
+        || kind == KDISPATCH_BLAS_GEMM) {
       continue;
     }
     CHECK_EQ(kind, want);

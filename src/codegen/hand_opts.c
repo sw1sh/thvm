@@ -273,8 +273,8 @@ static int hand_opt_kernel_on_cpu(KernelEntry const *ke) {
 // shape classifiers below stop recognising it -- losing the 10-100x BLAS
 // fast path -- so for these kernels we must keep returning 0 from
 // kernel_hand_coded_opts (no opts) on CPU.  Mirrors cpu_blas_dispatch's
-// exact try-ladder (blas.c:448-470): dot / gemv / gemm(matmul) /
-// contraction / im2col-contraction; plus the conv2d-flat structural gate
+// exact try-ladder (blas.c): gemm(matmul) / contraction /
+// im2col-contraction; plus the conv2d-flat structural gate
 // (tile.c:89) that propose.c routes through a BLAS-backed template.
 //
 // The fused conv2+maxpool reduce (the faithful-mode hot kernel) fails ALL
@@ -286,13 +286,9 @@ static int hand_opt_kernel_on_cpu(KernelEntry const *ke) {
 static int hand_opt_cpu_blas_eligible(KernelEntry const *ke) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   Term root = ke->cached_lift.store_root;
-  UopDagDotShape         dot;
-  UopDagGemvShape        gemv;
   UopDagGemmShape        gemm;
   UopDagContractionShape contr;
   UopDagIm2colShape      im2col;
-  if (uop_dag_classify_dot_shape (root, ke, &dot))   return 1;
-  if (uop_dag_classify_gemv_shape(root, ke, &gemv))  return 1;
   if (uop_dag_classify_matmul_shape(root, ke, &gemm)) return 1;
   if (uop_dag_classify_contraction_shape(root, ke, &contr)) return 1;
   if (uop_dag_classify_im2col_contraction(root, ke, &im2col)) return 1;

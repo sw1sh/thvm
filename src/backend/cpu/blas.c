@@ -1,12 +1,9 @@
-// backend/cpu/blas.c - pattern-recognise matmul / matvec / dot
-// kernels from the lifted UOp DAG and dispatch them to cblas_*: Apple
-// Accelerate on macOS, OpenBLAS / BLIS on Linux.  10-100x speedup on the hot ML workload
-// (matmul) -- a kernel that the JIT path doesn't attempt (it bails
-// at REDUCE).
+// backend/cpu/blas.c - pattern-recognise matmul-shaped kernels (gemm,
+// batched gemm, contraction, im2col) from the lifted UOp DAG and dispatch
+// them to cblas_*: Apple Accelerate on macOS, OpenBLAS / BLIS on Linux.
 //
 // Every dispatcher reads M/N/K + dtype + slot mapping from
-// ke->cached_lift.store_root via uop_dag_classify_matmul_shape /
-// uop_dag_classify_dot_shape / uop_dag_classify_gemv_shape.
+// ke->cached_lift.store_root via the uop_dag_classify_* extractors.
 // The unified rangeify pass produces the canonical MUL+REDUCE+OPT_TC
 // UOp DAG pattern for every matmul-shaped kernel, which
 // kernel_lift_to_uop packages as the per-kernel root these dispatchers
@@ -18,7 +15,7 @@
 // umbrella: recent Command Line Tools SDKs (Xcode 26.x) ship a broken
 // Sparse/SolveImplementationTyped.h that fails to compile even from C TUs
 // ("too many arguments to function call").  This file uses only cblas_*
-// (sdot/ddot/sgemm/dgemm/sgemv/dgemv), so the narrow header is sufficient
+// (sgemm/dgemm), so the narrow header is sufficient
 // and sidesteps the SDK breakage.
 #include <vecLib/cblas_new.h>
 #define HAVE_BLAS 1
@@ -38,8 +35,6 @@
 // Queried by tests through the blas_*_dispatch_dag accessors below.
 // Reset by thvm_init.
 static u64 BLAS_GEMM_DISPATCH_DAG = 0;
-static u64 BLAS_DOT_DISPATCH_DAG  = 0;
-static u64 BLAS_GEMV_DISPATCH_DAG = 0;
 
 // Cached "env flag set to '1'" check.  Each dispatcher had its own
 // `static int known; static int on;` block; this collapses them.  The
@@ -57,124 +52,17 @@ static int env_flag_on(int *slot, const char *name) {
   return *slot;
 }
 
-// Issue cblas_{s,d}dot.  Single dispatch site (the DAG GEMM/DOT/GEMV
-// dispatchers all funnel through it).
-static void blas_emit_dot(u32 dt, u32 K,
-                          u32 a_buf, u32 b_buf, u32 out_buf_id) {
-  if (dt == DT_FP32) {
-    float const *a = (float const *)CPU_BUFS[a_buf].data;
-    float const *b = (float const *)CPU_BUFS[b_buf].data;
-    float       *o = (float       *)CPU_BUFS[out_buf_id].data;
-    o[0] = cblas_sdot((int)K, a, 1, b, 1);
-  } else {
-    double const *a = (double const *)CPU_BUFS[a_buf].data;
-    double const *b = (double const *)CPU_BUFS[b_buf].data;
-    double       *o = (double       *)CPU_BUFS[out_buf_id].data;
-    o[0] = cblas_ddot((int)K, a, 1, b, 1);
-  }
-}
-
-// Issue cblas_{s,d}gemv given a fully-populated shape (M, K, ldW,
-// transW, w_buf, x_buf, out_buf).  Funnel for the DAG + legacy paths.
-static void blas_emit_gemv(u32 dt, u32 M, u32 K, u32 ldW, u32 transW,
-                           u32 w_buf, u32 x_buf, u32 out_buf_id) {
-  enum CBLAS_TRANSPOSE tW = transW ? CblasTrans : CblasNoTrans;
-  if (dt == DT_FP32) {
-    float const *W = (float const *)CPU_BUFS[w_buf].data;
-    float const *x = (float const *)CPU_BUFS[x_buf].data;
-    float       *o = (float       *)CPU_BUFS[out_buf_id].data;
-    cblas_sgemv(CblasRowMajor, tW, (int)M, (int)K,
-                1.0f, W, (int)ldW, x, 1, 0.0f, o, 1);
-  } else {
-    double const *W = (double const *)CPU_BUFS[w_buf].data;
-    double const *x = (double const *)CPU_BUFS[x_buf].data;
-    double       *o = (double       *)CPU_BUFS[out_buf_id].data;
-    cblas_dgemv(CblasRowMajor, tW, (int)M, (int)K,
-                1.0, W, (int)ldW, x, 1, 0.0, o, 1);
-  }
-}
-
-// DAG-side DOT dispatcher.  Reads K + slot mapping from the lifted
-// UOp DAG via `uop_dag_classify_dot_shape`.  Returns 1 on dispatch, 0
-// on no-match.
-static int blas_try_dot(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  if (ke->cached_lift.store_root == 0) return 0;
-  UopDagDotShape dot;
-  if (!uop_dag_classify_dot_shape(ke->cached_lift.store_root, ke, &dot)) {
-    return 0;
-  }
-  u32 a_buf = in_buf_ids[dot.a_input];
-  u32 b_buf = in_buf_ids[dot.b_input];
-  if (a_buf == 0 || b_buf == 0) return 0;
-  u32 elem_bytes = (dot.dtype == DT_FP32) ? sizeof(float) : sizeof(double);
-  u32 a_elems = (u32)(CPU_BUFS[a_buf].nbytes / elem_bytes);
-  u32 b_elems = (u32)(CPU_BUFS[b_buf].nbytes / elem_bytes);
-  if (a_elems < dot.K || b_elems < dot.K) return 0;
-  blas_emit_dot(dot.dtype, dot.K, a_buf, b_buf, out_buf_id);
-  BLAS_DOT_DISPATCH_DAG++;
-  return 1;
-}
-
-// DAG-side GEMV dispatcher.  Reads M/K + slot mapping + ldW + transpose
-// flag from the lifted UOp DAG via `uop_dag_classify_gemv_shape`.
-// Returns 1 on dispatch, 0 on no-match.
-static int blas_try_gemv(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  if (ke->cached_lift.store_root == 0) return 0;
-  UopDagGemvShape gemv;
-  if (!uop_dag_classify_gemv_shape(ke->cached_lift.store_root, ke, &gemv)) {
-    return 0;
-  }
-  u32 w_buf = in_buf_ids[gemv.w_input];
-  u32 x_buf = in_buf_ids[gemv.x_input];
-  if (w_buf == 0 || x_buf == 0) return 0;
-  u32 elem_bytes = (gemv.dtype == DT_FP32) ? sizeof(float) : sizeof(double);
-  u32 w_elems = (u32)(CPU_BUFS[w_buf].nbytes / elem_bytes);
-  u32 x_elems = (u32)(CPU_BUFS[x_buf].nbytes / elem_bytes);
-  if (w_elems < gemv.M * gemv.K) return 0;
-  if (x_elems < gemv.K) return 0;
-  // cblas_*gemv (CblasRowMajor) requires lda >= max(1, N) where the
-  // matrix is passed as (M, N) == (M, K) here -- i.e. ldW >= K.  A
-  // misclassified shape with ldW < K trips an "invalid parameter 7"
-  // abort; decline so the (correct) walker/JIT path handles it instead.
-  if (gemv.ldW < gemv.K || gemv.M == 0 || gemv.K == 0) return 0;
-  blas_emit_gemv(gemv.dtype, gemv.M, gemv.K, gemv.ldW, gemv.flags & 1u,
-                 w_buf, x_buf, out_buf_id);
-  BLAS_GEMV_DISPATCH_DAG++;
-  return 1;
-}
-
 // Counter accessors -- see top-of-file definition block.
 fn u64 cpu_blas_gemm_dispatch_dag_count(void) {
   return BLAS_GEMM_DISPATCH_DAG;
 }
-fn u64 cpu_blas_dot_dispatch_dag_count(void) {
-  return BLAS_DOT_DISPATCH_DAG;
-}
-fn u64 cpu_blas_gemv_dispatch_dag_count(void) {
-  return BLAS_GEMV_DISPATCH_DAG;
-}
 fn void cpu_blas_gemm_dispatch_counters_reset(void) {
   BLAS_GEMM_DISPATCH_DAG = 0;
-  BLAS_DOT_DISPATCH_DAG  = 0;
-  BLAS_GEMV_DISPATCH_DAG = 0;
 }
 
-// Try GEMM.  A:{M,K} @ B:{K,N} -> {M,N}.  TMatMul materializes the
-// pair as a common-shape EXPAND-broadcast so MUL becomes elementwise:
-//
-//   op[0] = MUL(in0, in1)               numel = M*K*N
-//   op[1] = REDUCE_SUM(op[0])           numel = M*N, REDUCE inner = N
-//                                       (i.e. reducing the middle axis
-//                                        of the {M,K,N} layout).
-//
-// Disambiguates from GEMV by inner: GEMV has inner = 1, GEMM has
-// inner = N > 1 + a non-trivial K (nMul / nOut > 1).  A buffer-size
-// check distinguishes A (M*K floats) from B (K*N floats).
-//
 // Issue cblas_{s,d}gemm given a fully-populated shape (M, N, K, ldA,
-// ldB, transA, transB, a_input, b_input).  Both the DAG path and the
-// legacy program[] path funnel through this so the actual dispatch
-// site stays single-source.
+// ldB, transA, transB, a_input, b_input).  Every route funnels through
+// this so the actual dispatch site stays single-source.
 static void blas_emit_gemm(u32 dt, u32 M, u32 N, u32 K,
                            u32 ldA, u32 ldB, u32 ldC,
                            u32 trans_a, u32 trans_b,
@@ -244,47 +132,6 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (ldC == 0) ldC = gemm.N;
   blas_emit_gemm(gemm.dtype, gemm.M, gemm.N, gemm.K, gemm.ldA, gemm.ldB, ldC,
                  gemm.flags & 1u, gemm.flags & 2u,
-                 a_buf, b_buf, out_buf_id);
-  BLAS_GEMM_DISPATCH_DAG++;
-  return 1;
-}
-
-// DAG-side VECMAT dispatcher: out{1,N} = a{1,K} @ B{K,N}, the M==1
-// single-token-decode projection / LM-head matvec.  The matmul
-// classifier declines this (the unit M row elides A's m-arm so A has
-// only 1 range), and the gemv emit can't express the {K,N}-matrix
-// orientation -- so it's emitted as a cblas_sgemm with M=1, which cblas
-// handles natively.  Without this it runs as the slow scalar walk
-// (the LM-head [1,50257] matvec is ~40 ms scalar vs ~ms on cblas).
-static int blas_try_vecmat(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  if (ke->cached_lift.store_root == 0) return 0;
-  UopDagVecmatShape vm;
-  if (!uop_dag_classify_vecmat_shape(ke->cached_lift.store_root, ke, &vm)) {
-    return 0;
-  }
-  // Resolve symbolic (kvar) dims to their per-dispatch bound (identity
-  // for the literal N/K of the decode matvecs).
-  u32 N   = kvar_extent_runtime(vm.N);
-  u32 K   = kvar_extent_runtime(vm.K);
-  u32 ldB = kvar_extent_runtime(vm.ldB);
-  if (N <= 1 || K == 0) return 0;
-  u32 a_buf = in_buf_ids[vm.a_input];
-  u32 b_buf = in_buf_ids[vm.b_input];
-  if (a_buf == 0 || b_buf == 0) return 0;
-  u32 elem_bytes = (vm.dtype == DT_FP32) ? sizeof(float) : sizeof(double);
-  u32 a_elems = (u32)(CPU_BUFS[a_buf].nbytes / elem_bytes);
-  u32 b_elems = (u32)(CPU_BUFS[b_buf].nbytes / elem_bytes);
-  if (a_elems < K) return 0;
-  if (b_elems < K * N) return 0;
-  // ldC: the output {1,N} row stride (only one row is written, so its
-  // value is moot beyond >= N, but mirror the gemm path for symbolic-N
-  // buffers sized at the kvar upper bound).
-  u32 ldC = (u32) TENS[ke->output_tid].view.strides[0];
-  if (ldC < N) ldC = N;
-  // cblas_sgemm(M=1, N, K): A{1,K} contiguous (ldA=K, transA=0), B per
-  // the recovered ldB / transB, C{1,N} (ldC).
-  blas_emit_gemm(vm.dtype, 1, N, K, K, ldB, ldC,
-                 0u, vm.flags & 1u,
                  a_buf, b_buf, out_buf_id);
   BLAS_GEMM_DISPATCH_DAG++;
   return 1;
@@ -526,9 +373,8 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
   return 1;
 }
 
-// Returns the specific KDispatchKind that fired (BLAS_DOT / BLAS_GEMV
-// / BLAS_GEMM) so the profiler can record the route, or 0 on no-match
-// (caller falls through to JIT / interpreter).
+// Returns KDISPATCH_BLAS_GEMM when a route fired so the profiler can
+// record it, or 0 on no-match (caller falls through to JIT / interpreter).
 fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // Bisection knob: THVM_CPU_BLAS_DISABLE=1 forces every kernel past
   // the BLAS try-ladder so the walker / JIT path runs instead.  Used
@@ -536,13 +382,7 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // bad transA/transB recovery) from kernel-body bugs.
   static int disable_slot = -1;
   if (env_flag_on(&disable_slot, "THVM_CPU_BLAS_DISABLE")) return 0;
-  if (blas_try_dot (ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_DOT;
-  if (blas_try_gemv(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMV;
   if (blas_try_gemm(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;
-  // M==1 vector-times-matrix (single-token decode projections + LM
-  // head) -- declined by gemm (unit M row elides A's m-arm), routed to
-  // a cblas_sgemm M=1.  After gemm so the M>=2 path wins first.
-  if (blas_try_vecmat(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;
   // True batched gemm (batch axis in A AND B AND output) -- the batched
   // multi-head attention bmm.  Before the contraction try (whose batch is
   // M-side / A-shared and would decline on a batch-in-both axis anyway).
@@ -570,8 +410,6 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 }
 
 fn u64  cpu_blas_gemm_dispatch_dag_count   (void) { return 0; }
-fn u64  cpu_blas_dot_dispatch_dag_count    (void) { return 0; }
-fn u64  cpu_blas_gemv_dispatch_dag_count   (void) { return 0; }
 fn void cpu_blas_gemm_dispatch_counters_reset(void) {}
 
 #endif

@@ -2,10 +2,9 @@
 //
 // Matmul shapes are canonicalised as MUL+REDUCE+OPT_TC UOp DAG nodes by
 // the unified rangeify pass and lifted into the kernel root by
-// kernel_lift_to_uop.  Downstream consumers (BLAS GEMM/DOT/GEMV dispatch, apply_opt KOP_TC
-// gate, propose KOP_TC tile-size proposer) read shape facts from
-// ke->cached_lift.store_root via uop_dag_classify_matmul_shape /
-// uop_dag_classify_dot_shape / uop_dag_classify_gemv_shape
+// kernel_lift_to_uop.  Downstream consumers (BLAS GEMM dispatch,
+// apply_opt KOP_TC gate, propose KOP_TC tile-size proposer) read shape
+// facts from ke->cached_lift.store_root via uop_dag_classify_matmul_shape
 // (src/uop/dag_scan.c).
 
 #define TILE_REDUCE_KIND(arg)  (((arg) >> 24) & 0xFFu)
