@@ -69,8 +69,8 @@ int main(void) {
   // parent1 = shared * c, parent2 = shared * d, root = p1 + p2.  Both
   // parents index `shared` with the root's range, so the walk keeps it
   // fused and it inherits that range (tinygrad indexing.py: all_all_same).
-  // bufferize_classify still tags it MULTI, but the default seed (809c2a66)
-  // does not realize on that tag; THVM_HEURISTIC_SEED=1 still would.
+  // bufferize_classify still tags it MULTI, but the seed (809c2a66) does
+  // not realize on that tag.
   TEST_BEGIN("unified-rangeify/diamond-shared-producer-fuses");
   Term d = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor1(3));
   Term shared = uop_binary(UOP_ADD, a, b);

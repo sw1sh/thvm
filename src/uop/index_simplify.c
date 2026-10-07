@@ -792,9 +792,9 @@ static Term uop_fold_add_divmod_recombine(Term a, Term b) {
 
 // The valid-given index folds (propagate_invalid push + uop_given_valid).
 //
-// This is a SEPARATE, opt-in (default OFF) optimization, decoupled from
-// THVM_FUSE_CONV_BWD.  It was previously bundled into the conv-bwd fuse
-// gate, but it is (a) NOT needed for the conv-backward memory win -- the
+// This is a SEPARATE, opt-in (default OFF) optimization, independent of the
+// conv-backward fusion.  It is (a) NOT needed for the conv-backward memory
+// win -- the
 // rangeify RESHAPE placeholder fold (schedule/indexing.c
 // apply_movement_op_reshape_composed) is what collapses the col2im into a
 // strided view -- and (b) INCORRECT under thvm's INVALID lowering when a

@@ -613,53 +613,17 @@ fn u32  materialized_loc_scope_depth(void) { return MATERIALIZE_SCOPE_DEPTH; }
 // `loss.realize(*opt.schedule_step())` step in ONE run_rangeify pass, so a
 // shared kernel is scheduled exactly once.
 //
-// Gated by THVM_JIT_REALIZE_DEDUP (default OFF -- the env-knob discipline
-// for an aliasing-sensitive path).  When the span is active and enabled,
-// materialized_loc_clear() defers the wipe; the deferred clear runs at
-// materialized_loc_jit_span_end().
+// When the span is active, materialized_loc_clear() defers the wipe; the
+// deferred clear runs at materialized_loc_jit_span_end().  The faithful
+// realize-seed produces FEWER boundaries, so a forward intermediate is shared
+// across realizes (forward in realize-1, read by backward in realize-2)
+// WITHOUT a unifying boundary; the cross-realize dedup is what unifies the
+// producer's output tid with the consumer's input tid.  A maxpool grad needs
+// it too: the /count argmax-tie split (gradient.py:11-14) is only correct if
+// the maxpool-input activation, the forward MAX and the backward mask read
+// ONE materialized buffer across the step's realize calls.
 static u32 MATERIALIZE_JIT_SPAN_DEPTH = 0;
 
-// Set the first time a maxpool MAX-reduce vjp is built (interact/uop_grad.c
-// REDUCE_MAX branch).  The /count argmax-tie split (gradient.py:11-14) is only
-// correct if the maxpool-input activation, the forward MAX, and the backward
-// mask read ONE materialized buffer.  Across the captured step's separate
-// realize calls (BN running-stat realizes, loss.realize, the grad bundle) that
-// requires the cross-realize materialized_loc span to persist -- otherwise each
-// realize re-materializes the activation into a fresh buffer and the two copies
-// fp-disagree at an argmax tie -> CMPEQ miss -> count 0 -> RECIP(0) NaN.  So a
-// maxpool grad in the live graph IMPLIES the dedup span, exactly as the
-// faithful seed does (verified: without the span the default-seed stacked-
-// maxpool training NaNs at step 2; with it the loss curve matches faithful).
-static int MAXPOOL_GRAD_SEEN = 0;
-fn void materialize_note_maxpool_grad(void) { MAXPOOL_GRAD_SEEN = 1; }
-static int MATERIALIZE_JIT_DEDUP_ENABLED(void) {
-  static int known = 0, on = 0;
-  if (!known) {
-    char const *e = getenv("THVM_JIT_REALIZE_DEDUP");
-    on = (e != NULL && e[0] != '0' && e[0] != '\0');
-    known = 1;
-  }
-  // The faithful realize-seed (THVM_RU_FAITHFUL_SEED) produces FEWER
-  // boundaries, so a forward intermediate is shared across realizes (forward
-  // in realize-1, read by backward in realize-2) WITHOUT a unifying boundary.
-  // The cross-realize materialized_loc dedup is what unifies the producer's
-  // output tid with the consumer's input tid; without it the JIT capture
-  // records divergent buf_ids (producer reallocs across realizes) and replay
-  // reads stale intermediates -> divergence/explosion.  So faithful IMPLIES
-  // the dedup (verified: faithful+dedup converges on the JIT replay, faithful
-  // alone diverges).  A maxpool grad implies it for the same reason (see
-  // MAXPOOL_GRAD_SEEN).
-  // Two-phase capture (THVM_JIT_TWO_PHASE) IMPLIES the dedup: the span's
-  // loc->tid cache is what makes the closure body READ a lazy declared
-  // input's realized buffer (one kernel, one recorded read the input-rebind
-  // sites can match) instead of re-inlining its producer graph -- without it
-  // the record contains no read of the declared input and every replay
-  // recomputes the capture-time value (the Krea stale-velocity bug).  Safe
-  // without pins: materialized_loc_lookup's dead-buffer guard re-emits when
-  // an entry's eagerly-freed buffer is gone.
-  return on || ru_faithful_seed_on() || MAXPOOL_GRAD_SEEN
-      || jit_capture_two_phase_active();
-}
 static int materialized_loc_span_holds(void) {
   // The cross-realize dedup keeps one realize's materialized boundary so a
   // later realize in the same captured step substitutes it (one kernel,
@@ -668,9 +632,8 @@ static int materialized_loc_span_holds(void) {
   // preserved boundary buffer's producer kid (backend-aware), so the
   // depth-first fire reads the materialized leaf rather than re-firing the
   // producer chain across realizes.  With that GC fix the span is correct
-  // on every backend the GC sweeps (CPU + CUDA) and follows the single
-  // THVM_JIT_REALIZE_DEDUP master gate.
-  if (MATERIALIZE_JIT_SPAN_DEPTH == 0 || !MATERIALIZE_JIT_DEDUP_ENABLED()) {
+  // on every backend the GC sweeps (CPU + CUDA).
+  if (MATERIALIZE_JIT_SPAN_DEPTH == 0) {
     return 0;
   }
   if (CURRENT_BACKEND == &CPU_BACKEND) return 1;
@@ -681,15 +644,8 @@ static int materialized_loc_span_holds(void) {
 }
 fn void materialized_loc_clear(void);   // fwd decl (span_end calls it)
 fn void materialized_loc_jit_span_begin(void) {
-  // Track the captured-step bracket UNCONDITIONALLY (the depth marks "inside a
-  // JIT capture").  Whether the span actually DEFERS the cross-realize clear is
-  // decided lazily by materialized_loc_span_holds, which re-checks
-  // MATERIALIZE_JIT_DEDUP_ENABLED() at clear time.  This matters for the
-  // maxpool auto-enable (MAXPOOL_GRAD_SEEN): the flag is set DURING the step's
-  // realize (when the MAX-reduce vjp is built), AFTER this begin runs, so an
-  // early gate here would miss it and let the activation re-materialize per
-  // realize -> the stacked-maxpool NaN.  When the gate is off at clear time the
-  // span behaves exactly as the old per-realize clear.
+  // The depth marks "inside a JIT capture"; materialized_loc_span_holds
+  // decides per backend whether the span defers the cross-realize clear.
   if (MATERIALIZE_JIT_SPAN_DEPTH == 0) materialized_loc_clear();
   MATERIALIZE_JIT_SPAN_DEPTH++;
 }
@@ -4293,7 +4249,7 @@ static int bufferize_strand_check_deep(RangeAxisSet const *iter,
   for (u32 i = 0; i < free->n; i++) {
     u32 aid = free->axes[i];
     if (range_axis_has(iter, aid)) continue;
-    // THVM_FUSE_CONV_BWD: a hash-cons-aliased REDUCE / realized-scope axis
+    // A hash-cons-aliased REDUCE / realized-scope axis
     // from a disjoint scope is bound when the fusing conv-bwd product
     // splices into its contraction reduce, so it is not stranded.
     if (rangeify_unified_aid_is_fuse_bound(aid)) continue;
@@ -4602,10 +4558,9 @@ static void topo_sort_boundaries(Term root) {
     // Partial realizes that genuinely drop axes and inline cleanly
     // (softmax denom / layer-norm mean broadcasts) are NOT promoted, so
     // their fusion is preserved.
-    // THVM_RU_FAITHFUL_SEED: this boundary gate must agree with the
-    // rangeify realize-map seed (rangeify_unified.c).  In faithful mode the
-    // CLASSIFY realized bit (MULTI/REDUCE/MATMUL heuristics) is NOT a
-    // boundary by itself -- only ROOT (== tinygrad STORE) is.  Every other
+    // This boundary gate must agree with the rangeify realize-map seed
+    // (rangeify_unified.c ru_seed_boundary_holds): the CLASSIFY realized bit
+    // (MULTI/MATMUL heuristics) is NOT a boundary by itself.  Every other
     // node falls through to the rangeify-realized gate below, so a node the
     // unified walk fused (single-consumer inherit, no ending-ranges) is
     // inlined into its consumer instead of escaping into its own kernel

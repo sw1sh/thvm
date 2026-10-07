@@ -1195,7 +1195,7 @@ fn u32 jit_capture_begin(void) {
       // no two-phase map is live).
       thvm_metal_allocnote_hook = jit_twophase_note_alloc_metal;
 #endif
-      // Open the realize-dedup span (gated by THVM_JIT_REALIZE_DEDUP):
+      // Open the realize-dedup span:
       // the multiple realizes of this captured step share one loc->tid
       // cache so a kernel emitted by realize-1 is reused (not re-emitted
       // + re-recorded) by realize-2/3.  Closed in jit_capture_end{,_with_result}.

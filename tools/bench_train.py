@@ -12,7 +12,6 @@ Env knobs (read at import-time by the C runtime, so set them in the shell):
   DEV=cpu|cuda|metal          backend (default cpu)
   MODEL=simple|beautiful       model (default beautiful)
   BS=<int>                     batch size (default 8)
-  THVM_RU_FAITHFUL_SEED=1      faithful realize-seed
   BEAM=<int> / AUTOTUNE=1      enable the autotune/BEAM search
   NITER=<int>                  iterations (default 12; warm = iters[2:])
 
@@ -131,8 +130,7 @@ for i in range(NITER):
     t0 = time.time(); jit(); lv = float(lossSlot.numpy()[0])
     wall.append((time.time() - t0) * 1e3)
 warm = wall[2:] or wall
-mode = "faithful" if os.environ.get("THVM_RU_FAITHFUL_SEED") else "default"
 beam = os.environ.get("BEAM", "0")
-print(f"thvm {DEV} {MODEL} {mode} BEAM={beam}: "
+print(f"thvm {DEV} {MODEL} BEAM={beam}: "
       f"warm_min={min(warm):.2f}ms warm_mean={np.mean(warm):.2f}ms "
       f"loss={lv:.4f} sched_kernels={sched_k} peak_mb={_peak_bytes() / 1e6:.1f}")

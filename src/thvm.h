@@ -2038,13 +2038,9 @@ fn void xpass_cc_populate(Term root);
 fn void xpass_cc_reset(void);
 // JIT-capture realize-dedup span: preserve the loc->tid cache across the
 // several realizes of one captured step so shared forward/grad kernels
-// are emitted (and recorded) once.  Gated by THVM_JIT_REALIZE_DEDUP.
+// are emitted (and recorded) once.
 fn void materialized_loc_jit_span_begin(void);
 fn void materialized_loc_jit_span_end  (void);
-// Flag the live graph as containing a maxpool MAX-reduce gradient so the
-// cross-realize materialized_loc span auto-enables (the /count argmax-tie
-// split needs the maxpool-input activation shared across the step's realizes).
-fn void materialize_note_maxpool_grad(void);
 
 // Build a contiguous View from a Shape.  Step 14 adds the movement ops
 // (reshape / permute / expand / pad / shrink / flip).

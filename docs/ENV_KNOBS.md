@@ -18,13 +18,6 @@ update the matching row here in the same change.
 
 ---
 
-## Correctness gates (change realized math -- validate before enabling)
-
-| Knob | Default | Effect |
-| --- | --- | --- |
-| `THVM_JIT_REALIZE_DEDUP` | off | Schedule-level cross-realize dispatch dedup. Bit-exact on CPU (~17% faster). On CUDA: correct + ~6% faster on plain conv models (simple-model 7.8->7.3ms, beats tinygrad's 7.6ms) after the kernel_gc_sweep backend-aware liveness fix; but on BatchNorm/max_pool models (beautiful_mnist) the replay still DIVERGES at iter2 and is ~14% SLOWER -- a separate BN/pool dedup-replay bug, under investigation. Keep off for BN models. |
-| `THVM_FUSE_CONV_BWD` | off | Fuse the conv-backward reduce into a strided-view reduce (cuts peak memory). Gated; validate grads before enabling. |
-
 ## Core scheduling & JIT
 
 | Knob | Default | Effect |
@@ -38,8 +31,6 @@ update the matching row here in the same change.
 | `THVM_NF_PARALLEL_STEP_SESSION` | off | Parallel normal-form step session. |
 | `THVM_PRECISE_FIRE_MEMO` | off | Precise dispatch-fire memoization. |
 | `THVM_DISPATCH_TRACE` | off | Trace dispatch memoization. |
-| `THVM_RU_FAITHFUL_SEED` | off | Realize-seed only structural boundaries (ROOT) + REDUCE outputs, deriving the rest in the rangeify walk (tinygrad's structural seed); default mode also seeds MULTI/MATMUL/FANIN. Faithful CPU beats tinygrad + default (see [[project_faithful_cpu_breakthrough]]). |
-| `THVM_RU_NO_SEED_REDUCE` | off | A/B revert: under faithful seed, go back to ROOT-only (drop the REDUCE-output seed). ROOT-only under-realizes -> conv data-grad becomes a col2im gather (faithful beautiful_mnist CPU 5.18ms -> 77.6ms). For comparison only. |
 | `THVM_MAX_KERNEL_BUFFERS` | Metal 31, else no cap | tinygrad's `MAX_KERNEL_BUFFERS`: a positive value caps the distinct buffers (output included) one kernel may bind on every device, splitting wider elementwise fusions (`ru_limit_bufs_node`). `0` turns the cap off everywhere, Metal included. |
 
 ## Bufferize & kernel lift
@@ -192,20 +183,3 @@ operational ones.
 | `THVM_CACHE` (Python) | `~/.cache/thvm` | Dataset cache directory. |
 | `THVM_BENCH_OPT` | off | Benchmark optimization selector (`tools/xbackend_bench`). |
 | `THVM_WL_TENSOR_VIEW_DEBUG` | off | WL tensor-view debug output. |
-
----
-
-## A/B gate command (V100, CUDA)
-
-`THVM_JIT_REALIZE_DEDUP` is bit-exact and correct on CPU + CUDA. The A/B
-comparison on a V100 pod is:
-
-```
-# baseline (knob off)
-DEV=cuda BS=32 python3 py/examples/beautiful_mnist_train.py
-# with cross-realize dedup
-DEV=cuda BS=32 THVM_JIT_REALIZE_DEDUP=1 python3 py/examples/beautiful_mnist_train.py
-```
-
-Loss must match step-for-step; CUDA warm-step drops ~6% (simple-model
-7.8->7.3ms, ahead of tinygrad's 7.6ms).

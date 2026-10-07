@@ -153,7 +153,7 @@ static Term reshape_const_zero(void) {
   return uop_const(DT_INT32, 0);
 }
 
-// === PLACEHOLDER round-trip (gated THVM_FUSE_CONV_BWD) ================
+// === PLACEHOLDER round-trip ===========================================
 //
 // Mirror source: tinygrad/schedule/indexing.py:140-143 (RESHAPE case of
 // apply_movement_op) + indexing.py:112-125 (_apply_reshape).

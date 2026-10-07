@@ -1350,11 +1350,6 @@ static Term interact_grad_dispatch(Term grad_term) {
         //   mask  = (a == broadcast_to_input(ret))
         //   count = lift( SUM(mask, axes) )         # ties shared equally
         //   gy_a  = mask * RECIP(count) * lift(gy)
-        // A maxpool grad in the live graph requires the cross-realize
-        // materialized_loc span so the activation / forward-MAX / backward-mask
-        // share ONE buffer across the step's separate realize calls (see
-        // materialize_note_maxpool_grad).
-        materialize_note_maxpool_grad();
         // Reuse the FORWARD reduce node `y` (== tinygrad `ret`) as the window
         // max -- gradient.py:11 `ret.src[0].eq(broadcast_to_input(ret))`.  `y`
         // is the same hash-consed REDUCE_MAX the loss references and is realized

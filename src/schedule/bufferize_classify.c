@@ -791,7 +791,7 @@ static int bufferize_chain_has_pool_merge(Term t) {
   return 0;
 }
 
-// THVM_FUSE_CONV_BWD Part 1: true iff a (broadcast) EXPAND sits within the
+// Conv-backward fusion: true iff a (broadcast) EXPAND sits within the
 // node's immediate movement-op chain.  The `_pool` unfold that scatters into
 // the conv-backward contraction carries a RESHAPE-over-EXPAND signature (the
 // sliding-window repeat); we must NOT realize that boundary -- it has to stay
@@ -814,21 +814,6 @@ static int bufferize_node_has_expand_in_movement_chain(u64 node_loc,
     cur = term_resolve(heap_read(term_val(cur) + 0));
   }
   return 0;
-}
-
-// Opt-in gate: fuse the conv-BACKWARD contraction reduce into its
-// downstream _pool-scatter reduce (the data-grad sum_cout(out_grad *
-// weight) + weight-grad), instead of force-realizing it for BLAS.  The
-// backward contraction's MUL operands (out_grad, weight) do NOT carry
-// the forward `_pool` RESHAPE-over-EXPAND signature, so
-// bufferize_chain_has_pool_merge can't recognise it; we recognise it
-// structurally instead -- a SUM REDUCE whose output flows through a
-// movement chain (pad/repeat/shrink/reshape -- the scatter) into ANOTHER
-// REDUCE.  Default OFF; the materialized contraction is the dominant
-// beautiful_mnist peak-memory cost (3x39MB + a 1.31GB unfold product).
-static int bufferize_fuse_conv_bwd_enabled(void) {
-  char const *e = getenv("THVM_FUSE_CONV_BWD");
-  return (e != NULL && e[0] == '1');
 }
 
 // True iff the REDUCE at `reduce_loc`'s output feeds a downstream
@@ -895,7 +880,7 @@ static int bufferize_reduce_feeds_scatter_reduce(u64 reduce_loc, u32 hop_cap) {
   return 0;
 }
 
-// THVM_FUSE_CONV_BWD: true iff the contraction REDUCE at `reduce_loc`
+// True iff the contraction REDUCE at `reduce_loc`
 // reads a now-REALIZED activation buffer through a `_pool` unfold (a
 // movement chain carrying an EXPAND -- the sliding-window repeat).  This
 // is precisely the 2nd-train-step trigger: the forward `relu(conv)`
@@ -955,12 +940,15 @@ static int bufferize_uop_is_matmul(u64 reduce_loc) {
   Term bindings[UPAT_NUM_BINDINGS] = {0};
   int is_mul   = upat_match(&bufferize_upat_mul, mul, bindings);
   int distinct = is_mul && (term_val(bindings[0]) != term_val(bindings[1]));
-  // Conv BACKWARD contraction: precise decline so it fuses with the
-  // _pool-scatter instead of force-realizing the 39MB im2col.  Gated:
-  // declines ONLY a SUM-MUL reduce whose output scatters (movement chain)
-  // into another reduce -- Linear's GEMM (whose reduce feeds an
-  // elementwise/relu, not a scatter-reduce) keeps BLAS.
-  if (is_mul && distinct && bufferize_fuse_conv_bwd_enabled()
+  // Conv BACKWARD contraction: fuse it into its downstream _pool-scatter
+  // reduce (the data-grad sum_cout(out_grad * weight) + weight-grad)
+  // instead of force-realizing the 39MB im2col for BLAS.  Its MUL operands
+  // (out_grad, weight) do NOT carry the forward `_pool` RESHAPE-over-EXPAND
+  // signature, so it is recognised structurally: a SUM-MUL reduce whose
+  // output scatters (movement chain) into another reduce.  Linear's GEMM
+  // (whose reduce feeds an elementwise/relu, not a scatter-reduce) keeps
+  // BLAS.
+  if (is_mul && distinct
       && bufferize_reduce_feeds_scatter_reduce(reduce_loc, 32)) {
     return 0;
   }
@@ -1610,7 +1598,7 @@ fn void bufferize_classify(Term root) {
             && bufferize_elementwise_src_has_reduce(info->loc, 0);
         // Movement ops stay views (see the default-skip rationale above).
         int skip_movement = skip_movement_default && uop_is_movement(info->op);
-        // THVM_FUSE_CONV_BWD Part 1 (realize-at-boundary): MULTI-seed every
+        // Conv-backward realize-at-boundary: MULTI-seed every
         // multi-consumer ACTIVATION boundary EXCEPT the `_pool` unfold (which
         // carries an EXPAND in its movement chain).  Realizing r1 =
         // relu(conv1) and its flat reshape as buffers lets the backward
@@ -1619,11 +1607,8 @@ fn void bufferize_classify(Term root) {
         // the spurious conv-spatial cross-product that hangs.  The unfold
         // stays a view (its EXPAND broadcast would materialize the full
         // sliding-window tensor if realized).
-        int fuse_realize_boundary = 0;
-        if (bufferize_fuse_conv_bwd_enabled()) {
-          fuse_realize_boundary =
-              !bufferize_node_has_expand_in_movement_chain(info->loc, info->op, 6);
-        }
+        int fuse_realize_boundary =
+            !bufferize_node_has_expand_in_movement_chain(info->loc, info->op, 6);
         if (fuse_realize_boundary
             || (!(ew && src_has_reduce) && !skip_movement)) {
           bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
@@ -1712,7 +1697,7 @@ fn void bufferize_classify(Term root) {
           // intermediate.  Default OFF -- the chain-guard pass below
           // already handles many cases.  Opt-in for workloads where
           // the upstream materialized intermediate is large.
-          // THVM_FUSE_CONV_BWD=1: precise seed-skip for the conv-backward
+          // Precise seed-skip for the conv-backward
           // contraction reduce -- its output feeds a _pool-scatter
           // (movement+elementwise chain with a PAD/SHRINK) into another
           // REDUCE.  Skipping the seed lets the multi-axis REDUCE
@@ -1721,7 +1706,7 @@ fn void bufferize_classify(Term root) {
           // generic riri walk below (which matches any reduce->movement->
           // reduce); Linear's GEMM has no PAD/SHRINK scatter so it stays
           // protected.
-          if (!skip_seed && bufferize_fuse_conv_bwd_enabled()
+          if (!skip_seed
               && bufferize_reduce_feeds_scatter_reduce(info->loc, 32)) {
             // Fuse the contraction into the scatter-reduce -- UNLESS it
             // reads a now-realized activation through the `_pool` col2im

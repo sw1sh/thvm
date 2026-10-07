@@ -652,19 +652,6 @@ Backend *ctx_ensure_backend(i32 dev) {
 }
 
 void thvm_init(void) {
-  // THVM_FUSE_CONV_BWD now defaults ON: fuse the conv-backward col2im into
-  // a strided view instead of materializing it (tinygrad never materializes
-  // it -- docs/thvm_vs_tinygrad.md SS3.7).  The placeholder reshape round-
-  // trip (schedule/indexing.c apply_movement_op_reshape_composed) +
-  // fold_add_divmod_recombine (uop/index_simplify.c, ported from tinygrad
-  // symbolic.py:28-49) collapse the unfold+col2im split/re-split so the
-  // fused read iterates the correct strided count -- no 21-trillion-element
-  // cross-product.  The three gate readers (ru_fuse_conv_bwd_enabled,
-  // uop_valid_fold_enabled, bufferize_fuse_conv_bwd_enabled) all test
-  // getenv("THVM_FUSE_CONV_BWD")=="1", so default the env here (only if the
-  // caller left it unset) to flip them together.  An explicit
-  // THVM_FUSE_CONV_BWD=0 still opts OUT (back to the materializing path).
-  setenv("THVM_FUSE_CONV_BWD", "1", 0);
   init_ctx_arrays(CURRENT_CTX);
   // Bind the main thread's WNF spine routing to the just-allocated
   // ctx state.  Worker threads spawned by the parallel pool re-bind

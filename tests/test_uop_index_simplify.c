@@ -1228,7 +1228,7 @@ int main(void) {
       CHECK_EQ(cc, 7);
     }
 
-    // Rule 29: gate-push for IOR/IXOR/ISHR (only under THVM_FUSE_CONV_BWD).
+    // Rule 29: gate-push for IOR/IXOR/ISHR (only under THVM_VALID_FOLD).
     TEST_BEGIN("ported/gate-push-allowlist-respects-env");
     // Without the env gate the push must NOT fire: keep IXOR over the gate.
     if (!uop_valid_fold_enabled()) {
