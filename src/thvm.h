@@ -119,15 +119,9 @@ void   sched_prof_add(int slot, double t0);
 //   EXT = label / opcode / arity. Per-tag meaning.
 //   VAL = heap location (38 bits ≈ 256 GiB worth of u64 cells).
 
-#define SUB_BITS  1
-#define TAG_BITS  7
-#define EXT_BITS  18
-#define VAL_BITS  38
-
 #define SUB_SHIFT 63
 #define TAG_SHIFT 56
 #define EXT_SHIFT 38
-#define VAL_SHIFT 0
 
 #define SUB_MASK  0x1ULL
 #define TAG_MASK  0x7FULL
@@ -142,7 +136,6 @@ void   sched_prof_add(int slot, double t0);
 // in the regular case; unused / target-tid by convention in the grad
 // case).
 #define DUP_GRAD_FLAG  (1U << 17)
-#define DUP_LABEL_MASK (0x1FFFFU)            // bits 0..16
 
 // === LAM ext flags ===
 // Bit 17 of a TAG_LAM's ext (separate namespace from DP0/DP1's ext)
@@ -2162,10 +2155,6 @@ void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out);
 // borrowed: teardown drops only the MTLBuffer ARC ref, never the host mmap
 // pages, and the recycle freelist never reclaims it.
 u32  thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor);
-// The within-buffer byte offset at which a Metal buf's element 0 lives
-// (nonzero only for a borrowed disk-mmap wrap).  Applied at kernel input
-// binds via [enc setBuffer:buf offset:thvm_metal_buf_byte_offset(bid) ..].
-u64  thvm_metal_buf_byte_offset(u32 buf_id);
 // Per-realize ARENA planner (schedule/materialize.c) Metal handles.  The
 // planner allocates ONE device buffer for a pass's working set, then hands
 // out per-boundary views of it (tinygrad: arena[offset:offset+nbytes]
@@ -3261,19 +3250,10 @@ typedef enum {
   KDISPATCH_BLAS_GEMM   = 3,
   KDISPATCH_JIT         = 4,   // CPU JIT (clang -shared)
   KDISPATCH_INTERPRETER = 5,   // CPU interpreter
-  KDISPATCH_METAL_JIT   = 6,   // [retired in 88f536c3 -- metal_jit_encode deleted]
   KDISPATCH_METAL_OP    = 7,   // Metal: per-op shader fallback (DAG-side encoder over cached_lift)
-  KDISPATCH_CPU_TILE    = 8,   // [retired -- cpu_dispatch_tile deleted; slot reserved]
   KDISPATCH_METAL_TILE  = 9,   // Metal: render_uop UOp-DAG -> MSL -> single-encoder dispatch
   KDISPATCH_METAL_MPS   = 10,  // Metal: MPSMatrixMultiplication GEMM (per-op replay only, not ICB-batchable)
                                // reuses the slot vacated by the retired metal_try_gemm (4e30432b)
-  // 11 was KDISPATCH_METAL_CONV (retired; metal_try_conv2d_flat was a
-  // diagnostic-only branch gated on THVM_METAL_SPECIALIZED, deleted in
-  // 97d58c32 -- conv shapes now route through render_uop's generic
-  // accumulator). 12 was KDISPATCH_METAL_GEMV (retired; rank-1 matvec
-  // routes through METAL_GEMM). Slots reserved to keep
-  // KDISPATCH_METAL_ALIAS = 13 stable for any external integer-keyed
-  // consumer of dispatch kinds.
   KDISPATCH_METAL_ALIAS = 13,  // Metal: metadata-only alias, no command encoding
   KDISPATCH_CUDA_JIT    = 14,  // CUDA: nvrtc-compiled kernel via cuLaunchKernel
   KDISPATCH_CUSTOM      = 15,  // raw injected program (kernel_emit_custom_program)

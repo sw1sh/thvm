@@ -50,7 +50,6 @@ void thvm_metal_buf_park_unpreserved_pinned(void)             {}
 u64  thvm_metal_live_bytes(void)                            { return 0; }
 void thvm_metal_precompile_range(u32 kid_lo, u32 kid_hi)     { (void)kid_lo; (void)kid_hi; }
 u32  thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) { (void)page_base; (void)maplen; (void)minor; return 0; }
-u64  thvm_metal_buf_byte_offset(u32 buf_id)                   { (void)buf_id; return 0; }
 u32  thvm_metal_buf_arena_alloc(u64 nbytes)                  { (void)nbytes; return 0; }
 u32  thvm_metal_buf_arena_view(u32 a, u64 off, u64 nb)       { (void)a; (void)off; (void)nb; return 0; }
 void thvm_metal_buf_arena_release(u32 a)                     { (void)a; }

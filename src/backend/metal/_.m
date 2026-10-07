@@ -1210,11 +1210,6 @@ u32 thvm_metal_buf_refcount(u32 buf_id) {
   return METAL_BUFS[buf_id].refcount;
 }
 
-u64 thvm_metal_buf_byte_offset(u32 buf_id) {
-  if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return 0;
-  return METAL_BUFS[buf_id].byte_offset;
-}
-
 // Logical size of buf_id (Backend.buf_nbytes): the bytes a kernel bound to
 // it addresses.  The freelist recycles by exact size, so nbytes is the
 // request, and an arena view's nbytes is its window.  A borrowed disk-mmap

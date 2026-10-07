@@ -46,7 +46,7 @@ fn u64 thvm_heap_cells(void) {
     if (e != NULL && *e != '\0') {
       char *end = NULL;
       unsigned long long v = strtoull(e, &end, 0);
-      // VAL_BITS=38 bounds an addressable loc; keep a margin below 2^38.
+      // The 38-bit VAL field bounds an addressable loc; keep a margin below 2^38.
       if (end != NULL && *end == '\0' && v >= (1ULL << 20) && v <= (1ULL << 37)) {
         cells = (u64)v;
       }

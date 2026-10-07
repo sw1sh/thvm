@@ -50,7 +50,7 @@
 // locs never collide.  Layout of the u64 key:
 //   bit  63       : BOOK flag (book loc vs dyn loc)
 //   bits 56..59   : context slot id (CONTEXTS_CAP == 16 -> 4 bits)
-//   bits 0..37    : raw loc (VAL_BITS == 38 bounds an addressable loc)
+//   bits 0..37    : raw loc (the 38-bit VAL field bounds an addressable loc)
 
 #define LAM_SHAPE_CAP        (1u << 12)
 #define LAM_SHAPE_BOOK_BIT   (1ULL << 63)
