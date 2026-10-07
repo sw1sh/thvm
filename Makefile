@@ -378,7 +378,6 @@ TESTS := \
   $(BIN)/test_fol_pelletier \
   $(BIN)/test_dyn_lab \
   $(BIN)/test_wsq \
-  $(BIN)/test_wspq \
   $(BIN)/test_wnf_pool \
   $(BIN)/test_nf_pool \
   $(BIN)/test_heap_atomic \

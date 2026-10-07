@@ -16,7 +16,6 @@
 // scheduler state on top.
 #include "util/atomics.h"
 #include "util/wsq.c"
-#include "util/wspq.c"
 
 // === Multi-context storage ===
 //
