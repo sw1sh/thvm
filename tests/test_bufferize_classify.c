@@ -243,6 +243,39 @@ int main(void) {
   CHECK(bufferize_reasons(ep2_r) & BUFFERIZE_REASON_INLINE);
   unsetenv("THVM_FUSE_REDUCE_EPILOGUE");
 
+  TEST_BEGIN("realize-classify/packed-dtype-realize-stops");
+  // No kernel computes an i4 / u4 buffer, so classify stops a realize of
+  // one (a 0-d SUM too) with thvm_fatal, which an armed caller catches.
+  {
+    Shape s4 = {0};
+    s4.ndim    = 1;
+    s4.dims[0] = 6;
+    Term p = term_new(0, TAG_TEN, DT_INT4, tensor_alloc(CURRENT_BACKEND, s4, DT_INT4));
+    Term q = term_new(0, TAG_TEN, DT_INT4, tensor_alloc(CURRENT_BACKEND, s4, DT_INT4));
+    Term u = term_new(0, TAG_TEN, DT_UINT4, tensor_alloc(CURRENT_BACKEND, s4, DT_UINT4));
+    Term packed[3] = { uop_binary(UOP_ADD, p, q), uop_reduce(REDUCE_SUM, 0, p), uop_unary(UOP_NEG, u) };
+    for (u32 i = 0; i < 3; i++) {
+      jmp_buf jb;
+      int stopped = 0;
+      thvm_heap_exhaust_jmp = &jb;
+      thvm_heap_exhausted   = 0;
+      if (setjmp(jb) != 0) {
+        stopped = 1;
+      } else {
+        bufferize_classify(packed[i]);
+      }
+      thvm_heap_exhaust_jmp = NULL;
+      CHECK_EQ(stopped, 1);
+      CHECK_EQ(thvm_heap_exhausted, 1);
+    }
+    Term fa   = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(3));
+    Term fb   = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(3));
+    Term fadd = uop_binary(UOP_ADD, fa, fb);
+    bufferize_classify(fadd);
+    CHECK_EQ(bufferize_is_realized(fadd), 1);
+    CHECK(bufferize_reasons(fadd) & BUFFERIZE_REASON_ROOT);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
