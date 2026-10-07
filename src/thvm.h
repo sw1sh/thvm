@@ -3104,10 +3104,8 @@ typedef struct {
   UOpGraphRewriteFn apply;
 } UOpGraphRewriteRule;
 
-// Declarative UPat layer on top of UOpGraphRewriteRule.  See
-// docs/plans/autotune_beam_profile.md Level 45.  Each UPatRule
-// compiles into a UOpGraphRewriteFn that does the pattern match
-// then calls the user-provided rewrite fn.
+// Declarative UOp pattern, matched structurally by upat_match
+// (uop/upat.c).
 //
 // op     : expected op, or 0 (UOP_NONE) for "any op"
 // nsrc   : expected src count, or 0xFF for "any"
@@ -3131,13 +3129,6 @@ typedef struct UPat {
 } UPat;
 
 #define UPAT_NUM_BINDINGS 8
-
-typedef Term (*UPatRewriteFn)(Term const *bindings, void *ctx);
-
-typedef struct {
-  UPat const   *pat;
-  UPatRewriteFn rewrite;   // renamed from `fn` to avoid #define fn collision
-} UPatRule;
 
 // upat_match: definition in src/uop/upat.c.  Single-TU unity
 // build (no header forward decl needed).

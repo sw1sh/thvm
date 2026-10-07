@@ -301,9 +301,8 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     // === Symbolic INDEX layer ===
     // Production lifter output nests UOP_RANGE leaves inside
     // UOP_INDEX_E.addr (a tree of UOP_IADD/IMUL/...).  Without
-    // these rebuild cases, uop_pattern_rewrite couldn't descend
-    // into address arithmetic to reach the UOP_RANGE leaves an
-    // axis_type-stamping rule needs to rewrite.
+    // these rebuild cases a rewrite could not descend into address
+    // arithmetic to reach those leaves.
 
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
