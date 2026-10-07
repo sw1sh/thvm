@@ -460,9 +460,40 @@ FindProof --list-lanes > listed.txt; weights_to_c.py lanes head.safetensors list
 HEAD=head.safetensors MODEL=id FEATPARITY=1 tests/atp_guide_gates.sh bin/FindProof spec.txt
 ```
 
-`weights_to_c.py example ex.safetensors` writes the tiny head the shipped
-`src/atp/guide_models.c` is built from; rebuilding from it reproduces the
-file byte for byte.
+`weights_to_c.py example ex.safetensors` and `weights_to_c.py harvest
+hv.safetensors` write the two shipped heads (`example`, the default, and
+`harvest`, the loop-0 harvest head: every phi(p) column, zero correction,
+top-64); `build example=ex.safetensors harvest=hv.safetensors`
+reproduces `src/atp/guide_models.c` byte for byte.  A head that reads
+phi(p) gets FindProof's `--problem-features` row in each lane process
+(`tests/atp_guide_phi.sh` checks the dumped columns against it); a
+problem without the row runs without the layer.
+
+## Guided harvest, label join and the M3 trainer
+
+The loop of plan section 3.2 (docs/atp/guide.md, "Training"), pod-only:
+
+```
+# 1. the jobs: every TRAIN / TRAIN-X pair the families' lanes searched at 60 s
+guide_jobs.py matrix.tsv problems.tsv dev_t.tsv xmatrix.tsv xproblems.tsv \
+  tgt-sel,encompass,twee-deep,unfold-tgt-awr jobs/ 1000 2
+# 2. the harvest: zero twins of the harvest head with the sampled dump
+bash guide_harvest.sh jobs/slot_1.tsv out/ bin/FindProof root/ gated.txt np0_extract.py
+# 3. labels: proof keys of every label-harvest and harvest run, then groups
+label_join.py keys keys.tsv labels/index.tsv labels/npz labels_x/index.tsv labels_x/npz \
+  out/index.tsv out/npz
+label_join.py join out/ keys.tsv groups/        # groups_<lane>.npz, stats.tsv, summary.txt
+# 4. the head (py/thvm): 5 OOF folds + the full model, early stopping on VAL
+DEV=cpu guide_net.py train groups/ train/ --list-lanes lanes.txt --k 64 --hidden 64
+guide_net.py readout train/                    # readouts, not gates
+# 5. compile it in
+weights_to_c.py build example=ex.safetensors harvest=hv.safetensors loop1=train/head.safetensors \
+  -o src/atp/guide_models.c
+label_join.py selftest; guide_net.py selftest  # synthetic files
+```
+
+The dump sampler (`THVM_ATP_GUIDE_DUMP_EVERY`, `_MAX`, `_ROWS`) and the
+dump's footer are described in docs/atp/guide.md ("The dump").
 
 ## History export, version 2
 
