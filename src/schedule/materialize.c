@@ -1622,41 +1622,6 @@ static void mem_plan_reset(void) { MEM_PLAN_LEN = 0; }
 // read.  Drain at end-of-pass so the planner's free-list scope stays
 // strictly per-pass; within-pass reuse (alloc-then-pop within the same
 // emit loop) still works.
-// THVM_MEMPLAN_DEBUG: per-pass outcome counters for the dead-buffer push
-// (printed at mem_plan_drain_freelist) PLUS record-site admission counters --
-// a boundary only enters MEM_PLAN when last_use>0 AND consumer_count==1, so
-// when a real graph's intermediates never recycle, the rec_* counters say
-// which admission gate rejected them.  Dumpable mid-pass from the ceiling
-// death path (mem_plan_debug_dump) since an OOM'd emit never reaches drain.
-static u64 MEM_PLAN_DBG_SKIP_SINK = 0, MEM_PLAN_DBG_SKIP_NOTDEAD = 0,
-           MEM_PLAN_DBG_SKIP_REFC = 0, MEM_PLAN_DBG_PARKED = 0,
-           MEM_PLAN_DBG_PUSHED = 0;
-static u64 MEM_PLAN_DBG_REC_OK = 0, MEM_PLAN_DBG_REC_SINK = 0,
-           MEM_PLAN_DBG_REC_MULTI = 0;
-static int mem_plan_debug_enabled(void) {
-  static int known = 0, on = 0;
-  if (!known) { on = getenv("THVM_MEMPLAN_DEBUG") != NULL; known = 1; }
-  return on;
-}
-fn void mem_plan_debug_dump(char const *tag) {
-  if (!mem_plan_debug_enabled()) return;
-  fprintf(stderr,
-    "[mem_plan %s] entries=%u rec_ok=%llu rec_sink=%llu rec_multi=%llu | "
-    "sink=%llu notdead=%llu refc=%llu parked=%llu freelist=%llu "
-    "capturing=%d backend=%d\n",
-    tag, MEM_PLAN_LEN,
-    (unsigned long long)MEM_PLAN_DBG_REC_OK,
-    (unsigned long long)MEM_PLAN_DBG_REC_SINK,
-    (unsigned long long)MEM_PLAN_DBG_REC_MULTI,
-    (unsigned long long)MEM_PLAN_DBG_SKIP_SINK,
-    (unsigned long long)MEM_PLAN_DBG_SKIP_NOTDEAD,
-    (unsigned long long)MEM_PLAN_DBG_SKIP_REFC,
-    (unsigned long long)MEM_PLAN_DBG_PARKED,
-    (unsigned long long)MEM_PLAN_DBG_PUSHED,
-    jit_is_capturing(),
-    CURRENT_BACKEND != NULL ? (int)CURRENT_BACKEND->id : -1);
-}
-
 static void mem_plan_drain_freelist(void) {
   for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
     MemPlanEntry *e = &MEM_PLAN[i];
@@ -1675,13 +1640,6 @@ static void mem_plan_drain_freelist(void) {
   // replay), so the next pass's allocs can't adopt a buf whose TenDesc the
   // fixpoint chain rule may still reference.
   jit_caprecycle_drain();
-  if (mem_plan_debug_enabled()
-      && (MEM_PLAN_LEN > 0 || MEM_PLAN_DBG_REC_SINK + MEM_PLAN_DBG_REC_MULTI > 0)) {
-    mem_plan_debug_dump("drain");
-    MEM_PLAN_DBG_SKIP_SINK = MEM_PLAN_DBG_SKIP_NOTDEAD = 0;
-    MEM_PLAN_DBG_SKIP_REFC = MEM_PLAN_DBG_PARKED = MEM_PLAN_DBG_PUSHED = 0;
-    MEM_PLAN_DBG_REC_OK = MEM_PLAN_DBG_REC_SINK = MEM_PLAN_DBG_REC_MULTI = 0;
-  }
 }
 
 static void mem_plan_record(u32 buf_id, u32 last_use_depth, Backend *b) {
@@ -1749,7 +1707,6 @@ static void mem_plan_push_shared_dead(u32 buf_id, Backend *b) {
 }
 
 static void mem_plan_push_dead(u32 current_depth) {
-  int dbg = mem_plan_debug_enabled();
   for (u32 i = 0; i < MEM_PLAN_LEN; i++) {
     MemPlanEntry *e = &MEM_PLAN[i];
     if (e->pushed)                              continue;
@@ -1765,8 +1722,8 @@ static void mem_plan_push_dead(u32 current_depth) {
     // opt-step realize call).  CPU was unaffected because the TLSF arena
     // planner skips sinks via its arena-plannability gate, but the
     // legacy freelist push path here applied to ALL backends.
-    if (e->last_use_depth == 0)                 { if (dbg) MEM_PLAN_DBG_SKIP_SINK++; continue; }
-    if (e->last_use_depth >= current_depth)     { if (dbg) MEM_PLAN_DBG_SKIP_NOTDEAD++; continue; }
+    if (e->last_use_depth == 0)                 continue;
+    if (e->last_use_depth >= current_depth)     continue;
     if (e->buf_id == 0)                         continue;
     Backend *b = e->backend;
     if (b == NULL || b->buf_freelist_push == NULL || !mem_plan_backend_enabled(b)) {
@@ -1778,7 +1735,6 @@ static void mem_plan_push_dead(u32 current_depth) {
     // bytes from the alias too, so skip -- the post-realize preserve
     // walk + rollback releases these via the refcount-driven path.
     if (b->buf_refcount != NULL && b->buf_refcount(e->buf_id) > 1) {
-      if (dbg) MEM_PLAN_DBG_SKIP_REFC++;
       e->pushed = 1;
       continue;
     }
@@ -1789,7 +1745,6 @@ static void mem_plan_push_dead(u32 current_depth) {
     // same-size captured output alloc adopts it, recording the reuse in the
     // stream (the JIT memory planner, tinygrad engine/jit.py:72).
     if (jit_caprecycle_push(b, e->buf_id)) {
-      if (dbg) MEM_PLAN_DBG_PARKED++;
       e->pushed = 1;
       continue;
     }
@@ -1797,7 +1752,6 @@ static void mem_plan_push_dead(u32 current_depth) {
     // storage; cpu_buf_freelist_push self-guards (owns_data check), so
     // an unconditional push here is safe for both backends.
     b->buf_freelist_push(e->buf_id);
-    if (dbg) MEM_PLAN_DBG_PUSHED++;
     e->pushed = 1;
   }
 }
@@ -1842,10 +1796,6 @@ static u8       *ARENA_DATA          = NULL;   // CPU arena base
 #ifdef THVM_HAS_CUDA
 static CUdeviceptr ARENA_DPTR        = 0;      // CUDA arena base
 #endif
-
-// Telemetry: counts arena vs legacy allocs per realize for THVM_ARENA_DUMP.
-static u32 ARENA_ALLOCS_ARENA  = 0;
-static u32 ARENA_ALLOCS_LEGACY = 0;
 
 // The Metal arena (offset-slices of one shared MTLBuffer) is OPT-IN, default
 // OFF, unlike CPU/CUDA where the arena is the memory win and default ON.  On
@@ -1972,8 +1922,6 @@ static u64 arena_boundary_nbytes(u32 ord_idx) {
 // doesn't allocate at all).
 static void arena_compute(void) {
   arena_reset();
-  ARENA_ALLOCS_ARENA  = 0;
-  ARENA_ALLOCS_LEGACY = 0;
   if (BOUNDARY_ORDER_LEN == 0)   return;
   if (CURRENT_BACKEND == NULL)   return;
   int is_cpu   = (CURRENT_BACKEND == &CPU_BACKEND);
@@ -2026,39 +1974,6 @@ static void arena_compute(void) {
     planned[i]  = 1;
     n_planned++;
   }
-  if (getenv("THVM_ARENA_DUMP_BUFS")) {
-    for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
-      u64 nb = arena_boundary_nbytes(i);
-      if (nb < 1048576) continue;
-      u64 loc = BOUNDARY_ORDER[i];
-      u32 binfo = bufferize_info_find(loc);
-      u32 op = (binfo != 0xFFFFFFFFu) ? BUFFERIZE_NODES[binfo].op : 0xFFu;
-      u64 kind = 0, naxes = 0, a0 = 0;
-      if (op == UOP_REDUCE) {
-        kind  = term_val(heap_read(loc + 1));
-        naxes = term_val(heap_read(loc + 2));
-        if (naxes >= 1) a0 = term_val(heap_read(loc + 3));
-      }
-      u64 cons[4];
-      u32 nc = bufferize_consumers_for_loc(loc, cons, 4);
-      u32 cop0 = 0xFFu, cop1 = 0xFFu;
-      if (nc >= 1) {
-        u32 ci = bufferize_info_find(cons[0]);
-        if (ci != 0xFFFFFFFFu) cop0 = BUFFERIZE_NODES[ci].op;
-      }
-      if (nc >= 2) {
-        u32 ci = bufferize_info_find(cons[1]);
-        if (ci != 0xFFFFFFFFu) cop1 = BUFFERIZE_NODES[ci].op;
-      }
-      fprintf(stderr,
-              "  buf[%u] op=%u bytes=%.2fMB plannable=%d kind=%llu naxes=%llu a0=%llu n_cons=%u cop0=%u cop1=%u life=[%u,%u]\n",
-              i, op, (double)nb / 1048576.0,
-              arena_boundary_is_plannable(i),
-              (unsigned long long)kind, (unsigned long long)naxes,
-              (unsigned long long)a0, nc, cop0, cop1,
-              first_pos[i], last_pos[i]);
-    }
-  }
   if (n_planned == 0) return;
 
   static ArenaEvent events[ARENA_SLOTS_CAP * 2];
@@ -2103,14 +2018,6 @@ static void arena_compute(void) {
   }
   tlsf_dispose(&tlsf);
   ARENA_SIZE = tlsf_round_up(peak, TLSF_BLOCK_SIZE);
-  if (getenv("THVM_ARENA_DUMP")) {
-    fprintf(stderr,
-            "arena: %u/%u plannable, sum=%.2fMB arena=%.2fMB peak_off=%.2fMB\n",
-            n_planned, BOUNDARY_ORDER_LEN,
-            (double)total / 1048576.0,
-            (double)ARENA_SIZE / 1048576.0,
-            (double)peak / 1048576.0);
-  }
 }
 
 // Lazily allocate the arena backend buf on the first arena-slot read.
@@ -2243,7 +2150,6 @@ static u32 arena_tensor_alloc(u32 ord_idx, Shape shape, u32 dtype) {
       return 0;
     }
   }
-  ARENA_ALLOCS_ARENA++;
   return tid;
 }
 
@@ -4637,38 +4543,11 @@ static void topo_sort_boundaries(Term root) {
                ? uop_bufferize_value(bt) : 0;
       boundary_buf_hash_insert(bt, val, idx);
     }
-    {
-      char const *e = getenv("THVM_DUMP_BOUNDARY_ORDER");
-      if (e != NULL && e[0] == '1') {
-        u32 binfo = bufferize_info_find(items[i].loc);
-        u8 op = (binfo != 0xFFFFFFFFu) ? BUFFERIZE_NODES[binfo].op : 0xFF;
-        u32 reasons = (binfo != 0xFFFFFFFFu) ? BUFFERIZE_NODES[binfo].reasons : 0;
-        fprintf(stderr,
-                "boundary-order: idx=%u loc=%llu op=%u reasons=0x%x buf=%llu\n",
-                idx, (unsigned long long)items[i].loc,
-                (unsigned)op, reasons,
-                (unsigned long long)items[i].buf);
-      }
-    }
   }
   // Fire-order consumer lifetimes for the arena planner.  Runs here
   // (not in topo_sort_boundaries' depth phase) because it needs the
   // finalized BOUNDARY_ORDER + loc->pos hash.
   boundary_compute_last_use_pos();
-  {
-    char const *e = getenv("THVM_DUMP_DIRECT_COUNT");
-    if (e != NULL && e[0] == '1') {
-      u32 realized_n = 0;
-      u32 unified_n  = 0;
-      for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-        if (BUFFERIZE_NODES[i].realized) realized_n++;
-        if (rangeify_unified_bufferize_at(i) != 0) unified_n++;
-      }
-      fprintf(stderr,
-              "direct-count: realized=%u unified_buf=%u ordered=%u\n",
-              realized_n, unified_n, BOUNDARY_ORDER_LEN);
-    }
-  }
 }
 
 // Unified-rangeify boundary walker.  Runs topo_sort_boundaries (which
@@ -5391,46 +5270,6 @@ static u32 input_slot_dedup_var(KernelEntry *ke, Term var_term,
   return slot;
 }
 
-static int materialize_dump_big_input_source_enabled(void) {
-  char const *e = getenv("DUMP_BIG_INPUT_SOURCE");
-  return e != NULL && e[0] == '1';
-}
-
-static void materialize_dump_source_child(Term child, u32 depth) {
-  child = term_resolve(child);
-  for (u32 i = 0; i < depth; i++) fprintf(stderr, "  ");
-  if (term_tag(child) != TAG_UOP) {
-    fprintf(stderr, "leaf tag=%u ext=%u val=%llu\n",
-            term_tag(child), term_ext(child),
-            (unsigned long long)term_val(child));
-    return;
-  }
-  u64 loc = term_val(child);
-  u32 idx = bufferize_info_find(loc);
-  fprintf(stderr, "uop op=%u loc=%llu realized=%u consumers=%u reasons=0x%x\n",
-          term_ext(child), (unsigned long long)loc,
-          idx == 0xFFFFFFFFu ? 0 : BUFFERIZE_NODES[idx].realized,
-          idx == 0xFFFFFFFFu ? 0 : BUFFERIZE_NODES[idx].consumer_count,
-          idx == 0xFFFFFFFFu ? 0 : BUFFERIZE_NODES[idx].reasons);
-  if (depth >= 2 || term_ext(child) == UOP_KERNEL) return;
-  u8 ar = uop_arity(term_ext(child));
-  for (u8 i = 0; i < ar; i++) {
-    materialize_dump_source_child(heap_read(loc + i), depth + 1);
-  }
-}
-
-static void materialize_dump_big_input_source(KernelEntry *ke,
-                                              u64 boundary_loc) {
-  if (!materialize_dump_big_input_source_enabled()) return;
-  if (ke == NULL || ke->n_inputs <= 30) return;
-  fprintf(stderr,
-          "big_input_source kid=%u n_inputs=%u out=%u source_op=%u loc=%llu\n",
-          (u32)(ke - KERNELS), ke->n_inputs,
-          ke->output_numel, term_ext(ke->source_uop),
-          (unsigned long long)boundary_loc);
-  materialize_dump_source_child(ke->source_uop, 0);
-}
-
 static u32 visit_indexed_leaf(Term t, KernelEntry *ke, u64 root_loc,
                               VisitMemo *memo);
 static u32 visit_operand_at_ranges(Term t, KernelEntry *ke, u64 root_loc,
@@ -5904,34 +5743,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
   i32      op_dev     = term_device_in(root_term);
   Backend *op_backend = (op_dev < 0) ? CURRENT_BACKEND : ctx_ensure_backend(op_dev);
   if (op_backend == NULL) op_backend = CURRENT_BACKEND;
-  // THVM_DBG_KIND: the TRUE upstream device decision.  A kernel's OUTPUT buffer
-  // (and thus its dispatch backend) is allocated on `op_backend` = the device
-  // term_device_in(root_term) finds in the kernel's graph (the device is in the
-  // graph -- tinygrad).  If a {512,2560} matmul gets op_backend=CPU on a metal
-  // run, it dispatches via cpu_dispatch_kernel -> the uop_walk interpreter
-  // (~122s) and NEVER reaches the metal renderer (cg_emit_via_uop is never
-  // called).  This fires for matmul-sized boundaries so the 2 slow refiner
-  // matmuls' device routing is pinned: op_dev<0 means term_device_in found NO
-  // device in the graph (defaulting to CURRENT_BACKEND); op_dev=0 (CPU) means a
-  // CPU-resident leaf leaked into the matmul's operand subtree.
-  if (getenv("THVM_DBG_KIND")) {
-    char const *bn = (op_backend == &CPU_BACKEND) ? "cpu"
-#ifdef THVM_HAS_METAL
-                   : (op_backend == &METAL_BACKEND) ? "metal"
-#endif
-                   : "?";
-    u32 sv_op = 0xFFFF;
-    if (term_tag(root_term) == TAG_UOP && term_ext(root_term) == UOP_STORE) {
-      Term v = heap_read(term_val(root_term) + 2);
-      sv_op = (term_tag(v) == TAG_UOP) ? term_ext(v) : 0xFFFE;
-    }
-    u64 onum = (u64)shape_numel(out_shape);
-    if (onum >= 65536u)   /* skip tiny kernels; a {512,2560} matmul = 1310720 */
-      fprintf(stderr, "[kind] boundary loc=%llu op=%u store_value_op=%u "
-              "op_dev=%d backend=%s out_numel=%llu out_dtype=%u\n",
-              (unsigned long long)boundary_loc, (unsigned)op, sv_op,
-              op_dev, bn, (unsigned long long)onum, out_dtype);
-  }
   // Resident weight-movement cache hit (cross-realize): a TRealize@Transpose
   // of a resident weight was already realized+pinned (by a warmup pass or an
   // earlier replay), so reuse that stable pinned buffer as a pre-capture LEAF
@@ -5976,46 +5787,8 @@ static Term emit_kernel_for_boundary(u32 bi) {
   }
   if (out_tid == 0) {
     out_tid = tensor_alloc(op_backend, out_shape, out_dtype);
-    if (out_tid != 0 && op_backend == &CPU_BACKEND) ARENA_ALLOCS_LEGACY++;
-    if (out_tid != 0 && op_backend == &METAL_BACKEND) ARENA_ALLOCS_LEGACY++;
-#ifdef THVM_HAS_CUDA
-    if (out_tid != 0 && op_backend == &CUDA_BACKEND) ARENA_ALLOCS_LEGACY++;
-#endif
   }
 
-  // === THVM_REALIZE_SIZE_LOG standing node-size probe (default OFF) ===
-  // For every realized boundary that gets a MATERIALIZED output BUFFER whose
-  // byte size >= the env threshold, emit one stderr line naming the culprit
-  // (size + op + shape + dtype + device).  Localizes which node materializes a
-  // huge buffer in a real forward (e.g. a 14 GB attention broadcast or a
-  // dequant-to-f32 weight).  Cheap: only the getenv + a size compare run when
-  // off; the line is emitted only above threshold.  This is the permanent
-  // version of the temporary [bigrealize] probe.
-  {
-    static long REALIZE_SIZE_LOG_THR = -1;   // -1 = unread, 0 = off
-    if (REALIZE_SIZE_LOG_THR == -1) {
-      char const *e = getenv("THVM_REALIZE_SIZE_LOG");
-      REALIZE_SIZE_LOG_THR = (e != NULL) ? atol(e) : 0;
-      if (REALIZE_SIZE_LOG_THR < 0) REALIZE_SIZE_LOG_THR = 0;
-    }
-    if (REALIZE_SIZE_LOG_THR > 0) {
-      u64 nbytes = dtype_storage_bytes(out_dtype, (u64)shape_numel(out_shape));
-      if (nbytes >= (u64)REALIZE_SIZE_LOG_THR) {
-        char const *dev =
-            (op_backend == &CPU_BACKEND)   ? "cpu"
-          : (op_backend == &METAL_BACKEND) ? "metal"
-#ifdef THVM_HAS_CUDA
-          : (op_backend == &CUDA_BACKEND)  ? "cuda"
-#endif
-          : "?";
-        fprintf(stderr, "thvm_realize_size: %llu B  op=%s  shape=(",
-                (unsigned long long)nbytes, bypass_dbg_op_name(op));
-        for (u32 d = 0; d < out_shape.ndim; d++)
-          fprintf(stderr, "%s%u", d ? "," : "", out_shape.dims[d]);
-        fprintf(stderr, ")  dtype=%s  device=%s\n", dtype_name(out_dtype), dev);
-      }
-    }
-  }
   u32 kid     = kernel_alloc();
   KernelEntry *ke = &KERNELS[kid];
   ke->output_tid    = out_tid;
@@ -6032,8 +5805,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
 
   VisitMemo memo = {0};
   u32 result;
-  SCHED_PROF_BLOCK(SCHED_PROF_VISIT,
-                   result = visit(root_term, ke, boundary_loc, &memo));
+  result = visit(root_term, ke, boundary_loc, &memo);
   u8 indexed = memo.indexed;
   visit_memo_free(&memo);
   if (result == VISIT_BAIL) {
@@ -6098,8 +5870,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
       }
     }
   }
-
-  materialize_dump_big_input_source(ke, boundary_loc);
 
   ke->schedule = &ke->_local_schedule;
 
@@ -6299,7 +6069,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
   if (BOUNDARY_LAST_USE[idx] > 0
       && BUFFERIZE_NODES[idx].consumer_count == 1
       && !xpass_is_held(boundary_loc)) {
-    if (mem_plan_debug_enabled()) MEM_PLAN_DBG_REC_OK++;
     if (xpass_is_shared(boundary_loc)) {
       mem_plan_record(TENS[out_tid].buf_id, MEM_PLAN_LAST_USE_NEVER,
                       CURRENT_BACKEND);
@@ -6308,17 +6077,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
       mem_plan_record(TENS[out_tid].buf_id, BOUNDARY_LAST_USE[idx],
                       CURRENT_BACKEND);
     }
-  } else if (mem_plan_debug_enabled()) {
-    if (BOUNDARY_LAST_USE[idx] == 0) MEM_PLAN_DBG_REC_SINK++;
-    else                             MEM_PLAN_DBG_REC_MULTI++;
-  }
-
-  if (getenv("THVM_DUMP_KERNEL_SHAPE")) {
-    fprintf(stderr, "KSHAPE kid=%u op=%s shape=[", kid, bypass_dbg_op_name(op));
-    for (u32 i = 0; i < out_shape.ndim; i++) {
-      fprintf(stderr, "%s%u", i ? "," : "", out_shape.dims[i]);
-    }
-    fprintf(stderr, "] depth=%u\n", this_depth);
   }
 
   // Persist loc -> tid so a later realize pass that walks the same
@@ -6528,17 +6286,7 @@ static Term materialize_strip_detach(Term term) {
   return r;
 }
 
-fn Term thvm_materialize_impl(Term term);
-
 fn Term thvm_materialize(Term term) {
-  if (!sched_prof_enabled()) return thvm_materialize_impl(term);
-  double _t0 = sched_prof_now();
-  Term r = thvm_materialize_impl(term);
-  sched_prof_add(SCHED_PROF_MATERIALIZE, _t0);
-  return r;
-}
-
-fn Term thvm_materialize_impl(Term term) {
   term = materialize_strip_detach(term);
   HOT_MATERIALIZE_CALLS++;
   // REF / ALO transparency: jump (don't unfold) into the body cell.
@@ -6730,17 +6478,17 @@ fn Term thvm_materialize_impl(Term term) {
     }
   }
 
-  SCHED_PROF_BLOCK(SCHED_PROF_BUFFERIZE, bufferize_classify(term));
+  bufferize_classify(term);
   // The unified rangeify pass projects its UOP_BUFFERIZE Terms back
   // onto BUFFERIZE_NODES.realized; we capture them into
   // BOUNDARY_BUFFERIZE_TERM[] here.  Mirror: tinygrad walks the
   // lowered tsink for BUFFERIZE+STORE pairs (tinygrad/engine/realize.py).
-  SCHED_PROF_BLOCK(SCHED_PROF_TOPO, topo_sort_buffers_unified(term));
+  topo_sort_buffers_unified(term);
   mem_plan_reset();
   // Arena planner: pre-compute per-boundary offsets into a shared
   // arena buf.  Mirror: tinygrad/schedule/memory.py memory_plan_rewrite
   // (called inside lower_schedule_item before kernel dispatch).
-  SCHED_PROF_BLOCK(SCHED_PROF_ARENA, arena_compute());
+  arena_compute();
   // Cross-pass shared-buffer recycle: in the LAST consuming sub-pass of a
   // TAG_CTR bundle, schedule each shared INPUT buffer (cached by the
   // producing sub-pass, recorded NEVER there) to be freed after its last
@@ -6762,7 +6510,6 @@ fn Term thvm_materialize_impl(Term term) {
   u32 kernels_at_start = KERNELS_NEXT;
   u32 tens_at_start    = TENS_NEXT;
   Term sink_kernel = 0;
-  double _emit_t0 = sched_prof_enabled() ? sched_prof_now() : 0.0;
   for (u32 i = 0; i < BOUNDARY_ORDER_LEN; i++) {
     Term k = emit_kernel_for_boundary(i);
     if (k == 0) {
@@ -6808,12 +6555,10 @@ fn Term thvm_materialize_impl(Term term) {
         }
       }
       arena_reset();
-      if (sched_prof_enabled()) sched_prof_add(SCHED_PROF_EMIT, _emit_t0);
       return term;
     }
     if (BOUNDARY_ORDER[i] == term_val(term)) sink_kernel = k;
   }
-  if (sched_prof_enabled()) sched_prof_add(SCHED_PROF_EMIT, _emit_t0);
   // End-of-pass: pop any planner-pushed bufs still on CPU_FREELIST so
   // a subsequent thvm_realize -> materialize iteration doesn't pull
   // from them (the chain rule's freshly-emitted UOPs may still
@@ -6844,11 +6589,6 @@ fn Term thvm_materialize_impl(Term term) {
       // the parent per view, mirroring the CPU/CUDA arena lifetime above).
       thvm_metal_buf_arena_release(ARENA_BUF_ID);
     }
-  }
-  if (getenv("THVM_ARENA_DUMP")) {
-    fprintf(stderr,
-            "arena: end-of-pass arena_allocs=%u legacy_allocs=%u\n",
-            ARENA_ALLOCS_ARENA, ARENA_ALLOCS_LEGACY);
   }
   ARENA_DATA   = NULL;
   ARENA_BUF_ID = 0;

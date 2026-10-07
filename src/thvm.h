@@ -64,50 +64,6 @@ typedef u64 Term;
 
 #define fn static inline
 
-// === Schedule profiler (THVM_SCHED_PROF=1) ==========================
-// Coarse per-phase wall-time accumulators for the cold materialize/
-// schedule/render pipeline.  Off by default: every SCHED_PROF_* call
-// expands to a getenv-cached early bailout, so a default build pays one
-// predicted branch per phase boundary and nothing else.  Set
-// THVM_SCHED_PROF=1 to arm the atexit dump (see sched_prof.c).
-enum {
-  SCHED_PROF_BUFFERIZE = 0,   // bufferize_classify
-  SCHED_PROF_RANGEIFY,        // run_rangeify_unified (inside bufferize_classify)
-  SCHED_PROF_TOPO,            // topo_sort_buffers_unified
-  SCHED_PROF_ARENA,           // arena_compute
-  SCHED_PROF_EMIT,            // emit_kernel_for_boundary loop (visit+render+alloc)
-  SCHED_PROF_RENDER,          // cg_render_uop_kernel_c_root (subset of EMIT)
-  SCHED_PROF_VISIT,           // visit() walk (subset of EMIT)
-  SCHED_PROF_HEAP_PRESERVE,   // mark_heap_rooted_preserve
-  SCHED_PROF_GC_PRESERVE,     // mark_gc_preserve
-  SCHED_PROF_KGC,             // kernel_gc_sweep
-  SCHED_PROF_MATERIALIZE,     // whole thvm_materialize (top-level)
-  SCHED_PROF_REALIZE_TOTAL,   // whole thvm_realize / _many wall
-  SCHED_PROF_WNF,             // wnf() drive (fires kernels: compile+dispatch)
-  SCHED_PROF_PRECOMPILE,      // cpu_jit_precompile_range / metal precompile
-  SCHED_PROF_ROLLBACK,        // pool rollback + fwd reclaim tail
-  SCHED_PROF_N
-};
-extern double  SCHED_PROF_SEC[SCHED_PROF_N];
-extern u64     SCHED_PROF_CNT[SCHED_PROF_N];
-extern int     SCHED_PROF_ENABLED;   // -1 = uncached, 0 = off, 1 = on
-
-int    sched_prof_enabled(void);
-double sched_prof_now(void);
-void   sched_prof_add(int slot, double t0);
-
-// Time a statement/block into a profiler slot.  Compiles to the bare
-// body when profiling is off (the env check short-circuits cheaply).
-#define SCHED_PROF_BLOCK(slot, body)                  \
-  do {                                                \
-    if (!sched_prof_enabled()) { body; }              \
-    else {                                            \
-      double _spt0 = sched_prof_now();                \
-      body;                                           \
-      sched_prof_add((slot), _spt0);                  \
-    }                                                 \
-  } while (0)
-
 // === Term bit layout ===
 //
 //   bit  63        62..56     55..38         37..0

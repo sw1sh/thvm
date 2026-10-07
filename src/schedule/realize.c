@@ -268,9 +268,7 @@ fn void thvm_realize_ceiling_cleanup(void) {
   if (!REALIZE_ABORT_ACTIVE) return;
   REALIZE_ABORT_ACTIVE = 0;
   // Mid-pass death diagnostics: the OOM'd emit never reaches the drain, so
-  // dump the mem-plan admission/push counters (which gate the capture-recycle
-  // pool) and the pool's own adoption stats here (both env-gated no-ops).
-  mem_plan_debug_dump("ceiling");
+  // dump the capture-recycle pool's adoption stats here (an env-gated no-op).
   jit_caprecycle_stats_dump();
   // The longjmp interrupted dispatch mid-flight; drain/flush so a freed buffer
   // is not still referenced by an in-flight GPU command, then hard-roll the
@@ -337,7 +335,6 @@ fn Term thvm_realize(Term expr) {
     CURRENT_CTX->default_device = (u32)want_device;
   }
 
-  double _rt0 = sched_prof_enabled() ? sched_prof_now() : 0.0;
   grad_memo_begin_realize();
   u32 cpu_wm   = cpu_buf_pool_begin();
   u32 metal_wm = thvm_metal_buf_pool_begin();
@@ -414,14 +411,13 @@ fn Term thvm_realize(Term expr) {
     // dispatch below then hits the populated dylib cache (no recompile).
     // Idempotent + cache-keyed, so calling it with the growing kernel range
     // every iteration is safe.
-    SCHED_PROF_BLOCK(SCHED_PROF_PRECOMPILE,
-                     cpu_jit_precompile_range(kn_at_call_start, KERNELS_NEXT));
+    cpu_jit_precompile_range(kn_at_call_start, KERNELS_NEXT);
     // Same cold-start lever on Metal: parallel-compile every tile kernel's
     // MSL->AIR + PSO before the serial wnf dispatch fires them one-at-a-time
     // (each lazy compile is ~1.5s of newLibraryWithSource: on cold start).
     // No-op stub off Metal; THVM_METAL_JIT_PARALLEL=0 disables.
     thvm_metal_precompile_range(kn_at_call_start, KERNELS_NEXT);
-    SCHED_PROF_BLOCK(SCHED_PROF_WNF, res = wnf(res));
+    res = wnf(res);
     // Count cross-subgraph consumers over the whole live graph before
     // materialize so the arena planner won't recycle a buf read by a
     // sibling subgraph.  Re-populated each iteration (the graph can grow
@@ -433,10 +429,9 @@ fn Term thvm_realize(Term expr) {
     kernel_compute_consumer_counts();
     res = mat;
   }
-  SCHED_PROF_BLOCK(SCHED_PROF_PRECOMPILE,
-                   cpu_jit_precompile_range(kn_at_call_start, KERNELS_NEXT));
+  cpu_jit_precompile_range(kn_at_call_start, KERNELS_NEXT);
   thvm_metal_precompile_range(kn_at_call_start, KERNELS_NEXT);
-  SCHED_PROF_BLOCK(SCHED_PROF_WNF, res = wnf(res));
+  res = wnf(res);
   if (getenv("THVM_KCNT")) {
     fprintf(stderr, "DBG realize emit: %u kernels in %d iters\n",
             KERNELS_NEXT - kn_at_call_start, iters_used);
@@ -449,7 +444,7 @@ fn Term thvm_realize(Term expr) {
   // (result + WNF_LAST_STACK + DEFS) AND overlays mark_heap_rooted_preserve
   // to cover pending UOP cells the root-set walk misses (e.g. forward
   // intermediates a future TGrad realize will need).
-  SCHED_PROF_BLOCK(SCHED_PROF_GC_PRESERVE, mark_gc_preserve(res));
+  mark_gc_preserve(res);
   // Capture-time mark-park: the fwd_reclaim analogue for the capture path
   // (which skips fwd_reclaim -- recorded buffers are jit_pinned and exempt
   // from every free).  A captured intermediate is safe to PARK (recycle its
@@ -551,7 +546,7 @@ fn Term thvm_realize(Term expr) {
   // Bounds KERNELS_NEXT growth across long training loops -- without
   // this, each Adam step adds ~5K kernels on LeNet, hitting
   // KERNELS_CAP after ~50 steps.
-  SCHED_PROF_BLOCK(SCHED_PROF_KGC, kernel_gc_sweep(res));
+  kernel_gc_sweep(res);
 
   // Cross-realize loc -> tid cache: scoped to ONE realize call so a
   // forward intermediate emitted as a kernel mid-pass stays reachable
@@ -568,7 +563,6 @@ fn Term thvm_realize(Term expr) {
 
   // Restore the session default device (scoped device routing, above).
   CURRENT_CTX->default_device = saved_default_device;
-  if (sched_prof_enabled()) sched_prof_add(SCHED_PROF_REALIZE_TOTAL, _rt0);
   if (realize_stale_fire_failed()) {
     return 0;
   }

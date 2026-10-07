@@ -1448,16 +1448,7 @@ static void ru_limit_bufs_node(u32 root_idx) {
   }
 }
 
-fn void run_rangeify_unified_impl(Term root);
-
 fn void run_rangeify_unified(Term root) {
-  if (!sched_prof_enabled()) { run_rangeify_unified_impl(root); return; }
-  double _t0 = sched_prof_now();
-  run_rangeify_unified_impl(root);
-  sched_prof_add(SCHED_PROF_RANGEIFY, _t0);
-}
-
-fn void run_rangeify_unified_impl(Term root) {
   // Clear per-node state.
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     RU_RANGE_MAP[i].out_ndim   = 0;
@@ -2679,23 +2670,6 @@ static RuAxisSubst ru_build_axis_subst(u32 pidx,
     } else {
       ru_axis_subst_match_pair(&m, pr, cr, 0);   // compound out_rng leaf-match
     }
-  }
-  if (getenv("THVM_RB_LOG2") != NULL) {
-    fprintf(stderr, "[rb-subst] pidx=%u p_out_ndim=%u c_in_ndim=%u :",
-            pidx, (unsigned)prm->out_ndim, (unsigned)consumer_rm->in_ndim);
-    for (u8 a = 0; a < prm->out_ndim; a++) {
-      Term pr = prm->out_rngs[a];
-      int paid = (term_tag(pr) == TAG_UOP && term_ext(pr) == UOP_RANGE)
-               ? (int)uop_range_axis_id(pr) : -1;
-      fprintf(stderr, " out[%u]aid=%d", a, paid);
-    }
-    for (u8 a = 0; a < consumer_rm->in_ndim; a++) {
-      Term cr = consumer_rm->in_rngs[a];
-      int caid = (term_tag(cr) == TAG_UOP && term_ext(cr) == UOP_RANGE)
-               ? (int)uop_range_axis_id(cr) : -1;
-      fprintf(stderr, " in[%u]aid=%d", a, caid);
-    }
-    fprintf(stderr, "\n");
   }
   return m;
 }

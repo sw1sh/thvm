@@ -865,14 +865,6 @@ static int bufferize_uop_is_matmul(u64 reduce_loc) {
     return 0;
   }
 
-  char const *e = getenv("THVM_DUMP_MATMUL_DETECT");
-  if (e != NULL && e[0] == '1') {
-    fprintf(stderr,
-            "matmul-detect: reduce_loc=%llu src0_op=%u is_mul=%d distinct=%d -> %d\n",
-            (unsigned long long)reduce_loc,
-            (unsigned)(term_tag(mul) == TAG_UOP ? term_ext(mul) : 0xFF),
-            is_mul, distinct, is_mul && distinct);
-  }
   return is_mul && distinct;
 }
 

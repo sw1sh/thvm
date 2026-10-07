@@ -33,12 +33,6 @@ update the matching row here in the same change.
 | `THVM_DISPATCH_TRACE` | off | Trace dispatch memoization. |
 | `THVM_MAX_KERNEL_BUFFERS` | Metal 31, else no cap | tinygrad's `MAX_KERNEL_BUFFERS`: a positive value caps the distinct buffers (output included) one kernel may bind on every device, splitting wider elementwise fusions (`ru_limit_bufs_node`). `0` turns the cap off everywhere, Metal included. |
 
-## Bufferize & kernel lift
-
-| Knob | Default | Effect |
-| --- | --- | --- |
-| `THVM_BUFFERIZE_DEBUG` | off | Debug the bufferize classifier. |
-
 ## Codegen tuning
 
 | Knob | Default | Effect |
@@ -57,8 +51,6 @@ update the matching row here in the same change.
 | `THVM_MAX_LIVE_BYTES` | (impl) | Max live-buffer memory. |
 | `THVM_CUDA_REUSE_BUFS` | (impl) | CUDA-specific buffer reuse. |
 | `THVM_METAL_REUSE_BUFS` | (impl) | Metal-specific buffer reuse. |
-| `THVM_ARENA_DUMP` | off | Dump arena alloc/dealloc events. |
-| `THVM_ARENA_DUMP_BUFS` | off | Dump the arena buffer list. |
 
 ## CPU backend
 
@@ -124,12 +116,8 @@ update the matching row here in the same change.
 | Knob | Default | Effect |
 | --- | --- | --- |
 | `THVM_KERNEL_PROFILE` | off | Per-kernel wall-time profile (top N rows). |
-| `THVM_DUMP_BOUNDARY_ORDER` | off | Dump kernel emit order. |
-| `THVM_DUMP_DIRECT_COUNT` | off | Dump the direct kernel count. |
-| `THVM_DUMP_KERNEL_SHAPE` | off | Dump kernel shapes. |
 | `THVM_DUMP_KERNEL_SRC` | off | Dump generated kernel source. |
 | `THVM_DUMP_TILE_JIT_SRC` | off | Dump tiled-JIT kernel source. |
-| `THVM_DUMP_MATMUL_DETECT` | off | Dump matmul detection. |
 | `THVM_KCNT` | off | Kernel-count debug. |
 
 ## ATP (automated theorem proving)
