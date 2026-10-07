@@ -5,6 +5,7 @@
 
 #include "../src/thvm.c"
 #include "test.h"
+#include "tu_probes.h"
 
 static u32 alloc_f32_tensor(u32 dim) {
   Shape s = {0};

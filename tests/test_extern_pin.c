@@ -2,6 +2,7 @@
 
 #include "../src/thvm.c"
 #include "test.h"
+#include "tu_probes.h"
 
 static u32 G_ITER_COUNT = 0;
 static Term G_ITER_LAST = 0;

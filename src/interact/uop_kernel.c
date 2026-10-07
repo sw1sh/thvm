@@ -347,8 +347,8 @@ fn void kernel_fire_by_id(u32 kid) {
   ke->fire_gen = KERNEL_FIRE_GEN;
 
   // Resolve any symbolic input slots first (input_tids[i] == 0 +
-  // input_terms[i] != 0).  These come from materialize_uop_in_env
-  // when a child was a free TAG_VAR; by fire time, APP-LAM beta
+  // input_terms[i] != 0).  These come from kernel emission when a
+  // child was a free TAG_VAR; by fire time, APP-LAM beta
   // should have substituted the binder and term_resolve walks the
   // SUB-bit chain to reach a TAG_TEN.  If we still don't see a
   // concrete TEN, the kernel can't fire -- bail.

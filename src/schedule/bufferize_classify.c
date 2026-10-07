@@ -17,7 +17,7 @@
 // remove bufferization with explicit legality/cost rules.
 //
 // Output: a small table indexed by the UOp's heap loc; the
-// selective materializer consults bufferize_is_realized to decide
+// selective materializer reads each node's `realized` bit to decide
 // whether to emit a UOP_KERNEL or inline the compute into its
 // consumer kernel's program.
 //
@@ -2329,30 +2329,4 @@ fn void bufferize_classify(Term root) {
     // main-heap UOP_BUFFERIZE Terms (one per realize boundary).
     run_rangeify_unified(root);
     return;
-}
-
-fn u8 bufferize_is_realized(Term uop_term) {
-  if (term_tag(uop_term) != TAG_UOP) return 0;
-  if (term_ext(uop_term) == UOP_KERNEL) return 1;   // already realized
-  u32 idx = bufferize_info_find(term_val(uop_term));
-  if (idx == 0xFFFFFFFFu) return 0;
-  return BUFFERIZE_NODES[idx].realized;
-}
-
-fn u32 bufferize_consumer_count(Term uop_term) {
-  if (term_tag(uop_term) != TAG_UOP) return 0;
-  u32 idx = bufferize_info_find(term_val(uop_term));
-  if (idx == 0xFFFFFFFFu) return 0;
-  return BUFFERIZE_NODES[idx].consumer_count;
-}
-
-fn u32 bufferize_reasons(Term uop_term) {
-  if (term_tag(uop_term) != TAG_UOP) {
-    return 0;
-  }
-  u32 idx = bufferize_info_find(term_val(uop_term));
-  if (idx == 0xFFFFFFFFu) {
-    return 0;
-  }
-  return BUFFERIZE_NODES[idx].reasons;
 }

@@ -26,6 +26,7 @@
 //   8. a timing line at V = 1e4, N = 1024, D = 64.
 #include "../src/thvm.c"
 #include "test.h"
+#include "tu_probes.h"
 #include <time.h>
 
 static int interp_mode(void) {

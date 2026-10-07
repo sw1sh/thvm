@@ -84,11 +84,9 @@ fn void gc_mark_term(Term t, u8 *heap_visited) {
 }
 
 // Untruncated preserve mark for TABLE-WIDE consumers (the capture-time
-// mark-park sweep).  gc_collect_roots caps its root array at 4096 and
-// SILENTLY DROPS the excess -- tolerable for the watermark-scoped rollback
-// (a dropped root's buffers are usually below the watermark), fatal for a
-// table-wide sweep: a Krea-scale capture holds tens of thousands of
-// extern-pinned wrappers, and a dropped WEIGHT wrapper's buffer would be
+// mark-park sweep).  A capped root array would be fatal here: a Krea-scale
+// capture holds tens of thousands of extern-pinned wrappers, and a
+// dropped WEIGHT wrapper's buffer would be
 // parked + adopted (the round-3 gen symptom: replay_dispatches == 0, peak
 // 10GB because the resident bf16 weights had been recycled out from under
 // the WL cache).  Walks the root tables directly, no cap.  Returns 1 on

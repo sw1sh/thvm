@@ -115,17 +115,9 @@ static u32             RU_TOPO_ORDER[RU_MAX_NODES];
 static u32             RU_TOPO_ORDER_LEN;
 static u32             RU_TOPO_REMAINING[RU_MAX_NODES];  // unprocessed-consumer counter
 
-// Stats / introspection accessors for the new test.
+// Nodes the last pass walked; read by tests (tests/tu_probes.h).
 static u32 RU_LAST_NODES_WALKED;
 
-fn u32 rangeify_unified_last_nodes_walked   (void) { return RU_LAST_NODES_WALKED;   }
-fn u32 rangeify_unified_range_idx_counter   (void) { return RU_RANGE_IDX_COUNTER;   }
-
-// Was this node assigned ranges? (For test introspection.)
-fn int rangeify_unified_has_ranges_at(u32 node_idx) {
-  if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
-  return RU_RANGE_MAP[node_idx].has_ranges ? 1 : 0;
-}
 fn u32 rangeify_unified_out_ndim_at(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
   return RU_RANGE_MAP[node_idx].out_ndim;
@@ -358,21 +350,6 @@ fn int rangeify_unified_aid_is_fuse_bound(u32 aid) {
   for (u32 g = 0; g < RU_FUSE_ALL_REDUCE_AIDS_N; g++)
     if (RU_FUSE_ALL_REDUCE_AIDS[g] == aid) return 1;
   return 0;
-}
-
-// Number of reduce-ranges attached to this node.  Non-zero only for
-// UOP_REDUCE nodes whose reduce axes have extent > 1.  Mirrors
-// tinygrad's `len(x.src[1:])` after convert_reduce_to_reduce_with_ranges
-// runs (indexing.py:94).
-fn u32 rangeify_unified_reduce_n_ranges_at(u32 node_idx) {
-  if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
-  return RU_REDUCE_RANGES[node_idx].n;
-}
-
-fn Term rangeify_unified_reduce_range_at(u32 node_idx, u32 i) {
-  if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
-  if (i >= RU_REDUCE_RANGES[node_idx].n) return 0;
-  return RU_REDUCE_RANGES[node_idx].ranges[i];
 }
 
 // === Mirror source: tinygrad/uop/ops.py:resolve  ===
@@ -2315,10 +2292,6 @@ fn int rangeify_unified_tid_chain_composed(u32 tid) {
   return RU_TID_CHAIN_COMPOSED[tid] != 0;
 }
 
-fn Term rangeify_unified_subst_at(u32 node_idx) {
-  if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
-  return RU_SUBST[node_idx];
-}
 
 // Accessor for the UOP_BUFFERIZE Term emitted at this node's realize
 // boundary.  0 if the node is not a boundary.
@@ -2560,9 +2533,6 @@ static Term ru_compose_view_chain(Term addr0, u32 tid) {
 // Count of UOP_BUFFERIZE nodes emitted on the main heap by the most
 // recent pm_apply_rangeify run.  Stats / introspection.
 static u32 RU_LAST_BUFFERIZES_EMITTED;
-fn u32 rangeify_unified_last_bufferizes_emitted(void) {
-  return RU_LAST_BUFFERIZES_EMITTED;
-}
 
 // Collect "closed ranges" for a realize boundary at node `i`. Mirror:
 // tinygrad/schedule/indexing.py:88 at ac4049794 (`closed_ranges =

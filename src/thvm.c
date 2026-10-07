@@ -545,11 +545,9 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "schedule/heap_rooted_preserve.c"
 
 // External-caller pin table.  Tracks every Term that a foreign
-// caller is holding so gc_collect_roots can keep them live.
+// caller is holding so the GC marks keep them live.
 #include "schedule/extern_pin.c"
 
-// Collect the dyn-heap GC root set.
-#include "schedule/gc_roots.c"
 
 // Recursive mark-from-root over the collected roots.
 #include "schedule/gc_mark.c"

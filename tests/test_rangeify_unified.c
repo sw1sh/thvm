@@ -18,6 +18,7 @@
 
 #include "../src/thvm.c"
 #include "test.h"
+#include "tu_probes.h"
 #include <string.h>
 
 static u32 alloc_f32_tensor1(u32 d0) {

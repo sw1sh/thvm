@@ -23,6 +23,7 @@
 // (C JIT) and with THVM_CPU_JIT_WARMUP=1000000000 (UOp walker).
 #include "../src/thvm.c"
 #include "test.h"
+#include "tu_probes.h"
 
 #define N 4
 #define D 4

@@ -811,10 +811,9 @@ struct Backend {
   // view_strided_index before reading buffer bytes.  CPU sets this
   // (cpu_dispatch_kernel gathers a ShapeTracker chain into a contiguous
   // temp, and every rung reads a single strided view in place); Metal
-  // does NOT (its shaders read bufs flat).  materialize_uop_in_env's f3
-  // view-only branches gate on this flag and fall through to
-  // kernel emission when the active backend can't consume aliases
-  // -- the reflected wins land for view-aware backends only.
+  // does NOT (its shaders read bufs flat).  view_resolve (materialize.c)
+  // gates on this flag, so view-only movement ops fall through to
+  // kernel emission when the active backend can't consume aliases.
   u8    view_aware;
   int   (*init)(void);
   void  (*shutdown)(void);
@@ -1794,9 +1793,6 @@ typedef struct {
 extern UOpInfo BUFFERIZE_NODES[BUFFERIZE_NODES_CAP];
 extern u32     BUFFERIZE_NODES_LEN;
 fn u32  bufferize_info_find(u64 loc);
-fn u8   bufferize_is_realized(Term uop_term);
-fn u32  bufferize_consumer_count(Term uop_term);
-fn u32  bufferize_reasons(Term uop_term);
 
 // Per-node consumer-list pool. Each producer node's UOpInfo.cmap_head
 // indexes into CMAP_LL; chain via .next. Populated by the bufferize
@@ -1889,7 +1885,6 @@ fn int  term_shape_in(Term t, u32 env_id, Shape *out);
 fn int  term_dtype_in(Term t, u32 env_id, u32 *out);
 // Device of a term (THVM_DEV_*), -1 = unknown/default.  See uop_meta.c.
 fn i32  term_device_in(Term t);
-fn Term materialize_uop_in_env(Term t, u32 env_id);
 
 // === interact/ ===
 // One file per active pair.  Each rule increments ITRS when it fires.
@@ -2322,14 +2317,10 @@ fn int  ru_fuse_matmul_input_on                (void);
 // nested REDUCE in OPT_TC even though it is no longer the bare store value).
 fn int  ru_fuse_epilogue_on                    (void);
 fn void pm_apply_rangeify                      (Term root);
-fn u32  rangeify_unified_last_nodes_walked     (void);
-fn u32  rangeify_unified_range_idx_counter     (void);
-fn int  rangeify_unified_has_ranges_at         (u32 node_idx);
 fn u32  rangeify_unified_out_ndim_at           (u32 node_idx);
 fn Term rangeify_unified_out_rng_at            (u32 node_idx, u32 axis);
 fn int  rangeify_unified_is_realized           (u32 node_idx);
 fn int  rangeify_unified_aid_is_fuse_bound     (u32 aid);
-fn Term rangeify_unified_subst_at              (u32 node_idx);
 // Main-heap UOP_BUFFERIZE Term at this node's realize boundary (0 if not
 // a boundary). Mirrors tinygrad's Ops.BUFFERIZE landing in the tsink at
 // indexing.py:77.
@@ -2339,14 +2330,11 @@ fn Term rangeify_unified_bufferize_at          (u32 node_idx);
 // to `cached_lift.store_root` from kernel_lift_to_uop; serves as the
 // substrate for the lifter-bypass cutover.
 fn Term rangeify_unified_store_root_at         (u32 node_idx);
-fn u32  rangeify_unified_last_bufferizes_emitted(void);
 // Reduce-ranges attached to a UOP_REDUCE node by the unified pass.
 // Mirrors tinygrad's `src=(value,)+tuple(new_ranges)` from
 // convert_reduce_to_reduce_with_ranges (indexing.py:90-96).  Returns 0
 // for non-REDUCE nodes or REDUCE nodes whose reduce axes are extent-1
 // (which collapse to UOP_CONST(0) per `resolve(s!=1)`).
-fn u32  rangeify_unified_reduce_n_ranges_at    (u32 node_idx);
-fn Term rangeify_unified_reduce_range_at       (u32 node_idx, u32 i);
 // Per-axis range terms preserved at INDEX_E construction in
 // pm_apply_rangeify.  Mirror: tinygrad's `BUFFERIZE.index(*per_axis_ranges)`
 // at indexing.py:78.  Returns the number of axes written to out_rngs (0

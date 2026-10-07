@@ -2,7 +2,7 @@
 //
 // Tracks every Term that a foreign caller (today: the WL
 // LibraryLink bridge) is currently holding outside the heap,
-// so gc_collect_roots can treat them as live GC roots.
+// so the GC marks (gc_mark.c) can treat them as live roots.
 // Without this, the trace can't see those references and
 // would reclaim their backing buffers between realizes.
 //
@@ -44,13 +44,6 @@ fn void extern_unpin_term(Term t) {
 
 fn void extern_pin_clear(void) {
   EXTERN_PINNED_TERMS_LEN = 0;
-}
-
-fn void extern_pinned_for_each(void (*cb)(Term)) {
-  if (cb == NULL) return;
-  for (u32 i = 0; i < EXTERN_PINNED_TERMS_LEN; i++) {
-    if (EXTERN_PINNED_TERMS[i] != 0) cb(EXTERN_PINNED_TERMS[i]);
-  }
 }
 
 // Handle table: maps a host-assigned handle id (e.g. a Wolfram

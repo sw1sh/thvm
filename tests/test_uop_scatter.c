@@ -31,6 +31,7 @@
 //      MAX and MIN are covered by test_uop_scatter_max.c.
 #include "../src/thvm.c"
 #include "test.h"
+#include "tu_probes.h"
 
 static int interp_mode(void) {
   char const *e = getenv("THVM_CPU_JIT_WARMUP");

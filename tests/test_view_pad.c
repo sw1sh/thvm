@@ -21,6 +21,7 @@
 
 #include "../src/thvm.c"
 #include "test.h"
+#include "tu_probes.h"
 
 int main(void) {
   thvm_init();

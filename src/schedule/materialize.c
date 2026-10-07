@@ -6486,23 +6486,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
   return kernel_term;
 }
 
-// Direct kernelize entry called by the surviving view tests:
-// for the 5 view-only movement ops, return the alias TenDesc as a
-// TAG_TEN; for everything else (PAD, elementwise, reduce, kernel)
-// fall through to the normal kernel-emit path.
-fn Term materialize_uop_in_env(Term t, u32 env_id) {
-  (void)env_id;
-  if (term_tag(t) == TAG_UOP) {
-    u8 op = term_ext(t);
-    if (op_is_view_movement(op)) {
-      u32 alias_tid = view_resolve(t);
-      if (alias_tid != 0)
-        return term_new(0, TAG_TEN, TENS[alias_tid].dtype, alias_tid);
-    }
-  }
-  return thvm_materialize(t);
-}
-
 // Recursive descent: walk a UOP DAG looking for UOP_ASSIGN nodes
 // at any depth.  Each ASSIGN's src subgraph is materialized in
 // place (heap_set on cell+1) so the surrounding kernel-emission
