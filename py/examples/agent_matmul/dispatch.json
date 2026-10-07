@@ -1,5 +1,0 @@
-{
-  "_comment": "stage4: 64x64 output tile per TG, 8 simdgroups = 256 threads. grid = (M/64)*(N/64) threadgroups; grid_rule is total threads = TG count * tg.",
-  "rule": "256",
-  "grid_rule": "ceildiv(M,64)*ceildiv(N,64)*tg"
-}

@@ -4,20 +4,14 @@ tinygrad builds + lowers a kernel; from_tinygrad_lowered rebuilds it as
 thvm ranged IR, renders, and dispatches; we diff vs tinygrad's own result.
 Complements test_from_tinygrad.py (tensor-level / full-backend path).
 
-Single-kernel pointwise coverage for now (the lowered importer's scope).
-Runs on the DEV-selected backend: cpu by default (C99, in-process), or
-DEV=metal / DEV=cuda to dispatch on a GPU.  tinygrad lowers for the same
-device.
+Single-kernel pointwise coverage for now (the lowered importer's scope),
+rendered as C99 and run in-process; tinygrad lowers for the CPU too.
 """
-import os
 import unittest
 
 import numpy as np
 
 from thvm.from_tinygrad_lowered import cross_validate
-
-_BACKEND = (os.environ.get("DEV", "") or "cpu").split(":", 1)[0].lower()
-
 
 def _tg():
     from tinygrad import Tensor
@@ -26,7 +20,7 @@ def _tg():
 
 class TestFromTinygradLowered(unittest.TestCase):
     def _chk(self, build_fn):
-        got, ref, err = cross_validate(build_fn, backend=_BACKEND)
+        got, ref, err = cross_validate(build_fn)
         self.assertLess(err, 1e-3, f"got {got.ravel()[:6]} ref {ref.ravel()[:6]}")
 
     def setUp(self):
@@ -79,8 +73,7 @@ class TestFromTinygradLowered(unittest.TestCase):
         from tinygrad import dtypes
         T = _tg()
         P = np.abs(self.A) + 0.5
-        got, ref, _ = cross_validate(lambda: T(P).bitcast(dtypes.int32).cast(dtypes.float32),
-                                     backend=_BACKEND)
+        got, ref, _ = cross_validate(lambda: T(P).bitcast(dtypes.int32).cast(dtypes.float32))
         np.testing.assert_allclose(got, ref, rtol=1e-6)
 
     def test_alu_param_refused(self):
@@ -99,7 +92,7 @@ class TestFromTinygradLowered(unittest.TestCase):
     # --- KOpt level: apply a thvm KOpt to the imported kernel; the
     #     OPTIMIZED kernel must still match tinygrad's result. ---
     def _chk_opt(self, build_fn, opts):
-        got, ref, err = cross_validate(build_fn, backend=_BACKEND, opts=opts)
+        got, ref, err = cross_validate(build_fn, opts=opts)
         self.assertLess(err, 1e-3, f"got {got.ravel()[:6]} ref {ref.ravel()[:6]}")
 
     def test_upcast_add(self):

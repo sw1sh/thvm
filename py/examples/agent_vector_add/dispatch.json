@@ -1,5 +1,0 @@
-{
-  "_comment": "MLX binary_vv f32 path: work_per_thread=2, mandatory 1024-thread block. grid = ceildiv(N,2) threads.",
-  "rule": "min(1024, ceildiv(N, 2))",
-  "grid_rule": "ceildiv(N, 2)"
-}

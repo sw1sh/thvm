@@ -6,8 +6,8 @@ level: tinygrad's post-lower kernel uops -- RANGE / INDEX / STORE / ALU
 over PARAM buffers, i.e. the form tinygrad's own renderer consumes -- and
 rebuilds them as thvm's ranged IR (UOP_BUFFER / UOP_RANGE / UOP_INDEX_E /
 UOP_STORE + integer address arithmetic), which thvm renders DIRECTLY
-(no rangeify -- the IR is already ranged).  This cross-validates thvm's
-codegen against tinygrad's lowered kernels.
+(no rangeify -- the IR is already ranged) as C99 and runs on the CPU.
+This cross-validates thvm's codegen against tinygrad's lowered kernels.
 
 A tinygrad lowered kernel is the STORE subtree of the compute CALL (the one
 whose body is a SINK) in `tensor.schedule_linear()`:
@@ -17,9 +17,7 @@ whose body is a SINK) in `tensor.schedule_linear()`:
 with RANGE leaves (axis loops, arg=(axis_id, AxisType)), INDEX(buf, addr)
 loads, integer ALU on the addresses, and float ALU / WHERE / REDUCE on the
 values.  A PARAM's ParamArg slot n is kernel-arg slot n (n=0 is the output
-by convention).  thvm's renderer promotes the LOOP/GLOBAL axes to GPU threads,
-so the dispatch grid is the product of those axis extents (== output numel
-for a pure pointwise kernel).
+by convention).
 
 The other CALLs in the schedule are copies that stage the host inputs;
 they are followed back to the source buffers to find each input's data.
@@ -77,7 +75,6 @@ class _Lowerer:
         self.h = h
         self.memo: dict[int, int] = {}
         self.params: dict[int, int] = {}      # PARAM slot -> numel
-        self.grid_axes: list[int] = []        # extents of LOOP/GLOBAL axes
 
     def emit(self, u) -> int:
         key = id(u)
@@ -108,8 +105,6 @@ class _Lowerer:
             # as arg[-1] (uop/ops.py:89, :611, :1172); a multi-part range
             # carries sub-ids between the two.
             at = _axis_type(u.arg[-1])
-            if at in (K.AXIS_LOOP, K.AXIS_GLOBAL):
-                self.grid_axes.append(extent)
             t = h.range(axis_id=int(u.arg[0]), axis_type=at, extent=extent)
         elif op is Ops.INDEX:
             t = h.index_e(self.emit(u.src[0]), self.emit(u.src[1]))
@@ -241,10 +236,7 @@ def _slot_inputs(kernel, calls, params, py_data):
     return inputs
 
 
-_TG_DEVICE = {"cpu": "CPU", "metal": "METAL", "cuda": "CUDA"}
-
-
-def cross_validate(build_fn, *, backend: str = "cpu", opts=None):
+def cross_validate(build_fn, *, opts=None):
     """Cross-validate thvm's codegen against tinygrad's lowered kernel.
 
     `build_fn` is a 0-arg callable returning a FRESH tinygrad Tensor (the
@@ -254,10 +246,8 @@ def cross_validate(build_fn, *, backend: str = "cpu", opts=None):
     buffers), so the two graphs must be independent and the input data
     must be read BEFORE scheduling.
 
-    `backend` picks where thvm renders and runs the kernel ("cpu" renders
-    C99 and runs it in-process; "metal" / "cuda" dispatch on the GPU).
-    tinygrad is pinned to the same device for the reference and the
-    lowering.
+    thvm renders the kernel as C99 and runs it in-process; tinygrad is
+    pinned to the CPU for the reference and the lowering.
 
     `opts`, if given, is a list of (KOP, axis, factor) thvm KOpts (e.g.
     [(K.KOP_UPCAST, 0, 4)]) applied to the imported ranged-IR root before
@@ -268,13 +258,9 @@ def cross_validate(build_fn, *, backend: str = "cpu", opts=None):
     Single-kernel only.  Returns (got, ref, max_abs_err).
     """
     from tinygrad.helpers import Context
-    if backend not in _TG_DEVICE:
-        raise ValueError(f"backend {backend!r}")
-
-    # NOTE: tinygrad's lowered IR is target-dependent (a REDUCE lowers
-    # differently for CPU vs GPU), so tinygrad must lower for the SAME
-    # backend thvm renders.
-    with Context(DEV=_TG_DEVICE[backend]):
+    # tinygrad's lowered IR is target-dependent (a REDUCE lowers differently
+    # for CPU vs GPU), so it must lower for the CPU thvm renders for.
+    with Context(DEV="CPU"):
         # 1) Reference, on an independent graph.
         ref = np.asarray(build_fn().numpy(), dtype=np.float32)
 
@@ -312,64 +298,7 @@ def cross_validate(build_fn, *, backend: str = "cpu", opts=None):
 
     inputs = _slot_inputs(kernel, calls, low.params, py_data)
 
-    grid_fallback = 1
-    for e in low.grid_axes:
-        grid_fallback *= e
-    if grid_fallback == 0:
-        grid_fallback = max(1, int(np.prod(ref.shape)))
-
-    if backend == "cpu":
-        return _run_cpu(h, root, ref, inputs)
-    if backend == "metal":
-        return _run_metal(h, root, ref, inputs, grid_fallback)
-    return _run_cuda(h, root, ref, inputs, grid_fallback)
-
-
-def _grid_from_guard(src: str, fallback: int) -> int:
-    """The dispatch grid (total threads) the rendered kernel expects, read
-    from its `tid >= Nu` bound guard.  Robust after KOpts change the axis
-    structure; falls back to the LOOP/GLOBAL extent product."""
-    import re
-    m = re.search(r"tid\s*>=\s*(\d+)u", src)
-    return int(m.group(1)) if m else fallback
-
-
-def _alloc_io(dev, ref, inputs):
-    out_buf = dev.buf_alloc((int(np.prod(ref.shape)) or 1) * 4)
-    handles = {0: out_buf}
-    for slot in sorted(inputs):
-        b = dev.buf_alloc(inputs[slot].nbytes)
-        dev.buf_write_array(b, inputs[slot].ravel())
-        handles[slot] = b
-    ordered = [handles[s] for s in sorted(handles)]
-    return out_buf, ordered
-
-
-def _run_metal(h, root, ref, inputs, grid_fallback):
-    from .thvm import Metal
-    m = Metal()
-    msl = h.render(root, name="k")
-    pso = m.compile_msl(msl, fn="k")
-    out_buf, ordered = _alloc_io(m, ref, inputs)
-    grid_n = _grid_from_guard(msl, grid_fallback)
-    tg = min(grid_n, 256)
-    m.dispatch(pso, ordered, grid=(grid_n, 1, 1), threadgroup=(tg, 1, 1))
-    got = m.buf_read_array(out_buf, ref.shape if ref.shape else (1,), np.float32)
-    return got, ref, float(np.abs(got - ref).max())
-
-
-def _run_cuda(h, root, ref, inputs, grid_fallback):
-    from .thvm import Cuda
-    c = Cuda()
-    src = h.render_cuda(root, name="k")
-    fn = c.compile(src, fn="k")
-    out_buf, ordered = _alloc_io(c, ref, inputs)
-    grid_n = _grid_from_guard(src, grid_fallback)
-    block = min(grid_n, 256) or 1
-    blocks = (grid_n + block - 1) // block
-    c.dispatch(fn, ordered, grid=blocks, block=block)
-    got = c.buf_read_array(out_buf, ref.shape if ref.shape else (1,), np.float32)
-    return got, ref, float(np.abs(got - ref).max())
+    return _run_cpu(h, root, ref, inputs)
 
 
 def _run_cpu(h, root, ref, inputs):

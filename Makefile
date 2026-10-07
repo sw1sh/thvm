@@ -1169,46 +1169,28 @@ probes: $(PROBE_BINS)
 # === py/ ctypes bindings (libthvm_py.{dylib,so}) =====================
 # Single-TU build of src/thvm.c + extern-C wrapper that re-exports the
 # static-inline UOp constructors, so ctypes can drive thvm from Python.
-# Two platform variants, both producing one `py` target:
-#
-#   macOS:  libthvm_py.dylib  =  thvm_py.c (.o) + thvm_py_metal.m (.o)
-#                                + Accelerate/Metal/Foundation frameworks
-#   Linux:  libthvm_py.so     =  thvm_py.c (.o) + thvm_py_cuda.c (.o)
-#                                + -lcuda -lnvrtc   (when CUDA present)
-#
-# The macOS block is guarded by `uname -s == Darwin` and is untouched
-# by the Linux addition below; the Linux block only emits a CUDA bridge
-# when the CUDA headers were found (HAVE_CUDA from the block above).
+# One `py` target per platform: libthvm_py.dylib on macOS (with the Metal
+# backend), libthvm_py.so on Linux (with the CUDA backend when the CUDA
+# headers were found, HAVE_CUDA from the block above).
 ifeq ($(shell uname -s),Darwin)
 PY_DYLIB        := py/thvm/libthvm_py.dylib
 PY_THVM_OBJ     := $(BUILD)/py_thvm.o
-PY_METAL_OBJ    := $(BUILD)/py_thvm_metal.o
 $(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
 	clang -fPIC -O2 -DACCELERATE_NEW_LAPACK $(ATP_DEFINES) \
 	    -DTHVM_HAS_METAL $(METAL_DEFINES) \
 	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
 	    -c -o $@ $<
-$(PY_METAL_OBJ): py/csource/thvm_py_metal.m | $(BUILD)
-	clang -fPIC -fobjc-arc -O2 -c -o $@ $<
-# Link the REAL Metal backend (backend_metal.o) + its metallib so the
-# general DEV=metal tensor/realize path (metal_buf_write/read/dispatch)
-# is live -- without it thvm.c falls back to the no-op Metal STUB and
-# every Metal buffer reads back zero.  py_thvm_metal.o (py_metal_* manual
-# dispatch harness) coexists; distinct symbol prefixes, no conflict.
-$(PY_DYLIB): $(PY_THVM_OBJ) $(PY_METAL_OBJ) $(METAL_OBJ) $(METAL_LIBPATH)
+# Link the real Metal backend (backend_metal.o) + its metallib: without it
+# thvm.c falls back to the no-op Metal stub and every Metal buffer reads
+# back zero.
+$(PY_DYLIB): $(PY_THVM_OBJ) $(METAL_OBJ) $(METAL_LIBPATH)
 	clang -shared -framework Accelerate -framework Metal -framework Foundation \
 	    -framework MetalPerformanceShaders \
-	    -o $@ $(PY_THVM_OBJ) $(PY_METAL_OBJ) $(METAL_OBJ)
+	    -o $@ $(PY_THVM_OBJ) $(METAL_OBJ)
 .PHONY: py
 py: $(PY_DYLIB)
 endif
 
-# Linux py build: libthvm_py.so.  thvm_py.c carries the UOp builder +
-# both render entry points (the CUDA renderer is plain C, always
-# compiled in); thvm_py_cuda.c is the in-process nvrtc + driver bridge,
-# linked only when HAVE_CUDA.  Without CUDA the .so still builds (UOp
-# construction + render-to-string), the `Cuda` class just stays
-# unavailable -- mirroring how the macOS .dylib needs no GPU to render.
 ifeq ($(shell uname -s),Linux)
 PY_SO           := py/thvm/libthvm_py.so
 PY_THVM_OBJ     := $(BUILD)/py_thvm.o
@@ -1216,16 +1198,8 @@ $(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
 	$(CC) -fPIC -O2 $(CUDA_DEFINES) $(ATP_DEFINES) $(CBLAS_CFLAGS) \
 	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
 	    -c -o $@ $<
-ifdef HAVE_CUDA
-PY_CUDA_OBJ     := $(BUILD)/py_thvm_cuda.o
-$(PY_CUDA_OBJ): py/csource/thvm_py_cuda.c | $(BUILD)
-	$(CC) -fPIC -O2 $(CUDA_DEFINES) -c -o $@ $<
-$(PY_SO): $(PY_THVM_OBJ) $(PY_CUDA_OBJ)
-	$(CC) -shared -o $@ $^ $(CUDA_LDFLAGS) -lm $(CBLAS_LIBS)
-else
 $(PY_SO): $(PY_THVM_OBJ)
-	$(CC) -shared -o $@ $^ -lm $(CBLAS_LIBS)
-endif
+	$(CC) -shared -o $@ $^ $(CUDA_LDFLAGS) -lm $(CBLAS_LIBS)
 .PHONY: py
 py: $(PY_SO)
 endif
