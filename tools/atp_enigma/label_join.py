@@ -31,14 +31,14 @@
 #
 # Usage:
 #   label_join.py keys <out_keys.tsv> <index.tsv> <npz_dir> [<index.tsv> <npz_dir>]...
-#   label_join.py join <harvest_dir> <keys.tsv>... <out_dir> [--jobs N]
+#   label_join.py join <out_dir> <keys.tsv> <harvest_dir>... [--jobs N]
 #   label_join.py selftest
 # keys reads every proof-mode row of a label-harvest or harvest index (19
 # columns, tools/atp_enigma/README.md) and writes problem, lane, sig and
-# the run's proof keys.  join reads <harvest_dir>/index.tsv (guide_harvest.sh:
-# the 19 label-harvest columns, then the dump's sampling rate and bytes),
-# npz/<problem>__<lane>.npz, dump/<problem>__<lane>.dump.gz and phi.tsv
-# (FindProof --problem-features --header rows), and writes one
+# the run's proof keys.  join reads every <harvest_dir>'s index.tsv
+# (guide_harvest.sh: the 19 label-harvest columns, then the dump's sampling
+# rate and bytes), npz/<problem>__<lane>.npz, dump/<problem>__<lane>.dump.gz
+# and phi.tsv (FindProof --problem-features --header rows), and writes one
 # groups_<lane>.npz per lane (arrays below), stats.tsv (per lane and label
 # source) and summary.txt.  A run is joined only when its dump's last
 # session, its npz and its phi(p) row agree: the chosen candidate of the
@@ -328,16 +328,25 @@ def cmd_join(args):
         jobs_n = int(args[i + 1])
         args = args[:i] + args[i + 2:]
     if len(args) < 3:
-        die("join needs <harvest_dir> <keys.tsv>... <out_dir>")
-    hdir, key_paths, out = args[0], args[1:-1], args[-1]
+        die("join needs <out_dir> <keys.tsv> <harvest_dir>...")
+    out, key_path, hdirs = args[0], args[1], args[2:]
     os.makedirs(out, exist_ok=True)
-    by = load_keys(key_paths)
-    names, phis, metas = phi_mod.load(os.path.join(hdir, "phi.tsv"))
-    phi_of = {nm: (p, m) for nm, p, m in zip(names, phis, metas)}
-    rows = read_index(os.path.join(hdir, "index.tsv"))
-    lanes = sorted({c[1] for c in rows})
+    by = load_keys([key_path])
+    phi_of, rows, seen = {}, [], set()
+    for hdir in hdirs:
+        names, phis, metas = phi_mod.load(os.path.join(hdir, "phi.tsv"))
+        for nm, p, m in zip(names, phis, metas):
+            if nm in phi_of and not np.array_equal(phi_of[nm][0], p):
+                die(f"{nm}: the harvest directories' phi(p) rows differ")
+            phi_of[nm] = (p, m)
+        for c in read_index(os.path.join(hdir, "index.tsv")):
+            if (c[0], c[1]) in seen:
+                die(f"{c[0]} {c[1]}: two runs in the harvest directories")
+            seen.add((c[0], c[1]))
+            rows.append((hdir, c))
+    lanes = sorted({c[1] for _h, c in rows})
     tasks, skipped = [], {}
-    for c in rows:
+    for hdir, c in rows:
         problem, lane, split = c[0], c[1], c[6]
         if split not in SPLITS:
             die(f"{problem} {lane}: split {split}: only TRAIN and TRAIN-X are training data (A24)")
@@ -581,7 +590,7 @@ def selftest():
         check(cross_keys(kt, "GRP001-1", "encompass", 0xB) == set(), "keys: sig must agree")
         check(cross_keys(kt, "GRP001-1", "tgt-sel", 0xA) == set(), "keys: not the lane itself")
         o = os.path.join(d, "out")
-        check(cmd_join([h, kp, o, "--jobs", "2"]) == 0, "join rc")
+        check(cmd_join([o, kp, h, "--jobs", "2"]) == 0, "join rc")
         g = np.load(os.path.join(o, "groups_tgt-sel.npz"))
         check(g["run_problem"].tolist() == ["GRP001-1", "GRP001-1-10"], "tgt-sel runs joined")
         check(g["run_stem"].tolist() == ["GRP001", "GRP001"], "stems share across pool and -10")
@@ -624,7 +633,7 @@ def selftest():
             c[0], c[6] = "REL001-1", "heldout"
             f.write("\t".join(c) + "\n")
         try:
-            cmd_join([h, kp, os.path.join(d, "out2"), "--jobs", "1"])
+            cmd_join([os.path.join(d, "out2"), kp, h, "--jobs", "1"])
             check(False, "a heldout row must stop the join")
         except SystemExit as ex:
             check("only TRAIN and TRAIN-X" in str(ex), "the split refusal names the rule")

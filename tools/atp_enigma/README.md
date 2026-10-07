@@ -477,12 +477,13 @@ The loop of plan section 3.2 (docs/atp/guide.md, "Training"), pod-only:
 # 1. the jobs: every TRAIN / TRAIN-X pair the families' lanes searched at 60 s
 guide_jobs.py matrix.tsv problems.tsv dev_t.tsv xmatrix.tsv xproblems.tsv \
   tgt-sel,encompass,twee-deep,unfold-tgt-awr jobs/ 1000 2
-# 2. the harvest: zero twins of the harvest head with the sampled dump
-bash guide_harvest.sh jobs/slot_1.tsv out/ bin/FindProof root/ gated.txt np0_extract.py
+# 2. the harvest: zero twins of the harvest head with the sampled dump, one
+#    out directory per slot
+bash guide_harvest.sh jobs/slot_1.tsv out_1/ bin/FindProof root/ gated.txt np0_extract.py
 # 3. labels: proof keys of every label-harvest and harvest run, then groups
 label_join.py keys keys.tsv labels/index.tsv labels/npz labels_x/index.tsv labels_x/npz \
-  out/index.tsv out/npz
-label_join.py join out/ keys.tsv groups/        # groups_<lane>.npz, stats.tsv, summary.txt
+  out_1/index.tsv out_1/npz out_2/index.tsv out_2/npz
+label_join.py join groups/ keys.tsv out_1/ out_2/   # groups_<lane>.npz, stats.tsv, summary.txt
 # 4. the head (py/thvm): 5 OOF folds + the full model, early stopping on VAL
 DEV=cpu guide_net.py train groups/ train/ --list-lanes lanes.txt --k 64 --hidden 64
 guide_net.py readout train/                    # readouts, not gates
