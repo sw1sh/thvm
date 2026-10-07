@@ -267,35 +267,6 @@ static int hand_opt_kernel_on_cpu(KernelEntry const *ke) {
   return b != NULL && b->id == 1;
 }
 
-// Returns 1 iff the CPU dispatch ladder (cpu_blas_dispatch, blas.c) would
-// route this kernel through cBLAS / Accelerate from the BARE (un-OPT'd)
-// lifted DAG.  Applying a hand-coded UPCAST/UNROLL mutates the DAG so the
-// shape classifiers below stop recognising it -- losing the 10-100x BLAS
-// fast path -- so for these kernels we must keep returning 0 from
-// kernel_hand_coded_opts (no opts) on CPU.  Mirrors cpu_blas_dispatch's
-// exact try-ladder (blas.c): gemm(matmul) / contraction /
-// im2col-contraction; plus the conv2d-flat structural gate
-// (tile.c:89) that propose.c routes through a BLAS-backed template.
-//
-// The fused conv2+maxpool reduce (the faithful-mode hot kernel) fails ALL
-// of these (the maxpool WHERE-mask poisons the clean contraction shape),
-// so it is NOT BLAS-eligible and falls through to UPCAST register-blocking
-// -- exactly the Lever-B target.  tinygrad runs hand_coded_optimizations
-// on every renderer including CPU (heuristic.py:8); only LOCAL/THREAD/DSP
-// sections are renderer-gated -- the UPCAST/UNROLL machinery always runs.
-static int hand_opt_cpu_blas_eligible(KernelEntry const *ke) {
-  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
-  Term root = ke->cached_lift.store_root;
-  UopDagGemmShape        gemm;
-  UopDagContractionShape contr;
-  UopDagIm2colShape      im2col;
-  if (uop_dag_classify_matmul_shape(root, ke, &gemm)) return 1;
-  if (uop_dag_classify_contraction_shape(root, ke, &contr)) return 1;
-  if (uop_dag_classify_im2col_contraction(root, ke, &im2col)) return 1;
-  if (uop_dag_classify_conv2d_flat_shape(root)) return 1;
-  return 0;
-}
-
 // Returns 1 if the kernel will run on CUDA (backend id == 3).  Used for
 // target-aware heuristic branching: nvrtc's C++ frontend is sensitive to
 // register pressure in ways Metal/MSL is not, so a few sections of the
@@ -465,18 +436,16 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // (DSP skip).  A slow opt'd kernel is a renderer gap, not a reason to
   // narrow the gate (docs/tinygrad_late_passes.md).
   //
-  // CPU (Lever B): tinygrad runs hand_coded_optimizations on EVERY
-  // renderer including CPU (heuristic.py:8); only the LOCAL/THREAD/DSP
-  // sections are renderer-gated.  thvm previously suppressed ALL CPU opts
-  // because the CPU dispatch ladder routes matmul/gemv/dot/conv through
-  // cBLAS from the BARE DAG and an UPCAST mutates the DAG out of those
-  // shapes.  But a NON-BLAS-eligible reduce kernel (the fused conv2+
-  // maxpool faithful kernel) has no BLAS route to poison, so we let the
-  // UPCAST register-blocking run -- giving render_uop independent acc0[N]
-  // lanes that clang can vectorize.  BLAS-eligible CPU kernels stay bare.
+  // CPU: tinygrad runs hand_coded_optimizations on EVERY renderer
+  // including CPU (heuristic.py:8); only the LOCAL/THREAD/DSP sections are
+  // renderer-gated.  The one CPU exception is a kernel the cBLAS ladder
+  // takes (cpu_blas_takes): BLAS reads the BARE DAG, and an UPCAST would
+  // mutate it out of the matched shape.  Every other CPU kernel gets the
+  // UPCAST register-blocking, giving render_uop independent acc0[N] lanes
+  // that clang can vectorize.
   int on_cpu = hand_opt_kernel_on_cpu(ke);
   if (on_cpu) {
-    if (hand_opt_cpu_blas_eligible(ke)) return 0;   // keep cBLAS fast path
+    if (cpu_blas_takes(ke)) return 0;   // keep the cBLAS fast path
     // else: fall through to the UPCAST/UNROLL sections (GPU-only
     // sections below are individually skipped via `on_cpu`).
   } else if (!hand_opt_kernel_on_gpu(ke)) {
