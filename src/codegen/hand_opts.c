@@ -791,7 +791,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
       int reduce_heavy = (occ_min_grid > 0) && hand_opt_is_reduce_heavy(&ax);
 
       // Build list of current UPCAST/UNROLL axis_ids for the stride test.
-      // hand_opt_upcast_buf_stride -> udg_addr_lookup keys on axis_id, so
+      // hand_opt_upcast_buf_stride -> uop_dag_addr_coeff_lookup keys on axis_id, so
       // we must pass ax.axis_id[i] not the snapshot index i.  The earlier
       // implementation stored `i` here, which made the all-UU-present
       // check fail on every iteration past the first -> UPCAST loop

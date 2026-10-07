@@ -2454,13 +2454,10 @@ u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
 fn u32 kernel_hand_coded_opts(struct KernelEntry *ke);
 
 // === Address-coefficient decode (UOP_INDEX_E.addr) ===================
-// Externally-callable wrappers over dag_scan.c's static decoders so the
-// hand_coded_optimizations heuristic (codegen/hand_opts.c) can implement
-// tinygrad's stride heuristic for UPCAST axis selection.
-//
-// UopDagAddrCoeffsView: minimal projection of UdgAddrCoeffs (axis-id +
-// coeff pairs).  HAND_OPT_MAX_AXES bounds n; offsets beyond the count
-// are not initialised.
+// Per-axis (axis_id, coeff) pairs of an address, used by the contraction
+// classifiers (uop/dag_scan.c) and by hand_coded_optimizations' stride
+// heuristic for UPCAST axis selection (codegen/hand_opts.c).  Entries past
+// n_axes are not initialised.
 #define UOP_DAG_ADDR_MAX_AXES 8
 typedef struct {
   u32 axis_ids[UOP_DAG_ADDR_MAX_AXES];
@@ -2720,7 +2717,7 @@ int uop_dag_classify_contraction_shape(Term root,
 //
 // In both cases two of the reduce K-axes share their stride coefficient
 // in operand A (X) with a non-reduce output axis.  C7.1 extends
-// udg_decode_addr_coeffs to distribute IMUL over IADD so the
+// uop_dag_decode_addr_coeffs to distribute IMUL over IADD so the
 // `(OH+KH)*W` and `(OW+KW)*1` address arms expand and each axis -- K
 // AND patch-M -- gets its own coefficient entry.  The classifier picks
 // the patch-M axes out of the output axes (any output axis whose

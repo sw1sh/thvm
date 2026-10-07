@@ -1984,16 +1984,9 @@ u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
 //
 // Used by the contraction classifier to map per-operand address shapes
 // to (M, N, K)-axis classification + stride extraction.
-#define UDG_CONTRACT_MAX_AXES 8
-typedef struct {
-  u32 axis_ids[UDG_CONTRACT_MAX_AXES];
-  u32 coeffs  [UDG_CONTRACT_MAX_AXES];
-  u32 n_axes;
-  i32 offset;
-  int ok;
-} UdgAddrCoeffs;
+#define UDG_CONTRACT_MAX_AXES UOP_DAG_ADDR_MAX_AXES
 
-static int udg_addr_accumulate(UdgAddrCoeffs *a, u32 axis_id, u32 coeff) {
+static int udg_addr_accumulate(UopDagAddrCoeffsView *a, u32 axis_id, u32 coeff) {
   for (u32 i = 0; i < a->n_axes; i++) {
     if (a->axis_ids[i] == axis_id) {
       // Same axis appearing twice in the address (e.g. lifter merged two
@@ -2028,7 +2021,7 @@ static int udg_addr_accumulate(UdgAddrCoeffs *a, u32 axis_id, u32 coeff) {
 // the same coefficient appearing on the K-axis (a5,a6) and the M-axis
 // (a2,a3) -- i.e. the strided-im2col signature the contraction classifier
 // recognises.  Returns 1 on success, 0 on bail.
-static int udg_addr_decode_leaf(Term t, u32 coeff, UdgAddrCoeffs *out) {
+static int udg_addr_decode_leaf(Term t, u32 coeff, UopDagAddrCoeffsView *out) {
   if (term_tag(t) == TAG_UOP) {
     u32 op = term_ext(t);
     if (op == UOP_RANGE) {
@@ -2069,7 +2062,7 @@ static int udg_addr_decode_leaf(Term t, u32 coeff, UdgAddrCoeffs *out) {
   return 0;
 }
 
-static void udg_decode_addr_coeffs(Term addr, UdgAddrCoeffs *out) {
+void uop_dag_decode_addr_coeffs(Term addr, UopDagAddrCoeffsView *out) {
   out->n_axes = 0;
   out->offset = 0;
   out->ok     = 0;
@@ -2081,7 +2074,7 @@ static void udg_decode_addr_coeffs(Term addr, UdgAddrCoeffs *out) {
 
 // Look up the coefficient for an axis_id in a decoded address.  Returns
 // 0 if the axis isn't referenced.
-static u32 udg_addr_lookup(UdgAddrCoeffs const *a, u32 axis_id) {
+u32 uop_dag_addr_coeff_lookup(UopDagAddrCoeffsView const *a, u32 axis_id) {
   for (u32 i = 0; i < a->n_axes; i++) {
     if (a->axis_ids[i] == axis_id) return a->coeffs[i];
   }
@@ -2129,7 +2122,7 @@ static u32 udg_axis_extent(Term root, u32 want_axis_id) {
 //   2. Verify STORE.value is REDUCE(MUL(INDEX_E(A, addr_a),
 //                                       INDEX_E(B, addr_b))) with
 //      A != B and kind == REDUCE_SUM.
-//   3. Decode addr_a, addr_b, addr_out via udg_decode_addr_coeffs.
+//   3. Decode addr_a, addr_b, addr_out via uop_dag_decode_addr_coeffs.
 //   4. Reduce axis must reference exactly ONE axis (single K), and that
 //      axis must appear in BOTH addr_a and addr_b but NOT in addr_out.
 //   5. Partition: M_axes = (addr_b minus K, must equal addr_out minus N_axes).
@@ -2193,10 +2186,10 @@ int uop_dag_classify_contraction_shape(Term root,
   Term addr_a = heap_read(term_val(a_idx) + 1);
   Term addr_b = heap_read(term_val(b_idx) + 1);
 
-  UdgAddrCoeffs ca = {0}, cb = {0}, co = {0};
-  udg_decode_addr_coeffs(addr_a,  &ca);
-  udg_decode_addr_coeffs(addr_b,  &cb);
-  udg_decode_addr_coeffs(addr_out,&co);
+  UopDagAddrCoeffsView ca = {0}, cb = {0}, co = {0};
+  uop_dag_decode_addr_coeffs(addr_a,  &ca);
+  uop_dag_decode_addr_coeffs(addr_b,  &cb);
+  uop_dag_decode_addr_coeffs(addr_out,&co);
   if (!ca.ok || !cb.ok || !co.ok) return 0;
   // Any non-zero address offsets => non-contiguous storage we don't
   // currently route.  Bail.
@@ -2211,9 +2204,9 @@ int uop_dag_classify_contraction_shape(Term root,
   u64 K_total = 1;
   for (u32 i = 0; i < n_K; i++) {
     u32 aid = red_axis_ids[i];
-    u32 ac  = udg_addr_lookup(&ca, aid);
-    u32 bc  = udg_addr_lookup(&cb, aid);
-    u32 oc  = udg_addr_lookup(&co, aid);
+    u32 ac  = uop_dag_addr_coeff_lookup(&ca, aid);
+    u32 bc  = uop_dag_addr_coeff_lookup(&cb, aid);
+    u32 oc  = uop_dag_addr_coeff_lookup(&co, aid);
     if (ac == 0 || bc == 0 || oc != 0) return 0;
     u32 ext = udg_axis_extent(root, aid);
     if (ext == 0) return 0;
@@ -2297,8 +2290,8 @@ int uop_dag_classify_contraction_shape(Term root,
     u32 aid = co.axis_ids[i];
     u32 oc  = co.coeffs  [i];
     if (oc == 0) return 0;
-    u32 a_c = udg_addr_lookup(&ca, aid);
-    u32 b_c = udg_addr_lookup(&cb, aid);
+    u32 a_c = uop_dag_addr_coeff_lookup(&ca, aid);
+    u32 b_c = uop_dag_addr_coeff_lookup(&cb, aid);
     u32 ext = udg_axis_extent(root, aid);
     if (ext == 0) return 0;
     if (a_c != 0 && b_c == 0) {
@@ -2527,23 +2520,23 @@ int uop_dag_classify_batched_gemm(Term root, struct KernelEntry const *ke,
   u32 a_input = inst_a - 1, b_input = inst_b - 1;
   if (a_input >= ke->n_inputs || b_input >= ke->n_inputs || a_input == b_input) return 0;
 
-  UdgAddrCoeffs ca = {0}, cb = {0}, co = {0};
-  udg_decode_addr_coeffs(heap_read(term_val(a_idx) + 1), &ca);
-  udg_decode_addr_coeffs(heap_read(term_val(b_idx) + 1), &cb);
-  udg_decode_addr_coeffs(heap_read(term_val(root)  + 1), &co);
+  UopDagAddrCoeffsView ca = {0}, cb = {0}, co = {0};
+  uop_dag_decode_addr_coeffs(heap_read(term_val(a_idx) + 1), &ca);
+  uop_dag_decode_addr_coeffs(heap_read(term_val(b_idx) + 1), &cb);
+  uop_dag_decode_addr_coeffs(heap_read(term_val(root)  + 1), &co);
   if (!ca.ok || !cb.ok || !co.ok) return 0;
   if (ca.offset != 0 || cb.offset != 0 || co.offset != 0) return 0;
   // K in A and B, never in the output.
-  if (udg_addr_lookup(&ca, red_axis) == 0) return 0;
-  if (udg_addr_lookup(&cb, red_axis) == 0) return 0;
-  if (udg_addr_lookup(&co, red_axis) != 0) return 0;
+  if (uop_dag_addr_coeff_lookup(&ca, red_axis) == 0) return 0;
+  if (uop_dag_addr_coeff_lookup(&cb, red_axis) == 0) return 0;
+  if (uop_dag_addr_coeff_lookup(&co, red_axis) != 0) return 0;
   // Output axes: in A only -> M; in B only -> N; in BOTH -> batch.  Require
   // exactly one of each (the simple single-batch gemm).
   u32 m_axis = 0, n_axis = 0, batch_axis = 0, n_M = 0, n_N = 0, n_batch = 0;
   for (u32 i = 0; i < co.n_axes; i++) {
     u32 aid = co.axis_ids[i];
     if (aid == red_axis) return 0;
-    u32 ac = udg_addr_lookup(&ca, aid), bc = udg_addr_lookup(&cb, aid);
+    u32 ac = uop_dag_addr_coeff_lookup(&ca, aid), bc = uop_dag_addr_coeff_lookup(&cb, aid);
     if      (ac != 0 && bc == 0) { m_axis = aid; n_M++; }
     else if (bc != 0 && ac == 0) { n_axis = aid; n_N++; }
     else if (ac != 0 && bc != 0) { batch_axis = aid; n_batch++; }
@@ -2559,9 +2552,9 @@ int uop_dag_classify_batched_gemm(Term root, struct KernelEntry const *ke,
     u32 aid = cb.axis_ids[i];
     if (aid != red_axis && aid != n_axis && aid != batch_axis) return 0;
   }
-  u32 a_K = udg_addr_lookup(&ca, red_axis), a_M = udg_addr_lookup(&ca, m_axis);
-  u32 b_K = udg_addr_lookup(&cb, red_axis), b_N = udg_addr_lookup(&cb, n_axis);
-  u32 c_M = udg_addr_lookup(&co, m_axis),   c_N = udg_addr_lookup(&co, n_axis);
+  u32 a_K = uop_dag_addr_coeff_lookup(&ca, red_axis), a_M = uop_dag_addr_coeff_lookup(&ca, m_axis);
+  u32 b_K = uop_dag_addr_coeff_lookup(&cb, red_axis), b_N = uop_dag_addr_coeff_lookup(&cb, n_axis);
+  u32 c_M = uop_dag_addr_coeff_lookup(&co, m_axis),   c_N = uop_dag_addr_coeff_lookup(&co, n_axis);
   if (a_K == 0 || a_M == 0 || b_K == 0 || b_N == 0 || c_M == 0 || c_N == 0) return 0;
   // ld/trans from the unit-stride (contiguous inner) axis -- mirrors
   // uop_dag_classify_matmul_shape's convention WITHOUT its canonical check.
@@ -2588,9 +2581,9 @@ int uop_dag_classify_batched_gemm(Term root, struct KernelEntry const *ke,
   out->M = M; out->N = N; out->K = k_extent; out->batch = batch;
   out->ldA = ldA; out->ldB = ldB; out->ldC = ldC;
   out->transA = transA; out->transB = transB;
-  out->batch_stride_a = udg_addr_lookup(&ca, batch_axis);
-  out->batch_stride_b = udg_addr_lookup(&cb, batch_axis);
-  out->batch_stride_c = udg_addr_lookup(&co, batch_axis);
+  out->batch_stride_a = uop_dag_addr_coeff_lookup(&ca, batch_axis);
+  out->batch_stride_b = uop_dag_addr_coeff_lookup(&cb, batch_axis);
+  out->batch_stride_c = uop_dag_addr_coeff_lookup(&co, batch_axis);
   // Per-batch element span (max addressed index + 1) for buffer bounds checks.
   out->a_span = (M - 1) * a_M + (k_extent - 1) * a_K + 1;
   out->b_span = (k_extent - 1) * b_K + (N - 1) * b_N + 1;
@@ -2666,10 +2659,10 @@ int uop_dag_classify_im2col_contraction(Term root,
 
   Term addr_a = heap_read(term_val(a_idx) + 1);
   Term addr_b = heap_read(term_val(b_idx) + 1);
-  UdgAddrCoeffs ca = {0}, cb = {0}, co = {0};
-  udg_decode_addr_coeffs(addr_a,  &ca);
-  udg_decode_addr_coeffs(addr_b,  &cb);
-  udg_decode_addr_coeffs(addr_out,&co);
+  UopDagAddrCoeffsView ca = {0}, cb = {0}, co = {0};
+  uop_dag_decode_addr_coeffs(addr_a,  &ca);
+  uop_dag_decode_addr_coeffs(addr_b,  &cb);
+  uop_dag_decode_addr_coeffs(addr_out,&co);
   if (!ca.ok || !cb.ok || !co.ok) IM2COL_REJ("addr-decode");
   if (ca.offset != 0 || cb.offset != 0 || co.offset != 0) IM2COL_REJ("addr-offset");
 
@@ -2694,12 +2687,12 @@ int uop_dag_classify_im2col_contraction(Term root,
   KEntry K[UDG_CONTRACT_MAX_AXES];
   for (u32 i = 0; i < n_K; i++) {
     K[i].aid = red_axis_ids[i];
-    K[i].a_coeff = udg_addr_lookup(&ca, K[i].aid);
-    K[i].b_coeff = udg_addr_lookup(&cb, K[i].aid);
+    K[i].a_coeff = uop_dag_addr_coeff_lookup(&ca, K[i].aid);
+    K[i].b_coeff = uop_dag_addr_coeff_lookup(&cb, K[i].aid);
     K[i].extent  = udg_axis_extent(root, K[i].aid);
     if (K[i].a_coeff == 0 || K[i].b_coeff == 0 || K[i].extent == 0) IM2COL_REJ("K-coeff-0");
     // K-axis must not be a direct output axis.
-    if (udg_addr_lookup(&co, K[i].aid) != 0) IM2COL_REJ("K-also-out");
+    if (uop_dag_addr_coeff_lookup(&co, K[i].aid) != 0) IM2COL_REJ("K-also-out");
     K[i].has_patch = 0;
   }
 
@@ -2718,8 +2711,8 @@ int uop_dag_classify_im2col_contraction(Term root,
     u32 aid = co.axis_ids[i];
     u32 oc  = co.coeffs  [i];
     if (oc == 0) IM2COL_REJ("oc-0");
-    u32 ac = udg_addr_lookup(&ca, aid);
-    u32 bc = udg_addr_lookup(&cb, aid);
+    u32 ac = uop_dag_addr_coeff_lookup(&ca, aid);
+    u32 bc = uop_dag_addr_coeff_lookup(&cb, aid);
     u32 ext = udg_axis_extent(root, aid);
     if (ext == 0) IM2COL_REJ("oc-ext-0");
     if (ac != 0 && bc == 0) {
@@ -2949,34 +2942,6 @@ int uop_dag_classify_im2col_contraction(Term root,
   out->N_outer_out_stride = forward_conv ? N_axes[0].out_coeff : 0u;
   return 1;
 #undef IM2COL_REJ
-}
-
-// === Public wrappers around udg_decode_addr_coeffs / udg_addr_lookup
-// (codegen/hand_opts.c needs them to implement tinygrad's stride heuristic).
-// UDG_CONTRACT_MAX_AXES == UOP_DAG_ADDR_MAX_AXES; the structs are wire-
-// compatible up to field order so we copy field-by-field.
-
-void uop_dag_decode_addr_coeffs(Term addr, UopDagAddrCoeffsView *out) {
-  if (out == NULL) return;
-  UdgAddrCoeffs c;
-  udg_decode_addr_coeffs(addr, &c);
-  u32 n = c.n_axes;
-  if (n > UOP_DAG_ADDR_MAX_AXES) n = UOP_DAG_ADDR_MAX_AXES;
-  out->n_axes = n;
-  out->offset = c.offset;
-  out->ok     = c.ok;
-  for (u32 i = 0; i < n; i++) {
-    out->axis_ids[i] = c.axis_ids[i];
-    out->coeffs  [i] = c.coeffs  [i];
-  }
-}
-
-u32 uop_dag_addr_coeff_lookup(UopDagAddrCoeffsView const *a, u32 axis_id) {
-  if (a == NULL) return 0;
-  for (u32 i = 0; i < a->n_axes; i++) {
-    if (a->axis_ids[i] == axis_id) return a->coeffs[i];
-  }
-  return 0;
 }
 
 u32 uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap) {

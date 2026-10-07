@@ -71,6 +71,7 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- The address-coefficient decoder exists once: dag_scan.c's contraction classifiers and the UPCAST stride heuristic share `uop_dag_decode_addr_coeffs` / `uop_dag_addr_coeff_lookup` over `UopDagAddrCoeffsView`, where a private `UdgAddrCoeffs` copy of the same struct sat behind field-by-field copying wrappers.
 - `src/uop/movement_index.c` (`uop_resolve_movement_chain`) and `bin/test_uop_movement_index` are gone: a second port of tinygrad's `apply_movement_op` that only its own test called.  Production resolves movement ops in `src/schedule/indexing.c`.
 - The UPat rewrite bridge is gone: `uop_pattern_rewrite`, which ran a `UPatRule` table through `uop_graph_rewrite`, had no caller left once the opt-pass mirror went, and `UPatRule` goes with it.  `upat_match` stays (the TC recogniser and the bufferize walkers match with it), and `test_uop_upat` keeps its matching cases.
 - `uop_range_split`, `uop_range_with_axis_type`, `uop_range_extent_is_var` and `uop_range_var_id` are gone: the first two served only the deleted opt-pass mirror and its test, and nothing ever called the other two.
