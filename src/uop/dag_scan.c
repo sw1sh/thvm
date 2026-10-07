@@ -284,9 +284,7 @@ int uop_dag_is_binary_ew(u32 op) { return uop_is_binary_elementwise((u8)op); }
 // `cpu_blas_dispatch` (backend/cpu/blas.c) needs M/N/K and the
 // input-slot mapping for matmul-shaped kernels so it can issue an
 // Accelerate dgemm.  This helper recovers a TileGemmInfo-shaped
-// summary from `ke->cached_lift.store_root` (the lifted UOp DAG)
-// plus `ke->input_views[]` (which the lifter already used to
-// compute matmul addresses).
+// summary from `ke->cached_lift.store_root` (the lifted UOp DAG).
 //
 // Strategy:
 //   1. Peel an optional UOP_OPT(_, TC, _) wrapper from STORE.value
@@ -301,8 +299,8 @@ int uop_dag_is_binary_ew(u32 op) { return uop_is_binary_elementwise((u8)op); }
 //   4. Recover input slot indices from the UOP_BUFFER instance field
 //      on the matmul A/B operands (`instance == slot + 1` for inputs;
 //      see lift_input_buffer in schedule/kernel_lift.c).
-//   5. Derive ldA / ldB / transpose flags from
-//      `ke->input_views[slot]` exactly as `tile_gemm_views_ok` does.
+//   5. Derive ldA / ldB / transpose flags from the operands' address
+//      coefficients.
 //
 // Returns 1 iff the DAG is matmul-shaped AND every output is
 // recoverable.  On 0, callers should fall back to the legacy
@@ -447,57 +445,11 @@ int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
   return 1;
 }
 
-// View-strides matcher: matmul kernels run inside a 3-axis range
-// nest [M, K, N], with one operand broadcast-zero on N (operand A)
-// and the other broadcast-zero on M (operand B).  Mirrors
-// tile_gemm_views_ok in src/schedule/tile.c exactly so the BLAS
-// dispatcher accepts the same set of layouts the legacy
-// tile_analyze_gemm path accepted.
-//
-// Kept as the input_views-based fallback for the hybrid path: when the
-// DAG-side extractor (uop_dag_extract_matmul_strides_from_addr) declines
-// because the address doesn't match the canonical IADD-of-(IMUL+RANGE)
-// shape (e.g. a future affine-coalesced layout), the matmul classifier
-// falls back to this view reader.  Once every shape `lift_scalar_index`
-// can produce decodes via the DAG path, this helper retires.
-//
-// Returns 1 with *out_ld + *out_trans on success; 0 otherwise.
-// `is_a` selects the A vs B stride pattern (different broadcast axis).
-static int udg_match_view_strides(View const *v, u32 M, u32 N, u32 K,
-                                  int is_a, u32 *out_ld, u32 *out_trans) {
-  if (v == NULL || v->shape.ndim != 3) return 0;
-  if (v->shape.dims[0] != M || v->shape.dims[1] != K
-      || v->shape.dims[2] != N) return 0;
-  if (is_a) {
-    // A: 3rd axis (N) is broadcast => stride[2] == 0.
-    if (v->strides[2] != 0) return 0;
-    if (v->strides[0] == (i32)K && v->strides[1] == 1) {
-      *out_ld = K; *out_trans = 0; return 1;
-    }
-    if (v->strides[0] == 1 && v->strides[1] == (i32)M) {
-      *out_ld = M; *out_trans = 1; return 1;
-    }
-    return 0;
-  } else {
-    // B: 1st axis (M) is broadcast => stride[0] == 0.
-    if (v->strides[0] != 0) return 0;
-    if (v->strides[1] == (i32)N && v->strides[2] == 1) {
-      *out_ld = N; *out_trans = 0; return 1;
-    }
-    if (v->strides[1] == 1 && v->strides[2] == (i32)K) {
-      *out_ld = K; *out_trans = 1; return 1;
-    }
-    return 0;
-  }
-}
-
 // Public entry: extract M/N/K + input slot mapping + ldA/ldB +
-// transpose flags from the lifted UOp DAG `root` and the kernel's
-// `input_views[]`.  Returns 1 on success.  All five UOp-DAG-side
-// gates (matmul classify, output buf shape, input slot recovery,
-// per-input view stride pattern) must succeed; any single gate
-// failure returns 0 and lets the caller fall back to the legacy
-// program[] path.
+// transpose flags from the lifted UOp DAG `root`.  Returns 1 on
+// success.  All UOp-DAG-side gates (matmul classify, output buf shape,
+// input slot recovery, per-operand address strides) must succeed; any
+// single gate failure returns 0 and the kernel takes no BLAS route.
 int uop_dag_classify_matmul_shape(Term root,
                                   struct KernelEntry const *ke,
                                   UopDagGemmShape *out) {
@@ -602,15 +554,7 @@ int uop_dag_classify_matmul_shape(Term root,
       transB = 0;
     }
   } else if (!dag_a_ok || !dag_b_ok) {
-    // Hybrid fallback: if the DAG path declined (unsupported addr shape)
-    // and input_views[] is populated, fall back to the legacy view-stride
-    // matcher.  Once every lift_scalar_index output decodes via the DAG,
-    // this fallback retires.
-    if (ke->input_views == NULL) return 0;
-    if (!udg_match_view_strides(&ke->input_views[a_input], M, N, k_extent,
-                                /*is_a=*/1, &ldA, &transA)) return 0;
-    if (!udg_match_view_strides(&ke->input_views[b_input], M, N, k_extent,
-                                /*is_a=*/0, &ldB, &transB)) return 0;
+    return 0;
   } else {
     // Sanity: each arm's other_axis must be distinct (m != n).
     if (axis_m == axis_n) return 0;
