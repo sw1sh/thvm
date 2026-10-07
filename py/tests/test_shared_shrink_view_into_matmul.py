@@ -20,15 +20,11 @@ Controls that PASS prove it is fusion-time movement-op index dropping,
 not a math error: elementwise (q*q) / reduce (q.sum) of the SAME view, a
 realize() barrier on q, and two SEPARATE q subgraphs all match numpy.
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
+import helpers  # noqa: F401
 
 
 class TestSharedShrinkViewIntoMatmul(unittest.TestCase):
@@ -62,7 +58,6 @@ class TestSharedShrinkViewIntoMatmul(unittest.TestCase):
 
     def test_realize_barrier_control(self):
         """Realize barrier on q -> correct (PASSES today)."""
-        import thvm
         q = self._q()
         q.realize()
         out = self._dot(q).numpy()

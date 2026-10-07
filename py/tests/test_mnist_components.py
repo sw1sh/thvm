@@ -16,18 +16,11 @@ far (stable across CPU + CUDA, all numerically correct):
   - local Metal in-house realize is a stub (dispatch_kernel not implemented);
     in-house thvm.Tensor runs on CPU-walker or CUDA, not local Metal.
 """
-import os
 import unittest
 
 import numpy as np
 
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
 
 
 _rng = np.random.default_rng(0)
@@ -48,7 +41,7 @@ COMPONENTS = {
 }
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestMnistComponents(unittest.TestCase):
     pass
 

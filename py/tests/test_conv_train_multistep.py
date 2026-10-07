@@ -10,18 +10,13 @@ batch lowers it.
 
     make py && python -m pytest py/tests/test_conv_train_multistep.py
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Tensor, nn  # noqa: E402
-from thvm.helpers import Context  # noqa: E402
+import helpers  # noqa: F401
+from thvm import Tensor, nn
+from thvm.helpers import Context
 
 BS, STEPS = 2, 4
 

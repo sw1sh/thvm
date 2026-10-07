@@ -7,15 +7,13 @@ table from V = 1e3 to 1e5 rows adds only the V*D gradient init: a one-hot
 path would slow down 100x, the native one stays well under 3x.  Values are
 checked against numpy (np.add.at for the gradient) at every size.
 """
-import os
-import sys
 import time
 import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
-from thvm import Device, Tensor  # noqa: E402
+import helpers  # noqa: F401
+from thvm import Device, Tensor
 
 N, D = 100_000, 64
 

@@ -15,7 +15,6 @@ import unittest
 import numpy as np
 
 from thvm import Context, Tensor, TinyJit, nn
-from thvm.helpers import getenv
 
 
 def _bc_inv_values(opt):

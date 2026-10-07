@@ -21,27 +21,17 @@ the [0, logit] log_softmax, and the train step under TinyJit with fresh
 inputs.  The aggregate is the dense segment sum the trainers' scatter_reduce
 computes.  The tinygrad comparisons run when tinygrad is importable.
 """
-import os
-import sys
 import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
-from thvm import Context, Device, Tensor, TinyJit, nn  # noqa: E402
-from thvm.dtypes import dtypes  # noqa: E402
-from thvm.tensor import _TH  # noqa: E402
-from thvm.thvm import K  # noqa: E402
+import helpers
+from thvm import Context, Device, Tensor, TinyJit, nn
+from thvm.dtypes import dtypes
+from thvm.tensor import _TH
+from thvm.thvm import K
 
 NATIVE = Device.DEFAULT == "CPU"
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
 
 
 def kernels():
@@ -191,7 +181,7 @@ class TestCat(unittest.TestCase):
         want_w[:4] = a.T @ g[:, 6:]
         np.testing.assert_allclose(tw.grad.numpy(), want_w, rtol=1e-5, atol=1e-6)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_cat_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         rng = np.random.default_rng(5)
@@ -251,7 +241,7 @@ class TestStack(unittest.TestCase):
         np.testing.assert_array_equal(x.grad.numpy(), [0.0])
         np.testing.assert_array_equal(y.grad.numpy(), [1.0])
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_stack_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         rng = np.random.default_rng(7)
@@ -499,7 +489,7 @@ class TestCatATP(unittest.TestCase):
         self.assertEqual(got.shape, want.shape)
         np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_model_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         from tinygrad import nn as tgnn
@@ -598,7 +588,7 @@ class TestCatJit(unittest.TestCase):
             np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-6)
             np.testing.assert_allclose(b, c, rtol=1e-5, atol=1e-6)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_jit_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         from tinygrad import nn as tgnn

@@ -13,17 +13,12 @@ unmapped) between building a reader and reading it.
 
 Each case runs in a child process, so a crash fails the test, not the run.
 """
-import os
-import pathlib
-import subprocess
-import sys
 import unittest
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+import helpers
 
 _PRELUDE = r"""
-import os, sys, warnings
-sys.path.insert(0, os.environ["THVM_PY"])
+import os, warnings
 import numpy as np
 from thvm import GlobalCounters, Tensor, TinyJit, nn
 from thvm.tensor import _TH
@@ -179,9 +174,7 @@ check("CLONE", c.numpy(), x)
 
 
 def _run(src, **env):
-    env = dict(os.environ, DEV="cpu", THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")), **env)
-    out = subprocess.run([sys.executable, "-c", src], env=env,
-                         capture_output=True, text=True, timeout=1800)
+    out = helpers.run_child(src, 1800, DEV="cpu", **env)
     if out.returncode != 0:
         raise AssertionError(f"child died rc={out.returncode}:\n{out.stdout}\n{out.stderr[-3000:]}")
     return out.stdout

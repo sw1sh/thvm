@@ -18,21 +18,15 @@ child process whose JIT never compiles, so the walker executes every kernel.
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_nested_reduce_broadcast.py -q
 """
 import itertools
-import os
-import pathlib
-import subprocess
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import K, Tensor  # noqa: E402
-from thvm.dtypes import dtypes  # noqa: E402
-from thvm.tensor import _TH  # noqa: E402
-from thvm.thvm import Term  # noqa: E402
+import helpers
+from thvm import K, Tensor
+from thvm.dtypes import dtypes
+from thvm.tensor import _TH
+from thvm.thvm import Term
 
 SHAPE = (4, 2, 3, 3)
 CASES = list(itertools.product((True, False), ("const", "buffer", "none"),
@@ -87,9 +81,6 @@ class TestNestedReduceBroadcast(unittest.TestCase):
 
 
 _CHILD = r"""
-import os, sys
-sys.path.insert(0, os.environ["THVM_PY"])
-sys.path.insert(0, os.environ["THVM_TESTS"])
 import numpy as np
 import test_nested_reduce_broadcast as t
 for case in t.CASES:
@@ -104,13 +95,9 @@ class TestNestedReduceBroadcastWalker(unittest.TestCase):
     def test_grid_uop_walker(self):
         # A warmup the JIT never reaches, no batched precompile, and an opt
         # tag no cached dylib carries: every kernel falls to the UOp walker.
-        env = dict(os.environ, DEV="cpu",
-                   THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
-                   THVM_TESTS=str(pathlib.Path(__file__).resolve().parent),
-                   THVM_CPU_JIT_WARMUP="1000000000", THVM_CPU_JIT_PARALLEL="0",
-                   THVM_CPU_JIT_OPT="O0", THVM_CPU_UOP_WALK_TRACE="1")
-        out = subprocess.run([sys.executable, "-c", _CHILD], env=env,
-                             capture_output=True, text=True, timeout=300)
+        out = helpers.run_child(_CHILD, 300, DEV="cpu", THVM_CPU_JIT_WARMUP="1000000000",
+                                THVM_CPU_JIT_PARALLEL="0", THVM_CPU_JIT_OPT="O0",
+                                THVM_CPU_UOP_WALK_TRACE="1")
         lines = [l for l in out.stdout.splitlines() if l.startswith("CASE ")]
         self.assertEqual(len(lines), len(CASES),
                          f"child failed:\n{out.stdout}\n{out.stderr}")

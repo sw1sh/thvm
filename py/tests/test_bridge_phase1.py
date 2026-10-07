@@ -6,13 +6,11 @@ autodiff, and realize -- without the Phase-2 Tensor class.
 
     make py && python -m pytest py/tests/test_bridge_phase1.py
 """
-import pathlib
 import struct
-import sys
 import unittest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from thvm.thvm import Thvm, K  # noqa: E402
+import helpers  # noqa: F401
+from thvm.thvm import Thvm, K
 
 
 def _f32(values):

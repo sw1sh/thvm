@@ -36,22 +36,11 @@ These guard two distinct findings from the eager-vs-JIT boundary bisect
      test_batchnorm_block_bwd_n1 below) -- that one's true grad is 0 and
      thvm fails to cancel; THIS one drops a real nonzero adjoint term.
 """
-import os
-import sys
 import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("THVM_PY", os.path.join(
-    os.path.dirname(__file__), "..")))
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
 
 
 def _thvm_grad(build):
@@ -72,7 +61,7 @@ def _tg_grad(build):
     return np.asarray(x.grad.numpy(), dtype=np.float32).reshape(-1)
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestDetachReduceBwdParity(unittest.TestCase):
     def _assert_parity(self, build, tol=1e-4):
         g_thvm = _thvm_grad(build)

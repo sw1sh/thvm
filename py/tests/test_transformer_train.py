@@ -16,19 +16,14 @@ tinygrad-parity test_transformer_block_parity):
 
     make py && python -m pytest py/tests/test_transformer_train.py
 """
-import os
-import sys
 import unittest
 
 import numpy as np
 
-PY = os.path.join(os.path.dirname(__file__), "..")
-sys.path.insert(0, os.environ.get("THVM_PY", PY))
-
-import thvm  # noqa: E402
-import thvm.optim as optim  # noqa: E402
-from thvm import Context  # noqa: E402
-from thvm import Tensor as T  # noqa: E402
+import helpers  # noqa: F401
+import thvm.optim as optim
+from thvm import Context
+from thvm import Tensor as T
 
 B, S, H, Dh = 2, 4, 2, 3
 D = H * Dh

@@ -14,17 +14,12 @@ guard against over-fixing (they legitimately fold).
 
     make py && python -m pytest py/tests/test_reduce_kind_chain.py
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Context, Tensor, nn  # noqa: E402
+import helpers  # noqa: F401
+from thvm import Context, Tensor, nn
 
 TOL = 1e-3
 

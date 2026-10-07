@@ -16,24 +16,11 @@ only fires for groups>1, including depthwise (groups == cin).
 
     make -C <repo> py && python -m pytest py/tests/test_grouped_conv_parity.py
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-PY = str(ROOT / "py")
-sys.path.insert(0, os.environ.get("THVM_PY", PY))
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
 
 
 # (name, N, Cin, Cout, H, K, groups)  -- Cin = groups * cin_per_group,
@@ -46,7 +33,7 @@ CASES = {
 }
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestGroupedConvParity(unittest.TestCase):
     pass
 

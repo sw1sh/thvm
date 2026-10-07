@@ -21,19 +21,13 @@ tinygrad reference runs here.
     make py && DEV=cpu PYTHONPATH=py:$HOME/tinygrad python -m pytest py/tests/test_optim_step_gc.py -q
 """
 import os
-import pathlib
-import subprocess
-import sys
 import tempfile
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-
-from thvm import Device  # noqa: E402
+import helpers
+from thvm import Device
 
 NATIVE = Device.DEFAULT == "CPU"
 
@@ -41,14 +35,6 @@ MUON1 = dict(lr=0.02, momentum=0.95, weight_decay=0.1, nesterov=True)
 MUON6 = dict(lr=0.005, momentum=0.9, weight_decay=0.0, nesterov=True)
 LARS5 = dict(lr=0.01, momentum=0.9, weight_decay=1e-4, tcoef=0.001, nesterov=False)
 STEPS2 = 3
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
 
 
 def muon_lars_runs(run, optim):
@@ -134,10 +120,8 @@ def head_step_runs(Tensor, nn, TinyJit, Context):
 
 
 _CHILD = r"""
-import os, sys
+import os
 import numpy as np
-sys.path.insert(0, os.environ["THVM_PY"])
-sys.path.insert(0, os.environ["THVM_TESTS"])
 import test_optim_step_gc as t
 from test_muon_lars_parity import _thvm_run
 from thvm import Context, Tensor, TinyJit, nn, optim
@@ -150,17 +134,11 @@ print("DONE", flush=True)
 
 
 def _child(gc_kb, walker, out):
-    env = dict(os.environ, THVM_PY=str(ROOT / "py"),
-               THVM_TESTS=str(pathlib.Path(__file__).resolve().parent), OUT=out,
-               THVM_CPU_JIT_WARMUP="1000000000" if walker else "0")
-    env.pop("THVM_GC_KB", None)
-    if gc_kb is not None:
-        env["THVM_GC_KB"] = str(gc_kb)
-    return subprocess.run([sys.executable, "-c", _CHILD], env=env,
-                          capture_output=True, text=True, timeout=1800)
+    return helpers.run_child(_CHILD, 1800, OUT=out, THVM_GC_KB=None if gc_kb is None else str(gc_kb),
+                             THVM_CPU_JIT_WARMUP="1000000000" if walker else "0")
 
 
-@unittest.skipUnless(NATIVE and _have_tg(), "tinygrad parity on the CPU backend")
+@unittest.skipUnless(NATIVE and helpers.have_tinygrad(), "tinygrad parity on the CPU backend")
 class TestOptimStepGC(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -17,15 +17,13 @@ chaotically over steps on a small near-degenerate problem.  Parity is
 checked STEP-1-EXACT on every config, and the multi-step trajectory is
 tracked on a well-conditioned (16x8) problem where the chaos is tame.
 """
-import os
-import sys
 import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
-from thvm import Context, Tensor  # noqa: E402
-from thvm import optim           # noqa: E402
+import helpers  # noqa: F401
+from thvm import Context, Tensor
+from thvm import optim
 
 try:
     import tinygrad              # noqa: F401

@@ -25,19 +25,13 @@ truncates to 31, where float64 gives 32.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_int_reduce_exact.py -q
 """
-import os
-import pathlib
 import re
-import subprocess
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Tensor  # noqa: E402
+import helpers
+from thvm import Tensor
 
 
 def _cases():
@@ -107,9 +101,6 @@ def run_case(arr, op, axis):
 
 
 _CHILD = r"""
-import os, sys
-sys.path.insert(0, os.environ["THVM_PY"])
-sys.path.insert(0, os.environ["THVM_TESTS"])
 import numpy as np
 import test_int_reduce_exact as t
 for name, arr, op, axis in t.CASES:
@@ -126,12 +117,7 @@ for name in t.FLOAT_BODY_CASES:
 
 
 def _run_child(extra_env):
-    env = dict(os.environ, DEV="cpu",
-               THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
-               THVM_TESTS=str(pathlib.Path(__file__).resolve().parent),
-               THVM_CPU_UOP_WALK_TRACE="1", **extra_env)
-    return subprocess.run([sys.executable, "-c", _CHILD], env=env,
-                          capture_output=True, text=True, timeout=600)
+    return helpers.run_child(_CHILD, 600, DEV="cpu", THVM_CPU_UOP_WALK_TRACE="1", **extra_env)
 
 
 class TestIntReduceExact(unittest.TestCase):

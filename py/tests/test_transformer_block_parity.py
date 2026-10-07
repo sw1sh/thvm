@@ -54,24 +54,11 @@ These tests are EXPECTED TO FAIL at HEAD and stay red for the fix workflow.
 
     make -C <root> py && python -m pytest py/tests/test_transformer_block_parity.py
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-PY = str(ROOT / "py")
-sys.path.insert(0, os.environ.get("THVM_PY", PY))
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
 
 
 # ---- block dims (small, as specified) --------------------------------
@@ -163,7 +150,7 @@ def _relmax(th, tg):
     return float(np.abs(th - tg).max() / (np.abs(tg).max() + 1e-6))
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestTransformerBlockParity(unittest.TestCase):
 
     def setUp(self):
@@ -246,7 +233,7 @@ def _mlp_block(p, x, ln1, ln2):
     return LN(h + ff, *ln2)
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestTransformerTrain(unittest.TestCase):
     """TRAIN: descent on the transformer sub-block that has a CORRECT
     forward (residual + LayerNorm + 2-layer MLP), with both Adam and Muon,

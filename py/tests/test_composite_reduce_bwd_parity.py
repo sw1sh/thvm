@@ -34,25 +34,11 @@ tinygrad's single-reduce-per-kernel shape (do not skip / quarantine). Run:
 
     make py && python -m pytest py/tests/test_composite_reduce_bwd_parity.py
 """
-import os
-import pathlib
-import subprocess
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-PY = str(ROOT / "py")
-sys.path.insert(0, os.environ.get("THVM_PY", PY))
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
 
 
 def _conv2d_np(x, w):
@@ -93,7 +79,7 @@ def _fd_grad(X, W0, eps=1e-6):
     return g
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestCompositeReduceBwdParity(unittest.TestCase):
 
     def test_relu_bn_train_maxpool_sum_conv_weight_grad_vs_fp64_oracle(self):

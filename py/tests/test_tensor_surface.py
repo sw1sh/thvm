@@ -4,22 +4,12 @@ softmin (mixin/op.py:709-724) and max_shape / max_numel
 (mixin/movement.py:49-57), checked against numpy and, when importable,
 against tinygrad itself.
 """
-import os
-import sys
 import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
-from thvm import Tensor  # noqa: E402
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
+from thvm import Tensor
 
 
 def _np_softmin(x, axis):
@@ -36,7 +26,7 @@ class TestTensorSurface(unittest.TestCase):
             got = Tensor(self.X).softmin(axis=axis).numpy()
             np.testing.assert_allclose(got, _np_softmin(self.X, axis), atol=1e-6)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_softmin_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         got = Tensor(self.X).softmin().numpy()

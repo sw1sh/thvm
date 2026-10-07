@@ -5,19 +5,14 @@ clone (tensor.py:344-351, uop/ops.py:887-893), to(device, force)
 (mixin/op.py:523-607), checked against numpy and, when importable,
 against tinygrad itself.
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Tensor, dtypes  # noqa: E402
-from thvm.dtypes import DType  # noqa: E402
-from thvm.tensor import _TH  # noqa: E402
+import helpers
+from thvm import Tensor, dtypes
+from thvm.dtypes import DType
+from thvm.tensor import _TH
 
 
 class TestClone(unittest.TestCase):
@@ -128,14 +123,6 @@ class TestTo(unittest.TestCase):
         self.assertEqual(y.grad.tolist(), [3., 3.])
 
 
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
 class TestVarStd(unittest.TestCase):
     X = np.array([[1., 2, 3], [4, 5, 7]], np.float32)
 
@@ -190,7 +177,7 @@ class TestVarStd(unittest.TestCase):
         self.assertEqual(m.dtype, dtypes.float32)
         np.testing.assert_allclose(m.item(), 7 / 3, rtol=1e-6)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_var_std_match_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         for kw in ({}, {"axis": 0}, {"axis": -1, "keepdim": True},

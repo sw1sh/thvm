@@ -15,16 +15,9 @@ import unittest
 
 import numpy as np
 
+import helpers
 from thvm import Tensor, dtypes, nn
 from thvm.nn.state import safe_load, safe_load_metadata, safe_save
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
 
 
 class TestSafetensors(unittest.TestCase):
@@ -72,7 +65,7 @@ class TestSafetensors(unittest.TestCase):
         got = nn.state.safe_load(self.path)
         np.testing.assert_array_equal(got["w"].numpy(), self.w)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_bytes_match_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         from tinygrad.nn.state import safe_save as tg_safe_save
@@ -110,7 +103,7 @@ class TestSafetensors(unittest.TestCase):
         self.assertEqual(got["h"].dtype, dtypes.float32)
         self.assertEqual(got["i64"].dtype, dtypes.int32)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_loads_tinygrad_file_with_other_dtypes(self):
         from tinygrad import Tensor as TgTensor
         from tinygrad.nn.state import safe_save as tg_safe_save
@@ -123,7 +116,7 @@ class TestSafetensors(unittest.TestCase):
         np.testing.assert_array_equal(got["i64"].numpy(), i64.astype(np.int32))
         np.testing.assert_array_equal(got["u8"].numpy(), u8.astype(np.int32))
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_tinygrad_loads_our_file(self):
         from tinygrad.nn.state import safe_load as tg_safe_load
         safe_save(self._tensors(), self.path)
