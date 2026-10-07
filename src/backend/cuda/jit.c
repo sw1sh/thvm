@@ -632,32 +632,6 @@ fn void cuda_jit_graph_invalidate(u32 slot) {
 // Returns 1 with (grid_x, block_x) on success; 0 if the DAG has no
 // axes / overflows 32 bits / a block dim exceeds the V100 cap (1024
 // threads/block on sm_70).
-// Find the OPT(_, GROUP_REDUCE, k) wrapping a KAX_GROUP_REDUCE range
-// and return k -- the cooperative block size to launch.  The range's
-// own extent is the FULL reduce extent (each thread strides it by k);
-// the OPT factor is the cooperative thread count.  Returns 0 if no
-// GROUP_REDUCE OPT is present.
-static u32 cuda_dag_group_reduce_factor(Term t) {
-  if (term_tag(t) != TAG_UOP) return 0;
-  u32 op  = term_ext(t);
-  u64 loc = term_val(t);
-  if (op == UOP_OPT) {
-    u32 kind = (u32)term_val(heap_read(loc + 1));
-    if (kind == UOP_OPT_GROUP_REDUCE) {
-      return (u32)term_val(heap_read(loc + 2));
-    }
-    return cuda_dag_group_reduce_factor(heap_read(loc + 0));
-  }
-  if (op == UOP_RANGE || op == UOP_BUFFER || op == UOP_CONST
-      || op == UOP_INVALID) return 0;
-  u8 ar = uop_arity((u8)op);
-  for (u8 i = 0; i < ar; i++) {
-    u32 f = cuda_dag_group_reduce_factor(heap_read(loc + i));
-    if (f != 0) return f;
-  }
-  return 0;
-}
-
 fn int cuda_dag_dispatch_shape(struct KernelEntry const *ke, u32 *grid_x,
                                u32 *block_x) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
@@ -682,7 +656,7 @@ fn int cuda_dag_dispatch_shape(struct KernelEntry const *ke, u32 *grid_x,
   // NOT the range extent (which is the full reduce extent each thread
   // strides over).  Look up the OPT wrap explicitly.
   u32 group_reduce_extent = has_group_reduce
-      ? cuda_dag_group_reduce_factor(ke->cached_lift.store_root) : 0;
+      ? rmu_group_reduce_factor(ke->cached_lift.store_root) : 0;
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
   u32 grid, block;
   if (group_reduce_extent != 0) {
