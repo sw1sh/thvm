@@ -15,9 +15,8 @@
        (second shape of the same family).
      - Both dispatch routes agree on the wrong value (THVM_CPU_JIT_WARMUP
        forced-walker matches the JIT), so the bug is in the shared kernel
-       lift, not a renderer.  No fusion env knob changes the result
-       (THVM_BUFFERIZE_REDUCE_FUSE_MULTI=0, THVM_FUSE_REDUCE_INTO_REDUCE=0,
-       THVM_CPU_BLAS_DISABLE=1).
+       lift, not a renderer.  THVM_CPU_BLAS_DISABLE=1 does not change the
+       result.
      - Pre-realizing the reduce scalar before the EXPAND is correct, which
        is the workaround NN/Examples/DeepSeekV2/Decode.wl (dsvRmsNorm) uses.
 

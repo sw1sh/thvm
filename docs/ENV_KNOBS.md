@@ -38,13 +38,6 @@ update the matching row here in the same change.
 | Knob | Default | Effect |
 | --- | --- | --- |
 | `THVM_BUFFERIZE_DEBUG` | off | Debug the bufferize classifier. |
-| `THVM_BUFFERIZE_REDUCE_FUSE_MULTI` | (impl) | Multi-reduce fusion in bufferize. |
-| `THVM_BUFFERIZE_SOFTMAX_REDUCE_TILE_CAP` | (impl) | Softmax reduce tile cap. |
-| `THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE` | (impl) | Keep non-matmul reduces realized. |
-| `THVM_BUFFERIZE_SKIP_SMALL_EXPAND` | (impl) | Skip bufferizing small EXPAND ops. |
-| `THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED` | (impl) | Skip the reduce-into-reduce seed. |
-| `THVM_FUSE_REDUCE_INTO_REDUCE` | on | Fuse a reduce into a consuming REDUCE (softmax sum into attn@V, the conv-input-grad pair) -- tinygrad-faithful reduce-absorbs-reduce, now that the multi-axis REDUCE renderer has landed. `0` reverts to the historical per-reduce-kernel split. |
-| `THVM_REDUCE_UNMARK_CAP` | (impl) | Reduce-unmark capacity. |
 
 ## Codegen tuning
 

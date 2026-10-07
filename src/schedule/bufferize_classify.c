@@ -419,87 +419,6 @@ static int bufferize_reduce_consumer_is_broadcast_chain(u64 reduce_loc) {
 }
 
 
-static u32 bufferize_reduce_count(void) {
-  u32 n = 0;
-  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-    if (BUFFERIZE_NODES[i].op == UOP_REDUCE) n++;
-  }
-  return n;
-}
-
-// Walk up from `start_loc` through unique-parent ops (movement,
-// scalar-preserving elementwise, etc.) until we hit the first
-// REALIZED ancestor in BUFFERIZE_NODES.  Returns that ancestor's
-// loc -- the "absorbing boundary" that owns the kernel which would
-// receive `start_loc`'s inlined UOp subgraph.  Returns 0 if the
-// walk loses uniqueness (multi-parent intermediate, no parent
-// found in BUFFERIZE_NODES) before finding one.  Bounded by
-// `hops_left` to avoid pathological recursion.
-//
-// Purpose: rangeify_try_lower_elementwise rejects kernels with > 1
-// REDUCE op.  When inline-softmax-broadcast-reduce unmarks a REDUCE
-// whose absorbing kernel root is ITSELF a REDUCE (e.g. a BN-mean
-// chain folding into a downstream maxpool/grad reduce), the merged
-// kernel ends up with 2 REDUCE ops and bails out of rangeify,
-// dispatching via the slower per-op metal encoder instead of the
-// tile-jit path.  Returning the absorbing boundary's op lets the
-// rule gate inlining on the consumer being a non-REDUCE root.
-static u64 bufferize_absorbing_boundary(u64 start_loc, u32 hops_left) {
-  // THVM_BUFFERIZE_DEBUG=1: trace the absorbing-root walk so we can
-  // diagnose REDUCE-chain fusion failures.  Print the start node, then
-  // each parent hop with its op + realized flag.  When the walk bails
-  // (multi-parent, no parent, or hop limit), explain why.  Used to
-  // localize cases where a REDUCE-into-REDUCE chain like kid 105 ->
-  // kid 106 on beautiful_mnist isn't seen as such by this pass.
-  int trace = 0;
-  {
-    static int known = 0, on = 0;
-    if (!known) {
-      char const *e = getenv("THVM_BUFFERIZE_DEBUG");
-      on = (e != NULL && e[0] == '1');
-      known = 1;
-    }
-    trace = on;
-  }
-  if (trace) {
-    u32 sidx = bufferize_info_find(start_loc);
-    u8  sop  = (sidx != 0xFFFFFFFFu) ? BUFFERIZE_NODES[sidx].op : 0xFF;
-    fprintf(stderr, "[bufdbg] absorb walk start: loc=%llu op=%u realized=%u\n",
-            (unsigned long long)start_loc,
-            sop,
-            (sidx != 0xFFFFFFFFu) ? BUFFERIZE_NODES[sidx].realized : 0);
-  }
-  u64 cur = start_loc;
-  while (hops_left > 0) {
-    u64 next = bufferize_unique_uop_parent(cur);
-    if (next == 0) {
-      if (trace) fprintf(stderr, "[bufdbg]   bail: no unique parent for loc=%llu\n",
-                         (unsigned long long)cur);
-      return 0;
-    }
-    u32 idx = bufferize_info_find(next);
-    if (idx == 0xFFFFFFFFu) {
-      if (trace) fprintf(stderr, "[bufdbg]   bail: parent loc=%llu not in BUFFERIZE_NODES\n",
-                         (unsigned long long)next);
-      return 0;
-    }
-    if (trace) fprintf(stderr, "[bufdbg]   hop %u: loc=%llu op=%u realized=%u\n",
-                       hops_left,
-                       (unsigned long long)next,
-                       BUFFERIZE_NODES[idx].op,
-                       BUFFERIZE_NODES[idx].realized);
-    if (BUFFERIZE_NODES[idx].realized) {
-      if (trace) fprintf(stderr, "[bufdbg]   -> absorb root op=%u\n",
-                         BUFFERIZE_NODES[idx].op);
-      return next;
-    }
-    cur = next;
-    hops_left--;
-  }
-  if (trace) fprintf(stderr, "[bufdbg]   bail: exhausted hops\n");
-  return 0;
-}
-
 // A REDUCE at `loc` (the consumer of an inner reduce) belongs to a
 // reduce chain whose kernel root is a realized REDUCE iff following its
 // unique-consumer reduce links upward eventually reaches a still-realized
@@ -523,30 +442,6 @@ static int bufferize_reduce_consumer_in_realized_chain(u64 loc, u32 hops_left) {
     loc = cons[0];                                      // mid-chain: keep walking
   }
   return 0;
-}
-
-// Gate the softmax-broadcast-reduce / scalar-tail rules' multi-reduce
-// generalization.  Each REDUCE is checked independently by
-// bufferize_reduce_consumer_is_broadcast_chain, so removing the
-// "exactly one REDUCE in the graph" restriction is safe per-rule.
-// Default-on; THVM_BUFFERIZE_REDUCE_FUSE_MULTI=0 reverts to the
-// historical single-reduce gate.
-static int bufferize_reduce_fuse_multi_enabled(void) {
-  char const *e = getenv("THVM_BUFFERIZE_REDUCE_FUSE_MULTI");
-  return e == NULL ? 1 : (e[0] != '0');
-}
-
-// Tile-feasibility predicate for the multi-reduce-fuse generalization:
-// rangeify_try_lower_elementwise bails when a kernel program carries
-// > 1 REDUCE op, and the rangeify-less fallback dispatches to the
-// per-op metal encoder (~2-3x slower than the tile-jit path on
-// beautiful-mnist-shape kernels).  Default-on; the env var is provided
-// for bisection.  When 0, the rule falls back to the historical
-// behaviour of inlining every legal candidate regardless of whether
-// the absorbing kernel root is also a REDUCE.
-static int bufferize_softmax_reduce_tile_cap_enabled(void) {
-  char const *e = getenv("THVM_BUFFERIZE_SOFTMAX_REDUCE_TILE_CAP");
-  return e == NULL ? 1 : (e[0] != '0');
 }
 
 // Reduce-epilogue fusion: when a non-matmul REDUCE has exactly ONE
@@ -1552,13 +1447,6 @@ fn void bufferize_classify(Term root) {
     // unified consumer-divergence walk keeps them views (its matching
     // branch inherits ranges instead of realizing on divergence); realize
     // still emerges downstream via the consuming REDUCEs' ending_ranges.
-    // THVM_BUFFERIZE_SKIP_SMALL_EXPAND=0 reverts to the old realize-the-
-    // movement-op behaviour for bisection.
-    int skip_movement_default = 1;
-    {
-      char const *_ee = getenv("THVM_BUFFERIZE_SKIP_SMALL_EXPAND");
-      if (_ee != NULL && _ee[0] == '0') skip_movement_default = 0;
-    }
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
       // fp8-matmul-decode lever: realize a fp8->bf16 weight CAST that feeds a
@@ -1597,7 +1485,7 @@ fn void bufferize_classify(Term root) {
         int src_has_reduce = ew
             && bufferize_elementwise_src_has_reduce(info->loc, 0);
         // Movement ops stay views (see the default-skip rationale above).
-        int skip_movement = skip_movement_default && uop_is_movement(info->op);
+        int skip_movement = uop_is_movement(info->op);
         // Conv-backward realize-at-boundary: MULTI-seed every
         // multi-consumer ACTIVATION boundary EXCEPT the `_pool` unfold (which
         // carries an EXPAND in its movement chain).  Realizing r1 =
@@ -1665,47 +1553,16 @@ fn void bufferize_classify(Term root) {
           bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
           bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
         } else {
-          // Env-toggle: THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE=0 skips
-          // the seed for REDUCEs whose consumer chain bottoms out at
-          // EXPAND (the broadcast-back-to-vector pattern used by
-          // softmax/BN/mean reduction).  These are exactly the REDUCEs
-          // the softmax-style unmark loop below would have unmarked
-          // anyway -- skipping the seed up front saves the round trip
-          // and lets the materialize.c orphan-BUFFERIZE path
-          // (try_inline_bufferize_1axis_via_decomp with the mask-free
-          // relaxation) fuse them inline.  REDUCEs whose chain does
-          // NOT bottom out at EXPAND (softmax-CE diamond: conv-REDUCE
-          // -> max + sub, where the sub branch reads conv-REDUCE
-          // directly without an EXPAND) stay seeded because inlining
-          // them recomputes the producer N times in the consumer
-          // kernel (cpu_uop_walk slowdown >> kernel-launch overhead).
-          // Default (env unset or != "0") keeps the conservative
-          // blanket seed and lets the unmark loop do the work.
-          char const *_red_e =
-              getenv("THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE");
+          // The blanket seed; the softmax-style unmark loop below drops
+          // it for the broadcast-back-to-vector REDUCEs.
           int skip_seed = 0;
-          if (_red_e != NULL && _red_e[0] == '0') {
-            skip_seed = bufferize_reduce_consumer_is_broadcast_chain(info->loc);
-          }
-          // THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED=1 also skips
-          // the seed when the REDUCE's unique consumer is itself a
-          // REDUCE (the kid 105 [B,H,W,Cout,kH,kW] -> kid 106
-          // [B,Cout,H,W] conv-input-grad pattern on beautiful_mnist).
-          // The multi-axis REDUCE renderer (commits 29804a8c..e07d77f1)
-          // can handle the combined reduce; skipping the seed lets it
-          // fuse into one kernel instead of writing the 160 MB
-          // intermediate.  Default OFF -- the chain-guard pass below
-          // already handles many cases.  Opt-in for workloads where
-          // the upstream materialized intermediate is large.
           // Precise seed-skip for the conv-backward
           // contraction reduce -- its output feeds a _pool-scatter
           // (movement+elementwise chain with a PAD/SHRINK) into another
           // REDUCE.  Skipping the seed lets the multi-axis REDUCE
           // renderer fuse the contraction into the scatter-reduce kernel
-          // instead of materializing the 39MB im2col.  Narrower than the
-          // generic riri walk below (which matches any reduce->movement->
-          // reduce); Linear's GEMM has no PAD/SHRINK scatter so it stays
-          // protected.
+          // instead of materializing the 39MB im2col.  Linear's GEMM has no
+          // PAD/SHRINK scatter so it stays protected.
           if (!skip_seed
               && bufferize_reduce_feeds_scatter_reduce(info->loc, 32)) {
             // Fuse the contraction into the scatter-reduce -- UNLESS it
@@ -1720,63 +1577,6 @@ fn void bufferize_classify(Term root) {
             // fused so its grad reduction order is bit-exact vs flag-OFF.
             if (!bufferize_reduce_reads_realized_pool(info->loc, 12))
               skip_seed = 1;
-          }
-          if (!skip_seed) {
-            char const *_riri_e =
-                getenv("THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED");
-            int riri_on = (_riri_e != NULL && _riri_e[0] == '1');
-            char const *_dbg = getenv("THVM_BUFFERIZE_DEBUG");
-            int dbg_on = (_dbg != NULL && _dbg[0] == '1');
-            // Walk through layout-only movement ops (RESHAPE/PERMUTE/
-            // EXPAND/SHRINK/PAD/FLIP) looking for the next UOP_REDUCE
-            // consumer.  Direct REDUCE->REDUCE in the bufferize graph
-            // is rare; the kid 105 -> kid 106 conv-input-grad pattern
-            // on beautiful_mnist has a RESHAPE between them, and many
-            // grad-chained reduces have multiple movement hops.  Use
-            // cmap edges (not consumer_count) so DP-grad projections
-            // count.  Each hop must be unique-consumer to be safe to
-            // fuse; multi-consumer movement means the source has fan-
-            // out and recycling its bytes through fusion is wrong.
-            u64 cons[4];
-            u32 n_cons = bufferize_consumers_for_loc(info->loc, cons, 4);
-            int consumer_is_reduce = 0;
-            u32 next_reduce_idx = 0xFFFFFFFFu;
-            u32 movement_hops = 0;
-            u8  walk_op = 0xFF;
-            if (n_cons == 1) {
-              u64 cur = cons[0];
-              for (u32 hop = 0; hop < 8; hop++) {
-                u32 cidx = bufferize_info_find(cur);
-                if (cidx == 0xFFFFFFFFu) break;
-                walk_op = BUFFERIZE_NODES[cidx].op;
-                if (walk_op == UOP_REDUCE) {
-                  if (!(BUFFERIZE_NODES[cidx].reasons & BUFFERIZE_REASON_MATMUL)) {
-                    consumer_is_reduce = 1;
-                    next_reduce_idx = cidx;
-                  }
-                  break;
-                }
-                int is_movement = (walk_op == UOP_RESHAPE || walk_op == UOP_PERMUTE
-                                || walk_op == UOP_EXPAND  || walk_op == UOP_SHRINK
-                                || walk_op == UOP_PAD     || walk_op == UOP_FLIP);
-                if (!is_movement) break;
-                movement_hops++;
-                u64 next_cons[2];
-                if (bufferize_consumers_for_loc(cur, next_cons, 2) != 1) break;
-                cur = next_cons[0];
-              }
-            }
-            if (dbg_on) {
-              fprintf(stderr,
-                      "[bufdbg] riri: reduce loc=%llu n_consumers=%u walk: %u movement hops, final_op=%u consumer_is_reduce=%d riri_knob=%d -> skip_seed=%d\n",
-                      (unsigned long long)info->loc, n_cons,
-                      movement_hops, walk_op,
-                      consumer_is_reduce, riri_on,
-                      (riri_on && consumer_is_reduce));
-            }
-            if (riri_on && consumer_is_reduce) {
-              skip_seed = 1;
-            }
           }
           if (!skip_seed) {
             bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
@@ -1811,75 +1611,16 @@ fn void bufferize_classify(Term root) {
     // structurally here: drop the REDUCE seed for chains that re-broadcast
     // through EXPAND, leaving the unified pass's REDUCE-via-RANGE
     // expansion + render_uop's _accN accumulator hoist to fuse them
-    // inline. Skip when the absorbing kernel root is itself a REDUCE
-    // (rangeify_try_lower_elementwise bails > 1 REDUCE per kernel) and
-    // honour the per-boundary unmark cap so BN-train backward's
-    // sibling-REDUCE branches don't all collapse into one kernel.
-    // Mirror context: tinygrad/schedule/indexing.py:31 (REDUCE realize
-    // predicate). The chain-walk + tile-cap + per-boundary cap helpers
-    // (bufferize_reduce_consumer_is_broadcast_chain,
-    // bufferize_absorbing_boundary,
-    // bufferize_softmax_reduce_tile_cap_enabled,
-    // bufferize_reduce_fuse_multi_enabled) stay as-is.
-    int tile_cap_on = bufferize_softmax_reduce_tile_cap_enabled();
-    int fuse_multi_on = bufferize_reduce_fuse_multi_enabled();
-    if (fuse_multi_on || bufferize_reduce_count() == 1) {
-      u64 abs_locs[1024];
-      u32 abs_unmark_count[1024];
-      u32 n_abs = 0;
-      for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-        UOpInfo *info = &BUFFERIZE_NODES[i];
-        if (info->op != UOP_REDUCE) continue;
-        if (!info->realized) continue;
-        if (info->reasons & BUFFERIZE_REASON_MATMUL) continue;
-        if (!bufferize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
-        u64 abs_loc = 0;
-        if (tile_cap_on) {
-          abs_loc = bufferize_absorbing_boundary(info->loc, 16);
-          if (abs_loc != 0) {
-            u32 abs_idx = bufferize_info_find(abs_loc);
-            // Fuse a reduce into a consuming REDUCE (the softmax sum->av
-            // chain; the conv-input-grad reduce pair).  The multi-axis REDUCE
-            // renderer that rangeify_try_lower_elementwise needs for >1 REDUCE
-            // per kernel has landed, so this is now DEFAULT-ON (faithful to
-            // tinygrad's one-reduce-absorbs-the-next fusion) -- closes the
-            // kid 105 + kid 106 [128,20,20,32,5,5] -> [128,32,24,24]
-            // conv-input-grad pair on beautiful_mnist (160 MB intermediate ->
-            // 0) and the softmax sum-reduce into attn@V.  THVM_FUSE_REDUCE_INTO_-
-            // REDUCE=0 reverts to the historical per-reduce-kernel split.
-            if (abs_idx != 0xFFFFFFFFu
-                && BUFFERIZE_NODES[abs_idx].op == UOP_REDUCE) {
-              char const *_fir = getenv("THVM_FUSE_REDUCE_INTO_REDUCE");
-              if (_fir != NULL && _fir[0] == '0') {
-                continue;
-              }
-            }
-          }
-          if (abs_loc != 0) {
-            u32 slot = 0xFFFFFFFFu;
-            for (u32 k = 0; k < n_abs; k++) {
-              if (abs_locs[k] == abs_loc) { slot = k; break; }
-            }
-            if (slot == 0xFFFFFFFFu) {
-              if (n_abs < (sizeof abs_locs) / sizeof abs_locs[0]) {
-                slot = n_abs++;
-                abs_locs[slot] = abs_loc;
-                abs_unmark_count[slot] = 0;
-              }
-            }
-            u32 cap_limit = (u32)-1;
-            char const *_cap_e = getenv("THVM_REDUCE_UNMARK_CAP");
-            if (_cap_e != NULL && _cap_e[0] >= '0' && _cap_e[0] <= '9') {
-              cap_limit = (u32)(_cap_e[0] - '0');
-            }
-            if (slot != 0xFFFFFFFFu && abs_unmark_count[slot] >= cap_limit) {
-              continue;
-            }
-            if (slot != 0xFFFFFFFFu) abs_unmark_count[slot]++;
-          }
-        }
-        bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
-      }
+    // inline, a reduce into a consuming REDUCE included (the softmax sum
+    // into attn@V, the conv-input-grad reduce pair).  Mirror context:
+    // tinygrad/schedule/indexing.py:31 (REDUCE realize predicate).
+    for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+      UOpInfo *info = &BUFFERIZE_NODES[i];
+      if (info->op != UOP_REDUCE) continue;
+      if (!info->realized) continue;
+      if (info->reasons & BUFFERIZE_REASON_MATMUL) continue;
+      if (!bufferize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
+      bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
     }
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];

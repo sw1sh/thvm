@@ -87,7 +87,7 @@ Both compilers lower a tensor program to device kernels through structurally ide
 | Graph batching (`graph_split_rewrite`) | `THVM_METAL_GRAPH_REPLAY` / `THVM_CUDA_JIT_GRAPH` + `jit/capture.c` | Partial |
 | Gradient (`gradient.py`, post-kernelize UOP) | `interact/uop_grad.c` (term/AST level) | Different layer; fewer backward rules |
 
-**Faithful-vs-simplified summary:** the rangeify walk, INDEX/BUFFERIZE rewrite, hand-coded heuristic core, and renderers are faithful. Genuinely simplified: movement-op/ShapeTracker merge, validity-mask union. (Reduce-into-reduce fusion is now faithful and default-on -- `THVM_FUSE_REDUCE_INTO_REDUCE`.) Genuinely missing: ImageDType, mask-UPCAST, THREAD (CUDA warp-shuffle reduce). **Landed 2026-06-26** (so NOT missing, despite older text below): arange/reduce-collapse (`uop/reduce_collapse.c`), full-extent UNROLL, ShapeTracker view-cancellation (split+resplit/unfold+col2im cancel to views), conv-backward col2im fusion (`THVM_FUSE_CONV_BWD` now default-on, -48% conv-train peak), importer PAD/SHRINK (offset,size) correctness. BEAM engine exists (`autotune.c`); only the proposer breadth is residual.
+**Faithful-vs-simplified summary:** the rangeify walk, INDEX/BUFFERIZE rewrite, hand-coded heuristic core, and renderers are faithful. Genuinely simplified: movement-op/ShapeTracker merge, validity-mask union. (Reduce-into-reduce fusion is faithful.) Genuinely missing: ImageDType, mask-UPCAST, THREAD (CUDA warp-shuffle reduce). **Landed 2026-06-26** (so NOT missing, despite older text below): arange/reduce-collapse (`uop/reduce_collapse.c`), full-extent UNROLL, ShapeTracker view-cancellation (split+resplit/unfold+col2im cancel to views), conv-backward col2im fusion (`THVM_FUSE_CONV_BWD` now default-on, -48% conv-train peak), importer PAD/SHRINK (offset,size) correctness. BEAM engine exists (`autotune.c`); only the proposer breadth is residual.
 
 ---
 
@@ -122,7 +122,7 @@ The key code is `ru_seed_boundary_holds` (`rangeify_unified.c`): it holds only f
 ### 3.3 Reduce grouping & multi-reduce
 
 - **tinygrad**: reduces are always realized or surface via divergence; *no explicit multi-reduce fusion* - chained reduces (softmax EXP -> SUM -> DIV) fuse implicitly because single-consumer inputs inline into the reduce kernel.
-- **thvm**: `REDUCE` seeded as `BUFFERIZE_REASON_REDUCE`. Named rule `bufferize_reduce_consumer_rule_drop_multi` (`bufferize_classify.c:728-822`) unmarks MULTI from reduces feeding a single chain (enables softmax fusion). `THVM_FUSE_REDUCE_INTO_REDUCE` is now **default-on** (the multi-axis REDUCE renderer landed): a reduce whose absorbing boundary is another REDUCE fuses into it (softmax sum into attn@V; the conv-input-grad pair into one kernel), matching tinygrad. `THVM_BUFFERIZE_REDUCE_FUSE_MULTI` (also default-on) gates the broadcast-reduce-chain generalization.
+- **thvm**: `REDUCE` seeded as `BUFFERIZE_REASON_REDUCE`. Named rule `bufferize_reduce_consumer_rule_drop_multi` (`bufferize_classify.c:728-822`) unmarks MULTI from reduces feeding a single chain (enables softmax fusion). A reduce whose absorbing boundary is another REDUCE fuses into it (softmax sum into attn@V; the conv-input-grad pair into one kernel), matching tinygrad.
 
 ### 3.4 Ending ranges (EXPAND-triggered realization)
 
@@ -183,13 +183,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 
 | Name | Effect | Default |
 |---|---|---|
-| `THVM_BUFFERIZE_REDUCE_FUSE_MULTI` | Fuse multiple REDUCE ops vs single-reduce gate | on (multi) |
-| `THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE` | Keep REDUCE realized when consumers are broadcast chains | on (keep) |
-| `THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED` | Skip seeding reduce->reduce; let walk derive | off |
-| `THVM_FUSE_REDUCE_INTO_REDUCE` | Fuse a reduce into a consuming REDUCE (softmax sum into attn@V; conv-input-grad pair) -- faithful now the multi-axis REDUCE renderer landed | on |
-| `THVM_BUFFERIZE_SKIP_SMALL_EXPAND` | Skip realizing small EXPAND nodes | on (skip) |
-| `THVM_BUFFERIZE_SOFTMAX_REDUCE_TILE_CAP` | Tile-feasibility cap for softmax multi-reduce fusion | on |
-| `THVM_REDUCE_UNMARK_CAP` | Cap on reduces unmarked (fused) per slot | unset |
 | `THVM_TILE` | Enable Metal conv2d tiling (autotune cache key) | unset |
 | `THVM_METAL_FUSION_MAX_INPUTS` | Cap inputs to a fused Metal kernel | unset |
 

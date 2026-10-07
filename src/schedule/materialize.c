@@ -2930,8 +2930,7 @@ static Term try_inline_bufferize_1axis_via_decomp(
   // whether the consumer treats the axis as a loop iter or a reduce
   // accumulator.  This covers BN's vector broadcast and the non-matmul-
   // REDUCE-feed broadcast subtract that hangs beautiful_mnist when the
-  // conservative REDUCE-as-boundary seed is dropped (env-toggle
-  // THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE=0).  Pool/reshape-MAX
+  // conservative REDUCE-as-boundary seed is dropped.  Pool/reshape-MAX
   // gradient's CMPEQ one-hot indicator keeps the strict gate.
   int producer_mask_free = !uop_value_subtree_has_mask_op(v);
   if (decomp_ok && !has_unknown_extent && dn >= 2) {
