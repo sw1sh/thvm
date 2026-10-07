@@ -457,13 +457,6 @@ static int bufferize_reduce_consumer_in_realized_chain(u64 loc, u32 hops_left) {
 // elementwise by later program ops (materialize.c, the
 // `single_reduce_emit` / "REDUCE as an intermediate op" path), so
 // unmarking the reduce lets the epilogue's kernel absorb it.
-//
-// Default OFF (env unset/"0") so the bit-exact gates stay green without
-// the flag; THVM_FUSE_REDUCE_EPILOGUE=1 enables it for the GPU A/B.
-static int bufferize_reduce_epilogue_fuse_enabled(void) {
-  char const *e = getenv("THVM_FUSE_REDUCE_EPILOGUE");
-  return e != NULL && e[0] == '1';
-}
 
 // True iff op is a unary elementwise OR a binary elementwise whose
 // non-reduce operand is a CONST/broadcast scalar (the `(1-b1)*g`,
@@ -1664,50 +1657,48 @@ fn void bufferize_classify(Term root) {
       if (inner_kind != outer_kind) continue;
       bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
     }
-    // Reduce-epilogue fusion (THVM_FUSE_REDUCE_EPILOGUE=1, default OFF):
-    // a non-matmul REDUCE with exactly ONE consumer that is a realized,
-    // shape-preserving elementwise epilogue keeps the reduce + the
-    // epilogue in one kernel.  Mirrors tinygrad's `reduce -> elementwise`
+    // Reduce-epilogue fusion: a non-matmul REDUCE with exactly ONE
+    // consumer that is a realized, shape-preserving elementwise epilogue
+    // keeps the reduce + the epilogue in one kernel.  Mirrors tinygrad's
+    // `reduce -> elementwise`
     // single-kernel lowering (the elementwise runs after the accumulator,
     // before the store).  Target: the optimizer / bias-grad `[N]->[N]`
     // post-reduce scaling kernels (e.g. `(1-b1)*g` right after the
     // bias-grad reduce) that otherwise pay a store + reload + separate
     // launch.  The reduce's output shape must equal the epilogue's output
     // shape so the epilogue iterates exactly the reduce's output ranges.
-    if (bufferize_reduce_epilogue_fuse_enabled()) {
-      for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
-        UOpInfo *info = &BUFFERIZE_NODES[i];
-        if (info->op != UOP_REDUCE) continue;
-        if (!info->realized) continue;
-        if (info->reasons & BUFFERIZE_REASON_MATMUL) continue;
-        if (info->consumer_count != 1) continue;
-        u64 consumer_locs[1];
-        u32 n_cons = bufferize_consumers_for_loc(info->loc, consumer_locs, 1);
-        if (n_cons != 1) continue;
-        u32 cidx = bufferize_info_find(consumer_locs[0]);
-        if (cidx == 0xFFFFFFFFu) continue;
-        // The consumer must itself be a realized boundary (its kernel
-        // absorbs the reduce) and a scalar-preserving elementwise tail.
-        if (!BUFFERIZE_NODES[cidx].realized) continue;
-        if (!bufferize_is_scalar_preserving_epilogue(consumer_locs[0],
-                                                      info->loc))
-          continue;
-        // Output shapes must match (same iteration space -- the epilogue
-        // adds no ranges and changes no rank).
-        Shape rsh = {0};
-        Shape csh = {0};
-        Term rt = term_new(0, TAG_UOP, info->op, info->loc);
-        Term ct = term_new(0, TAG_UOP, BUFFERIZE_NODES[cidx].op,
-                           consumer_locs[0]);
-        if (!term_shape_in(rt, 0, &rsh) || !term_shape_in(ct, 0, &csh))
-          continue;
-        if (rsh.ndim != csh.ndim) continue;
-        int same = 1;
-        for (u32 d = 0; d < rsh.ndim; d++)
-          if (rsh.dims[d] != csh.dims[d]) { same = 0; break; }
-        if (!same) continue;
-        bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
-      }
+    for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+      UOpInfo *info = &BUFFERIZE_NODES[i];
+      if (info->op != UOP_REDUCE) continue;
+      if (!info->realized) continue;
+      if (info->reasons & BUFFERIZE_REASON_MATMUL) continue;
+      if (info->consumer_count != 1) continue;
+      u64 consumer_locs[1];
+      u32 n_cons = bufferize_consumers_for_loc(info->loc, consumer_locs, 1);
+      if (n_cons != 1) continue;
+      u32 cidx = bufferize_info_find(consumer_locs[0]);
+      if (cidx == 0xFFFFFFFFu) continue;
+      // The consumer must itself be a realized boundary (its kernel
+      // absorbs the reduce) and a scalar-preserving elementwise tail.
+      if (!BUFFERIZE_NODES[cidx].realized) continue;
+      if (!bufferize_is_scalar_preserving_epilogue(consumer_locs[0],
+                                                    info->loc))
+        continue;
+      // Output shapes must match (same iteration space -- the epilogue
+      // adds no ranges and changes no rank).
+      Shape rsh = {0};
+      Shape csh = {0};
+      Term rt = term_new(0, TAG_UOP, info->op, info->loc);
+      Term ct = term_new(0, TAG_UOP, BUFFERIZE_NODES[cidx].op,
+                         consumer_locs[0]);
+      if (!term_shape_in(rt, 0, &rsh) || !term_shape_in(ct, 0, &csh))
+        continue;
+      if (rsh.ndim != csh.ndim) continue;
+      int same = 1;
+      for (u32 d = 0; d < rsh.ndim; d++)
+        if (rsh.dims[d] != csh.dims[d]) { same = 0; break; }
+      if (!same) continue;
+      bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
     }
     // Fanin-cap split: mark wide-fanin elementwise/movement children
     // as realized boundaries so the metal renderer's n_inputs > 30
