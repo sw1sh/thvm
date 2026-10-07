@@ -12,21 +12,17 @@
 // duplicated together).  Direct port of HVM4's wnf_app_mat_sup
 // (TinyHVM/HVM4/clang/wnf/app_mat_sup.c).
 //
-// Wired into the wnf strict-eval loop's APP -> TAG_MAT path (see
-// src/wnf/_.c): when the reduced arg is SUP, fire this commute
-// instead of falling through to the "miss" / fallback branch.
+// Fired by interact_app_mat (app_mat.c) for a SUP scrutinee, which both
+// wnf and redex_fire reach.
 //
-// Allocates 9 cells: 2 DUP body cells (handler, fallback) + 2
-// MAT layouts (2 cells each) + 2 APP layouts (2 cells each) + 1
-// SUP wrapper (2 cells)... wait, 2+2+2+2+2+2+2 = 14.  Recount:
-//   c+0    DUP body 0 = handler
-//   c+1    DUP body 1 = fallback
-//   c+2,3  MAT_0: handler=DP0(c+0), fallback=DP0(c+1)
-//   c+4,5  MAT_1: handler=DP1(c+0), fallback=DP1(c+1)
-//   c+6,7  APP_0: fun = MAT_0, arg = a
-//   c+8,9  APP_1: fun = MAT_1, arg = b
+// Allocates 12 cells:
+//   c+0     DUP body 0 = handler
+//   c+1     DUP body 1 = fallback
+//   c+2,3   MAT_0: handler = DP0(c+0), fallback = DP0(c+1)
+//   c+4,5   MAT_1: handler = DP1(c+0), fallback = DP1(c+1)
+//   c+6,7   APP_0: fun = MAT_0, arg = a
+//   c+8,9   APP_1: fun = MAT_1, arg = b
 //   c+10,11 SUP children (point at APP_0, APP_1)
-// Total = 12 cells.
 fn Term interact_app_mat_sup(Term mat, Term sup) {
     ITRS++;
     multi_emit(RULE_APP_MAT_SUP, MULTI_SLIDE, (u64)mat, (u64)sup, term_ext(sup));

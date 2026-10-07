@@ -27,6 +27,36 @@ static Term build_app2(Term f, Term a, Term b) {
     return build_app(build_app(f, a), b);
 }
 
+// λn. NUM(v)
+static Term const_lam(u32 v) {
+    u64 loc = heap_alloc(1);
+    heap_set(loc, term_new(0, TAG_NUM, DT_INT32, v));
+    return term_new(0, TAG_LAM, 0, loc);
+}
+
+// λa. λb. a + b
+static Term add_lam2(void) {
+    u64 la = heap_alloc(1);
+    u64 lb = heap_alloc(1);
+    heap_set(lb, term_new_op2(OP_ADD, term_new(0, TAG_VAR, 0, la), term_new(0, TAG_VAR, 0, lb)));
+    heap_set(la, term_new(0, TAG_LAM, 0, lb));
+    return term_new(0, TAG_LAM, 0, la);
+}
+
+// DP0 of a DUP whose body is #3{NUM(3), NUM(4)}.
+static Term dp0_of_ctr(void) {
+    Term kids[2] = {term_new(0, TAG_NUM, DT_INT32, 3), term_new(0, TAG_NUM, DT_INT32, 4)};
+    u64  dup     = heap_alloc(1);
+    heap_set(dup, term_new_ctr(3, kids, 2));
+    return term_new(0, TAG_DP0, 9, dup);
+}
+
+// The NUM value of `t`, or 0xFFFFFFFF when it is not a NUM.  cnf stops at
+// a SUP, so callers cnf each SUP child themselves.
+static u32 num_of(Term t) {
+    return term_tag(t) == TAG_NUM ? (u32)term_val(t) : 0xFFFFFFFFu;
+}
+
 int main(void) {
     thvm_init();
 
@@ -140,6 +170,51 @@ int main(void) {
         Term r = wnf(call);
         CHECK_EQ(term_tag(r), TAG_NUM);
         CHECK_EQ((u32)term_val(r), 5u);
+    }
+
+    // redex_fire (the nf / TInteract step) and wnf fire one APP-MAT rule:
+    // a SUP scrutinee commutes (APP-MAT-SUP) and a DP head is driven to its
+    // CTR before the match, so both reducers reach the same normal form.
+    TEST_BEGIN("mat/redex-fire-commutes-a-sup-scrutinee");
+    {
+        Term sup = build_sup(5, term_new(0, TAG_NUM, DT_INT32, 0), term_new(0, TAG_NUM, DT_INT32, 7));
+        Term r   = cnf(redex_fire(build_app(term_new_mat(0, term_new(0, TAG_NUM, DT_INT32, 99), const_lam(11)), sup)));
+        CHECK_EQ(term_tag(r), TAG_SUP);
+        CHECK_EQ(term_ext(r), 5u);
+        CHECK_EQ(num_of(cnf(heap_read(term_val(r) + 0))), 99u);
+        CHECK_EQ(num_of(cnf(heap_read(term_val(r) + 1))), 11u);
+    }
+
+    TEST_BEGIN("mat/redex-fire-drives-a-dp-head-to-its-ctr");
+    {
+        Term r = cnf(redex_fire(build_app(term_new_mat(3, add_lam2(), const_lam(11)), dp0_of_ctr())));
+        CHECK_EQ(num_of(r), 7u);
+    }
+
+    TEST_BEGIN("mat/nf-agrees-with-wnf");
+    {
+        for (int dp = 0; dp < 2; dp++) {
+            Term w, n;
+            if (dp) {
+                w = cnf(wnf(build_app(term_new_mat(3, add_lam2(), const_lam(11)), dp0_of_ctr())));
+                n = nf(build_app(term_new_mat(3, add_lam2(), const_lam(11)), dp0_of_ctr()));
+                CHECK_EQ(num_of(w), 7u);
+                CHECK_EQ(num_of(n), 7u);
+            } else {
+                Term s0 = build_sup(5, term_new(0, TAG_NUM, DT_INT32, 0), term_new(0, TAG_NUM, DT_INT32, 7));
+                Term s1 = build_sup(5, term_new(0, TAG_NUM, DT_INT32, 0), term_new(0, TAG_NUM, DT_INT32, 7));
+                w = cnf(wnf(build_app(term_new_mat(0, term_new(0, TAG_NUM, DT_INT32, 99), const_lam(11)), s0)));
+                n = nf(build_app(term_new_mat(0, term_new(0, TAG_NUM, DT_INT32, 99), const_lam(11)), s1));
+                CHECK_EQ(term_tag(w), TAG_SUP);
+                CHECK_EQ(term_tag(n), TAG_SUP);
+                if (term_tag(w) == TAG_SUP && term_tag(n) == TAG_SUP) {
+                    for (u32 i = 0; i < 2; i++) {
+                        CHECK_EQ(num_of(term_resolve(heap_read(term_val(n) + i))),
+                                 num_of(cnf(heap_read(term_val(w) + i))));
+                    }
+                }
+            }
+        }
     }
 
     thvm_free();

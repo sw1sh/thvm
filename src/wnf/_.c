@@ -410,100 +410,20 @@ apply:
             continue;
           }
           case TAG_MAT: {
-            // APP-MAT: force the arg, dispatch by its tag.
-            //   APP-MAT-NUM (arg is TAG_NUM, val == match):  return handler.
-            //   APP-MAT-CTR (arg is TAG_CTR, ext == match):  destructure --
-            //                  apply handler to each CTR child via APP-chain.
-            //                  Mirrors HVM4's APP-MAT-CTR-MAT: a MAT lambda
-            //                  matching constructor #K applied to a CTR with
-            //                  the same #K extracts its fields and passes
-            //                  them positionally to the handler.
-            //   miss:           build APP(fallback, arg) and continue.
-            // Heap[mat_loc+0] = handler.
-            // Heap[mat_loc+1] = fallback.
+            // APP-MAT (interact/app_mat.c) on the forced scrutinee.  The
+            // inner wnf runs on this call's shared stack, so sync
+            // WNF_S_POS first or it would overwrite the frames pushed so
+            // far.  A Levy-opaque DP head goes through cnf so DUP-CTR /
+            // DUP-NUM fire before the dispatch; any other head needs only
+            // wnf, which is cheaper than a full cnf walk.
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            u64  mat_loc = term_val(whnf);
-            u32  match   = term_ext(whnf);
-            // Sync WNF_S_POS with our local s_pos before reentering
-            // wnf: the outer (this) call has already pushed APP frames
-            // onto the shared stack.  Without the sync the inner wnf
-            // would start at a stale base and overwrite our frames.
-            // Drive a Levy-opaque DP head through cnf so DUP-CTR /
-            // DUP-NUM fire before the case-tree dispatches; for non-DP
-            // heads, plain wnf is enough and cheaper than a full cnf
-            // walk (which would descend into compound children and
-            // pay for SUP-lift even when there's no SUP).
             WNF_S_POS = s_pos;
-            Term arg_w   = wnf(arg);
+            Term arg_w = wnf(arg);
             if (term_tag(arg_w) == TAG_DP0 || term_tag(arg_w) == TAG_DP1) {
               arg_w = cnf(arg_w);
             }
             s_pos = WNF_S_POS;
-            ITRS++;
-            multi_emit(RULE_MAT_DISPATCH, MULTI_TERM, mat_loc, 0, match);
-            if (term_tag(arg_w) == TAG_NUM &&
-                (u32)term_val(arg_w) == match) {
-              next = heap_read(mat_loc + 0);
-              goto enter;
-            }
-            if (term_tag(arg_w) == TAG_CTR && term_ext(arg_w) == match) {
-              // Destructure: apply handler to each CTR child via an
-              // APP chain.  Reuse the consumed MAT cell for the first
-              // APP and the consumed CTR's child cells for the second
-              // APP; only allocate fresh storage from APP #3 onward.
-              // Mirrors HVM4's wnf_app_mat_ctr.c cell-reuse trick.
-              //
-              // Layout reminder:
-              //   MAT cell:  [mat_loc+0 = handler, mat_loc+1 = fallback]
-              //   CTR cell:  [ctr_loc+0 = NUM(arity),
-              //               ctr_loc+1 = c_0, ctr_loc+2 = c_1, ...]
-              // APP cell: [loc+0 = fun, loc+1 = arg].
-              //   APP #1 fits at mat_loc (already 2 cells; slot 0
-              //     already holds handler, write child0 to slot 1).
-              //   APP #2 fits at ctr_loc+1..ctr_loc+2 (the slots that
-              //     held c_0 and c_1; write APP#1 to ctr_loc+1 and
-              //     keep c_1 at ctr_loc+2).
-              Term handler = heap_read(mat_loc + 0);
-              u32 n = term_ctr_n(arg_w);
-              if (n == 0) {
-                next = handler;
-                goto enter;
-              }
-              u64 ctr_loc = term_val(arg_w);
-              Term child0 = heap_read(ctr_loc + 1);
-              heap_set(mat_loc + 1, child0);
-              Term res = term_new(0, TAG_APP, 0, mat_loc);
-              if (n == 1) { next = res; goto enter; }
-              Term child1 = heap_read(ctr_loc + 2);
-              heap_set(ctr_loc + 1, res);
-              heap_set(ctr_loc + 2, child1);
-              res = term_new(0, TAG_APP, 0, ctr_loc + 1);
-              if (n == 2) { next = res; goto enter; }
-              u64 apps = heap_alloc(2 * (u64)(n - 2));
-              for (u32 i = 2; i < n; i++) {
-                u64 a = apps + 2 * (u64)(i - 2);
-                heap_set(a + 0, res);
-                heap_set(a + 1, term_ctr_at(arg_w, i));
-                res = term_new(0, TAG_APP, 0, a);
-              }
-              next = res;
-              goto enter;
-            }
-            // arg is SUP: fire APP-MAT-SUP commute (clone the
-            // case-tree at the SUP's label so each branch gets its
-            // own copy).  Without this, MAT with a SUP scrutinee
-            // would silently fall through to the fallback below,
-            // collapsing the SUP enumeration.
-            if (term_tag(arg_w) == TAG_SUP) {
-              next = interact_app_mat_sup(whnf, arg_w);
-              goto enter;
-            }
-            // Miss: build APP(fallback, arg_w).  Reuse the consumed
-            // MAT cell -- it's already 2 words, slot 1 already holds
-            // fallback; copy fallback to slot 0, write arg_w to slot 1.
-            heap_set(mat_loc + 0, heap_read(mat_loc + 1));
-            heap_set(mat_loc + 1, arg_w);
-            next = term_new(0, TAG_APP, 0, mat_loc);
+            next = interact_app_mat(whnf, arg_w);
             goto enter;
           }
           default: {
@@ -706,31 +626,8 @@ apply:
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           Term y = heap_read(loc + 1);
           if (term_tag(y) == TAG_NUM) {
-            ITRS++;
-            multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, loc, loc + 1, op);
-            u32 xv = (u32)term_val(whnf);
-            u32 yv = (u32)term_val(y);
-            u32 r;
-            switch (op) {
-              case OP_ADD: r = xv + yv; break;
-              case OP_SUB: r = xv - yv; break;
-              case OP_MUL: r = xv * yv; break;
-              case OP_EQ:  r = (xv == yv) ? 1 : 0; break;
-              case OP_LT:  r = (xv <  yv) ? 1 : 0; break;
-              case OP_DIV: r = (yv == 0) ? 0 : xv / yv; break;
-              case OP_MOD: r = (yv == 0) ? 0 : xv % yv; break;
-              case OP_XOR: r = xv ^ yv; break;
-              case OP_AND: r = xv & yv; break;
-              case OP_OR:  r = xv | yv; break;
-              case OP_SHL: r = xv << (yv & 31); break;
-              case OP_SHR: r = xv >> (yv & 31); break;
-              case OP_GT:  r = (xv >  yv) ? 1 : 0; break;
-              case OP_LE:  r = (xv <= yv) ? 1 : 0; break;
-              case OP_GE:  r = (xv >= yv) ? 1 : 0; break;
-              case OP_NE:  r = (xv != yv) ? 1 : 0; break;
-              default:     r = 0; break;
-            }
-            whnf = term_new(0, TAG_NUM, term_ext(whnf), r);
+            whnf = interact_op2_num_num(op, term_ext(whnf), (u32)term_val(whnf),
+                                        (u32)term_val(y), loc);
             continue;
           }
           // x is NUM; descend into y.  Stash the WHNF'd x at
@@ -780,30 +677,7 @@ apply:
         }
         if (term_tag(whnf) == TAG_NUM) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-          ITRS++;
-          multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, loc, loc + 1, op);
-          u32 yv = (u32)term_val(whnf);
-          u32 r;
-          switch (op) {
-            case OP_ADD: r = xv + yv; break;
-            case OP_SUB: r = xv - yv; break;
-            case OP_MUL: r = xv * yv; break;
-            case OP_EQ:  r = (xv == yv) ? 1 : 0; break;
-            case OP_LT:  r = (xv <  yv) ? 1 : 0; break;
-            case OP_DIV: r = (yv == 0) ? 0 : xv / yv; break;
-            case OP_MOD: r = (yv == 0) ? 0 : xv % yv; break;
-            case OP_XOR: r = xv ^ yv; break;
-            case OP_AND: r = xv & yv; break;
-            case OP_OR:  r = xv | yv; break;
-            case OP_SHL: r = xv << (yv & 31); break;
-            case OP_SHR: r = xv >> (yv & 31); break;
-            case OP_GT:  r = (xv >  yv) ? 1 : 0; break;
-            case OP_LE:  r = (xv <= yv) ? 1 : 0; break;
-            case OP_GE:  r = (xv >= yv) ? 1 : 0; break;
-            case OP_NE:  r = (xv != yv) ? 1 : 0; break;
-            default:     r = 0; break;
-          }
-          whnf = term_new(0, TAG_NUM, dtype, r);
+          whnf = interact_op2_num_num(op, dtype, xv, (u32)term_val(whnf), loc);
           continue;
         }
         // y is SUP: fire OP2-NUM-SUP commute (no DUP needed; the

@@ -473,47 +473,12 @@ fn Term redex_fire(Term redex) {
         case TAG_PRI: result = interact_app_pri(fun, arg); break;
         case TAG_SUP: result = interact_app_sup(fun, arg); break;
         case TAG_MAT: {
-          u64 mat_loc = term_val(fun);
-          u32 match   = term_ext(fun);
-          Term arg_w  = wnf(arg);
-          ITRS++;
-          if (term_tag(arg_w) == TAG_NUM &&
-              (u32)term_val(arg_w) == match) {
-            result = heap_read(mat_loc);
-          } else if (term_tag(arg_w) == TAG_CTR &&
-                     term_ext(arg_w) == match) {
-            // Destructure with cell reuse: APP #1 lives in the
-            // consumed MAT cell, APP #2 in the consumed CTR's child
-            // slots.  See wnf/_.c TAG_MAT for the layout argument.
-            Term handler = heap_read(mat_loc);
-            u32 n = term_ctr_n(arg_w);
-            if (n == 0) { result = handler; break; }
-            u64 ctr_loc = term_val(arg_w);
-            Term child0 = heap_read(ctr_loc + 1);
-            heap_set(mat_loc + 1, child0);
-            Term res = term_new(0, TAG_APP, 0, mat_loc);
-            if (n >= 2) {
-              Term child1 = heap_read(ctr_loc + 2);
-              heap_set(ctr_loc + 1, res);
-              heap_set(ctr_loc + 2, child1);
-              res = term_new(0, TAG_APP, 0, ctr_loc + 1);
-            }
-            if (n > 2) {
-              u64 apps = heap_alloc(2 * (u64)(n - 2));
-              for (u32 i = 2; i < n; i++) {
-                u64 a = apps + 2 * (u64)(i - 2);
-                heap_set(a + 0, res);
-                heap_set(a + 1, term_ctr_at(arg_w, i));
-                res = term_new(0, TAG_APP, 0, a);
-              }
-            }
-            result = res;
-          } else {
-            // Miss: reuse the consumed MAT cell as APP(fallback, arg).
-            heap_set(mat_loc + 0, heap_read(mat_loc + 1));
-            heap_set(mat_loc + 1, arg_w);
-            result = term_new(0, TAG_APP, 0, mat_loc);
+          // wnf/_.c's APP-MAT: a DP head is driven to its value first.
+          Term arg_w = wnf(arg);
+          if (term_tag(arg_w) == TAG_DP0 || term_tag(arg_w) == TAG_DP1) {
+            arg_w = cnf(arg_w);
           }
+          result = interact_app_mat(fun, arg_w);
           break;
         }
         default: return 0;  // validation race: not a redex anymore
@@ -600,31 +565,8 @@ fn Term redex_fire(Term redex) {
       Term x = term_resolve(heap_read(val + 0));
       Term y = term_resolve(heap_read(val + 1));
       if (term_tag(x) != TAG_NUM || term_tag(y) != TAG_NUM) return 0;
-      u32 op = term_ext(redex);
-      u32 xv = (u32)term_val(x);
-      u32 yv = (u32)term_val(y);
-      u32 r;
-      switch (op) {
-        case OP_ADD: r = xv + yv; break;
-        case OP_SUB: r = xv - yv; break;
-        case OP_MUL: r = xv * yv; break;
-        case OP_EQ:  r = (xv == yv) ? 1 : 0; break;
-        case OP_LT:  r = (xv <  yv) ? 1 : 0; break;
-        case OP_DIV: r = (yv == 0) ? 0 : xv / yv; break;
-        case OP_MOD: r = (yv == 0) ? 0 : xv % yv; break;
-        case OP_XOR: r = xv ^ yv; break;
-        case OP_AND: r = xv & yv; break;
-        case OP_OR:  r = xv | yv; break;
-        case OP_SHL: r = xv << (yv & 31); break;
-        case OP_SHR: r = xv >> (yv & 31); break;
-        case OP_GT:  r = (xv >  yv) ? 1 : 0; break;
-        case OP_LE:  r = (xv <= yv) ? 1 : 0; break;
-        case OP_GE:  r = (xv >= yv) ? 1 : 0; break;
-        case OP_NE:  r = (xv != yv) ? 1 : 0; break;
-        default:     r = 0; break;
-      }
-      ITRS++;
-      result = term_new(0, TAG_NUM, term_ext(x), r);
+      result = interact_op2_num_num(term_ext(redex), term_ext(x), (u32)term_val(x),
+                                    (u32)term_val(y), val);
       break;
     }
     case TAG_UOP: {

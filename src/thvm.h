@@ -1438,7 +1438,8 @@ fn void multi_wire_prov_bump_body(u64 loc);
         }                                                             \
     } while (0)
 #else
-#define multi_emit(rule, family, term_a, term_b, delta_label) ((void)0)
+#define multi_emit(rule, family, term_a, term_b, delta_label) \
+  ((void)sizeof(term_a), (void)sizeof(term_b))
 #define WIRE_PROV_BUMP(loc) ((void)0)
 #endif
 
