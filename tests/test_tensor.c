@@ -71,9 +71,9 @@ int main(void) {
   CHECK_EQ(CURRENT_BACKEND->buf_read (TENS[id].buf_id, out, 4 * sizeof(f32)), 0);
   for (int i = 0; i < 4; i++) CHECK(in[i] == out[i]);
 
-  TEST_BEGIN("tensor/incref-then-release-twice");
+  TEST_BEGIN("tensor/second-ref-then-release-twice");
   u32 buf = TENS[id].buf_id;
-  tensor_incref(id);
+  TENS[id].refcount++;
   CHECK_EQ(TENS[id].refcount, 2);
   tensor_release(id);
   CHECK_EQ(TENS[id].refcount, 1);

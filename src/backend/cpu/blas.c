@@ -40,7 +40,6 @@
 static u64 BLAS_GEMM_DISPATCH_DAG = 0;
 static u64 BLAS_DOT_DISPATCH_DAG  = 0;
 static u64 BLAS_GEMV_DISPATCH_DAG = 0;
-static u64 BLAS_CONTRACTION_DISPATCH_DAG = 0;
 
 // Cached "env flag set to '1'" check.  Each dispatcher had its own
 // `static int known; static int on;` block; this collapses them.  The
@@ -154,14 +153,10 @@ fn u64 cpu_blas_dot_dispatch_dag_count(void) {
 fn u64 cpu_blas_gemv_dispatch_dag_count(void) {
   return BLAS_GEMV_DISPATCH_DAG;
 }
-fn u64 cpu_blas_contraction_dispatch_dag_count(void) {
-  return BLAS_CONTRACTION_DISPATCH_DAG;
-}
 fn void cpu_blas_gemm_dispatch_counters_reset(void) {
   BLAS_GEMM_DISPATCH_DAG = 0;
   BLAS_DOT_DISPATCH_DAG  = 0;
   BLAS_GEMV_DISPATCH_DAG = 0;
-  BLAS_CONTRACTION_DISPATCH_DAG = 0;
 }
 
 // Try GEMM.  A:{M,K} @ B:{K,N} -> {M,N}.  TMatMul materializes the
@@ -394,7 +389,6 @@ static int blas_try_contraction(KernelEntry *ke, u32 *in_buf_ids,
                       W_base,  (int)c.ldA,
                 0.0f, C_slice, (int)c.ldC);
   }
-  BLAS_CONTRACTION_DISPATCH_DAG++;
   return 1;
 }
 
@@ -546,7 +540,6 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
     }
   }
   free(patches);
-  BLAS_CONTRACTION_DISPATCH_DAG++;
   return 1;
 }
 
@@ -596,7 +589,6 @@ fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
 fn u64  cpu_blas_gemm_dispatch_dag_count   (void) { return 0; }
 fn u64  cpu_blas_dot_dispatch_dag_count    (void) { return 0; }
 fn u64  cpu_blas_gemv_dispatch_dag_count   (void) { return 0; }
-fn u64  cpu_blas_contraction_dispatch_dag_count (void) { return 0; }
 fn void cpu_blas_gemm_dispatch_counters_reset(void) {}
 
 #endif

@@ -96,7 +96,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // they're consumed by the scalar UOp interpreter and the UOp DAG
 // walker for the f16 / bf16 / fp8 promote-to-f32 ALU path.
 #include "dtype/info.c"
-#include "dtype/int_kernels.h"
 #include "dtype/fp_convert.c"
 #include "dtype/fp8.c"
 #include "dtype/nibble.c"
@@ -264,7 +263,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // === tensor/ ===
 #include "tensor/alloc.c"
 #include "tensor/mmap.c"
-#include "tensor/incref.c"
 #include "tensor/release.c"
 #include "tensor/mark_buf_preserved.c"
 #include "tensor/view_of.c"

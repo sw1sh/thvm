@@ -2110,18 +2110,10 @@ static void metal_pso_cache_store(u64 key,
   }
 }
 
-// External accessors for the PSO cache stats / control.  Used by
-// the new test_metal_pso_cache.c test; safe to call from a process
+// Test accessors for the PSO build stats; safe to call from a process
 // with no Metal device (returns 0).
-u64 thvm_metal_pso_cache_disk_hits(void)    { return METAL_JIT_BUILD_DISK_HITS; }
-u64 thvm_metal_pso_cache_disk_misses(void)  { return METAL_JIT_BUILD_DISK_MISSES; }
-u64 thvm_metal_pso_cache_bytes_r(void)      { return METAL_JIT_BUILD_DISK_BYTES_R; }
-u64 thvm_metal_pso_cache_bytes_w(void)      { return METAL_JIT_BUILD_DISK_BYTES_W; }
-u64 thvm_metal_jit_hits(void)               { return METAL_JIT_BUILD_HITS; }
 u64 thvm_metal_jit_misses(void)             { return METAL_JIT_BUILD_MISSES; }
 u64 thvm_metal_jit_compile_us(void)         { return METAL_JIT_BUILD_COMPILE_US; }
-int thvm_metal_pso_cache_enabled(void)      { return METAL_PSO_CACHE_ENABLED; }
-char const *thvm_metal_pso_cache_dir(void)  { return METAL_PSO_CACHE_DIR; }
 
 // Drop just the in-memory PSO cache (simulating a fresh process for
 // the test); leaves on-disk files intact.  Public so test code can
@@ -2952,13 +2944,6 @@ static id<MTLComputePipelineState> metal_tile_jit_pipeline(KernelEntry *ke) {
   return metal_tile_jit_build(ke, key);
 }
 
-// Test hook: expose the tile-jit PSO cache key for a kernel so tests
-// can assert "two kernels with the same UOp shape but different kvar
-// runtime values map to the same PSO slot".  Pure -- no Metal device
-// required.
-u64 thvm_metal_tile_jit_hash(KernelEntry const *ke) {
-  return metal_tile_jit_hash(ke);
-}
 
 // === Cold-start lever: parallel per-kernel MSL compile ====================
 //
@@ -4071,7 +4056,6 @@ static u64 metal_mps_min_macs(void) {
 }
 
 static u64 METAL_MPS_DISPATCH_COUNT = 0;
-fn u64 thvm_metal_mps_dispatch_count(void) { return METAL_MPS_DISPATCH_COUNT; }
 
 // Runtime-compiled conversion-kernel PSOs (bf16<->{f16,f32}).  Compiled
 // lazily on first MPS dispatch; one MTLLibrary, four functions.

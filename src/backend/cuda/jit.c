@@ -48,7 +48,6 @@ u64 CUDA_JIT_EVICTIONS = 0;
 u64 CUDA_JIT_PTX_LOADS = 0;   // of the compiles, how many were PTX passthrough
 fn u64 cuda_jit_compiles(void)  { return CUDA_JIT_COMPILES; }
 fn u64 cuda_jit_evictions(void) { return CUDA_JIT_EVICTIONS; }
-fn u64 cuda_jit_ptx_loads(void) { return CUDA_JIT_PTX_LOADS; }
 
 // Forward-declared in init.c so cuda_shutdown can unload every cached
 // module before the context is destroyed.
@@ -176,12 +175,6 @@ fn u64 cuda_jit_disk_writes(void) { return CUDA_JIT_DISK_WRITES; }
 // -> ~140 spurious recompiles/step -> the eviction nan + the ~10s/step
 // wall.  Eviction now happens only when the table is genuinely full
 // (a degenerate workload), via cuda_jit_probe returning a full marker.
-static CudaJitSlot *cuda_jit_home_slot(u64 key) {
-  u32 h = (u32)(key ^ (key >> 32));
-  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
-  return &CUDA_JIT_CACHE[h & (CUDA_JIT_CACHE_CAP - 1)];
-}
-
 // Linear-probe lookup.  Returns the slot holding `key` (a hit, *found=1),
 // or the first empty slot on its probe chain (a miss to insert into,
 // *found=0), or -- only when the whole table is occupied -- the home slot
@@ -528,10 +521,6 @@ fn int cuda_jit_graph_enabled(void) {
 
 // Cached fast path: if the slot already has an instantiated CUgraphExec,
 // launch it and return 0.  Caller can skip the per-op replay loop.
-static u64 CUDA_JIT_GRAPH_HITS = 0;
-static u64 CUDA_JIT_GRAPH_CAPS = 0;
-fn u64 cuda_jit_graph_hits(void) { return CUDA_JIT_GRAPH_HITS; }
-fn u64 cuda_jit_graph_captures(void) { return CUDA_JIT_GRAPH_CAPS; }
 
 fn int cuda_jit_graph_replay(u32 slot) {
   if (!cuda_jit_graph_enabled()) return -1;
@@ -544,7 +533,6 @@ fn int cuda_jit_graph_replay(u32 slot) {
   if (!CUDA_READY) return -1;
   if (slot >= CUDA_JIT_GRAPH_CACHE_NSLOTS) return -1;
   if (!CUDA_JIT_GRAPH_CACHE[slot].valid) return -1;
-  CUDA_JIT_GRAPH_HITS++;
   // Launch on the DEFAULT stream (NULL), NOT the capture stream -- see the
   // long note in cuda_jit_graph_capture_end_and_launch.  The graph's reads
   // (fresh inputs) and writes (consumed by later per-op kernels and the
@@ -652,7 +640,6 @@ fn int cuda_jit_graph_capture_end_and_launch(u32 slot) {
   CUDA_JIT_GRAPH_CACHE[slot].graph = g;
   CUDA_JIT_GRAPH_CACHE[slot].exec  = exec;
   CUDA_JIT_GRAPH_CACHE[slot].valid = 1;
-  CUDA_JIT_GRAPH_CAPS++;
   if (getenv("THVM_CUDA_JIT_GRAPH_TRACE")) {
     size_t n_nodes = 0;
     cuGraphGetNodes(g, NULL, &n_nodes);

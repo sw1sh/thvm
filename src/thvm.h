@@ -2039,7 +2039,6 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap);
 // Tensor descriptor lifecycle.  Step 12: bump-only allocation in TENS[];
 // refcount + backend-level buffer refcount govern the buffer lifetime.
 fn u32  tensor_alloc  (Backend *b, Shape shape, u32 dtype);
-fn void tensor_incref (u32 id);
 fn void tensor_release(u32 id);   // decref + buf_decref; free at 0
 fn void tensor_mark_buf_preserved(u32 id);
 fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref

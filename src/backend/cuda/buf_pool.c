@@ -10,16 +10,6 @@ fn u32 cuda_buf_pool_begin(void) {
   return (u32)CUDA_BUFS_NEXT;
 }
 
-fn void cuda_buf_pool_rollback(u32 wm) {
-  if (wm < 1) wm = 1;                 // slot 0 reserved
-  if (wm > CUDA_BUFS_NEXT) return;
-  for (u64 i = wm; i < CUDA_BUFS_NEXT; i++) {
-    if (CUDA_BUFS[i].jit_pinned) continue;   // JIT capture holds this buf
-    if (CUDA_BUFS[i].dptr != 0) cuda_buf_free((u32)i);
-  }
-  CUDA_BUFS_NEXT = wm;
-}
-
 // Preserve-aware rollback (mirrors cpu_buf_pool_rollback_with_preserve):
 // bufs flagged `preserved` -- the result-chain bufs marked just before
 // rollback -- survive; every other buffer allocated since the watermark
