@@ -848,12 +848,6 @@ struct Backend {
   // roots match.  NULL on backends without view aliasing -- caller
   // should fall back to identity (`a == b`).
   u32   (*buf_storage_root)(u32 buf_id);
-  // Optional: physical storage address probe.  Returns the device /
-  // host pointer as an opaque u64 (0 if buf has no storage).  Two
-  // bufs alias storage iff their addresses overlap -- a sounder
-  // alias check than buf_storage_root since arena reuse can land
-  // a fresh buf at the same dptr without updating parent_buf_id.
-  u64   (*buf_addr)(u32 buf_id);
   // Optional: the logical size in bytes of buf_id, the bytes its allocation
   // requested (a best-fit freelist recycle can back it with a larger
   // block).  0 when unknown.  The BEAM isolated bench sizes a chain-composed

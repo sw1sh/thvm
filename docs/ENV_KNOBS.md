@@ -32,9 +32,6 @@ update the matching row here in the same change.
 | `THVM_JIT` (Python) | on (`1`) | Enable the Python JIT capture/replay. `0` disables. |
 | `THVM_JIT_NO_PIN` | off | Disable JIT buffer pinning. |
 | `THVM_JIT_STRIDED` | off | Allow strided JIT capture of movement-op views. |
-| `THVM_JIT_REPLAY_DEDUP` | off | Experimental: dedup redundant dispatches during JIT replay. |
-| `THVM_JIT_REPLAY_DEDUP_WINDOW` | (impl) | Lookback window size for replay dedup. |
-| `THVM_JIT_REPLAY_DEDUP_TRACE` | off | Trace replay-dedup decisions. |
 | `THVM_JIT_REPLAY_NOSKIP` | off | Disable replay skip optimization. |
 | `THVM_JIT_REPLAY_PACK` | off | Experimental: pack replay dispatch records. |
 | `THVM_JIT_REPLAY_TRACE` | off | Trace JIT replay execution. |
