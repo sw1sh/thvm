@@ -19,10 +19,6 @@ fn Term uop_dag_apply_kopt(Term root, KOpt opt);
 // the applied_opts log; KOP_SWAP exchanges two axes in-place; KOP_TC
 // is metadata-only.  Returns 0 on validation failure (axis out of
 // range, arg doesn't divide, applied_opts full, unsupported opt).
-//
-// Per-axis kax_type is not stored on KpSchedule; the writer records
-// the opt and axes_resolve_kax_type derives the type from the
-// applied_opts log on read.
 fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   if (ke == NULL || ke->no_opts) {
     return 0;

@@ -532,7 +532,7 @@ static int cpu_jit_narrow_float(u32 dt) {
 // kernel that fails this can't be CPU-JITted, so the parallel precompile
 // pass skips it (no wasted clang).
 static int cpu_jit_eligible(KernelEntry const *ke) {
-  if (!cg_supports(ke)) return 0;
+  if (ke->cached_lift.store_root == 0) return 0;
   if (cpu_jit_narrow_float(ke->output_dtype)) return 0;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (ke->input_dtypes != NULL && cpu_jit_narrow_float(ke->input_dtypes[i]))

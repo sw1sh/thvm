@@ -187,7 +187,9 @@ static u64 kautotune_rangeified_key(KernelEntry const *ke) {
     return 0;
   }
   u64 h = 0xcbf29ce484222325ULL ^ 0x52414E4745584B41ULL;
-  if (ke->schedule != NULL && axes_resolve_n_axes(ke) > 0) {
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  if (axes_collect(ke, kax, ext, MAX_AXES) > 0) {
     h = kautotune_hash_u64(h, 3);
     h = kautotune_hash_u64(h, (u64)term_tag(ke->source_uop));
     h = kautotune_hash_u64(h, (u64)term_ext(ke->source_uop));
@@ -509,23 +511,23 @@ static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
     return 0;
   }
   if (opt.op != KOP_LOCAL) {
-    return tile_anno_apply_opt(ke, opt);
+    return kernel_apply_opt(ke, opt);
   }
-  if (!tile_anno_apply_opt(ke, opt)) {
+  if (!kernel_apply_opt(ke, opt)) {
     return 0;
   }
-  TileAxisInfo info;
-  if (opt.axis >= tile_anno_axis_count_or_kernelaxes(ke)
-      || !tile_anno_axis_or_kernelaxes(ke, opt.axis, &info)
-      || info.kax_type != KAX_LOOP) {
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  u32 n = axes_collect(ke, kax, ext, MAX_AXES);
+  if (opt.axis >= n || kax[opt.axis] != KAX_LOOP) {
     return 0;
   }
   KOpt global = {
     .op   = KOP_GLOBAL,
     .axis = opt.axis,
-    .arg  = info.extent,
+    .arg  = ext[opt.axis],
   };
-  return tile_anno_apply_opt(ke, global);
+  return kernel_apply_opt(ke, global);
 }
 
 static void kernel_bench_fire(u32 kid);

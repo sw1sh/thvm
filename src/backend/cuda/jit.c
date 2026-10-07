@@ -934,7 +934,7 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   // (cg_render_uop_kernel_cuda_root) consumes a lifted UOp DAG root.
   // A kernel the lifter declined (store_root == 0) has no DAG to
   // render, so bail.
-  if (!cg_supports(ke) || ke->cached_lift.store_root == 0) return -1;
+  if (ke->cached_lift.store_root == 0) return -1;
   Term store_root = ke->cached_lift.store_root;
 
   // Per-KernelEntry CUfunction cache.  cuda_dispatch_kernel previously

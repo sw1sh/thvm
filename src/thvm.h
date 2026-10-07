@@ -607,10 +607,9 @@ struct KernelEntry;
 
 // === KpSchedule ===
 // Axis-typed scheduling structure carried per-KernelEntry, mirroring
-// tinygrad's `Kernel.full_shape[]` + applied-opt log (no axis_types[]
-// after E9; per-axis kax_type derives from output_shape +
-// tail-reduce + scalar-reduce + applied_opts via
-// `axes_resolve_kax_type`).  The codegen variant emitter walks these
+// tinygrad's applied-opt log; the per-axis kax_type and extents come from
+// the lifted DAG's RANGE leaves (axes_collect, codegen/axis.c).  The
+// codegen variant emitter walks these
 // to produce a structured iteration nest -- nested loops, unrolled
 // blocks, thread/threadgroup bindings (Metal) -- instead of one flat
 // `for i = 0..numel-1`.
@@ -668,17 +667,8 @@ typedef struct {
 } KOpt;
 
 typedef struct {
-  // E9: axis_types[] is gone; per-axis kax_type derives on demand
-  // from (output_shape + tail-reduce + scalar-reduce + applied_opts)
-  // via axes_resolve_kax_type / axes_compute_axis_types in
-  // codegen/axis.c.
-  //
-  // Per-axis extents + axis count derive on demand from
-  // (output_shape + tail-reduce + scalar-reduce + applied_opts) via
-  //   axes_resolve_full_shape(ke, d, *out)
-  //   axes_resolve_n_axes(ke)
-  // KpSchedule carries only the applied_opts log + autotune
-  // bookkeeping bits.
+  // The applied_opts log + autotune bookkeeping bits; the axes themselves
+  // live in the lifted DAG (axes_collect).
   KOpt applied_opts[MAX_OPTS];
   u8   n_applied;
   u8   autotuned;              // 1 = kernel_autotune has run on this
@@ -840,16 +830,6 @@ static inline u64 thvm_live_byte_ceiling(void) {
 #define KSRC_AS_INPUT(n) (KSRC_INPUT_FLAG | (u32)(n))
 #define KSRC_IS_INPUT(s) (((s) & KSRC_INPUT_FLAG) != 0)
 #define KSRC_INDEX(s)    ((s) & 0x7FFFFFFFu)
-
-// === axis annotation type =============================================
-// Per-axis info returned by tile_anno_axis_or_kernelaxes.  memory_scope
-// and vector_width are 0-valued today; reserved for future use.
-typedef struct {
-  u32 kax_type;
-  u32 extent;
-  u32 memory_scope;
-  u32 vector_width;
-} TileAxisInfo;
 
 // Matmul shape facts (M/N/K/ldA/ldB/flags/dtype/a_input/b_input)
 // flow through UopDagGemmShape (src/uop/dag_scan.c) read from
@@ -1633,13 +1613,6 @@ fn u8   uop_is_ternary_elementwise(u8 op);
 fn int  term_shape_in(Term t, u32 env_id, Shape *out);
 fn int  term_dtype_in(Term t, u32 env_id, u32 *out);
 
-// === axis annotation read API (codegen/tile_anno.c) ===
-// Resolves axis count + per-axis TileAxisInfo from the KpSchedule
-// signal trio (output_shape + tail-reduce + scalar-reduce + applied_opts).
-fn int  tile_anno_axis_or_kernelaxes(struct KernelEntry const *ke, u32 d,
-                                     TileAxisInfo *out);
-fn u32  tile_anno_axis_count_or_kernelaxes(struct KernelEntry const *ke);
-
 // applied_opts facade.  External linkage (no `fn`) so backend_metal.o
 // can call these.
 u32        tile_anno_applied_opts_count(struct KernelEntry const *ke);
@@ -2312,9 +2285,8 @@ fn Term thvm_realize_many(Term ctr_term);
 // Exposed cross-TU so the Metal .m file (compiled separately under
 // -DTHVM_HAS_METAL) can render MSL via cg_emit_metal ->
 // cg_emit_tile_metal -> cg_emit_via_uop and record dispatches into
-// the shared K_PROFILE table.  cg_supports remains the pre-build
-// gate for the CPU JIT (clang -shared); the Metal side and the CPU
-// JIT both route through render_uop's lifter (post-F6).
+// the shared K_PROFILE table.  The Metal side and the CPU JIT both
+// route through render_uop's lifter.
 
 // Per-kid route taken by the most recent fire.  Mirrored by the WL
 // surface decoder (TKernelDispatchKind) -- keep the names + ids

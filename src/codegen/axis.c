@@ -1,11 +1,8 @@
-// codegen/axis.c -- KpSchedule axis queries.  The mutation
-// (axes_apply_opt) lives in codegen/apply_opt.c.  Mirrors tinygrad's
-// Kernel.axis_types[] / Kernel.full_shape[]
-// (tinygrad/codegen/opt/kernel.py).
-//
-// All resolvers read the lifted UOp DAG (cached_lift.store_root):
-// uop_dag_apply_kopt mutates RANGE leaves in place for every
-// split-class opt, so the DAG IS the post-opt axis structure.
+// codegen/axis.c -- a kernel's post-opt axis structure, tinygrad's
+// Kernel.axis_types[] / Kernel.full_shape[] (tinygrad/codegen/opt/kernel.py).
+// The lifted UOp DAG (cached_lift.store_root) IS that structure:
+// uop_dag_apply_kopt mutates its RANGE leaves in place for every
+// split-class opt (kernel_apply_opt, codegen/apply_opt.c).
 
 // Collect the kernel's full post-opt axis structure from cached_lift
 // .store_root.  The lifted DAG is post-mutation (uop_dag_apply_kopt
@@ -14,11 +11,15 @@
 // Output axes whose extent is 1 may not appear as RANGE leaves (the
 // addr collapses to CONST(0)); we synthesise them from output_shape.
 //
-// Returns axis count (sorted by axis_id), or 0 when the DAG is empty.
+// Returns the axis count (sorted by axis_id); 0 when the kernel has no
+// schedule (a py-built kernel) or its DAG is empty or overflows `cap`.
 // Caller arrays must be sized >= MAX_AXES.
-static u32 axes_dag_collect(KernelEntry const *ke, u8 *kax_out,
-                            u32 *extent_out, u32 cap) {
-  if (ke == NULL || ke->cached_lift.store_root == 0 || cap == 0) return 0;
+fn u32 axes_collect(KernelEntry const *ke, u8 *kax_out, u32 *extent_out,
+                    u32 cap) {
+  if (ke == NULL || ke->schedule == NULL || ke->cached_lift.store_root == 0
+      || cap == 0) {
+    return 0;
+  }
   u32 axis_ids[MAX_AXES] = {0};
   u32 axis_types[MAX_AXES] = {0};
   u32 extents[MAX_AXES] = {0};
@@ -53,73 +54,4 @@ static u32 axes_dag_collect(KernelEntry const *ke, u8 *kax_out,
     extent_out[i] = extents[i];
   }
   return n;
-}
-
-// Read per-axis kax_type[] from the lifted UOp DAG.  The DAG's
-// post-opt RANGE leaves carry the final axis layout (uop_dag_apply_kopt
-// mutates them in place for every split-class opt).
-//
-// Read the resolved kax_type (KAX_*) for axis `d` from the lifted
-// DAG's post-opt RANGE leaves (uop_dag_apply_kopt mutates them in
-// place for every split-class opt; axes_reset_to_default reverts
-// cached_lift.store_root from cached_lift_init_root so autotune's
-// bench loop is consistent).  Returns KAX_LOOP when ke/axes are
-// NULL, `d >= n_axes`, or the DAG is empty / overflows.
-fn u8 axes_resolve_kax_type(struct KernelEntry const *ke, u32 d) {
-  if (ke == NULL || ke->schedule == NULL) return KAX_LOOP;
-  u8 kax_dag[MAX_AXES] = {0};
-  u32 ext_dag[MAX_AXES] = {0};
-  u32 n_dag = axes_dag_collect(ke, kax_dag, ext_dag, MAX_AXES);
-  if (n_dag == 0 || d >= n_dag) return KAX_LOOP;
-  return kax_dag[d];
-}
-
-// Read per-axis full_shape extents from the lifted UOp DAG's
-// post-opt RANGE leaves.
-//
-// Returns the number of extents written to `out`; 0 on overflow /
-// empty DAG.
-fn u32 axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
-                               u32 cap) {
-  if (ke == NULL || ke->schedule == NULL || out == NULL || cap == 0) {
-    return 0;
-  }
-  // The post-opt RANGE leaves carry final extents.
-  u8 kax_dag[MAX_AXES] = {0};
-  u32 ext_dag[MAX_AXES] = {0};
-  u32 n_dag = axes_dag_collect(ke, kax_dag, ext_dag, MAX_AXES);
-  if (n_dag == 0 || n_dag > cap) return 0;
-  for (u32 i = 0; i < n_dag; i++) out[i] = ext_dag[i];
-  return n_dag;
-}
-
-// Per-axis full_shape resolver.  Returns the extent for axis `d` from
-// the lifted DAG's post-opt RANGE leaves; 0 when ke/axes are NULL,
-// `d` is out of range, or the DAG is empty.
-fn u32 axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
-                               u32 *out_extent) {
-  if (ke == NULL || ke->schedule == NULL) {
-    if (out_extent != NULL) *out_extent = 0;
-    return 0;
-  }
-  u32 extents[MAX_AXES] = {0};
-  u32 n = axes_compute_full_shape(ke, extents, MAX_AXES);
-  if (n == 0 || d >= n) {
-    if (out_extent != NULL) *out_extent = 0;
-    return 0;
-  }
-  if (out_extent != NULL) *out_extent = extents[d];
-  return 1;
-}
-
-// Axis-count resolver.  Returns the derived axis count
-// (output_shape.ndim clipped to MAX_AXES-1, plus 1 if a trailing
-// REDUCE-class axis is present, plus the count of split-class
-// applied_opts).  Authoritative count.
-fn u32 axes_resolve_n_axes(struct KernelEntry const *ke) {
-  if (ke == NULL || ke->schedule == NULL) {
-    return 0;
-  }
-  u32 extents[MAX_AXES] = {0};
-  return axes_compute_full_shape(ke, extents, MAX_AXES);
 }

@@ -2545,14 +2545,11 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
     MArgument_setMTensor(res, empty);
     return LIBRARY_NO_ERROR;
   }
-  // E9 session 3: read n_axes + per-axis (kax_type, extent) through the
-  // resolvers (signal-derived from output_shape + tail-reduce +
-  // scalar-reduce + applied_opts).  Wire format stays byte-equal: by
-  // writer-trio determinism, axes_resolve_n_axes(ke) == ax->n_axes and
-  // axes_resolve_full_shape(ke, i) == ax->full_shape[i] under
-  // THVM_E9_VALIDATE=1.  applied_opts is still sourced from KpSchedule
-  // (Piece B / future session moves the ownership).
-  u32 n_axes = axes_resolve_n_axes(ke);
+  // Per-axis (kax_type, extent) from the lifted DAG; applied_opts from
+  // KpSchedule.
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  u32 n_axes = axes_collect(ke, kax, ext, MAX_AXES);
   u32 n_applied = (u32)ax->n_applied;
   mint total = (mint)(2 + 2 * n_axes + 3 * n_applied);
   mint dims[1] = {total};
@@ -2562,10 +2559,8 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
   dst[0] = (mint)n_axes;
   dst[1] = (mint)n_applied;
   for (u32 i = 0; i < n_axes; i++) {
-    u32 extent = 0;
-    (void)axes_resolve_full_shape(ke, i, &extent);
-    dst[2 + i]           = (mint)axes_resolve_kax_type(ke, i);
-    dst[2 + n_axes + i]  = (mint)extent;
+    dst[2 + i]          = (mint)kax[i];
+    dst[2 + n_axes + i] = (mint)ext[i];
   }
   mint base = 2 + 2 * n_axes;
   for (u32 i = 0; i < n_applied; i++) {
@@ -2597,10 +2592,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
     return LIBRARY_NO_ERROR;
   }
   KOpt opt = { (u8)op, axis, arg };
-  int ok = tile_anno_apply_opt(&KERNELS[kid], opt);
-  if (ok) {
-  }
-  MArgument_setInteger(res, (mint)ok);
+  MArgument_setInteger(res, (mint)kernel_apply_opt(&KERNELS[kid], opt));
   return LIBRARY_NO_ERROR;
 }
 
