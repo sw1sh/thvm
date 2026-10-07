@@ -30,7 +30,7 @@ single sample; predicted class flips from 0 to 4 (correct).
 | Term packing + flat heap                     | implemented + tested    |
 | WNF stack machine + 29 interactions          | implemented + tested    |
 | Tensors / TUOp graph                         | implemented + tested    |
-| Materialize + kernelize + linearize          | implemented + tested    |
+| Materialize + kernelize                      | implemented + tested    |
 | Bufferize / rangeify schedule IR (default on)| implemented + tested    |
 | CPU backend (interpreter + UOp JIT)          | implemented + tested    |
 | Metal backend (kernel dispatch)              | implemented + tested    |
@@ -137,7 +137,7 @@ src/
   dtype/          dtype machinery (f32/i32/...)
   uop/            UOp constructors (CONST / unary / binary / ...)
   tensor/         TenDesc lifecycle + refcount
-  schedule/       materialize, kernelize, linearize, bufferize/rangeify
+  schedule/       materialize, kernelize, bufferize/rangeify
   codegen/        kernel codegen (scalar + tile, CPU C + Metal MSL)
   jit/            CPU UOp-graph JIT
   aot/            ahead-of-time compiler (C + Metal targets)

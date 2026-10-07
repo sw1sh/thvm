@@ -258,8 +258,8 @@ fn int ru_fuse_matmul_input_target_ok(void) {
 //
 // Metal keeps 31 because thvm's own Metal ABI still binds one [[buffer(n)]]
 // per buffer: the output at 0 and input i at 1+i (cg_render_uop_kernel,
-// cg_render_uop_kernel_root, lz_emit_prelude_metal, and
-// metal_tile_jit_encode_on in backend/metal/_.m), and metal_graph_build's
+// cg_render_uop_kernel_root, and metal_tile_jit_encode_on in
+// backend/metal/_.m), and metal_graph_build's
 // ICB sets setMaxKernelBufferBindCount:31.  An index past 30 does not compile
 // ("'buffer' attribute parameter is out of bounds"), so this is a
 // correctness cap, not a tunable.  Known gap: metal_tile_jit_encode_on binds

@@ -132,9 +132,8 @@ buffer distinct even when shapes coincide.
 
 A kernel root may also be an `UOP_AFTER` chain of `UOP_STORE`s: a
 kernel that writes its output in ordered passes (a scatter's init,
-accumulate and finish stores).  `uop_arity(UOP_AFTER)` stays 0 because
-the devectorizer's AFTER chains rely on it, so every materialize-time
-pass over a kernel root goes through `uop_root_map_stores` /
+accumulate and finish stores).  `uop_arity(UOP_AFTER)` is 0, so every
+materialize-time pass over a kernel root goes through `uop_root_map_stores` /
 `uop_root_each_store` ([src/uop/root_map_stores.c](../src/uop/root_map_stores.c)):
 the arange collapse, the walker rewrite with its REDUCE repair and the
 chain-fold scan each see every store; `uop_dag_renumber_axes` gives all

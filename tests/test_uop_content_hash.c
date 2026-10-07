@@ -221,26 +221,14 @@ int main(void) {
   TEST_BEGIN("content-hash/gc-invariant-every-layout");
   {
     u32 dims[2]   = {3, 5};
-    u32 bits[3]   = {7, 8, 9};
-    u32 axes[2]   = {4, 6};
-    u32 factor[2] = {2, 3};
-    u32 lanes[2]  = {1, 0};
     Term rng = uop_range(3, KAX_REDUCE, 17);
     Term buf = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 2, dims, 2);
     Term val = uop_index_e(buf, rng);
-    Term srcs[2] = { val, rng };
     Term nodes[] = {
       rng,
       buf,
       uop_bufferize_new(val, UOP_SCOPE_GLOBAL, 1, 1, &rng),
       uop_detach(val),
-      uop_vconst(DT_FP32, 3, bits),
-      uop_unroll(val, 2, axes, factor),
-      uop_contract(val, 2, axes, factor),
-      uop_gep(val, 2, lanes),
-      uop_stack(2, srcs),
-      uop_placeholder(DT_FP32, 5),
-      uop_end(val, 1, &rng),
       uop_gather_node(val, rng, 1),
       uop_scatter_node(val, rng, val, 1, SCATTER_MAX, 0),
     };

@@ -178,38 +178,6 @@ static u32 uop_graph_rebuild_ndim(Term t) {
   return ndim;
 }
 
-// `small` when `n` values fit in it, else a heap buffer the caller frees.
-static u32 *uop_graph_rebuild_buf(Term t, u32 *small, u32 small_n, u32 n) {
-  if (n <= small_n) {
-    return small;
-  }
-  u32 *buf = (u32 *)malloc((size_t)n * sizeof(u32));
-  if (buf == NULL) {
-    uop_graph_rebuild_fail(t, "out of memory");
-  }
-  return buf;
-}
-
-// UNROLL / CONTRACT: [src, NUM(n), (NUM(axis), NUM(factor)) * n].
-static Term uop_graph_rebuild_axis_args(Term t, Term src) {
-  u64  loc = term_val(t);
-  u32  n   = (u32)term_val(heap_read(loc + 1));
-  u32  small[16];
-  u32 *buf  = uop_graph_rebuild_buf(t, small, 16, 2 * n);
-  u32 *axes = buf;
-  u32 *facs = buf + n;
-  for (u32 i = 0; i < n; i++) {
-    axes[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 0));
-    facs[i] = (u32)term_val(heap_read(loc + 2 + 2 * i + 1));
-  }
-  Term out = term_ext(t) == UOP_UNROLL ? uop_unroll(src, n, axes, facs)
-                                       : uop_contract(src, n, axes, facs);
-  if (buf != small) {
-    free(buf);
-  }
-  return out;
-}
-
 // Kept out of line: its argument buffers must not land in the recursive
 // frame of uop_graph_rewrite_rec.
 __attribute__((noinline))
@@ -350,31 +318,6 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
       return uop_scatter_node(srcs[0], srcs[1], srcs[2], uop_scatter_dim(t),
                               uop_scatter_kind(t), uop_scatter_include_self(t));
 
-    // === Expander structural opcodes (src/uop/expander.c) ===
-    // Arity 1: only src[0] is a recursable child.  The tail NUM cells
-    // (n_args + axis_id/factor pairs, or n_idx + indices) describe the
-    // op's static arg shape and don't change under graph rewrite.
-    case UOP_UNROLL:
-    case UOP_CONTRACT:
-      return uop_graph_rebuild_axis_args(t, srcs[0]);
-
-    case UOP_GEP: {
-      u32  n = (u32)term_val(heap_read(loc + 1));
-      u32  small[64];
-      u32 *idxs = uop_graph_rebuild_buf(t, small, 64, n);
-      for (u32 i = 0; i < n; i++) {
-        idxs[i] = (u32)term_val(heap_read(loc + 2 + i));
-      }
-      Term out = uop_gep(srcs[0], n, idxs);
-      if (idxs != small) {
-        free(idxs);
-      }
-      return out;
-    }
-    // UOP_VCONST / UOP_PLACEHOLDER: arity 0, no rebuild path needed.
-    // UOP_STACK: arity 0 here; uop_graph_rewrite_stack_lanes rewrites and
-    // rebuilds its variadic lanes.  UOP_END: arity 0, lanes are RANGEs.
-
     default:
       return t;
   }
@@ -450,40 +393,6 @@ static u32 uop_graph_rewrite_match(UOpGraphRewriteState *st, Term t,
 
 static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st, Term t, u32 depth);
 
-// Variadic STACK: uop_arity reports 0, so the fixed-arity descent skips the
-// lanes.  Rewrites each lane and rebuilds through the canonical uop_stack
-// constructor (hash-conses, collapses singletons) when any lane changed.
-// Out of line so the lane buffer never sits in the recursive frame.
-__attribute__((noinline))
-static Term uop_graph_rewrite_stack_lanes(UOpGraphRewriteState *st,
-                                          Term stack, u32 depth) {
-  u32   n     = uop_stack_n(stack);
-  Term *lanes = NULL;
-  for (u32 i = 0; i < n; i++) {
-    Term old_l = uop_stack_src(stack, i);
-    Term new_l = uop_graph_rewrite_rec(st, old_l, depth);
-    if (new_l != old_l && lanes == NULL) {
-      lanes = (Term *)malloc((size_t)n * sizeof(Term));
-      if (lanes == NULL) {
-        uop_graph_rewrite_fail(st, "out of memory rebuilding a STACK", stack,
-                               st->chain_len);
-      }
-      for (u32 j = 0; j < i; j++) {
-        lanes[j] = uop_stack_src(stack, j);
-      }
-    }
-    if (lanes != NULL) {
-      lanes[i] = new_l;
-    }
-  }
-  if (lanes == NULL) {
-    return stack;
-  }
-  Term out = uop_stack(n, lanes);
-  free(lanes);
-  return out;
-}
-
 // Rewrites the sources of UOp node `t` at `depth` and rebuilds it when any
 // changed.
 static Term uop_graph_rewrite_descend(UOpGraphRewriteState *st, Term t,
@@ -501,11 +410,7 @@ static Term uop_graph_rewrite_descend(UOpGraphRewriteState *st, Term t,
       changed = 1;
     }
   }
-  Term cur = changed ? uop_graph_rebuild_with_srcs(t, srcs) : t;
-  if (term_tag(cur) == TAG_UOP && term_ext(cur) == UOP_STACK) {
-    cur = uop_graph_rewrite_stack_lanes(st, cur, depth);
-  }
-  return cur;
+  return changed ? uop_graph_rebuild_with_srcs(t, srcs) : t;
 }
 
 // Bottom-up: rewrite the sources, then apply the first matching rule and

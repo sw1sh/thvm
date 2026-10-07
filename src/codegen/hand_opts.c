@@ -493,10 +493,8 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   // Intra-heuristic target-aware skips (see hand_opt_kernel_is_cuda
   // users below) are the tinygrad-faithful way to handle backend
   // peculiarities -- mirrors heuristic.py:37 (AMX skip) and :109
-  // (DSP skip).  See docs/tinygrad_late_passes.md for the V100
-  // measurement (warm step is currently 130x naive baseline; the
-  // remediation is to port tinygrad/renderer/ptx.py, not to narrow
-  // the gate).
+  // (DSP skip).  A slow opt'd kernel is a renderer gap, not a reason to
+  // narrow the gate (docs/tinygrad_late_passes.md).
   //
   // CPU (Lever B): tinygrad runs hand_coded_optimizations on EVERY
   // renderer including CPU (heuristic.py:8); only the LOCAL/THREAD/DSP

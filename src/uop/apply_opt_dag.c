@@ -227,8 +227,7 @@ static Term apply_opt_dag_sub_uncached(Term t, ApplyOptDagSubState *st) {
     return uop_opt(new_tgt, uop_opt_kind(t), uop_opt_factor(t));
   }
   // An AFTER kernel root (arity 0) rewrites every store, so all stores
-  // share one axis-id space.  Only kernel roots reach here: the
-  // devectorizer's AFTER chains live inside the renderers.
+  // share one axis-id space.
   if (op == UOP_AFTER) {
     Term node  = uop_after_node(t);
     Term after = uop_after_after_node(t);

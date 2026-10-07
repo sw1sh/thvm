@@ -7,11 +7,7 @@
 // (dtype.py:251).  e5m2 keeps inf as 0x7c / 0xfc and encodes NaN as
 // sign | 0x7f (dtype.py:252).  Finite inputs are unaffected, and finite
 // overflow saturates to maxnorm.  A float CONST payload truncates
-// through the same encoding (DType.const, dtype.py:79-84 and 299), and
-// the devectorized MAX accumulator starts at dt.min (identity_element,
-// uop/ops.py:61), which is the finite -448 for e4m3 (dtype.py:69-77).
-// The same check covers the int and bool minimums; an i64 MAX, whose
-// minimum does not fit a CONST payload, stays a REDUCE.
+// through the same encoding (DType.const, dtype.py:79-84 and 299).
 //
 // A kernel store saturates instead, as tinygrad's emulated fp8 kernels
 // do (tinygrad/codegen/decomp/dtype.py:115-134): +/-inf stores as
@@ -45,72 +41,6 @@ static f32 f32_of(u32 b) {
 
 static u32 const_payload(Term c) {
   return (u32)term_val(heap_read(term_val(c)));
-}
-
-static u32 const_dtype(Term c) {
-  return (u32)term_ext(heap_read(term_val(c)));
-}
-
-// devectorize lowers a REDUCE as tinygrad's reduce_ranges_to_acc does
-// (codegen/__init__.py:197-204):
-//   init    = STORE(acc.after(*live), 0, identity)
-//   initted = acc.after(init, *own)
-//   update  = STORE(initted, 0, LOAD(initted) <op> body)
-//   result  = LOAD(acc.after(END(update, *own)))
-// init is the only STORE whose value is a CONST.  The walk reaches it
-// from the result through LOAD's source, both AFTER operands, END's body,
-// and the buffer of a STORE whose value is not a CONST.
-static Term find_init_const(Term t, u32 depth) {
-  if (depth > 64 || term_tag(t) != TAG_UOP) {
-    return 0;
-  }
-  switch (term_ext(t)) {
-    case UOP_LOAD:
-      return find_init_const(heap_read(term_val(t)), depth + 1);
-    case UOP_END:
-      return find_init_const(uop_end_body(t), depth + 1);
-    case UOP_STORE: {
-      Term v = uop_store_value(t);
-      if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_CONST) {
-        return v;
-      }
-      return find_init_const(uop_store_buf(t), depth + 1);
-    }
-    case UOP_AFTER: {
-      Term a = find_init_const(uop_after_node(t), depth + 1);
-      if (a != 0) {
-        return a;
-      }
-      return find_init_const(uop_after_after_node(t), depth + 1);
-    }
-    default:
-      return 0;
-  }
-}
-
-static Term lower_reduce(u32 kind, u32 dtype, u32 instance) {
-  u32  dims[1] = { 4 };
-  u32  axes[1] = { 2 };
-  Term buf     = uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype, 1, dims, instance);
-  Term body    = uop_load(uop_index_e(buf, uop_range(2, KAX_LOOP, 4)));
-  return uop_devectorize_graph(uop_reduce_multi(kind, 1, axes, body));
-}
-
-static void check_identity(u32 kind, u32 dtype, u32 instance, u32 want_bits) {
-  Term id = find_init_const(lower_reduce(kind, dtype, instance), 0);
-  CHECK(id != 0);
-  if (id == 0) {
-    return;
-  }
-  CHECK_EQ(const_dtype(id), dtype);
-  CHECK_EQ(const_payload(id), want_bits);
-}
-
-static void check_max_identity(u32 dtype, u32 instance, u32 want_bits) {
-  static char name[64];
-  snprintf(name, sizeof name, "devectorize/max-identity-is-dtype-min/%s", dtype_name(dtype));
-  TEST_BEGIN(name);
-  check_identity(REDUCE_MAX, dtype, instance, want_bits);
 }
 
 static Term cpu_buffer(u32 dtype, void const *data, u32 n) {
@@ -315,34 +245,6 @@ int main(void) {
   TEST_BEGIN("const/e4m3-inf-truncates-to-nan");
   CHECK(isnan(f32_of(const_payload(uop_const(DT_FP8E4M3, bits_of(pinf))))));
   CHECK(isnan(f32_of(const_payload(uop_const(DT_FP8E4M3, bits_of(ninf))))));
-
-  check_max_identity(DT_FP8E4M3, 1, bits_of(-448.0f));
-  check_max_identity(DT_FP8E5M2, 2, bits_of(ninf));
-  check_max_identity(DT_FP32, 3, bits_of(ninf));
-
-  // dt.min of an int or bool (dtype.py:70-72); a signed payload
-  // sign-extends from 32 bits.
-  struct { u32 dtype; u32 min; } const int_mins[8] = {
-    { DT_BOOL,   0           },
-    { DT_INT8,   0xFFFFFF80u },
-    { DT_UINT8,  0           },
-    { DT_INT16,  0xFFFF8000u },
-    { DT_UINT16, 0           },
-    { DT_INT32,  0x80000000u },
-    { DT_UINT32, 0           },
-    { DT_UINT64, 0           },
-  };
-  for (u32 i = 0; i < 8; i++) {
-    check_max_identity(int_mins[i].dtype, 4 + i, int_mins[i].min);
-  }
-
-  TEST_BEGIN("devectorize/max-i64-stays-a-reduce");
-  Term max_i64 = lower_reduce(REDUCE_MAX, DT_INT64, 12);
-  CHECK_EQ(term_ext(max_i64), UOP_REDUCE);
-  CHECK(find_init_const(max_i64, 0) == 0);
-
-  TEST_BEGIN("devectorize/sum-i64-lowers-from-zero");
-  check_identity(REDUCE_SUM, DT_INT64, 13, 0);
 
   TEST_BEGIN("store/runs-on-cpu");
   CHECK(CURRENT_BACKEND == &CPU_BACKEND);

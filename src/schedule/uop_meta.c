@@ -15,25 +15,6 @@ fn u8 uop_arity(u8 op) {
     case UOP_RANGE:    // heap = [NUM(axis_id), NUM(axis_type), NUM(extent)]
     case UOP_INVALID:  // heap = [NUM(0)] sentinel
     case UOP_DEFINE_VAR:  // heap = [NUM(packed_extent)]
-    case UOP_VCONST:   // heap = [NUM(dtype), NUM(n), NUM(b_0), ...] - all NUMs
-    // Devectorizer-pass leaves: PLACEHOLDER carries only [NUM(dtype),
-    // NUM(acc_id)]; the renderer emits one acc declaration per unique
-    // acc_id.  No recursable child Terms.  Mirrors tinygrad's
-    // UOp.placeholder + reduce_to_acc (devectorizer.py:321).
-    case UOP_PLACEHOLDER:
-    // UOP_STACK is variadic: heap = [NUM(n), src_0, ..., src_{n-1}].
-    // The src cells are recursable Term children but the count varies,
-    // so the rewriter walks them via the dedicated STACK rebuild path
-    // (uop_graph_rebuild_with_srcs) -- arity-0 here keeps the generic
-    // walker out of the variadic payload.
-    case UOP_STACK:
-    // UOP_END heap = [NUM(n), range_0, ..., range_{n-1}, body].  Each
-    // range_i is a UOP_RANGE Term; they are atoms (arity 0) on their own
-    // and dedup via the canonical range constructor.  Treating arity as
-    // 0 here means the generic walker won't try to rebuild END from a
-    // fixed-arity descent; the walkers that need the variadic payload
-    // (linearizer, devectorize's cone walk) read it explicitly.
-    case UOP_END:
       return 0;
     // UOP_OPT carries [target, NUM(kind), NUM(factor)]; only the
     // target slot is a recursable Term child.
@@ -56,15 +37,6 @@ fn u8 uop_arity(u8 op) {
     // payload mirrors RESHAPE/EXPAND's [src, NUM(ndim), NUM(d0)...]
     // convention (arity=1 even though the heap holds more slots).
     case UOP_BUFFERIZE:
-    // Expander-pass wrappers: each carries one recursable child Term
-    // plus a trailing NUM(n_args) header + 2*n_args NUM payload cells.
-    // See UOP_VCONST/UNROLL/CONTRACT/GEP heap layout comments in
-    // src/thvm.h.  Arity-1 matches RESHAPE/EXPAND etc. -- the rewriter
-    // descends into src[0] only; the NUM cells are read directly via
-    // uop_unroll_arg / uop_contract_arg / uop_gep_idx accessors.
-    case UOP_UNROLL:
-    case UOP_CONTRACT:
-    case UOP_GEP:
       return 1;
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_ASSIGN:
@@ -424,24 +396,8 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
       *out = uop_buffer_dtype(t);
       return 1;
     }
-    // Expander / devectorizer value nodes: a STACK's lanes share one
-    // dtype, a PLACEHOLDER or VCONST carries its own, and AFTER, GEP,
-    // UNROLL and CONTRACT carry their src[0]'s.  Without these a reduce
-    // over a STACK body, or over a lowered inner reduce
-    // (LOAD(AFTER(PLACEHOLDER, END))), lowered to an f32 accumulator.
-    if (op == UOP_STACK && uop_stack_n(t) > 0) {
-      return term_dtype_in(uop_stack_src(t, 0), env_id, out);
-    }
-    if (op == UOP_PLACEHOLDER) {
-      *out = uop_placeholder_dtype(t);
-      return 1;
-    }
-    if (op == UOP_VCONST) {
-      *out = uop_vconst_dtype(t);
-      return 1;
-    }
-    if (op == UOP_AFTER || op == UOP_GEP || op == UOP_UNROLL
-        || op == UOP_CONTRACT) {
+    // AFTER = [node, after_node] carries node's dtype.
+    if (op == UOP_AFTER) {
       return term_dtype_in(heap_read(loc), env_id, out);
     }
   }

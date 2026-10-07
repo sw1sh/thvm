@@ -66,6 +66,10 @@ already exists; design memos for not-yet-built layers live under
   first-class `BUFFERIZE`/`INDEX` schedule IR, edge-local movement
   contexts, bufferize rewrites, memory planning, and autotune
   integration.  Its data layer was deleted unread (2026-10).
+- [tinygrad_late_passes.md](tinygrad_late_passes.md): how UPCAST and
+  UNROLL reach the rendered source, against tinygrad's expander and
+  devectorizer at 365f87a8a, and why the UOp-level port of the older
+  design was removed (2026-10).
 - [bench/history.md](bench/history.md): consolidated benchmark
   history and current canaries for training, GPT-2, Metal, tile, and
   autotune work.

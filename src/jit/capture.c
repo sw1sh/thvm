@@ -1603,15 +1603,6 @@ static u64 uop_content_hash_rec(Term t, u32 depth) {
       h = uop_content_hash_atom(h, num);
       break;
     }
-    case UOP_VCONST: {
-      h = uop_content_mix(h, (u64)uop_vconst_dtype(t));
-      u32 n = uop_vconst_n(t);
-      h = uop_content_mix(h, (u64)n);
-      for (u32 i = 0; i < n; i++) {
-        h = uop_content_mix(h, (u64)uop_vconst_bits(t, i));
-      }
-      break;
-    }
     case UOP_RANGE: {
       // [NUM(axis_id), NUM(axis_type), NUM(extent)].  The extent may be
       // a kvar-bound token (kvar_extent_is_var); we hash the raw extent
@@ -1633,11 +1624,6 @@ static u64 uop_content_hash_rec(Term t, u32 depth) {
       for (u32 d = 0; d < ndim; d++) {
         h = uop_content_mix(h, (u64)uop_buffer_dim(t, d));
       }
-      break;
-    }
-    case UOP_PLACEHOLDER: {
-      h = uop_content_mix(h, (u64)uop_placeholder_dtype(t));
-      h = uop_content_mix(h, (u64)uop_placeholder_acc_id(t));
       break;
     }
     case UOP_INVALID:
@@ -1682,28 +1668,6 @@ static u64 uop_content_hash_rec(Term t, u32 depth) {
       break;
     }
 
-    // --- variadic STACK / END ---------------------------------------
-    case UOP_STACK: {
-      u32 n = (u32)term_val(heap_read(loc + 0));
-      h = uop_content_mix(h, (u64)n);
-      for (u32 i = 0; i < n; i++) {
-        h = uop_content_mix(h,
-              uop_content_hash_rec(uop_stack_src(t, i), depth + 1));
-      }
-      break;
-    }
-    case UOP_END: {
-      u32 n = (u32)term_val(heap_read(loc + 0));
-      h = uop_content_mix(h, (u64)n);
-      for (u32 i = 0; i < n; i++) {
-        h = uop_content_mix(h,
-              uop_content_hash_rec(heap_read(loc + 1 + i), depth + 1));
-      }
-      h = uop_content_mix(h,
-            uop_content_hash_rec(heap_read(loc + 1 + n), depth + 1));
-      break;
-    }
-
     // --- movement ops [src, NUM(ndim), payload NUMs...] -------------
     // RESHAPE/EXPAND/PERMUTE carry `ndim` payload NUMs; PAD/SHRINK
     // carry `2*ndim`.  We read ndim from loc+1 and hash the right span.
@@ -1727,32 +1691,6 @@ static u64 uop_content_hash_rec(Term t, u32 depth) {
     case UOP_FLIP: case UOP_CAST: case UOP_BITCAST: case UOP_COPY: {
       h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
       h = uop_content_hash_atom(h, heap_read(loc + 1));
-      break;
-    }
-
-    // --- expander wrappers: one src child + NUM payload -------------
-    case UOP_UNROLL: {
-      h = uop_content_mix(h, (u64)uop_unroll_n_args(t));
-      h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
-      break;
-    }
-    case UOP_CONTRACT: {
-      u32 n = uop_contract_n_args(t);
-      h = uop_content_mix(h, (u64)n);
-      for (u32 i = 0; i < n; i++) {
-        h = uop_content_mix(h, (u64)uop_contract_axis_id(t, i));
-        h = uop_content_mix(h, (u64)uop_contract_factor(t, i));
-      }
-      h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
-      break;
-    }
-    case UOP_GEP: {
-      u32 n = uop_gep_n_idx(t);
-      h = uop_content_mix(h, (u64)n);
-      for (u32 i = 0; i < n; i++) {
-        h = uop_content_mix(h, (u64)uop_gep_idx(t, i));
-      }
-      h = uop_content_mix(h, uop_content_hash_rec(heap_read(loc + 0), depth + 1));
       break;
     }
 

@@ -226,9 +226,6 @@ TESTS := \
   $(BIN)/test_uop_valid_fold \
   $(BIN)/test_uop_reduce_collapse \
   $(BIN)/test_uop_graph_rewrite \
-  $(BIN)/test_uop_expand \
-  $(BIN)/test_uop_devectorize \
-  $(BIN)/test_uop_symbolic \
   $(BIN)/test_uop_symbolic_shape \
   $(BIN)/test_uop_const_fold_dtype \
   $(BIN)/test_uop_walk_cast \
@@ -264,8 +261,6 @@ TESTS := \
   $(BIN)/test_sym_pad_concat \
   $(BIN)/test_sym_scores_fuse \
   $(BIN)/test_sym_mha_bisect \
-  $(BIN)/test_uop_linearize \
-  $(BIN)/test_render_ptx \
   $(BIN)/test_uop_upat \
   $(BIN)/test_grad \
   $(BIN)/test_iwhere_grad \
@@ -424,7 +419,7 @@ METAL_TESTS := $(addprefix $(BIN)/,test_metal_real test_metal_pad_softmax \
   test_metal_mixed_input test_metal_tc_transpose test_metal_fuse_matmul_input \
   test_metal_fuse_matmul_compile test_metal_copy_retarget test_metal_group_local \
   test_aot_metal test_aot_metal_run)
-CUDA_TESTS  := $(addprefix $(BIN)/,test_cuda_backend test_cuda_ptx test_cuda_mixed \
+CUDA_TESTS  := $(addprefix $(BIN)/,test_cuda_backend test_cuda_mixed \
   test_custom_kernel_cuda)
 
 # === Metal backend (Darwin only) =====================================

@@ -173,9 +173,3 @@ f32 fp8e4m3_to_f32(u8 x) {
   }
   return fp16_to_f32(ur);
 }
-
-// tinygrad DType.max for e4m3 (dtype.py:73-77): e4m3 has no inf, so its
-// largest value is maxnorm, and -fp8e4m3_max() is its dt.min.
-f32 fp8e4m3_max(void) {
-  return fp8e4m3_to_f32((u8)FP8_E4M3.maxnorm);
-}

@@ -9,17 +9,16 @@
 // the right values, orders of magnitude slower.  tinygrad spells a
 // non-finite constant with its renderer's names for infinity and NaN
 // (renderer/cstyle.py:25-26, 137-138 at 365f87a8a); the C target uses
-// INFINITY / NAN from math.h, as the linearized renderer does.  Both C
-// renderers spell a finite literal as a floating constant, as tinygrad's
-// str(float) does (cstyle.py:37): `-0` is the int 0, which drops the sign
-// of zero.
+// INFINITY / NAN from math.h.  A finite literal is a floating constant, as
+// tinygrad's str(float) makes it (cstyle.py:37): `-0` is the int 0, which
+// drops the sign of zero.
 //
 // Each case realizes on the CPU and checks the values and the signs of
 // zeros, compiles the kernel's JIT source with the JIT's own compiler and
 // flags (cpu_jit_compile_shared), and, whenever the JIT may compile it
 // (THVM_CPU_JIT_WARMUP at most 1), checks that the kernel dispatched
-// through the JIT.  The literal checks render f64 constants through each
-// C renderer.
+// through the JIT.  The literal checks render f64 constants through the
+// C emit.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -106,29 +105,22 @@ static void check_case(char const *name, Term expr, f64 const *want) {
   }
 }
 
-// Both C renderers, the legacy emit and the linearized one, spell a
-// finite f64 CONST as a floating constant.
+// The C emit spells a finite f64 CONST as a floating constant.
 static void check_c_literal(f32 v, char const *want) {
   static char name[64];
   snprintf(name, sizeof name, "c-literal/%s", want);
   TEST_BEGIN(name);
-  char legacy[64] = {0};
-  char linear[64] = {0};
-  FILE *fp = fmemopen(legacy, sizeof legacy - 1, "w");
+  char got[64] = {0};
+  FILE *fp = fmemopen(got, sizeof got - 1, "w");
   cg_target saved = RMU_TARGET;
   RMU_TARGET = CG_TARGET_C;
   rmu_emit_term(uop_const(DT_FP64, bits_of(v)), fp);
   RMU_TARGET = saved;
   fclose(fp);
-  LzCtx ctx = (LzCtx){ .n_bufs = 0, .target = LZ_TGT_C, .n_emitted_accs = 0 };
-  fp = fmemopen(linear, sizeof linear - 1, "w");
-  lz_emit_scalar_bits(&ctx, DT_FP64, bits_of(v), fp);
-  fclose(fp);
-  if (strcmp(legacy, want) != 0 || strcmp(linear, want) != 0) {
-    fprintf(stderr, "  %s: legacy %s linearized %s\n", name, legacy, linear);
+  if (strcmp(got, want) != 0) {
+    fprintf(stderr, "  %s: got %s\n", name, got);
   }
-  CHECK(strcmp(legacy, want) == 0);
-  CHECK(strcmp(linear, want) == 0);
+  CHECK(strcmp(got, want) == 0);
 }
 
 int main(void) {

@@ -162,7 +162,8 @@ fn u64 gc_from_end(void)     { return GC_FROM_END; }
 // effort; missing a tag costs correctness, so the switch covers the
 // full live tag set).
 // A UOp opcode with no case here is never evacuated, and a live node of it
-// reads garbage after the swap: every opcode below UOP_COUNT has a case.
+// reads garbage after the swap: every assigned opcode below UOP_COUNT has a
+// case (44-50 are unassigned).
 _Static_assert(UOP_COUNT == 55, "a new UOp opcode needs its heap size in gc_node_size");
 static u32 gc_node_size(Term t) {
   u8  tag = term_tag(t);
@@ -223,7 +224,6 @@ static u32 gc_node_size(Term t) {
         case UOP_INVALID:     return 1;       // [NUM(0)]
         case UOP_DEFINE_VAR:  return 1;       // [NUM(packed_extent)]
         case UOP_DETACH:      return 1;       // [src]
-        case UOP_PLACEHOLDER: return 2;       // [NUM(dtype), NUM(acc_id)]
         // 3-cell range / ternary / store / opt / gather.
         case UOP_RANGE:                       // [NUM(axis_id), NUM(axis_type), NUM(extent)]
         case UOP_IWHERE: case UOP_STORE:      // [cond,then,else] / [buf,addr,value]
@@ -264,25 +264,6 @@ static u32 gc_node_size(Term t) {
           Term n_cell = HEAP[loc + 3];
           if (term_tag(n_cell) != TAG_NUM) return 0;
           return 4 + (u32)term_val(n_cell);
-        }
-        // UOP_VCONST = [NUM(dtype), NUM(n), NUM(bits_0), ..];
-        // UOP_GEP    = [src, NUM(n), NUM(idx_0), ..].
-        case UOP_VCONST: case UOP_GEP: {
-          Term n_cell = HEAP[loc + 1];
-          if (term_tag(n_cell) != TAG_NUM) return 0;
-          return 2 + (u32)term_val(n_cell);
-        }
-        // UOP_UNROLL / UOP_CONTRACT = [src, NUM(n), NUM(axis_0), NUM(F_0), ..].
-        case UOP_UNROLL: case UOP_CONTRACT: {
-          Term n_cell = HEAP[loc + 1];
-          if (term_tag(n_cell) != TAG_NUM) return 0;
-          return 2 + 2 * (u32)term_val(n_cell);
-        }
-        // UOP_STACK = [NUM(n), src_0, ..]; UOP_END = [NUM(n), range_0, .., body].
-        case UOP_STACK: case UOP_END: {
-          Term n_cell = HEAP[loc];
-          if (term_tag(n_cell) != TAG_NUM) return 0;
-          return (op == UOP_END ? 2 : 1) + (u32)term_val(n_cell);
         }
         default: return 0;
       }

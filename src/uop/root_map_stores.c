@@ -3,9 +3,8 @@
 //
 // A kernel root is one STORE, or an AFTER chain of STOREs for a kernel that
 // writes its output in several ordered passes (a scatter's init, accumulate
-// and finish stores).  uop_arity(UOP_AFTER) stays 0 because the
-// devectorizer's AFTER chains rely on it, so a pass that walks by arity
-// never looks inside an AFTER root.  These helpers hand such a pass each
+// and finish stores).  uop_arity(UOP_AFTER) is 0, so a pass that walks by
+// arity never looks inside an AFTER root.  These helpers hand such a pass each
 // STORE instead, in execution order (an AFTER's after_node first).  A root
 // that is not an AFTER is its own single store.
 //

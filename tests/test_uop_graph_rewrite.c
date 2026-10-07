@@ -131,6 +131,21 @@ static Term iadd_chain(Term bottom, u32 depth, u32 first_axis) {
   return t;
 }
 
+// OPT(target, kind, factor) -> target.
+static Term rule_strip_opt(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_OPT) {
+    return 0;
+  }
+  return uop_opt_target(t);
+}
+
+static UOpGraphRewriteRule const STRIP_OPT[] = {{"strip-opt", rule_strip_opt}};
+
+static Term strip_opt(Term root) {
+  return uop_graph_rewrite(root, STRIP_OPT, 1, NULL);
+}
+
 static Term rule_range_7_to_8(Term t, void *user) {
   (void)user;
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) {
@@ -569,14 +584,14 @@ int main(void) {
   Term deep300 = iadd_chain(opt_leaf, 300, 1);
   CHECK(spine_len(deep300) >= 300);
   CHECK_EQ(count_op(deep300, UOP_OPT), 1);
-  Term deep300_out = uop_symbolic_rewrite(deep300);
+  Term deep300_out = strip_opt(deep300);
   CHECK_EQ(count_op(deep300_out, UOP_OPT), 0);
   CHECK(spine_len(deep300_out) >= 300);
 
   TEST_BEGIN("uop-graph-rewrite/strips-opt-2000-deep");
   Term deep2000 = iadd_chain(opt_leaf, 2000, 1);
   CHECK(spine_len(deep2000) >= 2000);
-  Term deep2000_out = uop_symbolic_rewrite(deep2000);
+  Term deep2000_out = strip_opt(deep2000);
   CHECK_EQ(count_op(deep2000_out, UOP_OPT), 0);
   CHECK(spine_len(deep2000_out) >= 2000);
 
@@ -589,9 +604,9 @@ int main(void) {
   Term both = uop_int_binary(UOP_IADD, shallow, deep_side);
   CHECK_EQ(heap_read(term_val(both) + 0), shallow);
   CHECK_EQ(count_op(both, UOP_OPT), 2);
-  Term both_out = uop_symbolic_rewrite(both);
+  Term both_out = strip_opt(both);
   CHECK_EQ(count_op(both_out, UOP_OPT), 0);
-  CHECK_EQ(uop_graph_rewrite_stat_hits("sym_pm_strip_opt"), 1);
+  CHECK_EQ(uop_graph_rewrite_stat_hits("strip-opt"), 1);
 
   char child_err[4096];
 
