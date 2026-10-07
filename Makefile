@@ -418,6 +418,15 @@ TESTS := \
   $(BIN)/test_atp_ac \
   $(BIN)/test_atp_ac_bench
 
+# Test binaries that link a GPU backend: the Metal ones build on Darwin,
+# the CUDA ones on Linux with the toolkit headers.
+METAL_TESTS := $(addprefix $(BIN)/,test_metal_real test_metal_pad_softmax \
+  test_metal_mixed_input test_metal_tc_transpose test_metal_fuse_matmul_input \
+  test_metal_fuse_matmul_compile test_metal_copy_retarget test_metal_group_local \
+  test_aot_metal test_aot_metal_run)
+CUDA_TESTS  := $(addprefix $(BIN)/,test_cuda_backend test_cuda_ptx test_cuda_mixed \
+  test_custom_kernel_cuda)
+
 # === Metal backend (Darwin only) =====================================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
 # Tests / dylib that #define THVM_HAS_METAL link this object + the
@@ -429,16 +438,7 @@ ifeq ($(shell uname -s),Darwin)
   METAL_SHADERS  := $(wildcard src/backend/metal/shaders/*.metal)
   METAL_AIRS     := $(METAL_SHADERS:src/backend/metal/shaders/%.metal=$(BUILD)/%.air)
   METAL_DEFINES  := -DTHVM_METAL_METALLIB='"$(METAL_LIBPATH)"'
-  TESTS          += $(BIN)/test_metal_real
-  TESTS          += $(BIN)/test_metal_pad_softmax
-  TESTS          += $(BIN)/test_metal_mixed_input
-  TESTS          += $(BIN)/test_metal_tc_transpose
-  TESTS          += $(BIN)/test_metal_fuse_matmul_input
-  TESTS          += $(BIN)/test_metal_fuse_matmul_compile
-  TESTS          += $(BIN)/test_metal_copy_retarget
-  TESTS          += $(BIN)/test_metal_group_local
-  TESTS          += $(BIN)/test_aot_metal
-  TESTS          += $(BIN)/test_aot_metal_run
+  TESTS          += $(METAL_TESTS)
 else
   METAL_OBJ      :=
   METAL_LDFLAGS  :=
@@ -472,10 +472,7 @@ ifeq ($(shell uname -s),Linux)
     CUDA_LDFLAGS   := -L$(CUDA_HOME)/lib64 -L$(CUDA_HOME)/lib64/stubs \
                       -L$(CUDA_HOME)/lib -L$(CUDA_HOME)/lib/stubs \
                       -L/usr/lib/x86_64-linux-gnu -lcuda -lnvrtc
-    TESTS          += $(BIN)/test_cuda_backend
-    TESTS          += $(BIN)/test_cuda_ptx
-    TESTS          += $(BIN)/test_cuda_mixed
-    TESTS          += $(BIN)/test_custom_kernel_cuda
+    TESTS          += $(CUDA_TESTS)
   endif
 endif
 
@@ -777,53 +774,13 @@ AOT_TESTS := $(BIN)/test_aot_emit $(BIN)/test_aot_e2e \
 $(AOT_TESTS): $(BIN)/test_%: tests/test_%.c $(SRC) build/thvm_runtime_blob.c | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< build/thvm_runtime_blob.c $(TEST_LDFLAGS)
 
-$(BIN)/test_metal_real: tests/test_metal_real.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
+$(METAL_TESTS): $(BIN)/%: tests/%.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
 
-$(BIN)/test_metal_pad_softmax: tests/test_metal_pad_softmax.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_metal_mixed_input: tests/test_metal_mixed_input.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_metal_tc_transpose: tests/test_metal_tc_transpose.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_metal_fuse_matmul_input: tests/test_metal_fuse_matmul_input.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_metal_fuse_matmul_compile: tests/test_metal_fuse_matmul_compile.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_metal_copy_retarget: tests/test_metal_copy_retarget.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_metal_group_local: tests/test_metal_group_local.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_aot_metal: tests/test_aot_metal.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_aot_metal_run: tests/test_aot_metal_run.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
-
-# CUDA end-to-end test: -DTHVM_HAS_CUDA pulls backend/cuda/ into the
-# single-TU build; -lcuda -lnvrtc link the driver + nvrtc.  Only
-# reachable when the CUDA block above added it to TESTS (Linux+CUDA).
-$(BIN)/test_cuda_backend: tests/test_cuda_backend.c $(SRC) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
-
-$(BIN)/test_cuda_ptx: tests/test_cuda_ptx.c $(SRC) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
-
-# Mixed CPU+CUDA realize (device-in-graph per-op routing + cross-device
-# COPY transfer).  Linux+CUDA only, like the other CUDA tests.
-$(BIN)/test_cuda_mixed: tests/test_cuda_mixed.c $(SRC) | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
-
-# Raw custom-kernel injection on CUDA buffers (the CUDA counterpart of
-# test_custom_kernel).  Linux+CUDA only, like the other CUDA tests.
-$(BIN)/test_custom_kernel_cuda: tests/test_custom_kernel_cuda.c $(SRC) | $(BIN)
+# CUDA tests: -DTHVM_HAS_CUDA pulls backend/cuda/ into the single-TU build;
+# -lcuda -lnvrtc link the driver + nvrtc.  Reachable only when the CUDA
+# block above added them to TESTS (Linux+CUDA).
+$(CUDA_TESTS): $(BIN)/%: tests/%.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 
 # DeepSeek-V2-Lite BS=1 decode-step microbenchmark (Stage 1): synthetic bf16

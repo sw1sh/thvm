@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- The Makefile builds the 10 Metal and 4 CUDA test binaries from two static pattern rules over `METAL_TESTS` / `CUDA_TESTS` instead of 14 copies of the same rule; the build commands and the `TESTS` lists are unchanged on Darwin, Linux and Linux with CUDA.
 - Three regression tests that nothing built now run in `make test`: `test_dup_ctr` (DUP-CTR commute), `test_shrink_over_pad` (a SHRINK's begin offset survives rangeify) and `test_full_unroll_repro` (a full-extent UNROLL through the production rewriter renders straight-line C that computes the right sums).  `tests/test_msl_dump.c`, an ad-hoc MSL dump and compile-timing script, is gone.
 - The reducer's legacy buffer worklist is gone (`redex_worklist_attach` / `_detach`, `nf_work_push` and the push loop `redex_fire` ran only with a buffer attached): `nf` drains through the pool, whose promoted parents arrive through the step session, and only `test_nf_pool` attached a buffer; that case now checks that `nf` detaches its pool.
 - Test-only runtime helpers left `src/`: `heap_take`, `heap_cas` and `heap_subst_var_rel` (tested only for their own sake, so their cases go; the reducer uses `heap_take_atomic` and `heap_set_rel`), `heap_perm_used`, the Windows `aligned_alloc` shim nothing called, and `src/aot/wnf_metal_shim.h`, which no translation unit included.  `term_new_any`, `term_new_inc` and `term_new_ann`, which only the ANY / INC / ANN interaction tests build, move into `tests/tu_probes.h`.
