@@ -5,12 +5,11 @@ into the reduce kernel.  The unified rangeify pass composes SHRINK + RESHAPE
 into the load address over x's raw buffer, while visit() binds the kernel
 input to the view the same chain resolves to.  The input_chain_composed slot
 flag ("the address is already composed, bind the raw buffer") has to be set
-whenever that kernel runs.  Withheld (a diagnostic gate trips whenever a
-composed address runs past the view's element count, as a shrunk base's
-always does), the dispatcher gathers the view into a contiguous temp and the
-kernel applies the chain a second time (the CPU JIT read 12 elements with a
-24-element index), and the UOp walker biases the pointer by the view offset,
-so on that path even `x.shrink(...) * 2` read shifted elements.
+whenever that kernel runs.  Withheld, the dispatcher gathers the view into a
+contiguous temp and the kernel applies the chain a second time (the CPU JIT
+read 12 elements with a 24-element index), and the UOp walker biases the
+pointer by the view offset, so on that path even `x.shrink(...) * 2` read
+shifted elements.
 
 The grid {shrink axis} x {merge it with its outer / inner neighbour} x
 {sum the merged / the other axis} x {head / interior shrink} x {two shapes}

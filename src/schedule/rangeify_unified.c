@@ -2967,8 +2967,8 @@ static RuAxisSubst ru_build_axis_subst(u32 pidx,
 //       -> otherwise (non-realized producer's rewritten value) splice in
 //          with a producer->consumer axis_id rewrite: the producer minted
 //          out_rngs against one of its consumers but other consumers read
-//          at different axis_ids, so without the rewrite uop_subtree_has_
-//          stranded_range trips on the producer-side leaves.
+//          at different axis_ids, so without the rewrite the spliced
+//          producer leaves keep axis_ids that cpu_uop_walk never iterates.
 //   - child is a leaf tensor (TAG_TEN)    ->  wrap with uop_index_e(child, in_addr)
 //   - everything else (atoms, passthroughs)  ->  keep
 // in_addr is the addr at which TAG_TEN/BUFFERIZE INPUTS are loaded at

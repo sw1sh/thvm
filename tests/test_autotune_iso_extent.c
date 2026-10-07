@@ -103,8 +103,7 @@ static u32 kernel_of(u32 k0, u32 out_tid) {
   return 0;
 }
 
-// y = sum_j (W[t, j] + s): W[t] a SHRINK view, s a broadcast scalar (it
-// trips the broadcast gate, whose kernels mark their composed slots too).
+// y = sum_j (W[t, j] + s): W[t] a SHRINK view, s a broadcast scalar.
 static void row_sum_case(u32 w_tid, f32 const *w, u32 t, int beam) {
   f32 s1[1] = { 3.0f };
   u32 row[2] = { 1, D }, be[4] = { t, t + 1, 0, D };

@@ -484,4 +484,4 @@ once the symbolic-merge work retires the strand/cap hacks.
 
 ---
 
-*Relevant source anchors:* thvm scheduling `src/schedule/rangeify_unified.c:147-166,480-487,591-647,733-999,835-888,1255-1337`, `bufferize_classify.c:728-822`, `materialize.c:180-200,2465-2499,2841-2865`; hand-opts `src/codegen/hand_opts.c:1-52,192-202,241-281,297-346,369-396`; grad `src/interact/uop_grad.c`, `py/thvm/optim.py:46-58`. tinygrad spec `tinygrad/schedule/indexing.py:10-11,28-35,129-145,148-269,211-232`, `codegen/opt/heuristic.py:27-189`, `codegen/opt/search.py:13-25,120-193`, `gradient.py:49-82`, `helpers.py:231-266`.
+*Relevant source anchors:* thvm scheduling `src/schedule/rangeify_unified.c:147-166,480-487,591-647,733-999,835-888,1255-1337`, `bufferize_classify.c:728-822`, `materialize.c:180-200,2465-2499`; hand-opts `src/codegen/hand_opts.c:1-52,192-202,241-281,297-346,369-396`; grad `src/interact/uop_grad.c`, `py/thvm/optim.py:46-58`. tinygrad spec `tinygrad/schedule/indexing.py:10-11,28-35,129-145,148-269,211-232`, `codegen/opt/heuristic.py:27-189`, `codegen/opt/search.py:13-25,120-193`, `gradient.py:49-82`, `helpers.py:231-266`.

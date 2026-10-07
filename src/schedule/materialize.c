@@ -3909,14 +3909,9 @@ static Term unified_store_root_for_walker(KernelEntry *ke, Term root) {
 // is opened once at each top-level scan entry.  A `BufferizeScanVisited`
 // is a lightweight handle holding the arena + its own `gen`.
 //
-// Several of these walks are PATH-SENSITIVE on a bound axis set (`iter`):
-// at every BUFFERIZE / REDUCE descent the bound set changes, so cached
-// answers are context-specific and the old code started a fresh visited
-// (`iv.n = 0`).  That reset is preserved exactly by `bufferize_scan_fresh`,
-// which assigns a brand-new generation -- invalidating every prior mark in
-// O(1) (no array clear) without sharing marks across `iter` contexts.  The
-// within-context memoization (passing the same handle down the `ar` loop)
-// stays O(1) and unbounded, which is what kills the exponential re-walk.
+// The would-strand check collects each output axis's addresses under a fresh
+// generation (`bufferize_scan_fresh`): O(1), no array clear, and no marks
+// shared across axes.
 typedef struct {
   u32  *stamp;     // loc-indexed; stamp[loc] == gen iff loc marked in gen
   u32   cap;       // == HEAP_NEXT at open time

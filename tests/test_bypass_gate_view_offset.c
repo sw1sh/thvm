@@ -1,19 +1,16 @@
-// test_bypass_gate_view_offset.c -- a kernel whose bypass gates trip still
-// marks the inputs whose views its addresses compose.
+// test_bypass_gate_view_offset.c -- a kernel whose addresses compose an
+// input's view marks that input, so no backend applies the view twice.
 //
 // The walker rewrite composes an input's view (a SHRINK's offset, say) into
 // the kernel's addresses over the underlying buffer, and the chain-fold scan
 // marks those slots input_chain_composed so the backends bind the raw buffer.
-// The mark was committed only when the resid / stranded / broadcast gates all
-// passed, although the rewritten root is used either way.  The C JIT binds
-// raw buffers regardless, but the UOp walker biased such a slot's pointer by
+// When that mark was withheld, the UOp walker biased such a slot's pointer by
 // its view offset a second time: a GPT-2 decode step (a token's row through
 // W.shrink, plus a broadcast position term, summed for the layernorm mean)
 // read a row twice as far down the table, past its end.
 //
 // y = sum_j (W[t, j] + s), with W[t] a SHRINK view of W and s a broadcast
-// scalar (the broadcast trips has_bcast).  Integer-valued data, so the sum is
-// exact on both backends.  Run as is (C JIT) and with
+// scalar.  Integer-valued data, so the sum is exact on both backends.  Run as is (C JIT) and with
 // THVM_CPU_JIT_WARMUP=1000000000 (the walker).
 #include "../src/thvm.c"
 #include "test.h"
