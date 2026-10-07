@@ -725,13 +725,6 @@ EXPORT uint32_t py_kernel_opts_propose(uint32_t kid,
   return n;
 }
 
-EXPORT uint64_t py_propose_tc_dag_count(void) {
-  return kernel_opts_propose_tc_dag_count();
-}
-EXPORT void py_propose_tc_counters_reset(void) {
-  kernel_opts_propose_tc_counters_reset();
-}
-
 // Apply a KOpt to the kernel's UOp DAG (Phase E DAG-mode path).
 // Returns the new store_root term (already stored into
 // ke->cached_lift.store_root); 0 on bail.  Use
