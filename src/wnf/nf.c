@@ -48,8 +48,9 @@ static u8 nf_skip_tag(Term t) {
 
 #define NF_FIRE_CAP   (1u << 20)    // safety bound on total fires per nf call
 
-// Per-fire callback.  Children get pushed back through nf_work_push
-// -> wnf_pool_push from inside redex_fire.  Root tracking happens via
+// Per-fire callback.  redex_fire's step session pushes promoted parents
+// into the pool (step_fresh_push); a round with nothing left re-enumerates.
+// Root tracking happens via
 // the heap-cell wrap in nf() (no off-heap pointer update needed), so
 // the callback ignores `user`.
 static u64 nf_pool_fire(WnfPool *p, u32 tid, Term r, void *user) {

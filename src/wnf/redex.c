@@ -178,10 +178,7 @@ static u32 term_arity(Term t) {
 
 // Forward-declared nf-worklist state.  step_fresh_push pushes parent
 // promotions through these when nf has the pool attached, so the
-// in-flight drain picks them up without a re-enumerate round.  The
-// NF_WORK_PTR / NF_WORK_N_PTR / NF_WORK_CAP_VAL legacy fallback path
-// (used when no pool is attached, e.g. by direct redex_fire callers)
-// stays defined further down with its own attach helpers.
+// in-flight drain picks them up without a re-enumerate round.
 static struct WnfPool *NF_POOL     = 0;
 static u32             NF_POOL_TID = 0;
 
@@ -446,58 +443,17 @@ static void heap_replace(Term old, Term new_) {
   }
 }
 
-// Incremental nf worklist.  Two attach modes; nf_work_push routes
-// to whichever is currently bound.
-//
-//   Pool   -- WnfPool + tid (parallel-ready path; T=1 today).
-//   Buffer -- legacy Term *buf + u32 *n_ptr cap (used only by paths
-//             not yet ported, e.g. tests that build a worklist by
-//             hand).
-//
-// At most one is attached at a time -- attach helpers clobber.
-// When neither is attached (e.g. WL `TInteract` direct fire) pushes
-// are silently dropped.
-static Term    *NF_WORK_PTR     = 0;
-static u32     *NF_WORK_N_PTR   = 0;
-static u32      NF_WORK_CAP_VAL = 0;
-// NF_POOL / NF_POOL_TID forward-declared near the top of this file
-// (used by step_fresh_push for parent-promotion routing).
-
-fn void redex_worklist_attach(Term *buf, u32 *n_ptr, u32 cap) {
-  NF_WORK_PTR     = buf;
-  NF_WORK_N_PTR   = n_ptr;
-  NF_WORK_CAP_VAL = cap;
-  NF_POOL         = 0;
-}
-
-fn void redex_worklist_detach(void) {
-  NF_WORK_PTR     = 0;
-  NF_WORK_N_PTR   = 0;
-  NF_WORK_CAP_VAL = 0;
-}
-
+// The nf pool (WnfPool + seed tid) the step session routes promoted
+// parents into; NF_POOL / NF_POOL_TID are declared near the top of this
+// file.  Without one attached (e.g. WL `TInteract` direct fire) the
+// session keeps its own fresh list.
 fn void redex_worklist_attach_pool(WnfPool *p, u32 tid) {
   NF_POOL         = p;
   NF_POOL_TID     = tid;
-  NF_WORK_PTR     = 0;
 }
 
 fn void redex_worklist_detach_pool(void) {
   NF_POOL = 0;
-}
-
-static inline void nf_work_push(Term t) {
-  if (NF_POOL != 0) {
-    if (!is_redex(t)) return;
-    wnf_pool_push(NF_POOL, NF_POOL_TID, t);
-    return;
-  }
-  if (NF_WORK_PTR == 0) return;
-  if (!is_redex(t)) return;
-  u32 n = *NF_WORK_N_PTR;
-  if (n >= NF_WORK_CAP_VAL) return;   // overflow: silently drop
-  NF_WORK_PTR[n] = t;
-  *NF_WORK_N_PTR = n + 1;
 }
 
 fn Term redex_fire(Term redex) {
@@ -762,16 +718,6 @@ fn Term redex_fire(Term redex) {
   // keeping the cell un-baked).  Baking it would patch the ASSIGN src to
   // a stale constant and training would stop after one step.
   heap_replace(redex, result);
-  // Incremental worklist propagation: push the result (if it's a
-  // fresh redex on its own) and every newly allocated cell whose
-  // content is a redex.  Replaces nf.c's old `[hb, HEAP_NEXT)` scan
-  // and the post-drain global re-enumerate.
-  if (NF_WORK_PTR != 0) {
-    if (result != 0) nf_work_push(result);
-    for (u64 i = hb_at_fire; i < HEAP_NEXT; i++) {
-      nf_work_push(heap_read(i));
-    }
-  }
   // Step session: index newly allocated cells (so future
   // heap_replace finds them) and surface any locally-fresh redex
   // to the fresh-worklist.  Parent recovery for new cells: for

@@ -8566,8 +8566,6 @@ fn u32  lam_shape_count(void);
 // nf attaches before its main loop and detaches after.  Other
 // callers (WL TInteract, TStep) leave the worklist detached and
 // pay zero overhead.
-fn void redex_worklist_attach(Term *buf, u32 *n_ptr, u32 cap);
-fn void redex_worklist_detach(void);
 
 // Step session: persistent across calls so the WL stepper doesn't
 // re-scan HEAP_NEXT on every TInteract.  attach() walks roots+heap

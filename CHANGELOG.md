@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- The reducer's legacy buffer worklist is gone (`redex_worklist_attach` / `_detach`, `nf_work_push` and the push loop `redex_fire` ran only with a buffer attached): `nf` drains through the pool, whose promoted parents arrive through the step session, and only `test_nf_pool` attached a buffer; that case now checks that `nf` detaches its pool.
 - Test-only runtime helpers left `src/`: `heap_take`, `heap_cas` and `heap_subst_var_rel` (tested only for their own sake, so their cases go; the reducer uses `heap_take_atomic` and `heap_set_rel`), `heap_perm_used`, the Windows `aligned_alloc` shim nothing called, and `src/aot/wnf_metal_shim.h`, which no translation unit included.  `term_new_any`, `term_new_inc` and `term_new_ann`, which only the ANY / INC / ANN interaction tests build, move into `tests/tu_probes.h`.
 - `src/util/wspq.c`, a key-priority work-stealing queue ported from HVM4, is gone with `bin/test_wspq`: nothing but its own test used it (the WNF pool runs on the plain work-stealing deque).
 - `thvm.h` loses six macros nothing used (`SUB_BITS`, `TAG_BITS`, `EXT_BITS`, `VAL_BITS`, `VAL_SHIFT`, `DUP_LABEL_MASK`), the retired `KDISPATCH_METAL_JIT` and `KDISPATCH_CPU_TILE` entries with the tombstone note for 11 and 12 (every remaining kind keeps its explicit number), and the uncalled `thvm_metal_buf_byte_offset` (the Metal binds read the buffer's `byte_offset` directly).

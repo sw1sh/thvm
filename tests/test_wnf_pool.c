@@ -58,7 +58,7 @@ static int test_push_pop_lifo(void) {
 }
 
 static int test_push_zero_dropped(void) {
-  TEST_BEGIN("push of 0 is silently dropped (matches nf_work_push)");
+  TEST_BEGIN("push of 0 is silently dropped");
   WnfPool *p = (WnfPool *)calloc(1, sizeof(WnfPool));
   wnf_pool_init(p, 1);
   wnf_pool_push(p, 0, 0);

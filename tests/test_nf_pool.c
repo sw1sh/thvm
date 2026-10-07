@@ -82,37 +82,14 @@ static int test_nf_idempotent(void) {
 }
 
 static int test_nf_pool_lifecycle(void) {
-  TEST_BEGIN("redex_worklist_attach_pool / detach hygiene");
+  TEST_BEGIN("nf detaches its pool when it returns");
   thvm_init();
-
-  // Verify nf cleanly detaches: after a run, a manual buffer-mode
-  // attach should still work (the pool slot is cleared).
   u64 add = heap_alloc(2);
   heap_set(add + 0, term_new(0, TAG_NUM, DT_INT32, 2));
   heap_set(add + 1, term_new(0, TAG_NUM, DT_INT32, 3));
   Term t = term_new(0, TAG_OP2, OP_ADD, add);
   (void)nf(t);
-
-  // Now use the legacy attach path -- it should not see any stale
-  // pool pointer and should accept pushes into a buffer.
-  Term buf[16] = {0};
-  u32  n = 0;
-  redex_worklist_attach(buf, &n, 16);
-  // Build a small redex (lam+era app) and push it manually -- the
-  // push must go to buf, not the (now-freed) pool.
-  u64  lam_loc = heap_alloc(1);
-  heap_set(lam_loc, term_new(0, TAG_VAR, 0, lam_loc));
-  Term lam     = term_new(0, TAG_LAM, 0, lam_loc);
-  Term era     = term_new(0, TAG_ERA, 0, 0);
-  u64  app_loc = heap_alloc(2);
-  heap_set(app_loc + 0, lam);
-  heap_set(app_loc + 1, era);
-  Term app     = term_new(0, TAG_APP, 0, app_loc);
-  nf_work_push(app);
-  CHECK_EQ(n, 1u);
-  CHECK_EQ(buf[0], app);
-  redex_worklist_detach();
-
+  CHECK(NF_POOL == 0);
   thvm_free();
   return 0;
 }

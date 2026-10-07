@@ -16,9 +16,8 @@
 // port (Phase 5).
 //
 // The drain loop is parametric in the fire function so this file
-// stays decoupled from src/wnf/redex.c -- swap in a stub for tests,
-// swap in `redex_fire` (with a thread-local NF_WORK_PTR shim) when
-// nf lands on top.
+// stays decoupled from src/wnf/redex.c -- tests swap in a stub, nf
+// passes `redex_fire`.
 
 #include <pthread.h>
 #include <time.h>
