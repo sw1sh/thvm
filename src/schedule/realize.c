@@ -248,14 +248,17 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
 // branch) HARD-rolls the pools back to those watermarks, freeing the orphaned
 // in-progress buffers so the next realize starts clean.  An over-budget run then
 // fails in seconds instead of leaking for 20 minutes.
-static u32 REALIZE_ABORT_CPU_WM   = 0;
-static u32 REALIZE_ABORT_METAL_WM = 0;
-#ifdef THVM_HAS_CUDA
-static u32 REALIZE_ABORT_CUDA_WM  = 0;
-#endif
-static int REALIZE_ABORT_ACTIVE   = 0;
-static u32 REALIZE_ABORT_SCOPE_DEPTH = 0;
-static u32 REALIZE_ABORT_SAVED_DEVICE = 0;
+typedef struct {
+  u32 cpu_wm;
+  u32 metal_wm;
+  u32 cuda_wm;
+  u32 device;     // the session default device to restore
+} RealizeMarks;
+
+static RealizeMarks REALIZE_ABORT_MARKS;
+static int          REALIZE_ABORT_ACTIVE      = 0;
+static u32          REALIZE_ABORT_SCOPE_DEPTH = 0;
+static u32          REALIZE_ABORT_FIRE_DEPTH  = 0;
 
 // Public: invoked by the LibraryLink ceiling-recovery branch (and safe to call
 // when no realize is in flight -- it no-ops).  Frees everything this realize
@@ -269,20 +272,197 @@ fn void thvm_realize_ceiling_cleanup(void) {
   // The longjmp interrupted dispatch mid-flight; drain/flush so a freed buffer
   // is not still referenced by an in-flight GPU command, then hard-roll the
   // pools (no "preserve" -- the realize FAILED, its buffers are orphaned).
-  cpu_buf_pool_rollback(REALIZE_ABORT_CPU_WM);
-  thvm_metal_buf_pool_rollback_with_preserve(REALIZE_ABORT_METAL_WM);
-  thvm_metal_buf_clear_preserved(REALIZE_ABORT_METAL_WM);
+  RealizeMarks m = REALIZE_ABORT_MARKS;
+  cpu_buf_pool_rollback(m.cpu_wm);
+  thvm_metal_buf_pool_rollback_with_preserve(m.metal_wm);
+  thvm_metal_buf_clear_preserved(m.metal_wm);
 #ifdef THVM_HAS_CUDA
-  cuda_buf_pool_rollback_with_preserve(REALIZE_ABORT_CUDA_WM);
-  cuda_buf_clear_preserved(REALIZE_ABORT_CUDA_WM);
+  cuda_buf_pool_rollback_with_preserve(m.cuda_wm);
+  cuda_buf_clear_preserved(m.cuda_wm);
 #endif
-  // Unwind the materialized-loc scope the realize entered so a later realize's
-  // scope depth (and its cross-realize cache) starts clean.
-  while (materialized_loc_scope_depth() > REALIZE_ABORT_SCOPE_DEPTH)
+  // Unwind the scopes the realize entered: a fire scope left open would keep
+  // the next realize from opening a new fire generation and ASSIGN pass, so a
+  // kernel the failed realize fired would read as fired over its rolled-back
+  // buffer.
+  while (materialized_loc_scope_depth() > REALIZE_ABORT_SCOPE_DEPTH) {
     materialized_loc_scope_leave();
+  }
   materialized_loc_clear();
-  // Restore the session default device the realize may have re-routed.
-  if (CURRENT_CTX != NULL) CURRENT_CTX->default_device = REALIZE_ABORT_SAVED_DEVICE;
+  KERNEL_FIRE_SCOPE_DEPTH = REALIZE_ABORT_FIRE_DEPTH;
+  if (CURRENT_CTX != NULL) {
+    CURRENT_CTX->default_device = m.device;
+  }
+}
+
+// Shared entry of thvm_realize and thvm_realize_many: pool watermarks, a fire
+// scope, a clean loc -> tid cache, and the abort rollback armed so a fatal
+// that longjmps out (thvm_realize_ceiling_cleanup) frees what this realize
+// allocated.
+static RealizeMarks realize_begin(u32 device) {
+  RealizeMarks m = {0};
+  m.device = device;
+  grad_memo_begin_realize();
+  m.cpu_wm   = cpu_buf_pool_begin();
+  m.metal_wm = thvm_metal_buf_pool_begin();
+#ifdef THVM_HAS_CUDA
+  m.cuda_wm  = cuda_buf_pool_begin();
+#endif
+  REALIZE_ABORT_FIRE_DEPTH = KERNEL_FIRE_SCOPE_DEPTH;
+  kernel_fire_scope_begin();
+  backend_dispatch_begin_all();
+  // A prior realize's intermediate, whose buffer the rollback may have
+  // recycled, must not alias this realize's input.  Tests that call
+  // bufferize_classify / thvm_materialize directly never populate the cache
+  // (gated by the scope counter).
+  materialized_loc_clear();
+  REALIZE_ABORT_MARKS       = m;
+  REALIZE_ABORT_SCOPE_DEPTH = materialized_loc_scope_depth();
+  REALIZE_ABORT_ACTIVE      = 1;
+  materialized_loc_scope_enter();
+  return m;
+}
+
+// Shared exit of thvm_realize and thvm_realize_many: preserve what the
+// result reaches, roll the pools back past everything else, collect, and
+// restore the session device.  0 when the realize fired a GC-stripped kernel.
+static Term realize_end(RealizeMarks m, Term res) {
+  backend_dispatch_end_all();
+  kernel_fire_scope_end();
+
+  // Tracing-GC preserve: walk the live root set (the result, every child of
+  // a bundle, WNF_LAST_STACK, DEFS, the WL-pinned Terms) once.
+  Term kids[THVM_REALIZE_MANY_CAP];
+  u32  n_kids = 0;
+  if (term_tag(res) == TAG_CTR) {
+    n_kids = term_ctr_n(res);
+    if (n_kids > THVM_REALIZE_MANY_CAP) {
+      n_kids = THVM_REALIZE_MANY_CAP;
+    }
+    for (u32 i = 0; i < n_kids; i++) {
+      kids[i] = term_ctr_at(res, i);
+    }
+  }
+  (void)mark_gc_preserve_all_roots_plus(res, kids, n_kids);
+  // Capture-time mark-park: the fwd_reclaim analogue for the capture path
+  // (which skips fwd_reclaim -- recorded buffers are jit_pinned and exempt
+  // from every free).  A captured intermediate is safe to PARK (recycle its
+  // storage for a later captured output) only if it is genuinely DEAD -- no
+  // later realize in this capture will read it.  The root-set walk above marks
+  // the result, WNF stack, DEFS and EXTERN_PINNED WL wrappers, but
+  // that is NOT sufficient: a per-projection velocity net carries its block
+  // residual as a LAZY UOP fragment (the Fold accumulator `x + a + m`), and
+  // the realized lin-output buffers that fragment references live in the dyn
+  // heap as TAG_TEN cells that NO root-set wrapper reaches (WL's lazy GC may
+  // have dropped the intermediate accumulator's wrapper, or it was never
+  // pinned).  Overlaying mark_heap_rooted_preserve -- the exact scan
+  // fwd_reclaim uses -- preserves every buffer a pending heap fragment still
+  // references, so only buffers with NO future eager read are left unpreserved
+  // and parked.  Without this overlay the sweep parks a still-live residual
+  // input; a later lin-output adoption then zero-fills + overwrites it, and
+  // the capture pass itself computes garbage (maxdiff ~3e5 vs eager on a
+  // 12-block synthetic).  The overlay is conservative (it also preserves any
+  // not-yet-collected dead heap cell's buffer -> that buffer isn't parked,
+  // costing some recycling) but that is a memory-vs-correctness trade, and the
+  // maybe_gc at the realize boundary compacts the heap so dead cells don't
+  // accumulate across the capture's realizes.  Requires the capture-gated
+  // clear_preserved(1) below: the root-set walk + this overlay mark
+  // below-watermark buffers too, and without a table-wide clear each realize's
+  // marks accrete -- a buffer preserved ONCE would stay "preserved" (stale) at
+  // every later sweep and never park.
+  // THVM_JIT_STATIC_PACK replaces this realize-end reachability sweep with
+  // online refcount-death recycling from metal_buf_decref (a buffer is parked
+  // the instant its last live TenDesc drops -- definitive static death, no heap
+  // walk).  So skip the mark_heap_rooted_preserve overlay + the sweep under the
+  // gate; the decref hook has already parked every dead intermediate.
+  if (jit_is_capturing() && !jit_static_pack_enabled()) {
+    mark_heap_rooted_preserve();
+    thvm_metal_buf_park_unpreserved_pinned();
+  }
+  jit_capture_mark_preserved();
+
+  // Reached the normal exit: disarm the ceiling-abort cleanup (the rollback
+  // below supersedes it).  A subsequent non-realize entry's ceiling longjmp
+  // must not roll back into this finished realize's stale watermarks.
+  REALIZE_ABORT_ACTIVE = 0;
+
+  // Arena planner cross-step leak fix: drop the preserved bit on
+  // every arena view CpuBuf (and its parent arena) so pool_rollback
+  // reclaims the entire arena cohort.  By construction arena views
+  // hold internal forward intermediates of THIS realize (the
+  // last_use>0 + consumer_count==1 gate in
+  // arena_boundary_is_plannable excludes sinks/roots), so dropping
+  // them is safe: the SINK lives in a standalone (non-arena)
+  // CpuBuf and keeps its preserve flag.  Without this clear, the
+  // gc-mark walk over the SINK result reaches view-tids embedded in
+  // KERNELS[].input_tids chains, marks the views preserved, and the
+  // parent-arena link in tensor_mark_buf_preserved keeps the entire
+  // 600MB arena alive across the rollback (the symptom: peak grows
+  // ~1.4GB -> 2.1GB by step 4 of BS=16 MNIST).  Tinygrad mirror:
+  // tinygrad/schedule/memory.py:13-16 _can_plan excludes held_bufs
+  // from the arena, so planned bufs naturally die at end-of-schedule.
+  cpu_buf_clear_preserved_arena_views(m.cpu_wm);
+  cpu_buf_pool_rollback_with_preserve(m.cpu_wm);
+  thvm_metal_buf_pool_rollback_with_preserve(m.metal_wm);
+  thvm_realize_fwd_reclaim();
+  // Free this realize's fp8->bf16 cast single-use transients (the matmul that
+  // consumed each has fired).  Runs AFTER fwd_reclaim's heap-rooted preserve so
+  // we unhook + decref buffers that scan would otherwise pin forever.
+  thvm_free_fp8_transients(term_tag(res) == TAG_TEN ? (u32)term_val(res) : 0);
+  cpu_buf_clear_preserved(m.cpu_wm);
+  cpu_buf_clear_freeable(m.cpu_wm);
+  thvm_metal_buf_clear_preserved(m.metal_wm);
+  // mark_gc_preserve marks below-watermark buffers too; under capture the
+  // mark-park sweep consumes those bits, so clear table-wide (mirror of
+  // fwd_reclaim's clear_preserved(1)) or a buffer preserved once stays
+  // "preserved" (stale) at every later sweep and never parks.
+  if (jit_is_capturing()) thvm_metal_buf_clear_preserved(1);
+#ifdef THVM_HAS_CUDA
+  cuda_buf_clear_preserved_arena_views(m.cuda_wm);
+  cuda_buf_pool_rollback_with_preserve(m.cuda_wm);
+  cuda_buf_clear_preserved(m.cuda_wm);
+  // Opt-in sweep: drop the preserve bits TABLE-WIDE now that the CUDA
+  // rollback has consumed them, so the next realize's sweep sees fresh
+  // marks (mirror of the Metal flow's clear_preserved(1) after its sweep;
+  // doing this before the rollback wiped live marks and corrupted results).
+  if (cuda_fwd_reclaim_enabled()) cuda_buf_clear_preserved(1);
+#endif
+
+  // Auto-trigger Cheney collection once the dyn heap crosses a
+  // configurable fraction of from-space.  The result Term is added
+  // to the root set; everything else WL holds is reached through
+  // the EXTERN_PIN_HANDLES side table (extern_pin_handle_set on
+  // every TTerm wrap), so the C-side pin table is authoritative
+  // post-GC.  WL's ttermRaw refreshes through the handle on every
+  // read, so cached raw Term integers can't go stale.
+  // THVM_GC_KB overrides the trigger threshold (in KB of heap; one
+  // cell = 8B).
+  thvm_realize_maybe_gc(&res);
+
+  // Kernel-arena GC: free per-kernel heap arrays + decref output
+  // TenDescs for kernels no longer reachable from any pinned Term.
+  // Bounds KERNELS_NEXT growth across long training loops -- without
+  // this, each Adam step adds ~5K kernels on LeNet, hitting
+  // KERNELS_CAP after ~50 steps.
+  kernel_gc_sweep(res);
+
+  // Cross-realize loc -> tid cache: scoped to ONE realize call so a
+  // forward intermediate emitted as a kernel mid-pass stays reachable
+  // for sibling children inside the same materialize loop (the
+  // multi-root grad share that drove the cache addition), but does
+  // NOT survive the pool-rollback -- whose freelist push would alias
+  // a future allocation to the cached tid and corrupt subsequent
+  // grad reads (BN-grad NaN repro).  Mirrors tinygrad's per-schedule
+  // _realize_cache lifetime: the cache lives only inside one
+  // run_rangeify call.
+  materialized_loc_clear();
+  materialized_loc_scope_leave();
+  xpass_cc_reset();
+
+  CURRENT_CTX->default_device = m.device;
+  if (realize_stale_fire_failed()) {
+    return 0;
+  }
+  return res;
 }
 
 fn Term thvm_realize(Term expr) {
@@ -331,34 +511,7 @@ fn Term thvm_realize(Term expr) {
     CURRENT_CTX->default_device = (u32)want_device;
   }
 
-  grad_memo_begin_realize();
-  u32 cpu_wm   = cpu_buf_pool_begin();
-  u32 metal_wm = thvm_metal_buf_pool_begin();
-#ifdef THVM_HAS_CUDA
-  u32 cuda_wm  = cuda_buf_pool_begin();
-#endif
-  kernel_fire_scope_begin();
-  backend_dispatch_begin_all();
-  // Start with a clean cross-realize loc -> tid cache so a prior
-  // realize's intermediate (whose buffer may have been pool-rolled-
-  // back) cannot alias a later realize's input.  Tests that call
-  // bufferize_classify / thvm_materialize directly bypass realize
-  // entirely and so never see a populated cache (gated by the scope
-  // counter below).
-  materialized_loc_clear();
-  // Arm the ceiling-abort cleanup BEFORE entering the scope: if the Metal
-  // ceiling backstop longjmps out before the normal exit below, the recovery
-  // path (thvm_realize_ceiling_cleanup) hard-rolls these pools so the failed
-  // realize's in-progress buffers don't leak across retries.
-  REALIZE_ABORT_CPU_WM   = cpu_wm;
-  REALIZE_ABORT_METAL_WM = metal_wm;
-#ifdef THVM_HAS_CUDA
-  REALIZE_ABORT_CUDA_WM  = cuda_wm;
-#endif
-  REALIZE_ABORT_SAVED_DEVICE = saved_default_device;
-  REALIZE_ABORT_SCOPE_DEPTH  = materialized_loc_scope_depth();
-  REALIZE_ABORT_ACTIVE       = 1;
-  materialized_loc_scope_enter();
+  RealizeMarks marks = realize_begin(saved_default_device);
 
   // wnf is the only reducer -- `nf` is the inspector primitive (see
   // wnf/nf.c), NOT in this hot path.
@@ -433,135 +586,7 @@ fn Term thvm_realize(Term expr) {
             KERNELS_NEXT - kn_at_call_start, iters_used);
   }
 
-  backend_dispatch_end_all();
-  kernel_fire_scope_end();
-
-  // Tracing-GC preserve: mark_gc_preserve(res) walks the live root set
-  // (result + WNF_LAST_STACK + DEFS) AND overlays mark_heap_rooted_preserve
-  // to cover pending UOP cells the root-set walk misses (e.g. forward
-  // intermediates a future TGrad realize will need).
-  mark_gc_preserve(res);
-  // Capture-time mark-park: the fwd_reclaim analogue for the capture path
-  // (which skips fwd_reclaim -- recorded buffers are jit_pinned and exempt
-  // from every free).  A captured intermediate is safe to PARK (recycle its
-  // storage for a later captured output) only if it is genuinely DEAD -- no
-  // later realize in this capture will read it.  mark_gc_preserve(res) marks
-  // the root set (result + WNF stack + DEFS + EXTERN_PINNED WL wrappers), but
-  // that is NOT sufficient: a per-projection velocity net carries its block
-  // residual as a LAZY UOP fragment (the Fold accumulator `x + a + m`), and
-  // the realized lin-output buffers that fragment references live in the dyn
-  // heap as TAG_TEN cells that NO root-set wrapper reaches (WL's lazy GC may
-  // have dropped the intermediate accumulator's wrapper, or it was never
-  // pinned).  Overlaying mark_heap_rooted_preserve -- the exact scan
-  // fwd_reclaim uses -- preserves every buffer a pending heap fragment still
-  // references, so only buffers with NO future eager read are left unpreserved
-  // and parked.  Without this overlay the sweep parks a still-live residual
-  // input; a later lin-output adoption then zero-fills + overwrites it, and
-  // the capture pass itself computes garbage (maxdiff ~3e5 vs eager on a
-  // 12-block synthetic).  The overlay is conservative (it also preserves any
-  // not-yet-collected dead heap cell's buffer -> that buffer isn't parked,
-  // costing some recycling) but that is a memory-vs-correctness trade, and the
-  // maybe_gc at the realize boundary compacts the heap so dead cells don't
-  // accumulate across the capture's realizes.  Requires the capture-gated
-  // clear_preserved(1) below: mark_gc_preserve + this overlay mark
-  // below-watermark buffers too, and without a table-wide clear each realize's
-  // marks accrete -- a buffer preserved ONCE would stay "preserved" (stale) at
-  // every later sweep and never park.
-  // THVM_JIT_STATIC_PACK replaces this realize-end reachability sweep with
-  // online refcount-death recycling from metal_buf_decref (a buffer is parked
-  // the instant its last live TenDesc drops -- definitive static death, no heap
-  // walk).  So skip the mark_heap_rooted_preserve overlay + the sweep under the
-  // gate; the decref hook has already parked every dead intermediate.
-  if (jit_is_capturing() && !jit_static_pack_enabled()) {
-    mark_heap_rooted_preserve();
-    thvm_metal_buf_park_unpreserved_pinned();
-  }
-  jit_capture_mark_preserved();
-
-  // Reached the normal exit: disarm the ceiling-abort cleanup (the rollback
-  // below supersedes it).  A subsequent non-realize entry's ceiling longjmp
-  // must not roll back into this finished realize's stale watermarks.
-  REALIZE_ABORT_ACTIVE = 0;
-
-  // Arena planner cross-step leak fix: drop the preserved bit on
-  // every arena view CpuBuf (and its parent arena) so pool_rollback
-  // reclaims the entire arena cohort.  By construction arena views
-  // hold internal forward intermediates of THIS realize (the
-  // last_use>0 + consumer_count==1 gate in
-  // arena_boundary_is_plannable excludes sinks/roots), so dropping
-  // them is safe: the SINK lives in a standalone (non-arena)
-  // CpuBuf and keeps its preserve flag.  Without this clear, the
-  // gc-mark walk over the SINK result reaches view-tids embedded in
-  // KERNELS[].input_tids chains, marks the views preserved, and the
-  // parent-arena link in tensor_mark_buf_preserved keeps the entire
-  // 600MB arena alive across the rollback (the symptom: peak grows
-  // ~1.4GB -> 2.1GB by step 4 of BS=16 MNIST).  Tinygrad mirror:
-  // tinygrad/schedule/memory.py:13-16 _can_plan excludes held_bufs
-  // from the arena, so planned bufs naturally die at end-of-schedule.
-  cpu_buf_clear_preserved_arena_views(cpu_wm);
-  cpu_buf_pool_rollback_with_preserve(cpu_wm);
-  thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
-  thvm_realize_fwd_reclaim();
-  // Free this realize's fp8->bf16 cast single-use transients (the matmul that
-  // consumed each has fired).  Runs AFTER fwd_reclaim's heap-rooted preserve so
-  // we unhook + decref buffers that scan would otherwise pin forever.
-  thvm_free_fp8_transients(term_tag(res) == TAG_TEN ? (u32)term_val(res) : 0);
-  cpu_buf_clear_preserved(cpu_wm);
-  cpu_buf_clear_freeable(cpu_wm);
-  thvm_metal_buf_clear_preserved(metal_wm);
-  // mark_gc_preserve marks below-watermark buffers too; under capture the
-  // mark-park sweep consumes those bits, so clear table-wide (mirror of
-  // fwd_reclaim's clear_preserved(1)) or a buffer preserved once stays
-  // "preserved" (stale) at every later sweep and never parks.
-  if (jit_is_capturing()) thvm_metal_buf_clear_preserved(1);
-#ifdef THVM_HAS_CUDA
-  cuda_buf_clear_preserved_arena_views(cuda_wm);
-  cuda_buf_pool_rollback_with_preserve(cuda_wm);
-  cuda_buf_clear_preserved(cuda_wm);
-  // Opt-in sweep: drop the preserve bits TABLE-WIDE now that the CUDA
-  // rollback has consumed them, so the next realize's sweep sees fresh
-  // marks (mirror of the Metal flow's clear_preserved(1) after its sweep;
-  // doing this before the rollback wiped live marks and corrupted results).
-  if (cuda_fwd_reclaim_enabled()) cuda_buf_clear_preserved(1);
-#endif
-
-  // Auto-trigger Cheney collection once the dyn heap crosses a
-  // configurable fraction of from-space.  The result Term is added
-  // to the root set; everything else WL holds is reached through
-  // the EXTERN_PIN_HANDLES side table (extern_pin_handle_set on
-  // every TTerm wrap), so the C-side pin table is authoritative
-  // post-GC.  WL's ttermRaw refreshes through the handle on every
-  // read, so cached raw Term integers can't go stale.
-  // THVM_GC_KB overrides the trigger threshold (in KB of heap; one
-  // cell = 8B).
-  thvm_realize_maybe_gc(&res);
-
-  // Kernel-arena GC: free per-kernel heap arrays + decref output
-  // TenDescs for kernels no longer reachable from any pinned Term.
-  // Bounds KERNELS_NEXT growth across long training loops -- without
-  // this, each Adam step adds ~5K kernels on LeNet, hitting
-  // KERNELS_CAP after ~50 steps.
-  kernel_gc_sweep(res);
-
-  // Cross-realize loc -> tid cache: scoped to ONE realize call so a
-  // forward intermediate emitted as a kernel mid-pass stays reachable
-  // for sibling children inside the same materialize loop (the
-  // multi-root grad share that drove the cache addition), but does
-  // NOT survive the pool-rollback -- whose freelist push would alias
-  // a future allocation to the cached tid and corrupt subsequent
-  // grad reads (BN-grad NaN repro).  Mirrors tinygrad's per-schedule
-  // _realize_cache lifetime: the cache lives only inside one
-  // run_rangeify call.
-  materialized_loc_clear();
-  materialized_loc_scope_leave();
-  xpass_cc_reset();
-
-  // Restore the session default device (scoped device routing, above).
-  CURRENT_CTX->default_device = saved_default_device;
-  if (realize_stale_fire_failed()) {
-    return 0;
-  }
-  return res;
+  return realize_end(marks, res);
 }
 
 // A wave is done once every root in it is a TAG_TEN, so the next wave's
@@ -619,17 +644,7 @@ fn Term thvm_realize_many(Term ctr_term) {
   }
   for (u32 p = 0; p < cn; p++) all[p] = term_ctr_at(ctr_term, order[p]);
 
-  grad_memo_begin_realize();
-  u32 cpu_wm   = cpu_buf_pool_begin();
-  u32 metal_wm = thvm_metal_buf_pool_begin();
-#ifdef THVM_HAS_CUDA
-  u32 cuda_wm  = cuda_buf_pool_begin();
-#endif
-  kernel_fire_scope_begin();
-  backend_dispatch_begin_all();
-  // Start with a clean cross-realize loc -> tid cache (see thvm_realize).
-  materialized_loc_clear();
-  materialized_loc_scope_enter();
+  RealizeMarks marks = realize_begin(CURRENT_CTX->default_device);
   u32 kn_at_call_start = KERNELS_NEXT;
 
   u32  label = term_ext(ctr_term);
@@ -687,71 +702,5 @@ fn Term thvm_realize_many(Term ctr_term) {
             KERNELS_NEXT - kn_at_call_start, iters_used, n);
   }
 
-  backend_dispatch_end_all();
-  kernel_fire_scope_end();
-
-  // Preserve mark + GC same as thvm_realize.  Walk every child of
-  // the result CTR so each root's producer chain is preserved.
-  for (u32 i = 0; i < cn; i++) mark_gc_preserve(term_ctr_at(res, i));
-  // Capture-time mark-park sweep, same as thvm_realize (see the rationale
-  // there: the mark_heap_rooted_preserve overlay is REQUIRED for correctness --
-  // it preserves buffers a pending lazy fragment still references, so only
-  // truly-dead intermediates are parked).
-  // THVM_JIT_STATIC_PACK replaces this realize-end reachability sweep with
-  // online refcount-death recycling from metal_buf_decref (a buffer is parked
-  // the instant its last live TenDesc drops -- definitive static death, no heap
-  // walk).  So skip the mark_heap_rooted_preserve overlay + the sweep under the
-  // gate; the decref hook has already parked every dead intermediate.
-  if (jit_is_capturing() && !jit_static_pack_enabled()) {
-    mark_heap_rooted_preserve();
-    thvm_metal_buf_park_unpreserved_pinned();
-  }
-  jit_capture_mark_preserved();
-
-  // Arena planner cross-step leak fix (see thvm_realize for full
-  // rationale).  Drop preserve on arena views + parent arenas so
-  // pool_rollback reclaims them; sink CpuBufs are standalone (not
-  // arena) and keep their preserve flag.  Tinygrad mirror:
-  // tinygrad/schedule/memory.py:13-16.
-  cpu_buf_clear_preserved_arena_views(cpu_wm);
-  cpu_buf_pool_rollback_with_preserve(cpu_wm);
-  thvm_metal_buf_pool_rollback_with_preserve(metal_wm);
-  thvm_realize_fwd_reclaim();
-  // Free this realize's fp8->bf16 cast single-use transients (the matmul that
-  // consumed each has fired).  Runs AFTER fwd_reclaim's heap-rooted preserve so
-  // we unhook + decref buffers that scan would otherwise pin forever.
-  thvm_free_fp8_transients(term_tag(res) == TAG_TEN ? (u32)term_val(res) : 0);
-  cpu_buf_clear_preserved(cpu_wm);
-  cpu_buf_clear_freeable(cpu_wm);
-  thvm_metal_buf_clear_preserved(metal_wm);
-  // mark_gc_preserve marks below-watermark buffers too; under capture the
-  // mark-park sweep consumes those bits, so clear table-wide (mirror of
-  // fwd_reclaim's clear_preserved(1)) or a buffer preserved once stays
-  // "preserved" (stale) at every later sweep and never parks.
-  if (jit_is_capturing()) thvm_metal_buf_clear_preserved(1);
-#ifdef THVM_HAS_CUDA
-  cuda_buf_clear_preserved_arena_views(cuda_wm);
-  cuda_buf_pool_rollback_with_preserve(cuda_wm);
-  cuda_buf_clear_preserved(cuda_wm);
-  // Opt-in sweep: drop the preserve bits TABLE-WIDE now that the CUDA
-  // rollback has consumed them, so the next realize's sweep sees fresh
-  // marks (mirror of the Metal flow's clear_preserved(1) after its sweep;
-  // doing this before the rollback wiped live marks and corrupted results).
-  if (cuda_fwd_reclaim_enabled()) cuda_buf_clear_preserved(1);
-#endif
-
-  thvm_realize_maybe_gc(&res);
-
-  kernel_gc_sweep(res);
-
-  // Same lifetime as thvm_realize: drop the loc -> tid cache before
-  // returning so non-preserved bufs (pool-rollback-recycled) can't be
-  // re-handed-out under the same cached tid in a future realize call.
-  materialized_loc_clear();
-  materialized_loc_scope_leave();
-  xpass_cc_reset();
-  if (realize_stale_fire_failed()) {
-    return 0;
-  }
-  return res;
+  return realize_end(marks, res);
 }

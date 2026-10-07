@@ -280,6 +280,7 @@ TESTS := \
   $(BIN)/test_kernel_fire_gen \
   $(BIN)/test_custom_kernel \
   $(BIN)/test_realize_many_war \
+  $(BIN)/test_realize_abort \
   $(BIN)/test_autotune_correctness_gate \
   $(BIN)/test_autotune_iso_scratch \
   $(BIN)/test_autotune_iso_extent \

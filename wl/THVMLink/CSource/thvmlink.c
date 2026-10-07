@@ -2230,9 +2230,11 @@ EXTERN_C DLLEXPORT int thvm_wl_term_ctr_at(WolframLibraryData libData, mint argc
 EXTERN_C DLLEXPORT int thvm_wl_materialize(WolframLibraryData libData, mint argc,
                                            MArgument *args, MArgument res) {
   (void)libData; (void)argc;
+  THVM_WL_RECOVER(materialize);
   Term t = (Term)MArgument_getInteger(args[0]);
   Term r = thvm_materialize(t);
   MArgument_setInteger(res, (mint)r);
+  THVM_WL_DONE();
   return LIBRARY_NO_ERROR;
 }
 
@@ -2263,11 +2265,13 @@ EXTERN_C DLLEXPORT int thvm_wl_realize_many(WolframLibraryData libData,
   const mint *data = libData->MTensor_getIntegerData(t);
   if (n <= 0) { MArgument_setInteger(res, 0); return LIBRARY_NO_ERROR; }
   if (n > 256) return LIBRARY_FUNCTION_ERROR;
+  THVM_WL_RECOVER(realize_many);
   Term children[256];
   for (mint i = 0; i < n; i++) children[i] = (Term)data[i];
   Term ctr = term_new_ctr(0, children, (u32)n);
   Term r   = thvm_realize_many(ctr);
   MArgument_setInteger(res, (mint)r);
+  THVM_WL_DONE();
   return LIBRARY_NO_ERROR;
 }
 
