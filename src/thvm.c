@@ -301,7 +301,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/index_simplify.c"
 #include "uop/index.c"
 #include "uop/where.c"
-#include "uop/movement_index.c"
 #include "uop/buffer.c"
 #include "uop/store.c"
 #include "uop/root_map_stores.c"

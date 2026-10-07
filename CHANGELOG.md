@@ -71,6 +71,7 @@ for the per-commit story.
 - Einx-style verbs over TUOp (`wl/THVMLink/Kernel/Einx.wl`).
 
 ### Scheduling & Codegen
+- `src/uop/movement_index.c` (`uop_resolve_movement_chain`) and `bin/test_uop_movement_index` are gone: a second port of tinygrad's `apply_movement_op` that only its own test called.  Production resolves movement ops in `src/schedule/indexing.c`.
 - The UPat rewrite bridge is gone: `uop_pattern_rewrite`, which ran a `UPatRule` table through `uop_graph_rewrite`, had no caller left once the opt-pass mirror went, and `UPatRule` goes with it.  `upat_match` stays (the TC recogniser and the bufferize walkers match with it), and `test_uop_upat` keeps its matching cases.
 - `uop_range_split`, `uop_range_with_axis_type`, `uop_range_extent_is_var` and `uop_range_var_id` are gone: the first two served only the deleted opt-pass mirror and its test, and nothing ever called the other two.
 - The UOp mirror of the opt pass is gone: `src/uop/apply_opt.c` (the KOP_GLOBAL, SWAP, split-class and TC UPatRules and `uop_apply_split_dag`) and its post-lift call in materialize.  That call read the kernel's applied opts right after `kernel_alloc` zeroed them, and they are written only at fire time, so its body never ran (0 of 44,545 evaluations in the Linux suites); fire-time opts reach the DAG through `kernel_apply_opt` -> `uop_dag_apply_kopt`.  `bin/test_uop_range_axis_type`, which tested only the mirror and the range primitives it used, goes with it.

@@ -1,7 +1,7 @@
 // test_uop_index_simplify.c - Phase B2: symbolic INDEX simplifier.
 //
 // Verifies the constructor-time folds in index_simplify.c fire on
-// the canonical patterns that uop_resolve_movement_chain emits, and
+// the canonical patterns movement-op index resolution emits, and
 // don't fire on operands that aren't reducible.  Each block has both
 // a "rule fires" and a "rule skips" case so a false positive (rule
 // firing too aggressively) shows up as a regression on the skip

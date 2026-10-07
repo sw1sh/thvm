@@ -224,7 +224,6 @@ TESTS := \
   $(BIN)/test_uop_index_simplify \
   $(BIN)/test_uop_valid_fold \
   $(BIN)/test_uop_reduce_collapse \
-  $(BIN)/test_uop_movement_index \
   $(BIN)/test_uop_graph_rewrite \
   $(BIN)/test_uop_expand \
   $(BIN)/test_uop_devectorize \
