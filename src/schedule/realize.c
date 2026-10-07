@@ -75,12 +75,7 @@ static int cuda_fwd_reclaim_enabled(void) {
 }
 
 fn void thvm_realize_fwd_reclaim(void) {
-  // Two-phase capture (THVM_JIT_TWO_PHASE) keeps recording lifetime EXACTLY
-  // eager -- the reclaim must run so dead intermediates die during the
-  // recording pass (the finalize planner then plans replay slots for them).
-  // Only the pin path (recorded buffers jit_pinned, per-realize rollback
-  // suffices) skips it.
-  if (jit_is_capturing() && !jit_capture_two_phase_active()) return;
+  if (jit_is_capturing()) return;
   // Default ON: this is the faithful realize-boundary GC (free a buffer when its
   // last WL refcount drops), correct since the heap-rooted preserve scan below
   // fixed the cross-realize free bug, free on the hot loop (the table-wide free
@@ -116,8 +111,8 @@ fn void thvm_realize_fwd_reclaim(void) {
   // sweep contract (see cuda_buf_free_unpreserved_all).  OPT-IN
   // (THVM_CUDA_FWD_RECLAIM=1) until the CUDA mark coverage is hardened the
   // way Metal's was: enabling it by default corrupted the Euler-sampler
-  // repro (cold diff 0.296 pin / 1.036 two-phase -- a live buffer the mark
-  // pass misses gets freed), so the default path stays byte-identical.
+  // repro (cold diff 0.296 -- a live buffer the mark pass misses gets
+  // freed), so the default path stays byte-identical.
   if (cuda_fwd_reclaim_enabled()) cuda_buf_free_unpreserved_all();
 #endif
   // Drop the preserve bits the scan set table-wide.  thvm_realize's
@@ -476,8 +471,7 @@ fn Term thvm_realize(Term expr) {
   // the instant its last live TenDesc drops -- definitive static death, no heap
   // walk).  So skip the mark_heap_rooted_preserve overlay + the sweep under the
   // gate; the decref hook has already parked every dead intermediate.
-  if (jit_is_capturing() && !jit_static_pack_enabled()
-      && !jit_capture_two_phase_active()) {
+  if (jit_is_capturing() && !jit_static_pack_enabled()) {
     mark_heap_rooted_preserve();
     thvm_metal_buf_park_unpreserved_pinned();
   }
@@ -707,8 +701,7 @@ fn Term thvm_realize_many(Term ctr_term) {
   // the instant its last live TenDesc drops -- definitive static death, no heap
   // walk).  So skip the mark_heap_rooted_preserve overlay + the sweep under the
   // gate; the decref hook has already parked every dead intermediate.
-  if (jit_is_capturing() && !jit_static_pack_enabled()
-      && !jit_capture_two_phase_active()) {
+  if (jit_is_capturing() && !jit_static_pack_enabled()) {
     mark_heap_rooted_preserve();
     thvm_metal_buf_park_unpreserved_pinned();
   }

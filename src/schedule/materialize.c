@@ -36,9 +36,6 @@ fn void jit_capture_record_gather(u32 src_tid, u32 dst_buf);
 fn int  jit_caprecycle_push(Backend *b, u32 buf_id);
 fn u32  jit_caprecycle_pop(Backend *b, u64 nbytes);
 fn void jit_caprecycle_drain(void);
-// Two-phase capture (THVM_JIT_TWO_PHASE): recording keeps eager lifetime
-// rules, so capture-time free suppressions must not engage on that path.
-fn int  jit_capture_two_phase_active(void);
 
 #define BOUNDARY_ORDER_CAP 16384
 static u64  BOUNDARY_ORDER[BOUNDARY_ORDER_CAP];
@@ -706,10 +703,7 @@ fn void materialized_loc_clear(void) {
 // capture).  result_tid is never freed (defensive: it is the matmul output,
 // not a cast transient, but guard anyway).
 fn void thvm_free_fp8_transients(u32 result_tid) {
-  // Two-phase capture: the transients die eagerly (the cast kernel that
-  // produced each is a recorded dispatch, so the finalize planner assigns its
-  // replay a planned slot); only the pin path defers to the capture pins.
-  if (jit_is_capturing() && !jit_capture_two_phase_active()) {
+  if (jit_is_capturing()) {
     FP8_TRANSIENT_LEN = 0;
     return;
   }
@@ -916,13 +910,10 @@ static void copy_upload_insert(u64 loc, u32 backend_id, u32 tid) {
 // permute is, like an upload, STATIC (immutable weight, fixed permutation) and
 // re-bound across every JIT-replay step -- so it must be realized ONCE,
 // jit-pinned (survive the per-realize pool rollback), and read as a stable
-// pre-capture LEAF.  Without this the anonymous permute output is an unpinned
-// compute buffer that the two-phase memory planner classifies as a dead
-// intermediate and interval-packs/frees while replayed matmuls still read it
-// (CUDA_ERROR_ILLEGAL_ADDRESS -- the resident-transpose UAF).  Keyed by the
-// hash-consed transpose node loc (stable: Transpose over the cached weight
-// term) + target backend, so a warmup realize populates it and the capture
-// reuses the same pinned buffer instead of re-emitting a recorded dispatch.
+// pre-capture LEAF.  Keyed by the hash-consed transpose node loc (stable:
+// Transpose over the cached weight term) + target backend, so a warmup
+// realize populates it and the capture reuses the same pinned buffer instead
+// of re-emitting a recorded dispatch.
 static CopyUploadSlot WEIGHT_MOVE_CACHE[COPY_UPLOAD_CACHE_CAP];
 
 // Parallel to WEIGHT_MOVE_CACHE (same index): the SOURCE upload tid each
@@ -5746,9 +5737,9 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // Resident weight-movement cache hit (cross-realize): a TRealize@Transpose
   // of a resident weight was already realized+pinned (by a warmup pass or an
   // earlier replay), so reuse that stable pinned buffer as a pre-capture LEAF
-  // rather than re-emitting the permute as a recorded dispatch the two-phase
-  // planner would free.  Mirrors the MATERIALIZED_LOC / COPY_UPLOAD_CACHE hits;
-  // the buf_refcount>0 guard makes a reclaimed entry a safe miss (re-emit).
+  // rather than re-emitting the permute as a recorded dispatch.  Mirrors the
+  // MATERIALIZED_LOC / COPY_UPLOAD_CACHE hits; the buf_refcount>0 guard makes
+  // a reclaimed entry a safe miss (re-emit).
   u32 wm_src = 0;
   if (tc_weight_pin_enabled() && uop_is_movement(op)) {
     wm_src = weight_move_chase_upload(root_term);
@@ -6085,7 +6076,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // re-emitting an identical kernel.  See MATERIALIZED_LOC_TABLE
   // comment above for full rationale.
   // Pin + cross-realize-cache a realized movement (transpose) whose source is
-  // a resident weight upload, so the two-phase capture treats it as a stable
+  // a resident weight upload, so a JIT capture reads it as a stable
   // pre-capture leaf (see WEIGHT_MOVE_CACHE).  Gated to a JIT capture + a
   // weight-derived input so ordinary activation permutes stay planner-managed
   // (an unpinned, per-step-reclaimed intermediate) and only weights go resident.

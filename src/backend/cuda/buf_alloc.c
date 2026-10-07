@@ -17,13 +17,6 @@ fn u64 cuda_buf_peak_bytes(void) { return CUDA_MEM_PEAK; }
 fn u64 cuda_buf_live_bytes(void) { return CUDA_MEM_LIVE; }
 fn void cuda_buf_peak_reset(void) { CUDA_MEM_PEAK = CUDA_MEM_LIVE; }
 
-// Forward decl into jit/capture.c (included after this file in the unity
-// build).  Two-phase capture invalidates a re-issued buf id's logical-map
-// binding at every id-issuing site.  On CUDA the freelist mints a FRESH slot
-// id (donor swap), so this is a uniformity formality like the CPU's; it
-// early-outs when no two-phase map is live.
-fn void jit_twophase_note_alloc(Backend *b, u32 buf_id);
-
 fn u32 cuda_buf_alloc(u64 nbytes) {
   if (!CUDA_READY) {
     fprintf(stderr, "cuda_buf_alloc: backend not initialised\n");
@@ -50,7 +43,6 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
               (unsigned long long)CUDA_BUFS[recycled].nbytes,
               (void*)CUDA_BUFS[recycled].dptr);
     }
-    jit_twophase_note_alloc(&CUDA_BACKEND, recycled);
     return recycled;
   }
 
@@ -144,7 +136,6 @@ fn u32 cuda_buf_alloc(u64 nbytes) {
     fprintf(stderr, "[alloc] req=%llu -> fresh buf_id=%u dptr=%p\n",
             (unsigned long long)nbytes, id, (void*)dptr);
   }
-  jit_twophase_note_alloc(&CUDA_BACKEND, id);
   return id;
 }
 
