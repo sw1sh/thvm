@@ -31,8 +31,7 @@ sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
 
 from thvm import K, Tensor  # noqa: E402
 from thvm.dtypes import dtypes  # noqa: E402
-from thvm.from_tinygrad import (  # noqa: E402
-    _binary, _expand, _fconst, _reduce, _reshape, _unary)
+from thvm.tensor import _TH  # noqa: E402
 from thvm.thvm import Term  # noqa: E402
 
 SHAPE = (4, 2, 3, 3)
@@ -43,8 +42,8 @@ CASES = list(itertools.product((True, False), ("const", "buffer", "none"),
 def _red(t):
     """Sum over axes (0, 2, 3) of a (4, 2, 3, 3) term -> (2,)."""
     for ax in (3, 2, 0):
-        t = _reduce(K.REDUCE_SUM, ax, t)
-    return _reshape(t, (2,))
+        t = _TH.reduce(K.REDUCE_SUM, ax, t)
+    return _TH.reshape(t, (2,))
 
 
 def run_case(neg_before, scale, final_expand):
@@ -56,22 +55,22 @@ def run_case(neg_before, scale, final_expand):
     # allocation may reclaim the buffer of a Tensor already gone.
     tw, ts = Tensor(w), Tensor(s)
     x = int(tw.term)
-    mean = _reshape(_red(x), (1, 2, 1, 1))
+    mean = _TH.reshape(_red(x), (1, 2, 1, 1))
     if neg_before:
-        m = _expand(_unary(K.NEG, mean), SHAPE)
+        m = _TH.expand(_TH.neg(mean), SHAPE)
     else:
-        m = _unary(K.NEG, _expand(mean, SHAPE))
-    r = _red(_binary(K.ADD, x, m))
+        m = _TH.neg(_TH.expand(mean, SHAPE))
+    r = _red(_TH.add(x, m))
     want = (w - w.sum(axis=(0, 2, 3)).reshape(1, 2, 1, 1)).sum(axis=(0, 2, 3))
     if scale == "const":
-        r = _binary(K.MUL, r, _expand(_reshape(_fconst(1 / 36), (1,)), (2,)))
+        r = _TH.mul(r, _TH.expand(_TH.reshape(_TH.fconst(1 / 36), (1,)), (2,)))
         want = want * np.float32(1 / 36)
     elif scale == "buffer":
-        r = _binary(K.MUL, r, int(ts.term))
+        r = _TH.mul(r, int(ts.term))
         want = want * s
     shape = (2,)
     if final_expand:
-        r = _expand(_reshape(r, (1, 2, 1, 1)), SHAPE)
+        r = _TH.expand(_TH.reshape(r, (1, 2, 1, 1)), SHAPE)
         want = np.broadcast_to(want.reshape(1, 2, 1, 1), SHAPE)
         shape = SHAPE
     got = Tensor._from_term(Term(r), dtypes.float32, shape).numpy()

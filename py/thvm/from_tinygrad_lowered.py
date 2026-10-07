@@ -132,11 +132,10 @@ class _Lowerer:
         elif op is Ops.MUL:
             t = self._binop(K.IMUL, K.MUL, u)
         elif op is Ops.CMPLT:
-            t = self._cmp(u)
+            t = h.cmplt(self.emit(u.src[0]), self.emit(u.src[1]))
         elif op is Ops.WHERE:
-            t = int(_uop_iwhere(_ct.c_uint64(int(self.emit(u.src[0]))),
-                                _ct.c_uint64(int(self.emit(u.src[1]))),
-                                _ct.c_uint64(int(self.emit(u.src[2])))))
+            t = h.iwhere(self.emit(u.src[0]), self.emit(u.src[1]),
+                         self.emit(u.src[2]))
         elif op is Ops.RECIPROCAL:
             t = h.unary(K.RECIP, self.emit(u.src[0]))
         elif op is Ops.EXP2:
@@ -173,16 +172,6 @@ class _Lowerer:
         if _is_int_dtype(u.dtype):
             return (self.h.iadd(a, b) if iop == K.IADD else self.h.imul(a, b))
         return (self.h.add(a, b) if fop == K.ADD else self.h.mul(a, b))
-
-    def _cmp(self, u) -> int:
-        # CMPLT -> thvm float CMPLT (0/1 mask)
-        a, b = self.emit(u.src[0]), self.emit(u.src[1])
-        return int(_uop_binary(_ct.c_uint32(K.CMPLT),
-                               _ct.c_uint64(int(a)), _ct.c_uint64(int(b))))
-
-
-# Pull the raw bridge for ops the Thvm handle doesn't wrap directly.
-from .thvm import _uop_binary, _uop_iwhere  # noqa: E402
 
 
 def _param_slot(p) -> int:

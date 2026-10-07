@@ -56,17 +56,17 @@ class TestDeepChainDepth(unittest.TestCase):
         # SUM(body) into body*extent (depth 62 exact, 63+ off by 1.36).
         from thvm import K
         from thvm.dtypes import dtypes
-        from thvm.from_tinygrad import _binary, _expand, _fconst, _reduce, _reshape
+        from thvm.tensor import _TH
         from thvm.thvm import Term
         rng = np.random.default_rng(0)
         x = rng.standard_normal((3, 4)).astype(np.float32)
         for depth in (62, 64, 100, 300):
             with self.subTest(depth=depth):
                 v = int(Tensor(x).term)
-                c = _expand(_reshape(_fconst(0.001), (1, 1)), (3, 4))
+                c = _TH.expand(_TH.reshape(_TH.fconst(0.001), (1, 1)), (3, 4))
                 for _ in range(depth):
-                    v = _binary(K.ADD, v, c)
-                r = _reduce(K.REDUCE_SUM, 1, v)
+                    v = _TH.add(v, c)
+                r = _TH.reduce(K.REDUCE_SUM, 1, v)
                 got = Tensor._from_term(Term(r), dtypes.float32, (3,)).numpy()
                 want = (x.astype(np.float64) + 0.001 * depth).sum(axis=1)
                 np.testing.assert_allclose(got, want, atol=1e-4)
