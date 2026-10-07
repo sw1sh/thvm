@@ -142,18 +142,7 @@ jitCaptureOnce[a_Association, args_List] := Module[{slot, fnRes, inTids},
 
 (* Direct invocation: dispatch through the side store.  Two paths:
      (a) closure has captured -> replay only
-     (b) first call -> capture-begin, run fn, capture-end, store slot.
-
-   POST-CAPTURE AUTOTUNE APPLY (tinygrad jit.py:289-300): under JITBEAM, the
-   capture's jit_capture_autotune_finalized (C) beam-searches each captured
-   kernel on isolated buffers and APPLIES the winning opt-config to the captured
-   KernelEntry's schedule in place.  The replay's Metal ICB build looks up each
-   kernel's PSO by a hash that folds its applied opts (metal_tile_jit_hash), so
-   the FIRST replay -- which runs after this capture-end search -- builds the
-   TUNED PSOs with no re-capture needed (the opts are already on the captured
-   kernels).  This is the re-bake apply; re-capture is unnecessary and unsafe
-   here (its fresh intermediate tids change the structural key, so its
-   cache-load misses anyway). *)
+     (b) first call -> capture-begin, run fn, capture-end, store slot. *)
 TJitClosure[a_Association][args___] := Module[{key = Hash[a], rec, inTids, st},
     ensureInit[];
     rec = $tJitState[key];

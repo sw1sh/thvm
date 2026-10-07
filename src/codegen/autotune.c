@@ -77,72 +77,12 @@ typedef struct {
 } KautotuneIso;
 static KautotuneIso ISO;  // file-static: only one isolated bench at a time
 
-// === Deferred post-capture bench queue (tinygrad jit.py:289-300) ===
-//
-// kernel_autotune CANNOT bench during a JIT capture (a bench dispatch
-// commits the in-flight capture batch + perturbs the recorded forward).  But
-// the cache KEY it computes mid-capture (the capture-phase
-// kautotune_structural_key, span open) is EXACTLY the key the warm replay's
-// re-capture cache-load looks up -- whereas a key recomputed AFTER the capture
-// (post span_end / post finalize) hashes a DIFFERENT DAG and never matches
-// (measured: re-capture HIT 4/217).  So during capture we DEFER: record the
-// (kid, capture-phase cache_key, cache_path, bench params) of every cache-MISS
-// kernel into this queue, then jit_capture_autotune_finalized (after the slot
-// clears, jit_is_capturing()==0, span still open so the kid's DAG is unchanged)
-// drains the queue, benches each on isolated scratch buffers, and STORES the
-// winner under the recorded capture-phase key.  The next re-capture's
-// cache-load then HITs that exact key and bakes the tuned PSO.
-#define KAUTOTUNE_POSTTUNE_CAP 8192
-typedef struct {
-  u32  kid;
-  u64  cache_key;
-  char cache_path[KAUTOTUNE_CACHE_PATH_CAP];
-  u32  n_runs;
-  u32  depth;
-  u32  beam_width;
-  u32  backend_id;
-  u32  slot;        // capturing JIT slot at enqueue (for per-slot drain scope)
-} KautotunePostItem;
-static KautotunePostItem KAUTOTUNE_POSTQ[KAUTOTUNE_POSTTUNE_CAP];
-static u32 KAUTOTUNE_POSTQ_N = 0;
-
-fn u32 jit_active_capture_slot(void);
-
-// Enqueue a cache-MISS kernel's capture-phase key for deferred post-capture
-// bench.  Dedup by cache_key so a kernel shape recorded N times (N replay
-// ops) is benched once.  No-op when the queue is full.
-static void kautotune_postq_enqueue(u32 kid, u64 cache_key,
-                                    char const *cache_path, u32 n_runs,
-                                    u32 depth, u32 beam_width, u32 backend_id) {
-  if (cache_key == 0 || cache_path == NULL || cache_path[0] == '\0') {
-    return;
-  }
-  for (u32 i = 0; i < KAUTOTUNE_POSTQ_N; i++) {
-    if (KAUTOTUNE_POSTQ[i].cache_key == cache_key) {
-      return;  // already queued (same shape)
-    }
-  }
-  if (KAUTOTUNE_POSTQ_N >= KAUTOTUNE_POSTTUNE_CAP) {
-    return;
-  }
-  KautotunePostItem *it = &KAUTOTUNE_POSTQ[KAUTOTUNE_POSTQ_N++];
-  it->kid        = kid;
-  it->cache_key  = cache_key;
-  it->n_runs     = n_runs;
-  it->depth      = depth;
-  it->beam_width = beam_width;
-  it->backend_id = backend_id;
-  it->slot       = jit_active_capture_slot();
-  snprintf(it->cache_path, sizeof(it->cache_path), "%s", cache_path);
-}
-
 static u32 kautotune_backend_id(KernelEntry const *ke);
 static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
                                      KOpt const *candidates, u32 n_cand,
                                      char const *cache_path, u64 cache_key,
                                      u32 n_runs, u32 depth, u32 beam_width,
-                                     u32 backend_id, int cache_ready,
-                                     int apply_keep_route);
+                                     u32 backend_id, int cache_ready);
 
 static u32 kautotune_n_runs(void) {
   char const *e = getenv("BEAM_RUNS");
@@ -1372,39 +1312,22 @@ fn int kernel_autotune(u32 kid) {
   // autotuned so the fire-time trigger doesn't re-propose on every replay.
   if (jit_is_capturing()) {
     ke->schedule->autotuned = 1;
-    // Defer: record the capture-phase key so jit_capture_autotune_finalized
-    // benches + stores under it.  Only queue cache-MISS shapes (a HIT already
-    // returned 1 above with the winner applied), and only when the post-capture
-    // pass is enabled (THVM_POSTTUNE=1) -- otherwise the queue would grow
-    // unbounded across captures with nothing to drain it.
-    static int posttune_on = -1;
-    if (posttune_on < 0) {
-      char const *on = getenv("THVM_POSTTUNE");
-      posttune_on = (on != NULL && on[0] == '1');
-    }
-    if (cache_ready && posttune_on) {
-      kautotune_postq_enqueue(kid, cache_key, cache_path, n_runs, depth,
-                              beam_width, backend_id);
-    }
     return 0;
   }
 
   return kautotune_bench_and_store(kid, ke, candidates, n_cand, cache_path,
                                    cache_key, n_runs, depth, beam_width,
-                                   backend_id, cache_ready,
-                                   0 /* eager: re-dispatch re-records route */);
+                                   backend_id, cache_ready);
 }
 
 // Bench the kernel's candidate opt-sequences on isolated scratch buffers and
-// store the winner under (cache_path, cache_key).  Split out of kernel_autotune
-// so the deferred post-capture drain can reuse it with a recorded capture-phase
-// key/path (the autotuned/propose/cache-load preamble already ran upstream).
+// store the winner under (cache_path, cache_key).  kernel_autotune runs the
+// autotuned / propose / cache-load preamble first.
 static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
                                      KOpt const *candidates, u32 n_cand,
                                      char const *cache_path, u64 cache_key,
                                      u32 n_runs, u32 depth, u32 beam_width,
-                                     u32 backend_id, int cache_ready,
-                                     int apply_keep_route) {
+                                     u32 backend_id, int cache_ready) {
   // Mark autotuned at the START so nested/direct bench dispatches do
   // not re-enter this path if a backend helper fires through the public
   // kernel path.  axes_reset_to_default preserves the flag.
@@ -1616,178 +1539,12 @@ static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
     }
   }
 
-  // Under POSTTUNE re-bake APPLY, the winner stays baked on ke and a later
-  // JIT REPLAY (not a fresh eager dispatch) is the first thing to fire it.
-  // The replay's route is chosen from cg_kernel_dispatch_kind(kid) BEFORE the
-  // dispatch records its route -- so a stale (pre-tile / untiled) kind would
-  // route the now-TILED kernel through the wrong dispatch path (e.g.
-  // METAL_ALIAS or a non-tile encoder) and produce a non-finite result on the
-  // very FIRST warm replay (the FLUX VAE CALL2 NaN).  A plain
-  // cg_profile_restore would re-install the untiled route, which is correct
-  // when an eager re-dispatch re-records the route first but wrong for the
-  // replay-first re-bake path.  So when a non-baseline winner is applied AND
-  // re-bake apply is on, fire the WINNER once on the isolated scratch (records
-  // the winner's true route into K_PROFILE[kid].kind) and KEEP that kind
-  // instead of restoring the untiled snapshot.  dispatch_count/total_us are
-  // still rewound so the search adds no spurious profile volume.
-  u64 winner_kind = 0;
-  int keep_winner_kind = 0;
-  if (applied && best_seq.n != 0 && apply_keep_route && ISO.active
-      && ISO.kid == kid) {
-    kernel_bench_fire(kid);                 // record the winner's route
-    winner_kind = (u64)cg_kernel_dispatch_kind(kid);
-    keep_winner_kind = 1;
-  }
-
   // Tear down the isolated scratch buffers and erase the search's profile
-  // footprint.  Under re-bake apply, keep the winner's recorded dispatch
-  // kind (route) so the first warm replay dispatches the tiled kernel
-  // correctly; otherwise restore the pre-search snapshot (search is
-  // profile-state-neutral; the first real dispatch re-records the route).
+  // footprint: the search is profile-state-neutral, and the first real
+  // dispatch re-records the route.
   kautotune_iso_end();
   cg_profile_restore(kid, prof_snap);
-  if (keep_winner_kind) {
-    cg_profile_set_kind(kid, (KDispatchKind)winner_kind);
-  }
   return applied;
-}
-
-// Drain the deferred post-capture bench queue (tinygrad jit.py compile_linear).
-// Called by jit_capture_autotune_finalized after the capture slot clears
-// (jit_is_capturing()==0) but BEFORE jit_capture_finalize -- so the apply runs
-// before the ICB/replay plan is computed (the tinygrad beam-before-graph_split
-// ordering).  Benches each queued kernel on isolated scratch buffers and, under
-// THVM_POSTTUNE_APPLY, leaves the winner baked on the captured KernelEntry (its
-// tile route recorded) so finalize plans on the tuned kernels and the warm
-// replay builds the tuned PSO.  The winner is also stored to the autotune disk
-// cache under the recorded capture-phase key.  `budget_sec`==0 is unbounded;
-// otherwise stop once exceeded.  Returns the number of kernels that newly tuned
-// (winner beat baseline).
-// Does this kernel qualify for tune-and-apply under the active scope?
-//
-// Default (THVM_POSTTUNE_SCOPE unset): conv2d-flat / reduce-unroll kernels only.
-//
-// The ORDERING is now correct -- the drain runs BEFORE jit_capture_finalize
-// (jit/capture.c jit_capture_end_common, the tinygrad jit_lower order:
-// compile_linear beam BEFORE graph_split_rewrite), so finalize plans the ICB on
-// the tuned kernels' dispatch route, NOT the stale untiled route.  That removed
-// the ordering-induced batch divergence the prior post-finalize re-bake suffered.
-//
-// A SEPARATE, still-open codegen bug blocks widening to all kernels: applying a
-// tuned LOCAL/UPCAST tile to an elementwise/norm kernel produces output that is
-// correct via the per-op dispatch path (single image: finite under
-// THVM_METAL_GRAPH_REPLAY=0) but NaN via the ICB-batched replay, AND NaN for the
-// 2-image batch even per-op.  The divergence is in the Metal tile renderer / ICB
-// interaction for tuned tiles (a downstream ICB-batched consumer reads a
-// LOCAL-retiled producer's output wrong; the batched shape mis-tiles), not in
-// the ordering.  Until that is fixed, full-scope apply is unsafe, so the default
-// stays conv2d/reduce -- the kernels whose tuned tile replays correctly through
-// both the ICB and the batch.  Empirically the conv2d kernels find no winning
-// tile on the FLUX VAE (already TC), so this is correctness-complete but not a
-// FLUX warm-time win; the DiT matmuls (the dominant cost) are already optimally
-// TC-tiled by hand_opts + render-time uop_recognise_tc and are NOT improved by
-// the autotune -- see propose.c (matmul kernels decline to propose).
-//
-// THVM_POSTTUNE_SCOPE=all re-bakes every tuned kernel -- a measurement / bug-fix
-// knob for working ON the renderer/ICB divergence; it currently NaNs the FLUX
-// ICB/batch replay.  The search (cache write) runs regardless of scope.
-static int kautotune_posttune_scope_allows(KernelEntry const *ke) {
-  // -1 unknown, 0 = conv/reduce only (default + "conv"), 1 = all.
-  static int scope = -1;
-  if (scope < 0) {
-    char const *e = getenv("THVM_POSTTUNE_SCOPE");
-    scope = (e != NULL && strcmp(e, "all") == 0) ? 1 : 0;
-  }
-  if (scope) {
-    return 1;
-  }
-  if (ke == NULL || ke->cached_lift.store_root == 0) {
-    return 0;
-  }
-  if (uop_dag_classify_conv2d_flat_shape(ke->cached_lift.store_root)) {
-    return 1;
-  }
-  return uop_dag_is_reduce_unroll_kernel(ke->cached_lift.store_root);
-}
-
-static u32 kautotune_posttune_drain(double budget_sec) {
-  static int tr = -1;
-  if (tr < 0) tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
-  static int apply = -1;
-  if (apply < 0) {
-    char const *e = getenv("THVM_POSTTUNE_APPLY");
-    apply = (e != NULL && e[0] == '1');     // default OFF (search-only)
-  }
-  u32 n_items = KAUTOTUNE_POSTQ_N;
-  u32 n_tuned = 0;
-
-  // APPLY: leave the winning opt-config applied to the captured KernelEntry.
-  // This drain runs BEFORE jit_capture_finalize (jit/capture.c), so finalize's
-  // ICB/replay plan is computed on the tuned kernels -- the tinygrad jit_lower
-  // ordering (beam compile_linear BEFORE graph_split_rewrite).  The warm replay's
-  // Metal PSO lookup folds the applied opts (metal_tile_jit_hash), so the first
-  // replay builds the TUNED PSO with no re-capture (the autotune cache key is
-  // non-deterministic across captures, so a cross-capture cache-load misses; the
-  // in-capture apply sidesteps it).  When handed apply_keep_route=1,
-  // bench_and_store fires the winner once on the iso scratch and keeps its
-  // dispatch route in K_PROFILE so finalize AND the first warm replay route the
-  // tiled kernel correctly.  Scoped per kernel by kautotune_posttune_scope_allows
-  // (ALL kernels by default now that tuning precedes finalize; DiT/attention
-  // included -- the batch replays the tuned runner without divergence).
-  struct timespec t0;
-  clock_gettime(CLOCK_MONOTONIC, &t0);
-  for (u32 i = 0; i < n_items; i++) {
-    KautotunePostItem *it = &KAUTOTUNE_POSTQ[i];
-    u32 kid = it->kid;
-    if (kid == 0 || kid >= KERNELS_NEXT) continue;
-    KernelEntry *ke = &KERNELS[kid];
-    if (ke->schedule == NULL) continue;
-    if (budget_sec > 0.0) {
-      struct timespec now;
-      clock_gettime(CLOCK_MONOTONIC, &now);
-      double el = (double)(now.tv_sec - t0.tv_sec)
-                + (double)(now.tv_nsec - t0.tv_nsec) * 1e-9;
-      if (el > budget_sec) {
-        if (tr) {
-          fprintf(stderr,
-                  "[autotune] post-capture: budget %.1fs exceeded at item %u/%u "
-                  "(%u tuned)\n", budget_sec, i, n_items, n_tuned);
-        }
-        break;
-      }
-    }
-    int scope_ok = apply && kautotune_posttune_scope_allows(ke);
-
-    // Re-propose candidates from the kid's current DAG so the bench has
-    // something to tune.  The winner is cached under the recorded capture-phase
-    // key; the cache-load validates the cached seq against this same proposal
-    // (kautotune_cached_seq_allowed).
-    KOpt candidates[KAUTOTUNE_MAX_CANDIDATES];
-    u32  n_cand = kernel_opts_propose(ke, candidates,
-                                      sizeof(candidates)/sizeof(*candidates));
-    if (n_cand == 0) continue;
-    int won = kautotune_bench_and_store(kid, ke, candidates, n_cand,
-                                        it->cache_path, it->cache_key,
-                                        it->n_runs, it->depth, it->beam_width,
-                                        it->backend_id, 1 /* cache_ready */,
-                                        scope_ok /* apply_keep_route */);
-    if (won) {
-      n_tuned++;
-    }
-    if (tr) {
-      fprintf(stderr,
-              "[posttune-drain] slot=%u kid=%u n_cand=%u scope_ok=%d won=%d "
-              "out_numel=%llu kind=%u\n",
-              it->slot, kid, n_cand, scope_ok, won,
-              (unsigned long long)ke->output_numel,
-              cg_kernel_dispatch_kind(kid));
-    }
-    if (!scope_ok) {
-      axes_reset_to_default(ke);
-    }
-  }
-  KAUTOTUNE_POSTQ_N = 0;  // consumed
-  return n_tuned;
 }
 
 // Should this kernel auto-tune on its next fire?  Three conditions:

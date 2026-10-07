@@ -250,7 +250,6 @@ static u32 JIT_PAUSE_DEPTH = 0;     // nested suppression for internal
                                     // benchmark fires (autotune, variants)
 
 static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots);
-static void jit_capture_autotune_finalized(u32 slot);
 fn u32 jit_replay(u32 slot);
 fn int jit_trace_capture_enabled(void);
 static int jit_bufref_contains(JitCaptureBufRef const *refs, u32 n,
@@ -1128,10 +1127,6 @@ fn void jit_capture_note_trace_skip(void) {
   }
 }
 
-fn u32 jit_active_capture_slot(void) {
-  return JIT_ACTIVE_SLOT;
-}
-
 fn void jit_capture_pause(void) {
   if (JIT_ACTIVE_SLOT != 0) {
     JIT_PAUSE_DEPTH++;
@@ -1226,49 +1221,19 @@ fn u32 jit_capture_begin(void) {
   return 0;
 }
 
-// Shared capture-end body: close the realize-dedup span, TUNE the captured
-// kernels, then finalize the recorded stream on the tuned kernels.
-//
-// Ordering ports tinygrad engine/jit.py jit_lower: memory_plan -> compile_linear
-// (beam tune each captured kernel) -> graph_split_rewrite (batch into the graph
-// runner) -> GraphRunner.  The beam tune runs BEFORE graph_split so the runner
-// is batched on the ALREADY-TUNED kernels.  thvm's jit_capture_finalize is the
-// memory_plan + graph_split combined (it computes replay_skip/pack liveness AND
-// the metal_graph_unsafe / metal_graph_recycle ICB-eligibility, which read each
-// kernel's dispatch ROUTE via cg_kernel_dispatch_kind).  So the autotune drain
-// must run BEFORE finalize -- otherwise finalize plans the ICB on the UNTILED
-// route and the re-baked TILED kernel replays against a stale plan (the prior
-// post-finalize re-bake's ordering-induced divergence; this reorder removes it).
-// Tuning first lets finalize see the tiled route and take the TILE-exempt ICB
-// path.  (A SEPARATE, open Metal tile-renderer / ICB divergence still blocks
-// applying tuned LOCAL/UPCAST tiles to non-conv kernels -- see
-// kautotune_posttune_scope_allows -- so the apply scope stays conv/reduce; the
-// ordering fix is the prerequisite that unblocks widening once that is fixed.)
-//
-// The span closes before the drain: the drain's iso-buffer bench fires dispatch
-// + may GC, and doing that while the span is open pollutes the shared loc->tid /
-// substitution-journal state, perturbing later captures.  The drain does NOT
-// need the capture-phase DAG -- the bench re-bakes the winner in place onto the
-// captured KernelEntry, which the warm replay's PSO lookup then folds in (it
-// does not depend on a cross-capture cache-load).
+// Shared capture-end body: close the realize-dedup span, clear the active
+// slot, dissolve the capture-recycle pool, then finalize the recorded stream.
 static void jit_capture_end_common(u32 done_slot, const Term *roots,
                                    u32 n_roots) {
-  // Close the span (reverts the substitution journal, wipes loc->tid) BEFORE
-  // the drain, which only inspects the recorded op list + KernelEntry metadata.
+  // Close the span (reverts the substitution journal, wipes loc->tid).
   materialized_loc_jit_span_end();
-  // Clear the active slot BEFORE the drain: kernel_autotune's bench gate is
-  // jit_is_capturing() (== JIT_ACTIVE_SLOT != 0).  The drain runs no-op when
-  // the queue is empty (JITBEAM off / no MISS), so this is cheap on warm calls.
   JIT_ACTIVE_SLOT = 0;
   JIT_PAUSE_DEPTH = 0;
   // Dissolve the capture-recycle pool: no post-capture alloc may adopt a
   // captured (stream-referenced, pinned) buffer.
   jit_caprecycle_reset();
-  // TUNE first (tinygrad compile_linear): bench each captured cache-MISS kernel
-  // on isolated scratch and APPLY the winner to its KernelEntry + dispatch route.
-  jit_capture_autotune_finalized(done_slot);
-  // FINALIZE second (tinygrad graph_split_rewrite + GraphRunner): plan the
-  // replay liveness/pack + ICB eligibility on the now-tuned kernels.
+  // Finalize (tinygrad graph_split_rewrite + GraphRunner): plan the replay
+  // liveness / pack and the ICB eligibility.
   if (done_slot != 0) {
     jit_capture_finalize(done_slot, roots, n_roots);
   }
@@ -3350,85 +3315,6 @@ graph_flags:
   }
 
   free(needed);
-}
-
-// JITBEAM>0 (tinygrad jit.py:73): post-capture, beam-search ONLY the
-// JIT-captured kernels.  Local copy of autotune.c's static check so the
-// post-capture pass doesn't need a public accessor.
-static int jit_postcapture_jitbeam_enabled(void) {
-  char const *e = getenv("JITBEAM");
-  return e != NULL && atoi(e) > 0;
-}
-
-// Drain the deferred post-capture bench queue that the capture-phase
-// kernel_autotune filled (autotune.c kautotune_postq_enqueue).
-static u32 kautotune_posttune_drain(double budget_sec);
-
-// Bench every captured kernel that missed the autotune cache, faithful to
-// tinygrad engine/jit.py jit_lower -> compile_linear (after the TinyJit records
-// the kernel sequence, jit_lower beam-searches each captured kernel on isolated
-// test buffers, then graph_split_rewrite batches the runner from the TUNED
-// kernels).  jit_capture_end_common calls THIS before jit_capture_finalize, so
-// the apply lands before the ICB/replay plan is built (beam-before-graph_split).
-//
-// The capture-phase kernel_autotune (under jit_is_capturing) cannot bench -- a
-// bench dispatch mid-capture corrupts the recorded forward -- so it DEFERS the
-// cache-MISS kernels into a queue with their capture-phase cache key/path.
-// This pass drains that queue once the capture slot has cleared
-// (jit_is_capturing()==0), benching each on isolated scratch buffers.  The
-// winner is BAKED in place onto the captured KernelEntry (kautotune_posttune_drain
-// under THVM_POSTTUNE_APPLY): the warm replay's Metal PSO lookup folds the
-// applied opts (metal_tile_jit_hash), so the first replay builds the tuned PSO.
-//
-// Default OFF (THVM_POSTTUNE!=1) even under JITBEAM -- see the opt-in gate
-// below.  THVM_POSTTUNE_BUDGET_SEC caps total pass wall time (0 = unbounded:
-// the search runs on the cold CALL1 capture, which the bench budgets for).
-static void jit_capture_autotune_finalized(u32 slot) {
-  if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) {
-    return;
-  }
-  JitCapture *c = &JIT_CAPTURES[slot];
-  if (!c->in_use || c->ops == NULL || c->n_ops == 0) {
-    return;
-  }
-  if (!jit_postcapture_jitbeam_enabled()) {
-    return;
-  }
-  // Explicit opt-in (THVM_POSTTUNE=1), default OFF even under JITBEAM, so a
-  // bare JITBEAM run stays foundation-identical.  The search WRITES every
-  // winner to the autotune disk cache under the capture-phase key regardless
-  // of scope.  APPLY (THVM_POSTTUNE_APPLY=1) bakes the winner onto the captured
-  // KernelEntry BEFORE finalize; scoped per kernel in kautotune_posttune_drain
-  // (conv2d/reduce by default -- the kernels whose tuned tile replays correctly
-  // through the ICB AND the batch; THVM_POSTTUNE_SCOPE=all widens it but hits an
-  // open Metal tile-renderer / ICB divergence on tuned LOCAL/UPCAST tiles).
-  {
-    char const *on = getenv("THVM_POSTTUNE");
-    if (on == NULL || on[0] != '1') {
-      return;
-    }
-  }
-  double budget_sec = 0.0;  // 0 = unbounded
-  {
-    char const *be = getenv("THVM_POSTTUNE_BUDGET_SEC");
-    if (be != NULL) budget_sec = atof(be);
-  }
-  static int tr = -1;
-  if (tr < 0) tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
-  struct timespec t0;
-  clock_gettime(CLOCK_MONOTONIC, &t0);
-
-  u32 n_tuned = kautotune_posttune_drain(budget_sec);
-  if (tr) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    double el = (double)(now.tv_sec - t0.tv_sec)
-              + (double)(now.tv_nsec - t0.tv_nsec) * 1e-9;
-    fprintf(stderr,
-            "[autotune] post-capture slot=%u: tuned %u kernels "
-            "(n_ops=%u, %.2fs)\n",
-            slot, n_tuned, c->n_ops, el);
-  }
 }
 
 #ifdef THVM_HAS_METAL
