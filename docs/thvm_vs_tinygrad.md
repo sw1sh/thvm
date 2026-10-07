@@ -40,9 +40,8 @@ audit corrects the kernel-count story:** the honest eager-schedule counts are fa
 **113**, default **164**, tinygrad **104** (the 328/226/120 figures were JIT-harness
 counts, ~2x inflated by capture-vs-eager duplication). So faithful is within 9% of
 tinygrad on kernels and the forward fuses MORE -- **fusion parity is essentially met**,
-and the boolean-OR-of-valids merge is NOT a kernel-count lever (with default `PCONTIG=0`
-thvm's per-axis divergence realize fuses at least as much as tinygrad's all-or-nothing
-one). The genuine residual is **codegen quality**: faithful's fused convs miss thvm's
+and the boolean-OR-of-valids merge is NOT a kernel-count lever (thvm's per-axis
+divergence realize fuses at least as much as tinygrad's all-or-nothing one). The genuine residual is **codegen quality**: faithful's fused convs miss thvm's
 Accelerate-BLAS matmul path and render unvectorized, so faithful CPU wall is 16x
 tinygrad's -- the real "faithful incl. performance" lever.
 
@@ -88,7 +87,7 @@ Both compilers lower a tensor program to device kernels through structurally ide
 | Graph batching (`graph_split_rewrite`) | `THVM_METAL_GRAPH_REPLAY` / `THVM_CUDA_JIT_GRAPH` + `jit/capture.c` | Partial |
 | Gradient (`gradient.py`, post-kernelize UOP) | `interact/uop_grad.c` (term/AST level) | Different layer; fewer backward rules |
 
-**Faithful-vs-simplified summary:** the rangeify walk, INDEX/BUFFERIZE rewrite, hand-coded heuristic core, and renderers are faithful. The *default* realize seed is intentionally over-conservative (a perf choice, not a porting gap). Genuinely simplified: movement-op/ShapeTracker merge, validity-mask union, ending-ranges PCONTIG. (Reduce-into-reduce fusion is now faithful and default-on -- `THVM_FUSE_REDUCE_INTO_REDUCE`.) Genuinely missing: ImageDType, mask-UPCAST, THREAD (CUDA warp-shuffle reduce). **Landed 2026-06-26** (so NOT missing, despite older text below): arange/reduce-collapse (`uop/reduce_collapse.c`), full-extent UNROLL, ShapeTracker view-cancellation (split+resplit/unfold+col2im cancel to views), conv-backward col2im fusion (`THVM_FUSE_CONV_BWD` now default-on, -48% conv-train peak), importer PAD/SHRINK (offset,size) correctness. BEAM engine exists (`autotune.c`); only the proposer breadth is residual.
+**Faithful-vs-simplified summary:** the rangeify walk, INDEX/BUFFERIZE rewrite, hand-coded heuristic core, and renderers are faithful. The *default* realize seed is intentionally over-conservative (a perf choice, not a porting gap). Genuinely simplified: movement-op/ShapeTracker merge, validity-mask union. (Reduce-into-reduce fusion is now faithful and default-on -- `THVM_FUSE_REDUCE_INTO_REDUCE`.) Genuinely missing: ImageDType, mask-UPCAST, THREAD (CUDA warp-shuffle reduce). **Landed 2026-06-26** (so NOT missing, despite older text below): arange/reduce-collapse (`uop/reduce_collapse.c`), full-extent UNROLL, ShapeTracker view-cancellation (split+resplit/unfold+col2im cancel to views), conv-backward col2im fusion (`THVM_FUSE_CONV_BWD` now default-on, -48% conv-train peak), importer PAD/SHRINK (offset,size) correctness. BEAM engine exists (`autotune.c`); only the proposer breadth is residual.
 
 ---
 
@@ -127,8 +126,8 @@ The key code is `ru_seed_boundary_holds` (`rangeify_unified.c:163-166`): in defa
 
 ### 3.4 Ending ranges (EXPAND-triggered realization)
 
-- **tinygrad** (`indexing.py:222-232`): an EXPAND marks its axis `ended`; a downstream REDUCE/elementwise with an ended range in a non-realized axis realizes *that axis only*, gated by a per-axis `PCONTIG` contiguity check (`indexing.py:227`).
-- **thvm** (`rangeify_unified.c:864-888`): same trigger, but conservatively marks *all* non-realized axes as realized (no PCONTIG per-axis check), losing fusions where some axes were contiguous.
+- **tinygrad** (`indexing.py:271-275`): an EXPAND marks its axis `ended`; a downstream REDUCE or elementwise op with ended ranges realizes every output axis.
+- **thvm** (`rangeify_unified.c`): the same.
 
 ### 3.5 Recompute-vs-materialize decision
 
@@ -262,7 +261,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 
 | Name | Effect | Default | Mode it changes |
 |---|---|---|---|
-| `PCONTIG` | Partial-contiguity in rangeify (per-axis merge aggressiveness) | 0 | Fusion granularity |
 | `SCACHE` | Scheduler/rangeify output cache | 1 | Recompile avoidance |
 | `SPLIT_REDUCEOP` | Two-phase split of large reduces | 1 | Reduce kernels |
 | `REDUCEOP_SPLIT_THRESHOLD` / `REDUCEOP_SPLIT_SIZE` (`rangeify.py:94,106`) | Split trigger / chunk exp | 32768 / 22 | Reduce splitting |
@@ -328,7 +326,7 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 - **Boolean-OR validity union** - *NOT a kernel-count lever (refuted 2026-06-01)*. The
   consumer-divergence realize (`rangeify_unified.c:838-862`) falls back to consumer[0] /
   per-axis realize where tinygrad OR-merges the per-axis validity masks and stays a view
-  (`indexing.py:211-213`). With default `PCONTIG=0`, tinygrad's per-axis decision is the
+  (`indexing.py:211-213`). tinygrad's per-axis decision is the
   single `all_all_same` flag (indexing.py:208): full view (merge valids) or full-realize
   every axis. thvm partial-realizes only the diverging axes, so it fuses AT LEAST as much
   as tinygrad's default. The OR-merge only sets WHICH valid the all-same view carries -- a
@@ -342,7 +340,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
   multi-output kernels remain a *possible* small win but are not a parity gap. Likewise
   reduce-into-reduce fusion is NOT a gap (forward+backward already matches tinygrad).
 - **Late rewrite / arange-reduce collapse** - *PORTED (2026-06-26)*. `src/uop/reduce_collapse.c` (`uop_reduce_arange_collapse`, wired in materialize.c on `store_root`) folds `REDUCE(SUM)` of a range-affine `IWHERE(ILT(...))` to the closed-form clamped count (mirrors tinygrad `codegen/simplify.py`); the N-trip reduce loop is eliminated, numerically exact. Also fixed the `from_tinygrad` importer reading PAD/SHRINK as `(begin,end)` widths instead of current tinygrad's `(offset,size)` -- which had produced wrong values for arange/padded imports.
-- **PCONTIG per-axis ending-ranges check** - *small*. thvm realizes *all* non-realized axes on ending ranges; tinygrad checks per-axis contiguity (`indexing.py:227`). Where: `rangeify_unified.c:864-888`.
 - **BIND const-fold UOp + `ALWAYS_CONTIGUOUS` set** - *small*. No `Ops.BIND`; may leak scalar-load kernels. Where: `bufferize_classify.c` recognition + rangeify skip-op gate.
 - **Stranded-range symbolic coverage proof** - *medium*. Strand checks are conservative; tinygrad proves coverage symbolically. Gates some broadcast-reduce fusions.
 

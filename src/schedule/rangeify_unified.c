@@ -1055,17 +1055,6 @@ static int rb_too_many_buffers(u64 loc) {
   return n > 3;
 }
 
-// THVM_PCONTIG: tinygrad's `PCONTIG = ContextVar("PCONTIG", 0)` (helpers.py:264).
-// Partial-contiguous fusion in rangeify.  Default 0 == zero behavior change;
-// PCONTIG > 2 relaxes the >3-buffer guard (rangeify.py:277) and takes the
-// buffer_in_reduce else-branch (rangeify.py:288-303) that stages the seq*seq
-// attention intermediate in LOCAL (threadgroup-shared) memory instead of GLOBAL,
-// collapsing the flash-attention reduces into one kernel.
-static int ru_pcontig(void) {
-  char const *e = getenv("THVM_PCONTIG");
-  return e ? atoi(e) : 0;
-}
-
 // Resolve the output numel of a Term reachable in the value subtree (an
 // accessed-buffer leaf, or the candidate node itself).  Returns 0 if the
 // shape is not statically recoverable (treated as a no-op contribution).
@@ -1079,9 +1068,9 @@ static u64 rb_term_numel(Term t) {
 
 // Term-collecting variant of rb_collect_accessed_buffers: mirrors tinygrad's
 // red_gate (rangeify.py:256-274) but records the resolved Term of each distinct
-// accessed buffer so the caller can sum `x.numel()` for the PCONTIG cost ratio
-// (rangeify.py:289).  Same gate as rb_collect_accessed_buffers: stop and count
-// at every realized boundary / leaf input / UOP_BUFFER.
+// accessed buffer so the caller can sum their numels.  Same gate as
+// rb_collect_accessed_buffers: stop and count at every realized boundary /
+// leaf input / UOP_BUFFER.
 static u32 rb_collect_accessed_buffer_terms(Term t, Term *terms, u32 n, u32 cap,
                                             u32 depth) {
   if (depth > 48 || n >= cap) return n;
@@ -1106,84 +1095,6 @@ static u32 rb_collect_accessed_buffer_terms(Term t, Term *terms, u32 n, u32 cap,
   for (u8 s = 0; s < ar; s++)
     n = rb_collect_accessed_buffer_terms(heap_read(loc + s), terms, n, cap, depth + 1);
   return n;
-}
-
-// tinygrad rangeify.py:289:
-//   out_in_ratio = (prod(buf.shape)+1) / (sum([x.numel() for x in accessed_buffers])+1)
-//   if out_in_ratio < 10: return None   # keep GLOBAL, no partial-contig
-// Returns 1 when the ratio is >= 10 (the node's output is "much larger" than the
-// buffers it reads -- staging it in LOCAL pays off), 0 otherwise.  Computed in
-// integer arithmetic: ratio >= 10  <=>  (out_numel+1) >= 10*(in_sum+1).
-static int rb_pcontig_ratio_ok(u32 node_idx) {
-  u64 out_numel = 1;
-  {
-    Shape s;
-    if (term_shape_in(term_new(0, TAG_UOP, BUFFERIZE_NODES[node_idx].op,
-                               BUFFERIZE_NODES[node_idx].loc), 0, &s)) {
-      out_numel = 1;
-      for (u32 a = 0; a < s.ndim && a < MAX_DIM; a++)
-        out_numel *= (u64)(s.dims[a] ? s.dims[a] : 1);
-    }
-  }
-  Term terms[16];
-  u32 n = 0;
-  u8 ar = uop_arity(BUFFERIZE_NODES[node_idx].op);
-  u64 loc = BUFFERIZE_NODES[node_idx].loc;
-  for (u8 s = 0; s < ar; s++)
-    n = rb_collect_accessed_buffer_terms(heap_read(loc + s), terms, n, 16, 0);
-  u64 in_sum = 0;
-  for (u32 i = 0; i < n; i++) in_sum += rb_term_numel(terms[i]);
-  return (out_numel + 1) >= 10ull * (in_sum + 1);
-}
-
-// tinygrad rangeify.py:294-303 PCONTIG partition + LOCAL bufferize, ported onto
-// thvm's realize-map machinery.  tinygrad reconstructs
-//   src.substitute(is_subs).bufferize(*is_pcontig, AddrSpace.LOCAL).index(*is_pcontig)
-// In thvm the bufferize/index reconstruction is deferred to pm_apply_rangeify
-// (the realize boundary at ~line 2876 emits uop_bufferize_new with addrspace
-// UOP_SCOPE_LOCAL when realized_partial is set, and the existing per-consumer
-// recompute substitutes every NON-closed axis).  So porting the partition is:
-// mark the node PARTIAL-realized with axes_mask = the is_pcontig axes; the rest
-// (is_subs) are recomputed.  The partition (rangeify.py:295-296): an output axis
-// is is_pcontig iff its out_rngs[a] range is in exclude_ranges (an axis already
-// bound by a LOCAL bufferize) OR is itself a REDUCE-typed range (the live reduce
-// the boundary feeds iterates it).  exclude_ranges is the union of ranges that
-// already index a LOCAL bufferize; thvm tracks that via the KAX_REDUCE axis_type
-// stamped into the consumer-reduce's in_rngs (which propagate into this node's
-// out_rngs) -- the reduce axis IS the staged LOCAL axis.  Returns 1 if it marked
-// a LOCAL partial-realize, 0 if the partition produced no is_subs (keep, like
-// tinygrad's `if not len(is_subs): return None`) or no is_pcontig.
-static int rb_pcontig_mark_local(u32 node_idx) {
-  RuRangeMap const *rm = &RU_RANGE_MAP[node_idx];
-  if (!rm->has_ranges) return 0;
-  u8 nd = rm->out_ndim;
-  if (nd == 0 || nd > 8) return 0;
-  u8 pcontig_mask = 0;
-  u8 n_pcontig = 0, n_subs = 0;
-  for (u8 a = 0; a < nd; a++) {
-    Term r = rm->out_rngs[a];
-    int is_range = (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE);
-    // is_pcontig: a REDUCE-typed axis (rangeify.py:296
-    // `any([rr.arg[-1] == AxisType.REDUCE for rr in x[1].ranges])`).  An
-    // extent-1 axis collapses to CONST (not a RANGE) and never indexes the
-    // staged buffer, so it is neither pcontig nor subs.
-    int is_pcontig = is_range && (uop_range_axis_type(r) == KAX_REDUCE);
-    if (is_pcontig) {
-      pcontig_mask |= (u8)(1u << a);
-      n_pcontig++;
-    } else if (is_range) {
-      n_subs++;       // is_subs: a non-CONST, non-reduce axis -> recomputed
-    }
-  }
-  // rangeify.py:298 `if not len(is_subs): return None` -- nothing to recompute,
-  // a full LOCAL realize would just be the GLOBAL realize; keep as-is.
-  // rangeify.py:300 `if len(is_pcontig):` -- need at least one axis to stage.
-  if (n_subs == 0 || n_pcontig == 0) return 0;
-  RU_REALIZE_MAP[node_idx].realized_full    = 0;
-  RU_REALIZE_MAP[node_idx].realized_partial = 1;
-  RU_REALIZE_MAP[node_idx].axes_mask        = pcontig_mask;
-  RU_REALIZE_MAP[node_idx].n_realized_axes  = n_pcontig;
-  return 1;
 }
 
 // tinygrad's buffer_in_reduce gate (rangeify.py:256-285): collect the
@@ -1493,9 +1404,8 @@ static u32 ru_kernel_input_bufs(u32 node_idx) {
 // MATERIALIZES a buffer far bigger than its inputs (the 14 GB Krea broadcast);
 // limit_bufs must NEVER pick it as a split point -- tinygrad never bufferizes a
 // broadcast either (it bufferizes elementwise *compute*, and the {B,M,K,N} MUL
-// stays a lazy strided read inside the REDUCE).  We compute the same out/in
-// ratio tinygrad uses for PCONTIG (rangeify.py:289): out_numel vs the sum of the
-// distinct input-buffer numels the subtree reads.  Ratio >= 4 means the node
+// stays a lazy strided read inside the REDUCE).  We compare out_numel with the
+// sum of the distinct input-buffer numels the subtree reads.  Ratio >= 4 means the node
 // grows the data 4x+ -- a broadcast expander.  Returns 1 to mean "do not realize
 // this src; prefer a cheaper one".
 #define RU_BROADCAST_EXPAND_RATIO 4u
@@ -1875,50 +1785,12 @@ fn void run_rangeify_unified_impl(Term root) {
                       || info->op == UOP_GATHER;
     if (RU_ENDING_RANGES[node_idx].n
         && (is_elementwise || info->op == UOP_REDUCE)) {
-      // indexing.py:230-233:
-      //   for i,r in enumerate(out_rngs):
-      //     if i in _realize_axis: continue
-      //     if not (PCONTIG > 1) or any(any(rr.arg > e.arg for e in
-      //         ending_ranges[x]) for rr in r.ranges):
-      //       _realize_axis.append(i)
-      // Without PCONTIG we realize EVERY non-realized axis (the conservative
-      // branch).  Under PCONTIG > 2 an axis is realized ONLY if one of its
-      // ranges was CREATED AFTER one of the ended ranges (axis_id `rr.arg`
-      // greater than an ending-range `e.arg`); an axis whose ranges all
-      // predate the ending ranges stays FUSED -- this is what keeps the
-      // attention seq*seq scores threaded into the @V reduce instead of
-      // materialized.  thvm's RU_RANGE_IDX_COUNTER == tinygrad's range.arg.
-      //
-      // tinygrad gates on `PCONTIG > 1` graph-wide (indexing.py:232); thvm uses
-      // `> 2` AND scopes to nodes bufferize_classify tagged
-      // BUFFERIZE_REASON_PCONTIG_ATTN (the FORWARD attention chain whose seed it
-      // skipped: Q@K + softmax MAX/SUM).  A backward / autograd / unrelated
-      // reduce keeps the conservative always-realize so its materialized buffer
-      // survives for the autograd reader (the loosened keep-fused otherwise
-      // corrupts the gradient, nn/attention-grad-dv-finite-diff).  thvm scopes
-      // (tinygrad doesn't) because thvm's autograd reads forward intermediates
-      // through realized buffers, whereas tinygrad re-derives them.
-      int pcontig_keep = (ru_pcontig() > 2
-                          && (info->reasons & BUFFERIZE_REASON_PCONTIG_ATTN));
+      // indexing.py:271-275: an elementwise op or REDUCE with ended ranges
+      // realizes every output axis (_realize_axis = list(range(len(out_rngs)))).
       u8 mask = RU_REALIZE_MAP[node_idx].axes_mask;
       u8 added = 0;
       for (u8 a = 0; a < my_ndim; a++) {
         if (mask & (u8)(1u << a)) continue;
-        if (pcontig_keep) {
-          // realize iff any range axis_id on this output axis exceeds an
-          // ending-range axis_id (rr.arg > e.arg, indexing.py:232).
-          u32 ax_ids[RU_MAX_AXES];
-          u32 n_ax = ru_collect_range_axes(out_rngs[a], ax_ids, RU_MAX_AXES, 0);
-          int after_ending = 0;
-          for (u32 j = 0; j < n_ax && !after_ending; j++) {
-            for (u8 k = 0; k < RU_ENDING_RANGES[node_idx].n; k++) {
-              if (ax_ids[j] > RU_ENDING_RANGES[node_idx].axis_ids[k]) {
-                after_ending = 1; break;
-              }
-            }
-          }
-          if (!after_ending) continue;     // predates ending ranges: keep fused
-        }
         mask |= (u8)(1u << a);
         out_rngs[a] = ru_new_range(shape.dims[a], KAX_LOOP);
         added++;
@@ -2131,34 +2003,15 @@ fn void run_rangeify_unified_impl(Term root) {
       // accumulator (still correct) if anything is off.
       if (!fuse_mm) {
         if (rb_unsafe_recompute_region(i)) continue;      // movement/broadcast re-index unsafe
-        // tinygrad rangeify.py:277:
-        //   if len(accessed_buffers) > 3 and not (PCONTIG > 2): return None
-        // PCONTIG > 2 relaxes the >3-buffer guard so the partial-contig branch
-        // below can stage a node fed by 4+ buffers (the attention chain reads
-        // q,k,v,scores,max,sum) in LOCAL.
-        if (rb_too_many_buffers(BUFFERIZE_NODES[i].loc) && !(ru_pcontig() > 2))
+        // tinygrad rangeify.py:85: a node reading more than 3 buffers is kept.
+        if (rb_too_many_buffers(BUFFERIZE_NODES[i].loc))
           continue;                                       // accessed_buffers > 3
       }
-      // tinygrad rangeify.py:280-303: buffer_in_reduce.  A node whose value
-      // fuses a LIVE reduce is normally kept (recomputing it re-runs the
-      // reduce reading buffers).  Under PCONTIG > 2 take the partial-contig
-      // else-branch: if the node's output is much larger than the buffers it
-      // reads (out_in_ratio >= 10, rangeify.py:289) and its axes partition into
-      // is_pcontig (REDUCE / already-LOCAL) vs is_subs (the rest), stage the
-      // is_pcontig axes in LOCAL and recompute is_subs -- the emergent
-      // flash-attention fusion.  The is_subs recompute reuses thvm's POSITIONAL
-      // re-index (ru_build_axis_subst), so it is gated by rb_unsafe_recompute_region
-      // above (same as the unconditional removal): tinygrad uses exact
-      // src.substitute (rangeify.py:308) and needs no such gate, but thvm's port
-      // stays in the movement-free recompute region until that lands (see the
-      // ru_remove_bufferize_on header).  Otherwise keep GLOBAL.
+      // tinygrad rangeify.py:88-95 buffer_in_reduce: a node whose value fuses
+      // a LIVE reduce is kept (recomputing it re-runs the reduce reading
+      // buffers).
       if (rb_src_has_live_reduce(BUFFERIZE_NODES[i].loc, 0)) {
-        if (ru_pcontig() > 2 && !fuse_mm
-            && rb_pcontig_ratio_ok(i)
-            && rb_pcontig_mark_local(i)) {
-          continue;        // marked PARTIAL/LOCAL in rb_pcontig_mark_local
-        }
-        continue;          // buffer_in_reduce: keep realized (GLOBAL)
+        continue;
       }
       RU_REALIZE_MAP[i].realized_full    = 0;
       RU_REALIZE_MAP[i].realized_partial = 0;

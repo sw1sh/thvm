@@ -4,8 +4,7 @@ A REDUCE feeding directly into another REDUCE of a DIFFERENT kind (a max_pool
 MAX-reduce feeding a global SUM/MEAN) must NOT fuse into one kernel: the inner
 reduce's accumulator semantics are lost when its body is inlined into the outer
 reduce.  tinygrad keeps the bufferize between such reduce OPs unconditionally
-(schedule/rangeify.py:269-293 remove_bufferize, buffer_in_reduce -> keep,
-PCONTIG default 0).  thvm's bufferize-classify reduce-chain unmark used to fuse
+(schedule/rangeify.py:88-96 remove_bufferize, buffer_in_reduce -> keep).  thvm's bufferize-classify reduce-chain unmark used to fuse
 ANY inner-reduce -> consumer-reduce regardless of kind, corrupting the forward
 value (e.g. x.max_pool2d().sum() returned ~2% of the correct total).  That wrong
 forward then poisoned the whole backward tape (the RANK-4 conv-weight grad).

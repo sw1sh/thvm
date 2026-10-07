@@ -578,7 +578,7 @@ fn int uop_matmul_mn_axes(Term root, u32 *out_m_axis, u32 *out_m_extent,
 // pure waste here, not a correctness requirement.
 //
 // === split-M/N TC collapse (gated on THVM_FUSE_MATMUL_EPILOGUE) ===========
-// A FUSED matmul (epilogue / PCONTIG) whose output rides an elementwise chain
+// A FUSED (epilogue) matmul whose output rides an elementwise chain
 // with a broadcast (FLUX's gated residual `x + gate*matmul`, gate {dim} over
 // {S,dim}) can have its M (or N) output axis SPLIT across several contiguous
 // LOOP range axes by the consumer's reshape -- so the operand address touches
@@ -748,7 +748,7 @@ static Term rec_tc_collapse_split(Term root) {
 // output_numel grid, not the tile grid).  Returns the input root
 // unchanged on any non-matmul.
 fn Term uop_recognise_tc_parallel(Term root) {
-  // THVM_FUSE_MATMUL_EPILOGUE: an epilogue/PCONTIG-fused matmul can have its
+  // THVM_FUSE_MATMUL_EPILOGUE: an epilogue-fused matmul can have its
   // M/N output axis split by the consumer's broadcast reshape; collapse the
   // contiguous split so the clean 2-range classifier keeps it on the TILED
   // tensor-core path instead of the generic accumulator.  No-op (returns root)

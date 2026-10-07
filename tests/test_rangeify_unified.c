@@ -251,161 +251,29 @@ int main(void) {
   }
   thvm_free();
 
-  // === THVM_PCONTIG: tinygrad's partial-contiguous flash-fusion ===
-  // (rangeify.py:277,288-303, helpers.py:264).  Default 0 == off; > 2 enables
-  // the LOCAL-staging else-branch in the buffer_in_reduce arm.
-
-  // (g) ru_pcontig() reads THVM_PCONTIG (helpers.py:264, default 0).
-  TEST_BEGIN("unified-rangeify/pcontig-env-reader");
-  unsetenv("THVM_PCONTIG");
-  CHECK_EQ(ru_pcontig(), 0);
-  setenv("THVM_PCONTIG", "3", 1);
-  CHECK_EQ(ru_pcontig(), 3);
-  setenv("THVM_PCONTIG", "0", 1);
-  CHECK_EQ(ru_pcontig(), 0);
-
-  // (h) rb_pcontig_mark_local partitions the boundary's per-axis ranges into
-  // is_pcontig (REDUCE / already-LOCAL axes, kept in the LOCAL buffer) vs
-  // is_subs (the rest, recomputed) -- tinygrad rangeify.py:295-296.  Synthesize
-  // a node whose out_rngs is [LOOP, REDUCE]: the REDUCE axis is is_pcontig
-  // (axes_mask bit 1), the LOOP axis is is_subs.  Assert it marks a PARTIAL
-  // (LOCAL) realize with the reduce axis closed and the loop axis recomputed.
-  TEST_BEGIN("unified-rangeify/pcontig-partition-marks-local");
+  // (g) A softmax (max-reduce -> sub -> exp -> sum-reduce -> recip -> mul):
+  // both reduces realize, and the exp, read by the sum over axis 1 and by
+  // the output mul, realizes in full.
+  TEST_BEGIN("unified-rangeify/softmax-realize-map");
   thvm_init();
   {
-    // Drive a real attention-shaped graph through the pass to populate the
-    // node tables, then synthesize the partition on a fresh node slot.
-    Term pa = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(8, 8));
-    Term psum = uop_reduce(REDUCE_SUM, /*axis*/1, pa);
-    bufferize_classify(psum);
-    run_rangeify_unified(psum);
-    // Use the REDUCE node's own slot: overwrite its range-map with a synthetic
-    // [LOOP, REDUCE] out_rngs and clear its realize state, then run the
-    // partition helper directly (the unit under test).
-    u32 idx = bufferize_info_find(term_val(psum));
-    CHECK(idx != 0xFFFFFFFFu);
-    RU_RANGE_MAP[idx].has_ranges = 1;
-    RU_RANGE_MAP[idx].out_ndim   = 2;
-    RU_RANGE_MAP[idx].out_rngs[0] = ru_new_range(8, KAX_LOOP);
-    RU_RANGE_MAP[idx].out_rngs[1] = ru_new_range(8, KAX_REDUCE);
-    RU_REALIZE_MAP[idx].realized_full    = 0;
-    RU_REALIZE_MAP[idx].realized_partial = 0;
-    RU_REALIZE_MAP[idx].axes_mask        = 0;
-    int marked = rb_pcontig_mark_local(idx);
-    CHECK_EQ(marked, 1);                               // is_pcontig + is_subs nonempty
-    CHECK_EQ(RU_REALIZE_MAP[idx].realized_partial, 1); // partial -> LOCAL addrspace
-    CHECK_EQ(RU_REALIZE_MAP[idx].realized_full, 0);
-    CHECK_EQ(RU_REALIZE_MAP[idx].axes_mask, 0x2);      // only the REDUCE axis closed
-    CHECK_EQ(RU_REALIZE_MAP[idx].n_realized_axes, 1);
+    Term sx  = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(8, 8));
+    Term mx  = uop_reduce(REDUCE_MAX, /*axis*/1, sx);
+    Term sub = uop_binary(UOP_ADD, sx, uop_unary(UOP_NEG, mx));
+    Term e   = uop_unary(UOP_EXP2, sub);
+    Term sm  = uop_reduce(REDUCE_SUM, /*axis*/1, e);
+    Term rc  = uop_unary(UOP_RECIP, sm);
+    Term out = uop_binary(UOP_MUL, e, rc);
+    bufferize_classify(out);
+    run_rangeify_unified(out);
+    u32 e_idx = bufferize_info_find(term_val(e));
+    CHECK_EQ(rangeify_unified_is_realized(bufferize_info_find(term_val(mx))), 1);
+    CHECK_EQ(rangeify_unified_is_realized(bufferize_info_find(term_val(sm))), 1);
+    CHECK_EQ(rangeify_unified_realized_full_at(e_idx), 1);
+    CHECK_EQ(rangeify_unified_axes_mask_at(e_idx), 0x3);
+    CHECK_EQ(rangeify_unified_realized_full_at(bufferize_info_find(term_val(out))), 1);
   }
   thvm_free();
-
-  // (i) No is_subs (every axis is a REDUCE axis) -> keep, like tinygrad's
-  // `if not len(is_subs): return None` (rangeify.py:298).  And no is_pcontig
-  // (every axis is LOOP) -> keep (rangeify.py:300 `if len(is_pcontig):`).
-  TEST_BEGIN("unified-rangeify/pcontig-partition-keeps-when-degenerate");
-  thvm_init();
-  {
-    Term pa = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(8, 8));
-    Term psum = uop_reduce(REDUCE_SUM, /*axis*/1, pa);
-    bufferize_classify(psum);
-    run_rangeify_unified(psum);
-    u32 idx = bufferize_info_find(term_val(psum));
-    CHECK(idx != 0xFFFFFFFFu);
-    // All-REDUCE: no is_subs -> keep.
-    RU_RANGE_MAP[idx].has_ranges = 1;
-    RU_RANGE_MAP[idx].out_ndim   = 2;
-    RU_RANGE_MAP[idx].out_rngs[0] = ru_new_range(8, KAX_REDUCE);
-    RU_RANGE_MAP[idx].out_rngs[1] = ru_new_range(8, KAX_REDUCE);
-    RU_REALIZE_MAP[idx].realized_partial = 0;
-    RU_REALIZE_MAP[idx].realized_full    = 0;
-    CHECK_EQ(rb_pcontig_mark_local(idx), 0);
-    CHECK_EQ(RU_REALIZE_MAP[idx].realized_partial, 0);
-    // All-LOOP: no is_pcontig -> keep.
-    RU_RANGE_MAP[idx].out_rngs[0] = ru_new_range(8, KAX_LOOP);
-    RU_RANGE_MAP[idx].out_rngs[1] = ru_new_range(8, KAX_LOOP);
-    CHECK_EQ(rb_pcontig_mark_local(idx), 0);
-    CHECK_EQ(RU_REALIZE_MAP[idx].realized_partial, 0);
-  }
-  thvm_free();
-
-  // (j) PCONTIG on a softmax (max-reduce -> sub -> exp -> sum-reduce ->
-  // recip -> mul, the flash-attention building block).  Every PCONTIG gate
-  // is `> 2`, so unset and levels up to 2 give a byte-identical realize map.
-  // Flash mode (3) skips the seed on both softmax reduces and keeps them
-  // fused, and the exp, read by the sum over axis 1 and by the output mul,
-  // realizes only axis 1 (a partial realize); this divergence is intended
-  // since 7bcb4e12.
-  TEST_BEGIN("unified-rangeify/pcontig-default-off-inert");
-  {
-    char const *levels[3] = { NULL, "2", "3" };
-    u8  mask[3][64];
-    u8  real[3][64];
-    u32 nn[3] = {0, 0, 0};
-    int mx_real[3], sm_real[3], e_real[3], e_full[3], out_full[3];
-    u8  e_mask[3], out_mask[3];
-    for (int pass = 0; pass < 3; pass++) {
-      if (levels[pass] == NULL) {
-        unsetenv("THVM_PCONTIG");
-      } else {
-        setenv("THVM_PCONTIG", levels[pass], 1);
-      }
-      thvm_init();
-      Term sx  = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(8, 8));
-      Term mx  = uop_reduce(REDUCE_MAX, /*axis*/1, sx);
-      Term sub = uop_binary(UOP_ADD, sx, uop_unary(UOP_NEG, mx));
-      Term e   = uop_unary(UOP_EXP2, sub);
-      Term sm  = uop_reduce(REDUCE_SUM, /*axis*/1, e);
-      Term rc  = uop_unary(UOP_RECIP, sm);
-      Term out = uop_binary(UOP_MUL, e, rc);
-      bufferize_classify(out);
-      run_rangeify_unified(out);
-      nn[pass] = rangeify_unified_last_nodes_walked();
-      if (nn[pass] > 64) {
-        nn[pass] = 64;
-      }
-      for (u32 k = 0; k < nn[pass]; k++) {
-        mask[pass][k] = rangeify_unified_axes_mask_at(k);
-        real[pass][k] = (u8)rangeify_unified_is_realized(k);
-      }
-      u32 e_idx   = bufferize_info_find(term_val(e));
-      u32 out_idx = bufferize_info_find(term_val(out));
-      mx_real[pass]  = rangeify_unified_is_realized(bufferize_info_find(term_val(mx)));
-      sm_real[pass]  = rangeify_unified_is_realized(bufferize_info_find(term_val(sm)));
-      e_real[pass]   = rangeify_unified_is_realized(e_idx);
-      e_full[pass]   = rangeify_unified_realized_full_at(e_idx);
-      e_mask[pass]   = rangeify_unified_axes_mask_at(e_idx);
-      out_full[pass] = rangeify_unified_realized_full_at(out_idx);
-      out_mask[pass] = rangeify_unified_axes_mask_at(out_idx);
-      thvm_free();
-    }
-    unsetenv("THVM_PCONTIG");
-    CHECK_EQ(nn[0], nn[1]);
-    int identical = 1;
-    for (u32 k = 0; k < nn[0] && k < nn[1]; k++) {
-      if (mask[0][k] != mask[1][k] || real[0][k] != real[1][k]) {
-        identical = 0;
-        break;
-      }
-    }
-    CHECK_EQ(identical, 1);
-    // Default: both reduces and the exp are realized, the exp in full.
-    CHECK_EQ(mx_real[0], 1);
-    CHECK_EQ(sm_real[0], 1);
-    CHECK_EQ(e_full[0], 1);
-    CHECK_EQ(e_mask[0], 0x3);
-    CHECK_EQ(out_full[0], 1);
-
-    TEST_BEGIN("unified-rangeify/pcontig-flash-unseeds-softmax-reduces");
-    CHECK_EQ(nn[2], nn[0]);
-    CHECK_EQ(mx_real[2], 0);
-    CHECK_EQ(sm_real[2], 0);
-    CHECK_EQ(e_real[2], 1);
-    CHECK_EQ(e_full[2], 0);
-    CHECK_EQ(e_mask[2], 0x2);
-    CHECK_EQ(out_full[2], 1);
-    CHECK_EQ(out_mask[2], 0x3);
-  }
 
   TEST_REPORT();
 }
