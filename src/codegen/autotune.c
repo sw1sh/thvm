@@ -84,21 +84,6 @@ static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
                                      u32 n_runs, u32 depth, u32 beam_width,
                                      u32 backend_id, int cache_ready);
 
-static u32 kautotune_n_runs(void) {
-  char const *e = getenv("BEAM_RUNS");
-  if (e == NULL || e[0] == '\0') {
-    return KAUTOTUNE_N_RUNS;
-  }
-  int n = atoi(e);
-  if (n <= 0) {
-    return KAUTOTUNE_N_RUNS;
-  }
-  if (n > 1000) {
-    return 1000;
-  }
-  return (u32)n;
-}
-
 static u32 kautotune_env_u32(char const *name, u32 fallback, u32 max) {
   char const *e = getenv(name);
   if (e == NULL || e[0] == '\0') {
@@ -1188,7 +1173,7 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
   axes_reset_to_default(ke);
   kernel_bench_fire(kid);                         // JIT warm
   out_opts[0] = (KOpt){ KOP_NONE, 0, 0 };
-  u32 n_runs = kautotune_n_runs();
+  u32 n_runs = KAUTOTUNE_N_RUNS;
   out_us  [0] = kernel_bench_us(kid, n_runs, 0);
 
   // Each candidate.
@@ -1247,7 +1232,7 @@ fn int kernel_autotune(u32 kid) {
     return 0;
   }
 
-  u32 n_runs    = kautotune_n_runs();
+  u32 n_runs    = KAUTOTUNE_N_RUNS;
   u32 depth     = kautotune_depth(ke);
   u32 beam_width = kautotune_beam_width();
   u32 backend_id = kautotune_backend_id(ke);
@@ -1485,19 +1470,10 @@ static int kautotune_bench_and_store(u32 kid, KernelEntry *ke,
   // threadgroup with low occupancy) is frequently SLOWER once it has to
   // share the GPU with hundreds of sibling kernels.  A marginal,
   // noise-level isolated win (~10us on a ~130us kernel) routinely flips
-  // to a loss on replay.  Requiring the winner to be at least MARGIN_PCT
-  // faster filters those out and only overrides the (well-tuned,
+  // to a loss on replay.  Requiring the winner to be at least 10% faster
+  // filters those out and only overrides the (well-tuned,
   // tinygrad-faithful) heuristic when the isolated speedup is large.
-  // Default 10% (THVM_AUTOTUNE_MARGIN_PCT overrides); raise it toward 50
-  // for a fleet of tiny kernels whose isolated wins don't transfer.
   u32 margin_pct = 10;
-  {
-    char const *m = getenv("THVM_AUTOTUNE_MARGIN_PCT");
-    if (m != NULL && m[0] != '\0') {
-      int v = atoi(m);
-      if (v >= 0 && v <= 100) margin_pct = (u32)v;
-    }
-  }
   // Winner accepted iff best_us <= heuristic_us * (1 - margin_pct/100).
   // Integer form: best_us * 100 <= heuristic_us * (100 - margin_pct).
   int beats_margin = ((u64)best_us * 100

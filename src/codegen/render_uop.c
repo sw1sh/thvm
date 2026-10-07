@@ -250,18 +250,12 @@ static const char *rmu_buf_name(Term t) {
   static char fallback[24];
   snprintf(fallback, sizeof(fallback), "buf%llu",
            (unsigned long long)term_val(t));
-  // DIAGNOSTIC (THVM_DBG_KERNEL_SHARE): the `buf<loc>` fallback bakes a
-  // per-instance HEAP LOC into the kernel SOURCE.  Two structurally-identical
-  // kernels (e.g. the same transformer block in different layers) that hit this
-  // fallback render DIFFERENT source -> different metal_src_hash -> they do NOT
-  // share a compiled PSO/.metallib -> N-deep nets compile ~Nx too many kernels
-  // (the cold-compile blowup).  An unresolved BUFFERIZE leaf is the usual cause
-  // (the rangeify pass didn't promote it to a structural in<N> slot).
-  if (getenv("THVM_DBG_KERNEL_SHARE"))
-    fprintf(stderr, "[kernel-share] WARNING: buf<loc> fallback baked into MSL "
-            "(%s) -- this kernel will NOT share across identical-shape "
-            "instances (unresolved buffer; per-instance loc in source)\n",
-            fallback);
+  // The `buf<loc>` fallback bakes a per-instance heap loc into the kernel
+  // source: two structurally identical kernels (the same transformer block in
+  // different layers) that hit it render different source and share no
+  // compiled PSO, so N-deep nets compile ~N times too many kernels.  An
+  // unresolved BUFFERIZE leaf is the usual cause (rangeify did not promote it
+  // to a structural in<N> slot).
   return fallback;
 }
 
@@ -1624,29 +1618,6 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
     fprintf(fp, "for (uint a%u = 0; a%u < %s; a%u++) /*reduce*/ {\n",
             axis_id, axis_id, bound, axis_id);
   } else {
-    // Small LOOP-typed output axes (non-reduce, non-promoted): emit
-    // `#pragma unroll` so the per-thread inner loop body unrolls in
-    // the SASS rather than running with branch overhead per iter.
-    // Cap at THVM_LOOP_UNROLL_MAX (default 4) to avoid blowing up the
-    // body for huge axes; tinygrad's renderer unrolls similar small
-    // sequential loops via the UNROLL OPT.  Compile-time penalty is
-    // bounded by the cap.  Skip symbolic-bound and large-extent.
-    if (RMU_TARGET != CG_TARGET_C && !is_var && extent > 1) {
-      // Default 1 (effectively OFF): a 10% regression at BS=64
-      // surfaced when defaulting to 4 (warm 154ms -> 138ms with =1).
-      // Cross-BS validation pending; opt in per workload until a clean-
-      // window sweep proves a default that's positive at every BS.
-      static int loop_unroll_max = -1;
-      if (loop_unroll_max < 0) {
-        char const *e = getenv("THVM_LOOP_UNROLL_MAX");
-        loop_unroll_max = (e != NULL && e[0] != '\0') ? atoi(e) : 1;
-        if (loop_unroll_max < 0) loop_unroll_max = 0;
-      }
-      if ((int)extent <= loop_unroll_max) {
-        fprintf(fp, "#pragma unroll(%u)\n", extent);
-        for (u32 i = 0; i < depth; i++) fputs("  ", fp);
-      }
-    }
     fprintf(fp, "for (uint a%u = 0; a%u < %s; a%u++) {\n",
             axis_id, axis_id, bound, axis_id);
   }
@@ -1974,8 +1945,7 @@ static int rmu_fuse_epilogue_on(void) {
 // this ON (std ~0.15 vs the correct ~0.24): some interaction in the 25-block DiT
 // velocity net corrupts when the batched matmul takes the tiled path, NOT
 // reproduced by any isolated/JIT/replay attention test.  Bisected: with the gate
-// ON, routing the batched matmuls back to parallel_tc (THVM_TC_TILE=0) restores
-// the cat, and EITHER the scores- or the @V-tiled kernel alone degrades it -- so
+// ON, routing the batched matmuls back to parallel_tc restores the cat, and EITHER the scores- or the @V-tiled kernel alone degrades it -- so
 // the fault is shared in the tiled emit path under the full pipeline, not the
 // per-matmul values.  Left OFF until that pipeline interaction is root-caused;
 // the parallel_tc fallback is correct.  THVM_TC_BATCHED=1 opts both gates back in
@@ -2239,12 +2209,6 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
   if ((m_extent % 8) != 0 || (n_extent % 8) != 0 || (k_extent % 8) != 0) {
     return 0;
   }
-  // THVM_TC_TILE=0 disables the tiled path (legacy 8x8 emit) -- for
-  // A/B benchmarking against the baseline.
-  {
-    char const *e = getenv("THVM_TC_TILE");
-    if (e && e[0] == '0') return 0;
-  }
   // Small-GEMM guard: when M or N is tiny the matmul is latency-bound,
   // not bandwidth-bound -- the threadgroup-staging + barrier overhead of
   // the tiled kernel loses to the simple one-tile-per-simdgroup 8x8 path
@@ -2289,9 +2253,8 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
   // the tail is a small fraction); only when no candidate clears MIN_TG (a
   // genuinely tiny GEMM) fall back to the smallest dividing tile (the most tiles).
   // Large GEMMs already clear MIN_TG at the biggest tile, so they are unchanged.
-  // MIN_TG ~ a few x the core count; env THVM_TC_MIN_TG tunes it.
+  // MIN_TG ~ a few x the core count.
   u32 min_tg = 160;
-  { char const *e = getenv("THVM_TC_MIN_TG"); if (e && e[0]) min_tg = (u32)atoi(e); }
   u32 bmul = (batch_extent > 1u) ? batch_extent : 1u;   // batched grid multiplier
   u32 best_lm = 0, best_ln = 0, best_rm = 0, best_rn = 0;
   u32 fb_lm = 0, fb_ln = 0, fb_rm = 0, fb_rn = 0, fb_tg = 0;
@@ -2313,11 +2276,6 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
     best_lm = fb_lm; best_ln = fb_ln; best_rm = fb_rm; best_rn = fb_rn;
   }
   if (best_lm == 0) return 0;
-  if (getenv("THVM_TC_DBG"))
-    fprintf(stderr, "[tc-pick] M=%u N=%u K=%u -> tile %ux%u (lm=%u ln=%u rm=%u rn=%u) tg=%u\n",
-            m_extent, n_extent, k_extent, best_lm*best_rm*8u, best_ln*best_rn*8u,
-            best_lm, best_ln, best_rm, best_rn,
-            (m8/(best_lm*best_rm))*(n8/(best_ln*best_rn))*bmul);
   // The tiled kernel only pays off when there is reuse: require the
   // output tile to span more than a single 8x8 fragment.
   if (best_lm * best_rm * best_ln * best_rn <= 1) return 0;
@@ -2325,27 +2283,6 @@ static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
   out->local_m = best_lm; out->local_n = best_ln;
   out->rm = best_rm;      out->rn = best_rn;
   out->kb = kb;
-  // Tuning overrides (THVM_TC_LM / _LN / _RM / _RN / _KB): force tile
-  // factors for benchmarking.  Only applied when the forced tile still
-  // divides the shape cleanly; ignored otherwise so a stray env var
-  // can't emit an incorrect kernel.
-  {
-    char const *e;
-    u32 lm = out->local_m, ln = out->local_n, rm = out->rm, rn = out->rn, kbo = out->kb;
-    if ((e = getenv("THVM_TC_LM")) && e[0]) lm = (u32)atoi(e);
-    if ((e = getenv("THVM_TC_LN")) && e[0]) ln = (u32)atoi(e);
-    if ((e = getenv("THVM_TC_RM")) && e[0]) rm = (u32)atoi(e);
-    if ((e = getenv("THVM_TC_RN")) && e[0]) rn = (u32)atoi(e);
-    if ((e = getenv("THVM_TC_KB")) && e[0]) kbo = (u32)atoi(e);
-    if (lm >= 1 && ln >= 1 && rm >= 1 && rn >= 1 && kbo >= 8
-        && (kbo % 8) == 0
-        && m8 % (lm * rm) == 0 && n8 % (ln * rn) == 0
-        && k_extent % kbo == 0) {
-      out->local_m = lm; out->local_n = ln;
-      out->rm = rm;      out->rn = rn;
-      out->kb = kbo;
-    }
-  }
   return 1;
 }
 
@@ -2376,8 +2313,6 @@ static int rmu_tc_pick_tile_cuda(u32 m_extent, u32 n_extent, u32 k_extent,
   if ((m_extent % 16) != 0 || (n_extent % 16) != 0 || (k_extent % 16) != 0) {
     return 0;
   }
-  // THVM_TC_TILE=0 forces the naive one-warp-per-16x16 WMMA path (A/B).
-  { char const *e = getenv("THVM_TC_TILE"); if (e && e[0] == '0') return 0; }
   u32 m16 = m_extent / 16, n16 = n_extent / 16;
   // {local_m, local_n, rm, rn}: warps along M/N and the 16x16 register tile per
   // warp.  TILE_M = local_m*rm*16, TILE_N = local_n*rn*16; warps = local_m*local_n.
@@ -2447,18 +2382,11 @@ static int rmu_tc_pick_tile_cuda(u32 m_extent, u32 n_extent, u32 k_extent,
   // 2026-06-17 small-M sweep), so bf16 uses a much lower floor to keep that
   // tile selected for the small attention-projection shapes too.
   u32 min_tg = c_is_bf ? 48u : 216u;
-  { char const *e = getenv("THVM_TC_MIN_TG"); if (e && e[0]) min_tg = (u32)atoi(e); }
   // Static __shared__ per-block cap (48 KiB on sm_70..sm_86).  A tile whose
-  // footprint exceeds it is skipped.  THVM_TC_SMEM_CAP opts into DYNAMIC shared
-  // (the emitter emits one `extern __shared__` block + pointer aliases and the
-  // launch sets CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES + passes
-  // sharedMemBytes) for tiles above 48 KiB -- but the 2026-06-17 sweep showed
-  // every >48 KiB tile is SLOWER here (a 32-warp tile's 32 KiB f32 convert
-  // scratch craters occupancy), so the default cap stays 48 KiB and all
-  // default-selected tiles fit statically.  The dynamic path is kept as a
-  // verified, opt-in capability for future arch/shape exploration.
+  // footprint exceeds it is skipped: the 2026-06-17 sweep measured every
+  // >48 KiB tile slower (a 32-warp tile's 32 KiB f32 convert scratch craters
+  // occupancy), so every kernel declares its shared memory statically.
   u32 cap = 48u * 1024u;
-  { char const *e = getenv("THVM_TC_SMEM_CAP"); if (e && e[0]) cap = (u32)atoi(e); }
   u32 best_lm = 0, best_ln = 0, best_rm = 0, best_rn = 0, best_kb = 0;
   u32 fb_lm = 0, fb_ln = 0, fb_rm = 0, fb_rn = 0, fb_kb = 0, fb_tg = 0;
   for (u32 i = 0; i < ncands; i++) {
@@ -2496,64 +2424,7 @@ static int rmu_tc_pick_tile_cuda(u32 m_extent, u32 n_extent, u32 k_extent,
   out->local_m = best_lm; out->local_n = best_ln;
   out->rm = best_rm;      out->rn = best_rn;
   out->kb = kb;
-  // Tuning overrides (THVM_TC_LM / _LN / _RM / _RN / _KB) for A/B; only
-  // applied when the forced tile still divides the shape cleanly.
-  {
-    char const *e;
-    u32 lm = out->local_m, ln = out->local_n, rm = out->rm, rn = out->rn, kbo = out->kb;
-    if ((e = getenv("THVM_TC_LM")) && e[0]) lm = (u32)atoi(e);
-    if ((e = getenv("THVM_TC_LN")) && e[0]) ln = (u32)atoi(e);
-    if ((e = getenv("THVM_TC_RM")) && e[0]) rm = (u32)atoi(e);
-    if ((e = getenv("THVM_TC_RN")) && e[0]) rn = (u32)atoi(e);
-    if ((e = getenv("THVM_TC_KB")) && e[0]) kbo = (u32)atoi(e);
-    if (lm >= 1 && ln >= 1 && rm >= 1 && rn >= 1 && kbo >= 16
-        && (kbo % 16) == 0
-        && m16 % (lm * rm) == 0 && n16 % (ln * rn) == 0
-        && k_extent % kbo == 0
-        && (lm * ln * 32u) <= 1024u) {
-      out->local_m = lm; out->local_n = ln;
-      out->rm = rm;      out->rn = rn;
-      out->kb = kbo;
-    }
-  }
-  if (getenv("THVM_TC_DBG"))
-    fprintf(stderr, "[tc-pick-cuda] M=%u N=%u K=%u -> tile %ux%u "
-            "(lm=%u ln=%u rm=%u rn=%u kb=%u) tg=%u\n",
-            m_extent, n_extent, k_extent,
-            out->local_m*out->rm*16u, out->local_n*out->rn*16u,
-            out->local_m, out->local_n, out->rm, out->rn, out->kb,
-            (m16/(out->local_m*out->rm))*(n16/(out->local_n*out->rn)));
   return 1;
-}
-
-// Upper bound on the shared-memory bytes a tiled-WMMA CUDA matmul kernel uses:
-// A staging (nbuf * tile_m * (KB+PAD)) + B staging + the bf16/fp16 convert
-// scratch (nwarps*256 floats, only when C is bf16/fp16), all in the kernel's
-// element types (WMMA inputs are 2-byte half/__nv_bfloat16; the scratch is
-// float).  The B-staging footprint differs by layout (transposed B stages
-// tile_n rows of KB+PAD; row-major B stages KB rows of tile_n+PAD), so take the
-// MAX over both -- this stays b_trans-INDEPENDENT, so the launch
-// (cuda_tc_tile_dispatch_shape -> cuda_jit_launch) and the emitter agree on the
-// use_dyn decision and the launch always requests >= what the kernel declares,
-// even if their independently-derived transpose flags ever diverged.  For
-// FLUX's transposed-B matmuls (tile_n > KB) the max IS the transposed case, so
-// it equals the emitter's real footprint exactly.  A return > 48 KiB means the
-// emitter switched to `extern __shared__` and the launch must opt into dynamic.
-static u32 rmu_tc_tiled_cuda_shared_bytes(RmuTcTile t, int c_is_bf) {
-  u32 PAD = 8u;
-  u32 tile_m = t.local_m * t.rm * 16u;
-  u32 tile_n = t.local_n * t.rn * 16u;
-  u32 nwarps = t.local_m * t.local_n;
-  int dbuf = 0;
-  { char const *e = getenv("THVM_TC_DB"); if (e && e[0] == '1') dbuf = 1; }
-  u32 nbuf = dbuf ? 2u : 1u;
-  u32 a_bytes = nbuf * tile_m * (t.kb + PAD) * 2u;
-  u32 b_bytes_t = nbuf * tile_n * (t.kb + PAD) * 2u;   // transposed B (col-major staged)
-  u32 b_bytes_n = nbuf * t.kb * (tile_n + PAD) * 2u;   // row-major B
-  u32 b_bytes = b_bytes_t > b_bytes_n ? b_bytes_t : b_bytes_n;
-  u32 ab_bytes = (a_bytes + b_bytes + 15u) & ~15u;     // 16-align the float scratch
-  u32 c_bytes = c_is_bf ? nwarps * 256u * 4u : 0u;
-  return ab_bytes + c_bytes;
 }
 
 // Emit the shared-memory-staged, register-blocked tiled WMMA matmul body
@@ -2616,41 +2487,11 @@ static void rmu_emit_matmul_tc_tiled_cuda(const char *a_name, const char *b_name
     tile_m, tile_n, t.local_m, t.local_n, t.rm, t.rn, t.kb,
     b_trans ? ", B col-major staged" : "");
   // Shared staging tiles (padded leading dim).  _Asm: tile_m x (KB+PAD).
-  // Single-buffered staging by default: the A100 sweep showed double-
-  // buffering gives no win (the kernel is shared-bandwidth / compute
-  // bound, not global-load-latency bound) while it doubles the shared
-  // footprint (halving occupancy and risking the 48 KiB cap).  THVM_TC_DB=1
-  // re-enables the software pipeline (two A/B halves ping-pong: while the
-  // MMA consumes K-block N from one half, the load of N+1 streams into the
-  // other, one __syncthreads per K-block instead of two).
-  int dbuf = 0;
-  { char const *e = getenv("THVM_TC_DB"); if (e && e[0] == '1') dbuf = 1; }
-  u32 nbuf = dbuf ? 2u : 1u;
-  u32 a_half = tile_m * a_ld;            // elements per A buffer half
-  u32 b_half = b_rows * b_ld;            // elements per B buffer half
-  // Total shared footprint (A+B staging + the bf16/fp16 convert scratch).
-  // > 48 KiB exceeds nvcc's STATIC __shared__ per-block cap, so emit ONE
-  // `extern __shared__` block and ALIAS _Asm / _Bsm / _cscratch as pointers
-  // into it (CUDA allows a single dynamic shared array per kernel); the launch
-  // sets CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES + passes
-  // sharedMemBytes (rmu_tc_tiled_cuda_shared_bytes / cuda_jit_launch).  Pointer
-  // indexing _Asm[i] is identical to array indexing, so the body is unchanged.
-  u32 a_bytes = nbuf * a_half * 2u;      // 2-byte WMMA-input elements
-  u32 b_bytes = nbuf * b_half * 2u;
-  u32 ab_bytes = (a_bytes + b_bytes + 15u) & ~15u;   // 16-align the float scratch
-  u32 total_shared = rmu_tc_tiled_cuda_shared_bytes(t, !c_direct);
-  int use_dyn = (total_shared > 48u * 1024u);
-  if (use_dyn) {
-    IND(depth); fprintf(fp,
-      "/* dynamic shared: %u B > 48 KiB static cap -> extern block + aliases */\n",
-      total_shared);
-    IND(depth); fputs("extern __shared__ __align__(16) unsigned char _dynsm[];\n", fp);
-    IND(depth); fprintf(fp, "%s* _Asm = (%s*)_dynsm;\n", a_elem, a_elem);
-    IND(depth); fprintf(fp, "%s* _Bsm = (%s*)(_dynsm + %uu);\n", b_elem, b_elem, a_bytes);
-  } else {
-    IND(depth); fprintf(fp, "__shared__ %s _Asm[%u];\n", a_elem, nbuf * a_half);
-    IND(depth); fprintf(fp, "__shared__ %s _Bsm[%u];\n", b_elem, nbuf * b_half);
-  }
+  // Single-buffered: the A100 sweep showed double-buffering gives no win (the
+  // kernel is shared-bandwidth / compute bound, not global-load-latency
+  // bound) while it doubles the shared footprint.
+  IND(depth); fprintf(fp, "__shared__ %s _Asm[%u];\n", a_elem, tile_m * a_ld);
+  IND(depth); fprintf(fp, "__shared__ %s _Bsm[%u];\n", b_elem, b_rows * b_ld);
   // This block's output-tile origin.
   IND(depth); fprintf(fp, "uint _tm = (tg / %uu) * %uu;\n", n_tiles_n, tile_m);
   IND(depth); fprintf(fp, "uint _tn = (tg %% %uu) * %uu;\n", n_tiles_n, tile_n);
@@ -2677,9 +2518,8 @@ static void rmu_emit_matmul_tc_tiled_cuda(const char *a_name, const char *b_name
   int b_tvec = b_trans && (t.kb % 8u == 0) && (b_nstride % 8 == 0);
   int b_vec = !b_trans && (tile_n % 8u == 0) && (n_extent % 8u == 0);
   u32 a_elems = tile_m * t.kb, b_elems = t.kb * tile_n;
-  u32 n_kblk = k_extent / t.kb;
-  // Emit-helper macros: cooperatively stage one K-block into the buffer
-  // half at element offset BUFOFF, reading from source K-origin K0.
+  // Emit-helper macros: cooperatively stage one K-block at element offset
+  // BO, reading from source K-origin K0.
   #define EMIT_LOAD_A(BO, K0)                                                  \
     do {                                                                       \
       if (a_vec) {                                                             \
@@ -2743,7 +2583,7 @@ static void rmu_emit_matmul_tc_tiled_cuda(const char *a_name, const char *b_name
         IND(depth + 1); fputs("}\n", fp);                                      \
       }                                                                        \
     } while (0)
-  // Inner MMA over a staged buffer half at element offsets (ACO, BCO).
+  // Inner MMA over the staged tiles at element offsets (ACO, BCO).
   #define EMIT_MMA(ACO, BCO)                                                   \
     do {                                                                       \
       IND(depth + 1); fprintf(fp, "for (uint _kk = 0u; _kk < %uu; _kk += 16u) {\n", t.kb);\
@@ -2777,41 +2617,15 @@ static void rmu_emit_matmul_tc_tiled_cuda(const char *a_name, const char *b_name
       IND(depth + 1); fputs("}\n", fp);                                       \
     } while (0)
 
-  if (!dbuf) {
-    // Single-buffered: stage block, barrier, MMA, barrier.
-    IND(depth); fprintf(fp, "for (uint _k0 = 0u; _k0 < %uu; _k0 += %uu) {\n",
-                        k_extent, t.kb);
-    EMIT_LOAD_A("0u", "_k0");
-    EMIT_LOAD_B("0u", "_k0");
-    IND(depth + 1); fputs("__syncthreads();\n", fp);
-    EMIT_MMA("0u", "0u");
-    IND(depth + 1); fputs("__syncthreads();\n", fp);
-    IND(depth); fputs("}\n", fp);
-  } else {
-    // Double-buffered software pipeline.  Prologue: stage block 0 into half
-    // 0.  Loop: issue the load of block _kit+1 into the OTHER half (overlaps
-    // the current MMA), MMA the current half, single barrier guards both.
-    EMIT_LOAD_A("0u", "0u");
-    EMIT_LOAD_B("0u", "0u");
-    IND(depth); fputs("__syncthreads();\n", fp);
-    IND(depth); fprintf(fp, "for (uint _kit = 0u; _kit < %uu; _kit++) {\n", n_kblk);
-    IND(depth + 1); fputs("uint _cur = _kit & 1u;\n", fp);
-    IND(depth + 1); fprintf(fp, "uint _aco = _cur * %uu, _bco = _cur * %uu;\n",
-                            a_half, b_half);
-    IND(depth + 1); fprintf(fp, "if (_kit + 1u < %uu) {\n", n_kblk);
-    {
-      char nbo_a[48], nbo_b[48], nk0[48];
-      snprintf(nbo_a, sizeof(nbo_a), "(_cur ^ 1u) * %uu", a_half);
-      snprintf(nbo_b, sizeof(nbo_b), "(_cur ^ 1u) * %uu", b_half);
-      snprintf(nk0, sizeof(nk0), "(_kit + 1u) * %uu", t.kb);
-      EMIT_LOAD_A(nbo_a, nk0);
-      EMIT_LOAD_B(nbo_b, nk0);
-    }
-    IND(depth + 1); fputs("}\n", fp);
-    EMIT_MMA("_aco", "_bco");
-    IND(depth + 1); fputs("__syncthreads();\n", fp);
-    IND(depth); fputs("}\n", fp);
-  }
+  // Stage block, barrier, MMA, barrier.
+  IND(depth); fprintf(fp, "for (uint _k0 = 0u; _k0 < %uu; _k0 += %uu) {\n",
+                      k_extent, t.kb);
+  EMIT_LOAD_A("0u", "_k0");
+  EMIT_LOAD_B("0u", "_k0");
+  IND(depth + 1); fputs("__syncthreads();\n", fp);
+  EMIT_MMA("0u", "0u");
+  IND(depth + 1); fputs("__syncthreads();\n", fp);
+  IND(depth); fputs("}\n", fp);
   #undef EMIT_LOAD_A
   #undef EMIT_LOAD_B
   #undef EMIT_MMA
@@ -2831,14 +2645,8 @@ static void rmu_emit_matmul_tc_tiled_cuda(const char *a_name, const char *b_name
     // scratch, then its 32 lanes convert+write into C.  Dedicated scratch
     // sized to this kernel's exact warp count (nwarps * 256 floats); the tile
     // picker's SMEM budget (rmu_tc_pick_tile_cuda) reserves it when the output
-    // is bf16/fp16 so staging + scratch stay under the cap.  When the kernel
-    // uses dynamic shared (use_dyn), the scratch aliases the tail of the one
-    // extern block, just past the A+B staging (16-byte-aligned base).
-    if (use_dyn) {
-      IND(depth); fprintf(fp, "float* _cscratch = (float*)(_dynsm + %uu);\n", ab_bytes);
-    } else {
-      IND(depth); fprintf(fp, "__shared__ float _cscratch[%u];\n", nwarps * 256u);
-    }
+    // is bf16/fp16 so staging + scratch stay under the cap.
+    IND(depth); fprintf(fp, "__shared__ float _cscratch[%u];\n", nwarps * 256u);
     for (u32 mi = 0; mi < t.rm; mi++) {
       for (u32 ni = 0; ni < t.rn; ni++) {
         IND(depth); fprintf(fp,
@@ -3364,8 +3172,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // the scalar per-element decode.  Krea's DiT weights are e4m3; e5m2 rides the
   // same staging with the e5m2 decoder.
   u32 b_slot_dt = rmu_slot_dtype(buf_b);
-  int b_is_fp8      = (b_slot_dt == DT_FP8E4M3 || b_slot_dt == DT_FP8E5M2)
-                      && rmu_fp8_in_tile_enabled();
+  int b_is_fp8      = (b_slot_dt == DT_FP8E4M3 || b_slot_dt == DT_FP8E5M2);
   int b_fp8_e5m2    = (b_slot_dt == DT_FP8E5M2);
 
   // Find the K-axis extent by scanning addr_a and addr_b for the
@@ -3792,19 +3599,6 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   // falls through to the per-8x8-tile parallel_tc body below (which emits
   // the full affine address via rmu_emit_term, any stride/offset included).
   int is_batched = (batch_axis_id != 0xFFFFFFFFu);
-  if (getenv("THVM_MATMUL_TRACE") != NULL) {
-    RmuTcTile _dt; int _tiled = ((!is_batched || rmu_tc_batched_on()) && !a_trans
-        && m_par && n_par && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok
-        && !(is_batched && (a_val != 0 || b_is_int8 || b_is_fp8))
-        && rmu_tc_pick_tile(m_extent, n_extent, k_extent,
-                            is_batched ? batch_extent : 0u, &_dt));
-    fprintf(stderr, "[mm] M=%u N=%u K=%u batch=%u dtA=%u dtB=%u dtC=%u%s path=%s%s\n",
-            m_extent, n_extent, k_extent, batch_extent,
-            uop_buffer_dtype(buf_a), uop_buffer_dtype(buf_b), uop_buffer_dtype(buf_c),
-            a_trans ? " Atrans" : "",
-            _tiled ? "TILED" : "parallel_tc/other",
-            epilogue_value != 0 ? " +epi" : "");
-  }
   if ((!is_batched || rmu_tc_batched_on()) && !a_trans && m_par && n_par
       && RMU_TARGET == CG_TARGET_METAL && _tc_dtype_ok
       // batched-tiled handles only the plain bf16 attention GEMM for now:

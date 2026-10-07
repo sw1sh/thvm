@@ -404,16 +404,8 @@ static Term rc_collapse_store(Term store, void *ctx) {
 // Public entry: collapse arange/reduce store values.  `root` is the
 // kernel store_root (a UOP_STORE, or an AFTER chain whose every store is
 // collapsed) from kernel_lift; returns a rewritten root with foldable
-// single-axis SUM-reduces replaced by their closed forms.  Gated OFF by
-// THVM_NO_REDUCE_COLLAPSE=1 for A/B.
+// single-axis SUM-reduces replaced by their closed forms.
 fn Term uop_reduce_arange_collapse(Term root) {
-  static int known = 0, enabled = 1;
-  if (!known) {
-    char const *e = getenv("THVM_NO_REDUCE_COLLAPSE");
-    enabled = !(e != NULL && e[0] == '1');
-    known = 1;
-  }
-  if (!enabled) return root;
   if (root == 0) return root;
   // File-scope static (single-threaded per realize), kept across calls with
   // the capacity it grew to.  Each call bumps cur_gen so all prior stamps

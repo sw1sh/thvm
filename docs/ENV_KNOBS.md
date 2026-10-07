@@ -56,23 +56,11 @@ update the matching row here in the same change.
 | `THVM_REDUCE_UNMARK_CAP` | (impl) | Reduce-unmark capacity. |
 | `THVM_UOP_GRAPH_SIMPLIFY` | on | Simplify the UOp graph; `0` disables. |
 
-## Hand-coded codegen optimizations (behavior-preserving tuning)
-
-Read via `hand_opt_getenv_int` in `src/codegen/hand_opts.c`.
+## Codegen tuning
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_UPCAST_CAP` | 32 | Cap upcast size (tinygrad-faithful default 32). |
-| `THVM_UPCAST_REDUCE_MIN_GRID` | 0 | Per-kernel occupancy floor, reduce-heavy kernels only. |
-| `THVM_UPCAST_TRACE` | off | Trace UPCAST / UNROLL decisions. |
-| `THVM_GROUPTOP` | on (`1`) | GROUP_REDUCE heuristic gate; `0` disables. |
-| `THVM_GROUP_SZ` | 16 | Cooperative block size for reduces. |
-| `THVM_GROUP_REDUCE_TRACE` | off | Trace GROUP_REDUCE. |
-| `THVM_LOCAL_INNER_FIRST` | 0 | Local-var ordering (`1` reverses expand/reduce order). |
-| `THVM_LOCAL_CAP` | 128 | Local thread-block cap. |
 | `THVM_TILE` | off | Tile-size tuning for the tiled codegen path. |
-| `THVM_LOOP_UNROLL_MAX` | (impl) | Max loop-unroll iterations. |
-| `THVM_HANDOPT_TRACE` | off | Trace hand-coded optimization decisions. |
 | `THVM_NO_FAST_IDIV` | off | A/B revert (read in `index_simplify.c`, not hand_opts): disable the fast_idiv/magicgu late-rewrite that lowers `x//c` -> `(x*m)>>s` at the C-render root (tinygrad's codegen/decomp/op.py). On = keep literal IDIV/IMOD. Upstream defaults the rewrite off (`DISABLE_FAST_IDIV=1`); thvm defaults it on for the C target. |
 
 ## Memory, GC & buffer management

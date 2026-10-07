@@ -19,23 +19,6 @@ typedef struct {
 static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
                             u32 batch_extent, RmuTcTile *out);
 
-// fp8-weight-in-tile staging (default ON).  When ON, a weight-only-quantized
-// fp8 matmul (TMatMul[x, Transpose[Cast[w_fp8, bf16]]]) reads the fp8 weight
-// directly into the tiled tensor-core B-staging (uchar -> decode -> bfloat,
-// decoded once per tile element) instead of falling to the scalar per-element
-// decode.  THVM_NO_FP8_IN_TILE=1 opts out (forces the scalar path) for the A/B
-// speed measurement.  Gates BOTH the renderer's b_is_fp8 branch AND this file's
-// dispatch-grid sizing so render + dispatch always agree on the path.
-static int rmu_fp8_in_tile_enabled(void) {
-  static int known = 0, on = 1;
-  if (!known) {
-    char const *e = getenv("THVM_NO_FP8_IN_TILE");
-    on = !(e != NULL && e[0] == '1');
-    known = 1;
-  }
-  return on;
-}
-
 
 static int rmt_collect_conv2d_info(KernelEntry const *ke,
                                    TileConv2DInfo *out) {
@@ -219,20 +202,15 @@ static int rmt_epilogue_tc_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K)
   if (troot == 0 || term_tag(troot) != TAG_UOP
       || term_ext(troot) != UOP_STORE) return 0;
   Term value = heap_read(term_val(troot) + 2);
-  int dbg = getenv("THVM_DISP_TRACE") != NULL;
   // A bare-OPT_TC top (the plain matmul) is handled by the existing tc_template
   // path, not here -- require the OPT_TC to be wrapped by an elementwise epilogue.
   if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
       && uop_opt_kind(value) == UOP_OPT_TC) {
-    if (dbg) fprintf(stderr, "[epi-decline] bare OPT_TC top\n");
     return 0;
   }
   int n_opt = 0, n_ew = 0;
   Term opt = rmt_epi_walk_opt_tc(value, &n_opt, &n_ew, 0, 0);
   if (opt == 0 || n_opt != 1 || n_ew == 0) {
-    if (dbg) fprintf(stderr, "[epi-decline] walk opt=%d n_opt=%d n_ew=%d val_op=%u\n",
-                     opt != 0, n_opt, n_ew,
-                     term_tag(value) == TAG_UOP ? term_ext(value) : 999u);
     return 0;
   }
   Term reduce = uop_opt_target(opt);
@@ -244,17 +222,12 @@ static int rmt_epilogue_tc_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K)
                          heap_read(term_val(troot) + 1), reduce);
   u32 m_axis, m_ext, n_axis, n_ext, k_ext = 0, unit_axis = 0;
   if (!uop_classify_matmul(synth, &k_ext, &unit_axis) || unit_axis != 0) {
-    if (dbg) fprintf(stderr, "[epi-decline] classify_matmul fail unit_axis=%u\n",
-                     unit_axis);
     return 0;
   }
   if (!uop_matmul_mn_axes(synth, &m_axis, &m_ext, &n_axis, &n_ext)) {
-    if (dbg) fprintf(stderr, "[epi-decline] mn_axes fail\n");
     return 0;
   }
   if (m_ext == 0 || n_ext == 0 || k_ext == 0) {
-    if (dbg) fprintf(stderr, "[epi-decline] zero ext M=%u N=%u K=%u\n",
-                     m_ext, n_ext, k_ext);
     return 0;
   }
   if (out_M != NULL) *out_M = m_ext;
@@ -296,10 +269,6 @@ static int rmt_q8_matmul_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
   u32 bdt = uop_buffer_dtype(buf);
   int is_fp8 = (bdt == DT_FP8E4M3 || bdt == DT_FP8E5M2);
   if (bdt != DT_INT8 && !is_fp8) return 0;
-  // fp8 rides the tiled grid only when fp8-in-tile is enabled; with the opt-out
-  // the renderer declines fp8 (scalar path) so this must too, or the tiled grid
-  // would mis-size the scalar kernel's launch.
-  if (is_fp8 && !rmu_fp8_in_tile_enabled()) return 0;
   // Recover M/N (+ extents) and K from the recognisers (cast-aware).
   u32 m_axis, m_ext, n_axis, n_ext, k_ext = 0;
   if (!uop_matmul_mn_axes(sroot, &m_axis, &m_ext, &n_axis, &n_ext)) return 0;
@@ -364,10 +333,6 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
   // Metal hardware caps buffer attributes at index 30; reject
   // kernels that won't render (matches the renderer's reject).
   if (ke->n_inputs > 30) {
-    if (getenv("THVM_DBG_REJECT"))
-      fprintf(stderr, "[reject] dispatch_shape kid=%u n_inputs=%u out_numel=%llu "
-              "reason=N_INPUTS>30\n", (unsigned)(ke - KERNELS), ke->n_inputs,
-              (unsigned long long)ke->output_numel);
     return 0;
   }
   // DAG-mode + per-axis OPTs present (hand-coded-opts / autotune ran
@@ -450,10 +415,6 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
             if (ntg > 0 && ntg <= 0xFFFFFFFFu) {
               if (groups_x  != NULL) *groups_x  = (u32)ntg;
               if (threads_x != NULL) *threads_x = btile.local_m * btile.local_n * 32u;
-              if (getenv("THVM_DISP_TRACE"))
-                fprintf(stderr, "[disp] BATCHED tiled M=%u N=%u K=%u b=%u tile=%ux%u "
-                        "grid=%llu threads=%u\n", m_ext, n_ext, k_ext, b_ext, tm, tn,
-                        (unsigned long long)ntg, btile.local_m * btile.local_n * 32u);
               return 1;
             }
           }
@@ -657,28 +618,9 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 // kernel_lift.c stamps instance=slot+1 on each input BUFFER, so the
 // renderer reconstructs slot positions from the DAG itself.
 static char *cg_emit_via_uop(KernelEntry const *ke) {
-  // THVM_DBG_REJECT: env-gated reject diagnostic.  These metal-render rejects
-  // fall the kernel back to the CPU uop_walk interpreter (KDISPATCH_INTERPRETER)
-  // -- a single-element scalar reduce, ~1000x slower for a matmul.  The print
-  // names the kernel (kid), its n_inputs, its store-VALUE op (UOP_OPT_TC == a
-  // matmul; a movement/CAST/IDIV op above it = a non-affine operand), output
-  // shape, and the reject reason, so the slow refiner matmuls can be pinpointed.
-  int _dbg_reject = (getenv("THVM_DBG_REJECT") != NULL);
-  u32 _dbg_store_op = 0xFFFF;
-  if (_dbg_reject && ke->cached_lift.store_root != 0
-      && term_tag(ke->cached_lift.store_root) == TAG_UOP
-      && term_ext(ke->cached_lift.store_root) == UOP_STORE) {
-    Term _v = heap_read(term_val(ke->cached_lift.store_root) + 2);
-    _dbg_store_op = (term_tag(_v) == TAG_UOP) ? term_ext(_v) : 0xFFFE;
-  }
   // Metal hardware caps buffer attributes at index 30 (31 slots total
   // including output).  Reject kernels with too many inputs.
   if (ke->n_inputs > 30) {
-    if (_dbg_reject)
-      fprintf(stderr, "[reject] cg_emit_via_uop kid=%u n_inputs=%u store_op=%u "
-              "out_numel=%llu reason=N_INPUTS>30\n",
-              (unsigned)(ke - KERNELS), ke->n_inputs, _dbg_store_op,
-              (unsigned long long)ke->output_numel);
     return NULL;
   }
   // Read the cached KernelUopLift populated by emit_kernel_for_boundary.
@@ -687,11 +629,6 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   // amount of re-running will help.
   Term cached_root = ke->cached_lift.store_root;
   if (cached_root == 0) {
-    if (_dbg_reject)
-      fprintf(stderr, "[reject] cg_emit_via_uop kid=%u n_inputs=%u "
-              "out_numel=%llu reason=STORE_ROOT==0(lift declined)\n",
-              (unsigned)(ke - KERNELS), ke->n_inputs,
-              (unsigned long long)ke->output_numel);
     return NULL;
   }
   // Render to a malloc'd string, matching cg_emit_tile_metal's

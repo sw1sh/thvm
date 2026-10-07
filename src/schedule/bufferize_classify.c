@@ -1453,7 +1453,6 @@ void thvm_fp8_elig_dump(void) {
 
 static int bufferize_fp8_matmul_tiled_eligible(u64 reduce_loc) {
   if (CURRENT_BACKEND != &METAL_BACKEND) return 0;
-  if (!rmu_fp8_in_tile_enabled()) return 0;
   {
     static int known = 0, on = 1;
     if (!known) {

@@ -237,19 +237,14 @@ VerificationTest[
        capture pass.  After input mutation, replay should refire the
        full producer chain instead of reusing benchmark intermediates. *)
     TInit[]; TReset[];
-    Module[{ctx = TContextNew["metal"], result, oldAuto, oldRuns, restore},
+    Module[{ctx = TContextNew["metal"], result, oldAuto, restore},
         oldAuto = Environment["AUTOTUNE"];
-        oldRuns = Environment["BEAM_RUNS"];
         restore[] := (
             If[StringQ[oldAuto],
                 SetEnvironment["AUTOTUNE" -> oldAuto],
-                SetEnvironment["AUTOTUNE" -> ""]];
-            If[StringQ[oldRuns],
-                SetEnvironment["BEAM_RUNS" -> oldRuns],
-                SetEnvironment["BEAM_RUNS" -> ""]]
+                SetEnvironment["AUTOTUNE" -> ""]]
         );
         SetEnvironment["AUTOTUNE" -> "1"];
-        SetEnvironment["BEAM_RUNS" -> "1"];
         If[ ctx === 0, restore[]; Return[True]];
         result = TInContext[ctx,
             x = TZeros[{1, 8, 8}];

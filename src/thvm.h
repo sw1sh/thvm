@@ -2162,8 +2162,7 @@ fn Term uop_reduce_src    (Term red);
 // Closed-form collapse of a single-axis SUM REDUCE over a pure RANGE (the
 // arange / cumsum / one-hot triangular-mask construction).  Port of
 // tinygrad codegen/simplify.py pm_reduce_simplify.  Returns `root`
-// unchanged when no foldable reduce is present.  Gated off by
-// THVM_NO_REDUCE_COLLAPSE=1.
+// unchanged when no foldable reduce is present.
 fn Term uop_reduce_arange_collapse(Term root);
 fn Term uop_reshape(Term src, u32 ndim, const u32 *dims);
 fn Term uop_permute(Term src, u32 ndim, const u32 *perm);

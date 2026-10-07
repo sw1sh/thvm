@@ -1,16 +1,11 @@
 #!/usr/bin/env wolframscript
 (* Focused bf16-output matmul microbench for the CUDA tiled-WMMA path.
    Exercises C = A . Transpose[W] with bf16 operands AND bf16 output -- the
-   c_is_bf path that needs the per-warp f32 convert scratch, i.e. the one the
-   128x256/32-warp tile can only use via DYNAMIC shared memory (extern
-   __shared__ + cuFuncSetAttribute, > 48 KiB).  Reports rel-err vs an f32 host
-   reference (correctness of the extern-shared kernel) and TFLOPS (timed with
-   the graph disabled + per-launch sync so AbsoluteTiming reflects GPU time).
+   c_is_bf path that needs the per-warp f32 convert scratch.  Reports rel-err
+   vs an f32 host reference and TFLOPS (timed with the graph disabled +
+   per-launch sync so AbsoluteTiming reflects GPU time).
 
-   Compare the dynamic-shared win on ONE binary:
-     DEV=cuda M=1024 K=3072 N=12288 wolframscript matmul_bench.wls          (dynamic, 160 KiB cap -> 128x256)
-     DEV=cuda THVM_TC_SMEM_CAP=49152 M=1024 K=3072 N=12288 wolframscript ... (static, 48 KiB cap -> 128x128)
-   THVM_TC_DBG=1 prints the picked tile to stderr. *)
+     DEV=cuda M=1024 K=3072 N=12288 wolframscript matmul_bench.wls *)
 PacletDirectoryLoad["wl/THVMLink"]; Get["WolframInstitute`THVMLink`"]; TInit[]; TReset[];
 pr[a___] := (WriteString["stdout", a, "\n"]; $Output // Flush);
 

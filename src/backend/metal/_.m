@@ -2687,14 +2687,6 @@ static id<MTLLibrary> metal_lib_for_src(char const *src, NSError **err,
         METAL_LIB_CACHE_HITS++;
         METAL_LIB_CACHE_BYTES_R += (u64)[libdata length];
       } else {
-        // DIAGNOSTIC (THVM_DBG_KERNEL_SHARE): one line per DISTINCT cold compile
-        // (a cache miss = a NEW kernel source MTLCompiler must build).  Count
-        // these for an N-block run: if the total grows ~linearly with N the
-        // identical blocks are NOT sharing (the cold-compile blowup); if it
-        // stays flat they share.  `src` is the hash; `len` the source size.
-        if (getenv("THVM_DBG_KERNEL_SHARE"))
-          fprintf(stderr, "[kernel-share] COLD-COMPILE src=%016llx len=%zu\n",
-                  (unsigned long long)key, strlen(src));
         libdata = metal_cgs_compile(src);
         if (libdata != nil) {
           METAL_LIB_CACHE_MISSES++;
@@ -4679,36 +4671,6 @@ static int metal_dispatch_kernel(struct KernelEntry *ke, u32 *in_buf_ids, u32 ou
       && cg_tile_metal_dispatch_shape(ke, &tile_groups_x, &tile_threads_x);
   int dag_supported = metal_kernel_supported(ke);
   if (!tile_supported && !dag_supported) {
-    // THVM_DBG_REJECT: this kernel is about to fall to the CPU uop_walk
-    // interpreter (KDISPATCH_INTERPRETER) -- BOTH the tile render AND the
-    // DAG-encoder declined.  Report n_inputs, the store-VALUE op, output
-    // shape, and the per-input dtypes so the slow refiner matmuls (route=
-    // uop_walk, 122s each) can be pinpointed: a UOP_OPT(TC) store-value is a
-    // matmul, n_inputs>30 = the limit_bufs split missed it, a non-fp32/i32
-    // input dtype = the dag-support dtype gate (metal_kernel_supported).
-    if (getenv("THVM_DBG_REJECT")) {
-      u32 kid_r = (u32)(ke - KERNELS);
-      u32 store_op = 0xFFFF, store_v_op = 0xFFFF;
-      Term sr = ke->cached_lift.store_root;
-      u32 sr_op = 0; u64 sr_loc = 0;
-      if (sr != 0 && uop_dag_decode_uop(sr, &sr_op, &sr_loc)) {
-        store_op = sr_op;
-        if (sr_op == UOP_STORE) {
-          Term v = uop_dag_heap_read(sr_loc, 2);
-          u32 v_op = 0; u64 v_loc = 0;
-          store_v_op = uop_dag_decode_uop(v, &v_op, &v_loc) ? v_op : 0xFFFE;
-        }
-      }
-      fprintf(stderr,
-        "[reject] UOP_WALK FALLBACK kid=%u n_inputs=%u store_op=%u store_value_op=%u "
-        "out_numel=%llu tile_enabled=%d store_root=%s in_dtypes=[",
-        kid_r, ke->n_inputs, store_op, store_v_op,
-        (unsigned long long)ke->output_numel, metal_tile_enabled(),
-        ke->cached_lift.store_root ? "set" : "0");
-      for (u32 i = 0; i < ke->n_inputs && i < 12; i++)
-        fprintf(stderr, "%s%u", i ? "," : "", ke->input_dtypes[i]);
-      fprintf(stderr, "]\n");
-    }
     return -1;
   }
 

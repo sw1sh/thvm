@@ -157,12 +157,12 @@ The key code is `ru_seed_boundary_holds` (`rangeify_unified.c:163-166`): in defa
 | Tensor Cores (27-46) | `TC`, `GLOBAL` | **PARTIAL** | Metal 8x8 simdgroup_matrix + CUDA WMMA; M/N UPCAST + N LOCAL ported; **no `TC_OPT>=1`** (multi-reduce / CAST'd buffers) or true `TC_SELECT` over multiple TC specs. GPU only; CPU routes through cBLAS. |
 | IMAGE float4 (51-62) | `UPCAST` | **MISSING** | thvm has no `ImageDType` |
 | MATVEC (65-82) | `GROUP`+`LOCAL`+`UPCAST` | **PORTED** | `hand_opt_match_matvec` (`hand_opts.c:241-281`); same `MV_*` defaults (4/8/4) |
-| GROUPTOP early gate (84-90) | `GROUPTOP` | **PORTED + ENHANCED** | Selects *largest* divisible reduce axis (not just 0,1,2); load-bearing on CUDA (2.2x: 10.8 ms on vs 23.5 ms off); `THVM_GROUPTOP`, `THVM_GROUP_SZ` |
+| GROUPTOP early gate (84-90) | `GROUPTOP` | **PORTED + ENHANCED** | Selects *largest* divisible reduce axis (not just 0,1,2); load-bearing on CUDA (2.2x: 10.8 ms on vs 23.5 ms off); size 16 as tinygrad |
 | Mask UPCAST (97-106) | `UPCAST` | **MISSING** | no `IWHERE`/`WHERE` mask-axis detection in DAG walk |
-| Main UPCAST loop (108-134) | `UPCAST` | **PORTED + ENHANCED** | stride heuristic 1:1; thvm adds reduce-heavy **occupancy floor** (`THVM_UPCAST_REDUCE_MIN_GRID`, auto = SM_count x 80) - no tinygrad equivalent |
+| Main UPCAST loop (108-134) | `UPCAST` | **PORTED + ENHANCED** | stride heuristic 1:1; thvm adds a reduce-heavy **occupancy floor** (CUDA SM count x 80) - no tinygrad equivalent |
 | UNROLL last reduce (138-150) | `UNROLL` | **PORTED** | full-extent `UNROLL(last,0)` + split-by-4 + the `s<=3` second-axis unroll. `uop_dag_apply_split` keeps an extent-1 reduce RANGE so `rmu_emit_store_reduce` emits straight-line `#pragma unroll(extent)` accumulation (verified bit-exact). Unlike tinygrad's `shift_to` (postrange.py:79-87), `REDUCE.axes` names only the outer half; the renderer and the CPU walker fold the unrolled inner half into the one reduce `uop_reduce_owns_split_axis` names, which matters once a kernel nests reduces. CUDA still skips (V100 register pressure) per heuristic.py:37/109 |
 | Easy UPCAST fallback (153-155) | `UPCAST` | **PORTED** | identical |
-| LOCAL placement (159-176) | `LOCAL` | **PORTED** | identical ranking + factor picking; `THVM_LOCAL_INNER_FIRST` tuning knob (net within-noise) |
+| LOCAL placement (159-176) | `LOCAL` | **PORTED** | identical ranking + factor picking |
 | THREAD (180-189) | `THREAD` | **MISSING** | no `KOP_THREAD`; CPU goes through cBLAS |
 | NOLOCALS gate | `NOLOCALS` | **PORTED** | reads `NOLOCALS`; no-op when backend declines |
 
@@ -170,7 +170,7 @@ The key code is `ru_seed_boundary_holds` (`rangeify_unified.c:163-166`): in defa
 
 **OptOps enum coverage** (tinygrad `opt/__init__.py:6-8` vs thvm `thvm.h:645-657`): `TC` partial, `UPCAST` ported, `UNROLL` partial, `LOCAL` ported, `THREAD` **missing**, `GROUP` ported, `GROUPTOP` ported, `NOLOCALS` ported, `PADTO` ported-but-unused, `SWAP` ported. thvm-only markers (`KOP_GLOBAL`, `KOP_FAST_MATH`, `KOP_SIMD_REDUCE`, `KOP_VEC_LOAD`) exist; only `GLOBAL` is live (TC parallel promotion).
 
-**BEAM (proposer-coverage gap, not a missing engine).** tinygrad's `search.py` enumerates ~200 actions/kernel (UPCAST 6x8, UNROLL 3x5, LOCAL 7x6, GROUPTOP 8x3, GROUP 4x3, optional PADTO, TC specs, SWAP perms, THREAD 10x3), compiles + times each on device (3 runs, early-stop at 3x best), keeps a Pareto top-`amt` per level, iterates to convergence, and disk-caches by `(AST, device, amt)`. **thvm has the equivalent search engine** -- `src/codegen/autotune.c` (`kernel_autotune`: propose -> bench-each-variant with `BEAM_RUNS` timing runs -> sequence-build up to `KAUTOTUNE_SEQ_MAX` -> pick-winner -> disk-cache), gated on `BEAM>0`/`AUTOTUNE=1` and wired in the fire path (`uop_kernel.c:255`) + WL (`thvm_wl_kernel_autotune`). Two real gaps remain, both addressed or scoped: (a) a flag bug had hand_opts set the shared `autotuned` flag, suppressing autotune on every non-WL path -- **fixed** (`3c134358`, split `hand_coded_done`); (b) the candidate **proposer** (`propose.c`) enumerates far fewer actions than `search.py` -- **expanded for Metal** to UPCAST/LOCAL/GROUPTOP per kernel (`e5c51194`), still missing the full action space (PADTO, SWAP, THREAD) and broad CUDA coverage. So the gap is "widen the proposer + the per-level Pareto beam", NOT "build BEAM". Measured: with the fixes, `BEAM=2` on Metal beautiful_mnist is 2.07 ms vs 3.57 ms heuristic-only.
+**BEAM (proposer-coverage gap, not a missing engine).** tinygrad's `search.py` enumerates ~200 actions/kernel (UPCAST 6x8, UNROLL 3x5, LOCAL 7x6, GROUPTOP 8x3, GROUP 4x3, optional PADTO, TC specs, SWAP perms, THREAD 10x3), compiles + times each on device (3 runs, early-stop at 3x best), keeps a Pareto top-`amt` per level, iterates to convergence, and disk-caches by `(AST, device, amt)`. **thvm has the equivalent search engine** -- `src/codegen/autotune.c` (`kernel_autotune`: propose -> bench-each-variant over 5 timing runs -> sequence-build up to `KAUTOTUNE_SEQ_MAX` -> pick-winner -> disk-cache), gated on `BEAM>0`/`AUTOTUNE=1` and wired in the fire path (`uop_kernel.c:255`) + WL (`thvm_wl_kernel_autotune`). Two real gaps remain, both addressed or scoped: (a) a flag bug had hand_opts set the shared `autotuned` flag, suppressing autotune on every non-WL path -- **fixed** (`3c134358`, split `hand_coded_done`); (b) the candidate **proposer** (`propose.c`) enumerates far fewer actions than `search.py` -- **expanded for Metal** to UPCAST/LOCAL/GROUPTOP per kernel (`e5c51194`), still missing the full action space (PADTO, SWAP, THREAD) and broad CUDA coverage. So the gap is "widen the proposer + the per-level Pareto beam", NOT "build BEAM". Measured: with the fixes, `BEAM=2` on Metal beautiful_mnist is 2.07 ms vs 3.57 ms heuristic-only.
 
 ---
 
@@ -208,13 +208,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 |---|---|---|
 | `HAND_CODED_OPTS` / `THVM_HAND_CODED_OPTS` | Master toggle for UPCAST/UNROLL/LOCAL/GROUPTOP | 1 |
 | `NOOPT` / `THVM_NOOPT` | Inverse-sense disable (wins over HAND_CODED_OPTS) | 0 |
-| `THVM_GROUPTOP` | Gate GROUPTOP early pass | 1 |
-| `THVM_GROUP_SZ` | Cooperative GROUP_REDUCE size | 16 |
-| `THVM_UPCAST_CAP` | upcast_size ceiling (product of UPCAST/UNROLL extents) | 32 |
-| `THVM_UPCAST_REDUCE_MIN_GRID` | Reduce-heavy occupancy floor (CUDA): >0 floor, 0 auto (SM x 80), <0 off | 0 (auto) |
-| `THVM_LOCAL_CAP` | LOCAL block-size cap | 128 |
-| `THVM_LOCAL_INNER_FIRST` | Reverse LOCAL axis ranking (non-expand first) | 0 |
-| `THVM_LOOP_UNROLL_MAX` | Reduce-loop unroll threshold (`render_uop.c`) | unset (16) |
 | `MV`, `MV_BLOCKSIZE`, `MV_THREADS_PER_ROW`, `MV_ROWS_PER_THREAD` | Matvec params | 1, 4, 8, 4 |
 
 **Autotune / BEAM** (real search in `autotune.c`; narrower proposer than tinygrad)
@@ -223,7 +216,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 |---|---|---|
 | `BEAM` | Beam width; `>0` drives the `kernel_autotune` propose->bench->cache search | 0 |
 | `AUTOTUNE` | Enable autotune (`BEAM>0` also enables) | off |
-| `BEAM_RUNS` | Timing runs/candidate (cap 1000) | built-in |
 | `AUTOTUNE_CACHE` / `AUTOTUNE_CACHE_DIR` / `AUTOTUNE_DISABLE` | Disk-cache control | on / `$XDG_CACHE_HOME/thvm/autotune` / off |
 
 **JIT capture / replay**
@@ -260,7 +252,7 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 | `THVM_CUDA_GPU_TIME` | CUDA-event timing | off |
 | `CUDA_PATH` / `CUDA_HOME` | Toolchain location | env |
 
-**Debug / trace** (no behavior change): `THVM_BUFFERIZE_DEBUG`, `DUMP_MATMUL_DETECT`, `THVM_DUMP_BOUNDARY_ORDER`, `THVM_DUMP_DIRECT_COUNT`, `THVM_DUMP_KERNEL_SHAPE`, `THVM_DUMP_KERNEL_SRC`, `THVM_UPCAST_TRACE`, `THVM_GROUP_REDUCE_TRACE`, `THVM_HANDOPT_TRACE`, `THVM_KCNT`, `THVM_KERNEL_PROFILE`, `THVM_DISPATCH_TRACE`, `THVM_UOP_GRAPH_SIMPLIFY`, `DUMP_UOP_REWRITE`, `THVM_CUDA_*` (LOG_COMPILES, DUMP_FAIL_PTX, DUMP_KID, DUMP_SHARED, DUMP_FAILED_KERNEL, DUMP_DISPATCH, LAUNCH_TRACE, RENDER_TRACE, ALLOC_TRACE, JIT_GRAPH_TRACE), `THVM_CPU_UOP_WALK_TRACE`, `THVM_TRACE_UOP_WALK_DECLINE`, `THVM_JIT_REPLAY_TRACE`, `THVM_ARENA_DUMP[_BUFS]`, `THVM_WL_TENSOR_VIEW_DEBUG`, `THVM_AOT_METAL_DUMP`.
+**Debug / trace** (no behavior change): `THVM_BUFFERIZE_DEBUG`, `DUMP_MATMUL_DETECT`, `THVM_DUMP_BOUNDARY_ORDER`, `THVM_DUMP_DIRECT_COUNT`, `THVM_DUMP_KERNEL_SHAPE`, `THVM_DUMP_KERNEL_SRC`, `THVM_KCNT`, `THVM_KERNEL_PROFILE`, `THVM_DISPATCH_TRACE`, `DUMP_UOP_REWRITE`, `THVM_CUDA_*` (LOG_COMPILES, DUMP_FAIL_PTX, DUMP_KID, DUMP_SHARED, DUMP_FAILED_KERNEL, DUMP_DISPATCH, LAUNCH_TRACE, RENDER_TRACE, ALLOC_TRACE, JIT_GRAPH_TRACE), `THVM_CPU_UOP_WALK_TRACE`, `THVM_TRACE_UOP_WALK_DECLINE`, `THVM_JIT_REPLAY_TRACE`, `THVM_ARENA_DUMP[_BUFS]`, `THVM_WL_TENSOR_VIEW_DEBUG`, `THVM_AOT_METAL_DUMP`.
 
 **ATP / Wolfram (out of ML-kernel scope):** `THVM_ATP_TRACE_MAX`, `THVM_ATP_FLATTERM`, `THVM_ATP_CP_WEIGHT`, `THVM_ATP_AUTO_MAXW`, `THVM_ATP_MNF`, `THVM_ATP_CP_DATASET`, `THVM_NF_PARALLEL_STEP_SESSION`.
 

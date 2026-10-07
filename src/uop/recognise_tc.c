@@ -455,11 +455,6 @@ fn int uop_classify_epilogue_matmul(Term root, u32 *out_K,
   Term reduce = 0;
   Term synth = rec_tc_synth_matmul_store(root, &reduce);
   if (synth == 0) return 0;
-  if (getenv("THVM_EPICLS3") && reduce != 0) {
-    Term mul = uop_reduce_src(reduce);
-    Term a = (term_tag(mul) == TAG_UOP && term_ext(mul) == UOP_MUL) ? rec_tc_peel_cast(heap_read(term_val(mul) + 0)) : 0;
-    fprintf(stderr, "[epicls3] a_op=%u\n", a ? (term_tag(a) == TAG_UOP ? term_ext(a) : 998u) : 997u);
-  }
   u32 em_axis, em_ext, en_axis, en_ext, ek_ext = 0, unit_axis = 0;
   if (!uop_classify_matmul(synth, &ek_ext, &unit_axis) || unit_axis != 0) return 0;
   if (!uop_matmul_mn_axes(synth, &em_axis, &em_ext, &en_axis, &en_ext)) return 0;

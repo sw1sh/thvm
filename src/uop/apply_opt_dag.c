@@ -449,16 +449,6 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
   if (k == 0) return 0;
   Term old_leaf = apply_opt_dag_find_range(root, target_axis);
   if (old_leaf == 0) {
-    if (getenv("THVM_HANDOPT_TRACE")) {
-      // Distinguish "no range with this id" from "multiple distinct".
-      u32 n_match = 0;
-      Term rs[APPLY_OPT_DAG_SPLIT_MAP_CAP];
-      u32 nr = apply_opt_dag_collect_ranges(root, rs, APPLY_OPT_DAG_SPLIT_MAP_CAP);
-      for (u32 i = 0; i < nr; i++) if (uop_range_axis_id(rs[i]) == target_axis) n_match++;
-      fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: find_range=0 (%u matching ranges of %u total)\n",
-              op, target_axis, k, n_match, nr);
-      fflush(stderr);
-    }
     return 0;
   }
   u32 extent = uop_range_extent(old_leaf);
@@ -468,30 +458,16 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
   // tinygrad excludes symbolic dims from upcastable/unrollable_dims, so a
   // well-formed opt never targets one -- bail defensively if one slips in.
   if (kvar_extent_is_var(extent)) {
-    if (getenv("THVM_HANDOPT_TRACE"))
-      fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: symbolic kvar extent (id=%u)\n",
-              op, target_axis, k, kvar_extent_var_id(extent));
     return 0;
   }
   if (extent % k != 0) {
-    if (getenv("THVM_HANDOPT_TRACE"))
-      fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: extent=%u %% k != 0\n",
-              op, target_axis, k, extent);
     return 0;
   }
   u32 axis_type_outer = uop_range_axis_type(old_leaf);
   if (!kop_split_source_ok(op, axis_type_outer)) {
-    if (getenv("THVM_HANDOPT_TRACE")) {
-      fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: axis type %u is no "
-              "split target\n", op, target_axis, k, axis_type_outer);
-    }
     return 0;
   }
   if (op == KOP_UNROLL && !uop_dag_reduces_axis(root, target_axis)) {
-    if (getenv("THVM_HANDOPT_TRACE")) {
-      fprintf(stderr, "[split] BAIL op=%u axis=%u k=%u: no REDUCE reduces "
-              "the axis\n", op, target_axis, k);
-    }
     return 0;
   }
   u8  inner_kax       = apply_opt_dag_inner_kax(op);
@@ -697,7 +673,6 @@ static Term apply_opt_dag_open_reduce_range(Term red) {
 // non-REDUCE leaf, extent not divisible, no such REDUCE, or a nested one).
 
 fn Term uop_dag_apply_group_reduce(Term root, u32 target_axis, u32 k) {
-  int gr_tr = getenv("THVM_GROUP_REDUCE_TRACE") != NULL;
   if (k == 0) return 0;
   Term ranges[APPLY_OPT_DAG_SPLIT_MAP_CAP];
   u32 n_ranges = apply_opt_dag_collect_ranges(root, ranges,
@@ -709,21 +684,15 @@ fn Term uop_dag_apply_group_reduce(Term root, u32 target_axis, u32 k) {
     Term r = ranges[i];
     if (uop_range_axis_id(r) != target_axis) continue;
     if (!kop_split_source_ok(KOP_GROUP, uop_range_axis_type(r))) {
-      if (gr_tr) fprintf(stderr, "[gr] axis=%u k=%u BAIL: leaf kax=%u != REDUCE\n",
-                         target_axis, k, uop_range_axis_type(r));
       return 0;
     }
     u32 e = uop_range_extent(r);
     if (e == 0 || e % k != 0) {
-      if (gr_tr) fprintf(stderr, "[gr] axis=%u k=%u BAIL: extent=%u not div\n",
-                         target_axis, k, e);
       return 0;
     }
     if (extent == 0) extent = e;
     else if (e != extent) {
       // Same axis_id, different extent -> malformed; refuse to GROUP.
-      if (gr_tr) fprintf(stderr, "[gr] axis=%u k=%u BAIL: mixed extents %u/%u\n",
-                         target_axis, k, extent, e);
       return 0;
     }
     if (ctx.n >= APPLY_OPT_DAG_SPLIT_MAP_CAP) return 0;
@@ -733,33 +702,14 @@ fn Term uop_dag_apply_group_reduce(Term root, u32 target_axis, u32 k) {
     ctx.n++;
   }
   if (ctx.n == 0) {
-    if (gr_tr) {
-      fprintf(stderr, "[gr] axis=%u k=%u BAIL: no REDUCE leaf matched; "
-              "collected %u/%u ranges:", target_axis, k, n_ranges,
-              APPLY_OPT_DAG_SPLIT_MAP_CAP);
-      for (u32 i = 0; i < n_ranges; i++) {
-        fprintf(stderr, " a%u(t=%u,e=%u)", uop_range_axis_id(ranges[i]),
-                uop_range_axis_type(ranges[i]), uop_range_extent(ranges[i]));
-      }
-      fputc('\n', stderr);
-    }
     return 0;
   }
   Term red = apply_opt_dag_reduce_of(root, target_axis);
   if (red == 0) {
-    if (gr_tr) {
-      fprintf(stderr, "[gr] axis=%u k=%u BAIL: no REDUCE reduces the axis\n",
-              target_axis, k);
-    }
     return 0;
   }
   Term open = apply_opt_dag_open_reduce_range(red);
   if (open != 0) {
-    if (gr_tr) {
-      fprintf(stderr, "[gr] axis=%u k=%u BAIL: group inside another reduce "
-              "(range a%u kax=%u open at its REDUCE)\n", target_axis, k,
-              uop_range_axis_id(open), uop_range_axis_type(open));
-    }
     return 0;
   }
 

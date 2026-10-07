@@ -16,8 +16,6 @@
                         defaults: M=64, K=64, N=64
        DEV     defaulted to metal if unset
        THVM_TILE        defaulted to 1 if unset
-       BEAM_RUNS
-                        defaulted to 9 if unset
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
@@ -44,8 +42,6 @@ If[envValue["DEV", ""] === "",
     SetEnvironment["DEV" -> "metal"]];
 If[envValue["THVM_TILE", ""] === "",
     SetEnvironment["THVM_TILE" -> "1"]];
-If[envValue["BEAM_RUNS", ""] === "",
-    SetEnvironment["BEAM_RUNS" -> "9"]];
 
 m = parseInt["M", 64];
 k = parseInt["K", 64];
@@ -60,8 +56,7 @@ TReset[];
 
 Print["Metal GEMM autotune"];
 Print["  DEV=", envValue["DEV", "default-cpu"],
-      "  THVM_TILE=", envValue["THVM_TILE", "off"],
-      "  BEAM_RUNS=", envValue["BEAM_RUNS", "5"]];
+      "  THVM_TILE=", envValue["THVM_TILE", "off"]];
 Print["  shape: {", m, ", ", k, "} . {", k, ", ", n, "}"];
 
 ctx = TContextNew["metal"];

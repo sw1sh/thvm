@@ -111,11 +111,11 @@ SetUsage[TKernelVariant, "TKernelVariant[<|\"Kid\", \"Opt\", \"WallUs\"|>] is a 
 Opt is a TOpt or None and WallUs is the measured wallclock per fire. Carries summary boxes so notebook output renders the (op, axis, arg) triple and timing next to the kid."];
 
 SetUsage[TKernelVariants, "TKernelVariants[kid$] returns a list of TKernelVariant: one for the no-opt baseline followed by one per TKernelProposed candidate.
-Each WallUs is measured by BEAM_RUNS back-to-back fires (default 5, min wallclock). Like TKernelAutotune internally but reports every candidate's measurement instead of just applying the winner, useful for inspecting what the proposer found.
+Each WallUs is the minimum wallclock over 5 back-to-back fires. Like TKernelAutotune internally but reports every candidate's measurement instead of just applying the winner, useful for inspecting what the proposer found.
 Leaves the kernel's KpSchedule at the baseline (no opts applied), since inspecting implies the user does not want to commit."];
 
 SetUsage[TKernelAutotune, "TKernelAutotune[kid$] benchmarks every TKernelProposed candidate against the no-opt baseline, applies the winning sequence to the kernel's C-side KpSchedule, and returns the resulting TKernelOpts.
-Each candidate runs BEAM_RUNS dispatches (default 5, min wallclock); the best candidates optionally expand into short opt sequences (AUTOTUNE_DEPTH, BEAM). Winners are cached on disk under $XDG_CACHE_HOME/thvm/autotune or AUTOTUNE_CACHE_DIR unless AUTOTUNE_CACHE=0 or AUTOTUNE_DISABLE=1.
+Each candidate runs 5 dispatches (minimum wallclock); the best candidates optionally expand into short opt sequences (AUTOTUNE_DEPTH, BEAM). Winners are cached on disk under $XDG_CACHE_HOME/thvm/autotune or AUTOTUNE_CACHE_DIR unless AUTOTUNE_CACHE=0 or AUTOTUNE_DISABLE=1.
 Because axes live on a shared schedule slot, the winner auto-applies to other kernels with the same structural key. Returns the unchanged TKernelOpts when no candidate beat baseline."];
 
 SetUsage[TKernelAutotuneAll, "TKernelAutotuneAll[] runs TKernelAutotune on every currently-live kernel and returns an Association mapping each kid to its tuned TKernelOpts.

@@ -323,14 +323,13 @@ VerificationTest[
     (* Disk cache: first autotune writes a winner; the second runtime
        session with the same program shape should replay it without
        running benchmark dispatches. *)
-    Module[{oldCache, oldDisable, oldDir, oldBackend, oldTile, oldRuns,
+    Module[{oldCache, oldDisable, oldDir, oldBackend, oldTile,
             dir, restore, files, before, after},
         oldCache   = Environment["AUTOTUNE_CACHE"];
         oldDisable = Environment["AUTOTUNE_DISABLE"];
         oldDir     = Environment["AUTOTUNE_CACHE_DIR"];
         oldBackend = Environment["DEV"];
         oldTile    = Environment["THVM_TILE"];
-        oldRuns    = Environment["BEAM_RUNS"];
         dir = CreateDirectory @ FileNameJoin[{
             $TemporaryDirectory,
             "thvm-autotune-cache-" <> ToString[$ProcessID] <> "-" <>
@@ -351,18 +350,14 @@ VerificationTest[
                 SetEnvironment["DEV" -> ""]];
             If[StringQ[oldTile],
                 SetEnvironment["THVM_TILE" -> oldTile],
-                SetEnvironment["THVM_TILE" -> ""]];
-            If[StringQ[oldRuns],
-                SetEnvironment["BEAM_RUNS" -> oldRuns],
-                SetEnvironment["BEAM_RUNS" -> ""]]
+                SetEnvironment["THVM_TILE" -> ""]]
         );
         Internal`WithLocalSettings[
             SetEnvironment["AUTOTUNE_CACHE" -> "1"];
             SetEnvironment["AUTOTUNE_DISABLE" -> ""];
             SetEnvironment["AUTOTUNE_CACHE_DIR" -> dir];
             SetEnvironment["DEV" -> ""];
-            SetEnvironment["THVM_TILE" -> ""];
-            SetEnvironment["BEAM_RUNS" -> ""],
+            SetEnvironment["THVM_TILE" -> ""],
 
             TInit[];
             xT = TTensorCreate @ NumericArray[Range[32], "Real32"];
@@ -730,24 +725,19 @@ VerificationTest[
        its internal benchmark fires must NOT be recorded into the
        replay sequence.  Only the user's actual reduce dispatch
        belongs in the capture. *)
-    Module[{oldAuto, oldRuns, oldBackend, restore, f, opCount},
+    Module[{oldAuto, oldBackend, restore, f, opCount},
         oldAuto    = Environment["AUTOTUNE"];
-        oldRuns    = Environment["BEAM_RUNS"];
         oldBackend = Environment["DEV"];
         restore[] := (
             If[StringQ[oldAuto],
                 SetEnvironment["AUTOTUNE" -> oldAuto],
                 SetEnvironment["AUTOTUNE" -> ""]];
-            If[StringQ[oldRuns],
-                SetEnvironment["BEAM_RUNS" -> oldRuns],
-                SetEnvironment["BEAM_RUNS" -> ""]];
             If[StringQ[oldBackend],
                 SetEnvironment["DEV" -> oldBackend],
                 SetEnvironment["DEV" -> ""]]
         );
         Internal`WithLocalSettings[
             SetEnvironment["AUTOTUNE" -> "1"];
-            SetEnvironment["BEAM_RUNS" -> "1"];
             SetEnvironment["DEV" -> ""],
             TInit[];
             xT = TTensorCreate @ NumericArray[Range[32], "Real32"];

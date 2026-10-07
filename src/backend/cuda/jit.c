@@ -389,33 +389,11 @@ module_load:;
 // flattens its iteration space onto a 1-D tid); the caller computes
 // them from the kernel's output extents (and, for a WMMA kernel,
 // grid = tiles*32, see render caveat 3).
-fn int cuda_jit_launch(CUfunction func,
-                       u32 grid_x, u32 block_x,
-                       u32 shared_bytes,
-                       void **args) {
-  // shared_bytes > 0 means the kernel uses DYNAMIC shared memory exceeding the
-  // 48 KiB static cap (the tiled-WMMA bf16-output big tile -- see
-  // rmu_emit_matmul_tc_tiled_cuda's `extern __shared__` path).  CUDA requires
-  // an explicit per-function opt-in for >48 KiB; set it before launch (cheap +
-  // idempotent on the cached CUfunction, and capture-safe since it is a
-  // host-side function config, not a stream op).  A static-shared kernel
-  // passes 0 here -> no attribute change, sharedMemBytes=0 (decls are baked in).
-  if (shared_bytes > 0) {
-    CUresult ra = cuFuncSetAttribute(
-      func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, (int)shared_bytes);
-    if (ra != CUDA_SUCCESS) {
-      cuda_set_error("cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES)", ra);
-      if (getenv("THVM_CUDA_LAUNCH_TRACE")) {
-        fprintf(stderr, "thvm: cuFuncSetAttribute(maxDynShared=%u) FAIL err=%d\n",
-                shared_bytes, (int)ra);
-      }
-      return -1;
-    }
-  }
+fn int cuda_jit_launch(CUfunction func, u32 grid_x, u32 block_x, void **args) {
   CUresult r = cuLaunchKernel(func,
                               grid_x, 1, 1,      // grid dim
                               block_x, 1, 1,     // block dim
-                              shared_bytes,      // dynamic shared mem bytes
+                              0,                 // shared memory is static
                               CUDA_CUR_STREAM,   // 0/NULL = default sync
                               args, NULL);
   if (r != CUDA_SUCCESS) {
@@ -770,7 +748,7 @@ fn int cuda_dag_has_opt_axes(struct KernelEntry const *ke) {
 // Returns 1 with (grid_x, block_x) when the tiled kernel will fire; 0
 // otherwise (caller falls through to cuda_dag_dispatch_shape / flat).
 fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
-                                   u32 *block_x, u32 *shared_bytes) {
+                                   u32 *block_x) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   // Re-apply the (idempotent) parallel TC recogniser to the STORED
   // (unwrapped) root -- exactly what cg_render_uop_kernel_cuda_root does
@@ -830,16 +808,6 @@ fn int cuda_tc_tile_dispatch_shape(struct KernelEntry *ke, u32 *grid_x,
     return 0;
   if (grid_x  != NULL) *grid_x  = (u32)ntg;
   if (block_x != NULL) *block_x = nthreads;
-  // Dynamic-shared opt-in: the emitter switches to `extern __shared__` exactly
-  // when this kernel's total shared footprint exceeds the 48 KiB static cap.
-  // Report it ONLY in that case (0 otherwise) so cuda_jit_launch sets the
-  // function attribute + passes sharedMemBytes only for the dynamic path; a
-  // static-shared tile keeps the baked-in decls and launches with 0.  The
-  // byte count mirrors the emitter's decls (b_trans-independent upper bound).
-  if (shared_bytes != NULL) {
-    u32 sh = rmu_tc_tiled_cuda_shared_bytes(tile, c_is_bf);
-    *shared_bytes = (sh > 48u * 1024u) ? sh : 0u;
-  }
   return 1;
 }
 
@@ -888,8 +856,7 @@ static int cuda_custom_dispatch(struct KernelEntry *ke,
   }
   u32 shared = ke->custom_shared_bytes;
   if (shared > 48u * 1024u) {
-    // >48 KiB dynamic shared needs the explicit per-function opt-in
-    // (mirrors cuda_jit_launch's tiled-WMMA path).
+    // >48 KiB dynamic shared needs the explicit per-function opt-in.
     CUresult ra = cuFuncSetAttribute(
         func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, (int)shared);
     if (ra != CUDA_SUCCESS) {
@@ -983,7 +950,6 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     CUfunction func;
     u32      grid_x;
     u32      block_x;
-    u32      shared_bytes;   // dynamic shared (>48 KiB tiled-WMMA tile); 0 = static
     u32      n_kvar;
     u32      kvar_ids[KVAR_USED_CAP];
   } CUDA_KE_CACHE[1 << 14];   // KERNELS_CAP order of magnitude
@@ -1062,8 +1028,7 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     if (gpu_time_on) cuEventRecord(gpu_ev_a, NULL);
     int rc = cuda_jit_launch(CUDA_KE_CACHE[cache_idx].func,
                              CUDA_KE_CACHE[cache_idx].grid_x,
-                             CUDA_KE_CACHE[cache_idx].block_x,
-                             CUDA_KE_CACHE[cache_idx].shared_bytes, args);
+                             CUDA_KE_CACHE[cache_idx].block_x, args);
     if (rc != 0 && getenv("THVM_CUDA_LAUNCH_TRACE")) {
       fprintf(stderr, "thvm: dispatch FAIL kid=%u (cache hit)\n", (u32)(ke - KERNELS));
     }
@@ -1181,8 +1146,8 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   // renderer decodes -- derive (grid, block) from the DAG's axis
   // types instead (cuda_dag_dispatch_shape).  Otherwise fall back to
   // the flat one-thread-per-output shape.
-  u32 grid_x = 0, block_x = 0, shared_bytes = 0;
-  if (cuda_tc_tile_dispatch_shape(ke, &grid_x, &block_x, &shared_bytes)) {
+  u32 grid_x = 0, block_x = 0;
+  if (cuda_tc_tile_dispatch_shape(ke, &grid_x, &block_x)) {
     // Tiled WMMA matmul: one block per output tile (see the function).
   } else if (!(cuda_dag_has_opt_axes(ke)
         && cuda_dag_dispatch_shape(ke, &grid_x, &block_x))) {
@@ -1202,7 +1167,7 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
     grid_x = (u32)((total + block_x - 1) / block_x);
   }
 
-  int rc = cuda_jit_launch(func, grid_x, block_x, shared_bytes, args);
+  int rc = cuda_jit_launch(func, grid_x, block_x, args);
   if (rc != 0 && getenv("THVM_CUDA_LAUNCH_TRACE")) {
     fprintf(stderr, "thvm: dispatch FAIL kid=%u (cache miss)\n", (u32)(ke - KERNELS));
   }
@@ -1215,7 +1180,6 @@ fn int cuda_dispatch_kernel(struct KernelEntry *ke,
   CUDA_KE_CACHE[cache_idx].func         = func;
   CUDA_KE_CACHE[cache_idx].grid_x       = grid_x;
   CUDA_KE_CACHE[cache_idx].block_x      = block_x;
-  CUDA_KE_CACHE[cache_idx].shared_bytes = shared_bytes;
   CUDA_KE_CACHE[cache_idx].n_kvar       = n_kvar;
   for (u32 i = 0; i < n_kvar && i < KVAR_USED_CAP; i++) {
     CUDA_KE_CACHE[cache_idx].kvar_ids[i] = kvar_ids[i];

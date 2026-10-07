@@ -241,8 +241,8 @@ static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
 // check passes) AND fit the threadgroup-memory budget: the cooperative reduce
 // allocates one accumulator per group lane, and Metal threadgroups are capped
 // at ~1024 threads, so factors above 256 are pointless (and large factors
-// over-subdivide the grid -- the same lesson as hand_opts.c's THVM_GROUP_SZ
-// default of 16).  The factor list mirrors hand_opts.c's GROUPTOP sizes plus
+// over-subdivide the grid -- the same lesson as hand_opts.c's GROUPTOP size
+// of 16).  The factor list mirrors hand_opts.c's GROUPTOP sizes plus
 // the smaller divisors tinygrad enumerates; the NaN/parity + speed-sanity
 // gates in the autotune search keep only a correct AND faster winner (on
 // large-output-grid convs the serial baseline already saturates the GPU, so

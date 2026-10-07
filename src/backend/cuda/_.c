@@ -102,10 +102,7 @@ fn void thvm_cuda_buf_free (u32 b)                        { cuda_buf_free(b); }
 // cuLaunchKernel extra-params array (one pointer per kernel arg).
 fn int thvm_cuda_launch(CUfunction func, u32 grid_x, u32 block_x,
                         void **args) {
-  // Host-facing direct launch (Python dispatch / tests): static shared only
-  // (0 dynamic).  The tiled-WMMA dynamic-shared path is driven by the internal
-  // cuda_dispatch_kernel, which computes the byte count via the tile picker.
-  return cuda_jit_launch(func, grid_x, block_x, 0u, args);
+  return cuda_jit_launch(func, grid_x, block_x, args);
 }
 
 // Convenience: build the cuLaunchKernel arg array from a list of
