@@ -32,14 +32,6 @@
 #define RU_MAX_NODES  BUFFERIZE_NODES_CAP
 #define RU_MAX_AXES   MAX_DIM
 
-// Strand-realize cap: a strand-triggered force-realize
-// only fires when the node's output iter product is at or below this many
-// elements.  The conv-bwd weight/data-grad reduce boundaries are small
-// (cout*cin*kh*kw ~ 0.6M); the unfold MUL product they fuse is multi-GB.
-// Capping here realizes the small reduce-output boundary (where the
-// strand cleanly closes) while leaving the unfold to fuse as a
-// strided-view read.  ~4M elems == 16MB f32, comfortably between the two.
-#define RU_STRAND_REALIZE_MAX_NUMEL ((u64)4u * 1024u * 1024u)
 #define RU_MAX_ENDING (RU_MAX_NODES * 4u)
 
 // Per-node range map. Out_rngs[i] is the per-axis index expression a
@@ -3383,26 +3375,20 @@ fn void pm_apply_rangeify(Term root) {
             rewritten = uop_reduce_multi(kind, n_rrng, new_axes, nb);
         }
       }
-      // Absorb stranded window-low LOOP axes into the reduce.  When this reduce reads a now-realized activation/param
-      // buffer through a col2im window (the conv data-grad on the 2nd
-      // train step contracts the `144=6*24`-decoded kh*kw window), the
-      // `6`-high half is already a reduce axis but the `24`-low half is a
-      // fresh LOOP range minted as the realized buffer's own output axis.
-      // It is not in this reduce's output addr and not a reduce axis, so
-      // it would render as an outer loop with the store inside it (576x
-      // overwrite + 6.8e12 iters).  Such a leaf can only be the
-      // contraction window: fold it into the reduce so it accumulates
-      // correctly.  Bounded to LOOP leaves that are neither an output axis
-      // nor an existing reduce axis -- a genuine output/broadcast axis is
-      // always in out_rngs and never absorbed.
+      // A stranded window-low LOOP axis in a reduce body stops.  When this
+      // reduce reads a now-realized activation/param buffer through a col2im
+      // window (the conv data-grad on the 2nd train step contracts the
+      // `144=6*24`-decoded kh*kw window), the `24`-low half can surface as a
+      // fresh LOOP range that is neither an output nor a reduce axis, and it
+      // would render as an outer loop with the store inside it (576x
+      // overwrite + 6.8e12 iters).  bufferize_reduce_reads_realized_pool
+      // realizes that contraction before it gets here.
       if (term_tag(rewritten) == TAG_UOP && term_ext(rewritten) == UOP_REDUCE) {
         RuFreeAxisSet bs;
         bs.n_bound = 0;
         bs.n_free  = 0;
         ru_collect_free_axes_rec(uop_reduce_src(rewritten), &bs, 0);
-        u32 absorb[MAX_DIM];
-        u32 n_absorb = 0;
-        for (u8 fi = 0; fi < bs.n_free && n_absorb < MAX_DIM; fi++) {
+        for (u8 fi = 0; fi < bs.n_free; fi++) {
           if (bs.free_types[fi] != KAX_LOOP) continue;
           u32 faid = bs.free_aids[fi];
           int is_out = 0;
@@ -3413,19 +3399,9 @@ fn void pm_apply_rangeify(Term root) {
           u32 n_cur = uop_reduce_n_axes(rewritten);
           for (u32 k = 0; k < n_cur && !is_red; k++)
             if (uop_reduce_axis(rewritten, k) == faid) is_red = 1;
-          if (is_red) continue;
-          absorb[n_absorb++] = faid;
-        }
-        if (n_absorb > 0) {
-          u32 merged_axes[2 * MAX_DIM];
-          u32 m_n = 0;
-          u32 n_cur = uop_reduce_n_axes(rewritten);
-          for (u32 k = 0; k < n_cur && m_n < 2 * MAX_DIM; k++)
-            merged_axes[m_n++] = uop_reduce_axis(rewritten, k);
-          for (u32 k = 0; k < n_absorb && m_n < 2 * MAX_DIM; k++)
-            merged_axes[m_n++] = absorb[k];
-          rewritten = uop_reduce_multi(uop_reduce_kind(rewritten), m_n,
-                                       merged_axes, uop_reduce_src(rewritten));
+          if (!is_red) {
+            thvm_fatal("rangeify: a reduce would absorb a stranded window LOOP axis");
+          }
         }
       }
     }
@@ -3441,7 +3417,7 @@ fn void pm_apply_rangeify(Term root) {
       rewritten = heap_read(term_val(rewritten) + 0);
     }
 
-    // Force-realize when the rewritten subtree contains FREE RANGE
+    // Stop when the rewritten subtree contains FREE RANGE
     // leaves whose axis_ids aren't covered by either:
     //   (a) the producer's out_rngs (consumers substitute these on
     //       splice via ru_build_axis_subst), OR
@@ -3453,10 +3429,6 @@ fn void pm_apply_rangeify(Term root) {
     // REDUCE got stripped past ru_rewrite_subtree.  Spliced into a
     // consumer, such a subtree reads that axis at iter 0: the
     // consumer's iter scope has no slot for it.
-    // Force-realize converts the producer to a UOP_BUFFERIZE leaf so
-    // the consumer reads via INDEX_E(BUFFERIZE, addr) at its own iter
-    // and the inner ranges stay scoped to the producer's BUFFERIZE
-    // body (whose closed_ranges = out_rngs cover them).
     //
     // Producer's iter scope (out_rngs) must include at least one
     // non-extent-1 axis -- otherwise this is a scalar producer (all
@@ -3551,53 +3523,7 @@ fn void pm_apply_rangeify(Term root) {
         if (!covered) { stranded = 1; break; }
       }
       if (stranded) {
-        // Force-realize this node so the strand closes into its BUFFERIZE
-        // output and the consumer reads it via a clean INDEX_E addr.
-        //
-        // Guard against realizing the multi-GB conv-bwd unfold MUL: its
-        // out_rngs span the full `[..,N,kh,kw]` window cube, so its iter
-        // product dwarfs the small reduce-output (`[cout,cin,kh,kw]`)
-        // boundary where the strand also surfaces.  The producer-first
-        // walk visits the MUL before its consuming REDUCE, so capping the
-        // realize at a small output-product (<= RU_STRAND_REALIZE_MAX_NUMEL)
-        // skips the unfold and lets the strand re-fire (and realize) at the
-        // small reduce, which fuses the unfold as a strided-view read.
-        // Use the node's ACTUAL output shape (== what emit_kernel_for_boundary
-        // passes to tensor_alloc via term_shape_in), NOT the out_rngs RANGE-leaf
-        // product.  The latter skips CONST-collapsed axes and can read far below
-        // the true allocation size (a 7-D conv-bwd unfold whose out_rngs carry
-        // CONST entries measured < the 4M cap while term_shape_in is 1.31GB),
-        // evading the cap and force-realizing the multi-GB unfold cube.
-        u64 out_numel = 1;
-        {
-          Shape ns;
-          if (ru_node_shape(info->loc, info->op, &ns)) {
-            for (u8 a = 0; a < ns.ndim; a++) out_numel *= (u64)(ns.dims[a] ? ns.dims[a] : 1);
-          } else {
-            for (u8 a = 0; a < rm->out_ndim; a++) {
-              Term pr = rm->out_rngs[a];
-              if (term_tag(pr) == TAG_UOP && term_ext(pr) == UOP_RANGE)
-                out_numel *= (u64)uop_range_extent(pr);
-            }
-          }
-        }
-        // Cap the big-strand force-realize: the multi-GB unfold MUL fuses
-        // into its consuming reduce (strand resolved by reduce-axis
-        // absorption) rather than materialize the window cube.
-        int small_enough = out_numel <= RU_STRAND_REALIZE_MAX_NUMEL;
-        // Only force-realize a SMALL boundary.  The multi-GB conv-bwd
-        // unfold MUL is left to fuse into its consuming reduce as a
-        // strided-view read; its window-low strand is resolved by the
-        // reduce-axis absorption above (a stranded LOOP window leaf in a
-        // reduce body is folded into the reduce), not by realizing the
-        // unfold cube.
-        if (small_enough) {
-          RU_REALIZE_MAP[i].realized_full = 1;
-          RU_REALIZE_MAP[i].n_realized_axes = rm->out_ndim;
-          RU_REALIZE_MAP[i].axes_mask =
-              (rm->out_ndim < 8) ? (u8)((1u << rm->out_ndim) - 1u) : 0xFFu;
-          realized = 1;
-        }
+        thvm_fatal("rangeify: a fused producer strands a free range");
       }
     }
 
