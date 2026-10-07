@@ -20,9 +20,13 @@
 
 #ifndef _WIN32
 #include <dlfcn.h>  // Windows: dlopen family shimmed in util/portable_win.h
-#include <spawn.h>      // posix_spawn for the parallel cold-start compile pool
-#include <sys/wait.h>   // waitpid for the spawned clang workers
+#include <errno.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/wait.h>
 extern char **environ;
+#else
+#include <process.h>  // _spawnvp
 #endif
 #include <unistd.h>
 #include <sys/stat.h>
@@ -390,10 +394,10 @@ static void cpu_jit_warn_compile_failed(char const *what) {
           "compiler; THVM_CPU_JIT_VERBOSE=1 shows its errors.\n", what, cpu_cc());
 }
 
-// Compile + load.  Returns the resolved `k` function pointer or NULL
-// on any failure (caller falls back to interpreter).
-// Compile a C source file into a shared object with the JIT's compiler and
-// flags.  Returns 1 on success.
+// Compile the C file `src_path` into the shared object `dl_path` with the
+// JIT's compiler and flags, spawned directly (no shell).  Its diagnostics
+// are dropped unless `loud` (an injected kernel, which has no interpreter
+// to fall back on) or THVM_CPU_JIT_VERBOSE=1.  Returns 1 on success.
 // -O3 default (not -O2): on the rendered conv-backward gather-reduce
 // kernels (deeply-nested masked-index expressions) -O3's extra
 // unrolling + scalar opts give ~1.6x over -O2 with NO float-semantics
@@ -407,16 +411,58 @@ static void cpu_jit_warn_compile_failed(char const *what) {
 // whole kernel silently falls back to the interpreter -- correct, but a
 // ~14x cliff on a 400-op chain.  The limit is a parser guard, not a
 // codegen one; raising it costs nothing for shallow kernels.
-fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path) {
-  char bracket[40] = "";
+fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path, int loud) {
+  char opt[8], bracket[40];
+  snprintf(opt, sizeof opt, "-%s", cpu_jit_opt_tag());
+  snprintf(bracket, sizeof bracket, "-fbracket-depth=%d", CPU_JIT_BRACKET_DEPTH);
+  char *argv[9];
+  u32   ac = 0;
+  argv[ac++] = (char *)cpu_cc();
+  argv[ac++] = opt;
   if (cpu_cc_is_clang()) {
-    snprintf(bracket, sizeof bracket, "-fbracket-depth=%d", CPU_JIT_BRACKET_DEPTH);
+    argv[ac++] = bracket;
   }
-  char cmd[768];
-  snprintf(cmd, sizeof cmd, "%s -%s %s -fPIC -shared -o '%s' '%s'%s",
-           cpu_cc(), cpu_jit_opt_tag(), bracket, dl_path, src_path,
-           cpu_jit_verbose() ? "" : " 2>/dev/null");
-  return system(cmd) == 0;
+  argv[ac++] = (char *)"-fPIC";
+  argv[ac++] = (char *)"-shared";
+  argv[ac++] = (char *)"-o";
+  argv[ac++] = (char *)dl_path;
+  argv[ac++] = (char *)src_path;
+  argv[ac]   = NULL;
+#ifdef _WIN32
+  (void)loud;
+  return _spawnvp(_P_WAIT, argv[0], (char const *const *)argv) == 0;
+#else
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  if (!loud && !cpu_jit_verbose()) {
+    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+  }
+  pid_t pid;
+  int   status  = -1;
+  int   spawned = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ) == 0;
+  posix_spawn_file_actions_destroy(&fa);
+  if (spawned) {
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+  }
+  return spawned && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
+}
+
+// dlopen `dl_path` and resolve `sym`: the symbol, with its image in
+// *handle, or NULL with the image closed again.
+static void *cpu_jit_load(char const *dl_path, char const *sym, void **handle) {
+  void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+  if (h == NULL) {
+    return NULL;
+  }
+  void *f = dlsym(h, sym);
+  if (f == NULL) {
+    dlclose(h);
+    return NULL;
+  }
+  *handle = h;
+  return f;
 }
 
 static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
@@ -449,36 +495,25 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
            (unsigned long long)key);
   cpu_jit_dylib_path(dl_path, sizeof dl_path, "", key);
 
-  // Skip the compile if the .dylib is already on disk (e.g. from a
-  // previous session) and current.  Stat-only check; we don't try to
-  // verify cache freshness against the current source.  The caller has
-  // already passed the warmup gate.
+  // Compile unless the .dylib is already on disk (e.g. from a previous
+  // session).  Stat-only: the content-hash name is the freshness check.
+  // The caller has already passed the warmup gate.
   struct stat st;
-  if (stat(dl_path, &st) == 0) {
-    void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
-    if (!h) return NULL;
-    CpuJitFn jfn = (CpuJitFn)dlsym(h, "k");
-    if (!jfn) { dlclose(h); return NULL; }
+  if (stat(dl_path, &st) != 0) {
+    FILE *f = fopen(src_path, "w");
+    if (!f) return NULL;
+    fputs(src, f);
+    fclose(f);
+    if (!cpu_jit_compile_shared(src_path, dl_path, 0)) {
+      cpu_jit_warn_compile_failed("compile");
+      return NULL;
+    }
+  }
+  void    *h   = NULL;
+  CpuJitFn jfn = (CpuJitFn)cpu_jit_load(dl_path, "k", &h);
+  if (jfn != NULL) {
     cpu_jit_cache_store(key, jfn, h, ke->n_inputs);
-    return jfn;
   }
-
-  FILE *f = fopen(src_path, "w");
-  if (!f) return NULL;
-  fputs(src, f);
-  fclose(f);
-
-  if (!cpu_jit_compile_shared(src_path, dl_path)) {
-    cpu_jit_warn_compile_failed("compile");
-    return NULL;
-  }
-
-  void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
-  if (!h) return NULL;
-  CpuJitFn jfn = (CpuJitFn)dlsym(h, "k");
-  if (!jfn) { dlclose(h); return NULL; }
-
-  cpu_jit_cache_store(key, jfn, h, ke->n_inputs);
   return jfn;
 }
 
@@ -613,30 +648,7 @@ static void *cpu_jit_build_combined(CpuJitJob const *jobs, u32 njobs,
       fclose(jf);
     }
     fclose(cf);
-    char optflag[8];
-    snprintf(optflag, sizeof optflag, "-%s", cpu_jit_opt_tag());
-    char bracketflag[32];
-    snprintf(bracketflag, sizeof bracketflag, "-fbracket-depth=%d",
-             CPU_JIT_BRACKET_DEPTH);   // see cpu_jit_compile_shared
-    char *argv[9];
-    u32 ac = 0;
-    argv[ac++] = (char *)cpu_cc();
-    argv[ac++] = optflag;
-    if (cpu_cc_is_clang()) argv[ac++] = bracketflag;
-    argv[ac++] = (char *)"-fPIC";
-    argv[ac++] = (char *)"-shared";
-    argv[ac++] = (char *)"-o";
-    argv[ac++] = comb_dl;
-    argv[ac++] = comb_c;
-    argv[ac]   = NULL;
-    pid_t pid;
-    if (posix_spawnp(&pid, cpu_cc(), NULL, NULL, argv, environ) != 0) {
-      cpu_jit_warn_compile_failed("parallel compile");
-      return NULL;
-    }
-    int status;
-    waitpid(pid, &status, 0);
-    if (stat(comb_dl, &st) != 0) {
+    if (!cpu_jit_compile_shared(comb_c, comb_dl, 0)) {
       cpu_jit_warn_compile_failed("parallel compile");
       return NULL;
     }

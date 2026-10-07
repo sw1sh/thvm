@@ -73,7 +73,7 @@ static int compiles_on_jit(KernelEntry const *ke) {
   fputs(src, f);
   fclose(f);
   free(src);
-  int ok = cpu_jit_compile_shared(src_path, dl_path);
+  int ok = cpu_jit_compile_shared(src_path, dl_path, 0);
   unlink(src_path);
   unlink(dl_path);
   return ok;

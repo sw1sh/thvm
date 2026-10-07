@@ -716,7 +716,7 @@ static void check_rendered(void) {
     fclose(cf);
     char so[600];
     snprintf(so, sizeof so, "%s.so", path);
-    h = cpu_jit_compile_shared(path, so) ? dlopen(so, RTLD_NOW) : NULL;
+    h = cpu_jit_compile_shared(path, so, 0) ? dlopen(so, RTLD_NOW) : NULL;
     unlink(path);
     unlink(so);
   }

@@ -1,11 +1,10 @@
 // backend/cpu/custom.c - compile + dispatch a raw injected kernel
 // (KernelEntry.custom_program) on the CPU backend.
 //
-// Reuses the CPU JIT's compile mechanics (backend/cpu/jit.c, the same
-// TU): hash the source, clang -shared it into a /tmp dylib at the
-// shared opt level (cpu_jit_opt_tag), dlopen once, and cache the
-// resolved entry point by content hash so repeat fires and JIT replays
-// skip the compile entirely.
+// Reuses the CPU JIT's compile and load helpers (backend/cpu/jit.c, the
+// same TU): hash the source, compile it into a /tmp dylib with the JIT's
+// compiler and opt level, dlopen once, and cache the resolved entry point
+// by content hash so repeat fires and JIT replays skip the compile.
 //
 // ABI (documented in schedule/kernel_custom.c): the source defines
 //   void <name>(void *const *bufs, unsigned const *grid,
@@ -51,17 +50,6 @@ static CpuCustomSlot *cpu_custom_lookup_slot(u64 key) {
   return NULL;
 }
 
-// C compiler for injected sources: THVM_CPU_CUSTOM_CC overrides, else the
-// JIT's cpu_cc() (THVM_CPU_CC / $CC / clang / cc / gcc).  An injected
-// kernel has no interpreter fallback, so it must compile on clang-less
-// hosts; the dylib filename carries the compiler tag so artifacts from
-// different compilers never alias.
-static const char *cpu_custom_cc(void) {
-  char const *env = getenv("THVM_CPU_CUSTOM_CC");
-  if (env != NULL && env[0] != '\0') return env;
-  return cpu_cc();
-}
-
 // Content key: source hash (cpu_src_hash, jit.c) mixed with the entry
 // name so two programs sharing a source body but exporting different
 // entry points resolve distinct functions.
@@ -75,20 +63,14 @@ static u64 cpu_custom_key(KernelEntry const *ke) {
 }
 
 // Compile the program (or reuse the on-disk dylib) and resolve its
-// entry point.  Mirrors cpu_jit_build's write / clang / dlopen / dlsym
-// flow with the custom entry name in place of the renderer's "k".
+// entry point: cpu_jit_build's flow with the custom entry name in place
+// of the renderer's "k".
 static CpuCustomFn cpu_custom_build(KernelEntry const *ke, u64 key) {
-  const char *cc = cpu_custom_cc();
-  // Compiler tag folded into the artifact name as a short hash (the cc
-  // string may be an env-supplied path with slashes), so artifacts from
-  // different compilers never alias.
-  u32 cc_tag = 0x811c9dc5u;
-  for (char const *p = cc; *p; p++) { cc_tag ^= (u8)*p; cc_tag *= 0x1000193u; }
   char src_path[256], dl_path[256];
   snprintf(src_path, sizeof src_path, "/tmp/thvm_custom_%016llx.c",
            (unsigned long long)key);
-  snprintf(dl_path,  sizeof dl_path,  "/tmp/thvm_custom_%016llx_%08x_%s.dylib",
-           (unsigned long long)key, cc_tag, cpu_jit_opt_tag());
+  snprintf(dl_path,  sizeof dl_path,  "/tmp/thvm_custom_%016llx_%s.dylib",
+           (unsigned long long)key, cpu_jit_opt_tag());
 
   struct stat st;
   if (stat(dl_path, &st) != 0) {
@@ -96,24 +78,19 @@ static CpuCustomFn cpu_custom_build(KernelEntry const *ke, u64 key) {
     if (f == NULL) return NULL;
     fputs(ke->custom_program, f);
     fclose(f);
-    char cmd[768];
-    snprintf(cmd, sizeof cmd, "%s -%s -fPIC -shared -o '%s' '%s'",
-             cc, cpu_jit_opt_tag(), dl_path, src_path);
-    if (system(cmd) != 0) {
+    if (!cpu_jit_compile_shared(src_path, dl_path, 1)) {
       fprintf(stderr, "thvm: cpu_custom_build: %s failed for custom "
-                      "kernel '%s' (source at %s)\n", cc, ke->custom_name,
+                      "kernel '%s' (source at %s)\n", cpu_cc(), ke->custom_name,
               src_path);
       return NULL;
     }
   }
 
-  void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
-  if (h == NULL) return NULL;
-  CpuCustomFn jfn = (CpuCustomFn)dlsym(h, ke->custom_name);
+  void       *h   = NULL;
+  CpuCustomFn jfn = (CpuCustomFn)cpu_jit_load(dl_path, ke->custom_name, &h);
   if (jfn == NULL) {
-    fprintf(stderr, "thvm: cpu_custom_build: entry point '%s' not found in "
-                    "custom kernel dylib\n", ke->custom_name);
-    dlclose(h);
+    fprintf(stderr, "thvm: cpu_custom_build: could not load entry point '%s' "
+                    "from %s\n", ke->custom_name, dl_path);
     return NULL;
   }
   CpuCustomSlot *s = cpu_custom_lookup_slot(key);

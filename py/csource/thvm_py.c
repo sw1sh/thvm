@@ -588,7 +588,7 @@ EXPORT void py_string_free(char *s) { free(s); }
 // Compile a C99 file into a shared object with the CPU JIT's compiler and
 // flags, so py-side kernel harnesses build exactly as the runtime does.
 EXPORT int py_cpu_jit_compile_shared(const char *src_path, const char *so_path) {
-  return cpu_jit_compile_shared(src_path, so_path);
+  return cpu_jit_compile_shared(src_path, so_path, 0);
 }
 
 // ---------------- BEAM / autotune surface ----------------

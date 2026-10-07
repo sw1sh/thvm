@@ -82,8 +82,10 @@ Compute paths:
   calling `cg_render_uop_kernel_c_root` against
   `ke->cached_lift.store_root`, hashes it, looks the hash up in the
   in-memory `CPU_JIT_CACHE`, and on a miss writes
-  `/tmp/thvm_jit_<hash>.c`, shells out to the C compiler, `dlopen`s the
-  resulting `.dylib`, and `dlsym`s the `k` symbol.
+  `/tmp/thvm_jit_<hash>.c`, compiles it with `cpu_jit_compile_shared`
+  (the C compiler spawned directly, no shell), and loads the `k` symbol
+  with `cpu_jit_load`. The cold-start batch and injected kernels
+  (custom.c) go through the same two helpers.
 
 ### Dispatch order
 
@@ -221,8 +223,8 @@ CPU JIT path, end to end:
    `cpu_jit_build` reuse `/tmp/thvm_jit_<hash>_<opt>.dylib` when it
    is on disk, or call `cg_render_uop_kernel_c_root(store_root,
    "k", fp)` to render the source, write it to
-   `/tmp/thvm_jit_<hash>.c`, shell out to the C compiler, `dlopen`
-   the dylib, and `dlsym` the `k` symbol. The slot is populated and
+   `/tmp/thvm_jit_<hash>.c`, compile it, and load the dylib's `k`
+   symbol. The slot is populated and
    returned. The batched precompile at realize
    (`cpu_jit_precompile_range`) passes the same gate: it builds only
    kernels whose next fire reaches the threshold, so a threshold no
