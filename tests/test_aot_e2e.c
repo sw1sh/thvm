@@ -31,17 +31,14 @@
 #include <sys/wait.h>
 
 // Repo root used in the generated wrapper's #include path.  Must be
-// an absolute path; we get it via the worktree's git rev-parse.
+// an absolute path.
 static char REPO_ROOT[1024] = {0};
 
+// The tests run from the repo root (make test, the verification runner).
 static void compute_repo_root(void) {
-  FILE *p = popen("git rev-parse --show-toplevel", "r");
-  if (!p) { strcpy(REPO_ROOT, "."); return; }
-  if (fgets(REPO_ROOT, sizeof REPO_ROOT, p) != NULL) {
-    size_t n = strlen(REPO_ROOT);
-    if (n > 0 && REPO_ROOT[n - 1] == '\n') REPO_ROOT[n - 1] = '\0';
+  if (getcwd(REPO_ROOT, sizeof REPO_ROOT) == NULL) {
+    REPO_ROOT[0] = '\0';
   }
-  pclose(p);
 }
 
 // Build the trivial TMatChain def in BOOK_HEAP at slot 1.  Returns
@@ -122,12 +119,9 @@ static int compile_e2e_binary(const char *emit_src,
 
   char cmd[2048];
   snprintf(cmd, sizeof cmd,
-    "clang -O0 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK "
-    "-DATP_RULE_INDEX -DATP_FV_INDEX -DATP_VAR_NORM "
-    "-DATP_ORDERED_REWRITE -DATP_ORPHAN_KILL -DATP_CP_GROUND_JOIN "
-    "-framework Accelerate "
-    "-o '%s' '%s' 2>&1",
-    out_bin_path, src_path);
+    "clang -O0 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK %s"
+    "-o '%s' '%s' %s 2>&1",
+    aot_host_defines(), out_bin_path, src_path, aot_exe_link_flags());
 
   FILE *p = popen(cmd, "r");
   if (!p) return -1;
@@ -327,10 +321,9 @@ int main(void) {
 
     char cmd[2048];
     snprintf(cmd, sizeof cmd,
-      "clang -O0 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK "
-    "-DATP_RULE_INDEX -DATP_FV_INDEX -DATP_VAR_NORM "
-    "-DATP_ORDERED_REWRITE -DATP_ORPHAN_KILL -DATP_CP_GROUND_JOIN "
-      "-framework Accelerate -o /tmp/aot_e2e_count /tmp/aot_e2e_count.c 2>&1");
+      "clang -O0 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK %s"
+      "-o /tmp/aot_e2e_count /tmp/aot_e2e_count.c %s 2>&1",
+      aot_host_defines(), aot_exe_link_flags());
     FILE *p = popen(cmd, "r");
     CHECK(p != NULL);
     char line[1024];
@@ -468,10 +461,9 @@ int main(void) {
 
     char cmd[2048];
     snprintf(cmd, sizeof cmd,
-      "clang -O0 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK "
-    "-DATP_RULE_INDEX -DATP_FV_INDEX -DATP_VAR_NORM "
-    "-DATP_ORDERED_REWRITE -DATP_ORPHAN_KILL -DATP_CP_GROUND_JOIN "
-      "-framework Accelerate -o /tmp/aot_e2e_fib /tmp/aot_e2e_fib.c 2>&1");
+      "clang -O0 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK %s"
+      "-o /tmp/aot_e2e_fib /tmp/aot_e2e_fib.c %s 2>&1",
+      aot_host_defines(), aot_exe_link_flags());
     FILE *p = popen(cmd, "r");
     CHECK(p != NULL);
     char line[1024];

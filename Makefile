@@ -761,13 +761,17 @@ build/thvm_runtime_blob.c: build/thvm_inline.c tools/embed_blob.py FORCE
 	@if [ -f $@ ] && cmp -s $@.tmp $@; then rm -f $@.tmp; \
 	 else mv -f $@.tmp $@; echo "regenerated $@"; fi
 
-# AOT-using test binaries link build/thvm_runtime_blob.c so the
-# extern thvm_runtime_src symbol resolves.
-AOT_TESTS := $(BIN)/test_aot_emit $(BIN)/test_aot_e2e \
-             $(BIN)/test_aot_e2e_bench $(BIN)/test_aot_build
+# AOT-using test binaries link the runtime blob so the extern
+# thvm_runtime_src symbol resolves: the Mach-O blob on macOS, the ELF one
+# elsewhere.  A loaded AOT module resolves thvm_pri_wl_invoke_returning
+# against the test binary, which on Linux exports it only with -rdynamic.
+AOT_TESTS   := $(BIN)/test_aot_emit $(BIN)/test_aot_e2e \
+               $(BIN)/test_aot_e2e_bench $(BIN)/test_aot_build
+AOT_BLOB    := $(if $(filter Darwin,$(UNAME_S)),build/thvm_runtime_blob.c,build/thvm_runtime_blob_elf.c)
+AOT_LDFLAGS := $(if $(filter Darwin,$(UNAME_S)),,-rdynamic)
 
-$(AOT_TESTS): $(BIN)/test_%: tests/test_%.c $(SRC) build/thvm_runtime_blob.c | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< build/thvm_runtime_blob.c $(TEST_LDFLAGS)
+$(AOT_TESTS): $(BIN)/test_%: tests/test_%.c $(SRC) $(AOT_BLOB) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< $(AOT_BLOB) $(TEST_LDFLAGS) $(AOT_LDFLAGS)
 
 $(METAL_TESTS): $(BIN)/%: tests/%.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)

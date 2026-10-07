@@ -19,7 +19,7 @@ import sys
 import os
 import re
 
-INCLUDE_RE = re.compile(r'^\s*#include\s+"([^"]+)"')
+INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+)"')
 
 
 def expand(path, seen, out):
