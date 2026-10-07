@@ -22,7 +22,7 @@ update the matching row here in the same change.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_JIT` (Python) | on (`1`) | Enable the Python JIT capture/replay. `0` disables. |
+| `JIT` (Python, tinygrad's name) | on (`1`) | Enable the Python JIT capture/replay. `0` disables. |
 | `THVM_JIT_NO_PIN` | off | Disable JIT buffer pinning. |
 | `THVM_JIT_REPLAY_NOSKIP` | off | Disable replay skip optimization. |
 | `THVM_JIT_REPLAY_PACK` | off | Experimental: pack replay dispatch records. |
@@ -152,6 +152,5 @@ operational ones.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_CACHE` (Python) | `~/.cache/thvm` | Dataset cache directory. |
 | `THVM_BENCH_OPT` | off | Benchmark optimization selector (`tools/xbackend_bench`). |
 | `THVM_WL_TENSOR_VIEW_DEBUG` | off | WL tensor-view debug output. |

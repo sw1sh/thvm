@@ -18,12 +18,12 @@ is only valid for the same symbolic-argument signature; a changed value
 (e.g. a different bound token) re-captures rather than returning a stale
 result.
 
-Disabled when THVM_JIT=0; falls back to pass-through (re-runs fn each
-call).  Use this when you suspect a capture/replay correctness issue.
+Disabled when JIT=0 (tinygrad's knob); falls back to pass-through (re-runs
+fn each call).  Use this when you suspect a capture/replay correctness issue.
 """
 from __future__ import annotations
 
-import os
+from .helpers import getenv
 
 
 class BoundVar(int):
@@ -153,10 +153,9 @@ def TinyJit(fn):
     every replay (the input_replace port, jit/capture.c).  The returned
     Tensor is captured by buf_id and refilled by each replay.
 
-    Disable via THVM_JIT=0 (returns the bare function for A/B
-    comparison).
+    Disable via JIT=0 (returns the bare function for A/B comparison).
     """
-    if os.environ.get("THVM_JIT", "1") == "0":
+    if getenv("JIT", 1) == 0:
         return fn
 
     from .thvm import Thvm

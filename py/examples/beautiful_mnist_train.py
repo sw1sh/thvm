@@ -113,8 +113,8 @@ def main():
 
     # JIT path: pre-allocate stable input buffers (X_buf / Y_buf), wrap
     # the step in TinyJit, .assign fresh data each iter.  Disable with
-    # THVM_JIT=0 to fall back to per-step graph rebuild.
-    _use_jit = os.environ.get("THVM_JIT", "1") != "0"
+    # JIT=0 to fall back to per-step graph rebuild.
+    _use_jit = getenv("JIT", 1) != 0
     X_buf = Y_buf = step_fn = None
     if _use_jit:
         from thvm import TinyJit
