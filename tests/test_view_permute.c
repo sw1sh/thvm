@@ -7,7 +7,7 @@
 //     strides reordered per the perm argument.
 //   - Offset is unchanged.
 //   - Non-identity perm marks the alias as non-contiguous.
-//   - Identity perm preserves contiguity.
+//   - Identity perm preserves contiguity; two swaps give back the source.
 //   - thvm_materialize at root post-materializes the alias into a
 //     fresh contig buf so flat buf_read gives the transposed values.
 //   - producer_kid is inherited.
@@ -71,6 +71,11 @@ int main(void) {
   CHECK_EQ(TENS[ident_tid].view.contiguous, 1);
   CHECK_EQ(TENS[ident_tid].view.strides[0], 3);
   CHECK_EQ(TENS[ident_tid].view.strides[1], 1);
+
+  TEST_BEGIN("view-permute/swap-twice-is-the-source-term");
+  // uop_permute composes a permute of a permute and drops an identity
+  // result, so two swaps give back the source term itself.
+  CHECK_EQ(uop_permute(uop_permute(src, 2, perm), 2, perm), src);
 
   TEST_BEGIN("view-permute/root-materialize-flatten-gives-transposed");
   Term permuted2 = uop_permute(src, 2, perm);
