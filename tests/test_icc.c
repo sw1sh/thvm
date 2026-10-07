@@ -13,6 +13,7 @@
 
 #include "../src/thvm.c"
 #include "test.h"
+#include "tu_probes.h"
 
 // Build θx.body where body is a Term that may reference VAR(loc) for
 // the bound x.  Returns the BRI Term and writes the binder loc out

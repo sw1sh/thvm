@@ -586,7 +586,7 @@ fn Term redex_fire(Term redex) {
       // Atomic claim: under a parallel pool, multiple workers may race
       // on the same DP cell; whoever wins the exchange to 0 owns the
       // body, the rest see 0 and bail (the redex is no longer theirs).
-      // Single-thread cost is identical to the legacy heap_take.
+      // Single-thread cost is identical to a plain read-and-clear.
       Term cell = heap_take_atomic(loc);
       if (cell == 0) return 0;       // claimed by another worker
       Term body = term_resolve(cell);

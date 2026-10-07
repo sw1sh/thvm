@@ -75,14 +75,11 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "term/new_eql.c"
 #include "term/new_and.c"
 #include "term/new_or.c"
-#include "term/new_any.c"
-#include "term/new_inc.c"
 #include "term/new_ctr.c"
 #include "term/kids_buf.c"
 #include "term/stack_grow.c"
 #include "term/new_when.c"
 #include "term/new_fvr.c"
-#include "term/new_ann.c"
 #include "term/new_pri.c"
 #include "term/new_dsu.c"
 #include "term/new_ddu.c"
@@ -104,7 +101,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "heap/alloc.c"
 #include "heap/read.c"
 #include "heap/set.c"
-#include "heap/take.c"
 #include "heap/subst_var.c"
 #include "heap/subst_cop.c"
 // Atomic-flavoured siblings.  Same body as the plain helpers but
@@ -116,8 +112,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "heap/read_acq.c"
 #include "heap/set_rel.c"
 #include "heap/take_atomic.c"
-#include "heap/cas.c"
-#include "heap/subst_var_rel.c"
 
 // === instrument/ ===
 // Process-global hot-path counters for WL-side debugging.  Single

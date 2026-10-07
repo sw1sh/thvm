@@ -64,15 +64,6 @@ static inline int posix_memalign(void **memptr, size_t alignment, size_t size) {
   return 0;
 }
 
-// --- aligned_alloc (C11): not in mingw's CRT.  The runtime frees the
-//     result with plain free(), so map to malloc and drop the alignment
-//     request (a huge-page hint on Apple Silicon, not a Windows
-//     correctness requirement). ---
-static inline void *aligned_alloc(size_t alignment, size_t size) {
-  (void)alignment;
-  return malloc(size);
-}
-
 // --- sysconf(_SC_NPROCESSORS_ONLN) -> GetSystemInfo ---
 #ifndef _SC_NPROCESSORS_ONLN
 #define _SC_NPROCESSORS_ONLN 1

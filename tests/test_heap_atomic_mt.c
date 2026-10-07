@@ -6,8 +6,6 @@
 //   * heap_take_atomic is single-winner: across N concurrent take
 //     attempts on a populated cell, exactly one returns the prior
 //     value, the rest return 0.
-//   * heap_cas commits exactly once when N threads race on the same
-//     expected value.
 //
 // The pthread worker pool that consumes these primitives lands in a
 // later slice; this test proves the primitives themselves are
@@ -113,47 +111,6 @@ static int test_take_atomic_mt(void) {
   return 0;
 }
 
-// --- heap_cas: single-committer race -------------------------------
-
-typedef struct {
-  u64       loc;
-  Term      expected;
-  Term      desired;
-  _Atomic u32 committers;
-} CasArg;
-
-static void *cas_thread(void *arg) {
-  CasArg *a = (CasArg *)arg;
-  Term seen = a->expected;
-  if (heap_cas(a->loc, &seen, a->desired)) {
-    atomic_fetch_add(&a->committers, 1);
-  }
-  return NULL;
-}
-
-static int test_cas_mt(void) {
-  TEST_BEGIN("heap_cas: exactly one commit per (loc, expected) race");
-  thvm_init();
-  for (u32 round = 0; round < 200; round++) {
-    u64  loc = heap_alloc(1);
-    Term old = term_new(0, TAG_NUM, DT_INT32, round + 100);
-    Term new_ = term_new(0, TAG_NUM, DT_INT32, round + 200);
-    heap_set(loc, old);
-
-    CasArg a = { .loc = loc, .expected = old, .desired = new_, .committers = 0 };
-    pthread_t threads[MT_NTHREADS];
-    for (u32 t = 0; t < MT_NTHREADS; t++) {
-      pthread_create(&threads[t], NULL, cas_thread, &a);
-    }
-    for (u32 t = 0; t < MT_NTHREADS; t++) pthread_join(threads[t], NULL);
-
-    CHECK_EQ(atomic_load(&a.committers), 1u);
-    CHECK_EQ(heap_read(loc), new_);
-  }
-  thvm_free();
-  return 0;
-}
-
 // --- ITRS: atomic bumps survive concurrent contention --------------
 
 #define MT_ITRS_BUMPS_EACH 100000
@@ -185,7 +142,6 @@ static int test_itrs_atomic_mt(void) {
 int main(void) {
   test_alloc_atomic_mt();
   test_take_atomic_mt();
-  test_cas_mt();
   test_itrs_atomic_mt();
   TEST_REPORT();
 }

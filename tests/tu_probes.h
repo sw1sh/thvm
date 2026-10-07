@@ -88,4 +88,22 @@ static void extern_pinned_for_each(void (*cb)(Term)) {
   }
 }
 
+// --- term constructors only tests build -----------------------------------
+static Term term_new_any(void) {
+  return term_new(0, TAG_ANY, 0, 0);
+}
+
+static Term term_new_inc(Term body) {
+  u64 loc = heap_alloc(1);
+  heap_set(loc, body);
+  return term_new(0, TAG_INC, 0, loc);
+}
+
+static Term term_new_ann(Term val, Term typ) {
+  u64 loc = heap_alloc(2);
+  heap_set(loc + 0, val);
+  heap_set(loc + 1, typ);
+  return term_new(0, TAG_ANN, 0, loc);
+}
+
 #endif

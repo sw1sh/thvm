@@ -1601,7 +1601,6 @@ fn Term term_sub_set(Term t, u8 sub);
 fn u64  heap_alloc(u64 size);
 fn Term heap_read(u64 loc);
 fn void heap_set(u64 loc, Term t);
-fn Term heap_take(u64 loc);                                 // read + zero
 fn void heap_subst_var(u64 loc, Term value);
 fn Term heap_subst_cop(u8 side, u64 loc, Term r0, Term r1); // pair subst
 
@@ -1621,7 +1620,6 @@ fn u64  thvm_heap_perm_cells(void);
 fn void thvm_heap_request_perm_cells(u64 cells);
 fn u64  thvm_heap_map_cells(void);
 fn u64  heap_perm_alloc(u64 n);
-fn u64  heap_perm_used(void);
 fn void gc_init(u64 space_words);
 fn void gc_reset(void);
 fn int  gc_enabled(void);
@@ -1670,11 +1668,8 @@ fn Term term_new_mat (u32 match_val, Term handler, Term fallback);
 fn Term term_new_eql (Term a, Term b);
 fn Term term_new_and (Term a, Term b);
 fn Term term_new_or  (Term a, Term b);
-fn Term term_new_any (void);
-fn Term term_new_inc (Term body);
 fn Term term_new_when(Term cond, Term body);
 fn Term term_new_fvr (u32 var_id);
-fn Term term_new_ann (Term val, Term typ);
 
 // 8.1b: TAG_PRI ("primitive function call") -- a thin port of HVM4's
 // PRI tag.  Each primitive is registered in a process-global table

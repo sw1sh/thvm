@@ -21,11 +21,6 @@ int main(void) {
   CHECK_EQ(heap_read(a + 0), t1);
   CHECK_EQ(heap_read(a + 1), t2);
 
-  TEST_BEGIN("heap/take-clears-cell");
-  Term taken = heap_take(a + 0);
-  CHECK_EQ(taken, t1);
-  CHECK_EQ(heap_read(a + 0), 0);
-
   TEST_BEGIN("heap/subst_var-sets-sub-flag");
   Term value = term_new(0, TAG_ERA, 0, 0);
   heap_subst_var(b, value);

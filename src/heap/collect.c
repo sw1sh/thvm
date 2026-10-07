@@ -117,7 +117,6 @@ fn u64 heap_perm_alloc(u64 n) {
   return loc;
 }
 
-fn u64 heap_perm_used(void) { return HEAP_PERM_USED; }
 
 fn void gc_reset(void) {
   GC_ENABLED    = 0;
