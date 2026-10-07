@@ -215,6 +215,7 @@ TESTS := \
   $(BIN)/test_app_lam \
   $(BIN)/test_era \
   $(BIN)/test_dup_sup \
+  $(BIN)/test_dup_ctr \
   $(BIN)/test_dup_lam \
   $(BIN)/test_lam_era \
   $(BIN)/test_tensor \
@@ -292,6 +293,7 @@ TESTS := \
   $(BIN)/test_view_shrink \
   $(BIN)/test_view_permute \
   $(BIN)/test_view_pad \
+  $(BIN)/test_shrink_over_pad \
   $(BIN)/test_view_flip \
   $(BIN)/test_cpu_free_list \
   $(BIN)/test_cpu_jit_warmup \
@@ -324,6 +326,7 @@ TESTS := \
   $(BIN)/test_uop_recognise_tc \
   $(BIN)/test_apply_opt_dag \
   $(BIN)/test_nested_reduce_unroll \
+  $(BIN)/test_full_unroll_repro \
   $(BIN)/test_render_c_slot_hole \
   $(BIN)/test_render_reduce_chain \
   $(BIN)/test_uop_walk_domains \
