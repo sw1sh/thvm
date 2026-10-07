@@ -1,28 +1,37 @@
 #!/bin/bash
 # ENIGMA gates G2.2 and G2.4 on FindProof (docs/plans/enigma_portfolio.md,
-# M2; the G2.2 reading for clock-gated lanes is amendment A2 of section
-# 5.4).  Runs on a pod, never on the Mac.
+# M2; G2.2 reads exact identity under the steps clock, amendment A8).
+# Runs on a pod, never on the Mac.
 #
 # G2.2 (zero correction is exact): for every (family, lane, problem) the
 # base lane run
 #   THVM_ATP_WORK_CLOCK=steps FindProof --lane=L --proof --szs --wall=W p
-# and its zero twin (the same plus --guide=F --guide-zero) must agree on
+# and its zero twin (the same with THVM_ATP_GUIDE=F THVM_ATP_GUIDE_ZERO=1,
+# the variables --guide=F --guide-zero set) must agree on
 #   - stdout (status and proof), after masking timings;
 #   - the engine stats on stderr (LRS prune and recompute counters
 #     included), after masking timings, the goal path and the twin's
 #     "% guide:" line;
 #   - every selection (THVM_ATP_CP_PICK_TRACE: pick, seq, pri);
 #   - the clock-gated decisions (THVM_ATP_CLOCK_TRACE), clocks masked.
-# A lane whose run logs no clock-gated decision must agree on all four.
-# A clock-gated lane may drift once a decision reads a clock that the
-# twin's few dozen out-of-window instructions per step moved: it passes
-# when the selections agree up to the first decision whose line differs,
-# and the script prints that selection index.  The base run's environment
-# carries THVM_ATP_GUIDP* variables of the same lengths as the twin's
-# THVM_ATP_GUIDE*, because an uncached getenv costs instructions in
-# proportion to the environment's size.  The twin must report a "% guide:"
-# line with picks > 0 and a frac_wall field: a layer that never picked
-# (the KD-heap or the top-K re-ranker armed, for instance) fails.
+# Under the steps clock an observer cannot advance the clock the
+# disciplines read, so every row must agree on all four: a clock-gated
+# decision taken elsewhere is a FAIL (A8 withdrew A2's drift reading).
+# The base run's environment carries THVM_ATP_GUIDP* variables of the
+# same lengths as the twin's THVM_ATP_GUIDE*, because an uncached getenv
+# costs instructions in proportion to the environment's size (the
+# front-end budgets keep the instruction clock).  The twin must report a
+# "% guide:" line with picks > 0 and a frac_wall field: a layer that never
+# picked (phi(p) missing for a head that reads it, the KD-heap or the
+# top-K re-ranker armed) fails.
+#
+# AA=1 runs the base twice: when the two base runs differ the row is
+# NONDET (it cannot test the twin) and does not count.  DUMP_EVERY=N
+# gives the twin the loop-0 harvest's sampled dump (THVM_ATP_GUIDE_DUMP,
+# THVM_ATP_GUIDE_DUMP_EVERY=N, DUMP_MAX picks), which must not change the
+# search either.  Per (family, lane) the rows count in list order: the
+# lane passes when no row FAILs and MIN_PASS (default 8, the plan's
+# count) rows PASS; fewer leave it INCONCLUSIVE.
 #
 # G2.4 (C and Python agree), when HEAD names the head's safetensors (the
 # binary must have it compiled in; MODEL gives its id): the non-zero twin
@@ -36,7 +45,10 @@
 #   family); default: the twee family on two repo problems.
 #   WALL (30) is each run's --wall; OUT keeps the runs (default: a
 #   temporary directory, removed on exit); DUMP_MAX (100000) caps the
-#   dumped picks.
+#   dumped picks; MODEL picks the compiled-in head (default: the first).
+#   TPTP must name the root the problems' include() directives resolve
+#   against.  Writes OUT/g22.tsv (one row per run problem) and
+#   OUT/g22.summary (one line per family and lane).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BIN=${1:-$ROOT/bin/FindProof}
@@ -45,6 +57,9 @@ WALL=${WALL:-30}
 MODEL=${MODEL:-}
 HEAD=${HEAD:-}
 DUMP_MAX=${DUMP_MAX:-100000}
+DUMP_EVERY=${DUMP_EVERY:-}
+AA=${AA:-0}
+MIN_PASS=${MIN_PASS:-8}
 FEATPARITY=${FEATPARITY:-0}
 W2C=$ROOT/tools/atp_enigma/weights_to_c.py
 NP0=$ROOT/tools/atp_enigma/np0_extract.py
@@ -63,6 +78,8 @@ fi
 fail=0
 n_pass=0
 n_fail=0
+n_nondet=0
+: > "$OUT/g22.tsv"
 
 # Timings, the goal path (it carries a pid) and the twin's own line out.
 mask() {
@@ -86,7 +103,8 @@ decisions() {
     | sed -E -e 's/ wall=[0-9]+ cpu=[0-9]+ work=[0-9]+$//'
 }
 
-# run <dir> <env...> -- <flags...>: one FindProof lane run.
+# run <dir> <env...> -- <flags...>: one FindProof lane run, reduced to
+# its four compared parts.
 run() {
   local dir=$1
   shift
@@ -96,95 +114,103 @@ run() {
     shift
   done
   shift
+  rm -rf "$dir"
   mkdir -p "$dir/clock"
   env ${envs[@]+"${envs[@]}"} THVM_ATP_WORK_CLOCK=steps THVM_ATP_CP_PICK_TRACE=1 THVM_ATP_CLOCK_TRACE="$dir/clock" \
     "$BIN" "$@" --proof --szs --wall="$WALL" \
     > "$dir/out" 2> "$dir/err" < /dev/null
+  sels "$dir/err" > "$dir.sel"
+  decisions "$dir/clock" > "$dir.dec"
+  mask "$dir/out" > "$dir.out.m"
+  stats "$dir/err" > "$dir.stats"
+}
+
+# same <a> <b>: the two runs agree on all four parts; else names the
+# first that differs.
+same() {
+  if ! cmp -s "$1.sel" "$2.sel"; then
+    local first
+    first=$(cmp "$1.sel" "$2.sel" 2>&1 | sed -n -E 's/.*line ([0-9]+).*/\1/p')
+    echo "selection ${first:-?} of $(wc -l < "$1.sel" | tr -d ' ') differs"
+  elif ! cmp -s "$1.dec" "$2.dec"; then
+    local ln
+    ln=$(cmp "$1.dec" "$2.dec" 2>&1 | sed -n -E 's/.*line ([0-9]+).*/\1/p')
+    echo "clock-gated decision ${ln:-?} differs: $(sed -n "${ln:-1}p" "$1.dec" | cut -c1-80) | $(sed -n "${ln:-1}p" "$2.dec" | cut -c1-80)"
+  elif ! cmp -s "$1.out.m" "$2.out.m"; then
+    echo "stdout (status or proof) differs"
+  elif ! cmp -s "$1.stats" "$2.stats"; then
+    echo "engine stats differ: $(diff "$1.stats" "$2.stats" | head -3 | tr '\n' ' ' | cut -c1-200)"
+  fi
 }
 
 verdict() {
-  if [ "$1" = PASS ]; then
-    n_pass=$((n_pass + 1))
-  else
-    n_fail=$((n_fail + 1))
-    fail=1
-  fi
+  case $1 in
+    PASS) n_pass=$((n_pass + 1)) ;;
+    NONDET) n_nondet=$((n_nondet + 1)) ;;
+    *) n_fail=$((n_fail + 1)); fail=1 ;;
+  esac
   echo "$1 $2"
 }
 
+idx=0
 while read -r fam lane probs; do
   case "$fam" in
     ''|'#'*) continue ;;
   esac
   for p in $probs; do
+    idx=$((idx + 1))
     name=$(basename "$p")
     d=$OUT/$fam/$lane/$name
     mkdir -p "$d"
-    gflags=(--lane="$lane" --guide="$fam" --guide-zero)
+    # The twin arms through the variables --guide, --guide-zero and
+    # --guide-model set; the base carries the same names with P for E, in
+    # the same places, so both environments have one layout.
+    tenvs=(THVM_ATP_GUIDE="$fam" THVM_ATP_GUIDE_ZERO=1)
     pads=(THVM_ATP_GUIDP="$fam" THVM_ATP_GUIDP_ZERO=1)
     if [ -n "$MODEL" ]; then
-      gflags+=(--guide-model="$MODEL")
+      tenvs+=(THVM_ATP_GUIDE_MODEL="$MODEL")
       pads+=(THVM_ATP_GUIDP_MODEL="$MODEL")
     fi
-    run "$d/base" "${pads[@]}" -- --lane="$lane" "$p"
-    run "$d/twin" -- "${gflags[@]}" "$p"
-    why=""
-    gl=$(grep -m1 '^% guide: ' "$d/twin/err")
-    picks=$(echo "$gl" | sed -n -E 's/.* picks=([0-9]+) .*/\1/p')
-    if [ -z "$gl" ] || [ "${picks:-0}" -eq 0 ]; then
-      why="the twin reports no guided pick ('${gl:-no % guide: line}')"
-    elif ! echo "$gl" | grep -q ' frac_wall='; then
-      why="the twin's % guide: line has no frac_wall"
+    if [ -n "$DUMP_EVERY" ]; then
+      tenvs+=(THVM_ATP_GUIDE_DUMP="$d/twin.dump" THVM_ATP_GUIDE_DUMP_EVERY="$DUMP_EVERY"
+              THVM_ATP_GUIDE_DUMP_MAX="$DUMP_MAX")
+      pads+=(THVM_ATP_GUIDP_DUMP="$d/base.dump" THVM_ATP_GUIDP_DUMP_EVERY="$DUMP_EVERY"
+             THVM_ATP_GUIDP_DUMP_MAX="$DUMP_MAX")
+      rm -f "$d/twin.dump"
     fi
-    sels "$d/base/err" > "$d/base.sel"
-    sels "$d/twin/err" > "$d/twin.sel"
-    decisions "$d/base/clock" > "$d/base.dec"
-    decisions "$d/twin/clock" > "$d/twin.dec"
-    mask "$d/base/out" > "$d/base.out.m"
-    mask "$d/twin/out" > "$d/twin.out.m"
-    stats "$d/base/err" > "$d/base.stats"
-    stats "$d/twin/err" > "$d/twin.stats"
+    run "$d/base" "${pads[@]}" -- --lane="$lane" "$p"
+    why=""
+    v=FAIL
+    if [ "$AA" = 1 ]; then
+      run "$d/base2" "${pads[@]}" -- --lane="$lane" "$p"
+      aa=$(same "$d/base" "$d/base2")
+      if [ -n "$aa" ]; then
+        v=NONDET
+        why="the base does not repeat: $aa"
+      fi
+    fi
     nsel=$(wc -l < "$d/base.sel" | tr -d ' ')
     ndec=$(wc -l < "$d/base.dec" | tr -d ' ')
-    if [ -z "$why" ] && [ "$ndec" -eq 0 ] && [ "$(wc -l < "$d/twin.dec" | tr -d ' ')" -eq 0 ]; then
-      if ! cmp -s "$d/base.sel" "$d/twin.sel"; then
-        first=$(cmp "$d/base.sel" "$d/twin.sel" 2>&1 | sed -n -E 's/.*line ([0-9]+).*/\1/p')
-        why="selection ${first:-?} of $nsel differs"
-      elif ! cmp -s "$d/base.out.m" "$d/twin.out.m"; then
-        why="stdout (status or proof) differs"
-      elif ! cmp -s "$d/base.stats" "$d/twin.stats"; then
-        why="engine stats differ: $(diff "$d/base.stats" "$d/twin.stats" | head -3 | tr '\n' ' ')"
-      fi
-      [ -z "$why" ] && verdict PASS "G2.2 $fam $lane $name: $nsel selections, no clock-gated decision"
-    elif [ -z "$why" ]; then
-      dline=$(cmp "$d/base.dec" "$d/twin.dec" 2>&1 | sed -n -E 's/.*line ([0-9]+).*/\1/p')
-      if [ -z "$dline" ] && cmp -s "$d/base.dec" "$d/twin.dec"; then
-        cut=$nsel
-        if ! cmp -s "$d/base.sel" "$d/twin.sel"; then
-          why="selections differ with identical clock-gated decisions"
-        elif ! cmp -s "$d/base.out.m" "$d/twin.out.m"; then
-          why="stdout (status or proof) differs"
-        elif ! cmp -s "$d/base.stats" "$d/twin.stats"; then
-          why="engine stats differ: $(diff "$d/base.stats" "$d/twin.stats" | head -3 | tr '\n' ' ')"
-        fi
-        [ -z "$why" ] && verdict PASS "G2.2 $fam $lane $name: $nsel selections, $ndec decisions identical"
+    if [ "$v" != NONDET ]; then
+      run "$d/twin" "${tenvs[@]}" -- --lane="$lane" "$p"
+      gl=$(grep -m1 '^% guide: ' "$d/twin/err")
+      picks=$(echo "$gl" | sed -n -E 's/.* picks=([0-9]+) .*/\1/p')
+      if [ -z "$gl" ] || [ "${picks:-0}" -eq 0 ]; then
+        why="the twin reports no guided pick ('${gl:-no % guide: line}'; $(grep -m1 '^guide: ' "$d/twin/err" | cut -c1-120))"
+      elif ! echo "$gl" | grep -q ' frac_wall='; then
+        why="the twin's % guide: line has no frac_wall"
+      elif [ -n "$DUMP_EVERY" ] && ! grep -q '^# guide end ' "$d/twin.dump" 2>/dev/null; then
+        why="the twin's dump has no footer"
       else
-        # The first differing decision: compare the selections before it.
-        ln=${dline:-$((ndec + 1))}
-        bsel=$(sed -n "${ln}p" "$d/base.dec" | sed -n -E 's/.* sel=([0-9]+).*/\1/p')
-        tsel=$(sed -n "${ln}p" "$d/twin.dec" | sed -n -E 's/.* sel=([0-9]+).*/\1/p')
-        cut=${bsel:-$tsel}
-        if [ -n "$tsel" ] && [ -n "$bsel" ] && [ "$tsel" -lt "$bsel" ]; then
-          cut=$tsel
-        fi
-        cut=${cut:-0}
-        if ! cmp -s <(head -n "$cut" "$d/base.sel") <(head -n "$cut" "$d/twin.sel"); then
-          why="a selection before the first drifted decision (selection $cut) differs"
-        fi
-        [ -z "$why" ] && verdict PASS "G2.2 $fam $lane $name: identical through selection $cut, where decision $ln drifted (A2); $nsel base selections"
+        why=$(same "$d/base" "$d/twin")
+      fi
+      if [ -z "$why" ]; then
+        v=PASS
+        why="$nsel selections, $ndec clock-gated decisions, identical"
       fi
     fi
-    [ -n "$why" ] && verdict FAIL "G2.2 $fam $lane $name: $why"
+    verdict "$v" "G2.2 $fam $lane $name: $why"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%d\n' "$fam" "$lane" "$name" "$v" "$nsel" "$why" "$idx" >> "$OUT/g22.tsv"
 
     if [ -n "$HEAD" ]; then
       nz=(--lane="$lane" --guide="$fam")
@@ -219,7 +245,20 @@ while read -r fam lane probs; do
   done
 done < "$SPEC"
 
-echo "GUIDE GATES: $n_pass pass, $n_fail fail (runs in $OUT)"
+# Per family and lane, in list order: any FAIL fails; MIN_PASS PASS rows
+# pass; NONDET rows do not count.
+sort -t$'\t' -k7,7n "$OUT/g22.tsv" | awk -F'\t' -v need="$MIN_PASS" '
+  { k = $1 "\t" $2; if (!(k in n)) order[++m] = k; n[k]++; v[k, $4]++ }
+  END {
+    printf "family\tlane\trows\tpass\tfail\tnondet\tG2.2\n"
+    for (i = 1; i <= m; i++) {
+      k = order[i]
+      g = (v[k, "FAIL"] > 0) ? "FAIL" : (v[k, "PASS"] >= need) ? "PASS" : "INCONCLUSIVE"
+      printf "%s\t%d\t%d\t%d\t%d\t%s\n", k, n[k], v[k, "PASS"] + 0, v[k, "FAIL"] + 0, v[k, "NONDET"] + 0, g
+    }
+  }' > "$OUT/g22.summary"
+cat "$OUT/g22.summary"
+echo "GUIDE GATES: $n_pass pass, $n_fail fail, $n_nondet nondet (runs in $OUT)"
 if [ "$fail" != 0 ]; then
   exit 1
 fi

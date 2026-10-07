@@ -58,7 +58,9 @@
 //      function of the search alone, unlike the process RSS
 //   then n_phi problem features (thvm_atp_guide_set_phi before the first
 //   scored pick; a missing or non-finite one reads as its mu) and the
-//   one-hot of the lane id.
+//   one-hot of the lane id.  FindProof sets the --problem-features row
+//   for a head that reads phi(p) (tools/atp_cli/problem_features.c,
+//   cli_guide_phi) and runs without the layer when it cannot.
 // f0..f13 are thvm_atp_cp_features at age = seq against the goal normal
 // form at the CP's push (the history export's 'F' record); f4 (= f0) is
 // dropped, f8 (the seq) gives way to column 12 and the symbol ids f9 /
@@ -229,7 +231,12 @@ typedef struct {
   u64                  t_max_ns;
   u64                  t_arm_ns;
   FILE                *dump;
-  u32                  dump_left;
+  u32                  dump_left;    // picks the dump may still take
+  u32                  dump_every;   // a selection in about this many
+  u32                  dump_rows;    // the row cap (0: none)
+  u32                  dump_rows_left;
+  u64                  dump_picks;   // dumped picks and rows, for the footer
+  u64                  dump_nrows;
 } AtpGuide;
 
 // The heap scratch of one pick.
@@ -528,6 +535,32 @@ static const char *atp_guide_lane_env(void) {
   return getenv("FINDPROOF_SLICE");
 }
 
+// A non-negative integer environment variable, else dflt.
+static u32 atp_guide_env_u32(const char *name, u32 dflt) {
+  const char *e = getenv(name);
+  if (e == NULL || e[0] == '\0') {
+    return dflt;
+  }
+  return (u32)strtoul(e, NULL, 10);
+}
+
+// A name the dump header can carry as one k=v token.
+static int atp_guide_name_ok(const char *s) {
+  size_t n = (s != NULL) ? strlen(s) : 0u;
+  if (n == 0u || n > 47u) {
+    return 0;
+  }
+  for (size_t i = 0; i < n; i++) {
+    char c = s[i];
+    u8 ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == '.' || c == '-';
+    if (!ok) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 // The RSS guard's cap in bytes (THVM_ATP_RSS_ABORT_MB, default 8 GB, 0
 // off), parsed as the guard parses it.
 static double atp_guide_mem_cap(void) {
@@ -580,14 +613,23 @@ static int atp_guide_arm(AtpState *s, const AtpGuideModel *m, const AtpGuideFami
   const char *dp = getenv("THVM_ATP_GUIDE_DUMP");
   if (dp != NULL && dp[0] != '\0') {
     g->dump = fopen(dp, "a");
-    const char *dm = getenv("THVM_ATP_GUIDE_DUMP_MAX");
-    g->dump_left = (dm != NULL && dm[0] != '\0') ? (u32)strtoul(dm, NULL, 10) : 400u;
+    g->dump_left      = atp_guide_env_u32("THVM_ATP_GUIDE_DUMP_MAX", 400u);
+    g->dump_every     = atp_guide_env_u32("THVM_ATP_GUIDE_DUMP_EVERY", 1u);
+    g->dump_rows      = atp_guide_env_u32("THVM_ATP_GUIDE_DUMP_ROWS", 0u);
+    g->dump_rows_left = g->dump_rows;
+    if (g->dump_every == 0u) {
+      g->dump_every = 1u;
+    }
     if (g->dump != NULL) {
       fprintf(g->dump, "# guide model=%s layout=%s n_x=%u hidden=%u family=%s mode=%s "
-              "k=%u tau=%.17g coop=%u zero=%u kappa=%.17g lane=%u\n",
+              "k=%u tau=%.17g coop=%u zero=%u kappa=%.17g lane=%u lane_name=%s phi=%u "
+              "every=%u max=%u rows=%u\n",
               m->id, m->layout == ATP_GUIDE_LAYOUT_V1 ? "v1" : "topk18", m->n_x, m->hid,
               g->family, g->fam.mode == ATP_GUIDE_LAZY ? "lazy" : "topk", g->fam.k,
-              g->fam.tau, g->fam.coop, (u32)g->zero, (double)m->kappa, g->lane);
+              g->fam.tau, g->fam.coop, (u32)g->zero, (double)m->kappa, g->lane,
+              atp_guide_name_ok(lane) ? lane : "-", g_atp_guide_phi.n, g->dump_every,
+              g->dump_left, g->dump_rows);
+      fflush(g->dump);
     }
   }
   s->guide = g;
@@ -684,6 +726,26 @@ static void atp_guide_env_probe(void) {
   snprintf(g_atp_guide_env_cfg.lane, sizeof g_atp_guide_env_cfg.lane, "%s",
            ln != NULL ? ln : "");
   g_atp_guide_env = 1;
+}
+
+// The phi(p) columns of the head the environment arms (0: unarmed, or a
+// head that reads none), and switching that layer off: FindProof's seam
+// (tools/atp_cli/main.c computes phi(p) for such a head).
+static u32 atp_guide_env_phi_cols(void) {
+  if (g_atp_guide_env < 0) {
+    atp_guide_env_probe();
+  }
+  if (g_atp_guide_env != 1 || g_atp_guide_env_cfg.m->layout != ATP_GUIDE_LAYOUT_V1) {
+    return 0u;
+  }
+  return g_atp_guide_env_cfg.m->n_phi;
+}
+
+static void atp_guide_env_off(const char *why) {
+  if (g_atp_guide_env == 1) {
+    fprintf(stderr, "guide: %s; selection layer off\n", why);
+  }
+  g_atp_guide_env = 0;
 }
 
 // thvm_atp_init: arm from THVM_ATP_GUIDE*, read once per process.
@@ -787,6 +849,10 @@ static void atp_guide_free(AtpState *s) {
     return;
   }
   if (g->dump != NULL) {
+    // A session without its footer was cut short: its last pick may be
+    // partial.
+    fprintf(g->dump, "# guide end picks=%llu rows=%llu\n", (unsigned long long)g->dump_picks,
+            (unsigned long long)g->dump_nrows);
     fclose(g->dump);
   }
   atp_guide_gv_clear(g);
@@ -1189,14 +1255,32 @@ static void atp_guide_eval(const AtpState *s, AtpGuide *g, u32 i) {
   g->n_eval++;
 }
 
-// THVM_ATP_GUIDE_DUMP=<path>: per scored candidate of the first
-// THVM_ATP_GUIDE_DUMP_MAX (400) scored picks: t, its evaluation index,
-// seq, chosen, x[0..n_x), the correction (before --guide-zero), score.
+// THVM_ATP_GUIDE_DUMP=<path>: per scored candidate of a dumped pick: t
+// (the selection index), its evaluation index, seq, chosen, x[0..n_x),
+// the correction (before --guide-zero), score.  A pick at selection t is
+// dumped when atp_hx_hash(t) % THVM_ATP_GUIDE_DUMP_EVERY == 0 (default 1:
+// every one), every scored call at that t (orphan re-picks too), until
+// THVM_ATP_GUIDE_DUMP_MAX (400) picks are out or the next one would pass
+// THVM_ATP_GUIDE_DUMP_ROWS rows (0: no row cap).  The hash of the index,
+// not the index itself: a stride would alias with the age (FIFO) and
+// coop cadences, whose picks the layer never scores.  Writing is
+// observation, so it stays off the work clock in every twin.
 static void atp_guide_dump(const AtpState *s, AtpGuide *g, u32 n, u32 chosen) {
   if (g->dump == NULL || g->dump_left == 0u || n == 0u) {
     return;
   }
   u32 t = s->cp_select_count + 1u;
+  if (g->dump_every > 1u && atp_hx_hash(t) % g->dump_every != 0u) {
+    return;
+  }
+  if (g->dump_rows != 0u) {
+    if (n > g->dump_rows_left) {
+      g->dump_left = 0u;
+      return;
+    }
+    g->dump_rows_left -= n;
+  }
+  atp_work_pause();
   for (u32 i = 0; i < n; i++) {
     const AtpGuideCand *c = &g->cand[i];
     fprintf(g->dump, "%u\t%u\t%u\t%u", t, i, c->seq, (u32)(i == chosen));
@@ -1205,7 +1289,11 @@ static void atp_guide_dump(const AtpState *s, AtpGuide *g, u32 n, u32 chosen) {
     }
     fprintf(g->dump, "\t%.17g\t%.17g\n", c->corr, c->score);
   }
+  fflush(g->dump);
+  atp_work_resume();
   g->dump_left--;
+  g->dump_picks++;
+  g->dump_nrows += n;
 }
 
 // --- the pick --------------------------------------------------------------
@@ -1396,6 +1484,14 @@ fn void thvm_atp_guide_set_phi(const AtpGuidePhi *phi) {
       g_atp_guide_phi_ok[i] = 1u;
     }
   }
+}
+
+fn u32 thvm_atp_guide_env_phi_cols(void) {
+  return atp_guide_env_phi_cols();
+}
+
+fn void thvm_atp_guide_env_off(const char *why) {
+  atp_guide_env_off(why);
 }
 
 fn int thvm_atp_guide_arm(AtpState *s, const char *family, const char *model_id, u8 zero,

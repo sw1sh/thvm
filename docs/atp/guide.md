@@ -27,13 +27,38 @@ re-ranker (`THVM_ATP_RERANK_TOPK`), whose branch precedes it.
 `thvm_atp_init` reads them once per process and arms every engine it
 creates.  Development overrides (env only): `THVM_ATP_GUIDE_MODE=topk:<k>`
 or `lazy:<k>[:<tau>]`, and `THVM_ATP_GUIDE_COOP=<r>`, replace the
-family's integration, for choosing a family's mode on VAL.
-`THVM_ATP_GUIDE_DUMP=<path>` (with `THVM_ATP_GUIDE_DUMP_MAX`, default 400
-picks) writes every scored candidate for the parity check; each armed
-engine appends one `# guide` header (model, integration, zero, lane) and
-its rows.  Hosts and tests arm with
-`thvm_atp_guide_arm(s, family, model_id, zero, lane)` before the engine's
-first push.
+family's integration, for choosing a family's mode on VAL.  Hosts and
+tests arm with `thvm_atp_guide_arm(s, family, model_id, zero, lane)`
+before the engine's first push.
+
+**The dump.**  `THVM_ATP_GUIDE_DUMP=<path>` writes the scored candidates
+of the dumped picks, the parity check's input and the training data's
+(see "Training").  Each armed engine appends one header line,
+
+    # guide model=... layout=... n_x=... hidden=... family=... mode=... k=... tau=...
+      coop=... zero=... kappa=... lane=<index> lane_name=<lane> phi=<n set>
+      every=<N> max=<picks> rows=<cap>
+
+(one line), one row per scored candidate (t, the selection index; the
+evaluation index; seq; chosen; x[0..n_x); the correction before
+`--guide-zero`; the score) and, when the engine is freed, the footer
+`# guide end picks=P rows=R`.  A session without its footer was cut short
+(a kill), so its last line may be partial.  Which picks are dumped:
+
+| Env | Default | Meaning |
+|---|---|---|
+| `THVM_ATP_GUIDE_DUMP_EVERY` | 1 | a pick at selection t is dumped when `atp_hx_hash(t) % N == 0`: about one selection in N over the whole run, every scored call at that t (orphan re-picks too) |
+| `THVM_ATP_GUIDE_DUMP_MAX` | 400 | the dump stops after this many picks |
+| `THVM_ATP_GUIDE_DUMP_ROWS` | 0 (none) | the dump stops before the first pick that would pass this many rows |
+
+The sample is a hash of the selection index, not a stride: a stride would
+alias with the age (FIFO) and coop cadences, whose picks the layer never
+scores.  A pick's rows are written whole and flushed.  Writing is pure
+observation, so it runs in a work-clock exclusion window in every twin,
+and a zero twin with the dump on selects exactly as its base lane
+(`test_atp_guide` zero-exact-dump, the pins in the pod battery, G2.2 with
+`DUMP_EVERY`).  `weights_to_c.py featparity` rebuilds the per-problem
+means from the dumped picks, so it needs an unsampled dump (N = 1).
 
 **The lane.**  The lane one-hot is the lane's own: the head's lane table
 (`LaneNames`) is searched for `THVM_ATP_GUIDE_LANE`, else
@@ -119,11 +144,27 @@ log1p(cp_pri), f0..f13 raw, log1p(selections since push).
 `thvm_atp_guide_set_phi(const AtpGuidePhi *)` (`n` values, at most 64),
 set in the process that runs the engine before its first weight pick; it
 folds them in at that pick and again whenever they are set anew.  A
-non-finite value reads as its training mean.  FindProof does not call it
-yet, so each phi column reads as its training mean (z = 0); see the open
-items.  The seam for the plan's phi(p) function (section 3.1: one
-function serves `--problem-features` and deployment) is this call, with
-the same row, in the lane's process before `atp_bench_main` runs.
+non-finite value, or a column past `n`, reads as its training mean.
+
+FindProof sets them in every lane process whose environment arms a head
+that reads phi(p) (`thvm_atp_guide_env_phi_cols() > 0`): after the front
+end, whose budgets it must not move, and before the engine's wall, alarm
+and emission deadline are set, `cli_guide_phi`
+(tools/atp_cli/problem_features.c) computes the row `--problem-features`
+prints with the same function in the same forked child under the same
+1 s CPU budget (`tp_problem_features`, `phi_compute`), copies its
+`ATP_PHI_N` (40) columns into an `AtpGuidePhi` and calls
+`thvm_atp_guide_set_phi`.  The plan's single function (section 3.1) is
+thus the one row both sides see: `tests/atp_guide_phi.sh` runs lanes with
+different front ends and checks that their dumps carry x[20..60) equal to
+the `--problem-features` row bit for bit.  A problem without the row
+(past the budget, not unit-equality CNF, a .pr file, a failed replay)
+runs without the layer, as section 3.1 prescribes for a problem past the
+budget: `thvm_atp_guide_env_off` prints `guide: <why>; selection layer
+off` and no engine of the process arms.  A head that reads no phi(p)
+(`example`, topk18) arms without the replay.  Unarmed, the seam is the
+environment probe the engine's init would make anyway, so unarmed runs
+are unchanged.
 
 ## Hooks
 
@@ -197,22 +238,36 @@ Unarmed, `s->guide` is NULL and every hook is one predictable branch.
 ## Gates G2.2 and G2.4
 
 `tests/atp_guide_gates.sh` (pods only) runs, per family, lane and
-problem, the base lane and its zero twin with `--proof --szs
---work-clock=instr`, the selection trace and the clock trace, and prints
-one PASS or FAIL line each:
+problem, the base lane and its zero twin under the gate clock
+`THVM_ATP_WORK_CLOCK=steps` (amendments A3 and A8), with `--lane=L
+--proof --szs`, the selection trace and the clock trace, and prints one
+PASS, FAIL or NONDET line each:
 
-- stdout (status, proof) and the engine stats (LRS prune and recompute
-  counters included) are compared after masking timings, the goal path
-  and the twin's `% guide:` line; the selections are compared pick by
-  pick.
-- A lane that logs no clock-gated decision must agree on everything.  A
-  clock-gated lane must agree on every selection up to its first
-  clock-gated decision whose line differs (plan section 5.4, amendment
-  A2); the script prints that selection index.
-- The base run carries `THVM_ATP_GUIDP*` variables of the same lengths as
-  the twin's `THVM_ATP_GUIDE*`, so both environments cost the same to
-  scan.
-- The twin must print a `% guide:` line with picks > 0 and `frac_wall`.
+- The engine's clock-gated disciplines read the steps clock, which an
+  observer cannot advance, so every row must agree exactly on all four:
+  the selections pick by pick, the clock-gated decisions (clocks masked),
+  stdout (status, proof) and the engine stats (LRS prune and recompute
+  counters included), after masking timings, the goal path and the
+  twin's `% guide:` line.  A clock-gated decision taken elsewhere is a
+  FAIL: A8 withdrew A2's reading, under which a clock-gated lane could
+  drift after its first differing decision.
+- The twin arms through the variables `--guide`, `--guide-zero` and
+  `--guide-model` set; the base carries `THVM_ATP_GUIDP*` variables of the
+  same lengths in the same places, so both environments have one layout
+  and cost the same to scan (the front-end budgets keep the instruction
+  clock).
+- The twin must print a `% guide:` line with picks > 0 and `frac_wall`:
+  a layer that never picked (phi(p) missing for a head that reads it, the
+  KD-heap or the top-K re-ranker armed) fails.
+- `MODEL=<id>` picks the head (the loop-0 gates use `harvest`, so the
+  twin also runs the phi(p) seam); `DUMP_EVERY=N` gives the twin the
+  loop-0 harvest's sampled dump, which must not change the search either
+  (the twin's dump must end with its footer); `AA=1` runs the base twice,
+  and a row whose two base runs differ is NONDET: it cannot test the
+  twin and does not count.
+- Per family and lane (`OUT/g22.summary`), in list order: the lane passes
+  when no row FAILs and `MIN_PASS` (8, the plan's count) rows PASS; fewer
+  leave it INCONCLUSIVE.  `OUT/g22.tsv` has one row per problem.
 
 With `HEAD=<head.safetensors>` (compiled in, `MODEL=<id>`) it also runs
 the non-zero twin with the dump and `weights_to_c.py parity` (G2.4);
@@ -221,14 +276,17 @@ the non-zero twin with the dump and `weights_to_c.py parity` (G2.4);
 
 ## Open items
 
-- FindProof copies the plan's phi(p) row into an `AtpGuidePhi` and calls
-  `thvm_atp_guide_set_phi` before `atp_bench_main`, once enigma-phi
-  lands; a test then checks that a FindProof-shaped run dumps x[20..] equal
-  to it.
 - Columns 13, 14 (goal symbols), 19 (term-heap growth), phi and the lane
-  are not in history export v2: the M3 harvest reads them from the
-  `THVM_ATP_GUIDE_DUMP` channel (guide_net.py consumes dumps), and
-  `featparity` checks the other columns against the export.
+  are not in history export v2, and a CP the run never selected has no
+  content there, so its cross-lane key is unknown.  Training reads every
+  input from the dump (label_join.py joins it with the export by seq);
+  `featparity` checks the other columns against the export, and the
+  phi(p) columns are checked against `--problem-features` by
+  `tests/atp_guide_phi.sh` and by the join.
+- A schedule with twins computes phi(p) once per twin process (each lane
+  is its own exec); the plan's single parent-side computation would need
+  the row handed to the twins without lengthening the unarmed lanes'
+  environments.
 
 ## Heads and the generator
 
@@ -242,15 +300,24 @@ an array's address.
 
     weights_to_c.py build ID=head.safetensors [ID=...] -o src/atp/guide_models.c
     weights_to_c.py example ex.safetensors      # the shipped tiny head
+    weights_to_c.py harvest hv.safetensors      # the loop-0 harvest head
     weights_to_c.py parity head.safetensors dump.tsv [out.txt]
 
 A head is a safetensors file of f32 `mu`, `sd`, `w1` [hid, n_x], `b1`,
 `w2`, `b2`, `kappa`; its metadata gives `Layout` (`v1` or `topk18`),
 `Phi`, `Lanes` and `Families` (`name:lane:mode:k:tau:coop`, comma
 separated).  A `topk_net.py export` file (no `Layout`) reads as `topk18`
-with the one family `*:0:topk:K:0:0`.  Heads total at most 2 MB.  The
-shipped head `example` (v1, 22 inputs, hidden 4, family `*` top-K 16)
-exists so the build compiles.
+with the one family `*:0:topk:K:0:0`.  Heads total at most 2 MB.  Two
+heads ship (`build example=ex.safetensors harvest=hv.safetensors`
+reproduces `src/atp/guide_models.c` byte for byte):
+- `example` (v1, 22 inputs, no phi(p), hidden 4, family `*` top-K 16), the
+  default, exists so the build compiles;
+- `harvest` (v1, 60 inputs: every phi(p) column and no lane column, hidden
+  1, w1 = w2 = 0, kappa 1, family `*` top-K 64) is the loop-0 harvest
+  head: its correction is 0 with or without `--guide-zero`, so it picks
+  the engine's root, and its dump records the engine's 64 best
+  candidates, phi(p) included; a dump names its lane (`lane_name=`), from
+  which the trainer builds the lane one-hot.
 
 Metadata `LaneNames` (optional) lists the `Lanes` lane names in one-hot
 order; `weights_to_c.py lanes head.safetensors listed.txt` checks them
@@ -267,6 +334,47 @@ history export (`np0_extract.py` of a `THVM_ATP_HISTORY_RATE=1
 THVM_ATP_HISTORY_CPFEAT=1` run, no negative subsampling) to 1e-9: the
 per-problem running means, the selections since push and the queue
 growth included.
+
+## Training (M3)
+
+The pipeline from a guided harvest to a compiled-in head, every step on a
+pod (plan section 3.2):
+
+1. `tools/atp_enigma/guide_jobs.py` lists the (problem, lane) jobs: every
+   TRAIN and TRAIN-X pair of the families whose 60 s lane-matrix row shows
+   the lane searched the problem (proved, wall, saturated, step cap,
+   memory guard), failed runs included, each with the dump rate that
+   spreads about 1,000 picks over a run as long as its matrix run.
+2. `tools/atp_enigma/guide_harvest.sh` runs them: the label harvest's
+   `FindProof --lane=L --szs --proof --wall=60` with export v2 at rate 1
+   (and `--work-clock=instr` on the clock-gated lanes), armed as the zero
+   twin of the harvest head with the sampled dump; `np0_extract.py` makes
+   the npz (proof mode, hindsight mode for a failed run or a withheld
+   proof), the dump is gzipped, and `phi.tsv` holds the problems'
+   `--problem-features` rows.
+3. `tools/atp_enigma/label_join.py keys` reads the proof keys and input
+   signatures of every label-harvest and harvest npz; `join` turns each
+   run's dump and npz into listwise groups (one per dumped pick:
+   candidates, inputs, labels) with three label sources: the run's own
+   proof (by seq), cross-lane positives (a selected candidate whose
+   rule's canonical key is in another lane's proof of the problem, the
+   input signatures equal) and hindsight positives (failed runs), and
+   writes per-lane statistics of what each source adds.  A run whose
+   dump disagrees with its export (the chosen CP at a dumped selection is
+   not the one the export records) or with its phi(p) row is left out.
+4. `tools/atp_enigma/guide_net.py train` fits a head on py/thvm: the
+   listwise loss within each pick's candidate set (a segment log-softmax
+   by scatter_reduce), layout v1 inputs with the lane one-hot, run
+   weights by TPTP rating and run length, five stem-hash OOF folds over
+   TRAIN and TRAIN-X together and the full model, early stopping on VAL,
+   and exports the head (b2 = 0, never trained) with its `Layout`, `Phi`,
+   `Lanes`, `LaneNames` and `Families` metadata.  Its readout (top-1
+   proof-CP hit against the engine's pick; the median-percentile ratio on
+   runs with 1,000+ selections; per lane, OOF and VAL) is a readout, not
+   a gate: G3.1 is decided at loop 1 on armed-harvest states.
+5. `weights_to_c.py build ... loop1=head.safetensors` compiles it in;
+   `weights_to_c.py lanes` checks its lanes against `--list-lanes`, and
+   G2.4 (`HEAD=`, `FEATPARITY=1`) checks C against Python.
 
 Tests: `tests/test_atp_guide.c`, built with `THVM_ATP_GUIDE_CHECK` (a
 clean pick that writes a cell-keyed KBO or LPO memo aborts) and
@@ -286,4 +394,9 @@ against the history export's `F` records; the goal versions; a decoding
 pick leaving the heap pointer, the memo epochs and the LPO statistics
 unchanged; per-problem normalization; layered-lazy semantics; coop
 cadence, orphan re-picks included; LRS side-key isolation; cost counters;
-the dump; arming from the environment.
+the dump, its sampler and row cap, and a zero twin's whole runs with the
+sampled dump on; the harvest head; the phi(p) seam's environment probe
+and switch-off; arming from the environment.  `tests/atp_guide_phi.sh`
+checks the seam on FindProof itself, `label_join.py selftest` and
+`guide_net.py selftest` the training tools on synthetic files (pods
+only, like every test).

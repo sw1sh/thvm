@@ -7774,6 +7774,13 @@ typedef struct {
   float v[ATP_GUIDE_PHI_MAX];
 } AtpGuidePhi;
 fn void      thvm_atp_guide_set_phi(const AtpGuidePhi *phi);
+// FindProof's phi(p) seam: how many phi(p) columns the head the
+// environment arms reads (0: the environment arms no layer, or its head
+// reads none).  A process that cannot give that head phi(p) calls
+// thvm_atp_guide_env_off, which keeps the layer unarmed there and prints
+// one "guide: <why>; selection layer off" line.
+fn u32       thvm_atp_guide_env_phi_cols(void);
+fn void      thvm_atp_guide_env_off(const char *why);
 // Arm s with the compiled-in head `model_id` (NULL: the default) and the
 // integration its family table gives `family`; zero = 1 forces a zero
 // correction; `lane` names the lane the engine runs, for the head's lane

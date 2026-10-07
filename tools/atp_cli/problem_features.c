@@ -1014,6 +1014,34 @@ static int tp_problem_features(const char *file, AtpPhi *phi, PhiMeta *meta,
   return PHI_OK;
 }
 
+// --- the selection layer's phi(p) -----------------------------------------
+
+_Static_assert(ATP_PHI_N <= ATP_GUIDE_PHI_MAX, "phi(p) fits the selection layer's row");
+
+// The env-armed selection layer's problem features (plan section 3.1):
+// the row --problem-features prints, computed by the same child under the
+// same CPU budget, handed to thvm_atp_guide_set_phi before the engine
+// starts.  A problem without it (over the budget, not unit-equality CNF,
+// a failed replay) runs without the layer, which the plan prescribes for
+// a problem past the budget.
+static void cli_guide_phi(const char *file) {
+  AtpPhi phi;
+  PhiMeta meta;
+  int rc = tp_problem_features(file, &phi, &meta, NULL, PHI_CPU_BUDGET_S);
+  if (rc != PHI_OK) {
+    thvm_atp_guide_env_off(rc == PHI_OVER_BUDGET ? "phi(p) exceeded its CPU budget"
+                                                 : "no phi(p) for this input");
+    return;
+  }
+  AtpGuidePhi gp;
+  memset(&gp, 0, sizeof gp);
+  gp.n = ATP_PHI_N;
+  for (u32 i = 0; i < (u32)ATP_PHI_N; i++) {
+    gp.v[i] = phi.v[i];
+  }
+  thvm_atp_guide_set_phi(&gp);
+}
+
 // --- FindProof --problem-features ---------------------------------------
 
 static void phi_problem_name(const char *file, char *buf, size_t cap) {

@@ -24,15 +24,18 @@
 #   weights_to_c.py build ID=head.safetensors [ID=head.safetensors ...]
 #                   [-o src/atp/guide_models.c]
 #   weights_to_c.py example out.safetensors
+#   weights_to_c.py harvest out.safetensors
 #   weights_to_c.py parity head.safetensors dump.tsv [out.txt]
 #   weights_to_c.py featparity run.npz dump.tsv [out.txt]
 #   weights_to_c.py lanes head.safetensors listed.txt
 # build writes the C file of static const float arrays (hex float
 # literals, exact) and the registry --guide-model=<id> selects from; the
-# first head is the default.  example writes the tiny head the shipped
-# src/atp/guide_models.c is built from:
+# first head is the default.  example writes the tiny head that keeps the
+# build compiling, harvest the loop-0 harvest head (every phi(p) column,
+# zero correction, top-64); the shipped src/atp/guide_models.c holds both:
 #   weights_to_c.py example ex.safetensors
-#   weights_to_c.py build example=ex.safetensors -o guide_models.c
+#   weights_to_c.py harvest hv.safetensors
+#   weights_to_c.py build example=ex.safetensors harvest=hv.safetensors -o guide_models.c
 # reproduces it byte for byte.  parity rescores a THVM_ATP_GUIDE_DUMP file
 # with the head in float64: every candidate's correction (to 1e-9) and
 # score, and every pick's decision (gate G2.4); a lazy dump must carry
@@ -293,13 +296,56 @@ def cmd_example(args):
     print(f"weights_to_c: example head -> {args[0]}")
 
 
+# ATP_PHI_N (src/thvm.h), the length of phi.py's PHI_COLUMNS.
+PHI_N = 40
+HARVEST_K = 64
+
+
+def harvest_head():
+    """The loop-0 harvest head: layout v1 with every phi(p) column and no
+    lane columns (a dump names its lane), one hidden unit, w1 = w2 = 0 and
+    kappa 1.  Its correction is 0 with or without --guide-zero, so it picks
+    the engine's root, and its top-64 dump records the engine's 64 best
+    candidates at every scored pick."""
+    n_x, hid = NC + NS + PHI_N, 1
+    tensors = {
+        "mu": ([n_x], [0.0] * n_x),
+        "sd": ([n_x], [1.0] * n_x),
+        "w1": ([hid, n_x], [0.0] * (hid * n_x)),
+        "b1": ([hid], [0.0]),
+        "w2": ([hid], [0.0]),
+        "b2": ([1], [0.0]),
+        "kappa": ([1], [1.0]),
+    }
+    meta = {"Layout": "v1", "Phi": str(PHI_N), "Lanes": "0",
+            "Families": "*:0:topk:%d:0:0" % HARVEST_K}
+    return tensors, meta
+
+
+def cmd_harvest(args):
+    if len(args) != 1:
+        die("harvest needs out.safetensors")
+    tensors, meta = harvest_head()
+    write_safetensors(args[0], tensors, meta)
+    print(f"weights_to_c: harvest head -> {args[0]}")
+
+
 def read_dump(path):
     """The sessions of a THVM_ATP_GUIDE_DUMP file (one '# guide' header per
-    armed engine): [(header dict, float64 rows)]."""
+    armed engine, and a '# guide end picks=P rows=R' footer when the
+    engine was freed): [(header dict, float64 rows)].  A session's footer,
+    when present, is the header's "end" entry (a dict); one without it was
+    cut short and its last line may be partial, so a line of the wrong
+    width ends its rows."""
     import numpy as np
     sessions = []
     with open(path) as f:
         for line in f:
+            if line.startswith("# guide end"):
+                if sessions:
+                    sessions[-1][0]["end"] = dict(tok.split("=", 1) for tok in line[11:].split()
+                                                  if "=" in tok)
+                continue
             if line.startswith("#"):
                 hdr = dict(tok.split("=", 1) for tok in line[1:].split() if "=" in tok)
                 sessions.append((hdr, []))
@@ -307,7 +353,13 @@ def read_dump(path):
             if line.strip():
                 if not sessions:
                     die(f"{path}: candidate rows before the first '# guide' header")
-                sessions[-1][1].append([float(v) for v in line.split("\t")])
+                hdr, rows = sessions[-1]
+                fields = line.rstrip("\n").split("\t")
+                want = 6 + int(hdr.get("n_x", len(fields) - 6))
+                if len(fields) != want or hdr.get("cut"):
+                    hdr["cut"] = "1"
+                    continue
+                rows.append([float(v) for v in fields])
     return [(hdr, np.array(rows, np.float64)) for hdr, rows in sessions if rows]
 
 
@@ -556,8 +608,8 @@ def cmd_lanes(args):
 
 
 def main():
-    cmds = {"build": cmd_build, "example": cmd_example, "parity": cmd_parity,
-            "featparity": cmd_featparity, "lanes": cmd_lanes}
+    cmds = {"build": cmd_build, "example": cmd_example, "harvest": cmd_harvest,
+            "parity": cmd_parity, "featparity": cmd_featparity, "lanes": cmd_lanes}
     if len(sys.argv) < 2 or sys.argv[1] not in cmds:
         die("usage: weights_to_c.py " + "|".join(cmds) + " ...")
     cmds[sys.argv[1]](sys.argv[2:])

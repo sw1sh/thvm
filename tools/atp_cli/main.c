@@ -1148,8 +1148,9 @@ static int fof_split_orchestrate(const char *self, const char *file,
 }
 
 // --problem-features (tools/atp_cli/problem_features.c, included after
-// this file: it reads SCHEDULE[]).
+// this file: it reads SCHEDULE[]), and the selection layer's phi(p).
 static int cli_problem_features_main(const char *file, int header, int lanes);
+static void cli_guide_phi(const char *file);
 
 static void usage(FILE *fp) {
   fprintf(fp,
@@ -1850,6 +1851,14 @@ int main(int argc, char **argv) {
     }
     g_tp_giveup_hook = NULL;
     tp_giveup("the front end spent the wall");
+  }
+
+  // A guided twin whose head reads phi(p) gets it here, after the front
+  // end (whose budgets it must not move) and before the engine's wall,
+  // alarm and emission deadline are set.  Unarmed, this probes the
+  // environment once, as the engine's init would.
+  if (thvm_atp_guide_env_phi_cols() > 0u) {
+    cli_guide_phi(file);
   }
 
   g_cli_want_szs = szs;

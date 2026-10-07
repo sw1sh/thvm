@@ -1503,11 +1503,17 @@ int main(void) {
       CHECK(f != NULL);
       if (f != NULL) {
         static char line[16384];
-        u32 rows = 0u, chosen = 0u, header = 0u;
+        u32 rows = 0u, chosen = 0u, header = 0u, footer = 0u;
         while (fgets(line, sizeof line, f) != NULL) {
+          if (strncmp(line, "# guide end ", 12) == 0) {
+            footer++;
+            CHECK(strcmp(line, "# guide end picks=2 rows=8\n") == 0);
+            continue;
+          }
           if (line[0] == '#') {
             header++;
             CHECK(strncmp(line, "# guide model=test layout=v1 n_x=20 ", 36) == 0);
+            CHECK(strstr(line, " lane_name=- phi=0 every=1 max=2 rows=0\n") != NULL);
             continue;
           }
           u32 fields = 1u;
@@ -1525,12 +1531,225 @@ int main(void) {
           rows++;
         }
         CHECK_EQ(header, 1u);
+        CHECK_EQ(footer, 1u);
         CHECK_EQ(rows, 8u);
         CHECK_EQ(chosen, 2u);
         fclose(f);
       }
       unlink(p);
     }
+  }
+
+  TEST_BEGIN("atp/guide/dump-sampler");
+  {
+    // THVM_ATP_GUIDE_DUMP_EVERY=3 over whole runs: exactly the scored
+    // selections t with atp_hx_hash(t) % 3 == 0 are dumped, every scored
+    // call at such a t, each whole; the footer counts them.  A row cap
+    // ends the dump before the first pick that would pass it.
+    u64 full_rows = 0u;
+    for (u32 cap = 0; cap < 2u; cap++) {
+      char rows_cap[32], rows_hdr[96];
+      snprintf(rows_cap, sizeof rows_cap, "%llu", (unsigned long long)(full_rows / 2u));
+      snprintf(rows_hdr, sizeof rows_hdr, " every=3 max=100000 rows=%s\n", cap ? rows_cap : "0");
+      char p[512];
+      tmp_template(p, sizeof p, "thvm_guide_sample");
+      int fd = mkstemp(p);
+      CHECK(fd >= 0);
+      if (fd < 0) {
+        continue;
+      }
+      close(fd);
+      setenv("THVM_ATP_GUIDE_DUMP", p, 1);
+      setenv("THVM_ATP_GUIDE_DUMP_MAX", "100000", 1);
+      setenv("THVM_ATP_GUIDE_DUMP_EVERY", "3", 1);
+      setenv("THVM_ATP_GUIDE_DUMP_ROWS", cap ? rows_cap : "0", 1);
+      AtpState *s = problem(1u);
+      CHECK(arm(s, &H_RAND, ATP_GUIDE_TOPK, 6u, 0.0, 4u, 1u));
+      unsetenv("THVM_ATP_GUIDE_DUMP");
+      unsetenv("THVM_ATP_GUIDE_DUMP_MAX");
+      unsetenv("THVM_ATP_GUIDE_DUMP_EVERY");
+      unsetenv("THVM_ATP_GUIDE_DUMP_ROWS");
+      problem_load(s, 1u);
+      // want[t]: rows a full dump holds at selection t.
+      static u32 want[TRAJ_MAX + 2u];
+      memset(want, 0, sizeof want);
+      u32 n_sampled = 0u, n_scored_t = 0u;
+      for (u32 k = 0; k < 600u; k++) {
+        u32 t = s->cp_select_count + 1u;
+        u64 sc0 = G(s)->n_scored, ev0 = G(s)->n_eval;
+        AtpStatus st = thvm_atp_step(s);
+        if (G(s)->n_scored != sc0 && t < TRAJ_MAX) {
+          n_scored_t++;
+          if (atp_hx_hash(t) % 3u == 0u) {
+            n_sampled++;
+            want[t] += (u32)(G(s)->n_eval - ev0);
+          }
+        }
+        if (st != ATP_RUNNING) {
+          break;
+        }
+      }
+      thvm_atp_free(s);
+      CHECK(n_scored_t > 8u);
+      CHECK(n_sampled > 1u && n_sampled < n_scored_t);
+      static u32 got[TRAJ_MAX + 2u];
+      memset(got, 0, sizeof got);
+      FILE *f = fopen(p, "r");
+      CHECK(f != NULL);
+      u64 rows = 0u, picks = 0u, foot_picks = 0u, foot_rows = 0u;
+      u32 footer = 0u, bad = 0u, last_t = 0u;
+      if (f != NULL) {
+        static char line[16384];
+        while (fgets(line, sizeof line, f) != NULL) {
+          unsigned long long fp = 0u, fr = 0u;
+          if (sscanf(line, "# guide end picks=%llu rows=%llu", &fp, &fr) == 2) {
+            footer++;
+            foot_picks = fp;
+            foot_rows = fr;
+            continue;
+          }
+          if (line[0] == '#') {
+            CHECK(strstr(line, rows_hdr) != NULL);
+            continue;
+          }
+          u32 t = 0u, i = 0u, seq = 0u, ch = 0u;
+          if (sscanf(line, "%u\t%u\t%u\t%u", &t, &i, &seq, &ch) != 4 || t >= TRAJ_MAX) {
+            bad++;
+            continue;
+          }
+          bad += (u32)(t < last_t);
+          last_t = t;
+          picks += (u64)(i == 0u);
+          got[t]++;
+          rows++;
+        }
+        fclose(f);
+      }
+      unlink(p);
+      CHECK_EQ(bad, 0u);
+      CHECK_EQ(footer, 1u);
+      CHECK_EQ(foot_rows, rows);
+      CHECK_EQ(foot_picks, picks);
+      // Uncapped: every sampled selection, each whole.  Capped at half
+      // its rows: a prefix of them, whole picks.
+      u32 differ = 0u, prefix_end = 0u;
+      u64 want_rows = 0u;
+      for (u32 t = 0; t < TRAJ_MAX; t++) {
+        if (cap == 0u) {
+          differ += (u32)(got[t] != want[t]);
+        } else if (got[t] != 0u) {
+          differ += (u32)(got[t] != want[t] || prefix_end);
+        } else if (want[t] != 0u) {
+          prefix_end = 1u;
+        }
+        want_rows += want[t];
+      }
+      CHECK_EQ(differ, 0u);
+      if (cap == 0u) {
+        CHECK_EQ(rows, want_rows);
+        full_rows = rows;
+      } else {
+        CHECK(rows > 0u && rows <= full_rows / 2u);
+      }
+    }
+  }
+
+  TEST_BEGIN("atp/guide/zero-exact-dump");
+  {
+    // A zero-correction twin with the sampled dump on selects exactly as
+    // the unguided engine over whole runs: the dump only observes (gate
+    // G2.2 with the loop-0 harvest's dump).
+    char p[512];
+    tmp_template(p, sizeof p, "thvm_guide_zdump");
+    int fd = mkstemp(p);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+      close(fd);
+      u64 hc0 = thvm_atp_heap_checkpoint();
+      u64 gc0 = gc_count();
+      u64 dumped = 0u;
+      for (u32 which = 0; which < N_PROBLEMS; which++) {
+        if (gc_count() == gc0) {
+          thvm_atp_heap_reset(hc0);
+        }
+        AtpState *s = problem(which);
+        problem_load(s, which);
+        run_traj(s, 600u, &T_BASE);
+        problem_free(s);
+        if (gc_count() == gc0) {
+          thvm_atp_heap_reset(hc0);
+        }
+        setenv("THVM_ATP_GUIDE_DUMP", p, 1);
+        setenv("THVM_ATP_GUIDE_DUMP_EVERY", "2", 1);
+        setenv("THVM_ATP_GUIDE_DUMP_MAX", "1000", 1);
+        s = problem(which);
+        CHECK_EQ(thvm_atp_guide_arm(s, "tgt-sel", "harvest", 1u, "tgt-sel"), 1);
+        unsetenv("THVM_ATP_GUIDE_DUMP");
+        unsetenv("THVM_ATP_GUIDE_DUMP_EVERY");
+        unsetenv("THVM_ATP_GUIDE_DUMP_MAX");
+        problem_load(s, which);
+        run_traj(s, 600u, &T_ARM);
+        CHECK(traj_eq(&T_BASE, &T_ARM));
+        CHECK(G(s)->n_scored > 0u);
+        CHECK_EQ(G(s)->n_changed, 0u);
+        dumped += G(s)->dump_picks;
+        problem_free(s);
+      }
+      CHECK(dumped > 0u);
+      unlink(p);
+    }
+  }
+
+  TEST_BEGIN("atp/guide/harvest-head");
+  {
+    // The loop-0 harvest head: every phi(p) column, no lane column, zero
+    // correction, top-64.  Unzeroed it still picks the engine's root.
+    const AtpGuideModel *m = atp_guide_model("harvest");
+    CHECK(m != NULL);
+    if (m != NULL) {
+      CHECK_EQ(m->layout, ATP_GUIDE_LAYOUT_V1);
+      CHECK_EQ(m->n_phi, (u32)ATP_PHI_N);
+      CHECK_EQ(m->n_lane, 0u);
+      CHECK_EQ(m->n_x, ATP_GUIDE_NC + ATP_GUIDE_NS + (u32)ATP_PHI_N);
+      const AtpGuideFamily *f = atp_guide_family(m, "encompass");
+      CHECK(f != NULL && f->mode == ATP_GUIDE_TOPK && f->k == ATP_GUIDE_KMAX);
+      CHECK(atp_guide_valid(m, f));
+      u32 nz = 0u;
+      for (u32 h = 0; h < m->hid; h++) {
+        nz += (u32)(m->w2[h] != 0.0f);
+      }
+      CHECK_EQ(nz, 0u);
+      AtpState *s = thvm_atp_init(&CFG, 100u);
+      CHECK_EQ(thvm_atp_guide_arm(s, "encompass", "harvest", 0u, NULL), 1);
+      rank_queue(s);
+      CHECK_EQ(atp_guide(s), 0u);
+      CHECK_EQ(G(s)->n_cand, 10u);
+      thvm_atp_free(s);
+    }
+  }
+
+  TEST_BEGIN("atp/guide/env-seam");
+  {
+    // FindProof's phi(p) seam: the columns the env-armed head reads, and
+    // the layer switched off for the process.
+    setenv("THVM_ATP_GUIDE", "twee", 1);
+    setenv("THVM_ATP_GUIDE_MODEL", "harvest", 1);
+    g_atp_guide_env = -1;
+    CHECK_EQ(thvm_atp_guide_env_phi_cols(), (u32)ATP_PHI_N);
+    unsetenv("THVM_ATP_GUIDE_MODEL");
+    g_atp_guide_env = -1;
+    CHECK_EQ(thvm_atp_guide_env_phi_cols(), 0u);
+    CHECK_EQ(g_atp_guide_env, 1);
+    thvm_atp_guide_env_off("test");
+    CHECK_EQ(g_atp_guide_env, 0);
+    AtpState *s = thvm_atp_init(&CFG, 100u);
+    CHECK(s->guide == NULL);
+    thvm_atp_free(s);
+    unsetenv("THVM_ATP_GUIDE");
+    g_atp_guide_env = -1;
+    CHECK_EQ(thvm_atp_guide_env_phi_cols(), 0u);
+    CHECK_EQ(g_atp_guide_env, 0);
+    g_atp_guide_env = -1;
   }
 
   TEST_BEGIN("atp/guide/env");
