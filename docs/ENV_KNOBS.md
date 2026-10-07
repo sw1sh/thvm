@@ -54,7 +54,6 @@ update the matching row here in the same change.
 | `THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED` | (impl) | Skip the reduce-into-reduce seed. |
 | `THVM_FUSE_REDUCE_INTO_REDUCE` | on | Fuse a reduce into a consuming REDUCE (softmax sum into attn@V, the conv-input-grad pair) -- tinygrad-faithful reduce-absorbs-reduce, now that the multi-axis REDUCE renderer has landed. `0` reverts to the historical per-reduce-kernel split. |
 | `THVM_REDUCE_UNMARK_CAP` | (impl) | Reduce-unmark capacity. |
-| `THVM_UOP_GRAPH_SIMPLIFY` | on | Simplify the UOp graph; `0` disables. |
 
 ## Codegen tuning
 

@@ -144,12 +144,10 @@ int main(void) {
   Term cc = term_new(0, TAG_TEN, DT_FP32, tc2);
   Term aa_plus_bb = uop_binary(UOP_ADD, aa, bb);
   Term times_cc   = uop_binary(UOP_MUL, aa_plus_bb, cc);
-  setenv("THVM_UOP_GRAPH_SIMPLIFY", "0", 1);
   thvm_materialize(times_cc);
   // Root is realized; the chain intermediate is single-consumer.
   CHECK_EQ(bufferize_is_realized(times_cc), 1);
   CHECK_EQ(bufferize_consumer_count(aa_plus_bb), 1);
-  unsetenv("THVM_UOP_GRAPH_SIMPLIFY");
 
   TEST_BEGIN("realize-classify/broadcast-reduce-bn-mean-chain-inlines");
   // The broadcast-reduce predicate must accept the BatchNorm-mean

@@ -526,7 +526,7 @@ int             dtype_is_packed   (u32 dt);
 // 41, 42 = UOP_IOR / UOP_IXOR (declared in the Symbolic INDEX layer above).
 // Identity-forward, STOP-backward marker (tinygrad UOp detach / stop-grad).
 // uop_grad treats it as a leaf w.r.t. its child (the cotangent dies), and
-// uop_graph_simplify unwraps it to its src BEFORE materialize, so no
+// materialize strips it (materialize_strip_detach) before lifting, so no
 // kernel/render/walker path ever sees it.  Used by BatchNorm.calc_stats
 // (`y = x - mean.detach()`) so the variance gradient does not flow back
 // through the mean -- mathematically d(var)/d(mean)=0, so the result is
@@ -2904,17 +2904,7 @@ fn u32 cg_render_input_inst_count(Term root);
 fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
                                        FILE *fp);
 
-typedef struct {
-  Term term;
-  u8   op;
-  u8   arity;
-  u64  loc;
-  Term src[MAX_UOP_SRC];
-} UOpView;
 fn u8   uop_is_movement(u8 op);
-fn int  uop_view(Term t, UOpView *out);
-fn int  uop_view_op(Term t, u8 op, UOpView *out);
-fn Term uop_view_src(UOpView const *view, u8 idx);
 
 typedef Term (*UOpGraphRewriteFn)(Term t, void *user);
 typedef struct {
@@ -2961,9 +2951,6 @@ fn u32  uop_graph_rewrite_stat_hits(char const *name);
 // TToDevice / Tensor.to(device).
 fn Term uop_to_device_leaves(Term root, i32 dev);
 
-fn Term uop_graph_simplify(Term root);
-fn Term uop_graph_simplify_checked(Term root, u32 env_id);
-fn Term uop_graph_simplify_materialize(Term root, u32 env_id);
 
 // Build a UOP_GRAD node.  y is the function output, gy is the
 // cotangent seed (typically a CONST(1) for top-level VJP), target is

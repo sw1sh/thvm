@@ -6572,9 +6572,9 @@ static void materialize_inner_copies(Term term) {
 }
 
 // Recursively strip UOP_DETACH(x) -> x in place across a UOP DAG, so the
-// stop-gradient marker never reaches kernel lifting / render / the walker
-// (the gated uop_graph_simplify can't be relied on).  Detach is identity
-// at the value level; the backward was already built before materialize.
+// stop-gradient marker never reaches kernel lifting / render / the walker.
+// Detach is identity at the value level; the backward was already built
+// before materialize.
 // Resolves chains of DETACH and rewrites each parent slot in place.
 static Term materialize_strip_detach_rec(Term term, u8 *visited, u64 cap) {
   for (int hops = 0; hops < 64 && term_tag(term) == TAG_UOP
@@ -6776,11 +6776,6 @@ fn Term thvm_materialize_impl(Term term) {
   // Resolve UOP_COPY children to their (uploaded) TAG_TEN before the
   // boundary classifier runs -- see materialize_inner_copies.
   materialize_inner_copies(term);
-
-  Term simplified = uop_graph_simplify_materialize(term, 0);
-  if (simplified != term) {
-    return thvm_materialize(simplified);
-  }
 
   if (term_ext(term) == UOP_CONST) {
     u32 tid = const_to_tendesc(term_val(term));

@@ -6,8 +6,10 @@
 // rebuilds the const at the destination dtype (symbolic.py:151-155)
 // and BITCAST(CONST) reads the value's storage bits back at the
 // destination width (fold_bitcast, symbolic.py:23-26; the cases mirror
-// test/null/test_uop_symbolic.py test_bitcast_chain).  Constructor and
-// rewrite checks only: nothing dispatches.
+// test/null/test_uop_symbolic.py test_bitcast_chain).  A graph rewrite that
+// exposes a CONST under a CAST or BITCAST rebuilds the node through its
+// constructor, which folds it.  Constructor and rewrite checks only:
+// nothing dispatches.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -18,13 +20,28 @@ static u32 bits_of(f32 v) {
   return b;
 }
 
-// A CAST / BITCAST node built without the constructor's fold, the shape
-// a graph rebuild hands to uop_graph_simplify.
+// A CAST / BITCAST node built without the constructor's fold.
 static Term raw_convert(u32 op, Term src, u32 dst_dtype) {
   u64 loc = heap_alloc(2);
   heap_set(loc + 0, src);
   heap_set(loc + 1, term_new(0, TAG_NUM, DT_INT32, dst_dtype));
   return term_new(0, TAG_UOP, op, loc);
+}
+
+// DETACH(x) -> x.
+static Term rule_strip_detach(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_DETACH) {
+    return 0;
+  }
+  return heap_read(term_val(t));
+}
+
+// Rewrites `op(DETACH(src))`: the source changes, so the rewriter rebuilds
+// the node through its constructor.
+static Term rebuilt_convert(u32 op, Term src, u32 dst_dtype) {
+  static UOpGraphRewriteRule const rules[] = {{"strip-detach", rule_strip_detach}};
+  return uop_graph_rewrite(raw_convert(op, uop_detach(src), dst_dtype), rules, 1, NULL);
 }
 
 int main(void) {
@@ -97,19 +114,17 @@ int main(void) {
   CHECK_EQ(term_ext(i4_bc), UOP_BITCAST);
   CHECK_EQ(heap_read(term_val(i4_bc)), i4);
 
-  TEST_BEGIN("graph-simplify/declined-bitcast-const-terminates");
-  Term i4_out = uop_graph_simplify(raw_convert(UOP_BITCAST, i4, DT_UINT4));
+  TEST_BEGIN("rewrite/declined-bitcast-const-terminates");
+  Term i4_out = rebuilt_convert(UOP_BITCAST, i4, DT_UINT4);
   CHECK_EQ(term_ext(i4_out), UOP_BITCAST);
   CHECK_EQ(heap_read(term_val(i4_out)), i4);
 
-  TEST_BEGIN("graph-simplify/cast-node-over-const-folds");
-  CHECK_EQ(uop_graph_simplify(raw_convert(UOP_CAST, f32_one, DT_BF16)), bf16_one);
-  CHECK_EQ(uop_graph_simplify(raw_convert(UOP_CAST, f32_one, DT_FP64)),
-           uop_const(DT_FP64, bits_of(1.0f)));
+  TEST_BEGIN("rewrite/cast-node-over-const-folds");
+  CHECK_EQ(rebuilt_convert(UOP_CAST, f32_one, DT_BF16), bf16_one);
+  CHECK_EQ(rebuilt_convert(UOP_CAST, f32_one, DT_FP64), uop_const(DT_FP64, bits_of(1.0f)));
 
-  TEST_BEGIN("graph-simplify/bitcast-node-over-const-folds");
-  CHECK_EQ(uop_graph_simplify(raw_convert(UOP_BITCAST, bf16_one, DT_UINT16)),
-           uop_const(DT_UINT16, 16256));
+  TEST_BEGIN("rewrite/bitcast-node-over-const-folds");
+  CHECK_EQ(rebuilt_convert(UOP_BITCAST, bf16_one, DT_UINT16), uop_const(DT_UINT16, 16256));
 
   thvm_free();
   TEST_REPORT();

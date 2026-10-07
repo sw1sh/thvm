@@ -229,18 +229,30 @@ static void test_identities(void) {
 }
 
 // === 5. a rewrite that unwraps DETACH keeps the payload ===
+static Term rule_strip_detach(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_DETACH) {
+    return 0;
+  }
+  return heap_read(term_val(t));
+}
+
+static Term strip_detach(Term root) {
+  static UOpGraphRewriteRule const rules[] = {{"strip-detach", rule_strip_detach}};
+  return uop_graph_rewrite(root, rules, 1, NULL);
+}
+
 static void test_detach_rewrite(void) {
   Term w = ten2(DT_FP32, 5, 3);
   Term i = ten2(DT_INT32, 4, 3);
-  Term g = uop_graph_simplify(uop_gather(uop_detach(w), i, 1));
+  Term g = strip_detach(uop_gather(uop_detach(w), i, 1));
   CHECK_EQ(term_ext(g), UOP_GATHER);
   CHECK_EQ(uop_gather_src(g), w);
   CHECK_EQ(uop_gather_idx(g), i);
   CHECK_EQ(uop_gather_dim(g), 1u);
   Term base = ten2(DT_FP32, 5, 3);
   Term src  = ten2(DT_FP32, 4, 3);
-  Term s = uop_graph_simplify(uop_scatter(base, i, uop_detach(src), 1,
-                                          SCATTER_MIN, 0));
+  Term s = strip_detach(uop_scatter(base, i, uop_detach(src), 1, SCATTER_MIN, 0));
   CHECK_EQ(term_ext(s), UOP_SCATTER);
   CHECK_EQ(uop_scatter_base(s), base);
   CHECK_EQ(uop_scatter_idx(s), i);
