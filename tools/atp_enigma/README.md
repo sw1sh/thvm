@@ -643,6 +643,43 @@ unreadable file or a term nested too deep to compare.
 blind to variable and symbol renaming, clause order and names (includes
 resolved), the corpus's J13 duplicate check.
 
+## DEV-S, the manufactured band set (plan M2 deliverable 4, amendment A25)
+
+DEV-S problems are ground goals the held-out runs derived: a rule that a
+lane searching the untransformed input oriented in the second half of a
+180 s run on a held-out problem, skolemized and posed against that
+problem's axioms, and kept when P0 solves it in (W/2, 2W] at WDEP = 60 s or
+at W180.  `devs.py` holds every reading (its header, amendment A25); its
+inputs live in `~/.cache/thvm/enigma/devs/in/` (`sources.tsv`,
+`source_lanes.txt`, `source_jobs.tsv`, `slots/`, `jobs.txt` with every
+sha256).
+
+```
+devs.py lanes <(FindProof --list-lanes=flags)        # the source lanes (= source_lanes.txt)
+devs.py jobs --problems problems.tsv --dev-t dev_t.tsv --train-t train_t.tsv \
+  --lane-table lanes_flags.txt --slots 8 --out in/   # the source list and slots
+# pod, per job: FindProof --lane=NAME --szs --wall=180 with the export at rate 1, then
+devs.py extract --root tptp_pool --source NAME --path PATH --lane LANE --hx run.hx \
+  --out cand/NAME__LANE.cand.tsv                     # candidate rows; delete run.hx
+# Mac: the J13 goal check reads ~/.cache/thvm/casc/J13/UEQ statically and prints counts only
+devs.py filter --cand cand/ --jobs in/source_jobs.tsv --pool-root tptp_pool \
+  --pool-problems problems.tsv --corpus-root ~/.cache/thvm/enigma/ifeq10/corpus \
+  --j13-dir ~/.cache/thvm/casc/J13/UEQ --out sel/   # problems, manifest, run_arms list
+devs.py stage --problems sel/problems.tsv --rows S1/ --wall 60 --out s2.tsv    # 120 s list
+devs.py stage --problems sel/problems.tsv --rows S1/ --wall 180 --out s3.tsv   # 360 s list
+devs.py band --manifest sel/candidates.tsv --rows S1/ --rows S2/ --rows S3/ --out band/
+devs.py gate --band band/ --rows AA/                 # G2.5 over the A/A pass
+python3 tools/atp_enigma/test_devs.py -v             # synthetic exports and rows (pods)
+```
+
+`extract` alone needs numpy (it reads the export through `np0_extract.py`,
+in chunks); it never reads a J13 file, and `filter` never sends one to a
+pod.  A job keeps its 32 candidates of smallest rank (a stable hash of the
+axiom system and the renaming-blind goal key, never difficulty); `filter`
+drops J13 goals, goals of the pool and the synthetic corpus, duplicates,
+the candidates past 10 per axiom system and past 1,000 in all, and names
+the rest `<source>-S<k>`.
+
 ## Comparison protocol (`protocol/`)
 
 The tools that run and judge every arm comparison of
