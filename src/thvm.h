@@ -1763,9 +1763,7 @@ fn Term term_resolve(Term t);
 // full body is seen.
 u32          kvar_alloc(const char *name, u32 lo, u32 hi);
 const char  *kvar_name(u32 id);
-u32          kvar_lo(u32 id);
 u32          kvar_hi(u32 id);
-u32          kvar_count(void);
 void         kvar_reset(void);
 u32          kvar_pack_extent(u32 var_id);
 int          kvar_extent_is_var(u32 packed_extent);

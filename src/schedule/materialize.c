@@ -1907,11 +1907,6 @@ static CUdeviceptr ARENA_DPTR        = 0;      // CUDA arena base
 // Telemetry: counts arena vs legacy allocs per realize for THVM_ARENA_DUMP.
 static u32 ARENA_ALLOCS_ARENA  = 0;
 static u32 ARENA_ALLOCS_LEGACY = 0;
-static u64 ARENA_PEAK_BYTES    = 0;
-
-fn u64 mem_plan_arena_peak_bytes(void)  { return ARENA_PEAK_BYTES;    }
-fn u32 mem_plan_arena_alloc_count(void) { return ARENA_ALLOCS_ARENA;  }
-fn u32 mem_plan_legacy_alloc_count(void){ return ARENA_ALLOCS_LEGACY; }
 
 static int arena_plan_enabled(void) {
   static int known = 0, enabled = 0;
@@ -2180,7 +2175,6 @@ static void arena_compute(void) {
   }
   tlsf_dispose(&tlsf);
   ARENA_SIZE = tlsf_round_up(peak, TLSF_BLOCK_SIZE);
-  ARENA_PEAK_BYTES = ARENA_SIZE;
   if (getenv("THVM_ARENA_DUMP")) {
     fprintf(stderr,
             "arena: %u/%u plannable, sum=%.2fMB arena=%.2fMB peak_off=%.2fMB\n",
@@ -5322,7 +5316,7 @@ static u8 op_is_view_movement(u8 op) {
 // view_strided_index.  Used by thvm_materialize when the root is a
 // movement-op chain that resolves to a view alias the caller will
 // read through (wnf expects flat-buffer reads).
-static Term materialize_root_alias_rec(Term t, int record_replay) {
+static Term materialize_root_alias(Term t, int record_replay) {
   if (term_tag(t) != TAG_TEN) return t;
   u32 tid = (u32)term_val(t);
   if (tid == 0 || tid >= TENS_NEXT) return t;
@@ -5407,10 +5401,6 @@ static Term materialize_root_alias_rec(Term t, int record_replay) {
     jit_capture_record_gather(tid, TENS[dst_tid].buf_id);
   }
   return term_new(0, TAG_TEN, d->dtype, dst_tid);
-}
-
-static Term materialize_root_alias(Term t) {
-  return materialize_root_alias_rec(t, 0);
 }
 
 // === build_kernel: visit() recursion (g2b) ===
@@ -6842,7 +6832,7 @@ fn Term thvm_materialize_impl(Term term) {
         // bytes -- stale on replay when the source is a re-firing reduce
         // broadcast or an append-mutated KV cache).  Idempotent for
         // genuinely static sources (re-copies identical bytes).
-        return materialize_root_alias_rec(alias_term, jit_is_capturing());
+        return materialize_root_alias(alias_term, jit_is_capturing());
       }
     }
   }

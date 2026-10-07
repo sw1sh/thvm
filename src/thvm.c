@@ -541,7 +541,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // in 6.3b..g.
 #include "wald/_.c"
 
-// Heap-rooted preserve walk; alternative to mark_preserved_chain.
+// Heap-rooted preserve walk.
 #include "schedule/heap_rooted_preserve.c"
 
 // External-caller pin table.  Tracks every Term that a foreign

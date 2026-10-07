@@ -964,12 +964,6 @@ static void ru_compute_topo_order(void) {
   }
 }
 
-// Accessor for testing.
-fn u32 rangeify_unified_topo_order_len(void) { return RU_TOPO_ORDER_LEN; }
-fn u32 rangeify_unified_topo_order_at(u32 i) {
-  if (i >= RU_TOPO_ORDER_LEN) return 0xFFFFFFFFu;
-  return RU_TOPO_ORDER[i];
-}
 
 // === Mirror source: indexing.py:148-269 run_rangeify ===
 //

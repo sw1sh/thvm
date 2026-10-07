@@ -78,17 +78,10 @@ const char *kvar_name(u32 id) {
   return KVARS[id].name;
 }
 
-u32 kvar_lo(u32 id) {
-  if (id == 0 || id >= KVARS_NEXT) return 0;
-  return KVARS[id].lo;
-}
-
 u32 kvar_hi(u32 id) {
   if (id == 0 || id >= KVARS_NEXT) return 0;
   return KVARS[id].hi;
 }
-
-u32 kvar_count(void) { return KVARS_NEXT - 1; }
 
 // Bind / read a kvar's runtime value (the loop count to run THIS realize).
 // HARD CAP: the value is clamped to [1, hi].  A bound above hi would loop past

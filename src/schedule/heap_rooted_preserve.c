@@ -5,8 +5,7 @@
 // [0, HEAP_NEXT) and marks every TenDesc reachable from a
 // TAG_TEN cell as preserved on its owning backend.
 // This is a strict superset of the bufs reachable from the
-// result tensor's producer chain that mark_preserved_chain
-// catches today, in two important ways:
+// result tensor's producer chain, in two important ways:
 //
 //   1. UOP children stored in HEAP[] (e.g., the operand cells
 //      of a TUOpAdd[a, b] sitting at expr_loc + 0..1) are
@@ -18,7 +17,7 @@
 //   2. Bufs reachable through HEAP cells but NOT through the
 //      result's producer_kid chain (e.g., a TenDesc the WL
 //      caller still holds via a separate TTerm) get
-//      preserved too -- mark_preserved_chain misses these.
+//      preserved too; a producer-chain walk misses these.
 //
 // Conversely, the heap-rooted scan is MORE PERMISSIVE: if a
 // TAG_TEN cell sits in the heap as an unreachable orphan

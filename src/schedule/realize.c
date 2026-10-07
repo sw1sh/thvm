@@ -13,40 +13,6 @@
 // to mark every buffer the result depends on as preserved.
 // The pool then rolls back skipping preserved bufs.
 
-// Recursively walk the result tensor's producer chain, marking
-// every reachable buf as preserved.  Conservative -- ALL forward
-// intermediates that fed the result are kept alive across the
-// rollback, so subsequent reads (TGrad chain rules, view-only
-// alias chains, etc.) see consistent state.  An aggressive
-// "result buf only" variant broke nn.wlt + segfaulted in
-// in-flight tests; a smarter design would track which kernel
-// outputs have been READ by all their consumers and free those
-// (refcount-driven free, the next reuse-pass arc item).
-static void mark_preserved_chain(u32 tid, u8 *visited_kids) {
-  if (tid == 0 || tid >= TENS_NEXT) return;
-  TenDesc *d = &TENS[tid];
-  if (d->buf_id != 0) {
-    cpu_buf_mark_preserved(d->buf_id);
-    // Arena view: the parent arena CpuBuf isn't reachable through any
-    // TenDesc.buf_id chain, but the view's bytes live inside it -- so
-    // we also mark the parent preserved.  Without this, pool_rollback
-    // would freelist-push the arena while a view still names its
-    // bytes via its data pointer (dangling read).
-    if (CPU_BUFS != NULL && d->buf_id < CPU_BUFS_NEXT) {
-      u32 parent = CPU_BUFS[d->buf_id].parent_buf_id;
-      if (parent != 0) cpu_buf_mark_preserved(parent);
-    }
-  }
-  u32 kid = d->producer_kid;
-  if (kid == 0 || kid >= KERNELS_NEXT) return;
-  if (visited_kids[kid]) return;
-  visited_kids[kid] = 1;
-  KernelEntry *ke = &KERNELS[kid];
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    mark_preserved_chain(ke->input_tids[i], visited_kids);
-  }
-}
-
 #define THVM_REALIZE_MAX_ITERS 64
 #define THVM_REALIZE_MANY_CAP  256
 

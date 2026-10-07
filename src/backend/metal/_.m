@@ -2190,7 +2190,7 @@ static u32 metal_tendesc_strided_index(TenDesc const *t, u32 flat_idx) {
 // === On-device strided gather (Backend.gather_strided for Metal) =========
 //
 // Encodes a compute kernel dst[gid] = src[strided_index(gid)] so that
-// materialize_root_alias_rec can flatten a non-contig realize-root view
+// materialize_root_alias can flatten a non-contig realize-root view
 // WITHOUT a GPU->host buf_read + CPU gather + host->GPU buf_write (which
 // forces a per-realize device sync).  The strided index is recomputed in
 // MSL EXACTLY as metal_view_strided_index does it: decompose gid
