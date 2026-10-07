@@ -331,27 +331,16 @@ static inline u32 grad_memo_hash(Term child, Term gy, Term target) {
   return (u32)h & (GRAD_MEMO_CAP - 1);
 }
 
-static u64 GRAD_MEMO_HITS  = 0;
-static u64 GRAD_MEMO_MISSES = 0;
-
-// Read-only accessors so the Python / WL bridges (and the dedup
-// experiment script) can compare the chain-rule walk's memo behavior
-// across single-realize vs realize-many call patterns.
-fn u64 grad_memo_hits_get  (void) { return GRAD_MEMO_HITS;   }
-fn u64 grad_memo_misses_get(void) { return GRAD_MEMO_MISSES; }
-
 static int grad_memo_lookup(Term child, Term gy, Term target, Term *out) {
   u32 base = grad_memo_hash(child, gy, target);
   for (u32 probe = 0; probe < GRAD_MEMO_CAP; probe++) {
     GradMemoEntry *e = &GRAD_MEMO[(base + probe) & (GRAD_MEMO_CAP - 1)];
-    if (e->gen != GRAD_MEMO_GEN) { GRAD_MEMO_MISSES++; return 0; }
+    if (e->gen != GRAD_MEMO_GEN) { return 0; }
     if (e->child == child && e->gy == gy && e->target == target) {
-      GRAD_MEMO_HITS++;
       *out = e->result;
       return 1;
     }
   }
-  GRAD_MEMO_MISSES++;
   return 0;
 }
 
@@ -419,27 +408,11 @@ typedef struct {
 } GradSlotEntry;
 static GradSlotEntry GRAD_SLOT[GRAD_SLOT_CAP];
 
-// Per-realize counters for the per-node slot mechanism, exported to the WL
-// and Python bridges so the dedup-verification probes (py/csource/thvm_py.c
-// py_grad_slot_*) can diagnose pre-walk gaps.  Reset at grad_memo_begin_realize.
-// FIRST   = first arrival at a forward node (cell allocated, cotangent stored).
-// FOLD    = later arrival while the cell hasn't fired yet (gy folded in).
-// REFIRE  = later arrival AFTER the cell already fired (fresh cell, downstream
-//           re-walked from scratch).  A high REFIRE count is the kernel-blowup
-//           smell -- each refire deposits an N-leaf ADD term per leaf.
-// PREWALK = number of slots the topo-deferred-fire pre-walk credited (with
-//           positive n_expected).
+// Per-realize slot-mechanism counter, reset at grad_memo_begin_realize; the
+// grad tests check it with grad_slot_stuck_get.
 // EXCESS  = arrivals that exceeded the pre-walked n_expected count (one extra
 //           per arrival past the predicted total -- diagnoses under-count).
-static u64 GRAD_SLOT_FIRST   = 0;
-static u64 GRAD_SLOT_FOLD    = 0;
-static u64 GRAD_SLOT_REFIRE  = 0;
-static u64 GRAD_SLOT_PREWALK = 0;
 static u64 GRAD_SLOT_EXCESS  = 0;
-fn u64 grad_slot_first_get  (void) { return GRAD_SLOT_FIRST;   }
-fn u64 grad_slot_fold_get   (void) { return GRAD_SLOT_FOLD;    }
-fn u64 grad_slot_refire_get (void) { return GRAD_SLOT_REFIRE;  }
-fn u64 grad_slot_prewalk_get(void) { return GRAD_SLOT_PREWALK; }
 fn u64 grad_slot_excess_get (void) { return GRAD_SLOT_EXCESS;  }
 
 // Count slots with n_expected > 0 but n_arrived < n_expected: pre-walk
@@ -463,12 +436,6 @@ fn void grad_memo_begin_realize(void) {
     memset(GRAD_DEP,  0, sizeof(GRAD_DEP));
     memset(GRAD_SLOT, 0, sizeof(GRAD_SLOT));
   }
-  GRAD_MEMO_HITS    = 0;
-  GRAD_MEMO_MISSES  = 0;
-  GRAD_SLOT_FIRST   = 0;
-  GRAD_SLOT_FOLD    = 0;
-  GRAD_SLOT_REFIRE  = 0;
-  GRAD_SLOT_PREWALK = 0;
   GRAD_SLOT_EXCESS  = 0;
 }
 
@@ -671,7 +638,6 @@ static void grad_prewalk_credit_and_descend(Term child, Term target) {
   if (e == NULL) return;                   // table full: defensive
   if (e->gen != GRAD_MEMO_GEN) {
     grad_slot_init(e, loc, target);
-    GRAD_SLOT_PREWALK++;
   }
   e->n_expected++;
   grad_prewalk_count(cr);                  // descend through this UOP once
@@ -780,20 +746,17 @@ static Term grad_bwd_emit_uop(Term child, Term gy) {
       heap_set(c + 1, gy);
       e->cell  = c;
       e->fired = 0;
-      GRAD_SLOT_REFIRE++;
       return grad_bwd_of(c);
     }
     if (e->cell != 0) {
       // Later arrival on the same uncounted slot: fold (legacy behavior).
       u64 c = e->cell;
       heap_set(c + 1, uop_binary(UOP_ADD, heap_read(c + 1), gy));
-      GRAD_SLOT_FOLD++;
       return uop_const(dt, 0);
     }
     u64 c = grad_cell_alloc(child);
     heap_set(c + 1, gy);
     e->cell = c;
-    GRAD_SLOT_FIRST++;
     return grad_bwd_of(c);
   }
 
@@ -804,7 +767,6 @@ static Term grad_bwd_emit_uop(Term child, Term gy) {
     e->pending_gy = (e->pending_gy == 0)
                   ? gy
                   : uop_binary(UOP_ADD, e->pending_gy, gy);
-    GRAD_SLOT_FOLD++;
     return uop_const(dt, 0);
   }
   if (e->n_arrived == e->n_expected) {
@@ -817,7 +779,6 @@ static Term grad_bwd_emit_uop(Term child, Term gy) {
     e->cell  = c;
     e->fired = 0;
     e->pending_gy = 0;     // reset so excess arrivals start a fresh round
-    GRAD_SLOT_FIRST++;
     return grad_bwd_of(c);
   }
   // Excess arrival: pre-walk under-counted (or saw a different fanout shape).

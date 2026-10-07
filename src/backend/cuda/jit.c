@@ -161,10 +161,6 @@ static void cuda_disk_cache_put(u64 cache_key, const char *ptx, size_t ptx_sz) {
 }
 
 // Telemetry: count disk-cache hits and writes.
-u64 CUDA_JIT_DISK_HITS  = 0;
-u64 CUDA_JIT_DISK_WRITES = 0;
-fn u64 cuda_jit_disk_hits(void)   { return CUDA_JIT_DISK_HITS;  }
-fn u64 cuda_jit_disk_writes(void) { return CUDA_JIT_DISK_WRITES; }
 
 // Open-addressed (linear probe).  A training run's kernel set is stable
 // and bounded (~140 distinct sources for beautiful_mnist), so with a
@@ -299,7 +295,6 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     if (cached_ptx != NULL) {
       ptx = cached_ptx;
       ptx_owned = 1;
-      CUDA_JIT_DISK_HITS++;
       goto module_load;
     }
 
@@ -388,7 +383,6 @@ fn CUfunction cuda_jit_compile(const char *cu_src, const char *kernel_name) {
     // Persist to disk so subsequent invocations skip nvrtc entirely.
     // ptx_sz includes the trailing NUL nvrtcGetPTX writes.
     cuda_disk_cache_put(disk_key, ptx, ptx_sz > 0 ? ptx_sz - 1 : 0);
-    CUDA_JIT_DISK_WRITES++;
   }
 
 module_load:;

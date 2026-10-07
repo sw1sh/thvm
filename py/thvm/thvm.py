@@ -57,9 +57,7 @@ _thvm_free = _bind("py_thvm_free", None)
 
 # ---------------- term inspection ----------------
 _term_tag = _bind("py_term_tag", c_uint32, c_uint64)
-_term_ext = _bind("py_term_ext", c_uint32, c_uint64)
 _term_val = _bind("py_term_val", c_uint64, c_uint64)
-_uop_src  = _bind("py_uop_src",  c_uint64, c_uint64)
 
 # ---------------- atom constructors ----------------
 _term_iconst = _bind("py_term_iconst", c_uint64, c_int32)
@@ -74,7 +72,6 @@ _uop_index_e = _bind("py_uop_index_e", c_uint64, c_uint64, c_uint64)
 _uop_int_binary = _bind("py_uop_int_binary", c_uint64, c_uint32, c_uint64, c_uint64)
 _uop_iwhere = _bind("py_uop_iwhere", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_where = _bind("py_uop_where", c_uint64, c_uint64, c_uint64, c_uint64)
-_uop_invalid = _bind("py_uop_invalid", c_uint64)
 _uop_binary = _bind("py_uop_binary", c_uint64, c_uint32, c_uint64, c_uint64)
 _uop_reduce = _bind("py_uop_reduce", c_uint64, c_uint32, c_uint32, c_uint64)
 _uop_opt = _bind("py_uop_opt", c_uint64, c_uint64, c_uint32, c_uint32)
@@ -114,7 +111,6 @@ _grad_with_target = _bind("py_grad_with_target", c_uint64,
                           c_uint64, c_uint64, c_uint64)
 _fwd = _bind("py_fwd", c_uint64, c_uint64, c_uint64)
 _wnf = _bind("py_wnf", c_uint64, c_uint64)
-_nf = _bind("py_nf", c_uint64, c_uint64)
 _realize = _bind("py_realize", c_uint64, c_uint64)
 _realize_many = _bind("py_realize_many", c_uint64,
                       ctypes.POINTER(c_uint64), c_uint32)
@@ -134,7 +130,6 @@ _jit_set_inputs = _bind("py_jit_set_inputs", None, c_uint32,
                         ctypes.POINTER(c_uint32), c_uint32)
 _jit_replay_with_inputs = _bind("py_jit_replay_with_inputs", c_uint32,
                                 c_uint32, ctypes.POINTER(c_uint32), c_uint32)
-_jit_op_count = _bind("py_jit_op_count", c_uint32, c_uint32)
 _jit_drop = _bind("py_jit_drop", None, c_uint32)
 _tens_count = _bind("py_tens_count", c_uint32)
 _kernel_count = _bind("py_kernel_count", c_uint32)
@@ -148,15 +143,6 @@ _ten_set_grad_leaf = _bind("py_ten_set_grad_leaf", c_int32,
                            c_uint64, c_int32)
 _uop_leaf_tids = _bind("py_uop_leaf_tids", c_uint32,
                        c_uint64, ctypes.POINTER(c_uint32), c_uint32)
-_grad_memo_hits   = _bind("py_grad_memo_hits",   c_uint64)
-_grad_memo_misses = _bind("py_grad_memo_misses", c_uint64)
-_grad_fires       = _bind("py_grad_fires",       c_uint64)
-_grad_slot_first   = _bind("py_grad_slot_first",   c_uint64)
-_grad_slot_fold    = _bind("py_grad_slot_fold",    c_uint64)
-_grad_slot_refire  = _bind("py_grad_slot_refire",  c_uint64)
-_grad_slot_prewalk = _bind("py_grad_slot_prewalk", c_uint64)
-_grad_slot_excess  = _bind("py_grad_slot_excess",  c_uint64)
-_grad_slot_stuck   = _bind("py_grad_slot_stuck",   c_uint64)
 _grad_err_take     = _bind("py_grad_err_take",     c_char_p)
 _ten_get_grad     = _bind("py_ten_get_grad",     c_uint64, c_uint64)
 _ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
@@ -164,10 +150,6 @@ _ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
 _ten_set_grad     = _bind("py_ten_set_grad",     c_int32,  c_uint64, c_uint64)
 
 # ---------------- buffer accessors ----------------
-_uop_buffer_scope = _bind("py_uop_buffer_scope", c_uint32, c_uint64)
-_uop_buffer_dtype = _bind("py_uop_buffer_dtype", c_uint32, c_uint64)
-_uop_buffer_ndim = _bind("py_uop_buffer_ndim", c_uint32, c_uint64)
-_uop_buffer_dim = _bind("py_uop_buffer_dim", c_uint32, c_uint64, c_uint32)
 
 # ---------------- renderer ----------------
 _render_uop_kernel = _bind("py_render_uop_kernel", c_void_p, c_uint64, c_char_p)
@@ -297,13 +279,9 @@ class _Constants:
     FP32 = _read_uint32_const("py_const_DT_FP32")
     # tensor term tag + max rank
     TAG_TEN = _read_uint32_const("py_const_TAG_TEN")
-    TAG_UOP = _read_uint32_const("py_const_TAG_UOP")
-    UOP_SHRINK = _read_uint32_const("py_const_UOP_SHRINK")
     MAX_DIM = _read_uint32_const("py_const_MAX_DIM")
     # buffer scopes
     SCOPE_GLOBAL = _read_uint32_const("py_const_UOP_SCOPE_GLOBAL")
-    SCOPE_LOCAL = _read_uint32_const("py_const_UOP_SCOPE_LOCAL")
-    SCOPE_REG = _read_uint32_const("py_const_UOP_SCOPE_REG")
     # FP binary opcodes
     ADD = _read_uint32_const("py_const_UOP_ADD")
     MUL = _read_uint32_const("py_const_UOP_MUL")
@@ -323,14 +301,10 @@ class _Constants:
     IMOD = _read_uint32_const("py_const_UOP_IMOD")
     ILT = _read_uint32_const("py_const_UOP_ILT")
     IAND = _read_uint32_const("py_const_UOP_IAND")
-    IOR = _read_uint32_const("py_const_UOP_IOR")
-    IXOR = _read_uint32_const("py_const_UOP_IXOR")
     # Reduce kinds
     REDUCE_SUM = _read_uint32_const("py_const_REDUCE_SUM")
     REDUCE_MAX = _read_uint32_const("py_const_REDUCE_MAX")
     # Indexed ops and their scatter combine kinds
-    GATHER = _read_uint32_const("py_const_UOP_GATHER")
-    SCATTER = _read_uint32_const("py_const_UOP_SCATTER")
     SCATTER_SUM = _read_uint32_const("py_const_SCATTER_SUM")
     SCATTER_PROD = _read_uint32_const("py_const_SCATTER_PROD")
     SCATTER_MAX = _read_uint32_const("py_const_SCATTER_MAX")
@@ -339,36 +313,14 @@ class _Constants:
     # Axis types (KAX_*)
     AXIS_LOOP = _read_uint32_const("py_const_KAX_LOOP")
     AXIS_REDUCE = _read_uint32_const("py_const_KAX_REDUCE")
-    AXIS_UPCAST = _read_uint32_const("py_const_KAX_UPCAST")
-    AXIS_UNROLL = _read_uint32_const("py_const_KAX_UNROLL")
     AXIS_LOCAL = _read_uint32_const("py_const_KAX_LOCAL")
     AXIS_GLOBAL = _read_uint32_const("py_const_KAX_GLOBAL")
-    AXIS_GROUP_REDUCE = _read_uint32_const("py_const_KAX_GROUP_REDUCE")
     # Opt kinds (UOP_OPT_*)
-    OPT_UNROLL = _read_uint32_const("py_const_UOP_OPT_UNROLL")
-    OPT_UPCAST = _read_uint32_const("py_const_UOP_OPT_UPCAST")
     OPT_TC = _read_uint32_const("py_const_UOP_OPT_TC")
-    OPT_LOCAL = _read_uint32_const("py_const_UOP_OPT_LOCAL")
-    OPT_GROUP_REDUCE = _read_uint32_const("py_const_UOP_OPT_GROUP_REDUCE")
-    OPT_CONV = _read_uint32_const("py_const_UOP_OPT_CONV")
-    OPT_FAST_MATH = _read_uint32_const("py_const_UOP_OPT_FAST_MATH")
-    OPT_SIMD_REDUCE = _read_uint32_const("py_const_UOP_OPT_SIMD_REDUCE")
-    OPT_VEC_LOAD = _read_uint32_const("py_const_UOP_OPT_VEC_LOAD")
     # KOpt opcodes (autotune-side; autotune.c BEAM uses these)
-    KOP_NONE = _read_uint32_const("py_const_KOP_NONE")
     KOP_UPCAST = _read_uint32_const("py_const_KOP_UPCAST")
-    KOP_UNROLL = _read_uint32_const("py_const_KOP_UNROLL")
-    KOP_LOCAL = _read_uint32_const("py_const_KOP_LOCAL")
-    KOP_GROUP = _read_uint32_const("py_const_KOP_GROUP")
-    KOP_GROUPTOP = _read_uint32_const("py_const_KOP_GROUPTOP")
-    KOP_SWAP = _read_uint32_const("py_const_KOP_SWAP")
-    KOP_PADTO = _read_uint32_const("py_const_KOP_PADTO")
-    KOP_NOLOCALS = _read_uint32_const("py_const_KOP_NOLOCALS")
     KOP_TC = _read_uint32_const("py_const_KOP_TC")
     KOP_GLOBAL = _read_uint32_const("py_const_KOP_GLOBAL")
-    KOP_FAST_MATH = _read_uint32_const("py_const_KOP_FAST_MATH")
-    KOP_SIMD_REDUCE = _read_uint32_const("py_const_KOP_SIMD_REDUCE")
-    KOP_VEC_LOAD = _read_uint32_const("py_const_KOP_VEC_LOAD")
 
 
 K = _Constants
@@ -389,9 +341,6 @@ class Thvm:
 
     _initialized = False
 
-    # Objects whose `.term` holds a raw heap Term (tensor.py registers every
-    # Tensor).  A realize that wants a heap collection leaves it pending;
-    # _collect runs it with these Terms as roots and rebinds each to its
     # moved cell, so no lazy graph Python keeps points into the dead space.
     live_terms: "weakref.WeakSet" = weakref.WeakSet()
 
@@ -438,12 +387,6 @@ class Thvm:
     def imul(self, a: Term, b: Term) -> Term:
         return Term(_uop_int_binary(c_uint32(K.IMUL), c_uint64(int(a)), c_uint64(int(b))))
 
-    def idiv(self, a: Term, b: Term) -> Term:
-        return Term(_uop_int_binary(c_uint32(K.IDIV), c_uint64(int(a)), c_uint64(int(b))))
-
-    def imod(self, a: Term, b: Term) -> Term:
-        return Term(_uop_int_binary(c_uint32(K.IMOD), c_uint64(int(a)), c_uint64(int(b))))
-
     def ilt(self, a: Term, b: Term) -> Term:
         return Term(_uop_int_binary(c_uint32(K.ILT), c_uint64(int(a)), c_uint64(int(b))))
 
@@ -461,9 +404,6 @@ class Thvm:
                                c_uint64(int(t)),
                                c_uint64(int(e))))
 
-    def invalid(self) -> Term:
-        return Term(_uop_invalid())
-
     # ---------------- FP arithmetic ----------------
     def add(self, a: Term, b: Term) -> Term:
         return Term(_uop_binary(c_uint32(K.ADD), c_uint64(int(a)), c_uint64(int(b))))
@@ -477,7 +417,6 @@ class Thvm:
     def cmpeq(self, a: Term, b: Term) -> Term:
         return Term(_uop_binary(c_uint32(K.CMPEQ), c_uint64(int(a)), c_uint64(int(b))))
 
-    # ---------------- FP unary ----------------
     # Builds UOP_NEG / RECIP / EXP2 / LOG2 / SQRT nodes.
     def _unary(self, opcode: int, x: Term) -> Term:
         return Term(_uop_unary(c_uint32(opcode), c_uint64(int(x))))
@@ -488,8 +427,6 @@ class Thvm:
     def log2(self, x: Term) -> Term:   return self._unary(K.LOG2, x)
     def sqrt(self, x: Term) -> Term:   return self._unary(K.SQRT, x)
 
-    # Synthetic exp(x) = exp2(x * log2(e)) since UOP_EXP isn't in the
-    # opcode set.  log2(e) is hash-consed via uop_const(FP32, ...) so
     # repeated calls share heap loc.
     def exp(self, x: Term) -> Term:
         log2_e = self.fconst(1.4426950408889634)
@@ -531,10 +468,6 @@ class Thvm:
                                  c_uint32(int(kind)),
                                  c_uint32(1 if include_self else 0)))
 
-    # ============ high-level tensor surface (TAG_TEN) ============
-    # Phase 1 of the Python Tensor frontend.  add / mul / cmplt /
-    # cmpeq / reduce above already compose TAG_TEN operands; these add
-    # tensor create, host I/O, unary/cast, movement, autodiff, and the
     # realize entry point.
 
     def ten_create(self, dtype: int, dims) -> Term:
@@ -619,9 +552,6 @@ class Thvm:
     def wnf(self, t: Term) -> Term:
         return Term(_wnf(c_uint64(int(t))))
 
-    def nf(self, t: Term) -> Term:
-        return Term(_nf(c_uint64(int(t))))
-
     def realize(self, t: Term) -> Term:
         """Drive wnf -> materialize -> kernelize -> schedule -> dispatch."""
         r = _realize(c_uint64(int(t)))
@@ -695,7 +625,6 @@ class Thvm:
         n = len(ids)
         arr = (c_uint32 * n)(*[c_uint32(int(i)) for i in ids]) if n else None
         return int(_jit_replay_with_inputs(c_uint32(s), arr, c_uint32(n)))
-    def jit_op_count(self, s: int) -> int: return int(_jit_op_count(c_uint32(s)))
     def jit_drop(self, s: int) -> None: _jit_drop(c_uint32(s))
 
     # ---- introspection (Phase-4 cross-check surface) ----
@@ -744,16 +673,6 @@ class Thvm:
     def ten_get_buf_id(self, t: Term) -> int:
         return int(_ten_get_buf_id(c_uint64(int(t))))
 
-    def grad_memo_hits   (self) -> int: return int(_grad_memo_hits())
-    def grad_memo_misses (self) -> int: return int(_grad_memo_misses())
-    def grad_fires       (self) -> int: return int(_grad_fires())
-    def grad_slot_first  (self) -> int: return int(_grad_slot_first())
-    def grad_slot_fold   (self) -> int: return int(_grad_slot_fold())
-    def grad_slot_refire (self) -> int: return int(_grad_slot_refire())
-    def grad_slot_prewalk(self) -> int: return int(_grad_slot_prewalk())
-    def grad_slot_excess (self) -> int: return int(_grad_slot_excess())
-    def grad_slot_stuck  (self) -> int: return int(_grad_slot_stuck())
-
     def grad_err_take(self) -> "str | None":
         """The chain rule's pending error (a node it has no gradient rule
         for), cleared by the call; None when there is none."""
@@ -774,23 +693,10 @@ class Thvm:
         return bool(_ten_set_grad(c_uint64(int(t)), c_uint64(int(g))))
 
     # ---------------- buffer accessors ----------------
-    def buffer_scope(self, t: Term) -> int:
-        return int(_uop_buffer_scope(c_uint64(int(t))))
-
-    def buffer_dtype(self, t: Term) -> int:
-        return int(_uop_buffer_dtype(c_uint64(int(t))))
-
-    def buffer_ndim(self, t: Term) -> int:
-        return int(_uop_buffer_ndim(c_uint64(int(t))))
-
-    def buffer_dim(self, t: Term, d: int) -> int:
-        return int(_uop_buffer_dim(c_uint64(int(t)), c_uint32(d)))
 
     # ---------------- term inspection ----------------
     def term_tag(self, t: Term) -> int: return int(_term_tag(c_uint64(int(t))))
-    def term_ext(self, t: Term) -> int: return int(_term_ext(c_uint64(int(t))))
     def term_val(self, t: Term) -> int: return int(_term_val(c_uint64(int(t))))
-    def uop_src(self, t: Term) -> int: return int(_uop_src(c_uint64(int(t))))
 
     # ---------------- BEAM / autotune surface ----------------
     def kernel_alloc(self) -> int:

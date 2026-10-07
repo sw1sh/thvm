@@ -50,7 +50,6 @@ static int precise_fire_memo_enabled(void) {
   return on;
 }
 static u64 ASSIGN_SEQ = 0;
-u64 PRECISE_SKIPS = 0, PRECISE_REFIRE_INPUT = 0, PRECISE_REFIRE_OUT = 0;
 #define ASSIGN_WRITE_RING 8192u
 static u64   ASSIGN_W_SEQ    [ASSIGN_WRITE_RING];
 static u32   ASSIGN_W_BUF    [ASSIGN_WRITE_RING];
@@ -395,10 +394,7 @@ fn void kernel_fire_by_id(u32 kid) {
           need = 1; break;
         }
       }
-      if (!need) { PRECISE_SKIPS++; return; }
-      PRECISE_REFIRE_INPUT++;
-    } else {
-      PRECISE_REFIRE_OUT++;
+      if (!need) { return; }
     }
   }
 

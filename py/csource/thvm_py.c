@@ -30,7 +30,6 @@ EXPORT void py_thvm_free(void) { thvm_free(); }
 
 // ---------------- term inspection ----------------
 EXPORT uint32_t py_term_tag(uint64_t t) { return term_tag(t); }
-EXPORT uint32_t py_term_ext(uint64_t t) { return term_ext(t); }
 EXPORT uint64_t py_term_val(uint64_t t) { return term_val(t); }
 
 // First heap child (the `src`) of a TAG_UOP node.  Movement ops
@@ -38,10 +37,6 @@ EXPORT uint64_t py_term_val(uint64_t t) { return term_val(t); }
 // source at heap slot 0; the Tensor frontend walks this to detect a
 // matmul operand that is a movement VIEW over a COMPUTED (unrealized)
 // source (the GPT2 head-split fusion hazard).  Returns 0 for non-UOP.
-EXPORT uint64_t py_uop_src(uint64_t t) {
-  if (term_tag(t) != TAG_UOP) return 0;
-  return heap_read(term_val(t));
-}
 
 // ---------------- atom constructors ----------------
 EXPORT uint64_t py_term_iconst(int32_t v) {
@@ -86,7 +81,6 @@ EXPORT uint64_t py_uop_where(uint64_t cond, uint64_t t, uint64_t e) {
   return uop_where(cond, t, e);
 }
 
-EXPORT uint64_t py_uop_invalid(void) { return uop_invalid(); }
 
 EXPORT uint64_t py_uop_binary(uint32_t opcode, uint64_t a, uint64_t b) {
   return uop_binary(opcode, a, b);
@@ -260,7 +254,6 @@ EXPORT uint64_t py_fwd(uint64_t y, uint64_t gy) {
 // heap-resident UOp/GRAD/kernel -- surfaces grads before materialize).
 // py_realize: the full pipeline, returns the result TAG_TEN.
 EXPORT uint64_t py_wnf(uint64_t t)     { return wnf(t); }
-EXPORT uint64_t py_nf(uint64_t t)      { return nf(t); }
 EXPORT uint64_t py_realize(uint64_t t) { return thvm_realize(t); }
 
 // py_realize_many: bundle n terms into one TAG_CTR and realize them
@@ -416,40 +409,7 @@ EXPORT uint32_t py_jit_replay_with_inputs(uint32_t s, uint32_t const *new_ids,
                                           uint32_t n) {
   return jit_replay_with_inputs(s, new_ids, n);
 }
-EXPORT uint32_t py_jit_op_count(uint32_t s) { return jit_capture_op_count(s); }
 EXPORT void     py_jit_drop(uint32_t s)     { jit_capture_drop(s); }
-// Diagnostic accessors for one captured op.
-EXPORT uint32_t py_jit_op_kid(uint32_t s, uint32_t i) {
-  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
-  if (i >= JIT_CAPTURES[s].n_ops) return 0;
-  return JIT_CAPTURES[s].ops[i].kid;
-}
-EXPORT uint32_t py_jit_op_out_buf(uint32_t s, uint32_t i) {
-  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
-  if (i >= JIT_CAPTURES[s].n_ops) return 0;
-  return JIT_CAPTURES[s].ops[i].out_buf_id;
-}
-EXPORT uint32_t py_jit_op_n_inputs(uint32_t s, uint32_t i) {
-  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
-  if (i >= JIT_CAPTURES[s].n_ops) return 0;
-  return JIT_CAPTURES[s].ops[i].n_inputs;
-}
-EXPORT uint32_t py_jit_op_in_buf(uint32_t s, uint32_t i, uint32_t j) {
-  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
-  if (i >= JIT_CAPTURES[s].n_ops) return 0;
-  JitCaptureOp *op = &JIT_CAPTURES[s].ops[i];
-  if (j >= op->n_inputs) return 0;
-  uint32_t const *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
-  return ids[j];
-}
-EXPORT uint32_t py_jit_op_replay_skip(uint32_t s, uint32_t i) {
-  if (s == 0 || s >= JIT_CAPTURE_NSLOTS) return 0;
-  if (i >= JIT_CAPTURES[s].n_ops) return 0;
-  return JIT_CAPTURES[s].ops[i].replay_skip;
-}
-EXPORT uint64_t py_hot_jit_replay_dispatches(void) {
-  return HOT_JIT_REPLAY_DISPATCHES;
-}
 
 // --- introspection (Phase-4 cross-check surface) ---
 EXPORT uint32_t py_tens_count(void) {
@@ -495,31 +455,11 @@ EXPORT uint64_t py_cuda_jit_evictions(void) {
   return 0;
 #endif
 }
-EXPORT uint64_t py_cuda_jit_disk_hits(void) {
-#ifdef THVM_HAS_CUDA
-  return cuda_jit_disk_hits();
-#else
-  return 0;
-#endif
-}
-EXPORT uint64_t py_cuda_jit_disk_writes(void) {
-#ifdef THVM_HAS_CUDA
-  return cuda_jit_disk_writes();
-#else
-  return 0;
-#endif
-}
-extern uint64_t PRECISE_SKIPS, PRECISE_REFIRE_INPUT, PRECISE_REFIRE_OUT;
-EXPORT uint64_t py_precise_skips(void)        { return PRECISE_SKIPS; }
-EXPORT uint64_t py_precise_refire_input(void) { return PRECISE_REFIRE_INPUT; }
-EXPORT uint64_t py_precise_refire_out(void)   { return PRECISE_REFIRE_OUT; }
 EXPORT void py_cg_profile_dump(uint32_t top_n) {
   cg_profile_dump(stderr, top_n);
   fflush(stderr);
 }
 EXPORT uint32_t py_const_TAG_TEN(void) { return TAG_TEN; }
-EXPORT uint32_t py_const_TAG_UOP(void) { return TAG_UOP; }
-EXPORT uint32_t py_const_UOP_SHRINK(void) { return UOP_SHRINK; }
 EXPORT uint32_t py_const_MAX_DIM(void) { return MAX_DIM; }
 
 // --- grad-leaf mark: INTERNAL mechanism, not a user-facing flag ---
@@ -553,18 +493,6 @@ EXPORT uint32_t py_uop_leaf_tids(uint64_t root, uint32_t *out, uint32_t cap) {
   return n;
 }
 
-// Hot-path snapshots for the dedup-verification experiment.  Returns
-// per-realize chain-rule memo stats and the global grad-fires counter.
-EXPORT uint64_t py_grad_memo_hits  (void) { return grad_memo_hits_get();   }
-EXPORT uint64_t py_grad_memo_misses(void) { return grad_memo_misses_get(); }
-EXPORT uint64_t py_grad_fires      (void) { return HOT_GRAD_FIRES;         }
-// Per-realize slot-mechanism counters for the topo-deferred-fire diagnosis.
-EXPORT uint64_t py_grad_slot_first  (void) { return grad_slot_first_get();   }
-EXPORT uint64_t py_grad_slot_fold   (void) { return grad_slot_fold_get();    }
-EXPORT uint64_t py_grad_slot_refire (void) { return grad_slot_refire_get();  }
-EXPORT uint64_t py_grad_slot_prewalk(void) { return grad_slot_prewalk_get(); }
-EXPORT uint64_t py_grad_slot_excess (void) { return grad_slot_excess_get();  }
-EXPORT uint64_t py_grad_slot_stuck  (void) { return grad_slot_stuck_get();   }
 // The chain rule's pending error message (a node it has no rule for),
 // cleared by the call; NULL when there is none.
 EXPORT char const *py_grad_err_take(void) { return grad_err_take(); }
@@ -608,12 +536,6 @@ EXPORT uint64_t py_cuda_buf_dptr(uint32_t buf_id) {
 #else
   (void)buf_id; return 0;
 #endif
-}
-EXPORT uint32_t py_uop_buffer_scope(uint64_t t) { return uop_buffer_scope(t); }
-EXPORT uint32_t py_uop_buffer_dtype(uint64_t t) { return uop_buffer_dtype(t); }
-EXPORT uint32_t py_uop_buffer_ndim(uint64_t t)  { return uop_buffer_ndim(t); }
-EXPORT uint32_t py_uop_buffer_dim(uint64_t t, uint32_t d) {
-  return uop_buffer_dim(t, d);
 }
 
 // ---------------- renderer ----------------
@@ -811,15 +733,7 @@ EXPORT uint32_t py_cuda_dag_dispatch_shape(uint64_t root,
   return 1;
 }
 
-EXPORT uint32_t py_const_KOP_NONE(void)     { return KOP_NONE; }
 EXPORT uint32_t py_const_KOP_UPCAST(void)   { return KOP_UPCAST; }
-EXPORT uint32_t py_const_KOP_UNROLL(void)   { return KOP_UNROLL; }
-EXPORT uint32_t py_const_KOP_LOCAL(void)    { return KOP_LOCAL; }
-EXPORT uint32_t py_const_KOP_GROUP(void)    { return KOP_GROUP; }
-EXPORT uint32_t py_const_KOP_GROUPTOP(void) { return KOP_GROUPTOP; }
-EXPORT uint32_t py_const_KOP_SWAP(void)     { return KOP_SWAP; }
-EXPORT uint32_t py_const_KOP_PADTO(void)    { return KOP_PADTO; }
-EXPORT uint32_t py_const_KOP_NOLOCALS(void) { return KOP_NOLOCALS; }
 EXPORT uint32_t py_const_KOP_TC(void)       { return KOP_TC; }
 EXPORT uint32_t py_const_KOP_GLOBAL(void)   { return KOP_GLOBAL; }
 // KOP_FAST_MATH / KOP_SIMD_REDUCE / KOP_VEC_LOAD were purged from the IR
@@ -830,8 +744,6 @@ EXPORT uint32_t py_const_KOP_GLOBAL(void)   { return KOP_GLOBAL; }
 EXPORT uint32_t py_const_DT_INT32(void)         { return DT_INT32; }
 EXPORT uint32_t py_const_DT_FP32(void)          { return DT_FP32; }
 EXPORT uint32_t py_const_UOP_SCOPE_GLOBAL(void) { return UOP_SCOPE_GLOBAL; }
-EXPORT uint32_t py_const_UOP_SCOPE_LOCAL(void)  { return UOP_SCOPE_LOCAL; }
-EXPORT uint32_t py_const_UOP_SCOPE_REG(void)    { return UOP_SCOPE_REG; }
 
 EXPORT uint32_t py_const_UOP_ADD(void)   { return UOP_ADD; }
 EXPORT uint32_t py_const_UOP_MUL(void)   { return UOP_MUL; }
@@ -851,14 +763,10 @@ EXPORT uint32_t py_const_UOP_IDIV(void)  { return UOP_IDIV; }
 EXPORT uint32_t py_const_UOP_IMOD(void)  { return UOP_IMOD; }
 EXPORT uint32_t py_const_UOP_ILT(void)   { return UOP_ILT; }
 EXPORT uint32_t py_const_UOP_IAND(void)  { return UOP_IAND; }
-EXPORT uint32_t py_const_UOP_IOR(void)   { return UOP_IOR; }
-EXPORT uint32_t py_const_UOP_IXOR(void)  { return UOP_IXOR; }
 
 EXPORT uint32_t py_const_REDUCE_SUM(void) { return REDUCE_SUM; }
 EXPORT uint32_t py_const_REDUCE_MAX(void) { return REDUCE_MAX; }
 
-EXPORT uint32_t py_const_UOP_GATHER(void)      { return UOP_GATHER; }
-EXPORT uint32_t py_const_UOP_SCATTER(void)     { return UOP_SCATTER; }
 EXPORT uint32_t py_const_SCATTER_SUM(void)     { return SCATTER_SUM; }
 EXPORT uint32_t py_const_SCATTER_PROD(void)    { return SCATTER_PROD; }
 EXPORT uint32_t py_const_SCATTER_MAX(void)     { return SCATTER_MAX; }
@@ -867,16 +775,9 @@ EXPORT uint32_t py_const_SCATTER_REPLACE(void) { return SCATTER_REPLACE; }
 
 EXPORT uint32_t py_const_KAX_LOOP(void)         { return KAX_LOOP; }
 EXPORT uint32_t py_const_KAX_REDUCE(void)       { return KAX_REDUCE; }
-EXPORT uint32_t py_const_KAX_UPCAST(void)       { return KAX_UPCAST; }
-EXPORT uint32_t py_const_KAX_UNROLL(void)       { return KAX_UNROLL; }
 EXPORT uint32_t py_const_KAX_LOCAL(void)        { return KAX_LOCAL; }
 EXPORT uint32_t py_const_KAX_GLOBAL(void)       { return KAX_GLOBAL; }
-EXPORT uint32_t py_const_KAX_GROUP_REDUCE(void) { return KAX_GROUP_REDUCE; }
 
-EXPORT uint32_t py_const_UOP_OPT_UNROLL(void)       { return UOP_OPT_UNROLL; }
-EXPORT uint32_t py_const_UOP_OPT_UPCAST(void)       { return UOP_OPT_UPCAST; }
 EXPORT uint32_t py_const_UOP_OPT_TC(void)           { return UOP_OPT_TC; }
-EXPORT uint32_t py_const_UOP_OPT_LOCAL(void)        { return UOP_OPT_LOCAL; }
-EXPORT uint32_t py_const_UOP_OPT_GROUP_REDUCE(void) { return UOP_OPT_GROUP_REDUCE; }
 // UOP_OPT_CONV / UOP_OPT_FAST_MATH / UOP_OPT_SIMD_REDUCE / UOP_OPT_VEC_LOAD
 // were purged from the IR (7a2218e6b); exports dropped (Python -> -1).
