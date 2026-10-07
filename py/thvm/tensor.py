@@ -33,7 +33,7 @@ import numpy as np
 from .device import Device
 from .dtypes import DType, dtypes
 from .helpers import TRAINING, argfix
-from .thvm import K, Term, Thvm, _uop_binary
+from .thvm import K, Term, Thvm, _uop_binary, _uop_where
 
 
 # Process-global bridge.  All Tensors share one Thvm instance.
@@ -66,31 +66,6 @@ _PIN_NEXT = 1
 # Every Tensor's raw term is a root of the deferred heap collection, which
 # rebinds it when its cells move (Thvm._collect).
 _LIVE_ADD = Thvm.live_terms.add
-
-
-# thvm's `where`/`maximum`/`minimum` compose through a 0/1 mask MULTIPLY
-# (no float WHERE/select ALU op), so a literal +/-inf operand poisons the
-# UNSELECTED lanes with 0*inf = NaN.  Substituting a large finite f32
-# sentinel (+/-3.0e38, the f32 max magnitude) at construction keeps every
-# downstream use mathematically identical -- softmax(qk + -3e38) underflows
-# to exactly 0, the same as a -inf additive causal mask -- while staying
-# NaN-safe.  This is the standard finite-large-negative causal-mask idiom.
-_F32_SENTINEL = 3.0e38
-
-
-def _finite_sentinel(value, dt: "DType"):
-    """Clamp a non-finite scalar const to a large finite f32 sentinel for
-    float dtypes (see _F32_SENTINEL note).  Pass non-float / finite values
-    through untouched."""
-    if dt.thvm_id != dtypes.float32.thvm_id:
-        return value
-    try:
-        fv = float(value)
-    except (TypeError, ValueError):
-        return value
-    if math.isinf(fv):
-        return _F32_SENTINEL if fv > 0 else -_F32_SENTINEL
-    return value
 
 
 def _host_scatter_extreme(base, flat, vals, is_max: bool, include_self: bool):
@@ -589,7 +564,6 @@ class Tensor(metaclass=_TensorMeta):
     def full(cls, shape, value, dtype: DType | None = None,
              **kw) -> "Tensor":
         dt = dtype or dtypes.default_float
-        value = _finite_sentinel(value, dt)
         return cls._from_numpy(np.full(shape, value, dtype=dt.np_dtype),
                                dt)
 
@@ -820,46 +794,30 @@ class Tensor(metaclass=_TensorMeta):
         ls = self.log_softmax(axis=ax)
         return (ls * OH).sum(axis=ax).mean() * -1.0
 
-    def argmax(self, axis: int = -1) -> "Tensor":
-        """Index of the max along `axis`.  Host-side (used for eval
-        accuracy, off the autograd path); returns an int Tensor."""
+    def argmax(self, axis=None, keepdim: bool = False) -> "Tensor":
+        """Index of the max along `axis` (the flattened tensor for None):
+        tinygrad mixin/op.py:863-888, ties to the first index."""
+        if axis is None:
+            return self.flatten().argmax(0)
         ax = axis if axis >= 0 else axis + self.ndim
-        return Tensor(np.argmax(self.numpy(), axis=ax).astype(np.int32),
-                      dtype=dtypes.default_int)
+        n = self._shape[ax]
+        m = self == self.max(axis=ax, keepdim=True)
+        ramp = Tensor.arange(n, 0, -1, dtype=dtypes.float32)
+        idx = m * ramp.reshape(n, *[1] * (self.ndim - ax - 1))
+        return (n - idx.max(axis=ax, keepdim=keepdim)).cast(dtypes.int32)
 
     def __eq__(self, other) -> "Tensor":
-        """Elementwise equality mask (1.0/0.0) -- tinygrad semantics, so
-        `(pred == labels).mean()` reads as an accuracy."""
-        a = self.numpy()
-        b = other.numpy() if isinstance(other, Tensor) else np.asarray(other)
-        return Tensor((a == b).astype(np.float32))
+        """Elementwise equality mask (1.0/0.0), so `(pred == labels).mean()`
+        reads as an accuracy; tinygrad's CMPEQ compare."""
+        return self._binop(other, K.CMPEQ).cast(dtypes.float32)
 
     def __ne__(self, other) -> "Tensor":
-        return Tensor((self.numpy() != (
-            other.numpy() if isinstance(other, Tensor) else np.asarray(other))
-        ).astype(np.float32))
+        return 1.0 - (self == other)
 
     def relu(self) -> "Tensor":
-        # relu(x) = (0 < x) * x
-        # JIT-friendly: cache the zero tensor PER SHAPE so the captured
-        # graph references a stable buf_id.  An earlier impl allocated a
-        # fresh zero each call (`Tensor(np.zeros(...))`), which broke
-        # TinyJit -- the captured op held the temp zero's buf_id but
-        # the Python wrapper went out of scope so subsequent replays
-        # saw a freed/recycled buffer.  Memoizing keeps the zero alive.
-        if not hasattr(Tensor, "_zero_cache"):
-            Tensor._zero_cache = {}
-        key = (self._shape, self._dtype.name)
-        zero = Tensor._zero_cache.get(key)
-        if zero is None:
-            zero = Tensor(np.zeros(self._shape, dtype=self._dtype.np_dtype),
-                          dtype=self._dtype)
-            zero.realize()
-            Tensor._zero_cache[key] = zero
-        mask = Term(_uop_binary(_ct.c_uint32(K.CMPLT),
-                                _ct.c_uint64(int(zero.term)),
-                                _ct.c_uint64(int(self.term))))
-        return self * Tensor._from_term(mask, self._dtype, self._shape)
+        # tinygrad mixin/elementwise.py:675-684; maximum(0) would pass half
+        # the gradient through at 0.
+        return (self > 0).where(self, 0)
 
     def elu(self, alpha: float = 1.0) -> "Tensor":
         # elu(x) = max(0, x) + min(0, alpha*(exp(x)-1))
@@ -873,13 +831,15 @@ class Tensor(metaclass=_TensorMeta):
         return self.relu() + (neg_relu_neg.exp() - 1.0) * alpha
 
     def maximum(self, other) -> "Tensor":
+        # tinygrad's MAX as selects: the ties' average gives each side half
+        # the gradient there, as MAX's gradient rule does
+        # (mixin/gradient.py:78-79).
         a, b = self._broadcast(other)
-        # max(a,b) = (a<b) * b + (a>=b) * a  -- via CMPLT
-        less = Term(_uop_binary(_ct.c_uint32(K.CMPLT),
-                                _ct.c_uint64(int(a.term)),
-                                _ct.c_uint64(int(b.term))))
-        less_t = Tensor._from_term(less, a._dtype, a._shape)
-        return less_t * b + (1.0 - less_t) * a
+        if a._dtype != b._dtype:
+            a, b = a.cast(dtypes.float32), b.cast(dtypes.float32)
+        if not dtypes.is_float(a._dtype):
+            return (a < b).where(b, a)
+        return (a < b).where(b, (a == b).where(a * 0.5 + b * 0.5, a))
 
     def minimum(self, other) -> "Tensor":
         return -(-self).maximum(-_wrap_other(self, other))
@@ -899,25 +859,21 @@ class Tensor(metaclass=_TensorMeta):
     def __gt__(self, other) -> "Tensor":
         return _wrap_other(self, other).__lt__(self)
 
-    def where(self, a, b) -> "Tensor":
-        """tinygrad Tensor.where -- self is a 0/1 (or boolean) mask;
-        returns mask*a + (1-mask)*b.  thvm has no ternary WHERE ALU op,
-        so it is composed from the 0/1 CMPLT mask exactly like maximum."""
-        mask = self
-        a_t = a if isinstance(a, Tensor) else None
-        b_t = b if isinstance(b, Tensor) else None
-        out_shape = mask._shape
-        if a_t is not None:
-            mask, a_t = mask._broadcast(a_t)
-            out_shape = mask._shape
-        if b_t is not None:
-            mask2, b_t = mask._broadcast(b_t)
-            mask = mask2
-            out_shape = mask._shape
-        sel_a = (mask * a) if a_t is not None else (mask * float(a))
-        inv = 1.0 - mask
-        sel_b = (inv * b) if b_t is not None else (inv * float(b))
-        return sel_a + sel_b
+    def where(self, x, y) -> "Tensor":
+        """x where self is nonzero, else y: tinygrad Tensor.where
+        (mixin/elementwise.py:426-438), a true select, so a non-finite
+        unselected value never leaks in."""
+        ref = x if isinstance(x, Tensor) else y if isinstance(y, Tensor) else self
+        x, y = _wrap_other(ref, x), _wrap_other(ref, y)
+        if x._dtype != y._dtype:
+            x, y = x.cast(dtypes.float32), y.cast(dtypes.float32)
+        cond, x = self._broadcast(x)
+        cond, y = cond._broadcast(y)
+        x, _ = x._broadcast(cond)
+        t = Term(_uop_where(_ct.c_uint64(int(cond.term)),
+                            _ct.c_uint64(int(x.term)),
+                            _ct.c_uint64(int(y.term))))
+        return Tensor._from_term(t, x._dtype, x._shape)
 
     def newton_schulz(self, steps: int, params, eps: float = 1.0e-7) -> "Tensor":
         """Newton-Schulz orthogonalization of an odd polynomial, port of
@@ -1722,7 +1678,6 @@ class Tensor(metaclass=_TensorMeta):
     def const_like(self, value) -> "Tensor":
         """A tensor of `value` with self's shape + dtype (tinygrad
         const_like)."""
-        value = _finite_sentinel(value, self._dtype)
         return Tensor(np.full(self._shape, value, dtype=self._dtype.np_dtype),
                       dtype=self._dtype)
 
