@@ -656,6 +656,13 @@ static void rmu_emit_term(Term t, FILE *fp) {
       fprintf(fp, "a%u", axis_id);
       return;
     }
+    case UOP_DEFINE_VAR: {
+      // The kernel declares V_<name> for every kvar kvar_collect_from_dag
+      // finds, this leaf included.
+      const char *vn = kvar_name(kvar_extent_var_id(uop_define_var_extent(t)));
+      fprintf(fp, "((int)V_%s)", vn != NULL ? vn : "V");
+      return;
+    }
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
     case UOP_IDIV: case UOP_IMOD: case UOP_ILT:
     case UOP_IAND: case UOP_IOR:  case UOP_IXOR: case UOP_ISHR: {
@@ -4610,6 +4617,7 @@ static int rmu_term_is_index(Term t) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
     case UOP_IXOR: case UOP_ISHR: case UOP_INVALID: case UOP_RANGE:
+    case UOP_DEFINE_VAR:
       return 1;
     case UOP_CONST:
       return !dtype_is_float(term_ext(heap_read(loc)));

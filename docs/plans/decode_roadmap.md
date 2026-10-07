@@ -175,12 +175,12 @@ true at this layer -- but unwired end to end.
   retires the "composition wall": the symbolic GPT-2 forward can be built eager
   end to end, then fused incrementally as the bugs below are fixed.
   KNOWN-OPEN (FUSED-path only -- eager execution is correct; fix for perf):
-    - `uop_walk.c:808` partial-collapse reduce: a multi-axis reduce whose body
-      lost one axis to a broadcast-collapse (EXPAND->CONST(0)) returns the reduce
-      IDENTITY instead of folding the collapsed axis's extent (so a
-      sum-over-a-broadcast-expand reads 0).  The existing repairs
-      (`ru_reduce_repair_broadcast_body`, `repair_collapsed_reduces_rec`) only
-      handle FULL collapse.  `test_sym_expand` diagnoses the `{S,1}` reduce.
+    - FIXED (2026-10-07): partial-collapse reduce.  A multi-axis reduce whose
+      body lost one axis to a broadcast-collapse (EXPAND->CONST(0)) returned
+      the reduce IDENTITY (a sum-over-a-broadcast-expand read 0).  Rangeify now
+      ports tinygrad's reduce_unparented (`ru_reduce_unparented`): the
+      unparented range leaves the REDUCE and a SUM multiplies by its extent, a
+      `UOP_DEFINE_VAR` for a symbolic one.  `test_sym_expand` asserts it.
     - a fused binary-op over two broadcast expands still faults (separate, not
       yet pinned).
     - ~15 latent raw-kvar coefficient/sizing sites from the audits (high-conf:

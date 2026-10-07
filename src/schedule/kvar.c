@@ -198,9 +198,9 @@ u32 kernel_kvar_value(struct KernelEntry const *ke, u32 var_id) {
 static void kvar_scan_rec(Term t, u32 *out_ids, u32 *n_out, u32 cap) {
   if (term_tag(t) != TAG_UOP) return;
   u32 op = term_ext(t);
-  if (op == UOP_RANGE) {
+  if (op == UOP_RANGE || op == UOP_DEFINE_VAR) {
     u64 loc = term_val(t);
-    u32 ext = (u32)term_val(heap_read(loc + 2));
+    u32 ext = (u32)term_val(heap_read(loc + (op == UOP_RANGE ? 2 : 0)));
     if (kvar_extent_is_var(ext)) {
       u32 vid = kvar_extent_var_id(ext);
       if (vid != 0) {

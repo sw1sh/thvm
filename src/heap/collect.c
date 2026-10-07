@@ -221,6 +221,7 @@ static u32 gc_node_size(Term t) {
         case UOP_IXOR: case UOP_ISHR:
           return 2;
         case UOP_INVALID:     return 1;       // [NUM(0)]
+        case UOP_DEFINE_VAR:  return 1;       // [NUM(packed_extent)]
         case UOP_DETACH:      return 1;       // [src]
         case UOP_PLACEHOLDER: return 2;       // [NUM(dtype), NUM(acc_id)]
         // 3-cell range / ternary / store / opt / gather.

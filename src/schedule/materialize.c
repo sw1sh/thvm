@@ -3682,7 +3682,7 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
 // producer BUFFERIZE down to its invariant value and the reduce-axis
 // RANGE leaves vanish from the body.  uwalk_run_reduce then sees
 // cext==0 and bails to the reduce identity (0 for SUM), zeroing the
-// adjoint -- the same failure ru_reduce_repair_broadcast_body fixes at
+// adjoint -- the same failure ru_reduce_unparented fixes at
 // rangeify time, but that repair runs BEFORE the inline (when the body
 // still references the axis through the not-yet-inlined BUFFERIZE addr)
 // so it can't fire here.  Mirror tinygrad, where REDUCE carries its

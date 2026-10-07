@@ -1,31 +1,83 @@
-// Symbolic EXPAND/broadcast to {S,S}.  {1,S}->{S,S} (broadcast the OUTER axis)
-// works and is asserted as a regression guard.  {S,1}->{S,S} (broadcast the
-// INNER axis, real stride on the outer kvar axis) is the OPEN M3 bug -- it
-// reads element 0 for every row; printed as a diagnostic, NOT asserted (see
-// docs/plans/decode_roadmap.md).  ramp{S}=[0..S-1].
+// Reduce over a broadcast EXPAND to {S,S}.  ramp{S}=[0..S-1] reshaped to
+// {1,S} or {S,1} and expanded to {S,S}, then summed (or maxed) over both
+// axes.  The broadcast axis indexes its source at a constant 0, so its
+// RANGE leaves the reduce body; tinygrad drops such an "unparented" range
+// from the REDUCE and multiplies a SUM by its extent
+// (codegen/simplify.py:81-91 reduce_unparented).  Runtime S=4: the sums are
+// 4 * (0+1+2+3) = 24 and the max is 3.  The static-extent cases check the
+// same rule with a literal extent.
 #include "../src/thvm.c"
 #include "test.h"
-static u32 ramp_tid(u32 hi, u32 s){
-  Shape rs={0}; rs.ndim=1; rs.dims[0]=hi;
-  u32 t=tensor_alloc(&CPU_BACKEND, rs, DT_FP32);
-  float r[64]; for(u32 i=0;i<hi;i++) r[i]=(float)i;
-  CPU_BACKEND.buf_write(TENS[t].buf_id, r, hi*4);
-  TENS[t].view.shape.dims[0]=kvar_pack_extent(s);
+
+static u32 ramp_tid(u32 hi, u32 s) {
+  Shape rs = {0};
+  rs.ndim = 1;
+  rs.dims[0] = hi;
+  u32 t = tensor_alloc(&CPU_BACKEND, rs, DT_FP32);
+  float r[64];
+  for (u32 i = 0; i < hi; i++) {
+    r[i] = (float)i;
+  }
+  CPU_BACKEND.buf_write(TENS[t].buf_id, r, hi * 4);
+  if (s != 0) {
+    TENS[t].view.shape.dims[0] = kvar_pack_extent(s);
+  }
   return t;
 }
-static float sumall(Term t, u32 s, u32 bound){
-  u32 ax[2]={0,1}; Term sum=uop_reduce_multi(REDUCE_SUM,2,ax,t);
-  kvar_set_runtime(s, bound);
-  Term r=term_resolve(thvm_realize(sum)); float o=-2;
-  TENS[(u32)term_val(r)].backend->buf_read(TENS[(u32)term_val(r)].buf_id,&o,4); return o;
+
+static float reduce_all(u32 kind, Term t, u32 s, u32 bound) {
+  u32 ax[2] = {0, 1};
+  Term red = uop_reduce_multi(kind, 2, ax, t);
+  if (s != 0) {
+    kvar_set_runtime(s, bound);
+  }
+  Term r = term_resolve(thvm_realize(red));
+  float o = -2;
+  TENS[(u32)term_val(r)].backend->buf_read(TENS[(u32)term_val(r)].buf_id, &o, 4);
+  return o;
 }
-int main(void){ thvm_init(); int f=0; u32 hi=16;
-  TEST_BEGIN("expand/1S-to-SS-broadcast-outer");      // rj[i,j]=j ; sum = S*S(S-1)/2 = 24
-  { u32 s=kvar_alloc("a",1,hi); u32 P=kvar_pack_extent(s); u32 _1s[2]={1,P}, ss[2]={P,P};
-    Term rj=uop_expand(uop_reshape(term_new(0,TAG_TEN,DT_FP32,ramp_tid(hi,s)),2,_1s),2,ss);
-    float o=sumall(rj,s,4); printf("  expand{1,S}->{S,S} sum=%g (want 24)\n",o); if(!(o>23.9f&&o<24.1f))f++; }
-  // DIAGNOSTIC (open bug, not asserted): {S,1}->{S,S} broadcast-inner.
-  { u32 s=kvar_alloc("b",1,hi); u32 P=kvar_pack_extent(s); u32 s1[2]={P,1}, ss[2]={P,P};
-    Term ri=uop_expand(uop_reshape(term_new(0,TAG_TEN,DT_FP32,ramp_tid(hi,s)),2,s1),2,ss);
-    float o=sumall(ri,s,4); printf("  [open] expand{S,1}->{S,S} sum=%g (want 24; reads elt0 -> OPEN M3 bug)\n",o); }
-  printf("  %s (%d failures)\n", f==0?"ok":"FAIL", f); return f==0?0:1; }
+
+// ramp{n} (n = the kvar `s`'s packed extent, or a literal n when s == 0)
+// reshaped to `inner ? {n,1} : {1,n}` and expanded to {n,n}.
+static Term broadcast_square(u32 hi, u32 s, u32 n, int inner) {
+  u32 P = s != 0 ? kvar_pack_extent(s) : n;
+  u32 rs[2] = { inner ? P : 1u, inner ? 1u : P };
+  u32 ss[2] = { P, P };
+  Term ramp = term_new(0, TAG_TEN, DT_FP32, ramp_tid(hi, s));
+  return uop_expand(uop_reshape(ramp, 2, rs), 2, ss);
+}
+
+static void check_close(float got, float want) {
+  if (!(got > want - 0.1f && got < want + 0.1f)) {
+    fprintf(stderr, "  %s: got %g want %g\n", test_name, got, want);
+  }
+  CHECK(got > want - 0.1f && got < want + 0.1f);
+}
+
+int main(void) {
+  thvm_init();
+  u32 hi = 16;
+
+  TEST_BEGIN("sym-expand/sum-broadcast-outer");
+  {
+    u32 s = kvar_alloc("a", 1, hi);
+    check_close(reduce_all(REDUCE_SUM, broadcast_square(hi, s, 0, 0), s, 4), 24.0f);
+  }
+  TEST_BEGIN("sym-expand/sum-broadcast-inner");
+  {
+    u32 s = kvar_alloc("b", 1, hi);
+    check_close(reduce_all(REDUCE_SUM, broadcast_square(hi, s, 0, 1), s, 4), 24.0f);
+  }
+  TEST_BEGIN("sym-expand/max-broadcast-inner");
+  {
+    u32 s = kvar_alloc("c", 1, hi);
+    check_close(reduce_all(REDUCE_MAX, broadcast_square(hi, s, 0, 1), s, 4), 3.0f);
+  }
+  TEST_BEGIN("static-expand/sum-broadcast-inner");
+  check_close(reduce_all(REDUCE_SUM, broadcast_square(4, 0, 4, 1), 0, 0), 24.0f);
+  TEST_BEGIN("static-expand/sum-broadcast-outer");
+  check_close(reduce_all(REDUCE_SUM, broadcast_square(4, 0, 4, 0), 0, 0), 24.0f);
+
+  thvm_free();
+  TEST_REPORT();
+}

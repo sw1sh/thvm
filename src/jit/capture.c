@@ -1642,6 +1642,9 @@ static u64 uop_content_hash_rec(Term t, u32 depth) {
     }
     case UOP_INVALID:
       break;                                        // [NUM(0)] sentinel
+    case UOP_DEFINE_VAR:
+      h = uop_content_hash_atom(h, heap_read(loc + 0));  // [NUM(packed_extent)]
+      break;
 
     // --- opt directive: kind + factor + the wrapped target ----------
     case UOP_OPT: {

@@ -442,6 +442,8 @@ static u32 uwalk_term_dtype_of(UWalkCtx *c, Term t) {
       u32 dt = term_ext(heap_read(loc));
       return (uwalk_dtype_is_float(dt) && dt != DT_FP32) ? DT_FP64 : dt;
     }
+    case UOP_DEFINE_VAR:
+      return DT_INT32;
     case UOP_CAST: case UOP_BITCAST:
       return uwalk_c_dtype((u32)term_val(heap_read(loc + 1)));
     case UOP_INDEX_E: {
@@ -859,7 +861,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
       return uwalk_reduce_value(c, t).f;
     case UOP_OPT:
       return uwalk_eval_float(c, heap_read(loc + 0), dt);
-    case UOP_RANGE:
+    case UOP_RANGE: case UOP_DEFINE_VAR:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
     case UOP_IXOR: case UOP_ISHR:
@@ -893,6 +895,8 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       u32 axis_id = term_val(heap_read(loc + 0));
       return (i64)uwalk_lookup_iter(c, axis_id);
     }
+    case UOP_DEFINE_VAR:
+      return (i64)kvar_extent_runtime(uop_define_var_extent(t));
     case UOP_IADD: return uwalk_eval_int(c, heap_read(loc+0))
                        + uwalk_eval_int(c, heap_read(loc+1));
     case UOP_ISUB: return uwalk_eval_int(c, heap_read(loc+0))

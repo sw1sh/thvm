@@ -14,6 +14,7 @@ fn u8 uop_arity(u8 op) {
     case UOP_CONST:
     case UOP_RANGE:    // heap = [NUM(axis_id), NUM(axis_type), NUM(extent)]
     case UOP_INVALID:  // heap = [NUM(0)] sentinel
+    case UOP_DEFINE_VAR:  // heap = [NUM(packed_extent)]
     case UOP_VCONST:   // heap = [NUM(dtype), NUM(n), NUM(b_0), ...] - all NUMs
     // Devectorizer-pass leaves: PLACEHOLDER carries only [NUM(dtype),
     // NUM(acc_id)]; the renderer emits one acc declaration per unique
@@ -295,7 +296,7 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
     if (!have) return 0;
     *out = acc; return 1;
   }
-  if (op == UOP_CONST) {
+  if (op == UOP_CONST || op == UOP_DEFINE_VAR) {
     out->ndim = 1; out->dims[0] = 1;
     for (u32 i = 1; i < MAX_DIM; i++) out->dims[i] = 0;
     return 1;
@@ -372,6 +373,10 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
         u32 tid = (u32)term_val(outbuf);
         if (tid != 0 && tid < TENS_NEXT) { *out = TENS[tid].dtype; return 1; }
       }
+    }
+    if (op == UOP_DEFINE_VAR) {
+      *out = DT_INT32;
+      return 1;
     }
     if (op == UOP_CONST) {
       // The CONST cell carries [NUM(bits)]; the dtype is the NUM's ext.

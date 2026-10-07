@@ -388,7 +388,7 @@ static Term ru_new_range(u32 extent, u32 axistype) {
 // Exact: an iterative
 // walk that expands each node once, stamped by heap loc, so there is no
 // depth budget.  The budget it replaces answered "absent" past depth 64,
-// and ru_reduce_repair_broadcast_body then rewrote REDUCE_SUM(body) into
+// and the broadcast-reduce repair then rewrote REDUCE_SUM(body) into
 // body*extent: every reduce over an elementwise chain 63+ deep summed
 // wrong, silently.
 static u32  *RU_AXIS_SEEN      = NULL;
@@ -495,55 +495,69 @@ static u32 ru_f32_bits(f32 v) {
   return b;
 }
 
-// Repair a REDUCE term whose body lost the reduce-axis range (e.g. a
-// stride-0 broadcast collapsed past ru_rewrite_subtree).  The
-// cpu_uop_walk's uwalk_run_reduce walks the body for a UOP_RANGE with
-// axis_id == r_aid to recover the loop extent; without one it falls back
-// to the reduce identity (0 for SUM, -INF for MAX) and the kernel writes
-// zeros.  Repair: the reduce of a body that's constant along the
-// reduce axis equals `body * extent` for SUM (and just `body` for
-// MAX/MIN).
-static Term ru_reduce_repair_broadcast_body(Term reduce_t,
-                                            Term const *reduce_ranges,
-                                            u32 n_ranges) {
-  if (term_tag(reduce_t) != TAG_UOP || term_ext(reduce_t) != UOP_REDUCE) {
-    return reduce_t;
+// `v` as a CONST of dtype `dt`: a float CONST payload holds the value's f32
+// bits (DType.const), an int CONST the value.
+static Term ru_const_of(u32 dt, u64 v) {
+  if (dtype_is_float(dt)) {
+    return uop_const(dt, ru_f32_bits((f32)v));
   }
-  if (n_ranges == 0) return reduce_t;
-  // Repair fires only when the body is INVARIANT over EVERY reduce axis:
-  // a stride-0 broadcast source collapsed each reduce-axis RANGE to
-  // CONST(0) past ru_rewrite_subtree, so the body references none of them
-  // and the walker's r_extent==0 fallback would yield 0.  SUM then equals
-  // body * prod(extents); MAX/MIN equals body.  Handles 1 OR MORE reduce
-  // axes (a `bias.expand(...,H,W).sum((H,W))` conv-bias / broadcast grad
-  // reduces 2+ broadcast axes -- single-axis-only repair left those at 0).
-  // When the body still uses some reduce axis we bail and let the walker
-  // reduce the surviving ranges as-is (the partial-collapse case).
-  u32 n_axes = uop_reduce_n_axes(reduce_t);
-  u32 kind   = uop_reduce_kind(reduce_t);
-  Term body  = uop_reduce_src(reduce_t);
-  for (u32 a = 0; a < n_axes; a++) {
-    if (ru_subtree_uses_axis(body, uop_reduce_axis(reduce_t, a))) {
-      return reduce_t;
+  return uop_const(dt, (u32)v);
+}
+
+// tinygrad codegen/simplify.py:81-91 reduce_unparented: a reduce range the
+// body never reads -- a stride-0 broadcast collapsed its RANGE to CONST(0)
+// past ru_rewrite_subtree -- leaves the REDUCE.  A SUM multiplies by the
+// range's extent: one CONST for the product of the literal extents, and a
+// DEFINE_VAR for each symbolic one.  A MAX keeps the body's value, as does a
+// bool SUM (an OR).  The REDUCE keeps the ranges its body reads; with none
+// left it is the body itself.
+static Term ru_reduce_unparented(Term red, Term const *ranges, u32 n_ranges) {
+  if (term_tag(red) != TAG_UOP || term_ext(red) != UOP_REDUCE) {
+    return red;
+  }
+  u32  kind = uop_reduce_kind(red);
+  Term body = uop_reduce_src(red);
+  u32  parented[MAX_DIM];
+  Term unparented[MAX_DIM];
+  u32  n_par = 0, n_unpar = 0;
+  for (u32 r = 0; r < n_ranges && r < MAX_DIM; r++) {
+    Term rng = ranges[r];
+    if (term_tag(rng) != TAG_UOP || term_ext(rng) != UOP_RANGE) {
+      return red;
+    }
+    u32 aid = uop_range_axis_id(rng);
+    if (ru_subtree_uses_axis(body, aid)) {
+      parented[n_par++] = aid;
+    } else {
+      unparented[n_unpar++] = rng;
     }
   }
-  if (kind == REDUCE_SUM) {
-    u64 prod = 1;
-    for (u32 r = 0; r < n_ranges; r++) {
-      Term rng = reduce_ranges[r];
-      if (term_tag(rng) != TAG_UOP || term_ext(rng) != UOP_RANGE) {
-        return reduce_t;
-      }
-      u32 extent = uop_range_extent(rng);
-      if (extent == 0) return reduce_t;
-      prod *= (u64)extent;
-    }
-    if (prod == 1) return body;
-    Term k = uop_const(DT_FP32, ru_f32_bits((f32)prod));
-    return uop_binary(UOP_MUL, body, k);
+  if (n_unpar == 0) {
+    return red;
   }
-  // MAX/MIN of a body constant over every reduce axis == body.
-  return body;
+  u32 dt = DT_FP32;
+  (void)term_dtype_in(red, 0, &dt);
+  Term ret = (n_par > 0) ? uop_reduce_multi(kind, n_par, parented, body) : body;
+  if (kind != REDUCE_SUM || dtype_is_bool(dt)) {
+    return ret;
+  }
+  u64 prod = 1;
+  for (u32 k = 0; k < n_unpar; k++) {
+    u32 ext = uop_range_extent(unparented[k]);
+    if (!kvar_extent_is_var(ext)) {
+      prod *= (u64)ext;
+    }
+  }
+  if (prod != 1) {
+    ret = uop_binary(UOP_MUL, ret, ru_const_of(dt, prod));
+  }
+  for (u32 k = 0; k < n_unpar; k++) {
+    u32 ext = uop_range_extent(unparented[k]);
+    if (kvar_extent_is_var(ext)) {
+      ret = uop_binary(UOP_MUL, ret, uop_cast(uop_define_var(ext), dt));
+    }
+  }
+  return ret;
 }
 
 // Walk addr-expression Term `t` recursively, collecting axis_ids of
@@ -3504,14 +3518,10 @@ fn void pm_apply_rangeify(Term root) {
       u32 kind  = uop_reduce_kind(rewritten);
       Term src  = uop_reduce_src(rewritten);
       rewritten = uop_reduce_multi(kind, n_rrng, new_axes, src);
-      // Repair: if the rewritten body lost ALL its reduce-axis RANGE
-      // leaves (a stride-0 broadcast collapsed them past
-      // ru_rewrite_subtree), collapse the REDUCE to `body * prod(extents)`
-      // (SUM) or `body` (MAX/MIN).  Handles 1+ reduce axes -- the
-      // multi-axis broadcast case (conv bias, broadcast grads reducing
-      // 2+ widened axes) previously fell through and computed 0.
-      rewritten = ru_reduce_repair_broadcast_body(
-          rewritten, RU_REDUCE_RANGES[i].ranges, n_rrng);
+      // Drop the reduce ranges a stride-0 broadcast collapsed out of the
+      // body (tinygrad reduce_unparented).
+      rewritten = ru_reduce_unparented(rewritten, RU_REDUCE_RANGES[i].ranges,
+                                       n_rrng);
       // THVM_FUSE_MATMUL_INPUT rank-grow remap (the EXACT-substitute port):
       // a fused elementwise A producer (THVM_FUSE_MATMUL_INPUT) is spliced into
       // the matmul's A operand through the matmul-lowering RESHAPE({M,K,1})+
@@ -3660,16 +3670,18 @@ fn void pm_apply_rangeify(Term root) {
             if (ru_expr_references_aid(rm->out_rngs[a], faid)) is_out = 1;
           if (is_out) continue;
           int is_red = 0;
-          for (u32 k = 0; k < n_rrng && !is_red; k++)
-            if (new_axes[k] == faid) is_red = 1;
+          u32 n_cur = uop_reduce_n_axes(rewritten);
+          for (u32 k = 0; k < n_cur && !is_red; k++)
+            if (uop_reduce_axis(rewritten, k) == faid) is_red = 1;
           if (is_red) continue;
           absorb[n_absorb++] = faid;
         }
         if (n_absorb > 0) {
           u32 merged_axes[2 * MAX_DIM];
           u32 m_n = 0;
-          for (u32 k = 0; k < n_rrng && m_n < 2 * MAX_DIM; k++)
-            merged_axes[m_n++] = new_axes[k];
+          u32 n_cur = uop_reduce_n_axes(rewritten);
+          for (u32 k = 0; k < n_cur && m_n < 2 * MAX_DIM; k++)
+            merged_axes[m_n++] = uop_reduce_axis(rewritten, k);
           for (u32 k = 0; k < n_absorb && m_n < 2 * MAX_DIM; k++)
             merged_axes[m_n++] = absorb[k];
           rewritten = uop_reduce_multi(uop_reduce_kind(rewritten), m_n,

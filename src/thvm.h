@@ -379,7 +379,13 @@ int             dtype_is_packed   (u32 dt);
                              // n_axes==1 case retains 4-cell layout
                              // [src, kind, n_axes=1, axis_0] -- builder
                              // uop_reduce(kind, axis, src) wraps n=1.
-// (slots 18, 19 were UOP_GRAD / UOP_FWD -- folded into TAG_DP0 /
+// UOP_DEFINE_VAR: the runtime value of a symbolic (kvar) extent, an int.
+//   Heap = [NUM(packed_extent)] (kvar_pack_extent).  Arity 0.  tinygrad's
+//   DEFINE_VAR (uop/ops.py); reduce_unparented multiplies a SUM reduce by
+//   the extent of a range its body never reads (codegen/simplify.py:88), and
+//   for a symbolic range that extent is this leaf.
+#define UOP_DEFINE_VAR  18
+// (slot 19 was UOP_FWD and slot 18 UOP_GRAD -- folded into TAG_DP0 /
 // TAG_DP1 with the DUP_GRAD_FLAG bit set on the ext (label) field.
 // A grad cell is just a regular dup-style cell holding [y]; its two
 // aux ports are TAG_DP0 (forward projection: passthrough to y) and
@@ -3143,6 +3149,8 @@ fn i32  uop_copy_device(u64 loc);
 
 // Build a UOP_DETACH node wrapping `src` (stop-gradient; see UOP_DETACH).
 fn Term uop_detach(Term src);
+fn Term uop_define_var(u32 packed_extent);
+fn u32  uop_define_var_extent(Term t);
 
 // Indexed ops (UOP_GATHER / UOP_SCATTER; uop/gather.c, uop/scatter.c).
 // uop_gather / uop_scatter validate their operands and return 0 when a
