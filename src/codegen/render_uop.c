@@ -971,6 +971,38 @@ static void rmu_emit_term(Term t, FILE *fp) {
 // conv+BN+maxpool chains can reach ~12 distinct axes.
 #define RMU_MAX_RANGES 32
 
+// How many leading heap slots of `op` the renderer's DAG walkers descend
+// into: the value and index ops.  Every other op (RANGE, BUFFER, CONST,
+// REDUCE, STORE, ...) is a leaf to a value walk.
+static u32 rmu_walk_arity(u32 op) {
+  switch (op) {
+    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
+    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
+    case UOP_ISHR:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_INDEX_E:
+      return 2;
+    case UOP_NEG:  case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT:
+    case UOP_CAST: case UOP_BITCAST: case UOP_OPT:
+      return 1;
+    case UOP_IWHERE:
+      return 3;
+    default:
+      return 0;
+  }
+}
+
+// rmu_walk_arity for a whole-kernel walk, which also descends a REDUCE's
+// body, both AFTER operands and a STORE's buffer, address and value.
+static u32 rmu_walk_arity_kernel(u32 op) {
+  switch (op) {
+    case UOP_REDUCE: return 1;
+    case UOP_AFTER:  return 2;
+    case UOP_STORE:  return 3;
+    default:         return rmu_walk_arity(op);
+  }
+}
+
 static void rmu_collect_ranges_rec_cap(Term t, Term *ranges,
                                        u32 *opt_kinds, u32 *opt_factors,
                                        u32 *n_out, u32 cap,
@@ -991,46 +1023,18 @@ static void rmu_collect_ranges_rec_cap(Term t, Term *ranges,
     (*n_out)++;
     return;
   }
-  switch (op) {
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E:
-      rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
-                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
-      rmu_collect_ranges_rec_cap(heap_read(loc + 1), ranges, opt_kinds,
-                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
-      return;
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-      rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
-                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
-      return;
-    case UOP_IWHERE:
-      rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
-                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
-      rmu_collect_ranges_rec_cap(heap_read(loc + 1), ranges, opt_kinds,
-                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
-      rmu_collect_ranges_rec_cap(heap_read(loc + 2), ranges, opt_kinds,
-                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
-      return;
-    case UOP_OPT: {
-      // OPT(target, kind, factor): inherit annotation into the
-      // recursed target's collection.  Stacked OPTs accumulate the
-      // outermost kind (last-wins for now).
-      u32 kind   = term_val(heap_read(loc + 1));
-      u32 factor = term_val(heap_read(loc + 2));
-      rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
-                                 opt_factors, n_out, cap, kind, factor);
-      return;
-    }
-    case UOP_CAST: case UOP_BITCAST:
-      rmu_collect_ranges_rec_cap(heap_read(loc + 0), ranges, opt_kinds,
-                                 opt_factors, n_out, cap, RMU_NO_OPT, 0);
-      return;
-    default:
-      return;
+  // OPT(target, kind, factor): inherit annotation into the recursed
+  // target's collection.  Stacked OPTs accumulate the outermost kind
+  // (last-wins for now).
+  u32 kind   = RMU_NO_OPT;
+  u32 factor = 0;
+  if (op == UOP_OPT) {
+    kind   = term_val(heap_read(loc + 1));
+    factor = term_val(heap_read(loc + 2));
+  }
+  for (u32 i = 0, n = rmu_walk_arity(op); i < n; i++) {
+    rmu_collect_ranges_rec_cap(heap_read(loc + i), ranges, opt_kinds,
+                               opt_factors, n_out, cap, kind, factor);
   }
 }
 
@@ -1060,29 +1064,12 @@ static int rmu_term_contains_rec(Term t, Term needle, u32 depth) {
   if (term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);
   u64 loc = term_val(t);
-  switch (op) {
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E:
-      return rmu_term_contains_rec(heap_read(loc + 0), needle, depth + 1)
-          || rmu_term_contains_rec(heap_read(loc + 1), needle, depth + 1);
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-    case UOP_CAST:  case UOP_BITCAST:
-    case UOP_OPT:
-      return rmu_term_contains_rec(heap_read(loc + 0), needle, depth + 1);
-    case UOP_IWHERE:
-      return rmu_term_contains_rec(heap_read(loc + 0), needle, depth + 1)
-          || rmu_term_contains_rec(heap_read(loc + 1), needle, depth + 1)
-          || rmu_term_contains_rec(heap_read(loc + 2), needle, depth + 1);
-    case UOP_REDUCE:
-      // Recurse into the body: nesting can be transitive.
-      return rmu_term_contains_rec(heap_read(loc + 0), needle, depth + 1);
-    default:
-      return 0;
+  // A REDUCE's body counts too: nesting can be transitive.
+  u32 n = op == UOP_REDUCE ? 1 : rmu_walk_arity(op);
+  for (u32 i = 0; i < n; i++) {
+    if (rmu_term_contains_rec(heap_read(loc + i), needle, depth + 1)) return 1;
   }
+  return 0;
 }
 static int rmu_term_contains(Term t, Term needle) {
   return rmu_term_contains_rec(t, needle, 0);
@@ -1145,26 +1132,10 @@ static int rmu_term_uses_axis_rec(Term t, u32 axis_id, u32 depth) {
     }
     return rmu_term_uses_axis_rec(uop_reduce_src(tred), axis_id, depth + 1);
   }
-  switch (op) {
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E:
-      return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1)
-          || rmu_term_uses_axis_rec(heap_read(loc + 1), axis_id, depth + 1);
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-    case UOP_CAST:  case UOP_BITCAST:
-    case UOP_OPT:
-      return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1);
-    case UOP_IWHERE:
-      return rmu_term_uses_axis_rec(heap_read(loc + 0), axis_id, depth + 1)
-          || rmu_term_uses_axis_rec(heap_read(loc + 1), axis_id, depth + 1)
-          || rmu_term_uses_axis_rec(heap_read(loc + 2), axis_id, depth + 1);
-    default:
-      return 0;
+  for (u32 i = 0, n = rmu_walk_arity(op); i < n; i++) {
+    if (rmu_term_uses_axis_rec(heap_read(loc + i), axis_id, depth + 1)) return 1;
   }
+  return 0;
 }
 static int rmu_term_uses_axis(Term t, u32 axis_id) {
   return rmu_term_uses_axis_rec(t, axis_id, 0);
@@ -1185,26 +1156,10 @@ static int rmu_term_has_reduce(Term t, u32 depth) {
   u32 op = term_ext(t);
   u64 loc = term_val(t);
   if (op == UOP_REDUCE) return 1;
-  switch (op) {
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E:
-      return rmu_term_has_reduce(heap_read(loc + 0), depth + 1)
-          || rmu_term_has_reduce(heap_read(loc + 1), depth + 1);
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-    case UOP_CAST:  case UOP_BITCAST:
-    case UOP_OPT:
-      return rmu_term_has_reduce(heap_read(loc + 0), depth + 1);
-    case UOP_IWHERE:
-      return rmu_term_has_reduce(heap_read(loc + 0), depth + 1)
-          || rmu_term_has_reduce(heap_read(loc + 1), depth + 1)
-          || rmu_term_has_reduce(heap_read(loc + 2), depth + 1);
-    default:
-      return 0;
+  for (u32 i = 0, n = rmu_walk_arity(op); i < n; i++) {
+    if (rmu_term_has_reduce(heap_read(loc + i), depth + 1)) return 1;
   }
+  return 0;
 }
 
 // Walk a term tree collecting UOP_REDUCE nodes for hoisting.  Each
@@ -1237,28 +1192,8 @@ static void rmu_collect_reduces(Term t, Term *reduces, u32 *n_out) {
     (*n_out)++;
     return;
   }
-  switch (op) {
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E:
-      rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
-      rmu_collect_reduces(heap_read(loc + 1), reduces, n_out);
-      return;
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-    case UOP_CAST:  case UOP_BITCAST:
-    case UOP_OPT:
-      rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
-      return;
-    case UOP_IWHERE:
-      rmu_collect_reduces(heap_read(loc + 0), reduces, n_out);
-      rmu_collect_reduces(heap_read(loc + 1), reduces, n_out);
-      rmu_collect_reduces(heap_read(loc + 2), reduces, n_out);
-      return;
-    default:
-      return;
+  for (u32 i = 0, n = rmu_walk_arity(op); i < n; i++) {
+    rmu_collect_reduces(heap_read(loc + i), reduces, n_out);
   }
 }
 
@@ -1341,51 +1276,16 @@ static void rmu_collect_ranges_rec_through_reduce_cap(
     (*n_out)++;
     return;
   }
-  switch (op) {
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E:
-      rmu_collect_ranges_rec_through_reduce_cap(
-          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
-          RMU_NO_OPT, 0, bound_axes, n_bound);
-      rmu_collect_ranges_rec_through_reduce_cap(
-          heap_read(loc + 1), ranges, opt_kinds, opt_factors, n_out, cap,
-          RMU_NO_OPT, 0, bound_axes, n_bound);
-      return;
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-      rmu_collect_ranges_rec_through_reduce_cap(
-          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
-          RMU_NO_OPT, 0, bound_axes, n_bound);
-      return;
-    case UOP_IWHERE:
-      rmu_collect_ranges_rec_through_reduce_cap(
-          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
-          RMU_NO_OPT, 0, bound_axes, n_bound);
-      rmu_collect_ranges_rec_through_reduce_cap(
-          heap_read(loc + 1), ranges, opt_kinds, opt_factors, n_out, cap,
-          RMU_NO_OPT, 0, bound_axes, n_bound);
-      rmu_collect_ranges_rec_through_reduce_cap(
-          heap_read(loc + 2), ranges, opt_kinds, opt_factors, n_out, cap,
-          RMU_NO_OPT, 0, bound_axes, n_bound);
-      return;
-    case UOP_OPT: {
-      u32 kind   = term_val(heap_read(loc + 1));
-      u32 factor = term_val(heap_read(loc + 2));
-      rmu_collect_ranges_rec_through_reduce_cap(
-          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
-          kind, factor, bound_axes, n_bound);
-      return;
-    }
-    case UOP_CAST: case UOP_BITCAST:
-      rmu_collect_ranges_rec_through_reduce_cap(
-          heap_read(loc + 0), ranges, opt_kinds, opt_factors, n_out, cap,
-          RMU_NO_OPT, 0, bound_axes, n_bound);
-      return;
-    default:
-      return;
+  u32 kind   = RMU_NO_OPT;
+  u32 factor = 0;
+  if (op == UOP_OPT) {
+    kind   = term_val(heap_read(loc + 1));
+    factor = term_val(heap_read(loc + 2));
+  }
+  for (u32 i = 0, n = rmu_walk_arity(op); i < n; i++) {
+    rmu_collect_ranges_rec_through_reduce_cap(
+        heap_read(loc + i), ranges, opt_kinds, opt_factors, n_out, cap,
+        kind, factor, bound_axes, n_bound);
   }
 }
 
@@ -4739,10 +4639,6 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   u32 n_out_true = rmu_partition_out_ranges(out_ranges, out_kinds,
                                             out_factors, n_out, addr);
   u32 n_inner    = n_out - n_out_true;
-  // Legacy aliases for the single-axis-K branches below.
-  Term red_range      = red_ranges[0];
-  u32  red_kind_opt   = red_kind_opts[0];
-  u32  red_factor_opt = red_factor_opts[0];
 
   // Parallel-accumulator path: when any true-output axis is UPCAST'd,
   // emit F register-blocked accumulators sharing ONE reduce loop --
@@ -5979,61 +5875,8 @@ static void rmu_discover_bufs_rec(Term t, RmuSlots *slots, u32 *n_inputs_out) {
     rmu_slots_promote(slots, t, n_inputs_out);
     return;
   }
-  // Recurse over operand slots.  Mirrors rmu_collect_ranges' op
-  // coverage; conservative -- walks any UOp's heap operands.  Each
-  // UOp's heap layout puts operand Terms in successive slots after a
-  // small header; we walk a fixed window large enough to cover the
-  // widest existing UOp shape (UOP_INDEX_E + UOP_STORE = 3 operands;
-  // UOP_REDUCE = 3; UOP_IWHERE = 3; UOP_OPT = 1 + 2 NUM headers).
-  // BUFFER terms are leaves so they only ever appear in operand
-  // slots, never in header NUM slots.
-  switch (op) {
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E:
-      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 1), slots, n_inputs_out);
-      return;
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
-      return;
-    case UOP_CAST:  case UOP_BITCAST:
-      // [src, NUM(dst_dtype)]
-      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
-      return;
-    case UOP_IWHERE:
-      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 1), slots, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 2), slots, n_inputs_out);
-      return;
-    case UOP_OPT:
-      // [target, NUM(kind), NUM(factor)]
-      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
-      return;
-    case UOP_REDUCE:
-      // [src, NUM(kind), NUM(axis)]
-      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
-      return;
-    case UOP_STORE:
-      // [buf, addr, value]
-      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 1), slots, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 2), slots, n_inputs_out);
-      return;
-    case UOP_AFTER:
-      // [node, after_node]
-      rmu_discover_bufs_rec(heap_read(loc + 0), slots, n_inputs_out);
-      rmu_discover_bufs_rec(heap_read(loc + 1), slots, n_inputs_out);
-      return;
-    case UOP_RANGE:
-    case UOP_CONST: case UOP_INVALID:
-    case UOP_BUFFER:
-      return;
-    default:
-      return;
+  for (u32 i = 0, n = rmu_walk_arity_kernel(op); i < n; i++) {
+    rmu_discover_bufs_rec(heap_read(loc + i), slots, n_inputs_out);
   }
 }
 
@@ -6528,29 +6371,10 @@ static int rmu_dag_has_group_reduce(Term t) {
   if (op == UOP_RANGE) {
     return (u32)term_val(heap_read(loc + 1)) == KAX_GROUP_REDUCE;
   }
-  switch (op) {
-    case UOP_OPT:
-      return rmu_dag_has_group_reduce(heap_read(loc + 0));
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E: case UOP_AFTER:
-      return rmu_dag_has_group_reduce(heap_read(loc + 0))
-          || rmu_dag_has_group_reduce(heap_read(loc + 1));
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-    case UOP_CAST:  case UOP_BITCAST:
-    case UOP_REDUCE:
-      return rmu_dag_has_group_reduce(heap_read(loc + 0));
-    case UOP_IWHERE:
-    case UOP_STORE:
-      return rmu_dag_has_group_reduce(heap_read(loc + 0))
-          || rmu_dag_has_group_reduce(heap_read(loc + 1))
-          || rmu_dag_has_group_reduce(heap_read(loc + 2));
-    default:
-      return 0;
+  for (u32 i = 0, n = rmu_walk_arity_kernel(op); i < n; i++) {
+    if (rmu_dag_has_group_reduce(heap_read(loc + i))) return 1;
   }
+  return 0;
 }
 
 // Walk the DAG for a UOP_OPT(_, TC, _) annotation -- the tell that the
@@ -6561,30 +6385,13 @@ static int rmu_dag_has_tc(Term t) {
   if (term_tag(t) != TAG_UOP) return 0;
   u32 op  = term_ext(t);
   u64 loc = term_val(t);
-  switch (op) {
-    case UOP_OPT:
-      if ((u32)term_val(heap_read(loc + 1)) == UOP_OPT_TC) return 1;
-      return rmu_dag_has_tc(heap_read(loc + 0));
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
-    case UOP_INDEX_E: case UOP_AFTER:
-      return rmu_dag_has_tc(heap_read(loc + 0))
-          || rmu_dag_has_tc(heap_read(loc + 1));
-    case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
-    case UOP_CAST:  case UOP_BITCAST:
-    case UOP_REDUCE:
-      return rmu_dag_has_tc(heap_read(loc + 0));
-    case UOP_IWHERE:
-    case UOP_STORE:
-      return rmu_dag_has_tc(heap_read(loc + 0))
-          || rmu_dag_has_tc(heap_read(loc + 1))
-          || rmu_dag_has_tc(heap_read(loc + 2));
-    default:
-      return 0;
+  if (op == UOP_OPT && (u32)term_val(heap_read(loc + 1)) == UOP_OPT_TC) {
+    return 1;
   }
+  for (u32 i = 0, n = rmu_walk_arity_kernel(op); i < n; i++) {
+    if (rmu_dag_has_tc(heap_read(loc + i))) return 1;
+  }
+  return 0;
 }
 
 // Structural-mode CUDA renderer.  Counterpart of
