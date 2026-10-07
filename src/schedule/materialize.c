@@ -6260,27 +6260,6 @@ static Term emit_kernel_for_boundary(u32 bi) {
     // its pointer biased by the view offset), and the kernel applies
     // the movement chain a second time.
     unified_fold_chain_commit_flags(ke, &_cf_marks);
-    // Post-lift UPatRule pass.  Reads applied_opts via the tile_anno
-    // facade (single read site so the eventual KpSchedule -> KernelEntry
-    // ownership move is a one-file change).
-    KOpt const *m_opts   = tile_anno_applied_opts(ke);
-    u32         m_n_app  = tile_anno_applied_opts_count(ke);
-    if (ke->cached_lift.store_root && m_opts != NULL && m_n_app > 0) {
-      // uop_apply_split_dag composes the split-class entries
-      // (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) at the UOp DAG level via
-      // the uop_range_split primitive, replacing each pre-split
-      // UOP_RANGE leaf with the (outer * k + inner) sub-expression.
-      //
-      // Order: split-DAG runs FIRST (rewires axis-id space + extents),
-      // then uop_apply_kernel_opts stamps axis_types via the simulator
-      // that accounts for SPLIT shifts.  Running stamp first would
-      // stamp pre-split leaves that split-DAG would then replace --
-      // losing the stamps.
-      Term root_after_split = uop_apply_split_dag(ke->cached_lift.store_root,
-                                                  m_opts, m_n_app);
-      Term post = uop_apply_kernel_opts(root_after_split, m_opts, m_n_app);
-      ke->cached_lift.store_root = post;
-    }
   }
 
   // Dense-renumber axis_ids to 0..n per kernel (the lifter assigns

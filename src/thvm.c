@@ -312,7 +312,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/upat.c"
 #include "uop/graph_simplify.c"
 #include "uop/recognise_tc.c"
-#include "uop/apply_opt.c"
 #include "uop/apply_opt_dag.c"
 #include "uop/dag_scan.c"
 // uop/expander.c -- port of tinygrad codegen/late/expander.py to thvm's

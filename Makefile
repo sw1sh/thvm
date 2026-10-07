@@ -224,7 +224,6 @@ TESTS := \
   $(BIN)/test_uop_index_simplify \
   $(BIN)/test_uop_valid_fold \
   $(BIN)/test_uop_reduce_collapse \
-  $(BIN)/test_uop_range_axis_type \
   $(BIN)/test_uop_movement_index \
   $(BIN)/test_uop_graph_rewrite \
   $(BIN)/test_uop_expand \
@@ -268,7 +267,6 @@ TESTS := \
   $(BIN)/test_uop_linearize \
   $(BIN)/test_render_ptx \
   $(BIN)/test_uop_upat \
-  $(BIN)/test_uop_range_axis_type \
   $(BIN)/test_grad \
   $(BIN)/test_iwhere_grad \
   $(BIN)/test_grad_gather_scatter \

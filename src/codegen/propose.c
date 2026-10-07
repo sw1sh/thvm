@@ -264,7 +264,7 @@ static u32 propose_conv2d_unroll_opts(KernelEntry const *ke, KOpt *out,
                                       u32 n, u32 cap) {
   static const u32 unroll_factors[] = {2};
   // KOP_UNROLL on the conv reduce axis is DAG-applied (uop_dag_apply_kopt
-  // -> uop_apply_split_dag -> find_range BY axis_id), so target the real
+  // -> uop_dag_apply_split -> find_range BY axis_id), so target the real
   // reduce axis_id, not the sorted-slot index (see propose_reduce_axis_id).
   u32 axis_size = 0;
   u32 axis = propose_reduce_axis_id(ke, &axis_size);
