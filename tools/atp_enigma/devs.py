@@ -1002,14 +1002,23 @@ def cmd_filter(a):
 
 
 def read_rows(paths):
+    """run_arms.py's rows.tsv as run_arms.read_tsv reads it: the first line
+    is the header, '#' first ("#problem<TAB>split..."); a later '#' line,
+    and a row whose field count is not the header's (a line a crash cut
+    short), are skipped, so a run without its row counts as missing."""
     rows = []
     for p in paths:
         f = os.path.join(p, "rows.tsv") if os.path.isdir(p) else p
         with open(f, encoding="utf-8") as fp:
-            header = fp.readline().rstrip("\n").split("\t")
+            first = fp.readline().rstrip("\n")
+            header = (first[1:] if first.startswith("#") else first).split("\t")
             for line in fp:
-                if line.strip():
-                    rows.append(dict(zip(header, line.rstrip("\n").split("\t"))))
+                line = line.rstrip("\n")
+                if not line.strip() or line.startswith("#"):
+                    continue
+                cells = line.split("\t")
+                if len(cells) == len(header):
+                    rows.append(dict(zip(header, cells)))
     return rows
 
 

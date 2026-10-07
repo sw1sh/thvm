@@ -766,5 +766,48 @@ class BandGate(unittest.TestCase):
         self.assertFalse(ok(60, 30, 15, {60: None, 180: 0.0}))
 
 
+sys.path.insert(0, os.path.join(HERE, "protocol"))
+import run_arms  # noqa: E402
+
+
+def arms_rows(path, cells, sha="b" * 64, cond="maxpar=16 rss=default", verdict=None):
+    """rows_text's cells written by run_arms.py's own writer: its '#'
+    header and every ROW_COLUMNS column."""
+    run_arms.ensure_header(path, run_arms.ROW_COLUMNS)
+    for name, w, p, sol, t in cells:
+        row = dict.fromkeys(run_arms.ROW_COLUMNS, "")
+        row.update({"problem": name, "split": "devs", "arm": "P0", "wall": run_arms.fmt_num(w),
+                    "pass": p, "status": "Unsatisfiable" if sol else "Timeout",
+                    "wall_s": "%.2f" % t, "verdict": verdict or ("VerifiedGood" if sol else "-"),
+                    "solution": sol, "bin_sha": sha, "cond": cond, "oom_kills": 0})
+        run_arms.append_line(path, [row[c] for c in run_arms.ROW_COLUMNS])
+
+
+class RunArmsRows(BandGate):
+    """BandGate's tests on out directories whose rows.tsv run_arms.py wrote:
+    the '#' header, every column, and a line a crash cut short."""
+
+    def stage_rows(self, walls, drop=None, **kw):
+        cells = [(n, w, 1, sol, t) for n, m in sorted(MEASURE.items())
+                 for w, (sol, t) in m.items() if w in walls and (n, w) != drop]
+        out = os.path.join(self.tmp, "out_%s" % "_".join(map(str, walls)))
+        os.makedirs(out, exist_ok=True)
+        path = os.path.join(out, "rows.tsv")
+        if os.path.exists(path):
+            os.unlink(path)
+        arms_rows(path, cells, **kw)
+        with open(path, "a") as fp:
+            fp.write("C9-1-S1\tdevs\tP0\t60\n")
+        return out
+
+    def test_header(self):
+        out = self.stage_rows((60, 180))
+        with open(os.path.join(out, "rows.tsv")) as fp:
+            self.assertEqual(fp.readline().rstrip("\n"), "#" + "\t".join(run_arms.ROW_COLUMNS))
+        rows = devs.read_rows([out])
+        self.assertEqual(len(rows), 12)
+        self.assertEqual((rows[0]["problem"], rows[0]["wall"], rows[0]["pass"]), ("C1-1-S1", "60", "1"))
+
+
 if __name__ == "__main__":
     unittest.main()
