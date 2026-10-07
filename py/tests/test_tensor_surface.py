@@ -39,8 +39,6 @@ class TestTensorSurface(unittest.TestCase):
     @unittest.skipUnless(_have_tg(), "tinygrad not on path")
     def test_softmin_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
-        if not hasattr(TgTensor, "softmin"):
-            self.skipTest("tinygrad checkout predates Tensor.softmin")
         got = Tensor(self.X).softmin().numpy()
         np.testing.assert_allclose(got, TgTensor(self.X).softmin().numpy(), atol=1e-6)
 

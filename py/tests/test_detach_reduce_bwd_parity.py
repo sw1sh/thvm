@@ -44,7 +44,6 @@ import numpy as np
 
 sys.path.insert(0, os.environ.get("THVM_PY", os.path.join(
     os.path.dirname(__file__), "..")))
-from _tinygrad_compat import tg_training  # noqa: E402
 
 
 def _have_tg():
@@ -66,7 +65,7 @@ def _thvm_grad(build):
 
 def _tg_grad(build):
     from tinygrad import Tensor
-    # Newer tinygrad dropped requires_grad/requires_grad_(); backward() fills
+    # tinygrad dropped requires_grad/requires_grad_(); backward() fills
     # .grad for every in-scope non-CONST float leaf (tensor.py:838), so the
     # rg() marker is an identity here -- the leaf gets a gradient regardless.
     x = build(Tensor, lambda t: t, lambda t: t.detach())
@@ -180,7 +179,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
             THN.BatchNorm(4)(x.conv2d(w).relu()).sum().backward()
             g_thvm = float(np.abs(w.grad.numpy()).sum())
 
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
             TGN.BatchNorm(4)(tx.conv2d(tw).relu()).sum().backward()
             g_tg = float(np.abs(tw.grad.numpy()).sum())
@@ -220,7 +219,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
             THN.BatchNorm(4)(x.conv2d(w).relu()).max_pool2d((2, 2)).sum().backward()
             g_thvm = w.grad.numpy()
 
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
             TGN.BatchNorm(4)(tx.conv2d(tw).relu()).max_pool2d((2, 2)).sum() \
                 .backward()

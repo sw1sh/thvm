@@ -86,14 +86,8 @@ class TestFromTinygradLowered(unittest.TestCase):
     def test_alu_param_refused(self):
         # A bound Variable is an ALU-addrspace PARAM (slot -1, tinygrad
         # #18444): a scalar argument, not a buffer this bridge can bind.
-        from tinygrad.uop.ops import UOp, Ops
-        try:
-            from tinygrad.uop.ops import ParamArg
-            from tinygrad.dtype import AddrSpace, dtypes
-        except ImportError:
-            self.skipTest("tinygrad checkout predates ParamArg.addrspace")
-        if not {"addrspace", "dtype"} <= set(getattr(ParamArg, "__dataclass_fields__", {})):
-            self.skipTest("tinygrad checkout predates ParamArg(dtype, addrspace)")
+        from tinygrad.uop.ops import UOp, Ops, ParamArg
+        from tinygrad.dtype import AddrSpace, dtypes
         from thvm.thvm import Thvm
         from thvm.from_tinygrad_lowered import _Lowerer
         u = UOp(Ops.PARAM, arg=ParamArg(slot=-1, dtype=dtypes.int32, addrspace=AddrSpace.ALU))

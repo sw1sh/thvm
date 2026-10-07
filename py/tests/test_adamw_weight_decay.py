@@ -22,10 +22,10 @@ import numpy as np
 sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
 from thvm import Context, Tensor  # noqa: E402
 from thvm import optim           # noqa: E402
-from _tinygrad_compat import tg_training  # noqa: E402
 
 try:
     import tinygrad              # noqa: F401
+    from tinygrad import Context as TgContext
     from tinygrad import Tensor as TgTensor
     from tinygrad.nn import optim as tg_optim
     _HAVE_TG = True
@@ -55,7 +55,7 @@ def _tg_steps(make_opt, steps):
     w0, target = _problem()
     w = TgTensor(w0.copy())
     opt = make_opt([w])
-    with tg_training():
+    with TgContext(TRAINING=1):
         for _ in range(steps):
             opt.zero_grad()
             loss = ((w - TgTensor(target)) * (w - TgTensor(target))).sum()

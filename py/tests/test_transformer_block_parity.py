@@ -64,7 +64,6 @@ import numpy as np
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PY = str(ROOT / "py")
 sys.path.insert(0, os.environ.get("THVM_PY", PY))
-from _tinygrad_compat import tg_muon_decays, tg_training  # noqa: E402
 
 
 def _have_tg():
@@ -321,7 +320,7 @@ class TestTransformerTrain(unittest.TestCase):
         opt = (Adam if opt_name == "adam" else Muon)(list(p.values()), lr=1e-2)
         ln1, ln2 = ("ln1_w", "ln1_b"), ("ln2_w", "ln2_b")
         losses = []
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             for _ in range(n_steps):
                 opt.zero_grad()
                 d = _mlp_block(p, x, ln1, ln2) - tgt
@@ -356,8 +355,6 @@ class TestTransformerTrain(unittest.TestCase):
     def test_train_muon_descends(self):
         """Muon (Newton-Schulz) descends the correct-forward sub-block with
         no NaN, and tracks tinygrad's descent."""
-        if not tg_muon_decays():
-            self.skipTest("tinygrad checkout predates #17709 (dead Muon decay)")
         th = self._train_thvm_mlp("muon")
         tg = self._train_tg_mlp("muon")
         self._assert_descends(th, "thvm-muon")
@@ -421,7 +418,7 @@ class TestTransformerTrain(unittest.TestCase):
         from tinygrad.nn.optim import Adam as TgAdam
         topt = TgAdam(list(tp.values()), lr=1e-2)
         tlosses = []
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             for _ in range(2):
                 topt.zero_grad()
                 d = thvm_fwd(tp, tx) - ttgt

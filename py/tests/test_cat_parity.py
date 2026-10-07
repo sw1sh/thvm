@@ -602,10 +602,9 @@ class TestCatJit(unittest.TestCase):
     def test_jit_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         from tinygrad import nn as tgnn
-        sys.path.insert(0, os.path.dirname(__file__))
-        from _tinygrad_compat import tg_training
+        from tinygrad import Context as TgContext
         lj, pj = self.run_thvm(jit=True)
-        lt, pt = self.train(TgTensor, tgnn, tg_training(), self.weights, self.blocks,
+        lt, pt = self.train(TgTensor, tgnn, TgContext(TRAINING=1), self.weights, self.blocks,
                             self.batches, jit=False)
         np.testing.assert_allclose(lj, lt, rtol=1e-4, atol=1e-5)
         for a, b in zip(pj, pt):

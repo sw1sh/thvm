@@ -5,40 +5,33 @@ it.  `from_tinygrad(tg_tensor)` walks the unrealized `tg_tensor.uop`
 DAG node-by-node, emits the matching thvm UOp via the Phase-1 bridge
 (`py/thvm/thvm.py`), and returns a thvm `Tensor` you can `.numpy()`.
 
-Why the unrealized `.uop`: after a realize/view-merge tinygrad folds
-movement into `Ops.VIEW`/`Ops.BUFFER_VIEW` and we lose the structural
-RESHAPE/EXPAND/PERMUTE chain thvm wants.  We translate the pre-merge
-graph; we DO call `.realize()` once on the source tensor first so the
-leaf BUFFERs have host data we can read back.
+Why the unrealized `.uop`: a realize replaces the tensor's graph with
+its result buffer and we lose the structural RESHAPE/EXPAND/PERMUTE chain
+thvm wants.  We translate the pre-realize graph; we DO call `.realize()`
+once on the source tensor first so the leaf BUFFERs have host data we can
+read back.
 
 Op coverage (extend by adding cases to `_emit`; unmapped ops raise
 NotImplementedError on purpose so coverage grows explicitly):
 
-  leaves     BUFFER, COPY (passthrough to the BUFFER under it),
-             CONST, VCONST-as-value
+  leaves     BUFFER, COPY (passthrough to the BUFFER under it), CONST
   buffers    AFTER(buf, STORE(buf, v)) -> v  (whole-buffer write, e.g. an
              ALLOC'd Tensor.ones parameter or an assign)
-  plumbing   DEVICE, UNIQUE, LUNIQUE on older checkouts (never translated;
-             only appear as srcs of BUFFER/COPY)
   binary     ADD, MUL, MAX, CMPLT, CMPNE, SUB
-  unary      RECIPROCAL/RECIP, EXP2, LOG2, SQRT, NEG
+  unary      RECIPROCAL, EXP2, LOG2, SQRT, NEG
   ternary    WHERE  (cond ? a : b, a true IWHERE select built by uop_where,
              the value-level constructor: no index-layer folds, so nested
              selects stay selects and the chain rule differentiates them;
              MAX uses the same)
   reduce     REDUCE in tinygrad's front normal form, arg=(Ops.ADD|Ops.MAX,
              n_front_axes): the reduced axes were PERMUTEd to the front and
-             the output drops them (uop/ops.py:635-642, :449-452); the older
-             tuple-axis spelling arg=(op, (axis, ...)) and REDUCE_AXIS are
-             still accepted
+             the output drops them (uop/ops.py:655-664, :433-437)
   movement   RESHAPE, EXPAND, PERMUTE, PAD, SHRINK, FLIP
   cast       CAST, BITCAST
-  noop       STAGE (CONTIGUOUS on older checkouts), CONTIGUOUS_BACKWARD,
-             DETACH, NOOP (passthrough)
+  noop       STAGE, CONTIGUOUS_BACKWARD, DETACH, NOOP (passthrough)
 
-Movement target shapes come from `u.shape` (NOT the symbolic VCONST
-shape-spec srcs).  PAD/SHRINK begin/end vectors come from the trailing
-VCONST srcs (modern tinygrad) with a fallback to `u.arg` (older).
+Movement target shapes come from `u.shape`; PAD/SHRINK (offset, size)
+pairs come from `u.marg`.
 """
 from __future__ import annotations
 
@@ -192,38 +185,11 @@ def _to_dtype(tg_dtype) -> DType:
     return dtypes.float32
 
 
-def _const_value(u):
-    """Extract the scalar payload from a CONST node.
-
-    tinygrad CONST.arg may be a plain python number or a wrapper like
-    ConstFloat(0.0) / ConstInt(2) exposing `.x`.
-    """
-    # tinygrad's declared CONST accessor is `val` (uop/ops.py:262-266); the
-    # stored arg encoding is explicitly unstable.  Fall back to the raw arg
-    # (and its legacy `.x` wrapper) for older checkouts.
-    # NOTE: probe by calling, not hasattr -- older checkouts also define a
-    # `val` (the BIND accessor, uop/ops.py:915 there) that asserts on CONST.
-    if getattr(u, "op", None) is _ops_const():
-        try:
-            return u.val
-        except Exception:
-            pass
-    arg = u.arg
-    if hasattr(arg, "x"):
-        return arg.x
-    return arg
-
-
-def _ops_const():
-    from tinygrad.uop.ops import Ops
-    return Ops.CONST
-
-
 def _movement_begin_end(u, kind: str):
     """Decode a PAD / SHRINK movement-arg into thvm's flat
     [begin0,end0,begin1,end1,...] per-axis bounds.
 
-    IMPORTANT SEMANTIC CONVERSION.  Current tinygrad's movement-arg
+    IMPORTANT SEMANTIC CONVERSION.  tinygrad's movement-arg
     (`UOp.marg`) for PAD and SHRINK is a per-dim `(offset, size)` tuple,
     NOT `(before_width, after_width)` / `(begin, end)` (tinygrad
     `uop/ops.py` shape rule: PAD/SHRINK output dim == `size`, with the
@@ -244,52 +210,13 @@ def _movement_begin_end(u, kind: str):
     pad -> a length-14 buffer whose downstream rank-changing RESHAPE then
     failed to decompose and zeroed the whole result.
     """
-    Ops = _ops()
     in_shape = _shape_of(u.src[0])
-    in_ndim = len(in_shape)
-
-    def _pairs_to_thvm(pairs):
-        flat: list[int] = []
-        for d, pair in enumerate(pairs):
-            offset = int(pair[0])
-            size = int(pair[1])
-            in_dim = int(in_shape[d]) if d < in_ndim else 0
-            if kind == "PAD":
-                begin = offset
-                end = size - offset - in_dim
-            else:  # SHRINK
-                begin = offset
-                end = offset + size
-            flat.extend([begin, end])
-        return flat
-
-    marg = getattr(u, "marg", None)
-    if marg is not None:
-        return _pairs_to_thvm(marg)
-
-    # VCONST was removed in newer tinygrad; guard the attribute lookup.
-    vconst = getattr(Ops, "VCONST", None)
-
-    def _vec(s, n):
-        if vconst is not None and s.op == vconst:
-            return tuple(int(x) for x in s.arg)
-        if s.op == Ops.CONST:
-            v = getattr(s.arg, "x", s.arg)   # unwrap ConstInt/ConstFloat
-            return tuple(int(v) for _ in range(n))
-        raise NotImplementedError(
-            f"{kind} param src is {s.op}, expected CONST/VCONST")
-
-    param_ops = (Ops.CONST,) if vconst is None else (vconst, Ops.CONST)
-    param_srcs = [s for s in u.src[1:] if s.op in param_ops]
-    if len(param_srcs) >= 2:
-        offs = _vec(param_srcs[-2], in_ndim)
-        sizes = _vec(param_srcs[-1], in_ndim)
-        return _pairs_to_thvm(list(zip(offs, sizes)))
-    arg = u.arg
-    if arg is not None:
-        return _pairs_to_thvm(arg)
-    raise NotImplementedError(
-        f"cannot decode {kind} params (no CONST/VCONST srcs, no arg) for {u.op}")
+    flat: list[int] = []
+    for d, (offset, size) in enumerate(u.marg):
+        offset, size = int(offset), int(size)
+        in_dim = int(in_shape[d]) if d < len(in_shape) else 0
+        flat.extend([offset, size - offset - in_dim if kind == "PAD" else offset + size])
+    return flat
 
 
 # ---- core walker --------------------------------------------------------
@@ -347,7 +274,7 @@ def _emit(u, memo: dict[int, int]) -> int:
         return term
 
     if op == Ops.CONST:
-        val = _const_value(u)
+        val = u.val
         if _is_int_dtype(u.dtype):
             term = _iconst(int(val))
         else:
@@ -357,33 +284,30 @@ def _emit(u, memo: dict[int, int]) -> int:
 
     # ---- materialized buffers -----------------------------------------
     # AFTER(buf, STORE(buf, v)): the buffer read after a whole-buffer write.
-    # Contiguous allocations (Tensor.ones/zeros params; the target is an
-    # ALLOC on tinygrad master, #18316) and Tensor.assign take this form, so
-    # the value is v.
-    if op is getattr(Ops, "AFTER", None):
+    # Contiguous allocations (Tensor.ones/zeros params, whose target is an
+    # ALLOC) and Tensor.assign take this form, so the value is v.
+    if op is Ops.AFTER:
         term = _emit(_after_value(u, Ops), memo)
         memo[key] = term
         return term
 
     # ---- passthrough plumbing / no-ops --------------------------------
-    # STAGE replaced CONTIGUOUS on tinygrad master (#18097): contiguous() is
-    # `alu(Ops.STAGE)` and tinygrad itself walks through {STAGE, DETACH,
-    # CONTIGUOUS_BACKWARD} as value-identity (tensor.py:178).
-    if op in _passthrough_ops(Ops):
+    # contiguous() is `alu(Ops.STAGE)`, and tinygrad itself walks through
+    # {STAGE, DETACH, CONTIGUOUS_BACKWARD} as value-identity (tensor.py:178).
+    if op in (Ops.STAGE, Ops.CONTIGUOUS_BACKWARD, Ops.DETACH, Ops.NOOP):
         term = _emit(u.src[0], memo)
         memo[key] = term
         return term
 
     # ---- unary --------------------------------------------------------
-    _RECIP = getattr(Ops, "RECIPROCAL", getattr(Ops, "RECIP", None))
     unary_table = {
-        _RECIP: K.RECIP,
+        Ops.RECIPROCAL: K.RECIP,
         Ops.EXP2: K.EXP2,
         Ops.LOG2: K.LOG2,
         Ops.SQRT: K.SQRT,
         Ops.NEG: K.NEG,
     }
-    if op in unary_table and op is not None:
+    if op in unary_table:
         src = _emit(u.src[0], memo)
         term = _unary(unary_table[op], src)
         memo[key] = term
@@ -436,28 +360,22 @@ def _emit(u, memo: dict[int, int]) -> int:
         return term
 
     # ---- reduce -------------------------------------------------------
-    if op == Ops.REDUCE or getattr(Ops, "REDUCE_AXIS", None) == op:
-        rop, axes = u.arg
+    if op == Ops.REDUCE:
+        rop, n_axes = u.arg
         if rop == Ops.ADD:
             kind = K.REDUCE_SUM
         elif rop == Ops.MAX:
             kind = K.REDUCE_MAX
         else:
             raise NotImplementedError(f"unmapped REDUCE op {rop}")
-        # Front normal form (uop/ops.py:635-642): arg[1] is an int n, the
-        # reduced axes are the first n of the (already permuted) src, and
-        # the output shape drops them (:449-452).  Legacy: a tuple of axes.
-        if isinstance(axes, int):
-            axes = tuple(range(axes))
+        # Front normal form (uop/ops.py:655-664): the reduced axes are the
+        # first n_axes of the (already permuted) src.
         src = _emit(u.src[0], memo)
         # thvm reduces one axis at a time; reduce innermost-first so the
         # outer axis indices stay valid.
-        for ax in sorted((int(a) for a in axes), reverse=True):
+        for ax in reversed(range(int(n_axes))):
             src = _reduce(kind, ax, src)
-        # thvm's UOP_REDUCE DROPS the reduced axis, but tinygrad's REDUCE
-        # KEEPS it as size 1 (e.g. (3,8) reduce axis1 -> (3,1)).  Reshape to
-        # tinygrad's output shape so downstream broadcasts line up -- without
-        # this the softmax max-subtract reads a rank-reduced max and overflows.
+        # Reshape to tinygrad's output shape so downstream broadcasts line up.
         src = _reshape(src, _shape_of(u))
         memo[key] = src
         return src
@@ -516,11 +434,6 @@ def _emit(u, memo: dict[int, int]) -> int:
         memo[key] = term
         return term
 
-    if op is getattr(Ops, "VIEW", None) or op is getattr(Ops, "BUFFER_VIEW", None):
-        raise NotImplementedError(
-            "Ops.VIEW found: this is a post-view-merge graph. Pass the "
-            "unrealized tensor's .uop (do not realize before from_tinygrad).")
-
     raise NotImplementedError(f"unmapped tinygrad op {op}")
 
 
@@ -532,11 +445,6 @@ def _after_value(u, Ops):
         raise NotImplementedError(
             "AFTER other than one whole-buffer STORE into its own target")
     return deps[0].src[1]
-
-
-def _passthrough_ops(Ops) -> tuple:
-    names = ("STAGE", "CONTIGUOUS", "CONTIGUOUS_BACKWARD", "DETACH", "NOOP")
-    return tuple(o for o in (getattr(Ops, n, None) for n in names) if o is not None)
 
 
 def _max(a: int, b: int) -> int:

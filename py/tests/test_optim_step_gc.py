@@ -167,11 +167,9 @@ class TestOptimStepGC(unittest.TestCase):
         from test_muon_lars_parity import _tg_run
         from tinygrad import Context, Tensor, TinyJit, nn
         from tinygrad.nn import optim
-        from _tinygrad_compat import tg_muon_decays
         cls.want = muon_lars_runs(_tg_run, optim)
         cls.want.update(gather_step_runs(Tensor, nn, TinyJit, Context))
         cls.want.update(head_step_runs(Tensor, nn, TinyJit, Context))
-        cls.muon_decays = tg_muon_decays()
 
     def _check(self, gc_kb, walker):
         with tempfile.TemporaryDirectory() as d:
@@ -182,8 +180,6 @@ class TestOptimStepGC(unittest.TestCase):
         self.assertNotIn("ran no dispatch rung", out.stderr)
         tol = {"muon1": 1e-4, "muon6": 1e-3, "lars5": 1e-3}
         for key, want in self.want.items():
-            if key == "muon1" and not self.muon_decays:
-                continue
             diff = float(np.abs(got[key] - want).max())
             self.assertLess(diff, tol.get(key, 1e-5),
                             f"{key} at THVM_GC_KB={gc_kb} walker={walker}: maxdiff {diff:.3e}")
