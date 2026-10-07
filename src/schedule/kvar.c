@@ -20,7 +20,7 @@
 // section.
 //
 // Used by:
-//   - uop/index.c       : uop_range_extent_is_var / _var_id / _static_extent
+//   - uop/index.c       : uop_range_static_extent
 //   - render_uop.c       : `V_<name>` loop bound + `constant uint &V_<name>`
 //                           kernel-signature arg
 //   - backend/metal/_.m  : metal_tile_jit_hash excludes kvar-bound numels;

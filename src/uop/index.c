@@ -31,33 +31,8 @@ fn Term uop_range(u32 axis_id, u32 axis_type, u32 extent) {
   return t;
 }
 
-// === UOP_RANGE accessors + axis_type rewriter ===
-//
-// Groundwork for porting `apply_opt.c`'s KpSchedule mutations onto
-// UPatRule[] over UOP_RANGE leaves.  Today KpSchedule.axis_types[]
-// stays the primary source of truth and kernel_lift_to_uop replays
-// applied_opts onto cur[].axis_type in C control flow before
-// emitting UOP_RANGE leaves with the resolved axis_type baked in.
-//
-// The Phase E port turns each apply_opt mutation into a UPatRule
-// over UOP_RANGE.axis_type / UOP_OPT-wrapped UOP_RANGE.  These four
-// helpers are the read/write primitives those rules will compose:
-//
-//   uop_range_axis_id  / uop_range_axis_type  / uop_range_extent
-//     -- field accessors that hide the [NUM(axis_id), NUM(axis_type),
-//        NUM(extent)] heap layout from rule bodies.
-//
-//   uop_range_with_axis_type(old, new_axis_type)
-//     -- structural rewriter; preserves axis_id/extent and returns the
-//        hash-cons-shared Term for the new axis_type.  Equivalent to
-//        the `axis_types[i] = ti` assignments in axes_apply_opt.c
-//        (KOP_GLOBAL: KAX_LOOP -> KAX_GLOBAL, and KOP_SWAP's pairwise
-//        swap of axis_types[]).
-//
-// E1 deliberately doesn't introduce new opcodes or change existing
-// callers -- it adds the read/write seam that subsequent E* wedges
-// (KOP_GLOBAL, KOP_SWAP, KOP_UPCAST/UNROLL/LOCAL/GROUP splits, KOP_TC)
-// will turn into UPatRule entries.
+// === UOP_RANGE field accessors ===
+// Hide the [NUM(axis_id), NUM(axis_type), NUM(extent)] heap layout.
 
 fn u32 uop_range_axis_id(Term r) {
   if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return 0;
@@ -74,93 +49,12 @@ fn u32 uop_range_extent(Term r) {
   return (u32)term_val(heap_read(term_val(r) + 2));
 }
 
-// kvar wedge: the low 31 bits of `extent` hold either a literal
-// extent or a kvar id when bit 31 (KVAR_FLAG) is set.  These three
-// helpers are the canonical accessor surface for "is this range
-// symbolic? what var? what's the static upper bound?".
-fn int uop_range_extent_is_var(Term r) {
-  return kvar_extent_is_var(uop_range_extent(r));
-}
-
-fn u32 uop_range_var_id(Term r) {
-  return kvar_extent_var_id(uop_range_extent(r));
-}
-
-// Static extent: for literal ranges, identity.  For kvar-bound
-// ranges, the registered upper bound (kvar_hi).  Use this when
-// computing buffer sizes / dispatch shapes -- the worst-case footprint
-// must be allocated even when the runtime value is smaller.
+// Static extent: the literal extent, or for a kvar-bound range (bit 31,
+// KVAR_FLAG, set; the low 31 bits a kvar id) its registered upper bound
+// (kvar_hi).  Buffer sizes and dispatch shapes use it: the worst-case
+// footprint must be allocated even when the runtime value is smaller.
 fn u32 uop_range_static_extent(Term r) {
   return kvar_extent_static(uop_range_extent(r));
-}
-
-fn Term uop_range_with_axis_type(Term r, u32 new_axis_type) {
-  if (term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) return r;
-  u32 axis_id = uop_range_axis_id(r);
-  u32 extent  = uop_range_extent(r);
-  return uop_range(axis_id, new_axis_type, extent);
-}
-
-// === uop_range_split primitive ========================================
-//
-// Replaces a single UOP_RANGE leaf with a (outer, inner) pair that
-// represents the same iteration space, plus a `linear_index` Term that
-// the caller substitutes for any consumer that referenced the original
-// leaf.  Mirrors kernel_lift.c's structural-replay "split" block
-// (lines ~1561-1604) at the UOp DAG level: that block walks the
-// SplitAxis cur[] vector, shifts entries right at o.axis+1, halves the
-// outer extent, and stamps inner with the opt's KAX_ type.  The
-// consumer's INDEX_E.addr arithmetic is implicitly rebuilt by the
-// `factor` field of the SplitAxis vector (outer's factor = old factor *
-// inner_extent).
-//
-// uop_range_split returns the same three values declaratively so a
-// UPatRule (rw_range_split below) can replace one UOP_RANGE leaf with
-// the equivalent (outer * k + inner) sub-expression and let
-// uop_pattern_rewrite's bottom-up rebuild thread the new linear_index
-// through every IADD/IMUL chain that consumed the old leaf.
-//
-// Heap layout returned (no new opcode -- composition of existing
-// UOP_RANGE + UOP_IMUL + UOP_IADD + UOP_CONST):
-//
-//   outer        : UOP_RANGE(axis=N,   axis_type=LOOP,           extent=E/k)
-//   inner        : UOP_RANGE(axis=N+1, axis_type=inner_axis_type, extent=k)
-//   linear_index : uop_int_binary(UOP_IADD,
-//                                 uop_int_binary(UOP_IMUL, outer, k_const),
-//                                 inner)
-//
-// Pre-conditions:
-//   - old_range is a UOP_RANGE term (returns zero-init on tag mismatch).
-//   - k > 0 and old_range.extent % k == 0 (returns zero-init otherwise).
-//   - inner_axis_type is one of KAX_UPCAST/UNROLL/LOCAL/GROUP_REDUCE
-//     (the rule body / caller validates this; the primitive accepts
-//     any u32 and trusts the caller, mirroring uop_range's own
-//     unchecked axis_type).
-//
-// Hash-cons: outer/inner/linear_index all flow through the canonical
-// uop_range / uop_int_binary / uop_const constructors, so re-running
-// uop_range_split with the same inputs returns hash-cons-identical
-// Terms.  This is the property a UPatRule that descends through
-// IADD/IMUL chains relies on: the rewriter's memo table dedups equal
-// subgraphs across calls.
-
-fn UopRangeSplit uop_range_split(Term old_range, u32 k, u32 inner_axis_type) {
-  UopRangeSplit out = {0, 0, 0};
-  if (term_tag(old_range) != TAG_UOP || term_ext(old_range) != UOP_RANGE) {
-    return out;
-  }
-  if (k == 0) return out;
-  u32 axis_id = uop_range_axis_id(old_range);
-  u32 extent  = uop_range_extent(old_range);
-  if (extent % k != 0) return out;
-  u32 outer_axis_type = uop_range_axis_type(old_range);
-
-  out.outer = uop_range(axis_id,     outer_axis_type, extent / k);
-  out.inner = uop_range(axis_id + 1, inner_axis_type, k);
-  Term k_const = uop_const(DT_INT32, k);
-  Term scaled  = uop_int_binary(UOP_IMUL, out.outer, k_const);
-  out.linear_index = uop_int_binary(UOP_IADD, scaled, out.inner);
-  return out;
 }
 
 // === UOP_INDEX_E: symbolic INDEX expression ===

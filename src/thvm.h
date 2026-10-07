@@ -2361,46 +2361,12 @@ fn u32  rangeify_unified_node_idx_for_bufferize(Term buf);
 fn u8   rangeify_unified_axes_mask_at(u32 node_idx);
 fn void rangeify_unified_index_axes_register(Term index_e_term,
                                              Term const *rngs, u8 ndim);
-// === UOP_RANGE field accessors + axis_type rewriter ===
-// Read/write seam for UPatRule[]-driven KpSchedule -> UOP_RANGE.axis_type
-// rule bodies.  Wrap the [NUM(axis_id), NUM(axis_type), NUM(extent)]
-// heap layout so callers don't poke heap slots directly.  Returns 0
-// / unchanged on tag mismatch.  See src/uop/index.c for design
-// notes.
+// === UOP_RANGE field accessors ===
+// Wrap the [NUM(axis_id), NUM(axis_type), NUM(extent)] heap layout;
+// 0 on a tag mismatch.
 fn u32  uop_range_axis_id  (Term r);
 fn u32  uop_range_axis_type(Term r);
 fn u32  uop_range_extent   (Term r);
-fn Term uop_range_with_axis_type(Term r, u32 new_axis_type);
-
-// === uop_range_split primitive ===
-// Splits one UOP_RANGE leaf into a (outer, inner) pair plus a
-// `linear_index` Term that reconstructs the original axis position
-// (`outer * k + inner`).  Replaces the structural-replay block in
-// kernel_lift.c at the UOp DAG level: instead of mutating a SplitAxis
-// vector and emitting fresh leaves, callers (a UPatRule) substitute
-// `linear_index` for any consumer that referenced the original leaf.
-//
-// Field layout:
-//   outer        : UOP_RANGE(axis=N,   axis_type=old.axis_type, extent=E/k)
-//   inner        : UOP_RANGE(axis=N+1, axis_type=inner_axis_type, extent=k)
-//   linear_index : IADD(IMUL(outer, k), inner)
-//
-// Returns {0, 0, 0} on tag mismatch / k == 0 / extent % k != 0.  The
-// caller is responsible for shifting any subsequent UOP_RANGE leaves'
-// axis_ids by +1 (every split inserts a new axis between N and N+1
-// in the post-replay axis sequence) -- the primitive itself only
-// constructs the pair; the rule body composes it into the DAG.
-//
-// Hash-cons: outer/inner/linear_index flow through the canonical
-// uop_range / uop_int_binary / uop_const constructors, so re-running
-// uop_range_split with the same inputs returns hash-cons-identical
-// Terms.  See src/uop/index.c for design notes.
-typedef struct {
-  Term outer;
-  Term inner;
-  Term linear_index;
-} UopRangeSplit;
-fn UopRangeSplit uop_range_split(Term old_range, u32 k, u32 inner_axis_type);
 
 // Dense-renumber a kernel DAG's UOP_RANGE axis_ids to 0..n-1 (ascending
 // by current id).  The lifter assigns global, sparse, sometimes-large
