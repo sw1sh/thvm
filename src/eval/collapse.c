@@ -33,6 +33,9 @@ static int eval_collapse_cmp(const void *a, const void *b) {
   return 0;
 }
 
+// Single-threaded SUP-tree enumeration on top of cnf.  Walks every
+// branch FIFO ordered by INC priority and writes pure leaves into
+// `out`.  Returns the count actually written, capped at `cap`.
 fn u64 eval_collapse(Term term, Term *out, u64 cap) {
   if (cap == 0) return 0;
   EvalCollapseTask *q = (EvalCollapseTask *)

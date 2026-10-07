@@ -6270,6 +6270,11 @@ static void cg_emit_cpu_kvar_decls(Term root, FILE *fp) {
   fputs("  (void)kvar_vals;\n", fp);
 }
 
+// F6: same UOp DAG, emitted as a C99 kernel for the CPU JIT path.
+// Function signature is the CPU-JIT contract dlsym'd by
+// cpu_jit_dispatch:
+//   void k(void *out_v, const void *const *ins_v,
+//          unsigned n, const unsigned *in_numels);
 fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
                                Term out_buf, Term const *in_bufs,
                                u32 n_inputs, FILE *fp) {

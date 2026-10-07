@@ -107,6 +107,8 @@ static void bufferize_cmap_add(u32 producer_idx, u64 consumer_loc) {
   BUFFERIZE_NODES[producer_idx].cmap_head = slot;
 }
 
+// Fill up to `cap` consumer_locs for `producer_loc`. Returns true count
+// (may exceed cap; caller is responsible for sizing).
 fn u32 bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap) {
   u32 idx = bufferize_info_find(producer_loc);
   if (idx == 0xFFFFFFFFu) return 0;
@@ -1374,6 +1376,9 @@ static void bufferize_reject_packed(void) {
   }
 }
 
+// bufferize_classify is the public schedule entry point: it walks the
+// UOp DAG rooted at `root`, marks ROOT/MULTI/REDUCE boundaries, runs
+// the named realize-rewrite rules and then the unified rangeify pass.
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
   if (term_tag(root) != TAG_UOP || term_ext(root) == UOP_KERNEL) {

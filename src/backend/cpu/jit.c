@@ -645,6 +645,16 @@ static void *cpu_jit_build_combined(CpuJitJob const *jobs, u32 njobs,
 }
 #endif  // !_WIN32
 
+// Parallel cold-start JIT warm: render + clang-compile every JIT-eligible
+// CPU kernel in [kid_lo, kid_hi) CONCURRENTLY (a posix_spawn pool of up to
+// ncores clang processes) and populate the on-disk dylib cache + in-memory
+// CpuJitSlot table BEFORE the serial dispatch loop fires them one-at-a-time.
+// Idempotent: a hash already on disk / in cache is skipped, and the batch is
+// de-duped by source hash so two workers never compile the same dylib.  A
+// no-op when THVM_CPU_JIT_PARALLEL=0.  The subsequent cpu_jit_dispatch fires
+// then hit the cache (no compile), collapsing ~Nx serial-clang wait to one
+// parallel pass.  Called from thvm_realize / thvm_realize_many once the
+// materialize fixpoint has emitted the kernel table, before the driving wnf.
 fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
 #ifdef _WIN32
   (void)kid_lo; (void)kid_hi;

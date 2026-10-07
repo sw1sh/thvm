@@ -13,6 +13,11 @@
 // for the same shape return the same Term so kernel boundaries dedup
 // to single buffer slots.
 
+// Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
+// `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via
+// uop_mov_cache: identical (scope, dtype, ndim, dims) tuples share heap
+// loc.  Defaults: scope=GLOBAL captures today's implicit-buffer behavior
+// and lets D'1 land without consumer rewrites.
 fn Term uop_buffer(u32 scope, u32 dtype, u32 ndim, const u32 *dims) {
   return uop_buffer_inst(scope, dtype, ndim, dims, 0);
 }

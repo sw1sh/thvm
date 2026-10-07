@@ -26,6 +26,7 @@ fn Term thvm_realize_many(Term ctr_term);
 // the WolframKernel hosting the runtime has to survive it.
 static char REALIZE_ERROR[96];
 
+// Deferred heap collection for a host that holds raw Terms (realize.c).
 fn char const *thvm_realize_error(void) {
   return REALIZE_ERROR;
 }

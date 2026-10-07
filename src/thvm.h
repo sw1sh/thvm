@@ -294,18 +294,7 @@ typedef struct {
     char const *name;           // canonical short name ("f32", "i8", ...)
 } DTypeInfo;
 
-// Per-dtype metadata accessor.  Returns NULL on out-of-range; the
-// table itself lives in src/dtype/info.c.
-DTypeInfo const *dtype_info(u32 dt);
-u32             dtype_itemsize    (u32 dt);
 u64             dtype_storage_bytes(u32 dt, u64 numel);
-char const     *dtype_name        (u32 dt);
-u8              dtype_kind        (u32 dt);
-int             dtype_is_float    (u32 dt);
-int             dtype_is_int      (u32 dt);
-int             dtype_is_signed   (u32 dt);
-int             dtype_is_bool     (u32 dt);
-int             dtype_is_packed   (u32 dt);
 
 // === UOp opcodes (TAG_UOP ext field) ===
 // See docs/tensors.md for per-opcode heap layouts.
@@ -917,8 +906,6 @@ typedef struct {
   u32   in_cap;
   u32   n_inputs;
 } KernelUopLift;
-fn void kernel_lift_reserve(KernelUopLift *lift, u32 needed);
-fn void kernel_lift_release(KernelUopLift *lift);
 
 typedef struct KernelEntry {
   // Input-tensor arrays: dynamically grown.  inputs_cap is the
@@ -1470,14 +1457,6 @@ fn void multi_wire_prov_bump_body(u64 loc);
             multi_wire_prov_bump_body((u64)(loc));                    \
         }                                                             \
     } while (0)
-fn u32                 multi_wire_prov_get(u64 loc);  // sentinel-safe read
-fn void                multi_trace_init(u64 initial_cap);
-fn void                multi_trace_reset(void);
-fn void                multi_trace_free(void);
-fn u64                 multi_trace_count(void);
-fn const MultiEvent  * multi_trace_get(u64 i);
-fn const char        * multi_rule_name(u8 r);
-fn const char        * multi_family_name(u8 f);
 #else
 #define multi_emit(rule, family, term_a, term_b, delta_label) ((void)0)
 #define WIRE_PROV_BUMP(loc) ((void)0)
@@ -1497,44 +1476,21 @@ u32 thvm_context_create(const char *default_device);
 u32 thvm_context_select(u32 slot);
 // Returns the current slot id (0 = default).
 u32 thvm_context_current(void);
-// Free everything in the given slot.  Slot 0 (default) is a no-op
-// (same as thvm_free) since it cannot be re-created without leaking
-// the static DEFAULT_CTX_STORAGE.
-void thvm_context_destroy(u32 slot);
-
-// === term/ ===
-fn Term term_new(u8 sub, u8 tag, u32 ext, u64 val);
-fn u8   term_tag(Term t);
-fn u32  term_ext(Term t);
-fn u64  term_val(Term t);
-fn u8   term_sub_get(Term t);
-fn Term term_sub_set(Term t, u8 sub);
 
 // === heap/ ===
 fn u64  heap_alloc(u64 size);
 fn Term heap_read(u64 loc);
 fn void heap_set(u64 loc, Term t);
-fn void heap_subst_var(u64 loc, Term value);
-fn Term heap_subst_cop(u8 side, u64 loc, Term r0, Term r1); // pair subst
 
 // === gc/ === (Cheney semi-space copying GC; defined in heap/collect.c)
 // Runtime heap allowance in cells.  Defaults to HEAP_CAP; overridable
 // once per process via the THVM_HEAP_CELLS env var (read at first call).
 // Drives the mmap size, gc_init split, and the gc_mark visited bitmap.
 fn u64  thvm_heap_cells(void);
-// Static def-template (book) heap allowance in cells.  Defaults to
-// BOOK_CAP; overridable once per process via THVM_BOOK_CELLS.  Drives
-// the book-heap mmap size in init_ctx_arrays.
-fn u64  thvm_book_cells(void);
 // Permanent (never collected) heap tail past the semi-spaces, in cells:
 // THVM_HEAP_PERM_CELLS, default 0.  thvm_heap_map_cells is the mapping
 // size; heap_perm_alloc bump-allocates atom-only nodes there (0 = none).
-fn u64  thvm_heap_perm_cells(void);
-fn void thvm_heap_request_perm_cells(u64 cells);
-fn u64  thvm_heap_map_cells(void);
 fn u64  heap_perm_alloc(u64 n);
-fn void gc_init(u64 space_words);
-fn void gc_reset(void);
 fn int  gc_enabled(void);
 fn u64  gc_from_start(void);
 fn u64  gc_from_end(void);
@@ -1542,47 +1498,7 @@ fn u64  gc_count(void);
 fn void gc_collect(Term *roots, u32 n_roots);
 fn u64  gc_forward_loc(u64 loc);
 
-// === book heap (static templates) ===
-fn u64  book_alloc(u64 size);
-fn Term book_read (u64 loc);
-fn void book_set  (u64 loc, Term t);
-
-// Snapshot a dynamic term tree into the book heap.  Returns a
-// book-domain term whose val refers to BOOK_HEAP rather than HEAP.
-Term thvm_book_from_dynamic(Term body);
-
-// Register `body` as the definition for `name`.  Snapshots the
-// body into the book heap (so subsequent mutations to the dynamic
-// graph don't affect the def) and stores the root book term in
-// DEFS[name].  TRef[name] then unfolds via ALO on demand.
-void thvm_def_register(u32 name, Term body);
-
-// === ALO ===
-//
-// `state_id` references an AloState chain mapping book locs to
-// freshly allocated dynamic locs.  `alo_realize` walks one layer of
-// the static `book_term` into dynamic cells, returning a dynamic
-// term; child slots are themselves wrapped in fresh ALOs (lazy).
-// `alo_force` does the same starting from a TAG_ALO term.
-u32  alo_state_push  (u32 parent, u64 old_loc, u64 new_loc);
-int  alo_state_lookup(u32 state_id, u64 old_loc, u64 *out_new_loc);
-Term alo_realize     (Term book_term, u32 state_id);
-Term alo_force       (Term alo_term);
-
-// === ref ===
-fn Term term_new_ref (u32 name);
-fn Term term_new_alo (Term book_term, u32 state_id);
-
 // === op2 + mat ===
-// Both allocate a 2-cell dyn heap block.  OP2's cells are [x, y];
-// MAT's cells are [handler, fallback].  See wnf for the firing rules.
-fn Term term_new_op2 (u32 opcode, Term x, Term y);
-fn Term term_new_mat (u32 match_val, Term handler, Term fallback);
-fn Term term_new_eql (Term a, Term b);
-fn Term term_new_and (Term a, Term b);
-fn Term term_new_or  (Term a, Term b);
-fn Term term_new_when(Term cond, Term body);
-fn Term term_new_fvr (u32 var_id);
 
 // 8.1b: TAG_PRI ("primitive function call") -- a thin port of HVM4's
 // PRI tag.  Each primitive is registered in a process-global table
@@ -1592,10 +1508,6 @@ fn Term term_new_fvr (u32 var_id);
 // and its return Term replaces the redex.  Used in 8.1c-d to build
 // SUP-encoded CP enumeration with unification as a primitive.
 typedef Term (*PrimFn)(Term *args);
-fn Term term_new_pri  (u32 prim_id);
-fn u32  prim_register (u32 prim_id, PrimFn func, u32 arity);
-fn PrimFn prim_fun    (u32 prim_id);
-fn u32  prim_arity    (u32 prim_id);
 #define PRIM_TABLE_CAP 64
 
 // THVM core primitives (slots 16+, leaving room for ATP at 0-4).
@@ -1608,32 +1520,6 @@ fn u32  prim_arity    (u32 prim_id);
 //                   one general PRI, customised by per-slot WL
 //                   functions.  Bridge lives in CSource/thvmlink.c.
 #define THVM_PRIM_PRI   16u
-fn void thvm_register_core_prims(void);
-
-// k0a: build a TAG_CTR labelled constructor over `n` child Terms.
-// Heap layout: [NUM(arity=n), c_0, ..., c_{n-1}].  ext = label
-// (0 = anonymous tuple).  Passive in the IC reducer.  Used by
-// k0c's multi-target interact_grad to bundle one cotangent per
-// requires_grad target into a single result.  Accessor
-// term_ctr_at returns 0 (invalid Term) on out-of-range.
-fn Term term_new_ctr (u32 label, const Term *children, u32 n);
-fn u32  term_ctr_n   (Term ctr_term);
-fn Term term_ctr_at  (Term ctr_term, u32 i);
-// Child scratch for a CTR rebuild: `stk` (REWRITE_MAX_ARITY slots)
-// when n fits, a heap block otherwise; release with term_kids_release.
-fn Term *term_kids_buf    (Term *stk, u32 n);
-fn void  term_kids_release(Term *kids, Term *stk);
-// Work stack of an iterative term walk: `buf` starts as the caller's
-// inline array `inl` of *cap entries of `esz` bytes; grow doubles it
-// onto the heap (updating *cap), release frees a heap block.
-fn void *term_stack_grow   (void *buf, const void *inl, u32 *cap, size_t esz);
-fn void  term_stack_release(void *buf, const void *inl);
-
-// === lazy outermost-layer resolver ===
-// Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);
-// returns everything else unchanged.  Cheaper than wnf -- no
-// kernel / materialize / grad firing.
-fn Term term_resolve(Term t);
 
 // === schedule/kvar -- symbolic-shape Variable registry ============
 // A kvar represents a kernel-shape parameter (e.g. "BS") that should
@@ -1655,19 +1541,11 @@ fn Term term_resolve(Term t);
 // further down (forward-decl + `typedef struct KernelEntry { ... }`),
 // used in the struct-tag form so the signatures compile before the
 // full body is seen.
-u32          kvar_alloc(const char *name, u32 lo, u32 hi);
-const char  *kvar_name(u32 id);
-u32          kvar_hi(u32 id);
-void         kvar_reset(void);
-u32          kvar_pack_extent(u32 var_id);
 int          kvar_extent_is_var(u32 packed_extent);
 u32          kvar_extent_var_id(u32 packed_extent);
 u32          kvar_extent_static(u32 packed_extent);
-void         kvar_set_runtime(u32 id, u32 value);
-u32          kvar_runtime(u32 id);
 u32          kvar_extent_runtime(u32 packed_extent);
 u32          kvar_collect_from_dag(Term root, u32 *out_ids, u32 cap);
-int          kernel_kvar_bind (struct KernelEntry *ke, u32 var_id, u32 value);
 u32          kernel_kvar_value(struct KernelEntry const *ke, u32 var_id);
 
 // === schedule ===
@@ -1698,9 +1576,6 @@ fn u32  bufferize_info_find(u64 loc);
 typedef struct { u64 consumer_loc; u32 next; } CMapNode;
 extern CMapNode CMAP_LL[CMAP_LL_CAP];
 extern u32      CMAP_LL_LEN;
-// Fill up to `cap` consumer_locs for `producer_loc`. Returns true count
-// (may exceed cap; caller is responsible for sizing).
-fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 
 // Why bufferize_classify realizes a node (UOpInfo.reasons bits).
 #define BUFFERIZE_REASON_ROOT        (1u << 0)
@@ -1748,17 +1623,6 @@ fn u32  bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap);
 // Every SCATTER is its own kernel: a serial read-modify-write of its
 // output (rangeify_unified.c ru_lower_scatter).  The faithful seed honors it.
 #define BUFFERIZE_REASON_SCATTER (1u << 11)
-// bufferize_classify is the public schedule entry point: it walks the
-// UOp DAG rooted at `root`, marks ROOT/MULTI/REDUCE boundaries, runs
-// the named realize-rewrite rules and then the unified rangeify pass.
-fn void bufferize_classify(Term root);
-
-// g2a: after realize_classify populates the boundary set, the
-// scheduler topo-sorts those boundaries by producer-to-consumer
-// depth.  These accessors expose the sorted order so tests / future
-// code-emit can iterate boundaries in dependency order.
-fn u32  materialize_boundary_count(void);
-fn u64  materialize_boundary_at(u32 i);
 
 // Leaf utilities other compilation units (realize_classify,
 // gc_mark, wnf/redex, interact/uop_kernel) reference.
@@ -1768,79 +1632,6 @@ fn u8   uop_is_binary_elementwise(u8 op);
 fn u8   uop_is_ternary_elementwise(u8 op);
 fn int  term_shape_in(Term t, u32 env_id, Shape *out);
 fn int  term_dtype_in(Term t, u32 env_id, u32 *out);
-// Device of a term (THVM_DEV_*), -1 = unknown/default.  See uop_meta.c.
-fn i32  term_device_in(Term t);
-
-// === interact/ ===
-// One file per active pair.  Each rule increments ITRS when it fires.
-fn Term interact_app_lam(Term lam, Term arg);
-fn Term interact_app_era(void);
-fn Term interact_dup_sup(u32 lab, u64 loc, u8 side, Term sup);
-fn Term interact_dup_era(u8 side, u64 loc, Term era);
-fn Term interact_dup_lam(u32 lab, u64 loc, u8 side, Term lam);
-fn Term interact_dup_bri(u32 lab, u64 loc, u8 side, Term bri);
-fn Term interact_dup_num(u8 side, u64 loc, Term num);
-fn Term interact_dup_ten(u8 side, u64 loc, Term ten);
-fn Term interact_dup_uop(u32 lab, u64 loc, u8 side, Term uop);
-fn Term interact_kernel (Term kernel);
-
-// === codegen/ axis ===
-// Resolve a single axis's KAX_ type from the lifted DAG's post-opt
-// RANGE leaves.  Returns KAX_LOOP when ke/axes are NULL,
-// d >= n_axes, or the DAG is empty / overflows.  Used by
-// tile_anno.c readers as the only axis-type read source -- no
-// direct axis_types[i] reads remain in codegen/tile_anno.c.
-fn u8   axes_resolve_kax_type(struct KernelEntry const *ke, u32 d);
-
-// Derive per-axis full_shape extents from the higher-level signals
-// (output_shape + tail-reduce + scalar-reduce + applied_opts).
-// Mirrors the writer trio (axes_default_for +
-// axes_ensure_scalar_reduce + axes_apply_opt) exactly.  Returns the
-// number of extents written; 0 on overflow / unknown opt / invalid
-// replay.  Used by axes_resolve_full_shape.
-fn u32  axes_compute_full_shape(struct KernelEntry const *ke, u32 *out,
-                                u32 cap);
-
-// Per-axis full_shape resolver.  Canonical (and only) read path for
-// axis extents.  Writes the derived extent for axis `d` into
-// `*out_extent` and returns 1 on success; 0 (with `*out_extent = 0`)
-// when ke/axes are NULL, d is out of range, or the simulator can't
-// speak.
-fn u32  axes_resolve_full_shape(struct KernelEntry const *ke, u32 d,
-                                u32 *out_extent);
-
-// Axis-count resolver.  Canonical (and only) read path for n_axes.
-// Returns the derived axis count (output_shape.ndim clipped to
-// MAX_AXES-1, plus 1 if a trailing REDUCE-class axis is present,
-// plus the count of split-class applied_opts).
-fn u32  axes_resolve_n_axes(struct KernelEntry const *ke);
-
-// Apply one TOpt to a KernelEntry's axis structure.  Split-class opts
-// (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) split the indicated axis,
-// growing n_axes by one; KOP_GLOBAL marks a LOOP axis as GLOBAL via
-// the applied_opts log; KOP_SWAP exchanges two axes in-place; KOP_TC
-// is metadata-only.  Returns 0 on validation failure (axis out of
-// range, arg doesn't divide, applied_opts full, unsupported opt).
-//
-// Per-axis kax_type is not stored on KpSchedule; the writer records
-// the opt and axes_resolve_kax_type derives the type from the
-// applied_opts log on read.
-fn int kernel_apply_opt(struct KernelEntry *ke, KOpt opt);
-
-// Shape-heuristic kernel opt proposer: looks at the kernel's
-// program + axes and writes up to `cap` candidate KOpts into
-// `out`.  Returns the number written.  The autotune loop applies
-// each in isolation against the baseline and picks the winner.
-// Today's heuristics are narrow (UNROLL on the reduce axis at
-// {2,4,8,16}); add more rules here as new opt classes get codegen
-// support.
-// Kernel-arena GC: strip per-kernel program/input arrays for kernels
-// whose output buffer was released by the cpu_buf pool rollback.
-// Returns the number of kernels stripped.  Wired into thvm_realize
-// so the per-kernel array memory stays bounded across long training
-// loops (M4 of the beautiful-mnist parity arc).  See kernel_gc.c
-// header for why slot ids are intentionally NOT recycled.
-fn u32  kernel_gc_sweep(Term result);
 
 // === axis annotation read API (codegen/tile_anno.c) ===
 // Resolves axis count + per-axis TileAxisInfo from the KpSchedule
@@ -1853,14 +1644,6 @@ fn u32  tile_anno_axis_count_or_kernelaxes(struct KernelEntry const *ke);
 // can call these.
 u32        tile_anno_applied_opts_count(struct KernelEntry const *ke);
 KOpt const *tile_anno_applied_opts(struct KernelEntry const *ke);
-// Hash all per-axis (kax_type, extent) into the running FNV-1a state.
-// Used by cache-key generation in autotune.c.
-u64        tile_anno_hash_axes(struct KernelEntry const *ke, u64 h);
-// Writer-side facade: thin wrapper over kernel_apply_opt.
-int        tile_anno_apply_opt(struct KernelEntry *ke, KOpt opt);
-// Reset axes to the default LOOP/REDUCE shape (autotune between-
-// candidates baseline; preserves autotuned + version).
-void       tile_anno_axes_reset(struct KernelEntry *ke);
 // Recognize the im2col-fused Conv2D reduce template produced by the
 // lowered UOp graph.  Renderers use this as a tile template instead
 // of carrying backend-private conv pattern matchers.
@@ -1870,8 +1653,6 @@ int     tile_rejects_conv2d_flat_cin1(struct KernelEntry const *ke);
 // Matmul shape facts flow through uop_dag_classify_matmul_shape
 // over ke->cached_lift.store_root; dispatch consumers route through
 // the lifter-based path.
-
-fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 
 // Autotune: walk the proposer's candidates, time each variant
 // against the baseline (no opts) with direct kernel dispatch, expand
@@ -1887,7 +1668,6 @@ fn u32 kernel_opts_propose(struct KernelEntry const *ke, KOpt *out, u32 cap);
 // activations or the tile-JIT shape table.  Returns 1 if a winner was
 // applied.  No-op while a JIT capture is recording (jit_is_capturing).
 fn int kernel_autotune(u32 kid);
-fn u64 kautotune_structural_key(struct KernelEntry const *ke);
 
 // Cheap predicate used by the fire-time auto-tune trigger.  True
 // iff (env opt-in `AUTOTUNE=1` or `BEAM>0`) AND (this KpSchedule
@@ -1910,9 +1690,6 @@ typedef struct {
   u32 out_buf_id;
   u32 in_buf_ids[JIT_REPLAY_MAX_INPUTS];
 } JitReplayDispatch;
-fn void jit_capture_pause(void);
-fn void jit_capture_resume(void);
-fn u32  jit_capture_export_ops(u32 slot, u64 *out, u32 cap_words);
 
 // GC-invariant structural content hash of the lifted UOp DAG rooted at
 // `root` (Merkle-style: mix(op, dtype, payload, child hashes), memoized
@@ -1927,37 +1704,14 @@ u64  uop_dag_content_hash(Term root);
 // the WL TKernelVariants surface.
 fn u64 kernel_bench_us(u32 kid, u32 n_runs, u64 early_stop);
 
-// Bench every proposer candidate (slot 0 = baseline, no opts) and
-// write per-variant (KOpt, us) into out_opts/out_us.  Returns the
-// number of slots written.  Restores axes to baseline at exit so
-// the WL caller can pick what to apply via TKernelApplyOpt.
-fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap);
-
 // === tensor/ ===
 // Tensor descriptor lifecycle.  Step 12: bump-only allocation in TENS[];
 // refcount + backend-level buffer refcount govern the buffer lifetime.
 fn u32  tensor_alloc  (Backend *b, Shape shape, u32 dtype);
 fn void tensor_release(u32 id);   // decref + buf_decref; free at 0
-fn void tensor_mark_buf_preserved(u32 id);
 fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref
-// ShapeTracker chain extension: when a movement op can't be absorbed
-// into a single view (RESHAPE on non-contig src), the caller calls this
-// to make `new_outermost` the new public view and push the previous
-// public view onto the prior_views chain.  Buf is shared (incref bumped).
-fn u32  tensor_view_chain_append(u32 src_id, View new_outermost);
-// Write src's elements into dst's buffer from element `dst_off` on:
-// the bytes when the dtypes match, the values at dst's dtype when they
-// differ.  0 on success.  ASSIGN and its JIT replay both write this way.
-fn int  tensor_assign(u32 dst_id, u32 src_id, u64 dst_off);
 
 // === view/ ===
-// Map an output flat index to the underlying buffer index through
-// a (possibly non-contiguous) View.  Contiguous views short-circuit
-// to flat_idx + offset; strided views walk per-axis strides.
-fn u32 view_strided_index(View const *v, u32 flat_idx);
-// Chain-aware index for a TenDesc's full ShapeTracker.  When
-// nviews == 0, equivalent to view_strided_index(&t->view, ...).
-fn u32 tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 
 // Cross-realize loc -> tid cache (defined in schedule/materialize.c).
 // Records the TenDesc tid produced by each emitted kernel's source UOP
@@ -1970,38 +1724,7 @@ fn u32 tendesc_strided_index(TenDesc const *t, u32 flat_idx);
 //     pass already realized.
 // Cleared by tracing GC + kernel GC sweeps when their respective IDs
 // move/recycle.
-fn u32  materialized_loc_lookup       (u64 loc);
-fn void materialized_loc_insert       (u64 loc, u32 tid);
 fn void materialized_loc_clear        (void);
-fn void materialized_loc_gc_before    (void);
-fn void materialized_loc_gc_after     (void);
-fn void thvm_free_fp8_transients      (u32 result_tid);
-// UOP_COPY persistent device-upload cache (schedule/materialize.c).
-// Reset on GC compaction / thvm reset / free (its keys are heap locs).
-fn void copy_upload_cache_reset       (void);
-fn void weight_move_cache_reset       (void);
-fn u64  weight_move_trim_sources      (void);
-fn void kernel_input_upload_reset     (void);
-fn void materialized_loc_scope_enter  (void);
-fn void materialized_loc_scope_leave  (void);
-fn u32  materialized_loc_scope_depth  (void);
-// Cross-pass buffer-share detection: per-loc count of how many top-level
-// realize roots reach a heap loc, populated each materialize-loop
-// iteration so the per-subgraph arena planner can see a buffer shared by
-// sibling subgraphs (the cross-pass share the local bufferize
-// consumer_count misses).
-fn void xpass_cc_populate(Term root);
-fn void xpass_cc_reset(void);
-// JIT-capture realize-dedup span: preserve the loc->tid cache across the
-// several realizes of one captured step so shared forward/grad kernels
-// are emitted (and recorded) once.
-fn void materialized_loc_jit_span_begin(void);
-fn void materialized_loc_jit_span_end  (void);
-
-// Build a contiguous View from a Shape.  Step 14 adds the movement ops
-// (reshape / permute / expand / pad / shrink / flip).
-fn View view_create(Shape shape);
-fn u32  shape_numel(Shape s);
 
 // Metal buffer pool hooks.  Real implementations live in
 // src/backend/metal/_.m; the C stub supplies no-op variants on
@@ -2075,10 +1798,6 @@ u32  thvm_metal_buf_meta(u32 buf_id);
 // (via thvm_kernel_input_drop_wrap) to release a block's weight wraps after
 // the block's matmuls retire so wraps don't accumulate across blocks.
 void thvm_metal_buf_free_borrowed(u32 buf_id);
-// Drop the Metal zero-copy disk-mmap wrap cached for a disk-mmap weight tid
-// (frees the borrowed MTLBuffer + clears the KIN_UP cache slot so the next
-// use re-wraps fresh).  No-op when the weight has no Metal wrap cached.
-fn void thvm_kernel_input_drop_wrap(u32 src_tid);
 
 // === uop/ ===
 // Constructors for raw UOp graph nodes.  Each helper allocates the
@@ -2087,13 +1806,6 @@ fn void thvm_kernel_input_drop_wrap(u32 src_tid);
 // structure.  Materialization (commit 3) consumes a graph built
 // from these.
 fn Term uop_const  (u32 dtype, u32 bits);
-fn Term uop_unary  (u32 opcode, Term src);                       // NEG/RECIP/EXP2/LOG2/SQRT
-fn Term uop_binary (u32 opcode, Term a, Term b);                 // ADD/MUL/CMPLT
-fn Term uop_reduce (u32 kind, u32 axis, Term src);
-// Multi-axis REDUCE: reduces over all `n_axes` axes simultaneously.
-// Mirrors tinygrad uop/ops.py Ops.REDUCE with multiple range srcs.
-// `uop_reduce(kind, axis, src)` is the n_axes==1 convenience.
-fn Term uop_reduce_multi(u32 kind, u32 n_axes, u32 const *axes, Term src);
 // REDUCE-node accessors (centralised so the heap layout can evolve
 // without touching every call site).  Caller passes a TAG_UOP cell with
 // op==UOP_REDUCE.
@@ -2101,66 +1813,15 @@ fn u32  uop_reduce_kind   (Term red);
 fn u32  uop_reduce_n_axes (Term red);
 fn u32  uop_reduce_axis   (Term red, u32 i);   // i in [0..n_axes)
 fn Term uop_reduce_src    (Term red);
-// Closed-form collapse of a single-axis SUM REDUCE over a pure RANGE (the
-// arange / cumsum / one-hot triangular-mask construction).  Port of
-// tinygrad codegen/simplify.py pm_reduce_simplify.  Returns `root`
-// unchanged when no foldable reduce is present.
-fn Term uop_reduce_arange_collapse(Term root);
-fn Term uop_reshape(Term src, u32 ndim, const u32 *dims);
-fn Term uop_permute(Term src, u32 ndim, const u32 *perm);
-fn Term uop_expand (Term src, u32 ndim, const u32 *dims);
-fn Term uop_pad    (Term src, u32 ndim, const u32 *begin_end);   // begin_end[2*ndim]
-fn Term uop_shrink (Term src, u32 ndim, const u32 *begin_end);
-fn Term uop_flip   (Term src, u32 axes_bitmask);
-fn Term uop_cast   (Term src, u32 dst_dtype);                    // value-preserving cast
-fn Term uop_bitcast(Term src, u32 dst_dtype);                    // same-itemsize reinterpret
 
 // === Symbolic INDEX layer ===
 // Constructors for UOP_RANGE / UOP_INDEX_E / UOP_I* / UOP_IWHERE / UOP_INVALID.
 // Hash-cons via uop_mov_cache like the movement opcodes.
-fn Term uop_range    (u32 axis_id, u32 axis_type, u32 extent);
-fn Term uop_index_e  (Term buffer, Term addr);
 fn Term uop_int_binary(u32 opcode, Term a, Term b);              // IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND/IOR/IXOR/ISHR
 fn Term uop_fast_idiv_rule(Term t, void *user);                  // late: x//c -> (x*m)>>s, x%c -> x-c*(x//c)
 fn Term uop_iwhere   (Term cond, Term then_v, Term else_v);
-fn Term uop_invalid  (void);
-// Value-level select (tinygrad Ops.WHERE): the same UOP_IWHERE node, folding
-// only a constant cond or then == else -- none of uop_iwhere's index-layer
-// folds, which would turn nested value selects into tensor-level IAND.
-fn Term uop_where    (Term cond, Term then_v, Term else_v);
-
-// === UOP_BUFFERIZE main-heap allocator ===
-// 1-to-1 port of tinygrad/schedule/indexing.py:77 (`UOp(Ops.BUFFERIZE,
-// s.dtype, src=(new_src,)+closed_ranges, arg=opts)`).  Hash-cons via
-// uop_mov_cache.  addrspace uses UOP_SCOPE_GLOBAL / LOCAL / REG;
-// removable mirrors BufferizeOpts.removable.  Accessors return 0 /
-// zero-init on tag mismatch (caller validates).
-fn Term uop_bufferize_new(Term value, u32 addrspace, u32 removable,
-                          u32 n_ranges, Term const *ranges);
-fn Term uop_bufferize_value     (Term b);
-fn u32  uop_bufferize_addrspace (Term b);
-fn u32  uop_bufferize_n_ranges  (Term b);
-fn Term uop_bufferize_range_at  (Term b, u32 i);
 
 // === Movement-op range swizzlers ===
-// 1-to-1 port of tinygrad/schedule/indexing.py:apply_movement_op (line 129)
-// per-op cases. Each rewrites the consumer's per-axis range expressions
-// (`out_rngs`) into the producer's per-axis expressions (`in_rngs`).
-// All variants hash-cons through uop_mov_cache.  `ndim` bounded by
-// MAX_DIM. In-place (in_rngs == out_rngs) is unsafe (PERMUTE).
-fn void apply_movement_op_shrink (u32 ndim, u32 const *begin_end,
-                                  Term const *out_rngs, Term *in_rngs);
-fn void apply_movement_op_permute(u32 ndim, u32 const *perm,
-                                  Term const *out_rngs, Term *in_rngs);
-fn void apply_movement_op_flip   (u32 ndim, u32 const *in_shape,
-                                  u32 const *flip_mask,
-                                  Term const *out_rngs, Term *in_rngs);
-fn void apply_movement_op_expand (u32 ndim, u32 const *in_shape,
-                                  u32 const *out_shape,
-                                  Term const *out_rngs, Term *in_rngs);
-fn void apply_movement_op_pad    (u32 ndim, u32 const *in_shape,
-                                  u32 const *begin_end,
-                                  Term const *out_rngs, Term *in_rngs);
 // RESHAPE handler. Maps consumer's `out_rngs` (rank = out_ndim, with extents
 // `out_shape[]`) into the producer's `in_rngs` (rank = in_ndim, extents
 // `in_shape[]`) by aligning groups of axes whose cumulative products match.
@@ -2192,51 +1853,16 @@ fn int  ru_fuse_matmul_input_on                (void);
 // nested REDUCE in OPT_TC even though it is no longer the bare store value).
 fn int  ru_fuse_epilogue_on                    (void);
 fn void pm_apply_rangeify                      (Term root);
-fn u32  rangeify_unified_out_ndim_at           (u32 node_idx);
-fn Term rangeify_unified_out_rng_at            (u32 node_idx, u32 axis);
-fn int  rangeify_unified_is_realized           (u32 node_idx);
-fn int  rangeify_unified_aid_is_fuse_bound     (u32 aid);
-// Main-heap UOP_BUFFERIZE Term at this node's realize boundary (0 if not
-// a boundary). Mirrors tinygrad's Ops.BUFFERIZE landing in the tsink at
-// indexing.py:77.
-fn Term rangeify_unified_bufferize_at          (u32 node_idx);
 // Main-heap UOP_STORE Term at this node's realize boundary (0 if not
 // a boundary or if dtype inference declined).  Structurally equivalent
 // to `cached_lift.store_root` from kernel_lift_to_uop; serves as the
 // substrate for the lifter-bypass cutover.
 fn Term rangeify_unified_store_root_at         (u32 node_idx);
-// Reduce-ranges attached to a UOP_REDUCE node by the unified pass.
-// Mirrors tinygrad's `src=(value,)+tuple(new_ranges)` from
-// convert_reduce_to_reduce_with_ranges (indexing.py:90-96).  Returns 0
-// for non-REDUCE nodes or REDUCE nodes whose reduce axes are extent-1
-// (which collapse to UOP_CONST(0) per `resolve(s!=1)`).
-// Per-axis range terms preserved at INDEX_E construction in
-// pm_apply_rangeify.  Mirror: tinygrad's `BUFFERIZE.index(*per_axis_ranges)`
-// at indexing.py:78.  Returns the number of axes written to out_rngs (0
-// if no per-axis info was recorded for this INDEX_E heap loc).
-fn u8   rangeify_unified_index_axes_lookup(u64 index_loc, Term *out_rngs,
-                                           u8 cap);
-// Reverse lookup: producer node_idx for a BUFFERIZE Term (scans
-// RU_BUFFERIZE_TERM[]).  0xFFFFFFFFu if no match.
-fn u32  rangeify_unified_node_idx_for_bufferize(Term buf);
-fn u8   rangeify_unified_axes_mask_at(u32 node_idx);
-fn void rangeify_unified_index_axes_register(Term index_e_term,
-                                             Term const *rngs, u8 ndim);
 // === UOP_RANGE field accessors ===
 // Wrap the [NUM(axis_id), NUM(axis_type), NUM(extent)] heap layout;
 // 0 on a tag mismatch.
 fn u32  uop_range_axis_id  (Term r);
-fn u32  uop_range_axis_type(Term r);
 fn u32  uop_range_extent   (Term r);
-
-// Dense-renumber a kernel DAG's UOP_RANGE axis_ids to 0..n-1 (ascending
-// by current id).  The lifter assigns global, sparse, sometimes-large
-// axis_ids; this maps each kernel to a fresh 0..n axis space (the
-// tinygrad model) so KOpt.axis, the render decode tables, and the JIT
-// source never depend on the absolute id magnitude.  Returns the new
-// root (or `root` if already dense).  Called by materialize once
-// store_root is finalized, before fire-time hand_opts.
-fn Term uop_dag_renumber_axes(Term root);
 
 // 1 iff REDUCE `red` owns `inner_aid`, the inner (UNROLL/UPCAST) half of
 // one of its axes split by uop_dag_apply_split: REDUCE.axes names only the
@@ -2244,23 +1870,7 @@ fn Term uop_dag_renumber_axes(Term root);
 // exactly the reduce this returns 1 for.  Defined in uop/apply_opt_dag.c.
 fn int uop_reduce_owns_split_axis(Term red, u32 inner_aid);
 
-// 1 iff the split-class KOpt `op` (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) may
-// split an axis of type `axis_type`: tinygrad's split_targets
-// (codegen/opt/postrange.py:14-15).  Defined in uop/apply_opt_dag.c.
-fn int kop_split_source_ok(u8 op, u32 axis_type);
-
-// 1 iff a UOP_REDUCE reachable from `root` reduces `axis_id`, tinygrad's
-// Scheduler.reduce_axes (codegen/opt/postrange.py:92-95).  Defined in
-// uop/apply_opt_dag.c.
-fn int uop_dag_reduces_axis(Term root, u32 axis_id);
-
 // === Buffer leaf ===
-// Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
-// `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via
-// uop_mov_cache: identical (scope, dtype, ndim, dims) tuples share heap
-// loc.  Defaults: scope=GLOBAL captures today's implicit-buffer behavior
-// and lets D'1 land without consumer rewrites.
-fn Term uop_buffer(u32 scope, u32 dtype, u32 ndim, const u32 *dims);
 
 // Variant with `instance` disambiguator.  Two UOP_BUFFER terms with
 // the same (scope, dtype, ndim, dims) but different instance fields
@@ -2272,8 +1882,6 @@ fn Term uop_buffer_inst(u32 scope, u32 dtype, u32 ndim, const u32 *dims,
 // Read accessors for UOP_BUFFER fields (returns 0 on tag mismatch).
 fn u32  uop_buffer_scope(Term t);
 fn u32  uop_buffer_dtype(Term t);
-fn u32  uop_buffer_ndim (Term t);
-fn u32  uop_buffer_dim  (Term t, u32 d);   // 0 if d >= ndim
 fn u32  uop_buffer_inst_get(Term t);       // 0 if not UOP_BUFFER
 
 // === DAG read-side scanners ===
@@ -2327,26 +1935,6 @@ typedef struct {
   i32 offset;
   int ok;
 } UopDagAddrCoeffsView;
-
-// Decode an UOP_INDEX_E.addr term into per-axis (axis_id, coeff) pairs
-// and an absolute byte offset.  Mirrors tinygrad's index.backward_slice
-// + IADD/IMUL distribution.  On bail (unrecognized leaf shape, e.g. an
-// IDIV/IMOD/IWHERE remnant from a conv2d-flat index that the simplifier
-// didn't collapse), out->ok stays 0 but out->n_axes carries whatever was
-// decoded so far.
-void uop_dag_decode_addr_coeffs(Term addr, UopDagAddrCoeffsView *out);
-
-// Look up a coefficient by axis_id.  Returns 0 when absent (which the
-// stride heuristic also treats as "stride 0 on this axis" -- the axis
-// does not contribute to the address).
-u32  uop_dag_addr_coeff_lookup(UopDagAddrCoeffsView const *a, u32 axis_id);
-
-// Enumerate every distinct UOP_INDEX_E.addr term reachable from `root`
-// (dedup by Term identity).  Writes up to `cap` addresses to out_addrs.
-// Returns the count.  The caller decodes each via
-// uop_dag_decode_addr_coeffs.  Mirrors tinygrad's Scheduler.bufs (the
-// reversed list of Ops.INDEX nodes the heuristic iterates).
-u32  uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap);
 
 // Should this kernel get the hand-coded opt heuristic on its next
 // fire?  True iff the env opt-in is on (default ON; HAND_CODED_OPTS=0
@@ -2422,42 +2010,6 @@ typedef struct {
 int uop_dag_classify_batched_gemm(Term root,
                                   struct KernelEntry const *ke,
                                   UopDagBatchedGemmShape *out);
-
-// Extract per-arm coefficients from a 2-D matmul-style INDEX_E
-// address built by lift_scalar_index.  The
-// address pattern for the matmul A operand under a 3-axis [M,K,N] lift
-// is either `IADD(IMUL(r_m, ICONST(K)), r_k)` (untransposed; ldA=K) or
-// `IADD(r_m, IMUL(r_k, ICONST(M)))` (transposed; ldA=M) -- and similarly
-// for B with the {k,n} pair.  Both arms are decoded
-// raw: each is either bare RANGE (coefficient = 1) or IMUL(RANGE, ICONST)
-// (coefficient = ICONST.value).  The caller derives `ld` / `trans` from
-// the side-specific BLAS convention:
-//   matmul A: ldA = other_coeff, transA = (red_coeff != 1)
-//             except both flip when the address's k arm carries the
-//             non-1 coefficient, so robust formula:
-//                 ldA   = max(red_coeff, other_coeff)
-//                 transA = (red_coeff != 1)
-//   matmul B: ldB = max(red_coeff, other_coeff)
-//             transB = (other_coeff != 1)   -- B's "natural" layout
-//                                              has red_coeff != 1
-// Returns 1 on success.  Returns 0 when the address doesn't match
-// IADD-of-(arm,arm) with each arm RANGE or IMUL(RANGE,ICONST), or when
-// neither arm references `red_axis_id`, or when both arms reference the
-// same axis.
-int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
-                                             u32 *out_red_coeff,
-                                             u32 *out_other_coeff,
-                                             u32 *out_other_axis_id);
-
-// DAG-side structural gate for conv2d_flat kernels.  Checks that
-// cached_lift.store_root's STORE.value is a UOP_REDUCE with
-// REDUCE_SUM kind, optionally wrapped in UOP_OPT(_, CONV, 0) by the
-// conv recogniser.  No shape extraction is needed -- the caller
-// still reads extents from ke->input_views[].
-//
-// Returns 1 on match.  No extents-out parameter -- conv2d_flat's
-// shape lives in input_views, not in the lifted DAG.
-int uop_dag_classify_conv2d_flat_shape(Term root);
 
 // === Generalized contraction-shape extractor ==========================
 //
@@ -2618,27 +2170,10 @@ typedef struct {
   u32 axis_r_q;         // RANGE id for the REDUCE/q axis    (= 1 from lifter)
 } UopDagConv2dFlatShape;
 
-int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
-                                      UopDagConv2dFlatShape *out);
-
 // === Store + After ===
 // UOP_STORE writes `value` to `buf` at symbolic `addr`.  T.copy maps to
 // `STORE(dst, addr, INDEX_E(src, addr))`.  Hash-cons by (buf, addr, value).
 fn Term uop_store(Term buf, Term addr, Term value);
-
-// Read accessors.
-fn Term uop_store_buf  (Term t);   // 0 on tag mismatch
-fn Term uop_store_addr (Term t);
-fn Term uop_store_value(Term t);
-
-// UOP_AFTER expresses ordering between sibling side-effects.  `node`
-// happens after `after_node`.  Backends emit a barrier when this
-// crosses a scope boundary, or a warp shuffle when crossing REG.
-// Hash-cons by (node, after_node).
-fn Term uop_after(Term node, Term after_node);
-
-fn Term uop_after_node      (Term t);
-fn Term uop_after_after_node(Term t);
 
 // A kernel root is one STORE or an AFTER chain of STOREs (a kernel that
 // writes its output in ordered passes).  uop_arity(AFTER) is 0, so a pass
@@ -2649,29 +2184,11 @@ fn Term uop_after_after_node(Term t);
 // own single store.
 typedef Term (*UopStoreMapFn) (Term store, void *ctx);
 typedef int  (*UopStorePredFn)(Term store, void *ctx);
-fn Term uop_root_map_stores(Term root, UopStoreMapFn pass, void *ctx);
-fn int  uop_root_each_store(Term root, UopStorePredFn pass, void *ctx);
-fn Term uop_root_store_buf (Term root);
-
-// 1 iff an INDEX_E sits inside the address of an INDEX_E or STORE under
-// `root`: the address depends on loaded data (gather / scatter).
-fn int  uop_dag_has_dynamic_index(Term root);
 
 // === Opt annotation ===
-// Attach an optimisation directive (UOP_OPT_UNROLL, UPCAST, TC,
-// LOCAL, GROUP_REDUCE) to `target`.  `factor` is 0 when the kind
-// carries no scalar (TC, LOCAL).  Hash-cons by (target, kind, factor).
-fn Term uop_opt(Term target, u32 kind, u32 factor);
 
 fn Term uop_opt_target(Term t);   // 0 on tag mismatch
 fn u32  uop_opt_kind  (Term t);
-fn u32  uop_opt_factor(Term t);
-
-// Recognise the matmul shape on a UOP_STORE root and wrap the inner
-// REDUCE with UOP_OPT(_, TC, 0) so render_uop's simdgroup_matrix
-// template fires. Returns the input root unchanged on any non-match.
-// See src/uop/recognise_tc.c for the exact pattern.
-fn Term uop_recognise_tc(Term root);
 
 // Detection-only: returns 1 if `root` is a matmul-shape STORE
 // (REDUCE-of-MUL on two distinct INDEX_E buffers, SUM kind). Fills
@@ -2716,40 +2233,7 @@ fn Term uop_recognise_batched_tc_parallel(Term root);
 // parallel-TC wrap needs this prototype to call it.
 fn Term uop_dag_apply_global(Term root, u32 axis_id);
 
-// === Kernel lift to UOp DAG ===
-// Package the unified-rangeify pass's store_root for a kernel entry
-// into a UOp DAG root suitable for cg_render_uop_kernel.  The lifter
-// today is a thin short-circuit -- it looks up the unified pass's
-// per-kernel output and wraps it as a KernelUopLift; the renderer /
-// DAG-side encoder / cpu_uop_walk all consume the result.
-//
-// `KernelUopLift` is forward-defined above (right before `KernelEntry`)
-// so the kernel entry can embed the lift output by-value as
-// `cached_lift`.  See that block for the typedef.  kernel_lift_to_uop
-// reserves out->in_bufs for every input; a caller that owns `out`
-// releases it with kernel_lift_release.
-fn int kernel_lift_to_uop(struct KernelEntry const *ke,
-                          KernelUopLift *out);
-
 // === UOp DAG renderer ===
-// Walks the UOp DAG rooted at `root` and emits pseudo-MSL.  Replaces
-// the kernel-output store walker.
-//
-// `root` is typically a UOP_STORE (single-store kernel) or a chain
-// of UOP_AFTER nodes (multi-store kernel).  `out_buf` and `in_bufs`
-// provide the kernel's buffer-binding contract; the renderer types
-// them using uop_buffer_dtype.
-fn void cg_render_uop_kernel(Term root, const char *kernel_name,
-                             Term out_buf, Term const *in_bufs,
-                             u32 n_inputs, FILE *fp);
-// F6: same UOp DAG, emitted as a C99 kernel for the CPU JIT path.
-// Function signature is the CPU-JIT contract dlsym'd by
-// cpu_jit_dispatch:
-//   void k(void *out_v, const void *const *ins_v,
-//          unsigned n, const unsigned *in_numels);
-fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
-                               Term out_buf, Term const *in_bufs,
-                               u32 n_inputs, FILE *fp);
 
 // Structural-mode entry points.  Discover the kernel's buffer slots
 // from the DAG itself via UOP_BUFFER.instance (kernel_lift.c sets
@@ -2759,19 +2243,6 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
 // needed.
 fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
                                   FILE *fp);
-fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
-                                    FILE *fp);
-// Highest input slot the renderer emits a buffer param for, via the
-// same UOP_BUFFER.instance discovery the signature emitters use.  Used
-// by materialize.c to truncate ke->n_inputs to the rendered signature
-// (drops trailing input slots the unified-rewrite collapsed away).
-fn u32 cg_render_input_inst_count(Term root);
-// CUDA counterpart: emits an `extern "C" __global__` kernel with the
-// thread-builtin prologue (blockIdx/blockDim/threadIdx) in place of
-// Metal `[[ ... ]]` attributes.  The CUDA backend runtime (Stage 2)
-// passes the post-lift store root, same as the MSL/C99 entries.
-fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
-                                       FILE *fp);
 
 fn u8   uop_is_movement(u8 op);
 
@@ -2813,76 +2284,10 @@ fn Term uop_graph_rewrite(Term root,
                           UOpGraphRewriteRule const *rules,
                           u32 n_rules,
                           void *user);
-fn u32  uop_graph_rewrite_stat_hits(char const *name);
-// Move a compute graph to `dev` by wrapping every TAG_TEN leaf in COPY(leaf,
-// dev): the routed realize then COMPUTES the graph on `dev` (each leaf uploaded
-// once), rather than computing on CPU and copying only the result.  Backs
-// TToDevice / Tensor.to(device).
-fn Term uop_to_device_leaves(Term root, i32 dev);
 
-
-// Build a UOP_GRAD node.  y is the function output, gy is the
-// cotangent seed (typically a CONST(1) for top-level VJP), target is
-// the leaf TAG_TEN to differentiate against.  Reduces under TWnf via
-// the chain-rule rewrite rule defined in interact/uop_grad.c.
-// Allocate a shared grad cell holding [y, gy].  Both projections (FWD
-// and BWD) reference this cell as TAG_DP0 / TAG_DP1 with the
-// DUP_GRAD_FLAG bit set on the ext (label) field.  FWD reads cell[0]
-// (y); BWD reads both cell[0] and cell[1] (gy = cotangent seed) and
-// runs the gy-threaded chain rule.
-fn u64  uop_grad_cell  (Term y, Term gy, Term target);
-fn Term uop_grad       (Term y, Term gy);   // BWD projection (TAG_DP1 + grad flag)
-fn Term uop_fwd        (Term y, Term gy);   // FWD projection (TAG_DP0 + grad flag)
-fn Term uop_grad_with_target(Term y, Term gy, Term target);
-fn void uop_leaf_tids(Term root, u32 *out_tids, u32 cap, u32 *n_out);
-
-// Build a UOP_LOAD node wrapping `src`.  Structural marker mirroring
-// tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in
-// the cpu kernel).  Output shape == src shape; arity 1.
-fn Term uop_load(Term src);
-// UOP_COPY constructor: lazy device transfer of `src`.  uop_copy_dev
-// carries an EXPLICIT target device (THVM_DEV_CPU/METAL, or -1 = generic
-// "realize backend").  uop_copy is the generic (-1) form.  Heap =
-// [src, NUM(device+1)]; hash-cons by (device, src).  uop_copy_device
-// reads a COPY heap loc's target device (-1 if generic).  See the
-// UOP_COPY notes above and uop/copy.c.
-fn Term uop_copy_dev(Term src, i32 device);
-fn Term uop_copy(Term src);
-fn i32  uop_copy_device(u64 loc);
-
-// Build a UOP_DETACH node wrapping `src` (stop-gradient; see UOP_DETACH).
-fn Term uop_detach(Term src);
-fn Term uop_define_var(u32 packed_extent);
 fn u32  uop_define_var_extent(Term t);
 
-// Indexed ops (UOP_GATHER / UOP_SCATTER; uop/gather.c, uop/scatter.c).
-// uop_gather / uop_scatter validate their operands and return 0 when a
-// check fails; the *_node forms skip the checks, for rebuilding a node
-// whose sources a rewrite replaced.  uop_indexed_shape_ok is the extent
-// check both share.  scatter_identity_bits writes the identity of `kind`
-// over `dtype` as a CONST payload and returns 0 when none exists.
-fn int  uop_indexed_shape_ok(Shape const *s);
-// 1 iff indexed-op operand `t` reaches a TEN, VAR, KERNEL or CONST through
-// RESHAPE / PERMUTE / EXPAND / SHRINK / FLIP only: storage an address can
-// read without realizing anything (uop/indexed_operand_is_structural.c).
-fn int  uop_indexed_operand_is_structural(Term t);
-fn Term uop_gather     (Term src, Term idx, u32 dim);
-fn Term uop_gather_node(Term src, Term idx, u32 dim);
-fn Term uop_gather_src (Term g);
-fn Term uop_gather_idx (Term g);
-fn u32  uop_gather_dim (Term g);
-fn Term uop_scatter     (Term base, Term idx, Term src, u32 dim, u32 kind,
-                         u32 include_self);
-fn Term uop_scatter_node(Term base, Term idx, Term src, u32 dim, u32 kind,
-                         u32 include_self);
-fn Term uop_scatter_base        (Term s);
-fn Term uop_scatter_idx         (Term s);
-fn Term uop_scatter_src         (Term s);
-fn u32  uop_scatter_dim         (Term s);
-fn u32  uop_scatter_kind        (Term s);
-fn u32  uop_scatter_include_self(Term s);
 fn int  scatter_identity_bits(u32 kind, u32 dtype, u32 *bits);
-
 
 // === schedule/ ===
 // Top-level materialize driver: heap-walk pass that in-place rewrites
@@ -2901,34 +2306,6 @@ fn Term thvm_materialize(Term term);
 // a cycle, and thvm_realize_error() then says why ("" otherwise).
 fn Term thvm_realize(Term expr);
 fn Term thvm_realize_many(Term ctr_term);
-// Deferred heap collection for a host that holds raw Terms (realize.c).
-fn void thvm_gc_defer(int on);
-fn int  thvm_gc_pending(void);
-fn void thvm_gc_collect_deferred(Term *roots, u32 n_roots);
-fn char const *thvm_realize_error(void);
-// Ceiling-abort cleanup: hard-rolls a failed (longjmp'd-out) realize's pools
-// back to its entry watermarks so an over-budget run doesn't leak across
-// retries.  Called from the LibraryLink THVM_WL_RECOVER recovery branch; a
-// no-op when no realize is in flight.
-fn void thvm_realize_ceiling_cleanup(void);
-
-// === interact/uop_grad ===
-// Forward-declared so materialize_expr can reduce UOP_GRAD nodes
-// inline before kernelizing.  Defined later in src/interact/uop_grad.c.
-fn Term interact_grad(Term grad_term);
-
-// === interact/uop_assign ===
-// Wnf-fired ASSIGN(dst_TEN, src_TEN): memcpy src.buf -> dst.buf, return
-// dst Term.  Eligible (is_redex true) only when both children resolve
-// to TAG_TEN -- otherwise wnf walks src's producer first.  Used as the
-// in-place mutation primitive for optimizer loops; weights stay
-// tid-stable while their buffer contents update each iteration.
-//
-// Two entries: _with takes already-resolved TENs (used by wnf/_.c so
-// the heap cells stay un-mutated for re-fire); the no-suffix variant
-// reads the heap and delegates.
-fn Term interact_assign     (Term assign_term);
-fn Term interact_assign_with(Term dst, Term src);
 
 // === codegen/ + profile/ ===
 // UOp-DAG source emitter (render_uop.c) + per-kid dispatch profiling.
@@ -2956,18 +2333,10 @@ typedef enum {
   KDISPATCH_CUSTOM      = 15,  // raw injected program (kernel_emit_custom_program)
 } KDispatchKind;
 
-int   cg_supports(KernelEntry const *ke);
-char *cg_emit_metal(KernelEntry const *ke);   // caller frees
 char *cg_emit_tile_metal(KernelEntry const *ke);   // caller frees
 int   cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x, u32 *threads_x);
 u64   cg_now_us(void);
 void  cg_profile_record(u32 kid, KDispatchKind kind, u64 elapsed_us);
-// Snapshot / restore the per-kid profile slot (kind + counters) so the
-// post-capture isolated autotune's bench fires leave no profile side
-// effects -- in particular K_PROFILE[kid].kind, which drives the JIT
-// replay ICB-batching decision.  Opaque u64[6] blob.
-void  cg_profile_snapshot(u32 kid, u64 out[6]);
-void  cg_profile_restore(u32 kid, u64 const in[6]);
 // Record a true per-kernel GPU-time sample (us).  Metal-only, gated on
 // THVM_METAL_PROFILE_PEROP=1.  External linkage so the .m TU can call it.
 void  cg_profile_record_gpu(u32 kid, u64 gpu_us);
@@ -3032,49 +2401,6 @@ void thvm_metal_gpu_time(u64 *out_total_us, u64 *out_flush_count);
 void thvm_metal_jit_drop_in_memory_psos(void);
 #endif
 
-fn void cpu_jit_cache_reset(void);
-
-// Compile a C source file into a shared object with the CPU JIT's compiler
-// (THVM_CPU_CC, else $CC, else clang / cc / gcc) and flags.  1 on success.
-fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path);
-
-// Parallel cold-start JIT warm: render + clang-compile every JIT-eligible
-// CPU kernel in [kid_lo, kid_hi) CONCURRENTLY (a posix_spawn pool of up to
-// ncores clang processes) and populate the on-disk dylib cache + in-memory
-// CpuJitSlot table BEFORE the serial dispatch loop fires them one-at-a-time.
-// Idempotent: a hash already on disk / in cache is skipped, and the batch is
-// de-duped by source hash so two workers never compile the same dylib.  A
-// no-op when THVM_CPU_JIT_PARALLEL=0.  The subsequent cpu_jit_dispatch fires
-// then hit the cache (no compile), collapsing ~Nx serial-clang wait to one
-// parallel pass.  Called from thvm_realize / thvm_realize_many once the
-// materialize fixpoint has emitted the kernel table, before the driving wnf.
-fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi);
-
-fn void backend_dispatch_begin_all(void);
-fn void backend_dispatch_flush_all(void);
-fn void backend_dispatch_end_all(void);
-fn void kernel_fire_gen_bump(void);
-// The first GC-stripped kernel a realize tried to fire (0 = none); the
-// realize then fails (uop_kernel.c, realize.c).
-fn u32  kernel_stale_fire_take(void);
-fn void kernel_assign_write_record(void *backend, u32 buf_id);
-fn void kernel_fire_scope_begin(void);
-fn void kernel_fire_scope_end(void);
-// Open a fresh ASSIGN pass with no surrounding realize scope, so a
-// wnf-driven recursive optimiser loop re-fires its shared materialized
-// step every iteration (prim_pri calls this before each TPriForce).
-fn void assign_pass_epoch_bump(void);
-// Claim an UOP_ASSIGN cell (by heap loc) for firing this pass: returns
-// 1 the first time the loc is seen in the current fire-gen, 0 on every
-// re-visit (so a multiply-reachable ASSIGN writes its buffer once).
-fn int assign_fire_claim(u64 loc);
-
-// Allocate a borrowed buffer: we don't own `data`, and on release we
-// call `on_release(handle)` instead of free().  Used by the WL bridge
-// to share a Shared NumericArray's bytes without copying.
-fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
-                              void (*on_release)(void *), void *handle);
-
 // === wnf/ ===
 // Stack-machine reducer to weak normal form.  See src/wnf/_.c for the
 // enter/apply protocol.
@@ -3085,7 +2411,6 @@ fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
 // snapshotted into WNF_LAST_STACK (length WNF_LAST_STACK_LEN,
 // innermost-first) for inspection.  max_steps == 0 == unbounded.
 fn Term wnf(Term t);
-fn Term wnf_n(Term t, u64 max_steps);
 // nf: explicit normal-form reducer.  WHNF (wnf) only surfaces the
 // outermost head; nf sweeps the heap, fires every redex via
 // redex_fire (covers GRAD, KERNEL, APP-LAM, OP2, etc. uniformly),
@@ -3102,22 +2427,6 @@ fn Term nf(Term root);
 // duplication actually fires.  See src/cnf/_.c.
 fn Term cnf(Term term);
 fn Term cnf_at(Term term, u32 depth);
-
-// === eval/ ===
-// Single-threaded SUP-tree enumeration on top of cnf.  Walks every
-// branch FIFO ordered by INC priority and writes pure leaves into
-// `out`.  Returns the count actually written, capped at `cap`.
-fn u64 eval_collapse(Term term, Term *out, u64 cap);
-
-// === collapse/ ===
-// Enumerate the SUP-tree of a term.  Walks via WNF; on TAG_SUP at the
-// head, recurses into both branches; TAG_ERA branches are dropped.
-// Returns the number of leaves written into `out`, capped at `cap`.
-//
-// "Shallow" collapse: only follows SUPs the WNF has surfaced to the
-// head.  Deep enumeration through APP / OP2 / EQL / ... lands as those
-// SUP-commutation interactions are added.
-fn u64 thvm_collapse(Term t, Term *out, u64 cap);
 
 // === kbo/ ===
 // Knuth-Bendix ordering on first-order terms (TAG_CTR + TAG_FVR).
@@ -8244,31 +7553,6 @@ fn void thvm_atp_rederive_end(AtpState *s);
 // Wall deadline (us, atp_now_us clock) after which re-derivation gives up.
 fn void thvm_atp_rederive_deadline(u64 wall_us);
 
-// Redex inspection / single-redex firing for the debugger interface.
-// is_redex predicate; redex_fire dispatches the matching interaction
-// and returns the result Term (0 if validation fails -- the input
-// wasn't a redex any more).  redex_fire ALSO patches every heap cell
-// still holding the old redex Term to point at the result, so
-// nested redexes get their parent slots updated automatically.
-// redex_enumerate scans the live heap for distinct redex Terms.
-fn u8   is_redex(Term t);
-fn Term redex_fire(Term redex);
-fn u32  redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap);
-
-// Lambda-bound-variable shape annotation table.  Populated by
-// `TLamShape[shape, body]` at the WL surface so a TVAR(lam_loc)
-// can be shape-resolved before APP-LAM beta substitutes a
-// concrete value.  Used by term_shape_in (and downstream by
-// materialize visit() to emit KSRC_AS_INPUT for shape-known
-// TVARs).  Reset from thvm_init.  Propagated through
-// clone_to_book_rec (dyn -> book) and alo_realize (book -> dyn).
-fn void lam_shape_reset(void);
-fn void lam_shape_set(u64 lam_loc, Shape const *shape);
-fn int  lam_shape_lookup(u64 lam_loc, Shape *out);
-fn void lam_shape_set_book(u64 book_loc, Shape const *shape);
-fn int  lam_shape_lookup_book(u64 book_loc, Shape *out);
-fn u32  lam_shape_count(void);
-
 // Optional incremental worklist for nf.  When attached, redex_fire
 // pushes locally-fresh redexes (the result + every newly allocated
 // cell whose content is a redex) into the buffer, advancing *n_ptr.
@@ -8276,22 +7560,7 @@ fn u32  lam_shape_count(void);
 // callers (WL TInteract, TStep) leave the worklist detached and
 // pay zero overhead.
 
-// Step session: persistent across calls so the WL stepper doesn't
-// re-scan HEAP_NEXT on every TInteract.  attach() walks roots+heap
-// once, builds a Term -> heap-loc inverse index plus a parent map,
-// and returns the initial redex count.  step_fire() fires one redex
-// using the inverse index for parent-slot patching.  drain_fresh()
-// returns redex-status flips since the previous drain (post \ pre).
-// detach() releases all session memory and restores legacy linear-
-// scan paths.
-fn u32  redex_step_attach(Term *roots, u32 n_roots);
-fn Term redex_step_fire(Term redex);
-fn u32  redex_step_drain_fresh(Term *out, u32 cap);
-fn void redex_step_detach(void);
-
 // === runtime lifecycle ===
-void thvm_init(void);
-void thvm_free(void);
 // Cheap per-frame reclaim: rewind the dynamic heap + every dynamic
 // descriptor/cache to a fresh state while keeping the arenas mapped,
 // the backend device live, and the static book heap / DEFS intact.

@@ -21,6 +21,11 @@
 // Backing constructors all hash-cons through uop_mov_cache, so repeated
 // swizzles with identical inputs deduplicate.
 
+// 1-to-1 port of tinygrad/schedule/indexing.py:apply_movement_op (line 129)
+// per-op cases. Each rewrites the consumer's per-axis range expressions
+// (`out_rngs`) into the producer's per-axis expressions (`in_rngs`).
+// All variants hash-cons through uop_mov_cache.  `ndim` bounded by
+// MAX_DIM. In-place (in_rngs == out_rngs) is unsafe (PERMUTE).
 fn void apply_movement_op_shrink(u32 ndim,
                                   u32 const *begin_end,
                                   Term const *out_rngs,

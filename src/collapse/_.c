@@ -34,6 +34,13 @@ static u64 collapse_walk(Term t, Term *out, u64 cap, u64 count) {
   }
 }
 
+// Enumerate the SUP-tree of a term.  Walks via WNF; on TAG_SUP at the
+// head, recurses into both branches; TAG_ERA branches are dropped.
+// Returns the number of leaves written into `out`, capped at `cap`.
+//
+// "Shallow" collapse: only follows SUPs the WNF has surfaced to the
+// head.  Deep enumeration through APP / OP2 / EQL / ... lands as those
+// SUP-commutation interactions are added.
 fn u64 thvm_collapse(Term t, Term *out, u64 cap) {
   return collapse_walk(t, out, cap, 0);
 }

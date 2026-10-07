@@ -54,6 +54,8 @@ static u64 ASSIGN_SEQ = 0;
 static u64   ASSIGN_W_SEQ    [ASSIGN_WRITE_RING];
 static u32   ASSIGN_W_BUF    [ASSIGN_WRITE_RING];
 static void *ASSIGN_W_BACKEND[ASSIGN_WRITE_RING];
+// The first GC-stripped kernel a realize tried to fire (0 = none); the
+// realize then fails (uop_kernel.c, realize.c).
 fn void kernel_assign_write_record(void *backend, u32 buf_id) {
   if (!precise_fire_memo_enabled()) return;   // zero overhead when off
   ASSIGN_SEQ++;
@@ -129,6 +131,9 @@ fn void assign_pass_epoch_bump(void) {
 #define ASSIGN_FIRE_MEMO_CAP 8192u
 static u64 ASSIGN_FIRE_LOC[ASSIGN_FIRE_MEMO_CAP];
 static u32 ASSIGN_FIRE_EPOCH[ASSIGN_FIRE_MEMO_CAP];
+// Claim an UOP_ASSIGN cell (by heap loc) for firing this pass: returns
+// 1 the first time the loc is seen in the current fire-gen, 0 on every
+// re-visit (so a multiply-reachable ASSIGN writes its buffer once).
 fn int assign_fire_claim(u64 loc) {
   if (loc == 0) return 1;
   u32 h = (u32)((loc >> 4) % ASSIGN_FIRE_MEMO_CAP);

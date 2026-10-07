@@ -3,6 +3,8 @@
 // strides[i] = product of dims[i+1..ndim-1].  offset = 0.
 // contiguous = 1.
 
+// Build a contiguous View from a Shape.  Step 14 adds the movement ops
+// (reshape / permute / expand / pad / shrink / flip).
 fn View view_create(Shape shape) {
   View v;
   v.shape      = shape;

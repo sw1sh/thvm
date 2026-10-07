@@ -640,6 +640,9 @@ static int materialized_loc_span_holds(void) {
   return 0;
 }
 fn void materialized_loc_clear(void);   // fwd decl (span_end calls it)
+// JIT-capture realize-dedup span: preserve the loc->tid cache across the
+// several realizes of one captured step so shared forward/grad kernels
+// are emitted (and recorded) once.
 fn void materialized_loc_jit_span_begin(void) {
   // The depth marks "inside a JIT capture"; materialized_loc_span_holds
   // decides per backend whether the span defers the cross-realize clear.
@@ -4566,6 +4569,10 @@ static void topo_sort_buffers_unified(Term root) {
   }
 }
 
+// g2a: after realize_classify populates the boundary set, the
+// scheduler topo-sorts those boundaries by producer-to-consumer
+// depth.  These accessors expose the sorted order so tests / future
+// code-emit can iterate boundaries in dependency order.
 fn u32 materialize_boundary_count(void)         { return BOUNDARY_ORDER_LEN; }
 fn u64 materialize_boundary_at(u32 i)           { return i < BOUNDARY_ORDER_LEN ? BOUNDARY_ORDER[i] : 0; }
 

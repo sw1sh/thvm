@@ -879,6 +879,9 @@ u32 thvm_context_current(void) {
     return 0;
 }
 
+// Free everything in the given slot.  Slot 0 (default) is a no-op
+// (same as thvm_free) since it cannot be re-created without leaking
+// the static DEFAULT_CTX_STORAGE.
 void thvm_context_destroy(u32 slot) {
     if (slot == 0)              return;       // default slot owns DEFAULT_CTX_STORAGE
     if (slot >= CONTEXTS_CAP)   return;

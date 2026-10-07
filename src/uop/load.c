@@ -7,6 +7,9 @@
 // TAG_TEN children to input slots.  At the runtime level it's an
 // identity (memcpy in the CPU kernel).
 
+// Build a UOP_LOAD node wrapping `src`.  Structural marker mirroring
+// tinygrad's UOps.LOAD; runtime semantics are identity (memcpy in
+// the cpu kernel).  Output shape == src shape; arity 1.
 fn Term uop_load(Term src) {
   u64 loc = heap_alloc(1);
   heap_set(loc, src);

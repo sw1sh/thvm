@@ -25,6 +25,9 @@ static int uop_where_const_truth(Term cond, int *truth) {
   return 1;
 }
 
+// Value-level select (tinygrad Ops.WHERE): the same UOP_IWHERE node, folding
+// only a constant cond or then == else -- none of uop_iwhere's index-layer
+// folds, which would turn nested value selects into tensor-level IAND.
 fn Term uop_where(Term cond, Term then_v, Term else_v) {
   if (then_v == else_v) {
     return then_v;

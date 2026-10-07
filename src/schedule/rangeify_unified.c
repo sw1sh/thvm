@@ -2039,6 +2039,15 @@ fn u32 rangeify_unified_node_idx_for_bufferize(Term buf) {
   return 0xFFFFFFFFu;
 }
 
+// Reduce-ranges attached to a UOP_REDUCE node by the unified pass.
+// Mirrors tinygrad's `src=(value,)+tuple(new_ranges)` from
+// convert_reduce_to_reduce_with_ranges (indexing.py:90-96).  Returns 0
+// for non-REDUCE nodes or REDUCE nodes whose reduce axes are extent-1
+// (which collapse to UOP_CONST(0) per `resolve(s!=1)`).
+// Per-axis range terms preserved at INDEX_E construction in
+// pm_apply_rangeify.  Mirror: tinygrad's `BUFFERIZE.index(*per_axis_ranges)`
+// at indexing.py:78.  Returns the number of axes written to out_rngs (0
+// if no per-axis info was recorded for this INDEX_E heap loc).
 fn u8 rangeify_unified_index_axes_lookup(u64 index_loc, Term *out_rngs,
                                           u8 cap) {
   for (u32 i = 0; i < RU_INDEX_AXIS_N; i++) {

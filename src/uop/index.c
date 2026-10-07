@@ -147,6 +147,11 @@ fn Term uop_invalid(void) {
 // calls this once per realize boundary the run_rangeify walk decided;
 // identical boundaries dedup naturally.
 
+// 1-to-1 port of tinygrad/schedule/indexing.py:77 (`UOp(Ops.BUFFERIZE,
+// s.dtype, src=(new_src,)+closed_ranges, arg=opts)`).  Hash-cons via
+// uop_mov_cache.  addrspace uses UOP_SCOPE_GLOBAL / LOCAL / REG;
+// removable mirrors BufferizeOpts.removable.  Accessors return 0 /
+// zero-init on tag mismatch (caller validates).
 fn Term uop_bufferize_new(Term value, u32 addrspace, u32 removable,
                           u32 n_ranges, Term const *ranges) {
   // Bound the range list to MAX_DIM (the same per-axis limit

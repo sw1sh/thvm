@@ -413,6 +413,27 @@ static int udg_extract_addr_arm(Term arm, u32 *out_axis_id, u32 *out_coeff) {
   return 1;
 }
 
+// Extract per-arm coefficients from a 2-D matmul-style INDEX_E
+// address built by lift_scalar_index.  The
+// address pattern for the matmul A operand under a 3-axis [M,K,N] lift
+// is either `IADD(IMUL(r_m, ICONST(K)), r_k)` (untransposed; ldA=K) or
+// `IADD(r_m, IMUL(r_k, ICONST(M)))` (transposed; ldA=M) -- and similarly
+// for B with the {k,n} pair.  Both arms are decoded
+// raw: each is either bare RANGE (coefficient = 1) or IMUL(RANGE, ICONST)
+// (coefficient = ICONST.value).  The caller derives `ld` / `trans` from
+// the side-specific BLAS convention:
+//   matmul A: ldA = other_coeff, transA = (red_coeff != 1)
+//             except both flip when the address's k arm carries the
+//             non-1 coefficient, so robust formula:
+//                 ldA   = max(red_coeff, other_coeff)
+//                 transA = (red_coeff != 1)
+//   matmul B: ldB = max(red_coeff, other_coeff)
+//             transB = (other_coeff != 1)   -- B's "natural" layout
+//                                              has red_coeff != 1
+// Returns 1 on success.  Returns 0 when the address doesn't match
+// IADD-of-(arm,arm) with each arm RANGE or IMUL(RANGE,ICONST), or when
+// neither arm references `red_axis_id`, or when both arms reference the
+// same axis.
 int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
                                              u32 *out_red_coeff,
                                              u32 *out_other_coeff,
@@ -1710,6 +1731,12 @@ static int udg_addr_decode_leaf(Term t, u32 coeff, UopDagAddrCoeffsView *out) {
   return 0;
 }
 
+// Decode an UOP_INDEX_E.addr term into per-axis (axis_id, coeff) pairs
+// and an absolute byte offset.  Mirrors tinygrad's index.backward_slice
+// + IADD/IMUL distribution.  On bail (unrecognized leaf shape, e.g. an
+// IDIV/IMOD/IWHERE remnant from a conv2d-flat index that the simplifier
+// didn't collapse), out->ok stays 0 but out->n_axes carries whatever was
+// decoded so far.
 void uop_dag_decode_addr_coeffs(Term addr, UopDagAddrCoeffsView *out) {
   out->n_axes = 0;
   out->offset = 0;
@@ -2592,6 +2619,11 @@ int uop_dag_classify_im2col_contraction(Term root,
 #undef IM2COL_REJ
 }
 
+// Enumerate every distinct UOP_INDEX_E.addr term reachable from `root`
+// (dedup by Term identity).  Writes up to `cap` addresses to out_addrs.
+// Returns the count.  The caller decodes each via
+// uop_dag_decode_addr_coeffs.  Mirrors tinygrad's Scheduler.bufs (the
+// reversed list of Ops.INDEX nodes the heuristic iterates).
 u32 uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap) {
   if (root == 0 || term_tag(root) != TAG_UOP || out_addrs == NULL || cap == 0) {
     return 0;

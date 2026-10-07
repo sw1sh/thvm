@@ -30,6 +30,12 @@
 // Wired into thvm_realize after each user-facing realize so the
 // arena stays bounded across N_STEPS.
 
+// Kernel-arena GC: strip per-kernel program/input arrays for kernels
+// whose output buffer was released by the cpu_buf pool rollback.
+// Returns the number of kernels stripped.  Wired into thvm_realize
+// so the per-kernel array memory stays bounded across long training
+// loops (M4 of the beautiful-mnist parity arc).  The header above says
+// why slot ids are intentionally NOT recycled.
 fn u32 kernel_gc_sweep(Term result) {
   (void)result;
   if (KERNELS_NEXT <= 1) return 0;

@@ -74,6 +74,9 @@ static int tensor_assign_nibbles(TenDesc *dd, u64 off, u8 const *vals, u32 n) {
   return 0;
 }
 
+// Write src's elements into dst's buffer from element `dst_off` on:
+// the bytes when the dtypes match, the values at dst's dtype when they
+// differ.  0 on success.  ASSIGN and its JIT replay both write this way.
 fn int tensor_assign(u32 dst_id, u32 src_id, u64 dst_off) {
   TenDesc *dd       = &TENS[dst_id];
   TenDesc *sd       = &TENS[src_id];

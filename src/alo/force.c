@@ -8,6 +8,12 @@
 // re-wrapped in fresh ALOs by alo_realize and only realised when
 // the wnf later enters them.
 
+//
+// `state_id` references an AloState chain mapping book locs to
+// freshly allocated dynamic locs.  `alo_realize` walks one layer of
+// the static `book_term` into dynamic cells, returning a dynamic
+// term; child slots are themselves wrapped in fresh ALOs (lazy).
+// `alo_force` does the same starting from a TAG_ALO term.
 Term alo_force(Term alo_term) {
   u64 alo_loc = term_val(alo_term);
   Term book_term = heap_read(alo_loc + 0);

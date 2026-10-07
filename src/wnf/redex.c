@@ -913,6 +913,14 @@ fn u32 redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap) {
 #define STEP_PRE_CAP_DEFAULT  (1u << 14)
 #define STEP_FRESH_CAP_DEFAULT (1u << 12)
 
+// Step session: persistent across calls so the WL stepper doesn't
+// re-scan HEAP_NEXT on every TInteract.  attach() walks roots+heap
+// once, builds a Term -> heap-loc inverse index plus a parent map,
+// and returns the initial redex count.  step_fire() fires one redex
+// using the inverse index for parent-slot patching.  drain_fresh()
+// returns redex-status flips since the previous drain (post \ pre).
+// detach() releases all session memory and restores legacy linear-
+// scan paths.
 fn u32 redex_step_attach(Term *roots, u32 n_roots) {
   if (STEP_ACTIVE) return 0;
   STEP_ACTIVE = 1;
