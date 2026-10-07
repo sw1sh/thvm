@@ -262,8 +262,7 @@ static void test_apply_split_upcast_splits_axis(void) {
 
   // The K reduce axis (originally 2, > target 0) shifts to 3, and the
   // UOP_REDUCE node's `axis` field must follow -- otherwise the
-  // renderer's reduce-range matcher (rmu_split_reduce) stops finding
-  // it.  Find the REDUCE node and check its axis.
+  // renderer's reduce-range matching stops finding it.  Find the REDUCE node and check its axis.
   Term value = heap_read(term_val(r) + 2);
   if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT) {
     value = uop_opt_target(value);

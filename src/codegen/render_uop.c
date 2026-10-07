@@ -1388,27 +1388,6 @@ static void rmu_collect_ranges_rec_through_reduce_cap(
   }
 }
 
-// Default-cap wrappers (MAX_DIM) for callers that don't need more.
-static void rmu_collect_ranges_through_reduce(
-    Term t, Term *ranges, u32 *n_out) {
-  u32 dummy_kinds[MAX_DIM]   = {0};
-  u32 dummy_factors[MAX_DIM] = {0};
-  u32 bound[RMU_BOUND_AXIS_CAP];
-  u32 n_bound = 0;
-  rmu_collect_ranges_rec_through_reduce_cap(
-      t, ranges, dummy_kinds, dummy_factors, n_out, MAX_DIM,
-      0, 0, bound, &n_bound);
-}
-
-static void rmu_collect_ranges_with_opts_through_reduce(
-    Term t, Term *ranges, u32 *opt_kinds, u32 *opt_factors, u32 *n_out) {
-  u32 bound[RMU_BOUND_AXIS_CAP];
-  u32 n_bound = 0;
-  rmu_collect_ranges_rec_through_reduce_cap(
-      t, ranges, opt_kinds, opt_factors, n_out, MAX_DIM,
-      RMU_NO_OPT, 0, bound, &n_bound);
-}
-
 // RMU_MAX_RANGES-cap range-only variant for the rmu_emit_store
 // dependency analysis (required_pos + reduce-feeding-broadcast hoist).
 // Those scans must see EVERY free range a reduce body references to
@@ -1760,13 +1739,6 @@ static void rmu_compute_global_decode_ctx(Term const *ranges, u32 n_ranges,
   }
 }
 
-// Back-compat shim: no LOCAL axis (opt_kinds = NULL -> has_local = 0).
-static void rmu_compute_global_decode(Term const *ranges, u32 n_ranges,
-                                      u8 const *promote,
-                                      RmuGlobalDecode *out) {
-  rmu_compute_global_decode_ctx(ranges, n_ranges, promote, NULL, out);
-}
-
 // Shared prelude for the reduce-shaped emit paths (the generic
 // accumulator path in rmu_emit_store_reduce).  Given the
 // output-axis ranges (the reduce axis already split off) and the
@@ -2103,33 +2075,6 @@ static int rmu_detect_matmul_tc(Term store, Term *out_red_value) {
   if (term_tag(rhs) != TAG_UOP || term_ext(rhs) != UOP_INDEX_E) return 0;
   if (out_red_value != NULL) *out_red_value = inner;
   return 1;
-}
-
-// Filter the collected ranges, splitting them into output ranges
-// (axis_id != reduce_axis) and the reduce range (axis_id == reduce_axis,
-// at most one).  Used by the REDUCE-as-store-value shape so the
-// renderer can emit output loops outside, accumulator+inner loop
-// inside.  Returns the index of the reduce range in the input array,
-// or n_ranges if not found.
-static u32 rmu_split_reduce(Term *ranges, u32 *opt_kinds,
-                            u32 *opt_factors, u32 n_ranges,
-                            u32 reduce_axis,
-                            Term *out_ranges, u32 *out_kinds,
-                            u32 *out_factors, u32 *n_out) {
-  u32 reduce_idx = n_ranges;
-  *n_out = 0;
-  for (u32 i = 0; i < n_ranges; i++) {
-    u32 axis_id = term_val(heap_read(term_val(ranges[i]) + 0));
-    if (axis_id == reduce_axis) {
-      reduce_idx = i;
-      continue;
-    }
-    out_ranges  [*n_out] = ranges[i];
-    out_kinds   [*n_out] = opt_kinds[i];
-    out_factors [*n_out] = opt_factors[i];
-    (*n_out)++;
-  }
-  return reduce_idx;
 }
 
 // 1 iff a reduce accumulator or hoisted local of dtype `dt` is held in its
@@ -4406,7 +4351,7 @@ static Term rmu_conv_m_subst_rule(Term t, void *user) {
 // the original K leaf into IADD(IMUL(outer, k), OPT(inner, UPCAST, k))
 // where `outer` keeps the original axis_id and `inner` gets a fresh
 // axis_id (red_axis+1).  The REDUCE node still names only `outer`,
-// so the renderer's rmu_split_reduce pulls `outer` into red_range
+// so matching ranges to the REDUCE's axis puts `outer` in red_range
 // but leaves `inner` in out_ranges -- where the renderer would
 // (incorrectly) treat it as an output dimension that gets a loop
 // OUTSIDE the reduce, overwriting the per-output accumulator with
@@ -4957,8 +4902,8 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   // and nests each reduce inside the one whose axis its body reads.
   if (rmu_term_has_reduce(red_src, 0)) return 0;
   // emit_store_reduce now handles SINGLE-axis AND multi-axis REDUCE.
-  // Multi-axis: collect every reduce axis_id; rmu_split_reduce_multi
-  // peels them all out of the range set; the parallel-acc / legacy
+  // Multi-axis: collect every reduce axis_id and peel them all out of
+  // the range set; the parallel-acc / legacy
   // emit opens them as nested loops in REDUCE.src[1:] order
   // (outermost axis_0, innermost axis_{n-1}; mirrors tinygrad
   // lowerer.py).

@@ -171,7 +171,7 @@ typedef struct {
   // bare integer in heap slot +2.  When an axis split shifts every
   // axis_id > target right by one (KOP_UPCAST/UNROLL/LOCAL/GROUP), the
   // REDUCE's axis must follow suit or the renderer's reduce-range
-  // matcher (rmu_split_reduce) stops finding it and falls back to the
+  // matching stops finding it and falls back to the
   // generic-store path -> the UPCAST'd inner axis gets mistaken for
   // the reduce loop -> MSL "use of undeclared identifier".
   //   reduce_shift_above == 0xFFFFFFFFu  -> no shift (SWAP / standalone)
