@@ -146,9 +146,7 @@ static int uop_term_max_value(Term t, i64 *out) {
 
 // Conservative lower-bound estimator (mirror of uop_term_max_value;
 // tinygrad symbolic vmin).  Returns 1 and sets *out to a value V such
-// that the term is provably >= V (RANGE leaves >= 0).  Used by
-// parse_valid / uop_given_valid to derive the [vmin, vmax] window of a
-// guarded expression.
+// that the term is provably >= V (RANGE leaves >= 0).
 static int uop_term_min_value(Term t, i64 *out) {
   if (term_tag(t) == TAG_NUM) { *out = (i64)(i32)term_val(t); return 1; }
   if (term_tag(t) != TAG_UOP) return 0;
@@ -211,11 +209,9 @@ static int uop_term_strictly_below(Term y, i64 bound) {
 // Mirrors scalar/simplify.c's simplify_value_nonneg.
 static int uop_term_nonneg_d(Term t, u32 depth) {
   // Bounded recursion over the finite index DAG (mirrors the depth>48
-  // guards on uop_index_substitute / uop_term_has_range_aid in this
-  // file).  The composed conv-backward col2im index can nest deeply
-  // (and on the CUDA symbolic-codegen path the iwhere valid-fold builds
-  // very deep masked-divmod trees); without this cap the recursion
-  // overflows the stack.  A deep/pathological term is conservatively
+  // guard on uop_index_substitute in this file).  The composed
+  // conv-backward col2im index can nest deeply; without this cap the
+  // recursion overflows the stack.  A deep/pathological term is conservatively
   // "not provably nonneg" (a missed simplification, never wrong).
   if (depth > 64) return 0;
   if (term_tag(t) != TAG_UOP) return 0;
@@ -788,49 +784,9 @@ static Term uop_fold_add_divmod_recombine(Term a, Term b) {
   return 0;
 }
 
-// === invalid_gate / propagate_invalid (tinygrad symbolic.py:25-65) ===
-
-// The valid-given index folds (propagate_invalid push + uop_given_valid).
-//
-// This is a SEPARATE, opt-in (default OFF) optimization, independent of the
-// conv-backward fusion.  It is (a) NOT needed for the conv-backward memory
-// win -- the
-// rangeify RESHAPE placeholder fold (schedule/indexing.c
-// apply_movement_op_reshape_composed) is what collapses the col2im into a
-// strided view -- and (b) INCORRECT under thvm's INVALID lowering when a
-// PAD gate is present: propagate_invalid pushes the `WHERE(cond, x, INV)`
-// border gate up through the conv reduce-body MUL into
-// `WHERE(cond, weight*x, INV)`, and a containing simplify can drop the
-// WHERE wrapper leaving a bare INVALID.  tinygrad's INVALID carries full
-// gate semantics through LOAD/STORE lowering; thvm renders a bare INVALID
-// in a value slot as the constant 0 (render_uop.c `/*INVALID*/0`), so the
-// stripped gate makes the WHOLE padded-conv output collapse to 0 (forward
-// sum -> 0, gradients -> 0/nan).  Keeping this fold OFF by default leaves
-// the padded conv correct while the fuse memory win is unaffected.  Enable
-// THVM_VALID_FOLD=1 only on graphs with no PAD gates.  (Tracked: the
-// propagate_invalid port must preserve the gate on the LOAD address rather
-// than hoist it past the reduce body before it can be default-on.)
-static int uop_valid_fold_enabled(void) {
-  static int v = -1;
-  if (v < 0) { char const *e = getenv("THVM_VALID_FOLD"); v = (e && e[0] == '1') ? 1 : 0; }
-  return v;
-}
-
 // True iff `t` is the bare INVALID sentinel CONST.
 static int uop_is_invalid(Term t) {
   return term_tag(t) == TAG_UOP && term_ext(t) == UOP_INVALID;
-}
-
-// Recognise the `cond.where(x, INVALID)` invalid-gate shape (symbolic.py:26
-// `invalid_gate = UPat.var("cond").where(UPat.var("x"), invalid_pat)`).
-// Returns 1 and fills *cond_out/*x_out on match.
-static int uop_match_invalid_gate(Term t, Term *cond_out, Term *x_out) {
-  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IWHERE) return 0;
-  Term else_v = heap_read(term_val(t) + 2);
-  if (!uop_is_invalid(else_v)) return 0;
-  *cond_out = heap_read(term_val(t) + 0);
-  *x_out    = heap_read(term_val(t) + 1);
-  return 1;
 }
 
 // === Binary integer simplifier ===
@@ -839,32 +795,6 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
   i64 av, bv;
   int a_const = uop_iconst_value(a, &av);
   int b_const = uop_iconst_value(b, &bv);
-
-  // propagate_invalid: push a (non-comparison) binary op past an
-  // invalid-gate so the gate stays at the top, where uop_given_valid
-  // can fold the body against its own condition.  Mirrors
-  // tinygrad/uop/symbolic.py:55-65:
-  //   (op, src=(cond.where(x,INV), y)) -> cond.where(x op y, INV)
-  //   (op, src=(y, cond.where(x,INV))) -> cond.where(y op x, INV)
-  //   (op, src=(INV, *))               -> INV   (binary with invalid)
-  // Comparisons (ILT) keep INVALID as a propagated 0/1 elsewhere; we
-  // handle the arithmetic + bitwise ops (IOR/IXOR/ISHR are commutative/
-  // order-independent w.r.t. the gate select, no div/floor semantics).
-  if (uop_valid_fold_enabled()
-      && (opcode == UOP_IADD || opcode == UOP_ISUB || opcode == UOP_IMUL
-          || opcode == UOP_IDIV || opcode == UOP_IMOD || opcode == UOP_IAND
-          || opcode == UOP_IOR  || opcode == UOP_IXOR || opcode == UOP_ISHR)) {
-    if (uop_is_invalid(a) || uop_is_invalid(b)) return uop_invalid();
-    Term gc, gx;
-    if (uop_match_invalid_gate(a, &gc, &gx)) {
-      Term inner = uop_int_binary(opcode, gx, b);
-      return uop_iwhere(gc, inner, uop_invalid());
-    }
-    if (uop_match_invalid_gate(b, &gc, &gx)) {
-      Term inner = uop_int_binary(opcode, a, gx);
-      return uop_iwhere(gc, inner, uop_invalid());
-    }
-  }
 
   // Constant-fold: both operands ICONST.
   if (a_const && b_const) {
@@ -1530,23 +1460,7 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
   return 0;
 }
 
-// === uop_given_valid (tinygrad symbolic.py:328-371) ===
-
-// Mint a throwaway RANGE leaf with a reserved high axis_id (won't
-// collide with real kernel axes, which are densely numbered from 0) and
-// a constrained extent.  uop_given_valid substitutes a guarded
-// expression e in [lo, hi] with fake+lo, fake a RANGE over [0, hi-lo],
-// so the div/mod folds see the TIGHTER bound from the valid clause, then
-// substitutes fake -> e-lo back.  Mirrors tinygrad's
-// `UOp.variable(f"fake{i}", v0, v1)` in uop_given_valid.
-#define UOP_VALID_FAKE_AXIS_BASE 0x70000000u
-#define UOP_VALID_SCAN_BUDGET    4096
-static Term uop_make_fake_range(u32 extent) {
-  static u32 ctr = 0;
-  if (extent == 0) return 0;
-  return uop_range(UOP_VALID_FAKE_AXIS_BASE + (ctr++ & 0xFFFF), KAX_LOOP, extent);
-}
-
+// === Index substitution (tinygrad UOp.substitute) ===
 
 // Rebuild `t`, replacing every structural occurrence of from[i] with
 // to[i], routing through the simplifying constructors (uop_int_binary /
@@ -1738,199 +1652,6 @@ fn Term uop_fast_idiv_rule(Term t, void *user) {
   return uop_fast_idiv_node(t);
 }
 
-// True iff the DAG rooted at `t` contains a UOP_RANGE leaf whose
-// axis_id equals `aid`.  Bounded recursion over the finite index DAG.
-static int uop_term_has_range_aid(Term t, u32 aid, u32 depth) {
-  if (depth > 48 || term_tag(t) != TAG_UOP) return 0;
-  u32 op = term_ext(t);
-  if (op == UOP_RANGE) return (u32)term_val(heap_read(term_val(t) + 0)) == aid;
-  if (op == UOP_CONST || op == UOP_INVALID) return 0;
-  u32 n = (op == UOP_IWHERE) ? 3 : 2;
-  for (u32 i = 0; i < n; i++) {
-    if (uop_term_has_range_aid(heap_read(term_val(t) + i), aid, depth + 1)) return 1;
-  }
-  return 0;
-}
-
-// True iff `clause` and `x` share at least one RANGE leaf (same axis_id).
-// Mirrors tinygrad's `any(r in x.ranges for r in c.ranges)`
-// (symbolic.py:383).
-static int uop_term_shares_range_with(Term clause, Term x, u32 depth) {
-  if (depth > 48 || term_tag(clause) != TAG_UOP) return 0;
-  u32 op = term_ext(clause);
-  if (op == UOP_RANGE) {
-    u32 aid = (u32)term_val(heap_read(term_val(clause) + 0));
-    return uop_term_has_range_aid(x, aid, 0);
-  }
-  if (op == UOP_CONST || op == UOP_INVALID) return 0;
-  u32 n = (op == UOP_IWHERE) ? 3 : 2;
-  for (u32 i = 0; i < n; i++) {
-    if (uop_term_shares_range_with(heap_read(term_val(clause) + i), x, depth + 1)) return 1;
-  }
-  return 0;
-}
-
-// parse_valid (tinygrad symbolic.py:328-340): decompose a single valid clause
-// into (expr, is_upper, bound):
-//   X < c        -> (X, upper, c-1)        [X <= c-1]
-//   (X < c).ne(1) i.e. X >= c              [thvm has no CMPNE form; the
-//                                           PAD lower guard is ILT(s-1, X)
-//                                           = (X > s-1) = (X >= s); we
-//                                           recognise that as a lower bound]
-// Returns 1 on a recognised clause.  *is_upper: 1 => X <= bound, 0 => X >= bound.
-static int uop_parse_valid(Term v, Term *expr_out, int *is_upper, i64 *bound_out) {
-  if (term_tag(v) != TAG_UOP || term_ext(v) != UOP_ILT) return 0;
-  Term lhs = heap_read(term_val(v) + 0);
-  Term rhs = heap_read(term_val(v) + 1);
-  i64 c;
-  // X < c  ->  X <= c-1
-  if (uop_iconst_value(rhs, &c)) {
-    *expr_out = lhs; *is_upper = 1; *bound_out = c - 1;
-    return 1;
-  }
-  // c < X  ->  X >= c+1   (the PAD lower guard ILT(s-1, X))
-  if (uop_iconst_value(lhs, &c)) {
-    *expr_out = rhs; *is_upper = 0; *bound_out = c + 1;
-    return 1;
-  }
-  return 0;
-}
-
-// Split a valid condition (a left-assoc IAND tree) into its clauses.
-static u32 uop_valid_split_and(Term v, Term *out, u32 cap, u32 depth) {
-  if (depth > 32 || cap == 0) return 0;
-  if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_IAND) {
-    u32 n0 = uop_valid_split_and(heap_read(term_val(v) + 0), out, cap, depth + 1);
-    u32 n1 = uop_valid_split_and(heap_read(term_val(v) + 1), out + n0, cap - n0, depth + 1);
-    return n0 + n1;
-  }
-  out[0] = v;
-  return 1;
-}
-
-// A stand-in for `e` over [lo, hi]: returns a fake RANGE f over
-// [0, hi-lo], with *to_out = f+lo to replace e and *back_out = e+(-lo)
-// to replace f.  e+(-lo) rather than ISUB: the re-fold may hoist the +lo
-// to the root, and only an add-const moves up to cancel it there.
-// Returns 0 when the window is empty, negative, or too wide.
-static Term uop_valid_fake(Term e, i64 lo, i64 hi, Term *to_out, Term *back_out) {
-  if (lo < 0 || hi < lo || hi - lo >= 0x40000000) {
-    return 0;
-  }
-  Term fake = uop_make_fake_range((u32)(hi - lo + 1));
-  *to_out   = (lo == 0) ? fake : uop_int_binary(UOP_IADD, fake, uop_iconst(lo));
-  *back_out = (lo == 0) ? e    : uop_int_binary(UOP_IADD, e, uop_iconst(-lo));
-  return fake;
-}
-
-// Substitute from[i] -> to[i] simultaneously, re-simplify, then put each
-// fake back.  The fakes are fresh leaves that no back_i contains, so
-// restoring them one at a time is still simultaneous.  Returns `uop`
-// when nothing matched, or when a fake survives: the back pass stops at
-// uop_index_substitute's depth cap, and a leaked fake would reach the
-// kernel as an undeclared loop variable.
-static Term uop_valid_try(Term uop, Term const *from, Term const *to,
-                          Term const *fakes, Term const *backs, u32 n) {
-  Term sub = uop_index_substitute_multi(uop, from, to, n, 0);
-  if (sub == uop) {
-    return uop;
-  }
-  for (u32 i = 0; i < n; i++) {
-    sub = uop_index_substitute(sub, fakes[i], backs[i], 0);
-  }
-  u32 left = uop_index_scan(sub, fakes, n, UOP_VALID_SCAN_BUDGET);
-  if (left & (UOP_SCAN_FOUND | UOP_SCAN_GAVE_UP)) {
-    return uop;
-  }
-  return sub;
-}
-
-// The simplex candidate (tinygrad symbolic.py:358-366): a clause
-// X0 + X1 + ... >= 1 over irreducible addends means some Xi >= 1.  When
-// assuming each Xi >= 1 alone simplifies `uop` to one and the same term,
-// that term is `uop` under the clause.  tinygrad's STACK branch is
-// dropped: index UOps are scalar.
-static Term uop_valid_simplex(Term uop, Term const *xs, u32 nx) {
-  for (u32 i = 0; i < nx; i++) {
-    u32 op = (term_tag(xs[i]) == TAG_UOP) ? term_ext(xs[i]) : 0;
-    if (op != UOP_RANGE && op != UOP_CONST) {
-      return uop;
-    }
-    u32 seen = uop_index_scan(uop, &xs[i], 1, UOP_VALID_SCAN_BUDGET);
-    if ((seen & (UOP_SCAN_FOUND | UOP_SCAN_GAVE_UP)) != UOP_SCAN_FOUND) {
-      return uop;
-    }
-  }
-  Term first = 0;
-  for (u32 i = 0; i < nx; i++) {
-    i64  hi;
-    Term to, back;
-    Term fake = uop_term_max_value(xs[i], &hi) ? uop_valid_fake(xs[i], 1, hi, &to, &back) : 0;
-    if (fake == 0) {
-      return uop;
-    }
-    Term r = uop_valid_try(uop, &xs[i], &to, &fake, &back, 1);
-    if (i > 0 && r != first) {
-      return uop;
-    }
-    first = r;
-  }
-  return first;
-}
-
-// uop_given_valid (tinygrad symbolic.py:342-371): simplify `uop` assuming
-// `valid` is true.  Parse the valid into per-expression [lo, hi] bounds,
-// then substitute EVERY bounded expression with a fake over its window
-// in one simultaneous pass, re-simplify, and substitute back.  This is
-// what folds the col2im decode: given `(X) < 125` the guarded `X//25` /
-// `X%25` simplify against the tightened window of X.  With try_simplex,
-// each clause may first try the per-addend simplex candidate.
-static Term uop_given_valid(Term valid, Term uop, int try_simplex) {
-  Term clauses[16];
-  u32 nc = uop_valid_split_and(valid, clauses, 16, 0);
-  // Aggregate per-expression bounds: lo[i], hi[i] (NULL == unknown).
-  Term exprs[16]; i64 los[16], his[16]; int has_lo[16], has_hi[16];
-  u32 ne = 0;
-  for (u32 i = 0; i < nc; i++) {
-    Term e; int up; i64 b;
-    if (!uop_parse_valid(clauses[i], &e, &up, &b)) continue;
-    // Find or insert.
-    u32 idx = ne;
-    for (u32 j = 0; j < ne; j++) if (exprs[j] == e) { idx = j; break; }
-    if (idx == ne) {
-      if (ne >= 16) break;
-      exprs[ne] = e; has_lo[ne] = 0; has_hi[ne] = 0; ne++;
-    }
-    if (up) { his[idx] = b; has_hi[idx] = 1; }
-    else    { los[idx] = b; has_lo[idx] = 1; }
-  }
-  Term from[16], to[16], fakes[16], backs[16];
-  u32  nj = 0;
-  for (u32 i = 0; i < ne; i++) {
-    Term e = exprs[i];
-    if (term_tag(e) != TAG_UOP || term_ext(e) == UOP_CONST) {
-      continue;
-    }
-    i64 lo, hi;
-    if (has_lo[i]) lo = los[i]; else if (!uop_term_min_value(e, &lo)) continue;
-    if (has_hi[i]) hi = his[i]; else if (!uop_term_max_value(e, &hi)) continue;
-    Term fake = uop_valid_fake(e, lo, hi, &to[nj], &backs[nj]);
-    if (fake == 0) {
-      continue;
-    }
-    from[nj]  = e;
-    fakes[nj] = fake;
-    nj++;
-    Term xs[16];
-    u32  nx = 0;
-    if (try_simplex && term_ext(e) == UOP_IADD && lo == 1
-        && uop_iadd_tree_collect_const_mul(e, xs, &nx, 16, 0)) {
-      uop = uop_valid_simplex(uop, xs, nx);
-    }
-  }
-  return uop_valid_try(uop, from, to, fakes, backs, nj);
-}
-
 // === Ternary IWHERE simplifier ===
 
 #define UOP_CLOSURE_SCAN_BUDGET 256
@@ -2023,58 +1744,13 @@ static Term uop_simplify_iwhere_body(Term cond, Term then_v, Term else_v) {
     Term inner_else = heap_read(term_val(else_v) + 2);
     return uop_iwhere(uop_int_binary(UOP_IOR, cond, inner_cond), then_v, inner_else);
   }
-  // drop_and_clauses (tinygrad symbolic.py:382-385): in WHERE(cond, x, INV)
-  // partition cond's AND-clauses by whether their ranges appear in x; if
-  // any clause's ranges are absent from x, drop it (the gate can't affect
-  // x's value there).  Gated behind the conv-bwd opt.
-  if (uop_is_invalid(else_v) && uop_valid_fold_enabled()
-      && term_tag(cond) == TAG_UOP && term_ext(cond) == UOP_IAND) {
-    Term clauses[16];
-    u32 nclauses = uop_valid_split_and(cond, clauses, 16, 0);
-    if (nclauses >= 2) {
-      Term kept = 0;
-      int dropped = 0;
-      for (u32 i = 0; i < nclauses; i++) {
-        if (uop_term_shares_range_with(clauses[i], then_v, 0)) {
-          kept = (kept == 0) ? clauses[i]
-                             : uop_int_binary(UOP_IAND, kept, clauses[i]);
-        } else {
-          dropped = 1;
-        }
-      }
-      if (dropped && kept != 0 && kept != cond) {
-        return uop_iwhere(kept, then_v, else_v);
-      }
-    }
-  }
-  // gated_given_valid (tinygrad symbolic.py:427-432): when the gate is a
-  // valid mask (`WHERE(cond, body, INVALID)`), simplify `body` against
-  // the bounds `cond` asserts, without the simplex candidate.  Gated
-  // behind THVM_VALID_FOLD so the shared index simplifier stays
-  // bit-identical with the flag OFF.
-  if (uop_is_invalid(else_v) && uop_valid_fold_enabled()
-      && term_tag(then_v) == TAG_UOP) {
-    u32 to = term_ext(then_v);
-    if (to == UOP_IDIV || to == UOP_IMOD || to == UOP_IADD
-        || to == UOP_IMUL || to == UOP_ISUB) {
-      Term folded = uop_given_valid(cond, then_v, 0);
-      if (folded != then_v) return uop_iwhere(cond, folded, else_v);
-    }
-  }
   return 0;
 }
 
-// Recursion-depth guard around the iwhere simplifier.  Several folds
-// above re-wrap via uop_iwhere -> uop_simplify_iwhere (the IWHERE-of-
-// IWHERE collapse, drop_and_clauses, and especially gated_given_valid,
-// which substitutes the gate's bounds into the body via
-// uop_index_substitute).  On the fused conv-backward col2im index the
-// CUDA symbolic-codegen path drives gated_given_valid without reaching a
-// fixpoint (each pass yields a different `folded`), so the
-// uop_iwhere<->uop_simplify_iwhere<->uop_index_substitute cycle grows
-// the stack without bound (SIGSEGV).  Bail to the raw (un-folded) IWHERE
-// once nesting is pathological -- always correct, just a missed
-// simplification; the schedule-level realize keeps the kernel feasible.
+// Recursion-depth guard around the iwhere simplifier: the IWHERE-of-IWHERE
+// collapse above re-wraps via uop_iwhere -> uop_simplify_iwhere.  Bail to the
+// raw (un-folded) IWHERE once nesting is pathological -- always correct, just
+// a missed simplification.
 fn Term uop_simplify_iwhere(Term cond, Term then_v, Term else_v) {
   static _Thread_local u32 depth = 0;
   if (depth > 96) return 0;
