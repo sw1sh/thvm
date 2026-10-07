@@ -46,10 +46,9 @@ This rollback is intentionally conservative.  It preserves buffers
 reachable from heap roots and result chains, then releases only what is
 proven unreachable.  That keeps correctness ahead of memory savings.
 
-`THVM_REUSE_BUFS=1` enables the experimental schedule planner for CPU
-only.  It can push proven-dead same-pass outputs onto the CPU freelist,
-then drains unused pushes at the end of the pass so reuse cannot leak
-into a later WNF/materialize pass.
+The schedule planner also recycles CPU buffers: it pushes proven-dead
+same-pass outputs onto the CPU freelist, then drains unused pushes at the
+end of the pass so reuse cannot leak into a later WNF/materialize pass.
 
 ## Metal Accounting
 
@@ -306,7 +305,7 @@ That points to three separate memory jobs:
 
 Current policy:
 
-- CPU speculative schedule reuse is opt-in via `THVM_REUSE_BUFS=1`.
+- CPU schedule reuse is on; unused freelist pushes drain at the end of each pass.
 - Metal speculative schedule reuse is disabled.
 - Metal still performs normal refcount-driven reuse after real decrefs.
 - Large performance sweeps stay blocked until Metal profiles prove

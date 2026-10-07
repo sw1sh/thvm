@@ -22,7 +22,6 @@ Autotune a bounded sample of LeNet kernels:
 Full LeNet autotune sweep:
 
     THVM_TILE=1 MAX_TUNE_KERNELS=All wolframscript -f wl/Examples/lenet-mnist/autotune.wls
-    DEV=metal THVM_TILE=1 THVM_KGC=0 MAX_TUNE_KERNELS=All wolframscript -f wl/Examples/lenet-mnist/autotune.wls
 
 Benchmark single-sample LeNet training with baseline vs bounded
 autotune:
@@ -56,10 +55,8 @@ within tolerance.  Zero-key kernels are kept separate because they do
 not share a `KernelAxes` slot.  The default tunes the first 16
 representative candidates so the script remains interactive; set
 `MAX_TUNE_KERNELS=All` for the full representative sweep.  On Metal,
-fire-time autotune via `AUTOTUNE=1` is the normal training path
-because it tunes while program arrays are still live.  Use `THVM_KGC=0`
-with `autotune.wls` when you want post-hoc variant tables after an
-already-realized forward pass.
+fire-time autotune via `AUTOTUNE=1` is the training path because it
+tunes while program arrays are still live.
 
 `bench-train.wls` runs the lazy LeNet/Adam training step from
 `train.wls` with a separate warmup phase, optional bounded

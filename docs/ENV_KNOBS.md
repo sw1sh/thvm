@@ -50,17 +50,13 @@ update the matching row here in the same change.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_GC` | on | Heap GC; `0` disables. |
 | `THVM_GC_KB` | (impl) | Heap GC trigger threshold (KB). |
 | `THVM_RECLAIM_MB` | 64 | py: free dead tensors' backend buffers once resident bytes exceed the last reclaim's survivors by max(this many MB, half the survivors); 0 reclaims after any growth. |
-| `THVM_KGC` | (impl) | Kernel GC control. |
 | `THVM_HEAP_CELLS` | (impl) | Initial heap cell count. |
 | `THVM_MAX_BUF_BYTES` | (impl) | Max single-buffer allocation (KB). |
 | `THVM_MAX_LIVE_BYTES` | (impl) | Max live-buffer memory. |
-| `THVM_REUSE_BUFS` | (impl) | Buffer reuse across backends. |
 | `THVM_CUDA_REUSE_BUFS` | (impl) | CUDA-specific buffer reuse. |
 | `THVM_METAL_REUSE_BUFS` | (impl) | Metal-specific buffer reuse. |
-| `THVM_ARENA_PLAN` | (impl) | Buffer arena planning. |
 | `THVM_ARENA_DUMP` | off | Dump arena alloc/dealloc events. |
 | `THVM_ARENA_DUMP_BUFS` | off | Dump the arena buffer list. |
 

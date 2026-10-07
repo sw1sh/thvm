@@ -187,14 +187,9 @@ fn void thvm_gc_collect_deferred(Term *roots, u32 n_roots) {
 
 fn void thvm_realize_maybe_gc(Term *res_io) {
   if (!gc_enabled()) return;
-  static int gc_disabled_env  = -1;
   static int gc_kb_env        = -1;
   static int gc_device_mb_env = -1;
   static int gc_cuda_floor_gb = -1;
-  if (gc_disabled_env == -1) {
-    const char *e = getenv("THVM_GC");
-    gc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
-  }
   if (gc_kb_env == -1) {
     const char *e = getenv("THVM_GC_KB");
     gc_kb_env = (e != NULL) ? atoi(e) : 0;
@@ -207,7 +202,6 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
     const char *e = getenv("THVM_CUDA_GC_FLOOR_GB");
     gc_cuda_floor_gb = (e != NULL) ? atoi(e) : 0;   // 0 = CUDA device-pressure GC OFF
   }
-  if (gc_disabled_env) return;
   u64 trigger_words = (gc_kb_env > 0)
                         ? (u64)gc_kb_env * 128
                         : (gc_from_end() - gc_from_start()) / 2;
@@ -548,22 +542,16 @@ fn Term thvm_realize(Term expr) {
   // every TTerm wrap), so the C-side pin table is authoritative
   // post-GC.  WL's ttermRaw refreshes through the handle on every
   // read, so cached raw Term integers can't go stale.
-  // THVM_GC=0 disables; THVM_GC_KB overrides the trigger threshold
-  // (in KB of heap; one cell = 8B).
+  // THVM_GC_KB overrides the trigger threshold (in KB of heap; one
+  // cell = 8B).
   thvm_realize_maybe_gc(&res);
 
   // Kernel-arena GC: free per-kernel heap arrays + decref output
   // TenDescs for kernels no longer reachable from any pinned Term.
   // Bounds KERNELS_NEXT growth across long training loops -- without
   // this, each Adam step adds ~5K kernels on LeNet, hitting
-  // KERNELS_CAP after ~50 steps.  Default-on; THVM_KGC=0 disables
-  // for benchmarks that want the old "leak everything" behaviour.
-  static int kgc_disabled_env = -1;
-  if (kgc_disabled_env == -1) {
-    const char *e = getenv("THVM_KGC");
-    kgc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
-  }
-  if (!kgc_disabled_env) SCHED_PROF_BLOCK(SCHED_PROF_KGC, kernel_gc_sweep(res));
+  // KERNELS_CAP after ~50 steps.
+  SCHED_PROF_BLOCK(SCHED_PROF_KGC, kernel_gc_sweep(res));
 
   // Cross-realize loc -> tid cache: scoped to ONE realize call so a
   // forward intermediate emitted as a kernel mid-pass stays reachable
@@ -766,12 +754,7 @@ fn Term thvm_realize_many(Term ctr_term) {
 
   thvm_realize_maybe_gc(&res);
 
-  static int kgc_disabled_env = -1;
-  if (kgc_disabled_env == -1) {
-    const char *e = getenv("THVM_KGC");
-    kgc_disabled_env = (e != NULL && e[0] == '0') ? 1 : 0;
-  }
-  if (!kgc_disabled_env) kernel_gc_sweep(res);
+  kernel_gc_sweep(res);
 
   // Same lifetime as thvm_realize: drop the loc -> tid cache before
   // returning so non-preserved bufs (pool-rollback-recycled) can't be

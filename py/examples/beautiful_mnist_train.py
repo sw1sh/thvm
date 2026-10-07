@@ -10,9 +10,9 @@ issue from the memory leak).
 
 Memory stays flat because every live Tensor pins its term and the loop
 calls thvm's cross-step buffer reclaim each step (GlobalCounters.reset()
-triggers it).  Run with THVM_GC=0 so raw term ids never move:
+triggers it):
 
-  THVM_GC=0 THVM_MAX_BUF_BYTES=0 DEV=cuda STEPS=70 BS=128 \
+  THVM_MAX_BUF_BYTES=0 DEV=cuda STEPS=70 BS=128 \
       python3 py/examples/beautiful_mnist_train.py
 """
 from __future__ import annotations

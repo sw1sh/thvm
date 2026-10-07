@@ -10,13 +10,11 @@
 
        wolframscript -f wl/Examples/lenet-mnist/autotune.wls
        THVM_TILE=1 MAX_TUNE_KERNELS=All wolframscript -f wl/Examples/lenet-mnist/autotune.wls
-       DEV=metal THVM_TILE=1 THVM_KGC=0 wolframscript -f wl/Examples/lenet-mnist/autotune.wls
        DEV=metal THVM_TILE=1 AUTOTUNE=1 N_STEPS=1 wolframscript -f wl/Examples/lenet-mnist/train.wls
 
    Environment knobs:
        MAX_TUNE_KERNELS   default 16; use All for the full LeNet sweep
        MAX_VARIANT_ROWS   default 3; how many candidate kernels to print
-       THVM_KGC=0         keep post-realize program arrays for Metal inspection
        AUTOTUNE=1    tune at kernel fire time instead of post-hoc
 *)
 
@@ -74,8 +72,7 @@ TInit[];
 Print["LeNet autotune example"];
 Print["  DEV=", envValue["DEV", "default-cpu"],
       "  THVM_TILE=", envValue["THVM_TILE", "off"],
-      "  AUTOTUNE=", envValue["AUTOTUNE", "off"],
-      "  THVM_KGC=", envValue["THVM_KGC", "on"]];
+      "  AUTOTUNE=", envValue["AUTOTUNE", "off"]];
 Print["  MAX_TUNE_KERNELS=", If[maxTune === Infinity, "All", maxTune],
       "  MAX_VARIANT_ROWS=", If[maxVariantRows === Infinity, "All", maxVariantRows]];
 

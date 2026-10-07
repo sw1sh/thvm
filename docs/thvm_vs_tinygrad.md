@@ -83,7 +83,7 @@ Both compilers lower a tensor program to device kernels through structurally ide
 | BEAM `search.py` | `codegen/autotune.c` | **Engine present + wired** (`BEAM>0`/`AUTOTUNE=1`); proposer (`propose.c`) narrower than search.py's ~200 actions |
 | Expander / devectorizer (`late/*.py`) | none: `render_uop.c` applies UPCAST / UNROLL at source emission | **Not ported.** A port of the pre-365f87a8a design never rendered a production kernel and was deleted ([tinygrad_late_passes.md](tinygrad_late_passes.md)) |
 | Renderers (llvmir/cstyle/ptx/metal) | `render_uop.c` + backend renderers | Faithful (CPU/CUDA/Metal only) |
-| `memory_plan_rewrite` | `THVM_ARENA_PLAN` (TLSF arena) | Partial; no reuse-distance layout opt |
+| `memory_plan_rewrite` | TLSF arena planner (`materialize.c`) | Partial; no reuse-distance layout opt |
 | Graph batching (`graph_split_rewrite`) | `THVM_METAL_GRAPH_REPLAY` / `THVM_CUDA_JIT_GRAPH` + `jit/capture.c` | Partial |
 | Gradient (`gradient.py`, post-kernelize UOP) | `interact/uop_grad.c` (term/AST level) | Different layer; fewer backward rules |
 
@@ -219,9 +219,8 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 |---|---|---|
 | `THVM_MAX_BUF_BYTES` | Per-buffer ceiling (0 = unlimited) | 1 GiB |
 | `THVM_MAX_LIVE_BYTES` | Total live backend buffer ceiling | 8 GiB |
-| `THVM_ARENA_PLAN` | TLSF arena buffer reuse | on |
 | `THVM_REUSE_BUFS` / `THVM_METAL_REUSE_BUFS` / `THVM_CUDA_REUSE_BUFS` | Per-backend buffer reuse | on / backend / backend |
-| `THVM_GC` / `THVM_GC_KB` / `THVM_KGC` / `THVM_HEAP_CELLS` | Heap GC / threshold / kernel GC / cell pool | on / auto / on / built-in |
+| `THVM_GC_KB` / `THVM_HEAP_CELLS` | Heap GC threshold / cell pool | auto / built-in |
 
 **Backend / codegen**
 

@@ -1566,23 +1566,6 @@ typedef struct {
 static MemPlanEntry MEM_PLAN[MEM_PLAN_CAP];
 static u32          MEM_PLAN_LEN = 0;
 
-// CPU planner: default-on; THVM_REUSE_BUFS=0 opts out.  The earlier
-// concern (DUP/SUP-aware lifetime tracking) hasn't materialized as a
-// correctness regression on the unified-rangeify path; verified on
-// beautiful_mnist BS=2/16 STEPS=4 (peak -7%, loss curves byte-equivalent
-// up to BLAS-summation fp-order noise) + full C suite + numpy conv+BN
-// grad ref.  Brings CPU's recycling behavior in line with Metal/CUDA,
-// where the planner has been default-on for a while.
-static int mem_plan_cpu_enabled(void) {
-  static int known = 0, enabled = 0;
-  if (!known) {
-    char const *e = getenv("THVM_REUSE_BUFS");
-    enabled       = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
-    known         = 1;
-  }
-  return enabled;
-}
-
 // Metal planner: default-ON.  The earlier rationale for default-off
 // ("inert on beautiful_mnist -- peak is im2col intermediates") was
 // invalidated by the conv strided-view _pool rework (391a0d08 zero-
@@ -1622,7 +1605,7 @@ static int mem_plan_cuda_enabled(void) {
 // Per-backend gate the recorded buf actually obeys.
 static int mem_plan_backend_enabled(Backend const *b) {
   if (b == NULL) return 0;
-  if (b->id == 1) return mem_plan_cpu_enabled();
+  if (b->id == 1) return 1;
   if (b->id == 2) return mem_plan_metal_enabled();
   if (b->id == 3) return mem_plan_cuda_enabled();
   return 0;
@@ -1864,16 +1847,6 @@ static CUdeviceptr ARENA_DPTR        = 0;      // CUDA arena base
 static u32 ARENA_ALLOCS_ARENA  = 0;
 static u32 ARENA_ALLOCS_LEGACY = 0;
 
-static int arena_plan_enabled(void) {
-  static int known = 0, enabled = 0;
-  if (!known) {
-    char const *e = getenv("THVM_ARENA_PLAN");
-    enabled = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
-    known = 1;
-  }
-  return enabled;
-}
-
 // The Metal arena (offset-slices of one shared MTLBuffer) is OPT-IN, default
 // OFF, unlike CPU/CUDA where the arena is the memory win and default ON.  On
 // Metal the arena's payoff is a different one -- it makes a recycling JIT
@@ -2001,7 +1974,6 @@ static void arena_compute(void) {
   arena_reset();
   ARENA_ALLOCS_ARENA  = 0;
   ARENA_ALLOCS_LEGACY = 0;
-  if (!arena_plan_enabled())     return;
   if (BOUNDARY_ORDER_LEN == 0)   return;
   if (CURRENT_BACKEND == NULL)   return;
   int is_cpu   = (CURRENT_BACKEND == &CPU_BACKEND);
@@ -5798,19 +5770,6 @@ static int boundary_refs_tid_rec(u64 loc, u32 tid, u8 *visited, u64 cap) {
   return 0;
 }
 
-// Opt-out (default ON, like THVM_*_REUSE_BUFS).  THVM_SHARED_FREE=0 keeps
-// every cross-pass-shared buffer pinned to end-of-realize (the 6cb09420
-// suppression behavior) -- used to A/B the recycle's peak win.
-static int shared_free_enabled(void) {
-  static int known = 0, enabled = 0;
-  if (!known) {
-    char const *e = getenv("THVM_SHARED_FREE");
-    enabled = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
-    known = 1;
-  }
-  return enabled;
-}
-
 // Consuming-sub-pass shared-buffer recycle.  Runs after topo_sort (depths +
 // BOUNDARY_ORDER ready) and before the emit loop.  For every shared tid the
 // producing sub-pass cached (XPASS_SHARED_TIDS) where THIS sub-pass is the
@@ -5829,7 +5788,6 @@ static int shared_free_enabled(void) {
 // boundaries are recorded by emit_kernel_for_boundary) and on any pass that
 // is not the last root reaching a given shared boundary.
 static void xpass_shared_input_plan(void) {
-  if (!shared_free_enabled())      return;
   if (XPASS_SHARED_TID_LEN == 0)   return;
   if (BOUNDARY_ORDER_LEN == 0)     return;
   if (CURRENT_BACKEND == NULL)     return;

@@ -128,30 +128,6 @@ fn int rangeify_unified_is_realized(u32 node_idx) {
       || RU_REALIZE_MAP[node_idx].realized_partial;
 }
 
-// tinygrad's remove_bufferize (rangeify.py:242-309): recompute a realized
-// elementwise boundary into its consumers instead of storing it, when all
-// gates pass (removable / accessed_buffers>3 / buffer_in_reduce / the thvm
-// movement-free recompute-region guard).  Removes the softmax exp (attention
-// 7->6 kernels), bit-exact on CPU + Metal.  Default-ON; opt out with
-// THVM_REMOVE_BUFFERIZE=0 for A/B.
-//
-// thvm's per-consumer re-index (ru_build_axis_subst, pm_apply_rangeify) is
-// POSITIONAL, not tinygrad's exact src.substitute (rangeify.py:308).  That is
-// exact only for a MOVEMENT-FREE recompute region (pure elementwise into a
-// same-rank reduce); rb_unsafe_recompute_region keeps everything else.  So the
-// port is correct but narrower than tinygrad until the exact substitute is
-// ported -- it captures the softmax/attention win (the hot path) and is a
-// no-op everywhere the recompute would broadcast or swizzle.
-fn int ru_remove_bufferize_on(void) {
-  static int known = 0, on = 1;
-  if (!known) {
-    char const *e = getenv("THVM_REMOVE_BUFFERIZE");
-    if (e != NULL && e[0] != '\0') on = (e[0] != '0');
-    known = 1;
-  }
-  return on;
-}
-
 // THVM_FUSE_MATMUL_INPUT (default OFF): elementwise-producer-into-matmul-load
 // fusion.  tinygrad fuses a single-consumer elementwise chain (e.g. the FLUX
 // modulation ln*(sc+1)+sh, a SiLU, a cast) INTO the consuming matmul's reduce
@@ -1867,98 +1843,96 @@ fn void run_rangeify_unified_impl(Term root) {
     for (u8 a = 0; a < in_ndim; a++) RU_RANGE_MAP[node_idx].in_rngs [a] = in_rngs [a];
   }
 
-  // *** remove_bufferize (tinygrad schedule/rangeify.py:242-309) ***
+  // *** remove_bufferize (tinygrad schedule/rangeify.py:50-102) ***
   // Un-realize a WALK-realized ELEMENTWISE boundary so it is RECOMPUTED into
   // each consumer kernel instead of stored to a shared buffer (the softmax
   // `*scale`/`exp` fuse into the score/max/sum reduces: 7 kernels -> fewer).
   // pm_apply_rangeify then re-indexes the recomputed value per consumer via
-  // ru_build_axis_subst + ru_subtree_rewrite_ranges (mirror rangeify.py:308
-  // `src.substitute({buf.src[1:] -> idx.src[1:]})`).  Gates, in tinygrad order:
-  //   * removable (rangeify.py:248): a node feeding a BLAS-matmul reduce stays
+  // ru_build_axis_subst + ru_subtree_rewrite_ranges (mirror rangeify.py:102
+  // `src.substitute(replaced)`).  Gates, in tinygrad order:
+  //   * removable (rangeify.py:56): a node feeding a BLAS-matmul reduce stays
   //     materialized -- thvm's GEMM dispatch needs buffer operands (thvm's
   //     ALWAYS_CONTIGUOUS equivalent).  See rb_feeds_matmul_reduce.
-  //   * buffer_in_reduce (rangeify.py:280-303): keep a node whose value fuses a
+  //   * buffer_in_reduce (rangeify.py:88-96): keep a node whose value fuses a
   //     LIVE (non-realized) reduce -- recomputing it would re-run that reduce
   //     reading buffers.  See rb_src_has_live_reduce.
-  if (ru_remove_bufferize_on()) {
-    for (u32 oi = 0; oi < RU_TOPO_ORDER_LEN; oi++) {
-      u32 i = RU_TOPO_ORDER[oi];
-      if (!(RU_REALIZE_MAP[i].realized_full || RU_REALIZE_MAP[i].realized_partial))
-        continue;
-      // limit_bufs pinned this boundary to keep a Metal kernel under the
-      // 31-buffer hard cap (ru_limit_bufs_node).  Un-realizing it would re-fuse
-      // the over-budget kernel -> Metal compile error.  Never remove it.
-      if (RU_REALIZE_MAP[i].pinned) continue;
-      // THVM_FUSE_MATMUL_EPILOGUE: un-realize an OPT_TC matmul REDUCE whose only
-      // consumer is an elementwise epilogue chain (rb_matmul_epilogue_fusable),
-      // so its REDUCE subtree inlines into that consumer's store -- the codegen
-      // epilogue then emits one fused TC kernel.  A matmul reduce is a SEED
-      // boundary (bufferize_classify sets BUFFERIZE_NODES[].realized for it), so
-      // this clause runs BEFORE the seed-boundary keep below; the elementwise
-      // recompute path only un-realizes WALK-derived boundaries.  Metal-only:
-      // the epilogue is emittable solely by the bf16 tiled emitter (render_uop.c
-      // gates `c_is_bf`); on CPU/CUDA keep the matmul a realized BLAS operand.
-      if (ru_fuse_epilogue_on() && ru_fuse_matmul_input_target_ok()
-          && rb_matmul_epilogue_fusable(i)
-          && !rb_src_has_live_reduce(BUFFERIZE_NODES[i].loc, 0)) {
-        RU_REALIZE_MAP[i].realized_full    = 0;
-        RU_REALIZE_MAP[i].realized_partial = 0;
-        continue;
-      }
-      if (BUFFERIZE_NODES[i].realized) continue;          // seed boundary: keep
-      u8 op = BUFFERIZE_NODES[i].op;
-      int ew = uop_is_unary_elementwise(op)
-            || uop_is_binary_elementwise(op)
-            || uop_is_ternary_elementwise(op);
-      if (!ew) continue;                                  // only removable elementwise
-      // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise feeding ONE matmul
-      // reduce is fused INTO that matmul (the TC A-staging computes it inline),
-      // so we DON'T keep it realized.  Otherwise the GEMM-operand rule holds.
-      // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise producer feeding
-      // ONE matmul reduce is un-realized and spliced into the matmul's A operand.
-      // The matmul lowering wraps A in RESHAPE({M,K,1})+EXPAND({M,K,N}) -- a
-      // rank-growing movement.  thvm's POSITIONAL ru_build_axis_subst does not
-      // compose its producer->consumer remap up that RESHAPE->EXPAND->MUL->REDUCE
-      // chain, so the producer's own {M,K} RANGE leaves leak into the reduce body
-      // as free LOOP axes -- which the conv-bwd absorb then folds into the reduce
-      // (1-axis K -> 3-axis {M,K,N}, recognise_tc declines, the matmul mis-sums).
-      // The reduce-rebuild below ports tinygrad's exact src.substitute for THIS
-      // rank-grow case: it remaps each leaked producer LOOP range onto the matmul
-      // axis (the reduce K range, or an output M range) of equal extent, keeping
-      // the reduce 1-axis so the TC tiled emitter handles the fused A -- bit-exact
-      // (the producer is evaluated at exactly the (m,k) the matmul iterates).
-      // rb_matmul_input_fusable already guarantees the consumer chain terminates
-      // at a matmul REDUCE (the only shape the remap targets), so the un-realize
-      // is safe.  Default-OFF flag, so the baseline is unaffected.
-      int fuse_mm = (ru_fuse_matmul_input_on() && ru_fuse_matmul_input_target_ok()
-                     && rb_feeds_matmul_reduce(i)
-                     && rb_matmul_input_fusable(i));
-      if (rb_feeds_matmul_reduce(i) && !fuse_mm)
-        continue;                                         // removable=False (GEMM operand)
-      // The matmul-input fuse threads the producer through the matmul-lowering
-      // reshape(+unit axis)+expand(broadcast over the contracted N axis) -- a
-      // benign rank-grow that rb_unsafe_recompute_region conservatively rejects
-      // and a multi-buffer modulation that rb_too_many_buffers would reject.
-      // For this targeted path the inline IS exact (the broadcast N axis is not
-      // read in the matmul's A load), so we skip those two general gates; the
-      // codegen-side detector (rmu_detect_matmul_tc) independently re-validates
-      // the operand shape before it inlines, falling back to the generic
-      // accumulator (still correct) if anything is off.
-      if (!fuse_mm) {
-        if (rb_unsafe_recompute_region(i)) continue;      // movement/broadcast re-index unsafe
-        // tinygrad rangeify.py:85: a node reading more than 3 buffers is kept.
-        if (rb_too_many_buffers(BUFFERIZE_NODES[i].loc))
-          continue;                                       // accessed_buffers > 3
-      }
-      // tinygrad rangeify.py:88-95 buffer_in_reduce: a node whose value fuses
-      // a LIVE reduce is kept (recomputing it re-runs the reduce reading
-      // buffers).
-      if (rb_src_has_live_reduce(BUFFERIZE_NODES[i].loc, 0)) {
-        continue;
-      }
+  for (u32 oi = 0; oi < RU_TOPO_ORDER_LEN; oi++) {
+    u32 i = RU_TOPO_ORDER[oi];
+    if (!(RU_REALIZE_MAP[i].realized_full || RU_REALIZE_MAP[i].realized_partial))
+      continue;
+    // limit_bufs pinned this boundary to keep a Metal kernel under the
+    // 31-buffer hard cap (ru_limit_bufs_node).  Un-realizing it would re-fuse
+    // the over-budget kernel -> Metal compile error.  Never remove it.
+    if (RU_REALIZE_MAP[i].pinned) continue;
+    // THVM_FUSE_MATMUL_EPILOGUE: un-realize an OPT_TC matmul REDUCE whose only
+    // consumer is an elementwise epilogue chain (rb_matmul_epilogue_fusable),
+    // so its REDUCE subtree inlines into that consumer's store -- the codegen
+    // epilogue then emits one fused TC kernel.  A matmul reduce is a SEED
+    // boundary (bufferize_classify sets BUFFERIZE_NODES[].realized for it), so
+    // this clause runs BEFORE the seed-boundary keep below; the elementwise
+    // recompute path only un-realizes WALK-derived boundaries.  Metal-only:
+    // the epilogue is emittable solely by the bf16 tiled emitter (render_uop.c
+    // gates `c_is_bf`); on CPU/CUDA keep the matmul a realized BLAS operand.
+    if (ru_fuse_epilogue_on() && ru_fuse_matmul_input_target_ok()
+        && rb_matmul_epilogue_fusable(i)
+        && !rb_src_has_live_reduce(BUFFERIZE_NODES[i].loc, 0)) {
       RU_REALIZE_MAP[i].realized_full    = 0;
       RU_REALIZE_MAP[i].realized_partial = 0;
+      continue;
     }
+    if (BUFFERIZE_NODES[i].realized) continue;          // seed boundary: keep
+    u8 op = BUFFERIZE_NODES[i].op;
+    int ew = uop_is_unary_elementwise(op)
+          || uop_is_binary_elementwise(op)
+          || uop_is_ternary_elementwise(op);
+    if (!ew) continue;                                  // only removable elementwise
+    // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise feeding ONE matmul
+    // reduce is fused INTO that matmul (the TC A-staging computes it inline),
+    // so we DON'T keep it realized.  Otherwise the GEMM-operand rule holds.
+    // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise producer feeding
+    // ONE matmul reduce is un-realized and spliced into the matmul's A operand.
+    // The matmul lowering wraps A in RESHAPE({M,K,1})+EXPAND({M,K,N}) -- a
+    // rank-growing movement.  thvm's POSITIONAL ru_build_axis_subst does not
+    // compose its producer->consumer remap up that RESHAPE->EXPAND->MUL->REDUCE
+    // chain, so the producer's own {M,K} RANGE leaves leak into the reduce body
+    // as free LOOP axes -- which the conv-bwd absorb then folds into the reduce
+    // (1-axis K -> 3-axis {M,K,N}, recognise_tc declines, the matmul mis-sums).
+    // The reduce-rebuild below ports tinygrad's exact src.substitute for THIS
+    // rank-grow case: it remaps each leaked producer LOOP range onto the matmul
+    // axis (the reduce K range, or an output M range) of equal extent, keeping
+    // the reduce 1-axis so the TC tiled emitter handles the fused A -- bit-exact
+    // (the producer is evaluated at exactly the (m,k) the matmul iterates).
+    // rb_matmul_input_fusable already guarantees the consumer chain terminates
+    // at a matmul REDUCE (the only shape the remap targets), so the un-realize
+    // is safe.  Default-OFF flag, so the baseline is unaffected.
+    int fuse_mm = (ru_fuse_matmul_input_on() && ru_fuse_matmul_input_target_ok()
+                   && rb_feeds_matmul_reduce(i)
+                   && rb_matmul_input_fusable(i));
+    if (rb_feeds_matmul_reduce(i) && !fuse_mm)
+      continue;                                         // removable=False (GEMM operand)
+    // The matmul-input fuse threads the producer through the matmul-lowering
+    // reshape(+unit axis)+expand(broadcast over the contracted N axis) -- a
+    // benign rank-grow that rb_unsafe_recompute_region conservatively rejects
+    // and a multi-buffer modulation that rb_too_many_buffers would reject.
+    // For this targeted path the inline IS exact (the broadcast N axis is not
+    // read in the matmul's A load), so we skip those two general gates; the
+    // codegen-side detector (rmu_detect_matmul_tc) independently re-validates
+    // the operand shape before it inlines, falling back to the generic
+    // accumulator (still correct) if anything is off.
+    if (!fuse_mm) {
+      if (rb_unsafe_recompute_region(i)) continue;      // movement/broadcast re-index unsafe
+      // tinygrad rangeify.py:85: a node reading more than 3 buffers is kept.
+      if (rb_too_many_buffers(BUFFERIZE_NODES[i].loc))
+        continue;                                       // accessed_buffers > 3
+    }
+    // tinygrad rangeify.py:88-95 buffer_in_reduce: a node whose value fuses
+    // a LIVE reduce is kept (recomputing it re-runs the reduce reading
+    // buffers).
+    if (rb_src_has_live_reduce(BUFFERIZE_NODES[i].loc, 0)) {
+      continue;
+    }
+    RU_REALIZE_MAP[i].realized_full    = 0;
+    RU_REALIZE_MAP[i].realized_partial = 0;
   }
 
   // *** Mirror indexing.py:268: graph_rewrite(pm_apply_rangeify) ***

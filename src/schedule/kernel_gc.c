@@ -28,9 +28,7 @@
 // the kernel's output.
 //
 // Wired into thvm_realize after each user-facing realize so the
-// arena stays bounded across N_STEPS.  Default-on; THVM_KGC=0
-// disables for benchmarks that want the old "leak everything"
-// behaviour.
+// arena stays bounded across N_STEPS.
 
 fn u32 kernel_gc_sweep(Term result) {
   (void)result;
