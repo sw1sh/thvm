@@ -594,7 +594,7 @@ wl-examples-test: $(WL_LIB)
 # late for the Linux glibc headers.
 ZIG          ?= zig
 WL_RES       := $(WL_PACLET)/LibraryResources
-WL_XCC_FLAGS := -std=c11 -O2 -w -D_GNU_SOURCE -I"$(WL_INCLUDE)"
+WL_XCC_FLAGS := -std=c11 -O2 -w -D_GNU_SOURCE $(WL_TRACE_DEF) $(ATP_DEFINES) $(WL_ATP_DEFINES) -I"$(WL_INCLUDE)"
 
 # Per-format runtime blobs: the embedded thvm source is .incbin'd into
 # every per-platform library, and the host object must match the
@@ -621,7 +621,7 @@ wl-mac: $(WL_SRC) $(SRC) $(METAL_LIBPATH) build/thvm_runtime_blob.c
 	clang -fobjc-arc -O2 -arch arm64 -arch x86_64 $(METAL_DEFINES) \
 	  -c -o build/backend_metal_univ.o src/backend/metal/_.m
 	$(CC) -std=c11 -O2 -w -fPIC -dynamiclib -arch arm64 -arch x86_64 \
-	  -DACCELERATE_NEW_LAPACK $(WL_TRACE_DEF) -DTHVM_HAS_METAL \
+	  -DACCELERATE_NEW_LAPACK $(WL_TRACE_DEF) $(ATP_DEFINES) $(WL_ATP_DEFINES) -DTHVM_HAS_METAL \
 	  -I"$(WL_INCLUDE)" \
 	  -o $(WL_RES)/MacOSX-ARM64/THVMLink.dylib \
 	  $(WL_SRC) build/thvm_runtime_blob.c build/backend_metal_univ.o \
