@@ -1,6 +1,6 @@
 // test_gc_node_size.c -- a Cheney collection moves every live node whole.
 //
-// gc_node_size tells the evacuator how many cells a node owns; a tag it has no
+// term_cells tells the evacuator how many cells a node owns; a tag it has no
 // case for is treated as an atom and left in from-space.  Each case roots one
 // node, or one wnf frame through WNF_LAST_STACK, collects, overwrites the
 // from-space it left, and reads the moved cells.

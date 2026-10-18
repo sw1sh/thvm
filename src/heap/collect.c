@@ -128,124 +128,17 @@ fn int gc_enabled(void)      { return GC_ENABLED; }
 fn u64 gc_from_start(void)   { return GC_FROM_START; }
 fn u64 gc_from_end(void)     { return GC_FROM_END; }
 
-// Cells the node at term_val(t) owns; 0 for an atom.  A live node of a tag or
-// opcode with no case is never evacuated and reads garbage after the swap:
-// every tag and every assigned opcode below UOP_COUNT has one (44-50 are
-// unassigned).  A wnf frame owns the cells of the node it points at.
-_Static_assert(TAG_COUNT == 35, "a new tag needs its heap size in gc_node_size");
-_Static_assert(UOP_COUNT == 55, "a new UOp opcode needs its heap size in gc_node_size");
-static u32 gc_node_size(Term t) {
-  u8  tag = term_tag(t);
-  u64 loc = term_val(t);
-  switch (tag) {
-    case TAG_NUM: case TAG_TEN: case TAG_REF: case TAG_ERA:
-    case TAG_ANY: case TAG_FVR:
-      return 0;
-    case TAG_LAM: case TAG_DUP: case TAG_INC: case TAG_BRI:
-    case TAG_VAR: case TAG_BJ0: case TAG_BJ1:
-      return 1;
-    case TAG_DP0: case TAG_DP1:
-      return (term_ext(t) & DUP_GRAD_FLAG) ? 3 : 1;
-    case TAG_APP: case TAG_SUP: case TAG_OP2: case TAG_MAT:
-    case TAG_ALO: case TAG_EQL: case TAG_AND: case TAG_OR:
-    case TAG_WHEN: case TAG_ANN:
-    case TAG_F_OP2_NUM: case TAG_F_EQL_R:
-      return 2;
-    case TAG_DSU: case TAG_DDU:
-    case TAG_F_DSU_LAB: case TAG_F_DDU_LAB:
-      return 3;
-    case TAG_F_UOP_CHILD:                     // ext bits 8..15: the parent opcode
-      return gc_node_size(term_new(0, TAG_UOP, (term_ext(t) >> 8) & 0xFF, loc));
-    case TAG_CTR: {
-      Term n_cell = HEAP[loc];
-      if (term_tag(n_cell) != TAG_NUM) return 0;
-      return 1 + (u32)term_val(n_cell);
-    }
-    case TAG_PRI: {
-      if (loc == 0) return 0;
-      Term cnt = HEAP[loc];
-      if (term_tag(cnt) != TAG_NUM) return 0;
-      return 1 + (u32)term_val(cnt);
-    }
-    case TAG_UOP: {
-      u32 op = term_ext(t);
-      switch (op) {
-        case UOP_CONST: return 1;
-        case UOP_KERNEL: case UOP_ASSIGN: return 2;
-        case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
-        case UOP_LOG2: case UOP_SQRT: case UOP_LOAD:
-          return 1;
-        case UOP_COPY: return 2;              // [src, NUM(device+1)]
-        case UOP_ADD: case UOP_MUL:
-        case UOP_CMPLT: case UOP_CMPEQ:
-          return 2;
-        // CAST/BITCAST = [src, NUM(dst_dtype)]; INDEX_E/AFTER and the integer
-        // ALU ops = two srcs.
-        case UOP_CAST: case UOP_BITCAST:
-        case UOP_INDEX_E: case UOP_AFTER:
-        case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-        case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR:
-        case UOP_IXOR: case UOP_ISHR:
-          return 2;
-        case UOP_INVALID:     return 1;       // [NUM(0)]
-        case UOP_DEFINE_VAR:  return 1;       // [NUM(packed_extent)]
-        case UOP_DETACH:      return 1;       // [src]
-        case UOP_RANGE:                       // [NUM(axis_id), NUM(axis_type), NUM(extent)]
-        case UOP_IWHERE: case UOP_STORE:      // [cond,then,else] / [buf,addr,value]
-        case UOP_OPT:                         // [target, NUM(kind), NUM(factor)]
-        case UOP_GATHER:                      // [src, idx, NUM(dim)]
-          return 3;
-        // [base, idx, src, NUM(dim), NUM(kind), NUM(include_self)]
-        case UOP_SCATTER:
-          return 6;
-        case UOP_FLIP:   return 2;
-        // [src, NUM(kind), NUM(n_axes), NUM(axis_0), ...]
-        case UOP_REDUCE: {
-          Term n_cell = HEAP[loc + 2];
-          if (term_tag(n_cell) != TAG_NUM) return 0;
-          return 3 + (u32)term_val(n_cell);
-        }
-        case UOP_RESHAPE: case UOP_EXPAND: case UOP_PERMUTE: {
-          Term ndim_cell = HEAP[loc + 1];
-          if (term_tag(ndim_cell) != TAG_NUM) return 0;
-          return 2 + (u32)term_val(ndim_cell);
-        }
-        case UOP_PAD: case UOP_SHRINK: {
-          Term ndim_cell = HEAP[loc + 1];
-          if (term_tag(ndim_cell) != TAG_NUM) return 0;
-          return 2 + 2 * (u32)term_val(ndim_cell);
-        }
-        // UOP_BUFFER = [NUM(scope), NUM(dtype), NUM(ndim), NUM(instance),
-        //               NUM(d0), ..].
-        case UOP_BUFFER: {
-          Term ndim_cell = HEAP[loc + 2];
-          if (term_tag(ndim_cell) != TAG_NUM) return 0;
-          return 4 + (u32)term_val(ndim_cell);
-        }
-        // UOP_BUFFERIZE = [value, NUM(addrspace), NUM(removable), NUM(n),
-        //                  range_0, .., range_{n-1}].
-        case UOP_BUFFERIZE: {
-          Term n_cell = HEAP[loc + 3];
-          if (term_tag(n_cell) != TAG_NUM) return 0;
-          return 4 + (u32)term_val(n_cell);
-        }
-        default: return 0;
-      }
-    }
-    default: return 0;
-  }
-}
-
 static Term gc_evacuate(Term t, u64 *alloc);
 
-static u64 gc_evacuate_cells(u64 loc, u32 size, u64 *alloc) {
+// Cells below `first` move as they are.
+static u64 gc_evacuate_cells(u64 loc, u32 size, u32 first, u64 *alloc) {
   u64 dst = *alloc;
   *alloc += size;
   for (u32 i = 0; i < size; i++) {
     HEAP[dst + i] = HEAP[loc + i];
   }
   HEAP[loc] = term_new(0, GC_FWD_TAG, 0, dst);
-  for (u32 i = 0; i < size; i++) {
+  for (u32 i = first; i < size; i++) {
     HEAP[dst + i] = gc_evacuate(HEAP[dst + i], alloc);
   }
   return dst;
@@ -264,7 +157,7 @@ static Term gc_evacuate(Term t, u64 *alloc) {
   // A 0-arg PRI (val 0) owns no cells.
   if (tag == TAG_PRI && loc == 0) return t;
 
-  // Book, permanent-tail and to-space locs never move.
+  // Permanent-tail and to-space locs never move.
   if (loc < GC_FROM_START || loc >= GC_FROM_END) return t;
 
   Term cell0 = HEAP[loc];
@@ -273,10 +166,13 @@ static Term gc_evacuate(Term t, u64 *alloc) {
     return term_new(term_sub_get(t), tag, term_ext(t), new_loc);
   }
 
-  u32 size = gc_node_size(t);
+  u32 size = term_cells(t, HEAP);
   if (size == 0) return t;
 
-  u64 new_loc = gc_evacuate_cells(loc, size, alloc);
+  // An unforced ALO's cell 0 is a book term, its NUM state in cell 1; alo_force
+  // leaves the dyn result and an ERA.
+  u32 first = (tag == TAG_ALO && term_tag(HEAP[loc + 1]) == TAG_NUM) ? 1 : 0;
+  u64 new_loc = gc_evacuate_cells(loc, size, first, alloc);
   return term_new(term_sub_get(t), tag, term_ext(t), new_loc);
 }
 
@@ -331,10 +227,6 @@ static void gc_evacuate_side_tables(u64 *alloc) {
         EXTERN_PIN_HANDLES[i] = gc_evacuate(EXTERN_PIN_HANDLES[i], alloc);
       }
     }
-  }
-  // DEFS hold REF name ids and book terms, which never move.
-  for (u32 i = 0; i < DEFS_CAP; i++) {
-    if (DEFS[i] != 0) DEFS[i] = gc_evacuate(DEFS[i], alloc);
   }
   // WNF_LAST_STACK: the frames a step-limited wnf_n left pending.
   for (u32 i = 0; i < WNF_LAST_STACK_LEN; i++) {

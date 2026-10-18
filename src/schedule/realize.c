@@ -139,8 +139,7 @@ fn void thvm_realize_fwd_reclaim(void) {
 // EXTERN_PINNED (the live WL wrappers) and drops nothing WL still holds, but it
 // compacts the heap so the next realize's fwd_reclaim free-unpreserved pass can
 // reclaim buffers whose wrappers WL HAS since collected (the manager fired
-// extern_pin_handle_drop).  Safe now that gc_node_size evacuates every UOP op
-// correctly (the CAST/BITCAST fix).  Trigger when metal live bytes have grown
+// extern_pin_handle_drop).  Trigger when metal live bytes have grown
 // past a bound since the last GC (default 512MB; THVM_GC_DEVICE_MB overrides,
 // 0 disables).  Off-Metal thvm_metal_live_bytes() returns 0 -> never fires.
 // `*res_io` rides the GC root set and is re-fetched after the space swap.

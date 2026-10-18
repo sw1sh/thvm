@@ -83,6 +83,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "term/new_pri.c"
 #include "term/new_dsu.c"
 #include "term/new_ddu.c"
+#include "term/cells.c"
 
 // === dtype/ ===
 // dtype info table + element-size primitives + integer-kernel macros.
@@ -138,7 +139,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "book/alloc.c"
 #include "book/read.c"
 #include "book/set.c"
-#include "book/from_dynamic.c"
 
 // === alo/ ===
 // realize uses heap_alloc + book_read + state_push/lookup + term_new_alo;
@@ -148,11 +148,10 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "alo/force.c"
 
 // === term/resolve.c ===
-// Lazy outermost-layer walker (VAR-SUB chain + ALO force).  Comes
-// after alo/ since it calls alo_force.  Used by interact_grad and
-// materialize_expr to surface the outermost structure without
-// firing materialize / kernel / grad.
+// Lazy outermost-layer walker (VAR-SUB chain + ALO force), after alo/ since it
+// calls alo_force; the book snapshot resolves through it.
 #include "term/resolve.c"
+#include "book/from_dynamic.c"
 
 // === view/ ===
 #include "view/shape_numel.c"

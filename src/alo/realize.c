@@ -4,55 +4,6 @@
 // Children are suspended in fresh ALOs rather than realized, so a branch that
 // never fires (a recursive REF, say) never expands.
 
-// Cells per node, as book/from_dynamic.c laid them out (dyn_arity there).
-static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
-  switch (tag) {
-    case TAG_APP: return 2;
-    case TAG_SUP: return 2;
-    case TAG_DUP: return 1;
-    case TAG_OP2: return 2;
-    case TAG_MAT: return 2;
-    case TAG_EQL: return 2;
-    case TAG_AND: return 2;
-    case TAG_OR:  return 2;
-    case TAG_WHEN: return 2;
-    case TAG_DP0: case TAG_DP1: {
-      // A grad cell is [y, gy, target], a plain dup body one cell; each
-      // instance gets its own, so a target VAR rebinds to that instance's LAM.
-      if (ext & DUP_GRAD_FLAG) return 3;
-      return 1;
-    }
-    case TAG_UOP: {
-      switch (ext) {
-        case UOP_CONST:                                    return 1;
-        case UOP_ADD: case UOP_MUL: case UOP_CMPLT:
-        case UOP_CMPEQ:                                    return 2;
-        case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
-        case UOP_LOG2: case UOP_SQRT:                      return 1;
-        // [src, NUM(dst dtype)]: the NUM passes through bare.
-        case UOP_CAST: case UOP_BITCAST:                   return 2;
-        // [src, NUM(kind), NUM(n_axes), NUM(axis_0), ...]
-        case UOP_REDUCE: {
-          Term n_cell = book_read(val + 2);
-          u32 n_axes = (term_tag(n_cell) == TAG_NUM)
-                       ? (u32)term_val(n_cell) : 1;
-          if (n_axes > MAX_DIM) n_axes = MAX_DIM;
-          return 3 + n_axes;
-        }
-        case UOP_LOAD:                                     return 1;
-        case UOP_KERNEL:                                   return 2;
-        // A select (uop_where / uop_iwhere): [cond, then, else].
-        case UOP_IWHERE:                                   return 3;
-        // Every cell, the NUM payload included (NUMs pass through bare).
-        case UOP_GATHER:                                   return 3;
-        case UOP_SCATTER:                                  return 6;
-        default:                                           return 0;
-      }
-    }
-    default: return 0;
-  }
-}
-
 // Both projections of a book dup must share one dyn dup cell, or each fires its
 // own DUP; the key (state_id, book loc) is the same for both.
 
@@ -171,20 +122,6 @@ Term alo_realize(Term book_term, u32 state_id) {
       return term_new(0, dp_tag, ext, new_loc);
     }
 
-    case TAG_CTR: {
-      // [NUM(n), c_0, ..., c_{n-1}]
-      Term n_cell = book_read(val);
-      if (term_tag(n_cell) != TAG_NUM) return book_term;
-      u32 n = (u32)term_val(n_cell);
-      u64 new_loc = heap_alloc(1 + n);
-      heap_set(new_loc, n_cell);
-      for (u32 i = 0; i < n; i++) {
-        Term child = book_read(val + 1 + i);
-        heap_set(new_loc + 1 + i, alo_suspend_child(child, state_id));
-      }
-      return term_new(0, TAG_CTR, ext, new_loc);
-    }
-
     case TAG_LAM: {
       u64 new_loc = heap_alloc(1);
       u32 body_state = alo_state_push(state_id, val, new_loc);
@@ -200,7 +137,7 @@ Term alo_realize(Term book_term, u32 state_id) {
 
     default:
     default_node: {
-      u32 ar = alo_node_arity(tag, ext, val);
+      u32 ar = term_cells(book_term, BOOK_HEAP);
       if (ar == 0) return book_term;
       u64 new_loc = heap_alloc(ar);
       for (u32 i = 0; i < ar; i++) {

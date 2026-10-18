@@ -6283,19 +6283,19 @@ static Term materialize_strip_detach(Term term) {
 fn Term thvm_materialize(Term term) {
   term = materialize_strip_detach(term);
   HOT_MATERIALIZE_CALLS++;
-  // REF / ALO transparency: jump (don't unfold) into the body cell.
-  // term_resolve walks VAR-SUB and ALO chains -- pure pointer hops,
-  // no heap allocation.  TAG_REF jumps directly to DEFS[name], the
-  // book-heap pointer registered by TDef -- still no allocation, no
-  // rewriting of the original term, just reading where the body
-  // lives.  Cap at 8 hops as a safety net against degenerate
-  // self-referencing REF chains; in practice 1-2 suffices.
+  // A REF to an atom def (a TEN, a NUM, another REF) stands for it.  Any other
+  // def is a book node, compiled when wnf unfolds it: its cells index
+  // BOOK_HEAP, and a book template is never rewritten in place.  The cap stops
+  // a cycle of REF aliases.
   for (int hops = 0; hops < 8; hops++) {
     Term resolved = term_resolve(term);
     if (term_tag(resolved) == TAG_REF) {
       u32 name = term_ext(resolved);
       Term book = (name < DEFS_CAP) ? DEFS[name] : 0;
-      if (book == 0) break;
+      if (book == 0 || term_cells(book, BOOK_HEAP) != 0) {
+        term = resolved;
+        break;
+      }
       term = book;
       continue;
     }
