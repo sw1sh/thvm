@@ -33,11 +33,6 @@
 #include "test.h"
 #include "tu_probes.h"
 
-static int interp_mode(void) {
-  char const *e = getenv("THVM_CPU_JIT_WARMUP");
-  return e != NULL && atoi(e) > 1;
-}
-
 static u32 mk(u32 dtype, u32 ndim, u32 const *dims, void const *data) {
   Shape s = {0};
   s.ndim = ndim;
@@ -150,7 +145,7 @@ static void check_bytes(void const *got, void const *want, u32 n,
 static u32 DISPATCHED = 0;
 
 static void check_dispatch(u32 k0) {
-  u32 want = interp_mode() ? KDISPATCH_INTERPRETER : KDISPATCH_JIT;
+  u32 want = cpu_jit_walker_only() ? KDISPATCH_INTERPRETER : KDISPATCH_JIT;
   for (u32 k = k0; k < KERNELS_NEXT; k++) {
     u32 kind = cg_kernel_dispatch_kind(k);
     if (kind == KDISPATCH_NONE

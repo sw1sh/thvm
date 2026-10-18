@@ -328,13 +328,6 @@ static Term f64_buffer(f64 const *v) {
   return term_new(0, TAG_TEN, DT_FP64, tid);
 }
 
-// A kernel runs compiled from the fire at which its source has fired
-// THVM_CPU_JIT_WARMUP times, on every JIT path; each kernel here fires
-// once.
-static int jit_may_compile(void) {
-  return cpu_jit_warmup() <= 1;
-}
-
 static void check_realized(char const *name, Term expr, f64 want) {
   TEST_BEGIN(name);
   u32  k0   = KERNELS_NEXT;
@@ -352,7 +345,7 @@ static void check_realized(char const *name, Term expr, f64 want) {
     }
     CHECK(got == want);
   }
-  if (jit_may_compile()) {
+  if (!cpu_jit_walker_only()) {
     for (u32 kid = k0; kid < k1; kid++) {
       CHECK_EQ(cg_kernel_dispatch_kind(kid), KDISPATCH_JIT);
     }

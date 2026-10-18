@@ -226,7 +226,7 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 |---|---|---|
 | `DEV` | `cpu`\|`cuda`\|`metal` | system |
 | `THVM_THREADS` / `AOT_THREADS` | Worker / AOT thread counts | auto / built-in |
-| `THVM_CPU_JIT_WARMUP` | CPU clang-JIT warmup | 0 |
+| `THVM_CPU_JIT_WARMUP` | Nonzero: every CPU kernel runs in the UOp walker | 0 |
 | `THVM_CUDA_FAST_MATH` | `--use_fast_math` | off |
 | `THVM_CUDA_SYNC` | Synchronize after each kernel | on |
 | `THVM_CUDA_JIT_GRAPH` / `THVM_CUDA_KE_CACHE` / `THVM_CUDA_DISK_CACHE` / `THVM_CUDA_CACHE_DIR` | CUDA graph cache / KE cache / disk cache / dir | off / off / off / computed |

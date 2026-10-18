@@ -61,13 +61,13 @@ class BothRoutes:
         return out
 
     def test_c_jit_route(self):
-        # Warmup 0 compiles each kernel on its first fire.
+        # THVM_CPU_JIT_WARMUP=0 compiles each kernel on its first fire.
         out = self._run_routes("0")
         walked = re.findall(r"^uop_walk: ", out.stderr, re.M)
         self.assertEqual(walked, [], "a kernel fell to the walker: the JIT did not run")
 
     def test_uop_walker_route(self):
-        # A warmup the JIT never reaches: every kernel runs on the UOp walker.
+        # THVM_CPU_JIT_WARMUP set: every kernel runs on the UOp walker.
         out = self._run_routes("1000000000")
         walked = re.findall(r"^uop_walk: n_inputs=\d+ root_op=\d+ rc=(\d)$", out.stderr, re.M)
         self.assertGreater(len(walked), len(self.ROUTE_CASES), "the walker did not execute the kernels")

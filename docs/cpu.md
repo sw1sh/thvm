@@ -97,9 +97,9 @@ through `Backend.dispatch_kernel`. The body lives at the bottom of
 2. `cpu_blas_dispatch(ke, ...)` first. On a non-zero return, record
    the route via `cg_profile_record(kid, blas_kind, ...)` and stop.
 3. `cpu_jit_dispatch(ke, ...)`. On a 1 return, record
-   `KDISPATCH_JIT` and stop. It declines during warmup
-   (`THVM_CPU_JIT_WARMUP`, default 0 = compile on first fire) and
-   for kernels it cannot render or compile.
+   `KDISPATCH_JIT` and stop. It declines every kernel when
+   `THVM_CPU_JIT_WARMUP` is set (any nonzero value; unset compiles on
+   the first fire), and kernels it cannot render or compile.
 4. `cpu_uop_walk(ke, ...)`. On success, record
    `KDISPATCH_INTERPRETER` and stop.
 5. Otherwise record `KDISPATCH_NONE` and return -1:
@@ -217,18 +217,14 @@ CPU JIT path, end to end:
    before it passes half full (`cpu_jit_claim_slot`), so every kernel a
    process compiles keeps a slot; a fixed 256-slot table used to leave
    each kernel past its capacity on the UOp walker.
-5. On miss, the warmup gate counts the fire in the key's slot and,
-   until the count reaches `THVM_CPU_JIT_WARMUP`, returns 0 so the
-   UOp walker runs the kernel. Only past the gate does
-   `cpu_jit_build` reuse `/tmp/thvm_jit_<hash>_<opt>.dylib` when it
+5. On miss, `cpu_jit_build` reuses `/tmp/thvm_jit_<hash>_<opt>.dylib` when it
    is on disk, or call `cg_render_uop_kernel_c_root(store_root,
    "k", fp)` to render the source, write it to
    `/tmp/thvm_jit_<hash>.c`, compile it, and load the dylib's `k`
    symbol. The slot is populated and
    returned. The batched precompile at realize
-   (`cpu_jit_precompile_range`) passes the same gate: it builds only
-   kernels whose next fire reaches the threshold, so a threshold no
-   run reaches keeps every kernel on the walker.
+   (`cpu_jit_precompile_range`) builds nothing under
+   `THVM_CPU_JIT_WARMUP`, so that knob keeps every kernel on the walker.
 6. A view-contiguity check rejects strided inputs that the renderer
    doesn't have stride logic for; on rejection `cpu_jit_dispatch`
    returns 0 and the dispatcher falls through.
@@ -243,8 +239,8 @@ The cache is keyed by rendered source, so two kernels with identical
 bodies share one slot and one `.dylib`, and a kernel whose source
 carries a different constant (a decode step's position, say) gets its
 own.  A persistent `/tmp/thvm_jit_<hash>_<opt>.dylib` is honored across
-processes once the kernel is past the warmup gate (a stat-only
-freshness check; no source-content verification).
+processes (a stat-only freshness check; no source-content
+verification).
 
 ## Comparison with Metal
 

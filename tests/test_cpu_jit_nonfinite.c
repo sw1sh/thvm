@@ -15,9 +15,9 @@
 //
 // Each case realizes on the CPU and checks the values and the signs of
 // zeros, compiles the kernel's JIT source with the JIT's own compiler and
-// flags (cpu_jit_compile_shared), and, whenever the JIT may compile it
-// (THVM_CPU_JIT_WARMUP at most 1), checks that the kernel dispatched
-// through the JIT.  The literal checks render f64 constants through the
+// flags (cpu_jit_compile_shared), and, unless THVM_CPU_JIT_WARMUP sends
+// every kernel to the walker, checks that the kernel dispatched through the
+// JIT.  The literal checks render f64 constants through the
 // C emit.
 
 #include "../src/thvm.c"
@@ -46,13 +46,6 @@ static Term f64_buffer(f64 const *v) {
   u32 tid = tensor_alloc(&CPU_BACKEND, s, DT_FP64);
   CPU_BACKEND.buf_write(TENS[tid].buf_id, v, 4 * sizeof(f64));
   return term_new(0, TAG_TEN, DT_FP64, tid);
-}
-
-// A kernel runs compiled from the fire at which its source has fired
-// THVM_CPU_JIT_WARMUP times, on every JIT path; each kernel here fires
-// once.
-static int jit_may_compile(void) {
-  return cpu_jit_warmup() <= 1;
 }
 
 static int compiles_on_jit(KernelEntry const *ke) {
@@ -99,7 +92,7 @@ static void check_case(char const *name, Term expr, f64 const *want) {
   }
   for (u32 kid = k0; kid < k1; kid++) {
     CHECK(compiles_on_jit(&KERNELS[kid]));
-    if (jit_may_compile()) {
+    if (!cpu_jit_walker_only()) {
       CHECK_EQ(cg_kernel_dispatch_kind(kid), KDISPATCH_JIT);
     }
   }

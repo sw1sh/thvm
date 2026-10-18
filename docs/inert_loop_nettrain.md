@@ -174,9 +174,9 @@ kernel void k(
     device const float *in1 [[ buffer(2) ]], ...
 ```
 
-On CPU the compiled artifact is a native dylib: hot kernels cross a fire-count
-warmup gate and `clang -O3` compiles the rendered C into a JIT dylib under
-`/tmp`, whose path `TKernelJitDylibPath[kid]` reports.
+On CPU the compiled artifact is a native dylib: on a kernel's first fire
+`clang -O3` compiles the rendered C into a JIT dylib under `/tmp`, whose path
+`TKernelJitDylibPath[kid]` reports.
 
 So one inert term lowers, through the same surface, to C99, Metal MSL, and native
 machine code.

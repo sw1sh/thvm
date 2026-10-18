@@ -54,8 +54,8 @@ update the matching row here in the same change.
 | Knob | Default | Effect |
 | --- | --- | --- |
 | `THVM_THREADS` | (impl) | CPU worker-thread count. |
-| `THVM_CPU_JIT_WARMUP` | 0 | The fire at which a kernel source first runs compiled: with W, fires 1 to W-1 run in the UOp walker and fire W compiles (0 and 1 compile on the first fire). The count gates every JIT path: the batched precompile at realize (`THVM_CPU_JIT_PARALLEL`), the in-memory compile cache and the dylibs cached under `/tmp`. A threshold no run reaches, `THVM_CPU_JIT_WARMUP=1000000000`, forces the walker for every kernel the JIT would take, however warm the caches are; kernels that match a BLAS pattern still dispatch to cblas unless `THVM_CPU_BLAS_DISABLE=1`. Read once per process. |
-| `THVM_CPU_JIT_PARALLEL` | on | Batched cold-start precompile: at realize, every kernel whose next fire passes `THVM_CPU_JIT_WARMUP` compiles into one combined dylib before the dispatch fires it. `0` leaves each kernel to compile at its own fire. |
+| `THVM_CPU_JIT_WARMUP` | 0 | Any nonzero value runs every kernel the JIT would take in the UOp walker, however warm the caches are: the batched precompile at realize (`THVM_CPU_JIT_PARALLEL`) builds nothing, and the dispatch neither compiles nor loads a dylib cached under `/tmp`. Kernels that match a BLAS pattern still dispatch to cblas unless `THVM_CPU_BLAS_DISABLE=1`. Unset or 0, a kernel compiles on its first fire. Walker-mode test runs set `1000000000`. Read once per process. |
+| `THVM_CPU_JIT_PARALLEL` | on | Batched cold-start precompile: at realize, every kernel the JIT takes compiles into one combined dylib before the dispatch fires it (none under `THVM_CPU_JIT_WARMUP`). `0` leaves each kernel to compile at its own fire. |
 | `THVM_CPU_CC` | `$CC`, else clang / cc / gcc | C compiler for CPU JIT kernels (clang-only flags are added only for clang). |
 | `THVM_CPU_JIT_VERBOSE` | off | Show the C compiler's diagnostics when a JIT compile fails (a failed kernel runs in the interpreter; thvm warns once). |
 | `THVM_CPU_UOP_WALK_TRACE` | off | Trace each UOp-walk entry (lift outcome + root op). |

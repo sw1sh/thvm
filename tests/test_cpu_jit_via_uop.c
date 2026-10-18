@@ -1,9 +1,6 @@
-// test_cpu_jit_via_uop.c - F6 integration test
-//
-// Fires a CPU JIT-eligible kernel enough times to cross the warmup
-// threshold (CPU_JIT_WARMUP=5), validating that cpu_jit_dispatch's
-// new render_uop_c path produces correct output for kernels that
-// actually compile through clang -shared and load via dlopen.
+// test_cpu_jit_via_uop.c - kernels the CPU JIT renders (render_uop_c),
+// compiles with clang -shared and loads via dlopen produce correct output,
+// fired repeatedly on fresh graphs.
 //
 // Skips the test entirely when no JIT compile occurs (the path was
 // stat-cached from a prior run, or a system without clang).
@@ -23,9 +20,8 @@ int main(void) {
   // Best-effort; missing files are fine.
   system("rm -f /tmp/thvm_jit_*.dylib /tmp/thvm_jit_*.c 2>/dev/null");
 
-  // thvm_init/free resets cpu_jit_cache (incl fire_count) so we
-  // need ONE init for the whole loop -- fire_count must persist
-  // across fires to cross CPU_JIT_WARMUP=5.
+  // thvm_init/free reset the JIT cache: one init for the whole loop, so
+  // the fires after the first reuse the cached kernel.
   thvm_init();
 
   Shape s = {0}; s.ndim = 1; s.dims[0] = 32;
@@ -36,9 +32,7 @@ int main(void) {
     expected[i] = src_a[i] + src_b[i];
   }
 
-  // Fire the same logical kernel 10 times. fire_count crosses
-  // CPU_JIT_WARMUP after fire 5; subsequent fires JIT via the
-  // F6 render_uop_c path. Each iteration checks output bit-equal.
+  // Fire the same logical kernel 10 times; each output must be bit-equal.
   for (u32 fire = 0; fire < 10; fire++) {
     u32 ta = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
     u32 tb = tensor_alloc(CURRENT_BACKEND, s, DT_FP32);
@@ -88,8 +82,8 @@ int main(void) {
     s4.dims[3] = 6;
     f32 src[288];
     for (u32 i = 0; i < 288; i++) src[i] = 1.0f;
-    // Fire enough times to cross the JIT warmup threshold.  Each fire
-    // builds a fresh Term graph (heap-resident); thvm_init persists.
+    // Fire ten times, each on a fresh Term graph (heap-resident);
+    // thvm_init persists.
     f32 last_result = 0.0f;
     for (u32 fire = 0; fire < 10; fire++) {
       u32 tx = tensor_alloc(CURRENT_BACKEND, s4, DT_FP32);
