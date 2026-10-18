@@ -134,17 +134,6 @@ def _jit_realize_result(result):
         t.realize()
 
 
-def _jit_result_root(result):
-    """A single result term to anchor the capture's liveness pass.  The
-    common JIT case returns one Tensor; multi-tensor returns are all
-    realized above (so their output buffers exist) and the first anchors
-    the liveness root -- enough to keep the captured graph alive."""
-    leaves = _jit_result_tensors(result)
-    if leaves:
-        return int(leaves[0].term)
-    return 0
-
-
 def TinyJit(fn):
     """Decorator: capture the wrapped function's kernel sequence on first
     call, replay on each subsequent call.  Inputs are passed as fresh
@@ -196,15 +185,10 @@ def TinyJit(fn):
             # (tinygrad realizes params here too, jit.py:284).
             _jit_realize_result(result)
         finally:
-            # End capture WITH the result root so the replay-skip liveness
-            # pass (jit_capture_finalize) knows the result buffer is
-            # observably needed -- otherwise EVERY dispatch gets marked
-            # replay_skip=1 and replays do zero work.
-            root = _jit_result_root(result)
-            if root:
-                _TH.jit_end_with_result(root)
-            else:
-                _TH.jit_end()
+            # End capture WITH every result root: the replay-skip liveness
+            # pass (jit_capture_finalize) replays only the dispatches a
+            # root needs, so an undeclared output would stay stale.
+            _TH.jit_end([t.term for t in _jit_result_tensors(result)])
         # Declare the input baseline for replay rebinding.
         _TH.jit_set_inputs(slot, input_ids)
         state["slot"] = slot

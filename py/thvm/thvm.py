@@ -115,8 +115,7 @@ _reclaim = _bind("py_reclaim", None, ctypes.POINTER(c_uint64), c_uint32)
 _reclaim_due = _bind("py_reclaim_due", c_int32, c_int32)
 _buf_live_count = _bind("py_buf_live_count", c_uint32)
 _jit_begin = _bind("py_jit_begin", c_uint32)
-_jit_end = _bind("py_jit_end", None)
-_jit_end_with_result = _bind("py_jit_end_with_result", None, c_uint64)
+_jit_end = _bind("py_jit_end", None, ctypes.POINTER(c_uint64), c_uint32)
 _jit_replay = _bind("py_jit_replay", c_uint32, c_uint32)
 _jit_set_inputs = _bind("py_jit_set_inputs", None, c_uint32,
                         ctypes.POINTER(c_uint32), c_uint32)
@@ -505,8 +504,9 @@ class Thvm:
 
     # ---- JIT capture / replay (TinyJit) ----
     def jit_begin(self) -> int:       return int(_jit_begin())
-    def jit_end(self) -> None:        _jit_end()
-    def jit_end_with_result(self, root: int) -> None: _jit_end_with_result(c_uint64(root))
+    def jit_end(self, roots=()) -> None:
+        n = len(roots)
+        _jit_end((c_uint64 * n)(*[int(r) for r in roots]) if n else None, c_uint32(n))
     def jit_replay(self, s: int) -> int: return int(_jit_replay(c_uint32(s)))
     def jit_set_inputs(self, s: int, ids: list[int]) -> None:
         n = len(ids)
