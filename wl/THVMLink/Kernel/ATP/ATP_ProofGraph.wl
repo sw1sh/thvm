@@ -928,7 +928,7 @@ cplVarQ[v_, varSyms_] := MatchQ[v, _Symbol] && (MemberQ[varSyms, v] || atpXVarQ[
 cplCanonVars[expr_, varSyms_] := cplCanonVars[expr, varSyms] =
     Block[{occ},
         occ = DeleteDuplicates @ Cases[expr, v_Symbol /; cplVarQ[v, varSyms], {0, Infinity}, Heads -> True];
-        expr /. MapThread[Rule, {occ, Table[Symbol["cplV" <> ToString[i]], {i, Length[occ]}]}]
+        expr /. MapThread[Rule, {occ, Table[Symbol["WolframInstitute`THVMLink`ATP`Private`cplV" <> ToString[i]], {i, Length[occ]}]}]
     ]
 
 (* True iff the two equation lists are equal up to a side swap and
