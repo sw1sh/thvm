@@ -10,9 +10,9 @@ issue from the memory leak).
 
 Memory stays flat because every live Tensor pins its term and the loop
 calls thvm's cross-step buffer reclaim each step (GlobalCounters.reset()
-triggers it).  Run with THVM_GC=0 so raw term ids never move:
+triggers it):
 
-  THVM_GC=0 THVM_MAX_BUF_BYTES=0 DEV=cuda STEPS=70 BS=128 \
+  THVM_MAX_BUF_BYTES=0 DEV=cuda STEPS=70 BS=128 \
       python3 py/examples/beautiful_mnist_train.py
 """
 from __future__ import annotations
@@ -113,8 +113,8 @@ def main():
 
     # JIT path: pre-allocate stable input buffers (X_buf / Y_buf), wrap
     # the step in TinyJit, .assign fresh data each iter.  Disable with
-    # THVM_JIT=0 to fall back to per-step graph rebuild.
-    _use_jit = os.environ.get("THVM_JIT", "1") != "0"
+    # JIT=0 to fall back to per-step graph rebuild.
+    _use_jit = getenv("JIT", 1) != 0
     X_buf = Y_buf = step_fn = None
     if _use_jit:
         from thvm import TinyJit

@@ -52,6 +52,14 @@ static Term lift_input_buffer(KernelEntry const *ke, u32 slot) {
   return uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype, 1, dummy, inst);
 }
 
+// Package the unified-rangeify pass's store_root for a kernel entry
+// into a UOp DAG root suitable for cg_render_uop_kernel.  The lifter
+// today is a thin short-circuit -- it looks up the unified pass's
+// per-kernel output and wraps it as a KernelUopLift; the renderer /
+// DAG-side encoder / cpu_uop_walk all consume the result.
+//
+// kernel_lift_to_uop reserves out->in_bufs for every input; a caller that
+// owns `out` releases it with kernel_lift_release.
 fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   if (ke == NULL || out == NULL) return 0;
   // Look up the UOP_STORE the rangeify_unified pass emitted for this

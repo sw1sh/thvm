@@ -1228,17 +1228,13 @@ int main(void) {
       CHECK_EQ(cc, 7);
     }
 
-    // Rule 29: gate-push for IOR/IXOR/ISHR (only under THVM_FUSE_CONV_BWD).
-    TEST_BEGIN("ported/gate-push-allowlist-respects-env");
-    // Without the env gate the push must NOT fire: keep IXOR over the gate.
-    if (!uop_valid_fold_enabled()) {
+    // Rule 29: an op over an invalid gate is not pushed inside it.
+    TEST_BEGIN("ported/no-gate-push-through-ixor");
+    {
       Term gcond = uop_int_binary(UOP_ILT, ra, rb);
       Term gated29 = uop_iwhere(gcond, ra, uop_invalid());
       Term pushed = uop_int_binary(UOP_IXOR, gated29, c3);
-      // gate stays IWHERE-wrapped only when enabled; disabled -> plain IXOR.
       CHECK_EQ(term_ext(pushed), UOP_IXOR);
-    } else {
-      CHECK_EQ(1, 1);
     }
   }
 

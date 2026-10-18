@@ -10,7 +10,6 @@ on construction and thvm_free() on garbage collection.
 from __future__ import annotations
 
 import ctypes
-import os
 import weakref
 from ctypes import c_char_p, c_float, c_int32, c_uint32, c_uint64, c_void_p
 from pathlib import Path
@@ -35,13 +34,6 @@ if _DYLIB_PATH is None:
     )
 
 _lib = ctypes.CDLL(str(_DYLIB_PATH))
-
-# Whether the loaded library carries the CUDA bridge (`py_cuda_*`).
-# True on the Linux+CUDA build, False on the macOS+Metal build.  The
-# `Cuda` class binds its entry points lazily so importing this module
-# never fails on a host without one backend or the other.
-_HAS_CUDA = hasattr(_lib, "py_cuda_init")
-_HAS_METAL = hasattr(_lib, "py_metal_init")
 
 
 def _bind(name: str, restype, *argtypes):
@@ -151,111 +143,16 @@ _ten_set_grad     = _bind("py_ten_set_grad",     c_int32,  c_uint64, c_uint64)
 
 # ---------------- buffer accessors ----------------
 
-# ---------------- renderer ----------------
-_render_uop_kernel = _bind("py_render_uop_kernel", c_void_p, c_uint64, c_char_p)
-_render_uop_kernel_cuda = _bind(
-    "py_render_uop_kernel_cuda", c_void_p, c_uint64, c_char_p)
+# ---------------- C kernels (the lowered cross-validator) ----------------
 _render_uop_kernel_c = _bind(
     "py_render_uop_kernel_c", c_void_p, c_uint64, c_char_p)
 _string_free = _bind("py_string_free", None, c_void_p)
 _cpu_jit_compile_shared = _bind(
     "py_cpu_jit_compile_shared", ctypes.c_int, c_char_p, c_char_p)
 
-# ---------------- BEAM / autotune surface ----------------
-_kernel_alloc = _bind("py_kernel_alloc", c_uint32)
-_kernel_set_cached_lift = _bind(
-    "py_kernel_set_cached_lift", None,
-    c_uint32, c_uint64, c_uint64,
-    ctypes.POINTER(c_uint64), c_uint32)
-_kernel_opts_propose = _bind(
-    "py_kernel_opts_propose", c_uint32,
-    c_uint32,
-    ctypes.POINTER(ctypes.c_uint8),
-    ctypes.POINTER(ctypes.c_uint8),
-    ctypes.POINTER(c_uint32),
-    c_uint32)
-_kernel_apply_opt = _bind(
-    "py_kernel_apply_opt", c_uint64,
-    c_uint32, ctypes.c_uint8, c_uint32, c_uint32)
 _uop_dag_apply_kopt = _bind(
     "py_uop_dag_apply_kopt", c_uint64,
     c_uint64, ctypes.c_uint8, c_uint32, c_uint32)
-_cuda_dag_dispatch_shape = _bind(
-    "py_cuda_dag_dispatch_shape", c_uint32,
-    c_uint64, ctypes.POINTER(c_uint32), ctypes.POINTER(c_uint32))
-
-
-# ---------------- in-process Metal compile + dispatch ----------------
-# Bound only on the macOS+Metal build; on the Linux+CUDA build the
-# `py_metal_*` symbols are absent and these stay None (the `Metal`
-# class raises a clear error if instantiated there).
-if _HAS_METAL:
-    _metal_init = _bind("py_metal_init", c_int32)
-    _metal_shutdown = _bind("py_metal_shutdown", None)
-
-    _metal_compile_msl = _bind(
-        "py_metal_compile_msl", c_uint32,
-        c_char_p, c_char_p, c_char_p, c_uint32)
-    _metal_pso_max_threads = _bind("py_metal_pso_max_threads", c_uint32, c_uint32)
-    _metal_pso_release = _bind("py_metal_pso_release", None, c_uint32)
-
-    _metal_buf_alloc = _bind("py_metal_buf_alloc", c_uint32, c_uint64)
-    _metal_buf_write = _bind("py_metal_buf_write", c_int32,
-                             c_uint32, c_void_p, c_uint64)
-    _metal_buf_read = _bind("py_metal_buf_read", c_int32,
-                            c_uint32, c_void_p, c_uint64)
-    _metal_buf_release = _bind("py_metal_buf_release", None, c_uint32)
-
-    _metal_dispatch = _bind(
-        "py_metal_dispatch", c_uint64,
-        c_uint32, ctypes.POINTER(c_uint32), c_uint32,
-        c_uint32, c_uint32, c_uint32,
-        c_uint32, c_uint32, c_uint32,
-        c_char_p, c_uint32)
-
-    _metal_dispatch_timed = _bind(
-        "py_metal_dispatch_timed", c_int32,
-        c_uint32, ctypes.POINTER(c_uint32), c_uint32,
-        c_uint32, c_uint32, c_uint32,
-        c_uint32, c_uint32, c_uint32,
-        ctypes.POINTER(c_uint64), ctypes.POINTER(c_uint64),
-        c_char_p, c_uint32)
-
-
-# ---------------- in-process CUDA compile + dispatch ----------------
-# Bound only on the Linux+CUDA build; on the macOS+Metal build the
-# `py_cuda_*` symbols are absent and these stay None.
-if _HAS_CUDA:
-    _cuda_init = _bind("py_cuda_init", c_int32)
-    _cuda_shutdown = _bind("py_cuda_shutdown", None)
-    _cuda_device_sm = _bind("py_cuda_device_sm", c_uint32)
-    _cuda_last_error = _bind("py_cuda_last_error", c_char_p)
-
-    _cuda_compile = _bind(
-        "py_cuda_compile", c_uint32,
-        c_char_p, c_char_p, c_char_p, c_uint32)
-    _cuda_fn_release = _bind("py_cuda_fn_release", None, c_uint32)
-
-    _cuda_buf_alloc = _bind("py_cuda_buf_alloc", c_uint32, c_uint64)
-    _cuda_buf_write = _bind("py_cuda_buf_write", c_int32,
-                            c_uint32, c_void_p, c_uint64)
-    _cuda_buf_read = _bind("py_cuda_buf_read", c_int32,
-                           c_uint32, c_void_p, c_uint64)
-    _cuda_buf_release = _bind("py_cuda_buf_release", None, c_uint32)
-    _cuda_buf_dptr    = _bind("py_cuda_buf_dptr",    c_uint64, c_uint32)
-
-    _cuda_dispatch = _bind(
-        "py_cuda_dispatch", c_uint64,
-        c_uint32, ctypes.POINTER(c_uint32), c_uint32,
-        c_uint32, c_uint32,
-        c_char_p, c_uint32)
-
-    _cuda_dispatch_timed = _bind(
-        "py_cuda_dispatch_timed", c_int32,
-        c_uint32, ctypes.POINTER(c_uint32), c_uint32,
-        c_uint32, c_uint32,
-        ctypes.POINTER(c_uint64), ctypes.POINTER(c_uint64),
-        c_char_p, c_uint32)
 
 
 # ---------------- enum binder ----------------
@@ -324,12 +221,6 @@ class _Constants:
 
 
 K = _Constants
-
-
-DEFAULT_HEADER = """\
-#include <metal_stdlib>
-using namespace metal;
-"""
 
 
 class Thvm:
@@ -698,47 +589,7 @@ class Thvm:
     def term_tag(self, t: Term) -> int: return int(_term_tag(c_uint64(int(t))))
     def term_val(self, t: Term) -> int: return int(_term_val(c_uint64(int(t))))
 
-    # ---------------- BEAM / autotune surface ----------------
-    def kernel_alloc(self) -> int:
-        """Allocate a synthetic KernelEntry slot. Returns kid."""
-        return int(_kernel_alloc())
-
-    def kernel_set_cached_lift(self, kid: int, store_root: Term,
-                               out_buf: Term, in_bufs: list[Term]) -> None:
-        """Populate `KERNELS[kid].cached_lift` from a Python-built UOp DAG.
-        Required before `kernel_opts_propose`.
-        """
-        n = len(in_bufs)
-        arr = (c_uint64 * n)(*[c_uint64(int(b)) for b in in_bufs])
-        _kernel_set_cached_lift(c_uint32(kid),
-                                c_uint64(int(store_root)),
-                                c_uint64(int(out_buf)),
-                                arr, c_uint32(n))
-
-    def kernel_opts_propose(self, kid: int, cap: int = 64) -> list[tuple[int, int, int]]:
-        """Returns list of (op, axis, arg) candidate KOpts from autotune's
-        propose. op values: K.KOP_TC / KOP_LOCAL / KOP_GLOBAL / etc.
-        """
-        ops = (ctypes.c_uint8 * cap)()
-        axes = (ctypes.c_uint8 * cap)()
-        args = (c_uint32 * cap)()
-        n = _kernel_opts_propose(c_uint32(kid), ops, axes, args, c_uint32(cap))
-        return [(int(ops[i]), int(axes[i]), int(args[i])) for i in range(int(n))]
-
-    def kernel_apply_opt(self, kid: int,
-                         opt: tuple[int, int, int]) -> Term | None:
-        """Apply a KOpt to KERNELS[kid]'s UOp DAG. Mutates cached_lift.store_root
-        in place and returns the new root term (so the caller can pass it to
-        render). Returns None on bail (unsupported opt, axis out of range, etc.).
-
-        opt is the (op, axis, arg) triple returned by kernel_opts_propose.
-        """
-        op, axis, arg = opt
-        new_root = _kernel_apply_opt(int(kid), int(op), int(axis), int(arg))
-        if new_root == 0:
-            return None
-        return Term(int(new_root))
-
+    # ---------------- C kernels (the lowered cross-validator) ----------------
     def uop_dag_apply_kopt(self, root: Term,
                            opt: tuple[int, int, int]) -> Term | None:
         """DAG-only variant: apply a KOpt to a free-standing root term,
@@ -750,49 +601,6 @@ class Thvm:
         if new_root == 0:
             return None
         return Term(int(new_root))
-
-    def cuda_dag_dispatch_shape(self, root: Term) -> tuple[int, int] | None:
-        """DAG-derived CUDA launch geometry for `root`.
-
-        Returns (grid, block) -- the 1-D launch shape the structural
-        CUDA renderer decodes from the DAG's axis types (KAX_LOOP ->
-        grid via `tg`, KAX_LOCAL -> block via `tt`).  The autotune
-        sweep needs this for a KOP_LOCAL-split kernel: a flat
-        one-thread-per-output grid cannot express the threadblock
-        tile.  Returns None if the DAG has no axes / overflows / a
-        block dim exceeds the 1024-thread hardware cap.
-        """
-        grid = c_uint32(0)
-        block = c_uint32(0)
-        ok = _cuda_dag_dispatch_shape(c_uint64(int(root)),
-                                      ctypes.byref(grid),
-                                      ctypes.byref(block))
-        if not ok:
-            return None
-        return int(grid.value), int(block.value)
-
-    # ---------------- renderer ----------------
-    def render(self, root: Term, name: str = "k") -> str:
-        """Render the UOp DAG to a Metal Shading Language kernel string."""
-        ptr = _render_uop_kernel(c_uint64(int(root)), name.encode("utf-8"))
-        if not ptr:
-            return ""
-        try:
-            return ctypes.string_at(ptr).decode("utf-8")
-        finally:
-            _string_free(ptr)
-
-    def render_cuda(self, root: Term, name: str = "k") -> str:
-        """Render the UOp DAG to a CUDA `.cu` kernel string
-        (`extern "C" __global__ void k(...)`).
-        """
-        ptr = _render_uop_kernel_cuda(c_uint64(int(root)), name.encode("utf-8"))
-        if not ptr:
-            return ""
-        try:
-            return ctypes.string_at(ptr).decode("utf-8")
-        finally:
-            _string_free(ptr)
 
     def render_c(self, root: Term, name: str = "k") -> str:
         """Render the UOp DAG to a C99 kernel with the CPU-JIT contract
@@ -814,267 +622,3 @@ class Thvm:
         THVM_CPU_JIT_VERBOSE=1 keeps the compiler's diagnostics.
         """
         return bool(_cpu_jit_compile_shared(c_path.encode("utf-8"), so_path.encode("utf-8")))
-
-
-class Metal:
-    """In-process Metal: compile MSL, alloc/write/read buffers, dispatch+time.
-
-    Avoids subprocess overhead per agent iteration. Lifecycle:
-      m = Metal(); m.init()
-      pso = m.compile_msl(src, fn='k')
-      buf = m.buf_alloc(nbytes); m.buf_write(buf, host_bytes)
-      ns = m.dispatch(pso, [buf, ...], grid=(...), threadgroup=(...))
-      m.buf_read(buf, host_bytes)
-      m.shutdown()
-    """
-
-    _initialized = False
-
-    def __init__(self):
-        if not Metal._initialized:
-            ok = _metal_init()
-            if not ok:
-                raise RuntimeError("py_metal_init failed (no Metal device)")
-            Metal._initialized = True
-
-    @staticmethod
-    def shutdown():
-        if Metal._initialized:
-            _metal_shutdown()
-            Metal._initialized = False
-
-    # ---------------- compile ----------------
-    def compile_msl(self, src: str, fn: str = "k") -> int:
-        """Returns a 1-based PSO handle. Raises RuntimeError on compile error."""
-        err = ctypes.create_string_buffer(512)
-        h = _metal_compile_msl(src.encode("utf-8"), fn.encode("utf-8"),
-                               err, c_uint32(512))
-        if h == 0:
-            raise RuntimeError(f"compile_msl: {err.value.decode('utf-8', 'replace')}")
-        return int(h)
-
-    def pso_max_threads(self, pso: int) -> int:
-        return int(_metal_pso_max_threads(c_uint32(pso)))
-
-    def pso_release(self, pso: int) -> None:
-        _metal_pso_release(c_uint32(pso))
-
-    # ---------------- buffers ----------------
-    def buf_alloc(self, nbytes: int) -> int:
-        h = _metal_buf_alloc(c_uint64(int(nbytes)))
-        if h == 0:
-            raise RuntimeError(f"buf_alloc({nbytes}) failed")
-        return int(h)
-
-    def buf_write(self, handle: int, data: bytes) -> None:
-        ptr = ctypes.c_char_p(bytes(data))
-        ok = _metal_buf_write(c_uint32(handle), ptr, c_uint64(len(data)))
-        if not ok:
-            raise RuntimeError(f"buf_write({handle}, {len(data)}b) failed")
-
-    def buf_write_array(self, handle: int, np_array) -> None:
-        """numpy array -> buffer (zero-copy where possible via ctypes)."""
-        import numpy as np
-        arr = np.ascontiguousarray(np_array)
-        nbytes = arr.nbytes
-        ok = _metal_buf_write(c_uint32(handle),
-                              arr.ctypes.data_as(c_void_p),
-                              c_uint64(nbytes))
-        if not ok:
-            raise RuntimeError(f"buf_write_array({handle}, {nbytes}b) failed")
-
-    def buf_read_array(self, handle: int, shape, dtype):
-        """Returns a numpy array of given shape+dtype filled from the buffer."""
-        import numpy as np
-        arr = np.empty(shape, dtype=dtype)
-        ok = _metal_buf_read(c_uint32(handle),
-                             arr.ctypes.data_as(c_void_p),
-                             c_uint64(arr.nbytes))
-        if not ok:
-            raise RuntimeError(f"buf_read_array({handle}, {arr.nbytes}b) failed")
-        return arr
-
-    def buf_release(self, handle: int) -> None:
-        _metal_buf_release(c_uint32(handle))
-
-    # ---------------- dispatch ----------------
-    def dispatch(self, pso: int, bufs, *, grid, threadgroup) -> int:
-        """Run one kernel; return wall ns (0 on error)."""
-        n = len(bufs)
-        arr = (c_uint32 * n)(*[c_uint32(int(h)) for h in bufs])
-        gx, gy, gz = grid
-        tx, ty, tz = threadgroup
-        err = ctypes.create_string_buffer(256)
-        ns = _metal_dispatch(c_uint32(pso), arr, c_uint32(n),
-                             c_uint32(gx), c_uint32(gy), c_uint32(gz),
-                             c_uint32(tx), c_uint32(ty), c_uint32(tz),
-                             err, c_uint32(256))
-        if ns == 0:
-            raise RuntimeError(f"dispatch: {err.value.decode('utf-8', 'replace')}")
-        return int(ns)
-
-    def dispatch_timed(self, pso: int, bufs, *, grid, threadgroup):
-        """Run one kernel; return (wall_ns, gpu_ns)."""
-        n = len(bufs)
-        arr = (c_uint32 * n)(*[c_uint32(int(h)) for h in bufs])
-        gx, gy, gz = grid
-        tx, ty, tz = threadgroup
-        wall = c_uint64(0)
-        gpu = c_uint64(0)
-        err = ctypes.create_string_buffer(256)
-        ok = _metal_dispatch_timed(
-            c_uint32(pso), arr, c_uint32(n),
-            c_uint32(gx), c_uint32(gy), c_uint32(gz),
-            c_uint32(tx), c_uint32(ty), c_uint32(tz),
-            ctypes.byref(wall), ctypes.byref(gpu),
-            err, c_uint32(256))
-        if not ok:
-            raise RuntimeError(f"dispatch_timed: {err.value.decode('utf-8', 'replace')}")
-        return int(wall.value), int(gpu.value)
-
-
-class Cuda:
-    """In-process CUDA: nvrtc-compile a .cu string, alloc/write/read
-    device buffers, dispatch + time.  The CUDA counterpart of `Metal`.
-
-    Lifecycle:
-      c = Cuda()                       # cuInit + context
-      fn = c.compile(cu_src, fn='k')   # nvrtc -> module -> CUfunction
-      buf = c.buf_alloc(nbytes); c.buf_write_array(buf, np_array)
-      ns = c.dispatch(fn, [buf, ...], grid=N, block=B)
-      out = c.buf_read_array(buf, shape, dtype)
-      c.shutdown()
-
-    The dispatch grid is 1-D: the CUDA structural renderer flattens
-    every promoted output LOOP axis onto `tid` (blockIdx.x*blockDim.x +
-    threadIdx.x).  `grid` is the block count and `block` the threads
-    per block; total threads must cover the output element count.
-    """
-
-    _initialized = False
-
-    def __init__(self):
-        if not _HAS_CUDA:
-            raise RuntimeError(
-                "this libthvm_py build has no CUDA bridge "
-                "(rebuild `make py` on a Linux+CUDA host)")
-        if not Cuda._initialized:
-            ok = _cuda_init()
-            if not ok:
-                raise RuntimeError(
-                    f"py_cuda_init failed: "
-                    f"{_cuda_last_error().decode('utf-8', 'replace')}")
-            Cuda._initialized = True
-
-    @staticmethod
-    def available() -> bool:
-        """True iff the loaded library carries the CUDA bridge."""
-        return _HAS_CUDA
-
-    @staticmethod
-    def shutdown():
-        if Cuda._initialized:
-            _cuda_shutdown()
-            Cuda._initialized = False
-
-    def device_sm(self) -> int:
-        """Compute capability as a 2-digit int (V100 -> 70)."""
-        return int(_cuda_device_sm())
-
-    # ---------------- compile ----------------
-    def compile(self, src: str, fn: str = "k") -> int:
-        """nvrtc-compile a .cu source string; return a 1-based function
-        handle.  Raises RuntimeError on compile / load error.
-        """
-        err = ctypes.create_string_buffer(512)
-        h = _cuda_compile(src.encode("utf-8"), fn.encode("utf-8"),
-                          err, c_uint32(512))
-        if h == 0:
-            raise RuntimeError(f"compile: {err.value.decode('utf-8', 'replace')}")
-        return int(h)
-
-    def fn_release(self, fn: int) -> None:
-        _cuda_fn_release(c_uint32(fn))
-
-    # ---------------- buffers ----------------
-    def buf_alloc(self, nbytes: int) -> int:
-        h = _cuda_buf_alloc(c_uint64(int(nbytes)))
-        if h == 0:
-            raise RuntimeError(
-                f"buf_alloc({nbytes}) failed: "
-                f"{_cuda_last_error().decode('utf-8', 'replace')}")
-        return int(h)
-
-    def buf_write(self, handle: int, data: bytes) -> None:
-        ptr = ctypes.c_char_p(bytes(data))
-        ok = _cuda_buf_write(c_uint32(handle), ptr, c_uint64(len(data)))
-        if not ok:
-            raise RuntimeError(f"buf_write({handle}, {len(data)}b) failed")
-
-    def buf_write_array(self, handle: int, np_array) -> None:
-        """numpy array -> device buffer (cuMemcpyHtoD)."""
-        import numpy as np
-        arr = np.ascontiguousarray(np_array)
-        ok = _cuda_buf_write(c_uint32(handle),
-                             arr.ctypes.data_as(c_void_p),
-                             c_uint64(arr.nbytes))
-        if not ok:
-            raise RuntimeError(f"buf_write_array({handle}, {arr.nbytes}b) failed")
-
-    def buf_read_array(self, handle: int, shape, dtype):
-        """Returns a numpy array of given shape+dtype filled from the
-        device buffer (cuMemcpyDtoH).
-        """
-        import numpy as np
-        arr = np.empty(shape, dtype=dtype)
-        ok = _cuda_buf_read(c_uint32(handle),
-                            arr.ctypes.data_as(c_void_p),
-                            c_uint64(arr.nbytes))
-        if not ok:
-            raise RuntimeError(f"buf_read_array({handle}, {arr.nbytes}b) failed")
-        return arr
-
-    def buf_release(self, handle: int) -> None:
-        _cuda_buf_release(c_uint32(handle))
-
-    def buf_dptr(self, handle: int) -> int:
-        return int(_cuda_buf_dptr(c_uint32(handle)))
-
-    # ---------------- dispatch ----------------
-    def dispatch(self, fn: int, bufs, *, grid: int, block: int) -> int:
-        """Launch one kernel on a 1-D grid; return wall ns.
-
-        `grid` is the block count (gridDim.x), `block` the threads per
-        block (blockDim.x).  Buffers bind to the kernel parameters in
-        order: out first, then inputs.
-        """
-        n = len(bufs)
-        arr = (c_uint32 * n)(*[c_uint32(int(h)) for h in bufs])
-        err = ctypes.create_string_buffer(256)
-        ns = _cuda_dispatch(c_uint32(fn), arr, c_uint32(n),
-                            c_uint32(int(grid)), c_uint32(int(block)),
-                            err, c_uint32(256))
-        if ns == 0:
-            raise RuntimeError(f"dispatch: {err.value.decode('utf-8', 'replace')}")
-        return int(ns)
-
-    def dispatch_timed(self, fn: int, bufs, *, grid: int, block: int):
-        """Launch one kernel; return (wall_ns, gpu_ns).
-
-        gpu_ns is true GPU execution time from CUDA events bracketing
-        the launch -- the honest analogue of Metal's GPUEndTime timing.
-        """
-        n = len(bufs)
-        arr = (c_uint32 * n)(*[c_uint32(int(h)) for h in bufs])
-        wall = c_uint64(0)
-        gpu = c_uint64(0)
-        err = ctypes.create_string_buffer(256)
-        ok = _cuda_dispatch_timed(
-            c_uint32(fn), arr, c_uint32(n),
-            c_uint32(int(grid)), c_uint32(int(block)),
-            ctypes.byref(wall), ctypes.byref(gpu),
-            err, c_uint32(256))
-        if not ok:
-            raise RuntimeError(
-                f"dispatch_timed: {err.value.decode('utf-8', 'replace')}")
-        return int(wall.value), int(gpu.value)

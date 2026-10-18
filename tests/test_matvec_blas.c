@@ -1,10 +1,8 @@
 // A vector-times-matrix out{1,N} = a{1,K} @ B{K,N} (the M==1 leading-unit
-// row) must dispatch through cblas_sgemm (M=1), not the slow scalar walk.
-// The lift elides the unit M row so A's address collapses to a bare
-// RANGE(k): the matmul classifier (2 ranges/operand) declines and the
-// gemv emit can't express the {K,N}-matrix orientation, so without the
-// dedicated vecmat classifier the single-token-decode projections + the
-// LM-head matvec ([1,50257] ~40 ms scalar vs ~ms on cblas) run scalar.
+// row) must dispatch through cblas_sgemm (M=1), not the slow scalar walk:
+// the lift elides the unit M row, and the matmul classifier takes the
+// result as a unit-axis GEMM.  The single-token-decode projections and the
+// LM-head matvec ([1,50257] ~40 ms scalar vs ~ms on cblas) are this shape.
 #include "../src/thvm.c"
 #include "test.h"
 static u32 ten(u32 d0, u32 d1, float fill) {
@@ -41,6 +39,6 @@ int main(void){ thvm_init(); int f=0;
          b2, (unsigned long long)g2, b1, (unsigned long long)g1, blm, (unsigned long long)glm);
   if (b2 || b1 || blm) f++;                  // numerics
   if (g2==0 || g1==0 || glm==0) {            // BLAS must fire on each
-    printf("  (BLAS did not fire on an M=1 matvec -- vecmat path unexercised)\n"); f++;
+    printf("  (BLAS did not fire on an M=1 matvec)\n"); f++;
   }
   printf("  %s (%d failures)\n", f==0?"ok":"FAIL", f); return f==0?0:1; }

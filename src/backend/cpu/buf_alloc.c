@@ -30,28 +30,7 @@ int CPU_ARENA_ALLOC_INFLIGHT = 0;
 void cpu_arena_alloc_inflight_set(int on) { CPU_ARENA_ALLOC_INFLIGHT = on; }
 int  cpu_arena_alloc_inflight(void) { return CPU_ARENA_ALLOC_INFLIGHT; }
 
-// Forward decl into jit/capture.c (included after this file in the unity
-// build).  Two-phase capture invalidates a re-issued buf id's logical-map
-// binding at every id-issuing site.  On CPU this is a formality (freelist
-// pops mint a FRESH slot id, so an id is never re-tenanted) kept for
-// backend uniformity; it early-outs when no two-phase map is live.
-fn void jit_twophase_note_alloc(Backend *b, u32 buf_id);
-
 fn u32 cpu_buf_alloc(u64 nbytes) {
-  // THVM_DEBUG_BIG_ALLOC=<bytes>: trace every allocation at or above the given
-  // size (decimal bytes) so a large materialization can be attributed by size
-  // (e.g. distinguishing the planner arena block from an unfused im2col).
-  // Diagnostic only; off unless set.
-  {
-    char const *dbg = getenv("THVM_DEBUG_BIG_ALLOC");
-    if (dbg != NULL && dbg[0] != '\0') {
-      u64 thresh = strtoull(dbg, NULL, 10);
-      if (thresh != 0 && nbytes >= thresh)
-        fprintf(stderr, "cpu_buf_alloc: BIG %llu bytes (%llu f32 elems)%s\n",
-                (unsigned long long)nbytes, (unsigned long long)(nbytes / 4),
-                CPU_ARENA_ALLOC_INFLIGHT ? " [arena]" : "");
-    }
-  }
   // Refuse a pathologically large single allocation rather than
   // calloc() it and thrash the host.  See thvm_buf_byte_ceiling.
   //
@@ -92,7 +71,6 @@ fn u32 cpu_buf_alloc(u64 nbytes) {
   // through to the fresh-calloc path below.
   u32 recycled = cpu_buf_freelist_try_pop(nbytes);
   if (recycled != 0) {
-    jit_twophase_note_alloc(&CPU_BACKEND, recycled);
     return recycled;
   }
 
@@ -118,7 +96,6 @@ fn u32 cpu_buf_alloc(u64 nbytes) {
   b->on_release = NULL;
   CPU_MEM_LIVE += nbytes;
   if (CPU_MEM_LIVE > CPU_MEM_PEAK) CPU_MEM_PEAK = CPU_MEM_LIVE;
-  jit_twophase_note_alloc(&CPU_BACKEND, id);
   return id;
 }
 
@@ -129,16 +106,6 @@ fn u64 cpu_buf_nbytes(u32 buf_id) {
     return 0;
   }
   return CPU_BUFS[buf_id].req_nbytes;
-}
-
-// Zero a buffer's full extent (Backend.buf_zero).  The JIT replay calls this
-// before a planned/recycled slot's producer fires so a partial-write kernel
-// sees fresh-calloc semantics (the eager pass's outputs were calloc-zeroed).
-fn void cpu_buf_zero(u32 buf_id) {
-  if (CPU_BUFS == NULL || buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
-  CpuBuf *b = &CPU_BUFS[buf_id];
-  if (b->data == NULL || b->nbytes == 0) return;
-  memset(b->data, 0, (size_t)b->nbytes);
 }
 
 // Borrow an existing buffer.  The caller owns `data` for the lifetime

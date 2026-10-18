@@ -219,12 +219,18 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
   }
 }
 
+// Snapshot a dynamic term tree into the book heap.  Returns a
+// book-domain term whose val refers to BOOK_HEAP rather than HEAP.
 Term thvm_book_from_dynamic(Term body) {
   BookRemap map[BOOK_REMAP_CAP];
   u32 map_pos = 0;
   return clone_to_book_rec(body, map, &map_pos);
 }
 
+// Register `body` as the definition for `name`.  Snapshots the
+// body into the book heap (so subsequent mutations to the dynamic
+// graph don't affect the def) and stores the root book term in
+// DEFS[name].  TRef[name] then unfolds via ALO on demand.
 void thvm_def_register(u32 name, Term body) {
   if (name >= DEFS_CAP) {
     fprintf(stderr, "thvm_def_register: name id %u out of range\n", name);

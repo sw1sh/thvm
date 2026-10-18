@@ -33,19 +33,15 @@ faults.
 """
 import itertools
 import os
-import pathlib
 import re
-import subprocess
 import sys
 import tempfile
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Tensor  # noqa: E402
+import helpers
+from thvm import Tensor
 
 SHAPES = ((2, 3, 4), (3, 5, 7))
 # (shrunk axis, merged pair): the outer neighbour merge is (axis-1, axis),
@@ -221,9 +217,6 @@ class TestShrinkReshapeReduce(unittest.TestCase):
 
 
 _CHILD = r"""
-import os, sys
-sys.path.insert(0, os.environ["THVM_PY"])
-sys.path.insert(0, os.environ["THVM_TESTS"])
 import numpy as np
 import test_shrink_reshape_reduce as t
 cases = [("named", n) for n in t.NAMED] + [("grid", c) for c in t.GRID]
@@ -239,13 +232,9 @@ class TestShrinkReshapeReduceWalker(unittest.TestCase):
     def test_uop_walker(self):
         # A warmup the JIT never reaches, no batched precompile, and an opt
         # tag no cached dylib carries: every kernel falls to the UOp walker.
-        env = dict(os.environ, DEV="cpu",
-                   THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
-                   THVM_TESTS=str(pathlib.Path(__file__).resolve().parent),
-                   THVM_CPU_JIT_WARMUP="1000000000", THVM_CPU_JIT_PARALLEL="0",
-                   THVM_CPU_JIT_OPT="O0", THVM_CPU_UOP_WALK_TRACE="1")
-        out = subprocess.run([sys.executable, "-c", _CHILD], env=env,
-                             capture_output=True, text=True, timeout=300)
+        out = helpers.run_child(_CHILD, 300, DEV="cpu", THVM_CPU_JIT_WARMUP="1000000000",
+                                THVM_CPU_JIT_PARALLEL="0", THVM_CPU_JIT_OPT="O0",
+                                THVM_CPU_UOP_WALK_TRACE="1")
         lines = [l for l in out.stdout.splitlines() if l.startswith("CASE ")]
         self.assertEqual(len(lines), len(NAMED) + len(GRID),
                          f"child failed:\n{out.stdout}\n{out.stderr}")
@@ -259,8 +248,6 @@ class TestShrinkReshapeReduceWalker(unittest.TestCase):
 
 _BEAM_CHILD = r"""
 import os, sys
-sys.path.insert(0, os.environ["THVM_PY"])
-sys.path.insert(0, os.environ["THVM_TESTS"])
 import numpy as np
 import test_shrink_reshape_reduce as t
 for name in t.BEAM:
@@ -273,15 +260,13 @@ for name in t.BEAM:
 """
 
 
-def _guard_malloc(env):
-    """`env` with macOS Guard Malloc inserted, which faults on a read past
-    the end of a malloc'd block; `env` unchanged where it does not load."""
+def _guard_malloc():
+    """The env that inserts macOS Guard Malloc, which faults on a read past
+    the end of a malloc'd block; empty where it does not load."""
     if sys.platform != "darwin":
-        return env
-    guarded = dict(env, DYLD_INSERT_LIBRARIES="/usr/lib/libgmalloc.dylib")
-    probe = subprocess.run([sys.executable, "-c", "pass"], env=guarded,
-                           capture_output=True, timeout=120)
-    return guarded if probe.returncode == 0 else env
+        return {}
+    guarded = {"DYLD_INSERT_LIBRARIES": "/usr/lib/libgmalloc.dylib"}
+    return guarded if helpers.run_child("pass", 120, **guarded).returncode == 0 else {}
 
 
 def _trace_by_case(stderr):
@@ -307,13 +292,9 @@ class TestShrinkBeamIsolatedBench(unittest.TestCase):
     def test_beam_bench_stays_inside_scratch(self):
         # AUTOTUNE_CACHE=0: no cached winner may skip the search.
         with tempfile.TemporaryDirectory() as out_dir:
-            env = _guard_malloc(dict(
-                os.environ, DEV="cpu", BEAM="2", AUTOTUNE_CACHE="0",
-                THVM_AUTOTUNE_TRACE="1", THVM_BEAM_OUT=out_dir,
-                THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
-                THVM_TESTS=str(pathlib.Path(__file__).resolve().parent)))
-            out = subprocess.run([sys.executable, "-c", _BEAM_CHILD], env=env,
-                                 capture_output=True, text=True, timeout=600)
+            out = helpers.run_child(_BEAM_CHILD, 600, DEV="cpu", BEAM="2", AUTOTUNE_CACHE="0",
+                                    THVM_AUTOTUNE_TRACE="1", THVM_BEAM_OUT=out_dir,
+                                    **_guard_malloc())
             self.assertEqual(out.returncode, 0,
                              f"child failed:\n{out.stdout}\n{out.stderr[-4000:]}")
             lines = [l for l in out.stdout.splitlines() if l.startswith("CASE ")]

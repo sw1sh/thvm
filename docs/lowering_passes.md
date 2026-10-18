@@ -13,7 +13,7 @@ How a high-level UOp DAG gets compiled into GPU/CPU dispatches.
       |   (BUFFER scope, STORE addr/value, AFTER ordering, OPT
       |   annotations) live here as opcodes.
       |
-      |  pass 1: simplify                        <- src/uop/graph_simplify.c
+      |  pass 1: simplify                        <- src/uop/rewrite.c
       |     algebraic folds; movement-as-INDEX        src/schedule/indexing.c
       |     (PERMUTE/RESHAPE/EXPAND/PAD/SHRINK/        src/uop/index_simplify.c
       |     FLIP rewrite to symbolic INDEX trees);
@@ -54,14 +54,14 @@ How a high-level UOp DAG gets compiled into GPU/CPU dispatches.
 
 ## Pass 1: UOp graph simplify
 
-- File: [src/uop/graph_simplify.c](../src/uop/graph_simplify.c)
+- Constructor rewrites: [src/uop/rewrite.c](../src/uop/rewrite.c)
 - Movement: [src/schedule/indexing.c](../src/schedule/indexing.c)
 - Index simplifier: [src/uop/index_simplify.c](../src/uop/index_simplify.c)
 
-A peephole rewriter on the heap-allocated UOp DAG.  Each rule
-matches a small structural pattern (e.g.
-`REDUCE_SUM(MUL(x, CONST))` -> `MUL(REDUCE_SUM(x), CONST)`) and
-returns a rewritten Term.  The driver loops until no rule fires.
+The UOp constructors simplify as they build: `uop_binary` and
+`uop_unary` call `uop_rewrite_*` (constant folding and identities
+such as `x + 0 = x`) before the hash-cons lookup, so simplified
+forms dedup too and no separate pass walks the DAG.
 
 Movement ops (`UOP_PERMUTE` / `UOP_RESHAPE` / `UOP_EXPAND` /
 `UOP_PAD` / `UOP_SHRINK` / `UOP_FLIP`) rewrite to symbolic INDEX

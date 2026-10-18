@@ -13,7 +13,7 @@ pr[a___] := (WriteString["stdout", a, "\n"]; $Output // Flush);
 isz = ToExpression[Environment["IS"] /. (x_ /; (x === $Failed || x === None) -> "128")];
 two = (Environment["TWO"] === "1");
 
-pr["=== FLUX flash measure: ImageSize ", isz, "  PCONTIG=", Environment["THVM_PCONTIG"], " ==="];
+pr["=== FLUX flash measure: ImageSize ", isz, " ==="];
 
 big30 = sum = peak = retained = Null;
 imgs = Null;

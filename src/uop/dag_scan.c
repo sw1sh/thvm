@@ -413,6 +413,27 @@ static int udg_extract_addr_arm(Term arm, u32 *out_axis_id, u32 *out_coeff) {
   return 1;
 }
 
+// Extract per-arm coefficients from a 2-D matmul-style INDEX_E
+// address built by lift_scalar_index.  The
+// address pattern for the matmul A operand under a 3-axis [M,K,N] lift
+// is either `IADD(IMUL(r_m, ICONST(K)), r_k)` (untransposed; ldA=K) or
+// `IADD(r_m, IMUL(r_k, ICONST(M)))` (transposed; ldA=M) -- and similarly
+// for B with the {k,n} pair.  Both arms are decoded
+// raw: each is either bare RANGE (coefficient = 1) or IMUL(RANGE, ICONST)
+// (coefficient = ICONST.value).  The caller derives `ld` / `trans` from
+// the side-specific BLAS convention:
+//   matmul A: ldA = other_coeff, transA = (red_coeff != 1)
+//             except both flip when the address's k arm carries the
+//             non-1 coefficient, so robust formula:
+//                 ldA   = max(red_coeff, other_coeff)
+//                 transA = (red_coeff != 1)
+//   matmul B: ldB = max(red_coeff, other_coeff)
+//             transB = (other_coeff != 1)   -- B's "natural" layout
+//                                              has red_coeff != 1
+// Returns 1 on success.  Returns 0 when the address doesn't match
+// IADD-of-(arm,arm) with each arm RANGE or IMUL(RANGE,ICONST), or when
+// neither arm references `red_axis_id`, or when both arms reference the
+// same axis.
 int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
                                              u32 *out_red_coeff,
                                              u32 *out_other_coeff,
@@ -649,302 +670,6 @@ int uop_dag_classify_matmul_shape(Term root,
   out->ldA     = ldA;
   out->ldB     = ldB;
   out->flags   = (transA ? 1u : 0u) | (transB ? 2u : 0u);
-  return 1;
-}
-
-// === DAG-side DOT-shape extractor =====================================
-//
-// cpu_blas_dispatch reads DOT shape facts (K, slot indices, dtype)
-// from the lifted UOp DAG so the matmul-shaped kernel dispatches via
-// a single cblas_sdot call instead of the per-element triple-loop.
-//
-// Strategy mirrors the GEMM extractor: classify via
-// `uop_classify_dot`, then read M=1 / N=1 / output buffer rank from
-// the lifted DAG.  Buffer slot indices come from BUFFER.instance.
-int uop_dag_classify_dot_shape(Term root,
-                               struct KernelEntry const *ke,
-                               UopDagDotShape *out) {
-  if (root == 0 || ke == NULL || out == NULL) return 0;
-  if (ke->n_inputs < 2) return 0;
-  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
-
-  u32 k_extent = 0;
-  if (!uop_classify_dot(root, &k_extent)) return 0;
-  if (k_extent == 0) return 0;
-
-  // Output buffer must be rank-0 (scalar) OR rank-1 numel=1.
-  Term buf_out = heap_read(term_val(root) + 0);
-  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
-  u32 ond = uop_buffer_ndim(buf_out);
-  if (ond > 1) return 0;
-  if (ond == 1 && uop_buffer_dim(buf_out, 0) != 1) return 0;
-
-  // Reach into the STORE for the MUL operands.
-  Term reduce = heap_read(term_val(root) + 2);
-  Term mul    = heap_read(term_val(reduce) + 0);
-  Term a_idx  = heap_read(term_val(mul) + 0);
-  Term b_idx  = heap_read(term_val(mul) + 1);
-
-  Term buf_a = heap_read(term_val(a_idx) + 0);
-  Term buf_b = heap_read(term_val(b_idx) + 0);
-  if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
-  if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) return 0;
-  u32 inst_a = uop_buffer_inst_get(buf_a);
-  u32 inst_b = uop_buffer_inst_get(buf_b);
-  if (inst_a == 0 || inst_b == 0) return 0;
-  u32 a_input = inst_a - 1;
-  u32 b_input = inst_b - 1;
-  if (a_input >= ke->n_inputs || b_input >= ke->n_inputs) return 0;
-  if (a_input == b_input) return 0;
-
-  // Uniform dtype check.
-  u32 dt = uop_buffer_dtype(buf_out);
-  if (dt != DT_FP32 && dt != DT_FP64) return 0;
-  if (uop_buffer_dtype(buf_a) != dt) return 0;
-  if (uop_buffer_dtype(buf_b) != dt) return 0;
-
-  // DOT addresses are bare RANGE(k)
-  // leaves -- the structural classifier `uop_classify_dot` already
-  // verified each INDEX_E.addr references exactly one range and that
-  // it's the reduce axis.  No stride extraction is needed: a bare
-  // RANGE address is implicitly stride-1 contiguous.  Buffer rank
-  // (rank-1 K elements) is implied by the buffer dim:
-  Term addr_a = heap_read(term_val(a_idx) + 1);
-  Term addr_b = heap_read(term_val(b_idx) + 1);
-  if (term_tag(addr_a) != TAG_UOP || term_ext(addr_a) != UOP_RANGE) return 0;
-  if (term_tag(addr_b) != TAG_UOP || term_ext(addr_b) != UOP_RANGE) return 0;
-  if (uop_buffer_ndim(buf_a) != 1 || uop_buffer_dim(buf_a, 0) != k_extent) return 0;
-  if (uop_buffer_ndim(buf_b) != 1 || uop_buffer_dim(buf_b, 0) != k_extent) return 0;
-
-  out->dtype   = dt;
-  out->K       = k_extent;
-  out->a_input = a_input;
-  out->b_input = b_input;
-  return 1;
-}
-
-// === DAG-side GEMV-shape extractor ====================================
-//
-// GEMV: W:{M,K} @ x:{K} -> {M}.  In the WL/lift representation the
-// vector x is broadcast to {M,K} via EXPAND so the MUL is elementwise.
-// W's lift address is m*K + k (2 distinct ranges); x's lift address is
-// just k (1 distinct range, because the broadcast m-axis has stride 0
-// and is dropped by lift_scalar_index).  REDUCE_SUM along the k axis
-// gives an {M} output.
-//
-// Strategy: classify the structural shape via `uop_classify_gemv`,
-// pick out which MUL operand is W (carries 2 ranges) vs x (carries 1),
-// recover M from the output buffer's rank-1 dim and from W's view, and
-// derive ldW + transpose flag from the W input view.
-int uop_dag_classify_gemv_shape(Term root,
-                                struct KernelEntry const *ke,
-                                UopDagGemvShape *out) {
-  if (root == 0 || ke == NULL || out == NULL) return 0;
-  if (ke->n_inputs < 2) return 0;
-  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
-
-  u32 k_extent = 0;
-  int w_first  = 0;
-  if (!uop_classify_gemv(root, &k_extent, &w_first)) return 0;
-  if (k_extent == 0) return 0;
-
-  // Output buffer must be rank-1 with shape {M}.
-  Term buf_out = heap_read(term_val(root) + 0);
-  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
-  if (uop_buffer_ndim(buf_out) != 1) return 0;
-  u32 M = uop_buffer_dim(buf_out, 0);
-  if (M == 0) return 0;
-
-  // Reach into the STORE for the MUL operands.
-  Term reduce = heap_read(term_val(root) + 2);
-  Term mul    = heap_read(term_val(reduce) + 0);
-  Term mul_a  = heap_read(term_val(mul) + 0);
-  Term mul_b  = heap_read(term_val(mul) + 1);
-  Term w_idx  = w_first ? mul_a : mul_b;
-  Term x_idx  = w_first ? mul_b : mul_a;
-
-  Term buf_w = heap_read(term_val(w_idx) + 0);
-  Term buf_x = heap_read(term_val(x_idx) + 0);
-  if (term_tag(buf_w) != TAG_UOP || term_ext(buf_w) != UOP_BUFFER) return 0;
-  if (term_tag(buf_x) != TAG_UOP || term_ext(buf_x) != UOP_BUFFER) return 0;
-  u32 inst_w = uop_buffer_inst_get(buf_w);
-  u32 inst_x = uop_buffer_inst_get(buf_x);
-  if (inst_w == 0 || inst_x == 0) return 0;
-  u32 w_input = inst_w - 1;
-  u32 x_input = inst_x - 1;
-  if (w_input >= ke->n_inputs || x_input >= ke->n_inputs) return 0;
-  if (w_input == x_input) return 0;
-
-  // Uniform dtype check.
-  u32 dt = uop_buffer_dtype(buf_out);
-  if (dt != DT_FP32 && dt != DT_FP64) return 0;
-  if (uop_buffer_dtype(buf_w) != dt) return 0;
-  if (uop_buffer_dtype(buf_x) != dt) return 0;
-
-  // DAG-side stride extraction.
-  //
-  // W's address is `IADD(arm_m, arm_k)` -- the matmul-A shape the
-  // stride extractor handles (the "ld" arm is the m-arm, the reduce
-  // arm is the k-arm).  x's address is bare RANGE(k) -- the
-  // structural classifier already verified it references precisely
-  // the reduce axis, so no stride extraction is needed for x.
-  Term addr_w = heap_read(term_val(w_idx) + 1);
-  Term addr_x = heap_read(term_val(x_idx) + 1);
-  if (term_tag(addr_x) != TAG_UOP || term_ext(addr_x) != UOP_RANGE) return 0;
-
-  u32 ldW = 0;
-  u32 transW = 0;
-  u32 w_red_coeff = 0, w_other_coeff = 0;
-  // x's bare RANGE leaf carries the reduce axis (classifier invariant).
-  u32 red_axis_id = uop_range_axis_id(addr_x);
-  int dag_w_ok = uop_dag_extract_matmul_strides_from_addr(
-      addr_w, red_axis_id, &w_red_coeff, &w_other_coeff, NULL);
-
-  if (!dag_w_ok) {
-    // Fallback to view-stride reader for lift outputs the DAG addr-arm
-    // extractor can't decode (e.g. non-IADD or non-RANGE addr leaves).
-    if (ke->input_views == NULL) return 0;
-    View const *vw = &ke->input_views[w_input];
-    View const *vx = &ke->input_views[x_input];
-    if (vw->shape.ndim == 2 && vw->shape.dims[0] == M
-        && vw->shape.dims[1] == k_extent
-        && vw->strides[0] == (i32)k_extent && vw->strides[1] == 1) {
-      ldW = k_extent;
-      transW = 0;
-    } else if (vw->shape.ndim == 2 && vw->shape.dims[0] == M
-               && vw->shape.dims[1] == k_extent
-               && vw->strides[0] == 1 && vw->strides[1] == (i32)M) {
-      ldW = M;
-      transW = 1;
-    } else {
-      return 0;
-    }
-
-    int x_ok = 0;
-    if (vx->shape.ndim == 1 && vx->shape.dims[0] == k_extent
-        && vx->strides[0] == 1) {
-      x_ok = 1;
-    } else if (vx->shape.ndim == 2 && vx->shape.dims[0] == 1
-               && vx->shape.dims[1] == k_extent && vx->strides[1] == 1) {
-      x_ok = 1;
-    } else if (vx->shape.ndim == 2 && vx->shape.dims[0] == M
-               && vx->shape.dims[1] == k_extent
-               && vx->strides[0] == 0 && vx->strides[1] == 1) {
-      x_ok = 1;
-    }
-    if (!x_ok) return 0;
-  } else {
-    // GEMV-W follows the matmul-A convention: m-arm carries ld in the
-    // natural layout, k-arm coefficient signals transpose.
-    //   non-trans: red=1,   other=K -> ldW=K, transW=0
-    //   trans:     red=M,   other=1 -> ldW=M, transW=1
-    ldW    = (w_red_coeff > w_other_coeff) ? w_red_coeff : w_other_coeff;
-    transW = (w_red_coeff != 1) ? 1 : 0;
-    if (transW) { if (ldW != M) return 0; }
-    else        { if (ldW != k_extent) return 0; }
-  }
-
-  out->dtype   = dt;
-  out->M       = M;
-  out->K       = k_extent;
-  out->w_input = w_input;
-  out->x_input = x_input;
-  out->ldW     = ldW;
-  out->flags   = transW ? 1u : 0u;
-  return 1;
-}
-
-// === DAG-side VECMAT-shape extractor ==================================
-//
-// out{1,N} = a{1,K} @ B{K,N}.  The single-token-decode projection and
-// the LM-head matvec produce this: the leading M==1 row is elided by
-// the lift, so the A operand's address collapses to a bare RANGE(k)
-// (1 range) while B keeps an IADD(k,n) (2 ranges).  The matmul
-// classifier (which needs 2 ranges per operand) declines, and the gemv
-// emit can't express a {K,N}-matrix orientation -- so this is routed to
-// a cblas_sgemm with M=1, which cblas handles natively.
-//
-// Structurally identical to GEMV (one 2-range matrix operand + one
-// 1-range bare-k vector operand) but with a {1,N} 2-D output instead of
-// a {M} 1-D output, and the matrix's NON-reduce axis is the output N
-// axis (vs GEMV where the matrix's non-reduce axis is the output M).
-int uop_dag_classify_vecmat_shape(Term root,
-                                  struct KernelEntry const *ke,
-                                  UopDagVecmatShape *out) {
-  if (root == 0 || ke == NULL || out == NULL) return 0;
-  if (ke->n_inputs < 2) return 0;
-  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
-
-  // Output buffer must be rank-2 {1, N} -- the elided unit leading row.
-  Term buf_out = heap_read(term_val(root) + 0);
-  if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
-  if (uop_buffer_ndim(buf_out) != 2) return 0;
-  if (uop_buffer_dim(buf_out, 0) != 1) return 0;
-  u32 N = uop_buffer_dim(buf_out, 1);
-  if (N == 0) return 0;
-
-  // Structural shape: matrix (2 ranges m/k... here k/n) * vector (1
-  // bare-k range), single reduce axis.  Reuse the GEMV recogniser; it
-  // picks the 2-range operand as "W" (our matrix B) and the 1-range
-  // bare-k operand as "x" (our vector a).
-  u32 k_extent = 0;
-  int b_first  = 0;
-  if (!uop_classify_gemv(root, &k_extent, &b_first)) return 0;
-  if (k_extent == 0 || k_extent == 1) return 0;
-
-  // Reach into the STORE for the MUL operands.  (b = matrix, a = vector.)
-  Term reduce = heap_read(term_val(root) + 2);
-  Term mul    = heap_read(term_val(reduce) + 0);
-  Term mul_a  = heap_read(term_val(mul) + 0);
-  Term mul_b  = heap_read(term_val(mul) + 1);
-  Term b_idx  = b_first ? mul_a : mul_b;
-  Term a_idx  = b_first ? mul_b : mul_a;
-
-  Term buf_b = heap_read(term_val(b_idx) + 0);
-  Term buf_a = heap_read(term_val(a_idx) + 0);
-  if (term_tag(buf_b) != TAG_UOP || term_ext(buf_b) != UOP_BUFFER) return 0;
-  if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
-  u32 inst_b = uop_buffer_inst_get(buf_b);
-  u32 inst_a = uop_buffer_inst_get(buf_a);
-  if (inst_b == 0 || inst_a == 0) return 0;
-  u32 b_input = inst_b - 1;
-  u32 a_input = inst_a - 1;
-  if (b_input >= ke->n_inputs || a_input >= ke->n_inputs) return 0;
-  if (b_input == a_input) return 0;
-
-  // Uniform dtype check.
-  u32 dt = uop_buffer_dtype(buf_out);
-  if (dt != DT_FP32 && dt != DT_FP64) return 0;
-  if (uop_buffer_dtype(buf_b) != dt) return 0;
-  if (uop_buffer_dtype(buf_a) != dt) return 0;
-
-  // a's address is bare RANGE(k) -- the contiguous {1,K} vector, so its
-  // k-stride is 1 (ldA = K, transA = 0 at the cblas_sgemm M=1 call).
-  Term addr_a = heap_read(term_val(a_idx) + 1);
-  Term addr_b = heap_read(term_val(b_idx) + 1);
-  if (term_tag(addr_a) != TAG_UOP || term_ext(addr_a) != UOP_RANGE) return 0;
-  u32 red_axis_id = uop_range_axis_id(addr_a);
-
-  // B's address is IADD(k-arm, n-arm).  Row-major {K,N}: k-stride N
-  // (= ldB), n-stride 1 (transB = 0).  Transposed {N,K}: n-stride K
-  // (= ldB), k-stride 1 (transB = 1).
-  u32 b_red_coeff = 0, b_other_coeff = 0, n_axis = 0;
-  if (!uop_dag_extract_matmul_strides_from_addr(
-          addr_b, red_axis_id, &b_red_coeff, &b_other_coeff, &n_axis)) {
-    return 0;
-  }
-  u32 ldB    = (b_red_coeff > b_other_coeff) ? b_red_coeff : b_other_coeff;
-  u32 transB = (b_other_coeff != 1) ? 1u : 0u;
-  if (transB) { if (ldB != k_extent) return 0; }
-  else        { if (ldB != N)        return 0; }
-
-  out->dtype   = dt;
-  out->N       = N;
-  out->K       = k_extent;
-  out->a_input = a_input;
-  out->b_input = b_input;
-  out->ldB     = ldB;
-  out->flags   = transB;
   return 1;
 }
 
@@ -2006,6 +1731,12 @@ static int udg_addr_decode_leaf(Term t, u32 coeff, UopDagAddrCoeffsView *out) {
   return 0;
 }
 
+// Decode an UOP_INDEX_E.addr term into per-axis (axis_id, coeff) pairs
+// and an absolute byte offset.  Mirrors tinygrad's index.backward_slice
+// + IADD/IMUL distribution.  On bail (unrecognized leaf shape, e.g. an
+// IDIV/IMOD/IWHERE remnant from a conv2d-flat index that the simplifier
+// didn't collapse), out->ok stays 0 but out->n_axes carries whatever was
+// decoded so far.
 void uop_dag_decode_addr_coeffs(Term addr, UopDagAddrCoeffsView *out) {
   out->n_axes = 0;
   out->offset = 0;
@@ -2888,6 +2619,11 @@ int uop_dag_classify_im2col_contraction(Term root,
 #undef IM2COL_REJ
 }
 
+// Enumerate every distinct UOP_INDEX_E.addr term reachable from `root`
+// (dedup by Term identity).  Writes up to `cap` addresses to out_addrs.
+// Returns the count.  The caller decodes each via
+// uop_dag_decode_addr_coeffs.  Mirrors tinygrad's Scheduler.bufs (the
+// reversed list of Ops.INDEX nodes the heuristic iterates).
 u32 uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap) {
   if (root == 0 || term_tag(root) != TAG_UOP || out_addrs == NULL || cap == 0) {
     return 0;

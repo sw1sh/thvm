@@ -23,9 +23,9 @@ int main(void) {
   int claimed = 1;
   for (u32 i = 0; i < N && claimed; i++) {
     CpuJitSlot *s = cpu_jit_claim_slot(key_of(i));
-    claimed = s != NULL && s->key == key_of(i) && s->func == NULL && s->fire_count == 0;
+    claimed = s != NULL && s->key == key_of(i) && s->func == NULL && s->n_inputs == 0;
     if (claimed) {
-      s->fire_count = i + 1;
+      s->n_inputs = i + 1;
     }
   }
   CHECK(claimed);
@@ -34,14 +34,14 @@ int main(void) {
   int found = 1;
   for (u32 i = 0; i < N && found; i++) {
     CpuJitSlot *s = cpu_jit_find_slot(key_of(i));
-    found = s != NULL && s->key == key_of(i) && s->fire_count == i + 1;
+    found = s != NULL && s->key == key_of(i) && s->n_inputs == i + 1;
   }
   CHECK(found);
   CHECK(cpu_jit_find_slot(key_of(N)) == NULL);
 
   TEST_BEGIN("cpu-jit-cache/claim-present");
   CpuJitSlot *s = cpu_jit_claim_slot(key_of(7));
-  CHECK(s != NULL && s->fire_count == 8);
+  CHECK(s != NULL && s->n_inputs == 8);
 
   TEST_BEGIN("cpu-jit-cache/reset");
   cpu_jit_cache_reset();
@@ -51,7 +51,7 @@ int main(void) {
   }
   CHECK(gone);
   s = cpu_jit_claim_slot(key_of(3));
-  CHECK(s != NULL && s->key == key_of(3) && s->fire_count == 0);
+  CHECK(s != NULL && s->key == key_of(3) && s->n_inputs == 0);
 
   thvm_free();
   TEST_REPORT();

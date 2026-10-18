@@ -74,16 +74,18 @@ Compute paths:
   all been deleted; the UOp DAG walker in `uop_walk.c` is the
   primary compute path.
 - [blas.c](../src/backend/cpu/blas.c): pattern matcher. Recognizes
-  the exact `KProgOp[]` shapes produced by `TDot`, `TMatVec`,
-  `TMatMul` and routes them to `cblas_{s,d}{dot,gemv,gemm}`. Returns
-  a `KDispatchKind` (`KDISPATCH_BLAS_DOT` / `_GEMV` / `_GEMM`) on
-  hit, 0 on miss.
+  matmul-shaped kernels (gemm, batched gemm, contraction, im2col) in
+  the lifted UOp DAG and routes them to `cblas_{s,d}gemm`. Returns
+  `KDISPATCH_BLAS_GEMM` on a hit, 0 on a miss; dot and matvec kernels
+  run in the JIT.
 - [jit.c](../src/backend/cpu/jit.c): clang JIT. Renders C99 source by
   calling `cg_render_uop_kernel_c_root` against
   `ke->cached_lift.store_root`, hashes it, looks the hash up in the
   in-memory `CPU_JIT_CACHE`, and on a miss writes
-  `/tmp/thvm_jit_<hash>.c`, shells out to the C compiler, `dlopen`s the
-  resulting `.dylib`, and `dlsym`s the `k` symbol.
+  `/tmp/thvm_jit_<hash>.c`, compiles it with `cpu_jit_compile_shared`
+  (the C compiler spawned directly, no shell), and loads the `k` symbol
+  with `cpu_jit_load`. The cold-start batch and injected kernels
+  (custom.c) go through the same two helpers.
 
 ### Dispatch order
 
@@ -95,11 +97,10 @@ through `Backend.dispatch_kernel`. The body lives at the bottom of
 2. `cpu_blas_dispatch(ke, ...)` first. On a non-zero return, record
    the route via `cg_profile_record(kid, blas_kind, ...)` and stop.
 3. `cpu_jit_dispatch(ke, ...)`. On a 1 return, record
-   `KDISPATCH_JIT` and stop. It declines during warmup
-   (`THVM_CPU_JIT_WARMUP`, default 0 = compile on first fire) and
-   for kernels it cannot render or compile.
-4. If `THVM_CPU_UOP_WALK` is not set to `0`, call
-   `cpu_uop_walk(ke, ...)`. On success, record
+   `KDISPATCH_JIT` and stop. It declines every kernel when
+   `THVM_CPU_JIT_WARMUP` is set (any nonzero value; unset compiles on
+   the first fire), and kernels it cannot render or compile.
+4. `cpu_uop_walk(ke, ...)`. On success, record
    `KDISPATCH_INTERPRETER` and stop.
 5. Otherwise record `KDISPATCH_NONE` and return -1:
    `cpu_dispatch_kernel` counts it (`cpu_dispatch_no_rung_count`)
@@ -147,9 +148,11 @@ renderer.
   `cg_kernel_total_us`) and static FLOPS estimation
   (`cg_kernel_flops`).
 - [autotune.c](../src/codegen/autotune.c): `kernel_autotune(kid)`.
-  Calls `kernel_opts_propose`, applies each candidate in isolation,
-  benches `KAUTOTUNE_N_RUNS` fires per variant, picks the min, and
-  leaves the kernel mutated to the winner. Winners are cached per
+  Proposes against the bare kernel (`kautotune_propose` resets the
+  hand-coded opts, calls `kernel_opts_propose`, and restores them),
+  applies each candidate in isolation, benches `KAUTOTUNE_N_RUNS`
+  fires per variant, picks the min, and leaves the kernel mutated to
+  the winner. Winners are cached per
   program shape in memory via the `autotuned` flag on `KernelAxes`
   and on disk under `$XDG_CACHE_HOME/thvm/autotune` (or
   `$HOME/.cache/thvm/autotune`, or `AUTOTUNE_CACHE_DIR`).  Set
@@ -214,18 +217,14 @@ CPU JIT path, end to end:
    before it passes half full (`cpu_jit_claim_slot`), so every kernel a
    process compiles keeps a slot; a fixed 256-slot table used to leave
    each kernel past its capacity on the UOp walker.
-5. On miss, the warmup gate counts the fire in the key's slot and,
-   until the count reaches `THVM_CPU_JIT_WARMUP`, returns 0 so the
-   UOp walker runs the kernel. Only past the gate does
-   `cpu_jit_build` reuse `/tmp/thvm_jit_<hash>_<opt>.dylib` when it
+5. On miss, `cpu_jit_build` reuses `/tmp/thvm_jit_<hash>_<opt>.dylib` when it
    is on disk, or call `cg_render_uop_kernel_c_root(store_root,
    "k", fp)` to render the source, write it to
-   `/tmp/thvm_jit_<hash>.c`, shell out to the C compiler, `dlopen`
-   the dylib, and `dlsym` the `k` symbol. The slot is populated and
+   `/tmp/thvm_jit_<hash>.c`, compile it, and load the dylib's `k`
+   symbol. The slot is populated and
    returned. The batched precompile at realize
-   (`cpu_jit_precompile_range`) passes the same gate: it builds only
-   kernels whose next fire reaches the threshold, so a threshold no
-   run reaches keeps every kernel on the walker.
+   (`cpu_jit_precompile_range`) builds nothing under
+   `THVM_CPU_JIT_WARMUP`, so that knob keeps every kernel on the walker.
 6. A view-contiguity check rejects strided inputs that the renderer
    doesn't have stride logic for; on rejection `cpu_jit_dispatch`
    returns 0 and the dispatcher falls through.
@@ -240,8 +239,8 @@ The cache is keyed by rendered source, so two kernels with identical
 bodies share one slot and one `.dylib`, and a kernel whose source
 carries a different constant (a decode step's position, say) gets its
 own.  A persistent `/tmp/thvm_jit_<hash>_<opt>.dylib` is honored across
-processes once the kernel is past the warmup gate (a stat-only
-freshness check; no source-content verification).
+processes (a stat-only freshness check; no source-content
+verification).
 
 ## Comparison with Metal
 

@@ -18,42 +18,17 @@ update the matching row here in the same change.
 
 ---
 
-## Correctness gates (change realized math -- validate before enabling)
-
-| Knob | Default | Effect |
-| --- | --- | --- |
-| `THVM_JIT_REALIZE_DEDUP` | off | Schedule-level cross-realize dispatch dedup. Bit-exact on CPU (~17% faster). On CUDA: correct + ~6% faster on plain conv models (simple-model 7.8->7.3ms, beats tinygrad's 7.6ms) after the kernel_gc_sweep backend-aware liveness fix; but on BatchNorm/max_pool models (beautiful_mnist) the replay still DIVERGES at iter2 and is ~14% SLOWER -- a separate BN/pool dedup-replay bug, under investigation. Keep off for BN models. |
-| `THVM_FUSE_CONV_BWD` | off | Fuse the conv-backward reduce into a strided-view reduce (cuts peak memory). Gated; validate grads before enabling. |
-
 ## Core scheduling & JIT
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_JIT` (Python) | on (`1`) | Enable the Python JIT capture/replay. `0` disables. |
+| `JIT` (Python, tinygrad's name) | on (`1`) | Enable the Python JIT capture/replay. `0` disables. |
 | `THVM_JIT_NO_PIN` | off | Disable JIT buffer pinning. |
-| `THVM_JIT_STRIDED` | off | Allow strided JIT capture of movement-op views. |
 | `THVM_JIT_REPLAY_NOSKIP` | off | Disable replay skip optimization. |
 | `THVM_JIT_REPLAY_PACK` | off | Experimental: pack replay dispatch records. |
-| `THVM_JIT_REPLAY_TRACE` | off | Trace JIT replay execution. |
-| `THVM_NF_PARALLEL_STEP_SESSION` | off | Parallel normal-form step session. |
 | `THVM_PRECISE_FIRE_MEMO` | off | Precise dispatch-fire memoization. |
 | `THVM_DISPATCH_TRACE` | off | Trace dispatch memoization. |
-| `THVM_RU_FAITHFUL_SEED` | off | Realize-seed only structural boundaries (ROOT) + REDUCE outputs, deriving the rest in the rangeify walk (tinygrad's structural seed); default mode also seeds MULTI/MATMUL/FANIN. Faithful CPU beats tinygrad + default (see [[project_faithful_cpu_breakthrough]]). |
-| `THVM_RU_NO_SEED_REDUCE` | off | A/B revert: under faithful seed, go back to ROOT-only (drop the REDUCE-output seed). ROOT-only under-realizes -> conv data-grad becomes a col2im gather (faithful beautiful_mnist CPU 5.18ms -> 77.6ms). For comparison only. |
 | `THVM_MAX_KERNEL_BUFFERS` | Metal 31, else no cap | tinygrad's `MAX_KERNEL_BUFFERS`: a positive value caps the distinct buffers (output included) one kernel may bind on every device, splitting wider elementwise fusions (`ru_limit_bufs_node`). `0` turns the cap off everywhere, Metal included. |
-
-## Bufferize & kernel lift
-
-| Knob | Default | Effect |
-| --- | --- | --- |
-| `THVM_BUFFERIZE_DEBUG` | off | Debug the bufferize classifier. |
-| `THVM_BUFFERIZE_REDUCE_FUSE_MULTI` | (impl) | Multi-reduce fusion in bufferize. |
-| `THVM_BUFFERIZE_SOFTMAX_REDUCE_TILE_CAP` | (impl) | Softmax reduce tile cap. |
-| `THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE` | (impl) | Keep non-matmul reduces realized. |
-| `THVM_BUFFERIZE_SKIP_SMALL_EXPAND` | (impl) | Skip bufferizing small EXPAND ops. |
-| `THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED` | (impl) | Skip the reduce-into-reduce seed. |
-| `THVM_FUSE_REDUCE_INTO_REDUCE` | on | Fuse a reduce into a consuming REDUCE (softmax sum into attn@V, the conv-input-grad pair) -- tinygrad-faithful reduce-absorbs-reduce, now that the multi-axis REDUCE renderer has landed. `0` reverts to the historical per-reduce-kernel split. |
-| `THVM_REDUCE_UNMARK_CAP` | (impl) | Reduce-unmark capacity. |
 
 ## Codegen tuning
 
@@ -66,35 +41,27 @@ update the matching row here in the same change.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_GC` | on | Heap GC; `0` disables. |
 | `THVM_GC_KB` | (impl) | Heap GC trigger threshold (KB). |
 | `THVM_RECLAIM_MB` | 64 | py: free dead tensors' backend buffers once resident bytes exceed the last reclaim's survivors by max(this many MB, half the survivors); 0 reclaims after any growth. |
-| `THVM_KGC` | (impl) | Kernel GC control. |
 | `THVM_HEAP_CELLS` | (impl) | Initial heap cell count. |
 | `THVM_MAX_BUF_BYTES` | (impl) | Max single-buffer allocation (KB). |
 | `THVM_MAX_LIVE_BYTES` | (impl) | Max live-buffer memory. |
-| `THVM_REUSE_BUFS` | (impl) | Buffer reuse across backends. |
 | `THVM_CUDA_REUSE_BUFS` | (impl) | CUDA-specific buffer reuse. |
 | `THVM_METAL_REUSE_BUFS` | (impl) | Metal-specific buffer reuse. |
-| `THVM_ARENA_PLAN` | (impl) | Buffer arena planning. |
-| `THVM_ARENA_DUMP` | off | Dump arena alloc/dealloc events. |
-| `THVM_ARENA_DUMP_BUFS` | off | Dump the arena buffer list. |
 
 ## CPU backend
 
 | Knob | Default | Effect |
 | --- | --- | --- |
 | `THVM_THREADS` | (impl) | CPU worker-thread count. |
-| `THVM_CPU_JIT_WARMUP` | 0 | The fire at which a kernel source first runs compiled: with W, fires 1 to W-1 run in the UOp walker and fire W compiles (0 and 1 compile on the first fire). The count gates every JIT path: the batched precompile at realize (`THVM_CPU_JIT_PARALLEL`), the in-memory compile cache and the dylibs cached under `/tmp`. A threshold no run reaches, `THVM_CPU_JIT_WARMUP=1000000000`, forces the walker for every kernel the JIT would take, however warm the caches are; kernels that match a BLAS pattern still dispatch to cblas unless `THVM_CPU_BLAS_DISABLE=1`. Read once per process. |
-| `THVM_CPU_JIT_PARALLEL` | on | Batched cold-start precompile: at realize, every kernel whose next fire passes `THVM_CPU_JIT_WARMUP` compiles into one combined dylib before the dispatch fires it. `0` leaves each kernel to compile at its own fire. |
+| `THVM_CPU_JIT_WARMUP` | 0 | Any nonzero value runs every kernel the JIT would take in the UOp walker, however warm the caches are: the batched precompile at realize (`THVM_CPU_JIT_PARALLEL`) builds nothing, and the dispatch neither compiles nor loads a dylib cached under `/tmp`. Kernels that match a BLAS pattern still dispatch to cblas unless `THVM_CPU_BLAS_DISABLE=1`. Unset or 0, a kernel compiles on its first fire. Walker-mode test runs set `1000000000`. Read once per process. |
+| `THVM_CPU_JIT_PARALLEL` | on | Batched cold-start precompile: at realize, every kernel the JIT takes compiles into one combined dylib before the dispatch fires it (none under `THVM_CPU_JIT_WARMUP`). `0` leaves each kernel to compile at its own fire. |
 | `THVM_CPU_CC` | `$CC`, else clang / cc / gcc | C compiler for CPU JIT kernels (clang-only flags are added only for clang). |
 | `THVM_CPU_JIT_VERBOSE` | off | Show the C compiler's diagnostics when a JIT compile fails (a failed kernel runs in the interpreter; thvm warns once). |
-| `THVM_CPU_UOP_WALK` | (impl) | CPU UOp-walk control. |
 | `THVM_CPU_UOP_WALK_TRACE` | off | Trace each UOp-walk entry (lift outcome + root op). |
 | `THVM_TRACE_RENDER_DECLINE` | off | Print why the C kernel renderer declined a kernel (overflow, untyped slot, or a body reading an unclaimed input slot), sending it to the CPU walker. |
 | `THVM_TRACE_UOP_WALK_DECLINE` | off | Trace why the UOp walk declined a kernel. |
 | `THVM_CPU_BLAS_DISABLE` | off | Disable the cblas dispatch path (force the generic walker). |
-| `THVM_BLAS_CONTRACTION_TRACE` | off | Trace BLAS contraction dispatch. |
 
 ## CUDA backend
 
@@ -144,12 +111,8 @@ update the matching row here in the same change.
 | Knob | Default | Effect |
 | --- | --- | --- |
 | `THVM_KERNEL_PROFILE` | off | Per-kernel wall-time profile (top N rows). |
-| `THVM_DUMP_BOUNDARY_ORDER` | off | Dump kernel emit order. |
-| `THVM_DUMP_DIRECT_COUNT` | off | Dump the direct kernel count. |
-| `THVM_DUMP_KERNEL_SHAPE` | off | Dump kernel shapes. |
 | `THVM_DUMP_KERNEL_SRC` | off | Dump generated kernel source. |
 | `THVM_DUMP_TILE_JIT_SRC` | off | Dump tiled-JIT kernel source. |
-| `THVM_DUMP_MATMUL_DETECT` | off | Dump matmul detection. |
 | `THVM_KCNT` | off | Kernel-count debug. |
 
 ## ATP (automated theorem proving)
@@ -189,23 +152,5 @@ operational ones.
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_CACHE` (Python) | `~/.cache/thvm` | Dataset cache directory. |
 | `THVM_BENCH_OPT` | off | Benchmark optimization selector (`tools/xbackend_bench`). |
 | `THVM_WL_TENSOR_VIEW_DEBUG` | off | WL tensor-view debug output. |
-
----
-
-## A/B gate command (V100, CUDA)
-
-`THVM_JIT_REALIZE_DEDUP` is bit-exact and correct on CPU + CUDA. The A/B
-comparison on a V100 pod is:
-
-```
-# baseline (knob off)
-DEV=cuda BS=32 python3 py/examples/beautiful_mnist_train.py
-# with cross-realize dedup
-DEV=cuda BS=32 THVM_JIT_REALIZE_DEDUP=1 python3 py/examples/beautiful_mnist_train.py
-```
-
-Loss must match step-for-step; CUDA warm-step drops ~6% (simple-model
-7.8->7.3ms, ahead of tinygrad's 7.6ms).

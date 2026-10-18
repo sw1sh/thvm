@@ -25,14 +25,11 @@
 
 static char REPO_ROOT[1024] = {0};
 
+// The tests run from the repo root (make test, the verification runner).
 static void compute_repo_root(void) {
-  FILE *p = popen("git rev-parse --show-toplevel", "r");
-  if (!p) { strcpy(REPO_ROOT, "."); return; }
-  if (fgets(REPO_ROOT, sizeof REPO_ROOT, p) != NULL) {
-    size_t n = strlen(REPO_ROOT);
-    if (n > 0 && REPO_ROOT[n - 1] == '\n') REPO_ROOT[n - 1] = '\0';
+  if (getcwd(REPO_ROOT, sizeof REPO_ROOT) == NULL) {
+    REPO_ROOT[0] = '\0';
   }
-  pclose(p);
 }
 
 static double now_s(void) {
@@ -198,18 +195,12 @@ static int compile_emitted_count_bench(const char *out_bin) {
     "}\n");
   fclose(f);
 
-  // The bench .c includes src/thvm.c -> src/atp/_.c, which has
-  // functions defined only under ATP_RULE_INDEX but called
-  // unconditionally.  Pass the same ATP defines the host test binary
-  // was built with (Makefile ATP_DEFINES), or clang errors out with
-  // "static declaration of 'atp_pretty_term' follows non-static".
+  // The bench .c includes src/thvm.c, so it needs the host's defines.
   char cmd[2048];
   snprintf(cmd, sizeof cmd,
-    "clang -O2 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK "
-    "-DATP_RULE_INDEX -DATP_FV_INDEX -DATP_VAR_NORM "
-    "-DATP_ORDERED_REWRITE -DATP_ORPHAN_KILL -DATP_CP_GROUND_JOIN "
-    "-framework Accelerate -o '%s' '%s' 2>&1",
-    out_bin, src_path);
+    "clang -O2 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK %s"
+    "-o '%s' '%s' %s 2>&1",
+    aot_host_defines(), out_bin, src_path, aot_exe_link_flags());
 
   FILE *pp = popen(cmd, "r");
   if (!pp) return -1;

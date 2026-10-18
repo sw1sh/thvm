@@ -48,11 +48,6 @@
 #include "../src/thvm.c"
 #include "test.h"
 
-static int interp_mode(void) {
-  char const *e = getenv("THVM_CPU_JIT_WARMUP");
-  return e != NULL && atoi(e) > 1;
-}
-
 static Shape shape_of(u32 ndim, u32 const *dims) {
   Shape s = {0};
   s.ndim = ndim;
@@ -271,10 +266,10 @@ static void check_dispatch(u32 k0) {
   for (u32 k = k0; k < KERNELS_NEXT; k++) {
     u32 kind = cg_kernel_dispatch_kind(k);
     if (kind == KDISPATCH_NONE
-        || (kind >= KDISPATCH_BLAS_DOT && kind <= KDISPATCH_BLAS_GEMM)) {
+        || kind == KDISPATCH_BLAS_GEMM) {
       continue;
     }
-    u32 want = (interp_mode() || jit_declines(k)) ? KDISPATCH_INTERPRETER
+    u32 want = (cpu_jit_walker_only() || jit_declines(k)) ? KDISPATCH_INTERPRETER
                                                   : KDISPATCH_JIT;
     if (kind != want) {
       fprintf(stderr, "  kernel %u: dispatch %u, output dtype %u, inputs", k, kind,

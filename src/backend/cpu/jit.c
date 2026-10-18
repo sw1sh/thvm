@@ -20,9 +20,13 @@
 
 #ifndef _WIN32
 #include <dlfcn.h>  // Windows: dlopen family shimmed in util/portable_win.h
-#include <spawn.h>      // posix_spawn for the parallel cold-start compile pool
-#include <sys/wait.h>   // waitpid for the spawned clang workers
+#include <errno.h>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/wait.h>
 extern char **environ;
+#else
+#include <process.h>  // _spawnvp
 #endif
 #include <unistd.h>
 #include <sys/stat.h>
@@ -50,28 +54,18 @@ static void cpu_jit_kvar_vals(KernelEntry const *ke, unsigned *out_vals) {
   for (u32 i = 0; i < nkv; i++) out_vals[i] = (unsigned)kvar_runtime(ids[i]);
 }
 
-// JIT warmup gate: a kernel source must fire CPU_JIT_WARMUP times before
-// it runs compiled; the UOp walker runs it until then.  Default 0 =
-// compile on first fire (tinygrad always compiles).  At BS=128 an
-// interpreted conv step is ~100s, so any warmup>0 makes the first few
-// steps catastrophically slow; compiling immediately pays one clang
-// pass (~ms/kernel) and every subsequent step is fast.  The source-keyed
-// cache + on-disk /tmp dylib reuse make repeat compiles free.
-//
-// The gate stands in front of every way to a compiled kernel: the batched
-// precompile at realize builds only a kernel whose next fire reaches the
-// threshold, and neither the in-memory cache nor a dylib on disk is used
-// before that fire.  So a threshold no run reaches
-// (THVM_CPU_JIT_WARMUP=1000000000) sends every kernel the JIT would take
-// to the walker, however warm the caches are.
-#define CPU_JIT_WARMUP 0
-// Override the warmup threshold via THVM_CPU_JIT_WARMUP (0 = compile on
-// first fire).  Lets a training loop with large one-shot-feeling kernels
-// (e.g. the conv im2col STORE) commit to a compile sooner.
-static u32 cpu_jit_warmup(void) {
+// THVM_CPU_JIT_WARMUP (any nonzero value) runs every kernel the JIT would
+// take in the UOp walker, however warm the caches are: the batched
+// precompile at realize builds nothing and the dispatch neither compiles nor
+// loads a dylib.  Unset or 0, a kernel compiles on its first fire, as
+// tinygrad always compiles.
+static int cpu_jit_walker_only(void) {
   static int v = -1;
-  if (v < 0) { const char *e = getenv("THVM_CPU_JIT_WARMUP"); v = e ? atoi(e) : CPU_JIT_WARMUP; }
-  return (u32)v;
+  if (v < 0) {
+    char const *e = getenv("THVM_CPU_JIT_WARMUP");
+    v = e != NULL && atoi(e) != 0;
+  }
+  return v;
 }
 
 // Optimization level for the clang JIT compile, tunable via
@@ -123,7 +117,6 @@ typedef struct {
   CpuJitFn  func;         // NULL until compile completes
   void     *dl_handle;
   u32       n_inputs;
-  u32       fire_count;   // # of dispatches before func was set
 } CpuJitSlot;
 #define CPU_JIT_CACHE_INIT_CAP 256u
 static CpuJitSlot *CPU_JIT_CACHE     = NULL;
@@ -305,31 +298,6 @@ static void cpu_jit_cache_store(u64 key, CpuJitFn jfn, void *dl_handle,
   }
 }
 
-// Warmup gate.  A key's fires are counted in its cache slot until it runs
-// compiled, and fire number n may run compiled once n >= the threshold.
-// The precompile asks whether the key's NEXT fire gets there (`s` is the
-// key's slot or NULL); the dispatch counts the fire it is making.  A slot
-// holds a compiled func only for a key that got there, so a cached func
-// needs no count.  When no slot can be claimed (out of memory) there is
-// nowhere to count: only an ungated run takes a dylib already on disk, and
-// nothing is compiled.
-static int cpu_jit_next_fire_warm(CpuJitSlot const *s) {
-  u32 fired = (s != NULL) ? s->fire_count : 0;
-  return fired + 1 >= cpu_jit_warmup();
-}
-
-static int cpu_jit_count_fire(u64 key, u32 n_inputs) {
-  CpuJitSlot *s = cpu_jit_claim_slot(key);
-  if (s == NULL) {
-    return cpu_jit_warmup() <= 1 && cpu_jit_dylib_cached(key);
-  }
-  if (s->fire_count == 0) {
-    s->n_inputs = n_inputs;
-  }
-  s->fire_count++;
-  return s->fire_count >= cpu_jit_warmup();
-}
-
 // The C compiler for JIT kernels: THVM_CPU_CC, else $CC, else the first of
 // clang / cc / gcc on PATH (the Linux pods ship gcc only).  Resolved once
 // per process.  clang-only flags are added only when it is clang.
@@ -390,10 +358,10 @@ static void cpu_jit_warn_compile_failed(char const *what) {
           "compiler; THVM_CPU_JIT_VERBOSE=1 shows its errors.\n", what, cpu_cc());
 }
 
-// Compile + load.  Returns the resolved `k` function pointer or NULL
-// on any failure (caller falls back to interpreter).
-// Compile a C source file into a shared object with the JIT's compiler and
-// flags.  Returns 1 on success.
+// Compile the C file `src_path` into the shared object `dl_path` with the
+// JIT's compiler and flags, spawned directly (no shell).  Its diagnostics
+// are dropped unless `loud` (an injected kernel, which has no interpreter
+// to fall back on) or THVM_CPU_JIT_VERBOSE=1.  Returns 1 on success.
 // -O3 default (not -O2): on the rendered conv-backward gather-reduce
 // kernels (deeply-nested masked-index expressions) -O3's extra
 // unrolling + scalar opts give ~1.6x over -O2 with NO float-semantics
@@ -407,16 +375,58 @@ static void cpu_jit_warn_compile_failed(char const *what) {
 // whole kernel silently falls back to the interpreter -- correct, but a
 // ~14x cliff on a 400-op chain.  The limit is a parser guard, not a
 // codegen one; raising it costs nothing for shallow kernels.
-fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path) {
-  char bracket[40] = "";
+fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path, int loud) {
+  char opt[8], bracket[40];
+  snprintf(opt, sizeof opt, "-%s", cpu_jit_opt_tag());
+  snprintf(bracket, sizeof bracket, "-fbracket-depth=%d", CPU_JIT_BRACKET_DEPTH);
+  char *argv[9];
+  u32   ac = 0;
+  argv[ac++] = (char *)cpu_cc();
+  argv[ac++] = opt;
   if (cpu_cc_is_clang()) {
-    snprintf(bracket, sizeof bracket, "-fbracket-depth=%d", CPU_JIT_BRACKET_DEPTH);
+    argv[ac++] = bracket;
   }
-  char cmd[768];
-  snprintf(cmd, sizeof cmd, "%s -%s %s -fPIC -shared -o '%s' '%s'%s",
-           cpu_cc(), cpu_jit_opt_tag(), bracket, dl_path, src_path,
-           cpu_jit_verbose() ? "" : " 2>/dev/null");
-  return system(cmd) == 0;
+  argv[ac++] = (char *)"-fPIC";
+  argv[ac++] = (char *)"-shared";
+  argv[ac++] = (char *)"-o";
+  argv[ac++] = (char *)dl_path;
+  argv[ac++] = (char *)src_path;
+  argv[ac]   = NULL;
+#ifdef _WIN32
+  (void)loud;
+  return _spawnvp(_P_WAIT, argv[0], (char const *const *)argv) == 0;
+#else
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  if (!loud && !cpu_jit_verbose()) {
+    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+  }
+  pid_t pid;
+  int   status  = -1;
+  int   spawned = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ) == 0;
+  posix_spawn_file_actions_destroy(&fa);
+  if (spawned) {
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+  }
+  return spawned && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
+}
+
+// dlopen `dl_path` and resolve `sym`: the symbol, with its image in
+// *handle, or NULL with the image closed again.
+static void *cpu_jit_load(char const *dl_path, char const *sym, void **handle) {
+  void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
+  if (h == NULL) {
+    return NULL;
+  }
+  void *f = dlsym(h, sym);
+  if (f == NULL) {
+    dlclose(h);
+    return NULL;
+  }
+  *handle = h;
+  return f;
 }
 
 static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
@@ -449,44 +459,31 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
            (unsigned long long)key);
   cpu_jit_dylib_path(dl_path, sizeof dl_path, "", key);
 
-  // Skip the compile if the .dylib is already on disk (e.g. from a
-  // previous session) and current.  Stat-only check; we don't try to
-  // verify cache freshness against the current source.  The caller has
-  // already passed the warmup gate.
+  // Compile unless the .dylib is already on disk (e.g. from a previous
+  // session).  Stat-only: the content-hash name is the freshness check.
   struct stat st;
-  if (stat(dl_path, &st) == 0) {
-    void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
-    if (!h) return NULL;
-    CpuJitFn jfn = (CpuJitFn)dlsym(h, "k");
-    if (!jfn) { dlclose(h); return NULL; }
+  if (stat(dl_path, &st) != 0) {
+    FILE *f = fopen(src_path, "w");
+    if (!f) return NULL;
+    fputs(src, f);
+    fclose(f);
+    if (!cpu_jit_compile_shared(src_path, dl_path, 0)) {
+      cpu_jit_warn_compile_failed("compile");
+      return NULL;
+    }
+  }
+  void    *h   = NULL;
+  CpuJitFn jfn = (CpuJitFn)cpu_jit_load(dl_path, "k", &h);
+  if (jfn != NULL) {
     cpu_jit_cache_store(key, jfn, h, ke->n_inputs);
-    return jfn;
   }
-
-  FILE *f = fopen(src_path, "w");
-  if (!f) return NULL;
-  fputs(src, f);
-  fclose(f);
-
-  if (!cpu_jit_compile_shared(src_path, dl_path)) {
-    cpu_jit_warn_compile_failed("compile");
-    return NULL;
-  }
-
-  void *h = dlopen(dl_path, RTLD_NOW | RTLD_LOCAL);
-  if (!h) return NULL;
-  CpuJitFn jfn = (CpuJitFn)dlsym(h, "k");
-  if (!jfn) { dlclose(h); return NULL; }
-
-  cpu_jit_cache_store(key, jfn, h, ke->n_inputs);
   return jfn;
 }
 
 // Render the kernel C source and canonicalize its a<N>/_acc<N> ids so
 // structurally-identical kernels are byte-identical across steps.  The
-// JIT key is the hash of THIS source (not the lifted-DAG term loc, which
-// is a fresh heap cell every realize and so never repeats -> the kernel
-// never crossed the warmup gate and stayed on the interpreter forever).
+// JIT key is the hash of THIS source, not the lifted-DAG term loc, which
+// is a fresh heap cell every realize and so never repeats.
 // Caller frees the returned string.
 static char *cpu_jit_render_canon(KernelEntry const *ke) {
   if (ke->cached_lift.store_root == 0) return NULL;
@@ -532,7 +529,7 @@ static int cpu_jit_narrow_float(u32 dt) {
 // kernel that fails this can't be CPU-JITted, so the parallel precompile
 // pass skips it (no wasted clang).
 static int cpu_jit_eligible(KernelEntry const *ke) {
-  if (!cg_supports(ke)) return 0;
+  if (ke->cached_lift.store_root == 0) return 0;
   if (cpu_jit_narrow_float(ke->output_dtype)) return 0;
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (ke->input_dtypes != NULL && cpu_jit_narrow_float(ke->input_dtypes[i]))
@@ -613,30 +610,7 @@ static void *cpu_jit_build_combined(CpuJitJob const *jobs, u32 njobs,
       fclose(jf);
     }
     fclose(cf);
-    char optflag[8];
-    snprintf(optflag, sizeof optflag, "-%s", cpu_jit_opt_tag());
-    char bracketflag[32];
-    snprintf(bracketflag, sizeof bracketflag, "-fbracket-depth=%d",
-             CPU_JIT_BRACKET_DEPTH);   // see cpu_jit_compile_shared
-    char *argv[9];
-    u32 ac = 0;
-    argv[ac++] = (char *)cpu_cc();
-    argv[ac++] = optflag;
-    if (cpu_cc_is_clang()) argv[ac++] = bracketflag;
-    argv[ac++] = (char *)"-fPIC";
-    argv[ac++] = (char *)"-shared";
-    argv[ac++] = (char *)"-o";
-    argv[ac++] = comb_dl;
-    argv[ac++] = comb_c;
-    argv[ac]   = NULL;
-    pid_t pid;
-    if (posix_spawnp(&pid, cpu_cc(), NULL, NULL, argv, environ) != 0) {
-      cpu_jit_warn_compile_failed("parallel compile");
-      return NULL;
-    }
-    int status;
-    waitpid(pid, &status, 0);
-    if (stat(comb_dl, &st) != 0) {
+    if (!cpu_jit_compile_shared(comb_c, comb_dl, 0)) {
       cpu_jit_warn_compile_failed("parallel compile");
       return NULL;
     }
@@ -645,6 +619,16 @@ static void *cpu_jit_build_combined(CpuJitJob const *jobs, u32 njobs,
 }
 #endif  // !_WIN32
 
+// Parallel cold-start JIT warm: render + clang-compile every JIT-eligible
+// CPU kernel in [kid_lo, kid_hi) CONCURRENTLY (a posix_spawn pool of up to
+// ncores clang processes) and populate the on-disk dylib cache + in-memory
+// CpuJitSlot table BEFORE the serial dispatch loop fires them one-at-a-time.
+// Idempotent: a hash already on disk / in cache is skipped, and the batch is
+// de-duped by source hash so two workers never compile the same dylib.  A
+// no-op when THVM_CPU_JIT_PARALLEL=0.  The subsequent cpu_jit_dispatch fires
+// then hit the cache (no compile), collapsing ~Nx serial-clang wait to one
+// parallel pass.  Called from thvm_realize / thvm_realize_many once the
+// materialize fixpoint has emitted the kernel table, before the driving wnf.
 fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
 #ifdef _WIN32
   (void)kid_lo; (void)kid_hi;
@@ -655,7 +639,7 @@ fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
     enabled = (e == NULL) ? 1 : (e[0] != '0');
     known = 1;
   }
-  if (!enabled) return;
+  if (!enabled || cpu_jit_walker_only()) return;
   if (kid_lo < 1) kid_lo = 1;
   if (kid_hi > KERNELS_NEXT) kid_hi = KERNELS_NEXT;
   if (kid_lo >= kid_hi) return;
@@ -701,11 +685,8 @@ fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
     if (src == NULL) continue;
     u64 key = cpu_src_hash(src);
 
-    // Warmup gate, ahead of both caches: build only a kernel whose next
-    // fire reaches the threshold.
-    CpuJitSlot *s = cpu_jit_find_slot(key);
-    if (!cpu_jit_next_fire_warm(s)) { free(src); continue; }
     // Already compiled in-memory?  Skip.
+    CpuJitSlot *s = cpu_jit_find_slot(key);
     if (s != NULL && s->func != NULL) { free(src); continue; }
     // On disk: the dispatch loads it.
     if (cpu_jit_dylib_cached(key)) { free(src); continue; }
@@ -778,8 +759,6 @@ fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
 
   if (njobs == 0) { free(jobs); return; }
 
-  int dbg = (getenv("THVM_CPU_JIT_PARALLEL_DBG") != NULL);
-  u64 t0 = dbg ? cg_now_us() : 0;
   // Build ONE combined dylib holding every fresh kernel (entry points
   // renamed k_<hex>), then dlopen it ONCE.  This collapses the N slow
   // first-dlopen syspolicyd provenance checks (the dominant cold cost on
@@ -789,9 +768,6 @@ fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
   // one fork/exec instead of N.
   char comb_dl[256] = {0};
   void *h = cpu_jit_build_combined(jobs, njobs, comb_dl, sizeof comb_dl);
-  if (dbg)
-    fprintf(stderr, "[jit-pre] combined-compiled %u kernels in %.0f ms (range [%u,%u))\n",
-            njobs, (double)(cg_now_us() - t0) / 1000.0, kid_lo, kid_hi);
 
   // dlsym every kernel's k_<hex> entry point out of the single combined
   // image and populate the in-memory cache so the dispatch loop finds a
@@ -820,7 +796,7 @@ fn void cpu_jit_precompile_range(u32 kid_lo, u32 kid_hi) {
 }
 
 fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  if (!cpu_jit_eligible(ke)) return 0;
+  if (!cpu_jit_eligible(ke) || cpu_jit_walker_only()) return 0;
   // Per-kid fast path: if this kid was already compiled to a JIT fn
   // pointer, reuse it directly -- skips cpu_jit_render_canon (heap
   // walk into a tmpfile) and the source hash entirely.  The kid -> fn
@@ -828,12 +804,8 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   // cached_lift BEFORE the first dispatch, after which a kid never
   // changes shape/source.  Skip the per-kid cache for kids that have
   // never compiled before (KID_JIT_FN[kid] == NULL) -- they fall
-  // through to the full source-hash path which has its own warmup
-  // gate + on-disk dylib reuse.
+  // through to the full source-hash path, which reuses a dylib on disk.
   u32 _kid = (u32)(ke - KERNELS);
-  if (getenv("THVM_CPU_JIT_PARALLEL_DBG"))
-    fprintf(stderr, "[jit-disp] kid=%u kidfn=%p\n", _kid,
-            (KID_JIT_FN != NULL && _kid < KERNELS_CAP) ? KID_JIT_FN[_kid] : (void*)1);
   if (_kid < KERNELS_CAP && KID_JIT_FN != NULL && KID_JIT_FN[_kid] != NULL) {
     CpuJitFn _jfn = (CpuJitFn)KID_JIT_FN[_kid];
     u32 ni = ke->n_inputs;
@@ -887,50 +859,14 @@ fn int cpu_jit_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   CpuJitFn jfn = (s != NULL) ? s->func : NULL;
 
   if (jfn == NULL) {
-    // Warmup gate, ahead of the on-disk dylib: until this kernel has
-    // fired enough times to be worth a clang compile, the walker runs
-    // it.  Mirrors what tinygrad does implicitly via its compile
-    // cache: one-shot kernels pay no compile cost; training-loop
-    // kernels cross the threshold almost immediately.
-    if (!cpu_jit_count_fire(key, ke->n_inputs)) { free(src); return 0; }
     jfn = cpu_jit_build(ke, key, src);
     if (!jfn) { free(src); return 0; }
   }
   free(src);                               // source no longer needed (hit or compiled)
 
-  // Skip the JIT path if any input is a non-contiguous view --
-  // gated behind THVM_JIT_STRIDED=1.  Each unique stride pattern
-  // hits a fresh clang compile (cpu_jit_hash includes view stride
-  // info), which doubles LeNet wallclock for one-shot training
-  // kernels without persistent compile-cache amortization.
-  // Render_uop_c (post-F6) handles non-contig views correctly via
-  // kernel_lift's view.strides path -- the gate is purely a perf
-  // knob, not a correctness one.
-  // Strided/chained-input kernels (the conv im2col unfold reads the
-  // _pool view) are now DEFAULT-JIT'd: the source-keyed cache amortizes
-  // the compile across the whole training run (the old "doubles LeNet
-  // wall" concern assumed the term-loc key never reused the dylib, so
-  // every step recompiled).  THVM_JIT_STRIDED=0 reverts to the walker
-  // for these.  A single conv2 unfold STORE drops from ~1s interpreted
-  // to a compiled strided loop.
-  static int strided_jit_known = 0, strided_jit_enabled = 1;
-  if (!strided_jit_known) {
-    char const *e = getenv("THVM_JIT_STRIDED");
-    if (e != NULL) strided_jit_enabled = (e[0] != '0');
-    strided_jit_known = 1;
-  }
-  for (u32 i = 0; i < ke->n_inputs; i++) {
-    u32 tid = ke->input_tids[i];
-    if (tid == 0 || tid >= TENS_NEXT) continue;
-    if (TENS[tid].nviews > 0 || !TENS[tid].view.contiguous) {
-      if (!strided_jit_enabled) return 0;
-    }
-  }
   // Cache the resolved (kid -> fn) so the next fire of this kid
   // skips render+hash+lookup (the early-return at the top of this
-  // function).  Only cached when jfn is non-NULL AND the per-input
-  // strided-jit gate above didn't reject -- this means a future call
-  // with identical inputs is safe to short-circuit.
+  // function).  Only cached when jfn is non-NULL.
   if (_kid < KERNELS_CAP && KID_JIT_FN != NULL) KID_JIT_FN[_kid] = (void *)jfn;
   // Pack input pointers + numels into local arrays and call the
   // generated function.  Stack-sized to ke->n_inputs (covered by

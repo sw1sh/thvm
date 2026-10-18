@@ -101,22 +101,6 @@ typedef struct {
   View     gather_view;
   u8       gather_nviews;
   View    *gather_prior;       // [gather_nviews]; NULL when nviews == 0
-  // Two-phase capture (THVM_JIT_TWO_PHASE) record-local LOGICAL input refs,
-  // parallel to in_buf_ids.  A physical buf_id is ambiguous across the record
-  // (backends recycle ids; the eager pass frees dead intermediates normally
-  // under two-phase), so each recorded WRITE mints a logical (== its op
-  // index) and each read resolves to the writer current AT THAT RECORD
-  // POSITION -- thvm's equivalent of tinygrad keying on Buffer objects
-  // (engine/jit.py captures Buffer refs, not raw ids).  Values: writer op
-  // index, TP_LEAF_BIT|leaf_idx (pre-capture buffer: weight/const/input), or
-  // TP_REF_NONE.  Unused (stays zeroed) on the pin-path.
-  u32  tp_in_log[JIT_OP_INLINE_INPUTS];
-  u32 *tp_heap_in_log;         // mirrors heap_in_buf_ids when n_inputs > 64
-  // Two-phase: this dispatch's output logical is pinned IN PLACE -- it wrote
-  // over a leaf/held buffer (in-place update, ASSIGN/GATHER endpoint, or an
-  // output aliasing one of its own inputs), so the planner must keep the
-  // recorded physical id (retained at record time) rather than plan a slot.
-  u8   tp_out_held;
 } JitCaptureOp;
 
 typedef struct {
@@ -212,34 +196,6 @@ typedef struct {
   // kernels (an in-place rope applied twice, a device counter bumped twice --
   // the DeepSeekV2 decode-step capture bug).
   u32               trace_capture_skipped;
-  // === Two-phase capture (THVM_JIT_TWO_PHASE, latched at begin) ==============
-  // tinygrad-faithful record-then-plan: the recording pass does NOT retain/pin
-  // dispatch buffers (eager execution frees dead intermediates exactly as
-  // non-capturing -- cold recording peak == eager peak); finalize then
-  // interval-packs the record's dead LOGICAL buffers into a capture-owned
-  // planned working set and rewrites the record onto it (tinygrad
-  // engine/jit.py:44 "combine all captured linears into one, memory plan";
-  // schedule/memory.py first/last-appearance interval reuse).
-  u32               two_phase;
-  // Physical (backend id, buf_id) -> current logical ref: open-addressing map
-  // maintained during recording.  A recorded WRITE to id X re-binds X to the
-  // new logical; a backend re-issuing id X (thvm_jit_twophase_note_alloc, the
-  // Metal freelist re-tenants ids) deletes the stale binding so a later read
-  // of X mints a fresh leaf instead of resolving to a dead logical.
-  u64              *tp_map_keys;    // ((u64)backend_id << 32) | buf_id
-  u32              *tp_map_vals;    // logical ref; TP_REF_NONE = tombstone
-  u32               tp_map_cap;     // power of two
-  u32               tp_map_len;     // live + tombstoned entries (grow trigger)
-  u32               tp_map_live;    // map consulted by note_alloc (recording
-                                    // through finalize classification)
-  // Leaf logicals: buffers first seen as a READ (pre-capture: weights, consts,
-  // declared inputs).  Retained (incref+pin) at mint so their id binding stays
-  // stable to replay -- these are the buffers "kept alive by the WL loader
-  // cache"; the retain is the capture's own hold, bounded by the leaf set (it
-  // never touches recorded intermediates, so it cannot inflate the peak).
-  JitCaptureBufRef *tp_leaves;
-  u32               tp_n_leaves;
-  u32               tp_leaves_cap;
 } JitCapture;
 
 static JitCapture JIT_CAPTURES[JIT_CAPTURE_NSLOTS];
@@ -407,252 +363,6 @@ static void jit_capture_retain_tensor_buf(JitCapture *c, u32 tid) {
   }
   TenDesc *td = &TENS[tid];
   jit_capture_retain_buf(c, td->backend, td->buf_id);
-}
-
-// === Two-phase capture (THVM_JIT_TWO_PHASE) ==================================
-//
-// The tinygrad-faithful capture model (engine/jit.py): RECORD each dispatch at
-// the launch boundary without owning buffer lifetime, then at capture end
-// "combine all captured linears into one, memory plan, and graph split"
-// (jit.py:44).  During recording, eager execution behaves EXACTLY as
-// non-capturing -- dead intermediates are freed normally, so the cold
-// recording peak equals the eager peak (the pin-path instead retains every
-// dispatched buffer and accumulates the sum of all intermediates -- the Krea
-// whole-net 18GB recording OOM).  Finalize interval-packs the record's dead
-// logical buffers (def = writer position, last use = last reader position;
-// tinygrad schedule/memory.py first/last-appearance reuse) into a planned,
-// capture-OWNED working set and rewrites the record onto it; replay then runs
-// the unchanged per-op loop (the cuGraph/ICB layer sits on top, tinygrad's
-// optional runtime/graph/* accelerators).
-//
-// The id-recycling hazard: without record-time retains a freed buf_id can be
-// re-issued mid-record (Metal's freelist re-tenants ids; CPU/CUDA mint fresh
-// ids but the map stays uniform), making earlier record refs ambiguous.
-// tinygrad gets identity from Buffer OBJECTS; thvm's equivalent is a
-// record-local LOGICAL index: each recorded WRITE to physical id X mints a
-// new logical, reads resolve to X's current logical writer at that record
-// position, and jit_twophase_note_alloc invalidates X's binding whenever a
-// backend re-issues the id.
-//
-// Gated (default OFF -- the pin path stays the default until the two-phase
-// path is proven end-to-end); THVM_JIT_TWO_PHASE=1 enables.
-#define TP_REF_NONE  0xFFFFFFFFu
-#define TP_LEAF_BIT  0x80000000u
-
-static int jit_two_phase_env(void) {
-  char const *e = getenv("THVM_JIT_TWO_PHASE");
-  return e != NULL && e[0] == '1';
-}
-
-// Count of captures whose logical map is live (recording or finalizing).
-// Fast early-out for the per-alloc note hook.
-static u32 JIT_TP_MAPS_LIVE = 0;
-
-fn int jit_capture_two_phase_active(void) {
-  return JIT_ACTIVE_SLOT != 0 && JIT_PAUSE_DEPTH == 0
-      && JIT_CAPTURES[JIT_ACTIVE_SLOT].two_phase != 0;
-}
-
-static inline u64 tp_map_key(Backend const *b, u32 buf_id) {
-  return ((u64)b->id << 32) | (u64)buf_id;
-}
-
-static inline u32 tp_map_slot_hash(u64 key, u32 cap) {
-  key ^= key >> 33; key *= 0xff51afd7ed558ccdULL;
-  key ^= key >> 33; key *= 0xc4ceb9fe1a85ec53ULL;
-  key ^= key >> 33;
-  return (u32)key & (cap - 1);
-}
-
-static int tp_map_grow(JitCapture *c) {
-  u32 ncap = c->tp_map_cap ? c->tp_map_cap * 2 : 1024;
-  u64 *nk = (u64 *)calloc(ncap, sizeof(u64));
-  u32 *nv = (u32 *)malloc((size_t)ncap * sizeof(u32));
-  if (nk == NULL || nv == NULL) { free(nk); free(nv); return 0; }
-  memset(nv, 0xFF, (size_t)ncap * sizeof(u32));   // all TP_REF_NONE
-  u32 nlen = 0;
-  for (u32 i = 0; i < c->tp_map_cap; i++) {
-    if (c->tp_map_keys[i] == 0 || c->tp_map_vals[i] == TP_REF_NONE) continue;
-    u32 h = tp_map_slot_hash(c->tp_map_keys[i], ncap);
-    while (nk[h] != 0) h = (h + 1) & (ncap - 1);
-    nk[h] = c->tp_map_keys[i];
-    nv[h] = c->tp_map_vals[i];
-    nlen++;
-  }
-  free(c->tp_map_keys);
-  free(c->tp_map_vals);
-  c->tp_map_keys = nk;
-  c->tp_map_vals = nv;
-  c->tp_map_cap  = ncap;
-  c->tp_map_len  = nlen;
-  return 1;
-}
-
-static void tp_map_put(JitCapture *c, Backend const *b, u32 buf_id, u32 ref) {
-  if (b == NULL || buf_id == 0) return;
-  if (c->tp_map_cap == 0 || c->tp_map_len * 4 >= c->tp_map_cap * 3) {
-    if (!tp_map_grow(c)) return;   // OOM: binding lost; reads mint a leaf
-  }
-  u64 key = tp_map_key(b, buf_id);
-  u32 h = tp_map_slot_hash(key, c->tp_map_cap);
-  while (c->tp_map_keys[h] != 0 && c->tp_map_keys[h] != key) {
-    h = (h + 1) & (c->tp_map_cap - 1);
-  }
-  if (c->tp_map_keys[h] == 0) c->tp_map_len++;
-  c->tp_map_keys[h] = key;
-  c->tp_map_vals[h] = ref;
-}
-
-static u32 tp_map_get(JitCapture const *c, Backend const *b, u32 buf_id) {
-  if (c->tp_map_cap == 0 || b == NULL || buf_id == 0) return TP_REF_NONE;
-  u64 key = tp_map_key(b, buf_id);
-  u32 h = tp_map_slot_hash(key, c->tp_map_cap);
-  while (c->tp_map_keys[h] != 0) {
-    if (c->tp_map_keys[h] == key) return c->tp_map_vals[h];
-    h = (h + 1) & (c->tp_map_cap - 1);
-  }
-  return TP_REF_NONE;
-}
-
-static void tp_map_del(JitCapture *c, Backend const *b, u32 buf_id) {
-  if (c->tp_map_cap == 0 || b == NULL || buf_id == 0) return;
-  u64 key = tp_map_key(b, buf_id);
-  u32 h = tp_map_slot_hash(key, c->tp_map_cap);
-  while (c->tp_map_keys[h] != 0) {
-    if (c->tp_map_keys[h] == key) {
-      c->tp_map_vals[h] = TP_REF_NONE;   // tombstone (key kept for probing)
-      return;
-    }
-    h = (h + 1) & (c->tp_map_cap - 1);
-  }
-}
-
-// Mint a leaf logical for a pre-capture buffer (first seen as a READ).
-// Retains it (incref + jit_pin + preserve-mark) so the id binding stays
-// stable through recording AND every replay -- leaves are weights / consts /
-// declared inputs, bounded and alive at read time, so the retain never
-// touches a recorded intermediate.
-static u32 tp_leaf_mint(JitCapture *c, Backend *b, u32 buf_id) {
-  if (b == NULL || buf_id == 0) return TP_REF_NONE;
-  if (c->tp_n_leaves >= c->tp_leaves_cap) {
-    u32 ncap = c->tp_leaves_cap ? c->tp_leaves_cap * 2 : 512;
-    JitCaptureBufRef *nl = (JitCaptureBufRef *)realloc(
-        c->tp_leaves, (size_t)ncap * sizeof(JitCaptureBufRef));
-    if (nl == NULL) return TP_REF_NONE;
-    c->tp_leaves = nl;
-    c->tp_leaves_cap = ncap;
-  }
-  u32 idx = c->tp_n_leaves++;
-  c->tp_leaves[idx].backend = b;
-  c->tp_leaves[idx].buf_id  = buf_id;
-  jit_capture_retain_buf(c, b, buf_id);
-  return TP_LEAF_BIT | idx;
-}
-
-// Resolve a recorded READ of (b, buf_id) to its logical ref, minting a leaf
-// on first sight.
-static u32 tp_resolve_read(JitCapture *c, Backend *b, u32 buf_id) {
-  if (b == NULL || buf_id == 0) return TP_REF_NONE;
-  u32 ref = tp_map_get(c, b, buf_id);
-  if (ref != TP_REF_NONE) return ref;
-  ref = tp_leaf_mint(c, b, buf_id);
-  if (ref != TP_REF_NONE) tp_map_put(c, b, buf_id, ref);
-  return ref;
-}
-
-// Pin (b, buf_id)'s CURRENT logical in place: an ASSIGN / host-GATHER
-// endpoint (replayed against the live physical id) or an in-place dispatch
-// output.  A write logical is marked held + retained NOW (it is alive at
-// this record position; deferring the retain to finalize could resurrect a
-// freed id).  An unseen buffer mints a leaf.
-static void tp_note_held_buf(JitCapture *c, Backend *b, u32 buf_id) {
-  if (c == NULL || !c->two_phase || b == NULL || buf_id == 0) return;
-  u32 ref = tp_map_get(c, b, buf_id);
-  if (ref == TP_REF_NONE) {
-    ref = tp_leaf_mint(c, b, buf_id);
-    if (ref != TP_REF_NONE) tp_map_put(c, b, buf_id, ref);
-    return;
-  }
-  if (ref & TP_LEAF_BIT) return;                    // already stable
-  if (ref < c->n_ops) c->ops[ref].tp_out_held = 1;
-  jit_capture_retain_buf(c, b, buf_id);
-}
-
-// Recorded-kernel hold counts (two-phase): the captured linear OWNS its
-// kernels the way tinygrad's jit_cache holds each CompiledRunner
-// (engine/jit.py capture list).  Without record-time buffer pins,
-// kernel_gc_sweep strips a kernel's input arrays + cached lift the moment
-// its output buffer dies (the eager-lifetime rule "a re-fire of a stripped
-// kernel just no-ops"), and the replay would then silently no-op that
-// dispatch -- the recorded slot stays zero-filled and everything downstream
-// computes on zeros.  Indexed by kid; lazily allocated on first two-phase
-// record; released per recorded op at capture clear/drop.
-static u32 *JIT_KID_HOLD = NULL;
-
-static void jit_capture_kid_hold(u32 kid) {
-  if (kid == 0 || kid >= KERNELS_CAP) return;
-  if (JIT_KID_HOLD == NULL) {
-    JIT_KID_HOLD = (u32 *)calloc(KERNELS_CAP, sizeof(u32));
-    if (JIT_KID_HOLD == NULL) return;
-  }
-  JIT_KID_HOLD[kid]++;
-}
-
-static void jit_capture_kid_release(u32 kid) {
-  if (JIT_KID_HOLD == NULL || kid == 0 || kid >= KERNELS_CAP) return;
-  if (JIT_KID_HOLD[kid] > 0) JIT_KID_HOLD[kid]--;
-}
-
-// Queried by kernel_gc_sweep: a kid recorded by a live two-phase capture
-// must keep its input arrays + lift for replay even when its output buffer
-// is dead (the planner gave the replay a slot to write instead).
-fn int jit_capture_kid_held(u32 kid) {
-  return JIT_KID_HOLD != NULL && kid < KERNELS_CAP && JIT_KID_HOLD[kid] > 0;
-}
-
-// Backend alloc hook: a re-issued physical id invalidates its stale logical
-// binding (the freed tenant's logical stays planless-dead; the new tenant's
-// first recorded read mints a fresh leaf, its first recorded write mints a
-// fresh logical).  Called from every backend site that issues a buf id
-// (fresh alloc, freelist pop, external wrap).  Must stay active while a
-// two-phase map is live even under jit_capture_pause (autotune bench allocs
-// can re-tenant ids too) and between end-of-recording and finalize
-// classification (the post-capture autotune drain).
-fn void jit_twophase_note_alloc(Backend *b, u32 buf_id) {
-  if (JIT_TP_MAPS_LIVE == 0 || b == NULL || buf_id == 0) return;
-  for (u32 s = 1; s < JIT_CAPTURE_NSLOTS; s++) {
-    JitCapture *c = &JIT_CAPTURES[s];
-    if (!c->in_use || !c->two_phase || !c->tp_map_live) continue;
-    tp_map_del(c, b, buf_id);
-  }
-}
-
-// metal_buf_alloc's callback slot (extern: the Metal TU can't see static
-// `fn` symbols).  NULL until the first two-phase jit_capture_begin arms it;
-// the hook no-ops when no two-phase map is live, so it stays armed.
-void (*thvm_metal_allocnote_hook)(u32 buf_id) = NULL;
-
-#ifdef THVM_HAS_METAL
-static void jit_twophase_note_alloc_metal(u32 buf_id) {
-  jit_twophase_note_alloc(&METAL_BACKEND, buf_id);
-}
-#endif
-
-static void jit_capture_tp_reset(JitCapture *c) {
-  if (c == NULL) return;
-  if (c->tp_map_live && JIT_TP_MAPS_LIVE > 0) JIT_TP_MAPS_LIVE--;
-  c->tp_map_live = 0;
-  free(c->tp_map_keys);
-  free(c->tp_map_vals);
-  c->tp_map_keys = NULL;
-  c->tp_map_vals = NULL;
-  c->tp_map_cap  = 0;
-  c->tp_map_len  = 0;
-  free(c->tp_leaves);
-  c->tp_leaves     = NULL;
-  c->tp_n_leaves   = 0;
-  c->tp_leaves_cap = 0;
-  c->two_phase = 0;
 }
 
 // === capture-time recycle pool (the JIT memory planner, capture side) =======
@@ -844,10 +554,6 @@ fn int jit_caprecycle_push(Backend *b, u32 buf_id) {
   if (b != &METAL_BACKEND || buf_id == 0) return 0;
   JitCapture *c = &JIT_CAPTURES[JIT_ACTIVE_SLOT];
   if (!c->in_use) return 0;
-  // Two-phase records without pinning: dead intermediates go through the
-  // NORMAL free paths (freelist / rollback / fwd_reclaim), never the
-  // capture-parking pool.
-  if (c->two_phase) return 0;
   for (u32 s = 1; s < JIT_CAPTURE_NSLOTS; s++) {
     if (s == JIT_ACTIVE_SLOT) continue;
     JitCapture *o = &JIT_CAPTURES[s];
@@ -883,7 +589,6 @@ fn int jit_caprecycle_push(Backend *b, u32 buf_id) {
 fn u32 jit_caprecycle_pop(Backend *b, u64 nbytes) {
 #ifdef THVM_HAS_METAL
   if (JIT_ACTIVE_SLOT == 0 || JIT_PAUSE_DEPTH > 0) return 0;
-  if (JIT_CAPTURES[JIT_ACTIVE_SLOT].two_phase) return 0;   // eager frees only
   if (b != &METAL_BACKEND || nbytes == 0) return 0;
   // A full pending list would silently drop the replay-zero mark for this
   // adoption (the replay then skips a required zero-fill on a partial-write
@@ -956,10 +661,8 @@ fn void jit_caprecycle_release_hook(Backend *b, u32 buf_id) {
   // TenDesc names the buffer, so no future record op can read it, and the
   // replay re-runs the record in order -- exactly the aliasing the finalize
   // packer computes, applied online so the COLD capture peak stays at max-live
-  // instead of the sum of every intermediate.  (The tinygrad-faithful
-  // end-state is two-phase capture -- plan the schedule before executing --
-  // but that is a multi-week rework; this bounds the peak now.)  Gated so
-  // every other JIT path is byte-identical.
+  // instead of the sum of every intermediate.  Gated so every other JIT path
+  // is byte-identical.
   if (!jit_static_pack_enabled()) return;
   if (JIT_ACTIVE_SLOT == 0 || JIT_PAUSE_DEPTH > 0) {
     JIT_CAPRELEASE_DBG_REJ_INACTIVE++;
@@ -1077,23 +780,12 @@ static void jit_capture_clear_ops(JitCapture *c) {
   }
   jit_capture_release_retained(c);
   jit_capture_clear_input_sites(c);
-  // Release the two-phase kernel holds BEFORE tp_reset clears the flag.
-  if (c->two_phase && c->ops != NULL) {
-    for (u32 i = 0; i < c->n_ops; i++) {
-      if (c->ops[i].kind == JIT_OP_DISPATCH) {
-        jit_capture_kid_release(c->ops[i].kid);
-      }
-    }
-  }
-  jit_capture_tp_reset(c);
   if (c->ops == NULL) {
     return;
   }
   for (u32 i = 0; i < c->n_ops; i++) {
     free(c->ops[i].heap_in_buf_ids);
     c->ops[i].heap_in_buf_ids = NULL;
-    free(c->ops[i].tp_heap_in_log);
-    c->ops[i].tp_heap_in_log = NULL;
     if (c->ops[i].kind == JIT_OP_GATHER) {
       free(c->ops[i].gather_prior);
       c->ops[i].gather_prior = NULL;
@@ -1167,21 +859,11 @@ fn u32 jit_capture_begin(void) {
       }
       jit_capture_clear_ops(&JIT_CAPTURES[i]);
       JIT_CAPTURES[i].in_use   = 1;
-      // Two-phase capture (THVM_JIT_TWO_PHASE): latched per capture so the
-      // record / finalize / gate sites all agree for this capture's lifetime.
-      JIT_CAPTURES[i].two_phase = jit_two_phase_env() ? 1u : 0u;
-      if (JIT_CAPTURES[i].two_phase) {
-        JIT_CAPTURES[i].tp_map_live = 1;
-        JIT_TP_MAPS_LIVE++;
-      }
       // Trace-capture: arm the eager-dispatch skip for THIS capture span only.
       // Latched at begin so the per-fire query (jit_capture_trace_pending) and
       // the finalize-time one-shot replay agree, even if the env var read races.
-      // Two-phase REQUIRES the eager dispatch during recording (the record IS
-      // the executed truth; intermediates must actually flow so they can be
-      // freed eagerly), so trace-capture is forced off on that path.
       JIT_CAPTURES[i].trace_capture_pending =
-          (!JIT_CAPTURES[i].two_phase && jit_trace_capture_enabled()) ? 1u : 0u;
+          jit_trace_capture_enabled() ? 1u : 0u;
       JIT_CAPTURES[i].trace_capture_skipped = 0;
       JIT_ACTIVE_SLOT          = i;
       JIT_PAUSE_DEPTH          = 0;
@@ -1190,30 +872,11 @@ fn u32 jit_capture_begin(void) {
       // Arm the decref-site parking callback (idempotent; no-ops when no
       // capture is active, so it can stay set for the whole session).
       thvm_metal_caprelease_hook = jit_caprecycle_release_hook_metal;
-      // Arm the alloc-note callback for the logical-map invalidation (Metal
-      // re-tenants buf ids on freelist pop / slot reuse; the hook no-ops when
-      // no two-phase map is live).
-      thvm_metal_allocnote_hook = jit_twophase_note_alloc_metal;
 #endif
-      // Open the realize-dedup span (gated by THVM_JIT_REALIZE_DEDUP):
+      // Open the realize-dedup span:
       // the multiple realizes of this captured step share one loc->tid
       // cache so a kernel emitted by realize-1 is reused (not re-emitted
       // + re-recorded) by realize-2/3.  Closed in jit_capture_end{,_with_result}.
-      // SKIPPED under two-phase: the span defers the materialized_loc wipe
-      // (heap release) until capture end -- the opposite of the two-phase
-      // contract that recording behaves EXACTLY as non-capturing.  Cross-
-      // realize re-emits then record as extra ops, which the logical
-      // indirection replays faithfully (the pin-era stale-buf_id divergence
-      // the span worked around cannot occur: a re-realloc is a new logical).
-      // Two-phase NEEDS the span too: without the cross-realize loc->tid
-      // cache, the closure BODY re-inlines a lazy declared input's producer
-      // graph instead of reading the buffer jitArgTids just realized -- the
-      // record then contains NO read of the declared input (zero rebind
-      // sites) and every replay recomputes the capture-time value (the Krea
-      // stale-velocity bug: steps 2..8 returned step-1's v bit-exactly).
-      // The span is pin-free-safe: its lookup's dead-buffer guard re-emits
-      // when an entry's buffer was eagerly freed, so recording lifetime
-      // stays eager; only the CACHE persists across the capture's realizes.
       materialized_loc_jit_span_begin();
       return i;
     }
@@ -1819,7 +1482,6 @@ fn void jit_capture_record(u32 kid, u32 const *in_buf_ids,
         JIT_CAPTURE_OP_CAP);
     return;
   }
-  u32 op_index = c->n_ops;
   JitCaptureOp *op = &c->ops[c->n_ops++];
   op->kind          = JIT_OP_DISPATCH;
   op->replay_skip   = 0;
@@ -1831,8 +1493,6 @@ fn void jit_capture_record(u32 kid, u32 const *in_buf_ids,
   op->out_buf_id    = out_buf_id;
   op->n_inputs      = n_inputs;
   op->heap_in_buf_ids = NULL;
-  op->tp_heap_in_log  = NULL;
-  op->tp_out_held     = 0;
   if (n_inputs <= JIT_OP_INLINE_INPUTS) {
     for (u32 i = 0; i < n_inputs; i++) op->in_buf_ids[i] = in_buf_ids[i];
   } else {
@@ -1845,67 +1505,8 @@ fn void jit_capture_record(u32 kid, u32 const *in_buf_ids,
       op->heap_in_buf_ids[i] = in_buf_ids[i];
     }
   }
-  if (!c->two_phase) {
-    // Pin path: own every dispatched buffer for the capture's lifetime.
-    jit_capture_retain_dispatch_bufs(c, op);
-    return;
-  }
-  // Two-phase: NO retain (eager lifetime rules apply -- fwd_reclaim /
-  // rollback / freelist free dead intermediates exactly as non-capturing).
-  // Hold the KERNEL though: kernel_gc_sweep must not strip a recorded kid's
-  // arrays/lift when its output buffer dies (the replay re-dispatches it).
-  jit_capture_kid_hold(kid);
-  // Resolve each read to its logical writer at THIS record position, then
-  // mint this op's output logical.
-  u32 *lg = op->tp_in_log;
-  if (n_inputs > JIT_OP_INLINE_INPUTS) {
-    op->tp_heap_in_log = (u32 *)malloc((size_t)n_inputs * sizeof(u32));
-    if (op->tp_heap_in_log == NULL) {
-      free(op->heap_in_buf_ids);
-      op->heap_in_buf_ids = NULL;
-      c->n_ops--;
-      return;
-    }
-    lg = op->tp_heap_in_log;
-  }
-  u32 const *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids
-                                               : op->in_buf_ids;
-  for (u32 i = 0; i < n_inputs; i++) {
-    lg[i] = tp_resolve_read(c, jit_dispatch_input_backend(op, i), ids[i]);
-  }
-  // Raw injected program: every argument (reads and its outs-mask
-  // writes alike) is pinned in place -- the opaque kernel body reads /
-  // writes those physical ids, so the planner may neither pack them
-  // nor plan a slot over them.  The out write below still registers
-  // this op as the buffer's logical writer; tp_out_held forces the
-  // held classification.
-  int custom = jit_dispatch_op_custom(op);
-  if (custom) {
-    for (u32 i = 0; i < n_inputs; i++) {
-      tp_note_held_buf(c, jit_dispatch_input_backend(op, i), ids[i]);
-    }
-  }
-  Backend *ob = jit_dispatch_output_backend(op);
-  if (ob != NULL && out_buf_id != 0) {
-    // In-place / held-alias detection: a write over a leaf or held buffer
-    // (or over one of this op's own inputs) must keep its physical id --
-    // outside readers (a weight updated through a kernel, an ASSIGN target)
-    // and the eager pass's read-write aliasing both depend on the location.
-    u32 prev = tp_map_get(c, ob, out_buf_id);
-    int held = 0;
-    if (prev != TP_REF_NONE) {
-      if (prev & TP_LEAF_BIT) held = 1;
-      else if (prev < op_index && c->ops[prev].tp_out_held) held = 1;
-    }
-    for (u32 i = 0; i < n_inputs && !held; i++) {
-      if (ids[i] == out_buf_id
-          && jit_dispatch_input_backend(op, i) == ob) held = 1;
-    }
-    if (custom) held = 1;
-    op->tp_out_held = held ? 1 : 0;
-    if (held) jit_capture_retain_buf(c, ob, out_buf_id);
-    tp_map_put(c, ob, out_buf_id, op_index);
-  }
+  // Own every dispatched buffer for the capture's lifetime.
+  jit_capture_retain_dispatch_bufs(c, op);
 }
 
 // Called from interact_assign_with just before the memcpy when
@@ -1921,24 +1522,12 @@ fn void jit_capture_record_assign(u32 dst_tid, u32 src_tid) {
   op->replay_packed   = 0;
   op->replay_zero     = 0;
   op->heap_in_buf_ids = NULL;
-  op->tp_heap_in_log  = NULL;
-  op->tp_out_held     = 0;
   op->assign_dst_tid  = dst_tid;
   op->assign_src_tid  = src_tid;
   // ASSIGN endpoints are replayed against the LIVE TenDescs (weights /
-  // KV caches) -- retained on BOTH paths so they survive to every replay.
+  // KV caches) -- retained so they survive to every replay.
   jit_capture_retain_tensor_buf(c, dst_tid);
   jit_capture_retain_tensor_buf(c, src_tid);
-  if (c->two_phase) {
-    // Pin the endpoints' current logicals in place: the replay memcpy targets
-    // the physical buffers, so neither may be planned onto a slot.
-    if (dst_tid != 0 && dst_tid < TENS_NEXT) {
-      tp_note_held_buf(c, TENS[dst_tid].backend, TENS[dst_tid].buf_id);
-    }
-    if (src_tid != 0 && src_tid < TENS_NEXT) {
-      tp_note_held_buf(c, TENS[src_tid].backend, TENS[src_tid].buf_id);
-    }
-  }
 }
 
 // Called from materialize_root_alias right after a host-side strided
@@ -1960,8 +1549,6 @@ fn void jit_capture_record_gather(u32 src_tid, u32 dst_buf) {
   op->replay_packed   = 0;
   op->replay_zero     = 0;
   op->heap_in_buf_ids = NULL;
-  op->tp_heap_in_log  = NULL;
-  op->tp_out_held     = 0;
   op->gather_backend  = (void *)sd->backend;
   op->gather_src_buf  = sd->buf_id;
   op->gather_dst_buf  = dst_buf;
@@ -1979,11 +1566,6 @@ fn void jit_capture_record_gather(u32 src_tid, u32 dst_buf) {
   }
   jit_capture_retain_buf(c, sd->backend, sd->buf_id);
   jit_capture_retain_buf(c, sd->backend, dst_buf);
-  // Two-phase: the replay gather reads/writes these physical ids -- pin their
-  // current logicals in place (a volatile kernel-output source stays at its
-  // recorded id; the contiguous dst stays a stable leaf later reads bind to).
-  tp_note_held_buf(c, sd->backend, sd->buf_id);
-  tp_note_held_buf(c, sd->backend, dst_buf);
 }
 
 fn void jit_capture_mark_preserved(void) {
@@ -2270,8 +1852,8 @@ static void jit_capture_sink_assigns(JitCapture *c, Term root) {
 
 // Logical output size of a recorded dispatch, derived from the KernelEntry
 // (dtype x numel) -- stable at finalize even after the eager buffer was freed
-// (the two-phase planner sizes planned slots from this; the eager alloc at
-// fire time used the same formula, so exact-size reuse matches eager layout).
+// (the replay packer sizes its slots from this; the eager alloc at fire time
+// used the same formula, so exact-size reuse matches eager layout).
 static u64 jit_dispatch_output_nbytes(JitCaptureOp const *op) {
   if (op == NULL || op->kind != JIT_OP_DISPATCH
       || op->kid == 0 || op->kid >= KERNELS_NEXT) {
@@ -2749,166 +2331,6 @@ static void jit_capture_pack_replay_temporaries(JitCapture *c, Term root,
 }
 #endif
 
-// === Two-phase finalize: memory-plan the record (tinygrad jit.py:44) ========
-//
-// Runs AFTER the shared reverse-liveness pass (replay_skip already marked).
-// Classifies every live dispatch's output LOGICAL:
-//   - held  (tp_out_held): pinned in place at record time -- keep phys id.
-//   - escaping: still current on its physical id AND alive at finalize (the
-//     result roots + any intermediate a live tensor still holds).  Retained
-//     here so it survives to every replay; refs keep the phys id.
-//   - dead: freed during recording (eager lifetime) -- interval-packed onto a
-//     capture-OWNED planned slot (exact size + backend; def = writer pos,
-//     free_after = last reader pos).  tinygrad schedule/memory.py's
-//     first/last-appearance reuse over the captured linear.
-// Then rewrites the record: planned writers dispatch into their slot buffer
-// (replay_zero mirrors the eager fresh-alloc zero fill) and every read of a
-// planned logical follows it.  Leaves / held / escaping refs keep the
-// recorded physical ids, which the retains have frozen -- so the input-site
-// builder (jit_capture_set_inputs matching declared arg buf_ids) keeps
-// working unchanged on the rewritten record.
-typedef struct {
-  Backend *b;
-  u64      nbytes;
-  u32      free_after;   // last record position whose tenant is still read
-  u32      buf;          // capture-owned buffer (allocated after planning)
-} TpPlanSlot;
-
-static void jit_capture_finalize_two_phase(JitCapture *c) {
-  u32 n = c->n_ops;
-  if (n == 0) return;
-  int dbg = getenv("THVM_JIT_PACK_DEBUG") != NULL;
-  u32 *w_last = (u32 *)malloc((size_t)n * sizeof(u32));
-  u32 *plan   = (u32 *)malloc((size_t)n * sizeof(u32));
-  TpPlanSlot *slots = (TpPlanSlot *)calloc(n ? n : 1, sizeof(TpPlanSlot));
-  if (w_last == NULL || plan == NULL || slots == NULL) {
-    free(w_last); free(plan); free(slots);
-    return;
-  }
-  for (u32 i = 0; i < n; i++) { w_last[i] = i; plan[i] = TP_REF_NONE; }
-  // Last read position per write logical, over the live (non-skipped) record.
-  for (u32 i = 0; i < n; i++) {
-    JitCaptureOp const *op = &c->ops[i];
-    if (op->kind != JIT_OP_DISPATCH || op->replay_skip) continue;
-    u32 const *lg = op->tp_heap_in_log != NULL ? op->tp_heap_in_log
-                                               : op->tp_in_log;
-    for (u32 p = 0; p < op->n_inputs; p++) {
-      u32 r = lg[p];
-      if (r == TP_REF_NONE || (r & TP_LEAF_BIT) || r >= n) continue;
-      if (w_last[r] < i) w_last[r] = i;
-    }
-  }
-  // Classify + interval-assign in record (== replay) order.
-  u32 n_slots = 0;
-  u64 dbg_held = 0, dbg_escaped = 0, dbg_planned = 0;
-  u64 dbg_escaped_bytes = 0, dbg_planned_bytes = 0, dbg_slot_bytes = 0;
-  for (u32 i = 0; i < n; i++) {
-    JitCaptureOp *op = &c->ops[i];
-    if (op->kind != JIT_OP_DISPATCH || op->replay_skip) continue;
-    Backend *ob = jit_dispatch_output_backend(op);
-    u32 phys = op->out_buf_id;
-    if (ob == NULL || phys == 0) continue;
-    if (op->tp_out_held) { dbg_held++; continue; }   // retained at record
-    int alive = tp_map_get(c, ob, phys) == i
-             && ob->buf_refcount != NULL && ob->buf_refcount(phys) > 0;
-    if (alive) {
-      // Escapes the capture (result root, or an intermediate a live tensor
-      // still holds): keep the phys id and retain it for the replays.
-      jit_capture_retain_buf(c, ob, phys);
-      dbg_escaped++;
-      dbg_escaped_bytes += jit_dispatch_output_nbytes(op);
-      continue;
-    }
-    u64 nbytes = jit_dispatch_output_nbytes(op);
-    if (nbytes == 0 || ob->buf_alloc == NULL) {
-      fprintf(stderr,
-          "thvm: jit two-phase -- op%u dead output (buf %u) unplannable "
-          "(nbytes=%llu); replay may read a freed buffer\n",
-          i, phys, (unsigned long long)nbytes);
-      continue;
-    }
-    u32 s;
-    for (s = 0; s < n_slots; s++) {
-      if (slots[s].b == ob && slots[s].nbytes == nbytes
-          && slots[s].free_after < i) break;
-    }
-    if (s == n_slots) {
-      slots[n_slots].b      = ob;
-      slots[n_slots].nbytes = nbytes;
-      slots[n_slots].buf    = 0;
-      n_slots++;
-      dbg_slot_bytes += nbytes;
-    }
-    slots[s].free_after = w_last[i];
-    plan[i] = s;
-    dbg_planned++;
-    dbg_planned_bytes += nbytes;
-  }
-  // Allocate the planned working set as capture-OWNED buffers.  The alloc's
-  // own reference belongs to the capture (no extra incref); pin + preserve +
-  // track in retained so rollback/fwd_reclaim never touch it and
-  // jit_capture_drop's release frees it.
-  for (u32 s = 0; s < n_slots; s++) {
-    slots[s].buf = slots[s].b->buf_alloc(slots[s].nbytes);
-    if (slots[s].buf == 0) {
-      fprintf(stderr,
-          "thvm: jit two-phase -- planned slot alloc failed (%llu bytes)\n",
-          (unsigned long long)slots[s].nbytes);
-      continue;
-    }
-    if (slots[s].b->buf_jit_pin != NULL
-        && getenv("THVM_JIT_NO_PIN") == NULL) {
-      slots[s].b->buf_jit_pin(slots[s].buf);
-    }
-    if (c->n_retained < JIT_CAPTURE_RETAIN_CAP) {
-      c->retained[c->n_retained].backend = slots[s].b;
-      c->retained[c->n_retained].buf_id  = slots[s].buf;
-      c->n_retained++;
-    }
-    jit_capture_mark_buf(slots[s].b, slots[s].buf);
-  }
-  // Rewrite the record onto the plan.
-  for (u32 i = 0; i < n; i++) {
-    JitCaptureOp *op = &c->ops[i];
-    if (op->kind != JIT_OP_DISPATCH || op->replay_skip) continue;
-    if (plan[i] != TP_REF_NONE && slots[plan[i]].buf != 0) {
-      op->out_buf_id  = slots[plan[i]].buf;
-      // Fresh-alloc semantics per replay: the eager pass wrote into a
-      // zero-fresh buffer, so a partial-write kernel's unwritten region read
-      // as zeros.  Zero the shared slot before each planned writer fires.
-      op->replay_zero = 1;
-    }
-    u32 *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids
-                                           : op->in_buf_ids;
-    u32 const *lg = op->tp_heap_in_log != NULL ? op->tp_heap_in_log
-                                               : op->tp_in_log;
-    for (u32 p = 0; p < op->n_inputs; p++) {
-      u32 r = lg[p];
-      if (r == TP_REF_NONE || (r & TP_LEAF_BIT) || r >= n) continue;
-      if (plan[r] != TP_REF_NONE && slots[plan[r]].buf != 0) {
-        ids[p] = slots[plan[r]].buf;
-      }
-    }
-  }
-  if (dbg) {
-    fprintf(stderr,
-        "[jit_twophase] ops=%u leaves=%u held=%llu escaped=%llu (%.1fMB) "
-        "planned=%llu (%.1fMB) -> slots=%u (%.1fMB working set)\n",
-        n, c->tp_n_leaves,
-        (unsigned long long)dbg_held,
-        (unsigned long long)dbg_escaped, dbg_escaped_bytes / 1.0e6,
-        (unsigned long long)dbg_planned, dbg_planned_bytes / 1.0e6,
-        n_slots, dbg_slot_bytes / 1.0e6);
-  }
-  // The logical map's job is done (classification consumed it); stop the
-  // per-alloc invalidation hook from scanning this capture.
-  if (c->tp_map_live && JIT_TP_MAPS_LIVE > 0) JIT_TP_MAPS_LIVE--;
-  c->tp_map_live = 0;
-  free(w_last);
-  free(plan);
-  free(slots);
-}
-
 static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
   if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) {
     return;
@@ -2933,26 +2355,6 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
   }
 
   int noskip = jit_replay_noskip();
-  // Two-phase, LAZY-return capture: the closure returned a lazy graph whose
-  // root resolves to NO tensor buffers (n_needed == 0 -- a lazy TTerm root,
-  // or no roots at all) and recorded no ASSIGN anchors, so nothing seeds
-  // the reverse-liveness pass -- every dispatch would be replay_skip'd, the
-  // replay a no-op, and the caller's cached lazy result would re-realize
-  // off STALE captured leaves on every warm call (the Euler-sampler
-  // divergence; the pin path segfaults on this shape).  Keep the whole
-  // record live instead: the replay refreshes every recorded buffer, and
-  // the un-recorded lazy tail re-computes eagerly per call off the
-  // refreshed values -- correct, just partially eager.  The unseeded
-  // WITH-assign case (the training-step idiom) keeps its assign-anchored
-  // liveness, and the pin path is untouched (its no-root skip behaviour is
-  // load-bearing for the bench-overhead measurements).
-  if (c->two_phase && n_needed == 0) {
-    int has_assign = 0;
-    for (u32 i = 0; i < c->n_ops && !has_assign; i++) {
-      if (c->ops[i].kind == JIT_OP_ASSIGN) has_assign = 1;
-    }
-    if (!has_assign) noskip = 1;
-  }
   for (u32 rev = c->n_ops; rev > 0; rev--) {
     JitCaptureOp *op = &c->ops[rev - 1];
     op->replay_skip = 0;
@@ -3008,17 +2410,6 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
         break;
       }
     }
-  }
-
-  // Two-phase (THVM_JIT_TWO_PHASE): memory-plan the record and jump to the
-  // shared graph-eligibility flags.  Every pass in between is pin-path only:
-  // assign-sink and the packer redirect + decref buffers the capture owns,
-  // the retain rebalance re-retains recorded phys ids (dead under two-phase
-  // -- re-increfing a freed id resurrects garbage), and drop_dead_output
-  // decrefs references never taken.
-  if (c->two_phase) {
-    jit_capture_finalize_two_phase(c);
-    goto graph_flags;
   }
 
   jit_capture_sink_assigns(c, has_result);
@@ -3261,10 +2652,7 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
   // two live dispatches (the scheduler recycled it across the captured stream).
   // After the rename pass above this should no longer trip for pure-DISPATCH
   // Metal captures.  O(n^2) over live dispatches, but n is the per-step kernel
-  // count (~hundreds) and this runs once at capture.  Shared with the
-  // two-phase path (its planned-slot reuse is exactly such a recycle; the ICB
-  // orders it with setBarrier, per-op replay orders it trivially).
-graph_flags:
+  // count (~hundreds) and this runs once at capture.
   c->metal_graph_unsafe = 0;
   c->metal_graph_recycle = 0;
   for (u32 i = 0; i < c->n_ops && !c->metal_graph_recycle; i++) {
@@ -3656,27 +3044,6 @@ static void jit_capture_build_input_sites(JitCapture *c) {
       // rebinding so the fresh call writes the fresh buffer.
       for (u32 k = 0; k < c->n_inputs_decl; k++) {
         if (op->out_buf_id != c->input_buf_ids[k]) continue;
-        // Two-phase: an op that PRODUCES a declared input (writes it
-        // without reading it) is the caller-side realize of the argument,
-        // recorded because jitCaptureOnce realizes args inside the capture
-        // scope.  Replaying it would recompute the CAPTURE-time value into
-        // the freshly rebound input buffer, clobbering the caller's new
-        // argument (the Krea sampler replayed stale z/t/tvec forever).
-        // The fresh input IS the value: skip the op on replay.  A genuine
-        // in-place use (the op also READS the declared input) keeps the
-        // OUT-site rebind.
-        if (c->two_phase) {
-          int reads_it = 0;
-          u32 const *rids = op->heap_in_buf_ids != NULL
-                          ? op->heap_in_buf_ids : op->in_buf_ids;
-          for (u32 j = 0; j < op->n_inputs && !reads_it; j++) {
-            if (rids[j] == c->input_buf_ids[k]) reads_it = 1;
-          }
-          if (!reads_it) {
-            c->ops[i].replay_skip = 1;
-            break;
-          }
-        }
         if (pass == 1) {
           c->sites[count].op_index   = i;
           c->sites[count].pos        = JIT_INPUT_OUT_POS;
@@ -3692,25 +3059,6 @@ static void jit_capture_build_input_sites(JitCapture *c) {
       if (c->sites == NULL) { c->n_sites = 0; return; }
     } else {
       c->n_sites = count;
-    }
-  }
-  // THVM_JIT_SITES_TRACE=1: per declared JIT input, how many rebind sites
-  // were found.  A declared input with 0 sites is NOT rebound on replay --
-  // it silently keeps its capture-time bytes.  The usual cause: the input
-  // is a lazy / non-contiguous tensor that a kernel stages into an internal
-  // copy whose tid differs from the declared input, so input_replace finds
-  // no matching buf_id (realize the input contiguous to fix).
-  if (getenv("THVM_JIT_SITES_TRACE") != NULL) {
-    fprintf(stderr, "[jit-sites] n_inputs_decl=%u n_sites=%u n_ops=%u\n",
-            c->n_inputs_decl, c->n_sites, c->n_ops);
-    for (u32 k = 0; k < c->n_inputs_decl; k++) {
-      u32 sc = 0;
-      for (u32 s = 0; s < c->n_sites; s++) if (c->sites[s].slot_index == k) sc++;
-      fprintf(stderr, "  decl[%u] buf=%u -> %u site(s):", k, c->input_buf_ids[k], sc);
-      for (u32 s = 0; s < c->n_sites; s++)
-        if (c->sites[s].slot_index == k)
-          fprintf(stderr, " op%u/pos%d", c->sites[s].op_index, (int)c->sites[s].pos);
-      fprintf(stderr, "\n");
     }
   }
 }
@@ -3808,8 +3156,6 @@ fn u32 jit_replay(u32 slot) {
   if (c->n_ops == 0) return 0;
   HOT_JIT_REPLAY_CALLS++;
   backend_dispatch_begin_all();
-  int trace = getenv("THVM_JIT_REPLAY_TRACE") != NULL;
-  if (trace) fprintf(stderr, "[replay] start n_ops=%u\n", c->n_ops);
 
 #ifdef THVM_HAS_CUDA
   // CUDA Graph fast path: if every op is a CUDA-backend dispatch/copy
@@ -3835,7 +3181,6 @@ fn u32 jit_replay(u32 slot) {
   int cuda_graph_replayed = 0;
   int cuda_capturing = 0;
   if (cuda_only && cuda_jit_graph_replay(slot) == 0) {
-    if (trace) fprintf(stderr, "[replay] CUDA graph hit (n_ops=%u)\n", c->n_ops);
     cuda_graph_replayed = 1;
     HOT_JIT_GRAPH_RUNS++;
     for (u32 i = 0; i < c->n_ops; i++) {
@@ -3854,7 +3199,6 @@ fn u32 jit_replay(u32 slot) {
     // Cache miss -- capture into a CUgraph as we go through the op loop.
     if (cuda_jit_graph_capture_begin() == 0) {
       cuda_capturing = 1;
-      if (trace) fprintf(stderr, "[replay] CUDA graph capturing slot=%u\n", slot);
     }
   }
   if (cuda_graph_replayed) {
@@ -3883,18 +3227,13 @@ fn u32 jit_replay(u32 slot) {
     }
     switch (op->kind) {
       case JIT_OP_DISPATCH: {
-        if (trace) fprintf(stderr, "[replay] op%u DISPATCH kid=%u out_buf=%u\n",
-                           i, op->kid, op->out_buf_id);
         if (op->kid == 0 || op->kid >= KERNELS_NEXT) {
-          if (trace) fprintf(stderr, "[replay]   skip: invalid kid\n");
           i++;
           continue;
         }
         KernelEntry *ke = &KERNELS[op->kid];
         Backend *b = TENS[ke->output_tid].backend;
         if (b == NULL || b->dispatch_kernel == NULL) {
-          if (trace) fprintf(stderr, "[replay]   skip: ke->output_tid=%u backend=%p\n",
-                             ke->output_tid, (void*)b);
           i++;
           continue;
         }
@@ -3919,7 +3258,6 @@ fn u32 jit_replay(u32 slot) {
           b->buf_zero(op->out_buf_id);
         }
         int rc = b->dispatch_kernel(ke, ids, op->out_buf_id);
-        if (trace) fprintf(stderr, "[replay]   dispatch rc=%d\n", rc);
         if (rc == 0) {
           HOT_KERNEL_FIRES++;
           HOT_JIT_REPLAY_DISPATCHES++;
@@ -3930,12 +3268,8 @@ fn u32 jit_replay(u32 slot) {
       case JIT_OP_ASSIGN: {
         HOT_JIT_REPLAY_ASSIGNS++;
         u32 dst = op->assign_dst_tid, src = op->assign_src_tid;
-        if (trace) fprintf(stderr, "[replay] op%u ASSIGN dst_tid=%u src_tid=%u\n",
-                           i, dst, src);
         if (dst == 0 || dst >= TENS_NEXT) break;
         if (src == 0 || src >= TENS_NEXT) break;
-        if (trace) fprintf(stderr, "[replay]   dst_buf=%u src_buf=%u\n",
-                           TENS[dst].buf_id, TENS[src].buf_id);
         TenDesc *dd = &TENS[dst], *sd = &TENS[src];
         if (dd->backend == NULL || dd->backend != sd->backend) break;
         if (sd->view.numel != dd->view.numel) break;
@@ -4016,8 +3350,6 @@ fn u32 jit_replay(u32 slot) {
           default: free(raw); free(dst); raw = NULL; dst = NULL; break;
         }
         if (dst != NULL) b->buf_write(op->gather_dst_buf, dst, dst_bytes);
-        if (trace) fprintf(stderr, "[replay] op%u GATHER src=%u dst=%u numel=%u dt=%u\n",
-                           i, op->gather_src_buf, op->gather_dst_buf, numel, op->gather_dtype);
         free(raw);
         free(dst);
         ITRS++;
@@ -4029,9 +3361,8 @@ fn u32 jit_replay(u32 slot) {
 #ifdef THVM_HAS_CUDA
   if (cuda_capturing) {
     if (cuda_jit_graph_capture_end_and_launch(slot) != 0) {
-      if (trace) fprintf(stderr, "[replay] CUDA graph capture FAILED -- per-op work already ran on capture stream, results may be missing\n");
-    } else if (trace) {
-      fprintf(stderr, "[replay] CUDA graph captured + launched slot=%u\n", slot);
+      fprintf(stderr, "thvm: CUDA graph capture failed for JIT slot %u; the "
+                      "replayed results may be missing\n", slot);
     }
   }
 #endif

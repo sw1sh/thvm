@@ -5,6 +5,12 @@
 // addresses are 32-bit signed, an empty gather or scatter is the
 // frontend's early return, and a symbolic (kvar) extent has no lowering.
 
+// Indexed ops (UOP_GATHER / UOP_SCATTER; uop/gather.c, uop/scatter.c).
+// uop_gather / uop_scatter validate their operands and return 0 when a
+// check fails; the *_node forms skip the checks, for rebuilding a node
+// whose sources a rewrite replaced.  uop_indexed_shape_ok is the extent
+// check both share.  scatter_identity_bits writes the identity of `kind`
+// over `dtype` as a CONST payload and returns 0 when none exists.
 fn int uop_indexed_shape_ok(Shape const *s) {
   u64 numel = 1;
   for (u32 d = 0; d < s->ndim; d++) {

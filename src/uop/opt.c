@@ -12,6 +12,9 @@
 // Hash-cons via uop_mov_cache: identical (target, kind, factor)
 // tuples share heap loc.
 
+// Attach an optimisation directive (UOP_OPT_UNROLL, UPCAST, TC,
+// LOCAL, GROUP_REDUCE) to `target`.  `factor` is 0 when the kind
+// carries no scalar (TC, LOCAL).  Hash-cons by (target, kind, factor).
 fn Term uop_opt(Term target, u32 kind, u32 factor) {
   u32 args[4] = { (u32)target, (u32)(target >> 32), kind, factor };
   u64 key = uop_mov_hash(UOP_OPT, 0, args, 4);

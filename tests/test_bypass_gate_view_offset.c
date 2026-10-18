@@ -17,11 +17,6 @@
 
 enum { V = 8, D = 16 };
 
-static int interp_mode(void) {
-  char const *e = getenv("THVM_CPU_JIT_WARMUP");
-  return e != NULL && atoi(e) > 1;
-}
-
 static u32 mk(u32 ndim, u32 const *dims, f32 const *data) {
   Shape s = {0};
   s.ndim = ndim;
@@ -75,7 +70,7 @@ static void row_sum_case(u32 t) {
       continue;
     }
     u32 kind = cg_kernel_dispatch_kind(k);
-    CHECK_EQ(kind, interp_mode() ? KDISPATCH_INTERPRETER : KDISPATCH_JIT);
+    CHECK_EQ(kind, cpu_jit_walker_only() ? KDISPATCH_INTERPRETER : KDISPATCH_JIT);
     for (u32 i = 0; i < ke->n_inputs; i++) {
       u32 in = ke->input_tids[i];
       if (in != 0 && in < TENS_NEXT && TENS[in].view.offset != 0) {

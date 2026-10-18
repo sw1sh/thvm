@@ -25,6 +25,15 @@
 // program, no fused dispatch, just the backend's buffer copy or a
 // round-trip via its buf_read + buf_write pair.
 
+// Wnf-fired ASSIGN(dst_TEN, src_TEN): memcpy src.buf -> dst.buf, return
+// dst Term.  Eligible (is_redex true) only when both children resolve
+// to TAG_TEN -- otherwise wnf walks src's producer first.  Used as the
+// in-place mutation primitive for optimizer loops; weights stay
+// tid-stable while their buffer contents update each iteration.
+//
+// Two entries: _with takes already-resolved TENs (used by wnf/_.c so
+// the heap cells stay un-mutated for re-fire); the no-suffix variant
+// reads the heap and delegates.
 fn Term interact_assign_with(Term dst, Term src) {
   if (term_tag(dst) != TAG_TEN || term_tag(src) != TAG_TEN) return dst;
 

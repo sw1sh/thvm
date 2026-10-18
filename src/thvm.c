@@ -187,7 +187,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "codegen/apply_opt.c"
 #include "codegen/propose.c"
 #include "codegen/tile_anno.c"
-#include "codegen/cg.c"
 #include "codegen/profile.c"
 #include "codegen/render_metal.c"
 #include "codegen/render_uop.c"
@@ -315,7 +314,6 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "schedule/tile.c"
 #include "schedule/kernel_alloc.c"
 #include "schedule/uop_meta.c"
-#include "schedule/sched_prof.c"
 #include "schedule/consumer_count.c"
 #include "schedule/bufferize_classify.c"
 // Phase 2 (ideal_pipeline_v2): unified rangeify pass. Must follow
@@ -351,7 +349,9 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "interact/dup_nod.c"
 #include "interact/op2_sup.c"
 #include "interact/op2_num_sup.c"
+#include "interact/op2_num_num.c"
 #include "interact/app_mat_sup.c"
+#include "interact/app_mat.c"
 #include "interact/app_bri.c"
 #include "interact/app_pri.c"
 #include "interact/app_sup.c"
@@ -652,19 +652,6 @@ Backend *ctx_ensure_backend(i32 dev) {
 }
 
 void thvm_init(void) {
-  // THVM_FUSE_CONV_BWD now defaults ON: fuse the conv-backward col2im into
-  // a strided view instead of materializing it (tinygrad never materializes
-  // it -- docs/thvm_vs_tinygrad.md SS3.7).  The placeholder reshape round-
-  // trip (schedule/indexing.c apply_movement_op_reshape_composed) +
-  // fold_add_divmod_recombine (uop/index_simplify.c, ported from tinygrad
-  // symbolic.py:28-49) collapse the unfold+col2im split/re-split so the
-  // fused read iterates the correct strided count -- no 21-trillion-element
-  // cross-product.  The three gate readers (ru_fuse_conv_bwd_enabled,
-  // uop_valid_fold_enabled, bufferize_fuse_conv_bwd_enabled) all test
-  // getenv("THVM_FUSE_CONV_BWD")=="1", so default the env here (only if the
-  // caller left it unset) to flip them together.  An explicit
-  // THVM_FUSE_CONV_BWD=0 still opts OUT (back to the materializing path).
-  setenv("THVM_FUSE_CONV_BWD", "1", 0);
   init_ctx_arrays(CURRENT_CTX);
   // Bind the main thread's WNF spine routing to the just-allocated
   // ctx state.  Worker threads spawned by the parallel pool re-bind
@@ -893,6 +880,9 @@ u32 thvm_context_current(void) {
     return 0;
 }
 
+// Free everything in the given slot.  Slot 0 (default) is a no-op
+// (same as thvm_free) since it cannot be re-created without leaking
+// the static DEFAULT_CTX_STORAGE.
 void thvm_context_destroy(u32 slot) {
     if (slot == 0)              return;       // default slot owns DEFAULT_CTX_STORAGE
     if (slot >= CONTEXTS_CAP)   return;

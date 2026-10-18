@@ -19,31 +19,16 @@ processes.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_scatter_amax_parity.py -q
 """
-import os
-import pathlib
-import re
-import subprocess
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Device, Tensor  # noqa: E402
-from thvm import tensor as thvm_tensor  # noqa: E402
-from thvm.dtypes import dtypes  # noqa: E402
+import helpers
+from thvm import Device, Tensor
+from thvm import tensor as thvm_tensor
+from thvm.dtypes import dtypes
 
 NATIVE = Device.DEFAULT == "CPU"
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
 
 
 # ---- the dense reference ------------------------------------------------------
@@ -195,7 +180,7 @@ ROUTE_CASES = [
     ("int32-amin-self", lambda: case_int32("amin", True)),
     ("segment-max", case_segment_max),
 ]
-if _have_tg():
+if helpers.have_tinygrad():
     ROUTE_CASES += [
         ("tg-amax-dim-1-noself", lambda: case_extreme_tinygrad("amax", -1, False, seed=5)),
         ("tg-amin-dim1-self", lambda: case_extreme_tinygrad("amin", 1, True, seed=6)),
@@ -215,7 +200,7 @@ class TestScatterExtreme(unittest.TestCase):
                                           seed=seed):
                             case_extreme(reduce, dim, include_self, seed)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_against_tinygrad(self):
         for reduce in ("amax", "amin"):
             for dim in (0, 1, -1):
@@ -312,52 +297,10 @@ class TestScatterExtremeHost(unittest.TestCase):
 
 # ---- both CPU routes ----------------------------------------------------------
 
-_CHILD = r"""
-import os, sys, traceback
-sys.path.insert(0, os.environ["THVM_PY"])
-sys.path.insert(0, os.environ["THVM_TESTS"])
-import test_scatter_amax_parity as t
-for name, fn in t.ROUTE_CASES:
-    try:
-        fn()
-        print(f"CASE {name} ok=True", flush=True)
-    except Exception:
-        print(f"CASE {name} ok=False " + traceback.format_exc().replace(chr(10), " | "), flush=True)
-"""
-
-
-def _run_child(extra_env):
-    env = dict(os.environ, DEV="cpu",
-               THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
-               THVM_TESTS=str(pathlib.Path(__file__).resolve().parent),
-               THVM_CPU_UOP_WALK_TRACE="1", **extra_env)
-    return subprocess.run([sys.executable, "-c", _CHILD], env=env,
-                          capture_output=True, text=True, timeout=1800)
-
-
 @unittest.skipUnless(NATIVE, "native scatter runs on the CPU backend")
-class TestBothRoutes(unittest.TestCase):
-    def _check_child(self, out):
-        lines = [ln for ln in out.stdout.splitlines() if ln.startswith("CASE ")]
-        self.assertEqual(len(lines), len(ROUTE_CASES),
-                         f"child failed:\n{out.stdout}\n{out.stderr[-4000:]}")
-        bad = [ln for ln in lines if "ok=False" in ln]
-        self.assertEqual(bad, [])
-
-    def test_c_jit_route(self):
-        out = _run_child({"THVM_CPU_JIT_WARMUP": "0"})
-        self._check_child(out)
-        walked = re.findall(r"^uop_walk: ", out.stderr, re.M)
-        self.assertEqual(walked, [], "a kernel fell to the walker: the JIT did not run")
-
-    def test_uop_walker_route(self):
-        out = _run_child({"THVM_CPU_JIT_WARMUP": "1000000000"})
-        self._check_child(out)
-        walked = re.findall(r"^uop_walk: n_inputs=\d+ root_op=\d+ rc=(\d)$",
-                            out.stderr, re.M)
-        self.assertGreater(len(walked), len(ROUTE_CASES),
-                           "the walker did not execute the kernels")
-        self.assertEqual(set(walked), {"1"})
+class TestBothRoutes(helpers.BothRoutes, unittest.TestCase):
+    MODULE = "test_scatter_amax_parity"
+    ROUTE_CASES = ROUTE_CASES
 
 
 if __name__ == "__main__":

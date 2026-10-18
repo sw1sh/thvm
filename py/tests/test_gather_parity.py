@@ -13,27 +13,17 @@ On the CPU backend these run thvm's native UOP_GATHER / UOP_SCATTER, so the
 gradients are real (scatter-adds).  The tinygrad-side checks also run
 against tinygrad itself when it is importable.
 """
-import os
-import sys
 import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
-from thvm import Context, Device, Tensor, TinyJit, nn  # noqa: E402
-from thvm.dtypes import dtypes  # noqa: E402
-from thvm.tensor import _TH  # noqa: E402
-from thvm.thvm import K  # noqa: E402
+import helpers
+from thvm import Context, Device, Tensor, TinyJit, nn
+from thvm.dtypes import dtypes
+from thvm.tensor import _TH
+from thvm.thvm import K
 
 NATIVE = Device.DEFAULT == "CPU"
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
 
 
 def np_gather(x, dim, idx):
@@ -122,7 +112,7 @@ class TestGather(unittest.TestCase):
         self.assertEqual(out.shape, (0, 3))
         self.assertEqual(out.numpy().shape, (0, 3))
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_gather_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         rng = np.random.default_rng(1)
@@ -195,7 +185,7 @@ class TestIndex(unittest.TestCase):
         np.testing.assert_allclose(t.grad.numpy(), np_scatter_add((6, 4), 0, np.repeat(
             wrapped[:, None], 4, axis=1), g), rtol=1e-6)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_index_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         data = np.random.default_rng(6).random((16, 5)).astype(np.float32)
@@ -314,7 +304,7 @@ class TestEmbedding(unittest.TestCase):
             idx.assign(Tensor(ids)).realize()
             np.testing.assert_array_equal(fwd(idx).numpy(), np_rows(w, ids))
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_embedding_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         from tinygrad import nn as tgnn

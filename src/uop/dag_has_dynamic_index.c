@@ -19,6 +19,8 @@ static void dyn_index_push_srcs(UOpWalk *w, Term t) {
   }
 }
 
+// 1 iff an INDEX_E sits inside the address of an INDEX_E or STORE under
+// `root`: the address depends on loaded data (gather / scatter).
 fn int uop_dag_has_dynamic_index(Term root) {
   UOpWalk all  = {0};
   UOpWalk addr = {0};

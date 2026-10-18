@@ -1,26 +1,21 @@
-// test_cpu_jit_warmup.c - THVM_CPU_JIT_WARMUP governs every CPU JIT path.
-//
-// A kernel runs compiled only from the fire at which its source has fired
-// THVM_CPU_JIT_WARMUP times; the UOp walker runs the fires before it.  The
-// batched precompile at realize, the in-memory compile cache and the dylibs
-// on disk under /tmp all stand behind that gate, so a threshold no run
-// reaches (1000000000, which walker-mode test runs set) sends the kernel to
-// the walker even when its dylib is on disk.
+// test_cpu_jit_warmup.c - THVM_CPU_JIT_WARMUP (any nonzero value) sends
+// every kernel the CPU JIT would take to the UOp walker.  The batched
+// precompile at realize, the in-memory compile cache and the dylibs on disk
+// under /tmp all stand behind it, so the kernel walks even when its dylib is
+// on disk.  Walker-mode test runs set 1000000000.
 //
 // One elementwise kernel, out = a * b + salt, is realized through
-// thvm_realize in five child processes, one per phase, since the JIT reads
+// thvm_realize in four child processes, one per phase, since the JIT reads
 // its knobs once per process.  The salt is drawn per run, so the kernel's
 // source, its JIT key and every cached artifact of it are new to the run:
-//   warm-precompile   warmup 0, precompile on: the combined cold-start
-//                     dylib compiles the kernel, no per-kernel dylib;
-//   gated-precompile  warmup 1000000000, precompile on, that combined dylib
+//   warm-precompile   knob 0, precompile on: the combined cold-start dylib
+//                     compiles the kernel, no per-kernel dylib;
+//   gated-precompile  knob 1000000000, precompile on, that combined dylib
 //                     on disk: three realizes walk;
-//   threshold         warmup 3, precompile on: fires 1 and 2 walk, fires 3
-//                     and 4 run compiled;
-//   warm-lazy         warmup 0, precompile off: the dispatch compiles the
+//   warm-lazy         knob 0, precompile off: the dispatch compiles the
 //                     per-kernel dylib;
-//   gated-lazy        warmup 1000000000, precompile off, that per-kernel
-//                     dylib on disk: three realizes walk.
+//   gated-lazy        knob 1, precompile off, that per-kernel dylib on disk:
+//                     three realizes walk.
 // The route of each fire is the dispatch kind the CPU ladder records.
 #include "../src/thvm.c"
 #include "test.h"
@@ -151,14 +146,6 @@ static void wg_gated_precompile(void) {
   }
 }
 
-static void wg_threshold(void) {
-  u32 const want[4] = { KDISPATCH_INTERPRETER, KDISPATCH_INTERPRETER,
-                        KDISPATCH_JIT, KDISPATCH_JIT };
-  for (u32 r = 0; r < 4; r++) {
-    wg_expect_route(wg_realize(), want[r]);
-  }
-}
-
 static void wg_warm_lazy(void) {
   u32 kid = wg_realize();
   wg_expect_route(kid, KDISPATCH_JIT);
@@ -202,9 +189,8 @@ int main(void) {
 
   wg_phase("cpu-jit-warmup/warm-precompile",  "0",          "1", wg_warm_precompile);
   wg_phase("cpu-jit-warmup/gated-precompile", "1000000000", "1", wg_gated_precompile);
-  wg_phase("cpu-jit-warmup/threshold",        "3",          "1", wg_threshold);
   wg_phase("cpu-jit-warmup/warm-lazy",        "0",          "0", wg_warm_lazy);
-  wg_phase("cpu-jit-warmup/gated-lazy",       "1000000000", "0", wg_gated_lazy);
+  wg_phase("cpu-jit-warmup/gated-lazy",       "1",          "0", wg_gated_lazy);
 
   TEST_REPORT();
 }

@@ -60,15 +60,12 @@ static u32 propose_reduce_axis_size(KernelEntry const *ke) {
 
 // Index of the reduce axis -- the last axis of type KAX_REDUCE.
 // Returns 0xFF if none (caller checks `< n_axes`).
-// Reads through tile_anno_axis_count_or_kernelaxes / tile_anno_axis,
-// which derive axis info from cached_lift.store_root.
 static u8 propose_reduce_axis_index(KernelEntry const *ke) {
-  u32 n = tile_anno_axis_count_or_kernelaxes(ke);
-  if (n == 0) return 0xFF;
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  u32 n = axes_collect(ke, kax, ext, MAX_AXES);
   for (i32 i = (i32)n - 1; i >= 0; i--) {
-    TileAxisInfo info;
-    if (tile_anno_axis_or_kernelaxes(ke, (u32)i, &info)
-        && info.kax_type == KAX_REDUCE) {
+    if (kax[i] == KAX_REDUCE) {
       return (u8)i;
     }
   }
@@ -118,12 +115,12 @@ static u32 propose_reduce_axis_id(KernelEntry const *ke, u32 *out_extent) {
 // kernels look untunable even when an inner axis has plenty of work.
 static u8 propose_loop_axis_for_factor(KernelEntry const *ke, u8 start,
                                        u32 factor) {
-  u32 n = tile_anno_axis_count_or_kernelaxes(ke);
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  u32 n = axes_collect(ke, kax, ext, MAX_AXES);
   for (u8 i = start; i < n; i++) {
-    TileAxisInfo info;
-    if (!tile_anno_axis_or_kernelaxes(ke, i, &info)) continue;
-    if (info.kax_type != KAX_LOOP) continue;
-    if (factor <= info.extent && info.extent % factor == 0) {
+    if (kax[i] != KAX_LOOP) continue;
+    if (factor <= ext[i] && ext[i] % factor == 0) {
       return i;
     }
   }
@@ -134,8 +131,8 @@ static u8 propose_loop_axis_for_factor(KernelEntry const *ke, u8 start,
 // first KAX_LOOP axis (by axis id, scanning ids >= `start`) in the
 // lifted DAG that `factor` divides, returning its axis id or 0xFF.
 //
-// propose_loop_axis_for_factor reads tile_anno / axes_resolve_n_axes,
-// which returns 0 when ke->schedule == NULL -- the case for a
+// propose_loop_axis_for_factor reads axes_collect, which returns 0 when
+// ke->schedule == NULL -- the case for a
 // synthetic KernelEntry built by the py bridge (kernel_alloc +
 // kernel_set_cached_lift, no materialize / schedule).  The CUDA
 // autotune sweep drives propose exactly that way, so the CUDA block
@@ -163,14 +160,14 @@ static u32 propose_conv2d_local_opts(KernelEntry const *ke, KOpt *out,
                                      u32 n, u32 cap) {
   static const u32 local_factors[] = {256, 128, 64, 32, 16, 8, 4, 2};
   u32 n_local_factors = sizeof(local_factors)/sizeof(*local_factors);
-  u32 n_axes = tile_anno_axis_count_or_kernelaxes(ke);
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  u32 n_axes = axes_collect(ke, kax, ext, MAX_AXES);
   for (u32 i = 0; i < n_local_factors && n < cap; i++) {
     u32 f = local_factors[i];
     for (u8 axis = 0; axis < n_axes; axis++) {
-      TileAxisInfo info;
-      if (!tile_anno_axis_or_kernelaxes(ke, axis, &info)) continue;
-      if (info.kax_type != KAX_LOOP) continue;
-      if (info.extent < f || info.extent % f != 0) continue;
+      if (kax[axis] != KAX_LOOP) continue;
+      if (ext[axis] < f || ext[axis] % f != 0) continue;
       out[n].op   = KOP_LOCAL;
       out[n].axis = axis;
       out[n].arg  = f;
@@ -185,14 +182,14 @@ static u32 propose_conv2d_upcast_opts(KernelEntry const *ke, KOpt *out,
                                       u32 n, u32 cap) {
   static const u32 upcast_factors[] = {8, 4, 2};
   u32 n_upcast_factors = sizeof(upcast_factors)/sizeof(*upcast_factors);
-  u32 n_axes = tile_anno_axis_count_or_kernelaxes(ke);
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  u32 n_axes = axes_collect(ke, kax, ext, MAX_AXES);
   for (u32 i = 0; i < n_upcast_factors && n < cap; i++) {
     u32 f = upcast_factors[i];
     for (u8 axis = 0; axis < n_axes; axis++) {
-      TileAxisInfo info;
-      if (!tile_anno_axis_or_kernelaxes(ke, axis, &info)) continue;
-      if (info.kax_type != KAX_LOOP) continue;
-      if (info.extent < f || info.extent % f != 0) continue;
+      if (kax[axis] != KAX_LOOP) continue;
+      if (ext[axis] < f || ext[axis] % f != 0) continue;
       out[n].op   = KOP_UPCAST;
       out[n].axis = axis;
       out[n].arg  = f;
@@ -460,13 +457,8 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
 
   // Mirrors the BEAM TC entry gate above.  tile_analyze_conv2d_flat
   // accepts DAG kernels via uop_dag_classify_conv2d_flat_shape when
-  // ke->cached_lift.store_root != 0; the axes-presence proxy gates
-  // any synthetic fixture that builds KpSchedule without running
-  // the lifter.
-  if (propose_metal_tile_enabled()
-      && (ke->cached_lift.store_root != 0
-          || (ke->schedule != NULL
-              && tile_anno_axis_count_or_kernelaxes(ke) > 0))) {
+  // ke->cached_lift.store_root != 0.
+  if (propose_metal_tile_enabled() && ke->cached_lift.store_root != 0) {
     TileConv2DInfo conv;
     if (tile_analyze_conv2d_flat(ke, &conv)) {
       n = propose_conv2d_local_opts(ke, out, n, cap);
@@ -480,11 +472,12 @@ fn u32 kernel_opts_propose(KernelEntry const *ke, KOpt *out, u32 cap) {
   // Skip 1 (= no opt; the autotune loop tracks the baseline
   // separately).  Larger factors first so wins compose if the
   // autotune later supports composite proposals.
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  u32 n_axes    = axes_collect(ke, kax, ext, MAX_AXES);
   u8  axis_idx  = propose_reduce_axis_index(ke);
-  TileAxisInfo axis_info;
   u32 axis_size = axis_idx == 0xFF ? propose_reduce_axis_size(ke)
-                                   : (tile_anno_axis_or_kernelaxes(ke, axis_idx,
-                                        &axis_info) ? axis_info.extent : 0);
+                : axis_idx < n_axes ? ext[axis_idx] : 0;
   // Reduce-axis split-class opts (UNROLL/GROUPTOP) are DAG-applied by
   // axis_id (find_range), so build their KOpt from the real reduce axis_id
   // -- propose_reduce_axis_index returns a sorted-SLOT index, which equals

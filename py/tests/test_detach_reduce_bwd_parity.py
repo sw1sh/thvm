@@ -36,23 +36,11 @@ These guard two distinct findings from the eager-vs-JIT boundary bisect
      test_batchnorm_block_bwd_n1 below) -- that one's true grad is 0 and
      thvm fails to cancel; THIS one drops a real nonzero adjoint term.
 """
-import os
-import sys
 import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("THVM_PY", os.path.join(
-    os.path.dirname(__file__), "..")))
-from _tinygrad_compat import tg_training  # noqa: E402
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
 
 
 def _thvm_grad(build):
@@ -66,14 +54,14 @@ def _thvm_grad(build):
 
 def _tg_grad(build):
     from tinygrad import Tensor
-    # Newer tinygrad dropped requires_grad/requires_grad_(); backward() fills
+    # tinygrad dropped requires_grad/requires_grad_(); backward() fills
     # .grad for every in-scope non-CONST float leaf (tensor.py:838), so the
     # rg() marker is an identity here -- the leaf gets a gradient regardless.
     x = build(Tensor, lambda t: t, lambda t: t.detach())
     return np.asarray(x.grad.numpy(), dtype=np.float32).reshape(-1)
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestDetachReduceBwdParity(unittest.TestCase):
     def _assert_parity(self, build, tol=1e-4):
         g_thvm = _thvm_grad(build)
@@ -180,7 +168,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
             THN.BatchNorm(4)(x.conv2d(w).relu()).sum().backward()
             g_thvm = float(np.abs(w.grad.numpy()).sum())
 
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
             TGN.BatchNorm(4)(tx.conv2d(tw).relu()).sum().backward()
             g_tg = float(np.abs(tw.grad.numpy()).sum())
@@ -220,7 +208,7 @@ class TestDetachReduceBwdParity(unittest.TestCase):
             THN.BatchNorm(4)(x.conv2d(w).relu()).max_pool2d((2, 2)).sum().backward()
             g_thvm = w.grad.numpy()
 
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             tx = tinygrad.Tensor(Xn); tw = tinygrad.Tensor(Wn)
             TGN.BatchNorm(4)(tx.conv2d(tw).relu()).max_pool2d((2, 2)).sum() \
                 .backward()

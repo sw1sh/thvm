@@ -24,19 +24,12 @@ docs/thvm_vs_tinygrad.md).
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_segment_log_softmax.py -q
 """
-import os
-import pathlib
-import re
-import subprocess
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Device  # noqa: E402
+import helpers
+from thvm import Device
 
 NATIVE = Device.DEFAULT == "CPU"
 
@@ -44,14 +37,6 @@ BIG = 1e4
 S, B, R, F, N_ENG, HID = 4, 3, 64, 6, 3, 8
 STEPS = 10
 LR = 3e-3
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
 
 
 # ---- inputs -------------------------------------------------------------------
@@ -277,7 +262,7 @@ def case_jit_adam():
         for k in got:
             np.testing.assert_allclose(got[k], want[k], rtol=1e-5, atol=1e-6,
                                        err_msg=f"step {i} {k} vs numpy")
-    if _have_tg():
+    if helpers.have_tinygrad():
         tg_losses, tg_hist = jit_adam("tinygrad", p0, batches)
         np.testing.assert_allclose(losses, tg_losses, rtol=1e-4)
         for i, (got, want) in enumerate(zip(hist, tg_hist)):
@@ -299,14 +284,14 @@ class TestSegmentLogSoftmax(unittest.TestCase):
     def test_loss_and_grad_numpy(self):
         case_loss_and_grad()
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_loss_and_grad_tinygrad(self):
         loss, g = case_loss_and_grad("thvm")
         tg_loss, tg_g = case_loss_and_grad("tinygrad")
         np.testing.assert_allclose(loss, tg_loss, rtol=1e-5)
         np.testing.assert_allclose(g, tg_g, rtol=1e-4, atol=1e-6)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_param_grads_tinygrad(self):
         p0 = init_params()
         arrays = draw(np.random.default_rng(3))
@@ -320,52 +305,10 @@ class TestSegmentLogSoftmax(unittest.TestCase):
         case_jit_adam()
 
 
-_CHILD = r"""
-import os, sys, traceback
-sys.path.insert(0, os.environ["THVM_PY"])
-sys.path.insert(0, os.environ["THVM_TESTS"])
-import test_segment_log_softmax as t
-for name, fn in t.ROUTE_CASES:
-    try:
-        fn()
-        print(f"CASE {name} ok=True", flush=True)
-    except Exception:
-        print(f"CASE {name} ok=False " + traceback.format_exc().replace(chr(10), " | "), flush=True)
-"""
-
-
-def _run_child(extra_env):
-    env = dict(os.environ, DEV="cpu",
-               THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
-               THVM_TESTS=str(pathlib.Path(__file__).resolve().parent),
-               THVM_CPU_UOP_WALK_TRACE="1", **extra_env)
-    return subprocess.run([sys.executable, "-c", _CHILD], env=env,
-                          capture_output=True, text=True, timeout=1800)
-
-
 @unittest.skipUnless(NATIVE, "native scatter runs on the CPU backend")
-class TestBothRoutes(unittest.TestCase):
-    def _check_child(self, out):
-        lines = [ln for ln in out.stdout.splitlines() if ln.startswith("CASE ")]
-        self.assertEqual(len(lines), len(ROUTE_CASES),
-                         f"child failed:\n{out.stdout}\n{out.stderr[-4000:]}")
-        bad = [ln for ln in lines if "ok=False" in ln]
-        self.assertEqual(bad, [])
-
-    def test_c_jit_route(self):
-        out = _run_child({"THVM_CPU_JIT_WARMUP": "0"})
-        self._check_child(out)
-        walked = re.findall(r"^uop_walk: ", out.stderr, re.M)
-        self.assertEqual(walked, [], "a kernel fell to the walker: the JIT did not run")
-
-    def test_uop_walker_route(self):
-        out = _run_child({"THVM_CPU_JIT_WARMUP": "1000000000"})
-        self._check_child(out)
-        walked = re.findall(r"^uop_walk: n_inputs=\d+ root_op=\d+ rc=(\d)$",
-                            out.stderr, re.M)
-        self.assertGreater(len(walked), len(ROUTE_CASES),
-                           "the walker did not execute the kernels")
-        self.assertEqual(set(walked), {"1"})
+class TestBothRoutes(helpers.BothRoutes, unittest.TestCase):
+    MODULE = "test_segment_log_softmax"
+    ROUTE_CASES = ROUTE_CASES
 
 
 if __name__ == "__main__":

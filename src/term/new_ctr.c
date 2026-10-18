@@ -15,6 +15,12 @@
 // CTR, those rules can land in interact/dup_ctr.c / interact/era_ctr.c
 // without disturbing the existing semantics.
 
+// k0a: build a TAG_CTR labelled constructor over `n` child Terms.
+// Heap layout: [NUM(arity=n), c_0, ..., c_{n-1}].  ext = label
+// (0 = anonymous tuple).  Passive in the IC reducer.  Used by
+// k0c's multi-target interact_grad to bundle one cotangent per
+// requires_grad target into a single result.  Accessor
+// term_ctr_at returns 0 (invalid Term) on out-of-range.
 fn Term term_new_ctr(u32 label, const Term *children, u32 n) {
   u64 loc = heap_alloc(1 + n);
   heap_set(loc, term_new(0, TAG_NUM, DT_INT32, n));

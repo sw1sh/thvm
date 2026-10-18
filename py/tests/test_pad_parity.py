@@ -6,25 +6,12 @@ cuts a k-row tensor to its first n rows when n < k.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_pad_parity.py -q
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Tensor  # noqa: E402
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
+from thvm import Tensor
 
 
 def np_pad(x, pairs):
@@ -67,7 +54,7 @@ class TestNegativePad(unittest.TestCase):
         got = Tensor(x0).pad([0, -1, -1, 2]).numpy()
         np.testing.assert_array_equal(got, np_pad(x0, [(0, -1), (-1, 2)]))
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         rng = np.random.default_rng(1)

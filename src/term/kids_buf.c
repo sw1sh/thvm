@@ -9,6 +9,8 @@
 // UEQ engine never exceeds arity 8).  Wide nodes now get a heap block:
 // the common case keeps its stack array and pays one compare.
 
+// Child scratch for a CTR rebuild: `stk` (REWRITE_MAX_ARITY slots)
+// when n fits, a heap block otherwise; release with term_kids_release.
 fn Term *term_kids_buf(Term *stk, u32 n) {
   if (n <= REWRITE_MAX_ARITY) {
     return stk;

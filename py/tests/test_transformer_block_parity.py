@@ -54,25 +54,11 @@ These tests are EXPECTED TO FAIL at HEAD and stay red for the fix workflow.
 
     make -C <root> py && python -m pytest py/tests/test_transformer_block_parity.py
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-PY = str(ROOT / "py")
-sys.path.insert(0, os.environ.get("THVM_PY", PY))
-from _tinygrad_compat import tg_muon_decays, tg_training  # noqa: E402
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
 
 
 # ---- block dims (small, as specified) --------------------------------
@@ -164,7 +150,7 @@ def _relmax(th, tg):
     return float(np.abs(th - tg).max() / (np.abs(tg).max() + 1e-6))
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestTransformerBlockParity(unittest.TestCase):
 
     def setUp(self):
@@ -247,7 +233,7 @@ def _mlp_block(p, x, ln1, ln2):
     return LN(h + ff, *ln2)
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestTransformerTrain(unittest.TestCase):
     """TRAIN: descent on the transformer sub-block that has a CORRECT
     forward (residual + LayerNorm + 2-layer MLP), with both Adam and Muon,
@@ -321,7 +307,7 @@ class TestTransformerTrain(unittest.TestCase):
         opt = (Adam if opt_name == "adam" else Muon)(list(p.values()), lr=1e-2)
         ln1, ln2 = ("ln1_w", "ln1_b"), ("ln2_w", "ln2_b")
         losses = []
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             for _ in range(n_steps):
                 opt.zero_grad()
                 d = _mlp_block(p, x, ln1, ln2) - tgt
@@ -356,8 +342,6 @@ class TestTransformerTrain(unittest.TestCase):
     def test_train_muon_descends(self):
         """Muon (Newton-Schulz) descends the correct-forward sub-block with
         no NaN, and tracks tinygrad's descent."""
-        if not tg_muon_decays():
-            self.skipTest("tinygrad checkout predates #17709 (dead Muon decay)")
         th = self._train_thvm_mlp("muon")
         tg = self._train_tg_mlp("muon")
         self._assert_descends(th, "thvm-muon")
@@ -421,7 +405,7 @@ class TestTransformerTrain(unittest.TestCase):
         from tinygrad.nn.optim import Adam as TgAdam
         topt = TgAdam(list(tp.values()), lr=1e-2)
         tlosses = []
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             for _ in range(2):
                 topt.zero_grad()
                 d = thvm_fwd(tp, tx) - ttgt

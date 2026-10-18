@@ -300,8 +300,8 @@ int main(void) {
     }
   }
 
-  // === DOT routes through cblas_sdot via DAG ===
-  TEST_BEGIN("metal-real/dot-cpu-routes-through-cblas-via-dag");
+  // === CPU dot parity ===
+  TEST_BEGIN("metal-real/dot-cpu-parity");
   {
     enum { DK = 64 };
     Shape sd = {0}; sd.ndim = 1; sd.dims[0] = DK;
@@ -333,13 +333,11 @@ int main(void) {
     f32 dd = dot_out - dv_ref;
     if (dd < 0) dd = -dd;
     CHECK(dd < 1e-3f);
-    // The DAG-side classifier must fire.
-    CHECK(cpu_blas_dot_dispatch_dag_count() > 0);
     thvm_free();
   }
 
-  // === GEMV routes through cblas_sgemv via DAG ===
-  TEST_BEGIN("metal-real/gemv-cpu-routes-through-cblas-via-dag");
+  // === CPU matvec parity ===
+  TEST_BEGIN("metal-real/gemv-cpu-parity");
   {
     enum { GM = 16, GK = 24 };
     Shape sw = {0}; sw.ndim = 2; sw.dims[0] = GM; sw.dims[1] = GK;
@@ -381,7 +379,6 @@ int main(void) {
       if (d < 0) d = -d;
       CHECK(d < 1e-3f);
     }
-    CHECK(cpu_blas_gemv_dispatch_dag_count() > 0);
     thvm_free();
   }
 

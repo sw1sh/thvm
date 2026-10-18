@@ -7,17 +7,12 @@ UOP_ASSIGN copies whole buffers and ignores the view offset/strides, so
 Tensor.assign special-cases a view dst (tagged by shrink/__getitem__) and
 scatters host-side into the base tensor's buffer.
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Tensor  # noqa: E402
+import helpers  # noqa: F401
+from thvm import Tensor
 
 
 class TestAssignIntoViewScatter(unittest.TestCase):

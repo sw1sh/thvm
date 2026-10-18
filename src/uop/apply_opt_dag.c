@@ -441,6 +441,8 @@ static Term apply_opt_dag_reduce_of(Term root, u32 axis_id) {
   return found;
 }
 
+// 1 iff a UOP_REDUCE reachable from `root` reduces `axis_id`, tinygrad's
+// Scheduler.reduce_axes (codegen/opt/postrange.py:92-95).
 fn int uop_dag_reduces_axis(Term root, u32 axis_id) {
   return apply_opt_dag_reduce_of(root, axis_id) != 0;
 }

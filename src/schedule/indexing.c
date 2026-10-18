@@ -21,6 +21,11 @@
 // Backing constructors all hash-cons through uop_mov_cache, so repeated
 // swizzles with identical inputs deduplicate.
 
+// 1-to-1 port of tinygrad/schedule/indexing.py:apply_movement_op (line 129)
+// per-op cases. Each rewrites the consumer's per-axis range expressions
+// (`out_rngs`) into the producer's per-axis expressions (`in_rngs`).
+// All variants hash-cons through uop_mov_cache.  `ndim` bounded by
+// MAX_DIM. In-place (in_rngs == out_rngs) is unsafe (PERMUTE).
 fn void apply_movement_op_shrink(u32 ndim,
                                   u32 const *begin_end,
                                   Term const *out_rngs,
@@ -153,7 +158,7 @@ static Term reshape_const_zero(void) {
   return uop_const(DT_INT32, 0);
 }
 
-// === PLACEHOLDER round-trip (gated THVM_FUSE_CONV_BWD) ================
+// === PLACEHOLDER round-trip ===========================================
 //
 // Mirror source: tinygrad/schedule/indexing.py:140-143 (RESHAPE case of
 // apply_movement_op) + indexing.py:112-125 (_apply_reshape).

@@ -118,7 +118,7 @@ VerificationTest[
     TestID -> "jit/i32-cmplt"
 ]
 
-(* f16 / bf16 / fp8 / int4 fall back to interpreter (cg_supports
+(* f16 / bf16 / fp8 / int4 fall back to interpreter (cpu_jit_eligible
    rejects those dtypes).  Verifying correctness here is enough --
    the JIT path simply isn't taken. *)
 

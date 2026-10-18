@@ -11,23 +11,18 @@ size-1 batch axis is dropped from the bufferize closed_ranges (n_ranges=3,
 out_ndim=4) so `effectively_full` fails AND the dropped size-1 axis leaves no
 free range so `would_strand` is 0 -> the MUL/ADD nodes feeding the d/dw2
 REDUCE get INLINED, recomputed, and mis-index.  tinygrad keeps these via the
-shape-agnostic `buffer_in_reduce` rule (schedule/rangeify.py:269-293): if a
+shape-agnostic `buffer_in_reduce` rule (schedule/rangeify.py:88-96): if a
 REDUCE in the bufferize value reaches a PARAM/BUFFERIZE, keep the bufferize
-(PCONTIG<=2 -> return None), regardless of batch extent.
+(return None), regardless of batch extent.
 
 `h.contiguous()` between the two convs masks the bug (forces the realize).
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Tensor  # noqa: E402
+import helpers  # noqa: F401
+from thvm import Tensor
 
 TOL = 2e-2
 

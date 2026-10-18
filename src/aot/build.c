@@ -191,6 +191,107 @@ static char *aot_wrap_emit_for_dylib(const char *emit_src,
   return out;
 }
 
+// The -D flags the host was built with that change what the runtime source
+// declares.  AOT-compiled code carries its own copy of that source, so it must
+// see the same set: THVM_TRACE changes TContext's size, which the module
+// shares with the host, and the ATP sources call functions and read globals
+// that exist only under their defines (g_lazy_rule needs THVM_ATPFT_RULES).
+// The list is every ATP define the Makefile can set.
+fn char const *aot_host_defines(void) {
+  return ""
+#ifdef THVM_TRACE
+    "-DTHVM_TRACE "
+#endif
+#ifdef ATP_AUTO_PREC
+    "-DATP_AUTO_PREC "
+#endif
+#ifdef ATP_CP_DIAG
+    "-DATP_CP_DIAG "
+#endif
+#ifdef ATP_CP_GROUND_JOIN
+    "-DATP_CP_GROUND_JOIN "
+#endif
+#ifdef ATP_FLATTERM_DIFF
+    "-DATP_FLATTERM_DIFF "
+#endif
+#ifdef ATP_FLATTERM_SELFCHECK
+    "-DATP_FLATTERM_SELFCHECK "
+#endif
+#ifdef ATP_FV_INDEX
+    "-DATP_FV_INDEX "
+#endif
+#ifdef ATP_GOAL_HEURISTIC
+    "-DATP_GOAL_HEURISTIC "
+#endif
+#ifdef ATP_MNF
+    "-DATP_MNF "
+#endif
+#ifdef ATP_MNF_DIAG
+    "-DATP_MNF_DIAG "
+#endif
+#ifdef ATP_ORDERED_REWRITE
+    "-DATP_ORDERED_REWRITE "
+#endif
+#ifdef ATP_ORPHAN_KILL
+    "-DATP_ORPHAN_KILL "
+#endif
+#ifdef ATP_RULE_INDEX
+    "-DATP_RULE_INDEX "
+#endif
+#ifdef ATP_VAR_NORM
+    "-DATP_VAR_NORM "
+#endif
+#ifdef THVM_ATPFT_ALLOC
+    "-DTHVM_ATPFT_ALLOC "
+#endif
+#ifdef THVM_ATPFT_CONVERT
+    "-DTHVM_ATPFT_CONVERT "
+#endif
+#ifdef THVM_ATPFT_CPQ
+    "-DTHVM_ATPFT_CPQ "
+#endif
+#ifdef THVM_ATPFT_LPO
+    "-DTHVM_ATPFT_LPO "
+#endif
+#ifdef THVM_ATPFT_MATCH
+    "-DTHVM_ATPFT_MATCH "
+#endif
+#ifdef THVM_ATPFT_NORM
+    "-DTHVM_ATPFT_NORM "
+#endif
+#ifdef THVM_ATPFT_RI
+    "-DTHVM_ATPFT_RI "
+#endif
+#ifdef THVM_ATPFT_RULES
+    "-DTHVM_ATPFT_RULES "
+#endif
+#ifdef THVM_ATPFT_UNIFY
+    "-DTHVM_ATPFT_UNIFY "
+#endif
+#ifdef THVM_ATP_AC
+    "-DTHVM_ATP_AC "
+#endif
+#ifdef THVM_ATP_GUIDE_CHECK
+    "-DTHVM_ATP_GUIDE_CHECK "
+#endif
+#ifdef THVM_ATP_LPO_ORIENT_CACHE
+    "-DTHVM_ATP_LPO_ORIENT_CACHE "
+#endif
+#ifdef THVM_ATP_TEST_CLOCK
+    "-DTHVM_ATP_TEST_CLOCK "
+#endif
+    "";
+}
+
+// Link flags for a standalone executable that includes the runtime source.
+fn char const *aot_exe_link_flags(void) {
+#ifdef __APPLE__
+  return "-framework Accelerate";
+#else
+  return "-lm";
+#endif
+}
+
 // Compile the def at `def_id` (named `name`) into a dylib at the
 // returned path (caller frees).  Returns NULL on any failure;
 // errors go to stderr.  Cache hit (file already exists at the
@@ -258,48 +359,12 @@ fn char *thvm_aot_compile_to_dylib(u32 def_id, const char *name) {
                              "-Wl,--unresolved-symbols=ignore-in-object-files";
 #endif
 
-  // If the host (this dylib / runtime) was built with -DTHVM_TRACE,
-  // the AOT module must be too -- it shares TContext with us, and the
-  // trace fields change its size.  Picked up here at compile time so
-  // the two views always agree.
-#ifdef THVM_TRACE
-  static const char *trace_def = "-DTHVM_TRACE ";
-#else
-  static const char *trace_def = "";
-#endif
-  // The embedded runtime blob includes src/atp/_.c, which has
-  // functions (atp_pretty_term / atp_rule_trace_on /
-  // atp_rewrite_normalize_indexed) DEFINED only under ATP_RULE_INDEX
-  // but CALLED unconditionally -- so the blob won't compile without
-  // these defines (clang: "static declaration follows non-static
-  // declaration").  Mirror whatever ATP flags the host was built with
-  // (the Makefile's ATP_DEFINES) so the blob matches.
-  static const char *atp_defs =
-#ifdef ATP_RULE_INDEX
-    "-DATP_RULE_INDEX "
-#endif
-#ifdef ATP_FV_INDEX
-    "-DATP_FV_INDEX "
-#endif
-#ifdef ATP_VAR_NORM
-    "-DATP_VAR_NORM "
-#endif
-#ifdef ATP_ORDERED_REWRITE
-    "-DATP_ORDERED_REWRITE "
-#endif
-#ifdef ATP_ORPHAN_KILL
-    "-DATP_ORPHAN_KILL "
-#endif
-#ifdef ATP_CP_GROUND_JOIN
-    "-DATP_CP_GROUND_JOIN "
-#endif
-    "";
   char cmd[2048];
   snprintf(cmd, sizeof cmd,
     "clang -O2 -fPIC -std=c11 -Wno-everything "
-    "-DACCELERATE_NEW_LAPACK -DTHVM_HAS_WL_BRIDGE %s%s%s "
+    "-DACCELERATE_NEW_LAPACK -DTHVM_HAS_WL_BRIDGE %s%s "
     "-o '%s' '%s' 2>&1",
-    trace_def, atp_defs, dylib_flags, dyl_path, src_path);
+    aot_host_defines(), dylib_flags, dyl_path, src_path);
 
   FILE *p = popen(cmd, "r");
   if (!p) return NULL;

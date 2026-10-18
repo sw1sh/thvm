@@ -42,6 +42,10 @@ fn Term uop_store_value(Term t) {
   return heap_read(term_val(t) + 2);
 }
 
+// UOP_AFTER expresses ordering between sibling side-effects.  `node`
+// happens after `after_node`.  Backends emit a barrier when this
+// crosses a scope boundary, or a warp shuffle when crossing REG.
+// Hash-cons by (node, after_node).
 fn Term uop_after(Term node, Term after_node) {
   u32 args[4] = { (u32)node,       (u32)(node       >> 32),
                   (u32)after_node, (u32)(after_node >> 32) };

@@ -15,6 +15,9 @@
 // outermost layer of `y` / `target` / `expr` so they can pattern-
 // match without invoking the wnf stack-machine.
 
+// Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);
+// returns everything else unchanged.  Cheaper than wnf -- no
+// kernel / materialize / grad firing.
 fn Term term_resolve(Term t) {
   for (;;) {
     u8 tag = term_tag(t);

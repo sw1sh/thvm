@@ -141,7 +141,6 @@ Three caches make repeated calls fast:
 | ------------------------ | --------------------------------------------------- |
 | `THVM_AOT_METAL_DUMP=1`  | Print emitted MSL source to stderr per dispatch     |
 | `THVM_THREADS=N`         | Override default `NumThreads` for `Method -> "CPU"` |
-| `THVM_NF_PARALLEL_STEP_SESSION=1` | Enable step session at T>1                 |
 
 Failure messages include the def name and a brief reason:
 ```

@@ -34,26 +34,11 @@ tinygrad's single-reduce-per-kernel shape (do not skip / quarantine). Run:
 
     make py && python -m pytest py/tests/test_composite_reduce_bwd_parity.py
 """
-import os
-import pathlib
-import subprocess
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-PY = str(ROOT / "py")
-sys.path.insert(0, os.environ.get("THVM_PY", PY))
-from _tinygrad_compat import tg_training  # noqa: E402
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
 
 
 def _conv2d_np(x, w):
@@ -94,7 +79,7 @@ def _fd_grad(X, W0, eps=1e-6):
     return g
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestCompositeReduceBwdParity(unittest.TestCase):
 
     def test_relu_bn_train_maxpool_sum_conv_weight_grad_vs_fp64_oracle(self):
@@ -129,7 +114,7 @@ class TestCompositeReduceBwdParity(unittest.TestCase):
              .max_pool2d().sum().backward())
         g_th = np.asarray(wh.grad.numpy(), np.float64).reshape(W0.shape)
 
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             wt = tinygrad.Tensor(Wf.copy())
             (TGN.BatchNorm(Cout)(tinygrad.Tensor(Xf.copy()).conv2d(wt).relu())
              .max_pool2d().sum().backward())
@@ -170,7 +155,7 @@ class TestCompositeReduceBwdParity(unittest.TestCase):
         X = rng.standard_normal((32, 1, 12, 12)).astype(np.float32)
         CW = rng.standard_normal((8, 1, 3, 3)).astype(np.float32)
 
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             w = tinygrad.Tensor(CW)
             y = tinygrad.Tensor(X).conv2d(w).relu()
             y = TGN.BatchNorm(8)(y)
@@ -212,7 +197,7 @@ class TestCompositeReduceBwdParity(unittest.TestCase):
         X = rng.standard_normal((32, 1, 12, 12)).astype(np.float32)
         CW = rng.standard_normal((8, 1, 3, 3)).astype(np.float32)
 
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             wt = tinygrad.Tensor(CW)
             TGN.BatchNorm(8)(tinygrad.Tensor(X).conv2d(wt).relu()).sum().backward()
             g_tg = wt.grad.numpy()
@@ -246,7 +231,7 @@ class TestCompositeReduceBwdParity(unittest.TestCase):
         rng = np.random.default_rng(0)
         W = rng.standard_normal((32, 8, 10, 10)).astype(np.float32)
 
-        with tg_training():
+        with tinygrad.Context(TRAINING=1):
             w = tinygrad.Tensor(W)
             loss = TGN.BatchNorm(8)(w).sum()
             loss.backward()

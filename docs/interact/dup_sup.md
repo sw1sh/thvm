@@ -8,7 +8,7 @@ VerificationTest in [wl/THVMLink/Tests/core.wlt](../../wl/THVMLink/Tests/core.wl
 
 Two cases, dispatched by comparing the dup label and the sup label.
 
-### Same label (annihilate, implemented)
+### Same label (annihilate)
 
 ```
 ! &L{x0, x1} = &L{a, b}
@@ -20,7 +20,7 @@ x1 <- b
 The dup and the sup were "siblings" sharing a label; they cancel.
 Each projection takes the corresponding branch of the SUP.
 
-### Different label (commute, deferred)
+### Different label (commute)
 
 ```
 ! &L{x0, x1} = &R{a, b}        L /= R
@@ -37,37 +37,39 @@ results are repackaged into two new sups carrying the *original* sup
 label. This is the rule that makes interaction nets non-confluent in
 a controlled way.
 
-Not yet implemented in this codebase. The current code marks the
-active pair as stuck (rebuilds the DP node holding the SUP) so the
-result is well-formed but unreduced. A test that exercises this case
-will drive the implementation.
-
 ## Implementation
 
 ```c
 fn Term interact_dup_sup(u32 lab, u64 loc, u8 side, Term sup) {
   u64 sup_loc = term_val(sup);
   u32 sup_lab = term_ext(sup);
+  ITRS++;
   if (lab == sup_lab) {
-    ITRS++;
     Term tm0 = heap_read(sup_loc + 0);
     Term tm1 = heap_read(sup_loc + 1);
     return heap_subst_cop(side, loc, tm0, tm1);
   }
-  // commute: stuck for now
-  heap_set(loc, sup);
-  return term_new(0, side == 0 ? TAG_DP0 : TAG_DP1, lab, loc);
+  Term a = heap_read(sup_loc + 0);
+  Term b = heap_read(sup_loc + 1);
+  u64 c = heap_alloc(6);
+  heap_set(c + 0, a);                                // ! &L{A0, A1} = a
+  heap_set(c + 1, b);                                // ! &L{B0, B1} = b
+  heap_set(c + 2, term_new(0, TAG_DP0, lab, c + 0));
+  heap_set(c + 3, term_new(0, TAG_DP0, lab, c + 1));
+  heap_set(c + 4, term_new(0, TAG_DP1, lab, c + 0));
+  heap_set(c + 5, term_new(0, TAG_DP1, lab, c + 1));
+  Term x0 = term_new(0, TAG_SUP, sup_lab, c + 2);    // &R{A0, B0}
+  Term x1 = term_new(0, TAG_SUP, sup_lab, c + 4);    // &R{A1, B1}
+  return heap_subst_cop(side, loc, x0, x1);
 }
 ```
 
-`side` is 0 for DP0, 1 for DP1; the active projection (whichever one
-the reducer popped from the stack) gets its branch returned and the
-other branch is installed at the dup loc with SUB=1 via
-`heap_subst_cop` (see [heap.md](../heap.md)).
+(The source also emits a multicomputation trace event per case.)
 
-The commute fall-through writes the SUP back into the dup cell so a
-later entry of the same projection sees the structure that produced
-the stuck state, not a corrupted intermediate.
+`side` is 0 for DP0, 1 for DP1; the active projection (whichever one
+the reducer popped from the stack) gets its result returned and the
+other one is installed at the dup loc with SUB=1 via
+`heap_subst_cop` (see [heap.md](../heap.md)).
 
 ## Worked example
 
@@ -91,9 +93,14 @@ return ERA
 A subsequent reduction of x1 finds `heap[dup_loc]` SUB-tagged and
 picks up LAM directly without firing any new interaction.
 
-## Cost (annihilate case)
+## Cost
+
+Annihilate:
 
 - Two `heap_read` (sup branches)
 - One `heap_set` (the substitution for the inactive side)
 - Zero allocations
 - One `ITRS++`
+
+Commute: one 6-cell allocation, two `heap_read`, six `heap_set` and the
+substitution, one `ITRS++`.

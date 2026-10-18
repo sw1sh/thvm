@@ -17,17 +17,12 @@ common path. All run under THVM_PY on sys.path.
 
     make py && python -m pytest py/tests/test_shared_extent_broadcast.py
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Tensor  # noqa: E402
+import helpers  # noqa: F401
+from thvm import Tensor
 
 try:
     import tinygrad  # noqa: F401

@@ -9,9 +9,7 @@ Both are ports of tinygrad's single LARS class (nn/optim.py:95-130):
     thvm's N-D matmul + transpose.
 
 Muon's post-momentum weight decay is added to the update after the lr
-scaling, p <- p*(1 - lr*wd) - g (nn/optim.py:127-128).  Before tinygrad
-#17709 that decay was dead code; the step-1 parity check skips on a
-tinygrad checkout that still has the dead decay.
+scaling, p <- p*(1 - lr*wd) - g (nn/optim.py:127-128).
 
 Newton-Schulz is an ill-conditioned (near-singular) map, so a tiny f32
 matmul-ordering difference between thvm's and tinygrad's lowering amplifies
@@ -19,19 +17,17 @@ chaotically over steps on a small near-degenerate problem.  Parity is
 checked STEP-1-EXACT on every config, and the multi-step trajectory is
 tracked on a well-conditioned (16x8) problem where the chaos is tame.
 """
-import os
-import sys
 import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
-from thvm import Context, Tensor  # noqa: E402
-from thvm import optim           # noqa: E402
-from _tinygrad_compat import tg_muon_decays, tg_training  # noqa: E402
+import helpers  # noqa: F401
+from thvm import Context, Tensor
+from thvm import optim
 
 try:
     import tinygrad              # noqa: F401
+    from tinygrad import Context as TgContext
     from tinygrad import Tensor as TgTensor
     from tinygrad.nn import optim as tg_optim
     _HAVE_TG = True
@@ -71,7 +67,7 @@ def _tg_run(make_opt, W0, X, Y, steps, mean=False):
     opt = make_opt([w])
     x = TgTensor(X); y = TgTensor(Y)
     traj = [w.numpy().copy()]
-    with tg_training():
+    with TgContext(TRAINING=1):
         for _ in range(steps):
             opt.zero_grad()
             out = x @ w
@@ -163,8 +159,6 @@ class TestLARSParity(unittest.TestCase):
 class TestMuonParity(unittest.TestCase):
     @unittest.skipUnless(_HAVE_TG, "tinygrad not importable")
     def test_muon_step1_exact(self):
-        if not tg_muon_decays():
-            self.skipTest("tinygrad checkout predates #17709 (dead Muon decay)")
         W0, X, Y = _linreg_problem(7, 5, 3, 8)
         kw = dict(lr=0.02, momentum=0.95, weight_decay=0.1, nesterov=True)
         th = _thvm_run(lambda p: optim.Muon(p, **kw), W0, X, Y, 1)

@@ -27,15 +27,13 @@ checks:
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_graphsage_train.py -q
 """
-import os
-import sys
 import time
 import unittest
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("THVM_PY", os.path.dirname(os.path.dirname(__file__))))
-from thvm import Context, Device, GlobalCounters, Tensor, TinyJit, nn  # noqa: E402
+import helpers  # noqa: F401
+from thvm import Context, Device, GlobalCounters, Tensor, TinyJit, nn
 
 N, E, D = 1000, 10_000, 32
 E_REAL, STEPS, LR = 8_000, 10, 1e-2

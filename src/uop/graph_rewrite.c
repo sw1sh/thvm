@@ -616,6 +616,10 @@ static Term uop_to_device_leaves_rec(Term t, i32 dev,
   return cur;
 }
 
+// Move a compute graph to `dev` by wrapping every TAG_TEN leaf in COPY(leaf,
+// dev): the routed realize then COMPUTES the graph on `dev` (each leaf uploaded
+// once), rather than computing on CPU and copying only the result.  Backs
+// TToDevice / Tensor.to(device).
 fn Term uop_to_device_leaves(Term root, i32 dev) {
   u32 cap = uop_graph_rewrite_memo_cap();
   UOpGraphRewriteMemoSlot *memo =

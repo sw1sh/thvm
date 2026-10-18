@@ -732,9 +732,6 @@ static u32 metal_buf_freelist_try_pop(u64 nbytes) {
     METAL_BUFS[bid].refcount = 1;
     METAL_BUFS[bid].preserved = 0;
     metal_record_memory_peak();
-    // Two-phase capture: this id gets a NEW tenant -- invalidate any stale
-    // logical-map binding (see thvm_metal_allocnote_hook in thvm.h).
-    if (thvm_metal_allocnote_hook != NULL) thvm_metal_allocnote_hook(bid);
     return bid;
   }
   return 0;   // miss
@@ -814,9 +811,6 @@ static u32 metal_buf_alloc(u64 nbytes) {
     return 0;
   }
   metal_record_memory_peak();
-  // Two-phase capture: a fresh alloc may reuse a vacated slot id -- invalidate
-  // any stale logical-map binding.
-  if (thvm_metal_allocnote_hook != NULL) thvm_metal_allocnote_hook(id);
   return id;
 }
 
@@ -826,8 +820,6 @@ static u32 metal_buf_alloc(u64 nbytes) {
 static u32 metal_buf_grab_slot(void) {
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
     if (METAL_BUFS[i].buf == nil && METAL_BUFS[i].refcount == 0) {
-      // Two-phase capture: slot id re-tenanted -- invalidate stale binding.
-      if (thvm_metal_allocnote_hook != NULL) thvm_metal_allocnote_hook(i);
       return i;
     }
   }
@@ -1146,8 +1138,6 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
   for (u32 i = 1; i < METAL_BUFS_NEXT; i++) {
     if (METAL_BUFS[i].buf == nil && METAL_BUFS[i].refcount == 0) {
       slot = i;
-      // Two-phase capture: slot id re-tenanted -- invalidate stale binding.
-      if (thvm_metal_allocnote_hook != NULL) thvm_metal_allocnote_hook(i);
       break;
     }
   }

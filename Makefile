@@ -218,12 +218,12 @@ TESTS := \
   $(BIN)/test_dup_ctr \
   $(BIN)/test_dup_lam \
   $(BIN)/test_lam_era \
+  $(BIN)/test_lam_shape \
   $(BIN)/test_tensor \
   $(BIN)/test_disk_tensor \
   $(BIN)/test_uop \
   $(BIN)/test_uop_index \
   $(BIN)/test_uop_index_simplify \
-  $(BIN)/test_uop_valid_fold \
   $(BIN)/test_uop_reduce_collapse \
   $(BIN)/test_uop_graph_rewrite \
   $(BIN)/test_uop_symbolic_shape \
@@ -281,6 +281,7 @@ TESTS := \
   $(BIN)/test_kernel_fire_gen \
   $(BIN)/test_custom_kernel \
   $(BIN)/test_realize_many_war \
+  $(BIN)/test_realize_abort \
   $(BIN)/test_autotune_correctness_gate \
   $(BIN)/test_autotune_iso_scratch \
   $(BIN)/test_autotune_iso_extent \
@@ -761,13 +762,17 @@ build/thvm_runtime_blob.c: build/thvm_inline.c tools/embed_blob.py FORCE
 	@if [ -f $@ ] && cmp -s $@.tmp $@; then rm -f $@.tmp; \
 	 else mv -f $@.tmp $@; echo "regenerated $@"; fi
 
-# AOT-using test binaries link build/thvm_runtime_blob.c so the
-# extern thvm_runtime_src symbol resolves.
-AOT_TESTS := $(BIN)/test_aot_emit $(BIN)/test_aot_e2e \
-             $(BIN)/test_aot_e2e_bench $(BIN)/test_aot_build
+# AOT-using test binaries link the runtime blob so the extern
+# thvm_runtime_src symbol resolves: the Mach-O blob on macOS, the ELF one
+# elsewhere.  A loaded AOT module resolves thvm_pri_wl_invoke_returning
+# against the test binary, which on Linux exports it only with -rdynamic.
+AOT_TESTS   := $(BIN)/test_aot_emit $(BIN)/test_aot_e2e \
+               $(BIN)/test_aot_e2e_bench $(BIN)/test_aot_build
+AOT_BLOB    := $(if $(filter Darwin,$(UNAME_S)),build/thvm_runtime_blob.c,build/thvm_runtime_blob_elf.c)
+AOT_LDFLAGS := $(if $(filter Darwin,$(UNAME_S)),,-rdynamic)
 
-$(AOT_TESTS): $(BIN)/test_%: tests/test_%.c $(SRC) build/thvm_runtime_blob.c | $(BIN)
-	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< build/thvm_runtime_blob.c $(TEST_LDFLAGS)
+$(AOT_TESTS): $(BIN)/test_%: tests/test_%.c $(SRC) $(AOT_BLOB) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) -o $@ $< $(AOT_BLOB) $(TEST_LDFLAGS) $(AOT_LDFLAGS)
 
 $(METAL_TESTS): $(BIN)/%: tests/%.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
@@ -1165,46 +1170,28 @@ probes: $(PROBE_BINS)
 # === py/ ctypes bindings (libthvm_py.{dylib,so}) =====================
 # Single-TU build of src/thvm.c + extern-C wrapper that re-exports the
 # static-inline UOp constructors, so ctypes can drive thvm from Python.
-# Two platform variants, both producing one `py` target:
-#
-#   macOS:  libthvm_py.dylib  =  thvm_py.c (.o) + thvm_py_metal.m (.o)
-#                                + Accelerate/Metal/Foundation frameworks
-#   Linux:  libthvm_py.so     =  thvm_py.c (.o) + thvm_py_cuda.c (.o)
-#                                + -lcuda -lnvrtc   (when CUDA present)
-#
-# The macOS block is guarded by `uname -s == Darwin` and is untouched
-# by the Linux addition below; the Linux block only emits a CUDA bridge
-# when the CUDA headers were found (HAVE_CUDA from the block above).
+# One `py` target per platform: libthvm_py.dylib on macOS (with the Metal
+# backend), libthvm_py.so on Linux (with the CUDA backend when the CUDA
+# headers were found, HAVE_CUDA from the block above).
 ifeq ($(shell uname -s),Darwin)
 PY_DYLIB        := py/thvm/libthvm_py.dylib
 PY_THVM_OBJ     := $(BUILD)/py_thvm.o
-PY_METAL_OBJ    := $(BUILD)/py_thvm_metal.o
 $(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
 	clang -fPIC -O2 -DACCELERATE_NEW_LAPACK $(ATP_DEFINES) \
 	    -DTHVM_HAS_METAL $(METAL_DEFINES) \
 	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
 	    -c -o $@ $<
-$(PY_METAL_OBJ): py/csource/thvm_py_metal.m | $(BUILD)
-	clang -fPIC -fobjc-arc -O2 -c -o $@ $<
-# Link the REAL Metal backend (backend_metal.o) + its metallib so the
-# general DEV=metal tensor/realize path (metal_buf_write/read/dispatch)
-# is live -- without it thvm.c falls back to the no-op Metal STUB and
-# every Metal buffer reads back zero.  py_thvm_metal.o (py_metal_* manual
-# dispatch harness) coexists; distinct symbol prefixes, no conflict.
-$(PY_DYLIB): $(PY_THVM_OBJ) $(PY_METAL_OBJ) $(METAL_OBJ) $(METAL_LIBPATH)
+# Link the real Metal backend (backend_metal.o) + its metallib: without it
+# thvm.c falls back to the no-op Metal stub and every Metal buffer reads
+# back zero.
+$(PY_DYLIB): $(PY_THVM_OBJ) $(METAL_OBJ) $(METAL_LIBPATH)
 	clang -shared -framework Accelerate -framework Metal -framework Foundation \
 	    -framework MetalPerformanceShaders \
-	    -o $@ $(PY_THVM_OBJ) $(PY_METAL_OBJ) $(METAL_OBJ)
+	    -o $@ $(PY_THVM_OBJ) $(METAL_OBJ)
 .PHONY: py
 py: $(PY_DYLIB)
 endif
 
-# Linux py build: libthvm_py.so.  thvm_py.c carries the UOp builder +
-# both render entry points (the CUDA renderer is plain C, always
-# compiled in); thvm_py_cuda.c is the in-process nvrtc + driver bridge,
-# linked only when HAVE_CUDA.  Without CUDA the .so still builds (UOp
-# construction + render-to-string), the `Cuda` class just stays
-# unavailable -- mirroring how the macOS .dylib needs no GPU to render.
 ifeq ($(shell uname -s),Linux)
 PY_SO           := py/thvm/libthvm_py.so
 PY_THVM_OBJ     := $(BUILD)/py_thvm.o
@@ -1212,16 +1199,8 @@ $(PY_THVM_OBJ): py/csource/thvm_py.c $(SRC) | $(BUILD)
 	$(CC) -fPIC -O2 $(CUDA_DEFINES) $(ATP_DEFINES) $(CBLAS_CFLAGS) \
 	    -Wno-unused-function -Wno-unused-variable -Wno-int-conversion \
 	    -c -o $@ $<
-ifdef HAVE_CUDA
-PY_CUDA_OBJ     := $(BUILD)/py_thvm_cuda.o
-$(PY_CUDA_OBJ): py/csource/thvm_py_cuda.c | $(BUILD)
-	$(CC) -fPIC -O2 $(CUDA_DEFINES) -c -o $@ $<
-$(PY_SO): $(PY_THVM_OBJ) $(PY_CUDA_OBJ)
-	$(CC) -shared -o $@ $^ $(CUDA_LDFLAGS) -lm $(CBLAS_LIBS)
-else
 $(PY_SO): $(PY_THVM_OBJ)
-	$(CC) -shared -o $@ $^ -lm $(CBLAS_LIBS)
-endif
+	$(CC) -shared -o $@ $^ $(CUDA_LDFLAGS) -lm $(CBLAS_LIBS)
 .PHONY: py
 py: $(PY_SO)
 endif

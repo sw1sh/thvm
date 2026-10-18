@@ -35,6 +35,9 @@ static Term uop_reduce_cell(u32 kind, u32 n_axes, u32 const *axes, Term src) {
   return t;
 }
 
+// Multi-axis REDUCE: reduces over all `n_axes` axes simultaneously.
+// Mirrors tinygrad uop/ops.py Ops.REDUCE with multiple range srcs.
+// `uop_reduce(kind, axis, src)` is the n_axes==1 convenience.
 fn Term uop_reduce_multi(u32 kind, u32 n_axes, u32 const *axes, Term src) {
   if (n_axes > MAX_DIM) n_axes = MAX_DIM;
   // Chain-fuse: collapse REDUCE(REDUCE(body, axes_inner), axes_outer) ->

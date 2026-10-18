@@ -249,29 +249,24 @@ static char *gen_horn_big_problem(void) {
   return t;
 }
 
-// The forked entry point leaves the caller's environment alone (the
-// replay's thvm_init sets THVM_FUSE_CONV_BWD), and phi(p) is the same
-// whether or not the replica is asked for.  Runs first, before anything
+// The forked entry point leaves the caller's environment alone, and phi(p)
+// is the same whether or not the replica is asked for.  Runs first, before anything
 // in this process initializes the runtime.
 static void test_isolation(TpLaneGate *g) {
   const char *p = "isolation";
-  unsetenv("THVM_FUSE_CONV_BWD");
   int n0 = env_count();
   AtpPhi alone, with;
   PhiMeta m1, m2;
   check(features(P_HORN, &alone, &m1, NULL) == 0, p,
         "features computed without the replica");
   check(env_count() == n0, p, "the environment keeps its size");
-  check(getenv("THVM_FUSE_CONV_BWD") == NULL, p,
-        "THVM_FUSE_CONV_BWD stays unset");
   check(features(P_HORN, &with, &m2, g) == 0, p,
         "features computed with the replica");
   check(memcmp(alone.v, with.v, sizeof alone.v) == 0, p,
         "phi(p) is the same with and without the replica");
   check(memcmp(m1.v, m2.v, sizeof m1.v) == 0, p,
         "the meta columns are the same with and without the replica");
-  check(env_count() == n0 && getenv("THVM_FUSE_CONV_BWD") == NULL, p,
-        "the environment is unchanged after the replica");
+  check(env_count() == n0, p, "the environment is unchanged after the replica");
 }
 
 static void test_names(void) {

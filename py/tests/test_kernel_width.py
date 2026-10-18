@@ -15,19 +15,13 @@ and that no trace reports a declined lift or a dispatch that ran nothing.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_kernel_width.py -q
 """
-import os
-import pathlib
 import re
-import subprocess
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Tensor  # noqa: E402
+import helpers
+from thvm import Tensor
 
 LEFT_DEEP = (60, 63, 64, 65, 66, 70, 130, 300)
 BALANCED = (70, 130)
@@ -60,9 +54,6 @@ def run_case(kind, n):
 
 
 _CHILD = r"""
-import os, sys
-sys.path.insert(0, os.environ["THVM_PY"])
-sys.path.insert(0, os.environ["THVM_TESTS"])
 import numpy as np
 import test_kernel_width as t
 for kind, n in t.CASES:
@@ -74,12 +65,7 @@ for kind, n in t.CASES:
 
 
 def _run_child(extra_env):
-    env = dict(os.environ, DEV="cpu",
-               THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
-               THVM_TESTS=str(pathlib.Path(__file__).resolve().parent),
-               THVM_TRACE_UOP_WALK_DECLINE="1", **extra_env)
-    return subprocess.run([sys.executable, "-c", _CHILD], env=env,
-                          capture_output=True, text=True, timeout=600)
+    return helpers.run_child(_CHILD, 600, DEV="cpu", THVM_TRACE_UOP_WALK_DECLINE="1", **extra_env)
 
 
 class TestKernelWidth(unittest.TestCase):

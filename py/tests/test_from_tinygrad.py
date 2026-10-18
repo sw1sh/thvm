@@ -77,9 +77,6 @@ def test_copy_of_computation():
 def test_copy_of_permute():
     x = np.arange(6, dtype=np.float32).reshape(2, 3)
     t = TgTensor(x).permute(1, 0).to("CPU:1")
-    expected = t.numpy()
-    if not np.array_equal(expected, x.T):
-        pytest.skip("this tinygrad checkout mis-copies a permuted view itself")
     _check(t)
 
 

@@ -28,10 +28,14 @@
 // the kernel's output.
 //
 // Wired into thvm_realize after each user-facing realize so the
-// arena stays bounded across N_STEPS.  Default-on; THVM_KGC=0
-// disables for benchmarks that want the old "leak everything"
-// behaviour.
+// arena stays bounded across N_STEPS.
 
+// Kernel-arena GC: strip per-kernel program/input arrays for kernels
+// whose output buffer was released by the cpu_buf pool rollback.
+// Returns the number of kernels stripped.  Wired into thvm_realize
+// so the per-kernel array memory stays bounded across long training
+// loops (M4 of the beautiful-mnist parity arc).  The header above says
+// why slot ids are intentionally NOT recycled.
 fn u32 kernel_gc_sweep(Term result) {
   (void)result;
   if (KERNELS_NEXT <= 1) return 0;
@@ -75,16 +79,6 @@ fn u32 kernel_gc_sweep(Term result) {
     // Buffer is dead.  Only the CPU sweep strips input arrays here; other
     // backends keep their kernels inspectable for their own teardown.
     if (b != &CPU_BACKEND) {
-      continue;
-    }
-    // A kid recorded by a live two-phase JIT capture is HELD: its output
-    // buffer dying is the two-phase design (the finalize planner hands the
-    // replay a planned slot to write instead), but the replay re-dispatches
-    // this very KernelEntry -- stripping it would turn that dispatch into a
-    // silent no-op (n_inputs=0, lift declined) and the replay computes on
-    // the slot's zero fill.  tinygrad parity: the jit_cache owns its
-    // CompiledRunners for the capture's lifetime (engine/jit.py).
-    if (jit_capture_kid_held(kid)) {
       continue;
     }
     // Buffer is dead.  Strip the input arrays; leave output_tid

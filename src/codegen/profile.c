@@ -265,8 +265,6 @@ u64 cg_now_us(void) {
 static char const *kdispatch_tag(KDispatchKind k) {
   switch (k) {
     case KDISPATCH_BLAS_GEMM:  return "blas_gemm";
-    case KDISPATCH_BLAS_GEMV:  return "blas_gemv";
-    case KDISPATCH_BLAS_DOT:   return "blas_dot";
     case KDISPATCH_JIT:        return "cpu_jit";
     case KDISPATCH_INTERPRETER:return "uop_walk";
     case KDISPATCH_METAL_TILE: return "metal";

@@ -578,7 +578,7 @@ fn int uop_matmul_mn_axes(Term root, u32 *out_m_axis, u32 *out_m_extent,
 // pure waste here, not a correctness requirement.
 //
 // === split-M/N TC collapse (gated on THVM_FUSE_MATMUL_EPILOGUE) ===========
-// A FUSED matmul (epilogue / PCONTIG) whose output rides an elementwise chain
+// A FUSED (epilogue) matmul whose output rides an elementwise chain
 // with a broadcast (FLUX's gated residual `x + gate*matmul`, gate {dim} over
 // {S,dim}) can have its M (or N) output axis SPLIT across several contiguous
 // LOOP range axes by the consumer's reshape -- so the operand address touches
@@ -748,7 +748,7 @@ static Term rec_tc_collapse_split(Term root) {
 // output_numel grid, not the tile grid).  Returns the input root
 // unchanged on any non-matmul.
 fn Term uop_recognise_tc_parallel(Term root) {
-  // THVM_FUSE_MATMUL_EPILOGUE: an epilogue/PCONTIG-fused matmul can have its
+  // THVM_FUSE_MATMUL_EPILOGUE: an epilogue-fused matmul can have its
   // M/N output axis split by the consumer's broadcast reshape; collapse the
   // contiguous split so the clean 2-range classifier keeps it on the TILED
   // tensor-core path instead of the generic accumulator.  No-op (returns root)
@@ -960,121 +960,3 @@ fn Term uop_recognise_batched_tc_parallel(Term root) {
   return out;
 }
 
-// Structural classifier for the DOT shape.
-// STORE(C, addr_out, REDUCE_SUM(MUL(INDEX_E(A, addr_a), INDEX_E(B, addr_b))))
-// where A and B are distinct rank-1 buffers and the addresses reference
-// the same single UOP_RANGE leaf (the K reduce axis).  Returns 1 + the
-// reduce-axis extent on match; 0 otherwise.
-//
-// Distinguished from matmul by the range count: matmul addresses each
-// touch exactly 2 distinct ranges (m,k for A; k,n for B); DOT addresses
-// each touch exactly 1.  Distinguished from GEMV (which has W's address
-// touching 2 ranges) by both addresses having only 1.
-fn int uop_classify_dot(Term root, u32 *out_k_extent) {
-  if (out_k_extent != NULL) *out_k_extent = 0;
-  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
-
-  Term bindings[UPAT_NUM_BINDINGS] = {0};
-  if (!upat_match(&rec_tc_store, root, bindings)) return 0;
-
-  Term buf_a = bindings[0];
-  Term buf_b = bindings[2];
-  if (buf_a == 0 || buf_b == 0 || buf_a == buf_b) return 0;
-
-  u64 sloc = term_val(root);
-  Term reduce = heap_read(sloc + 2);
-  u32 kind = uop_reduce_kind(reduce);
-  if (kind != REDUCE_SUM) return 0;
-  // Dot recogniser expects single reduce axis.
-  if (uop_reduce_n_axes(reduce) != 1) return 0;
-  u32 red_axis = uop_reduce_axis(reduce, 0);
-
-  Term mul    = uop_reduce_src(reduce);
-  Term addr_a = heap_read(term_val(heap_read(term_val(mul) + 0)) + 1);
-  Term addr_b = heap_read(term_val(heap_read(term_val(mul) + 1)) + 1);
-
-  u32 seen_a[8] = {0};
-  u32 seen_b[8] = {0};
-  u32 n_a = rec_tc_count_distinct_ranges(addr_a, seen_a, 8, 0, 0);
-  u32 n_b = rec_tc_count_distinct_ranges(addr_b, seen_b, 8, 0, 0);
-  if (n_a != 1 || n_b != 1) return 0;
-  // Both must reference the SAME range (the reduce axis).  Cross-check
-  // by confirming both seen lists match red_axis.
-  if (seen_a[0] != red_axis || seen_b[0] != red_axis) return 0;
-
-  // Reject IDIV/IMOD anywhere -- they signal a non-dot lift shape.
-  if (rec_tc_addr_has_divmod(addr_a, 0)) return 0;
-  if (rec_tc_addr_has_divmod(addr_b, 0)) return 0;
-
-  u32 ka = rec_tc_find_range_extent(addr_a, red_axis, 0);
-  if (ka == 0) ka = rec_tc_find_range_extent(addr_b, red_axis, 0);
-  if (out_k_extent != NULL) *out_k_extent = ka;
-  return 1;
-}
-
-// Structural classifier for the GEMV shape.
-// STORE(C, addr_out, REDUCE_SUM(MUL(INDEX_E(W, addr_w), INDEX_E(x, addr_x))))
-// where W's address touches exactly 2 distinct ranges (m,k) and x's
-// address touches exactly 1 distinct range (k -- the reduce axis,
-// because m is broadcast-zero).  Returns 1 + the reduce-axis extent
-// on match; *out_w_first set to 1 if the matrix-shaped operand is the
-// MUL.src[0] side, 0 if it's the MUL.src[1] side.
-fn int uop_classify_gemv(Term root, u32 *out_k_extent, int *out_w_first) {
-  if (out_k_extent != NULL) *out_k_extent = 0;
-  if (out_w_first  != NULL) *out_w_first  = 0;
-  if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
-
-  Term bindings[UPAT_NUM_BINDINGS] = {0};
-  if (!upat_match(&rec_tc_store, root, bindings)) return 0;
-
-  Term buf_a = bindings[0];
-  Term buf_b = bindings[2];
-  if (buf_a == 0 || buf_b == 0 || buf_a == buf_b) return 0;
-
-  u64 sloc = term_val(root);
-  Term reduce = heap_read(sloc + 2);
-  u32 kind = uop_reduce_kind(reduce);
-  if (kind != REDUCE_SUM) return 0;
-  // GEMV recogniser expects single reduce axis.
-  if (uop_reduce_n_axes(reduce) != 1) return 0;
-  u32 red_axis = uop_reduce_axis(reduce, 0);
-
-  Term mul    = uop_reduce_src(reduce);
-  Term addr_a = heap_read(term_val(heap_read(term_val(mul) + 0)) + 1);
-  Term addr_b = heap_read(term_val(heap_read(term_val(mul) + 1)) + 1);
-
-  u32 seen_a[8] = {0};
-  u32 seen_b[8] = {0};
-  u32 n_a = rec_tc_count_distinct_ranges(addr_a, seen_a, 8, 0, 0);
-  u32 n_b = rec_tc_count_distinct_ranges(addr_b, seen_b, 8, 0, 0);
-  // GEMV pattern: one address has 2 ranges (the matrix), the other 1
-  // (the broadcast vector).
-  int w_first;
-  if (n_a == 2 && n_b == 1) {
-    w_first = 1;
-  } else if (n_a == 1 && n_b == 2) {
-    w_first = 0;
-  } else {
-    return 0;
-  }
-
-  // Reject IDIV/IMOD: matmul/dot/gemv addresses are clean linear
-  // combinations of ranges; conv2d-flat lifts use IDIV/IMOD.
-  if (rec_tc_addr_has_divmod(addr_a, 0)) return 0;
-  if (rec_tc_addr_has_divmod(addr_b, 0)) return 0;
-
-  // Vector address must reference precisely the reduce axis (no other
-  // axis -- confirms it's broadcast-on-M).
-  u32 const *vec_seen = w_first ? seen_b : seen_a;
-  if (vec_seen[0] != red_axis) return 0;
-
-  // Matrix address must include the reduce axis as one of its 2 ranges.
-  u32 const *mat_seen = w_first ? seen_a : seen_b;
-  if (mat_seen[0] != red_axis && mat_seen[1] != red_axis) return 0;
-
-  Term addr_mat = w_first ? addr_a : addr_b;
-  u32 ka = rec_tc_find_range_extent(addr_mat, red_axis, 0);
-  if (out_k_extent != NULL) *out_k_extent = ka;
-  if (out_w_first  != NULL) *out_w_first  = w_first;
-  return 1;
-}

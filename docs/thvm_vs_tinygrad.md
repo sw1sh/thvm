@@ -14,18 +14,17 @@
 >   for Metal** (`e5c51194`). With both, `BEAM=2` on Metal beautiful_mnist is **2.07 ms**
 >   (vs 3.57 ms heuristic-only). The remaining proposer gap (full action space, CUDA
 >   re-eval) is medium, not a from-scratch build.
-> - **Symbolic rewriting is NOT missing.** `src/uop/{symbolic_rewrite,graph_rewrite,
->   graph_simplify}.c` + constructor-time `rewrite.c`/`index_simplify.c` port a subset
->   of tinygrad `symbolic.py`, wired in materialize + render. The gap is *specific*
->   unported rules (boolean-OR validity union, full view-cancellation, arange-collapse),
->   a medium completion.
+> - **Symbolic rewriting is NOT missing.** `src/uop/graph_rewrite.c` + constructor-time
+>   `rewrite.c`/`index_simplify.c` port a subset of tinygrad `symbolic.py`, wired in
+>   materialize + render. The gap is *specific* unported rules (boolean-OR validity
+>   union, full view-cancellation), a medium completion.
 > - **There is essentially NO kernel-count gap (2026-06-01 audit).** Honest eager-schedule
->   counts (full step, CPU, BS=8): thvm faithful **113**, default **164**, tinygrad
->   **104**. Faithful is within 9% and the forward fuses MORE than tinygrad (13 vs 16).
+>   counts (full step, CPU, BS=8): thvm faithful **113**, the former over-seeding default
+>   **164**, tinygrad **104**. Faithful is within 9% and the forward fuses MORE than tinygrad (13 vs 16).
 >   The earlier "207 vs 120 / unfused-optimizer / boolean-OR-merge" framing was an
 >   artifact of the JIT-harness kernel count (~2x inflated). The real residual is CODEGEN:
 >   faithful's fused convs miss thvm's Accelerate-BLAS matmul path, so faithful CPU wall
->   is 238 ms vs tinygrad 15 ms (default 7.36 ms). There are also **no missing autodiff
+>   is 238 ms vs tinygrad 15 ms (over-seeding 7.36 ms). There are also **no missing autodiff
 >   backward rules** (Tensor ops like maximum/relu decompose to primitives that already
 >   have gradients; thvm has no SIN/COS/POW *primitives* to differentiate, and its value
 >   select IWHERE follows tinygrad's WHERE rule).
@@ -34,15 +33,14 @@
 
 ## 1. Executive summary
 
-`thvm` is a faithful C port of tinygrad's UOP-DAG-to-kernel compiler: it reproduces the same pipeline shape (UOP DAG -> realize-seed classify -> consumer-driven rangeify -> materialize -> render -> backend dispatch), the same consumer-divergence fusion model, a near-line-by-line port of tinygrad's hand-coded optimization heuristic (`hand_coded_optimizations` -> `src/codegen/hand_opts.c`), AND a real BEAM autotuner (`src/codegen/autotune.c`) and symbolic rewrite engine (`src/uop/symbolic_rewrite.c` et al.). The two diverge in three places that matter. **(1) Realize-seeding:** tinygrad seeds *only* structural boundaries (`COPY`/`CONTIGUOUS`/`STORE`, `indexing.py:28-35`) and derives every other realize from the rangeify walk; thvm's *default* mode over-seeds (`ROOT + MULTI + REDUCE + MATMUL + FANIN_CAP` in `bufferize_classify.c`), producing more, smaller kernels, while its opt-in **faithful** mode (`THVM_RU_FAITHFUL_SEED=1`, `rangeify_unified.c:147-166`) seeds `ROOT` only to match tinygrad's structural seed. **(2) Optimization search:** both pair the hand-coded heuristic with a BEAM autotuner, but thvm's candidate **proposer** (`propose.c`) is narrower than tinygrad's ~200-action `search.py` (and was only recently unblocked on the py/JIT path); thvm also has no second-phase warp-shuffle THREAD reduce. **(3) Symbolic depth:** thvm's symbolic engine ports a *subset* of tinygrad's `symbolic.py`; the unported rules (boolean-OR validity merge, full ShapeTracker view-cancellation, arange-collapse) are where its movement/validity handling stays conservative. The measured tradeoff is the report's headline (warm Metal, BS=8): **thvm default 3.57 ms / 328 kernels / 31 MB**, **thvm default + `BEAM=2` 2.07 ms**, **thvm faithful 4.72 ms / 226 kernels / 14.8 MB**, **tinygrad 6.03 ms / 120 kernels / ~1-3 MB**. thvm wins wall-time (over-realization + a thvm-specific occupancy floor maximize per-kernel parallelism; BEAM closes most of the rest); tinygrad wins fusion and memory (heavier fusion + symbolic merge + structural seed). Faithful mode closes most of the memory gap (31 -> 14.8 MB). On Metal it costs ~1.3x
-wall; on CPU it costs 32x (238 ms vs default's 7.36 ms) -- see below. **A 2026-06-01
+`thvm` is a faithful C port of tinygrad's UOP-DAG-to-kernel compiler: it reproduces the same pipeline shape (UOP DAG -> realize-seed classify -> consumer-driven rangeify -> materialize -> render -> backend dispatch), the same consumer-divergence fusion model, a near-line-by-line port of tinygrad's hand-coded optimization heuristic (`hand_coded_optimizations` -> `src/codegen/hand_opts.c`), AND a real BEAM autotuner (`src/codegen/autotune.c`). The two diverge in three places that matter. **(1) Realize-seeding:** tinygrad seeds *only* structural boundaries (`COPY`/`CONTIGUOUS`/`STORE`, `indexing.py:28-35`) and derives every other realize from the rangeify walk; thvm seeds `ROOT`, `REDUCE` outputs and a few correctness realizes (`ru_seed_boundary_holds`, section 3.1) and derives the rest the same way. thvm used to default to an over-seeding classifier (`ROOT + MULTI + REDUCE + MATMUL + FANIN_CAP`) with this structural seed as an opt-in **faithful** mode; the measurements below compare the two. **(2) Optimization search:** both pair the hand-coded heuristic with a BEAM autotuner, but thvm's candidate **proposer** (`propose.c`) is narrower than tinygrad's ~200-action `search.py` (and was only recently unblocked on the py/JIT path); thvm also has no second-phase warp-shuffle THREAD reduce. **(3) Symbolic depth:** thvm's index simplifier (`src/uop/index_simplify.c`) ports a *subset* of tinygrad's `symbolic.py`; the unported rules (boolean-OR validity merge, full ShapeTracker view-cancellation, arange-collapse) are where its movement/validity handling stays conservative. The measured tradeoff is the report's headline (warm Metal, BS=8): **thvm over-seeding 3.57 ms / 328 kernels / 31 MB**, **thvm over-seeding + `BEAM=2` 2.07 ms**, **thvm faithful 4.72 ms / 226 kernels / 14.8 MB**, **tinygrad 6.03 ms / 120 kernels / ~1-3 MB**. Over-seeding wins wall-time (over-realization + a thvm-specific occupancy floor maximize per-kernel parallelism; BEAM closes most of the rest); tinygrad wins fusion and memory (heavier fusion + symbolic merge + structural seed). Faithful seeding closes most of the memory gap (31 -> 14.8 MB). On Metal it costs ~1.3x
+wall; on CPU it costs 32x (238 ms vs over-seeding's 7.36 ms) -- see below. **A 2026-06-01
 audit corrects the kernel-count story:** the honest eager-schedule counts are faithful
-**113**, default **164**, tinygrad **104** (the 328/226/120 figures were JIT-harness
+**113**, over-seeding **164**, tinygrad **104** (the 328/226/120 figures were JIT-harness
 counts, ~2x inflated by capture-vs-eager duplication). So faithful is within 9% of
 tinygrad on kernels and the forward fuses MORE -- **fusion parity is essentially met**,
-and the boolean-OR-of-valids merge is NOT a kernel-count lever (with default `PCONTIG=0`
-thvm's per-axis divergence realize fuses at least as much as tinygrad's all-or-nothing
-one). The genuine residual is **codegen quality**: faithful's fused convs miss thvm's
+and the boolean-OR-of-valids merge is NOT a kernel-count lever (thvm's per-axis
+divergence realize fuses at least as much as tinygrad's all-or-nothing one). The genuine residual is **codegen quality**: faithful's fused convs miss thvm's
 Accelerate-BLAS matmul path and render unvectorized, so faithful CPU wall is 16x
 tinygrad's -- the real "faithful incl. performance" lever.
 
@@ -54,10 +52,10 @@ Both compilers lower a tensor program to device kernels through structurally ide
 
 ### thvm stages
 
-1. **UOP DAG construction** (`src/uop/*.c`) - immutable, heap-consed (`TAG_UOP`) so identical subtrees dedup. Opcodes: data (`UOP_LOAD`/`STORE`/`CONST`/`CAST`/`BITCAST`), compute (`ADD`/`MUL`/`NEG`/`DIV`/`REDUCE`), movement (`RESHAPE`/`PERMUTE`/`EXPAND`/`PAD`/`SHRINK`/`FLIP`), special (`RANGE`/`BUFFER`/`OPT`). Early `graph_simplify.c` constant-folds and applies algebraic identities.
+1. **UOP DAG construction** (`src/uop/*.c`) - immutable, heap-consed (`TAG_UOP`) so identical subtrees dedup. Opcodes: data (`UOP_LOAD`/`STORE`/`CONST`/`CAST`/`BITCAST`), compute (`ADD`/`MUL`/`NEG`/`DIV`/`REDUCE`), movement (`RESHAPE`/`PERMUTE`/`EXPAND`/`PAD`/`SHRINK`/`FLIP`), special (`RANGE`/`BUFFER`/`OPT`). The UOp constructors constant-fold and apply algebraic identities as they build.
 2. **Bufferize classify / realize-seed** (`src/schedule/bufferize_classify.c`) - marks boundary nodes that must materialize, builds `BUFFERIZE_NODES[]` (per-node UOpInfo: opcode, consumer count, reasons bitmask, realized flag) and `CMAP_LL[]` (linked-list consumer map). This is the seed-mode decision point.
 3. **Rangeify unified** (`src/schedule/rangeify_unified.c`) - the port of `run_rangeify`. Kahn-order reverse-topo walk (`rangeify_unified.c:591-647`) assigning `RU_RANGE_MAP` (per-node in/out range tuples), `RU_REALIZE_MAP` (full/partial realize flags), `RU_ENDING_RANGES` (axes closed by downstream EXPANDs), `RU_REDUCE_RANGES` (injected reduce axes). Emits `UOP_BUFFERIZE` + INDEX at boundaries.
-4. **Materialize** (`src/schedule/materialize.c` + `kernel_lift.c`) - one `KernelEntry` per boundary; `visit()` inlines non-realized upstream UOPs or binds cross-realize buffers; `kernel_lift_to_uop` packages a standalone `UOP_STORE` (`kernel_lift.c:52-88`); cross-realize dedup via `MATERIALIZED_LOC_CACHE`; strand-realize gate for `THVM_FUSE_CONV_BWD`.
+4. **Materialize** (`src/schedule/materialize.c` + `kernel_lift.c`) - one `KernelEntry` per boundary; `visit()` inlines non-realized upstream UOPs or binds cross-realize buffers; `kernel_lift_to_uop` packages a standalone `UOP_STORE` (`kernel_lift.c:52-88`); cross-realize dedup via `MATERIALIZED_LOC_CACHE`; strand-realize gate for conv-backward fusion.
 5. **Render** (`src/codegen/render_uop.c` + `hand_opts.c` + `render_metal.c`) - hand-opts mutate the axis schedule, then a shared bottom-up walk emits MSL / CUDA C / C99.
 6. **Backend dispatch + JIT** (`src/backend/{cpu,cuda,metal}/*.c`, `src/jit/capture.c`) - record/replay with buffer pinning and cross-realize span dedup.
 
@@ -84,11 +82,11 @@ Both compilers lower a tensor program to device kernels through structurally ide
 | BEAM `search.py` | `codegen/autotune.c` | **Engine present + wired** (`BEAM>0`/`AUTOTUNE=1`); proposer (`propose.c`) narrower than search.py's ~200 actions |
 | Expander / devectorizer (`late/*.py`) | none: `render_uop.c` applies UPCAST / UNROLL at source emission | **Not ported.** A port of the pre-365f87a8a design never rendered a production kernel and was deleted ([tinygrad_late_passes.md](tinygrad_late_passes.md)) |
 | Renderers (llvmir/cstyle/ptx/metal) | `render_uop.c` + backend renderers | Faithful (CPU/CUDA/Metal only) |
-| `memory_plan_rewrite` | `THVM_ARENA_PLAN` (TLSF arena) | Partial; no reuse-distance layout opt |
+| `memory_plan_rewrite` | TLSF arena planner (`materialize.c`) | Partial; no reuse-distance layout opt |
 | Graph batching (`graph_split_rewrite`) | `THVM_METAL_GRAPH_REPLAY` / `THVM_CUDA_JIT_GRAPH` + `jit/capture.c` | Partial |
 | Gradient (`gradient.py`, post-kernelize UOP) | `interact/uop_grad.c` (term/AST level) | Different layer; fewer backward rules |
 
-**Faithful-vs-simplified summary:** the rangeify walk, INDEX/BUFFERIZE rewrite, hand-coded heuristic core, and renderers are faithful. The *default* realize seed is intentionally over-conservative (a perf choice, not a porting gap). Genuinely simplified: movement-op/ShapeTracker merge, validity-mask union, ending-ranges PCONTIG. (Reduce-into-reduce fusion is now faithful and default-on -- `THVM_FUSE_REDUCE_INTO_REDUCE`.) Genuinely missing: ImageDType, mask-UPCAST, THREAD (CUDA warp-shuffle reduce). **Landed 2026-06-26** (so NOT missing, despite older text below): arange/reduce-collapse (`uop/reduce_collapse.c`), full-extent UNROLL, ShapeTracker view-cancellation (split+resplit/unfold+col2im cancel to views), conv-backward col2im fusion (`THVM_FUSE_CONV_BWD` now default-on, -48% conv-train peak), importer PAD/SHRINK (offset,size) correctness. BEAM engine exists (`autotune.c`); only the proposer breadth is residual.
+**Faithful-vs-simplified summary:** the rangeify walk, INDEX/BUFFERIZE rewrite, hand-coded heuristic core, and renderers are faithful. Genuinely simplified: movement-op/ShapeTracker merge, validity-mask union. (Reduce-into-reduce fusion is faithful.) Genuinely missing: ImageDType, mask-UPCAST, THREAD (CUDA warp-shuffle reduce). **Landed 2026-06-26** (so NOT missing, despite older text below): arange/reduce-collapse (`uop/reduce_collapse.c`), full-extent UNROLL, ShapeTracker view-cancellation (split+resplit/unfold+col2im cancel to views), conv-backward col2im fusion (always on, -48% conv-train peak), importer PAD/SHRINK (offset,size) correctness. BEAM engine exists (`autotune.c`); only the proposer breadth is residual.
 
 ---
 
@@ -105,35 +103,35 @@ historical measurement; treat the eager counts as ground truth.
 
 ### 3.1 Realize-boundary seeding
 
-| Aspect | tinygrad | thvm default | thvm faithful (`THVM_RU_FAITHFUL_SEED=1`) |
-|---|---|---|---|
-| Structural seed | `COPY`, `CONTIGUOUS`, `STORE` only (`indexing.py:29`) | `ROOT` + `MULTI` + `REDUCE` + `MATMUL` + `FANIN_CAP` | `ROOT` only (`rangeify_unified.c:164`) |
-| Derivation | divergence walk derives all multi-consumer/reduce boundaries | pre-seeded, walk sees them already realized | divergence + ending-ranges walk derives the rest |
-| `ALWAYS_CONTIGUOUS` never-realize set | `CONTIGUOUS, AFTER, COPY, BUFFER, CONST, BIND, DEVICE, MSELECT, MSTACK, PARAM` (`indexing.py:10-11`) | no `BIND`; const/buffer handled ad hoc | same |
-| Kernels (eager, beautiful_mnist) | 104 | 164 | 113 |
-| Peak memory | ~1-3 MB | 31 MB | 14.8 MB |
+| Aspect | tinygrad | thvm |
+|---|---|---|
+| Structural seed | `COPY`, `CONTIGUOUS`, `STORE` only (`indexing.py:29`) | `ROOT`, `REDUCE` outputs and the correctness realizes (maxpool input / mask, indexed-op storage, scatter) |
+| Derivation | divergence walk derives all multi-consumer/reduce boundaries | divergence + ending-ranges walk derives the rest |
+| `ALWAYS_CONTIGUOUS` never-realize set | `CONTIGUOUS, AFTER, COPY, BUFFER, CONST, BIND, DEVICE, MSELECT, MSTACK, PARAM` (`indexing.py:10-11`) | no `BIND`; const/buffer handled ad hoc |
+| Kernels (eager, beautiful_mnist) | 104 | 113 |
+| Peak memory | ~1-3 MB | 14.8 MB |
 
-The key code is `ru_seed_boundary_holds` (`rangeify_unified.c:163-166`): in default it returns `1` for every realized node; in faithful it returns true only for `BUFFERIZE_REASON_ROOT`. Faithful seeding closes the kernel-count gap to within 9% of tinygrad (113 vs 104) and the forward pass fuses MORE than tinygrad (13 vs 16). So fusion granularity is NOT the residual gap (the older "fuse REDUCEs is the codegen gap" reading is superseded by the 2026-06-01 audit). The residual that matters is **codegen quality on the fused kernels**: faithful's CPU wall is 238 ms vs tinygrad's 15 ms (vs thvm default's 7.36 ms) because the fused convs miss thvm's Accelerate-BLAS matmul path and render as unvectorized C loops, where tinygrad's CLANG codegen applies UPCAST/UNROLL. That is the real "faithful incl. performance" lever (M1/M4 proposer + hand_opts coverage for fused kernels), not more fusion.
+The key code is `ru_seed_boundary_holds` (`rangeify_unified.c`): it holds only for `ROOT`, `REDUCE` outputs and the correctness realizes; the rest is derived by the walk. This seed closes the kernel-count gap to within 9% of tinygrad (113 vs 104) and the forward pass fuses MORE than tinygrad (13 vs 16). So fusion granularity is NOT the residual gap (the older "fuse REDUCEs is the codegen gap" reading is superseded by the 2026-06-01 audit). The residual that matters is **codegen quality on the fused kernels**: faithful's CPU wall is 238 ms vs tinygrad's 15 ms (vs thvm default's 7.36 ms) because the fused convs miss thvm's Accelerate-BLAS matmul path and render as unvectorized C loops, where tinygrad's CLANG codegen applies UPCAST/UNROLL. That is the real "faithful incl. performance" lever (M1/M4 proposer + hand_opts coverage for fused kernels), not more fusion.
 
 ### 3.2 Movement ops & ShapeTracker
 
 - **tinygrad** (`indexing.py:129-145`, `apply_movement_op`): swizzles *ranges* symbolically post-hoc; movement ops never force realization. Consecutive RESHAPE/SHRINK/PERMUTE views are symbolically simplified/merged (graph_rewrite + `pm_simplify_valid`) *before* divmod-decompose, so a split+resplit cancels back to the source iterator.
-- **thvm** (`run_rangeify_unified_impl`): an EXPAND whose consumers diverge stays a shared VIEW, recomputed per consumer rather than materialized; SHRINK / RESHAPE / PERMUTE / FLIP realize on divergence, as tinygrad's do. This reproduces tinygrad's *intent* (no 1.3 GB broadcast materialization) via different mechanics. The shared EXPAND takes consumer 0's ranges, except on an axis it passes through where that range is compound (a PAD's valid, a SHRINK offset): there it takes a fresh range, which each consumer's splice rebinds to its own (`ru_expand_shared_rngs`), the reads tinygrad's realize then `remove_bufferize` substitution give (`schedule/rangeify.py:50-91`). But thvm's `ru_compose_view_chain` (`rangeify_unified.c:1255-1337`) decomposes each `prior_views` step independently; it lacks tinygrad's cross-step symbolic merge, so split+resplit chains (unfold + col2im in conv-backward) don't cancel. `THVM_FUSE_CONV_BWD` routes RESHAPE through `apply_movement_op_reshape_composed` (a placeholder round-trip, `rangeify_unified.c:480-487`) as a hand-built partial substitute that lets IDIV/IMOD recombine instead of leaking independent decode axes into the cross-product.
+- **thvm** (`run_rangeify_unified`): an EXPAND whose consumers diverge stays a shared VIEW, recomputed per consumer rather than materialized; SHRINK / RESHAPE / PERMUTE / FLIP realize on divergence, as tinygrad's do. This reproduces tinygrad's *intent* (no 1.3 GB broadcast materialization) via different mechanics. The shared EXPAND takes consumer 0's ranges, except on an axis it passes through where that range is compound (a PAD's valid, a SHRINK offset): there it takes a fresh range, which each consumer's splice rebinds to its own (`ru_expand_shared_rngs`), the reads tinygrad's realize then `remove_bufferize` substitution give (`schedule/rangeify.py:50-91`). But thvm's `ru_compose_view_chain` (`rangeify_unified.c:1255-1337`) decomposes each `prior_views` step independently; it lacks tinygrad's cross-step symbolic merge, so split+resplit chains (unfold + col2im in conv-backward) don't cancel. Conv-backward fusion routes RESHAPE through `apply_movement_op_reshape_composed` (a placeholder round-trip, `indexing.c`) as a hand-built partial substitute that lets IDIV/IMOD recombine instead of leaking independent decode axes into the cross-product.
 
 ### 3.3 Reduce grouping & multi-reduce
 
 - **tinygrad**: reduces are always realized or surface via divergence; *no explicit multi-reduce fusion* - chained reduces (softmax EXP -> SUM -> DIV) fuse implicitly because single-consumer inputs inline into the reduce kernel.
-- **thvm**: `REDUCE` seeded as `BUFFERIZE_REASON_REDUCE`. Named rule `bufferize_reduce_consumer_rule_drop_multi` (`bufferize_classify.c:728-822`) unmarks MULTI from reduces feeding a single chain (enables softmax fusion). `THVM_FUSE_REDUCE_INTO_REDUCE` is now **default-on** (the multi-axis REDUCE renderer landed): a reduce whose absorbing boundary is another REDUCE fuses into it (softmax sum into attn@V; the conv-input-grad pair into one kernel), matching tinygrad. `THVM_BUFFERIZE_REDUCE_FUSE_MULTI` (also default-on) gates the broadcast-reduce-chain generalization.
+- **thvm**: `REDUCE` seeded as `BUFFERIZE_REASON_REDUCE`. Named rule `bufferize_reduce_consumer_rule_drop_multi` (`bufferize_classify.c:728-822`) unmarks MULTI from reduces feeding a single chain (enables softmax fusion). A reduce whose absorbing boundary is another REDUCE fuses into it (softmax sum into attn@V; the conv-input-grad pair into one kernel), matching tinygrad.
 
 ### 3.4 Ending ranges (EXPAND-triggered realization)
 
-- **tinygrad** (`indexing.py:222-232`): an EXPAND marks its axis `ended`; a downstream REDUCE/elementwise with an ended range in a non-realized axis realizes *that axis only*, gated by a per-axis `PCONTIG` contiguity check (`indexing.py:227`).
-- **thvm** (`rangeify_unified.c:864-888`): same trigger, but conservatively marks *all* non-realized axes as realized (no PCONTIG per-axis check), losing fusions where some axes were contiguous.
+- **tinygrad** (`indexing.py:271-275`): an EXPAND marks its axis `ended`; a downstream REDUCE or elementwise op with ended ranges realizes every output axis.
+- **thvm** (`rangeify_unified.c`): the same.
 
 ### 3.5 Recompute-vs-materialize decision
 
 - **tinygrad**: implicit in the walk; `pm_remove_bufferize` later inlines buffers whose recompute cost is acceptable, relying on symbolic coverage proofs.
-- **thvm**: an explicit strand check - `bufferize_value_would_strand` (`materialize.c`) detects a RANGE axis that would be left unbound (a reduce loop iterating 0 or wrong times) and forces a boundary. `THVM_FUSE_CONV_BWD`'s strand cap (`RU_STRAND_REALIZE_MAX_NUMEL`, ~4M elem / ~16 MB f32) lets large unfold products fuse as views while still catching genuinely stranded axes. These are correct but more conservative than tinygrad's symbolic proof, so they gate some legal fusions.
+- **thvm**: an explicit strand check - `bufferize_value_would_strand` (`materialize.c`) detects a RANGE axis that would be left unbound (a reduce loop iterating 0 or wrong times) and forces a boundary. The conv-backward strand cap (`RU_STRAND_REALIZE_MAX_NUMEL`, ~4M elem / ~16 MB f32) lets large unfold products fuse as views while still catching genuinely stranded axes. These are correct but more conservative than tinygrad's symbolic proof, so they gate some legal fusions.
 
 ### 3.6 Multi-consumer validity union
 
@@ -144,7 +142,7 @@ The key code is `ru_seed_boundary_holds` (`rangeify_unified.c:163-166`): in defa
 
 **Softmax (EXP -> SUM -> DIV).** tinygrad: SUM seeded, EXP single-consumer inlines, DIV single-consumer inlines -> one kernel. thvm default: SUM seeded realized; `drop_multi` must fire for EXP to inline; often 2+ kernels. thvm faithful: only ROOT seeded, no divergence in the chain -> all fused (matches tinygrad).
 
-**Conv backward (broadcast unfold MUL feeding weight-grad + data-grad reduces).** tinygrad: MUL is 2-consumer with divergent reduce axes -> partial realize / per-consumer recompute, *no 1.3 GB intermediate*. thvm default: MUL seeded MULTI -> materializes the 1.3 GB tensor. thvm faithful alone: MUL is a *computation*, not a movement op, so the `is_movement` special case doesn't fire -> still partial-realizes. **`THVM_FUSE_CONV_BWD=1`** is required: it composes the RESHAPE round-trip so the decode axes recombine, dropping the strand product enough to fuse without explosion.
+**Conv backward (broadcast unfold MUL feeding weight-grad + data-grad reduces).** tinygrad: MUL is 2-consumer with divergent reduce axes -> partial realize / per-consumer recompute, *no 1.3 GB intermediate*. thvm: MUL is a *computation*, not a movement op, so the `is_movement` special case doesn't fire; the seed alone would partial-realize. Conv-backward fusion (always on) composes the RESHAPE round-trip so the decode axes recombine, dropping the strand product enough to fuse without explosion.
 
 ---
 
@@ -180,25 +178,10 @@ The key code is `ru_seed_boundary_holds` (`rangeify_unified.c:163-166`): in defa
 
 Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value enables.
 
-**Scheduling / realize-seed**
-
-| Name | Effect | Default | Mode it changes |
-|---|---|---|---|
-| `THVM_RU_FAITHFUL_SEED` | Seed `ROOT` only, derive rest (fuse more: 226 vs 328 kernels). Auto-enables realize-dedup. | 0 | Fusion granularity |
-| `THVM_FUSE_CONV_BWD` | RESHAPE composed round-trip + strand cap; fuses conv-bwd unfold instead of materializing | 0 | Conv-backward fusion |
-| `THVM_JIT_REALIZE_DEDUP` | Defer `materialized_loc` clear across a JIT span; `on \|\| ru_faithful_seed_on()` (`materialize.c:188-200`) | 0 (auto-on under faithful) | Cross-realize kernel reuse |
-
 **Bufferize / classify**
 
 | Name | Effect | Default |
 |---|---|---|
-| `THVM_BUFFERIZE_REDUCE_FUSE_MULTI` | Fuse multiple REDUCE ops vs single-reduce gate | on (multi) |
-| `THVM_BUFFERIZE_KEEP_NONMATMUL_REDUCE` | Keep REDUCE realized when consumers are broadcast chains | on (keep) |
-| `THVM_BUFFERIZE_SKIP_REDUCE_INTO_REDUCE_SEED` | Skip seeding reduce->reduce; let walk derive | off |
-| `THVM_FUSE_REDUCE_INTO_REDUCE` | Fuse a reduce into a consuming REDUCE (softmax sum into attn@V; conv-input-grad pair) -- faithful now the multi-axis REDUCE renderer landed | on |
-| `THVM_BUFFERIZE_SKIP_SMALL_EXPAND` | Skip realizing small EXPAND nodes | on (skip) |
-| `THVM_BUFFERIZE_SOFTMAX_REDUCE_TILE_CAP` | Tile-feasibility cap for softmax multi-reduce fusion | on |
-| `THVM_REDUCE_UNMARK_CAP` | Cap on reduces unmarked (fused) per slot | unset |
 | `THVM_TILE` | Enable Metal conv2d tiling (autotune cache key) | unset |
 | `THVM_METAL_FUSION_MAX_INPUTS` | Cap inputs to a fused Metal kernel | unset |
 
@@ -206,8 +189,8 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 
 | Name | Effect | Default |
 |---|---|---|
-| `HAND_CODED_OPTS` / `THVM_HAND_CODED_OPTS` | Master toggle for UPCAST/UNROLL/LOCAL/GROUPTOP | 1 |
-| `NOOPT` / `THVM_NOOPT` | Inverse-sense disable (wins over HAND_CODED_OPTS) | 0 |
+| `HAND_CODED_OPTS` | Master toggle for UPCAST/UNROLL/LOCAL/GROUPTOP | 1 |
+| `NOOPT` | Inverse-sense disable (wins over HAND_CODED_OPTS) | 0 |
 | `MV`, `MV_BLOCKSIZE`, `MV_THREADS_PER_ROW`, `MV_ROWS_PER_THREAD` | Matvec params | 1, 4, 8, 4 |
 
 **Autotune / BEAM** (real search in `autotune.c`; narrower proposer than tinygrad)
@@ -224,7 +207,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 |---|---|---|
 | `THVM_JIT_REPLAY_NOSKIP` | Force every dispatch to run | off |
 | `THVM_JIT_REPLAY_PACK` | Pack replay ops (inline inputs -> sidecar) | on |
-| `THVM_JIT_STRIDED` | Strided-load sidecar slab in replay | off |
 | `THVM_JIT_NO_PIN` | Disable buffer pinning during capture | off |
 | `THVM_METAL_GRAPH_REPLAY` / `THVM_METAL_GRAPH_MAX_DISPATCHES` | Metal command-buffer graph replay + cap | off / unset |
 | `THVM_PRECISE_FIRE_MEMO` | Precise fire memoization | off |
@@ -235,9 +217,8 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 |---|---|---|
 | `THVM_MAX_BUF_BYTES` | Per-buffer ceiling (0 = unlimited) | 1 GiB |
 | `THVM_MAX_LIVE_BYTES` | Total live backend buffer ceiling | 8 GiB |
-| `THVM_ARENA_PLAN` | TLSF arena buffer reuse | on |
-| `THVM_REUSE_BUFS` / `THVM_METAL_REUSE_BUFS` / `THVM_CUDA_REUSE_BUFS` | Per-backend buffer reuse | on / backend / backend |
-| `THVM_GC` / `THVM_GC_KB` / `THVM_KGC` / `THVM_HEAP_CELLS` | Heap GC / threshold / kernel GC / cell pool | on / auto / on / built-in |
+| `THVM_METAL_REUSE_BUFS` / `THVM_CUDA_REUSE_BUFS` | Per-backend buffer reuse (CPU reuse always runs) | backend / backend |
+| `THVM_GC_KB` / `THVM_HEAP_CELLS` | Heap GC threshold / cell pool | auto / built-in |
 
 **Backend / codegen**
 
@@ -245,14 +226,14 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 |---|---|---|
 | `DEV` | `cpu`\|`cuda`\|`metal` | system |
 | `THVM_THREADS` / `AOT_THREADS` | Worker / AOT thread counts | auto / built-in |
-| `THVM_CPU_UOP_WALK` / `THVM_CPU_JIT_WARMUP` | CPU interpreter vs clang-JIT; warmup | off / built-in |
+| `THVM_CPU_JIT_WARMUP` | Nonzero: every CPU kernel runs in the UOp walker | 0 |
 | `THVM_CUDA_FAST_MATH` | `--use_fast_math` | off |
 | `THVM_CUDA_SYNC` | Synchronize after each kernel | on |
 | `THVM_CUDA_JIT_GRAPH` / `THVM_CUDA_KE_CACHE` / `THVM_CUDA_DISK_CACHE` / `THVM_CUDA_CACHE_DIR` | CUDA graph cache / KE cache / disk cache / dir | off / off / off / computed |
 | `THVM_CUDA_GPU_TIME` | CUDA-event timing | off |
 | `CUDA_PATH` / `CUDA_HOME` | Toolchain location | env |
 
-**Debug / trace** (no behavior change): `THVM_BUFFERIZE_DEBUG`, `DUMP_MATMUL_DETECT`, `THVM_DUMP_BOUNDARY_ORDER`, `THVM_DUMP_DIRECT_COUNT`, `THVM_DUMP_KERNEL_SHAPE`, `THVM_DUMP_KERNEL_SRC`, `THVM_KCNT`, `THVM_KERNEL_PROFILE`, `THVM_DISPATCH_TRACE`, `DUMP_UOP_REWRITE`, `THVM_CUDA_*` (LOG_COMPILES, DUMP_FAIL_PTX, DUMP_KID, DUMP_SHARED, DUMP_FAILED_KERNEL, DUMP_DISPATCH, LAUNCH_TRACE, RENDER_TRACE, ALLOC_TRACE, JIT_GRAPH_TRACE), `THVM_CPU_UOP_WALK_TRACE`, `THVM_TRACE_UOP_WALK_DECLINE`, `THVM_JIT_REPLAY_TRACE`, `THVM_ARENA_DUMP[_BUFS]`, `THVM_WL_TENSOR_VIEW_DEBUG`, `THVM_AOT_METAL_DUMP`.
+**Debug / trace** (no behavior change): `THVM_DUMP_KERNEL_SRC`, `THVM_KCNT`, `THVM_KERNEL_PROFILE`, `THVM_DISPATCH_TRACE`, `DUMP_UOP_REWRITE`, `THVM_CUDA_*` (LOG_COMPILES, DUMP_FAIL_PTX, DUMP_KID, DUMP_SHARED, DUMP_FAILED_KERNEL, DUMP_DISPATCH, LAUNCH_TRACE, RENDER_TRACE, ALLOC_TRACE, JIT_GRAPH_TRACE), `THVM_CPU_UOP_WALK_TRACE`, `THVM_TRACE_UOP_WALK_DECLINE`, `THVM_WL_TENSOR_VIEW_DEBUG`, `THVM_AOT_METAL_DUMP`.
 
 **ATP / Wolfram (out of ML-kernel scope):** `THVM_ATP_TRACE_MAX`, `THVM_ATP_FLATTERM`, `THVM_ATP_CP_WEIGHT`, `THVM_ATP_AUTO_MAXW`, `THVM_ATP_MNF`, `THVM_ATP_CP_DATASET`, `THVM_NF_PARALLEL_STEP_SESSION`.
 
@@ -262,7 +243,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 
 | Name | Effect | Default | Mode it changes |
 |---|---|---|---|
-| `PCONTIG` | Partial-contiguity in rangeify (per-axis merge aggressiveness) | 0 | Fusion granularity |
 | `SCACHE` | Scheduler/rangeify output cache | 1 | Recompile avoidance |
 | `SPLIT_REDUCEOP` | Two-phase split of large reduces | 1 | Reduce kernels |
 | `REDUCEOP_SPLIT_THRESHOLD` / `REDUCEOP_SPLIT_SIZE` (`rangeify.py:94,106`) | Split trigger / chunk exp | 32768 / 22 | Reduce splitting |
@@ -328,13 +308,13 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 - **Boolean-OR validity union** - *NOT a kernel-count lever (refuted 2026-06-01)*. The
   consumer-divergence realize (`rangeify_unified.c:838-862`) falls back to consumer[0] /
   per-axis realize where tinygrad OR-merges the per-axis validity masks and stays a view
-  (`indexing.py:211-213`). With default `PCONTIG=0`, tinygrad's per-axis decision is the
+  (`indexing.py:211-213`). tinygrad's per-axis decision is the
   single `all_all_same` flag (indexing.py:208): full view (merge valids) or full-realize
   every axis. thvm partial-realizes only the diverging axes, so it fuses AT LEAST as much
   as tinygrad's default. The OR-merge only sets WHICH valid the all-same view carries -- a
   correctness nuance thvm handles by deferring valids to address-build (`movement_index.c`
   IAND'd ILT masks). Honest eager counts (faithful 113 vs tg 104) confirm no gap here.
-- **ShapeTracker / movement-op symbolic-merge completion** - *medium/large* (engine exists, subset ported). `ru_compose_view_chain` decomposes per-step and can't cancel split+resplit (unfold+col2im); the symbolic rewrite engine is wired but lacks the view-cancellation + arange/reduce-collapse rules. Where: `rangeify_unified.c:1255-1337` + extend `uop/symbolic_rewrite.c` toward `symbolic.py`/`indexing.py:141-145`.
+- **ShapeTracker / movement-op symbolic-merge completion** - *medium/large* (engine exists, subset ported). `ru_compose_view_chain` decomposes per-step and can't cancel split+resplit (unfold+col2im); where: `rangeify_unified.c:1255-1337` + extend `uop/index_simplify.c` toward `symbolic.py`/`indexing.py:141-145`.
 - **Optimizer fusion** - *small/none*. Honest eager counts: thvm faithful 113, tinygrad
   104 for the full step including Adam (14 params); tinygrad itself does NOT cross-param
   fuse Adam (58 kernels / 14 params ~= 4/param, comparable to thvm). So the v1 "84-boundary
@@ -342,7 +322,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
   multi-output kernels remain a *possible* small win but are not a parity gap. Likewise
   reduce-into-reduce fusion is NOT a gap (forward+backward already matches tinygrad).
 - **Late rewrite / arange-reduce collapse** - *PORTED (2026-06-26)*. `src/uop/reduce_collapse.c` (`uop_reduce_arange_collapse`, wired in materialize.c on `store_root`) folds `REDUCE(SUM)` of a range-affine `IWHERE(ILT(...))` to the closed-form clamped count (mirrors tinygrad `codegen/simplify.py`); the N-trip reduce loop is eliminated, numerically exact. Also fixed the `from_tinygrad` importer reading PAD/SHRINK as `(begin,end)` widths instead of current tinygrad's `(offset,size)` -- which had produced wrong values for arange/padded imports.
-- **PCONTIG per-axis ending-ranges check** - *small*. thvm realizes *all* non-realized axes on ending ranges; tinygrad checks per-axis contiguity (`indexing.py:227`). Where: `rangeify_unified.c:864-888`.
 - **BIND const-fold UOp + `ALWAYS_CONTIGUOUS` set** - *small*. No `Ops.BIND`; may leak scalar-load kernels. Where: `bufferize_classify.c` recognition + rangeify skip-op gate.
 - **Stranded-range symbolic coverage proof** - *medium*. Strand checks are conservative; tinygrad proves coverage symbolically. Gates some broadcast-reduce fusions.
 
@@ -444,7 +423,7 @@ codegen quality and peak memory):
    `propose.c` / `hand_opts.c` to apply UPCAST/UNROLL to the big fused reduce kernels so
    the non-BLAS path vectorizes, OR teach the GEMM classifier to recognise a fused
    matmul-with-epilogue. *Verify:* faithful CPU warm wall closes toward tinygrad's 15 ms;
-   per-kernel GFLOPS on the fused conv; output parity via `test_faithful_parity.py`.
+   per-kernel GFLOPS on the fused conv.
 2. **Finish BEAM coverage** (medium): widen `propose.c` to the full `search.py` action
    space (PADTO/SWAP/THREAD + the UPCAST/LOCAL/GROUP grid, CUDA too); add a per-level
    Pareto beam in `autotune.c`. Re-evaluate hand_opts vs BEAM per backend (hand_opts is
@@ -459,7 +438,7 @@ codegen quality and peak memory):
    inflated the harness count ~2x. Schedule-level dedup. *Verify:* JIT replay kernel
    count approaches the eager `sched_kernels`.
 5. **Symbolic-merge completion** (medium): view-cancellation in `ru_compose_view_chain` +
-   arange/reduce-collapse late rewrites; retires the `THVM_FUSE_CONV_BWD` hack (a
+   arange/reduce-collapse late rewrites; retires the conv-backward fusion special cases (a
    cleanliness win, not a kernel-count one). *Verify:* split+resplit cancels to identity.
 6. **Opt-section completion** (M4): full-extent UNROLL renderer fix, mask-UPCAST,
    THREAD + CUDA warp-shuffle, multi-reduce TC (`TC_OPT>=1`); **optimizers (LARS/Muon) +

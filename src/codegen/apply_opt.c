@@ -13,6 +13,12 @@
 // generated symbols stay private to the TU.
 fn Term uop_dag_apply_kopt(Term root, KOpt opt);
 
+// Apply one TOpt to a KernelEntry's axis structure.  Split-class opts
+// (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) split the indicated axis,
+// growing n_axes by one; KOP_GLOBAL marks a LOOP axis as GLOBAL via
+// the applied_opts log; KOP_SWAP exchanges two axes in-place; KOP_TC
+// is metadata-only.  Returns 0 on validation failure (axis out of
+// range, arg doesn't divide, applied_opts full, unsupported opt).
 fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   if (ke == NULL || ke->no_opts) {
     return 0;

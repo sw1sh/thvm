@@ -1761,7 +1761,7 @@ static int uwalk_emit_after(UWalkCtx *c, Term after) {
 //
 // Returns 0; never bails (pre-mat path would have for packed nibbles
 // but the walker doesn't pre-mat -- packed dtypes are out of scope for
-// the F6-finish landing and surface in cg_supports gating instead).
+// the F6-finish landing).
 static int uwalk_resolve_input_ptr(KernelEntry *ke, u32 slot, u32 buf_id,
                                    void **out_ptr) {
   void *raw = CPU_BUFS[buf_id].data;

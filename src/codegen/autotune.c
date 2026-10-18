@@ -187,7 +187,9 @@ static u64 kautotune_rangeified_key(KernelEntry const *ke) {
     return 0;
   }
   u64 h = 0xcbf29ce484222325ULL ^ 0x52414E4745584B41ULL;
-  if (ke->schedule != NULL && axes_resolve_n_axes(ke) > 0) {
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  if (axes_collect(ke, kax, ext, MAX_AXES) > 0) {
     h = kautotune_hash_u64(h, 3);
     h = kautotune_hash_u64(h, (u64)term_tag(ke->source_uop));
     h = kautotune_hash_u64(h, (u64)term_ext(ke->source_uop));
@@ -490,28 +492,42 @@ static void axes_reset_to_default(KernelEntry *ke) {
   }
 }
 
+// The candidates the bench can apply.  It applies every one after
+// axes_reset_to_default, so propose against that bare kernel (tinygrad's
+// beam_search likewise starts get_kernel_actions from the plain Scheduler),
+// then put the arriving state, hand-coded opts included, back verbatim.
+static u32 kautotune_propose(KernelEntry *ke, KOpt *out, u32 cap) {
+  KpSchedule sched = *ke->schedule;
+  Term       root  = ke->cached_lift.store_root;
+  axes_reset_to_default(ke);
+  u32 n = kernel_opts_propose(ke, out, cap);
+  *ke->schedule              = sched;
+  ke->cached_lift.store_root = root;
+  return n;
+}
+
 static int kernel_apply_tune_candidate(KernelEntry *ke, KOpt opt) {
   if (ke == NULL || ke->schedule == NULL) {
     return 0;
   }
   if (opt.op != KOP_LOCAL) {
-    return tile_anno_apply_opt(ke, opt);
+    return kernel_apply_opt(ke, opt);
   }
-  if (!tile_anno_apply_opt(ke, opt)) {
+  if (!kernel_apply_opt(ke, opt)) {
     return 0;
   }
-  TileAxisInfo info;
-  if (opt.axis >= tile_anno_axis_count_or_kernelaxes(ke)
-      || !tile_anno_axis_or_kernelaxes(ke, opt.axis, &info)
-      || info.kax_type != KAX_LOOP) {
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  u32 n = axes_collect(ke, kax, ext, MAX_AXES);
+  if (opt.axis >= n || kax[opt.axis] != KAX_LOOP) {
     return 0;
   }
   KOpt global = {
     .op   = KOP_GLOBAL,
     .axis = opt.axis,
-    .arg  = info.extent,
+    .arg  = ext[opt.axis],
   };
-  return tile_anno_apply_opt(ke, global);
+  return kernel_apply_opt(ke, global);
 }
 
 static void kernel_bench_fire(u32 kid);
@@ -1165,7 +1181,7 @@ fn u32 kernel_bench_variants(u32 kid, KOpt *out_opts, u64 *out_us, u32 cap) {
   }
 
   KOpt cands[KAUTOTUNE_MAX_CANDIDATES];
-  u32 n_cand = kernel_opts_propose(ke, cands, sizeof(cands)/sizeof(*cands));
+  u32 n_cand = kautotune_propose(ke, cands, sizeof(cands)/sizeof(*cands));
   u32 n_out  = 1 + n_cand;
   if (n_out > cap) n_out = cap;
 
@@ -1221,8 +1237,8 @@ fn int kernel_autotune(u32 kid) {
   }
 
   KOpt candidates[KAUTOTUNE_MAX_CANDIDATES];
-  u32  n_cand = kernel_opts_propose(ke, candidates,
-                                    sizeof(candidates)/sizeof(*candidates));
+  u32  n_cand = kautotune_propose(ke, candidates,
+                                  sizeof(candidates)/sizeof(*candidates));
   if (n_cand == 0) {
     // No candidates -- still mark autotuned so the fire-time trigger
     // doesn't re-propose every dispatch.
@@ -1553,7 +1569,7 @@ static int autotune_jitbeam_enabled(void) {
 }
 
 
-fn int kernel_should_autotune(KernelEntry const *ke) {
+fn int kernel_should_autotune(KernelEntry *ke) {
   static int tr = -1;
   if (tr < 0) tr = (getenv("THVM_AUTOTUNE_TRACE") != NULL);
   // BEAM/AUTOTUNE fire on every kernel; JITBEAM fires ONLY on the JIT-captured
@@ -1569,7 +1585,7 @@ fn int kernel_should_autotune(KernelEntry const *ke) {
     return 0;
   }
   KOpt buf[KAUTOTUNE_MAX_CANDIDATES];
-  u32 nc = kernel_opts_propose(ke, buf, sizeof(buf)/sizeof(*buf));
+  u32 nc = kautotune_propose(ke, buf, sizeof(buf)/sizeof(*buf));
   if (tr) {
     fprintf(stderr, "[autotune] kid=%u n_cand=%u\n", (u32)(ke - KERNELS), nc);
   }

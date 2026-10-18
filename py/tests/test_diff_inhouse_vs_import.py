@@ -14,13 +14,7 @@ import unittest
 
 import numpy as np
 
-
-def _have_tinygrad():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
+import helpers
 
 
 _rng = np.random.default_rng(0)
@@ -70,7 +64,7 @@ OPS = {
 }
 
 
-@unittest.skipUnless(_have_tinygrad(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestDiffInhouseVsImport(unittest.TestCase):
     pass
 

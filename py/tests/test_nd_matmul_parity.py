@@ -14,27 +14,14 @@ Linear/matmul stays byte-clean -- only ndim>2 / broadcast cases are new.
 
     make py && python -m pytest py/tests/test_nd_matmul_parity.py
 """
-import os
-import pathlib
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-PY = str(ROOT / "py")
-sys.path.insert(0, os.environ.get("THVM_PY", PY))
+import helpers
 
 
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestNDMatmulParity(unittest.TestCase):
 
     def _matmul_fwd_bwd(self, ashape, bshape):
@@ -101,7 +88,7 @@ class TestNDMatmulParity(unittest.TestCase):
                            *self._matmul_fwd_bwd((2, 8, 16), (16, 4)))
 
 
-@unittest.skipUnless(_have_tg(), "tinygrad not on path")
+@unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestAttentionBlockParity(unittest.TestCase):
     """A real attention block: scores = Q@K^T / sqrt(d) -> softmax(rank-1
     fix, 6a313307) -> attn @ V. Both a 2-D single-head and a batched

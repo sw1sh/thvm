@@ -28,31 +28,16 @@ UOp walker, in child processes.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_scatter_reduce_parity.py -q
 """
-import os
-import pathlib
-import re
-import subprocess
-import sys
 import unittest
 
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, os.environ.get("THVM_PY", str(ROOT / "py")))
-
-from thvm import Context, Device, Tensor, TinyJit, nn  # noqa: E402
-from thvm import tensor as thvm_tensor  # noqa: E402
-from thvm.dtypes import dtypes  # noqa: E402
+import helpers
+from thvm import Context, Device, Tensor, TinyJit, nn
+from thvm import tensor as thvm_tensor
+from thvm.dtypes import dtypes
 
 NATIVE = Device.DEFAULT == "CPU"
-
-
-def _have_tg():
-    try:
-        import tinygrad  # noqa: F401
-        return True
-    except Exception:
-        return False
 
 
 # ---- numpy references -------------------------------------------------------
@@ -481,7 +466,7 @@ class TestScatterReduce(unittest.TestCase):
         empty = Tensor(np.zeros((0, 3), np.float32)).scatter_reduce(0, idx, src, "sum")
         self.assertEqual(empty.numpy().shape, (0, 3))
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_matches_tinygrad(self):
         # Forward against tinygrad master, and the gradient against
         # tinygrad's autograd through its one-hot formulation (its test_ops
@@ -512,7 +497,7 @@ class TestScatterReduce(unittest.TestCase):
                         np.testing.assert_allclose(src.grad.numpy(), tsrc.grad.numpy(),
                                                    rtol=1e-5, atol=1e-6)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_segment_lse_matches_tinygrad(self):
         # thvm's mean-shifted segment log-sum-exp against the trainer's own
         # amax-shifted one on tinygrad master: same loss, same gradient.
@@ -533,7 +518,7 @@ class TestScatterReduce(unittest.TestCase):
         np.testing.assert_allclose(float(loss.numpy()), float(tloss.numpy()), rtol=1e-5)
         np.testing.assert_allclose(X.grad.numpy(), tX.grad.numpy(), rtol=1e-5, atol=1e-6)
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_aggregation_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         rng = np.random.default_rng(8)
@@ -619,7 +604,7 @@ class TestScatter(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "replace"):
             x.scatter(0, idx, src).sum().backward()
 
-    @unittest.skipUnless(_have_tg(), "tinygrad not on path")
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_scatter_matches_tinygrad(self):
         from tinygrad import Tensor as TgTensor
         from tinygrad import dtypes as tg_dtypes
@@ -733,54 +718,10 @@ class TestHostFallback(unittest.TestCase):
 
 # ---- both CPU routes ----------------------------------------------------------
 
-_CHILD = r"""
-import os, sys, traceback
-sys.path.insert(0, os.environ["THVM_PY"])
-sys.path.insert(0, os.environ["THVM_TESTS"])
-import test_scatter_reduce_parity as t
-for name, fn in t.ROUTE_CASES:
-    try:
-        fn()
-        print(f"CASE {name} ok=True", flush=True)
-    except Exception:
-        print(f"CASE {name} ok=False " + traceback.format_exc().replace(chr(10), " | "), flush=True)
-"""
-
-
-def _run_child(extra_env):
-    env = dict(os.environ, DEV="cpu",
-               THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")),
-               THVM_TESTS=str(pathlib.Path(__file__).resolve().parent),
-               THVM_CPU_UOP_WALK_TRACE="1", **extra_env)
-    return subprocess.run([sys.executable, "-c", _CHILD], env=env,
-                          capture_output=True, text=True, timeout=1800)
-
-
 @unittest.skipUnless(NATIVE, "native scatter runs on the CPU backend")
-class TestBothRoutes(unittest.TestCase):
-    def _check_child(self, out):
-        lines = [ln for ln in out.stdout.splitlines() if ln.startswith("CASE ")]
-        self.assertEqual(len(lines), len(ROUTE_CASES),
-                         f"child failed:\n{out.stdout}\n{out.stderr[-4000:]}")
-        bad = [ln for ln in lines if "ok=False" in ln]
-        self.assertEqual(bad, [])
-
-    def test_c_jit_route(self):
-        # Warmup 0 compiles each kernel on its first fire.
-        out = _run_child({"THVM_CPU_JIT_WARMUP": "0"})
-        self._check_child(out)
-        walked = re.findall(r"^uop_walk: ", out.stderr, re.M)
-        self.assertEqual(walked, [], "a kernel fell to the walker: the JIT did not run")
-
-    def test_uop_walker_route(self):
-        # A warmup the JIT never reaches: every kernel runs on the UOp walker.
-        out = _run_child({"THVM_CPU_JIT_WARMUP": "1000000000"})
-        self._check_child(out)
-        walked = re.findall(r"^uop_walk: n_inputs=\d+ root_op=\d+ rc=(\d)$",
-                            out.stderr, re.M)
-        self.assertGreater(len(walked), len(ROUTE_CASES),
-                           "the walker did not execute the kernels")
-        self.assertEqual(set(walked), {"1"})
+class TestBothRoutes(helpers.BothRoutes, unittest.TestCase):
+    MODULE = "test_scatter_reduce_parity"
+    ROUTE_CASES = ROUTE_CASES
 
 
 if __name__ == "__main__":

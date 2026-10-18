@@ -35,11 +35,6 @@
 #include "../src/thvm.c"
 #include "test.h"
 
-static int interp_mode(void) {
-  char const *e = getenv("THVM_CPU_JIT_WARMUP");
-  return e != NULL && atoi(e) > 1;
-}
-
 static Shape shape_of(u32 ndim, u32 const *dims) {
   Shape s = {0};
   s.ndim = ndim;
@@ -171,11 +166,11 @@ static int check_eq(f32 const *got, f32 const *want, u32 n, char const *what) {
 static u32 DISPATCHED = 0;
 
 static void check_dispatch(u32 k0) {
-  u32 want = interp_mode() ? KDISPATCH_INTERPRETER : KDISPATCH_JIT;
+  u32 want = cpu_jit_walker_only() ? KDISPATCH_INTERPRETER : KDISPATCH_JIT;
   for (u32 k = k0; k < KERNELS_NEXT; k++) {
     u32 kind = cg_kernel_dispatch_kind(k);
     if (kind == KDISPATCH_NONE
-        || (kind >= KDISPATCH_BLAS_DOT && kind <= KDISPATCH_BLAS_GEMM)) {
+        || kind == KDISPATCH_BLAS_GEMM) {
       continue;
     }
     CHECK_EQ(kind, want);

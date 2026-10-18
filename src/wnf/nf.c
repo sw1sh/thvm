@@ -133,24 +133,16 @@ fn Term nf(Term root) {
   // and no full-heap re-enumerate.  attach() refuses (returns 0) if a
   // session is already open (e.g. the WL stepper); in that case we
   // fall back to the legacy re-enumerate path.
-  // Step session at T=1 always; opt-in at T>1 via THVM_NF_PARALLEL_STEP_SESSION
-  // for benchmarking the atomic-CAS path.  Default off because the
-  // inverse-index has remaining ordering bugs that surface as
-  // duplicate fires on some shared-substructure workloads.
+  // T=1 only: at T>1 the inverse index still has ordering bugs that
+  // surface as duplicate fires on some shared-substructure workloads.
   _Bool step_used = 0;
-  _Bool t1_only = 1;
-  const char *step_env = getenv("THVM_NF_PARALLEL_STEP_SESSION");
-  if (step_env != NULL && step_env[0] == '1') t1_only = 0;
-  if (n_threads == 1 || !t1_only) {
+  if (n_threads == 1) {
     (void)redex_step_attach(&root, 1);
     step_used = STEP_ACTIVE;
   }
 
-  // Seed buffer sized to fit every reachable redex without truncation
-  // (worst case = HEAP_NEXT, but cap somewhere reasonable to bound
-  // memory).  Enumerate-then-push pattern avoids interleaving the
-  // walk with bag pushes (heap_replace's parent-promotion would race
-  // a partial enumerate).
+  // Enumerate-then-push avoids interleaving the walk with bag pushes
+  // (heap_replace's parent-promotion would race a partial enumerate).
   // Seed buffer sized to fit every reachable redex without truncation
   // (worst case = HEAP_NEXT).  Also clamp to the pool bag's capacity
   // so the push loop never spins on a full bag -- overflow seeds get

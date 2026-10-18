@@ -2230,9 +2230,11 @@ EXTERN_C DLLEXPORT int thvm_wl_term_ctr_at(WolframLibraryData libData, mint argc
 EXTERN_C DLLEXPORT int thvm_wl_materialize(WolframLibraryData libData, mint argc,
                                            MArgument *args, MArgument res) {
   (void)libData; (void)argc;
+  THVM_WL_RECOVER(materialize);
   Term t = (Term)MArgument_getInteger(args[0]);
   Term r = thvm_materialize(t);
   MArgument_setInteger(res, (mint)r);
+  THVM_WL_DONE();
   return LIBRARY_NO_ERROR;
 }
 
@@ -2263,11 +2265,13 @@ EXTERN_C DLLEXPORT int thvm_wl_realize_many(WolframLibraryData libData,
   const mint *data = libData->MTensor_getIntegerData(t);
   if (n <= 0) { MArgument_setInteger(res, 0); return LIBRARY_NO_ERROR; }
   if (n > 256) return LIBRARY_FUNCTION_ERROR;
+  THVM_WL_RECOVER(realize_many);
   Term children[256];
   for (mint i = 0; i < n; i++) children[i] = (Term)data[i];
   Term ctr = term_new_ctr(0, children, (u32)n);
   Term r   = thvm_realize_many(ctr);
   MArgument_setInteger(res, (mint)r);
+  THVM_WL_DONE();
   return LIBRARY_NO_ERROR;
 }
 
@@ -2545,14 +2549,11 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
     MArgument_setMTensor(res, empty);
     return LIBRARY_NO_ERROR;
   }
-  // E9 session 3: read n_axes + per-axis (kax_type, extent) through the
-  // resolvers (signal-derived from output_shape + tail-reduce +
-  // scalar-reduce + applied_opts).  Wire format stays byte-equal: by
-  // writer-trio determinism, axes_resolve_n_axes(ke) == ax->n_axes and
-  // axes_resolve_full_shape(ke, i) == ax->full_shape[i] under
-  // THVM_E9_VALIDATE=1.  applied_opts is still sourced from KpSchedule
-  // (Piece B / future session moves the ownership).
-  u32 n_axes = axes_resolve_n_axes(ke);
+  // Per-axis (kax_type, extent) from the lifted DAG; applied_opts from
+  // KpSchedule.
+  u8  kax[MAX_AXES];
+  u32 ext[MAX_AXES];
+  u32 n_axes = axes_collect(ke, kax, ext, MAX_AXES);
   u32 n_applied = (u32)ax->n_applied;
   mint total = (mint)(2 + 2 * n_axes + 3 * n_applied);
   mint dims[1] = {total};
@@ -2562,10 +2563,8 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_axes_get(WolframLibraryData libData,
   dst[0] = (mint)n_axes;
   dst[1] = (mint)n_applied;
   for (u32 i = 0; i < n_axes; i++) {
-    u32 extent = 0;
-    (void)axes_resolve_full_shape(ke, i, &extent);
-    dst[2 + i]           = (mint)axes_resolve_kax_type(ke, i);
-    dst[2 + n_axes + i]  = (mint)extent;
+    dst[2 + i]          = (mint)kax[i];
+    dst[2 + n_axes + i] = (mint)ext[i];
   }
   mint base = 2 + 2 * n_axes;
   for (u32 i = 0; i < n_applied; i++) {
@@ -2597,10 +2596,7 @@ EXTERN_C DLLEXPORT int thvm_wl_kernel_apply_opt(WolframLibraryData l, mint a,
     return LIBRARY_NO_ERROR;
   }
   KOpt opt = { (u8)op, axis, arg };
-  int ok = tile_anno_apply_opt(&KERNELS[kid], opt);
-  if (ok) {
-  }
-  MArgument_setInteger(res, (mint)ok);
+  MArgument_setInteger(res, (mint)kernel_apply_opt(&KERNELS[kid], opt));
   return LIBRARY_NO_ERROR;
 }
 
@@ -2798,33 +2794,6 @@ EXTERN_C DLLEXPORT int thvm_wl_wm_trim(WolframLibraryData libData, mint argc,
                                        MArgument *args, MArgument res) {
   (void)libData; (void)argc; (void)args;
   MArgument_setInteger(res, (mint)weight_move_trim_sources());
-  return LIBRARY_NO_ERROR;
-}
-
-// {cpu_live, cpu_peak, dev_live, dev_peak}: allocator-storage accounting
-// (CPU_MEM_LIVE / CPU_MEM_PEAK, backend/cpu/buf_alloc.c; the CUDA mirror on
-// a CUDA build, zeros otherwise).  Unlike thvm_wl_total_buf_bytes this
-// includes freelist-PARKED storage (refcount 0 but never freed), so it is
-// the true recording high-water probe the two-phase JIT gate tests read.
-// args[0] != 0 resets the peaks to live before sampling.
-EXTERN_C DLLEXPORT int thvm_wl_cpu_mem_peak(WolframLibraryData libData, mint argc,
-                                            MArgument *args, MArgument res) {
-  mint reset = argc >= 1 ? MArgument_getInteger(args[0]) : 0;
-  if (reset != 0) cpu_buf_peak_reset();
-  mint dims[1] = {4};
-  MTensor out;
-  libData->MTensor_new(MType_Integer, 1, dims, &out);
-  mint *dst = libData->MTensor_getIntegerData(out);
-  dst[0] = (mint)cpu_buf_live_bytes();
-  dst[1] = (mint)cpu_buf_peak_bytes();
-  dst[2] = 0;
-  dst[3] = 0;
-#ifdef THVM_HAS_CUDA
-  if (reset != 0) cuda_buf_peak_reset();
-  dst[2] = (mint)cuda_buf_live_bytes();
-  dst[3] = (mint)cuda_buf_peak_bytes();
-#endif
-  MArgument_setMTensor(res, out);
   return LIBRARY_NO_ERROR;
 }
 

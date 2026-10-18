@@ -14,6 +14,9 @@
 // Caller is responsible for ensuring buffer_idx falls inside the
 // underlying buffer; the helper does no bounds checking.
 
+// Map an output flat index to the underlying buffer index through
+// a (possibly non-contiguous) View.  Contiguous views short-circuit
+// to flat_idx + offset; strided views walk per-axis strides.
 fn u32 view_strided_index(View const *v, u32 flat_idx) {
   if (v->contiguous) return flat_idx + (u32)v->offset;
   int64_t acc = v->offset;

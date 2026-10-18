@@ -2,9 +2,8 @@
 //
 // Every case compares the realized tensor with a host reference byte for
 // byte.  Run the binary twice: as is (kernels run through the C JIT), and
-// with THVM_CPU_JIT_WARMUP=1000000000 (no kernel crosses the compile gate,
-// which the precompile and both JIT caches honor, so each runs on the UOp
-// walker).  check_dispatch asserts which backend ran each kernel,
+// with THVM_CPU_JIT_WARMUP=1000000000 (the precompile and both JIT caches
+// stand behind it, so each kernel runs on the UOp walker).  check_dispatch asserts which backend ran each kernel,
 // so the two runs agree with the reference, and with each other, on both
 // backends.
 //
@@ -28,11 +27,6 @@
 #include "test.h"
 #include "tu_probes.h"
 #include <time.h>
-
-static int interp_mode(void) {
-  char const *e = getenv("THVM_CPU_JIT_WARMUP");
-  return e != NULL && atoi(e) > 1;
-}
 
 static u32 mk(u32 dtype, u32 ndim, u32 const *dims, void const *data) {
   Shape s = {0};
@@ -123,11 +117,11 @@ static void check_bytes(void const *got, void const *want, u32 n,
 static u32 DISPATCHED = 0;
 
 static void check_dispatch(u32 k0) {
-  u32 want = interp_mode() ? KDISPATCH_INTERPRETER : KDISPATCH_JIT;
+  u32 want = cpu_jit_walker_only() ? KDISPATCH_INTERPRETER : KDISPATCH_JIT;
   for (u32 k = k0; k < KERNELS_NEXT; k++) {
     u32 kind = cg_kernel_dispatch_kind(k);
     if (kind == KDISPATCH_NONE
-        || (kind >= KDISPATCH_BLAS_DOT && kind <= KDISPATCH_BLAS_GEMM)) {
+        || kind == KDISPATCH_BLAS_GEMM) {
       continue;
     }
     CHECK_EQ(kind, want);
@@ -757,7 +751,7 @@ static void test_timing(void) {
   double dt = now_s() - t0;
   check_bytes(got, want, N * D, "timing");
   printf("  gather V=%u N=%u D=%u: %.4f s (%s; one-hot baseline 0.89 s)\n",
-         V, N, D, dt, interp_mode() ? "walker" : "C JIT");
+         V, N, D, dt, cpu_jit_walker_only() ? "walker" : "C JIT");
   free(w);
   free(ids);
   free(want);

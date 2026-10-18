@@ -530,42 +530,6 @@ EXPORT uint32_t py_ten_get_buf_id(uint64_t t) {
   if (id == 0 || id >= TENS_NEXT) return 0;
   return TENS[id].buf_id;
 }
-EXPORT uint64_t py_cuda_buf_dptr(uint32_t buf_id) {
-#ifdef THVM_HAS_CUDA
-  return (uint64_t)cuda_buf_dptr(buf_id);
-#else
-  (void)buf_id; return 0;
-#endif
-}
-
-// ---------------- renderer ----------------
-// Returns a heap-allocated null-terminated MSL source string. Caller
-// must free via py_string_free.
-EXPORT char *py_render_uop_kernel(uint64_t root, const char *name) {
-  char *buf = NULL;
-  size_t sz = 0;
-  FILE *fp = open_memstream(&buf, &sz);
-  if (fp == NULL) return NULL;
-  cg_render_uop_kernel_root(root, name ? name : "k", fp);
-  fflush(fp);
-  fclose(fp);
-  return buf;
-}
-
-// CUDA structural renderer.  Returns a heap-allocated null-terminated
-// .cu source string (`extern "C" __global__ void k(...)`).  Caller
-// frees via py_string_free.  The CUDA-target counterpart of
-// py_render_uop_kernel; the Python `Thvm.render_cuda` wraps it.
-EXPORT char *py_render_uop_kernel_cuda(uint64_t root, const char *name) {
-  char *buf = NULL;
-  size_t sz = 0;
-  FILE *fp = open_memstream(&buf, &sz);
-  if (fp == NULL) return NULL;
-  cg_render_uop_kernel_cuda_root(root, name ? name : "k", fp);
-  fflush(fp);
-  fclose(fp);
-  return buf;
-}
 
 // C99 structural renderer: the CPU-JIT kernel contract
 // (`void k(void *out_v, const void *const *ins_v, unsigned n,
@@ -586,151 +550,17 @@ EXPORT char *py_render_uop_kernel_c(uint64_t root, const char *name) {
 EXPORT void py_string_free(char *s) { free(s); }
 
 // Compile a C99 file into a shared object with the CPU JIT's compiler and
-// flags, so py-side kernel harnesses build exactly as the runtime does.
+// flags, so the lowered cross-validator builds exactly as the runtime does.
 EXPORT int py_cpu_jit_compile_shared(const char *src_path, const char *so_path) {
-  return cpu_jit_compile_shared(src_path, so_path);
+  return cpu_jit_compile_shared(src_path, so_path, 0);
 }
 
-// ---------------- BEAM / autotune surface ----------------
-// Phase E entry: the autotune.c BEAM (slice 8 session 4) reads
-// `ke->cached_lift.store_root` for matmul-shape recognition via
-// uop_dag_classify_matmul_shape, then proposes KOpt[] candidates.
-// We expose the smallest set of helpers needed to drive it from a
-// Python autotuner: allocate a synthetic KernelEntry, populate the
-// cached lift with our Python-built UOp DAG, and call propose to get
-// candidate KOpts.  Applying opts and benching is left to the Python
-// driver -- it composes UOp variants via the existing constructors
-// and times via the Metal helpers in thvm_py_metal.m.
-
-EXPORT uint32_t py_kernel_alloc(void) { return kernel_alloc(); }
-
-EXPORT void py_kernel_set_cached_lift(uint32_t kid, uint64_t store_root,
-                                      uint64_t out_buf,
-                                      const uint64_t *in_bufs,
-                                      uint32_t n_inputs) {
-  if (kid == 0 || kid >= KERNELS_NEXT) return;
-  KernelEntry *ke = &KERNELS[kid];
-  // ke->n_inputs below must index real (zeroed) input arrays.
-  kernel_inputs_reserve(ke, n_inputs);
-  kernel_lift_reserve(&ke->cached_lift, n_inputs);
-  ke->cached_lift.store_root = store_root;
-  ke->cached_lift.out_buf    = out_buf;
-  for (uint32_t i = 0; i < n_inputs; i++) {
-    ke->cached_lift.in_bufs[i] = in_bufs[i];
-  }
-  // Both counts name the same inputs -- DAG classifiers read
-  // ke->n_inputs (not cached_lift.n_inputs) when validating the
-  // BUFFER.instance->slot mapping (uop_dag_classify_matmul_shape).
-  ke->cached_lift.n_inputs = n_inputs;
-  ke->n_inputs             = n_inputs;
-}
-
-// Returns number of candidates filled into out_ops[]/out_axes[]/out_args[].
-// Caller pre-allocates arrays of `cap` u32 each.  Each candidate is the
-// triple (op, axis, arg) -- see KOpt struct in thvm.h.
-EXPORT uint32_t py_kernel_opts_propose(uint32_t kid,
-                                       uint8_t *out_ops,
-                                       uint8_t *out_axes,
-                                       uint32_t *out_args,
-                                       uint32_t cap) {
-  if (kid == 0 || kid >= KERNELS_NEXT) return 0;
-  KernelEntry *ke = &KERNELS[kid];
-  KOpt opts[KAUTOTUNE_MAX_CANDIDATES];
-  uint32_t local_cap = cap;
-  if (local_cap > KAUTOTUNE_MAX_CANDIDATES) local_cap = KAUTOTUNE_MAX_CANDIDATES;
-  uint32_t n = kernel_opts_propose(ke, opts, local_cap);
-  for (uint32_t i = 0; i < n; i++) {
-    out_ops[i]  = opts[i].op;
-    out_axes[i] = opts[i].axis;
-    out_args[i] = opts[i].arg;
-  }
-  return n;
-}
-
-// Apply a KOpt to the kernel's UOp DAG (Phase E DAG-mode path).
-// Returns the new store_root term (already stored into
-// ke->cached_lift.store_root); 0 on bail.  Use
-// alongside the propose surface to compose the tinygrad-style BEAM
-// autotune loop in Python.
-EXPORT uint64_t py_kernel_apply_opt(uint32_t kid, uint8_t op,
-                                    uint32_t axis, uint32_t arg) {
-  if (kid == 0 || kid >= KERNELS_NEXT) return 0;
-  KernelEntry *ke = &KERNELS[kid];
-  KOpt opt = { op, axis, arg };
-  if (!kernel_apply_opt(ke, opt)) return 0;
-  return ke->cached_lift.store_root;
-}
-
-// Direct DAG-rewrite entry: apply the opt to a free-standing root term,
-// without going through a KernelEntry slot.  Useful for unit tests and
-// for agents that prefer to manage the DAG directly without the
-// kid-keyed KERNELS[] machinery.
+// Apply a KOpt to a free-standing root term (the lowered cross-validator's
+// `opts`), without a KernelEntry slot.
 EXPORT uint64_t py_uop_dag_apply_kopt(uint64_t root, uint8_t op,
                                       uint32_t axis, uint32_t arg) {
   KOpt opt = { op, axis, arg };
   return uop_dag_apply_kopt(root, opt);
-}
-
-// DAG-derived CUDA launch geometry.  The Python `Cuda.dispatch` takes
-// an explicit flat grid/block and so cannot launch a LOCAL-split
-// kernel: a KOP_LOCAL split moves the inner tile onto `tt`
-// (threadIdx.x), which the flat one-thread-per-output shape does not
-// express.  The CUDA autotune sweep calls this on the KOpt-rewritten
-// root to recover the tg/tt geometry the structural renderer decodes
-// (cg_render_uop_kernel_cuda_root).  Mirrors src/backend/cuda/jit.c's
-// cuda_dag_dispatch_shape, but operates on a free-standing root term
-// (the py CUDA bridge has no KernelEntry).
-//
-//   - KAX_LOOP   axes -> grid  (one block per LOOP tuple, `tg` decode)
-//   - KAX_LOCAL  axes -> block (threads per block, `tt` decode)
-//   - KAX_GROUP_REDUCE -> block (warp-collective reduce width)
-//   - KAX_UPCAST / KAX_UNROLL / KAX_REDUCE: in-thread, not in tid.
-//
-// Writes (*grid_x, *block_x) and returns 1 on success; 0 if the DAG
-// has no axes / overflows 32 bits / a block dim exceeds the 1024
-// threads/block hardware cap (sm_70 V100).
-EXPORT uint32_t py_cuda_dag_dispatch_shape(uint64_t root,
-                                           uint32_t *grid_x,
-                                           uint32_t *block_x) {
-  if (root == 0) return 0;
-  uint32_t ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
-  uint32_t n = uop_dag_collect_axes(root, ids, types, exts, MAX_AXES);
-  if (n == 0) return 0;
-  uint64_t total = 1;            // product of promoted-LOOP output extents
-  uint64_t local_total = 1;      // product of KAX_LOCAL extents
-  uint32_t group_reduce_extent = 0;
-  for (uint32_t i = 0; i < n; i++) {
-    if (exts[i] == 0) return 0;
-    switch (types[i]) {
-      case KAX_LOOP:         total       *= (uint64_t)exts[i]; break;
-      case KAX_LOCAL:        local_total *= (uint64_t)exts[i]; break;
-      case KAX_GROUP_REDUCE: group_reduce_extent = exts[i]; break;
-      default: break;
-    }
-  }
-  if (total == 0 || total > 0xFFFFFFFFu) return 0;
-  uint32_t grid, block;
-  // (The MLX-derived SIMD_REDUCE warp-grid special-case was removed with the
-  // FAST_MATH/SIMD_REDUCE/VEC_LOAD OptOps purge -- 7a2218e6b.  The generic
-  // dispatch-shape below now handles every kernel; the IR no longer emits a
-  // SIMD_REDUCE opt that would need a per-warp grid.)
-  if (group_reduce_extent != 0) {
-    if (group_reduce_extent > 1024) return 0;
-    grid  = (uint32_t)total;
-    block = group_reduce_extent;
-  } else if (local_total > 1) {
-    if (local_total > 1024) return 0;
-    block = (uint32_t)local_total;
-    grid  = (uint32_t)total;
-  } else {
-    block = total < 256 ? (uint32_t)total : 256u;
-    if (block < 32) block = (uint32_t)total;
-    grid  = (uint32_t)((total + (uint64_t)block - 1) / (uint64_t)block);
-  }
-  if (grid == 0 || block == 0) return 0;
-  if (grid_x  != NULL) *grid_x  = grid;
-  if (block_x != NULL) *block_x = block;
-  return 1;
 }
 
 EXPORT uint32_t py_const_KOP_UPCAST(void)   { return KOP_UPCAST; }

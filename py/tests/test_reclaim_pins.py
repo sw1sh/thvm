@@ -14,17 +14,11 @@ read returned garbage, then crashed (a 1 MB buffer is unmapped when freed).
 
 Each case runs in a child process, so a crash fails the test, not the run.
 """
-import os
-import pathlib
-import subprocess
-import sys
 import unittest
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+import helpers
 
 _CHILD = r"""
-import os, sys
-sys.path.insert(0, os.environ["THVM_PY"])
 import numpy as np
 from thvm import GlobalCounters, Tensor
 x = np.arange(1 << 18, dtype=np.float32)
@@ -43,9 +37,7 @@ print("GRAD", bool(np.array_equal(w.grad.numpy(), y)), yd.grad is None, flush=Tr
 
 class TestReclaimPins(unittest.TestCase):
     def test_detached_tensor_keeps_its_storage(self):
-        env = dict(os.environ, DEV="cpu", THVM_PY=os.environ.get("THVM_PY", str(ROOT / "py")))
-        out = subprocess.run([sys.executable, "-c", _CHILD], env=env,
-                             capture_output=True, text=True, timeout=600)
+        out = helpers.run_child(_CHILD, 600, DEV="cpu")
         self.assertEqual(out.returncode, 0, f"child died:\n{out.stdout}\n{out.stderr[-3000:]}")
         self.assertEqual(out.stdout.split(),
                          ["READ", "True", "SUM", "True", "GRAD", "True", "True"])
