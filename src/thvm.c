@@ -360,6 +360,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "interact/ann_bri.c"
 #include "interact/dup_bri.c"
 #include "interact/uop_grad.c"
+#include "uop/backward.c"         // after the chain rule's static helpers
 #include "interact/uop_kernel.c"
 #include "interact/uop_assign.c"
 // Raw custom-kernel injection (kernel_emit_custom_program +

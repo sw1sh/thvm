@@ -480,6 +480,13 @@ EXPORT uint32_t py_uop_leaf_tids(uint64_t root, uint32_t *out, uint32_t cap) {
 // cleared by the call; NULL when there is none.
 EXPORT char const *py_grad_err_take(void) { return grad_err_take(); }
 
+// Tensor.backward's leaf protocol (uop_backward): NULL, or the chain rule's
+// error message with every leaf's .grad rolled back.
+EXPORT char const *py_backward(uint64_t y, uint64_t gy, uint32_t const *tids, uint32_t n,
+                               uint64_t *grads, uint8_t *had_grad) {
+  return uop_backward(y, gy, tids, n, (Term *)grads, had_grad);
+}
+
 // Walk-once backward readback: the canonical "this tensor's grad"
 // after a uop_grad-driven realize.  grad_leaf_sup's target==0 path
 // accumulates contributions into TENS[tid].grad; this returns the

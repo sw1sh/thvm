@@ -133,6 +133,8 @@ _ten_set_grad_leaf = _bind("py_ten_set_grad_leaf", c_int32,
 _uop_leaf_tids = _bind("py_uop_leaf_tids", c_uint32,
                        c_uint64, ctypes.POINTER(c_uint32), c_uint32)
 _grad_err_take     = _bind("py_grad_err_take",     c_char_p)
+_backward = _bind("py_backward", c_char_p, c_uint64, c_uint64, ctypes.POINTER(c_uint32),
+                  c_uint32, ctypes.POINTER(c_uint64), ctypes.POINTER(ctypes.c_uint8))
 _ten_get_grad     = _bind("py_ten_get_grad",     c_uint64, c_uint64)
 _ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
 _ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
@@ -516,6 +518,19 @@ class Thvm:
 
     def ten_get_buf_id(self, t: Term) -> int:
         return int(_ten_get_buf_id(c_uint64(int(t))))
+
+    def backward(self, y: Term, gy: Term, tids) -> "tuple[list[int], list[bool], str | None]":
+        """Tensor.backward's leaf protocol in C (uop_backward): mark the leaves
+        `tids`, fire the chain rule on y seeded by gy, unmark them.  Returns
+        each leaf's grad term, whether it held one before, and the chain rule's
+        error (every grad rolled back) or None."""
+        n = len(tids)
+        arr = (c_uint32 * max(n, 1))(*tids)
+        grads = (c_uint64 * max(n, 1))()
+        had = (ctypes.c_uint8 * max(n, 1))()
+        err = _backward(c_uint64(int(y)), c_uint64(int(gy)), arr, c_uint32(n), grads, had)
+        return [int(g) for g in grads[:n]], [bool(h) for h in had[:n]], (
+            None if err is None else err.decode())
 
     def grad_err_take(self) -> "str | None":
         """The chain rule's pending error (a node it has no gradient rule

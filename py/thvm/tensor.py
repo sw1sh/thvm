@@ -418,83 +418,37 @@ class Tensor(metaclass=_TensorMeta):
         return self
 
     def backward(self, gradient: "Tensor | None" = None) -> "Tensor":
-        """Auto-grad-all-float-leaves backward (tinygrad spec): build ONE
-        uop_grad(y, gy) root and drive wnf so the chain rule visits every
-        in-scope leaf once, accumulating each one's cotangent into
-        TENS[tid].grad (grad_leaf_sup's target==0 path).  There is no
-        requires_grad flag: .grad is filled for EVERY in-scope non-CONST
-        float leaf, and the OPTIMIZER's param list (not a flag) decides
-        what updates.
-
-        In-scope leaves are the distinct TAG_TEN leaf tids reachable from
-        the loss term (uop_leaf_tids -- tinygrad's all_tensors-in-scope
-        filter over thvm's term graph).  We transiently mark the float
-        ones for the accumulation walk, fire wnf, read back each leaf's
-        TenDesc.grad, then unmark to leave global grad state untouched.
-
-        wnf only drives the term-level chain-rule rewrite -- no kernels,
-        no materialize, no dispatch.  The gradient values stay lazy inside
-        TenDesc.grad; Tensor.realize(*grads) drives the pipeline downstream
-        just like tinygrad."""
+        """Fill .grad for every live in-scope float leaf (tinygrad
+        tensor.py:475-494; there is no requires_grad flag, and the
+        optimizer's param list decides what updates).  The leaves are the
+        TAG_TEN tids reachable from the loss (uop_leaf_tids); uop_backward
+        marks them, fires the chain rule once and unmarks them.  The grads
+        stay lazy until Tensor.realize."""
         if gradient is None:
             if self.numel() != 1:
                 raise RuntimeError(
                     "backward(): implicit gradient only for scalar outputs")
             gradient = self.const_like(1.0)
-        # In-scope leaves -> their live Tensors.  Mark every FLOAT leaf for
-        # the accumulation walk (thvm TEN leaves are buffers, never CONST,
-        # so the tinygrad CONST exclusion is the float filter here).
-        scope_tids = _TH.uop_leaf_tids(self.term)
-        leaves: "list[Tensor]" = []
-        for tid in scope_tids:
-            leaf = _LEAF_TENSORS.get(tid)
-            if leaf is None or not dtypes.is_float(leaf._dtype):
-                continue
-            _TH.ten_set_grad_leaf(leaf.term, True)
-            leaves.append(leaf)
-        # Guard: warn if any leaf entered with a stale gradient from a
-        # prior backward().  thvm ACCUMULATES into TenDesc.grad (tinygrad
-        # semantics), so a forgotten opt.zero_grad() silently piles
-        # gradients across steps -- a footgun, since PyTorch users expect a
-        # fresh .grad each backward.  Soft, de-duped warning; intentional
-        # gradient accumulation can filter it.
-        for leaf in leaves:
-            if _TH.ten_get_grad(leaf.term) != 0:
-                warnings.warn(
-                    "backward(): a leaf entered with a non-zero gradient "
-                    "from a prior backward(); thvm accumulates into "
-                    "TenDesc.grad, so call opt.zero_grad() between backward "
-                    "passes to avoid stale accumulation (intentional "
-                    "accumulation can filter this warning).",
-                    stacklevel=2)
-                break
-        try:
-            # Build the walk-once BWD root and drive wnf to fire the chain
-            # rule (interact_grad -> grad_leaf_sup accumulator).  A node the
-            # chain rule has no gradient for fires to zero and leaves a
-            # message in its error slot (any earlier message is stale); then
-            # the walk's partial sums are dropped and backward() raises, as
-            # tinygrad's compute_gradient does (mixin/gradient.py:127).
-            _TH.grad_err_take()
-            before = [_TH.ten_get_grad(leaf.term) for leaf in leaves]
-            bwd = _TH.grad(self.term, gradient.term)
-            _TH.wnf(bwd)
-            err = _TH.grad_err_take()
-            if err is not None:
-                for leaf, g_term in zip(leaves, before):
-                    _TH.ten_set_grad(leaf.term, g_term)
-                raise RuntimeError(f"backward(): {err}")
-            # Wrap each in-scope leaf's TenDesc.grad term.
-            for leaf in leaves:
-                g_term = _TH.ten_get_grad(leaf.term)
-                if g_term != 0:
-                    leaf.grad = Tensor._from_term(Term(g_term),
-                                                  leaf._dtype, leaf._shape)
-        finally:
-            # Restore global grad state so a later backward() over a
-            # different loss starts from a clean mark set.
-            for leaf in leaves:
-                _TH.ten_set_grad_leaf(leaf.term, False)
+        # The live float leaves in scope; thvm TEN leaves are buffers, never
+        # CONST, so tinygrad's CONST exclusion is the float filter here.
+        tids = [tid for tid in _TH.uop_leaf_tids(self.term)
+                if (leaf := _LEAF_TENSORS.get(tid)) is not None and dtypes.is_float(leaf._dtype)]
+        grads, had_grad, err = _TH.backward(self.term, gradient.term, tids)
+        if err is not None:
+            # tinygrad's compute_gradient raises for a node without a rule
+            # (mixin/gradient.py:127); every .grad is rolled back.
+            raise RuntimeError(f"backward(): {err}")
+        if any(had_grad):
+            warnings.warn(
+                "backward(): a leaf entered with a non-zero gradient from a prior "
+                "backward(); thvm accumulates into TenDesc.grad, so call "
+                "opt.zero_grad() between backward passes to avoid stale accumulation "
+                "(intentional accumulation can filter this warning).",
+                stacklevel=2)
+        for tid, g in zip(tids, grads):
+            if g != 0:
+                leaf = _LEAF_TENSORS[tid]
+                leaf.grad = Tensor._from_term(Term(g), leaf._dtype, leaf._shape)
         return self
 
     def sequential(self, layers) -> "Tensor":

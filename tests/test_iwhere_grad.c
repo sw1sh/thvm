@@ -145,14 +145,16 @@ static void test_forward(void) {
 
 static void grad_single_walk(Term (*build)(Term), double (*host)(double),
                              char const *what) {
-  u32 tid;
-  Term x = x_ten(&tid);
-  TENS[tid].requires_grad = 1;
-  grad_req_ncount_inc();
-  wnf(uop_grad(build(x), ones_n()));
+  u32  tid;
+  Term x  = x_ten(&tid);
+  Term gt = 0;
+  u8   had = 1;
+  CHECK(uop_backward(build(x), ones_n(), &tid, 1, &gt, &had) == NULL);
+  CHECK_EQ(had, 0);
+  CHECK_EQ(TENS[tid].requires_grad, 0);
+  CHECK_EQ(GRAD_REQ_NCOUNT, 0u);
   CHECK_EQ(grad_slot_stuck_get(), 0u);
   CHECK_EQ(grad_slot_excess_get(), 0u);
-  Term gt = TENS[tid].grad;
   CHECK(gt != 0);
   f32 g[N];
   if (gt != 0) {
@@ -163,8 +165,6 @@ static void grad_single_walk(Term (*build)(Term), double (*host)(double),
     }
   }
   TENS[tid].grad = 0;
-  TENS[tid].requires_grad = 0;
-  grad_req_ncount_dec();
 }
 
 static void grad_target(Term (*build)(Term), double (*host)(double),
