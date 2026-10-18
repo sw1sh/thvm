@@ -237,6 +237,20 @@ static void test_kernel_apply_opt_unsupported_op_bails(void) {
 
 // === KOP_UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP DAG mutation =============
 
+// More distinct RANGE leaves than the split's map holds: the split bails
+// instead of renaming only the ranges it collected.
+static void test_apply_split_bails_past_the_range_cap(void) {
+  u32  dims[1] = { 1u << 20 };
+  Term C       = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 0);
+  Term addr    = uop_range(0, KAX_LOOP, 2);
+  for (u32 a = 1; a <= APPLY_OPT_DAG_SPLIT_MAP_CAP; a++) {
+    addr = uop_int_binary(UOP_IADD, addr, uop_range(a, KAX_LOOP, 2));
+  }
+  Term root = uop_store(C, addr, uop_const(DT_FP32, 0));
+  CHECK_EQ(uop_dag_apply_split(root, KOP_UPCAST, 0, 2), 0);
+  CHECK_EQ(uop_dag_renumber_axes(root), root);
+}
+
 static void test_apply_split_upcast_splits_axis(void) {
   Term root = build_matmul_root(NULL, NULL, NULL);
   // Split axis 0 (m, extent 16) by 4: outer at axis 0 (extent 4),
@@ -742,6 +756,8 @@ int main(void) {
 
   TEST_BEGIN("apply_split_upcast_splits_axis");    test_apply_split_upcast_splits_axis();
   TEST_BEGIN("apply_split_local_no_opt_wrap");     test_apply_split_local_no_opt_wrap();
+  TEST_BEGIN("apply_split_bails_past_the_range_cap");
+                                                    test_apply_split_bails_past_the_range_cap();
   TEST_BEGIN("apply_split_unroll_wraps_inner_opt"); test_apply_split_unroll_wraps_inner_opt();
   TEST_BEGIN("apply_split_checks_source_type");    test_apply_split_checks_source_type();
   TEST_BEGIN("apply_split_unroll_twice_on_outer"); test_apply_split_unroll_twice_on_outer();

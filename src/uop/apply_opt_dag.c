@@ -200,36 +200,83 @@ static Term apply_opt_dag_substitute(Term t, ApplyOptDagSubState *st) {
   return out;
 }
 
-// The one RANGE leaf of `target_axis`; 0 when there is none or several.
+// A walk over a lifted kernel DAG visiting each node once (nodes are
+// hash-consed, so Term equality is node identity).  A push returns 0 when the
+// stack or the visited set is full: the caller bails rather than act on part
+// of the kernel.
+#define AOD_WALK_STACK 256
+#define AOD_WALK_SEEN  1024
+typedef struct {
+  Term stack[AOD_WALK_STACK];
+  u32  sp;
+  Term seen[AOD_WALK_SEEN];
+} AodWalk;
+
+static int aod_walk_push(AodWalk *w, Term t) {
+  if (term_tag(t) != TAG_UOP) {
+    return 1;
+  }
+  u32 h = (u32)((t * 0x9e3779b97f4a7c15ull) >> 54);
+  for (u32 p = 0; p < AOD_WALK_SEEN; p++) {
+    Term *slot = &w->seen[(h + p) & (AOD_WALK_SEEN - 1)];
+    if (*slot == t) {
+      return 1;
+    }
+    if (*slot == 0) {
+      if (w->sp == AOD_WALK_STACK) {
+        return 0;
+      }
+      *slot = t;
+      w->stack[w->sp++] = t;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int aod_walk_start(AodWalk *w, Term root) {
+  w->sp = 0;
+  memset(w->seen, 0, sizeof w->seen);
+  return aod_walk_push(w, root);
+}
+
+// Push t's children: an OPT's target, and an AFTER's two stores when
+// `into_after`.  0 on overflow.
+static int aod_walk_children(AodWalk *w, Term t, int into_after) {
+  u32 op = term_ext(t);
+  if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID || op == UOP_RANGE) {
+    return 1;
+  }
+  if (op == UOP_OPT) {
+    return aod_walk_push(w, uop_opt_target(t));
+  }
+  u8  ar  = (op == UOP_AFTER && into_after) ? 2 : uop_arity(op);
+  u64 loc = term_val(t);
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    if (!aod_walk_push(w, heap_read(loc + i))) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+// The one RANGE leaf of `target_axis`; 0 when there is none, several, or the
+// walk overflows.
 static Term apply_opt_dag_find_range(Term root, u32 target_axis) {
   if (root == 0) return 0;
-  Term stack[256];
-  u32  sp = 0;
-  stack[sp++] = root;
+  AodWalk w;
+  if (!aod_walk_start(&w, root)) return 0;
   Term found = 0;
-  while (sp > 0) {
-    Term t = stack[--sp];
-    if (term_tag(t) != TAG_UOP) continue;
-    u32 op = term_ext(t);
-    if (op == UOP_RANGE) {
+  while (w.sp > 0) {
+    Term t = w.stack[--w.sp];
+    if (term_ext(t) == UOP_RANGE) {
       if (uop_range_axis_id(t) == target_axis) {
-        if (found != 0 && found != t) return 0;
+        if (found != 0) return 0;
         found = t;
       }
       continue;
     }
-    if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID) continue;
-    if (op == UOP_OPT) {
-      Term tgt = uop_opt_target(t);
-      if (term_tag(tgt) == TAG_UOP && sp < 256) stack[sp++] = tgt;
-      continue;
-    }
-    u8 ar = uop_arity(op);
-    u64 loc = term_val(t);
-    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 256; i++) {
-      Term child = heap_read(loc + i);
-      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
-    }
+    if (!aod_walk_children(&w, t, 0)) return 0;
   }
   return found;
 }
@@ -248,35 +295,21 @@ static u32 apply_opt_dag_inner_opt_kind(u8 op) {
 }
 
 // The distinct RANGE leaves under `root`, every store of an AFTER root
-// included, into out[0..cap); returns the count.
+// included, into out[0..cap); returns the count, or cap + 1 when the walk
+// would drop one, and then the caller bails.
 static u32 apply_opt_dag_collect_ranges(Term root, Term *out, u32 cap) {
   if (root == 0) return 0;
-  Term stack[256];
-  u32  sp = 0;
-  stack[sp++] = root;
+  AodWalk w;
+  if (!aod_walk_start(&w, root)) return cap + 1;
   u32 n = 0;
-  while (sp > 0) {
-    Term t = stack[--sp];
-    if (term_tag(t) != TAG_UOP) continue;
-    u32 op = term_ext(t);
-    if (op == UOP_RANGE) {
-      int seen = 0;
-      for (u32 i = 0; i < n; i++) { if (out[i] == t) { seen = 1; break; } }
-      if (!seen && n < cap) out[n++] = t;
+  while (w.sp > 0) {
+    Term t = w.stack[--w.sp];
+    if (term_ext(t) == UOP_RANGE) {
+      if (n == cap) return cap + 1;
+      out[n++] = t;
       continue;
     }
-    if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID) continue;
-    if (op == UOP_OPT) {
-      Term tgt = uop_opt_target(t);
-      if (term_tag(tgt) == TAG_UOP && sp < 256) stack[sp++] = tgt;
-      continue;
-    }
-    u8 ar = (op == UOP_AFTER) ? 2 : uop_arity(op);
-    u64 loc = term_val(t);
-    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 256; i++) {
-      Term child = heap_read(loc + i);
-      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
-    }
+    if (!aod_walk_children(&w, t, 1)) return cap + 1;
   }
   return n;
 }
@@ -387,6 +420,7 @@ fn Term uop_dag_apply_split(Term root, u8 op, u32 target_axis, u32 k) {
   Term ranges[APPLY_OPT_DAG_SPLIT_MAP_CAP];
   u32 n_ranges = apply_opt_dag_collect_ranges(root, ranges,
                                               APPLY_OPT_DAG_SPLIT_MAP_CAP);
+  if (n_ranges > APPLY_OPT_DAG_SPLIT_MAP_CAP) return 0;
   for (u32 i = 0; i < n_ranges && ctx.n < APPLY_OPT_DAG_SPLIT_MAP_CAP; i++) {
     Term r = ranges[i];
     if (r == old_leaf) continue;
@@ -530,6 +564,7 @@ fn Term uop_dag_apply_group_reduce(Term root, u32 target_axis, u32 k) {
   Term ranges[APPLY_OPT_DAG_SPLIT_MAP_CAP];
   u32 n_ranges = apply_opt_dag_collect_ranges(root, ranges,
                                               APPLY_OPT_DAG_SPLIT_MAP_CAP);
+  if (n_ranges > APPLY_OPT_DAG_SPLIT_MAP_CAP) return 0;
   ApplyOptDagSplitCtx ctx;
   ctx.n = 0;
   u32 extent = 0;
@@ -586,6 +621,7 @@ fn Term uop_dag_apply_swap(Term root, u32 axis_a, u32 axis_b) {
   Term ranges[APPLY_OPT_DAG_SPLIT_MAP_CAP];
   u32 n_ranges = apply_opt_dag_collect_ranges(root, ranges,
                                               APPLY_OPT_DAG_SPLIT_MAP_CAP);
+  if (n_ranges > APPLY_OPT_DAG_SPLIT_MAP_CAP) return 0;
   ApplyOptDagSplitCtx ctx;
   ctx.n = 0;
   for (u32 i = 0; i < n_ranges && ctx.n < APPLY_OPT_DAG_SPLIT_MAP_CAP; i++) {
@@ -612,13 +648,14 @@ fn Term uop_dag_apply_swap(Term root, u32 axis_a, u32 axis_b) {
 
 // Renumber a kernel's RANGE ids and REDUCE axes to 0..n-1 in their order, as
 // each tinygrad kernel's axes start fresh; identical kernels then render
-// byte-identical source.  Returns `root` when the ids are already dense.
+// byte-identical source.  Returns `root` when the ids are already dense, or
+// when there are too many ranges to renumber them all.
 fn Term uop_dag_renumber_axes(Term root) {
   if (root == 0 || term_tag(root) != TAG_UOP) return root;
   Term ranges[APPLY_OPT_DAG_SPLIT_MAP_CAP];
   u32 n_ranges = apply_opt_dag_collect_ranges(root, ranges,
                                               APPLY_OPT_DAG_SPLIT_MAP_CAP);
-  if (n_ranges == 0) return root;
+  if (n_ranges == 0 || n_ranges > APPLY_OPT_DAG_SPLIT_MAP_CAP) return root;
   u32 ids[APPLY_OPT_DAG_SPLIT_MAP_CAP]; u32 n_ids = 0;
   for (u32 i = 0; i < n_ranges; i++) {
     u32 a = uop_range_axis_id(ranges[i]);
