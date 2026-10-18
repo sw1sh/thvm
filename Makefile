@@ -311,6 +311,7 @@ TESTS := \
   $(BIN)/test_expand_shared_view \
   $(BIN)/test_shared_weight_levels \
   $(BIN)/test_uop_mov_cache_growth \
+  $(BIN)/test_hashcons_realize \
   $(BIN)/test_limit_bufs \
   $(BIN)/test_kernel_width \
   $(BIN)/test_uop_buffer \

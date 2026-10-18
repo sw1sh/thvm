@@ -286,6 +286,7 @@ fn void thvm_realize_ceiling_cleanup(void) {
     materialized_loc_scope_leave();
   }
   materialized_loc_clear();
+  uop_mov_cache_reset();
   KERNEL_FIRE_SCOPE_DEPTH = REALIZE_ABORT_FIRE_DEPTH;
   if (CURRENT_CTX != NULL) {
     CURRENT_CTX->default_device = m.device;
@@ -453,6 +454,8 @@ static Term realize_end(RealizeMarks m, Term res) {
   materialized_loc_clear();
   materialized_loc_scope_leave();
   xpass_cc_reset();
+  // This realize rewrote nodes in place over buffers its rollback freed.
+  uop_mov_cache_reset();
 
   CURRENT_CTX->default_device = m.device;
   if (realize_stale_fire_failed()) {
