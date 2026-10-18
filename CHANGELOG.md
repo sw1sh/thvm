@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- py/tests/test_schedule_parity.py (lever R0) runs 25 graphs (elementwise chains, reduces, softmax, layernorm, matmul, conv2d, maxpool, attention, movement ops, cat, gather and three backwards) in thvm and in tinygrad 365f87a8a: the values match everywhere, and the kernel counts match on 16. The 9 that differ are pinned in KNOWN (thvm uses more kernels on 8, one fewer on softmax), so the rangeify levers L2-L4 flip them one by one.
 - The optimizer's step realizes its buffers, as tinygrad's does (py audit P9): `schedule_step` returns `_step() + self.buffers` (nn/optim.py:57), so BatchNorm's running-stat assigns stay lazy and land with the step instead of in two realizes of their own per BatchNorm per step.
 - A kernel opt on a DAG with more ranges or nodes than its walker holds bails instead of rewriting part of the kernel: apply_opt_dag.c's range walkers dropped children past a 256-deep stack and ranges past 64, so a split, swap or group renamed only the ranges it saw. They now visit each node once (shared sub-DAGs no longer refill the stack) and report overflow; renumbering then leaves the kernel as is. Test: apply_split_bails_past_the_range_cap.
 - `x < x` folds to a false CONST expanded to x's shape, as tinygrad's `const_like` does (symbolic.py:139); it used to fold to a one-element CONST, which changed x's shape for any consumer that is not elementwise. The `x == x` fold is gone: tinygrad has none, and it made `x != x` (NaN detection) always false. Test: uop/self-compare-folds-keep-the-shape.
