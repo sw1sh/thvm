@@ -514,28 +514,12 @@ EXPORT uint32_t py_ten_get_buf_id(uint64_t t) {
   return TENS[id].buf_id;
 }
 
-// C99 structural renderer: the CPU-JIT kernel contract
-// (`void k(void *out_v, const void *const *ins_v, unsigned n,
-//          const unsigned *in_numels, const unsigned *kvar_vals)`).
-// An empty string means the renderer declined the signature.  Caller
-// frees via py_string_free.
-EXPORT char *py_render_uop_kernel_c(uint64_t root, const char *name) {
-  char *buf = NULL;
-  size_t sz = 0;
-  FILE *fp = open_memstream(&buf, &sz);
-  if (fp == NULL) return NULL;
-  cg_render_uop_kernel_c_root(root, name ? name : "k", fp);
-  fflush(fp);
-  fclose(fp);
-  return buf;
-}
-
-EXPORT void py_string_free(char *s) { free(s); }
-
-// Compile a C99 file into a shared object with the CPU JIT's compiler and
-// flags, so the lowered cross-validator builds exactly as the runtime does.
-EXPORT int py_cpu_jit_compile_shared(const char *src_path, const char *so_path) {
-  return cpu_jit_compile_shared(src_path, so_path, 0);
+// Run a free-standing kernel root once through the CPU JIT's renderer,
+// compiler and kernel contract (the lowered cross-validator): 0, or -1 when
+// the renderer declines, -2 when the compile or load fails.
+EXPORT int py_run_uop_kernel_c(uint64_t root, void *out, const void *const *ins,
+                               uint32_t n, const uint32_t *in_numels) {
+  return cpu_jit_run_root(root, out, ins, n, in_numels);
 }
 
 // Apply a KOpt to a free-standing root term (the lowered cross-validator's

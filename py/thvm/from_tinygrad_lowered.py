@@ -28,8 +28,6 @@ intermediate buffer) and accumulator-loop reductions are the next step.
 """
 from __future__ import annotations
 
-import ctypes as _ct
-
 import numpy as np
 
 from .thvm import Thvm, K
@@ -301,33 +299,16 @@ def cross_validate(build_fn, *, opts=None):
 
 
 def _run_cpu(h, root, ref, inputs):
-    """Render C99 and run it in-process.  The kernel loops over its own
-    axes, so there is no grid; the signature is the CPU-JIT contract that
-    src/backend/cpu/jit.c dlsyms, compiled by the JIT's own compiler and
-    flags (cpu_jit_compile_shared)."""
-    import os
-    import tempfile
-    src = h.render_c(root, name="k")
-    if not src:
-        raise RuntimeError("thvm's C renderer declined the kernel signature")
+    """Run the kernel once through the CPU JIT's renderer, compiler and
+    kernel contract (cpu_jit_run_root); it loops over its own axes."""
     shape = ref.shape if ref.shape else (1,)
     out = np.zeros(int(np.prod(shape)), dtype=np.float32)
     ins = [np.ascontiguousarray(inputs[s], dtype=np.float32) for s in sorted(inputs)]
-    with tempfile.TemporaryDirectory(prefix="thvm_lowered_") as d:
-        c_path, so_path = os.path.join(d, "k.c"), os.path.join(d, "k.so")
-        with open(c_path, "w") as f:
-            f.write(src)
-        if not h.compile_c_shared(c_path, so_path):
-            raise RuntimeError("compiling the rendered kernel failed "
-                               "(THVM_CPU_JIT_VERBOSE=1 shows the compiler's errors)")
-        k = _ct.CDLL(so_path).k
-    k.restype = None
-    k.argtypes = [_ct.c_void_p, _ct.POINTER(_ct.c_void_p), _ct.c_uint,
-                  _ct.POINTER(_ct.c_uint), _ct.POINTER(_ct.c_uint)]
-    n_in = max(1, len(ins))
-    ptrs = (_ct.c_void_p * n_in)(*[a.ctypes.data for a in ins])
-    numels = (_ct.c_uint * n_in)(*[a.size for a in ins])
-    kvars = (_ct.c_uint * 1)()
-    k(out.ctypes.data, ptrs, out.size, numels, kvars)
+    rc = h.run_kernel_c(root, out, ins)
+    if rc == -1:
+        raise RuntimeError("thvm's C renderer declined the kernel signature")
+    if rc != 0:
+        raise RuntimeError("compiling the rendered kernel failed "
+                           "(THVM_CPU_JIT_VERBOSE=1 shows the compiler's errors)")
     got = out.reshape(shape)
     return got, ref, float(np.abs(got - ref).max())

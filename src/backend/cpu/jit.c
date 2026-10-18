@@ -429,6 +429,41 @@ static void *cpu_jit_load(char const *dl_path, char const *sym, void **handle) {
   return f;
 }
 
+// Render a free-standing kernel root (no KernelEntry), compile it with the
+// JIT's compiler and flags, and run it once on host buffers under the CpuJitFn
+// contract.  0 on success, -1 when the renderer declines, -2 when the compile
+// or load fails.  Private paths, so the JIT's source-hash cache never sees it.
+fn int cpu_jit_run_root(Term root, void *out, const void *const *ins, unsigned n,
+                        const unsigned *in_numels) {
+  static u32 seq = 0;
+  char src_path[96], dl_path[96];
+  snprintf(src_path, sizeof src_path, "/tmp/thvm_run_root_%d_%u.c", (int)getpid(), seq);
+  snprintf(dl_path, sizeof dl_path, "/tmp/thvm_run_root_%d_%u.so", (int)getpid(), seq++);
+  FILE *f = fopen(src_path, "w");
+  if (f == NULL) {
+    return -2;
+  }
+  cg_render_uop_kernel_c_root(root, "k", f);
+  long len = ftell(f);
+  fclose(f);
+  int rc = -1;
+  if (len > 0) {
+    void    *h = NULL;
+    CpuJitFn k = cpu_jit_compile_shared(src_path, dl_path, 0)
+                   ? (CpuJitFn)cpu_jit_load(dl_path, "k", &h) : NULL;
+    rc = -2;
+    if (k != NULL) {
+      unsigned kvars[KVAR_USED_CAP] = {0};
+      k(out, ins, n, in_numels, kvars);
+      dlclose(h);
+      rc = 0;
+    }
+  }
+  unlink(src_path);
+  unlink(dl_path);
+  return rc;
+}
+
 static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
   // Render the kernel as C99 by lifting to the UOp DAG and walking
   // it via cg_render_uop_kernel_c. Output signature matches the

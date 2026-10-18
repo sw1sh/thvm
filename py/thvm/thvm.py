@@ -139,11 +139,8 @@ _ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
 _ten_set_grad     = _bind("py_ten_set_grad",     c_int32,  c_uint64, c_uint64)
 
 # ---------------- C kernels (the lowered cross-validator) ----------------
-_render_uop_kernel_c = _bind(
-    "py_render_uop_kernel_c", c_void_p, c_uint64, c_char_p)
-_string_free = _bind("py_string_free", None, c_void_p)
-_cpu_jit_compile_shared = _bind(
-    "py_cpu_jit_compile_shared", ctypes.c_int, c_char_p, c_char_p)
+_run_uop_kernel_c = _bind("py_run_uop_kernel_c", c_int32, c_uint64, c_void_p,
+                          ctypes.POINTER(c_void_p), c_uint32, ctypes.POINTER(c_uint32))
 
 _uop_dag_apply_kopt = _bind(
     "py_uop_dag_apply_kopt", c_uint64,
@@ -556,23 +553,12 @@ class Thvm:
             return None
         return Term(int(new_root))
 
-    def render_c(self, root: Term, name: str = "k") -> str:
-        """Render the UOp DAG to a C99 kernel with the CPU-JIT contract
-        (`void k(void *out_v, const void *const *ins_v, unsigned n,
-        const unsigned *in_numels, const unsigned *kvar_vals)`).  Empty
-        when the renderer declines the signature.
-        """
-        ptr = _render_uop_kernel_c(c_uint64(int(root)), name.encode("utf-8"))
-        if not ptr:
-            return ""
-        try:
-            return ctypes.string_at(ptr).decode("utf-8")
-        finally:
-            _string_free(ptr)
-
-    def compile_c_shared(self, c_path: str, so_path: str) -> bool:
-        """Compile a C99 file into a shared object with the CPU JIT's
-        compiler and flags (THVM_CPU_CC, else $CC, else clang / cc / gcc).
-        THVM_CPU_JIT_VERBOSE=1 keeps the compiler's diagnostics.
-        """
-        return bool(_cpu_jit_compile_shared(c_path.encode("utf-8"), so_path.encode("utf-8")))
+    def run_kernel_c(self, root: Term, out, ins) -> int:
+        """Run `root` once on contiguous numpy buffers through the CPU JIT's
+        renderer, compiler and kernel contract: 0, or -1 when the renderer
+        declines, -2 when the compile or load fails."""
+        n_in = max(1, len(ins))
+        ptrs = (c_void_p * n_in)(*[a.ctypes.data for a in ins])
+        numels = (c_uint32 * n_in)(*[a.size for a in ins])
+        return int(_run_uop_kernel_c(c_uint64(int(root)), c_void_p(out.ctypes.data),
+                                     ptrs, c_uint32(out.size), numels))

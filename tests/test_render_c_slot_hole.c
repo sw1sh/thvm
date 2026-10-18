@@ -8,7 +8,6 @@
 // render as `unsigned char` while the body reads floats.
 #include "../src/thvm.c"
 #include "test.h"
-#include <dlfcn.h>
 
 #define N 4
 
@@ -22,39 +21,6 @@ static u32 render_c(Term root, char *src, size_t cap) {
   fclose(fp);
   src[n > 0 ? n : 0] = '\0';
   return (u32)(n > 0 ? n : 0);
-}
-
-typedef void (*KFn)(void *, const void *const *, unsigned, const unsigned *,
-                    const unsigned *);
-
-static int compile_run(char const *src, const void *const *ins, f32 *out) {
-  char c_path[] = "/tmp/thvm_slot_hole_XXXXXX.c";
-  int fd = mkstemps(c_path, 2);
-  if (fd < 0) {
-    return 0;
-  }
-  FILE *f = fdopen(fd, "w");
-  fputs(src, f);
-  fclose(f);
-  char so_path[sizeof c_path + 8];
-  snprintf(so_path, sizeof so_path, "%s.so", c_path);
-  char cmd[512];
-  snprintf(cmd, sizeof cmd, "%s -O1 -fPIC -shared -o '%s' '%s' 2>/dev/null", cpu_cc(),
-           so_path, c_path);
-  int ok = system(cmd) == 0;
-  void *h = ok ? dlopen(so_path, RTLD_NOW | RTLD_LOCAL) : NULL;
-  KFn k = h ? (KFn)dlsym(h, "k_hole") : NULL;
-  if (k != NULL) {
-    unsigned numels[3] = { N, N, N };
-    unsigned kv[1] = { 0 };
-    k(out, ins, N, numels, kv);
-  }
-  if (h != NULL) {
-    dlclose(h);
-  }
-  unlink(c_path);
-  unlink(so_path);
-  return k != NULL;
 }
 
 // out[i] = x[i] + z[i]; x is input slot 1 and z slot 3, so slot 2 is a hole.
@@ -73,8 +39,9 @@ static void test_unread_hole_renders(void) {
   CHECK(strstr(src, "*in1 =") == NULL);
   f32 xv[N] = { 1, 2, 3, 4 }, hv[N] = { 100, 100, 100, 100 }, zv[N] = { 10, 20, 30, 40 };
   f32 got[N] = { 0 };
-  const void *ins[3] = { xv, hv, zv };
-  CHECK(compile_run(src, ins, got));
+  const void *ins[3]    = { xv, hv, zv };
+  unsigned    numels[3] = { N, N, N };
+  CHECK(cpu_jit_run_root(root, got, ins, N, numels) == 0);
   for (u32 r = 0; r < N; r++) {
     CHECK(got[r] == xv[r] + zv[r]);
   }

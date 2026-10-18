@@ -12,7 +12,6 @@
 // by cpu_uop_walk; both must match the reference.
 #include "../src/thvm.c"
 #include "test.h"
-#include <dlfcn.h>
 
 #define NI 2
 #define NJ 3
@@ -28,48 +27,12 @@ static Term x_index(Term i, Term j, Term k, Term l) {
                         uop_int_binary(UOP_IADD, uop_int_binary(UOP_IADD, a, b), c), l);
 }
 
-// Render `root` through the production C entry, compile it with the JIT's C compiler and
-// run it.  Returns 1 on a completed run.
+// Run `root` through the production C entry and the JIT's compiler.  Returns 1
+// on a completed run.
 static int run_rendered(Term root, f32 const *x, f32 *res) {
-  static char src[65536];
-  FILE *fp = fmemopen(src, sizeof src, "w");
-  if (fp == NULL) {
-    return 0;
-  }
-  cg_render_uop_kernel_c_root(root, "k_chain", fp);
-  fclose(fp);
-  char const *tmpdir = getenv("TMPDIR");
-  char path[512];
-  snprintf(path, sizeof path, "%s/thvm_reduce_chain_XXXXXX.c",
-           (tmpdir != NULL && tmpdir[0] != '\0') ? tmpdir : ".");
-  int fd = mkstemps(path, 2);
-  if (fd < 0) {
-    return 0;
-  }
-  FILE *cf = fdopen(fd, "w");
-  fputs(src, cf);
-  fclose(cf);
-  char so[600];
-  snprintf(so, sizeof so, "%s.dylib", path);
-  char cmd[1400];
-  snprintf(cmd, sizeof cmd, "%s -O1 -shared -fPIC -o '%s' '%s' 2>/dev/null", cpu_cc(), so, path);
-  void *h = (system(cmd) == 0) ? dlopen(so, RTLD_NOW) : NULL;
-  typedef void (*kfn)(void *, const void *const *, unsigned,
-                      const unsigned *, const unsigned *);
-  kfn kf = (h != NULL) ? (kfn)dlsym(h, "k_chain") : NULL;
-  if (kf != NULL) {
-    const void *ins[1]   = { x };
-    unsigned    numel[1] = { NX };
-    kf(res, ins, NI, numel, NULL);
-  } else {
-    fprintf(stderr, "  render/compile failed:\n%s\n", src);
-  }
-  if (h != NULL) {
-    dlclose(h);
-  }
-  unlink(path);
-  unlink(so);
-  return kf != NULL;
+  const void *ins[1]   = { x };
+  unsigned    numel[1] = { NX };
+  return cpu_jit_run_root(root, res, ins, NI, numel) == 0;
 }
 
 static u32 mk_f32(u32 n, f32 const *data) {
