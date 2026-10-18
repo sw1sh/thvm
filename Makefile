@@ -314,6 +314,7 @@ TESTS := \
   $(BIN)/test_kernel_width \
   $(BIN)/test_uop_buffer \
   $(BIN)/test_uop_store_after \
+  $(BIN)/test_uop_substitute \
   $(BIN)/test_after_root_kernel \
   $(BIN)/test_uop_gather_scatter_ir \
   $(BIN)/test_uop_gather \

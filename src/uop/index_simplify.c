@@ -1070,53 +1070,8 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
   return 0;
 }
 
-// tinygrad UOp.substitute (uop/ops.py:532) on the index layer: every from[i] ->
-// to[i] at once, topmost match first, rebuilt through the simplifying
-// constructors.  Past depth 48 the rest is left as is.
-static Term uop_index_substitute_multi(Term t, Term const *from, Term const *to,
-                                       u32 n, u32 depth) {
-  for (u32 i = 0; i < n; i++) {
-    if (t == from[i]) {
-      return to[i];
-    }
-  }
-  if (depth > 48 || term_tag(t) != TAG_UOP) {
-    return t;
-  }
-  u32 op  = term_ext(t);
-  u64 loc = term_val(t);
-  switch (op) {
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
-    case UOP_IXOR: case UOP_ISHR: {
-      Term a0 = heap_read(loc + 0);
-      Term b0 = heap_read(loc + 1);
-      Term a  = uop_index_substitute_multi(a0, from, to, n, depth + 1);
-      Term b  = uop_index_substitute_multi(b0, from, to, n, depth + 1);
-      if (a == a0 && b == b0) {
-        return t;
-      }
-      return uop_int_binary(op, a, b);
-    }
-    case UOP_IWHERE: {
-      Term c0 = heap_read(loc + 0);
-      Term x0 = heap_read(loc + 1);
-      Term e0 = heap_read(loc + 2);
-      Term c  = uop_index_substitute_multi(c0, from, to, n, depth + 1);
-      Term x  = uop_index_substitute_multi(x0, from, to, n, depth + 1);
-      Term e  = uop_index_substitute_multi(e0, from, to, n, depth + 1);
-      if (c == c0 && x == x0 && e == e0) {
-        return t;
-      }
-      return uop_iwhere(c, x, e);
-    }
-    default: return t;
-  }
-}
-
-static Term uop_index_substitute(Term t, Term from, Term to, u32 depth) {
-  return uop_index_substitute_multi(t, &from, &to, 1, depth);
-}
+// Defined in uop/substitute.c, later in the translation unit.
+fn Term uop_substitute(Term root, Term const *from, Term const *to, u32 n);
 
 // Bits returned by uop_index_scan.
 #define UOP_SCAN_FOUND   1u  // one of the `find` terms occurs
@@ -1267,10 +1222,12 @@ static Term uop_fold_where_closure(Term cond, Term t, Term f) {
   Term nt = t, nf = f;
   i64  lo, hi;
   if ((ts & UOP_SCAN_FOUND) && uop_int_bounds(cond, &lo, &hi) && lo >= 0 && hi <= 1) {
-    nt = uop_index_substitute(t, cond, uop_iconst(1), 0);
+    Term one = uop_iconst(1);
+    nt = uop_substitute(t, &cond, &one, 1);
   }
   if (fs & UOP_SCAN_FOUND) {
-    nf = uop_index_substitute(f, cond, uop_iconst(0), 0);
+    Term zero = uop_iconst(0);
+    nf = uop_substitute(f, &cond, &zero, 1);
   }
   if (nt == t && nf == f) {
     return 0;

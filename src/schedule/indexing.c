@@ -275,7 +275,7 @@ fn int apply_movement_op_reshape_composed(u32 out_ndim, u32 const *out_shape,
   for (u32 a = 0; a < out_ndim; a++) {
     Term e = out_rngs[a];
     for (u32 i = 0; i < n_real; i++) {
-      e = uop_index_substitute(e, real_rng[i], placeholder[i], 0);
+      e = uop_substitute(e, &real_rng[i], &placeholder[i], 1);
     }
     sub_out[a] = e;
   }
@@ -293,7 +293,7 @@ fn int apply_movement_op_reshape_composed(u32 out_ndim, u32 const *out_shape,
   for (u32 a = 0; a < in_ndim; a++) {
     Term e = sub_in[a];
     for (u32 i = 0; i < n_real; i++) {
-      e = uop_index_substitute(e, placeholder[i], real_rng[i], 0);
+      e = uop_substitute(e, &placeholder[i], &real_rng[i], 1);
     }
     in_rngs[a] = e;
   }

@@ -290,6 +290,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/opt.c"
 #include "uop/view.c"
 #include "uop/graph_rewrite.c"
+#include "uop/substitute.c"
 #include "uop/upat.c"
 #include "uop/recognise_tc.c"
 #include "uop/apply_opt_dag.c"
