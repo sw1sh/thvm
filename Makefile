@@ -303,6 +303,7 @@ TESTS := \
   $(BIN)/test_heap_rooted_preserve \
   $(BIN)/test_heap_recovery \
   $(BIN)/test_gc_mark_term \
+  $(BIN)/test_gc_node_size \
   $(BIN)/test_extern_pin \
   $(BIN)/test_bufferize_classify \
   $(BIN)/test_rangeify_unified \

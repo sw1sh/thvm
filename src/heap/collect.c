@@ -124,7 +124,9 @@ fn u64 gc_from_end(void)     { return GC_FROM_END; }
 
 // Cells the node at term_val(t) owns; 0 for an atom.  A live node of a tag or
 // opcode with no case is never evacuated and reads garbage after the swap:
-// every assigned opcode below UOP_COUNT has one (44-50 are unassigned).
+// every tag and every assigned opcode below UOP_COUNT has one (44-50 are
+// unassigned).  A wnf frame owns the cells of the node it points at.
+_Static_assert(TAG_COUNT == 35, "a new tag needs its heap size in gc_node_size");
 _Static_assert(UOP_COUNT == 55, "a new UOp opcode needs its heap size in gc_node_size");
 static u32 gc_node_size(Term t) {
   u8  tag = term_tag(t);
@@ -134,14 +136,20 @@ static u32 gc_node_size(Term t) {
     case TAG_ANY: case TAG_FVR:
       return 0;
     case TAG_LAM: case TAG_DUP: case TAG_INC: case TAG_BRI:
-    case TAG_VAR:
+    case TAG_VAR: case TAG_BJ0: case TAG_BJ1:
       return 1;
     case TAG_DP0: case TAG_DP1:
       return (term_ext(t) & DUP_GRAD_FLAG) ? 3 : 1;
     case TAG_APP: case TAG_SUP: case TAG_OP2: case TAG_MAT:
     case TAG_ALO: case TAG_EQL: case TAG_AND: case TAG_OR:
     case TAG_WHEN: case TAG_ANN:
+    case TAG_F_OP2_NUM: case TAG_F_EQL_R:
       return 2;
+    case TAG_DSU: case TAG_DDU:
+    case TAG_F_DSU_LAB: case TAG_F_DDU_LAB:
+      return 3;
+    case TAG_F_UOP_CHILD:                     // ext bits 8..15: the parent opcode
+      return gc_node_size(term_new(0, TAG_UOP, (term_ext(t) >> 8) & 0xFF, loc));
     case TAG_CTR: {
       Term n_cell = HEAP[loc];
       if (term_tag(n_cell) != TAG_NUM) return 0;
