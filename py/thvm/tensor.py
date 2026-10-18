@@ -210,7 +210,9 @@ class Tensor(metaclass=_TensorMeta):
             _TH.pin_drop(self._pin_id)
         _TH.pin_set(self._pin_id, self.term)
         tid = int(_TH.term_val(self.term)) if is_ten else 0
-        if tid > 0:
+        # An alias of a live leaf (a no-op reshape or broadcast of it) leaves the
+        # tid with that leaf, or the alias's death would drop the leaf's grad.
+        if tid > 0 and _LEAF_TENSORS.get(tid) is None:
             _LEAF_TENSORS[tid] = self
 
     def __del__(self):

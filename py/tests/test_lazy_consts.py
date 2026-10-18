@@ -52,6 +52,14 @@ class TestLazyConsts(unittest.TestCase):
         (x * x).sum().backward()
         np.testing.assert_allclose(x.grad.numpy(), [2.0, -4.0, 6.0], rtol=1e-6)
 
+    def test_scalar_operand_keeps_the_leaf_grad(self):
+        # A rank-0 scalar broadcasts against p; p's side of the broadcast is p's
+        # own term, wrapped in a short-lived Tensor that must not take p's grad.
+        p = Tensor(np.array([-1.0], np.float32)).realize()
+        (p * 0.5).sum().backward()
+        self.assertIsNotNone(p.grad)
+        np.testing.assert_allclose(p.grad.numpy(), [0.5], rtol=1e-6)
+
     def test_sparse_crossentropy_value_and_grad(self):
         rng = np.random.default_rng(3)
         logits = rng.standard_normal((5, 7)).astype(np.float32)
