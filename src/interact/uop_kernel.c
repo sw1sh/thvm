@@ -338,9 +338,10 @@ fn void kernel_fire_by_id(u32 kid) {
   if (ke->fire_gen == KERNEL_FIRE_GEN) return;     // already fired this pass
   if (ke->stripped) {
     if (KERNEL_FIRE_SCOPE_DEPTH == 0) {
-      fprintf(stderr, "thvm fatal: fired kernel kid=%u, which the kernel GC "
-              "stripped (its inputs were freed)\n", kid);
-      abort();
+      char msg[128];
+      snprintf(msg, sizeof msg, "fired kernel kid=%u outside a realize, which the "
+               "kernel GC stripped (its inputs were freed)", kid);
+      thvm_fatal(msg);
     }
     if (KERNEL_STALE_FIRE_KID == 0) {
       KERNEL_STALE_FIRE_KID = kid;

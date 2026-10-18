@@ -2,7 +2,8 @@
 // bundled, longjmps to the armed host (the WL entries' THVM_WL_RECOVER), and
 // thvm_realize_ceiling_cleanup puts the runtime back where the realize
 // entered: pool watermark, loc -> tid scope and fire scope.  The next
-// realize then computes the right values.
+// realize then computes the right values.  A GC-stripped kernel fired outside
+// a realize stops the same way instead of aborting the process.
 #include "../src/thvm.c"
 #include "test.h"
 
@@ -48,6 +49,20 @@ static int realize_stops(Term t) {
   return 0;
 }
 
+// Fire kernel `kid` outside a realize with the fatal hook armed; 1 when it
+// stopped with a fatal.
+static int fire_stops(u32 kid) {
+  jmp_buf jb;
+  thvm_heap_exhaust_jmp = &jb;
+  if (setjmp(jb) != 0) {
+    thvm_heap_exhaust_jmp = NULL;
+    return 1;
+  }
+  kernel_fire_by_id(kid);
+  thvm_heap_exhaust_jmp = NULL;
+  return 0;
+}
+
 int main(void) {
   thvm_init();
 
@@ -70,6 +85,23 @@ int main(void) {
     CHECK(first(term_ctr_at(r, 0)) == 3.0f);
     CHECK(first(term_ctr_at(r, 1)) == 12.0f);
     CHECK(thvm_realize_error()[0] == '\0');
+  }
+
+  // A kernel the kernel GC stripped, fired outside any realize (a bare wnf,
+  // as TWnf and TGrad run it), stops through thvm_fatal: an armed host gets
+  // the longjmp and keeps running, where an abort() killed the WL kernel.
+  TEST_BEGIN("realize-abort/stripped-fire-outside-a-realize-returns-to-the-host");
+  {
+    u32  k0 = KERNELS_NEXT;
+    Term m  = thvm_materialize(uop_binary(UOP_ADD, ten4(1.0f), ten4(2.0f)));
+    CHECK(term_tag(m) == TAG_UOP && term_ext(m) == UOP_KERNEL);
+    CHECK(KERNELS_NEXT > k0);
+    if (KERNELS_NEXT > k0) {
+      u32 kid = KERNELS_NEXT - 1;
+      KERNELS[kid].stripped = 1;
+      CHECK_EQ(KERNEL_FIRE_SCOPE_DEPTH, 0);
+      CHECK_EQ(fire_stops(kid), 1);
+    }
   }
 
   thvm_free();

@@ -57,7 +57,7 @@ static void extern_pin_manager(WolframLibraryData libData, mbool mode, mint id) 
        run doesn't leak across retries (28->45 GB / 20-min wedge).  No-ops    \
        when no realize was in flight. */                                      \
     thvm_realize_ceiling_cleanup();                                           \
-    fprintf(stderr, "thvm_wl_" #tag ": ceiling/heap exhausted -- returning "   \
+    fprintf(stderr, "thvm_wl_" #tag ": thvm fatal caught -- returning "        \
                     "LIBRARY_FUNCTION_ERROR (kernel preserved)\n");            \
     return LIBRARY_FUNCTION_ERROR;                                             \
   }
@@ -591,12 +591,14 @@ EXTERN_C DLLEXPORT int thvm_wl_wnf(WolframLibraryData libData, mint argc,
   (void)libData; (void)argc;
   Term t = (Term)MArgument_getInteger(args[0]);
   int dbg = wl_wnf_dbg();
+  THVM_WL_RECOVER(wnf);
   if (dbg) {
     fprintf(stderr, "[wnf-dbg] enter abortq=%d rss=%lldMB\n",
             libData->AbortQ(), thvm_atp_live_rss_bytes() >> 20);
     fflush(stderr);
   }
   Term r = wnf(t);
+  THVM_WL_DONE();
   if (dbg) {
     fprintf(stderr, "[wnf-dbg] exit abortq=%d rss=%lldMB\n",
             libData->AbortQ(), thvm_atp_live_rss_bytes() >> 20);
@@ -621,8 +623,10 @@ EXTERN_C DLLEXPORT int thvm_wl_nf(WolframLibraryData libData, mint argc,
   // run cnf at the surviving root so any DP wrappers left at the head
   // (Levy-opaque under wnf since the Phase 1+2 readback split) get
   // resolved before the user observes the term.
+  THVM_WL_RECOVER(nf);
   Term r = nf(t);
   r = cnf(r);
+  THVM_WL_DONE();
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
@@ -678,7 +682,9 @@ EXTERN_C DLLEXPORT int thvm_wl_wnf_n(WolframLibraryData libData, mint argc,
   (void)libData; (void)argc;
   Term t          = (Term)MArgument_getInteger(args[0]);
   u64  max_steps  = (u64) MArgument_getInteger(args[1]);
+  THVM_WL_RECOVER(wnf_n);
   Term r = wnf_n(t, max_steps);
+  THVM_WL_DONE();
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
 }
