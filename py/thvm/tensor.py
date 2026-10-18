@@ -1,9 +1,8 @@
-"""thvm Tensor: tinygrad's Tensor surface (365f87a8a is the spec) over a thvm term.
+"""tinygrad's Tensor surface (365f87a8a is the spec) over a thvm term.
 
-A Tensor wraps a thvm term plus its dtype and shape.  Methods build the UOp
-graph through the Thvm bridge; .realize() (implicit in .numpy() / .item() /
-.tolist()) runs thvm's materialize, schedule and dispatch.  thvm owns the lazy
-graph, autodiff (backward() drives its uop_grad walk) and kernel fusion.
+A Tensor is a thvm term plus its dtype and shape.  Methods build the UOp graph
+through the Thvm bridge; realize() (implicit in numpy(), item() and tolist())
+runs thvm's materialize, schedule and dispatch, and backward() its chain rule.
 """
 from __future__ import annotations
 
@@ -21,31 +20,17 @@ from .helpers import TRAINING, argfix
 from .thvm import K, Term, Thvm
 
 
-# Process-global bridge.  All Tensors share one Thvm instance.
 _TH = Thvm()
 _TAG_TEN = K.TAG_TEN
 
-# Routes a realized TAG_TEN's tid back to its originating Python Tensor.
-# backward() walks the in-scope leaf tids of the loss term, looks each
-# up here, and (for the float ones) auto-fills .grad -- the tinygrad
-# spec, where backward() fills .grad for every in-scope non-CONST float
-# leaf with no requires_grad flag anywhere.  WeakValueDictionary so dead
-# tensors auto-drop; nn parameters stay alive via their layer.  Every
-# realized leaf registers here in _pin(), not just "parameters".
+# Each TAG_TEN tid -> its Tensor, so backward() can fill .grad on the in-scope float leaves
+# (tinygrad tensor.py:485-494); weak values, so a dead Tensor drops out.
 _LEAF_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
     weakref.WeakValueDictionary()
 
-# Monotonic handle ids for live-tensor pinning.  Each realized Tensor
-# pins its term via _TH.pin_set(handle, term), a root of a realize's own
-# pool rollback; __del__ drops the handle.
-#
-# A dead Tensor's buffer is freed by _TH.reclaim(), which traces from every
-# live Tensor's term (lazy graphs included) and frees what nothing reaches.
-# Allocating a tensor and finishing a realize call _TH.reclaim_if_due(),
-# which reclaims once resident bytes outgrow the last reclaim's survivors,
-# so memory stays bounded without GlobalCounters.reset().  Both are safe
-# points: every term the frontend still needs is held by a live Tensor
-# there, never only as a raw integer in a local.
+# The next pin handle (_pin).  Tensor allocation and realize call reclaim_if_due(), which bounds
+# memory without GlobalCounters.reset(); both are safe points, where every term still needed is
+# held by a live Tensor, never only as a raw integer in a local.
 _PIN_NEXT = 1
 
 # Every Tensor's raw term is a root of the deferred heap collection, which
@@ -54,10 +39,9 @@ _LIVE_ADD = Thvm.live_terms.add
 
 
 def _host_scatter_extreme(base, flat, vals, is_max: bool, include_self: bool):
-    """amax / amin scatter on the host, as the native kernel folds it:
-    S[j] starts at the dtype's identity and takes x when (S < x) (amax) or
-    (x < S) (amin), in index order; then out = S (op) T with T = base, or
-    the identity where something lands without include_self."""
+    """amax / amin scatter on the host, folded as the native kernel does: S starts at the
+    identity and takes x when S < x (amax) or x < S (amin), in index order; out = S (op) T,
+    T = base, or the identity where something lands without include_self."""
     if base.dtype.kind == "f":
         ident = base.dtype.type(-np.inf if is_max else np.inf)
     else:
@@ -75,16 +59,14 @@ def _host_scatter_extreme(base, flat, vals, is_max: bool, include_self: bool):
 
 
 def _native_indexing() -> bool:
-    """Gather / scatter kernels run on the CPU backend only (emit refuses
-    them on a GPU backend), so the frontends build the native UOP_GATHER /
-    UOP_SCATTER only when DEV picked the CPU."""
+    """Gather / scatter kernels run on the CPU backend only (emit declines them on a GPU), so the
+    native UOP_GATHER / UOP_SCATTER are built only when DEV picked the CPU."""
     return Device.DEFAULT == "CPU"
 
 
 def _const_broadcast(value, shape, dtype: DType) -> "Tensor":
-    """A lazy constant of `shape`: EXPAND(RESHAPE(CONST)), no host buffer,
-    so a JIT capture holds no temporary tensor that could be freed under it
-    (the relu zero-cache problem)."""
+    """A lazy constant of `shape`, EXPAND(RESHAPE(CONST)) with no host buffer, like tinygrad's
+    const_like (uop/ops.py:603-605)."""
     c = (_TH.iconst(int(value)) if dtypes.is_int(dtype)
          else _TH.fconst(float(value)))
     shape = tuple(int(d) for d in shape)
@@ -94,19 +76,15 @@ def _const_broadcast(value, shape, dtype: DType) -> "Tensor":
 
 def _promote(a: "Tensor", b: "Tensor") -> "tuple[Tensor, Tensor]":
     """least_upper_dtype on the float32/int32 lattice: a mixed pair computes
-    in float32 (tinygrad mixin/elementwise.py:24-30)."""
+    in float32 (tinygrad mixin/elementwise.py:24-34)."""
     if a._dtype != b._dtype:
         return a.cast(dtypes.float32), b.cast(dtypes.float32)
     return a, b
 
 
 def _normalize_pairs(arg, shape, full):
-    """Normalize a shrink/pad argument to a flat [b0,e0,b1,e1,...] list.
-
-    Accepts the tinygrad tuple-of-pairs form (each element is a
-    `(begin, end)` pair or `None` -> `full(axis_size)`) OR the already-flat
-    int list.  `full(n)` supplies the per-axis default (begin,end) for a
-    `None` element (full-range for shrink, no-pad for pad)."""
+    """A shrink / pad argument as a flat [b0, e0, b1, e1, ...] list, from tinygrad's per-axis pairs
+    (a None pair is full(axis size)) or an already-flat int list."""
     seq = list(arg)
     is_pairs = any(x is None or isinstance(x, (tuple, list)) for x in seq)
     if not is_pairs:
@@ -122,14 +100,8 @@ def _normalize_pairs(arg, shape, full):
 
 
 def _wrap_other(self_t: "Tensor", other) -> "Tensor":
-    """Coerce a Python scalar (or Tensor) into a Tensor operand.
-
-    tinygrad's rule (mixin/elementwise.py:21-31, dtype.py promotion lattice):
-    a Python scalar is a WEAK value that adopts the tensor operand's kind --
-    except a float scalar with an int tensor, which promotes the operation
-    to float.  With thvm's float32/int32 surface that is exactly: int
-    scalar -> self's dtype; float scalar -> float32 (never truncated).  The
-    scalar is a rank-0 CONST, as tinygrad's is, not a host buffer."""
+    """A Python scalar as a weak rank-0 CONST (tinygrad mixin/elementwise.py:21-34): it takes the
+    tensor's dtype, except that a float scalar makes an int operation float32."""
     if isinstance(other, Tensor):
         return other
     dtype = self_t._dtype
@@ -141,9 +113,8 @@ def _wrap_other(self_t: "Tensor", other) -> "Tensor":
 
 
 class _TensorMeta(type):
-    # tinygrad removed the Tensor.training alias (#16774) in favour of the
-    # TRAINING ContextVar.  Without this, `Tensor.training = True` silently
-    # creates a class attribute nothing reads and training runs in eval mode.
+    # tinygrad replaced Tensor.training with the TRAINING ContextVar (#16774); without this,
+    # `Tensor.training = True` would set a class attribute nothing reads.
     @property
     def training(cls):
         raise AttributeError(_TRAINING_MOVED)
@@ -158,7 +129,7 @@ _TRAINING_MOVED = ("Tensor.training was removed (tinygrad #16774): use "
 
 
 class Tensor(metaclass=_TensorMeta):
-    """thvm tensor: TAG_TEN handle + Python-tracked dtype + shape."""
+    """A thvm term (a lazy UOp graph or a realized TAG_TEN) plus its dtype and shape."""
 
     __slots__ = ("term", "_dtype", "_shape", "is_param", "grad",
                  "_pin_id", "_view_base", "_view_begin_end", "__weakref__")
@@ -197,12 +168,8 @@ class Tensor(metaclass=_TensorMeta):
             self.term = _TH.ten_create(dtype.thvm_id, list(self._shape))
             if arr.size > 0:
                 _TH.ten_write(self.term, arr.tobytes())
-        # is_param (tinygrad nn.optim semantics): every Tensor is a
-        # candidate optimizer parameter by default; a buffer opts out via
-        # .is_param_(False) (BatchNorm running stats, Adam bias-correction
-        # state).  This drives ONLY the optimizer's param/buffer split --
-        # backward() auto-fills .grad for every in-scope float leaf
-        # regardless of is_param (tinygrad has no requires_grad).
+        # is_param only splits an optimizer's list into params and buffers (BatchNorm running
+        # stats opt out); backward() fills .grad on every in-scope float leaf regardless.
         self.is_param: bool = True
         self.grad: Tensor | None = None
         self._pin_id = 0
@@ -230,12 +197,8 @@ class Tensor(metaclass=_TensorMeta):
     # ---- live-tensor pinning (cross-step buffer reclaim) --------------
 
     def _pin(self, lazy: bool = False) -> None:
-        """Pin the current term if it is a realized TAG_TEN (or, with
-        `lazy`, whatever it is), so reclaim() keeps every buffer it reaches,
-        AND register a TAG_TEN in _LEAF_TENSORS so backward() can route the
-        leaf's tid back to this Tensor.  Re-pinning (term changed via
-        realize/assign) drops the stale handle entry first to avoid leaking
-        pin slots."""
+        """Pin the term if it is a TAG_TEN (any term with `lazy`), a root for reclaim() and a
+        realize's pool rollback, and map a TAG_TEN's tid to self for backward()."""
         global _PIN_NEXT
         is_ten = int(_TH.term_tag(self.term)) == _TAG_TEN
         if not is_ten and not lazy:
@@ -274,9 +237,8 @@ class Tensor(metaclass=_TensorMeta):
 
     @property
     def max_shape(self) -> tuple[int, ...]:
-        # tinygrad replaces each symbolic dim by its maximum
-        # (mixin/movement.py:49-53); thvm shapes are always concrete (a bound
-        # Variable is its value), so the maximum is the shape itself.
+        # tinygrad takes each symbolic dim's maximum (mixin/movement.py:49-53); thvm shapes are
+        # concrete (a bound Variable is its value), so that is the shape itself.
         return tuple(int(d) for d in self._shape)
 
     def max_numel(self) -> int:
@@ -285,26 +247,16 @@ class Tensor(metaclass=_TensorMeta):
     # ---- realize + host readback --------------------------------------
 
     def realize(self, *lst: "Tensor", **kwargs) -> "Tensor":
-        """Drive thvm's pipeline; mutates `term` to the resulting
-        TAG_TEN.  Several tensors realize together in ONE realize_many
-        pass, like tinygrad's Tensor.realize(*lst): the shared forward
-        intermediates of backward grad chains emit once (the loc -> tid
-        cache in schedule/materialize.c spans the call, mirroring
-        tinygrad's per-schedule _realize_cache), and every assign
-        applies exactly once.
-
-        Assign order follows the data, not the argument order: a tensor
-        that reads a buffer's prior state realizes before the assign that
-        overwrites it (tinygrad schedule/__init__.py WAR edges).  thvm
-        orders whole tensors, not kernels, so a prior-state read and an
-        assign under the SAME tensor keep their graph order, and tensors
-        that each read what the other overwrites raise RuntimeError
-        ("cycle detected in assign graph")."""
+        """Run thvm's pipeline and swap each term for its TAG_TEN; several tensors realize in one
+        realize_many pass (tinygrad tensor.py:219-225), so shared kernels emit once."""
         if not lst:
             self.term = _TH.realize(self.term)
             self._pin()
             _TH.reclaim_if_due()
             return self
+        # Assigns follow the data: a tensor reading a buffer's prior state realizes before another
+        # tensor's assign overwrites it (tinygrad's WAR edges, schedule/__init__.py:57-65); within
+        # one tensor the graph order holds, and a cycle raises RuntimeError.
         terms_all = [self.term] + [x.term for x in lst]
         out = _TH.realize_many(terms_all)
         self.term = out[0]
@@ -319,19 +271,15 @@ class Tensor(metaclass=_TensorMeta):
         return self.realize()
 
     def clone(self, device=None) -> "Tensor":
-        """Fresh storage holding self's value, never aliasing self
-        (tinygrad tensor.py:344-351; uop/ops.py:887-893 stores the value
-        into empty_like storage).  `device` is accepted for tinygrad
-        compatibility; DEV picks thvm's single device.
-
-        Realized eagerly, like contiguous(), so the clone is a new leaf and
-        backward() does not reach self through it, where tinygrad passes
-        the gradient to the source (mixin/gradient.py:100-101)."""
+        """Fresh storage holding self's value (tinygrad tensor.py:344-351, uop/ops.py:887-893);
+        `device` is ignored, DEV picks thvm's one device."""
         del device
         _TH.reclaim_if_due()
         dst = Tensor._from_term(
             _TH.ten_create(self._dtype.thvm_id, list(self._shape)),
             self._dtype, self._shape)
+        # Realized eagerly, so the clone is a new leaf: backward() does not reach self through it,
+        # where tinygrad passes the gradient to the source (mixin/gradient.py:100-101).
         ret = dst.assign(self).realize()
         if self.grad is not None:
             ret.grad = self.grad.clone()
@@ -355,30 +303,20 @@ class Tensor(metaclass=_TensorMeta):
     # ---- graph helpers --------
 
     def detach(self) -> "Tensor":
-        """tinygrad detach -- stop-gradient.  Wraps in UOP_DETACH:
-        identity forward (unwrapped before materialize), zero backward
-        (the cotangent dies at the detach).  Used e.g. by BatchNorm to
-        keep the variance gradient from flowing through the mean.
-
-        The result reads self's storage, as tinygrad's DETACH UOp keeps its
-        source's buffer (mixin/elementwise.py:43-47), so it pins its term:
-        a detached tensor keeps that storage after self is gone."""
+        """Stop-gradient (tinygrad mixin/elementwise.py:43-47): UOP_DETACH, the identity forward
+        and no gradient backward."""
         t = Tensor._from_term(_TH.detach(self.term), self._dtype, self._shape)
+        # The result reads self's storage, as tinygrad's DETACH does, so it pins its term to keep
+        # that storage after self is gone.
         t._pin(lazy=True)
         return t
 
     def assign(self, x: "Tensor") -> "Tensor":
-        """tinygrad assign -- lazy IN-PLACE update.  Builds UOP_ASSIGN(self,
-        x); realizing it copies x's buffer into self's (the dst tid/buffer
-        stay stable) and returns self.  In-place + lazy is what makes the
-        optimizer step JIT-capturable (jit_capture_record_assign) and keeps
-        param buffers stable across replays -- exactly tinygrad/WL TAssign."""
+        """Lazy in-place update (tinygrad tensor.py:236-274): UOP_ASSIGN(self, x) writes x into
+        self's buffer when realized, keeping the buffer, so a JIT capture can replay it."""
         x = x if isinstance(x, Tensor) else Tensor(x, dtype=self._dtype)
-        # View dst (a shrink slice, e.g. the kv-cache write
-        # `cache[:, :, p:p+n].assign(...)`): thvm's eager UOP_ASSIGN copies
-        # whole buffers and ignores the view offset/strides, so it would
-        # never reach the base buffer.  Scatter host-side into the base
-        # tensor's buffer instead, then realize the base in place.
+        # A shrink-view dst (the kv-cache write `cache[:, :, p:p+n].assign(...)`): UOP_ASSIGN
+        # writes one contiguous run at the view's offset, ignoring strides, so scatter on the host.
         if self._view_base is not None and self._view_begin_end is not None:
             base = self._view_base
             base.realize()
@@ -387,8 +325,7 @@ class Tensor(metaclass=_TensorMeta):
             sl = tuple(slice(be[2*i], be[2*i+1]) for i in range(base.ndim))
             arr[sl] = x.numpy().reshape(arr[sl].shape)
             new_base = Tensor(arr, dtype=base._dtype).realize()
-            # Re-point the base tensor at the freshly written buffer so any
-            # later read through `base` (the kv-cache) sees the update.
+            # Re-point base at the new buffer so later reads through it see the write.
             base.term = new_base.term
             base._pin()
             self.term = new_base.term
@@ -402,7 +339,7 @@ class Tensor(metaclass=_TensorMeta):
         return self
 
     def replace(self, x: "Tensor") -> "Tensor":
-        """tinygrad replace -- swap underlying data; returns self."""
+        """Take x's data, dtype and shape (tinygrad tensor.py:227-234)."""
         x = x if isinstance(x, Tensor) else Tensor(x, dtype=self._dtype)
         self.term = x.term
         self._dtype = x._dtype
@@ -411,28 +348,21 @@ class Tensor(metaclass=_TensorMeta):
         return self
 
     def is_param_(self, is_param: bool = True) -> "Tensor":
-        """Mark whether this Tensor is an optimizer parameter (tinygrad
-        Tensor.is_param_).  Buffers (BatchNorm running stats, Adam bias-
-        correction state) call .is_param_(False) so the optimizer's
-        param/buffer split skips them.  Has NO effect on backward() --
-        gradients flow to every in-scope float leaf regardless."""
+        """Mark whether this is an optimizer parameter (tinygrad tensor.py:124-126); only the
+        optimizer's param / buffer split reads it, never backward()."""
         self.is_param = is_param
         return self
 
     def backward(self, gradient: "Tensor | None" = None) -> "Tensor":
-        """Fill .grad for every live in-scope float leaf (tinygrad
-        tensor.py:475-494; there is no requires_grad flag, and the
-        optimizer's param list decides what updates).  The leaves are the
-        TAG_TEN tids reachable from the loss (uop_leaf_tids); uop_backward
-        marks them, fires the chain rule once and unmarks them.  The grads
-        stay lazy until Tensor.realize."""
+        """Fill .grad on every live in-scope float leaf, with no requires_grad flag (tinygrad
+        tensor.py:475-495); the grads stay lazy until realized."""
         if gradient is None:
             if self.numel() != 1:
                 raise RuntimeError(
                     "backward(): implicit gradient only for scalar outputs")
             gradient = self.const_like(1.0)
-        # The live float leaves in scope; thvm TEN leaves are buffers, never
-        # CONST, so tinygrad's CONST exclusion is the float filter here.
+        # tinygrad keeps the float leaves with a device (tensor.py:486-488); a TEN leaf is a
+        # buffer, so the float test is all that is left.
         tids = [tid for tid in _TH.uop_leaf_tids(self.term)
                 if (leaf := _LEAF_TENSORS.get(tid)) is not None and dtypes.is_float(leaf._dtype)]
         grads, had_grad, err = _TH.backward(self.term, gradient.term, tids)
@@ -547,7 +477,6 @@ class Tensor(metaclass=_TensorMeta):
     def __add__(self, o):  return self._binop(o, K.ADD)
     def __radd__(self, o): return self.__add__(o)
     def __sub__(self, o):
-        # a - b = a + (-b)
         if isinstance(o, (int, float)):
             return self.__add__(-o)
         return self.__add__(-(o if isinstance(o, Tensor) else Tensor(o)))
@@ -567,23 +496,14 @@ class Tensor(metaclass=_TensorMeta):
         return Tensor._from_term(_TH.neg(self.term), self._dtype,
                                  self._shape)
 
-    # tinygrad alias: `t.add(other)` == `t + other`
     def add(self, o): return self.__add__(o)
     def sub(self, o): return self.__sub__(o)
     def mul(self, o): return self.__mul__(o)
     def div(self, o): return self.__truediv__(o)
 
     def __matmul__(self, other: "Tensor") -> "Tensor":
-        """Matmul -- composes RESHAPE+EXPAND+MUL+REDUCE; thvm fuses.
-
-        2-D @ 2-D takes the byte-identical specialized path below.
-        N-D (batched / broadcast) matmul ports tinygrad's dot rule
-        (tinygrad/mixin/__init__.py:341-346) with thvm's EXPLICIT
-        broadcast (thvm mul does not implicit-broadcast): insert a
-        broadcast-1 slot, transpose w's contraction axis to trailing,
-        expand the leading batch dims to the numpy-broadcast batch,
-        then the same MUL + trailing-reduce as the 2-D path.
-        """
+        """Matmul as RESHAPE, EXPAND, MUL and REDUCE, which thvm fuses; N-D operands take
+        tinygrad's dot (mixin/op.py:387-392)."""
         if self.ndim == 2 and other.ndim == 2:
             M, K_in = self._shape
             K2, N = other._shape
@@ -596,18 +516,7 @@ class Tensor(metaclass=_TensorMeta):
         return self._dot_nd(other)
 
     def _dot_nd(self, w: "Tensor") -> "Tensor":
-        """N-D dot, faithful to tinygrad/mixin/__init__.py:341-346.
-
-        tinygrad:
-            axis_w = -min(w.ndim, 2)
-            x = x.reshape(*x.shape[:-1], *[1]*min(dx-1,dw-1,1), x.shape[-1])
-            w = w.reshape(*w.shape[:-2], *[1]*min(dx-1,dw-1,1),
-                          *w.shape[axis_w:]).transpose(-1, axis_w)
-            return (x*w).sum(-1)
-        tinygrad's mul implicitly broadcasts the leading batch dims;
-        thvm's does not, so after the reshape/transpose we compute the
-        numpy-broadcast common shape and .expand() both operands to it.
-        """
+        """N-D dot, tinygrad's rule (mixin/op.py:387-392)."""
         x = self
         dx, dw = x.ndim, w.ndim
         if not (dx > 0 and dw > 0):
@@ -618,17 +527,12 @@ class Tensor(metaclass=_TensorMeta):
             raise RuntimeError(f"cannot dot {x._shape} and {w._shape}")
 
         pad = (1,) * min(dx - 1, dw - 1, 1)
-        # x: (..., M, 1?, K)
         xs = (*x._shape[:-1], *pad, x._shape[-1])
         x = x.reshape(*xs)
-        # w: (..., 1?, *w.shape[axis_w:]) then move contraction axis -> last.
         ws = (*w._shape[:-2], *pad, *w._shape[axis_w:])
         w = w.reshape(*ws).transpose(-1, axis_w)
 
-        # Now the trailing-2 of x is (.., 1?, K) and of w is (.., K, N?).
-        # The contraction axis K is x's last and w's axis -2 (after the
-        # transpose).  Broadcast every remaining dim numpy-style, then
-        # let the elementwise MUL line up + trailing-reduce over K.
+        # After the transpose the contraction axis is last in both x and w.
         r = _TH.broadcast2(x.term, x._shape, w.term, w._shape)
         if r is None:
             raise RuntimeError(f"cannot dot {self._shape} and {w._shape}: "
@@ -646,7 +550,7 @@ class Tensor(metaclass=_TensorMeta):
 
     def neg(self) -> "Tensor":   return self.__neg__()
     def recip(self) -> "Tensor": return self._unary(K.RECIP)
-    def reciprocal(self) -> "Tensor": return self._unary(K.RECIP)  # tinygrad alias
+    def reciprocal(self) -> "Tensor": return self._unary(K.RECIP)
     def exp2(self) -> "Tensor":  return self._unary(K.EXP2)
     def log2(self) -> "Tensor":  return self._unary(K.LOG2)
     def sqrt(self) -> "Tensor":  return self._unary(K.SQRT)
@@ -663,27 +567,25 @@ class Tensor(metaclass=_TensorMeta):
     def tanh(self) -> "Tensor":
         return 2.0 * (2.0 * self).sigmoid() - 1.0
     def softmax(self, axis: int = -1) -> "Tensor":
-        # numerically-stable: exp(x - max) / sum(exp(x - max)) along axis.
         m = self.max(axis=axis, keepdim=True)
         e = (self - m).exp()
         return e * e.sum(axis=axis, keepdim=True).reciprocal()
 
     def softmin(self, axis: int = -1) -> "Tensor":
-        # tinygrad mixin/op.py:709-724.
+        # tinygrad mixin/op.py:709-729.
         return (-self).softmax(axis=axis)
 
     def log_softmax(self, axis: int = -1) -> "Tensor":
-        # x - max, then subtract logsumexp; REDUCE_MAX backward (mask at
-        # argmax) makes the max-subtract differentiable.
+        # Unlike tinygrad's (mixin/op.py:658) the max is not detached: its gradient flows through
+        # REDUCE_MAX's backward, a mask at the argmax.
         m = self.max(axis=axis, keepdim=True)
         shifted = self - m
         return shifted - shifted.exp().sum(axis=axis, keepdim=True).log()
 
     def sparse_categorical_crossentropy(self, Y: "Tensor",
                                         axis: int = -1) -> "Tensor":
-        """Mean NLL of log_softmax(self) at the integer class labels Y, the
-        one-hot an in-graph compare (tinygrad mixin/op.py:1005-1008, 1723-1746),
-        so a TinyJit replay reads each step's labels."""
+        """Mean NLL of log_softmax(self) at the int labels Y (tinygrad mixin/op.py:1723-1746), the
+        one-hot an in-graph compare (:1005-1008), so a TinyJit replay reads each step's labels."""
         ax = axis if axis >= 0 else axis + self.ndim
         n = self._shape[ax]
         oh = Y.unsqueeze(ax) == Tensor.arange(n).reshape(n, *[1] * (self.ndim - ax - 1))
@@ -715,20 +617,13 @@ class Tensor(metaclass=_TensorMeta):
         return (self > 0).where(self, 0)
 
     def elu(self, alpha: float = 1.0) -> "Tensor":
-        # elu(x) = max(0, x) + min(0, alpha*(exp(x)-1))
-        # Composed as: relu(x) + (-relu(-x)).exp() - 1, scaled by alpha.
-        # Simpler: relu(x) + (relu(-x) > 0).where(alpha*(exp(x)-1), 0)
-        # For Phase 3A use the (1 - x.relu()/(x.relu()+eps))*alpha
-        # path is brittle; use the safe identity:
-        #   elu(x) = relu(x) + alpha * (exp(min(x,0)) - 1)
-        # min(x,0) = -relu(-x)
+        # elu(x) = relu(x) + alpha * (exp(min(x, 0)) - 1), with min(x, 0) = -relu(-x).
         neg_relu_neg = -((-self).relu())
         return self.relu() + (neg_relu_neg.exp() - 1.0) * alpha
 
     def maximum(self, other) -> "Tensor":
-        # tinygrad's MAX as selects: the ties' average gives each side half
-        # the gradient there, as MAX's gradient rule does
-        # (mixin/gradient.py:78-79).
+        # tinygrad's MAX as selects: at a tie the average gives each side half the gradient, as
+        # MAX's gradient rule does (mixin/gradient.py:78-79).
         a, b = _promote(*self._broadcast(other))
         if not dtypes.is_float(a._dtype):
             return (a < b).where(b, a)
@@ -738,11 +633,11 @@ class Tensor(metaclass=_TensorMeta):
         return -(-self).maximum(-_wrap_other(self, other))
 
     def square(self) -> "Tensor":
-        # tinygrad mixin/elementwise.py:498 -- square(x) = x*x.
+        # tinygrad mixin/elementwise.py:576-585.
         return self * self
 
     def __lt__(self, other) -> "Tensor":
-        # CMPLT lowers to a 0.0/1.0 mask (same op relu/maximum use).
+        # A 0/1 mask in a's dtype: thvm has no bool dtype.
         a, b = self._broadcast(other)
         return Tensor._from_term(_TH.cmplt(a.term, b.term), a._dtype, a._shape)
 
@@ -750,9 +645,8 @@ class Tensor(metaclass=_TensorMeta):
         return _wrap_other(self, other).__lt__(self)
 
     def where(self, x, y) -> "Tensor":
-        """x where self is nonzero, else y: tinygrad Tensor.where
-        (mixin/elementwise.py:426-438), a true select, so a non-finite
-        unselected value never leaks in."""
+        """x where self is nonzero, else y (tinygrad mixin/elementwise.py:426-438): a true select,
+        so a non-finite unselected value never leaks in."""
         ref = x if isinstance(x, Tensor) else y if isinstance(y, Tensor) else self
         x, y = _promote(_wrap_other(ref, x), _wrap_other(ref, y))
         cond, x = self._broadcast(x)
@@ -761,22 +655,15 @@ class Tensor(metaclass=_TensorMeta):
         return Tensor._from_term(_TH.where(cond.term, x.term, y.term), x._dtype, x._shape)
 
     def newton_schulz(self, steps: int, params, eps: float = 1.0e-7) -> "Tensor":
-        """Newton-Schulz orthogonalization of an odd polynomial, port of
-        tinygrad/mixin/__init__.py:1444-1459.
-
-        For coefficients ``params = (a, b, c)`` (the Muon quintic) each
-        step computes ``G <- a*G + b*(GG^T)G + c*(GG^T)^2 G`` where the
-        left factor ``GG^T`` is always formed from the CURRENT step's G
-        (tinygrad's ``functools.reduce(lambda x,y:(y@y.T)@x,[G]*i,G)``
-        feeds the original ``y=G`` into every ``(y@y.T)`` factor, only the
-        rightmost ``@x`` chains).  G is Frobenius-normalized first; a
-        tall matrix (shape[-2] > shape[-1]) is transposed in/out so the
-        contraction stays on the smaller axis."""
+        """Newton-Schulz for an odd polynomial: each step G <- sum_i params[i] * (G G^T)^i G, from
+        the Frobenius-normalized G (tinygrad mixin/op.py:1875-1890)."""
         assert self.ndim > 1, "NS only works for two or more dims"
         if self._shape[-2] > self._shape[-1]:
             return self.transpose(-2, -1).newton_schulz(
                 steps, params, eps).transpose(-2, -1)
         G = self / (self.square().sum(axis=(-2, -1), keepdim=True).sqrt() + eps)
+        # tinygrad's reduce over [G]*i forms every (y @ y.T) factor from this step's G, so
+        # G G^T is built once per step.
         for _ in range(steps):
             ggt = G @ G.transpose(-2, -1)
             acc = None
@@ -824,13 +711,12 @@ class Tensor(metaclass=_TensorMeta):
 
     def var(self, axis=None, keepdim: bool = False,
             correction=1) -> "Tensor":
-        """Variance with Bessel's `correction` (tinygrad mixin/op.py:523-549).
-        Like tinygrad's smax(n - correction, 0) divisor, n <= correction
-        divides by zero (inf/nan) instead of raising."""
+        """Variance with Bessel's `correction` (tinygrad mixin/op.py:523-549); as with tinygrad's
+        smax(n - correction, 0) divisor, n <= correction divides by zero instead of raising."""
         output_dtype = (self._dtype if dtypes.is_float(self._dtype)
                         else dtypes.float32)
         squares = (self - self.mean(axis=axis, keepdim=True)).square()
-        # tinygrad sums in sum_acc_dtype(squares.dtype) (op.py:548); the
+        # tinygrad sums in sum_acc_dtype(squares.dtype) (mixin/op.py:548); the
         # squares are already float32, since mean promotes int input.
         numerator = squares.sum(axis=axis, keepdim=keepdim)
         n = self._reduce_count(axis)
@@ -938,11 +824,8 @@ class Tensor(metaclass=_TensorMeta):
         return self.shrink(begin_end)
 
     def _pool(self, k_, stride=1, dilation=1) -> "Tensor":
-        """tinygrad's _pool unfold via repeat+shrink+reshape (port of
-        tinygrad/mixin/movement.py:_pool).  Produces a single tensor
-        of shape (..., *o_, *k_) where each (o, k) slice is the
-        sliding window at output position o.  Powers conv2d / pool
-        without N separate shrink iterations."""
+        """tinygrad's _pool unfold (mixin/movement.py:598-616): shape (..., *o_, *k_), each (o, k)
+        slice the window at output position o."""
         if isinstance(k_, int):
             k_ = (k_,)
         k_ = tuple(int(k) for k in k_)
@@ -981,22 +864,17 @@ class Tensor(metaclass=_TensorMeta):
         for k, o in zip(k_, o_):
             reshape3.extend([k, o])
         x = x.reshape(*reshape3)
-        # permute: move k axes after o axes.
-        # current after reshape3: prefix, k_0, o_0, k_1, o_1, ...
-        # want: prefix, o_0, o_1, ..., k_0, k_1, ...
+        # prefix, k_0, o_0, k_1, o_1, ... -> prefix, o_0, o_1, ..., k_0, k_1, ...
         perm = list(range(noop_ndim))
         for i in range(len(i_)):
-            perm.append(noop_ndim + i * 2 + 1)   # o_i
+            perm.append(noop_ndim + i * 2 + 1)
         for i in range(len(i_)):
-            perm.append(noop_ndim + i * 2)       # k_i
+            perm.append(noop_ndim + i * 2)
         return x.permute(*perm)
 
     def pad(self, begin_end) -> "Tensor":
-        """Pad each axis with zeros.  Accepts either the tinygrad
-        tuple-of-pairs form (one `(before, after)` pair or `None` per
-        axis) or the flat form [b0, e0, b1, e1, ...].  A negative pad
-        shrinks that side first, as tinygrad's _pad_constant does
-        (mixin/op.py:282-288)."""
+        """Zero-pad by tinygrad's per-axis (before, after) pairs or a flat [b0, e0, ...]; a negative
+        pad shrinks that side first, as tinygrad's _pad_constant does (mixin/op.py:282-288)."""
         begin_end = _normalize_pairs(begin_end, self._shape,
                                      full=lambda n: (0, 0))
         if any(int(x) < 0 for x in begin_end):
@@ -1009,23 +887,15 @@ class Tensor(metaclass=_TensorMeta):
         return Tensor._from_term(t, self._dtype, new_shape)
 
     def shrink(self, begin_end) -> "Tensor":
-        """Take a sub-range per axis.  Accepts either:
-          * the tinygrad tuple-of-pairs form: one `(begin, end)` pair (or
-            `None` for the full axis) PER axis -- e.g.
-            `shrink(((tok, tok+1), None))`; or
-          * the flat form: 2*ndim ints [b0, e0, b1, e1, ...].
-        Both normalize to the flat (begin, end) the bridge expects."""
+        """A sub-range per axis, by tinygrad's per-axis (begin, end) pairs (None: the whole axis) or
+        a flat [b0, e0, b1, e1, ...]."""
         begin_end = _normalize_pairs(begin_end, self._shape,
                                      full=lambda n: (0, n))
         new_shape = tuple(int(begin_end[2*i+1]) - int(begin_end[2*i])
                           for i in range(self.ndim))
         t = _TH.shrink(self.term, [int(x) for x in begin_end])
         out = Tensor._from_term(t, self._dtype, new_shape)
-        # Remember the source + slice so assign() into this view can
-        # scatter back into the base buffer (thvm's eager UOP_ASSIGN does
-        # a flat full-buffer copy that ignores the view offset/strides;
-        # the kv-cache write `cache[:, :, p:p+n].assign(...)` relies on a
-        # real strided scatter).  See assign().
+        # Kept so assign() into this view can scatter into the base (see assign()).
         out._view_base = self
         out._view_begin_end = [int(x) for x in begin_end]
         return out
@@ -1036,19 +906,15 @@ class Tensor(metaclass=_TensorMeta):
         return self.reshape(*self._shape[:dim], 1, *self._shape[dim:])
 
     def cat(self, *args: "Tensor", dim: int = 0) -> "Tensor":
-        """Concatenate self and `args` along `dim` (tinygrad
-        mixin/op.py:731-746, with its dim check and shape assert): each piece
-        is zero-padded to the output extent along dim and the pads are
-        summed.  The result is lazy and fuses into its consumer, and each
-        input's gradient is its slice of the output's (PAD's adjoint is a
-        SHRINK).  thvm has no STACK op, so equal pieces take this path too,
-        where tinygrad stacks them (mixin/movement.py:256-272): one add per
-        extra piece, and a -0.0 comes out as +0.0, where tinygrad keeps it."""
+        """Concatenate self and `args` along `dim`, each piece zero-padded to the output extent and
+        the pads summed (tinygrad mixin/op.py:731-750)."""
         dim = self._resolve_dim(dim)
         for arg in args:
             assert arg.ndim == self.ndim and all(
                 ti == ai for i, (ti, ai) in enumerate(zip(self._shape, arg._shape)) if i != dim)
         tensors = [self, *args]
+        # With no STACK op, equal pieces take this path too, where tinygrad stacks them (:747):
+        # a -0.0 then comes out as +0.0, where tinygrad keeps it.
         dim_cumsum = list(itertools.accumulate([t._shape[dim] for t in tensors], initial=0))
         padded = [t.pad(tuple((dim_cumsum[i], dim_cumsum[-1] - dim_cumsum[i + 1]) if j == dim else None
                               for j in range(t.ndim)))
@@ -1056,9 +922,8 @@ class Tensor(metaclass=_TensorMeta):
         return functools.reduce(Tensor.__add__, padded[1:], padded[0])
 
     def stack(self, *args: "Tensor", dim: int = 0) -> "Tensor":
-        """Stack self and `args` along a new axis `dim` (tinygrad
-        mixin/movement.py:256-272: argfix, dim resolved one past ndim, the
-        shape assert).  Without a STACK op it is unsqueeze, then cat."""
+        """Stack self and `args` along a new axis `dim` (tinygrad mixin/movement.py:256-272); with
+        no STACK op it is unsqueeze, then cat."""
         tensors = argfix(self, *args)
         dim = tensors[0]._resolve_dim(dim, extra=1)
         assert all(t._shape == tensors[0]._shape for t in tensors), \
@@ -1076,14 +941,8 @@ class Tensor(metaclass=_TensorMeta):
         return dim + total if dim < 0 else dim
 
     def gather(self, dim: int, index: "Tensor") -> "Tensor":
-        """Values along `dim` at the positions `index` names (tinygrad
-        mixin/op.py:1023-1041, with its checks and exception types): the
-        result has index's shape and self's dtype,
-        out[i] = self[i with i_dim := index[i]], and an index outside
-        [0, self.shape[dim]) reads 0.  On the CPU backend this is one
-        native UOP_GATHER, O(|index|) and differentiable (self's gradient
-        is the cotangent scatter-added back); on another device it runs
-        host-side and carries no gradient."""
+        """Values of self along `dim` at `index`, 0 out of range (tinygrad mixin/op.py:1023-1041):
+        a differentiable UOP_GATHER on the CPU, elsewhere a host gather without gradient."""
         if index.ndim != self.ndim:
             raise RuntimeError(
                 f"self.ndim must equal index.ndim, {self.ndim=}, {index.ndim=}")
@@ -1117,10 +976,8 @@ class Tensor(metaclass=_TensorMeta):
 
     def _pre_scatter(self, dim: int, index: "Tensor", src: "Tensor"
                      ) -> "tuple[int, Tensor]":
-        """tinygrad's _pre_scatter checks, in its order and with its exception
-        types (mixin/op.py:1077-1093); returns the resolved dim and src shrunk
-        to index's shape (:1088).  The int check on index is the one
-        _one_hot_along_dim makes when _pre_scatter builds the mask (:1006)."""
+        """tinygrad's _pre_scatter checks in its order and exception types (mixin/op.py:1077-1093,
+        then _one_hot_along_dim's int check, :1006); returns dim and src shrunk to index (:1088)."""
         dim = self._resolve_dim(dim)
         assert index.ndim == self.ndim == src.ndim, (
             f"self.ndim, index.ndim and src.ndim must all equal, "
@@ -1148,20 +1005,15 @@ class Tensor(metaclass=_TensorMeta):
 
     def _scatter_reduced(self, dim: int, index: "Tensor", src: "Tensor",
                          reduce: "str | None", include_self: bool) -> "Tensor":
-        """The checked scatter: reduce "sum", "mean", "amax", "amin" or None
-        (the last write along dim wins).  On the CPU backend one native
-        UOP_SCATTER (two for mean) that differentiates through the C rules;
-        an empty index or self has no kernel to run, and another device runs
-        it on the host."""
+        """Scatter for reduce "sum", "mean", "amax", "amin" or None (the last write wins): native
+        UOP_SCATTERs on the CPU (two for mean), else the host; empty operands run no kernel."""
         if self.numel() == 0:
             dt = dtypes.float32 if reduce == "mean" else self._dtype
             return Tensor(np.zeros(self._shape, dtype=dt.np_dtype), dtype=dt)
         if index.numel() == 0:
-            # Nothing lands.  tinygrad's sum and mean keep self exactly (a -0.0
-            # stays -0.0; mean in float32), as amax / amin do apart from a NaN
-            # self, which tinygrad's MAX(identity, self) turns into the
-            # identity; its reduce=None merge cannot broadcast the empty
-            # one-hot axis (mixin/op.py:1077-1093, 1128-1129, 1170-1176).
+            # Nothing lands: tinygrad keeps self exactly (mean in float32), but its amax / amin turn
+            # a NaN self into the identity (mixin/op.py:1129-1130) where this keeps the NaN; its
+            # reduce=None merge cannot broadcast the empty one-hot axis and raises (:1170-1177).
             if reduce is None:
                 moved = list(index._shape) + [self._shape[dim]]
                 moved[dim], moved[-1] = moved[-1], moved[dim]
@@ -1220,21 +1072,10 @@ class Tensor(metaclass=_TensorMeta):
 
     def scatter_reduce(self, dim: int, index: "Tensor", src: "Tensor", reduce: str,
                        include_self: bool = True) -> "Tensor":
-        """src combined into self at the positions index names along dim
-        (tinygrad mixin/op.py:1095-1134, with its checks and exception types):
-        "sum" adds every src value that lands on a position to it, "mean"
-        divides that sum by the number of values summed.  Without include_self
-        a position some value lands on leaves self out (the sum starts from 0,
-        the mean counts only the values); a position nothing lands on keeps
-        self.  "amax" / "amin" fold the values from the dtype's minimum /
-        maximum (mixin/op.py:1128-1129) with tinygrad's CPU compare-select:
-        among equal values the first in index order stays, a NaN src never
-        wins, and a NaN self becomes that identity where it is combined;
-        their gradient splits ties as tinygrad's MAX does.  An index outside
-        [0, self.shape[dim]) is dropped.  sum, amax and amin keep self's
-        dtype (tinygrad's sum_acc_dtype on float32 and int32); mean is
-        float32.  "prod" raises NotImplementedError: the native scatter has
-        no such combine yet."""
+        """src folded into self at `index` along `dim` by "sum", "mean", "amax" or "amin" (tinygrad
+        mixin/op.py:1095-1134); an out-of-range index is dropped, and "prod" is not implemented."""
+        # amax / amin fold from the dtype's min / max (mixin/op.py:1129-1130) by tinygrad's CPU
+        # compare-select: the first of equal values stays, and a NaN, src or self, never wins.
         dim, src = self._pre_scatter(dim, index, src)
         if reduce == "prod":
             raise NotImplementedError(
@@ -1245,12 +1086,8 @@ class Tensor(metaclass=_TensorMeta):
 
     def scatter(self, dim: int, index: "Tensor", src, reduce: "str | None" = None
                 ) -> "Tensor":
-        """src written into self at the positions index names along dim
-        (tinygrad mixin/op.py:1136-1168): the last write along dim wins, and a
-        scalar src fills index's shape in self's dtype.  reduce="add" is
-        scatter_reduce "sum" (a scalar src only); "multiply" is "prod", which
-        raises NotImplementedError.  The reduce=None form has no gradient yet:
-        backward() through it raises."""
+        """src written into self at `index` along `dim`, the last write winning (tinygrad
+        mixin/op.py:1136-1168); the reduce=None form has no gradient rule, so backward() raises."""
         if reduce not in {None, "add", "multiply"}:
             raise TypeError(f"{reduce=} must be one of None, 'multiply', or 'add'")
         if isinstance(src, (int, float, bool)):
@@ -1268,11 +1105,8 @@ class Tensor(metaclass=_TensorMeta):
         return self._scatter_reduced(dim, index, src, None, False)
 
     def _gather_rows(self, idx: "Tensor", wrap: bool) -> "Tensor":
-        """self[idx] along axis 0: shape idx.shape + self.shape[1:], a row
-        of 0 for an index out of range.  With `wrap` a negative index first
-        counts from the end (tinygrad's advanced getitem, mixin/op.py:95);
-        embedding reads it as out of range.  The wrap runs on the gather's
-        index grid, where it fuses into the gather kernel."""
+        """self[idx] along axis 0, a zero row out of range; `wrap` first counts a negative index
+        from the end (tinygrad mixin/op.py:95), on the gather's index grid so it fuses in."""
         rest = tuple(self._shape[1:])
         n = idx.numel()
         if n == 0:
@@ -1286,9 +1120,8 @@ class Tensor(metaclass=_TensorMeta):
         return self.gather(0, ix).reshape(*idx._shape, *rest)
 
     def _index_rows(self, idx) -> "Tensor":
-        """Advanced getitem with one Tensor / list / ndarray index on axis
-        0 (tinygrad mixin/op.py:84-95): the index must be int, a negative
-        index counts from the end, and an index still out of range reads 0."""
+        """Advanced getitem by one int Tensor / list / ndarray index on axis 0 (tinygrad
+        mixin/op.py:84-95): a negative index counts from the end, one still out of range reads 0."""
         if isinstance(idx, Tensor):
             if not dtypes.is_int(idx._dtype):
                 raise IndexError(f"index dtype {idx._dtype} is not supported")
@@ -1305,12 +1138,8 @@ class Tensor(metaclass=_TensorMeta):
         return self._gather_rows(Tensor(arr, dtype=dtypes.int32), wrap=False)
 
     def __getitem__(self, idx):
-        """Basic indexing: int / slice (per leading dim), via shrink.
-
-        An int index shrinks the axis to width 1 then drops it (squeeze);
-        a slice shrinks to [start:stop].  Trailing dims default to full.
-        A Tensor / list / ndarray index selects rows along axis 0
-        (_index_rows); other advanced forms raise NotImplementedError."""
+        """Basic indexing by int / slice per leading dim through shrink, an int dropping its axis; a
+        Tensor / list / ndarray index selects rows on axis 0 (_index_rows)."""
         if isinstance(idx, (Tensor, np.ndarray, list)):
             if _native_indexing():
                 return self._index_rows(idx)
@@ -1348,7 +1177,7 @@ class Tensor(metaclass=_TensorMeta):
 
     def linear(self, weight: "Tensor", bias: "Tensor | None" = None
                ) -> "Tensor":
-        """y = x @ weight + bias.  Broadcasts bias over leading dims."""
+        """y = x @ weight + bias."""
         out = self @ weight
         if bias is not None:
             out = out + bias
@@ -1373,34 +1202,24 @@ class Tensor(metaclass=_TensorMeta):
 
     def max_pool2d(self, kernel_size=(2, 2), stride=None, dilation=1,
                    padding=0, ceil_mode=False) -> "Tensor":
-        """tinygrad-faithful max_pool2d: _pool unfold then a max-reduce
-        over the trailing window axes.  Stays on the autograd graph (the
-        old Phase-3A path realized to numpy and returned a fresh tensor,
-        which severed backward -- so every conv UPSTREAM of a pool got
-        no gradient).  Port of tinygrad/mixin/__init__.py:max_pool2d."""
-        del ceil_mode  # ceildiv output sizing is a Phase-later path
+        """Max pool: the _pool unfold, then a max over the trailing window axes (tinygrad
+        mixin/op.py:1335-1378)."""
+        del ceil_mode  # ignored: output sizes always round down
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
         k_ = tuple(int(k) for k in kernel_size)
         if stride is None:
             stride = k_
         if padding:
-            # max-pool padding must fill with -inf so a padded cell never
-            # wins the window max; thvm's pad is zero-only, so refuse
-            # rather than silently zero-pad (which would corrupt the max).
+            # tinygrad pads with the dtype's min (mixin/op.py:1372) so a pad never wins the max;
+            # thvm's pad is zero-only, so refuse rather than corrupt the max.
             raise NotImplementedError(
                 "max_pool2d padding != 0 needs a -inf pad (not yet wired)")
         s_ = (stride,) * len(k_) if isinstance(stride, int) else tuple(stride)
         d_ = (dilation,) * len(k_) if isinstance(dilation, int) else tuple(dilation)
         spatial = self._shape[-len(k_):]
-        # Fast path: non-overlapping window (stride == kernel, no dilation,
-        # divides evenly).  Pooling is then a pure CONTIGUOUS reshape that
-        # splits each spatial axis into (out, k) -- a stride view that fuses
-        # straight into the max-reduce.  The general _pool below builds an
-        # overlap unfold via repeat/expand whose reshape-of-broadcast can't
-        # stay a view in thvm yet, so it MATERIALIZES a huge intermediate
-        # (a (B,C,20,20) pool blows up multi-GB at BS=128); the reshape path
-        # sidesteps that entirely for the common stride==kernel pool.
+        # Non-overlapping windows are a reshape into (out, k) per axis that fuses into the max,
+        # where _pool's repeat / expand unfold cannot stay a view and materializes a large buffer.
         if (all(s == k for s, k in zip(s_, k_)) and all(d == 1 for d in d_)
                 and all(i % k == 0 for i, k in zip(spatial, k_))):
             prefix = list(self._shape[:-len(k_)])
@@ -1408,25 +1227,17 @@ class Tensor(metaclass=_TensorMeta):
             for i, k in zip(spatial, k_):
                 split.extend([i // k, k])
             x = self.reshape(*prefix, *split)
-            # window (k) axes are the odd trailing positions; reduce them.
             base = len(prefix)
             kaxes = tuple(base + 2 * j + 1 for j in range(len(k_)))
             return x.max(axis=kaxes)
-        # General overlapping/strided/dilated case: _pool unfold + window max.
         x = self._pool(k_, stride=stride, dilation=dilation)
         return x.max(axis=tuple(range(-len(k_), 0)))
 
     def conv2d(self, weight: "Tensor",
                bias: "Tensor | None" = None,
                groups: int = 1, stride=1, dilation=1, padding=0) -> "Tensor":
-        """tinygrad-faithful conv2d: pad + _pool unfold + single
-        broadcast-mul + sum over (C_in, kH, kW).  Produces a small
-        graph (O(1) ops vs the previous O(kH*kW*C_in) per-(h,w,c)
-        composition) so thvm's hand-coded opts can recognize it as
-        the matmul-shaped conv-reduce kernel.
-
-        Port of tinygrad/mixin/__init__.py:conv2d (line ~1235).
-        """
+        """conv2d as a pad, the _pool unfold, one broadcast MUL and a sum over (C_in, kH, kW)
+        (tinygrad mixin/op.py:1564-1605)."""
         sH, sW = (stride, stride) if isinstance(stride, int) else stride
         dH, dW = (dilation, dilation) if isinstance(dilation, int) else dilation
         if isinstance(padding, int):
@@ -1446,54 +1257,32 @@ class Tensor(metaclass=_TensorMeta):
         H_out, W_out = x._shape[2:4]
 
         if groups == 1:
-            # Broadcast x and weight over (B, C_out, H_out, W_out),
-            # placing the reduce axes (C_in, kH, kW) as the TRAILING
-            # three so reduce_chain_collect in src/schedule/uop_meta.c
-            # fuses the three .sum() calls into one contiguous-axis
-            # REDUCE (it only fuses contiguous trailing axes).  Without
-            # this the walker hits triply-nested REDUCEs in the backward
-            # and explodes by ~25x per output element.
-            # Move x's C_in axis from position 1 to position 3 (between
-            # W_out and kH).  Then add the broadcast C_out axis at 1.
-            # x:      (B, C_in, H_out, W_out, kH, kW)
-            #      -> (B, H_out, W_out, C_in, kH, kW)         via permute
-            #      -> (B, 1, H_out, W_out, C_in, kH, kW)      via reshape
-            #      -> (B, C_out, H_out, W_out, C_in, kH, kW)  via expand
+            # Both broadcast to (B, C_out, H_out, W_out, C_in, kH, kW): the reduce axes go last, as
+            # reduce_chain_collect (schedule/uop_meta.c) fuses only contiguous trailing axes.
             x_b = (x.permute(0, 2, 3, 1, 4, 5)
                     .reshape(B, 1, H_out, W_out, C_in, kH, kW)
                     .expand(B, C_out, H_out, W_out, C_in, kH, kW))
             w_b = (weight.reshape(1, C_out, 1, 1, C_in, kH, kW)
                          .expand(B, C_out, H_out, W_out, C_in, kH, kW))
-            # Sum over the TRAILING three (C_in, kH, kW).
-            # reduce_chain_collect fuses these into a single REDUCE of
-            # extent C_in*kH*kW.
             out = (x_b * w_b).sum(axis=(4, 5, 6))
             if bias is not None:
                 out = out + bias.reshape(1, -1, 1, 1)
             return out
 
-        # Grouped / depthwise: port of tinygrad/mixin/__init__.py:1244-1249
-        # specialized to 2 spatial dims (HW=(kH,kW), oyx=(H_out,W_out)).
-        # The channel dim C_in == groups*cin is split into (groups, cin);
-        # the weight's C_out == groups*rcout splits into (groups, rcout).
-        # The reduce axes (cin, kH, kW) stay TRAILING-three for fusion.
+        # Grouped / depthwise: tinygrad's conv2d (mixin/op.py:1599-1604) on 2 spatial dims, C_in
+        # split into (groups, cin) and C_out into (groups, rcout); (cin, kH, kW) stay last.
         cin = weight._shape[1]
         if groups * cin != C_in:
             raise ValueError(
                 f"conv2d groups mismatch: groups({groups})*cin({cin}) "
                 f"!= C_in({C_in})")
         rcout = C_out // groups
-        # x:  (B, C_in, H_out, W_out, kH, kW)
-        #  -> (B, groups, cin, 1, H_out, W_out, kH, kW)        reshape
-        #  -> (B, groups, cin, rcout, H_out, W_out, kH, kW)    expand
-        #  -> (B, groups, rcout, H_out, W_out, cin, kH, kW)    permute
+        # Both broadcast to (B, groups, rcout, H_out, W_out, cin, kH, kW).
         x_b = (x.reshape(B, groups, cin, 1, H_out, W_out, kH, kW)
                 .expand(B, groups, cin, rcout, H_out, W_out, kH, kW)
                 .permute(0, 1, 3, 4, 5, 2, 6, 7))
         w_b = (weight.reshape(1, groups, rcout, 1, 1, cin, kH, kW)
                      .expand(B, groups, rcout, H_out, W_out, cin, kH, kW))
-        # Sum over the TRAILING three (cin, kH, kW); merge groups*rcout
-        # back into C_out.
         out = (x_b * w_b).sum(axis=(5, 6, 7)).reshape(B, C_out, H_out, W_out)
         if bias is not None:
             out = out + bias.reshape(1, -1, 1, 1)
@@ -1503,13 +1292,14 @@ class Tensor(metaclass=_TensorMeta):
 
     @property
     def T(self) -> "Tensor":
-        """Transpose of the last two dims (tinygrad's `.T`)."""
+        """The last two dims swapped; tinygrad's `.T` swaps dims 0 and 1
+        (mixin/movement.py:323-328), the same only for 2-D."""
         return self.transpose()
 
     @classmethod
     def arange(cls, start, stop=None, step=1,
                dtype: DType | None = None) -> "Tensor":
-        """1-D ramp [start, stop) by `step` (tinygrad/mixin arange)."""
+        """1-D ramp [start, stop) by `step` (tinygrad mixin/op.py:166-195)."""
         if stop is None:
             stop, start = start, 0
         if dtype is None:
@@ -1531,17 +1321,12 @@ class Tensor(metaclass=_TensorMeta):
         return self.cast(dtypes.float32)
 
     def half(self) -> "Tensor":
-        # thvm's default Tensor surface is fp32-only; half() is a no-op
-        # passthrough (gpt2 only takes the half path under HALF=1, which
-        # the thvm bench does not set).
+        # No float16 dtype, so half() is the identity (the gpt2 bench calls it only under HALF=1).
         return self
 
     def to(self, device, force: bool = False) -> "Tensor":
-        """Device move (tinygrad tensor.py:353-367).  DEV picks thvm's
-        single device at process start, so this is the identity, grad
-        included.  `force` inserts a transfer for device-less values in
-        tinygrad; thvm's leaves are always backend buffers, so it has no
-        effect here."""
+        """Device move (tinygrad tensor.py:353-367): the identity, as DEV picks thvm's one device at
+        process start; `force` has nothing to transfer, thvm's leaves being backend buffers."""
         del device, force
         return self
 
@@ -1550,39 +1335,32 @@ class Tensor(metaclass=_TensorMeta):
         return _const_broadcast(value, self._shape, self._dtype)
 
     def gelu(self, approximate: str = "tanh") -> "Tensor":
-        """Gaussian Error Linear Unit (tanh approximation), port of
-        tinygrad/mixin/elementwise.py:gelu."""
+        """GELU in the tanh form, whatever `approximate` says (tinygrad
+        mixin/elementwise.py:780-795)."""
         return 0.5 * self * (
             1.0 + (math.sqrt(2.0 / math.pi)
                    * (self + 0.044715 * (self * self * self))).tanh())
 
     def _tri(self, r: int, c: int, diagonal: int = 0) -> "Tensor":
-        """Boolean (0/1) triangular mask: arange(r)[:,None]+diag <=
-        arange(c).  Port of tinygrad/mixin/__init__.py:_tri."""
+        """0/1 mask arange(r)[:, None] + diagonal <= arange(c) (tinygrad mixin/op.py:233-234)."""
         row = Tensor.arange(r, dtype=dtypes.default_int).reshape(r, 1)
         col = Tensor.arange(c, dtype=dtypes.default_int).reshape(1, c)
-        # (row + diagonal) <= col  -> 1.0 where True
+        # <= on ints as < col + 1: there is no CMPLE.
         return (row + diagonal) < (col + 1)
 
     def triu(self, diagonal: int = 0) -> "Tensor":
-        """Upper-triangular part (other elements 0).  Port of
-        tinygrad/mixin/__init__.py:triu."""
+        """The upper-triangular part, other elements 0 (tinygrad mixin/op.py:236-257)."""
         mask = self._tri(self._shape[-2], self._shape[-1], diagonal)
         return mask.where(self, self.const_like(0))
 
     def tril(self, diagonal: int = 0) -> "Tensor":
-        """Lower-triangular part (other elements 0).  Port of
-        tinygrad/mixin/__init__.py:tril."""
+        """The lower-triangular part, other elements 0 (tinygrad mixin/op.py:259-280)."""
         mask = self._tri(self._shape[-2], self._shape[-1], diagonal + 1)
         return mask.where(self.const_like(0), self)
 
     def embedding(self, idx: "Tensor") -> "Tensor":
-        """Rows of self (vocab, embed) at the integer ids `idx`, shape
-        (*idx.shape, embed): tinygrad nn.Embedding's forward
-        (nn/__init__.py:369-371), where an id outside [0, vocab) (a negative
-        one included) reads a zero row.  On the CPU backend it is one native
-        gather, differentiable: the weight's gradient scatter-adds the
-        cotangent rows.  Powers nn.Embedding."""
+        """Rows of self (vocab, embed) at the int ids `idx`, a zero row outside [0, vocab) (tinygrad
+        nn/__init__.py:369-371): on the CPU one native gather, differentiable into self."""
         if _native_indexing():
             return self._gather_rows(idx, wrap=False)
         # Host gather off the CPU backend: no native gather kernels there.
@@ -1595,15 +1373,12 @@ class Tensor(metaclass=_TensorMeta):
                                      attn_mask: "Tensor | None" = None,
                                      dropout_p: float = 0.0,
                                      is_causal: bool = False) -> "Tensor":
-        """Scaled dot-product attention, port of
-        tinygrad/tensor.py:scaled_dot_product_attention.
-
-        qk = (q @ k^T)/sqrt(d_k); optional causal/additive mask; softmax
-        over the last axis; @ value."""
+        """softmax((q @ k^T) / sqrt(d_k) + mask) @ value, the mask causal or additive (tinygrad
+        mixin/rand.py:298-327)."""
         q = self
         if dropout_p and TRAINING:
-            # tinygrad applies softmax(qk).dropout(p) under TRAINING
-            # (mixin/rand.py:282-294); thvm has no dropout op yet.
+            # tinygrad drops out softmax(qk) under TRAINING (mixin/rand.py:294, 327);
+            # thvm has no dropout.
             raise NotImplementedError("scaled_dot_product_attention dropout_p "
                                       "under TRAINING (thvm has no dropout)")
         qk = (q @ key.transpose(-2, -1)) / math.sqrt(q._shape[-1])
@@ -1619,16 +1394,14 @@ class Tensor(metaclass=_TensorMeta):
 
     @staticmethod
     def manual_seed(seed: int = 0) -> None:
-        """Seed thvm's host RNG (tinygrad Tensor.manual_seed).  thvm's
-        factories + multinomial sampling read numpy's global RNG."""
+        """Seed numpy's global RNG, which thvm's random factories and multinomial draw from
+        (tinygrad tensor.py:441-457)."""
         np.random.seed(seed)
 
     def multinomial(self, num_samples: int = 1,
                     replacement: bool = False) -> "Tensor":
-        """Sample `num_samples` indices from the multinomial distribution
-        weighted by self (rows are independent).  Host-side draw against
-        numpy's seeded RNG; off the autograd path (sampling is data, not
-        a differentiable op) -- matches tinygrad's semantics."""
+        """`num_samples` indices per row, drawn by the weights in self on the host from numpy's
+        seeded RNG, with no gradient (tinygrad mixin/rand.py:251-276)."""
         w = self.numpy().astype(np.float64)
         if w.ndim == 1:
             w = w[None, :]
