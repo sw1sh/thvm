@@ -66,7 +66,7 @@ TTensorData @ TRealize @ TGradOf[w]
 Render the live interaction-net heap as an IC string diagram, seeded at a particular term:
 
 ```wl
-THeapGraph @ TApp[TLam[w, TUOpAdd[w, w]], TTensorCreate[{1., 2.}]]
+THeapGraph @ TApp[TLam[v, TUOpAdd[v, v]], TTensorCreate[{1., 2.}]]
 ```
 <!-- => a Graph of the heap reachable from the seed term, with LAM / APP / TEN / UOP nodes coloured per Style.wl -->
 

@@ -2611,6 +2611,22 @@ VerificationTest[
     TestID -> "ATP/tptp/auto-internalize-skips-Symbol-heads"
 ]
 
+(* The proof is lifted under a private $Context with Global` off the
+   path, as the documentation build evaluates examples: completion
+   renumbers the associativity axiom's variables, and their decode has
+   to restore the caller's Global` symbols rather than mint X, Y, Z in
+   the ambient context, or no axiom matches and the lift fails. *)
+VerificationTest[
+    Block[{$Context = "ATPTestPrivate`", $ContextPath = {"WolframInstitute`THVMLink`ATP`", "System`"}},
+        Head @ TFindProof[
+            "cnf(a1, axiom, and(X, Y) = and(Y, X)).
+             cnf(a2, axiom, and(X, and(Y, Z)) = and(and(X, Y), Z)).
+             cnf(g, negated_conjecture, and(and(p, q), r) != and(r, and(q, p))).",
+            TimeConstraint -> 10]],
+    ProofObject,
+    TestID -> "ATP/tptp/proof-lift-in-private-context"
+]
+
 (* TRelevantAxioms on an unquantified pattern axiom should keep
    the axiom (Pattern variables shouldn't be misclassified as
    confined symbols).  Iter 66 fixed atpFnSyms to skip Pattern-

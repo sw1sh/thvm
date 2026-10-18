@@ -1076,7 +1076,11 @@ cplReconCp[cEq_, mEq_, pos_, varSyms_] := Block[{cf, cv, mf, mv, peak, subt, sub
    lineage cannot be assembled -- callers degrade to $Failed, never
    to an unsound proof. *)
 buildCplDataset[enc_, conjPair_, cRes_] := Catch[
-    Block[{$RecursionLimit = 100000, $IterationLimit = 1000000},
+    Block[{$RecursionLimit = 100000, $IterationLimit = 1000000,
+        (* the caller's held originals for decodeAtpTerm, which reads them
+           dynamically, so a Module variable would not reach it *)
+        $atpSymObj = Lookup[enc["State"], "symObj", <||>],
+        $atpVarObj = Lookup[enc["State"], "varObj", <||>]},
     Module[{
         trace, traceRaw, traceOffsets, decodeTraceEntry, traceReasons,
         orientFviIdx, deathOf, mainRules = cRes["MainRules"],
@@ -1106,10 +1110,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            attributing the buildCplDataset tile the same way the C
            bridge's [atp-phase] marks attribute the post-run tail. *)
         cplSplitQ = Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
-        cplT0, cplMark,
-        (* restore the caller's held originals during this build's decoding *)
-        $atpSymObj = Lookup[enc["State"], "symObj", <||>],
-        $atpVarObj = Lookup[enc["State"], "varObj", <||>]
+        cplT0, cplMark
     },
         cplT0 = AbsoluteTime[];
         cplMark[label_] := If[ cplSplitQ,
