@@ -1,28 +1,11 @@
-// interact/uop_kernel.c - fire a UOP_KERNEL once all inputs are TAG_TEN.
-//
-// Called by wnf when it enters a UOP_KERNEL term.  Recursively fires
-// any upstream kernels first (the producer_kid on each input TenDesc
-// points at the kernel that produces it) so every input buffer is
-// populated by the time this kernel dispatches.  Then pulls input
-// buffer ids from KernelEntry.input_tids[], dispatches through
-// Backend->dispatch_kernel (CPU interpreter in step 12), and returns
-// the output TAG_TEN from heap[loc+0].
-//
-// Increments ITRS: one kernel firing is one interaction (matches
-// how HVM4 counts an OP2-NUM-NUM collapse).
+// interact/uop_kernel.c - fire a UOP_KERNEL: fire each input's producer
+// kernel first (TenDesc.producer_kid), dispatch through the output backend's
+// dispatch_kernel, and return the output TAG_TEN at heap[loc+0].  One fire is
+// one interaction (ITRS), as HVM4 counts an OP2-NUM-NUM collapse.
 
-// Per-outer-realize firing memo.  Within a single interact_kernel
-// entry (one user-facing fire), the kernel DAG is a pure function of
-// inputs -- a kernel referenced by multiple consumers should fire
-// exactly once, not once per consumer.  Without this guard, w2's
-// chain rule on LeNet (where forward intermediates are shared across
-// dozens of partial-conv kernels) re-fires kernels exponentially:
-// 640 kernels x ~1700 visits each = >1M dispatches per realize.
-//
-// Bumped at each top-level interact_kernel entry so subsequent
-// user-facing realizes (which may include ASSIGN-driven mutation
-// of input buffers) start fresh.  Reset on overflow so we never
-// stale-skip after a u32 wrap.
+// Fire memo: within one fire generation a kernel reached by several consumers
+// fires once (shared forward intermediates otherwise re-fire exponentially).
+// A realize scope, a top-level interact_kernel and every ASSIGN start a new one.
 static u32 KERNEL_FIRE_GEN = 0;
 static u32 KERNEL_FIRE_SCOPE_DEPTH = 0;
 fn void kernel_fire_gen_bump(void) {
@@ -30,18 +13,11 @@ fn void kernel_fire_gen_bump(void) {
   if (KERNEL_FIRE_GEN == 0) KERNEL_FIRE_GEN = 1;   // skip 0 sentinel
 }
 
-// --- precise fire memo (opt-in THVM_PRECISE_FIRE_MEMO=1) -------------
-// The coarse memo (fire_gen) re-fires every kernel after each ASSIGN,
-// because interact_assign bumps KERNEL_FIRE_GEN globally per assign.  In
-// a BUNDLED optimizer step (one realize scope, so shared-upstream
-// outputs stay live -- no per-assign rollback), that re-fires each
-// shared grad/activation ~30x.  The precise memo records each ASSIGN's
-// written (backend, buf_id) with a monotonic seq; a kernel may skip a
-// re-fire iff NO input buffer was assigned since its last actual
-// dispatch AND every input + the output buffer is still live.  Correct:
-// a pure kernel's output depends only on its inputs.  Needs bundling to
-// be effective (per-tensor assign scopes free the outputs -> nothing to
-// skip to; see the freed-output finding in the speed memo).
+// Precise fire memo (THVM_PRECISE_FIRE_MEMO, default on): every ASSIGN bumps
+// the generation, which re-fires each shared kernel of a bundled optimizer
+// step.  Each write is logged with a sequence number; a kernel skips a re-fire
+// when no input or output buffer was written since its last dispatch and all
+// of them are still live (a pure kernel's output depends only on its inputs).
 static int precise_fire_memo_enabled(void) {
   static int known = 0, on = 0;
   if (!known) { char const *e = getenv("THVM_PRECISE_FIRE_MEMO");
@@ -54,8 +30,6 @@ static u64 ASSIGN_SEQ = 0;
 static u64   ASSIGN_W_SEQ    [ASSIGN_WRITE_RING];
 static u32   ASSIGN_W_BUF    [ASSIGN_WRITE_RING];
 static void *ASSIGN_W_BACKEND[ASSIGN_WRITE_RING];
-// The first GC-stripped kernel a realize tried to fire (0 = none); the
-// realize then fails (uop_kernel.c, realize.c).
 fn void kernel_assign_write_record(void *backend, u32 buf_id) {
   if (!precise_fire_memo_enabled()) return;   // zero overhead when off
   ASSIGN_SEQ++;
@@ -64,8 +38,7 @@ fn void kernel_assign_write_record(void *backend, u32 buf_id) {
   ASSIGN_W_BUF[slot]     = buf_id;
   ASSIGN_W_BACKEND[slot] = backend;
 }
-// Was (backend, buf_id) ASSIGNed at a seq > `since`?  Out-of-window ->
-// conservative 1 (re-fire).
+// Was (backend, buf_id) written after seq `since`?  Past the ring: 1 (re-fire).
 static int kernel_buf_assigned_since(void *backend, u32 buf_id, u64 since) {
   if (ASSIGN_SEQ == 0) return 0;
   u64 oldest = (ASSIGN_SEQ > ASSIGN_WRITE_RING) ? (ASSIGN_SEQ - ASSIGN_WRITE_RING + 1) : 1;
@@ -80,12 +53,9 @@ static int kernel_buf_assigned_since(void *backend, u32 buf_id, u64 since) {
   return 0;
 }
 
-// One realize PASS (the whole scope from scope_begin to its matching
-// scope_end -- thvm_realize / thvm_realize_many) gets a stable epoch.
-// Unlike KERNEL_FIRE_GEN, this is NOT advanced by interact_assign_with's
-// post-write gen bump, so the ASSIGN memo (assign_fire_claim) can tell
-// "same cell, same pass" across the gen advances an in-place assign
-// forces for downstream kernel re-fire.
+// One epoch per realize pass (outermost scope_begin to scope_end).  An ASSIGN
+// bumps the fire generation but not the epoch, so assign_fire_claim can tell
+// "same cell, same pass" across those bumps.
 static u32 ASSIGN_PASS_EPOCH = 0;
 
 fn void kernel_fire_scope_begin(void) {
@@ -101,39 +71,21 @@ fn void kernel_fire_scope_end(void) {
   if (KERNEL_FIRE_SCOPE_DEPTH > 0) KERNEL_FIRE_SCOPE_DEPTH--;
 }
 
-// Open a fresh ASSIGN pass without a realize scope.  A wnf-driven
-// recursive training loop forces a SHARED materialized step (one cell
-// loc, reached via TRef/ALO) once per iteration via TPriForce; the
-// per-pass assign_fire_claim memo keys on (cell loc, ASSIGN_PASS_EPOCH).
-// Without a realize scope around the loop the epoch never advances, so
-// the shared ASSIGN cell claims-and-fires only on the first iteration
-// (every later force is a no-op) and the loop runs a single step
-// regardless of n.  prim_pri calls this before forcing each step so
-// every iteration is its own pass: multi-root assigns inside ONE step
-// still dedup (same epoch within the force), but the next iteration's
-// re-force gets a fresh epoch and re-fires.  The companion KERNEL_FIRE_GEN
-// bump that lets the upstream kernel re-fire already happens inside
-// interact_assign_with; this is the missing assign-side counterpart.
+// A new ASSIGN pass without a realize scope.  A wnf-driven training loop
+// (TPriForce) re-forces one shared materialized step per iteration; prim_pri
+// calls this before each force, else its ASSIGN cells would fire only once.
 fn void assign_pass_epoch_bump(void) {
   ASSIGN_PASS_EPOCH++;
   if (ASSIGN_PASS_EPOCH == 0) ASSIGN_PASS_EPOCH = 1;
 }
 
-// Per-pass ASSIGN firing memo.  An UOP_ASSIGN cell reachable from more
-// than one realize root (e.g. Adam's `m` assign is BOTH a top-level
-// schedule_step output AND embedded in the param update that reads
-// `m`) must fire its in-place buffer write exactly ONCE per pass --
-// otherwise the second visit re-applies `m = m*b1 + g*(1-b1)` against
-// the already-updated buffer (m -> 1.9x).  Keyed by the cell's heap loc
-// + the realize-pass epoch (NOT the fire gen, which an in-place assign
-// bumps mid-pass); recursive training loops get a FRESH cell loc each
-// iter (alo_realize deep-copies), so no cross-iter false skip.
+// ASSIGN firing memo, keyed by the cell's heap loc and the pass epoch: an
+// ASSIGN reachable from several roots (Adam's `m` update, also read by the
+// param update) writes its buffer once per pass, not once per visit.
 #define ASSIGN_FIRE_MEMO_CAP 8192u
 static u64 ASSIGN_FIRE_LOC[ASSIGN_FIRE_MEMO_CAP];
 static u32 ASSIGN_FIRE_EPOCH[ASSIGN_FIRE_MEMO_CAP];
-// Claim an UOP_ASSIGN cell (by heap loc) for firing this pass: returns
-// 1 the first time the loc is seen in the current fire-gen, 0 on every
-// re-visit (so a multiply-reachable ASSIGN writes its buffer once).
+// 1 the first time `loc` is claimed this pass, 0 on every re-visit.
 fn int assign_fire_claim(u64 loc) {
   if (loc == 0) return 1;
   u32 h = (u32)((loc >> 4) % ASSIGN_FIRE_MEMO_CAP);
@@ -147,46 +99,26 @@ fn int assign_fire_claim(u64 loc) {
       return 1;                                  // claimed -- fire it
     }
   }
-  // 4-way slot full of this-pass entries: overwrite the base slot.  A
-  // mis-claim only costs a re-fire (the prior buggy behavior), never a
-  // dropped distinct assign.
+  // All four probes hold this pass's entries: overwrite the base slot.  A
+  // mis-claim costs a re-fire, never a dropped assign.
   ASSIGN_FIRE_EPOCH[h] = ASSIGN_PASS_EPOCH;
   ASSIGN_FIRE_LOC[h] = loc;
   return 1;
 }
 
-// === Cross-backend kernel-input upload ===============================
-// A kernel runs on its OUTPUT's backend.  When one of its inputs lives on a
-// DIFFERENT backend -- a CPU weight leaf feeding a Metal-routed net -- the
-// dispatch would otherwise hand the input's CPU buf id straight to the Metal
-// queue, which reads its own buffer pool at that id (garbage / zeros).  Host-
-// stage the input src->dst once and reuse across re-fires (a weight leaf is
-// static within a realize), keyed by (src_tid, dst_backend_id).  Mirrors
-// tinygrad moving an op's operands to the kernel's device before dispatch.
-// Reset on the same lifecycle as the UOP_COPY upload cache
-// (copy_upload_cache_reset sites).
-// src_tid / dst_tid are per-context TenDesc ids (tens_next restarts at 0
-// per context), so an entry keyed in one context must never be returned
-// in another -- the `ctx` field discriminates the current context slot at
-// every match (the FLUX cross-session bug class: a 2nd model context
-// reusing the 1st's uploaded-input tids).  backend_id is the kernel's
-// target backend (load-bearing for a CPU-weight-into-Metal stage).
+// Cross-backend kernel inputs.  A kernel runs on its output's backend; an
+// input on another backend (a CPU weight feeding a Metal net) is staged there
+// once and reused across re-fires, as tinygrad moves operands to the kernel's
+// device.  Keyed by (src_tid, backend, context): tids restart per context.
+// Reset with the UOP_COPY upload cache.
 #define KIN_UP_CAP (1u << 15)
 static struct { u32 src_tid; u32 backend_id; u32 dst_tid; u32 ctx; } KIN_UP[KIN_UP_CAP];
 fn void kernel_input_upload_reset(void) { memset(KIN_UP, 0, sizeof(KIN_UP)); }
 
-// Drop the Metal zero-copy disk-mmap WRAP cached for src_tid (a disk-mmap CPU
-// weight that fed a Metal matmul).  A streaming per-block forward wraps each
-// block's weights zero-copy (kernel_input_on_backend's borrowed-wrap branch),
-// caches the wrap tid in KIN_UP, and never sees the per-realize pool rollback
-// reclaim the borrowed MTLBuffer (those rollbacks skip borrowed slots).  After
-// a block's matmuls retire, the WL streaming loader calls this per weight to
-// release that block's wrap so wraps don't accumulate (one per block) for the
-// whole model.  Frees the borrowed MTLBuffer wrapper (the underlying mmap
-// pages stay owned by the CPU-side DiskMap, dropped separately via
-// thvm_disk_buf_dontneed) and clears the KIN_UP slot so the NEXT use of this
-// weight re-wraps its (possibly re-faulted) pages fresh.  No-op when src_tid
-// has no Metal wrap cached.
+// Drop the zero-copy Metal wrap cached for a disk-mmap weight.  Pool rollbacks
+// skip borrowed buffers, so the WL streaming loader releases each block's
+// wraps once its matmuls retire; the next use re-wraps the (maybe re-faulted)
+// pages.  The mmap pages stay with the CPU-side DiskMap.
 fn void thvm_kernel_input_drop_wrap(u32 src_tid) {
   if (src_tid == 0 || src_tid >= TENS_NEXT) return;
   u32 backend_id = METAL_BACKEND.id;
@@ -229,10 +161,9 @@ fn void thvm_kernel_input_drop_wrap(u32 src_tid) {
     }
   }
 }
-// Return a tid whose buffer holds src_tid's bytes on dst_b (src_tid itself if it
-// is already on dst_b, or on any failure -- the dispatch then proceeds as before
-// rather than aborting).  Leaves are contiguous, so the kernel's input view
-// (strides/offset) applies unchanged over the uploaded contiguous buffer.
+// A tid whose buffer holds src_tid's bytes on dst_b; src_tid itself when it is
+// already there or the move fails.  Leaves are contiguous, so the kernel's
+// input view applies unchanged to the moved buffer.
 static u32 kernel_input_on_backend(u32 src_tid, Backend *dst_b) {
   if (src_tid == 0 || src_tid >= TENS_NEXT || dst_b == NULL) return src_tid;
   Backend *sb = TENS[src_tid].backend;
@@ -255,17 +186,9 @@ static u32 kernel_input_on_backend(u32 src_tid, Backend *dst_b) {
   u64 numel  = TENS[src_tid].view.numel;
   u64 nbytes = dtype_storage_bytes(TENS[src_tid].dtype, numel);
   u32 dst_tid = 0;
-  // === Zero-copy wrap: disk-mmap weight -> Metal =======================
-  // On Apple unified memory, a CPU disk-mmap source (a safetensors weight,
-  // on_release == disk_map_release) staged to Metal needs no copy:
-  // newBufferWithBytesNoCopy wraps the mmap pages in place so the GPU reads
-  // the SAME physical bytes (no upload, no extra RSS).  We wrap the page-
-  // aligned DiskMap base; the weight's first byte sits `minor` bytes in, which
-  // the wrapped buffer's byte_offset carries (applied at every kernel input
-  // bind, so the kernel's contiguous index 0 lands on the weight).  The dst
-  // TenDesc keeps the src's contiguous offset-0 leaf view unchanged.  Declines
-  // (dst_tid stays 0) on non-Metal target, non-disk src, a non-element-multiple
-  // minor, or a wrap failure -> falls through to the staged host upload below.
+  // A disk-mmap weight going to Metal needs no copy on unified memory: wrap the
+  // page-aligned mmap in place, its `minor` byte offset carried by the wrapped
+  // buffer.  Any decline falls through to the staged upload.
   if (dst_b == &METAL_BACKEND) {
     void *map_base = NULL;
     u64   maplen = 0, minor = 0;
@@ -281,10 +204,8 @@ static u32 kernel_input_on_backend(u32 src_tid, Backend *dst_b) {
           dw->dtype          = TENS[src_tid].dtype;
           dw->refcount       = 1;
           dw->view           = TENS[src_tid].view;     // contiguous offset-0 leaf
-          // The weight's within-map byte offset is carried by the wrapped
-          // buffer's byte_offset (applied at the kernel input bind), so the
-          // view stays offset-0 -- a nonzero view offset would be dropped by
-          // the matmul codegen's fresh offset-0 leaf rebuild.
+          // Offset-0 view: the wrapped buffer carries the byte offset (the
+          // matmul codegen's leaf rebuild drops a view offset).
           dw->prior_views    = NULL;
           dw->nviews         = 0;
           dw->requires_grad  = 0;
@@ -351,15 +272,8 @@ fn void kernel_fire_by_id(u32 kid) {
   u32 prev_fire_gen = ke->fire_gen;                // 0 = never actually fired
   ke->fire_gen = KERNEL_FIRE_GEN;
 
-  // Resolve any symbolic input slots first (input_tids[i] == 0 +
-  // input_terms[i] != 0).  These come from kernel emission when a
-  // child was a free TAG_VAR; by fire time, APP-LAM beta
-  // should have substituted the binder and term_resolve walks the
-  // SUB-bit chain to reach a TAG_TEN.  If we still don't see a
-  // concrete TEN, the kernel can't fire -- bail.
-  // Sized to ke->n_inputs (KERNEL_MAX_INPUT is now a 1M sanity bound,
-  // not a typical size, so a static [KERNEL_MAX_INPUT] would blow
-  // the stack).
+  // A symbolic input slot (a free TAG_VAR at emission) resolves through APP-LAM's
+  // substitution to a TEN by now; a slot that does not leaves the kernel unfired.
   u32 resolved_tids[ke->n_inputs ? ke->n_inputs : 1];
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
@@ -371,16 +285,10 @@ fn void kernel_fire_by_id(u32 kid) {
     resolved_tids[i] = tid;
   }
 
-  // Precise fire memo (opt-in): when the coarse memo would re-fire (an
-  // intervening ASSIGN bumped fire_gen), skip the dispatch + upstream
-  // re-walk iff this kernel fired before AND neither its inputs nor its
-  // output were ASSIGNed since that fire AND every input + the output
-  // buffer is still live.  Conservative on any uncertainty -> re-fire.
+  // Precise memo: skip the dispatch and the upstream walk when nothing this
+  // kernel reads or writes changed since it fired this pass.  Epoch 0 (no
+  // scope) never skips: a never-fired kernel's fire_pass is 0 too.
   (void)prev_fire_gen;
-  // ASSIGN_PASS_EPOCH != 0 guards the no-scope path (direct kernel_fire_by_id
-  // with no scope_begin leaves epoch 0; a never-fired kernel also has
-  // fire_pass 0, so 0==0 would falsely skip the FIRST fire).  Real realizes
-  // always bump the epoch >= 1.
   if (precise_fire_memo_enabled() && ASSIGN_PASS_EPOCH != 0
       && ke->fire_pass == ASSIGN_PASS_EPOCH) {
     Backend *ob   = TENS[ke->output_tid].backend;
@@ -404,13 +312,6 @@ fn void kernel_fire_by_id(u32 kid) {
     }
   }
 
-  // No `fired` memoization.  A kernel re-fires on every interact_kernel
-  // entry, the same way OP2 re-collapses on every NUM-NUM redex.  IC's
-  // structural sharing (DUP/SUP) decides how many distinct redex
-  // instances exist; the dispatcher just runs the program for each.
-  // ASSIGN UOPs in optimizer loops mutate input buffers between
-  // re-fires so the same kid produces different output values.
-
   // Depth-first: fire every input's producing kernel first.
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = resolved_tids[i];
@@ -427,16 +328,9 @@ fn void kernel_fire_by_id(u32 kid) {
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 on_b = kernel_input_on_backend(resolved_tids[i], out_b);
     in_buf_ids[i] = TENS[on_b].buf_id;
-    // kernel_input_on_backend moved a cross-backend leaf (a CPU weight feeding
-    // a Metal-routed net) onto out_b -- either a staged upload or a zero-copy
-    // disk-mmap wrap.  The kernel reads each input's strides/offset from
-    // ke->input_tids[slot], not from in_buf_ids; keep them consistent by
-    // rebinding the recorded tid to the moved one (both the staged copy and
-    // the wrap carry a contiguous offset-0 same-shape view, so this is
-    // semantically a no-op, but it keeps the recorded view's buffer identity
-    // matching the bound buffer).  Only rebind the plain-leaf case the move
-    // applied to; leave composed/strided slots the codegen already lowered
-    // into the kernel INDEX untouched.
+    // The kernel reads a slot's view from input_tids, so a moved plain leaf is
+    // rebound to its moved tid (same contiguous view); composed slots keep the
+    // INDEX the codegen lowered.
     if (on_b != resolved_tids[i] && ke->input_tids != NULL
         && i < ke->n_inputs && ke->input_tids[i] == resolved_tids[i]
         && (ke->input_chain_composed == NULL || !ke->input_chain_composed[i])) {
@@ -445,17 +339,9 @@ fn void kernel_fire_by_id(u32 kid) {
   }
   u32 out_buf_id = TENS[ke->output_tid].buf_id;
 
-  // Re-alloc the output buf if its slot was recycled out from under us
-  // (refcount==0 == "donor slot drained by buf_freelist_try_pop" or
-  // "post-rollback dead slot").  Without this, a re-fire would dispatch
-  // to a stale dptr -- which for CUDA is either a 0 dptr (-1 hard fail)
-  // or, worse, a dptr now owned by ANOTHER live tensor (silent loss
-  // overwrite -- the per-batch CE kernel re-firing into the scalar mean
-  // buf slot was the documented BS=128 CUDA mnist bug).  The fresh
-  // buf_alloc gets a new slot id with a fresh storage region (or one
-  // recycled cleanly by the same freelist machinery), and we re-bind
-  // TENS[output_tid].buf_id so subsequent fires see the live slot.
-  // Tinygrad parity: their Buffer.ensure_allocated() at fire time.
+  // An output slot recycled since the last fire (refcount 0) gets a fresh
+  // buffer, as tinygrad's Buffer.ensure_allocated: re-firing into it would
+  // write a buffer another tensor now owns.
   if (out_b != NULL && out_b->buf_refcount != NULL && out_b->buf_alloc != NULL
       && (out_buf_id == 0 || out_b->buf_refcount(out_buf_id) == 0)) {
     u64 nbytes = dtype_storage_bytes(ke->output_dtype, (u64)ke->output_numel);
@@ -466,15 +352,8 @@ fn void kernel_fire_by_id(u32 kid) {
     }
   }
 
-  // First-fire opt decisions.  Two layers:
-  //   - hand-coded heuristic (HAND_CODED_OPTS, default ON; NOOPT=1 off):
-  //     apply tinygrad-style UPCAST/LOCAL/GROUP/UNROLL/TC by default,
-  //     no benchmarking.  Runs first so BEAM (if enabled) can search
-  //     beyond the heuristic baseline.
-  //   - BEAM autotune (AUTOTUNE=1 or BEAM>0): benchmark proposer candidates.
-  // Both run after producers are populated so a direct dispatch sees
-  // ready input buffers; neither perturbs the fire-generation memo or
-  // TJit capture.
+  // First-fire opts, after the producers so the inputs are ready: the
+  // hand-coded heuristic (NOOPT=1 skips it), then BEAM, whose winner must beat it.
   if (kernel_should_hand_code_opts(ke)) {
     kernel_hand_coded_opts(ke);
   }
@@ -484,38 +363,20 @@ fn void kernel_fire_by_id(u32 kid) {
 
   Backend *b = TENS[ke->output_tid].backend;
   if (b && b->dispatch_kernel) {
-    // JIT capture hook: when a TJit closure is mid-record, push the
-    // (kid, in_buf_ids, out_buf_id) tuple onto its capture buffer
-    // BEFORE dispatch fires.  The dispatch happens normally on the
-    // capture pass; subsequent replays skip materialize entirely
-    // and just re-dispatch the recorded sequence.
+    // A capturing TJit records the dispatch; replays re-dispatch the record.
     if (jit_is_capturing()) {
       jit_capture_record((u32)(ke - KERNELS),
                          in_buf_ids, ke->n_inputs, out_buf_id);
     }
-    // Trace-capture (THVM_JIT_TRACE_CAPTURE): the op stream is now recorded with
-    // its concrete (kid, in_buf_ids, out_buf_id) -- everything metal_graph_build
-    // needs to encode the ICB.  SKIP the eager GPU submit for this Metal kernel;
-    // jit_capture_end_common runs one ICB replay after finalize to fill the
-    // result buffer.  Collapses the cold step from N standalone submits to one
-    // batched ICB.  Metal-only: CPU/CUDA keep the eager dispatch (the per-op
-    // replay still works there, but the win is the Metal ICB batch).  A nested
-    // benchmark fire (jit_capture_pause) is NOT trace_pending, so autotune's
-    // isolated-scratch bench still dispatches eagerly.
+    // Trace-capture (THVM_JIT_TRACE_CAPTURE, Metal): the record holds all the
+    // ICB needs, so skip the eager submit; one ICB replay after finalize fills
+    // the results.  An autotune bench fire is not trace-pending.
 #ifdef THVM_HAS_METAL
     if (b == &METAL_BACKEND && jit_capture_trace_pending()) {
-      // Stamp the dispatch ROUTE the eager pass would have recorded, so
-      // jit_capture_finalize reads the correct cg_kernel_dispatch_kind for ICB
-      // eligibility (tile kernels stay ICB-batchable instead of being misread as
-      // DAG-path and tripping metal_graph_unsafe).  Pure: no GPU work.  The
-      // route classifier lives in the Metal TU, so guard the whole branch under
-      // THVM_HAS_METAL -- on a CPU-only build b == &METAL_BACKEND is always
-      // false anyway, so trace-capture is a no-op there (the eager CPU dispatch
-      // runs as before).
+      // Stamp the route the eager pass would record: finalize decides ICB
+      // eligibility from it.
       thvm_metal_kernel_route_classify(ke, in_buf_ids, out_buf_id);
-      // Arm the finalize-time one-shot replay: an eager dispatch was actually
-      // skipped, so the result buffers ARE unfilled (CPU/CUDA captures never
-      // reach here and must not end-replay -- see jit_capture_end_common).
+      // An eager dispatch was skipped: arm the finalize replay.
       jit_capture_note_trace_skip();
       ke->fire_assign_seq = ASSIGN_SEQ;
       ke->fire_pass       = ASSIGN_PASS_EPOCH;
@@ -524,11 +385,8 @@ fn void kernel_fire_by_id(u32 kid) {
       return;
     }
 #endif
-    // THVM_DISPATCH_TRACE=1: one line per actual dispatch, with the
-    // fire-gen + scope depth + capturing flag.  Used to localize
-    // redundant re-dispatch (e.g. a kernel firing N x per step): if the
-    // same kid logs many lines with DIFFERENT fire_gen, the redundancy
-    // is multiple fire scopes; with the SAME fire_gen it's a memo miss.
+    // THVM_DISPATCH_TRACE=1: a line per dispatch with its fire generation (one
+    // kid under many generations: many scopes; under one: a memo miss).
     {
       static int dt_known = 0, dt_on = 0;
       if (!dt_known) { char const *e = getenv("THVM_DISPATCH_TRACE");
@@ -544,28 +402,16 @@ fn void kernel_fire_by_id(u32 kid) {
       }
     }
     int rc = b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
-    // A CPU dispatch that ran no rung wrote nothing (cpu_dispatch_kernel
-    // said so on stderr): leave the precise memo unstamped so the output
-    // is not taken as produced and a later fire tries again.
+    // A CPU dispatch that ran no rung wrote nothing: leave the memo unstamped
+    // so a later fire tries again.
     if (!(rc < 0 && b == &CPU_BACKEND)) {
-      // Precise memo bookkeeping: record this dispatch's OUTPUT write so a
-      // downstream kernel reading it re-fires iff WE re-fired (propagates
-      // re-fires through the kernel chain -- a fresh forward correctly
-      // re-runs when an input changed; an unchanged upstream still lets
-      // downstream skip, preserving the dedup).  Record BEFORE stamping
-      // fire_assign_seq so our own output write (seq == fire_assign_seq)
-      // doesn't make US look dirty on a later re-walk.
+      // Log the output write so a reader re-fires exactly when this kernel did;
+      // logged before stamping, so the kernel's own write never dirties it.
       if (b == out_b && out_buf_id != 0) kernel_assign_write_record(b, out_buf_id);
       ke->fire_assign_seq = ASSIGN_SEQ;
       ke->fire_pass       = ASSIGN_PASS_EPOCH;
     }
   }
-
-  // Per-fire consumer-count decref removed alongside `fired`: the
-  // assumption "one fire = one full read of every input" only holds
-  // for the static one-shot case, and re-firing kernels in optimizer
-  // loops would over-decrement.  Future work: structural lifetime
-  // analysis on the kernel DAG, not per-fire accounting.
 
   ITRS++;
   multi_emit(RULE_UOP_KERNEL, MULTI_TERM, (u64)kid, 0, 0);
@@ -584,16 +430,9 @@ fn Term interact_kernel(Term kernel) {
   return outbuf;
 }
 
-// Export for the separately-compiled Metal TU (backend/metal/_.m, which only
-// sees thvm.h -- the static-inline `fn` first-fire-opt predicates here are not
-// linkable from it).  Applies the SAME first-fire hand-coded-opt decision the
-// dispatch path applies (kernel_should_hand_code_opts -> kernel_hand_coded_-
-// opts, idempotent via the hand_coded_done guard) so a pre-rendered kernel's
-// source -- and therefore its PSO hash -- matches what the fire-path dispatch
-// will look up.  Returns 1 if the kernel is eligible for parallel precompile,
-// 0 if it should be left to the lazy fire-time compile (BEAM/autotune rewrites
-// store_root at fire time AFTER hand_opts, so a pre-rendered hash wouldn't
-// match -- mirrors cpu_jit_precompile_range's autotune skip).
+// The first-fire opts for the Metal TU's parallel precompile (it sees only
+// thvm.h), so a pre-rendered kernel hashes like the fire path's.  0 when BEAM
+// will rewrite the kernel at fire time: leave it to the lazy compile.
 int thvm_kernel_apply_first_fire_opts(struct KernelEntry *ke) {
   if (ke == NULL) return 0;
   if (kernel_should_hand_code_opts(ke)) kernel_hand_coded_opts(ke);

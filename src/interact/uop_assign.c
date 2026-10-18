@@ -1,39 +1,13 @@
-// interact/uop_assign.c - in-place buffer write.
+// interact/uop_assign.c - UOP_ASSIGN(dst, src), tinygrad's Ops.ASSIGN: once
+// both children are TAG_TENs, write src's elements into dst's buffer in place
+// (differing dtypes store src's values at dst's dtype, tensor_assign) and
+// return dst, whose tid, buffer and view are unchanged.  An optimizer loop
+// steps its weights this way, so kernels keep naming them by tid.
 //
-// Wnf fires UOP_ASSIGN(dst, src) once both children resolve to TAG_TEN.
-// Semantics: write src's elements into `dst.buf` (preserving dst's
-// tid/buf_id/view) and return the dst Term.  Any dtype: matching dtypes
-// copy the bytes, differing dtypes store src's values at dst's dtype
-// (tensor_assign, src/tensor/assign.c).  Used by optimizer loops
-// to mutate weight tensors in-place; weights stay tid-stable so the
-// surrounding kernels can keep referencing them by tid across loop
-// iterations.
-//
-// Two entry points:
-//   interact_assign_with(dst, src)  -- caller passes already-resolved
-//                                      TAG_TEN terms.  Used by wnf/_.c
-//                                      where the heap cells deliberately
-//                                      stay un-mutated so a recursive
-//                                      training loop can re-fire the
-//                                      ASSIGN against fresh upstream
-//                                      kernel outputs each iter.
-//   interact_assign(assign_term)    -- redex_fire entry point: reads
-//                                      the assign cells off the heap
-//                                      then delegates to _with.
-//
-// Mirrors tinygrad's UOps.ASSIGN.  Not a kernel -- there's no
-// program, no fused dispatch, just the backend's buffer copy or a
-// round-trip via its buf_read + buf_write pair.
+// interact_assign_with takes the resolved TENs: wnf/_.c leaves the heap cells
+// unmutated so a recursive training loop re-fires the ASSIGN against each
+// iteration's kernel outputs.  interact_assign (redex_fire) reads the cells.
 
-// Wnf-fired ASSIGN(dst_TEN, src_TEN): memcpy src.buf -> dst.buf, return
-// dst Term.  Eligible (is_redex true) only when both children resolve
-// to TAG_TEN -- otherwise wnf walks src's producer first.  Used as the
-// in-place mutation primitive for optimizer loops; weights stay
-// tid-stable while their buffer contents update each iteration.
-//
-// Two entries: _with takes already-resolved TENs (used by wnf/_.c so
-// the heap cells stay un-mutated for re-fire); the no-suffix variant
-// reads the heap and delegates.
 fn Term interact_assign_with(Term dst, Term src) {
   if (term_tag(dst) != TAG_TEN || term_tag(src) != TAG_TEN) return dst;
 
@@ -49,24 +23,12 @@ fn Term interact_assign_with(Term dst, Term src) {
 
   if (sd->view.numel != dd->view.numel) return dst;
 
-  // JIT capture: record the (dst, src) tid pair so a TJit closure
-  // can replay the assign as part of its captured sequence.  This
-  // happens BEFORE the write so a capture failure (table full)
-  // doesn't make us double-execute -- jit_capture_record_assign
-  // is itself a no-op when JIT_ACTIVE_SLOT == 0.
   if (jit_is_capturing()) {
     jit_capture_record_assign(dst_tid, src_tid);
   }
 
-  // Offset-aware in-place write.  A plain weight ASSIGN has a contig
-  // dst at offset 0 (the whole buffer).  A KV-cache append's dst is a
-  // SHRUNK row view: dd->view.numel is the SHRUNK element count (e.g.
-  // dim), dd->view.offset the start element (e.g. row*dim).  We size
-  // from the shrunk numel and write at the element offset so the other
-  // rows stay untouched.  The CONTIGUOUS single-row case ({1,dim} into
-  // {nCtx,dim} row-major) is a pure offset copy -- the shrunk view's
-  // strides match the cache's row-major layout, so no strided scatter
-  // is needed.
+  // A KV-cache append's dst is a shrunk row view: writing its numel at its
+  // element offset leaves the other rows untouched.
   if (tensor_assign(dst_tid, src_tid, (u64)(u32)dd->view.offset) != 0) {
     return dst;
   }
@@ -81,9 +43,8 @@ fn Term interact_assign(Term assign_term) {
   u64  loc = term_val(assign_term);
   Term dst = term_resolve(heap_read(loc + 0));
   Term src = term_resolve(heap_read(loc + 1));
-  // Stuck if either side isn't a TEN yet (the redex.c caller bails on
-  // result == assign_term and re-drives once the src kernel chain has
-  // landed a TEN).
+  // Stuck until both sides are TENs: redex_fire re-drives it once the src
+  // kernel chain has landed one.
   if (term_tag(dst) != TAG_TEN || term_tag(src) != TAG_TEN) return assign_term;
   // Fire the buffer write at most once per pass (see assign_fire_claim):
   // a multiply-reachable ASSIGN cell must not re-apply its update.

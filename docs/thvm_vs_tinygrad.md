@@ -209,7 +209,7 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 | `THVM_JIT_REPLAY_PACK` | Pack replay ops (inline inputs -> sidecar) | on |
 | `THVM_JIT_NO_PIN` | Disable buffer pinning during capture | off |
 | `THVM_METAL_GRAPH_REPLAY` / `THVM_METAL_GRAPH_MAX_DISPATCHES` | Metal command-buffer graph replay + cap | off / unset |
-| `THVM_PRECISE_FIRE_MEMO` | Precise fire memoization | off |
+| `THVM_PRECISE_FIRE_MEMO` | Precise fire memoization | on |
 
 **Memory / arena / GC**
 

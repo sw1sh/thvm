@@ -992,7 +992,8 @@ typedef struct KernelEntry {
                                    // when fire_gen == current gen so a
                                    // kernel referenced by N consumers in one
                                    // realize fires once instead of N times.
-                                   // Bumped per top-level interact_kernel.
+                                   // The generation advances per realize
+                                   // scope, top-level fire and ASSIGN.
   u64       fire_assign_seq;       // ASSIGN_SEQ at this kernel's last actual
                                    // dispatch (THVM_PRECISE_FIRE_MEMO path):
                                    // skip a re-fire when no input buffer was
