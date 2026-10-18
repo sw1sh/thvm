@@ -14,7 +14,6 @@
 // The pool then rolls back skipping preserved bufs.
 
 #define THVM_REALIZE_MAX_ITERS 64
-#define THVM_REALIZE_MANY_CAP  256
 
 // Forward decl: CTR-bundle entry point used by thvm_realize when a
 // caller hands us a TAG_CTR of independent root Terms (e.g. all the
@@ -331,18 +330,16 @@ static Term realize_end(RealizeMarks m, Term res) {
 
   // Tracing-GC preserve: walk the live root set (the result, every child of
   // a bundle, WNF_LAST_STACK, DEFS, the WL-pinned Terms) once.
-  Term kids[THVM_REALIZE_MANY_CAP];
-  u32  n_kids = 0;
-  if (term_tag(res) == TAG_CTR) {
-    n_kids = term_ctr_n(res);
-    if (n_kids > THVM_REALIZE_MANY_CAP) {
-      n_kids = THVM_REALIZE_MANY_CAP;
-    }
-    for (u32 i = 0; i < n_kids; i++) {
-      kids[i] = term_ctr_at(res, i);
-    }
+  u32   n_kids = (term_tag(res) == TAG_CTR) ? term_ctr_n(res) : 0;
+  Term *kids   = (n_kids != 0) ? (Term *)malloc((size_t)n_kids * sizeof(Term)) : NULL;
+  if (n_kids != 0 && kids == NULL) {
+    thvm_fatal("realize: out of memory for a bundle's roots");
+  }
+  for (u32 i = 0; i < n_kids; i++) {
+    kids[i] = term_ctr_at(res, i);
   }
   (void)mark_gc_preserve_all_roots_plus(res, kids, n_kids);
+  free(kids);
   // Capture-time mark-park: the fwd_reclaim analogue for the capture path
   // (which skips fwd_reclaim -- recorded buffers are jit_pinned and exempt
   // from every free).  A captured intermediate is safe to PARK (recycle its
@@ -629,20 +626,24 @@ fn Term thvm_realize_many(Term ctr_term) {
   if (term_tag(ctr_term) != TAG_CTR) return thvm_realize(ctr_term);
   u32 n = term_ctr_n(ctr_term);
   if (n == 0) return ctr_term;
-  u32 cn = (n < THVM_REALIZE_MANY_CAP) ? n : THVM_REALIZE_MANY_CAP;
-
-  Term all[THVM_REALIZE_MANY_CAP];
-  u32  order[THVM_REALIZE_MANY_CAP];
-  u32  wave_end[THVM_REALIZE_MANY_CAP];
+  Term *all      = (Term *)malloc((size_t)n * sizeof(Term));
+  u32  *order    = (u32 *)malloc((size_t)n * sizeof(u32));
+  u32  *wave_end = (u32 *)malloc((size_t)n * sizeof(u32));
+  if (all == NULL || order == NULL || wave_end == NULL) {
+    thvm_fatal("realize_many: out of memory for the bundle's roots");
+  }
   u8   has_assign = 0;
-  for (u32 i = 0; i < cn; i++) all[i] = term_ctr_at(ctr_term, i);
-  u32 n_waves = realize_waves(all, cn, order, wave_end, &has_assign);
+  for (u32 i = 0; i < n; i++) all[i] = term_ctr_at(ctr_term, i);
+  u32 n_waves = realize_waves(all, n, order, wave_end, &has_assign);
   if (n_waves == 0) {
     snprintf(REALIZE_ERROR, sizeof REALIZE_ERROR,
              "realize_many: cycle detected in assign graph");
+    free(all);
+    free(order);
+    free(wave_end);
     return 0;
   }
-  for (u32 p = 0; p < cn; p++) all[p] = term_ctr_at(ctr_term, order[p]);
+  for (u32 p = 0; p < n; p++) all[p] = term_ctr_at(ctr_term, order[p]);
 
   RealizeMarks marks = realize_begin(CURRENT_CTX->default_device);
   u32 kn_at_call_start = KERNELS_NEXT;
@@ -667,7 +668,7 @@ fn Term thvm_realize_many(Term ctr_term) {
       // fire its kernels / ASSIGNs.  Materialize then walks the
       // released bundle, sharing forward-kernel dedup across roots.
       for (u32 p = lo; p < hi; p++) all[p] = wnf(all[p]);
-      Term wnf_ctr = term_new_ctr(label, all, cn);
+      Term wnf_ctr = term_new_ctr(label, all, n);
       // Count cross-subgraph consumers over the whole bundle (after every
       // child's wnf has driven its backward) so the arena planner sees a
       // forward activation shared by sibling grad targets.  Re-populated
@@ -678,7 +679,7 @@ fn Term thvm_realize_many(Term ctr_term) {
       // order, so a released root is never the last reader of a buffer
       // an unreleased one still needs.
       xpass_cc_populate(wnf_ctr);
-      mat = thvm_materialize(hi == cn ? wnf_ctr : term_new_ctr(label, all, hi));
+      mat = thvm_materialize(hi == n ? wnf_ctr : term_new_ctr(label, all, hi));
       for (u32 p = lo; p < hi; p++) all[p] = term_ctr_at(mat, p);
       if (kcnt_dbg) {
         fprintf(stderr, "DBG realize_many iter %d: emitted %u kernels (ITRS+%llu)\n",
@@ -693,10 +694,17 @@ fn Term thvm_realize_many(Term ctr_term) {
   }
   Term res = mat;
   if (n_waves > 1) {
-    Term out[THVM_REALIZE_MANY_CAP];
-    for (u32 p = 0; p < cn; p++) out[order[p]] = all[p];
-    res = term_new_ctr(label, out, cn);
+    Term *out = (Term *)malloc((size_t)n * sizeof(Term));
+    if (out == NULL) {
+      thvm_fatal("realize_many: out of memory for the bundle's roots");
+    }
+    for (u32 p = 0; p < n; p++) out[order[p]] = all[p];
+    res = term_new_ctr(label, out, n);
+    free(out);
   }
+  free(all);
+  free(order);
+  free(wave_end);
   if (kcnt_dbg) {
     fprintf(stderr, "DBG realize_many emit: %u kernels in %d iters (%u children)\n",
             KERNELS_NEXT - kn_at_call_start, iters_used, n);

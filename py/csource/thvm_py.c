@@ -274,10 +274,7 @@ EXPORT uint64_t py_realize_many(uint64_t *terms, uint32_t n) {
     if (r != 0) terms[0] = r;
     return r;
   }
-  if (n > 256) n = 256;
-  Term children[256];
-  for (uint32_t i = 0; i < n; i++) children[i] = terms[i];
-  Term ctr = term_new_ctr(0, children, n);
+  Term ctr = term_new_ctr(0, (Term const *)terms, n);
   Term res = thvm_realize(ctr);
   if (res == 0) return 0;
   uint32_t rn = term_ctr_n(res);

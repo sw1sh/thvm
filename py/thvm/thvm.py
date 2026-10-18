@@ -556,7 +556,7 @@ class Thvm:
         """Distinct TAG_TEN leaf tids reachable from `root` -- the
         in-scope-leaf set backward() auto-marks (tinygrad's all_tensors
         in-scope filter over thvm's term graph)."""
-        cap = 4096
+        cap = max(1, int(_tens_count()))   # every leaf is a distinct tid
         buf = (c_uint32 * cap)()
         n = int(_uop_leaf_tids(c_uint64(int(root)), buf, c_uint32(cap)))
         return [int(buf[i]) for i in range(n)]

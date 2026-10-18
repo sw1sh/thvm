@@ -24,11 +24,10 @@
 // Root edges cannot reorder a prior-state read and a write that sit under
 // the SAME root; tinygrad orders those per kernel.
 
-#define RW_MAX_ROOTS 256
-#define RW_WORDS     (RW_MAX_ROOTS / 64)
-#define RW_ROOTLOC_CAP 512u
-
-typedef struct { u64 w[RW_WORDS]; } RwSet;
+// A root set is a bitset over the bundle's roots, RW_W words, kept in one
+// word pool and named by its offset there; a bundle of any size gets the
+// whole analysis (tinygrad's create_schedule has no root cap).
+typedef u32 RwSet;
 
 enum { RW_EDGE_ROOT = 0, RW_EDGE_READ = 1, RW_EDGE_DST = 2 };
 
@@ -66,16 +65,47 @@ static RwSeen   *RW_SEEN       = NULL;
 static u64       RW_SEEN_CAP   = 0;      // power of two
 static u64       RW_SEEN_LEN   = 0;      // slots stamped in the current epoch
 static u32       RW_EPOCH      = 0;
-static RwRootLoc RW_ROOTLOC[RW_ROOTLOC_CAP];
-static RwSet     RW_WAR_SUCC[RW_MAX_ROOTS];
-static RwSet     RW_RAW_PRED[RW_MAX_ROOTS];
+static u64       *RW_POOL        = NULL;
+static u32        RW_POOL_LEN    = 0;    // words handed out this call
+static u32        RW_POOL_CAP    = 0;
+static u32        RW_W           = 0;    // words per set: (n + 63) / 64
+static RwRootLoc *RW_ROOTLOC     = NULL;
+static u32        RW_ROOTLOC_CAP = 0;    // power of two, >= 2 * n
+static RwSet     *RW_WAR_SUCC    = NULL; // per root
+static RwSet     *RW_RAW_PRED    = NULL; // per root
+static u32        RW_ROOTS_CAP   = 0;
 
-fn void rw_set_add(RwSet *s, u32 i) {
-  s->w[i >> 6] |= 1ULL << (i & 63);
+// A new empty set into *out; 0 on OOM.  The pool may move, so a set is
+// only ever addressed through its offset.
+static int rw_set_new(RwSet *out) {
+  if (RW_POOL_LEN + RW_W > RW_POOL_CAP) {
+    u32  cap   = (RW_POOL_CAP != 0) ? RW_POOL_CAP * 2 : 4096;
+    while (cap < RW_POOL_LEN + RW_W) cap *= 2;
+    u64 *grown = (u64 *)realloc(RW_POOL, (size_t)cap * sizeof(u64));
+    if (grown == NULL) return 0;
+    RW_POOL     = grown;
+    RW_POOL_CAP = cap;
+  }
+  *out = RW_POOL_LEN;
+  memset(&RW_POOL[RW_POOL_LEN], 0, (size_t)RW_W * sizeof(u64));
+  RW_POOL_LEN += RW_W;
+  return 1;
 }
 
-fn int rw_set_has(RwSet const *s, u32 i) {
-  return (int)((s->w[i >> 6] >> (i & 63)) & 1ULL);
+fn void rw_set_add(RwSet s, u32 i) {
+  RW_POOL[s + (i >> 6)] |= 1ULL << (i & 63);
+}
+
+fn void rw_set_del(RwSet s, u32 i) {
+  RW_POOL[s + (i >> 6)] &= ~(1ULL << (i & 63));
+}
+
+fn int rw_set_has(RwSet s, u32 i) {
+  return (int)((RW_POOL[s + (i >> 6)] >> (i & 63)) & 1ULL);
+}
+
+fn void rw_set_or(RwSet dst, RwSet src) {
+  for (u32 x = 0; x < RW_W; x++) RW_POOL[dst + x] |= RW_POOL[src + x];
 }
 
 fn u64 rw_hash(u64 k) {
@@ -240,6 +270,7 @@ static u32 rw_state(u64 key) {
   RwState *st = &RW_STATES[RW_STATES_LEN];
   memset(st, 0, sizeof *st);
   st->key = key;
+  if (!rw_set_new(&st->readers) || !rw_set_new(&st->firers)) return 0;
   RW_INDEX[h] = ++RW_STATES_LEN;
   return RW_STATES_LEN;
 }
@@ -287,7 +318,7 @@ static int rw_read_ten(u32 tid, u32 r) {
   if (tid == 0 || tid >= TENS_NEXT) return 1;
   u32 s = rw_state(rw_base_key(tid));
   if (s == 0) return 0;
-  rw_set_add(&RW_STATES[s - 1].readers, r);
+  rw_set_add(RW_STATES[s - 1].readers, r);
   return rw_push_kernel(TENS[tid].producer_kid);
 }
 
@@ -303,8 +334,8 @@ static int rw_note_assign(u64 loc, u32 edge, u32 r) {
       RW_STATES[s - 1].sup = sup;
     }
   }
-  rw_set_add(&RW_STATES[s - 1].firers, r);
-  if (edge == RW_EDGE_READ) rw_set_add(&RW_STATES[s - 1].readers, r);
+  rw_set_add(RW_STATES[s - 1].firers, r);
+  if (edge == RW_EDGE_READ) rw_set_add(RW_STATES[s - 1].readers, r);
   return 1;
 }
 
@@ -382,8 +413,38 @@ static int rw_any_assign(Term const *roots, u32 n) {
 
 static RwRootLoc *rw_rootloc_slot(u64 loc) {
   u32 h = (u32)rw_hash(loc) & (RW_ROOTLOC_CAP - 1);
-  while (RW_ROOTLOC[h].used && RW_ROOTLOC[h].loc != loc) h = (h + 1) & (RW_ROOTLOC_CAP - 1);
+  while (RW_ROOTLOC[h].used && RW_ROOTLOC[h].loc != loc) {
+    h = (h + 1) & (RW_ROOTLOC_CAP - 1);
+  }
   return &RW_ROOTLOC[h];
+}
+
+// Size the per-call tables for n roots; 0 on OOM.
+static int rw_tables_for(u32 n) {
+  RW_W        = (n + 63) / 64;
+  RW_POOL_LEN = 0;
+  if (n > RW_ROOTS_CAP) {
+    RwSet *succ = (RwSet *)realloc(RW_WAR_SUCC, (size_t)n * sizeof(RwSet));
+    if (succ == NULL) return 0;
+    RW_WAR_SUCC = succ;
+    RwSet *pred = (RwSet *)realloc(RW_RAW_PRED, (size_t)n * sizeof(RwSet));
+    if (pred == NULL) return 0;
+    RW_RAW_PRED  = pred;
+    RW_ROOTS_CAP = n;
+  }
+  u32 cap = 512;
+  while (cap < 2 * n) cap *= 2;
+  if (cap > RW_ROOTLOC_CAP) {
+    RwRootLoc *rl = (RwRootLoc *)realloc(RW_ROOTLOC, (size_t)cap * sizeof(RwRootLoc));
+    if (rl == NULL) return 0;
+    RW_ROOTLOC     = rl;
+    RW_ROOTLOC_CAP = cap;
+  }
+  memset(RW_ROOTLOC, 0, (size_t)RW_ROOTLOC_CAP * sizeof(RwRootLoc));
+  for (u32 i = 0; i < n; i++) {
+    if (!rw_set_new(&RW_WAR_SUCC[i]) || !rw_set_new(&RW_RAW_PRED[i])) return 0;
+  }
+  return 1;
 }
 
 // Record the reads and ASSIGNs reached by root `r`.  0 on OOM.
@@ -420,7 +481,7 @@ static int rw_walk_root(Term root, u32 r) {
     if (edge != RW_EDGE_ROOT) {
       RwRootLoc *rl = rw_rootloc_slot(loc);
       if (rl->used) {
-        for (u32 w = 0; w < RW_WORDS; w++) RW_RAW_PRED[r].w[w] |= rl->roots.w[w];
+        rw_set_or(RW_RAW_PRED[r], rl->roots);
       }
     }
     if (tag == TAG_UOP && term_ext(t) == UOP_ASSIGN && !rw_note_assign(loc, edge, r)) return 0;
@@ -439,22 +500,23 @@ fn u32 realize_waves(Term const *roots, u32 n, u32 *order, u32 *wave_end, u8 *ha
   *has_assign = 0;
   for (u32 i = 0; i < n; i++) order[i] = i;
   wave_end[0] = n;
-  if (n < 2 || n > RW_MAX_ROOTS) return 1;
+  if (n < 2) return 1;
   if (rw_any_assign(roots, n) != 1) return 1;
   *has_assign = 1;
 
   RW_STATES_LEN = 0;
   if (RW_INDEX != NULL) memset(RW_INDEX, 0, RW_INDEX_CAP * sizeof(u32));
-  memset(RW_ROOTLOC, 0, sizeof RW_ROOTLOC);
-  memset(RW_WAR_SUCC, 0, sizeof RW_WAR_SUCC);
-  memset(RW_RAW_PRED, 0, sizeof RW_RAW_PRED);
+  if (!rw_tables_for(n)) return 1;
   for (u32 i = 0; i < n; i++) {
     Term t = rw_resolve(roots[i]);
     if (!rw_is_node(term_tag(t))) continue;
     RwRootLoc *rl = rw_rootloc_slot(term_val(t));
-    rl->used = 1;
-    rl->loc  = term_val(t);
-    rw_set_add(&rl->roots, i);
+    if (!rl->used) {
+      if (!rw_set_new(&rl->roots)) return 1;
+      rl->used = 1;
+      rl->loc  = term_val(t);
+    }
+    rw_set_add(rl->roots, i);
   }
   for (u32 r = 0; r < n; r++) {
     if (!rw_walk_root(roots[r], r)) return 1;
@@ -463,25 +525,26 @@ fn u32 realize_waves(Term const *roots, u32 n, u32 *order, u32 *wave_end, u8 *ha
   for (u32 s = 0; s < RW_STATES_LEN; s++) {
     RwState const *a = &RW_STATES[s];
     if (a->sup == 0) continue;
-    RwSet const *rd = &RW_STATES[a->sup - 1].readers;
-    for (u32 w = 0; w < RW_WORDS; w++) {
-      u64 src = rd->w[w] & ~a->firers.w[w];
+    RwSet rd = RW_STATES[a->sup - 1].readers;
+    for (u32 w = 0; w < RW_W; w++) {
+      u64 src = RW_POOL[rd + w] & ~RW_POOL[a->firers + w];
       while (src != 0) {
         u32 j = (w << 6) + (u32)__builtin_ctzll(src);
         src &= src - 1;
-        for (u32 x = 0; x < RW_WORDS; x++) RW_WAR_SUCC[j].w[x] |= a->firers.w[x];
+        rw_set_or(RW_WAR_SUCC[j], a->firers);
       }
     }
   }
 
   // Kahn over the WAR edges, CTR-ordered queue; a WAR edge j -> i puts i
   // at least one wave after j.
-  u32 indeg[RW_MAX_ROOTS] = {0};
-  u32 level[RW_MAX_ROOTS] = {0};
-  u32 queue[RW_MAX_ROOTS];
+  u32 *indeg = (u32 *)calloc(3 * (size_t)n, sizeof(u32));
+  if (indeg == NULL) return 1;
+  u32 *level = indeg + n;
+  u32 *queue = indeg + 2 * (size_t)n;
   for (u32 j = 0; j < n; j++) {
     for (u32 i = 0; i < n; i++) {
-      if (rw_set_has(&RW_WAR_SUCC[j], i)) indeg[i]++;
+      if (rw_set_has(RW_WAR_SUCC[j], i)) indeg[i]++;
     }
   }
   u32 head = 0, tail = 0;
@@ -492,41 +555,49 @@ fn u32 realize_waves(Term const *roots, u32 n, u32 *order, u32 *wave_end, u8 *ha
   while (head < tail) {
     u32 j = queue[head++];
     for (u32 i = 0; i < n; i++) {
-      if (!rw_set_has(&RW_WAR_SUCC[j], i)) continue;
+      if (!rw_set_has(RW_WAR_SUCC[j], i)) continue;
       if (level[i] < level[j] + 1) level[i] = level[j] + 1;
       if (level[i] + 1 > n_waves) n_waves = level[i] + 1;
       if (--indeg[i] == 0) queue[tail++] = i;
     }
   }
-  if (tail < n) return 0;
-  if (n_waves == 1) return 1;
+  if (tail < n || n_waves == 1) {
+    free(indeg);
+    return tail < n ? 0 : 1;
+  }
 
   // Inside a wave, a root runs after the roots whose term it reaches;
   // ties keep CTR order.
+  RwSet pending;
+  if (!rw_set_new(&pending)) {
+    free(indeg);
+    return 1;
+  }
   u32 pos = 0;
   for (u32 w = 0; w < n_waves; w++) {
-    RwSet pending;
-    memset(&pending, 0, sizeof pending);
     for (u32 i = 0; i < n; i++) {
-      if (level[i] == w) rw_set_add(&pending, i);
+      if (level[i] == w) rw_set_add(pending, i);
     }
     for (;;) {
       u32 pick = n, first = n;
       for (u32 i = 0; i < n && pick == n; i++) {
-        if (!rw_set_has(&pending, i)) continue;
+        if (!rw_set_has(pending, i)) continue;
         if (first == n) first = i;
-        RwSet preds = RW_RAW_PRED[i];
-        preds.w[i >> 6] &= ~(1ULL << (i & 63));
         u64 waiting = 0;
-        for (u32 x = 0; x < RW_WORDS; x++) waiting |= preds.w[x] & pending.w[x];
+        for (u32 x = 0; x < RW_W; x++) {
+          u64 preds = RW_POOL[RW_RAW_PRED[i] + x];
+          if (x == (i >> 6)) preds &= ~(1ULL << (i & 63));
+          waiting |= preds & RW_POOL[pending + x];
+        }
         if (waiting == 0) pick = i;
       }
       if (first == n) break;
       if (pick == n) pick = first;
-      pending.w[pick >> 6] &= ~(1ULL << (pick & 63));
+      rw_set_del(pending, pick);
       order[pos++] = pick;
     }
     wave_end[w] = pos;
   }
+  free(indeg);
   return n_waves;
 }

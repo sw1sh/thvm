@@ -2264,11 +2264,12 @@ EXTERN_C DLLEXPORT int thvm_wl_realize_many(WolframLibraryData libData,
   mint n    = libData->MTensor_getFlattenedLength(t);
   const mint *data = libData->MTensor_getIntegerData(t);
   if (n <= 0) { MArgument_setInteger(res, 0); return LIBRARY_NO_ERROR; }
-  if (n > 256) return LIBRARY_FUNCTION_ERROR;
-  THVM_WL_RECOVER(realize_many);
-  Term children[256];
+  Term *children = (Term *)malloc((size_t)n * sizeof(Term));
+  if (children == NULL) return LIBRARY_MEMORY_ERROR;
   for (mint i = 0; i < n; i++) children[i] = (Term)data[i];
+  THVM_WL_RECOVER(realize_many);
   Term ctr = term_new_ctr(0, children, (u32)n);
+  free(children);
   Term r   = thvm_realize_many(ctr);
   MArgument_setInteger(res, (mint)r);
   THVM_WL_DONE();

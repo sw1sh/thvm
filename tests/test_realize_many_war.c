@@ -91,6 +91,35 @@ int main(void) {
     CHECK(first(b) == 8.0f);
   }
 
+  // More roots than the 256 the walk's root sets used to hold: 150
+  // assigns first in CTR order, then 150 reads of the states they
+  // supersede.  Every root is realized and every read sees the prior state.
+  TEST_BEGIN("realize-many-war/bundle-of-300-roots");
+  {
+    enum { K = 150 };
+    Term xs[K], kids[2 * K];
+    for (u32 k = 0; k < K; k++) {
+      xs[k] = ten4(1.0f + (float)k);
+      Term a1 = mk_assign(xs[k], uop_binary(UOP_MUL, xs[k], ten4(2.0f)));
+      kids[k]     = mk_assign(a1, uop_binary(UOP_ADD, a1, ten4(3.0f)));
+      kids[K + k] = uop_binary(UOP_ADD, xs[k], ten4(10.0f));
+    }
+    Term r = thvm_realize_many(term_new_ctr(0, kids, 2 * K));
+    CHECK(r != 0 && term_tag(r) == TAG_CTR && term_ctr_n(r) == 2 * K);
+    u32 bad = 0;
+    for (u32 k = 0; k < K && r != 0 && term_ctr_n(r) == 2 * K; k++) {
+      float v = 1.0f + (float)k;
+      Term  y = term_resolve(term_ctr_at(r, K + k));
+      if (term_tag(y) != TAG_TEN || first(y) != v + 10.0f) {
+        bad++;
+      }
+      if (first(xs[k]) != 2.0f * v + 3.0f) {
+        bad++;
+      }
+    }
+    CHECK_EQ(bad, 0u);
+  }
+
   // 1024 nodes 4096 cells apart, reached by the ASSIGN pre-check (root 0
   // has none) and by the per-root walks (root 1 ends in one): a u32 side
   // table indexed by heap cell would keep one page per node (>= 4 MiB)

@@ -190,6 +190,38 @@ class TestAssignWar(unittest.TestCase):
             self.assertEqual(set(waves), {1}, out["text"])
             self.assertIn("DBG realize_many emit:", out["text"])
 
+    def test_bundle_past_256_roots(self):
+        # More roots than the 256 a bundle used to hold (the rest stayed
+        # lazy, their assigns unapplied): 150 assigns, then the 150 reads of
+        # the states they supersede.
+        xs = [Tensor([float(k)]).realize() for k in range(150)]
+        ys = [x + 10 for x in xs]
+        for x in xs:
+            x.assign(x * 2)
+        Tensor.realize(*xs, *ys)
+        self.assertEqual([y.item() for y in ys], [k + 10.0 for k in range(150)])
+        self.assertEqual([x.item() for x in xs], [2.0 * k for k in range(150)])
+
+    def test_adam_over_130_params(self):
+        # Adam's moment realize bundles 2N + 2 roots: 262 for 130 params.
+        lr, b1, b2, eps = 0.1, 0.9, 0.999, 1e-8
+        p0 = np.linspace(-1.0, 1.0, 130).astype(np.float32)
+        c = np.linspace(0.5, 2.0, 130).astype(np.float32)
+        with Context(TRAINING=1):
+            ps = [Tensor(p0[i:i + 1].copy()).realize() for i in range(130)]
+            opt = Adam(ps, lr=lr, b1=b1, b2=b2, eps=eps)
+            for _ in range(2):
+                opt.zero_grad()
+                sum((p * float(c[i])).sum() for i, p in enumerate(ps)).backward()
+                opt.step()
+        p_np, m, v = p0.astype(np.float64), np.zeros(130), np.zeros(130)
+        for t in (1, 2):
+            m = b1 * m + (1 - b1) * c
+            v = b2 * v + (1 - b2) * c * c
+            p_np = p_np - lr * (m / (1 - b1 ** t)) / (np.sqrt(v / (1 - b2 ** t)) + eps)
+        got = np.array([p.item() for p in ps])
+        np.testing.assert_allclose(got, p_np, rtol=1e-5, atol=1e-6)
+
     def test_lazy_grad_bundle_raises(self):
         # Root granularity: each param update reaches the whole backward,
         # which reads every other param, so the roots form a WAR cycle.
