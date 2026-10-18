@@ -562,8 +562,10 @@ serializeGnnModel[m_Association] := Block[{rR = Lookup[m, "Rounds", Length[m["W1
     ]
 ]
 
-TAtpSetGnnScorer[model_Association] := $atpSetGnnScorerFn[
-    N[serializeGnnModel[model]]] === 1
+TAtpSetGnnScorer::rejected = "The engine rejected the GCN: its layer shapes (first layer `1`) do not match the engine's clause-graph features. Train it again with TAtpTrainGnn.";
+TAtpSetGnnScorer[model_Association] := If[ $atpSetGnnScorerFn[N[serializeGnnModel[model]]] === 1,
+    True,
+    Message[TAtpSetGnnScorer::rejected, Quiet @ Dimensions[First[Lookup[model, "W1", {{}}]]]]; False]
 TAtpSetGnnScorer[Clear | None | {}] := $atpSetGnnScorerFn[{}] === 1
 
 (* Path overload: load a pretrained GCN from a .safetensors file (lazy,

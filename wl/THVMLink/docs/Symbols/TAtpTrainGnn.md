@@ -42,7 +42,7 @@ The config records the message-passing depth and width it was trained with:
 ```wl
 Lookup[TAtpLoadGnnScorer[TAtpGnnScorerAsset[]], {"Rounds", "Hidden"}]
 ```
-<!-- => {2, 8} -->
+<!-- => {3, 64} -->
 
 ## Properties & Relations
 

@@ -17,6 +17,7 @@ RelatedGuides: [THVMLink]
 
 ## Details & Options
 
+- The bundled scorer has three rounds of message passing, 64 hidden units and the 12 clause-graph node features the engine computes; it is the ENIGMA Tier-2 GCN (DAgger round 3), trained on critical-pair graphs from the proof searches of CASC-29 and CASC-30 UEQ problems.
 - Returns `Missing["NotBundled"]` if the asset file is absent.
 
 ## Basic Examples

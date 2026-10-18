@@ -144,7 +144,7 @@ FileExistsQ @ TAtpGnnScorerAsset[]
 model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
 {model["Rounds"], model["Hidden"]}
 ```
-<!-- => {2, 8} -->
+<!-- => {3, 64} -->
 
 The weights round-trip bit-for-bit through a file:
 

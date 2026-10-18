@@ -25,7 +25,7 @@ Load the bundled pretrained scorer and read its config:
 model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
 {model["Rounds"], model["Hidden"]}
 ```
-<!-- => {2, 8} - the trained GCN's message-passing depth and width -->
+<!-- => {3, 64} - the trained GCN's message-passing depth and width -->
 
 ## Properties & Relations
 
