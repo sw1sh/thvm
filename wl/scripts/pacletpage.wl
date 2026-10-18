@@ -23,13 +23,13 @@ Needs["WolframInstitute`PacletPage`"];
    Each comes off this list when its crash is fixed. *)
 $unevaluatedPages = {"AtpMethods.md", "TAtpTrainScorer.md", "Train.md"};
 
-(* A symbol page's or the guide's sections share one context, as the pages were written; tutorials
-   and overviews do by default.  THVMLink`ATP` loads Wolfram`Parser`, so the examples run against
+(* The converter's own resets: a symbol page clears its bindings at every --- and heading, so each
+   example group stands alone (run_doc_examples.wls checks the same), and a tutorial threads its
+   state from the first cell to the last.  THVMLink`ATP` loads Wolfram`Parser`, so the examples run against
    it too, which PacletPage does not read from PacletInfo.wl's {name, version} form.  Each page
    converts in its own parallel kernel, so an ATP saturation that outlives its time limit, or a
    crash, ends that kernel and not the build; six of them leave the machine to other builds. *)
 $documentationOptions = {
-    "EvaluateSeparator" -> <|"Symbol" -> None, "Guide" -> None|>,
     "Dependencies" -> {"Wolfram/Parser"},
     "Parallel" -> 6,
     "TimeConstraint" -> 900

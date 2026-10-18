@@ -4,11 +4,25 @@ How to write the THVMLink documentation sources under `docs/` - the
 `Template: TechNote` tutorials, the `Template: Symbol` reference pages, and the
 `Template: Guide` guide. They are literate-markdown files that
 [`build_docs.wls`](../../scripts/build_docs.wls) turns into evaluated Wolfram notebooks via
-`MarkdownToNotebook` (MTN). This guide is the house style; it captures rules the
-user has called out, and it overrides the upstream
-[wolfram-symbol-page skill](https://github.com/sw1sh/MarkdownToNotebook/blob/main/skills/wolfram-symbol-page/SKILL.md)
-where they disagree (noted inline). For Wolfram-code style inside cells, follow
+`MarkdownToNotebook` (MTN). The pages follow the documentation guidelines of the
+WolframInstitute PureMath paclet: its `wolfram-symbol-page`, `wolfram-tech-note` and
+`wolfram-guide-page` skills (`.agent-skills/` in that repository) are the rules for reference
+pages, tutorials and the guide. This guide adds what is particular to THVMLink and records
+where it departs from them (noted inline). For Wolfram-code style inside cells, follow
 [`wl/GUIDE.md`](../../GUIDE.md).
+
+## Gates
+
+Every changed page passes these, run from the repository root (adapted from PureMath's
+`scripts/`):
+
+```bash
+wl -f wl/scripts/run_doc_examples.wls wl/THVMLink/docs/Symbols/TRealize.md   # every cell, evaluated as the build does
+python3 wl/scripts/check_showcase.py       # Basic Examples opens with the symbol's own output
+python3 wl/scripts/check_enumerations.py   # one expression, one output per cell
+python3 wl/scripts/check_example_groups.py # no binding used across a --- or a heading
+wl -f wl/scripts/lint_docs.wls             # code spans, inline math, table headers, cells parse
+```
 
 ## Build and inspect, always
 
@@ -41,8 +55,9 @@ Every symbol - **built-in (`Total`, `Normal`, `Plus`, `Dot`) and paclet
 ## Argument names are italics, not math
 
 In a `## Usage` signature and in prose, write argument names in *italics*:
-`<code>[TUOpReduce]()[*t*, *axis*]</code>`. **Do not** use the `$x$` math form -
-it renders as ugly inline LaTeX. (This overrides the skill, which uses `$x_i$`.)
+`<code>[TUOpReduce]()[*t*, *axis*]</code>`, and a string argument as `"*name*"`.
+Never put a word in `$...$`: `$axis$` renders as the product of four italic letters.
+Math is for subscripted names (`$x_1$`) and formulas only.
 
 ## Cells: no ceremony, one output each
 
@@ -58,9 +73,10 @@ it renders as ugly inline LaTeX. (This overrides the skill, which uses `$x_i$`.)
 - **Readouts use [Normal]().** `Normal @ TRealize @ expr` returns a plain list;
   prefer it over `TTensorData @ TRealize @ expr` (the `Normal` UpValue means
   `Normal[TTensorData[...]]`).
-- **Self-contained per section.** MTN resets cell state at every `##` heading, so
-  a section's cells may not reference a variable bound in an earlier section -
-  rebuild what you need at the top of each section.
+- **Self-contained per example group.** On a symbol page MTN clears every binding at
+  each `---` and each heading, so a group's cells may not use a variable bound
+  before it: bind it again, as its own captioned cell, at the head of the group.
+  Tutorials thread state from their first cell to their last.
 - **Output type matters.** Lists, strings, numbers, graphics (`Graph`,
   `Legended`, `Column`), and **atomic objects with a summary box** (`TMemoryPlan`,
   `TKernel`, `TOpt`, `TKernelOpts`, `TJitClosure`, a `TTerm`, ...) serialize and
