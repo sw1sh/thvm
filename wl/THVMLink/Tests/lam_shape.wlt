@@ -6,9 +6,9 @@
    conversion (TDef) and ALO realization (TRef unfold) so every
    instance of a recursive lambda inherits the binder's shape.
 
-   Materialize integration -- treating shape-annotated TVAR as
-   KSRC_AS_INPUT so the lambda body can compile pre-substitution
-   -- lands separately. *)
+   A shape-annotated TVAR is a kernel input, so a lambda body can
+   be materialized before substitution; tests/test_lam_shape.c
+   covers that case in C as well. *)
 
 (* === basic: annotation visible on the TVAR === *)
 
