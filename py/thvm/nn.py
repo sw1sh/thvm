@@ -1,11 +1,5 @@
-"""tinygrad-shaped nn layers (tinygrad/nn/__init__.py): Linear, BatchNorm,
-LayerNorm and Conv2d, each a composition of Tensor ops and factories (weight
-init via Tensor.uniform / .ones / .zeros).
-
-state.get_parameters(obj) walks lists/tuples/dicts/objects, collecting every
-Tensor attribute (incl. is_param=False running stats, as tinygrad does --
-tests replace ALL params via .replace).
-"""
+"""tinygrad's nn layers (tinygrad nn/__init__.py), with nn.state, nn.optim and
+nn.datasets."""
 from __future__ import annotations
 
 import math
@@ -15,12 +9,9 @@ from .helpers import TRAINING
 from .tensor import Tensor
 
 
-# ---------------- layers --------------------------------------------------
-
-
 class Linear:
-    """y = x @ W^T + b.  Mirrors tinygrad's nn.Linear (weight stored as
-    (out, in); transposed at call time)."""
+    """tinygrad's nn.Linear (nn/__init__.py:156-177): y = x @ W^T + b, W stored
+    (out, in)."""
 
     def __init__(self, in_features: int, out_features: int,
                  bias: bool = True):
@@ -35,8 +26,7 @@ class Linear:
 
 
 class Conv2d:
-    """2D convolution over (B, C_in, H, W) -> (B, C_out, H', W'), through
-    Tensor.conv2d."""
+    """tinygrad's nn.Conv2d (nn/__init__.py:80-109) over (B, C_in, H, W)."""
 
     def __init__(self, in_channels: int, out_channels: int,
                  kernel_size, stride=1, padding=0, dilation=1,
@@ -62,7 +52,7 @@ class Conv2d:
 
 
 class BatchNorm:
-    """Batch normalization (2D / 3D / 4D input)."""
+    """tinygrad's nn.BatchNorm (nn/__init__.py:8-59)."""
 
     def __init__(self, sz: int, eps: float = 1e-5, affine: bool = True,
                  track_running_stats: bool = True,
@@ -80,24 +70,17 @@ class BatchNorm:
     def calc_stats(self, x: Tensor) -> tuple[Tensor, Tensor]:
         if self.track_running_stats and not TRAINING:
             return self.running_mean, self.running_var
-        # batch mean over all axes except feature axis (axis 1).
         reduce_axes = tuple(i for i in range(x.ndim) if i != 1)
         batch_mean = x.mean(axis=reduce_axes)
         shape_mask = [1, -1] + [1] * (x.ndim - 2)
-        # detach the mean here: d(var)/d(mean) == 0 at mean == E[x], so
-        # detaching gives the identical gradient with a far smaller
-        # backward graph (otherwise the variance grad flows back through
-        # the mean, compounding through every upstream layer).  Mirrors
-        # tinygrad BatchNorm.calc_stats.
+        # d(var)/d(mean) is 0 at the batch mean, so detaching it keeps the gradient
+        # and shrinks the backward graph (tinygrad nn/__init__.py:48).
         y = x - batch_mean.detach().reshape(*shape_mask)
         batch_var = (y * y).mean(axis=reduce_axes)
         return batch_mean, batch_var
 
     def __call__(self, x: Tensor) -> Tensor:
         mean, var = self.calc_stats(x)
-        # Update running stats in training (mirrors tinygrad) so eval --
-        # which reads running_mean/var while TRAINING is unset -- is
-        # correct.  detach() keeps the update off the autograd path.
         if self.track_running_stats and TRAINING:
             n = x.numel()
             corr = n / (n - x.shape[1]) if n > x.shape[1] else 1.0
@@ -111,13 +94,13 @@ class BatchNorm:
         return x.batchnorm(self.weight, self.bias, mean, invstd)
 
 
-# tinygrad-style aliases
 BatchNorm2d = BatchNorm
 BatchNorm3d = BatchNorm
 
 
 class LayerNorm:
-    """Normalize over the last `normalized_shape` dims."""
+    """tinygrad's nn.LayerNorm (nn/__init__.py:235-261) over the last
+    `normalized_shape` dims."""
 
     def __init__(self, normalized_shape,
                  eps: float = 1e-5,
@@ -142,25 +125,20 @@ class LayerNorm:
 
 
 class LayerNorm2d(LayerNorm):
-    """LayerNorm over channel-last with channels-first storage."""
+    """tinygrad's nn.LayerNorm2d (nn/__init__.py:263-279): LayerNorm over the C
+    of (B, C, H, W)."""
     def __call__(self, x: Tensor) -> Tensor:
-        # (B, C, H, W) -> permute to (B, H, W, C) for layernorm, then back
         return super().__call__(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
 
 class Embedding:
-    """Lookup table: maps integer indices to rows of a (vocab, embed)
-    weight.  Mirrors tinygrad's nn.Embedding -- forward gathers the rows
-    selected by `idx` and reshapes to (*idx.shape, embed_size); an id out of
-    range reads a zero row.  On the CPU backend the gather is native and the
-    weight gradient a scatter-add, with or without USE_ATOMICS: tinygrad's
-    atomic backward clips an out-of-range id into [0, vocab) (nn/__init__.py:
-    356), thvm drops it, as the forward reads it as 0."""
+    """tinygrad's nn.Embedding.  On the CPU backend an out-of-range id reads a zero row
+    and gets no gradient; tinygrad's atomic backward clips it (nn/__init__.py:356)."""
 
     def __init__(self, vocab_size: int, embed_size: int):
         self.vocab_size = vocab_size
         self.embed_size = embed_size
-        # tinygrad uses glorot_uniform; the checkpoint replaces this anyway.
+        # tinygrad's glorot_uniform init (nn/__init__.py:389).
         bound = math.sqrt(6.0 / (vocab_size + embed_size))
         self.weight = Tensor.uniform(vocab_size, embed_size,
                                      low=-bound, high=bound)
@@ -172,11 +150,8 @@ class Embedding:
         return self.weight.embedding(idx)
 
 
-# ---------------- state helpers (port of tinygrad/nn/state.get_parameters)
-
-
 def _get_state_dict(obj, prefix: str = "") -> dict[str, Tensor]:
-    """Recursively walk an object, collecting Tensors keyed by dotted path."""
+    """Every Tensor under `obj`, keyed by dotted path (tinygrad nn/state.py:89-112)."""
     out: dict[str, Tensor] = {}
     if isinstance(obj, Tensor):
         out[prefix.rstrip(".")] = obj
@@ -195,16 +170,15 @@ def _get_state_dict(obj, prefix: str = "") -> dict[str, Tensor]:
 class _State:
     @staticmethod
     def get_parameters(obj) -> list[Tensor]:
-        """tinygrad-compatible: returns ALL Tensors in the object tree
-        (incl. is_param=False BN running stats)."""
+        """Every Tensor under `obj`, is_param False ones included (tinygrad
+        nn/state.py:114-126)."""
         return list(_get_state_dict(obj).values())
 
     @staticmethod
     def get_state_dict(obj) -> dict[str, Tensor]:
         return _get_state_dict(obj)
 
-    # nn.state.safe_save / safe_load / torch_load / load_state_dict live in
-    # nn_state (the `thvm.nn.state` module), which imports this file.
+    # The rest of nn.state lives in nn_state, which imports this module.
     def __getattr__(self, name):
         from . import nn_state
         return getattr(nn_state, name)
@@ -212,9 +186,8 @@ class _State:
 
 state = _State()
 
-# tinygrad-shaped submodules: nn.optim.Adam / nn.datasets.mnist.
-# Register under the dotted nn.* names too so `from thvm.nn.datasets
-# import mnist` resolves even though nn is a module (not a package).
+# nn is a module, not a package, so the submodules are registered under nn.*
+# for `from thvm.nn.datasets import mnist`.
 import sys as _sys   # noqa: E402
 from . import optim   # noqa: E402
 from . import datasets   # noqa: E402

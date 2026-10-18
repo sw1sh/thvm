@@ -1,16 +1,5 @@
-"""thvm-py: drop-in tinygrad replacement (`import tinygrad` -> `import thvm`).
-
-Build prereq:
-  make py        # produces py/thvm/libthvm_py.dylib (macOS)
-                 #       or py/thvm/libthvm_py.so    (Linux)
-
-Two layers:
-  - The Phase-2 Tensor API (Tensor, dtypes, nn, ...) mirrors tinygrad's;
-    method bodies build a thvm TAG_TEN graph through the Phase-1 bridge
-    and route .backward() to thvm's real uop_grad.
-  - The bridge handles (Thvm, K, Term) stay exposed for building UOp
-    graphs directly.
-"""
+"""A tinygrad replacement (`import tinygrad` -> `import thvm`) over libthvm_py, which
+`make py` builds; the bridge handles Thvm, K and Term build UOp graphs directly."""
 from .thvm import Thvm, K, Term
 from . import nn, helpers
 from .tensor import Tensor
@@ -21,10 +10,8 @@ from ._misc import Variable, TinyJit, UOp
 from .helpers import GlobalCounters, function
 from .from_tinygrad import from_tinygrad
 
-# tinygrad-shaped dotted submodules so `from thvm.uop.ops import UOp`,
-# `from thvm.nn.state import torch_load`, `from thvm.llm.gguf import
-# gguf_load` resolve (nn / uop / llm are not real packages -- register
-# them in sys.modules the same way nn.optim / nn.datasets are).
+# nn, uop and llm are not packages, so their dotted names are registered for
+# `from thvm.uop.ops import UOp`, `from thvm.nn.state import torch_load` and the like.
 import sys as _sys
 import types as _types
 from . import uop_ops as _uop_ops
@@ -44,11 +31,8 @@ _sys.modules[__name__ + ".llm.gguf"] = _gguf
 _sys.modules[__name__ + ".nn.state"] = _nn_state
 
 __all__ = [
-    # tinygrad-shaped surface
     "Tensor", "dtypes", "DType", "Device", "Context",
     "Variable", "TinyJit", "UOp", "nn", "helpers", "GlobalCounters", "function",
-    # cross-validation: ingest a tinygrad lazy UOp graph
     "from_tinygrad",
-    # bridge handles
     "Thvm", "K", "Term",
 ]

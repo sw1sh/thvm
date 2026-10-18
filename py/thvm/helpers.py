@@ -1,4 +1,4 @@
-"""tinygrad-compatible helpers module (Phase 2A subset)."""
+"""A subset of tinygrad's helpers.py."""
 from __future__ import annotations
 
 import contextlib
@@ -24,18 +24,13 @@ def argfix(*x):
 
 
 def getenv(key: str, default: Any = 0):
-    """Read an env var and cast to the default's type (tinygrad-compatible)."""
+    """The env var cast to the default's type (tinygrad helpers.py:162)."""
     return type(default)(os.environ.get(key, default))
 
 
 class Context(contextlib.ContextDecorator):
-    """`with Context(BEAM=1): ...` (or `@Context(TRAINING=1)`) overrides the
-    named knobs for the block and restores them on exit.
-
-    A registered ContextVar (e.g. TRAINING) is overridden in-process, as
-    tinygrad does (helpers.py:169-177).  Every key is also exported to the
-    environment, which is where the C runtime reads its knobs.
-    """
+    """tinygrad's Context (helpers.py:169-177), which also exports each key to the
+    environment, where the C runtime reads its knobs."""
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -66,8 +61,8 @@ class Context(contextlib.ContextDecorator):
 
 
 class ContextVar:
-    """tinygrad's ContextVar (helpers.py:179-191): a named knob seeded from
-    the environment whose value `Context` overrides for a block."""
+    """tinygrad's ContextVar (helpers.py:179-191): a knob seeded from the environment
+    that Context overrides for a block."""
 
     _cache: dict[str, "ContextVar"] = {}
 
@@ -93,25 +88,21 @@ class ContextVar:
         return self.value < x
 
 
-# Training mode (tinygrad helpers.py:240, #16703; the Tensor.training alias
-# was removed in #16774): BatchNorm normalizes with batch statistics and
-# the optimizers step only while it is set.
+# tinygrad helpers.py:240: BatchNorm uses batch statistics and the optimizers
+# step only while it is set.
 TRAINING = ContextVar("TRAINING", 0)
 
-# tinygrad helpers.py:288, accepted for compatibility: nn.Embedding behaves
-# the same either way, its gather and scatter-add gradient are native.
+# tinygrad helpers.py:288, accepted and ignored: nn.Embedding is the same either way.
 USE_ATOMICS = ContextVar("USE_ATOMICS", 0)
 
-# tinygrad debug/JIT env knobs (helpers.DEBUG / helpers.JIT).  GPT2 reads
-# both: DEBUG gates the per-step timing print, JIT gates the symbolic
-# single-token forward_jit path.
+# tinygrad helpers.py:236 and 238; bench/gpt2 reads DEBUG for its timing print and
+# JIT to pick forward_jit.
 DEBUG: int = getenv("DEBUG", 0)
 JIT: int = getenv("JIT", 1)
 
 
 class Timing:
-    """tinygrad's Timing context manager: prints `prefix` + elapsed (and an
-    optional on_exit suffix) on __exit__ when enabled."""
+    """tinygrad's Timing (helpers.py:313-318)."""
 
     def __init__(self, prefix: str = "", on_exit=None, enabled: bool = True):
         self.prefix, self.on_exit, self.enabled = prefix, on_exit, enabled
@@ -130,9 +121,8 @@ class Timing:
 def fetch(url: str, name: "pathlib.Path | str | None" = None,
           subdir: str | None = None, gunzip: bool = False,
           allow_caching: bool = True, **_) -> pathlib.Path:
-    """tinygrad's fetch: download `url` to a content-addressed cache file
-    and return its local path (cached on subsequent calls).  Shares
-    tinygrad's cache dir so already-downloaded weights are reused."""
+    """tinygrad's fetch (helpers.py:469-507): the local path of `url`, downloaded once
+    into tinygrad's own cache dir, so what tinygrad already fetched is reused."""
     import hashlib
     if name is not None and (isinstance(name, pathlib.Path) or "/" in str(name)):
         fp = pathlib.Path(name)
@@ -177,8 +167,7 @@ def colored(s, color: str | None = None, background=False):
 
 
 class _Trange:
-    """Minimal tqdm-like wrapper: iterable + set_description (writes a
-    carriage-return status line to stderr)."""
+    """tqdm's iteration and set_description, the latter a status line on stderr."""
     def __init__(self, iterable):
         self._it = iterable
         self._t0 = time.time()
@@ -201,9 +190,7 @@ def tqdm(iterable, **_):
 
 
 class GlobalCounters:
-    """tinygrad's global op/mem counters.  thvm doesn't track FLOPs the
-    same way; reset() zeroes them so the training loop's per-step
-    bookkeeping has somewhere to write."""
+    """tinygrad's GlobalCounters (helpers.py:301-309), which thvm never increments."""
     global_ops = 0
     global_mem = 0
     time_sum_s = 0.0
@@ -213,17 +200,13 @@ class GlobalCounters:
     def reset(cls):
         cls.global_ops = cls.global_mem = cls.kernel_count = 0
         cls.time_sum_s = 0.0
-        # A step boundary: free the buffers that died since the last
-        # reclaim, if any were allocated since.  Tensor allocation and
-        # realize reclaim on their own once garbage outgrows a bound, so
-        # this only tightens the peak of a loop that calls it; with nothing
-        # allocated since the last reclaim it is one C call.  Lazy import
-        # avoids a cycle.
+        # A step boundary frees what died since the last reclaim, tightening the peak
+        # of a loop that calls it.  Imported here: tensor imports this module.
         from .tensor import _TH
         _TH.reclaim_if_due(force=True)
 
 
 def function(fn):
-    """tinygrad's @function marks a call-graph boundary; a transparent
-    passthrough here (no capture)."""
+    """tinygrad's @function (function.py:107-113), here a passthrough that captures
+    no call graph."""
     return fn

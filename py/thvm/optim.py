@@ -1,16 +1,6 @@
-"""thvm.nn.optim -- SGD / Adam / AdamW / LARS / Muon, mirroring tinygrad's nn.optim.
-
-The contract matches tinygrad's Optimizer: zero_grad() clears the
-parameter gradients and schedule_step() builds one in-place update and
-returns the assign tensors that must be realized to apply it.  The
-assigns are LAZY: step() realizes them (tinygrad's
-`Tensor.realize(*self.schedule_step())`), or a training loop can fire
-them together with the loss via `loss.realize(*opt.schedule_step())`.
-
-Trainable params are those with is_param == True (tinygrad's default);
-a buffer (BatchNorm running stats, Adam bias-correction state) opts out
-via .is_param_(False) and is realized but not updated.
-"""
+"""SGD, Adam, AdamW, LARS and Muon, as tinygrad's nn/optim.py: schedule_step() returns
+the tensors whose realize applies one step and step() realizes them.  Tensors with
+is_param False (BatchNorm running stats) are realized but not updated."""
 from __future__ import annotations
 
 from .helpers import TRAINING
@@ -30,54 +20,37 @@ class Optimizer:
     def __init__(self, params, lr: float):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        # Params must be realized TAG_TEN leaves so backward()'s in-scope
-        # leaf walk routes them back to their Tensor (factory inits are
-        # lazy UOP graphs).
+        # backward() finds a param by its TAG_TEN leaf, so a lazy factory init
+        # (a UOp graph) is realized first.
         for x in params:
             x.realize()
-        # tinygrad nn/optim.py:13-15 -- split the flat list by is_param:
-        # trainable params get updated, buffers are still realized.
+        # tinygrad nn/optim.py:13-15: params are updated, buffers only realized.
         self.params = _dedup([x for x in params if x.is_param])
         self.buffers = _dedup([x for x in params if not x.is_param])
         assert self.params, "optimizer must have at least one param"
         self.lr = lr
 
     def zero_grad(self):
-        # Clear BOTH the Python .grad handle AND the canonical C-side
-        # TENS[tid].grad accumulator -- thvm's backward() *accumulates*
-        # into that accumulator (tinygrad semantics), so without clearing
-        # it each step the gradients pile up across steps and blow up to
-        # nan within a few iterations.
+        # backward() accumulates into the C-side TenDesc.grad, so it is cleared too.
         from .tensor import _TH
         for p in self.params:
             p.grad = None
             _TH.ten_clear_grad(p.term)
 
     def step(self):
-        # The assigns built by schedule_step() are LAZY; realize them here
-        # (tinygrad's Optimizer.step is `Tensor.realize(*self.schedule_step())`).
-        # Without this the update never lands and a re-read of a param that
-        # feeds a multi-consumer view (e.g. attention's q/k/v slices of one
-        # qkv weight) makes wnf_n re-expand the un-sunk assign without bound.
+        # tinygrad nn/optim.py:39.
         Tensor.realize(*self.schedule_step())
 
     def schedule_step(self):
-        """Build the (lazy, in-place) update assigns and return every
-        tensor that must be realized to apply the step.  tinygrad model:
-        `loss.realize(*opt.schedule_step())` fires them together -- which
-        is also exactly what makes the whole step one JIT-capturable
-        graph (no eager realize mid-step)."""
+        """The tensors whose realize applies one step, its in-place assigns lazy
+        (tinygrad nn/optim.py:41-57); the grads are realized first."""
         if not TRAINING:
             raise RuntimeError(
                 f"TRAINING={TRAINING.value}, TRAINING must be enabled to use the "
                 "optimizer.  Consider using Context(TRAINING=1) before calling "
                 "Optimizer.step().")
-        # Realize the grads first so the forward activations that read the
-        # params are materialized BEFORE the in-place ASSIGN writes them.
-        # Then the caller's loss reduction reads realized activations (not
-        # the params) and can't race the param updates -- which is what
-        # lets `loss.realize(*schedule_step())` stay correct with in-place
-        # assigns (no explicit two-phase needed at the call site).
+        # The grads realize first, materializing the activations that read the params
+        # before the assigns overwrite them (for loss.realize(*opt.schedule_step())).
         grads = [p.grad for p in self.params if p.grad is not None]
         if grads:
             Tensor.realize(*grads)
@@ -123,15 +96,8 @@ class Adam(Optimizer):
         self.b1, self.b2, self.eps, self.wd = b1, b2, eps, weight_decay
         self.m = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
         self.v = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
-        # Bias-correction state lives ON-GRAPH as 1-element Tensors b1_t,
-        # b2_t initialised to ones, advanced INSIDE _step by a captured
-        # kernel (b1_t.assign(b1_t * b1)).  Because b1_t/b2_t are in the
-        # realize set the step returns, TinyJit captures their advance
-        # kernel and re-fires it every replay -- so t (== the b1_t/b2_t
-        # power) advances under JIT, matching tinygrad nn/optim.py:161-183.
-        # A host-side `self.t += 1; ten_write(1/bc1)` would be DEAD on
-        # replay (TinyJit re-fires only captured kernels, not the Python
-        # body), pinning the correction at the step-1 value forever.
+        # b1**t and b2**t are on-graph Tensors that _step advances by an assign, so
+        # a TinyJit replay advances them too (tinygrad nn/optim.py:157, 163-164).
         import numpy as _np
         self.b1_t = Tensor(_np.array([1.0], dtype=_np.float32))
         self.b2_t = Tensor(_np.array([1.0], dtype=_np.float32))
@@ -141,21 +107,10 @@ class Adam(Optimizer):
             x.realize()
 
     def _step(self):
-        # Advance the on-graph bias-correction state (tinygrad
-        # nn/optim.py:167-168: self.b1_t *= self.b1).  These assigns are
-        # captured by TinyJit and re-fired each replay, so b1_t == b1**t
-        # advances every step.
         self.b1_t.assign(self.b1_t * self.b1)
         self.b2_t.assign(self.b2_t * self.b2)
-        # Phase 1: the in-place m/v moment updates plus the b1_t/b2_t
-        # advance, THEN realize them so each m[i]/v[i]/b1_t/b2_t.term
-        # collapses from its ASSIGN node to a TEN before phase 2 reads it.
-        # Without this split, m_hat = m[i] / (1 - b1_t) captures the
-        # *unrealized* ASSIGN(m[i], ...) node, p's update embeds it, and
-        # realizing p re-fires m[i]'s in-place write against the already-
-        # updated buffer (m -> 1.9x, or m picks up v's value).  Realizing
-        # the moments + correction state first is backend-agnostic and
-        # needs no scheduler bundling.
+        # The moments realize before the param updates read them: an update built
+        # on an unrealized ASSIGN(m[i], ...) would fire that write again with p.
         mv = [self.b1_t, self.b2_t]
         for i, p in enumerate(self.params):
             g = p.grad
@@ -166,9 +121,7 @@ class Adam(Optimizer):
             self.v[i].assign(self.v[i] * self.b2 + (g * g) * (1.0 - self.b2))
             mv += [self.m[i], self.v[i]]
         Tensor.realize(*mv)
-        # Phase 2: the param updates read the now-realized m,v + b1_t,b2_t
-        # (plain TENs).  tinygrad nn/optim.py:173-174,182: m_hat = m/(1-b1_t),
-        # v_hat = v/(1-b2_t), p -= lr * m_hat / (sqrt(v_hat) + eps).
+        # tinygrad nn/optim.py:169-171, 178.
         out = []
         for i, p in enumerate(self.params):
             if p.grad is None:
@@ -177,41 +130,24 @@ class Adam(Optimizer):
             v_hat = self.v[i] / (1.0 - self.b2_t)
             upd = m_hat * self.lr * (v_hat.sqrt() + self.eps).reciprocal()
             if self.wd:
-                # Decoupled (AdamW) weight decay -- add wd*p to the update so
-                # p -= lr*(m_hat/(sqrt(v_hat)+eps) + wd*p), matching tinygrad
-                # nn/optim.py:175,182 (up += wd*t.detach()).  Gated on wd!=0 so
-                # plain Adam (wd=0) keeps the exact m_hat*lr*recip expression
-                # and stays byte-identical.  p.detach() so the decay carries no
-                # autograd tape.
+                # Decoupled (AdamW) decay, up += wd * p (tinygrad nn/optim.py:171);
+                # gated so plain Adam keeps its exact expression.
                 upd = upd + p.detach() * (self.wd * self.lr)
             p.assign(p - upd)
             out.append(p)
-        # b1_t/b2_t are advanced+realized in phase 1; they must ALSO be in
-        # the returned realize set so TinyJit's capture-liveness pass keeps
-        # their advance kernel (otherwise jit_capture_finalize marks it
-        # replay_skip=1 and the correction freezes again under replay).
+        # tinygrad nn/optim.py:179 returns b1_t and b2_t with the step's tensors.
         return out + [self.b1_t, self.b2_t]
 
 
-# AdamW = Adam with decoupled weight decay (tinygrad nn/optim.py:136-142:
-# AdamW(...) = LAMB(weight_decay, adam=True)); default wd 0.01 like tinygrad.
+# tinygrad nn/optim.py:132-138: Adam with decoupled weight decay, default 0.01.
 def AdamW(params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8, weight_decay=0.01, **_):
     return Adam(params, lr=lr, b1=b1, b2=b2, eps=eps, weight_decay=weight_decay)
 
 
-# LARS / Muon share one trust-ratio + momentum + Newton-Schulz core,
-# faithfully porting tinygrad nn/optim.py:95-130 (class LARS).  thvm's
-# SGD/Adam/AdamW above stay in their own byte-stable eager paths; LARS is
-# a separate class so adding it cannot perturb them.  In tinygrad SGD is
-# LARS(tcoef=0) and Muon is LARS(ns_coefficients=...); thvm keeps the fast
-# specialized SGD and exposes Muon as the LARS(NS) wrapper below.
+# tinygrad's SGD is LARS(tcoef=0) (nn/optim.py:74-80); thvm's SGD is its own class.
 class LARS(Optimizer):
-    """Layer-wise Adaptive Rate Scaling (tinygrad nn/optim.py:95-130).
-
-    Trust ratio ``r = tcoef * |w| / (|g| + wd*|w|)`` gated on |w|>0 & |g|>0
-    (else 1.0) scales the momentum-SGD update.  With ``tcoef=0`` it is plain
-    momentum SGD; with ``ns_coefficients`` set it is Muon (the momentum
-    buffer is orthogonalized by Newton-Schulz before the update)."""
+    """Layer-wise Adaptive Rate Scaling (tinygrad nn/optim.py:95-129): tcoef=0 makes
+    it momentum SGD, ns_coefficients Muon."""
 
     def __init__(self, params, lr=0.001, momentum=0.9, weight_decay=1e-4,
                  ns_steps=0, ns_coefficients=None, nesterov=False,
@@ -223,35 +159,18 @@ class LARS(Optimizer):
         self.ns_steps, self.ns_coefficients = ns_steps, ns_coefficients
         self.nesterov, self.classic = nesterov, classic
         self.pre_wd, self.tcoef = pre_wd, tcoef
-        # Momentum buffers, zero-initialised + realized (tinygrad's
-        # self.b = self._new_optim_param(); zeros on the first run).
         self.b = ([Tensor.zeros(*(p.shape or (1,))) for p in self.params]
                   if self.momentum else [])
         for b in self.b:
             b.realize()
 
     def _step(self):
-        # The trust ratio, weight decay, momentum update, Newton-Schulz
-        # orthogonalization, and the in-place param assign, ported from
-        # tinygrad LARS._step (nn/optim.py:109-130).
-        #
-        # The non-NS path stays fully eager-inline like thvm's SGD: build g,
-        # update self.b[i] in place, p.assign(p - g), and return both the
-        # momentum buffers and the params so the caller realizes them TOGETHER
-        # (one fire scope).  An eager `Tensor.realize` of the momentum buffer
-        # mid-step (before reading it back into the param update) desyncs the
-        # next step's momentum recurrence and freezes the param -- SGD's inline
-        # one-shot realize is the correct shape.
-        #
-        # Newton-Schulz is the exception: it reads self.b[i] through a deep
-        # matmul chain, and a chain over an unrealized in-place ASSIGN node
-        # stalls realize (the same hazard the Adam class splits around with its
-        # `Tensor.realize(*mv)` barrier).  So when ns_coefficients is set we
-        # first build + realize the momentum buffers, then run NS on the now-
-        # plain-TEN buffers in a second pass.
+        # tinygrad nn/optim.py:109-129.  The momentum buffers realize with the
+        # params, except under Newton-Schulz: its deep chain over an unrealized
+        # ASSIGN stalls realize, so they realize first.
         out = []
         ns = bool(self.ns_coefficients)
-        pre = []          # NS path scratch: (p, r, g_after_momentum)
+        pre = []          # Newton-Schulz path: (i, p, r, g before its momentum term)
         moments = []
         for i, p in enumerate(self.params):
             g = p.grad
@@ -260,7 +179,7 @@ class LARS(Optimizer):
                 continue
             g = g.reshape(*p.shape) if p.shape else g
             if self.tcoef != 0:
-                # trust ratio (tinygrad nn/optim.py:117-119)
+                # trust ratio (tinygrad nn/optim.py:112-116)
                 r1 = p.detach().square().sum().sqrt()
                 r2 = g.square().sum().sqrt()
                 r = (r1 > 0).where(
@@ -293,10 +212,8 @@ class LARS(Optimizer):
             out.append(p)
         if not ns:
             return out
-        # NS path: realize the momentum buffers, then orthogonalize.  The
-        # nesterov term reads b[i] only after that realize, as Adam's phase 2
-        # reads m and v: built before it, g would hold the unrealized ASSIGN
-        # node, and realizing p would fire the momentum write a second time.
+        # The nesterov term reads b[i] after this realize: built on the unrealized
+        # ASSIGN, it would make p's realize fire the momentum write again.
         if moments:
             Tensor.realize(*moments)
         out = list(moments)
@@ -306,8 +223,7 @@ class LARS(Optimizer):
             i, p, r, g = entry
             if self.momentum:
                 g = (g + self.b[i] * self.momentum) if self.nesterov else self.b[i]
-            # orthogonalize the (reshaped-2D) momentum update, reshape back
-            # (tinygrad nn/optim.py:127).
+            # orthogonalize the update as a 2-D matrix (tinygrad nn/optim.py:123)
             gshape = g.shape
             g = g.reshape(gshape[0], -1).newton_schulz(
                 self.ns_steps, self.ns_coefficients).reshape(*gshape)
@@ -320,20 +236,15 @@ class LARS(Optimizer):
         return out
 
     def _post_wd(self, p, g):
-        # Muon's post-momentum weight decay, added after the lr scaling so it
-        # stays decoupled from the trust ratio: p <- p*(1 - lr*wd) - g, as in
-        # torch (tinygrad nn/optim.py:127-128, #17709; before that fix the
-        # decayed param was computed and dropped).
+        # Muon's post-momentum decay, after the lr scaling so the trust ratio
+        # leaves it alone: p <- p*(1 - lr*wd) - g (tinygrad nn/optim.py:126-127).
         if not self.pre_wd and self.wd > 0:
             g = g + p.detach() * (self.wd * self.lr)
         return g
 
 
-# Muon applies Newton-Schulz orthogonalization to the momentum update --
-# tinygrad nn/optim.py:83-93 (Muon(...) = LARS(pre_wd=False, classic=False,
-# nesterov=True, ns_coef)).  Coefficients/steps default to the Muon quintic
-# (3.4445,-4.775,2.0315), 5 steps; momentum 0.95, weight_decay 0.1 (applied
-# post-momentum, see LARS._post_wd), matching tinygrad's defaults.
+# tinygrad nn/optim.py:83-93: LARS with Newton-Schulz on the momentum update and
+# post-momentum weight decay.
 def Muon(params, lr=0.001, momentum=0.95, weight_decay=0.1, ns_steps=5,
          ns_coefficients=(3.4445, -4.775, 2.0315), nesterov=True, **_):
     return LARS(params, lr=lr, momentum=momentum, weight_decay=weight_decay,

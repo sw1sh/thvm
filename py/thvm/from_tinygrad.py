@@ -1,38 +1,5 @@
-"""Ingest a tinygrad lazy UOp graph and rebuild it in thvm's heap.
-
-Cross-validation tool: tinygrad builds the lazy graph, thvm executes
-it.  `from_tinygrad(tg_tensor)` walks the unrealized `tg_tensor.uop`
-DAG node-by-node, emits the matching thvm UOp via the Phase-1 bridge
-(`py/thvm/thvm.py`), and returns a thvm `Tensor` you can `.numpy()`.
-
-Why the unrealized `.uop`: a realize replaces the tensor's graph with
-its result buffer and we lose the structural RESHAPE/EXPAND/PERMUTE chain
-thvm wants.  We translate the pre-realize graph; we DO call `.realize()`
-once on the source tensor first so the leaf BUFFERs have host data we can
-read back.
-
-Op coverage (extend by adding cases to `_emit`; unmapped ops raise
-NotImplementedError on purpose so coverage grows explicitly):
-
-  leaves     BUFFER, COPY (passthrough to the BUFFER under it), CONST
-  buffers    AFTER(buf, STORE(buf, v)) -> v  (whole-buffer write, e.g. an
-             ALLOC'd Tensor.ones parameter or an assign)
-  binary     ADD, MUL, MAX, CMPLT, CMPNE, SUB
-  unary      RECIPROCAL, EXP2, LOG2, SQRT, NEG
-  ternary    WHERE  (cond ? a : b, a true IWHERE select built by uop_where,
-             the value-level constructor: no index-layer folds, so nested
-             selects stay selects and the chain rule differentiates them;
-             MAX uses the same)
-  reduce     REDUCE in tinygrad's front normal form, arg=(Ops.ADD|Ops.MAX,
-             n_front_axes): the reduced axes were PERMUTEd to the front and
-             the output drops them (uop/ops.py:655-664, :433-437)
-  movement   RESHAPE, EXPAND, PERMUTE, PAD, SHRINK, FLIP
-  cast       CAST, BITCAST
-  noop       STAGE, CONTIGUOUS_BACKWARD, DETACH, NOOP (passthrough)
-
-Movement target shapes come from `u.shape`; PAD/SHRINK (offset, size)
-pairs come from `u.marg`.
-"""
+"""Rebuilds a tinygrad Tensor's lazy UOp graph as thvm terms, cross-checking thvm's
+backend on tinygrad's graphs; an unmapped op raises NotImplementedError."""
 from __future__ import annotations
 
 from .dtypes import DType, dtypes
@@ -40,20 +7,15 @@ from .tensor import Tensor, _TH
 from .thvm import K, Term
 
 
-# Lazily import the tinygrad Ops enum so importing thvm never hard-depends
-# on tinygrad being on the path.  Only `from_tinygrad()` needs it.
+# Imported lazily, so importing thvm does not need tinygrad.
 def _ops():
     from tinygrad.uop.ops import Ops
     return Ops
 
 
 def _bcast(term: int, src_shape, out_shape) -> int:
-    """Right-align `src_shape` into `out_shape` and expand -- tinygrad's
-    implicit broadcast (uop/ops.py:70-82 _broadcast_shape/broadcast_axes):
-    elementwise srcs keep their own shapes and the ALU node's shape is the
-    per-right-aligned-dim broadcast; codegen expands late.  thvm's binops
-    take same-shape operands, so the bridge materialises the broadcast as
-    RESHAPE (prepend 1s) + EXPAND."""
+    """`term` right-aligned into `out_shape` by RESHAPE and EXPAND: tinygrad's ALU
+    srcs keep their shapes (uop/ops.py:80-92), thvm's binops take equal ones."""
     src_shape, out_shape = tuple(src_shape), tuple(out_shape)
     if src_shape == out_shape or not out_shape:
         return term
@@ -65,10 +27,8 @@ def _emit_b(u, i: int, memo: dict[int, int]) -> int:
     return _bcast(_emit(u.src[i], memo), _shape_of(u.src[i]), _shape_of(u))
 
 
-# ---- helpers ------------------------------------------------------------
-
 def _is_int_dtype(dt) -> bool:
-    """True if a tinygrad dtype is integral (so a CONST maps to iconst)."""
+    """Integer or bool, a CONST of which maps to iconst."""
     name = getattr(dt, "name", str(dt))
     return any(k in name for k in ("int", "bool", "uint", "long"))
 
@@ -88,30 +48,9 @@ def _to_dtype(tg_dtype) -> DType:
 
 
 def _movement_begin_end(u, kind: str):
-    """Decode a PAD / SHRINK movement-arg into thvm's flat
-    [begin0,end0,begin1,end1,...] per-axis bounds.
-
-    IMPORTANT SEMANTIC CONVERSION.  tinygrad's movement-arg
-    (`UOp.marg`) for PAD and SHRINK is a per-dim `(offset, size)` tuple,
-    NOT `(before_width, after_width)` / `(begin, end)` (tinygrad
-    `uop/ops.py` shape rule: PAD/SHRINK output dim == `size`, with the
-    input of length `s` placed at `offset` so that `offset + s <= size`
-    for PAD and `offset + size <= s` for SHRINK).  thvm's UOP_PAD takes
-    `(begin_width, end_width)` and UOP_SHRINK takes a `[begin, end)`
-    slice, so we MUST translate:
-
-      PAD:    begin = offset
-              end   = size - offset - in_dim      (trailing pad width)
-      SHRINK: begin = offset
-              end   = offset + size               (slice upper bound)
-
-    Reading tinygrad's `(offset, size)` straight through as thvm
-    `(begin, end)` is what corrupted the arange/cumsum construction: the
-    PAD `((3, 7),)` over a length-4 input is offset=3 / out_size=7 (thvm
-    begin=3, end=0), but the literal read gave thvm a (3, 7) before/after
-    pad -> a length-14 buffer whose downstream rank-changing RESHAPE then
-    failed to decompose and zeroed the whole result.
-    """
+    """thvm's flat [begin0, end0, ...] for a PAD or SHRINK, whose tinygrad marg is a
+    per-dim (offset, size), size the output extent (uop/ops.py:419-428): PAD's end is
+    the trailing width size - offset - in_dim, SHRINK's the bound offset + size."""
     in_shape = _shape_of(u.src[0])
     flat: list[int] = []
     for d, (offset, size) in enumerate(u.marg):
@@ -121,15 +60,9 @@ def _movement_begin_end(u, kind: str):
     return flat
 
 
-# ---- core walker --------------------------------------------------------
-
 def _emit(u, memo: dict[int, int]) -> int:
-    """Translate one tinygrad UOp `u` to a thvm Term, recursing on srcs.
-
-    `memo` maps id(uop) -> thvm Term so a shared subgraph (DAG) is built
-    once, and None -> the leaf Tensors the walk keeps alive.  Returns the
-    raw u64 Term.
-    """
+    """`u` as a raw thvm Term; `memo` maps id(uop) to its Term, so a shared subgraph
+    is built once, and None to the leaf Tensors the walk keeps alive."""
     key = id(u)
     if key not in memo:
         memo[key] = _emit_op(u, memo)
@@ -140,25 +73,20 @@ def _emit_op(u, memo: dict[int, int]) -> int:
     Ops = _ops()
     op = u.op
 
-    # ---- leaves -------------------------------------------------------
     if op == Ops.BUFFER:
-        # Read the realized host data into a fresh thvm leaf tensor.
         arr = u.buffer.numpy()
         dt = _to_dtype(u.dtype)
         target = _shape_of(u)
         if target and tuple(arr.shape) != target:
             arr = arr.reshape(target)
         leaf = Tensor._from_numpy(arr.astype(dt.np_dtype, copy=False), dt)
-        # The walk holds the leaf's term as a raw integer until the result
-        # Tensor wraps it; keep the leaf alive so a reclaim triggered by the
-        # next leaf's allocation does not free its buffer.
+        # The walk holds the leaf's term as a raw integer, so the leaf is kept
+        # alive: a reclaim on the next leaf's allocation would free its buffer.
         memo.setdefault(None, []).append(leaf)
         return int(leaf.term)
 
-    # A COPY's value is its src[0] (a single-device COPY is an identity,
-    # schedule/prepare.py:214-215); src[1:] carries device plumbing.
-    # contiguous() is `alu(Ops.STAGE)`, and tinygrad itself walks through
-    # {STAGE, DETACH, CONTIGUOUS_BACKWARD} as value-identity (tensor.py:178).
+    # A single-device COPY is an identity (schedule/prepare.py:214-215), and
+    # tinygrad walks through STAGE, DETACH and CONTIGUOUS_BACKWARD (tensor.py:178).
     if op in (Ops.COPY, Ops.STAGE, Ops.CONTIGUOUS_BACKWARD, Ops.DETACH, Ops.NOOP):
         return _emit(u.src[0], memo)
 
@@ -167,9 +95,8 @@ def _emit_op(u, memo: dict[int, int]) -> int:
             return _TH.iconst(int(u.val))
         return _TH.fconst(float(u.val))
 
-    # AFTER(buf, STORE(buf, v)): the buffer read after a whole-buffer write.
-    # Contiguous allocations (Tensor.ones/zeros params, whose target is an
-    # ALLOC) and Tensor.assign take this form, so the value is v.
+    # AFTER(buf, STORE(buf, v)), as Tensor.assign builds it (tensor.py:259) and an
+    # ALLOC'd parameter's init: the value is v.
     if op is Ops.AFTER:
         return _emit(_after_value(u, Ops), memo)
 
@@ -183,12 +110,9 @@ def _emit_op(u, memo: dict[int, int]) -> int:
     if op in binary:
         return binary[op](_emit_b(u, 0, memo), _emit_b(u, 1, memo))
 
-    # WHERE(cond, a, b) -> thvm IWHERE, a true select: correct for
-    # non-finite branches (tinygrad max_pool2d masks with -inf; an
-    # arithmetic select cond*a+(1-cond)*b would hit 0*-inf=NaN).
-    # uop_where, not uop_iwhere: the index-layer folds would merge nested
-    # selects into a tensor-level IAND that materialize cannot schedule or
-    # differentiate.
+    # A true select, as an arithmetic blend makes 0 * -inf NaN on max_pool2d's -inf
+    # masks; uop_where, as uop_iwhere's folds merge nested selects into an IAND that
+    # materialize cannot schedule or differentiate.
     if op == Ops.WHERE:
         return _TH.where(_emit_b(u, 0, memo), _emit_b(u, 1, memo),
                          _emit_b(u, 2, memo))
@@ -210,9 +134,7 @@ def _emit_op(u, memo: dict[int, int]) -> int:
     if op == Ops.RESHAPE:
         return _TH.reshape(_emit(u.src[0], memo), _shape_of(u))
     if op == Ops.EXPAND:
-        # EXPAND PREPENDS len(arg) dims (uop/ops.py:430-431, :731):
-        # out = arg + src.shape.  _bcast handles both that and the
-        # same-rank expand-the-1s form.
+        # EXPAND prepends its arg to the shape (uop/ops.py:414-415).
         return _bcast(_emit(u.src[0], memo), _shape_of(u.src[0]), _shape_of(u))
     if op == Ops.PERMUTE:
         return _TH.permute(_emit(u.src[0], memo), tuple(int(a) for a in u.arg))
@@ -248,32 +170,21 @@ def _sub(a: int, b: int) -> int:
 
 
 def _max(a: int, b: int) -> int:
-    """max(a,b) = (a<b) ? b : a as a true select, like WHERE: the
-    arithmetic form (a<b)*b + (1-(a<b))*a is 0*inf = NaN whenever the
-    losing operand is infinite."""
+    """(a < b) ? b : a as a true select, like WHERE: the arithmetic blend is NaN
+    whenever the losing operand is infinite."""
     return _TH.where(_TH.cmplt(a, b), b, a)
 
 
 def _cmpne(a: int, b: int) -> int:
-    # a != b  ==  1 - (a == b)
     eq = _TH.cmpeq(a, b)
     one = _TH.fconst(1.0)
     return _TH.add(one, _TH.neg(eq))
 
 
-# ---- public entry point -------------------------------------------------
-
 def from_tinygrad(tg_tensor) -> Tensor:
-    """Rebuild a tinygrad Tensor's lazy UOp graph in thvm; return a thvm
-    Tensor.
-
-    Realizes the source tensor first (so leaf BUFFERs hold host data we
-    can read back), then walks the *original* `.uop` DAG -- which still
-    carries the structural movement chain -- and emits the matching thvm
-    UOp per node, memoizing id(uop) -> thvm Term to preserve sharing.
-    """
+    """`tg_tensor`'s lazy UOp graph as a thvm Tensor: taken before the realize that
+    replaces it with a buffer, walked after, once its leaf BUFFERs hold data."""
     root = tg_tensor.uop
-    # Allocate leaf buffers so `.buffer.numpy()` works on BUFFER leaves.
     tg_tensor.realize()
     memo: dict[int, int] = {}
     term = _emit(root, memo)

@@ -1,8 +1,4 @@
-"""Device selection -- mirrors tinygrad's Device namespace.
-
-Phase 0 of the env-var rename aligned thvm on tinygrad's `DEV` var,
-so `Device.DEFAULT` just reflects what `DEV` picked at process start.
-"""
+"""tinygrad's Device: DEFAULT is the device DEV names at import, CPU when unset."""
 from __future__ import annotations
 
 import os

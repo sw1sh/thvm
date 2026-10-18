@@ -1,14 +1,5 @@
-// thvm_py.c -- thin extern "C" wrappers around thvm's static-inline UOp
-// constructors, so ctypes can drive thvm from Python.
-//
-// Build (Darwin):
-//   clang -shared -fPIC -O2 -DACCELERATE_NEW_LAPACK \
-//     -framework Accelerate \
-//     -o py/thvm/libthvm_py.dylib py/csource/thvm_py.c
-//
-// The whole runtime is single-TU via #include "src/thvm.c"; the static
-// inline `fn` declarations resolve inside this TU and are re-exported
-// through the wrapper functions below.
+// The ctypes surface of py/thvm: exported wrappers over the static-inline `fn`s of
+// the single-TU runtime, built by `make py`.
 
 #include "../../src/thvm.c"
 
@@ -18,25 +9,20 @@
 
 #define EXPORT __attribute__((visibility("default")))
 
-// ---------------- runtime lifecycle ----------------
-// Python objects hold raw heap Terms (every lazy Tensor's graph), so the
-// heap collection a realize wants is deferred: Thvm runs it through
-// py_gc_collect with its live Terms as roots and rebinds them.
+// Python holds raw heap Terms (every lazy Tensor's graph), so a realize defers
+// its heap collection: Thvm runs it through py_gc_collect with its live Terms.
 EXPORT void py_thvm_init(void) {
   thvm_init();
   thvm_gc_defer(1);
 }
 EXPORT void py_thvm_free(void) { thvm_free(); }
 
-// ---------------- term inspection ----------------
 EXPORT uint32_t py_term_tag(uint64_t t) { return term_tag(t); }
 EXPORT uint64_t py_term_val(uint64_t t) { return term_val(t); }
 
-// ---------------- atom constructors ----------------
 EXPORT uint64_t py_term_iconst(int32_t v) {
-  // UOP_CONST(DT_INT32, bits) -- the DAG-side classifiers
-  // (uop_dag_classify_matmul_shape etc.) pattern-match on UOP_CONST
-  // for stride coefficients.  A bare TAG_NUM atom won't match.
+  // A UOP_CONST, not a bare TAG_NUM: the DAG classifiers match UOP_CONST
+  // stride coefficients (uop_dag_classify_matmul_shape).
   return uop_const(DT_INT32, (uint32_t)v);
 }
 EXPORT uint64_t py_term_fconst(float v) {
@@ -45,7 +31,6 @@ EXPORT uint64_t py_term_fconst(float v) {
   return uop_const(DT_FP32, bits);
 }
 
-// ---------------- UOp graph constructors ----------------
 EXPORT uint64_t py_uop_buffer(uint32_t scope, uint32_t dtype,
                               uint32_t ndim, const uint32_t *dims,
                               uint32_t instance) {
@@ -70,7 +55,7 @@ EXPORT uint64_t py_uop_iwhere(uint64_t cond, uint64_t t, uint64_t e) {
   return uop_iwhere(cond, t, e);
 }
 
-// Value-level select (tensor WHERE): no index-layer folds.
+// The value-level select (tensor WHERE), without uop_iwhere's index-layer folds.
 EXPORT uint64_t py_uop_where(uint64_t cond, uint64_t t, uint64_t e) {
   return uop_where(cond, t, e);
 }
@@ -101,22 +86,7 @@ EXPORT uint64_t py_uop_scatter(uint64_t base, uint64_t idx, uint64_t src,
   return uop_scatter(base, idx, src, dim, kind, include_self);
 }
 
-// ============== high-level tensor surface (TAG_TEN) ==================
-// Phase 1 of the Python Tensor frontend (docs/plans/py_tensor_frontend
-// .md): the high-level tensor-term layer, ported from the WL
-// LibraryLink glue (wl/THVMLink/CSource/thvmlink.c, thvm_wl_*).
-// thvm_py.c is a single-TU #include of src/thvm.c, so these call
-// tensor_alloc / uop_grad / thvm_realize directly -- exactly as
-// py_uop_binary calls uop_binary.
-//
-// A TAG_TEN term packs (dtype, tensor-id).  The algebra + movement
-// builders compose TAG_TEN terms; py_realize drives wnf -> materialize
-// -> kernelize -> schedule -> dispatch and returns the result TAG_TEN.
-
-// --- tensor create / host I/O ---
-
-// Allocate a fresh tensor on the DEV-selected backend; returns the
-// packed TAG_TEN term.  dims[] holds `ndim` (<= MAX_DIM) extents.
+// A fresh TAG_TEN tensor on the DEV-selected backend.
 EXPORT uint64_t py_ten_create(uint32_t dtype, uint32_t ndim,
                               const uint32_t *dims) {
   Shape shape;
@@ -128,9 +98,8 @@ EXPORT uint64_t py_ten_create(uint32_t dtype, uint32_t ndim,
   return term_new(0, TAG_TEN, dtype, id);
 }
 
-// Copy raw host bytes into a TAG_TEN tensor's backend buffer.  The
-// caller packs the dtype-native layout; the bridge memcpies nbytes.
-// Returns 1 on success, 0 for a bad term / backend.
+// py_ten_write / py_ten_read copy nbytes of dtype-native host data: 1, or 0
+// when `t` is not a known TAG_TEN or its backend cannot copy.
 EXPORT int py_ten_write(uint64_t t, const void *data, uint64_t nbytes) {
   if (term_tag(t) != TAG_TEN) return 0;
   u32 id = (u32)term_val(t);
@@ -138,15 +107,12 @@ EXPORT int py_ten_write(uint64_t t, const void *data, uint64_t nbytes) {
   TenDesc *d = &TENS[id];
   if (d->backend == NULL || d->backend->buf_write == NULL) return 0;
   d->backend->buf_write(d->buf_id, data, nbytes);
-  // Host write is a buffer mutation the precise fire memo must see (else
-  // a kernel reading this buf -- e.g. the eval forward reading a freshly
-  // ten_write'n xSlot -- would wrongly skip re-firing and read stale
-  // bytes).  Record it on the same ASSIGN-write ring as interact_assign.
+  // The precise fire memo skips a kernel whose buffers saw no write since its
+  // last dispatch, so a host write is logged as an ASSIGN's is.
   kernel_assign_write_record(d->backend, d->buf_id);
   return 1;
 }
 
-// Copy a (realized) TAG_TEN tensor's backend buffer out to host bytes.
 EXPORT int py_ten_read(uint64_t t, void *out, uint64_t nbytes) {
   if (term_tag(t) != TAG_TEN) return 0;
   u32 id = (u32)term_val(t);
@@ -157,8 +123,6 @@ EXPORT int py_ten_read(uint64_t t, void *out, uint64_t nbytes) {
   return 1;
 }
 
-// Tensor introspection: dtype, element count, shape (writes ndim
-// extents into out_dims[>=MAX_DIM], returns ndim).
 EXPORT uint32_t py_ten_dtype(uint64_t t) {
   if (term_tag(t) != TAG_TEN) return 0;
   u32 id = (u32)term_val(t);
@@ -171,6 +135,7 @@ EXPORT uint64_t py_ten_numel(uint64_t t) {
   if (id == 0 || id >= TENS_NEXT) return 0;
   return (uint64_t)TENS[id].view.numel;
 }
+// The rank, with the extents written to out_dims[MAX_DIM].
 EXPORT uint32_t py_ten_shape(uint64_t t, uint32_t *out_dims) {
   if (term_tag(t) != TAG_TEN) return 0;
   u32 id = (u32)term_val(t);
@@ -182,8 +147,6 @@ EXPORT uint32_t py_ten_shape(uint64_t t, uint32_t *out_dims) {
   return s->ndim;
 }
 
-// --- tensor algebra (py_uop_binary / py_uop_reduce above already
-//     cover BINARY / REDUCE) ---
 EXPORT uint64_t py_uop_unary(uint32_t opcode, uint64_t src) {
   return uop_unary(opcode, src);
 }
@@ -194,8 +157,8 @@ EXPORT uint64_t py_uop_bitcast(uint64_t src, uint32_t dst_dtype) {
   return uop_bitcast(src, dst_dtype);
 }
 
-// --- movement ops (tinygrad reshape/permute/expand/pad/shrink/flip).
-//     pad / shrink take begin_end[2*ndim]; flip takes an axes bitmask. ---
+// pad and shrink take begin_end[2 * ndim], a (begin, end) pair per axis; flip
+// takes an axes bitmask.
 EXPORT uint64_t py_uop_reshape(uint64_t src, uint32_t ndim,
                                const uint32_t *dims) {
   return uop_reshape(src, ndim, dims);
@@ -226,9 +189,8 @@ EXPORT uint64_t py_uop_flip(uint64_t src, uint32_t axes_bitmask) {
   return uop_flip(src, axes_bitmask);
 }
 
-// --- autodiff: thvm's real uop_grad chain-rule rewrite ---
-// py_grad builds the BWD projection of y w.r.t. its leaves, seeded by
-// gy -- Tensor.backward() routes here, not a hand-built backward DAG.
+// The chain-rule (DP1) and forward (DP0) projections of a grad cell [y, gy,
+// target] (uop/grad.c); a nonzero target runs the target walk.
 EXPORT uint64_t py_grad(uint64_t y, uint64_t gy) {
   return uop_grad(y, gy);
 }
@@ -240,24 +202,13 @@ EXPORT uint64_t py_fwd(uint64_t y, uint64_t gy) {
   return uop_fwd(y, gy);
 }
 
-// --- reduce + dispatch ---
-// py_wnf: weak normal form.  py_nf: full normal form (fires every
-// heap-resident UOp/GRAD/kernel -- surfaces grads before materialize).
-// py_realize: the full pipeline, returns the result TAG_TEN.
+// py_realize: the result TAG_TEN, or 0 with py_realize_error() saying why.
 EXPORT uint64_t py_wnf(uint64_t t)     { return wnf(t); }
 EXPORT uint64_t py_realize(uint64_t t) { return thvm_realize(t); }
 
-// py_realize_many: bundle n terms into one TAG_CTR and realize them
-// together (thvm_realize routes a CTR to thvm_realize_many).  This is
-// the tinygrad `loss.realize(*sched)` contract: every assign + consumer
-// is scheduled in ONE materialize pass, so a buffer that is BOTH
-// assigned and read by another assign (e.g. Adam's m read by the param
-// update) fires its ASSIGN exactly once instead of being re-fired by a
-// later per-tensor realize against an already-updated buffer.  The
-// resolved children are written back into `terms[]` so each Python
-// Tensor can refresh its handle to the materialized TAG_TEN.  Returns 0
-// and leaves `terms[]` untouched when the realize failed (an assign
-// cycle between the roots); py_realize_error() says why.
+// The n roots realized as one TAG_CTR bundle (tinygrad Tensor.realize(*lst)), so
+// an assign another root reads fires once; the resolved roots go back into terms[],
+// which a failed realize (0, py_realize_error() says why) leaves untouched.
 EXPORT uint64_t py_realize_many(uint64_t *terms, uint32_t n) {
   if (n == 0) return 0;
   if (n == 1) {
@@ -275,8 +226,8 @@ EXPORT uint64_t py_realize_many(uint64_t *terms, uint32_t n) {
 
 EXPORT const char *py_realize_error(void) { return thvm_realize_error(); }
 
-// The deferred heap collection: `roots[]` are the Terms Python holds, and
-// come back relocated.
+// The deferred heap collection: roots[] are the Terms Python holds, and come
+// back relocated.
 EXPORT int32_t py_gc_pending(void) {
   return thvm_gc_pending();
 }
@@ -284,18 +235,7 @@ EXPORT void py_gc_collect(uint64_t *roots, uint32_t n) {
   thvm_gc_collect_deferred((Term *)roots, n);
 }
 
-// --- live-tensor pinning + buffer reclaim ---
-// A backend buffer is freed once nothing can read it, as tinygrad frees a
-// Buffer when its last reference dies (device.py:194 Buffer.deallocate,
-// device.py:133-134 Buffer.__del__).  thvm's references are not counted:
-// lazy UOp graphs name a tensor by its TAG_TEN leaf in heap cells, and
-// TenDescs, views, JIT captures and pins share buffers by id, so liveness
-// is decided by tracing.  py_reclaim marks every buffer reachable from the
-// frontend's live terms (`roots`: each live Tensor's lazy or realized term)
-// and from the runtime roots (pins, WNF stack, DEFS), following each reached
-// TenDesc.grad, then frees every other buffer that no JIT capture retains.
-// Every realized Tensor also pins its term, which roots it inside a
-// realize's own pool rollback.
+// A realized Tensor pins its term, a root of each realize's own pool rollback.
 EXPORT void py_pin_set(uint64_t handle, uint64_t term) {
   extern_pin_handle_set(handle, term);
 }
@@ -321,15 +261,16 @@ static void py_clear_preserved(void) {
 #endif
 }
 
-// A realize clears the preserve bits only above its own watermark, so a
-// buffer allocated before it (an input it read) keeps a stale bit; clear the
-// table first so the mark alone decides.
+// Heap cells hold uncounted tensor references, so this frees each CPU or CUDA
+// buffer that tracing from roots[] (each live Tensor's term), pins, the WNF stack
+// and DEFS misses: tinygrad frees a Buffer on its last reference (device.py:133-134).
 EXPORT void py_reclaim(uint64_t const *roots, uint32_t n) {
+  // A realize clears preserve bits only from its own watermark up, so an older
+  // buffer can carry a stale one; clear the table so the mark alone decides.
   py_clear_preserved();
   if (!mark_gc_preserve_host_roots((Term const *)roots, n)) return;
-  // A live TinyJit capture reads buffers no Python Tensor reaches; jit_pinned
-  // alone cannot protect them (one dropped capture unpins a buffer another
-  // still retains, and CUDA has no such skip).
+  // A live capture reads buffers no Tensor reaches, and jit_pinned is a flag:
+  // dropping one capture unpins a buffer another still retains.
   jit_capture_mark_preserved();
   cpu_buf_pool_free_unpreserved(1);
 #ifdef THVM_HAS_CUDA
@@ -339,13 +280,9 @@ EXPORT void py_reclaim(uint64_t const *roots, uint32_t n) {
   PY_RECLAIM_AFTER = py_resident_bytes();
 }
 
-// Whether resident bytes grew past the last reclaim's survivors by
-// max(THVM_RECLAIM_MB (default 64), half the survivors): the trigger the
-// frontend checks before it allocates a tensor and after a realize, so
-// garbage stays bounded and each reclaim's cost (proportional to the live
-// set) is amortized over at least that much allocation.  `force` (and
-// THVM_RECLAIM_MB=0) drops the slack: any growth is due.  Never due while a
-// JIT capture records, whose buffers the capture finalize retains.
+// The slack, max(THVM_RECLAIM_MB (default 64), half the survivors), amortizes a
+// reclaim's live-set cost; `force` or THVM_RECLAIM_MB=0 makes any growth due.
+// Never due while a JIT capture records: its finalize retains the buffers.
 EXPORT int32_t py_reclaim_due(int32_t force) {
   static int64_t floor_bytes = -1;
   if (floor_bytes < 0) {
@@ -360,7 +297,7 @@ EXPORT int32_t py_reclaim_due(int32_t force) {
   return live > PY_RECLAIM_AFTER + slack;
 }
 
-// Backend buffers that hold storage for a tensor (freelisted ones excluded).
+// CPU and CUDA buffers holding storage, freelisted ones excluded.
 EXPORT uint32_t py_buf_live_count(void) {
   uint32_t n = 0;
   for (u64 i = 1; CPU_BUFS != NULL && i < CPU_BUFS_NEXT; i++) {
@@ -374,42 +311,34 @@ EXPORT uint32_t py_buf_live_count(void) {
   return n;
 }
 
-// --- JIT capture / replay (TinyJit) ---
-// jit_capture_begin arms recording; kernel dispatches + in-place ASSIGNs
-// during the realize land in the active slot.  jit_replay re-dispatches
-// the SAME kernel sequence against the SAME buffers -- no re-render, no
-// nvrtc, no fresh allocs (so per-step time + arena growth stay flat).
-// Records GPU work only; the wrapped step must read its changing inputs
-// from stable slots written (py_ten_write) before each replay.
+// A capture records the kernel dispatches and in-place ASSIGNs of the realizes
+// from py_jit_begin (its slot, 0 when none is free) to py_jit_end; a replay
+// re-dispatches them on the same buffers.
 EXPORT uint32_t py_jit_begin(void)          { return jit_capture_begin(); }
-// roots[] are the result's realized terms: the replay regenerates each one
-// (none for a capture whose result is kept some other way).
+// roots[] are the result's realized terms, whose dispatches every replay keeps.
 EXPORT void py_jit_end(uint64_t const *roots, uint32_t n) {
   jit_capture_end_with_results((Term const *)roots, n);
 }
 EXPORT uint32_t py_jit_replay(uint32_t s)   { return jit_replay(s); }
-// Declare the JIT-input tensors' buf_ids (argument order) so replay can
-// rebind them to fresh inputs -- tinygrad input_replace baseline.
+// The capture's input buf_ids in argument order; py_jit_replay_with_inputs
+// rebinds their sites to each call's fresh inputs.
 EXPORT void py_jit_set_inputs(uint32_t s, uint32_t const *ids, uint32_t n) {
   jit_capture_set_inputs(s, ids, n);
 }
-// Replay rebinding the captured input sites to this call's fresh inputs.
 EXPORT uint32_t py_jit_replay_with_inputs(uint32_t s, uint32_t const *new_ids,
                                           uint32_t n) {
   return jit_replay_with_inputs(s, new_ids, n);
 }
 EXPORT void     py_jit_drop(uint32_t s)     { jit_capture_drop(s); }
 
-// --- introspection (Phase-4 cross-check surface) ---
 EXPORT uint32_t py_tens_count(void) {
   return TENS_NEXT > 1 ? TENS_NEXT - 1 : 0;
 }
 EXPORT uint32_t py_kernel_count(void) {
   return KERNELS_NEXT > 1 ? KERNELS_NEXT - 1 : 0;
 }
-// Device-agnostic resident buffer-byte counters, the analog of
-// tinygrad's GlobalCounters live mem.  Sums the CPU and (when built with
-// CUDA) CUDA counters; only the active backend's is nonzero.
+// Resident CPU plus (with CUDA) CUDA buffer bytes, peak and live, the live one as
+// tinygrad's GlobalCounters.mem_used; Metal buffers are not counted.
 EXPORT uint64_t py_cpu_peak_bytes(void) {
 #ifdef THVM_HAS_CUDA
   return cpu_buf_peak_bytes() + cuda_buf_peak_bytes();
@@ -451,14 +380,8 @@ EXPORT void py_cg_profile_dump(uint32_t top_n) {
 EXPORT uint32_t py_const_TAG_TEN(void) { return TAG_TEN; }
 EXPORT uint32_t py_const_MAX_DIM(void) { return MAX_DIM; }
 
-// --- grad-leaf mark: INTERNAL mechanism, not a user-facing flag ---
-// backward() auto-marks every in-scope non-CONST float leaf right
-// before the walk (tinygrad spec: no requires_grad anywhere; .grad is
-// filled for every reachable float leaf, and the OPTIMIZER's param
-// list -- not a flag -- decides what updates).  grad_leaf_sup's
-// target==0 path consults this mark to drive the "accumulate each
-// reached leaf's cotangent into TenDesc.grad" walk; it is set/cleared
-// transiently by backward() and never exposed on the Tensor surface.
+// Marks or unmarks a leaf for the single walk, in which grad_leaf_sup adds the
+// leaf's cotangent to TenDesc.grad; py_backward marks its leaves itself.
 EXPORT int py_ten_set_grad_leaf(uint64_t t, int on) {
   if (term_tag(t) != TAG_TEN) return 0;
   u32 id = (u32)term_val(t);
@@ -470,12 +393,8 @@ EXPORT int py_ten_set_grad_leaf(uint64_t t, int on) {
   else if (was && !now) grad_req_ncount_dec();
   return 1;
 }
-// Walk the UOP DAG rooted at `root` and write the distinct TAG_TEN
-// leaf tids into `out` (caller-allocated, `cap` slots).  Returns the
-// count written.  backward() uses this to enumerate the in-scope
-// leaves it should auto-mark + read back -- the tinygrad
-// "all_tensors whose uop is in scope" filter, done over thvm's term
-// graph instead of a Python all_tensors set.
+// The distinct TAG_TEN tids under `root`, written to the caller's out[cap], and
+// their count: backward()'s in-scope leaves (tinygrad tensor.py:487-488).
 EXPORT uint32_t py_uop_leaf_tids(uint64_t root, uint32_t *out, uint32_t cap) {
   u32 n = 0;
   uop_leaf_tids((Term)root, out, cap, &n);
@@ -493,11 +412,8 @@ EXPORT char const *py_backward(uint64_t y, uint64_t gy, uint32_t const *tids, ui
   return uop_backward(y, gy, tids, n, (Term *)grads, had_grad);
 }
 
-// Walk-once backward readback: the canonical "this tensor's grad"
-// after a uop_grad-driven realize.  grad_leaf_sup's target==0 path
-// accumulates contributions into TENS[tid].grad; this returns the
-// lazy grad term (callers realize it).  set / clear let the frontend
-// reset between backward calls (PyTorch zero_grad analogue).
+// The lazy TenDesc.grad the single walk accumulates into, 0 when none; the
+// optimizer's zero_grad clears it between steps.
 EXPORT uint64_t py_ten_get_grad(uint64_t t) {
   if (term_tag(t) != TAG_TEN) return 0;
   u32 id = (u32)term_val(t);
@@ -519,7 +435,6 @@ EXPORT int py_ten_set_grad(uint64_t t, uint64_t g) {
   return 1;
 }
 
-// ---------------- buffer accessors (handy for debug) ----------------
 EXPORT uint32_t py_ten_get_buf_id(uint64_t t) {
   if (term_tag(t) != TAG_TEN) return 0;
   u32 id = (u32)term_val(t);
@@ -527,16 +442,14 @@ EXPORT uint32_t py_ten_get_buf_id(uint64_t t) {
   return TENS[id].buf_id;
 }
 
-// Run a free-standing kernel root once through the CPU JIT's renderer,
-// compiler and kernel contract (the lowered cross-validator): 0, or -1 when
-// the renderer declines, -2 when the compile or load fails.
+// Runs a free-standing kernel root once on host buffers (cpu_jit_run_root): 0, or
+// -1 when the renderer declines, -2 when the compile or load fails.
 EXPORT int py_run_uop_kernel_c(uint64_t root, void *out, const void *const *ins,
                                uint32_t n, const uint32_t *in_numels) {
   return cpu_jit_run_root(root, out, ins, n, in_numels);
 }
 
-// Apply a KOpt to a free-standing root term (the lowered cross-validator's
-// `opts`), without a KernelEntry slot.
+// `root` with the KOpt applied, outside any KernelEntry; 0 when it bails.
 EXPORT uint64_t py_uop_dag_apply_kopt(uint64_t root, uint8_t op,
                                       uint32_t axis, uint32_t arg) {
   KOpt opt = { op, axis, arg };
@@ -545,7 +458,6 @@ EXPORT uint64_t py_uop_dag_apply_kopt(uint64_t root, uint8_t op,
 
 EXPORT uint32_t py_const_KOP_UPCAST(void)   { return KOP_UPCAST; }
 
-// ---------------- exposed enums (to avoid magic numbers in Python) ----------------
 EXPORT uint32_t py_const_DT_INT32(void)         { return DT_INT32; }
 EXPORT uint32_t py_const_DT_FP32(void)          { return DT_FP32; }
 EXPORT uint32_t py_const_UOP_SCOPE_GLOBAL(void) { return UOP_SCOPE_GLOBAL; }

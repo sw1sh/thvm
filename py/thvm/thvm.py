@@ -1,12 +1,5 @@
-"""ctypes loader + thin Python API for thvm UOp construction.
-
-A `Term` is just a u64 handle (thvm's tagged-pointer scheme); we wrap it
-in a NewType for type-checker friendliness but operate on the raw u64
-values throughout.
-
-Lifecycle: instantiate `Thvm()` once per process. It calls thvm_init()
-on construction and thvm_free() on garbage collection.
-"""
+"""ctypes bindings to libthvm_py: `Thvm` builds and realizes terms, each a raw
+u64 `Term` (thvm.h's tag / ext / val word)."""
 from __future__ import annotations
 
 import ctypes
@@ -19,8 +12,6 @@ from typing import NewType
 Term = NewType("Term", int)
 
 
-# The shared library is `.dylib` on macOS (Metal bridge) and `.so` on
-# Linux (CUDA bridge); `make py` builds whichever the platform supports.
 _LIB_DIR = Path(__file__).parent
 _DYLIB_PATH = next(
     (p for p in (_LIB_DIR / "libthvm_py.dylib", _LIB_DIR / "libthvm_py.so")
@@ -43,19 +34,15 @@ def _bind(name: str, restype, *argtypes):
     return f
 
 
-# ---------------- runtime lifecycle ----------------
 _thvm_init = _bind("py_thvm_init", None)
 _thvm_free = _bind("py_thvm_free", None)
 
-# ---------------- term inspection ----------------
 _term_tag = _bind("py_term_tag", c_uint32, c_uint64)
 _term_val = _bind("py_term_val", c_uint64, c_uint64)
 
-# ---------------- atom constructors ----------------
 _term_iconst = _bind("py_term_iconst", c_uint64, c_int32)
 _term_fconst = _bind("py_term_fconst", c_uint64, c_float)
 
-# ---------------- UOp graph constructors ----------------
 _uop_buffer = _bind("py_uop_buffer", c_uint64,
                     c_uint32, c_uint32, c_uint32,
                     ctypes.POINTER(c_uint32), c_uint32)
@@ -73,7 +60,6 @@ _uop_gather = _bind("py_uop_gather", c_uint64, c_uint64, c_uint64, c_uint32)
 _uop_scatter = _bind("py_uop_scatter", c_uint64, c_uint64, c_uint64, c_uint64,
                      c_uint32, c_uint32, c_uint32)
 
-# ---------------- high-level tensor surface (TAG_TEN) ----------------
 _ten_create = _bind("py_ten_create", c_uint64,
                     c_uint32, c_uint32, ctypes.POINTER(c_uint32))
 _ten_write = _bind("py_ten_write", c_int32, c_uint64, c_void_p, c_uint64)
@@ -143,7 +129,6 @@ _ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
 _ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
 _ten_set_grad     = _bind("py_ten_set_grad",     c_int32,  c_uint64, c_uint64)
 
-# ---------------- C kernels (the lowered cross-validator) ----------------
 _run_uop_kernel_c = _bind("py_run_uop_kernel_c", c_int32, c_uint64, c_void_p,
                           ctypes.POINTER(c_void_p), c_uint32, ctypes.POINTER(c_uint32))
 
@@ -152,7 +137,6 @@ _uop_dag_apply_kopt = _bind(
     c_uint64, ctypes.c_uint8, c_uint32, c_uint32)
 
 
-# ---------------- enum binder ----------------
 def _read_uint32_const(name: str) -> int:
     fn = getattr(_lib, name, None)
     if fn is None:
@@ -163,20 +147,13 @@ def _read_uint32_const(name: str) -> int:
 
 
 class _Constants:
-    """Symbolic constants exposed by the wrapper.
-
-    The actual values match thvm.h and are pulled from the dylib at
-    import time so the Python layer can never drift from the C layer.
-    """
-    # dtypes
+    """thvm.h's constants, read from the library at import so Python cannot
+    drift from C; a missing export reads as -1."""
     INT32 = _read_uint32_const("py_const_DT_INT32")
     FP32 = _read_uint32_const("py_const_DT_FP32")
-    # tensor term tag + max rank
     TAG_TEN = _read_uint32_const("py_const_TAG_TEN")
     MAX_DIM = _read_uint32_const("py_const_MAX_DIM")
-    # buffer scopes
     SCOPE_GLOBAL = _read_uint32_const("py_const_UOP_SCOPE_GLOBAL")
-    # FP binary opcodes
     ADD = _read_uint32_const("py_const_UOP_ADD")
     MUL = _read_uint32_const("py_const_UOP_MUL")
     NEG = _read_uint32_const("py_const_UOP_NEG")
@@ -187,24 +164,19 @@ class _Constants:
     EXP2 = _read_uint32_const("py_const_UOP_EXP2")
     LOG2 = _read_uint32_const("py_const_UOP_LOG2")
     SQRT = _read_uint32_const("py_const_UOP_SQRT")
-    # Integer binary opcodes
     IADD = _read_uint32_const("py_const_UOP_IADD")
     IMUL = _read_uint32_const("py_const_UOP_IMUL")
-    # Reduce kinds
     REDUCE_SUM = _read_uint32_const("py_const_REDUCE_SUM")
     REDUCE_MAX = _read_uint32_const("py_const_REDUCE_MAX")
-    # Indexed ops and their scatter combine kinds
     SCATTER_SUM = _read_uint32_const("py_const_SCATTER_SUM")
     SCATTER_PROD = _read_uint32_const("py_const_SCATTER_PROD")
     SCATTER_MAX = _read_uint32_const("py_const_SCATTER_MAX")
     SCATTER_MIN = _read_uint32_const("py_const_SCATTER_MIN")
     SCATTER_REPLACE = _read_uint32_const("py_const_SCATTER_REPLACE")
-    # Axis types (KAX_*)
     AXIS_LOOP = _read_uint32_const("py_const_KAX_LOOP")
     AXIS_REDUCE = _read_uint32_const("py_const_KAX_REDUCE")
     AXIS_LOCAL = _read_uint32_const("py_const_KAX_LOCAL")
     AXIS_GLOBAL = _read_uint32_const("py_const_KAX_GLOBAL")
-    # KOpt opcodes (autotune-side; autotune.c BEAM uses these)
     KOP_UPCAST = _read_uint32_const("py_const_KOP_UPCAST")
 
 
@@ -212,11 +184,8 @@ K = _Constants
 
 
 class Thvm:
-    """Singleton handle to the thvm runtime.
-
-    Holds no state of its own; thvm's runtime is process-global. Multiple
-    instances share the same runtime; call `close()` once at the end.
-    """
+    """Handle to the process-global runtime: the first instance initializes it,
+    close() frees it."""
 
     _initialized = False
 
@@ -235,26 +204,22 @@ class Thvm:
             _thvm_free()
             Thvm._initialized = False
 
-    # ---------------- atoms ----------------
     def iconst(self, value: int) -> Term:
         return Term(_term_iconst(c_int32(int(value))))
 
     def fconst(self, value: float) -> Term:
         return Term(_term_fconst(c_float(float(value))))
 
-    # ---------------- buffer ----------------
     def buffer(self, *, scope: int, dtype: int, dims, instance: int = 0) -> Term:
         ndim = len(dims)
         arr = (c_uint32 * ndim)(*[c_uint32(int(d)) for d in dims])
         return Term(_uop_buffer(c_uint32(scope), c_uint32(dtype),
                                 c_uint32(ndim), arr, c_uint32(instance)))
 
-    # ---------------- range ----------------
     def range(self, axis_id: int, axis_type: int, extent: int) -> Term:
         return Term(_uop_range(c_uint32(axis_id), c_uint32(axis_type),
                                c_uint32(extent)))
 
-    # ---------------- INDEX layer ----------------
     def index_e(self, buf: Term, addr: Term) -> Term:
         return Term(_uop_index_e(c_uint64(int(buf)), c_uint64(int(addr))))
 
@@ -275,7 +240,6 @@ class Thvm:
                                c_uint64(int(t)),
                                c_uint64(int(e))))
 
-    # ---------------- FP arithmetic ----------------
     def binary(self, opcode: int, a: Term, b: Term) -> Term:
         return Term(_uop_binary(c_uint32(int(opcode)), c_uint64(int(a)), c_uint64(int(b))))
 
@@ -290,7 +254,6 @@ class Thvm:
     def log2(self, x: Term) -> Term:   return self.unary(K.LOG2, x)
     def sqrt(self, x: Term) -> Term:   return self.unary(K.SQRT, x)
 
-    # ---------------- reduce / store ----------------
     def reduce(self, kind: int, axes, src: Term) -> Term:
         arr = (c_uint32 * max(len(axes), 1))(*[c_uint32(int(a)) for a in axes])
         return Term(_uop_reduce(c_uint32(kind), c_uint32(len(axes)), arr, c_uint64(int(src))))
@@ -303,7 +266,6 @@ class Thvm:
     def detach(self, src: Term) -> Term:
         return Term(_uop_detach(c_uint64(int(src))))
 
-    # ---------------- indexed ops ----------------
     def gather(self, src: Term, idx: Term, dim: int) -> Term:
         """UOP_GATHER, or Term(0) when the operands fail uop_gather's checks."""
         return Term(_uop_gather(c_uint64(int(src)), c_uint64(int(idx)),
@@ -311,25 +273,23 @@ class Thvm:
 
     def scatter(self, base: Term, idx: Term, src: Term, dim: int, kind: int,
                 include_self: bool) -> Term:
-        """UOP_SCATTER with a SCATTER_* kind, or Term(0) when the operands
-        fail uop_scatter's checks."""
+        """UOP_SCATTER of a SCATTER_* kind, or Term(0) when the operands fail
+        uop_scatter's checks."""
         return Term(_uop_scatter(c_uint64(int(base)), c_uint64(int(idx)),
                                  c_uint64(int(src)), c_uint32(int(dim)),
                                  c_uint32(int(kind)),
                                  c_uint32(1 if include_self else 0)))
 
     def ten_create(self, dtype: int, dims) -> Term:
-        """Allocate a tensor on the DEV-selected backend; returns TAG_TEN."""
+        """A fresh TAG_TEN tensor on the DEV-selected backend."""
         ndim = len(dims)
         arr = (c_uint32 * max(ndim, 1))(*[c_uint32(int(d)) for d in dims])
         return Term(_ten_create(c_uint32(int(dtype)), c_uint32(ndim), arr))
 
     def ten_write(self, t: Term, data: bytes) -> bool:
-        """Copy raw host bytes into a tensor's backend buffer."""
         return bool(_ten_write(c_uint64(int(t)), data, c_uint64(len(data))))
 
     def ten_read(self, t: Term, nbytes: int) -> bytes:
-        """Copy a (realized) tensor's backend buffer out to host bytes."""
         buf = ctypes.create_string_buffer(nbytes)
         if not _ten_read(c_uint64(int(t)), buf, c_uint64(nbytes)):
             raise RuntimeError(f"ten_read failed for term {int(t):#x}")
@@ -346,7 +306,6 @@ class Thvm:
         ndim = int(_ten_shape(c_uint64(int(t)), out))
         return tuple(int(out[i]) for i in range(ndim))
 
-    # ---- tensor algebra (unary / cast) ----
     def unary(self, opcode: int, x: Term) -> Term:
         return Term(_uop_unary(c_uint32(int(opcode)), c_uint64(int(x))))
 
@@ -354,10 +313,9 @@ class Thvm:
         return Term(_uop_cast(c_uint64(int(x)), c_uint32(int(dst_dtype))))
 
     def bitcast(self, x: Term, dst_dtype: int) -> Term:
-        """Same-itemsize reinterpret of the bits (not a value conversion)."""
+        """Reinterprets the bits; another itemsize returns `x` unchanged."""
         return Term(_uop_bitcast(c_uint64(int(x)), c_uint32(int(dst_dtype))))
 
-    # ---- movement ops ----
     def _move(self, fn, src: Term, dims) -> Term:
         arr = (c_uint32 * max(len(dims), 1))(*[c_uint32(int(d)) for d in dims])
         return Term(fn(c_uint64(int(src)), c_uint32(len(dims)), arr))
@@ -366,8 +324,8 @@ class Thvm:
         return self._move(_uop_reshape, src, dims)
 
     def broadcast2(self, a: Term, sa, b: Term, sb):
-        """Broadcast a (shape sa) and b (shape sb) to one shape (uop_broadcast2):
-        (a', b', shape), or None when an axis is neither equal nor 1."""
+        """(a', b', shape): a (shape sa) and b (shape sb) broadcast to one shape
+        (uop_broadcast2), or None when an axis is neither equal nor 1."""
         ab = (c_uint64 * 2)(int(a), int(b))
         arr_a = (c_uint32 * max(len(sa), 1))(*[int(d) for d in sa])
         arr_b = (c_uint32 * max(len(sb), 1))(*[int(d) for d in sb])
@@ -397,7 +355,6 @@ class Thvm:
     def flip(self, src: Term, axes_bitmask: int) -> Term:
         return Term(_uop_flip(c_uint64(int(src)), c_uint32(int(axes_bitmask))))
 
-    # ---- autodiff (thvm's real uop_grad chain-rule rewrite) ----
     def grad(self, y: Term, gy: Term) -> Term:
         return Term(_grad(c_uint64(int(y)), c_uint64(int(gy))))
 
@@ -408,12 +365,10 @@ class Thvm:
     def fwd(self, y: Term, gy: Term) -> Term:
         return Term(_fwd(c_uint64(int(y)), c_uint64(int(gy))))
 
-    # ---- reduce to normal form + dispatch ----
     def wnf(self, t: Term) -> Term:
         return Term(_wnf(c_uint64(int(t))))
 
     def realize(self, t: Term) -> Term:
-        """Drive wnf -> materialize -> kernelize -> schedule -> dispatch."""
         r = _realize(c_uint64(int(t)))
         if r == 0 and _realize_error():
             raise RuntimeError(_realize_error().decode())
@@ -433,10 +388,8 @@ class Thvm:
         return [Term(arr[len(live) + j]) for j in range(len(held))]
 
     def realize_many(self, terms: "list[Term]") -> "list[Term]":
-        """Realize several terms in ONE scheduler pass (tinygrad
-        `loss.realize(*sched)`).  Returns the resolved terms in order.
-        Raises RuntimeError when the terms' assigns form a cycle (tinygrad
-        schedule/__init__.py:82)."""
+        """Realizes `terms` in one pass (tinygrad Tensor.realize(*lst)); RuntimeError
+        when that fails, as on an assign cycle (tinygrad schedule/__init__.py:82)."""
         n = len(terms)
         if n == 0:
             return []
@@ -445,7 +398,6 @@ class Thvm:
             raise RuntimeError(_realize_error().decode())
         return self._collect([Term(arr[i]) for i in range(n)])
 
-    # ---- live-tensor pinning + buffer reclaim ----
     def pin_set(self, handle: int, t: Term) -> None:
         _pin_set(c_uint64(handle), c_uint64(int(t)))
 
@@ -453,26 +405,21 @@ class Thvm:
         _pin_drop(c_uint64(handle))
 
     def reclaim(self) -> None:
-        """Free every backend buffer that no live Tensor (lazy or realized),
-        pin or JIT capture can read: tinygrad frees a Buffer when its last
-        reference dies (device.py:133-134), thvm finds the dead ones by
-        tracing from every live Tensor's term (py_reclaim).  Only call it
-        where every term the caller still needs is held by a live Tensor."""
+        """Frees each CPU or CUDA buffer no live Tensor, pin or JIT capture reaches
+        (py_reclaim): safe only where live Tensors hold every term still needed."""
         live = list(Thvm.live_terms)
         arr = (c_uint64 * max(len(live), 1))(*[int(x.term) for x in live])
         _reclaim(arr, c_uint32(len(live)))
 
     def reclaim_if_due(self, force: bool = False) -> None:
-        """reclaim() once resident buffer bytes outgrew the last reclaim's
-        survivors (py_reclaim_due); `force` reclaims after any growth."""
+        """reclaim() once resident bytes outgrew the last reclaim's survivors
+        (py_reclaim_due); `force` reclaims after any growth."""
         if _reclaim_due(c_int32(1 if force else 0)):
             self.reclaim()
 
     def buf_live_count(self) -> int:
-        """Backend buffers currently holding a tensor's storage."""
         return int(_buf_live_count())
 
-    # ---- JIT capture / replay (TinyJit) ----
     def jit_begin(self) -> int:       return int(_jit_begin())
     def jit_end(self, roots=()) -> None:
         n = len(roots)
@@ -488,7 +435,6 @@ class Thvm:
         return int(_jit_replay_with_inputs(c_uint32(s), arr, c_uint32(n)))
     def jit_drop(self, s: int) -> None: _jit_drop(c_uint32(s))
 
-    # ---- introspection (Phase-4 cross-check surface) ----
     def tens_count(self) -> int:
         return int(_tens_count())
 
@@ -513,19 +459,15 @@ class Thvm:
     def cg_profile_dump(self, top_n: int = 20) -> None:
         _cg_profile_dump(c_uint32(top_n))
 
-    # ---- grad-leaf mark (INTERNAL; driven by backward(), not user-facing) ----
     def ten_set_grad_leaf(self, t: Term, on: bool) -> bool:
-        """Mark/unmark a TEN leaf for the grad-accumulation walk.  Set
-        transiently by Tensor.backward() over the in-scope float leaves;
-        never exposed on the Tensor surface (tinygrad has no
-        requires_grad)."""
+        """Marks or unmarks leaf `t` for the single walk's .grad accumulation;
+        backward() marks its leaves through uop_backward instead."""
         return bool(_ten_set_grad_leaf(c_uint64(int(t)),
                                        c_int32(1 if on else 0)))
 
     def uop_leaf_tids(self, root: Term) -> "list[int]":
-        """Distinct TAG_TEN leaf tids reachable from `root` -- the
-        in-scope-leaf set backward() auto-marks (tinygrad's all_tensors
-        in-scope filter over thvm's term graph)."""
+        """The distinct TAG_TEN tids reachable from `root`, backward()'s in-scope
+        leaves (tinygrad tensor.py:487-488) before its live-float filter."""
         cap = max(1, int(_tens_count()))   # every leaf is a distinct tid
         buf = (c_uint32 * cap)()
         n = int(_uop_leaf_tids(c_uint64(int(root)), buf, c_uint32(cap)))
@@ -535,10 +477,8 @@ class Thvm:
         return int(_ten_get_buf_id(c_uint64(int(t))))
 
     def backward(self, y: Term, gy: Term, tids) -> "tuple[list[int], list[bool], str | None]":
-        """Tensor.backward's leaf protocol in C (uop_backward): mark the leaves
-        `tids`, fire the chain rule on y seeded by gy, unmark them.  Returns
-        each leaf's grad term, whether it held one before, and the chain rule's
-        error (every grad rolled back) or None."""
+        """uop_backward: each leaf's grad term, whether it held one before, and the
+        chain rule's error (every grad rolled back) or None."""
         n = len(tids)
         arr = (c_uint32 * max(n, 1))(*tids)
         grads = (c_uint64 * max(n, 1))()
@@ -554,29 +494,22 @@ class Thvm:
         return None if msg is None else msg.decode()
 
     def ten_get_grad(self, t: Term) -> int:
-        """Read TENS[tid].grad (the chain-rule accumulator).
-        Returns 0 if no grad has been accumulated yet."""
+        """The lazy TENS[tid].grad term, 0 when nothing has accumulated."""
         return int(_ten_get_grad(c_uint64(int(t))))
 
     def ten_clear_grad(self, t: Term) -> bool:
-        """Zero out TENS[tid].grad (PyTorch's zero_grad analogue)."""
         return bool(_ten_clear_grad(c_uint64(int(t))))
 
     def ten_set_grad(self, t: Term, g: int) -> bool:
-        """Set TENS[tid].grad to the lazy term `g` (0 clears it)."""
         return bool(_ten_set_grad(c_uint64(int(t)), c_uint64(int(g))))
 
-    # ---------------- term inspection ----------------
     def term_tag(self, t: Term) -> int: return int(_term_tag(c_uint64(int(t))))
     def term_val(self, t: Term) -> int: return int(_term_val(c_uint64(int(t))))
 
-    # ---------------- C kernels (the lowered cross-validator) ----------------
     def uop_dag_apply_kopt(self, root: Term,
                            opt: tuple[int, int, int]) -> Term | None:
-        """DAG-only variant: apply a KOpt to a free-standing root term,
-        without going through a KernelEntry slot.  Returns the new root
-        (or None on bail).
-        """
+        """`root` with the KOpt (op, axis, arg) applied, outside any KernelEntry;
+        None when the opt bails."""
         op, axis, arg = opt
         new_root = _uop_dag_apply_kopt(int(root), int(op), int(axis), int(arg))
         if new_root == 0:
@@ -584,9 +517,8 @@ class Thvm:
         return Term(int(new_root))
 
     def run_kernel_c(self, root: Term, out, ins) -> int:
-        """Run `root` once on contiguous numpy buffers through the CPU JIT's
-        renderer, compiler and kernel contract: 0, or -1 when the renderer
-        declines, -2 when the compile or load fails."""
+        """Runs `root` once on contiguous numpy arrays (cpu_jit_run_root): 0, or -1 when
+        the renderer declines, -2 when the compile or load fails."""
         n_in = max(1, len(ins))
         ptrs = (c_void_p * n_in)(*[a.ctypes.data for a in ins])
         numels = (c_uint32 * n_in)(*[a.size for a in ins])

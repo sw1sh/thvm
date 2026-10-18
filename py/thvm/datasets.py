@@ -1,11 +1,5 @@
-"""thvm.nn.datasets -- mnist(), mirroring tinygrad.nn.datasets.mnist.
-
-Fetches the IDX files through helpers.fetch (tinygrad's download cache),
-parses them with numpy, and returns thvm Tensors shaped exactly like
-tinygrad's loader: images (N, 1, 28, 28) and integer labels (N,).  Images
-are float32 of the raw 0-255 values (BatchNorm handles the scale),
-matching tinygrad's uint8-then-upcast pipeline.
-"""
+"""tinygrad's nn.datasets.mnist (nn/datasets.py:4-8): images (N, 1, 28, 28) and labels
+(N,), here float32 of the raw 0-255 values and int32, as py/thvm has no uint8."""
 from __future__ import annotations
 
 import gzip

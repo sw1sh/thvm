@@ -1,10 +1,5 @@
-"""thvm's `llm.gguf` surface.
-
-gpt2.py imports `gguf_load` for its `--model_size gpt2_gguf_*` quantized
-path.  thvm's bridge has no GGUF dequant kernels yet, so loading a GGUF
-checkpoint is unsupported; the default `GPT2.build` (HuggingFace
-pytorch_model.bin via torch_load) path is fully supported.  Re-exported
-under the dotted `thvm.llm.gguf` name in __init__.py."""
+"""`thvm.llm.gguf`: gpt2 imports gguf_load for its gpt2_gguf_* sizes, but thvm has no
+GGUF dequant kernels, so it raises."""
 
 
 def gguf_load(tensor):

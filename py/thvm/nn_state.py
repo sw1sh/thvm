@@ -1,32 +1,6 @@
-"""thvm's `nn.state` surface: safetensors, torch_load, state dicts.
-
-Faithful to tinygrad/nn/state.py's API:
-  - safe_save(tensors, fn, metadata=None) / safe_load(fn) -> dict[str, Tensor]
-  - safe_load_metadata(fn) -> (file bytes, data_start, header)
-  - torch_load(path) -> dict[str, Tensor]   (reads a PyTorch .bin/.pth)
-  - get_state_dict(obj) -> dict[str, Tensor]
-  - load_state_dict(model, state_dict) -> list[Tensor]
-
-safetensors files are byte-identical to tinygrad's safe_save.  thvm has no
-disk device, so safe_load_metadata returns a read-only numpy memmap of the
-file where tinygrad returns a disk Tensor.  py/thvm holds only float32 and
-int32 tensors, so safe_load narrows other dtypes the way torch_load does:
-float formats to float32 and integer formats to int32.
-
-torch_load reads BOTH PyTorch save formats directly into numpy (no
-torch / safetensors dependency):
-
-  * zip format (newer torch.save): a ZIP whose `*/data.pkl` holds the
-    state-dict pickle, with storages persisted as `*/data/<id>` members.
-  * legacy format (older torch.save, e.g. HF gpt2): a raw pickle stream
-    `magic, protocol, sys_info, <main pickle>, <storage-id list>,
-    <storage bytes>`; we two-pass it exactly like tinygrad
-    (torch_load else-branch): first pass populates per-storage byte
-    lengths via the _rebuild_tensor_v2 reduce, then the storage bytes are
-    sliced in id order and the main pickle is replayed.
-
-Re-exported under the dotted `thvm.nn.state` name in thvm/__init__.py.
-"""
+"""tinygrad's nn.state (nn/state.py) as `thvm.nn.state`: safetensors, torch_load and
+state dicts.  py/thvm holds float32 and int32 tensors only, so a load converts a float
+format to float32 and an integer one to int32."""
 from __future__ import annotations
 
 import io
@@ -55,8 +29,8 @@ _TORCH_DTYPES = {
 }
 
 
-# safetensors dtype tag -> numpy storage dtype; BF16 and the fp8 tags have
-# no numpy dtype and are widened by _safe_array (tinygrad nn/state.py:33-35).
+# safetensors dtype tag -> numpy storage dtype (tinygrad nn/state.py:33-35); BF16 has
+# no numpy dtype and _safe_array widens it, the fp8 tags are unsupported.
 _SAFE_NP = {
     "BOOL": np.bool_, "I8": np.int8, "U8": np.uint8, "I16": np.int16,
     "U16": np.uint16, "I32": np.int32, "U32": np.uint32, "I64": np.int64,
@@ -77,8 +51,8 @@ def _safe_array(raw, tag: str, shape) -> np.ndarray:
 
 
 def safe_load_metadata(fn):
-    """Loads a .safetensors file, returning the file bytes, the data start
-    position, and the header (tinygrad nn/state.py:44-50)."""
+    """The file as a read-only numpy memmap (tinygrad's is a disk Tensor), the data
+    start position and the header (tinygrad nn/state.py:44-49)."""
     t = np.memmap(pathlib.Path(fn), dtype=np.uint8, mode="r")
     data_start = int.from_bytes(t[0:8].tobytes(), "little") + 8
     return t, data_start, json.loads(t[8:data_start].tobytes())
@@ -99,10 +73,8 @@ def safe_load(fn) -> dict[str, "Tensor"]:
 
 
 def safe_save(tensors: dict[str, "Tensor"], fn, metadata: dict | None = None):
-    """Saves a `state_dict` to disk in a .safetensors file with optional
-    metadata (tinygrad nn/state.py:64-86): a little-endian u64 header
-    length, the JSON header padded with spaces to a multiple of 8, then the
-    raw tensor bytes in dict order."""
+    """Saves a `state_dict` as a .safetensors file, byte-identical to tinygrad's
+    (nn/state.py:64-85)."""
     headers, offset, blobs = {}, 0, []
     if metadata:
         headers["__metadata__"] = metadata
@@ -144,10 +116,10 @@ def _bytes_to_array(buf: bytes, np_dtype, is_bf16, size):
 
 
 def torch_load(path) -> dict[str, "Tensor"]:
-    """Load a PyTorch .bin/.pth into a {name: thvm Tensor} state dict."""
+    """The state dict of a PyTorch .bin/.pth in the zip or the legacy pickle format
+    (tinygrad nn/state.py:206-299), read with numpy alone."""
     path = str(path)
 
-    # ---- shared pickle machinery (storage ids -> raw byte buffers) ----
     storage_source: dict = {}     # storage key -> bytes
     lens: dict = {}               # storage key -> byte length
 
@@ -195,7 +167,6 @@ def torch_load(path) -> dict[str, "Tensor"]:
                 return _Dummy
 
         def persistent_load(self, pid):
-            # legacy pid is the storage key itself (or a tuple whose [2] is)
             if isinstance(pid, (tuple, list)):
                 return pid
             return pid
@@ -215,7 +186,6 @@ def torch_load(path) -> dict[str, "Tensor"]:
     fobj = io.BytesIO(raw)
 
     if zipfile.is_zipfile(fobj):
-        # ---- zip format -----------------------------------------------
         with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
             names = zf.namelist()
             pkl_name = next(n for n in names if n.endswith("data.pkl"))
@@ -225,16 +195,13 @@ def torch_load(path) -> dict[str, "Tensor"]:
                     storage_source[n.split("/")[-1]] = zf.read(n)
             pkl_bytes = zf.read(pkl_name)
 
-        # legacy reduce keys storages by str(key); zip keys by the same id
-        # string in persistent_id -- patch persistent_load to map a zip pid
-        # tuple (typename, storage_tag, key, ...) to its key.
         class _ZipPickle(_TorchPickle):
             def persistent_load(self, pid):
                 return pid  # pid is the (typename, tag, key, loc, numel) tuple
         d = _ZipPickle(io.BytesIO(pkl_bytes)).load()
         return _to_tensors(d)
 
-    # ---- legacy format (magic, proto, sys_info, pickle, ids, data) ----
+    # The legacy format, read twice as tinygrad does (nn/state.py:291-299).
     fobj.seek(0)
     pkl = _TorchPickle(fobj)
     pkl.load()                 # magic number
@@ -268,9 +235,8 @@ def get_parameters(obj) -> list["Tensor"]:
 def load_state_dict(model, state_dict: dict[str, "Tensor"],
                     strict: bool = True, verbose: bool = True,
                     consume: bool = False, realize: bool = True):
-    """Copy `state_dict` into `model`'s parameters by dotted name; returns
-    the loaded Tensors.  Mirrors tinygrad's load_state_dict (replace +
-    realize), so the model's leaf buffers carry the checkpoint weights."""
+    """tinygrad's load_state_dict (nn/state.py:128-165): each model Tensor replaced by
+    its state_dict entry and realized; returns the loaded Tensors."""
     model_sd = get_state_dict(model)
     ret = []
     for k, v in model_sd.items():

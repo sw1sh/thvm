@@ -1,8 +1,4 @@
-"""tinygrad-compatible dtypes namespace.
-
-Phase 2A: float32 + int32 only.  Each DType knows its byte size, the
-numpy dtype for host I/O, and the thvm dtype-id the bridge uses.
-"""
+"""tinygrad's dtypes, float32 and int32 only."""
 from __future__ import annotations
 
 import numpy as np
@@ -30,11 +26,9 @@ class DType:
 
 
 class dtypes:
-    """tinygrad-compatible namespace: dtypes.float, dtypes.int, ..."""
     float32 = DType("float32", 4, np.float32, _K.FP32)
     int32   = DType("int32",   4, np.int32,   _K.INT32)
 
-    # tinygrad-canonical aliases
     float = float32
     int   = int32
     default_float = float32

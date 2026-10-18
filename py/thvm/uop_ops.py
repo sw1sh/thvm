@@ -1,10 +1,5 @@
-"""thvm's `uop.ops` surface.
-
-tinygrad exposes a `UOp` symbolic-graph type here; on the thvm Tensor
-surface a bound symbolic Variable is a `BoundVar` (an int subclass with
-`.val`), which doubles as the `UOp` gpt2 checks for the single-token
-decode path.  Re-exported under the dotted `thvm.uop.ops` name in
-__init__.py."""
+"""`thvm.uop.ops`: tinygrad's UOp is BoundVar here, the bound Variable gpt2 tests for
+its single-token decode."""
 from ._misc import UOp
 
 __all__ = ["UOp"]
