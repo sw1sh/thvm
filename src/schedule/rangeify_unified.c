@@ -1,43 +1,29 @@
-// schedule/rangeify_unified.c
+// schedule/rangeify_unified.c - tinygrad's run_rangeify
+// (schedule/indexing.py:189-320) and pm_apply_rangeify (indexing.py:136-147).
 //
-// 1-to-1 port of tinygrad/schedule/indexing.py:run_rangeify (lines
-// 148-269) + pm_apply_rangeify (lines 101-110).
+// One reverse-topological walk assigns the nodes their per-axis RANGE
+// expressions and decides where to realize (consumer divergence, ending ranges,
+// REDUCE axes).  pm_apply_rangeify, a PatternMatcher rewrite in tinygrad, is a
+// walk here: it fills a substitution table (RU_SUBST) with each node's
+// rewritten value and puts a UOP_BUFFERIZE on the main heap at every realize
+// boundary.
 //
-// The unified pass is the only rangeify path; it replaces the
-// named-rule bufferize_classify + materialize.c visit() + kernel_lift
-// trio with one imperative reverse-topological walk that:
-//   - assigns per-axis RANGE expressions to every node in the DAG
-//   - decides realize boundaries by looking at the consumer ranges
-//     (consumer-divergence, ending-ranges, REDUCE/EXPAND injection)
-//   - emits a rewrite map that pm_apply_rangeify uses to replace each
-//     node's src with the appropriate BUFFERIZE/INDEX expression
-//
-// THVM-SIDE DATA STRUCTURES vs TINYGRAD:
-//
-//   tinygrad                            | thvm
-//   ------------------------------------+-------------------------------
-//   tsink.toposort(gate_kernel_sink)    | BUFFERIZE_NODES (post bufferize_walk_rec)
-//   consumer_map: Dict[UOp, List[UOp]]  | CMAP_LL + cmap_head
-//   range_map: Dict[UOp, (in,out)]      | RU_RANGE_MAP[node_idx]
-//   realize_map: Dict[UOp, None|list]   | RU_REALIZE_MAP[node_idx]
-//   ending_ranges: dict[UOp, List]      | RU_ENDING_RANGES[node_idx]
-//
-// pm_apply_rangeify in tinygrad is one PatternMatcher rewrite; in thvm
-// we run an equivalent imperative walk that updates a substitution
-// table (RU_SUBST[node_idx]) and writes UOP_BUFFERIZE Terms onto the
-// main heap at realize boundaries.
-//
-// Mirror source: tinygrad/schedule/indexing.py:148-269.
+//   tinygrad                          thvm
+//   tsink.toposort(gate_kernel_sink)  RU_TOPO_ORDER over BUFFERIZE_NODES
+//   consumer_map                      CMAP_LL + cmap_head
+//   range_map[x] = (in, out)          RU_RANGE_MAP[node_idx]
+//   realize_map                       RU_REALIZE_MAP[node_idx]
+//   ending_ranges                     RU_ENDING_RANGES[node_idx]
 
 #define RU_MAX_NODES  BUFFERIZE_NODES_CAP
 #define RU_MAX_AXES   MAX_DIM
 
 #define RU_MAX_ENDING (RU_MAX_NODES * 4u)
 
-// Per-node range map. Out_rngs[i] is the per-axis index expression a
-// consumer threads into this node; in_rngs[i] is the equivalent at this
-// node's source (after movement op swizzle / REDUCE axis injection).
-// Both store Term (TAG_NUM 0 = "no range" / unfilled).
+// A node's ranges, tinygrad's range_map[x] = (in, out): out_rngs[i] is the
+// index expression its consumers read output axis i at, in_rngs[i] the one its
+// source is read at (after a movement swizzle or REDUCE axis injection).
+// Unfilled entries are 0.
 typedef struct {
   Term out_rngs[RU_MAX_AXES];
   Term in_rngs [RU_MAX_AXES];
@@ -46,34 +32,28 @@ typedef struct {
   u8   has_ranges;        // 1 once out_rngs has been assigned
 } RuRangeMap;
 
-// Per-node realize state. Mirrors tinygrad's realize_map[x]:
-//   realized_full == 0 && realized_partial == 0 : not realized
-//   realized_full == 1                          : fully realized (all axes)
-//   realized_partial == 1                       : partial-realize (mask)
+// tinygrad's realize_map[x]: not realized, realized_full (every axis), or
+// realized_partial (the axes in axes_mask).
 typedef struct {
   u8  realized_full;
   u8  realized_partial;
-  u8  axes_mask;          // bit i set iff axis i is in realize list (partial mode)
+  u8  axes_mask;          // bit i set iff axis i is realized
   u8  n_realized_axes;
-  u8  pinned;             // limit_bufs forced this boundary; remove_bufferize must NOT un-realize it
+  u8  pinned;             // ru_limit_bufs_node split; remove_bufferize keeps it
 } RuRealizeEntry;
 
-// Per-node ending-ranges list. We store up to RU_ENDING_PER_NODE entries
-// (axis_ids of the RANGE leaves that have been "closed" by an EXPAND
-// in this node's consumer chain).
+// tinygrad's ending_ranges[x]: axis ids of the RANGE leaves an EXPAND in the
+// consumer chain ended.  Only emptiness decides; the ids serve the dedup.
 #define RU_ENDING_PER_NODE 16
 typedef struct {
   u32 axis_ids[RU_ENDING_PER_NODE];
   u8  n;
 } RuEndingRanges;
 
-// Per-node reduce-range vector.  Mirrors tinygrad's
-// `UOp(Ops.REDUCE, dtype, src=(value,)+tuple(new_ranges), arg=(kind, ()))`
-// at tinygrad/schedule/indexing.py:90-96 (convert_reduce_to_reduce_with_ranges).
-// Filled by run_rangeify_unified when it visits a UOP_REDUCE node; read
-// by materialize.c to enumerate the reduce-axes the emit walker needs to
-// iterate. n == 0 for non-REDUCE nodes or for REDUCE nodes with
-// all-extent-1 reduce axes.
+// The fresh REDUCE ranges of a UOP_REDUCE node, which tinygrad's
+// convert_reduce_to_reduce_with_ranges puts in src[1:] (indexing.py:107-113).
+// An extent-1 reduce axis is CONST(0) and not listed, so n == 0 for a
+// non-REDUCE or an all-extent-1 REDUCE.
 typedef struct {
   Term ranges[MAX_DIM];
   u8   n;
@@ -89,16 +69,10 @@ static RuEndingRanges  RU_ENDING_RANGES[RU_MAX_NODES];
 static RuReduceRanges  RU_REDUCE_RANGES[RU_MAX_NODES];
 static u32             RU_RANGE_IDX_COUNTER;  // monotonic axis_id source
 
-// Reverse-topological order (consumers before producers).  Mirror
-// source: tinygrad/uop/ops.py:consumer_map_from_toposort +
-// `reversed(tsink.toposort(gate_kernel_sink))` at
-// schedule/indexing.py:161.  bufferize_walk_rec's DFS PRE-order does
-// NOT strictly satisfy this on DAGs with shared subexpressions: a
-// shared producer reachable via the LAST-visited consumer path lands
-// in BUFFERIZE_NODES AFTER that consumer.  This caused softmax /
-// attention regressions because EXP's consumer-divergence wasn't
-// observable until ALL its consumers' range_maps were filled.  We
-// compute a proper Kahn's-algorithm order on BUFFERIZE_NODES below.
+// Consumers before producers: tinygrad's reversed(tsink.toposort())
+// (indexing.py:199, 207).  bufferize_walk_rec's DFS pre-order puts a shared
+// producer under its first-visited consumer, so it can precede a later
+// consumer; ru_compute_topo_order builds a Kahn order instead.
 static u32             RU_TOPO_ORDER[RU_MAX_NODES];
 static u32             RU_TOPO_ORDER_LEN;
 static u32             RU_TOPO_REMAINING[RU_MAX_NODES];  // unprocessed-consumer counter
@@ -120,19 +94,12 @@ fn int rangeify_unified_is_realized(u32 node_idx) {
       || RU_REALIZE_MAP[node_idx].realized_partial;
 }
 
-// THVM_FUSE_MATMUL_INPUT (default OFF): elementwise-producer-into-matmul-load
-// fusion.  tinygrad fuses a single-consumer elementwise chain (e.g. the FLUX
-// modulation ln*(sc+1)+sh, a SiLU, a cast) INTO the consuming matmul's reduce
-// rather than realizing it to its own buffer (schedule/indexing.py:198-200 --
-// "if this op only has one consumer it inherits the consumer's ranges", and
-// schedule/rangeify.py:40-46 pm_syntactic_sugar pushes the INDEX through the
-// elementwise so its compute is inlined into the reduce loop).  thvm's GEMM
-// dispatch needs buffer operands, so rb_feeds_matmul_reduce normally KEEPS such
-// a producer realized (thvm's ALWAYS_CONTIGUOUS equivalent).  With this flag,
-// a SINGLE-CONSUMER elementwise feeding a SINGLE matmul reduce is un-realized;
-// its value subtree splices into the matmul MUL operand, and the TC tiled
-// emitter computes it inline at the A-staging load (render_uop.c).  Gated OFF
-// so the default codegen is byte-identical -- FLUX opts in.
+// THVM_FUSE_MATMUL_INPUT (default off): inline a single-consumer elementwise
+// producer into the matmul that reads it, as tinygrad inlines any
+// single-consumer op (indexing.py:242-244).  Otherwise rb_feeds_matmul_reduce
+// keeps such a producer realized, since thvm's GEMM paths need buffer operands;
+// with the flag the tiled TC emitter computes it at its A-staging load
+// (render_uop.c).
 fn int ru_fuse_matmul_input_on(void) {
   static int known = 0, on = 0;
   if (!known) {
@@ -143,27 +110,13 @@ fn int ru_fuse_matmul_input_on(void) {
   return on;
 }
 
-// THVM_FUSE_MATMUL_EPILOGUE (default OFF): matmul-output-into-elementwise
-// fusion -- the SIBLING of THVM_FUSE_MATMUL_INPUT (above), on the consumer
-// side.  tinygrad inlines a single-consumer reduce into its consumer (a reduce
-// with one consumer inherits that consumer's ranges -- schedule/indexing.py:198-
-// 200 -- so the reduce/matmul's store IS the consumer elementwise group's
-// store).  thvm normally KEEPS a matmul reduce realized (its REDUCE seed +
-// rb_feeds_matmul_reduce treat it as a GEMM-operand boundary).  With this flag,
-// an OPT_TC matmul reduce whose ONLY consumer is an elementwise chain is
-// un-realized; its REDUCE subtree splices into that consumer's store value, so
-// the store value becomes ELEMENTWISE(...REDUCE...) instead of reading a matmul
-// buffer.  The codegen-side epilogue (render_uop.c rmu_detect_matmul_tc /
-// rmu_emit_matmul_tc) then walks through the elementwise wrapper and applies the
-// elementwise per output element at the matmul's C store -- collapsing the two
-// kernels into one.  When the inlined matmul still classifies as a clean 2-range
-// GEMM (recognise_tc.c uop_recognise_tc[_parallel] epilogue path) it stays on
-// the simdgroup-matrix TC path with a bf16 C-staging epilogue; when the consumer
-// broadcast structure splits its M/N output across multiple range axes the TC
-// 2-range classifier declines and the fused kernel runs the matmul via the
-// generic parallel accumulator (still one kernel, GPU-parallel over the output,
-// bit-exact -- but no tensor cores).  Gated OFF so the default codegen is
-// byte-identical; FLUX opts in.
+// THVM_FUSE_MATMUL_EPILOGUE (default off), the consumer-side sibling: an OPT_TC
+// matmul reduce whose only consumer is an elementwise chain is un-realized, so
+// its REDUCE inlines into that chain's store value and the codegen epilogue
+// (rmu_detect_matmul_tc, rmu_emit_matmul_tc) applies the chain at the matmul's
+// C store: one kernel instead of two.  If the fused matmul does not classify as
+// a 2-range GEMM (uop_recognise_tc), it runs on the generic parallel
+// accumulator: still one kernel, without tensor cores.
 fn int ru_fuse_epilogue_on(void) {
   static int known = 0, on = 0;
   if (!known) {
@@ -174,44 +127,26 @@ fn int ru_fuse_epilogue_on(void) {
   return on;
 }
 
-// The fused-A inline is emittable ONLY by the Metal register-blocked tiled
-// matmul (render_uop.c rmu_emit_matmul_tc_tiled), which reconstructs the
-// producer's (m, k) directly from the threadgroup tile origin at its A-staging
-// load -- so it never relies on the producer's spliced RANGE leaves.  Every
-// other path (the CPU/CUDA generic accumulator) recomputes the producer subtree
-// per element, where the producer feeds the matmul through the matmul-lowering
-// reshape(+unit)+expand(broadcast N): a rank-changing movement the POSITIONAL
-// per-consumer re-index (ru_build_axis_subst) cannot bind, so the producer's
-// own M/K ranges leak as extra output loops (a catastrophic |M|*|N|*|M|*|K|*|K|
-// nest).  rmu_emit_matmul_tc already bails the fused-A on non-Metal
-// (render_uop.c, `a_val != 0 && RMU_TARGET != CG_TARGET_METAL`), so keep the
-// rangeify un-realize decision consistent with what codegen can emit: only
-// un-realize the producer when the realize routes to Metal.  On CPU/CUDA the
-// producer stays a realized buffer operand (correct, BLAS-eligible).
+// Only the Metal tiled matmul (rmu_emit_matmul_tc_tiled) can emit a fused A: it
+// rebuilds the producer's (m, k) from the tile origin.  Elsewhere the
+// producer's own M/K ranges, behind the matmul's reshape + expand, would leak
+// as extra output loops (ru_build_axis_subst binds positionally), and
+// rmu_emit_matmul_tc declines a fused A off Metal, so there the producer stays
+// a realized operand.
 fn int ru_fuse_matmul_input_target_ok(void) {
   return CURRENT_CTX != NULL && CURRENT_CTX->default_device == THVM_DEV_METAL;
 }
 
-// Per-device kernel-buffer cap: tinygrad's DEVICE_MAX_BUFS = {"WEBGPU": 8}
-// (schedule/rangeify.py:170).  #18322 took METAL out of that table because
-// tinygrad's Metal kernels now take one `constant args_t& args [[buffer(0)]]`
-// struct of buffer pointers (renderer/cstyle.py:365, 393-396); its CPU entry
-// was already stale.  CPU and CUDA return 0 here, as on master.
-//
-// Metal keeps 31 because thvm's own Metal ABI still binds one [[buffer(n)]]
-// per buffer: the output at 0 and input i at 1+i (cg_render_uop_kernel,
-// cg_render_uop_kernel_root, and metal_tile_jit_encode_on in
-// backend/metal/_.m), and metal_graph_build's
-// ICB sets setMaxKernelBufferBindCount:31.  An index past 30 does not compile
-// ("'buffer' attribute parameter is out of bounds"), so this is a
-// correctness cap, not a tunable.  Known gap: metal_tile_jit_encode_on binds
-// the conv-cfg bytes and each symbolic variable's value after the inputs, in
-// the same 31 slots, and ru_limit_bufs_node does not count them.
-//
-// THVM_MAX_KERNEL_BUFFERS is tinygrad's MAX_KERNEL_BUFFERS (helpers.py:252,
-// default 0): a positive value overrides the table on every device.
-//
-// Returns 0 for "no limit", which skips the split.
+// The kernel buffer cap, 0 for none.  tinygrad's DEVICE_MAX_BUFS lists only
+// WEBGPU (rangeify.py:170): its Metal kernels take one argument-buffer struct
+// (renderer/cstyle.py:365, 393-396).  thvm's Metal ABI binds one [[buffer(n)]]
+// per buffer (the output at 0, input i at 1+i: cg_render_uop_kernel,
+// cg_render_uop_kernel_root, metal_tile_jit_encode_on in backend/metal/_.m),
+// and metal_graph_build's ICB allows 31 bindings, so an index past 30 does not
+// compile: a correctness cap.  Known gap: metal_tile_jit_encode_on also binds
+// the conv-cfg bytes and each symbolic variable after the inputs, which
+// ru_limit_bufs_node does not count.  THVM_MAX_KERNEL_BUFFERS > 0 overrides the
+// cap on every device, as tinygrad's MAX_KERNEL_BUFFERS does (helpers.py:252).
 static u32 ru_device_max_bufs(void) {
   char const *e = getenv("THVM_MAX_KERNEL_BUFFERS");
   if (e != NULL) {
@@ -219,9 +154,8 @@ static u32 ru_device_max_bufs(void) {
     if (v > 0) {
       return (u32)v;
     }
-    // tinygrad reads 0 as "use the table", which lists only WEBGPU, so on
-    // every thvm device master is uncapped at 0 as well.  Only an unset
-    // variable keeps thvm's Metal ABI cap.
+    // tinygrad reads 0 as "use the table", which has no thvm device, so 0 means
+    // no cap; only an unset variable keeps the Metal cap.
     return 0;
   }
   if (CURRENT_CTX == NULL) {
@@ -233,94 +167,68 @@ static u32 ru_device_max_bufs(void) {
   }
 }
 
-// Whether a bufferize-classify realized node is seeded as a structural
-// boundary up front (vs left for the walk to derive): tinygrad's structural
-// boundaries (ROOT == STORE, indexing.py:49; one reduce per kernel) and the
-// correctness realizes below.  The walk derives the rest, as tinygrad's
-// schedule/indexing.py does.
+// Which of bufferize_classify's realize marks seed the walk: the root
+// (tinygrad's STORE, indexing.py:49), its REDUCE marks, and the correctness
+// realizes below.  The walk derives the rest.
 fn int ru_seed_boundary_holds(u32 reasons) {
   if (reasons & BUFFERIZE_REASON_ROOT) return 1;
-  // Honor the maxpool-input pre-realize (ROUTE A): a REDUCE_MAX's activation
-  // must be a materialized buffer so the forward window-max and the backward
-  // argmax mask read bit-exact ties (else /count -> RECIP(0) NaN).  This is
-  // a correctness realize, not a heuristic.
+  // A REDUCE_MAX's input must be a buffer so the forward window max and the
+  // backward argmax mask see the same ties (else /count reads RECIP(0)).
   if (reasons & BUFFERIZE_REASON_MAXPOOL_INPUT) return 1;
-  // Honor the maxpool backward mask pre-realize (ROUTE A, part 2): the argmax
-  // mask CMPEQ + its mask_norm must materialize so the /count tie-split does
-  // not fuse into the N=1 conv-weight backward reduce (where the nested-
-  // reduce-iter count mis-reads over the size-1 batch axis -> zero grad).
-  // Also a correctness realize.
+  // The argmax mask and its normalizer must materialize, or the /count
+  // tie-split fuses into the N=1 conv-weight backward reduce, which misreads
+  // the count over the size-1 batch axis (a zero grad).
   if (reasons & BUFFERIZE_REASON_MAXPOOL_MASK) return 1;
   // An indexed op's storage operand: only a buffer or a view of a leaf is
   // addressable by the op's computed address (ru_index_leaf).  A SCATTER
   // is always its own read-modify-write kernel (ru_lower_scatter).
   if (reasons & BUFFERIZE_REASON_INDEXED_SRC) return 1;
   if (reasons & BUFFERIZE_REASON_SCATTER) return 1;
-  // Seed every REDUCE output as a boundary.  This is faithful to tinygrad
-  // (one reduce per kernel; a REDUCE output always escapes into a buffer)
-  // and is the lever that de-fuses the conv data-grad.  Without it the
-  // ROOT-only walk leaves the FORWARD conv REDUCE un-realized, so the
-  // backward maxpool-grad RECOMPUTES the conv forward inline -- the giant
-  // [8,64,8,8] kid (the `_acc8` conv-forward recompute fused with the
-  // col2im `in4[divmod]` gather, ~28% of the wall) -- to rebuild the
-  // argmax mask, and lowers the data-grad as a per-lane col2im gather.
-  // Seeding the REDUCE realizes the conv forward once; the mask then reads
-  // an affine materialized buffer and the data-grad lowers as a strided
-  // reduce (tinygrad's shape).
+  // A REDUCE bufferize_classify marked is a buffer.  tinygrad realizes a reduce
+  // only where its ranges end or its consumers diverge (indexing.py:245-276);
+  // seeding the marks keeps the conv forward realized once, so the maxpool
+  // backward reads its argmax mask from a buffer instead of recomputing the
+  // conv inline, and the data-grad lowers as a strided reduce rather than a
+  // col2im gather.
   if (reasons & BUFFERIZE_REASON_REDUCE) return 1;
   return 0;
 }
 
-// Is `aid` a REDUCE-range / realized-scope axis anywhere in the last
-// rangeify pass?  Used by materialize.c's would-strand check to mirror the
-// rangeify-side covered-check so a hash-cons-aliased foreign axis in a
-// fusing conv-bwd product's value does not re-trigger materialize-side
-// realization.
+// 1 iff `aid` is a REDUCE range, or a range of a realized node, in the last
+// pass (RU_FUSE_ALL_REDUCE_AIDS).  materialize.c's bufferize_strand_check_deep
+// asks it so a hash-cons-aliased axis from another scope is not stranded, as in
+// pm_apply_rangeify's strand check.
 fn int rangeify_unified_aid_is_fuse_bound(u32 aid) {
   for (u32 g = 0; g < RU_FUSE_ALL_REDUCE_AIDS_N; g++)
     if (RU_FUSE_ALL_REDUCE_AIDS[g] == aid) return 1;
   return 0;
 }
 
-// === Mirror source: tinygrad/uop/ops.py:resolve  ===
-// In tinygrad, `resolve(s != 1)` returns False iff s is structurally 1.
-// We mirror with the static-extent check on a literal.
+// tinygrad's resolve(s != 1) (uop/ops.py:64) is False only for an s that is 1:
+// a symbolic extent is never one.
 static int ru_extent_is_one(u32 extent) {
   return kvar_extent_is_var(extent) ? 0 : (kvar_extent_static(extent) == 1);
 }
 
-// === Mirror source: indexing.py:51-54 IndexingContext.new_range ===
-// `if isinstance(s, UOp) and s.op is Ops.RANGE: return s`
-//   -- already covered by hash-cons via uop_range
-// `if resolve(s != 1)`: build a fresh RANGE; else CONST(0).
+// IndexingContext.new_range (indexing.py:18-21): a fresh RANGE, or CONST(0) for
+// an extent-1 axis.
 static Term ru_new_range(u32 extent, u32 axistype) {
-  // Always bump RU_RANGE_IDX_COUNTER so the axis_id space mirrors
-  // tinygrad's (one axis per output dim, including size-1).
-  // Downstream consumers - kernel_apply_opt's apply_opt_dag_find_range,
-  // tile/codegen axis lookup, etc. - index into this space by
-  // user-facing axis number; collapsing size-1 axes to CONST(0)
-  // without bumping the counter would shift every subsequent axis_id
-  // down by one.
+  // Unlike tinygrad, an extent-1 axis still takes an axis_id, so the ids keep
+  // matching output dim positions, which opts (apply_opt_dag_find_range) and
+  // the tile/codegen axis lookup rely on.
   u32 axis_id = RU_RANGE_IDX_COUNTER++;
   if (ru_extent_is_one(extent)) {
-    // Mirror tinygrad: UOp.const(dtypes.weakint, 0).  The collapsed
-    // CONST(0) still consumes axis_id `axis_id`; the loss of the
-    // RANGE leaf is harmless at the addr-build layer since size-1
-    // axes contribute stride*0 to the address.
+    // tinygrad's UOp.const(0); a size-1 axis adds nothing to an address.
     return uop_const(DT_INT32, 0);
   }
   return uop_range(axis_id, axistype, extent);
 }
 
 // The UOP_RANGE leaf with axis_id `aid` under `t`, or 0 if none.  Does not
-// descend into UOP_BUFFER (its dim cells are TAG_NUM leaves), UOP_BUFFERIZE
-// (an opaque cross-realize boundary), or, with `stop_kernel`, UOP_KERNEL.
-// Exact: an iterative
-// walk that expands each node once, stamped by heap loc, so there is no
-// depth budget.  The budget it replaces answered "absent" past depth 64,
-// and the broadcast-reduce repair then rewrote REDUCE_SUM(body) into
-// body*extent: every reduce over an elementwise chain 63+ deep summed
-// wrong, silently.
+// descend into UOP_BUFFER (its dim cells are TAG_NUM leaves), UOP_BUFFERIZE (an
+// opaque cross-realize boundary), or, with `stop_kernel`, UOP_KERNEL.
+// Iterative and exact, each node expanded once (stamped by heap loc): a false
+// "absent" would let ru_reduce_unparented turn a SUM into body * extent.
 static u32  *RU_AXIS_SEEN      = NULL;
 static u64   RU_AXIS_SEEN_CAP  = 0;
 static u32   RU_AXIS_EPOCH     = 0;
@@ -403,22 +311,20 @@ static Term ru_find_axis_range(Term t, u32 aid, int stop_kernel) {
   return 0;
 }
 
-// Used after ru_rewrite_subtree to detect when a REDUCE's body lost the
-// reduce-axis range (e.g. a CONST broadcast collapsed past the rewrite,
-// leaving the REDUCE iterating an axis that the walker can't measure).
+// 1 iff `t` reads the range with axis_id `aid`: ru_reduce_unparented asks it of
+// a REDUCE body, where a stride-0 broadcast may have collapsed the range.
 static int ru_subtree_uses_axis(Term t, u32 aid) {
   return ru_find_axis_range(t, aid, 0) != 0;
 }
 
-// The extent of the axis-`aid` RANGE leaf under `t`, or 0 if absent.  Used
-// by the THVM_FUSE_MATMUL_INPUT rank-grow remap to match a leaked producer
-// range to the matmul axis (M / K) of equal extent.
+// The extent of the axis-`aid` RANGE leaf under `t`, or 0 if absent.  The
+// THVM_FUSE_MATMUL_INPUT remap matches a leaked producer range to the matmul
+// axis (M or K) of equal extent with it.
 static u32 ru_subtree_axis_extent(Term t, u32 aid) {
   Term r = ru_find_axis_range(t, aid, 0);
   return (r != 0) ? uop_range_extent(r) : 0;
 }
 
-// Build f32 CONST term with given value.
 static u32 ru_f32_bits(f32 v) {
   u32 b;
   memcpy(&b, &v, sizeof b);
@@ -426,7 +332,7 @@ static u32 ru_f32_bits(f32 v) {
 }
 
 // `v` as a CONST of dtype `dt`: a float CONST payload holds the value's f32
-// bits (DType.const), an int CONST the value.
+// bits, an int CONST the value (tinygrad's DType.const, dtype.py:79).
 static Term ru_const_of(u32 dt, u64 v) {
   if (dtype_is_float(dt)) {
     return uop_const(dt, ru_f32_bits((f32)v));
@@ -434,13 +340,11 @@ static Term ru_const_of(u32 dt, u64 v) {
   return uop_const(dt, (u32)v);
 }
 
-// tinygrad codegen/simplify.py:81-91 reduce_unparented: a reduce range the
-// body never reads -- a stride-0 broadcast collapsed its RANGE to CONST(0)
-// past ru_rewrite_subtree -- leaves the REDUCE.  A SUM multiplies by the
-// range's extent: one CONST for the product of the literal extents, and a
-// DEFINE_VAR for each symbolic one.  A MAX keeps the body's value, as does a
-// bool SUM (an OR).  The REDUCE keeps the ranges its body reads; with none
-// left it is the body itself.
+// tinygrad's reduce_unparented (codegen/simplify.py:81-91): a reduce range the
+// body never reads (a stride-0 broadcast collapsed it to CONST(0)) leaves the
+// REDUCE.  A SUM multiplies by its extent (a DEFINE_VAR for a symbolic one); a
+// MAX, or a bool SUM (an OR), keeps the body's value.  With no range left the
+// REDUCE is its body.
 static Term ru_reduce_unparented(Term red, Term const *ranges, u32 n_ranges) {
   if (term_tag(red) != TAG_UOP || term_ext(red) != UOP_REDUCE) {
     return red;
@@ -490,9 +394,9 @@ static Term ru_reduce_unparented(Term red, Term const *ranges, u32 n_ranges) {
   return ret;
 }
 
-// Walk addr-expression Term `t` recursively, collecting axis_ids of
-// UOP_RANGE leaves into `out_axes` (bounded by `cap`). Returns the
-// number written.  Mirrors tinygrad's UOp.ranges accessor.
+// Write the axis_ids of the UOP_RANGE leaves of addr expression `t` to
+// `out_axes`, at most `cap`, and return how many there are, which can exceed
+// `cap`.  A tree walk to depth 32: a shared leaf counts once per path.
 static u32 ru_collect_range_axes(Term t, u32 *out_axes, u32 cap, u32 depth) {
   if (depth > 32) return 0;
   if (term_tag(t) != TAG_UOP) return 0;
@@ -515,10 +419,8 @@ static u32 ru_collect_range_axes(Term t, u32 *out_axes, u32 cap, u32 depth) {
   return n;
 }
 
-// Append ending-range axes from a child node up to this node, but only
-// the unique ones (tinygrad uses `sum([...], [])` then implicitly dedups
-// at the eligibility check; we dedup at append to keep the per-node
-// table bounded).
+// Append src's ending ranges to dst, deduplicated to keep the table bounded
+// (tinygrad concatenates, indexing.py:217, and only tests for emptiness).
 static void ru_ending_append(RuEndingRanges *dst, const RuEndingRanges *src) {
   for (u8 i = 0; i < src->n; i++) {
     u32 axis_id = src->axis_ids[i];
@@ -530,28 +432,23 @@ static void ru_ending_append(RuEndingRanges *dst, const RuEndingRanges *src) {
   }
 }
 
-// Build the shape of node at loc/op for use as the new ranges'
-// extents. We use term_shape_in. Returns 1 on success.
+// The output shape of the node at (loc, op); 1 on success.
 static int ru_node_shape(u64 loc, u8 op, Shape *out) {
   (void)op;
   Term t = term_new(0, TAG_UOP, op, loc);
   return term_shape_in(t, 0, out);
 }
 
-// Build the shape of node's source (heap[loc + 0]). For movement ops
-// in tinygrad, x.src[0].shape is the pre-swizzle shape. We always read
-// slot 0 here -- caller guarantees the op carries a single source at
-// slot 0 (true for all Movement ops + REDUCE).
+// The shape of slot 0, the source of a movement op or REDUCE (tinygrad's
+// x.src[0].shape, the pre-swizzle shape).
 static int ru_node_src_shape(u64 loc, Shape *out) {
   Term src = term_resolve(heap_read(loc));
   return term_shape_in(src, 0, out);
 }
 
-// === Mirror source: indexing.py:155-160 (consumer_map gather) ===
-// We rely on the CMAP_LL/cmap_head table: per producer node, the
-// linked-list of consumer locs is already populated by bufferize_walk_rec.
-// This wrapper resolves consumer locs -> node indices and trims invalid
-// entries (consumer never made it into BUFFERIZE_NODES).
+// consumer_map[x] (indexing.py:198-203) as node indices: bufferize_walk_rec
+// filled CMAP_LL with the consumer locs; a consumer outside BUFFERIZE_NODES is
+// dropped.
 #define RU_MAX_CONSUMERS 256
 #define RU_CONSRED_BFS_CAP 256
 static u32 ru_consumers_for_node(u32 node_idx,
@@ -572,30 +469,24 @@ static u32 ru_consumers_for_node(u32 node_idx,
   return n_out;
 }
 
-// Mirror source: indexing.py:165-173 (skip-class predicates inside the
-// main walk).
+// Nodes the walk gives no ranges (indexing.py:208-215).
 static int ru_is_skip_op(u8 op) {
-  // tinygrad skips: DEVICE, UNIQUE, CALL, FUNCTION, LINEAR, AFTER,
-  // MSTACK, MSELECT, and dtype==weakint.
-  // thvm currently has none of DEVICE/UNIQUE/CALL/FUNCTION/LINEAR/MSTACK/MSELECT.
-  // UOP_AFTER exists; KERNEL acts as the opaque-kernel boundary.
+  // tinygrad skips CALL, LINEAR, AFTER, MSTACK and MSELECT; thvm has AFTER, and
+  // KERNEL is its opaque kernel boundary.
   return op == UOP_AFTER || op == UOP_KERNEL;
 }
 
-// Mirror source: indexing.py:181 -- gather consumer in_rngs.
-//   `consumer_rngs = [rctx.range_map[c][0] for c in consumer_map[x] if c in rctx.range_map]`
-// We return up to RU_MAX_AXES per consumer (since each consumer's
-// in_rngs has at most this node's out shape rank).
+// One consumer's input ranges for this node: tinygrad's consumer_rngs
+// (indexing.py:230).
 typedef struct {
   Term rngs[RU_MAX_AXES];
   u8   ndim;
 } RuConsumerRangs;
 
-// 1 iff consumer `ci` hands its in_rngs to the node at `loc`.  An indexed
-// op reads its storage operands at addresses it builds itself
-// (ru_index_leaf), so a GATHER passes its ranges to its idx slot only and
-// a SCATTER to its base slot only: a storage operand's views would inherit
-// ranges shaped for another operand.
+// 1 iff consumer `ci` hands its in_rngs to the node at `loc`.  An indexed op
+// builds its storage operands' addresses itself (ru_index_leaf), so a GATHER
+// passes its ranges only to its idx slot and a SCATTER only to its base slot; a
+// storage operand's views would get ranges shaped for another operand.
 static int ru_consumer_passes_rngs(u32 ci, u64 loc) {
   u32 slot;
   switch (BUFFERIZE_NODES[ci].op) {
@@ -616,16 +507,12 @@ static u32 ru_gather_consumer_rngs(u32 node_idx, u8 my_ndim,
     u32 ci = consumer_idxs[i];
     if (!RU_RANGE_MAP[ci].has_ranges) continue;
     if (!ru_consumer_passes_rngs(ci, BUFFERIZE_NODES[node_idx].loc)) continue;
-    // The consumer's in_rngs at the slot where this node is the source.
-    // Tinygrad's per-consumer `range_map[c][0]` is rank-equal to the
-    // PRODUCER's out shape (the consumer's `in` for this edge), so we
-    // simply mirror in_rngs as-is. Caller capped at cap.
+    // range_map[c][0] has this node's rank: it is c's input for this edge.
     if (n_out >= cap) break;
     RuConsumerRangs *r = &out[n_out++];
     r->ndim = my_ndim;
     for (u8 a = 0; a < my_ndim && a < RU_MAX_AXES; a++) {
-      // If consumer's in_rngs rank doesn't match (heterogeneous reach;
-      // mostly during partial port), fall back to CONST(0).
+      // A consumer with fewer input ranges pads with CONST(0).
       r->rngs[a] = (a < RU_RANGE_MAP[ci].in_ndim)
                  ? RU_RANGE_MAP[ci].in_rngs[a]
                  : uop_const(DT_INT32, 0);
@@ -634,9 +521,9 @@ static u32 ru_gather_consumer_rngs(u32 node_idx, u8 my_ndim,
   return n_out;
 }
 
-// Mirror source: indexing.py:205 (`all_same(local_rngs)` per axis).
-// Two Term values are "the same" iff structurally identical (the
-// constructors hash-cons, so equality on the packed Term is enough).
+// all_same(local_rngs) on one axis (indexing.py:253).  Hash-consing makes Term
+// equality structural; unlike tinygrad (indexing.py:250), the valids take part
+// in the comparison.
 static int ru_all_same_axis(RuConsumerRangs const *rs, u32 n, u8 axis) {
   if (n <= 1) return 1;
   Term first = rs[0].rngs[axis];
@@ -646,16 +533,13 @@ static int ru_all_same_axis(RuConsumerRangs const *rs, u32 n, u8 axis) {
   return 1;
 }
 
-// The ranges an EXPAND shares as a view when its consumers diverge.  Each
-// consumer splices the EXPAND's value with every bare RANGE of the shared
-// ranges rebound to its own range (ru_build_axis_subst), and nothing else
-// rebinds.  On a broadcast axis the source reads index 0, so consumer 0's
-// range stays whatever it is.  On an axis the EXPAND passes through, a
-// compound consumer-0 range (a PAD's valid, a SHRINK offset) would put
-// consumer 0's index into the other consumers' kernels: such an axis gets a
-// fresh range, which every consumer rebinds.  tinygrad realizes the
-// diverging EXPAND and remove_bufferize then substitutes each consumer's
-// ranges for the buffer's (schedule/rangeify.py:50-91), the same reads.
+// The ranges a diverging EXPAND shares as a view; each consumer rebinds every
+// bare RANGE of them to its own (ru_build_axis_subst).  A broadcast axis reads
+// index 0, so consumer 0's range stays.  A passed-through axis whose consumer-0
+// range is compound (a PAD valid, a SHRINK offset) gets a fresh range instead,
+// or consumer 0's index would leak into the others.  tinygrad realizes the
+// EXPAND and remove_bufferize substitutes the consumer ranges back
+// (rangeify.py:50-102): the same reads.
 static void ru_expand_shared_rngs(u64 loc, RuConsumerRangs const *rs, u32 n,
                                   Shape const *shape, u8 ndim, Term *out_rngs) {
   Shape src;
@@ -680,22 +564,14 @@ static void ru_expand_shared_rngs(u64 loc, RuConsumerRangs const *rs, u32 n,
   }
 }
 
-// Mirror source: indexing.py:246
-//   `if x.op in GroupOp.Movement: rngs = apply_movement_op(...)`
-// We call into the Phase-1c apply_movement_op_* family in indexing.c.
-//
-// Returns 1 if a swizzle was applied (in_rngs/in_ndim filled), 0 if
-// the op isn't a movement op the swizzler handles, or if the RESHAPE
-// shape pair needs pm_simplify_valid (not yet ported).
+// apply_movement_op (indexing.py:171-187, called at :291) through the
+// apply_movement_op_* swizzlers of indexing.c.  1 with in_rngs and in_ndim
+// filled; 0 when the op has no swizzle here, its source shape is unknown, or
+// the RESHAPE swizzle declines.
 static int ru_apply_movement(u64 loc, u8 op,
                               Term const *out_rngs, u32 out_ndim,
                               Term *in_rngs, u32 *in_ndim) {
   if (op == UOP_RESHAPE) {
-    // Decompose the reshape into matching axis groups and swizzle the
-    // consumer's flat ranges into producer-axis-aligned IDIV/IMOD
-    // expressions.  Declines the fold when the shapes don't decompose
-    // cleanly (the stride-trick rank-merge tinygrad routes through
-    // `pm_simplify_valid`, not yet ported).
     Shape src_shape;
     if (!ru_node_src_shape(loc, &src_shape)) {
       *in_ndim = 0;
@@ -709,13 +585,10 @@ static int ru_apply_movement(u64 loc, u8 op,
     u32 src_ndim = src_shape.ndim;
     if (src_ndim > RU_MAX_AXES) src_ndim = RU_MAX_AXES;
     for (u32 i = 0; i < src_ndim; i++) in_dims[i] = src_shape.dims[i];
-    // Route the RESHAPE swizzle through the placeholder round-trip
-    // (indexing.py:140-143).  Substituting each consumer free RANGE for a
-    // clean single placeholder before the flat-decompose lets the
-    // divmod-recombine fire symbolically, so a consecutive split + re-split
-    // (the `_pool` unfold feeding the col2im) recombines back to its source
-    // iter instead of leaking independent 6/24 decode axes into a
-    // 10^14-iter cross-product.
+    // tinygrad's placeholder round trip (indexing.py:183-185): each consumer
+    // RANGE becomes a clean placeholder before the IDIV/IMOD decompose, so a
+    // split followed by a re-split (the `_pool` unfold feeding the col2im)
+    // folds back to its source range instead of leaking independent axes.
     if (apply_movement_op_reshape_composed(out_ndim, out_dims, src_ndim,
                                            in_dims, out_rngs, in_rngs)) {
       *in_ndim = src_ndim;
@@ -795,38 +668,17 @@ static int ru_apply_movement(u64 loc, u8 op,
   return 0;
 }
 
-// Mirror source: tinygrad/uop/ops.py:consumer_map_from_toposort.
-// Builds RU_TOPO_ORDER[] such that for every (consumer, producer)
-// edge, consumer's index in the array is strictly less than
-// producer's.  Equivalent to tinygrad's
-// `reversed(tsink.toposort(gate_kernel_sink))` at
-// schedule/indexing.py:161.
-//
-// Implementation: Kahn's algorithm over BUFFERIZE_NODES seen as a
-// DAG with one edge per (node -> source) pair.  In-degree = number of
-// CONSUMERS of the node within BUFFERIZE_NODES (= consumer_count
-// minus consumers outside the node table; in practice that's 0 since
-// bufferize_walk_rec adds every reachable UOp).  We seed the worklist
-// with consumer_count == 0 nodes (the SINK -- typically a single root,
-// possibly multiple roots if bufferize_classify was called with a
-// nested SINK).  Each dequeue decrements the in-degree of all UOP
-// producers reachable via heap[loc + arity] slots; producers whose
-// counter hits 0 are enqueued.
-//
-// Falls back to forward BUFFERIZE_NODES order if Kahn's leaves nodes
-// unvisited (cycle / inconsistent consumer_count); the forward order
-// still satisfies the consumer-after-producer invariant for any
-// already-toposorted prefix and degrades gracefully on pathological
-// graphs.
+// RU_TOPO_ORDER, every consumer before its producers, as tinygrad's
+// reversed(tsink.toposort()) (indexing.py:199, 207): Kahn's algorithm with
+// in-degree consumer_count, seeded with the nodes nothing consumes (the root).
+// Nodes it leaves unvisited (a consumer_count that disagrees with the heap
+// edges) are appended in table order.
 static void ru_compute_topo_order(void) {
   RU_TOPO_ORDER_LEN = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     RU_TOPO_REMAINING[i] = BUFFERIZE_NODES[i].consumer_count;
   }
-  // Seed worklist with nodes that have no consumers in BUFFERIZE_NODES
-  // (the SINK / root).  Push them onto the order array directly --
-  // RU_TOPO_ORDER doubles as worklist; new entries appended at the
-  // tail are processed in FIFO order.
+  // RU_TOPO_ORDER doubles as the FIFO worklist.
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     if (RU_TOPO_REMAINING[i] == 0) {
       RU_TOPO_ORDER[RU_TOPO_ORDER_LEN++] = i;
@@ -857,9 +709,6 @@ static void ru_compute_topo_order(void) {
       }
     }
   }
-  // Fallback: append any nodes that didn't reach in-degree 0 (broken
-  // consumer_count / cycle).  Preserves the previous "iterate every
-  // node" invariant even if Kahn's was incomplete.
   if (RU_TOPO_ORDER_LEN < BUFFERIZE_NODES_LEN) {
     u8 *enqueued = (u8 *)calloc(BUFFERIZE_NODES_LEN, 1);
     if (enqueued != NULL) {
@@ -876,21 +725,7 @@ static void ru_compute_topo_order(void) {
   }
 }
 
-
-// === Mirror source: indexing.py:148-269 run_rangeify ===
-//
-// Reverse-topo walk over BUFFERIZE_NODES via RU_TOPO_ORDER (Kahn's,
-// consumers strictly before producers).  Mirrors tinygrad's
-// `reversed(tsink.toposort(gate_kernel_sink))`.
-//
-// Pre-condition: caller must have run bufferize_classify(root) first;
-// this fills BUFFERIZE_NODES + CMAP_LL + the existing realized-bit.
-//
-// Side effects: populates RU_RANGE_MAP + RU_REALIZE_MAP + RU_ENDING_RANGES.
-// The realize decision is kept in RU_REALIZE_MAP separate from
-// BUFFERIZE_NODES.realized.
-
-// A node is a realized boundary (a buffer) iff seed- OR walk-realized.
+// A node is a buffer iff bufferize_classify or the walk realized it.
 static int rb_node_realized(u32 idx) {
   if (idx == 0xFFFFFFFFu) return 0;
   return BUFFERIZE_NODES[idx].realized
@@ -898,16 +733,10 @@ static int rb_node_realized(u32 idx) {
       || RU_REALIZE_MAP[idx].realized_partial;
 }
 
-// 1 iff the SUBTREE rooted at `t` contains a live (non-realized) REDUCE
-// reachable without crossing a realized boundary.  Walks the RAW UOP heap
-// graph -- NOT only tracked BUFFERIZE_NODES -- because an inlined broadcast
-// (EXPAND of recip(sum)) and other non-boundary value nodes are absent from
-// that table yet must be traversed to reach the reduce inside them.  STOP at
-// any realized boundary (tinygrad red_gate's AFTER/STAGE buffers,
-// rangeify.py:256-271): a realized node is a buffer here, so its subtree is
-// not re-run.  Only descend through value-carrying ops (elementwise /
-// movement / cast); structural leaves (BUFFER/BUFFERIZE/KERNEL/RANGE/CONST)
-// hold no reduce to recompute.
+// 1 iff `t` holds a REDUCE that is not realized, reached without crossing a
+// realized boundary (a buffer, as tinygrad's red_gate stops at AFTER and STAGE,
+// rangeify.py:64-79).  Walks the raw heap graph, since an inlined broadcast is
+// not in BUFFERIZE_NODES, through elementwise, movement and cast ops only.
 static int rb_subtree_has_live_reduce(Term t, u32 depth) {
   if (depth > 48) return 0;
   Term r = term_resolve(t);
@@ -915,7 +744,7 @@ static int rb_subtree_has_live_reduce(Term t, u32 depth) {
   u8 op = term_ext(r);
   if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) return 0;
   if (rb_node_realized(bufferize_info_find(term_val(r)))) return 0;  // buffer: stop
-  if (op == UOP_REDUCE) return 1;                                    // live reduce
+  if (op == UOP_REDUCE) return 1;
   int ew = uop_is_unary_elementwise(op)
         || uop_is_binary_elementwise(op)
         || uop_is_ternary_elementwise(op);
@@ -929,11 +758,10 @@ static int rb_subtree_has_live_reduce(Term t, u32 depth) {
   return 0;
 }
 
-// Collect the DISTINCT realized buffers / leaf inputs the subtree at `t`
-// reads (tinygrad red_gate's accessed_buffers, rangeify.py:256-274): record
-// a loc and STOP at every realized boundary, leaf tensor (PARAM), or
-// UOP_BUFFER; descend through value + (live) reduce ops otherwise.  Dedups
-// into `locs` (capacity `cap`); returns the running distinct count.
+// The distinct buffers `t` reads, tinygrad's red_gate accessed_buffers
+// (rangeify.py:61-82): a realized boundary, UOP_BUFFER, KERNEL, BUFFERIZE or
+// leaf tensor (PARAM) counts and ends the descent.  Dedups into `locs`
+// (capacity `cap`) and returns the running count.
 static u32 rb_collect_accessed_buffers(Term t, u64 *locs, u32 n, u32 cap,
                                        u32 depth) {
   if (depth > 48 || n >= cap) return n;
@@ -961,10 +789,8 @@ static u32 rb_collect_accessed_buffers(Term t, u64 *locs, u32 n, u32 cap,
   return n;
 }
 
-// tinygrad rangeify.py:277: a node generated from more than 3 distinct
-// buffers is NOT removed (recomputing it would re-read many buffers in every
-// consumer kernel -- the cost model keeps it stored).  Counts the candidate's
-// child subtrees' accessed buffers.
+// tinygrad keeps a buffer generated from more than 3 buffers (rangeify.py:85):
+// recomputing it would re-read them all in every consumer kernel.
 static int rb_too_many_buffers(u64 loc) {
   u32 idx = bufferize_info_find(loc);
   if (idx == 0xFFFFFFFFu) return 0;
@@ -976,9 +802,7 @@ static int rb_too_many_buffers(u64 loc) {
   return n > 3;
 }
 
-// Resolve the output numel of a Term reachable in the value subtree (an
-// accessed-buffer leaf, or the candidate node itself).  Returns 0 if the
-// shape is not statically recoverable (treated as a no-op contribution).
+// The element count of `t`'s shape, or 0 if its shape is unknown.
 static u64 rb_term_numel(Term t) {
   Shape s;
   if (!term_shape_in(t, 0, &s)) return 0;
@@ -987,11 +811,8 @@ static u64 rb_term_numel(Term t) {
   return p;
 }
 
-// Term-collecting variant of rb_collect_accessed_buffers: mirrors tinygrad's
-// red_gate (rangeify.py:256-274) but records the resolved Term of each distinct
-// accessed buffer so the caller can sum their numels.  Same gate as
-// rb_collect_accessed_buffers: stop and count at every realized boundary /
-// leaf input / UOP_BUFFER.
+// rb_collect_accessed_buffers recording each buffer's Term, so the caller can
+// sum their sizes.
 static u32 rb_collect_accessed_buffer_terms(Term t, Term *terms, u32 n, u32 cap,
                                             u32 depth) {
   if (depth > 48 || n >= cap) return n;
@@ -1018,15 +839,10 @@ static u32 rb_collect_accessed_buffer_terms(Term t, Term *terms, u32 n, u32 cap,
   return n;
 }
 
-// tinygrad's buffer_in_reduce gate (rangeify.py:256-285): collect the
-// reduces in the candidate node's value (stopping at realized buffers); if
-// any is reachable, recomputing the node would re-run a live reduce reading
-// buffers, so it is KEPT.  Here the candidate at `loc` is the elementwise op
-// being considered for removal: walk each of its child subtrees.  A realized
-// reduce (the qk `scores`, the softmax `max`/`sum`) is a buffer, not a live
-// reduce, so a pure-elementwise-over-realized-buffers node returns 0 and is
-// removable; a node that fuses an UN-realized reduce (the softmax normalize,
-// whose `sum` reduce lives inside it) returns 1 and is kept.
+// tinygrad's buffer_in_reduce (rangeify.py:87-96): a candidate whose value
+// holds a live reduce is kept, since recomputing it would re-run the reduce.  A
+// realized reduce (the attention scores, the softmax max and sum) is a buffer,
+// so an elementwise node over it stays removable.
 static int rb_src_has_live_reduce(u64 loc, u32 depth) {
   (void)depth;
   if (loc >= HEAP_NEXT) return 0;
@@ -1039,7 +855,7 @@ static int rb_src_has_live_reduce(u64 loc, u32 depth) {
   return 0;
 }
 
-// Count the UOP_RANGE leaves (iterated, non-CONST axes) in a range list.
+// The number of entries of `rngs` that are a bare UOP_RANGE.
 static u8 rb_count_range_axes(Term const *rngs, u8 ndim) {
   u8 n = 0;
   for (u8 a = 0; a < ndim; a++) {
@@ -1049,22 +865,13 @@ static u8 rb_count_range_axes(Term const *rngs, u8 ndim) {
   return n;
 }
 
-// (b) thvm's recompute re-index (ru_build_axis_subst, pm_apply_rangeify) maps
-// producer out_rngs[a] -> consumer in_rngs[a] POSITIONALLY.  That is exact only
-// when the value is recomputed into consumers that iterate at the producer's
-// rank WITHOUT any movement op rewriting the index -- the softmax exp feeding
-// the same-rank `sum` reduce (bit-exact).  It is NOT exact once a MOVEMENT op
-// (EXPAND / RESHAPE / PERMUTE / PAD / SHRINK / FLIP) sits in the recompute
-// region: a broadcast EXPAND reads the value over axes it does not depend on
-// (the bn-backward gamma grad: a per-channel [C] coeff expanded to [C,H,W]
-// then reduced -- wrong index), and a RESHAPE/PERMUTE swizzle re-indexes the
-// strided view in a way the positional map cannot follow (the conv contraction
-// product -> reshape -- the lifter walks a stranded range and BUS-ERRORS).
-// tinygrad handles both with its exact src.substitute (rangeify.py:308); until
-// that is ported, restrict removal to MOVEMENT-FREE recompute regions.  BFS the
-// region (non-realized movement/elementwise consumers, stopping at realized
-// boundaries and reduces); keep the producer if any movement op -- or any
-// residual rank increase -- appears.
+// 1 if recomputing the node in its consumers is not exact.  The recompute
+// rebinds producer out_rngs[a] to consumer in_rngs[a] positionally
+// (ru_build_axis_subst), which holds only without a movement op between: an
+// EXPAND reads the value over axes it does not depend on, a RESHAPE or PERMUTE
+// re-indexes it.  tinygrad's src.substitute (rangeify.py:102) is exact.  BFS
+// the non-realized elementwise consumers: any movement consumer, or one
+// iterating more ranges than the producer, makes the region unsafe.
 static int rb_unsafe_recompute_region(u32 node_idx) {
   u8 prod_rank = rb_count_range_axes(RU_RANGE_MAP[node_idx].out_rngs,
                                      RU_RANGE_MAP[node_idx].out_ndim);
@@ -1100,14 +907,11 @@ static int rb_unsafe_recompute_region(u32 node_idx) {
   return 0;
 }
 
-// (a) tinygrad's `removable` exclusion (rangeify.py:248): a node consumed
-// contiguous (COPY / ALWAYS_CONTIGUOUS) is never removed.  thvm's BLAS matmul
-// path (cpu/blas.c dgemm, metal/cuda tile-GEMM) needs MATERIALIZED operands --
-// a matmul reduce cannot recompute its inputs in-kernel the way tinygrad's
-// fused reduce does -- so a matmul-feeding node is thvm's ALWAYS_CONTIGUOUS
-// equivalent: removing it forces a re-realize for the GEMM (no kernel saved).
-// BFS the consumer DAG through non-realized movement/ew hops; stop at realized
-// boundaries (they materialize on their own) and at non-matmul reduces.
+// 1 if the node feeds a matmul reduce through non-realized movement and
+// elementwise hops.  thvm's GEMM paths (cpu/blas.c, the Metal and CUDA tile
+// GEMMs) need materialized operands, so such a node is thvm's counterpart of a
+// non-removable tinygrad buffer (indexing.py:90, rangeify.py:56): removing it
+// would only force a re-realize for the GEMM.
 static int rb_feeds_matmul_reduce(u32 node_idx) {
   u32 queue[RU_CONSRED_BFS_CAP];
   u32 qhead = 0, qtail = 0;
@@ -1142,18 +946,10 @@ static int rb_feeds_matmul_reduce(u32 node_idx) {
   return 0;
 }
 
-// THVM_FUSE_MATMUL_INPUT gate: is this elementwise node SAFELY fusable into a
-// consuming matmul reduce?  Mirrors tinygrad's single-consumer fuse rule
-// (schedule/indexing.py:198-200): an op with exactly one consumer inherits that
-// consumer's ranges and stays inlined.  We require a strict linear chain --
-// every hop from the producer up to (and excluding) the matmul reduce has
-// EXACTLY ONE consumer, and that one consumer is a movement/elementwise op or
-// the matmul REDUCE itself.  This guarantees un-realizing the producer inlines
-// its value into precisely ONE matmul kernel (so the buffer is genuinely saved,
-// no recompute fan-out) and that the matmul's MUL operand becomes the inlined
-// value subtree the TC tiled emitter computes at its A-staging load.  Returns 0
-// if any hop branches (>1 consumer), if a non-matmul reduce / realized boundary
-// is reached, or if no matmul reduce terminates the chain.
+// THVM_FUSE_MATMUL_INPUT: 1 if the node reaches a 2-D matmul reduce through a
+// chain where every hop has exactly one consumer, each a non-realized movement
+// or elementwise op (tinygrad's single-consumer inline, indexing.py:242-244).
+// The producer then inlines into exactly one matmul kernel, as its MUL operand.
 static int rb_matmul_input_fusable(u32 node_idx) {
   u32 cur = node_idx;
   u32 budget = RU_CONSRED_BFS_CAP;
@@ -1164,64 +960,26 @@ static int rb_matmul_input_fusable(u32 node_idx) {
     u32 ci = cidxs[0];
     u8 cop = BUFFERIZE_NODES[ci].op;
     if (cop == UOP_REDUCE) {
-      // Terminal: fusable iff it is a 2-D matmul reduce (the only reduce thvm's
-      // codegen can inline an elementwise A operand into via the TC A-staging).
-      // A BATCHED matmul (the attention scores / context, output {heads, S, S})
-      // is excluded: the rank-grow range remap that keeps the inlined reduce
-      // 1-axis (the THVM_FUSE_MATMUL_INPUT exact-substitute port below) is a 2-D
-      // {M,N}-output remap; a batched output's extra batch axis would mis-bind,
-      // so keep the batched producer (the q*scale pre-scale) realized -- correct,
-      // its own kernel.  out_ndim == 2 is the plain {M,N} projection shape.
+      // Only a 2-D {M,N} matmul: the rank-grow remap in pm_apply_rangeify binds
+      // M and K only, so a batched one (attention scores and context) keeps its
+      // producer realized.
       if (!(BUFFERIZE_NODES[ci].reasons & BUFFERIZE_REASON_MATMUL)) return 0;
       return (RU_RANGE_MAP[ci].out_ndim == 2) ? 1 : 0;
     }
-    // Only chain through non-realized movement/elementwise hops.  A realized
-    // intermediate would itself materialize -> stop (no clean inline).
+    // A realized hop materializes on its own: no clean inline.
     if (rb_node_realized(ci)) return 0;
     int is_movement = uop_is_movement(cop);
     int is_ew = uop_is_unary_elementwise(cop)
              || uop_is_binary_elementwise(cop)
              || uop_is_ternary_elementwise(cop);
-    if (!(is_movement || is_ew)) return 0;  // CAST is elementwise; STORE/etc stop
+    if (!(is_movement || is_ew)) return 0;  // CAST, STORE etc. end the chain
     cur = ci;
   }
   return 0;
 }
 
-// THVM_FUSE_MATMUL_EPILOGUE: is this REALIZED node an OPT_TC matmul reduce whose
-// SINGLE consumer is an elementwise/cast chain (the epilogue) terminating at a
-// realized boundary -- not another reduce/matmul and not a movement op?  Mirror
-// of rb_matmul_input_fusable on the CONSUMER side (schedule/indexing.py:198-200,
-// "an op with one consumer inherits the consumer's ranges").  When true,
-// un-realizing the matmul reduce inlines its REDUCE subtree into that one
-// elementwise chain's store; the codegen-side epilogue (rmu_emit_matmul_tc)
-// keeps the matmul on the TC path and applies the elementwise per output
-// element.  We require a strict LINEAR elementwise chain so the matmul is
-// genuinely consumed once (no recompute fan-out into multiple kernels) and so
-// the consumer's store value is exactly ELEMENTWISE(...REDUCE...) the codegen
-// walks.  The fused store and the matmul share output ranges (M, N), so the
-// epilogue's index reads bind to the same tiled (m, n) the matmul emits --
-// rmu_epilogue_walk rejects anything (movement / second reduce) that would
-// break that positional bind.  Returns 0 unless:
-//   * the node is a matmul reduce (BUFFERIZE_REASON_MATMUL),
-//   * every hop up to (and including) the realized sink has exactly ONE
-//     consumer that is an elementwise/cast op (no branch, no movement),
-//   * the chain reaches a realized boundary WITHOUT crossing another reduce.
-// Will the codegen keep this matmul on the TILED (simdgroup_matrix) path when
-// it is inlined as an epilogue?  The TILED emitter (render_uop.c
-// rmu_emit_matmul_tc_tiled) requires BOTH MUL operands to be clean buffer reads
-// (a bare INDEX_E over a BUFFER / BUFFERIZE boundary, possibly bf16->f32 CAST-
-// wrapped) and a 2-D (non-batched) shape.  A fused-producer A (the un-realized
-// attention / SwiGLU output -- an ALU tree, not a buffer) or a batched matmul
-// (the attention Q@K^T / @V, a shared 3rd range) is NOT epilogue-TILED-able:
-// inlining it would drop the matmul to a SCALAR accumulator inside the gate
-// kernel (strictly worse than its own TILED kernel).  Returns 1 only when the
-// epilogue fuse will stay TILED; mirrors rmu_detect_matmul_tc's operand gate so
-// the scheduler does not un-realize a matmul the codegen cannot fuse cleanly.
-// Peel CAST / movement views off a matmul operand down to its data leaf, so the
-// "clean buffer operand" test sees through the Transpose[W] view, the bf16->f32
-// widening cast, and the {seq,heads,head_dim} reshape that wrap a buffer read.
-// Stops at the first non-cast / non-movement op (the leaf or an ALU producer).
+// Peel CAST and movement views (a Transpose, a bf16->f32 widening cast, a
+// reshape) off a matmul operand, down to its data leaf or first ALU op.
 static Term rb_peel_operand_views(Term t, u32 depth) {
   if (depth > 32 || term_tag(t) != TAG_UOP) return t;
   u8 op = term_ext(t);
@@ -1230,44 +988,41 @@ static Term rb_peel_operand_views(Term t, u32 depth) {
   return t;
 }
 
-// Is this matmul operand a STABLE buffer read whose realize the codegen will see
-// as a clean INDEX_E -- a true input/weight BUFFER (or leaf var) behind cast +
-// movement views?  A FUSED ALU producer (the un-realized attention / SwiGLU
-// output) is rejected outright; a BUFFERIZE intermediate is ALSO rejected,
-// because a downstream pass (the attention flash-fusion un-realize) may strip
-// its realize so the operand arrives at codegen as a recomputed ALU tree (the
-// to_out projection's ctxI) -- which the TILED epilogue emitter cannot stage,
-// dropping the matmul off path=TILED.  Epilogue-only fusion provides no
-// input-fuse path, so only a genuinely stable buffer operand is safe.
+// 1 if a matmul operand is a stable buffer read: an input or weight BUFFER (or
+// a leaf tensor or var) behind cast and movement views.  A computed operand is
+// rejected even when realized: a later pass can still drop its realize and
+// leave an ALU tree the tiled epilogue cannot stage.
 static int rb_operand_is_clean_buffer(Term t) {
   Term leaf = rb_peel_operand_views(t, 0);
   if (term_tag(leaf) != TAG_UOP) return 1;        // TEN / leaf var: a stable buffer
   return term_ext(leaf) == UOP_BUFFER;
 }
 
+// 1 if the inlined matmul can stay on the tiled TC path
+// (rmu_emit_matmul_tc_tiled): one reduce axis over a MUL whose operands are
+// both clean buffer reads.  Otherwise it would drop to a scalar accumulator
+// inside the consumer kernel, slower than its own tiled kernel.  The scheduler
+// side of rmu_detect_matmul_tc's operand gate.
 static int rb_matmul_epilogue_tc_emittable(u32 node_idx) {
   if (BUFFERIZE_NODES[node_idx].op != UOP_REDUCE) return 0;
   Term reduce = term_new(0, TAG_UOP, UOP_REDUCE, BUFFERIZE_NODES[node_idx].loc);
   if (uop_reduce_n_axes(reduce) != 1) return 0;     // single K axis
   Term mul = uop_reduce_src(reduce);
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
-  // BOTH operands must be clean buffer reads.  A fused-producer A (the
-  // un-realized attention / SwiGLU output, an ALU tree) is NOT epilogue-TILED-
-  // able: inlining it would drop the matmul to a scalar accumulator inside the
-  // gate kernel, dropping it off path=TILED -- strictly worse than its own TILED
-  // kernel.  Keep such a matmul its own realized boundary (return 0 -> no
-  // un-realize).  Mirrors render_uop.c rmu_detect_matmul_tc's operand gate.
   if (!rb_operand_is_clean_buffer(heap_read(term_val(mul) + 0))) return 0;
   if (!rb_operand_is_clean_buffer(heap_read(term_val(mul) + 1))) return 0;
   return 1;
 }
 
+// THVM_FUSE_MATMUL_EPILOGUE: 1 if the node is a matmul reduce the tiled emitter
+// keeps (rb_matmul_epilogue_tc_emittable), and it and every hop below the
+// realized sink have exactly one consumer, each an elementwise or cast op: no
+// branch, no movement, no second reduce.  The fused store then holds
+// ELEMENTWISE(...REDUCE...) over the matmul's own (M, N) ranges, which the
+// tiled emitter replaces with its tile's (m, n).
 static int rb_matmul_epilogue_fusable(u32 node_idx) {
   if (!(BUFFERIZE_NODES[node_idx].reasons & BUFFERIZE_REASON_MATMUL)) return 0;
   if (BUFFERIZE_NODES[node_idx].op != UOP_REDUCE) return 0;
-  // Only un-realize when the codegen will keep the inlined matmul TILED.  An
-  // un-TILED-emittable matmul (fused-producer A, batched) would fall to a scalar
-  // accumulator inside the consumer -- worse than its own TILED kernel.
   if (!rb_matmul_epilogue_tc_emittable(node_idx)) return 0;
   u32 cur = node_idx;
   u32 budget = RU_CONSRED_BFS_CAP;
@@ -1277,36 +1032,28 @@ static int rb_matmul_epilogue_fusable(u32 node_idx) {
     if (nc != 1) return 0;                  // branch (or sink): not a clean chain
     u32 ci = cidxs[0];
     u8 cop = BUFFERIZE_NODES[ci].op;
-    // A second reduce / matmul terminates the chain WITHOUT an elementwise
-    // epilogue -- nothing to fuse (and the codegen epilogue rejects a nested
-    // REDUCE).  Bail so the matmul stays its own realized boundary.
+    // A second reduce leaves no epilogue (rmu_epilogue_walk rejects a nested
+    // REDUCE).
     if (cop == UOP_REDUCE) return 0;
-    // A movement op (RESHAPE / EXPAND / PERMUTE / ...) re-indexes the value: the
-    // codegen epilogue (rmu_epilogue_walk) only walks pure elementwise/cast, so
-    // the fused store value would not match.  Keep the matmul realized.
+    // A movement op re-indexes the value; rmu_epilogue_walk takes only
+    // elementwise and cast hops.
     if (uop_is_movement(cop)) return 0;
     int is_ew = uop_is_unary_elementwise(cop)
              || uop_is_binary_elementwise(cop)
              || uop_is_ternary_elementwise(cop)
              || cop == UOP_CAST || cop == UOP_BITCAST;
     if (!is_ew) return 0;                    // STORE/etc: not an elementwise epilogue
-    // An elementwise hop that is itself a realized boundary IS the fused store
-    // target (its store value will hold the inlined ...REDUCE...).  Fusable.
+    // A realized elementwise hop is the fused store target.
     if (rb_node_realized(ci)) return 1;
-    cur = ci;                                // non-realized ew hop: keep walking
+    cur = ci;
   }
   return 0;
 }
 
-// Count the DISTINCT input buffers a kernel rooted at `node_idx` references.
-// Mirror tinygrad _limit_bufs's visitor (schedule/rangeify.py:181-185): a
-// STAGE / AFTER / PARAM / MSELECT / MSTACK counts as one buffer and ends the
-// descent, any other node contributes the union of its srcs' buffers.
-// thvm's rb_collect_accessed_buffers is that gate (stops at UOP_BUFFER /
-// realized boundary / leaf TEN-PARAM), so we reuse it over the root's direct
-// src subtrees.  `cap` bounds the count; we only care whether it exceeds
-// MAX_BUFS-1, so once it saturates `cap` the caller already knows it's over
-// budget.
+// The distinct input buffers of the kernel rooted at `node_idx`, as tinygrad's
+// _limit_bufs visitor counts them (rangeify.py:181-185):
+// rb_collect_accessed_buffers over the root's srcs.  The count saturates at
+// RU_LIMIT_BUFS_CAP.
 #define RU_LIMIT_BUFS_CAP 64
 static u32 ru_kernel_input_bufs(u32 node_idx) {
   u64 locs[RU_LIMIT_BUFS_CAP];
@@ -1319,16 +1066,11 @@ static u32 ru_kernel_input_bufs(u32 node_idx) {
   return n;
 }
 
-// Is `src` a BROADCAST EXPANDER -- a value whose output is much larger than the
-// data it actually reads (the attention `EXPAND(reshape(a,{B,M,K,1}),{B,M,K,N})`
-// MUL: {B,M,K,N} output, ~{B,M,K}+{B,K,N} of real input)?  Realizing such a node
-// MATERIALIZES a buffer far bigger than its inputs (the 14 GB Krea broadcast);
-// limit_bufs must NEVER pick it as a split point -- tinygrad never bufferizes a
-// broadcast either (it bufferizes elementwise *compute*, and the {B,M,K,N} MUL
-// stays a lazy strided read inside the REDUCE).  We compare out_numel with the
-// sum of the distinct input-buffer numels the subtree reads.  Ratio >= 4 means the node
-// grows the data 4x+ -- a broadcast expander.  Returns 1 to mean "do not realize
-// this src; prefer a cheaper one".
+// 1 if `src` is a broadcast expander: its numel is at least
+// RU_BROADCAST_EXPAND_RATIO times the summed numel of the distinct buffers it
+// reads (the attention MUL EXPAND(reshape(a,{B,M,K,1}),{B,M,K,N})).  Realizing
+// one materializes a buffer far larger than its inputs, so limit_bufs splits
+// elsewhere first.
 #define RU_BROADCAST_EXPAND_RATIO 4u
 static int ru_src_is_broadcast_expander(Term src) {
   u64 out_numel = rb_term_numel(src);
@@ -1347,44 +1089,18 @@ static int ru_src_is_broadcast_expander(Term src) {
   u64 in_sum = 0;
   for (u32 i = 0; i < n; i++) in_sum += rb_term_numel(terms[i]);
   if (in_sum == 0) return 0;                     // no measurable input: not a clear expander
-  // out >= ratio * in  <=>  broadcast that inflates the data `ratio`x or more.
   return out_numel >= (u64)RU_BROADCAST_EXPAND_RATIO * in_sum;
 }
 
-// PORT of tinygrad _limit_bufs (schedule/rangeify.py:176-198).
-//
-// A single elementwise kernel may reference at most MAX_BUFS distinct buffers
-// (output + inputs).  If a kernel root would exceed (MAX_BUFS - 1) INPUT
-// buffers (the -1 reserves the output slot, rangeify.py:187), tinygrad
-// bufferizes the root's elementwise srcs -- forcing each into its OWN kernel
-// so the root reads it as a single buffer.  Here the thvm analog of
-// "bufferize this src" is PRE-MARKING it realized (RU_REALIZE_MAP[src]
-// .realized_full = 1) DURING the reverse-topo walk, BEFORE the walk reaches
-// the src: the walk processes consumers-before-producers, so a src marked here
-// while we process `root` is visited later and takes the walk's realized-node
-// branch, which mints fresh LOOP out_rngs + consistent in_rngs for it --
-// i.e. the walk's own machinery produces a clean materialize boundary, exactly
-// as for any other realized node.  pm_apply_rangeify then emits a
-// UOP_BUFFERIZE on it and codegen splits it into its own kernel.  (A post-walk
-// re-mark would leave the src's already-committed children indexed by the old
-// consumer-inherited ranges, so the in-walk pre-mark is the faithful spot.)
-//
-// `root_idx` is the elementwise node currently being processed.  Tinygrad's
-// UPat matches every Binary|Ternary node; we mirror that by calling this for
-// each elementwise node in the walk (not only realized ones), so a nested
-// over-fused subexpression splits even when its own root stays fused.  The
-// gated buffer count (rb_collect_accessed_buffers stops at realized
-// boundaries) means a src realized by an earlier (closer-to-sink) root already
-// caps the count for roots below it.
-//
-// The split points differ from tinygrad's.  pm_limit_bufs is one
-// graph_rewrite in the default order (rangeify.py:360), which rewrites a node
-// after its srcs (uop/ops.py:1840-1843), so tinygrad splits from the leaves
-// up and a left-deep chain gets a STAGE every MAX_BUFS-1 leaves.  This walk
-// visits the root first, so every node from the root down to the first one
-// within budget becomes its own kernel: 40 leaves under
-// THVM_MAX_KERNEL_BUFFERS=8 give 34 kernels here, 7 in tinygrad.  Both keep
-// every kernel within the cap.
+// tinygrad's _limit_bufs (rangeify.py:176-198): a root reading more than
+// MAX_BUFS - 1 inputs (one slot is the output) bufferizes its elementwise srcs.
+// Here that is a pinned realize mark set during the walk, before the walk
+// reaches the src, so the src takes the realized branch like any boundary (a
+// mark after the walk would leave its children on inherited ranges).  Runs for
+// unary and CAST roots too (tinygrad matches Binary|Ternary).  tinygrad splits
+// from the leaves up (graph_rewrite visits srcs first, uop/ops.py:1840-1843);
+// this walk starts at the root, so a left-deep chain splits into more kernels.
+// Both stay within the cap.
 static void ru_limit_bufs_node(u32 root_idx) {
   u32 max_bufs = ru_device_max_bufs();
   if (max_bufs < 2) return;                  // 0 == no limit; <2 underflow-guard
@@ -1395,23 +1111,16 @@ static void ru_limit_bufs_node(u32 root_idx) {
              || uop_is_binary_elementwise(rop)
              || uop_is_ternary_elementwise(rop)
              || rop == UOP_CAST || rop == UOP_BITCAST;
-  if (!root_ew) return;                      // tinygrad UPat: Binary|Ternary only
+  if (!root_ew) return;
 
-  if (ru_kernel_input_bufs(root_idx) <= input_cap) return;   // within budget
+  if (ru_kernel_input_bufs(root_idx) <= input_cap) return;
 
-  // Over budget: bufferize (force-realize) the elementwise srcs so each
-  // becomes its own kernel.  Mirror rangeify.py:189-196: for s in root.src:
-  // if s in GroupOp.Elementwise and s.device is not None: bufferize(s).
-  //
-  // PASS 0 realizes only CHEAP (non-broadcast) elementwise srcs; PASS 1 falls
-  // back to broadcast-expander srcs ONLY if the kernel is still over budget
-  // after pass 0 (splitting somewhere is mandatory to stay under the hard cap).
-  // Never realize a broadcast expander preferentially -- that materializes a
-  // buffer far larger than the data it reads (the 14 GB attention MUL).
+  // Pass 0 skips broadcast expanders; pass 1 takes them only if the kernel is
+  // still over budget, since a split is mandatory under a hard cap.
   u64 rloc = BUFFERIZE_NODES[root_idx].loc;
   u8  rar  = uop_arity(rop);
   for (u32 pass = 0; pass < 2; pass++) {
-    if (ru_kernel_input_bufs(root_idx) <= input_cap) return;  // now within budget
+    if (ru_kernel_input_bufs(root_idx) <= input_cap) return;
     for (u8 s = 0; s < rar; s++) {
       Term src = term_resolve(heap_read(rloc + s));
       if (term_tag(src) != TAG_UOP) continue;            // leaf: not splittable
@@ -1420,17 +1129,12 @@ static void ru_limit_bufs_node(u32 root_idx) {
               || uop_is_binary_elementwise(sop)
               || uop_is_ternary_elementwise(sop)
               || sop == UOP_CAST || sop == UOP_BITCAST;
-      if (!s_ew) continue;                               // only elementwise srcs
-      // Pass 0: skip broadcast expanders (prefer cheap srcs).  Pass 1: allow
-      // them, but only because the kernel is genuinely still over budget.
+      if (!s_ew) continue;
       if (pass == 0 && ru_src_is_broadcast_expander(src)) continue;
       u32 sidx = bufferize_info_find(term_val(src));
       if (sidx == 0xFFFFFFFFu) continue;
-      if (rb_node_realized(sidx)) continue;              // already a boundary
-      // s.device is not None: realize routes uniform-device here, so the src is
-      // on the kernel's device by construction (term_device_in of the graph ==
-      // the realize target, which is the device whose max we just applied).
-      // Pre-mark the full-realize boundary; the walk mints its ranges later.
+      if (rb_node_realized(sidx)) continue;
+      // tinygrad's s.device check always holds: a realize runs on one device.
       RU_REALIZE_MAP[sidx].realized_full    = 1;
       RU_REALIZE_MAP[sidx].realized_partial = 0;
       RU_REALIZE_MAP[sidx].axes_mask        = 0;
@@ -1440,8 +1144,12 @@ static void ru_limit_bufs_node(u32 root_idx) {
   }
 }
 
+// run_rangeify (indexing.py:189-320) over BUFFERIZE_NODES, then
+// pm_apply_rangeify.  Requires bufferize_classify(root): BUFFERIZE_NODES,
+// CMAP_LL and the realized bits.  Fills RU_RANGE_MAP, RU_REALIZE_MAP,
+// RU_ENDING_RANGES and RU_REDUCE_RANGES; the realize decision lives in
+// RU_REALIZE_MAP, apart from BUFFERIZE_NODES[].realized.
 fn void run_rangeify_unified(Term root) {
-  // Clear per-node state.
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     RU_RANGE_MAP[i].out_ndim   = 0;
     RU_RANGE_MAP[i].in_ndim    = 0;
@@ -1468,19 +1176,14 @@ fn void run_rangeify_unified(Term root) {
   u32 root_node = bufferize_info_find(term_val(root));
   if (root_node == 0xFFFFFFFFu) return;
 
-  // *** Mirror indexing.py:195 (generate realize map) ***
-  // Seed RU_REALIZE_MAP from BUFFERIZE_NODES.realized, filtered by
-  // ru_seed_boundary_holds to the structural boundaries (ROOT == tinygrad's
-  // STORE, indexing.py:49, plus the correctness realizes).  Tinygrad's
-  // pm_generate_realize_map (indexing.py:45-54) always realizes a STORE,
-  // plus the srcs of MSELECT / MSTACK, custom-kernel inputs, and the src
-  // of a STORE that reads its own destination.  It needs no contiguous or
-  // COPY rule because prepare has already lowered a bare STAGE and a
-  // COPY to STOREs into fresh buffers (prepare.py:215-231).  thvm's
-  // tensor graph has no STORE here (the root stands in for one).  The MULTI (consumer>=2), MATMUL and FANIN_CAP reasons are thvm
-  // heuristics that tinygrad does NOT seed -- it DERIVES realization in the
-  // walk below via multi-consumer range divergence (indexing.py:245-268) and
-  // the reduce/elementwise ending-ranges rule (indexing.py:270-277).
+  // indexing.py:195, the realize map: the bufferize_classify realize marks that
+  // ru_seed_boundary_holds keeps, the root standing in for tinygrad's STORE.
+  // tinygrad's pm_generate_realize_map (indexing.py:45-54) also realizes
+  // MSELECT/MSTACK srcs, custom-kernel inputs and a self-reading STORE's src;
+  // prepare already turned a bare STAGE or COPY into a STORE
+  // (prepare.py:220-230).  The MULTI, MATMUL and FANIN_CAP reasons alone do not
+  // seed: the walk derives those realizes, as tinygrad does
+  // (indexing.py:245-276).
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     if (!BUFFERIZE_NODES[i].realized) continue;
     if (!ru_seed_boundary_holds(BUFFERIZE_NODES[i].reasons)) continue;
@@ -1488,14 +1191,7 @@ fn void run_rangeify_unified(Term root) {
     RU_REALIZE_MAP[i].n_realized_axes = MAX_DIM;
   }
 
-  // *** Mirror indexing.py:207 (reverse-topo walk) ***
-  // bufferize_walk_rec's PRE-order does NOT strictly satisfy
-  // "consumers-before-producers" on DAGs with shared subexpressions
-  // (e.g. softmax's EXP node is reached via MUL first, but its
-  // REDUCE_SUM consumer is appended later via the RECIP path).  We
-  // compute a true reverse-topological order via Kahn's algorithm and
-  // iterate it here.  Mirror: the consumer map run_rangeify builds from
-  // its toposort (schedule/indexing.py:198-203).
+  // indexing.py:207: consumers before producers (RU_TOPO_ORDER).
   ru_compute_topo_order();
   for (u32 oi = 0; oi < RU_TOPO_ORDER_LEN; oi++) {
     u32 node_idx = RU_TOPO_ORDER[oi];
@@ -1505,15 +1201,13 @@ fn void run_rangeify_unified(Term root) {
 
     Shape shape;
     if (!ru_node_shape(info->loc, info->op, &shape)) {
-      // Shape inference failed -- mirror tinygrad's `if x.dtype.scalar()
-      // == dtypes.weakint: continue` (we have no weakint, so falling
-      // through w/o shape == no ranges).
+      // No shape, no ranges.
       continue;
     }
     u8 my_ndim = (u8)shape.ndim;
     if (my_ndim > RU_MAX_AXES) my_ndim = RU_MAX_AXES;
 
-    // ending_ranges[x] = sum([ending_ranges.get(u, []) for u in consumer_map[x]], [])
+    // indexing.py:217: the consumers' ending ranges.
     {
       u32 cidxs[RU_MAX_CONSUMERS];
       u32 nc = ru_consumers_for_node(node_idx, cidxs, RU_MAX_CONSUMERS);
@@ -1523,32 +1217,17 @@ fn void run_rangeify_unified(Term root) {
       }
     }
 
-    // *** Mirror indexing.py:181 gather consumer rngs ***
+    // consumer_rngs (indexing.py:230).
     RuConsumerRangs consumer_rngs[RU_MAX_CONSUMERS];
     u32 n_crngs = ru_gather_consumer_rngs(node_idx, my_ndim,
                                           consumer_rngs, RU_MAX_CONSUMERS);
 
     Term out_rngs[RU_MAX_AXES] = {0};
 
-    // A rank-changing RESHAPE -- the pool windowing
-    // `x.reshape(B,C,Ho,k,Wo,k)` (split) and the pool-gradient merge
-    // `reshape((B,C,Ho,k,Wo,k)->(B,C,Ho,Wo))` -- swizzles the consumer's
-    // ranges into compound IDIV/IMOD/affine index expressions
-    // (apply_movement_op_reshape) that flow into the reshape SOURCE's
-    // out_rngs.  The source no longer needs a force-realize band-aid: the
-    // general strand covered-check below (ru_expr_references_aid) now
-    // recognises the swizzled leaf axes inside those compound out_rngs as
-    // covered, so the source FUSES into the consuming reduce/elementwise
-    // kernel instead of materializing.  Mirrors tinygrad, which lowers
-    // relu->max_pool2d->sum to a single fused reduce kernel
-    // (schedule/indexing.py `_apply_reshape` + symbolic simplify +
-    // `remove_movement_op_after_rangeify`).
-
     if (RU_REALIZE_MAP[node_idx].realized_full
         || RU_REALIZE_MAP[node_idx].realized_partial) {
-      // *** Mirror indexing.py:182-189: realize_map entry pre-seeded ***
-      // "create new ranges (at the output); ending_ranges[] = []; mark
-      //  all axes as realized."
+      // indexing.py:231-238: a realized node gets fresh output ranges, and
+      // every range ends here.
       for (u8 a = 0; a < my_ndim; a++) {
         out_rngs[a] = ru_new_range(shape.dims[a], KAX_LOOP);
       }
@@ -1558,65 +1237,44 @@ fn void run_rangeify_unified(Term root) {
       RU_REALIZE_MAP[node_idx].n_realized_axes = my_ndim;
       RU_ENDING_RANGES[node_idx].n = 0;
     } else if (n_crngs == 0) {
-      // *** Mirror indexing.py:190-192 ***
-      // "if no consumers have ranges and this isn't realized, this
-      //  doesn't have ranges either."
+      // indexing.py:239-241: no consumer has ranges, so neither does this node.
       continue;
     } else if (n_crngs == 1) {
-      // *** Mirror indexing.py:193-195 ***
-      // "if this has one consumer, it inherits the ranges from it."
+      // indexing.py:242-244: a single consumer's ranges are inherited.
       for (u8 a = 0; a < my_ndim; a++) {
         out_rngs[a] = consumer_rngs[0].rngs[a];
       }
     } else {
-      // *** Mirror indexing.py:196-220 ***
-      // Two-or-more consumers: per-axis decide whether to share or
-      // realize anew. tinygrad's `all_all_same` short-circuit:
-      // if every axis's local_rngs are structurally the same, just
-      // share; else realize (mark partial-realize on the diverging axes).
+      // indexing.py:245-268: two or more consumers.  tinygrad shares the ranges
+      // when every axis agrees and otherwise realizes every axis; thvm realizes
+      // only the diverging axes (a partial realize), with the exceptions below.
       u8 partial_mask = 0;
       u8 n_realized = 0;
-      // First pass: detect all_all_same.
       int all_all_same = 1;
       for (u8 a = 0; a < my_ndim; a++) {
         if (!ru_all_same_axis(consumer_rngs, n_crngs, a)) {
           all_all_same = 0; break;
         }
       }
-      // A broadcast EXPAND that injects (stride-0) range axes is the one
-      // movement op kept fused on divergence: its divergent consumer
-      // ranges are exactly the reduce axes of the consuming REDUCEs,
-      // covered by their ending_ranges (indexing.py:223-232,249-250), so
-      // tinygrad never materializes it (a conv-bwd out_grad broadcast is
-      // 1.3 GB).  thvm's ru_all_same_axis compares RANGE Term identity,
-      // seeing those reduce-injected axes as divergent; the share-as-view
-      // shortcut recovers the fused EXPAND, with ranges every consumer can
-      // rebind (ru_expand_shared_rngs).
-      //
-      // SHRINK / RESHAPE / PERMUTE / PAD / FLIP are partial-realized on
-      // genuine divergence, faithful to tinygrad: a SHRINK (getitem) or
-      // PERMUTE (transpose) view of a computed source whose consumers map
-      // the SAME producer axis to DIFFERENT downstream axes (q.reshape(M,
-      // N,1) vs q.reshape(M,1,N); Gw vs Gw.T) CANNOT collapse to consumer
-      // 0's ranges -- that carries consumer 0's stride into consumer 1's
-      // read (silent wrong result).  tinygrad mints a fresh range + marks
-      // the axis realized (indexing.py:213-215), so each consumer LOADs
-      // from a real buffer with its own ShapeTracker.  thvm does the same
-      // via the per-axis else branch below + the realized-movement
-      // BUFFERIZE boundary (see the RU_SUBST = BUFFERIZE keep further
-      // down).  Restrict the share-as-view shortcut to EXPAND only.
+      // A broadcast EXPAND is shared as a view instead: its diverging consumer
+      // ranges are the reduce axes of the consuming REDUCEs, and tinygrad fuses
+      // it too (realize, then remove_bufferize).  Every consumer rebinds the
+      // shared ranges (ru_expand_shared_rngs).  Any other view of a computed
+      // source whose consumers map one producer axis to different axes
+      // (q.reshape(M,N,1) vs q.reshape(M,1,N); Gw vs Gw.T) cannot reuse
+      // consumer 0's ranges, which would read consumer 1 with consumer 0's
+      // stride: it realizes, and each consumer indexes the buffer at its own
+      // ranges.
       if (!all_all_same && info->op == UOP_EXPAND) {
         ru_expand_shared_rngs(info->loc, consumer_rngs, n_crngs, &shape,
                               my_ndim, out_rngs);
       } else if (all_all_same) {
-        // Mirror "OR of valids" path (indexing.py:211-213). Without a
-        // full symbolic-bool merger we collapse to consumer 0's range
-        // -- safe because all_all_same means they're equal anyway.
+        // The OR of the valids (indexing.py:258-261) is consumer 0's range:
+        // all_all_same compared the valids too.
         for (u8 a = 0; a < my_ndim; a++) {
           out_rngs[a] = consumer_rngs[0].rngs[a];
         }
       } else {
-        // Per-axis decide.
         for (u8 a = 0; a < my_ndim; a++) {
           if (ru_all_same_axis(consumer_rngs, n_crngs, a)) {
             out_rngs[a] = consumer_rngs[0].rngs[a];
@@ -1627,28 +1285,14 @@ fn void run_rangeify_unified(Term root) {
           }
         }
         if (n_realized > 0) {
-          // Mirror indexing.py:96-97 at ac4049794, the partial-realize path
-          // #18368 later deleted: a STAGE whose realized_ranges cover EVERY
-          // output axis (len(range_map[s][1]) == len(realized_ranges)) is a
-          // full GLOBAL boundary, not a LOCAL partial.
-          //
-          // A MOVEMENT op (SHRINK / RESHAPE / PERMUTE / FLIP) that realizes
-          // on consumer-divergence is FULLY realized regardless of how many
-          // axes diverged: it is a pure VIEW, so a partial-realize over just
-          // the divergent axis would leave the materialized buffer indexed
-          // by the NON-divergent axes only, and the divergent consumers (a
-          // getitem c[:,0] vs c[:,1], a transpose Gw vs Gw.T) would read it
-          // with the realized axis UNBOUND -- the begin offset / permuted
-          // stride is silently dropped (two different slices collapse to the
-          // same read).  tinygrad realizes the whole view (the RESHAPE/SHRINK
-          // gets realize_map[x] = list(range(ndim)) once any axis diverges),
-          // giving each consumer its own ShapeTracker over a contiguous
-          // buffer.  REDUCE / elementwise partial-realizes that legitimately
-          // drop a keepdim-reduced axis (softmax denom, layer-norm mean) are
-          // NOT movement ops, so they stay partial and keep their fusion.
-          // EXPAND is force-shared above (line ~912) and never reaches this
-          // branch; PAD carries a value-side WHERE guard handled separately.
-          // Only the index-remapping views land here.
+          // A realize over every axis is a full boundary.  So is a realized
+          // index-remapping view (RESHAPE, PERMUTE, SHRINK, FLIP): a partial
+          // realize over the diverging axis would leave that axis unbound in
+          // the buffer and drop the SHRINK offset or permuted stride (c[:,0]
+          // and c[:,1] would read the same element).  A REDUCE or elementwise
+          // partial realize (a softmax denominator, a layer-norm mean) keeps
+          // its fusion.  EXPAND is shared above; PAD keeps its value-side WHERE
+          // guard and stays partial.
           int is_mv = (info->op == UOP_RESHAPE || info->op == UOP_PERMUTE
                     || info->op == UOP_SHRINK  || info->op == UOP_FLIP);
           if (n_realized == my_ndim || is_mv) {
@@ -1657,10 +1301,8 @@ fn void run_rangeify_unified(Term root) {
             RU_REALIZE_MAP[node_idx].axes_mask =
                 (my_ndim < 8) ? (u8)((1u << my_ndim) - 1u) : 0xFFu;
             RU_REALIZE_MAP[node_idx].n_realized_axes = my_ndim;
-            // Close ALL axes: mint a fresh LOOP range for each non-divergent
-            // axis too, so the materialized buffer is iterated over its full
-            // contiguous shape (the divergent axes already got fresh ranges
-            // above).
+            // Fresh ranges on the agreeing axes too, so the buffer is iterated
+            // over its whole shape.
             for (u8 a = 0; a < my_ndim; a++) {
               if (!(partial_mask & (u8)(1u << a))) {
                 out_rngs[a] = ru_new_range(shape.dims[a], KAX_LOOP);
@@ -1675,20 +1317,16 @@ fn void run_rangeify_unified(Term root) {
       }
     }
 
-    // *** Mirror indexing.py:223-232 ***
-    // "if this element is a reduce and there's ended ranges, we might
-    //  have to end some other ranges (...)"
-    // A GATHER counts as elementwise here: in tinygrad it is a one-hot
-    // REDUCE (mixin/op.py:1043), so an expand above it ends ranges the same
-    // way (a gather feeding a matmul realizes; the matmul reads a buffer).
+    // indexing.py:270-276: an elementwise op or REDUCE with ended ranges
+    // realizes every output axis.  A GATHER counts as elementwise: tinygrad's
+    // is a one-hot REDUCE (mixin/op.py:1041), so a gather feeding a matmul
+    // realizes and the matmul reads a buffer.
     int is_elementwise = uop_is_unary_elementwise(info->op)
                       || uop_is_binary_elementwise(info->op)
                       || uop_is_ternary_elementwise(info->op)
                       || info->op == UOP_GATHER;
     if (RU_ENDING_RANGES[node_idx].n
         && (is_elementwise || info->op == UOP_REDUCE)) {
-      // indexing.py:271-275: an elementwise op or REDUCE with ended ranges
-      // realizes every output axis (_realize_axis = list(range(len(out_rngs)))).
       u8 mask = RU_REALIZE_MAP[node_idx].axes_mask;
       u8 added = 0;
       for (u8 a = 0; a < my_ndim; a++) {
@@ -1705,19 +1343,12 @@ fn void run_rangeify_unified(Term root) {
       RU_ENDING_RANGES[node_idx].n = 0;
     }
 
-    // *** Mirror _limit_bufs (tinygrad schedule/rangeify.py:176-198) ***
-    // Before deriving this node's input ranges (and thus before the walk
-    // descends into its srcs), enforce the device kernel-buffer cap: if this
-    // elementwise node's fused subtree would read more distinct buffers than
-    // the device allows in one kernel, pre-mark its elementwise srcs realized
-    // so each splits into its own kernel.  The srcs are visited later in this
-    // same reverse-topo walk and pick up fresh LOOP ranges via the realized
-    // branch above.  Pinned, so remove_bufferize cannot re-fuse them.
+    // tinygrad's _limit_bufs: may pin this node's elementwise srcs realized
+    // before the walk reaches them (ru_limit_bufs_node).
     ru_limit_bufs_node(node_idx);
 
-    // *** Mirror indexing.py:243-254 ***
-    // "rngs is the input ranges" -- apply movement-op swizzle / REDUCE
-    // axis injection.
+    // indexing.py:283-301, the input ranges: swizzled by a movement op, fresh
+    // on a REDUCE's reduced axes, passed through otherwise.
     Term in_rngs[RU_MAX_AXES] = {0};
     u32  in_ndim = my_ndim;
     int  is_movement = (info->op == UOP_RESHAPE || info->op == UOP_PERMUTE
@@ -1729,11 +1360,11 @@ fn void run_rangeify_unified(Term root) {
                             in_rngs, &swizzled_ndim)) {
         in_ndim = swizzled_ndim;
       } else {
-        // Identity fallback when the swizzler can't infer the shape.
+        // The swizzle declined: pass the ranges through.
         for (u8 a = 0; a < my_ndim; a++) in_rngs[a] = out_rngs[a];
       }
 
-      // Mirror indexing.py:249-250 (EXPAND seeds ending_ranges).
+      // indexing.py:294-297: an EXPAND ends the ranges of its broadcast axes.
       if (info->op == UOP_EXPAND) {
         Shape src_shape;
         if (ru_node_src_shape(info->loc, &src_shape)) {
@@ -1741,8 +1372,7 @@ fn void run_rangeify_unified(Term root) {
             u32 in_dim  = (a < src_shape.ndim) ? src_shape.dims[a] : 1;
             u32 out_dim = (u32)term_val(heap_read(info->loc + 2 + a));
             if (in_dim != out_dim) {
-              // Range "ended" by this expand: collect the axis_id of
-              // every RANGE in out_rngs[a] but not in in_rngs[a].
+              // Every RANGE in out_rngs[a] ends here.
               u32 axes_out[RU_MAX_AXES];
               u32 n_axes_out = ru_collect_range_axes(out_rngs[a],
                                                      axes_out, RU_MAX_AXES, 0);
@@ -1764,16 +1394,10 @@ fn void run_rangeify_unified(Term root) {
         }
       }
     } else if (info->op == UOP_REDUCE) {
-      // Mirror indexing.py:253-254
-      //   `tuple(rctx.new_range(s, axistype=AxisType.REDUCE) if i in arg[1] else r ...`
-      // Multi-axis REDUCE: every axis in the node's axes-list gets a
-      // fresh KAX_REDUCE range; non-reduce dims thread out_rngs through.
-      //
-      // RU_REDUCE_RANGES[node_idx] records every fresh REDUCE range
-      // Term so materialize.c can enumerate them via accessor without
-      // re-deriving from the heap (thvm equivalent of tinygrad's
-      // convert_reduce_to_reduce_with_ranges packing them into
-      // src=(value,)+tuple(new_ranges) at indexing.py:94).
+      // indexing.py:300-301: a fresh KAX_REDUCE range on each reduced axis, the
+      // output ranges in order on the others (tinygrad's reduced axes are the
+      // source's leading arg[1] axes; thvm's stay in place).  RU_REDUCE_RANGES
+      // keeps the fresh ranges, tinygrad's REDUCE src[1:] (indexing.py:113).
       Shape src_shape;
       Term red_t = term_new(0, TAG_UOP, info->op, info->loc);
       u32 n_axes = uop_reduce_n_axes(red_t);
@@ -1793,10 +1417,7 @@ fn void run_rangeify_unified(Term root) {
           if (is_reduce_axis[a]) {
             Term rng = ru_new_range(src_shape.dims[a], KAX_REDUCE);
             in_rngs[a] = rng;
-            // Record only true UOP_RANGE leaves (extent-1 reduce axes
-            // collapse to UOP_CONST(0) per ru_new_range; tinygrad's
-            // convert_reduce_to_reduce_with_ranges filters via
-            // `len(x.arg[1])` and the `i in x.arg[1]` check at line 93).
+            // Only true RANGEs: an extent-1 axis is CONST(0) (ru_new_range).
             if (term_tag(rng) == TAG_UOP && term_ext(rng) == UOP_RANGE) {
               u8 k = RU_REDUCE_RANGES[node_idx].n;
               if (k < MAX_DIM) {
@@ -1814,11 +1435,9 @@ fn void run_rangeify_unified(Term root) {
         in_ndim = dst_ndim;
       }
     } else {
-      // Elementwise / CAST / BITCAST / etc: in_rngs == out_rngs.
       for (u8 a = 0; a < my_ndim; a++) in_rngs[a] = out_rngs[a];
     }
 
-    // Commit per-node range map.
     RU_RANGE_MAP[node_idx].out_ndim   = my_ndim;
     RU_RANGE_MAP[node_idx].in_ndim    = (u8)in_ndim;
     RU_RANGE_MAP[node_idx].has_ranges = 1;
@@ -1826,36 +1445,26 @@ fn void run_rangeify_unified(Term root) {
     for (u8 a = 0; a < in_ndim; a++) RU_RANGE_MAP[node_idx].in_rngs [a] = in_rngs [a];
   }
 
-  // *** remove_bufferize (tinygrad schedule/rangeify.py:50-102) ***
-  // Un-realize a WALK-realized ELEMENTWISE boundary so it is RECOMPUTED into
-  // each consumer kernel instead of stored to a shared buffer (the softmax
-  // `*scale`/`exp` fuse into the score/max/sum reduces: 7 kernels -> fewer).
-  // pm_apply_rangeify then re-indexes the recomputed value per consumer via
-  // ru_build_axis_subst + ru_subtree_rewrite_ranges (mirror rangeify.py:102
-  // `src.substitute(replaced)`).  Gates, in tinygrad order:
-  //   * removable (rangeify.py:56): a node feeding a BLAS-matmul reduce stays
-  //     materialized -- thvm's GEMM dispatch needs buffer operands (thvm's
-  //     ALWAYS_CONTIGUOUS equivalent).  See rb_feeds_matmul_reduce.
-  //   * buffer_in_reduce (rangeify.py:88-96): keep a node whose value fuses a
-  //     LIVE (non-realized) reduce -- recomputing it would re-run that reduce
-  //     reading buffers.  See rb_src_has_live_reduce.
+  // remove_bufferize (rangeify.py:50-102): un-realize a walk-realized
+  // elementwise boundary so each consumer recomputes it instead of reading a
+  // shared buffer; pm_apply_rangeify re-indexes it per consumer
+  // (ru_build_axis_subst and ru_subtree_rewrite_ranges, tinygrad's
+  // src.substitute at rangeify.py:102).  Besides tinygrad's gates (more than 3
+  // buffers, rangeify.py:85; a live reduce, rangeify.py:87-96), thvm keeps GEMM
+  // operands (rb_feeds_matmul_reduce) and movement regions
+  // (rb_unsafe_recompute_region).
   for (u32 oi = 0; oi < RU_TOPO_ORDER_LEN; oi++) {
     u32 i = RU_TOPO_ORDER[oi];
     if (!(RU_REALIZE_MAP[i].realized_full || RU_REALIZE_MAP[i].realized_partial))
       continue;
-    // limit_bufs pinned this boundary to keep a Metal kernel under the
-    // 31-buffer hard cap (ru_limit_bufs_node).  Un-realizing it would re-fuse
-    // the over-budget kernel -> Metal compile error.  Never remove it.
+    // A limit_bufs split: un-realizing it would re-fuse a kernel over the
+    // device buffer cap.
     if (RU_REALIZE_MAP[i].pinned) continue;
-    // THVM_FUSE_MATMUL_EPILOGUE: un-realize an OPT_TC matmul REDUCE whose only
-    // consumer is an elementwise epilogue chain (rb_matmul_epilogue_fusable),
-    // so its REDUCE subtree inlines into that consumer's store -- the codegen
-    // epilogue then emits one fused TC kernel.  A matmul reduce is a SEED
-    // boundary (bufferize_classify sets BUFFERIZE_NODES[].realized for it), so
-    // this clause runs BEFORE the seed-boundary keep below; the elementwise
-    // recompute path only un-realizes WALK-derived boundaries.  Metal-only:
-    // the epilogue is emittable solely by the bf16 tiled emitter (render_uop.c
-    // gates `c_is_bf`); on CPU/CUDA keep the matmul a realized BLAS operand.
+    // THVM_FUSE_MATMUL_EPILOGUE: un-realize an OPT_TC matmul reduce whose only
+    // consumer is an elementwise chain (rb_matmul_epilogue_fusable).  A matmul
+    // is a bufferize_classify boundary, so this runs before the keep below.
+    // Metal only: the bf16 tiled emitter alone emits the epilogue (render_uop.c
+    // checks c_is_bf); elsewhere the matmul stays a realized BLAS operand.
     if (ru_fuse_epilogue_on() && ru_fuse_matmul_input_target_ok()
         && rb_matmul_epilogue_fusable(i)
         && !rb_src_has_live_reduce(BUFFERIZE_NODES[i].loc, 0)) {
@@ -1863,54 +1472,33 @@ fn void run_rangeify_unified(Term root) {
       RU_REALIZE_MAP[i].realized_partial = 0;
       continue;
     }
-    if (BUFFERIZE_NODES[i].realized) continue;          // seed boundary: keep
+    if (BUFFERIZE_NODES[i].realized) continue;          // a classify boundary
     u8 op = BUFFERIZE_NODES[i].op;
     int ew = uop_is_unary_elementwise(op)
           || uop_is_binary_elementwise(op)
           || uop_is_ternary_elementwise(op);
     if (!ew) continue;                                  // only removable elementwise
-    // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise feeding ONE matmul
-    // reduce is fused INTO that matmul (the TC A-staging computes it inline),
-    // so we DON'T keep it realized.  Otherwise the GEMM-operand rule holds.
-    // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise producer feeding
-    // ONE matmul reduce is un-realized and spliced into the matmul's A operand.
-    // The matmul lowering wraps A in RESHAPE({M,K,1})+EXPAND({M,K,N}) -- a
-    // rank-growing movement.  thvm's POSITIONAL ru_build_axis_subst does not
-    // compose its producer->consumer remap up that RESHAPE->EXPAND->MUL->REDUCE
-    // chain, so the producer's own {M,K} RANGE leaves leak into the reduce body
-    // as free LOOP axes -- which the conv-bwd absorb then folds into the reduce
-    // (1-axis K -> 3-axis {M,K,N}, recognise_tc declines, the matmul mis-sums).
-    // The reduce-rebuild below ports tinygrad's exact src.substitute for THIS
-    // rank-grow case: it remaps each leaked producer LOOP range onto the matmul
-    // axis (the reduce K range, or an output M range) of equal extent, keeping
-    // the reduce 1-axis so the TC tiled emitter handles the fused A -- bit-exact
-    // (the producer is evaluated at exactly the (m,k) the matmul iterates).
-    // rb_matmul_input_fusable already guarantees the consumer chain terminates
-    // at a matmul REDUCE (the only shape the remap targets), so the un-realize
-    // is safe.  Default-OFF flag, so the baseline is unaffected.
+    // THVM_FUSE_MATMUL_INPUT: a single-consumer elementwise producer of one
+    // matmul is un-realized and spliced into its A operand (pm_apply_rangeify's
+    // rank-grow remap binds its leaked ranges).  Any other GEMM operand stays
+    // realized.
     int fuse_mm = (ru_fuse_matmul_input_on() && ru_fuse_matmul_input_target_ok()
                    && rb_feeds_matmul_reduce(i)
                    && rb_matmul_input_fusable(i));
     if (rb_feeds_matmul_reduce(i) && !fuse_mm)
       continue;                                         // removable=False (GEMM operand)
-    // The matmul-input fuse threads the producer through the matmul-lowering
-    // reshape(+unit axis)+expand(broadcast over the contracted N axis) -- a
-    // benign rank-grow that rb_unsafe_recompute_region conservatively rejects
-    // and a multi-buffer modulation that rb_too_many_buffers would reject.
-    // For this targeted path the inline IS exact (the broadcast N axis is not
-    // read in the matmul's A load), so we skip those two general gates; the
-    // codegen-side detector (rmu_detect_matmul_tc) independently re-validates
-    // the operand shape before it inlines, falling back to the generic
-    // accumulator (still correct) if anything is off.
+    // The input fuse skips the next two gates: the matmul lowering's
+    // reshape(+unit axis) + expand(over N) is exact here (A's load never reads
+    // N), and its producers (a modulation) often read more than 3 buffers.
+    // rmu_detect_matmul_tc re-checks the operand and can fall back to the
+    // generic accumulator.
     if (!fuse_mm) {
       if (rb_unsafe_recompute_region(i)) continue;      // movement/broadcast re-index unsafe
-      // tinygrad rangeify.py:85: a node reading more than 3 buffers is kept.
+      // More than 3 buffers (rangeify.py:85).
       if (rb_too_many_buffers(BUFFERIZE_NODES[i].loc))
-        continue;                                       // accessed_buffers > 3
+        continue;
     }
-    // tinygrad rangeify.py:88-95 buffer_in_reduce: a node whose value fuses
-    // a LIVE reduce is kept (recomputing it re-runs the reduce reading
-    // buffers).
+    // A live reduce in the value (rangeify.py:87-96).
     if (rb_src_has_live_reduce(BUFFERIZE_NODES[i].loc, 0)) {
       continue;
     }
@@ -1918,56 +1506,30 @@ fn void run_rangeify_unified(Term root) {
     RU_REALIZE_MAP[i].realized_partial = 0;
   }
 
-  // *** Mirror indexing.py:268: graph_rewrite(pm_apply_rangeify) ***
+  // indexing.py:317: graph_rewrite(pm_apply_rangeify).
   pm_apply_rangeify(root);
 }
 
-// === pm_apply_rangeify (mirror indexing.py:101-110) ===
-//
-// In tinygrad this is a PatternMatcher rewrite that:
-//   1. REDUCE(op, axis_tuple) -> REDUCE(op) with explicit RANGE args
-//   2. PAD -> WHERE (because apply_movement_op_pad already produced the
-//      WHERE-INVALID guard; this rule wraps the PAD source value with it)
-//   3. Generic node -> rewrite each src either to INDEX expr or to a
-//      BUFFERIZE+INDEX when the src is in realize_map
-//   4. Movement ops post-rangeify: drop them (rngs already swizzled in).
-//
-// thvm-side implementation: walk every node and compute the canonical
-// substitute Term.  RU_SUBST holds the INDEX expression a consumer
-// threads in; at realize boundaries we additionally emit a UOP_BUFFERIZE
-// Term on the MAIN HEAP via uop_bufferize_new and stash it in
-// RU_BUFFERIZE_TERM for materialize.c to walk.
+// pm_apply_rangeify's tables, indexed by node.  RU_SUBST is what a consumer
+// splices in for the node: its rewritten value, or at a realize boundary the
+// UOP_BUFFERIZE (RU_BUFFERIZE_TERM) that the consumer indexes at its own
+// ranges.
 
 #define RU_SUBST_CAP RU_MAX_NODES
 static Term RU_SUBST[RU_SUBST_CAP];
-// Main-heap UOP_BUFFERIZE Term per realized node.  Zero means "no
-// boundary emitted here".  Mirrors tinygrad's
-// `UOp(Ops.BUFFERIZE, ..., src=(value,)+closed_ranges, arg=opts)`
-// landing in the tsink graph at the realize boundary.
+// A realized node's UOP_BUFFERIZE (tinygrad's STAGE, indexing.py:92), or 0.
 static Term RU_BUFFERIZE_TERM[RU_SUBST_CAP];
-// Main-heap UOP_STORE Term per realized node, structurally equivalent
-// to what `kernel_lift_to_uop` emits as `cached_lift.store_root`.
-// Built from the rewritten subtree + a fresh UOP_BUFFER sized by the
-// boundary's closed-range extents.  Zero if no boundary or if dtype
-// inference declined.  Consumed by kernel_lift.c via the
-// rangeify_unified_store_root_at accessor.
+// The realized node's kernel root for kernel_lift.c
+// (rangeify_unified_store_root_at): UOP_STORE(buffer of the node's shape,
+// output address, store value), or a SCATTER's AFTER chain of stores.  0 when
+// there is no boundary or no dtype.
 static Term RU_STORE_ROOT[RU_SUBST_CAP];
 
-// Side table: per-axis range terms preserved at INDEX_E construction.
-// Mirror: tinygrad's `BUFFERIZE.index(*per_axis_ranges)` carries per-axis
-// range terms directly in the INDEX node's args
-// (tinygrad/schedule/indexing.py:78).  thvm's `uop_index_e(buffer, addr)`
-// is a 2-arg form with a flat addr (sum over stride*range products);
-// the per-axis info is otherwise lost the moment the flat addr is built
-// by `ru_build_input_addr_for`.  Materialize.c's bypass rewriter needs
-// the per-axis info to substitute closed_ranges -> consumer in_rngs
-// (the spec at indexing.py:78 `new_src.index(*[r for i,r in enumerate
-// (ctx.range_map[x][0]) if i in realized_ranges])`); without it the
-// rewriter has to RE-DECOMPOSE the flat addr and fails when the
-// addr contains movement-op swizzlers (IDIV/IMOD/inner-IADD).
-//
-// Key = INDEX_E heap loc (`term_val(index_e_term)`).  Linear-scan
-// lookup, capped at RU_INDEX_AXIS_CAP entries per pass.
+// The per-axis ranges of each INDEX_E pm_apply_rangeify builds, keyed by its
+// heap loc.  tinygrad's INDEX keeps them as srcs (indexing.py:93); thvm's
+// INDEX_E has one flat address, and materialize.c's BUFFERIZE inline needs the
+// per-axis ranges to substitute closed ranges without re-decomposing that
+// address (which fails on IDIV/IMOD swizzles).  Linear scan, capped.
 #define RU_INDEX_AXIS_CAP 16384
 static u64  RU_INDEX_AXIS_KEY  [RU_INDEX_AXIS_CAP];
 static u8   RU_INDEX_AXIS_NDIM [RU_INDEX_AXIS_CAP];
@@ -1979,8 +1541,7 @@ static void ru_index_axes_register(Term index_e_term, Term const *rngs,
   if (RU_INDEX_AXIS_N >= RU_INDEX_AXIS_CAP) return;
   if (term_tag(index_e_term) != TAG_UOP) return;
   u64 loc = term_val(index_e_term);
-  // Dedup: same INDEX_E loc may be constructed multiple times (hash-cons
-  // returns the same term).  Skip if already registered.
+  // A hash-consed INDEX_E can be built more than once: the first entry wins.
   for (u32 i = 0; i < RU_INDEX_AXIS_N; i++) {
     if (RU_INDEX_AXIS_KEY[i] == loc) return;
   }
@@ -1992,37 +1553,30 @@ static void ru_index_axes_register(Term index_e_term, Term const *rngs,
   RU_INDEX_AXIS_N++;
 }
 
-// Public wrapper for ru_index_axes_register.  Used by materialize.c's
-// bypass rewriter to propagate per-axis info when it rebuilds an
-// INDEX_E (e.g. BUFFERIZE->BUFFER promotion).  Without this the
-// rebuilt INDEX_E loses its side-table entry.
+// For materialize.c, which re-registers an INDEX_E it rebuilds (a BUFFERIZE
+// promoted to its BUFFER) so the entry survives.
 fn void rangeify_unified_index_axes_register(Term index_e_term,
                                              Term const *rngs, u8 ndim) {
   ru_index_axes_register(index_e_term, rngs, ndim);
 }
 
-// Reverse lookup: given a BUFFERIZE Term, find its producer node_idx
-// in RU_BUFFERIZE_TERM[].  Used by materialize.c's bypass rewriter to
-// resolve orphan BUFFERIZEs (those not in BOUNDARY_BUFFERIZE_TERM[]
-// because their node didn't get a boundary kernel).  Returns
-// 0xFFFFFFFFu when no match.
-// Per-axis realize mask from RU_REALIZE_MAP.  Bit i set iff axis i
-// is in the realized set (closed in BUFFERIZE).  Returns 0 for nodes
-// out of bounds.
+// The node's realized-axes mask (bit i: axis i is closed in its BUFFERIZE).
 fn u8 rangeify_unified_axes_mask_at(u32 node_idx) {
   if (node_idx >= RU_MAX_NODES) return 0;
   return RU_REALIZE_MAP[node_idx].axes_mask;
 }
 
-// 1 iff the node is fully realized (all output axes closed); 0 for
-// partial-realize or not-realized.  The materialize bypass rewriter
-// uses this with rangeify_unified_out_rng_at to recover the positional
-// closed-range -> output-axis map (mirroring ru_collect_closed_ranges).
+// 1 iff the node is fully realized.  materialize.c pairs it with
+// rangeify_unified_axes_mask_at and rangeify_unified_out_rng_at to map closed
+// ranges to output axes, as ru_collect_closed_ranges does.
 fn int rangeify_unified_realized_full_at(u32 node_idx) {
   if (node_idx >= RU_MAX_NODES) return 0;
   return RU_REALIZE_MAP[node_idx].realized_full ? 1 : 0;
 }
 
+// The node whose RU_BUFFERIZE_TERM is `buf`, or 0xFFFFFFFFu.  materialize.c
+// uses it for a BUFFERIZE whose node did not become a boundary kernel (one not
+// in BOUNDARY_BUFFERIZE_TERM).
 fn u32 rangeify_unified_node_idx_for_bufferize(Term buf) {
   if (buf == 0) return 0xFFFFFFFFu;
   for (u32 i = 0; i < RU_SUBST_CAP; i++) {
@@ -2031,15 +1585,8 @@ fn u32 rangeify_unified_node_idx_for_bufferize(Term buf) {
   return 0xFFFFFFFFu;
 }
 
-// Reduce-ranges attached to a UOP_REDUCE node by the unified pass.
-// Mirrors tinygrad's `src=(value,)+tuple(new_ranges)` from
-// convert_reduce_to_reduce_with_ranges (indexing.py:90-96).  Returns 0
-// for non-REDUCE nodes or REDUCE nodes whose reduce axes are extent-1
-// (which collapse to UOP_CONST(0) per `resolve(s!=1)`).
-// Per-axis range terms preserved at INDEX_E construction in
-// pm_apply_rangeify.  Mirror: tinygrad's `BUFFERIZE.index(*per_axis_ranges)`
-// at indexing.py:78.  Returns the number of axes written to out_rngs (0
-// if no per-axis info was recorded for this INDEX_E heap loc).
+// The per-axis ranges registered for the INDEX_E at `index_loc`: the number
+// written to out_rngs, 0 if none.
 fn u8 rangeify_unified_index_axes_lookup(u64 index_loc, Term *out_rngs,
                                           u8 cap) {
   for (u32 i = 0; i < RU_INDEX_AXIS_N; i++) {
@@ -2052,15 +1599,10 @@ fn u8 rangeify_unified_index_axes_lookup(u64 index_loc, Term *out_rngs,
   return 0;
 }
 
-// Per-tid flag: set to 1 by ru_compose_view_chain when the unified pass
-// folds td->prior_views into the INDEX_E.addr for a TAG_TEN input.
-// materialize.c's input_slot_dedup reads this and sets the matching
-// ke->input_chain_composed[slot]=1 so the backend's pre-mat pass skips
-// the gather (the addr already encodes the chain walk).  Mirrors the
-// rangeify.c emit_chained_index_from_addr + input_chain_composed
-// bookkeeping; without it the backend would gather the strided view
-// into a contig buffer AND the kernel would read at our chain-composed
-// addr -- double-application, wrong reads.
+// Per tid: 1 when an address here composes the tensor's views itself
+// (ru_compose_view_chain, ru_ten_leaf_addr).  materialize.c's input_slot_dedup
+// copies it to ke->input_chain_composed, so the backend binds the raw buffer
+// instead of first gathering the view, which would apply the views twice.
 static u8 RU_TID_CHAIN_COMPOSED[TENS_CAP];
 
 fn int rangeify_unified_tid_chain_composed(u32 tid) {
@@ -2069,39 +1611,26 @@ fn int rangeify_unified_tid_chain_composed(u32 tid) {
 }
 
 
-// Accessor for the UOP_BUFFERIZE Term emitted at this node's realize
-// boundary.  0 if the node is not a boundary.
+// The node's UOP_BUFFERIZE, 0 if it is not a boundary.
 fn Term rangeify_unified_bufferize_at(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
   return RU_BUFFERIZE_TERM[node_idx];
 }
 
-// Accessor for the UOP_STORE Term emitted at this node's realize
-// boundary, structurally equivalent to `cached_lift.store_root`.
+// The node's RU_STORE_ROOT.
 fn Term rangeify_unified_store_root_at(u32 node_idx) {
   if (node_idx >= BUFFERIZE_NODES_LEN) return 0;
   return RU_STORE_ROOT[node_idx];
 }
 
-// Build a row-major linear addr Term from an array of per-axis range
-// expressions and the producing tensor's shape.  Each range may be a
-// bare UOP_RANGE leaf (the elementwise case) or an arithmetic
-// expression over RANGE leaves (the RESHAPE swizzler's IDIV/IMOD
-// decomposition). Strides come from the dims[] argument when supplied;
-// when dims[] is NULL we recover them from each UOP_RANGE leaf's
-// extent (heap field 2) and fall back to a flat IADD if any axis isn't
-// a bare RANGE -- caller responsibility for the elementwise path.
+// The row-major address of per-axis index expressions `rngs` (bare RANGEs or
+// IDIV/IMOD swizzles) over `dims`.  With dims NULL each extent is read off a
+// bare RANGE, and any other entry counts as extent 1.
 static Term ru_build_addr_with_dims(Term const *rngs, u8 ndim,
                                      u32 const *dims) {
   if (ndim == 0) return uop_const(DT_INT32, 0);
   u32 local_dims[RU_MAX_AXES] = {0};
   if (dims == NULL) {
-    // Derive per-axis extents from each rng.  RANGE leaves contribute
-    // their extent; CONST(0) (broadcast-axis placeholder) contributes
-    // 1 (no stride mass).  Any other shape (a swizzler IADD/IMUL,
-    // CONST(non-zero), etc.) defaults to 1 too -- the surrounding
-    // call already knows the underlying numel from src_shape when
-    // it matters; this path is the dims-NULL fallback.
     for (u8 a = 0; a < ndim; a++) {
       Term r = rngs[a];
       if (term_tag(r) == TAG_UOP && term_ext(r) == UOP_RANGE) {
@@ -2115,10 +1644,8 @@ static Term ru_build_addr_with_dims(Term const *rngs, u8 ndim,
   u32 strides[RU_MAX_AXES] = {0};
   strides[ndim - 1] = 1;
   for (i8 a = (i8)ndim - 2; a >= 0; a--) {
-    // A symbolic (kvar) inner dim contributes its UPPER BOUND to the outer
-    // stride (matching shape_numel / view_create): the addr layout is the
-    // hi-padded buffer, the loop iterates only the bound extent.  Baking the
-    // raw kvar-packed extent here would corrupt every outer addr coefficient.
+    // A symbolic (kvar) dim strides by its upper bound, as shape_numel and
+    // view_create lay buffers out; the raw packed extent is not a size.
     strides[a] = strides[a + 1] * kvar_extent_static(dims[a + 1]);
   }
   Term acc = 0;
@@ -2143,18 +1670,8 @@ static Term ru_build_addr_from_ranges(Term const *rngs, u8 ndim) {
   return ru_build_addr_with_dims(rngs, ndim, NULL);
 }
 
-// Builds the "INDEX expression" Term that a consumer references when it
-// reads this node. Mirrors tinygrad's
-//   `new_src = new_src.index(*ctx.range_map[x][0])`
-// We model `.index(*r)` as a chain of UOP_INDEX_E.addr over an IADD-tree
-// of (range_i * stride_i) -- tinygrad's INDEX is multi-arg but the
-// downstream stride-collapse simplification yields the same scalar.
-// When the node's own output shape (heap-resolvable via `self_term`) is
-// known we thread its dims through so the addr's row-major strides match
-// the realized BUFFER's stride layout.  Without dims, size-1 axes hash-
-// cons to UOP_CONST(0) and ru_build_addr_with_dims falls back to a
-// stride-1 IADD chain (the non-bare-RANGE bail-out), which produces
-// wrong addrs when any axis is degenerate.
+// The node's output address, where its store writes: out_rngs over its own
+// shape, or over extents read off the ranges when the shape is unknown.
 static Term ru_build_index_addr_for(RuRangeMap const *rm, Term self_term) {
   Shape out_shape;
   if (self_term != 0 && term_shape_in(self_term, 0, &out_shape)
@@ -2166,14 +1683,9 @@ static Term ru_build_index_addr_for(RuRangeMap const *rm, Term self_term) {
   return ru_build_addr_from_ranges(rm->out_rngs, rm->out_ndim);
 }
 
-// Body/input addr: includes the reduce range (and any movement-op
-// swizzle). For non-REDUCE nodes this is identical to the output addr
-// because in_rngs == out_rngs; for REDUCE the reduce range was injected
-// at raxis in run_rangeify_unified's UOP_REDUCE branch.  When `loc` is
-// supplied we read the producer's shape (heap[loc + 0]) and use its
-// dims for strides -- needed when the RESHAPE / PAD swizzler produced
-// IDIV/IMOD expressions whose extents can't be recovered from a bare
-// UOP_RANGE leaf.
+// The address the node reads its inputs at: in_rngs (with any swizzle or REDUCE
+// range) over the shape of its slot-0 source, whose dims give the strides a
+// compound entry cannot.  RU_NO_LOC skips the shape lookup.
 #define RU_NO_LOC ((u64)~0ull)
 
 static Term ru_build_input_addr_for(RuRangeMap const *rm, u64 loc) {
@@ -2187,29 +1699,19 @@ static Term ru_build_input_addr_for(RuRangeMap const *rm, u64 loc) {
   return ru_build_addr_from_ranges(rm->in_rngs, rm->in_ndim);
 }
 
-// === prior_views chain composition into INDEX_E.addr ===
-//
-// Mirrors rangeify.c's `input_chain_foldable` +
-// `emit_chained_index_from_addr` over scalar UOps -- here emitted as
-// UOp DAG IDIV/IMOD/IMUL/IADD via uop_int_binary.  The unified pass
-// builds `in_addr` as a row-major flat index into the producer's iter
-// cube, which for a TAG_TEN with `td->nviews > 0` equals the
-// public-view shape's row-major flat index (assuming the public view
-// is contiguous -- the common case after a RESHAPE on a non-contig
-// source appended a fresh canonical outermost view via
-// tensor_view_chain_append).  Compose prior_views[nviews-1] ...
-// prior_views[0] via decompose-by-shape: coord[d] = (flat /
-// suffix[d]) % dims[d], buffer_idx += coord[d] * strides[d] + offset.
-// Returns 0 on bail (non-foldable chain, negative strides, packed
-// dtype, non-contig public view); caller then leaves in_addr alone
-// and the backend pre-mat handles the chain at dispatch time.
+// A TAG_TEN with prior views (td->nviews > 0) is read at a row-major flat index
+// of its public view; composing prior_views[nviews-1] .. [0] into that address
+// (coord[d] = (flat / suffix[d]) % dims[d], times strides[d], plus the offset)
+// reads the raw buffer directly.  1 if that applies: a contiguous offset-0
+// public view, non-negative strides and offsets, no packed dtype.  Otherwise
+// the backend gathers the view at dispatch.
 static int ru_chain_foldable(u32 tid) {
   if (tid == 0 || tid >= TENS_NEXT) return 0;
   TenDesc const *td = &TENS[tid];
   if (td->nviews == 0 || td->prior_views == NULL) return 0;
   if (dtype_is_packed(td->dtype)) return 0;
-  // Outermost public view must be contig+offset0 so the unified pass's
-  // row-major flat addr lands at the right entry of prior_views[nviews-1].
+  // The flat address indexes prior_views[nviews-1] only from a contiguous,
+  // offset-0 public view.
   if (!td->view.contiguous || td->view.offset != 0) return 0;
   for (u8 k = 0; k < td->nviews; k++) {
     View const *pv = &td->prior_views[k];
@@ -2222,11 +1724,9 @@ static int ru_chain_foldable(u32 tid) {
   return 1;
 }
 
-// Build the per-view decompose-by-shape map as a UOp DAG over `cur`.
-// `cur` is a flat index into pv->shape; returns sum_d coord_d*pv->strides[d]
-// + pv->offset where coord_d = (cur / suffix[d]) % pv->shape.dims[d].
-// Broadcast axes (strides[d]==0) contribute nothing.  Mirror of
-// rangeify.c's build_addr_from_flat_iter over the UOp DAG.
+// One view's decompose-by-shape of flat index `cur`, with no modulus on the
+// leading axis; a broadcast axis (stride 0) adds nothing:
+//   offset + sum over d of ((cur / suffix[d]) % dims[d]) * strides[d]
 static Term ru_compose_one_view(Term cur, View const *pv) {
   u32 ndim = pv->shape.ndim;
   if (ndim == 0) {
@@ -2235,9 +1735,8 @@ static Term ru_compose_one_view(Term cur, View const *pv) {
   u32 suffix[MAX_DIM];
   suffix[ndim - 1] = 1;
   for (i32 d = (i32)ndim - 2; d >= 0; d--) {
-    // A symbolic (kvar) inner dim contributes its upper bound to the flat-index
-    // suffix (the layout is worst-case); the raw kvar-packed extent (2^31) would
-    // make `cur / suffix` collapse to 0 -> every coord reads element 0.
+    // A symbolic dim counts its upper bound (the worst-case layout); the raw
+    // packed extent would make every coordinate 0.
     suffix[d] = suffix[d + 1] * kvar_extent_static(pv->shape.dims[d + 1]);
   }
   Term acc = pv->offset != 0 ? uop_const(DT_INT32, pv->offset) : 0;
@@ -2248,7 +1747,7 @@ static Term ru_compose_one_view(Term cur, View const *pv) {
       coord = uop_int_binary(UOP_IDIV, coord, uop_const(DT_INT32, suffix[d]));
     }
     if (d != 0) {
-      // Resolve a symbolic modulus to its upper bound (matches the suffix above).
+      // The upper bound again, as in the suffix.
       coord = uop_int_binary(UOP_IMOD, coord,
                              uop_const(DT_INT32, kvar_extent_static(pv->shape.dims[d])));
     }
@@ -2260,16 +1759,9 @@ static Term ru_compose_one_view(Term cur, View const *pv) {
   return acc != 0 ? acc : uop_const(DT_INT32, 0);
 }
 
-// A contiguous (row-major, offset-0) view composes as the IDENTITY on
-// the running flat index: ru_compose_one_view rebuilds the mixed-radix
-// digits of `cur` (the top axis is unbounded -- no IMOD -- and every
-// stride == its own suffix), so acc == cur for ALL cur >= 0.  This is
-// the View-merge fast path from tinygrad's `View.__add__`
-// (`if vm2.contiguous: return vm1`): a contiguous inner view absorbs
-// into its outer view, emitting NO IDIV/IMOD/IMUL/IADD for that step.
-// Require all-static dims so the suffix/identity argument doesn't lean
-// on the kvar upper-bound resolution (the worst-case packed extent),
-// keeping the merge byte-exact rather than just bound-exact.
+// 1 if the view maps a flat index to itself: contiguous and offset 0, so each
+// stride equals its suffix and the leading axis has no modulus.  Symbolic dims
+// are excluded, so the identity never rests on the upper-bound layout.
 static int ru_view_composes_as_identity(View const *pv) {
   if (!pv->contiguous || pv->offset != 0) return 0;
   for (u32 d = 0; d < pv->shape.ndim; d++) {
@@ -2278,23 +1770,16 @@ static int ru_view_composes_as_identity(View const *pv) {
   return 1;
 }
 
-// Walk the chain prior_views[nviews-1] -> prior_views[0], composing
-// each view's decompose-by-shape into the running flat index.  Returns
-// the original addr on bail; sets RU_TID_CHAIN_COMPOSED[tid]=1 on
-// success so input_slot_dedup can flip ke->input_chain_composed[].
-// Mergeable consecutive views (a contiguous inner view absorbing into
-// its outer) are collapsed read-only at compose time -- TENS[tid] is
-// refcount-shared (DUP), so prior_views[] is NEVER mutated; the merge
-// is realized purely by SKIPPING the identity step.
+// Compose the tid's prior views into `addr0`, skipping the identity ones, and
+// flag the tid in RU_TID_CHAIN_COMPOSED; addr0 is returned unchanged when the
+// chain does not fold (ru_chain_foldable).  TENS[tid] is shared, so the views
+// are never merged in place.
 static Term ru_compose_view_chain(Term addr0, u32 tid) {
   if (addr0 == 0) return addr0;
   if (!ru_chain_foldable(tid)) return addr0;
   TenDesc const *td = &TENS[tid];
   Term cur = addr0;
   for (i32 k = (i32)td->nviews - 1; k >= 0; k--) {
-    // View merge: a contiguous offset-0 inner view is the identity on
-    // `cur`, so its decompose collapses into the neighbouring view.
-    // Skipping it emits exactly the bytes of the merged affine map.
     if (ru_view_composes_as_identity(&td->prior_views[k])) continue;
     cur = ru_compose_one_view(cur, &td->prior_views[k]);
     if (cur == 0) return addr0;
@@ -2303,21 +1788,14 @@ static Term ru_compose_view_chain(Term addr0, u32 tid) {
   return cur;
 }
 
-// Count of UOP_BUFFERIZE nodes emitted on the main heap by the most
-// recent pm_apply_rangeify run.  Stats / introspection.
+// The UOP_BUFFERIZEs the last pm_apply_rangeify emitted; read by tests
+// (tests/tu_probes.h).
 static u32 RU_LAST_BUFFERIZES_EMITTED;
 
-// Collect "closed ranges" for a realize boundary at node `i`. Mirror:
-// tinygrad/schedule/indexing.py:88 at ac4049794 (`closed_ranges =
-// tuple([r for i,r in enumerate(ctx.range_map[s][1]) if i in
-// realized_ranges])`, the partial-realize form #18368 deleted) -- i.e. the
-// out_rngs at the realized axes. Returns the number of ranges written
-// (>= 0, <= MAX_DIM).
-//
-// For realized_full, every axis is closed.  For realized_partial only
-// the axes in axes_mask are closed.  RANGEs that hash-cons to
-// UOP_CONST(0) (extent==1 axes) are dropped, mirroring tinygrad's
-// `if r.op is Ops.RANGE` filter at indexing.py:91 at ac4049794.
+// The closed ranges of a realize boundary: out_rngs at its realized axes, every
+// axis when full.  tinygrad closes every output range (indexing.py:84); a
+// CONST(0) entry (an extent-1 axis) is dropped, as tinygrad's END drops it
+// (indexing.py:87).  Returns the count, at most cap.
 static u32 ru_collect_closed_ranges(u32 i, Term *out_ranges, u32 cap) {
   RuRangeMap const *rm = &RU_RANGE_MAP[i];
   RuRealizeEntry const *rl = &RU_REALIZE_MAP[i];
@@ -2333,20 +1811,11 @@ static u32 ru_collect_closed_ranges(u32 i, Term *out_ranges, u32 cap) {
   return n;
 }
 
-// Per-axis range substitution table used when splicing a non-realized
-// producer's RU_SUBST into a consumer.  The producer minted its
-// out_rngs against one of its consumers (typically the first one
-// reached in topological order); a different consumer reading the same
-// shared producer has its own in_rngs at the same axis positions.
-// Without rewiring, the spliced subtree carries the producer-scope
-// axis_ids verbatim, and cpu_uop_walk sets up loop slots only for the
-// consumer's iter axes.
-//
-// CAP at 2*RU_MAX_AXES so we have room for the OUT_RNGS rewire pairs
-// (one per axis, up to RU_MAX_AXES) PLUS the fresh-range injections
-// (also up to RU_MAX_AXES) used when a producer-internal range that
-// was a REDUCE-axis got stripped past `ru_rewrite_subtree` and needs a
-// fresh consumer-scope range with an enclosing REDUCE_SUM scaffold.
+// A producer -> consumer range substitution for splicing a non-realized
+// producer's value into a consumer.  The producer's out_rngs need not be the
+// consumer's in_rngs (an un-realized boundary minted fresh ranges, a shared
+// EXPAND kept consumer 0's), and the consumer kernel iterates only its own.
+// Room for one pair per axis plus the leaves a compound entry binds.
 #define RU_AXIS_SUBST_CAP (RU_MAX_AXES * 2)
 typedef struct {
   u32 from_aid[RU_AXIS_SUBST_CAP];   // producer-side axis_id to replace
@@ -2364,15 +1833,9 @@ static int ru_axis_subst_lookup(RuAxisSubst const *m, u32 aid, Term *out) {
   return 0;
 }
 
-// Free-axis tracker used to find producer-scope RANGE leaves in a
-// spliced subtree without an enclosing UOP_REDUCE.  As we descend into
-// a UOP_REDUCE we push its axis_id onto the bound-set; on exit we pop.
-// A UOP_RANGE leaf whose axis_id is NOT in the bound set is "free" --
-// the caller's iter scope is responsible for iterating it.
-//
-// We cap the bound set at RU_AXIS_SUBST_CAP since reduce-axes nest at
-// most as deep as the producer's value subtree, which is bounded by
-// RU_MAX_AXES * 2 in practice (each REDUCE level adds one axis).
+// The free RANGE leaves of a subtree: those no enclosing UOP_REDUCE binds, so
+// the caller's scope must iterate them.  Each set keeps at most
+// RU_AXIS_SUBST_CAP entries and drops the rest.
 typedef struct {
   u32 bound_aids[RU_AXIS_SUBST_CAP];
   u8  n_bound;
@@ -2381,14 +1844,10 @@ typedef struct {
   u8  n_free;
 } RuFreeAxisSet;
 
-// Does expression `t` reference a UOP_RANGE leaf with axis_id == aid
-// anywhere in its DAG?  Stops at BUFFER/BUFFERIZE/KERNEL boundaries
-// (their internal ranges are scoped separately).  Used by the strand
-// covered-check so a free axis that appears inside a COMPOUND out_rngs
-// entry (the IDIV/IMOD/affine swizzle a rank-changing RESHAPE builds,
-// `aid_hi*k + aid_lo`) counts as covered: the consumer iterates those
-// leaf axes in its own scope and substitutes the whole compound
-// expression on splice (ru_subtree_rewrite_ranges via in_rngs).
+// 1 iff `t` contains the RANGE with axis_id `aid`, without entering BUFFER,
+// BUFFERIZE or KERNEL.  A leaf inside a compound out_rngs entry (a RESHAPE
+// swizzle such as aid_hi*k + aid_lo) counts: the consumer iterates it and
+// substitutes the whole entry on splice.
 static int ru_expr_references_aid(Term t, u32 aid) {
   return ru_find_axis_range(t, aid, 1) != 0;
 }
@@ -2411,10 +1870,8 @@ static void ru_free_axis_add_free(RuFreeAxisSet *s, u32 aid, u8 atype) {
   }
 }
 
-// Walk subtree `t`, populate `s->free_aids` with axis_ids of UOP_RANGE
-// leaves that are NOT inside the scope of a UOP_REDUCE with matching
-// axis.  Stops at UOP_BUFFER / UOP_BUFFERIZE / UOP_KERNEL leaves
-// (opaque boundaries; their internal ranges are scoped separately).
+// Add the free RANGE leaves of `t` to `s`, not entering BUFFER, BUFFERIZE or
+// KERNEL (their ranges are scoped separately).
 static void ru_collect_free_axes_rec(Term t, RuFreeAxisSet *s, u32 depth) {
   if (depth > 128) return;
   Term r = term_resolve(t);
@@ -2429,10 +1886,8 @@ static void ru_collect_free_axes_rec(Term t, RuFreeAxisSet *s, u32 depth) {
   if (op == UOP_BUFFER || op == UOP_BUFFERIZE || op == UOP_KERNEL) return;
   u64 loc = term_val(r);
   if (op == UOP_REDUCE) {
-    // Push EVERY reduce axis onto the bound set, recurse into the body,
-    // then pop them all.  Multi-axis support: a REDUCE binds all its
-    // axes simultaneously (mirrors tinygrad's per-REDUCE .ranges set;
-    // uop/ops.py: ended_ranges contain every axis in src[1:]).
+    // A REDUCE binds all its axes in its body, as tinygrad's ended_ranges is
+    // its whole src[1:] (uop/ops.py:58, 470-480).
     u32 n_axes = uop_reduce_n_axes(r);
     u32 pushed_count = 0;
     for (u32 i = 0; i < n_axes; i++) {
@@ -2453,17 +1908,7 @@ static void ru_collect_free_axes_rec(Term t, RuFreeAxisSet *s, u32 depth) {
   }
 }
 
-// Collect the axis_ids of every REDUCE
-// range bound at a CONSUMER REDUCE scope reachable from `node_idx`
-// through a chain of movement-op consumers.  Used by the strand
-// covered-check so a free axis that this node leaks but whose proper
-// binding lives at the OUTER consumer's REDUCE counts as covered (the
-// conv-backward contraction product, op=MUL ndim=7: its reduce axes are
-// bound by the downstream _pool-scatter REDUCE, NOT at this movement-op
-// level).  Without this the product is force-realized -> the 1.31GB
-// unfold materializes.  Walk is hop-capped and unique-consumer per hop
-// (multi-consumer fan-out means the binding is genuinely ambiguous, so
-// we stop and let the strand check realize).
+// Append the axis ids of node ci's reduce ranges to out_aids, deduplicated.
 static void ru_collect_reduce_aids_into(u32 ci, u32 *out_aids, u8 *n_out, u8 cap) {
   for (u8 k = 0; k < RU_REDUCE_RANGES[ci].n; k++) {
     u32 aid = uop_range_axis_id(RU_REDUCE_RANGES[ci].ranges[k]);
@@ -2474,18 +1919,14 @@ static void ru_collect_reduce_aids_into(u32 ci, u32 *out_aids, u8 *n_out, u8 cap
 }
 
 #define RU_CONSRED_AIDS_CAP 64
-// BFS the consumer DAG from `node_idx` through movement + elementwise
-// consumers, collecting the reduce-range aids of every REDUCE reached.
-// The conv-backward contraction product fans out into MULTIPLE
-// _pool-scatter chains (data-grad reduces cout, weight-grad reduces
-// b/h/w), each scattering through pad/repeat/shrink/reshape (and an
-// ADD/MUL accumulation hop) before a distinct REDUCE; the product's
-// leaked window axes are bound at those scatter REDUCEs.  A FUSED
-// (non-realized) consumer reduce is walked PAST -- riri folds it into
-// its own consumer, so the combined kernel binds both scopes' axes.  A
-// realized reduce is a hard boundary.  We must visit them all (a
-// unique-consumer walk only sees one scope and leaves the others
-// genuinely stranded).
+// The reduce-range axis ids of every REDUCE reachable from `node_idx` through
+// movement and elementwise consumers.  The strand check counts a free axis they
+// bind as covered: the conv-backward contraction product fans out into several
+// scatter chains (the data-grad over cout, the weight-grad over b/h/w), each
+// ending in its own REDUCE that binds the product's window axes, so all of them
+// must be visited.  A realized REDUCE ends the walk; a fused one does not,
+// since bufferize_classify leaves a contraction that feeds a scatter reduce
+// unseeded and the combined kernel binds both scopes.
 static void ru_collect_consumer_reduce_aids(u32 node_idx, u32 *out_aids,
                                             u8 *n_out, u8 cap, u32 hop_cap) {
   u32 queue[RU_CONSRED_BFS_CAP];
@@ -2506,13 +1947,6 @@ static void ru_collect_consumer_reduce_aids(u32 node_idx, u32 *out_aids,
       if (n_visited < RU_CONSRED_BFS_CAP) visited[n_visited++] = ci;
       u8 cop = BUFFERIZE_NODES[ci].op;
       if (RU_REDUCE_RANGES[ci].n > 0) {
-        // Reached a REDUCE -- record its axes.  If it is itself FUSED
-        // (not realized -- e.g. a seed-skipped conv-bwd contraction that
-        // riri folds into ITS consumer scatter-reduce), keep walking past
-        // it: the combined fused kernel binds BOTH this reduce's axes and
-        // the downstream scatter-reduce's window axes, so the producer's
-        // leaked window axes are covered by that outer scope.  A REALIZED
-        // reduce is a hard boundary (its body is its own scope) -- stop.
         ru_collect_reduce_aids_into(ci, out_aids, n_out, cap);
         int red_realized = RU_REALIZE_MAP[ci].realized_full
                         || RU_REALIZE_MAP[ci].realized_partial;
@@ -2522,8 +1956,6 @@ static void ru_collect_consumer_reduce_aids(u32 node_idx, u32 *out_aids,
       int is_movement = (cop == UOP_RESHAPE || cop == UOP_PERMUTE
                       || cop == UOP_EXPAND  || cop == UOP_SHRINK
                       || cop == UOP_PAD     || cop == UOP_FLIP);
-      // Also traverse elementwise accumulation hops (the conv-bwd scatter
-      // chain crosses an ADD/MUL/WHERE between reduces).
       int is_ew = uop_is_unary_elementwise(cop)
                || uop_is_binary_elementwise(cop)
                || uop_is_ternary_elementwise(cop);
@@ -2532,14 +1964,9 @@ static void ru_collect_consumer_reduce_aids(u32 node_idx, u32 *out_aids,
   }
 }
 
-// Walk a spliced subtree and rebuild it with each UOP_RANGE leaf whose
-// axis_id matches m->from_aid[k] replaced by m->to_term[k].  Mirrors
-// tinygrad's variable-substitution sweep used inside
-// create_bufferize_and_index_based_on_ranges when a producer's index
-// expression is reused across consumers (indexing.py:56-81 substitutes
-// via `.substitute` over the per-consumer range_map).  Other Terms
-// (CONST, IADD, etc.) are descended structurally; UOP_BUFFERIZE /
-// UOP_BUFFER / UOP_KERNEL are opaque boundaries we never enter.
+// Rebuild `t` with each RANGE leaf whose axis_id `m` maps replaced, not
+// entering BUFFERIZE, BUFFER or KERNEL: tinygrad's src.substitute in
+// remove_bufferize (rangeify.py:102).
 static Term ru_subtree_rewrite_ranges(Term t, RuAxisSubst const *m,
                                        u32 depth) {
   if (depth > 64 || m->n == 0) return t;
@@ -2565,11 +1992,8 @@ static Term ru_subtree_rewrite_ranges(Term t, RuAxisSubst const *m,
   }
   if (!changed) return t;
   Term rebuilt = uop_graph_rebuild_with_srcs(r, srcs);
-  // If we're rebuilding an INDEX_E that had per-axis info registered
-  // for its original loc, propagate the registration to the rebuilt
-  // loc with the substitution m applied to each axis range.  Without
-  // this, the bypass rewriter's axis-table lookup on the rebuilt
-  // INDEX_E misses and falls back to flat-addr decomposition.
+  // Carry the INDEX_E's per-axis ranges over to the rebuilt one, substituted,
+  // so materialize.c's axis-table inline still finds them.
   if (op == UOP_INDEX_E && rebuilt != t) {
     Term old_ax_rngs[MAX_DIM];
     u8 old_n = rangeify_unified_index_axes_lookup(
@@ -2592,9 +2016,7 @@ static Term ru_subtree_rewrite_ranges(Term t, RuAxisSubst const *m,
   return rebuilt;
 }
 
-// Add a (producer_aid -> consumer_term) pair to `m` if the producer aid
-// isn't already mapped.  Dedup keeps the first binding (the per-axis
-// walk visits positionally-aligned leaves).
+// Map from_aid to to_term unless it is already mapped (the first binding wins).
 static void ru_axis_subst_add(RuAxisSubst *m, u32 from_aid, Term to_term) {
   for (u8 k = 0; k < m->n; k++) if (m->from_aid[k] == from_aid) return;
   if (m->n < RU_AXIS_SUBST_CAP) {
@@ -2604,17 +2026,10 @@ static void ru_axis_subst_add(RuAxisSubst *m, u32 from_aid, Term to_term) {
   }
 }
 
-// Walk a producer out_rng expression `pr` and the consumer in_rng `cr`
-// in PARALLEL, mapping each producer UOP_RANGE leaf to the structurally
-// aligned consumer subterm.  Both are `(low + high*k)`-style affine
-// decodes of the SAME axis (a rank-changing RESHAPE swizzle produces the
-// identical tree shape on both sides -- the consumer's in_rngs are the
-// producer's out_rngs re-expressed over the consumer's fresh iter).
-// When a producer RANGE leaf aligns with a consumer RANGE, map aid->cr;
-// when it aligns with a compound consumer subterm (the consumer fused an
-// extra split), map aid->that subterm.  Structural mismatch (different
-// op) stops descent on that branch -- the bare-leaf fast path already
-// covered the common case, so a mismatch just means no extra binding.
+// Walk producer out_rng `pr` and consumer in_rng `cr` in parallel and map each
+// producer RANGE leaf to the aligned consumer subterm.  A RESHAPE swizzle
+// builds the same affine tree (low + high*k) on both sides; where the ops
+// differ the walk stops, which only means no extra binding.
 static void ru_axis_subst_match_pair(RuAxisSubst *m, Term pr, Term cr,
                                      u32 depth) {
   if (depth > 32) return;
@@ -2638,18 +2053,10 @@ static void ru_axis_subst_match_pair(RuAxisSubst *m, Term pr, Term cr,
   ru_axis_subst_match_pair(m, heap_read(ploc + 1), heap_read(cloc + 1), depth + 1);
 }
 
-// Build the producer->consumer axis_id substitution map for the edge
-// where consumer `consumer_rm` reads producer at node `pidx`.  Producer
-// minted out_rngs[a] at its own iter scope; consumer reads at the same
-// axis position with rm->in_rngs[a].  Bare-range out_rngs map directly.
-// COMPOUND out_rngs (a rank-changing RESHAPE swizzles the axis into an
-// affine `(low + high*k)` tree) are matched leaf-by-leaf against the
-// consumer's structurally-identical in_rng so EVERY producer range leaf
-// -- not just a top-level bare range -- gets rebound.  Without the
-// compound match, a window-low leaf inside a swizzled out_rng leaks into
-// the consumer's value tree as a free LOOP range (the conv-bwd col2im
-// read of a realized activation buffer on the 2nd train step strands the
-// window -> store-inside-loop 6.8e12-iter hang).  Returns the map.
+// The substitution for the edge where `consumer_rm` reads producer `pidx`: each
+// producer out_rngs[a] maps to the consumer's in_rngs[a], a bare RANGE directly
+// and a compound swizzle leaf by leaf (ru_axis_subst_match_pair).  A leaf left
+// unbound would leak into the consumer as a free loop range.
 static RuAxisSubst ru_build_axis_subst(u32 pidx,
                                        RuRangeMap const *consumer_rm) {
   RuAxisSubst m;
@@ -2672,26 +2079,15 @@ static RuAxisSubst ru_build_axis_subst(u32 pidx,
   return m;
 }
 
-// Rebuild the producer Term at (loc, op) by REWRITING each child slot:
-//   - child has RU_SUBST[child_idx] != 0
-//       -> if RU_SUBST is a UOP_BUFFERIZE, wrap with uop_index_e(BUFFERIZE, in_addr)
-//          so the load happens at THIS consumer's iter (mirrors tinygrad
-//          indexing.py:78 -- BUFFERIZE.index(*consumer_ranges)).
-//       -> otherwise (non-realized producer's rewritten value) splice in
-//          with a producer->consumer axis_id rewrite: the producer minted
-//          out_rngs against one of its consumers but other consumers read
-//          at different axis_ids, so without the rewrite the spliced
-//          producer leaves keep axis_ids that cpu_uop_walk never iterates.
-//   - child is a leaf tensor (TAG_TEN)    ->  wrap with uop_index_e(child, in_addr)
-//   - everything else (atoms, passthroughs)  ->  keep
-// in_addr is the addr at which TAG_TEN/BUFFERIZE INPUTS are loaded at
-// THIS op's iteration -- for elementwise it matches the op's own
-// out-addr, for REDUCE it must include the reduce range (built from
-// rm->in_rngs).
-// Mirror: tinygrad/schedule/indexing.py:create_bufferize_and_index_based_on_ranges
-// (lines 56-81), `new_srcs` accumulation loop + final `x.replace(src=tns)`.
-// ru_rewrite_child is the per-slot body; ru_rewrite_subtree applies it to
-// every slot of the node.
+// The child as consumer `consumer_rm` reads it at `in_addr` (tinygrad's
+// create_bufferize_and_index_srcs, indexing.py:73-99):
+//   - a realized producer (RU_SUBST a BUFFERIZE): INDEX_E(BUFFERIZE, in_addr),
+//     read at the consumer's ranges (indexing.py:93);
+//   - a non-realized producer: its rewritten value, its ranges rebound to the
+//     consumer's (ru_build_axis_subst);
+//   - a leaf tensor or var: INDEX_E(leaf, in_addr);
+//   - anything else is kept.
+// ru_rewrite_subtree applies it to every slot of a node.
 static Term ru_rewrite_child(Term old_child, Term in_addr,
                              RuRangeMap const *consumer_rm) {
   Term new_child = old_child;
@@ -2701,21 +2097,14 @@ static Term ru_rewrite_child(Term old_child, Term in_addr,
     u32 cidx = bufferize_info_find(term_val(resolved));
     if (cidx != 0xFFFFFFFFu && RU_SUBST[cidx] != 0) {
       Term sub = RU_SUBST[cidx];
-      // BUFFERIZE substitute (realized producer): re-index at OUR iter.
       if (term_tag(sub) == TAG_UOP && term_ext(sub) == UOP_BUFFERIZE) {
         new_child = uop_index_e(sub, in_addr);
-        // Stash per-axis range terms alongside the flat addr so the
-        // bypass rewriter can substitute closed_ranges directly per
-        // tinygrad's spec (indexing.py:78) rather than re-decomposing
-        // the flat addr (which fails on movement-op swizzlers).
+        // Keep the per-axis ranges for materialize.c's axis-table inline.
         if (consumer_rm != NULL) {
           ru_index_axes_register(new_child, consumer_rm->in_rngs,
                                  consumer_rm->in_ndim);
         }
       } else {
-        // Non-realized producer: splice in its value subtree, but
-        // first rewrite producer-scope RANGE axis_ids to the
-        // consumer's equivalent at the same axis position.
         if (consumer_rm != NULL) {
           RuAxisSubst m = ru_build_axis_subst(cidx, consumer_rm);
           new_child = ru_subtree_rewrite_ranges(sub, &m, 0);
@@ -2725,22 +2114,12 @@ static Term ru_rewrite_child(Term old_child, Term in_addr,
       }
     }
   } else if (ctag == TAG_TEN || ctag == TAG_VAR) {
-    // TAG_VAR (shape-annotated TLam-bound variable): treated as a
-    // symbolic input slot just like TAG_TEN.  visit() maps it to
-    // KSRC_AS_INPUT via input_slot_dedup_var; the bypass rewriter
-    // (unified_rewrite_buffer_for_var in materialize.c) substitutes
-    // it with the matching UOP_BUFFER before cpu_uop_walk binds
-    // runtime input pointers.
-    //
-    // For TAG_TEN whose TenDesc carries a non-trivial prior_views
-    // chain we fold the ShapeTracker decompose-by-shape into the
-    // INDEX_E.addr.  Most chained descs are instead minted by
-    // view_resolve inside materialize.c's visit(), for a movement
-    // chain the swizzlers already composed into in_addr over the
-    // base TAG_TEN; materialize.c's unified_fold_chain_scan flags
-    // those slots.  This branch handles a chained desc that is
-    // already the TAG_TEN at unified-pass time (cross-realize reuse
-    // of a chained intermediate).
+    // A TAG_VAR is a symbolic input slot like a TAG_TEN: visit() binds it via
+    // input_slot_dedup_var, and materialize.c's unified_rewrite_buffer_for_var
+    // swaps in its UOP_BUFFER.  A TAG_TEN that already carries prior views (a
+    // chained intermediate reused across realizes) composes them into the
+    // address here; chains visit()'s view_resolve mints later are flagged by
+    // materialize.c's unified_fold_chain_scan.
     Term addr = in_addr;
     if (ctag == TAG_TEN) {
       u32 tid = (u32)term_val(resolved);
@@ -2767,14 +2146,13 @@ static Term ru_rewrite_subtree(Term self, u64 loc, u8 op, Term in_addr,
   return uop_graph_rebuild_with_srcs(self, srcs);
 }
 
-// === Indexed ops (UOP_GATHER, UOP_SCATTER) ===
+// Indexed ops: UOP_GATHER and UOP_SCATTER.
 
-// Buffer address of per-axis coordinates into tensor `tid`: the public
-// view's strides and offset (a plain row-major address when the view is
-// contiguous from 0), then every prior view of its ShapeTracker --
-// tendesc_strided_index (view/strided_index.c), built symbolically.  A
-// composed address reads the raw buffer, so the tid is flagged for
-// input_slot_dedup to skip the backend's view handling.
+// The buffer address of per-axis coordinates into tensor `tid`: the public
+// view's strides and offset (row-major when contiguous from 0), then every
+// prior view, as tendesc_strided_index (view/strided_index.c) computes it,
+// built symbolically.  Such an address reads the raw buffer, so the tid is
+// flagged for input_slot_dedup.
 static Term ru_ten_leaf_addr(u32 tid, Term const *coords, u32 ndim) {
   TenDesc const *td = &TENS[tid];
   View const    *v  = &td->view;
@@ -2945,16 +2323,15 @@ static Term ru_read_operand_at_ranges(Term t, u32 const *dims,
   return ru_rewrite_child(t, addr, rm);
 }
 
-// GATHER(src, idx, dim) at this node's ranges.  idx is read at the ranges
-// (ru_read_operand_at_ranges).  src loads at the ranges with axis `dim`
-// replaced by the loaded index, clamped to 0 so the load stays in bounds,
-// and the value is gated INVALID (read as 0) when the index is out of
-// range: the collapsed one-hot sum tinygrad's pm_reduce_load_collapse
-// leaves (codegen/simplify.py:143-145).  The gate holds a load, so
+// GATHER(src, idx, dim) at this node's ranges: idx is read at the ranges
+// (ru_read_operand_at_ranges), src at the ranges with axis `dim` replaced by
+// the loaded index clamped to 0, gated INVALID (read as 0) when the index is
+// out of range: the collapsed one-hot sum of tinygrad's pm_reduce_load_collapse
+// (codegen/simplify.py:124-126).  The gate holds a load, so
 // uop_fold_where_closure keeps the clamp, and the INVALID branch keeps the
-// materialize broadcast gate off the data-dependent address.  The index is
-// compared as int32, the width of every kernel address: a 64-bit index
-// outside the int32 range wraps (a uint32 -1 still reads as invalid).
+// materialize broadcast gate off the data-dependent address.  The index
+// compares as int32, the width of every kernel address: a 64-bit index outside
+// the int32 range wraps (a uint32 -1 still reads as invalid).
 static Term ru_lower_gather(Term self, u64 loc, RuRangeMap const *rm) {
   Term  src = heap_read(loc + 0);
   Term  idx = heap_read(loc + 1);
@@ -2993,30 +2370,27 @@ static Term ru_scatter_combine(u32 kind, Term acc, Term x) {
   }
 }
 
-// SCATTER(base, idx, src, dim, kind, include_self) at node i: always its
-// own kernel over its output OUT.  base is read at the node's ranges R
-// over base.shape (ru_read_operand_at_ranges); idx and src through
-// ru_index_leaf at fresh loop ranges E over idx.shape.  With t = E where
-// t_dim is the loaded index clamped to 0, and valid its range check, the
-// accumulate store is
+// SCATTER(base, idx, src, dim, kind, include_self) at node i, always its own
+// kernel over its output OUT.  base is read at the node's ranges R
+// (ru_read_operand_at_ranges); idx and src through ru_index_leaf at fresh loop
+// ranges E over idx.shape.  With t = E but t_dim the loaded index clamped to 0,
+// and valid its range check, the accumulate store is
 //   OUT[t] = valid ? OUT[t] (op) src[E] : OUT[t]    (src[E] for REPLACE)
-// with (op) the kind's ru_scatter_combine, so an invalid index writes the
-// old value back.  The src positions that meet at one output share t's
-// other coordinates, so every loop order visits them in ascending t_dim:
-// tinygrad's reduce order, and the last-write-wins order of REPLACE.  With
-// I the kind's identity (scatter_identity_bits), the stores run in AFTER
+// with (op) the kind's ru_scatter_combine.  The src positions that meet at one
+// output share t's other coordinates, so every loop order visits them in
+// ascending t_dim: tinygrad's reduce order, and REPLACE's last-write-wins.
+// With I the kind's identity (scatter_identity_bits) the stores run in AFTER
 // order and give tinygrad's out = S (op) T (mixin/op.py:1127-1130):
 //   include_self    OUT[R] = I; accumulate; OUT[R] = OUT[R] (op) base[R]
 //                   (the last store drops when base is the CONST I);
 //   no self         OUT[R] = I (op) base[R] for MAX / MIN, base[R] for
 //                   SUM; OUT[t] = valid ? I : OUT[t]; accumulate;
 //   REPLACE         OUT[R] = base[R]; accumulate.
-// Without include_self a written position thus holds S, and an untouched
-// one I (op) base, which is base except that MAX(I, NaN) = I (tinygrad
-// keeps a NaN base outside the index's extent for some shapes; thvm always
-// gives I).  The node's BUFFERIZE wraps the SCATTER itself, so no consumer
-// can inline it.  PROD has no lowering yet: the node still becomes a
-// boundary, and visit() declines its kernel.
+// Without include_self a written position holds S and an untouched one I (op)
+// base, which is base except that MAX(I, NaN) = I (tinygrad keeps a NaN base
+// outside the index's extent for some shapes).  The BUFFERIZE wraps the SCATTER
+// itself, so no consumer can inline it.  PROD has no lowering: the node is
+// still a boundary, and visit() declines its kernel.
 static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {
   u64  loc  = BUFFERIZE_NODES[i].loc;
   Term self = term_new(0, TAG_UOP, UOP_SCATTER, loc);
@@ -3079,16 +2453,11 @@ static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {
   RU_STORE_ROOT[i] = root;
 }
 
-// PAD value-side guard: build IWHERE(cond, body, INVALID) where `cond`
-// is the AND of per-axis `(out_rng >= begin) & (out_rng < begin + in_dim)`.
-// Mirrors tinygrad's PAD-as-WHERE rule (schedule/indexing.py:108) and the
-// kernel_lift S_PAD case in src/schedule/kernel_lift.c.  Without this wrap,
-// the PAD's "outside the kept window" cells inherit whatever value the
-// inner subtree computes -- correct only when the inner is an INDEX_E into
-// a tensor whose address swizzler already injected the INVALID guard.
-// CONST / EXPAND / WHERE bodies (e.g. a SHRINK gradient's gy=CONST(1)
-// seed) have no addr-driven read to gate on, so the WHERE-INVALID has to
-// land on the value side.
+// PAD's value-side guard: IWHERE(cond, body, INVALID), cond the AND over the
+// padded axes of begin <= out_rng < begin + in_dim; tinygrad's PAD -> WHERE
+// (indexing.py:101-105).  An INDEX_E body already carries the swizzler's guard
+// in its address, but a CONST, EXPAND or WHERE body (a SHRINK gradient's
+// CONST(1) seed) has no address to gate.
 static Term ru_pad_wrap_where(u64 loc, RuRangeMap const *rm, Term body) {
   Shape src_shape;
   if (!ru_node_src_shape(loc, &src_shape)) return body;
@@ -3098,21 +2467,10 @@ static Term ru_pad_wrap_where(u64 loc, RuRangeMap const *rm, Term body) {
   for (u32 d = 0; d < ndim; d++) {
     u32 begin = (u32)term_val(heap_read(loc + 2 + 2 * d));
     u32 end   = (u32)term_val(heap_read(loc + 2 + 2 * d + 1));
-    // Skip axes that aren't padded (begin == end == 0).  Such an axis
-    // needs no value-side guard: the consumer iter never strays outside
-    // the kept window.  This also mirrors apply_movement_op_pad
-    // (schedule/indexing.c:107), which passes an unpadded axis straight
-    // through.  Crucially it skips an unpadded SYMBOLIC (kvar) leading
-    // axis whose `in_dim` is the raw kvar-packed extent (high bit set):
-    // building `ILT(RANGE, CONST(in_dim))` there feeds a negative i32
-    // constant to the ILT simplifier, which folds it to constant FALSE
-    // (index_simplify.c:1334-1337, RANGE < non-positive const) and
-    // collapses the whole IWHERE to INVALID -- zeroing the entire output.
+    // An unpadded axis needs no guard, as in apply_movement_op_pad.
     if (begin == 0 && end == 0) continue;
-    // Resolve a symbolic (kvar) padded dim to its static upper bound
-    // before using it as the hi-bound constant.  Same template as the
-    // stride/suffix sites in ru_build_addr_with_dims / ru_compose_one_view:
-    // a kvar dim contributes its hi extent to any layout/bound coefficient.
+    // A symbolic padded dim bounds by its upper bound, as the strides in
+    // ru_build_addr_with_dims do.
     u32 in_dim = kvar_extent_static(src_shape.dims[d]);
     Term r = rm->out_rngs[d];
     if (r == 0) continue;
@@ -3131,39 +2489,32 @@ static Term ru_pad_wrap_where(u64 loc, RuRangeMap const *rm, Term body) {
   return uop_iwhere(cond_acc, body, uop_invalid());
 }
 
+// tinygrad's pm_apply_rangeify (indexing.py:136-147): a REDUCE gets explicit
+// RANGE srcs, a PAD becomes a WHERE, a realized src becomes an INDEX of its
+// STAGE, and a movement op drops, its ranges already swizzled.  Here a
+// producer-first walk fills RU_SUBST, RU_BUFFERIZE_TERM and RU_STORE_ROOT.
 fn void pm_apply_rangeify(Term root) {
   (void)root;
-  // Clear substitute + bufferize tables.
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
     RU_SUBST[i]           = 0;
     RU_BUFFERIZE_TERM[i]  = 0;
     RU_STORE_ROOT[i]      = 0;
   }
-  // Clear chain-composed tid bookkeeping; the live TENS window is
-  // [1, TENS_NEXT) so the reset only touches in-use slots.
+  // The live TENS window is [1, TENS_NEXT).
   for (u32 t = 1; t < TENS_NEXT && t < TENS_CAP; t++) {
     RU_TID_CHAIN_COMPOSED[t] = 0;
   }
   RU_LAST_BUFFERIZES_EMITTED = 0;
-  // Reset per-pass per-axis index side table; populated when
-  // pm_apply_rangeify constructs INDEX_E nodes from each consumer's
-  // in_rngs.  Consumed by materialize.c's bypass rewriter to
-  // substitute closed_ranges via per-axis terms (tinygrad spec at
-  // indexing.py:78) instead of re-decomposing the flat addr.
   RU_INDEX_AXIS_N = 0;
 
-  // Collect the axis_ids of every REDUCE range in the graph.  When the conv-backward contraction fuses, a
-  // product's strided-unfold INDEX_E addr can carry hash-cons-shared
-  // RANGE leaves whose binding lives at a REDUCE scope NOT reachable
-  // through this node's consumer DAG (a different layer's backward; the
-  // addr expression hash-conses to the same Term).  Those leaves index
-  // CORRECTLY when the product splices into the contraction reduce
-  // (verified grad-exact), so they must NOT trip the strand check.  A
-  // genuine producer-internal strand (a stripped partial-realize
-  // closed_range) is NOT a reduce-range axis, so it still strands.
+  // RU_FUSE_ALL_REDUCE_AIDS: every REDUCE range of the pass and every range of
+  // a realized node.  A fusing conv-backward product's strided-unfold address
+  // can carry hash-consed RANGE leaves of such a scope that its consumer DAG
+  // does not reach (another layer's backward); they index correctly once the
+  // product splices into its contraction reduce, so the strand checks treat
+  // them as covered.  A genuine strand (a stripped closed range) is neither.
   RU_FUSE_ALL_REDUCE_AIDS_N = 0;
   for (u32 n = 0; n < BUFFERIZE_NODES_LEN; n++) {
-    // Every REDUCE range axis in the graph...
     for (u8 k = 0; k < RU_REDUCE_RANGES[n].n; k++) {
       u32 aid = uop_range_axis_id(RU_REDUCE_RANGES[n].ranges[k]);
       u8 dup = 0;
@@ -3172,11 +2523,6 @@ fn void pm_apply_rangeify(Term root) {
       if (!dup && RU_FUSE_ALL_REDUCE_AIDS_N < RU_FUSE_ALL_REDUCE_AIDS_CAP)
         RU_FUSE_ALL_REDUCE_AIDS[RU_FUSE_ALL_REDUCE_AIDS_N++] = aid;
     }
-    // ...plus the LOOP axes owned by a REALIZED scope.  A realized
-    // node's out_rngs are closed into its own BUFFERIZE; any of those
-    // leaves that hash-cons-aliases into a fusing product's addr is
-    // bound at the realized scope (the consumer substitutes it on
-    // splice), so it must not trip the strand check either.
     int rn_realized = RU_REALIZE_MAP[n].realized_full
                    || RU_REALIZE_MAP[n].realized_partial;
     if (rn_realized && RU_RANGE_MAP[n].has_ranges) {
@@ -3195,19 +2541,16 @@ fn void pm_apply_rangeify(Term root) {
     }
   }
 
-  // Walk nodes bottom-up (children-first) so each consumer sees its
-  // producers' substitutes.  RU_TOPO_ORDER is consumer-first
-  // (computed by ru_compute_topo_order at run_rangeify_unified entry);
-  // reversing it gives producer-first / children-before-parents.
+  // Producers first (RU_TOPO_ORDER reversed), so each consumer sees its
+  // producers' substitutes.
   for (i64 oi = (i64)RU_TOPO_ORDER_LEN - 1; oi >= 0; oi--) {
     u32 i = RU_TOPO_ORDER[oi];
     UOpInfo const *info = &BUFFERIZE_NODES[i];
     if (ru_is_skip_op(info->op)) continue;
     RuRangeMap const *rm = &RU_RANGE_MAP[i];
     if (!rm->has_ranges) {
-      // No ranges = this node has no consumers w/ ranges and isn't
-      // realized; the OLD path inlines it into its consumer (PASS-THRU
-      // semantics). We leave RU_SUBST[i] = 0 to signal "passthrough".
+      // Not realized and no consumer has ranges: RU_SUBST[i] = 0 leaves the
+      // node as it is in its consumers.
       continue;
     }
 
@@ -3221,23 +2564,16 @@ fn void pm_apply_rangeify(Term root) {
 
     Term self = term_new(0, TAG_UOP, info->op, info->loc);
 
-    // Compute the rewritten subtree FIRST for both realize / non-realize
-    // paths.  The realize path uses it as the BUFFERIZE's stored value;
-    // the non-realize path uses it directly as the splice substitute.
-    // After computing, we apply REDUCE-axis rewire / repair / trivial-
-    // strip, then run the strand check that may force-realize.
+    // The rewritten node is the realized store value or the spliced substitute.
+    // A REDUCE then gets its range axes, and the strand checks run.
     Term in_addr   = ru_build_input_addr_for(rm, info->loc);
     Term rewritten = (info->op == UOP_GATHER)
                    ? ru_lower_gather(self, info->loc, rm)
                    : ru_rewrite_subtree(self, info->loc, info->op,
                                         in_addr, rm);
-    // Rewire UOP_REDUCE's axes from the original shape-axis indices
-    // (e.g. "axes (1, 3) of {3,2,4,5}") to the freshly minted
-    // UOP_RANGE.axis_ids.  Multi-axis: one fresh RANGE per axis in
-    // RU_REDUCE_RANGES[i].ranges -- the rewritten REDUCE inherits
-    // every axis_id from those ranges, dropping shape-coord axes.
-    // Downstream walkers (cpu_uop_walk's uwalk_run_reduce, render_uop)
-    // match against RANGE.axis_id, not the shape index.
+    // Rewire the REDUCE from source-shape axis indices to the fresh ranges'
+    // axis_ids (RU_REDUCE_RANGES): uwalk_run_reduce and render_uop match reduce
+    // axes by RANGE axis_id.
     if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n >= 1
         && term_tag(rewritten) == TAG_UOP
         && term_ext(rewritten) == UOP_REDUCE) {
@@ -3254,51 +2590,21 @@ fn void pm_apply_rangeify(Term root) {
       // body (tinygrad reduce_unparented).
       rewritten = ru_reduce_unparented(rewritten, RU_REDUCE_RANGES[i].ranges,
                                        n_rrng);
-      // THVM_FUSE_MATMUL_INPUT rank-grow remap (the EXACT-substitute port):
-      // a fused elementwise A producer (THVM_FUSE_MATMUL_INPUT) is spliced into
-      // the matmul's A operand through the matmul-lowering RESHAPE({M,K,1})+
-      // EXPAND({M,K,N}).  thvm's positional ru_build_axis_subst remaps the
-      // producer's ranges at the RESHAPE edge, but that map does NOT compose up
-      // the RESHAPE->EXPAND->MUL->REDUCE chain (each upper splice carries an
-      // empty map), so the producer's OWN {M,K} RANGE leaves survive in the
-      // reduce body as free LOOP axes whose aids differ from the matmul's M (an
-      // output axis) and K (the reduce axis).  Left alone, the conv-bwd absorb
-      // below folds them into the reduce (1-axis K -> 3-axis {M,K,N}) and the
-      // matmul mis-sums over the producer's M -> a wrong result (and on a block
-      // an O(M*N*M*K) nest that hangs).  tinygrad avoids this because its
-      // s.substitute(zip(orig_ranges,end_ranges)) maps by EXACT range identity
-      // through every movement op (rangeify.py:294 / indexing.py:78); thvm's
-      // positional map cannot.  Port it for the rank-grow matmul case: remap
-      // each leaked producer LOOP range (a free aid that is neither an output
-      // axis nor the reduce axis) onto the matmul axis (the reduce K range, or
-      // an output M range) of EQUAL extent -- the producer's A[m,k] read, whose
-      // m IS the matmul's M output axis and k IS its reduce K axis.  This keeps
-      // the reduce 1-axis (recognise_tc fires, the TC tiled emitter handles the
-      // fused A), bit-exact: the producer is evaluated at exactly (m,k) the
-      // matmul iterates.  Gated on the flag (default-OFF) AND on the leaked-axis
-      // structure (a 1-axis SUM reduce with free LOOP producer aids), so flag-
-      // off and every non-fused reduce are byte-identical.  The EQUAL-ndim
-      // common case and the conv-bwd path below are unaffected (no flag, or no
-      // leaked producer LOOP aid resolves an extent match).
-      // Only a clean 2-D matmul reduce: body MUL(A_tree, B_index) over a single
-      // K range.  The leaked producer LOOP ranges are the producer's {m, k}.
-      // Map each onto the matmul axis it occupies, disambiguating by structure:
-      //   k (the contraction): the producer's k threads through the SAME
-      //     RESHAPE/EXPAND as the weight's k -- so it is the axis whose extent
-      //     equals the reduce K extent.  Bind to the reduce range.
-      //   m: the producer-only axis.  Bind to the OUTPUT range of equal extent
-      //     that the weight operand B does NOT read (so it is M, never N -- a
-      //     FLUX QKV is {S,512}@{512,512}, K==N==512, so an extent-only match
-      //     would alias m's M<->N; the "not read by B" test breaks the tie).
-      // K binds first (its reduce-range target is unambiguous), then m.  Default-
-      // OFF flag + the 1-axis-SUM matmul-shape gate keep flag-off and every
-      // non-fused / conv reduce byte-identical.
+      // THVM_FUSE_MATMUL_INPUT rank-grow remap.  A fused A producer splices in
+      // through the matmul lowering's RESHAPE({M,K,1}) + EXPAND({M,K,N}), and
+      // ru_build_axis_subst's positional map does not compose up that chain, so
+      // the producer's own {m,k} ranges stay in the body as free LOOP ranges
+      // (fatal below).  tinygrad's src.substitute matches ranges by identity
+      // (rangeify.py:102); here each leaked range binds by extent: to an output
+      // range of equal extent that the weight B does not read (so M, never N,
+      // even when N has the same extent), else to the reduce range when it has
+      // K's extent.  Only a 1-axis SUM over a 2-D output qualifies.
       if (ru_fuse_matmul_input_on() && kind == REDUCE_SUM && n_rrng == 1
           && rm->out_ndim == 2
           && term_tag(rewritten) == TAG_UOP && term_ext(rewritten) == UOP_REDUCE) {
         Term rbody = uop_reduce_src(rewritten);
         Term b_idx = 0;   // the weight operand (the clean INDEX_E side of the MUL)
-        Term a_side = 0;  // the OTHER operand (must be a FUSED producer, not bare)
+        Term a_side = 0;  // the other operand, which must be a fused producer
         if (term_tag(rbody) == TAG_UOP && term_ext(rbody) == UOP_MUL) {
           Term o0 = term_resolve(heap_read(term_val(rbody) + 0));
           Term o1 = term_resolve(heap_read(term_val(rbody) + 1));
@@ -3309,14 +2615,9 @@ fn void pm_apply_rangeify(Term root) {
           if (term_tag(c1)==TAG_UOP && term_ext(c1)==UOP_INDEX_E) { b_idx = c1; a_side = c0; }
           else if (term_tag(c0)==TAG_UOP && term_ext(c0)==UOP_INDEX_E) { b_idx = c0; a_side = c1; }
         }
-        // Only fire when A is genuinely a FUSED ELEMENTWISE producer (an
-        // ALU tree -- the input-fusion inlined SiLU/MUL/ADD over the matmul
-        // input), NOT a bare INDEX_E (a normal realized 2-D matmul operand) and
-        // NOT a MOVEMENT view (the batched attention A is a PERMUTE/RESHAPE over
-        // a buffer -- it has free batch/output axes my 2-D M-bind would mis-map,
-        // corrupting the scores/context matmul).  Require A's top op to be a
-        // unary/binary/ternary elementwise or CAST so the remap fires ONLY on a
-        // real input-fusion producer.
+        // Only a fused elementwise A (an ALU tree over the input), not a bare
+        // INDEX_E (a plain operand) or a movement view (a batched attention A,
+        // whose free batch axes the 2-D bind would mis-map).
         if (a_side == 0) b_idx = 0;
         else if (term_tag(a_side) != TAG_UOP) b_idx = 0;
         else {
@@ -3350,9 +2651,7 @@ fn void pm_apply_rangeify(Term root) {
           u32 fext = ru_subtree_axis_extent(rbody, faid);
           if (fext == 0) continue;
           Term bind = 0;
-          // m-leak FIRST: an output range of equal extent NOT read by the weight
-          // B (so M, never N).  If none qualifies (fext != any non-B-read output
-          // extent), fall through to the K bind when fext == k_ext.
+          // M first: an output range of equal extent the weight does not read.
           for (u8 a = 0; a < rm->out_ndim && bind == 0; a++) {
             Term orng = rm->out_rngs[a];
             if (term_tag(orng)==TAG_UOP && term_ext(orng)==UOP_RANGE
@@ -3360,7 +2659,7 @@ fn void pm_apply_rangeify(Term root) {
                 && !ru_expr_references_aid(b_idx, uop_range_axis_id(orng)))
               bind = orng;
           }
-          // k-leak: the contraction axis (extent == reduce K extent).
+          // Else K: the reduce range, when the extents match.
           if (bind == 0 && fext == k_ext) bind = k_rng;
           if (bind != 0 && uop_range_axis_id(bind) != faid
               && mg_map.n < RU_AXIS_SUBST_CAP)
@@ -3372,14 +2671,11 @@ fn void pm_apply_rangeify(Term root) {
             rewritten = uop_reduce_multi(kind, n_rrng, new_axes, nb);
         }
       }
-      // A stranded window-low LOOP axis in a reduce body stops.  When this
-      // reduce reads a now-realized activation/param buffer through a col2im
-      // window (the conv data-grad on the 2nd train step contracts the
-      // `144=6*24`-decoded kh*kw window), the `24`-low half can surface as a
-      // fresh LOOP range that is neither an output nor a reduce axis, and it
-      // would render as an outer loop with the store inside it (576x
-      // overwrite + 6.8e12 iters).  bufferize_reduce_reads_realized_pool
-      // realizes that contraction before it gets here.
+      // A free LOOP range in a reduce body that is neither an output nor a
+      // reduce axis would render as a loop around the store.
+      // bufferize_reduce_reads_realized_pool realizes the contraction that
+      // would produce one (a col2im window read of a realized buffer); meeting
+      // one here is fatal.
       if (term_tag(rewritten) == TAG_UOP && term_ext(rewritten) == UOP_REDUCE) {
         RuFreeAxisSet bs;
         bs.n_bound = 0;
@@ -3402,40 +2698,22 @@ fn void pm_apply_rangeify(Term root) {
         }
       }
     }
-    // Trivial REDUCE (extent-1 reduce axis): ru_new_range collapsed
-    // the reduce-range to UOP_CONST(0), leaving RU_REDUCE_RANGES[i].n
-    // == 0.  cpu_uop_walk's uwalk_run_reduce would find no UOP_RANGE
-    // in the body and return 0 (the r_extent==0 fallback at uop_walk.c
-    // line 567).  Unwrap the REDUCE shell to its source:
-    // sum_{i in [0,1)} f(i) == f(0).
+    // A REDUCE whose reduce axes all have extent 1 has no range left
+    // (ru_new_range made them CONST(0)): it is its body, as the sum over [0, 1)
+    // of f(i) is f(0).
     if (info->op == UOP_REDUCE && RU_REDUCE_RANGES[i].n == 0
         && term_tag(rewritten) == TAG_UOP
         && term_ext(rewritten) == UOP_REDUCE) {
       rewritten = heap_read(term_val(rewritten) + 0);
     }
 
-    // Stop when the rewritten subtree contains FREE RANGE
-    // leaves whose axis_ids aren't covered by either:
-    //   (a) the producer's out_rngs (consumers substitute these on
-    //       splice via ru_build_axis_subst), OR
-    //   (b) the producer's own REDUCE shells in the subtree (the
-    //       walker tracks bound-axes via REDUCE descent).
-    // Any other free axis_id is a "stranded" producer-internal range:
-    // a partial-realize child's closed_range leaked through the
-    // BUFFERIZE inline rewriter, or a REDUCE-axis whose enclosing
-    // REDUCE got stripped past ru_rewrite_subtree.  Spliced into a
-    // consumer, such a subtree reads that axis at iter 0: the
-    // consumer's iter scope has no slot for it.
-    //
-    // Producer's iter scope (out_rngs) must include at least one
-    // non-extent-1 axis -- otherwise this is a scalar producer (all
-    // axes collapsed to CONST(0)) and force-realize would emit a
-    // 1-element BUFFERIZE which the materialize.c rewriter mis-handles
-    // as a broadcast read (numel-1 path).  For scalar producers, the
-    // free RANGEs in the rewritten subtree come from a deeper
-    // producer's iter that should remain inlined; the strand check is
-    // a false positive at this node and the deeper producer (with
-    // non-trivial out_rngs) is where realize should actually fire.
+    // The strand check: a free RANGE in the rewritten subtree must be bound by
+    // the producer's out_rngs (consumers rebind those on splice) or by a REDUCE
+    // inside it.  Any other is a stranded producer-internal range (a
+    // partial-realize child's closed range, a reduce axis whose REDUCE was
+    // stripped), which a consumer would read at index 0.  Skipped for a scalar
+    // producer (no RANGE in out_rngs): its free ranges belong to a deeper
+    // producer that stays inlined, so the check would be a false positive.
     int has_nontrivial_out_axis = 0;
     for (u8 a = 0; a < rm->out_ndim; a++) {
       Term pr = rm->out_rngs[a];
@@ -3444,33 +2722,17 @@ fn void pm_apply_rangeify(Term root) {
         break;
       }
     }
-    // PAD / SHRINK carry an OFFSET shift between in_rngs and out_rngs
-    // (PAD inserts begin zeros; SHRINK skips begin entries).  When
-    // force-realized at this node, the realize branch emits a BUFFERIZE
-    // whose closed_ranges = out_rngs (covering only OUTPUT-iter axes);
-    // any deeper-producer iter axis that leaked into the rewritten
-    // subtree survives as a free RANGE because the BUFFERIZE-promotion
-    // at materialize.c rebuilds the consumer's in_addr from out_rngs.
-    // For conv-im2col's backward path the leaked axes come from an
-    // EXPAND-of-broadcast input feeding a multi-reduce chain: their
-    // proper binding lives at the OUTER consumer's REDUCE scope, not at
-    // this movement-op level.  Defer the realize decision to a deeper
-    // non-shift producer where out_rngs actually scopes the strand.
-    // RESHAPE / PERMUTE / EXPAND / FLIP are pure swizzles (stride
-    // remap, broadcast, sign-flip) so the conservative skip doesn't
-    // apply -- their realize at this level still nets a valid
-    // BUFFERIZE for downstream INDEX_E.
+    // Also skipped for PAD and SHRINK, whose in_rngs shift against out_rngs:
+    // ranges leaked through them (the conv-im2col backward's
+    // EXPAND-of-broadcast input) are bound at an outer consumer REDUCE.
     int is_shift_op_skip = (info->op == UOP_PAD || info->op == UOP_SHRINK);
     if (!realized && has_nontrivial_out_axis && !is_shift_op_skip) {
       RuFreeAxisSet fs;
       fs.n_bound = 0;
       fs.n_free  = 0;
       ru_collect_free_axes_rec(rewritten, &fs, 0);
-      // A free axis whose proper binding is a CONSUMER REDUCE
-      // (conv-backward contraction product -> _pool-scatter -> REDUCE)
-      // counts as covered.  Force-realizing here would materialize the
-      // 1.31GB unfold; deferring lets the product fuse into the
-      // scatter-reduce kernel as a strided-view read.
+      // A free axis a consumer REDUCE binds (the conv-backward contraction
+      // product feeding its scatter reduce) is covered.
       u32 cons_red_aids[RU_CONSRED_AIDS_CAP];
       u8  n_cons_red = 0;
       if (fs.n_free > 0) {
@@ -3484,36 +2746,17 @@ fn void pm_apply_rangeify(Term root) {
         for (u8 cr = 0; cr < n_cons_red && !covered; cr++) {
           if (cons_red_aids[cr] == aid) covered = 1;
         }
-        // Hash-cons-aliased REDUCE / realized-scope axis from a disjoint
-        // scope (a different layer's backward whose addr expression
-        // hash-conses to the same Term): covered.  These index correctly
-        // when the product splices into the contraction reduce (verified
-        // grad-exact on conv2_bwd + 2-layer); a genuine producer-internal
-        // strand is neither a reduce axis nor a realized-scope axis.
-        //
-        // Gate the blanket cover on the free leaf's axis_type: only a
-        // genuinely REDUCE-typed (KAX_REDUCE) leaf is bound when the
-        // product splices into a foreign contraction reduce.  A LOOP-typed
-        // free leaf is a real loop-iter axis; on the 2nd train step a
-        // col2im read of a now-realized activation buffer mints a fresh
-        // LOOP window-low range whose id collides with a reduce id, and
-        // the un-gated cover would suppress its strand -> the window
-        // renders as an outer loop with the store inside it (the
-        // 6.8e12-iter hang).  Keep such a LOOP leaf tripping the strand so
-        // its (small reduce-output) producer realizes; the consumer then
-        // reads it via a clean INDEX_E addr at its own iter.
+        // A hash-cons-aliased REDUCE axis of a disjoint scope (another layer's
+        // backward) is covered, but only a KAX_REDUCE leaf: a LOOP leaf whose
+        // id collides with a reduce id is a real loop axis (a col2im window
+        // read of a realized buffer) and still strands.
         if (!covered && fs.free_types[fi] == KAX_REDUCE) {
           for (u32 g = 0; g < RU_FUSE_ALL_REDUCE_AIDS_N && !covered; g++)
             if (RU_FUSE_ALL_REDUCE_AIDS[g] == aid) covered = 1;
         }
-        // An axis is covered when it appears ANYWHERE inside one of the
-        // producer's out_rngs expressions -- not only as a top-level plain
-        // RANGE.  A rank-changing RESHAPE swizzles the consumer ranges into
-        // compound IDIV/IMOD/affine out_rngs (`aid_hi*k + aid_lo`); the leaf
-        // axes inside those expressions are iterated by the consumer and
-        // substituted as a whole on splice (ru_subtree_rewrite_ranges via
-        // the consumer's in_rngs).  Treating them as stranded force-realized
-        // the reshape source unnecessarily (the old reshape-source band-aid).
+        // A leaf anywhere inside one of the producer's out_rngs (a RESHAPE
+        // swizzle, aid_hi*k + aid_lo) is covered: the consumer iterates it and
+        // substitutes the whole entry on splice.
         for (u8 a = 0; a < rm->out_ndim && !covered; a++) {
           if (ru_expr_references_aid(rm->out_rngs[a], aid)) covered = 1;
         }
@@ -3525,24 +2768,14 @@ fn void pm_apply_rangeify(Term root) {
     }
 
     if (realized) {
-      // Mirror indexing.py:92:
-      //   new_src = UOp(Ops.STAGE, src=(new_src,)+closed_ranges, arg=opts)
-      // The main-heap node wraps the REWRITTEN subtree so
-      // uop_bufferize_value returns the lowered form with INDEX_E around
-      // realized-producer references.  RU_SUBST keeps using `self` (the
-      // ORIGINAL op Term) because downstream materialize.c consumers
-      // resolve through it via term_resolve / heap_read identity.
-      // my_addr is the OUTPUT addr (uop_store(buf, my_addr, value)).
+      // indexing.py:92: STAGE(value, closed_ranges).  The BUFFERIZE wraps the
+      // rewritten subtree, so uop_bufferize_value returns the lowered value
+      // with INDEX_Es at its realized producers.
       Term my_addr = ru_build_index_addr_for(rm, self);
-      // The realized-store value subtree for movement-op nodes (EXPAND,
-      // RESHAPE, PERMUTE, PAD, SHRINK, FLIP): ru_rewrite_subtree returns
-      // the rebuilt movement shell wrapping an INDEX_E whose addr
-      // already encodes the swizzle.  The non-realized branch (below)
-      // strips that shell into the inner INDEX_E so consumers splice in
-      // just the value tree.  Apply the same strip when building
-      // RU_STORE_ROOT.value so cpu_uop_walk (no value-layer movement-op
-      // handler) sees the indexed read, not the wrapper.  RU_BUFFERIZE_TERM
-      // keeps the unstripped form for upstream-boundary identity checks.
+      // A movement node's rewritten shell wraps an INDEX_E whose address
+      // already holds the swizzle.  The store value strips the shell, as the
+      // non-realized branch does, since cpu_uop_walk has no value-level
+      // movement ops; the BUFFERIZE keeps it.
       Term store_value = rewritten;
       int is_movement_op = (info->op == UOP_RESHAPE || info->op == UOP_PERMUTE
                          || info->op == UOP_EXPAND  || info->op == UOP_PAD
@@ -3557,33 +2790,22 @@ fn void pm_apply_rangeify(Term root) {
       }
       Term closed_ranges[MAX_DIM];
       u32 n_closed = ru_collect_closed_ranges(i, closed_ranges, MAX_DIM);
-      // addrspace mirrors tinygrad's BufferizeOpts.addrspace:
-      // full-realize -> GLOBAL device memory; partial-realize falls back
-      // to LOCAL (threadgroup-shared) because the per-axis collapse
-      // matches the `len(range_map[s][1]) != len(realized_ranges)` branch
-      // at tinygrad/schedule/indexing.py:96-97 at ac4049794, which #18368
-      // deleted.
+      // A full realize is GLOBAL, a partial one LOCAL.  tinygrad has no partial
+      // realize: its STAGE is always GLOBAL (indexing.py:59, 91).
       u32 addrspace = RU_REALIZE_MAP[i].realized_full
                     ? UOP_SCOPE_GLOBAL
                     : UOP_SCOPE_LOCAL;
-      // removable mirrors `removable = s.op not in ALWAYS_CONTIGUOUS and
-      // s not in ctx.non_removable` (indexing.py:90).  thvm has UOP_COPY
-      // but no ALWAYS_CONTIGUOUS set, so removable defaults to 1.
+      // tinygrad's removable (indexing.py:90) excludes ALWAYS_CONTIGUOUS srcs;
+      // thvm has no such set, and remove_bufferize has already run.
       u32 removable = 1;
       Term b = uop_bufferize_new(rewritten, addrspace, removable,
                                  n_closed, closed_ranges);
       RU_BUFFERIZE_TERM[i] = b;
       RU_LAST_BUFFERIZES_EMITTED++;
-      // Assemble UOP_STORE(out_buf, addr, value) for the lifter's
-      // `out->store_root`: out_buf is shaped by the n_closed RANGE
-      // extents, dtype comes from the rewritten value.  Only emit if
-      // dtype is recoverable; without a recoverable dtype this slot's
-      // store_root stays 0 and kernel_lift_to_uop will reject the
-      // kernel.  Note: DT_BOOL == 0 is a valid dtype, so we MUST use
-      // term_dtype_in's return value rather than gating on
-      // `store_dtype != 0` -- the latter would silently drop every
-      // cast-to-bool kernel and leave its output buffer at the init
-      // zeros.
+      // The kernel root: STORE(buffer of the node's shape and dtype, my_addr,
+      // store_value).  Without a dtype it stays 0 and kernel_lift_to_uop
+      // rejects the kernel.  DT_BOOL is 0, so the test is term_dtype_in's
+      // result: store_dtype != 0 would drop every cast-to-bool kernel.
       u32 store_dtype = 0;
       if (term_dtype_in(self, 0, &store_dtype)) {
         Shape out_shape = {0};
@@ -3593,66 +2815,32 @@ fn void pm_apply_rangeify(Term root) {
           RU_STORE_ROOT[i] = uop_store(out_buf, my_addr, store_value);
         }
       }
-      // RU_SUBST holds the bare BUFFERIZE; ru_rewrite_subtree wraps
-      // each downstream consumer with uop_index_e(BUFFERIZE, consumer_in_addr)
-      // so cross-realize loads use the CONSUMER's iter (mirrors
-      // tinygrad/schedule/indexing.py:78 `BUFFERIZE.index(*consumer_ranges)`).
-      // The pre-wrapped `uop_index_e(b, my_addr)` form would pin reads to
-      // the PRODUCER's range axis_id -- correct only when consumer and
-      // producer share the same RANGE Term, which fails when both are
-      // realized (each minted a fresh range at lines 621-622).
+      // RU_SUBST is the bare BUFFERIZE: each consumer indexes it at its own
+      // in_rngs (ru_rewrite_child; indexing.py:93).  INDEX_E(b, my_addr) would
+      // read at this node's fresh ranges, which no consumer iterates.
       RU_SUBST[i] = b;
     } else {
-      // Mirror indexing.py:107 (passthrough INDEX without BUFFERIZE wrap).
-      // The consumer threads our VALUE EXPRESSION at the current iter.
-      // RU_SUBST is the REWRITTEN subtree (computed and finalized above):
-      // TAG_TEN children are wrapped with INDEX_E at the input addr
-      // (in_rngs for REDUCE, out_rngs otherwise), and downstream
-      // producer RU_SUBSTs are spliced in.  The consumer's own
-      // ru_rewrite_subtree then plugs this in verbatim (its TAG_UOP
-      // child branch hits our RU_SUBST entry).
+      // A src not in the realize map stays inline (indexing.py:78): RU_SUBST is
+      // the rewritten value, which the consumer's ru_rewrite_child splices in.
       RU_SUBST[i] = rewritten;
     }
 
-    // Mirror indexing.py:98-99 (remove_movement_op_after_rangeify):
-    //   `if x in ctx.range_map ... : return x.src[0]` -- but ONLY for a
-    //   NON-realized movement op.  A movement op that landed in the
-    //   realize_map (full OR partial) stays a boundary: its consumers
-    //   wrap it in a BUFFERIZE and index it per-consumer
-    //   (create_bufferize_and_index_based_on_ranges, indexing.py:63-78),
-    //   so forwarding it to its producer's substitute would discard the
-    //   just-emitted BUFFERIZE and re-share the producer view across the
-    //   divergent consumers (the exact corruption a partial-realize is
-    //   meant to break).  Keep RU_SUBST[i] = b for ANY realized movement
-    //   op; only NON-realized movement ops forward.
+    // remove_movement_op_after_rangeify (indexing.py:133-134): a non-realized
+    // movement op forwards its producer's substitute.  A realized one keeps its
+    // BUFFERIZE, so divergent consumers each index the buffer at their own
+    // ranges instead of sharing consumer 0's view.
     int is_movement = (info->op == UOP_RESHAPE || info->op == UOP_PERMUTE
                     || info->op == UOP_EXPAND  || info->op == UOP_PAD
                     || info->op == UOP_SHRINK  || info->op == UOP_FLIP);
-    // A realized movement op keeps its BUFFERIZE boundary (RU_SUBST[i] =
-    // b, set above).  This is REQUIRED for partial-realize of a SHRINK /
-    // RESHAPE / PERMUTE view of a computed source shared by divergent
-    // consumers: each consumer must INDEX_E the materialized buffer with
-    // its own ShapeTracker rather than inherit consumer 0's stride.  The
-    // PERMUTE/RESHAPE-realized swizzle-keep path below is for NON-realized
-    // producers only, so it is unreachable here; bail before it.
     if (is_movement && realized) {
       continue;
     }
     if (is_movement) {
-      // Forward to producer's substitute by default.  RESHAPE / PERMUTE
-      // need a special case when the producer realized to a UOP_BUFFERIZE:
-      // their movement-shell's slot 0 already holds INDEX_E(producer_buf,
-      // swizzled_addr) where the swizzle encodes the rank merge or axis
-      // permutation.  Forwarding to the bare BUFFERIZE drops that
-      // swizzle and the consumer re-wraps with INDEX_E(BUFFERIZE,
-      // consumer_addr) against the unswizzled output range, reading the
-      // wrong element (this is what gd-loss / mse-grad / SGD-step / etc.
-      // exercise -- their dot-product chains realize through PERMUTE
-      // and RESHAPE).  Unwrap the shell in those cases so the swizzled
-      // INDEX_E survives.  EXPAND / PAD / SHRINK / FLIP do not reuse the
-      // shell's pre-swizzled INDEX_E (the bn_grad dgamma chain's EXPAND
-      // reads stale data through it); each builds a fresh INDEX_E at its
-      // own input addr below.
+      // Forward the producer's substitute, except a RESHAPE or PERMUTE over a
+      // realized producer: its shell's slot 0 holds INDEX_E(buffer, swizzled
+      // address), and forwarding the bare BUFFERIZE would drop the swizzle, so
+      // the shell is unwrapped below.  Over a realized producer, a PAD, SHRINK,
+      // FLIP or EXPAND builds a fresh INDEX_E at its own input address.
       Term producer = term_resolve(heap_read(info->loc));
       if (term_tag(producer) == TAG_UOP) {
         u32 pidx = bufferize_info_find(term_val(producer));
@@ -3664,47 +2852,28 @@ fn void pm_apply_rangeify(Term root) {
                           && (info->op == UOP_PERMUTE
                            || info->op == UOP_RESHAPE);
           if (!keep_swizzle) {
-            // For non-realized PAD the consumer would otherwise read
-            // psub verbatim at every iter -- including iters outside
-            // the kept window where the producer's bytes are stale /
-            // unrelated.  Wrap psub with the value-side WHERE guard
-            // so out-of-window reads collapse to INVALID -> 0.  When
-            // psub is a bare BUFFERIZE we first wrap it in INDEX_E at
-            // the PAD's input addr (rm->in_rngs already encodes the
-            // shifted iter), mirroring ru_rewrite_subtree's
-            // BUFFERIZE-as-leaf substitution path.
+            // A non-realized PAD forwards under its WHERE guard, so reads
+            // outside the kept window are INVALID (0); a BUFFERIZE is first
+            // indexed at the PAD's input address, whose in_rngs hold the shift.
             Term fwd = psub;
             if (info->op == UOP_PAD && !realized) {
               if (psub_is_bufferize) {
                 Term in_addr = ru_build_input_addr_for(rm, info->loc);
                 fwd = uop_index_e(psub, in_addr);
-                // Stash per-axis range terms for the bypass rewriter's
-                // axis-table inline.  Mirror: tinygrad's BUFFERIZE.index
-                // (indexing.py:78) at the PAD-wrap path.
                 ru_index_axes_register(fwd, rm->in_rngs, rm->in_ndim);
               }
               fwd = ru_pad_wrap_where(info->loc, rm, fwd);
             } else if (psub_is_bufferize
                        && (info->op == UOP_SHRINK || info->op == UOP_FLIP
                         || info->op == UOP_EXPAND)) {
-              // A non-realized SHRINK (getitem) / FLIP over a producer that
-              // realized to a BUFFERIZE must read that buffer at its OWN
-              // swizzled iter, NOT forward the bare buffer.  The SHRINK's
-              // in_rngs already carry the begin offset (apply_movement_op_
-              // shrink: in_rng[a] = out_rng[a] + begin), so an INDEX_E at
-              // this op's input addr reads the right slice.  Without the
-              // wrap, two different getitem slices of one realized source
-              // (c[:,0] vs c[:,1], the fused-QKV head split) forward the
-              // IDENTICAL bare buffer -- the begin offset is dropped and
-              // both reads collapse to the same element.  Mirror tinygrad
-              // create_bufferize_and_index_based_on_ranges (indexing.py:78,
-              // BUFFERIZE.index(*consumer_ranges)) + the realized-source
-              // SHRINK in apply_movement_op (indexing.py:131).  A broadcast
-              // EXPAND likewise: its in_rngs read 0 on the axes it
-              // broadcasts, where the consumer's own addr runs over the
-              // expanded extent and reads past the buffer (one weight's
-              // RESHAPE realized for two matmuls, one of them over
-              // broadcast rows: test_shared_weight_levels).
+              // A SHRINK (getitem) or FLIP over a realized producer reads it at
+              // its own swizzled address (in_rngs carry the SHRINK begin):
+              // forwarding the bare buffer would make c[:,0] and c[:,1] read
+              // the same element.  tinygrad indexes a STAGE at the consumer's
+              // ranges (indexing.py:93) after the SHRINK swizzle
+              // (indexing.py:173).  A broadcast EXPAND likewise: its in_rngs
+              // read 0 on broadcast axes, where the consumer's own address
+              // would run past the buffer (test_shared_weight_levels).
               Term in_addr = ru_build_input_addr_for(rm, info->loc);
               fwd = uop_index_e(psub, in_addr);
               ru_index_axes_register(fwd, rm->in_rngs, rm->in_ndim);
@@ -3714,9 +2883,7 @@ fn void pm_apply_rangeify(Term root) {
           }
         }
       }
-      // Unwrap the movement shell: RU_SUBST[i] is currently the rebuilt
-      // movement-op Term (e.g. UOP_EXPAND(UOP_INDEX_E(...), ndim, dims))
-      // and we want just the inner INDEX_E. Slot 0 holds it directly.
+      // Unwrap the movement shell to the INDEX_E in its slot 0.
       Term cur = RU_SUBST[i];
       if (term_tag(cur) == TAG_UOP) {
         Term inner = heap_read(term_val(cur) + 0);
