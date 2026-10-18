@@ -1,16 +1,5 @@
-// uop/store.c - construct UOP_STORE and UOP_AFTER.
-//
-// UOP_STORE is the symmetric counterpart to UOP_INDEX_E: where INDEX_E
-// reads `buf[addr]`, STORE writes `value` to `buf[addr]`.  Both share
-// the symbolic-address tree shape (UOP_RANGE / UOP_I* / UOP_IWHERE).
-//
-// UOP_AFTER is an ordering annotation: `AFTER(node, after_node)` means
-// `node` is sequenced after `after_node`.  Backends emit a barrier
-// when AFTER crosses a scope boundary (LOCAL/GLOBAL) and a warp
-// shuffle when crossing REG.
-//
-// Both opcodes hash-cons via uop_mov_cache.
-
+// Heap layout: [buf, addr, value]: writes value to buf[addr], with the same
+// symbolic address tree an INDEX_E reads through.
 fn Term uop_store(Term buf, Term addr, Term value) {
   u32 args[6] = { (u32)buf,   (u32)(buf   >> 32),
                   (u32)addr,  (u32)(addr  >> 32),
@@ -42,10 +31,8 @@ fn Term uop_store_value(Term t) {
   return heap_read(term_val(t) + 2);
 }
 
-// UOP_AFTER expresses ordering between sibling side-effects.  `node`
-// happens after `after_node`.  Backends emit a barrier when this
-// crosses a scope boundary, or a warp shuffle when crossing REG.
-// Hash-cons by (node, after_node).
+// Heap layout: [node, after_node]: node runs after after_node; rmu_emit_after
+// puts a threadgroup barrier between them when either stores to a LOCAL buffer.
 fn Term uop_after(Term node, Term after_node) {
   u32 args[4] = { (u32)node,       (u32)(node       >> 32),
                   (u32)after_node, (u32)(after_node >> 32) };

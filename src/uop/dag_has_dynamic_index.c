@@ -1,11 +1,3 @@
-// uop/dag_has_dynamic_index.c - does a kernel address depend on loaded data?
-//
-// 1 iff some INDEX_E or STORE under `root` (every store of an AFTER root
-// included) has an INDEX_E inside its address: a gather or scatter whose
-// position is read from an index buffer.  The opt passes assume affine
-// addresses, and a scatter's read-modify-write is only race-free as a
-// serial loop, so emit flags such kernels no_opts.
-
 static void dyn_index_push_srcs(UOpWalk *w, Term t) {
   u64 loc = term_val(t);
   if (term_ext(t) == UOP_AFTER) {
@@ -19,8 +11,9 @@ static void dyn_index_push_srcs(UOpWalk *w, Term t) {
   }
 }
 
-// 1 iff an INDEX_E sits inside the address of an INDEX_E or STORE under
-// `root`: the address depends on loaded data (gather / scatter).
+// 1 iff an INDEX_E sits in the address of an INDEX_E or STORE under `root`,
+// every store of an AFTER root included: a gather or scatter, whose address
+// the opt passes cannot treat as affine (KernelEntry.no_opts).
 fn int uop_dag_has_dynamic_index(Term root) {
   UOpWalk all  = {0};
   UOpWalk addr = {0};

@@ -1,23 +1,9 @@
-// uop/expand.c - construct a UOP_EXPAND node.
-//
-// Heap layout: [src, NUM(ndim), NUM(d0), ..., NUM(d_{ndim-1})] where
-// ndim is stored explicitly at slot 1 so the materializer doesn't
-// have to infer it from the source's rank.  src stays at slot 0 to
-// match the per-op "child at slot i" convention used by the
-// schedule/materialize child loop.
-//
-// Storing ndim explicitly is what makes EXPAND legitimately able to
-// change rank (e.g. lift a scalar gy to a {2,3} target shape during
-// backprop, which the source-rank-inference path could not represent).
+// Heap layout: [src, NUM(ndim), NUM(d0), ..., NUM(d_{ndim-1})].  ndim may
+// differ from the source's rank: backprop expands a {1} CONST to a full shape.
 
 fn Term uop_expand(Term src, u32 ndim, const u32 *dims) {
-  // Collapse expand-of-expand (intermediate shape is overridden).
   Term collapsed = uop_rewrite_movement_src(UOP_EXPAND, src);
   if (collapsed != 0) src = collapsed;
-  // Hash-cons by (op, src, ndim, dims).  Repeat construction (e.g.
-  // EXPAND(CONST(0), target.shape) appearing in every TGrad WL
-  // wrap, multiplied across nested rounds) reuses the existing
-  // heap loc.
   u32 key_buf[1 + MAX_DIM];
   key_buf[0] = ndim;
   for (u32 i = 0; i < ndim; i++) key_buf[1 + i] = dims[i];

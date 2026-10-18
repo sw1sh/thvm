@@ -1,8 +1,4 @@
-// uop/flip.c - construct a UOP_FLIP node.
-//
-// Heap layout: [src, NUM(axes_bitmask)].  Bit i of the bitmask is
-// set iff axis i is flipped.  Implemented in step 14 by negating
-// strides[i] and adjusting offset.
+// Heap layout: [src, NUM(axes_bitmask)]; bit i is set iff axis i is flipped.
 
 fn Term uop_flip(Term src, u32 axes_bitmask) {
   u32 args[1] = {axes_bitmask};

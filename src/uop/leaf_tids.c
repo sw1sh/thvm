@@ -1,16 +1,5 @@
-// uop/leaf_tids.c - walk a UOP DAG and collect distinct TAG_TEN
-// leaf tids.  Pure tree walk, nothing grad-specific (TGrad happens
-// to be the first caller; future BEAM / kernel introspection passes
-// will use the same primitive).
-//
-// Iterative + heap-loc-keyed visited bitmap so shared sub-UOPs are
-// walked once.  The recursive WL equivalent re-walked them
-// exponentially -- LeNet's 8-weight forward measured 1.6 s in WL
-// and < 2 ms here.
-//
-// `out_tids` receives up to `cap` tid values; `*n_out` returns the
-// actual count written (0 on empty walk).  `visited[loc]` indexes
-// up to HEAP_NEXT (the live region) -- HEAP_CAP would be wasteful.
+// The distinct TAG_TEN tids under `root`, at most `cap`, with *n_out their
+// count.  A heap-loc visited bitmap walks each shared sub-UOp once.
 
 fn void uop_leaf_tids(Term root, u32 *out_tids, u32 cap, u32 *n_out) {
   *n_out = 0;
@@ -55,7 +44,6 @@ fn void uop_leaf_tids(Term root, u32 *out_tids, u32 cap, u32 *n_out) {
     } else if (tag == TAG_DP0 || tag == TAG_DP1) {
       if (sp + 1 < HEAP_NEXT) stack[sp++] = heap_read(loc);
     }
-    // Other tags: leaves with no recursable children.
   }
 
   free(visited);

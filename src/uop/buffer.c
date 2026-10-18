@@ -1,32 +1,11 @@
-// uop/buffer.c - construct a UOP_BUFFER leaf.
-//
-// Heap layout: [NUM(scope), NUM(dtype), NUM(ndim), NUM(instance),
-//               NUM(d0), ..., NUM(d_{ndim-1})];
-// instance = kernel slot + 1 (0 = the output buffer).
-//
-// Scope (UOP_SCOPE_GLOBAL/LOCAL/REG) carries the storage tier:
-// GLOBAL = device memory (kernel argument), LOCAL = threadgroup-shared,
-// REG = per-thread register fragment.
-//
-// Hash-cons via uop_mov_cache: (scope, dtype, ndim, instance, dims) round-trip
-// to one heap loc.  Repeated `uop_buffer(GLOBAL, DT_FP32, 1, &n)` calls
-// for the same shape return the same Term so kernel boundaries dedup
-// to single buffer slots.
+// Heap layout: [NUM(scope), NUM(dtype), NUM(ndim), NUM(instance), NUM(d0),
+// ...].  Equal buffers hash-cons to one Term and one kernel slot; instance
+// (input slot + 1, 0 for the output) keeps same-shaped slots apart.
 
-// Construct a UOP_BUFFER leaf with `scope` (UOP_SCOPE_GLOBAL/LOCAL/REG),
-// `dtype` (DT_FP32/etc.), and `ndim` dimensions in `dims`.  Hash-cons via
-// uop_mov_cache: identical (scope, dtype, ndim, dims) tuples share heap
-// loc.  Defaults: scope=GLOBAL captures today's implicit-buffer behavior
-// and lets D'1 land without consumer rewrites.
 fn Term uop_buffer(u32 scope, u32 dtype, u32 ndim, const u32 *dims) {
   return uop_buffer_inst(scope, dtype, ndim, dims, 0);
 }
 
-// Variant carrying an instance disambiguator.  Two buffers with the
-// same (scope, dtype, ndim, dims) but different instance fields hash-
-// cons to distinct Terms.  Used by kernel_lift_to_uop to keep input
-// slots distinguishable from each other and from the output even when
-// they share shape.  instance=0 is the default (shareable).
 fn Term uop_buffer_inst(u32 scope, u32 dtype, u32 ndim, const u32 *dims,
                         u32 instance) {
   u32 key_buf[4 + MAX_DIM];
@@ -51,8 +30,8 @@ fn Term uop_buffer_inst(u32 scope, u32 dtype, u32 ndim, const u32 *dims,
   return t;
 }
 
-// Read accessors.  Return 0 / sentinel when `t` is not a UOP_BUFFER
-// term so callers can defensively probe terms of unknown opcode.
+// The accessors return 0 for a Term that is not a UOP_BUFFER, so a caller can
+// probe any Term.
 
 fn u32 uop_buffer_scope(Term t) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_BUFFER) return 0;

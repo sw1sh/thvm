@@ -1,33 +1,20 @@
-// uop/graph_rewrite.c - named bottom-up rewrite pass over UOp DAGs.
-//
-// This is the UOp-level counterpart to the realize-map rule harness:
-// it walks a graph bottom-up, rebuilds changed nodes through the
-// canonical UOp constructors, then runs a table of named replacement
-// callbacks.  It is intentionally smaller than tinygrad's UPat system;
-// the first goal is to provide one reusable home for symbolic,
-// movement, and schedule-IR rewrite rules as they are ported.
+// Bottom-up rewrite: a node whose sources changed is rebuilt through the
+// canonical constructors, then named rules apply to a fixed point (a smaller
+// cousin of tinygrad's graph_rewrite).
 
 #define UOP_GRAPH_REWRITE_STATS_CAP 128
 #define UOP_GRAPH_REWRITE_MEMO_MAX  (1u << 20)
 
-// Past either budget the pass fails through thvm_fatal with a diagnostic,
-// as tinygrad raises RuntimeError (uop/ops.py:1804 stack limit, :1815
-// fixed_point_rewrite cycle): stopping early would return a graph rewritten
-// only above the cut.  thvm_fatal returns an armed LibraryLink entry to WL
-// as an error instead of killing the kernel.
-//
-// MAX_DEPTH bounds structural recursion (child and STACK-lane descent), the
-// only part of the pass that grows the C stack.  Rewrites run on the calling
-// thread, at least the 8 MB main-thread stack (no render runs on a worker
-// pool).  A level costs one 176-byte frame on arm64 at -O2 (plus 128 bytes
-// at a STACK), so the budget stays under 1.5 MB in practice and 2.5 MB at
-// worst, while sitting 4x above the deepest chain tested end to end (2000
-// levels in py/tests/test_deep_chain_depth.py).
-//
-// MAX_CHAIN bounds successive rule hits on one node.  A chain runs
-// iteratively and costs no stack; a node that reappears on its own chain
-// aborts at once.
+// Past either budget the pass fails through thvm_fatal (an error in an armed WL
+// entry), as tinygrad raises at uop/ops.py:1804 (stack) and :1815 (cycle):
+// stopping early would return a graph rewritten only above the cut.
+
+// The child recursion is the only part that grows the C stack: 8192 small
+// frames fit the 8 MB main-thread stack the pass runs on, 4x the 2000-level
+// chain py/tests/test_deep_chain_depth.py tests.
 #define UOP_GRAPH_REWRITE_MAX_DEPTH 8192u
+// Successive rule hits on one node; a chain is a loop, not recursion, and a
+// node that reappears on its own chain aborts at once.
 #define UOP_GRAPH_REWRITE_MAX_CHAIN 1024u
 
 typedef struct {
@@ -40,9 +27,8 @@ typedef struct {
   Term value;
 } UOpGraphRewriteMemoSlot;
 
-// One rule hit on an open chain: the node the rule fired on, and the
-// replacement to memoize once the chain settles (0 when it was already
-// memoized or is not a UOp node).
+// A rule hit on an open chain: the node it fired on, and the replacement to
+// memoize once the chain settles (0 when already memoized or not a UOp node).
 typedef struct {
   Term node;
   Term key;
@@ -194,8 +180,6 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
       return uop_binary(op, srcs[0], srcs[1]);
 
     case UOP_REDUCE: {
-      // Multi-axis REDUCE: copy the full axes array; n_axes==1 case stays
-      // single-axis identical to the old reduce(kind, axis, src).
       u32 kind   = uop_reduce_kind(t);
       u32 n_axes = uop_reduce_n_axes(t);
       u32 axes[MAX_DIM];
@@ -266,12 +250,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
       return uop_bitcast(srcs[0], dtype);
     }
 
-    // === Symbolic INDEX layer ===
-    // Production lifter output nests UOP_RANGE leaves inside
-    // UOP_INDEX_E.addr (a tree of UOP_IADD/IMUL/...).  Without
-    // these rebuild cases a rewrite could not descend into address
-    // arithmetic to reach those leaves.
-
+    // Address arithmetic, so rules reach the RANGE leaves inside an INDEX_E.
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR:
@@ -283,10 +262,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     case UOP_INDEX_E:
       return uop_index_e(srcs[0], srcs[1]);
 
-    // UOP_RANGE has arity 0; the canonical-reconstruct path is
-    // unreachable in practice (no children means changed=0), but
-    // wiring it through uop_range hash-cons keeps the rebuild
-    // total over every opcode the rewriter visits.
+    // Unreachable (arity 0: no source can change), kept for a total rebuild.
     case UOP_RANGE: {
       u32 axis_id   = (u32)term_val(heap_read(loc + 0));
       u32 axis_type = (u32)term_val(heap_read(loc + 1));
@@ -294,8 +270,6 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
       return uop_range(axis_id, axis_type, extent);
     }
 
-    // UOP_INVALID is a singleton via the mov-cache.  Reuse the
-    // canonical constructor; rebuild is identity in practice.
     case UOP_INVALID:
       return uop_invalid();
 
@@ -308,9 +282,8 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     case UOP_STORE:
       return uop_store(srcs[0], srcs[1], srcs[2]);
 
-    // The indexed ops copy their NUM payload.  The unchecked builders:
-    // the original node passed the checks, and a rewritten source (a
-    // folded CONST, say) need not keep a shape the checks could read.
+    // The unchecked builders: the original node passed the checks, and a
+    // rewritten source (a folded CONST, say) need not keep a shape they read.
     case UOP_GATHER:
       return uop_gather_node(srcs[0], srcs[1], uop_gather_dim(t));
 
@@ -393,8 +366,6 @@ static u32 uop_graph_rewrite_match(UOpGraphRewriteState *st, Term t,
 
 static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st, Term t, u32 depth);
 
-// Rewrites the sources of UOp node `t` at `depth` and rebuilds it when any
-// changed.
 static Term uop_graph_rewrite_descend(UOpGraphRewriteState *st, Term t,
                                       u32 depth) {
   u8   op  = term_ext(t);
@@ -413,10 +384,9 @@ static Term uop_graph_rewrite_descend(UOpGraphRewriteState *st, Term t,
   return changed ? uop_graph_rebuild_with_srcs(t, srcs) : t;
 }
 
-// Bottom-up: rewrite the sources, then apply the first matching rule and
-// fully rewrite its replacement, repeating until no rule fires.  The
-// replacement chain is a loop, not recursion, so `depth` counts structural
-// descent only.  Every node on a chain maps to the chain's fixpoint.
+// Rewrite the sources, then apply the first matching rule and fully rewrite its
+// replacement until no rule fires.  The chain is a loop, so `depth` counts only
+// structural descent; every node on a chain memoizes to its fixpoint.
 static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st, Term t, u32 depth) {
   Term resolved = term_resolve(t);
   if (term_tag(resolved) != TAG_UOP || term_ext(resolved) == UOP_KERNEL) {
@@ -530,21 +500,8 @@ fn Term uop_graph_rewrite(Term root,
   return out;
 }
 
-// === Move a compute graph to a device by COPYing every tensor leaf =======
-// A lazy graph "lives on device D" iff it is COMPUTED on D, which means each
-// op's operands must be on D, recursively down to the leaves.  So TToDevice /
-// Tensor.to(D) wraps every TAG_TEN leaf (weights, realized tensors, host
-// inputs) in COPY(leaf, D); the routed realize then computes the whole graph
-// on D with each leaf uploaded once.  This is what makes an imported forward
-// actually run on the GPU -- a single COPY around the root would compute the
-// whole thing on CPU and only move the result.  Mirrors tinygrad moving a
-// model's parameters with model.to(D), not copying only the output.
-//
-// A bare realized tensor is the degenerate single-leaf case (one upload).  An
-// existing COPY is left intact: it already names its src's device, so we don't
-// recurse into it (which would double-wrap its leaf).  Memoized by term so a
-// shared leaf yields one COPY (uploaded once).
-//
+// === Move a compute graph to a device ===
+
 // Past UOP_GRAPH_REWRITE_MAX_DEPTH it fails: returning the subtree unwrapped
 // would leave its leaves on the old device, a mixed-device graph.
 static void uop_to_device_leaves_check_depth(Term r, u32 depth) {
@@ -562,18 +519,14 @@ static Term uop_to_device_leaves_rec(Term t, i32 dev,
                                      u32 cap, u32 *used, u32 depth) {
   Term r   = term_resolve(t);
   u8   tag = term_tag(r);
-  if (tag == TAG_TEN) return uop_copy_dev(r, dev);     // the leaf upload
-  if (tag != TAG_UOP) return r;                        // NUM / VAR: leave as-is
+  if (tag == TAG_TEN) return uop_copy_dev(r, dev);
+  if (tag != TAG_UOP) return r;
   u8 op = term_ext(r);
   if (op == UOP_KERNEL) return r;                      // opaque
   if (op == UOP_COPY) {
-    // An EXPLICIT-device COPY already names where its src lives -- respect it.
-    // A GENERIC COPY (device -1, the deferred-upload a TFromNet weight uses via
-    // TUOpCopy[TTensorCreateHost[...]]) otherwise resolves its target to
-    // CURRENT_BACKEND at materialize time, which is CPU during a routed realize
-    // -- so the weight would stay on CPU while leaf-inserted inputs go to `dev`,
-    // and the mixed-device kernel computes garbage.  Re-target it to `dev` so
-    // every operand lands on the same device.
+    // An explicit-device COPY stays.  A generic one (device -1, a TFromNet
+    // weight's deferred upload) resolves to CURRENT_BACKEND at materialize
+    // time, which can differ from `dev`, so it is re-targeted to `dev`.
     if (uop_copy_device(term_val(r)) >= 0) return r;
     uop_to_device_leaves_check_depth(r, depth);
     Term csrc = uop_to_device_leaves_rec(heap_read(term_val(r) + 0),
@@ -616,10 +569,9 @@ static Term uop_to_device_leaves_rec(Term t, i32 dev,
   return cur;
 }
 
-// Move a compute graph to `dev` by wrapping every TAG_TEN leaf in COPY(leaf,
-// dev): the routed realize then COMPUTES the graph on `dev` (each leaf uploaded
-// once), rather than computing on CPU and copying only the result.  Backs
-// TToDevice / Tensor.to(device).
+// Wraps each TAG_TEN leaf in COPY(leaf, dev) so the realize computes the graph
+// on dev, uploading each leaf once: a COPY at the root alone would compute on
+// the leaves' device and move only the result.  Backs TToDevice.
 fn Term uop_to_device_leaves(Term root, i32 dev) {
   u32 cap = uop_graph_rewrite_memo_cap();
   UOpGraphRewriteMemoSlot *memo =

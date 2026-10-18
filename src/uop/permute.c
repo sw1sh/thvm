@@ -1,21 +1,12 @@
-// uop/permute.c - construct a UOP_PERMUTE node.
-//
-// Heap layout: [src, NUM(ndim), NUM(p0), NUM(p1), ..., NUM(p_{ndim-1})]
-// where p[i] is the source axis index that becomes the i-th
-// output axis.  Total cells: 2 + ndim.
+// Heap layout: [src, NUM(ndim), NUM(p0), ..., NUM(p_{ndim-1})], output axis i
+// being source axis p_i.
 
 fn Term uop_permute(Term src, u32 ndim, const u32 *perm) {
-  // Identity permute: perm[i] == i for all i -> drop the op.
-  // (Common in autograd where the inverse-of-identity transpose
-  // appears for symmetric chains.)
   u8 identity = 1;
   for (u32 i = 0; i < ndim; i++) {
     if (perm[i] != i) { identity = 0; break; }
   }
   if (identity) return src;
-  // Compose permute-of-permute: outer.perm[i] = inner.perm[outer.perm[i]].
-  // Drops the intermediate node; the composition gets hash-cons'd
-  // like any normal permute.
   if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_PERMUTE) {
     u64 inner_loc = term_val(src);
     Term inner_ndim_cell = heap_read(inner_loc + 1);

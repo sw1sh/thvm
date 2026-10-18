@@ -1,15 +1,5 @@
-// uop/unary.c - construct a 1-source UOp (NEG/RECIP/EXP2/LOG2/SQRT).
-//
-// Heap layout: [src] -- one cell holding the source term.
-//
-// Hash-cons by (opcode, src).  Sharing identical UOp terms is
-// always safe (UOPs are immutable; materialize dedups by heap loc
-// identity); the same upstream slim down across iterations of a
-// recursive lambda's chain rule.
-
+// opcode is NEG, RECIP, EXP2, LOG2 or SQRT; heap layout [src].
 fn Term uop_unary(u32 opcode, Term src) {
-  // Constructor-time rewrites (uop/rewrite.c): constant fold +
-  // self-inverse pairs (`neg(neg(x)) = x`, etc.).
   Term r = uop_rewrite_unary(opcode, src);
   if (r != 0) return r;
   u32 args[2] = { (u32)src, (u32)(src >> 32) };

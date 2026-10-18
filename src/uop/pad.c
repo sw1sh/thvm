@@ -1,9 +1,5 @@
-// uop/pad.c - construct a UOP_PAD node.
-//
-// Heap layout: [src, NUM(ndim), NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...]
-// where b_i and e_i are the begin / end pad widths for axis i.
-// Total cells: 2 + 2*ndim.  ndim explicit so walkers/GC can size
-// the node without consulting term_shape_in.
+// Heap layout: [src, NUM(ndim), NUM(b0), NUM(e0), ...], b_i / e_i the pad
+// before / after axis i; ndim is stored so the GC can size the node alone.
 
 fn Term uop_pad(Term src, u32 ndim, const u32 *begin_end) {
   u32 key_buf[1 + 2 * MAX_DIM];

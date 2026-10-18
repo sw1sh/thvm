@@ -1,24 +1,6 @@
-// uop/copy.c - construct a UOP_COPY node (lazy device transfer).
-//
-// Heap layout: [src, NUM(device+1)] -- the source term plus a trailing
-// NUM payload holding the EXPLICIT target device (mirroring the variable
-// payload of REDUCE/RESHAPE; arity stays 1, src is the only recursable
-// child).  The stored value is `device + 1` so the generic sentinel
-// (device == -1, "the realize backend") is a non-negative 0 and CPU=1,
-// METAL=2 read back cleanly.  At materialize time the COPY uploads src to
-// its target device: an explicit device names the backend directly; the
-// generic sentinel falls back to CURRENT_BACKEND (the legacy behaviour).
-// When the target already holds src it is an identity (no kernel, no copy).
-//
-// Mirrors tinygrad's Ops.COPY, which carries the target as src[1]
-// (uop/ops.py:660 copy_to_device -> UOp(Ops.COPY, dt, (src, DEVICE));
-// ops.py:756 COPY.device == src[1].device; engine/realize.py:158
-// exec_copy host-staged upload).  thvm packs the device as a NUM cell
-// rather than a child DEVICE uop, but the meaning is identical.
-//
-// Hash-cons by (UOP_COPY, device, src): COPY nodes are immutable and a
-// distinct target device is a distinct node, so the same src copied to
-// two devices does not collide.
+// Heap layout: [src, NUM(device + 1)], arity 1; the + 1 stores the generic
+// device -1 (the realize backend) as 0.  tinygrad's Ops.COPY holds the target
+// device as its arg (uop/ops.py:766-773 copy_to_device).
 
 fn Term uop_copy_dev(Term src, i32 device) {
   u32 args[3] = { (u32)src, (u32)(src >> 32), (u32)device };
@@ -33,12 +15,9 @@ fn Term uop_copy_dev(Term src, i32 device) {
   return t;
 }
 
-// Generic transfer to the realize backend (device == -1), the legacy
-// device-agnostic COPY.
 fn Term uop_copy(Term src) { return uop_copy_dev(src, -1); }
 
-// Read a COPY node's explicit target device, or -1 for the generic
-// (realize-backend) sentinel.  `loc` is the COPY heap loc (term_val).
+// Takes the COPY's heap loc (term_val), not its Term; -1 is the generic device.
 fn i32 uop_copy_device(u64 loc) {
   Term d = heap_read(loc + 1);
   if (term_tag(d) != TAG_NUM) return -1;

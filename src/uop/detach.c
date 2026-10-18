@@ -1,9 +1,5 @@
-// uop/detach.c - stop-gradient marker (tinygrad UOp detach).
-//
-// Identity at runtime; materialize strips DETACH(x) -> x
-// (materialize_strip_detach) so no kernel/render/walker path observes it.  Its only
-// live role is in uop_grad: the cotangent reaching a DETACH dies (the
-// child is not differentiated), matching `x.detach()`.
+// Stop-gradient (tinygrad Ops.DETACH): the chain rule sends no cotangent past
+// it, and materialize strips DETACH(x) -> x (materialize_strip_detach).
 fn Term uop_detach(Term src) {
   u64 loc = heap_alloc(1);
   heap_set(loc, src);

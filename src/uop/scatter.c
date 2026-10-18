@@ -1,30 +1,10 @@
-// uop/scatter.c - UOP_SCATTER: `src` combined into a copy of `base` at the
-// positions an index tensor names along axis `dim`.
-//
-// Heap layout: [base, idx, src, NUM(dim), NUM(kind), NUM(include_self)];
-// arity 3 (base, idx, src).  The node has base's shape and dtype.  With
-// t(p) = p with p_dim := idx[p], valid(p) = 0 <= idx[p] < base.shape[dim]
-// and I the kind's identity (scatter_identity_bits):
-//
-//   SUM, PROD, MAX, MIN   out = S (op) T
-//     S[j] folds src[p] over the valid p with t(p) = j, in row-major p
-//          order, or is I when there is none;
-//     T    = base if include_self, else (j touched ? I : base).
-//   REPLACE               out[j] = src[p] for the last valid p (along dim)
-//                         with t(p) = j, or base[j] when untouched.
-//
-// This is tinygrad's scatter_reduce algebra (mixin/op.py:1126-1134) and
-// scatter's last-write-wins merge (_masked_merge, :1170-1177).
-//
-// uop_scatter returns 0 unless the operands have equal ndim, idx has an
-// integer dtype, dim < ndim, src.shape == idx.shape (the frontend shrinks
-// src first, as _pre_scatter does at :1088), idx.shape[d] <= base.shape[d]
-// for every d != dim, dtype(src) == dtype(base), kind is a SCATTER_* with
-// an identity the dtype can express, include_self is 0 or 1, and the shapes
-// pass uop_indexed_shape_ok.  include_self does not apply to REPLACE, which
-// stores 0 so equal scatters hash-cons to one node.  uop_scatter_node
-// builds the node unchecked.
+// Heap layout: [base, idx, src, NUM(dim), NUM(kind), NUM(include_self)].
 
+// tinygrad's scatter_reduce (mixin/op.py:1126-1134): out[j] folds the src[p]
+// with in-range idx[p] = j into base[j], or for a hit j into the identity when
+// include_self is 0.  REPLACE: last write wins (_masked_merge, :1170-1177).
+
+// Unchecked, for rebuilding a node whose sources a rewrite replaced.
 fn Term uop_scatter_node(Term base, Term idx, Term src, u32 dim, u32 kind,
                          u32 include_self) {
   u32 args[9] = { (u32)base, (u32)(base >> 32),
@@ -48,6 +28,8 @@ fn Term uop_scatter_node(Term base, Term idx, Term src, u32 dim, u32 kind,
   return t;
 }
 
+// 0 when a check fails.  src.shape must equal idx.shape: the frontend shrinks
+// src first, as tinygrad's _pre_scatter does (mixin/op.py:1088).
 fn Term uop_scatter(Term base, Term idx, Term src, u32 dim, u32 kind,
                     u32 include_self) {
   Shape bs, is, ss;
@@ -83,6 +65,7 @@ fn Term uop_scatter(Term base, Term idx, Term src, u32 dim, u32 kind,
       return 0;
     }
   }
+  // REPLACE takes no include_self; storing 0 keeps equal scatters one node.
   if (kind == SCATTER_REPLACE) {
     include_self = 0;
   }
@@ -113,11 +96,9 @@ fn u32 uop_scatter_include_self(Term s) {
   return (u32)term_val(heap_read(term_val(s) + 5));
 }
 
-// The largest (want_max) or smallest value of `dtype` as a CONST payload:
-// tinygrad DType.max / DType.min (dtype.py:70-78), which is +-inf for a
-// float except the infinity-free fp8e4m3 (+-448, its largest normal), the
-// integer range, and True / False for bool.  0 when a 64-bit integer
-// extreme does not fit the 32-bit payload.
+// The max (want_max) or min of `dtype` as a CONST payload: tinygrad DType.max /
+// DType.min (dtype.py:70-78), +-inf for a float but +-448 for the inf-free
+// fp8e4m3.  0 when a 64-bit integer extreme does not fit the 32-bit payload.
 static int scatter_dtype_extreme(u32 dtype, int want_max, u32 *bits) {
   DTypeInfo const *di = dtype_info(dtype);
   if (di == NULL) {
@@ -158,9 +139,8 @@ static int scatter_dtype_extreme(u32 dtype, int want_max, u32 *bits) {
   }
 }
 
-// The identity of `kind` over `dtype` as a CONST payload (uop/const.c): 0
-// for SUM, 1 for PROD, the dtype minimum for MAX and maximum for MIN.
-// REPLACE never reads one; its payload is 0.
+// Writes the identity of `kind` over `dtype` as a CONST payload; 0 when none
+// exists.  REPLACE never reads one; its payload is 0.
 fn int scatter_identity_bits(u32 kind, u32 dtype, u32 *bits) {
   switch (kind) {
     case SCATTER_SUM:

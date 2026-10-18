@@ -1,20 +1,6 @@
-// uop/opt.c - construct UOP_OPT annotations.
-//
-// UOP_OPT attaches an optimisation directive (UNROLL, UPCAST, TC,
-// LOCAL, GROUP_REDUCE) to a target node.  Mirrors TileLang's OptOp
-// system: T.unroll = OPT(range, UNROLL, factor); T.gemm composes a
-// matmul shape + OPT(_, TC); T.Parallel = OPT(range, LOCAL, 0).
-//
-// The renderer pattern-matches on (UOp shape, OPT kind) to fire
-// specialised templates instead of emitting one new opcode per
-// specialisation (no UOP_GEMM / UOP_CONV2D needed).
-//
-// Hash-cons via uop_mov_cache: identical (target, kind, factor)
-// tuples share heap loc.
-
-// Attach an optimisation directive (UOP_OPT_UNROLL, UPCAST, TC,
-// LOCAL, GROUP_REDUCE) to `target`.  `factor` is 0 when the kind
-// carries no scalar (TC, LOCAL).  Hash-cons by (target, kind, factor).
+// Heap layout: [target, NUM(kind), NUM(factor)]; factor is 0 for a kind that
+// takes none.  Renderers match (target shape, kind) for their specialised
+// templates, so a TC matmul needs no opcode of its own.
 fn Term uop_opt(Term target, u32 kind, u32 factor) {
   u32 args[4] = { (u32)target, (u32)(target >> 32), kind, factor };
   u64 key = uop_mov_hash(UOP_OPT, 0, args, 4);

@@ -1,16 +1,9 @@
-// uop/upat.c - declarative pattern layer over UOp DAGs: structural
-// matching with positional bindings.  Each UPat node captures op /
-// src-count / dtype / optional binding slot; nested UPats describe
-// child structure.
-
 fn int upat_match(UPat const *pat, Term t, Term *bindings) {
   if (pat == NULL) return 0;
 
-  // "any" op (0) accepts any UOp tag; otherwise op must match.
   if (term_tag(t) != TAG_UOP) {
-    // A non-UOp leaf has zero children, so leaf-wildcards require
-    // op=0 plus nsrc in {0, 0xFF/any}.  A specific op (>0), an
-    // op_alt set, or a specific arity (>=1) all reject leaves.
+    // A non-UOp leaf has no sources: only an any-op pattern without op_alt
+    // and with nsrc 0 or 0xFF matches it.
     if (pat->op == 0 && pat->op_alt == NULL
         && (pat->nsrc == 0 || pat->nsrc == 0xFF)) {
       if (pat->bind >= 0 && pat->bind < UPAT_NUM_BINDINGS) {
@@ -33,13 +26,8 @@ fn int upat_match(UPat const *pat, Term t, Term *bindings) {
   }
 
   u8 arity = uop_arity(t_op);
-  // When the pattern pinned the op (op != 0 or op_alt != NULL), trust
-  // the user's nsrc -- they know the heap layout and may want to match
-  // through opcodes that uop_arity() doesn't yet enumerate
-  // (UOP_INDEX_E / UOP_STORE / UOP_OPT / UOP_I* / UOP_IWHERE / etc).
-  // Otherwise (op == 0 AND op_alt == NULL), a fixed nsrc must match
-  // arity -- without that we'd accept e.g. UOP_NEG (arity 1) for a
-  // pattern that asked for "any op with 2 children".
+  // A pinned op trusts the pattern's nsrc, which may reach Terms uop_arity
+  // does not count (AFTER, KERNEL); otherwise a fixed nsrc must be the arity.
   int op_pinned = (pat->op != 0) || (pat->op_alt != NULL);
   if (!op_pinned && pat->nsrc != 0xFF && pat->nsrc != arity) return 0;
 

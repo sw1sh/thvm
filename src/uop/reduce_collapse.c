@@ -1,35 +1,9 @@
-// uop/reduce_collapse.c - closed-form collapse of REDUCE(SUM) over a
-// pure RANGE.  Faithful port of tinygrad's arange/reduce-collapse
-// (tinygrad/codegen/simplify.py:78-150 pm_reduce_simplify ->
-// reduce_unparented + the pm_reduce_collapse "bound" rules), specialised
-// to the post-rangeify thvm form where a UOP_REDUCE carries a numeric
-// reduce axis and its body references the matching UOP_RANGE leaf.
-//
-// The arange / cumsum / one-hot / RoPE-table construction lowers to a
-// triangular-mask reduce that tinygrad collapses to a const ramp BEFORE
-// kernel-split, emitting ZERO kernels.  thvm (this rule absent) iterated
-// the reduce axis as a real loop, materialising an N-element array + a
-// reduce loop where tinygrad folds.  This rule reproduces tinygrad's
-// closed form so the same construction renders without the inner
-// reduce-axis loop.
-//
-// Two faithful rules, mirroring tinygrad simplify.py:
-//
-//  (1) reduce_unparented (simplify.py:78-88): a REDUCE(SUM) over an axis
-//      whose RANGE the body never references is `body * extent`.
-//
-//  (2) reduce bound-collapse (simplify.py:103-111): a REDUCE(SUM, r) of
-//      IWHERE(cmp(affine(r)), val, 0) where `val` does not reference `r`.
-//      The sum counts the iters of r where the guard holds, times val.
-//      thvm's PAD valid-mask renders the guard as ILT(a, b); we recognise
-//      the two affine-in-r shapes:
-//        ILT(C, r + rest)  (r > C-rest)  -> upper-tail count
-//        ILT(r + rest, C)  (r < C-rest)  -> lower-tail count
-//      and fold the iter count to a clamped affine of the non-r terms.
-//
-// Both are exact integer identities.  When the pattern doesn't match the
-// rule returns 0 and the caller keeps the literal reduce loop, so this is
-// a pure narrowing optimisation with no correctness exposure.
+// tinygrad's pm_reduce_collapse bound rule (codegen/simplify.py:104-111): the
+// arange / cumsum / one-hot mask, a single-axis SUM over IWHERE(ILT(affine(r)),
+// val, 0), folds to val times the count of r the guard admits.
+
+// A mismatch returns 0 and keeps the reduce loop, so a miss costs only speed;
+// reduce_unparented is rangeify's (ru_reduce_unparented).
 
 static int rc_reduce_binds(Term red, u32 aid) {
   u32 n_axes = uop_reduce_n_axes(red);
@@ -65,10 +39,9 @@ static int rc_axis_visit(UOpWalk *w, Term n, u32 aid) {
   return 0;
 }
 
-// True iff `t`'s DAG references a free UOP_RANGE leaf with axis_id == aid.
-// Exact at any depth: a false "unused" would let rule (2) fold a `val`
-// that varies with the reduce axis.  tinygrad's no_range answers the same
-// question over the full backward_slice (codegen/simplify.py:79).
+// 1 iff a free RANGE(aid) sits under `t`, exact at any depth: a false "unused"
+// would fold a `val` that varies with the axis.  tinygrad's no_range asks the
+// same over the full backward_slice (codegen/simplify.py:79).
 static int rc_uses_axis(Term t, u32 aid) {
   UOpWalk w = {0};
   uop_walk_push(&w, t);
@@ -111,7 +84,6 @@ static Term rc_find_range(Term body, u32 aid) {
   return found;
 }
 
-// Read a UOP_CONST integer payload.  Returns 1 + sets *out on success.
 static int rc_const_i32(Term t, i32 *out) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_CONST) return 0;
   u64 loc = term_val(t);
@@ -121,20 +93,13 @@ static int rc_const_i32(Term t, i32 *out) {
   return 1;
 }
 
-// Find the UOP_RANGE leaf with axis_id == aid inside an affine sum tree
-// `t` of the form (RANGE(aid) [+ rest...]).  Splits `t` into the RANGE
-// term (returned in *rng) and the residual `rest` (everything else,
-// must not reference aid).  Only handles a single top-level IADD chain
-// containing exactly one RANGE(aid) leaf and an aid-free remainder.
-// Returns 1 on success.  `rest` is 0 (sentinel "no residual") when the
-// affine is the bare range.
+// Splits an IADD chain holding exactly one RANGE(aid) into that range (*rng)
+// and the aid-free rest (*rest, 0 for a bare range); 0 for any other shape.
 static int rc_split_affine(Term t, u32 aid, Term *rng, Term *rest) {
-  // Bare RANGE leaf.
   if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_RANGE
       && (u32)term_val(heap_read(term_val(t) + 0)) == aid) {
     *rng = t; *rest = 0; return 1;
   }
-  // IADD(a, b): exactly one side carries the range, the other is aid-free.
   if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_IADD) {
     Term a = heap_read(term_val(t) + 0);
     Term b = heap_read(term_val(t) + 1);
@@ -158,51 +123,40 @@ static int rc_split_affine(Term t, u32 aid, Term *rng, Term *rest) {
   return 0;
 }
 
-// clamp(x, 0, hi) == max(0, min(x, hi)) on integer Terms.
 static Term rc_clamp_0_hi(Term x, u32 hi) {
   Term hic = uop_const(DT_INT32, hi);
-  // min(x, hi) = (x < hi) ? x : hi
   Term lt_hi = uop_int_binary(UOP_ILT, x, hic);
   Term minned = uop_iwhere(lt_hi, x, hic);
-  // max(0, minned) = (minned < 0) ? 0 : minned
   Term zero = uop_const(DT_INT32, 0);
   Term lt_0 = uop_int_binary(UOP_ILT, minned, zero);
   return uop_iwhere(lt_0, zero, minned);
 }
 
-// Core: try to collapse `red` (a UOP_REDUCE SUM with a single axis) into
-// a closed form.  Returns the folded Term, or 0 if no rule matched.
+// The folded form of `red`, or 0 when it does not match.
 static Term rc_collapse_one(Term red) {
   if (term_tag(red) != TAG_UOP || term_ext(red) != UOP_REDUCE) return 0;
   if (uop_reduce_kind(red) != REDUCE_SUM) return 0;
-  if (uop_reduce_n_axes(red) != 1) return 0;          // single-axis only
+  if (uop_reduce_n_axes(red) != 1) return 0;
   u32 aid = uop_reduce_axis(red, 0);
   Term body = uop_reduce_src(red);
-  // Only rule (2) folds, and only an IWHERE body: decline before walking
-  // the body, which costs a pass over it per reduce.
+  // Only an IWHERE body can fold: decline before the walks below, each a pass
+  // over the body.
   if (term_tag(body) != TAG_UOP || term_ext(body) != UOP_IWHERE) return 0;
 
-  // Locate the reduce axis's RANGE leaf to read its static extent.  The
-  // axis_id is the numeric reduce axis; scan the body for RANGE(aid).
-  // (Used only for the extent; the affine split re-finds it.)
   Term range_leaf = rc_find_range(body, aid);
 
-  // Rule (1): reduce_unparented -- body never references aid.
   if (range_leaf == 0) {
-    // No RANGE(aid) in body: sum of a constant body over `ext` iters.
-    // We can only fold when we know the static extent; without the leaf
-    // we cannot recover it here.  Decline (the loop is already trivial).
+    // The body never reads aid, so there is no RANGE leaf to take the extent
+    // from; rangeify's reduce_unparented owns this case.
     return 0;
   }
   u32 ext = uop_range_extent(range_leaf);
   if (ext == 0 || ext > (1u << 24)) return 0;          // guard absurd extents
 
-  // Rule (2): bound-collapse of IWHERE(cmp(affine(r)), val, 0).
   u64 bloc = term_val(body);
   Term cond = heap_read(bloc + 0);
   Term then_v = heap_read(bloc + 1);
   Term else_v = heap_read(bloc + 2);
-  // `val` must NOT reference the reduce axis.
   if (rc_uses_axis(then_v, aid)) return 0;
   // else must be 0 / INVALID (both render as 0 and are the SUM identity).
   int else_zero = 0;
@@ -211,30 +165,27 @@ static Term rc_collapse_one(Term red) {
     else { i32 ev; if (rc_const_i32(else_v, &ev) && ev == 0) else_zero = 1; }
   }
   if (!else_zero) return 0;
-  // Guard must be ILT.
   if (term_tag(cond) != TAG_UOP || term_ext(cond) != UOP_ILT) return 0;
   Term lhs = heap_read(term_val(cond) + 0);
   Term rhs = heap_read(term_val(cond) + 1);
   int lhs_has = rc_uses_axis(lhs, aid);
   int rhs_has = rc_uses_axis(rhs, aid);
-  if (lhs_has == rhs_has) return 0;                    // need exactly one side
+  if (lhs_has == rhs_has) return 0;
 
   // Count of r in [0, ext) satisfying the guard, times `then_v`.
   Term count = 0;
   if (rhs_has) {
-    // ILT(C_side, r + rest)  <=>  r > C_side - rest  <=>  r >= (C - rest) + 1
-    // upper-tail count = ext - clamp((C - rest) + 1, 0, ext)
+    // C < r + rest admits r >= C - rest + 1:
+    // count = ext - clamp(C - rest + 1, 0, ext).
     Term rng, rest;
     if (!rc_split_affine(rhs, aid, &rng, &rest)) return 0;
     (void)rng;
-    // threshold = lhs - rest + 1   (first r that is included)
     Term thr = (rest == 0) ? lhs : uop_int_binary(UOP_ISUB, lhs, rest);
     thr = uop_int_binary(UOP_IADD, thr, uop_const(DT_INT32, 1));
     Term clamped = rc_clamp_0_hi(thr, ext);
     count = uop_int_binary(UOP_ISUB, uop_const(DT_INT32, ext), clamped);
   } else {
-    // ILT(r + rest, C_side)  <=>  r < C_side - rest
-    // lower-tail count = clamp(C - rest, 0, ext)
+    // r + rest < C admits r < C - rest: count = clamp(C - rest, 0, ext).
     Term rng, rest;
     if (!rc_split_affine(lhs, aid, &rng, &rest)) return 0;
     (void)rng;
@@ -243,24 +194,12 @@ static Term rc_collapse_one(Term red) {
   }
   if (count == 0) return 0;
 
-  // result = then_v * count.  then_v is aid-free; for the canonical
-  // arange it is iconst(1) so the MUL folds to `count`.
   return uop_int_binary(UOP_IMUL, then_v, count);
 }
 
-// Bottom-up rewrite: collapse every foldable single-axis SUM-reduce in
-// the DAG rooted at `root`.  Rebuilds parents around folded children via
-// the simplifying constructors (which hash-cons).  Returns the rewritten
-// root (== root when nothing folded).  Bounded recursion; the memo visits
-// each shared sub-DAG once.
-// Open-addressed memo (Term key -> rewritten Term), generation-stamped so the
-// per-call reset is O(1) (bump `cur_gen`) instead of memset'ing the whole
-// table.  A slot is "live" iff slot_gen[i] == m->cur_gen.  Key 0 is never
-// memoized (the caller guards root==0; non-UOP returns early).  The capacity
-// is a power of 2 and doubles at half load, never giving up on memoizing:
-// without the memo every path to a shared sub-DAG re-walks it (and re-runs
-// rc_find_range over each REDUCE body in it), a cost that doubles with each
-// level of sharing, which a deep chain of table.cat steps has one of per step.
+// Generation-stamped memo: slot i is live iff slot_gen[i] == cur_gen, so a bump
+// empties it in O(1).  It doubles at half load and never gives up, since each
+// path to a shared sub-DAG would re-walk it (a deep table.cat chain's sharing).
 #define RC_MEMO_INIT_CAP 16384            /* power of 2 */
 typedef struct {
   u64  *key;
@@ -281,7 +220,7 @@ static Term rc_memo_get(RcMemo *m, Term t, int *hit) {
   u32 h = rc_memo_hash(t, m->cap);
   for (u32 probe = 0; probe < m->cap; probe++) {
     u32 i = (h + probe) & (m->cap - 1);
-    if (m->slot_gen[i] != m->cur_gen) { *hit = 0; return 0; }  // empty (this gen)
+    if (m->slot_gen[i] != m->cur_gen) { *hit = 0; return 0; }
     if (m->key[i] == (u64)t) { *hit = 1; return m->val[i]; }
   }
   *hit = 0; return 0;
@@ -290,15 +229,14 @@ static void rc_memo_insert(RcMemo *m, Term t, Term v) {
   u32 h = rc_memo_hash(t, m->cap);
   for (u32 probe = 0; probe < m->cap; probe++) {
     u32 i = (h + probe) & (m->cap - 1);
-    if (m->slot_gen[i] != m->cur_gen) {                // empty (this gen): claim
+    if (m->slot_gen[i] != m->cur_gen) {
       m->key[i] = (u64)t; m->val[i] = v;
       m->slot_gen[i] = m->cur_gen; m->n++; return;
     }
-    if (m->key[i] == (u64)t) { m->val[i] = v; return; }  // update
+    if (m->key[i] == (u64)t) { m->val[i] = v; return; }
   }
 }
-// Double the table, re-inserting this generation's entries.  The fresh
-// stamps are 0 and cur_gen >= 1, so every new slot reads empty.
+// Fresh stamps are 0 and cur_gen >= 1, so every new slot reads empty.
 static void rc_memo_grow(RcMemo *m) {
   u32   cap  = m->cap ? m->cap * 2 : RC_MEMO_INIT_CAP;
   u64  *key  = (u64  *)malloc((size_t)cap * sizeof(u64));
@@ -324,6 +262,8 @@ static void rc_memo_put(RcMemo *m, Term t, Term v) {
   rc_memo_insert(m, t, v);
 }
 
+// Collapses every foldable REDUCE under `t`, rebuilding parents through the
+// simplifying constructors; past depth 512 it leaves the rest as it is.
 static Term rc_rewrite_rec(Term t, RcMemo *m, u32 depth) {
   if (depth > 512) return t;
   if (term_tag(t) != TAG_UOP) return t;
@@ -333,9 +273,6 @@ static Term rc_rewrite_rec(Term t, RcMemo *m, u32 depth) {
   u64 loc = term_val(t);
   if (op == UOP_BUFFER || op == UOP_KERNEL) { rc_memo_put(m, t, t); return t; }
 
-  // Try to collapse this node if it's a reduce; recurse into the result
-  // (a folded reduce becomes pure index arithmetic with no further
-  // reduce, but the recursion keeps the contract uniform).
   if (op == UOP_REDUCE) {
     Term folded = rc_collapse_one(t);
     if (folded != 0 && folded != t) {
@@ -345,9 +282,6 @@ static Term rc_rewrite_rec(Term t, RcMemo *m, u32 depth) {
     }
   }
 
-  // Generic: rebuild children, then re-apply the right constructor so the
-  // hash-cons / simplifying folds settle.  We only need to rebuild the
-  // op families that can carry a reduce in their subtree.
   u8 ar = uop_arity(op);
   if (ar == 0) { rc_memo_put(m, t, t); return t; }
   Term children[8];
@@ -386,10 +320,8 @@ static Term rc_rewrite_rec(Term t, RcMemo *m, u32 depth) {
       break;
     }
     default:
-      // Op we don't rebuild (movement / INDEX_E / etc.): keep original.
-      // A reduce buried under one of these still folds on its own walk
-      // because rc_rewrite_rec recursed into the child above; only the
-      // wrapper Term identity is preserved here.
+      // Other ops keep their original node, so a reduce under one stays
+      // unfolded.
       out = t;
       break;
   }
@@ -401,21 +333,18 @@ static Term rc_collapse_store(Term store, void *ctx) {
   return rc_rewrite_rec(store, (RcMemo *)ctx, 0);
 }
 
-// Public entry: collapse arange/reduce store values.  `root` is the
-// kernel store_root (a UOP_STORE, or an AFTER chain whose every store is
-// collapsed) from kernel_lift; returns a rewritten root with foldable
-// single-axis SUM-reduces replaced by their closed forms.
+// `root` is a kernel's store_root (a STORE, or an AFTER chain of them); returns
+// it with every foldable REDUCE in its stores collapsed.
 fn Term uop_reduce_arange_collapse(Term root) {
   if (root == 0) return root;
-  // File-scope static (single-threaded per realize), kept across calls with
-  // the capacity it grew to.  Each call bumps cur_gen so all prior stamps
-  // read as empty -- an O(1) reset.
+  // Kept across calls at the capacity it grew to (realize is single-threaded);
+  // bumping cur_gen empties it.
   static RcMemo memo;
   if (memo.cap == 0) {
     rc_memo_grow(&memo);
   }
   memo.n = 0;
-  if (++memo.cur_gen == 0) {            // wrap (astronomically rare): hard-clear
+  if (++memo.cur_gen == 0) {            // wrapped: clear every stamp
     memset(memo.slot_gen, 0, (size_t)memo.cap * sizeof(u32));
     memo.cur_gen = 1;
   }

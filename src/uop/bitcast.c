@@ -1,20 +1,6 @@
-// uop/bitcast.c -- bit-level reinterpret cast.
-//
-// Heap layout: [src, NUM(dst_dtype)].  Source and destination must
-// share itemsize.  Mirrors tinygrad's Ops.BITCAST -- the runtime
-// kernel is a memcpy with a width sanity check.
-//
-// Backward gradient: zero of src.dtype (matches tinygrad/gradient.py:42
-// where BITCAST returns None).
-//
-// Folding rules:
-//   BITCAST(x, x.dtype) -> x
-//   BITCAST(BITCAST(x, mid), dst) -> BITCAST(x, dst) when itemsizes match
-//   BITCAST(CONST(v, src), dst) -> CONST(w, dst), where w is v's storage
-//     bits at src's width read back at dst's: tinygrad's fold_bitcast
-//     (uop/symbolic.py:23-26).  Packed int4 / uint4 stay a node.  An
-//     8-byte dtype folds the payload unchanged, a known gap: a u32
-//     payload cannot hold a 64-bit pattern.
+// Heap layout: [src, NUM(dst_dtype)], equal itemsizes.  A CONST folds as
+// tinygrad's fold_bitcast (uop/symbolic.py:23-26), except packed int4 / uint4
+// (a node) and 8-byte dtypes (payload kept: a u32 cannot hold 64 bits).
 
 static u32 uop_bitcast_int_mask(u32 dt) {
   u32 size = dtype_itemsize(dt);
@@ -93,27 +79,22 @@ static Term uop_bitcast_const(u32 src_dt, u32 bits, u32 dst_dt) {
 }
 
 fn Term uop_bitcast(Term src, u32 dst_dtype) {
-  // Identity.
   u32 src_dtype = DT_FP32;
   if (term_dtype_in(src, 0, &src_dtype) && src_dtype == dst_dtype) {
     return src;
   }
 
-  // Width sanity: refuse to construct a BITCAST whose itemsizes
-  // differ.  The caller should explicitly route through CAST first.
-  // dtype_itemsize aborts on packed nibble dtypes; gate on that
-  // so the assertion only fires at materialize time, not here.
+  // Differing itemsizes return src unchanged, not a bad BITCAST (callers CAST
+  // first); packed dtypes skip the check, as dtype_itemsize aborts on them.
   if (!dtype_is_packed(src_dtype) && !dtype_is_packed(dst_dtype)
       && dtype_itemsize(src_dtype) != dtype_itemsize(dst_dtype)) {
     fprintf(stderr, "uop_bitcast: itemsize mismatch: src=%s (%u B) dst=%s (%u B)\n",
             dtype_name(src_dtype), dtype_itemsize(src_dtype),
             dtype_name(dst_dtype), dtype_itemsize(dst_dtype));
-    return src;   // best-effort: return the src so callers see no-op
-                  // instead of a half-built UOP_BITCAST.
+    return src;
   }
 
-  // BITCAST(BITCAST(x, mid), dst) -> BITCAST(x, dst).  Always safe
-  // because bitcast is bit-preserving.
+  // bitcast(bitcast(x, mid), dst) = bitcast(x, dst): both keep the bits.
   if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_BITCAST) {
     Term inner = heap_read(term_val(src));
     return uop_bitcast(inner, dst_dtype);

@@ -1,24 +1,8 @@
-// uop/gather.c - UOP_GATHER: one element of `src` per position of an index
-// tensor, taken along axis `dim` at the position the index names.
-//
-// Heap layout: [src, idx, NUM(dim)]; arity 2 (src, idx).  The node has
-// idx's shape and src's dtype:
-//
-//   out[i] = src[i with i_dim := idx[i]]   if 0 <= idx[i] < src.shape[dim]
-//          = 0                            otherwise
-//
-// This is tinygrad's Tensor.gather (mixin/op.py:1023-1043).  tinygrad sums
-// a one-hot mask, so an index outside [0, src.shape[dim]) selects nothing;
-// rangeify lowers the node straight to the form pm_reduce_load_collapse
-// leaves once that sum collapses (codegen/simplify.py:143-145): a load of
-// src whose address holds the loaded index, gated by the range check.
-//
-// uop_gather returns 0 unless the operands have equal ndim, idx has an
-// integer dtype, dim < ndim, idx.shape[d] <= src.shape[d] for every d !=
-// dim (tinygrad's assert), and both shapes pass uop_indexed_shape_ok.  The
-// frontends raise tinygrad's exception types on a 0.  uop_gather_node
-// builds the node unchecked.  Both hash-cons, dim included in the key.
+// Heap layout: [src, idx, NUM(dim)], arity 2.  tinygrad's Tensor.gather
+// (mixin/op.py:1023-1043) sums a one-hot mask, so out[i] = src[i with i_dim :=
+// idx[i]], or 0 when idx[i] is outside [0, src.shape[dim]).
 
+// Unchecked, for rebuilding a node whose sources a rewrite replaced.
 fn Term uop_gather_node(Term src, Term idx, u32 dim) {
   u32 args[5] = { (u32)src, (u32)(src >> 32),
                   (u32)idx, (u32)(idx >> 32), dim };
@@ -36,6 +20,8 @@ fn Term uop_gather_node(Term src, Term idx, u32 dim) {
   return t;
 }
 
+// 0 when a check fails, which the py frontend raises on; idx.shape[d] <=
+// src.shape[d] off `dim` is tinygrad's assert.
 fn Term uop_gather(Term src, Term idx, u32 dim) {
   Shape ss, is;
   u32   idt;

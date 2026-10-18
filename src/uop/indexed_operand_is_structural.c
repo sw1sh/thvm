@@ -1,14 +1,6 @@
-// uop/indexed_operand_is_structural.c - can an indexed op read this operand
-// in place?
-//
-// An indexed op reads a storage operand (GATHER slot 0, SCATTER slots 1 and
-// 2) at an address it builds itself, walking the operand's views down to
-// storage (rangeify_unified.c ru_index_leaf).  That works when the views end
-// at a TEN, a VAR, a KERNEL's output or a CONST, and holds no PAD (whose
-// out-of-window mask the walk does not model).  Any other operand has a
-// compute source bufferize_classify realizes first; both sides decide with
-// this predicate so they agree.
-
+// GATHER slot 0 and SCATTER slots 1-2 are read through their views at an
+// address the op builds (ru_index_leaf), which cannot model a PAD's mask.
+// bufferize_classify realizes any other operand; rangeify asks this too.
 fn int uop_indexed_operand_is_structural(Term t) {
   for (;;) {
     Term r = term_resolve(t);

@@ -1,14 +1,3 @@
-// uop/where.c - value-level select (tinygrad Ops.WHERE on tensors).
-//
-// Builds the same UOP_IWHERE node as uop_iwhere, but folds only a constant
-// condition and equal branches.  uop_iwhere runs the index-layer folds (the
-// IWHERE-of-IWHERE collapse to IAND, the where-closure substitution, the
-// valid folds), which suit address math but turn nested value selects into
-// tensor-level IAND/IOR nodes that materialize cannot schedule.  Value
-// selects -- the chain rule's masks, a WHERE imported from tinygrad -- go
-// through here.  Hash-consed under uop_iwhere's key, so an unfolded select
-// is one node whichever constructor built it.
-
 static int uop_where_const_truth(Term cond, int *truth) {
   if (term_tag(cond) != TAG_UOP || term_ext(cond) != UOP_CONST) {
     return 0;
@@ -25,9 +14,9 @@ static int uop_where_const_truth(Term cond, int *truth) {
   return 1;
 }
 
-// Value-level select (tinygrad Ops.WHERE): the same UOP_IWHERE node, folding
-// only a constant cond or then == else -- none of uop_iwhere's index-layer
-// folds, which would turn nested value selects into tensor-level IAND.
+// tinygrad's Ops.WHERE on values: an IWHERE folding only a constant cond or
+// equal branches.  uop_iwhere's index folds would turn nested selects into
+// IAND / IOR, which materialize cannot schedule.  Shares uop_iwhere's hash key.
 fn Term uop_where(Term cond, Term then_v, Term else_v) {
   if (then_v == else_v) {
     return then_v;

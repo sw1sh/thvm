@@ -1,8 +1,5 @@
-// uop/shrink.c - construct a UOP_SHRINK node.
-//
-// Heap layout: [src, NUM(ndim), NUM(b0), NUM(e0), NUM(b1), NUM(e1), ...]
-// where b_i / e_i bound the kept slice [b_i, e_i) along axis i.
-// Total cells: 2 + 2*ndim.
+// Heap layout: [src, NUM(ndim), NUM(b0), NUM(e0), ...], where axis i keeps the
+// slice [b_i, e_i).
 
 fn Term uop_shrink(Term src, u32 ndim, const u32 *begin_end) {
   u32 key_buf[1 + 2 * MAX_DIM];

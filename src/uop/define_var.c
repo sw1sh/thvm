@@ -1,9 +1,6 @@
-// uop/define_var.c - the runtime value of a symbolic extent (tinygrad
-// DEFINE_VAR).
-//
-// Heap layout: [NUM(packed_extent)], an int.  The walker reads the kvar's
-// runtime value (kvar_extent_runtime); the renderers read the kernel's
-// V_<name> parameter, which kvar_collect_from_dag declares for it.
+// tinygrad's UOp.variable (uop/ops.py:1018): the runtime value of a symbolic
+// extent, heap [NUM(packed_extent)].  The walker reads kvar_extent_runtime and
+// the renderers the V_<name> parameter kvar_collect_from_dag declares for it.
 
 fn Term uop_define_var(u32 packed_extent) {
   u32 args[1] = { packed_extent };

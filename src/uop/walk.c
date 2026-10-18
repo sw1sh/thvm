@@ -1,16 +1,6 @@
-// uop/walk.c - visit every UOp node reachable from a root, once each.
-//
-// Hash-consed UOp graphs share subtrees, so a recursive search without a
-// visited set revisits them exponentially, and a depth or stack budget
-// returns a wrong answer on any graph past it.  UOpWalk keeps pending
-// nodes on a growable heap stack and marks each node when it is queued,
-// so a search is linear in the reachable nodes at any depth.  Mirrors
-// tinygrad's UOp.toposort (tinygrad/uop/ops.py:295-306): an explicit
-// stack plus a visited set, where the caller's choice of which sources
-// to queue plays the role of toposort's `gate`.
-//
-// Usage: uop_walk_push the root, then pop nodes until 0, pushing the
-// sources worth searching; uop_walk_free releases the storage.
+// UOpWalk marks a node as it is queued: linear at any depth, where shared
+// subtrees make recursion exponential and a depth budget wrong.  tinygrad's
+// UOp.toposort (uop/ops.py:295-306), with the caller's pushes as its `gate`.
 
 typedef struct {
   Term *stack;
@@ -78,7 +68,6 @@ static int uop_walk_mark(UOpWalk *w, Term t) {
   }
 }
 
-// Queues `t` unless it is not a UOp node or was queued before.
 fn void uop_walk_push(UOpWalk *w, Term t) {
   if (term_tag(t) != TAG_UOP || !uop_walk_mark(w, t)) {
     return;
@@ -95,7 +84,6 @@ fn void uop_walk_push(UOpWalk *w, Term t) {
   w->stack[w->sp++] = t;
 }
 
-// Next queued node, most recently pushed first; 0 when the walk is done.
 fn Term uop_walk_pop(UOpWalk *w) {
   return w->sp > 0 ? w->stack[--w->sp] : 0;
 }

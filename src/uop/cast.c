@@ -1,17 +1,8 @@
-// uop/cast.c -- value-preserving cast UOP.
-//
-// Heap layout: [src, NUM(dst_dtype)].  ext on the wrapping TAG_UOP
-// is UOP_CAST (the dtype lives in the second heap cell).
-//
-// Folding rules (best-effort, no failure path):
-//   CAST(x, x.dtype) -> x
-//   CAST(CONST(v, src_dt), dst_dt) -> CONST(v, dst_dt) for float src_dt
-//     and dst_dt: tinygrad's root.const_like(c.val)
-//     (uop/symbolic.py:151-155).  The payload is the f32 bits of v and
-//     uop_const truncates v to dst_dt.
+// Heap layout: [src, NUM(dst_dtype)].  Float to float, a CONST folds as
+// tinygrad's root.const_like(c.val) (uop/symbolic.py:151-155): the payload
+// keeps v's f32 bits, which uop_const truncates to dst_dtype.
 
 fn Term uop_cast(Term src, u32 dst_dtype) {
-  // Identity: cast to the term's existing dtype is a no-op.
   u32 src_dtype = DT_FP32;
   if (term_dtype_in(src, 0, &src_dtype) && src_dtype == dst_dtype) {
     return src;

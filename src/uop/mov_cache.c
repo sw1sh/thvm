@@ -1,42 +1,14 @@
-// uop/mov_cache.c - hash-cons cache for movement-op UOPs.
-//
-// RESHAPE / EXPAND / PERMUTE / FLIP / PAD / SHRINK / REDUCE allocate
-// (2 + ndim) to (2 + 2*ndim) cells per construction.  In the chain
-// rule's recursion, the same (op, src, args) combination often
-// recurs across rounds (e.g. EXPAND(CONST(0), target.shape) appears
-// in every TGrad WL wrapper at the same shape; nested rounds emit
-// many copies).  Hash-cons by (op, src, args) so the second and
-// later calls reuse the existing heap loc.
-//
-// Sharing UOP terms across references is always safe (UOPs are
-// immutable; materialize dedups by heap loc identity).  This is
-// the same model as the CONST cache in const.c, just with extra
-// args in the key.
-//
-// Cleared by uop_mov_cache_reset() in thvm_init -- a stale entry
-// pointing into a freed heap range would mis-resolve.
-//
-// Multi-context: the cached `term` AND its `src` key are per-context
-// heap locs (heap_next restarts at 0 per context).  An entry cached
-// by context A and looked up in context B both mis-keys (B's src loc
-// collides with A's distinct node) and mis-resolves (the returned
-// term dereferences B's heap at A's loc).  The key folds the current
-// context slot id so cross-context entries never alias (the FLUX
-// cross-session bug: a 2nd model context reused the 1st context's
-// cached movement Terms and read its heap -> a malformed `{}[[2]]`
-// shape).
+// Hash-cons cache for the UOp constructors: an equal (op, src, args)
+// construction returns the Term built first, which is safe as UOps are
+// immutable.  Reset wherever the heap is freed or compacted.
 
-// The table doubles before it passes half full.  A fixed table that filled
-// up stopped hash-consing silently: an insert was dropped and a lookup
-// probed every slot, so equal UOPs built later became distinct Terms
-// (and each miss cost a full scan).  The CPU renderer names a kernel's
-// buffer slots by UOP_BUFFER identity, so two copies of one input BUFFER
-// pushed the real inputs to higher slots and declared them with the wrong
-// C type.
+// The table doubles before it passes half full rather than drop inserts: the
+// renderer names a kernel's buffer slots by UOP_BUFFER identity, so equal
+// BUFFERs must stay one Term.
 #define UOP_MOV_CACHE_INIT_CAP (1u << 18)
 typedef struct {
   u64  key;                                      // 0 = empty
-  Term term;                                     // cached UOP term
+  Term term;
 } UopMovSlot;
 static UopMovSlot *UOP_MOV_CACHE     = NULL;
 static u32         UOP_MOV_CACHE_CAP = 0;       // slots, a power of two
@@ -55,8 +27,7 @@ static inline u32 uop_mov_home(u64 key, u32 mask) {
   return h & mask;
 }
 
-// Double the table (or allocate the first one), rehashing every entry.
-// 0 when out of memory: the cache then keeps its current contents.
+// 0 when out of memory, the cache keeping its current contents.
 static int uop_mov_cache_grow(void) {
   u32 cap = UOP_MOV_CACHE_CAP ? 2 * UOP_MOV_CACHE_CAP : UOP_MOV_CACHE_INIT_CAP;
   UopMovSlot *t = (UopMovSlot *)calloc(cap, sizeof *t);
@@ -79,14 +50,12 @@ static int uop_mov_cache_grow(void) {
   return 1;
 }
 
-// FNV-1a 64-bit hash of (op, src, vals[0..n-1]).  Result has bit 63
-// forced on so the empty-slot sentinel (0) never collides with a
-// valid hash.
+// FNV-1a of (context, op, src, vals), with bit 63 set so a key is never the
+// empty slot's 0.
 static inline u64 uop_mov_hash(u32 op, u64 src, u32 const *vals, u32 n_vals) {
   u64 h = 0xcbf29ce484222325ULL;
-  // Fold the context slot so an entry keyed in one context never
-  // matches a same-(op,src,vals) construction in another (their src
-  // locs collide because heap_next restarts per context).
+  // heap_next restarts per context, so without the context slot two contexts'
+  // src locs, and the cached Terms they name, would collide.
   h ^= (u64)thvm_context_current(); h *= 0x100000001b3ULL;
   h ^= (u64)op; h *= 0x100000001b3ULL;
   h ^= src;     h *= 0x100000001b3ULL;
@@ -96,8 +65,7 @@ static inline u64 uop_mov_hash(u32 op, u64 src, u32 const *vals, u32 n_vals) {
   return h | (1ULL << 63);
 }
 
-// Look up; returns the cached term if hit, else 0 (= TAG_APP at
-// loc=0, which uop_const ensures is never a real result).
+// The cached Term, or 0 on a miss (a UOp Term is never 0).
 static inline Term uop_mov_lookup(u64 key) {
   if (UOP_MOV_CACHE_CAP == 0) {
     return 0;
@@ -114,8 +82,7 @@ static inline Term uop_mov_lookup(u64 key) {
   }
 }
 
-// Insert (op, src, vals) -> term, growing the table first when it would
-// pass half full.  Out of memory leaves the term uncached.
+// Out of memory leaves the Term uncached.
 static inline void uop_mov_insert(u64 key, Term t) {
   if (2 * (UOP_MOV_CACHE_LEN + 1) > UOP_MOV_CACHE_CAP && !uop_mov_cache_grow()) {
     return;
