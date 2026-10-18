@@ -128,14 +128,16 @@ def _wrap_other(self_t: "Tensor", other) -> "Tensor":
     a Python scalar is a WEAK value that adopts the tensor operand's kind --
     except a float scalar with an int tensor, which promotes the operation
     to float.  With thvm's float32/int32 surface that is exactly: int
-    scalar -> self's dtype; float scalar -> float32 (never truncated)."""
+    scalar -> self's dtype; float scalar -> float32 (never truncated).  The
+    scalar is a rank-0 CONST, as tinygrad's is, not a host buffer."""
     if isinstance(other, Tensor):
         return other
     dtype = self_t._dtype
     if isinstance(other, float) and not dtypes.is_float(self_t._dtype):
         dtype = dtypes.float32
-    arr = np.asarray(other, dtype=dtype.np_dtype)
-    return Tensor(arr, dtype=dtype)
+    if np.ndim(other) > 0:
+        return Tensor(np.asarray(other, dtype=dtype.np_dtype), dtype=dtype)
+    return _const_broadcast(other, (), dtype)
 
 
 class _TensorMeta(type):
