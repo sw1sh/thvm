@@ -1076,8 +1076,6 @@ wmGenerateProblemFor[theory_String, thm_String, takeConjunct : (_Integer | All) 
 
 (* ----------------------------------------------------------------- *)
 
-End[]
-
 Options[TSZSDerivationToProofObject] = {"ParseFormulas" -> False}
 
 (* Public: build a thvm-shaped proof Association from a parsed SZS
@@ -1296,5 +1294,7 @@ TTweeProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{t
         |>
     ]
 ]
+
+End[]
 
 EndPackage[]

@@ -2636,6 +2636,15 @@ VerificationTest[
     TestID -> "ATP/tptp/text-with-return-spec"
 ]
 
+(* The public context holds only the exported names: a local variable
+   defined outside a Private section (e, axioms, goal, ...) would shadow
+   the reader's Global` symbol of the same name. *)
+VerificationTest[
+    Select[Names["WolframInstitute`THVMLink`ATP`*"], LowerCaseQ[StringTake[#, 1]] &],
+    {},
+    TestID -> "ATP/context/no-lowercase-public-symbols"
+]
+
 (* TRelevantAxioms on an unquantified pattern axiom should keep
    the axiom (Pattern variables shouldn't be misclassified as
    confined symbols).  Iter 66 fixed atpFnSyms to skip Pattern-

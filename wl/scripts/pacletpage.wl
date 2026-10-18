@@ -27,11 +27,11 @@ $unevaluatedPages = {"AtpMethods.md", "TAtpTrainScorer.md", "Train.md"};
    and overviews do by default.  THVMLink`ATP` loads Wolfram`Parser`, so the examples run against
    it too, which PacletPage does not read from PacletInfo.wl's {name, version} form.  Each page
    converts in its own parallel kernel, so an ATP saturation that outlives its time limit, or a
-   crash, ends that kernel and not the build. *)
+   crash, ends that kernel and not the build; six of them leave the machine to other builds. *)
 $documentationOptions = {
     "EvaluateSeparator" -> <|"Symbol" -> None, "Guide" -> None|>,
     "Dependencies" -> {"Wolfram/Parser"},
-    "Parallel" -> True,
+    "Parallel" -> 6,
     "TimeConstraint" -> 900
 };
 
