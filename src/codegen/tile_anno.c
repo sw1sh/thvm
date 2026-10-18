@@ -1,9 +1,7 @@
 // codegen/tile_anno.c - the applied-opts log and axis hash the Metal
 // backend and autotune read.
 
-// applied_opts facade.  External linkage so the metal backend
-// (compiled as a separate translation unit, backend_metal.o) can
-// call these.
+// External linkage: backend/metal/_.m, a separate translation unit, reads these.
 u32 tile_anno_applied_opts_count(KernelEntry const *ke) {
   if (ke == NULL || ke->schedule == NULL) return 0;
   return ke->schedule->n_applied;
@@ -14,9 +12,8 @@ KOpt const *tile_anno_applied_opts(KernelEntry const *ke) {
   return ke->schedule->applied_opts;
 }
 
-// Hash all per-axis (kax_type, extent) pairs into the running FNV-1a
-// state and return the updated hash.  Used by autotune.c to produce
-// cache keys that include axis structure.
+// Fold the axis count and each axis' (type, extent) into FNV-1a state `h`, for
+// autotune's cache key.
 u64 tile_anno_hash_axes(KernelEntry const *ke, u64 h) {
   u8  kax[MAX_AXES];
   u32 ext[MAX_AXES];
@@ -32,9 +29,8 @@ u64 tile_anno_hash_axes(KernelEntry const *ke, u64 h) {
   return h;
 }
 
-// Reset the axes back to the default LOOP/REDUCE shape (used between
-// autotune bench candidates so each candidate starts from a fresh
-// baseline).  Preserves the autotuned flag.
+// Zero the schedule but its `autotuned` flag, between autotune candidates; the
+// caller resets the DAG itself.
 void tile_anno_axes_reset(KernelEntry *ke) {
   if (ke == NULL || ke->schedule == NULL) return;
   u8  autotuned = ke->schedule->autotuned;

@@ -1,16 +1,10 @@
-// Public bridge for the WL FFI (thvmlink.c), which peeks at the
-// rendered MSL without going through Metal dispatch.  After the
-// dispatch ladder collapse (88f536c3 / 4e30432b), the only Metal MSL
-// emit path is metal_tile_jit_encode -> render_uop; cg_emit_metal
-// forwards to cg_emit_tile_metal which routes there.
+// For the WL FFI (thvmlink.c): a kernel's MSL, rendered without a dispatch.
 char *cg_emit_metal(KernelEntry const *ke) {
   return cg_emit_tile_metal((KernelEntry *)ke);
 }
 
-// Forward declaration of the threadgroup-staged TC tile picker, defined
-// in render_uop.c (#included after this file in the unity build).  The
-// dispatch-shape code below must size the threadgroup grid to the same
-// tile geometry the renderer emits, so it calls the identical picker.
+// render_uop.c's TC tile picker (included after this file): the dispatch shape
+// below must launch the tile geometry the renderer emits.
 typedef struct {
   u32 local_m, local_n;   // simdgroups along M / N within a threadgroup
   u32 rm, rn;             // register 8x8 tiles per simdgroup along M / N
@@ -28,26 +22,13 @@ static int rmt_collect_conv2d_info(KernelEntry const *ke,
   return out->threads > 0 && out->threads <= 256;
 }
 
-// DAG-mode dispatch shape: derive (groups, threads) from the lifted
-// UOp DAG's RANGE-leaf axis types/extents, mirroring the render_uop.c
-// default-parallelise convention exactly so the launched grid covers
-// the kernel's `tid` decode with no over/under-launch:
-//   - promoted output axes  (KAX_LOOP)  -> the flat `tid` index range
-//   - in-thread loops       (KAX_UPCAST / KAX_UNROLL / KAX_REDUCE)
-//                                       -> do NOT contribute to `tid`
-//   - threadgroup-local     (KAX_LOCAL) -> threadgroup size
-//   - threadgroup-collective(KAX_GROUP_REDUCE) -> threadgroup size
-// Returns 1 with (groups, threads) on success; 0 if the DAG has no
-// axes / overflow / a threadgroup dim that exceeds the hw cap.
-//
-// This path runs ONLY for kernels with cached_lift.store_root != 0
-// (the production lifted-DAG kernels): kernel_apply_opt mutates the
-// DAG (not ke->schedule->applied_opts, which stays empty), so the
-// applied_opts-reading tile path would compute the pre-opt grid.
 // The cooperative threadgroup size of a GROUP_REDUCE kernel (render_uop.c,
 // included after this file).
 static u32 rmu_group_reduce_factor(Term t);
 
+// (groups, threads) from the DAG's axis types, as render_uop decodes them: LOOP
+// extents index the outputs, LOCAL extents and the GROUP_REDUCE factor fill the
+// threadgroup.  0 without axes, on overflow, or past the hardware cap.
 static int rmt_dag_dispatch_shape(KernelEntry const *ke, u32 *groups_x,
                                   u32 *threads_x) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
@@ -75,23 +56,16 @@ static int rmt_dag_dispatch_shape(KernelEntry const *ke, u32 *groups_x,
   if (group_reduce_extent != 0) {
     if (group_reduce_extent > 256) return 0;
     if (total > 0xFFFFFFFFu) return 0;
-    // A GROUP_REDUCE axis that COEXISTS with LOCAL axes (tinygrad matvec:
-    // GROUP the reduce + LOCAL the output row) needs BOTH in the
-    // threadgroup -- local_total rows * group_extent reduce-threads.  The
-    // render_uop GROUP template lays the group out as the innermost tt dim.
-    // local_total == 1 (GROUP-only / GROUPTOP) -> threads = group_extent,
-    // unchanged.
+    // GROUP_REDUCE with LOCAL axes (matvec: GROUP the reduce, LOCAL the row)
+    // puts both in the threadgroup, the group innermost in tt.
     u64 t = (u64)group_reduce_extent * local_total;
     if (t > 1024) return 0;                 // Apple maxTotalThreadsPerTG
     groups  = (u32)total;
     threads = (u32)t;
   } else if (local_total > 1) {
     if (local_total > 1024) return 0;     // Apple maxTotalThreadsPerTG
-    // tg/tt split (mirrors render_uop.c's RmuGlobalDecode.has_local):
-    // GLOBAL extents -> grid (one threadgroup per GLOBAL tuple, decoded
-    // from `tg`); LOCAL extents -> threadgroup (decoded from `tt`).  So
-    // `groups` is exactly the product of promoted-LOOP output extents
-    // and `threads` is exactly the product of LOCAL extents.
+    // One threadgroup per LOOP tuple (tg), the LOCAL extents across it (tt), as
+    // render_uop's RmuGlobalDecode.has_local decodes them.
     if (total > 0xFFFFFFFFu) return 0;
     threads = (u32)local_total;
     groups  = (u32)total;
@@ -105,11 +79,6 @@ static int rmt_dag_dispatch_shape(KernelEntry const *ke, u32 *groups_x,
   return 1;
 }
 
-// True iff the lifted DAG carries any per-axis OPT-class axis
-// (UPCAST / UNROLL / LOCAL / GROUP_REDUCE) -- i.e. kernel_apply_opt
-// (DAG mode) ran.  The conv2d-flat dispatch reader keys its
-// outputs_per_thread off ke->schedule->applied_opts (empty in DAG
-// mode), so it would mis-size; bail to the generic DAG path instead.
 static int rmt_dag_has_opt_axes(KernelEntry const *ke) {
   if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
   u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
@@ -124,13 +93,9 @@ static int rmt_dag_has_opt_axes(KernelEntry const *ke) {
   return 0;
 }
 
-// THVM_FUSE_MATMUL_EPILOGUE: walk a (post-uop_recognise_tc_parallel) store value
-// for EXACTLY ONE UOP_OPT_TC, recording whether any ELEMENTWISE op sits above it
-// (the epilogue wrapper -- the q8 dequant MUL(OPT_TC, scale)).  A bare matmul's
-// transformed value is the OPT_TC itself at the top (n_ew == 0), so the caller
-// rejects it.  Movement/CAST/elementwise/index-int are walked; a second OPT_TC,
-// a REDUCE outside the OPT_TC, or an unknown op aborts.  Returns the OPT_TC term
-// (or 0), and sets *n_ew to the count of elementwise hops above it.
+// THVM_FUSE_MATMUL_EPILOGUE: the OPT_TC under a store value's elementwise
+// epilogue (the q8 dequant MUL(OPT_TC, scale)), or 0.  *n_opt counts the OPT_TCs
+// reached, *n_ew those below an elementwise op.
 static Term rmt_epi_walk_opt_tc(Term t, int *n_opt, int *n_ew, int above_ew,
                                 int depth) {
   if (depth > 64 || term_tag(t) != TAG_UOP) return 0;
@@ -160,16 +125,9 @@ static Term rmt_epi_walk_opt_tc(Term t, int *n_opt, int *n_ew, int above_ew,
   return found;
 }
 
-// THVM_FUSE_MATMUL_EPILOGUE: recover M/N/K for an epilogue-fused matmul so the
-// dispatch grid matches the renderer EXACTLY.  The renderer (cg_emit_via_uop)
-// runs uop_recognise_tc_parallel on cached_root before emitting, which collapses
-// any consumer-split M/N and wraps the matmul REDUCE in OPT_TC; we apply the SAME
-// transform here, then read M/N/K off a synthetic bare-REDUCE store built from the
-// OPT_TC's inner reduce.  Requires the OPT_TC to sit UNDER an elementwise wrapper
-// (n_ew > 0) -- a BARE matmul's transformed value is the OPT_TC at the top
-// (n_ew == 0), so this returns 0 for it, keeping the bare path on its own grid.
-// Returns 1 + M/N/K on a clean epilogue matmul; 0 otherwise (and 0 gate-off,
-// since uop_recognise_tc_parallel's epilogue branch only fires under the gate).
+// THVM_FUSE_MATMUL_EPILOGUE: M/N/K of an epilogue-fused matmul as the renderer
+// sees it, after the uop_recognise_tc_parallel that cg_emit_via_uop applies.  0
+// for a bare matmul, whose value is the OPT_TC itself and which keeps its grid.
 static int rmt_epilogue_tc_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
   if (out_M != NULL) *out_M = 0;
   if (out_N != NULL) *out_N = 0;
@@ -181,8 +139,6 @@ static int rmt_epilogue_tc_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K)
   if (troot == 0 || term_tag(troot) != TAG_UOP
       || term_ext(troot) != UOP_STORE) return 0;
   Term value = heap_read(term_val(troot) + 2);
-  // A bare-OPT_TC top (the plain matmul) is handled by the existing tc_template
-  // path, not here -- require the OPT_TC to be wrapped by an elementwise epilogue.
   if (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
       && uop_opt_kind(value) == UOP_OPT_TC) {
     return 0;
@@ -195,8 +151,8 @@ static int rmt_epilogue_tc_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K)
   Term reduce = uop_opt_target(opt);
   if (reduce == 0 || term_tag(reduce) != TAG_UOP
       || term_ext(reduce) != UOP_REDUCE) return 0;
-  // Synthetic bare-REDUCE store so uop_classify_matmul / uop_matmul_mn_axes (which
-  // read slot+2) classify the matmul shape (the real slot+2 is the epilogue chain).
+  // uop_classify_matmul and uop_matmul_mn_axes want the REDUCE as the store
+  // value, not the epilogue chain.
   Term synth = uop_store(heap_read(term_val(troot) + 0),
                          heap_read(term_val(troot) + 1), reduce);
   u32 m_axis, m_ext, n_axis, n_ext, k_ext = 0, unit_axis = 0;
@@ -215,20 +171,11 @@ static int rmt_epilogue_tc_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K)
   return 1;
 }
 
-// Weight-only-quantized matmul detection for dispatch-grid sizing.
-// The B operand is a CAST(int8/fp8 -> bf16) over the quantized weight buffer
-// (TMatMul[x, Transpose[Cast[w_q, bf16]]]); uop_dag_classify_matmul_shape
-// declines it (its uniform-dtype gate rejects the int8/fp8 vs bf16 mismatch, so
-// BLAS / MPS never run it) -- but the renderer's rmu_emit_matmul_tc DOES emit
-// the tiled simdgroup kernel for it (b_is_int8 char->bfloat staging, or
-// b_is_fp8 uchar->decode->bfloat staging), so the grid must still be sized to
-// the tile.  Reads M/N/K off the (OPT-wrapped) matmul shape via the same
-// recognisers the renderer uses.  Returns 1 + M/N/K when the store_root is a
-// quantized-B (int8 or fp8) matmul; 0 otherwise.
+// M/N/K of a matmul whose B is a weight-only quantized (int8 or fp8) buffer
+// behind a dequant CAST, which rmu_emit_matmul_tc stages in its tile.
 static int rmt_q8_matmul_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
   if (sroot == 0 || term_tag(sroot) != TAG_UOP
       || term_ext(sroot) != UOP_STORE) return 0;
-  // Peel an OPT(_, TC, _) wrapper to reach the REDUCE, then the MUL's B.
   Term value = heap_read(term_val(sroot) + 2);
   while (term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
          && uop_opt_kind(value) == UOP_OPT_TC) {
@@ -238,7 +185,6 @@ static int rmt_q8_matmul_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
   Term mul = heap_read(term_val(value) + 0);
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
   Term rhs = heap_read(term_val(mul) + 1);
-  // B must be a CAST whose source INDEX_Es an INT8 buffer.
   if (term_tag(rhs) != TAG_UOP
       || (term_ext(rhs) != UOP_CAST && term_ext(rhs) != UOP_BITCAST)) return 0;
   Term idx = heap_read(term_val(rhs) + 0);
@@ -248,7 +194,6 @@ static int rmt_q8_matmul_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
   u32 bdt = uop_buffer_dtype(buf);
   int is_fp8 = (bdt == DT_FP8E4M3 || bdt == DT_FP8E5M2);
   if (bdt != DT_INT8 && !is_fp8) return 0;
-  // Recover M/N (+ extents) and K from the recognisers (cast-aware).
   u32 m_axis, m_ext, n_axis, n_ext, k_ext = 0;
   if (!uop_matmul_mn_axes(sroot, &m_axis, &m_ext, &n_axis, &n_ext)) return 0;
   if (!uop_classify_matmul(sroot, &k_ext, NULL)) return 0;
@@ -259,12 +204,9 @@ static int rmt_q8_matmul_shape(Term sroot, u32 *out_M, u32 *out_N, u32 *out_K) {
   return 1;
 }
 
-// THVM_FUSE_MATMUL_INPUT: recover M/N/K for a fused-A matmul (A is an inlined
-// elementwise producer, B a clean buffer read) so the dispatch sizes the TILE
-// grid -- one threadgroup per output tile -- not the GLOBAL-axis-count grid
-// (which would launch tile_m/8 x tile_n/8 too many threadgroups and corrupt
-// every tile past the first).  uop_classify_matmul / uop_matmul_mn_axes already
-// accept the fused A (recognise_tc.c).  Returns 0 unless A is genuinely fused.
+// THVM_FUSE_MATMUL_INPUT: M/N/K of a fused-A matmul (A an inlined elementwise
+// producer, B a buffer read), so it launches one threadgroup per output tile,
+// not one per 8x8 GLOBAL tile; 0 unless A is fused.
 static int rmt_fused_a_matmul_shape(Term sroot, u32 *out_M, u32 *out_N,
                                     u32 *out_K) {
   if (!ru_fuse_matmul_input_on()) return 0;
@@ -278,8 +220,7 @@ static int rmt_fused_a_matmul_shape(Term sroot, u32 *out_M, u32 *out_N,
   if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
   Term mul = heap_read(term_val(value) + 0);
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
-  // A (after one cast peel) must NOT be a bare INDEX_E -- that is the fused
-  // producer signature (a plain matmul goes through the BLAS-slot classifier).
+  // An A that is an INDEX_E (after one CAST) is a plain matmul, not a fused one.
   Term lhs = heap_read(term_val(mul) + 0);
   if (term_tag(lhs) == TAG_UOP
       && (term_ext(lhs) == UOP_CAST || term_ext(lhs) == UOP_BITCAST)) {
@@ -288,9 +229,8 @@ static int rmt_fused_a_matmul_shape(Term sroot, u32 *out_M, u32 *out_N,
   } else if (term_tag(lhs) == TAG_UOP && term_ext(lhs) == UOP_INDEX_E) {
     return 0;
   }
-  // uop_classify_matmul / uop_matmul_mn_axes expect an UNWRAPPED store root
-  // (they bail on a leading OPT_TC), so rebuild the store around the peeled
-  // REDUCE value (mirrors udg_classify_matmul_store).
+  // uop_classify_matmul and uop_matmul_mn_axes reject an OPT_TC value: classify
+  // a store around the peeled REDUCE, as udg_classify_matmul_store does.
   Term cstore = sroot;
   if (value != heap_read(term_val(sroot) + 2)) {
     cstore = uop_store(heap_read(term_val(sroot) + 0),
@@ -309,17 +249,12 @@ static int rmt_fused_a_matmul_shape(Term sroot, u32 *out_M, u32 *out_N,
 int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
                                  u32 *threads_x) {
   if (ke == NULL) return 0;
-  // Metal hardware caps buffer attributes at index 30; reject
-  // kernels that won't render (matches the renderer's reject).
+  // Metal caps buffer arguments at index 30; cg_emit_via_uop rejects these too.
   if (ke->n_inputs > 30) {
     return 0;
   }
-  // DAG-mode + per-axis OPTs present (hand-coded-opts / autotune ran
-  // and mutated the DAG): the conv2d-flat / scalar-tile readers can't
-  // see those (they key off the empty applied_opts log), so derive
-  // (groups, threads) straight from the DAG's axis types.  Skip when
-  // a TC matmul template is in play -- that binds its own grid.
   {
+    // A store value OPT(_, TC, _) is a TC matmul, sized by the branches below.
     Term sroot = ke->cached_lift.store_root;
     int tc_template = 0;
     if (sroot != 0 && term_tag(sroot) == TAG_UOP
@@ -328,21 +263,8 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
       if (term_tag(v) == TAG_UOP && term_ext(v) == UOP_OPT
           && uop_opt_kind(v) == UOP_OPT_TC) tc_template = 1;
     }
-    // THVM_FUSE_MATMUL_EPILOGUE (default OFF): an epilogue-fused store value is an
-    // elementwise chain over the matmul REDUCE (MUL(REDUCE, per-N scale) for the
-    // q8 dequant), so `v` above is NOT a bare OPT_TC -> tc_template stays 0 and
-    // the matmul would fall to the generic GLOBAL-axis-product grid, over-
-    // launching ~32x the threadgroups (the fused kernel ran ~10x slow -- and a
-    // wrong grid races the parallel tiled body, corrupting the output).  Size the
-    // TILE grid here to MATCH THE RENDERER EXACTLY: the renderer (cg_emit_via_uop)
-    // applies uop_recognise_tc_parallel to cached_root before emitting, so apply
-    // the SAME transform here and read M/N/K off the resulting OPT_TC.  This makes
-    // dispatch + render agree regardless of the pre-transform DAG state (bare vs
-    // OPT_TC-wrapped vs hand-opts-mutated, which differs across the prefetch and
-    // fire calls).  STRICTLY ADDITIVE + FULLY GATED: rmt_epilogue_tc_shape returns
-    // 0 when the gate is off AND for any BARE matmul (its transformed value is a
-    // bare OPT_TC, no elementwise wrapper), so a bare bf16/int8 TC matmul never
-    // enters this branch and keeps HEAD's (tg,tt) byte-for-byte.
+    // THVM_FUSE_MATMUL_EPILOGUE: an epilogue-fused matmul is an elementwise chain
+    // over the REDUCE, not a bare OPT_TC; launch its tile grid.
     if (!tc_template) {
       u32 eM = 0, eN = 0, eK = 0;
       if (rmt_epilogue_tc_shape(sroot, &eM, &eN, &eK)
@@ -364,24 +286,16 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
         }
       }
     }
-    // TRUE batched gemm (attention's mhaBmm): the value is OPT(_, TC, 0)
-    // wrapped and the batch/M/N axes are GLOBAL, but uop_dag_classify_matmul_-
-    // shape rejects the 3-range-per-operand shape, so the 2-D branches below
-    // bail.  Size the grid directly: batch * (M/8) * (N/8) threadgroups, 32
-    // threads each (one simdgroup per (batch, 8x8 tile)) -- mirrors the
-    // renderer's is_batched parallel_tc layout exactly.  The batch axis is
-    // NOT divided by 8 (it is the gemm-index dim, not a tile dim).
+    // A batched matmul (attention's mhaBmm), which uop_dag_classify_matmul_shape
+    // rejects: batch * (M/8) * (N/8) threadgroups of one simdgroup, as the
+    // renderer's is_batched parallel_tc lays it out; the batch is not tiled.
     if (tc_template) {
       u32 b_ax, b_ext, m_ax, m_ext, n_ax, n_ext, k_ext;
       if (uop_classify_batched_matmul(sroot, &b_ax, &b_ext, &m_ax, &m_ext,
                                       &n_ax, &n_ext, &k_ext)
           && (m_ext % 8u) == 0 && (n_ext % 8u) == 0 && b_ext >= 1) {
-        // THVM_TC_BATCHED (default OFF -- residual FLUX-pipeline gap, see
-        // render_uop.c): the batched-tiled emitter is correct in isolation but a full
-        // FluxGenerate still decodes garbage with it on.  This dispatch-grid gate
-        // MUST match rmu_emit_matmul_tc_tiled's gate -- if they disagree the grid and
-        // kernel mismatch (worse than either consistent path).  Default OFF -> the
-        // parallel_tc grid (correct).  THVM_TC_BATCHED=1 opts BOTH gates back in.
+        // THVM_TC_BATCHED (default off, see render_uop.c) as rmu_tc_batched_on
+        // reads it: this grid must match the kernel the renderer picks.
         static int _tcb_k = 0, _tcb = 0;
         if (!_tcb_k) { char const *e = getenv("THVM_TC_BATCHED");
                        if (e != NULL && e[0] == '1') _tcb = 1; _tcb_k = 1; }
@@ -406,29 +320,7 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
         }
       }
     }
-    // Parallel TC: the simdgroup_matrix template binds each GLOBAL output
-    // axis to the threadgroup grid, one simdgroup (32 threads) per 8x8
-    // output tile (render_uop.c rmu_emit_matmul_tc parallel_tc branch).
-    // grid = product(GLOBAL_extent / 8) threadgroups, 32 threads each.
-    // Only the GLOBAL-promoted axes parallelise; a non-promoted output
-    // axis stays an in-kernel for-loop (still correct, just serial).
-    // Without this the TC kernel would take the output_numel default
-    // grid below, racing many simdgroups onto the same tiles.
-    //
-    // BUT the simdgroup_matrix template only fires when M%8==0 AND N%8==0
-    // (render_uop.c rmu_emit_matmul_tc bails to a scalar accumulator
-    // otherwise -- it can't tile a ragged 8x8 fragment).  When it bails,
-    // the kernel emits the default `tid`-decoded scalar body whose correct
-    // grid is output_numel, NOT the TC tile grid.  So if the matmul shape
-    // doesn't qualify, skip the TC tile-grid branch and fall through to
-    // the output_numel default -- otherwise we'd launch only
-    // product(M_tiles) * 32 threads and leave most output cells unwritten
-    // (e.g. a {8,K}x{K,500} matmul: M=8 -> 1 tile -> 32 threads, but the
-    // scalar kernel needs 8*500=4000 threads).
-    // q8 int8-weight matmul: uop_dag_classify_matmul_shape declines it (the
-    // int8 vs bf16 uniform-dtype gate), so size the tiled grid off the
-    // cast-aware recognisers instead -- one threadgroup per output tile,
-    // LOCAL_M*LOCAL_N*32 threads each (mirrors rmu_emit_matmul_tc_tiled).
+    // A weight-only quantized B: one threadgroup per output tile.
     if (tc_template) {
       u32 qM = 0, qN = 0, qK = 0;
       if (rmt_q8_matmul_shape(sroot, &qM, &qN, &qK)
@@ -451,10 +343,8 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
         }
       }
     }
-    // THVM_FUSE_MATMUL_INPUT: fused-A matmul.  uop_dag_classify_matmul_shape
-    // declines (A is an inlined producer, not a single input slot), so size the
-    // TILE grid off the cast-aware recognisers -- one threadgroup per output
-    // tile, LOCAL_M*LOCAL_N*32 threads each (mirrors rmu_emit_matmul_tc_tiled).
+    // THVM_FUSE_MATMUL_INPUT: uop_dag_classify_matmul_shape declines a fused A
+    // (no input slot), so its tile grid is sized here.
     if (tc_template) {
       u32 fM = 0, fN = 0, fK = 0;
       if (rmt_fused_a_matmul_shape(sroot, &fM, &fN, &fK)
@@ -477,32 +367,26 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
         }
       }
     }
+    // rmu_emit_matmul_tc needs M, N multiples of 8; otherwise it emits a scalar
+    // body, whose grid is the output_numel default.
     if (tc_template) {
       UopDagGemmShape gemm = {0};
       int simdgroup_fires =
           uop_dag_classify_matmul_shape(sroot, ke, &gemm)
           && gemm.M != 0 && gemm.N != 0
           && (gemm.M % 8u) == 0 && (gemm.N % 8u) == 0;
-      // A fused-A matmul intentionally fails the BLAS-slot classifier; don't
-      // clear tc_template for it (the fused grid above already returned, but if
-      // its tile picker declined we still want the simdgroup/scalar path, not a
-      // mis-sized grid).
+      // A fused A fails the BLAS-slot classifier by design: keep tc_template.
       if (!simdgroup_fires && !rmt_fused_a_matmul_shape(sroot, NULL, NULL, NULL))
         tc_template = 0;
     }
     if (tc_template) {
-      // Threadgroup-staged tiled path: when both M and N are GLOBAL and
-      // the tile picker accepts the shape, the renderer emits a
-      // TILE_M x TILE_N tile per threadgroup with LOCAL_M*LOCAL_N
-      // simdgroups.  Size the grid to match: one threadgroup per output
-      // tile, LOCAL_M*LOCAL_N*32 threads each.  Mirrors
-      // rmu_emit_matmul_tc's gate exactly (render_uop.c).
+      // With M and N GLOBAL and a tile the picker accepts, rmu_emit_matmul_tc
+      // stages tiles in threadgroup memory: one threadgroup per output tile.
       {
         UopDagGemmShape g2 = {0};
         if (uop_dag_classify_matmul_shape(sroot, ke, &g2)
             && g2.M != 0 && g2.N != 0 && g2.K != 0
             && (g2.dtype == DT_FP32 || g2.dtype == DT_BF16)) {
-          // Both M and N must be GLOBAL-promoted for the tiled emit.
           u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
           u32 na = uop_dag_collect_axes(sroot, ids, types, exts, MAX_AXES);
           u32 n_global = 0;
@@ -522,6 +406,8 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
           }
         }
       }
+      // Else the parallel_tc body: a simdgroup per 8x8 tile of the GLOBAL axes,
+      // a LOOP output axis a serial loop (the output_numel grid would race).
       u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
       u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types,
                                    exts, MAX_AXES);
@@ -540,13 +426,12 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
         return 1;
       }
     }
+    // Opt axes in the DAG: size it from the axis types, as render_uop decodes it.
     if (!tc_template && rmt_dag_has_opt_axes(ke)
         && rmt_dag_dispatch_shape(ke, groups_x, threads_x)) {
       return 1;
     }
   }
-  // Conv2D flat: dispatch (c_out * patches / outputs_per_thread)
-  // total threads divided into `threads` per group.
   TileConv2DInfo conv;
   if (rmt_collect_conv2d_info(ke, &conv)) {
     u64 total = (u64)conv.c_out * (u64)conv.patches;
@@ -561,18 +446,8 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
     return 1;
   }
   if (tile_rejects_conv2d_flat_cin1(ke)) return 0;
-  // Lifter-based fallback.  If the kernel_lift would succeed,
-  // render_uop emits a valid kernel; dispatch shape is just
-  // (output_numel, 256-default threadgroup).
-  // The kernel's outer for-loops handle work distribution within each
-  // thread (each thread runs the full body redundantly; last-writer-
-  // wins on the output buffer gives correct results).  Future wedges
-  // can specialize when M/N-axes get bound to thread positions via
-  // UOP_OPT_LOCAL annotations.
-  //
-  // cached_lift.store_root == 0 means the materialize-time lift
-  // declined (no source_uop / no unified store_root); the renderer
-  // can't emit a valid kernel.
+  // Default: 256-thread groups over the outputs, which render_uop decodes from
+  // tid.  Without a lift (store_root 0) nothing renders.
   if (ke->cached_lift.store_root == 0) return 0;
   u64 total = ke->output_numel ? (u64)ke->output_numel : 1;
   if (total == 0 || total > 0xFFFFFFFFu) return 0;
@@ -585,73 +460,30 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
 }
 
 
-// Render through cached KernelUopLift + cg_render_uop_kernel_root.
-// This is the primary (and only) Metal MSL emit path: the lifter
-// (materialize-time) handles every kernel shape (matmul, conv2d_flat
-// including multi-input X im2col, elementwise, reduce,
-// movement-fused subtrees).
-//
-// Passes cached_lift.store_root directly into
-// cg_render_uop_kernel_root, which discovers buffer slots structurally
-// from the DAG via UOP_BUFFER.instance.  No in_bufs[] dependency:
-// kernel_lift.c stamps instance=slot+1 on each input BUFFER, so the
-// renderer reconstructs slot positions from the DAG itself.
+// The MSL of a kernel's lifted DAG, buffer slots read off UOP_BUFFER.instance
+// (slot + 1, kernel_lift.c).  Caller frees; NULL if it cannot render.
 static char *cg_emit_via_uop(KernelEntry const *ke) {
-  // Metal hardware caps buffer attributes at index 30 (31 slots total
-  // including output).  Reject kernels with too many inputs.
+  // Metal caps buffer arguments at index 30: the output and 30 inputs.
   if (ke->n_inputs > 30) {
     return NULL;
   }
-  // Read the cached KernelUopLift populated by emit_kernel_for_boundary.
-  // cached_root==0 means the materialize-time lift declined (no
-  // source_uop / no unified store_root / n_inputs over cap) -- no
-  // amount of re-running will help.
+  // 0: the materialize-time lift declined, for good.
   Term cached_root = ke->cached_lift.store_root;
   if (cached_root == 0) {
     return NULL;
   }
-  // Render to a malloc'd string, matching cg_emit_tile_metal's
-  // contract.  Use kernel name "k" so MTLLibrary lookup behaves like
-  // the existing path.
-  // F3.1: pre-render pass installs UOP_OPT(_, TC, 0) on matmul-shaped
-  // STORE roots so render_uop's simdgroup_matrix template fires.
-  // No-op for non-matmul kernels.
-  //
-  // The parallel variant ALSO re-stamps the M and N output axes
-  // KAX_GLOBAL when K/M/N are all multiples of 8, so rmu_emit_matmul_tc
-  // takes the parallel_tc branch (one simdgroup per 8x8 output tile)
-  // and cg_tile_metal_dispatch_shape launches product(extent/8)
-  // threadgroups -- the whole GPU works the matmul instead of a single
-  // 32-thread simdgroup running it serially under the legacy
-  // `if(sgi==0u && tg==0u)` guard.  Each threadgroup owns a unique 8x8
-  // tile, so there is no multi-simdgroup write race.  Ragged shapes
-  // (M%8 or N%8 != 0) fall back to the guarded path automatically.
+  // uop_recognise_tc_parallel wraps a matmul REDUCE in OPT(_, TC, 0) and, with
+  // M, N and K multiples of 8, stamps M and N GLOBAL: a simdgroup per 8x8 tile.
   Term store_root = uop_recognise_tc_parallel(cached_root);
-  // TRUE batched matmul (attention's mhaBmm): the 2-D recogniser above
-  // rejects the 3-range-per-operand shape and returns the root unchanged,
-  // so try the batched recogniser next.  It wraps OPT(_, TC, 0) + stamps
-  // batch/M/N GLOBAL, and rmu_emit_matmul_tc emits one simdgroup per
-  // (batch, 8x8 output tile).  No-op (returns input) for every non-batched
-  // kernel, so the 2-D path stays byte-identical.
+  // The 2-D recogniser leaves a batched matmul (attention's mhaBmm) alone; the
+  // batched one also stamps the batch GLOBAL, a simdgroup per (batch, 8x8 tile).
   if (store_root == cached_root) {
     store_root = uop_recognise_batched_tc_parallel(store_root);
   }
-  // Default-parallelise happens inside the renderer (rmu_emit_store /
-  // rmu_emit_output_loops): plain-LOOP output axes are decoded from
-  // `tid` instead of looped serially.  For non-matmul kernels we do NOT
-  // rewrite the DAG's axis_type here -- a KAX_GLOBAL rewrite would make
-  // the renderer's legacy single-`tg` branch fire and collide multiple
-  // grid axes.  The matmul TC path is the exception: uop_recognise_tc_-
-  // parallel above stamps M/N GLOBAL because rmu_emit_matmul_tc's
-  // parallel_tc branch binds each threadgroup to a unique 8x8 tile (no
-  // collision), and cg_tile_metal_dispatch_shape sizes the grid to match.
-  // Render into a temp file (portable across macOS/Linux/Windows) and
-  // read it back, rather than a fixed stack buffer -- no length cap.
+  // A tmpfile has no size cap.
   FILE *fp = tmpfile();
   if (fp == NULL) return NULL;
-  // Structural entry: derive kernel signature (output dtype + per-
-  // input dtype) from the BUFFER nodes in the DAG via slot index;
-  // names ("out", "in0", "in1", ...) are decoded structurally too.
+  // The Metal backend looks the function up as "k".
   cg_render_uop_kernel_root(store_root, "k", fp);
   long n = ftell(fp);
   if (n <= 0) { fclose(fp); return NULL; }
@@ -665,11 +497,7 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
 }
 
 char *cg_emit_tile_metal(KernelEntry const *ke) {
-  // Render through the UOp-DAG renderer.  The lifter handles every
-  // kernel shape (matmul / conv2d / elementwise / reduce / movement-
-  // fused / im2col multi-input).  Returns NULL when the lifter
-  // declines (n_inputs > 30, malformed shape, etc.) so the dispatch
-  // ladder can route the kernel through a non-tile path if any.
+  // NULL leaves the kernel to the Metal backend's non-tile paths.
   return cg_emit_via_uop(ke);
 }
 

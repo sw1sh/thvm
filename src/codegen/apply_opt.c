@@ -1,48 +1,26 @@
-// codegen/apply_opt.c -- mutate a KernelEntry's lifted UOp DAG by
-// applying one TOpt.  Wraps uop_dag_apply_kopt: the DAG-side rewriter
-// validates the opt against the current RANGE leaves, rewrites them
-// in place, and returns the new store_root (or 0 on bail).  The
-// outer dispatcher mirrors the mutation into schedule->applied_opts
-// for WL introspection (TKernelOpts["Applied"]).
-//
-// Returns 1 on success, 0 on bail (declined kernel, validation
-// failure inside uop_dag_apply_kopt, applied_opts full).
+// codegen/apply_opt.c - apply one KOpt to a kernel: uop_dag_apply_kopt rewrites
+// its lifted DAG, and schedule->applied_opts logs the opt.
 
-// Forward decl: defined in uop/apply_opt_dag.c, included after this file
-// in thvm.c.  The forward decl matches `fn` (static inline) so the
-// generated symbols stay private to the TU.
+// Defined in uop/apply_opt_dag.c, which thvm.c includes after this file.
 fn Term uop_dag_apply_kopt(Term root, KOpt opt);
 
-// Apply one TOpt to a KernelEntry's axis structure.  Split-class opts
-// (UPCAST/UNROLL/LOCAL/GROUP/GROUPTOP) split the indicated axis,
-// growing n_axes by one; KOP_GLOBAL marks a LOOP axis as GLOBAL via
-// the applied_opts log; KOP_SWAP exchanges two axes in-place; KOP_TC
-// is metadata-only.  Returns 0 on validation failure (axis out of
-// range, arg doesn't divide, applied_opts full, unsupported opt).
+// 1 when the opt applies; 0 for a kernel without a DAG or with no_opts, or when
+// uop_dag_apply_kopt declines or changes nothing (no such axis, a split that does
+// not divide, an unsupported op).
 fn int kernel_apply_opt(KernelEntry *ke, KOpt opt) {
   if (ke == NULL || ke->no_opts) {
     return 0;
   }
-  // DAG-mode: Phase E path.  When cached_lift.store_root is populated
-  // (Python-built kernels and post-lift production kernels), mutate the
-  // DAG directly via uop_dag_apply_kopt.  This avoids the legacy
-  // KpSchedule.applied_opts[] log + axes_compute_axis_types resolver
-  // chain.  The renderer reads the post-mutation DAG directly
-  // (UOP_RANGE.axis_type for parallel TC, UOP_OPT(_, TC, factor) for
-  // the simdgroup_matrix template).
   if (ke->cached_lift.store_root != 0) {
     Term new_root = uop_dag_apply_kopt(ke->cached_lift.store_root, opt);
     if (new_root == 0 || new_root == ke->cached_lift.store_root) return 0;
     ke->cached_lift.store_root = new_root;
-    // Mirror the mutation into schedule->applied_opts so WL
-    // introspection (TKernelOpts["Applied"]) and the axis-type
-    // resolver see the post-opt state.  Skip when the schedule slot
-    // is unallocated (Python-built kernels) or already full.
+    // The log feeds TKernelOpts["Applied"] and the Metal backend.  A hand-built
+    // entry has no schedule; past MAX_OPTS the opt applies unlogged.
     if (ke->schedule != NULL && ke->schedule->n_applied < MAX_OPTS) {
       ke->schedule->applied_opts[ke->schedule->n_applied++] = opt;
     }
     return 1;
   }
-  // No cached_lift.store_root: declined kernel (no DAG to mutate).
   return 0;
 }
