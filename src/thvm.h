@@ -1891,9 +1891,9 @@ fn u64 kautotune_structural_key(struct KernelEntry const *ke);
 
 // Cheap predicate used by the fire-time auto-tune trigger.  True
 // iff (env opt-in `AUTOTUNE=1` or `BEAM>0`) AND (this KpSchedule
-// hasn't been autotuned yet) AND (proposer has at least one
-// candidate).
-fn int kernel_should_autotune(struct KernelEntry const *ke);
+// hasn't been autotuned yet) AND (the proposer has at least one
+// candidate for the bare kernel).
+fn int kernel_should_autotune(struct KernelEntry *ke);
 
 // Case-insensitive match of a DEV env string against a backend name
 // ("cpu"/"metal"/"cuda"); a trailing ":renderer" suffix is ignored.

@@ -600,7 +600,7 @@ static void check_iso_scratch(Case const *k, u32 kid, Term x) {
   CHECK(covered);
   if (covered) {
     KOpt cands[KAUTOTUNE_MAX_CANDIDATES];
-    u32  n_cand = kernel_opts_propose(ke, cands, KAUTOTUNE_MAX_CANDIDATES);
+    u32  n_cand = kautotune_propose(ke, cands, KAUTOTUNE_MAX_CANDIDATES);
     axes_reset_to_default(ke);
     kernel_bench_fire(kid);
     KautotuneOutStat base     = kautotune_output_stat(ke);

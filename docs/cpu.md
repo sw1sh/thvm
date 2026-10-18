@@ -146,9 +146,11 @@ renderer.
   `cg_kernel_total_us`) and static FLOPS estimation
   (`cg_kernel_flops`).
 - [autotune.c](../src/codegen/autotune.c): `kernel_autotune(kid)`.
-  Calls `kernel_opts_propose`, applies each candidate in isolation,
-  benches `KAUTOTUNE_N_RUNS` fires per variant, picks the min, and
-  leaves the kernel mutated to the winner. Winners are cached per
+  Proposes against the bare kernel (`kautotune_propose` resets the
+  hand-coded opts, calls `kernel_opts_propose`, and restores them),
+  applies each candidate in isolation, benches `KAUTOTUNE_N_RUNS`
+  fires per variant, picks the min, and leaves the kernel mutated to
+  the winner. Winners are cached per
   program shape in memory via the `autotuned` flag on `KernelAxes`
   and on disk under `$XDG_CACHE_HOME/thvm/autotune` (or
   `$HOME/.cache/thvm/autotune`, or `AUTOTUNE_CACHE_DIR`).  Set
