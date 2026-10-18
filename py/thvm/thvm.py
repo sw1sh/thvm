@@ -66,10 +66,7 @@ _uop_iwhere = _bind("py_uop_iwhere", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_where = _bind("py_uop_where", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_binary = _bind("py_uop_binary", c_uint64, c_uint32, c_uint64, c_uint64)
 _uop_reduce = _bind("py_uop_reduce", c_uint64, c_uint32, c_uint32, c_uint64)
-_uop_opt = _bind("py_uop_opt", c_uint64, c_uint64, c_uint32, c_uint32)
 _uop_store = _bind("py_uop_store", c_uint64, c_uint64, c_uint64, c_uint64)
-_uop_after = _bind("py_uop_after", c_uint64, c_uint64, c_uint64)
-_uop_load = _bind("py_uop_load", c_uint64, c_uint64)
 _uop_detach = _bind("py_uop_detach", c_uint64, c_uint64)
 _uop_gather = _bind("py_uop_gather", c_uint64, c_uint64, c_uint64, c_uint32)
 _uop_scatter = _bind("py_uop_scatter", c_uint64, c_uint64, c_uint64, c_uint64,
@@ -140,8 +137,6 @@ _ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
 _ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
 _ten_set_grad     = _bind("py_ten_set_grad",     c_int32,  c_uint64, c_uint64)
 
-# ---------------- buffer accessors ----------------
-
 # ---------------- C kernels (the lowered cross-validator) ----------------
 _render_uop_kernel_c = _bind(
     "py_render_uop_kernel_c", c_void_p, c_uint64, c_char_p)
@@ -191,12 +186,7 @@ class _Constants:
     SQRT = _read_uint32_const("py_const_UOP_SQRT")
     # Integer binary opcodes
     IADD = _read_uint32_const("py_const_UOP_IADD")
-    ISUB = _read_uint32_const("py_const_UOP_ISUB")
     IMUL = _read_uint32_const("py_const_UOP_IMUL")
-    IDIV = _read_uint32_const("py_const_UOP_IDIV")
-    IMOD = _read_uint32_const("py_const_UOP_IMOD")
-    ILT = _read_uint32_const("py_const_UOP_ILT")
-    IAND = _read_uint32_const("py_const_UOP_IAND")
     # Reduce kinds
     REDUCE_SUM = _read_uint32_const("py_const_REDUCE_SUM")
     REDUCE_MAX = _read_uint32_const("py_const_REDUCE_MAX")
@@ -211,12 +201,8 @@ class _Constants:
     AXIS_REDUCE = _read_uint32_const("py_const_KAX_REDUCE")
     AXIS_LOCAL = _read_uint32_const("py_const_KAX_LOCAL")
     AXIS_GLOBAL = _read_uint32_const("py_const_KAX_GLOBAL")
-    # Opt kinds (UOP_OPT_*)
-    OPT_TC = _read_uint32_const("py_const_UOP_OPT_TC")
     # KOpt opcodes (autotune-side; autotune.c BEAM uses these)
     KOP_UPCAST = _read_uint32_const("py_const_KOP_UPCAST")
-    KOP_TC = _read_uint32_const("py_const_KOP_TC")
-    KOP_GLOBAL = _read_uint32_const("py_const_KOP_GLOBAL")
 
 
 K = _Constants
@@ -231,6 +217,7 @@ class Thvm:
 
     _initialized = False
 
+    # Every live Tensor: a heap collection relocates each one's term to the
     # moved cell, so no lazy graph Python keeps points into the dead space.
     live_terms: "weakref.WeakSet" = weakref.WeakSet()
 
@@ -271,17 +258,8 @@ class Thvm:
     def iadd(self, a: Term, b: Term) -> Term:
         return Term(_uop_int_binary(c_uint32(K.IADD), c_uint64(int(a)), c_uint64(int(b))))
 
-    def isub(self, a: Term, b: Term) -> Term:
-        return Term(_uop_int_binary(c_uint32(K.ISUB), c_uint64(int(a)), c_uint64(int(b))))
-
     def imul(self, a: Term, b: Term) -> Term:
         return Term(_uop_int_binary(c_uint32(K.IMUL), c_uint64(int(a)), c_uint64(int(b))))
-
-    def ilt(self, a: Term, b: Term) -> Term:
-        return Term(_uop_int_binary(c_uint32(K.ILT), c_uint64(int(a)), c_uint64(int(b))))
-
-    def iand(self, a: Term, b: Term) -> Term:
-        return Term(_uop_int_binary(c_uint32(K.IAND), c_uint64(int(a)), c_uint64(int(b))))
 
     def iwhere(self, cond: Term, t: Term, e: Term) -> Term:
         return Term(_uop_iwhere(c_uint64(int(cond)),
@@ -307,38 +285,20 @@ class Thvm:
     def cmpeq(self, a: Term, b: Term) -> Term:
         return Term(_uop_binary(c_uint32(K.CMPEQ), c_uint64(int(a)), c_uint64(int(b))))
 
-    # Builds UOP_NEG / RECIP / EXP2 / LOG2 / SQRT nodes.
-    def _unary(self, opcode: int, x: Term) -> Term:
-        return Term(_uop_unary(c_uint32(opcode), c_uint64(int(x))))
+    def neg(self, x: Term) -> Term:    return self.unary(K.NEG, x)
+    def recip(self, x: Term) -> Term:  return self.unary(K.RECIP, x)
+    def exp2(self, x: Term) -> Term:   return self.unary(K.EXP2, x)
+    def log2(self, x: Term) -> Term:   return self.unary(K.LOG2, x)
+    def sqrt(self, x: Term) -> Term:   return self.unary(K.SQRT, x)
 
-    def neg(self, x: Term) -> Term:    return self._unary(K.NEG, x)
-    def recip(self, x: Term) -> Term:  return self._unary(K.RECIP, x)
-    def exp2(self, x: Term) -> Term:   return self._unary(K.EXP2, x)
-    def log2(self, x: Term) -> Term:   return self._unary(K.LOG2, x)
-    def sqrt(self, x: Term) -> Term:   return self._unary(K.SQRT, x)
-
-    # repeated calls share heap loc.
-    def exp(self, x: Term) -> Term:
-        log2_e = self.fconst(1.4426950408889634)
-        return self.exp2(self.mul(x, log2_e))
-
-    # ---------------- reduce / opt / store / after / load ----------------
+    # ---------------- reduce / store ----------------
     def reduce(self, kind: int, axis: int, src: Term) -> Term:
         return Term(_uop_reduce(c_uint32(kind), c_uint32(axis), c_uint64(int(src))))
-
-    def opt(self, target: Term, kind: int, factor: int = 0) -> Term:
-        return Term(_uop_opt(c_uint64(int(target)), c_uint32(kind), c_uint32(factor)))
 
     def store(self, buf: Term, addr: Term, value: Term) -> Term:
         return Term(_uop_store(c_uint64(int(buf)),
                                c_uint64(int(addr)),
                                c_uint64(int(value))))
-
-    def after(self, node: Term, after_node: Term) -> Term:
-        return Term(_uop_after(c_uint64(int(node)), c_uint64(int(after_node))))
-
-    def load(self, src: Term) -> Term:
-        return Term(_uop_load(c_uint64(int(src))))
 
     def detach(self, src: Term) -> Term:
         return Term(_uop_detach(c_uint64(int(src))))
@@ -357,8 +317,6 @@ class Thvm:
                                  c_uint64(int(src)), c_uint32(int(dim)),
                                  c_uint32(int(kind)),
                                  c_uint32(1 if include_self else 0)))
-
-    # realize entry point.
 
     def ten_create(self, dtype: int, dims) -> Term:
         """Allocate a tensor on the DEV-selected backend; returns TAG_TEN."""
@@ -582,8 +540,6 @@ class Thvm:
     def ten_set_grad(self, t: Term, g: int) -> bool:
         """Set TENS[tid].grad to the lazy term `g` (0 clears it)."""
         return bool(_ten_set_grad(c_uint64(int(t)), c_uint64(int(g))))
-
-    # ---------------- buffer accessors ----------------
 
     # ---------------- term inspection ----------------
     def term_tag(self, t: Term) -> int: return int(_term_tag(c_uint64(int(t))))

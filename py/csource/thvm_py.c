@@ -32,12 +32,6 @@ EXPORT void py_thvm_free(void) { thvm_free(); }
 EXPORT uint32_t py_term_tag(uint64_t t) { return term_tag(t); }
 EXPORT uint64_t py_term_val(uint64_t t) { return term_val(t); }
 
-// First heap child (the `src`) of a TAG_UOP node.  Movement ops
-// (RESHAPE/PERMUTE/EXPAND/PAD/SHRINK/FLIP) and unary ops store their
-// source at heap slot 0; the Tensor frontend walks this to detect a
-// matmul operand that is a movement VIEW over a COMPUTED (unrealized)
-// source (the GPT2 head-split fusion hazard).  Returns 0 for non-UOP.
-
 // ---------------- atom constructors ----------------
 EXPORT uint64_t py_term_iconst(int32_t v) {
   // UOP_CONST(DT_INT32, bits) -- the DAG-side classifiers
@@ -90,19 +84,10 @@ EXPORT uint64_t py_uop_reduce(uint32_t kind, uint32_t axis, uint64_t src) {
   return uop_reduce(kind, axis, src);
 }
 
-EXPORT uint64_t py_uop_opt(uint64_t target, uint32_t kind, uint32_t factor) {
-  return uop_opt(target, kind, factor);
-}
-
 EXPORT uint64_t py_uop_store(uint64_t buf, uint64_t addr, uint64_t value) {
   return uop_store(buf, addr, value);
 }
 
-EXPORT uint64_t py_uop_after(uint64_t node, uint64_t after_node) {
-  return uop_after(node, after_node);
-}
-
-EXPORT uint64_t py_uop_load(uint64_t src) { return uop_load(src); }
 EXPORT uint64_t py_uop_detach(uint64_t src) { return uop_detach(src); }
 
 // Indexed ops (uop/gather.c, uop/scatter.c): 0 when the operands fail the
@@ -562,11 +547,6 @@ EXPORT uint64_t py_uop_dag_apply_kopt(uint64_t root, uint8_t op,
 }
 
 EXPORT uint32_t py_const_KOP_UPCAST(void)   { return KOP_UPCAST; }
-EXPORT uint32_t py_const_KOP_TC(void)       { return KOP_TC; }
-EXPORT uint32_t py_const_KOP_GLOBAL(void)   { return KOP_GLOBAL; }
-// KOP_FAST_MATH / KOP_SIMD_REDUCE / KOP_VEC_LOAD were purged from the IR
-// (7a2218e6b); their py_const_* exports are dropped.  _read_uint32_const
-// returns -1 for the now-absent symbols, which the Python layer tolerates.
 
 // ---------------- exposed enums (to avoid magic numbers in Python) ----------------
 EXPORT uint32_t py_const_DT_INT32(void)         { return DT_INT32; }
@@ -585,12 +565,7 @@ EXPORT uint32_t py_const_UOP_LOG2(void)  { return UOP_LOG2; }
 EXPORT uint32_t py_const_UOP_SQRT(void)  { return UOP_SQRT; }
 
 EXPORT uint32_t py_const_UOP_IADD(void)  { return UOP_IADD; }
-EXPORT uint32_t py_const_UOP_ISUB(void)  { return UOP_ISUB; }
 EXPORT uint32_t py_const_UOP_IMUL(void)  { return UOP_IMUL; }
-EXPORT uint32_t py_const_UOP_IDIV(void)  { return UOP_IDIV; }
-EXPORT uint32_t py_const_UOP_IMOD(void)  { return UOP_IMOD; }
-EXPORT uint32_t py_const_UOP_ILT(void)   { return UOP_ILT; }
-EXPORT uint32_t py_const_UOP_IAND(void)  { return UOP_IAND; }
 
 EXPORT uint32_t py_const_REDUCE_SUM(void) { return REDUCE_SUM; }
 EXPORT uint32_t py_const_REDUCE_MAX(void) { return REDUCE_MAX; }
@@ -606,6 +581,3 @@ EXPORT uint32_t py_const_KAX_REDUCE(void)       { return KAX_REDUCE; }
 EXPORT uint32_t py_const_KAX_LOCAL(void)        { return KAX_LOCAL; }
 EXPORT uint32_t py_const_KAX_GLOBAL(void)       { return KAX_GLOBAL; }
 
-EXPORT uint32_t py_const_UOP_OPT_TC(void)           { return UOP_OPT_TC; }
-// UOP_OPT_CONV / UOP_OPT_FAST_MATH / UOP_OPT_SIMD_REDUCE / UOP_OPT_VEC_LOAD
-// were purged from the IR (7a2218e6b); exports dropped (Python -> -1).
