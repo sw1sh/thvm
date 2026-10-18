@@ -39,15 +39,17 @@ $documentationOptions = {
    the same commit.  Debug output the toolchains leave beside them stays out of the archive. *)
 $resourceOptions = {"Exclude" -> {"*.dSYM", "*.dSYM/*", "*.pdb", "*.lib", "*.exp", "*.DS_Store", "docs/*", "Tests/*"}};
 
-(* Pages whose examples launch parallel kernels of their own (TFindFiniteModels, and the
-   counterexample and TPTP searches built on it): they convert in this kernel, since parallel
-   computations cannot nest in the parallel kernel that would convert them. *)
-$sequentialPages = {"TFindFiniteModels.md", "Disproof.md", "TPTPImport.md"};
+(* Pages whose examples compute in parallel kernels of their own (TFindFiniteModels'
+   "Parallelize"): they convert in this kernel, since parallel computations cannot nest in the
+   parallel kernel that would convert them, with $sequentialKernels kernels launched for them,
+   since a kernel `wl` starts has none configured. *)
+$sequentialPages = {"TFindFiniteModels.md"};
+$sequentialKernels = 4;
 
 (* The pages in three groups, into the same Documentation/English tree and the same cache: most on
    parallel kernels, the sequential ones in this kernel, and the unevaluated ones without their
    examples. The definition notebook is built with the first group. *)
-buildDocumentation[opts___] := Module[{all, groupOf, groups, results},
+buildDocumentation[opts___] := Module[{all, groupOf, groups, build, results},
     all = Sort @ FileNames["*.md", FileNameJoin[{$pacletDirectory, "docs"}], Infinity];
     groupOf[file_] := Which[
         MemberQ[$unevaluatedPages, FileNameTake[file]], "Unevaluated",
@@ -58,11 +60,14 @@ buildDocumentation[opts___] := Module[{all, groupOf, groups, results},
         {"Sequential", {"Parallel" -> False, "Definition" -> None}},
         {"Unevaluated", {"ConverterOptions" -> {"Evaluate" -> False}, "Definition" -> None}}
     };
+    build[files_, groupOptions_] := BuildPacletDocumentation[$pacletDirectory, opts, "Files" -> files, Sequence @@ groupOptions, Sequence @@ $documentationOptions];
     results = Map[
         Function[{group}, With[{files = Select[all, groupOf[#] === First[group] &]},
             If[ files === {}, Nothing,
                 Replace[
-                    BuildPacletDocumentation[$pacletDirectory, opts, "Files" -> files, Sequence @@ Last[group], Sequence @@ $documentationOptions],
+                    If[ First[group] === "Sequential",
+                        WithCleanup[LaunchKernels[$sequentialKernels], build[files, Last[group]], CloseKernels[]],
+                        build[files, Last[group]]],
                     Except[_Association] :> Return[$Failed, Module]]]]],
         groups];
     Merge[results, Replace[{{l__List} :> Join[l], {a__Association} :> Join[a], {a_, ___} :> a}]]

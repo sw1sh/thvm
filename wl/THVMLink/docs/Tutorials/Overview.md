@@ -185,12 +185,12 @@ surface:
 ```wl
 Needs["WolframInstitute`THVMLink`ATP`"];
 TFindProof[
-    Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
+    ForAll[{x, y}, OverBar[x \[CircleTimes] y] == OverBar[x] \[CircleTimes] OverBar[y]],
     "AbelianGroupAxioms",
     TimeConstraint -> 10
 ]
 ```
-<!-- => ProofObject[<|"Theorem" -> ..., "Status" -> "Proved", ...|>] -->
+<!-- => ProofObject[EquationalLogic, ...] - in an abelian group the inverse of a product is the product of the inverses -->
 
 `TFindProof` accepts `Method -> Automatic | "Portfolio" | "Waldmeister" |
 "VampireUEQ" | "Twee" | "EProver" | "VampirePortfolio"` plus a fully
