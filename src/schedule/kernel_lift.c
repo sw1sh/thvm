@@ -1,7 +1,6 @@
-// schedule/kernel_lift.c -- look up the unified rangeify pass's
-// UOP_STORE root for a scheduled kernel's boundary and package it as
-// KernelUopLift for the renderer / dispatcher.  KernelUopLift is
-// declared in thvm.h.
+// schedule/kernel_lift.c - package the UOP_STORE root that rangeify_unified
+// emitted for a kernel's boundary as a KernelUopLift (thvm.h) for the
+// renderers and dispatchers.
 
 fn void kernel_lift_reserve(KernelUopLift *lift, u32 needed) {
   if (needed <= lift->in_cap) {
@@ -31,13 +30,10 @@ fn void kernel_lift_release(KernelUopLift *lift) {
   lift->out_buf    = 0;
 }
 
-// Build a UOP_BUFFER for kernel input slot `slot` from the TenDesc
-// shape.  Falls back to a 1D dummy when the slot has no TenDesc
-// (test fixtures or paths where TenDesc isn't wired).
-//
-// The `instance` field on UOP_BUFFER ensures distinct slots get
-// distinct Terms even when shape collides; we use slot+1 (since
-// instance=0 is the output's reserved value).
+// The UOP_BUFFER for input slot `slot`, shaped like its TenDesc; a slot
+// with no TenDesc (input_tids[slot] == 0) gets a 1-D placeholder.  The
+// instance is slot + 1 (0 is the output's), so equal-shaped slots stay
+// distinct terms under hash-consing.
 static Term lift_input_buffer(KernelEntry const *ke, u32 slot) {
   if (slot >= ke->n_inputs) return 0;
   u32 dtype = (ke->input_dtypes != NULL) ? ke->input_dtypes[slot] : DT_FP32;
@@ -52,20 +48,13 @@ static Term lift_input_buffer(KernelEntry const *ke, u32 slot) {
   return uop_buffer_inst(UOP_SCOPE_GLOBAL, dtype, 1, dummy, inst);
 }
 
-// Package the unified-rangeify pass's store_root for a kernel entry
-// into a UOp DAG root suitable for cg_render_uop_kernel.  The lifter
-// today is a thin short-circuit -- it looks up the unified pass's
-// per-kernel output and wraps it as a KernelUopLift; the renderer /
-// DAG-side encoder / cpu_uop_walk all consume the result.
-//
-// kernel_lift_to_uop reserves out->in_bufs for every input; a caller that
-// owns `out` releases it with kernel_lift_release.
+// Fills `out` from the store root rangeify_unified emitted for ke's
+// boundary: one UOP_BUFFER per input slot in in_bufs[], out_buf, and the
+// raw store_root, which emit_kernel_for_boundary (materialize.c) then
+// rewrites for the walker.  Returns 0 when the boundary has no such root.
+// A caller that owns `out` releases it with kernel_lift_release.
 fn int kernel_lift_to_uop(KernelEntry const *ke, KernelUopLift *out) {
   if (ke == NULL || out == NULL) return 0;
-  // Look up the UOP_STORE the rangeify_unified pass emitted for this
-  // kernel's boundary and build the buffer fields the bypass-substitution
-  // site reads (in_bufs[], n_inputs, out_buf).  store_root is the raw
-  // unified root; the caller in materialize.c rewrites it for the walker.
   if (ke->source_uop == 0) {
     return 0;
   }

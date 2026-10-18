@@ -1,53 +1,24 @@
-// schedule/indexing.c - movement-op range swizzler.
+// schedule/indexing.c - movement-op range swizzlers: the per-op cases of
+// tinygrad's apply_movement_op (schedule/indexing.py:171-187 at 365f87a8a).
 //
-// Mirrors tinygrad/schedule/indexing.py.  Each movement op rewrites the
-// per-axis index expression (RANGE Term or arithmetic over RANGE leaves)
-// that a downstream consumer uses when indexing into the producer.
-//
-// SHRINK / PERMUTE / FLIP / EXPAND / PAD swizzles + the group-aligning
-// RESHAPE handler live here.  Stride-trick rank-merge reshapes that
-// would need tinygrad's pm_simplify_valid rewrite aren't ported yet --
-// apply_movement_op_reshape returns 0 in that case and the unified
-// rangeify pass declines the fold.
-//
-// Mirror source: tinygrad/schedule/indexing.py:129  apply_movement_op
-//
-// Input/output:
-//   - `out_rngs[ndim_out]` are the per-axis range Terms the CONSUMER uses
-//     (one per output axis of the movement op).
-//   - `in_rngs[ndim_in]` are the per-axis range Terms the PRODUCER sees
-//     (filled by this function).  ndim_in == ndim_out for these ops.
-//
-// Backing constructors all hash-cons through uop_mov_cache, so repeated
-// swizzles with identical inputs deduplicate.
+// Each maps the per-axis index expressions a consumer uses (out_rngs, one
+// per output axis) to the producer's (in_rngs, filled here; never in place,
+// PERMUTE would clobber it).  Only RESHAPE changes the rank, and ndim is at
+// most MAX_DIM.  The constructors hash-cons, so equal swizzles yield the
+// same Terms.
 
-// 1-to-1 port of tinygrad/schedule/indexing.py:apply_movement_op (line 129)
-// per-op cases. Each rewrites the consumer's per-axis range expressions
-// (`out_rngs`) into the producer's per-axis expressions (`in_rngs`).
-// All variants hash-cons through uop_mov_cache.  `ndim` bounded by
-// MAX_DIM. In-place (in_rngs == out_rngs) is unsafe (PERMUTE).
 fn void apply_movement_op_shrink(u32 ndim,
                                   u32 const *begin_end,
                                   Term const *out_rngs,
                                   Term *in_rngs) {
-  // tinygrad schedule/indexing.py:173 (365f87a8a)
-  // `a if off == 0 else a+off`: shift each consumer index by the begin
-  // offset so the kernel reads the source at out_iter + begin.  A SHRINK
-  // over a buffer is ALSO resolved by materialize.c's visit() into an
-  // offset view slot (view_apply_shrink); unified_fold_chain_scan flags
-  // that slot input_chain_composed, so the backend binds the raw buffer
-  // and the begin offset is applied only here.
+  // indexing.py:173: a if off == 0 else a+off.  visit() (materialize.c) also
+  // turns a SHRINK of a buffer into an offset view slot (view_apply_shrink),
+  // but unified_fold_chain_scan flags that slot input_chain_composed, so the
+  // backend binds the raw buffer and only this index applies the offset.
   for (u32 i = 0; i < ndim; i++) {
-    // A kvar-packed begin (KVAR_FLAG set) is the RUNTIME row offset of a
-    // single-row slice at a symbolic position -- the GPT-2 decode
-    // posTable[pos:pos+1] read.  Resolve it to the value bound via
-    // kvar_set_runtime (kvar_hi if unbound) so the shifted consumer index
-    // reads the right source row.  kvar_extent_static (the hi bound, for
-    // sizing/strides) would read a FIXED row and the raw packed u32 has
-    // bit 31 set -> a garbage offset.  A LITERAL begin (flag clear) is
-    // identity through kvar_extent_runtime, so every compile-time SHRINK is
-    // byte-unchanged.  Mirrors view_apply_shrink (materialize.c) which
-    // resolves the standalone-realize begin the same way.
+    // A kvar-packed begin (KVAR_FLAG) is a runtime row offset, as in a
+    // decode's posTable[pos:pos+1]: use the bound value (kvar_hi if
+    // unbound), as view_apply_shrink does; a literal begin passes through.
     u32 ss = kvar_extent_runtime(begin_end[2 * i]);
     if (ss == 0) {
       in_rngs[i] = out_rngs[i];
@@ -62,10 +33,8 @@ fn void apply_movement_op_permute(u32 ndim,
                                    u32 const *perm,
                                    Term const *out_rngs,
                                    Term *in_rngs) {
-  // tinygrad: rngs = tuple(rngs[p] for p in argsort(arg))
-  // `arg` (perm here) gives output->input axis mapping: output[i] = input[perm[i]].
-  // argsort(perm)[i] = j s.t. perm[j] == i  (== perm^-1[i]).
-  // For each input axis i, in_rngs[i] = out_rngs[perm^-1[i]].
+  // indexing.py:174: rngs[p] for p in argsort(perm), that is
+  // in_rngs[i] = out_rngs[perm^-1[i]].
   u32 inv[MAX_DIM] = {0};
   for (u32 i = 0; i < ndim; i++) inv[perm[i]] = i;
   for (u32 i = 0; i < ndim; i++) in_rngs[i] = out_rngs[inv[i]];
@@ -80,13 +49,15 @@ fn void apply_movement_op_flip(u32 ndim,
     if ((flip_mask[i] & 1u) == 0) {
       in_rngs[i] = out_rngs[i];
     } else {
-      // (s - 1) - a
+      // indexing.py:175: (s-1)-a
       Term sm1 = uop_const(DT_INT32, (in_shape[i] > 0) ? (in_shape[i] - 1) : 0);
       in_rngs[i] = uop_int_binary(UOP_ISUB, sm1, out_rngs[i]);
     }
   }
 }
 
+// tinygrad's EXPAND only prepends axes (indexing.py:176); here the rank is
+// kept and each broadcast axis reads index 0.
 fn void apply_movement_op_expand(u32 ndim,
                                   u32 const *in_shape,
                                   u32 const *out_shape,
@@ -96,7 +67,6 @@ fn void apply_movement_op_expand(u32 ndim,
     if (in_shape[i] == out_shape[i]) {
       in_rngs[i] = out_rngs[i];
     } else {
-      // broadcasted axis: collapse the consumer index to 0
       in_rngs[i] = uop_const(DT_INT32, 0);
     }
   }
@@ -107,10 +77,9 @@ fn void apply_movement_op_pad(u32 ndim,
                                u32 const *begin_end,
                                Term const *out_rngs,
                                Term *in_rngs) {
-  // For each axis: r if (s==0 && e==0)
-  //                else WHERE((r >= s) & (r < sh+s), r-s, INVALID)
-  // We model r>=s as ILT(s-1, r) (integer-only), and skip the lo clause
-  // entirely when s == 0 (r >= 0 is trivially true for unsigned indices).
+  // indexing.py:177-181: r on an unpadded axis, else
+  // WHERE((r >= s) & (r < sh+s), r-s, INVALID), with r >= s as ILT(s-1, r)
+  // and the lo clause dropped at s == 0.
   for (u32 i = 0; i < ndim; i++) {
     u32 ss = begin_end[2 * i];
     u32 ee = begin_end[2 * i + 1];
@@ -126,7 +95,7 @@ fn void apply_movement_op_pad(u32 ndim,
       cond = cond_hi;
     } else {
       Term s_m1   = uop_const(DT_INT32, ss - 1);
-      Term cond_lo = uop_int_binary(UOP_ILT, s_m1, r);  // s-1 < r  iff  r >= s
+      Term cond_lo = uop_int_binary(UOP_ILT, s_m1, r);
       cond = uop_int_binary(UOP_IAND, cond_lo, cond_hi);
     }
     Term shifted;
@@ -140,64 +109,21 @@ fn void apply_movement_op_pad(u32 ndim,
   }
 }
 
-// RESHAPE handler.  Aligns input and output axes into matching groups by
-// scanning cumulative products; each group maps the flat range space of
-// one side onto the other via IDIV/IMOD.  Handles the merging direction
-// (many input axes -> one output axis, e.g. flattening) and the splitting
-// direction (one input axis -> many output axes), as well as the 1:1 case.
-//
-// When the shapes do not decompose into matching groups (a stride-trick
-// reshape that mixes split-and-merge inside a single block, the case
-// tinygrad's `_apply_reshape` defers to `pm_simplify_valid`), returns 0
-// so the caller can decline the fold (pm_simplify_valid not yet ported).
-//
-// Size-1 axes on either side contribute extent 1 and a CONST(0) range;
-// they're folded into the surrounding group without disturbing the
-// alignment.
 static Term reshape_const_zero(void) {
   return uop_const(DT_INT32, 0);
 }
 
-// === PLACEHOLDER round-trip ===========================================
-//
-// Mirror source: tinygrad/schedule/indexing.py:140-143 (RESHAPE case of
-// apply_movement_op) + indexing.py:112-125 (_apply_reshape).
-//
-//   sink = UOp.sink(*rngs).simplify()
-//   sub_array = {r: UOp.range(r.src[0], i, PLACEHOLDER) for i,r in enumerate(sink.ranges)}
-//   rngs = _apply_reshape(in_shape, arg, sink.substitute(sub_array))
-//            .substitute({v:k for k,v in sub_array.items()}).src
-//
-// thvm's flat-decompose (apply_movement_op_reshape) builds the same
-// `combined = sum(out_rng*stride)` flat then decomposes by in_shape via
-// IDIV/IMOD -- but it runs directly on the CONSUMER's out_rngs.  When a
-// prior reshape already swizzled those into compound IDIV/IMOD/affine
-// trees (the `_pool` unfold `[...,144,144]->[...,6,24,6,24]` mints fresh
-// independent ranges for the 6x24 split, discarding the packed structure
-// `flat = oh + kh*25`), the downstream `(a0 + a2*24)//25` has two
-// structurally-independent RANGE leaves and the divmod-recombine folds in
-// index_simplify.c have no shared `flat` to fold against.
-//
-// Fix (tinygrad's): substitute each free RANGE leaf in the consumer
-// out_rngs with a FRESH single placeholder RANGE (distinct clean axis_id,
-// same extent so the bound-aware folds still fire), run the flat-
-// decompose against the clean placeholders -- so the recombine fires
-// symbolically at constructor time in uop_int_binary -- then substitute
-// the real ranges back.  The recombine `(x//c)*c + x%c -> x`, then
-// `flat//25 -> kh, flat%25 -> oh`, fires before fresh ranges commit.
-//
-// Placeholder axis_ids use a high base disjoint from the real axis space
-// (RU_RANGE_IDX_COUNTER) so a placeholder can never collide with a real
-// range and the inverse substitution is exact.  Placeholders never escape
-// this function -- every one is substituted back to its real range.
+// RESHAPE takes tinygrad's PLACEHOLDER round-trip (indexing.py:182-185):
+// each RANGE leaf of out_rngs becomes a fresh placeholder RANGE of the same
+// extent, the decompose runs on those so the divmod-recombine folds
+// (uop/index_simplify.c) fire at construction, and the real leaves are put
+// back.  Placeholder axis_ids sit far above the ones RU_RANGE_IDX_COUNTER
+// hands out, so the inverse substitution is exact.
 #define RESHAPE_PLACEHOLDER_AXIS_BASE 0x60000000u
 
-// Collect distinct free RANGE leaves (axis_id + extent + axis_type) over
-// all the out_rngs into out_aids/out_ext/out_atype, bounded by cap.
-// Returns the count, or (u32)-1 on overflow (caller declines the round-
-// trip and falls back).  axis_type is collected so the forward
-// placeholder substitution can rebuild the exact hash-consed Term (the
-// uop_range key includes axis_type).
+// Appends t's distinct RANGE leaves (axis_id, extent, axis_type) to the out_*
+// arrays and returns *n, which becomes (u32)-1 past cap.  axis_type is part of
+// uop_range's hash-cons key, so the rebuilt leaf must carry it.
 static u32 reshape_collect_distinct_ranges(Term t, u32 *out_aids,
                                            u32 *out_ext, u32 *out_atype,
                                            u32 *n, u32 cap, u32 depth) {
@@ -230,16 +156,13 @@ static u32 reshape_collect_distinct_ranges(Term t, u32 *out_aids,
   return *n;
 }
 
-// PLACEHOLDER-composed RESHAPE swizzle.  Substitutes each consumer free
-// RANGE for a clean placeholder, runs the flat-decompose (which fires the
-// symbolic recombine), then maps placeholders back to the real ranges.
-// Returns the same 0/1 contract as apply_movement_op_reshape.
+// apply_movement_op_reshape through the placeholder round-trip; also 0 when
+// out_rngs hold more than 2 * MAX_DIM distinct RANGE leaves.
 fn int apply_movement_op_reshape_composed(u32 out_ndim, u32 const *out_shape,
                                           u32 in_ndim,  u32 const *in_shape,
                                           Term const *out_rngs, Term *in_rngs) {
   if (out_ndim > MAX_DIM || in_ndim > MAX_DIM) return 0;
 
-  // Gather the distinct real RANGE leaves the consumer out_rngs reference.
   u32 real_aids[2 * MAX_DIM];
   u32 real_ext[2 * MAX_DIM];
   u32 real_atype[2 * MAX_DIM];
@@ -247,19 +170,12 @@ fn int apply_movement_op_reshape_composed(u32 out_ndim, u32 const *out_shape,
   for (u32 a = 0; a < out_ndim; a++) {
     reshape_collect_distinct_ranges(out_rngs[a], real_aids, real_ext,
                                     real_atype, &n_real, 2 * MAX_DIM, 0);
-    if (n_real == (u32)-1) return 0;  // too many leaves: decline, fall back
+    if (n_real == (u32)-1) return 0;
   }
 
-  // Build a placeholder RANGE per distinct real leaf (clean single leaf,
-  // same extent, disjoint axis_id) and the real->placeholder forward map.
-  // Reconstruct `real_rng[i]` with the ORIGINAL axis_type so the forward
-  // substitution matches the actual hash-consed Term in out_rngs (the
-  // uop_range hash-cons key includes axis_type -- rebuilding a KAX_REDUCE
-  // window range as KAX_LOOP would silently miss it, leaking it past the
-  // placeholder swap so the divmod-recombine can't fire and the window
-  // strands as a non-reduce loop -- the conv-bwd 2nd-step 6.8e12-iter
-  // hang).  Placeholders stay KAX_LOOP (a clean disjoint axis), and the
-  // inverse map restores the real range identity (incl. its type).
+  // real_rng[i] keeps its axis_type so it is the very Term in out_rngs: a
+  // REDUCE range rebuilt as KAX_LOOP would miss the substitution and stay a
+  // plain loop.
   Term real_rng[2 * MAX_DIM];
   Term placeholder[2 * MAX_DIM];
   for (u32 i = 0; i < n_real; i++) {
@@ -268,9 +184,8 @@ fn int apply_movement_op_reshape_composed(u32 out_ndim, u32 const *out_shape,
                                real_ext[i]);
   }
 
-  // Substitute real->placeholder in each consumer out_rng (routing through
-  // the simplifying constructors so commutative flips settle early, like
-  // tinygrad's `UOp.sink(*rngs).simplify()`).
+  // The simplifying constructors settle commutative flips early, like
+  // tinygrad's UOp.sink(*rngs).simplify() (indexing.py:183).
   Term sub_out[MAX_DIM];
   for (u32 a = 0; a < out_ndim; a++) {
     Term e = out_rngs[a];
@@ -280,16 +195,12 @@ fn int apply_movement_op_reshape_composed(u32 out_ndim, u32 const *out_shape,
     sub_out[a] = e;
   }
 
-  // Flat-decompose on the clean placeholder ranges.  The divmod-recombine
-  // folds (index_simplify.c) fire at constructor time, collapsing the
-  // split+re-split back to the source iter where possible.
   Term sub_in[MAX_DIM];
   if (!apply_movement_op_reshape(out_ndim, out_shape, in_ndim, in_shape,
                                  sub_out, sub_in)) {
     return 0;
   }
 
-  // Substitute placeholders back to the real ranges (the inverse map).
   for (u32 a = 0; a < in_ndim; a++) {
     Term e = sub_in[a];
     for (u32 i = 0; i < n_real; i++) {
@@ -300,24 +211,24 @@ fn int apply_movement_op_reshape_composed(u32 out_ndim, u32 const *out_shape,
   return 1;
 }
 
+// Groups input and output axes with equal cumulative products and maps each
+// group's flat index across by IDIV/IMOD; size-1 input axes read CONST(0).
+// Returns 0 when the shapes do not group; tinygrad's _apply_reshape
+// (indexing.py:155-167) always flattens and leans on its simplifier instead.
 fn int apply_movement_op_reshape(u32 out_ndim, u32 const *out_shape,
                                   u32 in_ndim,  u32 const *in_shape,
                                   Term const *out_rngs, Term *in_rngs) {
   if (out_ndim > MAX_DIM || in_ndim > MAX_DIM) return 0;
-  // Pre-init all in_rngs to CONST(0) so size-1 axes inside groups, and
-  // any trailing input axes from numel rounding, land on a safe default.
   for (u32 i = 0; i < in_ndim; i++) in_rngs[i] = reshape_const_zero();
 
   u32 i = 0, j = 0;
   while (i < in_ndim || j < out_ndim) {
-    // Skip leading size-1 axes on either side (they contribute zero).
     while (i < in_ndim && in_shape[i] == 1) { in_rngs[i] = reshape_const_zero(); i++; }
     while (j < out_ndim && out_shape[j] == 1) { j++; }
     if (i == in_ndim && j == out_ndim) break;
     if (i == in_ndim || j == out_ndim) return 0;
 
-    // Expand a single group on each side until the cumulative products
-    // match.  `i_end`/`j_end` are one past the last axis in the group.
+    // The groups [i, i_end) and [j, j_end) grow until their products match.
     u32 i_start = i, j_start = j;
     u64 in_acc  = in_shape[i];
     u64 out_acc = out_shape[j];
@@ -335,8 +246,8 @@ fn int apply_movement_op_reshape(u32 out_ndim, u32 const *out_shape,
       }
     }
 
-    // Build the flattened range over the output group:
-    //   flat = sum_{k in [j_start, j_end)} out_rngs[k] * prod(out_shape[k+1..j_end))
+    // flat = sum over k in [j_start, j_end) of
+    //        out_rngs[k] * prod(out_shape[k+1 .. j_end))
     Term flat = 0;
     u64 suffix = 1;
     for (u32 k = j_end; k > j_start; k--) {
@@ -352,8 +263,7 @@ fn int apply_movement_op_reshape(u32 out_ndim, u32 const *out_shape,
     }
     if (flat == 0) flat = reshape_const_zero();
 
-    // Distribute the flat expression back across the input group:
-    //   in_rngs[idx] = (flat / suffix_in) % in_shape[idx]
+    // in_rngs[idx] = (flat / in_suffix) % in_shape[idx]
     u64 in_suffix = 1;
     for (u32 k = i_end; k > i_start; k--) {
       u32 idx = k - 1;
@@ -366,9 +276,8 @@ fn int apply_movement_op_reshape(u32 out_ndim, u32 const *out_shape,
         expr = uop_int_binary(UOP_IDIV, expr,
                               uop_const(DT_INT32, (u32)in_suffix));
       }
-      // No IMOD when this is the outermost axis of the input group and
-      // its extent equals the remaining product -- the upper bound of
-      // `flat` is already in range.
+      // The group's outermost axis needs no IMOD: flat / in_suffix is
+      // already below its extent.
       int outermost = (idx == i_start);
       if (!outermost) {
         expr = uop_int_binary(UOP_IMOD, expr,

@@ -1,16 +1,10 @@
-// schedule/consumer_count.c - per-kernel consumer-count pass
-// (sub-item a of the refcount-driven-free arc).
+// schedule/consumer_count.c - per-kernel consumer counts.
 //
-// kernel_compute_consumer_counts walks every KernelEntry and, for
-// each input slot, traces back to the producing kernel via
-// TENS[tid].producer_kid, then increments that producer's
-// consumer_count.  Run after materialize but before kernel firing;
-// the result feeds the refcount-driven free pass that frees a
-// kernel's output buf when its last consumer has fired.
-//
-// Aliasing-aware: a view-only TenDesc (RESHAPE / EXPAND alias) keeps
-// its source tensor's producer_kid via tensor_view_of, so an alias
-// consumer is correctly attributed to the original producer.
+// A kernel's consumer_count is the number of input slots, over all
+// kernels, whose tensor traces back to it through TENS[tid].producer_kid.
+// A view alias inherits its source's producer_kid (tensor_view_of), so a
+// read through a reshape or expand counts against the real producer.
+// TKernelTable reports the count; nothing in the runtime reads it.
 
 fn void kernel_compute_consumer_counts(void) {
   for (u32 k = 1; k < KERNELS_NEXT; k++) {

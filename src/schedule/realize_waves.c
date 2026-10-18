@@ -24,9 +24,9 @@
 // Root edges cannot reorder a prior-state read and a write that sit under
 // the SAME root; tinygrad orders those per kernel.
 
-// A root set is a bitset over the bundle's roots, RW_W words, kept in one
-// word pool and named by its offset there; a bundle of any size gets the
-// whole analysis (tinygrad's create_schedule has no root cap).
+// A root set is a bitset of RW_W words over the bundle's roots, kept in one
+// word pool and named by its offset there, so any number of roots fits
+// (tinygrad's create_schedule has no root cap).
 typedef u32 RwSet;
 
 enum { RW_EDGE_ROOT = 0, RW_EDGE_READ = 1, RW_EDGE_DST = 2 };
@@ -115,11 +115,9 @@ fn u64 rw_hash(u64 k) {
   return k;
 }
 
-// The visited set is sized to the largest walk, not to the heap: the walk
-// runs on every multi-root realize, and a table indexed by heap loc would
-// keep every page any walk touched resident for the life of the process.
-// A slot stamped in an older epoch counts as empty, so a new walk needs no
-// clear.
+// The visited set is a hash sized to the largest walk: a table indexed by
+// heap loc would keep every page any multi-root realize touched resident.  A
+// slot stamped in an older epoch counts as empty, so a new walk needs no clear.
 static void rw_epoch_next(void) {
   RW_SEEN_LEN = 0;
   if (++RW_EPOCH >= (1u << 30)) {
@@ -495,7 +493,7 @@ static int rw_walk_root(Term root, u32 r) {
 // with the end of wave w in order[]; returns 0 when the roots' WAR edges
 // form a cycle.  A bundle with no ASSIGN, or one the analysis cannot
 // finish (OOM), is a single wave in the given order; *has_assign reports
-// whether the analysis ran.
+// whether some root reaches an ASSIGN.
 fn u32 realize_waves(Term const *roots, u32 n, u32 *order, u32 *wave_end, u8 *has_assign) {
   *has_assign = 0;
   for (u32 i = 0; i < n; i++) order[i] = i;

@@ -1,34 +1,15 @@
-// schedule/bufferize_classify.c - decide which UOPs in a graph
-//                                  must "realize" into a backing
-//                                  buffer (a tinygrad CONTIGUOUS).
-//                                  This is the seed/walk pass of
-//                                  the bufferize schedule IR.
+// schedule/bufferize_classify.c - decide which UOps realize into a buffer
+// (their own kernel) ahead of the unified rangeify pass.
 //
-// A UOp is first seeded as a boundary when ANY of:
-//   (a) it is the root the caller asked for,
-//   (b) it has 2+ distinct UOp parents (multi-consumer),
-//   (c) it is a REDUCE (REDUCE outputs always escape into a
-//       buffer; one reduce per kernel),
-//   (d) it is a movement op whose source can't be aliased.
-//
-// Named realize-map rewrites then clear boundaries that are legal to
-// recompute or inline.  This deliberately mirrors tinygrad's
-// BUFFERIZE/INDEX schedule-rewrite model: seed conservatively, then
-// remove bufferization with explicit legality/cost rules.
-//
-// Output: a small table indexed by the UOp's heap loc; the
-// selective materializer reads each node's `realized` bit to decide
-// whether to emit a UOP_KERNEL or inline the compute into its
-// consumer kernel's program.
-//
-// Note: this pass DOES NOT mutate the heap or the kernel
-// table.  It only reads the UOp DAG and populates the table.
-// Aliasing of duplicate child references inside a single
-// parent (e.g., MUL[x, x]) counts as ONE consumer of x, since
-// the materializer dedups.
+// The walk records each UOp's consumers (BUFFERIZE_NODES, CMAP_LL).  The root,
+// multi-consumer nodes, REDUCEs and a few correctness cases are seeded, then
+// named rules unmark the REDUCEs that may fuse: realize conservatively and
+// remove by rule, as tinygrad's remove_bufferize does
+// (schedule/rangeify.py:50-102).  materialize reads each node's `realized`
+// bit.  The classification only reads the heap; run_rangeify_unified, called
+// last, builds BUFFERIZE terms.
 
-// BUFFERIZE_NODES_CAP + UOpInfo struct + BUFFERIZE_NODES/BUFFERIZE_NODES_LEN
-// declared in thvm.h so materialize.c can iterate the table.
+// UOpInfo, CMapNode and the table caps are declared in thvm.h.
 
 UOpInfo BUFFERIZE_NODES    [BUFFERIZE_NODES_CAP];
 u32     BUFFERIZE_NODES_LEN = 0;
@@ -36,11 +17,8 @@ u32     BUFFERIZE_NODES_LEN = 0;
 CMapNode CMAP_LL    [CMAP_LL_CAP];
 u32      CMAP_LL_LEN = 0;
 
-// Open-addressed hash table mapping loc -> BUFFERIZE_NODES index.
-// Without this, bufferize_info_find did a linear scan of BUFFERIZE_NODES,
-// which made bufferize_classify O(N^2) for the N UOPs in a recursive
-// training-loop graph and the dominant cost of long bound-w realizes.
-// Cap is the next power of two >= BUFFERIZE_NODES_CAP for cheap masking.
+// Open-addressed loc -> BUFFERIZE_NODES index, so a lookup stays O(1) on a
+// large training graph.
 #define BUFFERIZE_NODES_HASH_CAP (1u << 16)   // 64K slots, BUFFERIZE_NODES_CAP = 16K
 #define BUFFERIZE_NODES_HASH_EMPTY 0xFFFFFFFFu
 static u32 BUFFERIZE_NODES_HASH[BUFFERIZE_NODES_HASH_CAP];
@@ -79,8 +57,7 @@ static void bufferize_node_hash_insert(u64 loc, u32 idx) {
       return;
     }
   }
-  // Hash table full -- silently drop; lookups for this loc will
-  // miss but caller has the linear cap to fall back to.
+  // Unreachable: 64K slots hold at most BUFFERIZE_NODES_CAP entries.
 }
 
 static u32 bufferize_node_get_or_add(u64 loc, u8 op) {
@@ -100,15 +77,16 @@ static u32 bufferize_node_get_or_add(u64 loc, u8 op) {
 
 static void bufferize_cmap_add(u32 producer_idx, u64 consumer_loc) {
   if (producer_idx == 0xFFFFFFFFu) return;
-  if (CMAP_LL_LEN >= CMAP_LL_CAP) return;     // cap overflow: dropped silently; consumer_count is still authoritative
+  // On overflow the edge is dropped; consumer_count stays exact.
+  if (CMAP_LL_LEN >= CMAP_LL_CAP) return;
   u32 slot = CMAP_LL_LEN++;
   CMAP_LL[slot].consumer_loc = consumer_loc;
   CMAP_LL[slot].next         = BUFFERIZE_NODES[producer_idx].cmap_head;
   BUFFERIZE_NODES[producer_idx].cmap_head = slot;
 }
 
-// Fill up to `cap` consumer_locs for `producer_loc`. Returns true count
-// (may exceed cap; caller is responsible for sizing).
+// Fills up to `cap` consumer locs of `producer_loc` and returns the full
+// count, which may exceed cap.
 fn u32 bufferize_consumers_for_loc(u64 producer_loc, u64 *out_locs, u32 cap) {
   u32 idx = bufferize_info_find(producer_loc);
   if (idx == 0xFFFFFFFFu) return 0;
@@ -134,8 +112,8 @@ static void bufferize_node_unmark(UOpInfo *info, u32 reason) {
   if (info == NULL) {
     return;
   }
-  // Matmul reduces stay realized: we want them as their own kernel so
-  // dispatch routes through metal-gemm-with-TC.
+  // A matmul REDUCE stays realized: as its own kernel it reaches the GEMM
+  // dispatch (BLAS, tensor cores).
   if (info->reasons & BUFFERIZE_REASON_MATMUL) {
     info->reasons |= reason;
     return;
@@ -144,14 +122,10 @@ static void bufferize_node_unmark(UOpInfo *info, u32 reason) {
   info->reasons |= reason;
 }
 
-// Find the first UOP node reachable from a Term, descending through any
-// chain of TAG_DP0/TAG_DP1 cells (cell[0]/cell[1] slots).  Returns 0 if
-// no UOP is found within bound or a cycle is hit.  Used so cmap can
-// connect a UOP-child's location across grad-projection cells (TGrad's
-// reverse-mode chain bridges REDUCE -> DP1+GRAD -> ... -> REDUCE; without
-// this, the chain-guard's BFS can't trace inter-reduce iter deps in the
-// backward pass).  visited_dls is an array of seen DUP-cell locs to
-// break cycles; cap is its capacity.
+// The first UOp reachable from t through TAG_DP0/TAG_DP1 cells (slot 0, then
+// slot 1), or 0 past `bound` hops or on a cycle (visited_dls holds up to cap
+// seen cell locs).  It lets a cmap edge cross TGrad's grad-projection cells,
+// so consumer walks see reduce -> DP -> reduce links in a backward graph.
 static Term bufferize_unwrap_dp(Term t, u64 *visited_dls, u32 *n_visited,
                                  u32 cap, u32 bound) {
   for (u32 hops = 0; hops < bound; hops++) {
@@ -190,18 +164,13 @@ static void bufferize_walk_rec(Term t, u8 *visited) {
   u64 seen[MAX_UOP_SRC] = {0};
   u8  n_seen = 0;
   for (u8 i = 0; i < ar; i++) {
-    // Resolve VAR (SUB-bit) + ALO chains so a body post-APP-LAM
-    // beta exposes the bound argument's UOP rather than the bare
-    // VAR cell -- mirrors visit() in materialize.c so the walker
-    // and the kernel walker agree on what's a kernel boundary.
+    // Resolve as visit() (materialize.c) does, so both walks agree on the
+    // boundaries.
     Term raw = heap_read(loc + i);
     Term child = term_resolve(raw);
     u8 ctag = term_tag(child);
-    // When the child is a DP projection (grad-flavored or otherwise),
-    // chase through cell[0]/cell[1] to find the first UOP and add a
-    // cmap edge from THIS node to it.  No bump to consumer_count --
-    // only the cmap edge (the chain-guard's BFS reader) needs to see
-    // the connection; OLD-path MULTI-seed thresholds stay unchanged.
+    // A DP child adds only a cmap edge to the UOp behind it, no consumer
+    // count, so it never triggers the MULTI seed.
     if (ctag == TAG_DP0 || ctag == TAG_DP1) {
       u64 dp_vis[32];
       u32 dp_n = 0;
@@ -232,13 +201,9 @@ static void bufferize_walk_rec(Term t, u8 *visited) {
   }
 }
 
-// Walk through layout-only wrappers (EXPAND/RESHAPE/PERMUTE) and
-// CAST/BITCAST to bottom out at a UOP_CONST.  Used by the
-// broadcast-reduce predicate to recognize ALU patterns where a scalar
-// constant has been broadcast to match the post-reduce shape - e.g.
-// `mean = reduce / N` lowers to `MUL(reduce, EXPAND(CONST(1/N)))` via
-// the WL Times / liftNumeric / broadcastScalar pipeline in Tensor.wl.
-// Recursion is bounded by the heap; in practice the wrapper depth is 1-2.
+// True iff t is a CONST under at most 8 EXPAND / RESHAPE / PERMUTE / CAST /
+// BITCAST wrappers, as in `mean = reduce / N`, which Tensor.wl (liftNumeric,
+// broadcastScalar) lowers to MUL(reduce, EXPAND(CONST(1/N))).
 static int bufferize_term_is_broadcast_of_const(Term t, u32 depth) {
   if (depth > 8) return 0;
   t = term_resolve(t);
@@ -254,9 +219,8 @@ static int bufferize_term_is_broadcast_of_const(Term t, u32 depth) {
   return 0;
 }
 
-// Walk the heap looking for the unique UOp parent of `child_loc`.
-// Returns the parent's loc, or 0 if there are zero or 2+ parents.
-// Used by the softmax-relaxation pass to confirm the consumer chain.
+// The loc of child_loc's only UOp parent in BUFFERIZE_NODES, or 0 for none
+// or several (a linear scan).
 static u64 bufferize_unique_uop_parent(u64 child_loc) {
   u64 found = 0;
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
@@ -278,11 +242,7 @@ static u64 bufferize_unique_uop_parent(u64 child_loc) {
   return found;
 }
 
-// Shared UPat: scalar-preserving unary (1-arity op in the {NEG,
-// RECIP, SQRT, EXP2, LOG2} set).  Used by every chain-walker hop
-// predicate that asks "does this hop keep the post-reduce shape?".
-// No bindings, no nested src; structural test is the op-set match
-// alone.
+// A scalar unary: NEG, RECIP, SQRT, EXP2 or LOG2.
 static u8 const bufferize_upat_scalar_unary_alt[] = {
   UOP_NEG, UOP_RECIP, UOP_SQRT, UOP_EXP2, UOP_LOG2, 0
 };
@@ -290,10 +250,8 @@ static UPat const bufferize_upat_scalar_unary = {
   0, 1, 0, -1, NULL, bufferize_upat_scalar_unary_alt
 };
 
-// Shared UPat: movement-passthrough (RESHAPE/PERMUTE) -- layout-only
-// movement ops that keep the scalar value at every coordinate.
-// Used by chain-walker hop predicates as a TERMINAL "yes, this hop
-// is shape-passthrough" check.
+// A layout-only movement (RESHAPE, PERMUTE), which keeps the value at every
+// coordinate.
 static u8 const bufferize_upat_movement_passthrough_alt[] = {
   UOP_RESHAPE, UOP_PERMUTE, 0
 };
@@ -301,13 +259,7 @@ static UPat const bufferize_upat_movement_passthrough = {
   0, 1, 0, -1, NULL, bufferize_upat_movement_passthrough_alt
 };
 
-// Shared UPat: any movement op (the full set including value-
-// preserving and value-shaping ops).  Used to walk THROUGH the LN
-// broadcast layout (EXPAND(RESHAPE(...))) when looking upstream for
-// the elementwise op that should be split off the matmul kernel.
-// Each of these 6 ops stores its source at heap[loc + 0], so the
-// walker can step `arg = heap_read(term_val(arg))` regardless of
-// which movement op matched.
+// Any movement op; each keeps its source at heap[loc + 0].
 static u8 const bufferize_upat_movement_any_alt[] = {
   UOP_RESHAPE, UOP_PERMUTE, UOP_EXPAND, UOP_PAD, UOP_SHRINK, UOP_FLIP, 0
 };
@@ -315,12 +267,7 @@ static UPat const bufferize_upat_movement_any = {
   0, 1, 0, -1, NULL, bufferize_upat_movement_any_alt
 };
 
-// Shared UPat: {UOP_ADD, UOP_MUL}(?0, ?1) -- "ALU with two children",
-// both captured.  Used by the chain-walker hop predicates that need
-// to test the sibling against a const-y wrapper (broadcast-of-CONST
-// vs plain CONST -- both callers have their own predicate on the
-// captured operands).  op_alt encodes the disjunction so the same
-// pattern catches ADD and MUL in one match call.
+// ADD or MUL with both operands bound, for the const-sibling test.
 static u8 const bufferize_upat_alu2_alt[] = {UOP_ADD, UOP_MUL, 0};
 static UPat const bufferize_upat_alu2_children[2] = {
   {0, 0xFF, 0, 0, NULL, NULL},
@@ -330,14 +277,9 @@ static UPat const bufferize_upat_alu2 = {
   0, 2, 0, -1, bufferize_upat_alu2_children, bufferize_upat_alu2_alt
 };
 
-// Walk a single chain branch starting from a *given* parent of a
-// reduce (or any other node) and verify it ends in EXPAND through
-// scalar-preserving ops.  Mirrors the historical
-// Test whether the op at `cur` is a scalar-preserving chain hop -
-// either a unary scalar function, a layout-only movement op (RESHAPE/
-// PERMUTE), or an ALU op whose other operand is a (possibly broadcast)
-// constant.  `cur` is the loc of the current node; the predicate must
-// inspect the node's children for the ALU case.
+// True iff the node at `cur` keeps the post-reduce value per coordinate: a
+// scalar unary, a RESHAPE / PERMUTE, or an ADD / MUL with a (broadcast)
+// CONST operand.
 static int bufferize_chain_hop_is_scalar_preserving(u64 cur, u8 pop) {
   Term cur_term = term_new(0, TAG_UOP, pop, cur);
   if (upat_match(&bufferize_upat_scalar_unary, cur_term, NULL)) return 1;
@@ -350,18 +292,14 @@ static int bufferize_chain_hop_is_scalar_preserving(u64 cur, u8 pop) {
   return 0;
 }
 
-// Returns 1 iff every UOp parent of child_loc has a chain that
-// bottoms out at EXPAND through scalar-preserving hops.  Used both
-// at the top of the predicate (when the reduce itself has fan-out)
-// and at intermediate hops (when an internal node like the BN-mean
-// MUL is shared between forward and backward branches).
+// 1 iff child_loc has a parent and every parent's chain reaches an EXPAND
+// through scalar-preserving hops; asked at the reduce and at a shared
+// mid-chain node (a BatchNorm mean feeds forward and backward).
 static int bufferize_chain_walk_all_parents_is_broadcast(
     u64 child_loc, u32 hops_left);
 
-// Walk a single chain starting from `parent_loc` and confirm it
-// bottoms out at EXPAND.  When the current node is multi-consumer,
-// recursively confirm every parent branch ends at EXPAND.  Bounded
-// by `hops_left` to avoid pathological recursion.
+// Follows the chain up from parent_loc to an EXPAND, branching at a
+// multi-consumer node; hops_left bounds it.
 static int bufferize_chain_walk_is_broadcast(u64 parent_loc, u32 hops_left) {
   u64 cur = parent_loc;
   while (hops_left > 0) {
@@ -372,8 +310,6 @@ static int bufferize_chain_walk_is_broadcast(u64 parent_loc, u32 hops_left) {
     if (!bufferize_chain_hop_is_scalar_preserving(cur, pop)) return 0;
     u64 next = bufferize_unique_uop_parent(cur);
     if (next == 0) {
-      // Multi-consumer intermediate: descend into every parent.
-      // Each parent's chain must independently end at EXPAND.
       return bufferize_chain_walk_all_parents_is_broadcast(cur, hops_left - 1);
     }
     cur = next;
@@ -405,32 +341,18 @@ static int bufferize_chain_walk_all_parents_is_broadcast(
   return n_parents > 0;
 }
 
-// Walk a REDUCE's consumer chain and return 1 iff every hop is
-// scalar-preserving until we hit an EXPAND (the broadcast back to
-// vector shape).  The chain pattern this matches is the
-// TSoftmax / "normalize by sum" idiom plus the BatchNorm
-// mean -> (... - mean) -> EXPAND idiom:
-//     REDUCE -> {NEG|RECIP|SQRT|EXP2|LOG2|RESHAPE|PERMUTE}* ->
-//     {ADD|MUL}*(broadcast-of-CONST sib) -> EXPAND
-// Multi-consumer intermediates are handled by branching the chain
-// check across all parents - every branch must independently end at
-// EXPAND.  This is what unblocks BN-mean (forward+backward share the
-// {C}-shape mean, both reach EXPAND through different RESHAPE branches).
+// 1 iff every consumer chain of the REDUCE broadcasts it back, the softmax
+// sum and BatchNorm mean idiom:
+//   REDUCE -> (scalar unary | RESHAPE | PERMUTE | ADD/MUL by const)* -> EXPAND
 static int bufferize_reduce_consumer_is_broadcast_chain(u64 reduce_loc) {
   return bufferize_chain_walk_all_parents_is_broadcast(reduce_loc, 8);
 }
 
 
-// A REDUCE at `loc` (the consumer of an inner reduce) belongs to a
-// reduce chain whose kernel root is a realized REDUCE iff following its
-// unique-consumer reduce links upward eventually reaches a still-realized
-// REDUCE.  The outermost reduce of a chain keeps its realized flag (its
-// consumer is not a reduce, or it is the graph root), so the walk
-// terminates.  The reduce-chain unmark pass uses this instead of testing
-// the immediate consumer's current `realized` flag: in a 3+ reduce chain
-// a mid-chain reduce is unmarked before the inner one is visited, so the
-// flag would race and the inner reduce would wrongly stay a boundary
-// (splitting an N-axis trailing reduce into 2 kernels for N>=3).
+// 1 iff the REDUCE at loc leads, through single-consumer non-matmul REDUCEs,
+// to a still-realized REDUCE (the chain's kernel root).  The reduce-chain
+// unmark asks this, not the consumer's own flag, which it may already have
+// cleared in a chain of 3+ reduces.
 static int bufferize_reduce_consumer_in_realized_chain(u64 loc, u32 hops_left) {
   while (hops_left-- > 0) {
     u32 idx = bufferize_info_find(loc);
@@ -446,35 +368,17 @@ static int bufferize_reduce_consumer_in_realized_chain(u64 loc, u32 hops_left) {
   return 0;
 }
 
-// Reduce-epilogue fusion: when a non-matmul REDUCE has exactly ONE
-// consumer that is a realized, shape-preserving elementwise op (the
-// post-reduce scaling that the optimizer/bias-grad path emits as a
-// `[N]->[N]` unary/scalar-broadcast tail), keep the reduce + its
-// epilogue in ONE kernel rather than realizing the reduce, storing it,
-// and re-loading it for the elementwise.  This mirrors tinygrad, which
-// lowers `reduce -> elementwise` to a single kernel via `STORE.end(
-// *reduce_ranges)` (the elementwise computes in the reduce kernel after
-// the accumulator, before the store).  The thvm kernel walker already
-// supports REDUCE as an intermediate op whose result is consumed
-// elementwise by later program ops (materialize.c, the
-// `single_reduce_emit` / "REDUCE as an intermediate op" path), so
-// unmarking the reduce lets the epilogue's kernel absorb it.
-
-// True iff op is a unary elementwise OR a binary elementwise whose
-// non-reduce operand is a CONST/broadcast scalar (the `(1-b1)*g`,
-// `g*scale` post-reduce tail).  These preserve the reduce's output
-// iteration space exactly -- no new ranges, no rank change -- so they
-// fuse into the reduce kernel as a pure epilogue.  A binary op with two
-// genuine reduce-shaped operands (a real matmul-style combine) is
-// rejected: its second operand would need its own load index.
+// True iff the node at loc is an epilogue that may fuse into the REDUCE at
+// reduce_loc: a unary elementwise op, or a binary one whose other operand is
+// a broadcast scalar, so it iterates exactly the reduce's output ranges (the
+// optimizer's `(1-b1)*g`).  Reduce and epilogue then share one kernel, as in
+// tinygrad; visit() (materialize.c) takes a REDUCE mid-kernel.
 static int bufferize_is_scalar_preserving_epilogue(u64 loc, u64 reduce_loc) {
   u32 idx = bufferize_info_find(loc);
   if (idx == 0xFFFFFFFFu) return 0;
   u8 op = BUFFERIZE_NODES[idx].op;
   if (uop_is_unary_elementwise(op)) return 1;
   if (!uop_is_binary_elementwise(op)) return 0;
-  // Binary: exactly one operand must be the reduce; the other must be a
-  // broadcast scalar (CONST leaf or 1-elem TEN).  Resolve both slots.
   Term a = term_resolve(heap_read(loc + 0));
   Term b = term_resolve(heap_read(loc + 1));
   u64 a_loc = (term_tag(a) == TAG_UOP) ? term_val(a) : 0;
@@ -483,18 +387,11 @@ static int bufferize_is_scalar_preserving_epilogue(u64 loc, u64 reduce_loc) {
   int b_is_reduce = (b_loc == reduce_loc);
   if (a_is_reduce == b_is_reduce) return 0;          // both or neither
   Term other = a_is_reduce ? b : a;
-  // The other operand must be a BROADCAST SCALAR: it bottoms out (through
-  // a pure view chain of EXPAND/RESHAPE/etc.) at either a UOP_CONST leaf
-  // or a single-element realized tensor (the `0.5`/`1-b1` scalar that
-  // Python materialises as a 1-elem TEN before broadcasting).  Either
-  // way the kernel loads ONE value, not a per-element stream, so the
-  // epilogue iterates exactly the reduce's output ranges with no extra
-  // load index.  Any other leaf (a full-shape buffer, another reduce, a
-  // computed value) is rejected -- it would need its own iteration.
+  // The other operand is a CONST, or a 1-element TEN behind movement ops (a
+  // scalar the py bridge realizes before broadcasting): one load either way.
   int saw_movement = 0;
   for (u32 hops = 0; hops < 8; hops++) {
     if (term_tag(other) == TAG_TEN) {
-      // A scalar broadcast TEN reached only through movement ops.
       Shape lsh = {0};
       if (!saw_movement) return 0;               // a same-shape buffer, not scalar
       if (!term_shape_in(other, 0, &lsh)) return 0;
@@ -512,33 +409,15 @@ static int bufferize_is_scalar_preserving_epilogue(u64 loc, u64 reduce_loc) {
   return 0;
 }
 
-// bufferize_unique_uop_parent returns the SOLE parent of `loc` or 0
-// if zero/multiple.  bufferize_reduce_consumer_is_broadcast_chain
-// already requires the chain to have a unique parent at every hop,
-// so a REDUCE with consumer_count > 1 fails the chain check
-// independently and the consumer_count == 1 fast-reject is just
-// an optimisation.  Without it, multi-consumer REDUCEs whose
-// branches all bottom out at the same EXPAND would be considered.
-
-// === Metal fanin-cap split ==========================================
-// The metal renderer declines kernels with > 30 inputs (render_metal.c
-// gate at n_inputs > 30 -> NULL).  Without an upstream split, a wide
-// ADD/MUL tree (Adam updates folding 30+ tensors, BN-train backward
-// reducing many feature groups) lands at the render decline and falls
-// onto the per-op interpreter.  This rule walks each realized
-// boundary's expression tree, counts distinct realized inputs, and if
-// the total exceeds `cap` greedily marks the largest split-class
-// (elementwise / movement) child as realized to split the fan-in.
-// Iterates until either the boundary fits under cap or no eligible
-// child remains.
+// Fan-in cap: the Metal renderer declines a kernel with more than 30 inputs
+// (render_metal.c cg_emit_via_uop), so a wide ADD/MUL tree (an Adam update, a
+// BatchNorm-train backward) is split: its largest elementwise or movement
+// child realizes until the boundary has at most `cap` input leaves or no such
+// child is left.
 static int bufferize_metal_tile_fanin_cap_enabled(void) {
 #ifdef THVM_HAS_CUDA
-  // Opt-in on CUDA (THVM_CUDA_FANIN_CAP=1): splitting wide fan-ins is a
-  // perf/pressure knob there, NOT a correctness requirement -- the renderer
-  // declares every input a kernel reads.  The always-on experiment
-  // regressed the Krea gen with an async CUDA_ERROR_ILLEGAL_ADDRESS from a
-  // split boundary, so it stays off until the split is hardened for CUDA
-  // shapes.
+  // Opt-in on CUDA (THVM_CUDA_FANIN_CAP=1): its renderer takes any number of
+  // inputs, and a split has faulted there (CUDA_ERROR_ILLEGAL_ADDRESS).
   if (CUDA_READY) {
     char const *ce = getenv("THVM_CUDA_FANIN_CAP");
     return ce != NULL && ce[0] == '1';
@@ -632,9 +511,7 @@ static void bufferize_rule_metal_tile_fanin_cap(Term root) {
   }
 }
 
-// Shared UPat: UOP_MUL(?0, ?1) -- both operands captured.  Used by
-// the matmul recognizer (distinctness check on bindings) and by the
-// matmul-input-protect marker (gate-and-mark on bindings).
+// MUL with both operands bound, for the matmul test.
 static UPat const bufferize_upat_mul_children[2] = {
   {0, 0xFF, 0, 0, NULL},
   {0, 0xFF, 0, 1, NULL},
@@ -643,23 +520,10 @@ static UPat const bufferize_upat_mul = {
   UOP_MUL, 2, 0, -1, bufferize_upat_mul_children
 };
 
-// Detect UOP_REDUCE(SUM, UOP_MUL(A, B)) with A != B -- matmul-shape
-// reduce.  Used to protect matmul outputs from inline-* rules so the
-// matmul kernel stays bufferized as a clean 2-input/2-op kernel that
-// tile_analyze_gemm accepts (-> metal-gemm dispatch with TC).
-// Diagnosed in Levels 27-34 of docs/plans/autotune_beam_profile.md
-// (40x wall gap on transformer FFN kids 14/16).  The structural part
-// (UOP_MUL with 2 children) goes through the declarative UPat layer;
-// the distinctness check remains a post-match guard so the
-// diagnostic can keep its prior structure.
-// True iff the movement-op chain rooted at `t` carries the tinygrad-`_pool`
-// im2col unfold signature -- a rank-reducing RESHAPE sitting directly over
-// an EXPAND (the `repeat`-collapse that materializes the sliding window).
-// A conv contraction REDUCE(SUM, MUL(unfold, weight)) has this on the
-// unfold operand; a true matmul (Linear) does not.  Matching tinygrad,
-// conv contractions are NOT routed to the contiguous-im2col GEMM path
-// (that materialization is the dominant peak-memory cost); they fuse as
-// a regular reduce indexing the strided unfold view in-kernel.
+// True iff the movement chain at t carries the signature of tinygrad's
+// `_pool` unfold (mixin/movement.py:598): a rank-reducing RESHAPE directly
+// over an EXPAND.  A conv contraction has it on one MUL operand, a Linear
+// matmul does not.
 static int bufferize_chain_has_pool_merge(Term t) {
   Term cur = term_resolve(t);
   for (u32 hops = 0; hops < 64; hops++) {
@@ -681,16 +545,9 @@ static int bufferize_chain_has_pool_merge(Term t) {
   return 0;
 }
 
-// Conv-backward fusion: true iff a (broadcast) EXPAND sits within the
-// node's immediate movement-op chain.  The `_pool` unfold that scatters into
-// the conv-backward contraction carries a RESHAPE-over-EXPAND signature (the
-// sliding-window repeat); we must NOT realize that boundary -- it has to stay
-// a strided view so the downstream reduce can index it.  Every OTHER multi-
-// consumer activation boundary (r1 = relu(conv1), its flat reshape) IS
-// realized so the backward `_pool`(r1) composes into an INDEX_E strided read
-// over the realized buffer instead of recomputing relu(conv1).  Walks up to
-// hop_cap movement hops from `info->loc`'s source, stopping at the first non-
-// movement op.
+// True iff the node is an EXPAND or one sits within hop_cap movement hops
+// under its slot 0, as on a conv backward's `_pool` unfold, which must stay a
+// view so the downstream reduce can index it.
 static int bufferize_node_has_expand_in_movement_chain(u64 node_loc,
                                                        u8 node_op,
                                                        u32 hop_cap) {
@@ -706,26 +563,12 @@ static int bufferize_node_has_expand_in_movement_chain(u64 node_loc,
   return 0;
 }
 
-// True iff the REDUCE at `reduce_loc`'s output feeds a downstream
-// (non-matmul) REDUCE through a chain of movement + elementwise ops,
-// every hop of which has a UNIQUE consumer, with at least one PAD or
-// SHRINK on the path.  This is the conv-backward contraction ->
-// _pool-scatter -> scatter-reduce pattern: the cout-contraction SUM
-// reduces into a [B,H,W,Cout,kH,kW] view that a pad+repeat+shrink+reshape
-// chain scatters (the overlap-add window scatter -- ALWAYS carries a
-// PAD/SHRINK) before the input-grad/weight-grad REDUCE consumes it; an
-// ADD/MUL accumulation hop may sit between the reduce and the scatter.
-// The PAD/SHRINK requirement keeps Linear's GEMM protected (its SUM
-// feeds a relu/bias ADD then a softmax REDUCE with NO scatter movement).
-// Such a reduce must NOT be matmul-protected (it would materialize the
-// 39MB contraction output) AND must skip its bufferize seed (riri) so it
-// fuses into the scatter-reduce kernel.  hop_cap bounds the walk (the
-// conv-bwd chain is ~10 hops; the old riri cap of 8 stalled on a PAD).
+// True iff the REDUCE's output reaches a non-matmul REDUCE through movement
+// and elementwise hops that cross a PAD or SHRINK: a conv-backward
+// contraction feeding the `_pool` overlap-add scatter, which fuses into that
+// scatter-reduce.  A Linear's GEMM crosses no PAD / SHRINK.  hop_cap bounds
+// the BFS, whose entries record whether their path crossed one.
 static int bufferize_reduce_feeds_scatter_reduce(u64 reduce_loc, u32 hop_cap) {
-  // BFS the consumer DAG; the scatter chain may fan out at an ADD/MUL
-  // accumulation (conv1's cout-reduce feeds two consumers).  Each frontier
-  // node carries whether a PAD/SHRINK scatter has been crossed; match when
-  // ANY path reaches a non-matmul REDUCE through such a scatter.
   u64 q_loc[128];
   u8  q_saw[128];
   u32 qh = 0, qt = 0;
@@ -751,7 +594,7 @@ static int bufferize_reduce_feeds_scatter_reduce(u64 reduce_loc, u32 hop_cap) {
     if (walk_op == UOP_REDUCE) {
       if (saw && !(BUFFERIZE_NODES[cidx].reasons & BUFFERIZE_REASON_MATMUL))
         return 1;
-      continue;  // matmul or no-scatter reduce: dead end on this path
+      continue;  // a matmul or unscattered reduce ends this path
     }
     if (walk_op == UOP_PAD || walk_op == UOP_SHRINK) saw = 1;
     int is_movement = (walk_op == UOP_RESHAPE || walk_op == UOP_PERMUTE
@@ -770,29 +613,16 @@ static int bufferize_reduce_feeds_scatter_reduce(u64 reduce_loc, u32 hop_cap) {
   return 0;
 }
 
-// True iff the contraction REDUCE at `reduce_loc`
-// reads a now-REALIZED activation buffer through a `_pool` unfold (a
-// movement chain carrying an EXPAND -- the sliding-window repeat).  This
-// is precisely the 2nd-train-step trigger: the forward `relu(conv)`
-// activation that was FUSED on step 0 persists as a realized arena buffer
-// on step 1 (the Adam weight ASSIGN shifts the realize boundaries), so
-// the backward contraction's `_pool(activation)` operand resolves to a
-// strided INDEX_E over the realized buffer.  Reading the realized buffer
-// back through the `_pool`'s `[6,24]`-repeat col2im mints a 24*6 window
-// decode whose ranges are INDEPENDENT of the contraction's clean kh,kw --
-// a redundant cross-product that blows the fused reduce up to ~6.8e12
-// iters (the hang).  Such a contraction must REALIZE so the scatter-reduce
-// reads a clean strided buffer instead of inlining the col2im.  A step-0
-// contraction (activation still fused, no realized read on this path)
-// returns 0 and stays fused -- its grad reduction order is bit-exact.
+// True iff the contraction REDUCE reads a realized activation through a
+// `_pool` unfold (an EXPAND, then a realized node, on the path).  Fused, that
+// read decodes the unfold window with ranges independent of the
+// contraction's kh, kw, a cross-product that hangs the reduce, so such a
+// contraction realizes instead.
 static int bufferize_reduce_reads_realized_pool(u64 reduce_loc, u32 hop_cap) {
   Term mul = term_resolve(heap_read(reduce_loc + 0));
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
-  // Recurse the MUL operand subtree (DFS): flag if ANY path crosses a
-  // `_pool` EXPAND and then reaches a realized boundary (the realized-
-  // activation read).  An intervening relu MUL / bias ADD on a backward
-  // path means a shallow single-chain walk misses it, so descend through
-  // elementwise + movement nodes.  hop_cap bounds the traversal budget.
+  // A DFS through elementwise and movement nodes: a relu MUL or a bias ADD
+  // may sit on the path.
   Term stk[64];
   u8   se[64];  // saw_expand flag per stack entry
   u32  sp = 0;
@@ -809,8 +639,7 @@ static int bufferize_reduce_reads_realized_pool(u64 reduce_loc, u32 hop_cap) {
     int rz = (cidx != 0xFFFFFFFFu && BUFFERIZE_NODES[cidx].realized);
     if (rz && saw_expand && op != UOP_EXPAND) return 1;
     if (op == UOP_EXPAND) saw_expand = 1;
-    // Don't descend into a realized boundary that's NOT pool-read (it's a
-    // separate kernel's output, not part of this contraction's recompute).
+    // A realized node before any EXPAND is another kernel's output.
     if (rz && !saw_expand) continue;
     int is_movement = uop_is_movement(op);
     int is_ew = uop_is_unary_elementwise(op)
@@ -825,35 +654,22 @@ static int bufferize_reduce_reads_realized_pool(u64 reduce_loc, u32 hop_cap) {
   return 0;
 }
 
+// True iff the REDUCE at reduce_loc is a matmul to keep realized for the GEMM
+// dispatch: a REDUCE of MUL(a, b) with a != b, unless it is a conv contraction.
 static int bufferize_uop_is_matmul(u64 reduce_loc) {
   Term mul = term_resolve(heap_read(reduce_loc + 0));
   Term bindings[UPAT_NUM_BINDINGS] = {0};
   int is_mul   = upat_match(&bufferize_upat_mul, mul, bindings);
   int distinct = is_mul && (term_val(bindings[0]) != term_val(bindings[1]));
-  // Conv BACKWARD contraction: fuse it into its downstream _pool-scatter
-  // reduce (the data-grad sum_cout(out_grad * weight) + weight-grad)
-  // instead of force-realizing the 39MB im2col for BLAS.  Its MUL operands
-  // (out_grad, weight) do NOT carry the forward `_pool` RESHAPE-over-EXPAND
-  // signature, so it is recognised structurally: a SUM-MUL reduce whose
-  // output scatters (movement chain) into another reduce.  Linear's GEMM
-  // (whose reduce feeds an elementwise/relu, not a scatter-reduce) keeps
-  // BLAS.
+  // A conv-backward contraction, whose operands lack the unfold signature,
+  // fuses into its scatter-reduce.
   if (is_mul && distinct
       && bufferize_reduce_feeds_scatter_reduce(reduce_loc, 32)) {
     return 0;
   }
-  // Conv contraction: one MUL operand is the `_pool` unfold.  Decline
-  // matmul-protect on EVERY backend so it fuses as a regular reduce
-  // indexing the strided unfold view -- no materialized contiguous
-  // im2col (which OOMs at scale: 24 GB CPU / 16 GB GPU for the
-  // beautiful_mnist conv backward).  The earlier CPU rationale ("BLAS
-  // over a materialized im2col, the fused reduce explodes / is 1000x
-  // slower in the walker") is obsolete: the explosion was the
-  // reshape-split-source strand bug (fixed in rangeify_unified.c -- a
-  // rank-changing reshape over a non-movement source realizes its
-  // source), and the fused reduce now compiles via strided JIT (conv2
-  // fwd 1.7 s BLAS -> ~3 ms fused-JIT).  So fused is both correct,
-  // faster, and lighter than the protected im2col on CPU too.
+  // A forward conv contraction fuses as a reduce over the strided unfold
+  // view on every backend, as in tinygrad: a contiguous im2col would be the
+  // dominant peak-memory cost.
   if (is_mul && distinct
       && (bufferize_chain_has_pool_merge(bindings[0])
           || bufferize_chain_has_pool_merge(bindings[1]))) {
@@ -863,16 +679,9 @@ static int bufferize_uop_is_matmul(u64 reduce_loc) {
   return is_mul && distinct;
 }
 
-// True when the recompute subtree feeding elementwise node at `loc` reaches
-// a UOP_REDUCE without first crossing a realized boundary.  Such a node is
-// a reduce EPILOGUE: tinygrad fuses it into the reduce's consumer kernel
-// (recompute) rather than materializing it, so it does NOT get the blanket
-// MULTI realize seed.  The walk descends only through elementwise + movement
-// ops (the recompute-cheap prologue between a reduce and its readers) and
-// stops at REDUCE (found), realized boundaries, KERNEL/TEN leaves, or any
-// other op -- so a reduce-FREE shared subexpression (the multi-consumer
-// elementwise the bufferize-telemetry tests assert IS realized) is left
-// untouched.
+// True iff the node's sources reach a REDUCE through elementwise and movement
+// ops before any realized node: a reduce epilogue, which tinygrad recomputes
+// in each consumer rather than realizing.
 static int bufferize_elementwise_src_has_reduce(u64 loc, u32 depth) {
   if (depth > 32) return 0;
   if (loc >= HEAP_NEXT) return 0;
@@ -887,8 +696,7 @@ static int bufferize_elementwise_src_has_reduce(u64 loc, u32 depth) {
     if (cop == UOP_KERNEL) continue;
     u64 cloc = term_val(ch);
     if (cop == UOP_REDUCE) return 1;
-    // Stop descending at an already-realized boundary -- it's a separate
-    // kernel whose output this node READS, not a fusable recompute source.
+    // A realized child is another kernel's output.
     u32 cidx = bufferize_info_find(cloc);
     if (cidx != 0xFFFFFFFFu && BUFFERIZE_NODES[cidx].realized) continue;
     int child_ew = uop_is_unary_elementwise(cop)
@@ -901,13 +709,10 @@ static int bufferize_elementwise_src_has_reduce(u64 loc, u32 depth) {
   return 0;
 }
 
-// Descend from a (movement) node through its movement-op source chain to the
-// first underlying COMPUTE producer -- the activation buffer the window views
-// are layered over.  Returns its loc, or 0 if none (the chain bottoms out at a
-// leaf / KERNEL / TEN before any compute).  The maxpool window-reshape is a
-// pure view of the relu/BN activation; realizing the RESHAPE would materialize
-// the view, but realizing this underlying compute makes every window view
-// (forward MAX + backward CMPEQ) index the SAME buffer with bit-exact ties.
+// The first compute node under loc's movement chain (the activation a window
+// view reads), or 0 at a leaf, KERNEL or TEN.  Realizing it, not the view,
+// lets every view (the maxpool MAX and its backward CMPEQ) index one buffer,
+// so argmax ties stay bit-exact.
 static u64 bufferize_movement_compute_source(u64 loc, u32 depth) {
   if (depth > 16 || loc >= HEAP_NEXT) return 0;
   Term src = term_resolve(heap_read(loc + 0));
@@ -916,8 +721,6 @@ static u64 bufferize_movement_compute_source(u64 loc, u32 depth) {
   if (sop == UOP_KERNEL) return 0;
   u64 sloc = term_val(src);
   if (uop_is_movement(sop)) return bufferize_movement_compute_source(sloc, depth + 1);
-  // First non-movement node: this is the activation compute (relu MUL, BN
-  // affine, etc.).  Return its loc so the caller can realize it.
   return sloc;
 }
 
@@ -967,9 +770,9 @@ static void bufferize_seed_indexed_operands(void) {
   }
 }
 
-// True iff the term `t` is (a movement-broadcast of) a REDUCE_MAX.  Used to
-// recognise the broadcast `lift(MAX(a))` operand of the maxpool backward mask
-// CMPEQ(a, lift(MAX(a))) (gradient.py:11-14).
+// True iff t is a REDUCE_MAX behind movement ops: the lift(MAX(a)) operand of
+// the maxpool backward mask CMPEQ(a, lift(MAX(a))) (tinygrad
+// mixin/gradient.py:10-13).
 static int bufferize_term_is_reduce_max(Term t, u32 depth) {
   if (depth > 16) return 0;
   t = term_resolve(t);
@@ -984,15 +787,9 @@ static int bufferize_term_is_reduce_max(Term t, u32 depth) {
   return 0;
 }
 
-// True iff the node at `loc` is the maxpool backward argmax mask: a CMPEQ one
-// of whose operands is (a movement-broadcast of) a REDUCE_MAX -- i.e.
-// CMPEQ(activation, lift(MAX(activation))).  This mask, its SUM-reduce count,
-// and the RECIP(/count) must realize into their OWN windowed kernel rather
-// than fusing into the downstream conv-weight backward SUM-reduce: under an
-// N=1 batch the fused nested-reduce mis-iterates the count over the size-1
-// axis (the walker's cext==0 identity bail), reading count 0 at some fused
-// positions even when the mask itself is correct.  Materialising the mask
-// first gives the weight-grad reduce a clean strided operand.
+// True iff the node is the maxpool backward argmax mask CMPEQ(a, lift(MAX(a))).
+// It realizes so its SUM count and RECIP get their own kernel: fused into an
+// N=1 conv-weight backward reduce, the count is read over the size-1 axis as 0.
 static int bufferize_node_is_maxpool_mask(u64 loc, u8 op) {
   if (op != UOP_CMPEQ) return 0;
   if (bufferize_term_is_reduce_max(heap_read(loc + 0), 0)) return 1;
@@ -1000,9 +797,7 @@ static int bufferize_node_is_maxpool_mask(u64 loc, u8 op) {
   return 0;
 }
 
-// True iff the term `t` is the maxpool argmax mask CMPEQ(a, lift(MAX(a)))
-// reached through a movement-only chain.  Used to recognise the operands of
-// the normalized mask MUL(mask, RECIP(SUM(mask))).
+// True iff t is the maxpool argmax mask behind movement ops.
 static int bufferize_term_is_maxpool_mask(Term t, u32 depth) {
   if (depth > 16) return 0;
   t = term_resolve(t);
@@ -1016,13 +811,9 @@ static int bufferize_term_is_maxpool_mask(Term t, u32 depth) {
   return 0;
 }
 
-// True iff the node at `loc` is the maxpool normalized mask gradient factor
-// MUL(mask, RECIP(SUM(mask))) (gradient.py:11-14): a MUL with one operand the
-// argmax mask (or a movement of it) and the other a RECIP whose source is a
-// SUM-reduce.  Realizing THIS makes the whole tie-split (/count divide)
-// materialize in its own windowed kernel; the downstream BN/conv backward
-// SUM-reduce then reads a clean strided cotangent instead of fusing the
-// nested mask->count->recip chain into its own (size-1-axis-prone) reduce.
+// True iff the node is the normalized mask MUL(mask, RECIP(SUM(mask))) of the
+// maxpool gradient (tinygrad mixin/gradient.py:10-13), which realizes for the
+// same reason as the mask.
 static int bufferize_node_is_maxpool_mask_norm(u64 loc, u8 op) {
   if (op != UOP_MUL) return 0;
   Term a = term_resolve(heap_read(loc + 0));
@@ -1030,7 +821,7 @@ static int bufferize_node_is_maxpool_mask_norm(u64 loc, u8 op) {
   int a_mask = bufferize_term_is_maxpool_mask(a, 0);
   int b_mask = bufferize_term_is_maxpool_mask(b, 0);
   if (!a_mask && !b_mask) return 0;
-  // The other operand must be RECIP(SUM(...)) -- the broadcast 1/count.
+  // The other operand is the broadcast 1/count, RECIP(SUM(...)).
   Term other = a_mask ? b : a;
   other = term_resolve(other);
   while (term_tag(other) == TAG_UOP && uop_is_movement(term_ext(other)))
@@ -1043,38 +834,8 @@ static int bufferize_node_is_maxpool_mask_norm(u64 loc, u8 op) {
       && (u32)term_val(heap_read(term_val(rsrc) + 1)) == REDUCE_SUM;
 }
 
-// THVM fp8-matmul-decode lever: a fp8->wider CAST whose value fuses into a
-// consuming matmul reduce lowers the fp8 DECODE into the matmul's innermost
-// reduce loop -- so each fp8 weight element is decoded once per OUTPUT ROW it
-// contributes to (M-fold redundant): a {512,2560}x{2560,2560} fp8 matmul ran
-// 35 ms vs 6 ms for a bf16-leaf weight (6x), the text-fusion velnet bottleneck.
-// REALIZING the cast to a transient bf16 buffer first decodes each element ONCE
-// (in a cheap memory-bandwidth pass, ~13 MB/weight, freed after the matmul --
-// NOT a resident 24 GB), then the matmul reads bf16 at full speed (5.6 ms,
-// matching the leaf).  This detector marks such a CAST as a realize boundary.
-// True iff: info is a CAST/BITCAST, its source dtype is fp8, AND its value
-// reaches a matmul MUL through pure movement/cast hops (the weight read of
-// TMatMul[x, Transpose[Cast[w_fp8, bf16]]]).
-// True iff the matmul whose REDUCE sits at `reduce_loc` would take the tiled
-// tensor-core path (rmu_emit_matmul_tc) with an fp8 B staged in-tile: Metal
-// target, a non-batched 2-D GEMM with M/N/K all divisible by 8 (the tile
-// granularity), and the tile picker accepts the shape.  Used to keep the
-// fp8->bf16 weight CAST lazy for such matmuls (the tile decodes fp8 directly;
-// no bf16 transient).  At classify time the STORE value is a BARE REDUCE (the
-// OPT_TC wrap is applied later, at render), so the recognisers read it plain.
-//
-// DEFAULT ON (THVM_FP8_IN_TILE_LAZY=0 opts out to the transient path).  Now
-// that uop_dag_classify_matmul_shape accepts the fp8 weight (dag_scan.c), the
-// lazy fp8->bf16 cast keeps the matmul on the hand_opts KOP_TC path -- it
-// stays 2-range, recognise_tc stamps OPT(TC), and rmu_emit_matmul_tc's b_is_fp8
-// branch decodes the fp8 weight in-kernel at TC rate (~9.6 ms, bit-identical to
-// the transient path).  Keeping the cast lazy means NO bf16 transient is
-// materialized -- the ~24 GB of fp8->bf16 weight transients that OOM'd the
-// single-realize Krea capture never exist.  A shape the tiled path declines
-// (ragged M/N/K, collapsed-unit, non-Metal) still realizes the transient below.
-// Eligibility accept/decline census (THVM_FP8_ELIG_DBG / dumped at ceiling
-// trip via thvm_fp8_elig_dump).  Diagnoses "the transient came back in the real
-// gen": each DECLINE reason names which pre-lift shape the recovery missed.
+// Accept and decline counts of bufferize_fp8_matmul_tiled_eligible, printed by
+// thvm_fp8_elig_dump (the Metal memory census calls it).
 static u64 FP8_ELIG_ACCEPT      = 0;   // eligible -> lazy in-tile (no transient)
 static u64 FP8_ELIG_DECL_NAXES  = 0;   // reduce n_axes != 1
 static u64 FP8_ELIG_DECL_NOTMUL = 0;   // reduce src not MUL
@@ -1096,6 +857,10 @@ void thvm_fp8_elig_dump(void) {
     (unsigned long long)FP8_ELIG_DECL_RAGGED, (unsigned long long)FP8_ELIG_DECL_PICK);
 }
 
+// True iff the matmul REDUCE at reduce_loc takes Metal's tiled tensor-core path
+// (rmu_emit_matmul_tc), which decodes an fp8 B operand in-tile: a non-batched
+// GEMM with M, N and K all multiples of 8 that rmu_tc_pick_tile accepts.  Its
+// fp8 weight CAST then stays lazy, with no bf16 transient.
 static int bufferize_fp8_matmul_tiled_eligible(u64 reduce_loc) {
   if (CURRENT_BACKEND != &METAL_BACKEND) return 0;
   {
@@ -1107,12 +872,8 @@ static int bufferize_fp8_matmul_tiled_eligible(u64 reduce_loc) {
     }
     if (!on) return 0;
   }
-  // Recover M/N/K from the matmul REDUCE.  The STORE sink is not registered as
-  // a consumer in the bufferize CMAP, so a consumer walk to it finds nothing;
-  // and at bufferize time (pre-lift) the operands are EXPANDs to the matmul
-  // iteration space, not INDEX_Es.  The MUL is over the {M,N,K} broadcast space
-  // and the REDUCE contracts K; the EXPAND target dims ARE that space, and the
-  // (positional) reduce axis selects K -- the remaining two dims are M and N.
+  // Before the lift the MUL's operands are EXPANDs to the {M,N,K} space: K is
+  // the reduce axis, M and N the other two dims.
   Term reduce = term_new(0, TAG_UOP, UOP_REDUCE, reduce_loc);
   if (uop_reduce_n_axes(reduce) != 1) { FP8_ELIG_DECL_NAXES++; return 0; }
   u32 red_axis = uop_reduce_axis(reduce, 0);
@@ -1145,6 +906,10 @@ static int bufferize_fp8_matmul_tiled_eligible(u64 reduce_loc) {
   return 0;
 }
 
+// True iff the node is a CAST or BITCAST of an fp8 value that reaches a matmul
+// MUL through movement and cast hops.  Fused, the matmul would decode each fp8
+// weight once per output row; realized into a transient bf16 buffer, each
+// element is decoded once.
 static int bufferize_fp8_cast_feeds_matmul(UOpInfo const *info) {
   static int known = 0, enabled = 1;
   if (!known) {
@@ -1154,14 +919,11 @@ static int bufferize_fp8_cast_feeds_matmul(UOpInfo const *info) {
   }
   if (!enabled) return 0;
   if (info->op != UOP_CAST && info->op != UOP_BITCAST) return 0;
-  // Source must be fp8 (the resident weight); the cast widens to bf16/f16/f32.
+  // The source is the resident fp8 weight.
   u32 src_dt = DT_FP32;
   if (!term_dtype_in(heap_read(info->loc + 0), 0, &src_dt)) return 0;
   if (src_dt != DT_FP8E4M3 && src_dt != DT_FP8E5M2) return 0;
-  // Walk consumers: the cast's value must reach a matmul MUL through pure
-  // movement (RESHAPE/PERMUTE/EXPAND -- the Transpose+broadcast of the matmul
-  // lowering) / cast hops.  BFS a few hops; stop at the MUL whose REDUCE is a
-  // matmul.  Bounded.
+  // BFS the consumers through movement and cast hops to a matmul's MUL.
   u64 queue[64]; u32 qh = 0, qt = 0;
   queue[qt++] = info->loc;
   u32 budget = 64;
@@ -1171,37 +933,25 @@ static int bufferize_fp8_cast_feeds_matmul(UOpInfo const *info) {
     u32 nc = bufferize_consumers_for_loc(cur, cons, 8);
     for (u32 c = 0; c < nc; c++) {
       Term ct = term_resolve(term_new(0, TAG_UOP, 0, cons[c]));
-      // We only have the loc; read the op via the bufferize node.
       u32 cidx = bufferize_info_find(cons[c]);
       if (cidx == 0xFFFFFFFFu) continue;
       u8 cop = BUFFERIZE_NODES[cidx].op;
       (void)ct;
       if (cop == UOP_MUL) {
-        // Is this MUL the reduced source of a matmul reduce?  Its consumer is a
-        // REDUCE that bufferize_uop_is_matmul accepts.
         u64 mcons[8];
         u32 mnc = bufferize_consumers_for_loc(cons[c], mcons, 8);
         for (u32 m = 0; m < mnc; m++) {
           u32 midx = bufferize_info_find(mcons[m]);
           if (midx != 0xFFFFFFFFu && BUFFERIZE_NODES[midx].op == UOP_REDUCE
               && bufferize_uop_is_matmul(mcons[m])) {
-            // The fp8 weight feeds a matmul.  On Metal, if that matmul is
-            // tiled-tensor-core eligible, the tiled kernel decodes the fp8
-            // weight ONCE into the shared-memory B-tile (rmu_emit_matmul_tc's
-            // b_is_fp8 staging), reused across the tile's M rows -- so there is
-            // no M-fold decode redundancy and NO reason to spend a bf16
-            // transient (which is exactly the resident weight-transient the
-            // cold JIT capture was pinning).  Keep the CAST lazy so the tile
-            // reads fp8 directly.  Only the non-tiled fallback (CPU/CUDA, or a
-            // shape the tiled path declines) still realizes the transient to
-            // avoid the scalar per-element M-fold decode.
+            // A tiled tensor-core matmul decodes the fp8 B tile once for all
+            // its rows, so the cast stays lazy there.
             if (bufferize_fp8_matmul_tiled_eligible(mcons[m])) return 0;
             return 1;
           }
         }
         continue;
       }
-      // Chain through pure movement / cast hops only.
       if (uop_is_movement(cop) || cop == UOP_CAST || cop == UOP_BITCAST) {
         if (qt < 64) queue[qt++] = cons[c];
       }
@@ -1210,18 +960,9 @@ static int bufferize_fp8_cast_feeds_matmul(UOpInfo const *info) {
   return 0;
 }
 
-// True iff `t`'s source subtree (bounded DFS) contains an EXPAND whose value
-// derives from a REDUCE through movement / unary (RECIP, SQRT, ADD-of-const)
-// hops -- the RMSNorm broadcast-back `EXPAND(RESHAPE(RECIP(SQRT(REDUCE(x*x)+eps))))`
-// (see NN/Norm.wl TRMSNorm).  This is the reduce-then-broadcast that, fused
-// lazily into a downstream batched matmul reduce, mis-stages on Metal (the q/k
-// RMSNorm-into-GQA-attention divergence at S>=32): the inner reduce's per-row
-// normalizer is re-indexed wrong through the matmul's rank-grow EXPAND.
-// True iff `t` derives from a REDUCE through movement / unary (RECIP, SQRT,
-// NEG) / ADD-or-MUL-of-const hops -- the `RECIP(SQRT(REDUCE(x*x)/d + eps))`
-// normalizer body.  Searches BOTH operands of ADD/MUL (the reduce may sit on
-// either side of the `/d` or `+eps`).  Does NOT cross a second reduce or a real
-// two-value contraction (both operands non-const non-movement).
+// True iff t derives from a REDUCE through movement, unary and ADD / MUL hops
+// (either operand), as the RMSNorm normalizer RECIP(SQRT(REDUCE(x*x)/d + eps))
+// does.
 static int bufferize_derives_from_reduce(Term t, u32 depth) {
   if (depth > 24 || term_tag(t) != TAG_UOP) return 0;
   u8 op = term_ext(t);
@@ -1240,13 +981,10 @@ static int bufferize_derives_from_reduce(Term t, u32 depth) {
   return 0;
 }
 
-// True iff `t`'s source subtree (bounded DFS) contains an EXPAND whose value
-// derives from a REDUCE -- the RMSNorm broadcast-back
-// `EXPAND(RESHAPE(RECIP(SQRT(REDUCE(x*x)/d + eps))))` (see NN/Norm.wl TRMSNorm).
-// This reduce-then-broadcast, fused lazily into a downstream batched matmul
-// reduce, mis-stages on Metal (the q/k RMSNorm-into-GQA-attention divergence at
-// S>=32): the inner reduce's per-row normalizer is re-indexed wrong through the
-// matmul's rank-grow EXPAND.
+// True iff t's subtree holds an EXPAND of a value derived from a REDUCE: the
+// RMSNorm broadcast-back EXPAND(RESHAPE(RECIP(SQRT(REDUCE(x*x)/d + eps))))
+// (NN/Norm.wl TRMSNorm).  Fused into a batched matmul reduce on Metal, its
+// per-row normalizer is indexed wrong through the matmul's rank-grow EXPAND.
 static int bufferize_subtree_has_reduce_broadcast(Term t, u32 depth) {
   if (depth > 24 || term_tag(t) != TAG_UOP) return 0;
   u8 op = term_ext(t);
@@ -1269,7 +1007,7 @@ static int bufferize_subtree_has_reduce_broadcast(Term t, u32 depth) {
   return 0;
 }
 
-// rmsnorm-feeds-matmul lever toggle (default ON; opt out for A/B).
+// THVM_NO_RMSNORM_MATMUL_REALIZE=1 turns the RMSNorm realize off.
 static int bufferize_rmsnorm_matmul_realize_enabled(void) {
   static int known = 0, enabled = 1;
   if (!known) {
@@ -1280,9 +1018,8 @@ static int bufferize_rmsnorm_matmul_realize_enabled(void) {
   return enabled;
 }
 
-// True iff `operand`, walked back through pure movement (RESHAPE/PERMUTE/EXPAND
-// + cast), bottoms out at a non-const value (an EXPAND of a CONST scalar -- the
-// matmul scale -- is NOT a genuine contraction operand).
+// True iff the operand, behind movement and cast ops, is not a CONST (an
+// EXPAND of a CONST scale is no contraction operand).
 static int bufferize_operand_is_nonconst(Term operand, u32 depth) {
   if (depth > 24 || term_tag(operand) != TAG_UOP) return 0;
   u8 op = term_ext(operand);
@@ -1291,31 +1028,24 @@ static int bufferize_operand_is_nonconst(Term operand, u32 depth) {
     return bufferize_operand_is_nonconst(
         term_resolve(heap_read(term_val(operand) + 0)), depth + 1);
   }
-  return 1;   // a real value (LOAD / MUL / REDUCE / ...)
+  return 1;
 }
 
-// True iff `reduce_loc` is a genuine contraction reduce: its source is a MUL of
-// two DISTINCT non-const operands (a matmul / batched-bmm: q@k, @V, x@W).  This
-// is independent of bufferize_uop_is_matmul, which declines the 4D batched
-// mhaBmm reduce (the GQA attention q@k / @V) -- the very reduces whose RMSNorm
-// input we must realize.
+// True iff the REDUCE's source is a MUL of two distinct non-const operands (a
+// matmul or batched matmul: q@k, @V, x@W).  It looks at the MUL alone, not at
+// bufferize_uop_is_matmul's test.
 static int bufferize_reduce_is_contraction(u64 reduce_loc) {
   Term mul = term_resolve(heap_read(reduce_loc + 0));
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
   Term a = term_resolve(heap_read(term_val(mul) + 0));
   Term b = term_resolve(heap_read(term_val(mul) + 1));
-  if (term_val(a) == term_val(b)) return 0;           // x*x (rmsnorm mean): not a contraction
+  if (term_val(a) == term_val(b)) return 0;           // x*x, the RMSNorm mean
   return bufferize_operand_is_nonconst(a, 0) && bufferize_operand_is_nonconst(b, 0);
 }
 
-// Walk a contraction-reduce MUL operand back through the matmul-staging
-// movement (RESHAPE/PERMUTE/EXPAND/CAST) to the FIRST elementwise (non-movement)
-// node -- the actual matmul input expression.  If that node's subtree carries
-// the RMSNorm reduce-broadcast (rsqrt-of-mean) normalizer, return its loc to
-// force-realize; else 0.  The matmul input is the RMSNorm output directly
-// (`q = rms`), OR a rope of it (`q = rope(rms)` -- an ADD of MULs whose subtree
-// still contains the rmsnorm reduce-broadcast).  Realizing it cuts the lazy
-// reduce-broadcast -> matmul fusion that mis-stages on Metal at S>=32.
+// The loc of the first non-movement node under a contraction operand (the
+// matmul input: the RMSNorm output, or a rope of it) when its subtree holds the
+// RMSNorm reduce-broadcast; else 0.
 static u64 bufferize_rmsnorm_under_operand(Term operand, u32 depth) {
   if (depth > 24 || term_tag(operand) != TAG_UOP) return 0;
   u8 op = term_ext(operand);
@@ -1323,22 +1053,14 @@ static u64 bufferize_rmsnorm_under_operand(Term operand, u32 depth) {
     return bufferize_rmsnorm_under_operand(
         term_resolve(heap_read(term_val(operand) + 0)), depth + 1);
   }
-  // First non-movement node: the matmul input expression (rms output, or a
-  // rope/elementwise wrapping it).  Realize it iff it carries the normalizer.
   if (bufferize_subtree_has_reduce_broadcast(operand, 0)) return term_val(operand);
   return 0;
 }
 
-// For a contraction reduce (q@k / @V / x@W: source MUL of two distinct non-const
-// operands) whose operands are RMSNorm outputs, force-realize EACH such rmsnorm
-// output (the boundary that makes the norm its own kernel).  Lazily fused into
-// the batched GQA attention matmul on Metal, the RMSNorm's per-row normalizer
-// mis-stages through the matmul's RESHAPE{M,K,1}+EXPAND{M,K,N} rank-grow ->
-// wrong output for S>=32 (the Krea DiT q/k-RMSNorm; bit-identical to CPU once
-// realized first -- what tinygrad does, a norm feeding a matmul is its own
-// kernel).  Keyed on bufferize_reduce_is_contraction (NOT bufferize_uop_is_matmul,
-// which declines the 4D batched mhaBmm reduce -- the very ones we must fix).
-// Returns the count of boundaries marked.
+// For a contraction REDUCE, realizes each operand that is an RMSNorm output,
+// so the norm is its own kernel and cannot mis-stage on Metal (see
+// bufferize_subtree_has_reduce_broadcast), as tinygrad gives a norm feeding a
+// matmul its own kernel.  Returns the number of boundaries marked.
 static u32 bufferize_rmsnorm_feeds_matmul(UOpInfo const *info) {
   if (!bufferize_rmsnorm_matmul_realize_enabled()) return 0;
   if (info->op != UOP_REDUCE) return 0;
@@ -1376,115 +1098,53 @@ static void bufferize_reject_packed(void) {
   }
 }
 
-// bufferize_classify is the public schedule entry point: it walks the
-// UOp DAG rooted at `root`, marks ROOT/MULTI/REDUCE boundaries, runs
-// the named realize-rewrite rules and then the unified rangeify pass.
+// The schedule entry point: walk the DAG at root, seed the boundaries, run
+// the unmark rules, then the unified rangeify pass.
 fn void bufferize_classify(Term root) {
   bufferize_info_clear();
   if (term_tag(root) != TAG_UOP || term_ext(root) == UOP_KERNEL) {
     return;
   }
 
-  // Bitmap sized to HEAP_NEXT (current high-water of the dyn
-  // heap) instead of HEAP_CAP -- per-call cost stays
-  // proportional to live work, not the 16 MiB max.
+  // The visited bitmap spans HEAP_NEXT, not the heap capacity, so its cost
+  // tracks live work.
   u64 cap = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
   u8 *visited = (u8 *)calloc(cap, 1);
   if (visited == NULL) return;
   bufferize_walk_rec(root, visited);
   free(visited);
 
-  // Rule (a): the root itself realizes.
   u32 root_idx = bufferize_info_find(term_val(root));
   if (root_idx != 0xFFFFFFFFu) {
     bufferize_node_mark(&BUFFERIZE_NODES[root_idx], BUFFERIZE_REASON_ROOT);
   }
 
-  // When the unified rangeify pass is enabled, we replace the OLD-path
-  // seeds (multi-consumer / REDUCE / matmul / matmul-input-protect) AND
-  // the 11 named rewrite rules with one call to run_rangeify_unified.
-  // The unified pass mirrors tinygrad/schedule/indexing.py:run_rangeify
-  // which only seeds COPY/CONTIGUOUS/STORE (none of which exist in
-  // thvm today) -- everything else is decided by the consumer-divergence
-  // walk. The root is already seeded above.
-  //
-  // After the walk we project RU_REALIZE_MAP back onto
-  // BUFFERIZE_NODES.realized so downstream consumers (materialize.c,
-  // bufferize.c, the kernel walker) observe the new decisions through
-  // the same side-table they already read.
-    // OLD-path multi-consumer / REDUCE / matmul seeds stay.  Dropping
-    // REDUCE here without lowered-DAG materialize.c support breaks every
-    // reduce-bearing topology (MaxPool/Softmax/BN-train/CE); the seed
-    // removal lands together with the materialize.c rewrite that walks
-    // UOP_BUFFERIZE directly.
-    //
-    // Mirror context: tinygrad/schedule/indexing.py:28-35
-    // (pm_generate_realize_map realizes COPY/CONTIGUOUS/STORE only;
-    //  REDUCE realize emerges from ending_ranges + consumer-divergence
-    //  inside run_rangeify).
-    // A movement op (EXPAND/RESHAPE/PERMUTE/SHRINK/PAD/FLIP) is a pure
-    // VIEW: it computes nothing, only remaps indices over its source
-    // buffer.  tinygrad NEVER realizes a movement op for being multi-
-    // consumer -- it folds the swizzle into each consumer's LOAD index
-    // (remove_movement_op_after_rangeify; pm_generate_realize_map seeds
-    // only COPY/CONTIGUOUS/STORE, indexing.py:28-35).  thvm's blanket
-    // MULTI seed force-realized them, which for a broadcast EXPAND
-    // materialised the full expanded tensor (conv backward shares one
-    // out_grad-broadcast EXPAND between the weight-grad reduce -- reduces
-    // b/h/w -- and the input-grad reduce -- reduces cout; realizing it
-    // is a 1.3 GB buffer, the dominant peak-memory cost on every
-    // backend).  Default-skip the MULTI seed for movement ops so the
-    // unified consumer-divergence walk keeps them views (its matching
-    // branch inherits ranges instead of realizing on divergence); realize
-    // still emerges downstream via the consuming REDUCEs' ending_ranges.
+    // Seeds.  tinygrad's pm_generate_realize_map realizes only STOREs and a
+    // few srcs (schedule/indexing.py:45-54) and derives the rest in
+    // run_rangeify; thvm seeds more, and ru_seed_boundary_holds
+    // (rangeify_unified.c) names the seeds the unified walk starts from.
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
-      // fp8-matmul-decode lever: realize a fp8->bf16 weight CAST that feeds a
-      // matmul so the per-element decode runs ONCE in a transient bf16 buffer,
-      // not M-fold redundant in the matmul's inner reduce loop (6x faster).
       if (bufferize_fp8_cast_feeds_matmul(info)) {
-        // FP8_TRANSIENT flags the boundary so emit records its bf16 tid and
-        // end-of-realize frees it (single-use: only the matmul reduce reads it
-        // this realize).  Without the free, mark_heap_rooted_preserve pins the
-        // kloc+0 cell forever -> 13MB-per-matmul leak (the 128px OOM wall).
+        // The cast realizes into a single-use bf16 transient; FP8_TRANSIENT
+        // has emit record its tid so the realize frees it, else
+        // mark_heap_rooted_preserve would pin it for good.
         bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE | BUFFERIZE_REASON_FP8_TRANSIENT);
       }
-      // Realize each RMSNorm output that feeds a (batched) matmul: the
-      // reduce-broadcast normalizer mis-stages through the matmul rank-grow
-      // EXPAND on Metal (the Krea q/k-RMSNorm -> GQA attention divergence at
-      // S>=32).  Faithful: a norm feeding a matmul is its own kernel.  `info`
-      // is the contraction reduce; the boundaries go on its rmsnorm operands.
+      // For a contraction REDUCE, its RMSNorm operands realize.
       (void)bufferize_rmsnorm_feeds_matmul(info);
       if (info->consumer_count >= 2) {
-        // Mirror tinygrad: a multi-consumer REDUCE-EPILOGUE elementwise is
-        // NOT pre-realized.  tinygrad's pm_generate_realize_map seeds only
-        // COPY/CONTIGUOUS/STORE (indexing.py:28-35); a multi-consumer
-        // elementwise that consumes a reduce fuses (recomputes) into each
-        // consumer's kernel rather than materializing.  thvm's blanket MULTI
-        // seed force-realized every such epilogue, emitting an extra kernel
-        // per reduce.  Skip the seed only when the node is elementwise AND
-        // its recompute source reaches a REDUCE (the epilogue case) -- the
-        // unified consumer-divergence walk then realizes it only on genuine
-        // range divergence and otherwise recomputes, matching tinygrad
-        // (verified: tinygrad fuses such chains into one kernel).  A reduce-
-        // FREE shared subexpression keeps the MULTI seed so the existing
-        // bufferize-telemetry / diamond-fanout tests stay green.
+        // MULTI, except for a movement op or a reduce epilogue with an EXPAND
+        // on it or under its slot 0: realized, that broadcast (the `_pool`
+        // unfold) materializes the whole expanded tensor, while tinygrad keeps
+        // it a view and recomputes the epilogue per consumer.  Other shared
+        // nodes realize, so a backward `_pool` reads a buffer, not a recompute.
         int ew = uop_is_unary_elementwise(info->op)
               || uop_is_binary_elementwise(info->op)
               || uop_is_ternary_elementwise(info->op);
         int src_has_reduce = ew
             && bufferize_elementwise_src_has_reduce(info->loc, 0);
-        // Movement ops stay views (see the default-skip rationale above).
         int skip_movement = uop_is_movement(info->op);
-        // Conv-backward realize-at-boundary: MULTI-seed every
-        // multi-consumer ACTIVATION boundary EXCEPT the `_pool` unfold (which
-        // carries an EXPAND in its movement chain).  Realizing r1 =
-        // relu(conv1) and its flat reshape as buffers lets the backward
-        // `_pool`(r1) resolve to a strided INDEX_E read over the realized
-        // buffer (Part 2) instead of recomputing the relu(conv1) subtree --
-        // the spurious conv-spatial cross-product that hangs.  The unfold
-        // stays a view (its EXPAND broadcast would materialize the full
-        // sliding-window tensor if realized).
         int fuse_realize_boundary =
             !bufferize_node_has_expand_in_movement_chain(info->loc, info->op, 6);
         if (fuse_realize_boundary
@@ -1492,19 +1152,10 @@ fn void bufferize_classify(Term root) {
           bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
         }
       }
-      // Maxpool-input pre-realize (ROUTE A): for EVERY REDUCE_MAX (the maxpool
-      // window reduce), realize the underlying activation it reduces -- the
-      // relu/BN output beneath the window-view movement chain.  The forward
-      // window-max (loss) and the backward argmax mask CMPEQ(a, lift(MAX(a)))
-      // (the /count tie-split, gradient.py:11-14) both reduce movement-views
-      // of that activation; left fused, each consuming kernel recomputes it
-      // independently and the two recomputes fp-disagree at an argmax tie ->
-      // CMPEQ miss -> count 0 -> RECIP(0) NaN.  Realizing the activation once
-      // makes every view index ONE shared buffer so ties are bit-exact.  Keyed
-      // off the REDUCE_MAX directly (not consumer-walks) so it fires for nested
-      // maxpools whose window view is not surfaced as multi-consumer.  We
-      // realize the compute SOURCE, never the window view itself (its EXPAND
-      // would materialize the sliding-window blow-up).
+      // Each REDUCE_MAX realizes the activation under its window view: the
+      // forward max and the backward argmax mask both read it, and two fused
+      // recomputes can disagree at a tie (count 0, then RECIP(0) is NaN).
+      // MAXPOOL_INPUT makes the unified walk keep it.
       if (info->op == UOP_REDUCE
           && (u32)term_val(heap_read(info->loc + 1)) == REDUCE_MAX) {
         Term wsrc = term_resolve(heap_read(info->loc + 0));
@@ -1516,8 +1167,6 @@ fn void bufferize_classify(Term root) {
           if (act_loc != 0) {
             u32 aidx = bufferize_info_find(act_loc);
             if (aidx != 0xFFFFFFFFu) {
-              // MULTI for the heuristic seed; MAXPOOL_INPUT so the faithful seed
-              // honors this correctness realize too (bit-exact argmax ties).
               bufferize_node_mark(&BUFFERIZE_NODES[aidx], BUFFERIZE_REASON_MULTI);
               bufferize_node_mark(&BUFFERIZE_NODES[aidx],
                                   BUFFERIZE_REASON_MAXPOOL_INPUT);
@@ -1526,45 +1175,18 @@ fn void bufferize_classify(Term root) {
         }
       }
       if (info->op == UOP_REDUCE) {
-        // Only MATMUL REDUCEs stay as boundaries (mirrors tinygrad's
-        // matmul-protect).  Other REDUCEs fuse inline via the unified
-        // pass's REDUCE-via-RANGE expansion + render_uop's _accN
-        // accumulator hoist.
-        //
-        // Probe_w2 (synthetic BN-train backward) showed the cmap-based
-        // chain-guard misses some inter-reduce iter dependencies in
-        // larger backward graphs -- grad came out 0 with the chain-guard
-        // active, correct with always-keep.  Since the kernel-count
-        // savings of the chain-guard (~13%) don't outweigh the
-        // correctness risk, conservatively keep ALL non-matmul REDUCEs
-        // as boundaries too.  The fix path is in render_uop's
-        // nested-reduce-iter handler (file as task #21).
+        // A matmul REDUCE realizes for good (BUFFERIZE_REASON_MATMUL); any
+        // other gets a seed the unmark rules below may drop.
         if (bufferize_uop_is_matmul(info->loc)) {
           bufferize_node_mark(info, BUFFERIZE_REASON_REDUCE);
           bufferize_node_mark(info, BUFFERIZE_REASON_MATMUL);
         } else {
-          // The blanket seed; the softmax-style unmark loop below drops
-          // it for the broadcast-back-to-vector REDUCEs.
+          // A conv-backward contraction gets no seed and fuses into its
+          // scatter-reduce, unless it reads a realized activation through
+          // the unfold (bufferize_reduce_reads_realized_pool).
           int skip_seed = 0;
-          // Precise seed-skip for the conv-backward
-          // contraction reduce -- its output feeds a _pool-scatter
-          // (movement+elementwise chain with a PAD/SHRINK) into another
-          // REDUCE.  Skipping the seed lets the multi-axis REDUCE
-          // renderer fuse the contraction into the scatter-reduce kernel
-          // instead of materializing the 39MB im2col.  Linear's GEMM has no
-          // PAD/SHRINK scatter so it stays protected.
           if (!skip_seed
               && bufferize_reduce_feeds_scatter_reduce(info->loc, 32)) {
-            // Fuse the contraction into the scatter-reduce -- UNLESS it
-            // reads a now-realized activation through the `_pool` col2im
-            // (the 2nd-train-step trigger).  That fused read mints a
-            // redundant 24*6 window decode INDEPENDENT of the clean kh,kw,
-            // a cross-product that blows the reduce up to ~6.8e12 iters
-            // (the hang).  Realizing only THAT contraction materializes a
-            // clean strided buffer for the scatter-reduce; every other
-            // contraction (step-0 fused activation, the weight/data-grad
-            // reduces whose operands are not a realized-pool read) stays
-            // fused so its grad reduction order is bit-exact vs flag-OFF.
             if (!bufferize_reduce_reads_realized_pool(info->loc, 12))
               skip_seed = 1;
           }
@@ -1573,37 +1195,19 @@ fn void bufferize_classify(Term root) {
           }
         }
       }
-      // Maxpool backward mask pre-realize (ROUTE A, part 2): realize the
-      // argmax mask CMPEQ(a, lift(MAX(a))) so the windowed /count divide
-      // (mask * RECIP(SUM(mask))) materializes in its OWN kernel instead of
-      // fusing into the downstream conv-weight backward SUM-reduce.  When the
-      // tie-split count is fused into an N=1 weight-grad reduce the walker's
-      // nested-reduce-iter mis-reads count over the size-1 batch axis -> wrong
-      // grad (and, before the activation pre-realize, RECIP(0) NaN).  A
-      // materialized mask gives both the count reduce and the weight-grad
-      // reduce a clean strided operand.  Fires regardless of consumer_count.
+      // The maxpool argmax mask and its normalized form realize whatever
+      // their consumer count (bufferize_node_is_maxpool_mask); MAXPOOL_MASK
+      // makes the unified walk keep them.
       if (bufferize_node_is_maxpool_mask(info->loc, info->op)
           || bufferize_node_is_maxpool_mask_norm(info->loc, info->op)) {
-        // MULTI for the heuristic seed; MAXPOOL_MASK so the faithful seed
-        // honors this correctness realize too (else the /count tie-split fuses
-        // into the N=1 conv-weight backward reduce and the mask zeroes out).
         bufferize_node_mark(info, BUFFERIZE_REASON_MULTI);
         bufferize_node_mark(info, BUFFERIZE_REASON_MAXPOOL_MASK);
       }
     }
-    // Softmax-style REDUCE unmark: a REDUCE whose every consumer chain
-    // bottoms out at EXPAND through scalar-preserving hops is the
-    // broadcast-back-to-vector pattern (softmax sum, BN-mean, mean/N
-    // -- see bufferize_reduce_consumer_is_broadcast_chain for the
-    // exact chain shape). Tinygrad's pm_generate_realize_map only
-    // realizes REDUCEs whose ranges include AxisType.OUTER; thvm has
-    // no OUTER axis tag, so we approximate the same predicate
-    // structurally here: drop the REDUCE seed for chains that re-broadcast
-    // through EXPAND, leaving the unified pass's REDUCE-via-RANGE
-    // expansion + render_uop's _accN accumulator hoist to fuse them
-    // inline, a reduce into a consuming REDUCE included (the softmax sum
-    // into attn@V, the conv-input-grad reduce pair).  Mirror context:
-    // tinygrad/schedule/indexing.py:31 (REDUCE realize predicate).
+    // Softmax-style unmark: a REDUCE every consumer chain of which broadcasts
+    // it back (bufferize_reduce_consumer_is_broadcast_chain) fuses inline.
+    // tinygrad seeds no REDUCE; a reduce realizes there only where ranges end
+    // (schedule/indexing.py:270-277).
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
       if (info->op != UOP_REDUCE) continue;
@@ -1612,6 +1216,8 @@ fn void bufferize_classify(Term root) {
       if (!bufferize_reduce_consumer_is_broadcast_chain(info->loc)) continue;
       bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
     }
+    // Reduce-chain unmark: a REDUCE whose only consumer is a same-kind REDUCE
+    // of a realized chain fuses into it.
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
       if (info->op != UOP_REDUCE) continue;
@@ -1624,54 +1230,30 @@ fn void bufferize_classify(Term root) {
       u32 cidx = bufferize_info_find(consumer_locs[0]);
       if (cidx == 0xFFFFFFFFu) continue;
       if (BUFFERIZE_NODES[cidx].op != UOP_REDUCE) continue;
-      // Accept a consumer reduce that is either still a realized boundary
-      // or a mid-chain reduce whose own consumer chain reaches a realized
-      // reduce root.  Testing only the immediate `realized` flag races the
-      // unmark of a mid-chain reduce (3+ axis trailing reduce -> 2 kernels).
+      // The consumer may be a mid-chain reduce this loop already unmarked.
       if (!BUFFERIZE_NODES[cidx].realized
           && !bufferize_reduce_consumer_in_realized_chain(consumer_locs[0], 16))
         continue;
-      // bufferize_unwrap_dp follows DP cells across SUB-marked fired
-      // dups too -- accept any chain whose outer.src[0] resolves to
-      // this inner UOP after DUP traversal.  The CPU walker handles
-      // DUP-traversed addr / body expressions correctly because
-      // term_resolve in uwalk_eval_* unwraps SUB-marked cells; the
-      // chain-guard's cmap-BFS limitation only mattered for the
-      // hoist-cache execution model; uwalk_run_reduce re-runs the
-      // inner per outer iteration and handles the chain directly.
+      // The outer REDUCE must read this one, possibly behind fired DP cells,
+      // which the CPU walker resolves (term_resolve in uwalk_eval_*).
       u64 visited[8];
       u32 n_visited = 0;
       Term outer_src = bufferize_unwrap_dp(heap_read(consumer_locs[0] + 0),
                                             visited, &n_visited, 8, 16);
       if (outer_src == 0 || term_tag(outer_src) != TAG_UOP) continue;
       if (term_val(outer_src) != info->loc) continue;
-      // tinygrad keeps the bufferize between two reduce OPS whenever the
-      // outer reduce's body reads the inner reduce's buffered output
-      // (remove_bufferize, schedule/rangeify.py:88-96: buffer_in_reduce
-      // -> return None).  A multi-axis reduce of one
-      // logical reduce is a single REDUCE op with multiple ranges
-      // (convert_reduce_to_reduce_with_ranges), never two ops -- so the
-      // only way two REDUCE ops chain here is genuinely separate reduces.
-      // Fusing different-kind reduces (MAX-pool feeding a SUM) into one
-      // kernel corrupts the result: the inner reduce's accumulator
-      // semantics are lost when inlined into the outer reduce body.  Gate
-      // the unmark on matching kinds so a kind-mismatched chain keeps its
-      // boundary (two kernels), matching tinygrad.
+      // Only a same-kind chain fuses: inlined into a SUM, a MAX loses its own
+      // accumulator.  tinygrad fuses no such chain, as it keeps every reduce
+      // that reads a buffer realized (remove_bufferize,
+      // schedule/rangeify.py:87-96).
       u32 inner_kind = (u32)term_val(heap_read(info->loc + 1));
       u32 outer_kind = (u32)term_val(heap_read(consumer_locs[0] + 1));
       if (inner_kind != outer_kind) continue;
       bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
     }
-    // Reduce-epilogue fusion: a non-matmul REDUCE with exactly ONE
-    // consumer that is a realized, shape-preserving elementwise epilogue
-    // keeps the reduce + the epilogue in one kernel.  Mirrors tinygrad's
-    // `reduce -> elementwise`
-    // single-kernel lowering (the elementwise runs after the accumulator,
-    // before the store).  Target: the optimizer / bias-grad `[N]->[N]`
-    // post-reduce scaling kernels (e.g. `(1-b1)*g` right after the
-    // bias-grad reduce) that otherwise pay a store + reload + separate
-    // launch.  The reduce's output shape must equal the epilogue's output
-    // shape so the epilogue iterates exactly the reduce's output ranges.
+    // Reduce-epilogue unmark: a non-matmul REDUCE whose only consumer is a
+    // realized epilogue of the same shape fuses into it, saving a store, a
+    // reload and a launch (bufferize_is_scalar_preserving_epilogue).
     for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
       UOpInfo *info = &BUFFERIZE_NODES[i];
       if (info->op != UOP_REDUCE) continue;
@@ -1683,14 +1265,10 @@ fn void bufferize_classify(Term root) {
       if (n_cons != 1) continue;
       u32 cidx = bufferize_info_find(consumer_locs[0]);
       if (cidx == 0xFFFFFFFFu) continue;
-      // The consumer must itself be a realized boundary (its kernel
-      // absorbs the reduce) and a scalar-preserving elementwise tail.
       if (!BUFFERIZE_NODES[cidx].realized) continue;
       if (!bufferize_is_scalar_preserving_epilogue(consumer_locs[0],
                                                     info->loc))
         continue;
-      // Output shapes must match (same iteration space -- the epilogue
-      // adds no ranges and changes no rank).
       Shape rsh = {0};
       Shape csh = {0};
       Term rt = term_new(0, TAG_UOP, info->op, info->loc);
@@ -1705,10 +1283,7 @@ fn void bufferize_classify(Term root) {
       if (!same) continue;
       bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
     }
-    // Fanin-cap split: mark wide-fanin elementwise/movement children
-    // as realized boundaries so the metal renderer's n_inputs > 30
-    // decline doesn't trigger.  Runs after softmax-unmark so the
-    // boundary set reflects every other rule first.
+    // After the unmark rules, so the fan-in split sees the final boundaries.
     bufferize_rule_metal_tile_fanin_cap(root);
     bufferize_seed_indexed_operands();
     bufferize_reject_packed();

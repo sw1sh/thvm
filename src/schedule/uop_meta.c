@@ -1,23 +1,15 @@
-// schedule/uop_meta.c - leaf utilities the rest of the schedule
-// pipeline depends on: per-op arity, elementwise predicates, and
-// best-effort shape/dtype inference.
-//
-// Pulled out of materialize.c so bufferize_classify and consumer_count
-// (which use uop_arity) can be included BEFORE materialize.c -- which
-// in turn calls bufferize_classify to build the boundary set before
-// emitting kernels.
+// schedule/uop_meta.c - per-op arity, elementwise predicates, best-effort
+// shape, dtype and device inference, and the reduce-chain matcher.
 
 fn u8 uop_arity(u8 op) {
   switch (op) {
-    // Atoms whose heap holds only NUM cells (or nothing): zero
-    // recursable Term children.
+    // Atoms: the heap holds only NUM cells, no Term children.
     case UOP_CONST:
     case UOP_RANGE:    // heap = [NUM(axis_id), NUM(axis_type), NUM(extent)]
     case UOP_INVALID:  // heap = [NUM(0)] sentinel
     case UOP_DEFINE_VAR:  // heap = [NUM(packed_extent)]
       return 0;
-    // UOP_OPT carries [target, NUM(kind), NUM(factor)]; only the
-    // target slot is a recursable Term child.
+    // OPT = [target, NUM(kind), NUM(factor)].
     case UOP_OPT:
       return 1;
     case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
@@ -26,25 +18,17 @@ fn u8 uop_arity(u8 op) {
     case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
     case UOP_REDUCE:  case UOP_LOAD:    case UOP_DETACH:
     case UOP_CAST:    case UOP_BITCAST:
-    // UOP_COPY heap = [src, NUM(device+1)]; one recursable producer Term
-    // (src; the device NUM is trailing payload, like REDUCE's axes).
-    // Inherits src's shape + dtype.
+    // COPY = [src, NUM(device + 1)].
     case UOP_COPY:
-    // UOP_BUFFERIZE heap: [value, NUM(addrspace), NUM(removable),
-    // NUM(n_ranges), range_0, ...].  Only slot 0 (value) is a
-    // recursable producer Term -- the trailing UOP_RANGE leaves are
-    // themselves arity-0 atoms that hash-cons separately.  Variable
-    // payload mirrors RESHAPE/EXPAND's [src, NUM(ndim), NUM(d0)...]
-    // convention (arity=1 even though the heap holds more slots).
+    // BUFFERIZE = [value, NUM(addrspace), NUM(removable), NUM(n_ranges),
+    // range_0, ...]: like RESHAPE's [src, NUM(ndim), NUM(d0), ...], only the
+    // first slot counts.
     case UOP_BUFFERIZE:
       return 1;
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_ASSIGN:
-    // Symbolic-INDEX layer integer ALU + INDEX_E.  Heap = [a, b]
-    // for the IX_* ops, [buffer, addr] for INDEX_E.  Both slots are
-    // recursable Term children that the rewriter must descend into
-    // to reach UOP_RANGE leaves nested inside production lifter
-    // output (UOP_INDEX_E.addr -> IADD/IMUL chain -> UOP_RANGE).
+    // The index-layer integer ops = [a, b] and INDEX_E = [buffer, addr];
+    // walkers descend both to reach the RANGE leaves of an address.
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR:
@@ -52,10 +36,7 @@ fn u8 uop_arity(u8 op) {
     // GATHER = [src, idx, NUM(dim)]: the trailing NUM is payload.
     case UOP_GATHER:
       return 2;
-    // Ternary symbolic ops.  IWHERE = [cond, then, else];
-    // STORE = [buf, addr, value].  All three slots are Term
-    // children; covering them lets the rewriter walk from the
-    // STORE root all the way down to UOP_RANGE leaves.
+    // IWHERE = [cond, then, else], STORE = [buf, addr, value].
     case UOP_IWHERE:
     case UOP_STORE:
     // SCATTER = [base, idx, src, NUM(dim), NUM(kind), NUM(include_self)].
@@ -75,23 +56,18 @@ fn u8 uop_is_binary_elementwise(u8 op) {
   return op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ;
 }
 
-// IWHERE(cond, then, else) is an elementwise ternary select on float
-// values (tinygrad's Ops.WHERE).  Distinct from its index-layer use
-// inside INDEX_E address expressions: those live in the addr subtree the
-// index machinery walks, never as a scheduled value node, so classifying
-// the value-graph IWHERE as elementwise here does not affect them.
+// IWHERE doubles as tinygrad's value-graph Ops.WHERE.  Its index-layer uses
+// sit inside INDEX_E addresses, never as scheduled value nodes, so calling
+// it elementwise here does not touch them.
 fn u8 uop_is_ternary_elementwise(u8 op) {
   return op == UOP_IWHERE;
 }
 
-// Per-call memoization for term_shape_in.  Without it, recursive
-// shape inference re-walked shared subgraphs exponentially -- the
-// dominant cost of materialize for the bound-w SGD pattern (where
-// each iter's gradient references the same target/lr UOPs).
-// Loc-keyed open-addressed hash; outer entry assigns a fresh
-// generation, so we never need to memset 8K slots.  Cell holds
-// (gen, loc, shape, valid) where valid=0 means cached-negative.
-#define SHAPE_CACHE_CAP 8192            // power of two, > deepest UOP DAG
+// Memo for one outermost term_shape_in call, without which the recursion
+// re-walks shared subgraphs exponentially.  Open-addressed and keyed by the
+// packed Term (the `loc` field); each outermost call starts a new
+// generation, which empties the table without a memset.
+#define SHAPE_CACHE_CAP 8192            // power of two
 typedef struct {
   u32   gen;
   u32   valid;     // 0 = cached negative result, 1 = positive
@@ -137,12 +113,9 @@ static void shape_cache_insert(u64 loc, Shape const *shape, int valid) {
       return;
     }
   }
-  // table full -- silently drop, caller falls back to recursion
+  // Table full: the entry is dropped.
 }
 
-// term_shape_in_inner: the recursive worker.  Outer entry bumps
-// the generation so prior cache entries become invisible without
-// the cost of a memset.
 static int term_shape_in_inner(Term t, u32 env_id, Shape *out);
 
 fn int term_shape_in(Term t, u32 env_id, Shape *out) {
@@ -159,9 +132,7 @@ fn int term_shape_in(Term t, u32 env_id, Shape *out) {
 static int term_shape_in_uncached(Term t, u32 env_id, Shape *out);
 
 static int term_shape_in_inner(Term t, u32 env_id, Shape *out) {
-  // Cache lookup keyed on the packed Term value.  Skip for atoms /
-  // tags whose val isn't a heap loc; for those the recursion bottom
-  // is cheap anyway.
+  // Only UOP and TEN terms are cached; the other tags are cheap.
   u8 tag0 = term_tag(t);
   int cacheable = (tag0 == TAG_UOP || tag0 == TAG_TEN);
   if (cacheable) {
@@ -174,33 +145,24 @@ static int term_shape_in_inner(Term t, u32 env_id, Shape *out) {
   return ok;
 }
 
-// Spec broadcast (tinyspec.tex "Derived Properties": "right-align shapes,
-// element-wise max; each axis must be equal or 1").  Replaces the old
-// largest-total-numel rule that returned one operand's shape VERBATIM -- which
-// mis-sizes when operands broadcast in different axes (e.g. {4,1} op {1,8} ->
-// spec {4,8}, old rule -> {1,8}), a latent OOB masked today only because the WL
-// frontend pre-EXPANDs both operands to identical shapes.
+// Broadcast as tinygrad's spec defines it (spec/tinyspec.tex:283): right-align
+// the shapes and take the per-axis max.
 static void shape_broadcast2(Shape const *a, Shape const *b, Shape *out) {
   u32 nd = a->ndim > b->ndim ? a->ndim : b->ndim;
   for (u32 i = 0; i < MAX_DIM; i++) out->dims[i] = 0;
   out->ndim = nd;
   for (u32 i = 0; i < nd; i++) {
-    // right-aligned: the i-th axis from the trailing end; absent axes are 1.
+    // The i-th axis from the end; a missing axis is 1.
     u32 da = (i < a->ndim) ? a->dims[a->ndim - 1 - i] : 1;
     u32 db = (i < b->ndim) ? b->dims[b->ndim - 1 - i] : 1;
-    out->dims[nd - 1 - i] = da >= db ? da : db;   // element-wise max (max(1,x)=x)
+    out->dims[nd - 1 - i] = da >= db ? da : db;
   }
 }
 
 static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
   (void)env_id;
-  // Bound-var shape: a TLam can carry a shape annotation for its
-  // bound variable (registered via TLamShape in the WL surface,
-  // stored in the lam_shape table keyed by the LAM's heap loc).
-  // When a TVAR points at that loc and the cell hasn't been
-  // SUB-substituted yet (pre APP-LAM beta), look up the shape.
-  // After substitution term_resolve below would unwrap to the
-  // arg's TEN and the existing tag-dispatch would handle it.
+  // A VAR not yet substituted (before APP-LAM beta) has the shape its LAM
+  // was annotated with (TLamShape; the lam_shape table, keyed by LAM loc).
   if (term_tag(t) == TAG_VAR) {
     u64 loc = term_val(t);
     Term cell = heap_read(loc);
@@ -209,9 +171,8 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
       if (lam_shape_lookup(loc, &s)) { *out = s; return 1; }
     }
   }
-  // Same VAR/ALO resolve as visit() in materialize.c -- shape inference
-  // walking through a beta-substituted body needs to see the bound
-  // arg's TEN, not the bare VAR cell.
+  // Resolve as visit() (materialize.c) does, so a substituted VAR yields
+  // its argument.
   t = term_resolve(t);
   u8 tag = term_tag(t);
   if (tag == TAG_TEN) {
@@ -235,10 +196,8 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
       || op == UOP_COPY) {
     return term_shape_in(heap_read(loc), 0, out);
   }
-  // UOP_BUFFERIZE is a realize-boundary marker; its shape == value.shape.
-  // Mirror tinygrad/schedule/indexing.py:77 -- the BUFFERIZE wraps the
-  // producer Term and inherits its dtype/shape; the closed_ranges trailing
-  // the value are the buffer's index leaves, not shape mutators.
+  // BUFFERIZE has its value's shape, as tinygrad's STAGE does
+  // (schedule/indexing.py:92): the trailing ranges index the buffer.
   if (op == UOP_BUFFERIZE) {
     return term_shape_in(heap_read(loc), 0, out);
   }
@@ -258,7 +217,7 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
     shape_broadcast2(&la, &lb, out); return 1;
   }
   if (uop_is_ternary_elementwise(op)) {
-    // Output shape = spec broadcast of cond/then/else (right-align, per-dim max).
+    // The broadcast of cond, then and else.
     Shape acc; int have = 0;
     for (u32 k = 0; k < 3; k++) {
       Shape s;
@@ -305,14 +264,11 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
   }
   if (op == UOP_REDUCE) {
     Shape cs; if (!term_shape_in(heap_read(loc), 0, &cs)) return 0;
-    // Multi-axis REDUCE: drop ALL axes in the list.  Output ndim is
-    // src ndim minus n_axes.  Mirrors tinygrad's per-REDUCE ranges-set
-    // shape derivation (uop/ops.py).
+    // Drops every reduced axis, as tinygrad's REDUCE shape does
+    // (uop/ops.py:433-437).
     if (cs.ndim == 0) return 0;
     Term t = term_new(0, TAG_UOP, op, loc);
     u32 n_axes = uop_reduce_n_axes(t);
-    // Build a per-axis "is reduce axis" mask so we can drop them all in
-    // one pass regardless of order.
     u8 drop[MAX_DIM] = {0};
     for (u32 ai = 0; ai < n_axes; ai++) {
       u32 ax = uop_reduce_axis(t, ai);
@@ -351,24 +307,21 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
       return 1;
     }
     if (op == UOP_CONST) {
-      // The CONST cell carries [NUM(bits)]; the dtype is the NUM's ext.
+      // CONST = [NUM(bits)] with the dtype in the NUM's ext.
       Term num = heap_read(loc);
       if (term_tag(num) == TAG_NUM) { *out = term_ext(num); return 1; }
     }
     if (op == UOP_CAST || op == UOP_BITCAST) {
-      // dtype lives in the second heap cell as NUM(dst_dtype).
+      // [src, NUM(dst_dtype)]
       Term num = heap_read(loc + 1);
       if (term_tag(num) == TAG_NUM) { *out = (u32)term_val(num); return 1; }
     }
-    // IWHERE(cond, then, else): the result dtype is the selected value's
-    // dtype (then-branch), NOT cond's (which is a bool/float mask).
+    // IWHERE has its then-branch's dtype, not the mask's.
     if (uop_is_ternary_elementwise(op)) {
       return term_dtype_in(heap_read(loc + 1), env_id, out);
     }
-    // Elementwise + reduce + movement ops inherit dtype from src[0]
-    // (and binary ops require both srcs share a dtype -- the strict
-    // policy matches tinygrad's no-implicit-promotion stance).  So do
-    // GATHER (src) and SCATTER (base).
+    // These take src[0]'s dtype (GATHER's src, SCATTER's base); binary
+    // operands must share it, as tinygrad's UOps do not promote.
     if (uop_is_unary_elementwise(op) || uop_is_binary_elementwise(op)
         || op == UOP_RESHAPE || op == UOP_PERMUTE || op == UOP_EXPAND
         || op == UOP_PAD     || op == UOP_SHRINK  || op == UOP_FLIP
@@ -378,33 +331,26 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
       Term src0 = heap_read(loc);
       return term_dtype_in(src0, env_id, out);
     }
-    // INDEX_E reads an element from the indexed buffer; the dtype is
-    // the buffer's dtype.  Without this case, term_dtype_in falls
-    // through to the DT_FP32 default and graph_rewrite's BITCAST
-    // reconstruction (uop_bitcast(rewritten_index_e, dst)) sees the
-    // source as f32 -- tripping uop_bitcast's itemsize-mismatch guard
-    // for any sub-32-bit BITCAST (f16->u16, fp8->u8, etc.).
+    // INDEX_E has its buffer's dtype.  The f32 default would trip
+    // uop_bitcast's itemsize check when graph_rewrite rebuilds a sub-32-bit
+    // BITCAST over it (f16 -> u16, fp8 -> u8).
     if (op == UOP_INDEX_E) {
       Term buf = heap_read(loc + 0);
       return term_dtype_in(buf, env_id, out);
     }
-    // BUFFER's dtype lives in heap[loc+1] as a NUM cell (set by
-    // uop_buffer_inst).  Same rationale as INDEX_E: without this,
-    // any BUFFER consumer routed through term_dtype_in defaults to
-    // DT_FP32 and breaks dtype-sensitive folds.
+    // BUFFER keeps its dtype at heap[loc + 1]; the f32 default would break
+    // dtype-sensitive folds, as for INDEX_E.
     if (op == UOP_BUFFER) {
       *out = uop_buffer_dtype(t);
       return 1;
     }
-    // AFTER = [node, after_node] carries node's dtype.
+    // AFTER = [node, after_node] has node's dtype.
     if (op == UOP_AFTER) {
       return term_dtype_in(heap_read(loc), env_id, out);
     }
   }
-  // TUOpGradWithTarget chain-rule projection: cell is [y, gy, target];
-  // the gradient result has y's dtype (= gy's dtype = leaf's dtype).
-  // Without this branch, materialize falls through to DT_FP32 here and
-  // higher-order TGrad on non-f32 inputs lands at the wrong dtype.
+  // A grad projection's cell is [y, gy, target] and its result has y's dtype;
+  // the f32 default would mistype a higher-order grad of non-f32 inputs.
   if ((tag == TAG_DP0 || tag == TAG_DP1)
       && (term_ext(t) & DUP_GRAD_FLAG) != 0) {
     Term y = heap_read(term_val(t));
@@ -413,9 +359,8 @@ fn int term_dtype_in(Term t, u32 env_id, u32 *out) {
   *out = DT_FP32; return 1;
 }
 
-// Map a resident Backend* to its device code (THVM_DEV_*), or -1.
-// Backend.id is its own numbering (CPU=1, METAL=2) and is NOT the
-// device code, so compare against the known backend singletons.
+// The THVM_DEV_* code of a backend, or -1.  Backend.id (CPU=1, METAL=2,
+// CUDA=3) is a different numbering, so match the backend singletons.
 static i32 backend_device_code(Backend *b) {
   if (b == NULL) return -1;
   if (b == &CPU_BACKEND)   return THVM_DEV_CPU;
@@ -426,15 +371,10 @@ static i32 backend_device_code(Backend *b) {
   return -1;
 }
 
-// Device of a term (THVM_DEV_*), or -1 = unknown (-> the default device).
-// Ported from tinygrad's UOp.device (uop/ops.py:756): an explicit COPY
-// names its target (src[1].device there; the device NUM here); a resident
-// TEN reports its backend; every other op propagates the device of its
-// first source that has one.  A graph whose leaves are all on one device
-// therefore reports that device at the root -- which thvm_realize uses to
-// pick the single realize backend, so the device lives in the GRAPH, not
-// the context.  (Mixed-device graphs report their first-found device;
-// true per-op routing across backends is a later phase.)
+// Device of a term (THVM_DEV_*), or -1 for none, after tinygrad's UOp.device
+// (uop/ops.py:895-908): a COPY names its target, a TEN its backend, and any
+// other op its first source that has one, so a mixed-device graph reports the
+// first device found.  thvm_realize picks its backend with it.
 fn i32 term_device_in(Term t) {
   u8 tag = term_tag(t);
   if (tag == TAG_TEN) {
@@ -447,8 +387,8 @@ fn i32 term_device_in(Term t) {
   u64 loc = term_val(t);
   if (op == UOP_COPY) {
     i32 dev = uop_copy_device(loc);
-    if (dev >= 0) return dev;                 // explicit target
-    return term_device_in(heap_read(loc));    // generic: follow src
+    if (dev >= 0) return dev;
+    return term_device_in(heap_read(loc));    // a generic COPY: follow src
   }
   u8 ar = uop_arity((u8)op);
   for (u8 i = 0; i < ar; i++) {
@@ -476,21 +416,17 @@ typedef struct {
   u8   reduce_axes[MAX_DIM];
 } ReduceChainInfo;
 
-// Returns u64 so shapes whose product exceeds 2^32 (e.g. BS=512
-// conv-bwd dInput at [32,800,204800] = 5.24e9 elements) don't get
-// truncated.  The cast-to-u32 it formerly performed silently
-// overflowed; callers now read u64 and gate u32-typed downstream
-// fields explicitly.
+// u64: a numel can pass 2^32, so callers range-check before narrowing.
 static u64 shape_numel_u32(Shape const *s) {
   u64 n = 1;
   for (u32 i = 0; i < s->ndim; i++) n *= (u64)s->dims[i];
   return n;
 }
 
-// Collapses a chain of same-kind reductions into the equivalent
-// single contiguous-axis UOP_REDUCE.  For SUM, require the original
-// axes to be consumed from inner to outer so the fused loop
-// preserves the old row-major addition order.
+// Describes in *out the single REDUCE equivalent to the chain of same-kind
+// REDUCEs at root, which visit() (materialize.c) then emits as one kernel;
+// 0 when there is none.  A SUM chain must consume its axes inner to outer,
+// so the fused loop keeps the chain's row-major addition order.
 static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
   memset(out, 0, sizeof(*out));
   root = term_resolve(root);
@@ -508,12 +444,8 @@ static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
     u32 k = (u32)term_val(k_term);
     if (kind == 0xFFFFFFFFu) kind = k;
     else if (kind != k) return 0;
-    // Multi-axis REDUCE: flatten every axis of this REDUCE into the
-    // chain in the OUTER-to-INNER order matching how a chain of
-    // single-axis REDUCEs would list its outer-most-first.  The current
-    // representation packs axes within one REDUCE in builder order; for
-    // the SUM-fusion preservation check we treat them as a contiguous
-    // block.
+    // A multi-axis REDUCE adds its axes in builder order, as one block of
+    // the outer-to-inner list.
     u32 cur_n = uop_reduce_n_axes(cur);
     for (u32 ai = 0; ai < cur_n; ai++) {
       if (n >= MAX_DIM) return 0;
@@ -562,16 +494,9 @@ static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
     if (removed[i] >= MAX_DIM || seen[removed[i]]) return 0;
     seen[removed[i]] = 1;
   }
-  // Fusion contract: the rangeify body emit (src/schedule/rangeify.c)
-  // collapses a multi-axis reduce into ONE flattened reduce RANGE of
-  // extent prod(per-axis extents) and relies on row-major arithmetic
-  // to visit the (r0 * ext1 * ... + r1 * ... + rk) block.  That trick
-  // only stays correct when the reduced axes are the CONTIGUOUS
-  // TRAILING axes of the pre-reduce input -- otherwise the inner
-  // address computation skips the non-reduced axis sandwiched between
-  // reduced ones.  For non-trailing or non-contiguous reduce chains
-  // (e.g. batchnorm's reduce(B,H,W) over {B,C,H,W} = axes {0,2,3}),
-  // fall back to one kernel per reduce.
+  // Only a chain over the contiguous trailing axes of its source fuses
+  // (batchnorm's reduce over axes {0,2,3} of {B,C,H,W} does not); any other
+  // chain emits one kernel per REDUCE.
   if (max_axis - min_axis + 1 != n) return 0;
   if (max_axis != src_shape.ndim - 1) return 0;
 

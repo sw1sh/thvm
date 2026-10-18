@@ -1,24 +1,19 @@
-// schedule/kernel_custom.c - raw custom-kernel injection bridge.
+// schedule/kernel_custom.c - raw custom-kernel injection.
 //
-// Lets a caller (the WL TKernel[<|"Program" -> ...|>] surface, or a C
-// test) register a hand-written kernel source as a first-class
-// KernelEntry and fire it through the normal backend dispatch, so it
-// records into JIT capture and replays exactly like a scheduler-emitted
-// kernel.  Mirrors tinygrad's raw Ops.PROGRAM path (uop/ops.py
-// ProgramInfo.from_sink: name/global_size/local_size/outs/ins;
-// tensor.py Tensor.custom_kernel), including the critical outs contract
-// from codegen/__init__.py do_to_program: a raw program must carry an
-// explicit set of WRITTEN buffers, else the memory planner treats its
-// scratch as dead and recycles it mid-stream (the tinygrad outs=()
-// graph-replay race).
+// Registers a hand-written kernel source (the WL TKernel[<|"Program" -> ...|>]
+// surface, or a C test) as a KernelEntry that fires through the normal backend
+// dispatch, so JIT capture records and replays it like a scheduler kernel.
+// tinygrad's analogue is a raw Ops.PROGRAM given to Tensor.custom_kernel
+// (tensor.py:159).  A raw program must name the buffers it writes, else the
+// planner may recycle one of them mid-replay; tinygrad assumes every buffer
+// when it cannot infer the writes (uop/ops.py:1375).
 //
 // Contract:
 //   - Every argument buffer (read or written) occupies one input slot
 //     (input_tids[i]); custom_outs_mask marks the written slots and
-//     output_tid mirrors the first written slot.
-//   - Arguments must be realized, contiguous, offset-0 leaf tensors on
-//     one backend (the WL layer realizes/contiguizes before calling,
-//     the same coercion tinygrad's custom_kernel applies).
+//     output_tid is the tensor of out_slots[0].
+//   - Arguments must be live, contiguous, offset-0 leaf tensors on one
+//     backend; the WL layer realizes each one first.
 //   - The source ABI is per backend:
 //       CPU:   void <name>(void *const *bufs, unsigned const *grid,
 //                          unsigned const *block);
@@ -27,10 +22,11 @@
 //       CUDA:  extern "C" __global__ void <name>(T *arg0, T *arg1, ...);
 //              launched with grid[3] x block[3] blocks/threads and
 //              custom_shared_bytes of dynamic shared memory.
-//   - Firing is explicit (kernel_custom_fire): no producer_kid is set,
-//     so lazy graphs never re-fire an injected kernel behind the
-//     caller's back; downstream reads see the written bytes as plain
-//     TAG_TEN leaves.
+//       Metal: kernel <name> with argument slot i at [[buffer(i)]],
+//              dispatched as grid[3] threadgroups of block[3] threads.
+//   - Firing is explicit (kernel_custom_fire): no producer_kid is set, so
+//     a lazy graph never re-fires an injected kernel; downstream reads see
+//     the written bytes as plain TAG_TEN leaves.
 
 // The outs mask (custom_outs_mask) is a u64 bit set, so an injected
 // kernel takes at most 64 buffer arguments.
@@ -46,8 +42,7 @@ static int kernel_custom_arg_ok(u32 tid) {
   return td->nviews == 0 && td->view.contiguous && td->view.offset == 0;
 }
 
-// Register a raw program as a fresh KernelEntry.  Returns the kid, or 0
-// on validation failure (message on stderr names the reason).
+// Returns the new kid, or 0 when validation fails (stderr says why).
 fn u32 kernel_emit_custom_program(char const *name, char const *source,
                                   u32 const grid[3], u32 const block[3],
                                   u32 const *arg_tids, u32 n_args,
@@ -131,11 +126,9 @@ fn u32 kernel_emit_custom_program(char const *name, char const *source,
   return kid;
 }
 
-// Argument-slot index of the first written buffer (bit position of the
-// lowest set outs bit).  Backends override this slot's bound pointer
-// with the dispatch-provided out_buf_id, which is authoritative at JIT
-// replay (input rebinding / planner redirects rewrite out_buf_id, not
-// the mirrored input slot).
+// The slot of the lowest set outs bit.  Backends bind out_buf_id there in
+// place of the slot's own buffer: at JIT replay, input rebinding and planner
+// redirects rewrite out_buf_id, not the mirrored input slot.
 fn u32 kernel_custom_primary_out_slot(KernelEntry const *ke) {
   u64 m = ke->custom_outs_mask;
   u32 slot = 0;
@@ -143,10 +136,8 @@ fn u32 kernel_custom_primary_out_slot(KernelEntry const *ke) {
   return slot;
 }
 
-// Fire an injected kernel once: resolve live buffer ids, record into an
-// active JIT capture, dispatch on the arguments' backend.  The dispatch
-// core of kernel_fire_by_id (interact/uop_kernel.c) without its
-// fire-generation memos: an explicit custom fire always executes.
+// The dispatch core of kernel_fire_by_id (interact/uop_kernel.c) without
+// its fire-generation memos, so an explicit custom fire always executes.
 // Returns 0 on success, -1 on any failure.
 fn int kernel_custom_fire(u32 kid) {
   if (kid == 0 || kid >= KERNELS_NEXT) return -1;
@@ -157,9 +148,8 @@ fn int kernel_custom_fire(u32 kid) {
     return -1;
   }
 
-  // Depth-first: populate any lazy input produced by a scheduler kernel
-  // (mirrors kernel_fire_by_id's producer walk; a fresh scope gives the
-  // walk its own fire generation).
+  // Fill lazy inputs first, as kernel_fire_by_id's producer walk does; the
+  // scope gives the walk its own fire generation.
   kernel_fire_scope_begin();
   for (u32 i = 0; i < ke->n_inputs; i++) {
     u32 tid = ke->input_tids[i];
@@ -183,25 +173,15 @@ fn int kernel_custom_fire(u32 kid) {
   }
   u32 out_buf_id = TENS[ke->output_tid].buf_id;
 
-  // JIT capture hook: record (kid, args, primary out) BEFORE the
-  // dispatch, exactly as kernel_fire_by_id does.  The capture layer
-  // recognises the custom kid and holds every argument buffer for the
-  // planner (see jit_dispatch_op_custom in jit/capture.c).
+  // Record before the dispatch, as kernel_fire_by_id does; the capture keeps
+  // every argument of a custom op live (jit_dispatch_op_custom, jit/capture.c).
   if (jit_is_capturing()) {
     jit_capture_record(kid, in_buf_ids, ke->n_inputs, out_buf_id);
   }
 #ifdef THVM_HAS_METAL
-  // Metal trace-capture double-run guard -- the Metal-side analog of the
-  // CPU/CUDA fix 0b09b8e1, mirroring interact/uop_kernel.c.  Under
-  // THVM_JIT_TRACE_CAPTURE the recording pass records the op stream and SKIPS
-  // the eager submit; jit_capture_end_common then runs ONE finalize replay
-  // (metal_custom_dispatch per recorded custom kid) to fill the buffers.  A
-  // custom kernel carries no lifted DAG to route-classify, but it IS
-  // re-dispatched by that replay, so skipping the eager submit here makes an
-  // in-place custom kernel (rope_dev / len_bump / cache_append) run ONCE per
-  // captured step, not twice -- twice corrupts the DeepSeekV2 decode (rope
-  // rotated twice, device position bumped by two).  The write-record still
-  // fires so downstream kernels re-record; only the GPU submit is deferred.
+  // Metal trace capture (THVM_JIT_TRACE_CAPTURE), as in kernel_fire_by_id:
+  // record the writes but skip the submit, since jit_capture_end_common's
+  // finalize replay dispatches this kernel; an in-place one would run twice.
   if (b == &METAL_BACKEND && jit_capture_trace_pending()) {
     jit_capture_note_trace_skip();
     for (u32 i = 0; i < ke->n_inputs; i++) {
@@ -217,16 +197,15 @@ fn int kernel_custom_fire(u32 kid) {
   int rc = b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
   if (rc != 0) return -1;
 
-  // Precise-fire-memo bookkeeping: every WRITTEN argument invalidates
-  // downstream kernels' skip decision, the same signal a scheduler
-  // kernel's output write leaves (uop_kernel.c kernel_assign_write_record).
+  // Each written argument voids downstream kernels' precise-fire-memo skip,
+  // as a scheduler kernel's output write does.
   for (u32 i = 0; i < ke->n_inputs; i++) {
     if (ke->custom_outs_mask & (1ull << i)) {
       kernel_assign_write_record(b, in_buf_ids[i]);
     }
   }
-  // Realize-boundary drain (CUDA cuCtxSynchronize; NULL on CPU) so an
-  // eager caller can read the written buffers immediately.
+  // Drain (cuCtxSynchronize on CUDA) so an eager caller can read the
+  // written buffers at once.
   if (b->dispatch_end != NULL) b->dispatch_end();
 
   ITRS++;

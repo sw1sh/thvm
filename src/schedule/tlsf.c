@@ -1,25 +1,20 @@
-// schedule/tlsf.c - Two-Level Segregated Fit allocator.
+// schedule/tlsf.c - Two-Level Segregated Fit (TLSF) allocator.
 //
-// Faithful C port of tinygrad/runtime/support/memory.py TLSFAllocator
-// (lines 14-106).  Used by the per-realize arena memory planner
-// (schedule/mem_plan.c) to assign each plannable buffer an offset
-// into a shared arena: non-overlapping lifetimes share bytes.
-//
-// First level: MSB(size).  Second level: TLSF_LV2_CNT linear bins
-// within each lv1 covering the [2^(b-1), 2^b) range.  alloc() picks
-// the smallest-bucket-first non-empty block; free() merges with
-// adjacent free neighbours via a doubly-linked physical-block list.
-//
-// Single-pass usage: tlsf_init(...) -> alloc/free pairs in event
-// order -> tlsf_dispose().  All storage is owned by the allocator
-// (no caller-side block ids).
+// Port of tinygrad's TLSFAllocator (runtime/support/memory.py:23-115),
+// without alignment or a base address.  arena_compute (materialize.c)
+// uses it to give each plannable buffer an offset in one shared arena, so
+// buffers with disjoint lifetimes share bytes.  The first level is
+// bit_length(size), the second a linear split of [2^(b-1), 2^b); alloc
+// takes the smallest non-empty fitting bin and free merges with free
+// physical neighbours.
 
-// tinygrad memory.py:24 block_size=16; thvm uses 256 to match the
-// caller (mem_plan.c rounds nbytes up to TLSF_BLOCK_SIZE per buf).
-// 256B matches tinygrad/schedule/memory.py:41 block_size=256.
+// tinygrad's planner builds TLSFAllocator(block_size=256, lv2_cnt=32)
+// (schedule/memory.py:41-48); its l2_cnt is lv2_cnt.bit_length() = 6
+// (runtime/support/memory.py:34).  TLSF_L2_BITS is 5, so lv2 < 16 and
+// bins 16..31 stay empty.
 #define TLSF_BLOCK_SIZE 256u
-#define TLSF_LV2_CNT    32u                 // tinygrad memory.py:24 lv2_cnt=32
-#define TLSF_L2_BITS    5u                  // log2(TLSF_LV2_CNT)
+#define TLSF_LV2_CNT    32u
+#define TLSF_L2_BITS    5u
 #define TLSF_LV1_MAX    64u                 // bit_length of u64 size
 #define TLSF_INVALID    0xFFFFFFFFu
 
@@ -47,10 +42,8 @@ typedef struct {
   u32       lv1_count[TLSF_LV1_MAX];
 } TlsfAllocator;
 
-// --- bit_length / lv1 / lv2 helpers (tinygrad memory.py:34-37) ---
-
+// Python's int.bit_length.
 static u32 tlsf_bit_length(u64 v) {
-  // Position of highest set bit + 1 (Python's int.bit_length).
   if (v == 0) return 0;
   u32 b = 0;
   while (v) { b++; v >>= 1; }
@@ -62,10 +55,9 @@ static u32 tlsf_lv1(u64 size) { return tlsf_bit_length(size); }
 static u32 tlsf_lv2(u64 size) {
   u32 bl = tlsf_bit_length(size);
   if (bl == 0) return 0;
-  u32 base = bl - 1u;                       // MSB position
+  u32 base = bl - 1u;
   u64 msb_val = 1ULL << base;
-  // tinygrad: (size - (1 << (bl-1))) // (1 << max(0, bl - l2_cnt))
-  // where l2_cnt = lv2_cnt.bit_length() = 5 for lv2_cnt=32 (line 25).
+  // memory.py:46 lv2: (size - (1 << (bl-1))) // (1 << max(0, bl - l2_cnt))
   u32 shift = bl > TLSF_L2_BITS ? bl - TLSF_L2_BITS : 0u;
   return (u32)((size - msb_val) >> shift);
 }
@@ -74,8 +66,6 @@ static u64 tlsf_round_up(u64 v, u64 align) {
   if (align == 0) return v;
   return (v + align - 1) / align * align;
 }
-
-// --- slot allocator (over TlsfBlock pool) ---
 
 static u32 tlsf_block_new(TlsfAllocator *a) {
   u32 id;
@@ -99,8 +89,6 @@ static void tlsf_block_free_slot(TlsfAllocator *a, u32 id) {
   a->blocks[id].alive = 0;
   a->free_slots[a->free_slot_top++] = id;
 }
-
-// --- bin ops (singly-linked free list per (lv1,lv2)) ---
 
 static void tlsf_bin_insert(TlsfAllocator *a, u32 bid) {
   TlsfBlock *b = &a->blocks[bid];
@@ -136,12 +124,8 @@ static void tlsf_bin_remove(TlsfAllocator *a, u32 bid) {
   exit(1);
 }
 
-// --- block split / merge (mirrors memory.py:53-75) ---
-
-// Split bid (must be free, with size > new_size) into two adjacent
-// free blocks: bid keeps [start, start+new_size) at new_size; a new
-// block covers [start+new_size, start+size) at (size - new_size).
-// Reorders the bins for bid (size changed) and inserts the new tail.
+// Splits free block bid (size > new_size) into two adjacent free blocks,
+// bid keeping the first new_size bytes (memory.py:62-67 _split_block).
 static void tlsf_split(TlsfAllocator *a, u32 bid, u64 new_size) {
   TlsfBlock *b = &a->blocks[bid];
   u64 old_size = b->size;
@@ -156,15 +140,14 @@ static void tlsf_split(TlsfAllocator *a, u32 bid, u64 new_size) {
   tail->prev  = bid;
   tail->next  = old_next;
   tlsf_bin_insert(a, tail_id);
-  // Wire up prev pointer of the original next neighbour (if any).
   if (old_next != TLSF_INVALID) {
     a->blocks[old_next].prev = tail_id;
   }
   a->blocks[bid].next = tail_id;
 }
 
-// Merge bid with any free neighbour to the right; repeats while
-// right neighbour is free.  bid must remain free (its is_free unchanged).
+// Absorbs every free block to the right of free block bid
+// (memory.py:69-79 _merge_right).
 static void tlsf_merge_right(TlsfAllocator *a, u32 bid) {
   TlsfBlock *b = &a->blocks[bid];
   if (!b->is_free) return;
@@ -183,8 +166,8 @@ static void tlsf_merge_right(TlsfAllocator *a, u32 bid) {
   }
 }
 
-// Walk left while neighbours are free, then merge right from there.
-// Mirrors memory.py:72-75 _merge_block.
+// Walk left while neighbours are free, then merge right from there
+// (memory.py:81-84 _merge_block).
 static void tlsf_merge_block(TlsfAllocator *a, u32 bid) {
   while (a->blocks[bid].prev != TLSF_INVALID
          && a->blocks[a->blocks[bid].prev].is_free) {
@@ -193,10 +176,7 @@ static void tlsf_merge_block(TlsfAllocator *a, u32 bid) {
   tlsf_merge_right(a, bid);
 }
 
-// --- public API ---
-
-// Initialise with total bytes available.  After init, one big free
-// block covers [0, total).
+// After init one free block covers [0, total).
 static void tlsf_init(TlsfAllocator *a, u64 total) {
   memset(a, 0, sizeof(*a));
   for (u32 l1 = 0; l1 < TLSF_LV1_MAX; l1++) {
@@ -212,14 +192,13 @@ static void tlsf_init(TlsfAllocator *a, u64 total) {
   tlsf_bin_insert(a, root);
 }
 
-// Released only when memset-init is overwritten; keep tiny.
+// The storage is inline in the allocator, so there is nothing to release.
 static void tlsf_dispose(TlsfAllocator *a) {
   (void)a;
 }
 
-// Look up a free block by start address (linear scan; only used by
-// tlsf_free, which is called once per buffer at end-of-lifetime).
-// O(n_blocks) but n_blocks is small (<= 2 * n_buffers).
+// The live block starting at `start`, by linear scan (tlsf_free runs once
+// per buffer).
 static u32 tlsf_find_by_start(TlsfAllocator *a, u64 start) {
   for (u32 i = 0; i < a->n_blocks; i++) {
     if (!a->blocks[i].alive) continue;
@@ -228,12 +207,12 @@ static u32 tlsf_find_by_start(TlsfAllocator *a, u64 start) {
   return TLSF_INVALID;
 }
 
-// Allocate `req_size` bytes.  Returns the offset (>= 0); on OOM
-// returns (u64)-1.  Mirrors memory.py:77-103.
+// The offset of a fresh `req_size`-byte block, or (u64)-1 when none fits
+// (memory.py:86-112 alloc).
 static u64 tlsf_alloc(TlsfAllocator *a, u64 req_size) {
   if (req_size < TLSF_BLOCK_SIZE) req_size = TLSF_BLOCK_SIZE;
-  u64 size = req_size;                      // no alignment beyond block_size
-  // Round up to the next bucket so any entry there can fit (line 82).
+  u64 size = req_size;
+  // Round up to the next bucket so any entry there can fit (memory.py:91).
   u32 size_bl = tlsf_bit_length(size);
   u32 round_shift = size_bl > TLSF_L2_BITS ? size_bl - TLSF_L2_BITS : 0u;
   u64 round_align = 1ULL << round_shift;
@@ -241,28 +220,24 @@ static u64 tlsf_alloc(TlsfAllocator *a, u64 req_size) {
 
   u32 start_l1 = tlsf_lv1(size);
   u32 start_l2 = tlsf_lv2(size);
-  // tinygrad memory.py:87 uses size.bit_length() to gate the l2 floor;
-  // post-round-up size's bit_length matches start_l1, so the floor only
-  // applies at l1 == start_l1 (deeper l1 buckets cover bigger ranges).
+  // Only size's own first level starts at its lv2 bin (memory.py:96).
   for (u32 l1 = start_l1; l1 < TLSF_LV1_MAX; l1++) {
     if (a->lv1_count[l1] == 0) continue;
     u32 l2_start = (l1 == start_l1) ? start_l2 : 0u;
     for (u32 l2 = l2_start; l2 < TLSF_LV2_CNT; l2++) {
       u32 bid = a->bins[l1][l2];
       if (bid == TLSF_INVALID) continue;
-      // Found smallest fitting block.
       if (a->blocks[bid].size > req_size) {
         tlsf_split(a, bid, req_size);
       }
-      // Re-fetch bid (split may have re-binned it but bid is unchanged).
       tlsf_bin_remove(a, bid);
       return a->blocks[bid].start;
     }
   }
-  return (u64)-1;                           // OOM
+  return (u64)-1;
 }
 
-// Free a previously-allocated offset.  Mirrors memory.py:105-106.
+// memory.py:114-115 free, plus unknown-offset and double-free checks.
 static void tlsf_free(TlsfAllocator *a, u64 start) {
   u32 bid = tlsf_find_by_start(a, start);
   if (bid == TLSF_INVALID) {

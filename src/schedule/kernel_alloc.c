@@ -1,15 +1,9 @@
-// schedule/kernel_alloc.c - reserve a fresh KernelEntry slot.
+// schedule/kernel_alloc.c - KernelEntry slot allocation.
 //
-// Bump-only allocation in KERNELS[] (no freelist, no kernel-cache
-// keyed by signature yet).  Each materialized kernel gets its own
-// slot regardless of structural duplication; a future content-
-// addressed cache could dedup but doesn't yet.
-//
-// KernelEntry's input arrays are heap-allocated pointers that grow
-// on demand via kernel_inputs_reserve.  This was originally a fixed
-// [64] inline layout; deeply-nested chain-rule output (e.g.
-// nth-order TGrad) blew past that cap and bailed materialize.
-// Heap arrays grow geometrically, free on dealloc.
+// KERNELS[] is bump-allocated: every materialized kernel gets its own
+// slot, with no freelist and no dedup of structurally equal kernels.
+// The per-input arrays live on the C heap and grow geometrically, since
+// nested chain-rule output can feed one kernel many inputs.
 
 fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
   if (needed <= ke->inputs_cap) return;
@@ -25,13 +19,10 @@ fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
   ke->input_numels = (u32  *)realloc(ke->input_numels, (size_t)new_cap * sizeof(u32));
   ke->input_terms  = (Term *)realloc(ke->input_terms,  (size_t)new_cap * sizeof(Term));
   ke->input_views  = (View *)realloc(ke->input_views,  (size_t)new_cap * sizeof(View));
-  // Per-slot ShapeTracker-chain composed flag (set by rangeify when it
-  // folds the prior_views chain into the kernel INDEX; the CPU / Metal
-  // backends gate the per-input pre-mat skip on it).
   ke->input_chain_composed = (u8 *)realloc(
       ke->input_chain_composed, (size_t)new_cap * sizeof(u8));
-  // Zero new tail so unused slots stay clean (matters for input_tids=0
-  // sentinel and input_terms=0 sentinel).
+  // Zero the new tail: 0 is the no-tensor sentinel of input_tids and
+  // input_terms.
   for (u32 i = ke->inputs_cap; i < new_cap; i++) {
     ke->input_tids  [i] = 0;
     ke->input_dtypes[i] = 0;
@@ -41,15 +32,13 @@ fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
     memset(&ke->input_views[i], 0, sizeof(View));
   }
   ke->inputs_cap = new_cap;
-  // The lift's per-input table grows with the slots it mirrors, so an
-  // input slot added after the lift (the unified rewrite's extend path)
-  // always has a lift slot.
+  // Keep the lift's table as long as the slot arrays, so a slot added
+  // after the lift (the unified rewrite's extend path) has a lift slot.
   kernel_lift_reserve(&ke->cached_lift, new_cap);
 }
 
-// Free the heap-allocated arrays in a KernelEntry; reset counts and
-// caps to zero.  Call when releasing a kernel slot or resetting the
-// runtime context.  Safe to call repeatedly (NULL-tolerant).
+// Frees the entry's heap arrays and resets its counts and caps; safe to
+// call repeatedly.
 fn void kernel_free_arrays(KernelEntry *ke) {
   free(ke->input_tids);   ke->input_tids   = NULL;
   free(ke->input_dtypes); ke->input_dtypes = NULL;
@@ -61,12 +50,10 @@ fn void kernel_free_arrays(KernelEntry *ke) {
   free(ke->custom_name);    ke->custom_name    = NULL;
   ke->n_inputs   = 0;
   ke->inputs_cap = 0;
-  // Invalidate the cached lift so a later re-fire of this stripped slot
-  // no-ops cleanly.  cpu_uop_walk keys its input count off
-  // cached_lift.n_inputs (not ke->n_inputs) and declines when
-  // store_root==0; without this a GC-stripped kernel reached via a
-  // stale TenDesc.producer_kid would walk the dangling lift with
-  // freed input arrays and read uninitialised buffer ids.
+  // A GC-stripped kernel can still be reached through a stale
+  // producer_kid.  cpu_uop_walk sizes its inputs by cached_lift.n_inputs
+  // and declines on store_root == 0, so clearing the lift makes that
+  // re-fire a no-op instead of a read of freed arrays.
   kernel_lift_release(&ke->cached_lift);
 }
 
@@ -77,20 +64,15 @@ fn u32 kernel_alloc(void) {
     exit(1);
   }
   u32 id = KERNELS_NEXT++;
-  // Free any heap arrays from a previous owner of this slot (the
-  // ctx free path zero's KERNELS, but a kernel_dealloc_last that
-  // didn't run would leave them dangling otherwise).  Then zero
-  // the entry; pointer fields become NULL, so reserve will alloc
-  // fresh on first growth.
+  // A rewound slot keeps its previous owner's fields (thvm_reset frees
+  // the arrays but does not zero the entry), so free and zero it.
   kernel_free_arrays(&KERNELS[id]);
   memset(&KERNELS[id], 0, sizeof(KernelEntry));
   return id;
 }
 
-// Release the most-recently-allocated kernel slot when a tentative
-// emit (e.g. materialize_kernel_inlined's bail path) decides not
-// to use it.  No-op if `kid` isn't the head of the bump pointer
-// (some other allocation happened in between).
+// Gives back the newest slot when a tentative emit (emit_kernel_for_boundary
+// bailing) does not use it; a no-op unless `kid` is the last slot.
 fn void kernel_dealloc_last(u32 kid) {
   if (kid == 0) return;
   if (kid + 1 != KERNELS_NEXT) return;
