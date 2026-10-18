@@ -1,21 +1,5 @@
-// eval_collapse -- enumerate all pure terms reachable through SUP
-// branches in a term.  Mirrors HVM4 clang/eval/collapse.c stripped
-// of the parallel work-stealing queue: single-threaded FIFO walk
-// over a key-priority queue with INC reducing the key (higher
-// priority) and SUP increasing it (lower priority).
-//
-// At each step:
-//   1. cnf the term to surface a SUP/ERA/INC/(pure) head.
-//   2. SUP -> push both branches with key+1.
-//   3. ERA -> drop the branch.
-//   4. INC -> unwrap and re-push at key-1 (higher priority).
-//   5. otherwise -> append to the output list.
-//
-// The output array has at most `cap` slots; further leaves are
-// dropped silently.  Returns the count actually written.
-//
-// Loaded after wnf/_.c and cnf/_.c (single-TU build) so cnf() and
-// the heap helpers are visible.
+// HVM4's eval/collapse.c without its work-stealing priority queue (Wspq): SUP
+// tree leaves in key order; a SUP raises the key by one, an INC lowers it.
 
 #define EVAL_COLLAPSE_QUEUE_CAP 65536u
 
@@ -33,9 +17,8 @@ static int eval_collapse_cmp(const void *a, const void *b) {
   return 0;
 }
 
-// Single-threaded SUP-tree enumeration on top of cnf.  Walks every
-// branch FIFO ordered by INC priority and writes pure leaves into
-// `out`.  Returns the count actually written, capped at `cap`.
+// Writes at most `cap` leaves to `out` and returns the count; popped slots are
+// not reused, so the walk stops once it has pushed the queue's cap in all.
 fn u64 eval_collapse(Term term, Term *out, u64 cap) {
   if (cap == 0) return 0;
   EvalCollapseTask *q = (EvalCollapseTask *)
@@ -51,11 +34,8 @@ fn u64 eval_collapse(Term term, Term *out, u64 cap) {
   q_tail++;
 
   while (q_head < q_tail && count < cap) {
-    // Sort the slice [q_head, q_tail) so the smallest-key task pops
-    // first.  Sorting per round is O(n log n); for the workloads we
-    // care about (single hundreds of branches) this is fine.  HVM4
-    // uses a Wspq deque keyed by priority; we trade simpler code for
-    // O(n log n) per round.
+    // A sort per pop stands in for HVM4's priority deque: simpler, at
+    // O(n log n) a pop.
     qsort(&q[q_head], q_tail - q_head, sizeof(EvalCollapseTask),
           eval_collapse_cmp);
     EvalCollapseTask t = q[q_head++];
@@ -75,7 +55,7 @@ fn u64 eval_collapse(Term term, Term *out, u64 cap) {
         break;
       }
       case TAG_ERA: {
-        // Drop the branch -- failed search.
+        // a failed branch
         break;
       }
       case TAG_INC: {

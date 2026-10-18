@@ -1,23 +1,15 @@
-// util/portable_win.h - Win32 shims for the CPU-only Windows paclet
-// cross-build (zig cc -target x86_64-windows-gnu).
+// Win32 shims for the CPU-only Windows paclet cross-build (zig cc -target
+// x86_64-windows-gnu), whose mingw CRT lacks these POSIX calls. thvm.h includes
+// this after the system headers; off _WIN32 it is empty.
 //
-// mingw's CRT lacks the POSIX/glibc functions the runtime calls.  This
-// header maps them to their Win32 equivalents.  It is included only
-// under _WIN32 (from thvm.h, after the system headers); the macOS and
-// Linux builds never see it.
-//
-// GPU backends never compile on Windows (Metal is Apple-only Objective-C;
-// CUDA is Linux-gated), and the CPU JIT's compile+dlopen step degrades
-// gracefully to the interpreter when no compiler is on the box -- so the
-// dlopen/popen shims exist to satisfy the link, and run only if a user
-// has clang on PATH.
+// No GPU backend builds here, and the CPU JIT falls back to the interpreter
+// without a compiler, so the dlopen/popen shims run only when clang is on PATH.
 #ifndef THVM_PORTABLE_WIN_H
 #define THVM_PORTABLE_WIN_H
 #ifdef _WIN32
 
-// Trim windows.h: WIN32_LEAN_AND_MEAN drops winsock (whose
-// `#define s_addr ...` would clobber the runtime's `Term s_addr`
-// locals); NOMINMAX/NOGDI drop the min/max macros and GDI symbols.
+// Trim windows.h so its macros (winsock's s_addr, min, max) and GDI names stay
+// out of the runtime's identifiers.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #define NOGDI
@@ -27,7 +19,6 @@
 #include <malloc.h>
 #include <time.h>
 
-// --- dlopen family -> LoadLibrary / GetProcAddress ---
 #define RTLD_NOW   0
 #define RTLD_LOCAL 0
 static inline void *dlopen(const char *path, int flags) {
@@ -42,20 +33,14 @@ static inline int dlclose(void *handle) {
 }
 static inline char *dlerror(void) { return NULL; }
 
-// --- process + string helpers ---
 #define popen  _popen
 #define pclose _pclose
 #define strdup _strdup
 
-// --- mkdir(path, mode): Win32 _mkdir takes no mode ---
 #define mkdir(path, mode) _mkdir(path)
 
-// --- posix_memalign: the only caller (util/wsq.c) frees with plain
-//     free(), so we must NOT use _aligned_malloc (which would require
-//     _aligned_free).  Use malloc and ignore the alignment request --
-//     it is a cache-line false-sharing optimisation for the parallel
-//     work-stealing deque, not a correctness requirement, so a CPU-only
-//     Windows build trades a little false-sharing for a portable free. ---
+// malloc, not _aligned_malloc: the one caller (util/wsq.c) frees with free(),
+// and the alignment only spares false sharing.
 static inline int posix_memalign(void **memptr, size_t alignment, size_t size) {
   (void)alignment;
   void *p = malloc(size);
@@ -64,7 +49,6 @@ static inline int posix_memalign(void **memptr, size_t alignment, size_t size) {
   return 0;
 }
 
-// --- sysconf(_SC_NPROCESSORS_ONLN) -> GetSystemInfo ---
 #ifndef _SC_NPROCESSORS_ONLN
 #define _SC_NPROCESSORS_ONLN 1
 #endif
@@ -75,8 +59,8 @@ static inline long sysconf(int name) {
   return (long)si.dwNumberOfProcessors;
 }
 
-// clock_gettime + CLOCK_MONOTONIC and <sys/time.h>/gettimeofday come
-// from zig's bundled mingw (winpthreads), so they are not shimmed here.
+// zig's bundled mingw (winpthreads) supplies clock_gettime, CLOCK_MONOTONIC and
+// gettimeofday, so they need no shim.
 
 #endif  // _WIN32
 #endif  // THVM_PORTABLE_WIN_H

@@ -1,17 +1,5 @@
-// thvm_collapse: enumerate the SUP-tree of a term.
-//
-// Walks the SUP at the head of `t`.  At each step:
-//   - CNF the term to surface the head (lifts SUPs through compound
-//     nodes, fires DUP-XXX during readback).
-//   - If the head is TAG_SUP, recurse on heap[loc+0] and heap[loc+1].
-//   - If the head is TAG_ERA, drop the branch (failed search).
-//   - Otherwise, append the term to `out`.
-//
-// Returns the number of leaves written to `out`, capped at `cap`.
-//
-// Uses cnf rather than plain wnf so children with DP-rooted heads
-// (Levy-opaque under wnf since the Phase 1 + 2 readback split) get
-// driven through their dup interactions before the walk decides.
+// cnf, not wnf, so a DP-headed child (Levy-opaque under wnf) fires its DUP
+// before the walk branches on its head.
 static u64 collapse_walk(Term t, Term *out, u64 cap, u64 count) {
   if (count >= cap) return count;
   Term w = cnf(t);
@@ -34,13 +22,8 @@ static u64 collapse_walk(Term t, Term *out, u64 cap, u64 count) {
   }
 }
 
-// Enumerate the SUP-tree of a term.  Walks via WNF; on TAG_SUP at the
-// head, recurses into both branches; TAG_ERA branches are dropped.
-// Returns the number of leaves written into `out`, capped at `cap`.
-//
-// "Shallow" collapse: only follows SUPs the WNF has surfaced to the
-// head.  Deep enumeration through APP / OP2 / EQL / ... lands as those
-// SUP-commutation interactions are added.
+// The leaves of t's SUP tree in DFS order, ERA branches dropped; returns how
+// many were written to `out` (at most `cap`).
 fn u64 thvm_collapse(Term t, Term *out, u64 cap) {
   return collapse_walk(t, out, cap, 0);
 }

@@ -1,13 +1,6 @@
-// term/stack_grow.c - work stack of an iterative term walk.
-//
-// A walk over a term keeps its pending frames in a small array on the C
-// stack (`inl`) and moves them to the heap only when the term is deeper
-// than that array.  Depth then costs heap memory, never C stack: a
-// recursive walk over a 100k-deep term overflows the 8 MB main stack.
-
-// Work stack of an iterative term walk: `buf` starts as the caller's
-// inline array `inl` of *cap entries of `esz` bytes; grow doubles it
-// onto the heap (updating *cap), release frees a heap block.
+// Work stack of an iterative term walk, so depth costs heap, not C stack: `buf`
+// starts as the caller's inline array `inl` (*cap entries of `esz` bytes); grow
+// doubles it onto the heap (updating *cap), release frees a heap block.
 fn void *term_stack_grow(void *buf, const void *inl, u32 *cap, size_t esz) {
   size_t n  = (size_t)*cap;
   size_t nn = n * 2u;

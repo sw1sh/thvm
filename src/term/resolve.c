@@ -1,23 +1,5 @@
-// term/resolve.c - cheap, lazy outermost-layer resolver.
-//
-// Follows two kinds of indirection without firing reductions:
-//   - TAG_VAR with a SUB-bit cell: take the substituted value and
-//     keep walking (so a chain of beta substitutions collapses).
-//   - TAG_ALO: force one realisation layer.  alo_force itself is
-//     memoised so subsequent walks of the same ALO are cheap.
-//
-// Anything else (TAG_TEN / TAG_NUM / TAG_UOP / TAG_LAM / TAG_APP /
-// TAG_REF / TAG_MAT / TAG_OP2 / ...) is returned unchanged.  In
-// particular this DOES NOT fire materialize / kernel / grad
-// reductions -- callers that need full WHNF should still use wnf().
-//
-// Used by interact_grad and materialize_expr to expose the
-// outermost layer of `y` / `target` / `expr` so they can pattern-
-// match without invoking the wnf stack-machine.
-
-// Follows VAR (SUB-bit chain) + ALO (memoised one-layer force);
-// returns everything else unchanged.  Cheaper than wnf -- no
-// kernel / materialize / grad firing.
+// Follows a VAR or DP over a SUB cell, a grad DP0 (y passed through) and an
+// ALO (one memoised layer); unlike wnf it fires no kernel, materialize or grad.
 fn Term term_resolve(Term t) {
   for (;;) {
     u8 tag = term_tag(t);
@@ -27,23 +9,17 @@ fn Term term_resolve(Term t) {
       t = term_sub_set(cell, 0);
       continue;
     }
-    // DP0 / DP1 over a SUB-bit cell: the DUP fired earlier and
-    // heap_subst_cop wrote this projection's value into the cell.
-    // Pick it up so callers (interact_grad, materialize) see the
-    // resolved value rather than a stale projection term.
+    // The DUP fired, and heap_subst_cop left this side's value in the cell.
     if (tag == TAG_DP0 || tag == TAG_DP1) {
       Term cell = heap_read(term_val(t));
       if (term_sub_get(cell)) {
         t = term_sub_set(cell, 0);
         continue;
       }
-      // Grad-flag DP0 = pure passthrough: cell[0] holds y, no DUP
-      // ever fires.  Unwrap eagerly so higher-order chain rules
-      // (which see fwd-projections from the inner pass embedded in
-      // gy_for_a expressions) can pattern-match on the underlying
-      // term instead of getting stuck on the DP0 wrapper.
+      // A grad DP0 never fires; unwrap it to y so a higher-order chain rule
+      // can match the term under it.
       if (tag == TAG_DP0 && (term_ext(t) & DUP_GRAD_FLAG)) {
-        t = heap_read(term_val(t));   // = cell[0] = y
+        t = heap_read(term_val(t));
         continue;
       }
       return t;

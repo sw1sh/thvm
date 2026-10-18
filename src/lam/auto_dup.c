@@ -1,50 +1,17 @@
-// lam/auto_dup.c -- C-side auto-dup for LAM bodies whose binder is
-// referenced more than once.  Mirrors HVM4's parse-time
-// parse/auto_dup.c (TinyHVM/HVM4/clang/parse/auto_dup.c) but operates
-// on the post-construction heap (the body has been installed at
-// HEAP[lam_loc] before this fires).
+// Auto-dup for a LAM whose binder occurs n > 1 times, done on the built heap
+// where HVM4 does it on the parse tree (TinyHVM/HVM4/clang/parse/auto_dup.c).
 //
-// Shape of the rewrite for n VAR(lam_loc) cells in the body:
+// n-1 DUPs split the binder: D_1 holds VAR(lam_loc), D_i holds DP1(D_{i-1});
+// use i becomes DP0(D_i) and use n becomes DP1(D_{n-1}).
 //
-//   D_1.body  = VAR(lam_loc)
-//   D_i.body  = DP1(D_{i-1})            for i = 2..n-1
-//
-//   use_i     = DP0(D_i)                for i = 1..n-1
-//   use_n     = DP1(D_{n-1})
-//
-// Each VAR(lam_loc) cell is rewritten in place to its DP0/DP1
-// replacement.  When APP-LAM later fires, heap_subst_var(lam_loc, arg)
-// drops `arg` into D_1.body; the chain then projects n independent
-// copies via the existing DUP-XXX rules (dup_num, dup_ctr, dup_lam,
-// dup_sup, ...).
-//
-// Each DUP gets a distinct fresh label drawn from the second-highest
-// quartile of the 18-bit ext field (0x10000 .. 0x1FFFF) so it (a)
-// cannot collide with WL's TFreshLabel (which counts up from 1 and
-// stays in the low range in practice) and (b) does NOT set bit 17
-// (DUP_GRAD_FLAG, src/thvm.h:70), which would mark the projection as
-// a grad-flavored cell and route wnf through the chain-rule path.
-//
-// Walker is dedup'd by base loc, mirrors lam_body_uses_var.  Bails
-// conservatively (returning LAM_AUTODUP_BAIL) on TAG_REF / TAG_ALO /
-// UOP_KERNEL or oversize bodies; callers fall back to the plain
-// lam_seal_ext path which leaves any non-linear body broken under
-// reduction -- the same state thvm was in before this file landed.
-//
-// Auto-dup fires exclusively from `lam_seal_ext_with_auto_dup`, which
-// is what the WL bridge (thvm_wl_lam_seal_ext) calls.  In-runtime LAM
-// rebuilders (clone_to_book_rec, ann_lam, app_bri) keep using
-// lam_seal_ext directly: their bodies are already auto-dup'd from the
-// original construction, so re-running auto-dup would just re-walk a
-// linear body.
+// Only the WL bridge (thvm_wl_lam_seal_ext) and tests seal here; the runtime's
+// LAM rebuilders (clone_to_book_rec, ann_lam, app_bri) make linear bodies.
 
 #define LAM_AUTODUP_MAX_USES 1024
 #define LAM_AUTODUP_BAIL     ((u32)-1)
 
-// Fresh label counter for auto-dup chains.  Range chosen to avoid
-// (a) collision with WL's TFreshLabel (low values) and (b) bit 17
-// which is the DUP_GRAD_FLAG -- using that bit here would route
-// every projection through the gradient chain-rule path in wnf.
+// Labels 0x10000..0x1FFFF sit above WL's TFreshLabel counter, which counts up
+// from 1, and clear of bit 17 (DUP_GRAD_FLAG), which makes grad projections.
 #define AUTO_DUP_LABEL_BASE 0x10000u
 #define AUTO_DUP_LABEL_TOP  0x1FFFFu
 static u32 AUTO_DUP_LABEL_NEXT = AUTO_DUP_LABEL_BASE;
@@ -57,9 +24,8 @@ static u32 auto_dup_fresh_label(void) {
   return lab;
 }
 
-// Walk HEAP[lam_loc] (a LAM's body) and collect heap locations of
-// every VAR cell whose val == lam_loc.  Returns the count, or
-// LAM_AUTODUP_BAIL if the walker had to give up.
+// The body's VAR(lam_loc) cells into out_locs, left to right; returns their
+// count, or LAM_AUTODUP_BAIL on a UOP_KERNEL or a body past the walk's caps.
 static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
   static u64  visited_bases[LAM_BODY_MAX_VISITS];
   static u64  stack_locs[LAM_BODY_MAX_VISITS];
@@ -85,28 +51,18 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
       continue;
     }
 
-    // TAG_REF / TAG_ALO are closed wrt our local lam_loc by
-    // definition: a REF points at a book def whose binders are its
-    // own, and an ALO is a suspended realize-template that closes
-    // over its state_id, not our caller's lam.  Neither subtree can
-    // contain a VAR(lam_loc) cell -- so we treat them as opaque
-    // leaves in the walk.  Under Phase 1+2 (DPs opaque in wnf,
-    // duplication driven by cnf readback) recursive non-linear
-    // bodies handle their own per-call duplication correctly: each
-    // recursive invocation alo-realizes a fresh dyn DUP chain whose
-    // sibling DP0/DP1 cells share a body via alo_dup_share, and cnf
-    // fires DUP-XXX on demand without compounding across calls.
+    // A REF's or ALO's body is a book template over its own binders, never
+    // over the LAM being sealed here.
     if (tag == TAG_REF || tag == TAG_ALO) {
       continue;
     }
 
-    // UOP_KERNEL has side-table inputs (KernelEntry.input_terms) we
-    // can't see from a heap walk; bail conservatively.
+    // The walk cannot see kernel inputs (KernelEntry.input_terms).
     if (tag == TAG_UOP && term_ext(t) == UOP_KERNEL) {
       return LAM_AUTODUP_BAIL;
     }
 
-    // CTR: arity stored at val, children at val+1..val+n.
+    // CTR: [NUM(n), c_0, ..., c_{n-1}].
     if (tag == TAG_CTR) {
       u32 n = term_ctr_n(t);
       if (n == 0) continue;
@@ -117,15 +73,12 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
       if (seen) continue;
       if (v_count >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
       visited_bases[v_count++] = val;
-      // Push in REVERSE so LIFO pop walks children left-to-right,
-      // matching HVM4 parse/auto_dup.c's recursive descent.  Forward
-      // push reverses sibling visit order, which mis-assigns DP0/DP1
-      // to the wrong VAR occurrences -- a downstream label-matched
-      // DUP-SUP-ANN then pairs against the wrong arm of the source
-      // SUP and the body silently computes a non-diagonal product.
+      // Pushed in reverse so pops run left to right, as HVM4's descent does;
+      // any other order hands DP0/DP1 to the wrong uses, and DUP-SUP pairs
+      // the wrong SUP arms.
       for (u32 i = n; i > 0; i--) {
         if (s_pos >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
-        u64 cloc = val + i;   // child i-1 lives at val + 1 + (i-1) = val + i
+        u64 cloc = val + i;
         stack_locs[s_pos]  = cloc;
         stack_terms[s_pos] = heap_read(cloc);
         s_pos++;
@@ -133,8 +86,6 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
       continue;
     }
 
-    // Generic compound: arity from lam_body_arity (defined in
-    // lam/body_uses_var.c, included earlier in src/thvm.c).
     u32 ar = lam_body_arity(t);
     if (ar == 0) continue;
 
@@ -146,7 +97,7 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
     if (v_count >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
     visited_bases[v_count++] = val;
 
-    // Push in REVERSE for forward-DFS visit order (see CTR branch).
+    // Reversed, as for CTR.
     for (u32 i = ar; i > 0; i--) {
       if (s_pos >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
       u64 cloc = val + i - 1;
@@ -159,11 +110,8 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
   return found;
 }
 
-// Build the n-1 DUP chain and rewrite the n VAR cells.  Caller has
-// verified n >= 2.
+// n >= 2: builds the header's DUP chain and rewrites the n VAR cells.
 static void auto_dup_lam_at(u64 lam_loc, u64 *var_locs, u32 n) {
-  // Allocate dup body cells.  Each is a single-cell heap loc; the
-  // initial body is VAR(lam_loc) for D_1, DP1(D_{i-1}) for D_i (i>1).
   u64 dup_bodies[LAM_AUTODUP_MAX_USES];
   u32 labels[LAM_AUTODUP_MAX_USES];
 
@@ -178,32 +126,19 @@ static void auto_dup_lam_at(u64 lam_loc, u64 *var_locs, u32 n) {
     }
   }
 
-  // Rewrite each VAR(lam_loc) site to its DPx replacement.
   for (u32 i = 0; i < n; i++) {
     Term repl;
     if (i + 1 < n) {
       repl = term_new(0, TAG_DP0, labels[i], dup_bodies[i]);
     } else {
-      // Last use takes DP1 of the deepest DUP.
       repl = term_new(0, TAG_DP1, labels[n - 2], dup_bodies[n - 2]);
     }
     heap_set(var_locs[i], repl);
   }
 }
 
-// Auto-dup-aware sealing.  Walks the body, sets LAM_ERA_MASK for 0
-// uses, leaves a single use untouched, builds a DUP chain for n > 1.
-// On walker bail, falls back to plain lam_seal_ext (which keeps the
-// ERA_MASK semantics).
-//
-// UOP-graph bodies skip auto-dup entirely: when the LAM body is a
-// compute UOP (not yet a UOP_KERNEL), interact_app_lam materialises
-// the body into a UOP_KERNEL whose input-slot indirection naturally
-// handles multiple reads of the same input tensor.  An auto-dup chain
-// over the binder VAR would inject DP0/DP1 nodes that materialise
-// can't see through, leaving a degenerate kernel that ignores the
-// argument.  Body-uses-var still applies for the LAM_ERA_MASK case
-// (no uses) but DUP construction is skipped.
+// A compute-UOP body gets no chain: APP-LAM compiles it to a kernel whose input
+// slot reads the arg any number of times, and materialize cannot see past DPs.
 fn u32 lam_seal_ext_with_auto_dup(u64 lam_loc, u32 base_ext) {
   Term body_t = heap_read(lam_loc);
   if (term_tag(body_t) == TAG_UOP && term_ext(body_t) != UOP_KERNEL) {

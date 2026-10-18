@@ -1,8 +1,5 @@
-// term/new_mat.c - construct a TAG_MAT (numeric switch atom).
-//
-// Heap layout: [handler, fallback].  ext = NUM value to match
-// against the argument when applied (APP-MAT-NUM).
-
+// Heap layout: [handler, fallback]; an applied argument takes the handler when
+// it is NUM(ext) or a CTR labelled ext (interact/app_mat.c), else the fallback.
 fn Term term_new_mat(u32 match_val, Term handler, Term fallback) {
   u64 loc = heap_alloc(2);
   heap_set(loc + 0, handler);

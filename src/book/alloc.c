@@ -1,10 +1,5 @@
-// book/alloc.c - bump-allocate cells in the static def-template heap.
-//
-// BOOK_HEAP is parallel to HEAP but immutable once written -- it
-// stores the snapshot of named definitions registered via
-// thvm_def_register().  Cell index 0 is reserved as a "no template"
-// sentinel.
-
+// BOOK_HEAP holds the static def templates (thvm_def_register), immutable once
+// written; loc 0 is reserved as "no template", so BOOK_NEXT starts at 1.
 fn u64 book_alloc(u64 size) {
   u64 at   = BOOK_NEXT;
   u64 next = at + size;

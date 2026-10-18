@@ -1,20 +1,7 @@
-// book/from_dynamic.c - snapshot a dynamic term tree into the book
-// heap so it can survive heap resets and act as a static template
-// for thvm_def_register / TAG_REF unfolding.
-//
-// Two passes via a small per-call hash-style remapping table that
-// turns dynamic heap locs (binder addresses + node addresses) into
-// fresh book heap locs.  All children are copied recursively; atoms
-// (TAG_NUM / TAG_TEN / TAG_REF / TAG_ERA / TAG_VAR-after-rebind) are
-// the recursion base case.
-//
-// Limited tag coverage on purpose: LAM / APP / VAR / NUM / TEN /
-// REF / ERA + the UOP family.  SUP / DUP and the IC interaction
-// scaffolding don't appear in user-written defs (they arise during
-// reduction); adding them here is a follow-up.
+// Snapshots a dynamic term into the book heap: a template that survives heap
+// resets and that a TAG_REF unfolds through ALO.
 
-// Tiny linear remap table -- defs rarely exceed a few dozen cells, so
-// O(N) lookup is fine and avoids dragging in a hashmap.
+// Linear remap (dyn loc -> book loc): defs are small enough for O(N) lookup.
 typedef struct {
   u64 dyn_loc;
   u64 book_loc;
@@ -51,8 +38,7 @@ static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
     case TAG_OR:  return 2;
     case TAG_WHEN: return 2;
     case TAG_DP0: case TAG_DP1: {
-      // grad-flavored projections share a 3-cell grad cell;
-      // plain dup projections share a 1-cell dup body.
+      // A grad cell is [y, gy, target]; a plain dup body is one cell.
       if (ext & DUP_GRAD_FLAG) return 3;
       return 1;
     }
@@ -66,14 +52,12 @@ static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
         // [src, NUM(dst dtype)]: clone both cells, as alo_node_arity does.
         case UOP_CAST: case UOP_BITCAST:                   return 2;
         case UOP_LOAD:                                     return 1;
-        // UOP_REDUCE is now variable-arity (multi-axis): heap is
-        // [src, kind, n_axes, axis_0, ..., axis_{n-1}].  Treat like
-        // other variable-arity ops -- unsupported in book snapshot.
+        // A variable tail: clone_to_book_rec sizes REDUCE itself.
         case UOP_REDUCE:                                   return 0;
         case UOP_KERNEL:                                   return 2;
         case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
         case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
-          return 0;  // variable-arity; unsupported in book snapshot for now
+          return 0;
         // A select (uop_where / uop_iwhere): [cond, then, else].
         case UOP_IWHERE:                                   return 3;
         // Fixed-size indexed ops: clone every cell (NUM payload included,
@@ -83,7 +67,7 @@ static u32 dyn_arity(u8 tag, u32 ext, u64 val) {
         default:                                           return 0;
       }
     }
-    default: return 0;  // VAR / TEN / NUM / REF / ERA / ALO are atoms here
+    default: return 0;
   }
 }
 
@@ -100,11 +84,8 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
       return t;
 
     case TAG_VAR: {
-      // VAR refs the binder LAM's loc (val) -- remap to the new
-      // book loc allocated for that LAM.  If we haven't seen the
-      // binder yet, emit a placeholder (val=0) and let the LAM pass
-      // patch it; in practice the LAM is always visited first since
-      // we recurse top-down.
+      // The binder LAM was mapped before its body was walked; a free VAR
+      // (binder outside the snapshot) becomes VAR(0).
       u64 book_binder = 0;
       for (u32 i = 0; i < *map_pos; i++) {
         if (map[i].dyn_loc == val) { book_binder = map[i].book_loc; break; }
@@ -113,9 +94,7 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
     }
 
     case TAG_CTR: {
-      // CTR layout: heap[val] = NUM(arity), heap[val+1..val+n] = children.
-      // Snapshot the whole 1+n run; recurse into each child so a VAR
-      // inside resolves to its remapped book LAM binder.
+      // [NUM(n), c_0, ..., c_{n-1}]: the whole 1+n run.
       Term n_cell = heap_read(val);
       if (term_tag(n_cell) != TAG_NUM) return t;
       u32 n = (u32)term_val(n_cell);
@@ -130,9 +109,8 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
 
     case TAG_DP0:
     case TAG_DP1: {
-      // Grad-flavored projections share a 3-cell grad cell -- copy
-      // verbatim through the default path so each lambda instance
-      // gets a fresh grad cell with its own y/gy/target slots.
+      // A grad projection's [y, gy, target] cell is cloned whole; alo_realize
+      // gives each instance its own copy.
       if (ext & DUP_GRAD_FLAG) {
         u32 ar = dyn_arity(tag, ext, val);
         u64 b = remap_lookup_or_alloc(map, map_pos, val, ar);
@@ -142,12 +120,9 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
         }
         return term_new(0, tag, ext, b);
       }
-      // Plain projection: rewrite DP -> BJ on the book copy so the
-      // template is Levy-opaque under wnf and cnf.  alo_realize
-      // unfolds BJ -> fresh DP per realize call (each book template
-      // instance gets its own dyn dup cell shared across DP0/DP1
-      // projections via alo_dup_share).  Mirrors HVM4's DP0/DP1 vs
-      // BJ0/BJ1 split (TinyHVM/HVM4/clang/cnf/_.c).
+      // A plain projection becomes BJ0/BJ1, Levy-opaque under wnf and cnf;
+      // alo_realize turns it back into a DP per instance, its dup cell shared
+      // by both sides (HVM4's DP/BJ split, TinyHVM/HVM4/clang/cnf/_.c).
       u64 b = remap_lookup_or_alloc(map, map_pos, val, 1);
       Term body = heap_read(val);
       book_set(b, clone_to_book_rec(body, map, map_pos));
@@ -160,41 +135,25 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
       Term body = heap_read(val);
       Term cb   = clone_to_book_rec(body, map, map_pos);
       book_set(b, cb);
-      // Propagate any shape annotation on this LAM from dyn space
-      // to book space.  TLamShape sets the dyn-side annotation;
-      // here we mirror it on the book loc so alo_realize can
-      // re-instate the annotation on each fresh dyn instance.
+      // The book LAM takes the shape; alo_realize copies it onto each instance.
       Shape s;
       if (lam_shape_lookup(val, &s)) lam_shape_set_book(b, &s);
-      // Re-seal LAM_ERA_MASK against the dyn body we just cloned
-      // in.  This catches LAMs that were constructed with ext=0
-      // (e.g. by tests that bypass lam_seal_ext) so the book copy
-      // still gets an accurate mask.  We OR over `ext`'s remaining
-      // bits so any other flags the dyn LAM carried survive.
+      // Re-seal LAM_ERA_MASK from the dyn body, for a LAM built with ext 0 (say
+      // by a test that bypasses lam_seal_ext); the other ext bits survive.
       u32 sealed_ext = lam_seal_ext(val, ext & ~LAM_ERA_MASK);
       return term_new(0, TAG_LAM, sealed_ext, b);
     }
 
     case TAG_UOP: {
       if (ext == UOP_REDUCE) {
-        // Variable-arity multi-axis REDUCE: dyn heap is
-        // [src, NUM(kind), NUM(n_axes), NUM(axis_0), ..., NUM(axis_{n-1})].
-        // dyn_arity returns 0 for it (the fixed-arity table can't express a
-        // variable tail), so without this case the default below would pass
-        // the REDUCE through verbatim -- keeping its DYNAMIC heap loc in the
-        // book template.  alo_realize then reads kind/n_axes from book heap at
-        // that stale dyn loc and gets garbage (e.g. n_axes=216), overflowing
-        // the fixed `axes[MAX_DIM]` in the REDUCE chain-rule and smashing the
-        // stack (the n>=2 recursive-SGD hang).  Clone the full 3+n_axes run so
-        // the book template owns its own metadata NUMs, matching
-        // alo_realize's alo_node_arity(UOP_REDUCE) = 3 + n_axes.
+        // [src, NUM(kind), NUM(n_axes), NUM(axis_0), ...], all cloned, as
+        // alo_node_arity reads them from the book; passed through verbatim the
+        // REDUCE would keep its dyn loc, and alo_realize would read garbage.
         Term n_cell = heap_read(val + 2);
         u32  n_axes = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 1;
         if (n_axes > MAX_DIM) n_axes = MAX_DIM;
         u32 ar = 3 + n_axes;
         u64 b = remap_lookup_or_alloc(map, map_pos, val, ar);
-        // src (slot 0) recurses; the kind/n_axes/axis NUMs are atoms and
-        // clone_to_book_rec returns them as-is.
         for (u32 i = 0; i < ar; i++) {
           Term child = heap_read(val + i);
           book_set(b + i, clone_to_book_rec(child, map, map_pos));
@@ -206,9 +165,8 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
 
     default:
     generic_node: {
-      // Generic fixed-arity node (APP / UOP-fixed-arity).
       u32 ar = dyn_arity(tag, ext, val);
-      if (ar == 0) return t;     // unsupported tag/opcode -- pass through verbatim
+      if (ar == 0) return t;     // not snapshotted: keeps its dyn loc
       u64 b = remap_lookup_or_alloc(map, map_pos, val, ar);
       for (u32 i = 0; i < ar; i++) {
         Term child = heap_read(val + i);
@@ -219,18 +177,14 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
   }
 }
 
-// Snapshot a dynamic term tree into the book heap.  Returns a
-// book-domain term whose val refers to BOOK_HEAP rather than HEAP.
+// A book term: its val indexes BOOK_HEAP, not HEAP.
 Term thvm_book_from_dynamic(Term body) {
   BookRemap map[BOOK_REMAP_CAP];
   u32 map_pos = 0;
   return clone_to_book_rec(body, map, &map_pos);
 }
 
-// Register `body` as the definition for `name`.  Snapshots the
-// body into the book heap (so subsequent mutations to the dynamic
-// graph don't affect the def) and stores the root book term in
-// DEFS[name].  TRef[name] then unfolds via ALO on demand.
+// The snapshot keeps later mutations of the dynamic graph out of the def.
 void thvm_def_register(u32 name, Term body) {
   if (name >= DEFS_CAP) {
     fprintf(stderr, "thvm_def_register: name id %u out of range\n", name);

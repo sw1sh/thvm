@@ -1,26 +1,10 @@
-// alo/realize.c - walk one layer of a static book template into the
-// dynamic heap.
+// One layer of a book template into the dyn heap, after HVM4's wnf/alo_*.c: a
+// VAR rebinds through the state chain, a LAM pushes its binding, a node copies.
 //
-// Mirrors HVM4's wnf_alo_* / TinyHVM's thvm_alo_realize.  Strategy:
-//
-//   - leaves (TAG_NUM, TAG_TEN, TAG_REF, TAG_ERA): pass through.
-//   - TAG_VAR: rebind via the substitution chain (ALO-VAR).
-//   - TAG_LAM: allocate one fresh dyn cell, push a binding
-//     (book_lam_loc -> new_lam_loc), wrap the body in a fresh ALO
-//     under the extended state (ALO-LAM).
-//   - TAG_APP / TAG_UOP / TAG_SUP / TAG_DUP and other fixed-arity
-//     nodes: allocate fresh dyn cells, wrap each child in ALO under
-//     the same state (ALO-NOD).
-//
-// Children get wrapped in ALOs rather than realised eagerly so a
-// non-strict consumer (e.g., a recursive REF in a never-fired
-// branch) doesn't expand its body.  alo_force fires one layer when
-// wnf later enters that ALO.
+// Children are suspended in fresh ALOs rather than realized, so a branch that
+// never fires (a recursive REF, say) never expands.
 
-// Returns the dyn arity for a fixed-arity tag/opcode (matches the
-// table used in book/from_dynamic.c).  UOP_GRAD's tail is variable
-// (heap = [y, gy, NUM(n), x_1..x_n]) so we read n from the book
-// cell at val+2.
+// Cells per node, as book/from_dynamic.c laid them out (dyn_arity there).
 static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
   switch (tag) {
     case TAG_APP: return 2;
@@ -33,12 +17,8 @@ static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
     case TAG_OR:  return 2;
     case TAG_WHEN: return 2;
     case TAG_DP0: case TAG_DP1: {
-      // grad-flavored projections wrap a 3-cell grad cell
-      // [y, gy, target_or_zero]; plain DUP projections wrap a
-      // 1-cell dup body.  Realize the cells so each lambda
-      // instance gets its own grad cell -- otherwise the body's
-      // TVAR target inside cell+2 would alias the template's
-      // bound var and resolve to the same LAM across instances.
+      // A grad cell is [y, gy, target], a plain dup body one cell; each
+      // instance gets its own, so a target VAR rebinds to that instance's LAM.
       if (ext & DUP_GRAD_FLAG) return 3;
       return 1;
     }
@@ -51,9 +31,7 @@ static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
         case UOP_LOG2: case UOP_SQRT:                      return 1;
         // [src, NUM(dst dtype)]: the NUM passes through bare.
         case UOP_CAST: case UOP_BITCAST:                   return 2;
-        // UOP_REDUCE: book heap = [src, kind, n_axes, axis_0, ...].
-        // n_axes lives at val+2 (a TAG_NUM cell in the book); total
-        // cells = 3 + n_axes.
+        // [src, NUM(kind), NUM(n_axes), NUM(axis_0), ...]
         case UOP_REDUCE: {
           Term n_cell = book_read(val + 2);
           u32 n_axes = (term_tag(n_cell) == TAG_NUM)
@@ -75,19 +53,8 @@ static u32 alo_node_arity(u8 tag, u32 ext, u64 val) {
   }
 }
 
-// DUP-share remap: when a parent realize encounters DP0 and DP1 of
-// the same book dup, both projections must end up pointing at the
-// SAME freshly-allocated dyn dup loc -- otherwise each fires its own
-// DUP-NOD interaction (HVM4 fires only one per pair, since
-// heap_subst_cop substitutes the other side via SUB).  The lookup
-// key is (state_id, book_dup_loc); state_id is the binding scope
-// shared by both projections at suspend time, so subsequent realizes
-// of either projection find the same entry.
-//
-// Open-addressed hash table.  Generation counter (DUP_SHARE_GEN)
-// invalidates all entries on reset without re-zeroing 24 MiB.
-// Probe limit 8: on overflow we fall back to the un-shared path
-// (still correct, just one extra DUP-NOD per affected pair).
+// Both projections of a book dup must share one dyn dup cell, or each fires its
+// own DUP; the key (state_id, book loc) is the same for both.
 
 #define DUP_SHARE_BITS  20
 #define DUP_SHARE_SLOTS (1u << DUP_SHARE_BITS)
@@ -98,10 +65,11 @@ typedef struct { u32 gen; u32 state_id; u64 book_loc; u64 dyn_loc; } DupShareEnt
 static DupShareEntry DUP_SHARE[DUP_SHARE_SLOTS];
 static u32 DUP_SHARE_GEN = 1;
 
+// A generation bump empties the table without re-zeroing its 24 MiB.
 fn void alo_dup_share_reset(void) {
   DUP_SHARE_GEN++;
   if (DUP_SHARE_GEN == 0) {
-    // wraparound after 2^32 resets -- zero the table once and start over.
+    // Wrapped: zero the table so no stale generation matches.
     memset(DUP_SHARE, 0, sizeof(DUP_SHARE));
     DUP_SHARE_GEN = 1;
   }
@@ -139,13 +107,10 @@ static void dup_share_push(u32 state, u64 book, u64 dyn) {
       return;
     }
   }
-  // probe limit reached: silently drop (fall back to no sharing)
+  // Probe limit hit: the pair goes unshared, which only costs a second DUP.
 }
 
-// Wrap a book child in a fresh ALO bound to `state`.  Atoms that
-// don't need allocation (NUM/TEN/REF/ERA) are passed through bare
-// since wrapping them just generates a wnf step that would unwrap
-// them again.
+// NUM/TEN/REF/ERA pass bare: an ALO around them would only cost a wnf step.
 static Term alo_suspend_child(Term book_child, u32 state) {
   u8 tag = term_tag(book_child);
   if (tag == TAG_NUM || tag == TAG_TEN || tag == TAG_REF || tag == TAG_ERA)
@@ -170,21 +135,17 @@ Term alo_realize(Term book_term, u32 state_id) {
       if (alo_state_lookup(state_id, val, &dyn_loc)) {
         return term_new(0, TAG_VAR, ext, dyn_loc);
       }
-      // Free var (binder outside the snapshot) -- leave as-is.
+      // A free var (binder outside the template) stays as is.
       return book_term;
     }
 
     case TAG_DP0:
     case TAG_DP1: {
-      // Grad-flavored projections wrap a 3-cell grad cell with
-      // entirely different semantics; let the default node path
-      // handle them (each instance gets its own grad cell, as today).
+      // A grad projection takes the node path: each instance gets its own cell.
       if (ext & DUP_GRAD_FLAG) goto default_node;
 
-      // Plain dup projection should not appear in book templates after
-      // the BJ rewrite landed (clone_to_book_rec emits BJ for plain
-      // DPs).  Defensive fall-through for back-compat with templates
-      // that pre-date the rewrite: same dup_share semantics, emit DP.
+      // clone_to_book_rec writes plain projections as BJ0/BJ1; a book DP gets
+      // the same shared dup cell.
       u64 new_loc;
       if (!dup_share_lookup(state_id, val, &new_loc)) {
         new_loc = heap_alloc(1);
@@ -197,10 +158,8 @@ Term alo_realize(Term book_term, u32 state_id) {
 
     case TAG_BJ0:
     case TAG_BJ1: {
-      // Book-time projection -> fresh dyn DP.  Shared dup cell: both
-      // BJ0 and BJ1 of the same book BJ map to the SAME freshly
-      // allocated dyn dup-body so their DP0/DP1 siblings fire one
-      // DUP-XXX between them (heap_subst_cop substitutes the dual).
+      // BJ0 and BJ1 of one book BJ map to one fresh dup cell, so their DPs fire
+      // one DUP between them (heap_subst_cop hands the other side a SUB).
       u64 new_loc;
       if (!dup_share_lookup(state_id, val, &new_loc)) {
         new_loc = heap_alloc(1);
@@ -213,11 +172,7 @@ Term alo_realize(Term book_term, u32 state_id) {
     }
 
     case TAG_CTR: {
-      // CTR layout: book[val] = NUM(arity), book[val+1..val+n] = children.
-      // Allocate a fresh dyn layout, copy the arity NUM as-is, and
-      // ALO-suspend each child under the same state so a downstream
-      // VAR inside a child can rebind to dyn binders set up earlier
-      // in this realization.
+      // [NUM(n), c_0, ..., c_{n-1}]
       Term n_cell = book_read(val);
       if (term_tag(n_cell) != TAG_NUM) return book_term;
       u32 n = (u32)term_val(n_cell);
@@ -235,23 +190,18 @@ Term alo_realize(Term book_term, u32 state_id) {
       u32 body_state = alo_state_push(state_id, val, new_loc);
       Term body = book_read(val);
       heap_set(new_loc, alo_suspend_child(body, body_state));
-      // Re-instate any shape annotation from the book LAM onto
-      // the fresh dyn instance, so each iter's bound var is
-      // shape-resolvable independently.
+      // Each instance takes the book LAM's shape, so its own bound var has one.
       Shape s;
       if (lam_shape_lookup_book(val, &s)) lam_shape_set(new_loc, &s);
-      // LAM_ERA_MASK is already baked into `ext` from the book copy
-      // (set by clone_to_book_rec when the dyn LAM was registered).
-      // Don't re-seal here: the dyn body we're emitting has ALO-
-      // wrapped children, which would hide a downstream VAR(new_loc)
-      // and produce a false positive for the mask.
+      // ext keeps the mask clone_to_book_rec sealed: under the ALO-wrapped
+      // children a re-seal could not see whether VAR(new_loc) occurs.
       return term_new(0, TAG_LAM, ext, new_loc);
     }
 
     default:
     default_node: {
       u32 ar = alo_node_arity(tag, ext, val);
-      if (ar == 0) return book_term;       // unsupported tag: leave verbatim
+      if (ar == 0) return book_term;
       u64 new_loc = heap_alloc(ar);
       for (u32 i = 0; i < ar; i++) {
         Term child = book_read(val + i);

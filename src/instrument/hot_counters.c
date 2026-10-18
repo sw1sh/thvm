@@ -1,22 +1,9 @@
-// instrument/hot_counters.c -- snapshot + reset helpers for the
-// per-context HotCounters block (see thvm.h).  The counters
-// themselves are TContext fields; the HOT_* macros from thvm.h
-// expand to lvalues so consumers `HOT_*++` directly.
+// Snapshot and reset of the per-context HotCounters (thvm.h), read from WL as
+// THotCounters[] (Profile.wl).
 //
-// WL-side surface lives in `wl/THVMLink/Kernel/Profile.wl`:
-//   - THotCounters[]                  -- snapshot Association.
-//   - THotCountersReset[]             -- zero them.
-//   - THotCountersDelta[label, body]  -- reset, eval `body`, return
-//                                        the snapshot as the delta.
-//
-// When you add a counter:
-//   1. Append a field to `HotCounters` in thvm.h.
-//   2. Add a `HOT_*` macro alongside the others in thvm.h.
-//   3. Bump HOT_COUNTER_COUNT in thvm.h.
-//   4. Append the read in `hot_counters_snapshot` below.
-//   5. Append the same name to `$hotCounterNames` in Profile.wl.
-// Order must match -- the WL side decodes the {Integer, 1} payload by
-// position.
+// A new counter takes, all at one position, a HotCounters field, a HOT_* macro
+// and a HOT_COUNTER_COUNT bump (thvm.h), a read below and a $THotCounterNames
+// entry (Profile.wl): WL decodes the snapshot by position.
 
 fn void hot_counters_reset(void) {
   memset(&CURRENT_CTX->hot, 0, sizeof(HotCounters));

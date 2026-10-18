@@ -1,25 +1,15 @@
-// thvm_collapse_ordered: priority-aware enumeration.
-//
-// Same shallow walk as thvm_collapse, but each leaf is tagged with
-// the number of TAG_INC wrappers seen on the path from the root.
-// Lower INC-depth = higher priority = emitted first.  Ties are
-// broken by original DFS position (i.e. the sort is stable).
-//
-// Implementation: collect (Term, priority, dfs_idx) triples, then
-// stable-sort by (priority asc, dfs_idx asc), then write the Terms
-// out.  Caller-supplied buffer; capped at `cap`.
+// thvm_collapse's walk, the leaves ordered by how many TAG_INC wrappers sit
+// above them (fewest first), ties in DFS order.
 
 typedef struct {
   Term term;
   u32  pri;
-  u32  idx;   // tie-breaker: original DFS order
+  u32  idx;   // DFS position: qsort is not stable
 } CollapseLeafPri;
 
 static u64 collapse_walk_pri(Term t, CollapseLeafPri *buf, u64 cap,
                              u64 count, u32 pri) {
   if (count >= cap) return count;
-  // cnf rather than plain wnf so DP-headed children get driven through
-  // their dup interactions during readback (see src/cnf/_.c).
   Term w = cnf(t);
   switch (term_tag(w)) {
     case TAG_SUP: {

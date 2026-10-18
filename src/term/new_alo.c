@@ -1,8 +1,4 @@
-// term/new_alo.c - allocate a fresh ALO node.
-//
-// Heap layout: [book_term, NUM(state_id)].  alo_force reads both
-// cells when it fires.
-
+// Heap layout: [book_term, NUM(state_id)]; alo_force caches its result there.
 fn Term term_new_alo(Term book_term, u32 state_id) {
   u64 loc = heap_alloc(2);
   heap_set(loc + 0, book_term);

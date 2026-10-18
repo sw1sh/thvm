@@ -1,12 +1,5 @@
-// alo/state.c - substitution-chain helpers used by alo_realize.
-//
-// An AloState entry binds a book-heap loc (the address of a binder
-// in the static template) to a freshly allocated dynamic-heap loc
-// (the same binder in the realised copy).  Each ALO descent into a
-// LAM appends a new entry; ALO-VAR walks the chain looking for the
-// latest binding for the var's loc.
-//
-// State id 0 = empty chain.
+// An AloState entry maps a template binder's book loc to its realized dyn loc;
+// each realized LAM pushes one, ALO-VAR takes the newest match; 0 is empty.
 
 u32 alo_state_push(u32 parent, u64 old_loc, u64 new_loc) {
   if (ALO_STATES_NEXT >= ALO_STATE_CAP) {

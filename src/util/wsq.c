@@ -1,17 +1,7 @@
-// util/wsq.c -- Chase-Lev work-stealing deque for u64 tasks.
+// Chase-Lev work-stealing deque of u64 tasks (TinyHVM/HVM4/clang/data/wsq.c):
+// the owner works the bottom wait-free; thieves steal the top lock-free.
 //
-// Foundation for the parallel WNF / CNF redex bag.  Each worker owns
-// one WsDeque it pushes/pops at the bottom; thieves steal from the
-// top.  Owner ops are wait-free, steals are lock-free and may fail
-// under contention (the standard Chase-Lev / Le-Pop-Be guarantees).
-//
-// Ported from TinyHVM/HVM4/clang/data/wsq.c.  Single change vs HVM4:
-// uses thvm's `fn` (= static inline) macro and lives under src/util/
-// instead of src/data/.
-//
-// Capacity is fixed at init; wsq_push returns 0 when the bucket
-// fills up (the wspq layer above handles the spin / spill).
-// Counters are monotonic u64; wrap-around is unreachable in practice.
+// Fixed capacity; the u64 counters never wrap in practice and are unguarded.
 
 typedef struct __attribute__((aligned(CACHE_L1))) {
   _Alignas(CACHE_L1) CachePaddedAtomic top;
