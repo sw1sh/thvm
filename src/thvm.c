@@ -828,12 +828,8 @@ void thvm_reset(void) {
   // (TReset[]) must too, or a later frame's symbolic dim reuses a stale id
   // whose KVAR_RUNTIME_SET / hi were stamped by the previous frame.
   kvar_reset();
-  // Rewind the Cheney semi-spaces (from-space = lower half,
-  // HEAP_NEXT = 0).  No heap zeroing: gc_collect already hands out
-  // non-zeroed cells after a space swap (see heap/collect.c step 7), so
-  // the runtime always writes a cell before reading it -- the old
-  // full-heap memset was both unnecessary and faulted in the entire
-  // heap capacity on every reset.
+  // Rewind the semi-spaces without zeroing: the runtime writes every cell
+  // before reading it, as after any collection's space swap.
   gc_init(thvm_heap_cells() / 2);
   // Dynamic cursors / counters.  DEFS, BOOK_HEAP, BOOK_NEXT, and
   // BOOK_REF_VISITED are intentionally preserved (static def templates

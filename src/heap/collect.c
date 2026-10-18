@@ -99,6 +99,12 @@ fn void gc_reset(void) {
   GC_COUNT      = 0;
 }
 
+// First allocatable cell of a semi-space.  Loc 0 reads as "none" (an unbound
+// book binder, assign_fire_claim, heap_perm_alloc), so no node lives there.
+static u64 gc_space_base(u64 start) {
+  return start == 0 ? 1 : start;
+}
+
 fn void gc_init(u64 space_words) {
   if (2 * space_words > thvm_heap_cells()) {
     fprintf(stderr, "gc_init: %llu cells x 2 exceeds heap=%llu\n",
@@ -114,7 +120,7 @@ fn void gc_init(u64 space_words) {
   GC_TO_END     = 2 * space_words;
   GC_COUNT      = 0;
   HEAP_PERM_USED = 0;
-  HEAP_NEXT = GC_FROM_START;
+  HEAP_NEXT = gc_space_base(GC_FROM_START);
 }
 
 fn u64 gc_count(void)        { return GC_COUNT; }
@@ -395,7 +401,7 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   if (!GC_ENABLED) return;
 
   GC_COUNT++;
-  u64 alloc = GC_TO_START;
+  u64 alloc = gc_space_base(GC_TO_START);
   materialized_loc_gc_before();
 
   for (u32 i = 0; i < n_roots; i++) {

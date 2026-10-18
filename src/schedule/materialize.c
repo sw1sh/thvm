@@ -2197,10 +2197,6 @@ static u32 boundary_depth_rec(u64 loc) {
 // O(1) -- the deep-graph O(N^2) (N boundaries x O(N) heap memset) collapse.
 static void boundary_last_use_descend(u64 from_loc, u32 visiting_depth,
                                       u32 *visited, u32 epoch) {
-  // Heap loc 0 is a valid allocation; only HEAP_NEXT bounds gates
-  // the read.  (Earlier code treated 0 as a sentinel which silently
-  // dropped last-use updates for the first-allocated boundary in
-  // any heap-clean tests.)
   if (from_loc >= HEAP_NEXT) return;
   if (visited[from_loc] == epoch) return;
   visited[from_loc] = epoch;

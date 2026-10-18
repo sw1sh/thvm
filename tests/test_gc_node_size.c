@@ -82,6 +82,20 @@ int main(void) {
   CHECK_EQ(HEAP[term_val(fuc) + 0], term_new(0, TAG_TEN, DT_FP32, 1));
   CHECK_EQ(HEAP[term_val(fuc) + 1], term_new(0, TAG_TEN, DT_FP32, 2));
 
+  // Loc 0 reads as "none" (an unbound book binder, assign_fire_claim), so no
+  // node may live there: not the first allocation, nor the first cell a
+  // collection evacuates into the lower semi-space.
+  TEST_BEGIN("gc/loc-0-is-never-a-node");
+  gc_init(thvm_heap_cells() / 2);
+  Term first   = term_new_op2(OP_ADD, num(1), num(2));
+  Term held[1] = { first };
+  CHECK(term_val(first) != 0);
+  gc_collect(held, 1);
+  gc_collect(held, 1);
+  CHECK_EQ(gc_from_start(), 0);
+  CHECK(term_val(held[0]) != 0);
+  CHECK(cells_are(held[0], 2, 1));
+
   thvm_free();
   TEST_REPORT();
 }

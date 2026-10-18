@@ -2174,9 +2174,6 @@ static Term ru_build_index_addr_for(RuRangeMap const *rm, Term self_term) {
 // dims for strides -- needed when the RESHAPE / PAD swizzler produced
 // IDIV/IMOD expressions whose extents can't be recovered from a bare
 // UOP_RANGE leaf.
-// Heap loc 0 is a legitimate heap allocation -- it can't double as
-// "no loc" without colliding.  Use HEAP_NEXT (one past the high-water
-// mark) as the sentinel.
 #define RU_NO_LOC ((u64)~0ull)
 
 static Term ru_build_input_addr_for(RuRangeMap const *rm, u64 loc) {
