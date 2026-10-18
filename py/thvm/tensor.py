@@ -894,22 +894,13 @@ class Tensor(metaclass=_TensorMeta):
 
     def _reduce(self, kind: int, axis, keepdim: bool) -> "Tensor":
         axes = self._reduce_axes(axis)
-        # Reduce innermost-first so the outer-axis indices stay valid.
-        t = self.term
-        new_shape = list(self._shape)
-        for ax in reversed(axes):
-            t = _TH.reduce(kind, ax, t)
-            if keepdim:
-                new_shape[ax] = 1
-            else:
-                new_shape.pop(ax)
-        # thvm's UOP_REDUCE DROPS the reduced axis (output ndim = src-1).
-        # For keepdim we must reshape the term to re-insert the size-1 axes,
-        # else the Python shape says (.,1,.) while the term is rank-reduced --
-        # and any later broadcast against it reads out of bounds (garbage).
+        t = _TH.reduce(kind, axes, self.term)
+        # UOP_REDUCE drops the reduced axes; keepdim reshapes them back as 1s.
         if keepdim:
-            t = _TH.reshape(t, list(new_shape))
-        return Tensor._from_term(t, self._dtype, tuple(new_shape))
+            shape = tuple(1 if i in axes else s for i, s in enumerate(self._shape))
+            return Tensor._from_term(_TH.reshape(t, list(shape)), self._dtype, shape)
+        shape = tuple(s for i, s in enumerate(self._shape) if i not in axes)
+        return Tensor._from_term(t, self._dtype, shape)
 
     def sum(self, axis=None, keepdim: bool = False) -> "Tensor":
         return self._reduce(K.REDUCE_SUM, axis, keepdim)

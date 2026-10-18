@@ -64,7 +64,7 @@ class TestBridgePhase1(unittest.TestCase):
 
     def test_reduce_sum(self):
         x = self._const([4], [1, 2, 3, 4])
-        self.assertEqual(self._eval(self.th.reduce(K.REDUCE_SUM, 0, x), 1), [10.0])
+        self.assertEqual(self._eval(self.th.reduce(K.REDUCE_SUM, (0,), x), 1), [10.0])
 
     # --- movement ---
 

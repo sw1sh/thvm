@@ -208,11 +208,7 @@ def _emit_op(u, memo: dict[int, int]) -> int:
             raise NotImplementedError(f"unmapped REDUCE op {rop}")
         # Front normal form (uop/ops.py:655-664): the reduced axes are the
         # first n_axes of the (already permuted) src.
-        src = _emit(u.src[0], memo)
-        # thvm reduces one axis at a time; reduce innermost-first so the
-        # outer axis indices stay valid.
-        for ax in reversed(range(int(n_axes))):
-            src = _TH.reduce(kind, ax, src)
+        src = _TH.reduce(kind, range(int(n_axes)), _emit(u.src[0], memo))
         # Reshape to tinygrad's output shape so downstream broadcasts line up.
         return _TH.reshape(src, _shape_of(u))
 

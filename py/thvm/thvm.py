@@ -65,7 +65,8 @@ _uop_int_binary = _bind("py_uop_int_binary", c_uint64, c_uint32, c_uint64, c_uin
 _uop_iwhere = _bind("py_uop_iwhere", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_where = _bind("py_uop_where", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_binary = _bind("py_uop_binary", c_uint64, c_uint32, c_uint64, c_uint64)
-_uop_reduce = _bind("py_uop_reduce", c_uint64, c_uint32, c_uint32, c_uint64)
+_uop_reduce = _bind("py_uop_reduce", c_uint64,
+                    c_uint32, c_uint32, ctypes.POINTER(c_uint32), c_uint64)
 _uop_store = _bind("py_uop_store", c_uint64, c_uint64, c_uint64, c_uint64)
 _uop_detach = _bind("py_uop_detach", c_uint64, c_uint64)
 _uop_gather = _bind("py_uop_gather", c_uint64, c_uint64, c_uint64, c_uint32)
@@ -288,8 +289,9 @@ class Thvm:
     def sqrt(self, x: Term) -> Term:   return self.unary(K.SQRT, x)
 
     # ---------------- reduce / store ----------------
-    def reduce(self, kind: int, axis: int, src: Term) -> Term:
-        return Term(_uop_reduce(c_uint32(kind), c_uint32(axis), c_uint64(int(src))))
+    def reduce(self, kind: int, axes, src: Term) -> Term:
+        arr = (c_uint32 * max(len(axes), 1))(*[c_uint32(int(a)) for a in axes])
+        return Term(_uop_reduce(c_uint32(kind), c_uint32(len(axes)), arr, c_uint64(int(src))))
 
     def store(self, buf: Term, addr: Term, value: Term) -> Term:
         return Term(_uop_store(c_uint64(int(buf)),

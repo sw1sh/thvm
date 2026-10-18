@@ -259,6 +259,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/unary.c"
 #include "uop/binary.c"
 #include "uop/reduce.c"
+#include "uop/reduce_axes.c"
 #include "uop/reshape.c"
 #include "uop/permute.c"
 #include "uop/expand.c"

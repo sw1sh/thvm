@@ -35,9 +35,7 @@ CASES = list(itertools.product((True, False), ("const", "buffer", "none"),
 
 def _red(t):
     """Sum over axes (0, 2, 3) of a (4, 2, 3, 3) term -> (2,)."""
-    for ax in (3, 2, 0):
-        t = _TH.reduce(K.REDUCE_SUM, ax, t)
-    return _TH.reshape(t, (2,))
+    return _TH.reshape(_TH.reduce(K.REDUCE_SUM, (0, 2, 3), t), (2,))
 
 
 def run_case(neg_before, scale, final_expand):

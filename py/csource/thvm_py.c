@@ -80,8 +80,8 @@ EXPORT uint64_t py_uop_binary(uint32_t opcode, uint64_t a, uint64_t b) {
   return uop_binary(opcode, a, b);
 }
 
-EXPORT uint64_t py_uop_reduce(uint32_t kind, uint32_t axis, uint64_t src) {
-  return uop_reduce(kind, axis, src);
+EXPORT uint64_t py_uop_reduce(uint32_t kind, uint32_t n, uint32_t const *axes, uint64_t src) {
+  return uop_reduce_axes(kind, n, axes, src);
 }
 
 EXPORT uint64_t py_uop_store(uint64_t buf, uint64_t addr, uint64_t value) {

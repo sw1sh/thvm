@@ -51,6 +51,19 @@ int main(void) {
   CHECK_EQ(uop_reduce_n_axes(r), 1);
   CHECK_EQ(uop_reduce_axis(r, 0), 0);
 
+  TEST_BEGIN("uop/reduce-axes-is-the-innermost-first-chain");
+  // Any order, repeats once: the hash-consed term of reducing 3, 2, 0 one
+  // axis at a time, which chain-fuses into one REDUCE.
+  Term x4      = term_new(0, TAG_TEN, DT_FP32, 3);
+  u32  axes[4] = {2, 0, 3, 2};
+  Term chain   = uop_reduce(REDUCE_SUM, 0,
+                            uop_reduce(REDUCE_SUM, 2, uop_reduce(REDUCE_SUM, 3, x4)));
+  Term ra      = uop_reduce_axes(REDUCE_SUM, 4, axes, x4);
+  CHECK_EQ(ra, chain);
+  CHECK_EQ(uop_reduce_n_axes(ra), 3);
+  CHECK_EQ(uop_reduce_src(ra), x4);
+  CHECK_EQ(uop_reduce_axes(REDUCE_SUM, 0, axes, x4), x4);
+
   TEST_BEGIN("uop/reshape-stores-dims");
   // Heap layout: [src, NUM(ndim), NUM(d0), ..., NUM(d_{ndim-1})].
   u32 dims[3] = {2, 3, 4};

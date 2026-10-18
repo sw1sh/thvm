@@ -66,7 +66,7 @@ class TestDeepChainDepth(unittest.TestCase):
                 c = _TH.expand(_TH.reshape(_TH.fconst(0.001), (1, 1)), (3, 4))
                 for _ in range(depth):
                     v = _TH.add(v, c)
-                r = _TH.reduce(K.REDUCE_SUM, 1, v)
+                r = _TH.reduce(K.REDUCE_SUM, (1,), v)
                 got = Tensor._from_term(Term(r), dtypes.float32, (3,)).numpy()
                 want = (x.astype(np.float64) + 0.001 * depth).sum(axis=1)
                 np.testing.assert_allclose(got, want, atol=1e-4)

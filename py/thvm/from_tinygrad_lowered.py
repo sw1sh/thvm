@@ -110,13 +110,12 @@ class _Lowerer:
             t = h.index_e(self.emit(u.src[0]), self.emit(u.src[1]))
         elif op is Ops.REDUCE:
             # REDUCE(value, reduce_range...) -- arg[0] is the reduce op.
-            # thvm reduces by a single AXIS_REDUCE range id; nest for
-            # multi-axis reduces (src[1:] are the reduce RANGEs).
+            # One AXIS_REDUCE range id per link, nested in src order.
             kind = K.REDUCE_MAX if u.arg[0] is Ops.MAX else K.REDUCE_SUM
             t = self.emit(u.src[0])
             for rng in u.src[1:]:
                 self.emit(rng)               # build the AXIS_REDUCE range
-                t = h.reduce(kind, int(rng.arg[0]), t)
+                t = h.reduce(kind, (int(rng.arg[0]),), t)
         elif op is Ops.STORE:
             idx = u.src[0]                    # INDEX(buf, addr)
             buf = self.emit(idx.src[0])
