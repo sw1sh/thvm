@@ -32,6 +32,10 @@ static int uop_const_is_one_f32(Term t) {
   return v == 1.0f;
 }
 
+// Defined later in the translation unit.
+fn Term uop_reshape(Term src, u32 ndim, const u32 *dims);
+fn Term uop_expand(Term src, u32 ndim, const u32 *dims);
+
 static u32 f32_bits(f32 v) { u32 b; memcpy(&b, &v, sizeof b); return b; }
 static f32 bits_f32(u32 b) { f32 v; memcpy(&v, &b, sizeof v); return v; }
 
@@ -62,13 +66,24 @@ fn Term uop_rewrite_binary(u32 opcode, Term a, Term b) {
       if (uop_const_is_one_f32(b)) return a;
       if (uop_const_is_one_f32(a)) return b;
       break;
-    // x < x and x == x fold to a {1} CONST all the same, which only an
-    // elementwise consumer broadcasts back to x's shape.
+    // x < x is false everywhere (tinygrad symbolic.py:139), a CONST expanded
+    // to x's shape as tinygrad's const_like is.  No x == x rule: NaN != NaN.
     case UOP_CMPLT:
-      if (a == b) return uop_const(DT_FP32, f32_bits(0.0f));
-      break;
-    case UOP_CMPEQ:
-      if (a == b) return uop_const(DT_FP32, f32_bits(1.0f));
+      if (a == b) {
+        Shape s;
+        if (!term_shape_in(a, 0, &s)) {
+          break;
+        }
+        Term f = uop_const(DT_FP32, f32_bits(0.0f));
+        if (s.ndim == 0) {
+          return f;
+        }
+        u32 ones[MAX_DIM];
+        for (u32 i = 0; i < s.ndim; i++) {
+          ones[i] = 1;
+        }
+        return uop_expand(uop_reshape(f, s.ndim, ones), s.ndim, s.dims);
+      }
       break;
     default: break;
   }

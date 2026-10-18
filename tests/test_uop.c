@@ -79,6 +79,24 @@ int main(void) {
   gb = bb;
   CHECK_EQ(uop_broadcast2(&ga, 1, s3, &gb, 1, s4, bout), -1);
 
+  TEST_BEGIN("uop/self-compare-folds-keep-the-shape");
+  // tinygrad symbolic.py:139: x < x is a false CONST at x's shape.  x == x
+  // stays a compare: NaN == NaN is false.
+  Shape s34s   = {0};
+  s34s.ndim    = 2;
+  s34s.dims[0] = 3;
+  s34s.dims[1] = 4;
+  Term  xs     = term_new(0, TAG_TEN, DT_FP32, tensor_alloc(&CPU_BACKEND, s34s, DT_FP32));
+  Term  lt     = uop_binary(UOP_CMPLT, xs, xs);
+  Shape ls     = {0};
+  CHECK(term_shape_in(lt, 0, &ls));
+  CHECK_EQ(ls.ndim, 2);
+  CHECK_EQ(ls.dims[0], 3);
+  CHECK_EQ(ls.dims[1], 4);
+  Term eq = uop_binary(UOP_CMPEQ, xs, xs);
+  CHECK_EQ(term_tag(eq), TAG_UOP);
+  CHECK_EQ(term_ext(eq), UOP_CMPEQ);
+
   TEST_BEGIN("uop/reshape-stores-dims");
   // Heap layout: [src, NUM(ndim), NUM(d0), ..., NUM(d_{ndim-1})].
   u32 dims[3] = {2, 3, 4};
