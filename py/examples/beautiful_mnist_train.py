@@ -118,21 +118,17 @@ def main():
     X_buf = Y_buf = step_fn = None
     if _use_jit:
         from thvm import TinyJit
-        # Pre-allocate stable input tensors.  X_buf holds the input
-        # batch; OH_buf holds the one-hot labels (refilled host-side
-        # each iter so the captured graph reads the new contents).
-        # Sparse_categorical_crossentropy does Y.numpy() at capture
-        # time, baking in step-1's labels under JIT -- the JIT-safe
-        # cross_entropy_from_onehot path reads OH_buf directly.
-        X_buf  = Tensor(np.zeros((bs, 1, 28, 28), dtype=np.float32))
-        OH_buf = Tensor(np.zeros((bs, 10), dtype=np.float32))
-        X_buf.realize(); OH_buf.realize()
+        # Stable input buffers (X_buf the batch, Y_buf its labels), refilled
+        # in place each iter so the captured graph reads the new contents.
+        X_buf = Tensor(np.zeros((bs, 1, 28, 28), dtype=np.float32))
+        Y_buf = Tensor(np.zeros((bs,), dtype=np.int32))
+        X_buf.realize(); Y_buf.realize()
 
         @TinyJit
         def step_fn():
             opt.zero_grad()
             loss = (model(X_buf)
-                    .cross_entropy_from_onehot(OH_buf)
+                    .sparse_categorical_crossentropy(Y_buf)
                     .backward())
             grads = [p.grad for p in opt.params if p.grad is not None]
             Tensor.realize(loss, *grads)
@@ -150,17 +146,10 @@ def main():
             sys.stderr.write(f"=== step {i+1} start, compiles_before={_TH.cuda_jit_compiles()} ===\n")
             sys.stderr.flush()
         if _use_jit:
-            # Refill the stable input buffers in place.  After the JIT
-            # captures the first step, replay re-dispatches the same
-            # kernels against the same buf_ids; the new contents drive
-            # the new outputs.  X_buf gets fresh batch; OH_buf gets
-            # fresh one-hot labels (scattered host-side -- the assign
-            # copies onto OH_buf's stable buf_id, so the captured graph
-            # reads the new contents).
+            # Replay re-dispatches the captured kernels against the same
+            # buffers, so refilling them in place drives the new outputs.
             X_buf.assign(Tensor(Xtr[idx])); X_buf.realize()
-            oh_np = np.zeros((bs, 10), dtype=np.float32)
-            oh_np[np.arange(bs), Ytr[idx]] = 1.0
-            OH_buf.assign(Tensor(oh_np)); OH_buf.realize()
+            Y_buf.assign(Tensor(Ytr[idx].astype(np.int32))); Y_buf.realize()
             loss = step_fn()
         else:
             opt.zero_grad()

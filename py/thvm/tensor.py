@@ -92,6 +92,14 @@ def _const_broadcast(value, shape, dtype: DType) -> "Tensor":
     return Tensor._from_term(t, dtype, shape)
 
 
+def _promote(a: "Tensor", b: "Tensor") -> "tuple[Tensor, Tensor]":
+    """least_upper_dtype on the float32/int32 lattice: a mixed pair computes
+    in float32 (tinygrad mixin/elementwise.py:24-30)."""
+    if a._dtype != b._dtype:
+        return a.cast(dtypes.float32), b.cast(dtypes.float32)
+    return a, b
+
+
 def _normalize_pairs(arg, shape, full):
     """Normalize a shrink/pad argument to a flat [b0,e0,b1,e1,...] list.
 
@@ -432,8 +440,7 @@ class Tensor(metaclass=_TensorMeta):
             if self.numel() != 1:
                 raise RuntimeError(
                     "backward(): implicit gradient only for scalar outputs")
-            gradient = (Tensor(1.0, dtype=self._dtype) if not self._shape
-                        else Tensor.ones(*self._shape, dtype=self._dtype))
+            gradient = self.const_like(1.0)
         # In-scope leaves -> their live Tensors.  Mark every FLOAT leaf for
         # the accumulation walk (thvm TEN leaves are buffers, never CONST,
         # so the tinygrad CONST exclusion is the float filter here).
@@ -542,8 +549,11 @@ class Tensor(metaclass=_TensorMeta):
 
     @classmethod
     def empty(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
+        """An unfilled buffer (tinygrad empty): allocated, never written."""
         dt = dtype or dtypes.default_float
-        return cls._from_numpy(np.empty(shape, dtype=dt.np_dtype), dt)
+        shape = tuple(int(d) for d in shape)
+        _TH.reclaim_if_due()
+        return cls._from_term(_TH.ten_create(dt.thvm_id, list(shape)), dt, shape)
 
     @classmethod
     def full(cls, shape, value, dtype: DType | None = None,
@@ -588,11 +598,7 @@ class Tensor(metaclass=_TensorMeta):
     # ---- elementwise binary -------------------------------------------
 
     def _binop(self, other, opcode: int) -> "Tensor":
-        a, b = self._broadcast(other)
-        # least_upper_dtype on the float32/int32 lattice: a mixed binop
-        # computes in float32 (tinygrad mixin/elementwise.py:24-30).
-        if a._dtype != b._dtype:
-            a, b = a.cast(dtypes.float32), b.cast(dtypes.float32)
+        a, b = _promote(*self._broadcast(other))
         return Tensor._from_term(_TH.binary(opcode, a.term, b.term), a._dtype, a._shape)
 
     def __add__(self, o):  return self._binop(o, K.ADD)
@@ -746,35 +752,13 @@ class Tensor(metaclass=_TensorMeta):
 
     def sparse_categorical_crossentropy(self, Y: "Tensor",
                                         axis: int = -1) -> "Tensor":
-        """Mean NLL of log_softmax(self) at the integer class labels Y.
-
-        Y holds class indices (a gathered batch / dataset slice -- data,
-        not on the autograd path), so it is one-hot'd host-side and the
-        gradient flows only through `self` (the logits).
-
-        Under TinyJit:  Y.numpy() does a host-side read, which means the
-        one-hot buffer baked into the captured graph is step-1's labels;
-        replays reuse those frozen labels instead of refilling.  For a
-        JIT-capturable train step, pre-allocate a one-hot Tensor outside
-        the JIT and pass it as the `oh` kwarg of the lower-level call --
-        the caller writes fresh one-hots into oh's buffer each iter."""
+        """Mean NLL of log_softmax(self) at the integer class labels Y, the
+        one-hot an in-graph compare (tinygrad mixin/op.py:1005-1008, 1723-1746),
+        so a TinyJit replay reads each step's labels."""
         ax = axis if axis >= 0 else axis + self.ndim
-        n_classes = self._shape[ax]
-        labels = Y.numpy().astype(np.int64).reshape(-1)
-        oh = np.zeros((labels.shape[0], n_classes), dtype=np.float32)
-        oh[np.arange(labels.shape[0]), labels] = 1.0
-        ls = self.log_softmax(axis=ax)
-        return (ls * Tensor(oh.reshape(self._shape))).sum(axis=ax).mean() * -1.0
-
-    def cross_entropy_from_onehot(self, OH: "Tensor",
-                                  axis: int = -1) -> "Tensor":
-        """JIT-capturable cross-entropy: caller pre-allocates a one-hot
-        Tensor OH (same shape as `self`'s logits, BUT with the class
-        dim being n_classes) and refills it between calls.  The graph
-        reads OH's stable buf_id, so replay sees fresh one-hots."""
-        ax = axis if axis >= 0 else axis + self.ndim
-        ls = self.log_softmax(axis=ax)
-        return (ls * OH).sum(axis=ax).mean() * -1.0
+        n = self._shape[ax]
+        oh = Y.unsqueeze(ax) == Tensor.arange(n).reshape(n, *[1] * (self.ndim - ax - 1))
+        return (self.log_softmax(axis=ax) * oh).sum(axis=ax).mean() * -1.0
 
     def argmax(self, axis=None, keepdim: bool = False) -> "Tensor":
         """Index of the max along `axis` (the flattened tensor for None):
@@ -816,9 +800,7 @@ class Tensor(metaclass=_TensorMeta):
         # tinygrad's MAX as selects: the ties' average gives each side half
         # the gradient there, as MAX's gradient rule does
         # (mixin/gradient.py:78-79).
-        a, b = self._broadcast(other)
-        if a._dtype != b._dtype:
-            a, b = a.cast(dtypes.float32), b.cast(dtypes.float32)
+        a, b = _promote(*self._broadcast(other))
         if not dtypes.is_float(a._dtype):
             return (a < b).where(b, a)
         return (a < b).where(b, (a == b).where(a * 0.5 + b * 0.5, a))
@@ -843,9 +825,7 @@ class Tensor(metaclass=_TensorMeta):
         (mixin/elementwise.py:426-438), a true select, so a non-finite
         unselected value never leaks in."""
         ref = x if isinstance(x, Tensor) else y if isinstance(y, Tensor) else self
-        x, y = _wrap_other(ref, x), _wrap_other(ref, y)
-        if x._dtype != y._dtype:
-            x, y = x.cast(dtypes.float32), y.cast(dtypes.float32)
+        x, y = _promote(_wrap_other(ref, x), _wrap_other(ref, y))
         cond, x = self._broadcast(x)
         cond, y = cond._broadcast(y)
         x, _ = x._broadcast(cond)
@@ -1637,10 +1617,8 @@ class Tensor(metaclass=_TensorMeta):
         return self
 
     def const_like(self, value) -> "Tensor":
-        """A tensor of `value` with self's shape + dtype (tinygrad
-        const_like)."""
-        return Tensor(np.full(self._shape, value, dtype=self._dtype.np_dtype),
-                      dtype=self._dtype)
+        """A lazy constant of self's shape and dtype (tinygrad const_like)."""
+        return _const_broadcast(value, self._shape, self._dtype)
 
     def gelu(self, approximate: str = "tanh") -> "Tensor":
         """Gaussian Error Linear Unit (tanh approximation), port of

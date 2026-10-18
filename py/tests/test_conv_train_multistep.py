@@ -38,14 +38,12 @@ def _train(model):
     layers = _layers(model)
     opt = nn.optim.Adam(nn.state.get_parameters(layers), lr=1e-2)
     x = Tensor(np.random.randn(BS, 1, 28, 28).astype(np.float32))
-    oh = np.zeros((BS, 10), np.float32)
-    oh[np.arange(BS), np.random.randint(0, 10, BS)] = 1.0
-    OH = Tensor(oh)
+    Y = Tensor(np.random.randint(0, 10, BS).astype(np.int32))
     losses = []
     with Context(TRAINING=1):
         for _ in range(STEPS):
             opt.zero_grad()
-            loss = x.sequential(layers).cross_entropy_from_onehot(OH)
+            loss = x.sequential(layers).sparse_categorical_crossentropy(Y)
             loss.backward()
             opt.step()
             losses.append(float(loss.numpy()))
