@@ -30,23 +30,36 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* Diamond: k1 = ADD(a, b); k2 = MUL(k1_out, c);
-                k3 = MUL(k1_out, d).
-       k1 has depth 0 (its inputs are leaves); k2/k3 have depth 1. *)
+    (* Diamond of four realizes (one TRealize would fuse it into a single
+       kernel): k1 = a + b; k2 = k1 c; k3 = k1 d; k4 = k2 + k3, so the
+       depths are 0, 1, 1, 2. *)
     TInit[];
     TReset[];
     a = TTensorCreate @ NumericArray[{1.0, 2.0}, "Real32"];
     b = TTensorCreate @ NumericArray[{3.0, 4.0}, "Real32"];
     c = TTensorCreate @ NumericArray[{5.0, 6.0}, "Real32"];
     d = TTensorCreate @ NumericArray[{7.0, 8.0}, "Real32"];
-    k1Term = TUOpAdd[a, b];
-    res2   = TRealize @ TUOpAdd[TUOpMul[k1Term, c], TUOpMul[k1Term, d]];
-    plan = First @ TMemoryPlan[];
-    depths = #["depth"] & /@ plan["Kernels"];
-    {Min[depths], Max[depths]},
-    {0, _Integer?(# >= 1 &)},
-    SameTest -> (#1[[1]] === #2[[1]] && MatchQ[#1[[2]], #2[[2]]] &),
-    TestID -> "memory-plan/diamond-depth-0-and-positive"
+    k1 = TRealize @ TUOpAdd[a, b];
+    k2 = TRealize @ TUOpMul[k1, c];
+    k3 = TRealize @ TUOpMul[k1, d];
+    k4 = TRealize @ TUOpAdd[k2, k3];
+    #["depth"] & /@ First[TMemoryPlan[]]["Kernels"],
+    {0, 1, 1, 2},
+    TestID -> "memory-plan/diamond-depths"
+]
+
+VerificationTest[
+    (* A chain of 400 realizes, each consuming the last one's output: the
+       depth walk is iterative, so a chain deeper than $RecursionLimit allows
+       a recursive walk still gives every kernel its depth. *)
+    TInit[];
+    TReset[];
+    x = TTensorCreate @ NumericArray[{1.0, 2.0}, "Real32"];
+    Do[x = TRealize @ TUOpAdd[x, x], {400}];
+    Max[#["depth"] & /@ First[TMemoryPlan[]]["Kernels"]],
+    _Integer?(# >= 399 &),
+    SameTest -> MatchQ,
+    TestID -> "memory-plan/long-chain-depth"
 ]
 
 VerificationTest[

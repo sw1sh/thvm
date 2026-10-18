@@ -303,6 +303,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- `TMemoryPlan[]` gives each kernel its real topological depth, and works however long the session's kernel chain. It read producers from the tensor table, whose `producer_kid` is 0 once a tensor is realized, so every depth was 0. It also recursed down the chain, which aborted with `$RecursionLimit` after a few hundred dependent kernels (the Tensors tutorial, late in a documentation build). Producers now come from the kernel table's `out_tid`, in one forward pass.
 - A second `TFindProof` of an imported TPTP problem no longer prints `ClearAll::clloc` for its one-letter symbols.
 - `TFindProof[tptpText, spec]` (for example `"Lemmas"`) proves or completes the TPTP text. The named-theory completion form used to claim it and look the text up as an `AxiomaticTheory` name.
 - `TFindProof` lifts a proof whose variables completion renumbered (the TPTP associativity examples) under any `$Context`. `buildCplDataset` held the decoder's original-symbol tables in a `Module`, which the decoder never saw, so a renumbered variable decoded as a fresh `X` in the ambient context. In a `Global`` kernel that coincided with the axiom's own symbol; under the documentation build's private context no axiom matched and the proof came back `$Failed`.

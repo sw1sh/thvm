@@ -140,24 +140,22 @@ TMetalMemoryProfile[] := Module[{summary, bufs, liveBufs, retainedBufs},
 ]
 
 (* === Topological depth ===
-   depth[kid] = 1 + max(depth of producer kernel of any input tid).
-   External tids (producer_kid == 0) contribute 0.  Memoized via a
-   local Association so the cost stays linear in the DAG size even
-   when multiple consumers share a producer. *)
-computeKernelDepths[kernels_, tens_] := Block[{nKernels = Length[kernels], depthCache, depth, kernelInputs, producerOf},
-    depthCache = <||>;
-    (* tens is keyed by tid (1..N).  Look up producer_kid lazily;
-       columns are {producer_kid, buf_id, dtype, ...}. *)
-    producerOf[tid_Integer] := If[tid <= 0 || tid > Length[tens], 0, tens[[tid, 1]]];
-    kernelInputs[kid_Integer] := If[kid <= 0 || kid > nKernels, {}, TKernelInputs[kid]];
-    depth[kid_Integer] /; KeyExistsQ[depthCache, kid] := depthCache[kid];
-    depth[kid_Integer] := depthCache[kid] = If[
-        kid <= 0 || kid > nKernels, 0,
-        Block[{producerKids = DeleteCases[producerOf /@ kernelInputs[kid], 0]},
-            If[producerKids === {}, 0, 1 + Max[depth /@ DeleteDuplicates[producerKids]]]
-        ]
+   depth[kid] = 1 + max(depth of the kernel that produced each input);
+   a kernel whose inputs are all leaves has depth 0.  The producer of
+   an input is the latest earlier kernel whose out_tid is that tid:
+   the tensor table's producer_kid is 0 once a tensor is realized, and
+   a tid can be reused.  Kernels are numbered in creation order, so a
+   producer precedes its consumer and one forward pass gives every
+   depth, however long the session's kernel chain. *)
+computeKernelDepths[kernels_] := Block[{nKernels = Length[kernels], kidsByTid, producerBefore, depth = <||>},
+    kidsByTid = GroupBy[Table[{kernels[[k, 2]], k}, {k, nKernels}], First -> Last];
+    producerBefore[tid_, k_] := Replace[Select[Lookup[kidsByTid, tid, {}], # < k &], {{} -> 0, ks_ :> Last[ks]}];
+    Do[
+        With[{producers = DeleteCases[DeleteDuplicates[producerBefore[#, k] & /@ TKernelInputs[k]], 0]},
+            depth[k] = If[ producers === {}, 0, 1 + Max[Lookup[depth, producers]]]],
+        {k, nKernels}
     ];
-    Association @ Table[k -> depth[k], {k, nKernels}]
+    depth
 ]
 
 (* Alias-only Metal reshapes produce a new TenDesc whose buf_id points
@@ -302,7 +300,7 @@ TMemoryPlan[] := Block[{kernels, tens, cpuBufs, metalBufs, kernelDepths, kernelR
     tens = TTensTable[];
     cpuBufs = TCpuBufTable[];
     metalBufs = TMetalBufTable[];
-    kernelDepths = computeKernelDepths[kernels, tens];
+    kernelDepths = computeKernelDepths[kernels];
     kernelRecords = MapIndexed[
         With[{kid = First[#2]}, <|
             "id" -> kid,
