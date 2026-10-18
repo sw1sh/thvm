@@ -1,117 +1,114 @@
-// schedule/gc_mark.c - tracing-GC mark walk.
-//
-// gc_mark_term traverses `t`'s heap children based on its tag
-// and marks every reachable buf preserved.  Recursion
-// terminates via the heap_visited[HEAP_CAP] bitmap so cycles
-// in the dyn heap (DUP / SUP / re-entrant lambda bodies)
-// don't infinite-loop.
-//
-// Tag dispatch covers the live runtime set per src/thvm.h.
-// term_resolve unwraps SUB-tagged variables before recursing
-// so the graph view matches what the runtime would see.
+// schedule/gc_mark.c - the preserve mark: every buffer a live root reaches is
+// marked preserved, so the pool rollback and the forward reclaim keep it.
+// Nodes are walked by term_cells, the collector's own size table: a dyn term
+// in HEAP, a def (DEFS, an unforced ALO's cell 0) in BOOK_HEAP, which holds
+// book terms only.  The walk never forces an ALO, so it allocates nothing.
+
+typedef struct { Term t; u8 book; } GcMarkItem;
+
+typedef struct {
+  u8         *dyn, *book;          // visited node bases, per HEAP / BOOK_HEAP loc
+  u64         n_dyn, n_book;
+  GcMarkItem *stack;
+  u64         len, cap;
+} GcMark;
 
 // Set only by mark_gc_preserve_host_roots: a reached tensor also keeps the
 // lazy gradient in its TenDesc.grad, which a later backward() accumulates
 // into even after the frontend dropped its own grad handle.
 static u8 *GC_MARK_GRAD_SEEN = NULL;
 
-fn void gc_mark_term(Term t, u8 *heap_visited) {
+static void gc_mark_push(GcMark *m, Term t, u8 book) {
   if (t == 0) return;
-  Term r = term_resolve(t);
-  u8 tag = term_tag(r);
-  u64 v  = term_val(r);
+  if (m->len == m->cap) {
+    u64 cap = m->cap ? 2 * m->cap : 4096;
+    GcMarkItem *s = (GcMarkItem *)realloc(m->stack, cap * sizeof(GcMarkItem));
+    if (s == NULL) thvm_fatal("gc_mark: out of memory for the mark stack");
+    m->stack = s;
+    m->cap   = cap;
+  }
+  m->stack[m->len++] = (GcMarkItem){ t, book };
+}
 
-  switch (tag) {
-    case TAG_TEN: {
-      u32 tid = (u32)v;
+static void gc_mark_drain(GcMark *m) {
+  while (m->len > 0) {
+    GcMarkItem it  = m->stack[--m->len];
+    Term       t   = it.t;
+    u8         tag = term_tag(t);
+    if (tag == TAG_TEN) {
+      u32 tid = (u32)term_val(t);
       tensor_mark_buf_preserved(tid);
       if (GC_MARK_GRAD_SEEN != NULL && tid < TENS_NEXT && !GC_MARK_GRAD_SEEN[tid]) {
         GC_MARK_GRAD_SEEN[tid] = 1;
-        gc_mark_term(TENS[tid].grad, heap_visited);
+        gc_mark_push(m, TENS[tid].grad, 0);
       }
-      return;
+      continue;
     }
-    case TAG_UOP: {
-      u32 op = term_ext(r);
-      u8 arity = uop_arity((u8)op);
-      // UOP_KERNEL stores [output_buf, kid_num]; uop_arity
-      // returns 0 for it but we still want to mark the output.
-      if (op == UOP_KERNEL) arity = 2;
-      for (u8 i = 0; i < arity; i++) {
-        if (v + i >= HEAP_NEXT) break;
-        if (heap_visited[v + i]) continue;
-        heap_visited[v + i] = 1;
-        gc_mark_term(heap_read(v + i), heap_visited);
-      }
-      return;
+    if (tag == TAG_REF) {
+      u32 name = term_ext(t);
+      if (name < DEFS_CAP) gc_mark_push(m, DEFS[name], 1);
+      continue;
     }
-    case TAG_LAM:
-    case TAG_DUP: {
-      if (v >= HEAP_NEXT) return;
-      if (heap_visited[v]) return;
-      heap_visited[v] = 1;
-      gc_mark_term(heap_read(v), heap_visited);
-      return;
+    Term const *mem  = it.book ? BOOK_HEAP : HEAP;
+    u8         *seen = it.book ? m->book : m->dyn;
+    u64         lim  = it.book ? m->n_book : m->n_dyn;
+    u64         loc  = term_val(t);
+    u32         n    = term_cells(t, mem);
+    if (n == 0 || loc + n > lim || seen[loc]) continue;
+    seen[loc] = 1;
+    // An unforced ALO's cell 0 is a book term, its NUM state in cell 1.
+    u8 alo_book = !it.book && tag == TAG_ALO && term_tag(mem[loc + 1]) == TAG_NUM;
+    for (u32 i = 0; i < n; i++) {
+      gc_mark_push(m, mem[loc + i], it.book || (i == 0 && alo_book));
     }
-    case TAG_APP:
-    case TAG_SUP:
-    case TAG_OP2:
-    case TAG_MAT: {
-      for (u8 i = 0; i < 2; i++) {
-        if (v + i >= HEAP_NEXT) break;
-        if (heap_visited[v + i]) continue;
-        heap_visited[v + i] = 1;
-        gc_mark_term(heap_read(v + i), heap_visited);
-      }
-      return;
-    }
-    case TAG_REF: {
-      if (v < DEFS_CAP && DEFS[v] != 0) {
-        gc_mark_term(DEFS[v], heap_visited);
-      }
-      return;
-    }
-    case TAG_ALO: {
-      if (v >= HEAP_NEXT) return;
-      if (heap_visited[v]) return;
-      heap_visited[v] = 1;
-      gc_mark_term(heap_read(v), heap_visited);
-      return;
-    }
-    default:
-      return;   // TAG_ERA / TAG_VAR / TAG_NUM: leaves.
   }
 }
 
-// Untruncated preserve mark for TABLE-WIDE consumers (the capture-time
-// mark-park sweep).  A capped root array would be fatal here: a Krea-scale
-// capture holds tens of thousands of extern-pinned wrappers, and a
-// dropped WEIGHT wrapper's buffer would be
-// parked + adopted (the round-3 gen symptom: replay_dispatches == 0, peak
-// 10GB because the resident bf16 weights had been recycled out from under
-// the WL cache).  Walks the root tables directly, no cap.  Returns 1 on
-// success; 0 when the visited bitmap can't be allocated -- the caller MUST
-// then skip its sweep (marks would be incomplete).  `extra` holds n_extra
-// more roots.
+static int gc_mark_begin(GcMark *m) {
+  memset(m, 0, sizeof *m);
+  m->n_dyn  = HEAP_NEXT > 0 ? HEAP_NEXT : 1;
+  m->n_book = BOOK_NEXT > 0 ? BOOK_NEXT : 1;
+  m->dyn    = (u8 *)calloc(m->n_dyn, 1);
+  m->book   = (u8 *)calloc(m->n_book, 1);
+  if (m->dyn == NULL || m->book == NULL) {
+    free(m->dyn);
+    free(m->book);
+    return 0;
+  }
+  return 1;
+}
+
+static void gc_mark_end(GcMark *m) {
+  gc_mark_drain(m);
+  free(m->stack);
+  free(m->dyn);
+  free(m->book);
+}
+
+// Marks what `roots` reach and nothing else; 0 when a bitmap can't be
+// allocated.
+fn int gc_mark_terms(Term const *roots, u32 n) {
+  GcMark m;
+  if (!gc_mark_begin(&m)) return 0;
+  for (u32 i = 0; i < n; i++) gc_mark_push(&m, roots[i], 0);
+  gc_mark_end(&m);
+  return 1;
+}
+
+// The whole root set: `result`, `extra` (n_extra more roots), WNF_LAST_STACK,
+// DEFS and the WL-pinned Terms, uncapped (a Krea-scale capture pins tens of
+// thousands of wrappers; a dropped one would let the capture's mark-park sweep
+// recycle a live weight).  Returns 0 when a bitmap can't be allocated: the
+// caller must then skip its sweep, as the marks would be incomplete.
 fn int mark_gc_preserve_all_roots_plus(Term result, Term const *extra, u32 n_extra) {
-  u64 cells = HEAP_NEXT;
-  if (cells == 0) cells = 1;
-  u8 *visited = (u8 *)calloc(cells, 1);
-  if (visited == NULL) return 0;
-  if (result != 0) gc_mark_term(result, visited);
-  for (u32 i = 0; i < n_extra; i++) gc_mark_term(extra[i], visited);
-  for (u32 i = 0; i < WNF_LAST_STACK_LEN; i++) {
-    if (WNF_LAST_STACK[i] != 0) gc_mark_term(WNF_LAST_STACK[i], visited);
-  }
-  for (u32 i = 0; i < DEFS_CAP; i++) {
-    if (DEFS[i] != 0) gc_mark_term(DEFS[i], visited);
-  }
-  for (u32 i = 0; i < EXTERN_PINNED_TERMS_LEN; i++) {
-    if (EXTERN_PINNED_TERMS[i] != 0) {
-      gc_mark_term(EXTERN_PINNED_TERMS[i], visited);
-    }
-  }
-  free(visited);
+  GcMark m;
+  if (!gc_mark_begin(&m)) return 0;
+  gc_mark_push(&m, result, 0);
+  for (u32 i = 0; i < n_extra; i++) gc_mark_push(&m, extra[i], 0);
+  for (u32 i = 0; i < WNF_LAST_STACK_LEN; i++) gc_mark_push(&m, WNF_LAST_STACK[i], 0);
+  for (u32 i = 0; i < DEFS_CAP; i++) gc_mark_push(&m, DEFS[i], 1);
+  for (u32 i = 0; i < EXTERN_PINNED_TERMS_LEN; i++) gc_mark_push(&m, EXTERN_PINNED_TERMS[i], 0);
+  gc_mark_end(&m);
   return 1;
 }
 
@@ -119,14 +116,6 @@ fn int mark_gc_preserve_all_roots(Term result) {
   return mark_gc_preserve_all_roots_plus(result, NULL, 0);
 }
 
-// Preserve every buffer reachable from the live root set.  Delegates to the
-// UNTRUNCATED walk (mark_gc_preserve_all_roots): the old fixed-4096 root array
-// silently dropped roots past 4096, and a cold JIT capture holds well over
-// 4096 live wrappers (cached weights + realized velocity-net intermediates) --
-// a dropped root left its buffers unmarked, so the capture-recycle mark-park
-// sweep parked a still-live buffer and the replay read garbage.  The all-roots
-// walk marks directly from WNF_LAST_STACK + DEFS + EXTERN_PINNED with no cap
-// (the visited bitmap is still sized to HEAP_NEXT, not full capacity).
 fn void mark_gc_preserve(Term result) {
   (void)mark_gc_preserve_all_roots(result);
 }
