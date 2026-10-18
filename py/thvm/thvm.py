@@ -96,6 +96,9 @@ _uop_pad = _bind("py_uop_pad", c_uint64,
 _uop_shrink = _bind("py_uop_shrink", c_uint64,
                     c_uint64, c_uint32, ctypes.POINTER(c_uint32))
 _uop_flip = _bind("py_uop_flip", c_uint64, c_uint64, c_uint32)
+_uop_broadcast2 = _bind("py_uop_broadcast2", c_int32, ctypes.POINTER(c_uint64),
+                        c_uint32, ctypes.POINTER(c_uint32), c_uint32, ctypes.POINTER(c_uint32),
+                        ctypes.POINTER(c_uint32))
 _grad = _bind("py_grad", c_uint64, c_uint64, c_uint64)
 _grad_with_target = _bind("py_grad_with_target", c_uint64,
                           c_uint64, c_uint64, c_uint64)
@@ -361,6 +364,18 @@ class Thvm:
 
     def reshape(self, src: Term, dims) -> Term:
         return self._move(_uop_reshape, src, dims)
+
+    def broadcast2(self, a: Term, sa, b: Term, sb):
+        """Broadcast a (shape sa) and b (shape sb) to one shape (uop_broadcast2):
+        (a', b', shape), or None when an axis is neither equal nor 1."""
+        ab = (c_uint64 * 2)(int(a), int(b))
+        arr_a = (c_uint32 * max(len(sa), 1))(*[int(d) for d in sa])
+        arr_b = (c_uint32 * max(len(sb), 1))(*[int(d) for d in sb])
+        out = (c_uint32 * K.MAX_DIM)()
+        nd = int(_uop_broadcast2(ab, c_uint32(len(sa)), arr_a, c_uint32(len(sb)), arr_b, out))
+        if nd < 0:
+            return None
+        return Term(ab[0]), Term(ab[1]), tuple(int(d) for d in out[:nd])
 
     def permute(self, src: Term, perm) -> Term:
         return self._move(_uop_permute, src, perm)

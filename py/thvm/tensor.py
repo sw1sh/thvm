@@ -530,26 +530,13 @@ class Tensor(metaclass=_TensorMeta):
 
     def _broadcast(self, other) -> tuple["Tensor", "Tensor"]:
         b = _wrap_other(self, other)
-        sa, sb = self._shape, b._shape
-        if sa == sb:
+        if self._shape == b._shape:
             return self, b
-        nd = max(len(sa), len(sb))
-        sa_pad = (1,) * (nd - len(sa)) + sa
-        sb_pad = (1,) * (nd - len(sb)) + sb
-        out_shape = []
-        for da, db in zip(sa_pad, sb_pad):
-            if da != db and da != 1 and db != 1:
-                raise ValueError(
-                    f"cannot broadcast {sa} vs {sb}")
-            out_shape.append(max(da, db))
-        out = tuple(out_shape)
-        a = self if sa_pad == sa else self.reshape(*sa_pad)
-        b2 = b if sb_pad == sb else b.reshape(*sb_pad)
-        if sa_pad != out:
-            a = a.expand(*out)
-        if sb_pad != out:
-            b2 = b2.expand(*out)
-        return a, b2
+        r = _TH.broadcast2(self.term, self._shape, b.term, b._shape)
+        if r is None:
+            raise ValueError(f"cannot broadcast {self._shape} vs {b._shape}")
+        ta, tb, out = r
+        return Tensor._from_term(ta, self._dtype, out), Tensor._from_term(tb, b._dtype, out)
 
     # ---- elementwise binary -------------------------------------------
 
@@ -642,27 +629,13 @@ class Tensor(metaclass=_TensorMeta):
         # The contraction axis K is x's last and w's axis -2 (after the
         # transpose).  Broadcast every remaining dim numpy-style, then
         # let the elementwise MUL line up + trailing-reduce over K.
-        xs, ws = x._shape, w._shape
-        nd = max(len(xs), len(ws))
-        xs_f = (1,) * (nd - len(xs)) + tuple(xs)
-        ws_f = (1,) * (nd - len(ws)) + tuple(ws)
-        if xs_f != xs:
-            x = x.reshape(*xs_f)
-        if ws_f != ws:
-            w = w.reshape(*ws_f)
-        bshape = []
-        for a, b in zip(xs_f, ws_f):
-            if a == b or a == 1 or b == 1:
-                bshape.append(max(a, b))
-            else:
-                raise RuntimeError(
-                    f"cannot dot {self._shape} and {w._shape}: "
-                    f"non-broadcastable {a} vs {b}")
-        bshape = tuple(bshape)
-        if x._shape != bshape:
-            x = x.expand(*bshape)
-        if w._shape != bshape:
-            w = w.expand(*bshape)
+        r = _TH.broadcast2(x.term, x._shape, w.term, w._shape)
+        if r is None:
+            raise RuntimeError(f"cannot dot {self._shape} and {w._shape}: "
+                               f"non-broadcastable {x._shape} vs {w._shape}")
+        xt, wt, bshape = r
+        x = Tensor._from_term(xt, x._dtype, bshape)
+        w = Tensor._from_term(wt, w._dtype, bshape)
         return (x * w).sum(axis=-1)
 
     # ---- elementwise unary --------------------------------------------

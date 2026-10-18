@@ -263,6 +263,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/reshape.c"
 #include "uop/permute.c"
 #include "uop/expand.c"
+#include "uop/broadcast2.c"
 #include "uop/pad.c"
 #include "uop/shrink.c"
 #include "uop/flip.c"

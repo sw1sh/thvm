@@ -64,6 +64,21 @@ int main(void) {
   CHECK_EQ(uop_reduce_src(ra), x4);
   CHECK_EQ(uop_reduce_axes(REDUCE_SUM, 0, axes, x4), x4);
 
+  TEST_BEGIN("uop/broadcast2-right-aligns-then-expands");
+  // (3, 1) with (4,): a only expands; b gains a leading 1, then expands.
+  u32  s31[2] = {3, 1}, s4[1] = {4}, s14[2] = {1, 4}, s34[2] = {3, 4}, bout[MAX_DIM];
+  Term ba = term_new(0, TAG_TEN, DT_FP32, 4), bb = term_new(0, TAG_TEN, DT_FP32, 5);
+  Term ga = ba, gb = bb;
+  CHECK_EQ(uop_broadcast2(&ga, 2, s31, &gb, 1, s4, bout), 2);
+  CHECK_EQ(bout[0], 3);
+  CHECK_EQ(bout[1], 4);
+  CHECK_EQ(ga, uop_expand(ba, 2, s34));
+  CHECK_EQ(gb, uop_expand(uop_reshape(bb, 2, s14), 2, s34));
+  u32 s3[1] = {3};
+  ga = ba;
+  gb = bb;
+  CHECK_EQ(uop_broadcast2(&ga, 1, s3, &gb, 1, s4, bout), -1);
+
   TEST_BEGIN("uop/reshape-stores-dims");
   // Heap layout: [src, NUM(ndim), NUM(d0), ..., NUM(d_{ndim-1})].
   u32 dims[3] = {2, 3, 4};

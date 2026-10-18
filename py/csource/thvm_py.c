@@ -208,6 +208,12 @@ EXPORT uint64_t py_uop_expand(uint64_t src, uint32_t ndim,
                               const uint32_t *dims) {
   return uop_expand(src, ndim, dims);
 }
+// ab[0] (shape sa) and ab[1] (shape sb) broadcast in place to one shape
+// (uop_broadcast2): its rank, written to out, or -1.
+EXPORT int py_uop_broadcast2(uint64_t *ab, uint32_t na, const uint32_t *sa,
+                             uint32_t nb, const uint32_t *sb, uint32_t *out) {
+  return uop_broadcast2((Term *)&ab[0], na, sa, (Term *)&ab[1], nb, sb, out);
+}
 EXPORT uint64_t py_uop_pad(uint64_t src, uint32_t ndim,
                            const uint32_t *begin_end) {
   return uop_pad(src, ndim, begin_end);

@@ -57,12 +57,7 @@ def _bcast(term: int, src_shape, out_shape) -> int:
     src_shape, out_shape = tuple(src_shape), tuple(out_shape)
     if src_shape == out_shape or not out_shape:
         return term
-    if len(src_shape) < len(out_shape):
-        src_shape = (1,) * (len(out_shape) - len(src_shape)) + src_shape
-        term = _TH.reshape(term, src_shape)
-    if src_shape != out_shape:
-        term = _TH.expand(term, out_shape)
-    return term
+    return _TH.broadcast2(term, src_shape, term, out_shape)[0]
 
 
 def _emit_b(u, i: int, memo: dict[int, int]) -> int:
