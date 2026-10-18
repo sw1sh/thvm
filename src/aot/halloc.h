@@ -1,30 +1,15 @@
-// src/aot/halloc.h
-//
-// Thread-local bump allocator for the AOT runtime.
-//
-// At T>1, every cont_alloc + every CTR construction would otherwise
-// hit `__atomic_fetch_add(&CURRENT_CTX->heap_next, ...)` -- 800k+
-// contended atomics for a tree-sum at d=18.  Caching one chunk per
-// thread (Bend2's `tl_hp`/`tl_he` pattern) collapses this to one
-// atomic per chunk (~12 atomics per thread for d=18).
-//
-// Lives in its own header (not src/aot/worker.c) because cont.c is
-// compiled BEFORE worker.c in the bundle and needs to call
-// aot_heap_alloc.
-//
-// Reset across aot_run calls: aot_heap_tl_reset() sets the calling
-// thread's tl state to (0, 0), forcing a fresh chunk reservation
-// on the first alloc.  Spawned workers start with zero-initialised
-// __thread vars (per the C standard), so they always get a fresh
-// chunk at their first alloc.  No epoch counter needed because
-// workers don't outlive their aot_run.
+// src/aot/halloc.h -- per-thread bump allocator for the AOT (ahead-of-time)
+// runtime: one atomic on heap_next per chunk instead of one per continuation
+// cell or CTR, like Bend2's tl_hp / tl_he
+// (TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c:82).  A header of
+// its own because cont.c, included before worker.c, allocates through it.
 
 #ifndef THVM_AOT_HALLOC_H
 #define THVM_AOT_HALLOC_H
 
 #include "../thvm.h"
 
-#define AOT_HEAP_CHUNK_CELLS  65536u   // 64k cells = 512KB per chunk
+#define AOT_HEAP_CHUNK_CELLS  65536u   // 512 KB per chunk
 
 extern __thread u64 aot_tl_chunk_lo;
 extern __thread u64 aot_tl_chunk_hi;
@@ -42,6 +27,8 @@ static inline u64 aot_heap_alloc(u64 size) {
   return at;
 }
 
+// Each run starts with this: the caller's chunk may predate a heap reset.
+// Spawned workers start with zeroed bounds and end with their run.
 static inline void aot_heap_tl_reset(void) {
   aot_tl_chunk_lo = 0;
   aot_tl_chunk_hi = 0;

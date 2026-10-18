@@ -1,23 +1,8 @@
-// aot/metal_emit.c -- Phase 7 iter D: MSL source emitter.
-//
-// Generates a Metal compute kernel from a TDef'd body.  The kernel
-// signature mirrors the iter A-C tooling:
-//
-//   kernel void aot_def_<name>(
-//       device   Term         *heap      [[buffer(0)]],
-//       device   Term         *args      [[buffer(1)]],
-//       device   Term         *result    [[buffer(2)]],
-//       device   atomic_uint  *book_next [[buffer(3)]],
-//       uint                   tid       [[thread_position_in_grid]])
-//
-// Iter D coverage: defs whose body, after peeling N outer TLam
-// binders, is a value expression made of TVar (bound to args), TNum
-// literals, and TOp2 folds (recursive).  The body folds inline to a
-// single uint; the kernel writes msl_term_new(TAG_NUM, _, uint) into
-// result[0].  Out of scope (later iters): TMat, TRef, TCtr, TDup.
-//
-// Reuses AotEmit + aot_emit_init/str/fmt from aot/emit.c (same TU
-// after the #includes in src/thvm.c).
+// src/aot/metal_emit.c -- MSL (Metal Shading Language) emitter: one def
+// becomes a single-thread kernel aot_def_<name>(heap, args, result, book_next,
+// tid) that writes its result Term to result[0].  IC (interaction calculus)
+// bodies are built on the book heap and reduced by an emitted wnf loop;
+// App(MAT chain, VAR) dispatch, CTR bodies and NUM folds compile directly.
 
 typedef struct {
     u64  lam_loc;
@@ -49,24 +34,17 @@ static const char *aot_msl_bind_lookup(AotMslBindings *b, u64 loc) {
     return NULL;
 }
 
-// Per-emit fresh counter.  Reset at the top of thvm_aot_metal_emit.
+// Fresh-name counter and the uint ring's index; reset per emit.
 static u32 g_msl_fresh = 0;
 
-// Iter G: REF-call inlining context.  Set at the top of
-// thvm_aot_metal_emit so the TAG_APP case can detect recursion
-// (callee_id == self_id -> bail).  emit_failed flips to 1 on any
-// unsupported shape inside a recursive emit; the top-level entry
-// frees the buffer and returns NULL when set.
-//
-// Iter W: g_msl_emit_failure_reason carries a brief description so
-// the host (compile_and_run in _.m) can print a useful diagnostic
-// instead of just "emit failed for def_id N".
+// REF inlining refuses calls to self_def_id; an unsupported shape sets
+// emit_failed with a reason, and thvm_aot_metal_emit then returns NULL.
 static u32  g_msl_self_def_id = 0;
 static int  g_msl_emit_failed = 0;
 static char g_msl_emit_failure_reason[256] = {0};
 
-// Public accessor so the dual-TU Metal backend can read the latest
-// failure reason after thvm_aot_metal_emit returns NULL.
+// For the Metal backend's diagnostic (src/backend/metal/_.m, its own
+// translation unit).
 const char *thvm_aot_metal_emit_failure_reason(void) {
     return g_msl_emit_failure_reason;
 }
@@ -80,14 +58,8 @@ static void aot_msl_emit_fail(const char *fmt, ...) {
     va_end(ap);
 }
 
-// Iter V: DUP memo -- per-emit map from dup_loc -> emitted uint var
-// name.  When a LAM binder is used multiple times, WL's auto_dup
-// rewrites the body's TVar(lam_loc) cells into a chain of DP0/DP1
-// projections of a shared DUP cell.  In our NUM-folding context we
-// don't need real IC duplication semantics -- both projections just
-// observe the same value -- so on first DP0/DP1 encounter we emit
-// the body's value once and memo the var name for the sibling
-// projection to reuse.
+// NUM folds: auto_dup (src/lam/auto_dup.c) turns a reused binder into DP0 / DP1
+// of one dup; both see the same scalar, so the body's uint is emitted once.
 typedef struct {
     u64  dup_loc;
     char uint_var[24];
@@ -113,14 +85,8 @@ static void aot_msl_dup_push(u64 dup_loc, const char *uint_var) {
     g_msl_dup_n++;
 }
 
-// Iter Z: parallel Term-memo for DP0/DP1 with SUP/LAM bodies (the
-// auto-dup uint memo above is only sound for NUM-typed bodies where
-// both projections observe the same scalar).  In the IC-construction
-// path used by Church-bool TDefs, both DP0 and DP1 of the same source
-// dup_loc must point at the SAME freshly-allocated GPU dup-body loc
-// so DUP-SUP annihilation fires at runtime.  Key: source book dup_loc;
-// value: name of the `ulong dup_loc_K` MSL local holding the GPU-side
-// body cell.  Reset alongside g_msl_dup_n at top of thvm_aot_metal_emit.
+// IC path: both projections of one source dup must share one fresh book cell
+// (its dup_loc_K local), or DUP-SUP cannot annihilate.
 typedef struct {
     u64  dup_loc;
     char loc_var[24];
@@ -146,26 +112,12 @@ static void aot_msl_dup_term_push(u64 dup_loc, const char *loc_var) {
     g_msl_dup_term_n++;
 }
 
-// Forward decls for the term/uint emit pair.
 static const char *aot_msl_emit_uint(AotEmit *b, Term t,
                                      AotMslBindings *bind);
 
-// Iter Z: book->dyn migration for AOT-Metal results.
-//
-// The kernel's IC reducer allocates compound terms in BOOK_HEAP via
-// aot_book_alloc.  Host runtime cnf/collapse walk HEAP (the dyn
-// heap), so the result Term needs to be relocated before WL can
-// consume it via TCnf/TCollapse.  Mirrors the shape of alo_realize
-// for the closed-term case: walk the book-heap subtree from the
-// root, allocate equivalents in dyn heap, return a dyn-pointing
-// Term.  Memo by source book_loc to handle shared subterms (e.g.,
-// auto_dup'd dup-body cells where DP0 and DP1 reference the same
-// loc).
-//
-// Iter Z+1's parallel collapse shader reads BOOK_HEAP directly and
-// makes this migration unnecessary; for the single-thread bringup
-// it's the cleanest way to bridge the two heap arenas.
-
+// The kernel builds results in BOOK_HEAP but host cnf / collapse walk HEAP, so
+// the Metal backend copies them over, as alo_realize does a closed term,
+// memoed by book loc so cells shared by DP0 and DP1 stay shared.
 #define AOT_MIGRATE_VISITED_CAP 4096
 typedef struct {
     u64 book_loc;
@@ -197,18 +149,13 @@ static Term aot_migrate_book_to_dyn_rec(Term t,
         tag == TAG_REF || tag == TAG_ANY ||
         tag == TAG_FVR || tag == TAG_PRI) return t;
     if (tag == TAG_VAR) {
-        // Translate VAR's binder loc through the memo so it points
-        // at the migrated LAM's dyn-heap cell.
+        // Point the VAR at its LAM's migrated cell.
         for (u32 i = 0; i < *memo_n; i++) {
             if (memo[i].book_loc == val) {
                 return term_new(0, TAG_VAR, ext, memo[i].dyn_loc);
             }
         }
-        // Unmemoized binder -- the LAM hasn't been visited yet (forward
-        // reference, e.g. body before LAM in walk).  Allocate a placeholder
-        // LAM cell and memo it; the LAM case will reuse the memoed dyn_loc
-        // when it's emitted.  The LAM-case visitor sees an existing memo,
-        // skips alloc, and writes its body into the placeholder.
+        // A VAR met before its LAM reserves and memos the LAM's dyn cell.
         if (*memo_n >= AOT_MIGRATE_VISITED_CAP) return t;
         u64 dyn_loc = heap_alloc(1);
         memo[*memo_n].book_loc = val;
@@ -236,24 +183,15 @@ static Term aot_migrate_book_to_dyn_rec(Term t,
     return term_new(0, tag, ext, dyn_loc);
 }
 
-// External linkage so backend/metal/_.m can call this from a
-// separate TU.  Iter Z+1 collapses this into the parallel readback
-// shader.
+// Called from src/backend/metal/_.m, a separate TU.
 Term thvm_aot_migrate_book_to_dyn(Term root) {
     AotMigrateMemo memo[AOT_MIGRATE_VISITED_CAP];
     u32 memo_n = 0;
     return aot_migrate_book_to_dyn_rec(root, memo, &memo_n);
 }
 
-// Iter Z: does this body need the IC-construction + GPU-side wnf
-// state machine?  Returns 1 if any TAG_SUP appears at any depth, or
-// any TAG_LAM appears (i.e., a Church value sitting inside the body
-// rather than the outer-peeled binder structure).  The existing
-// scalar/MAT/CTR fast paths handle everything else.
-//
-// Bounded walk: tracks a small visited-base set to avoid pathological
-// recursion via shared sub-terms (rare in book templates but cheap to
-// guard against).
+// 1 when the body needs the IC path: a SUP, LAM or BJ below the peeled binders
+// (CTR-arm binder LAMs aside).  Visited node locs bound the walk.
 #define AOT_MSL_NEEDS_IC_VISITED_CAP 8192
 static int aot_msl_needs_ic_walk(Term t,
                                   u64 *visited, u32 *visited_n) {
@@ -261,7 +199,6 @@ static int aot_msl_needs_ic_walk(Term t,
     if (tag == TAG_SUP || tag == TAG_LAM ||
         tag == TAG_BJ0 || tag == TAG_BJ1) return 1;
     u64 val = term_val(t);
-    // Dedup by base loc to bound work.
     if (tag == TAG_APP || tag == TAG_DP0 || tag == TAG_DP1 ||
         tag == TAG_CTR || tag == TAG_OP2 || tag == TAG_MAT ||
         tag == TAG_EQL) {
@@ -276,8 +213,7 @@ static int aot_msl_needs_ic_walk(Term t,
                aot_msl_needs_ic_walk(book_read(val + 1), visited, visited_n);
     }
     if (tag == TAG_DP0 || tag == TAG_DP1) {
-        // DP whose body is non-NUM forces the IC path.  NUM body
-        // (auto-dup of NUM-binder) is handled by the existing memo.
+        // A DP needs it only if its body does.
         Term body = book_read(val);
         if (term_tag(body) == TAG_NUM) return 0;
         return aot_msl_needs_ic_walk(body, visited, visited_n);
@@ -293,23 +229,14 @@ static int aot_msl_needs_ic_walk(Term t,
         return 0;
     }
     if (tag == TAG_OP2 || tag == TAG_EQL) {
-        // OP2/EQL with a SUP under either arg needs the IC state
-        // machine (commutes).  Plain NUM-NUM still folds inline.
+        // OP2 and EQL need it only through an operand (a SUP one commutes).
         return aot_msl_needs_ic_walk(book_read(val + 0), visited, visited_n) ||
                aot_msl_needs_ic_walk(book_read(val + 1), visited, visited_n);
     }
     if (tag == TAG_MAT) {
-        // MAT cells are case-trees; if a handler or the fallback
-        // contains a SUP, the IC path is required.  The scrutinee
-        // comes via the containing APP, walked separately above.
-        //
-        // A LAM-chain handler is the CTR-destructure arm binder
-        // structure (e.g. `#2 x y -> ...` emits Lam[x, Lam[y, ...]]),
-        // NOT an IC Church value -- peel it before walking so a plain
-        // CTR-destructure MAT routes to the static-unfold path (which
-        // emits CTR-arm dispatch) rather than the IC state machine
-        // (which does not).  Only a SUP under the peeled body forces
-        // the IC path.
+        // A handler's LAM chain binds CTR fields (#2 x y -> ...), not a
+        // Church value: peel it, so a plain destructuring MAT keeps the
+        // static path (the IC loop has no CTR arms).
         Term handler  = book_read(val + 0);
         Term fallback = book_read(val + 1);
         for (u32 guard = 0;
@@ -323,8 +250,7 @@ static int aot_msl_needs_ic_walk(Term t,
 }
 
 static int aot_msl_body_needs_ic(Term body) {
-    /* Heap-allocate visited cache so 8K * sizeof(u64) = 64 KiB doesn't
-       blow the stack on dispatchers that already have a deep frame. */
+    // 64 KiB: on the heap, not a possibly deep caller stack.
     u64 *visited = (u64 *)malloc(AOT_MSL_NEEDS_IC_VISITED_CAP * sizeof(u64));
     if (visited == NULL) return 0;
     u32 visited_n = 0;
@@ -333,11 +259,8 @@ static int aot_msl_body_needs_ic(Term body) {
     return r;
 }
 
-// Iter H helper: emit a Term-valued MSL expression for use in
-// value-position contexts (e.g., CTR child slots).  Falls through
-// to aot_msl_emit_uint + msl_term_new wrap for numeric atoms; for
-// TVar bound to args[K], the binding name IS already a Term, so
-// just return that name directly without re-wrapping.
+// A Term-valued MSL expression for t (a 64-slot ring entry): a bound VAR's
+// name, a book-heap construction for IC terms, else a NUM wrap of the uint.
 static const char *aot_msl_emit_term(AotEmit *b, Term t,
                                      AotMslBindings *bind) {
     static char ring[64][96];
@@ -349,16 +272,13 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         u64 loc = term_val(t);
         const char *bound = aot_msl_bind_lookup(bind, loc);
         if (bound) {
-            // Binding name is a Term-typed local (args[K] or var_K).
             snprintf(out, 96, "%s", bound);
             return out;
         }
     }
 
-    // Iter Z: IC-construction path for Church-encoded bodies.  Each
-    // case allocates the GPU-heap cells, recursively emits children,
-    // and returns a Term-typed local.  Mirrors alo_realize's per-tag
-    // shape (src/alo/realize.c).
+    // IC construction on the book heap, tag by tag as in alo_realize
+    // (src/alo/realize.c); each case returns a Term local.
     if (tag == TAG_LAM) {
         u32  lam_ext = term_ext(t);
         u64  src_loc = term_val(t);
@@ -367,10 +287,8 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         snprintf(loc_var, sizeof loc_var, "lam_loc_%u", idx);
         snprintf(var_var, sizeof var_var, "var_%u",     idx);
         snprintf(lam_var, sizeof lam_var, "lam_%u",     idx);
-        // Allocate body cell + introduce VAR(loc_var) binding for the
-        // body's TVar(src_loc) references.  The VAR resolves through
-        // heap[loc_var]: initially holds the body Term (pre-APP-LAM);
-        // after aot_app_lam fires it holds arg | SUB_BIT.
+        // The binder is VAR(loc_var): heap[loc_var] holds the body until
+        // aot_app_lam substitutes arg | SUB_BIT.
         aot_emit_fmt(b,
             "  ulong %s = aot_book_alloc(book_next, 1u);\n"
             "  Term  %s = msl_term_new(TAG_VAR, 0u, %s);\n",
@@ -393,8 +311,6 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         char loc_var[24], app_var[24], f_local[96], a_local[96];
         snprintf(loc_var, sizeof loc_var, "app_loc_%u", idx);
         snprintf(app_var, sizeof app_var, "app_%u",     idx);
-        // Materialize children before allocation so deeper allocs
-        // don't interleave with our cell layout (mirrors CTR pattern).
         Term f = book_read(src_loc + 0);
         Term a = book_read(src_loc + 1);
         const char *fe = aot_msl_emit_term(b, f, bind);
@@ -438,9 +354,6 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         u32  label   = term_ext(t);
         u64  src_loc = term_val(t);
         u8   side    = (tag == TAG_DP0 || tag == TAG_BJ0) ? 0 : 1;
-        // Memo: both DP0 and DP1 (or BJ0/BJ1) of the same source dup
-        // share one fresh GPU dup-body cell.  Without sharing,
-        // DUP-SUP annihilation at runtime mis-fires.
         const char *memo_loc = aot_msl_dup_term_lookup(src_loc);
         char loc_var[24];
         if (memo_loc != NULL) {
@@ -461,9 +374,7 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         u32  dp_idx = g_msl_fresh++;
         char dp_var[24];
         snprintf(dp_var, sizeof dp_var, "dp_%u", dp_idx);
-        // BJ tags become DP at GPU construction time -- we're emitting
-        // dyn-equivalent state directly (alo_realize would do the same
-        // BJ->DP unfold on a CPU realize).
+        // BJ becomes DP here, as alo_realize unfolds it on the CPU.
         aot_emit_fmt(b,
             "  Term %s = msl_term_new(%s, %uu, %s);\n",
             dp_var,
@@ -473,11 +384,8 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         return out;
     }
     if (tag == TAG_REF) {
-        // Inline the def's body directly -- equivalent to alo_realize
-        // for the closed-term case.  Each TAG_REF use gets its own
-        // copy of the LAM tree (no per-call sharing via alo_dup_share,
-        // but correct for Church-bool SAT where T_/F_ are tiny).  Bail
-        // on recursive REFs (which would loop forever in this inliner).
+        // Each use inlines its own copy of the def's body; a self-reference
+        // would never terminate.
         u32 ref_id = term_ext(t);
         if (ref_id >= DEFS_CAP || ref_id == g_msl_self_def_id) {
             aot_msl_emit_fail("recursive or out-of-range REF id %u in IC body", ref_id);
@@ -490,19 +398,11 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
             snprintf(out, 96, "0u /* undefined REF */");
             return out;
         }
-        // Scope the auto-dup memos to this inlining.  Both DUP memos
-        // key on the book dup_loc, but a def inlined at N TRef sites
-        // re-walks the SAME book template -- so the auto-dup DP0/DP1
-        // inside the def body carry identical dup_locs every time.
-        // Without this window, inlining #2's DP0/DP1 would alias
-        // inlining #1's GPU dup cell (which holds inlining #1's
-        // VAR binder), silently breaking the second copy of the
-        // lambda.  Saving/restoring the memo counts gives each
-        // inlining a fresh window: DP0+DP1 of one dup still share
-        // within the window; distinct inlinings stay independent.
+        // Every inlining walks the same book template, hence the same
+        // dup_locs: drop the memo entries one inlining adds, so the next
+        // gets its own cells instead of aliasing the first one's binders.
         u32 saved_dup_n      = g_msl_dup_n;
         u32 saved_dup_term_n = g_msl_dup_term_n;
-        // Recurse on the def's body.  The returned MSL local is a Term.
         const char *bt = aot_msl_emit_term(b, ref_body, bind);
         snprintf(out, 96, "%s", bt);
         g_msl_dup_n      = saved_dup_n;
@@ -511,9 +411,8 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
     }
 
     if (tag == TAG_OP2) {
-        // Iter Z+ATP: build OP2 cell on the book heap.  The wnf state
-        // machine fires NUM-NUM directly and dispatches to op2_sup /
-        // op2_num_sup commutes when an arg is SUP.
+        // The wnf loop fires NUM-NUM; a SUP operand commutes (op2_sup,
+        // op2_num_sup).
         u64  src_loc = term_val(t);
         u32  op      = term_ext(t);
         u32  idx     = g_msl_fresh++;
@@ -537,9 +436,8 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         return out;
     }
     if (tag == TAG_MAT) {
-        // Iter Z+ATP: build MAT cell on the book heap.  The wnf state
-        // machine fires APP-MAT-NUM / APP-MAT-CTR (case dispatch) and
-        // app_mat_sup commute when the scrutinee is SUP.
+        // The wnf loop fires a NUM match, commutes a SUP scrutinee
+        // (app_mat_sup) and sends anything else to the fallback.
         u64  src_loc = term_val(t);
         u32  match   = term_ext(t);
         u32  idx     = g_msl_fresh++;
@@ -563,9 +461,8 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         return out;
     }
     if (tag == TAG_EQL) {
-        // Iter ATP: build EQL cell on the book heap.  The wnf state
-        // machine fires NUM-NUM directly, ERA/ANY shorts, and
-        // eql_sup_l / eql_sup_r commutes when an arg is SUP.
+        // The wnf loop compares NUM-NUM; a SUP operand commutes (eql_sup_l,
+        // eql_sup_r).
         u64  src_loc = term_val(t);
         u32  idx     = g_msl_fresh++;
         char loc_var[24], eql_var[24], a_local[96], b_local[96];
@@ -588,10 +485,6 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         return out;
     }
     if (tag == TAG_CTR) {
-        // Iter OO: nested CTR -- allocate child cell sequence on the
-        // GPU heap, materialize each grandchild via the same emit_term
-        // path (recursing into deeper nesting), return a Term-valued
-        // local that holds the new TAG_CTR.
         u32  label  = term_ext(t);
         u64  ctr_loc = term_val(t);
         Term n_cell  = book_read(ctr_loc);
@@ -601,9 +494,7 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
             snprintf(out, 96, "0u /* nested CTR arity too large */");
             return out;
         }
-        // Materialize each grandchild first (their emit may use the
-        // same ring slots, so copy each result into a local before
-        // emitting the next).
+        // Copy each child out of the ring before emitting the next.
         char child_exprs[8][96];
         for (u32 i = 0; i < n; i++) {
             Term child = book_read(ctr_loc + 1 + i);
@@ -629,10 +520,8 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
         snprintf(out, 96, "%s", ctr_var);
         return out;
     }
-    // Generic path: emit as uint (NUM payload), wrap as Term.
-    // Iter II: preserve TNum's literal dtype on the wrap; for non-TNum
-    // (e.g., TOp2 fold), default to 0u (caller's responsibility to
-    // know the result dtype, mirroring iter HH).
+    // Anything else goes through the uint path, wrapped as NUM with a
+    // literal's dtype (0 otherwise).
     u32 dtype_ext = (tag == TAG_NUM) ? term_ext(t) : 0u;
     const char *uv = aot_msl_emit_uint(b, t, bind);
     snprintf(out, 96, "msl_term_new(TAG_NUM, %uu, ulong(%s))",
@@ -640,10 +529,8 @@ static const char *aot_msl_emit_term(AotEmit *b, Term t,
     return out;
 }
 
-// Recursively emit MSL for a value expression, returning a C-string
-// MSL expression that evaluates to a `uint` (the folded NUM payload).
-// For nested OP2s we materialize each sub-fold into a `uint v_K = ...`
-// declaration so the final expression remains compact.
+// A uint MSL expression for t's NUM value (a ring entry indexed by
+// g_msl_fresh); nested folds become `uint v_K` declarations.
 static const char *aot_msl_emit_uint(AotEmit *b, Term t,
                                      AotMslBindings *bind) {
     static char ring[256][80];
@@ -660,8 +547,7 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
         u64 loc = term_val(t);
         const char *bound = aot_msl_bind_lookup(bind, loc);
         if (!bound) {
-          // Iter LL: signal failure -- silent fallthrough to "0u"
-          // produced wrong-but-running kernels.
+          // Fail: a silent 0u would give a kernel that runs but is wrong.
           aot_msl_emit_fail(
               "TVar(loc=%llu) has no binding -- def shape uses a "
               "free var the emit can't resolve",
@@ -677,12 +563,8 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
       case TAG_DP1:
       case TAG_BJ0:
       case TAG_BJ1: {
-        // Auto-dup of multi-use binders.  Both DP0 and DP1 (or BJ0/BJ1
-        // after clone_to_book's BJ rewrite) of the same dup_loc
-        // reference the SAME body; we emit the body's uint value once
-        // and memo the var name so the sibling projection reuses it.
-        // Equivalent to firing DUP-NUM (both projections become NUM(v))
-        // but materialized statically at emit time.
+        // DUP-NUM at emit time: both projections of a dup (DP, or BJ after
+        // clone_to_book_rec) reuse the body's uint.
         u64 dup_loc = term_val(t);
         const char *memoed = aot_msl_dup_lookup(dup_loc);
         if (memoed != NULL) {
@@ -704,8 +586,7 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
         u64 loc = term_val(t);
         Term x = book_read(loc + 0);
         Term y = book_read(loc + 1);
-        // Iter XX: const-fold OP2(NUM, NUM) at emit time -- skip the
-        // intermediate v_K decl entirely.
+        // NUM-NUM folds at emit time.
         if (term_tag(x) == TAG_NUM && term_tag(y) == TAG_NUM) {
           u32 xv32 = (u32)term_val(x);
           u32 yv32 = (u32)term_val(y);
@@ -745,19 +626,16 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
         return out;
       }
       case TAG_APP: {
-        // Iter G: cross-def static call.  Walk APP spine inward to
-        // collect args + find the function head.  Shape:
-        //   App(App(...App(REF, a_n-1), ...), a_1), a_0)
-        // (innermost APP is the outermost call: it carries arg 0).
+        // A static call, inlined: walk App(..App(REF, a_0).., a_{n-1}) to
+        // the REF; the innermost APP holds a_0.
         Term call_args[8];
         u32  n_call_args = 0;
         Term cursor = t;
         while (term_tag(cursor) == TAG_APP && n_call_args < 8) {
           u64 al = term_val(cursor);
-          call_args[n_call_args++] = book_read(al + 1);  // arg
-          cursor = book_read(al + 0);                    // function
+          call_args[n_call_args++] = book_read(al + 1);
+          cursor = book_read(al + 0);
         }
-        // Reverse so call_args[0] is the first call arg.
         for (u32 i = 0; i < n_call_args / 2; i++) {
           Term tmp = call_args[i];
           call_args[i] = call_args[n_call_args - 1 - i];
@@ -783,7 +661,7 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
           snprintf(out, 80, "0u /* REF id %u out of range */", callee_id);
           return out;
         }
-        // Materialize each call arg as a Term, bind callee LAM[K] -> term name.
+        // Bind each callee LAM to its arg, wrapped as a NUM Term.
         u32 saved_n = bind->n;
         Term callee_cursor = DEFS[callee_id];
         u32 callee_arity = 0;
@@ -813,19 +691,12 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
                    n_call_args, callee_arity);
           return out;
         }
-        // Recursively emit the callee body with bindings in place.
-        // The result is a uint expression we can pass back to the
-        // caller's evaluator (TOp2, MAT, etc.) directly.
         const char *result_expr = aot_msl_emit_uint(b, callee_cursor, bind);
         bind->n = saved_n;
         snprintf(out, 80, "%s", result_expr);
         return out;
       }
       default: {
-        // Iter UU: any tag we don't have a value-fold case for
-        // (TPri / TSup / TUOp / TAlo / TBri / TInc / ...) signals
-        // an emit failure with the offending tag.  Silent 0u
-        // returns produced wrong-but-running kernels.
         aot_msl_emit_fail(
             "unsupported tag %u in value position -- def shape "
             "isn't yet supported by the Metal emit",
@@ -836,9 +707,8 @@ static const char *aot_msl_emit_uint(AotEmit *b, Term t,
     }
 }
 
-// Public entry: generate MSL source for the named def.  Returns
-// malloc'd buffer (caller frees).  NULL on bad def_id or missing root.
-// External linkage so the dual-TU Metal backend (_.m) can call it.
+// MSL source for def_id (caller frees), or NULL for a bad id or an unsupported
+// shape (see thvm_aot_metal_emit_failure_reason).  Used by the Metal backend.
 char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     if (def_id >= DEFS_CAP) return NULL;
     Term root = DEFS[def_id];
@@ -851,7 +721,6 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     AotMslBindings bind;
     aot_msl_bind_init(&bind);
 
-    // Peel outer LAMs and bind each to args[K].
     Term cursor = root;
     u32  argc = 0;
     while (term_tag(cursor) == TAG_LAM) {
@@ -863,10 +732,6 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         argc++;
     }
 
-    // Preamble split into multiple aot_emit_fmt calls so we stay
-    // under the shared 1024-byte tmp buffer.  Order: header +
-    // pragma + tag/ext defs (small), then helpers (medium), then
-    // kernel signature (medium).
     aot_emit_fmt(&b,
         "// auto-generated by thvm_aot_metal_emit(\"%s\") def_id=%u arity=%u\n"
         "#include <metal_stdlib>\n"
@@ -1183,20 +1048,16 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     g_msl_self_def_id = def_id;
     g_msl_emit_failed = 0;
     g_msl_emit_failure_reason[0] = '\0';
-    g_msl_dup_n = 0;   // iter V: reset dup memo for this emit
-    g_msl_dup_term_n = 0; // iter Z: reset Term-memo for IC construction
+    g_msl_dup_n = 0;
+    g_msl_dup_term_n = 0;
 
-    // Iter Z: Church-style bodies (containing TAG_SUP / TAG_LAM /
-    // TAG_BJ at any depth, or TAG_DP whose body isn't NUM) need the
-    // GPU-side wnf state machine + IC-interaction inlines.  Construct
-    // the term tree on the shared book heap, then drive wnf to WHNF
-    // and write the root Term to result[0].
+    // IC bodies: build the term on the book heap, then run the emitted wnf
+    // loop to WHNF (weak head normal form) and store the root in result[0].
     int emitted_ic = 0;
     if (aot_msl_body_needs_ic(cursor)) {
         const char *root_var = aot_msl_emit_term(&b, cursor, &bind);
-        // Stack cap chosen to fit Apple GPU thread-private memory
-        // budget at 8 bytes per Term (4096 * 8 = 32 KiB).  Iter cap
-        // bounds runaway loops; future iter can grow / make data-driven.
+        // 4096 Terms = 32 KiB of thread-private memory; iter_cap stops a
+        // runaway reduction.
         const u32 stack_cap = 4096u;
         const u32 iter_cap  = 1u << 20;
         aot_emit_str(&b,
@@ -1256,7 +1117,7 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
             "        next = heap[loc + 0]; continue;\n"
             "      }\n",
             stack_cap);
-        // EQL ENTER: push frame, descend into left arg (mirrors OP2).
+        // EQL ENTER: likewise.
         aot_emit_fmt(&b,
             "      if (t == TAG_EQL) {\n"
             "        ulong loc = msl_term_val(next);\n"
@@ -1464,19 +1325,9 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
         emitted_ic = 1;
     }
 
-    // Iter F + L: detect App(MAT-chain, TVar) shape.  After TLam-peel
-    // the body might be:
-    //   App(MAT[v0, [h0, MAT[v1, [h1, ... fallback]]]], TVar(arg))
-    // For each MAT cell, the handler shape decides the arm:
-    //   * value handler (TNum/TVar/TOp2/...) -> NUM-arm:
-    //       if (scrutinee_tag == NUM && scrutinee_val == match) ...
-    //   * TLam-wrapped handler (one or more lambdas) -> CTR-arm:
-    //       if (scrutinee_tag == CTR && scrutinee_ext == match) {
-    //         Term x = heap[scrutinee_val + 1];   (per peeled LAM)
-    //         ...
-    //         result_val = <body uint>;
-    //       }
-    // Mixed-shape chains are allowed (e.g., 0 -> NUM(42), #1 x -> x).
+    // App(MAT chain, bound VAR): a LAM handler is a CTR arm whose LAMs bind
+    // the fields heap[scrutinee_val + 1 + i]; any other handler is a NUM arm.
+    // A chain may mix both.
     int emitted_mat = 0;
     if (!emitted_ic && term_tag(cursor) == TAG_APP) {
         u64  app_loc  = term_val(cursor);
@@ -1501,7 +1352,6 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
                     Term handler   = book_read(ml + 0);
                     Term fallback  = book_read(ml + 1);
                     if (term_tag(handler) == TAG_LAM) {
-                        // CTR-arm: peel LAMs, bind each to heap[val+1+i].
                         u32 saved_n = bind.n;
                         Term hcursor = handler;
                         u32 lam_idx = 0;
@@ -1529,7 +1379,6 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
                             "  }\n", hv);
                         bind.n = saved_n;
                     } else {
-                        // NUM-arm (iter F path).
                         const char *hv = aot_msl_emit_uint(&b, handler, &bind);
                         aot_emit_fmt(&b,
                             "  %sif (scrutinee_tag == %uu && scrutinee_val == %uu) result_val = %s;\n",
@@ -1539,9 +1388,8 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
                     first = 0;
                     mc = fallback;
                 }
-                // Default arm: fallback expression after the MAT chain.
-                // If the fallback is TLam (catch-all binding the
-                // scrutinee), peel + bind; else emit as value expr.
+                // Default arm: a LAM binds the scrutinee; anything else is
+                // a value.
                 if (term_tag(mc) == TAG_LAM) {
                     u32 saved_n = bind.n;
                     u32 fr = g_msl_fresh++;
@@ -1563,8 +1411,8 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
                     const char *fv = aot_msl_emit_uint(&b, mc, &bind);
                     aot_emit_fmt(&b, "  else result_val = %s;\n", fv);
                 }
-                // Iter HH: preserve input dtype on result.  Mirrors
-                // the C runtime's NUM ops (ADD/SUB/MUL keep LHS dtype).
+                // The result takes args[0]'s dtype, as the C NUM ops keep
+                // their left operand's (src/interact/op2_num_num.c).
                 aot_emit_fmt(&b,
                     "  result[0] = msl_term_new(TAG_NUM,"
                     " %s, ulong(result_val));\n"
@@ -1577,18 +1425,13 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
 
     int emitted_ctr = 0;
     if (!emitted_ic && !emitted_mat && term_tag(cursor) == TAG_CTR) {
-        // Iter H: build a fresh CTR cell on the GPU heap.  Layout:
-        //   heap[loc]      = NUM(n) with DT_INT32 ext
-        //   heap[loc+1..n] = children (each as a Term)
-        // Result: term_new(0, TAG_CTR, label, loc).
+        // A CTR body is built on the book heap: NUM(n), then the n fields.
         u32  label  = term_ext(cursor);
         u64  ctr_loc = term_val(cursor);
         Term n_cell  = book_read(ctr_loc);
         u32  n       = (term_tag(n_cell) == TAG_NUM) ? (u32)term_val(n_cell) : 0;
         if (n <= 8) {
-            // Materialize each child Term first (uint exprs may live
-            // in the static ring; the emit below has its own fresh
-            // counter per call so we copy each into a local).
+            // Copy each child out of the ring before emitting the next.
             char child_exprs[8][96];
             for (u32 i = 0; i < n; i++) {
                 Term child = book_read(ctr_loc + 1 + i);
@@ -1613,8 +1456,7 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     }
 
     if (!emitted_ic && !emitted_mat && !emitted_ctr) {
-        // Plain value-expression body: emit directly + wrap as NUM.
-        // Iter HH: preserve input dtype on result.
+        // A NUM fold, with args[0]'s dtype.
         const char *rv = aot_msl_emit_uint(&b, cursor, &bind);
         aot_emit_fmt(&b,
             "  result[0] = msl_term_new(TAG_NUM,"
@@ -1625,11 +1467,7 @@ char *thvm_aot_metal_emit(u32 def_id, const char *name) {
     }
 
     if (g_msl_emit_failed) {
-        // Iter G: an unsupported shape (recursion, partial app, etc.)
-        // tripped the failure flag during recursive emit.  Discard the
-        // partial source so the caller can fall back / report failure.
-        // Iter Z: when env THVM_AOT_METAL_DUMP=1 also print the partial
-        // source so failures during the IC path are diagnosable.
+        // Drop the partial source; THVM_AOT_METAL_DUMP=1 prints it first.
         const char *e = getenv("THVM_AOT_METAL_DUMP");
         if (e != NULL && e[0] == '1' && b.buf != NULL) {
             fprintf(stderr,

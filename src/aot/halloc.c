@@ -1,8 +1,4 @@
-// src/aot/halloc.c
-//
-// Storage for the thread-local bump-allocator state declared in
-// halloc.h.  __thread definitions live in a .c so the linker has
-// exactly one copy.
+// src/aot/halloc.c -- storage for halloc.h's per-thread chunk bounds.
 
 #include "halloc.h"
 
