@@ -3,8 +3,7 @@
 // x0 <- TEN(t)
 // x1 <- TEN(t)
 //
-// TAG_TEN is an atomic handle (just a tid).  Both projections reference
-// the same tensor by id; sharing is implicit.  No heap copy.
+// A TEN is a tid handle: both sides name one tensor, and no buffer is copied.
 fn Term interact_dup_ten(u8 side, u64 loc, Term ten) {
   ITRS++;
   multi_emit(RULE_DUP_TEN, MULTI_DIST, loc, 0, 0);

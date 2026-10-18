@@ -1,25 +1,24 @@
-// (λ{#K:h; m} #K)
-// --------------- APP-MAT-NUM
+// (lam{#K:h; m} #K)
+// ----------------- APP-MAT-NUM
 // h
 //
-// (λ{#K:h; m} #K{a, b, ...})
-// -------------------------- APP-MAT-CTR
+// (lam{#K:h; m} #K{a, b, ...})
+// ---------------------------- APP-MAT-CTR
 // (h a b ...)
 //
-// (λ{#K:h; m} &L{a, b})
-// --------------------- APP-MAT-SUP (app_mat_sup.c)
-// &L{(λ{#K:h0; m0} a), (λ{#K:h1; m1} b)}
+// (lam{#K:h; m} &L{a, b})
+// ----------------------- APP-MAT-SUP (app_mat_sup.c)
+// ! H &L = h
+// ! M &L = m
+// &L{(lam{#K:H0; M0} a), (lam{#K:H1; M1} b)}
 //
-// (λ{#K:h; m} x)
-// -------------- APP-MAT-MIS, for any other x
+// (lam{#K:h; m} x)
+// ---------------- APP-MAT-MIS, for any other x
 // (m x)
 //
-// `arg` is the scrutinee in WHNF, a DP head already driven to its value:
-// wnf and redex_fire both force it first.  Every APP is built in fresh
-// cells, as in the other interactions; HVM4's wnf_app_mat_ctr reuses the
-// consumed MAT and CTR cells, but nf's step index (wnf/redex.c) only learns
-// the cells a fire allocates, so an APP written over a consumed cell never
-// fires there.
+// `arg` comes forced (wnf, then cnf for a DP head).  The APPs take fresh cells,
+// not the consumed MAT and CTR (HVM4's wnf_app_mat_ctr): nf's step index
+// (wnf/redex.c) learns only the cells a fire allocates.
 fn Term interact_app_mat(Term mat, Term arg) {
   u64 mat_loc = term_val(mat);
   u32 match   = term_ext(mat);

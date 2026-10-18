@@ -1,39 +1,12 @@
-// wnf -- reduce a term to weak normal form.
-//
-// Stack-machine reducer modeled on HVM4's clang/wnf/_.c.  Two phases:
-//
-//   enter:  walk into the head position, pushing eliminator frames
-//           (APP, DP0, DP1) until we reach a WHNF root (LAM, ERA,
-//           SUP, or an unsubstituted VAR).
-//
-//   apply:  pop frames in LIFO order and dispatch the active-pair
-//           interaction with the WHNF root.  Some interactions
-//           (APP-LAM, DUP-SUP) produce a new term to re-enter; others
-//           (APP-ERA, DUP-ERA) produce a fresh WHNF directly.
-//
-// `WNF_STACK` and `WNF_S_POS` are the global stack and head used by
-// every reducer call.  We snapshot `base = WNF_S_POS` at entry so a
-// nested wnf() invocation would still terminate at its own base
-// (the runtime is single-threaded today, so nesting is moot, but the
-// pattern matches HVM4 and costs nothing).
-//
-// `wnf_n(t, max_steps)` is the step-bounded form: the budget is
-// checked just *before* each interaction-firing site (every place
-// the reducer would bump ITRS).  Free reductions -- VAR-SUB / DUP
-// follows, APP/DP frame pushes -- always run, so a single step
-// resolves to a meaningful WHNF rather than stopping mid-deref.
-// On bail we snapshot the still-pending eliminator frames into
-// `WNF_LAST_STACK` (innermost-first) and unwind via the same
-// "stuck term" path the apply loop uses for non-redex pairs --
-// heap mutations stick, so calling wnf again on the returned root
-// resumes the reduction.
-//
-// `wnf(t)` is the unbounded form (max_steps = 0).
-//
-// WNF_LAST_STACK / WNF_LAST_STACK_LEN now live in TContext (see
-// thvm.h); the macros in this file resolve to ctx fields.  Storage
-// is heap-allocated in thvm_init / thvm_context_create.
+// wnf - weak head normal form on the stack machine of HVM4's clang/wnf/_.c.
+// enter walks into the head and pushes each eliminator as a frame (APP, DP,
+// a strict OP2, EQL, AND, OR, WHEN, ANN, DSU or DDU, an F_* frame for a later
+// slot); apply pops them and fires.  Nested wnf / cnf calls share the stack: a
+// caller stores s_pos in WNF_S_POS and reloads it; each stops at its own base.
 
+// wnf_n stops once max_steps interactions have fired (0: no bound), before the
+// next fire, unfold or strict push: pending frames go to WNF_LAST_STACK
+// (innermost first) and unwind as stuck terms, so wnf on the result resumes.
 fn Term wnf_n(Term term, u64 max_steps) {
   HOT_WNF_CALLS++;
   Term *stack = WNF_STACK;
@@ -50,9 +23,7 @@ enter:
   switch (term_tag(next)) {
     case TAG_VAR: {
       u64  loc  = term_val(next);
-      // Acquire-load: pairs with heap_subst_var's release-store so we
-      // never observe the SUB bit without the matching value bits
-      // (which would be UB at T>1 with plain heap_read).
+      // Acquire: pairs with heap_subst_var's release store (SUB bit and value).
       Term cell = heap_read_acq(loc);
       if (term_sub_get(cell)) {
         next = term_sub_set(cell, 0);
@@ -64,27 +35,19 @@ enter:
     case TAG_DP0:
     case TAG_DP1: {
       u64  loc  = term_val(next);
-      // Grad-flavored projection: dispatch BEFORE touching the cell
-      // so the other projection can still read y.
+      // A grad projection leaves the cell alone: the sibling still reads y.
       if (term_ext(next) & DUP_GRAD_FLAG) {
         if (BUDGET_HIT) BAIL_AT(next);
         if (term_tag(next) == TAG_DP0) {
-          // FWD passthrough: cell holds y, force it.
+          // FWD: the cell's y.
           ITRS++;
           multi_emit(RULE_GRAD_FWD, MULTI_TERM, loc, 0, 0);
           next = heap_read(loc);
           goto enter;
         }
-        // DETACH is a stop-gradient: the cotangent reaching a detach
-        // dies and its child is treated as a constant (tinygrad
-        // gradient.py:89 excludes Ops.DETACH from the backward walk).
-        // The normal descent below re-enters cell[0] through the loop,
-        // which UNWRAPS DETACH to its forward child (the runtime
-        // identity at UOP_DETACH above) -- so interact_grad would then
-        // dispatch the unwrapped child's chain rule and propagate the
-        // cotangent, silently making .detach() a backward no-op.  Pin
-        // the grad cell's y to the DETACH term itself (no unwrap) and
-        // dispatch now so interact_grad's UOP_DETACH case returns zero.
+        // DETACH stops the gradient (tinygrad mixin/gradient.py:113-114), but
+        // the descent below would unwrap it and run its child's rule: pin y to
+        // the DETACH so interact_grad's UOP_DETACH case returns zero.
         {
           Term y_raw = term_resolve(heap_read(loc + 0));
           if (term_tag(y_raw) == TAG_UOP && term_ext(y_raw) == UOP_DETACH) {
@@ -98,27 +61,15 @@ enter:
             goto enter;
           }
         }
-        // BWD: HVM4-style stack-based descent.  Push the grad-DP1
-        // frame, descend into cell[0] (= y) so the normal enter loop
-        // drives any nested DPs / UOPs to head form.  The apply phase
-        // will pop the frame and call interact_grad with the resolved
-        // y.  This avoids the reentrant wnf() approach (which broke
-        // with deep nesting via cell-consumption / shared-stack
-        // surprises) and naturally handles arbitrarily deep DP-DP
-        // structures from prior chain-rule rounds.
+        // BWD: reduce y (cell[0]) on this stack, not in a nested wnf, so deep
+        // DP chains from earlier chain-rule fires need no recursion.
         stack[s_pos++] = next;
         next = heap_read(loc + 0);
         goto enter;
       }
-      // Plain (non-grad) DP projection: HVM4-style dynamic projection.
-      // Push the DP frame and descend into the cell body so the apply
-      // phase can fire DUP-XXX (DUP-LAM, DUP-SUP, DUP-NUM, DUP-CTR, ...)
-      // as soon as the body reaches WHNF.  Levy-opaque book-time
-      // projection is TAG_BJ0/BJ1 below.
-      //
-      // SUB-bit shortcut: an earlier sibling fire already resolved this
-      // projection; follow the SUB chain.  Acquire-load matches
-      // heap_subst_var's release-store on the writer side.
+      // A plain DP fires its DUP once the body is WHNF, as in HVM4 (the
+      // Levy-opaque projections are BJ0 / BJ1).  A SUB cell is the sibling's
+      // finished fire.
       Term cell = heap_read_acq(loc);
       if (term_sub_get(cell)) {
         next = term_sub_set(cell, 0);
@@ -130,10 +81,8 @@ enter:
     }
     case TAG_BJ0:
     case TAG_BJ1: {
-      // Book-time projection (HVM4 BJ).  Levy-opaque under wnf -- we
-      // never fire DUP-XXX in place; alo_realize is what unfolds these
-      // into fresh dyn-heap DP cells when their body is sub'd into a
-      // book copy.  Identical SUB-chain follow as the DP arm above.
+      // A book-time projection (HVM4's BJ) never fires here: alo_realize turns
+      // it into a DP per book copy.
       u64  loc  = term_val(next);
       Term cell = heap_read_acq(loc);
       if (term_sub_get(cell)) {
@@ -157,26 +106,17 @@ enter:
       goto enter;
     }
     case TAG_REF: {
-      // Lazy ALO unfold.  ALO-VAR / ALO-LAM / ALO-NOD then walk one
-      // layer per fire as wnf re-enters this term (no eager expansion
-      // even for self-referential defs).
-      //
-      // (Legacy AOT had a fast path here that dispatched to AOT_FNS
-      // for registered defs.  The Bend2-style AOT replacing it works
-      // outside of this loop -- the runtime calls AOT entry points
-      // directly with Tasks, not through wnf descent.)
+      // A REF unfolds one layer per entry (alo_realize wraps the children in
+      // ALOs), so self-referential defs stay lazy.
       u32  name = term_ext(next);
       Term book = (name < DEFS_CAP) ? DEFS[name] : 0;
       if (book == 0) {
-        // Undefined ref -- treat as WHNF atom; won't reduce further.
+        // An undefined name is a WHNF atom.
         whnf = next;
         goto apply;
       }
       if (BUDGET_HIT) BAIL_AT(next);
-      // REF -> ALO unfolding is structural, not a beta/dup/mat
-      // reduction -- HVM4's wnf_alo_*.c never bumps ITRS for it
-      // either.  Counting these inflated thvm's ITRS ~3x versus
-      // HVM4 on REF-heavy benches like fib_nat.
+      // No ITRS: unfolds are structural (HVM4's REF and ALO rules count none).
       next = alo_realize(book, 0);
       goto enter;
     }
@@ -194,35 +134,16 @@ enter:
         goto apply;
       }
       if (op == UOP_DETACH) {
-        // Stop-gradient marker: identity at runtime.  The backward was
-        // already built (grad treats it as a leaf), so unwrap to the
-        // child and re-enter -- it never reaches a kernel/TEN read.
+        // Forward, DETACH is the identity: unwrap to its child.
         next = heap_read(term_val(next) + 0);
         goto enter;
       }
-      // (slots UOP_GRAD/UOP_FWD have moved to TAG_DP0/DP1+DUP_GRAD_FLAG;
-      // see the TAG_DP{0,1} branch above.)
       if (op == UOP_ASSIGN) {
-        // Force src (heap[loc+1]) first -- could be a kernel chain
-        // that has to fire before we have a TEN to copy from.  dst
-        // (heap[loc+0]) should already be a TEN handle but resolve
-        // it for symmetry.  Once both are TEN, hand the resolved
-        // values to interact_assign_with which memcpys src.buf ->
-        // dst.buf and returns dst.
-        //
-        // Recursive training loops produce a FRESH ASSIGN cell each
-        // iteration via alo_realize (REF/ALO unfold deep-copies into
-        // dyn heap), so heap-mutating the cells per fire is fine --
-        // next iter has its own copy and re-fires its own upstream
-        // kernel chain.  We pass the resolved values directly rather
-        // than heap_set'ing them so the original cell structure is
-        // preserved for tooling (THeapDiagram, debug traces).
+        // Reduce src (slot 1, perhaps a kernel chain) and dst without writing
+        // them back: the cell keeps its src kernel, so a training loop re-fires
+        // it each pass (uop_assign.c).
         u64  aloc   = term_val(next);
         if (BUDGET_HIT) BAIL_AT(next);
-        // Sync WNF_S_POS with our local s_pos before reentering wnf:
-        // the outer (this) call may have pushed frames (F_UOP_CHILD
-        // ancestors).  Without this, the inner wnf snapshots a stale
-        // WNF_S_POS and clobbers outer frames.  Re-read on return.
         WNF_S_POS = s_pos;
         Term src_w  = wnf(heap_read(aloc + 1));
         s_pos = WNF_S_POS;
@@ -230,47 +151,26 @@ enter:
         Term dst_w  = wnf(heap_read(aloc + 0));
         s_pos = WNF_S_POS;
         if (term_tag(src_w) == TAG_TEN && term_tag(dst_w) == TAG_TEN) {
-          // Fire this ASSIGN cell's buffer write at most once per pass:
-          // a cell reachable from two roots (Adam's m as both a step
-          // output and inside the param update that reads m) would
-          // otherwise re-apply the update against the updated buffer.
+          // One write per cell and pass: a cell two roots reach (Adam's m, a
+          // step output the param update reads) would apply twice.
           if (assign_fire_claim(aloc))
             whnf = interact_assign_with(dst_w, src_w);
           else
             whnf = dst_w;
           goto apply;
         }
-        // Either side stuck (e.g. dst still a UOP) -- leave as WHNF.
         whnf = next;
         goto apply;
       }
-      // BUFFER / CONST / VIEW / movement / elementwise / REDUCE / ...
-      // are WNF by themselves; they become active only inside a KERNEL AST
-      // the interpreter walks after firing.
-      //
-      // BUT: a descendant slot may hold an ACTIVE term (chain-rule
-      // DP1_GRAD; DUP-projection inside a UOP from TGrad's leafTids
-      // nest; nested UOP_ASSIGN / UOP_KERNEL).  wnf would otherwise
-      // leave it unfired and materialize would BAIL.  Push an
-      // F_UOP_CHILD frame for the first active child and descend
-      // into it; the apply phase resumes scanning for siblings (and
-      // recursively drives the result if it's itself UOP-with-
-      // actives) until the parent UOP is fully WHNF.  When all
-      // children are passive (the common forward-only case), the
-      // initial scan finds nothing and we fall through immediately.
+      // Any other UOP is WHNF once no child is active (uop_child_is_active: a
+      // DP, a KERNEL or ASSIGN, or a UOP over one); F_UOP_CHILD frames drive
+      // each active child in turn.
       u64 uloc = term_val(next);
       u8  uar  = uop_arity((u8)op);
       u8  next_idx = uop_next_active_child(uloc, uar, 0);
       if (next_idx < uar) {
         if (BUDGET_HIT) BAIL_AT(next);
-        // Frame ext layout:
-        //   bits  0.. 7  child idx (slot we're driving)
-        //   bits  8..15  parent UOP opcode (so apply rebuilds the
-        //                parent Term without re-reading the heap)
-        //   bit  16      rescan flag: when set, apply skips the
-        //                heap_set (already done before recursive
-        //                descent) and just resumes scanning from
-        //                child_idx for the next active sibling.
+        // Frame ext: the child's index in bits 0-7, the UOP's opcode in 8-15.
         u32 packed = (u32)next_idx | ((u32)op << 8);
         stack[s_pos++] = term_new(0, TAG_F_UOP_CHILD, packed, uloc);
         next = heap_read(uloc + next_idx);
@@ -280,10 +180,7 @@ enter:
       goto apply;
     }
     case TAG_OP2: {
-      // HVM4-style stack-based strict eval.  Push the OP2 frame and
-      // descend into x.  When x reduces (apply phase), if x is NUM
-      // and y is also NUM, fire op directly; otherwise push a
-      // F_OP2_NUM frame with x's value baked in and descend into y.
+      // A strict eliminator is its own frame; enter reduces its strict slot.
       if (BUDGET_HIT) BAIL_AT(next);
       u64 loc = term_val(next);
       stack[s_pos++] = next;
@@ -291,17 +188,9 @@ enter:
       goto enter;
     }
     case TAG_EQL: {
-      // HVM4-style stack-based strict eval.  Push EQL frame, descend
-      // into a.  Apply pops EQL: dispatches on a's WHNF (ERA/ANY/SUP
-      // handle without forcing b; otherwise push F_EQL_R and descend
-      // into b).  The full rule table:
-      //   EQL-ERA-{L,R}: ERA on either side -> ERA
-      //   EQL-ANY-{L,R}: ANY on either side -> NUM(1)
-      //   EQL-SUP-L: EQL(&L{a0,a1}, b) -> &L{EQL(a0,B0), EQL(a1,B1)}
-      //              with !&L{B0,B1}=b (DUP duplicates b)
-      //   EQL-SUP-R: symmetric
-      //   EQL-NUM-NUM: compare values, NUM(1) if equal else NUM(0)
-      //   otherwise: stuck
+      // EQL rules, a first (EQL frame) then b (F_EQL_R): ERA on a side -> ERA,
+      // ANY -> NUM(1), a SUP side commutes with a DUP of the other, NUM == NUM
+      // -> NUM(1) or NUM(0); anything else is stuck.
       if (BUDGET_HIT) BAIL_AT(next);
       u64 loc = term_val(next);
       stack[s_pos++] = next;
@@ -309,8 +198,6 @@ enter:
       goto enter;
     }
     case TAG_AND: {
-      // HVM4-style: push AND frame, descend into a (the strict slot).
-      // Apply dispatches on a's WHNF; b stays lazy until needed.
       if (BUDGET_HIT) BAIL_AT(next);
       u64 loc = term_val(next);
       stack[s_pos++] = next;
@@ -318,7 +205,6 @@ enter:
       goto enter;
     }
     case TAG_OR: {
-      // HVM4-style: push OR frame, descend into a.
       if (BUDGET_HIT) BAIL_AT(next);
       u64 loc = term_val(next);
       stack[s_pos++] = next;
@@ -326,7 +212,6 @@ enter:
       goto enter;
     }
     case TAG_WHEN: {
-      // HVM4-style: push WHEN frame, descend into cond.
       if (BUDGET_HIT) BAIL_AT(next);
       u64 loc = term_val(next);
       stack[s_pos++] = next;
@@ -334,7 +219,7 @@ enter:
       goto enter;
     }
     case TAG_ANN: {
-      // HVM4-style: push ANN frame, descend into typ (the strict slot).
+      // ANN's strict slot is typ, slot 1.
       if (BUDGET_HIT) BAIL_AT(next);
       u64 loc = term_val(next);
       stack[s_pos++] = next;
@@ -342,9 +227,6 @@ enter:
       goto enter;
     }
     case TAG_DSU: {
-      // Dynamic-label SUP: strict on the label term.  Push DSU frame
-      // (the frame IS the DSU itself, since its loc is in val and we
-      // know to descend into label at +0), descend into label.
       if (BUDGET_HIT) BAIL_AT(next);
       u64 loc = term_val(next);
       stack[s_pos++] = next;
@@ -352,7 +234,6 @@ enter:
       goto enter;
     }
     case TAG_DDU: {
-      // Dynamic-label DUP: same shape as DSU -- strict on label.
       if (BUDGET_HIT) BAIL_AT(next);
       u64 loc = term_val(next);
       stack[s_pos++] = next;
@@ -390,17 +271,11 @@ apply:
           }
           case TAG_PRI: {
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            // 8.1b: accumulate arg into PRI's buffer; saturated
-            // call returns the result Term, partial returns a
-            // larger PRI -- both go through `next` for further
-            // reduction.
             next = interact_app_pri(whnf, arg);
             goto enter;
           }
           case TAG_SUP: {
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
-            // 8.1d-i: APP-SUP commutation -- distribute the APP
-            // across the SUP's children, sharing arg via a DUP.
             next = interact_app_sup(whnf, arg);
             goto enter;
           }
@@ -410,12 +285,8 @@ apply:
             continue;
           }
           case TAG_MAT: {
-            // APP-MAT (interact/app_mat.c) on the forced scrutinee.  The
-            // inner wnf runs on this call's shared stack, so sync
-            // WNF_S_POS first or it would overwrite the frames pushed so
-            // far.  A Levy-opaque DP head goes through cnf so DUP-CTR /
-            // DUP-NUM fire before the dispatch; any other head needs only
-            // wnf, which is cheaper than a full cnf walk.
+            // Force the scrutinee as app_mat.md says: wnf, then cnf for a DP
+            // head (a DUP wnf left stuck, which cnf may still fire).
             if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             WNF_S_POS = s_pos;
             Term arg_w = wnf(arg);
@@ -435,16 +306,14 @@ apply:
       }
       case TAG_DP0:
       case TAG_DP1: {
-        // Grad-flavored DP1 frame: BWD chain-rule dispatch.
+        // DP1 + GRAD: the chain rule on the reduced y.
         if (term_tag(frame) == TAG_DP1 && (term_ext(frame) & DUP_GRAD_FLAG)) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           u64 gloc = term_val(frame);
           heap_set(gloc + 0, whnf);
           Term g = interact_grad(frame);
           if (g == frame) {
-            // Stuck (chain rule can't pattern-match -- e.g. y is a
-            // SUP that hasn't been routed yet).  Propagate frame as
-            // WHNF; outer DUPs / etc. will retry.
+            // No rule matches y yet (an unrouted SUP, say): the DP1 is WHNF.
             whnf = frame;
             continue;
           }
@@ -453,8 +322,6 @@ apply:
           next = g;
           goto enter;
         }
-        // Plain (non-grad) DP frame: HVM4-style dynamic projection
-        // dispatch on body's WHNF tag.  Mirrors redex.c's DP firing.
         u64 loc  = term_val(frame);
         u32 lab  = term_ext(frame);
         u8  side = (term_tag(frame) == TAG_DP0) ? 0 : 1;
@@ -502,8 +369,7 @@ apply:
           case TAG_UOP: {
             Term r = interact_dup_uop(lab, loc, side, whnf);
             if (r == 0) {
-              // Active UOP (KERNEL/ASSIGN) -- can't commute yet.  Restore
-              // body to its slot and propagate the DP up as WHNF.
+              // An active UOP: restore the body; the DP is WHNF.
               heap_set(loc, whnf);
               whnf = frame;
               continue;
@@ -512,14 +378,8 @@ apply:
             next = r;
             goto enter;
           }
-          // Generic eager-commute via interact_dup_nod -- matches
-          // HVM4's wnf_dup_nod dispatch (~/src/HVM4/clang/wnf/_.c).
-          // APP is intentionally absent: HVM4's comment says
-          // "DO NOT ADD: DP0/DP1 do not interact with APP" because
-          // eager DUP-APP would duplicate a beta-equivalent redex.
-          // The tags here are primitive / structural compounds; their
-          // duplication only replicates non-beta interactions, so
-          // Levy-optimality is preserved.
+          // DUP-NOD commutes the DUP into these compounds, as HVM4's DP frame
+          // does; never APP (its "DO NOT ADD"), which would copy a beta redex.
           case TAG_OP2:
           case TAG_MAT:
           case TAG_EQL:
@@ -535,11 +395,7 @@ apply:
             goto enter;
           }
           default: {
-            // Body cnfs to a non-dispatchable tag (REF/ALO/VAR/
-            // another DP/BJ/APP).  Restore body and propagate the DP
-            // root as WHNF.  Outer consumers (cnf, etc.) will retry.
-            // APP-bodied DPs in particular are intentionally not
-            // commuted -- see HVM4's "// DO NOT ADD" comment above.
+            // No DUP rule for the body (VAR, APP, DP, BJ, ...): the DP is WHNF.
             heap_set(loc, whnf);
             whnf = frame;
             continue;
@@ -547,13 +403,7 @@ apply:
         }
       }
       case TAG_DSU: {
-        // DSU frame: label reduced to whnf.  Dispatch:
-        //   NUM(n) -> SUP^n{a, b}  (DSU-NUM)
-        //   ERA    -> ERA          (DSU-ERA)
-        //   SUP    -> nested SUP via cross-product on cloned (a,b)
-        //                          (DSU-SUP)
-        //   DP0/DP1 -> drive through cnf so any DUP-XXX fires first
-        //   else   -> stuck: write whnf back to label slot; return frame
+        // A DP label is one wnf left stuck; cnf may still fire its DUP.
         u64 loc = term_val(frame);
         if (term_tag(whnf) == TAG_DP0 || term_tag(whnf) == TAG_DP1) {
           WNF_S_POS = s_pos;
@@ -575,14 +425,11 @@ apply:
           next = interact_dsu_sup(loc, whnf);
           goto enter;
         }
-        // Label stuck: rebuild DSU with reduced label.
         heap_set(loc + 0, whnf);
         whnf = frame;
         continue;
       }
       case TAG_DDU: {
-        // DDU frame: label reduced to whnf.  Same dispatch shape as
-        // DSU but with the DDU rules.
         u64 loc = term_val(frame);
         if (term_tag(whnf) == TAG_DP0 || term_tag(whnf) == TAG_DP1) {
           WNF_S_POS = s_pos;
@@ -609,14 +456,9 @@ apply:
         continue;
       }
       case TAG_OP2: {
-        // OP2 frame: x reduced to whnf.  If x is NUM and y is also
-        // NUM (cheap heap_read), fire op directly.  Otherwise push a
-        // F_OP2_NUM frame with x's value baked in and descend into
-        // y.  If x didn't reach NUM, OP2 is stuck.
         u64 loc = term_val(frame);
         u32 op  = term_ext(frame);
-        // Drive a Levy-opaque DP through cnf so DUP-NUM / DUP-SUP fire
-        // before dispatching this strict frame (Phase 1+2 readback).
+        // A DP operand gets the cnf drive a DSU label gets.
         if (term_tag(whnf) == TAG_DP0 || term_tag(whnf) == TAG_DP1) {
           WNF_S_POS = s_pos;
           whnf = cnf(whnf);
@@ -630,41 +472,28 @@ apply:
                                         (u32)term_val(y), loc);
             continue;
           }
-          // x is NUM; descend into y.  Stash the WHNF'd x at
-          // heap[loc + 0] so F_OP2_NUM can key on `loc` (the
-          // original OP2 cell).  IMPORTANT: write WITHOUT bumping
-          // wire_prov -- the stash is a transient cache, not a
-          // logical event.  Bumping clobbers x's real producer
-          // with the in-flight OP2's id, polluting consumed[] of
-          // any later OP2_NUM_NUM reading heap[loc+0] (e.g. when a
-          // sibling-branch OP2 reads the shared SUB-resolved NUM
-          // via its DP-projection slot).
+          // Stash x in slot 0 for F_OP2_NUM, whose val is `loc`.  A raw store:
+          // the stash is no event; a wire_prov bump would hide x's producer.
           u32 dtype = term_ext(whnf);
           u32 packed_ext = (op & 0xFF) | ((dtype & 0xFF) << 8);
-          HEAP[loc + 0] = whnf;   // raw store, no wire_prov bump
+          HEAP[loc + 0] = whnf;
           stack[s_pos++] = term_new(0, TAG_F_OP2_NUM, packed_ext, loc);
           next = y;
           goto enter;
         }
-        // x is SUP: fire OP2-SUP commute (clone y at SUP's label).
         if (term_tag(whnf) == TAG_SUP) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           Term y = heap_read(loc + 1);
           whnf = interact_op2_sup(op, whnf, y, loc);
           continue;
         }
-        // x stuck (not NUM, not SUP): rebuild OP2 with reduced x.
         heap_set(loc + 0, whnf);
         whnf = frame;
         continue;
       }
       case TAG_F_OP2_NUM: {
-        // F_OP2_NUM frame: y reduced to whnf.  x's WHNF'd NUM was
-        // stashed at heap[loc + 0] by the OP2 frame before this
-        // frame was pushed; the frame's val carries `loc` (the
-        // original OP2 cell), ext carries op | (dtype << 8).  Read
-        // x out of the heap so multi_emit can use loc as a real
-        // wire-prov carrier.
+        // val is the OP2 cell, with x stashed in slot 0 so the trace can use
+        // `loc` as the carrier; ext is op | dtype << 8.
         u64 loc        = term_val(frame);
         u32 packed_ext = term_ext(frame);
         u32 op         = packed_ext & 0xFF;
@@ -680,37 +509,22 @@ apply:
           whnf = interact_op2_num_num(op, dtype, xv, (u32)term_val(whnf), loc);
           continue;
         }
-        // y is SUP: fire OP2-NUM-SUP commute (no DUP needed; the
-        // baked-in NUM is atomic and reusable across both branches).
         if (term_tag(whnf) == TAG_SUP) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
           Term x = term_new(0, TAG_NUM, dtype, xv);
           whnf = interact_op2_num_sup(op, x, whnf, loc);
           continue;
         }
-        // y stuck (not NUM, not SUP): rebuild OP2(x, whnf) in place
-        // at the original loc -- x is already at heap[loc+0] from the
-        // stash; just write the reduced y back to heap[loc+1].
+        // Stuck: x is in slot 0 already, so the OP2 is rebuilt in place.
         heap_set(loc + 1, whnf);
         whnf = term_new(0, TAG_OP2, op, loc);
         continue;
       }
       case TAG_F_UOP_CHILD: {
-        // Active UOP child finished.  Frame layout: ext low 8 bits
-        // = child idx, bits 8..15 = parent UOP opcode (baked at
-        // enter-site push so apply rebuilds the parent Term).
-        // whnf may itself be a UOP whose children are now active
-        // (e.g. DUP-UOP commute returns a UOP with fresh DUPs).
-        // Recursively re-drive via reentrant wnf so any new actives
-        // fire before we finalize the parent.
         u64 uloc      = term_val(frame);
         u32 packed    = term_ext(frame);
         u8  child_idx = (u8)(packed & 0xFF);
         u8  parent_op = (u8)((packed >> 8) & 0xFF);
-        // Re-drive whnf to FULL WHNF if it's a UOP with active
-        // descendants (e.g. DUP-UOP commute returns a UOP with
-        // fresh DUPs around its children).  Sync WNF_S_POS so the
-        // inner snapshots its base ABOVE this outer's frames.
         if (term_tag(whnf) == TAG_UOP) {
           u32 wop = term_ext(whnf);
           if (wop != UOP_KERNEL && wop != UOP_ASSIGN) {
@@ -738,9 +552,6 @@ apply:
         continue;
       }
       case TAG_EQL: {
-        // EQL frame: a reduced to whnf.  ERA/ANY short-circuit;
-        // SUP-L commutes; otherwise store a back, push F_EQL_R,
-        // descend into b.
         u64 loc = term_val(frame);
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
@@ -776,7 +587,6 @@ apply:
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }
-        // Store a's WHNF in heap[loc+0]; push F_EQL_R; descend into b.
         if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
         heap_set(loc + 0, whnf);
         stack[s_pos++] = term_new(0, TAG_F_EQL_R, 0, loc);
@@ -784,8 +594,6 @@ apply:
         goto enter;
       }
       case TAG_F_EQL_R: {
-        // F_EQL_R frame: b reduced to whnf, a's WHNF stored at
-        // heap[loc+0].  Apply the right-side rules.
         u64  loc = term_val(frame);
         Term a   = heap_read(loc + 0);
         if (term_tag(whnf) == TAG_ERA) {
@@ -829,13 +637,11 @@ apply:
           whnf = term_new(0, TAG_NUM, term_ext(a), r);
           continue;
         }
-        // Both stuck: rebuild EQL(a, b) with reduced values in heap.
         heap_set(loc + 1, whnf);
         whnf = term_new(0, TAG_EQL, 0, loc);
         continue;
       }
       case TAG_AND: {
-        // AND frame: a reduced to whnf.
         u64 loc = term_val(frame);
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
@@ -850,8 +656,6 @@ apply:
           if ((u32)term_val(whnf) == 0) {
             continue;     // whnf = NUM(0) stays
           }
-          // a is NUM(non-zero): result is wnf(b).  Drop AND frame,
-          // descend into b.
           next = heap_read(loc + 1);
           goto enter;
         }
@@ -874,13 +678,11 @@ apply:
           next = term_new(0, TAG_SUP, lab, ns);
           goto enter;
         }
-        // a stuck.
         heap_set(loc + 0, whnf);
         whnf = frame;
         continue;
       }
       case TAG_OR: {
-        // OR frame: a reduced to whnf.
         u64 loc = term_val(frame);
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
@@ -893,7 +695,6 @@ apply:
           ITRS++;
           multi_emit(RULE_OR_NUM, MULTI_TERM, loc, 0, 0);
           if ((u32)term_val(whnf) == 0) {
-            // a is NUM(0): result is wnf(b).
             next = heap_read(loc + 1);
             goto enter;
           }
@@ -924,7 +725,6 @@ apply:
         continue;
       }
       case TAG_WHEN: {
-        // WHEN frame: cond reduced to whnf.
         u64 loc = term_val(frame);
         if (term_tag(whnf) == TAG_ERA) {
           if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
@@ -967,7 +767,6 @@ apply:
         continue;
       }
       case TAG_ANN: {
-        // ANN frame: typ reduced to whnf.  val is at heap[loc+0].
         u64 loc = term_val(frame);
         Term val = heap_read(loc + 0);
         if (term_tag(whnf) == TAG_LAM) {
@@ -980,7 +779,6 @@ apply:
           next = interact_ann_bri(val, whnf);
           goto enter;
         }
-        // typ stuck: rebuild ANN with reduced typ.
         heap_set(loc + 1, whnf);
         whnf = frame;
         continue;
@@ -996,12 +794,7 @@ apply:
   return whnf;
 
 bail:
-  // Step budget exhausted just before an interaction.  Snapshot the
-  // pending frames (innermost-first), then unwind by writing whnf
-  // back through each frame's primary slot -- the same logic the
-  // apply loop uses for stuck terms.  Heap mutations from already-
-  // fired interactions stick; calling wnf again on the returned
-  // root resumes from there.
+  // Budget spent: snapshot the frames, then unwind each as a stuck term would.
   WNF_LAST_STACK_LEN = s_pos - base;
   for (u32 i = 0; i < WNF_LAST_STACK_LEN; i++) {
     WNF_LAST_STACK[i] = stack[base + WNF_LAST_STACK_LEN - 1 - i];
@@ -1015,28 +808,18 @@ bail:
     } else if (ftag == TAG_OP2 || ftag == TAG_EQL || ftag == TAG_AND
                || ftag == TAG_OR  || ftag == TAG_WHEN
                || ftag == TAG_DSU || ftag == TAG_DDU) {
-      // Strict-eval frames: store the in-flight WHNF back at slot 0
-      // so subsequent wnf re-entry sees the partially-reduced state.
-      // DSU/DDU strict slot is the label term at +0; same shape.
       heap_set(term_val(frame) + 0, whnf);
       whnf = frame;
     } else if (ftag == TAG_ANN) {
-      // ANN's strict slot is typ at slot 1.
       heap_set(term_val(frame) + 1, whnf);
       whnf = frame;
     } else if (ftag == TAG_F_OP2_NUM) {
-      // After the M1 redesign, F_OP2_NUM's frame.val carries the
-      // ORIGINAL OP2 cell's loc (not xv).  x is stashed at
-      // heap[loc+0]; heap[loc+1] still holds the ORIGINAL DP
-      // projection (the apply path never wrote y back here).  Just
-      // rebuild OP2 at loc; resumption re-derives y from
-      // heap[loc+1] via SUB-chase.
+      // x is stashed in slot 0 and slot 1 still holds y: rebuild the OP2.
       u32 packed_ext = term_ext(frame);
       u32 op         = packed_ext & 0xFF;
       u64 loc        = term_val(frame);
       whnf = term_new(0, TAG_OP2, op, loc);
     } else if (ftag == TAG_F_EQL_R) {
-      // a stored at heap[loc+0]; in-flight whnf is partial b.
       u64 loc = term_val(frame);
       heap_set(loc + 1, whnf);
       whnf = term_new(0, TAG_EQL, 0, loc);

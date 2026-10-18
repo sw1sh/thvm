@@ -6,21 +6,9 @@
 // X0 <- T{A0_0, A1_0, ..., A_{n-1}_0}
 // X1 <- T{A0_1, A1_1, ..., A_{n-1}_1}
 //
-// Generic eager-commute of DUP through an n-ary compound.  Matches
-// HVM4's wnf_dup_nod (~/src/HVM4/clang/wnf/dup_nod.c).  Used for the
-// "primitive / structural" tags where duplication doesn't replicate
-// a beta-equivalent redex (OP2, MAT, EQL, AND, OR, WHEN, ANN, DSU,
-// DDU, INC).  APP is *not* dispatched here; HVM4 forbids it because
-// eager DUP-APP would duplicate a beta opportunity.
-//
-// For each of the n operand slots: allocate a fresh shared body
-// cell, copy the operand into it, build a pair of DP0_L / DP1_L
-// projections over that body.  Then build two new T-tagged cells
-// over the projection pairs and substitute one into the dup loc.
-//
-// Trace: emits RULE_DUP_NOD; term_a carries the term being commuted
-// (so the consumer can recover the inner tag via term_tag(term_a)),
-// term_b is the dup cell loc.  delta_label is the DUP's label L.
+// HVM4's wnf_dup_nod (TinyHVM/HVM4/clang/wnf/dup_nod.c) for the tags
+// dup_nod_arity lists; never APP, where an eager DUP would copy a beta redex.
+// Trace: term_a is the DUP cell, term_b the term (its tag names T), label L.
 
 fn u32 dup_nod_arity(u8 tag) {
   switch (tag) {
@@ -36,11 +24,7 @@ fn Term interact_dup_nod(u32 lab, u64 loc, u8 side, Term term) {
   u8  t_tag = term_tag(term);
   u32 ari   = dup_nod_arity(t_tag);
   if (ari == 0) {
-    /* No operands to commute through -- just substitute the value
-       on both sides.  Mirrors HVM4's dup_nod ari==0 branch (used
-       for atom-like cells; we never reach this from wnf today, but
-       keep the path so a future caller dispatching atomic tags
-       through dup_nod stays correct). */
+    // An atom goes to both sides, as in HVM4; neither caller passes one.
     ITRS++;
     multi_emit(RULE_DUP_NOD, MULTI_DIST, loc, (u64)term, lab);
     return heap_subst_cop(side, loc, term, term);

@@ -6,13 +6,8 @@
 // X0 <- #K{A0, B0, ...}
 // X1 <- #K{A1, B1, ...}
 //
-// Same shape as HVM4's generic wnf_dup_nod (TinyHVM/HVM4/clang/wnf/dup_nod.c)
-// specialised to TAG_CTR.  Arity-0 CTRs are atomic so each projection
-// just copies the term value (mirrors interact_dup_num / interact_dup_any).
-//
-// Allocation per fire: n shared dup-body cells + two fresh CTR layouts
-// (term_new_ctr does its own heap_alloc(1+n)) -> 3n+2 cells total for
-// arity n.  Arity capped at 16 like HVM4's CTR.
+// HVM4's wnf_dup_nod (TinyHVM/HVM4/clang/wnf/dup_nod.c) for TAG_CTR; an arity-0
+// CTR is an atom, shared by both sides.
 
 fn Term interact_dup_ctr(u32 lab, u64 loc, u8 side, Term ctr) {
   ITRS++;

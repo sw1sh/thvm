@@ -2,9 +2,8 @@
 // ---------- OP2-NUM-NUM
 // #(a op b)
 //
-// u32 arithmetic in the left operand's dtype; division and modulus by
-// zero give 0 and shift counts wrap at 32.  `op2_loc` is the OP2 cell,
-// the event's wire carrier.
+// u32 arithmetic, the result in `dtype` (the left operand's).  x / 0 and x % 0
+// give 0 and shift counts wrap at 32; `op2_loc`, the OP2 cell, feeds the trace.
 fn Term interact_op2_num_num(u32 op, u32 dtype, u32 x, u32 y, u64 op2_loc) {
   ITRS++;
   multi_emit(RULE_OP2_NUM_NUM, MULTI_TERM, op2_loc, op2_loc + 1, op);

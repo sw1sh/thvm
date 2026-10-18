@@ -2,15 +2,9 @@
 // ---------------------- DUP-NUM (annihilate)
 // x0 <- NUM(v)
 // x1 <- NUM(v)
-//
-// NUM is atomic: it has no heap cells, no internal sharing concern,
-// so projections simply copy the Term value into both sides.
 fn Term interact_dup_num(u8 side, u64 loc, Term num) {
   ITRS++;
-  /* Pass `loc` (the DUP cell's heap loc holding the NUM body) as the
-     carrier so wire_prov[loc] gives the producer event.  Passing the
-     NUM Term word would have term_val = the integer value, which is
-     not a heap loc -- the consumed lookup would be meaningless. */
+  // The trace carrier is `loc`: a NUM's term_val is its value, not a heap loc.
   multi_emit(RULE_DUP_NUM, MULTI_DIST, loc, 0, 0);
   return heap_subst_cop(side, loc, num, num);
 }

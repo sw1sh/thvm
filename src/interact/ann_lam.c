@@ -1,20 +1,9 @@
-// (ANN val (λx. body))
-// --------------------- ANN-LAM  (ICC type-forward-flow)
-// = λx. (ANN (APP val $k) body[x ← θ$k. x])
+// (ANN val (lam x.body))
+// ---------------------- ANN-LAM (ICC type-forward flow)
+// = lam x. (ANN (APP val $k) body[x <- bri $k. x])
 //
-// Mirror of APP-BRI: introduce a fresh $k bound by an inner Val
-// (BRI), substitute the LAM's old binder with that inner Val (so
-// occurrences of x in body are now θ-wrapped), and wrap the result
-// in a new outer LAM.
-//
-// Allocates a 6-cell block:
-//
-//   c+0  new LAM body (ANN term)             (= new_lam_loc)
-//   c+1  inner BRI body, holds VAR(new_lam_loc)  (= k_loc)
-//   c+2  APP val cell  (= val)
-//   c+3  APP arg cell  (= VAR(k_loc))
-//   c+4  ANN val cell  (= APP term)
-//   c+5  ANN typ cell  (= old body, with substituted x)
+// Mirror of APP-BRI: $k, the inner bridge's binder, is also the APP's argument,
+// so both are the one cell k_loc.
 fn Term interact_ann_lam(Term val, Term lam) {
   ITRS++;
   multi_emit(RULE_ANN_LAM, MULTI_TERM, (u64)val, (u64)lam, 0);

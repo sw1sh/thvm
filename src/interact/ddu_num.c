@@ -3,16 +3,7 @@
 // ! X &n = v
 // b(X0, X1)
 //
-// The DDU's label term reduced to NUM(n).  Build a plain DUP at
-// label n on a fresh body cell holding v; create the two
-// projections X0=DP0_n, X1=DP1_n; APP the body to (X0, X1) in
-// left-to-right order.  Mirrors HVM4's wnf_ddu_num in
-// TinyHVM/HVM4/clang/wnf/ddu_num.c.
-//
-// Cell layout:
-//   c (1 cell)        body holding v -- DP0_n / DP1_n project off it
-//   app0 (2 cells)    (body, X0)
-//   app1 (2 cells)    (app0, X1)
+// HVM4's wnf_ddu_num (TinyHVM/HVM4/clang/wnf/ddu_num.c).
 fn Term interact_ddu_num(u64 ddu_loc, Term lab_num) {
   u32 lab  = (u32)term_val(lab_num);
   Term v   = heap_read(ddu_loc + 1);

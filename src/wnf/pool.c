@@ -1,23 +1,7 @@
-// wnf/pool.c -- worker pool that will drive parallel WNF / NF.
-//
-// Phase 1 step 2 (docs/aot.md, docs/plans/levy_optimal.md).  This
-// file lands the pool data structure and a generic drain loop; the
-// actual wiring of `nf` onto the pool comes later, once the heap
-// primitives are atomic and per-worker bumps exist.
-//
-// Each worker owns a Chase-Lev WsDeque (the redex bag) plus its own
-// counters (itrs delta, fire count) so the global ITRS doesn't need
-// to be incremented under contention.  Workers push locally fresh
-// redexes onto their own bag and steal from peers when idle.
-//
-// nf doesn't have priority levels (every redex is equally eager), so
-// we use raw WsDeque per worker rather than the bucketed Wspq -- the
-// bucketing is collapse-specific and lands with the parallel CNF
-// port (Phase 5).
-//
-// The drain loop is parametric in the fire function so this file
-// stays decoupled from src/wnf/redex.c -- tests swap in a stub, nf
-// passes `redex_fire`.
+// wnf/pool.c - the worker pool nf drains redexes on.  Each worker owns a
+// Chase-Lev WsDeque (util/wsq.c) as its redex bag, popping and pushing its own
+// and stealing from its peers' when it runs dry.  The drains take the fire
+// function as a parameter: tests pass a stub, nf passes nf_pool_fire.
 
 #include <pthread.h>
 #include <time.h>
@@ -26,9 +10,7 @@ typedef struct WnfWorker {
   u32             id;
   u32             _pad0;
   WsDeque         bag;
-  WnfThreadState  wnf_state;     // routed by WNF_STACK / WNF_S_POS via
-                                 // CURRENT_WNF_STATE when this worker
-                                 // is the active thread
+  WnfThreadState  wnf_state;     // WNF_STACK / WNF_S_POS while this worker runs
   u64             itrs_delta;
   u64             fires;            // # redexes successfully fired
   u64             steals;           // # successful steals from peers
@@ -37,27 +19,19 @@ typedef struct WnfWorker {
   u64             active_ns;        // ns spent in pop+fire (busy time)
   u64             idle_ns;          // ns spent in spin (waiting for work)
   u64             wakeups;          // # times reactivated after going idle
-  u64             _pad1[6];         // pad out to a cache-line boundary so
-                                    // adjacent workers' counters don't share
+  u64             _pad1[6];         // cache-line padding
 } WnfWorker;
 
-// Forward-declare the WnfPool typedef so WnfFireFn's signature uses
-// the typedef name (matching what callers in nf.c write); without
-// this newer clang flags `struct WnfPool *` vs `WnfPool *` as
-// incompatible function-pointer types even though they're the same.
+// Declared before WnfFireFn: a struct first named in a prototype would get
+// prototype scope, a different type from the struct WnfPool below.
 typedef struct WnfPool WnfPool;
 
-// Action to perform per popped redex.  Returns the number of *new*
-// redexes the action wants to enqueue; the driver re-checks the local
-// bag after each fire.  Pushing children happens via wnf_pool_push
-// from inside the action itself (the action receives the pool + tid).
+// Fires one popped redex and pushes any new work itself (wnf_pool_push); the
+// drains ignore the return value.
 typedef u64 (*WnfFireFn)(WnfPool *p, u32 tid, Term redex, void *user);
 
-// Persistent-worker control plane.  Workers are spawned lazily at
-// the first drain_parallel call and kept alive across subsequent
-// calls; signal start/done via mutex + condvars so the per-drain
-// pthread_create + pthread_join overhead disappears.  Shutdown is
-// signaled at wnf_pool_free.
+// Workers 1..n-1 persist: the first drain_parallel spawns them, and each drain
+// wakes them through start_cond / done_cond.
 typedef struct WnfPoolCtl {
   pthread_mutex_t mu;
   pthread_cond_t  start_cond;       // driver wakes workers
@@ -78,21 +52,17 @@ typedef struct WnfPool {
   WnfWorker          workers[MAX_THREADS];
   CachePaddedAtomic  alive;        // workers still claiming work
   CachePaddedAtomic  total_fires;  // global fire count (merged at drain end)
-  u64                drain_wall_ns; // last drain_parallel/local wall time
+  u64                drain_wall_ns; // wall time of this run's drains
   u32                drain_rounds;  // how many drain calls in this nf run
   WnfPoolCtl         ctl;          // persistent-worker thread control
 } WnfPool;
 
-// Thread-local pointer to the worker driving the current thread.  NULL
-// outside a parallel section (T=1, all serial paths) so the WNF_STACK /
-// WNF_S_POS macros fall back to CURRENT_CTX.  Set by wnf_pool_drain_parallel
-// inside each spawned pthread; restored on return.
+// The worker this thread runs, whose bag step_fresh_push fills; NULL on a
+// thread the pool does not run, as in a T=1 drain.
 extern _Thread_local struct WnfWorker *CURRENT_WORKER;
 _Thread_local struct WnfWorker *CURRENT_WORKER = NULL;
 
-// Monotonic nanoseconds since some unspecified epoch.  Used to charge
-// per-worker active vs idle time.  CLOCK_MONOTONIC is portable across
-// macOS / Linux and survives wall-clock changes.
+// Monotonic ns, for the active / idle accounting.
 fn u64 wnf_pool_now_ns(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -106,9 +76,7 @@ fn _Bool wnf_pool_init(WnfPool *p, u32 n) {
   atomic_store_explicit(&p->total_fires.v, 0, memory_order_relaxed);
   p->drain_wall_ns = 0;
   p->drain_rounds  = 0;
-  // Control-plane: pthread mutex + condvars are lazily inited on the
-  // first drain_parallel call (worker spawn point); zero them here so
-  // the unspawned predicate is "ctl.spawned == 0".
+  // The ctl mutex and condvars are initialised by the first drain_parallel.
   memset(&p->ctl, 0, sizeof(p->ctl));
   for (u32 i = 0; i < n; i++) {
     p->workers[i].id              = i;
@@ -122,11 +90,8 @@ fn _Bool wnf_pool_init(WnfPool *p, u32 n) {
     p->workers[i].idle_ns         = 0;
     p->workers[i].wakeups         = 0;
     p->workers[i].wnf_state.stack = (Term *)calloc(WNF_CAP, sizeof(Term));
-    // Bag: 256K slots = 2MB/worker.  Sized to hold the bottom-level
-    // seed of a balanced ADD tree up to depth 19 (2^18 = 262144
-    // initial redexes).  Larger than necessary for typical
-    // workloads but cheap relative to the heap; bump WSPQ_CAP_POW2
-    // (in src/util/wspq.c) for collapse-style fan-out.
+    // 2^18 slots (2 MB) per bag, a depth-19 balanced ADD tree's bottom-level
+    // seed; nf clamps its seed to it.
     if (!p->workers[i].wnf_state.stack ||
         !wsq_init(&p->workers[i].bag, /*cap_pow2=*/18)) {
       free(p->workers[i].wnf_state.stack);
@@ -140,13 +105,10 @@ fn _Bool wnf_pool_init(WnfPool *p, u32 n) {
   return 1;
 }
 
-// Forward decl: shutdown helper defined alongside the persistent
-// worker spawn (further down with the parallel drain).
 static void wnf_pool_shutdown_workers(WnfPool *p);
 
 fn void wnf_pool_free(WnfPool *p) {
-  // Tear down persistent pthreads first so they aren't using the
-  // bags / stacks while we free them.
+  // Join the workers before freeing the bags and stacks they use.
   wnf_pool_shutdown_workers(p);
   for (u32 i = 0; i < p->n; i++) {
     wsq_free(&p->workers[i].bag);
@@ -155,20 +117,16 @@ fn void wnf_pool_free(WnfPool *p) {
   }
 }
 
-// Owner push (called from inside a fire action).
+// Owner push: a WsDeque takes pushes from one thread only.
 fn void wnf_pool_push(WnfPool *p, u32 tid, Term t) {
   if (t == 0) return;
   WsDeque *q = &p->workers[tid].bag;
-  // wsq_push only fails if the deque is full; spin briefly in that
-  // case (the bag's WSPQ_CAP_POW2 = 4M slots, so practical overflow
-  // is a runaway interaction loop -- caller's NF_FIRE_CAP guard is
-  // the real backstop).
+  // wsq_push fails only on a full bag: spin until a thief takes a task.
   while (!wsq_push(q, (u64)t)) cpu_relax();
   p->workers[tid].pushes++;
 }
 
-// Owner pop -- LIFO from the bottom.  Preserves the existing
-// nf order so ITRS-counting tests keep passing once nf is wired.
+// Owner pop, LIFO from the bottom.
 fn _Bool wnf_pool_pop_local(WnfPool *p, u32 tid, Term *out) {
   u64 x = 0;
   if (!wsq_pop(&p->workers[tid].bag, &x)) return 0;
@@ -176,10 +134,8 @@ fn _Bool wnf_pool_pop_local(WnfPool *p, u32 tid, Term *out) {
   return 1;
 }
 
-// Try to steal one task from any other worker.  Visit peers in a
-// shifted round-robin starting at `*cursor` so workers don't all
-// hammer the same victim.  Bumps `workers[tid].steals` on success
-// and `steal_attempts` on every call.
+// Steal one task, visiting the peers round-robin from *cursor so thieves
+// spread over victims.
 fn _Bool wnf_pool_steal(WnfPool *p, u32 tid, Term *out, u32 *cursor) {
   if (p->n <= 1) return 0;
   p->workers[tid].steal_attempts++;
@@ -199,10 +155,7 @@ fn _Bool wnf_pool_steal(WnfPool *p, u32 tid, Term *out, u32 *cursor) {
   return 0;
 }
 
-// Reset per-run counters so a process-global pool's stats reflect
-// only the latest nf invocation rather than every call since spawn.
-// Doesn't touch worker bags (they're empty between runs anyway) or
-// the persistent-worker control plane (mutex / cond / drain_gen).
+// Zero the per-run counters, so the stats cover only the latest nf run.
 fn void wnf_pool_reset_run(WnfPool *p) {
   for (u32 i = 0; i < p->n; i++) {
     p->workers[i].fires          = 0;
@@ -219,8 +172,7 @@ fn void wnf_pool_reset_run(WnfPool *p) {
   atomic_store_explicit(&p->total_fires.v, 0, memory_order_relaxed);
 }
 
-// True iff some worker has work (used by an idle worker before going
-// to sleep / declaring termination).
+// Whether a peer has stealable work: an idle worker's wake-up test.
 fn _Bool wnf_pool_any_work(WnfPool *p, u32 tid) {
   for (u32 v = 0; v < p->n; v++) {
     if (v == tid) continue;
@@ -229,13 +181,8 @@ fn _Bool wnf_pool_any_work(WnfPool *p, u32 tid) {
   return 0;
 }
 
-// T=1 drain loop.  Pop -> fire -> repeat until the bag is empty.  No
-// stealing, no termination handshake.  Returns the worker's fire count.
-//
-// The full T>1 driver lives separately and adds steal+termination
-// once heap atomics + per-worker context are in place; this helper
-// is the equivalent of nf.c's inner while-loop, factored so the data
-// structure can be unit-tested against a stub fire function.
+// T=1 drain: pop and fire until the bag is empty or max_fires fired, with no
+// stealing.  Returns the fire count.
 fn u64 wnf_pool_drain_local(WnfPool *p, u32 tid, WnfFireFn fire,
                             void *user, u64 max_fires) {
   WnfWorker *w = &p->workers[tid];
@@ -255,18 +202,14 @@ fn u64 wnf_pool_drain_local(WnfPool *p, u32 tid, WnfFireFn fire,
   return fired;
 }
 
-// Sum per-worker fire counts into total_fires.  Called from
-// drain_parallel after all workers have finished -- avoids a
-// per-fire atomic on a hot cache line under contention.
+// total_fires, summed once a parallel drain ends rather than bumped per fire.
 fn void wnf_pool_aggregate_fires(WnfPool *p) {
   u64 total = 0;
   for (u32 i = 0; i < p->n; i++) total += p->workers[i].fires;
   atomic_store_explicit(&p->total_fires.v, total, memory_order_relaxed);
 }
 
-// Sum per-worker itrs_delta into the host counter and reset.  Called
-// at the end of a parallel run so the rest of the runtime sees the
-// accumulated interaction count via plain ITRS.
+// Sum and zero the workers' itrs_delta; nf adds it to ITRS.
 fn u64 wnf_pool_merge_itrs(WnfPool *p) {
   u64 total = 0;
   for (u32 i = 0; i < p->n; i++) {
@@ -276,15 +219,9 @@ fn u64 wnf_pool_merge_itrs(WnfPool *p) {
   return total;
 }
 
-// === Pool stats snapshot ===========================================
-//
-// `WnfPoolStats` is a flat struct callers (especially the WL bridge)
-// can copy out before the pool struct goes out of scope.  Captures
-// per-worker and pool-level counters; renderers slice it however they
-// want.  Populated by `wnf_pool_stats_capture(p, &stats)` and stored
-// in a process-global `WNF_POOL_LAST_STATS` after each `nf` run so
-// the WL bridge can introspect the most recent run without holding
-// the live pool.
+// === Stats ===
+// Pool counters copied out of the live pool: nf stores its run's in
+// WNF_POOL_LAST_STATS, which the WL bridge (TPoolStats) reads.
 
 #define WNF_POOL_STATS_MAX_WORKERS MAX_THREADS
 
@@ -329,37 +266,21 @@ fn void wnf_pool_stats_capture(WnfPool *p, WnfPoolStats *out) {
     s->wakeups        = w->wakeups;
     s->itrs_delta     = w->itrs_delta;
   }
-  // Zero unused worker slots so consumers iterating up to MAX_THREADS
-  // see clean zeros rather than the prior run's residue.
+  // Zero the unused slots: readers may iterate to MAX_THREADS.
   for (u32 i = p->n; i < WNF_POOL_STATS_MAX_WORKERS; i++) {
     memset(&out->workers[i], 0, sizeof(WnfWorkerStats));
   }
 }
 
-// Public accessor for the last captured snapshot.  The WL bridge
-// reads through this pointer and slices fields by name.
 fn const WnfPoolStats *wnf_pool_last_stats(void) {
   return &WNF_POOL_LAST_STATS;
 }
 
-// Convenience: capture then store globally.  Called from `nf` right
-// before `wnf_pool_free` wipes the live state.
 fn void wnf_pool_stats_snapshot(WnfPool *p) {
   wnf_pool_stats_capture(p, &WNF_POOL_LAST_STATS);
 }
 
-// === T>1 parallel drain ============================================
-//
-// Spawns N-1 pthreads (worker 0 = the calling thread) and runs the
-// classic work-stealing loop in each: pop local, else steal peer,
-// else go idle.  Termination uses an atomic `alive` counter -- a
-// worker that observes empty local + no stealable work decrements
-// alive, then spins watching for fresh work or alive==0.  Last
-// worker out (prev==1) signals end; spinners see alive==0 and exit.
-//
-// Each spawned pthread sets CURRENT_WNF_STATE to its own worker's
-// WnfThreadState so wnf() / cnf() called from inside the fire
-// callback resolve to private spine storage.
+// === Parallel drain ===
 
 typedef struct {
   WnfPool   *pool;
@@ -368,20 +289,21 @@ typedef struct {
   void      *user;
 } WnfPoolWorkerArg;
 
+// T>1: a worker pops its bag, else steals, else leaves `alive` and spins until
+// a peer has work (it rejoins) or alive is 0; the last one out (prev == 1)
+// ends the drain.  wnf / cnf in a fire use the worker's own stack.
 static void wnf_pool_worker_loop(WnfPool *p, u32 tid, WnfFireFn fire,
                                  void *user) {
   WnfWorker *w = &p->workers[tid];
   CURRENT_WNF_STATE = &w->wnf_state;
-  CURRENT_WORKER    = w;   // step_fresh_push reads ->id to push to
-                           // this worker's own bag (single-producer).
+  CURRENT_WORKER    = w;   // step_fresh_push's bag: one producer per bag
   Term r;
   u32 cursor = (tid + 1) % p->n;
   u64 active_t0 = wnf_pool_now_ns();
   while (1) {
     if (wnf_pool_pop_local(p, tid, &r)) {
       (void)fire(p, tid, r, user);
-      w->fires++;   // per-worker; no atomic.  total_fires aggregated
-                    // at drain end via wnf_pool_aggregate_fires.
+      w->fires++;   // summed into total_fires when the drain ends
       continue;
     }
     if (wnf_pool_steal(p, tid, &r, &cursor)) {
@@ -389,14 +311,11 @@ static void wnf_pool_worker_loop(WnfPool *p, u32 tid, WnfFireFn fire,
       w->fires++;
       continue;
     }
-    // Going idle: charge the active span up to here, decrement alive.
     u64 active_t1 = wnf_pool_now_ns();
     w->active_ns += (active_t1 - active_t0);
     u32 prev = atomic_fetch_sub_explicit(&p->alive.v, 1,
                                          memory_order_acq_rel);
     if (prev == 1) break;
-    // Spin watching for either fresh work (reactivate) or all peers
-    // gone (exit).  cpu_relax keeps the spin cheap.
     u64 idle_t0 = wnf_pool_now_ns();
     while (1) {
       cpu_relax();
@@ -421,19 +340,13 @@ done:
   return;
 }
 
-// === Persistent worker pthread main ================================
-//
-// One pthread per worker (excluding worker 0 = the caller).  Each
-// loops on `start_cond`: wait until ctl.drain_gen advances past our
-// last seen, then run the worker_loop, then signal `done_cond` when
-// pending hits 0.  ctl.shutdown breaks the loop so wnf_pool_free
-// can join cleanly.
-
 typedef struct {
   WnfPool *pool;
   u32      tid;
 } PersistentWorkerArg;
 
+// Worker tid >= 1: for each new ctl.drain_gen, one worker loop; the last to
+// finish signals done_cond.  ctl.shutdown ends the thread.
 static void *wnf_pool_persistent_main(void *arg_) {
   PersistentWorkerArg *arg = (PersistentWorkerArg *)arg_;
   WnfPool *p = arg->pool;
@@ -465,8 +378,7 @@ static void *wnf_pool_persistent_main(void *arg_) {
   }
 }
 
-// Spawn N-1 persistent worker pthreads on first use.  No-op if
-// already spawned.  Idempotent / cheap.
+// Spawn workers 1..n-1, once.
 static void wnf_pool_ensure_workers(WnfPool *p) {
   if (p->ctl.spawned || p->n <= 1) return;
   pthread_mutex_init(&p->ctl.mu, NULL);
@@ -482,8 +394,6 @@ static void wnf_pool_ensure_workers(WnfPool *p) {
   p->ctl.spawned = 1;
 }
 
-// Signal shutdown + join.  Called from wnf_pool_free.  No-op if no
-// pthreads were ever spawned.
 static void wnf_pool_shutdown_workers(WnfPool *p) {
   if (!p->ctl.spawned) return;
   pthread_mutex_lock(&p->ctl.mu);
@@ -497,10 +407,7 @@ static void wnf_pool_shutdown_workers(WnfPool *p) {
   p->ctl.spawned = 0;
 }
 
-// Drive the bag in parallel.  Worker 0 runs on the calling thread;
-// workers 1..n-1 are persistent pthreads spawned at first call,
-// signaled via condvar each subsequent call (no per-drain spawn /
-// join overhead).  Returns the fire count for THIS call.
+// Drain on all n workers, worker 0 on this thread; returns this call's fires.
 fn u64 wnf_pool_drain_parallel(WnfPool *p, WnfFireFn fire, void *user) {
   if (p->n == 1) {
     return wnf_pool_drain_local(p, 0, fire, user, ~(u64)0);
@@ -508,14 +415,10 @@ fn u64 wnf_pool_drain_parallel(WnfPool *p, WnfFireFn fire, void *user) {
   wnf_pool_ensure_workers(p);
 
   u64 wall_t0 = wnf_pool_now_ns();
-  // Snapshot per-worker fires; aggregate the cross-worker total at
-  // drain end via wnf_pool_aggregate_fires.  Avoids a per-fire
-  // atomic on the hot total_fires counter.
   u64 fires_before = 0;
   for (u32 i = 0; i < p->n; i++) fires_before += p->workers[i].fires;
   atomic_store_explicit(&p->alive.v, p->n, memory_order_relaxed);
 
-  // Set up + signal the persistent workers to start this drain.
   pthread_mutex_lock(&p->ctl.mu);
   p->ctl.cur_fire  = fire;
   p->ctl.cur_user  = user;
@@ -524,16 +427,13 @@ fn u64 wnf_pool_drain_parallel(WnfPool *p, WnfFireFn fire, void *user) {
   pthread_cond_broadcast(&p->ctl.start_cond);
   pthread_mutex_unlock(&p->ctl.mu);
 
-  // Worker 0 = caller thread.  Save & restore both thread-locals so
-  // outer code keeps its prior routing.
+  // Worker 0 is this thread: restore its routing afterwards.
   WnfThreadState *saved_state  = CURRENT_WNF_STATE;
   WnfWorker      *saved_worker = CURRENT_WORKER;
   wnf_pool_worker_loop(p, 0, fire, user);
   CURRENT_WNF_STATE = saved_state;
   CURRENT_WORKER    = saved_worker;
 
-  // Caller's drain done -- decrement pending.  If we were the last,
-  // we don't need to wait.  Otherwise wait for the persistent workers.
   pthread_mutex_lock(&p->ctl.mu);
   if (--p->ctl.pending > 0) {
     while (p->ctl.pending > 0) {
@@ -545,8 +445,6 @@ fn u64 wnf_pool_drain_parallel(WnfPool *p, WnfFireFn fire, void *user) {
   u64 wall_t1 = wnf_pool_now_ns();
   p->drain_wall_ns += (wall_t1 - wall_t0);
   p->drain_rounds++;
-  // Aggregate per-worker fires into the pool's total_fires snapshot
-  // so wnf_pool_last_stats / TPoolStats see the full count.
   wnf_pool_aggregate_fires(p);
   u64 fires_after = 0;
   for (u32 i = 0; i < p->n; i++) fires_after += p->workers[i].fires;

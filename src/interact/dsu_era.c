@@ -2,10 +2,7 @@
 // ------------ DSU-ERA
 // &{}
 //
-// Label is ERA -- the whole DSU collapses to ERA.  HVM4 returns
-// ERA at the SUP root; thvm follows.  a and b are dropped (they're
-// reachable only through this DSU; under linear discipline both
-// were single-use and will be GC'd).
+// HVM4's wnf_dsu_era (TinyHVM/HVM4/clang/wnf/dsu_era.c).
 fn Term interact_dsu_era(void) {
   ITRS++;
   multi_emit(RULE_DSU_ERA, MULTI_PRUNE, 0, 0, 0);

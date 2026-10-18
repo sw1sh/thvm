@@ -1,42 +1,8 @@
-// wnf/redex.c -- redex enumeration + single-redex firing for the
-// debugger / step interface.
-//
-// A "redex" is a Term value whose principal port currently faces an
-// interaction partner.  Identification is by the packed Term value
-// itself: the val field uniquely picks out the redex's data slot,
-// the tag picks out the eliminator role.
-//
-// The core trio:
-//   is_redex(t)       -- predicate; safe to call on any Term.
-//   redex_fire(t)     -- dispatches the matching interact_*; returns
-//                        the rewrite result (or 0 on validation
-//                        failure -- the input wasn't a redex).  Also
-//                        rewrites every heap cell still holding the
-//                        old redex term to point at the result, so
-//                        nested redexes get their parent slots
-//                        patched without the caller's help.
-//   redex_enumerate   -- scans the live heap for redex Terms,
-//                        deduped by packed Term value.  Used both
-//                        for TRedexes[t] reporting and for the
-//                        pre/post diff that powers TInteract's
-//                        "fresh" return.
-//
-// Cost is O(HEAP_NEXT) per scan -- linear over the live heap.  For
-// the legacy direct-fire path this is fine.
-//
-// === step session (incremental WL stepper) =======================
-// The WL stepper opens a `redex_step_*` session that holds a
-// persistent inverse index (Term -> heap-locs) plus a per-loc
-// parent map.  Inside a session:
-//   * heap_replace patches via the inverse index in O(uses-of-old)
-//     instead of O(HEAP_NEXT).
-//   * Parent-promotion redexes (a parent slot was patched, the
-//     parent term's redex status flipped) are surfaced via the
-//     parent map without re-enumerating the heap.
-//   * The "fresh" diff TInteract returns is computed locally as
-//     the worklist contents minus the pre-set, dropping the two
-//     full enumerates per step.
-// Sessionless callers (nf, direct redex_fire) keep the linear scan.
+// wnf/redex.c - redexes as packed Terms (tag = the eliminator, val = its slot)
+// for nf and the WL stepper.  is_redex tests one; redex_fire fires it through
+// its interact_* (0 when it is none) and patches every heap cell holding it to
+// the result; redex_enumerate collects them under roots and over the heap.  A
+// step session indexes the heap so that patching costs O(uses).
 
 fn u8 is_redex(Term t) {
   HOT_IS_REDEX_CALLS++;
@@ -50,33 +16,23 @@ fn u8 is_redex(Term t) {
     }
     case TAG_DP0:
     case TAG_DP1: {
-      // Grad-flavored projections (DUP_GRAD_FLAG on ext): always
-      // eligible.  DP0 = FWD passthrough; DP1 = chain-rule fire (may
-      // bail back to non-redex if y can't pattern-match yet).
+      // Grad projections are always eligible; a DP1 whose y matches no rule
+      // fires to 0.
       if (term_ext(t) & DUP_GRAD_FLAG) return 1;
       Term cell = heap_read(val);
-      // Skip if the dup slot already holds a SUB (a previous fire's
-      // residue) -- that's a substitution shortcut, not a fresh
-      // active pair.
+      // A SUB cell is a sibling's finished fire, not an active pair.
       if (term_sub_get(cell)) return 0;
       Term body = term_resolve(cell);
       u8 bt = term_tag(body);
       if (bt == TAG_SUP || bt == TAG_LAM || bt == TAG_ERA ||
           bt == TAG_NUM || bt == TAG_TEN || bt == TAG_CTR ||
           bt == TAG_ANY || bt == TAG_BRI) return 1;
-      // Eager n-ary commute via interact_dup_nod -- matches HVM4's
-      // wnf_dup_nod dispatch.  Includes OP2/MAT/EQL/AND/OR/WHEN/ANN/
-      // DSU/DDU/INC.  These are primitive/structural compounds so the
-      // duplication doesn't replicate beta redexes (Levy preserved).
-      // APP is *intentionally absent* -- HVM4 explicitly forbids it
-      // because eager DUP-APP would duplicate a beta opportunity.
+      // DUP-NOD bodies, as in wnf/_.c; never APP (it would copy a beta redex).
       if (bt == TAG_OP2  || bt == TAG_MAT  || bt == TAG_EQL ||
           bt == TAG_AND  || bt == TAG_OR   || bt == TAG_WHEN ||
           bt == TAG_ANN  || bt == TAG_DSU  || bt == TAG_DDU  ||
           bt == TAG_INC) return 1;
-      // DUP-UOP commute: a lazy-compute UOP (CONST/ADD/MUL/NEG/REDUCE/
-      // EXPAND/RESHAPE/FLIP) is eligible.  Active UOPs (KERNEL/ASSIGN)
-      // are NOT -- they need to fire their own interaction first.
+      // DUP-UOP shares a passive UOP; a KERNEL or ASSIGN fires first.
       if (bt == TAG_UOP) {
         u8 op = term_ext(body);
         return op != UOP_KERNEL && op != UOP_ASSIGN;
@@ -86,33 +42,20 @@ fn u8 is_redex(Term t) {
     case TAG_REF: return 1;
     case TAG_ALO: return 1;
     case TAG_OP2: {
-      // Acquire-load matches the release-store on heap_set inside
-      // heap_replace -- under T>1, sibling fires concurrently patch
-      // these cells, and we must observe the post-patch NUM not the
-      // pre-patch OP2 to recognise the parent as newly redex.
+      // Acquire: pairs with heap_replace's release store of a patched operand.
       Term x = term_resolve(heap_read_acq(val));
       Term y = term_resolve(heap_read_acq(val + 1));
       return term_tag(x) == TAG_NUM && term_tag(y) == TAG_NUM;
     }
     case TAG_UOP: {
       u8 op = term_ext(t);
-      // KERNEL always reducible (the dispatcher is idempotent for
-      // inspection -- with `fired` removed, every entry re-runs).
-      // GRAD always *eligible* -- the fire is a no-op when y isn't
-      // structurally pattern-matchable.
-      // ASSIGN reducible only when both children resolve to TAG_TEN;
-      // otherwise wnf walks src's producer first to materialize the
-      // value being assigned.
       if (op == UOP_KERNEL) return 1;
       if (op == UOP_ASSIGN) {
         Term dst = term_resolve(heap_read(val + 0));
         Term src = term_resolve(heap_read(val + 1));
         return term_tag(dst) == TAG_TEN && term_tag(src) == TAG_TEN;
       }
-      // UOP-SUP commutation: a binary or unary elementwise UOP whose
-      // input contains a SUP commutes the SUP outward (HVM4-style).
-      // Tensor sharing is by heap-loc identity, so the "other" operand
-      // doesn't need a DUP -- both new UOPs reference its cell.
+      // UOP-SUP: an elementwise UOP over a SUP operand (see redex_fire).
       if (uop_is_binary_elementwise(op)) {
         Term a = term_resolve(heap_read(val + 0));
         Term b = term_resolve(heap_read(val + 1));
@@ -128,10 +71,8 @@ fn u8 is_redex(Term t) {
   }
 }
 
-// How many heap cells does a compound term own?  Atoms and known-
-// non-compound tags return 0 (no recursion).  Mirrors the layout
-// arities used by alo/realize.c and book/from_dynamic.c, but
-// includes UOP variants.
+// Cells a compound term owns, for the DFS and the parent map; 0 for an atom
+// or a tag not listed here.
 static u32 term_arity(Term t) {
   u8 tag = term_tag(t);
   switch (tag) {
@@ -153,37 +94,18 @@ static u32 term_arity(Term t) {
   }
 }
 
-// Step session: persistent across calls so the WL stepper doesn't
-// pay an O(HEAP_NEXT) scan on every TInteract.  The session owns
-// three side tables, all indexed by loc 0..STEP_SIDE_CAP:
-//
-//   STEP_USE_NEXT[L]  = next loc holding the same Term as L, or
-//                       STEP_NIL.  Buckets keyed by Term in
-//                       STEP_USE_HEAD give the first loc.
-//   STEP_PARENT[L]    = the Term whose val owns slot L (so we can
-//                       check is_redex on it after heap_replace
-//                       patches L).  0 if no parent recorded.
-//   STEP_PRE[T]       = open-addressed hash set of "redexes the
-//                       caller already saw" -- the pre-fire active
-//                       set.  Drained-fresh = pushed - pre.
-//
-// All built once on attach by walking roots+heap; heap_replace
-// (when a session is attached) does O(uses-of-old) work via the
-// use-list and pushes parent terms whose redex-status flips.
-//
-// Sessionless callers (legacy nf, direct TInteract without
-// step_attach) keep the linear scan -- zero overhead when off.
-
 #define STEP_NIL ((u64)-1)
 
-// Forward-declared nf-worklist state.  step_fresh_push pushes parent
-// promotions through these when nf has the pool attached, so the
-// in-flight drain picks them up without a re-enumerate round.
+// nf's pool while attached (redex_worklist_attach_pool): step_fresh_push then
+// pushes to a worker's bag instead of the fresh list.
 static struct WnfPool *NF_POOL     = 0;
 static u32             NF_POOL_TID = 0;
 
+// Step session tables.  A Term's use chain starts at STEP_USE_HEAD (keyed by
+// STEP_USE_KEY) and runs through STEP_USE_NEXT[loc]; STEP_PARENT[loc] is the
+// Term owning slot loc (0: none); STEP_PRE holds the redexes the caller saw.
 static u8     STEP_ACTIVE        = 0;
-static Term  *STEP_USE_HEAD      = 0;   // hash-bucket head loc per Term, STEP_NIL = empty
+static Term  *STEP_USE_HEAD      = 0;   // chain heads, STEP_NIL = empty
 static Term  *STEP_USE_KEY       = 0;   // bucket keys (Term values)
 static u32    STEP_USE_HEAD_CAP  = 0;   // power of two
 static u64   *STEP_USE_NEXT      = 0;
@@ -204,18 +126,9 @@ static inline u32 step_hash(Term t, u32 cap_mask) {
   return (u32)h & cap_mask;
 }
 
-// Lookup-or-insert in the use-head table.  Returns the slot index
-// (caller reads STEP_USE_HEAD[i] for the current head, writes back),
-// or (u32)-1 if the table is full and a new key can't be inserted.
-//
-// Atomic-CAS-based insert: under T>1 multiple workers race on
-// inserting fresh result keys (NUM(2), NUM(4), ...) into the table.
-// CAS on STEP_USE_KEY claims the bucket.  STEP_USE_HEAD entries are
-// initialized to NIL at attach (so CAS winners DON'T need to write
-// HEAD themselves -- doing so would race-wipe a concurrent push to
-// the same bucket).  STEP_USE_KEY=0 sentinel never rotates (entries
-// are only inserted, never removed during the session), so once a
-// non-zero key is observed it's stable.
+// Slot of Term t in the use-head table, inserted if new; STEP_USE_HEAD_FULL
+// when full.  Keys are claimed by CAS and never removed; HEADs are NIL from
+// attach, and a CAS winner leaves its HEAD alone (a write could wipe a push).
 #define STEP_USE_HEAD_FULL ((u32)-1)
 static u32 step_use_head_slot(Term t) {
   u32 mask = STEP_USE_HEAD_CAP - 1;
@@ -232,20 +145,16 @@ static u32 step_use_head_slot(Term t) {
                                       0,
                                       __ATOMIC_ACQ_REL,
                                       __ATOMIC_ACQUIRE)) {
-        return i;   // HEAD already NIL from attach; don't overwrite
+        return i;
       }
-      // Lost the CAS.  expected was updated to whatever's there now;
-      // if it's our key, this slot is ours; otherwise probe further.
+      // Lost the race: the slot is ours only if the winner inserted t.
       if (expected == t) return i;
     }
   }
   return STEP_USE_HEAD_FULL;
 }
 
-// Treiber-stack push of `loc` onto STEP_USE_HEAD[slot]'s chain.
-// Atomic load + CAS retry until we publish.  STEP_USE_NEXT[loc] gets
-// the prior head; the CAS publishes loc as the new head.  Used by
-// both step_use_insert and heap_replace's transfer loop.
+// Treiber-stack push of loc onto the chain at STEP_USE_HEAD[slot].
 static inline void step_use_head_push_atomic(u32 slot, u64 loc) {
   u64 prev;
   do {
@@ -256,7 +165,6 @@ static inline void step_use_head_push_atomic(u32 slot, u64 loc) {
       0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
 }
 
-// Pre-set membership.
 static u8 step_pre_contains(Term t) {
   if (STEP_PRE_CAP == 0) return 0;
   u32 mask = STEP_PRE_CAP - 1;
@@ -280,19 +188,12 @@ static void step_pre_insert(Term t) {
   }
 }
 
-// Push to fresh worklist with dedup.  Filters out terms already in
-// the pre-set so callers see only the symmetric diff.
+// Queue a redex on the fresh list once, unless the caller saw it (STEP_PRE).
 static void step_fresh_push(Term t) {
   if (!STEP_ACTIVE || t == 0) return;
   if (!is_redex(t)) return;
-  // Pool-attached nf integration: route promoted parents straight into
-  // the CALLING WORKER's bag (NOT NF_POOL_TID, which is the seed-
-  // owner only) so the in-flight drain pops them next round of its
-  // own loop -- no FRESH_BUF round-trip, no re-enumerate.  WsDeque
-  // is single-producer per bag, so each worker MUST push only to its
-  // own bag; pushing to a peer's bag concurrently corrupts.
-  // CURRENT_WORKER is thread-local; falls back to NF_POOL_TID for
-  // the seed loop on the main thread (no spawned workers yet).
+  // Under nf, push to the calling worker's own bag (a WsDeque has one
+  // producer); with no worker bound, as in a T=1 drain, to NF_POOL_TID's.
   if (NF_POOL != 0) {
     u32 tid = CURRENT_WORKER ? CURRENT_WORKER->id : NF_POOL_TID;
     wnf_pool_push(NF_POOL, tid, t);
@@ -312,11 +213,9 @@ static void step_fresh_push(Term t) {
   }
 }
 
-// Grow the per-loc side arrays so STEP_PARENT[loc] / STEP_USE_NEXT[loc]
-// are valid for `loc < new_cap`.
+// Make STEP_PARENT / STEP_USE_NEXT valid below new_cap.
 static void step_side_grow(u64 new_cap) {
   if (new_cap <= STEP_SIDE_CAP) return;
-  // Round up to a power of two and double from current to amortise.
   u64 cap = STEP_SIDE_CAP ? STEP_SIDE_CAP * 2 : 4096;
   while (cap < new_cap) cap *= 2;
   STEP_USE_NEXT = (u64 *) realloc(STEP_USE_NEXT, cap * sizeof(u64));
@@ -328,17 +227,13 @@ static void step_side_grow(u64 new_cap) {
   STEP_SIDE_CAP = cap;
 }
 
-// Record that cell at loc holds Term t.  Inserts into the use-list
-// at the head (LIFO).  Idempotent within a session: callers that
-// re-insert a (loc, t) pair link an extra node, which is harmless --
-// heap_replace will overwrite the cell on the first match and the
-// stale chain entry becomes a no-op.
+// Put loc on Term t's use chain.  A loc has one chain node
+// (STEP_USE_NEXT[loc]), so it can be on one chain at a time.
 static void step_use_insert(u64 loc, Term t) {
   if (!STEP_ACTIVE || t == 0) return;
   if (loc >= STEP_SIDE_CAP) step_side_grow(loc + 1);
   u32 i = step_use_head_slot(t);
-  if (i == STEP_USE_HEAD_FULL) return;   // table full; heap_replace
-                                         // falls back to linear scan
+  if (i == STEP_USE_HEAD_FULL) return;   // full: heap_replace scans for t
   step_use_head_push_atomic(i, loc);
 }
 
@@ -348,27 +243,9 @@ static inline void step_parent_set(u64 loc, Term parent) {
   STEP_PARENT[loc] = parent;
 }
 
-// Patch every heap cell that still holds `old` to hold `new`.  The
-// IC interactions logically substitute the redex's incoming wire
-// with the result; in heap terms that means any parent slot whose
-// content equals the redex term gets replaced by the result.
-//
-// Two paths:
-//   * Step session attached -> O(uses-of-old) via the use-list.
-//     Each patched cell's parent term is checked for redex
-//     promotion and pushed to the fresh worklist.
-//   * No session -> linear scan over HEAP_NEXT (legacy semantics
-//     the inspector + nf rely on for parent-slot patching when
-//     no inverse index exists).
-// True when heap cell `cur` is the `src` slot (loc+1) of a UOP_ASSIGN.
-// An ASSIGN's src kernel must never be substituted to its one-time TEN
-// output: the recursive optimiser loop re-fires it each iteration (the
-// wnf reducer resolves the src to a fresh TEN per pass via
-// interact_assign_with, leaving this cell holding the kernel).  Baking
-// it patches the ASSIGN src to a stale constant -- training stops after
-// one step.  Relies on STEP_PARENT, valid only on the STEP_ACTIVE paths
-// (the optimiser loop runs under a T=1 step session); the sessionless
-// fallback below never carries a re-firing loop.
+// Whether cell `cur` is a UOP_ASSIGN's src slot (loc+1).  heap_replace keeps a
+// kernel there: a training loop re-fires it each pass, and a baked TEN would
+// stop training after one step.  Only a session checks it (STEP_PARENT).
 static int cell_is_assign_src(u64 cur) {
   if (cur >= STEP_SIDE_CAP) return 0;
   Term parent = STEP_PARENT[cur];
@@ -376,6 +253,9 @@ static int cell_is_assign_src(u64 cur) {
       && term_ext(parent) == UOP_ASSIGN && term_val(parent) + 1 == cur;
 }
 
+// Patch every heap cell holding the fired redex `old` to `new_`.  In a step
+// session old's use chain finds them (else a heap scan) and each patched cell's
+// parent is pushed for promotion; without a session, a plain heap scan.
 static void heap_replace(Term old, Term new_) {
   if (old == new_) return;
   HOT_HEAP_REPLACE_CALLS++;
@@ -390,12 +270,8 @@ static void heap_replace(Term old, Term new_) {
       if (STEP_USE_KEY[i] == old) { slot = i; break; }
     }
     if (slot != (u32)-1) {
-      // Inverse-index path: atomically claim OLD's chain by exchanging
-      // its head with NIL, then walk the claimed chain, patching cells
-      // and re-publishing them onto NEW's chain via the same atomic
-      // push.  Multiple workers racing on the same OLD bucket can't
-      // happen in practice (single-winner pop), but the exchange
-      // guards against it anyway.
+      // Claim old's chain by swapping its head to NIL, then move each
+      // patched cell onto new_'s chain.
       u64 cur = (u64)__atomic_exchange_n(
           (u64 *)&STEP_USE_HEAD[slot], (u64)STEP_NIL,
           __ATOMIC_ACQ_REL);
@@ -403,8 +279,7 @@ static void heap_replace(Term old, Term new_) {
       while (cur != STEP_NIL) {
         u64 next = STEP_USE_NEXT[cur];
         if (heap_read(cur) == old && !(old_is_kernel && cell_is_assign_src(cur))) {
-          // Release-store: pairs with is_redex's acquire-load above
-          // so a concurrent sibling fire's is_redex sees this patch.
+          // Release: pairs with is_redex's acquire load.
           heap_set_rel(cur, new_);
           if (new_slot != STEP_USE_HEAD_FULL) {
             step_use_head_push_atomic(new_slot, cur);
@@ -420,11 +295,8 @@ static void heap_replace(Term old, Term new_) {
       }
       return;
     }
-    // slot == -1: `old` is either genuinely absent from the use-list
-    // (no cell holds it) or its entry was dropped at insert time
-    // because the table was full.  Fall through to the linear scan,
-    // and surface parent promotions via the parent map so chain
-    // reductions still progress.
+    // old is not indexed (no cell holds it, or the table was full at insert):
+    // scan the heap, still pushing the patched cells' parents.
     HOT_HEAP_REPLACE_CELLS += HEAP_NEXT;
     for (u64 i = 0; i < HEAP_NEXT; i++) {
       if (heap_read(i) == old && !(old_is_kernel && cell_is_assign_src(i))) {
@@ -443,10 +315,8 @@ static void heap_replace(Term old, Term new_) {
   }
 }
 
-// The nf pool (WnfPool + seed tid) the step session routes promoted
-// parents into; NF_POOL / NF_POOL_TID are declared near the top of this
-// file.  Without one attached (e.g. WL `TInteract` direct fire) the
-// session keeps its own fresh list.
+// nf's pool and seed tid, for step_fresh_push; without them a session keeps
+// its own fresh list.
 fn void redex_worklist_attach_pool(WnfPool *p, u32 tid) {
   NF_POOL         = p;
   NF_POOL_TID     = tid;
@@ -473,7 +343,7 @@ fn Term redex_fire(Term redex) {
         case TAG_PRI: result = interact_app_pri(fun, arg); break;
         case TAG_SUP: result = interact_app_sup(fun, arg); break;
         case TAG_MAT: {
-          // wnf/_.c's APP-MAT: a DP head is driven to its value first.
+          // Forced as wnf/_.c's APP-MAT forces it.
           Term arg_w = wnf(arg);
           if (term_tag(arg_w) == TAG_DP0 || term_tag(arg_w) == TAG_DP1) {
             arg_w = cnf(arg_w);
@@ -488,26 +358,20 @@ fn Term redex_fire(Term redex) {
     case TAG_DP0:
     case TAG_DP1: {
       u64  loc  = val;
-      // Grad-flavored projection: dispatch to grad-fwd / grad-bwd
-      // BEFORE touching the cell (so both projections can read y).
+      // A grad projection leaves the cell alone: the sibling still reads y.
       if (term_ext(redex) & DUP_GRAD_FLAG) {
         if (tag == TAG_DP0) {
-          // FWD passthrough: cell holds y, return it.
           ITRS++;
           result = heap_read(loc);
           break;
         }
-        // BWD: fire chain rule on y.
         Term g = interact_grad(redex);
         if (g == redex) return 0;   // stuck (y can't pattern-match yet)
         ITRS++;
         result = g;
         break;
       }
-      // Atomic claim: under a parallel pool, multiple workers may race
-      // on the same DP cell; whoever wins the exchange to 0 owns the
-      // body, the rest see 0 and bail (the redex is no longer theirs).
-      // Single-thread cost is identical to a plain read-and-clear.
+      // Take the body atomically: of racing workers only one reads it non-zero.
       Term cell = heap_take_atomic(loc);
       if (cell == 0) return 0;       // claimed by another worker
       Term body = term_resolve(cell);
@@ -525,15 +389,13 @@ fn Term redex_fire(Term redex) {
         case TAG_UOP: {
           Term r = interact_dup_uop(lab, loc, side, body);
           if (r == 0) {
-            heap_set(loc, cell);   // active UOP -- restore, stay stuck
+            heap_set(loc, cell);   // active UOP: restore, stay stuck
             return 0;
           }
           result = r;
           break;
         }
-        // Generic eager n-ary commute (HVM4's wnf_dup_nod).  See the
-        // matching dispatch comment in src/wnf/_.c -- APP is excluded
-        // by design (would duplicate a beta redex).
+        // DUP-NOD, as in wnf/_.c (never APP).
         case TAG_OP2: case TAG_MAT: case TAG_EQL:
         case TAG_AND: case TAG_OR:  case TAG_WHEN:
         case TAG_ANN: case TAG_DSU: case TAG_DDU:
@@ -541,7 +403,7 @@ fn Term redex_fire(Term redex) {
           result = interact_dup_nod(lab, loc, side, body);
           break;
         default:
-          heap_set(loc, cell);  // restore -- not a redex anymore
+          heap_set(loc, cell);  // restore: not a redex any more
           return 0;
       }
       break;
@@ -550,14 +412,12 @@ fn Term redex_fire(Term redex) {
       u32  name = term_ext(redex);
       Term book = (name < DEFS_CAP) ? DEFS[name] : 0;
       if (book == 0) return 0;
-      // No ITRS bump: REF -> ALO is a structural unfolding step,
-      // not an interaction.  Match wnf/_.c TAG_REF.
+      // No ITRS: an unfold is no interaction (wnf/_.c's TAG_REF).
       result = alo_realize(book, 0);
       break;
     }
     case TAG_ALO: {
-      // No ITRS bump: ALO is a structural deep-copy step, not
-      // an interaction.  Match wnf/_.c TAG_ALO.
+      // No ITRS, as for REF.
       result = alo_force(redex);
       break;
     }
@@ -575,20 +435,14 @@ fn Term redex_fire(Term redex) {
         result = interact_kernel(redex);   // ITRS++ inside
       } else if (op == UOP_ASSIGN) {
         result = interact_assign(redex);   // ITRS++ inside
-        if (result == redex) return 0;     // stuck -- not a redex yet
+        if (result == redex) return 0;     // stuck: not a redex yet
       } else if (uop_is_binary_elementwise(op)) {
-        // UOP-SUP commutation (HVM4 OP2-SUP shape):
-        //   UOP_op(SUP^L(a, b), c) ->
-        //     ! &L { c0, c1 } = c;
-        //     &L { UOP_op(a, c0), UOP_op(b, c1) }
-        //
-        // The DUP on `c` is critical: when `c` is also SUP^L (same
-        // label), DUP^L collapses against it via DUP-SUP, producing
-        // the (a-side-of-c, b-side-of-c) pair.  Without it we'd get
-        // SUP^L nested inside SUP^L on every same-label co-occurrence
-        // (one per leaf-of-same-tid, which is exactly what blows up
-        // for ADD(x, x)).  For non-SUP `c`, DUP-TEN / DUP-UOP / DUP-NUM
-        // pass `c` through to both sides (sharing by heap-loc identity).
+        // UOP_op(&L{a0, a1}, c)
+        // ---------------------- UOP-SUP (as OP2-SUP; mirrored for a right SUP)
+        // ! &L{c0, c1} = c
+        // &L{UOP_op(a0, c0), UOP_op(a1, c1)}
+        // The DUP matters: a same-label SUP c annihilates against it, where
+        // sharing c would nest SUP^L inside SUP^L (ADD(x, x) of a SUP x).
         Term a = term_resolve(heap_read(val + 0));
         Term b = term_resolve(heap_read(val + 1));
         if (term_tag(a) == TAG_SUP) {
@@ -652,29 +506,15 @@ fn Term redex_fire(Term redex) {
     default: return 0;
   }
 
-  // Substitute the fired redex's result into its parent slots.  One
-  // exception, enforced inside heap_replace: a UOP_KERNEL feeding a
-  // UOP_ASSIGN's src is NOT baked to its one-time TEN -- the recursive
-  // optimiser loop re-fires that kernel each iteration (the wnf reducer
-  // resolves the src to a fresh TEN per pass via interact_assign_with,
-  // keeping the cell un-baked).  Baking it would patch the ASSIGN src to
-  // a stale constant and training would stop after one step.
+  // Patch the parents, except an ASSIGN's src kernel (cell_is_assign_src).
   heap_replace(redex, result);
-  // Step session: index newly allocated cells (so future
-  // heap_replace finds them) and surface any locally-fresh redex
-  // to the fresh-worklist.  Parent recovery for new cells: for
-  // every term `t` written into [hb, HEAP_NEXT), find which
-  // owning Term in [hb, HEAP_NEXT) has val pointing here.  We
-  // do this by sweeping the new cells once and recording each
-  // arity-bearing term's child slots as parented by it.
+  // Session: index the cells this fire allocated, record the result and those
+  // cells as parents of their slots, and push the redexes among them.
   if (STEP_ACTIVE) {
     if (result != 0) step_fresh_push(result);
     for (u64 i = hb_at_fire; i < HEAP_NEXT; i++) {
       step_use_insert(i, heap_read(i));
     }
-    // Second pass: any compound term that lives in [hb, HEAP_NEXT)
-    // owns a slot range.  Walk the result + new cells' contents to
-    // find such terms and stamp parent ownership.
     if (result != 0) {
       u32 ar = term_arity(result);
       if (ar > 0) {
@@ -696,19 +536,8 @@ fn Term redex_fire(Term redex) {
   return result;
 }
 
-// Hash-set side table for O(1) dedup during redex_enumerate.
-// Plain `u8 seen[HEAP_CAP]` would be huge; an open-addressed hash
-// keyed on the packed Term value keeps the lookup roughly cache-
-// resident and grows lazily as enumeration runs.  Cleared at the
-// top of redex_enumerate.  Cap matches NF_WORK_CAP * 4 so worst
-// case (every redex unique) keeps load factor under 0.25.
-// REDEX_DEDUP: open-addressed hash set, dynamically sized at the top
-// of redex_enumerate to fit HEAP_NEXT * 4 (load factor <= 0.25).
-// Pre-fix this was a fixed 32K table that saturated on heaps with
-// >32K distinct Terms -- saturated insert probed the entire table on
-// every subsequent call (O(N) per insert, O(N^2) per enumerate),
-// causing a 670ms cliff on tree-d=16 (131k cells).  Dynamic sizing
-// keeps every insert O(1) average.
+// redex_enumerate's visited set: open addressing on the packed Term, sized at
+// each call to 4x the Terms the walk can meet (load <= 0.25).
 static Term *REDEX_DEDUP     = NULL;
 static u32   REDEX_DEDUP_CAP = 0;
 
@@ -721,24 +550,20 @@ static inline u32 redex_dedup_hash(Term t) {
 }
 
 static void redex_dedup_resize(u64 want) {
-  // Pick a power-of-two capacity at least 4x the demand.
-  u32 cap = 32768;   // 32K floor matches the legacy starting size
+  u32 cap = 32768;
   while ((u64)cap < want * 4) {
     cap <<= 1;
-    if (cap == 0) { cap = (u32)1 << 28; break; }   // 256M sanity ceiling
+    if (cap == 0) { cap = (u32)1 << 28; break; }   // u32 overflow
   }
   if (cap != REDEX_DEDUP_CAP) {
     REDEX_DEDUP = (Term *)realloc(REDEX_DEDUP, (size_t)cap * sizeof(Term));
     REDEX_DEDUP_CAP = cap;
   }
-  // Always clear -- the dedup contract is "fresh empty table per
-  // enumerate".  Pre-fix this was a `memset(REDEX_DEDUP, 0,
-  // sizeof(REDEX_DEDUP))` against a static array; with a dynamic
-  // pointer sizeof is just sizeof(Term *) = 8 bytes -> no-op clear.
+  // Each enumerate starts from an empty set.
   memset(REDEX_DEDUP, 0, (size_t)REDEX_DEDUP_CAP * sizeof(Term));
 }
 
-// Returns 1 if `t` was inserted (not previously present), 0 if seen.
+// 1 when t is new (and now inserted), 0 when already seen.
 static inline u8 redex_dedup_insert(Term t) {
   u32 h = redex_dedup_hash(t);
   for (u32 probe = 0; probe < REDEX_DEDUP_CAP; probe++) {
@@ -749,12 +574,9 @@ static inline u8 redex_dedup_insert(Term t) {
       return 1;
     }
   }
-  return 1;   // table full -- caller pre-sized so this only happens
-              // if more than HEAP_NEXT * 4 distinct Terms appear; in
-              // practice equivalent to a no-op skip
+  return 1;   // full: never, at 4x the Terms a walk can meet
 }
 
-// Add `t` to `out` if it's a redex we haven't already recorded.
 static void redex_collect_one(Term t, Term *out, u32 cap, u32 *count) {
   if (!is_redex(t)) return;
   if (!redex_dedup_insert(t)) return;
@@ -762,30 +584,16 @@ static void redex_collect_one(Term t, Term *out, u32 cap, u32 *count) {
   (*count)++;
 }
 
-// DFS walk from each root, collecting redex Terms into `out`.  Also
-// scans every live heap cell -- so redexes held inside a duplicated
-// shared subgraph are caught even if the caller didn't pass the
-// containing root.  Dedup is by packed Term value.
+// The redexes under the roots, then on the whole heap, deduped by Term, into
+// out[0..cap); returns the full count, which may exceed cap.
 fn u32 redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap) {
   HOT_REDEX_ENUM_CALLS++;
   HOT_REDEX_ENUM_CELLS += HEAP_NEXT;
-  // Size the dedup table to fit every reachable Term without
-  // saturating: 4x HEAP_NEXT + a small slack for off-heap roots,
-  // floored at 32K (the legacy fixed size).  Saturation past this
-  // capacity falls through to the "table full" branch which is
-  // equivalent to a no-op skip on the duplicate.
-  // Resize already memsets to 0 -- no separate clear needed.
   redex_dedup_resize((u64)HEAP_NEXT + (u64)n_roots);
 
   u32 count = 0;
 
-  // Worklist DFS for caller-provided roots (which may not live in
-  // any heap cell -- e.g. a TTerm the user is holding directly).
-  // Dedup-by-Term via REDEX_DEDUP so deeply shared subgraphs don't
-  // explode the visit count quadratically.  No upper stack cap:
-  // a deeply nested recursive lambda body can easily exceed 256
-  // distinct Terms before reaching its leaves.  Use a heap-grown
-  // stack via a static buffer that doubles on demand.
+  // DFS from the roots, which may live off the heap (a Term the WL side holds).
   static Term *DFS_STACK = NULL;
   static u32   DFS_STACK_CAP = 0;
   if (DFS_STACK_CAP == 0) {
@@ -819,65 +627,33 @@ fn u32 redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap) {
     }
   }
 
-  // Plus the global heap scan: catches redexes off the root tree
-  // (e.g. orphan grad sub-cells whose parent was heap_replaced
-  // away, but whose BWD projection still has work to do that the
-  // outer chain expects to consume).  With REDEX_DEDUP this is
-  // O(HEAP_NEXT) not O(HEAP_NEXT * redex_count) -- the linear
-  // scan inside redex_collect_one was the long-recursive-loop
-  // killer.  Cells already inserted into REDEX_DEDUP via the DFS
-  // are skipped in O(1).
+  // Then every heap cell, for redexes off the root tree: a grad cell whose
+  // parent heap_replace patched away may still owe the outer chain its BWD.
   for (u64 i = 0; i < HEAP_NEXT; i++) {
     redex_collect_one(heap_read(i), out, cap, &count);
   }
   return count;
 }
 
-// === step session API =============================================
-// `redex_step_attach(roots, n_roots)` walks the heap+roots once,
-// builds a Term -> heap-loc inverse index plus a loc -> parent-Term
-// map, and seeds the pre-set with whatever is currently a redex.
-// Subsequent `redex_step_fire(t)` calls do their parent-slot
-// patching via the inverse index in O(uses-of-t) and surface any
-// redex-status flips into a fresh-worklist drained by
-// `redex_step_drain_fresh`.  Detach restores the legacy linear-
-// scan paths.
-//
-// Memory: O(reachable cells) in three side arrays sized to the
-// current HEAP_NEXT, plus two open-addressed hash tables for
-// Term-keyed lookup.  All released on detach.
-//
-// Limitation: GC moves heap locs, so a session must not span a
-// gc_collect call.  In practice the WL stepper holds a session
-// only while inside one TInteract step, so this is fine.
+// === Step session API ===
 
 #define STEP_HEAD_CAP_DEFAULT (1u << 14)
 #define STEP_PRE_CAP_DEFAULT  (1u << 14)
 #define STEP_FRESH_CAP_DEFAULT (1u << 12)
 
-// Step session: persistent across calls so the WL stepper doesn't
-// re-scan HEAP_NEXT on every TInteract.  attach() walks roots+heap
-// once, builds a Term -> heap-loc inverse index plus a parent map,
-// and returns the initial redex count.  step_fire() fires one redex
-// using the inverse index for parent-slot patching.  drain_fresh()
-// returns redex-status flips since the previous drain (post \ pre).
-// detach() releases all session memory and restores legacy linear-
-// scan paths.
+// attach builds the use chains and parent map from the roots and heap, seeds
+// STEP_PRE and returns the redex count; drain_fresh returns the redexes new
+// since the last drain.  gc_collect moves locs, so none may run in a session.
 fn u32 redex_step_attach(Term *roots, u32 n_roots) {
   if (STEP_ACTIVE) return 0;
   STEP_ACTIVE = 1;
-  // Allocate side tables up front; heap may grow during fires.
   u64 base_cap = HEAP_NEXT > 4096 ? HEAP_NEXT : 4096;
   STEP_SIDE_CAP = base_cap;
   STEP_USE_NEXT = (u64 *) malloc(base_cap * sizeof(u64));
   STEP_PARENT   = (Term *)calloc(base_cap, sizeof(Term));
   for (u64 i = 0; i < base_cap; i++) STEP_USE_NEXT[i] = STEP_NIL;
 
-  // Use-list head table: open-addressed hash keyed by Term value.
-  // Worst case is HEAP_NEXT distinct Terms (each cell holds a unique
-  // value, e.g. depth-N tree of distinct leaves).  Size to ~4x heap
-  // so load factor stays under 0.25; round up to next power of two
-  // and floor at the legacy default.
+  // Up to HEAP_NEXT distinct Terms: size the head table 4x (load <= 0.25).
   u32 desired = STEP_HEAD_CAP_DEFAULT;
   while ((u64)desired < (u64)HEAP_NEXT * 4 && desired < (1u << 28)) {
     desired <<= 1;
@@ -905,19 +681,14 @@ fn u32 redex_step_attach(Term *roots, u32 n_roots) {
     for (u32 k = 0; k < ar; k++) step_parent_set(base + k, t);
   }
 
-  // Roots may be off-heap (caller holds the Term directly), so the
-  // heap walk above won't have stamped them as parents of their
-  // owned slots.  Do that here so a heap_replace patch on a root's
-  // child slot can promote the root.
+  // An off-heap root also parents its slots, so a patch there promotes it.
   for (u32 r = 0; r < n_roots; r++) {
     Term t = roots[r];
     u32 ar = term_arity(t);
     if (ar == 0) continue;
     u64 base = term_val(t);
     for (u32 k = 0; k < ar; k++) {
-      // Don't clobber an existing parent: if this root's child slot
-      // is also reachable through a heap-stored term, the heap
-      // version is just as valid.
+      // A parent the heap walk recorded is kept.
       if (base + k < STEP_SIDE_CAP && STEP_PARENT[base + k] == 0) {
         step_parent_set(base + k, t);
       } else if (base + k >= STEP_SIDE_CAP) {
@@ -926,13 +697,8 @@ fn u32 redex_step_attach(Term *roots, u32 n_roots) {
     }
   }
 
-  // Seed the pre-set + return the initial redex count via the
-  // existing enumerate path (also walks caller roots that may not
-  // live in any heap cell).  redex_enumerate returns the FULL count
-  // even when it overflows the buffer, so clamp n to the buffer
-  // cap before iterating -- the lost overflow entries just don't
-  // make it into the pre-set, which is harmless (they get filtered
-  // again in is_redex on each push).
+  // redex_enumerate returns the full count, past the buffer; redexes beyond it
+  // miss STEP_PRE, so a later push can report one as fresh.
   enum { SEED_BUF_CAP = 8192 };
   static Term seed_buf[SEED_BUF_CAP];
   u32 n_total = redex_enumerate(roots, n_roots, seed_buf, SEED_BUF_CAP);
@@ -943,9 +709,7 @@ fn u32 redex_step_attach(Term *roots, u32 n_roots) {
 
 fn Term redex_step_fire(Term redex) {
   if (!STEP_ACTIVE) return redex_fire(redex);
-  // Whatever the caller asks to fire is by definition something
-  // they already saw -- belongs in the pre-set even if attach
-  // missed it (e.g. a redex held off-heap in caller-land).
+  // The caller has seen what it fires, even a redex attach missed.
   step_pre_insert(redex);
   Term r = redex_fire(redex);
   return r;
@@ -956,8 +720,7 @@ fn u32 redex_step_drain_fresh(Term *out, u32 cap) {
   u32 n = STEP_FRESH_N;
   if (n > cap) n = cap;
   for (u32 i = 0; i < n; i++) out[i] = STEP_FRESH_BUF[i];
-  // Whatever we're returning to the caller, they now know about,
-  // so move it from "fresh" into "pre" before clearing.
+  // The whole fresh list, past cap too, now counts as seen.
   for (u32 i = 0; i < STEP_FRESH_N; i++) step_pre_insert(STEP_FRESH_BUF[i]);
   STEP_FRESH_N = 0;
   memset(STEP_FRESH_SEEN, 0, STEP_FRESH_CAP * sizeof(Term));

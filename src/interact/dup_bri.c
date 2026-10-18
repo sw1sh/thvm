@@ -1,11 +1,11 @@
-// ! &L{F0, F1} = θx.body
-// ----------------------- DUP-BRI  (commute, mirror of DUP-LAM)
-// F0 <- θx0. b0
-// F1 <- θx1. b1
+// ! &L{F0, F1} = bri x.body
+// ------------------------- DUP-BRI (commute, mirror of DUP-LAM)
+// F0 <- bri x0.b0
+// F1 <- bri x1.b1
 // x  <- &L{x0, x1}
 // ! &L{b0, b1} = body
 //
-// Same allocation layout as DUP-LAM.
+// Same 5-cell block as DUP-LAM.
 
 fn Term interact_dup_bri(u32 lab, u64 loc, u8 side, Term bri) {
   ITRS++;
