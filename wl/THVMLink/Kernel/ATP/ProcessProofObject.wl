@@ -56,6 +56,10 @@ SetUsage[TEproverProofObject, "TEproverProofObject[theory$, thm$] runs the E pro
 E's --proof-object --tstp-format emits the same SZS-framed fof+inference DAG as Vampire's --proof tptp, so the lift path is shared.
 Options: TimeConstraint, Binary, ParseFormulas, LiftToProofObject; LiftToProofObject wraps the Association into a literal ProofObject head. See the ATP documentation."];
 
+(* Twee.wl, Vampire.wl and Waldmeister.wl define these and load after this file; naming them here
+   makes the Private code below call the public functions rather than create private ones. *)
+{TTweeProof, TVampireProof, TWaldmeisterProof};
+
 Begin["`Private`"]
 
 (* TPTP-symbol -> WL-operator reverse map.  Mirrors the encoder

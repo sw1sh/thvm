@@ -2645,6 +2645,17 @@ VerificationTest[
     TestID -> "ATP/context/no-lowercase-public-symbols"
 ]
 
+(* No Private symbol shares a public name: Private code naming a public
+   function that a later file defines would otherwise call a private stub. *)
+VerificationTest[
+    Intersection @@ Map[
+        Last[StringSplit[#, "`"]] &,
+        Names /@ {"WolframInstitute`THVMLink`ATP`Private`*", "WolframInstitute`THVMLink`ATP`*"},
+        {2}],
+    {},
+    TestID -> "ATP/context/no-private-stub-of-public-name"
+]
+
 (* TRelevantAxioms on an unquantified pattern axiom should keep
    the axiom (Pattern variables shouldn't be misclassified as
    confined symbols).  Iter 66 fixed atpFnSyms to skip Pattern-
