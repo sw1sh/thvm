@@ -33,7 +33,6 @@ import io
 import json
 import pathlib
 import pickle
-import struct
 import zipfile
 
 import numpy as np

@@ -273,17 +273,13 @@ class Thvm:
                                c_uint64(int(e))))
 
     # ---------------- FP arithmetic ----------------
-    def add(self, a: Term, b: Term) -> Term:
-        return Term(_uop_binary(c_uint32(K.ADD), c_uint64(int(a)), c_uint64(int(b))))
+    def binary(self, opcode: int, a: Term, b: Term) -> Term:
+        return Term(_uop_binary(c_uint32(int(opcode)), c_uint64(int(a)), c_uint64(int(b))))
 
-    def mul(self, a: Term, b: Term) -> Term:
-        return Term(_uop_binary(c_uint32(K.MUL), c_uint64(int(a)), c_uint64(int(b))))
-
-    def cmplt(self, a: Term, b: Term) -> Term:
-        return Term(_uop_binary(c_uint32(K.CMPLT), c_uint64(int(a)), c_uint64(int(b))))
-
-    def cmpeq(self, a: Term, b: Term) -> Term:
-        return Term(_uop_binary(c_uint32(K.CMPEQ), c_uint64(int(a)), c_uint64(int(b))))
+    def add(self, a: Term, b: Term) -> Term:   return self.binary(K.ADD, a, b)
+    def mul(self, a: Term, b: Term) -> Term:   return self.binary(K.MUL, a, b)
+    def cmplt(self, a: Term, b: Term) -> Term: return self.binary(K.CMPLT, a, b)
+    def cmpeq(self, a: Term, b: Term) -> Term: return self.binary(K.CMPEQ, a, b)
 
     def neg(self, x: Term) -> Term:    return self.unary(K.NEG, x)
     def recip(self, x: Term) -> Term:  return self.unary(K.RECIP, x)

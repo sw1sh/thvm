@@ -51,10 +51,7 @@ class Optimizer:
         from .tensor import _TH
         for p in self.params:
             p.grad = None
-            try:
-                _TH.ten_clear_grad(p.term)
-            except Exception:
-                pass
+            _TH.ten_clear_grad(p.term)
 
     def step(self):
         # The assigns built by schedule_step() are LAZY; realize them here

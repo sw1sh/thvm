@@ -1,26 +1,14 @@
-"""Phase 3A of py_tensor_frontend.md -- tinygrad-shaped nn layers.
+"""tinygrad-shaped nn layers (tinygrad/nn/__init__.py): Linear, BatchNorm,
+LayerNorm and Conv2d, each a composition of Tensor ops and factories (weight
+init via Tensor.uniform / .ones / .zeros).
 
-Each layer is a composition of Tensor ops + factories (weight init via
-Tensor.uniform / .ones / .zeros).  Phase 3A scope:
-
-  Linear     -- y = x @ W^T + b
-  BatchNorm  -- (x - mean) * invstd; running stats in inference mode
-  LayerNorm  -- normalize over last `normalized_shape` dims
-  Conv2d     -- delegates to Tensor.conv2d (Phase-3A host-side cheat)
-
-state.get_parameters(obj) walks lists/tuples/dicts/objects, collecting
-every Tensor attribute (incl. is_param=False running stats, as tinygrad
-does -- tests replace ALL params via .replace).
-
-Phase 3B will:
-  - move conv2d / max_pool2d onto the composed reshape+expand+mul+sum
-    unfold path (so they fuse into thvm kernels);
-  - add optim.SGD + optim.Adam.
+state.get_parameters(obj) walks lists/tuples/dicts/objects, collecting every
+Tensor attribute (incl. is_param=False running stats, as tinygrad does --
+tests replace ALL params via .replace).
 """
 from __future__ import annotations
 
 import math
-from typing import Any
 
 from .dtypes import dtypes
 from .helpers import TRAINING
@@ -47,12 +35,8 @@ class Linear:
 
 
 class Conv2d:
-    """2D convolution over (B, C_in, H, W) -> (B, C_out, H', W').
-
-    Phase 3A delegates to Tensor.conv2d, which currently runs on the
-    host via numpy.  The forward results are correct; gradient flow
-    waits on the composed Phase-3B path.
-    """
+    """2D convolution over (B, C_in, H, W) -> (B, C_out, H', W'), through
+    Tensor.conv2d."""
 
     def __init__(self, in_channels: int, out_channels: int,
                  kernel_size, stride=1, padding=0, dilation=1,

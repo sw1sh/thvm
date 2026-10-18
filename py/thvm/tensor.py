@@ -1,39 +1,24 @@
-"""thvm Tensor -- Phase 2 + 3A of py_tensor_frontend.md.
+"""thvm Tensor: tinygrad's Tensor surface (365f87a8a is the spec) over a thvm term.
 
-A Tensor wraps a thvm TAG_TEN term + Python-side dtype + shape.  Method
-bodies build a TAG_TEN graph through the Phase-1 bridge (Thvm); a
-trailing .realize() (implicit in .numpy() / .item() / .tolist()) drives
-thvm's wnf -> materialize -> kernelize -> schedule -> dispatch.  No
-Python lazy graph, no Python autodiff -- thvm owns those.
-
-Honest bar (tinygrad parity, "mostly works"):
-  - elementwise (+, -, *, /, -, activations) with tinygrad broadcast
-  - reductions (.sum / .mean / .max) with axis=int|tuple|None
-  - movement (.reshape, .permute, .expand, .flatten, .transpose)
-  - host I/O + factories (ones, zeros, eye, rand, empty, uniform, ...)
-  - matmul (__matmul__) and .linear / .batchnorm / .layernorm methods
-  - Phase-3A host-side max_pool2d / conv2d (numpy bridge: correct
-    numerically, but bypasses thvm's fusion; proper composed paths
-    are Phase 3B)
-Symbolic dims, real JIT, and grad-flow through backward() are Phase
-3B; .detach() / .assign() are stubs sufficient for forward inference.
+A Tensor wraps a thvm term plus its dtype and shape.  Methods build the UOp
+graph through the Thvm bridge; .realize() (implicit in .numpy() / .item() /
+.tolist()) runs thvm's materialize, schedule and dispatch.  thvm owns the lazy
+graph, autodiff (backward() drives its uop_grad walk) and kernel fusion.
 """
 from __future__ import annotations
 
-import ctypes as _ct
 import functools
 import itertools
 import math
 import warnings
 import weakref
-from typing import Any, Sequence
 
 import numpy as np
 
 from .device import Device
 from .dtypes import DType, dtypes
 from .helpers import TRAINING, argfix
-from .thvm import K, Term, Thvm, _uop_binary, _uop_where
+from .thvm import K, Term, Thvm
 
 
 # Process-global bridge.  All Tensors share one Thvm instance.
@@ -357,7 +342,7 @@ class Tensor(metaclass=_TensorMeta):
     def __repr__(self) -> str:
         return f"<Tensor dtype={self._dtype.name} shape={self._shape}>"
 
-    # ---- bookkeeping helpers (forward-only stubs for Phase 3A) --------
+    # ---- graph helpers --------
 
     def detach(self) -> "Tensor":
         """tinygrad detach -- stop-gradient.  Wraps in UOP_DETACH:
@@ -403,7 +388,7 @@ class Tensor(metaclass=_TensorMeta):
             self._view_begin_end = None
             self._pin()
             return self
-        self.term = Term(_uop_binary(K.ASSIGN, self.term, x.term))
+        self.term = _TH.binary(K.ASSIGN, self.term, x.term)
         return self
 
     def replace(self, x: "Tensor") -> "Tensor":
@@ -608,10 +593,7 @@ class Tensor(metaclass=_TensorMeta):
         # computes in float32 (tinygrad mixin/elementwise.py:24-30).
         if a._dtype != b._dtype:
             a, b = a.cast(dtypes.float32), b.cast(dtypes.float32)
-        t = Term(_uop_binary(_ct.c_uint32(int(opcode)),
-                             _ct.c_uint64(int(a.term)),
-                             _ct.c_uint64(int(b.term))))
-        return Tensor._from_term(t, a._dtype, a._shape)
+        return Tensor._from_term(_TH.binary(opcode, a.term, b.term), a._dtype, a._shape)
 
     def __add__(self, o):  return self._binop(o, K.ADD)
     def __radd__(self, o): return self.__add__(o)
@@ -851,10 +833,7 @@ class Tensor(metaclass=_TensorMeta):
     def __lt__(self, other) -> "Tensor":
         # CMPLT lowers to a 0.0/1.0 mask (same op relu/maximum use).
         a, b = self._broadcast(other)
-        less = Term(_uop_binary(_ct.c_uint32(K.CMPLT),
-                                _ct.c_uint64(int(a.term)),
-                                _ct.c_uint64(int(b.term))))
-        return Tensor._from_term(less, a._dtype, a._shape)
+        return Tensor._from_term(_TH.cmplt(a.term, b.term), a._dtype, a._shape)
 
     def __gt__(self, other) -> "Tensor":
         return _wrap_other(self, other).__lt__(self)
@@ -870,10 +849,7 @@ class Tensor(metaclass=_TensorMeta):
         cond, x = self._broadcast(x)
         cond, y = cond._broadcast(y)
         x, _ = x._broadcast(cond)
-        t = Term(_uop_where(_ct.c_uint64(int(cond.term)),
-                            _ct.c_uint64(int(x.term)),
-                            _ct.c_uint64(int(y.term))))
-        return Tensor._from_term(t, x._dtype, x._shape)
+        return Tensor._from_term(_TH.where(cond.term, x.term, y.term), x._dtype, x._shape)
 
     def newton_schulz(self, steps: int, params, eps: float = 1.0e-7) -> "Tensor":
         """Newton-Schulz orthogonalization of an odd polynomial, port of
@@ -1494,12 +1470,6 @@ class Tensor(metaclass=_TensorMeta):
         y = self - m
         var = (y * y).mean(axis=axis, keepdim=True)
         return y * (var + eps).rsqrt()
-
-    # --- Phase-3A host-side convolution + pooling ---
-    # These realize their inputs and run via numpy.  They bypass thvm's
-    # kernel fusion -- correctness over perf for Phase 3A; the proper
-    # composed paths (reshape+expand+mul+sum unfold pattern) are
-    # Phase 3B.
 
     def max_pool2d(self, kernel_size=(2, 2), stride=None, dilation=1,
                    padding=0, ceil_mode=False) -> "Tensor":
