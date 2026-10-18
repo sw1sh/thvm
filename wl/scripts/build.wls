@@ -8,8 +8,8 @@
 
    Set BUILD_NATIVE=0 to skip the `make wl` step when the dylib is
    already current (just re-pack + re-install).  For the documentation
-   build see build_docs.wls; to publish to the cloud see
-   publish_paclet.wls. *)
+   build see build_docs.wls; to publish the paclet and its documentation site
+   see release.wls, and to submit it to the Paclet Repository submit.wls. *)
 
 repoRoot  = FileNameJoin[{DirectoryName[$InputFileName], "..", ".."}];
 pacletDir = FileNameJoin[{DirectoryName[$InputFileName], "..", "THVMLink"}];

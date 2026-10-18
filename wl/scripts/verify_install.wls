@@ -2,10 +2,9 @@
 (* wl/scripts/verify_install.wls - prove the published paclet installs
    and loads from its URL in a clean kernel, the way an end user would:
 
-       wolframscript -f wl/scripts/verify_install.wls <paclet-url-or-file>
+       wl -f wl/scripts/verify_install.wls <paclet-url-or-file>
 
-   With no argument it reads the URL of the public CloudObject named
-   "THVMLink.paclet" (what wl/scripts/publish_paclet.wls writes).
+   With no argument it installs the paclet resource release.wls deploys.
 
    This deliberately does NOT add the repo's wl/ directory to $Path:
    it exercises the shipped library under LibraryResources/$SystemID,
@@ -13,13 +12,13 @@
 
 src = If[ Length[$ScriptCommandLine] >= 2,
     Last[$ScriptCommandLine],
-    First[CloudObject["THVMLink.paclet"]]
+    ResourceObject["https://www.wolframcloud.com/obj/wolframinstitute/DeployedResources/Paclet/WolframInstitute/THVMLink"]
 ];
 Print["[verify] installing from: ", src];
 
 (* Remove any already-installed copy so we test the fetched artifact,
    not a stale local install. *)
-Quiet @ PacletUninstall["THVMLink"];
+Quiet @ PacletUninstall["WolframInstitute/THVMLink"];
 
 pac = PacletInstall[src, ForceVersionInstall -> True];
 If[ Head[pac] =!= PacletObject,

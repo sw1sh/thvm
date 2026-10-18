@@ -6,9 +6,10 @@ PacletObject[<|
     "Description" -> "Wolfram Language bridge to thvm - observe and drive the interaction-net runtime.",
     "Creator" -> "Wolfram Institute",
     "License" -> "MIT",
-    "Version" -> "0.1.0",
+    "Version" -> "0.2.0",
     "WolframVersion" -> "13.0+",
     "PrimaryContext" -> "WolframInstitute`THVMLink`",
+    "Dependencies" -> {{"Wolfram/Parser", "1.1+"}},
     "Extensions" -> {
         {
             "Kernel",

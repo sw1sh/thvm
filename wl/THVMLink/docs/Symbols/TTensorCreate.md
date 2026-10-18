@@ -81,6 +81,7 @@ SameQ[
 The runtime selects backend by global context. `TTensorCreate` does not yet take a `Backend` option; switch contexts first if you need a Metal tensor:
 
 ```wl
+#| eval: false
 metal = TContextNew["metal"];
 TInContext[ metal,
     TTensorCreate[Range[0., 3.]]

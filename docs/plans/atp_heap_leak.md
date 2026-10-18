@@ -58,7 +58,7 @@ kernel is clean (17/17 cells + a Waldmeister DoubleNegation probe), so
 the trigger is prior-page tensor/JIT state (likely the
 second-TNetTrain-in-kernel against recycled CpuBuf/JIT-slot state --
 the known JIT/memory-plan violation class).  AtpMethods.md therefore
-stays pinned in build_docs.wls until this tensor-lane crash closes.
+stays pinned in wl/scripts/pacletpage.wl ($unevaluatedPages) until this tensor-lane crash closes.
 
 ## FIX (2026-07-04): recycle via gc_collect, not an absolute-HEAP_NEXT pop
 

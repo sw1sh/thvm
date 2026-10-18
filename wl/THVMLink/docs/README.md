@@ -41,36 +41,38 @@ skills define the format:
 The [AccessibleColors](https://github.com/sw1sh/AccessibleColors) paclet is
 the worked example every skill points to.
 
-## Building the notebooks
+## Building, releasing and submitting
 
-Run [`build_docs.wls`](../../scripts/build_docs.wls) from anywhere; it scans
-`docs/**.md`, routes each source to the standard paclet documentation layout
-under `Documentation/English/`, and also builds the submission notebook at
-`ResourceDefinition.nb` at the paclet root:
+[PacletPage](https://github.com/WolframInstitute/PacletPage) does all three, through three thin
+scripts in [`wl/scripts`](../../scripts) that share [`pacletpage.wl`](../../scripts/pacletpage.wl).
+Build the platform libraries first, since the examples and the archive use them:
 
 ```
-wolframscript -file wl/scripts/build_docs.wls
+make wl-cross                                   # one library per Wolfram $SystemID
+wl -f wl/scripts/build_docs.wls                 # docs/**.md -> Documentation/English, ResourceDefinition.nb
 ```
 
-`build_docs.wls` fetches `MarkdownToNotebook` from its public cloud deployment
-(`https://www.wolframcloud.com/obj/nikm/DeployedResources/Function/MarkdownToNotebook`),
-so no local clone of the converter is required.
+[`build_docs.wls`](../../scripts/build_docs.wls) runs `BuildPacletDocumentation`: every page becomes
+an authoring notebook under `Documentation/English/`, and `ResourceDefinition.md` becomes
+`ResourceDefinition.nb` at the paclet root. A page converts again only when its source, the
+paclet's code or the converter changed (`--no-cache` evaluates every example afresh). The pages
+in `$unevaluatedPages` (`pacletpage.wl`) are built without evaluating their examples until the
+tensor-lane crash they would hit is fixed.
 
-Then run `DocumentationBuild` over the assembled `Documentation/` tree to
-produce the published `ref/`, `guide/`, and `tutorial/` pages.
+Release and submit as the Wolfram Institute, which owns the `WolframInstitute` publisher, with
+`--dry-run` first:
 
-Before submission to the Paclet Repository, run the docked *Check* button
-on each notebook or, headless:
-
-```wl
-Needs["DefinitionNotebookClient`"];
-UsingFrontEnd @ Block[{ nbo = NotebookOpen[File["ResourceDefinition.nb"]] },
-    CurrentValue[nbo, CreateCellID] = True;
-    SelectionMove[nbo, All, Notebook];
-    FrontEndTokenExecute[nbo, "Save"];
-    Normal @ DefinitionNotebookClient`CheckDefinitionNotebook[nbo]
-]
 ```
+wl -f ~/.claude/skills/wolfram-cloud-account/run-as.wls wolframinstitute wl/scripts/release.wls --dry-run
+wl -f ~/.claude/skills/wolfram-cloud-account/run-as.wls wolframinstitute wl/scripts/release.wls
+wl -f ~/.claude/skills/wolfram-cloud-account/run-as.wls wolframinstitute wl/scripts/submit.wls --dry-run
+wl -f ~/.claude/skills/wolfram-cloud-account/run-as.wls wolframinstitute wl/scripts/submit.wls
+```
+
+[`release.wls`](../../scripts/release.wls) builds the documentation, deploys the paclet resource,
+publishes the documentation site around it and checks every page;
+[`submit.wls`](../../scripts/submit.wls) submits the paclet to the Paclet Repository, after the
+definition notebook's own check and a fresh build that must hold every page and load alone.
 
 ## What is and is not in this scope
 
