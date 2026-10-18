@@ -185,7 +185,7 @@ surface:
 ```wl
 Needs["WolframInstitute`THVMLink`ATP`"];
 TFindProof[
-    ForAll[{x, y}, OverBar[x \[CircleTimes] y] == OverBar[x] \[CircleTimes] OverBar[y]],
+    ForAll[{a, b}, OverBar[a \[CircleTimes] b] == OverBar[a] \[CircleTimes] OverBar[b]],
     "AbelianGroupAxioms",
     TimeConstraint -> 10
 ]

@@ -303,6 +303,8 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- A second `TFindProof` of an imported TPTP problem no longer prints `ClearAll::clloc` for its one-letter symbols.
+- `TFindProof[tptpText, spec]` (for example `"Lemmas"`) proves or completes the TPTP text. The named-theory completion form used to claim it and look the text up as an `AxiomaticTheory` name.
 - `TFindProof` lifts a proof whose variables completion renumbered (the TPTP associativity examples) under any `$Context`. `buildCplDataset` held the decoder's original-symbol tables in a `Module`, which the decoder never saw, so a renumbered variable decoded as a fresh `X` in the ambient context. In a `Global`` kernel that coincided with the axiom's own symbol; under the documentation build's private context no axiom matched and the proof came back `$Failed`.
 - THVMLink's Overview proves the inverse of a product in an abelian group. Its old goal, `x ⊗ y ⊗ z == z ⊗ y ⊗ x`, parses as a three-argument `CircleTimes`, which no group axiom mentions, so it could not be proved. The docs build launches four kernels for `TFindFiniteModels`' `"Parallelize"` example, since kernels started by `wl` have none configured.
 - THVMLink's bundled GCN scorer (`Assets/gcn_atp.safetensors`) is the ENIGMA Tier-2 round-3 model (3 rounds, hidden 64, 12 node features). The old asset took the 6 features of the June schema, so since the engine moved to 12 (2026-07-21) `TAtpSetGnnScorer` refused it and `TFindProofGnnReranked` returned `$Failed`. A refused model now reports `TAtpSetGnnScorer::rejected` with its first layer's shape instead of a silent `False`.

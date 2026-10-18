@@ -18,7 +18,7 @@ The TPTP (Thousands of Problems for Theorem Provers) benchmark suite is the stan
 
 - Variable-bearing axioms route to the default unfailing Knuth-Bendix completion.
 - Ground problems route through congruence closure when you add `Method -> "SMT"`.
-- A goal-less file gives back the saturated rule set via the single-argument completion form.
+- A goal-less file runs the single-argument completion form, whose `"Lemmas"` are the saturated rule set.
 
 Function-symbol names come back as String heads (<code>"and"[x_, y_]</code> rather than <code>and[x_, y_]</code>) so they cannot collide with any user-level Wolfram symbol.
 
@@ -99,15 +99,16 @@ TFindProof[imported["Conjecture"], imported["Axioms"],
     Method -> "VampireUEQ", TimeConstraint -> 30]
 ```
 
-Goal-less inputs - no `conjecture` or `negated_conjecture` clause - fall through to the single-argument completion form: saturate the axioms within the budget, return the completed rule set as a list of `Inactive[Equal]` equations.
+Goal-less inputs - no `conjecture` or `negated_conjecture` clause - fall through to the single-argument completion form: saturate the axioms within the budget. It returns a `ProofObject` with no theorem, and the `"Lemmas"` return spec gives the completed rule set as a list of `Inactive[Equal]` equations:
 
 ```wl
 TFindProof[
     "cnf(a1, axiom, mul(X, e) = X).
      cnf(a2, axiom, mul(e, X) = X).",
+    "Lemmas",
     TimeConstraint -> 5]
 ```
-<!-- => {Inactive[Equal][mul[v_, e], v_], Inactive[Equal][mul[e, v_], v_]} -->
+<!-- => {Inactive[Equal][mul[X, e], X], Inactive[Equal][mul[e, X], X]} -->
 
 Ground problems route through [TFindProof]() with `Method -> "SMT"` just as cleanly - the importer is shared; only the dispatch differs. See the [SMT](paclet:WolframInstitute/THVMLink/tutorial/SMT) tech note for the ground/QF_UF path.
 

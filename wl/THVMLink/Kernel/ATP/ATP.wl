@@ -4213,7 +4213,7 @@ atpProveFromTheory[cjArg_, theory_String, returnSpec_,
    form would otherwise read the spec as a theorem name.  The /; guard
    on the prove form (theory =!= a return spec) sends it to the
    completion form below. *)
-TFindProof[theory_String, returnSpec_String, opts : OptionsPattern[]] /; atpReturnSpecQ[returnSpec] && ! FileExistsQ[theory] :=
+TFindProof[theory_String, returnSpec_String, opts : OptionsPattern[]] /; atpReturnSpecQ[returnSpec] && ! FileExistsQ[theory] && ! atpTptpTextQ[theory] :=
     atpTheoryCompletion[theory, returnSpec, opts];
 TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpecQ[theory] := Catch[
     Block[{cjRaw, methodOpt = OptionValue[TFindProof, {opts}, Method],
@@ -4325,9 +4325,11 @@ TFindProof[thms_Association, theory_String, returnSpec_ ? atpReturnSpecQ, opts :
    The parser handles the TPTP UEQ fragment (one equational literal
    per cnf clause).  fof / tff / thf clauses + include directives are
    skipped with a console warning.  See Kernel/ATP/TPTPImport.wl. *)
+atpTptpTextQ[s_String] := StringContainsQ[s, "cnf(" | "fof("]
+
 TFindProof[File[path_String], opts : OptionsPattern[]] :=
     tptpDispatch[TPTPImport[File[path]], opts]
-TFindProof[s_String, opts : OptionsPattern[]] /; StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
+TFindProof[s_String ? atpTptpTextQ, opts : OptionsPattern[]] :=
     tptpDispatch[TPTPImport[s], opts]
 (* A bare filename string is accepted as the TPTP file -- no File[...] wrapper
    needed.  The FileExistsQ pattern test makes this more specific than the
@@ -4342,7 +4344,7 @@ TFindProof[path_String ? FileExistsQ, opts : OptionsPattern[]] :=
 TFindProof[File[path_String], returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     Block[{$atpProblemName = FileNameTake[path]},
         tptpDispatch[TPTPImport[File[path]], returnSpec, opts]]
-TFindProof[s_String, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] /; StringContainsQ[s, "cnf("] || StringContainsQ[s, "fof("] :=
+TFindProof[s_String ? atpTptpTextQ, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     tptpDispatch[TPTPImport[s], returnSpec, opts]
 TFindProof[path_String ? FileExistsQ, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     Block[{$atpProblemName = FileNameTake[path]},
@@ -4377,7 +4379,8 @@ tptpStringToSymbol[s_String] := With[
             First[parts] <> StringJoin[Capitalize /@ Rest[parts]]],
         True, s
     ]},
-    ClearAll[name];
+    (* a short name the prove entry's Block localizes is already inert, and ClearAll refuses it *)
+    Quiet[ClearAll[name], ClearAll::clloc];
     Symbol[name]
 ];
 (* Internalize: convert "h"[args...] -> Tptp$h[args...].  Nullary

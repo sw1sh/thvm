@@ -2627,6 +2627,15 @@ VerificationTest[
     TestID -> "ATP/tptp/proof-lift-in-private-context"
 ]
 
+(* TPTP text with a return spec goes to the TPTP dispatch, not the
+   named-theory completion form, which would read it as a theory name. *)
+VerificationTest[
+    Length @ TFindProof["cnf(a1, axiom, mul(X, e) = X).
+        cnf(a2, axiom, mul(e, X) = X).", "Lemmas", TimeConstraint -> 5],
+    2,
+    TestID -> "ATP/tptp/text-with-return-spec"
+]
+
 (* TRelevantAxioms on an unquantified pattern axiom should keep
    the axiom (Pattern variables shouldn't be misclassified as
    confined symbols).  Iter 66 fixed atpFnSyms to skip Pattern-
