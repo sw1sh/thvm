@@ -9,7 +9,7 @@ PacletObject[<|
     "Version" -> "0.2.0",
     "WolframVersion" -> "13.0+",
     "PrimaryContext" -> "WolframInstitute`THVMLink`",
-    "Dependencies" -> {{"Wolfram/Parser", "1.1+"}},
+    "Dependencies" -> {{"Wolfram/Parser", "1.3.1+"}},
     "Extensions" -> {
         {
             "Kernel",
