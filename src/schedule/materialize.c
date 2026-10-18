@@ -551,7 +551,7 @@ fn void xpass_cc_populate(Term root) {
   if (visited == NULL) return;
   if (term_tag(root) == TAG_CTR) {
     u32 n = term_ctr_n(root);
-    for (u32 i = 0; i < n && i < 256; i++) {
+    for (u32 i = 0; i < n; i++) {
       memset(visited, 0, cap);
       xpass_cc_walk_rec(term_ctr_at(root, i), visited, cap, i);
     }
@@ -562,7 +562,7 @@ fn void xpass_cc_populate(Term root) {
   XPASS_CC_ACTIVE = 1;
   if (term_tag(root) == TAG_CTR) {
     u32 n = term_ctr_n(root);
-    for (u32 i = 0; i < n && i < 256; i++) {
+    for (u32 i = 0; i < n; i++) {
       xpass_cc_mark_held(term_ctr_at(root, i));
     }
   } else {
@@ -6308,16 +6308,18 @@ fn Term thvm_materialize(Term term) {
   // the children themselves are normal UOp graphs (or already TAG_TEN
   // for grad components that wnf already reduced).
   if (term_tag(term) == TAG_CTR) {
-    u32 n = term_ctr_n(term);
-    if (n > 256) return term;
-    Term children[256];
+    u32   n        = term_ctr_n(term);
+    Term *children = (Term *)malloc((n ? n : 1) * sizeof(Term));
+    if (children == NULL) thvm_fatal("materialize: out of memory for a bundle's roots");
     u32 saved_root = MATERIALIZE_CURRENT_ROOT;
     for (u32 i = 0; i < n; i++) {
       MATERIALIZE_CURRENT_ROOT = i;
       children[i] = thvm_materialize(term_ctr_at(term, i));
     }
     MATERIALIZE_CURRENT_ROOT = saved_root;
-    return term_new_ctr(term_ext(term), children, n);
+    Term bundle = term_new_ctr(term_ext(term), children, n);
+    free(children);
+    return bundle;
   }
   // Compound IC nodes (APP/LAM/SUP/DUP/OP2/MAT/ALO): walk children
   // in-place so a single TMaterialize call on a full recursive

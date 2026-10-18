@@ -220,7 +220,8 @@ class TestAssignWar(unittest.TestCase):
             v = b2 * v + (1 - b2) * c * c
             p_np = p_np - lr * (m / (1 - b1 ** t)) / (np.sqrt(v / (1 - b2 ** t)) + eps)
         got = np.array([p.item() for p in ps])
-        np.testing.assert_allclose(got, p_np, rtol=1e-5, atol=1e-6)
+        # 1 - 0.999 in float32 is 1.3e-5 off, about 1e-6 on p after two steps.
+        np.testing.assert_allclose(got, p_np, rtol=1e-5, atol=1e-5)
 
     def test_lazy_grad_bundle_raises(self):
         # Root granularity: each param update reaches the whole backward,
