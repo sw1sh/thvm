@@ -1,40 +1,13 @@
-// uop/dag_scan.c -- read-side scanners over a lifted UOp DAG.
-//
-// Consumers (metal_kernel_supported, metal_dispatch_kernel's pre-build
-// dtype gate, propose_*) need structural facts about a kernel.
-// kernel_lift_to_uop materialises cached_lift.store_root; these
-// helpers recover the same facts from that DAG.
-//
-// Helpers here treat `root` as a UOP_STORE (single-output) or UOP_AFTER
-// chain of stores.  They return safe defaults (0 / "uniform") when
-// `root` is 0 so callers can early-bail when the lift declined.
-//
-// Coverage matches rmu_discover_bufs_rec in render_uop.c (every UOp
-// shape that appears in lifted kernels: arithmetic, INDEX_E, REDUCE,
-// IWHERE, OPT, CAST/BITCAST, STORE, AFTER).
+// uop/dag_scan.c - read-side scanners over a kernel's lifted UOp DAG
+// (cached_lift.store_root): dtype and reduce gates, GEMM, contraction and conv
+// classifiers, and the axis and address-coefficient readers behind hand_opts.
+// A `root` of 0 (the lift declined) gets the safe default, 0 or uniform.  The
+// entry points have external linkage: backend/metal/_.m is a separate TU.
 
-// === recursion guard ===========================================
-// Lifted DAGs have one STORE chain per output and no cycles -- the
-// lifter constructs pure DAGs.  No memoisation; each helper is one
-// bounded walk per dispatch.  Depth is naturally O(n_ops + n_inputs).
+// Lifted DAGs are acyclic: the recursive scans need no visited set.
 
-// Walk the DAG rooted at `t` and verify every dtype-carrying node has
-// dtype `dt`.  Returns 1 on uniform-dtype, 0 on mismatch / unknown.
-//
-// Nodes that carry an explicit dtype:
-//   UOP_BUFFER  -> uop_buffer_dtype(t)
-//   UOP_CONST   -> term_ext on the inner NUM cell at heap_read(loc + 0)
-//   UOP_CAST    -> heap_read(loc + 1) (NUM(dst_dtype))
-//   UOP_BITCAST -> heap_read(loc + 1) (NUM(dst_dtype))
-//
-// Other ops (UOP_ADD/MUL/NEG/REDUCE/...) carry their dtype implicitly
-// via their operands; the recursive walk catches them when it hits a
-// BUFFER or CONST leaf.  UOP_RANGE / UOP_I* / UOP_INVALID are integer
-// address terms with no float-dtype payload; they're skipped.
-//
-// External linkage so the metal backend (compiled as a separate
-// translation unit, backend_metal.o) can call this without an
-// inline-definition link error -- mirrors tile_anno_applied_opts_count.
+// 1 iff every BUFFER, CONST and CAST/BITCAST target under `t` has dtype `dt`; an
+// op not listed below reads as a mismatch.
 int uop_dag_dtype_uniform(Term t, u32 dt) {
   if (t == 0) return 1;
   if (term_tag(t) != TAG_UOP) return 1;
@@ -49,58 +22,48 @@ int uop_dag_dtype_uniform(Term t, u32 dt) {
       return term_ext(inner) == dt;
     }
     case UOP_CAST: case UOP_BITCAST: {
-      // [src, NUM(dst_dtype)].  The cast result dtype must equal `dt`,
-      // and we still recurse into src so any BUFFER/CONST under it is
-      // also typed (lifted kernels keep input buffer dtype == output
-      // dtype today; the cast checks catch future int<->float kernels).
+      // [src, NUM(dst_dtype)]: src must be `dt` too, so a converting cast
+      // reads as non-uniform.
       Term ddtype = heap_read(loc + 1);
       if (term_tag(ddtype) != TAG_NUM) return 0;
       if (term_val(ddtype) != dt) return 0;
       return uop_dag_dtype_uniform(heap_read(loc + 0), dt);
     }
-    // === integer-address arithmetic (skip; they're index-domain) ====
+    // Index-domain: no float dtype to check.
     case UOP_RANGE: case UOP_INVALID:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR:
       return 1;
-    // === one-operand recursion ======================================
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
     case UOP_LOG2:  case UOP_SQRT:
     case UOP_REDUCE:
     case UOP_OPT:
     case UOP_LOAD:
       return uop_dag_dtype_uniform(heap_read(loc + 0), dt);
-    // === two-operand recursion ======================================
     case UOP_ADD:  case UOP_MUL:
     case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       return uop_dag_dtype_uniform(heap_read(loc + 0), dt)
           && uop_dag_dtype_uniform(heap_read(loc + 1), dt);
-    // === three-operand recursion ====================================
     case UOP_IWHERE:
       return uop_dag_dtype_uniform(heap_read(loc + 0), dt)
           && uop_dag_dtype_uniform(heap_read(loc + 1), dt)
           && uop_dag_dtype_uniform(heap_read(loc + 2), dt);
     case UOP_STORE:
-      // [buf, addr, value].  buf must match `dt`; addr is index-domain
-      // (skipped); value must match `dt`.
+      // [buf, addr, value]; the address is index-domain.
       return uop_dag_dtype_uniform(heap_read(loc + 0), dt)
           && uop_dag_dtype_uniform(heap_read(loc + 2), dt);
     case UOP_AFTER:
       return uop_dag_dtype_uniform(heap_read(loc + 0), dt)
           && uop_dag_dtype_uniform(heap_read(loc + 1), dt);
     default:
-      // Unknown op: conservative -- treat as non-uniform so the caller
-      // bails to legacy.
       return 0;
   }
 }
 
-// Walk the DAG rooted at `t` and find the first UOP_RANGE leaf whose
-// axis_type == 1 (KAX_REDUCE).  Returns the extent (NUM at slot 1) if
-// found, else 0.  Used by propose's reduce-axis-size heuristic over
-// the lifted UOp DAG.
+// propose's reduce-axis size: the extent (slot 2) of the first RANGE with
+// axis_type KAX_REDUCE under `t`, else 0.
 u32 uop_dag_reduce_axis_extent(Term t) {
   if (t == 0 || term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);
@@ -138,8 +101,7 @@ u32 uop_dag_reduce_axis_extent(Term t) {
       }
     case UOP_STORE:
       {
-        // STORE = [buf, addr, value]; the address tree carries the
-        // RANGE leaves the renderer hoists into for-loops.
+        // [buf, addr, value]: the RANGEs live in the address and the value.
         u32 a = uop_dag_reduce_axis_extent(heap_read(loc + 1));
         if (a) return a;
         return uop_dag_reduce_axis_extent(heap_read(loc + 2));
@@ -149,30 +111,14 @@ u32 uop_dag_reduce_axis_extent(Term t) {
   }
 }
 
-// Walk the DAG rooted at `t` and verify every UOP_REDUCE node carries
-// a sum/max kind compatible with the reduce-unroll/group-reduce
-// metal templates.  UOP_REDUCE encodes kind in a child slot; we
-// conservatively pass any REDUCE we find.
-//
-// Returns 1 if at least one UOP_REDUCE is reachable from `t` AND every
-// reachable arithmetic op is one of the float-only set the metal
-// reduce-unroll template emits.  Mirrors propose_metal_reduce_unroll
-// _kernel's program[]-side check.
-//
-// `is_float_only` flag tracks whether we've seen any non-float-only
-// ops so far (returned via *out_ok).  *out_has_reduce is set to 1 on
-// any UOP_REDUCE encounter.
+// Clears *out_ok at an op outside the cases below; sets *out_has_reduce at any
+// REDUCE, whatever its kind.
 static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
                                        int *out_has_reduce) {
   if (t == 0 || term_tag(t) != TAG_UOP) return;
   if (!*out_ok) return;
   u32 op = term_ext(t);
   u64 loc = term_val(t);
-  // Coverage of accepted ops mirrors propose_metal_reduce_unroll
-  // _kernel: float arithmetic + REDUCE + index-domain
-  // (RANGE / I* / INVALID) + leaves (BUFFER/CONST) + STORE/AFTER
-  // structural.  CMPEQ/CMPLT and OPT pass through.  Anything else
-  // (e.g. CAST to a non-fp32 dtype) flips out_ok.
   switch (op) {
     case UOP_REDUCE:
       *out_has_reduce = 1;
@@ -193,7 +139,6 @@ static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
       uop_dag_reduce_unroll_walk(heap_read(loc + 2), out_ok, out_has_reduce);
       return;
     case UOP_STORE:
-      // Skip the buf operand (leaf BUFFER) and walk addr + value.
       uop_dag_reduce_unroll_walk(heap_read(loc + 1), out_ok, out_has_reduce);
       uop_dag_reduce_unroll_walk(heap_read(loc + 2), out_ok, out_has_reduce);
       return;
@@ -206,12 +151,10 @@ static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR:
-      // Leaves / index-domain: no-op.
       return;
     case UOP_CAST: case UOP_BITCAST:
-      // The renderer handles BITCAST same-itemsize moves and CAST is
-      // already in propose's accepted set indirectly via the
-      // renderer's coverage; conservative: treat as ok.
+      // propose.c has already required an all-f32 DAG (uop_dag_dtype_uniform),
+      // so this cast is f32 to f32.
       uop_dag_reduce_unroll_walk(heap_read(loc + 0), out_ok, out_has_reduce);
       return;
     default:
@@ -220,9 +163,8 @@ static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
   }
 }
 
-// Public surface: returns 1 iff the DAG rooted at `t` has at least one
-// UOP_REDUCE and every reachable op is in the metal reduce-unroll
-// accepted set.  Mirrors the per-op gate in propose.c.
+// The structural half of propose_metal_reduce_unroll_kernel's gate (propose.c
+// checks the dtypes).
 int uop_dag_is_reduce_unroll_kernel(Term t) {
   int ok = 1;
   int has_reduce = 0;
@@ -230,17 +172,10 @@ int uop_dag_is_reduce_unroll_kernel(Term t) {
   return ok && has_reduce;
 }
 
-// === External-linkage decode helpers =================================
-//
-// The Metal backend (src/backend/metal/_.m) lives in a separate TU
-// from the main runtime, so the `fn`-prefixed (static inline) heap /
-// term / uop_buffer accessors aren't visible.  Re-export the small
-// subset the DAG-side per-op encoder needs as external-linkage shims.
-// Mirrors the same pattern as uop_dag_dtype_uniform et al.
+// === Shims for the Metal TU ===
+// backend/metal/_.m walks the DAG through these: the heap, term and UOp
+// accessors are `fn` (static inline) and invisible to another TU.
 
-// Decode the (op, loc) pair for a Term `t` that's expected to be a
-// UOp.  Returns 1 on success with *out_op + *out_loc set; 0 if the
-// term isn't TAG_UOP.
 int uop_dag_decode_uop(Term t, u32 *out_op, u64 *out_loc) {
   if (term_tag(t) != TAG_UOP) return 0;
   if (out_op  != NULL) *out_op  = term_ext(t);
@@ -248,17 +183,11 @@ int uop_dag_decode_uop(Term t, u32 *out_op, u64 *out_loc) {
   return 1;
 }
 
-// Decode a UOP_BUFFER's instance disambiguator.  Returns 0 (default
-// instance) when `t` isn't a UOP_BUFFER -- callers that need to
-// distinguish "not a buffer" from "instance==0" should pre-check via
-// uop_dag_decode_uop first.
+// 0 also for a non-BUFFER, and 0 is the output's instance: check the op first.
 u32 uop_dag_buffer_instance(Term t) {
   return uop_buffer_inst_get(t);
 }
 
-// Decode a UOP_CONST node's underlying NUM payload.  Returns 1 on
-// success with *out_dtype + *out_bits set; 0 if `t` isn't a CONST or
-// the payload is malformed.
 int uop_dag_const_payload(Term t, u32 *out_dtype, u32 *out_bits) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_CONST) return 0;
   Term inner = heap_read(term_val(t) + 0);
@@ -268,61 +197,24 @@ int uop_dag_const_payload(Term t, u32 *out_dtype, u32 *out_bits) {
   return 1;
 }
 
-// Read the i-th source slot of a UOp at heap loc `loc`.  Just a thin
-// wrapper around heap_read that the metal TU can call directly.
 Term uop_dag_heap_read(u64 loc, u32 offset) {
   return heap_read(loc + offset);
 }
 
-// Predicate shims: the UOp predicate functions live in the main TU
-// as `fn` static inlines.  Re-export with external linkage.
 int uop_dag_is_unary_ew (u32 op) { return uop_is_unary_elementwise ((u8)op); }
 int uop_dag_is_binary_ew(u32 op) { return uop_is_binary_elementwise((u8)op); }
 
-// === DAG-side GEMM-shape extractor ====================================
-//
-// `cpu_blas_dispatch` (backend/cpu/blas.c) needs M/N/K and the
-// input-slot mapping for matmul-shaped kernels so it can issue an
-// Accelerate dgemm.  This helper recovers a TileGemmInfo-shaped
-// summary from `ke->cached_lift.store_root` (the lifted UOp DAG).
-//
-// Strategy:
-//   1. Peel an optional UOP_OPT(_, TC, _) wrapper from STORE.value
-//      (the dedicated GEMM-only path `kernel_lift_from_gemm`
-//      synthesises STORE(C, addrC, OPT(REDUCE, TC, 0)); the
-//      rangeify-driven path leaves STORE(C, addrC, REDUCE(...))).
-//   2. Run `uop_classify_matmul` on the (possibly-rebuilt) STORE to
-//      validate matmul shape + recover K_extent.
-//   3. Read M/N from the output buffer's dims (matmul output is 2-D
-//      with shape [M, N] when the lifter or kernel_lift_from_gemm
-//      builds it).
-//   4. Recover input slot indices from the UOP_BUFFER instance field
-//      on the matmul A/B operands (`instance == slot + 1` for inputs;
-//      see lift_input_buffer in schedule/kernel_lift.c).
-//   5. Derive ldA / ldB / transpose flags from the operands' address
-//      coefficients.
-//
-// Returns 1 iff the DAG is matmul-shaped AND every output is
-// recoverable.  On 0, callers should fall back to the legacy
-// program[] path (or skip BLAS dispatch entirely).
-//
-// Type `UopDagGemmShape` lives in src/thvm.h alongside the function
-// declaration so the legacy fallback in cpu/blas.c can reference it
-// without needing dag_scan.c's static typedef.
+// === GEMM shape ===
+// For CPU BLAS, hand_opts, propose and the Metal and CUDA tensor-core paths.
 
-// Peel a UOP_OPT(_, TC, _) wrapper if present, returning the bare
-// inner REDUCE-shaped value.  Otherwise returns `value` unchanged.
 static Term udg_peel_tc_opt(Term value) {
   if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_OPT) return value;
   if (uop_opt_kind(value) != UOP_OPT_TC) return value;
   return uop_opt_target(value);
 }
 
-// Re-run uop_classify_matmul on a STORE whose value may be wrapped
-// in UOP_OPT(_, TC, _).  When the wrapper is present we synthesise a
-// transient STORE without the wrapper so the existing classifier
-// (which expects the STORE.value to be a bare REDUCE) sees the
-// canonical shape.  Returns 1 + K_extent on match.
+// uop_classify_matmul wants a bare REDUCE under the STORE, so a TC-wrapped value
+// is classified through a transient STORE built without the OPT.
 static int udg_classify_matmul_store(Term store, u32 *out_k_extent,
                                      Term *out_a_idx, Term *out_b_idx,
                                      u32 *out_unit_axis) {
@@ -333,56 +225,18 @@ static int udg_classify_matmul_store(Term store, u32 *out_k_extent,
   Term peeled   = udg_peel_tc_opt(value);
   Term canon = (peeled == value) ? store : uop_store(buf_out, addr_out, peeled);
   if (!uop_classify_matmul(canon, out_k_extent, out_unit_axis)) return 0;
-  // Reach into the canonicalised STORE for the matmul operands.
-  // Layout: STORE(buf_out, addr_out, REDUCE(MUL(INDEX_E(A, addrA),
-  //                                             INDEX_E(B, addrB)))).
+  // STORE(buf, addr, REDUCE(MUL(INDEX_E(A, addr_a), INDEX_E(B, addr_b))))
   u64 sloc = term_val(canon);
   Term reduce = heap_read(sloc + 2);
   Term mul    = heap_read(term_val(reduce) + 0);
-  // Peel a CAST(INDEX_E) operand wrapper (bf16->f32 widen / int8->bf16
-  // dequant) so callers receive the bare INDEX_E -- matching the
-  // peel uop_classify_matmul does for the structural classification.
+  // Peel a widening or dequant CAST, as uop_classify_matmul does.
   if (out_a_idx != NULL) *out_a_idx = rec_tc_peel_cast(heap_read(term_val(mul) + 0));
   if (out_b_idx != NULL) *out_b_idx = rec_tc_peel_cast(heap_read(term_val(mul) + 1));
   return 1;
 }
 
-// DAG-side stride extractor.
-//
-// `lift_scalar_index` (kernel_lift.c:388-407) builds an INDEX_E.addr by
-// looping over the buffer's view dims and accumulating per-dim terms:
-//
-//   for d in 0..ndim:
-//     stride = view.strides[d]                  -- broadcast dims (stride
-//                                                   == 0) are skipped
-//     term   = (stride == 1) ? r_uop
-//                            : IMUL(r_uop, ICONST(stride))
-//     acc    = (acc == 0) ? term : IADD(acc, term)
-//
-// For the matmul-A case under a [M, K, N] expanded view, two dims survive
-// (M and K -- the N dim is broadcast-zero) so the address is exactly
-//   IADD(arm_m, arm_k)
-// where each arm is either RANGE(axis) or IMUL(RANGE(axis), ICONST(c)).
-// The non-reduce arm carries `ld` (the storage stride of the non-K axis);
-// the reduce arm has coefficient 1 if A is row-major (transA == 0) or
-// coefficient M if A is transposed (transA == 1).  Symmetric for B with
-// {k, n} arms and GEMV-W with {m, k} arms.
-//
-// The structural classifier guarantees the address has exactly two
-// distinct RANGE axes (it bails on conv-shaped addresses with 3+ ranges
-// and on dot-shaped addresses with only 1).  This extractor relies on
-// that and only inspects the IADD-of-arms shape.
-//
-// Returns 1 on success.  Returns 0 when:
-//   - `addr` isn't a UOP_IADD,
-//   - either arm doesn't decode as RANGE or IMUL(RANGE, ICONST),
-//   - neither arm matches the requested reduce axis,
-//   - both arms reference the same axis id.
-
-// Decode an arm of the IADD into (axis_id, coeff).  Returns 1 on success.
-// Accepts either operand order in the IMUL (RANGE on lhs+ICONST on rhs,
-// or the reverse) -- the int simplifier `uop_match_const_mul` already
-// canonicalises the two, but the lifter constructs RANGE-on-lhs.
+// A matmul operand's address is IADD(arm, arm), one arm per axis it reads (a
+// broadcast axis has none); an arm is RANGE or IMUL(RANGE, CONST), either order.
 static int udg_extract_addr_arm(Term arm, u32 *out_axis_id, u32 *out_coeff) {
   if (term_tag(arm) != TAG_UOP) return 0;
   u32 op = term_ext(arm);
@@ -413,27 +267,8 @@ static int udg_extract_addr_arm(Term arm, u32 *out_axis_id, u32 *out_coeff) {
   return 1;
 }
 
-// Extract per-arm coefficients from a 2-D matmul-style INDEX_E
-// address built by lift_scalar_index.  The
-// address pattern for the matmul A operand under a 3-axis [M,K,N] lift
-// is either `IADD(IMUL(r_m, ICONST(K)), r_k)` (untransposed; ldA=K) or
-// `IADD(r_m, IMUL(r_k, ICONST(M)))` (transposed; ldA=M) -- and similarly
-// for B with the {k,n} pair.  Both arms are decoded
-// raw: each is either bare RANGE (coefficient = 1) or IMUL(RANGE, ICONST)
-// (coefficient = ICONST.value).  The caller derives `ld` / `trans` from
-// the side-specific BLAS convention:
-//   matmul A: ldA = other_coeff, transA = (red_coeff != 1)
-//             except both flip when the address's k arm carries the
-//             non-1 coefficient, so robust formula:
-//                 ldA   = max(red_coeff, other_coeff)
-//                 transA = (red_coeff != 1)
-//   matmul B: ldB = max(red_coeff, other_coeff)
-//             transB = (other_coeff != 1)   -- B's "natural" layout
-//                                              has red_coeff != 1
-// Returns 1 on success.  Returns 0 when the address doesn't match
-// IADD-of-(arm,arm) with each arm RANGE or IMUL(RANGE,ICONST), or when
-// neither arm references `red_axis_id`, or when both arms reference the
-// same axis.
+// The reduce arm's coefficient and the other arm's coefficient and axis; 0 unless
+// `addr` is IADD(arm, arm) with exactly one arm on `red_axis_id`.
 int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
                                              u32 *out_red_coeff,
                                              u32 *out_other_coeff,
@@ -449,8 +284,6 @@ int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
   if (!udg_extract_addr_arm(arm2, &axis2, &c2)) return 0;
   if (axis1 == axis2) return 0;
 
-  // Identify which arm is the reduce ("k") arm.  The other is the
-  // ld-bearing axis (m for A, n for B, m for W).
   u32 k_coeff, other_coeff, other_axis;
   if (axis1 == red_axis_id) {
     k_coeff = c1; other_coeff = c2; other_axis = axis2;
@@ -466,11 +299,8 @@ int uop_dag_extract_matmul_strides_from_addr(Term addr, u32 red_axis_id,
   return 1;
 }
 
-// Public entry: extract M/N/K + input slot mapping + ldA/ldB +
-// transpose flags from the lifted UOp DAG `root`.  Returns 1 on
-// success.  All UOp-DAG-side gates (matmul classify, output buf shape,
-// input slot recovery, per-operand address strides) must succeed; any
-// single gate failure returns 0 and the kernel takes no BLAS route.
+// M and N from the output BUFFER, K from uop_classify_matmul, input slots from
+// BUFFER.instance, ld and trans from the operand addresses; 0 if any fails.
 int uop_dag_classify_matmul_shape(Term root,
                                   struct KernelEntry const *ke,
                                   UopDagGemmShape *out) {
@@ -483,27 +313,22 @@ int uop_dag_classify_matmul_shape(Term root,
   if (!udg_classify_matmul_store(root, &k_extent, &a_idx, &b_idx, &unit_axis))
     return 0;
   if (k_extent == 0) return 0;
-  // Reject K=1: the address arm collapses to bare RANGE(m) so transA is
-  // ambiguous (and BLAS reduces to outer product anyway -- degenerate).
+  // K == 1 leaves A's address a bare RANGE(m), so transA is ambiguous (and the
+  // product is an outer product).
   if (k_extent == 1) return 0;
 
-  // Output buf: STORE.src[0].  Must be a 2-D BUFFER with shape [M, N].
   Term buf_out = heap_read(term_val(root) + 0);
   if (term_tag(buf_out) != TAG_UOP || term_ext(buf_out) != UOP_BUFFER) return 0;
   if (uop_buffer_ndim(buf_out) != 2) return 0;
   u32 M = uop_buffer_dim(buf_out, 0);
   u32 N = uop_buffer_dim(buf_out, 1);
   if (M == 0 || N == 0) return 0;
-  // A collapsed-unit operand axis (unit_axis != 0) is only consistent with
-  // a unit output dim: M==1 for A's collapsed M (the GPT-2 decode LM-head
-  // {1,K}@{K,N}={1,N}), N==1 for B's collapsed N.  Confirm against the
-  // output buffer so a genuine dense matmul whose addr merely lost an arm
-  // to some other rewrite can't slip through with a bogus stride.
+  // A collapsed unit axis (A's M, or B's N) needs that output dim to be 1, so a
+  // dense matmul whose address lost an arm to another rewrite cannot pass.
   if (unit_axis == 1 && M != 1) return 0;
   if (unit_axis == 2 && N != 1) return 0;
 
-  // Recover input slots from BUFFER.instance.  INDEX_E.src[0] is the
-  // buffer; instance == slot + 1 for inputs (see lift_input_buffer).
+  // BUFFER.instance is the input slot + 1 (lift_input_buffer).
   Term buf_a = heap_read(term_val(a_idx) + 0);
   Term buf_b = heap_read(term_val(b_idx) + 0);
   if (term_tag(buf_a) != TAG_UOP || term_ext(buf_a) != UOP_BUFFER) return 0;
@@ -516,23 +341,16 @@ int uop_dag_classify_matmul_shape(Term root,
   if (a_input >= ke->n_inputs || b_input >= ke->n_inputs) return 0;
   if (a_input == b_input) return 0;
 
-  // Recover the reduce axis id from the (possibly-OPT-wrapped) REDUCE
-  // node so the stride extractor can identify the k-arm of each addr.
-  // Multi-axis REDUCE: this single-K matmul classifier expects exactly
-  // one reduce axis; the multi-axis K compound case is handled by
-  // uop_dag_classify_contraction_shape (C6).
+  // One reduce axis; a multi-axis K is uop_dag_classify_contraction_shape's.
   Term value = heap_read(term_val(root) + 2);
   Term reduce = udg_peel_tc_opt(value);
   if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
   if (uop_reduce_n_axes(reduce) != 1) return 0;
   u32 red_axis_id = uop_reduce_axis(reduce, 0);
 
-  // INDEX_E.addr lives at heap_read(term_val(idx_term) + 1).
   Term addr_a = heap_read(term_val(a_idx) + 1);
   Term addr_b = heap_read(term_val(b_idx) + 1);
 
-  // DAG-side stride extraction (preferred).  The IADD-of-(IMUL+RANGE)
-  // shape encodes ldA/ldB/transA/transB without needing input_views[].
   u32 ldA = 0, ldB = 0;
   u32 transA = 0, transB = 0;
   u32 a_red_coeff = 0, a_other_coeff = 0, axis_m = 0;
@@ -543,17 +361,12 @@ int uop_dag_classify_matmul_shape(Term root,
       addr_b, red_axis_id, &b_red_coeff, &b_other_coeff, &axis_n);
 
   if (unit_axis != 0) {
-    // Collapsed-unit GEMM: one operand's addr is a bare RANGE(k) (its
-    // unit M/N axis collapsed to CONST(0) at rangeify), so its arm
-    // extractor declined.  The collapsed operand is contiguous row-major
-    // over (1, K) / (K, 1) -- a non-transposed read with ld = K / N.  The
-    // surviving operand still decodes via the DAG arm extractor; require
-    // it and synthesise the collapsed side's stride directly.
+    // Rangeify folds the unit axis to CONST(0), so the collapsed operand's
+    // address is a bare RANGE(k): a row-major {1,K} or {K,1} read whose ld is
+    // set here; only the other operand decodes.
     if (unit_axis == 1) {
-      // A's M-axis collapsed (M==1).  A = {1,K} row-major: ldA=K, transA=0.
-      // B = {K,N} must decode normally and carry the {k,n} arms.
       if (!dag_b_ok) return 0;
-      if (axis_n == red_axis_id) return 0;     // B's other arm must be N, not K
+      if (axis_n == red_axis_id) return 0;
       ldB    = (b_red_coeff > b_other_coeff) ? b_red_coeff : b_other_coeff;
       transB = (b_other_coeff != 1) ? 1 : 0;
       if (transB) { if (ldB != k_extent) return 0; }
@@ -561,12 +374,9 @@ int uop_dag_classify_matmul_shape(Term root,
       ldA    = k_extent;
       transA = 0;
     } else {
-      // B's N-axis collapsed (N==1).  B = {K,1} row-major: ldB=1.  A =
-      // {M,K} decodes normally.  (BLAS GEMM rejects N<=1 downstream, so
-      // this arm exists mainly for completeness/symmetry; the value is
-      // still routed correctly should the N<=1 guard be relaxed.)
+      // N == 1: blas.c declines it (N <= 1); other consumers get a correct shape.
       if (!dag_a_ok) return 0;
-      if (axis_m == red_axis_id) return 0;     // A's other arm must be M, not K
+      if (axis_m == red_axis_id) return 0;
       ldA    = (a_red_coeff > a_other_coeff) ? a_red_coeff : a_other_coeff;
       transA = (a_red_coeff != 1) ? 1 : 0;
       if (transA) { if (ldA != M) return 0; }
@@ -577,15 +387,10 @@ int uop_dag_classify_matmul_shape(Term root,
   } else if (!dag_a_ok || !dag_b_ok) {
     return 0;
   } else {
-    // Sanity: each arm's other_axis must be distinct (m != n).
     if (axis_m == axis_n) return 0;
-    // Decode the OUTPUT STORE addr to identify the TRUE M-axis_id (the
-    // arm with coefficient N) and N-axis_id (the arm with coefficient
-    // 1).  udg_classify_matmul_store blindly assigns MUL operand 0 ->
-    // A, operand 1 -> B; if the caller wrote MUL(B, A) (e.g. via
-    // WL's Orderless Times reordering), `axis_m` and `axis_n` here
-    // come back swapped.  We then need to swap a_input/b_input + ldA
-    // /ldB + transA/transB so BLAS sees the canonical A @ B layout.
+    // MUL operand 0 is taken as A, but WL's Orderless Times can write MUL(B, A):
+    // the output address names the true M (coefficient N) and N (coefficient 1)
+    // axes, and swapped operands are swapped back.
     Term addr_out = heap_read(term_val(root) + 1);
     u32 out_axis_M = 0xFFFFFFFFu, out_axis_N = 0xFFFFFFFFu;
     if (term_tag(addr_out) == TAG_UOP && term_ext(addr_out) == UOP_IADD) {
@@ -595,65 +400,35 @@ int uop_dag_classify_matmul_shape(Term root,
       if (udg_extract_addr_arm(oa1, &oax1, &oc1)
           && udg_extract_addr_arm(oa2, &oax2, &oc2)
           && oax1 != oax2) {
-        // Row-major output of shape {M, N}: m-arm carries coeff N,
-        // n-arm carries coeff 1.
         if (oc1 == N && oc2 == 1)        { out_axis_M = oax1; out_axis_N = oax2; }
         else if (oc2 == N && oc1 == 1)   { out_axis_M = oax2; out_axis_N = oax1; }
       }
     }
     if (out_axis_M != 0xFFFFFFFFu) {
-      // Detect mis-mapped operand assignment: axis_m should land on
-      // the M axis, axis_n on the N axis.  When swapped, swap A/B.
       if (axis_m == out_axis_N && axis_n == out_axis_M) {
         u32 tmp_input  = a_input;     a_input     = b_input;     b_input     = tmp_input;
         u32 tmp_red    = a_red_coeff; a_red_coeff = b_red_coeff; b_red_coeff = tmp_red;
         u32 tmp_other  = a_other_coeff; a_other_coeff = b_other_coeff; b_other_coeff = tmp_other;
         u32 tmp_axis   = axis_m;      axis_m      = axis_n;      axis_n      = tmp_axis;
       } else if (axis_m != out_axis_M || axis_n != out_axis_N) {
-        // Neither canonical nor swap-able -- bail so BLAS declines
-        // and the walker handles the kernel via the generic path.
         return 0;
       }
     }
-    // BLAS convention (see uop_dag_extract_matmul_strides_from_addr docs):
-    //   A: ldA = max(red, other), transA = (red_coeff != 1)
-    //   B: ldB = max(red, other), transB = (other_coeff != 1)
-    // For A non-trans: red=1, other=K -> ldA=K, transA=0.
-    // For A trans:     red=M, other=1 -> ldA=M, transA=1.
-    // For B non-trans: red=N, other=1 -> ldB=N, transB=0.
-    // For B trans:     red=1, other=K -> ldB=K, transB=1.
+    // (reduce, other) coefficients: A {M,K} row-major (1, K), transposed (M, 1);
+    // B {K,N} row-major (N, 1), transposed (1, K).  ld is the larger one.
     ldA    = (a_red_coeff > a_other_coeff) ? a_red_coeff : a_other_coeff;
     ldB    = (b_red_coeff > b_other_coeff) ? b_red_coeff : b_other_coeff;
     transA = (a_red_coeff   != 1) ? 1 : 0;
     transB = (b_other_coeff != 1) ? 1 : 0;
-    // Validate ld values match the output buffer dims when not transposed.
     if (transA) { if (ldA != M) return 0; }
     else        { if (ldA != k_extent) return 0; }
     if (transB) { if (ldB != k_extent) return 0; }
     else        { if (ldB != N) return 0; }
   }
 
-  // Uniform dtype: every BUFFER reachable from the store_root must
-  // share dtype; mirrors tile_gemm_uniform_dtype's per-op gate.  bf16 is
-  // admitted for the Metal simdgroup tensor-core path (the threadgroup
-  // staging load upconverts bfloat->float); CPU BLAS re-rejects it (blas.c).
-  //
-  // Weight-only quant is the non-uniform case: B (the weight) may be INT8 or
-  // fp8 (e4m3/e5m2) while A and the output share the compute dtype (bf16/f32).
-  // rec_tc_peel_cast (in udg_classify_matmul_store) already stripped the
-  // quant->compute dequant CAST so buf_b is the raw quant buffer.  Accepting
-  // it here keeps the kernel on the matmul fast path: hand_opts Section 1
-  // applies KOP_TC + KOP_GLOBAL on the WHOLE M/N/K axes (no generic
-  // UPCAST/LOCAL split), so recognise_tc later stamps OPT(TC) and
-  // rmu_emit_matmul_tc takes the tiled simdgroup path (its b_is_int8 branch
-  // stages char->bfloat, its b_is_fp8 branch decodes uchar->bfloat, both
-  // in-kernel at TC rate).  WITHOUT accepting fp8 here the fp8-weight matmul
-  // falls to the generic elementwise UPCAST, which tile-splits M/N/K and
-  // 3-range-decomposes the operands -- mn_axes then sees n_a/n_b=3, OPT(TC) is
-  // never stamped, and the matmul renders as the scalar per-element decode
-  // accumulator (~20x slower).  out->dtype stays the COMPUTE dtype, so the CPU
-  // BLAS dispatch still re-rejects (blas.c gates FP32/FP64 only) -- no quant
-  // GEMM hits Accelerate.
+  // bf16, and a weight-only quant B (int8, fp8) behind its peeled dequant CAST,
+  // are for the tensor-core paths (hand_opts' TC section); blas.c takes only f32
+  // and f64.  out->dtype is the compute dtype.
   u32 dt = uop_buffer_dtype(buf_out);
   if (dt != DT_FP32 && dt != DT_FP64 && dt != DT_BF16) return 0;
   if (uop_buffer_dtype(buf_a) != dt) return 0;
@@ -673,79 +448,24 @@ int uop_dag_classify_matmul_shape(Term root,
   return 1;
 }
 
-// === DAG-side structural gate for conv2d-flat =========================
-//
-// `tile_analyze_conv2d_flat` (src/schedule/tile.c) reads the conv shape
-// almost entirely from `ke->input_views[]`, `ke->output_shape`,
-// `ke->input_dtypes[]`, and `ke->n_inputs` -- all of which survive
-// DAG-side classifier for "the kernel's last op is UOP_REDUCE with
-// REDUCE_SUM kind".  Strategy:
-//   1. `root` must be UOP_STORE.
-//   2. STORE.value must be UOP_REDUCE (bare) OR UOP_OPT(_, CONV, 0)
-//      wrapping a UOP_REDUCE (F4's recogniser may have wrapped it).
-//   3. The REDUCE's kind must be REDUCE_SUM.
-//
-// The shape extraction for the actual conv fields (kh, kw, c_in,
-// c_out, h_out, w_out, batch, w_offset, w_stride0/1, x_offset,
-// x_stride_b/0/1/2, w_input, x_input, patch_input_base/count,
-// threads, outputs_per_thread, reduce_unroll) stays in
-// tile_analyze_conv2d_flat -- it reads `ke->input_views[]` /
-// `ke->output_shape` / opt-derived counters, none of which need the
-// DAG.  So this classifier returns just 1/0 with no out struct.
+// === conv2d-flat ===
+// The structural gate of tile_analyze_conv2d_flat (schedule/tile.c): a STORE of
+// a bare REDUCE_SUM.  tile.c reads the shape from the decoder below, else from
+// input_views.
 int uop_dag_classify_conv2d_flat_shape(Term root) {
   if (root == 0) return 0;
   if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
   Term value = heap_read(term_val(root) + 2);
   if (term_tag(value) != TAG_UOP || term_ext(value) != UOP_REDUCE) return 0;
-  // REDUCE kind is at heap_read(loc + 1).
   Term kind = heap_read(term_val(value) + 1);
   if (term_tag(kind) != TAG_NUM) return 0;
   if (term_val(kind) != REDUCE_SUM) return 0;
   return 1;
 }
 
-// === DAG-side full-shape extractor (conv2d-flat) ======================
-//
-// Inverts the conv2d-flat address tree shape (IDIV/IMOD decomposition of
-// r_out + r_q into batch/output-spatial/channel/kernel-spatial axes) so
-// the conv shape facts
-// (c_out, c_in, kh, kw, batch, h_out, w_out, w_offset, w_stride0/1,
-// x_offset, x_stride_b/0/1/2) flow from the lifted UOp DAG instead of
-// from `ke->input_views[]`.  The IDIV/IMOD decomposition is deterministic
-// in the forward direction; given knowledge of which divisors mean what,
-// the inverse is a pattern match on the address tree.
-//
-// The simplifier (src/uop/index_simplify.c) rewrites the construction-
-// time tree:
-//   * `(c*x)/c -> x`, `(c*x+y)/c -> x` (when y < c)
-//   * `(r % (k*c))/c -> (r/c) % k` (nested div-mod)
-//   * `(r % (k*c)) % c -> r % c`   (nested mod-mod)
-//   * `IMOD by 1 -> 0`, `IDIV by 1 -> a`, `RANGE % bound -> RANGE`
-//   * IADD/IMUL absorbing 0/1 identities
-// so we match BOTH the lifter-produced shape AND the canonical
-// post-simplifier shape:
-//   * lifter: `co = r_out / patches`, `bi = (r_out % patches) / spatial`
-//             `oh = ((r_out%patches)%spatial) / w_out`,
-//             `ow = ((r_out%patches)%spatial) % w_out`
-//   * canonical (after simplification, batch>=1, spatial = h_out*w_out):
-//             `co = r_out / patches`,
-//             `bi = (r_out / spatial) % batch` (or 0 if batch=1),
-//             `oh = (r_out / w_out) % h_out`,
-//             `ow = r_out % w_out`
-// Same for r_q -> ci, kh_v, kw_v.
-//
-// Out-of-scope for this session (deferred):
-//   * Multi-input IWHERE chain (lifter itself reads input_views at
-//     kernel_lift.c:1070 so the lift is fundamentally tied; the DAG
-//     extractor falls back to input_views in this case).
-//   * Degenerate kh==kw==1 (kh_v / kw_v collapse to 0 leaving no IMOD
-//     marker for k-axis dims).  KRED == r_q.extent fully determines
-//     these but the addr-only path can't disambiguate; we fall back.
-//
-// Returns 1 with `out` filled iff the DAG shape decoded cleanly; 0
-// otherwise -- callers fall back to the input_views[] reader.
+// The address decoder inverts the IDIV/IMOD split of r_out (co, bi, oh, ow)
+// and of r_q (ci, kh_v, kw_v) in the W and X addresses.
 
-// Match `IDIV(t, ICONST(*divisor))` (constant divisor only).
 static int udg_match_idiv_const(Term t, Term *out_num, u32 *out_div) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IDIV) return 0;
   Term a = heap_read(term_val(t) + 0);
@@ -758,7 +478,6 @@ static int udg_match_idiv_const(Term t, Term *out_num, u32 *out_div) {
   return 1;
 }
 
-// Match `IMOD(t, ICONST(*divisor))` (constant divisor only).
 static int udg_match_imod_const(Term t, Term *out_num, u32 *out_div) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IMOD) return 0;
   Term a = heap_read(term_val(t) + 0);
@@ -771,8 +490,7 @@ static int udg_match_imod_const(Term t, Term *out_num, u32 *out_div) {
   return 1;
 }
 
-// Match `IMUL(t, ICONST(*coeff))` either operand order (mirrors
-// uop_match_const_mul).  Returns 1 with the non-const half in *out_t.
+// Either operand order; *out_t is the non-CONST side.
 static int udg_match_imul_const(Term t, Term *out_t, u32 *out_coeff) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IMUL) return 0;
   Term a = heap_read(term_val(t) + 0);
@@ -793,13 +511,11 @@ static int udg_match_imul_const(Term t, Term *out_t, u32 *out_coeff) {
   return 1;
 }
 
-// Match `RANGE` and pull its axis_id (caller may check vs expected).
 static int udg_is_range_axis(Term t, u32 want_axis_id) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_RANGE) return 0;
   return uop_range_axis_id(t) == want_axis_id;
 }
 
-// Read a top-level signed CONST out of a Term.  Used to recover offsets.
 static int udg_match_iconst_signed(Term t, i32 *out_v) {
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_CONST) return 0;
   Term num = heap_read(term_val(t) + 0);
@@ -808,12 +524,9 @@ static int udg_match_iconst_signed(Term t, i32 *out_v) {
   return 1;
 }
 
-// Flatten a left-leaning IADD chain into up to N leaves.  Returns the
-// leaf count (capped at cap; returns 0 if the cap would be exceeded so
-// callers can bail).
 #define UDG_CONV_ADDR_MAX_LEAVES 12
+// The leaves of an IADD tree, or 0 when there are more than `cap`.
 static u32 udg_flatten_iadd(Term t, Term *leaves, u32 cap) {
-  // Recursive: descend through IADD nodes, stash non-IADD as leaves.
   if (cap == 0) return 0;
   if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_IADD) {
     leaves[0] = t;
@@ -829,15 +542,8 @@ static u32 udg_flatten_iadd(Term t, Term *leaves, u32 cap) {
   return na + nb;
 }
 
-// Decode the W INDEX_E.addr.
-//
-// Lifter shape (after simplification):
-//   [IADD(k_w_off,)] IADD( IMUL(IDIV(r_out, patches), w_s0),
-//                           [IMUL(r_q, w_s1) | r_q if w_s1==1] )
-//
-// Recovers: patches (= u32 divisor), w_stride0, w_stride1, w_offset.
-// Returns 1 on success, fills out_axis_r_out + out_axis_r_q so the
-// caller can plumb them into the X decode + cross-checks.
+// W address: [w_offset +] (r_out / patches) * w_s0 + r_q * w_s1, an IMUL by 1
+// omitted.  Also returns the r_out and r_q axis ids for the X decode.
 static int udg_decode_conv_w_addr(Term addr,
                                   u32 *out_axis_r_out,
                                   u32 *out_axis_r_q,
@@ -858,13 +564,10 @@ static int udg_decode_conv_w_addr(Term addr,
       w_off = cv;
       continue;
     }
-    // Check if this leaf decodes as `(IDIV(r_out, patches)) * w_s0` or
-    // bare IDIV (when w_s0 == 1).
     Term idiv_num = 0; u32 idiv_div = 0;
     Term mul_inner = 0; u32 mul_coeff = 1;
     if (udg_match_imul_const(t, &mul_inner, &mul_coeff)
         && udg_match_idiv_const(mul_inner, &idiv_num, &idiv_div)) {
-      // co-arm: IMUL(IDIV(r_out, patches), w_s0).  Check r_out is RANGE.
       if (term_tag(idiv_num) != TAG_UOP || term_ext(idiv_num) != UOP_RANGE) continue;
       arm_co = t;
       *out_axis_r_out = uop_range_axis_id(idiv_num);
@@ -873,7 +576,6 @@ static int udg_decode_conv_w_addr(Term addr,
       continue;
     }
     if (udg_match_idiv_const(t, &idiv_num, &idiv_div)) {
-      // co-arm with w_s0 == 1: IDIV(r_out, patches).
       if (term_tag(idiv_num) != TAG_UOP || term_ext(idiv_num) != UOP_RANGE) continue;
       arm_co = t;
       *out_axis_r_out = uop_range_axis_id(idiv_num);
@@ -881,7 +583,6 @@ static int udg_decode_conv_w_addr(Term addr,
       *out_w_stride0  = 1;
       continue;
     }
-    // q-arm: bare RANGE or IMUL(RANGE, w_s1).
     if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_RANGE) {
       arm_q = t;
       *out_axis_r_q   = uop_range_axis_id(t);
@@ -897,7 +598,7 @@ static int udg_decode_conv_w_addr(Term addr,
       *out_w_stride1  = qmul_coeff;
       continue;
     }
-    return 0;  // unrecognised leaf
+    return 0;
   }
   if (arm_co == 0 || arm_q == 0) return 0;
   if (*out_patches == 0 || *out_w_stride0 == 0 || *out_w_stride1 == 0) return 0;
@@ -906,25 +607,20 @@ static int udg_decode_conv_w_addr(Term addr,
   return 1;
 }
 
-// Recogniser for an X-address arm in a conv2d_flat single-input lift.
-// Each leaf decodes into one of the slots below; an unrecognised arm
-// causes the whole decode to bail.
+// The X-address arms.  Nothing reads these tags: the decoders below match each
+// arm directly, and an unrecognised arm fails the decode.
 typedef enum {
   UDG_CONV_ARM_NONE   = 0,
   UDG_CONV_ARM_CONST  = 1,  // x_offset
   UDG_CONV_ARM_CI     = 2,  // ci * x_stride2
   UDG_CONV_ARM_BI     = 3,  // bi * x_stride_b
-  UDG_CONV_ARM_H      = 4,  // (oh + kh_v) * x_stride0   -- oh, h_out, x_s0
-  UDG_CONV_ARM_W      = 5,  // (ow + kw_v) * x_stride1   -- ow, w_out, x_s1
+  UDG_CONV_ARM_H      = 4,  // (oh + kh_v) * x_stride0
+  UDG_CONV_ARM_W      = 5,  // (ow + kw_v) * x_stride1
 } UdgConvArmKind;
 
-// Match the canonical `oh = (r_out / w_out) % h_out` shape OR the
-// uncollapsed lifter shape `oh = ((r_out%patches)%spatial) / w_out` (rare;
-// the simplifier normally rewrites it to the canonical).  Sets *out_w_out
-// + *out_h_out + *out_axis on success.
+// oh = (r_out / w_out) % h_out.
 static int udg_match_oh(Term t, u32 axis_r_out,
                         u32 *out_w_out, u32 *out_h_out) {
-  // Canonical shape (after simplifier): IMOD(IDIV(r_out, w_out), h_out).
   Term mod_num = 0; u32 mod_div = 0;
   if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
   Term div_num = 0; u32 div_div = 0;
@@ -935,7 +631,7 @@ static int udg_match_oh(Term t, u32 axis_r_out,
   return 1;
 }
 
-// Match `ow = r_out % w_out` (canonical).
+// ow = r_out % w_out.
 static int udg_match_ow(Term t, u32 axis_r_out, u32 *out_w_out) {
   Term mod_num = 0; u32 mod_div = 0;
   if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
@@ -944,11 +640,9 @@ static int udg_match_ow(Term t, u32 axis_r_out, u32 *out_w_out) {
   return 1;
 }
 
-// Match `bi = (r_out / spatial) % batch` (canonical, batch>=2) OR
-// `bi = IDIV(IMOD(r_out, patches), spatial)` (uncollapsed; rare).
+// bi = (r_out / spatial) % batch.
 static int udg_match_bi(Term t, u32 axis_r_out,
                         u32 *out_spatial, u32 *out_batch) {
-  // Canonical: IMOD(IDIV(r_out, spatial), batch).
   Term mod_num = 0; u32 mod_div = 0;
   if (udg_match_imod_const(t, &mod_num, &mod_div)) {
     Term div_num = 0; u32 div_div = 0;
@@ -962,11 +656,9 @@ static int udg_match_bi(Term t, u32 axis_r_out,
   return 0;
 }
 
-// Match `ci = (r_q / kw) / kh` (canonical-ish; lifter writes the two
-// IDIVs separately and the simplifier doesn't fuse them).  Recovers
-// kw + kh.
+// ci = (r_q / kw) / kh as two IDIVs.  index_simplify folds such a pair into
+// r_q / (kw * kh), which does not match.
 static int udg_match_ci(Term t, u32 axis_r_q, u32 *out_kw, u32 *out_kh) {
-  // Outer IDIV: (qk / kh) where qk = (r_q / kw).
   Term outer_num = 0; u32 outer_div = 0;
   if (!udg_match_idiv_const(t, &outer_num, &outer_div)) return 0;
   Term inner_num = 0; u32 inner_div = 0;
@@ -977,7 +669,7 @@ static int udg_match_ci(Term t, u32 axis_r_q, u32 *out_kw, u32 *out_kh) {
   return 1;
 }
 
-// Match `kh_v = (r_q / kw) % kh`.
+// kh_v = (r_q / kw) % kh.
 static int udg_match_kh_v(Term t, u32 axis_r_q, u32 *out_kw, u32 *out_kh) {
   Term mod_num = 0; u32 mod_div = 0;
   if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
@@ -989,7 +681,7 @@ static int udg_match_kh_v(Term t, u32 axis_r_q, u32 *out_kw, u32 *out_kh) {
   return 1;
 }
 
-// Match `kw_v = r_q % kw`.
+// kw_v = r_q % kw.
 static int udg_match_kw_v(Term t, u32 axis_r_q, u32 *out_kw) {
   Term mod_num = 0; u32 mod_div = 0;
   if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
@@ -998,26 +690,20 @@ static int udg_match_kw_v(Term t, u32 axis_r_q, u32 *out_kw) {
   return 1;
 }
 
-// Decode the H-axis arm: `IMUL(IADD(oh, kh_v), x_stride0)` (kh>1) OR
-// bare `IMUL(oh, x_stride0)` (kh==1, kh_v==0 collapsed) OR the
-// degenerate `IADD(oh, kh_v)` (x_stride0==1) -- but for now we require
-// x_stride0 != 1 (typical conv has x_stride0 == w which is rarely 1).
+// H arm: (oh + kh_v) * x_s0, either IADD order.  A bare oh (kh == 1) and a
+// missing IMUL (x_s0 == 1) do not match.
 static int udg_decode_h_arm(Term t, u32 axis_r_out, u32 axis_r_q,
                             u32 *out_x_s0, u32 *out_w_out, u32 *out_h_out,
                             u32 *out_kw, u32 *out_kh) {
   Term inner = 0; u32 coeff = 0;
-  // Outer IMUL with stride.
   if (!udg_match_imul_const(t, &inner, &coeff)) return 0;
   if (coeff == 0) return 0;
   *out_x_s0 = coeff;
-  // Inner is IADD(oh, kh_v) -- both must match.
   if (term_tag(inner) != TAG_UOP || term_ext(inner) != UOP_IADD) {
-    // kh==1 case: bare oh.  We don't support degenerate here.
     return 0;
   }
   Term lhs = heap_read(term_val(inner) + 0);
   Term rhs = heap_read(term_val(inner) + 1);
-  // Try (oh, kh_v) and (kh_v, oh) orderings.
   u32 kw1 = 0, kh1 = 0;
   if (udg_match_oh(lhs, axis_r_out, out_w_out, out_h_out)
       && udg_match_kh_v(rhs, axis_r_q, &kw1, &kh1)) {
@@ -1032,10 +718,9 @@ static int udg_decode_h_arm(Term t, u32 axis_r_out, u32 axis_r_q,
   return 0;
 }
 
-// Decode the CI-axis arm: `IMUL(ci, x_s2)` OR bare `ci` when x_s2==1.
+// CI arm: ci * x_s2, or a bare ci when x_s2 == 1.
 static int udg_decode_ci_arm(Term t, u32 axis_r_q,
                              u32 *out_x_s2, u32 *out_kw, u32 *out_kh) {
-  // bare ci case (x_s2==1): IDIV(IDIV(r_q, kw), kh).
   u32 kw1 = 0, kh1 = 0;
   if (udg_match_ci(t, axis_r_q, &kw1, &kh1)) {
     *out_x_s2 = 1; *out_kw = kw1; *out_kh = kh1; return 1;
@@ -1048,7 +733,7 @@ static int udg_decode_ci_arm(Term t, u32 axis_r_q,
   return 1;
 }
 
-// Decode the BI-axis arm: `IMUL(bi, x_sb)` OR bare `bi` when x_sb==1.
+// BI arm: bi * x_sb, or a bare bi when x_sb == 1.
 static int udg_decode_bi_arm(Term t, u32 axis_r_out,
                              u32 *out_x_sb, u32 *out_spatial, u32 *out_batch) {
   u32 sp = 0, bt = 0;
@@ -1063,27 +748,12 @@ static int udg_decode_bi_arm(Term t, u32 axis_r_out,
   return 1;
 }
 
-// === 1x1 conv detection + dedicated parser ===
-//
-// When kh == kw == 1, the simplifier collapses `r_q / 1 -> r_q`,
-// `r_q % 1 -> 0`, and `IADD(x, 0) -> x` so the X address loses ALL
-// IDIV/IMOD on the r_q axis.  The CI arm degenerates to either a bare
-// `RANGE(r_q)` or `IMUL(RANGE(r_q), x_s2)`; the H arm becomes
-// `IMUL(IMOD(IDIV(r_out, w_out), h_out), x_s0)`; the W arm becomes
-// `IMUL(IMOD(r_out, w_out), x_s1)` (or bare IMOD when x_s1==1); and the
-// optional BI arm becomes `IMUL(IMOD(IDIV(r_out, spatial), batch), x_sb)`.
-//
-// This collides STRUCTURALLY with the standard parser's BI matcher: the
-// H arm and BI arm both look like `IMUL(IMOD(IDIV(r_out, X), Y), C)`,
-// distinguishable only by divisor values.  Rather than teach the
-// existing matchers a divisor disambiguator (greedy mis-classification
-// risk on canonical >=2x2 conv), we run a dedicated 1x1 parser that
-// is invoked ONLY when the X address is positively identified as 1x1.
+// 1x1 conv (kh == kw == 1): the X address keeps no IDIV/IMOD on r_q, and its H
+// and BI arms are both IMUL(IMOD(IDIV(r_out, a), b), c), told apart only by
+// their divisors.  A separate parser takes exactly that case.
 
-// Walk `t` and return 1 iff any descendant is `IDIV(RANGE(axis_r_q), c)`
-// or `IMOD(RANGE(axis_r_q), c)` with c >= 2.  Used by `udg_x_addr_is_1x1`
-// to positively detect "no kh/kw decomposition exists on r_q in the X
-// address."  Capped depth.
+// 1 iff IDIV or IMOD(RANGE(axis_r_q), c >= 2) occurs under `t`, searched
+// through integer ops and IWHERE to depth 16.
 static int udg_x_has_rq_divmod(Term t, u32 axis_r_q, int depth) {
   if (depth > 16) return 0;
   if (term_tag(t) != TAG_UOP) return 0;
@@ -1098,18 +768,12 @@ static int udg_x_has_rq_divmod(Term t, u32 axis_r_q, int depth) {
       if (term_tag(dnum) == TAG_NUM && (u32)term_val(dnum) >= 2) return 1;
     }
   }
-  // Recurse into binary / ternary / unary ops.  RANGE / CONST / BUFFER
-  // have no relevant sub-terms.
   if (op == UOP_RANGE || op == UOP_CONST || op == UOP_BUFFER) return 0;
   if (op == UOP_IWHERE) {
     if (udg_x_has_rq_divmod(heap_read(term_val(t) + 0), axis_r_q, depth + 1)) return 1;
     if (udg_x_has_rq_divmod(heap_read(term_val(t) + 1), axis_r_q, depth + 1)) return 1;
     return udg_x_has_rq_divmod(heap_read(term_val(t) + 2), axis_r_q, depth + 1);
   }
-  // Most other UOps store 2 operand terms; INDEX_E stores [buf, addr]
-  // (we only need to descend into addr but recursing into both is safe).
-  // Defensive: read 2 children.  Walking pure-leaf ops (CONST/RANGE)
-  // already returned 0 above.
   if (op == UOP_IADD || op == UOP_IMUL || op == UOP_ISUB || op == UOP_IDIV
       || op == UOP_IMOD || op == UOP_ILT  || op == UOP_IAND
       || op == UOP_IOR  || op == UOP_IXOR || op == UOP_ISHR) {
@@ -1121,17 +785,12 @@ static int udg_x_has_rq_divmod(Term t, u32 axis_r_q, int depth) {
   return 0;
 }
 
-// Returns 1 iff the X address has NO `IDIV(RANGE(r_q), c)` and NO
-// `IMOD(RANGE(r_q), c)` for c >= 2 anywhere in the tree.  This is the
-// positive 1x1 detector.
 static int udg_x_addr_is_1x1(Term addr_x, u32 axis_r_q) {
   return !udg_x_has_rq_divmod(addr_x, axis_r_q, 0);
 }
 
-// Match `IMOD(IDIV(RANGE(r_out), inner), outer)`.  Recovers (inner,
-// outer).  Used to identify both the H arm (`IMOD(IDIV(r_out, w_out),
-// h_out)`) and the BI arm (`IMOD(IDIV(r_out, spatial), batch)`) shape
-// without committing to which is which (disambiguation done later).
+// (r_out / inner) % outer: the 1x1 H arm (w_out, h_out) or BI arm (spatial,
+// batch); the caller tells them apart.
 static int udg_match_imod_idiv_range(Term t, u32 axis_r_out,
                                      u32 *out_inner, u32 *out_outer) {
   Term mod_num = 0; u32 mod_div = 0;
@@ -1144,8 +803,7 @@ static int udg_match_imod_idiv_range(Term t, u32 axis_r_out,
   return 1;
 }
 
-// Match bare `IMOD(RANGE(r_out), c)` -- the W-arm shape when x_s1==1
-// in the 1x1 case.  Recovers c (= w_out).
+// r_out % w_out: the 1x1 W arm.
 static int udg_match_imod_range(Term t, u32 axis_r_out, u32 *out_div) {
   Term mod_num = 0; u32 mod_div = 0;
   if (!udg_match_imod_const(t, &mod_num, &mod_div)) return 0;
@@ -1154,29 +812,12 @@ static int udg_match_imod_range(Term t, u32 axis_r_out, u32 *out_div) {
   return 1;
 }
 
-// 1x1 conv parser.  Mirrors the standard parser's signature; called as
-// a delegate from the standard parser's entry point when the X address
-// has no IDIV/IMOD on r_q (i.e. kh==kw==1 collapsed).
-//
-// Strategy:
-//   1. W addr decode (reuses `udg_decode_conv_w_addr`).  Recovers
-//      patches, w_s0, w_s1, w_offset, axis_r_out, axis_r_q.
-//   2. Flatten X addr into IADD leaves.  Each leaf is one of:
-//        * ICONST -> x_offset
-//        * IMUL(IMOD(IDIV(r_out, A), B), C) or bare IMOD(IDIV(...), B)
-//          -- candidate H or BI arm (both look the same!)
-//        * IMUL(IMOD(r_out, w_out), C) or bare IMOD(r_out, w_out)
-//          -- W arm (x_s1>1 vs ==1)
-//        * IMUL(RANGE(r_q), C) or bare RANGE(r_q)
-//          -- CI arm (x_s2>1 vs ==1)
-//   3. Disambiguate H vs BI by trying both assignments; the consistent
-//      one (spatial == h_out * w_out, batch * spatial == patches) wins.
-//   4. Cross-validate w_out from H arm against w_out from W arm; CI arm
-//      must witness c_in via r_q.extent (since kh*kw=1, c_in=KRED).
+// X leaves: CONST, CI (r_q * x_s2), W ((r_out % w_out) * x_s1) and up to two
+// H/BI candidates, assigned so that spatial == h_out * w_out and batch * spatial
+// == patches.  Each IMUL is absent at stride 1.
 static int uop_dag_extract_conv2d_flat_shape_1x1(
     Term addr_w, Term addr_x,
     UopDagConv2dFlatShape *out) {
-  // --- W decode (same as standard parser) ---
   u32 axis_r_out = 0, axis_r_q = 0;
   u32 patches = 0, w_s0 = 0, w_s1 = 0;
   i32 w_off = 0;
@@ -1185,18 +826,13 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
     return 0;
   }
 
-  // --- X flatten ---
   Term x_leaves[UDG_CONV_ADDR_MAX_LEAVES] = {0};
   u32 n_x = udg_flatten_iadd(addr_x, x_leaves, UDG_CONV_ADDR_MAX_LEAVES);
   if (n_x == 0) return 0;
 
-  // --- Classify ---
   i32 x_off = 0;
-  // CI arm (RANGE(r_q) variants):
   int got_ci = 0; u32 x_s2 = 0;
-  // W arm (IMOD(r_out, w_out) variants):
   int got_w = 0; u32 x_s1 = 0; u32 w_out_w = 0;
-  // Candidate H/BI arms (IMOD-of-IDIV(r_out, ...)).  Up to 2.
   struct { Term t; u32 inner; u32 outer; u32 coeff; int has_coeff; } cand[2];
   u32 n_cand = 0;
 
@@ -1205,7 +841,6 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
     i32 cv;
     if (udg_match_iconst_signed(t, &cv)) { x_off = cv; continue; }
 
-    // CI arm: bare RANGE(r_q) or IMUL(RANGE(r_q), x_s2).
     if (!got_ci) {
       if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_RANGE
           && uop_range_axis_id(t) == axis_r_q) {
@@ -1219,7 +854,6 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
       }
     }
 
-    // W arm: IMOD(r_out, w_out) bare (x_s1==1) or wrapped in IMUL.
     if (!got_w) {
       u32 w_out_t = 0;
       if (udg_match_imod_range(t, axis_r_out, &w_out_t)) {
@@ -1232,12 +866,10 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
       }
     }
 
-    // H or BI candidate: IMOD(IDIV(r_out, inner), outer) bare or wrapped
-    // in IMUL.  We can't classify yet -- stash and disambiguate later.
     {
       u32 inner_d = 0, outer_d = 0;
       if (udg_match_imod_idiv_range(t, axis_r_out, &inner_d, &outer_d)) {
-        if (n_cand >= 2) return 0;  // too many; bail
+        if (n_cand >= 2) return 0;
         cand[n_cand].t         = t;
         cand[n_cand].inner     = inner_d;
         cand[n_cand].outer     = outer_d;
@@ -1261,34 +893,19 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
       }
     }
 
-    // Unrecognised leaf -- bail.
     return 0;
   }
 
-  // The H arm must be present.  W arm absent only if w_out==1 (which
-  // would have collapsed `IMOD(r_out, 1)` to 0); that case is rare and
-  // out of scope -- bail.
+  // w_out == 1 folds the W arm away; not handled.
   if (!got_w) return 0;
   if (n_cand == 0) return 0;
   if (!got_ci) return 0;
 
-  // --- Disambiguate H vs BI via divisor values ---
-  // H arm: inner == w_out, outer == h_out.
-  // BI arm: inner == spatial == h_out * w_out, outer == batch.
-  //
-  // Constraints:
-  //   * h_out > 0, w_out > 0, batch > 0
-  //   * w_out_w (from W arm) == w_out (from H arm)
-  //   * batch * spatial == patches  AND  spatial == h_out * w_out
-  //
-  // For batch == 1 there is no BI arm, so n_cand == 1.
-  // For batch >= 2 the lifter emits both, so n_cand == 2.
+  // H is (w_out, h_out) and BI (spatial, batch); batch == 1 leaves only H.
   u32 batch = 0, spatial = 0, h_out = 0, w_out = 0, x_sb = 0;
   int got_bi = 0;
 
   if (n_cand == 1) {
-    // batch == 1 case: the single candidate is the H arm.
-    // inner == w_out, outer == h_out.  spatial = patches.
     h_out = cand[0].outer;
     w_out = cand[0].inner;
     if (w_out != w_out_w) return 0;
@@ -1298,8 +915,7 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
     spatial = patches;
     x_sb = 0;
   } else {
-    // batch >= 2 case: try both pairings.  Exactly one should be
-    // self-consistent.
+    // Exactly one pairing may fit.
     int hits = 0;
     int h_idx = -1;
     for (int try_h = 0; try_h < 2; try_h++) {
@@ -1312,7 +928,6 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
       if (try_w_out != w_out_w) continue;
       if ((u64)try_h_out * (u64)try_w_out != try_spatial) continue;
       if ((u64)try_batch * (u64)try_spatial != patches) continue;
-      // Consistent.
       hits++;
       h_idx = try_h;
       h_out = try_h_out;
@@ -1320,36 +935,31 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
       spatial = try_spatial;
       batch = try_batch;
     }
-    if (hits != 1) return 0;  // ambiguous or no fit
+    if (hits != 1) return 0;
     int b_idx = 1 - h_idx;
-    // Determine x_sb (BI coeff) and x_s0 (H coeff).
     x_sb = cand[b_idx].has_coeff ? cand[b_idx].coeff : 1;
     if (cand[h_idx].has_coeff) {
-      // x_s0 stored in cand[h_idx].coeff; we'll read below.
+      // x_s0 is read below.
     }
     got_bi = 1;
   }
 
-  // Recover x_s0 from the H candidate (whichever index we chose).
   u32 x_s0 = 0;
   if (n_cand == 1) {
     x_s0 = cand[0].has_coeff ? cand[0].coeff : 1;
   } else {
-    // Re-derive H index by matching inner==w_out.
     int h_idx = (cand[0].inner == w_out && cand[0].outer == h_out) ? 0 : 1;
     x_s0 = cand[h_idx].has_coeff ? cand[h_idx].coeff : 1;
   }
 
-  // --- Pull r_out / r_q extents to derive c_out and c_in ---
   u32 r_out_ext = rec_tc_find_range_extent(addr_w, axis_r_out, 0);
   u32 r_q_ext   = rec_tc_find_range_extent(addr_w, axis_r_q,   0);
   if (r_out_ext == 0 || r_q_ext == 0) return 0;
   if (r_out_ext % patches != 0) return 0;
   u32 c_out = r_out_ext / patches;
-  // For 1x1 conv: KRED == c_in * 1 * 1 == c_in.
+  // KRED = c_in * kh * kw = c_in.
   u32 c_in  = r_q_ext;
 
-  // --- Fill out ---
   out->c_out     = c_out;
   out->c_in      = c_in;
   out->kh        = 1;
@@ -1373,18 +983,13 @@ static int uop_dag_extract_conv2d_flat_shape_1x1(
   return 1;
 }
 
-// Public extractor: run on `addr_w` + `addr_x` (single-input INDEX_E
-// addresses) plus the lift's input slots, and fill the conv shape facts
-// into `out`.  Returns 1 on success.  On 0 the caller must fall back to
-// the input_views[] reader.  All four "X arms" must decode (BI / CI / H
-// / W).  Out-of-scope: x_offset==0 is fine (just no const arm); but
-// degenerate `kh==kw==1` collapses ci to bare RANGE -- not handled yet.
+// The conv shape from the W and X INDEX_E addresses; 0 when either does not
+// decode (tile.c then reads input_views).
 int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
                                       UopDagConv2dFlatShape *out) {
   if (out == NULL) return 0;
   memset(out, 0, sizeof(*out));
 
-  // --- W decode ---
   u32 axis_r_out = 0, axis_r_q = 0;
   u32 patches = 0, w_s0 = 0, w_s1 = 0;
   i32 w_off = 0;
@@ -1393,15 +998,10 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
     return 0;
   }
 
-  // 1x1 conv detection: if X address has no IDIV/IMOD on r_q, the kh/kw
-  // decomposition collapsed.  Delegate to the dedicated 1x1 parser
-  // (which uses divisor-value disambiguation since the H and BI arms are
-  // structurally identical).
   if (udg_x_addr_is_1x1(addr_x, axis_r_q)) {
     return uop_dag_extract_conv2d_flat_shape_1x1(addr_w, addr_x, out);
   }
 
-  // --- X decode ---
   Term x_leaves[UDG_CONV_ADDR_MAX_LEAVES] = {0};
   u32 n_x = udg_flatten_iadd(addr_x, x_leaves, UDG_CONV_ADDR_MAX_LEAVES);
   if (n_x == 0) return 0;
@@ -1413,14 +1013,8 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
   u32 x_s1     = 0,  w_out_w   = 0,  kw_w    = 0;
   int got_h    = 0,  got_w     = 0,  got_ci  = 0,  got_bi = 0;
 
-  // First pass: classify each leaf into one of:
-  //   CONST -> x_offset
-  //   H_ARM (IMUL with IADD inside)            -- distinctive: IMUL(IADD(...), C)
-  //   CI_ARM (IDIV-of-IDIV; coefficient maybe) -- distinctive: IMUL(IDIV(IDIV(r_q,..),..), C) or bare
-  //   BI_ARM (IMOD-of-IDIV)                    -- IMUL(IMOD(IDIV(r_out,..),..), C) or bare
-  //   "ow" leaf  (IMOD(r_out, w_out))          -- when x_s1==1 the W arm dissolved
-  //   "kw_v" leaf (IMOD(r_q, kw))              -- partner of "ow"
-  // Then pair the ow + kw_v leaves into a synthetic w-arm.
+  // X leaves: CONST (x_offset) and the H, W, CI and BI arms.  At x_s1 == 1 the
+  // W arm ow + kw_v has no IMUL, so the flatten splits it into two leaves.
   Term ow_leaf = 0, kw_v_leaf = 0;
   u32 ow_w_out = 0, kw_v_kw = 0;
 
@@ -1432,7 +1026,7 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
                                    &x_s0, &w_out_h, &h_out_h, &kw_h, &kh_h)) {
       got_h = 1; continue;
     }
-    // Full IMUL-wrapped W-arm (x_s1>1 case).
+    // W arm: (ow + kw_v) * x_s1, either IADD order.
     if (!got_w) {
       Term inner_imul = 0; u32 inner_coeff = 0;
       if (udg_match_imul_const(t, &inner_imul, &inner_coeff)
@@ -1456,32 +1050,25 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
                                      &x_sb, &spatial, &batch)) {
       got_bi = 1; continue;
     }
-    // Disaggregated W-arm (x_s1==1): a bare IMOD(r_out, w_out) "ow" leaf
-    // OR a bare IMOD(r_q, kw) "kw_v" leaf.  Stash; pair them up after.
     if (ow_leaf == 0 && udg_match_ow(t, axis_r_out, &ow_w_out)) {
       ow_leaf = t; continue;
     }
     if (kw_v_leaf == 0 && udg_match_kw_v(t, axis_r_q, &kw_v_kw)) {
       kw_v_leaf = t; continue;
     }
-    return 0;  // unrecognised arm
-  }
-
-  // Pair up ow + kw_v into a synthetic W-arm if the IMUL collapsed
-  // (x_s1==1 case).
-  if (!got_w && ow_leaf != 0 && kw_v_leaf != 0) {
-    x_s1 = 1; w_out_w = ow_w_out; kw_w = kw_v_kw; got_w = 1;
-  } else if (ow_leaf != 0 || kw_v_leaf != 0) {
-    // Only one of the pair was found -- inconsistent; bail.
     return 0;
   }
 
-  // Required: H and W arms.  CI optional only if c_in==1+kh*kw==KRED
-  // (out of scope for this session); BI optional only if batch==1.
+  if (!got_w && ow_leaf != 0 && kw_v_leaf != 0) {
+    x_s1 = 1; w_out_w = ow_w_out; kw_w = kw_v_kw; got_w = 1;
+  } else if (ow_leaf != 0 || kw_v_leaf != 0) {
+    return 0;
+  }
+
+  // H and W are required; CI may be absent only when c_in == 1, BI only when
+  // batch == 1 (checked below).
   if (!got_h || !got_w) return 0;
 
-  // Cross-checks: w_out from H arm == w_out from W arm; kw consistent;
-  // kh consistent (if both got_ci and got_h supply it).
   if (w_out_h != w_out_w) return 0;
   if (kw_h != kw_w) return 0;
   if (got_ci) {
@@ -1489,7 +1076,6 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
     if (kh_ci != kh_h) return 0;
   }
 
-  // Recover c_in / batch defaults when arms collapsed.
   u32 kw = kw_h;
   u32 kh = kh_h;
   u32 h_out = h_out_h;
@@ -1497,14 +1083,7 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
   if (kw == 0 || kh == 0) return 0;
   if (h_out == 0 || w_out == 0) return 0;
 
-  // Pull r_out / r_q extents to derive c_out and KRED.
-  // The W addr's IDIV-of-RANGE referenced r_out via axis id; recover
-  // the actual extent by walking back into the IADD leaves.
-  // Simpler: read extents from the lifted RANGE nodes inside the addr.
   u32 r_out_ext = 0, r_q_ext = 0;
-  // r_out lives inside the W addr's co-arm as IDIV(r_out, patches).
-  // r_q lives as either bare RANGE leaf or IMUL(RANGE, w_s1).
-  // Both are easy to find via rec_tc_find_range_extent.
   r_out_ext = rec_tc_find_range_extent(addr_w, axis_r_out, 0);
   r_q_ext   = rec_tc_find_range_extent(addr_w, axis_r_q,   0);
   if (r_out_ext == 0 || r_q_ext == 0) return 0;
@@ -1512,16 +1091,13 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
   u32 c_out = r_out_ext / patches;
   u32 KRED  = r_q_ext;
 
-  // c_in derivation.  KRED == c_in * kh * kw, so c_in = KRED / (kh*kw).
+  // KRED = c_in * kh * kw.
   if (KRED == 0 || kh * kw == 0) return 0;
   if (KRED % (kh * kw) != 0) return 0;
   u32 c_in = KRED / (kh * kw);
   if (c_in == 0) return 0;
-  // Out of scope: c_in==1 ci-arm collapsed; reject for now.
   if (c_in > 1 && !got_ci) return 0;
 
-  // batch derivation: if BI arm absent, batch == 1 and the spatial
-  // factor equals patches.
   if (!got_bi) {
     batch   = 1;
     spatial = patches;
@@ -1531,15 +1107,8 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
   }
   if (spatial != h_out * w_out) return 0;
 
-  // x_stride_b: for batch==1 we have no info; default 0 (matches the
-  // input_views reader behavior for ndim==3 inputs).
+  // No BI arm: x_stride_b 0, as tile.c's input_views reader gives a 3-D X.
   if (!got_bi) x_sb = 0;
-
-  // Recover input slot indices from BUFFER.instance.  The W INDEX_E
-  // points to W's BUFFER, and the X INDEX_E points to X's BUFFER.
-  // Caller provides addr_w/addr_x at the level INSIDE INDEX_E so we
-  // can't read BUFFER directly here -- but the slot can be deduced
-  // by the caller.  Leave w_input/x_input zero here; callers fill.
 
   out->c_out     = c_out;
   out->c_in      = c_in;
@@ -1563,28 +1132,15 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
   return 1;
 }
 
-// === Hand-coded-opts helper: DAG axis enumeration ====================
-// Walk the DAG rooted at `root` and collect every distinct UOP_RANGE
-// leaf, ordered by ascending axis_id.  Writes (axis_id, axis_type,
-// extent) triples into the parallel out_* arrays.  Returns the count
-// (clipped to `cap`); 0 if `root` is 0 / not a UOp / no ranges.
-//
-// Used by kernel_hand_coded_opts (src/codegen/hand_opts.c) to inspect
-// the current axis structure of a lifted kernel between successive
-// kernel_apply_opt calls (each apply mutates the DAG, so the axis list
-// must be re-queried).  Mirrors `apply_opt_dag_collect_ranges` in
-// uop/apply_opt_dag.c but de-dups + sorts by axis_id and exposes the
-// decoded fields rather than the raw Terms.
+// The distinct RANGEs under `root` as (axis_id, axis_type, extent), sorted by
+// axis_id, at most `cap`.  An AFTER is a leaf here (uop_arity 0).
 u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
                          u32 *out_extent, u32 cap) {
   if (root == 0 || term_tag(root) != TAG_UOP || cap == 0) return 0;
   Term stack[512];
   u32  sp = 0;
   stack[sp++] = root;
-  // Collect distinct RANGE terms (dedup by axis_id; the lifter emits
-  // one RANGE per axis_id and apply_opt rebuilds them, so axis_id is a
-  // safe identity here -- two RANGEs with the same axis_id but
-  // different extent shouldn't co-exist in a well-formed DAG).
+  // Dedup by axis_id: a well-formed DAG has one RANGE per axis_id.
   u32 n = 0;
   while (sp > 0) {
     Term t = stack[--sp];
@@ -1617,7 +1173,6 @@ u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
       if (term_tag(child) == TAG_UOP) stack[sp++] = child;
     }
   }
-  // Insertion-sort by axis_id (n is tiny -- <= MAX_AXES).
   for (u32 i = 1; i < n; i++) {
     u32 aid = out_axis_id[i], at = out_axis_type[i], ext = out_extent[i];
     i32 j = (i32)i - 1;
@@ -1634,32 +1189,15 @@ u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
   return n;
 }
 
-// === DAG-side generalized-contraction extractor =======================
-//
-// Walks an INDEX_E's symbolic address and, for every distinct UOP_RANGE
-// axis_id it references, accumulates the linear coefficient that range
-// contributes to the address.  Supports the lift_scalar_index shape
-// where the address is a left-leaning IADD chain whose leaves are one
-// of {RANGE, IMUL(RANGE, ICONST), IMUL(ICONST, RANGE), ICONST}.  Bare
-// ICONST leaves are accumulated as an absolute offset.
-//
-// On success:
-//   *n_out                = number of distinct axes (0..cap)
-//   out_axis_ids[k]       = axis_id of the k-th distinct axis
-//   out_coeffs[k]         = total linear coefficient (sum of arms with
-//                           that axis_id; typically 1 arm per axis)
-//   *out_offset           = sum of bare ICONST leaves (signed-safe via i32 cast)
-//   *out_ok = 1 on full decode; 0 on bail (unrecognized leaf shape).
-//
-// Used by the contraction classifier to map per-operand address shapes
-// to (M, N, K)-axis classification + stride extraction.
+// === Address coefficients and the contraction classifiers ===
+// An INDEX_E address read as sum(coeff * RANGE) + offset, for hand_opts and the
+// BLAS contraction classifiers below.
 #define UDG_CONTRACT_MAX_AXES UOP_DAG_ADDR_MAX_AXES
 
 static int udg_addr_accumulate(UopDagAddrCoeffsView *a, u32 axis_id, u32 coeff) {
   for (u32 i = 0; i < a->n_axes; i++) {
     if (a->axis_ids[i] == axis_id) {
-      // Same axis appearing twice in the address (e.g. lifter merged two
-      // arms): accumulate coefficients.
+      // An axis in several arms sums their coefficients.
       a->coeffs[i] += coeff;
       return 1;
     }
@@ -1671,25 +1209,9 @@ static int udg_addr_accumulate(UopDagAddrCoeffsView *a, u32 axis_id, u32 coeff) 
   return 1;
 }
 
-// Recursively accumulate `coeff * leaf` into the coeff table.  Supports
-// the leaf shapes that survive thvm's index_simplify pass for conv im2col:
-//   RANGE                                    -> accumulate axis @ coeff
-//   CONST                                    -> add to offset
-//   IADD(L, R)                               -> recurse(L, coeff) + recurse(R, coeff)
-//   IMUL(X, CONST(c)) or IMUL(CONST(c), X)   -> recurse(X, coeff * c)
-//
-// IMUL distribution over IADD mirrors tinygrad symbolic.py:236
-//   (UPat.cvar("y") * (UPat.var("x", weakint) + UPat.cvar("c")),
-//    lambda x,y,c: (y*x)+(y*c))                          # y*(x+c) -> y*x + y*c
-// which is the canonical-form rewrite the index simplifier applies.  thvm's
-// index_simplify doesn't currently push that rule, so we apply the
-// distribution lazily here while walking the symbolic address.  The conv
-// weight-grad im2col fingerprint
-//   in[a4*18432 + a1*576 + (a5+a2)*24 + (a6+a3)]
-// then decodes to coeffs {a4:18432, a1:576, a5:24, a2:24, a6:1, a3:1} with
-// the same coefficient appearing on the K-axis (a5,a6) and the M-axis
-// (a2,a3) -- i.e. the strided-im2col signature the contraction classifier
-// recognises.  Returns 1 on success, 0 on bail.
+// Add coeff * t: RANGE, CONST, IADD, OPT and IMUL by a CONST.  index_simplify
+// does not distribute IMUL over IADD (tinygrad symbolic.py:249 does), so this
+// does: (oh + kh) * W gives oh and kh one coefficient, the im2col fingerprint.
 static int udg_addr_decode_leaf(Term t, u32 coeff, UopDagAddrCoeffsView *out) {
   if (term_tag(t) == TAG_UOP) {
     u32 op = term_ext(t);
@@ -1704,18 +1226,12 @@ static int udg_addr_decode_leaf(Term t, u32 coeff, UopDagAddrCoeffsView *out) {
       return 1;
     }
     if (op == UOP_OPT) {
-      // OPT(inner, kind, k) wraps the inner subtree with a renderer hint
-      // (UPCAST / UNROLL / GROUP_REDUCE / TC / ...).  For address-coeff
-      // decoding the wrapper is transparent: the underlying RANGE leaf
-      // contributes its axis stride exactly as before.  Without this
-      // unwrap, decoding bails on every post-UPCAST address (because
-      // apply_opt_dag wraps the new inner RANGE in OPT(_, UPCAST, k)),
-      // which breaks the multi-UPCAST stride heuristic.
+      // A renderer hint, transparent here: apply_opt_dag wraps the inner
+      // RANGE of each UPCAST or UNROLL split in one.
       return udg_addr_decode_leaf(uop_opt_target(t), coeff, out);
     }
     Term inner = 0; u32 c = 0;
     if (udg_match_imul_const(t, &inner, &c)) {
-      // (coeff * c) needs to fit in u32; bail on overflow.
       u64 prod = (u64)coeff * (u64)c;
       if (prod > 0xFFFFFFFFu) return 0;
       return udg_addr_decode_leaf(inner, (u32)prod, out);
@@ -1723,32 +1239,21 @@ static int udg_addr_decode_leaf(Term t, u32 coeff, UopDagAddrCoeffsView *out) {
   }
   i32 ival = 0;
   if (udg_match_iconst_signed(t, &ival)) {
-    // CONST contributes coeff * ival to the absolute offset.
     out->offset += (i32)((i64)ival * (i64)coeff);
     return 1;
   }
-  // Unrecognized leaf (IDIV/IMOD/IWHERE for conv2d-flat); bail.
   return 0;
 }
 
-// Decode an UOP_INDEX_E.addr term into per-axis (axis_id, coeff) pairs
-// and an absolute byte offset.  Mirrors tinygrad's index.backward_slice
-// + IADD/IMUL distribution.  On bail (unrecognized leaf shape, e.g. an
-// IDIV/IMOD/IWHERE remnant from a conv2d-flat index that the simplifier
-// didn't collapse), out->ok stays 0 but out->n_axes carries whatever was
-// decoded so far.
+// Per-axis coefficients and the element offset of an INDEX_E address; out->ok
+// is 0 when some leaf, such as an IDIV, IMOD or IWHERE, does not decode.
 void uop_dag_decode_addr_coeffs(Term addr, UopDagAddrCoeffsView *out) {
   out->n_axes = 0;
   out->offset = 0;
   out->ok     = 0;
-  // Single entry point handles every shape (bare RANGE, bare CONST,
-  // IMUL(RANGE, CONST), IADD chain, IMUL(IADD, CONST) -- the last is
-  // the im2col-fingerprint case C7.1 added).
   if (udg_addr_decode_leaf(addr, 1, out)) out->ok = 1;
 }
 
-// Look up the coefficient for an axis_id in a decoded address.  Returns
-// 0 if the axis isn't referenced.
 u32 uop_dag_addr_coeff_lookup(UopDagAddrCoeffsView const *a, u32 axis_id) {
   for (u32 i = 0; i < a->n_axes; i++) {
     if (a->axis_ids[i] == axis_id) return a->coeffs[i];
@@ -1756,9 +1261,7 @@ u32 uop_dag_addr_coeff_lookup(UopDagAddrCoeffsView const *a, u32 axis_id) {
   return 0;
 }
 
-// Find the UOP_RANGE leaf in the kernel DAG with the requested axis_id
-// and return its extent (statically resolved if a literal; max upper
-// bound if a kvar).  0 if not found.
+// Static extent (a symbolic one's upper bound) of axis `want_axis_id`, or 0.
 static u32 udg_axis_extent(Term root, u32 want_axis_id) {
   if (root == 0 || term_tag(root) != TAG_UOP) return 0;
   Term stack[256];
@@ -1788,28 +1291,9 @@ static u32 udg_axis_extent(Term root, u32 want_axis_id) {
   return 0;
 }
 
-// Public entry: classify the kernel as a generalized tensor contraction
-// (M-axes, N-axes, single K-axis) and recover the batched-GEMM dispatch
-// shape.  See thvm.h for the contract.
-//
-// Strategy:
-//   1. Peel optional UOP_OPT(_, TC) wrapper from STORE.value.
-//   2. Verify STORE.value is REDUCE(MUL(INDEX_E(A, addr_a),
-//                                       INDEX_E(B, addr_b))) with
-//      A != B and kind == REDUCE_SUM.
-//   3. Decode addr_a, addr_b, addr_out via uop_dag_decode_addr_coeffs.
-//   4. Reduce axis must reference exactly ONE axis (single K), and that
-//      axis must appear in BOTH addr_a and addr_b but NOT in addr_out.
-//   5. Partition: M_axes = (addr_b minus K, must equal addr_out minus N_axes).
-//                 N_axes = (addr_a minus K, must equal addr_out minus M_axes).
-//   6. Verify the N-axis composition in addr_a (= addr_out) is contiguous
-//      with stride product N_total, matching K's stride in A == N_total.
-//   7. Identify the "batch" M-axis as the M-axis with the LARGEST stride
-//      in B, and verify its stride == K_extent * inner_M_total.
-//      Remaining M-axes (inner_M) must be contiguous in B with strides
-//      matching their composition (stride product == inner_M_total).
-//   8. Verify the output's M-axis strides match (batch outer stride =
-//      inner_M_total * N_total; inner M strides = N_total * inner stride).
+// out[M, N] = sum_K A[K, N] * B[M, K]: N axes only in A, M axes only in B, K
+// axes in both and not in the output; the M axis with the largest B stride may
+// be a batch.  Only dense f32 layouts pass (thvm.h has the sgemm call).
 int uop_dag_classify_contraction_shape(Term root,
                                        struct KernelEntry const *ke,
                                        UopDagContractionShape *out) {
@@ -1817,7 +1301,6 @@ int uop_dag_classify_contraction_shape(Term root,
   if (ke->n_inputs < 2) return 0;
   if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
 
-  // Peel optional UOP_OPT(_, TC) wrapper, structurally validate.
   Term buf_out  = heap_read(term_val(root) + 0);
   Term addr_out = heap_read(term_val(root) + 1);
   Term value    = heap_read(term_val(root) + 2);
@@ -1826,18 +1309,11 @@ int uop_dag_classify_contraction_shape(Term root,
   if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
   u32 rkind = uop_reduce_kind(reduce);
   if (rkind != REDUCE_SUM) return 0;
-  // Multi-K support: collect EVERY reduce axis_id.  Each must appear
-  // in BOTH A and B address coefficients, never in the output, and
-  // they must compose into one flat K dimension for cblas_sgemm.
-  // Mirrors tinygrad's einsum: out[M,N] = sum_{k1, k2, ...} A[K,N] * B[M,K]
-  // collapses to A[K_total, N] @ B[M, K_total].
   u32 n_K = uop_reduce_n_axes(reduce);
   if (n_K == 0 || n_K > UDG_CONTRACT_MAX_AXES) return 0;
   u32 red_axis_ids[UDG_CONTRACT_MAX_AXES];
   for (u32 i = 0; i < n_K; i++) red_axis_ids[i] = uop_reduce_axis(reduce, i);
-  u32 red_axis_id = red_axis_ids[0];   // legacy single-K alias (still used for
-                                       // single-K storage-stride checks below
-                                       // when n_K == 1).
+  u32 red_axis_id = red_axis_ids[0];
   Term mul = uop_reduce_src(reduce);
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
   Term a_idx = heap_read(term_val(mul) + 0);
@@ -1866,13 +1342,8 @@ int uop_dag_classify_contraction_shape(Term root,
   uop_dag_decode_addr_coeffs(addr_b,  &cb);
   uop_dag_decode_addr_coeffs(addr_out,&co);
   if (!ca.ok || !cb.ok || !co.ok) return 0;
-  // Any non-zero address offsets => non-contiguous storage we don't
-  // currently route.  Bail.
   if (ca.offset != 0 || cb.offset != 0 || co.offset != 0) return 0;
 
-  // Per-K-axis check: every K axis must appear in BOTH A and B coeffs,
-  // never in the output.  Collect per-axis extent + per-input coeff so
-  // we can later compose them into one flat K dimension.
   u32 K_extents[UDG_CONTRACT_MAX_AXES];
   u32 K_a_coeffs[UDG_CONTRACT_MAX_AXES];
   u32 K_b_coeffs[UDG_CONTRACT_MAX_AXES];
@@ -1891,18 +1362,11 @@ int uop_dag_classify_contraction_shape(Term root,
     K_total *= ext;
   }
   if (K_total == 0 || K_total > 0x7fffffffULL) return 0;
-  // Multi-K compose: A treats the K axes as a [K_0, K_1, ...] row-
-  // major block (descending a_coeff, smallest = the single-K innermost
-  // stride for A).  B likewise treats them as a row-major block
-  // (descending b_coeff, smallest = single-K innermost for B).  When
-  // both inputs agree on the K composition we can collapse to one
-  // flat K for cblas_sgemm without strided dispatch (since the K
-  // strides are dense within each input).
+  // Several K axes collapse into one when A and B nest them in the same order
+  // and each is dense in both.
   u32 K_in_a_single = K_a_coeffs[0];
   u32 K_in_b_single = K_b_coeffs[0];
   if (n_K > 1) {
-    // Sort indices by descending a_coeff so the row-major dense check
-    // can verify each subsequent K-coeff = prev * inner extents.
     u32 ord_a[UDG_CONTRACT_MAX_AXES];
     for (u32 i = 0; i < n_K; i++) ord_a[i] = i;
     for (u32 i = 1; i < n_K; i++) {
@@ -1912,11 +1376,6 @@ int uop_dag_classify_contraction_shape(Term root,
       }
       ord_a[j + 1] = tmp;
     }
-    // Same sort for B.  For the simple GEMM dispatch we require BOTH
-    // inputs sort K-axes in the SAME order (i.e. K axes are dense in
-    // both A and B with the same nesting).  Different sorts would
-    // require either a transpose or a strided-K dispatch (C7's
-    // strided im2col path); bail for now.
     u32 ord_b[UDG_CONTRACT_MAX_AXES];
     for (u32 i = 0; i < n_K; i++) ord_b[i] = i;
     for (u32 i = 1; i < n_K; i++) {
@@ -1927,14 +1386,8 @@ int uop_dag_classify_contraction_shape(Term root,
       ord_b[j + 1] = tmp;
     }
     for (u32 i = 0; i < n_K; i++) if (ord_a[i] != ord_b[i]) return 0;
-    // K_in_a_single (innermost K stride in A) corresponds to the LAST
-    // entry in the sorted order; ditto for B.  These will be used as
-    // K_in_a / K_in_b lookups below.
     K_in_a_single = K_a_coeffs[ord_a[n_K - 1]];
     K_in_b_single = K_b_coeffs[ord_b[n_K - 1]];
-    // Verify the row-major composition: for descending order,
-    // coeff[i] = coeff[i+1] * extent[i+1] (i.e. each outer step covers
-    // the product of all inner K extents at its inner side).
     u64 acc_a = K_in_a_single;
     u64 acc_b = K_in_b_single;
     for (i32 i = (i32)n_K - 2; i >= 0; i--) {
@@ -1944,18 +1397,12 @@ int uop_dag_classify_contraction_shape(Term root,
       if (K_b_coeffs[ord_b[i]] != (u32)acc_b) return 0;
     }
   }
-  // Legacy aliases for single-K storage-stride checks below.  After
-  // multi-K compose, K_in_a / K_in_b refer to the COMPOSITE K's
-  // innermost (smallest) stride -- equivalent to a single-K of size
-  // K_total at that stride.
+  // From here K is one axis of extent K_total at the innermost K stride.
   u32 K_in_a = K_in_a_single;
   u32 K_in_b = K_in_b_single;
   u32 K_extent = (u32)K_total;
 
-  // Output axes: every output axis must appear in EITHER A or B (not
-  // both) -- if in A only it's an N-axis; if in B only it's an M-axis.
-  // Build M_axes (axis_id, extent, B_coeff, OUT_coeff) and N_axes
-  // (axis_id, extent, A_coeff, OUT_coeff).
+  // An output axis read by A only is an N axis, by B only an M axis.
   typedef struct { u32 axis_id; u32 extent; u32 b_coeff; u32 out_coeff; } UdgMAxis;
   typedef struct { u32 axis_id; u32 extent; u32 a_coeff; u32 out_coeff; } UdgNAxis;
   UdgMAxis M_axes[UDG_CONTRACT_MAX_AXES];
@@ -1984,16 +1431,11 @@ int uop_dag_classify_contraction_shape(Term root,
       M_axes[n_M].out_coeff = oc;
       n_M++;
     } else {
-      // Either in both inputs (would-be K, but already excluded), or in
-      // neither, or in output only -- not a clean contraction.
       return 0;
     }
   }
   if (n_M == 0 || n_N == 0) return 0;
 
-  // Every axis referenced by A must be one of the K_axes or one of the
-  // N_axes, and every axis referenced by B must be K or one of the
-  // M_axes.  Guarantees we've found the FULL contraction shape.
   for (u32 i = 0; i < ca.n_axes; i++) {
     u32 aid = ca.axis_ids[i];
     int is_K = 0;
@@ -2013,17 +1455,13 @@ int uop_dag_classify_contraction_shape(Term root,
     if (!found) return 0;
   }
 
-  // Compute N_total = product of N_axes extents.
   u64 N_total = 1;
   for (u32 i = 0; i < n_N; i++) N_total *= N_axes[i].extent;
   if (N_total == 0 || N_total > 0x7fffffffULL) return 0;
 
-  // A operand: must be a clean (K, N) row-major slice.
-  //   Sort N_axes by descending a_coeff.  Expected layout: largest
-  //   a_coeff first, each subsequent coeff = prev_coeff / prev_extent,
-  //   smallest coeff == 1, and K_in_a == N_total.
+  // A is (K, N) row-major: K's stride is N_total, and the N axes are dense with
+  // the same strides in A and the output.
   if ((u32)N_total != K_in_a) return 0;
-  // Sort N_axes by descending a_coeff (insertion sort, n_N tiny).
   for (u32 i = 1; i < n_N; i++) {
     UdgNAxis tmp = N_axes[i];
     i32 j = (i32)i - 1;
@@ -2033,24 +1471,18 @@ int uop_dag_classify_contraction_shape(Term root,
     }
     N_axes[j + 1] = tmp;
   }
-  // For sorted N_axes (descending stride), stride[n-1] == 1 and
-  // stride[i] * extent[i] == stride[i-1], with stride[0] * extent[0]
-  // == N_total.  Output address's coefficient for each N-axis must
-  // match the A operand's coefficient (since N-stride is identical in
-  // both A and output for a contiguous (M, N) output layout).
   {
     u64 acc = 1;
     for (i32 i = (i32)n_N - 1; i >= 0; i--) {
       if (N_axes[i].a_coeff != (u32)acc) return 0;
-      // Output address must match A's N-coefficient.
       if (N_axes[i].out_coeff != (u32)acc) return 0;
       acc *= N_axes[i].extent;
     }
     if (acc != N_total) return 0;
   }
 
-  // M operand (B): identify batch axis as the M-axis with the LARGEST
-  // b_coeff.  Sort M_axes by descending b_coeff.
+  // B is (batch, K, inner_M) row-major; with several M axes the one with the
+  // largest B stride is the batch.
   for (u32 i = 1; i < n_M; i++) {
     UdgMAxis tmp = M_axes[i];
     i32 j = (i32)i - 1;
@@ -2060,39 +1492,24 @@ int uop_dag_classify_contraction_shape(Term root,
     }
     M_axes[j + 1] = tmp;
   }
-  // For the simple batched-GEMM dispatch, decompose M as (batch =
-  // M_axes[0], inner_M = M_axes[1..n_M-1]).  Inner M axes must be
-  // contiguous in B with stride = product of extents to the right
-  // ending at 1.  Batch axis must have b_coeff = K_extent * inner_M_total.
-  // (When n_M == 1, batch == 1 and inner_M == M_axes[0].)
   u64 inner_M_total = 1;
   u32 batch         = 1;
   if (n_M == 1) {
-    // Single M-axis: no batching needed (treat all of M as inner_M).
     inner_M_total = M_axes[0].extent;
     batch         = 1;
-    // For the inner_M block to be contiguous in B, b_coeff must equal 1,
-    // and K_in_b must equal inner_M_total (K stride == inner_M_total)
-    // OR b_coeff == K_extent and K_in_b == 1 (would be transposed; not
-    // currently routed -- bail).
+    // A transposed B (M stride K, K stride 1) is not routed.
     if (M_axes[0].b_coeff != 1) return 0;
     if (K_in_b != inner_M_total) return 0;
   } else {
-    // batch = M_axes[0].extent, inner_M = remaining.
     batch = M_axes[0].extent;
     for (u32 i = 1; i < n_M; i++) inner_M_total *= M_axes[i].extent;
-    // Inner M axes contig in B.
     u64 acc = 1;
     for (i32 i = (i32)n_M - 1; i >= 1; i--) {
       if (M_axes[i].b_coeff != (u32)acc) return 0;
       acc *= M_axes[i].extent;
     }
     if (acc != inner_M_total) return 0;
-    // K's stride in B must equal inner_M_total (K immediately wraps
-    // inner_M in B's memory).
     if (K_in_b != inner_M_total) return 0;
-    // Batch axis's stride in B must equal K_extent * inner_M_total
-    // (batch wraps the [K, inner_M] block).
     u64 expect_batch_stride_b = (u64)K_extent * inner_M_total;
     if (M_axes[0].b_coeff != (u32)expect_batch_stride_b) return 0;
   }
@@ -2100,14 +1517,7 @@ int uop_dag_classify_contraction_shape(Term root,
   u64 M_total = (u64)batch * inner_M_total;
   if (M_total > 0x7fffffffULL) return 0;
 
-  // Verify OUTPUT M-axis strides.  M_axes is sorted by descending
-  // b_coeff which equals descending out_coeff (for a contiguous output
-  // layout where M comes before N).  Output layout: [batch, inner_M,
-  // N], strides [inner_M_total*N_total, N_total*(...), N_total].
-  // For n_M == 1: out_coeff of M_axes[0] should equal N_total.
-  // For n_M > 1: batch out_coeff = inner_M_total*N_total; subsequent
-  // inner-M out_coeff = N_total * (prefix of inner-M extents to the
-  // right).
+  // The output is (batch, inner_M, N) row-major.
   {
     u64 acc = N_total;
     for (i32 i = (i32)n_M - 1; i >= 0; i--) {
@@ -2116,13 +1526,11 @@ int uop_dag_classify_contraction_shape(Term root,
     }
   }
 
-  // Verify per-buffer storage sizes.
   u64 a_needed = (u64)K_extent * N_total;
   u64 b_needed = (u64)batch * K_extent * inner_M_total;
   u64 c_needed = (u64)batch * inner_M_total * N_total;
   (void)c_needed;
   if (uop_buffer_ndim(buf_a) == 0 || uop_buffer_ndim(buf_b) == 0) return 0;
-  // Storage-size cross-check on buffer dims:
   u64 a_buf_prod = 1, b_buf_prod = 1;
   for (u32 d = 0; d < uop_buffer_ndim(buf_a); d++)
     a_buf_prod *= uop_buffer_dim(buf_a, d);
@@ -2131,9 +1539,8 @@ int uop_dag_classify_contraction_shape(Term root,
   if (a_buf_prod < a_needed) return 0;
   if (b_buf_prod < b_needed) return 0;
 
-  // Uniform dtype check (matches uop_dag_classify_matmul_shape).
   u32 dt = uop_buffer_dtype(buf_out);
-  if (dt != DT_FP32) return 0;       // only fp32 routed for now
+  if (dt != DT_FP32) return 0;
   if (uop_buffer_dtype(buf_a) != dt) return 0;
   if (uop_buffer_dtype(buf_b) != dt) return 0;
 
@@ -2154,22 +1561,16 @@ int uop_dag_classify_contraction_shape(Term root,
   return 1;
 }
 
-// === TRUE batched gemm classifier (batch axis in A AND B AND output) =====
-// A{batch,M,K} . B{batch,K,N} -> C{batch,M,N}: each batch an independent gemm.
-// The bmm in TMultiHeadAttention's batched path is the canonical instance
-// (batch = nHeads).  Operands are PERMUTED views, so ld/trans/batch-stride are
-// recovered straight from the address coefficients -- NO canonical-layout
-// validation (which uop_dag_classify_matmul_shape applies and which would
-// reject a permuted operand).  Declines whenever anything is non-affine or
-// non-unit-inner, leaving the kernel to the (correct) codegen path.
+// C{batch,M,N} = A{batch,M,K} . B{batch,K,N}, the batch axis in all three
+// (attention's per-head bmm).  Operands may be permuted views, so ld, trans and
+// batch strides come from the address coefficients, with no layout check.
 int uop_dag_classify_batched_gemm(Term root, struct KernelEntry const *ke,
                                   UopDagBatchedGemmShape *out) {
   if (root == 0 || ke == NULL || out == NULL) return 0;
   if (ke->n_inputs < 2) return 0;
   if (term_tag(root) != TAG_UOP || term_ext(root) != UOP_STORE) return 0;
-  // Structural validation done INLINE -- udg_classify_matmul_store enforces
-  // exactly 2 range axes per operand (via uop_classify_matmul), which rejects
-  // the 3-axis {batch,M,K} batched operand.
+  // Checked here, not by udg_classify_matmul_store: uop_classify_matmul rejects
+  // an operand that reads three axes.
   Term reduce = udg_peel_tc_opt(heap_read(term_val(root) + 2));
   if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) return 0;
   if (uop_reduce_kind(reduce) != REDUCE_SUM) return 0;
@@ -2201,12 +1602,10 @@ int uop_dag_classify_batched_gemm(Term root, struct KernelEntry const *ke,
   uop_dag_decode_addr_coeffs(heap_read(term_val(root)  + 1), &co);
   if (!ca.ok || !cb.ok || !co.ok) return 0;
   if (ca.offset != 0 || cb.offset != 0 || co.offset != 0) return 0;
-  // K in A and B, never in the output.
   if (uop_dag_addr_coeff_lookup(&ca, red_axis) == 0) return 0;
   if (uop_dag_addr_coeff_lookup(&cb, red_axis) == 0) return 0;
   if (uop_dag_addr_coeff_lookup(&co, red_axis) != 0) return 0;
-  // Output axes: in A only -> M; in B only -> N; in BOTH -> batch.  Require
-  // exactly one of each (the simple single-batch gemm).
+  // Output axes: A only is M, B only is N, both is the batch; one of each.
   u32 m_axis = 0, n_axis = 0, batch_axis = 0, n_M = 0, n_N = 0, n_batch = 0;
   for (u32 i = 0; i < co.n_axes; i++) {
     u32 aid = co.axis_ids[i];
@@ -2218,7 +1617,6 @@ int uop_dag_classify_batched_gemm(Term root, struct KernelEntry const *ke,
     else return 0;
   }
   if (n_M != 1 || n_N != 1 || n_batch != 1) return 0;
-  // Every A axis must be K/M/batch; every B axis K/N/batch (full shape).
   for (u32 i = 0; i < ca.n_axes; i++) {
     u32 aid = ca.axis_ids[i];
     if (aid != red_axis && aid != m_axis && aid != batch_axis) return 0;
@@ -2231,8 +1629,7 @@ int uop_dag_classify_batched_gemm(Term root, struct KernelEntry const *ke,
   u32 b_K = uop_dag_addr_coeff_lookup(&cb, red_axis), b_N = uop_dag_addr_coeff_lookup(&cb, n_axis);
   u32 c_M = uop_dag_addr_coeff_lookup(&co, m_axis),   c_N = uop_dag_addr_coeff_lookup(&co, n_axis);
   if (a_K == 0 || a_M == 0 || b_K == 0 || b_N == 0 || c_M == 0 || c_N == 0) return 0;
-  // ld/trans from the unit-stride (contiguous inner) axis -- mirrors
-  // uop_dag_classify_matmul_shape's convention WITHOUT its canonical check.
+  // ld and trans from whichever of an operand's two axes has unit stride.
   u32 transA, ldA;
   if      (a_K == 1) { transA = 0; ldA = a_M; }
   else if (a_M == 1) { transA = 1; ldA = a_K; }
@@ -2241,7 +1638,7 @@ int uop_dag_classify_batched_gemm(Term root, struct KernelEntry const *ke,
   if      (b_N == 1) { transB = 0; ldB = b_K; }
   else if (b_K == 1) { transB = 1; ldB = b_N; }
   else return 0;
-  if (c_N != 1) return 0;            // output must be row-contiguous {..,M,N}
+  if (c_N != 1) return 0;
   u32 ldC = c_M;
   u32 M = udg_axis_extent(root, m_axis);
   u32 N = udg_axis_extent(root, n_axis);
@@ -2266,28 +1663,9 @@ int uop_dag_classify_batched_gemm(Term root, struct KernelEntry const *ke,
   return 1;
 }
 
-// === C7.2: im2col conv-bwd weight-grad contraction classifier ===========
-//
-// Recognises the conv-backward weight-grad pattern
-//
-//   dW[Cout, Cin, KH, KW] = sum_{B, OH, OW}
-//                            dY[B, Cout, OH, OW] * X[B, Cin, OH+KH, OW+KW]
-//
-// where C7.1's distributing decoder splits the IMUL(IADD(OH, KH), W) +
-// IADD(OW, KW) arms so the X address coefficients are
-//   {B: Cin*H*W, Cin: H*W, OH: W, KH: W, OW: 1, KW: 1}
-// (OH/KH and OW/KW share strides -- the im2col fingerprint).  Output
-// axes Cout and Cin are clean (B-only or A-only); KH, KW each share an
-// A-stride with one of the K-axes (OH, OW), so they're reclassified as
-// "patch-M" axes.  The dispatch then materialises a per-batch im2col
-// patches buffer and calls cblas_sgemm once per B.
-//
-// Reference: tinygrad lowers conv via `_pool` (mixin/movement.py:569),
-// which expresses the patches as a ShapeTracker view; their codegen
-// either inlines it or materialises a view.  thvm doesn't yet have a
-// matching _pool lowering, so this classifier-plus-dispatch combo is
-// the equivalent shortcut: detect the same pattern in the lifted DAG
-// and route directly to cblas_sgemm.
+// im2col conv contraction (shapes in thvm.h): the weight gradient or the forward
+// conv, whose KH and KW axes share X strides with OH and OW; blas.c gathers the
+// patches and runs one sgemm per batch.  tinygrad: _pool (mixin/movement.py:598).
 int uop_dag_classify_im2col_contraction(Term root,
                                         struct KernelEntry const *ke,
                                         UopDagIm2colShape *out) {
@@ -2304,9 +1682,6 @@ int uop_dag_classify_im2col_contraction(Term root,
   if (term_tag(reduce) != TAG_UOP || term_ext(reduce) != UOP_REDUCE) IM2COL_REJ("not-reduce");
   if (uop_reduce_kind(reduce) != REDUCE_SUM) IM2COL_REJ("not-sum");
 
-  // Multi-K reduce required: exactly 3 axes for (B, OH, OW) -- otherwise
-  // the im2col fingerprint can't form.  Single-K conv-bwd is handled by
-  // the regular contraction classifier.
   u32 n_K = uop_reduce_n_axes(reduce);
   if (n_K < 2 || n_K > UDG_CONTRACT_MAX_AXES) IM2COL_REJ("n_K-bounds");
   u32 red_axis_ids[UDG_CONTRACT_MAX_AXES];
@@ -2341,19 +1716,8 @@ int uop_dag_classify_im2col_contraction(Term root,
   if (!ca.ok || !cb.ok || !co.ok) IM2COL_REJ("addr-decode");
   if (ca.offset != 0 || cb.offset != 0 || co.offset != 0) IM2COL_REJ("addr-offset");
 
-  // For each K-axis (reduce), check whether its A-coefficient is shared
-  // with some output axis (im2col patch fingerprint).  Per K-axis we
-  // record (a-coeff, b-coeff, extent).  The im2col fingerprint requires
-  // that EVERY non-batch K-axis pair with a patch-M (same A-coeff as an
-  // output axis); the unpaired K-axis is the outer batch K (B).
-  //
-  // For the conv-wgrad case:
-  //   K = (B, OH, OW)   patch-M = (KH paired with OH; KW paired with OW)
-  // K-axis ordering (sorted by A-coeff descending) determines the
-  // batch/row/col splits:
-  //   K_outer = sorted_K[0] (B, no patch pair)
-  //   K_row   = sorted_K[1] (OH, paired with KH)
-  //   K_col   = sorted_K[2] (OW, paired with KW; innermost)
+  // An output axis with a K axis's A stride is its patch partner.  Sorted by A
+  // stride, K is (outer, row, col): row and col are paired, outer is not.
   typedef struct {
     u32 aid; u32 a_coeff; u32 b_coeff; u32 extent;
     u32 patch_aid; u32 patch_extent; u32 patch_out_coeff;
@@ -2366,17 +1730,11 @@ int uop_dag_classify_im2col_contraction(Term root,
     K[i].b_coeff = uop_dag_addr_coeff_lookup(&cb, K[i].aid);
     K[i].extent  = udg_axis_extent(root, K[i].aid);
     if (K[i].a_coeff == 0 || K[i].b_coeff == 0 || K[i].extent == 0) IM2COL_REJ("K-coeff-0");
-    // K-axis must not be a direct output axis.
     if (uop_dag_addr_coeff_lookup(&co, K[i].aid) != 0) IM2COL_REJ("K-also-out");
     K[i].has_patch = 0;
   }
 
-  // Walk output axes.  Each output axis is one of:
-  //   - patch-M: a-coeff is non-zero AND matches some K-axis's a-coeff
-  //     AND b-coeff is 0 (output axis must not appear in B for patch).
-  //   - clean N (non-patch): a-coeff is non-zero, doesn't match any K
-  //     a-coeff, b-coeff is 0.
-  //   - clean M: b-coeff is non-zero, a-coeff is 0.
+  // Output axes: read by A only, a patch axis or else an N axis; by B only, M.
   typedef struct { u32 aid; u32 extent; u32 a_coeff; u32 out_coeff; } NAxisRec;
   typedef struct { u32 aid; u32 extent; u32 b_coeff; u32 out_coeff; } MAxisRec;
   NAxisRec N_axes[UDG_CONTRACT_MAX_AXES];
@@ -2391,11 +1749,9 @@ int uop_dag_classify_im2col_contraction(Term root,
     u32 ext = udg_axis_extent(root, aid);
     if (ext == 0) IM2COL_REJ("oc-ext-0");
     if (ac != 0 && bc == 0) {
-      // Either patch-M or clean N.  Check stride-share with any K-axis.
       int paired = 0;
       for (u32 j = 0; j < n_K; j++) {
         if (!K[j].has_patch && K[j].a_coeff == ac) {
-          // Patch-M: bind to this K-axis.
           K[j].has_patch       = 1;
           K[j].patch_aid       = aid;
           K[j].patch_extent    = ext;
@@ -2421,18 +1777,15 @@ int uop_dag_classify_im2col_contraction(Term root,
       M_axes[n_M].out_coeff = oc;
       n_M++;
     } else {
-      IM2COL_REJ("ac-bc-both-or-neither");  // not a clean im2col contraction
+      IM2COL_REJ("ac-bc-both-or-neither");
     }
   }
-  // Need at least one patch-M and one clean M for the dispatch to be
-  // useful.  (Pure clean-N case is the regular contraction.)
+  // No patch axis: the plain contraction's case.
   if (n_patch == 0) IM2COL_REJ("n_patch=0");
   if (n_M != 1) IM2COL_REJ("n_M!=1");
   if (n_N > 1) IM2COL_REJ("n_N>1");
   if (n_patch > 2) IM2COL_REJ("n_patch>2");
 
-  // Sort K by descending a_coeff so K[0] is the outermost (batch), K[n_K-1]
-  // innermost.  Use insertion sort (n_K tiny, <=4).
   for (u32 i = 1; i < n_K; i++) {
     KEntry tmp = K[i];
     i32 j = (i32)i - 1;
@@ -2441,35 +1794,15 @@ int uop_dag_classify_im2col_contraction(Term root,
     }
     K[j+1] = tmp;
   }
-  // Innermost K-axis (K_col) must have a-coeff == 1.
   if (K[n_K-1].a_coeff != 1) IM2COL_REJ("K_col.a!=1");
-  // Outermost (K_outer) and middle (K_row) when n_K==3 must be unpaired
-  // (K_outer) and paired (K_row).  In C7.2 scope: n_K must be 3 (B, OH, OW).
   if (n_K != 3) IM2COL_REJ("n_K!=3");
   if (K[0].has_patch != 0) IM2COL_REJ("K0-paired");
   if (K[1].has_patch != 1) IM2COL_REJ("K1-unpaired");
   if (K[2].has_patch != 1) IM2COL_REJ("K2-unpaired");
 
-  // ----- BWD vs FWD discriminator + canonical extent mapping -----
-  //
-  // The two duals share the n_K=3, n_patch=2, n_M=1 structural shape with
-  // OH<->KH and OW<->KW stride-shared (the im2col fingerprint).  They
-  // differ in which member of each pair is the K-axis and which is the
-  // patch (output) axis:
-  //
-  //   BWD: K = (B, OH, OW)            patches = (KH paired with OH,
-  //                                              KW paired with OW)
-  //        M (Cout) lives in dY: b_coeff = OH*OW.
-  //        K_outer (B) is ABOVE M in dY: b_coeff = M.ext * OH * OW.
-  //
-  //   FWD: K = (Cin, KH, KW)          patches = (OH paired with KH,
-  //                                              OW paired with KW)
-  //        M (Cout) lives in W:  b_coeff = Cin*KH*KW.
-  //        K_outer (Cin) is INSIDE M in W: b_coeff = KH*KW.
-  //
-  // Discriminator: M.b_coeff selects direction; from there OH/OW/KH/KW
-  // map onto K[1..2] vs patches consistently across the rest of the
-  // function.
+  // BWD has K = (B, OH, OW), patch axes KH and KW, and Cout at dY stride OH*OW;
+  // FWD has K = (Cin, KH, KW), patch axes OH and OW, and Cout at W stride
+  // Cin*KH*KW.  Cout's stride in operand B picks the direction.
   u32 K_inner = K[2].extent;             // sort-order K[2] = KW (FWD) / OW (BWD)
   u32 K_middle = K[1].extent;            // sort-order K[1] = KH (FWD) / OH (BWD)
   u32 K_outer_ext = K[0].extent;
@@ -2490,9 +1823,7 @@ int uop_dag_classify_im2col_contraction(Term root,
     IM2COL_REJ("M.b-no-match");
   }
 
-  // Canonical extent mapping: OH/OW are always output-pixel rows/cols,
-  // KH/KW are always kernel-window rows/cols, regardless of direction.
-  // In FWD K[1..2] hold KH/KW and patches hold OH/OW; in BWD it's flipped.
+  // Extents by role: OH, OW are output pixels and KH, KW the kernel window.
   u32 OH_ext, OW_ext, KH_ext, KW_ext;
   if (forward_conv) {
     OH_ext = K[1].patch_extent;  OW_ext = K[2].patch_extent;
@@ -2502,9 +1833,8 @@ int uop_dag_classify_im2col_contraction(Term root,
     KH_ext = K[1].patch_extent;  KW_ext = K[2].patch_extent;
   }
 
-  // Outer batch role + Cin role.  In BWD the K_outer K-axis IS the batch
-  // (B); in FWD the clean-N N-axis IS the batch and K_outer plays Cin.
-  // Either way, X_Cin_stride = H*W and X_outer_stride = N_outer * H * W.
+  // BWD: K_outer is the batch and the N axis (if any) Cin; FWD: the N axis is
+  // the batch and K_outer Cin.
   u32 X_Cin_stride;       // X stride per Cin step (= H*W)
   u32 N_extent_used;      // Cin extent (1 if no explicit Cin axis)
   u32 X_outer_stride;     // X stride per outer-batch step (= Cin*H*W)
@@ -2527,7 +1857,6 @@ int uop_dag_classify_im2col_contraction(Term root,
   }
   if (X_Cin_stride == 0 || X_outer_stride == 0) IM2COL_REJ("X-stride-0");
 
-  // Verify X layout: width=W, height=H, X_Cin = H*W, X_outer = Cin*H*W.
   u32 X_W = K[1].a_coeff;          // K_middle a-stride = W
   if (X_W == 0) IM2COL_REJ("X_W=0");
   if (X_Cin_stride % X_W != 0) IM2COL_REJ("X_Cin%X_W");
@@ -2535,20 +1864,12 @@ int uop_dag_classify_im2col_contraction(Term root,
   if (X_H == 0) IM2COL_REJ("X_H=0");
   if (X_outer_stride % X_Cin_stride != 0) IM2COL_REJ("X_outer%X_Cin");
   if (X_outer_stride / X_Cin_stride != N_extent_used) IM2COL_REJ("X_outer/X_Cin!=N");
-  // Patch fits inside X: OH + KH <= X_H + 1, OW + KW <= X_W + 1.
   if (OH_ext + KH_ext > X_H + 1) IM2COL_REJ("OH+KH>X_H+1");
   if (OW_ext + KW_ext > X_W + 1) IM2COL_REJ("OW+KW>X_W+1");
 
-  // Verify output strides.
-  //   BWD: dW is (Cout, Cin, KH, KW) flat -- M.oc = N_total = Cin*KH*KW,
-  //        Cin.oc = KH*KW, KH.oc = KW, KW.oc = 1.  (Cin axis is absent
-  //        when n_N==0 and Cout.oc collapses to KH*KW.)
-  //   FWD: out is (B, Cout, OH, OW) flat -- B.oc = Cout*OH*OW,
-  //        Cout.oc = OH*OW, OH.oc = OW, OW.oc = 1.
-  u64 N_total = (u64)N_extent_used * KH_ext * KW_ext;     // sgemm-N in BWD,
-                                                          // sgemm-K in FWD
-  u64 K_pixels = (u64)OH_ext * OW_ext;                    // sgemm-K in BWD,
-                                                          // sgemm-N in FWD
+  // Row-major output: BWD dW (Cout, Cin, KH, KW), FWD out (B, Cout, OH, OW).
+  u64 N_total = (u64)N_extent_used * KH_ext * KW_ext;     // sgemm N in BWD, K in FWD
+  u64 K_pixels = (u64)OH_ext * OW_ext;                    // sgemm K in BWD, N in FWD
   if (N_total == 0 || N_total > 0x7fffffffULL) IM2COL_REJ("N_total-bounds");
   if (forward_conv) {
     if (M_axes[0].out_coeff != (u32)K_pixels)                  IM2COL_REJ("fwd:M.oc");
@@ -2564,9 +1885,7 @@ int uop_dag_classify_im2col_contraction(Term root,
     if (K[2].patch_out_coeff != 1)                             IM2COL_REJ("bwd:KW.oc");
   }
 
-  // Verify per-buffer storage sizes.  X is always (N_outer, Cin, H*W); the
-  // direction-dependent operand is dY (BWD) vs W (FWD), and the output is
-  // dW (BWD, no batch dim) vs out (FWD, has batch dim).
+  // A is X (N_outer, Cin, H*W); B is dY (BWD) or W (FWD).
   u64 a_need = (u64)N_outer_extent * X_Cin_stride;
   u64 b_need = forward_conv ? (u64)M_axes[0].extent * N_total
                             : (u64)N_outer_extent * M_axes[0].extent * K_pixels;
@@ -2577,17 +1896,12 @@ int uop_dag_classify_im2col_contraction(Term root,
   if (a_buf_prod < a_need) IM2COL_REJ("a-buf-too-small");
   if (b_buf_prod < b_need) IM2COL_REJ("b-buf-too-small");
 
-  // Uniform dtype check.
   u32 dt = uop_buffer_dtype(buf_out);
   if (dt != DT_FP32) IM2COL_REJ("dt!=fp32");
   if (uop_buffer_dtype(buf_a) != dt) IM2COL_REJ("a-dt");
   if (uop_buffer_dtype(buf_b) != dt) IM2COL_REJ("b-dt");
 
-  // Populate the shape struct with semantic OH/OW/KH/KW extents (not
-  // sort-order K[0..2].extent) so the dispatcher's gather + sgemm logic
-  // is identical across BWD and FWD.  In BWD, OH/OW are K-axes and KH/KW
-  // are patches; in FWD it's reversed -- but the gather and matmul still
-  // see "OH = output-pixel rows" and "KH = kernel-window rows".
+  // Role extents, not sort order, so one dispatcher serves BWD and FWD.
   out->dtype              = dt;
   out->a_input            = a_input;
   out->b_input            = b_input;
@@ -2619,11 +1933,8 @@ int uop_dag_classify_im2col_contraction(Term root,
 #undef IM2COL_REJ
 }
 
-// Enumerate every distinct UOP_INDEX_E.addr term reachable from `root`
-// (dedup by Term identity).  Writes up to `cap` addresses to out_addrs.
-// Returns the count.  The caller decodes each via
-// uop_dag_decode_addr_coeffs.  Mirrors tinygrad's Scheduler.bufs (the
-// reversed list of Ops.INDEX nodes the heuristic iterates).
+// The distinct INDEX_E addresses under `root`, at most `cap`: the counterpart of
+// tinygrad's Scheduler.bufs (codegen/opt/postrange.py:250).
 u32 uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap) {
   if (root == 0 || term_tag(root) != TAG_UOP || out_addrs == NULL || cap == 0) {
     return 0;
@@ -2641,8 +1952,7 @@ u32 uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap) {
       int seen = 0;
       for (u32 i = 0; i < n; i++) if (out_addrs[i] == addr) { seen = 1; break; }
       if (!seen && n < cap) out_addrs[n++] = addr;
-      // Still descend into INDEX_E's children (BUFFER + addr subtree)
-      // in case nested INDEX_E live inside the addr (unlikely but cheap).
+      // Keep descending: an address may hold a nested INDEX_E.
     }
     if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID || op == UOP_RANGE) {
       continue;
