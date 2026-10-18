@@ -15,10 +15,13 @@ With[{checkout = Environment["PACLETPAGE_CHECKOUT"]},
 Needs["WolframInstitute`PacletPage`"];
 
 (* Pages built without evaluating their examples: their code and the `<!-- => -->` hints are shown
-   as written.  A second TAtpTrainScorer or TNetTrain in one kernel dies inside a JIT-compiled CPU
-   tensor kernel (docs/plans/atp_heap_leak.md, "Poison 3"), and the pages TAtpCpDataset and Train
-   already train during the build, so these two stay unevaluated until that crash is fixed. *)
-$unevaluatedPages = {"AtpMethods.md", "TAtpTrainScorer.md"};
+   as written.
+   - AtpMethods.md and TAtpTrainScorer.md: a second TAtpTrainScorer or TNetTrain in one kernel dies
+     inside a JIT-compiled CPU tensor kernel (docs/plans/atp_heap_leak.md, "Poison 3").
+   - Train.md: its training example aborts the kernel, fresh or not, with "thvm fatal: fired kernel
+     kid=96, which the kernel GC stripped (its inputs were freed)".
+   Each comes off this list when its crash is fixed. *)
+$unevaluatedPages = {"AtpMethods.md", "TAtpTrainScorer.md", "Train.md"};
 
 (* A symbol page's or the guide's sections share one context, as the pages were written; tutorials
    and overviews do by default.  THVMLink`ATP` loads Wolfram`Parser`, so the examples run against
@@ -36,15 +39,31 @@ $documentationOptions = {
    the same commit.  Debug output the toolchains leave beside them stays out of the archive. *)
 $resourceOptions = {"Exclude" -> {"*.dSYM", "*.dSYM/*", "*.pdb", "*.lib", "*.exp", "*.DS_Store", "docs/*", "Tests/*"}};
 
-(* Every page but the unevaluated ones, with their examples evaluated, then those, without; both
-   into the same Documentation/English tree and the same cache. *)
-buildDocumentation[opts___] := Module[{all, pinned, evaluated, unevaluated},
+(* Pages whose examples launch parallel kernels of their own (TFindFiniteModels, and the
+   counterexample and TPTP searches built on it): they convert in this kernel, since parallel
+   computations cannot nest in the parallel kernel that would convert them. *)
+$sequentialPages = {"TFindFiniteModels.md", "Disproof.md", "TPTPImport.md"};
+
+(* The pages in three groups, into the same Documentation/English tree and the same cache: most on
+   parallel kernels, the sequential ones in this kernel, and the unevaluated ones without their
+   examples. The definition notebook is built with the first group. *)
+buildDocumentation[opts___] := Module[{all, groupOf, groups, results},
     all = Sort @ FileNames["*.md", FileNameJoin[{$pacletDirectory, "docs"}], Infinity];
-    pinned = Select[all, MemberQ[$unevaluatedPages, FileNameTake[#]] &];
-    evaluated = BuildPacletDocumentation[$pacletDirectory, opts, "Files" -> Complement[all, pinned], Sequence @@ $documentationOptions];
-    If[ ! AssociationQ[evaluated] || pinned === {}, Return[evaluated, Module]];
-    unevaluated = BuildPacletDocumentation[$pacletDirectory, opts, "Files" -> pinned, "Definition" -> None,
-        "ConverterOptions" -> {"Evaluate" -> False}, Sequence @@ $documentationOptions];
-    If[ ! AssociationQ[unevaluated], Return[$Failed, Module]];
-    Merge[{evaluated, unevaluated}, Replace[{{a_List, b_List} :> Join[a, b], {a_Association, b_Association} :> Join[a, b], {a_, ___} :> a}]]
+    groupOf[file_] := Which[
+        MemberQ[$unevaluatedPages, FileNameTake[file]], "Unevaluated",
+        MemberQ[$sequentialPages, FileNameTake[file]], "Sequential",
+        True, "Parallel"];
+    groups = {
+        {"Parallel", {}},
+        {"Sequential", {"Parallel" -> False, "Definition" -> None}},
+        {"Unevaluated", {"ConverterOptions" -> {"Evaluate" -> False}, "Definition" -> None}}
+    };
+    results = Map[
+        Function[{group}, With[{files = Select[all, groupOf[#] === First[group] &]},
+            If[ files === {}, Nothing,
+                Replace[
+                    BuildPacletDocumentation[$pacletDirectory, opts, "Files" -> files, Sequence @@ Last[group], Sequence @@ $documentationOptions],
+                    Except[_Association] :> Return[$Failed, Module]]]]],
+        groups];
+    Merge[results, Replace[{{l__List} :> Join[l], {a__Association} :> Join[a], {a_, ___} :> a}]]
 ]
