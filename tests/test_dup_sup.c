@@ -25,13 +25,20 @@ static u64 build_dup(Term body) {
   return loc;
 }
 
+// A LAM whose body is ERA; heap loc 0 is never a node.
+static Term build_lam(void) {
+  u64 loc = heap_alloc(1);
+  heap_set(loc, term_new(0, TAG_ERA, 0, 0));
+  return term_new(0, TAG_LAM, 0, loc);
+}
+
 int main(void) {
   thvm_init();
 
   TEST_BEGIN("dup-sup/same-label-annihilate-dp0");
   {
     Term era = term_new(0, TAG_ERA, 0, 0);
-    Term lam = term_new(0, TAG_LAM, 0, 0);
+    Term lam = build_lam();
     Term sup = build_sup(7, era, lam);
     u64  dup = build_dup(sup);
     Term dp0 = term_new(0, TAG_DP0, 7, dup);
@@ -46,7 +53,7 @@ int main(void) {
     // After dp0 fires DUP-SUP, the dp1 cell should hold the LAM with
     // the SUB flag set so a subsequent dp1 entry picks it up.
     Term era = term_new(0, TAG_ERA, 0, 0);
-    Term lam = term_new(0, TAG_LAM, 0, 0);
+    Term lam = build_lam();
     Term sup = build_sup(7, era, lam);
     u64  dup = build_dup(sup);
     Term dp0 = term_new(0, TAG_DP0, 7, dup);

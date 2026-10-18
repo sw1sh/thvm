@@ -6,13 +6,20 @@
 #include "../src/thvm.c"
 #include "test.h"
 
+// A LAM whose body is ERA; heap loc 0 is never a node.
+static Term build_lam(void) {
+  u64 loc = heap_alloc(1);
+  heap_set(loc, term_new(0, TAG_ERA, 0, 0));
+  return term_new(0, TAG_LAM, 0, loc);
+}
+
 int main(void) {
   thvm_init();
 
   TEST_BEGIN("era/app-era-yields-era");
   {
     Term era = term_new(0, TAG_ERA, 0, 0);
-    Term arg = term_new(0, TAG_LAM, 0, 0);
+    Term arg = build_lam();
     u64  loc = heap_alloc(2);
     heap_set(loc + 0, era);
     heap_set(loc + 1, arg);

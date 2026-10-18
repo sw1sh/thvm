@@ -75,6 +75,13 @@ static u64 count_events(u64 from, u8 family) {
 }
 #endif
 
+// A LAM whose body is ERA; heap loc 0 is never a node.
+static Term build_lam(void) {
+  u64 loc = heap_alloc(1);
+  heap_set(loc, term_new(0, TAG_ERA, 0, 0));
+  return term_new(0, TAG_LAM, 0, loc);
+}
+
 int main(void) {
     thvm_init();
 
@@ -197,7 +204,7 @@ int main(void) {
         CURRENT_CTX->trace = 1;
         u64 from = multi_trace_count();
         Term era = term_new(0, TAG_ERA, 0, 0);
-        Term arg = term_new(0, TAG_LAM, 0, 0);   // any value
+        Term arg = build_lam();   // any value
         (void)wnf(build_app(era, arg));
         u64 idx = find_event(from, RULE_APP_ERA, MULTI_PRUNE);
         CHECK(idx != (u64)-1);
@@ -227,7 +234,7 @@ int main(void) {
         CURRENT_CTX->trace = 1;
         u64 from = multi_trace_count();
         Term era = term_new(0, TAG_ERA, 0, 0);
-        Term lam = term_new(0, TAG_LAM, 0, 0);
+        Term lam = build_lam();
         Term sup = build_sup(7, era, lam);
         u64  dup = build_dup(sup);
         Term dp0 = term_new(0, TAG_DP0, 7, dup);
@@ -245,7 +252,7 @@ int main(void) {
         CURRENT_CTX->trace = 1;
         u64 from = multi_trace_count();
         Term era = term_new(0, TAG_ERA, 0, 0);
-        Term lam = term_new(0, TAG_LAM, 0, 0);
+        Term lam = build_lam();
         Term sup = build_sup(11, era, lam);       // sup label 11
         u64  dup = build_dup(sup);
         Term dp0 = term_new(0, TAG_DP0, 7, dup);  // dup label 7 (different)
@@ -522,7 +529,7 @@ int main(void) {
         // stays at MULTI_WIRE_NONE for a clean consumed[0] check.
         CURRENT_CTX->trace = 0;
         Term era = term_new(0, TAG_ERA, 0, 0);
-        Term lam = term_new(0, TAG_LAM, 0, 0);
+        Term lam = build_lam();
         Term sup = build_sup(11, era, lam);      // sup label 11
         u64  dup = build_dup(sup);
         Term dp0 = term_new(0, TAG_DP0, 7, dup); // dup label 7
