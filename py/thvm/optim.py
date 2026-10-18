@@ -81,7 +81,9 @@ class Optimizer:
         grads = [p.grad for p in self.params if p.grad is not None]
         if grads:
             Tensor.realize(*grads)
-        return self._step()
+        # tinygrad nn/optim.py:57: the buffers (BatchNorm running stats) ride
+        # the step's realize, so their assigns land every step.
+        return self._step() + self.buffers
 
     def _step(self):
         raise NotImplementedError
