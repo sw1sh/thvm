@@ -2,6 +2,7 @@
 Template: Symbol
 Name: TFindStringProof
 Context: WolframInstitute`THVMLink`ATP`
+ContextPath: [Global`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TFindStringProof
 Keywords: [string rewriting, semi-Thue, directed rules, oriented rules, bubble sort, FindStringProof, multiway]

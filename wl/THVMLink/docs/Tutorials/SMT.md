@@ -3,6 +3,7 @@ Template: TechNote
 Name: SMT
 Title: Congruence Closure and Lazy DPLL(T)
 Context: WolframInstitute`THVMLink`ATP`
+ContextPath: [Global`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/SMT
 Keywords: [SMT, congruence closure, QF_UF, DPLL(T), Downey-Sethi-Tarjan, TPTP, equational, decision procedure]

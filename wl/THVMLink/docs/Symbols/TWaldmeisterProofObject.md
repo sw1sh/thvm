@@ -2,6 +2,7 @@
 Template: Symbol
 Name: TWaldmeisterProofObject
 Context: WolframInstitute`THVMLink`ATP`
+ContextPath: [Global`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TWaldmeisterProofObject
 Keywords: [Waldmeister, wmcli, ATP, ProofObject, proof protocol, external prover, proof lift, theorem proving]

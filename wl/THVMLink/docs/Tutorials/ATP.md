@@ -3,6 +3,7 @@ Template: TechNote
 Name: ATP
 Title: Theorem Proving with THVMLink
 Context: WolframInstitute`THVMLink`ATP`
+ContextPath: [Global`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/ATP
 Keywords: [theorem proving, ATP, equational, completion, Knuth-Bendix, Waldmeister, Vampire, congruence closure, SMT, TPTP]

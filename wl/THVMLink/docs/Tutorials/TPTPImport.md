@@ -3,6 +3,7 @@ Template: TechNote
 Name: TPTPImport
 Title: Importing TPTP Benchmarks
 Context: WolframInstitute`THVMLink`ATP`
+ContextPath: [Global`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/TPTPImport
 Keywords: [TPTP, CNF, FOF, benchmark, import, theorem proving, Sheffer, AbelianGroupAxioms]
