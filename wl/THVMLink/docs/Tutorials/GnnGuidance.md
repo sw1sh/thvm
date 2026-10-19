@@ -10,197 +10,160 @@ RelatedGuides: [THVMLink]
 RelatedTutorials: [ATP, AtpMethods, Train]
 ---
 
-## What learned guidance does
+The completion engine of [TFindProof]() keeps a queue of critical pairs, the equations that arise where two rewrite rules overlap, and the order in which it takes them from the queue decides how soon a proof is found. A hand-tuned weight, such as the size of the equation, stands in for the real question: will this equation be used in the proof? Learned guidance answers that question with a model trained on earlier proofs, the approach of the ENIGMA (Efficient learNing-based Inference Guiding MAchine) provers. THVMLink has two learned scorers. One rates fixed features of each critical pair and is used by <code>[Method]() -> "ENIGMA"</code>, as described in [Methods and Presets for TFindProof](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods). The other, the subject of this tutorial, is a graph neural network (GNN), specifically a graph convolutional network (GCN), that reads the structure of an equation with the names of its symbols removed, so that a model trained on one theory applies to theories with other symbols. It is trained and run on the tensor runtime of THVMLink.
 
-The [ATP](paclet:WolframInstitute/THVMLink/tutorial/ATP) engine proves an
-equational theorem by Knuth-Bendix completion: it repeatedly picks a
-*critical pair* (an overlap of two rules whose joinability must be
-checked), normalizes it, and keeps the survivors as new rules. Which
-critical pair to pick next is the central heuristic, and a hand-tuned
-weight is only a proxy for the real question: *will this pair end up in the
-proof?* Learned guidance answers that question with a model trained on past
-proofs, the idea behind the ENIGMA line of work (Efficient learNing-based
-Inference Guiding MAchine).
+| | |
+| --- | --- |
+| <code>[TAtpCpGraph]()[*lhs* == *rhs*]</code> | encode an equation as a graph |
+| <code>[TAtpCpGraphEquation]()[*graph*]</code> | recover the equation from its graph |
+| <code>[TAtpGraphDataset]()[*conjectures*, *axioms*]</code> | prove *conjectures* and label the equations of the searches |
+| <code>[TAtpTrainGnn]()[*dataset*]</code> | train a GCN on a dataset |
+| <code>[TAtpGnnScore]()[*model*, *dataset*]</code> | score the graphs of a dataset with a model |
+| <code>[TAtpSaveGnnScorer]()[*model*, *file*]</code> | save a model to a file |
+| <code>[TAtpLoadGnnScorer]()[*file*]</code> | load a model from a file |
+| <code>[TAtpGnnScorerAsset]()[]</code> | the file of the pretrained model that comes with the paclet |
+| <code>[TAtpSetGnnScorer]()[*model*]</code> | make *model* the scorer of the prover |
+| <code>[TFindProofGnnReranked]()[*conjecture*, *axioms*, *model*]</code> | prove *conjecture* with *model* ranking the critical pairs |
 
-thvm ships two learned scorers. The [AtpMethods](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods)
-tutorial covers the Tier-1 hand-feature scorer behind
-<code>[TFindProof]()[*goal*, *theory*, Method -> "ENIGMA"]</code>. This page
-covers the Tier-2 graph neural network (GNN): a graph convolutional network
-(GCN) that reads the *structure* of a critical pair, with no symbol
-identities, so one model generalizes across theories with different
-signatures. The pipeline is four steps, all on thvm's own tensor runtime:
-encode each pair as a graph, build a labelled dataset, train the GCN, and
-push it into the engine to guide selection.
+## An equation as a graph
 
-## A critical pair as a graph
-
-[TAtpCpGraph]() encodes one equation as an anonymized hypergraph: a node for
-the critical-pair super-node, one per function-symbol occurrence, and one
-per variable occurrence, wired by the term structure. The node *features* are
-purely structural (node kind, arity, occurrence count, side), never the
-symbol name, so the network sees shape, not `nand` versus `CircleTimes`.
+[TAtpCpGraph]() encodes an equation as a graph with a node for the equation as a whole, a node for each occurrence of a subterm, and a node for each distinct symbol and variable, connected along the structure of the terms. Each node has a vector of features that describe its kind, its number of arguments and how often it occurs, but not its name:
 
 ```wl
-Keys @ TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]
+cp = TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]
 ```
-<!-- => {NodeTypes, NodeFeatures, Edges, NodeLabels, NNodes, NEdges, Symbols} -->
+<!-- => <|"NodeTypes" -> {0, 1, 2, 1, 2, 1, 2, 1, 1, 2}, "NodeFeatures" -> {{0., 0., 0., 0., 1., 1., 0., 0., 0., 0., 1., 1.}, …}, "Edges" -> {{1, 2, 0}, {3, 4, 0}, {1, 3, 1}, {5, 6, 0}, {7, 4, 0}, {5, 7, 1}, {1, 5, 1}, {8, 9, 0}, {0, 1, 2}, {0, 8, 3}}, "NodeLabels" -> {0, 0, 3, 0, 4, 0, 5, 0, 0, 6}, "NNodes" -> 10, "NEdges" -> 10, "Symbols" -> {Missing["NotASymbol"], Missing["NotASymbol"], "CircleTimes", Missing["NotASymbol"], "a", Missing["NotASymbol"], "OverBar", Missing["NotASymbol"], Missing["NotASymbol"], "ident"}|> -->
 
-The node-type vector marks each node as the super-node (`0`), a term (`1`),
-a symbol (`2`), or a variable (`3`):
+The node types are `0` for the equation, `1` for a subterm, `2` for a symbol and `3` for a variable:
 
 ```wl
-TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]["NodeTypes"]
+cp["NodeTypes"]
 ```
 <!-- => {0, 1, 2, 1, 2, 1, 2, 1, 1, 2} -->
 
-The features are anonymized, but the graph *also* stores the concrete
-identity of each node in `"Symbols"` (and the raw label in `"NodeLabels"`),
-so the encoding is lossless: [TAtpCpGraphEquation]() is its exact inverse and
-rebuilds the equation - in the engine's canonical `Inactive[Equal]` form -
-from the stored symbols plus the term structure.
+Since the features carry no names, an equation with its symbols renamed has the same features:
 
 ```wl
-TAtpCpGraphEquation @ TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]
-```
-<!-- => Inactive[Equal][a \[CircleTimes] OverBar[a], ident] -->
-
-## Building a dataset
-
-[TAtpGraphDataset]() turns proofs into supervision. It proves each given
-conjecture against the axioms and labels the resulting equations: `1` for a
-lemma the proof actually used (proof-essential), `0` for a rule that
-saturation generated but the proof did not. Only proved goals contribute,
-and structurally identical rules are de-duplicated. Two named theorems over
-the abelian-group axioms make a small bounded dataset:
-
-```wl
-thms = Catenate @ Lookup[
-    AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"],
-    {"InverseOfInverse", "InverseOfComposite"}];
-ds = TAtpGraphDataset[thms, AxiomaticTheory["AbelianGroupAxioms"], TimeConstraint -> 5];
-Length @ ds["Graphs"]
-```
-<!-- => 33 -->
-
-```wl
-{ds["NPos"], ds["NNeg"], ds["NProofs"]}
-```
-<!-- => {17, 16, 2} -->
-
-The same builder takes a bare theory name (it then proves every
-`NotableTheorem` of the theory), or a `ProofObject` straight from
-[TFindProof]() (positives only; pass the saturated `"Lemmas"` set as a
-second argument to add negatives):
-
-```wl
-po = TFindProof["InverseOfInverse", "AbelianGroupAxioms"];
-ds2 = TAtpGraphDataset[po, TFindProof["InverseOfInverse", "AbelianGroupAxioms", "Lemmas"]];
-{ds2["NPos"], ds2["NNeg"]}
-```
-<!-- => {5, 5} -->
-
-A raw TPTP (Thousands of Problems for Theorem Provers) file works too:
-<code>[TFindProof]()[[File]()["x.p"]]</code> parses and proves the unit-equality
-fragment, and the returned `ProofObject` feeds the same builder. Generating
-a dataset from a whole corpus means proving the corpus, so bound each proof
-with `TimeConstraint` and chunk large sweeps; see the engineering notes in
-`docs/atp/gnn_pipeline.md`.
-
-## Training the network
-
-[TAtpTrainGnn]() trains the GCN on a dataset entirely in thvm's tensor
-stack: `"Rounds"` rounds of row-normalized-adjacency message passing
-(*H' = relu(A.H.W1 + H.Ws + b)*), masked-mean pooling to a graph embedding,
-and a two-class proof-relevance head trained with categorical
-cross-entropy and Adam. It returns a report whose `"Model"` is the trained
-network. The first training call in a kernel session also JIT-compiles the
-GCN's tensor kernels, and that compile dominates the wall (about two
-minutes cold, a few seconds once warm), so the call is quoted here rather
-than run: with `SeedRandom[1234]`, <code>[TAtpTrainGnn]()[*ds*, "Hidden" -> 16,
-"Rounds" -> 2, MaxTrainingRounds -> 120]</code> on the two-theorem dataset
-above reports `"LossStart" -> 0.874` falling to `"LossEnd" -> 0.723` - the
-loss falls as the network learns proof relevance. Scaled up - the default
-config (`"Hidden" -> 32`, `"Rounds" -> 3`, 300 Adam steps) trained on a
-whole theory with <code>[TAtpTrainGnn]()["GroupAxioms", TimeConstraint -> 10]</code>,
-a `NotableTheorems` sweep - the proof-relevance score reaches a test
-[area-under-the-ROC-curve](https://reference.wolfram.com/language/ref/ROCCurve.html)
-of about 0.89 on a by-problem held-out split, generalizing to theorems it
-never trained on.
-
-## Saving and loading
-
-A trained model serializes to a `.safetensors` file with [TAtpSaveGnnScorer]()
-and reloads with [TAtpLoadGnnScorer](). The format is the standard
-safetensors layout (each weight a named tensor, the scalar config in the
-file metadata), so the file is also readable by Python's `safetensors`, and
-a pretrained scorer ships as a paclet asset.
-
-```wl
-FileExistsQ @ TAtpGnnScorerAsset[]
+TAtpCpGraph[CircleTimes[b, OverBar[b]] == unit]["NodeFeatures"] == cp["NodeFeatures"]
 ```
 <!-- => True -->
 
+The names are kept separately, under `"Symbols"`, so the encoding loses nothing. [TAtpCpGraphEquation]() rebuilds the equation, in the inactive form the prover uses for its rules:
+
 ```wl
-model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
-{model["Rounds"], model["Hidden"]}
+TAtpCpGraphEquation[cp]
 ```
-<!-- => {3, 64} -->
+<!-- => Inactive[Equal][a ⊗ OverBar[a], ident] -->
 
-The weights round-trip bit-for-bit through a file:
+## A dataset from proofs
+
+[TAtpGraphDataset]() proves each conjecture and turns the equations of the search into labeled graphs: `1` for a lemma the proof uses, and `0` for a rule the completion derived that the proof does not use. Proving `f[f[f[a]]] == f[a]` from `f[f[x_]] == x_` takes one rewrite with the axiom, so the one rule the completion derives is unused and labeled `0`:
 
 ```wl
-path = TAtpSaveGnnScorer[model, FileNameJoin[{$TemporaryDirectory, "gcn.safetensors"}]];
-TAtpLoadGnnScorer[path]["W1"] === model["W1"]
+TAtpGraphDataset[{f[f[f[a]]] == f[a]}, {f[f[x_]] == x_}]
+```
+<!-- => <|"Graphs" -> {<|"NodeTypes" -> {0, 1, 2, 1, 1, 2, 1}, …, "NNodes" -> 7, "NEdges" -> 8, "Symbols" -> {Missing["NotASymbol"], Missing["NotASymbol"], "f", Missing["NotASymbol"], Missing["NotASymbol"], "x", Missing["NotASymbol"]}|>}, "Labels" -> {0}, "NPos" -> 0, "NNeg" -> 1, "NProofs" -> 1|> -->
+
+The axioms of an abelian group give a larger example:
+
+```wl
+abelian = {x_ \[CircleTimes] (y_ \[CircleTimes] z_) == (x_ \[CircleTimes] y_) \[CircleTimes] z_, x_ \[CircleTimes] y_ == y_ \[CircleTimes] x_, x_ \[CircleTimes] e == x_, x_ \[CircleTimes] inv[x_] == e}
+```
+<!-- => {x_ ⊗ (y_ ⊗ z_) == (x_ ⊗ y_) ⊗ z_, x_ ⊗ y_ == y_ ⊗ x_, x_ ⊗ e == x_, x_ ⊗ inv[x_] == e} -->
+
+The proof that the inverse of the inverse of `a` is `a` uses five lemmas, and the completion derives six further rules:
+
+```wl
+TAtpGraphDataset[{inv[inv[a]] == a}, abelian, TimeConstraint -> 5]["Labels"]
+```
+<!-- => {1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0} -->
+
+The equations behind the labels, the five lemmas first:
+
+```wl
+TAtpCpGraphEquation /@ TAtpGraphDataset[{inv[inv[a]] == a}, abelian, TimeConstraint -> 5]["Graphs"]
+```
+<!-- => {Inactive[Equal][x ⊗ (inv[x] ⊗ y), e ⊗ y], Inactive[Equal][x, e ⊗ x], Inactive[Equal][x ⊗ (inv[x] ⊗ y), y], Inactive[Equal][inv[inv[x]], x ⊗ e], Inactive[Equal][inv[inv[x]], x], Inactive[Equal][x ⊗ e, x], Inactive[Equal][x ⊗ inv[x], e], Inactive[Equal][(x ⊗ y) ⊗ z, x ⊗ (y ⊗ z)], Inactive[Equal][x ⊗ y, y ⊗ x], Inactive[Equal][inv[e], e], Inactive[Equal][x ⊗ (y ⊗ inv[x ⊗ y]), e]} -->
+
+Several conjectures give one dataset, and only proved conjectures contribute to it. Besides the graphs, the dataset counts the positive and negative examples and the proofs:
+
+```wl
+KeyDrop[TAtpGraphDataset[{inv[inv[a]] == a, inv[a \[CircleTimes] b] == inv[a] \[CircleTimes] inv[b]}, abelian, TimeConstraint -> 5], "Graphs"]
+```
+<!-- => <|"Labels" -> {1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, "NPos" -> 17, "NNeg" -> 16, "NProofs" -> 2|> -->
+
+[TAtpGraphDataset]() also takes the name of an [AxiomaticTheory]() theory, whose notable theorems it proves, and a [ProofObject]() from [TFindProof](), whose lemmas are the positive examples. A problem in the TPTP (Thousands of Problems for Theorem Provers) format can be proved with [TFindProof]() first. Each proof costs a search, so [TimeConstraint]() bounds each one.
+
+## Training a network
+
+[TAtpTrainGnn]() trains a GCN on a dataset. The network passes messages along the edges of each graph for a number of rounds, each round computing new node vectors *H'* = relu(*A*.*H*.*W1* + *H*.*Ws* + *b*) from the node vectors *H* and the normalized adjacency matrix *A*. It then averages the node vectors into one vector for the graph and reads off a score for the two classes, trained with categorical cross-entropy and the Adam optimizer. The result holds the trained `"Model"`, its area under the receiver operating characteristic (ROC) curve on the training graphs, and the loss at the start and at the end of training. Training compiles the tensor kernels of the network the first time it runs and can take minutes:
+
+```wl
+#| eval: false
+TAtpTrainGnn[TAtpGraphDataset[{inv[inv[a]] == a, inv[a \[CircleTimes] b] == inv[a] \[CircleTimes] inv[b]}, abelian, TimeConstraint -> 5], "Hidden" -> 16, "Rounds" -> 2]
+```
+<!-- => <|"Model" -> <|"Kind" -> "GNN", "W1" -> {…}, "Ws" -> {…}, "Bh" -> {…}, "Wout" -> {…}, "Bout" -> {…}, "Rounds" -> 2, "Hidden" -> 16, "NMax" -> …|>, "TrainAUC" -> …, "LossStart" -> …, "LossEnd" -> …, "NPos" -> 17, "NNeg" -> 16|> -->
+
+`"Hidden"` sets the length of the node vectors and `"Rounds"` the number of rounds of message passing. With the name of a theory, <code>[TAtpTrainGnn]()["*theory*"]</code> builds the dataset from the notable theorems of the theory and trains on it in one step.
+
+## The pretrained model
+
+The paclet comes with a pretrained model, stored in the safetensors format, the standard format for the weights of neural networks:
+
+```wl
+TAtpGnnScorerAsset[]
+```
+<!-- => the path of gcn_atp.safetensors in the Assets directory of the paclet -->
+
+[TAtpLoadGnnScorer]() loads it as an [Association]() of weight matrices and settings. The settings of the pretrained model are three rounds of message passing on node vectors of length 64:
+
+```wl
+KeyTake[TAtpLoadGnnScorer[TAtpGnnScorerAsset[]], {"Kind", "Rounds", "Hidden", "NMax"}]
+```
+<!-- => <|"Kind" -> "GNN", "Rounds" -> 3, "Hidden" -> 64, "NMax" -> 64|> -->
+
+[TAtpGnnScore]() scores each graph of a dataset; a higher score means the model rates the equation as more likely to be used in a proof. The scores for the eleven equations of the group example:
+
+```wl
+TAtpGnnScore[TAtpLoadGnnScorer[TAtpGnnScorerAsset[]], TAtpGraphDataset[{inv[inv[a]] == a}, abelian, TimeConstraint -> 5]]
+```
+<!-- => {-2.0863874554634094, -1.1306440234184265, -1.536804974079132, 0.22483105212450027, -1.3557806611061096, -1.1827852725982666, 0.3535003066062927, -5.955554485321045, -5.111791133880615, 0.05050660576671362, -1.3583860993385315} -->
+
+[TAtpSaveGnnScorer]() writes a model to a file and gives the file:
+
+```wl
+file = TAtpSaveGnnScorer[TAtpLoadGnnScorer[TAtpGnnScorerAsset[]], FileNameJoin[{$TemporaryDirectory, "gcn.safetensors"}]]
+```
+<!-- => the path of gcn.safetensors in $TemporaryDirectory -->
+
+Loading the file gives back the same weights:
+
+```wl
+TAtpLoadGnnScorer[file] === TAtpLoadGnnScorer[TAtpGnnScorerAsset[]]
 ```
 <!-- => True -->
 
 ## Guiding a proof
 
-[TAtpSetGnnScorer]() pushes a model into the C engine. The GNN then drives
-the *secondary* selection dimension: every few selections the engine picks
-the pair the network scores highest, while the primary heuristic still owns
-the rest of the queue. Completeness is untouched because the engine takes a
-periodic first-in-first-out pick regardless of the score, so a cold or
-over-fit model only slows a proof, never loses one.
+[TAtpSetGnnScorer]() makes a model the scorer of the prover. It takes a model or the file of one:
 
 ```wl
-model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
-TAtpSetGnnScorer[model]
+TAtpSetGnnScorer[TAtpGnnScorerAsset[]]
 ```
 <!-- => True -->
 
-[TFindProofGnnReranked]() proves a goal with the model guiding selection,
-re-scoring the live queue every `"RerankPeriod"` selections, all in C with
-no Wolfram round-trip in the proof loop:
+[TFindProofGnnReranked]() proves a conjecture with the model ranking the critical pairs: every `"RerankPeriod"` selections, the network scores the critical pairs in the queue and the queue is reordered by the scores. The scoring runs inside the prover, on the tensor runtime, with no evaluation in the Wolfram Language between selections. The result is the status of the search:
 
 ```wl
-model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
-axioms = {
-    ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]],
-    ForAll[{x}, CircleTimes[x, ident] == x],
-    ForAll[{x}, CircleTimes[x, inv[x]] == ident]};
-TFindProofGnnReranked[ForAll[{x}, CircleTimes[ident, x] == x], axioms, model,
-    "RerankPeriod" -> 50, MaxSteps -> 8000]
+TFindProofGnnReranked[inv[inv[a]] == a, abelian, TAtpLoadGnnScorer[TAtpGnnScorerAsset[]], "RerankPeriod" -> 50, MaxSteps -> 8000]
 ```
 <!-- => "PROVED" -->
 
-Whether learned guidance *speeds up* a proof depends on the scorer's quality
-and how aggressively it coops with the primary heuristic. The C benchmark
-(`bin/test_atp_wolfram_bench`) runs this with no kernel, so a corpus sweep
-cannot stall the front end: set `THVM_ATP_GNN_ASSET`,
-`THVM_ATP_GNN_RERANK_PERIOD`, and `THVM_ATP_GNN_COOP_RATIO` (the coop
-ratio is the safety lever, gentler is safer) on top of a baseline preset
-like `THVM_ATP_WALDMEISTER`.
+The model only changes the order in which critical pairs are selected. The prover still selects the oldest pair in the queue at regular intervals, so every pair is eventually processed: a poor model can make a proof take longer, but it cannot make a provable conjecture unprovable. [TAtpSetGnnScorer]() with [Clear]() removes the model:
 
-## Where to go next
+```wl
+TAtpSetGnnScorer[Clear]
+```
+<!-- => True -->
 
-- [AtpMethods](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods): the
-  Tier-1 hand-feature scorer and the `Method -> "ENIGMA"` learn loop.
-- [ATP](paclet:WolframInstitute/THVMLink/tutorial/ATP): the proof engine,
-  presets, portfolios, and TPTP problem files.
-- [Train](paclet:WolframInstitute/THVMLink/tutorial/Train): how training
-  works on the tensor surface that the GCN is built on.
-- `docs/atp/gnn_pipeline.md` and `docs/atp/ml_guidance.md` in the
-  repository: the end-to-end design, the open problems (corpus-scale
-  dataset generation, the `Method -> {"ENIGMA", "Model" -> ...}` fold), and
-  the ML-in-ATP landscape.
+How training works on the tensor runtime is the subject of [Training Neural Networks with THVMLink](paclet:WolframInstitute/THVMLink/tutorial/Train), and the prover itself of [Theorem Proving with THVMLink](paclet:WolframInstitute/THVMLink/tutorial/ATP).

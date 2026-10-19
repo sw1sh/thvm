@@ -6,171 +6,202 @@ Context: WolframInstitute`THVMLink`ATP`
 ContextPath: [Global`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/SMT
-Keywords: [SMT, congruence closure, QF_UF, DPLL(T), Downey-Sethi-Tarjan, TPTP, equational, decision procedure]
+Keywords: [SMT, satisfiability modulo theories, congruence closure, QF_UF, DPLL(T), Downey-Sethi-Tarjan, TPTP, equational, decision procedure]
 RelatedGuides: [THVMLink]
-RelatedTutorials: [ATP, Overview, Disproof]
+RelatedTutorials: [ATP, Disproof, TPTPImport]
 ---
 
-## What the SMT surface covers
+A ground problem is one whose equations contain no variables. Whether a ground goal follows from ground hypotheses is a question in QF_UF, the quantifier-free theory of equality with uninterpreted functions, and congruence closure decides it completely, in time close to linear in the number of subterms. The completion engine that [TFindProof]() uses by default is built for axioms with universally quantified variables; on a ground problem it can spend its time on critical pairs that do not matter. Three functions decide ground problems directly, in the manner of an SMT (satisfiability modulo theories) solver:
 
-[TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof) (covered in the [ATP](paclet:WolframInstitute/THVMLink/tutorial/ATP) tech note) is an unfailing Knuth-Bendix completion engine: it handles universally-quantified equational axioms by saturating critical pairs. That is the right tool when axioms have free variables, e.g. <code>and[x_,y_] == and[y_,x_]</code>.
+| | |
+| --- | --- |
+| <code>[TSatEUF]()[*equalities*, *disequalities*]</code> | decide whether ground equalities and disequalities can hold together |
+| <code>[TSmtDecide]()[*formula*]</code> | decide whether a Boolean combination of ground equations can hold |
+| <code>[TFindProof]()[*goal*, *hypotheses*, [Method]() -> "SMT"]</code> | decide whether *goal* follows from ground *hypotheses* |
 
-When the conjecture and every axiom are *ground* - no variables - the problem collapses to QF_UF (quantifier-free first-order equality with uninterpreted function symbols). Congruence closure decides QF_UF in near-linear time, whereas the saturator may spin on irrelevant critical pairs until the wall budget runs out. <code>THVMLink\`ATP\`</code> exposes the fast path through three entries:
+Every symbol is uninterpreted: `a`, `b` and compound terms such as `f[a, b]` stand for unknown values of unknown functions, related only by the equations given.
 
-- [TSatEUF]() - raw decision procedure over a list of equalities and disequalities.
-- [TSmtDecide]() - DPLL(T) lift to arbitrary Boolean combinations of equality atoms.
-- [TFindProof]() with `Method -> "SMT"` - the entailment surface that reduces `H |= G` to satisfiability of `H && !G`, deciding it by congruence closure.
+## Congruence closure
 
-TPTP problem files drop in directly: `File["...p"]` or a `cnf/fof` string at [TFindProof]() (with `Method -> "SMT"` for the ground SMT path) triggers the shared TPTP parser before dispatch.
-
-## Setting up
-
-The SMT entries live alongside the equational engine. One `Needs` brings them all in:
+The examples share one list of hypotheses:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
+hyps = {a == b, b == c}
 ```
+<!-- => {a == b, b == c} -->
 
-All examples below assume this entry has run. Equality atoms are written with `==`, disequalities with `!=`. The engines accept any combination of undefined symbols (`a`, `b`, ...) and compound function applications (`f[a, b]`) - everything in sight is treated as an uninterpreted term.
-
-## Pure congruence closure
-
-[TSatEUF]() takes two lists - equalities and disequalities - and returns either a counter-example witness or the inferred equivalence classes:
+[TSatEUF]() takes a list of equalities and a list of disequalities. Adding the disequality `a != c` to the hypotheses makes them contradictory, and the result names the disequality that fails:
 
 ```wl
-TSatEUF[{a == b, b == c}, {a != c}]
+TSatEUF[hyps, {a != c}]
 ```
 <!-- => <|"Status" -> "UNSAT", "Witness" -> a != c|> -->
 
-```wl
-TSatEUF[{a == b}, {f[a] != f[b]}]
-```
-<!-- => <|"Status" -> "UNSAT", "Witness" -> f[a] != f[b]|> -->
-
-The UNSAT verdict on the second call is the standard congruence-closure outcome: the union-find sees `a` and `b` collapse, then walks the use-lists and notices that `f[a]` and `f[b]` are now congruent. A satisfiable input returns the inferred classes for every subterm seen:
+A function gives equal values on equal arguments, so `f[a] != f[c]` contradicts the hypotheses too. This is the congruence step: once `a` and `c` are in one class, `f[a]` and `f[c]` are merged as well:
 
 ```wl
-TSatEUF[{a == b, c == d}, {}]
+TSatEUF[hyps, {f[a] != f[c]}]
 ```
-<!-- => <|"Status" -> "SAT", "Classes" -> {{a, b}, {c, d}}|> -->
+<!-- => <|"Status" -> "UNSAT", "Witness" -> f[a] != f[c]|> -->
 
-The implementation is Downey-Sethi-Tarjan: each subterm starts in its own union-find class with a use-list of compound parents whose arguments mention it; each merge propagates congruence; path-compressed find plus union-by-rank give the near-linear bound.
+A satisfiable input gives the equivalence classes of its subterms:
+
+```wl
+TSatEUF[hyps, {a != d}]
+```
+<!-- => <|"Status" -> "SAT", "Classes" -> {{a, b, c}, {d}}|> -->
+
+The algorithm is that of Downey, Sethi and Tarjan. Each subterm starts in a class of its own, and merging two classes also merges the compound terms whose arguments have become equal. With path compression and union by rank, the running time is close to linear.
 
 ## Boolean combinations
 
-[TSmtDecide]() lifts the same theory solver to Boolean combinations of equality atoms via `And`, `Or`, `Not`, `Implies`, `Equivalent`, `Xor`:
+[TSmtDecide]() decides formulas built from equations and disequations with [And](), [Or](), [Not](), [Implies](), [Equivalent]() and [Xor](). Each disjunct of this formula is ruled out by one of the disequations:
 
 ```wl
 TSmtDecide[(a == b || b == c) && a != b && b != c]
 ```
 <!-- => <|"Status" -> "UNSAT"|> -->
 
+A satisfiable formula comes with a truth value for each of its atoms:
+
+```wl
+TSmtDecide[(a == b || c == d) && c == e]
+```
+<!-- => <|"Status" -> "SAT", "Model" -> <|a == b -> False, c == d -> True, c == e -> True|>|> -->
+
+The procedure is lazy DPLL(T), the Davis-Putnam-Logemann-Loveland search modulo a theory T. Each atom is replaced by a propositional variable, [SatisfiabilityInstances]() proposes a truth assignment for the propositional formula, and [TSatEUF]() checks the equations that assignment asserts. An assignment that contradicts them is excluded by a blocking clause, and the next one is requested; there are finitely many assignments, so the search ends. Here the propositional formula is satisfiable, but every assignment that satisfies it contradicts congruence, since `a == b` and `c == d` force `f[a, c] == f[b, d]`:
+
 ```wl
 TSmtDecide[((a == b && c == d) || x == y) && f[a, c] != f[b, d] && x != y]
 ```
 <!-- => <|"Status" -> "UNSAT"|> -->
 
-The second example exercises the theory-conflict path: the SAT shell picks the `(a==b && c==d)` disjunct as the candidate model, congruence closure fires inside it and discovers `f[a, c] == f[b, d]`, which contradicts the stated disequality; the alternative `x == y` branch is already excluded; UNSAT.
-
-A SAT verdict comes with a satisfying assignment:
+A formula is valid when its negation is unsatisfiable. That `a == b` implies `f[a] == f[b]` is valid:
 
 ```wl
-TSmtDecide[(a == b || c == d) && c == e]
+TSmtDecide[!Implies[a == b, f[a] == f[b]]]
 ```
-<!-- => <|"Status" -> "SAT", "Model" -> <|...|>|> -->
+<!-- => <|"Status" -> "UNSAT"|> -->
 
-The algorithm is the textbook lazy DPLL(T) shell: each equality/disequality atom is abstracted as a fresh propositional variable; the Boolean abstraction is handed to Wolfram's <code>[SatisfiabilityInstances]()</code> as the propositional kernel; every candidate model is theory-checked via [TSatEUF](); on T-conflict the exact assignment is forbidden by a blocking clause and the kernel is re-queried. Loop terminates - there are <code>2^|atoms|</code> assignments and each iteration prunes one. Sound and complete for QF_UF.
+## Entailment
 
-## Entailment surface
-
-The ground entailment surface is reached through [TFindProof](): `Method -> "SMT"` reduces `H1, ..., Hn |= G` to a satisfiability query on `H1 && ... && Hn && !G` and decides it by congruence closure (or DPLL(T) for a Boolean goal). It returns a `"Proved"` decision Association when the entailment holds:
+The `"SMT"` method of [TFindProof]() decides whether a goal follows from hypotheses, by deciding whether the hypotheses together with the negated goal are satisfiable. When they are not, the goal is proved, and the negated goal is recorded as the witness:
 
 ```wl
-TFindProof[a == c, {a == b, b == c}, Method -> "SMT"]
+TFindProof[a == c, hyps, Method -> "SMT"]
 ```
-<!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure", ...|> -->
+<!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure", "Goal" -> a == c, "Hypotheses" -> {a == b, b == c}, "Witness" -> a != c|> -->
+
+Congruence carries the hypotheses through functions:
 
 ```wl
-TFindProof[Implies[a == b && b == c, a == c], {}, Method -> "SMT"]
+TFindProof[f[a] == f[c], hyps, Method -> "SMT"]
 ```
-<!-- => <|"Status" -> "Proved", "Method" -> "DPLL(T)+CongruenceClosure", ...|> -->
+<!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure", "Goal" -> f[a] == f[c], "Hypotheses" -> {a == b, b == c}, "Witness" -> f[a] != f[c]|> -->
 
-A non-entailment is refuted with a [CounterexampleObject]() whose `"Model"` is the congruence-closure quotient as a finite algebra in [FindFiniteModels]() structure ({a, b} merged to element 0, c apart as element 1). The `"Counterexample"` output kind asks for it directly:
+When the goal does not follow, the result is a [CounterexampleObject](), a finite model in which the hypotheses hold and the goal fails:
 
 ```wl
-TFindProof[a == c, {a == b}, "Counterexample"]
+TFindProof[a == d, hyps, Method -> "SMT"]
 ```
-<!-- => CounterexampleObject[<|"Domain" -> 2, "Model" -> <|a -> 0, b -> 0, c -> 1|>, ...|>] -->
 
-The [Disproof](paclet:WolframInstitute/THVMLink/tutorial/Disproof) tech note covers the `CounterexampleObject` and the quantified case. The `"Method"` field of the decision Association discloses which engine handled the call: pure congruence closure for equality-literal goals, DPLL(T) + congruence closure for Boolean-combination goals.
-
-## TPTP overloads
-
-`TFindProof[File["...p"], Method -> "SMT"]` and `TFindProof["...cnf/fof string...", Method -> "SMT"]` route through the same TPTP parser the equational engine uses, then dispatch through congruence closure:
+The `"Counterexample"` spec gives the same object without the method setting, since [TFindProof]() uses congruence closure for a ground problem on its own:
 
 ```wl
-TFindProof[
-    "cnf(a1, axiom, a = b).
-     cnf(a2, axiom, b = c).
-     cnf(g, negated_conjecture, a != c).", Method -> "SMT"]
+co = TFindProof[a == d, hyps, "Counterexample"]
 ```
-<!-- => <|"Status" -> "Proved", ...|> -->
+
+Its model is the quotient of the terms by the hypotheses: a domain of two elements, with `a`, `b` and `c` in one and `d` in the other:
 
 ```wl
-TFindProof[
-    "fof(a1, axiom, a = b).
-     fof(g, negated_conjecture, f(a) != f(b)).", Method -> "SMT"]
+co["Model"]
 ```
-<!-- => <|"Status" -> "Proved", ...|> -->
+<!-- => <|a -> 0, b -> 0, c -> 0, d -> 1|> -->
 
-A ground-gate rejects inputs with universally-quantified variables (`Pattern` / `Blank` heads) - congruence closure is a quantifier-free decision procedure:
+The counterexample checks itself. Its verification function evaluates the hypotheses in the model:
 
 ```wl
-TFindProof[
-    "cnf(a1, axiom, and(X, Y) = and(Y, X)).
-     cnf(g, negated_conjecture, and(a, b) != and(b, a)).", Method -> "SMT"]
+co["VerificationFunction"][]
 ```
-<!-- => TFindProof::nonground; reach for the default completion engine -->
+<!-- => True -->
 
-The parser succeeded; only the SMT dispatch refused. For variable-bearing axioms drop `Method -> "SMT"` and use the default completion engine.
-
-## `Method -> "SMT"` in `TFindProof`
-
-A single suboption turns the standard equational entry into an SMT dispatch:
+Its falsification function evaluates the goal in the model:
 
 ```wl
-TFindProof[a == c, {a == b, b == c}, Method -> "SMT"]
+co["FalsificationFunction"][]
 ```
-<!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure", ...|> -->
+<!-- => False -->
+
+A Boolean goal is decided by DPLL(T), as the `"Method"` entry records:
 
 ```wl
 TFindProof[Implies[a == b && b == c, a == c], {}, Method -> "SMT"]
 ```
-<!-- => <|"Status" -> "Proved", "Method" -> "DPLL(T)+CongruenceClosure", ...|> -->
+<!-- => <|"Status" -> "Proved", "Method" -> "DPLL(T)+CongruenceClosure", "Goal" -> Implies[a == b && b == c, a == c], "Hypotheses" -> {}|> -->
 
-Default `TFindProof` (no `Method`) still goes to the saturator and returns a Wolfram `ProofObject`. `Method -> "SMT"` returns the SMT Association directly, not a `ProofObject` - the result shape is different on purpose, since the SMT-style witness (a disequality whose two sides collapsed) is not a proof tree.
+A Boolean goal that does not follow is refuted by a truth assignment to its atoms:
 
-## Choosing the right entry
+```wl
+TFindProof[Implies[a == b, a == c], {}, Method -> "SMT"]
+```
 
-| Input shape                                    | Use                                              |
-|------------------------------------------------|--------------------------------------------------|
-| Ground equational, single goal                 | `TFindProof[g, h, Method -> "SMT"]`              |
-| Ground, Boolean combination of (in)equalities  | [TSmtDecide]() or `TFindProof[g, h, Method -> "SMT"]` |
-| Variable-bearing equational axioms             | [TFindProof]() (default)                         |
-| TPTP UEQ benchmark with universal vars         | `TFindProof[File["...p"]]`                       |
-| TPTP ground problem                            | `TFindProof[File["...p"], Method -> "SMT"]`      |
+Without the method setting, [TFindProof]() proves a ground goal with its completion engine and gives a [ProofObject]():
 
-## Scope and limits
+```wl
+TFindProof[a == c, hyps]
+```
 
-Decided here:
+The `"SMT"` method gives an [Association]() instead of a [ProofObject]() because its evidence is a contradiction found by congruence closure, not a chain of rewrites.
 
-- QF_UF (ground first-order equality plus uninterpreted functions). Full decision procedure - returns SAT or UNSAT in finite time.
-- Boolean combinations of equality atoms via lazy DPLL(T). Same guarantee.
+## Problems in the TPTP format
 
-Not decided:
+A problem in the TPTP (Thousands of Problems for Theorem Provers) format can be given to [TFindProof]() as text. With the `"SMT"` method, a ground problem in clause normal form (`cnf`) is decided by congruence closure:
 
-- Quantified formulas. Reach for [TFindProof]() for the equational fragment.
-- Linear arithmetic, arrays, bit-vectors. Separate theory solvers, not yet ported; could plug behind the same DPLL(T) shell.
-- Anything where the propositional structure has exponentially many candidate models: lazy DPLL(T) pays for each one. An eager T-propagation pass that pushes congruence facts into the SAT kernel as additional clauses is the natural extension.
+```wl
+TFindProof["cnf(a1, axiom, a = b).
+cnf(a2, axiom, b = c).
+cnf(g, negated_conjecture, a != c).", Method -> "SMT"]
+```
+<!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure", "Goal" -> a == c, "Hypotheses" -> {a == b, b == c}, "Witness" -> a != c|> -->
 
-For how this single-theory core compares to the broader field - general SMT solvers (Z3, CVC5), first-order ATPs (Vampire, E), and unit-equational provers (Waldmeister, Twee) - see the positioning survey in `src/atp/survey.md`, which lays out the feature matrices honestly: thvm decides the EUF theory completely, and routes everything quantified to the completion engine rather than to SMT.
+A problem in first-order form (`fof`) is decided the same way:
+
+```wl
+TFindProof["fof(a1, axiom, a = b).
+fof(g, conjecture, f(a) = f(b)).", Method -> "SMT"]
+```
+<!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure", "Goal" -> f[a] == f[b], "Hypotheses" -> {a == b}, "Witness" -> f[a] != f[b]|> -->
+
+A problem with variables is not ground, and the `"SMT"` method gives `$Failed` for it:
+
+```wl
+TFindProof["cnf(a1, axiom, and(X, Y) = and(Y, X)).
+cnf(g, negated_conjecture, and(a, b) != and(b, a)).", Method -> "SMT"]
+```
+<!-- => $Failed -->
+
+Without the method setting, the completion engine proves the same problem:
+
+```wl
+TFindProof["cnf(a1, axiom, and(X, Y) = and(Y, X)).
+cnf(g, negated_conjecture, and(a, b) != and(b, a)).", "Status"]
+```
+<!-- => "Proved" -->
+
+[Importing TPTP Benchmarks](paclet:WolframInstitute/THVMLink/tutorial/TPTPImport) covers the format in more detail.
+
+## Choosing a function
+
+| Problem | Function |
+| --- | --- |
+| ground equalities and disequalities | <code>[TSatEUF]()[*equalities*, *disequalities*]</code> |
+| a Boolean combination of ground equations | <code>[TSmtDecide]()[*formula*]</code> |
+| a ground goal and ground hypotheses | <code>[TFindProof]()[*goal*, *hypotheses*, [Method]() -> "SMT"]</code> |
+| a refuting model for a ground goal | <code>[TFindProof]()[*goal*, *hypotheses*, "Counterexample"]</code> |
+| equations with variables | <code>[TFindProof]()[*goal*, *axioms*]</code> |
+| a ground TPTP problem | <code>[TFindProof]()["*text*", [Method]() -> "SMT"]</code> |
+| a TPTP problem with variables | <code>[TFindProof]()["*text*"]</code> |
+
+## Scope
+
+Congruence closure and DPLL(T) decide the quantifier-free theory of equality with uninterpreted functions, and Boolean combinations over it, completely: every input gets a SAT or an UNSAT verdict. Quantified formulas are outside that theory; for equations with variables, [TFindProof]() uses its completion engine, described in [Theorem Proving with THVMLink](paclet:WolframInstitute/THVMLink/tutorial/ATP). Other theories, such as linear arithmetic, arrays and bit vectors, are not decided. DPLL(T) checks one truth assignment at a time, so a formula whose Boolean structure admits very many assignments can take correspondingly long. Refuting models are the subject of [Disproving Conjectures with Countermodels](paclet:WolframInstitute/THVMLink/tutorial/Disproof).
