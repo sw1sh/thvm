@@ -38,7 +38,11 @@
 # runs with THVM_ATP_GUIDE_DUMP and tools/atp_enigma/weights_to_c.py
 # parity rescores the dump.  FEATPARITY=1 also exports the run's history
 # (rate 1, push features), converts it with np0_extract.py and runs
-# weights_to_c.py featparity.
+# weights_to_c.py featparity.  A run that proved but whose proof FindProof
+# withheld has no proof block, so its export converts in np0_extract's
+# no-proof mode, as the guided harvest converts it: featparity reads the
+# push, selection and deletion records, which both modes keep, and no
+# label (amendment A31).
 #
 # Usage: tests/atp_guide_gates.sh [bin/FindProof] [spec]
 #   spec: lines "family lane problem..." (the plan wants 8 problems per
@@ -234,11 +238,21 @@ while read -r fam lane probs; do
         verdict FAIL "G2.4 $fam $lane $name: $(grep -v '^PARITY' "$d/parity.txt" | tr '\n' ' ')"
       fi
       if [ "$FEATPARITY" = 1 ] && [ -s "$d/dump.tsv" ]; then
-        if python3 "$NP0" "$d/hx.bin" "$d/guided/out" "$d/run.npz" 1000000000 > "$d/np0.txt" 2>&1 &&
+        rm -f "$d/run.npz" "$d/featparity.txt"
+        python3 "$NP0" "$d/hx.bin" "$d/guided/out" "$d/run.npz" 1000000000 > "$d/np0.txt" 2>&1
+        np0=$?
+        if [ "$np0" != 0 ] && grep -q '^no proof block' "$d/np0.txt" &&
+           grep -q '^FindProof: proof withheld' "$d/guided/err"; then
+          python3 "$NP0" "$d/hx.bin" - "$d/run.npz" 1000000000 >> "$d/np0.txt" 2>&1
+          np0=$?
+        fi
+        if [ "$np0" = 0 ] &&
            python3 "$W2C" featparity "$d/run.npz" "$d/dump.tsv" "$d/featparity.txt" > /dev/null; then
           verdict PASS "featparity $fam $lane $name: $(head -1 "$d/featparity.txt")"
+        elif [ "$np0" != 0 ]; then
+          verdict FAIL "featparity $fam $lane $name: np0_extract: $(tail -2 "$d/np0.txt" | tr '\n' ' ')"
         else
-          verdict FAIL "featparity $fam $lane $name: $(tail -4 "$d/featparity.txt" "$d/np0.txt" 2>/dev/null | tr '\n' ' ')"
+          verdict FAIL "featparity $fam $lane $name: $(tail -4 "$d/featparity.txt" | tr '\n' ' ')"
         fi
       fi
     fi
