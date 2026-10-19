@@ -329,6 +329,8 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- TSmtDecide treats a predicate atom such as `p[a]` as an uninterpreted predicate, with congruence (`a == b && p[a] && ! p[b]` is UNSAT), and refuses arithmetic with `TSmtDecide::theory`; both used to come back `"UNSAT"` (`TSmtDecide[x > 1]` and `TSmtDecide[p[a]]` alike).
+- TFindProof on TPTP text with `Method -> "SMT"` rejects a non-ground clause with `TFindProof::nonground` again (the option rule was read as a return spec), and accepts a problem `TPTPImport` already parsed, with or without a return spec.
 - TFindProof treats a pattern variable in a predicate axiom as universal: `TFindProof[mortal[socrates], {Implies[man[x_], mortal[x_]], man[socrates]}]` proves at once (it left `Implies` in the equationalized problem and re-entered the predicate path until the recursion limit), as does the TPTP form `![X]: (man(X) => mortal(X))`. A problem still not equational after equationalizing now gives `TFindProof::noneq` and `$Failed`.
 - The external provers keep to their time limits. TWaldmeisterProof and TTweeProof stop the prover at `TimeConstraint` and report `"TimedOut"` (Waldmeister ignored the limit and never returned on a non-theorem; Twee reported `"Failed"`), and TVampireProof stops Vampire 2 s past its own `-t`, which overruns in casc mode.
 - TEproverProof works: it passed E a real CPU limit (`--cpu-limit=5.`), which E rejects, so every E run failed. E's proofs now convert like Vampire's: input copies and identity steps fold away, nested inferences give their clause parents, E's rule names map to construct types, and the formulas get the theory's operator names, so TEproverProofObject lifts to a ProofObject.

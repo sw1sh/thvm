@@ -4318,7 +4318,7 @@ TFindProof[cj : (_List | _ForAll | _Equal | _Unequal | Inactive[Equal][_, _] | I
 (* An Association (e.g. the whole NotableTheorems table) "just does
    Values": each value is proved on its own, so a theorem that fails to
    prove is $Failed in its slot rather than failing the whole call. *)
-TFindProof[thms_Association, theory_String, opts : OptionsPattern[]] :=
+TFindProof[thms_Association, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpecQ[theory] :=
     atpProveFromTheory[#, theory, opts] & /@ Values[thms];
 TFindProof[thms_Association, theory_String, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     atpProveFromTheory[#, theory, returnSpec, opts] & /@ Values[thms];(* Expression form: run thvm's C ATP completion engine on the
@@ -4364,7 +4364,15 @@ TFindProof[path_String ? FileExistsQ, returnSpec_ ? atpReturnSpecQ, opts : Optio
     Block[{$atpProblemName = FileNameTake[path]},
         tptpDispatch[TPTPImport[File[path]], returnSpec, opts]]
 
-tptpDispatch[imported_Association, returnSpec_, opts : OptionsPattern[TFindProof]] := If[
+(* A problem TPTPImport already parsed. *)
+atpTptpImportedQ[a_Association] := MatchQ[Keys[a], {"Axioms", "Conjecture"}]
+atpTptpImportedQ[_] := False
+TFindProof[imported_Association ? atpTptpImportedQ, opts : OptionsPattern[]] :=
+    tptpDispatch[imported, opts]
+TFindProof[imported_Association ? atpTptpImportedQ, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
+    tptpDispatch[imported, returnSpec, opts]
+
+tptpDispatch[imported_Association, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[TFindProof]] := If[
     "SMT" === OptionValue[TFindProof, {opts}, Method],
     atpSmtProject[tptpDispatchSMT[imported], returnSpec],
     If[ imported["Conjecture"] === None,
