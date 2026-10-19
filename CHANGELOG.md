@@ -329,6 +329,8 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- Elementwise tensor arithmetic broadcasts like numpy and tinygrad: `m + v` with shapes {2, 2} and {2} adds `v` to each row. Incompatible shapes give `General::bcast`. Before, only scalars broadcast, and other operands were read past the end of the smaller buffer. The library now refuses that read in every elementwise `TUOp*`, and refuses a reshape to a different count, a permutation that is not one, or an expand the source cannot take, each with a `::shape` message.
+- `TMemoryPlanGantt` draws its bars again: the bar map parsed as a single `Function`. `TScheduleGraph`'s kernel labels show the op count instead of `2[OpCount]`.
 - `THeapRead`, `THeapSet` and `TBookRead` refuse a location outside the heap with a message (`THeapRead[-1]` crashed the kernel). A bare integer in a `TCtr`, `TBookCtr`, `TMatNum`, `TIfZero`, `TLam` or `TCnf` slot is the number with that value, as it already was in `TOp2` and `TSup` (`TNf[TCtr[3, 10, 20]]` crashed the kernel). `TCtr` with more than 16 children gives a message. `TInitialize` on a stripped snapshot without `"ZeroFill" -> True` gives a message and stays unevaluated instead of throwing an uncaught `Throw`.
 - `TNum` with an unknown dtype and `TOp2` with an unknown operator give a message and stay unevaluated instead of building a malformed term, and `TTermExpr` names all sixteen OP2 operators (it showed `?5` for division).
 - A number's dtype survives inspection: `TTermExpr` and `Term` name it for every dtype but i32 (`"NUM"["f32", v]`), and `TInitialize` rebuilds it. They had tested for dtype code 0, which f32 had before it became 13, so an f32 read as a plain number and a bool as `"f32"`.

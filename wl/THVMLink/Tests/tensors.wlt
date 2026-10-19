@@ -169,3 +169,29 @@ VerificationTest[
     {1, True},
     TestID -> "TMaterialize/reduce-output-shape"
 ]
+
+(* Elementwise sugar broadcasts like numpy/tinygrad: right-aligned, size-1 axes grow. *)
+VerificationTest[
+    With[{m = TTensorCreate[{{1., 5.}, {3., 2.}}]},
+        {Normal @ TRealize[m + TTensorCreate[{10., 20.}]], Normal @ TRealize[m * TTensorCreate[{{10.}, {100.}}]]}],
+    {{{11., 25.}, {13., 22.}}, {{10., 50.}, {300., 200.}}},
+    TestID -> "tensors/sugar-broadcasts"
+]
+
+(* Shapes that cannot broadcast give General::bcast and stay unevaluated. *)
+VerificationTest[
+    MatchQ[TTensorCreate[{{1., 5.}, {3., 2.}}] + TTensorCreate[{1., 2., 3.}], _Plus],
+    True,
+    {General::bcast, General::bcast},
+    TestID -> "tensors/sugar-broadcast-incompatible"
+]
+
+(* The raw constructors refuse operands that would read past a buffer: different element
+   counts, a reshape to another count, a non-permutation, an expand the source cannot take. *)
+VerificationTest[
+    With[{m = TTensorCreate[{{1., 5.}, {3., 2.}}], v = TTensorCreate[{1., 2., 3.}]},
+        Head /@ {TUOpAdd[m, v], TUOpReshape[v, {2, 2}], TUOpPermute[m, {1, 1}], TUOpExpand[v, {3, 2}]}],
+    {TUOpAdd, TUOpReshape, TUOpPermute, TUOpExpand},
+    {TUOpAdd::shape, TUOpReshape::shape, TUOpPermute::shape, TUOpExpand::shape},
+    TestID -> "tensors/uop-shape-checks"
+]

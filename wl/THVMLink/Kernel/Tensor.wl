@@ -236,10 +236,19 @@ TUOpConst[value_, dtype_String : "f32"] := (
 TUOpCast[src_, dtype_String] := (ensureInit[]; TTerm[$uopCastFn[ttermRaw[src], dtypeCode[dtype]]])
 TUOpBitcast[src_, dtype_String] := (ensureInit[]; TTerm[$uopBitcastFn[ttermRaw[src], dtypeCode[dtype]]])
 
-TUOpAdd[a_, b_] := (ensureInit[]; TTerm[$uopBinaryFn[$UopAdd, ttermRaw[a], ttermRaw[b]]])
-TUOpMul[a_, b_] := (ensureInit[]; TTerm[$uopBinaryFn[$UopMul, ttermRaw[a], ttermRaw[b]]])
-TUOpCmplt[a_, b_] := (ensureInit[]; TTerm[$uopBinaryFn[$UopCmplt, ttermRaw[a], ttermRaw[b]]])
-TUOpCmpeq[a_, b_] := (ensureInit[]; TTerm[$uopBinaryFn[$UopCmpeq, ttermRaw[a], ttermRaw[b]]])
+(* The library refuses operands whose element counts differ (unless one has a single element),
+   and a reshape, permute or expand that does not fit the source: each would read past a buffer.
+   The refusal is a message, and the expression stays unevaluated. *)
+uopChecked[head_, args_List, raw_] := If[ IntegerQ[raw], raw,
+    Message[MessageName[head, "shape"], Sequence @@ (shapeOrArg /@ args)]; $Failed]
+shapeOrArg[t_TTerm] := Replace[tUopShape[t], $Failed -> t]
+shapeOrArg[x_] := x
+General::shape = "`1` and `2` do not fit together: an elementwise operation needs equal element counts or a single element, and a movement operation a shape the source can take.";
+
+TUOpAdd[a_, b_] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TUOpAdd, {a, b}, Quiet[$uopBinaryFn[$UopAdd, ttermRaw[a], ttermRaw[b]]]]; IntegerQ[r])]
+TUOpMul[a_, b_] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TUOpMul, {a, b}, Quiet[$uopBinaryFn[$UopMul, ttermRaw[a], ttermRaw[b]]]]; IntegerQ[r])]
+TUOpCmplt[a_, b_] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TUOpCmplt, {a, b}, Quiet[$uopBinaryFn[$UopCmplt, ttermRaw[a], ttermRaw[b]]]]; IntegerQ[r])]
+TUOpCmpeq[a_, b_] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TUOpCmpeq, {a, b}, Quiet[$uopBinaryFn[$UopCmpeq, ttermRaw[a], ttermRaw[b]]]]; IntegerQ[r])]
 
 TUOpNeg[a_] := (ensureInit[]; TTerm[$uopUnaryFn[$UopNeg, ttermRaw[a]]])
 TUOpRecip[a_] := (ensureInit[]; TTerm[$uopUnaryFn[$UopRecip, ttermRaw[a]]])
@@ -292,9 +301,9 @@ TKVarHi[vid_Integer] := (ensureInit[]; $kvarHiFn[vid])
 TKVarSet[vid_Integer, v_Integer] := (ensureInit[]; $kvarSetRuntimeFn[vid, v])
 TSymbolicAxis[t_, axis_Integer, vid_Integer] := (ensureInit[]; TTerm[$markSymbolicAxisFn[ttermRaw[t], axis, vid]])
 
-TUOpReshape[src_, shape_List] := (ensureInit[]; TTerm[$uopReshapeFn[ttermRaw[src], shape]])
-TUOpPermute[src_, axes_List] := (ensureInit[]; TTerm[$uopPermuteFn[ttermRaw[src], axes]])
-TUOpExpand[src_, shape_List] := (ensureInit[]; TTerm[$uopExpandFn[ttermRaw[src], shape]])
+TUOpReshape[src_, shape_List] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TUOpReshape, {src, shape}, Quiet[$uopReshapeFn[ttermRaw[src], shape]]]; IntegerQ[r])]
+TUOpPermute[src_, axes_List] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TUOpPermute, {src, axes}, Quiet[$uopPermuteFn[ttermRaw[src], axes]]]; IntegerQ[r])]
+TUOpExpand[src_, shape_List] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TUOpExpand, {src, shape}, Quiet[$uopExpandFn[ttermRaw[src], shape]]]; IntegerQ[r])]
 TUOpPad[src_, ranges_List] := (ensureInit[]; TTerm[$uopPadFn[ttermRaw[src], Flatten[ranges]]])
 TUOpShrink[src_, ranges_List] := (ensureInit[]; TTerm[$uopShrinkFn[ttermRaw[src], Flatten[ranges]]])
 
@@ -390,7 +399,7 @@ TUOpIConst[v_Integer] := (ensureInit[]; TTerm[$termIConstFn[v]])
    mutate weight tensors without allocating fresh tids per step.
    Both children share the binary heap layout; reuses $uopBinaryFn
    under opcode $UopAssign. *)
-TAssign[dst_, src_] := (ensureInit[]; TTerm[$uopBinaryFn[$UopAssign, ttermRaw[dst], ttermRaw[src]]])
+TAssign[dst_, src_] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TAssign, {dst, src}, Quiet[$uopBinaryFn[$UopAssign, ttermRaw[dst], ttermRaw[src]]]]; IntegerQ[r])]
 
 (* TConv2D[input, weights, bias] is defined in NN.wl alongside the
    other neural-network layers. *)
@@ -715,9 +724,9 @@ TUOpSrcs[u_] := With[{loc = TTermVal[u], op = TTermExt[u]},
 
 pairFold[op_, args_List] := Fold[op, First[args], Rest[args]]
 
-(* Frontend pre-broadcast: rank-0 / shape-{1} scalars lifted from
-   a host-side numeric get EXPAND'd to the LHS shape BEFORE the
-   binop UOP is constructed.  Same architectural slot as tinygrad's
+(* Frontend pre-broadcast: each operand of an elementwise binop is reshaped to the common rank
+   (leading 1s) and EXPAND'd to the common shape BEFORE the binop UOP is constructed, scalars
+   lifted from a host-side numeric included.  Same architectural slot as tinygrad's
    `Tensor._broadcasted` (tinygrad/tensor.py:3554-3571): both
    operands of an elementwise binop are normalised to a common
    shape at term-construction time, so the UOP graph downstream
@@ -736,22 +745,31 @@ pairFold[op_, args_List] := Fold[op, First[args], Rest[args]]
    itself: same KProgOp[] hash divergence; the cache would still
    need a frontend-level normalisation upstream.  Tinygrad makes
    the same choice. *)
-broadcastScalar[t_TTerm, targetShape_List] := With[{s = tUopShape[t]},
-    If[(s === {} || s === {1}) && targetShape =!= s, TUOpExpand[t, targetShape], t]]
-broadcastScalar[other_, _] := other
+broadcastTo[t_TTerm, target_List] := With[{s = tUopShape[t]},
+    Which[
+        ! ListQ[s] || s === target, t,
+        Times @@ s === 1, TUOpExpand[t, target],
+        True, With[{p = PadLeft[s, Length[target], 1]},
+            With[{reshaped = If[p === s, t, TUOpReshape[t, p]]},
+                If[p === target, reshaped, TUOpExpand[reshaped, target]]]]]]
+broadcastTo[other_, _] := other
 
-(* numpy-style broadcast of a set of shapes: right-align, pad missing
-   leading axes with 1, take the per-axis max.  The common shape of an
-   elementwise binop; using the FIRST operand's shape is wrong when a
-   later operand outranks it (e.g. a rank-0 scalar reduce result like
-   TDot combined with a shape-{1} target). *)
-broadcastShapes[shapes : {___List}] := Module[{maxr, padded},
+(* numpy-style broadcast of a set of shapes (tinygrad tensor.py _broadcast_shape): right-align,
+   pad missing leading axes with 1; on each axis the sizes are equal or 1, and the common size
+   is their maximum.  Incompatible shapes give General::bcast and $Failed.  The common shape of
+   an elementwise binop; using the FIRST operand's shape is wrong when a later operand outranks
+   it (e.g. a rank-0 scalar reduce result like TDot combined with a shape-{1} target). *)
+broadcastShapes[shapes : {___List}] := Module[{maxr, padded, target},
     maxr = Max[Append[Length /@ shapes, 0]];
     If[ maxr === 0,
         {},
         padded = (s |-> PadLeft[s, maxr, 1]) /@ shapes;
-        MapThread[Max, padded]]
+        target = MapThread[Max, padded];
+        If[ AllTrue[padded, p |-> And @@ MapThread[#1 === 1 || #1 === #2 &, {p, target}]],
+            target,
+            Message[General::bcast, shapes]; $Failed]]
 ]
+General::bcast = "Shapes `1` cannot be broadcast together: on each axis, counted from the last, the sizes must be equal or 1.";
 
 (* dtype precision rank for the Plus/Times operand ordering below. *)
 dtypePrecRank[dt_String] := Replace[dt, {"f64" -> 4, "f32" -> 3, "f16" -> 2, "bf16" -> 2, _ -> 1}]
@@ -771,14 +789,14 @@ TTerm /: Plus[t_TTerm ? tensorTermQ, rest__] := Module[{lifted, allTerms, target
     lifted = (r |-> liftNumeric[r, broadcastDType[t, r]]) /@ {rest};
     allTerms = precOrder[Prepend[lifted, t]];
     targetShape = broadcastShapes[tUopShape /@ allTerms];
-    pairFold[TUOpAdd, (x |-> broadcastScalar[x, targetShape]) /@ allTerms]
+    pairFold[TUOpAdd, (x |-> broadcastTo[x, targetShape]) /@ allTerms] /; targetShape =!= $Failed
 ]
 
 TTerm /: Times[t_TTerm ? tensorTermQ, rest__] := Module[{lifted, allTerms, targetShape},
     lifted = (r |-> liftNumeric[r, broadcastDType[t, r]]) /@ {rest};
     allTerms = precOrder[Prepend[lifted, t]];
     targetShape = broadcastShapes[tUopShape /@ allTerms];
-    pairFold[TUOpMul, (x |-> broadcastScalar[x, targetShape]) /@ allTerms]
+    pairFold[TUOpMul, (x |-> broadcastTo[x, targetShape]) /@ allTerms] /; targetShape =!= $Failed
 ]
 
 TTerm /: Minus[t_TTerm ? tensorTermQ] := TUOpNeg[t]
@@ -813,8 +831,8 @@ TTerm /: Total[t_TTerm ? tensorTermQ, axis_Integer] := TUOpReduce[t, axis - 1, "
    so it carries the sum_acc_dtype f32 accumulation (tSumAxes). *)
 TTerm /: Total[t_TTerm ? tensorTermQ, All] := tSumAxes[t, Range[0, Length[tUopShape[t]] - 1]]
 
-TTerm /: Less[a_TTerm ? tensorTermQ, b_] := TUOpCmplt[a, broadcastScalar[liftNumeric[b, inheritDType[a]], tUopShape[a]]]
-TTerm /: Less[a_, b_TTerm ? tensorTermQ] := TUOpCmplt[broadcastScalar[liftNumeric[a, inheritDType[b]], tUopShape[b]], b]
+TTerm /: Less[a_TTerm ? tensorTermQ, b_] := TUOpCmplt[a, broadcastTo[liftNumeric[b, inheritDType[a]], tUopShape[a]]]
+TTerm /: Less[a_, b_TTerm ? tensorTermQ] := TUOpCmplt[broadcastTo[liftNumeric[a, inheritDType[b]], tUopShape[b]], b]
 
 (* === Movement / linalg UpValues =============================
    Idiomatic WL forms route to existing TUOp* / T* primitives so
