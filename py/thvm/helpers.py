@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import gzip
 import os
 import pathlib
 import sys
@@ -135,16 +136,17 @@ def fetch(url: str, name: "pathlib.Path | str | None" = None,
         if subdir:
             cache = cache / subdir
         fname = name if name is not None else hashlib.md5(url.encode()).hexdigest()
-        fp = cache / fname
+        fp = cache / (fname + (".gunzip" if gunzip else ""))
     if not fp.is_file() or not allow_caching:
         fp.parent.mkdir(parents=True, exist_ok=True)
         tmp = fp.parent / (fp.name + ".tmp")
         print(f"fetching {url}")
         req = urllib.request.Request(url, headers={"User-Agent": "thvm"})
         with urllib.request.urlopen(req) as r, open(tmp, "wb") as f:
-            total = int(r.headers.get("content-length", 0))
+            src = gzip.GzipFile(fileobj=r) if gunzip else r
+            total = 0 if gunzip else int(r.headers.get("content-length", 0))
             done = 0
-            while chunk := r.read(16384):
+            while chunk := src.read(16384):
                 f.write(chunk)
                 done += len(chunk)
                 if total:

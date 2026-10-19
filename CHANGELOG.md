@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- helpers.fetch(gunzip=True) stores the decompressed body, under a .gunzip cache name, as tinygrad does (helpers.py:476-484); it took the flag and kept the gzip bytes. Test: test_nn_bookkeeping.
 - nn.BatchNorm counts its training batches in num_batches_tracked, as tinygrad does (nn/__init__.py:58); it stayed 0. Test: test_nn_bookkeeping.
 - nf uses a step session only when it opened one: with the WL stepper's session open it ran on that session and detached it. At T=1 it re-enumerates when its seed was clamped to the bag or a push found the bag full (now dropped and counted instead of spinning forever with no thief), so redexes past the 2^18 seed slots fire. Tests: test_nf_pool.
 - eval_collapse reuses popped queue slots, so it stops early only when 65536 tasks are pending at once: it stopped after 65536 pushes in all, at 32767 leaves of a long SUP comb. Test: test_cnf.
