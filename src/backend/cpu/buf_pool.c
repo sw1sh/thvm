@@ -161,7 +161,10 @@ fn void cpu_buf_clear_preserved_arena_views(u32 wm) {
     u32 parent = CPU_BUFS[i].parent_buf_id;
     if (parent == 0) continue;
     CPU_BUFS[i].preserved = 0;
-    if (parent < CPU_BUFS_NEXT) CPU_BUFS[parent].preserved = 0;
+    // A parent below the watermark is a buffer from an earlier realize (a
+    // WL-held weight a view reads), not this realize's arena: keep its bit, as
+    // cuda_buf_clear_preserved_arena_views does.
+    if (parent >= wm && parent < CPU_BUFS_NEXT) CPU_BUFS[parent].preserved = 0;
   }
 }
 

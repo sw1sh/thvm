@@ -133,6 +133,20 @@ int main(void) {
   u32 h = cpu_buf_alloc(64);
   CHECK(h > 0);     // either reused stale or fresh -- both OK
 
+  // The end-of-realize arena-view clear keeps the preserve bit of a parent
+  // from an earlier realize (a held weight a view reads), as CUDA's does.
+  TEST_BEGIN("cpu-free-list/arena-view-clear-keeps-an-older-parent");
+  {
+    u32 w = cpu_buf_alloc(64);
+    CPU_BUFS[w].preserved = 1;
+    u32 wm = (u32)CPU_BUFS_NEXT;
+    u32 v  = cpu_buf_alloc_arena_view(CPU_BUFS[w].data, 64, w);
+    CPU_BUFS[v].preserved = 1;
+    cpu_buf_clear_preserved_arena_views(wm);
+    CHECK_EQ(CPU_BUFS[w].preserved, 1);
+    CHECK_EQ(CPU_BUFS[v].preserved, 0);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

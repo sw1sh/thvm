@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- The CPU end-of-realize arena-view clear keeps the preserve bit of a parent from an earlier realize (a held weight a matmul view reads), as CUDA's has since the Krea weight-zeroing fix; it cleared it, so the rollback could recycle a live weight. Test: test_cpu_free_list.
 - wnf/pool.c's unused WnfPoolWorkerArg is removed.
 - helpers.fetch(gunzip=True) stores the decompressed body, under a .gunzip cache name, as tinygrad does (helpers.py:476-484); it took the flag and kept the gzip bytes. Test: test_nn_bookkeeping.
 - nn.BatchNorm counts its training batches in num_batches_tracked, as tinygrad does (nn/__init__.py:58); it stayed 0. Test: test_nn_bookkeeping.
