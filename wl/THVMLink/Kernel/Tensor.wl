@@ -275,8 +275,10 @@ TUOpExp2[a_] := (ensureInit[]; TTerm[$uopUnaryFn[$UopExp2, ttermRaw[a]]])
 TUOpLog2[a_] := (ensureInit[]; TTerm[$uopUnaryFn[$UopLog2, ttermRaw[a]]])
 TUOpSqrt[a_] := (ensureInit[]; TTerm[$uopUnaryFn[$UopSqrt, ttermRaw[a]]])
 
+(* tUopShape gives {} both for a scalar and for a graph over lambda variables, whose shape is unknown
+   until application, so only an axis outside a known non-empty shape is refused. *)
 TUOpReduce[src_, axis_Integer, kind_String] /; termLikeQ[src] && IntegerQ[reduceKindCode[kind]] &&
-        With[{s = tUopShape[src]}, ! ListQ[s] || 0 <= axis < Length[s]] := (
+        With[{s = tUopShape[src]}, ! ListQ[s] || s === {} || 0 <= axis < Length[s]] := (
     ensureInit[];
     TTerm[$uopReduceFn[reduceKindCode[kind], axis, ttermRaw[src]]]
 )
