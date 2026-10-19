@@ -57,3 +57,11 @@ VerificationTest[
     {ProofObject, Function},
     TestID -> "Eprover/lift/AbelianGroup_InverseOfInverse"
 ]
+
+(* E takes an integer CPU limit; a real one is rounded up instead of rejected. *)
+VerificationTest[
+    If[ ! eproverAvailable, "Proved",
+        TEproverProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 4.5]["Status"]],
+    "Proved",
+    TestID -> "Eprover/real-time-limit"
+]

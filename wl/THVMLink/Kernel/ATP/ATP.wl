@@ -94,7 +94,7 @@ model$ is an Association keyed \"Kind\" (\"Linear\" or \"MLP\"), \"Mean\", \"Inv
 
 SetUsage[TAtpCpGraph, "TAtpCpGraph[lhs$ == rhs$] encodes one equation or critical pair (also accepts Inactive[Equal][lhs$, rhs$] and a HoldForm of either) into the anonymised typed hypergraph the ENIGMA Tier 2 graph neural network message-passes over. Returns an Association keyed \"NodeTypes\", \"NodeFeatures\" (an NNodes by ATP_CPG_FEAT_DIM matrix, 12 columns in the phase-2 schema), \"Edges\" (a list of {src$, dst$, type$}), \"NNodes\", \"NEdges\", \"NodeLabels\", \"Symbols\".
 Node 0 is the critical-pair super-node; the rest are term occurrences (preorder walk of lhs then rhs), symbol nodes (one per distinct operator/constant), and var nodes (one per distinct variable). Node types code 0 CPSuper, 1 Term, 2 Symbol, 3 Var; edge types code the term-to-symbol, term-to-child, and cp-to-side-root links.
-The six node-feature columns are purely structural (is_term, is_symbol, is_var, arity, occurrence_count, is_cpsuper) and never encode the concrete label/id/value, so equations equal up to a consistent symbol/variable renaming produce bit-identical graphs. \"NodeLabels\" and \"Symbols\" keep the concrete per-node identity so TAtpCpGraphEquation reconstructs the original equation. lhs and rhs share one encoder state (a shared symbol or variable is a single deduped node).
+The node-feature columns are purely structural (kind, arity, occurrence counts) and never encode the concrete label/id/value, so equations equal up to a consistent symbol/variable renaming produce bit-identical graphs. \"NodeLabels\" and \"Symbols\" keep the concrete per-node identity so TAtpCpGraphEquation reconstructs the original equation. lhs and rhs share one encoder state (a shared symbol or variable is a single deduped node).
 This is the per-equation encoder TAtpGraphDataset emits; pair it with a GNN trained on the dataset."];
 
 SetUsage[TAtpCpGraphEquation, "TAtpCpGraphEquation[graph$] reconstructs the original equation from a TAtpCpGraph result, returning Inactive[Equal][lhs$, rhs$]. It is the exact inverse of TAtpCpGraph, reading the per-node \"Symbols\" identities and the \"Edges\" term structure (each term node's head, ordered children, and the two side roots).
@@ -138,6 +138,8 @@ SetUsage[TFindProofGnnReranked, "TFindProofGnnReranked[conjecture$, axioms$, mod
 Unlike TFindProofReranked there is no WL round-trip in the proof loop, so it is far faster; completeness is preserved (re-ranking only permutes selection order, the periodic FIFO pick still fires).
 Options: \"RerankPeriod\", MaxSteps, \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\"."];
 
+SetUsage[PortfolioFrontLoad, "PortfolioFrontLoad is an option for TFindProof that gives each of the first k$ entries of a Method schedule twice the equal share of the TimeConstraint."];
+
 (* Forward-declare sibling-file public symbols (SMT.wl owns
    TSatEUF / TSmtDecide) so bare references inside this file's
    Begin[`Private`] resolve to the shared WolframInstitute`THVMLink`ATP`X symbol
@@ -159,6 +161,15 @@ Options: \"RerankPeriod\", MaxSteps, \"CriticalPairWeight\", \"Ordering\", \"Aut
    WolframInstitute`THVMLink` pushed by the BeginPackage second arg.) *)
 
 Begin["`Private`"];
+
+(* Run a shell command under a wall-clock limit of tc seconds.  perl ships with macOS and Linux,
+   and an alarm set before exec survives it, so the prover itself gets SIGALRM at the limit (exit
+   code 142) instead of running on as an orphan. *)
+atpRunLimited[cmd_String, tc_] := Module[{secs, r},
+    {secs, r} = AbsoluteTiming @ RunProcess[{"perl", "-e", "alarm shift; exec @ARGV",
+        ToString[Max[1, Ceiling[tc]]], "sh", "-c", "exec " <> cmd}];
+    <|"Output" -> r["StandardOutput"], "Seconds" -> secs, "TimedOut" -> r["ExitCode"] === 142|>
+]
 
 (* Suppress General::shdw during definition load.  The TFindProof
    dispatch defensively Block-localizes Global`a..z + xN names
@@ -540,7 +551,18 @@ serializeLearnedModel[m_Association] := Block[{
     ]
 ]
 
-TAtpSetLearnedScorer[model_] := $atpSetLearnedScorerFn[
+TAtpSetLearnedScorer::model = "A learned scorer is a \"Linear\" or \"Logistic\" model with a `1`-element \"W\" and a number \"B\", or an \"MLP\" model with \"W1\" (h by `1`), \"B1\" and \"W2\" (h each) and a number \"B2\"; optional \"Mean\" and \"InvStd\" have `1` elements.";
+numVecQ[v_, n_] := VectorQ[v, NumericQ] && Length[v] === n
+learnedModelOkQ[m_Association] := With[{kind = Lookup[m, "Kind", "Linear"], d = $AtpFeatureDim},
+    numVecQ[Lookup[m, "Mean", ConstantArray[0, d]], d] && numVecQ[Lookup[m, "InvStd", ConstantArray[1, d]], d] &&
+    If[ MemberQ[{"Linear", "Logistic"}, kind],
+        numVecQ[Lookup[m, "W", None], d] && NumericQ[Lookup[m, "B", None]],
+        MatrixQ[Lookup[m, "W1", None], NumericQ] && Last[Dimensions[m["W1"]]] === d &&
+            With[{h = Length[m["W1"]]},
+                numVecQ[Lookup[m, "B1", None], h] && numVecQ[Lookup[m, "W2", None], h] && NumericQ[Lookup[m, "B2", None]]]]
+]
+TAtpSetLearnedScorer[model_Association] /; ! learnedModelOkQ[model] := (Message[TAtpSetLearnedScorer::model, $AtpFeatureDim]; False)
+TAtpSetLearnedScorer[model : (_Association | Clear | None | {})] := $atpSetLearnedScorerFn[
     N[serializeLearnedModel[model]]] === 1
 
 (* Flatten a trained GCN model (the "Model" from TAtpTrainGnn) into the C
@@ -563,6 +585,12 @@ serializeGnnModel[m_Association] := Block[{rR = Lookup[m, "Rounds", Length[m["W1
 ]
 
 TAtpSetGnnScorer::rejected = "The engine rejected the GCN: its layer shapes (first layer `1`) do not match the engine's clause-graph features. Train it again with TAtpTrainGnn.";
+TAtpSetGnnScorer::model = "A GCN model has \"W1\", \"Ws\" and \"Bh\" (one matrix, matrix and vector per round), a matrix \"Wout\" and a vector \"Bout\", as TAtpTrainGnn gives.";
+gnnModelOkQ[m_Association] := AllTrue[{"W1", "Ws", "Bh", "Wout", "Bout"}, KeyExistsQ[m, #] &] &&
+    ListQ[m["W1"]] && Length[m["W1"]] >= 1 && Length[m["W1"]] === Length[m["Ws"]] === Length[m["Bh"]] &&
+    AllTrue[Join[m["W1"], m["Ws"]], MatrixQ[#, NumericQ] &] && AllTrue[m["Bh"], VectorQ[#, NumericQ] &] &&
+    MatrixQ[m["Wout"], NumericQ] && VectorQ[m["Bout"], NumericQ]
+TAtpSetGnnScorer[model_Association] /; ! gnnModelOkQ[model] := (Message[TAtpSetGnnScorer::model]; False)
 TAtpSetGnnScorer[model_Association] := If[ $atpSetGnnScorerFn[N[serializeGnnModel[model]]] === 1,
     True,
     Message[TAtpSetGnnScorer::rejected, Quiet @ Dimensions[First[Lookup[model, "W1", {{}}]]]]; False]
@@ -660,9 +688,8 @@ Options[TAtpCpDataset] = {Method -> {"Completion"}, TimeConstraint -> 30, MaxSte
 
 (* Run `proveFn[]` for its dataset side-effect with the recorder pointed
    at a fresh temp file, then parse the accumulated TSV into the result
-   Association.  `proveFn` returns the proof statuses (used only for the
-   proof count). *)
-atpDatasetCollect[proveFn_, nProofs_] := Module[{
+   Association.  `proveFn` returns the proof statuses; "NProofs" counts the proved ones. *)
+atpDatasetCollect[proveFn_] := Module[{nProofs,
     path = FileNameJoin[{$TemporaryDirectory,
         "thvm_enigma_cp_" <> ToString[$ProcessID] <> "_"
             <> ToString[RandomInteger[10^9]] <> ".tsv"}],
@@ -670,7 +697,7 @@ atpDatasetCollect[proveFn_, nProofs_] := Module[{
 },
     Quiet @ DeleteFile[path];
     SetEnvironment["THVM_ATP_CP_DATASET" -> path];
-    proveFn[];
+    nProofs = Count[Flatten[{proveFn[]}], "Proved"];
     SetEnvironment["THVM_ATP_CP_DATASET" -> None];
     raw = If[ FileExistsQ[path], Import[path, "TSV"], {}];
     Quiet @ DeleteFile[path];
@@ -706,16 +733,14 @@ TAtpCpDataset[theory_String, opts : OptionsPattern[]] := Module[{
 },
     atpDatasetCollect[
         Function[TFindProof[thms, theory, "Status",
-            Method -> m, TimeConstraint -> tc]],
-        Length[thms]]
+            Method -> m, TimeConstraint -> tc]]]
 ]
 
 TAtpCpDataset[conjectures_List, axioms_List, opts : OptionsPattern[]] := Module[{m = OptionValue[Method], tc = OptionValue[TimeConstraint]},
     atpDatasetCollect[
-        Function[Scan[
+        Function[Map[
             TFindProof[#, axioms, "Status", Method -> m, TimeConstraint -> tc] &,
-            conjectures]],
-        Length[conjectures]]
+            conjectures]]]
 ]
 
 (* ENIGMA Tier 1c: train a scorer on a dataset via thvm's TNetTrain. *)
@@ -1287,7 +1312,7 @@ atpGnnBcastBias[bias_TTerm, bs_, p_, d_] :=
     TUOpExpand[TUOpReshape[bias, {1, 1, d}], {bs, p, d}]
 
 (* Batch a graph dataset into padded host arrays for the GCN: X
-   (B x N x 6 features), A (B x N x N row-normalised adjacency with
+   (B x N x F node features), A (B x N x N row-normalised adjacency with
    self-loops, edge types merged), Mask + NNodes for the masked-mean
    pool, Y (B x 2 one-hot).  Reads the TAtpCpGraph schema (NodeFeatures
    matrix, 0-indexed Edges, NNodes). *)
@@ -1395,13 +1420,15 @@ Options[TAtpTrainGnn] = {
    the same bounded chunks.  Uses the b1pow/b2pow TAdam form so bias
    correction tracks the live step. *)
 TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
-    graphs = dataset["Graphs"], labels = dataset["Labels"], f = 6,
+    graphs = dataset["Graphs"], labels = dataset["Labels"], f,
     hH, rR, lrVal, rounds, bs, nCap, nMax, nG,
     w1s, wss, bhs, wout, bout, params, ms, vs,
     fwd, lossStart, lossEnd, scores, auc, model
 },
     nG = Length[graphs];
     If[ nG === 0, Return[$Failed]];
+    (* the node-feature width of the data, which the engine's TAtpCpGraph sets *)
+    f = Length @ First @ graphs[[1]]["NodeFeatures"];
     hH = OptionValue["Hidden"];  rR = OptionValue["Rounds"];
     lrVal  = N @ OptionValue["LearningRate"];
     rounds = OptionValue[MaxTrainingRounds];
@@ -1591,7 +1618,7 @@ TFindProofReranked[conjecture_, axioms_List, model_Association, opts : OptionsPa
         ],
         {chunks}];
     $atpProofFreeFn[handle];
-    atpStatusFor[st]
+    atpStepBudgetStatus[st]
 ]
 
 Options[TFindProofGnnReranked] = {
@@ -1623,7 +1650,7 @@ TFindProofGnnReranked[conjecture_, axioms_List, model_Association, opts : Option
     st = $atpProofStepFn[handle, maxSteps];
     $atpProofFreeFn[handle];
     TAtpSetGnnScorer[Clear];
-    atpStatusFor[st]
+    atpStepBudgetStatus[st]
 ]
 
 (* === Status decoder + stats Association builder =================== *)
@@ -1632,6 +1659,9 @@ $atpStatusName = <|0 -> "RUNNING", 1 -> "PROVED", 2 -> "REFUTED", 3 -> "TIMEOUT"
 
 atpStatusFor[code_Integer] :=
     Lookup[$atpStatusName, code, "UNKNOWN(" <> ToString[code] <> ")"]
+
+(* A stepping loop that ends still RUNNING has spent its MaxSteps budget. *)
+atpStepBudgetStatus[code_Integer] := atpStatusFor[If[code === 0, 3, code]]
 
 (* Build the public Status/Steps/Rules/QueueSize assoc from the
    first four entries of any runner's stats array. *)
@@ -1993,6 +2023,8 @@ atpResolveWitnessIds[witnessSpec_List, state_Association] := Block[{pairs = Map[
 ]
 
 (* File-form dispatch (.pr file). *)
+TATP::nofile = "The problem file `1` does not exist.";
+TATP[File[path_String], OptionsPattern[]] /; ! FileExistsQ[path] := (Message[TATP::nofile, path]; $Failed)
 TATP[File[path_String], OptionsPattern[]] := Catch[
     Block[{stats},
         ensureInit[];
@@ -3481,7 +3513,7 @@ atpScheduleFor["AllPresets"] := $AtpAllPresets;
 atpScheduleFor["AllPresets", _, _] := $AtpAllPresets;
 
 atpParseMethod[m_] := (
-    Message[TFindProof::badmethod, m]; {-1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 1, 0, 0, 0, 0, 0, None, 0});
+    Message[TFindProof::badmethod, m]; atpParseMethod[Automatic]);
 
 (* Strategy schedule (Waldmeister-style portfolio).  Automatic and
    "Portfolio" expand to an ORDERED list of concrete Method configs
@@ -4062,6 +4094,8 @@ atpReturnValue[bundle_, "PortfolioTrace"] :=
             "WallTime" -> atpReturnValue[bundle, "WallTime"],
             "Proved" -> MatchQ[bundle["ProofObject"], _ProofObject]|>}];
 
+(* A problem the encoder refused comes back as its Failure, which says why; "Status" stays a tag. *)
+atpProjectReturn[f_Failure, spec_String] /; spec =!= "Status" := f;
 atpProjectReturn[bundle_, spec_String] := atpReturnValue[bundle, spec];
 atpProjectReturn[bundle_, All] :=
     Association[# -> atpReturnValue[bundle, #] & /@ $AtpReturnSpecs];
@@ -4173,6 +4207,8 @@ atpAxiomaticTheory[theory_String, "NotableTheorems"] :=
 atpProveFromTheory[cjArg_, theory_String,
         opts : OptionsPattern[TFindProof]] :=
     atpProveFromTheory[cjArg, theory, "ProofObject", opts];
+(* The Global` names a conjecture uses, which the theory's variables must not take. *)
+atpGoalNames[cj_] := DeleteDuplicates @ Cases[cj, s_Symbol /; Context[s] === "Global`" :> SymbolName[s], {0, Infinity}, Heads -> True]
 (* The returnSpec threads through to the expression-form call; a
    multi-conjunct theorem returns ONE projection for the whole
    conjunction (e.g. "Status" is a single tag). *)
@@ -4188,7 +4224,7 @@ atpProveFromTheory[cjArg_, theory_String, returnSpec_,
         axRaw = atpApplyRelevance[axRaw, cjList,
             atpRelevanceSpec[
                 OptionValue[TFindProof, {opts}, Method]]];
-        axioms = CanonicalizePatterns /@ (unquantifyFormula /@ axRaw);
+        axioms = CanonicalizePatterns[#, atpGoalNames[cjList]] & /@ (unquantifyFormula /@ axRaw);
         If[ Length[cjList] === 1,
             TFindProof[
                 CanonicalizePatterns @ unquantifyFormula @ First[cjList],
@@ -4217,7 +4253,12 @@ TFindProof[theory_String, returnSpec_String, opts : OptionsPattern[]] /; atpRetu
     atpTheoryCompletion[theory, returnSpec, opts];
 TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpecQ[theory] := Catch[
     Block[{cjRaw, methodOpt = OptionValue[TFindProof, {opts}, Method],
-            methodName, methodSubs},
+            methodName, methodSubs,
+            (* TFindProof's own defaults for the builder options, listed after the caller's so
+               an explicit option wins and the builders' different defaults do not apply. *)
+            processDefaults = {
+                "LiftToProofObject" -> OptionValue[TFindProof, {opts}, "LiftToProofObject"],
+                "ParseFormulas" -> OptionValue[TFindProof, {opts}, "ParseFormulas"]}},
         (* A list Method -> {"WaldmeisterProcess", "WMCLI" -> path, ...}
            carries the external-tool name as the head and its per-tool
            suboptions (the binary path, TimeConstraint, ...) as the rest;
@@ -4241,25 +4282,25 @@ TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpe
                includes the CLI wrapper's options PLUS the
                builder-only ParseFormulas. *)
             Throw[WolframInstitute`THVMLink`ATP`TVampireProofObject[theory, thm,
-                FilterRules[Join[methodSubs, {opts}],
+                FilterRules[Join[methodSubs, {opts}, processDefaults],
                     Options[WolframInstitute`THVMLink`ATP`TVampireProofObject]]],
                 "TATPError"]
         ];
         If[ methodName === "TweeProcess",
             Throw[WolframInstitute`THVMLink`ATP`TTweeProofObject[theory, thm,
-                FilterRules[Join[methodSubs, {opts}],
+                FilterRules[Join[methodSubs, {opts}, processDefaults],
                     Options[WolframInstitute`THVMLink`ATP`TTweeProofObject]]],
                 "TATPError"]
         ];
         If[ methodName === "WaldmeisterProcess",
             Throw[WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
-                FilterRules[Join[methodSubs, {opts}],
+                FilterRules[Join[methodSubs, {opts}, processDefaults],
                     Options[WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject]]],
                 "TATPError"]
         ];
         If[ methodName === "EproverProcess",
             Throw[WolframInstitute`THVMLink`ATP`TEproverProofObject[theory, thm,
-                FilterRules[Join[methodSubs, {opts}],
+                FilterRules[Join[methodSubs, {opts}, processDefaults],
                     Options[WolframInstitute`THVMLink`ATP`TEproverProofObject]]],
                 "TATPError"]
         ];
@@ -4304,7 +4345,7 @@ TFindProof[cj : (_List | _ForAll | _Equal | _Unequal | Inactive[Equal][_, _] | I
 (* An Association (e.g. the whole NotableTheorems table) "just does
    Values": each value is proved on its own, so a theorem that fails to
    prove is $Failed in its slot rather than failing the whole call. *)
-TFindProof[thms_Association, theory_String, opts : OptionsPattern[]] :=
+TFindProof[thms_Association, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpecQ[theory] :=
     atpProveFromTheory[#, theory, opts] & /@ Values[thms];
 TFindProof[thms_Association, theory_String, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     atpProveFromTheory[#, theory, returnSpec, opts] & /@ Values[thms];(* Expression form: run thvm's C ATP completion engine on the
@@ -4350,7 +4391,15 @@ TFindProof[path_String ? FileExistsQ, returnSpec_ ? atpReturnSpecQ, opts : Optio
     Block[{$atpProblemName = FileNameTake[path]},
         tptpDispatch[TPTPImport[File[path]], returnSpec, opts]]
 
-tptpDispatch[imported_Association, returnSpec_, opts : OptionsPattern[TFindProof]] := If[
+(* A problem TPTPImport already parsed. *)
+atpTptpImportedQ[a_Association] := MatchQ[Keys[a], {"Axioms", "Conjecture"}]
+atpTptpImportedQ[_] := False
+TFindProof[imported_Association ? atpTptpImportedQ, opts : OptionsPattern[]] :=
+    tptpDispatch[imported, opts]
+TFindProof[imported_Association ? atpTptpImportedQ, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
+    tptpDispatch[imported, returnSpec, opts]
+
+tptpDispatch[imported_Association, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[TFindProof]] := If[
     "SMT" === OptionValue[TFindProof, {opts}, Method],
     atpSmtProject[tptpDispatchSMT[imported], returnSpec],
     If[ imported["Conjecture"] === None,
@@ -4372,11 +4421,17 @@ tptpDispatch[imported_Association, returnSpec_, opts : OptionsPattern[TFindProof
    sk_c1 -> skC1, op_overtilde -> opOvertilde, $true -> Dollar$true.
    Symbol[] rejects identifier strings with `_` (parsed as Blank) or
    leading `$` (parsed as $-prefix); this fold side-steps both. *)
+(* A name that is still no identifier (a space, a leading digit) keeps only its letters and digits,
+   with an "s" in front when it would start with a digit; otherwise Symbol[] fails, leaves its
+   string argument behind, and tptpInternalize's //. converts that string again forever. *)
+tptpIdentifier[t_String] := If[ StringMatchQ[t, RegularExpression["[A-Za-z$][A-Za-z0-9$]*"]], t,
+    With[{u = StringReplace[t, RegularExpression["[^A-Za-z0-9]"] -> ""]},
+        If[ u === "" || DigitQ[StringTake[u, 1]], "s" <> u, u]]]
 tptpStringToSymbol[s_String] := With[
-    {name = "Global`" <> Which[
+    {name = "Global`" <> tptpIdentifier @ Which[
         StringStartsQ[s, "$"], "Dollar" <> StringDrop[s, 1],
         StringContainsQ[s, "_"], With[{parts = StringSplit[s, "_"]},
-            First[parts] <> StringJoin[Capitalize /@ Rest[parts]]],
+            StringJoin[First[parts, ""], Capitalize /@ Rest[parts]]],
         True, s
     ]},
     (* a short name the prove entry's Block localizes is already inert, and ClearAll refuses it *)
@@ -4474,9 +4529,18 @@ TFindProof[goal_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : OptionsPatte
    ATP_Equationalize.wl. *)
 atpPredicateProblemQ[conjecture_, axioms_List] :=
     ! eqzEquationalProblemQ[conjecture, axioms] && ! atpGroundBooleanProblemQ[conjecture, axioms];
+TFindProof::noneq = "The problem is not equational after equationalization; `1` is left.";
+(* A problem that is still not equational would come back to the predicate path forever. *)
 atpEquationalizeGoal[conjecture_, axioms_List] :=
     With[{eq = atpEquationalizeProblem[conjecture, axioms]},
-        {If[Length[eq[[1]]] === 1, First[eq[[1]]], eq[[1]]], eq[[2]]}];
+        With[{goal = If[Length[eq[[1]]] === 1, First[eq[[1]]], eq[[1]]]},
+            If[ eqzEquationalProblemQ[goal, eq[[2]]],
+                {goal, eq[[2]]},
+                Message[TFindProof::noneq, First[Select[Flatten[{goal, eq[[2]]}], ! eqzIsEquationQ[#] &], goal]];
+                $Failed
+            ]
+        ]
+    ];
 (* Method -> "WaldmeisterProcess" (bare or a {"WaldmeisterProcess", ...}
    suboption list) routes to the real Waldmeister binary instead of the
    internal completion engine. *)
@@ -4496,7 +4560,8 @@ TFindProof[conjecture_, axioms_List, opts : OptionsPattern[]] /;
     If[ atpWaldmeisterProcessQ[{opts}],
         atpWaldmeisterPredicateProof[conjecture, axioms, opts],
         With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-            atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]
+            If[ eq === $Failed, $Failed,
+                atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]]
         ]
     ];
 TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] /;
@@ -4504,13 +4569,14 @@ TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : Option
     Which[
         ! MatchQ[returnSpec, "ProofObject"],
             With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-                TFindProof[eq[[1]], eq[[2]], returnSpec, opts]
+                If[ eq === $Failed, $Failed, TFindProof[eq[[1]], eq[[2]], returnSpec, opts]]
             ],
         atpWaldmeisterProcessQ[{opts}],
             atpWaldmeisterPredicateProof[conjecture, axioms, opts],
         True,
             With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-                atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]
+                If[ eq === $Failed, $Failed,
+                    atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]]
             ]
     ];
 (* Already-equational problem under Method -> "WaldmeisterProcess" (the
@@ -4632,7 +4698,8 @@ TFindProof[conjecture_, axioms_List, OptionsPattern[]] :=
                 atpNormalizeAxioms[axioms],
                 MaxSteps -> OptionValue[MaxSteps],
                 Method -> OptionValue[Method],
-                TimeConstraint -> OptionValue[TimeConstraint]],
+                TimeConstraint -> OptionValue[TimeConstraint],
+                PortfolioFrontLoad -> OptionValue[PortfolioFrontLoad]],
             "ProofObject"]], {General::shdw}];
 TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, OptionsPattern[]] :=
     Quiet[Block[{
@@ -4653,7 +4720,8 @@ TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, OptionsPatter
                 atpNormalizeAxioms[axioms],
                 MaxSteps -> OptionValue[MaxSteps],
                 Method -> OptionValue[Method],
-                TimeConstraint -> OptionValue[TimeConstraint]],
+                TimeConstraint -> OptionValue[TimeConstraint],
+                PortfolioFrontLoad -> OptionValue[PortfolioFrontLoad]],
             returnSpec]], {General::shdw}];
 
 (* Run a goal-directed proof and return a bundle:
@@ -4862,6 +4930,8 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
             (* Record this slice's outcome for the "PortfolioTrace"
                return spec: which Method, how long the C-engine call
                took, whether it produced a verifying ProofObject. *)
+            (* A problem the encoder refuses is refused by every config. *)
+            If[ FailureQ[atpR], Break[]];
             AppendTo[atpTrace, <|
                 "Method" -> atpSched[[i]],
                 "WallTime" -> Lookup[atpR, "WallTime", Missing["NotAvailable"]],
@@ -5110,8 +5180,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
    saturated rule set as Inactive[Equal] pairs. *)
 atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     Catch[
-    Module[{enc, cRes, atpWall, atpMethodCfg, atpWallTime,
-            axEq, varNames, ds, po},
+    Module[{enc, cRes, atpWall, atpMethodCfg, atpWallTime, deadline, tStart = AbsoluteTime[]},
         atpEnsureWmHeap[OptionValue[Method]];
         atpWall = If[ OptionValue[TimeConstraint] =!= Infinity,
             N[OptionValue[TimeConstraint]], 0.];
@@ -5127,46 +5196,57 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
         {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
             enc, atpResolveMaxSteps[OptionValue[MaxSteps], OptionValue[Method]],
             atpWall, Sequence @@ atpMethodCfg];
-        (* Construct a ProofObject with "Theorems" -> None.  Use the
-           same buildCplDataset path the goal-directed bundle uses,
-           which now recognises the (conjPair == {0, 0}, no main
-           steps) no-goal mode and enumerates every TRACE_CP entry so
-           the dataset surfaces the saturated rule set with full
-           Construct / Position / Rule / Orientation provenance - same
-           shape as the goal-directed case, minus Hypothesis and
-           Conclusion (no goal). *)
-        axEq = holdToProofStmt /@ enc["AxHCsRaw"];
-        varNames = cRes["VarSyms"];
-        ds = Block[{$RecursionLimit = Max[$RecursionLimit, 16384]},
-            Check[
-                Quiet[buildCplDataset[enc, enc["ConjPair"], cRes],
-                    {General::newsym, RuleDelayed::rhs}],
-                $Failed]];
-        po = If[ ds === $Failed || ! ListQ[ds],
-            (* Fallback: minimal axioms-only dataset so the
-               ProofObject is still ProofObjectQ-valid. *)
-            ProofObject["EquationalLogic", None, axEq,
-                <|"Variables" -> varNames, "Constants" -> {},
-                  "Proof" -> MapIndexed[
-                    {eq, idx} |-> ({"Axiom", First[idx]} ->
-                        <|"Statement" -> (eq /. Inactive[Equal] -> Equal),
-                          "Proof" -> <||>|>),
-                    axEq]|>],
-            ProofObject["EquationalLogic", None, axEq,
-                <|"Variables" -> Union[varNames,
-                    Cases[ds, s_Symbol /; atpXVarQ[s], {0, Infinity}]],
-                  "Constants" -> {}, "Proof" -> ds|>]];
-        <|
-            "enc" -> enc,
-            "cRes" -> cRes,
-            "ProofObject" -> po,
-            "RelevantAxioms" -> <|"Mode" -> None, "Kept" -> axioms, "Dropped" -> {}|>,
-            "AppliedMethod" -> OptionValue[Method],
-            "WallTime" -> atpWallTime
-        |>
+        deadline = If[ atpWall > 0., tStart + atpWall, Infinity];
+        (* The ProofObject's dataset walks every critical pair of the saturation, minutes for a
+           large one, so it is built only when a return spec reads it ("ProofObject", "TPTP"), in
+           what is left of the TimeConstraint. *)
+        With[{e = enc, c = cRes, d = deadline},
+            <|
+                "enc" -> enc,
+                "cRes" -> cRes,
+                "ProofObject" :> atpCompletionProofObject[e, c, d],
+                "RelevantAxioms" -> <|"Mode" -> None, "Kept" -> axioms, "Dropped" -> {}|>,
+                "AppliedMethod" -> OptionValue[Method],
+                "WallTime" -> atpWallTime
+            |>]
     ],
     "TATPError"
 ];
+
+TFindProof::cplpo = "The completed rule set has `1` rules; building their derivations exceeds the TimeConstraint, so the ProofObject lists the axioms only. \"Lemmas\" gives the rules.";
+
+(* Construct a ProofObject with "Theorems" -> None.  Use the same buildCplDataset path the
+   goal-directed bundle uses, which recognises the (conjPair == {0, 0}, no main steps) no-goal
+   mode and enumerates every TRACE_CP entry so the dataset surfaces the saturated rule set with
+   full Construct / Position / Rule / Orientation provenance - same shape as the goal-directed
+   case, minus Hypothesis and Conclusion (no goal). *)
+atpCompletionProofObject[enc_, cRes_, deadline_] := Module[{axEq, varNames, ds, build},
+    axEq = holdToProofStmt /@ enc["AxHCsRaw"];
+    varNames = cRes["VarSyms"];
+    build = Function[Block[{$RecursionLimit = Max[$RecursionLimit, 16384]},
+        Check[
+            Quiet[buildCplDataset[enc, enc["ConjPair"], cRes],
+                {General::newsym, RuleDelayed::rhs}],
+            $Failed]]];
+    ds = If[ deadline === Infinity, build[],
+        TimeConstrained[build[], Max[deadline - AbsoluteTime[], 0.01], $Aborted]];
+    If[ ds === $Aborted,
+        Message[TFindProof::cplpo, Length[atpMainRulesLemmas[cRes]]]];
+    If[ ds === $Failed || ds === $Aborted || ! ListQ[ds],
+        (* Fallback: minimal axioms-only dataset so the
+           ProofObject is still ProofObjectQ-valid. *)
+        ProofObject["EquationalLogic", None, axEq,
+            <|"Variables" -> varNames, "Constants" -> {},
+              "Proof" -> MapIndexed[
+                {eq, idx} |-> ({"Axiom", First[idx]} ->
+                    <|"Statement" -> (eq /. Inactive[Equal] -> Equal),
+                      "Proof" -> <||>|>),
+                axEq]|>],
+        ProofObject["EquationalLogic", None, axEq,
+            <|"Variables" -> Union[varNames,
+                Cases[ds, s_Symbol /; atpXVarQ[s], {0, Infinity}]],
+              "Constants" -> {}, "Proof" -> ds|>]]
+]
 
 (* Single non-list axiom: auto-wrap and re-dispatch.  Same shape as
    the (conj, single_ax) wrap, at the completion entry. *)

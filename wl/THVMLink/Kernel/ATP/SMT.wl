@@ -47,6 +47,7 @@ SetUsage[TSmtDecide, "TSmtDecide[formula$] decides a quantifier-free Boolean com
 Returns an Association keyed by \"Status\" (\"SAT\" or \"UNSAT\"); on SAT a \"Model\" key gives a satisfying atom assignment (each atom to True or False) certified by congruence closure.
 Handles the And, Or, Not, Implies, Equivalent, and Xor combinators."];
 
+TSmtDecide::theory = "TSmtDecide decides Boolean combinations of equalities over uninterpreted functions and predicates; `1` is arithmetic.";
 TSatEUF::badin = "TSatEUF inputs must be lists of equalities (HoldPattern[Equal[_,_]]) " <> "and disequalities (HoldPattern[Unequal[_,_]]); got `1` / `2`.";
 
 Begin["`Private`"];
@@ -275,7 +276,7 @@ groundQ[expr_] := FreeQ[expr, _Pattern | _Blank | _BlankSequence | _BlankNullSeq
    out one truth assignment and there are 2^|atoms| assignments
    total. *)
 
-TSmtDecide[formula_] := Block[{atoms, propVars, abstraction, blocking = True, instance, model, theoryRes, eqs, diseqs, normFormula},
+TSmtDecide[formula_] := Block[{atoms, propVars, abstraction, blocking = True, instance, model, theoryRes, eqs, diseqs, normFormula, arith},
     (* Strip Inactive[Equal] / Inactive[Unequal] so the atom collector
        and the SatisfiabilityInstances boolean kernel see bare Equal /
        Unequal heads.  Without this, an Inactive-wrapped atom list
@@ -283,6 +284,11 @@ TSmtDecide[formula_] := Block[{atoms, propVars, abstraction, blocking = True, in
        filter never fires, and the formula falls through to the empty-
        atoms TrueQ branch (UNSAT for every non-literally-True input). *)
     normFormula = formula /. {Inactive[Equal][a_, b_] :> a == b, Inactive[Unequal][a_, b_] :> Unequal[a, b]};
+    If[ (arith = SelectFirst[smtAtoms[normFormula], ! FreeQ[#, $smtArithmetic] &, None]) =!= None,
+        Message[TSmtDecide::theory, arith];
+        Return[$Failed]
+    ];
+    normFormula = smtEncodePredicates[normFormula];
     atoms = collectAtoms[normFormula];
     If[atoms === {}, Return @ <|"Status" -> If[TrueQ[normFormula], "SAT", "UNSAT"], "Model" -> <||>|>];
     propVars = Table[Unique["smt$p"], {Length[atoms]}];
@@ -293,13 +299,25 @@ TSmtDecide[formula_] := Block[{atoms, propVars, abstraction, blocking = True, in
         model = AssociationThread[atoms, First @ instance];
         {eqs, diseqs} = modelToLiterals[model];
         theoryRes = TSatEUF[eqs, diseqs];
-        If[theoryRes["Status"] === "SAT", Return @ <|"Status" -> "SAT", "Model" -> model|>];
+        If[theoryRes["Status"] === "SAT", Return @ <|"Status" -> "SAT", "Model" -> Association[Replace[Normal[model], {((p_ == smt$true) -> v_) :> (p -> v), ((p_ != smt$true) -> v_) :> (p -> ! v)}, {1}]]|>];
         (* T-conflict: forbid this exact propositional assignment. *)
         blocking = And[blocking, Not[And @@ MapThread[If[#2, #1, Not[#1]] &, {propVars, First @ instance}]]];
     ]
 ]
 
 collectAtoms[formula_] := Sort @ DeleteDuplicates @ Cases[formula, (_Equal | _Unequal), {0, Infinity}, Heads -> False]
+
+(* The maximal subterms below the Boolean connectives. *)
+$smtConnectives = And | Or | Not | Implies | Equivalent | Xor | Nand | Nor;
+smtAtoms[f_] := DeleteDuplicates @ Flatten @ smtAtomsOf[f]
+smtAtomsOf[h_[args___]] /; MatchQ[h, $smtConnectives] := smtAtomsOf /@ {args}
+smtAtomsOf[a_] := {a}
+(* An uninterpreted predicate atom p[a] becomes the equality p[a] == true, so congruence closure
+   also covers it (a == b forces p[a] and p[b] to agree). *)
+smtEncodePredicates[h_[args___]] /; MatchQ[h, $smtConnectives] := h @@ (smtEncodePredicates /@ {args})
+smtEncodePredicates[a : (_Equal | _Unequal | True | False)] := a
+smtEncodePredicates[a_] := a == smt$true
+$smtArithmetic = Less | Greater | LessEqual | GreaterEqual | Inequality | _Real | _Rational | Plus | Times | Power;
 
 modelToLiterals[model_Association] := Module[{eqAcc = {}, diseqAcc = {}},
     KeyValueMap[

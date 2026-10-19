@@ -52,13 +52,15 @@ wrap[expr_, head_ : List] := Replace[expr, x : Except[_head] :> head[x]]
    Guard against this by escaping the canonical names if the global
    binding already exists.  Without the guard, any of c / m / x / a /
    b / d / f / g / h would be a footgun. *)
-CanonicalizePatterns[expr_] := Module[{
+(* avoid lists names the canonical names must skip: a goal's constants, so a theory's variable
+   a_ never shares a name with the goal's constant a. *)
+CanonicalizePatterns[expr_, avoid_List : {}] := Module[{
     chars = CharacterRange["a", "z"],
     patts = DeleteDuplicates[Cases[expr, _Pattern, All, Heads -> True]]
 },
-    chars = First @ NestWhile[
+    chars = Select[First @ NestWhile[
         Apply[{cs, k} |-> {Join[cs, (StringJoin[#, ToString[k]] &) /@ cs], k + 1}],
-        {chars, 1}, Length[First[#]] < Length[patts] &];
+        {chars, 1}, Length[Complement[First[#], avoid]] < Length[patts] &], ! MemberQ[avoid, #] &];
     expr /. MapIndexed[
         With[{canonical = Pattern @@ {
                 atpFreshGlobalSymbol[Extract[chars, #2]], Last[#1]}},

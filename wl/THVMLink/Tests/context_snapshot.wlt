@@ -201,21 +201,19 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* Initializing an Uninitialized snapshot WITHOUT ZeroFill throws. *)
+    (* Initializing an Uninitialized snapshot WITHOUT ZeroFill issues a message and
+       stays unevaluated, before anything is written to the heap. *)
     TInit[];
     TReset[];
-    Catch[
-        Module[{h, stripped},
-            h = TContextSnapshot[TTensor[{2}, {1., 2.}]];
-            stripped = TContextStrip[h];
-            TReset[];
-            TInitialize[stripped]
-        ],
-        "TInitialize::uninit"
+    Module[{h, stripped},
+        h = TContextSnapshot[TTensor[{2}, {1., 2.}]];
+        stripped = TContextStrip[h];
+        TReset[];
+        MatchQ[TInitialize[stripped], HoldPattern[TInitialize[_TContext]]]
     ],
-    $Failed,
+    True,
     {TInitialize::uninit},
-    TestID -> "heap-init/uninit-without-zerofill-throws"
+    TestID -> "heap-init/uninit-without-zerofill-unevaluated"
 ]
 
 (* === TContextToTermTree projection === *)
@@ -512,4 +510,19 @@ VerificationTest[
     ],
     {True, True},
     TestID -> "term/walker/dp-projection-wrapping"
+]
+
+(* A NUM carries its dtype: TTermExpr and Term name it for every dtype but
+   i32, and TInitialize rebuilds the same dtype from the Term form. *)
+VerificationTest[
+    {TTermExpr[TNum[3]], TTermExpr[TNum[1065353216, "f32"]], TTermExpr[TNum[1, "bool"]]},
+    {"NUM"[3], "NUM"["f32", 1065353216], "NUM"["bool", 1]},
+    TestID -> "term/num-dtype-in-ttermexpr"
+]
+
+VerificationTest[
+    With[{f = TNum[1065353216, "f32"]},
+        {Term[f], TTermExt[TInitialize[Term[f]]] === TTermExt[f], TTermVal[TInitialize[Term[f]]]}],
+    {Term["NUM", "f32", 1065353216], True, 1065353216},
+    TestID -> "term/num-dtype-round-trips"
 ]

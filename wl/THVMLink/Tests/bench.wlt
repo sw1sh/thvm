@@ -113,3 +113,11 @@ VerificationTest[
     True,
     TestID -> "bench/export-writes-readable-file"
 ]
+
+(* A spec without InitFn, StepFn or a positive NumSteps is refused with TBench::spec. *)
+VerificationTest[
+    TBench[<|"Name" -> "x"|>],
+    $Failed,
+    {TBench::spec},
+    TestID -> "bench/spec-checked"
+]

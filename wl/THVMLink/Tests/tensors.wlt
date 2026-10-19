@@ -169,3 +169,92 @@ VerificationTest[
     {1, True},
     TestID -> "TMaterialize/reduce-output-shape"
 ]
+
+(* Elementwise sugar broadcasts like numpy/tinygrad: right-aligned, size-1 axes grow. *)
+VerificationTest[
+    With[{m = TTensorCreate[{{1., 5.}, {3., 2.}}]},
+        {Normal @ TRealize[m + TTensorCreate[{10., 20.}]], Normal @ TRealize[m * TTensorCreate[{{10.}, {100.}}]]}],
+    {{{11., 25.}, {13., 22.}}, {{10., 50.}, {300., 200.}}},
+    TestID -> "tensors/sugar-broadcasts"
+]
+
+(* Shapes that cannot broadcast give General::bcast and stay unevaluated. *)
+VerificationTest[
+    MatchQ[TTensorCreate[{{1., 5.}, {3., 2.}}] + TTensorCreate[{1., 2., 3.}], _Plus],
+    True,
+    {General::bcast, General::bcast},
+    TestID -> "tensors/sugar-broadcast-incompatible"
+]
+
+(* The raw constructors refuse operands that would read past a buffer: different element
+   counts, a reshape to another count, a non-permutation, an expand the source cannot take. *)
+VerificationTest[
+    With[{m = TTensorCreate[{{1., 5.}, {3., 2.}}], v = TTensorCreate[{1., 2., 3.}]},
+        Head /@ {TUOpAdd[m, v], TUOpReshape[v, {2, 2}], TUOpPermute[m, {1, 1}], TUOpExpand[v, {3, 2}]}],
+    {TUOpAdd, TUOpReshape, TUOpPermute, TUOpExpand},
+    {TUOpAdd::shape, TUOpReshape::shape, TUOpPermute::shape, TUOpExpand::shape},
+    TestID -> "tensors/uop-shape-checks"
+]
+
+(* Input that is not a term or tensor data gives a message and stays unevaluated, instead of
+   reaching the library and building a malformed term. *)
+VerificationTest[
+    {TRealize[foo], TRealize[3], TTensorCreate[{{1, 2}, {3}}], TTensorCreate[{1, 2}, "bogus"], TUOpConst[foo], TUOpReduce[TTensorCreate[{1., 2.}], 0, "PROD"]},
+    {TRealize[foo], TRealize[3], TTensorCreate[{{1, 2}, {3}}], TTensorCreate[{1, 2}, "bogus"], TUOpConst[foo], TUOpReduce[TTensorCreate[{1., 2.}], 0, "PROD"]},
+    {TRealize::term, TRealize::term, TTensorCreate::data, TTensorCreate::dtype, TUOpConst::args, TUOpReduce::args},
+    SameTest -> (Length[#1] === Length[#2] && And @@ MapThread[MatchQ[Head[#1], Head[#2]] &, {#1, #2}] &),
+    TestID -> "tensors/input-checks"
+]
+
+VerificationTest[
+    TUOpReduce[TTensorCreate[{1., 2.}], 3, "SUM"],
+    _TUOpReduce,
+    {TUOpReduce::args},
+    SameTest -> MatchQ,
+    TestID -> "tensors/reduce-axis-past-rank"
+]
+
+(* TMatMul needs matching inner dimensions; TGather an index with one position per slice;
+   TSet a source with the destination's element count.  Each refusal is a message. *)
+VerificationTest[
+    With[{a = TTensorCreate[{{1., 2.}, {3., 4.}}], x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}], d = TTensorCreate[{1., 2., 3.}]},
+        Head /@ {TMatMul[a, TTensorCreate[{{1., 2., 3.}}]], TGather[x, 1, {1}], TSet[d, TTensorCreate[{5., 6.}]]}],
+    {TMatMul, TGather, TSet},
+    {TMatMul::dims, TGather::args, TSet::src},
+    TestID -> "tensors/matmul-gather-set-checks"
+]
+
+VerificationTest[
+    With[{x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}]}, Normal @ TRealize[TGather[x, 1, {2, 0}]]],
+    {{3.}, {4.}},
+    TestID -> "tensors/gather-per-row"
+]
+
+(* TUOpKind names a UOP's op, a grad projection "GRAD", and any other term by its tag. *)
+VerificationTest[
+    With[{x = TTensorCreate[{1., 2.}]}, {TUOpKind[x], TUOpKind[x + x], TUOpKind[TGrad[Total[x^2], x]]}],
+    {"TEN", "ADD", "GRAD"},
+    TestID -> "tensors/tuopkind-names"
+]
+
+(* A TKernel in arithmetic stands for its output term; kernel["Source", fmt] is TKernelSource. *)
+VerificationTest[
+    With[{x = TTensorCreate[{1., 2.}]}, With[{k = TKernel[TMaterialize[x^2]]}, {Normal @ TRealize[k + x], Normal @ TRealize[2. k]}]],
+    {{2., 6.}, {2., 8.}},
+    TestID -> "tensors/tkernel-arithmetic"
+]
+
+VerificationTest[
+    (TRealize[TTensorCreate[{1., 2.}] * 3.]; StringQ[TKernel[TKernelCount[] - 1]["Source", "C"]]),
+    True,
+    TestID -> "tensors/tkernel-source-format"
+]
+
+(* tinygrad promotion: an integer tensor with a real scalar, or mixed with a float tensor,
+   computes in f32; integer with integer stays integer. *)
+VerificationTest[
+    With[{i = TTensorCreate[{1, 2}], f = TTensorCreate[{0.5, 1.5}]},
+        {Normal @ TRealize[i * 2.5], TTensorDType[TRealize[i * 2.5]], Normal @ TRealize[i * 3], TTensorDType[TRealize[i * 3]], Normal @ TRealize[i + f]}],
+    {{2.5, 5.}, "f32", {3, 6}, "i32", {1.5, 3.5}},
+    TestID -> "tensors/int-float-promotion"
+]

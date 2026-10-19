@@ -359,11 +359,20 @@ atpReconstructPredicateProof[P_, propositions_, axioms_] /; atpReconstructableQ[
    (which converts ForAll -> Pattern for thvm's engine) and by the
    Waldmeister .pr writer (which reads variables from ForAll, so it must
    NOT be Pattern-converted). *)
+(* A pattern variable (x_) in a predicate formula is universal, as in FindEquationalProof; the
+   equationalizer reads variables from ForAll only, so it gets the ForAll form, over fresh symbols
+   (the pattern's own name may have a value). *)
+eqzCloseFree[f_] := With[{ps = DeleteDuplicates @ Cases[f, Verbatim[Pattern][_Symbol, _], {0, Infinity}, Heads -> True]},
+    If[ ps === {}, f,
+        With[{fresh = Table[Unique["eqzf$"], Length[ps]]},
+            ForAll[fresh, f /. Thread[ps -> fresh]]]]
+]
+
 atpEquationalizeProblemForAll[propositions_, axioms_] := Module[{
     foldedPropositions, foldedAxioms, eqProps, eqAxioms
 },
-    foldedPropositions = Map[eqzFoldQuantifiers, Flatten[{propositions}]];
-    foldedAxioms = Map[eqzFoldQuantifiers, Flatten[{axioms}]];
+    foldedPropositions = Map[eqzFoldQuantifiers @* eqzCloseFree, Flatten[{propositions}]];
+    foldedAxioms = Map[eqzFoldQuantifiers @* eqzCloseFree, Flatten[{axioms}]];
 
     eqProps = Map[eqzEquationalize, foldedPropositions];
     eqAxioms = Map[eqzEquationalize, foldedAxioms];

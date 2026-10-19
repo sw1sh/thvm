@@ -140,3 +140,23 @@ VerificationTest[
     {ProofObject, 3, 3},
     TestID -> "Lift/multi-conjunct/Huntington_ImpliesRobbins"
 ]
+
+(* TWaldmeisterProof stops at its time limit on a goal that does not follow (commutativity from
+   the group axioms) instead of running on. *)
+VerificationTest[
+    If[ ! StringQ[WolframInstitute`THVMLink`ATP`Private`wmBinary[Automatic]], {"TimedOut", True},
+        Module[{file = FileNameJoin[{$TemporaryDirectory, "thvm_wm_nontheorem.pr"}], r},
+            Export[file, StringRiffle[{
+                "NAME          NonTheorem", "MODE          PROOF", "SORTS         ANY",
+                "SIGNATURE     m: ANY ANY -> ANY", "              i: ANY -> ANY",
+                "              e: -> ANY", "              a: -> ANY", "              b: -> ANY",
+                "ORDERING      KBO", "              m=1, i=1, e=1, a=1, b=1", "              i > m > e > a > b",
+                "VARIABLES     X, Y, Z: ANY",
+                "EQUATIONS     m(m(X,Y),Z) = m(X,m(Y,Z))", "              m(e,X) = X", "              m(i(X),X) = e",
+                "CONCLUSION    m(a,b) = m(b,a)"}, "\n"], "Text"];
+            r = TWaldmeisterProof[file, TimeConstraint -> 2];
+            DeleteFile[file];
+            {r["Status"], r["Seconds"] < 5}]],
+    {"TimedOut", True},
+    TestID -> "Waldmeister/time-limit"
+]

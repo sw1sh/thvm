@@ -766,7 +766,7 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] := Block[{
     legendStatuses = DeleteDuplicates[#["status"] & /@ packed];
     Graphics[
         {
-            b |-> Block[{y0 = b["y_range"][[1]], y1 = b["y_range"][[2]], h, inset, x0, x1},
+            (b |-> Block[{y0 = b["y_range"][[1]], y1 = b["y_range"][[2]], h, inset, x0, x1},
                 h = y1 - y0;
                 inset = 0.05 h;
                 x0 = b["alloc_depth"];
@@ -812,7 +812,7 @@ TMemoryPlanGantt[TMemoryPlan[a_Association], opts : OptionsPattern[]] := Block[{
                         Sequence @@ {}
                     ]
                 }
-            ] /@ packed
+            ]) /@ packed
         },
         Frame -> True,
         FrameTicks -> {

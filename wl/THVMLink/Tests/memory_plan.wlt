@@ -129,3 +129,21 @@ VerificationTest[
     True,
     TestID -> "memory-plan/makeboxes-renders-summary"
 ]
+
+VerificationTest[
+    (* the Gantt draws one bar per buffer (the bar map was parsed as one Function) *)
+    TReset[];
+    a = TTensorCreate[Range[1., 64.]];
+    TMaterialize[Total[a^2] * Total[a]];
+    g = TMemoryPlanGantt[TMemoryPlan[]];
+    {Length[Cases[g, _Rectangle, Infinity]] > 0, FreeQ[g, _Function]},
+    {True, True},
+    TestID -> "memory-plan/gantt-draws-bars"
+]
+
+VerificationTest[
+    (* byte counts are whole; KiB and up keep three significant figures *)
+    WolframInstitute`THVMLink`Private`formatBytes /@ {4, 140, 1536, 3 * 1024^2},
+    {"4B", "140B", "1.50KiB", "3.00MiB"},
+    TestID -> "memory-plan/format-bytes"
+]

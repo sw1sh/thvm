@@ -515,6 +515,12 @@ TKernel /: Information[k:TKernel[_Association] /; tKernelInternalQ[k]] := Associ
 k_TKernel[] /; tKernelInternalQ[k] := TWnf[k[[1]]["Term"]]
 
 k_TKernel[prop_String] /; tKernelInternalQ[k] := tKernelProp[k, prop]
+k_TKernel[prop_String, arg_] /; tKernelInternalQ[k] := tKernelProp[k, prop, arg]
+
+(* A kernel in arithmetic stands for its output term, as it does inside TUOp* constructors. *)
+TKernel /: Plus[k_TKernel ? tKernelInternalQ, rest__] := Plus[k[[1]]["Term"], rest]
+TKernel /: Times[k_TKernel ? tKernelInternalQ, rest__] := Times[k[[1]]["Term"], rest]
+TKernel /: Dot[a___, k_TKernel ? tKernelInternalQ, b___] := Dot[a, k[[1]]["Term"], b]
 
 k_TKernel[args__TTerm] /; tKernelInternalQ[k] :=
     Failure["TKernel", <|

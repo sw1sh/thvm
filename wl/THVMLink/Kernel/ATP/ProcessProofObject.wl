@@ -250,7 +250,7 @@ fastParseFormula[body_String] := Block[{op, parts, l, r, sep},
         reverseEncodeFormula[op[l, r]]
     ]
 ]
-fastParseFormula[other_] := other
+fastParseFormula[other_] := reverseEncodeFormula[other]
 
 (* The canonical SZS-rule -> thvm-construct mapping.  Editable as a
    public Association.  Defaults cover the standard saturation-prover
@@ -274,7 +274,13 @@ $SZSRuleToConstruct = <|
     "factoring" -> "SubstitutionLemma",
     "resolution" -> "CriticalPairLemma",
     "binary_resolution" -> "CriticalPairLemma",
-    "paramodulation" -> "CriticalPairLemma"
+    "paramodulation" -> "CriticalPairLemma",
+    (* E's names: spm/pm superposition and paramodulation, rw rewriting, cn clause normalization
+       (closing x != x). *)
+    "spm" -> "CriticalPairLemma",
+    "pm" -> "CriticalPairLemma",
+    "rw" -> "SubstitutionLemma",
+    "cn" -> "Conclusion"
 |>
 
 constructTypeOf[rule_String] := Lookup[$SZSRuleToConstruct, rule, "SubstitutionLemma"]
@@ -1168,6 +1174,7 @@ Options[TEproverProofObject] = {
 
 TEproverProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{epR = TEproverProof[theory, thm, FilterRules[{opts}, Options[TEproverProof]]], liftQ = TrueQ @ OptionValue["LiftToProofObject"], parseOpt, assoc},
     parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
+    If[ ! AssociationQ[epR], Return[$Failed]];
     If[ epR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Eprover",
@@ -1187,6 +1194,7 @@ TEproverProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
    SZS-to-ProofObject builder. *)
 TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{vampR = TVampireProof[theory, thm, FilterRules[{opts}, Options[TVampireProof]]], liftQ = TrueQ @ OptionValue["LiftToProofObject"], parseOpt, assoc},
     parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
+    If[ ! AssociationQ[vampR], Return[$Failed]];
     If[ vampR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Vampire",
@@ -1246,6 +1254,7 @@ TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /; FileExte
     (* LiftToProofObject implies ParseFormulas: the lift needs
        WL-parsed formula bodies to walk. *)
     parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
+    If[ ! AssociationQ[wmR], Return[$Failed]];
     If[ wmR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Waldmeister",
@@ -1269,6 +1278,7 @@ Options[TTweeProofObject] = {
 }
 
 TTweeProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{tR = TTweeProof[theory, thm, FilterRules[{opts}, {TimeConstraint, "Binary"}]], ds, axs, lems},
+    If[ ! AssociationQ[tR], Return[$Failed]];
     If[ tR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Twee",
@@ -1291,7 +1301,7 @@ TTweeProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{t
             "Backend" -> "Twee-TSTP",
             "Status" -> "Proved",
             "Goal" -> Missing["NotEmittedByTwee"],
-            "Axioms" -> #["Statement"] & /@ axs,
+            "Axioms" -> (#["Statement"] & /@ axs),
             "ProofDataset" -> ds,
             "ProofLength" -> tR["ProofLength"],
             "RuleHistogram" -> <|"twee-rewrite" -> Length[lems]|>

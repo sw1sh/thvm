@@ -61,7 +61,8 @@ TMultiwayGraph[t$] and TMultiwayGraph[t$, max$] run TMultiTrace on a TTerm t$ in
 steps$ is a list of step Associations carrying \"CanonicalSlice\", \"SliceBoxes\", and \"Events\"; unlike TCausalGraph this needs slice info, so a flat trace is rejected.
 Vertices are slice leaves: per step the active term's SUP-head is unfolded so a SUP contributes one vertex per leaf (recursively, until non-SUP heads), and a non-SUP head contributes a single vertex. Edges connect leaves of consecutive slices, coloured by the firing event's family (TERM, SLIDE, FORK, SPLIT, MERGE, PRUNE, DIST).
 Options: Branchial (overlay a dashed branchial clique between new sibling leaves, default False), VertexLabels, PlotLegends (Automatic emits a SwatchLegend of family colours)."];
-TMultiwayGraph::needsteps = "TMultiwayGraph requires step records (from TMultiSteps), not a flat trace.  Use TCausalGraph[trace] for an event-id-vertices view, or call TMultiSteps to capture the slice canonicals needed for the multiway view.";
+TMultiwayGraph::needsteps = "TMultiwayGraph takes step records (Associations from TMultiTrace with the \"Events\" and \"CanonicalSlice\" keys) or a term; for a flat trace use TCausalGraph.";
+TMultiTrace::key = "`1` are not TMultiTrace keys; the keys are `2`.";
 
 Begin["`Private`"];
 
@@ -144,10 +145,13 @@ resolveKeys[k_String] := {k}
    list / All keys keep the list-of-associations shape. *)
 TMultiTrace[expr_, opts : OptionsPattern[]] := multiTraceImpl[expr, $multiDefaultKeys, Infinity, OptionValue["DiagramSeeds"], None]
 TMultiTrace[expr_, max_Integer ? Positive, opts : OptionsPattern[]] := multiTraceImpl[expr, $multiDefaultKeys, max, OptionValue["DiagramSeeds"], None]
-TMultiTrace[expr_, key_String, opts : OptionsPattern[]] := multiTraceImpl[expr, {key}, Infinity, OptionValue["DiagramSeeds"], key]
-TMultiTrace[expr_, keys : (_List | All), opts : OptionsPattern[]] := multiTraceImpl[expr, resolveKeys[keys], Infinity, OptionValue["DiagramSeeds"], None]
-TMultiTrace[expr_, key_String, max_Integer ? Positive, opts : OptionsPattern[]] := multiTraceImpl[expr, {key}, max, OptionValue["DiagramSeeds"], key]
-TMultiTrace[expr_, keys : (_List | All), max_Integer ? Positive, opts : OptionsPattern[]] := multiTraceImpl[expr, resolveKeys[keys], max, OptionValue["DiagramSeeds"], None]
+TMultiTrace[expr_, key_String, opts : OptionsPattern[]] /; multiKeysOkQ[{key}] := multiTraceImpl[expr, {key}, Infinity, OptionValue["DiagramSeeds"], key]
+TMultiTrace[expr_, keys : (_List | All), opts : OptionsPattern[]] /; multiKeysOkQ[resolveKeys[keys]] := multiTraceImpl[expr, resolveKeys[keys], Infinity, OptionValue["DiagramSeeds"], None]
+TMultiTrace[expr_, key_String, max_Integer ? Positive, opts : OptionsPattern[]] /; multiKeysOkQ[{key}] := multiTraceImpl[expr, {key}, max, OptionValue["DiagramSeeds"], key]
+TMultiTrace[expr_, keys : (_List | All), max_Integer ? Positive, opts : OptionsPattern[]] /; multiKeysOkQ[resolveKeys[keys]] := multiTraceImpl[expr, resolveKeys[keys], max, OptionValue["DiagramSeeds"], None]
+TMultiTrace[_, keys : (_String | _List), ___] /; ! multiKeysOkQ[resolveKeys[keys]] :=
+    Null /; (Message[TMultiTrace::key, Complement[resolveKeys[keys], $multiAllKeys], $multiAllKeys]; False)
+multiKeysOkQ[keys_List] := SubsetQ[$multiAllKeys, keys]
 
 (* `term0` is held by the HoldFirst on TMultiSteps.  Inside the
    impl we evaluate it AFTER turning the trace flag on, so any
@@ -474,6 +478,9 @@ TMultiwayGraph[t_TTerm, max_Integer ? Positive, opts : OptionsPattern[]] := TMul
 
 (* Trace shape -- no slice info, can't build the multiway view. *)
 TMultiwayGraph[trace_List ? multiTraceQ, OptionsPattern[]] := (Message[TMultiwayGraph::needsteps]; $Failed)
+
+(* Anything else that is not a list of step records (a per-key list, a bare list) is refused. *)
+TMultiwayGraph[steps_List, OptionsPattern[]] /; ! VectorQ[steps, AssociationQ] := (Message[TMultiwayGraph::needsteps]; $Failed)
 
 TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{slices, sliceKeys, vertexLabel, allKeys, edges, branchial, vlabels, labelStyle, presentFamilies, legend, edgeStyles, edgeFamilies, edgeRules, edgeList},
     (* Vertex identity = canonical SUB-resolved form of the slice
