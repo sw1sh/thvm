@@ -4,40 +4,235 @@ Name: TReset
 Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TReset
-Keywords: [reset, heap, init, scratch]
-SeeAlso: [TInit, TItrs, TFreshLabel, TFree]
+Keywords: [reset, heap, counters, labels, fresh start]
+SeeAlso: [TInit, TItrs, TFreshLabel, THeapPos, TStack]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TReset]()[]</code> zeroes the heap, the WNF stack, and the interaction counter -- the cheapest way to start a clean reduction without tearing down the runtime.
+<code>[TReset]()[]</code> rewinds the heap of the current runtime context to empty and restarts its counters.
+
+<!-- #| annotation: 26.10.19: TReset[ctx] and TInit[ctx] are defined in Kernel/THVMLink.wl before Context.wl makes TContext public, so their patterns use a Private`TContext shadow and never match; TReset[TContext[0]] returns unevaluated. The page documents only TReset[] until that is fixed. -->
 
 ## Details & Options
 
-- Survives the kernel table: compiled kernels, the AOT cache, and the tensor pool are *not* wiped. To fully reset use `TFree[]` followed by [TInit]().
-- The fresh-label counter ([TFreshLabel]()) goes back to 1.
-- Use between independent examples in a script so heap loc numbering is predictable.
+- [TReset]() gives 1.
+- The heap is rewound, so the next term starts at location 0 and [THeapPos]() gives 0.
+- The interaction counter of [TItrs]() goes back to 0, the pending frames of [TStack]() are dropped, and the fresh-label counter of [TFreshLabel]() restarts at 1.
+- The tensors and compiled kernels that belong to terms on the heap are released, and tensor ids restart at 1.
+- Constructors stored in the book heap with [TBookCtr]() survive the reset.
+- Cells are reused, not cleared: a [TTerm]() made before the reset refers to cells that the next terms overwrite.
+- [TInit]() initializes the runtime; [TReset]() starts a fresh computation in a runtime that is already initialized.
 
 ## Basic Examples
 
-After a reduction the interaction counter has bumped:
+Reset the heap:
 
 ```wl
-TReset[];
-TWnf[TApp[TLam[x, x], TNum[1]]];
-TItrs[]
+TReset[]
 ```
+
 <!-- => 1 -->
 
-`TReset` zeroes it back:
+The heap is now empty:
+
+```wl
+THeapPos[]
+```
+
+<!-- => 0 -->
+
+## Scope
+
+Start from an empty heap:
 
 ```wl
 TReset[];
+```
+
+Reduce an application of a lambda:
+
+```wl
+TTermVal[TWnf[TApp[TLam[x, x + 1], TNum[41]]]]
+```
+
+<!-- => 42 -->
+
+The reduction fired two interactions:
+
+```wl
 TItrs[]
 ```
+
+<!-- => 2 -->
+
+Reset again:
+
+```wl
+TReset[];
+```
+
+The interaction counter is back to 0:
+
+```wl
+TItrs[]
+```
+
 <!-- => 0 -->
+
+---
+
+Start from an empty heap:
+
+```wl
+TReset[];
+```
+
+A lambda takes the first heap cell:
+
+```wl
+TLam[x, x]
+```
+
+<!-- => a TTerm summary box showing tag LAM@0 -->
+
+The heap now holds one cell:
+
+```wl
+THeapPos[]
+```
+
+<!-- => 1 -->
+
+---
+
+Start from an empty heap:
+
+```wl
+TReset[];
+```
+
+The first fresh label is 1:
+
+```wl
+TFreshLabel[]
+```
+
+<!-- => 1 -->
+
+The next is 2:
+
+```wl
+TFreshLabel[]
+```
+
+<!-- => 2 -->
+
+Reset again:
+
+```wl
+TReset[];
+```
+
+The labels start over:
+
+```wl
+TFreshLabel[]
+```
+
+<!-- => 1 -->
+
+---
+
+Start from an empty heap:
+
+```wl
+TReset[];
+```
+
+Tensor ids start at 1 after a reset:
+
+```wl
+TTermVal[TTensorCreate[{1., 2.}]]
+```
+
+<!-- => 1 -->
 
 ## Properties and Relations
 
-[TInit]() is the one-shot allocator setup (idempotent). `TReset` is what you call *between* reductions to keep state predictable.
+Store a constructor with the field 42 in the book heap:
+
+```wl
+b = TBookCtr[3, TNum[42]]
+```
+
+<!-- => a TTerm summary box showing tag CTR and ext 3 -->
+
+Reset the heap:
+
+```wl
+TReset[];
+```
+
+The field survives the reset, in the cell after the constructor's child count:
+
+```wl
+TTermVal[TBookRead[TTermVal[b] + 1]]
+```
+
+<!-- => 42 -->
+
+---
+
+Reset the heap:
+
+```wl
+TReset[];
+```
+
+No eliminator frames are pending after a reset:
+
+```wl
+TStack[]
+```
+
+<!-- => {} -->
+
+## Possible Issues
+
+Start from an empty heap:
+
+```wl
+TReset[];
+```
+
+Bind a lambda, which takes the first heap cell:
+
+```wl
+f = TLam[x, x + 1]
+```
+
+<!-- => a TTerm summary box showing tag LAM@0 -->
+
+Reset the heap:
+
+```wl
+TReset[];
+```
+
+A new term reuses the first cell:
+
+```wl
+g = TLam[y, TNum[7]]
+```
+
+<!-- => a TTerm summary box showing tag LAM@0 -->
+
+The handle made before the reset now reads the new term's body:
+
+```wl
+Term[f]
+```
+
+<!-- => Term["LAM", 0, Term["NUM", 7]] -->

@@ -4,62 +4,208 @@ Name: TGather
 Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TGather
-Keywords: [gather, index, select, one-hot, RL, policy gradient]
-SeeAlso: [TTakeAlongAxis, TUOpCmpeq, TOneHot, TEmbedding, TUOpReduce, TGrad]
+Keywords: [gather, index, select, one-hot, take along axis, policy gradient]
+SeeAlso: [TTakeAlongAxis, TWhere, TGrad, TRealize, Part]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TGather]()[*x*, *axis*, *index*]</code> selects one element per slice along *axis* (0-indexed), keeping that axis at size 1: `out[..., 0, ...] = x[..., index, ...]`. It lowers tinygrad-style to `Total[(arange == index) * x]` reduced over *axis* -- the same `UOP_CMPEQ` one-hot the cross-entropy uses, multiplied by *x* and sum-reduced.
+<code>[TGather]()[*x*, *axis*, *index*]</code> picks one element of the tensor *x* along *axis* in every slice, at the position *index* gives for that slice.
+
+<!-- #| annotation: 26.10.19: TGather follows tinygrad's gather lowering: an arange along axis compared for equality with the index (a UOP_CMPEQ one-hot mask), multiplied by x and sum-reduced over axis. There is no gather opcode, which is why an index outside the axis matches nothing and gives 0, why the result is f32 (the mask is f32), and why the gradient scatters back through the mask to exactly the selected positions. The index length is not checked against the slice count. -->
 
 ## Details & Options
 
-- *index* is an integer host list or a `TTerm`, giving one index per slice. Its shape is *x*'s shape with *axis* set to 1, or the flat per-slice list (it is reshaped to the keep-shape).
-- The selected axis stays at size 1 in the result (a keepdims gather), so a `{batch, n}` input gathered along *axis* `1` yields `{batch, 1}`.
-- The lowering builds a one-hot mask with <code>[TUOpCmpeq]()</code> against an `arange`, multiplies by *x*, and sum-reduces with <code>[TUOpReduce]()</code>; no dedicated gather opcode is needed.
-- Differentiable: the cotangent scatters back to exactly the selected positions, so it trains. This is what makes it the per-sample action log-prob selector for a policy gradient.
-- For the numpy `take_along_axis` argument order `(index, axis)`, use <code>[TTakeAlongAxis]()</code>.
+- *axis* counts from 0. The result has the shape of *x* with *axis* set to length 1, and its element at position 0 of *axis* is the element of *x* at position *index* of *axis* in the same slice.
+- *index* is a list of integers, one per slice, either flat or shaped like the result. It can also be an integer-valued [TTerm]() of dtype `"i32"` or `"f32"`.
+- <code>[TGather]()[*x*, *axis*, *index*]</code> gives a lazy [TTerm](). <code>[TRealize]()</code> computes it, and <code>[Normal]()</code> reads the values back.
+- Under <code>[TGrad]()</code>, the gradient flows back to exactly the selected positions of *x* and is zero everywhere else.
+- An index outside the range from 0 to the axis length minus 1 selects nothing, and that slice of the result is 0.
+- The result has dtype `"f32"`, also when *x* is an `"i32"` tensor.
+- <code>[TTakeAlongAxis]()[*x*, *index*, *axis*]</code> is the same selection with the arguments in the order of numpy's `take_along_axis`.
+- An *x* that is not a [TTerm]() returns unevaluated.
 
 ## Basic Examples
 
-Gather one column per row of a 2x3 matrix, picking column 2 from row 0 and column 0 from row 1. The gathered axis stays at size 1:
+A 2 x 3 matrix:
 
 ```wl
-x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}];
-Normal @ TRealize @ TGather[x, 1, {2, 0}]
+x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}]
 ```
+
+<!-- => a TTensor summary box: shape 2 x 3, dtype f32 -->
+
+Gather column 2 from row 0 and column 0 from row 1, as a lazy graph:
+
+```wl
+g = TGather[x, 1, {2, 0}]
+```
+
+<!-- => a TUOp summary box of kind RESHAPE -->
+
+The gathered axis keeps length 1, so the result is a 2 x 1 matrix:
+
+```wl
+Normal[TRealize[g]]
+```
+
 <!-- => {{3.}, {4.}} -->
 
 ## Scope
 
-The index may itself be a `TTerm`. Casting an index tensor to f32 happens inside the lowering, so an integer-valued `TTerm` works:
+A 2 x 3 matrix:
 
 ```wl
-x   = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}];
-idx = TTensorCreate[{1., 2.}];
-Normal @ TRealize @ TGather[x, 1, idx]
+x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}]
 ```
+
+<!-- => a TTensor summary box: shape 2 x 3, dtype f32 -->
+
+Along axis 0 the slices are the columns, so the index gives one row per column:
+
+```wl
+Normal[TRealize[TGather[x, 0, {1, 0, 1}]]]
+```
+
+<!-- => {{4., 2., 6.}} -->
+
+The index may also be shaped like the result:
+
+```wl
+Normal[TRealize[TGather[x, 1, {{2}, {0}}]]]
+```
+
+<!-- => {{3.}, {4.}} -->
+
+An integer tensor works as the index:
+
+```wl
+idx = TTensorCreate[{1, 2}, "i32"]
+```
+
+<!-- => a TTensor summary box: shape 2, dtype i32 -->
+
+Gather with it:
+
+```wl
+Normal[TRealize[TGather[x, 1, idx]]]
+```
+
 <!-- => {{2.}, {6.}} -->
+
+---
+
+A 2 x 3 x 2 tensor:
+
+```wl
+t = TTensorCreate[ArrayReshape[Range[1., 12.], {2, 3, 2}]]
+```
+
+<!-- => a TTensor summary box: shape 2 x 3 x 2, dtype f32 -->
+
+Gathering along the last axis takes one index for each of the 2 x 3 slices:
+
+```wl
+Normal[TRealize[TGather[t, 2, {{1, 0, 1}, {0, 0, 1}}]]]
+```
+
+<!-- => {{{2.}, {3.}, {6.}}, {{7.}, {9.}, {12.}}} -->
 
 ## Applications
 
-Pick each sample's action log-prob from a `{batch, n_actions}` table with a `{batch}` action list -- the selection a policy gradient performs every step. Row 0 took action 2, row 1 took action 0:
+The log-probabilities a policy assigns to three actions, for a batch of two states:
 
 ```wl
-logp    = TTensorCreate[{{-2.3, -1.2, -0.5}, {-0.1, -3.0, -2.0}}];
-actions = {2, 0};
-Normal @ TRealize @ TGather[logp, 1, actions]
+logp = TTensorCreate[{{-2., -1.5, -0.5}, {-0.25, -3., -2.}}]
 ```
-<!-- => {{-0.5}, {-0.1}} -->
+
+<!-- => a TTensor summary box: shape 2 x 3, dtype f32 -->
+
+Gathering along the action axis with the actions 2 and 0 taken in the two states picks the log-probability of each action taken, the term a policy gradient differentiates:
+
+```wl
+Normal[TRealize[TGather[logp, 1, {2, 0}]]]
+```
+
+<!-- => {{-0.5}, {-0.25}} -->
 
 ## Properties and Relations
 
-The gradient scatters the cotangent back to the gathered positions only. The gradient of the sum of the gathered elements is a one-hot at each selected index:
+A 2 x 3 matrix:
 
 ```wl
-x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}];
-TRealize @ TGrad @ Total[TGather[x, 1, {2, 0}], All];
-Normal @ TRealize @ TGradOf[x]
+x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}]
 ```
+
+<!-- => a TTensor summary box: shape 2 x 3, dtype f32 -->
+
+Differentiate the sum of the gathered elements:
+
+```wl
+TGrad[Total[TGather[x, 1, {2, 0}], All]]
+```
+
+<!-- => a TUOp summary box for the lazy sum -->
+
+The gradient is 1 at each selected position and 0 elsewhere:
+
+```wl
+Normal[TRealize[TGradOf[x]]]
+```
+
 <!-- => {{0., 0., 1.}, {1., 0., 0.}} -->
+
+---
+
+A 2 x 3 matrix:
+
+```wl
+x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}]
+```
+
+<!-- => a TTensor summary box: shape 2 x 3, dtype f32 -->
+
+[TTakeAlongAxis]() takes the index before the axis and gives the same values:
+
+```wl
+Normal[TRealize[TTakeAlongAxis[x, {2, 0}, 1]]] === Normal[TRealize[TGather[x, 1, {2, 0}]]]
+```
+
+<!-- => True -->
+
+## Possible Issues
+
+A 2 x 3 matrix:
+
+```wl
+x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}]
+```
+
+<!-- => a TTensor summary box: shape 2 x 3, dtype f32 -->
+
+An index past the end of the axis selects nothing, and that slice comes out 0 rather than issuing a message:
+
+```wl
+Normal[TRealize[TGather[x, 1, {5, 0}]]]
+```
+
+<!-- => {{0.}, {4.}} -->
+
+---
+
+An integer matrix:
+
+```wl
+n = TTensorCreate[{{1, 2, 3}, {4, 5, 6}}, "i32"]
+```
+
+<!-- => a TTensor summary box: shape 2 x 3, dtype i32 -->
+
+The gathered values come back as reals:
+
+```wl
+Normal[TRealize[TGather[n, 1, {2, 0}]]]
+```
+
+<!-- => {{3.}, {4.}} -->

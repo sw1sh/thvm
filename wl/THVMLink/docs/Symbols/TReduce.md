@@ -4,31 +4,136 @@ Name: TReduce
 Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TReduce
-Keywords: [reduce, wnf, in-place, chaining]
-SeeAlso: [TWnf, THeapGraph, TTermExpr, TRealize]
+Keywords: [reduce, wnf, in place, inspect heap]
+SeeAlso: [TWnf, THeapGraph, TTermExpr, Term, TRealize]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TReduce]()[*term*]</code> reduces *term* to WNF in-place and returns *term* (the original root, useful as a seed for [THeapGraph]() or [TTermExpr]() after reduction).
+<code>[TReduce]()[*term*]</code> reduces *term* to weak normal form in place and gives *term* itself.
 
 ## Details & Options
 
-- Sugar over [TWnf]() that throws away the reduced-root return value and threads *term* through for chaining.
-- The heap mutates: re-reading *term* after a `TReduce` reflects the post-reduction state. This is the typical seed for "inspect the heap after the reduction" workflows.
+- [TReduce]() runs <code>[TWnf]()[*term*]</code> for its effect on the heap and gives back the handle it was given, not the reduced term.
+- The reduction rewrites the cells reachable from *term*, so [Term](), [TTermExpr]() and [THeapGraph]() of *term* afterwards show the heap after the reduction.
+- The reduced value is what [TWnf]() gives. The original handle does not point at it, and reducing it a second time fires on cells the first reduction already consumed.
+- [TRealize]() is the tensor counterpart: it schedules and runs the kernels of a tensor computation.
 
 ## Basic Examples
 
-`TReduce` runs the WNF reduction and returns the seed for chaining. The interaction counter records the fires:
+Start from an empty heap so the binder location is predictable:
 
 ```wl
 TReset[];
-TReduce[TApp[TLam[x, TOp2["+", x, TNum[1]]], TNum[41]]];
+```
+
+Bind an application of a lambda:
+
+```wl
+t = TApp[TLam[x, x + 1], TNum[41]]
+```
+
+<!-- => a TTerm summary box showing tag APP -->
+
+Reduce it in place; [TReduce]() gives the application back:
+
+```wl
+TReduce[t]
+```
+
+<!-- => a TTerm summary box showing tag APP -->
+
+The application now reads through the rewritten heap, where the lambda's cell holds the argument 41:
+
+```wl
+Term[t]
+```
+
+<!-- => Term["APP", Term["LAM", 0, Term["NUM", 41]], Term["NUM", 41]] -->
+
+## Scope
+
+Start from an empty heap so the interaction counter starts at 0:
+
+```wl
+TReset[];
+```
+
+Bind an application of a lambda:
+
+```wl
+t = TApp[TLam[x, x + 1], TNum[41]]
+```
+
+<!-- => a TTerm summary box showing tag APP -->
+
+Reduce it in place:
+
+```wl
+u = TReduce[t]
+```
+
+<!-- => a TTerm summary box showing tag APP -->
+
+The handle given back is the original one:
+
+```wl
+u === t
+```
+
+<!-- => True -->
+
+The reduction fired the application and the sum:
+
+```wl
 TItrs[]
 ```
+
 <!-- => 2 -->
+
+---
+
+Reducing a value leaves it as it is:
+
+```wl
+TReduce[TNum[5]] == TNum[5]
+```
+
+<!-- => True -->
 
 ## Properties and Relations
 
-[TRealize]() is `[TWnf]()` composed with `TMaterialize` -- use it for tensor-bearing UOP graphs. `TReduce` is the bare WNF + chain.
+[TWnf]() gives the reduced term instead of the original handle:
+
+```wl
+TTermVal[TWnf[TApp[TLam[x, x + 1], TNum[41]]]]
+```
+
+<!-- => 42 -->
+
+## Possible Issues
+
+Bind an application of a lambda:
+
+```wl
+t = TApp[TLam[x, x + 1], TNum[41]]
+```
+
+<!-- => a TTerm summary box showing tag APP -->
+
+Reduce it in place:
+
+```wl
+TReduce[t]
+```
+
+<!-- => a TTerm summary box showing tag APP -->
+
+Reducing the original handle again fires on consumed cells and does not give the value 42:
+
+```wl
+TTermVal[TWnf[t]]
+```
+
+<!-- => 41 -->

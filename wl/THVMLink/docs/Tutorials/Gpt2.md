@@ -10,113 +10,243 @@ RelatedGuides: [THVMLink]
 RelatedTutorials: [Train, Tensors, Overview]
 ---
 
-## A transformer on the tensor surface
+GPT-2 (Generative Pre-trained Transformer 2) is a language model: given a sequence of tokens, it gives a score for every possible next token. Its smallest version, with 117 million parameters, is a stack of twelve identical transformer blocks. Each block has two residual branches: causal multi-head self-attention after a layer normalization, then a feed-forward network with a GELU (Gaussian error linear unit) activation after a second layer normalization. A token embedding plus a learned position embedding feeds the stack, and a final layer normalization and a linear head, which shares its weights with the token embedding, turn the last hidden state into scores, called logits, over the 50257 tokens of the vocabulary.
 
-The [Train](paclet:WolframInstitute/THVMLink/tutorial/Train) tutorial lifted a convolutional classifier through [TFromNet]() and trained it. This note lifts a *language model* - the 117M-parameter GPT-2 - and runs real inference: encode a prompt, run the transformer forward, and greedily generate a continuation.
+THVMLink builds each of these pieces as a lazy tensor graph from the same operations as any other [TTerm]() tensor, so the whole model is one graph that [TRealize]() computes. The sections below build each piece on small inputs, then lift the published GPT-2 model from the Wolfram Neural Net Repository and generate text with it.
 
-GPT-2 is a stack of twelve identical pre-norm transformer blocks. Each block is two residual branches: causal multi-head self-attention around a [LayerNorm](paclet:WolframInstitute/THVMLink/ref/TLayerNorm), then a [GELU](paclet:WolframInstitute/THVMLink/ref/TGELU) feed-forward around a second LayerNorm. A token [EmbeddingLayer]() plus a learned positional embedding feed the stack; a final LayerNorm and a tied linear head turn the last hidden state into next-token logits over the 50257-token vocabulary. Every one of those pieces is a `TTerm` graph built from the same movement and reduce primitives the rest of THVMLink uses - `Dot`, [TSoftmax](), [TLayerNorm]() - so the whole model is one lazy graph you [TRealize]() at the end.
+## Token and position embeddings
 
-Each building block below is checked against the Wolfram layer it mirrors, to f32 tolerance. That parity is the correctness gate; the full inference script at the end strings the verified blocks into the published GPT-2 weights.
-
-## Token and positional embeddings
-
-A token id is just a row lookup into the embedding matrix. <code>[TEmbeddingMatrix]()[*table*, *ids*]</code> gathers the rows of a `{vocab, dim}` table for a host-side list of 0-indexed ids and stitches them into a `{Length[ids], dim}` matrix. Wolfram's [EmbeddingLayer]() is 1-indexed, so the lift subtracts one. Take a tiny `{6, 4}` table and gather three rows:
+An embedding looks up one row of a matrix for each token. A table of six rows of four numbers stands in for the embedding matrix:
 
 ```wl
-table = TTensorCreate[{{0., 1., 2., 3.}, {4., 5., 6., 7.}, {8., 9., 10., 11.},
-                       {12., 13., 14., 15.}, {16., 17., 18., 19.}, {20., 21., 22., 23.}}];
+table = TTensorCreate[{{0., 1., 2., 3.}, {4., 5., 6., 7.}, {8., 9., 10., 11.}, {12., 13., 14., 15.}, {16., 17., 18., 19.}, {20., 21., 22., 23.}}]
+```
+
+`TEmbeddingMatrix` gathers the rows for a list of token ids, counted from 0, into a matrix with one row per id:
+
+```wl
 Normal @ TRealize @ TEmbeddingMatrix[table, {0, 4, 2}]
 ```
 <!-- => {{0., 1., 2., 3.}, {16., 17., 18., 19.}, {8., 9., 10., 11.}} -->
 
-GPT-2 sums the token embedding and the positional embedding (the embedding sub-graph's `inputCombine` is [Plus]()). With the same table standing in for positions, the combined embedding of ids `{0, 4, 2}` at positions `{0, 1, 2}` is the elementwise sum:
+GPT-2 adds the embedding of each token to the embedding of its position. The token embeddings of the ids 0, 4 and 2:
 
 ```wl
-table = TTensorCreate[{{0., 1., 2., 3.}, {4., 5., 6., 7.}, {8., 9., 10., 11.},
-                       {12., 13., 14., 15.}, {16., 17., 18., 19.}, {20., 21., 22., 23.}}];
-tok = TEmbeddingMatrix[table, {0, 4, 2}];
-pos = TEmbeddingMatrix[table, {0, 1, 2}];
+tok = TEmbeddingMatrix[table, {0, 4, 2}]
+```
+
+The embeddings of the positions 0, 1 and 2, here read from the same table:
+
+```wl
+pos = TEmbeddingMatrix[table, {0, 1, 2}]
+```
+
+Their sum is the input of the first block:
+
+```wl
 Normal @ TRealize[tok + pos]
 ```
 <!-- => {{0., 2., 4., 6.}, {20., 22., 24., 26.}, {16., 18., 20., 22.}} -->
 
+[EmbeddingLayer]() counts token ids from 1, so lifting a Wolfram Language net subtracts 1 from each id.
+
 ## Layer normalization
 
-GPT-2's [NormalizationLayer]() standardizes each position across the feature axis - subtract the row mean, divide by the root of the (biased) row variance plus `1.*^-5` - then applies a learned per-feature scale and shift. <code>[TLayerNormAffine]()[*x*, *gamma*, *beta*]</code> is exactly that, and it matches the Wolfram layer's own output to about `1.*^-7`. Normalize a `{2, 4}` input with unit scale and zero shift, so each row comes out mean-zero, unit-variance:
+A layer normalization standardizes each position across its features: it subtracts the mean of the row and divides by the square root of the row's variance, taken with denominator *n*, plus $10^{-5}$. It then multiplies by a learned scale and adds a learned shift for each feature. `TLayerNormAffine` takes the input, the scale and the shift. A batch of two positions with four features:
 
 ```wl
-x = TTensorCreate[{{1., 2., 3., 4.}, {-2., 0., 2., 4.}}];
-gamma = TTensorCreate[{1., 1., 1., 1.}];
-beta = TTensorCreate[{0., 0., 0., 0.}];
-Normal @ TRealize @ TLayerNormAffine[x, gamma, beta]
+hidden = TTensorCreate[{{1., 2., 3., 4.}, {-2., 0., 2., 4.}}]
 ```
-<!-- => {{-1.34164, -0.447214, 0.447214, 1.34164}, {-1.34164, -0.447214, 0.447214, 1.34164}} -->
 
-The bare [TLayerNorm]() (no learned scale or shift) does the standardize step alone; the affine form multiplies by *gamma* and adds *beta* along the last axis.
+A scale of 1 for each feature:
+
+```wl
+gamma = TTensorCreate[{1., 1., 1., 1.}]
+```
+
+A shift of 0 for each feature:
+
+```wl
+beta = TTensorCreate[{0., 0., 0., 0.}]
+```
+
+With unit scale and zero shift, each row comes out with mean 0 and variance close to 1:
+
+```wl
+normed = Normal @ TRealize @ TLayerNormAffine[hidden, gamma, beta]
+```
+<!-- => {{-1.34164, -0.447212, 0.447212, 1.34164}, {-1.34164, -0.447213, 0.447213, 1.34164}} -->
+
+The largest difference from the same formula computed in machine precision is at the level of 32-bit rounding:
+
+```wl
+Max @ Abs[normed - ((# - Mean[#])/Sqrt[Mean[(# - Mean[#])^2] + 1.*^-5] & /@ {{1., 2., 3., 4.}, {-2., 0., 2., 4.}})]
+```
+<!-- => 4.5653*^-8 -->
+
+`TLayerNorm` does the standardization alone, without the scale and the shift.
 
 ## The GELU activation
 
-The feed-forward block's nonlinearity is the tanh-approximation GELU, `0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x^3)))`. [TGELU]() composes it from [TTanh](), which thvm computes as `2 sigmoid(2x) - 1` so the exponent stays negative and the result saturates cleanly to `+-1` instead of overflowing to NaN - GELU's cubic argument grows fast enough to matter. Apply it across a span that reaches into that tail:
+The feed-forward branch uses the tanh approximation of GELU, $\frac{1}{2} x \left(1 + \tanh\left(\sqrt{2/\pi} \left(x + 0.044715 x^3\right)\right)\right)$. `TGELU` builds it from `TTanh`, which computes $\tanh(x)$ as $2 \sigma(2 x) - 1$ with the logistic sigmoid $\sigma$, so a large argument saturates to 1 instead of overflowing. Values that reach into both tails:
 
 ```wl
-x = TTensorCreate[{-4., -1., 0., 1., 4., 12.}];
-Normal @ TRealize @ TGELU[x]
+span = TTensorCreate[{-4., -1., 0., 1., 4., 12.}]
 ```
-<!-- => {-0.00007, -0.15881, 0., 0.84119, 3.99993, 12.} -->
 
-This matches Wolfram's `ElementwiseLayer[0.5 # (1 + Tanh[0.797885 (# + 0.044715 #^3)]) &]` to about `1.*^-7` across the same range, with no overflow even at `x = 60`.
+The activation:
+
+```wl
+gelu = Normal @ TRealize @ TGELU[span]
+```
+<!-- => {-0.0000702459, -0.158808, 0., 0.841192, 3.99993, 12.} -->
+
+[ElementwiseLayer]() computes the same formula in the Wolfram Language neural network framework:
+
+```wl
+ElementwiseLayer[0.5 # (1 + Tanh[Sqrt[2/Pi] (# + 0.044715 #^3)]) &][{-4., -1., 0., 1., 4., 12.}]
+```
+<!-- => {-0.0000702143, -0.158808, 0., 0.841192, 3.99993, 12.} -->
+
+The two agree to 32-bit rounding:
+
+```wl
+Max @ Abs[gelu - ElementwiseLayer[0.5 # (1 + Tanh[Sqrt[2/Pi] (# + 0.044715 #^3)]) &][{-4., -1., 0., 1., 4., 12.}]]
+```
+<!-- => 2.38419*^-7 -->
+
+At 60 the cubic term is large, and the activation still gives 60 rather than an overflow:
+
+```wl
+Normal @ TRealize @ TGELU[TTensorCreate[{60.}]]
+```
+<!-- => {60.} -->
 
 ## Causal multi-head self-attention
 
-Attention is the heart of the block. Project the input to queries, keys, and values; for each head, score every query against every key with a scaled dot product, mask out future positions, softmax each row, and mix the values. <code>[TMultiHeadAttention]()[*Q*, *K*, *V*, *nHeads*, *mask*]</code> does this over flat `{seq, dim}` projections (it reshapes to `{nHeads, seq, dHead}` internally), with [TCausalMask]() supplying the additive `{seq, seq}` bias that is `0` on and below the diagonal and `-1.*^9` above it - so position *i* attends only to positions `<= i`.
-
-Build a two-head example over a length-three sequence and confirm the causal structure: the first row attends only to itself, so its output is exactly the first value vector of each head:
+Attention projects the input to queries, keys and values. For each head, it scores every query against every key with a dot product scaled by $1/\sqrt{d}$, where *d* is the size of a head, masks out the positions that come later, applies a softmax to each row of scores, and mixes the values with the resulting weights. `TMultiHeadAttention` takes the queries, the keys and the values as matrices with one row per position, the number of heads and an additive mask. Queries for a sequence of three positions with four features, split into two heads of two features each:
 
 ```wl
-q = TTensorCreate[{{1., 0., 0., 1.}, {0., 1., 1., 0.}, {1., 1., 0., 0.}}];
-k = TTensorCreate[{{1., 0., 0., 1.}, {0., 1., 1., 0.}, {1., 1., 0., 0.}}];
-v = TTensorCreate[{{2., 3., 4., 5.}, {6., 7., 8., 9.}, {10., 11., 12., 13.}}];
-Normal @ TRealize @ TMultiHeadAttention[q, k, v, 2, TCausalMask[3]]
+q = TTensorCreate[{{1., 0., 0., 1.}, {0., 1., 1., 0.}, {1., 1., 0., 0.}}]
+```
+
+The keys, here the same as the queries:
+
+```wl
+kk = TTensorCreate[{{1., 0., 0., 1.}, {0., 1., 1., 0.}, {1., 1., 0., 0.}}]
+```
+
+The values:
+
+```wl
+vv = TTensorCreate[{{2., 3., 4., 5.}, {6., 7., 8., 9.}, {10., 11., 12., 13.}}]
+```
+
+`TCausalMask` gives the mask, 0 on and below the diagonal and $-10^9$ above it, so that the position *i* attends only to the positions up to *i*:
+
+```wl
+mask = TCausalMask[3]
+```
+
+The mask as a matrix:
+
+```wl
+Normal[mask]
+```
+<!-- => {{0., -1.*^9, -1.*^9}, {0., 0., -1.*^9}, {0., 0., 0.}} -->
+
+The first position attends only to itself, so the first row of the result is the first row of the values in both heads:
+
+```wl
+Normal @ TRealize @ TMultiHeadAttention[q, kk, vv, 2, mask]
 ```
 <!-- => {{2., 3., 4., 5.}, {4.67905, 5.67905, 6.67905, 7.67905}, {7.02094, 8.02094, 8., 9.}} -->
 
-GPT-2's attention sub-network uses a bare-dot scoring net (no key transform), `Mask -> "Causal"`, and pre-scales the queries by `1/Sqrt[64]` in a separate node - arithmetically identical to the `1/Sqrt[dHead]` scale [TMultiHeadAttention]() folds in. The lift matches that spec, and a manual per-head bare-dot computation, to about `1.*^-8`.
+The attention part of the GPT-2 net scores with a plain dot product, uses a causal mask, and multiplies the queries by $1/\sqrt{64}$ in a separate node before scoring; with heads of size 64 this is the same scaling `TMultiHeadAttention` applies.
 
-## The whole net is one graph
+## Lifting the whole net
 
-There is no hand-assembled forward. <code>[TFromNet]()[*net*, *ids*]</code> traverses the real GPT-2 [NetModel]() - a [NetChain]() of an embedding [NetGraph]() and a twelve-block transformer [NetChain]() - through the same per-layer cases the building blocks above came from. The embedding [NetGraph]() consumes the 1-indexed `ids` (token plus positional, summed), each pre-norm block is a [NetGraph]() of `norm -> attention -> residual add` then `norm -> linear -> GELU -> linear -> residual add`, and the final [NormalizationLayer]() closes the stack. The base model's LM head is the *tied* token-embedding projection (not a layer), so [TFromNet]() appends `hidden . tokenEmbedding^T` to produce the `{seq, vocab}` logits [TTerm](). The last row is the next-token distribution. When the net already carries that head as a real layer - the `"Task" -> "LanguageModeling"` variant's tied `classifier` [LinearLayer]() - [TFromNet]() folds it and skips the manual projection, so either net yields the same logits (bit-for-bit).
+`TFromNet` turns a Wolfram Language net into one lazy graph by lifting each layer to the operations above. <code>TFromNet[*net*, *ids*]</code> lifts the GPT-2 net applied to a list of token ids, counted from 1 as the net's input encoder gives them. The GPT-2 model in the Wolfram Neural Net Repository is a [NetChain]() of an embedding [NetGraph](), which sums the token and position embeddings, and a [NetChain]() of the twelve blocks. Each block is a [NetGraph]() that applies a normalization, the attention and a residual addition, then a normalization, a linear layer, the GELU activation, a second linear layer and a second residual addition. The base model has no output layer, so `TFromNet` appends the product of the last hidden state with the transposed token embedding matrix, which gives the logits as a matrix with one row per position and one column per token of the vocabulary. The last row scores the next token.
+
+The `"Task" -> "LanguageModeling"` variant of the model already ends in that product, as a [LinearLayer]() named `classifier` that shares its weights with the token embedding, followed by a softmax. `TFromNet` lifts the [LinearLayer]() like any other layer, so either variant gives the same logits.
 
 ## Loading the model
 
-The GPT-2 weights ship in the Wolfram Neural Net Repository; [NetModel]() loads them as a [NetChain](). The `"Task" -> "LanguageModeling"` variant bundles everything this example needs in one net: its layers are `{embedding, decoder, last, classifier, probabilities}`, its input encoder (the `"Input"` port) turns a prompt into 1-indexed token ids, and its output decoder (the `"Output"` port's `"Labels"`) turns ids back into text. The `classifier` is the tied token-embedding head as a real [LinearLayer](), so dropping the final probabilities layer with <code>[NetDrop]()[*lm*, -1]</code> leaves a net that outputs the `{seq, 50257}` next-token logits directly - no hand-appended head, and one net for the forward, the encoder, and the decoder. (Run [NetModel]() once, online, to populate the cache.)
+[NetModel]() loads the language-modeling variant of GPT-2 from the Wolfram Neural Net Repository. The download runs once and is then cached, so the cells below are shown without being evaluated:
 
 ```wl
 #| eval: false
-lm = NetModel[{"GPT2 Transformer Trained on WebText Data", "Task" -> "LanguageModeling"}];
+lm = NetModel[{"GPT2 Transformer Trained on WebText Data", "Task" -> "LanguageModeling"}]
+```
+
+The net's input encoder turns a text into token ids, counted from 1:
+
+```wl
+#| eval: false
 NetExtract[lm, "Input"]["The quick brown fox"]
 ```
 <!-- => {209, 1813, 7331, 21576} -->
 
-## A reusable fixed-sequence forward
+The layers of this net are named `embedding`, `decoder`, `last`, `classifier` and `probabilities`, and its output decoder holds the text of each token. <code>[NetDrop]()[*lm*, -1]</code> removes the final softmax, which leaves a net whose output is the logits.
 
-Lifting the twelve-block net is a constant ~20 s regardless of sequence length - it is graph *construction*, not compute - so re-lifting the growing sequence every step (`TFromNet[net, ids]` in a loop) costs tens of seconds per token. The fix is to lift ONCE into a fixed-shape forward and reuse it. <code>[TFromNet]()[*net*, *onehot*]</code> does this for a token-LM [NetChain](): applied to a `{maxSeq, vocab}` ONE-HOT input it replaces the variable-length id gather with `onehot . tokenEmbedding`, so the whole graph - embedding, blocks, classifier head - has a fixed shape determined by the one-hot itself (`maxSeq` is the window you pad to - there is no separate integer argument). Capturing that forward once under [TJit]() makes it reusable across steps. (On a net carrying a [SequenceLastLayer](), which would collapse to the last *padded* row, the fixed-window lift drops it: the window emits all positions and the per-step read picks the running length.) Positions `0..maxSeq-1` are constant (no per-step positional gather), and the causal mask plus reading the logits at the current length keep the padded tail positions inert. The one-hot of a prompt feeds it exactly the same rows the gather would, so its logits match the variable-length path to f32 (argmax token-for-token; see the parity note below).
+## A forward pass of fixed length
+
+Lifting the twelve blocks takes about the same time whatever the length of the sequence, because the time goes into building the graph rather than computing it. Generation adds one token at a time, so lifting the net again for every new token repeats that construction at every step. Instead, the net is lifted once for a fixed window of positions and the lifted forward pass is reused.
+
+<code>TFromNet[*net*, *onehot*]</code> lifts the net applied to a one-hot matrix: one row for each position of the window, with a 1 in the column of the token at that position. The lift multiplies the one-hot matrix by the token embedding matrix in place of the lookup of ids, so the graph has a fixed shape, set by the one-hot matrix. The position embeddings are those of the positions of the whole window. Rows past the end of the text are zero, and because of the causal mask they do not change the logits of the earlier positions, so the logits of the text are read from the row of its last token. If the net ends in a [SequenceLastLayer](), which would read the last padded row, the lift for a window drops it. On the same text, the one-hot forward pass and the lift from ids pick the same next token.
 
 ## Generating text
 
-Generation is then: lift the classifier-headed forward ONCE and capture it with <code>[TJit]()[*forward*]</code> as a function of the one-hot input. `step[onehot]` is the whole per-token kernel: the first call captures the cached twelve-block dispatch over that one-hot, and every later call REBINDS the fresh one-hot in place and re-dispatches - the [TJit]() closure's argument *is* the per-call input (tinygrad's `input_replace`: it substitutes the new input's buffer at the captured read sites), and `step` returns the `{maxSeq, vocab}` logits handle whose buffer the replay rewrote. No explicit copy or slot - passing `step[hot[g]]` is the entire feed. The one-hot itself is <code>[TOneHot]()[*ids* - 1, *vocab*]</code> over the (0-indexed) ids, padded to `maxSeq` with an out-of-range label so the tail rows stay zero. Greedy [PositionLargest]() argmax is deterministic - a correctness anchor: on `"The quick brown fox"` the first generated token is id 19 (`"es"`), agreeing with an independent numpy GPT-2 forward (top-5 `{19, 118, 63, 83, 50246}`), so thvm reproduces GPT-2's own next-token prediction token-for-token.
+`TOneHot` builds the one-hot matrix from ids counted from 0. Padding the ids with 50257, a label outside the vocabulary, leaves the rows past the end of the text at zero. [TJit]() records the lifted forward pass as a function of the one-hot matrix: its first application builds, schedules and runs the graph, and each later application with a new one-hot matrix of the same shape replays the recorded kernels on it and gives the logits, without building the graph again. Each step reads the logits at the last position of the text and appends the token with the largest score, found with [PositionLargest](). Choosing the largest score at every step makes the generation deterministic.
+
+The prompt as token ids:
 
 ```wl
 #| eval: false
-lm     = NetModel[{"GPT2 Transformer Trained on WebText Data", "Task" -> "LanguageModeling"}];
-ids    = NetExtract[lm, "Input"]["Once upon a time"];   maxSeq = Length[ids] + 12;
-labels = NetExtract[NetExtract[lm, "Output"], "Labels"];
-hot    = seq |-> TOneHot[PadRight[seq - 1, maxSeq, 50257], 50257];
-step   = TJit[TRealize @ TWnf @ TFromNet[NetDrop[lm, -1], #] &];
-gen    = Nest[g |-> Append[g, First @ PositionLargest @ Normal[step[hot[g]]][[Length[g]]]], ids, 12];
+ids = NetExtract[lm, "Input"]["Once upon a time"]
+```
+
+A window long enough for the prompt and 12 new tokens:
+
+```wl
+#| eval: false
+maxSeq = Length[ids] + 12
+```
+
+The text of each token, read from the output decoder:
+
+```wl
+#| eval: false
+labels = NetExtract[NetExtract[lm, "Output"], "Labels"]
+```
+
+The one-hot matrix of a list of ids, padded to the window:
+
+```wl
+#| eval: false
+hot = seq |-> TOneHot[PadRight[seq - 1, maxSeq, 50257], 50257]
+```
+
+The recorded forward pass of the net without its softmax:
+
+```wl
+#| eval: false
+step = TJit[TRealize @ TWnf @ TFromNet[NetDrop[lm, -1], #] &]
+```
+
+Twelve steps of greedy generation, each appending the most likely next token:
+
+```wl
+#| eval: false
+gen = Nest[g |-> Append[g, First @ PositionLargest @ Normal[step[hot[g]]][[Length[g]]]], ids, 12]
+```
+
+The prompt and its continuation as text:
+
+```wl
+#| eval: false
 StringJoin @ labels[[gen]]
 ```
 <!-- => "Once upon a time, the world was a place of great beauty and great danger" -->
 
-real GPT-2 117M text out of the lifted graph - and FAST: the lift + capture is paid once (~0.9 s), then every step is a [TJit]() replay of the cached forward, ~25 ms per token (no re-lift, just the input rebind + the twelve-block dispatch + the logit readback) against the ~tens of *seconds* per token the re-lift-every-step loop spent rebuilding the graph - a ~1000x per-token speedup. [`Examples/gpt2_inference.wls`](../../Examples/gpt2_inference.wls) wraps this with temperature / top-K sampling. The fixed-window forward matches the variable-length path's argmax token-for-token on identical input (logits differ by ~1e-4 from the different matmul shapes, the same f32 reduction-order noise as elsewhere), so over a long enough generation a near-tie can flip and the two paths' token streams diverge - both are valid GPT-2 output.
-
-Everything in this note is the ordinary tensor surface: the model is one `TTerm`, the attention and norms and GELU are the same `Dot`, [TSoftmax](), and reduce primitives you write by hand, and [TRealize]() turns the lazy graph into the logits that drive the next token.
+The one-hot forward pass and the lift from ids pick the same token at each step on the same input. Their logits differ by about $10^{-4}$, because the matrix products have different shapes and sum in a different order, so over a long generation a near tie between two tokens can resolve differently and the two token sequences can part.

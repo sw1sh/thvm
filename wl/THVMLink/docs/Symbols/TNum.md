@@ -4,49 +4,143 @@ Name: TNum
 Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TNum
-Keywords: [number, num, integer, atom]
-SeeAlso: [TOp2, TUOpConst, TIfZero, TCtr]
+Keywords: [number, num, integer, atom, dtype]
+SeeAlso: [TOp2, TUOpConst, TIfZero, TMatNum, TTermVal]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TNum]()[*i*]</code> returns a `TAG_NUM` atom holding the integer *i* (`DT_I32`).
+<code>[TNum]()[*i*]</code> gives a number term holding the integer *i* with dtype `"i32"`.
 
-<code>[TNum]()[*i*, *dtype*]</code> picks the dtype: `"i32"` (default) or `"f32"` -- for `"f32"` the value is bit-reinterpreted from the integer bits.
+<code>[TNum]()[*i*, "*dtype*"]</code> gives a number term holding the 32-bit pattern *i* with dtype *dtype*.
 
 ## Details & Options
 
-- `TAG_NUM` is the IC's integer atom. Many of the higher-level constructors ([TSup](), [TApp](), [TCtr](), ...) auto-coerce a bare `Integer` argument to <code>[TNum]()[*i*]</code>, so you rarely need to write it explicitly.
-- For arithmetic floats use [TUOpConst]() instead; the `f32` form of `TNum` is for bit-pattern packing (e.g. embedded scalar payloads).
-- Atomic: `TNum` is its own WNF. Arithmetic over `TNum`s fires via [TOp2]().
+- A number term is an atom with the NUM tag. Its VAL field holds the 32-bit pattern and its EXT field the dtype code, read by [TTermVal]() and [TTermExt]().
+- The usual dtypes are `"i32"`, the default, and `"f32"`. For `"f32"`, *i* is the bit pattern of the float, not its value: 1065353216 is the pattern of 1.0.
+- Integer arithmetic with [TOp2]() and the `+`, `-` and `*` operators works on unsigned 32-bit patterns.
+- A bare [Integer]() in a term position of [TApp](), [TSup](), [TOp2]() and similar constructors is read as <code>[TNum]()[*i*]</code>.
+- A number is already reduced: [TWnf]() gives it back unchanged.
+- A number displays as a summary box with its value and dtype.
+- For a floating-point constant in a tensor computation, [TUOpConst]() gives a tensor constant.
 
 ## Basic Examples
 
+A number term:
+
 ```wl
-TReset[];
+TNum[42]
+```
+
+<!-- => a TNum summary box showing number 42 and dtype i32 -->
+
+---
+
+Its canonical form:
+
+```wl
 Term[TNum[42]]
 ```
+
 <!-- => Term["NUM", 42] -->
 
-The integer value is in the `VAL` field:
+---
+
+Its value is the VAL field:
 
 ```wl
-TReset[];
 TTermVal[TNum[42]]
 ```
+
 <!-- => 42 -->
 
 ## Scope
 
-Arithmetic over `TNum`s fires `OP2-NUM-NUM`:
+An `"f32"` number holding the bit pattern of 1.0:
 
 ```wl
-TReset[];
-TTermVal @ TWnf @ TOp2["+", TNum[3], TNum[4]]
+TNum[1065353216, "f32"]
 ```
+
+<!-- => a TNum summary box showing number 1065353216 and dtype f32 -->
+
+---
+
+Its EXT field is the dtype code 13 of `"f32"`:
+
+```wl
+TTermExt[TNum[1065353216, "f32"]]
+```
+
+<!-- => 13 -->
+
+---
+
+Numbers add with `+`:
+
+```wl
+TTermVal[TWnf[TNum[3] + TNum[4]]]
+```
+
 <!-- => 7 -->
+
+---
+
+A number multiplies by an integer with `*`:
+
+```wl
+TTermVal[TWnf[TNum[6] * 7]]
+```
+
+<!-- => 42 -->
+
+---
+
+A bare integer in a constructor is read as a number term:
+
+```wl
+Term[TOp2["+", 3, 4]]
+```
+
+<!-- => Term["OP2", "+", Term["NUM", 3], Term["NUM", 4]] -->
 
 ## Properties and Relations
 
-A bare `Integer` in a constructor slot is coerced to `TNum` via `numCoerce`; the `+`, `*`, `-`, `==`, `<` UpValues route through [TOp2](). For a tensor-valued constant use [TUOpConst]().
+A number is already reduced, so [TWnf]() gives it back:
+
+```wl
+TWnf[TNum[5]] == TNum[5]
+```
+
+<!-- => True -->
+
+---
+
+A comparison gives the number 1 for true:
+
+```wl
+TTermVal[TWnf[TOp2["<", 3, 4]]]
+```
+
+<!-- => 1 -->
+
+## Possible Issues
+
+Arithmetic is unsigned 32-bit, so a negative difference reads as its 32-bit two's complement:
+
+```wl
+TTermVal[TWnf[TNum[3] - TNum[5]]]
+```
+
+<!-- => 4294967294 -->
+
+---
+
+A real number is not a number term and returns unevaluated:
+
+```wl
+TNum[1.5]
+```
+
+<!-- => TNum[1.5] -->
