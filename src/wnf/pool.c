@@ -292,13 +292,6 @@ fn void wnf_pool_stats_snapshot(WnfPool *p) {
 
 // === Parallel drain ===
 
-typedef struct {
-  WnfPool   *pool;
-  u32        tid;
-  WnfFireFn  fire;
-  void      *user;
-} WnfPoolWorkerArg;
-
 // T>1: a worker pops its bag, else steals, else leaves `alive` and spins until
 // a peer has work (it rejoins) or alive is 0; the last one out (prev == 1)
 // ends the drain.  wnf / cnf in a fire use the worker's own stack.
