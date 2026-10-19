@@ -353,7 +353,7 @@ static void atp_otter_one(AtpState *s, u32 row, u32 seq) {
 // pressure like the overlap-pair loops (atp_pressure_collect).
 static void atp_otter_heap_gate(AtpState *s) {
   if (s->trace_pack) {
-    if ((HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+    if (atp_transient_gc_due(s)) {
       thvm_atp_gc_collect(s);
     }
     return;

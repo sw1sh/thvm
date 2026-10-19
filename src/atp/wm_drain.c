@@ -310,8 +310,7 @@ static u32 thvm_atp_interreduce_wm(AtpState *s, AtpAddedRange added) {
   // `added.first - dropped`.
 #define WM_IR_MAYBE_GC()                                                      \
   do {                                                                        \
-    if (s->trace_pack &&                                                      \
-        (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {                      \
+    if (atp_transient_gc_due(s)) {                                            \
       thvm_atp_gc_collect(s);                                                 \
       for (u32 _k = 0; _k < n_new; _k++) {                                    \
         new_lhs[_k] = s->lhs[added.first - dropped + _k];                     \
@@ -888,8 +887,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
     // new_lhs/new_rhs (local copies), so a Cheney collection here is safe as
     // long as we re-read the relocated new-rule Terms afterwards.  Gated on
     // trace_pack (the off-heap-trace path that makes deep runs reachable).
-    if (s->trace_pack &&
-        (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+    if (atp_transient_gc_due(s)) {
       thvm_atp_gc_collect(s);
       for (u32 k = 0; k < n_new; k++) {
         new_lhs[k] = s->lhs[added.first - dropped + k];
@@ -1328,8 +1326,7 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added) {
             "IR2 j=%u used=%lluM nr=%u press=%u\n", j,
             (unsigned long long)(used>>20), s->n_rules,
             (unsigned)atp_heap_under_pressure()); } }
-      if (s->trace_pack &&
-          (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+      if (atp_transient_gc_due(s)) {
         thvm_atp_gc_collect(s);
         for (u32 k = 0; k < n_new; k++) {
           new_lhs[k] = s->lhs[added.first - dropped + k];

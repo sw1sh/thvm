@@ -2301,7 +2301,7 @@ static void atp_cp_rebuild_priorities(AtpState *s) {
     // step-top GC.  Reclaim them in-loop: the unpacked Terms are consumed
     // within the iteration, so nothing live is carried across the boundary
     // (cp_packed bytes + rooted rule/trace arrays survive a Cheney pass).
-    if (s->trace_pack && (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+    if (atp_transient_gc_due(s)) {
       thvm_atp_gc_collect(s);
     }
     if (atp_cp_slot_implicit(s, vv)) {

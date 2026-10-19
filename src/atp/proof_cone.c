@@ -219,8 +219,7 @@ fn void thvm_atp_record_goal_cone(AtpState *s) {
   // across a collection, and the birth/death arrays are plain u32.
 #define ATP_CONE_MAYBE_GC()                                                   \
   do {                                                                        \
-    if (s->trace_pack && gc_enabled() &&                                      \
-        (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {           \
+    if (gc_enabled() && atp_transient_gc_due(s)) {                            \
       thvm_atp_gc_collect(s);                                                 \
     }                                                                         \
   } while (0)

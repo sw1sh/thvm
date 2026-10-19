@@ -488,6 +488,18 @@ static u64 atp_gc_threshold_bytes(void) {
   return (u64)v << 20;
 }
 
+// Whether the threshold collection is due: once the cells allocated since
+// the last collection pass the threshold.  Measured from the live set that
+// collection left, not from the from-space start, so a live set past the
+// threshold does not collect again at every step or loop iteration
+// (conjunct 3 of WolframAxioms ImpliesShefferAxioms spent 95 of 121 s in
+// 1661 such collections).  Gated on trace_pack, the off-heap trace that
+// keeps the live set small and makes deep runs reachable.
+static u8 atp_transient_gc_due(const AtpState *s) {
+  return s->trace_pack &&
+         (HEAP_NEXT - gc_from_start()) > s->gc_live_after + atp_gc_threshold_bytes();
+}
+
 // Discard every record / node and rebuild the tree from the live CP
 // arrays.  Used when a wholesale CP-set mutation (e.g. a test
 // populating the arrays directly) reshuffles seqs out from under
@@ -518,7 +530,7 @@ static void atp_fv_index_rebuild(AtpState *s) {
     // Bound the transient unpack (see atp_cp_rebuild_priorities): l,r are
     // consumed by the feature insert and not kept by the index, so a Cheney
     // pass between iterations reclaims them without touching the live index.
-    if (s->trace_pack && (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+    if (atp_transient_gc_due(s)) {
       thvm_atp_gc_collect(s);
     }
     Term l = 0, r = 0;

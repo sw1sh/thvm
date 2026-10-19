@@ -198,8 +198,7 @@ fn u32 thvm_atp_cp_size_stats(const AtpState *s, u32 *min_out, u32 *max_out,
     // pressure mark is throttled (atp_pressure_collect): a live set above
     // half the space -- a full on-heap trace -- collected on EVERY queued
     // CP here, a post-run stall of thousands of whole-heap copies.
-    if (s->trace_pack &&
-        (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+    if (atp_transient_gc_due(s)) {
       thvm_atp_gc_collect((AtpState *)s);
     } else {
       atp_pressure_collect((AtpState *)s);
@@ -3185,8 +3184,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
   // off-heap the live set is small and the pass is cheap; with the
   // on-heap trace every pass copies the whole proof trace (~8x
   // slowdown observed: 5160 -> 642 steps/s) for no reclaim.
-  if (s->trace_pack &&
-      (HEAP_NEXT - gc_from_start()) > atp_gc_threshold_bytes()) {
+  if (atp_transient_gc_due(s)) {
     thvm_atp_gc_collect(s);
   }
 

@@ -408,6 +408,7 @@ TESTS := \
   $(BIN)/test_atp_deep_cp \
   $(BIN)/test_ft_order \
   $(BIN)/test_atp_ft_rules \
+  $(BIN)/test_atp_gc_threshold \
   $(BIN)/test_atp_ft \
   $(BIN)/test_ft_match \
   $(BIN)/test_ft_norm \
