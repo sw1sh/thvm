@@ -191,5 +191,53 @@ class TestVarStd(unittest.TestCase):
                                    TgTensor(xi).var().numpy(), rtol=1e-6)
 
 
+class TestGelu(unittest.TestCase):
+    """gelu's approximate modes (mixin/elementwise.py:780-795)."""
+
+    def test_none_is_the_erf_form(self):
+        import math
+        x = np.linspace(-3, 3, 13).astype(np.float32)
+        want = np.array([v * 0.5 * (1.0 + math.erf(v / math.sqrt(2))) for v in x], np.float32)
+        np.testing.assert_allclose(Tensor(x).gelu(approximate="none").numpy(), want, atol=2e-6)
+        self.assertRaises(RuntimeError, Tensor(x).gelu, approximate="bogus")
+
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not importable")
+    def test_none_matches_tinygrad(self):
+        from tinygrad import Tensor as TgTensor
+        x = np.linspace(-3, 3, 13).astype(np.float32)
+        np.testing.assert_allclose(Tensor(x).gelu(approximate="none").numpy(),
+                                   TgTensor(x).gelu(approximate="none").numpy(), rtol=1e-6, atol=1e-7)
+
+
+class TestMaxPoolCeilMode(unittest.TestCase):
+    """ceil_mode (mixin/op.py:1273-1284): a no-op when the floor sizes cover the
+    input; a window past it needs the -inf pad thvm lacks, so it raises."""
+
+    def test_covered_input_matches_floor(self):
+        x = np.arange(32.).reshape(1, 2, 4, 4).astype(np.float32)
+        np.testing.assert_array_equal(Tensor(x).max_pool2d(ceil_mode=True).numpy(),
+                                      Tensor(x).max_pool2d().numpy())
+
+    def test_window_past_the_input_raises(self):
+        x = np.arange(50.).reshape(1, 2, 5, 5).astype(np.float32)
+        self.assertRaises(NotImplementedError, Tensor(x).max_pool2d, ceil_mode=True)
+
+
+class TestTranspose(unittest.TestCase):
+    """transpose() and .T swap dims 0 and 1 (mixin/movement.py:323-343)."""
+
+    def test_default_swaps_dims_0_and_1(self):
+        x = np.arange(24.).reshape(2, 3, 4).astype(np.float32)
+        np.testing.assert_array_equal(Tensor(x).transpose().numpy(), x.transpose(1, 0, 2))
+        np.testing.assert_array_equal(Tensor(x).T.numpy(), x.transpose(1, 0, 2))
+        np.testing.assert_array_equal(Tensor(x).transpose(-1, -2).numpy(), x.transpose(0, 2, 1))
+
+    @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not importable")
+    def test_matches_tinygrad(self):
+        from tinygrad import Tensor as TgTensor
+        x = np.arange(24.).reshape(2, 3, 4).astype(np.float32)
+        np.testing.assert_array_equal(Tensor(x).T.numpy(), TgTensor(x).T.numpy())
+
+
 if __name__ == "__main__":
     unittest.main()

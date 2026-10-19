@@ -768,14 +768,11 @@ class Tensor(metaclass=_TensorMeta):
         t = _TH.permute(self.term, list(axes))
         return Tensor._from_term(t, self._dtype, new_shape)
 
-    def transpose(self, dim0: int = -2, dim1: int = -1) -> "Tensor":
-        if self.ndim < 2:
-            return self
-        perm = list(range(self.ndim))
-        d0 = dim0 if dim0 >= 0 else dim0 + self.ndim
-        d1 = dim1 if dim1 >= 0 else dim1 + self.ndim
-        perm[d0], perm[d1] = perm[d1], perm[d0]
-        return self.permute(*perm)
+    def transpose(self, dim0: int = 1, dim1: int = 0) -> "Tensor":
+        """tinygrad mixin/movement.py:330-343."""
+        order = list(range(self.ndim))
+        order[dim0], order[dim1] = order[dim1], order[dim0]
+        return self.permute(*order)
 
     def expand(self, *shape) -> "Tensor":
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
@@ -1206,7 +1203,6 @@ class Tensor(metaclass=_TensorMeta):
                    padding=0, ceil_mode=False) -> "Tensor":
         """Max pool: the _pool unfold, then a max over the trailing window axes (tinygrad
         mixin/op.py:1335-1378)."""
-        del ceil_mode  # ignored: output sizes always round down
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
         k_ = tuple(int(k) for k in kernel_size)
@@ -1220,6 +1216,14 @@ class Tensor(metaclass=_TensorMeta):
         s_ = (stride,) * len(k_) if isinstance(stride, int) else tuple(stride)
         d_ = (dilation,) * len(k_) if isinstance(dilation, int) else tuple(dilation)
         spatial = self._shape[-len(k_):]
+        if ceil_mode:
+            # The trailing pad _apply_ceil_mode adds (mixin/op.py:1273-1284); none
+            # when the floor sizes already cover the input.
+            for i, k, s, d in zip(spatial, k_, s_, d_):
+                o = -(-(i - (d * (k - 1) + 1)) // s) + 1
+                if s * (o - 1) + (d * (k - 1) + 1) - i - max(s * (o - 1) - (i - 1), 0) > 0:
+                    raise NotImplementedError(
+                        "max_pool2d ceil_mode past the input needs a -inf pad (not yet wired)")
         # Non-overlapping windows are a reshape into (out, k) per axis that fuses into the max,
         # where _pool's repeat / expand unfold cannot stay a view and materializes a large buffer.
         if (all(s == k for s, k in zip(s_, k_)) and all(d == 1 for d in d_)
@@ -1294,8 +1298,7 @@ class Tensor(metaclass=_TensorMeta):
 
     @property
     def T(self) -> "Tensor":
-        """The last two dims swapped; tinygrad's `.T` swaps dims 0 and 1
-        (mixin/movement.py:323-328), the same only for 2-D."""
+        """transpose(): dims 0 and 1 swapped (tinygrad mixin/movement.py:323-328)."""
         return self.transpose()
 
     @classmethod
@@ -1337,11 +1340,22 @@ class Tensor(metaclass=_TensorMeta):
         return _const_broadcast(value, self._shape, self._dtype)
 
     def gelu(self, approximate: str = "tanh") -> "Tensor":
-        """GELU in the tanh form, whatever `approximate` says (tinygrad
-        mixin/elementwise.py:780-795)."""
-        return 0.5 * self * (
-            1.0 + (math.sqrt(2.0 / math.pi)
-                   * (self + 0.044715 * (self * self * self))).tanh())
+        """tinygrad mixin/elementwise.py:780-795."""
+        if approximate == "tanh":
+            return 0.5 * self * (
+                1.0 + (math.sqrt(2.0 / math.pi)
+                       * (self + 0.044715 * (self * self * self))).tanh())
+        if approximate == "none":
+            return self * 0.5 * (1.0 + (self / math.sqrt(2)).erf())
+        raise RuntimeError(f"{approximate=} is not supported")
+
+    def erf(self) -> "Tensor":
+        """Abramowitz and Stegun 7.1.26, as tinygrad (mixin/elementwise.py:1059-1071)."""
+        s = (self < 0).where(-1.0, 1.0)
+        t = 1.0 / (1.0 + 0.3275911 * (s * self))
+        poly = functools.reduce(lambda acc, c: acc * t + c,
+                                [1.061405429, -1.453152027, 1.421413741, -0.284496736, 0.254829592], 0.0)
+        return s * (1.0 - t * poly * (-self.square()).exp())
 
     def _tri(self, r: int, c: int, diagonal: int = 0) -> "Tensor":
         """0/1 mask arange(r)[:, None] + diagonal <= arange(c) (tinygrad mixin/op.py:233-234)."""
