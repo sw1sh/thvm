@@ -258,3 +258,11 @@ VerificationTest[
     {{2.5, 5.}, "f32", {3, 6}, "i32", {1.5, 3.5}},
     TestID -> "tensors/int-float-promotion"
 ]
+
+(* A reduce over a graph of lambda variables has no known shape until the lambda is applied, so
+   TUOpReduce accepts it. *)
+VerificationTest[
+    Normal[TRealize[TApp[TLam[w, TUOpReduce[TUOpMul[w, w], 0, "SUM"]], TTensorCreate[{1., 2., 3.}]]]],
+    {14.},
+    TestID -> "tensors/reduce-under-lambda"
+]
