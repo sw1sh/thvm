@@ -26,6 +26,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 - With `"Hidden" -> 0` the model is linear, with the kind `"Linear"` and the weights `"W"` and `"B"`. With `"Hidden" -> n`, it has one hidden layer of *n* rectified linear units, at most 64, with the kind `"MLP"` and the weights `"W1"`, `"B1"`, `"W2"` and `"B2"`.
 - `"TrainAUC"` is the area under the receiver operating characteristic (ROC) curve of the model on the training rows: `1` when the model ranks every label-1 row above every label-0 row, and about `0.5` for a random ranking.
 - With the forms that build the dataset, the options of [TAtpCpDataset]() are used for the proofs.
+- A *dataset* whose rows are not 14 numbers each, or whose labels are not one `0` or `1` for each row, issues `TAtpTrainScorer::data` and gives `$Failed`; a `"Hidden"` value outside `0` to `64` issues `TAtpTrainScorer::hidden`.
 - The model is used by <code>[TFindProof]()[…, [Method]() -> "ENIGMA"]</code> after <code>[TAtpSetLearnedScorer]()[*model*]</code>, in the style of ENIGMA (Efficient Learning-Based Inference Guiding Machine).
 - [TAtpTrainGnn]() trains a graph neural network on equation graphs instead of feature rows.
 - The following options can be given:
@@ -39,22 +40,142 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 
 ## Basic Examples
 
-Train a scorer on a synthetic dataset of 20 rows, whose label is `1` when the first feature exceeds `0.5`, and read the area under the curve on the training rows:
+A dataset of six critical pairs, each a row of 14 features, labeled by whether it takes part in a proof:
 
 ```wl
-SeedRandom[42];
-feats = RandomReal[{0, 1}, {20, 14}];
-labels = Boole /@ Thread[feats[[All, 1]] > 0.5];
-trained = TAtpTrainScorer[<|"Features" -> feats, "Labels" -> labels|>];
-trained["TrainAUC"]
+data = <|"Features" -> Table[N[Mod[i + j, 4]], {i, 6}, {j, 14}], "Labels" -> {1, 0, 0, 0, 1, 0}|>
 ```
 
-<!-- => 0.969697 -->
+<!-- => <|"Features" -> {{2., 3., 0., 1., 2., 3., 0., 1., 2., 3., 0., 1., 2., 3.}, ...}, "Labels" -> {1, 0, 0, 0, 1, 0}|> -->
 
-The model has a hidden layer, with standardization folded in, as [TAtpSetLearnedScorer]() takes it:
+Train a linear scorer on it:
 
 ```wl
-Keys @ trained["Model"]
+TAtpTrainScorer[data, "Hidden" -> 0]
+```
+
+<!-- => <|"Model" -> <|"Kind" -> "Linear", "Mean" -> {1.83333, 1.5, ...}, "InvStd" -> {0.855399, 0.725476, ...}, "W" -> {...}, "B" -> a number|>, "TrainAUC" -> 1., "NRows" -> 6, "NPositive" -> 2, "Hidden" -> 0|> -->
+
+The area under the curve on the training rows:
+
+```wl
+TAtpTrainScorer[data, "Hidden" -> 0]["TrainAUC"]
+```
+
+<!-- => 1. -->
+
+## Scope
+
+By default the model has one hidden layer of 16 units:
+
+```wl
+Keys[TAtpTrainScorer[<|"Features" -> Table[N[Mod[i + j, 4]], {i, 6}, {j, 14}], "Labels" -> {1, 0, 0, 0, 1, 0}|>]["Model"]]
 ```
 
 <!-- => {"Kind", "Mean", "InvStd", "W1", "B1", "W2", "B2"} -->
+
+---
+
+Train on the critical pairs of the proofs of conjectures, here from the axioms of an Abelian group:
+
+```wl
+KeyDrop[TAtpTrainScorer[{OverBar[OverBar[x]] == x}, AxiomaticTheory["AbelianGroupAxioms"], TimeConstraint -> 5], "Model"]
+```
+
+<!-- => <|"TrainAUC" -> 0.958333, "NRows" -> 10, "NPositive" -> 4, "Hidden" -> 16, "NProofs" -> 1|> -->
+
+---
+
+Train on the notable theorems of a named theory:
+
+```wl
+KeyDrop[TAtpTrainScorer["AbelianGroupAxioms", TimeConstraint -> 5], "Model"]
+```
+
+<!-- => <|"TrainAUC" -> 0.669235, "NRows" -> 92, "NPositive" -> 33, "Hidden" -> 16, "NProofs" -> 4|> -->
+
+## Options
+
+### Hidden
+
+The number of hidden units sets the shape of the first weight matrix:
+
+```wl
+Dimensions[TAtpTrainScorer[<|"Features" -> Table[N[Mod[i + j, 4]], {i, 6}, {j, 14}], "Labels" -> {1, 0, 0, 0, 1, 0}|>, "Hidden" -> 4]["Model"]["W1"]]
+```
+
+<!-- => {4, 14} -->
+
+### MaxTrainingRounds
+
+A single training step ranks the rows of a real dataset less well than the default 300:
+
+```wl
+TAtpTrainScorer[{OverBar[OverBar[x]] == x}, AxiomaticTheory["AbelianGroupAxioms"], TimeConstraint -> 5, MaxTrainingRounds -> 1]["TrainAUC"]
+```
+
+<!-- => a number below 0.958333, such as 0.333333 -->
+
+### LearningRate
+
+A larger learning rate:
+
+```wl
+TAtpTrainScorer[<|"Features" -> Table[N[Mod[i + j, 4]], {i, 6}, {j, 14}], "Labels" -> {1, 0, 0, 0, 1, 0}|>, "LearningRate" -> 0.1]["TrainAUC"]
+```
+
+<!-- => 1. -->
+
+### Method
+
+Train with plain stochastic gradient descent instead of Adam:
+
+```wl
+TAtpTrainScorer[<|"Features" -> Table[N[Mod[i + j, 4]], {i, 6}, {j, 14}], "Labels" -> {1, 0, 0, 0, 1, 0}|>, "Method" -> "SGD"]["TrainAUC"]
+```
+
+<!-- => 1. -->
+
+## Applications
+
+Train a scorer on the proofs of a theory's notable theorems:
+
+```wl
+trained = TAtpTrainScorer["AbelianGroupAxioms", TimeConstraint -> 5];
+```
+
+Give its model to the prover:
+
+```wl
+TAtpSetLearnedScorer[trained["Model"]]
+```
+
+<!-- => True -->
+
+Prove a theorem with the learned scorer:
+
+```wl
+TFindProof["InverseOfInverse", "AbelianGroupAxioms", "Status", Method -> "ENIGMA", TimeConstraint -> 10]
+```
+
+<!-- => "Proved" -->
+
+## Properties and Relations
+
+The model takes the 14 features of [TAtpCpDataset](), whose names its `"FeatureNames"` key lists:
+
+```wl
+Length[TAtpCpDataset[{OverBar[OverBar[x]] == x}, AxiomaticTheory["AbelianGroupAxioms"], TimeConstraint -> 5]["FeatureNames"]]
+```
+
+<!-- => 14 -->
+
+## Possible Issues
+
+A dataset whose rows do not have 14 features issues a message and gives `$Failed`:
+
+```wl
+TAtpTrainScorer[<|"Features" -> {{1., 2.}}, "Labels" -> {1}|>]
+```
+
+<!-- => TAtpTrainScorer::data is issued; $Failed -->

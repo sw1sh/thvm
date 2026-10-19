@@ -15,13 +15,9 @@ With[{checkout = Environment["PACLETPAGE_CHECKOUT"]},
 Needs["WolframInstitute`PacletPage`"];
 
 (* Pages built without evaluating their examples: their code and the `<!-- => -->` hints are shown
-   as written.
-   - AtpMethods.md and TAtpTrainScorer.md: a second TAtpTrainScorer or TNetTrain in one kernel dies
-     inside a JIT-compiled CPU tensor kernel (docs/plans/atp_heap_leak.md, "Poison 3").
-   - Train.md: its training example aborts the kernel, fresh or not, with "thvm fatal: fired kernel
-     kid=96, which the kernel GC stripped (its inputs were freed)".
-   Each comes off this list when its crash is fixed. *)
-$unevaluatedPages = {"AtpMethods.md", "TAtpTrainScorer.md", "Train.md"};
+   as written.  None at present; a page goes here only while a crash keeps its examples from
+   running, and cells that cannot run yet are marked `#| eval: false` on their own page. *)
+$unevaluatedPages = {};
 
 (* Every page starts from a fresh runtime, as its examples assume and run_doc_examples.wls checks:
    a parallel kernel converts many pages, and the heap, the book of definitions and the kernel
