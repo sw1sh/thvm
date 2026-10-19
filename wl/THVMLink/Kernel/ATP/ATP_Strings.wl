@@ -185,8 +185,8 @@ TStringPath[thms_, axioms_, opts : OptionsPattern[TFindProof]] := Block[{path = 
             If[MatchQ[po, _ProofObject], path = atpDatasetEqPath[po]]]
     ];
     Which[
-        path === $Failed, $Failed,
-        ListQ[path] && path =!= {} && ListQ[First[path]],
+        ! ListQ[path], $Failed,
+        path =!= {} && ListQ[First[path]],
             atpSquashDups[atpWordToString /@ #] & /@ path,
         True, atpSquashDups[atpWordToString /@ path]
     ]

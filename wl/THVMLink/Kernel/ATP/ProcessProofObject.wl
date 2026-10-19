@@ -1174,6 +1174,7 @@ Options[TEproverProofObject] = {
 
 TEproverProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{epR = TEproverProof[theory, thm, FilterRules[{opts}, Options[TEproverProof]]], liftQ = TrueQ @ OptionValue["LiftToProofObject"], parseOpt, assoc},
     parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
+    If[ ! AssociationQ[epR], Return[$Failed]];
     If[ epR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Eprover",
@@ -1193,6 +1194,7 @@ TEproverProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
    SZS-to-ProofObject builder. *)
 TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{vampR = TVampireProof[theory, thm, FilterRules[{opts}, Options[TVampireProof]]], liftQ = TrueQ @ OptionValue["LiftToProofObject"], parseOpt, assoc},
     parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
+    If[ ! AssociationQ[vampR], Return[$Failed]];
     If[ vampR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Vampire",
@@ -1252,6 +1254,7 @@ TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /; FileExte
     (* LiftToProofObject implies ParseFormulas: the lift needs
        WL-parsed formula bodies to walk. *)
     parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
+    If[ ! AssociationQ[wmR], Return[$Failed]];
     If[ wmR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Waldmeister",
@@ -1275,6 +1278,7 @@ Options[TTweeProofObject] = {
 }
 
 TTweeProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{tR = TTweeProof[theory, thm, FilterRules[{opts}, {TimeConstraint, "Binary"}]], ds, axs, lems},
+    If[ ! AssociationQ[tR], Return[$Failed]];
     If[ tR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Twee",

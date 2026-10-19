@@ -104,12 +104,13 @@ VerificationTest[
 
 VerificationTest[
     (* Distinct symbols get distinct labels.  After encoding zero
-       and nil, the symbol map should have 2 entries. *)
+       and nil, the symbol map has 2 entries besides the engine-reserved
+       grounding constants cAtp1 / cAtp2 the initial state carries. *)
     Module[{state, r1, r2},
       state = WolframInstitute`THVMLink`ATP`Private`encodeAtpTermInit[];
       r1 = WolframInstitute`THVMLink`ATP`Private`encodeAtpTerm[zero, state];
       r2 = WolframInstitute`THVMLink`ATP`Private`encodeAtpTerm[nil, r1[[2]]];
-      Length[r2[[2]]["sym"]]
+      Length[KeyDrop[r2[[2]]["sym"], {"cAtp1", "cAtp2"}]]
     ],
     2,
     TestID -> "ATP/encoder/distinct-symbols-get-distinct-labels"
@@ -125,7 +126,7 @@ VerificationTest[
         f[zero, succ[zero]], state
       ];
       t = result[[1]];
-      {WolframInstitute`THVMLink`Private`$termTagFn[t], Length[result[[2]]["sym"]]}
+      {WolframInstitute`THVMLink`Private`$termTagFn[t], Length[KeyDrop[result[[2]]["sym"], {"cAtp1", "cAtp2"}]]}
     ],
     {20 (* TAG_CTR *), 3 (* f, zero, succ *)},
     TestID -> "ATP/encoder/compound-head-becomes-ctr-with-children"
@@ -351,12 +352,12 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* A non-existent file path causes wald_parse_file to fail;
-       the C-side runner returns ATP_RUNNING (=0) as a parse-fail
-       sentinel, which decodes to "RUNNING". *)
-    TATP[File["tests/data/atp/_does_not_exist_.pr"]]["Status"],
-    "RUNNING",
-    TestID -> "ATP/TATP/file/missing-path-yields-running-sentinel"
+    (* A non-existent file path is refused before the C-side parser, which would
+       report its parse failure as the ATP_RUNNING (=0) sentinel. *)
+    TATP[File["tests/data/atp/_does_not_exist_.pr"]],
+    $Failed,
+    {TATP::nofile},
+    TestID -> "ATP/TATP/file/missing-path-is-refused"
 ]
 
 (* === TFindProof: C ATP engine ============================ *)
@@ -1589,6 +1590,8 @@ VerificationTest[
          TFindProof["AbelianGroupAxioms", "Lemmas", TimeConstraint -> 10],
          {__}]},
     {ProofObject, True},
+    (* the AC completion never saturates, so the ProofObject lists the axioms only *)
+    {TFindProof::cplpo},
     TestID -> "ATP/completion/theory-by-name-returns-lemmas"
 ]
 
@@ -2415,7 +2418,7 @@ VerificationTest[
    A future preset addition has to extend the registry, which keeps
    the doc and dispatcher in sync. *)
 VerificationTest[
-    With[{p = WolframInstitute`THVMLink`ATP`Private`$AtpMethodPresets},
+    With[{p = $AtpMethodPresets},
         {ListQ[p], AllTrue[p, StringQ],
          SubsetQ[p, {"Waldmeister", "VampireUEQ", "Twee", "EProver",
                      "Portfolio", "VampirePortfolio",
@@ -2788,6 +2791,7 @@ VerificationTest[
 VerificationTest[
     TAtpSetLearnedScorer[<|"Kind" -> "Linear", "W" -> {1., 2., 3.}, "B" -> 0.|>],
     False,
+    {TAtpSetLearnedScorer::model},
     TestID -> "ATP/enigma/reject-malformed-model"
 ]
 
@@ -2859,8 +2863,8 @@ VerificationTest[
          Count[g["NodeTypes"], 0], Count[g["NodeTypes"], 1],
          Count[g["NodeTypes"], 2], Count[g["NodeTypes"], 3],
          Sort[Keys[g]]}],
-    {10, 10, {10, 6}, 1, 5, 3, 1,
-     Sort[{"NodeTypes", "NodeFeatures", "Edges", "NNodes", "NEdges"}]},
+    {10, 10, {10, 12}, 1, 5, 3, 1,
+     Sort[{"NodeTypes", "NodeFeatures", "Edges", "NNodes", "NEdges", "NodeLabels", "Symbols"}]},
     TestID -> "ATP/enigma/cpgraph-schema"
 ]
 
@@ -2932,7 +2936,7 @@ VerificationTest[
          SubsetQ[{0, 1}, Union[ds["Labels"]]],
          AllTrue[ds["Graphs"], AssociationQ[#] &&
              Sort[Keys[#]] === Sort[{"NodeTypes", "NodeFeatures",
-                 "Edges", "NNodes", "NEdges"}] &],
+                 "Edges", "NNodes", "NEdges", "NodeLabels", "Symbols"}] &],
          Sort[Keys[ds]]}],
     {2, True, True, True, True, True,
      Sort[{"Graphs", "Labels", "NPos", "NNeg", "NProofs"}]},
@@ -2965,9 +2969,9 @@ VerificationTest[
             TAtpCpGraph[Inactive[Equal][a, a]]}, "Labels" -> {1, 0}|>;
         nMax = Max[#["NNodes"] & /@ ds["Graphs"]];
         bt = WolframInstitute`THVMLink`ATP`Private`atpGnnTensors[ds];
-        {Dimensions[bt["X"]] === {2, nMax, 6},
+        {Dimensions[bt["X"]] === {2, nMax, 12},
          Dimensions[bt["A"]] === {2, nMax, nMax},
-         Dimensions[bt["Y"]] === {2, 2}, bt["B"] === 2, bt["F"] === 6}],
+         Dimensions[bt["Y"]] === {2, 2}, bt["B"] === 2, bt["F"] === 12}],
     {True, True, True, True, True},
     TestID -> "ATP/enigma/gnn-tensors-shape"
 ]
