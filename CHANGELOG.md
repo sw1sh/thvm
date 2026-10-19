@@ -396,6 +396,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- The documentation renders the symbols of THVMLink`ATP`, TFindProof among them, as PacletSymbol references: PacletPage declares only the primary context's symbols by default, so wl/scripts/pacletpage.wl now passes the public symbols of both contexts.
 - TAtpTrainScorer refuses a dataset that is not 14-feature rows with one 0 or 1 label each (`TAtpTrainScorer::data`), and a "Hidden" width outside 0 to 64 (`TAtpTrainScorer::hidden`), instead of training on garbage behind a cascade of internal messages.
 - TAtpTrainGnn takes its starting loss from a forward of its own, so the forward its training loop differentiates stays lazy until the loop runs.
 - The documentation evaluates Train, AtpMethods and TAtpTrainScorer again (a second training in one kernel no longer dies, and the stripped-kernel abort is fixed in the runtime); the TAtpTrainScorer page is rewritten around real examples.

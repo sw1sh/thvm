@@ -44,7 +44,19 @@ $documentationOptions = {
 
 (* The libraries the release ships: one per Wolfram $SystemID, all built by `make wl-cross` from
    the same commit.  Debug output the toolchains leave beside them stays out of the archive. *)
-$resourceOptions = {"Exclude" -> {"*.dSYM", "*.dSYM/*", "*.pdb", "*.lib", "*.exp", "*.DS_Store", "docs/*", "Tests/*"}};
+(* The symbols the resource page's examples render as PacletSymbol: the public ones of both of the
+   paclet's contexts, as full names.  PacletPage's default reads the primary context only, which
+   leaves TFindProof and the rest of THVMLink`ATP` as plain text in every example. *)
+$pacletContexts = {"WolframInstitute`THVMLink`", "WolframInstitute`THVMLink`ATP`"};
+pacletSymbolNames[] := (
+    PacletDirectoryLoad[$pacletDirectory];
+    Needs["WolframInstitute`THVMLink`"];
+    Sort @ Flatten[Function[c, (c <> Last[StringSplit[#, "`"]] &) /@ Names[c <> "*"]] /@ $pacletContexts]
+);
+$resourceOptions := {
+    "Exclude" -> {"*.dSYM", "*.dSYM/*", "*.pdb", "*.lib", "*.exp", "*.DS_Store", "docs/*", "Tests/*"},
+    "Symbols" -> pacletSymbolNames[]
+};
 
 (* Pages whose examples compute in parallel kernels of their own (TFindFiniteModels'
    "Parallelize"): they convert in this kernel, since parallel computations cannot nest in the
