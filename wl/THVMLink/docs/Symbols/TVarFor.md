@@ -98,4 +98,4 @@ The body of an identity lambda is the variable for the lambda's own cell, here l
 TTermExpr[TLam[x, x]]
 ```
 
-<!-- => "LAM"["VAR"[0]] -->
+<!-- => "LAM"["VAR"[1]] -->

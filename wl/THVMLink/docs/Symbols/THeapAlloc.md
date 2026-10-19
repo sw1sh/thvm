@@ -31,26 +31,26 @@ Start from an empty heap:
 TReset[];
 ```
 
-Reserve two cells, which start at location 0:
+Reserve two cells, which start at location 1, since location 0 never holds a cell:
 
 ```wl
 THeapAlloc[2]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 The next free location has moved past them:
 
 ```wl
 THeapPos[]
 ```
-<!-- => 2 -->
+<!-- => 3 -->
 
 The next allocation starts where the previous one ended:
 
 ```wl
 THeapAlloc[3]
 ```
-<!-- => 2 -->
+<!-- => 3 -->
 
 ## Scope
 
@@ -65,7 +65,7 @@ Reserve two cells:
 ```wl
 loc = THeapAlloc[2]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 Write a number into the first:
 
@@ -101,14 +101,14 @@ An allocation of no cells gives the current position:
 ```wl
 THeapAlloc[0]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 Nothing was reserved:
 
 ```wl
 THeapPos[]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 ## Properties and Relations
 
@@ -130,11 +130,11 @@ Building it reserved those two cells:
 ```wl
 THeapPos[]
 ```
-<!-- => 2 -->
+<!-- => 3 -->
 
 The next allocation follows them:
 
 ```wl
 THeapAlloc[1]
 ```
-<!-- => 2 -->
+<!-- => 3 -->

@@ -50,7 +50,7 @@ The heap now holds over a thousand cells:
 ```wl
 THeapPos[]
 ```
-<!-- => 1131 -->
+<!-- => 1132 -->
 
 Collect the garbage:
 
@@ -93,14 +93,14 @@ The next collection moves it back to the first half:
 ```wl
 TGCCollect[]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 The heap base follows:
 
 ```wl
 THeapBase[]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 ## Properties and Relations
 
@@ -157,7 +157,7 @@ They occupy a hundred cells:
 ```wl
 THeapPos[]
 ```
-<!-- => 100 -->
+<!-- => 101 -->
 
 Collect:
 

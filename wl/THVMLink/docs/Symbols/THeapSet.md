@@ -36,7 +36,7 @@ Reserve a cell:
 ```wl
 loc = THeapAlloc[1]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 Write the number 7 into it:
 
@@ -88,7 +88,7 @@ Reserve a cell:
 ```wl
 loc = THeapAlloc[1]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 Any term can be stored, here the eraser:
 
@@ -140,7 +140,7 @@ Reserve a cell:
 ```wl
 loc = THeapAlloc[1]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 Write a bare integer:
 

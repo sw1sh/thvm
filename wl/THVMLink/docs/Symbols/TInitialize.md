@@ -15,7 +15,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TInitialize]()[*expr*]</code> builds the term whose canonical form is the [Term]() expression *expr*.
 
-<!-- #| annotation: 26.10.19: The snapshot form (Heap.wl) resets the book heap, DEFS and ALO_STATES when the snapshot bundles them, then TResets the dynamic heap, reallocates the tensors (renumbered densely, so a snapshot survives TFree and a fresh kernel), writes the cells back from location 0, restores the label counter and repacks the root. The Term form walks the expression bottom-up through the public constructors with Unique[] binders, so binder ids are alpha-renamed; it has rules for NUM, ERA, ANY, REF, TEN, VAR, LAM, APP, SUP, OP2, DUP, DP0 and DP1 only, so CTR and MAT come back unevaluated. An orphan VAR inside a lambda, as in TInitialize[Term["LAM", 5, Term["VAR", 99]]], issues TInitialize::orphanvar and then THeapSet::loc for location 0, and still gives a LAM term (reported 26.10.19). -->
+<!-- #| annotation: 26.10.19: The snapshot form (Heap.wl) resets the book heap, DEFS and ALO_STATES when the snapshot bundles them, then TResets the dynamic heap, reallocates the tensors (renumbered densely, so a snapshot survives TFree and a fresh kernel), writes each cell back at its own location, restores the label counter and repacks the root. The Term form walks the expression bottom-up through the public constructors with Unique[] binders, so binder ids are alpha-renamed; it has rules for NUM, ERA, ANY, REF, TEN, VAR, LAM, APP, SUP, OP2, DUP, DP0 and DP1 only, so CTR and MAT come back unevaluated. An orphan VAR inside a lambda, as in TInitialize[Term["LAM", 5, Term["VAR", 99]]], issues TInitialize::orphanvar and then THeapSet::loc for location 0, and still gives a LAM term (reported 26.10.19). -->
 
 ## Details & Options
 
@@ -45,7 +45,7 @@ Take a snapshot of a superposition with 3 added to it:
 ```wl
 snap = TContextSnapshot[TSup[1, 2] + 3]
 ```
-<!-- => TContext[<|"Root" -> Term["OP2", "+", 2], "Cells" -> <|0 -> Term["NUM", "i32", 1], 1 -> Term["NUM", "i32", 2], 2 -> Term["SUP", 1, 0], 3 -> Term["NUM", "i32", 3]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 2, "State" -> "Initialized"|>], up to the label numbers -->
+<!-- => TContext[<|"Root" -> Term["OP2", "+", 3], "Cells" -> <|1 -> Term["NUM", "i32", 1], 2 -> Term["NUM", "i32", 2], 3 -> Term["SUP", 1, 1], 4 -> Term["NUM", "i32", 3]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 2, "State" -> "Initialized"|>], up to the label numbers -->
 
 Restore it:
 

@@ -55,7 +55,7 @@ A lambda carries the location of its binder, which its variable refers back to:
 Term[TLam[x, x + 1]]
 ```
 
-<!-- => Term["LAM", 0, Term["OP2", "+", Term["VAR", 0], Term["NUM", 1]]] -->
+<!-- => Term["LAM", 1, Term["OP2", "+", Term["VAR", 1], Term["NUM", 1]]] -->
 
 ## Scope
 
@@ -133,7 +133,7 @@ The lambda's variable now reads as the substituted value:
 Term[f]
 ```
 
-<!-- => Term["LAM", 0, Term["NUM", 5]] -->
+<!-- => Term["LAM", 1, Term["NUM", 5]] -->
 
 ---
 
@@ -179,7 +179,7 @@ The cells of a snapshot of a lambda:
 Values[First[TContextSnapshot[TLam[x, x + 1]]]["Cells"]]
 ```
 
-<!-- => {Term["OP2", "+", 1], Term["VAR", 0, 0], Term["NUM", "i32", 1]} -->
+<!-- => {Term["OP2", "+", 2], Term["VAR", 0, 1], Term["NUM", "i32", 1]} -->
 
 ## Properties and Relations
 

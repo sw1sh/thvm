@@ -490,7 +490,7 @@ snapshotRestorableQ[a_Association, {opts___}] :=
 TInitialize[TContext[a_Association], opts:OptionsPattern[]] /; snapshotRestorableQ[a, {opts}] := Module[{
     cellsAssoc, bookCellsAssoc, tensorsAssoc, defs, aloStates,
     root, labels, zeroFill, hasBundle,
-    cellList, n, bookKeys, base, slotToRuntime, rootRaw
+    start, top, bookKeys, slotToRuntime, rootRaw
 },
     ensureInit[];
     zeroFill = TrueQ @ OptionValue["ZeroFill"];
@@ -548,13 +548,19 @@ TInitialize[TContext[a_Association], opts:OptionsPattern[]] /; snapshotRestorabl
         $aloStatesSetNextFn[Length[aloStates] + 1]
     ];
 
-    (* Restore dyn heap. *)
-    cellList = Values @ KeySort[cellsAssoc];
-    n = Length[cellList];
-    base = If[n > 0, $heapAllocFn[n], 0];
-    Do[
-        $heapSetFn[base + i - 1, termToRaw[cellList[[i]], slotToRuntime]],
-        {i, n}
+    (* Restore dyn heap.  The cells are keyed by heap location and the restored terms point at
+       those locations, so each cell goes back to its own key.  A reset heap already holds its
+       reserved prefix (location 0, the runtime's "none"), so its cursor starts past it and the
+       snapshot's copy of the prefix is not rewritten; writing the cells from the cursor on
+       shifted every one of them off its key. *)
+    If[ Length[cellsAssoc] > 0,
+        start = $heapPosFn[];
+        top = Max[Keys[cellsAssoc]] + 1;
+        If[ top > start, $heapAllocFn[top - start]];
+        KeyValueMap[
+            {loc, cell} |-> If[ loc >= start, $heapSetFn[loc, termToRaw[cell, slotToRuntime]]],
+            cellsAssoc
+        ]
     ];
 
     $labelCounter = labels;

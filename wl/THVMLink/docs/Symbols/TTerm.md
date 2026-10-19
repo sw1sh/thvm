@@ -221,4 +221,4 @@ The handle made before the reset now reads the new term's body:
 Term[f]
 ```
 
-<!-- => Term["LAM", 0, Term["NUM", 7]] -->
+<!-- => Term["LAM", 1, Term["NUM", 7]] -->

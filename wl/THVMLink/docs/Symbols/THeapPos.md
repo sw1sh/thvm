@@ -20,7 +20,7 @@ RelatedGuides: [THVMLink]
 - The live cells are at the locations from <code>[THeapBase]()[]</code> up to <code>[THeapPos]()[]</code> - 1.
 - Every allocation advances it: <code>[THeapAlloc]()[*n*]</code> by *n*, and a term constructor by the number of cells of its node.
 - A lambda takes one cell, an application or a superposition two, and a constructor one more than its number of children. Numbers and the eraser are stored in the term itself and take no cell.
-- <code>[TReset]()</code> sets it to 0, and after <code>[TGCCollect]()</code> it is just past the last live cell in the other half of the heap.
+- <code>[TReset]()</code> sets it to 1, since location 0 never holds a cell, and after <code>[TGCCollect]()</code> it is just past the last live cell in the other half of the heap.
 
 ## Basic Examples
 
@@ -30,26 +30,26 @@ Start from an empty heap:
 TReset[];
 ```
 
-The next free location is 0:
+The next free location is 1:
 
 ```wl
 THeapPos[]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 Reserve two cells:
 
 ```wl
 THeapAlloc[2]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 The position has moved past them:
 
 ```wl
 THeapPos[]
 ```
-<!-- => 2 -->
+<!-- => 3 -->
 
 ## Scope
 
@@ -71,7 +71,7 @@ The position has advanced by one:
 ```wl
 THeapPos[]
 ```
-<!-- => 1 -->
+<!-- => 2 -->
 
 A constructor with two children takes three cells, its child count and the children:
 
@@ -85,7 +85,7 @@ The position has advanced by three:
 ```wl
 THeapPos[]
 ```
-<!-- => 4 -->
+<!-- => 5 -->
 
 A number is stored in the term itself:
 
@@ -99,7 +99,7 @@ The position has not moved:
 ```wl
 THeapPos[]
 ```
-<!-- => 4 -->
+<!-- => 5 -->
 
 ## Properties and Relations
 

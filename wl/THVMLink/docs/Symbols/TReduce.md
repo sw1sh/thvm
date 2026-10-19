@@ -50,7 +50,7 @@ The application now reads through the rewritten heap, where the lambda's cell ho
 Term[t]
 ```
 
-<!-- => Term["APP", Term["LAM", 0, Term["NUM", 41]], Term["NUM", 41]] -->
+<!-- => Term["APP", Term["LAM", 1, Term["NUM", 41]], Term["NUM", 41]] -->
 
 ## Scope
 

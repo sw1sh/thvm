@@ -63,7 +63,7 @@ A snapshot of the heap behind a sum:
 TContextSnapshot[TNum[3] + TNum[4]]
 ```
 
-<!-- => TContext[<|"Root" -> Term["OP2", "+", 0], "Cells" -> <|0 -> Term["NUM", "i32", 3], 1 -> Term["NUM", "i32", 4]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
+<!-- => TContext[<|"Root" -> Term["OP2", "+", 1], "Cells" -> <|1 -> Term["NUM", "i32", 3], 2 -> Term["NUM", "i32", 4]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
 
 ## Scope
 
@@ -135,7 +135,7 @@ Snapshot a lambda:
 snap = TContextSnapshot[TLam[x, x + 1]]
 ```
 
-<!-- => TContext[<|"Root" -> Term["LAM", 0, 0], "Cells" -> <|0 -> Term["OP2", "+", 1], 1 -> Term["VAR", 0, 0], 2 -> Term["NUM", "i32", 1]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
+<!-- => TContext[<|"Root" -> Term["LAM", 0, 1], "Cells" -> <|1 -> Term["OP2", "+", 2], 2 -> Term["VAR", 0, 1], 3 -> Term["NUM", "i32", 1]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
 
 The snapshot survives serialization unchanged:
 
@@ -175,4 +175,4 @@ A snapshot holds every cell of the heap, so the snapshot of a sum also holds the
 Keys[First[TContextSnapshot[TNum[3] + TNum[4]]]["Cells"]]
 ```
 
-<!-- => {0, 1, 2} -->
+<!-- => {1, 2, 3} -->

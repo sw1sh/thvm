@@ -75,7 +75,7 @@ The VAL field of the application is the location of its first child:
 TTermVal[t]
 ```
 
-<!-- => 1 -->
+<!-- => 2 -->
 
 The cell at that location holds the function:
 
@@ -83,7 +83,7 @@ The cell at that location holds the function:
 Term[THeapRead[TTermVal[t]]]
 ```
 
-<!-- => Term["LAM", 0, Term["VAR", 0]] -->
+<!-- => Term["LAM", 1, Term["VAR", 1]] -->
 
 The next cell holds the argument:
 

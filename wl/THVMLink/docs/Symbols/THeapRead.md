@@ -88,7 +88,7 @@ Reserve a cell:
 ```wl
 loc = THeapAlloc[1]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 Write a number into it:
 
@@ -124,7 +124,7 @@ List every live cell of the heap:
 ```wl
 Term /@ THeapRead /@ Range[THeapBase[], THeapPos[] - 1]
 ```
-<!-- => {Term["OP2", "+", Term["VAR", 0], Term["NUM", 1]], Term["VAR", 0], Term["NUM", 1], Term["LAM", 0, Term["OP2", "+", Term["VAR", 0], Term["NUM", 1]]], Term["NUM", 41]} -->
+<!-- => {Term["OP2", "+", Term["VAR", 1], Term["NUM", 1]], Term["VAR", 1], Term["NUM", 1], Term["LAM", 1, Term["OP2", "+", Term["VAR", 1], Term["NUM", 1]]], Term["NUM", 41]} -->
 
 Reduce the application:
 
@@ -138,7 +138,7 @@ The reduction has rewritten the cells, and the body cell of the lambda now holds
 ```wl
 Term /@ THeapRead /@ Range[THeapBase[], THeapPos[] - 1]
 ```
-<!-- => {Term["NUM", 41], Term["NUM", 41], Term["NUM", 1], Term["LAM", 0, Term["NUM", 41]], Term["NUM", 41]} -->
+<!-- => {Term["NUM", 41], Term["NUM", 41], Term["NUM", 1], Term["LAM", 1, Term["NUM", 41]], Term["NUM", 41]} -->
 
 ## Properties and Relations
 

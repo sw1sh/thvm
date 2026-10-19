@@ -36,7 +36,7 @@ Snapshot a sum of two tensors:
 snap = TContextSnapshot[TTensorCreate[{1., 2., 3.}] + TTensorCreate[{4., 5., 6.}]]
 ```
 
-<!-- => TContext[<|"Root" -> Term["UOP", "ADD", 0], "Cells" -> <|0 -> Term["TEN", "f32", 0], 1 -> Term["TEN", "f32", 1]|>, "BookCells" -> <||>, "Tensors" -> <|0 -> NumericArray[{1., 2., 3.}, "Real32"], 1 -> NumericArray[{4., 5., 6.}, "Real32"]|>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
+<!-- => TContext[<|"Root" -> Term["UOP", "ADD", 1], "Cells" -> <|1 -> Term["TEN", "f32", 0], 2 -> Term["TEN", "f32", 1]|>, "BookCells" -> <||>, "Tensors" -> <|0 -> NumericArray[{1., 2., 3.}, "Real32"], 1 -> NumericArray[{4., 5., 6.}, "Real32"]|>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
 
 Strip the tensor data:
 
@@ -44,7 +44,7 @@ Strip the tensor data:
 TContextStrip[snap]
 ```
 
-<!-- => TContext[<|"Root" -> Term["UOP", "ADD", 0], "Cells" -> <|0 -> Term["TEN", "f32", 0], 1 -> Term["TEN", "f32", 1]|>, "BookCells" -> <||>, "Tensors" -> <|0 -> <|"shape" -> {3}, "dtype" -> "f32"|>, 1 -> <|"shape" -> {3}, "dtype" -> "f32"|>|>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Uninitialized"|>] -->
+<!-- => TContext[<|"Root" -> Term["UOP", "ADD", 1], "Cells" -> <|1 -> Term["TEN", "f32", 0], 2 -> Term["TEN", "f32", 1]|>, "BookCells" -> <||>, "Tensors" -> <|0 -> <|"shape" -> {3}, "dtype" -> "f32"|>, 1 -> <|"shape" -> {3}, "dtype" -> "f32"|>|>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Uninitialized"|>] -->
 
 The tensors are now described by shape and dtype:
 
@@ -108,7 +108,7 @@ Snapshot a lambda, which refers to no tensors:
 s = TContextSnapshot[TLam[x, x + 1]]
 ```
 
-<!-- => TContext[<|"Root" -> Term["LAM", 0, 0], "Cells" -> <|0 -> Term["OP2", "+", 1], 1 -> Term["VAR", 0, 0], 2 -> Term["NUM", "i32", 1]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
+<!-- => TContext[<|"Root" -> Term["LAM", 0, 1], "Cells" -> <|1 -> Term["OP2", "+", 2], 2 -> Term["VAR", 0, 1], 3 -> Term["NUM", "i32", 1]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
 
 Stripping it changes nothing:
 

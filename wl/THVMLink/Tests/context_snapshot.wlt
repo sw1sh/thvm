@@ -31,7 +31,8 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* Root Term carries the tag + heap-relative val. *)
+    (* Root Term carries the tag + the heap location of its cell: a reset
+       heap hands out location 1 first, since location 0 is never a node. *)
     TInit[];
     TReset[];
     Module[{lam = TLam[x, x], h, root},
@@ -39,7 +40,7 @@ VerificationTest[
         root = First[h]["Root"];
         {Head[root], root[[1]], root[[3]]}
     ],
-    {Term, "LAM", 0},
+    {Term, "LAM", 1},
     TestID -> "heap-snapshot/root-term-fields"
 ]
 
@@ -79,6 +80,20 @@ VerificationTest[
     ],
     True,
     TestID -> "heap-snapshot/lam-cycle-roundtrip"
+]
+
+(* A restored lambda applies: every cell goes back to its own location
+   even though a reset heap's cursor starts past the reserved location 0.
+   Writing the cells from the cursor shifted them, and the application
+   read garbage and crashed the kernel. *)
+VerificationTest[
+    TInit[];
+    TReset[];
+    Module[{h = TContextSnapshot[TLam[x, x + 1]]},
+        TTermVal[TWnf[TApp[TInitialize[h], TNum[41]]]]
+    ],
+    42,
+    TestID -> "heap-snapshot/restored-lam-applies"
 ]
 
 (* === multi-cell roundtrip: TLam[x, TApp[x, TEra[]]] === *)

@@ -356,15 +356,16 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_heap_recycle(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
-// Lower bound of the active heap region.  When the Cheney GC has
-// swapped, live cells live in [gc_from_start(), HEAP_NEXT); WL
-// iterators that walk the heap use this as the lower bound.
-// Returns 0 when GC is disabled (single-region semantics).
+// Lower bound of the active heap region: live cells live in
+// [gc_space_base(gc_from_start()), HEAP_NEXT), and WL iterators that walk
+// the heap use this as the lower bound.  The lower semi-space starts at 1,
+// since loc 0 reads as "none" and never holds a node.  Returns 0 when GC is
+// disabled (single-region semantics).
 EXTERN_C DLLEXPORT int thvm_wl_heap_base(WolframLibraryData libData,
                                          mint argc, MArgument *args,
                                          MArgument res) {
   (void)libData; (void)argc; (void)args;
-  MArgument_setInteger(res, gc_enabled() ? (mint)gc_from_start() : 0);
+  MArgument_setInteger(res, gc_enabled() ? (mint)gc_space_base(gc_from_start()) : 0);
   return LIBRARY_NO_ERROR;
 }
 

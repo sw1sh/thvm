@@ -56,7 +56,7 @@ A lambda shows its body, where the variable is the location of its binder:
 TTermExpr[TLam[x, x + 1]]
 ```
 
-<!-- => "LAM"["OP2"["+", "VAR"[0], "NUM"[1]]] -->
+<!-- => "LAM"["OP2"["+", "VAR"[1], "NUM"[1]]] -->
 
 ---
 

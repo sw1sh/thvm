@@ -44,7 +44,7 @@ SetUsage[TTagName, "TTagName[tag$] returns the name string for a tag id."];
 (* === heap === *)
 SetUsage[THeapPos, "THeapPos[] returns the next free heap location (the upper bound of the active heap region)."];
 SetUsage[THeapBase, "THeapBase[] returns the lower bound of the active heap region.
-It is 0 after thvm_init and equals the GC from-start once semi-spaces have swapped, so heap iterators should walk THeapBase[] to THeapPos[] to cover live cells."];
+It is 1 after thvm_init (location 0 never holds a cell) and equals the GC from-start once semi-spaces have swapped, so heap iterators should walk THeapBase[] to THeapPos[] to cover live cells."];
 SetUsage[THeapAlloc, "THeapAlloc[size$] reserves size$ consecutive cells and returns the base loc."];
 SetUsage[THeapRead, "THeapRead[loc$] returns the Term at heap[loc$]."];
 SetUsage[TBookRead, "TBookRead[loc$] returns the Term at book_heap[loc$], useful for inspecting CTR cells allocated via TBookCtr or built by the Metal AOT kernel."];

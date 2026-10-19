@@ -13,13 +13,13 @@ RelatedGuides: [THVMLink]
 
 <code>[THeapBase]()[]</code> gives the lower bound of the active region of the dynamic heap.
 
-<!-- #| annotation: 26.10.19: THeapBase wraps the C heap's from-space start: 0 after thvm_init or TReset, and gc_from_start() once a collection has swapped the semi-spaces, which is 2^27 cells with the default heap size. Heap walkers (THeap, THeapGraph[], TContextSnapshot) iterate from THeapBase[] to THeapPos[] - 1 for that reason. -->
+<!-- #| annotation: 26.10.19: THeapBase wraps the C heap's first allocatable cell of the from-space, gc_space_base(gc_from_start()): 1 after thvm_init or TReset, since location 0 reads as "none" and never holds a node, and gc_from_start() once a collection has swapped the semi-spaces, which is 2^27 cells with the default heap size. Heap walkers (THeap, THeapGraph[], TContextSnapshot) iterate from THeapBase[] to THeapPos[] - 1 for that reason. -->
 
 ## Details & Options
 
 - The live cells of the dynamic heap are at the locations from <code>[THeapBase]()[]</code> up to <code>[THeapPos]()[]</code> - 1.
-- The heap is split into two halves for garbage collection. <code>[THeapBase]()[]</code> is 0 while the first half is active, and the start of the second half, 134217728 with the default heap size, while the second half is active.
-- Each <code>[TGCCollect]()</code> moves the live cells to the other half, and <code>[TReset]()</code> sets the base back to 0.
+- The heap is split into two halves for garbage collection. <code>[THeapBase]()[]</code> is 1 while the first half is active, since location 0 never holds a cell, and the start of the second half, 134217728 with the default heap size, while the second half is active.
+- Each <code>[TGCCollect]()</code> moves the live cells to the other half, and <code>[TReset]()</code> sets the base back to 1.
 
 ## Basic Examples
 
@@ -29,12 +29,12 @@ Start from an empty heap:
 TReset[];
 ```
 
-The active region starts at location 0:
+The active region starts at location 1:
 
 ```wl
 THeapBase[]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 ## Scope
 
@@ -63,14 +63,14 @@ A second collection moves the heap back:
 ```wl
 TGCCollect[]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
-The base is 0 again:
+The base is 1 again:
 
 ```wl
 THeapBase[]
 ```
-<!-- => 0 -->
+<!-- => 1 -->
 
 ## Applications
 

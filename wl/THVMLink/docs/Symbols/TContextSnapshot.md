@@ -42,7 +42,7 @@ A snapshot of the heap behind a lambda, with the lambda as its root:
 TContextSnapshot[TLam[x, x + 1]]
 ```
 
-<!-- => TContext[<|"Root" -> Term["LAM", 0, 0], "Cells" -> <|0 -> Term["OP2", "+", 1], 1 -> Term["VAR", 0, 0], 2 -> Term["NUM", "i32", 1]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
+<!-- => TContext[<|"Root" -> Term["LAM", 0, 1], "Cells" -> <|1 -> Term["OP2", "+", 2], 2 -> Term["VAR", 0, 1], 3 -> Term["NUM", "i32", 1]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
 
 ---
 
@@ -74,7 +74,7 @@ A snapshot of a tensor sum carries the data of both tensors:
 TContextSnapshot[TTensorCreate[{1., 2., 3.}] + TTensorCreate[{4., 5., 6.}]]
 ```
 
-<!-- => TContext[<|"Root" -> Term["UOP", "ADD", 0], "Cells" -> <|0 -> Term["TEN", "f32", 0], 1 -> Term["TEN", "f32", 1]|>, "BookCells" -> <||>, "Tensors" -> <|0 -> NumericArray[{1., 2., 3.}, "Real32"], 1 -> NumericArray[{4., 5., 6.}, "Real32"]|>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
+<!-- => TContext[<|"Root" -> Term["UOP", "ADD", 1], "Cells" -> <|1 -> Term["TEN", "f32", 0], 2 -> Term["TEN", "f32", 1]|>, "BookCells" -> <||>, "Tensors" -> <|0 -> NumericArray[{1., 2., 3.}, "Real32"], 1 -> NumericArray[{4., 5., 6.}, "Real32"]|>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
 
 ---
 
@@ -122,7 +122,7 @@ Snapshot a lambda:
 snap = TContextSnapshot[TLam[x, x + 1]]
 ```
 
-<!-- => TContext[<|"Root" -> Term["LAM", 0, 0], "Cells" -> <|0 -> Term["OP2", "+", 1], 1 -> Term["VAR", 0, 0], 2 -> Term["NUM", "i32", 1]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
+<!-- => TContext[<|"Root" -> Term["LAM", 0, 1], "Cells" -> <|1 -> Term["OP2", "+", 2], 2 -> Term["VAR", 0, 1], 3 -> Term["NUM", "i32", 1]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
 
 Clear the heap:
 
@@ -144,7 +144,7 @@ The restored lambda has the same canonical form:
 Term[r]
 ```
 
-<!-- => Term["LAM", 0, Term["OP2", "+", Term["VAR", 0], Term["NUM", 1]]] -->
+<!-- => Term["LAM", 1, Term["OP2", "+", Term["VAR", 1], Term["NUM", 1]]] -->
 
 It adds 1 to its argument:
 
@@ -168,7 +168,7 @@ BinaryDeserialize[BinarySerialize[snap]] === snap
 TContextToTermTree[snap]
 ```
 
-<!-- => "LAM"["OP2"["+", "VAR"[0], "NUM"[1]]] -->
+<!-- => "LAM"["OP2"["+", "VAR"[1], "NUM"[1]]] -->
 
 ## Possible Issues
 
@@ -192,4 +192,4 @@ The snapshot of a number has no cells of its own, yet it holds the lambda's cell
 Keys[First[TContextSnapshot[TNum[5]]]["Cells"]]
 ```
 
-<!-- => {0} -->
+<!-- => {1} -->

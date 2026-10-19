@@ -54,7 +54,7 @@ The body of a lambda is reduced:
 Term[TNf[TLam[y, TNum[1] + TNum[2]]]]
 ```
 
-<!-- => Term["LAM", 0, Term["NUM", 3]] -->
+<!-- => Term["LAM", 1, Term["NUM", 3]] -->
 
 ---
 
@@ -90,7 +90,7 @@ TReset[];
 Term[TWnf[TLam[y, TNum[1] + TNum[2]]]]
 ```
 
-<!-- => Term["LAM", 0, Term["OP2", "+", Term["NUM", 1], Term["NUM", 2]]] -->
+<!-- => Term["LAM", 1, Term["OP2", "+", Term["NUM", 1], Term["NUM", 2]]] -->
 
 ---
 
@@ -132,4 +132,4 @@ The sweep has reduced the other lambda's body as well:
 Term[other]
 ```
 
-<!-- => Term["LAM", 0, Term["NUM", 7]] -->
+<!-- => Term["LAM", 1, Term["NUM", 7]] -->

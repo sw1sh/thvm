@@ -125,7 +125,7 @@ The body of a lambda is left as it is:
 Term[TWnf[TLam[y, TNum[1] + TNum[2]]]]
 ```
 
-<!-- => Term["LAM", 0, Term["OP2", "+", Term["NUM", 1], Term["NUM", 2]]] -->
+<!-- => Term["LAM", 1, Term["OP2", "+", Term["NUM", 1], Term["NUM", 2]]] -->
 
 ## Properties and Relations
 

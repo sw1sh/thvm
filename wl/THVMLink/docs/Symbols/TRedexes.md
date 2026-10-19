@@ -132,7 +132,7 @@ An application of a matcher to a number is a redex:
 Term /@ TRedexes[TApp[TMatNum[0, TNum[1], TLam[k, TNum[2]]], TNum[0]]]
 ```
 
-<!-- => {Term["APP", Term["MAT", 0, Term["NUM", 1], Term["LAM", 0, Term["NUM", 2]]], Term["NUM", 0]]} -->
+<!-- => {Term["APP", Term["MAT", 0, Term["NUM", 1], Term["LAM", 1, Term["NUM", 2]]], Term["NUM", 0]]} -->
 
 ## Properties and Relations
 

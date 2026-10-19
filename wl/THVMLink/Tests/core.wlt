@@ -20,17 +20,19 @@ VerificationTest[
     TestID -> "TItrs starts at 0"
 ]
 
+(* A fresh heap hands out location 1 first: location 0 reads as "none"
+   and never holds a node. *)
 VerificationTest[
     THeapPos[],
-    0,
-    TestID -> "THeapPos starts at 0"
+    1,
+    TestID -> "THeapPos starts at 1"
 ]
 
 VerificationTest[
     (* TFree leaves the runtime uninitialized; the next heap op should
        silently re-init via ensureInit[]. *)
     (TFree[]; THeapPos[]),
-    0,
+    1,
     TestID -> "ensureInit auto-runs TInit on first heap op"
 ]
 
@@ -55,7 +57,7 @@ VerificationTest[
     (* TTerm[id] indexing covers all the per-field accessors. *)
     (TReset[]; Module[{t = TLam[var, var]},
         {t["tag"], t["tagName"], t["val"], t["sub"]}]),
-    {$TagLAM, "LAM", 0, 0},
+    {$TagLAM, "LAM", 1, 0},
     TestID -> "TTerm[id][\"tag/tagName/val/sub\"] forwards to bridge"
 ]
 
@@ -66,7 +68,7 @@ VerificationTest[
         THeapSet[a, era];
         {a, THeapPos[], THeapRead[a] == era}
     ]),
-    {0, 2, True},
+    {1, 3, True},
     TestID -> "heap alloc + set + read"
 ]
 
@@ -301,7 +303,7 @@ VerificationTest[
         TWnf[app];
         after  = TTermExpr[app];
         {before, after}]),
-    {"APP"["LAM"["VAR"[0]], "ERA"], "APP"["LAM"["ERA"], "ERA"]},
+    {"APP"["LAM"["VAR"[1]], "ERA"], "APP"["LAM"["ERA"], "ERA"]},
     TestID -> "TTermExpr before vs after TWnf shows substituted body"
 ]
 

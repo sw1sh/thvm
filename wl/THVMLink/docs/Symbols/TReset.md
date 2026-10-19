@@ -18,7 +18,7 @@ RelatedGuides: [THVMLink]
 ## Details & Options
 
 - [TReset]() gives 1.
-- The heap is rewound, so the next term starts at location 0 and [THeapPos]() gives 0.
+- The heap is rewound, so the next term starts at location 1 and [THeapPos]() gives 1; location 0 never holds a cell.
 - The interaction counter of [TItrs]() goes back to 0, the pending frames of [TStack]() are dropped, and the fresh-label counter of [TFreshLabel]() restarts at 1.
 - The tensors and compiled kernels that belong to terms on the heap are released, and tensor ids restart at 1.
 - Constructors stored in the book heap with [TBookCtr]() survive the reset.
@@ -42,7 +42,7 @@ The heap is now empty:
 THeapPos[]
 ```
 
-<!-- => 0 -->
+<!-- => 1 -->
 
 ## Scope
 
@@ -68,7 +68,7 @@ The heap is empty again:
 THeapPos[]
 ```
 
-<!-- => 0 -->
+<!-- => 1 -->
 
 ---
 
@@ -130,7 +130,7 @@ The heap now holds one cell:
 THeapPos[]
 ```
 
-<!-- => 1 -->
+<!-- => 2 -->
 
 ---
 
@@ -262,4 +262,4 @@ The handle made before the reset now reads the new term's body:
 Term[f]
 ```
 
-<!-- => Term["LAM", 0, Term["NUM", 7]] -->
+<!-- => Term["LAM", 1, Term["NUM", 7]] -->
