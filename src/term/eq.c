@@ -43,9 +43,12 @@ fn int term_eq_struct(Term a, Term b) {
     case TAG_LAM:
       return term_eq_struct(heap_read(term_val(a)),
                             heap_read(term_val(b)));
+    case TAG_DUP:
+    case TAG_BRI:
+      if (term_ext(a) != term_ext(b)) return 0;
+      return term_eq_n(a, b, 1);
     case TAG_APP:
     case TAG_SUP:
-    case TAG_DUP:
     case TAG_OP2:
     case TAG_MAT:
     case TAG_EQL:
@@ -53,7 +56,6 @@ fn int term_eq_struct(Term a, Term b) {
     case TAG_OR:
     case TAG_WHEN:
     case TAG_ANN:
-    case TAG_BRI:
       // ext holds the SUP/DUP label, the OP2 opcode or the MAT match value.
       if (term_ext(a) != term_ext(b)) return 0;
       return term_eq_n(a, b, 2);

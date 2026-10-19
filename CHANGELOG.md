@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- Structural equality (TTermSame) reads a one-cell DUP or BRI node's one cell: it compared two, the second belonging to whatever node followed. Test: test_term_eq.
 - kernel_inputs_reserve checks its reallocs: out of memory it leaked the old arrays and wrote through NULL.
 - A step-budgeted wnf that runs out inside a UOP's active child (a dup projection, a kernel) returns the UOP rebuilt around the partly reduced child: the bail's unwinding had no F_UOP_CHILD case and returned the child in the parent's place (reachable through WL TWnf[t, n]). Test: test_wnf_n.
 - A nested BUFFERIZE inline chain past UNIFIED_SUBST_CAP (64) bindings is fatal: unified_rewrite_rec_extend dropped the new binding and rewrote with that closed range unbound, which then read as iteration 0, where the axis-table and multi-axis paths decline.
