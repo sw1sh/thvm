@@ -52,8 +52,14 @@ backendNameLabel[_] = "?";
 
 formatKib[n_] := round1[n / 1024.0];
 
+(* A spec names the run and gives InitFn, StepFn and a positive NumSteps; "Name" defaults to "bench". *)
+benchSpecOkQ[spec_Association] := KeyExistsQ[spec, "InitFn"] && KeyExistsQ[spec, "StepFn"] &&
+    MatchQ[Lookup[spec, "NumSteps"], _Integer ? Positive]
+TBench::spec = "A TBench spec gives \"InitFn\", \"StepFn\" and a positive integer \"NumSteps\"; `1` does not.";
+
+TBench[spec_Association] /; ! benchSpecOkQ[spec] := (Message[TBench::spec, spec]; $Failed)
 TBench[spec_Association] := Block[{
-    name = spec["Name"],
+    name = Lookup[spec, "Name", "bench"],
     initFn = spec["InitFn"],
     stepFn = spec["StepFn"],
     nSteps = spec["NumSteps"],

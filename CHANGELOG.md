@@ -329,6 +329,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- `TBench` checks its spec: without `"InitFn"`, `"StepFn"` or a positive `"NumSteps"` it gives `TBench::spec` (it gave `Do::iterb` and an association with private symbols). `"Name"` defaults to `"bench"`.
 - A `TKernel` in `Plus`, `Times` or `Dot` stands for its output, as it already did inside `TUOp*` constructors: `TKernel[TMaterialize[x^2]] + x` built a malformed term. `kernel["Source", "Metal"]` works as `TKernelSource`'s usage says.
 - `TMultiTrace` with an unknown key gives `TMultiTrace::key` (it gave a list of `Missing`). `TMultiwayGraph` refuses anything but step records or a term with `TMultiwayGraph::needsteps`, which now names `TMultiTrace`. A per-key list such as `TMultiTrace[t, "Events"]` used to flood `MapThread` and `Part` messages and give a meaningless graph.
 - Negative numbers agree with arithmetic. NUMs are unsigned 32-bit words, so `TNum[-1]` is 4294967295, the same as `TOp2["-", 3, 4]`; it was a 38-bit pattern, 274877906943. `a - b` and `-n t` on numeric terms build a wrapped subtraction. A value that does not fit in 32 bits gives `TNum::range`.
