@@ -329,6 +329,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- TFindProof treats a pattern variable in a predicate axiom as universal: `TFindProof[mortal[socrates], {Implies[man[x_], mortal[x_]], man[socrates]}]` proves at once (it left `Implies` in the equationalized problem and re-entered the predicate path until the recursion limit), as does the TPTP form `![X]: (man(X) => mortal(X))`. A problem still not equational after equationalizing now gives `TFindProof::noneq` and `$Failed`.
 - The external provers keep to their time limits. TWaldmeisterProof and TTweeProof stop the prover at `TimeConstraint` and report `"TimedOut"` (Waldmeister ignored the limit and never returned on a non-theorem; Twee reported `"Failed"`), and TVampireProof stops Vampire 2 s past its own `-t`, which overruns in casc mode.
 - TEproverProof works: it passed E a real CPU limit (`--cpu-limit=5.`), which E rejects, so every E run failed. E's proofs now convert like Vampire's: input copies and identity steps fold away, nested inferences give their clause parents, E's rule names map to construct types, and the formulas get the theory's operator names, so TEproverProofObject lifts to a ProofObject.
 - TTweeProofObject's `"Axioms"` holds every axiom statement, not only the last.

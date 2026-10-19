@@ -4488,9 +4488,18 @@ TFindProof[goal_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : OptionsPatte
    ATP_Equationalize.wl. *)
 atpPredicateProblemQ[conjecture_, axioms_List] :=
     ! eqzEquationalProblemQ[conjecture, axioms] && ! atpGroundBooleanProblemQ[conjecture, axioms];
+TFindProof::noneq = "The problem is not equational after equationalization; `1` is left.";
+(* A problem that is still not equational would come back to the predicate path forever. *)
 atpEquationalizeGoal[conjecture_, axioms_List] :=
     With[{eq = atpEquationalizeProblem[conjecture, axioms]},
-        {If[Length[eq[[1]]] === 1, First[eq[[1]]], eq[[1]]], eq[[2]]}];
+        With[{goal = If[Length[eq[[1]]] === 1, First[eq[[1]]], eq[[1]]]},
+            If[ eqzEquationalProblemQ[goal, eq[[2]]],
+                {goal, eq[[2]]},
+                Message[TFindProof::noneq, First[Select[Flatten[{goal, eq[[2]]}], ! eqzIsEquationQ[#] &], goal]];
+                $Failed
+            ]
+        ]
+    ];
 (* Method -> "WaldmeisterProcess" (bare or a {"WaldmeisterProcess", ...}
    suboption list) routes to the real Waldmeister binary instead of the
    internal completion engine. *)
@@ -4510,7 +4519,8 @@ TFindProof[conjecture_, axioms_List, opts : OptionsPattern[]] /;
     If[ atpWaldmeisterProcessQ[{opts}],
         atpWaldmeisterPredicateProof[conjecture, axioms, opts],
         With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-            atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]
+            If[ eq === $Failed, $Failed,
+                atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]]
         ]
     ];
 TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] /;
@@ -4518,13 +4528,14 @@ TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : Option
     Which[
         ! MatchQ[returnSpec, "ProofObject"],
             With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-                TFindProof[eq[[1]], eq[[2]], returnSpec, opts]
+                If[ eq === $Failed, $Failed, TFindProof[eq[[1]], eq[[2]], returnSpec, opts]]
             ],
         atpWaldmeisterProcessQ[{opts}],
             atpWaldmeisterPredicateProof[conjecture, axioms, opts],
         True,
             With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-                atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]
+                If[ eq === $Failed, $Failed,
+                    atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]]
             ]
     ];
 (* Already-equational problem under Method -> "WaldmeisterProcess" (the

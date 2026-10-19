@@ -201,3 +201,24 @@ VerificationTest[
     {},
     TestID -> "ATP/eqz/tfindproof-not-private"
 ]
+
+(* Pattern variables in a predicate axiom are universal: the syllogism with x_ proves like its
+   ForAll form instead of re-entering the predicate path forever, and a value on the pattern's
+   name does not leak in. *)
+VerificationTest[
+    Block[{x = 5}, TFindProof[mortal[socrates], {Implies[man[x_], mortal[x_]], man[socrates]}, "Status"]],
+    "Proved",
+    TestID -> "Equationalize/pattern-variables-are-universal"
+]
+
+VerificationTest[
+    Quiet @ Head @ TFindProof[mortal[socrates], {Implies[man[x_], mortal[x_]], man[socrates]}]["ProofFunction"][],
+    Success,
+    TestID -> "Equationalize/pattern-variables-proof-verifies"
+]
+
+VerificationTest[
+    TFindProof["fof(a1, axiom, ![X]: (man(X) => mortal(X))).\nfof(a2, axiom, man(socrates)).\nfof(c, conjecture, mortal(socrates)).", "Status"],
+    "Proved",
+    TestID -> "Equationalize/tptp-fof-implication"
+]
