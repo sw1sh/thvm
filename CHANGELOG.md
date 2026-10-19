@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- The LAM shape table grows at half load: at 4096 slots it dropped every new shape, and each unfold of a shaped def records its instance's shape, so a long recursive loop lost them between collections and materialize then bailed on the bound variables. Test: test_lam_shape the-table-grows.
 - Structural equality (TTermSame) reads a one-cell DUP or BRI node's one cell: it compared two, the second belonging to whatever node followed. Test: test_term_eq.
 - kernel_inputs_reserve checks its reallocs: out of memory it leaked the old arrays and wrote through NULL.
 - A step-budgeted wnf that runs out inside a UOP's active child (a dup projection, a kernel) returns the UOP rebuilt around the partly reduced child: the bail's unwinding had no F_UOP_CHILD case and returned the child in the parent's place (reachable through WL TWnf[t, n]). Test: test_wnf_n.

@@ -42,6 +42,25 @@ int main(void) {
     CHECK_EQ(KERNELS_NEXT - k0, 1u);
   }
 
+  // The table grows: every shape set is found again, past any fixed size.
+  TEST_BEGIN("lam-shape/the-table-grows");
+  {
+    for (u32 i = 1; i <= 10000; i++) {
+      Shape s   = {0};
+      s.ndim    = 1;
+      s.dims[0] = i;
+      lam_shape_set(1000000 + i, &s);
+    }
+    int all = 1;
+    for (u32 i = 1; i <= 10000; i++) {
+      Shape s = {0};
+      if (!lam_shape_lookup(1000000 + i, &s) || s.dims[0] != i) {
+        all = 0;
+      }
+    }
+    CHECK(all);
+  }
+
   thvm_free();
   TEST_REPORT();
 }
