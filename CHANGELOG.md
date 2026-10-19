@@ -329,6 +329,9 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- Integer tensor division is true division, as in tinygrad: `TTensorCreate[{1, 2}]/2` is `{0.5, 1.}` in f32 (it was `{0, 0}`); reciprocal and square root cast an integer tensor to f32 first, and a rational scalar promotes like a real one.
+- TFindProof keeps a theory's variables off the goal's names in any context, so the renaming also holds on a documentation page, whose symbols live in a private context.
+- TEproverProof reports "TimedOut" when E's automatic schedule gives up at its CPU limit, and runs E under the same outer time limit as the other provers.
 - TContextToTermTree names a NUM's dtype again (it printed `dtypeName["i32"]` for every number of a snapshot).
 - TSmtDecide refuses a quantified formula with `TSmtDecide::quant` (it read `ForAll[x, f[x] == x]` as an atom); TPTP problems under `Method -> "SMT"` are decided over WL symbols like the other TPTP paths, so the result reads `a == c`, not `"a"[] == "c"[]`.
 - TFindProof's `"LiftToProofObject"` defaults to Automatic: a WaldmeisterProcess proof, whose protocol lifts in a fraction of a second to a ProofObject that verifies, comes back as a ProofObject again; the TPTP provers' results stay unlifted.

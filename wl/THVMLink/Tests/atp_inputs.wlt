@@ -97,3 +97,12 @@ VerificationTest[
     {Failure, "Failed"},
     TestID -> "ATP/inputs/false-goal-is-a-failure"
 ]
+
+(* The theory's variables avoid the goal's names in any context, as on a documentation page whose
+   symbols live in a private context. *)
+VerificationTest[
+    Block[{$Context = "ThvmPageCtx`", $ContextPath = {"WolframInstitute`THVMLink`ATP`", "WolframInstitute`THVMLink`", "System`"}},
+        ToExpression["FreeQ[TFindEquationalPath[OverBar[a \\[CircleTimes] b] == OverBar[b] \\[CircleTimes] OverBar[a], \"AbelianGroupAxioms\"], _Pattern]"]],
+    True,
+    TestID -> "ATP/inputs/theory-variables-avoid-goal-names-in-any-context"
+]

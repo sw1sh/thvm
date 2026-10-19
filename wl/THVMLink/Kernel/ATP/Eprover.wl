@@ -73,7 +73,7 @@ TEproverProof[theory_String, thm_String, opts : OptionsPattern[]] := TEproverPro
 
 TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=
-    Block[{bin, tc, cmd, out, secs, status, derivation, foldedDerivation},
+    Block[{bin, tc, cmd, run, out, secs, status, derivation, foldedDerivation},
         bin = eproverBinary[OptionValue["Binary"]];
         If[ MissingQ[bin],
             Message[TEproverProof::noeprover];
@@ -85,11 +85,15 @@ TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
         ];
         tc = OptionValue[TimeConstraint];
         cmd = StringJoin[bin, " --auto-schedule --proof-object --tstp-format", " --cpu-limit=", ToString[Ceiling[tc]], " ", problemFile, " 2>&1"];
-        {secs, out} = AbsoluteTiming @ RunProcess[{"sh", "-c", cmd}, "StandardOutput"];
+        run = atpRunLimited[cmd, Ceiling[tc] + 2];
+        {secs, out} = {run["Seconds"], run["Output"]};
         status = Which[
             StringContainsQ[out, "SZS status Theorem"] || StringContainsQ[out, "SZS status Unsatisfiable"],
                 "Proved",
-            StringContainsQ[out, "SZS status ResourceOut"] || StringContainsQ[out, "SZS status Timeout"] || StringContainsQ[out, "CPU time limit"],
+            (* E's automatic schedule reports GaveUp when its CPU limit runs out, as it does for a
+               strategy that gives up early: a GaveUp near the limit is the limit. *)
+            run["TimedOut"] || StringContainsQ[out, "SZS status ResourceOut"] || StringContainsQ[out, "SZS status Timeout"] || StringContainsQ[out, "CPU time limit"] ||
+                    (StringContainsQ[out, "SZS status GaveUp"] && secs >= 0.9 Ceiling[tc]),
                 "TimedOut",
             True,
                 "Failed"

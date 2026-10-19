@@ -65,3 +65,11 @@ VerificationTest[
     "Proved",
     TestID -> "Eprover/real-time-limit"
 ]
+
+(* E's automatic schedule says GaveUp when its CPU limit runs out; at the limit that is TimedOut. *)
+VerificationTest[
+    If[ ! eproverAvailable, "TimedOut",
+        TEproverProof["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]["Status"]],
+    "TimedOut",
+    TestID -> "Eprover/time-limit-status"
+]

@@ -152,7 +152,10 @@ broadcastDType[a_, b_] := First[Select[{inheritDType[a], inheritDType[b]}, Strin
    tensor is default_float, and an elementwise op mixing integer and float operands computes in
    float, the integer operands cast by value first. *)
 intDTypeQ[d_] := MemberQ[{"bool", "i4", "u4", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"}, d]
-scalarDType[t_, r_Real] /; intDTypeQ[inheritDType[t]] := "f32"
+scalarDType[t_, r : (_Real | _Rational)] /; intDTypeQ[inheritDType[t]] := "f32"
+(* tinygrad's reciprocal and sqrt cast an integer tensor to the default float first
+   (mixin/elementwise.py, reciprocal: self._ensure_float()), so integer division is true division. *)
+ensureFloat[t_] := If[intDTypeQ[inheritDType[t]], TUOpCast[t, "f32"], t]
 scalarDType[t_, r_] := broadcastDType[t, r]
 promoteMixed[terms_List] := If[
     AnyTrue[terms, intDTypeQ[inheritDType[#]] &] && AnyTrue[terms, ! intDTypeQ[inheritDType[#]] &],
@@ -844,8 +847,8 @@ TTerm /: Times[t_TTerm ? tensorTermQ, rest__] := Module[{lifted, allTerms, targe
 
 TTerm /: Minus[t_TTerm ? tensorTermQ] := TUOpNeg[t]
 
-TTerm /: Power[t_TTerm ? tensorTermQ, Rational[1, 2]] := TUOpSqrt[t]
-TTerm /: Power[t_TTerm ? tensorTermQ, -1] := TUOpRecip[t]
+TTerm /: Power[t_TTerm ? tensorTermQ, Rational[1, 2]] := TUOpSqrt[ensureFloat[t]]
+TTerm /: Power[t_TTerm ? tensorTermQ, -1] := TUOpRecip[ensureFloat[t]]
 (* Integer exponent n >= 1: expand to repeated multiplication.  Required
    so plain WL `t^3` (e.g. inside an ElementwiseLayer's GELU function
    body) lowers to a TTerm chain rather than staying as Power[TTerm, 3].
@@ -853,7 +856,7 @@ TTerm /: Power[t_TTerm ? tensorTermQ, -1] := TUOpRecip[t]
    already handles. *)
 TTerm /: Power[t_TTerm ? tensorTermQ, n_Integer ? Positive] := Fold[TUOpMul[#1, t] &, t, ConstantArray[t, n - 1]]
 
-TTerm /: Sqrt[t_TTerm ? tensorTermQ] := TUOpSqrt[t]
+TTerm /: Sqrt[t_TTerm ? tensorTermQ] := TUOpSqrt[ensureFloat[t]]
 TTerm /: Tanh[t_TTerm ? tensorTermQ] := TTanh[t]
 
 (* Exp / Log: route through the EXP2 / LOG2 primitives via the
