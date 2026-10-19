@@ -320,6 +320,10 @@ SetUsage[TUOpSrcs, "TUOpSrcs[u$] returns the source-cell terms for a UOp term, i
    `BeginPackage["WolframInstitute`THVMLink`"]` reuses the same symbol. *)
 {TPriDrain};
 
+(* Context.wl and Kernel.wl make these public, after this file and Format.wl have used them
+   in their Private sections; named here, those uses are the public symbols. *)
+{TContext, TInContext, TKernel, TKernelInputs};
+
 (* Forward-declare the public symbols owned by Kernel/NN/*.wl.  Those files
    live one directory deeper, so the sibling loader (sorted {depth, path})
    Gets them AFTER the depth-1 siblings - including Tensor.wl, whose Dot

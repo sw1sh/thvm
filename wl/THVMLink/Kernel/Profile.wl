@@ -78,7 +78,7 @@ Order matches the C-side hot_counters_snapshot payload in src/instrument/hot_cou
 
 (* Forward-declare bridge symbols owned by THVMLink.wl. *)
 {THeapPos, THeapBase, THeapRead, TItrs, TTagName, TTermTag,
- TKernelTable, TTensTable, decodeKernelInfo};
+ TKernelTable, TTensTable};
 
 Begin["`Private`"];
 
