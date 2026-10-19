@@ -90,6 +90,7 @@ class BatchNorm:
                                      + mean.detach() * self.momentum)
             self.running_var.assign(self.running_var * (1.0 - self.momentum)
                                     + var.detach() * (self.momentum * corr))
+            self.num_batches_tracked.assign(self.num_batches_tracked + 1)
         invstd = (var + self.eps).rsqrt()
         return x.batchnorm(self.weight, self.bias, mean, invstd)
 
