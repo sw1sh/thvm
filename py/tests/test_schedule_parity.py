@@ -19,12 +19,16 @@ import numpy as np
 import helpers
 
 # (thvm kernels, tinygrad kernels, the deviation) for every case that differs,
-# measured on the pod 2026-10-19.
+# measured on the pod 2026-10-19.  "Fused row reduce": a reduce whose keepdim
+# result is broadcast back over its row stays in the consumer's kernel, where
+# tinygrad keeps the stage (buffer_in_reduce, schedule/rangeify.py:87-96).
 KNOWN = {
     "sum_keepdim":       (2, 1, "one extra realize; L2e/L4 seeds"),
+    "var":               (1, 2, "one kernel fewer: a fused row reduce"),
     "reduce_chain_diff": (2, 1, "one extra realize; L2e/L4 seeds"),
-    "softmax":           (2, 3, "one kernel fewer than tinygrad"),
-    "layernorm":         (4, 3, "one extra realize; L2e/L4 seeds"),
+    "softmax":           (2, 3, "one kernel fewer: a fused row reduce"),
+    "log_softmax":       (2, 3, "one kernel fewer: a fused row reduce"),
+    "layernorm":         (2, 3, "one kernel fewer: fused row reduces, x - mean realized"),
     "matmul_bias_relu":  (2, 1, "one extra realize; the CPU BLAS operand rule is the suspect"),
     "attention":         (6, 4, "two extra realizes; L2e/L4 seeds"),
     "conv2d_bwd":        (4, 2, "two extra realizes; L2e/L4 seeds"),
