@@ -148,6 +148,17 @@ inheritDType[_] := "f32"
 
 broadcastDType[a_, b_] := First[Select[{inheritDType[a], inheritDType[b]}, StringQ], "f32"]
 
+(* tinygrad dtype promotion (dtype.py least_upper_dtype): a Python float scalar against an integer
+   tensor is default_float, and an elementwise op mixing integer and float operands computes in
+   float, the integer operands cast by value first. *)
+intDTypeQ[d_] := MemberQ[{"bool", "i4", "u4", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"}, d]
+scalarDType[t_, r_Real] /; intDTypeQ[inheritDType[t]] := "f32"
+scalarDType[t_, r_] := broadcastDType[t, r]
+promoteMixed[terms_List] := If[
+    AnyTrue[terms, intDTypeQ[inheritDType[#]] &] && AnyTrue[terms, ! intDTypeQ[inheritDType[#]] &],
+    If[intDTypeQ[inheritDType[#]], TUOpCast[#, "f32"], #] & /@ terms,
+    terms]
+
 (* === TTensor constructors === *)
 
 TTensor[shape_List] := TTensor[shape, "f32"]
@@ -816,15 +827,15 @@ dtypePrecRank[dt_String] := Replace[dt, {"f64" -> 4, "f32" -> 3, "f16" -> 2, "bf
 precOrder[terms_List] := SortBy[terms, -dtypePrecRank[inheritDType[#]] &]
 
 TTerm /: Plus[t_TTerm ? tensorTermQ, rest__] := Module[{lifted, allTerms, targetShape},
-    lifted = (r |-> liftNumeric[r, broadcastDType[t, r]]) /@ {rest};
-    allTerms = precOrder[Prepend[lifted, t]];
+    lifted = (r |-> liftNumeric[r, scalarDType[t, r]]) /@ {rest};
+    allTerms = precOrder[promoteMixed[Prepend[lifted, t]]];
     targetShape = broadcastShapes[tUopShape /@ allTerms];
     pairFold[TUOpAdd, (x |-> broadcastTo[x, targetShape]) /@ allTerms] /; targetShape =!= $Failed
 ]
 
 TTerm /: Times[t_TTerm ? tensorTermQ, rest__] := Module[{lifted, allTerms, targetShape},
-    lifted = (r |-> liftNumeric[r, broadcastDType[t, r]]) /@ {rest};
-    allTerms = precOrder[Prepend[lifted, t]];
+    lifted = (r |-> liftNumeric[r, scalarDType[t, r]]) /@ {rest};
+    allTerms = precOrder[promoteMixed[Prepend[lifted, t]]];
     targetShape = broadcastShapes[tUopShape /@ allTerms];
     pairFold[TUOpMul, (x |-> broadcastTo[x, targetShape]) /@ allTerms] /; targetShape =!= $Failed
 ]

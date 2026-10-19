@@ -329,6 +329,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- Mixed integer and float tensor arithmetic promotes like tinygrad. `TTensorCreate[{1, 2}] * 2.5` is `{2.5, 5.}` in f32 (it truncated the scalar and gave `{2, 4}`), and an integer tensor plus a float tensor computes in f32.
 - `TGrad` refuses a target or wrt that is not a term with `TGrad::args`; `TGrad[{1, 2}, q]` exposed a private symbol and `TGrad[Total[q], {1, 2}]` gave `{TGradOf[1], TGradOf[2]}`.
 - `TBench` checks its spec: without `"InitFn"`, `"StepFn"` or a positive `"NumSteps"` it gives `TBench::spec` (it gave `Do::iterb` and an association with private symbols). `"Name"` defaults to `"bench"`.
 - A `TKernel` in `Plus`, `Times` or `Dot` stands for its output, as it already did inside `TUOp*` constructors: `TKernel[TMaterialize[x^2]] + x` built a malformed term. `kernel["Source", "Metal"]` works as `TKernelSource`'s usage says.

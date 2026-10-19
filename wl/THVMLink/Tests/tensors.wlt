@@ -249,3 +249,12 @@ VerificationTest[
     True,
     TestID -> "tensors/tkernel-source-format"
 ]
+
+(* tinygrad promotion: an integer tensor with a real scalar, or mixed with a float tensor,
+   computes in f32; integer with integer stays integer. *)
+VerificationTest[
+    With[{i = TTensorCreate[{1, 2}], f = TTensorCreate[{0.5, 1.5}]},
+        {Normal @ TRealize[i * 2.5], TTensorDType[TRealize[i * 2.5]], Normal @ TRealize[i * 3], TTensorDType[TRealize[i * 3]], Normal @ TRealize[i + f]}],
+    {{2.5, 5.}, "f32", {3, 6}, "i32", {1.5, 3.5}},
+    TestID -> "tensors/int-float-promotion"
+]
