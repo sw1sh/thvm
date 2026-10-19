@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- CUDA autotune winners cache under "cuda": kautotune_backend_name had no case for backend 3 and filed them under "unknown".
 - The schedule parity table pins var (1 vs tinygrad's 2), log_softmax (2 vs 3) and layernorm (2 vs 3): since Python scalars became rank-0 CONSTs (56c48f11) their row reduces fuse into the broadcast consumer, as softmax's already did, where tinygrad keeps the stage (buffer_in_reduce). R0 had calibrated the table against an older build, so the three cases failed from the start.
 - The LAM shape table grows at half load: at 4096 slots it dropped every new shape, and each unfold of a shaped def records its instance's shape, so a long recursive loop lost them between collections and materialize then bailed on the bound variables. Test: test_lam_shape the-table-grows.
 - Structural equality (TTermSame) reads a one-cell DUP or BRI node's one cell: it compared two, the second belonging to whatever node followed. Test: test_term_eq.

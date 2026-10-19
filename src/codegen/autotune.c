@@ -178,6 +178,7 @@ static char const *kautotune_backend_name(u32 backend_id) {
   switch (backend_id) {
     case 1:  return "cpu";
     case 2:  return "metal";
+    case 3:  return "cuda";
     default: return "unknown";
   }
 }
