@@ -3259,6 +3259,7 @@ fn u32 jit_replay(u32 slot) {
         }
         int rc = b->dispatch_kernel(ke, ids, op->out_buf_id);
         if (rc == 0) {
+          ke->dispatched = 1;
           HOT_KERNEL_FIRES++;
           HOT_JIT_REPLAY_DISPATCHES++;
           ITRS++;

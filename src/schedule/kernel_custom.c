@@ -184,6 +184,7 @@ fn int kernel_custom_fire(u32 kid) {
   // finalize replay dispatches this kernel; an in-place one would run twice.
   if (b == &METAL_BACKEND && jit_capture_trace_pending()) {
     jit_capture_note_trace_skip();
+    ke->dispatched = 1;
     for (u32 i = 0; i < ke->n_inputs; i++) {
       if (ke->custom_outs_mask & (1ull << i)) {
         kernel_assign_write_record(b, in_buf_ids[i]);
@@ -196,6 +197,7 @@ fn int kernel_custom_fire(u32 kid) {
 #endif
   int rc = b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
   if (rc != 0) return -1;
+  ke->dispatched = 1;
 
   // Each written argument voids downstream kernels' precise-fire-memo skip,
   // as a scheduler kernel's output write does.

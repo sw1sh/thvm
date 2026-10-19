@@ -72,8 +72,11 @@ fn u32 kernel_gc_sweep(Term result) {
       // intermediates are stripped by this same sweep, so a re-fire
       // would recompute from freed buffers and yield wrong values.
       // Mirrors tinygrad replacing a realized tensor's lazydata with a
-      // BUFFER leaf.
-      TENS[ke->output_tid].producer_kid = 0;
+      // BUFFER leaf.  A kernel that never dispatched (materialized for a
+      // later fire) has written nothing, so its link stays.
+      if (ke->dispatched) {
+        TENS[ke->output_tid].producer_kid = 0;
+      }
       continue;
     }
     // Buffer is dead.  Only the CPU sweep strips input arrays here; other
@@ -101,7 +104,7 @@ fn u32 kernel_gc_sweep(Term result) {
       continue;
     }
     u32 otid = KERNELS[kid].output_tid;
-    if (otid == t || otid == 0 || otid >= TENS_NEXT) {
+    if (otid == t || otid == 0 || otid >= TENS_NEXT || !KERNELS[kid].dispatched) {
       continue;
     }
     Backend *b = TENS[t].backend;

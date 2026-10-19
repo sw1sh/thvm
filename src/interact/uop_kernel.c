@@ -379,6 +379,7 @@ fn void kernel_fire_by_id(u32 kid) {
       // An eager dispatch was skipped: arm the finalize replay.
       jit_capture_note_trace_skip();
       ke->fire_assign_seq = ASSIGN_SEQ;
+      ke->dispatched      = 1;
       ke->fire_pass       = ASSIGN_PASS_EPOCH;
       ITRS++;
       multi_emit(RULE_UOP_KERNEL, MULTI_TERM, (u64)kid, 0, 0);
@@ -409,6 +410,7 @@ fn void kernel_fire_by_id(u32 kid) {
       // logged before stamping, so the kernel's own write never dirties it.
       if (b == out_b && out_buf_id != 0) kernel_assign_write_record(b, out_buf_id);
       ke->fire_assign_seq = ASSIGN_SEQ;
+      ke->dispatched      = 1;
       ke->fire_pass       = ASSIGN_PASS_EPOCH;
     }
   }

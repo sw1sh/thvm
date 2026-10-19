@@ -987,6 +987,8 @@ typedef struct KernelEntry {
   u8        stripped;              // kernel_gc_sweep freed its input
                                    // arrays + lift; firing it again is a
                                    // stale reference (kernel_fire_by_id).
+  u8        dispatched;            // a dispatch has written the output, so
+                                   // kernel_gc_sweep may take it as committed.
   u32       fire_gen;              // last KERNEL_FIRE_GEN this kernel
                                    // dispatched at.  kernel_fire_by_id skips
                                    // when fire_gen == current gen so a
