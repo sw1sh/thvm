@@ -303,3 +303,47 @@ VerificationTest[
     "Proved",
     TestID -> "SMT/method-smt/single-hyp-wraps"
 ]
+
+(* Predicate atoms are uninterpreted predicates, with congruence; arithmetic is refused rather than
+   decided UNSAT. *)
+VerificationTest[
+    {TSmtDecide[p[a]]["Status"], TSmtDecide[p[a] && ! p[a]]["Status"], TSmtDecide[a == b && p[a] && ! p[b]]["Status"]},
+    {"SAT", "UNSAT", "UNSAT"},
+    TestID -> "SMT/predicate-atoms"
+]
+
+VerificationTest[
+    TSmtDecide[a == b && p[a] && ! p[c]]["Model"],
+    <|a == b -> True, p[a] -> True, p[c] -> False|>,
+    TestID -> "SMT/predicate-model"
+]
+
+VerificationTest[
+    TSmtDecide[x > 1],
+    $Failed,
+    {TSmtDecide::theory},
+    TestID -> "SMT/arithmetic-refused"
+]
+
+(* A problem TPTPImport already parsed goes through the same dispatch as its text. *)
+VerificationTest[
+    Module[{r = Wolfram`Parser`TPTPImport["cnf(a1, axiom, f(a) = b).\ncnf(a2, axiom, f(b) = c).\ncnf(g, negated_conjecture, f(f(a)) != c)."]},
+        {TFindProof[r, "Status"], TFindProof[r, Method -> "SMT"]["Status"]}],
+    {"Proved", "Proved"},
+    TestID -> "ATP/tptp-parsed-association"
+]
+
+(* TSmtDecide is quantifier-free: a quantifier is refused, not read as an atom. *)
+VerificationTest[
+    TSmtDecide[ForAll[x, f[x] == x]],
+    $Failed,
+    {TSmtDecide::quant},
+    TestID -> "SMT/quantifier-refused"
+]
+
+(* TPTP input under Method -> "SMT" is decided over the same WL symbols as the other TPTP paths. *)
+VerificationTest[
+    ToString[TFindProof["cnf(a1, axiom, a = b).\ncnf(a2, axiom, b = c).\ncnf(g, negated_conjecture, a != c).", Method -> "SMT"]["Goal"]],
+    "a == c",
+    TestID -> "SMT/tptp-goal-in-wl-symbols"
+]

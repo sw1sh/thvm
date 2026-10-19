@@ -3,330 +3,258 @@ Template: TechNote
 Name: ATP
 Title: Theorem Proving with THVMLink
 Context: WolframInstitute`THVMLink`ATP`
-ContextPath: [Global`]
+ContextPath: [Global`, Wolfram`Parser`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/ATP
-Keywords: [theorem proving, ATP, equational, completion, Knuth-Bendix, Waldmeister, Vampire, congruence closure, SMT, TPTP]
+Keywords: [theorem proving, ATP, automated theorem proving, equational, completion, Knuth-Bendix, Waldmeister, Vampire, congruence closure, SMT, TPTP]
 RelatedGuides: [THVMLink]
-RelatedTutorials: [Overview, Disproof]
+RelatedTutorials: [AtpMethods, Disproof, SMT, TPTPImport, FindReplacePath, Waldmeister]
 ---
 
-## What the ATP surface covers
+THVMLink proves theorems of equational logic: given axioms that are equations, each holding for all values of its variables, it searches for a proof that a further equation follows from them. Its automated theorem prover is unfailing Knuth-Bendix completion, the method of the Waldmeister, Twee and Vampire provers on equational problems. Completion orients the axioms into rewrite rules, adds the equations that arise where two rules overlap (the critical pairs), and proves the conjecture when its two sides rewrite to the same term. Equations that cannot be oriented are kept and applied in whichever direction makes a term smaller, which is what makes the completion unfailing. Problems without variables are decided by congruence closure instead.
 
-<code>THVMLink\`ATP\`</code> wraps `thvm`'s C-side proof engines and presents them through a single Wolfram surface. Two engines live behind the same `WolframInstitute`THVMLink`ATP`` context:
-
-- **Unfailing Knuth-Bendix completion** - first-order equational logic. Saturates a set of axioms into a confluent rewrite system; tries to refute the negated conjecture. The flagship entry point is [TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof) (`TATP` is the lower-level cousin that returns the raw saturation Association).
-- **Congruence closure (QF_UF)** - quantifier-free first-order theory of equality with uninterpreted functions, accessed through [TSatEUF](), [TSmtDecide](), and [TFindProof]() with `Method -> "SMT"`. Decides ground entailment in time linear in the term count; `TSmtDecide` lifts it to arbitrary Boolean combinations via DPLL(T).
-
-Either engine takes TPTP problem files directly: pipe [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) output straight into `TFindProof` (add `Method -> "SMT"` for the ground congruence-closure path), or pass the path/string and the dispatcher does the parse for you.
-
-Equational axioms can be supplied directly, or as a name resolved through the built-in [AxiomaticTheory](). Each axiom and conjecture is universally quantified through a ForAll wrapper (the standard Wolfram surface, identical to [FindEquationalProof](paclet:ref/FindEquationalProof)). Use a non-`Orderless` operator (`CircleTimes` / `CenterDot` / a function head like `f[x, y]`) when both sides of an equation must differ - Wolfram's `Times` sorts its operands at parse time, so `x*y == y*x` reads as `x*y == x*y` and never reaches the engine as a non-trivial goal.
-
-This note walks both engines end to end through a single problem family - abelian groups and the Sheffer / nand axioms - so the example shapes carry from one section to the next.
-
----
+| | |
+| --- | --- |
+| <code>[TFindProof]()[*conjecture*, *axioms*]</code> | prove *conjecture* from *axioms*, giving a [ProofObject]() |
+| <code>[TFindProof]()["*theorem*", "*theory*"]</code> | prove a named theorem of an [AxiomaticTheory]() theory |
+| <code>[TFindProof]()[*axioms*, "Lemmas"]</code> | complete *axioms* with no conjecture and give the rewrite rules |
+| <code>[TFindProof]()[*conjecture*, *axioms*, "*spec*"]</code> | give a property of the search, such as `"Status"` |
+| <code>[TAtpSchedule]()[*method*]</code> | the configurations a [Method]() setting tries in turn |
+| <code>[TAtpDescribeMethod]()[*method*]</code> | the suboptions a [Method]() setting resolves to |
+| <code>[TRelevantAxioms]()[*conjecture*, *axioms*]</code> | the axioms kept and dropped by the relevance filter |
+| <code>[TATP]()[*axioms*, *conjecture*]</code> | run completion with one fixed strategy and report the outcome |
 
 ## Proving an equational theorem
 
-[TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof) takes a conjecture and an axiom set and returns a real Wolfram `ProofObject`. The simplest call resolves both names through `AxiomaticTheory`:
+[TFindProof]() proves a named theorem of a theory known to [AxiomaticTheory]() and gives a [ProofObject](), the same kind of object [FindEquationalProof]() gives:
 
 ```wl
 TFindProof["InverseOfInverse", "AbelianGroupAxioms", TimeConstraint -> 10]
 ```
-<!-- => ProofObject[<|"Theorem" -> ..., "Status" -> "Proved", ...|>] - the standard summary box -->
 
-The returned object speaks the standard `ProofObject` interface: `p["ProofDataset"]`, `p["ProofGraph"]`, `p["ProofFunction"]`, `p["ProofLength"]`, `p["Properties"]` all work the same way they do for built-in [FindEquationalProof]().
-
-Mix an explicit conjecture against a named theory:
+The theory is the list of axioms of an abelian group, with [CircleTimes]() for the product, [OverBar]() for the inverse and `OverTilde[1]` for the unit:
 
 ```wl
-TFindProof[
-    ForAll[{x, y}, OverBar[x \[CircleTimes] y] == OverBar[x] \[CircleTimes] OverBar[y]],
-    "AbelianGroupAxioms",
-    TimeConstraint -> 10]
+AxiomaticTheory["AbelianGroupAxioms"]
 ```
-<!-- => ProofObject[...] - "Proved": the inverse distributes over the product -->
+<!-- => {ForAll[{\[FormalA], \[FormalB], \[FormalC]}, \[FormalA] ⊗ (\[FormalB] ⊗ \[FormalC]) == (\[FormalA] ⊗ \[FormalB]) ⊗ \[FormalC]], ForAll[{\[FormalA], \[FormalB]}, \[FormalA] ⊗ \[FormalB] == \[FormalB] ⊗ \[FormalA]], ForAll[\[FormalA], \[FormalA] ⊗ OverTilde[1] == \[FormalA]], ForAll[\[FormalA], \[FormalA] ⊗ OverBar[\[FormalA]] == OverTilde[1]]} -->
 
-Pass both arguments explicitly when there's no canonical name for the axiom set - typical when working with a custom theory:
+A conjecture can also be stated explicitly. The inverse of a product is the product of the inverses:
 
 ```wl
-TFindProof[
-    ForAll[{a, b}, a \[CircleTimes] b == b \[CircleTimes] a],
-    {ForAll[{a, b, c}, a \[CircleTimes] (b \[CircleTimes] c) == (a \[CircleTimes] b) \[CircleTimes] c],
-     ForAll[{a, b}, a \[CircleTimes] b == b \[CircleTimes] a]}]
+TFindProof[ForAll[{x, y}, OverBar[x \[CircleTimes] y] == OverBar[x] \[CircleTimes] OverBar[y]], "AbelianGroupAxioms", TimeConstraint -> 10]
 ```
-<!-- => ProofObject[...] - the goal is an axiom, so the proof is immediate -->
 
-A list-valued conjecture (a multi-equation theorem, e.g. one of the entries in `AxiomaticTheory["BooleanAxioms", "NotableTheorems"]`) returns a list of `ProofObject`s, one per conjunct.
-
-## Single-argument completion
-
-Drop the conjecture entirely and `TFindProof` runs saturation as its own deliverable. The default return is a `ProofObject` with `"Theorems" -> None` - same shape as the goal-directed call, just with a goalless proof slot. Bound it with `TimeConstraint`, since non-terminating axiom sets never saturate:
+Axioms can be given explicitly too, with [ForAll]() or, as here, with pattern variables, which make each axiom hold for all values of its variables. These are the axioms of a group, with a right identity `e` and a right inverse `inv`:
 
 ```wl
-TFindProof["AbelianGroupAxioms", TimeConstraint -> 2]
+groupAxioms = {a_ \[CircleTimes] e == a_, a_ \[CircleTimes] inv[a_] == e, a_ \[CircleTimes] (b_ \[CircleTimes] c_) == (a_ \[CircleTimes] b_) \[CircleTimes] c_}
 ```
-<!-- => ProofObject[<|"Theorems" -> None, "Axioms" -> {...}, ...|>] -->
+<!-- => {a_ ⊗ e == a_, a_ ⊗ inv[a_] == e, a_ ⊗ (b_ ⊗ c_) == (a_ ⊗ b_) ⊗ c_} -->
 
-Pass `"Lemmas"` (or any other return spec) when you want just the rule set derived within the bound, as a list of `Inactive[Equal]` equations. On the three group axioms the early lemmas are the classical derived facts - the left-unit law, `inv` of the unit, the double inverse:
+The inverse of the inverse of an element is the element itself:
 
 ```wl
-Take[
-    TFindProof[
-        {ForAll[a, a \[CircleTimes] e == a],
-         ForAll[a, a \[CircleTimes] inv[a] == e],
-         ForAll[{a, b, c}, a \[CircleTimes] (b \[CircleTimes] c) == (a \[CircleTimes] b) \[CircleTimes] c]},
-        "Lemmas",
-        TimeConstraint -> 2],
-    8]
+p = TFindProof[ForAll[a, inv[inv[a]] == a], groupAxioms, TimeConstraint -> 10]
 ```
-<!-- => {a \[CircleTimes] e == a, ..., a \[CircleTimes] (inv[a] \[CircleTimes] b) == b, e \[CircleTimes] a == a,
-        inv[e] == e, inv[inv[a]] == a, ...} - each an Inactive[Equal] -->
 
-## Picking what comes back
-
-The last positional argument selects what `TFindProof` returns. A single string returns that bare value; a list returns an Association keyed by the requested names; `All` returns every output (projected here onto its keys):
+The [ProofObject]() has the properties of the ones [FindEquationalProof]() gives. Its proof function checks the proof step by step:
 
 ```wl
-Keys @ TFindProof[
-    ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x],
-    "AbelianGroupAxioms",
-    All,
-    TimeConstraint -> 10]
+p["ProofFunction"][]
 ```
-<!-- => {ProofObject, Lemmas, PreprocessedAxioms, RelevantAxioms, RawTrace, Statistics,
-        Status, Path, AppliedMethod, WallTime, PortfolioTrace, Counterexample, TPTP} -->
+<!-- => Success["ProofFunction", <|"MessageTemplate" -> "Success!"|>] -->
 
-Available keys: `"ProofObject"` (default; the bare object), `"Lemmas"` (the completed rule set), `"PreprocessedAxioms"` (the normalised axioms fed to the engine), `"RelevantAxioms"` ([TRelevantAxioms]()'s keep / drop partition), `"RawTrace"` (the decoded completion trace), `"Statistics"` (a small run-stats Association), `"Status"` (`"Proved"` / `"Saturated"` / `"TimedOut"` / `"Failed"`), `"Path"` (the rewrite path between the goal faces), `"AppliedMethod"` (the schedule entry that won), `"WallTime"` (seconds spent), `"PortfolioTrace"` (per-entry portfolio outcomes), `"TPTP"` (the problem in TPTP CNF form), `"Counterexample"` (the equational dual of `"ProofObject"` - a [CounterexampleObject]() disproving the goal, or `$Failed`; see the [Disproof](paclet:WolframInstitute/THVMLink/tutorial/Disproof) tech note).
-
----
-
-## Methods, presets, portfolios
-
-`Method` is where the saturator's heuristic surface lives. Defaults to `Automatic`. The full sub-option list is reproduced in [TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof)'s reference page; the load-bearing options are:
-
-- `"Completion"` vs `"GoalDirected"` - the algorithm shape.
-- `"Ordering" -> "KBO" | "LPO"` - the term ordering used for orientation.
-- `"CriticalPairWeight" -> "Add" | "Max" | "Ord" | "Gt" | "Mix" | "Mix2" | "Unif" | "Goal"` - the CP selection heuristic.
-- `"AutoPrecedence" -> True | False` - Waldmeister's symbol-precedence inference.
-- `"AxiomRelevance" -> None | "Safe" | "Connected" | "SInE"` - the axiom filter (also reachable through [TRelevantAxioms]()).
-- `"UnfailingCP" -> True` - superpose both faces of an unorientable equation (completeness requirement of unfailing completion).
-- `"GroundJoin" -> True`, `"Connectedness" -> True` - the Twee redundancy criteria.
-
-### Single explicit config
-
-Pass a single Association as `Method`:
+Its proof graph shows how the lemmas derived from the axioms lead to the conclusion:
 
 ```wl
-TFindProof[
-    ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x],
-    "AbelianGroupAxioms",
-    Method -> {"Completion",
-        "Ordering"           -> "KBO",
-        "CriticalPairWeight" -> "Mix"},
-    TimeConstraint -> 15]
+p["ProofGraph"]
 ```
-<!-- => ProofObject[...] - "Proved" under the pinned single config -->
 
-### Named presets
-
-Each named preset bundles the defaults of a real-world prover so a one-name call reproduces (close to) that prover's behaviour on the input:
-
-- `"Waldmeister"` - Mix weight + KBO + AutoPrecedence + SelectionRatio 51 + RHSInterreduce + UnfailingCP (CPSetInterreduce stays off, like the CLI's `-ki` default).
-- `"VampireUEQ"` - LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + AutoMaxWeight + BackwardSubsume + BackwardDemod + RHSInterreduce + MNF front.
-- `"Twee"` - CPW Twee + GroundJoin + Connectedness + UnfailingCP + BackwardSubsume + BackwardDemod + RHSInterreduce + AutoMaxWeight 20.
-- `"EProver"` - CPW ConjSym + KBO + SelectionRatio 10 + AutoMaxWeight 20 + BackwardSubsume + RHSInterreduce + UnfailingCP.
-- `"VampireRandom"` - LPO + AutoPrecedence + SelectionRatio 10 + UnfailingCP + GroundJoin + BackwardDemod + RHSInterreduce + a seeded random CP-pick ratio + LRS; the Vampire 5.0.1 portfolio entry that cracks `McCuneAxioms/EqualityOfInverses` in the cross-system baseline.
-- `"ENIGMA"` - ML-guided critical-pair selection. A trained proof-relevance scorer (`"CriticalPairWeight" -> "Learned"`) rides a sound bounded-queue base (KBO + AutoPrecedence + UnfailingCP + RHSInterreduce + AutoMaxWeight 20); completeness holds regardless of the model because the engine still takes a periodic FIFO pick. Build and push a model with the learn loop in [AtpMethods](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods); absent one, a baked-in logistic regression is used.
-
-`DoubleNegation` over the Boolean axioms is a symmetric goal - the kind `"VampireUEQ"`'s MNF front closes directly:
+A list of conjectures is proved as one conjunction, with one [ProofObject](). The right identity and right inverse are also left ones:
 
 ```wl
-TFindProof["DoubleNegation", "BooleanAxioms",
-    Method -> "VampireUEQ",
-    TimeConstraint -> 10]
+TFindProof[{ForAll[a, e \[CircleTimes] a == a], ForAll[a, inv[a] \[CircleTimes] a == e]}, groupAxioms, TimeConstraint -> 10]
 ```
-<!-- => ProofObject[...] - "Proved" well inside the bound -->
 
-### Portfolios
-
-A portfolio is a schedule of single-config Methods tried in turn; the first that proves + verifies wins. `TimeConstraint` divides fairly across the schedule (each remaining entry gets `remaining-budget / remaining-configs` seconds).
-
-- `"Portfolio"` - fixed 4-entry schedule (Mix2 weight, then LPO + AutoPrecedence, then GT weight, then GoalDirected). Adequate baseline for problems without a recognised structure.
-- `"VampirePortfolio"` - the 13-entry Vampire UEQ rotation, the canonical "throw everything at it" schedule.
-- `"VampirePortfolioCompact"` - 3-entry rotation (VampireUEQ + Twee + Mix2-AutoPrec) sized for small `TimeConstraint`.
-- `Automatic` (default) - problem-aware. Analyses the conjecture's algebraic structure (Group / AbelianGroup / Ring / Combinatory / AC / Sheffer-Nand), front-loads a tailored config, then appends the fixed `"Portfolio"` as fallback. Never proves *less* than `"Portfolio"` because the fallback is always there.
-
-The `"AppliedMethod"` return spec reports which schedule entry won:
+Equations are best written with operators that do not evaluate, such as [CircleTimes](), [CenterDot]() or an undefined function. [Times]() is [Orderless](), so its arguments are sorted before the prover sees them, and the commutativity of [Times]() evaluates to [True]():
 
 ```wl
-TFindProof[
-    ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x],
-    "AbelianGroupAxioms",
-    {"Status", "AppliedMethod"},
-    Method         -> "VampirePortfolio",
-    TimeConstraint -> 10]
+x y == y x
 ```
-<!-- => <|"Status" -> "Proved",
-        "AppliedMethod" -> {"Completion", "CriticalPairWeight" -> "Twee", ...}|>
-        - the rotation's Twee entry is the first to close it -->
+<!-- => True -->
 
-`PortfolioFrontLoad -> n` widens the slice given to the first `n` entries (each gets 2x the unweighted share) - use it when an `Automatic` front genuinely deserves more time than the fair share.
+## Completion without a goal
 
-### External CLI process methods
-
-Four additional Method names dispatch the proof through an external prover's command-line binary instead of `thvm`'s internal saturator, then lift the SZS / TSTP output back into the same `ProofObject` shape the internal presets produce.  Useful as a comparator, for ProofObject parity checks against the upstream prover, or when a benchmark has a known-good entry on a CLI that thvm's preset can't reproduce.
-
-- `"VampireProcess"` - shells out to `/opt/homebrew/bin/vampire` (`brew install vampire`).
-- `"TweeProcess"` - shells out to `~/.cabal/bin/twee` or `/opt/homebrew/bin/twee` (`cabal install twee`).
-- `"WaldmeisterProcess"` - shells out to the `wmcli` binary, resolved through `$WMCLI`, then `$PATH`, then the common dev-build locations under the home directory.
-- `"EproverProcess"` - shells out to `/opt/homebrew/bin/eprover` (`brew install eprover`).
-
-All but `"TweeProcess"` lift to a `ProofObject` by default (`"LiftToProofObject" -> True`); Twee returns the raw derivation Association:
+Without a conjecture, [TFindProof]() completes the axioms into a set of rewrite rules. The `"Lemmas"` spec gives the rules. The axioms of a monoid complete to three rules:
 
 ```wl
-TFindProof["InverseOfInverse", "AbelianGroupAxioms",
-    Method -> "WaldmeisterProcess"]
+TFindProof["MonoidAxioms", "Lemmas"]
 ```
-<!-- => ProofObject[...] - the same head the internal presets return, proved by the external wmcli -->
+<!-- => {Inactive[Equal][OverTilde[1] ⊗ a, a], Inactive[Equal][a ⊗ OverTilde[1], a], Inactive[Equal][(a ⊗ b) ⊗ c, a ⊗ (b ⊗ c)]} -->
 
-When the binary isn't installed the dispatcher returns a `Failure["ExternalNoProof", ...]` rather than raising, so the absent-binary case is something a caller can detect and skip past.  See [AtpMethods](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods) for the full per-CLI surface (the `"Binary"`, `"ParseFormulas"`, and `"LiftToProofObject"` options the builders accept).
-
-## Schedule + method introspection
-
-Before launching a portfolio, you may want to know what schedule it expands to and what each entry's full sub-options will be. Two small inspection helpers do exactly that:
+Completion need not end. The group axioms above generate new rules for as long as it runs, so [TimeConstraint]() bounds the search, and the status reports that the bound was reached:
 
 ```wl
-TAtpSchedule["VampirePortfolio"]
+TFindProof[groupAxioms, "Status", TimeConstraint -> 2]
 ```
-<!-- => {"VampireUEQ", {"Completion", "CriticalPairWeight" -> "Twee", "GroundJoin" -> True, ...},
-        ..., "GoalDirected"} - the 13-entry rotation -->
+<!-- => "TimedOut" -->
+
+## Choosing what comes back
+
+A last argument selects what [TFindProof]() gives instead of the [ProofObject](). The `"Path"` spec gives the rewrite path from the left side of the conjecture to its right side, here a single rewrite with a derived lemma:
 
 ```wl
-TAtpSchedule[Automatic,
-    ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x],
-    "AbelianGroupAxioms"]
+TFindProof[ForAll[a, inv[inv[a]] == a], groupAxioms, "Path", TimeConstraint -> 10]
 ```
-<!-- => structure-aware front + the fixed Portfolio tail -->
+<!-- => {inv[inv[a]], a} -->
+
+The `"AppliedMethod"` spec gives the configuration that found the proof:
 
 ```wl
-TAtpDescribeMethod["Waldmeister"]
+TFindProof[ForAll[a, inv[inv[a]] == a], groupAxioms, "AppliedMethod", TimeConstraint -> 10]
 ```
-<!-- => <|"CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True,
-        "SkolemHighest" -> True, "SelectionRatio" -> 51, "RHSInterreduce" -> True,
-        "UnfailingCP" -> True, "CPSetInterreduce" -> False, ...|> -->
+<!-- => {"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True, "SelectionRatio" -> 51, "RHSInterreduce" -> True, "UnfailingCP" -> True, "CPSetInterreduce" -> True} -->
 
-`TAtpDescribeMethod` resolves an arbitrary `Method` spec to the full options Association the C engine will receive. For a list spec like `{"Twee", "Ordering" -> "LPO"}` it merges the preset defaults with the user's overrides, so you see what actually wins. For a portfolio spec it returns `<|"Schedule" -> {...}|>` describing the multi-entry rotation.
+A list of specs gives an [Association](). `"Statistics"` gives the number of rewrite steps in the chain that closes the goal, and the numbers of rules, entries of the inference trace and critical pairs left in the queue:
+
+```wl
+TFindProof[ForAll[a, inv[inv[a]] == a], groupAxioms, {"Status", "Statistics"}, TimeConstraint -> 10]
+```
+<!-- => <|"Status" -> "Proved", "Statistics" -> <|"Status" -> "Proved", "Steps" -> 1, "Rules" -> 7, "Trace" -> 45, "QueueSize" -> 9|>|> -->
+
+The possible specs are:
+
+| | |
+| --- | --- |
+| `"ProofObject"` | the [ProofObject]() (default) |
+| `"Status"` | `"Proved"`, `"Saturated"`, `"TimedOut"` or `"Failed"` |
+| `"Statistics"` | the status, the rewrite steps that close the goal, and the numbers of rules, trace entries and queued critical pairs |
+| `"Lemmas"` | the rewrite rules derived by the completion |
+| `"Path"` | the rewrite path between the two sides of the conjecture |
+| `"Counterexample"` | a [CounterexampleObject]() refuting the conjecture, or `$Failed` |
+| `"AppliedMethod"` | the configuration that found the proof |
+| `"PortfolioTrace"` | the outcome of each scheduled configuration |
+| `"WallTime"` | the time of the configuration that found the proof |
+| `"RelevantAxioms"` | the axioms kept and dropped by the relevance filter |
+| `"PreprocessedAxioms"` | the axioms as the prover receives them |
+| `"TPTP"` | the proof as a refutation in TPTP format |
+| `"RawTrace"` | the inference trace of the prover |
+| [All]() | an [Association]() of every spec |
+
+The `"Counterexample"` spec is the subject of [Disproving Conjectures with Countermodels](paclet:WolframInstitute/THVMLink/tutorial/Disproof).
+
+## Methods
+
+The [Method]() option sets the strategy of the search: how critical pairs are ranked, which ordering orients the equations, and which simplifications are applied. Its settings are single configurations, named configurations modeled on other provers, and schedules that try several configurations in turn:
+
+| | |
+| --- | --- |
+| [Automatic]() | detect the structure of the axioms, try configurations suited to it, then the `"Portfolio"` schedule (default) |
+| `"Completion"`, `"GoalDirected"` | plain completion, and completion with a search from both sides of the goal |
+| `"Waldmeister"`, `"Twee"`, `"VampireUEQ"`, `"EProver"`, `"VampireRandom"` | configurations modeled on those provers |
+| `"Portfolio"`, `"VampirePortfolio"`, `"VampirePortfolioCompact"` | schedules of configurations |
+| `"ENIGMA"` | critical pairs ranked by a learned model |
+| `"SMT"` | congruence closure, for a ground problem |
+| <code>{*name*, *opt* -> *val*, …}</code> | a configuration with explicit suboptions |
+
+[TAtpSchedule]() shows the configurations a setting tries. For the group problem, [Automatic]() puts three configurations suited to a group first and the four of the `"Portfolio"` schedule after them:
+
+```wl
+TAtpSchedule[Automatic, ForAll[a, inv[inv[a]] == a], groupAxioms]
+```
+<!-- => {{"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True, "SelectionRatio" -> 51, "RHSInterreduce" -> True, "UnfailingCP" -> True, "CPSetInterreduce" -> True}, {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50, "AutoPrecedence" -> True}, {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50}, {"Completion", "CriticalPairWeight" -> "Mix2"}, {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True}, {"Completion", "CriticalPairWeight" -> "Gt"}, "GoalDirected"} -->
+
+[TAtpDescribeMethod]() gives the suboptions a named configuration sets:
+
+```wl
+TAtpDescribeMethod["Twee"]
+```
+<!-- => <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "UnfailingCP" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "GoalDirected" -> False|> -->
+
+A list with a name and suboptions changes or adds to the settings of the named configuration:
+
+```wl
+TAtpDescribeMethod[{"Twee", "Ordering" -> "LPO"}]
+```
+<!-- => <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "UnfailingCP" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "GoalDirected" -> False, "Ordering" -> "LPO"|> -->
+
+A single configuration with explicit suboptions, here the Knuth-Bendix ordering (KBO) with the `"Mix"` ranking of critical pairs, proves commutativity in an abelian group:
+
+```wl
+TFindProof[ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x], "AbelianGroupAxioms", Method -> {"Completion", "Ordering" -> "KBO", "CriticalPairWeight" -> "Mix"}, TimeConstraint -> 10]
+```
+
+The `"VampireUEQ"` configuration searches from both sides of the goal, which closes symmetric goals such as double negation in a Boolean algebra:
+
+```wl
+TFindProof["DoubleNegation", "BooleanAxioms", Method -> "VampireUEQ", TimeConstraint -> 10]
+```
+
+A schedule shares the [TimeConstraint]() among its entries and stops at the first proof. With the `"VampirePortfolio"` schedule, its first entry does not prove commutativity in its share of the time, and its second, a configuration with the `"Twee"` ranking of critical pairs, does:
+
+```wl
+TFindProof[ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x], "AbelianGroupAxioms", {"Status", "AppliedMethod"}, Method -> "VampirePortfolio", TimeConstraint -> 10]
+```
+<!-- => <|"Status" -> "Proved", "AppliedMethod" -> {"Completion", "CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20}|> -->
+
+The settings `"VampireProcess"`, `"EproverProcess"`, `"TweeProcess"` and `"WaldmeisterProcess"` run the external prover programs of those names, when they are installed, and convert their proofs to the same [ProofObject]() form. The suboptions, the named configurations and the external programs are described in [Methods and Presets for TFindProof](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods), and the Waldmeister configuration in [The Waldmeister Method in THVMLink](paclet:WolframInstitute/THVMLink/tutorial/Waldmeister).
 
 ## Axiom relevance
 
-Large theories carry axioms that no proof of the current goal needs. [TRelevantAxioms]() reports the filter's keep / drop partition without running the prover - useful to verify a filter setting before committing to a long portfolio:
+An axiom that no proof of the conjecture can use only enlarges the search. Before it searches, [TFindProof]() filters the axioms, and [TRelevantAxioms]() shows the result of the filter without proving anything. An axiom about a function `h` that occurs in no other axiom and not in the conjecture is dropped:
 
 ```wl
-TRelevantAxioms[
-    ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x],
-    "AbelianGroupAxioms",
-    Method -> {"AxiomRelevance" -> "Safe"}]
+TRelevantAxioms[ForAll[a, inv[inv[a]] == a], Append[groupAxioms, h[h[x_]] == h[x_]]]
 ```
-<!-- => <|"Kept" -> {...}, "Dropped" -> {<|"Axiom" -> _, "Symbols" -> _, "Reason" -> _|>, ...},
-        "Mode" -> "Safe"|> -->
+<!-- => <|"Kept" -> {Inactive[Equal][a_ ⊗ e, a_], Inactive[Equal][a_ ⊗ inv[a_], e], Inactive[Equal][a_ ⊗ (b_ ⊗ c_), (a_ ⊗ b_) ⊗ c_]}, "Dropped" -> {<|"Axiom" -> Inactive[Equal][h[h[x_]], h[x_]], "Symbols" -> {h}, "Reason" -> "ConfinedBothSides"|>}, "Mode" -> "Safe"|> -->
 
-Modes:
+The filter is set by the `"AxiomRelevance"` suboption of [Method]():
 
-- `None` - keep all axioms.
-- `"Safe"` (default) - drop only provably dead-weight axioms (a confined symbol occurring on both sides; sound and completeness-preserving). The Y combinator dropped when the goal is Y-free is a typical case.
-- `"Connected"` - symbol-reachability pruning. Coarse heuristic; can drop a needed axiom.
-- `"SInE"` - the Hoder-Voronkov SInE algorithm as it ships in Vampire (D-relation + bounded BFS from the conjecture's symbols). Defaults `{"SineTolerance" -> 3, "SineDepth" -> 2, "SineGenerality" -> 8}` mirror Vampire's CLI knobs.
+| | |
+| --- | --- |
+| [None]() | keep every axiom |
+| `"Safe"` | drop only axioms that cannot take part in a proof (default) |
+| `"Connected"` | keep the axioms connected to the conjecture through shared symbols |
+| `"SInE"` | SInE (Sine Qua Non) premise selection, as in the Vampire prover |
 
----
+`"Safe"` drops an axiom only when a symbol occurs on both of its sides and nowhere else, so it never drops an axiom a proof needs. `"Connected"` and `"SInE"` are heuristics for theories with many axioms, and can drop an axiom a proof needs.
 
-## TATP - the raw saturator
+## The completion engine alone
 
-[TATP]() is the lower-level entry point. Same engine, simpler return shape: an Association with `"Status"`, `"Steps"`, `"Rules"`, `"QueueSize"`. Use it when you want the saturation statistics without the `ProofObject` reconstruction:
+[TATP]() runs completion with one fixed strategy and reports how the run ended, with no [ProofObject](). It holds its arguments, so a list of axioms stored in a variable is passed with [Evaluate]():
 
 ```wl
-TATP[
-    {ForAll[a, a \[CircleTimes] e == a],
-     ForAll[a, a \[CircleTimes] inv[a] == e],
-     ForAll[{a, b, c}, a \[CircleTimes] (b \[CircleTimes] c) == (a \[CircleTimes] b) \[CircleTimes] c]},
-    ForAll[a, inv[inv[a]] == a]]
+TATP[Evaluate[groupAxioms], ForAll[a, inv[inv[a]] == a]]
 ```
 <!-- => <|"Status" -> "PROVED", "Steps" -> 41, "Rules" -> 8, "QueueSize" -> 11|> -->
 
-`TATP[File["path.pr"]]` parses a Waldmeister `.pr` spec via the C-side `wald_parse_file` and runs the saturator directly.
+## Ground problems and TPTP files
 
-`TATP` also takes a `Witness -> {x_, ...}` opt that captures the existential bindings on success, and an `AllWitnesses -> True` mode that enumerates bounded existential proofs (with `MaxDepth` / `MaxWitnesses` caps). This is what the verification-driven workflows in the [Overview](paclet:WolframInstitute/THVMLink/tutorial/Overview) tutorial use.
-
----
-
-## Congruence closure (SMT)
-
-For ground equational entailment - all variables substituted, no quantifiers - the unfailing-completion path is overkill. `TFindProof` with `Method -> "SMT"` reduces ground entailment to a QF_UF satisfiability check via congruence closure. Ground atoms are written with the bare `==` / `!=` heads (they stay unevaluated on distinct symbols):
+A problem without variables is ground, and the `"SMT"` method decides it by congruence closure, as described in [Congruence Closure and Lazy DPLL(T)](paclet:WolframInstitute/THVMLink/tutorial/SMT):
 
 ```wl
 TFindProof[a == c, {a == b, b == c}, Method -> "SMT"]
 ```
-<!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure", "Goal" -> a == c,
-        "Hypotheses" -> {a == b, b == c}, "Witness" -> a != c|>;
-        a CounterexampleObject with the quotient "Model" on refute -->
+<!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure", "Goal" -> a == c, "Hypotheses" -> {a == b, b == c}, "Witness" -> a != c|> -->
 
-Inputs may be a TPTP source string or `File[path]` - the dispatcher pipes them through [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) and runs the same procedure:
-
-```wl
-TFindProof["cnf(g, negated_conjecture, foo(sk) != sk).
-            cnf(a, axiom, foo(sk) = sk).", Method -> "SMT"]
-```
-<!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure",
-        "Goal" -> foo[sk] == sk, ...|> -->
-
-For SMT-style satisfiability rather than entailment, [TSatEUF]() takes a pair `{equalities, disequalities}` and returns `<|"Status" -> "SAT"|"UNSAT", ...|>`. On `"SAT"` you also get `"Classes"` - the inferred equivalence classes of subterms.
-
-```wl
-TSatEUF[{f[a] == a}, {f[f[a]] != a}]
-```
-<!-- => <|"Status" -> "UNSAT", "Witness" -> f[f[a]] != a|> -->
-
-[TSmtDecide]() lifts the theory solver to arbitrary Boolean combinations via lazy DPLL(T) - Tseitin-free atom abstraction + a Wolfram `SatisfiabilityInstances` propositional kernel + congruence closure on each conflict:
-
-```wl
-TSmtDecide[
-    And[a == b, b == c, a != c]]
-```
-<!-- => <|"Status" -> "UNSAT"|> -->
-
-```wl
-TSmtDecide[
-    Or[f[a] == a, g[b] != g[b]]]
-```
-<!-- => <|"Status" -> "SAT", "Model" -> <|f[a] == a -> True|>|> -->
-
-`TSmtDecide` handles `And`, `Or`, `Not`, `Implies`, `Equivalent`, and `Xor` over equality / disequality atoms.
-
----
-
-## TPTP problem files end to end
-
-The [Wolfram/WolframParser](paclet:Wolfram/WolframParser/guide/WolframParser) paclet's [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) parses a `.p` file (or inline `cnf` / `fof` / `tff` / `tcf` / `thf` source) into the shape `TFindProof` expects. It is on the path as soon as the ATP context is loaded. Function symbols come back as String heads (`"mult"[X_, Y_]`) so they cannot collide with user-level Wolfram symbols, and a `negated_conjecture` clause is flipped through `Not` so the conjecture is the positive goal you'd state in Wolfram-language:
+Problems from the TPTP (Thousands of Problems for Theorem Provers) library, the standard benchmark collection for theorem provers, are written in a text format of their own. [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport), from the WolframParser paclet, parses it into axioms and a conjecture, with function symbols as string heads and variables as patterns:
 
 ```wl
 TPTPImport["cnf(right_identity, axiom, mult(X, e) = X).
-    cnf(right_inverse, axiom, mult(X, inv(X)) = e).
-    cnf(associativity, axiom, mult(mult(X, Y), Z) = mult(X, mult(Y, Z))).
-    cnf(inverse_of_inverse, negated_conjecture, inv(inv(a)) != a)."]
+cnf(right_inverse, axiom, mult(X, inv(X)) = e).
+cnf(associativity, axiom, mult(mult(X, Y), Z) = mult(X, mult(Y, Z))).
+cnf(inverse_of_inverse, negated_conjecture, inv(inv(a)) != a)."]
 ```
-<!-- => <|"Axioms" -> {"mult"[X_, "e"[]] == X_, "mult"[X_, "inv"[X_]] == "e"[],
-        "mult"["mult"[X_, Y_], Z_] == "mult"[X_, "mult"[Y_, Z_]]},
-        "Conjecture" -> "inv"["inv"["a"[]]] == "a"[]|> -->
+<!-- => <|"Axioms" -> {"mult"[X_, "e"[]] == X_, "mult"[X_, "inv"[X_]] == "e"[], "mult"["mult"[X_, Y_], Z_] == "mult"[X_, "mult"[Y_, Z_]]}, "Conjecture" -> "inv"["inv"["a"[]]] == "a"[]|> -->
 
-`TFindProof` accepts the parsed Association directly (`TFindProof[parsed]`), the raw inline string (`TFindProof["cnf(...). cnf(...). cnf(goal, negated_conjecture, ...)."]`), or a `File[path]` (`TFindProof[File["..."], TimeConstraint -> 10]` - the dispatcher does the import for you).
+[TFindProof]() takes the text, or a file given as <code>[File]()["*file*"]</code>, and proves the problem:
 
-The corpus walker side - browse 26,264 problems across 57 mathematical domains by status / rating / domain, parse on demand - lives as the [TPTPProblemLibrary](paclet:Wolfram/WolframParser/tutorial/TPTPProblemLibrary) tutorial in WolframParser. The same `TPTPImport` is the front door.
+```wl
+TFindProof["cnf(right_identity, axiom, mult(X, e) = X).
+cnf(right_inverse, axiom, mult(X, inv(X)) = e).
+cnf(associativity, axiom, mult(mult(X, Y), Z) = mult(X, mult(Y, Z))).
+cnf(inverse_of_inverse, negated_conjecture, inv(inv(a)) != a).", TimeConstraint -> 10]
+```
 
----
-
-## Where to go next
-
-- Per-symbol pages: [TFindProof](paclet:WolframInstitute/THVMLink/ref/TFindProof), [TATP](), [TRelevantAxioms](), [TAtpSchedule](), [TAtpDescribeMethod](), [TSatEUF](), [TSmtDecide]().
-- Parser side: [Parsing TPTP](paclet:Wolfram/WolframParser/tutorial/ParsingTPTP) (how the parser is built from the BNF) and [TPTP Problem Library](paclet:Wolfram/WolframParser/tutorial/TPTPProblemLibrary) (using `TPTPImport` on the full corpus).
-- The dispatcher, encoder, `TFindProof` core, and method parser live in [`ATP.wl`](../../Kernel/ATP/ATP.wl); the structure auto-tune + schedule introspection in [`ATP_Method.wl`](../../Kernel/ATP/ATP_Method.wl), the `ProofObject` reconstruction (proof decoder + critical-pair-lemma DAG) in [`ATP_ProofGraph.wl`](../../Kernel/ATP/ATP_ProofGraph.wl), the relevance filter in [`ATP_Relevance.wl`](../../Kernel/ATP/ATP_Relevance.wl), and the congruence-closure SMT path in [`SMT.wl`](../../Kernel/ATP/SMT.wl). The C-side completion engine is under `src/atp/`.
-- The algorithmic intent for the completion engine is written up in `docs/plans/waldmeister_ic_atp.md` at the source-tree root.
+[Importing TPTP Benchmarks](paclet:WolframInstitute/THVMLink/tutorial/TPTPImport) covers the format. Rules that rewrite in one direction only, and the rewrite paths of proofs, are the subject of [Finding Replacement Paths with Directed Rules](paclet:WolframInstitute/THVMLink/tutorial/FindReplacePath).

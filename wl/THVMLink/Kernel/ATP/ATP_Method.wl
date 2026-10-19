@@ -10,6 +10,9 @@
 
 BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
 
+(* ATP_Method.wl loads before ATP.wl, which assigns the list: the public symbol must exist first. *)
+SetUsage[$AtpMethodPresets, "$AtpMethodPresets lists the names of TFindProof's Method presets."];
+
 SetUsage[TAtpSchedule, "TAtpSchedule[method$] returns the schedule (a list of single-config Methods) that TFindProof would expand the Method option method$ to, without running the C engine; useful for debugging a Method choice or counting portfolio entries before allocating TimeConstraint.
 TAtpSchedule[method$, conjecture$, axioms$] threads the conjecture and axioms through Automatic's structure-recognized auto-tune, so the result matches what TFindProof[conjecture$, axioms$] with Method method$ would dispatch.
 TAtpSchedule[method$, \"Theorem\", \"Theory\"] resolves names through AxiomaticTheory."];
@@ -61,10 +64,12 @@ TAtpSchedule[m_, cj : (_List | _ForAll | _Equal | _Unequal | Inactive[Equal][_, 
    dispatch.  Schedule-style Methods (Automatic / Portfolio /
    VampirePortfolio[Compact]) return a <|"Schedule" -> ...|> wrapper
    describing the multi-entry rotation. *)
+(* "GoalDirected" comes from its own table, $AtpPresetGoalDirected, which atpDispatchPreset merges
+   under the same suboption name. *)
 TAtpDescribeMethod[name_String] /; KeyExistsQ[$AtpPresetDefaults, name] :=
-    $AtpPresetDefaults[name]
+    Append[$AtpPresetDefaults[name], "GoalDirected" -> Lookup[$AtpPresetGoalDirected, name, False]]
 TAtpDescribeMethod[{name_String, subopts___Rule}] /; KeyExistsQ[$AtpPresetDefaults, name] :=
-    Join[$AtpPresetDefaults[name], Association[{subopts}]]
+    Join[TAtpDescribeMethod[name], Association[{subopts}]]
 TAtpDescribeMethod[name : ("Portfolio" | "VampirePortfolio" | "VampirePortfolioCompact" | "AllPresets" | "Automatic")] :=
     <|"Schedule" -> atpScheduleFor[name]|>
 TAtpDescribeMethod[Automatic] :=

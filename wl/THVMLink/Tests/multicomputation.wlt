@@ -487,4 +487,22 @@ If[ ! TMultiTraceQ[],
         },
         TestID -> "OP2_SUP introduces fully-wired DUPs (1-in/2-out, both projections consumed)"
     ];
+
+    (* An unknown key gives TMultiTrace::key and stays unevaluated; a per-key list is not
+       step records, so TMultiwayGraph refuses it. *)
+    VerificationTest[
+        TMultiTrace[TSup[1, 2] + 3, "Foo"],
+        TMultiTrace[TSup[1, 2] + 3, "Foo"],
+        {TMultiTrace::key},
+        SameTest -> (Head[#1] === Head[#2] &),
+        TestID -> "multitrace/unknown-key"
+    ];
+
+    VerificationTest[
+        TMultiwayGraph[TMultiTrace[TSup[1, 2] + 3, "Events"]],
+        $Failed,
+        {TMultiwayGraph::needsteps},
+        TestID -> "multiway/per-key-list-refused"
+    ];
+
 ]

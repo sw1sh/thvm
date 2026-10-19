@@ -4,69 +4,254 @@ Name: TWhere
 Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TWhere
-Keywords: [where, select, mask, ternary, CMPLT, RL]
-SeeAlso: [TMaximum, TMinimum, TClip, TReLU, TUOpCmplt, TGrad]
+Keywords: [where, select, mask, ternary, conditional, elementwise]
+SeeAlso: [TMaximum, TMinimum, TClip, TGrad, Less, If]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TWhere]()[*cond*, *a*, *b*]</code> is a ternary select: it returns *a* where the 0/1 mask *cond* is 1 and *b* where it is 0. thvm has no `WHERE` opcode, so it lowers to `cond*a + (1 - cond)*b`, where *cond* is a comparison mask such as `a < b`.
+<code>[TWhere]()[*cond*, *a*, *b*]</code> gives, element by element, *a* where the mask *cond* is 1 and *b* where it is 0.
+
+<!-- #| annotation: 26.10.19: thvm has no WHERE opcode, so TWhere lowers to cond*a + (1 - cond)*b, tinygrad's Tensor.where written with arithmetic. That form is why both branches are evaluated everywhere, why a non-finite value in the unselected branch poisons the position (0*Infinity is NaN), why a mask value between 0 and 1 blends, and why the gradient of a is cond and of b is 1 - cond. A comparison mask (UOP_CMPLT from the Less UpValue) carries no gradient. Equal on two TTerms is structural identity, not a UOP_CMPEQ mask. Tensor operands of different shapes are not broadcast (reported 26.10.19). -->
 
 ## Details & Options
 
-- *cond* is a 0/1 `TTerm`, normally a comparison mask. `a < b` lowers to a `UOP_CMPLT` mask via <code>[TUOpCmplt]()</code>, and `a == b` to a `UOP_CMPEQ` mask via <code>[TUOpCmpeq]()</code>; both read back as `1.` / `0.`.
-- The mask carries no gradient (a comparison is not differentiable), so under <code>[TGrad]()</code> the cotangent splits cleanly: *a* receives *cond* and *b* receives `1 - cond`, exactly a true ternary select's rule.
-- *a* and *b* broadcast against *cond*; a scalar branch is fine.
-- Keep both branches finite. The unselected branch is multiplied by 0, and `0*Infinity` is `NaN`, so an `Infinity` or `NaN` in the branch you did not pick still poisons the result. This is why thvm's attention mask uses a large finite bias rather than `-Infinity`.
+- *cond* is a tensor of 0s and 1s of the shape of the result, usually a comparison such as *x* < *y* or *x* < 0, which gives 1 where the comparison holds and 0 elsewhere.
+- *a* and *b* are tensors of the same shape as *cond*, lazy graphs, or numbers, which apply to every element.
+- <code>[TWhere]()[*cond*, *a*, *b*]</code> gives a lazy [TTerm](). <code>[TRealize]()</code> computes it, and <code>[Normal]()</code> reads the values back.
+- The result is computed as *cond* *a* + (1 - *cond*) *b*, so both branches are evaluated at every position. A mask value between 0 and 1 blends the two branches.
+- Under <code>[TGrad]()</code>, *a* receives the gradient where *cond* is 1 and *b* where it is 0. A comparison mask receives no gradient.
+- Both branches must be finite where they are not selected: an infinite or indeterminate value there makes that position indeterminate.
 
 ## Basic Examples
 
-Select from *a* where the mask is 1 and from *b* where it is 0:
+A mask:
 
 ```wl
-cond = TTensorCreate[{1., 0., 1., 0.}];
-a    = TTensorCreate[{10., 20., 30., 40.}];
-b    = TTensorCreate[{-1., -2., -3., -4.}];
-Normal @ TRealize @ TWhere[cond, a, b]
+cond = TTensorCreate[{1., 0., 1., 0.}]
 ```
+
+<!-- => a TTensor summary box: shape 4, dtype f32 -->
+
+Values for the positions where the mask is 1:
+
+```wl
+a = TTensorCreate[{10., 20., 30., 40.}]
+```
+
+<!-- => a TTensor summary box: shape 4, dtype f32 -->
+
+Values for the positions where it is 0:
+
+```wl
+b = TTensorCreate[{-1., -2., -3., -4.}]
+```
+
+<!-- => a TTensor summary box: shape 4, dtype f32 -->
+
+The selection, as a lazy graph:
+
+```wl
+w = TWhere[cond, a, b]
+```
+
+<!-- => a TUOp summary box of kind ADD -->
+
+Its values:
+
+```wl
+Normal[TRealize[w]]
+```
+
 <!-- => {10., -2., 30., -4.} -->
 
 ## Scope
 
-The mask is usually a comparison. Picking the elementwise larger of two tensors is <code>[TWhere]()</code> over an `a < b` mask:
+A tensor:
 
 ```wl
-a = TTensorCreate[{-1., 2., 3.}];
-b = TTensorCreate[{-4., -2., 9.}];
-Normal @ TRealize @ TWhere[a < b, b, a]
+z = TTensorCreate[{-2., -1., 1., 2.}]
 ```
+
+<!-- => a TTensor summary box: shape 4, dtype f32 -->
+
+A comparison is a mask of 1s where it holds:
+
+```wl
+Normal[TRealize[z < 0]]
+```
+
+<!-- => {1., 1., 0., 0.} -->
+
+The branches may be numbers; this replaces the negative elements by 0:
+
+```wl
+Normal[TRealize[TWhere[z < 0, 0, z]]]
+```
+
+<!-- => {0., 0., 1., 2.} -->
+
+The sign of each element:
+
+```wl
+Normal[TRealize[TWhere[z < 0, -1, 1]]]
+```
+
+<!-- => {-1., -1., 1., 1.} -->
+
+---
+
+Two tensors:
+
+```wl
+a = TTensorCreate[{-1., 2., 3.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+The second:
+
+```wl
+b = TTensorCreate[{-4., -2., 9.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+A comparison of two tensors selects the larger element at each position:
+
+```wl
+Normal[TRealize[TWhere[a < b, b, a]]]
+```
+
 <!-- => {-1., 2., 9.} -->
 
-This is exactly how <code>[TMaximum]()</code> is defined.
+## Applications
+
+A tensor:
+
+```wl
+x = TTensorCreate[{-3., -1., 0., 2., 4.}]
+```
+
+<!-- => a TTensor summary box: shape 5, dtype f32 -->
+
+A leaky rectifier, which keeps positive values and scales negative ones by 0.1:
+
+```wl
+Normal[TRealize[TWhere[x < 0, 0.1*x, x]]]
+```
+
+<!-- => {-0.3, -0.1, 0., 2., 4.} -->
 
 ## Properties and Relations
 
-The cotangent flows only to the selected branch, so <code>[TGrad]()</code> routes the gradient by the mask. Here the mask `{1., 0., 1.}` sends the gradient of a sum entirely to *a* at positions 0 and 2:
+Two tensors:
 
 ```wl
-cond = TTensorCreate[{1., 0., 1.}];
-a    = TTensorCreate[{5., 6., 7.}];
-b    = TTensorCreate[{0., 0., 0.}];
-TRealize @ TGrad @ Total[TWhere[cond, a, b]];
-Normal @ TRealize @ TGradOf[a]
+a = TTensorCreate[{-1., 2., 3.}]
 ```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+The second:
+
+```wl
+b = TTensorCreate[{-4., -2., 9.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+[TMaximum]() is this selection:
+
+```wl
+Normal[TRealize[TWhere[a < b, b, a]]] === Normal[TRealize[TMaximum[a, b]]]
+```
+
+<!-- => True -->
+
+It agrees with an [If]() on the values, element by element:
+
+```wl
+Normal[TRealize[TWhere[a < b, b, a]]] === MapThread[If[#1 < #2, #2, #1] &, {Normal[a], Normal[b]}]
+```
+
+<!-- => True -->
+
+---
+
+A mask and two branches:
+
+```wl
+cond = TTensorCreate[{1., 0., 1.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+The first branch:
+
+```wl
+a = TTensorCreate[{5., 6., 7.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+The second branch:
+
+```wl
+b = TTensorCreate[{0., 0., 0.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+Differentiate the sum of the selection:
+
+```wl
+TGrad[Total[TWhere[cond, a, b]]]
+```
+
+<!-- => a TUOp summary box of kind REDUCE -->
+
+*a* gets the gradient where the mask is 1:
+
+```wl
+Normal[TRealize[TGradOf[a]]]
+```
+
 <!-- => {1., 0., 1.} -->
+
+*b* gets it where the mask is 0:
+
+```wl
+Normal[TRealize[TGradOf[b]]]
+```
+
+<!-- => {0., 1., 0.} -->
 
 ## Possible Issues
 
-Because <code>[TWhere]()</code> evaluates `cond*a + (1 - cond)*b`, **both** branches are computed at every position; the mask only weights them. The value the mask discards still passes through the multiply, so a non-finite entry in the unselected branch becomes `0*Infinity = NaN` and poisons that position. Replacing a discarded value with a different finite value shows the unselected branch never reaching the output, as long as it stays finite:
+A mask value between 0 and 1 blends the branches instead of choosing one:
 
 ```wl
-cond = TTensorCreate[{1., 0.}];
-a    = TTensorCreate[{1., 99.}];
-b    = TTensorCreate[{0., 2.}];
-Normal @ TRealize @ TWhere[cond, a, b]
+Normal[TRealize[TWhere[TTensorCreate[{0.5, 0.}], TTensorCreate[{10., 10.}], TTensorCreate[{0., 0.}]]]]
 ```
-<!-- => {1., 2.} -- position 1 selects `b`'s 2.; the discarded 99. in `a` is multiplied by 0 and vanishes. An `Infinity` in its place would have given `0*Infinity = NaN`, so keep both branches finite (thvm's attention mask uses a large finite bias, not -Infinity). -->
 
+<!-- => {5., 0.} -->
+
+---
+
+A tensor whose logarithm is infinite at its second element:
+
+```wl
+p = TTensorCreate[{1., 0.}]
+```
+
+<!-- => a TTensor summary box: shape 2, dtype f32 -->
+
+The mask selects 5 at the second position, but the unselected logarithm there is infinite, so that position becomes indeterminate and the values cannot be read:
+
+```wl
+Normal[TRealize[TWhere[TTensorCreate[{1., 0.}], Log[p], TTensorCreate[{5., 5.}]]]]
+```
+
+<!-- => the message LibraryFunction::fpexc is issued and the result is $Failed -->

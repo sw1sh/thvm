@@ -225,3 +225,36 @@ VerificationTest[
     {1, 2, 1},
     TestID -> "context/destroyed-slot-reused"
 ]
+
+(* The context-taking forms of TReset and TInit match a TContext handle: the
+   public TContext, which Context.wl defines after THVMLink.wl has used it. *)
+VerificationTest[
+    TReset[TContext[0]],
+    1,
+    TestID -> "context/treset-on-context-handle"
+]
+
+VerificationTest[
+    TInit[TContext[0]],
+    True,
+    TestID -> "context/tinit-on-context-handle"
+]
+
+(* No Private symbol shares a public name: a Private reference to a public
+   symbol that a later file defines would otherwise be a private stub. *)
+VerificationTest[
+    Intersection @@ Map[
+        Last[StringSplit[#, "`"]] &,
+        Names /@ {"WolframInstitute`THVMLink`Private`*", "WolframInstitute`THVMLink`*"},
+        {2}],
+    {},
+    TestID -> "context/no-private-stub-of-public-name"
+]
+
+(* The public context holds only exported names, so a helper never shadows a
+   reader's Global` symbol of the same name. *)
+VerificationTest[
+    Select[Names["WolframInstitute`THVMLink`*"], LowerCaseQ[StringTake[Last[StringSplit[#, "`"]], 1]] &],
+    {},
+    TestID -> "context/no-lowercase-public-symbols"
+]

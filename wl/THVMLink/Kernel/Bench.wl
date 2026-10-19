@@ -50,10 +50,16 @@ backendNameLabel[1] = "CPU";
 backendNameLabel[2] = "Metal";
 backendNameLabel[_] = "?";
 
-formatKib[n_] := Round[n / 1024.0, 0.1];
+formatKib[n_] := round1[n / 1024.0];
 
+(* A spec names the run and gives InitFn, StepFn and a positive NumSteps; "Name" defaults to "bench". *)
+benchSpecOkQ[spec_Association] := KeyExistsQ[spec, "InitFn"] && KeyExistsQ[spec, "StepFn"] &&
+    MatchQ[Lookup[spec, "NumSteps"], _Integer ? Positive]
+TBench::spec = "A TBench spec gives \"InitFn\", \"StepFn\" and a positive integer \"NumSteps\"; `1` does not.";
+
+TBench[spec_Association] /; ! benchSpecOkQ[spec] := (Message[TBench::spec, spec]; $Failed)
 TBench[spec_Association] := Block[{
-    name = spec["Name"],
+    name = Lookup[spec, "Name", "bench"],
     initFn = spec["InitFn"],
     stepFn = spec["StepFn"],
     nSteps = spec["NumSteps"],
@@ -80,15 +86,15 @@ TBench[spec_Association] := Block[{
     bufs = plan["Bufs"];
     peak = plan["Peak"];
     totalKib = formatKib[peak["total_bytes"]];
-    headroomPct = If[peak["total_bytes"] > 0, Round[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"], 0.1], 0];
+    headroomPct = If[peak["total_bytes"] > 0, round1[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"]], 0];
     backendId = If[bufs === {}, 0, First @ Commonest[#["backend"] & /@ bufs]];
     backend = backendNameLabel[backendId];
     <|
         "name" -> name,
         "backend" -> backend,
         "n_steps" -> nSteps,
-        "wall_time_ms" -> Round[wallMs, 0.1],
-        "ms_per_step" -> Round[msPerStep, 0.1],
+        "wall_time_ms" -> round1[wallMs],
+        "ms_per_step" -> round1[msPerStep],
         "kernel_count" -> Length[plan["Kernels"]],
         "ten_count" -> Length[plan["Tens"]],
         "total_live_kib" -> totalKib,

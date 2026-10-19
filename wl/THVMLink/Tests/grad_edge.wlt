@@ -161,3 +161,11 @@ VerificationTest[
     {2.0, 4.0, 6.0, 8.0, 0.0},
     TestID -> "grad/four-movement-op-chain"
 ]
+
+(* A target or wrt that is not a term is refused with TGrad::args, not passed to the walk. *)
+VerificationTest[
+    With[{q = TTensorCreate[{1., 2.}]}, Head /@ {TGrad[{1, 2}, q], TGrad[Total[q], {1, 2}]}],
+    {TGrad, TGrad},
+    {TGrad::args, TGrad::args},
+    TestID -> "grad/non-term-arguments"
+]

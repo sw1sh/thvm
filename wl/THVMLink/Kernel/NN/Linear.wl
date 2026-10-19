@@ -46,7 +46,11 @@ TMatVec[w_TTerm, x_TTerm] := With[{shapeW = tUopShape[w]},
    cpu_blas_dispatch recognises this exact KProgOp[] (MUL +
    REDUCE_SUM with inner=N, where input buffers are M*K and K*N
    floats) and routes to cblas_sgemm. *)
-TMatMul[a_TTerm, b_TTerm] := With[{shapeA = tUopShape[a], shapeB = tUopShape[b]},
+matMulShapesOkQ[{_, k_Integer}, {k_Integer, _}] := True
+matMulShapesOkQ[_, _] := False
+TMatMul::dims = "TMatMul multiplies an m by k matrix with a k by n one; the shapes are `1` and `2`.";
+
+TMatMul[a_TTerm, b_TTerm] /; matMulShapesOkQ[tUopShape[a], tUopShape[b]] := With[{shapeA = tUopShape[a], shapeB = tUopShape[b]},
     Module[{m, k, n, ab, bb},
         m = shapeA[[1]];
         k = shapeA[[2]];
@@ -56,6 +60,7 @@ TMatMul[a_TTerm, b_TTerm] := With[{shapeA = tUopShape[a], shapeB = tUopShape[b]}
         TUOpReduce[TUOpMul[ab, bb], 1, "SUM"]
     ]
 ]
+TMatMul[a_TTerm, b_TTerm] := Null /; (Message[TMatMul::dims, tUopShape[a], tUopShape[b]]; False)
 
 (* TLinear[x, W, b] -- standard nn.Linear forward = x @ W + b.
    The bias is rank-1 {N}; reshape to {1, ..., 1, N} and EXPAND

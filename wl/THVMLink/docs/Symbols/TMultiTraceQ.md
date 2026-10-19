@@ -4,27 +4,49 @@ Name: TMultiTraceQ
 Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TMultiTraceQ
-Keywords: [multicomputation, trace, dylib, build]
+Keywords: [multicomputation, trace, event recording, library]
 SeeAlso: [TMultiTrace, TMultiwayGraph, TCausalGraph]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TMultiTraceQ]()[]</code> returns [True]() iff the loaded `WolframInstitute`THVMLink` dylib was built with `-DTHVM_TRACE` (the default for `make wl`).
+<code>[TMultiTraceQ]()[]</code> gives [True]() if the loaded THVMLink runtime can record reduction events, and [False]() otherwise.
+
+<!-- #| annotation: 26.10.19: TMultiTraceQ reports whether the dylib was compiled with THVM_TRACE; make wl builds with it by default, and WL_TRACE=0 opts out for benchmarking. -->
 
 ## Details & Options
 
-- Pass `WL_TRACE=0` to `make` to opt out of the trace machinery (e.g. for benchmarking the runtime without the per-event overhead). In that case [TMultiTrace]() returns [$Failed]() and `TMultiTraceQ` is `False`.
-- Cheap call -- use it as a guard at the top of a script that depends on the trace.
+- The runtime THVMLink ships with records events, so [TMultiTraceQ]() gives [True]().
+- A runtime built without event recording gives [False](). [TMultiTrace]() then issues `TMultiTrace::notrace` and gives `$Failed`. [TMultiwayGraph]() and [TCausalGraph]() of a term run [TMultiTrace](), so they need recording too.
+- [TMultiTraceQ]() initializes the runtime if needed and does not change its state.
 
 ## Basic Examples
+
+The loaded runtime records events:
 
 ```wl
 TMultiTraceQ[]
 ```
+
 <!-- => True -->
 
 ## Properties and Relations
 
-The trace is the foundation for [TMultiwayGraph]() (the multiway view) and [TCausalGraph]() (the causal DAG). Both require recording on; this predicate is the cheapest way to confirm.
+With recording available, [TMultiTrace]() gives one record per step, here the step numbers:
+
+```wl
+TMultiTrace[TNum[3] + TNum[4], "Step"]
+```
+
+<!-- => {0, 1} -->
+
+---
+
+[TMultiwayGraph]() draws the recorded steps:
+
+```wl
+TMultiwayGraph[TSup[1, 2] + 3]
+```
+
+<!-- => a Graph from the vertex <1, 2> + 3 down two branches, OP2_SUP then DUP_NUM then OP2_NUM_NUM, ending at the vertices 4 and 5 -->

@@ -5,28 +5,77 @@ Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTermTree
 Keywords: [tree, term, visual, ExpressionTree]
-SeeAlso: [TTermExpr, Term, THeapDiagram]
+SeeAlso: [TTermExpr, Term, THeapGraph, THeapDiagram]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TTermTree]()[*term*]</code> = <code>[ExpressionTree]()[[TTermExpr]()[*term*]]</code> -- the tag-name walk of *term* rendered as a Wolfram [Tree]() object for visual inspection.
+<code>[TTermTree]()[*term*]</code> gives the tag-name walk of *term* as a [Tree]().
 
 ## Details & Options
 
-- Renders inline in a notebook with full `Tree` styling.
-- Compare with [THeapDiagram]() (string-diagram view with named ports) and [THeapGraph]() (cell-and-wire `Graph`).
+- <code>[TTermTree]()[*term*]</code> is <code>[ExpressionTree]()[[TTermExpr]()[*term*]]</code>.
+- Each compound cell is an inner node labeled by its tag name. Operator names, labels, numbers and variable locations are leaves.
+- The result is an ordinary [Tree](), so functions such as [TreeLeaves](), [TreeData]() and [TreeDepth]() apply to it.
+- [THeapGraph]() and [THeapDiagram]() draw the same heap as an interaction net, with shared cells and wires.
 
 ## Basic Examples
 
-A small lambda body as a tree:
+The tree of a sum:
 
 ```wl
-TReset[];
-TTermTree[TLam[x, TOp2["+", x, TNum[1]]]]
+TTermTree[TNum[3] + TNum[4]]
 ```
+
+<!-- => a Tree with root OP2, whose children are the leaf +, and two NUM nodes over the leaves 3 and 4 -->
+
+---
+
+The tree of a product of two sums:
+
+```wl
+TTermTree[(TNum[1] + TNum[2]) * (TNum[3] + TNum[4])]
+```
+
+<!-- => a Tree with root OP2 over the leaf * and two OP2 subtrees, one per sum -->
+
+## Scope
+
+A superposition is a node over its label and its two branches:
+
+```wl
+TTermTree[TSup[9, TNum[3] + TNum[4], TNum[5] * TNum[6]]]
+```
+
+<!-- => a Tree with root SUP over the leaf 9 and two OP2 subtrees -->
 
 ## Properties and Relations
 
-For the canonical structural form (binder ids preserved, suitable as vertex identity in [TMultiwayGraph]()) use [Term](). For the raw tag-only walk use [TTermExpr]().
+The leaves of the tree of a sum hold its operator and its two numbers:
+
+```wl
+TreeData /@ TreeLeaves[TTermTree[TNum[3] + TNum[4]]]
+```
+
+<!-- => {"+", 3, 4} -->
+
+---
+
+The tree of a sum has depth 2:
+
+```wl
+TreeDepth[TTermTree[TNum[3] + TNum[4]]]
+```
+
+<!-- => 2 -->
+
+---
+
+The tree is the [ExpressionTree]() of [TTermExpr]():
+
+```wl
+TTermTree[TNum[3] + TNum[4]] === ExpressionTree[TTermExpr[TNum[3] + TNum[4]]]
+```
+
+<!-- => True -->

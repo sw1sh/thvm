@@ -3,142 +3,167 @@ Template: TechNote
 Name: TPTPImport
 Title: Importing TPTP Benchmarks
 Context: WolframInstitute`THVMLink`ATP`
-ContextPath: [Global`]
+ContextPath: [Global`, Wolfram`Parser`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/TPTPImport
-Keywords: [TPTP, CNF, FOF, benchmark, import, theorem proving, Sheffer, AbelianGroupAxioms]
+Keywords: [TPTP, CNF, FOF, benchmark, import, theorem proving, SZS, AbelianGroupAxioms]
 RelatedGuides: [THVMLink]
-RelatedTutorials: [ATP, SMT, Overview]
+RelatedTutorials: [ATP, SMT, Disproof]
 ---
 
-## What the TPTP path covers
+The TPTP (Thousands of Problems for Theorem Provers) library is the standard collection of problems on which automated theorem provers such as Vampire, E, Twee and Waldmeister are compared, and its text format is how those provers exchange problems and proofs. [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport), from the WolframParser paclet, parses that format into Wolfram Language equations, and [TFindProof]() takes a TPTP problem as text or as a file and proves it:
 
-The TPTP (Thousands of Problems for Theorem Provers) benchmark suite is the standard cross-prover problem corpus - Vampire, E, Twee, Waldmeister all run on it - and ATP literature quotes timings against TPTP slugs like `LCL129-1.p` or `ShefferAxioms/AndAssociativity.p`. A reader who wants to reproduce a result, or who already has a problem in TPTP form, needs an importer.
-
-[TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) parses a TPTP file or string into an Association of `"Axioms"` and `"Conjecture"`. Better yet, [TFindProof]() accepts `File["..."]` or an inline TPTP string directly, so the parse happens behind the dispatch:
-
-- Variable-bearing axioms route to the default unfailing Knuth-Bendix completion.
-- Ground problems route through congruence closure when you add `Method -> "SMT"`.
-- A goal-less file runs the single-argument completion form, whose `"Lemmas"` are the saturated rule set.
-
-Function-symbol names come back as String heads (<code>"and"[x_, y_]</code> rather than <code>and[x_, y_]</code>) so they cannot collide with any user-level Wolfram symbol.
-
-## Setting up
-
-The TPTP parser itself - [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) - lives in the <code>[Wolfram\`Parser\`](paclet:Wolfram/WolframParser/guide/WolframParser)</code> paclet. The dispatch overloads on [TFindProof]() that accept a `File` or string call it through transparently, so loading just <code>THVMLink\`ATP\`</code> is enough for the file / string entry points to work:
-
-```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
-Needs["Wolfram`Parser`"];
-```
-
-Reach for `Needs["Wolfram`Parser`"]` explicitly only when you want to call [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) directly to inspect the parsed Association before dispatch.
+| | |
+| --- | --- |
+| <code>[TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport)["*text*"]</code> | parse a TPTP problem into its axioms and its conjecture |
+| <code>[TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport)[[File]()["*file*"]]</code> | parse a TPTP problem file |
+| <code>[TFindProof]()["*text*"]</code> | prove the conjecture of a TPTP problem from its axioms |
+| <code>[TFindProof]()[[File]()["*file*"]]</code> | prove the problem in a TPTP file |
+| <code>[TFindProof]()[*problem*, "TPTP"]</code> | give the proof as a refutation in TPTP format |
 
 ## Parsing a problem
 
-The simplest call - just parse, don't prove - shows the output shape:
+A problem in clause normal form (`cnf`) is a list of clauses, each with a name, a role and a formula. This one states the axioms of an abelian group, with the product `mult`, the unit `e` and the inverse `inv`, and negates the conjecture that the inverse of the inverse of `a` is `a`:
 
 ```wl
-TPTPImport["cnf(a, axiom, and(X, Y) = and(Y, X))."]
-```
-<!-- => <|"Axioms" -> {"and"[v$_, w$_] == "and"[w$_, v$_]}, "Conjecture" -> None|> -->
-
-Universal variables (`X`, `Y` in the TPTP source) come through as the Wolfram pattern-variable convention (`v$_`, `w$_`) so they bind correctly against the saturation engine's matcher. The file overload eats benchmark `.p` files directly:
-
-```wl
-TPTPImport["% TPTP problem: GroupAxioms::InverseOfInverse
-% axioms = 3, conjuncts total = 1
-cnf(ax1, axiom, and(X1,and(X2,X3)) = and(and(X1,X2),X3)).
-cnf(ax2, axiom, and(X1,op_overtilde(k1)) = X1).
-cnf(ax3, axiom, and(X1,not(X1)) = op_overtilde(k1)).
-cnf(goal, negated_conjecture, not(not(sk_c1)) != sk_c1).
-"]
-```
-<!-- => <|"Axioms" -> {4 equational axioms}, "Conjecture" -> "not"["not"["skC1"[]]] == "skC1"[]|> -->
-
-Underscored TPTP names (`sk_c1`, `op_overtilde`) come through verbatim as String heads. Skolem constants - introduced by the TPTP tooling when a goal is universally quantified - sit ready to drop into the conjecture or as ground witnesses.
-
-## Proving from a file or string
-
-The same TPTP source can ride straight into [TFindProof]():
-
-```wl
-TFindProof[
-    "cnf(a1, axiom, and(X, Y) = and(Y, X)).
-     cnf(a2, axiom, and(X, and(Y, Z)) = and(and(X, Y), Z)).
-     cnf(g,  negated_conjecture, and(and(p, q), r) != and(r, and(q, p)))."]
-```
-<!-- => ProofObject[...] -->
-
-Three clauses: two universally-quantified equational axioms (commutativity and associativity of `and`) and a ground inequality conjecture. The dispatch parses the clauses, routes them as `Axioms` / `Conjecture`, and the saturator closes the goal.
-
-Files behave the same way:
-
-```wl
-TFindProof["% TPTP problem: AbelianGroupAxioms::InverseOfInverse
-% axioms = 4, conjuncts total = 1
-cnf(ax1, axiom, and(X1,and(X2,X3)) = and(and(X1,X2),X3)).
-cnf(ax2, axiom, and(X1,X2) = and(X2,X1)).
-cnf(ax3, axiom, and(X1,op_overtilde(k1)) = X1).
-cnf(ax4, axiom, and(X1,not(X1)) = op_overtilde(k1)).
-cnf(goal, negated_conjecture, not(not(sk_c1)) != sk_c1).
-", TimeConstraint -> 10]
-```
-<!-- => ProofObject[...] -->
-
-If you want a non-default `Method`, pull the parsed shape out and feed it back through the standard two-argument call:
-
-```wl
-imported = TPTPImport["% TPTP problem: AbelianGroupAxioms::InverseOfInverse
-% axioms = 4, conjuncts total = 1
-cnf(ax1, axiom, and(X1,and(X2,X3)) = and(and(X1,X2),X3)).
-cnf(ax2, axiom, and(X1,X2) = and(X2,X1)).
-cnf(ax3, axiom, and(X1,op_overtilde(k1)) = X1).
-cnf(ax4, axiom, and(X1,not(X1)) = op_overtilde(k1)).
-cnf(goal, negated_conjecture, not(not(sk_c1)) != sk_c1)."];
-TFindProof[imported["Conjecture"], imported["Axioms"],
-    Method -> "VampireUEQ", TimeConstraint -> 30]
+problem = "cnf(associativity, axiom, mult(X, mult(Y, Z)) = mult(mult(X, Y), Z)).
+cnf(commutativity, axiom, mult(X, Y) = mult(Y, X)).
+cnf(right_identity, axiom, mult(X, e) = X).
+cnf(right_inverse, axiom, mult(X, inv(X)) = e).
+cnf(inverse_of_inverse, negated_conjecture, inv(inv(a)) != a)."
 ```
 
-Goal-less inputs - no `conjecture` or `negated_conjecture` clause - fall through to the single-argument completion form: saturate the axioms within the budget. It returns a `ProofObject` with no theorem, and the `"Lemmas"` return spec gives the completed rule set as a list of `Inactive[Equal]` equations:
+[TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) gives an [Association]() of the axioms and the conjecture:
 
 ```wl
-TFindProof[
-    "cnf(a1, axiom, mul(X, e) = X).
-     cnf(a2, axiom, mul(e, X) = X).",
-    "Lemmas",
-    TimeConstraint -> 5]
+parsed = TPTPImport[problem]
+```
+<!-- => <|"Axioms" -> {"mult"[X_, "mult"[Y_, Z_]] == "mult"["mult"[X_, Y_], Z_], "mult"[X_, Y_] == "mult"[Y_, X_], "mult"[X_, "e"[]] == X_, "mult"[X_, "inv"[X_]] == "e"[]}, "Conjecture" -> "inv"["inv"["a"[]]] == "a"[]|> -->
+
+The variables `X`, `Y` and `Z` of the clauses become the patterns `X_`, `Y_` and `Z_`, so each axiom holds for all values of its variables. A function symbol becomes a string head, and a constant such as `e` becomes a string head with no arguments. The negated conjecture is negated back, so the conjecture is the equation to prove:
+
+```wl
+parsed["Conjecture"]
+```
+<!-- => "inv"["inv"["a"[]]] == "a"[] -->
+
+String heads cannot collide with Wolfram Language symbols: a TPTP problem may use names such as `f`, `c` or `plus` without touching any definition in the session. To work with symbols instead, replace each string head by the symbol of the same name:
+
+```wl
+parsed["Conjecture"] //. h_String[args___] :> Symbol[h][args]
+```
+<!-- => inv[inv[a[]]] == a[] -->
+
+## Proving a problem
+
+[TFindProof]() parses the text itself and proves the conjecture from the axioms:
+
+```wl
+TFindProof[problem]
+```
+
+The parsed pieces are equations [TFindProof]() accepts directly, which is the way to give a problem other settings, such as a [Method]():
+
+```wl
+TFindProof[parsed["Conjecture"], parsed["Axioms"], Method -> "VampireUEQ", TimeConstraint -> 10]
+```
+
+A problem in a file is given as <code>[File]()["*file*"]</code>. Write the problem to a temporary file:
+
+```wl
+file = Export[FileNameJoin[{$TemporaryDirectory, "InverseOfInverse.p"}], problem, "Text"]
+```
+<!-- => the path of InverseOfInverse.p in $TemporaryDirectory -->
+
+[TFindProof]() reads and proves it:
+
+```wl
+TFindProof[File[file]]
+```
+
+The `"TPTP"` spec gives the proof in the format the problem came in: a refutation in the SZS (Sutcliffe-Zimmer-Schulz) output format, in which each derived clause cites the clauses it comes from and the last one is the contradiction `$false`. The problem is named after the file:
+
+```wl
+TFindProof[File[file], "TPTP"]
+```
+<!-- => "% SZS status Unsatisfiable for InverseOfInverse.p\n% SZS output start CNFRefutation for InverseOfInverse.p\ncnf(ax1, axiom, mult(X,mult(Y,Z)) = mult(mult(X,Y),Z)).\n...\ncnf(sl2, plain, inv(inv(X)) = X, inference(rw, [status(thm)], [cpl3, ax3])).\ncnf(contradiction, plain, $false, inference(rw, [status(thm)], [negated_conjecture, sl2])).\n% SZS output end CNFRefutation for InverseOfInverse.p" -->
+
+A problem with no conjecture has nothing to prove, and [TFindProof]() completes its axioms instead. The `"Lemmas"` spec gives the rewrite rules the completion derives:
+
+```wl
+TFindProof["cnf(right_identity, axiom, mul(X, e) = X).
+cnf(left_identity, axiom, mul(e, X) = X).", "Lemmas", TimeConstraint -> 5]
 ```
 <!-- => {Inactive[Equal][mul[X, e], X], Inactive[Equal][mul[e, X], X]} -->
 
-Ground problems route through [TFindProof]() with `Method -> "SMT"` just as cleanly - the importer is shared; only the dispatch differs. See the [SMT](paclet:WolframInstitute/THVMLink/tutorial/SMT) tech note for the ground/QF_UF path.
+A conjecture that does not follow from the axioms is not proved. The axiom `f(f(X)) = X` completes to a rewrite system in which `f(a)` and `a` have different normal forms, so the search ends with the status `"Saturated"`:
+
+```wl
+TFindProof["cnf(involution, axiom, f(f(X)) = X).
+cnf(goal, negated_conjecture, f(a) != a).", "Status", TimeConstraint -> 5]
+```
+<!-- => "Saturated" -->
+
+The `"Counterexample"` spec gives a model in which the axioms hold and the conjecture fails, here the two-element model in which `f` swaps the elements:
+
+```wl
+TFindProof["cnf(involution, axiom, f(f(X)) = X).
+cnf(goal, negated_conjecture, f(a) != a).", "Counterexample", TimeConstraint -> 5]
+```
+
+## First-order formulas and predicates
+
+A problem in first-order form (`fof`) states its formulas with quantifiers: `![X]:` is "for all X" and `?[X]:` is "there exists X". A universally quantified axiom becomes an equation over patterns, and a `conjecture` clause is the goal itself:
+
+```wl
+TPTPImport["fof(involution, axiom, ![X]: f(f(X)) = X).
+fof(goal, conjecture, f(f(f(a))) = f(a))."]
+```
+<!-- => <|"Axioms" -> {"f"["f"[X_]] == X_}, "Conjecture" -> "f"["f"["f"["a"[]]]] == "f"["a"[]]|> -->
+
+[TFindProof]() proves it:
+
+```wl
+TFindProof["fof(involution, axiom, ![X]: f(f(X)) = X).
+fof(goal, conjecture, f(f(f(a))) = f(a)).", "Status"]
+```
+<!-- => "Proved" -->
+
+The connectives `&`, `|`, `~`, `=>` and `<=>` become [And](), [Or](), [Not](), [Implies]() and [Equivalent]():
+
+```wl
+TPTPImport["fof(all_men_are_mortal, axiom, ![X]: (man(X) => mortal(X))).
+fof(socrates_is_a_man, axiom, man(socrates)).
+fof(socrates_is_mortal, conjecture, mortal(socrates))."]
+```
+<!-- => <|"Axioms" -> {Implies["man"[X_], "mortal"[X_]], "man"["socrates"[]]}, "Conjecture" -> "mortal"["socrates"[]]|> -->
+
+A clause problem with predicates is converted to an equational problem, and the proof is a `"Predicate/EquationalLogic"` [ProofObject]():
+
+```wl
+TFindProof["cnf(c1, axiom, p(X) | ~q(X)).
+cnf(c2, axiom, q(a)).
+cnf(c3, negated_conjecture, ~p(a))."]
+```
+
+Comments, whether `%` lines or `/* ... */` blocks, and the `inference(...)` annotations that proof output attaches to clauses are skipped:
+
+```wl
+TPTPImport["% a comment line
+/* a comment block */ cnf(a1, axiom, f(X) = X, inference(rw, [], [])).
+cnf(goal, negated_conjecture, f(a) != a)."]
+```
+<!-- => <|"Axioms" -> {"f"[X_] == X_}, "Conjecture" -> "f"["a"[]] == "a"[]|> -->
 
 ## Coverage
 
-What TPTP encodes vs what thvm consumes:
+| TPTP input | Result |
+| --- | --- |
+| `cnf` equations and disequations | axioms and a conjecture over patterns |
+| `cnf` clauses with predicates | Boolean clauses, which [TFindProof]() converts to an equational problem |
+| `fof` with `!` | equations over patterns |
+| `fof` with `?` | an [Exists]() formula |
+| `fof` connectives | [And](), [Or](), [Not](), [Implies](), [Equivalent]() |
+| comments and `inference` annotations | skipped |
 
-| TPTP form         | Status | Notes                                         |
-|-------------------|--------|-----------------------------------------------|
-| `cnf` equations   | Full   | Each `=`/`!=` literal -> an axiom / goal      |
-| `cnf` non-equality literals | Partial | Universal `p(...)` and Skolemized goals route through; predicate-only clauses become equational `p(...) = TRUE` |
-| `fof` equational  | Full   | Universal quantifier handled via WL `Pattern`  |
-| `fof` Boolean structure | Partial | `&`, `\|`, `~`, `=>`, `<=>` translated to WL Boolean equivalents |
-| `fof` mixed quantifiers | Skolemized | Existentials get fresh Skolem constants     |
-| `tff`/`tcf`/`thf` | Skeleton | Type/term distinction parsed; type annotations dropped before dispatch |
-| `include('path')` | Full   | Recursive include; relative to source file    |
-| Sequents          | Partial | `lhs --> rhs` routes as goals; one-side empty supported |
-| Annotations / comments | Full | `% ...` and `/* ... */` stripped; <code>inference(...)</code> annotations skipped |
-
-The grammar follows the canonical [TPTPWorld BNF](https://github.com/TPTPWorld/SyntaxBNF); the parser is implemented over `EBNFParse` so coverage extends naturally as further productions become useful for the benchmarks at hand.
-
-## String heads vs Wolfram symbols
-
-The importer returns function applications as String-headed compound terms (<code>"f"[x_, y_]</code>) rather than as `Symbol`-headed (`f[x_, y_]`). This is deliberate:
-
-- TPTP symbol names regularly collide with `System` symbols (`p`, `f`, `c`, `Plus`, etc.) and with user-defined ones. String heads sidestep every namespace concern.
-- The engine's term canonicalizer normalizes Strings the same way it normalizes Symbols, so there is no downstream cost.
-- A round-trip through [TFindProof]() preserves the String shape - all output (proof object, lemmas, raw trace) refers to the same Strings, so a downstream pipeline can pattern-match against the original TPTP names.
-
-If you want to coerce a particular String head into a Symbol after the fact, `expr /. h_String[args___] :> Symbol[h][args]` is the one-liner.
-
-[TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport) and its `EBNFParse`-driven grammar sit in the [Wolfram/WolframParser](paclet:Wolfram/WolframParser/guide/WolframParser) paclet; see the [Parsing TPTP](paclet:Wolfram/WolframParser/tutorial/ParsingTPTP) tech note for the grammar internals. Extending coverage to a new TPTP form is mostly about adding productions to that grammar; the [TFindProof]() dispatch usually picks the new shape up without changes.
+The typed form `tff` is not converted to equations, so [TFindProof]() does not prove problems written in it. A ground problem, one with no variables, can also be decided by congruence closure with the `"SMT"` method, as described in [Congruence Closure and Lazy DPLL(T)](paclet:WolframInstitute/THVMLink/tutorial/SMT). The [Parsing TPTP](paclet:Wolfram/WolframParser/tutorial/ParsingTPTP) tutorial of the WolframParser paclet describes the grammar.

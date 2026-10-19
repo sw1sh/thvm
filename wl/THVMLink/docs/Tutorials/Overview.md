@@ -3,204 +3,252 @@ Template: TechNote
 Name: Overview
 Title: A Tour of THVMLink
 Context: WolframInstitute`THVMLink`
+ContextPath: [WolframInstitute`THVMLink`ATP`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/Overview
-Keywords: [interaction net, tensor, autodiff, kernel, visualization, ATP, tour]
+Keywords: [interaction net, lambda calculus, superposition, tensor, automatic differentiation, kernel, memory plan, snapshot, theorem proving, tour]
 RelatedGuides: [THVMLink]
-RelatedTutorials: []
+RelatedTutorials: [Tensors, Train, Gpt2, ATP]
 ---
 
-## What THVMLink is, in one paragraph
+THVMLink connects the Wolfram Language to `thvm`, a runtime that computes by rewriting an interaction net: a graph of agents joined by wires, reduced by local rules that each replace a pair of connected agents. Lambda terms, lazy tensor expressions and the compiled kernels that compute them are all cells of one heap. From the Wolfram Language you build terms and tensors symbolically, reduce or compute them, differentiate tensor expressions, inspect the kernels and buffers the runtime schedules, save the runtime as an expression, and prove equational theorems.
 
-THVMLink is the Wolfram-language driver for `thvm`, a tensor-aware interaction-
-combinator runtime. The C runtime holds one symbolic graph - lambda calculus,
-the tensor UOp DAG, and the kernel schedule live in the same heap. The Wolfram
-side wraps every cell as a `TTerm`, the tensor descriptors as `TTensor`
-handles, the compiled kernels as `TKernel` typed objects, and renders the
-whole runtime as an IC string diagram through `THeapGraph`. The same paclet
-fires autodiff over the heap, plans buffer lifetimes, autotunes the CPU/CUDA/
-Metal back ends, and proves equational theorems via the C-side ATP. This
-tutorial walks the surface end to end with a single running example.
+The runtime starts on first use, on the central processing unit (CPU) back end, so the examples below begin directly.
 
-## Setting up
+## Terms and reduction
 
-Initialize the runtime once per kernel:
+[TLam]() builds a lambda. This one adds 1 to its argument:
 
 ```wl
-Needs["WolframInstitute`THVMLink`"];
-TInit[]
+succ = TLam[n, n + 1]
 ```
-<!-- => True -->
 
-`TInit` is idempotent within a session, and <code>[TReset]()</code> zeroes the heap without tearing the dylib down. The default <code>[TContext]()</code> selects the CPU back end; <code>[TContextNew]()["metal"]</code> opens a Metal context and <code>[TInContext]()</code> rebinds the active one for a body of code.
-
-## Pure interaction nets
-
-The combinator surface predates the tensor layer and is still the cleanest way
-to introduce the heap. Build a small lambda application:
+Applying it to a number, built with [TNum](), gives an application term. Nothing is reduced yet:
 
 ```wl
-identity = TLam[x, x];
-applied  = TApp[identity, TLam[y, y]];
-TWnf[applied]
+app = succ[TNum[41]]
 ```
-<!-- => the identity lambda, now reduced to TLam[y, y] in the live heap -->
 
-`TWnf` drives a term to weak normal form. <code>[TStep]()</code> fires a single interaction and exposes the pending eliminator frames via <code>[TStack]()</code>; <code>[TRedexes]()</code> lists every redex in the live heap; <code>[TInteract]()</code> fires a named one. <code>[TCollapse]()</code> walks the SUP-tree and enumerates non-SUP leaves - the canonical way to read a superposition out as a list of choices.
-
-Render the heap as you build:
+[THeapGraph]() draws the term as an interaction net, with one vertex for each agent and one edge for each wire:
 
 ```wl
-THeapGraph[applied]
+THeapGraph[app, ImageSize -> 300]
 ```
-<!-- => a small Graph with one APP node feeding two LAM nodes -->
 
-Per [feedback_wl_dark_mode_colors](../THVMLink-Dev.nb), the renderer adapts to light or dark themes automatically through `Style.wl`'s standard colors.
-
-## Tensors and the UOp graph
-
-`TTensorCreate` wraps a `NumericArray`, a `PackedArray`, or a nested list into a
-fresh `TTerm` carrying a `TAG_TEN`. The buffer is shared zero-copy on CPU.
+[TWnf]() reduces the application to weak normal form. The result is a number term:
 
 ```wl
-x = TTensorCreate[Range[1., 4.]];
-y = TTensorCreate[Range[10., 40., 10.]];
-{TTensorShape[x], TTensorDType[x]}
+result = TWnf[app]
 ```
-<!-- => {{4}, "f32"} -->
 
-The `TUOp*` family builds the tensor compute graph. The graph stays lazy until
-`TRealize` schedules and dispatches it:
+[TTermVal]() reads its value:
 
 ```wl
-z = TUOpReduce[ TUOpMul[ TUOpAdd[x, y], TUOpAdd[x, y] ], 0, "SUM" ];
-TTensorData @ TRealize[z]
+TTermVal[result]
 ```
-<!-- => NumericArray[{(1+10)^2 + (2+20)^2 + (3+30)^2 + (4+40)^2 = 3630.}, "Real32"] -->
+<!-- => 42 -->
 
-`TMaterialize` runs the schedule without dispatching - useful for inspecting
-the kernels the planner produces before any compute happens:
+A superposition, built with [TSup](), stands for two values at once. Applying the successor to a superposition of 1 and 2 reduces both branches, and [TCollapse]() lists the resulting leaves:
 
 ```wl
-TMaterialize[z];
-TKernelCount[]
+leaves = TCollapse[TLam[n, n + 1][TSup[1, 2]]]
 ```
-<!-- => 1 (the elementwise add+mul+reduce was fused into one kernel) -->
 
-## Lazy lambdas that compile to kernels
-
-A lambda whose body is a UOp graph JIT-materializes into a `UOP_KERNEL` on its
-first application. The compile-once, dispatch-many idiom is the basic shape of
-every training loop:
+The values of the leaves:
 
 ```wl
-sq = TLam[w, TUOpMul[w, w]];
-TRealize @ TApp[sq, TTensorCreate[Range[1., 5.]]];
-TKernel[1]["DispatchKind"]
+TTermVal /@ leaves
+```
+<!-- => {2, 3} -->
+
+## Tensors and the lazy graph
+
+[TTensorCreate]() makes a tensor from a list of numbers:
+
+```wl
+xs = TTensorCreate[{1., 2., 3., 4.}]
+```
+
+A second tensor of the same shape:
+
+```wl
+ys = TTensorCreate[{10., 20., 30., 40.}]
+```
+
+[TTensorShape]() gives its shape:
+
+```wl
+TTensorShape[xs]
+```
+<!-- => {4} -->
+
+Ordinary arithmetic on tensors builds a lazy graph of micro-operations (UOps) and computes nothing:
+
+```wl
+sumsq = Total[(xs + ys)^2]
+```
+
+[Term]() shows the graph that the arithmetic built, a reduction over a product of two sums of the tensor leaves:
+
+```wl
+Term[sumsq]
+```
+<!-- => Term["UOP", "REDUCE", Term["UOP", "MUL", Term["UOP", "ADD", Term["TEN", 1], Term["TEN", 2]], Term["UOP", "ADD", Term["TEN", 1], Term["TEN", 2]]], Term["NUM", 0], Term["NUM", 1]] -->
+
+[TRealize]() schedules the graph into kernels, compiles them and runs them, giving a tensor that holds the result:
+
+```wl
+total = TRealize[sumsq]
+```
+
+[Normal]() reads the values back as a list:
+
+```wl
+Normal[total]
+```
+<!-- => {3630.} -->
+
+## Kernels
+
+[TMaterialize]() schedules a graph into kernels without running them, and [TKernel]() wraps the scheduled kernel as an object:
+
+```wl
+k = TKernel[TMaterialize[(xs - ys)^2]]
+```
+
+Applying the kernel object to no arguments dispatches it and gives the tensor it writes:
+
+```wl
+Normal[k[]]
+```
+<!-- => {81., 324., 729., 1296.} -->
+
+The dispatch ran natively compiled code on the CPU:
+
+```wl
+k["DispatchKind"]
 ```
 <!-- => "jit" -->
 
-The kernel's source is queryable as a property:
+The `"Flops"` property estimates the number of arithmetic operations in one dispatch, as [TKernelFlops]() does:
 
 ```wl
-StringTake[ TKernel[1]["Source"], UpTo[120] ]
+k["Flops"]
 ```
-<!-- => the rendered C99 elementwise body -->
+<!-- => 20 -->
 
-## Autodiff over the heap
+## Gradients
 
-Build a loss, fire `TGrad` (it auto-grads every float leaf), and read the
-accumulated gradient with `TGradOf`:
+A weight vector to fit, so that its dot product with `xs` is 1:
 
 ```wl
-W   = TGlorot[{4}];
-xs  = TTensorCreate[{1., 2., 3., 4.}];
-ys  = TTensorCreate[{1.}];
-preds = TUOpReduce[ TUOpMul[W, xs], 0, "SUM" ];
-loss  = TL2Loss[ TUOpAdd[preds, TUOpNeg[ys]] ];
-TClearGrad[W];
-TRealize @ TGrad[loss];
-TTensorData @ TRealize @ TGradOf[W]
+w = TTensorCreate[{0.1, 0.2, 0.3, 0.4}]
 ```
-<!-- => the linear-regression gradient -->
 
-`TGrad` accumulates into `TenDesc.grad`. The multi-target form returns the
-gradients in one shared backward walk: `TGrad[loss, {W1, W2, ...}]`.
-
-A single SGD step writes the update back through `TSet`:
+The squared error, again a lazy graph:
 
 ```wl
-lr = TUOpConst[-0.05, "f32"];
-TSet[W, TUOpAdd[W, TUOpMul[lr, TGradOf[W]]]]
+loss = (Total[w*xs] - 1.)^2
 ```
-<!-- => the parameter updated in place; the original W TTerm still refers to the same TenDesc -->
 
-## Plans, profiles, autotune
-
-After the loss has materialized, the planner can project the schedule:
+[TGrad]() differentiates the loss with respect to every floating-point tensor it depends on and adds each gradient to that tensor's gradient slot. It gives the loss back:
 
 ```wl
-TMaterialize[loss];
-TMemoryPlanReport @ TMemoryPlan[]
+TGrad[loss]
 ```
-<!-- => a Column with top-5 largest bufs by nbytes, top-5 longest-lived by span, etc. -->
 
-`TMemoryPlanGantt[TMemoryPlan[]]` renders the buffer life cycles as a Gantt;
-`TScheduleGraph[]` renders the kernel DAG.
-
-The kernel introspection surface lives on `TKernel`. The autotuner benchmarks
-every `TKernelProposed` candidate and applies the winner:
+[TGradOf]() gives the gradient held for `w` as a lazy graph, and [TRealize]() computes it:
 
 ```wl
-TKernelAutotuneUnique[]
+grad = TRealize[TGradOf[w]]
 ```
-<!-- => <|kid -> TKernelOpts[<|"Applied" -> {TOpt[...], ...}|>], ...|> -->
 
-Hot-path counters (`THotCountersDelta`) and `TBench` close the loop on
-wallclock + memory, in case the wins do not surface in static FLOPS.
-
-## Snapshots: shipping a runtime as data
-
-`TContextSnapshot` captures the live heap, book cells, tensors, definitions,
-and ALO state into a portable Wolfram expression. `TInitialize` restores it
-into a fresh kernel.
+The prediction is 3 against a target of 1, so the gradient is $2 \cdot 2 = 4$ times `xs`:
 
 ```wl
-#| eval: False
-snap = TContextSnapshot @ loss;
-TFree[]; TInit[];
-TInitialize[snap]
+Normal[grad]
 ```
-<!-- => loss, live again, in a freshly initialized kernel -->
+<!-- => {4., 8., 12., 16.} -->
 
-This is the recommended way to ship a model + training state to a different
-machine or to a Wolfram Cloud session.
+[TSet]() writes a gradient-descent step into the buffer of `w` in place:
+
+```wl
+TSet[w, w - 0.01*grad]
+```
+
+The updated weights:
+
+```wl
+Normal[w]
+```
+<!-- => {0.06, 0.12, 0.18, 0.24} -->
+
+The loss after the step is lower than the 4 it started from:
+
+```wl
+Normal @ TRealize[(Total[w*xs] - 1.)^2]
+```
+<!-- => {0.64} -->
+
+## Schedules and memory
+
+[TScheduleGraph]() draws the kernels scheduled so far, with an edge from each tensor or kernel to the kernels that read it:
+
+```wl
+TScheduleGraph[]
+```
+
+[TMemoryPlan]() gives a snapshot of the kernels, tensors and buffers of the current schedule:
+
+```wl
+TMemoryPlan[]
+```
+
+[TMemoryPlanReport]() summarizes the plan as text, with the largest and longest-lived buffers and the peak memory in use:
+
+```wl
+TMemoryPlanReport[TMemoryPlan[]]
+```
+
+## Saving the runtime as an expression
+
+[TContextSnapshot]() records the whole heap, so start from an empty one with [TReset]() to keep the snapshot small:
+
+```wl
+TReset[];
+```
+
+A snapshot of the successor function, with the lambda as its root:
+
+```wl
+snap = TContextSnapshot[TLam[n, n + 1]]
+```
+<!-- => TContext[<|"Root" -> Term["LAM", 0, 0], "Cells" -> <|0 -> Term["OP2", "+", 1], 1 -> Term["VAR", 0, 0], 2 -> Term["NUM", "i32", 1]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
+
+The snapshot is an ordinary expression that can be stored and moved to another session. [TInitialize]() writes it back into the runtime and gives the root as a live term:
+
+```wl
+restored = TInitialize[snap]
+```
+
+The restored lambda computes as before:
+
+```wl
+TTermVal @ TWnf[restored[TNum[9]]]
+```
+<!-- => 10 -->
 
 ## Theorem proving
 
-The `WolframInstitute`THVMLink`ATP`` context wraps `thvm`'s equational saturation engine. The
-returned object is a real `ProofObject` and supports the full Wolfram property
-surface:
+The `` WolframInstitute`THVMLink`ATP` `` context holds the automated theorem proving (ATP) functions. [TFindProof]() proves an equational theorem from a set of axioms and gives a [ProofObject](), the same kind of object [FindEquationalProof]() gives. In an abelian group, written with [CircleTimes]() for the product and [OverBar]() for the inverse, the inverse of a product is the product of the inverses:
 
 ```wl
-Needs["WolframInstitute`THVMLink`ATP`"];
-TFindProof[
-    ForAll[{a, b}, OverBar[a \[CircleTimes] b] == OverBar[a] \[CircleTimes] OverBar[b]],
-    "AbelianGroupAxioms",
-    TimeConstraint -> 10
-]
+proof = TFindProof[ForAll[{x, y}, OverBar[x \[CircleTimes] y] == OverBar[x] \[CircleTimes] OverBar[y]], "AbelianGroupAxioms", TimeConstraint -> 10]
 ```
-<!-- => ProofObject[EquationalLogic, ...] - in an abelian group the inverse of a product is the product of the inverses -->
 
-`TFindProof` accepts `Method -> Automatic | "Portfolio" | "Waldmeister" |
-"VampireUEQ" | "Twee" | "EProver" | "VampirePortfolio"` plus a fully
-sub-optioned single-config form (`{"Completion", "Ordering" -> "LPO", ...}`).
-`TAtpSchedule` previews the schedule a `Method` will expand to; `TRelevantAxioms`
-exposes the relevance filter's keep / drop partition.
+The proof object answers the usual properties, such as the number of steps:
 
-## Where to go next
-
-- The [THVMLink guide](paclet:WolframInstitute/THVMLink/guide/THVMLink) lists every public symbol grouped by subsystem.
-- Worked examples live under `wl/Examples/` in the source tree - `beautiful-mnist`, `gpt2`, `mlp-mnist`, `linear-train` are the end-to-end demos; `kernel-introspect.wls` and `metal-gemm-autotune.wls` are the introspection-heavy scripts.
-- The Kernel/README ([wl/THVMLink/Kernel/README.md](../../Kernel/README.md)) maps the public API to its owning source file, so you know which `.wl` to read when you want to follow a symbol back to its implementation.
-- The Wolfram-language style guide ([wl/GUIDE.md](../../../GUIDE.md)) carries the conventions every `.wl`, `.wls`, and `.wlt` file in the paclet follows.
+```wl
+proof["ProofLength"]
+```
+<!-- => 19 -->

@@ -4,35 +4,67 @@ Name: TAtpSaveGnnScorer
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TAtpSaveGnnScorer
-Keywords: [ENIGMA, GNN, GCN, ATP, safetensors, serialization, save, paclet asset, graph neural network]
+Keywords: [ENIGMA, graph neural network, GNN, theorem proving, safetensors, save, model file]
 SeeAlso: [TAtpLoadGnnScorer, TAtpSetGnnScorer, TAtpGnnScorerAsset, TAtpTrainGnn]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Learned Guidance: a GNN for Critical-Pair Selection](GnnGuidance)"]
 ---
 
 ## Usage
 
-<code>[TAtpSaveGnnScorer]()[*model*, *path*]</code> saves a trained GCN *model* (the `"Model"` Association from [TAtpTrainGnn]()) to *path* as a `.safetensors` file (`TSafeTensorSave`): each weight array becomes one named tensor and the scalar config (`Rounds` / `Hidden` / `NMax`) rides in the file's `__metadata__`. Returns *path*.
+<code>[TAtpSaveGnnScorer]()[*model*, "*file*"]</code> saves the graph neural network *model* to *file* in the safetensors format, and gives *file*.
 
 ## Details & Options
 
-- This is how a pretrained graph convolutional network ships as a paclet asset. The file is the standard safetensors layout, so it is also readable by Python's `safetensors`.
-- <code>[TAtpSetGnnScorer]()[*path*]</code> reloads the saved file and pushes it; [TAtpLoadGnnScorer]() reloads it as a `"Model"` Association.
+- *model* is a graph convolutional network (GCN), as [TAtpTrainGnn]() gives in its `"Model"`, with the keys `"Kind"`, `"W1"`, `"Ws"`, `"Bh"`, `"Wout"`, `"Bout"`, `"Rounds"`, `"Hidden"` and `"NMax"`.
+- Each weight array is saved as a named tensor, and `"Rounds"`, `"Hidden"` and `"NMax"` are saved in the metadata of the file.
+- The safetensors format can be read by other programs, such as the `safetensors` library for Python.
+- [TAtpLoadGnnScorer]() reads the file back as a model, and <code>[TAtpSetGnnScorer]()["*file*"]</code> gives it to the prover.
 
 ## Basic Examples
 
-Save a trained model to a temporary file:
+Save a small network written by hand, with one round and two hidden units:
 
 ```wl
-model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
-TAtpSaveGnnScorer[model, FileNameJoin[{$TemporaryDirectory, "gcn.safetensors"}]]
+TAtpSaveGnnScorer[<|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, FileNameJoin[{$TemporaryDirectory, "gcn.safetensors"}]]
 ```
-<!-- => the path under $TemporaryDirectory, ending gcn.safetensors -->
 
-## Properties & Relations
+<!-- => the path of gcn.safetensors in $TemporaryDirectory -->
 
-- [TAtpTrainGnn]() produces the `"Model"` this serializes.
-- [TAtpLoadGnnScorer]() is the inverse: it reads the file back into a `"Model"` Association. [TAtpGnnScorerAsset]() is the bundled-asset path.
+## Scope
 
-## Possible Issues
+Save the bundled pretrained network to another file:
 
-- The weights round-trip bit-for-bit through the file, but the scalar config travels in the safetensors `__metadata__`; a hand-edited file that drops `Rounds` / `Hidden` / `NMax` will not reload as a usable scorer.
+```wl
+TAtpSaveGnnScorer[TAtpLoadGnnScorer[TAtpGnnScorerAsset[]], FileNameJoin[{$TemporaryDirectory, "pretrained.safetensors"}]]
+```
+
+<!-- => the path of pretrained.safetensors in $TemporaryDirectory -->
+
+## Properties and Relations
+
+A small network written by hand, with one round and two hidden units:
+
+```wl
+model = <|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>
+```
+
+<!-- => the model Association -->
+
+Loading the saved file gives the model back:
+
+```wl
+TAtpLoadGnnScorer[TAtpSaveGnnScorer[model, FileNameJoin[{$TemporaryDirectory, "gcn.safetensors"}]]] === model
+```
+
+<!-- => True -->
+
+---
+
+The saved file can be given to the prover:
+
+```wl
+TAtpSetGnnScorer[TAtpSaveGnnScorer[<|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, FileNameJoin[{$TemporaryDirectory, "gcn.safetensors"}]]]
+```
+
+<!-- => True -->

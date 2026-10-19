@@ -4,51 +4,136 @@ Name: TAtpSchedule
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TAtpSchedule
-Keywords: [ATP, Method, portfolio, schedule, introspection]
+Keywords: [theorem proving, ATP, Method, portfolio, schedule, strategy]
 SeeAlso: [TAtpDescribeMethod, TFindProof, TRelevantAxioms]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 ---
 
 ## Usage
 
-<code>[TAtpSchedule]()[$method$]</code> returns the schedule (a list of single-config `Method` specs) that <code>[TFindProof]()[..., Method -> $method$]</code> would expand to, without running the C engine.  Useful for debugging a `Method` choice or counting portfolio entries before allocating `TimeConstraint`.
+<code>[TAtpSchedule]()[*method*]</code> gives the list of configurations that [TFindProof]() tries in turn for the setting <code>[Method]() -> *method*</code>.
 
-<code>[TAtpSchedule]()[$method$, $conjecture$, $axioms$]</code> threads the conjecture and axioms through `Automatic`'s structure-recognised auto-tune, so the returned schedule matches what <code>[TFindProof]()[$conjecture$, $axioms$, Method -> $method$]</code> would dispatch.
+<code>[TAtpSchedule]()[*method*, *conjecture*, *axioms*]</code> gives the schedule for proving *conjecture* from *axioms*.
 
-<code>[TAtpSchedule]()[$method$, "$Theorem$", "$Theory$"]</code> resolves names through [AxiomaticTheory]().
+<code>[TAtpSchedule]()[*method*, "*theorem*", "*theory*"]</code> gives the schedule for a named theorem of an [AxiomaticTheory]() theory.
 
 ## Details & Options
 
-- A single explicit config like `{"Completion", "Ordering" -> "LPO"}` returns a one-entry list `{<that config>}`.
-- A named preset like `"Waldmeister"` returns the same one-entry list with the preset name.
-- A portfolio like `"VampirePortfolio"` returns the multi-entry rotation.
-- `Automatic` (the default) returns the structure-aware front + the fixed `"Portfolio"` tail.  Without the conjecture / axioms it returns the un-front-loaded `"Portfolio"`.
+- [TAtpSchedule]() shows a schedule without running the prover.
+- Each entry of a schedule is one configuration: the name of a configuration such as `"Waldmeister"`, or a list <code>{*name*, *opt* -> *val*, …}</code> with explicit suboptions.
+- A single configuration gives a list with one entry.
+- A schedule such as `"Portfolio"`, `"VampirePortfolio"`, `"VampirePortfolioCompact"` or `"AllPresets"` gives its entries in order.
+- [Automatic]() with no problem gives the `"Portfolio"` schedule. For a problem, [Automatic]() detects the structure of the axioms and puts configurations suited to it before the `"Portfolio"` entries.
+- [TFindProof]() tries the entries in order, shares its [TimeConstraint]() among them, and stops at the first proof.
+- The suboptions of each configuration are described in [Methods and Presets for TFindProof](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods), and [TAtpDescribeMethod]() gives their values.
 
 ## Basic Examples
 
-A named portfolio expands to its rotation:
+The `"Portfolio"` schedule has four configurations:
 
 ```wl
-TAtpSchedule["VampirePortfolio"]
+TAtpSchedule["Portfolio"]
 ```
-<!-- => {"VampireUEQ", {"Completion", "CriticalPairWeight" -> "Twee", "GroundJoin" -> True, ...}, ...} -->
 
-An `Automatic` schedule against an AbelianGroup goal carries the structure-aware front:
+<!-- => {{"Completion", "CriticalPairWeight" -> "Mix2"}, {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True}, {"Completion", "CriticalPairWeight" -> "Gt"}, "GoalDirected"} -->
+
+---
+
+The schedule [Automatic]() tries for a theorem of abelian groups:
 
 ```wl
-TAtpSchedule[Automatic,
-    x \[CircleTimes] y == y \[CircleTimes] x, "AbelianGroupAxioms"]
+TAtpSchedule[Automatic, OverBar[OverBar[x]] == x, "AbelianGroupAxioms"]
 ```
-<!-- => {{"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", ...}, ...} - the structure-aware front, then the fixed "Portfolio" tail -->
 
-A single-config `Method` round-trips unchanged:
+<!-- => {{"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", ...}, {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50, "AutoPrecedence" -> True}, {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50}, {"Completion", "CriticalPairWeight" -> "Mix2"}, {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True}, {"Completion", "CriticalPairWeight" -> "Gt"}, "GoalDirected"} -->
+
+## Scope
+
+A named configuration gives a list with one entry:
+
+```wl
+TAtpSchedule["Waldmeister"]
+```
+
+<!-- => {"Waldmeister"} -->
+
+---
+
+A configuration with explicit suboptions is kept as it is:
 
 ```wl
 TAtpSchedule[{"Completion", "Ordering" -> "LPO"}]
 ```
+
 <!-- => {{"Completion", "Ordering" -> "LPO"}} -->
 
-## Properties & Relations
+---
 
-- [TAtpDescribeMethod]() is the companion: given the same `Method` spec, it returns the merged options Association each individual entry resolves to.  Pair the two to inspect both shape and content of a portfolio.
-- [TFindProof]() with `Method -> $method$` runs the schedule [TAtpSchedule]() returns.  `TimeConstraint` divides fairly across entries; use `PortfolioFrontLoad -> n` to widen the share of the first `n` entries.
+The compact Vampire schedule has three entries:
+
+```wl
+TAtpSchedule["VampirePortfolioCompact"]
+```
+
+<!-- => {"VampireUEQ", "Twee", {"Completion", "CriticalPairWeight" -> "Mix2", "AutoPrecedence" -> True, "AutoMaxWeight" -> 20}} -->
+
+---
+
+`"AllPresets"` tries the prover configurations in turn:
+
+```wl
+TAtpSchedule["AllPresets"]
+```
+
+<!-- => {"Waldmeister", "VampireUEQ", "Twee", "EProver"} -->
+
+---
+
+[Automatic]() with no problem gives the `"Portfolio"` schedule:
+
+```wl
+TAtpSchedule[Automatic]
+```
+
+<!-- => {{"Completion", "CriticalPairWeight" -> "Mix2"}, {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True}, {"Completion", "CriticalPairWeight" -> "Gt"}, "GoalDirected"} -->
+
+---
+
+The schedule for a named theorem:
+
+```wl
+TAtpSchedule[Automatic, "InverseOfInverse", "AbelianGroupAxioms"]
+```
+
+<!-- => the same seven entries as for OverBar[OverBar[x]] == x -->
+
+## Properties and Relations
+
+[TFindProof]() tries the entries in order; its `"PortfolioTrace"` spec lists the attempts it made:
+
+```wl
+TFindProof[x \[CircleTimes] y == y \[CircleTimes] x, "AbelianGroupAxioms", "PortfolioTrace", TimeConstraint -> 5]
+```
+
+<!-- => the first three entries of the schedule, the third proving the goal -->
+
+---
+
+[TAtpDescribeMethod]() gives the suboptions of one configuration:
+
+```wl
+TAtpDescribeMethod["Twee"]
+```
+
+<!-- => <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "UnfailingCP" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "GoalDirected" -> False|> -->
+
+## Possible Issues
+
+An unknown method issues a message and gives `$Failed`:
+
+```wl
+TAtpSchedule["Foo"]
+```
+
+<!-- => the message TFindProof::badmethod is issued and the result is $Failed -->

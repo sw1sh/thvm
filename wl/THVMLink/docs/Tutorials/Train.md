@@ -5,413 +5,677 @@ Title: Training Neural Networks with THVMLink
 Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/tutorial/Train
-Keywords: [training, gradient descent, optimizer, Adam, MLP, convolution, conv2d, ReLU, higher-order gradient, backpropagation, LeNet, NetModel, NetTrain, NetPredict, Metal, GPU, MNIST]
+Keywords: [training, gradient descent, optimizer, Adam, MLP, multilayer perceptron, convolution, ReLU, cross-entropy, higher-order gradient, backpropagation, LeNet, NetChain, TNetTrain, TFromNet, TJit, MNIST]
 RelatedGuides: [THVMLink]
-RelatedTutorials: [Tensors, Overview]
+RelatedTutorials: [Tensors, Overview, Gpt2]
 ---
 
-## What training looks like on the tensor surface
+Training a model repeats one step: build a scalar loss from the parameters, differentiate it with [TGrad](), which adds the gradient of each tensor to that tensor's gradient slot, read the gradients with [TGradOf](), and write the updated parameters into their buffers with [TSet](). The parameters are ordinary [TTerm]() tensors. [TGrad]() differentiates with respect to every floating-point tensor the loss depends on, so no flag marks which tensors are trained, and the backward pass is a branch added to the graph rather than a recorded tape.
 
-The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) tutorial built up tensors, the lazy UOp graph, kernels, and a single gradient. Training is just that gradient, in a loop: build a scalar *loss*, fire [TGrad]() to fill every float leaf's gradient slot, read the gradients with [TGradOf](), and write the parameter updates back in place with [TSet](). No tape, no session, no `requires_grad` flag (matching tinygrad) - the parameters are ordinary `TTerm` leaves, and each step is a fresh backward walk over the heap that auto-grads every reachable float leaf.
-
-One rule carries the whole note: **realize the gradients before you apply the update.** [TSet]() writes a parameter's buffer *in place*, and a parameter's gradient is computed by reading that same buffer - so an update that hasn't first pinned the gradient to its own buffer races its own read and the loop diverges. Pinning the gradient with [TRealize]() first is exactly what an optimizer's step does.
+Compute the gradients with [TRealize]() before writing the update. [TSet]() overwrites a parameter's buffer, and the gradient of that parameter reads the same buffer, so an update built from a gradient that is still a lazy graph reads values that the update is overwriting.
 
 ## A training loop from scratch
 
-Fit `w . x = 14` for `x = {1, 2, 3}` by gradient descent on the squared error. The parameter is an ordinary leaf - [TGrad]() auto-grads every float leaf, so the target and input get gradients too (you simply ignore the ones you do not update):
+Fit a weight vector so that its dot product with $\{1, 2, 3\}$ is 14, by gradient descent on the squared error. The weights start at zero:
 
 ```wl
-w = TTensorCreate[{0., 0., 0.}];
-xs = TTensorCreate[{1., 2., 3.}];
-tgt = TTensorCreate[{14.}];
+w = TTensorCreate[{0., 0., 0.}]
+```
+
+The input:
+
+```wl
+xs = TTensorCreate[{1., 2., 3.}]
+```
+
+The target:
+
+```wl
+tgt = TTensorCreate[{14.}]
+```
+
+The squared error at the start is $14^2$:
+
+```wl
 Normal @ TRealize[(Total[w*xs] - tgt)^2]
 ```
 <!-- => {196.} -->
 
-One step is *forward, backward, pin the gradient, update*. [TClearGrad]() zeroes the slot first (thvm *accumulates* into it), [TGrad]() fills it, <code>[TRealize]() @ [TGradOf]()[*w*]</code> pins it to a buffer, and [TSet]() steps the parameter against it:
+A step clears the gradient slot, differentiates the loss, computes the gradient and updates the weights. [TClearGrad]() clears the slot, since [TGrad]() adds to it:
 
 ```wl
-TClearGrad[w];
-TGrad[(Total[w*xs] - tgt)^2];
-grad = TRealize @ TGradOf[w];
-TSet[w, w + (-0.01)*grad];
-Normal @ w
+TClearGrad[w]
 ```
-<!-- => {0.28, 0.56, 0.84}  (w - 0.01 * d/dw of (w.x - 14)^2) -->
 
-Wrapping that in a loop drives the loss down. [Table]() collects the loss after each of eight steps so you can watch it converge:
+Differentiate the squared error:
+
+```wl
+TGrad[(Total[w*xs] - tgt)^2]
+```
+
+Compute the gradient, $2 (0 - 14) \{1, 2, 3\}$:
+
+```wl
+grad = TRealize @ TGradOf[w]
+```
+
+Step against the gradient with learning rate 0.01:
+
+```wl
+TSet[w, w - 0.01*grad]
+```
+
+The updated weights:
+
+```wl
+Normal[w]
+```
+<!-- => {0.28, 0.56, 0.84} -->
+
+Repeating the step drives the error down. [Table]() records the squared error after each of eight more steps:
 
 ```wl
 Table[
     TClearGrad[w];
     TGrad[(Total[w*xs] - tgt)^2];
     g = TRealize @ TGradOf[w];
-    TSet[w, w + (-0.01)*g];
+    TSet[w, w - 0.01*g];
     First @ Normal @ TRealize[(Total[w*xs] - tgt)^2],
     {8}]
 ```
-<!-- => {52.6728, 27.3056, 14.1552, 7.33805, 3.80405, 1.97202, 1.02229, 0.529957} (loss decreasing) -->
+<!-- => {52.6728, 27.3056, 14.1552, 7.33806, 3.80405, 1.97202, 1.0223, 0.529959} -->
 
-## A two-layer MLP
+## A two-layer perceptron
 
-Real models stack linear layers with a nonlinearity. [TLinear]() is `x . W + b`; [TReLU]() is the elementwise `max(x, 0)` (built as `x * (0 < x)`, a CMPLT mask). Initialize the weights with [TGlorot]() (He/Glorot scaling) and the biases with [TZeros](), marking every one a parameter:
+A multilayer perceptron alternates linear layers and a nonlinearity. `TLinear` computes *x* . *W* + *b*, and `TReLU` the elementwise maximum of its argument and 0. [TGlorot]() draws weights from a normal distribution scaled by the number of inputs of the layer, and `TZeros` gives zero biases. The weights of a layer from 3 inputs to 8 hidden units:
 
 ```wl
-w1 = TGlorot[{3, 8}];
-b1 = TZeros[{8}];
-w2 = TGlorot[{8, 1}];
-b2 = TZeros[{1}];
-mlp = xIn |-> TLinear[TReLU[TLinear[xIn, w1, b1]], w2, b2];
+w1 = TGlorot[{3, 8}]
+```
+
+Its biases:
+
+```wl
+b1 = TZeros[{8}]
+```
+
+The weights of a layer from the 8 hidden units to 1 output:
+
+```wl
+w2 = TGlorot[{8, 1}]
+```
+
+Its bias:
+
+```wl
+b2 = TZeros[{1}]
+```
+
+The network as a function of its input:
+
+```wl
+mlp = xIn |-> TLinear[TReLU[TLinear[xIn, w1, b1]], w2, b2]
+```
+
+A batch of one input gives one output:
+
+```wl
 TTensorShape @ TRealize @ mlp[TTensorCreate[{{1., 2., 3.}}]]
 ```
 <!-- => {1, 1} -->
 
-[TGrad]() with a list of targets differentiates every parameter in one shared backward walk, returning the gradients in target order; realize them together so the shared forward emits once:
+With a list of tensors, [TGrad]() differentiates with respect to each of them in one backward pass and gives the gradients in the same order. An input:
 
 ```wl
-xb = TTensorCreate[{{1., 2., 3.}}];
-yb = TTensorCreate[{{14.}}];
-loss = Total[(mlp[xb] - yb)^2];
-params = {w1, b1, w2, b2};
-TClearGrad /@ params;
-grads = TGrad[loss, params];
-Length @ TRealize[grads]
+xb = TTensorCreate[{{1., 2., 3.}}]
 ```
-<!-- => 4 -->
+
+Its target:
+
+```wl
+yb = TTensorCreate[{{14.}}]
+```
+
+The squared error:
+
+```wl
+loss = Total[(mlp[xb] - yb)^2]
+```
+
+The parameters:
+
+```wl
+params = {w1, b1, w2, b2}
+```
+
+Clear their gradient slots:
+
+```wl
+TClearGrad /@ params
+```
+
+The gradients with respect to all four parameters:
+
+```wl
+grads = TGrad[loss, params]
+```
+
+Computing the gradients together runs the forward pass they share once. Each gradient has the shape of its parameter:
+
+```wl
+TTensorShape /@ TRealize[grads]
+```
+<!-- => {{3, 8}, {8}, {8, 1}, {1}} -->
 
 ## Optimizers
 
-Hand-written SGD is the foundation; [TAdam]() packages the adaptive-moment update. It takes the loss, the parameter list, per-parameter first/second moment buffers (seed with [TZerosLike]()), and the step index, computes the gradients internally, and applies the step in place. On the one-element regression `(w - 0.05)^2` from `w = 1`, the textbook first Adam step (lr `0.001`) lands at `0.999`:
+`TAdam` applies one step of the Adam (adaptive moment estimation) optimizer. It takes the loss, the list of parameters, lists of first-moment and second-moment buffers of the same shapes, and the step number, computes the gradients itself and updates the parameters in place. `TZerosLike` makes zero buffers of the shapes of given tensors. A one-element parameter:
 
 ```wl
-wA = TTensorCreate[{1.}];
-mA = TTensorCreate[{0.}];
-vA = TTensorCreate[{0.}];
-TAdam[TL2Loss[wA - TTensorCreate[{0.05}]], {wA}, {mA}, {vA}, 1];
-Normal @ TTensorData[wA]
+wA = TTensorCreate[{1.}]
 ```
-<!-- => {0.999}  (one Adam step: 1 - 0.001 * mhat / (sqrt(vhat) + eps)) -->
 
-Pass a list of parameters and a matching list of moment buffers to step a whole network's weights at once - that is how an optimizer loops over the [TGrad]()-filled `params` from the previous section.
+Its first-moment buffer:
 
-## Capture the step once, then replay it: TJit + TSet
+```wl
+mA = TTensorCreate[{0.}]
+```
 
-The loops above rebuild the loss `TTerm` every iteration, and that is the single most expensive mistake you can make on the tensor surface. **Do not reconstruct the graph per step.** Each rebuild re-schedules and re-compiles the whole forward + backward, and because every step leaves its kernels on the live heap, the per-step cost *grows without bound* as the heap fills - a measured forward+grad step drifts from `~25` ms to `~120` ms over a few hundred steps. Reconstruct-and-realize is roughly **8x slower** than the right pattern, and it degrades the longer you run.
+Its second-moment buffer:
 
-The right pattern is *build once, capture once, replay*: assemble the forward and the optimizer step over **concrete weight and input `TTerm`s a single time**, capture that whole dispatch sequence with [TJit](), then feed each minibatch by overwriting the input buffers in place with [TSet]() and calling the captured closure again. The graph is never rebuilt; every step after the first is a pure replay of a fixed kernel set.
+```wl
+vA = TTensorCreate[{0.}]
+```
 
-Build the pieces once. A two-layer MLP fitting `Ramp[x] . W`, its weights [TGlorot]()/[TZeros]() leaves, and the input/target buffers `x`/`y` that every step will reuse:
+One step on the loss $(w - 0.05)^2$, written with the sum of squares `TL2Loss`. The step gives the list of parameters:
+
+```wl
+TAdam[TL2Loss[wA - TTensorCreate[{0.05}]], {wA}, {mA}, {vA}, 1]
+```
+
+The first step of Adam moves the parameter by the learning rate, 0.001 by default:
+
+```wl
+Normal[wA]
+```
+<!-- => {0.999} -->
+
+## Recording the training step with TJit
+
+The loops above build the loss graph again in every step. Each new graph is scheduled and compiled again, and the kernels of every step stay in the runtime's tables, so such a loop does more work than it needs and slows down as it runs. [TJit]() avoids both: build the forward pass and the update once, over tensors that stay fixed, record the whole step once, and then, in each step, overwrite the input tensors in place with [TSet]() and replay the recording.
+
+Fix the random seed, so that the data below is reproducible:
 
 ```wl
 SeedRandom[1];
-W = RandomReal[{-1, 1}, {4, 2}];
-minibatch[] := With[{xx = RandomReal[{-1, 1}, {32, 4}]}, {N @ xx, N @ Ramp[xx] . W}];
-{w1, b1, w2, b2} = {TGlorot[{4, 64}], TZeros[{64}], TGlorot[{64, 2}], TZeros[{2}]};
-params = {w1, b1, w2, b2};
-{x, y} = TTensorCreate /@ minibatch[];
-forward = TLinear[TReLU[TLinear[x, w1, b1]], w2, b2];
+```
+
+The data comes from a fixed random matrix applied to the input after [Ramp]():
+
+```wl
+W = RandomReal[{-1, 1}, {4, 2}]
+```
+
+A function that draws a batch of 32 random inputs and their targets:
+
+```wl
+minibatch[] := With[{xx = RandomReal[{-1, 1}, {32, 4}]}, {N @ xx, N @ Ramp[xx] . W}]
+```
+
+The weights of a layer from 4 inputs to 64 hidden units:
+
+```wl
+w1 = TGlorot[{4, 64}]
+```
+
+Its biases:
+
+```wl
+b1 = TZeros[{64}]
+```
+
+The weights of a layer from the 64 hidden units to 2 outputs:
+
+```wl
+w2 = TGlorot[{64, 2}]
+```
+
+Its biases:
+
+```wl
+b2 = TZeros[{2}]
+```
+
+The parameters:
+
+```wl
+params = {w1, b1, w2, b2}
+```
+
+A first batch:
+
+```wl
+batch = minibatch[]
+```
+
+The input tensor, which every step overwrites:
+
+```wl
+input = TTensorCreate[batch[[1]]]
+```
+
+The target tensor, which every step overwrites:
+
+```wl
+target = TTensorCreate[batch[[2]]]
+```
+
+The forward pass, built once:
+
+```wl
+forward = TLinear[TReLU[TLinear[input, w1, b1]], w2, b2]
+```
+
+It gives 2 outputs for each of the 32 inputs:
+
+```wl
 TTensorShape @ TRealize @ forward
 ```
-<!-- => {32, 2}  (batch 32, 2 outputs) -->
+<!-- => {32, 2} -->
 
-Wrap the *whole step* - forward, the one shared backward [TGrad]() walk, and the in-place SGD update - in a no-argument function and hand it to [TJit](). [TAssign]() writes each stepped weight straight back into its own buffer, so the step has no return value worth reading; the closure starts uncaptured (gray play-button, op count `0`):
+The step computes the gradients of `TMSELoss`, the squared error summed over the batch, with respect to all parameters, then writes each updated parameter into its own buffer with `TAssign`. The gradients are computed before the update, as above. The closure records nothing until its first application:
 
 ```wl
 trainStep = TJit @ Function[{},
-    TRealize @ MapThread[TAssign[#1, #1 - 0.002*#2] &, {params, TGrad[TMSELoss[forward, y], params]}]]
+    TRealize @ MapThread[TAssign[#1, #1 - 0.002*#2] &, {params, TRealize @ TGrad[TMSELoss[forward, target], params]}]]
 ```
-<!-- => TJitClosure summary box: captured: no, ops: 0 -->
 
-The first call captures the dispatch sequence; [TJitOpCount]() then reports how many dispatches it pinned (forward + backward + four weight updates fuse to a small fixed set):
+The first application records the step and runs it:
 
 ```wl
-trainStep[];
+trainStep[]
+```
+
+`TJitOpCount` gives the number of kernel dispatches recorded, for the forward pass, the backward pass and the four updates:
+
+```wl
 TJitOpCount[trainStep]
 ```
-<!-- => 20  (the fixed dispatch set captured once) -->
+<!-- => 22 -->
 
-Now the loop is *feed and replay*: each step overwrites the input and target buffers in place with [TSet]() - never rebuilding `forward` - and calls the captured closure, which re-fires the same `20` dispatches on the new data and steps the weights in place. A thousand steps drives the loss from `~28` down past `0.2`:
+Each later step overwrites the input and the target with a new batch and replays the recorded dispatches, which update the weights in place. A thousand steps:
 
 ```wl
 Do[
-    MapThread[TSet[#1, TTensorCreate[#2]] &, {{x, y}, minibatch[]}];
+    MapThread[TSet[#1, TTensorCreate[#2]] &, {{input, target}, minibatch[]}];
     trainStep[],
-    {1000}];
-Round[Total @ Normal @ TRealize @ TMSELoss[forward, y], 0.01]
+    {1000}]
 ```
-<!-- => 0.12  (loss after 1000 captured-and-replayed steps; started at ~28.21) -->
 
-That is the canonical training step, and [`wl/THVMLink/Examples/train_step_canonical.wls`](../../Examples/train_step_canonical.wls) is the runnable version (CPU by default, `DEV=metal` for the GPU). The same closure replays unchanged on the Metal GPU: because [TJit]() re-fires a *fixed* kernel set, replay can never over-fuse the backward into the thousands-of-kernels shape that hangs the GPU. For an on-device adaptive step, swap the hand-written SGD line for [TAdam]() inside the same captured function, in its `b1pow` / `b2pow` buffer form below so the bias correction tracks each replay instead of freezing at the capture-time step.
-
-The `t`-integer [TAdam]() form folds the bias correction `1 / (1 - beta^t)` in at emit time, which is correct in an eager loop. Under [TJit]() it would freeze that correction at the step the loop was captured. For a JIT-captured step, use the `b1pow` / `b2pow` form instead: seed two shape-`{1}` scalar buffers to `1.0` (with [TOnes]()) and pass them as the last two arguments. Each step advances `beta^t` in-graph, so the correction is read from the live buffer and tracks every replay:
+The squared error on the last batch, summed over the two outputs, is down from about 28 at the start:
 
 ```wl
-wB = TTensorCreate[{1.}];
-mB = TTensorCreate[{0.}];
-vB = TTensorCreate[{0.}];
-b1B = TOnes[{1}];
-b2B = TOnes[{1}];
-TAdam[TL2Loss[wB - TTensorCreate[{0.05}]], {wB}, {mB}, {vB}, b1B, b2B];
-Normal @ TTensorData[wB]
+Round[Total @ Normal @ TRealize @ TMSELoss[forward, target], 0.01]
 ```
-<!-- => {0.999}  (same first step; correction comes from b1pow/b2pow now) -->
+<!-- => 0.12 -->
 
-These two forms agree to f32 on the first step; the buffer form stays correct across an arbitrary number of [TJit]() replays.
+`TAdam` with a step number computes its bias correction $1/(1 - \beta^t)$ when the graph is built, so a recorded step would keep the correction of the step it was recorded at. For a recorded step, pass two buffers of shape $\{1\}$ that hold 1 in place of the step number. Each step multiplies them by the two decay rates $\beta_1$ and $\beta_2$ inside the graph, so the correction follows the replays. A one-element parameter:
+
+```wl
+wB = TTensorCreate[{1.}]
+```
+
+Its first-moment buffer:
+
+```wl
+mB = TTensorCreate[{0.}]
+```
+
+Its second-moment buffer:
+
+```wl
+vB = TTensorCreate[{0.}]
+```
+
+The buffer for the powers of $\beta_1$, made with `TOnes`:
+
+```wl
+b1B = TOnes[{1}]
+```
+
+The buffer for the powers of $\beta_2$:
+
+```wl
+b2B = TOnes[{1}]
+```
+
+One step with the buffers:
+
+```wl
+TAdam[TL2Loss[wB - TTensorCreate[{0.05}]], {wB}, {mB}, {vB}, b1B, b2B]
+```
+
+The first step agrees with the step-number form:
+
+```wl
+Normal[wB]
+```
+<!-- => {0.999} -->
 
 ## Convolutional layers
 
-[TConv2D]() is a stride-1, no-padding 2-D convolution: *input* `{C_in, H, W}` (or batched `{B, C_in, H, W}`), *weights* `{C_out, C_in, kh, kw}`, *bias* `{C_out}`. It lowers through im2col + a fused matmul. Here a single 2x2 filter over a 4x4 image:
+`TConv2D` is a two-dimensional convolution with stride 1 and no padding. Its input has dimensions channels × height × width, possibly with a batch dimension in front; its filters have dimensions output channels × input channels × filter height × filter width; and it takes one bias for each output channel. An image of one channel of 4 × 4 pixels:
 
 ```wl
-img = TTensorCreate[N @ ArrayReshape[Range[16], {1, 4, 4}]];
-cw = TTensorCreate[N @ ArrayReshape[Range[4], {1, 1, 2, 2}]];
-cb = TTensorCreate[{0.}];
+img = TTensorCreate[N @ ArrayReshape[Range[16], {1, 4, 4}]]
+```
+
+One filter of 2 × 2:
+
+```wl
+cw = TTensorCreate[N @ ArrayReshape[Range[4], {1, 1, 2, 2}]]
+```
+
+A zero bias:
+
+```wl
+cb = TTensorCreate[{0.}]
+```
+
+The convolution gives one map of 3 × 3:
+
+```wl
 Normal @ TRealize @ TConv2D[img, cw, cb]
 ```
-<!-- => {{{44., 54., 64.}, {84., 94., 104.}, {124., 134., 144.}}}  (a {1, 3, 3} feature map) -->
+<!-- => {{{44., 54., 64.}, {84., 94., 104.}, {124., 134., 144.}}} -->
 
-The whole convolution is differentiable. Mark the filter a parameter, build a scalar from the output, and [TGrad]() fills the filter's gradient - this is the backward pass a conv-net training step runs:
+The convolution is differentiable. Clear the gradient slot of the filter:
 
 ```wl
-TClearGrad[cw];
-TGrad[Total[TConv2D[img, cw, cb]^2]];
+TClearGrad[cw]
+```
+
+Differentiate the sum of squares of the output:
+
+```wl
+TGrad[Total[TConv2D[img, cw, cb]^2]]
+```
+
+The gradient with respect to the filter:
+
+```wl
 Normal @ TRealize @ TGradOf[cw]
 ```
-<!-- => {{{{12192., 13884.}, {18960., 20652.}}}}  (d/d(filter) of sum(conv^2)) -->
+<!-- => {{{{12192., 13884.}, {18960., 20652.}}}} -->
 
-A pooled two-layer conv stack - <code>[TConv2D]()</code> -> [TReLU]() -> <code>[TMaxPool2d]()</code> -> [TConv2D]() - is the standard image-classifier front end; its stacked backward pass is the stress test for the scheduler's reduce-boundary handling.
+A convolution followed by `TReLU` and the 2 × 2 maximum pooling `TMaxPool2d` is the front end of an image classifier.
 
-## From a Wolfram net
+## An image classifier
 
-You need not assemble layers by hand. [TFromNet]() lifts an initialised Wolfram NeuralNetworks net into the same `TTerm` UOp graph, so the whole pipeline - [TRealize](), [TGrad](), [TJit]() - applies to a net you built with [NetChain]() and [NetInitialize](). The lifted graph computes exactly what the net does:
+A linear layer after the convolution, the activation and the pooling gives a small classifier of 28 × 28 images into 10 classes. Eight filters of 3 × 3 over one channel:
 
 ```wl
-net = NetInitialize[NetChain[{LinearLayer[8], Ramp, LinearLayer[1]}, "Input" -> 3], RandomSeeding -> 1234];
-xn = TTensorCreate[{1., 2., 3.}];
-Normal @ TRealize @ TFromNet[net, xn]
+w1 = TGlorot[{8, 1, 3, 3}]
 ```
-<!-- => {-0.504425}  (identical to net[{1., 2., 3.}]) -->
 
-Once lifted, the forward is an ordinary `TTerm`: differentiate it with [TGrad](), step its weights with [TSet](), or capture the step with [TJit]() - exactly the conv classifier the next section trains on MNIST. The high-level [TNetTrain]() / [TNetPredict]() surface trains the published LeNet end to end on the GPU below, lifting its batched forward straight from the [NetChain](); see *End to end: the real LeNet*.
-
-## A convolutional MNIST classifier
-
-The pooled conv stack from the previous section is the front end of an image classifier. Cap it with a [TLinear]() head and you have a LeNet-style network. Mark every weight a parameter and confirm the forward maps a batch of `{1, 28, 28}` images to a `{batch, 10}` logit matrix - convolution, ReLU, max-pool, flatten, linear:
+Their biases:
 
 ```wl
-w1 = TGlorot[{8, 1, 3, 3}]; b1 = TZeros[{8}];
-w2 = TGlorot[{8*13*13, 10}]; b2 = TZeros[{10}];
-lenet = x |-> TLinear[ArrayReshape[TMaxPool2d[TReLU[TConv2D[x, w1, b1]]], {64, 8*13*13}], w2, b2];
-TTensorShape @ TRealize @ lenet[TTensorCreate[N @ RandomReal[1, {64, 1, 28, 28}]]]
+b1 = TZeros[{8}]
+```
+
+A linear layer from the 8 pooled maps of 13 × 13 to 10 classes:
+
+```wl
+w2 = TGlorot[{8*13*13, 10}]
+```
+
+Its biases:
+
+```wl
+b2 = TZeros[{10}]
+```
+
+The classifier, for batches of 64 images:
+
+```wl
+classifier = x |-> TLinear[ArrayReshape[TMaxPool2d[TReLU[TConv2D[x, w1, b1]]], {64, 8*13*13}], w2, b2]
+```
+
+A batch of 64 random images gives 10 scores, the logits, for each image:
+
+```wl
+TTensorShape @ TRealize @ classifier[TTensorCreate[N @ RandomReal[1, {64, 1, 28, 28}]]]
 ```
 <!-- => {64, 10} -->
 
-[TCategoricalCrossEntropy]() is the classification loss: it takes the *raw logits* (no explicit softmax) and a one-hot target, lowering to the stable logsumexp `max(z) + log(sum(exp(z - max(z)))) - sum(target*z)`. The max-subtract keeps it finite even when one logit dwarfs the rest - here the true class sits 100 below the peak, so the loss is exactly that gap, where a naive `log(sum(exp(z)))` would overflow `exp` to infinity:
+`TCategoricalCrossEntropy` is the classification loss. It takes the logits, without a softmax, and a one-hot target, and it computes $\max(z) + \log \sum \exp(z - \max(z)) - \sum t z$, which stays finite when one logit is much larger than the others. Here the logit of the true class is 100 below the largest, and the loss is that difference:
 
 ```wl
 First @ Normal @ TRealize @ TCategoricalCrossEntropy[TTensorCreate[{{0., 1., 100.}}], TTensorCreate[{{1., 0., 0.}}]]
 ```
-<!-- => 100.  (stable: the true-class logit 0 is 100 below the max) -->
+<!-- => 100. -->
 
-Training is the loop from the top of this note, one batch of images at a time: clear the gradient slots, fire [TGrad]() through the cross-entropy, *realize the gradients before the update*, and step each weight with [TSet](). Six epochs over 2048 shuffled MNIST digits (batch 64, SGD at `lr = 0.1`) reaches **92% test accuracy** on a held-out set:
+Training on handwritten digits from the MNIST (Modified National Institute of Standards and Technology) data set is the loop from the start of this tutorial, one batch of images at a time. The cells below are shown without being evaluated. A sample of 2048 training digits:
 
 ```wl
 #| eval: false
-data    = RandomSample[ResourceData["MNIST", "TrainingData"], 2048];
-images  = ArrayReshape[N @ Flatten[ImageData /@ Keys[data]], {2048, 1, 28, 28}];
-onehots = N[UnitVector[10, # + 1] & /@ Values[data]];
-params  = {w1, b1, w2, b2};
+data = RandomSample[ResourceData["MNIST", "TrainingData"], 2048]
+```
+
+The images as one array:
+
+```wl
+#| eval: false
+images = ArrayReshape[N @ Flatten[ImageData /@ Keys[data]], {2048, 1, 28, 28}]
+```
+
+The labels as one-hot vectors:
+
+```wl
+#| eval: false
+onehots = N[UnitVector[10, # + 1] & /@ Values[data]]
+```
+
+The parameters of the classifier:
+
+```wl
+#| eval: false
+params = {w1, b1, w2, b2}
+```
+
+Six passes over the 32 batches of 64 images, each step computing the gradients before the update:
+
+```wl
+#| eval: false
 Do[
     Do[
         batch  = TTensorCreate[images[[64*(s - 1) + 1 ;; 64*s]]];
         target = TTensorCreate[onehots[[64*(s - 1) + 1 ;; 64*s]]];
         TClearGrad /@ params;
-        grads = TRealize @ TGrad[TCategoricalCrossEntropy[lenet[batch], target], params];
+        grads = TRealize @ TGrad[TCategoricalCrossEntropy[classifier[batch], target], params];
         MapThread[TSet[#1, #1 - 0.1*#2] &, {params, grads}],
         {s, 32}],
     {epoch, 6}]
 ```
 
-Nothing here is a special training mode: the network, the softmax cross-entropy, and the backward pass through all of it are plain `TTerm` arithmetic differentiated by the same [TGrad]() that handled `w . x` at the top of the note.
+The network, the cross-entropy and the backward pass through both are ordinary [TTerm]() arithmetic, differentiated by the same [TGrad]() as the dot product at the start of this tutorial.
 
-### The same net, lifted from a NetChain
+## Training a Wolfram Language net
 
-You need not hand-assemble the layers. Build the network as a [NetChain]() and lift it with [TFromNet](): the conv head, pooling, flatten, and linear all convert, each lifted weight a plain `TTerm` leaf baked into the forward. [TNetParams]() reads exactly those weight `TTerm`s straight off the GRAPH - the float-leaf tensors reachable from the forward, minus the input slot - so a [TSet]() update flows straight back into it (the graph leaves, not a flag or a stored net, are how the trainable weights are identified). Lift the same LeNet head over a batch-shaped input slot and collect its four trainable tensors:
-
-```wl
-lenet = NetInitialize[NetChain[{ConvolutionLayer[8, {3, 3}], Ramp, PoolingLayer[{2, 2}, {2, 2}], FlattenLayer[], LinearLayer[10]}, "Input" -> {1, 28, 28}], RandomSeeding -> 1234];
-slot = TTensorCreate[N @ RandomReal[1, {64, 1, 28, 28}]];
-fwd = TFromNet[lenet, slot];
-params = Select[TNetParams[fwd], TTermVal[#] =!= TTermVal[slot] &];
-{Length[params], TTensorShape @ TRealize @ fwd}
-```
-<!-- => {4, {64, 10}}  (4 params: conv W/b + linear W/b; forward is {batch, 10} logits) -->
-
-Now `fwd` is the logit `TTerm` and `params` are its weights - the same two ingredients the hand-built loop used. Training is identical, except each batch is fed by overwriting the input slot in place with [TAssign]() rather than rebuilding the forward. It reaches the same **~92.6% test accuracy**:
+`TNetTrain` trains a [NetChain]() directly. Given an initialized net, a list of inputs and a list of one-hot targets, it lifts the net into a lazy graph, trains it by gradient descent on the cross-entropy, and gives an [Association]() with the lifted `"Forward"` pass, its `"Input"` tensor and the trained `"Params"`. `TNetPredict` applies the trained forward pass to new inputs of the same shape. Fix the random seed:
 
 ```wl
 #| eval: false
-Do[
-    Do[
-        TRealize @ TAssign[slot, TTensorCreate[images[[64*(s - 1) + 1 ;; 64*s]]]];
-        target = TTensorCreate[onehots[[64*(s - 1) + 1 ;; 64*s]]];
-        TClearGrad /@ params;
-        grads = TRealize @ TGrad[TCategoricalCrossEntropy[fwd, target], params];
-        MapThread[TSet[#1, #1 - 0.1*#2] &, {params, grads}],
-        {s, 32}],
-    {epoch, 5}]
-```
-
-A Wolfram [NetChain](), lifted, trained by the same four-line step. And that whole loop is itself packaged as one call - the next section.
-
-### One call: TNetTrain and TNetPredict
-
-[TNetTrain]() wraps the lift-Reap-train loop: pass an initialised net plus host arrays of inputs and one-hot targets, and it returns a handle carrying the lifted `"Forward"` `TTerm`, its `"Input"` slot, and the trained `"Params"`. [TNetPredict]() then evaluates that handle on a fresh same-shape batch. A linearly-separable two-class set trains and classifies in two lines:
-
-```wl
 SeedRandom[1234];
-xs = N @ {{1., 1.}, {1.5, 1.2}, {0.5, 0.8}, {1.2, 0.9}, {-1., -1.}, {-1.2, -0.8}, {-0.7, -1.1}, {-0.9, -1.}};
-ys = N @ {{1., 0.}, {1., 0.}, {1., 0.}, {1., 0.}, {0., 1.}, {0., 1.}, {0., 1.}, {0., 1.}};
-clf = NetInitialize[NetChain[{LinearLayer[6], Ramp, LinearLayer[2]}, "Input" -> 2], RandomSeeding -> 7];
-trained = TNetTrain[clf, xs, ys, "MaxTrainingRounds" -> 80];
-(Ordering[#, -1][[1]] - 1) & /@ TNetPredict[trained, xs]
 ```
-<!-- => {0, 0, 0, 0, 1, 1, 1, 1}  (both classes separated) -->
 
-`"LearningRate"` (default 0.3), `"MaxTrainingRounds"` (100), and `"Loss"` (the stable [TCategoricalCrossEntropy](), expecting a logits net - no final `SoftmaxLayer`) are options. The same call scales to the conv MNIST head above; the loop inside is exactly the realize-grads-first SGD this note opened with.
-
-## End to end: the real LeNet, trained on the Metal GPU
-
-Everything so far built the net by hand or as a small [NetChain](). The same pipeline lifts a *published* model unchanged. [NetModel]() carries LeNet - the original two-convolution digit classifier - as a [NetChain]() with an [Image]() input encoder and a `"Class"` output decoder. On this machine's Wolfram Language version it comes back **uninitialised** (its weights are `Automatic`), so [NetInitialize]() gives it concrete random weights: training it is training *from scratch*. [TFromNet]() lifts the initialised net into a `TTerm` for inference; [TNetTrain]() (below) lifts the batched forward from the same [NetChain]() for training, dropping the trailing `SoftmaxLayer` internally so the loss sees logits:
-
-```wl
-init = NetInitialize[NetModel["LeNet"], RandomSeeding -> 7];
-lenet = TFromNet[init];
-Length @ TNetParams[lenet]
-```
-<!-- => 8  (2 conv + 2 fully-connected layers, each a weight + a bias) -->
-
-The lifted `lenet` is an ordinary `TTerm` that runs inference at its lifted input shape. Training over a batch lifts the batched forward directly from the [NetChain](), so [TNetTrain]() takes the initialised net `init`. Real MNIST digits are [Image]() objects; [TNetTrain]() takes them as the *keys* of `image -> class` rules and reshapes each through the encoder's `{1, 28, 28}` array internally, with no host-side [ImageData]() ceremony at the call site:
-
-```wl
-data = RandomSample[ResourceData["MNIST", "TrainingData"], 256];
-First @ Keys @ data
-```
-<!-- => (a 28x28 MNIST digit Image) -->
-
-### Prescreen the step, then dispatch on the GPU
-
-The inert loop materialises the *entire* training step once - forward, cross-entropy, the shared backward, and one in-place update per weight - and a single [TWnf]() re-fires that **fixed** kernel set every round. So the kernels added while building the `"TrainingNet"` term (nothing has fired yet) are exactly the set the GPU will re-run. Counting them with [TKernelCount]() is the Metal safety check: a small, fixed set is safe to dispatch, because re-firing it cannot over-fuse the backward into the thousands-of-kernels shape that can hang the GPU. Read the count before and after the build for the loop's own contribution, isolated from kernels the rest of the page has accumulated. A small subset (64 digits, fifteen full-batch rounds) keeps the cell quick while still training from scratch:
-
-```wl
-SeedRandom[7];
-init = NetInitialize[NetModel["LeNet"], RandomSeeding -> 7];
-lenet = TFromNet[init];
-data = RandomSample[ResourceData["MNIST", "TrainingData"], 64];
-before = TKernelCount[];
-loop = TNetTrain[init, data, "TrainingNet", MaxTrainingRounds -> 15, "LearningRate" -> 0.2];
-TKernelCount[] - before
-```
-<!-- => 294  (the fixed step set; well under the few-hundred Metal-safety bar) -->
-
-294 kernels, built before a single round runs, re-fired in place by [TWnf]() - so training this LeNet on the GPU is safe. Drive the loop with one [TWnf]() and no new kernels appear: the fixed set just fires fifteen times in place. The cell below really runs the training on the CPU (the doc build never dispatches Metal), reports its per-round wall time, and asserts the kernel set never grew - exactly the safety invariant the GPU relies on:
-
-```wl
-t = First @ AbsoluteTiming @ TWnf[loop];
-{TKernelCount[] - before, Round[1000.*t/15, 1]}
-```
-<!-- => {294, _}  (294 UNCHANGED: TWnf re-fired the fixed set, no over-fusion; second number = live CPU ms/round) -->
-
-The kernel count is unchanged: [TWnf]() re-fired the fixed 294-kernel set fifteen times in place, no over-fusion. The training really happened - the trained `lenet` now classifies its training digits well above the 10% chance baseline:
-
-```wl
-N @ Mean @ MapThread[Boole[#1 == #2] &, {TNetPredict[lenet, Keys[data]], Values[data]}]
-```
-<!-- => 0.969  (train-subset accuracy: fifteen SGD rounds carried it from ~0.1 chance) -->
-
-The convenience form `TNetTrain[init, data, MaxTrainingRounds -> 15, "LearningRate" -> 0.2]` does the [TWnf]() for you and returns the trained forward. The same fixed 294-kernel set dispatches unchanged on the Metal GPU: set `DEV=metal` in the environment (the runtime reads it on init) and the loop runs on the GPU instead, far faster per round.
-
-The per-round wall time the cell above produces is the live CPU number; the Metal and tinygrad columns are representative measured references on an Apple M3 Max (the GPU figures come from running [`lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) with `DEV=metal`, the same fixed step set warm):
-
-| backend (this step) | ms/round | held-out accuracy |
-|---|---|---|
-| thvm CPU (clang, live above) | (the number the cell prints) | 0.97 (train subset) |
-| thvm Metal (M3 Max, measured ref) | ~53 | - |
-| thvm Metal, 256 imgs / 60 rounds (measured ref) | ~86 | 0.88 |
-| tinygrad Metal, 256 imgs / 60 rounds (measured ref) | ~32 | 0.77 |
-
-The CPU number is order-of-seconds per round; the same 294-kernel step on the Metal GPU is roughly 20x faster once warm. On the larger 256-image / 60-round run the GPU reaches **~88%** held-out accuracy at about **86 ms/round** - the figures [`lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) reports. tinygrad's fused schedule for the identical LeNet runs faster still (~32 ms/round) but converges to a lower subset accuracy here; both train the real LeNet end to end on the GPU.
-
-### Predict on held-out images
-
-[TNetPredict]() runs the trained forward on a list of [Image]() objects and returns the integer class for each (the logits' argmax - the `"Class"` decoder). The live cells above trained on a 64-digit subset for fifteen rounds to keep the page fast; train the full 256-image / 60-round run (the configuration [`lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) uses, ideally with `DEV=metal`) and the same `lenet`, trained in place, reaches about **88%** accuracy from scratch on a held-out test set:
+Eight points in the plane:
 
 ```wl
 #| eval: false
-test = RandomSample[ResourceData["MNIST", "TestData"], 256];
-preds = TNetPredict[lenet, Keys[test]];
-N @ Mean @ MapThread[Boole[#1 == #2] &, {preds, Values[test]}]
+points = {{1., 1.}, {1.5, 1.2}, {0.5, 0.8}, {1.2, 0.9}, {-1., -1.}, {-1.2, -0.8}, {-0.7, -1.1}, {-0.9, -1.}}
 ```
-<!-- => 0.879  (held-out test accuracy, from scratch, 256-image train + test subset) -->
 
-The predictions are sensible digit-by-digit - a sample of held-out images with the model's call against the truth:
+Their classes as one-hot vectors, the first four in one class and the last four in the other:
 
 ```wl
 #| eval: false
-test = RandomSample[ResourceData["MNIST", "TestData"], 8];
-preds = TNetPredict[lenet, Keys[test]];
-Grid[{Keys[test], MapThread["pred " <> ToString[#1] <> " / true " <> ToString[#2] &, {preds, Values[test]}]}]
+classes = {{1., 0.}, {1., 0.}, {1., 0.}, {1., 0.}, {0., 1.}, {0., 1.}, {0., 1.}, {0., 1.}}
 ```
-<!-- => (8 digit images over their predicted / true labels; most match) -->
 
-[`wl/THVMLink/Examples/lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) runs this whole pipeline at the full 256-image / 60-round size - lift, prescreen, train, predict - and prints the accuracy, the per-round timing, and a sample-prediction grid. The tinygrad reference for the same architecture and backend is [`bench/netmodel-mnist/lenet_tinygrad.py`](../../../../bench/netmodel-mnist/lenet_tinygrad.py): the identical LeNet (`Conv2d[1 -> 20, 5x5]` and `Conv2d[20 -> 50, 5x5]`, two fully-connected layers) trained the same way on the same Metal GPU runs at about **32 ms/round** and reaches **~0.77** test accuracy on this subset. thvm is slower per round (the inert loop re-fires more, smaller kernels than tinygrad's fused schedule) but converges to a higher subset accuracy here; both train the real LeNet end to end on the GPU.
+A small net that gives two logits, without a final softmax:
 
-### Time and memory against tinygrad
+```wl
+#| eval: false
+clf = NetInitialize[NetChain[{LinearLayer[6], Ramp, LinearLayer[2]}, "Input" -> 2], RandomSeeding -> 7]
+```
 
-That same network (`Conv2d[1 -> 8, 3x3]` -> ReLU -> 2x2 max-pool -> `Linear[1352 -> 10]`, batch 64, softmax cross-entropy) runs as an eager forward + backward + SGD step in both thvm and [tinygrad](https://tinygrad.org) on the CPU. Warm (post-warmup) per-step wall time and the memory the *training itself* allocates:
+Train it for 80 rounds:
 
-| | per-step (warm) | training working set |
-|---|---|---|
-| thvm (`TTerm` eager) | ~32 ms | ~60 MB |
-| tinygrad (eager) | ~15 ms | ~119 MB (whole process) |
+```wl
+#| eval: false
+trained = TNetTrain[clf, points, classes, MaxTrainingRounds -> 80]
+```
 
-thvm is about 2x slower than tinygrad for this small eager step on the CPU. The gap closes - and on the larger fused `beautiful_mnist` pipeline with the JIT and the faithful realize point, reverses - where thvm's CPU codegen edges out tinygrad. Absolute process footprint is not comparable: thvm runs inside a WolframKernel whose runtime baseline (~2.7 GB) dwarfs the tens of megabytes the training allocates, while tinygrad's lean Python process peaks at 119 MB. The per-step working set - what the conv buffers, activations, and gradients actually cost - is comparable, in the tens of megabytes either way.
+The parts of the result:
+
+```wl
+#| eval: false
+Keys[trained]
+```
+<!-- => {"Forward", "Input", "Params"} -->
+
+The logits of the training points:
+
+```wl
+#| eval: false
+TNetPredict[trained, points]
+```
+<!-- => {{1.20958, -1.1065}, {1.55489, -1.41893}, {0.864268, -0.794071}, {1.31103, -1.19885}, {-1.87919, 1.41503}, {-2.23472, 1.66808}, {-1.33729, 1.01407}, {-1.69712, 1.27782}} -->
+
+The class with the larger logit, counted from 0, separates the two groups:
+
+```wl
+#| eval: false
+(Ordering[#, -1][[1]] - 1) & /@ TNetPredict[trained, points]
+```
+<!-- => {0, 0, 0, 0, 1, 1, 1, 1} -->
+
+`TNetTrain` takes the following options:
+
+| | | |
+| --- | --- | --- |
+| [MaxTrainingRounds]() | 30 | the number of rounds of training |
+| `"LearningRate"` | 0.05 | the size of each gradient-descent step |
+| `"Method"` | `"SGD"` | stochastic gradient descent, or `"Adam"` |
+| `"Momentum"` | 0. | a positive value adds momentum to the gradient-descent steps |
+| `"WeightDecay"` | 0. | a positive value adds a penalty on the squares of the weights |
+| `"Loss"` | [Automatic]() | the loss, by default `TCategoricalCrossEntropy`, for a net that ends in logits rather than a [SoftmaxLayer]() |
+| [TargetDevice]() | `"CPU"` | the device the training runs on |
+
+## Lifting a Wolfram Language net
+
+`TFromNet` lifts an initialized net into a lazy graph of the same operations as the layers above, so [TRealize](), [TGrad]() and [TJit]() all apply to it. A small net:
+
+```wl
+net = NetInitialize[NetChain[{LinearLayer[8], Ramp, LinearLayer[1]}, "Input" -> 3], RandomSeeding -> 1234]
+```
+
+An input tensor:
+
+```wl
+xn = TTensorCreate[{1., 2., 3.}]
+```
+
+The lifted net applied to the input:
+
+```wl
+Normal @ TRealize @ TFromNet[net, xn]
+```
+<!-- => {-0.504425} -->
+
+The net itself gives the same value:
+
+```wl
+net[{1., 2., 3.}]
+```
+<!-- => {-0.504425} -->
+
+Without an input, `TFromNet` gives the net as a lambda whose variable is the input:
+
+```wl
+fn = TFromNet[net]
+```
+
+`TNetParams` gives the weights and biases of the lifted net, in the order the runtime walks them:
+
+```wl
+TTensorShape /@ TNetParams[fn]
+```
+<!-- => {{1}, {8}, {8, 3}, {1, 8}} -->
+
+Applying the lambda to the input and reducing it with [TWnf]() gives the same forward pass:
+
+```wl
+Normal @ TRealize @ TWnf[fn[xn]]
+```
+<!-- => {-0.504425} -->
 
 ## Higher-order gradients
 
-Because [TGradOf]() returns a live UOP graph, you can differentiate it again. The first gradient of `x^3` is `3 x^2`; differentiating *that* gives the second derivative `6 x`:
+[TGradOf]() gives a lazy graph, so a gradient can be differentiated again. The derivative of $s^3$ is $3 s^2$, and its derivative is $6 s$. A one-element tensor:
 
 ```wl
-x = TTensorCreate[{3.}];
-TClearGrad[x];
-TGrad[Total[x^3]];
-Normal @ TRealize @ TGradOf[x]
+s = TTensorCreate[{3.}]
 ```
-<!-- => {27.}  (3 x^2 at x = 3) -->
+
+Clear its gradient slot:
 
 ```wl
-g1 = TGradOf[x];
-TClearGrad[x];
-TGrad[Total[g1]];
-Normal @ TRealize @ TGradOf[x]
+TClearGrad[s]
 ```
-<!-- => {18.}  (d/dx of 3 x^2 = 6 x at x = 3) -->
 
-This is not limited to scalars. Because every layer's backward is itself a `TTerm` graph, the second derivative composes through a real network: the filter Hessian of `Total[TConv2D[x, w]^2]`, the input Hessian across the [TReLU]() mask, and a `linear -> ReLU -> linear` MLP's input Hessian all come out correct (the last verified against a central finite difference). The `nn` test suite pins these.
+Differentiate $s^3$:
 
-## Per-epoch hygiene: TReset
+```wl
+TGrad[Total[s^3]]
+```
 
-Each realized forward+backward step leaves its compiled kernels and intermediate `TenDesc`s in the runtime's side tables. Those tables never recycle slots within a session - a freed kernel keeps its slot so the kid references still living in the heap's `UOP_KERNEL` cells stay valid - so across a long uninterrupted loop the kernel count and tensor-descriptor count climb monotonically. Several per-realize scheduler passes are linear in those counts (the consumer-count pass, the per-realize kernel sweep, the rangeify descriptor walk), so even though the *work per step is identical*, the time to schedule each step creeps up as the tables fill. This is a compute cost, not only a memory one.
+The first derivative at 3:
 
-[TReset]() is the per-epoch hygiene call that fixes it: it rewinds the heap, the kernel table, and the tensor-descriptor table back to empty (keeping the arenas mapped and the backend device live, so it is cheap), and the next epoch schedules against fresh, short tables again. Rebuild the parameter leaves after a reset, since the old `TTerm` wrappers point into the rewound heap.
+```wl
+Normal @ TRealize @ TGradOf[s]
+```
+<!-- => {27.} -->
 
-Measured on a fixed `3 -> 8 -> 1` MLP forward+backward step realized in a tight loop (CPU, 50 steps/chunk): without a reset, per-step time drifts up with the heap as the side tables fill (roughly `6.9 -> 10.7` ms/step over 600 steps as the heap grows past 170k cells); a [TReset]() between epochs holds the heap flat (~16k cells) and the step time flat (~6.7 ms/step). The drift is gentle on a tiny model and steep on a large one - the larger the per-step kernel/descriptor footprint, the faster the tables fill and the more the scheduler scans cost. Capturing the step with [TJit]() sidesteps the issue entirely (the schedule is built once and replayed), but a plain eager loop should call [TReset]() once per epoch.
+The first derivative as a lazy graph:
 
-## Where to go next
+```wl
+g1 = TGradOf[s]
+```
 
-- The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) tutorial for the tensor / UOp / kernel / autodiff machinery underneath this loop.
-- Per-symbol pages: [TGrad](paclet:WolframInstitute/THVMLink/ref/TGrad), [TSet](paclet:WolframInstitute/THVMLink/ref/TSet), [TLinear](paclet:WolframInstitute/THVMLink/ref/TLinear), [TConv2D](paclet:WolframInstitute/THVMLink/ref/TConv2D), [TAdam](paclet:WolframInstitute/THVMLink/ref/TAdam), [TFromNet](paclet:WolframInstitute/THVMLink/ref/TFromNet).
-- *Build once, capture once, replay* with [TJit]() + [TSet]() is THE training pattern - see *Capture the step once, then replay it* above; rebuilding the graph per step is ~8x slower and degrades without bound. The [Tensors](paclet:WolframInstitute/THVMLink/tutorial/Tensors) "Capturing a step" section covers the same capture mechanism on a single kernel.
-- The [TNetTrain]() / [TNetPredict]() one-liner above for the packaged surface - <code>[TNetTrain]()[*net*, *data*, [MaxTrainingRounds]() -> *n*]</code> on a [NetChain]() (its batched forward lifted directly), with `data` a list of `input -> class` rules or the string `"MNIST"`.
-- [`wl/THVMLink/Examples/lenet_metal_tutorial.wls`](../../Examples/lenet_metal_tutorial.wls) for the full LeNet-on-Metal run end to end.
-- **Still coming:** reconstructing a trained [NetChain]() back out of a lifted-and-trained `TTerm` (the weights train in place; round-tripping them into a fresh Wolfram net is the open piece).
+Clear the gradient slot again:
+
+```wl
+TClearGrad[s]
+```
+
+Differentiate the first derivative:
+
+```wl
+TGrad[Total[g1]]
+```
+
+The second derivative at 3:
+
+```wl
+Normal @ TRealize @ TGradOf[s]
+```
+<!-- => {18.} -->
+
+The backward branch of every layer is itself a lazy graph, so second derivatives pass through convolutions and `TReLU` in the same way.
+
+## Resetting between epochs
+
+Every realized step leaves its compiled kernels and its tensors in the runtime's tables, and scheduling a step scans those tables. In a long loop that builds its graph again in every step, the tables keep growing, and each step takes longer although it does the same work. [TReset]() empties the heap and releases the tensors and kernels of the terms on it, so the next epoch schedules against short tables. A [TTerm]() made before the reset refers to cells that later terms overwrite, so create the parameters again after a reset, from their values read with [Normal]() before it. A step recorded with [TJit]() is scheduled once, and its replays do not add to the tables.
