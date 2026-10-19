@@ -1,9 +1,8 @@
 (* ::Package:: *)
 (* Diagram.wl - Wolfram`DiagrammaticComputation`-backed renderer.
 
-   Sits in its own subcontext (`WolframInstitute`THVMLink`Diagram`) so it can put the
-   DC package on its $ContextPath via BeginPackage's import list and
-   call `Diagram` / `DiagramNetwork` directly without ambiguity.
+   Puts the DC package on its $ContextPath (BeginPackage's import list, plus the Diagram`
+   subcontext where DC 1.0.8 defines them) so it can use `Diagram` / `DiagramNetwork` directly.
 
    Loaded from THVMLink.wl after the public symbol THeapDiagram is
    declared.
@@ -33,6 +32,11 @@
    dynamic for the same reason. *)
 
 BeginPackage["WolframInstitute`THVMLink`", {"Wolfram`DiagrammaticComputation`"}];
+
+(* DiagrammaticComputation 1.0.8 defines Diagram, DiagramNetwork and DiagramFlip in its Diagram`
+   subcontext, which the import list above does not put on this file's path *)
+If[ MemberQ[$Packages, "Wolfram`DiagrammaticComputation`Diagram`"],
+    AppendTo[$ContextPath, "Wolfram`DiagrammaticComputation`Diagram`"]];
 
 Begin["`Private`"];
 
