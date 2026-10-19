@@ -266,3 +266,12 @@ VerificationTest[
     {14.},
     TestID -> "tensors/reduce-under-lambda"
 ]
+
+(* Integer division is true division, as in tinygrad: reciprocal and sqrt cast an integer tensor to
+   f32 first, and a rational scalar promotes like a real one. *)
+VerificationTest[
+    With[{n = TTensorCreate[{1, 2}], m = TTensorCreate[{2, 4}]},
+        {Normal[TRealize[n/2]], TTensorDType[TRealize[n/2]], Normal[TRealize[n/m]], Normal[TRealize[Sqrt[TTensorCreate[{4, 9}]]]], TTensorDType[TRealize[n*3]]}],
+    {{0.5, 1.}, "f32", {0.5, 0.5}, {2., 3.}, "i32"},
+    TestID -> "tensors/integer-true-division"
+]

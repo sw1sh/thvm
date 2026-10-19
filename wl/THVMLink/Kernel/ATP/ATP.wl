@@ -4207,8 +4207,10 @@ atpAxiomaticTheory[theory_String, "NotableTheorems"] :=
 atpProveFromTheory[cjArg_, theory_String,
         opts : OptionsPattern[TFindProof]] :=
     atpProveFromTheory[cjArg, theory, "ProofObject", opts];
-(* The Global` names a conjecture uses, which the theory's variables must not take. *)
-atpGoalNames[cj_] := DeleteDuplicates @ Cases[cj, s_Symbol /; Context[s] === "Global`" :> SymbolName[s], {0, Infinity}, Heads -> True]
+(* The names a conjecture uses, which the theory's variables must not take: the decoder rebuilds
+   symbols by name, so a goal's constant a in any context (a documentation page's private context
+   too) collides with a variable named a. *)
+atpGoalNames[cj_] := DeleteDuplicates @ Cases[cj, s_Symbol /; Context[s] =!= "System`" :> SymbolName[s], {0, Infinity}, Heads -> True]
 (* The returnSpec threads through to the expression-form call; a
    multi-conjunct theorem returns ONE projection for the whole
    conjunction (e.g. "Status" is a single tag). *)
