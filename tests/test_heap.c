@@ -7,11 +7,13 @@ int main(void) {
   thvm_init();
 
   TEST_BEGIN("heap/alloc-bumps-and-returns-distinct-locs");
+  u64 base = HEAP_NEXT;
   u64 a = heap_alloc(2);
   u64 b = heap_alloc(3);
-  CHECK_EQ(a, 0);
-  CHECK_EQ(b, 2);
-  CHECK_EQ(HEAP_NEXT, 5);
+  CHECK(base != 0);   // loc 0 reads as "none", so no node lives there
+  CHECK_EQ(a, base);
+  CHECK_EQ(b, base + 2);
+  CHECK_EQ(HEAP_NEXT, base + 5);
 
   TEST_BEGIN("heap/set-then-read");
   Term t1 = term_new(0, TAG_LAM, 0, 42);
