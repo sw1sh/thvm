@@ -275,5 +275,27 @@ int main(void) {
   }
   thvm_free();
 
+  // (h) An address naming one RANGE many times, as stacked reshapes over
+  // permuted ranges do, still has two distinct axes; the callers index their
+  // RU_MAX_AXES arrays with the count.
+  TEST_BEGIN("unified-rangeify/range-axes-are-distinct");
+  thvm_init();
+  {
+    Term r0   = uop_range(0, KAX_LOOP, 4);
+    Term r1   = uop_range(1, KAX_LOOP, 6);
+    Term addr = r1;
+    for (u32 i = 0; i < 20; i++) {
+      // Raw IADD nodes: the simplifying constructor would fold r0 + r0.
+      u64 loc = heap_alloc(2);
+      heap_set(loc + 0, addr);
+      heap_set(loc + 1, r0);
+      addr = term_new(0, TAG_UOP, UOP_IADD, loc);
+    }
+    u32 axes[RU_MAX_AXES] = { 0 };
+    CHECK_EQ(ru_collect_range_axes(addr, axes, RU_MAX_AXES), 2);
+    CHECK((axes[0] == 0 && axes[1] == 1) || (axes[0] == 1 && axes[1] == 0));
+  }
+  thvm_free();
+
   TEST_REPORT();
 }

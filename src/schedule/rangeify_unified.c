@@ -394,28 +394,39 @@ static Term ru_reduce_unparented(Term red, Term const *ranges, u32 n_ranges) {
   return ret;
 }
 
-// Write the axis_ids of the UOP_RANGE leaves of addr expression `t` to
-// `out_axes`, at most `cap`, and return how many there are, which can exceed
-// `cap`.  A tree walk to depth 32: a shared leaf counts once per path.
-static u32 ru_collect_range_axes(Term t, u32 *out_axes, u32 cap, u32 depth) {
-  if (depth > 32) return 0;
-  if (term_tag(t) != TAG_UOP) return 0;
-  u8 op = term_ext(t);
-  if (op == UOP_RANGE) {
-    if (cap == 0) return 1;
-    out_axes[0] = uop_range_axis_id(t);
-    return 1;
+// The distinct axis_ids of the UOP_RANGE leaves of addr expression `t`, into
+// out_axes; more than `cap` is fatal, since a caller's table would drop one.
+static u32 ru_collect_range_axes(Term t, u32 *out_axes, u32 cap) {
+  UOpWalk w = {0};
+  uop_walk_push(&w, t);
+  u32  n = 0;
+  Term u;
+  while ((u = uop_walk_pop(&w)) != 0) {
+    u8 op = term_ext(u);
+    if (op == UOP_RANGE) {
+      u32 aid  = uop_range_axis_id(u);
+      int seen = 0;
+      for (u32 i = 0; i < n; i++) {
+        if (out_axes[i] == aid) {
+          seen = 1;
+          break;
+        }
+      }
+      if (!seen) {
+        if (n == cap) {
+          thvm_fatal("rangeify: an address names more distinct ranges than RU_MAX_AXES");
+        }
+        out_axes[n++] = aid;
+      }
+      continue;
+    }
+    u8  ar  = uop_arity(op);
+    u64 loc = term_val(u);
+    for (u8 i = 0; i < ar; i++) {
+      uop_walk_push(&w, heap_read(loc + i));
+    }
   }
-  u8 ar = uop_arity(op);
-  u32 n = 0;
-  u64 loc = term_val(t);
-  for (u8 i = 0; i < ar; i++) {
-    Term c = heap_read(loc + i);
-    n += ru_collect_range_axes(c,
-                               (out_axes != NULL && n < cap) ? (out_axes + n) : NULL,
-                               (n < cap) ? (cap - n) : 0,
-                               depth + 1);
-  }
+  uop_walk_free(&w);
   return n;
 }
 
@@ -1374,8 +1385,7 @@ fn void run_rangeify_unified(Term root) {
             if (in_dim != out_dim) {
               // Every RANGE in out_rngs[a] ends here.
               u32 axes_out[RU_MAX_AXES];
-              u32 n_axes_out = ru_collect_range_axes(out_rngs[a],
-                                                     axes_out, RU_MAX_AXES, 0);
+              u32 n_axes_out = ru_collect_range_axes(out_rngs[a], axes_out, RU_MAX_AXES);
               for (u32 j = 0; j < n_axes_out
                             && RU_ENDING_RANGES[node_idx].n < RU_ENDING_PER_NODE; j++) {
                 u32 ax = axes_out[j];
@@ -1402,7 +1412,9 @@ fn void run_rangeify_unified(Term root) {
       Term red_t = term_new(0, TAG_UOP, info->op, info->loc);
       u32 n_axes = uop_reduce_n_axes(red_t);
       if (!ru_node_src_shape(info->loc, &src_shape)) {
-        for (u8 a = 0; a < my_ndim; a++) in_rngs[a] = out_rngs[a];
+        // The reduce ranges are unknown, and an empty list reads as a size-1
+        // reduce whose body is its value: the reduction would be dropped.
+        thvm_fatal("rangeify: a REDUCE whose source has no shape");
       } else {
         u8 is_reduce_axis[RU_MAX_AXES] = {0};
         for (u32 ai = 0; ai < n_axes; ai++) {
@@ -2528,8 +2540,7 @@ fn void pm_apply_rangeify(Term root) {
     if (rn_realized && RU_RANGE_MAP[n].has_ranges) {
       for (u8 a = 0; a < RU_RANGE_MAP[n].out_ndim; a++) {
         u32 ax[RU_MAX_AXES];
-        u32 na = ru_collect_range_axes(RU_RANGE_MAP[n].out_rngs[a],
-                                       ax, RU_MAX_AXES, 0);
+        u32 na = ru_collect_range_axes(RU_RANGE_MAP[n].out_rngs[a], ax, RU_MAX_AXES);
         for (u32 z = 0; z < na; z++) {
           u8 dup = 0;
           for (u32 j = 0; j < RU_FUSE_ALL_REDUCE_AIDS_N; j++)
