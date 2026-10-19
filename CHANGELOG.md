@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- nf uses a step session only when it opened one: with the WL stepper's session open it ran on that session and detached it. At T=1 it re-enumerates when its seed was clamped to the bag or a push found the bag full (now dropped and counted instead of spinning forever with no thief), so redexes past the 2^18 seed slots fire. Tests: test_nf_pool.
 - eval_collapse reuses popped queue slots, so it stops early only when 65536 tasks are pending at once: it stopped after 65536 pushes in all, at 32767 leaves of a long SUP comb. Test: test_cnf.
 - LAM_ERA_MASK is set only on lambdas whose binder is unused: APP-BRI's inner lambda (its $k is read by the ANN outside the body) and ANN-LAM's new lambda (read through the bridge that replaces the old binder) were sealed as erasable, so applying them dropped the argument. The binder-use walk and auto-dup's use collection size nodes with term_cells, so a use under a DSU, a STORE or any UOp missing from their own arity table counts (auto-dup left such uses without a DUP). Tests: test_icc.
 - A step-budgeted wnf checks the budget before a DUP-UOP fires, as every other rule does: it checked after, so a bail wrote the UOP back over the fired dup's substitution and the rule fired again on resume. Test: test_wnf_n.

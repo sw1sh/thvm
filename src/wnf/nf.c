@@ -79,9 +79,10 @@ fn Term nf(Term root) {
   u64  root_loc = heap_alloc(1);
   heap_set(root_loc, root);
 
-  // T=1 only: at T>1 the step index double-fires shared substructure.
+  // T=1 only: at T>1 the step index double-fires shared substructure.  A
+  // session the WL stepper holds is not nf's to index or detach.
   _Bool step_used = 0;
-  if (n_threads == 1) {
+  if (n_threads == 1 && !STEP_ACTIVE) {
     (void)redex_step_attach(&root, 1);
     step_used = STEP_ACTIVE;
   }
@@ -93,7 +94,8 @@ fn Term nf(Term root) {
   }
   Term *seed = (Term *)malloc((size_t)seed_cap * sizeof(Term));
   u32  seed_n = redex_enumerate(&root, 1, seed, seed_cap);
-  if (seed_n > seed_cap) seed_n = seed_cap;
+  _Bool clamped = seed_n > seed_cap;
+  if (clamped) seed_n = seed_cap;
   for (u32 i = 0; i < seed_n; i++) wnf_pool_push(pool, 0, seed[i]);
 
   u64 fired_total = 0;
@@ -115,13 +117,16 @@ fn Term nf(Term root) {
     if (fired_round == 0) break;       // nothing fired: a fixed point
 
     // With a session the fires pushed every successor, so a drained bag is
-    // the end; without one, re-enumerate.
-    if (step_used) {
+    // the end, unless the seed was clamped or a push dropped; otherwise
+    // re-enumerate.
+    if (step_used && !clamped && pool->workers[0].dropped == 0) {
       seed_n = 0;
     } else {
+      pool->workers[0].dropped = 0;
       root = heap_read(root_loc);
       seed_n = redex_enumerate(&root, 1, seed, seed_cap);
-      if (seed_n > seed_cap) seed_n = seed_cap;
+      clamped = seed_n > seed_cap;
+      if (clamped) seed_n = seed_cap;
     }
     if (seed_n == 0) break;
     for (u32 i = 0; i < seed_n; i++) wnf_pool_push(pool, 0, seed[i]);

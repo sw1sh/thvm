@@ -19,7 +19,8 @@ typedef struct WnfWorker {
   u64             active_ns;        // ns spent in pop+fire (busy time)
   u64             idle_ns;          // ns spent in spin (waiting for work)
   u64             wakeups;          // # times reactivated after going idle
-  u64             _pad1[6];         // cache-line padding
+  u64             dropped;          // # pushes a full bag refused with no thief (T=1)
+  u64             _pad1[5];         // cache-line padding
 } WnfWorker;
 
 // Declared before WnfFireFn: a struct first named in a prototype would get
@@ -89,6 +90,7 @@ fn _Bool wnf_pool_init(WnfPool *p, u32 n) {
     p->workers[i].active_ns       = 0;
     p->workers[i].idle_ns         = 0;
     p->workers[i].wakeups         = 0;
+    p->workers[i].dropped         = 0;
     p->workers[i].wnf_state.stack = (Term *)calloc(WNF_CAP, sizeof(Term));
     // 2^18 slots (2 MB) per bag, a depth-19 balanced ADD tree's bottom-level
     // seed; nf clamps its seed to it.
@@ -121,8 +123,15 @@ fn void wnf_pool_free(WnfPool *p) {
 fn void wnf_pool_push(WnfPool *p, u32 tid, Term t) {
   if (t == 0) return;
   WsDeque *q = &p->workers[tid].bag;
-  // wsq_push fails only on a full bag: spin until a thief takes a task.
-  while (!wsq_push(q, (u64)t)) cpu_relax();
+  // wsq_push fails only on a full bag: spin until a thief takes a task.  With
+  // no thief the task is dropped and counted, and nf re-enumerates.
+  while (!wsq_push(q, (u64)t)) {
+    if (p->n <= 1) {
+      p->workers[tid].dropped++;
+      return;
+    }
+    cpu_relax();
+  }
   p->workers[tid].pushes++;
 }
 
@@ -166,6 +175,7 @@ fn void wnf_pool_reset_run(WnfPool *p) {
     p->workers[i].idle_ns        = 0;
     p->workers[i].wakeups        = 0;
     p->workers[i].itrs_delta     = 0;
+    p->workers[i].dropped        = 0;
   }
   p->drain_wall_ns = 0;
   p->drain_rounds  = 0;

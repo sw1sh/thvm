@@ -94,10 +94,57 @@ static int test_nf_pool_lifecycle(void) {
   return 0;
 }
 
+static Term nf_test_add(u32 a, u32 b) {
+  u64 loc = heap_alloc(2);
+  heap_set(loc + 0, term_new(0, TAG_NUM, DT_INT32, a));
+  heap_set(loc + 1, term_new(0, TAG_NUM, DT_INT32, b));
+  return term_new(0, TAG_OP2, OP_ADD, loc);
+}
+
+// A step session the WL stepper opened is not nf's: nf leaves it attached.
+static int test_nf_keeps_a_session_it_did_not_open(void) {
+  TEST_BEGIN("nf leaves a session it did not open attached");
+  thvm_init();
+  Term held = nf_test_add(2, 3);
+  (void)redex_step_attach(&held, 1);
+  CHECK(STEP_ACTIVE);
+  Term out = nf(nf_test_add(4, 5));
+  CHECK_EQ(term_tag(out), TAG_NUM);
+  CHECK_EQ(term_val(out), 9u);
+  CHECK(STEP_ACTIVE);
+  redex_step_detach();
+  thvm_free();
+  return 0;
+}
+
+// More redexes than the bag's 2^18 seed slots: the ones past the clamp fire
+// too, from a re-enumeration.
+static int test_nf_past_the_seed_cap(void) {
+  TEST_BEGIN("nf fires every redex past the seed cap");
+  thvm_init();
+  nf_set_threads(1);
+  u32   n    = 300000;
+  Term *kids = (Term *)malloc(n * sizeof(Term));
+  for (u32 i = 0; i < n; i++) kids[i] = nf_test_add(i, 1);
+  Term out = nf(term_new_ctr(0, kids, n));
+  free(kids);
+  int all = 1;
+  for (u32 i = 0; i < n && all; i++) {
+    Term c = term_resolve(term_ctr_at(out, i));
+    all = term_tag(c) == TAG_NUM && term_val(c) == i + 1;
+  }
+  CHECK(all);
+  nf_set_threads(0);
+  thvm_free();
+  return 0;
+}
+
 int main(void) {
   test_nf_app_lam();
   test_nf_op2_chain();
   test_nf_idempotent();
   test_nf_pool_lifecycle();
+  test_nf_keeps_a_session_it_did_not_open();
+  test_nf_past_the_seed_cap();
   TEST_REPORT();
 }
