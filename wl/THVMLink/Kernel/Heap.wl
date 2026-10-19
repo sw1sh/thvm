@@ -155,7 +155,7 @@ termFromTTermDepth[t_TTerm, d_Integer] := Block[{tag, val, ext, cell},
     val = TTermVal[t];
     ext = TTermExt[t];
     Switch[tag,
-        $TagNUM, Term["NUM", val],
+        $TagNUM, If[ext === $DTInt32, Term["NUM", val], Term["NUM", dtypeName[ext], val]],
         $TagERA, Term["ERA"],
         $TagTEN, Term["TEN", val],
         $TagREF, Term["REF", ext],
@@ -432,6 +432,7 @@ Options[TInitialize] = {"ZeroFill" -> False}
 
 TInitialize[t_TTerm] := t (* identity *)
 TInitialize[Term["NUM", v_Integer]] := TNum[v]
+TInitialize[Term["NUM", dtype_String, v_Integer]] := TNum[v, dtype]
 TInitialize[Term["NUM", _, v_Integer]] := TNum[v]
 TInitialize[Term["ERA"]] := TEra[]
 TInitialize[Term["ANY"]] := TAny[]
@@ -648,9 +649,9 @@ cellTreeWalkTerm[cells_, Term[tag_String, ext_, val_, ___], seen_] := Module[{ta
     Switch[tagCode,
         $TagERA, "ERA",
         $TagVAR, "VAR"[val],
-        (* Mirror TTermExpr in THVMLink.wl: drop dtype for the common
-           i32 case, surface "f32" only for f32 NUM cells. *)
-        $TagNUM, If[ext === 0, "NUM"["f32", val], "NUM"[val]],
+        (* Mirror TTermExpr in THVMLink.wl: drop the dtype for the common
+           i32 case and name it for every other. *)
+        $TagNUM, If[ext === $DTInt32, "NUM"[val], "NUM"[dtypeName[ext], val]],
         $TagTEN, "TEN"[val],
         $TagREF, "REF"[ext, val],
         $TagDP0, "DP0"[ext, cellTreeWalkLoc[cells, val, seen]],

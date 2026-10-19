@@ -1146,10 +1146,10 @@ tTreeWalkWith[reader_, t_, seen_] := Block[{raw = ttermRaw[t], tag, val, ext, se
     Switch[tag,
         $TagERA, "ERA",
         $TagVAR, "VAR"[val],
-        (* Drop the dtype field for the common i32 case; surface it
-           only when the cell holds an f32 (CONST scalar payload).
-           Keeps "NUM"[2] readable for kernel kid / view dim cells. *)
-        $TagNUM, If[ext === 0, "NUM"["f32", val], "NUM"[val]],
+        (* Drop the dtype for the common i32 case and name it for every
+           other (an f32 CONST scalar payload, a bool).  Keeps "NUM"[2]
+           readable for kernel kid / view dim cells. *)
+        $TagNUM, If[ext === $DTInt32, "NUM"[val], "NUM"[dtypeName[ext], val]],
         $TagTEN, "TEN"[val],
         $TagREF, "REF"[ext],
         (* DP0 / DP1 recurse into the dup body so each projection's
