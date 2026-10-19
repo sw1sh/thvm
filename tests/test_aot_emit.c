@@ -388,5 +388,47 @@ int main(void) {
     free(src);
   }
 
+  // A nested dispatch names its value dvN from a counter that restarts per
+  // program, so one def emits one source (build.c's content-hash cache keys on
+  // it).  TLam[m, TLam[n, TMat[<|0 -> 1|>, TLam[m1, TMat[<|0 -> 2|>, TLam[n1, 3]][n]]][m]]]
+  TEST_BEGIN("emit is deterministic across a nested dispatch");
+  {
+    u64  lam_m_loc  = book_alloc(1);
+    Term var_m      = term_new(0, TAG_VAR, 0, lam_m_loc);
+    u64  lam_n_loc  = book_alloc(1);
+    Term var_n      = term_new(0, TAG_VAR, 0, lam_n_loc);
+    u64  lam_n1_loc = book_alloc(1);
+    book_set(lam_n1_loc, term_new(0, TAG_NUM, DT_INT32, 3));
+    u64  mi_loc     = book_alloc(2);
+    book_set(mi_loc + 0, term_new(0, TAG_NUM, DT_INT32, 2));
+    book_set(mi_loc + 1, term_new(0, TAG_LAM, 0, lam_n1_loc));
+    u64  ai_loc     = book_alloc(2);
+    book_set(ai_loc + 0, term_new(0, TAG_MAT, 0, mi_loc));
+    book_set(ai_loc + 1, var_n);
+    u64  lam_m1_loc = book_alloc(1);
+    book_set(lam_m1_loc, term_new(0, TAG_APP, 0, ai_loc));
+    u64  mo_loc     = book_alloc(2);
+    book_set(mo_loc + 0, term_new(0, TAG_NUM, DT_INT32, 1));
+    book_set(mo_loc + 1, term_new(0, TAG_LAM, 0, lam_m1_loc));
+    u64  ao_loc     = book_alloc(2);
+    book_set(ao_loc + 0, term_new(0, TAG_MAT, 0, mo_loc));
+    book_set(ao_loc + 1, var_m);
+    book_set(lam_n_loc, term_new(0, TAG_APP, 0, ao_loc));
+    book_set(lam_m_loc, term_new(0, TAG_LAM, 0, lam_n_loc));
+    DEFS[7] = term_new(0, TAG_LAM, 0, lam_m_loc);
+    char *s1 = thvm_aot_emit_program(7, "nest");
+    char *s2 = thvm_aot_emit_program(7, "nest");
+    CHECK(s1 != NULL && s2 != NULL);
+    if (s1 != NULL && s2 != NULL) {
+      // One fast-path line per dispatch: the outer one and the nested one.
+      u32 dispatches = 0;
+      for (char const *q = s1; (q = strstr(q, " != TAG_NUM) dv")) != NULL; q++) dispatches++;
+      CHECK_EQ(dispatches, 2u);
+      CHECK(strcmp(s1, s2) == 0);
+    }
+    free(s1);
+    free(s2);
+  }
+
   TEST_REPORT();
 }

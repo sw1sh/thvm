@@ -21,14 +21,15 @@ static void aot_emit_init(AotEmit *e) {
   e->cap = AOT_EMIT_INITIAL_CAP;
   e->len = 0;
   e->buf = (char *)malloc(e->cap);
-  if (e->buf) e->buf[0] = '\0';
+  if (e->buf == NULL) thvm_fatal("aot emit: out of memory");
+  e->buf[0] = '\0';
 }
 
 static void aot_emit_grow(AotEmit *e, u32 need) {
   while (e->cap - e->len < need) {
     u32 ncap = e->cap * 2;
     char *nb = (char *)realloc(e->buf, ncap);
-    if (!nb) return;
+    if (nb == NULL) thvm_fatal("aot emit: out of memory");
     e->buf = nb;
     e->cap = ncap;
   }
@@ -51,7 +52,7 @@ static void aot_emit_fmt(AotEmit *e, const char *fmt, ...) {
   va_end(ap);
   if (n < 0) { va_end(ap2); return; }
   char *tmp = (char *)malloc((size_t)n + 1);
-  if (tmp == NULL) { va_end(ap2); return; }
+  if (tmp == NULL) thvm_fatal("aot emit: out of memory");
   vsnprintf(tmp, (size_t)n + 1, fmt, ap2);
   va_end(ap2);
   aot_emit_str(e, tmp);
@@ -198,7 +199,8 @@ static Term aot_peel_lams(Term root, u32 *out_argc, AotBindings *b) {
   return cursor;
 }
 
-static u32 aot_value_fresh = 0;
+static u32 aot_value_fresh  = 0;
+static u32 aot_nested_fresh = 0;   // the dvN names of nested dispatches
 
 // The program being emitted, for the DP case's dup memo: a static like
 // aot_value_fresh rather than one more parameter on every value-expr call.
@@ -291,73 +293,28 @@ static const char *aot_emit_value_expr_named(AotEmit *e, Term term,
                      indent, out_buf, label);
         return out_buf;
       }
-      if (n == 1) {
-        char child_buf[24];
-        const char *cv = aot_emit_value_expr_named(e, book_read(loc + 1),
-                                                    bind, indent,
-                                                    child_buf, sizeof child_buf);
-        aot_emit_fmt(e, "%sTerm %s = aot_make_ctr1(%u, %s);\n",
-                     indent, out_buf, label, cv);
-        return out_buf;
+      // Each child first, as it may emit statements of its own; 64 bytes holds
+      // any value expression, ERA's term_new included.
+      char (*kid_buf)[64] = (char (*)[64])malloc((size_t)n * sizeof *kid_buf);
+      const char **kid = (const char **)malloc((size_t)n * sizeof *kid);
+      if (kid_buf == NULL || kid == NULL) thvm_fatal("aot emit: out of memory");
+      for (u32 i = 0; i < n; i++) {
+        kid[i] = aot_emit_value_expr_named(e, book_read(loc + 1 + i), bind,
+                                           indent, kid_buf[i], sizeof kid_buf[i]);
       }
-      if (n == 2) {
-        char b0[24], b1[24];
-        const char *c0 = aot_emit_value_expr_named(e, book_read(loc + 1),
-                                                    bind, indent,
-                                                    b0, sizeof b0);
-        const char *c1 = aot_emit_value_expr_named(e, book_read(loc + 2),
-                                                    bind, indent,
-                                                    b1, sizeof b1);
-        aot_emit_fmt(e, "%sTerm %s = aot_make_ctr2(%u, %s, %s);\n",
-                     indent, out_buf, label, c0, c1);
-        return out_buf;
+      if (n <= 4) {
+        aot_emit_fmt(e, "%sTerm %s = aot_make_ctr%u(%u", indent, out_buf, n, label);
+        for (u32 i = 0; i < n; i++) aot_emit_fmt(e, ", %s", kid[i]);
+        aot_emit_fmt(e, ");\n");
+      } else {
+        u32 arr = aot_value_fresh++;
+        aot_emit_fmt(e, "%sTerm __ctr_kids_%u[%u] = {", indent, arr, n);
+        for (u32 i = 0; i < n; i++) aot_emit_fmt(e, "%s%s", i == 0 ? "" : ", ", kid[i]);
+        aot_emit_fmt(e, "};\n%sTerm %s = aot_make_ctrn(%u, %u, __ctr_kids_%u);\n",
+                     indent, out_buf, label, n, arr);
       }
-      if (n == 3) {
-        char b0[24], b1[24], b2[24];
-        const char *c0 = aot_emit_value_expr_named(e, book_read(loc + 1),
-                                                    bind, indent, b0, sizeof b0);
-        const char *c1 = aot_emit_value_expr_named(e, book_read(loc + 2),
-                                                    bind, indent, b1, sizeof b1);
-        const char *c2 = aot_emit_value_expr_named(e, book_read(loc + 3),
-                                                    bind, indent, b2, sizeof b2);
-        aot_emit_fmt(e, "%sTerm %s = aot_make_ctr3(%u, %s, %s, %s);\n",
-                     indent, out_buf, label, c0, c1, c2);
-        return out_buf;
-      }
-      if (n == 4) {
-        char b0[24], b1[24], b2[24], b3[24];
-        const char *c0 = aot_emit_value_expr_named(e, book_read(loc + 1),
-                                                    bind, indent, b0, sizeof b0);
-        const char *c1 = aot_emit_value_expr_named(e, book_read(loc + 2),
-                                                    bind, indent, b1, sizeof b1);
-        const char *c2 = aot_emit_value_expr_named(e, book_read(loc + 3),
-                                                    bind, indent, b2, sizeof b2);
-        const char *c3 = aot_emit_value_expr_named(e, book_read(loc + 4),
-                                                    bind, indent, b3, sizeof b3);
-        aot_emit_fmt(e, "%sTerm %s = aot_make_ctr4(%u, %s, %s, %s, %s);\n",
-                     indent, out_buf, label, c0, c1, c2, c3);
-        return out_buf;
-      }
-      // 16 is HVM4's CTR arity cap (C00..C16, TinyHVM/HVM4/clang/term/arity.c).
-      if (n <= 16) {
-        aot_emit_fmt(e, "%s{ Term __ctr_kids_%u[%u] = {",
-                     indent, aot_value_fresh, n);
-        for (u32 i = 0; i < n; i++) {
-          char bi[24];
-          const char *ci = aot_emit_value_expr_named(
-              e, book_read(loc + 1 + i), bind, indent, bi, sizeof bi);
-          aot_emit_fmt(e, "%s%s", (i == 0 ? "" : ", "), ci);
-        }
-        aot_emit_fmt(e,
-          "};\n"
-          "%s  Term %s = aot_make_ctrn(%u, %u, __ctr_kids_%u); }\n",
-          indent, out_buf, label, n, aot_value_fresh - 1);
-        return out_buf;
-      }
-      aot_emit_fmt(e,
-        "%sTerm %s = term_new(0, TAG_ERA, 0, 0);"
-              "  /* CTR arity %u exceeds 16 (HVM4 cap) */\n",
-        indent, out_buf, n);
+      free(kid);
+      free(kid_buf);
       return out_buf;
     }
     case TAG_OP2: {
@@ -720,9 +677,8 @@ static void aot_emit_arm_handler(AotProgState *st, Term handler,
 
   // Nested dispatch, as in ack's default arm matching on n; a fresh dvN keeps
   // the outer dv visible.
-  static u32 nested_counter = 0;
   char dv2_name[16];
-  snprintf(dv2_name, sizeof dv2_name, "dv%u", ++nested_counter);
+  snprintf(dv2_name, sizeof dv2_name, "dv%u", ++aot_nested_fresh);
   if (aot_emit_app_of_mat_named(st, cursor, bind, dv2_name, indent)) {
     bind->n = saved_n;
     st->dup_memo_n = saved_dup_memo_n;
@@ -874,10 +830,11 @@ static _Bool aot_tag_is_whnf(u8 tag) {
 
 #define AOT_PRI_SCAN_MAX_DEPTH  32
 
-// 1 if a PRI occurs within AOT_PRI_SCAN_MAX_DEPTH levels.  Callers fire PRIs
-// via TWnf when they choose, so the fallback leaves such a body unreduced.
+// 1 if a PRI occurs within AOT_PRI_SCAN_MAX_DEPTH levels, or past what the scan
+// can see.  Callers fire PRIs via TWnf when they choose, so the fallback leaves
+// such a body unreduced.
 static _Bool aot_body_contains_pri(Term term, u32 depth) {
-  if (depth > AOT_PRI_SCAN_MAX_DEPTH) return 0;
+  if (depth > AOT_PRI_SCAN_MAX_DEPTH) return 1;
   u8  tag = term_tag(term);
   u64 loc = term_val(term);
   switch (tag) {
@@ -892,7 +849,6 @@ static _Bool aot_body_contains_pri(Term term, u32 depth) {
     case TAG_AND:
     case TAG_OR:
     case TAG_ANN:
-    case TAG_BRI:
     case TAG_WHEN:
     case TAG_SUP: {
       Term a = book_read(loc + 0);
@@ -905,6 +861,7 @@ static _Bool aot_body_contains_pri(Term term, u32 depth) {
     case TAG_LAM:
     case TAG_INC:
     case TAG_DUP:
+    case TAG_BRI:
       return aot_body_contains_pri(book_read(loc), depth + 1);
 
     // Heap[loc] = NUM(n); Heap[loc+1..loc+n] = children
@@ -912,7 +869,7 @@ static _Bool aot_body_contains_pri(Term term, u32 depth) {
       Term n_cell = book_read(loc);
       if (term_tag(n_cell) != TAG_NUM) return 0;
       u32 n = (u32)term_val(n_cell);
-      if (n > 64) return 0;  // safety cap
+      if (n > 64) return 1;  // past the scan's cap
       for (u32 i = 0; i < n; i++) {
         if (aot_body_contains_pri(book_read(loc + 1 + i), depth + 1))
           return 1;
@@ -933,9 +890,10 @@ fn char *thvm_aot_emit_program(u32 def_id, const char *name) {
   Term root = DEFS[def_id];
   if (root == 0) return NULL;
 
-  // v_K names restart per program, so equal defs emit equal source and hit
-  // build.c's content-hash cache.
-  aot_value_fresh = 0;
+  // v_K and dvN names restart per program, so equal defs emit equal source and
+  // hit build.c's content-hash cache.
+  aot_value_fresh  = 0;
+  aot_nested_fresh = 0;
 
   AotEmit body_buf, cont_buf, final_buf;
   aot_emit_init(&body_buf);

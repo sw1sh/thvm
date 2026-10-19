@@ -481,5 +481,62 @@ int main(void) {
     free(src);
   }
 
+  // A CTR past the fixed aot_make_ctr1..4 helpers, with an ERA child: its
+  // children are emitted before the array that holds them and the result stays
+  // in scope.  TLam[x, C6(x, ERA, x, x, x, x)] on NUM(5); val packs the arity,
+  // child 1's tag and child 5's value.
+  TEST_BEGIN("emit + compile + run: an arity-6 CTR keeps its children");
+  {
+    thvm_free(); thvm_init();
+    u64  lam_loc = book_alloc(1);
+    Term var_x   = term_new(0, TAG_VAR, 0, lam_loc);
+    u64  ctr_loc = book_alloc(7);
+    book_set(ctr_loc, term_new(0, TAG_NUM, DT_INT32, 6));
+    for (u32 i = 0; i < 6; i++) {
+      book_set(ctr_loc + 1 + i, i == 1 ? term_new(0, TAG_ERA, 0, 0) : var_x);
+    }
+    book_set(lam_loc, term_new(0, TAG_CTR, 3, ctr_loc));
+    DEFS[4] = term_new(0, TAG_LAM, 0, lam_loc);
+    char *src = thvm_aot_emit_program(4, "ctr6");
+    CHECK(src != NULL);
+    FILE *f = fopen("/tmp/aot_e2e_ctr6.c", "w");
+    CHECK(f != NULL);
+    if (src != NULL && f != NULL) {
+      fprintf(f, "#include \"%s/src/thvm.c\"\n\n", REPO_ROOT);
+      fputs(src, f);
+      fputs("\n#include <stdio.h>\n"
+            "int main(void) {\n"
+            "  thvm_init();\n"
+            "  AotProgram p;\n"
+            "  aot_program_ctr6_register(&p);\n"
+            "  Term in = term_new(0, TAG_NUM, DT_INT32, 5u);\n"
+            "  AotTask root = aot_make_task(FN_ctr6, AOT_RET_ROOT, in, 0, 0, 0);\n"
+            "  Term r = aot_run_serial(&p, root);\n"
+            "  unsigned v = term_tag(r) != TAG_CTR ? 0u\n"
+            "      : term_ctr_n(r) * 10000u + term_tag(term_ctr_at(r, 1)) * 100u\n"
+            "        + (unsigned)term_val(term_ctr_at(r, 5));\n"
+            "  printf(\"result val=%u\\n\", v);\n"
+            "  return 0;\n"
+            "}\n", f);
+      fclose(f);
+      char cmd[2048];
+      snprintf(cmd, sizeof cmd,
+        "clang -O0 -std=c11 -Wno-everything -DACCELERATE_NEW_LAPACK %s"
+        "-o /tmp/aot_e2e_ctr6 /tmp/aot_e2e_ctr6.c %s 2>&1",
+        aot_host_defines(), aot_exe_link_flags());
+      FILE *p = popen(cmd, "r");
+      CHECK(p != NULL);
+      if (p != NULL) {
+        char line[1024];
+        while (fgets(line, sizeof line, p) != NULL) {
+          if (strstr(line, "error:") != NULL) fprintf(stderr, "clang: %s", line);
+        }
+        CHECK_EQ(pclose(p), 0);
+      }
+      CHECK_EQ(run_e2e_binary("/tmp/aot_e2e_ctr6"), 6ull * 10000 + TAG_ERA * 100 + 5);
+    }
+    free(src);
+  }
+
   TEST_REPORT();
 }
