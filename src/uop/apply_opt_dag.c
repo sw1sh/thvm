@@ -24,8 +24,8 @@ fn Term uop_dag_apply_tc(Term root, u32 factor) {
     // chain in place; rmu_detect_matmul_tc accepts the chain around an OPT_TC.
     Term red = rec_tc_find_epilogue_reduce(value);
     if (red == 0) return 0;
-    RecTcSubState st = { red, uop_opt(red, UOP_OPT_TC, factor), {0}, {0}, 0 };
-    new_value = rec_tc_sub(&st, value, 0);
+    Term tc = uop_opt(red, UOP_OPT_TC, factor);
+    new_value = uop_substitute(value, &red, &tc, 1);
   } else {
     return 0;
   }
@@ -200,85 +200,43 @@ static Term apply_opt_dag_substitute(Term t, ApplyOptDagSubState *st) {
   return out;
 }
 
-// A walk over a lifted kernel DAG visiting each node once (nodes are
-// hash-consed, so Term equality is node identity).  A push returns 0 when the
-// stack or the visited set is full: the caller bails rather than act on part
-// of the kernel.
-#define AOD_WALK_STACK 256
-#define AOD_WALK_SEEN  1024
-typedef struct {
-  Term stack[AOD_WALK_STACK];
-  u32  sp;
-  Term seen[AOD_WALK_SEEN];
-} AodWalk;
-
-static int aod_walk_push(AodWalk *w, Term t) {
-  if (term_tag(t) != TAG_UOP) {
-    return 1;
-  }
-  u32 h = (u32)((t * 0x9e3779b97f4a7c15ull) >> 54);
-  for (u32 p = 0; p < AOD_WALK_SEEN; p++) {
-    Term *slot = &w->seen[(h + p) & (AOD_WALK_SEEN - 1)];
-    if (*slot == t) {
-      return 1;
-    }
-    if (*slot == 0) {
-      if (w->sp == AOD_WALK_STACK) {
-        return 0;
-      }
-      *slot = t;
-      w->stack[w->sp++] = t;
-      return 1;
-    }
-  }
-  return 0;
-}
-
-static int aod_walk_start(AodWalk *w, Term root) {
-  w->sp = 0;
-  memset(w->seen, 0, sizeof w->seen);
-  return aod_walk_push(w, root);
-}
-
 // Push t's children: an OPT's target, and an AFTER's two stores when
-// `into_after`.  0 on overflow.
-static int aod_walk_children(AodWalk *w, Term t, int into_after) {
+// `into_after`.
+static void aod_walk_children(UOpWalk *w, Term t, int into_after) {
   u32 op = term_ext(t);
   if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID || op == UOP_RANGE) {
-    return 1;
+    return;
   }
   if (op == UOP_OPT) {
-    return aod_walk_push(w, uop_opt_target(t));
+    uop_walk_push(w, uop_opt_target(t));
+    return;
   }
   u8  ar  = (op == UOP_AFTER && into_after) ? 2 : uop_arity(op);
   u64 loc = term_val(t);
   for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
-    if (!aod_walk_push(w, heap_read(loc + i))) {
-      return 0;
-    }
+    uop_walk_push(w, heap_read(loc + i));
   }
-  return 1;
 }
 
-// The one RANGE leaf of `target_axis`; 0 when there is none, several, or the
-// walk overflows.
+// The one RANGE leaf of `target_axis`; 0 when there is none or several.
 static Term apply_opt_dag_find_range(Term root, u32 target_axis) {
   if (root == 0) return 0;
-  AodWalk w;
-  if (!aod_walk_start(&w, root)) return 0;
-  Term found = 0;
-  while (w.sp > 0) {
-    Term t = w.stack[--w.sp];
+  UOpWalk w = {0};
+  uop_walk_push(&w, root);
+  Term found = 0, t;
+  int  several = 0;
+  while (!several && (t = uop_walk_pop(&w)) != 0) {
     if (term_ext(t) == UOP_RANGE) {
       if (uop_range_axis_id(t) == target_axis) {
-        if (found != 0) return 0;
-        found = t;
+        several = found != 0;
+        found   = t;
       }
       continue;
     }
-    if (!aod_walk_children(&w, t, 0)) return 0;
+    aod_walk_children(&w, t, 0);
   }
-  return found;
+  uop_walk_free(&w);
+  return several ? 0 : found;
 }
 
 static u8 apply_opt_dag_inner_kax(u8 op) {
@@ -295,22 +253,26 @@ static u32 apply_opt_dag_inner_opt_kind(u8 op) {
 }
 
 // The distinct RANGE leaves under `root`, every store of an AFTER root
-// included, into out[0..cap); returns the count, or cap + 1 when the walk
-// would drop one, and then the caller bails.
+// included, into out[0..cap); returns the count, or cap + 1 when there are
+// more, and then the caller bails.
 static u32 apply_opt_dag_collect_ranges(Term root, Term *out, u32 cap) {
   if (root == 0) return 0;
-  AodWalk w;
-  if (!aod_walk_start(&w, root)) return cap + 1;
-  u32 n = 0;
-  while (w.sp > 0) {
-    Term t = w.stack[--w.sp];
+  UOpWalk w = {0};
+  uop_walk_push(&w, root);
+  u32  n = 0;
+  Term t;
+  while ((t = uop_walk_pop(&w)) != 0) {
     if (term_ext(t) == UOP_RANGE) {
-      if (n == cap) return cap + 1;
+      if (n == cap) {
+        n = cap + 1;
+        break;
+      }
       out[n++] = t;
       continue;
     }
-    if (!aod_walk_children(&w, t, 1)) return cap + 1;
+    aod_walk_children(&w, t, 1);
   }
+  uop_walk_free(&w);
   return n;
 }
 

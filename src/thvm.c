@@ -268,6 +268,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/flip.c"
 #include "uop/grad.c"
 #include "uop/leaf_tids.c"
+#include "uop/map.c"
 #include "uop/walk.c"
 #include "uop/load.c"
 #include "uop/copy.c"

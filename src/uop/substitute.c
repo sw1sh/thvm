@@ -64,79 +64,26 @@ static Term uop_substitute_rebuild(Term t, Term const *srcs) {
   }
 }
 
-// Open-addressed Term -> Term memo; keys are never 0 (a TAG_UOP or atom Term).
-typedef struct {
-  Term *keys;
-  Term *vals;
-  u32   cap;
-  u32   len;
-} UopSubMemo;
-
-static u32 uop_sub_slot(UopSubMemo const *m, Term k) {
-  u32 i = (u32)((k * 0x9e3779b97f4a7c15ull) >> 32) & (m->cap - 1);
-  while (m->keys[i] != 0 && m->keys[i] != k) {
-    i = (i + 1) & (m->cap - 1);
-  }
-  return i;
-}
-
-static void uop_sub_put(UopSubMemo *m, Term k, Term v) {
-  if (2 * (m->len + 1) > m->cap) {
-    UopSubMemo g = { calloc(2 * (size_t)m->cap, sizeof(Term)),
-                     calloc(2 * (size_t)m->cap, sizeof(Term)), 2 * m->cap, 0 };
-    if (g.keys == NULL || g.vals == NULL) {
-      thvm_fatal("uop_substitute: out of memory");
-    }
-    for (u32 i = 0; i < m->cap; i++) {
-      if (m->keys[i] != 0) {
-        u32 j = uop_sub_slot(&g, m->keys[i]);
-        g.keys[j] = m->keys[i];
-        g.vals[j] = m->vals[i];
-        g.len++;
-      }
-    }
-    free(m->keys);
-    free(m->vals);
-    *m = g;
-  }
-  u32 i = uop_sub_slot(m, k);
-  if (m->keys[i] == 0) {
-    m->keys[i] = k;
-    m->len++;
-  }
-  m->vals[i] = v;
-}
-
-// 1, with its value in *v, when k is done.
-static int uop_sub_find(UopSubMemo const *m, Term k, Term *v) {
-  u32 i = uop_sub_slot(m, k);
-  if (m->keys[i] != k) {
-    return 0;
-  }
-  *v = m->vals[i];
-  return 1;
-}
-
 fn Term uop_substitute(Term root, Term const *from, Term const *to, u32 n) {
   if (n == 0 || root == 0) {
     return root;
   }
-  UopSubMemo m = { calloc(64, sizeof(Term)), calloc(64, sizeof(Term)), 64, 0 };
-  u32   scap  = 256, sp = 0;
-  Term *stack = malloc(scap * sizeof(Term));
-  if (m.keys == NULL || m.vals == NULL || stack == NULL) {
+  UOpMap m     = {0};
+  u32    scap  = 256, sp = 0;
+  Term  *stack = malloc(scap * sizeof(Term));
+  if (stack == NULL) {
     thvm_fatal("uop_substitute: out of memory");
   }
   // Seeding the memo with the map makes a key's value final: it is never
   // descended into.
   for (u32 i = 0; i < n; i++) {
-    uop_sub_put(&m, from[i], to[i]);
+    (void)uop_map_put(&m, from[i], to[i]);
   }
   stack[sp++] = root;
   Term v;
   while (sp > 0) {
     Term t = stack[sp - 1];
-    if (uop_sub_find(&m, t, &v)) {
+    if (uop_map_get(&m, t, &v)) {
       sp--;
       continue;
     }
@@ -144,7 +91,7 @@ fn Term uop_substitute(Term root, Term const *from, Term const *to, u32 n) {
     int pending = 0;
     for (u32 i = 0; i < ns; i++) {
       Term s = uop_src_at(t, i);
-      if (s != 0 && !uop_sub_find(&m, s, &v)) {
+      if (s != 0 && !uop_map_get(&m, s, &v)) {
         if (sp == scap) {
           scap *= 2;
           stack = realloc(stack, scap * sizeof(Term));
@@ -165,17 +112,16 @@ fn Term uop_substitute(Term root, Term const *from, Term const *to, u32 n) {
     for (u32 i = 0; i < ns; i++) {
       Term s  = uop_src_at(t, i);
       srcs[i] = s;
-      if (s != 0 && uop_sub_find(&m, s, &v)) {
+      if (s != 0 && uop_map_get(&m, s, &v)) {
         srcs[i] = v;
       }
       changed |= srcs[i] != s;
     }
-    uop_sub_put(&m, t, changed ? uop_substitute_rebuild(t, srcs) : t);
+    (void)uop_map_put(&m, t, changed ? uop_substitute_rebuild(t, srcs) : t);
   }
   Term out = root;
-  uop_sub_find(&m, root, &out);
+  uop_map_get(&m, root, &out);
   free(stack);
-  free(m.keys);
-  free(m.vals);
+  uop_map_free(&m);
   return out;
 }

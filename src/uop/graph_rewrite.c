@@ -3,7 +3,6 @@
 // cousin of tinygrad's graph_rewrite).
 
 #define UOP_GRAPH_REWRITE_STATS_CAP 128
-#define UOP_GRAPH_REWRITE_MEMO_MAX  (1u << 20)
 
 // Past either budget the pass fails through thvm_fatal (an error in an armed WL
 // entry), as tinygrad raises at uop/ops.py:1804 (stack) and :1815 (cycle):
@@ -22,11 +21,6 @@ typedef struct {
   u32         hits;
 } UOpGraphRewriteStat;
 
-typedef struct {
-  Term key;
-  Term value;
-} UOpGraphRewriteMemoSlot;
-
 // A rule hit on an open chain: the node it fired on, and the replacement to
 // memoize once the chain settles (0 when already memoized or not a UOp node).
 typedef struct {
@@ -36,9 +30,7 @@ typedef struct {
 } UOpGraphRewriteStep;
 
 typedef struct {
-  UOpGraphRewriteMemoSlot   *memo;
-  u32                        memo_cap;
-  u32                        memo_used;
+  UOpMap                     memo;
   UOpGraphRewriteRule const *rules;
   u32                        n_rules;
   void                      *user;
@@ -84,68 +76,6 @@ fn u32 uop_graph_rewrite_stat_hits(char const *name) {
     }
   }
   return 0;
-}
-
-static u32 uop_graph_rewrite_hash(Term t, u32 cap) {
-  u64 x = t;
-  x ^= x >> 33; x *= 0xff51afd7ed558ccdULL;
-  x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL;
-  x ^= x >> 33;
-  return (u32)x & (cap - 1);
-}
-
-static u32 uop_graph_rewrite_memo_cap(void) {
-  u64 need = HEAP_NEXT > 0 ? HEAP_NEXT * 2 : 1024;
-  u32 cap = 1024;
-  while ((u64)cap < need && cap < UOP_GRAPH_REWRITE_MEMO_MAX) {
-    cap <<= 1;
-  }
-  return cap;
-}
-
-static int uop_graph_rewrite_memo_lookup(UOpGraphRewriteState *st,
-                                         Term key,
-                                         Term *out) {
-  if (st->memo == NULL || st->memo_cap == 0) {
-    return 0;
-  }
-  u32 h = uop_graph_rewrite_hash(key, st->memo_cap);
-  for (u32 p = 0; p < st->memo_cap; p++) {
-    u32 i = (h + p) & (st->memo_cap - 1);
-    if (st->memo[i].key == 0) {
-      return 0;
-    }
-    if (st->memo[i].key == key) {
-      *out = st->memo[i].value;
-      return 1;
-    }
-  }
-  return 0;
-}
-
-static void uop_graph_rewrite_memo_insert(UOpGraphRewriteState *st,
-                                          Term key,
-                                          Term value) {
-  if (st->memo == NULL || st->memo_cap == 0) {
-    return;
-  }
-  if (st->memo_used * 2 >= st->memo_cap) {
-    return;
-  }
-  u32 h = uop_graph_rewrite_hash(key, st->memo_cap);
-  for (u32 p = 0; p < st->memo_cap; p++) {
-    u32 i = (h + p) & (st->memo_cap - 1);
-    if (st->memo[i].key == key) {
-      st->memo[i].value = value;
-      return;
-    }
-    if (st->memo[i].key == 0) {
-      st->memo[i].key   = key;
-      st->memo[i].value = value;
-      st->memo_used++;
-      return;
-    }
-  }
 }
 
 __attribute__((noinline, noreturn))
@@ -393,7 +323,7 @@ static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st, Term t, u32 depth) {
     return resolved;
   }
   Term memo_hit = 0;
-  if (uop_graph_rewrite_memo_lookup(st, resolved, &memo_hit)) {
+  if (uop_map_get(&st->memo, resolved, &memo_hit)) {
     return memo_hit;
   }
   if (depth >= UOP_GRAPH_REWRITE_MAX_DEPTH) {
@@ -433,7 +363,7 @@ static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st, Term t, u32 depth) {
     fresh = 0;
     if (term_tag(key) != TAG_UOP || term_ext(key) == UOP_KERNEL) {
       cur = key;
-    } else if (!uop_graph_rewrite_memo_lookup(st, key, &cur)) {
+    } else if (!uop_map_get(&st->memo, key, &cur)) {
       st->chain[st->chain_len - 1].key = key;
       cur   = key;
       fresh = 1;
@@ -446,11 +376,11 @@ static Term uop_graph_rewrite_rec(UOpGraphRewriteState *st, Term t, u32 depth) {
   }
   for (u32 k = base; k < st->chain_len; k++) {
     if (st->chain[k].key != 0) {
-      uop_graph_rewrite_memo_insert(st, st->chain[k].key, cur);
+      (void)uop_map_put(&st->memo, st->chain[k].key, cur);
     }
   }
   st->chain_len = base;
-  uop_graph_rewrite_memo_insert(st, resolved, cur);
+  (void)uop_map_put(&st->memo, resolved, cur);
   return cur;
 }
 
@@ -484,17 +414,12 @@ fn Term uop_graph_rewrite(Term root,
 
   UOpGraphRewriteState st;
   memset(&st, 0, sizeof(st));
-  st.memo_cap = uop_graph_rewrite_memo_cap();
-  st.memo = (UOpGraphRewriteMemoSlot *)calloc(st.memo_cap, sizeof(st.memo[0]));
-  if (st.memo == NULL) {
-    st.memo_cap = 0;
-  }
   st.rules   = rules;
   st.n_rules = n_rules;
   st.user    = user;
 
   Term out = uop_graph_rewrite_rec(&st, root, 0);
-  free(st.memo);
+  uop_map_free(&st.memo);
   free(st.chain);
   uop_graph_rewrite_stats_dump(&st);
   return out;
@@ -514,9 +439,7 @@ static void uop_to_device_leaves_check_depth(Term r, u32 depth) {
   }
 }
 
-static Term uop_to_device_leaves_rec(Term t, i32 dev,
-                                     UOpGraphRewriteMemoSlot *memo,
-                                     u32 cap, u32 *used, u32 depth) {
+static Term uop_to_device_leaves_rec(Term t, i32 dev, UOpMap *memo, u32 depth) {
   Term r   = term_resolve(t);
   u8   tag = term_tag(r);
   if (tag == TAG_TEN) return uop_copy_dev(r, dev);
@@ -529,21 +452,12 @@ static Term uop_to_device_leaves_rec(Term t, i32 dev,
     // time, which can differ from `dev`, so it is re-targeted to `dev`.
     if (uop_copy_device(term_val(r)) >= 0) return r;
     uop_to_device_leaves_check_depth(r, depth);
-    Term csrc = uop_to_device_leaves_rec(heap_read(term_val(r) + 0),
-                                         dev, memo, cap, used, depth + 1);
+    Term csrc = uop_to_device_leaves_rec(heap_read(term_val(r) + 0), dev, memo, depth + 1);
     return uop_copy_dev(csrc, dev);
   }
 
   Term memo_hit = 0;
-  if (cap != 0) {
-    u32 h = uop_graph_rewrite_hash(r, cap);
-    for (u32 p = 0; p < cap; p++) {
-      u32 i = (h + p) & (cap - 1);
-      if (memo[i].key == 0) break;
-      if (memo[i].key == r) { memo_hit = memo[i].value; break; }
-    }
-    if (memo_hit != 0) return memo_hit;
-  }
+  if (uop_map_get(memo, r, &memo_hit)) return memo_hit;
   uop_to_device_leaves_check_depth(r, depth);
 
   u8  ar  = uop_arity(op);
@@ -552,20 +466,13 @@ static Term uop_to_device_leaves_rec(Term t, i32 dev,
   int changed = 0;
   for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
     Term old_child = heap_read(loc + i);
-    Term new_child = uop_to_device_leaves_rec(old_child, dev, memo, cap, used, depth + 1);
+    Term new_child = uop_to_device_leaves_rec(old_child, dev, memo, depth + 1);
     srcs[i] = new_child;
     if (new_child != old_child) changed = 1;
   }
   Term cur = changed ? uop_graph_rebuild_with_srcs(r, srcs) : r;
 
-  if (cap != 0 && *used * 2 < cap) {
-    u32 h = uop_graph_rewrite_hash(r, cap);
-    for (u32 p = 0; p < cap; p++) {
-      u32 i = (h + p) & (cap - 1);
-      if (memo[i].key == r)  { memo[i].value = cur; break; }
-      if (memo[i].key == 0)  { memo[i].key = r; memo[i].value = cur; (*used)++; break; }
-    }
-  }
+  (void)uop_map_put(memo, r, cur);
   return cur;
 }
 
@@ -573,12 +480,8 @@ static Term uop_to_device_leaves_rec(Term t, i32 dev,
 // on dev, uploading each leaf once: a COPY at the root alone would compute on
 // the leaves' device and move only the result.  Backs TToDevice.
 fn Term uop_to_device_leaves(Term root, i32 dev) {
-  u32 cap = uop_graph_rewrite_memo_cap();
-  UOpGraphRewriteMemoSlot *memo =
-      (UOpGraphRewriteMemoSlot *)calloc(cap, sizeof(memo[0]));
-  if (memo == NULL) cap = 0;     // OOM: still correct, just unshared COPYs
-  u32 used = 0;
-  Term out = uop_to_device_leaves_rec(root, dev, memo, cap, &used, 0);
-  free(memo);
+  UOpMap memo = {0};
+  Term   out  = uop_to_device_leaves_rec(root, dev, &memo, 0);
+  uop_map_free(&memo);
   return out;
 }

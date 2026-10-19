@@ -262,37 +262,6 @@ static Term rec_tc_find_epilogue_reduce(Term value) {
   return red;
 }
 
-// Replace `target` by `repl` under `t`, rebuilding each Term at most once.
-// `repl` is not walked, so a wrapped OPT(target) cannot match again.
-#define REC_TC_SUB_MEMO_CAP 1024
-typedef struct {
-  Term target, repl;
-  Term key[REC_TC_SUB_MEMO_CAP], val[REC_TC_SUB_MEMO_CAP];
-  u32 n;
-} RecTcSubState;
-static Term rec_tc_sub(RecTcSubState *st, Term t, int depth) {
-  if (depth > 64) return t;
-  Term r = term_resolve(t);
-  if (r == st->target) return st->repl;
-  if (term_tag(r) != TAG_UOP) return r;
-  for (u32 i = 0; i < st->n; i++) if (st->key[i] == r) return st->val[i];
-  u8 op = term_ext(r);
-  if (op == UOP_KERNEL || op == UOP_BUFFER) return r;
-  u8 ar = uop_arity(op);
-  Term srcs[MAX_UOP_SRC] = {0};
-  int changed = 0;
-  u64 loc = term_val(r);
-  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
-    Term old_c = heap_read(loc + i);
-    Term new_c = rec_tc_sub(st, old_c, depth + 1);
-    srcs[i] = new_c;
-    if (new_c != old_c) changed = 1;
-  }
-  Term out = changed ? uop_graph_rebuild_with_srcs(r, srcs) : r;
-  if (st->n < REC_TC_SUB_MEMO_CAP) { st->key[st->n] = r; st->val[st->n] = out; st->n++; }
-  return out;
-}
-
 // The bare-REDUCE STORE(buf, addr, reduce) of an epilogue store, whose REDUCE
 // shares the output's M and N ranges; 0 without one epilogue REDUCE.
 static Term rec_tc_synth_matmul_store(Term root, Term *out_reduce) {
@@ -315,8 +284,7 @@ static Term rec_tc_wrap_epilogue_reduce(Term root, Term reduce) {
   Term addr_out = heap_read(sloc + 1);
   Term value    = heap_read(sloc + 2);
   Term tc       = uop_opt(reduce, UOP_OPT_TC, 0);
-  RecTcSubState st = { reduce, tc, {0}, {0}, 0 };
-  Term new_value = rec_tc_sub(&st, value, 0);
+  Term new_value = uop_substitute(value, &reduce, &tc, 1);
   if (new_value == value) return root;
   return uop_store(buf_out, addr_out, new_value);
 }
@@ -560,8 +528,7 @@ static Term rec_tc_collapse_split(Term root) {
       if (rn == 0) continue;
       Term repl = (ax_ord[i] == inner) ? uop_range(inner, KAX_LOOP, flat)
                                        : uop_const(DT_INT32, 0);
-      RecTcSubState st = { rn, repl, {0}, {0}, 0 };
-      result = rec_tc_sub(&st, result, 0);
+      result = uop_substitute(result, &rn, &repl, 1);
     }
   }
   return result;
