@@ -651,6 +651,7 @@ cellTreeWalkLoc[cells_, idx_Integer, seen_] := With[{cell = Lookup[cells, idx, M
 cellTreeWalkTerm[cells_, Term[tag_String, ext_, val_, ___], seen_] := Module[{tagCode = tagToCode[tag], n, seen2, stateCell},
     Switch[tagCode,
         $TagERA, "ERA",
+        $TagANY, "ANY",
         $TagVAR, "VAR"[val],
         (* Mirror TTermExpr in THVMLink.wl: drop the dtype for the common
            i32 case and name it for every other. *)

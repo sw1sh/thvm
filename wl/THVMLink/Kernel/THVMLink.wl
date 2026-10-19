@@ -90,6 +90,7 @@ Returns Missing[\"OutOfBounds\", path$] when the route doesn't fit the term shap
 (* === high-level constructors === *)
 SetUsage[TFreshLabel, "TFreshLabel[] returns the next integer from a monotonic SUP/DUP label counter, then bumps it.  Reset by TReset[]."];
 SetUsage[TEra, "TEra[] constructs an eraser term."];
+SetUsage[TAny, "TAny[] constructs the wildcard term ANY, which structural equality (TEql) treats as equal to every term."];
 SetUsage[TVarFor, "TVarFor[lamLoc$] constructs a VAR pointing at a binder loc."];
 SetUsage[TLam, "TLam[x$, body$] constructs a lambda (HoldAll, so x$ is the binder symbol and body$ the lambda body referring to it, e.g. TLam[w, TUOpAdd[w, w]]).
 When body$ is a UOP graph and the first TApp's argument carries a shape, the APP-LAM interaction JIT-materializes the body into a kernel with the bound var as a symbolic input slot (compile once, dispatch each subsequent arg).
@@ -1154,6 +1155,7 @@ tTreeWalkWith[reader_, t_, seen_] := Block[{raw = ttermRaw[t], tag, val, ext, se
     ext = $termExtFn[raw];
     Switch[tag,
         $TagERA, "ERA",
+        $TagANY, "ANY",
         $TagVAR, "VAR"[val],
         (* Drop the dtype for the common i32 case and name it for every
            other (an f32 CONST scalar payload, a bool).  Keeps "NUM"[2]
@@ -1296,6 +1298,7 @@ heapWith[fields__] := With[{loc = THeapAlloc[Length[{fields}]]},
 heapTerm[tag_Integer, ext_Integer, fields__] := packTerm[0, tag, ext, heapWith[fields]]
 
 TEra[] := packTerm[0, $TagERA, 0, 0]
+TAny[] := packTerm[0, $TagANY, 0, 0]
 TVarFor[lamLoc_Integer] := packTerm[0, $TagVAR, 0, lamLoc]
 
 TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg] (* heapWith coerces bare-Integer args *)

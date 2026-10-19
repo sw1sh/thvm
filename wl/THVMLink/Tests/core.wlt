@@ -486,3 +486,10 @@ VerificationTest[
     {TSup::empty},
     TestID -> "core/tsup-list-edge-cases"
 ]
+
+(* TAny[] is the ANY wildcard: equal to every term under TEql. *)
+VerificationTest[
+    {TTermExpr[TAny[]], TTermVal[TWnf[TEql[TAny[], TNum[7]]]], TTermExpr[TInitialize[Term["ANY"]]]},
+    {"ANY", 1, "ANY"},
+    TestID -> "core/tany-wildcard"
+]
