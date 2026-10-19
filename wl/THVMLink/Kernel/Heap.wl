@@ -439,7 +439,7 @@ TInitialize[Term["ANY"]] := TAny[]
 TInitialize[Term["REF", slot_Integer]] := packTerm[0, $TagREF, slot, 0]
 TInitialize[Term["TEN", id_Integer]] := packTerm[0, $TagTEN, 5, id]
 TInitialize[Term["VAR", binderId_]] := (Message[TInitialize::orphanvar, binderId]; $Failed)
-TInitialize::orphanvar = "Term[\"VAR\", ``] outside any enclosing Term[\"LAM\", ``, ...] - VARs only make sense in a LAM body.";
+TInitialize::orphanvar = "Term[\"VAR\", `1`] is outside the Term[\"LAM\", `1`, ...] that binds it; a VAR belongs in its lambda's body.";
 
 (* Identity rule for already-built TTerms: lets nested recursion mix
    freshly-built TTerm leaves into a Term-shaped expression. *)
@@ -482,7 +482,12 @@ TInitialize[Term["DP0", label_Integer, body_]] :=
 TInitialize[Term["DP1", label_Integer, body_]] :=
     Last  @ TDup[label, TInitialize[body]]
 
-TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
+(* An uninitialized tensor (TContextStrip's) needs "ZeroFill" -> True: without it the snapshot
+   is refused before anything is written to the heap. *)
+snapshotRestorableQ[a_Association, {opts___}] :=
+    TrueQ[OptionValue[TInitialize, {opts}, "ZeroFill"]] || ! AnyTrue[Values[Lookup[a, "Tensors", <||>]], AssociationQ]
+
+TInitialize[TContext[a_Association], opts:OptionsPattern[]] /; snapshotRestorableQ[a, {opts}] := Module[{
     cellsAssoc, bookCellsAssoc, tensorsAssoc, defs, aloStates,
     root, labels, zeroFill, hasBundle,
     cellList, n, bookKeys, base, slotToRuntime, rootRaw
@@ -503,7 +508,7 @@ TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
     TReset[];
 
     slotToRuntime = Association @ KeyValueMap[
-        {slot, entry} |-> slot -> initTensorEntry[entry, zeroFill],
+        {slot, entry} |-> slot -> initTensorEntry[entry],
         tensorsAssoc
     ];
 
@@ -563,9 +568,11 @@ TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
     If[MissingQ[rootRaw], Missing["NoRoot"], TTerm[rootRaw]]
 ]
 
+TInitialize[TContext[_Association], OptionsPattern[]] := Null /; (Message[TInitialize::uninit]; False)
+
 (* Allocate + (optionally) write a single tensor entry; return the
    runtime tensor id (TenDesc slot, not the packed TAG_TEN term). *)
-initTensorEntry[na_NumericArray, _] := Module[{shape, dtype, rid},
+initTensorEntry[na_NumericArray] := Module[{shape, dtype, rid},
     shape = Dimensions[na];
     dtype = numericArrayDType[na];
     rid = TTermVal @ $tensorAllocFn[dtypeCode[dtype], shape];
@@ -576,11 +583,7 @@ initTensorEntry[na_NumericArray, _] := Module[{shape, dtype, rid},
     rid
 ]
 
-initTensorEntry[a_Association, zeroFill_] := Module[{shape = a["shape"], dtype = a["dtype"], rid, count},
-    If[ ! zeroFill,
-        Message[TInitialize::uninit];
-        Throw[$Failed, "TInitialize::uninit"]
-    ];
+initTensorEntry[a_Association] := Module[{shape = a["shape"], dtype = a["dtype"], rid, count},
     rid = TTermVal @ $tensorAllocFn[dtypeCode[dtype], shape];
     count = Times @@ shape;
     If[ dtype === "f32",
@@ -590,7 +593,7 @@ initTensorEntry[a_Association, zeroFill_] := Module[{shape = a["shape"], dtype =
     rid
 ]
 
-TInitialize::uninit = "TInitialize: snapshot is Uninitialized; pass \"ZeroFill\" -> True to allocate zero-filled tensor buffers.";
+TInitialize::uninit = "The snapshot holds uninitialized tensors; give \"ZeroFill\" -> True to restore them as zero-filled buffers.";
 
 (* Convert a Term[...] back into a packed runtime u64 via $termNewFn.
    Symbolic ext fields for OP2 / UOP / TEN / NUM are decoded back to

@@ -442,3 +442,39 @@ VerificationTest[
     "OP2"["!=", "NUM"[7], "NUM"[2]],
     TestID -> "core/top2-opcode-names"
 ]
+
+(* A location outside the heap gives a message and stays unevaluated, rather
+   than reading or writing past the mapping (THeapRead[-1] was a bus error). *)
+VerificationTest[
+    {THeapRead[-1], TBookRead[-1], THeapSet[-1, 0]},
+    {THeapRead[-1], TBookRead[-1], THeapSet[-1, 0]},
+    {THeapRead::loc, TBookRead::loc, THeapSet::loc},
+    TestID -> "core/heap-location-out-of-range"
+]
+
+(* A bare integer in a constructor slot is the NUM with that value, as in
+   TOp2 and TSup; TNf[TCtr[3, 10, 20]] used to crash the kernel. *)
+VerificationTest[
+    TTermExpr[TNf[TCtr[3, 10, 20]]],
+    "CTR"[3, "NUM"[10], "NUM"[20]],
+    TestID -> "core/tctr-lifts-integers"
+]
+
+VerificationTest[
+    {TTermVal[TWnf[TApp[TMatNum[0, 100, TLam[k, 200]], 0]]], TTermVal[TWnf[TApp[TMatNum[0, 100, TLam[k, 200]], 3]]]},
+    {100, 200},
+    TestID -> "core/tmatnum-lifts-integers"
+]
+
+VerificationTest[
+    {TTermVal[TWnf[TIfZero[0, 10, 20]]], TTermVal[TWnf[TIfZero[5, 10, 20]]], TTermVal[TWnf[TApp[TLam[x, 5], 1]]], TTermVal[TWnf[TApp[TLam[7], 1]]], TTermExpr[TCnf[5]]},
+    {10, 20, 5, 7, "NUM"[5]},
+    TestID -> "core/lambda-and-branch-bodies-lift-integers"
+]
+
+VerificationTest[
+    TCtr[1, Sequence @@ Range[17]],
+    TCtr[1, Sequence @@ Range[17]],
+    {TCtr::arity},
+    TestID -> "core/tctr-arity-limit"
+]

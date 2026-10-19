@@ -329,6 +329,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- `THeapRead`, `THeapSet` and `TBookRead` refuse a location outside the heap with a message (`THeapRead[-1]` crashed the kernel). A bare integer in a `TCtr`, `TBookCtr`, `TMatNum`, `TIfZero`, `TLam` or `TCnf` slot is the number with that value, as it already was in `TOp2` and `TSup` (`TNf[TCtr[3, 10, 20]]` crashed the kernel). `TCtr` with more than 16 children gives a message. `TInitialize` on a stripped snapshot without `"ZeroFill" -> True` gives a message and stays unevaluated instead of throwing an uncaught `Throw`.
 - `TNum` with an unknown dtype and `TOp2` with an unknown operator give a message and stay unevaluated instead of building a malformed term, and `TTermExpr` names all sixteen OP2 operators (it showed `?5` for division).
 - A number's dtype survives inspection: `TTermExpr` and `Term` name it for every dtype but i32 (`"NUM"["f32", v]`), and `TInitialize` rebuilds it. They had tested for dtype code 0, which f32 had before it became 13, so an f32 read as a plain number and a bool as `"f32"`.
 - `THeapDiagram` and `TMultiTrace`'s `"Diagram"` key give real DiagrammaticComputation diagrams again. Version 1.0.8 of that paclet defines `Diagram`, `DiagramNetwork` and `DiagramFlip` in its ``Diagram` `` subcontext, so `Diagram.wl` built inert private stubs. `diagram.wlt` went from 1/9 to 9/9 and `multicomputation.wlt` from 21/22 to 22/22.

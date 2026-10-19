@@ -562,6 +562,9 @@ EXTERN_C DLLEXPORT int thvm_wl_heap_read(WolframLibraryData libData, mint argc,
                                          MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   u64 loc = (u64)MArgument_getInteger(args[0]);
+  if (loc >= thvm_heap_map_cells()) {
+    return LIBRARY_DIMENSION_ERROR;
+  }
   MArgument_setInteger(res, (mint)heap_read(loc));
   return LIBRARY_NO_ERROR;
 }
@@ -571,6 +574,9 @@ EXTERN_C DLLEXPORT int thvm_wl_heap_set(WolframLibraryData libData, mint argc,
   (void)libData; (void)argc;
   u64  loc = (u64) MArgument_getInteger(args[0]);
   Term t   = (Term)MArgument_getInteger(args[1]);
+  if (loc >= thvm_heap_map_cells()) {
+    return LIBRARY_DIMENSION_ERROR;
+  }
   heap_set(loc, t);
   MArgument_setInteger(res, 1);
   return LIBRARY_NO_ERROR;
@@ -4011,6 +4017,9 @@ EXTERN_C DLLEXPORT int thvm_wl_book_read(WolframLibraryData libData, mint argc,
                                          MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   u64 loc = (u64)MArgument_getInteger(args[0]);
+  if (loc >= BOOK_CAP) {
+    return LIBRARY_DIMENSION_ERROR;
+  }
   MArgument_setInteger(res, (mint)book_read(loc));
   return LIBRARY_NO_ERROR;
 }

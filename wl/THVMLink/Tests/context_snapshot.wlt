@@ -201,21 +201,19 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* Initializing an Uninitialized snapshot WITHOUT ZeroFill throws. *)
+    (* Initializing an Uninitialized snapshot WITHOUT ZeroFill issues a message and
+       stays unevaluated, before anything is written to the heap. *)
     TInit[];
     TReset[];
-    Catch[
-        Module[{h, stripped},
-            h = TContextSnapshot[TTensor[{2}, {1., 2.}]];
-            stripped = TContextStrip[h];
-            TReset[];
-            TInitialize[stripped]
-        ],
-        "TInitialize::uninit"
+    Module[{h, stripped},
+        h = TContextSnapshot[TTensor[{2}, {1., 2.}]];
+        stripped = TContextStrip[h];
+        TReset[];
+        MatchQ[TInitialize[stripped], HoldPattern[TInitialize[_TContext]]]
     ],
-    $Failed,
+    True,
     {TInitialize::uninit},
-    TestID -> "heap-init/uninit-without-zerofill-throws"
+    TestID -> "heap-init/uninit-without-zerofill-unevaluated"
 ]
 
 (* === TContextToTermTree projection === *)

@@ -49,7 +49,7 @@ SetUsage[THeapAlloc, "THeapAlloc[size$] reserves size$ consecutive cells and ret
 SetUsage[THeapRead, "THeapRead[loc$] returns the Term at heap[loc$]."];
 SetUsage[TBookRead, "TBookRead[loc$] returns the Term at book_heap[loc$], useful for inspecting CTR cells allocated via TBookCtr or built by the Metal AOT kernel."];
 SetUsage[THeapSet, "THeapSet[loc$, term$] writes term$ to heap[loc$]."];
-SetUsage[TGCCollect, "TGCCollect[] runs a Cheney semi-space collection of the dyn heap and returns the new live cell count."];
+SetUsage[TGCCollect, "TGCCollect[] runs a Cheney semi-space collection of the dynamic heap and gives the new heap position THeapPos[]."];
 SetUsage[TGCCount, "TGCCount[] returns the number of GC cycles since thvm_init."];
 (* TKernelSource / TKernelFlops / TKernelDispatchKind / TKernelDispatchCount /
    TKernelTotalUs / TKernelJitDylibPath / TKernelProfile / TProfileAll
@@ -896,9 +896,16 @@ TTerm[c_Integer, id_Integer, _]["info"] := <|
 THeapPos[] := (ensureInit[]; $heapPosFn[])
 THeapBase[] := (ensureInit[]; $heapBaseFn[])
 THeapAlloc[size_Integer] := (ensureInit[]; $heapAllocFn[size])
-THeapRead[loc_Integer] := (ensureInit[]; TTerm[$heapReadFn[loc]])
-TBookRead[loc_Integer] := (ensureInit[]; TTerm[$bookReadFn[loc]])
-THeapSet[loc_Integer, t_] := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
+(* A location outside the heap (or the book heap) gives a message and leaves the expression
+   unevaluated; the library refuses it rather than reading or writing past the mapping. *)
+THeapRead[loc_Integer] := Module[{r}, TTerm[r] /;
+    (ensureInit[]; r = Quiet[$heapReadFn[loc]]; IntegerQ[r] || (Message[THeapRead::loc, loc]; False))]
+TBookRead[loc_Integer] := Module[{r}, TTerm[r] /;
+    (ensureInit[]; r = Quiet[$bookReadFn[loc]]; IntegerQ[r] || (Message[TBookRead::loc, loc]; False))]
+THeapSet[loc_Integer, t_] := Module[{r}, r /;
+    (ensureInit[]; r = Quiet[$heapSetFn[loc, ttermRaw[t]]]; IntegerQ[r] || (Message[THeapSet::loc, loc]; False))]
+THeapRead::loc = THeapSet::loc = "`1` is not a location in the heap.";
+TBookRead::loc = "`1` is not a location in the book heap.";
 TGCCollect[] := (ensureInit[]; $gcCollectFn[])
 TGCCount[] := (ensureInit[]; $gcCountFn[])
 TWnf[t_] := Module[{r},
@@ -919,6 +926,7 @@ TWnf[t_, n_Integer /; n >= 0] := Module[{r},
     r
 ]
 TNf[t_] := (ensureInit[]; withTermCtx[t, TTerm[$nfFn[ttermRaw[t]]]])
+TCnf[i_Integer] := TCnf[numCoerce[i]]
 TCnf[t_] := (ensureInit[]; withTermCtx[t, TTerm[$cnfFn[ttermRaw[t]]]])
 
 (* TCollapse[t]: enumerate the SUP-tree of a term.  Walks the SUP
@@ -1331,7 +1339,7 @@ TTermSame[a_Integer, b_Integer] := (ensureInit[]; $termEqStructFn[a, b] === 1)
    a no-op anyway.  See src/interact/app_lam.c. *)
 SetAttributes[TLam, HoldAll]
 TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
-    THeapSet[loc, Function[x, body][TVarFor[loc]]];
+    THeapSet[loc, numCoerce[Function[x, body][TVarFor[loc]]]];
     packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 
@@ -1342,7 +1350,7 @@ TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
    return a constant, and any "thunk" pattern.  HoldAll preserves
    any heap-side construction inside `body` until evaluated. *)
 TLam[body_] := With[{loc = THeapAlloc[1]},
-    THeapSet[loc, body];
+    THeapSet[loc, numCoerce[body]];
     packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 
@@ -1356,7 +1364,7 @@ TLam[body_] := With[{loc = THeapAlloc[1]},
 SetAttributes[TLamShape, HoldAll]
 TLamShape[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     WolframInstitute`THVMLink`Private`$lamShapeSetFn[loc, shape];
-    THeapSet[loc, Function[x, body][TVarFor[loc]]];
+    THeapSet[loc, numCoerce[Function[x, body][TVarFor[loc]]]];
     packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 

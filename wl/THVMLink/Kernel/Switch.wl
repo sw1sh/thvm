@@ -127,7 +127,7 @@ TEql[a_, b_] := (
 
 TMatNum[matchVal_Integer, handler_, fallback_] := (
     ensureInit[];
-    TTerm[$termNewMatFn[matchVal, ttermRaw[handler], ttermRaw[fallback]]]
+    TTerm[$termNewMatFn[matchVal, ttermRaw[numCoerce[handler]], ttermRaw[numCoerce[fallback]]]]
 )
 TMatCtr[ctorName_Integer, handler_, fallback_] := TMatNum[ctorName, handler, fallback]
 
@@ -136,9 +136,12 @@ TMatCtr[ctorName_Integer, handler_, fallback_] := TMatNum[ctorName, handler, fal
    never referenced) so MAT-MIS lands correctly. *)
 TIfZero[counter_, thenTerm_, elseTerm_] := TApp[TMatNum[0, thenTerm, TLam[ignored, elseTerm]], counter]
 
-TCtr[label_Integer, children___] := (
+(* REWRITE_MAX_ARITY in src/thvm.h *)
+$ctrMaxArity = 16;
+
+TCtr[label_Integer, children___] /; Length[{children}] <= $ctrMaxArity := (
     ensureInit[];
-    TTerm[$termNewCtrFn[label, ttermRaw /@ {children}]]
+    TTerm[$termNewCtrFn[label, ttermRaw[numCoerce[#]] & /@ {children}]]
 )
 
 (* TBookCtr - like TCtr but allocates the cell sequence in BOOK_HEAP
@@ -146,10 +149,13 @@ TCtr[label_Integer, children___] := (
    destined for the Metal AOT path: the kernel's `device Term *heap`
    buffer is zero-copy bound to BOOK_HEAP, so destructure derefs only
    work for vals in book_heap range. *)
-TBookCtr[label_Integer, children___] := (
+TBookCtr[label_Integer, children___] /; Length[{children}] <= $ctrMaxArity := (
     ensureInit[];
-    TTerm[$termNewBookCtrFn[label, ttermRaw /@ {children}]]
+    TTerm[$termNewBookCtrFn[label, ttermRaw[numCoerce[#]] & /@ {children}]]
 )
+TCtr[_Integer, children___] := Null /; (Message[TCtr::arity, Length[{children}], $ctrMaxArity]; False)
+TBookCtr[_Integer, children___] := Null /; (Message[TBookCtr::arity, Length[{children}], $ctrMaxArity]; False)
+TCtr::arity = TBookCtr::arity = "A constructor takes at most `2` children; `1` were given.";
 
 (* TMatChain[<|0 -> h0, 1 -> h1, ...|>, fb] expands to
      TMatNum[0, h0, TMatNum[1, h1, ... TMatNum[k, hk, fb] ...]].
