@@ -396,6 +396,9 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- TAtpTrainScorer refuses a dataset that is not 14-feature rows with one 0 or 1 label each (`TAtpTrainScorer::data`), and a "Hidden" width outside 0 to 64 (`TAtpTrainScorer::hidden`), instead of training on garbage behind a cascade of internal messages.
+- TAtpTrainGnn takes its starting loss from a forward of its own, so the forward its training loop differentiates stays lazy until the loop runs.
+- The documentation evaluates Train, AtpMethods and TAtpTrainScorer again (a second training in one kernel no longer dies, and the stripped-kernel abort is fixed in the runtime); the TAtpTrainScorer page is rewritten around real examples.
 - Integer tensor division is true division, as in tinygrad: `TTensorCreate[{1, 2}]/2` is `{0.5, 1.}` in f32 (it was `{0, 0}`); reciprocal and square root cast an integer tensor to f32 first, and a rational scalar promotes like a real one.
 - TFindProof keeps a theory's variables off the goal's names in any context, so the renaming also holds on a documentation page, whose symbols live in a private context.
 - TEproverProof reports "TimedOut" when E's automatic schedule gives up at its CPU limit, and runs E under the same outer time limit as the other provers.

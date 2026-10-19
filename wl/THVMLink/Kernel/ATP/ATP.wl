@@ -765,6 +765,14 @@ atpScorerAuc[scores_List, labels_List] := Module[{nP, nN, ranks},
 
 Options[TAtpTrainScorer] = {"Hidden" -> 16, MaxTrainingRounds -> 300, "LearningRate" -> 0.01, "Method" -> "Adam"};
 
+TAtpTrainScorer::data = "A dataset has a \"Features\" matrix of rows of `1` numbers and as many \"Labels\", each 0 or 1, as TAtpCpDataset gives.";
+TAtpTrainScorer::hidden = "\"Hidden\" is a number of hidden units from 0 to 64; `1` is not.";
+scorerDataOkQ[d_Association] := With[{f = Lookup[d, "Features"], y = Lookup[d, "Labels"]},
+    MatrixQ[f, NumericQ] && Last[Dimensions[f]] === $AtpFeatureDim && ListQ[y] && Length[y] === Length[f] && SubsetQ[{0, 1}, y]]
+TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] /; ! scorerDataOkQ[dataset] :=
+    (Message[TAtpTrainScorer::data, $AtpFeatureDim]; $Failed)
+TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] /; ! MatchQ[OptionValue[TAtpTrainScorer, {opts}, "Hidden"], _Integer ? (0 <= # <= 64 &)] :=
+    (Message[TAtpTrainScorer::hidden, OptionValue[TAtpTrainScorer, {opts}, "Hidden"]]; $Failed)
 TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] := Module[{
     x = N[dataset["Features"]], y = dataset["Labels"], mean, sd, invStd,
     z, h = OptionValue["Hidden"], net, yOneHot, trained, pv,
@@ -1463,7 +1471,10 @@ TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
         Module[{lg = fwd[Range[nG]], logits, yT, loss, grads, lr, name},
             logits = lg[[1]];  yT = lg[[2]];
             loss = TCategoricalCrossEntropy[logits, yT];
-            lossStart = First[Normal @ TRealize @ loss];
+            (* The starting loss comes from a forward of its own, so the forward the loop
+               differentiates stays lazy until the loop runs (Optim.wl's adamStep: realize
+               nothing before TGrad). *)
+            lossStart = First[Normal @ TRealize @ (TCategoricalCrossEntropy @@ fwd[Range[nG]])];
             grads = TGrad[loss, params];
             lr = TUOpConst[lrVal];
             name = WolframInstitute`THVMLink`Private`freshTrainName[];

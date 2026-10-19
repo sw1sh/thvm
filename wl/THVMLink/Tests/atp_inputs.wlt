@@ -106,3 +106,27 @@ VerificationTest[
     True,
     TestID -> "ATP/inputs/theory-variables-avoid-goal-names-in-any-context"
 ]
+
+(* TAtpTrainScorer refuses a dataset that is not 14-feature rows with 0/1 labels, and a hidden width
+   outside 0 to 64, with its own message instead of training on garbage. *)
+VerificationTest[
+    TAtpTrainScorer[<|"Features" -> {{1., 2.}}, "Labels" -> {1}|>],
+    $Failed,
+    {TAtpTrainScorer::data},
+    TestID -> "ATP/inputs/train-scorer-bad-data"
+]
+
+VerificationTest[
+    TAtpTrainScorer[<|"Features" -> Table[N[Mod[i + j, 4]], {i, 6}, {j, 14}], "Labels" -> {1, 0, 0, 0, 1, 0}|>, "Hidden" -> 100],
+    $Failed,
+    {TAtpTrainScorer::hidden},
+    TestID -> "ATP/inputs/train-scorer-bad-hidden"
+]
+
+(* A second training in the same kernel works (it used to die in a JIT-compiled CPU kernel). *)
+VerificationTest[
+    With[{d = <|"Features" -> Table[N[Mod[i + j, 4]], {i, 6}, {j, 14}], "Labels" -> {1, 0, 0, 0, 1, 0}|>},
+        {TAtpTrainScorer[d]["TrainAUC"], TAtpTrainScorer[d]["TrainAUC"]}],
+    {1., 1.},
+    TestID -> "ATP/inputs/train-scorer-twice"
+]
