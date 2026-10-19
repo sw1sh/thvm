@@ -307,9 +307,10 @@ A head is a safetensors file of f32 `mu`, `sd`, `w1` [hid, n_x], `b1`,
 `w2`, `b2`, `kappa`; its metadata gives `Layout` (`v1` or `topk18`),
 `Phi`, `Lanes` and `Families` (`name:lane:mode:k:tau:coop`, comma
 separated).  A `topk_net.py export` file (no `Layout`) reads as `topk18`
-with the one family `*:0:topk:K:0:0`.  Heads total at most 2 MB.  Two
-heads ship (`build example=ex.safetensors harvest=hv.safetensors`
-reproduces `src/atp/guide_models.c` byte for byte):
+with the one family `*:0:topk:K:0:0`.  Heads total at most 2 MB.  Three
+heads ship (`build example=ex.safetensors harvest=hv.safetensors
+loop0=tools/atp_enigma/models/loop0.safetensors` reproduces
+`src/atp/guide_models.c` byte for byte):
 - `example` (v1, 22 inputs, no phi(p), hidden 4, family `*` top-K 16), the
   default, exists so the build compiles;
 - `harvest` (v1, 60 inputs: every phi(p) column and no lane column, hidden
@@ -317,7 +318,13 @@ reproduces `src/atp/guide_models.c` byte for byte):
   head: its correction is 0 with or without `--guide-zero`, so it picks
   the engine's root, and its dump records the engine's 64 best
   candidates, phi(p) included; a dump names its lane (`lane_name=`), from
-  which the trainer builds the lane one-hot.
+  which the trainer builds the lane one-hot;
+- `loop0` (v1, 64 inputs: every phi(p) column and the one-hot of
+  unfold-tgt-awr, twee-deep, tgt-sel and encompass, hidden 128, a top-K 64
+  family per lane) is the loop-0 head of plan amendments A30 and A31: the
+  full model of `guide_net.py` on the loop-0 harvest's groups, its width
+  chosen on VAL.  `--guide=<lane> --guide-model=loop0` arms it in that
+  lane's twin.
 
 Metadata `LaneNames` (optional) lists the `Lanes` lane names in one-hot
 order; `weights_to_c.py lanes head.safetensors listed.txt` checks them

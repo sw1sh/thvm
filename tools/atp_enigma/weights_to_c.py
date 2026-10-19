@@ -32,10 +32,12 @@
 # literals, exact) and the registry --guide-model=<id> selects from; the
 # first head is the default.  example writes the tiny head that keeps the
 # build compiling, harvest the loop-0 harvest head (every phi(p) column,
-# zero correction, top-64); the shipped src/atp/guide_models.c holds both:
+# zero correction, top-64); the shipped src/atp/guide_models.c holds both
+# and the trained loop-0 head:
 #   weights_to_c.py example ex.safetensors
 #   weights_to_c.py harvest hv.safetensors
-#   weights_to_c.py build example=ex.safetensors harvest=hv.safetensors -o guide_models.c
+#   weights_to_c.py build example=ex.safetensors harvest=hv.safetensors \
+#     loop0=tools/atp_enigma/models/loop0.safetensors -o guide_models.c
 # reproduces it byte for byte.  parity rescores a THVM_ATP_GUIDE_DUMP file
 # with the head in float64: every candidate's correction (to 1e-9) and
 # score, and every pick's decision (gate G2.4); a lazy dump must carry
