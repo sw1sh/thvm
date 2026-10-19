@@ -107,6 +107,29 @@ int main(void) {
     CHECK_EQ(term_val(out), term_val(add));
   }
 
+  // A budget spent just before a DUP-UOP leaves the dup unfired; the bail must
+  // not write over a fired dup's substitution, so the rule fires once in all.
+  TEST_BEGIN("wnf_n/bail-before-dup-uop-fires-it-once");
+  {
+    Shape s   = {0};
+    s.ndim    = 1;
+    s.dims[0] = 2;
+    Term t    = term_new(0, TAG_TEN, DT_FP32, tensor_alloc(&CPU_BACKEND, s, DT_FP32));
+    Term add  = uop_binary(UOP_ADD, t, t);
+    u64  dup  = heap_alloc(1);
+    heap_set(dup, build_app(build_id_lam(), add));   // APP-LAM, then DUP-UOP
+    Term d0   = term_new(0, TAG_DP0, 7, dup);
+    Term d1   = term_new(0, TAG_DP1, 7, dup);
+    u64  i0   = ITRS;
+    wnf_n(d0, 1);
+    CHECK_EQ(ITRS - i0, 1);
+    Term r0 = term_resolve(wnf(d0));
+    Term r1 = term_resolve(wnf(d1));
+    CHECK_EQ(r0, add);
+    CHECK_EQ(r1, add);
+    CHECK_EQ(ITRS - i0, 2);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

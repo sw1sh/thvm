@@ -367,6 +367,7 @@ apply:
             goto enter;
           }
           case TAG_UOP: {
+            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             Term r = interact_dup_uop(lab, loc, side, whnf);
             if (r == 0) {
               // An active UOP: restore the body; the DP is WHNF.
@@ -374,7 +375,6 @@ apply:
               whnf = frame;
               continue;
             }
-            if (BUDGET_HIT) { stack[s_pos++] = frame; BAIL_AT(whnf); }
             next = r;
             goto enter;
           }

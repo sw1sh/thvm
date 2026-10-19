@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- A step-budgeted wnf checks the budget before a DUP-UOP fires, as every other rule does: it checked after, so a bail wrote the UOP back over the fired dup's substitution and the rule fired again on resume. Test: test_wnf_n.
 - A custom kernel whose outs come out of order (WL "Outs" -> {3, 1}) writes each out slot's own buffer: output_tid was the first listed slot's tensor while the backends bind it at the lowest one, so that slot received the other tensor's buffer. Test: test_custom_kernel outs-in-any-order.
 - torch_load reads a saved permuted tensor (a transposed view) in logical order, as tinygrad does (nn/state.py:232-241): it took the storage bytes as row-major. Test: test_torch_load.
 - Dead code removed: recognise_tc.c's unused matmul UPat table, dag_scan's unread red_axis_id, the py bridge's uncalled Thvm.wnf, fwd, grad, ten_get_grad and ten_set_grad with their C exports.
