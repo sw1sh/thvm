@@ -2214,20 +2214,22 @@ __attribute__((noinline))
 static Term unified_rewrite_rec_extend(UnifiedRewriteState *st,
                                        UnifiedSubst const *sub,
                                        Term from, Term to, Term v, u32 depth) {
+  // A dropped binding would leave its closed range unbound, read as iteration 0.
+  if (sub != NULL && sub->n >= UNIFIED_SUBST_CAP) {
+    thvm_fatal("materialize: a nested inline chain binds more than UNIFIED_SUBST_CAP ranges");
+  }
   UnifiedSubst new_sub;
   new_sub.n = 0;
   if (sub != NULL) {
-    for (u32 i = 0; i < sub->n && new_sub.n < UNIFIED_SUBST_CAP; i++) {
+    for (u32 i = 0; i < sub->n; i++) {
       new_sub.from[new_sub.n] = sub->from[i];
       new_sub.to  [new_sub.n] = sub->to  [i];
       new_sub.n++;
     }
   }
-  if (new_sub.n < UNIFIED_SUBST_CAP) {
-    new_sub.from[new_sub.n] = from;
-    new_sub.to  [new_sub.n] = to;
-    new_sub.n++;
-  }
+  new_sub.from[new_sub.n] = from;
+  new_sub.to  [new_sub.n] = to;
+  new_sub.n++;
   return unified_rewrite_rec_sub(st, &new_sub, v, depth + 1);
 }
 
