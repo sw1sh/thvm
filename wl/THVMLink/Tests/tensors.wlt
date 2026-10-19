@@ -236,3 +236,16 @@ VerificationTest[
     {"TEN", "ADD", "GRAD"},
     TestID -> "tensors/tuopkind-names"
 ]
+
+(* A TKernel in arithmetic stands for its output term; kernel["Source", fmt] is TKernelSource. *)
+VerificationTest[
+    With[{x = TTensorCreate[{1., 2.}]}, With[{k = TKernel[TMaterialize[x^2]]}, {Normal @ TRealize[k + x], Normal @ TRealize[2. k]}]],
+    {{2., 6.}, {2., 8.}},
+    TestID -> "tensors/tkernel-arithmetic"
+]
+
+VerificationTest[
+    (TRealize[TTensorCreate[{1., 2.}] * 3.]; StringQ[TKernel[TKernelCount[] - 1]["Source", "C"]]),
+    True,
+    TestID -> "tensors/tkernel-source-format"
+]
