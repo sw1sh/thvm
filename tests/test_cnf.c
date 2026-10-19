@@ -170,6 +170,23 @@ int main(void) {
     CHECK_EQ(term_val(out1[0]), 1);
   }
 
+  // A comb of 40000 leaves pushes past the queue's 65536 slots in all, with
+  // two tasks pending at a time: popped slots are reused.
+  TEST_BEGIN("collapse/long-comb-reuses-queue-slots");
+  {
+    u32  n_leaves = 40000;
+    Term comb     = build_num(n_leaves - 1);
+    for (u32 i = n_leaves - 1; i > 0; i--) {
+      comb = build_sup(7, build_num(i - 1), comb);
+    }
+    Term *out = (Term *)malloc((n_leaves + 1) * sizeof(Term));
+    u64   n   = eval_collapse(comb, out, n_leaves + 1);
+    CHECK_EQ(n, n_leaves);
+    CHECK_EQ(term_val(out[0]), 0);
+    CHECK_EQ(term_val(out[n_leaves - 1]), n_leaves - 1);
+    free(out);
+  }
+
   thvm_free();
   TEST_REPORT();
 }

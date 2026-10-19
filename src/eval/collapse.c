@@ -17,8 +17,17 @@ static int eval_collapse_cmp(const void *a, const void *b) {
   return 0;
 }
 
-// Writes at most `cap` leaves to `out` and returns the count; popped slots are
-// not reused, so the walk stops once it has pushed the queue's cap in all.
+// Moves the live tasks to the front of the queue; 0 when they fill it.
+static int eval_collapse_room(EvalCollapseTask *q, u32 *head, u32 *tail, u32 need) {
+  if (*tail + need <= EVAL_COLLAPSE_QUEUE_CAP) return 1;
+  memmove(q, q + *head, (size_t)(*tail - *head) * sizeof *q);
+  *tail -= *head;
+  *head  = 0;
+  return *tail + need <= EVAL_COLLAPSE_QUEUE_CAP;
+}
+
+// Writes at most `cap` leaves to `out` and returns the count; the walk stops
+// early only when the queue's cap of tasks are pending at once.
 fn u64 eval_collapse(Term term, Term *out, u64 cap) {
   if (cap == 0) return 0;
   EvalCollapseTask *q = (EvalCollapseTask *)
@@ -42,7 +51,7 @@ fn u64 eval_collapse(Term term, Term *out, u64 cap) {
     Term resolved = cnf(t.term);
     switch (term_tag(resolved)) {
       case TAG_SUP: {
-        if (q_tail + 2 > EVAL_COLLAPSE_QUEUE_CAP) {
+        if (!eval_collapse_room(q, &q_head, &q_tail, 2)) {
           free(q);
           return count;
         }
@@ -59,7 +68,7 @@ fn u64 eval_collapse(Term term, Term *out, u64 cap) {
         break;
       }
       case TAG_INC: {
-        if (q_tail + 1 > EVAL_COLLAPSE_QUEUE_CAP) {
+        if (!eval_collapse_room(q, &q_head, &q_tail, 1)) {
           free(q);
           return count;
         }

@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- eval_collapse reuses popped queue slots, so it stops early only when 65536 tasks are pending at once: it stopped after 65536 pushes in all, at 32767 leaves of a long SUP comb. Test: test_cnf.
 - LAM_ERA_MASK is set only on lambdas whose binder is unused: APP-BRI's inner lambda (its $k is read by the ANN outside the body) and ANN-LAM's new lambda (read through the bridge that replaces the old binder) were sealed as erasable, so applying them dropped the argument. The binder-use walk and auto-dup's use collection size nodes with term_cells, so a use under a DSU, a STORE or any UOp missing from their own arity table counts (auto-dup left such uses without a DUP). Tests: test_icc.
 - A step-budgeted wnf checks the budget before a DUP-UOP fires, as every other rule does: it checked after, so a bail wrote the UOP back over the fired dup's substitution and the rule fired again on resume. Test: test_wnf_n.
 - A custom kernel whose outs come out of order (WL "Outs" -> {3, 1}) writes each out slot's own buffer: output_tid was the first listed slot's tensor while the backends bind it at the lowest one, so that slot received the other tensor's buffer. Test: test_custom_kernel outs-in-any-order.
