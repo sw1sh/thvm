@@ -4117,7 +4117,7 @@ Options[TFindProof] = {
        *Process names; ignored by the internal-engine path. *)
     "Binary" -> Automatic,
     "ParseFormulas" -> False,
-    "LiftToProofObject" -> False,
+    "LiftToProofObject" -> Automatic,
     (* "ProofObject" (default) returns the built-in ProofObject; "TProofObject"
        returns the native, extensible thvm proof object (see TProofObject.wl). *)
     "ProofForm" -> "ProofObject"
@@ -4253,12 +4253,7 @@ TFindProof[theory_String, returnSpec_String, opts : OptionsPattern[]] /; atpRetu
     atpTheoryCompletion[theory, returnSpec, opts];
 TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpecQ[theory] := Catch[
     Block[{cjRaw, methodOpt = OptionValue[TFindProof, {opts}, Method],
-            methodName, methodSubs,
-            (* TFindProof's own defaults for the builder options, listed after the caller's so
-               an explicit option wins and the builders' different defaults do not apply. *)
-            processDefaults = {
-                "LiftToProofObject" -> OptionValue[TFindProof, {opts}, "LiftToProofObject"],
-                "ParseFormulas" -> OptionValue[TFindProof, {opts}, "ParseFormulas"]}},
+            methodName, methodSubs, processDefaults},
         (* A list Method -> {"WaldmeisterProcess", "WMCLI" -> path, ...}
            carries the external-tool name as the head and its per-tool
            suboptions (the binary path, TimeConstraint, ...) as the rest;
@@ -4267,6 +4262,14 @@ TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpe
            precedence over a same-named top-level option). *)
         methodName = If[ ListQ[methodOpt], First[methodOpt], methodOpt];
         methodSubs = If[ ListQ[methodOpt], Rest[methodOpt], {}];
+        (* TFindProof's own defaults for the builder options, listed after the caller's so an
+           explicit option wins and the builders' different defaults do not apply.  Automatic
+           lifts Waldmeister's proof, whose protocol parses quickly into a ProofObject that
+           verifies; the TPTP provers' lifts parse every formula with TPTPImport, seconds each. *)
+        processDefaults = {
+            "LiftToProofObject" -> Replace[OptionValue[TFindProof, {opts}, "LiftToProofObject"],
+                Automatic :> methodName === "WaldmeisterProcess"],
+            "ParseFormulas" -> OptionValue[TFindProof, {opts}, "ParseFormulas"]};
         (* Method -> "VampireProcess" / "TweeProcess" / etc. route
            through the external CLI wrappers and return a thvm-shaped
            ProofObject, so the same downstream consumers (proof

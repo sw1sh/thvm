@@ -654,8 +654,10 @@ cellTreeWalkTerm[cells_, Term[tag_String, ext_, val_, ___], seen_] := Module[{ta
         $TagANY, "ANY",
         $TagVAR, "VAR"[val],
         (* Mirror TTermExpr in THVMLink.wl: drop the dtype for the common
-           i32 case and name it for every other. *)
-        $TagNUM, If[ext === $DTInt32, "NUM"[val], "NUM"[dtypeName[ext], val]],
+           i32 case and name it for every other.  A snapshot's cells carry the
+           dtype as its name already. *)
+        $TagNUM, With[{d = If[StringQ[ext], ext, dtypeName[ext]]},
+            If[d === "i32", "NUM"[val], "NUM"[d, val]]],
         $TagTEN, "TEN"[val],
         $TagREF, "REF"[ext, val],
         $TagDP0, "DP0"[ext, cellTreeWalkLoc[cells, val, seen]],

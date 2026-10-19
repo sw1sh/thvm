@@ -332,3 +332,18 @@ VerificationTest[
     {"Proved", "Proved"},
     TestID -> "ATP/tptp-parsed-association"
 ]
+
+(* TSmtDecide is quantifier-free: a quantifier is refused, not read as an atom. *)
+VerificationTest[
+    TSmtDecide[ForAll[x, f[x] == x]],
+    $Failed,
+    {TSmtDecide::quant},
+    TestID -> "SMT/quantifier-refused"
+]
+
+(* TPTP input under Method -> "SMT" is decided over the same WL symbols as the other TPTP paths. *)
+VerificationTest[
+    ToString[TFindProof["cnf(a1, axiom, a = b).\ncnf(a2, axiom, b = c).\ncnf(g, negated_conjecture, a != c).", Method -> "SMT"]["Goal"]],
+    "a == c",
+    TestID -> "SMT/tptp-goal-in-wl-symbols"
+]
