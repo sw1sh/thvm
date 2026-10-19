@@ -250,7 +250,7 @@ fastParseFormula[body_String] := Block[{op, parts, l, r, sep},
         reverseEncodeFormula[op[l, r]]
     ]
 ]
-fastParseFormula[other_] := other
+fastParseFormula[other_] := reverseEncodeFormula[other]
 
 (* The canonical SZS-rule -> thvm-construct mapping.  Editable as a
    public Association.  Defaults cover the standard saturation-prover
@@ -274,7 +274,13 @@ $SZSRuleToConstruct = <|
     "factoring" -> "SubstitutionLemma",
     "resolution" -> "CriticalPairLemma",
     "binary_resolution" -> "CriticalPairLemma",
-    "paramodulation" -> "CriticalPairLemma"
+    "paramodulation" -> "CriticalPairLemma",
+    (* E's names: spm/pm superposition and paramodulation, rw rewriting, cn clause normalization
+       (closing x != x). *)
+    "spm" -> "CriticalPairLemma",
+    "pm" -> "CriticalPairLemma",
+    "rw" -> "SubstitutionLemma",
+    "cn" -> "Conclusion"
 |>
 
 constructTypeOf[rule_String] := Lookup[$SZSRuleToConstruct, rule, "SubstitutionLemma"]
@@ -1291,7 +1297,7 @@ TTweeProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{t
             "Backend" -> "Twee-TSTP",
             "Status" -> "Proved",
             "Goal" -> Missing["NotEmittedByTwee"],
-            "Axioms" -> #["Statement"] & /@ axs,
+            "Axioms" -> (#["Statement"] & /@ axs),
             "ProofDataset" -> ds,
             "ProofLength" -> tR["ProofLength"],
             "RuleHistogram" -> <|"twee-rewrite" -> Length[lems]|>

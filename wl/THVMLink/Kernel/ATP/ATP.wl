@@ -160,6 +160,15 @@ Options: \"RerankPeriod\", MaxSteps, \"CriticalPairWeight\", \"Ordering\", \"Aut
 
 Begin["`Private`"];
 
+(* Run a shell command under a wall-clock limit of tc seconds.  perl ships with macOS and Linux,
+   and an alarm set before exec survives it, so the prover itself gets SIGALRM at the limit (exit
+   code 142) instead of running on as an orphan. *)
+atpRunLimited[cmd_String, tc_] := Module[{secs, r},
+    {secs, r} = AbsoluteTiming @ RunProcess[{"perl", "-e", "alarm shift; exec @ARGV",
+        ToString[Max[1, Ceiling[tc]]], "sh", "-c", "exec " <> cmd}];
+    <|"Output" -> r["StandardOutput"], "Seconds" -> secs, "TimedOut" -> r["ExitCode"] === 142|>
+]
+
 (* Suppress General::shdw during definition load.  The TFindProof
    dispatch defensively Block-localizes Global`a..z + xN names
    (see [[project_atp_tfindproof_iter_leak]]) and some of those
@@ -4217,7 +4226,12 @@ TFindProof[theory_String, returnSpec_String, opts : OptionsPattern[]] /; atpRetu
     atpTheoryCompletion[theory, returnSpec, opts];
 TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpecQ[theory] := Catch[
     Block[{cjRaw, methodOpt = OptionValue[TFindProof, {opts}, Method],
-            methodName, methodSubs},
+            methodName, methodSubs,
+            (* TFindProof's own defaults for the builder options, listed after the caller's so
+               an explicit option wins and the builders' different defaults do not apply. *)
+            processDefaults = {
+                "LiftToProofObject" -> OptionValue[TFindProof, {opts}, "LiftToProofObject"],
+                "ParseFormulas" -> OptionValue[TFindProof, {opts}, "ParseFormulas"]}},
         (* A list Method -> {"WaldmeisterProcess", "WMCLI" -> path, ...}
            carries the external-tool name as the head and its per-tool
            suboptions (the binary path, TimeConstraint, ...) as the rest;
@@ -4241,25 +4255,25 @@ TFindProof[thm_String, theory_String, opts : OptionsPattern[]] /; ! atpReturnSpe
                includes the CLI wrapper's options PLUS the
                builder-only ParseFormulas. *)
             Throw[WolframInstitute`THVMLink`ATP`TVampireProofObject[theory, thm,
-                FilterRules[Join[methodSubs, {opts}],
+                FilterRules[Join[methodSubs, {opts}, processDefaults],
                     Options[WolframInstitute`THVMLink`ATP`TVampireProofObject]]],
                 "TATPError"]
         ];
         If[ methodName === "TweeProcess",
             Throw[WolframInstitute`THVMLink`ATP`TTweeProofObject[theory, thm,
-                FilterRules[Join[methodSubs, {opts}],
+                FilterRules[Join[methodSubs, {opts}, processDefaults],
                     Options[WolframInstitute`THVMLink`ATP`TTweeProofObject]]],
                 "TATPError"]
         ];
         If[ methodName === "WaldmeisterProcess",
             Throw[WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[theory, thm,
-                FilterRules[Join[methodSubs, {opts}],
+                FilterRules[Join[methodSubs, {opts}, processDefaults],
                     Options[WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject]]],
                 "TATPError"]
         ];
         If[ methodName === "EproverProcess",
             Throw[WolframInstitute`THVMLink`ATP`TEproverProofObject[theory, thm,
-                FilterRules[Join[methodSubs, {opts}],
+                FilterRules[Join[methodSubs, {opts}, processDefaults],
                     Options[WolframInstitute`THVMLink`ATP`TEproverProofObject]]],
                 "TATPError"]
         ];

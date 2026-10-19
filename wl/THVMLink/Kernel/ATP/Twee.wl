@@ -100,7 +100,7 @@ TTweeProof[theory_String, thm_String, opts : OptionsPattern[]] := TTweeProof[
 
 TTweeProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=
-    Block[{bin, tc, cmd, out, secs, status, proofBody, parsed},
+    Block[{bin, tc, cmd, run, out, secs, status, proofBody, parsed},
         bin = tweeBinary[OptionValue["Binary"]];
         If[ MissingQ[bin],
             Message[TTweeProof::notwee];
@@ -111,12 +111,13 @@ TTweeProof[problemFile_String, opts : OptionsPattern[]] /;
             Return[$Failed]
         ];
         tc = OptionValue[TimeConstraint];
-        cmd = StringJoin["timeout ", ToString[N[tc + 2]], " ", bin, " --tstp --quiet ", problemFile, " 2>&1"];
-        {secs, out} = AbsoluteTiming @ RunProcess[{"sh", "-c", cmd}, "StandardOutput"];
+        cmd = StringJoin[bin, " --tstp --quiet ", problemFile, " 2>&1"];
+        run = atpRunLimited[cmd, tc];
+        {secs, out} = {run["Seconds"], run["Output"]};
         status = Which[
             StringContainsQ[out, "SZS status Unsatisfiable"] || StringContainsQ[out, "SZS status Theorem"],
                 "Proved",
-            StringContainsQ[out, "RESULT: Timeout"] || StringContainsQ[out, "Time limit"],
+            run["TimedOut"] || StringContainsQ[out, "RESULT: Timeout"] || StringContainsQ[out, "Time limit"],
                 "TimedOut",
             True,
                 "Failed"

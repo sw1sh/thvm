@@ -329,6 +329,10 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- The external provers keep to their time limits. TWaldmeisterProof and TTweeProof stop the prover at `TimeConstraint` and report `"TimedOut"` (Waldmeister ignored the limit and never returned on a non-theorem; Twee reported `"Failed"`), and TVampireProof stops Vampire 2 s past its own `-t`, which overruns in casc mode.
+- TEproverProof works: it passed E a real CPU limit (`--cpu-limit=5.`), which E rejects, so every E run failed. E's proofs now convert like Vampire's: input copies and identity steps fold away, nested inferences give their clause parents, E's rule names map to construct types, and the formulas get the theory's operator names, so TEproverProofObject lifts to a ProofObject.
+- TTweeProofObject's `"Axioms"` holds every axiom statement, not only the last.
+- TFindProof with a process method (`"VampireProcess"`, `"TweeProcess"`, `"WaldmeisterProcess"`, `"EproverProcess"`) honors its own `"LiftToProofObject" -> False` default, so a plain run gives the prover's result in seconds instead of lifting to a ProofObject (about 100 s for an 8-step Vampire proof, nearly all of it parsing formulas).
 - Mixed integer and float tensor arithmetic promotes like tinygrad. `TTensorCreate[{1, 2}] * 2.5` is `{2.5, 5.}` in f32 (it truncated the scalar and gave `{2, 4}`), and an integer tensor plus a float tensor computes in f32.
 - `TGrad` refuses a target or wrt that is not a term with `TGrad::args`; `TGrad[{1, 2}, q]` exposed a private symbol and `TGrad[Total[q], {1, 2}]` gave `{TGradOf[1], TGradOf[2]}`.
 - `TBench` checks its spec: without `"InitFn"`, `"StepFn"` or a positive `"NumSteps"` it gives `TBench::spec` (it gave `Do::iterb` and an association with private symbols). `"Name"` defaults to `"bench"`.
