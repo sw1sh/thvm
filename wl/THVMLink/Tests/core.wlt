@@ -419,3 +419,26 @@ VerificationTest[
     {{4}, {5}},
     TestID -> "collapse TDup[7, TOp2[\"+\", TSup[7,1,2], 3]] -- shared label, annihilate"
 ]
+
+(* An unknown dtype or operator gives a message and stays unevaluated, rather
+   than building a malformed term. *)
+VerificationTest[
+    TNum[3, "foo"],
+    TNum[3, "foo"],
+    {TNum::dtype},
+    TestID -> "core/tnum-unknown-dtype-unevaluated"
+]
+
+VerificationTest[
+    TOp2["$", 1, 2],
+    TOp2["$", 1, 2],
+    {TOp2::badop},
+    TestID -> "core/top2-unknown-op-unevaluated"
+]
+
+(* Every OP2 opcode has a display name. *)
+VerificationTest[
+    TTermExpr[TOp2["!=", 7, 2]],
+    "OP2"["!=", "NUM"[7], "NUM"[2]],
+    TestID -> "core/top2-opcode-names"
+]

@@ -418,7 +418,8 @@ $tagNames = <|
     30 -> "DDU"
 |>;
 
-$op2Names = <| 0 -> "+", 1 -> "-", 2 -> "*", 3 -> "==", 4 -> "<" |>;
+$op2Names = <| 0 -> "+", 1 -> "-", 2 -> "*", 3 -> "==", 4 -> "<", 5 -> "/", 6 -> "%", 7 -> "^", 8 -> "&",
+    9 -> "|", 10 -> "<<", 11 -> ">>", 12 -> ">", 13 -> "<=", 14 -> ">=", 15 -> "!=" |>;
 
 (* Dtype constants - keep in sync with src/thvm.h.  The enum mirrors
    tinygrad's full dtype set; only f32/i32 are wired through the

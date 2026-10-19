@@ -79,10 +79,12 @@ $termNewBookCtrFn := $termNewBookCtrFn = load["thvm_wl_term_new_book_ctr", {Inte
 
 (* TAG_NUM is just a packed term - no library call needed. *)
 TNum[i_Integer] := TNum[i, "i32"]
-TNum[i_Integer, dtype_String] := (
+TNum[i_Integer, dtype_String] /; IntegerQ[dtypeCode[dtype]] := (
     ensureInit[];
     TTerm[$termNewFn[0, $TagNUM, dtypeCode[dtype], i]]
 )
+TNum[_Integer, dtype_String] := Null /; (Message[TNum::dtype, dtype]; False)
+TNum::dtype = "`1` is not a dtype; a NUM takes \"i32\", \"f32\", \"bool\" or another THVMLink dtype name.";
 
 (* numCoerce - term-constructor sugar.  A bare Integer in a value
    position means "the i32 NUM with that value", so TSup[1, 2] is
@@ -105,11 +107,12 @@ TNum[i_Integer, dtype_String] := (
 numCoerce[i_Integer] := TNum[i]
 numCoerce[x_] := x
 
-TOp2[op_String, x_, y_] := (
+TOp2[op_String, x_, y_] /; KeyExistsQ[$op2Codes, op] := (
     ensureInit[];
-    TTerm[$termNewOp2Fn[Lookup[$op2Codes, op, (Message[TOp2::badop, op]; 0)], ttermRaw[numCoerce[x]], ttermRaw[numCoerce[y]]]]
+    TTerm[$termNewOp2Fn[$op2Codes[op], ttermRaw[numCoerce[x]], ttermRaw[numCoerce[y]]]]
 )
-TOp2::badop = "Unknown OP2 opcode `1`; expected one of \"+\", \"-\", \"*\", \"==\", \"<\".";
+TOp2[op_String, _, _] := Null /; (Message[TOp2::badop, op]; False)
+TOp2::badop = "Unknown OP2 opcode `1`; expected one of \"+\", \"-\", \"*\", \"/\", \"%\", \"==\", \"!=\", \"<\", \">\", \"<=\", \">=\", \"&\", \"|\", \"^\", \"<<\", \">>\".";
 
 (* TAG_EQL: structural equality, strict on both sides.  Reducer
    handles NUM-NUM, ERA/ANY shorts, and EQL-SUP commutes (both

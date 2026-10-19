@@ -329,6 +329,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- `TNum` with an unknown dtype and `TOp2` with an unknown operator give a message and stay unevaluated instead of building a malformed term, and `TTermExpr` names all sixteen OP2 operators (it showed `?5` for division).
 - A number's dtype survives inspection: `TTermExpr` and `Term` name it for every dtype but i32 (`"NUM"["f32", v]`), and `TInitialize` rebuilds it. They had tested for dtype code 0, which f32 had before it became 13, so an f32 read as a plain number and a bool as `"f32"`.
 - `THeapDiagram` and `TMultiTrace`'s `"Diagram"` key give real DiagrammaticComputation diagrams again. Version 1.0.8 of that paclet defines `Diagram`, `DiagramNetwork` and `DiagramFlip` in its ``Diagram` `` subcontext, so `Diagram.wl` built inert private stubs. `diagram.wlt` went from 1/9 to 9/9 and `multicomputation.wlt` from 21/22 to 22/22.
 - `TReset[ctx]` and `TInit[ctx]` act on a `TContext` handle. `THVMLink.wl` and `Format.wl` used `TContext`, `TInContext`, `TKernel` and `TKernelInputs` before the files that make them public loaded, so those patterns held private stubs and never matched. The four names are now declared up front. The private helpers `tlazyEncode`, `tlazyDecode` and `decodeKernelInfo` no longer leak into the public context.
