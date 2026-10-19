@@ -101,6 +101,18 @@ def _prod(xs):
     return n
 
 
+def _argsort(xs):
+    return sorted(range(len(xs)), key=xs.__getitem__)
+
+
+def _strides_for_shape(shape):
+    strides, acc = [], 1
+    for s in reversed(shape):
+        strides.append(acc)
+        acc *= s
+    return tuple(reversed(strides))
+
+
 def _bytes_to_array(buf: bytes, np_dtype, is_bf16, size):
     if is_bf16:
         u16 = np.frombuffer(buf, dtype=np.uint16)
@@ -135,8 +147,17 @@ def torch_load(path) -> dict[str, "Tensor"]:
             return None
         byte_start = storage_offset * itemsize
         byte_end = (storage_offset + _prod(size)) * itemsize
-        return _bytes_to_array(storage_source[key][byte_start:byte_end],
-                               np_dtype, is_bf16, tuple(size))
+        arr = _bytes_to_array(storage_source[key][byte_start:byte_end],
+                              np_dtype, is_bf16, tuple(size))
+        # A permuted tensor's bytes are in storage order (nn/state.py:232-241).
+        shape_strides = [(s, st) for s, st in zip(size, stride) if s != 1]
+        perm = [len(shape_strides) - 1 - y for y in _argsort([st for _, st in shape_strides])]
+        if perm != list(range(len(perm))):
+            inter = tuple(shape_strides[x][0] for x in _argsort(perm))
+            if tuple(shape_strides[i][1] for i in _argsort(perm)) != _strides_for_shape(inter):
+                raise ValueError("torch_load: nonpermutable strides")
+            arr = np.ascontiguousarray(arr.reshape(inter).transpose(perm)).reshape(tuple(size))
+        return arr
 
     class _Param:
         def __setstate__(self, state):
@@ -167,9 +188,7 @@ def torch_load(path) -> dict[str, "Tensor"]:
                 return _Dummy
 
         def persistent_load(self, pid):
-            if isinstance(pid, (tuple, list)):
-                return pid
-            return pid
+            return pid  # the (typename, tag, key, location, numel) storage tuple
 
     def _to_tensors(d):
         out: dict[str, Tensor] = {}
@@ -195,10 +214,7 @@ def torch_load(path) -> dict[str, "Tensor"]:
                     storage_source[n.split("/")[-1]] = zf.read(n)
             pkl_bytes = zf.read(pkl_name)
 
-        class _ZipPickle(_TorchPickle):
-            def persistent_load(self, pid):
-                return pid  # pid is the (typename, tag, key, loc, numel) tuple
-        d = _ZipPickle(io.BytesIO(pkl_bytes)).load()
+        d = _TorchPickle(io.BytesIO(pkl_bytes)).load()
         return _to_tensors(d)
 
     # The legacy format, read twice as tinygrad does (nn/state.py:291-299).

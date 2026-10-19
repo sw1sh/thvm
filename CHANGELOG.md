@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- torch_load reads a saved permuted tensor (a transposed view) in logical order, as tinygrad does (nn/state.py:232-241): it took the storage bytes as row-major. Test: test_torch_load.
 - Dead code removed: recognise_tc.c's unused matmul UPat table, dag_scan's unread red_axis_id, the py bridge's uncalled Thvm.wnf, fwd, grad, ten_get_grad and ten_set_grad with their C exports.
 - THVM_NO_FAST_IDIV=0 keeps the fast-idiv rewrite on, as tinygrad's DISABLE_FAST_IDIV=0 does: any value, 0 included, turned it off. Test: test_uop_index_simplify.
 - CUDA autotune winners cache under "cuda": kautotune_backend_name had no case for backend 3 and filed them under "unknown".
