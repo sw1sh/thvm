@@ -100,6 +100,27 @@ int main(void) {
     CHECK_EQ(term_ext(r1_b), 1);
   }
 
+  // A CTR's arity has no bound (realize bundles every root into one), so both
+  // copies carry every child.
+  TEST_BEGIN("dup-ctr/arity-20-copies-every-child");
+  {
+    Term kids[20];
+    for (u32 i = 0; i < 20; i++) {
+      kids[i] = term_new(0, TAG_NUM, DT_INT32, 100 + i);
+    }
+    Term ctr = term_new_ctr(3, kids, 20);
+    u64  dup = heap_alloc(1);
+    heap_set(dup, ctr);
+    Term r0 = wnf(term_new(0, TAG_DP0, 7, dup));
+    Term r1 = wnf(term_new(0, TAG_DP1, 7, dup));
+    CHECK_EQ(term_ctr_n(r0), 20);
+    CHECK_EQ(term_ctr_n(r1), 20);
+    for (u32 i = 0; i < 20; i++) {
+      CHECK_EQ(wnf(term_ctr_at(r0, i)), kids[i]);
+      CHECK_EQ(wnf(term_ctr_at(r1, i)), kids[i]);
+    }
+  }
+
   thvm_free();
   TEST_REPORT();
 }
