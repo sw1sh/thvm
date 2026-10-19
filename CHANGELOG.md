@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- Rangeify's EXPAND ending ranges align a rank-growing EXPAND's source by suffix, as its range swizzle does: (3,) -> (2,3) ends only the new leading axis, where it ended both and marked the source's own axis as broadcast. py broadcasts reshape first, so only WL and C graphs build such EXPANDs. Test: test_rangeify_unified.
 - Tensor.transpose() and .T swap dims 0 and 1, as tinygrad's do (mixin/movement.py:323-343); they swapped the last two, which differs from 3-D up (every in-tree caller is 2-D). gelu(approximate="none") is the erf form, with tinygrad's erf ported (mixin/elementwise.py:780-795, 1059-1071), and an unknown mode raises; it was always the tanh form. max_pool2d(ceil_mode=True) raises when a window would start past the input (the -inf pad is not wired) instead of silently rounding down. Tests: test_tensor_surface_sync.
 - The CPU end-of-realize arena-view clear keeps the preserve bit of a parent from an earlier realize (a held weight a matmul view reads), as CUDA's has since the Krea weight-zeroing fix; it cleared it, so the rollback could recycle a live weight. Test: test_cpu_free_list.
 - wnf/pool.c's unused WnfPoolWorkerArg is removed.

@@ -1379,8 +1379,11 @@ fn void run_rangeify_unified(Term root) {
       if (info->op == UOP_EXPAND) {
         Shape src_shape;
         if (ru_node_src_shape(info->loc, &src_shape)) {
+          // A rank-growing EXPAND aligns its source by suffix, as
+          // ru_apply_movement does: the leading axes are the new ones.
+          u32 pad = my_ndim > src_shape.ndim ? my_ndim - src_shape.ndim : 0;
           for (u8 a = 0; a < my_ndim; a++) {
-            u32 in_dim  = (a < src_shape.ndim) ? src_shape.dims[a] : 1;
+            u32 in_dim  = (a < pad) ? 1 : src_shape.dims[a - pad];
             u32 out_dim = (u32)term_val(heap_read(info->loc + 2 + a));
             if (in_dim != out_dim) {
               // Every RANGE in out_rngs[a] ends here.

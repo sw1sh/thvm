@@ -297,5 +297,25 @@ int main(void) {
   }
   thvm_free();
 
+  // (i) A rank-growing EXPAND (3,) -> (2,3) aligns its source by suffix, as the
+  // swizzle does: only the new leading axis is broadcast, so only its range
+  // ends; the source's own axis passes through.
+  TEST_BEGIN("unified-rangeify/rank-growing-expand-ends-only-the-new-axis");
+  thvm_init();
+  {
+    Term e   = uop_unary(UOP_EXP2, term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor1(3)));
+    u32  od[2] = {2, 3};
+    Term ex  = uop_expand(e, 2, od);
+    Term out = uop_binary(UOP_ADD, ex, term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor2(2, 3)));
+    bufferize_classify(out);
+    run_rangeify_unified(out);
+    u32  xi = bufferize_info_find(term_val(ex));
+    Term r0 = rangeify_unified_out_rng_at(xi, 0);
+    CHECK_EQ(RU_ENDING_RANGES[xi].n, 1);
+    CHECK(term_tag(r0) == TAG_UOP && term_ext(r0) == UOP_RANGE);
+    CHECK_EQ(RU_ENDING_RANGES[xi].axis_ids[0], uop_range_axis_id(r0));
+  }
+  thvm_free();
+
   TEST_REPORT();
 }
