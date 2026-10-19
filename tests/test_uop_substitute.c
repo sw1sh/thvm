@@ -60,7 +60,9 @@ int main(void) {
     Term x = uop_binary(UOP_ADD, a, c), y = uop_binary(UOP_MUL, a, c);
     Term x2 = uop_binary(UOP_ADD, b, c), y2 = uop_binary(UOP_MUL, b, c);
     CHECK_EQ(uop_substitute(uop_after(x, y), &a, &b, 1), uop_after(x2, y2));
-    CHECK_EQ(uop_substitute(uop_detach(x), &a, &b, 1), uop_detach(x2));
+    Term d = uop_substitute(uop_detach(x), &a, &b, 1);   // a DETACH is not hash-consed
+    CHECK_EQ(term_ext(d), UOP_DETACH);
+    CHECK_EQ(heap_read(term_val(d)), x2);
     CHECK_EQ(uop_substitute(uop_copy_dev(x, 0), &a, &b, 1), uop_copy_dev(x2, 0));
     CHECK_EQ(uop_substitute(x, &c, &c, 1), x);
   }

@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- test_uop_substitute's DETACH check compares the rebuilt node's source: uop_detach is not hash-consed, so the identity check it had could never pass.
 - A lazily unfolded def survives a collection. An unforced ALO names its binders through ALO_STATES (book binder -> the instance's LAM cell) and its shared dup cells through DUP_SHARE, both holding dyn locs the collector never saw, so a def unfolded one layer and held across a collection read its variable and its second dup projection from overwritten cells. The collector notes the state of every unforced ALO it moves, then keeps and re-points each live state's chain cells and dup cells until nothing new turns up. Test: test_alo_gc.
 - The kernel GC takes a live output as committed only after its kernel dispatched. A kernel materialized for a later fire (WL TMaterialize, then TDef) owns a live but unwritten buffer, and the sweep after any unrelated realize cut its output's producer link, so firing the chain's last kernel read its inputs unwritten. KernelEntry.dispatched is set by every dispatch that writes the real output (kernel_fire_by_id, a JIT replay, a custom kernel). Test: test_kernel_gc_unfired.
 - test_heap's allocation checks start from HEAP_NEXT: they expected the first cell at loc 0, which is reserved now that loc 0 reads as none (pod run r8 failed 3 of 7 checks at GCb).
