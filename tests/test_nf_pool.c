@@ -139,6 +139,31 @@ static int test_nf_past_the_seed_cap(void) {
   return 0;
 }
 
+// nf reduces its own term's redexes only: a KERNEL an earlier realize left in
+// some other heap cell, naming a kernel the kernel GC stripped, is not fired
+// (firing it outside a realize is fatal).
+static int test_nf_leaves_other_terms_redexes(void) {
+  TEST_BEGIN("nf fires only its own term's redexes");
+  thvm_init();
+  u32  kid = kernel_alloc();
+  KERNELS[kid].stripped = 1;
+  Shape s   = {0};
+  s.ndim    = 1;
+  s.dims[0] = 2;
+  u64 kl = heap_alloc(2);
+  heap_set(kl + 0, term_new(0, TAG_TEN, DT_FP32, tensor_alloc(&CPU_BACKEND, s, DT_FP32)));
+  heap_set(kl + 1, term_new(0, TAG_NUM, 0, kid));
+  u64 holder = heap_alloc(1);
+  heap_set(holder, term_new(0, TAG_UOP, UOP_KERNEL, kl));
+  u64  itrs0 = ITRS;
+  Term out   = nf(nf_test_add(2, 3));
+  CHECK_EQ(term_tag(out), TAG_NUM);
+  CHECK_EQ(term_val(out), 5u);
+  CHECK_EQ(ITRS - itrs0, 1u);
+  thvm_free();
+  return 0;
+}
+
 int main(void) {
   test_nf_app_lam();
   test_nf_op2_chain();
@@ -146,5 +171,6 @@ int main(void) {
   test_nf_pool_lifecycle();
   test_nf_keeps_a_session_it_did_not_open();
   test_nf_past_the_seed_cap();
+  test_nf_leaves_other_terms_redexes();
   TEST_REPORT();
 }

@@ -1,7 +1,8 @@
 // wnf/redex.c - redexes as packed Terms (tag = the eliminator, val = its slot)
 // for nf and the WL stepper.  is_redex tests one; redex_fire fires it through
 // its interact_* (0 when it is none) and patches every heap cell holding it to
-// the result; redex_enumerate collects them under roots and over the heap.  A
+// the result; redex_enumerate collects them under the roots (over the whole
+// heap when there are none).  A
 // step session indexes the heap so that patching costs O(uses).
 
 fn u8 is_redex(Term t) {
@@ -615,22 +616,54 @@ fn u32 redex_enumerate(Term *roots, u32 n_roots, Term *out, u32 cap) {
       if (count < cap) out[count] = t;
       count++;
     }
-    u32 ar = term_arity(t);
-    if (ar == 0) continue;
-    u64 base = term_val(t);
+    // Children: a substituted VAR's or fired DP's value, a forced ALO's
+    // result, else every cell (term_cells).  Nothing is forced: a REF's and an
+    // unforced ALO's bodies are book terms, and a VAR's or book projection's
+    // cell is not this node's.
+    u64  base = term_val(t);
+    u8   tag  = term_tag(t);
+    Term one  = 0;
+    u32  ar   = 0;
+    if (tag == TAG_VAR || tag == TAG_DP0 || tag == TAG_DP1) {
+      Term cell = heap_read(base);
+      if (term_sub_get(cell)) {
+        one = term_sub_set(cell, 0);
+      } else if (tag != TAG_VAR) {
+        ar = term_cells(t, HEAP);
+      }
+    } else if (tag == TAG_ALO) {
+      if (term_tag(heap_read(base + 1)) != TAG_NUM) one = heap_read(base);
+    } else if (tag != TAG_BJ0 && tag != TAG_BJ1 && tag != TAG_REF) {
+      ar = term_cells(t, HEAP);
+    }
+    if (one != 0) {
+      if (s_pos >= DFS_STACK_CAP) {
+        DFS_STACK_CAP *= 2;
+        DFS_STACK = (Term *)realloc(DFS_STACK, DFS_STACK_CAP * sizeof(Term));
+      }
+      DFS_STACK[s_pos++] = one;
+    }
     for (u32 i = 0; i < ar; i++) {
       if (s_pos >= DFS_STACK_CAP) {
         DFS_STACK_CAP *= 2;
         DFS_STACK = (Term *)realloc(DFS_STACK, DFS_STACK_CAP * sizeof(Term));
       }
-      DFS_STACK[s_pos++] = heap_read(base + i);
+      DFS_STACK[s_pos++] = term_sub_set(heap_read(base + i), 0);
     }
   }
 
-  // Then every heap cell, for redexes off the root tree: a grad cell whose
+  // Without roots, every heap cell (the pure heap scan of the WL redex
+  // snapshot).  With roots, only the grad projections off their tree: one whose
   // parent heap_replace patched away may still owe the outer chain its BWD.
+  // Nothing else off the tree is the roots' to fire: a KERNEL an earlier realize
+  // left there names a kernel the kernel GC may have stripped, and an ASSIGN
+  // there is another term's write.
   for (u64 i = 0; i < HEAP_NEXT; i++) {
-    redex_collect_one(heap_read(i), out, cap, &count);
+    Term t = heap_read(i);
+    u8 tag = term_tag(t);
+    if (n_roots == 0 || ((tag == TAG_DP0 || tag == TAG_DP1) && (term_ext(t) & DUP_GRAD_FLAG))) {
+      redex_collect_one(t, out, cap, &count);
+    }
   }
   return count;
 }
