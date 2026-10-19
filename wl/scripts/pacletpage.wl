@@ -23,6 +23,16 @@ Needs["WolframInstitute`PacletPage`"];
    Each comes off this list when its crash is fixed. *)
 $unevaluatedPages = {"AtpMethods.md", "TAtpTrainScorer.md", "Train.md"};
 
+(* Every page starts from a fresh runtime, as its examples assume and run_doc_examples.wls checks:
+   a parallel kernel converts many pages, and the heap, the book of definitions and the kernel
+   table one page leaves would show in the next page's heap locations, kernel ids and snapshots.
+   TInit clears all three (TReset keeps the book).  The converter is the published
+   MarkdownToNotebook, through its ResourceObject as parallel kernels need it. *)
+thvmConvertPage[args___] := (
+    WolframInstitute`THVMLink`TInit[];
+    ResourceFunction[ResourceObject["https://www.wolframcloud.com/obj/wolframinstitute/DeployedResources/Function/MarkdownToNotebook"]][args]
+);
+
 (* The converter's own resets: a symbol page clears its bindings at every --- and heading, so each
    example group stands alone (run_doc_examples.wls checks the same), and a tutorial threads its
    state from the first cell to the last.  THVMLink`ATP` loads Wolfram`Parser`, so the examples run against
@@ -30,6 +40,7 @@ $unevaluatedPages = {"AtpMethods.md", "TAtpTrainScorer.md", "Train.md"};
    converts in its own parallel kernel, so an ATP saturation that outlives its time limit, or a
    crash, ends that kernel and not the build; six of them leave the machine to other builds. *)
 $documentationOptions = {
+    "Converter" -> thvmConvertPage,
     "Dependencies" -> {"Wolfram/Parser"},
     "Parallel" -> 6,
     "TimeConstraint" -> 900

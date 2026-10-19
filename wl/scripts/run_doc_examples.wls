@@ -313,6 +313,8 @@ runFile[file_] := Block[{
 		RunDocExamples`expected, RunDocExamples`issued, RunDocExamples`unexpected,
 		RunDocExamples`missing, RunDocExamples`stale},
 	RunDocExamples`ensureLoaded[];
+	(* a fresh runtime per page, as the build's converter (wl/scripts/pacletpage.wl) gives it *)
+	WolframInstitute`THVMLink`TInit[];
 	Quiet[Clear @@ Complement[Names["Global`*"], $harnessGlobalSymbols]];
 	RunDocExamples`src = Import[file, "Text"];
 	RunDocExamples`items = RunDocExamples`parseItems[RunDocExamples`src];
