@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TTensorDType]()[*t*]</code> gives the dtype of the tensor *t* as a string, such as `"f32"` or `"i32"`.
 
-<!-- #| annotation: 26.10.19: TTensorDType names the dtype code in the TEN term's ext field. A number combined with a tensor is lifted to the tensor's dtype (liftNumeric), except that a Real with an integer tensor gives f32 (scalarDType), as tinygrad promotes. An exact Rational is still lifted to the integer dtype, so n/2 of an i32 tensor truncates 1/2 to 0 and gives zeros, and an i32 tensor divided by an i32 tensor stays i32 where tinygrad gives a float (reported 26.10.19). -->
+<!-- #| annotation: 26.10.19: TTensorDType names the dtype code in the TEN term's ext field. A number combined with a tensor is lifted to the tensor's dtype (liftNumeric), except that a Real or Rational with an integer tensor gives f32 (scalarDType), and reciprocal and square root cast an integer tensor to f32 first (ensureFloat), as tinygrad promotes; so n/2 and n/m of i32 tensors are true division. -->
 
 ## Details & Options
 

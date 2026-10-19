@@ -16,8 +16,6 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 
 <code>[TEproverProof]()["*theory*", "*theorem*"]</code> runs E on the problem file of a named theorem of an [AxiomaticTheory]() theory.
 
-<!-- #| annotation: 26.10.19: TEproverProof passes Ceiling[TimeConstraint] to eprover --cpu-limit and does not stop E itself. When E reaches that limit it reports SZS status GaveUp, which TEproverProof reads as "Failed", not "TimedOut" (reported 26.10.19). -->
-
 ## Details & Options
 
 - [TEproverProof]() runs the E program, which has to be installed, on a problem in the TPTP (Thousands of Problems for Theorem Provers) format. The program is looked for in `/opt/homebrew/bin`, `/usr/local/bin` and the directories of the `PATH` environment variable.
@@ -94,6 +92,16 @@ TEproverProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 1]["St
 
 <!-- => "Proved" -->
 
+---
+
+A problem E does not settle within the limit has the status `"TimedOut"`:
+
+```wl
+TEproverProof["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]["Status"]
+```
+
+<!-- => "TimedOut" -->
+
 ### Binary
 
 A path with no program gives the status `"Failed"`:
@@ -115,16 +123,6 @@ TVampireProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 5]["St
 <!-- => "Proved" -->
 
 ## Possible Issues
-
-E gives up when it reaches its time limit, so a problem that E does not settle in time has the status `"Failed"` rather than `"TimedOut"`:
-
-```wl
-TEproverProof["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]["Status"]
-```
-
-<!-- => "Failed" -->
-
----
 
 A file that does not exist issues a message and gives `$Failed`:
 

@@ -20,8 +20,6 @@ RelatedTutorials: ["[Finding Replacement Paths with Directed Rules](FindReplaceP
 
 <code>[TFindEquationalPath]()[*proof*, "*prop*"]</code> gives the property *prop* of the rewrite path of *proof*.
 
-<!-- #| annotation: 26.10.19: A theory's variables are renamed apart from the goal's constants only while Global` is on $ContextPath. In the doc build's page context it is not, and TFindEquationalPath[OverBar[a \[CircleTimes] b] == OverBar[b] \[CircleTimes] OverBar[a], "AbelianGroupAxioms"] gives a path that ends at OverBar[b_] \[CircleTimes] OverBar[a_], with the theory's pattern variables in place of the constants (TFindProof[..., "Path"] is right in the same context); reported 26.10.19, so no example on this page uses a or b with a named theory. -->
-
 ## Details & Options
 
 - [TFindEquationalPath]() proves *thm* with [TFindProof]() and reads the path off the proof: the left side is rewritten forward, then the right side is joined in reverse through the term the two sides meet at.
@@ -342,6 +340,16 @@ TFindProof[((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[Circl
 ```
 
 <!-- => {((a ⊗ b) ⊗ c) ⊗ d, (a ⊗ b) ⊗ (c ⊗ d), a ⊗ (b ⊗ (c ⊗ d))} -->
+
+---
+
+The goal's constants stay constants when a named theory calls its variables by the same names, so the path ends at the goal's right-hand side:
+
+```wl
+Last[TFindEquationalPath[OverBar[a \[CircleTimes] b] == OverBar[b] \[CircleTimes] OverBar[a], "AbelianGroupAxioms"]]
+```
+
+<!-- => OverBar[b] ⊗ OverBar[a] -->
 
 ## Possible Issues
 
