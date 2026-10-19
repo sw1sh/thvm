@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- kernel_inputs_reserve checks its reallocs: out of memory it leaked the old arrays and wrote through NULL.
 - A step-budgeted wnf that runs out inside a UOP's active child (a dup projection, a kernel) returns the UOP rebuilt around the partly reduced child: the bail's unwinding had no F_UOP_CHILD case and returned the child in the parent's place (reachable through WL TWnf[t, n]). Test: test_wnf_n.
 - A nested BUFFERIZE inline chain past UNIFIED_SUBST_CAP (64) bindings is fatal: unified_rewrite_rec_extend dropped the new binding and rewrote with that closed range unbound, which then read as iteration 0, where the axis-table and multi-axis paths decline.
 - materialize.c drops 346 lines no one calls: `try_inline_bufferize_1axis_via_decomp` and `try_inline_bufferize_multi_via_stride_match` (the stride and extent inline fallbacks; a side-table miss is fatal instead) and the mask scan only the first one asked.

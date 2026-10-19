@@ -21,6 +21,10 @@ fn void kernel_inputs_reserve(KernelEntry *ke, u32 needed) {
   ke->input_views  = (View *)realloc(ke->input_views,  (size_t)new_cap * sizeof(View));
   ke->input_chain_composed = (u8 *)realloc(
       ke->input_chain_composed, (size_t)new_cap * sizeof(u8));
+  if (ke->input_tids == NULL || ke->input_dtypes == NULL || ke->input_numels == NULL
+      || ke->input_terms == NULL || ke->input_views == NULL || ke->input_chain_composed == NULL) {
+    thvm_fatal("kernel_inputs_reserve: out of memory");
+  }
   // Zero the new tail: 0 is the no-tensor sentinel of input_tids and
   // input_terms.
   for (u32 i = ke->inputs_cap; i < new_cap; i++) {
