@@ -4,55 +4,131 @@ Name: TSmtDecide
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TSmtDecide
-Keywords: [SMT, DPLL(T), congruence closure, QF_UF, Boolean combination, decision procedure]
-SeeAlso: [TSatEUF, TFindProof, SatisfiabilityInstances]
+Keywords: [SMT, DPLL(T), congruence closure, QF_UF, Boolean formula, decision procedure, satisfiability]
+SeeAlso: [TSatEUF, TFindProof, SatisfiabilityInstances, CounterexampleObject]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Congruence Closure and Lazy DPLL(T)](SMT)"]
 ---
 
 ## Usage
 
-<code>[TSmtDecide]()[$formula$]</code> decides the satisfiability of a Boolean combination of equality atoms by lazy DPLL(T) over congruence closure.
-
-$formula$ is any combination of `Equal[lhs, rhs]` / `Unequal[lhs, rhs]` atoms via `And`, `Or`, `Not`, `Implies`, `Equivalent`, `Xor`.  Returns `<|"Status" -> "SAT", "Model" -> assoc|>` with a satisfying assignment of the equality atoms, or `<|"Status" -> "UNSAT"|>` when no assignment works.
+<code>[TSmtDecide]()[*formula*]</code> decides whether the Boolean combination *formula* of equations between terms is satisfiable.
 
 ## Details & Options
 
-- Each equality / disequality atom is abstracted as a fresh propositional variable.  The Boolean abstraction is handed to Wolfram's [SatisfiabilityInstances]() as the propositional kernel; every candidate model is theory-checked through [TSatEUF]().  On a T-conflict the exact assignment is forbidden by a blocking clause and the kernel is re-queried.
-- The loop terminates: there are <code>2^|atoms|</code> assignments and each iteration prunes one.  Sound and complete for QF_UF.
-- Operates over Wolfram's `Equal` / `Unequal` heads directly (no `Inactive` wrapping required).
-- For raw congruence closure on a flat (in)equality list, use [TSatEUF]().  For ground entailment queries, use [TFindProof]() with `Method -> "SMT"` (decision) or the `"Counterexample"` output kind (refuting model).  For variable-bearing axioms reach for [TFindProof]()'s default completion engine.
+- *formula* combines equations `lhs == rhs` and disequations `lhs != rhs` between terms with [And](), [Or](), [Not](), [Implies](), [Equivalent]() and [Xor](). The functions in the terms are uninterpreted, as in [TSatEUF]().
+- For a satisfiable formula, [TSmtDecide]() gives `<|"Status" -> "SAT", "Model" -> model|>`, where *model* gives the truth value of each equation.
+- For an unsatisfiable formula, it gives `<|"Status" -> "UNSAT"|>`.
+- [TSmtDecide]() replaces each equation by a Boolean variable, finds a truth assignment with [SatisfiabilityInstances](), and checks it against the theory of equality with [TSatEUF](). An assignment that contradicts the theory is excluded, and the search continues.
+- [TSmtDecide]() always terminates and is correct for both answers. A formula with *n* equations can need up to $2^n$ truth assignments.
+- A formula is valid when its negation is unsatisfiable.
 
 ## Basic Examples
 
-A simple UNSAT case (transitivity collision):
+A formula that is unsatisfiable, since every case of the disjunction contradicts a disequation:
 
 ```wl
 TSmtDecide[(a == b || b == c) && a != b && b != c]
 ```
+
 <!-- => <|"Status" -> "UNSAT"|> -->
 
-The theory-conflict path exercised inside a disjunction:
+---
 
-```wl
-TSmtDecide[((a == b && c == d) || x == y) && f[a, c] != f[b, d] && x != y]
-```
-<!-- => <|"Status" -> "UNSAT"|> -->
-
-A SAT verdict carries a satisfying assignment:
+A satisfiable formula gives the truth value of each equation:
 
 ```wl
 TSmtDecide[(a == b || c == d) && c == e]
 ```
-<!-- => <|"Status" -> "SAT", "Model" -> <|...|>|> -->
 
-## Properties & Relations
+<!-- => <|"Status" -> "SAT", "Model" -> <|a == b -> False, c == d -> True, c == e -> True|>|> -->
 
-- [TSatEUF]() is the inner theory solver.  [TSmtDecide]() wraps it in the lazy DPLL(T) loop.
-- [TFindProof]() with `Method -> "SMT"` rephrases entailment `H1, ..., Hn |= G` as satisfiability of <code>H1 && ... && Hn && !G</code> and dispatches to either [TSatEUF]() (single equality literal goal) or [TSmtDecide]() (Boolean goal).
-- The propositional shell is Wolfram's [SatisfiabilityInstances](); the implementation does no Tseitin transformation, so deeply-nested formulas with many atoms can hit the <code>2^|atoms|</code> worst case before all conflicts are blocked.
+## Scope
+
+A truth assignment that the theory of equality rules out is excluded:
+
+```wl
+TSmtDecide[((a == b && c == d) || x == y) && f[a, c] != f[b, d] && x != y]
+```
+
+<!-- => <|"Status" -> "UNSAT"|> -->
+
+---
+
+Equal arguments give equal values of a function:
+
+```wl
+TSmtDecide[a == b && f[a] != f[b]]
+```
+
+<!-- => <|"Status" -> "UNSAT"|> -->
+
+---
+
+[Implies]() is satisfiable when its premise is false:
+
+```wl
+TSmtDecide[Implies[a == b, f[a] == f[b]]]
+```
+
+<!-- => <|"Status" -> "SAT", "Model" -> <|a == b -> False, f[a] == f[b] -> False|>|> -->
+
+---
+
+[Equivalent]() is satisfiable when both sides are false:
+
+```wl
+TSmtDecide[Equivalent[a == b, b == c]]
+```
+
+<!-- => <|"Status" -> "SAT", "Model" -> <|a == b -> False, b == c -> False|>|> -->
+
+---
+
+[Xor]() of two equations is unsatisfiable when their right sides are equal:
+
+```wl
+TSmtDecide[Xor[a == b, a == c] && b == c]
+```
+
+<!-- => <|"Status" -> "UNSAT"|> -->
+
+## Properties and Relations
+
+The negation of a valid formula is unsatisfiable:
+
+```wl
+TSmtDecide[Not[Implies[a == b, f[a] == f[b]]]]
+```
+
+<!-- => <|"Status" -> "UNSAT"|> -->
+
+---
+
+[TSatEUF]() decides a conjunction of equations and disequations given as lists:
+
+```wl
+TSatEUF[{a == b}, {f[a] != f[b]}]
+```
+
+<!-- => <|"Status" -> "UNSAT", "Witness" -> f[a] != f[b]|> -->
 
 ## Possible Issues
 
-- Quantified formulas are out of scope.  Reach for [TFindProof]() (unfailing Knuth-Bendix completion) for the equational fragment with universal axioms.
-- Equality atoms on built-in operators (e.g. `1 + 1 == 2`) are NOT interpreted: congruence closure treats `Plus` as uninterpreted.  Mix integers in only if the formula does not rely on arithmetic.
-- A formula whose propositional kernel has exponentially many candidate models takes proportional time, since the lazy approach pays for each one.  An eager T-propagation pass would amortise this; not currently implemented.
+Quantifiers are not interpreted, so a quantified equation is treated as a single Boolean variable:
+
+```wl
+TSmtDecide[ForAll[x, f[x] == x]]
+```
+
+<!-- => <|"Status" -> "SAT", "Model" -> <|f[x] == x -> True|>|> -->
+
+---
+
+An equation between numbers evaluates before [TSmtDecide]() sees it:
+
+```wl
+TSmtDecide[1 + 1 == 2 && a != b]
+```
+
+<!-- => <|"Status" -> "SAT", "Model" -> <|a != b -> True|>|> -->

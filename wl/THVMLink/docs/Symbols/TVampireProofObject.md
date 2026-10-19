@@ -2,47 +2,143 @@
 Template: Symbol
 Name: TVampireProofObject
 Context: WolframInstitute`THVMLink`ATP`
+ContextPath: [Global`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TVampireProofObject
-Keywords: [Vampire, ATP, ProofObject, SZS, external prover, proof lift, theorem proving]
+Keywords: [Vampire, theorem proving, ATP, ProofObject, SZS, external prover]
 SeeAlso: [TVampireProof, TSZSDerivationToProofObject, TTweeProofObject, TEproverProofObject, TWaldmeisterProofObject, TFindProof]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 ---
 
 ## Usage
 
-<code>[TVampireProofObject]()[*theory*, *thm*]</code> runs the Vampire CLI via [TVampireProof]() and converts the result through [TSZSDerivationToProofObject]() into a `thvm`-shaped proof Association.
-
-It is the `Method -> "VampireProcess"` dispatch target in [TFindProof](), so proofs from differing Methods (an internal preset versus the external Vampire CLI) can be compared structurally.
+<code>[TVampireProofObject]()["*theory*", "*theorem*"]</code> runs the Vampire prover on a named theorem of an [AxiomaticTheory]() theory, and gives its proof as a [ProofObject]().
 
 ## Details & Options
 
-- The returned Association lands each inference step under the same `ProofDataset` construct keys the internal engine uses (`{"Axiom", n}`, `{"Hypothesis", n}`, `{"CriticalPairLemma", n}`, `{"SubstitutionLemma", n}`, `{"Conclusion", 1}`), with `"Backend" -> "SZS"`.
-- Options:
-  - `TimeConstraint`, `"Mode"`, `"Binary"` - forwarded to [TVampireProof]().
-  - `"ParseFormulas"` (default `False`) - when `True`, each step's `Statement` is `TPTPImport`-parsed into a Wolfram expression so structural comparison against the internal engine's output works (slow, roughly 5 seconds per formula).
-  - `"LiftToProofObject"` (default `True`) - wraps the Association into a literal `ProofObject` head (implying `"ParseFormulas" -> True`), so the standard property accessors `p["ProofFunction"]`, `p["ProofGraph"]`, `p["ProofLength"]`, and `p["Theorems"]` work.  Set it `False` for the raw construct-keyed Association.
-- When the Vampire binary is not installed, the builder returns a `Failure["ExternalNoProof", <|"Tool" -> _, "Status" -> _, "Seconds" -> _|>]` rather than raising an error, so a fresh-checkout build does not break.
+- [TVampireProofObject]() runs [TVampireProof]() on the problem file of the theorem, and converts the proof with [TSZSDerivationToProofObject]().
+- The steps of the proof are keyed as in the proofs of [TFindProof](): `{"Axiom", n}`, `{"Hypothesis", n}`, `{"CriticalPairLemma", n}`, `{"SubstitutionLemma", n}` and `{"Conclusion", 1}`.
+- With `"LiftToProofObject" -> False`, the result is an Association with the keys `"Backend"`, `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`, with the formulas as Vampire writes them.
+- With the default `"LiftToProofObject" -> True`, the formulas are parsed into expressions and the result is a [ProofObject](). Parsing takes a few seconds for each formula.
+- When Vampire finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>.
+- The steps of a Vampire proof do not record the positions and orientations of the rewrites, so the `"ProofFunction"` of the [ProofObject]() cannot check them.
+- <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "VampireProcess"]</code> gives the same result.
+- The following options can be given:
+
+| | | |
+| --- | --- | --- |
+| [TimeConstraint]() | `30` | time limit in seconds given to Vampire |
+| `"Mode"` | `"casc"` | the mode Vampire runs in |
+| `"Binary"` | [Automatic]() | path of the Vampire program |
+| `"LiftToProofObject"` | [True]() | whether to give a [ProofObject]() |
+| `"ParseFormulas"` | [False]() | whether to parse the formulas into expressions |
 
 ## Basic Examples
 
-Build the raw construct-keyed proof Association from a Vampire run and read its shape:
+Prove a Boolean identity with Vampire and give the proof as a [ProofObject]():
 
 ```wl
-Keys @ TVampireProofObject["AbelianGroupAxioms", "InverseOfInverse",
-    TimeConstraint -> 10, "LiftToProofObject" -> False]
+TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5]
 ```
-<!-- => {Backend, Status, Goal, Axioms, ProofDataset, ProofLength, RuleHistogram} -->
 
-The default <code>[TVampireProofObject]()["AbelianGroupAxioms", "InverseOfInverse"]</code> returns the same content lifted into a literal `ProofObject`; because the lift implies `"ParseFormulas" -> True` (roughly 5 seconds per formula), budget minutes rather than seconds for it on a portfolio-sized derivation.
+<!-- => a ProofObject summary box, logic EquationalLogic -->
 
-## Properties & Relations
+With `"LiftToProofObject" -> False`, the result is an Association of the steps, with the formulas as Vampire writes them:
 
-- [TVampireProof]() is the raw CLI wrapper this builds on; [TVampireProofObject]() is the proof-shaped lift.
-- [TTweeProofObject](), [TEproverProofObject](), and [TWaldmeisterProofObject]() are the sibling external-prover lifts; all four route through [TSZSDerivationToProofObject]() except Twee.
-- [TFindProof]()`[..., Method -> "VampireProcess"]` is the in-portfolio way to invoke this.
+```wl
+TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "LiftToProofObject" -> False]
+```
 
-## Possible Issues
+<!-- => <|"Backend" -> "SZS", "Status" -> "Proved", "Goal" -> "skc1"[] != "and"["skc1"[], "or"["skc2"[], "not"["skc2"[]]]], "Axioms" -> {"(\n  ( ! [X0,X1] : (and(X0,or(X1,not(X1))) = X0) ))"}, "ProofDataset" -> <|...|>, "ProofLength" -> 2, "RuleHistogram" -> <|"forward_subsumption_resolution" -> 1|>|> -->
 
-- With `"LiftToProofObject" -> False` the result is a raw Association keyed by `"Status"`, `"Backend"`, and the per-step construct keys, not a `ProofObject` head; the property accessors only apply to the lifted form.
-- The (*theory*, *thm*) form resolves the generated TPTP bank under `tools/baselines/vampire_tptp/` (see [TVampireProof]()); on a fresh checkout export the bank first (`tools/vampire/export_tptp.wls`).
+With `"ParseFormulas" -> True`, the formulas are parsed into expressions:
+
+```wl
+TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "LiftToProofObject" -> False, "ParseFormulas" -> True]["Axioms"]
+```
+
+<!-- => {X0_ ⊗ (X1_ ⊕ OverBar[X1_]) == X0_} -->
+
+## Scope
+
+The proof of a group theorem has critical-pair and substitution lemmas:
+
+```wl
+TVampireProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5, "LiftToProofObject" -> False]["RuleHistogram"]
+```
+
+<!-- => <|"forward_demodulation" -> 1, "superposition" -> 6, "trivial_inequality_removal" -> 1|> -->
+
+---
+
+The number of steps of the proof:
+
+```wl
+TVampireProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5, "LiftToProofObject" -> False]["ProofLength"]
+```
+
+<!-- => 9 -->
+
+## Options
+
+### LiftToProofObject
+
+With `"LiftToProofObject" -> False`, the result is an Association rather than a [ProofObject]():
+
+```wl
+TVampireProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5, "LiftToProofObject" -> False]["Backend"]
+```
+
+<!-- => "SZS" -->
+
+### ParseFormulas
+
+`"ParseFormulas" -> True` parses the formulas of the steps into expressions, as in the last of the basic examples:
+
+```wl
+#| eval: false
+TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "LiftToProofObject" -> False, "ParseFormulas" -> True]["Axioms"]
+```
+
+<!-- => {X0_ ⊗ (X1_ ⊕ OverBar[X1_]) == X0_} -->
+
+### TimeConstraint
+
+A time limit too short for Vampire gives a [Failure]():
+
+```wl
+TVampireProofObject["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]
+```
+
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Vampire", "Status" -> "TimedOut", "Seconds" -> 0.94, "Strategy" -> Missing["NoProof"]|>] -->
+
+### Mode
+
+In the `"vampire"` mode, Vampire runs a single strategy and finds a proof by superposition:
+
+```wl
+TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "LiftToProofObject" -> False, "Mode" -> "vampire"]["RuleHistogram"]
+```
+
+<!-- => <|"superposition" -> 1, "trivial_inequality_removal" -> 1|> -->
+
+### Binary
+
+A path with no program gives a [Failure]():
+
+```wl
+TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "Binary" -> "/nonexistent/vampire"]
+```
+
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Vampire", "Status" -> "Failed", "Seconds" -> 0.01, "Strategy" -> Missing["NoProof"]|>] -->
+
+## Properties and Relations
+
+[TFindProof]() with the `"VampireProcess"` method gives the same result:
+
+```wl
+TFindProof["DroppingAlwaysTrue", "BooleanAxioms", Method -> "VampireProcess", TimeConstraint -> 5, "LiftToProofObject" -> False] === TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "LiftToProofObject" -> False]
+```
+
+<!-- => True -->

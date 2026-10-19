@@ -4,31 +4,48 @@ Name: TFindEquationalProof
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TFindEquationalProof
-Keywords: [theorem proving, ATP, equational, alias]
+Keywords: [theorem proving, ATP, equational logic, deprecated, alias]
 SeeAlso: [TFindProof, FindEquationalProof, TFindEquationalPath]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TFindEquationalProof]()[*...*]</code> is equivalent to [TFindProof](); every call forwards to [TFindProof]() unchanged.
+<code>[TFindEquationalProof]()[*conjecture*, *axioms*]</code> is a deprecated name for <code>[TFindProof]()[*conjecture*, *axioms*]</code>.
+
+<code>[TFindEquationalProof]()["*theorem*", "*theory*"]</code> is a deprecated name for <code>[TFindProof]()["*theorem*", "*theory*"]</code>.
 
 ## Details & Options
 
-- The signatures, options, and return value are exactly [TFindProof]()'s; see that page for the full surface.
+- [TFindEquationalProof]() takes the same arguments and options as [TFindProof]() and gives the same results.
+- New code uses [TFindProof]().
 
 ## Basic Examples
 
-The alias forwards to [TFindProof]():
+Prove the double-inverse theorem of abelian groups:
 
 ```wl
-TFindEquationalProof[
-    x \[CircleTimes] y == y \[CircleTimes] x,
-    "AbelianGroupAxioms",
-    TimeConstraint -> 10]
+TFindEquationalProof[OverBar[OverBar[x]] == x, "AbelianGroupAxioms"]
 ```
-<!-- => ProofObject[<|"Status" -> "Proved", ...|>] (identical to the TFindProof call) -->
 
-## Properties & Relations
+<!-- => a ProofObject summary box, logic EquationalLogic -->
 
-- [TFindProof]() is the current entry point. The Wolfram Language built-in [FindEquationalProof]() is the kernel's own equational prover; [TFindProof]() returns the same `ProofObject` head.
+---
+
+Prove a named theorem of a theory:
+
+```wl
+TFindEquationalProof["InverseOfComposite", "AbelianGroupAxioms"]
+```
+
+<!-- => a ProofObject summary box, logic EquationalLogic -->
+
+## Properties and Relations
+
+The result is the same as that of [TFindProof]():
+
+```wl
+TFindEquationalProof["InverseOfComposite", "AbelianGroupAxioms", "Lemmas"] === TFindProof["InverseOfComposite", "AbelianGroupAxioms", "Lemmas"]
+```
+
+<!-- => True -->

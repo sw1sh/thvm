@@ -4,60 +4,100 @@ Name: TAtpCpDataset
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TAtpCpDataset
-Keywords: [ENIGMA, ATP, critical pair, dataset, learned guidance, feature vector, machine learning, proof relevance]
+Keywords: [ENIGMA, theorem proving, critical pair, dataset, learned guidance, feature vector, machine learning]
 SeeAlso: [TAtpTrainScorer, TAtpSetLearnedScorer, TAtpGraphDataset, TFindProof, AxiomaticTheory]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 ---
 
 ## Usage
 
-<code>[TAtpCpDataset]()[*conjectures*, *axioms*]</code> proves each conjecture against the shared *axioms* with per-critical-pair feature recording on, labels the processed critical pairs by trace-DAG reachability from each proof (`1` = proof-relevant, `0` = not), and returns the dataset.
+<code>[TAtpCpDataset]()[*conjectures*, *axioms*]</code> proves each of the *conjectures* from *axioms*, and gives the features of the critical pairs each proof processed, labeled by whether they took part in the proof.
 
-<code>[TAtpCpDataset]()[*theory*]</code> runs every <code>[AxiomaticTheory]()[*theory*, "NotableTheorems"]</code> against the theory's axioms.
-
-The returned Association is keyed `"Features"` (an *n* by 14 matrix), `"Labels"` (a 0/1 vector), `"FeatureNames"`, `"NRows"`, `"NPositive"`, and `"NProofs"`. Only proved runs contribute rows.
+<code>[TAtpCpDataset]()["*theory*"]</code> uses the notable theorems of the named [AxiomaticTheory]() theory as the conjectures.
 
 ## Details & Options
 
-- This is the ENIGMA (Efficient learNing-based Inference Guiding MAchine) training-data foundation for the Tier-1 hand-feature scorer: feed `"Features"` / `"Labels"` to a classifier (for example `TNetTrain`, or directly to [TAtpTrainScorer]()) and push the result back with [TAtpSetLearnedScorer]() to close the learn loop.
-- The 14 feature columns are `"size_sum"`, `"max_depth"`, `"n_distinct_vars"`, `"n_var_occ"`, `"weight_add"`, `"weight_gt"`, `"weight_mix2"`, `"goal_weight"`, `"age"`, `"top_symbol_l"`, `"top_symbol_r"`, `"shares_goal_sub"`, `"orientable"`, and `"unif_measure"`.
-- The structural-graph counterpart is [TAtpGraphDataset](), which emits symbol-anonymized hypergraphs for a graph neural network rather than these fixed 14-feature rows.
-- Options:
-  - `Method` - the proof Method (default `{"Completion"}`).
-  - `TimeConstraint` - per-proof wall-clock bound (default 30).
-  - `MaxSteps` - the saturation step cap (default `Automatic`).
+- [TAtpCpDataset]() gives the training data for a learned critical-pair ranking in the style of ENIGMA (Efficient Learning-Based Inference Guiding Machine): [TAtpTrainScorer]() trains a model on it, [TAtpSetLearnedScorer]() gives the model to the prover, and <code>[TFindProof]()[…, [Method]() -> "ENIGMA"]</code> uses it.
+- The result has the keys `"Features"` (a matrix with one row of 14 numbers for each processed critical pair), `"Labels"` (`1` for a critical pair the proof uses and `0` otherwise), `"FeatureNames"`, `"NRows"`, `"NPositive"` (the number of rows labeled `1`) and `"NProofs"`.
+- The 14 features describe the size, depth, variables and weights of a critical pair, its age in the search, its top symbols, whether it shares a subterm with the goal, whether it can be oriented, and how it unifies.
+- Only the conjectures that are proved contribute rows.
+- The following options can be given:
+
+| | | |
+| --- | --- | --- |
+| [Method]() | `{"Completion"}` | proof search method |
+| [TimeConstraint]() | `30` | time limit in seconds for each proof |
+| [MaxSteps]() | [Automatic]() | maximum number of critical pairs for each proof |
 
 ## Basic Examples
 
-Build a labelled critical-pair dataset from two of a theory's notable theorems:
+The features of the critical pairs of a one-step proof:
 
 ```wl
-axioms = AxiomaticTheory["AbelianGroupAxioms"];
-thms = Catenate @ Lookup[
-    AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"],
-    {"InverseOfInverse", "InverseOfComposite"}];
-ds = TAtpCpDataset[thms, axioms, TimeConstraint -> 5];
-ds["NRows"]
+TAtpCpDataset[{f[f[f[a]]] == f[a]}, {f[f[x_]] == x_}]
 ```
-<!-- => 36 -->
+
+<!-- => <|"Features" -> {{4, 2, 1, 2, 4, 3, 34, 2000, 0, 3, 0, 1, 1, 4}}, "Labels" -> {1}, "FeatureNames" -> {"size_sum", "max_depth", "n_distinct_vars", "n_var_occ", "weight_add", "weight_gt", "weight_mix2", "goal_weight", "age", "top_symbol_l", "top_symbol_r", "shares_goal_sub", "orientable", "unif_measure"}, "NRows" -> 1, "NPositive" -> 1, "NProofs" -> 1|> -->
 
 ## Scope
 
-Read the feature names:
+A proof of the double-inverse theorem of abelian groups processes ten critical pairs, four of which take part in the proof:
 
 ```wl
-TAtpCpDataset[
-    AxiomaticTheory["AbelianGroupAxioms", "NotableTheorems"]["InverseOfComposite"],
-    AxiomaticTheory["AbelianGroupAxioms"],
-    TimeConstraint -> 5]["FeatureNames"]
+TAtpCpDataset[{OverBar[OverBar[x]] == x}, AxiomaticTheory["AbelianGroupAxioms"]]
 ```
-<!-- => {size_sum, max_depth, n_distinct_vars, n_var_occ, weight_add, weight_gt, weight_mix2, goal_weight, age, top_symbol_l, top_symbol_r, shares_goal_sub, orientable, unif_measure} -->
 
-## Properties & Relations
+<!-- => <|"Features" -> {{5, 2, 1, 2, 5, 4, 45, 10000, 0, 3, 0, 0, 1, 4}, ...}, "Labels" -> {0, 1, 1, 0, 0, 0, 0, 0, 1, 1}, "FeatureNames" -> {...}, "NRows" -> 10, "NPositive" -> 4, "NProofs" -> 1|> -->
 
-- [TAtpTrainScorer]() consumes the `"Features"` / `"Labels"` keys directly; `TAtpTrainScorer[theory]` and `TAtpTrainScorer[conjectures, axioms]` fold the dataset build and the training into one call.
-- [TAtpGraphDataset]() is the graph-structured sibling: per-equation hypergraphs for a GNN instead of per-critical-pair feature rows; it sources clean positives from the verified proof object rather than per-CP trace labels.
+---
 
-## Possible Issues
+The notable theorems of the group axioms give a larger dataset:
 
-- Building a dataset from a whole corpus means proving the corpus, so each proof is bounded by `TimeConstraint`; a sweep over `NotableTheorems` can be slow and memory-heavy. Bound and chunk large sweeps.
+```wl
+TAtpCpDataset["GroupAxioms", TimeConstraint -> 5]["NRows"]
+```
+
+<!-- => 86 -->
+
+## Options
+
+### Method
+
+Prove with a different critical-pair weight:
+
+```wl
+TAtpCpDataset[{OverBar[OverBar[x]] == x}, AxiomaticTheory["AbelianGroupAxioms"], Method -> {"Completion", "CriticalPairWeight" -> "Add"}]["NRows"]
+```
+
+<!-- => 9 -->
+
+### TimeConstraint
+
+A conjecture that is not proved within the time limit contributes no rows:
+
+```wl
+TAtpCpDataset[{x ** y == y ** x}, AxiomaticTheory["AbelianGroupAxioms"], TimeConstraint -> 1]["NRows"]
+```
+
+<!-- => 0 -->
+
+### MaxSteps
+
+A step budget bounds each proof:
+
+```wl
+TAtpCpDataset[{OverBar[OverBar[x]] == x}, AxiomaticTheory["AbelianGroupAxioms"], MaxSteps -> 1000]["NRows"]
+```
+
+<!-- => 10 -->
+
+## Properties and Relations
+
+[TAtpTrainScorer]() trains a model on the dataset, and [TAtpGraphDataset]() gives a dataset of equation graphs for a graph neural network instead:
+
+```wl
+TAtpGraphDataset[{OverBar[OverBar[x]] == x}, AxiomaticTheory["AbelianGroupAxioms"]]["NPos"]
+```
+
+<!-- => 5 -->

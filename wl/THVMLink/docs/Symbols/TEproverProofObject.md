@@ -4,43 +4,97 @@ Name: TEproverProofObject
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TEproverProofObject
-Keywords: [E prover, eprover, ATP, ProofObject, SZS, external prover, proof lift, theorem proving]
+Keywords: [E prover, eprover, theorem proving, ATP, ProofObject, SZS, external prover]
 SeeAlso: [TEproverProof, TSZSDerivationToProofObject, TVampireProofObject, TTweeProofObject, TWaldmeisterProofObject, TFindProof]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 ---
 
 ## Usage
 
-<code>[TEproverProofObject]()[*theory*, *thm*]</code> runs the E prover CLI on the canonical TPTP (Thousands of Problems for Theorem Provers) problem file and lifts the SZS proof into a `thvm`-shaped proof Association via [TSZSDerivationToProofObject]().
+<code>[TEproverProofObject]()["*theory*", "*theorem*"]</code> runs the E prover on a named theorem of an [AxiomaticTheory]() theory, and gives its proof as a [ProofObject]().
 
-It is the `Method -> "EproverProcess"` dispatch target in [TFindProof]().
+<!-- #| annotation: 26.10.19: The E examples are kept unevaluated: TEproverProof passes ToString[N[tc]] ("5.") to eprover --cpu-limit, which E 3.2 rejects, so every run reports "Failed" and this function gives Failure["ExternalNoProof", ...]. With the limit fixed, E's bare-name parent sources (c_0_3 for an inference copied from a clause) still map to Private`constructTypeOf[Missing["NoRule"]] keys in the proof dataset; evaluate the cells again once both are fixed. -->
 
 ## Details & Options
 
-- E's `--proof-object --tstp-format` emits the same SZS-framed `fof`-plus-`inference` DAG as Vampire's `--proof tptp`, so the lift path is shared with [TVampireProofObject](). Each step lands under the internal engine's `ProofDataset` construct keys (`{"Axiom", n}`, `{"CriticalPairLemma", n}`, ...), with `"Backend" -> "SZS"`.
-- Options:
-  - `TimeConstraint`, `"Binary"` - forwarded to [TEproverProof]().
-  - `"ParseFormulas"` (default `False`) - when `True`, each step's `Statement` is `TPTPImport`-parsed into a Wolfram expression (slow).
-  - `"LiftToProofObject"` (default `True`) - wraps the Association into a literal `ProofObject` head (implying `"ParseFormulas" -> True`), so `p["ProofFunction"]`, `p["ProofGraph"]`, `p["ProofLength"]`, and `p["Theorems"]` work.  Set it `False` for the raw construct-keyed Association.
-- When the E binary is not installed, the builder returns a `Failure["ExternalNoProof", ...]` rather than raising an error.
+- [TEproverProofObject]() runs [TEproverProof]() on the problem file of the theorem, and converts the proof with [TSZSDerivationToProofObject]().
+- The steps of the proof are keyed as in the proofs of [TFindProof](): `{"Axiom", n}`, `{"Hypothesis", n}`, `{"CriticalPairLemma", n}`, `{"SubstitutionLemma", n}` and `{"Conclusion", 1}`.
+- With `"LiftToProofObject" -> False`, the result is an Association with the keys `"Backend"`, `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`, with the formulas as E writes them.
+- With the default `"LiftToProofObject" -> True`, the formulas are parsed into expressions and the result is a [ProofObject]().
+- When E finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>.
+- <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "EproverProcess"]</code> gives the same result.
+- The following options can be given:
+
+| | | |
+| --- | --- | --- |
+| [TimeConstraint]() | `30` | time limit in seconds given to E |
+| `"Binary"` | [Automatic]() | path of the E program |
+| `"LiftToProofObject"` | [True]() | whether to give a [ProofObject]() |
+| `"ParseFormulas"` | [False]() | whether to parse the formulas into expressions |
 
 ## Basic Examples
 
-On a machine without the E binary the builder degrades to a typed `Failure` (the `TEproverProof::noeprover` message fires along the way):
+Prove a Boolean identity with E and give the proof as a [ProofObject]():
 
 ```wl
-Head @ TEproverProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
+#| eval: false
+TEproverProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5]
 ```
-<!-- => Failure - Failure["ExternalNoProof", ...] when eprover is absent; ProofObject where it is installed -->
 
-With E installed (`brew install eprover`), the same call returns the lifted proof: <code>[TEproverProofObject]()["AbelianGroupAxioms", "InverseOfInverse"]</code> is a literal `ProofObject` supporting the standard property accessors, exactly like [TVampireProofObject]().
+<!-- => a ProofObject of the E proof -->
 
-## Properties & Relations
+## Options
 
-- [TEproverProof]() is the raw CLI wrapper this builds on.
-- [TVampireProofObject](), [TTweeProofObject](), and [TWaldmeisterProofObject]() are the sibling external-prover lifts; E and Vampire share the SZS lift path.
-- [TFindProof]()`[..., Method -> "EproverProcess"]` is the in-portfolio way to invoke this.
+### LiftToProofObject
 
-## Possible Issues
+With `"LiftToProofObject" -> False`, the result is an Association of the steps:
 
-- With `"LiftToProofObject" -> False` the result is a raw Association, not a `ProofObject` head; the property accessors only apply to the lifted form.
+```wl
+#| eval: false
+TEproverProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "LiftToProofObject" -> False]["Backend"]
+```
+
+<!-- => "SZS" -->
+
+### ParseFormulas
+
+With `"ParseFormulas" -> True`, the formulas of the steps are parsed into expressions:
+
+```wl
+#| eval: false
+TEproverProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "LiftToProofObject" -> False, "ParseFormulas" -> True]["Axioms"]
+```
+
+<!-- => the axioms as expressions -->
+
+### TimeConstraint
+
+The time limit is given to E:
+
+```wl
+#| eval: false
+TEproverProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 1, "LiftToProofObject" -> False]["Status"]
+```
+
+<!-- => "Proved" -->
+
+### Binary
+
+A path with no program gives a [Failure]():
+
+```wl
+TEproverProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "Binary" -> "/nonexistent/eprover"]
+```
+
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Eprover", "Status" -> "Failed", "Seconds" -> 0.01, "Strategy" -> "eprover-auto-schedule"|>] -->
+
+## Properties and Relations
+
+[TVampireProofObject]() gives the proof of the same theorem by Vampire, in the same form:
+
+```wl
+TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "LiftToProofObject" -> False]["RuleHistogram"]
+```
+
+<!-- => <|"forward_subsumption_resolution" -> 1|> -->

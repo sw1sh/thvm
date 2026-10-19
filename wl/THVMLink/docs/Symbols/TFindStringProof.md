@@ -5,76 +5,200 @@ Context: WolframInstitute`THVMLink`ATP`
 ContextPath: [Global`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TFindStringProof
-Keywords: [string rewriting, semi-Thue, directed rules, oriented rules, bubble sort, FindStringProof, multiway]
-SeeAlso: [TStringPath, TFindEquationalPath, TFindProof, FindEquationalProof]
+Keywords: [string rewriting, semi-Thue system, rewrite rules, word problem, bubble sort, FindStringProof, multiway system]
+SeeAlso: [TStringPath, TFindEquationalPath, TFindProof, FindEquationalProof, ProofObject]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Finding Replacement Paths with Directed Rules](FindReplacePath)"]
 ---
 
 ## Usage
 
-<code>[TFindStringProof]()[*thm*, *axioms*]</code> proves a string-rewriting theorem over the semi-Thue *axioms* and returns the `ProofObject`.
+<code>[TFindStringProof]()[*thm*, *axioms*]</code> proves the string-rewriting theorem *thm* from the string *axioms*, and gives a [ProofObject]().
 
-<code>[TFindStringProof]()[*thm*, *axioms*, *spec*]</code> returns the value selected by the [TFindProof]() return *spec* (`"Status"`, `"Path"`, `"Lemmas"`, ...).
+<code>[TFindStringProof]()[*thm*, *axioms*, "*spec*"]</code> gives the property *spec* of the proof search, as in [TFindProof]().
 
 ## Details & Options
 
-- Words are strings of letters; each character becomes one symbol and a word becomes a right-nested [CenterDot]() term (`"ABC"` encodes to `A·(B·C)`), with an associativity bridge axiom appended so a rule may fire at any position. The encoding follows the Wolfram Function Repository <code>[ResourceFunction]()["FindStringProof"]</code>.
-- An axiom written `"BA" -> "AB"` is a [Rule]() and installs *pre-oriented*: one-directional string rewriting (a semi-Thue rule). An axiom written `{"BA", "AB"}`, `"BA" == "AB"`, or `"BA" <-> "AB"` is a two-way equation that the engine orients itself.
-- A theorem is a word pair in any of those shapes; its direction is meaningless (the goal is an equation). A `List` of theorems is a multi-goal conjunction returning ONE `ProofObject` with a hypothesis/conclusion row pair per conjunct.
-- Accepts the [TFindProof]() options `MaxSteps`, `TimeConstraint`, `Method`, `PortfolioFrontLoad`.
-- The returned `ProofObject` is a standard `"EquationalLogic"` proof over the encoded terms and supports the full property API; [TStringPath]() decodes a proof's rewrite path back to plain words.
+- A word is a nonempty string of letters. Each letter becomes a symbol, and a word becomes a product of its letters under [CenterDot](), so `"ABC"` becomes `A·(B·C)`. An associativity axiom is added, so a rule can rewrite any part of a word.
+- An axiom written as a rule `"BA" -> "AB"` rewrites from left to right only, as in a semi-Thue system. An axiom written as a pair `{"BA", "AB"}` or as `"BA" <-> "AB"` is an equation, oriented by the prover.
+- A theorem is a pair of words in any of these forms. A list of theorems is proved as one conjunction, and gives one [ProofObject]().
+- The proof is a [ProofObject]() over the words as products of letters, with all the properties of an equational proof. [TStringPath]() gives the rewrite path as a list of words.
+- The values of *spec* are those of [TFindProof](), such as `"Status"`, `"Statistics"` and `"Path"`.
+- [TFindStringProof]() gives `$Failed` when no proof is found, and a [Failure]() for input that is not a pair of words.
+- [TFindStringProof]() takes the options of [TFindProof]():
+
+| | | |
+| --- | --- | --- |
+| [MaxSteps]() | [Automatic]() | maximum number of critical pairs to process |
+| [Method]() | [Automatic]() | proof search method |
+| [TimeConstraint]() | [Infinity]() | time limit in seconds |
 
 ## Basic Examples
 
-A single one-directional rule bubble-sorts a word; the proof is a real `ProofObject`:
+The rule `"BA" -> "AB"` sorts a word:
 
 ```wl
-TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, TimeConstraint -> 30]
+TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}]
 ```
-<!-- => ProofObject[<|"Theorem" -> ..., "Status" -> "Proved", ...|>] -->
 
-The `"Status"` spec returns the bare decision:
-
-```wl
-TFindStringProof["BBBAAA" -> "AAABBB", {"BA" -> "AB"}, "Status", TimeConstraint -> 30]
-```
-<!-- => Proved -->
-
-## Scope
-
-A list of theorems is one conjunction proved off a single saturation; the dataset carries a hypothesis per conjunct:
-
-```wl
-po = TFindStringProof[{"BA" -> "AB", "BBA" -> "ABB"}, {"BA" -> "AB"}, TimeConstraint -> 30];
-ContainsAll[Keys @ Normal @ po["ProofDataset"],
-    {{"Hypothesis", 1}, {"Hypothesis", 2}, {"Conclusion", 1}, {"Conclusion", 2}}]
-```
-<!-- => True - one ProofObject, a hypothesis/conclusion row per conjunct -->
-
-## Properties and Relations
-
-The proof object verifies independently - pre-oriented rules carry a proper trace lineage through the engine, so the lift survives:
-
-```wl
-po = TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, TimeConstraint -> 30];
-po["ProofFunction"][]
-```
-<!-- => Success["EquationalProof", <|...|>] -->
+<!-- => a ProofObject summary box, logic EquationalLogic -->
 
 ---
 
-A pair axiom is a two-way equation, the Wolfram Function Repository `FindStringProof` behaviour; a `Rule` axiom restricts rewriting to one direction. Both prove `"BBAA" == "AABB"`, but only the directed system keeps the word strictly sorting:
+Ask for the status of the proof search:
 
 ```wl
-TFindStringProof[{"BBAA", "AABB"}, {{"BA", "AB"}}, "Status", TimeConstraint -> 30]
+TFindStringProof["BBBAAA" -> "AAABBB", {"BA" -> "AB"}, "Status"]
 ```
-<!-- => Proved -->
+
+<!-- => "Proved" -->
+
+## Scope
+
+An axiom given as a pair of words is an equation:
+
+```wl
+TFindStringProof["BBAA" -> "AABB", {{"BA", "AB"}}, "Status"]
+```
+
+<!-- => "Proved" -->
+
+---
+
+An axiom given with [TwoWayRule]() is an equation too:
+
+```wl
+TFindStringProof["BBAA" <-> "AABB", {"BA" <-> "AB"}, "Status"]
+```
+
+<!-- => "Proved" -->
+
+---
+
+A list of theorems is proved as one conjunction:
+
+```wl
+TFindStringProof[{"BA" -> "AB", "BBA" -> "ABB"}, {"BA" -> "AB"}]
+```
+
+<!-- => a ProofObject summary box, logic EquationalLogic -->
+
+---
+
+The `"Statistics"` spec counts the steps of the proof search:
+
+```wl
+TFindStringProof["BBBAAA" -> "AAABBB", {"BA" -> "AB"}, "Statistics"]
+```
+
+<!-- => <|"Status" -> "Proved", "Steps" -> 8, "Rules" -> 4, "Trace" -> 9, "QueueSize" -> 0|> -->
+
+---
+
+The `"Path"` spec gives the rewrite path over the products of letters:
+
+```wl
+TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, "Path"]
+```
+
+<!-- => {B · (B · (A · A)), B · (A · (A · B)), A · (B · (A · B)), A · (A · (B · B))} -->
+
+---
+
+The theorem of the proof is an equation between products of letters:
+
+```wl
+TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}]["Theorems"]
+```
+
+<!-- => B · (B · (A · A)) == A · (A · (B · B)) -->
+
+## Options
+
+### MaxSteps
+
+A small step budget stops the search before it finds the proof:
+
+```wl
+TFindStringProof["BBBAAA" -> "AAABBB", {"BA" -> "AB"}, "Status", MaxSteps -> 1]
+```
+
+<!-- => "TimedOut" -->
+
+### Method
+
+Prove the theorem with the `"Waldmeister"` configuration:
+
+```wl
+TFindStringProof["ABB" -> "BBA", {"AB" -> "BA"}, "AppliedMethod", Method -> "Waldmeister"]
+```
+
+<!-- => "Waldmeister" -->
+
+### TimeConstraint
+
+A time limit bounds a search that does not end:
+
+```wl
+TFindStringProof["AB" -> "BA", {"ABA" -> "BAB"}, "Status", TimeConstraint -> 2]
+```
+
+<!-- => "TimedOut" -->
+
+## Properties and Relations
+
+Find a proof:
+
+```wl
+po = TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}]
+```
+
+<!-- => a ProofObject summary box, logic EquationalLogic -->
+
+The proof verifies through its own `"ProofFunction"`:
+
+```wl
+po["ProofFunction"][po["Theorems"]]
+```
+
+<!-- => Success["ProofFunction", <|"MessageTemplate" -> "Success!"|>] -->
+
+---
+
+[TStringPath]() gives the rewrite path as a list of words:
+
+```wl
+TStringPath["BBAA" -> "AABB", {"BA" -> "AB"}]
+```
+
+<!-- => {"BBAA", "BAAB", "ABAB", "AABB"} -->
 
 ## Possible Issues
 
-Words must be nonempty strings of letters; anything else returns a `Failure` naming the offending word:
+A theorem that does not follow from the axioms gives `$Failed`:
 
 ```wl
-TFindStringProof["A1" -> "AB", {"A" -> "B"}, TimeConstraint -> 10]
+TFindStringProof["AB" -> "BA", {"AA" -> "A"}]
 ```
+
+<!-- => $Failed -->
+
+---
+
+A word with a character that is not a letter gives a [Failure]():
+
+```wl
+TFindStringProof["A1" -> "AB", {"A" -> "B"}]
+```
+
 <!-- => Failure["TATPParseError", <|"Word" -> "A1", "Reason" -> "expected a nonempty word of letters"|>] -->
+
+---
+
+[Equal]() compares two different strings to [False](), so a pair of words written with `==` is not a theorem:
+
+```wl
+TFindStringProof["BBAA" == "AABB", {"BA" -> "AB"}]
+```
+
+<!-- => a Failure with "Item" -> False and "Reason" -> "expected a word pair: ..." -->

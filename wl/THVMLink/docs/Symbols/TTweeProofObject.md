@@ -4,40 +4,88 @@ Name: TTweeProofObject
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TTweeProofObject
-Keywords: [Twee, ATP, ProofObject, SZS, TSTP, external prover, proof lift, theorem proving]
-SeeAlso: [TTweeProof, TSZSDerivationToProofObject, TVampireProofObject, TEproverProofObject, TWaldmeisterProofObject, TFindProof]
+Keywords: [Twee, theorem proving, ATP, proof steps, external prover]
+SeeAlso: [TTweeProof, TVampireProofObject, TEproverProofObject, TWaldmeisterProofObject, TSZSDerivationToProofObject, TFindProof]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 ---
 
 ## Usage
 
-<code>[TTweeProofObject]()[*theory*, *thm*]</code> runs the Twee CLI via [TTweeProof]() and returns a `thvm`-shaped proof Association.
-
-It is the `Method -> "TweeProcess"` dispatch target in [TFindProof]().
+<code>[TTweeProofObject]()["*theory*", "*theorem*"]</code> runs the Twee prover on a named theorem of an [AxiomaticTheory]() theory, and gives its proof as an Association of steps.
 
 ## Details & Options
 
-- Twee's `--tstp` output is SZS-framed, but its proof body is a human-readable equation chain rather than TPTP `fof` inferences, so the lemma-list shape is built directly rather than via [TSZSDerivationToProofObject](). The dataset is keyed by `{"Axiom", n}` and `{"Lemma", n}` only, with no per-step construct-class metadata.
-- Options:
-  - `TimeConstraint`, `"Binary"` - forwarded to [TTweeProof]().
-- When the Twee binary is not installed, the builder returns a `Failure["ExternalNoProof", ...]` rather than raising an error.
+- [TTweeProofObject]() runs [TTweeProof]() on the problem file of the theorem and collects its axioms and lemmas.
+- The result has the keys `"Backend"` (`"Twee-TSTP"`), `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`.
+- `"ProofDataset"` keys the steps `{"Axiom", n}` and `{"Lemma", n}`, with each statement as Twee writes it. Twee records no inference rules and does not repeat the goal, so the steps carry no derivations and `"Goal"` is [Missing]().
+- When Twee finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>.
+- <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "TweeProcess"]</code> gives the same result.
+- The following options can be given:
+
+| | | |
+| --- | --- | --- |
+| [TimeConstraint]() | `30` | time limit in seconds |
+| `"Binary"` | [Automatic]() | path of the Twee program |
 
 ## Basic Examples
 
-Lift a Twee proof and read the shape of the proof Association:
+The steps of a Twee proof of a group theorem:
 
 ```wl
-Keys @ TTweeProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
+TTweeProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5]
 ```
-<!-- => {Backend, Status, Goal, Axioms, ProofDataset, ProofLength, RuleHistogram} -->
 
-## Properties & Relations
+<!-- => <|"Backend" -> "Twee-TSTP", "Status" -> "Proved", "Goal" -> Missing["NotEmittedByTwee"], "Axioms" -> ..., "ProofDataset" -> <|{"Axiom", 1} -> ..., {"Axiom", 2} -> ..., {"Axiom", 3} -> ..., {"Lemma", 1} -> ..., {"Lemma", 2} -> ...|>, "ProofLength" -> 6, "RuleHistogram" -> <|"twee-rewrite" -> 2|>|> -->
 
-- [TTweeProof]() is the raw CLI wrapper this builds on.
-- [TVampireProofObject](), [TEproverProofObject](), and [TWaldmeisterProofObject]() are the sibling external-prover lifts; unlike those three, [TTweeProofObject]() does not route through [TSZSDerivationToProofObject]() because Twee emits no `fof` inference DAG.
-- [TFindProof]()`[..., Method -> "TweeProcess"]` is the in-portfolio way to invoke this.
+## Scope
 
-## Possible Issues
+The steps of the proof:
 
-- Because Twee carries no per-step inference DAG, the result lacks the `{"CriticalPairLemma", n}` / `{"SubstitutionLemma", n}` construct-class metadata the SZS-based lifts provide; for that, use [TVampireProofObject]() or [TEproverProofObject]().
-- The (*theory*, *thm*) form resolves the generated TPTP bank under `tools/baselines/vampire_tptp/` (see [TTweeProof]()); on a fresh checkout export the bank first (`tools/vampire/export_tptp.wls`).
+```wl
+TTweeProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5]["ProofDataset"]
+```
+
+<!-- => <|{"Axiom", 1} -> <|"Statement" -> "and(X, op_overtilde(k1)) = X.", "Proof" -> <||>|>, ..., {"Lemma", 2} -> <|"Statement" -> "and(op_overtilde(k1), not(not(X))) = X.", "Proof" -> <||>|>|> -->
+
+## Options
+
+### TimeConstraint
+
+A time limit too short for Twee gives a [Failure]():
+
+```wl
+TTweeProofObject["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]
+```
+
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Twee", "Status" -> "Failed", "Seconds" -> 3.03|>] -->
+
+### Binary
+
+A path with no program gives a [Failure]():
+
+```wl
+TTweeProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5, "Binary" -> "/nonexistent/twee"]
+```
+
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Twee", "Status" -> "Failed", "Seconds" -> 0.01|>] -->
+
+## Properties and Relations
+
+[TFindProof]() with the `"TweeProcess"` method gives the same result:
+
+```wl
+TFindProof["LeftIdentity", "GroupAxioms", Method -> "TweeProcess", TimeConstraint -> 5] === TTweeProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5]
+```
+
+<!-- => True -->
+
+---
+
+[TVampireProofObject]() records the inference of each step of a proof of the same theorem:
+
+```wl
+TVampireProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5, "LiftToProofObject" -> False]["RuleHistogram"]
+```
+
+<!-- => <|"forward_demodulation" -> 1, "superposition" -> 6, "trivial_inequality_removal" -> 1|> -->

@@ -4,46 +4,110 @@ Name: TAtpDescribeMethod
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TAtpDescribeMethod
-Keywords: [ATP, Method, preset, introspection]
+Keywords: [theorem proving, ATP, Method, preset, suboptions, strategy]
 SeeAlso: [TAtpSchedule, TFindProof, TRelevantAxioms]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 ---
 
 ## Usage
 
-<code>[TAtpDescribeMethod]()[$method$]</code> returns an Association describing what a `Method` spec resolves to.  Useful for verifying that a list-form spec like `{"Twee", "Ordering" -> "LPO"}` lands the suboptions you expect on the C engine.
+<code>[TAtpDescribeMethod]()[*method*]</code> gives an Association of the suboptions that the setting <code>[Method]() -> *method*</code> of [TFindProof]() resolves to.
 
 ## Details & Options
 
-- A named preset (`"Waldmeister"`, `"VampireUEQ"`, `"Twee"`, `"EProver"`, `"VampireRandom"`, `"ENIGMA"`) returns the preset's full defaults Association: the suboptions the dispatcher merges with the user's overrides.
-- A list spec like `{"Twee", "Ordering" -> "LPO"}` returns the preset's defaults merged with the user's overrides - the options that actually reach the C engine, so you see what wins on collision.
-- A non-preset config like `{"Completion", "Ordering" -> "LPO"}` returns the bare Association of suboptions, with no preset merge.
-- `Automatic` / `"Portfolio"` / `"VampirePortfolio"` / `"VampirePortfolioCompact"` / `"AllPresets"` return `<|"Schedule" -> {...}|>` describing the multi-entry rotation rather than a single config.
+- For a named configuration such as `"Waldmeister"`, `"Twee"`, `"VampireUEQ"`, `"EProver"`, `"VampireRandom"` or `"ENIGMA"`, [TAtpDescribeMethod]() gives the suboptions of that configuration.
+- For a list <code>{*name*, *opt* -> *val*, …}</code> it gives the suboptions of *name* with the explicit settings added or replacing them.
+- For `"Completion"` or `"GoalDirected"` with explicit suboptions, it gives only those suboptions.
+- For a schedule such as [Automatic](), `"Portfolio"` or `"VampirePortfolio"`, it gives `<|"Schedule" -> {…}|>` with the entries of the schedule, as [TAtpSchedule]() does.
+- The suboptions are described in [Methods and Presets for TFindProof](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods).
 
 ## Basic Examples
 
-A named preset returns its defaults:
+The suboptions of the `"Twee"` configuration:
 
 ```wl
-TAtpDescribeMethod["Waldmeister"]
+TAtpDescribeMethod["Twee"]
 ```
-<!-- => <|"CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True, "SelectionRatio" -> 51, ...|> -->
 
-List form shows the merged result:
+<!-- => <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "UnfailingCP" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20|> -->
+
+## Scope
+
+An explicit setting is added to the suboptions of a configuration:
 
 ```wl
 TAtpDescribeMethod[{"Twee", "Ordering" -> "LPO"}]
 ```
-<!-- => <|"CriticalPairWeight" -> "Twee", "Ordering" -> "LPO", "GroundJoin" -> True, ...|> -->
 
-A portfolio returns a Schedule key:
+<!-- => <|"CriticalPairWeight" -> "Twee", ..., "AutoMaxWeight" -> 20, "Ordering" -> "LPO"|> -->
+
+---
+
+An explicit setting replaces the value a configuration gives:
 
 ```wl
-TAtpDescribeMethod["VampirePortfolio"]
+TAtpDescribeMethod[{"Twee", "AutoMaxWeight" -> 40}]
 ```
-<!-- => <|"Schedule" -> {"VampireUEQ", {"Completion", ...}, ...}|> -->
 
-## Properties & Relations
+<!-- => <|"CriticalPairWeight" -> "Twee", ..., "AutoMaxWeight" -> 40|> -->
 
-- [TAtpSchedule]() is the companion: given the same `Method` spec, it returns the list of entries the dispatcher would try.  Pair the two to inspect both shape (schedule) and content (per-entry options) of a portfolio.
-- [TFindProof]() with `Method -> $method$` runs the configuration this Association describes.
+---
+
+Plain completion with explicit suboptions has only those suboptions:
+
+```wl
+TAtpDescribeMethod[{"Completion", "Ordering" -> "LPO"}]
+```
+
+<!-- => <|"Ordering" -> "LPO"|> -->
+
+---
+
+The `"ENIGMA"` configuration ranks critical pairs with a learned model:
+
+```wl
+TAtpDescribeMethod["ENIGMA"]
+```
+
+<!-- => <|"CriticalPairWeight" -> "Learned", "Ordering" -> "KBO", "AutoPrecedence" -> True, "UnfailingCP" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "CoopWeight" -> "Gt", "CoopRatio" -> 2|> -->
+
+---
+
+The `"Waldmeister"` configuration sets many suboptions:
+
+```wl
+TAtpDescribeMethod["Waldmeister"]
+```
+
+<!-- => <|"CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True, "SkolemHighest" -> True, "SelectionRatio" -> 51, ...|> -->
+
+---
+
+A schedule gives its entries:
+
+```wl
+TAtpDescribeMethod["Portfolio"]
+```
+
+<!-- => <|"Schedule" -> {{"Completion", "CriticalPairWeight" -> "Mix2"}, {"Completion", "Ordering" -> "LPO", "AutoPrecedence" -> True}, {"Completion", "CriticalPairWeight" -> "Gt"}, "GoalDirected"}|> -->
+
+## Properties and Relations
+
+The schedule given by [TAtpDescribeMethod]() is the one [TAtpSchedule]() gives:
+
+```wl
+TAtpDescribeMethod["VampirePortfolioCompact"]["Schedule"] === TAtpSchedule["VampirePortfolioCompact"]
+```
+
+<!-- => True -->
+
+## Possible Issues
+
+An unknown method issues a message and gives `$Failed`:
+
+```wl
+TAtpDescribeMethod["Foo"]
+```
+
+<!-- => the message TFindProof::badmethod is issued and the result is $Failed -->

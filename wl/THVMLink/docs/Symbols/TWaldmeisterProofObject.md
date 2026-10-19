@@ -5,44 +5,148 @@ Context: WolframInstitute`THVMLink`ATP`
 ContextPath: [Global`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TWaldmeisterProofObject
-Keywords: [Waldmeister, wmcli, ATP, ProofObject, proof protocol, external prover, proof lift, theorem proving]
-SeeAlso: [TWaldmeisterProof, TSZSDerivationToProofObject, TVampireProofObject, TTweeProofObject, TEproverProofObject, TFindProof]
+Keywords: [Waldmeister, wmcli, theorem proving, ATP, ProofObject, proof protocol, external prover]
+SeeAlso: [TWaldmeisterProof, TSZSDerivationToProofObject, TVampireProofObject, TTweeProofObject, TEproverProofObject, TFindProof, FindEquationalProof]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[The Waldmeister Method in THVMLink](Waldmeister)", "[Methods and Presets for TFindProof](AtpMethods)"]
 ---
 
 ## Usage
 
-<code>[TWaldmeisterProofObject]()[*file*]</code> runs the local Waldmeister binary via [TWaldmeisterProof]() on a `.pr` problem *file* and converts the proof protocol through [TSZSDerivationToProofObject]() into a `thvm`-shaped proof Association.
+<code>[TWaldmeisterProofObject]()["*file*"]</code> runs the Waldmeister prover on the problem in the `.pr` *file*, and gives its proof as a [ProofObject]().
 
-<code>[TWaldmeisterProofObject]()[*theory*, *thm*]</code> resolves a banked `.pr` file under `tools/baselines/wm_pr/` from the (*theory*, *thm*) pair when one is present, and otherwise GENERATES the `.pr` at runtime from the theory's symbolic axioms and the named [NotableTheorem]() conjecture.
-
-It is the `Method -> "WaldmeisterProcess"` dispatch target in [TFindProof]().
+<code>[TWaldmeisterProofObject]()["*theory*", "*theorem*"]</code> runs Waldmeister on a named theorem of an [AxiomaticTheory]() theory.
 
 ## Details & Options
 
-- Each protocol inference lands under the internal engine's `ProofDataset` construct keys (`{"Axiom", n}`, `{"CriticalPairLemma", n}`, ...), with `"Backend" -> "SZS"`.
-- The `(theory, thm)` form uses a banked `.pr` under `tools/baselines/wm_pr/` as a byte-stable fast path; on a cache-miss it generates the `.pr` in-process (symbolic axioms and conjecture to TPTP CNF strings, then to `.pr` -- byte-identical to the banked construction) rather than failing.
-- Options:
-  - `TimeConstraint`, `"Binary"`, `"MathlinkPath"` - forwarded to [TWaldmeisterProof]().
-  - `"ParseFormulas"` (default `False`) - when `True`, each step's `Statement` is parsed into a Wolfram expression.
-  - `"LiftToProofObject"` (default `True`) - wraps the Association into a literal `ProofObject` head (implying `"ParseFormulas" -> True`), so `p["ProofFunction"]`, `p["ProofGraph"]`, `p["ProofLength"]`, and `p["Theorems"]` work.  Set it `False` for the raw construct-keyed Association.  The lifted proof renders and walks, but `p["ProofFunction"][p["Theorems"]]` does not verify: the protocol steps lack the rewrite metadata (Orientation / Rule / Side / Position) the verifier replays.
-- When the `wmcli` binary is not installed, the builder returns a `Failure["ExternalNoProof", ...]` rather than raising an error.
+- [TWaldmeisterProofObject]() runs [TWaldmeisterProof]() and converts its proof with [TSZSDerivationToProofObject]().
+- The form <code>[TWaldmeisterProofObject]()["*theory*", "*theorem*"]</code> reads the file `tools/baselines/wm_pr/`*theory*`__`*theorem*`.pr` under the current directory when it exists, and otherwise writes the problem from the axioms and the theorem of the theory.
+- The steps of the proof are keyed as in the proofs of [TFindProof](): `{"Axiom", n}`, `{"Hypothesis", n}`, `{"CriticalPairLemma", n}`, `{"SubstitutionLemma", n}` and `{"Conclusion", 1}`.
+- With the default `"LiftToProofObject" -> True`, the formulas are parsed into expressions and the result is a [ProofObject](). With `"LiftToProofObject" -> False`, the result is an Association with the keys `"Backend"`, `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`, with the formulas as Waldmeister writes them.
+- When Waldmeister finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>.
+- <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "WaldmeisterProcess"]</code> gives the same result.
+- The following options can be given:
+
+| | | |
+| --- | --- | --- |
+| `"LiftToProofObject"` | [True]() | whether to give a [ProofObject]() |
+| `"ParseFormulas"` | [False]() | whether to parse the formulas into expressions |
+| `"Binary"` | [Automatic]() | path of the `wmcli` program |
+| `"WMCLI"` | [Automatic]() | path of the `wmcli` program, used instead of `"Binary"` when given |
+| `"MathlinkPath"` | [Automatic]() | directory of the MathLink framework the program loads |
 
 ## Basic Examples
 
-Lift a Waldmeister proof into a literal `ProofObject` (the default):
+Prove the double-inverse theorem of abelian groups with Waldmeister:
 
 ```wl
-TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 10]
+TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse"]
 ```
-<!-- => ProofObject[...] (the .pr is generated at runtime on a cache-miss; Failure["ExternalNoProof", ...] when wmcli is unavailable) -->
 
-## Properties & Relations
+<!-- => a ProofObject summary box, logic EquationalLogic -->
 
-- [TWaldmeisterProof]() is the raw CLI wrapper this builds on.
-- [TVampireProofObject](), [TTweeProofObject](), and [TEproverProofObject]() are the sibling external-prover lifts.
-- [TFindProof]()`[..., Method -> "WaldmeisterProcess"]` is the in-portfolio way to invoke this.
+With `"LiftToProofObject" -> False`, the result is an Association of the steps, with the formulas as Waldmeister writes them:
 
-## Possible Issues
+```wl
+TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse", "LiftToProofObject" -> False]
+```
 
-- The `(theory, thm)` form prefers a banked `.pr` file (Waldmeister consumes its own `.pr` format, not TPTP) for byte-stability, but no longer depends on one: a cache-miss is handled by generating the `.pr` at runtime. A non-equational conjecture (one Waldmeister's unit-equational format cannot express) returns a `Failure["WmGenerate", ...]`.
+<!-- => <|"Backend" -> "SZS", "Status" -> "Proved", "Goal" -> "not(not(skC1())) = skC1()", "Axioms" -> {"x1 = and(x1,opOvertilde(k1()))", ...}, "ProofDataset" -> <|...|>, "ProofLength" -> 15, "RuleHistogram" -> <|"equation_copy" -> 1, "forward_demodulation" -> 3, "orient" -> 6, "superposition" -> 3, "trivial_inequality_removal" -> 1|>|> -->
+
+With `"ParseFormulas" -> True`, the formulas are parsed into expressions:
+
+```wl
+TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse", "LiftToProofObject" -> False, "ParseFormulas" -> True]["Goal"]
+```
+
+<!-- => OverBar[OverBar["skc1"[]]] == "skc1"[] -->
+
+## Scope
+
+Write a Waldmeister problem:
+
+```wl
+file = Export[FileNameJoin[{$TemporaryDirectory, "involution.pr"}], "NAME involution\nMODE PROOF\nSORTS ANY\nSIGNATURE a: -> ANY\n          f: ANY -> ANY\nORDERING LPO\n         f > a\nVARIABLES x : ANY\nEQUATIONS f(f(x)) = x\nCONCLUSION f(f(f(a))) = f(a)\n", "Text"]
+```
+
+<!-- => the path of involution.pr in $TemporaryDirectory -->
+
+The steps of its proof:
+
+```wl
+TWaldmeisterProofObject[file, "LiftToProofObject" -> False]
+```
+
+<!-- => <|"Backend" -> "SZS", "Status" -> "Proved", "Goal" -> "f(f(f(a()))) = f(a())", "Axioms" -> {"x1 = f(f(x1))"}, "ProofDataset" -> <|...|>, "ProofLength" -> 4, "RuleHistogram" -> <|"forward_demodulation" -> 1, "orient" -> 1, "trivial_inequality_removal" -> 1|>|> -->
+
+---
+
+The rules of a group proof:
+
+```wl
+TWaldmeisterProofObject["GroupAxioms", "LeftIdentity", "LiftToProofObject" -> False]["RuleHistogram"]
+```
+
+<!-- => <|"forward_demodulation" -> 3, "orient" -> 8, "superposition" -> 4, "trivial_inequality_removal" -> 1|> -->
+
+## Options
+
+### LiftToProofObject
+
+With `"LiftToProofObject" -> False`, the result is an Association rather than a [ProofObject]():
+
+```wl
+TWaldmeisterProofObject["GroupAxioms", "LeftIdentity", "LiftToProofObject" -> False]["Backend"]
+```
+
+<!-- => "SZS" -->
+
+### ParseFormulas
+
+`"ParseFormulas" -> True` parses the formulas of the steps into expressions:
+
+```wl
+TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse", "LiftToProofObject" -> False, "ParseFormulas" -> True]["Goal"]
+```
+
+<!-- => OverBar[OverBar["skc1"[]]] == "skc1"[] -->
+
+### Binary
+
+A path with no program gives a [Failure]():
+
+```wl
+TWaldmeisterProofObject["GroupAxioms", "LeftIdentity", "Binary" -> "/nonexistent/wmcli"]
+```
+
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Waldmeister", "Status" -> "Failed", "Seconds" -> 0.01|>] -->
+
+### WMCLI
+
+`"WMCLI"` is used instead of `"Binary"`:
+
+```wl
+TWaldmeisterProofObject["GroupAxioms", "LeftIdentity", "WMCLI" -> "/nonexistent/wmcli"]
+```
+
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Waldmeister", "Status" -> "Failed", "Seconds" -> 0.01|>] -->
+
+### MathlinkPath
+
+The program does not start without the MathLink framework:
+
+```wl
+TWaldmeisterProofObject["GroupAxioms", "LeftIdentity", "MathlinkPath" -> "/nonexistent"]
+```
+
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Waldmeister", "Status" -> "Failed", "Seconds" -> 0.02|>] -->
+
+## Properties and Relations
+
+[TFindProof]() with the `"WaldmeisterProcess"` method gives the same result:
+
+```wl
+TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "WaldmeisterProcess", "LiftToProofObject" -> False] === TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse", "LiftToProofObject" -> False]
+```
+
+<!-- => True -->
