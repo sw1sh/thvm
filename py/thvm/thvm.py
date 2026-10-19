@@ -85,11 +85,8 @@ _uop_flip = _bind("py_uop_flip", c_uint64, c_uint64, c_uint32)
 _uop_broadcast2 = _bind("py_uop_broadcast2", c_int32, ctypes.POINTER(c_uint64),
                         c_uint32, ctypes.POINTER(c_uint32), c_uint32, ctypes.POINTER(c_uint32),
                         ctypes.POINTER(c_uint32))
-_grad = _bind("py_grad", c_uint64, c_uint64, c_uint64)
 _grad_with_target = _bind("py_grad_with_target", c_uint64,
                           c_uint64, c_uint64, c_uint64)
-_fwd = _bind("py_fwd", c_uint64, c_uint64, c_uint64)
-_wnf = _bind("py_wnf", c_uint64, c_uint64)
 _realize = _bind("py_realize", c_uint64, c_uint64)
 _realize_many = _bind("py_realize_many", c_uint64,
                       ctypes.POINTER(c_uint64), c_uint32)
@@ -124,10 +121,8 @@ _uop_leaf_tids = _bind("py_uop_leaf_tids", c_uint32,
 _grad_err_take     = _bind("py_grad_err_take",     c_char_p)
 _backward = _bind("py_backward", c_char_p, c_uint64, c_uint64, ctypes.POINTER(c_uint32),
                   c_uint32, ctypes.POINTER(c_uint64), ctypes.POINTER(ctypes.c_uint8))
-_ten_get_grad     = _bind("py_ten_get_grad",     c_uint64, c_uint64)
 _ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
 _ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
-_ten_set_grad     = _bind("py_ten_set_grad",     c_int32,  c_uint64, c_uint64)
 
 _run_uop_kernel_c = _bind("py_run_uop_kernel_c", c_int32, c_uint64, c_void_p,
                           ctypes.POINTER(c_void_p), c_uint32, ctypes.POINTER(c_uint32))
@@ -355,18 +350,9 @@ class Thvm:
     def flip(self, src: Term, axes_bitmask: int) -> Term:
         return Term(_uop_flip(c_uint64(int(src)), c_uint32(int(axes_bitmask))))
 
-    def grad(self, y: Term, gy: Term) -> Term:
-        return Term(_grad(c_uint64(int(y)), c_uint64(int(gy))))
-
     def grad_with_target(self, y: Term, gy: Term, target: Term) -> Term:
         return Term(_grad_with_target(c_uint64(int(y)), c_uint64(int(gy)),
                                       c_uint64(int(target))))
-
-    def fwd(self, y: Term, gy: Term) -> Term:
-        return Term(_fwd(c_uint64(int(y)), c_uint64(int(gy))))
-
-    def wnf(self, t: Term) -> Term:
-        return Term(_wnf(c_uint64(int(t))))
 
     def realize(self, t: Term) -> Term:
         r = _realize(c_uint64(int(t)))
@@ -493,15 +479,8 @@ class Thvm:
         msg = _grad_err_take()
         return None if msg is None else msg.decode()
 
-    def ten_get_grad(self, t: Term) -> int:
-        """The lazy TENS[tid].grad term, 0 when nothing has accumulated."""
-        return int(_ten_get_grad(c_uint64(int(t))))
-
     def ten_clear_grad(self, t: Term) -> bool:
         return bool(_ten_clear_grad(c_uint64(int(t))))
-
-    def ten_set_grad(self, t: Term, g: int) -> bool:
-        return bool(_ten_set_grad(c_uint64(int(t)), c_uint64(int(g))))
 
     def term_tag(self, t: Term) -> int: return int(_term_tag(c_uint64(int(t))))
     def term_val(self, t: Term) -> int: return int(_term_val(c_uint64(int(t))))

@@ -189,21 +189,14 @@ EXPORT uint64_t py_uop_flip(uint64_t src, uint32_t axes_bitmask) {
   return uop_flip(src, axes_bitmask);
 }
 
-// The chain-rule (DP1) and forward (DP0) projections of a grad cell [y, gy,
-// target] (uop/grad.c); a nonzero target runs the target walk.
-EXPORT uint64_t py_grad(uint64_t y, uint64_t gy) {
-  return uop_grad(y, gy);
-}
+// The chain-rule (DP1) projection of a grad cell [y, gy, target]
+// (uop/grad.c); a nonzero target runs the target walk.
 EXPORT uint64_t py_grad_with_target(uint64_t y, uint64_t gy,
                                     uint64_t target) {
   return uop_grad_with_target(y, gy, target);
 }
-EXPORT uint64_t py_fwd(uint64_t y, uint64_t gy) {
-  return uop_fwd(y, gy);
-}
 
 // py_realize: the result TAG_TEN, or 0 with py_realize_error() saying why.
-EXPORT uint64_t py_wnf(uint64_t t)     { return wnf(t); }
 EXPORT uint64_t py_realize(uint64_t t) { return thvm_realize(t); }
 
 // The n roots realized as one TAG_CTR bundle (tinygrad Tensor.realize(*lst)), so
@@ -412,26 +405,13 @@ EXPORT char const *py_backward(uint64_t y, uint64_t gy, uint32_t const *tids, ui
   return uop_backward(y, gy, tids, n, (Term *)grads, had_grad);
 }
 
-// The lazy TenDesc.grad the single walk accumulates into, 0 when none; the
-// optimizer's zero_grad clears it between steps.
-EXPORT uint64_t py_ten_get_grad(uint64_t t) {
-  if (term_tag(t) != TAG_TEN) return 0;
-  u32 id = (u32)term_val(t);
-  if (id == 0 || id >= TENS_NEXT) return 0;
-  return (uint64_t)TENS[id].grad;
-}
+// Clears the lazy TenDesc.grad the single walk accumulates into; the
+// optimizer's zero_grad calls it between steps.
 EXPORT int py_ten_clear_grad(uint64_t t) {
   if (term_tag(t) != TAG_TEN) return 0;
   u32 id = (u32)term_val(t);
   if (id == 0 || id >= TENS_NEXT) return 0;
   TENS[id].grad = 0;
-  return 1;
-}
-EXPORT int py_ten_set_grad(uint64_t t, uint64_t g) {
-  if (term_tag(t) != TAG_TEN) return 0;
-  u32 id = (u32)term_val(t);
-  if (id == 0 || id >= TENS_NEXT) return 0;
-  TENS[id].grad = (Term)g;
   return 1;
 }
 

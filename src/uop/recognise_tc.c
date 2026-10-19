@@ -3,31 +3,6 @@
 // as the simdgroup_matrix template.  K need not be a multiple of 8: on a tile
 // mismatch the renderer falls back to the scalar accumulator.
 
-// The matmul shape as a UPat; the classifiers walk it by hand instead, as an
-// operand may be CAST(INDEX_E).  Braced macros, not named objects: a static
-// initializer wants constant expressions (C11 6.7.9p4), as clang 14 enforces.
-#define REC_TC_A_BUF  { UOP_BUFFER,  0,    0, 0,  NULL, NULL }
-#define REC_TC_A_ADDR { 0,           0xFF, 0, 1,  NULL, NULL }
-static UPat const rec_tc_a_kids[2] = { REC_TC_A_BUF, REC_TC_A_ADDR };
-#define REC_TC_A      { UOP_INDEX_E, 2,    0, -1, rec_tc_a_kids, NULL }
-
-#define REC_TC_B_BUF  { UOP_BUFFER,  0,    0, 2,  NULL, NULL }
-#define REC_TC_B_ADDR { 0,           0xFF, 0, 3,  NULL, NULL }
-static UPat const rec_tc_b_kids[2] = { REC_TC_B_BUF, REC_TC_B_ADDR };
-#define REC_TC_B      { UOP_INDEX_E, 2,    0, -1, rec_tc_b_kids, NULL }
-
-static UPat const rec_tc_mul_kids[2] = { REC_TC_A, REC_TC_B };
-#define REC_TC_MUL    { UOP_MUL,     2,    0, -1, rec_tc_mul_kids, NULL }
-
-// A REDUCE matches its body only; the kind and axis NUMs after it are payload.
-static UPat const rec_tc_reduce_kids[1] = { REC_TC_MUL };
-#define REC_TC_REDUCE { UOP_REDUCE,  1,    0, -1, rec_tc_reduce_kids, NULL }
-
-static UPat const rec_tc_store_kids[3] = {
-  { 0, 0xFF, 0, -1, NULL, NULL }, { 0, 0xFF, 0, -1, NULL, NULL }, REC_TC_REDUCE
-};
-static UPat const rec_tc_store = { UOP_STORE,   3,    0, -1, rec_tc_store_kids, NULL };
-
 // The INDEX_E under one CAST/BITCAST (a bf16 widening or q8's int8 dequant),
 // else `t`; rmu_emit_matmul_tc peels the same cast.
 static Term rec_tc_peel_cast(Term t) {

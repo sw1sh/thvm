@@ -1312,7 +1312,6 @@ int uop_dag_classify_contraction_shape(Term root,
   if (n_K == 0 || n_K > UDG_CONTRACT_MAX_AXES) return 0;
   u32 red_axis_ids[UDG_CONTRACT_MAX_AXES];
   for (u32 i = 0; i < n_K; i++) red_axis_ids[i] = uop_reduce_axis(reduce, i);
-  u32 red_axis_id = red_axis_ids[0];
   Term mul = uop_reduce_src(reduce);
   if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
   Term a_idx = heap_read(term_val(mul) + 0);

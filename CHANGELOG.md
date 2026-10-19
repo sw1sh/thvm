@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- Dead code removed: recognise_tc.c's unused matmul UPat table, dag_scan's unread red_axis_id, the py bridge's uncalled Thvm.wnf, fwd, grad, ten_get_grad and ten_set_grad with their C exports.
 - THVM_NO_FAST_IDIV=0 keeps the fast-idiv rewrite on, as tinygrad's DISABLE_FAST_IDIV=0 does: any value, 0 included, turned it off. Test: test_uop_index_simplify.
 - CUDA autotune winners cache under "cuda": kautotune_backend_name had no case for backend 3 and filed them under "unknown".
 - The schedule parity table pins var (1 vs tinygrad's 2), log_softmax (2 vs 3) and layernorm (2 vs 3): since Python scalars became rank-0 CONSTs (56c48f11) their row reduces fuse into the broadcast consumer, as softmax's already did, where tinygrad keeps the stage (buffer_in_reduce). R0 had calibrated the table against an older build, so the three cases failed from the start.
