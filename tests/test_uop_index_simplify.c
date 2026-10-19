@@ -108,6 +108,9 @@ static i64 ieval(Term t, i64 x) {
 }
 
 int main(void) {
+  // THVM_NO_FAST_IDIV=0 keeps the rewrite on, as tinygrad's DISABLE_FAST_IDIV=0
+  // does; the rule reads the knob once, on its first call below.
+  setenv("THVM_NO_FAST_IDIV", "0", 1);
   thvm_init();
 
   Term r = uop_range(0, KAX_LOOP, 8);
@@ -668,6 +671,8 @@ int main(void) {
     CHECK(lowered != 0);
     CHECK_EQ(term_ext(lowered), UOP_ISHR);
     CHECK_EQ(term_ext(heap_read(term_val(lowered) + 0)), UOP_IMUL);
+    TEST_BEGIN("fastidiv/knob-zero-keeps-the-rule");
+    CHECK(uop_fast_idiv_rule(div11, NULL) != 0);
 
     // fast_idiv-node: `num % 11` lowers to ISUB(num, IMUL(div, 11)) with NO
     // residual IDIV/IMOD.

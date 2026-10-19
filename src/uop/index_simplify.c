@@ -1172,12 +1172,15 @@ static Term uop_fast_idiv_node(Term node) {
   return uop_int_binary(UOP_ISUB, num, cm);
 }
 
-// The uop_graph_rewrite rule.  THVM_NO_FAST_IDIV, set to any value, keeps the
+// The uop_graph_rewrite rule.  THVM_NO_FAST_IDIV, set nonzero, keeps the
 // literal IDIV/IMOD, like tinygrad's DISABLE_FAST_IDIV (helpers.py:249).
 fn Term uop_fast_idiv_rule(Term t, void *user) {
   (void)user;
   static int gate = -1;
-  if (gate < 0) gate = getenv("THVM_NO_FAST_IDIV") ? 1 : 0;
+  if (gate < 0) {
+    char const *e = getenv("THVM_NO_FAST_IDIV");
+    gate = e != NULL && atoi(e) != 0;
+  }
   if (gate) return 0;
   return uop_fast_idiv_node(t);
 }
