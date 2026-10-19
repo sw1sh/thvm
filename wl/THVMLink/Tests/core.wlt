@@ -478,3 +478,11 @@ VerificationTest[
     {TCtr::arity},
     TestID -> "core/tctr-arity-limit"
 ]
+
+(* A one-element superposition is that term; an empty one is refused. *)
+VerificationTest[
+    {TTermExpr[TSup[{5}]], TSup[{}]},
+    {"NUM"[5], TSup[{}]},
+    {TSup::empty},
+    TestID -> "core/tsup-list-edge-cases"
+]

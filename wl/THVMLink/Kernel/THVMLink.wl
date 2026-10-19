@@ -1302,7 +1302,10 @@ TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg] (* heapWith coerces bare-Inte
 
 TSup[a_, b_] := TSup[TFreshLabel[], a, b]
 TSup[label_Integer, a_, b_] := heapTerm[$TagSUP, label, a, b] (* heapWith coerces bare-Integer children *)
-TSup[xs_List] := Fold[TSup, xs]
+TSup[{x_}] := numCoerce[x]
+TSup[xs : {_, __}] := Fold[TSup, xs]
+TSup[{}] := Null /; (Message[TSup::empty]; False)
+TSup::empty = "A superposition needs at least one term.";
 
 (* Dynamic-label SUP / DUP (HVM4 DSU / DDU).  The label is a Term
    that wnf reduces strict-left before dispatching the matching

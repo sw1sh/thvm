@@ -195,3 +195,37 @@ VerificationTest[
     {TUOpAdd::shape, TUOpReshape::shape, TUOpPermute::shape, TUOpExpand::shape},
     TestID -> "tensors/uop-shape-checks"
 ]
+
+(* Input that is not a term or tensor data gives a message and stays unevaluated, instead of
+   reaching the library and building a malformed term. *)
+VerificationTest[
+    {TRealize[foo], TRealize[3], TTensorCreate[{{1, 2}, {3}}], TTensorCreate[{1, 2}, "bogus"], TUOpConst[foo], TUOpReduce[TTensorCreate[{1., 2.}], 0, "PROD"]},
+    {TRealize[foo], TRealize[3], TTensorCreate[{{1, 2}, {3}}], TTensorCreate[{1, 2}, "bogus"], TUOpConst[foo], TUOpReduce[TTensorCreate[{1., 2.}], 0, "PROD"]},
+    {TRealize::term, TRealize::term, TTensorCreate::data, TTensorCreate::dtype, TUOpConst::args, TUOpReduce::args},
+    SameTest -> (Length[#1] === Length[#2] && And @@ MapThread[MatchQ[Head[#1], Head[#2]] &, {#1, #2}] &),
+    TestID -> "tensors/input-checks"
+]
+
+VerificationTest[
+    TUOpReduce[TTensorCreate[{1., 2.}], 3, "SUM"],
+    _TUOpReduce,
+    {TUOpReduce::args},
+    SameTest -> MatchQ,
+    TestID -> "tensors/reduce-axis-past-rank"
+]
+
+(* TMatMul needs matching inner dimensions; TGather an index with one position per slice;
+   TSet a source with the destination's element count.  Each refusal is a message. *)
+VerificationTest[
+    With[{a = TTensorCreate[{{1., 2.}, {3., 4.}}], x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}], d = TTensorCreate[{1., 2., 3.}]},
+        Head /@ {TMatMul[a, TTensorCreate[{{1., 2., 3.}}]], TGather[x, 1, {1}], TSet[d, TTensorCreate[{5., 6.}]]}],
+    {TMatMul, TGather, TSet},
+    {TMatMul::dims, TGather::args, TSet::src},
+    TestID -> "tensors/matmul-gather-set-checks"
+]
+
+VerificationTest[
+    With[{x = TTensorCreate[{{1., 2., 3.}, {4., 5., 6.}}]}, Normal @ TRealize[TGather[x, 1, {2, 0}]]],
+    {{3.}, {4.}},
+    TestID -> "tensors/gather-per-row"
+]

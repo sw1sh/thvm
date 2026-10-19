@@ -228,10 +228,18 @@ TTensorData[t_TTerm] := Missing["NotATensor", TTagName[TTermTag[t]]]
 
 (* === UOp graph constructors === *)
 
-TUOpConst[value_, dtype_String : "f32"] := (
+(* A term-like argument is anything ttermRaw packs (a TTerm, an internal TKernel); a bare integer
+   would be read as a raw packed word, so it is not one. *)
+termLikeQ[_Integer] := False
+termLikeQ[x_] := IntegerQ[Quiet[ttermRaw[x]]]
+General::term = "`1` is not a THVMLink term or tensor.";
+
+TUOpConst[value_ ? NumericQ, dtype_String : "f32"] /; IntegerQ[dtypeCode[dtype]] := (
     ensureInit[];
     TTerm[$uopConstFn[dtypeCode[dtype], N[value]]]
 )
+TUOpConst[value_, dtype_String : "f32"] := Null /; (Message[TUOpConst::args, value, dtype]; False)
+TUOpConst::args = "TUOpConst takes a number and a THVMLink dtype name; `1` with `2` is not one.";
 
 TUOpCast[src_, dtype_String] := (ensureInit[]; TTerm[$uopCastFn[ttermRaw[src], dtypeCode[dtype]]])
 TUOpBitcast[src_, dtype_String] := (ensureInit[]; TTerm[$uopBitcastFn[ttermRaw[src], dtypeCode[dtype]]])
@@ -256,10 +264,13 @@ TUOpExp2[a_] := (ensureInit[]; TTerm[$uopUnaryFn[$UopExp2, ttermRaw[a]]])
 TUOpLog2[a_] := (ensureInit[]; TTerm[$uopUnaryFn[$UopLog2, ttermRaw[a]]])
 TUOpSqrt[a_] := (ensureInit[]; TTerm[$uopUnaryFn[$UopSqrt, ttermRaw[a]]])
 
-TUOpReduce[src_, axis_Integer, kind_String] := (
+TUOpReduce[src_, axis_Integer, kind_String] /; termLikeQ[src] && IntegerQ[reduceKindCode[kind]] &&
+        With[{s = tUopShape[src]}, ! ListQ[s] || 0 <= axis < Length[s]] := (
     ensureInit[];
     TTerm[$uopReduceFn[reduceKindCode[kind], axis, ttermRaw[src]]]
 )
+TUOpReduce[src_, axis_Integer, kind_String] := Null /; (Message[TUOpReduce::args, axis, kind, tUopShape[src]]; False)
+TUOpReduce::args = "TUOpReduce reduces a tensor along an existing axis with \"SUM\" or \"MAX\"; axis `1` with `2` does not fit shape `3`.";
 
 (* sum_acc_dtype (tinygrad dtype.py:274 + mixin/reduce.py:43): a SUM
    accumulates in least_upper_dtype(dt, float32), i.e. a bf16/f16 input
@@ -548,14 +559,15 @@ TGrad[y_, targets_List] := Module[{leaves, grads},
    each read what the other overwrites return
    Failure["TRealize", ...] ("cycle detected in assign graph"). *)
 TRealize[{}] := {}
-TRealize[exprs_List] := Module[{raw, n},
+TRealize[exprs_List] /; AllTrue[exprs, termLikeQ] := Module[{raw, n},
     ensureInit[];
     raw = $realizeManyFn[Developer`ToPackedArray[ttermRaw /@ exprs, Integer]];
     If[raw === 0, Return @ realizeFailure[]];
     n = $termCtrNFn[raw];
     Table[TTerm[$termCtrAtFn[raw, i]], {i, 0, n - 1}]
 ]
-TRealize[expr_] := (ensureInit[]; realizeResult[$realizeFn[ttermRaw[expr]]])
+TRealize[expr_] /; termLikeQ[expr] := (ensureInit[]; realizeResult[$realizeFn[ttermRaw[expr]]])
+TRealize[expr_] := Null /; (Message[TRealize::term, expr]; False)
 
 realizeResult[0] := realizeFailure[]
 realizeResult[raw_] := TTerm[raw]
@@ -568,7 +580,8 @@ realizeFailure[] := Failure["TRealize", <|"MessageTemplate" -> $realizeErrorFn[]
    first heap cell is the pre-allocated output TAG_TEN (empty) and
    second cell is a TAG_NUM carrying the KernelEntry id.  Subsequent
    TWnf fires the kernels bottom-up. *)
-TMaterialize[expr_] := (ensureInit[]; TTerm[$materializeFn[ttermRaw[expr]]])
+TMaterialize[expr_] /; termLikeQ[expr] := (ensureInit[]; TTerm[$materializeFn[ttermRaw[expr]]])
+TMaterialize[expr_] := Null /; (Message[TMaterialize::term, expr]; False)
 
 (* TKernelCount / TKernelProgramCacheSize / TKernelInfo are defined
    in Kernel.wl alongside the rest of the kernel-introspection surface. *)
@@ -649,7 +662,13 @@ TPackUInt4[xs_List] := (ensureInit[]; $int4PackFn[Round @ Flatten[{xs}], $DTUInt
 TUnpackInt4[na_NumericArray, numel_Integer] := (ensureInit[]; $int4UnpackFn[na, $DTInt4, numel])
 TUnpackUInt4[na_NumericArray, numel_Integer] := (ensureInit[]; $int4UnpackFn[na, $DTUInt4, numel])
 
-TTensorCreate[data_] := (ensureInit[]; TTerm[$tensorFromNAFn[asSharableNA[data]]])
+(* Tensor data is a nonempty rectangular array of numbers (a list or a NumericArray). *)
+tensorDataQ[na_NumericArray] := Length[Dimensions[na]] >= 1 && Times @@ Dimensions[na] > 0
+tensorDataQ[data_] := ArrayQ[data, _, NumericQ] && Length[Dimensions[data]] >= 1 && FreeQ[Dimensions[data], 0]
+TTensorCreate::data = "`1` is not tensor data: give a nonempty rectangular array of numbers.";
+TTensorCreate::dtype = "`1` is not a THVMLink dtype name.";
+
+TTensorCreate[data_] /; tensorDataQ[data] := (ensureInit[]; TTerm[$tensorFromNAFn[asSharableNA[data]]])
 
 (* Host-pinned tensor: ALWAYS CPU-resident (zero-copy NA wrap) even
    when the active backend is non-CPU.  Pair with TUOpCopy to defer the
@@ -658,7 +677,7 @@ TTensorCreate[data_] := (ensureInit[]; TTerm[$tensorFromNAFn[asSharableNA[data]]
    is lazy. *)
 TTensorCreateHost[data_] := (ensureInit[]; TTerm[$tensorFromNAHostFn[asSharableNA[data]]])
 
-TTensorCreate[data_, dtype_String] := (
+TTensorCreate[data_, dtype_String] /; tensorDataQ[data] && IntegerQ[dtypeCode[dtype]] := (
     ensureInit[];
     Module[{na, useTyped, normalized, shape, flatNa, t, logicalShape},
         useTyped = MemberQ[{"f16", "bf16", "fp8e4m3", "fp8e5m2", "i4", "u4", "bool"}, dtype];
@@ -701,6 +720,9 @@ TTensorCreate[data_, dtype_String] := (
             TTerm[$tensorFromNAFn[na]]
         ]
     ])
+
+TTensorCreate[data_, dtype_String] /; tensorDataQ[data] := Null /; (Message[TTensorCreate::dtype, dtype]; False)
+TTensorCreate[data_, ___] /; ! tensorDataQ[data] := Null /; (Message[TTensorCreate::data, data]; False)
 
 TUOpKind[u_] := Lookup[$uopNames, TTermExt[u], "UOP?" <> ToString[TTermExt[u]]]
 
@@ -957,7 +979,12 @@ TTerm /: Set[t_TTerm, src_] := TSet[t, src]
 (* TSet[dst, src]: in-place buffer write.  Evaluates dst (so callers
    can pass a Module-bound symbol) before dispatching the literal-form
    TAssign + TRealize.  Returns dst so chains compose. *)
-TSet[dst_TTerm, src_] := (TRealize[TAssign[dst, src]]; dst)
+(* The source is a term with dst's element count. *)
+tSetSourceOkQ[dst_, src_] := termLikeQ[src] && With[{sd = tUopShape[dst], ss = tUopShape[src]},
+    ! ListQ[sd] || ! ListQ[ss] || Times @@ ss === Times @@ sd]
+TSet[dst_TTerm, src_] /; tSetSourceOkQ[dst, src] := (TRealize[TAssign[dst, src]]; dst)
+TSet[dst_TTerm, src_] := Null /; (Message[TSet::src, src, tUopShape[dst]]; False)
+TSet::src = "TSet writes a term with the destination's number of elements (shape `2`); `1` is not one.";
 
 (* TSetData[dst, na]: in-place host upload.  Writes the NumericArray's
    bytes straight into dst's existing buffer via tensor_write_na, with

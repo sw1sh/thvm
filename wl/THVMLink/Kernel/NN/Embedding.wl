@@ -22,7 +22,18 @@ Begin["`Private`"];
 gatherIndexTensor[index_TTerm, keepShape_] := TUOpReshape[TUOpCast[index, "f32"], keepShape]
 gatherIndexTensor[index_List, keepShape_] := TTensorCreate[ArrayReshape[N @ Flatten[{index}], keepShape]]
 
-TGather[x_TTerm, axis_Integer, index_] := Module[{shape = tUopShape[x], rank, n, keepShape, arange, idx, oh},
+(* The index holds one position for every slice along axis: a shorter list would be zero-padded
+   by ArrayReshape and silently gather position 0. *)
+gatherArgsOkQ[shape_List, axis_Integer, index_] := 0 <= axis < Length[shape] &&
+    With[{want = Times @@ ReplacePart[shape, axis + 1 -> 1], got = gatherIndexShape[index]},
+        ListQ[got] && Times @@ got === want]
+gatherArgsOkQ[__] := False
+gatherIndexShape[index_List] := Dimensions[index]
+gatherIndexShape[index_TTerm] := tUopShape[index]
+gatherIndexShape[_] := $Failed
+TGather::args = "TGather on a tensor of shape `1` along axis `2` needs an index with one position for every slice; the index has shape `3`.";
+
+TGather[x_TTerm, axis_Integer, index_] /; gatherArgsOkQ[tUopShape[x], axis, index] := Module[{shape = tUopShape[x], rank, n, keepShape, arange, idx, oh},
     rank = Length[shape];
     n = shape[[axis + 1]];
     keepShape = ReplacePart[shape, axis + 1 -> 1];
@@ -31,6 +42,7 @@ TGather[x_TTerm, axis_Integer, index_] := Module[{shape = tUopShape[x], rank, n,
     oh = TUOpCmpeq[arange, idx];
     TUOpReshape[TUOpReduce[x * oh, axis, "SUM"], keepShape]
 ]
+TGather[x_TTerm, axis_Integer, index_] := Null /; (Message[TGather::args, tUopShape[x], axis, gatherIndexShape[index]]; False)
 
 TTakeAlongAxis[x_TTerm, index_, axis_Integer] := TGather[x, axis, index]
 
