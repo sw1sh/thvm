@@ -65,9 +65,10 @@ Math is for subscripted names (`$x_1$`) and formulas only.
   `Context: WolframInstitute`THVMLink``) before it evaluates the cells, so an example never needs
   `Needs["WolframInstitute`THVMLink`"]`.
 - **No `TInit`.** The runtime initializes itself on first use, so init calls are
-  noise. (A purposeful `TReset[]` / `TInit[]` to show something *in isolation* is
-  rare and must earn its place; the kernel table survives `TReset`, only `TInit`
-  fully resets it - prefer presenting the live accumulated state honestly.)
+  noise. A `TReset[];` cell earns its place only where a later output depends on the
+  heap's state (interaction counters, heap positions, fresh labels, kernel ids); it is
+  then its own captioned cell. `TReset` clears the heap, the kernel table (`TKernelCount`
+  goes back to 1) and the tensors, so a term or kernel made before it is no longer valid.
 - **One output per cell.** Never show `{TTensorShape[x], TTensorDType[x]}` - split
   into two cells.
 - **Readouts use [Normal]().** `Normal @ TRealize @ expr` returns a plain list;
