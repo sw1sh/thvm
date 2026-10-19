@@ -493,3 +493,18 @@ VerificationTest[
     {"ANY", 1, "ANY"},
     TestID -> "core/tany-wildcard"
 ]
+
+(* NUMs are unsigned 32-bit words: a negative i32 is stored as the two's-complement pattern
+   arithmetic gives for it, and a - b on terms is the wrapped difference. *)
+VerificationTest[
+    {TTermVal[TNum[-1]], TTermVal[TWnf[TOp2["-", 3, 4]]], TTermVal[TWnf[TNum[3] - TNum[4]]], TTermVal[TWnf[TNum[10] - TNum[3]]], TTermVal[TWnf[-2 TNum[5]]]},
+    {4294967295, 4294967295, 4294967295, 7, 4294967286},
+    TestID -> "core/num-negatives-wrap-32bit"
+]
+
+VerificationTest[
+    TNum[2^40],
+    TNum[2^40, "i32"],
+    {TNum::range},
+    TestID -> "core/num-out-of-range"
+]

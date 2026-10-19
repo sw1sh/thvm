@@ -329,6 +329,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- Negative numbers agree with arithmetic. NUMs are unsigned 32-bit words, so `TNum[-1]` is 4294967295, the same as `TOp2["-", 3, 4]`; it was a 38-bit pattern, 274877906943. `a - b` and `-n t` on numeric terms build a wrapped subtraction. A value that does not fit in 32 bits gives `TNum::range`.
 - Readouts print cleanly. Byte counts are whole (`140B`, not `140.B` or `4.00B`). Percentages and timings carry one decimal without rounding noise (`31.9`, not `31.900000000000002`). `TUOpKind` names a gradient `"GRAD"` and a tensor leaf `"TEN"` (it gave `"UOP?131072"` and `"EXP2"`).
 - `TAny[]` builds the `ANY` wildcard term, which `TEql` treats as equal to every term. It had a page and a reducer rule but no definition, and `TTermExpr` showed the tag as `Unknown[18]`.
 - Tensor functions refuse input they cannot use, with a message, and leave the expression unevaluated. Before, they built a malformed term or silently did nothing. This covers `TRealize` and `TMaterialize` of a non-term; `TTensorCreate` of a scalar, an empty or ragged list, or an unknown dtype; `TUOpConst` of a non-number; `TUOpReduce` with an unknown kind or an axis past the rank; `TMatMul` with mismatched inner dimensions; `TGather` with an index of the wrong length; and `TSet` with a source of another size. `TSup[{x}]` is `x` and `TSup[{}]` is refused.

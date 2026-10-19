@@ -78,12 +78,18 @@ $termNewCtrFn := $termNewCtrFn = load["thvm_wl_term_new_ctr", {Integer, {Integer
 $termNewBookCtrFn := $termNewBookCtrFn = load["thvm_wl_term_new_book_ctr", {Integer, {Integer, 1}}, Integer]
 
 (* TAG_NUM is just a packed term - no library call needed. *)
+(* NUMs are unsigned 32-bit words (OP2 arithmetic wraps mod 2^32), so an i32 NUM stores a
+   negative integer as its two's-complement pattern, the value arithmetic gives for it. *)
 TNum[i_Integer] := TNum[i, "i32"]
-TNum[i_Integer, dtype_String] /; IntegerQ[dtypeCode[dtype]] := (
+TNum[i_Integer, "i32"] /; -2^31 <= i < 2^32 := TNum[BitAnd[i, 2^32 - 1], $DTInt32]
+TNum[i_Integer, "i32"] := Null /; (Message[TNum::range, i]; False)
+TNum::range = "`1` does not fit in a 32-bit NUM.";
+TNum[i_Integer, code_Integer] := (
     ensureInit[];
-    TTerm[$termNewFn[0, $TagNUM, dtypeCode[dtype], i]]
+    TTerm[$termNewFn[0, $TagNUM, code, i]]
 )
-TNum[_Integer, dtype_String] := Null /; (Message[TNum::dtype, dtype]; False)
+TNum[i_Integer, dtype_String] /; dtype =!= "i32" && IntegerQ[dtypeCode[dtype]] := TNum[i, dtypeCode[dtype]]
+TNum[_Integer, dtype_String] /; dtype =!= "i32" := Null /; (Message[TNum::dtype, dtype]; False)
 TNum::dtype = "`1` is not a dtype; a NUM takes \"i32\", \"f32\", \"bool\" or another THVMLink dtype name.";
 
 (* numCoerce - term-constructor sugar.  A bare Integer in a value
@@ -212,6 +218,10 @@ TTerm /: Subtract[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] := TOp2["-", a
 TTerm /: Subtract[t_TTerm ? numericTermQ, n_Integer] := TOp2["-", t, TNum[n]]
 
 (* Times[k, n] / Times[n, k] / Times[k1, k2]. *)
+(* A negative factor negates in the unsigned ring, 0 - (|n| t), so a - b (which WL writes as
+   Plus[a, Times[-1, b]]) is a - b mod 2^32. *)
+TTerm /: Times[t_TTerm ? numericTermQ, n_Integer ? Negative] := TOp2["-", TNum[0], If[n === -1, t, TOp2["*", TNum[-n], t]]]
+TTerm /: Times[n_Integer ? Negative, t_TTerm ? numericTermQ] := TOp2["-", TNum[0], If[n === -1, t, TOp2["*", TNum[-n], t]]]
 TTerm /: Times[t_TTerm ? numericTermQ, n_Integer] := TOp2["*", t, TNum[n]]
 TTerm /: Times[n_Integer, t_TTerm ? numericTermQ] := TOp2["*", TNum[n], t]
 TTerm /: Times[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] := TOp2["*", a, b]
