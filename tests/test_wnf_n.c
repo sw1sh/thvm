@@ -90,6 +90,23 @@ int main(void) {
   CHECK_EQ(term_tag(WNF_LAST_STACK[0]), TAG_APP);
   CHECK_EQ(term_tag(WNF_LAST_STACK[1]), TAG_APP);
 
+  // A budget spent inside a UOP's active child (a dup projection) rebuilds the
+  // UOP around the partly reduced child, as an unwound stuck frame would.
+  TEST_BEGIN("wnf_n/bail-inside-a-uop-child-keeps-the-uop");
+  {
+    Shape s   = {0};
+    s.ndim    = 1;
+    s.dims[0] = 2;
+    Term t    = term_new(0, TAG_TEN, DT_FP32, tensor_alloc(&CPU_BACKEND, s, DT_FP32));
+    u64  dup  = heap_alloc(1);
+    heap_set(dup, build_app(build_id_lam(), t));   // APP-LAM, then DUP-TEN
+    Term add  = uop_binary(UOP_ADD, term_new(0, TAG_DP0, 3, dup), t);
+    Term out  = wnf_n(add, 1);
+    CHECK_EQ(term_tag(out), TAG_UOP);
+    CHECK_EQ(term_ext(out), UOP_ADD);
+    CHECK_EQ(term_val(out), term_val(add));
+  }
+
   thvm_free();
   TEST_REPORT();
 }

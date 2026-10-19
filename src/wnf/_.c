@@ -823,6 +823,12 @@ bail:
       u64 loc = term_val(frame);
       heap_set(loc + 1, whnf);
       whnf = term_new(0, TAG_EQL, 0, loc);
+    } else if (ftag == TAG_F_UOP_CHILD) {
+      // The partly reduced child goes back into its parent UOP's cell.
+      u32 packed = term_ext(frame);
+      u64 uloc   = term_val(frame);
+      heap_set(uloc + (packed & 0xFF), whnf);
+      whnf = term_new(0, TAG_UOP, (packed >> 8) & 0xFF, uloc);
     }
   }
   WNF_S_POS = s_pos;

@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- A step-budgeted wnf that runs out inside a UOP's active child (a dup projection, a kernel) returns the UOP rebuilt around the partly reduced child: the bail's unwinding had no F_UOP_CHILD case and returned the child in the parent's place (reachable through WL TWnf[t, n]). Test: test_wnf_n.
 - A nested BUFFERIZE inline chain past UNIFIED_SUBST_CAP (64) bindings is fatal: unified_rewrite_rec_extend dropped the new binding and rewrote with that closed range unbound, which then read as iteration 0, where the axis-table and multi-axis paths decline.
 - materialize.c drops 346 lines no one calls: `try_inline_bufferize_1axis_via_decomp` and `try_inline_bufferize_multi_via_stride_match` (the stride and extent inline fallbacks; a side-table miss is fatal instead) and the mask scan only the first one asked.
 - rangeify reads distinct range axes: `ru_collect_range_axes` returned every RANGE occurrence along every tree path (to depth 32) while writing at most RU_MAX_AXES ids, and both callers indexed their RU_MAX_AXES stack arrays with that count, reading garbage axis ids into RU_ENDING_RANGES and RU_FUSE_ALL_REDUCE_AIDS once an address named more than eight ranges (stacked reshapes over permuted ranges do). It now walks the DAG once and returns the distinct ids; more than RU_MAX_AXES is fatal. A REDUCE whose source has no shape is fatal too: its empty range list read as a size-1 reduce and the unwrap dropped the reduction. Test: test_rangeify_unified range-axes-are-distinct.
