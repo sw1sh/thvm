@@ -486,7 +486,11 @@ label_join.py keys keys.tsv labels/index.tsv labels/npz labels_x/index.tsv label
 label_join.py join groups/ keys.tsv out_1/ out_2/   # groups_<lane>.npz, stats.tsv, summary.txt
 # 4. the head (py/thvm): 5 OOF folds + the full model, early stopping on VAL
 DEV=cpu guide_net.py train groups/ train/ --list-lanes lanes.txt --k 64 --hidden 64
+#    or one process per model on the same out directory, then the merge
+DEV=cpu guide_net.py train groups/ train/ --list-lanes lanes.txt --hidden 64 --models full
+DEV=cpu guide_net.py train groups/ train/ --list-lanes lanes.txt --hidden 64 --models 0
 guide_net.py readout train/                    # readouts, not gates
+guide_net.py choose train_h32/ train_h64/ train_h128/   # amendment A30's width rule
 # 5. compile it in
 weights_to_c.py build example=ex.safetensors harvest=hv.safetensors loop1=train/head.safetensors \
   -o src/atp/guide_models.c

@@ -54,21 +54,35 @@
 #                [--hidden 64] [--k 64 | --lazy [--tau 0]] [--epochs 200]
 #                [--patience 10] [--lr 1e-3] [--seed 0] [--max-groups-per-run 256]
 #                [--w-own 1] [--w-cross 1] [--w-hind 1] [--folds 5] [--model-id loop0]
+#                [--models 0,1,...,full] [--max-hours 0]
 #   guide_net.py readout <out_dir>
+#   guide_net.py choose <out_dir>... [--tol 0.005]
 #   guide_net.py selftest [<out_dir>]
-# train writes <out_dir>/head.safetensors (the full model, weights_to_c.py
-# build reads it), heads/fold<k>.safetensors, scores.npz (each evaluated
-# row's head score and the model that scored it), train.log, train.json,
-# and runs readout.  The groups of the lanes trained are read whole into
-# memory.
+# train writes, per model m (a fold k or full): its head (head.safetensors
+# for the full model, which weights_to_c.py build reads, heads/fold<k>
+# .safetensors for the folds), models/<m>.json (its record), scores/<m>.npz
+# (the rows it evaluated and its float64 scores of them), meta.json and
+# train.log (train_<models>.log with --models); when it trained every
+# model it runs readout, which merges scores/.  --models trains a subset,
+# so the models can run as separate processes on one out_dir.
+# --max-hours stops a model at the first epoch end past that many hours
+# (0: no budget) with its best VAL epoch so far, and says so.  Each
+# lane's x rows are a read-only memmap of its groups file (np.savez
+# stores its members), so processes reading one groups_dir share those
+# pages; the labels and the group arrays are read into memory.
+# choose applies the width rule of amendment A30: of the out_dirs' full
+# models, the narrowest hidden whose best VAL loss is within tol (relative)
+# of the lowest.
 import hashlib
 import json
 import math
 import os
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 
 import numpy as np
 
@@ -106,14 +120,57 @@ def fold_of(stem, k=5):
 
 # --- data ---------------------------------------------------------------------
 
+def npz_member(path, name):
+    """Member <name> of an np.savez file: a read-only memmap of the file
+    itself when the member is stored (np.savez stores, savez_compressed
+    deflates), else the array read whole."""
+    with zipfile.ZipFile(path) as zf:
+        info = zf.getinfo(name + ".npy")
+    if info.compress_type != zipfile.ZIP_STORED:
+        return np.load(path)[name]
+    with open(path, "rb") as f:
+        f.seek(info.header_offset)
+        h = f.read(30)
+        if len(h) != 30 or h[:4] != b"PK\x03\x04":
+            die(f"{path}: member {name}: no local file header")
+        n_name, n_extra = struct.unpack("<HH", h[26:30])
+        f.seek(info.header_offset + 30 + n_name + n_extra)
+        ver = np.lib.format.read_magic(f)
+        if ver == (1, 0):
+            shape, fortran, dtype = np.lib.format.read_array_header_1_0(f)
+        else:
+            shape, fortran, dtype = np.lib.format.read_array_header_2_0(f)
+        off = f.tell()
+    if dtype.hasobject:
+        die(f"{path}: member {name} holds objects")
+    if int(np.prod(shape)) == 0:
+        return np.zeros(shape, dtype)
+    return np.memmap(path, dtype=dtype, mode="r", offset=off, shape=shape,
+                     order="F" if fortran else "C")
+
+
+def src_lut(w_src):
+    """log of the largest source weight among a label mask's bits, -BIG
+    for a mask without a weighted positive; indexed by lab & 7."""
+    lut = np.full(8, -BIG, np.float64)
+    for m in range(8):
+        ws = [wv for bit, wv in ((OWN, w_src[0]), (CROSS, w_src[1]), (HIND, w_src[2]))
+              if m & bit and wv > 0]
+        if ws:
+            lut[m] = math.log(max(ws))
+    return lut
+
+
 class Data:
-    """The groups of the trained lanes, concatenated."""
+    """The groups of the trained lanes: group, run and label arrays
+    concatenated in memory, each lane's x rows a memmap of its file."""
 
     def __init__(self, groups_dir, lanes):
         self.lanes = list(lanes)
         R = {k: [] for k in ("problem", "split", "stem", "mode", "nsel", "rating", "every",
                              "phi", "lane")}
-        g_run, g_t, g_n, g_pend, xs, labs = [], [], [], [], [], []
+        g_run, g_t, g_n, g_pend, labs = [], [], [], [], []
+        self.xl, self.row0 = [], [0]
         n_runs = 0
         for li, lane in enumerate(self.lanes):
             path = os.path.join(groups_dir, f"groups_{lane}.npz")
@@ -125,6 +182,15 @@ class Data:
             for sp in set(z["run_split"].tolist()):
                 if sp not in SPLITS:
                     die(f"{path}: split {sp}: only TRAIN and TRAIN-X are training data (A24)")
+            x = npz_member(path, "x")
+            if x.dtype != np.float32 or x.ndim != 2 or x.shape[1] != N_DYN:
+                die(f"{path}: x is {x.dtype} {x.shape}, not float32 [N, {N_DYN}]")
+            off = z["g_off"].astype(np.int64)
+            lab = z["lab"].astype(np.uint8)
+            if int(off[-1]) != len(x) or len(lab) != len(x):
+                die(f"{path}: g_off ends at {int(off[-1])}, x has {len(x)} rows, lab {len(lab)}")
+            self.xl.append(x)
+            self.row0.append(self.row0[-1] + len(x))
             r = len(z["run_problem"])
             R["problem"] += z["run_problem"].tolist()
             R["split"] += z["run_split"].tolist()
@@ -135,13 +201,11 @@ class Data:
             R["every"].append(z["run_every"].astype(np.int64))
             R["phi"].append(z["run_phi"].astype(np.float32))
             R["lane"].append(np.full(r, li, np.int64))
-            off = z["g_off"].astype(np.int64)
             g_run.append(z["g_run"].astype(np.int64) + n_runs)
             g_t.append(z["g_t"].astype(np.int64))
             g_n.append(np.diff(off))
             g_pend.append(z["g_pend"].astype(np.int64))
-            xs.append(z["x"].astype(np.float32))
-            labs.append(z["lab"].astype(np.uint8))
+            labs.append(lab)
             n_runs += r
         self.problem = R["problem"]
         self.split = R["split"]
@@ -162,10 +226,17 @@ class Data:
         self.g_n = np.concatenate(g_n) if g_n else np.zeros(0, np.int64)
         self.g_pend = np.concatenate(g_pend) if g_pend else np.zeros(0, np.int64)
         self.g_off = np.concatenate([[0], np.cumsum(self.g_n)]).astype(np.int64)
-        self.x = np.concatenate(xs) if xs else np.zeros((0, N_DYN), np.float32)
+        self.g_lane = self.run_lane[self.g_run]
         self.lab = np.concatenate(labs) if labs else np.zeros(0, np.uint8)
+        self.n_rows = self.row0[-1]
         self.val = np.array([is_val_stem(s) for s in self.stem], bool)
         self.n_x = N_DYN + self.n_phi + len(self.lanes)
+
+    def xrows(self, g, k):
+        """x[0..20) of group g's first k rows (a view of its lane's file)."""
+        li = int(self.g_lane[g])
+        a = int(self.g_off[g]) - self.row0[li]
+        return self.xl[li][a:a + min(int(self.g_n[g]), k)]
 
     def run_weights(self, runs):
         """(0.5 + rating) log10(10 + selections) over runs, mean 1."""
@@ -179,22 +250,15 @@ class Data:
         return out
 
     def group_pos(self, k, w_src):
-        """Per group: whether its first k rows hold a positive; the rows'
-        log source weights (-BIG off the positives)."""
-        lab = self.lab
-        w = np.full(len(lab), -BIG, np.float64)
-        best = np.zeros(len(lab))
-        for bit, wv in ((OWN, w_src[0]), (CROSS, w_src[1]), (HIND, w_src[2])):
-            if wv > 0:
-                best = np.maximum(best, np.where((lab & bit) != 0, wv, 0.0))
-        hit = best > 0
-        w[hit] = np.log(best[hit])
-        row_g = np.repeat(np.arange(len(self.g_n)), self.g_n)
-        rank = np.arange(len(lab)) - self.g_off[row_g]
-        inside = rank < k
-        has = np.zeros(len(self.g_n), bool)
-        np.logical_or.at(has, row_g[inside & hit], True)
-        return has, w, rank
+        """Per group: whether its first k rows hold a positive the source
+        weights count; and the label lookup of the rows' log source
+        weights (src_lut)."""
+        lut = src_lut(w_src)
+        pos = np.zeros(self.n_rows + 1, np.int32)
+        np.cumsum((lut > -BIG)[self.lab & 7], dtype=np.int32, out=pos[1:])
+        end = self.g_off[:-1] + np.minimum(self.g_n, k)
+        has = pos[end] > pos[self.g_off[:-1]]
+        return has, lut
 
 
 def fit_norm(data, groups, k, lazy):
@@ -209,15 +273,13 @@ def fit_norm(data, groups, k, lazy):
     phi_s2 = np.zeros(data.n_phi)
     rows_per_run = np.zeros(len(data.nsel))
     for g in groups:
-        a, b = data.g_off[g], min(data.g_off[g + 1], data.g_off[g] + k)
-        x = data.x[a:b].astype(np.float64)
+        x = data.xrows(g, k).astype(np.float64)
         if lazy:
-            x = x.copy()
             x[:, 0] = 0.0
         s1[:N_DYN] += x.sum(0)
         s2[:N_DYN] += (x * x).sum(0)
-        n += b - a
-        rows_per_run[data.g_run[g]] += b - a
+        n += len(x)
+        rows_per_run[data.g_run[g]] += len(x)
     for r in np.nonzero(rows_per_run)[0]:
         c = rows_per_run[r]
         phi_s1 += c * data.phi[r]
@@ -236,10 +298,9 @@ def fit_norm(data, groups, k, lazy):
 
 def rows_full(data, g, k, lazy):
     """The full v1 inputs of group g's first k rows (float64)."""
-    a, b = data.g_off[g], min(data.g_off[g + 1], data.g_off[g] + k)
-    n = b - a
-    x = np.zeros((n, data.n_x))
-    x[:, :N_DYN] = data.x[a:b]
+    xg = data.xrows(g, k)
+    x = np.zeros((len(xg), data.n_x))
+    x[:, :N_DYN] = xg
     if lazy:
         x[:, 0] = 0.0
     r = data.g_run[g]
@@ -252,8 +313,8 @@ class Packer:
     """Fixed-shape batches of whole groups: z [R_MAX, n_x], x0 [1, R_MAX],
     lw, pm [1, R_MAX], seg [1, R_MAX], sw [1, G_MAX + 1]."""
 
-    def __init__(self, data, mu, sd, k, lazy, wlog):
-        self.d, self.mu, self.sd, self.k, self.lazy, self.wlog = data, mu, sd, k, lazy, wlog
+    def __init__(self, data, mu, sd, k, lazy, lut):
+        self.d, self.mu, self.sd, self.k, self.lazy, self.lut = data, mu, sd, k, lazy, lut
 
     def batches(self, groups, gw):
         out, cur, rows = [], [], 0
@@ -283,12 +344,11 @@ class Packer:
             z[r:r + n] = ((x - self.mu) / self.sd).astype(np.float32)
             x0[0, r:r + n] = x[:, 0]
             lw[0, r:r + n] = 0.0
-            pm[0, r:r + n] = self.wlog[a:a + n]
+            pm[0, r:r + n] = self.lut[self.d.lab[a:a + n] & 7]
             seg[0, r:r + n] = i
             sw[0, i] = gw[g]
             r += n
         return z, x0, lw, pm, seg, sw
-
 
 # --- the model (py/thvm) ---------------------------------------------------------
 
@@ -374,7 +434,8 @@ def train_one(data, groups_tr, groups_va, args, seed, log):
     Context, Tensor, TinyJit, nn = thvm_api()
     k, lazy = args["k"], args["lazy"]
     w_src = (args["w_own"], args["w_cross"], args["w_hind"])
-    has, wlog, _ = data.group_pos(k, w_src)
+    t_start = time.time()
+    has, lut = data.group_pos(k, w_src)
     tr_runs = np.unique(data.g_run[groups_tr])
     rw = data.run_weights(tr_runs)
     groups_tr = groups_tr[has[groups_tr]]
@@ -382,7 +443,7 @@ def train_one(data, groups_tr, groups_va, args, seed, log):
     if len(groups_tr) == 0 or len(groups_va) == 0:
         die(f"no training ({len(groups_tr)}) or validation ({len(groups_va)}) group with a positive")
     mu, sd = fit_norm(data, groups_tr, k, lazy)
-    pk = Packer(data, mu, sd, k, lazy, wlog)
+    pk = Packer(data, mu, sd, k, lazy, lut)
     model = Head(data.n_x, args["hidden"], seed)
     rng = np.random.default_rng(seed)
     with Context(TRAINING=1):
@@ -414,23 +475,27 @@ def train_one(data, groups_tr, groups_va, args, seed, log):
     gw_va = np.zeros(len(data.g_n))
     gw_va[groups_va] = vrw[data.g_run[groups_va]] / vcount[data.g_run[groups_va]]
     gw_va[groups_va] /= gw_va[groups_va].sum()
-    vb = [pk.arrays(b, gw_va) for b in pk.batches(groups_va, gw_va)]
+    vb = pk.batches(groups_va, gw_va)
 
     def tens(arrs):
         return [Tensor(a).realize() for a in arrs]
-    vfix = [tens(a) for a in vb]
 
+    # The VAL batches are packed anew at every evaluation: the same groups
+    # and weights each time, without holding their tensors between epochs.
     def val_loss():
-        return sum(float(vjit(*ins).numpy()) for ins in vfix)
+        return sum(float(vjit(*tens(pk.arrays(b, gw_va))).numpy()) for b in vb)
     best = (val_loss(), -1, model.numpy())
+    first_val = best[0]
     log(f"  epoch -1 (the engine: w2 0, kappa 1) val {best[0]:.5f}; train groups "
         f"{len(groups_tr)} of {len(tr_runs)} runs, val groups {len(groups_va)}")
     by_run = {}
     for g in groups_tr.tolist():
         by_run.setdefault(int(data.g_run[g]), []).append(g)
     stop = f"the {args['epochs']}-epoch cap"
+    ep_run = 0
     for ep in range(args["epochs"]):
         t0 = time.time()
+        ep_run = ep + 1
         pick = []
         for r, gs in by_run.items():
             if cap and len(gs) > cap:
@@ -456,13 +521,17 @@ def train_one(data, groups_tr, groups_va, args, seed, log):
         elif ep - best[1] >= args["patience"]:
             stop = f"no validation improvement for {args['patience']} epochs"
             break
+        if args["max_hours"] > 0 and time.time() - t_start > 3600.0 * args["max_hours"]:
+            stop = f"the {args['max_hours']:g}-hour budget"
+            break
     p = best[2]
     if p["kappa"] < 0:
         log(f"  kappa {p['kappa']:.4f} < 0 clipped to 0 (the layer requires kappa >= 0)")
         p["kappa"] = 0.0
-    rec = {"best_epoch": best[1], "best_val": best[0], "stop": stop,
+    rec = {"best_epoch": best[1], "best_val": best[0], "engine_val": first_val, "stop": stop,
+           "epochs_run": ep_run, "hours": (time.time() - t_start) / 3600.0,
            "train_groups": int(len(groups_tr)), "val_groups": int(len(groups_va)),
-           "train_runs": int(len(tr_runs)), "seed": seed}
+           "train_runs": int(len(tr_runs)), "seed": seed, "hidden": int(args["hidden"])}
     log(f"  best epoch {best[1]} val {best[0]:.5f}; stopped: {stop}")
     return p, mu, sd, rec
 
@@ -511,11 +580,31 @@ def score_groups(data, groups, p, mu, sd, k, lazy):
     return np.concatenate(idx), np.concatenate(sc)
 
 
+def model_names(n_folds):
+    return [str(f) for f in range(n_folds)] + ["full"]
+
+
+def write_json(path, obj):
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=1)
+    os.replace(tmp, path)
+
+
 def cmd_train(argv):
     a = parse_args(argv)
     gdir, out = a["pos"][0], a["pos"][1]
-    os.makedirs(os.path.join(out, "heads"), exist_ok=True)
-    logf = open(os.path.join(out, "train.log"), "w")
+    every = model_names(a["folds"])
+    models = a["models"].split(",") if a["models"] else every
+    for m in models:
+        if m not in every:
+            die(f"--models: '{m}' is not one of {','.join(every)}")
+    if len(set(models)) != len(models):
+        die("--models names a model twice")
+    for sub in ("heads", "models", "scores"):
+        os.makedirs(os.path.join(out, sub), exist_ok=True)
+    tag = "" if models == every else "_" + "_".join(models)
+    logf = open(os.path.join(out, f"train{tag}.log"), "w")
 
     def log(s):
         print(s, flush=True)
@@ -529,40 +618,38 @@ def cmd_train(argv):
     lanes = lane_order(listed, lanes)
     data = Data(gdir, lanes)
     log(f"guide_net train: lanes {','.join(lanes)}; runs {len(data.nsel)}, groups {len(data.g_n)}, "
-        f"rows {len(data.x)}; n_x {data.n_x} (20 + phi {data.n_phi} + lanes {len(lanes)}); "
-        f"VAL runs {int(data.val.sum())}")
+        f"rows {data.n_rows}; n_x {data.n_x} (20 + phi {data.n_phi} + lanes {len(lanes)}); "
+        f"VAL runs {int(data.val.sum())}; hidden {a['hidden']}; models {','.join(models)}")
     k = a["k"]
+    write_json(os.path.join(out, "meta.json"),
+               {"groups_dir": os.path.abspath(gdir), "lanes": lanes, "k": k, "lazy": a["lazy"],
+                "folds": a["folds"], "hidden": a["hidden"],
+                "args": {kk: v for kk, v in a.items() if kk != "pos"}})
     folds = np.array([fold_of(s, a["folds"]) for s in data.stem], np.int64)
     gval = data.val[data.g_run]
     gfold = folds[data.g_run]
     allg = np.arange(len(data.g_n))
-    rec = {"args": {kk: v for kk, v in a.items() if kk != "pos"}, "lanes": lanes, "models": {}}
-    scores = np.full(len(data.x), np.nan)
-    scorer = np.full(len(data.x), -1, np.int64)
-    for f in list(range(a["folds"])) + ["full"]:
-        if f == "full":
+    for m in models:
+        if m == "full":
             tr = allg[~gval]
             ev = allg[gval]
+            seed = a["seed"]
         else:
+            f = int(m)
             tr = allg[~gval & (gfold != f)]
             ev = allg[~gval & (gfold == f)]
-        log(f"model {f}:")
-        p, mu, sd, r = train_one(data, tr, allg[gval], a, a["seed"] + (0 if f == "full" else 1 + f), log)
-        rec["models"][str(f)] = r
-        path = os.path.join(out, "head.safetensors" if f == "full" else f"heads/fold{f}.safetensors")
+            seed = a["seed"] + 1 + f
+        log(f"model {m}:")
+        p, mu, sd, r = train_one(data, tr, allg[gval], a, seed, log)
+        path = os.path.join(out, "head.safetensors" if m == "full" else f"heads/fold{m}.safetensors")
         export_head(path, p, mu, sd, data, a, r)
         ri, sc = score_groups(data, ev, p, mu, sd, k, a["lazy"])
-        scores[ri] = sc
-        scorer[ri] = a["folds"] if f == "full" else f
-    np.savez(os.path.join(out, "scores.npz"), scores=scores, scorer=scorer, k=k,
-             lazy=a["lazy"], lanes=np.array(lanes), groups_dir=np.array(os.path.abspath(gdir)))
-    with open(os.path.join(out, "train.json"), "w") as fj:
-        json.dump(rec, fj, indent=1)
-    log("readout:")
-    txt = readout(data, scores, scorer, k, a["folds"])
-    with open(os.path.join(out, "readout.txt"), "w") as fr:
-        fr.write(txt + "\n")
-    log(txt)
+        np.savez(os.path.join(out, "scores", f"{m}.npz"), rows=ri, scores=sc)
+        write_json(os.path.join(out, "models", f"{m}.json"), r)
+    if models == every:
+        log("readout:")
+        txt = readout_dir(out, data)
+        log(txt)
     logf.close()
     return 0
 
@@ -590,7 +677,7 @@ def boot_ratio(per_run, stems, f, n=2000, seed=0):
     return tuple(np.percentile(out, [2.5, 97.5]).tolist())
 
 
-def readout(data, scores, scorer, k, n_folds):
+def readout(data, scores, k):
     lines = ["readout (not a gate; G3.1 is decided at loop 1 on armed-harvest states): per lane, "
              "OOF states under their fold model and VAL states under the full model"]
     for li, lane in enumerate(data.lanes):
@@ -656,24 +743,93 @@ def readout(data, scores, scorer, k, n_folds):
     return "\n".join(lines)
 
 
+def readout_dir(out, data=None):
+    """The readout of a train out_dir: the scored rows of every model
+    present (scores/<m>.npz) merged, their records, written to
+    readout.txt."""
+    meta = json.load(open(os.path.join(out, "meta.json")))
+    if data is None:
+        data = Data(meta["groups_dir"], meta["lanes"])
+    scores = np.full(data.n_rows, np.nan)
+    head = [f"models (hidden {meta['hidden']}, k {meta['k']}{', lazy' if meta['lazy'] else ''}):"]
+    missing = []
+    for m in model_names(meta["folds"]):
+        f = os.path.join(out, "scores", f"{m}.npz")
+        j = os.path.join(out, "models", f"{m}.json")
+        if not (os.path.exists(f) and os.path.exists(j)):
+            missing.append(m)
+            continue
+        z = np.load(f)
+        scores[z["rows"]] = z["scores"]
+        r = json.load(open(j))
+        head.append(f"  {m}: best epoch {r['best_epoch']} of {r['epochs_run']}, VAL loss {r['best_val']:.6f} "
+                    f"(engine {r['engine_val']:.6f}), stopped: {r['stop']}; {r['train_groups']} training "
+                    f"groups of {r['train_runs']} runs, {r['val_groups']} VAL groups, {r['hours']:.2f} h")
+    if missing:
+        head.append(f"  missing: {','.join(missing)} (their rows are not read)")
+    txt = "\n".join(head) + "\n" + readout(data, scores, meta["k"])
+    tmp = os.path.join(out, f"readout.txt.tmp{os.getpid()}")
+    with open(tmp, "w") as fr:
+        fr.write(txt + "\n")
+    os.replace(tmp, os.path.join(out, "readout.txt"))
+    return txt
+
+
 def cmd_readout(argv):
     if len(argv) != 1:
         die("readout needs <out_dir> (a train output)")
-    out = argv[0]
-    s = np.load(os.path.join(out, "scores.npz"))
-    data = Data(str(s["groups_dir"]), s["lanes"].tolist())
-    txt = readout(data, s["scores"], s["scorer"], int(s["k"]), 5)
-    print(txt)
+    print(readout_dir(argv[0]))
+    return 0
+
+
+def choose_width(rows, tol):
+    """Amendment A30's width rule over (hidden, best VAL loss of the full
+    model): the narrowest hidden whose loss is at most L* + tol |L*|,
+    L* the lowest."""
+    best = min(v for _, v in rows)
+    bar = best + tol * abs(best)
+    return min(h for h, v in rows if v <= bar), bar
+
+
+def cmd_choose(argv):
+    tol, dirs, i = 0.005, [], 0
+    while i < len(argv):
+        if argv[i] == "--tol" and i + 1 < len(argv):
+            tol = float(argv[i + 1])
+            i += 2
+            continue
+        dirs.append(argv[i])
+        i += 1
+    if not dirs or not (math.isfinite(tol) and tol >= 0.0):
+        die("choose needs <out_dir>... [--tol t], t >= 0")
+    rows, where = [], {}
+    for d in dirs:
+        f = os.path.join(d, "models", "full.json")
+        if not os.path.exists(f):
+            die(f"{d}: no full model (models/full.json)")
+        r = json.load(open(f))
+        h, v = int(r["hidden"]), float(r["best_val"])
+        if h in where:
+            die(f"{d} and {where[h]} both hold hidden {h}")
+        if not math.isfinite(v):
+            die(f"{d}: VAL loss {v}")
+        where[h] = d
+        rows.append((h, v))
+    h, bar = choose_width(rows, tol)
+    for hh, v in sorted(rows):
+        print(f"hidden {hh}: VAL loss {v:.6f} ({'within' if v <= bar else 'over'} the bar {bar:.6f}) {where[hh]}")
+    print(f"chosen hidden {h} {where[h]}")
     return 0
 
 
 def parse_args(argv):
     a = {"pos": [], "list_lanes": "", "lanes": "", "hidden": 64, "k": 64, "lazy": False, "tau": 0.0,
          "epochs": 200, "patience": 10, "lr": 1e-3, "seed": 0, "max_groups_per_run": 256,
-         "w_own": 1.0, "w_cross": 1.0, "w_hind": 1.0, "folds": 5, "model_id": "loop0"}
+         "w_own": 1.0, "w_cross": 1.0, "w_hind": 1.0, "folds": 5, "model_id": "loop0",
+         "models": "", "max_hours": 0.0}
     types = {"hidden": int, "k": int, "tau": float, "epochs": int, "patience": int, "lr": float,
              "seed": int, "max_groups_per_run": int, "w_own": float, "w_cross": float,
-             "w_hind": float, "folds": int}
+             "w_hind": float, "folds": int, "max_hours": float}
     i = 0
     while i < len(argv):
         t = argv[i]
@@ -694,6 +850,8 @@ def parse_args(argv):
         die("--k must be in 1..64")
     if not 1 <= a["hidden"] <= 128:
         die("--hidden must be in 1..128")
+    if not (math.isfinite(a["max_hours"]) and a["max_hours"] >= 0.0):
+        die("--max-hours must be >= 0")
     return a
 
 
@@ -789,11 +947,32 @@ def selftest(argv):
     check(0 < int(data.val.sum()) < len(data.val), "VAL is a proper slice")
     # The loss against float64 numpy on a packed batch.
     Context, Tensor, TinyJit, nn = thvm_api()
-    has, wlog, _ = data.group_pos(64, (1.0, 1.0, 1.0))
+    # x is a memmap of each lane's file, equal to the member np.load reads.
+    same_x = all(isinstance(data.xl[li], np.memmap) and
+                 np.array_equal(np.asarray(data.xl[li]), np.load(os.path.join(gdir, f"groups_{ln}.npz"))["x"])
+                 for li, ln in enumerate(data.lanes))
+    check(same_x, "x rows: a memmap of each groups file, equal to np.load's")
+    zc = os.path.join(out, "compressed.npz")
+    np.savez_compressed(zc, x=np.arange(6, dtype=np.float32).reshape(3, 2))
+    check(np.array_equal(npz_member(zc, "x"), np.arange(6, dtype=np.float32).reshape(3, 2)),
+          "a deflated member is read whole")
+    # group_pos against a per-group scan, at k = 3 and k = 64.
+    ok_pos = True
+    for kk, ws in ((3, (1.0, 0.0, 1.0)), (64, (1.0, 1.0, 1.0))):
+        hs, lut_ = data.group_pos(kk, ws)
+        for g in range(len(data.g_n)):
+            a0 = data.g_off[g]
+            lab_g = data.lab[a0:a0 + min(int(data.g_n[g]), kk)]
+            want = any((ws[0] > 0 and v & OWN) or (ws[1] > 0 and v & CROSS) or (ws[2] > 0 and v & HIND)
+                       for v in lab_g.tolist())
+            ok_pos = ok_pos and bool(hs[g]) == bool(want)
+        ok_pos = ok_pos and lut_[OWN | HIND] == 0.0 and lut_[0] == -BIG and lut_[CROSS] == (-BIG if ws[1] == 0 else 0.0)
+    check(ok_pos, "group_pos: the groups with a counted positive in their first k rows")
+    has, lut = data.group_pos(64, (1.0, 1.0, 1.0))
     groups = np.nonzero(has & ~data.val[data.g_run])[0]
     mu, sd = fit_norm(data, groups, 64, False)
     check(bool(np.all(sd > 0)) and mu.dtype == np.float32, "normalization: sd > 0, float32")
-    pk = Packer(data, mu, sd, 64, False, wlog)
+    pk = Packer(data, mu, sd, 64, False, lut)
     gw = np.zeros(len(data.g_n))
     gw[groups] = 1.0 / len(groups)
     b0 = pk.batches(groups, gw)[0]
@@ -820,12 +999,12 @@ def selftest(argv):
     check(d64 < 1e-3, f"py/thvm scores vs the float64 head: max |diff| {d64:.2e}")
     # The untrained head (w2 = 0, kappa 1) picks the engine's row 0.
     p0 = Head(data.n_x, 16, 3).numpy()
-    sc = np.full(len(data.x), np.nan)
+    sc = np.full(data.n_rows, np.nan)
     ri, s0 = score_groups(data, np.arange(len(data.g_n)), p0, mu, sd, 64, False)
     sc[ri] = s0
     same = all(int(np.argmax(sc[data.g_off[g]:data.g_off[g + 1]])) == 0 for g in range(len(data.g_n)))
     check(same, "the untrained head picks row 0 at every group (the engine)")
-    txt0 = readout(data, sc, np.zeros(len(data.x), np.int64), 64, 5)
+    txt0 = readout(data, sc, 64)
     check("ratio 1.000" in txt0, "the untrained head's readout ratio is 1")
     # Training: TinyJit, early stopping; the head beats the engine on VAL.
     a = parse_args([gdir, out, "--list-lanes", os.path.join(out, "lanes.txt"), "--hidden", "16",
@@ -840,7 +1019,7 @@ def selftest(argv):
     check(rec["best_epoch"] >= 0, "a best epoch was found")
     vg = np.nonzero(data.val[data.g_run])[0]
     ri, sv = score_groups(data, vg, pt, mut, sdt, 64, False)
-    sc = np.full(len(data.x), np.nan)
+    sc = np.full(data.n_rows, np.nan)
     sc[ri] = sv
     hm = he = n = 0
     for g in vg:
@@ -875,10 +1054,43 @@ def selftest(argv):
                     "--max-groups-per-run", "32"])
     check(rc == 0 and os.path.exists(os.path.join(out, "run", "head.safetensors")) and
           os.path.exists(os.path.join(out, "run", "heads", "fold1.safetensors")), "train writes the heads")
-    s = np.load(os.path.join(out, "run", "scores.npz"))
-    check(bool(np.any(np.isfinite(s["scores"]))), "train scores OOF and VAL rows")
+    nsc = sum(len(np.load(os.path.join(out, "run", "scores", f"{m}.npz"))["rows"]) for m in ("0", "1", "full"))
+    check(nsc > 0, "train scores OOF and VAL rows")
     rtxt = open(os.path.join(out, "run", "readout.txt")).read()
-    check("tgt-sel OOF" in rtxt and "encompass VAL" in rtxt, "the readout covers each lane and part")
+    check("tgt-sel OOF" in rtxt and "encompass VAL" in rtxt and "missing" not in rtxt,
+          "the readout covers each lane and part")
+    # The same models trained one subset at a time (as separate processes
+    # would) give the same heads and readout.
+    base = [gdir, os.path.join(out, "run2"), "--list-lanes", os.path.join(out, "lanes.txt"),
+            "--hidden", "8", "--epochs", "6", "--patience", "3", "--folds", "2",
+            "--max-groups-per-run", "32"]
+    rc1 = cmd_train(base + ["--models", "1"])
+    part = readout_dir(os.path.join(out, "run2"))
+    rc2 = cmd_train(base + ["--models", "full,0"])
+    check(rc1 == 0 and rc2 == 0 and "missing: 0,full" in part, "--models trains a subset; the readout names the missing")
+    dmax = 0.0
+    for hp in ("head.safetensors", "heads/fold0.safetensors", "heads/fold1.safetensors"):
+        h1 = weights_to_c.load_head(os.path.join(out, "run", hp))
+        h2 = weights_to_c.load_head(os.path.join(out, "run2", hp))
+        for nm in ("mu", "sd", "w1", "b1", "w2"):
+            dmax = max(dmax, float(np.max(np.abs(np.array(h1[nm]) - np.array(h2[nm])))))
+        dmax = max(dmax, abs(h1["kappa"] - h2["kappa"]))
+    check(dmax <= 1e-5, f"heads trained per subset equal the all-in-one heads: max |diff| {dmax:.2e}")
+    r2 = readout_dir(os.path.join(out, "run2"))
+    check("tgt-sel OOF" in r2 and "encompass VAL" in r2 and "missing" not in r2,
+          "the merged readout of the subsets")
+    # --max-hours stops at the first epoch end past the budget.
+    rc3 = cmd_train(base[:1] + [os.path.join(out, "run3")] + base[2:] + ["--models", "full", "--max-hours", "1e-9"])
+    r3 = json.load(open(os.path.join(out, "run3", "models", "full.json")))
+    check(rc3 == 0 and r3["epochs_run"] == 1 and r3["stop"] == "the 1e-09-hour budget",
+          f"--max-hours: {r3['epochs_run']} epoch, stopped: {r3['stop']}")
+    # The width rule (amendment A30).
+    check(choose_width([(32, 2.000), (64, 1.995), (128, 1.990)], 0.005)[0] == 64 and
+          choose_width([(32, 1.99), (64, 1.98), (128, 1.80)], 0.005)[0] == 128 and
+          choose_width([(128, 1.0), (32, 1.0), (64, 1.0)], 0.005)[0] == 32 and
+          choose_width([(32, 1.0049), (64, 1.0)], 0.005)[0] == 32 and
+          choose_width([(32, 1.0051), (64, 1.0)], 0.005)[0] == 64,
+          "choose: the narrowest width within 0.5% of the lowest VAL loss")
     # The split rule.
     bad = os.path.join(out, "bad")
     os.makedirs(bad, exist_ok=True)
@@ -902,6 +1114,8 @@ def child_main(argv):
         return cmd_train(rest)
     if cmd == "readout":
         return cmd_readout(rest)
+    if cmd == "choose":
+        return cmd_choose(rest)
     if cmd == "selftest":
         return selftest(rest)
     die(f"unknown command {cmd}")
@@ -909,7 +1123,7 @@ def child_main(argv):
 
 def main():
     if len(sys.argv) < 2:
-        die("usage: guide_net.py train|readout|selftest ...")
+        die("usage: guide_net.py train|readout|choose|selftest ...")
     if sys.argv[1] == "--child":
         return child_main(sys.argv[2:])
     # py/thvm prints "... ran no dispatch rung ..." when a kernel was

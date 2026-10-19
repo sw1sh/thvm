@@ -368,10 +368,19 @@ pod (plan section 3.2):
    weights by TPTP rating and run length, five stem-hash OOF folds over
    TRAIN and TRAIN-X together and the full model, early stopping on VAL,
    and exports the head (b2 = 0, never trained) with its `Layout`, `Phi`,
-   `Lanes`, `LaneNames` and `Families` metadata.  Its readout (top-1
-   proof-CP hit against the engine's pick; the median-percentile ratio on
-   runs with 1,000+ selections; per lane, OOF and VAL) is a readout, not
-   a gate: G3.1 is decided at loop 1 on armed-harvest states.
+   `Lanes`, `LaneNames` and `Families` metadata.  `--models` trains a
+   subset of the six models (`0`..`4`, `full`), so each can run as its own
+   process on one out directory: every lane's x rows are a read-only
+   memmap of its groups file, shared between the processes, and each
+   model writes its head, its record (`models/<m>.json`) and its scored
+   rows (`scores/<m>.npz`); `readout` merges them.  `--max-hours` stops a
+   model at the first epoch end past its budget, with its best VAL epoch.
+   `guide_net.py choose` applies amendment A30's width rule to the full
+   models of several out directories (the narrowest hidden whose best
+   VAL loss is within 0.5% of the lowest).  The readout (top-1 proof-CP
+   hit against the engine's pick; the median-percentile ratio on runs
+   with 1,000+ selections; per lane, OOF and VAL) is a readout, not a
+   gate: G3.1 is decided at loop 1 on armed-harvest states.
 5. `weights_to_c.py build ... loop1=head.safetensors` compiles it in;
    `weights_to_c.py lanes` checks its lanes against `--list-lanes`, and
    G2.4 (`HEAD=`, `FEATPARITY=1`) checks C against Python.
