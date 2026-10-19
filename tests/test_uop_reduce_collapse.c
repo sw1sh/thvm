@@ -101,6 +101,25 @@ int main(void) {
     for (i64 v = 0; v <= 7; v++) CHECK_EQ(eval_idx(folded, OUTER, v, 0), v);
   }
 
+  // A foldable REDUCE under a float op folds too, as tinygrad's rule does
+  // wherever the REDUCE sits.
+  TEST_BEGIN("reduce-collapse/folds-under-a-float-op");
+  {
+    u32  OUTER = 4, INNER = 5;
+    Term r0   = uop_range(OUTER, KAX_LOOP, 8);
+    Term r1   = uop_range(INNER, KAX_LOOP, 8);
+    Term cond = uop_int_binary(UOP_ILT, r1, r0);
+    Term body = uop_iwhere(cond, uop_const(DT_INT32, 1), uop_const(DT_INT32, 0));
+    Term red  = uop_reduce(REDUCE_SUM, INNER, body);
+    f32  half = 0.5f;
+    u32  bits;
+    memcpy(&bits, &half, sizeof bits);
+    Term root   = uop_binary(UOP_ADD, uop_cast(red, DT_FP32), uop_const(DT_FP32, bits));
+    Term folded = uop_reduce_arange_collapse(root);
+    CHECK(folded != root);
+    CHECK(!has_reduce(folded, 0));
+  }
+
   // === skips: body references the reduce axis in `val` (not a pure mask) ===
   // SUM_r IWHERE(ILT(6, r0+r1), r1, 0): val depends on r1 -> not foldable
   // by the bound rule; must be left as a REDUCE.

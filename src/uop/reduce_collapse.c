@@ -197,156 +197,26 @@ static Term rc_collapse_one(Term red) {
   return uop_int_binary(UOP_IMUL, then_v, count);
 }
 
-// Generation-stamped memo: slot i is live iff slot_gen[i] == cur_gen, so a bump
-// empties it in O(1).  It doubles at half load and never gives up, since each
-// path to a shared sub-DAG would re-walk it (a deep table.cat chain's sharing).
-#define RC_MEMO_INIT_CAP 16384            /* power of 2 */
-typedef struct {
-  u64  *key;
-  Term *val;
-  u32  *slot_gen;
-  u32   cap;
-  u32   cur_gen;
-  u32   n;
-} RcMemo;
-static inline u32 rc_memo_hash(Term t, u32 cap) {
-  u64 v = (u64)t;
-  v ^= v >> 33; v *= 0xff51afd7ed558ccdULL;
-  v ^= v >> 33; v *= 0xc4ceb9fe1a85ec53ULL;
-  v ^= v >> 33;
-  return (u32)v & (cap - 1);
-}
-static Term rc_memo_get(RcMemo *m, Term t, int *hit) {
-  u32 h = rc_memo_hash(t, m->cap);
-  for (u32 probe = 0; probe < m->cap; probe++) {
-    u32 i = (h + probe) & (m->cap - 1);
-    if (m->slot_gen[i] != m->cur_gen) { *hit = 0; return 0; }
-    if (m->key[i] == (u64)t) { *hit = 1; return m->val[i]; }
-  }
-  *hit = 0; return 0;
-}
-static void rc_memo_insert(RcMemo *m, Term t, Term v) {
-  u32 h = rc_memo_hash(t, m->cap);
-  for (u32 probe = 0; probe < m->cap; probe++) {
-    u32 i = (h + probe) & (m->cap - 1);
-    if (m->slot_gen[i] != m->cur_gen) {
-      m->key[i] = (u64)t; m->val[i] = v;
-      m->slot_gen[i] = m->cur_gen; m->n++; return;
-    }
-    if (m->key[i] == (u64)t) { m->val[i] = v; return; }
-  }
-}
-// Fresh stamps are 0 and cur_gen >= 1, so every new slot reads empty.
-static void rc_memo_grow(RcMemo *m) {
-  u32   cap  = m->cap ? m->cap * 2 : RC_MEMO_INIT_CAP;
-  u64  *key  = (u64  *)malloc((size_t)cap * sizeof(u64));
-  Term *val  = (Term *)malloc((size_t)cap * sizeof(Term));
-  u32  *gen  = (u32  *)calloc(cap, sizeof(u32));
-  if (key == NULL || val == NULL || gen == NULL) {
-    fprintf(stderr, "thvm: reduce-collapse memo: out of memory at %u entries\n", cap);
-    exit(1);
-  }
-  RcMemo old = *m;
-  m->key = key; m->val = val; m->slot_gen = gen; m->cap = cap; m->n = 0;
-  for (u32 i = 0; i < old.cap; i++) {
-    if (old.slot_gen[i] == m->cur_gen) {
-      rc_memo_insert(m, (Term)old.key[i], old.val[i]);
-    }
-  }
-  free(old.key); free(old.val); free(old.slot_gen);
-}
-static void rc_memo_put(RcMemo *m, Term t, Term v) {
-  if ((m->n + 1) * 2 > m->cap) {
-    rc_memo_grow(m);
-  }
-  rc_memo_insert(m, t, v);
-}
-
-// Collapses every foldable REDUCE under `t`, rebuilding parents through the
-// simplifying constructors; past depth 512 it leaves the rest as it is.
-static Term rc_rewrite_rec(Term t, RcMemo *m, u32 depth) {
-  if (depth > 512) return t;
-  if (term_tag(t) != TAG_UOP) return t;
-  int hit; Term cached = rc_memo_get(m, t, &hit);
-  if (hit) return cached;
-  u32 op = term_ext(t);
-  u64 loc = term_val(t);
-  if (op == UOP_BUFFER || op == UOP_KERNEL) { rc_memo_put(m, t, t); return t; }
-
-  if (op == UOP_REDUCE) {
-    Term folded = rc_collapse_one(t);
-    if (folded != 0 && folded != t) {
-      Term r = rc_rewrite_rec(folded, m, depth + 1);
-      rc_memo_put(m, t, r);
-      return r;
-    }
-  }
-
-  u8 ar = uop_arity(op);
-  if (ar == 0) { rc_memo_put(m, t, t); return t; }
-  Term children[8];
-  int changed = 0;
-  for (u8 i = 0; i < ar && i < 8; i++) {
-    Term c = heap_read(loc + i);
-    Term nc = rc_rewrite_rec(c, m, depth + 1);
-    children[i] = nc;
-    if (nc != c) changed = 1;
-  }
-  if (!changed) { rc_memo_put(m, t, t); return t; }
-
-  Term out = t;
-  switch (op) {
-    case UOP_STORE:
-      out = uop_store(children[0], children[1], children[2]);
-      break;
-    case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
-    case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-      out = uop_int_binary(op, children[0], children[1]);
-      break;
-    case UOP_IWHERE:
-      out = uop_iwhere(children[0], children[1], children[2]);
-      break;
-    case UOP_REDUCE: {
-      u32 n_axes = uop_reduce_n_axes(t);
-      u32 axes[MAX_DIM];
-      for (u32 i = 0; i < n_axes && i < MAX_DIM; i++) axes[i] = uop_reduce_axis(t, i);
-      out = uop_reduce_multi(uop_reduce_kind(t), n_axes, axes, children[0]);
-      break;
-    }
-    case UOP_CAST: {
-      // CAST heap layout: [src, NUM(dst_dtype)].
-      u32 dst_dtype = (u32)term_val(heap_read(loc + 1));
-      out = uop_cast(children[0], dst_dtype);
-      break;
-    }
-    default:
-      // Other ops keep their original node, so a reduce under one stays
-      // unfolded.
-      out = t;
-      break;
-  }
-  rc_memo_put(m, t, out);
-  return out;
+// tinygrad pm_reduce_simplify as a graph_rewrite rule (codegen/simplify.py:147-150,
+// applied in schedule/rangeify.py:357): a foldable REDUCE folds wherever it sits.
+static Term rc_collapse_rule(Term t, void *user) {
+  (void)user;
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_REDUCE) return t;
+  Term folded = rc_collapse_one(t);
+  return folded != 0 ? folded : t;
 }
 
 static Term rc_collapse_store(Term store, void *ctx) {
-  return rc_rewrite_rec(store, (RcMemo *)ctx, 0);
+  (void)ctx;
+  UOpGraphRewriteRule rules[] = {
+    { "reduce-collapse", rc_collapse_rule },
+  };
+  return uop_graph_rewrite(store, rules, 1, NULL);
 }
 
 // `root` is a kernel's store_root (a STORE, or an AFTER chain of them); returns
 // it with every foldable REDUCE in its stores collapsed.
 fn Term uop_reduce_arange_collapse(Term root) {
   if (root == 0) return root;
-  // Kept across calls at the capacity it grew to (realize is single-threaded);
-  // bumping cur_gen empties it.
-  static RcMemo memo;
-  if (memo.cap == 0) {
-    rc_memo_grow(&memo);
-  }
-  memo.n = 0;
-  if (++memo.cur_gen == 0) {            // wrapped: clear every stamp
-    memset(memo.slot_gen, 0, (size_t)memo.cap * sizeof(u32));
-    memo.cur_gen = 1;
-  }
-  return uop_root_map_stores(root, rc_collapse_store, &memo);
+  return uop_root_map_stores(root, rc_collapse_store, NULL);
 }
