@@ -249,9 +249,10 @@ fn char *thvm_aot_compile_to_dylib(u32 def_id, const char *name) {
   free(src);
   if (!wrapped) return NULL;
 
-  // THVM_TRACE changes TContext but not the source text, so it salts the
-  // hash: a module built for the other layout would corrupt the heap.
-  u64 hash = aot_fnv1a64(wrapped);
+  // The host defines change TContext and the ATP globals but not the source
+  // text, so they salt the hash: a module built for another layout would
+  // corrupt the heap.
+  u64 hash = aot_fnv1a64(wrapped) ^ aot_fnv1a64(aot_host_defines());
 #ifdef THVM_TRACE
   // "M1" (wire provenance) versions the trace layout; bump it when the
   // THVM_TRACE part of TContext changes.

@@ -18,9 +18,12 @@ static inline u64 aot_heap_alloc(u64 size) {
   if (aot_tl_chunk_lo + size > aot_tl_chunk_hi) {
     u64 chunk = AOT_HEAP_CHUNK_CELLS;
     if (size > chunk) chunk = size;
+    u64 cap = gc_enabled() ? gc_from_end() : thvm_heap_cells();
     aot_tl_chunk_lo = (u64)__atomic_fetch_add(
         &CURRENT_CTX->heap_next, chunk, __ATOMIC_RELAXED);
-    aot_tl_chunk_hi = aot_tl_chunk_lo + chunk;
+    // heap_alloc's bound: the cells past the space's end are no one's.
+    if (aot_tl_chunk_lo + size > cap) thvm_fatal("aot_heap_alloc: the heap is exhausted");
+    aot_tl_chunk_hi = aot_tl_chunk_lo + chunk < cap ? aot_tl_chunk_lo + chunk : cap;
   }
   u64 at = aot_tl_chunk_lo;
   aot_tl_chunk_lo += size;
