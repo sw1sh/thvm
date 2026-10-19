@@ -229,3 +229,10 @@ VerificationTest[
     {{3.}, {4.}},
     TestID -> "tensors/gather-per-row"
 ]
+
+(* TUOpKind names a UOP's op, a grad projection "GRAD", and any other term by its tag. *)
+VerificationTest[
+    With[{x = TTensorCreate[{1., 2.}]}, {TUOpKind[x], TUOpKind[x + x], TUOpKind[TGrad[Total[x^2], x]]}],
+    {"TEN", "ADD", "GRAD"},
+    TestID -> "tensors/tuopkind-names"
+]

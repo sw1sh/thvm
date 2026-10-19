@@ -140,3 +140,10 @@ VerificationTest[
     {True, True},
     TestID -> "memory-plan/gantt-draws-bars"
 ]
+
+VerificationTest[
+    (* byte counts are whole; KiB and up keep three significant figures *)
+    WolframInstitute`THVMLink`Private`formatBytes /@ {4, 140, 1536, 3 * 1024^2},
+    {"4B", "140B", "1.50KiB", "3.00MiB"},
+    TestID -> "memory-plan/format-bytes"
+]

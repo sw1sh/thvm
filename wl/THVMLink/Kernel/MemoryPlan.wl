@@ -355,6 +355,9 @@ backendName[_] = "?"
    activations), so pick a unit such that the mantissa always sits in
    [1, 1024) and round to 3 sig figs.  Returns a string like
    "12B" / "5.43KiB" / "1.20MiB". *)
+(* one decimal without the binary rounding noise Round[x, 0.1] keeps (31.900000000000002) *)
+round1[x_] := Round[10 x] / 10.
+
 formatBytes[0 | 0.] := "0B"
 formatBytes[n_ ? NumericQ] := Block[{x = N[Abs[n]], unit, scale, mantissa, digits},
     {unit, scale} = Which[
@@ -364,9 +367,13 @@ formatBytes[n_ ? NumericQ] := Block[{x = N[Abs[n]], unit, scale, mantissa, digit
         True, {"B", 1.}
     ];
     mantissa = x / scale;
-    (* 3 sig figs: keep 2 decimals < 10, 1 decimal < 100, 0 decimals >= 100. *)
-    digits = Which[mantissa < 10, 2, mantissa < 100, 1, True, 0];
-    ToString[NumberForm[Sign[n] mantissa, {Infinity, digits}]] <> unit
+    (* 3 sig figs: keep 2 decimals < 10, 1 decimal < 100, 0 decimals >= 100; a byte count is
+       whole, and NumberForm with 0 decimals would leave a trailing point ("140."). *)
+    digits = Which[unit === "B", 0, mantissa < 10, 2, mantissa < 100, 1, True, 0];
+    If[ digits === 0,
+        ToString[Round[Sign[n] mantissa]],
+        ToString[NumberForm[Sign[n] mantissa, {Infinity, digits}]]
+    ] <> unit
 ]
 
 (* Peak concurrent live bytes: at each topological depth t, sum
@@ -403,7 +410,7 @@ TMemoryPlanReport[TMemoryPlan[a_Association]] := Block[{bufs = a["Bufs"], kernel
     peak = peakConcurrentLive[bufs];
     savingsBytes = formatBytes[peak["total_bytes"] - peak["peak_bytes"]];
     savingsPct = If[ peak["total_bytes"] > 0,
-        Round[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"], 0.1],
+        round1[100. (peak["total_bytes"] - peak["peak_bytes"]) / peak["total_bytes"]],
         0
     ];
     Column[{

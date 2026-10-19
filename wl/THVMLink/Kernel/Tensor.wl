@@ -724,7 +724,13 @@ TTensorCreate[data_, dtype_String] /; tensorDataQ[data] && IntegerQ[dtypeCode[dt
 TTensorCreate[data_, dtype_String] /; tensorDataQ[data] := Null /; (Message[TTensorCreate::dtype, dtype]; False)
 TTensorCreate[data_, ___] /; ! tensorDataQ[data] := Null /; (Message[TTensorCreate::data, data]; False)
 
-TUOpKind[u_] := Lookup[$uopNames, TTermExt[u], "UOP?" <> ToString[TTermExt[u]]]
+(* The op of a UOP term; a grad projection (DP0/DP1 with DUP_GRAD_FLAG) is "GRAD", and any other
+   term is named by its tag ("TEN" for a tensor leaf), not by its ext field read as an opcode. *)
+TUOpKind[u_] := With[{tag = TTermTag[u], ext = TTermExt[u]},
+    Which[
+        tag === $TagUOP, Lookup[$uopNames, ext, "UOP?" <> ToString[ext]],
+        MemberQ[{$TagDP0, $TagDP1}, tag] && BitAnd[ext, $DupGradFlag] =!= 0, "GRAD",
+        True, TTagName[tag]]]
 
 TUOpSrcs[u_] := With[{loc = TTermVal[u], op = TTermExt[u]},
     With[{n = Switch[op, $UopKernel, 2, $UopAdd | $UopMul | $UopCmplt | $UopCmpeq, 2, _, 1]},
