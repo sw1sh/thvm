@@ -396,6 +396,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- TFindProof's Automatic method runs the "Waldmeister" configuration first on single-operator axiomatizations (the Sheffer class: WolframAxioms, ShefferAxioms, HillmanAxioms, MeredithAxioms and the rest), with six shares of the time: at TimeConstraint 60 it proves OrAssociativity, AndAssociativity, ImpliesHillmanAxioms and ImpliesMeredithAxioms of WolframAxioms in 21 to 24 s, which timed out before, and Commutativity in 1.1 s instead of 29 s. A schedule entry's "ScheduleShare" -> w weighs its slice of the time; the weight is not passed to the engine. Tests: ATP/schedule/Sheffer-*, ATP/schedule/ScheduleShare-weight-and-drop, ATP/schedule/WolframAxioms-OrAssociativity-default-60s.
 - The documentation renders the symbols of THVMLink`ATP`, TFindProof among them, as PacletSymbol references: PacletPage declares only the primary context's symbols by default, so wl/scripts/pacletpage.wl now passes the public symbols of both contexts.
 - TAtpTrainScorer refuses a dataset that is not 14-feature rows with one 0 or 1 label each (`TAtpTrainScorer::data`), and a "Hidden" width outside 0 to 64 (`TAtpTrainScorer::hidden`), instead of training on garbage behind a cascade of internal messages.
 - TAtpTrainGnn takes its starting loss from a forward of its own, so the forward its training loop differentiates stays lazy until the loop runs.

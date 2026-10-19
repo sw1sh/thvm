@@ -453,35 +453,24 @@ atpAutoTuneForClass["Combinatory"] := {
     {"Completion", "CriticalPairWeight" -> "Add"}
 }
 atpAutoTuneForClass["Sheffer"] := {
-    (* No Tafel2 Sheffer row.  Measured per-entry behavior:
-       - Mix2 + SelectionRatio 2 (aggressive 1-FIFO-per-2 age bias)
-         cracks the cross-axiom Implies-X family FASTER than Add:
-         ImpliesWolframAxioms ~3.7s + ImpliesWolframAlternate ~3.7s
-         + Commutativity ~0.55s, vs Add's ~7.9s on the same goals.
-         The default SelectionRatio (11) leaves these unreachable; the
-         tight age bias forces the saturator through the long
-         derivation chain these cross-system goals need before the
-         CP queue blows up, so it is front-loaded.
-       - Add weight also closes the Implies-X family (slower, ~7.9s)
-         but is more general across nand goals -- kept as the second
-         entry.
-       - GoalDirected (MNF bidirectional front) is the closer for the
-         symmetric goals (nand-Commutativity, etc.) and a known
-         engine bug can hang MNF on hard cross-axiom Implies-X if it's
-         the first attempt.  Run AFTER the completion configs so any
-         hang is bounded by the remaining-budget slice and the
-         shell-level kill-after.
-       - SInE relevance pruning helps the cross-system Meredith-class
-         Implies-X (Vampire benchmark winner).
-       All entries cap CP weight via AutoMaxWeight -> 20 -- no memory
-       thrashing.  AndAssociativity-class deep saturations stay out of
-       this lean schedule (need Waldmeister preset + minutes of
-       saturation; the safety tail's Gt entry still picks them up). *)
-    (* Mix2 + SR=2 without AutoMaxWeight cracks Hillman/Commutativity at
-       len 27 in 0.04s; the AMW=20 variant below FAILS Hillman (AMW
-       defers + drains CPs that this trajectory needs immediately).
-       Run the AMW-free variant FIRST so Hillman + ImpliesWolfram cases
-       crack on entry 1 instead of falling through to the safety tail. *)
+    (* No Tafel2 Sheffer row.  The Waldmeister preset runs first, with six times the share of the
+       budget: it proves the WolframAxioms class's deep saturations (OrAssociativity,
+       AndAssociativity, ImpliesHillmanAxioms, ImpliesMeredithAxioms) in 21 to 24 s, on which every
+       entry after it walls, and the class's easy theorems in 0.1 to 1 s (ShefferAxioms
+       ImpliesWolframAxioms in 0.3 s, against 18 s through the entries after it).  The rest keep
+       the class's other theorems in reach when the Waldmeister slice fails:
+       - Mix2 + SelectionRatio 2 (one age pick per two weight picks) drives the saturator through
+         the long derivation chains of the cross-axiom Implies-X goals.  The variant without
+         AutoMaxWeight runs first, since the AutoMaxWeight 20 variant defers and drains the critical
+         pairs HillmanAxioms Commutativity needs at once, and fails it.
+       - Add weight closes WolframAxioms Commutativity (1.7 s), which both Mix2 entries fail.
+       - GoalDirected (MNF bidirectional front) closes symmetric goals.  It runs after the
+         completion configs because a known engine bug can hang MNF on a hard cross-axiom
+         Implies-X, and its slice of the budget bounds the hang.
+       - SInE relevance pruning helps the cross-system Meredith-class Implies-X.
+       Every entry after the first Mix2 one caps critical-pair weight with AutoMaxWeight 20, so
+       none thrashes memory. *)
+    {"Waldmeister", "ScheduleShare" -> 6},
     {"Completion", "CriticalPairWeight" -> "Mix2", "SelectionRatio" -> 2},
     {"Completion", "CriticalPairWeight" -> "Mix2", "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
     {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20},

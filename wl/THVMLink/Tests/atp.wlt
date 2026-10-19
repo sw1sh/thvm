@@ -1154,10 +1154,11 @@ VerificationTest[
 
 VerificationTest[
     (* "AppliedMethod" under Automatic returns the actual schedule
-       entry that won.  The default Automatic schedule's first entry
-       (Mix2) closes InverseOfInverse trivially. *)
-    TFindProof["InverseOfInverse", "AbelianGroupAxioms", "AppliedMethod"],
-    {"Completion", "CriticalPairWeight" -> "Mix2"},
+       entry that won.  The first entry of the AbelianGroup class
+       schedule closes InverseOfInverse trivially. *)
+    TFindProof["InverseOfInverse", "AbelianGroupAxioms", "AppliedMethod"] ===
+        First[TAtpSchedule[Automatic, "InverseOfInverse", "AbelianGroupAxioms"]],
+    True,
     TestID -> "ATP/return/AppliedMethod-portfolio-winner"
 ]
 
@@ -2401,6 +2402,49 @@ VerificationTest[
     {"Completion", "CriticalPairWeight" -> "Gt",
         "GoalInterleave" -> 50, "AutoPrecedence" -> True},
     TestID -> "ATP/schedule/AbelianGroup-front-load-is-Gt+AutoPrec"
+]
+
+(* The Sheffer class (WolframAxioms and the other single-operator
+   Boolean bases) runs the Waldmeister preset first, weighted to six
+   shares of the budget: it is the one entry that proves the class's
+   deep theorems, OrAssociativity and AndAssociativity in about 21 s. *)
+VerificationTest[
+    First @ TAtpSchedule[Automatic, "OrAssociativity", "WolframAxioms"],
+    {"Waldmeister", "ScheduleShare" -> 6},
+    TestID -> "ATP/schedule/Sheffer-front-load-is-Waldmeister"
+]
+
+(* "ScheduleShare" weighs a schedule entry and never reaches the
+   engine: the entry runs as its bare preset. *)
+VerificationTest[
+    With[{e = {"Waldmeister", "ScheduleShare" -> 6}},
+        {WolframInstitute`THVMLink`ATP`Private`atpScheduleShare[e],
+         WolframInstitute`THVMLink`ATP`Private`atpScheduleShare["Twee"],
+         WolframInstitute`THVMLink`ATP`Private`atpDropScheduleShare[e],
+         WolframInstitute`THVMLink`ATP`Private`atpDropScheduleShare[
+             {"Completion", "ScheduleShare" -> 2, "GoalInterleave" -> 50}]}],
+    {6, 1., {"Waldmeister"}, {"Completion", "GoalInterleave" -> 50}},
+    TestID -> "ATP/schedule/ScheduleShare-weight-and-drop"
+]
+
+(* The weighted first entry proves a WolframAxioms notable theorem
+   on its own slice, so the trace has one proved entry. *)
+VerificationTest[
+    With[{trace = TFindProof["Commutativity", "WolframAxioms",
+            "PortfolioTrace", TimeConstraint -> 30]},
+        {Length[trace], trace[[1]]["Method"], trace[[1]]["Proved"]}],
+    {1, {"Waldmeister", "ScheduleShare" -> 6}, True},
+    TestID -> "ATP/schedule/Sheffer-Waldmeister-proves-Commutativity"
+]
+
+(* The default method proves the deep WolframAxioms theorems within a
+   one-minute budget: the Waldmeister entry's six shares are about
+   28 s of 60, and OrAssociativity takes about 21 s. *)
+VerificationTest[
+    TFindProof["OrAssociativity", "WolframAxioms", "Status",
+        TimeConstraint -> 60],
+    "Proved",
+    TestID -> "ATP/schedule/WolframAxioms-OrAssociativity-default-60s"
 ]
 
 (* Unknown theorem name yields $Failed (catch-all path). *)

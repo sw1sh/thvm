@@ -74,7 +74,7 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets
 
 - Any other setting of [Method]() issues the message `TFindProof::badmethod`, and [Automatic]() is used instead. `$AtpMethodPresets` lists the named configurations and schedules.
 - [TAtpSchedule]() gives the schedule a method expands to and [TAtpDescribeMethod]() the suboptions of a configuration. The suboptions are described in [Methods and Presets for TFindProof](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods).
-- [TimeConstraint]() is the total time for a schedule, shared among its entries: each entry gets the time left divided by the number of entries left, and each of the first [PortfolioFrontLoad]() entries gets twice that share. With the default setting <code>[TimeConstraint]() -> [Infinity]()</code>, each entry of a schedule is given 60 seconds.
+- [TimeConstraint]() is the total time for a schedule, shared among its entries: each entry gets the time left in proportion to its weight among the entries left. The weight of an entry is 1, doubled for each of the first [PortfolioFrontLoad]() entries, and multiplied by *w* for an entry <code>{*name*, …, "ScheduleShare" -> *w*}</code>. The [Automatic]() schedule gives the `"Waldmeister"` configuration six shares for a single-operator axiomatization such as `"WolframAxioms"`. With the default setting <code>[TimeConstraint]() -> [Infinity]()</code>, each entry of a schedule is given 60 seconds.
 - A completion without a goal keeps its [TimeConstraint]() for every *spec*. When the derivations of the rules it found do not fit in the time left, its [ProofObject]() lists the axioms only, and the message `TFindProof::cplpo` is issued.
 - With a process method, the options of the matching builder, such as `"LiftToProofObject"`, `"ParseFormulas"` and `"Binary"` of [TVampireProofObject](), are passed on to it. With the default `"LiftToProofObject" -> Automatic`, `"WaldmeisterProcess"` gives a [ProofObject](), and `"VampireProcess"`, `"TweeProcess"` and `"EproverProcess"` give the Association of the proof as the prover writes it; `"LiftToProofObject" -> True` gives a [ProofObject]() for Vampire and E.
 - The following options can be given:
@@ -91,6 +91,26 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets
 | `"Binary"` | [Automatic]() | path of the program of a process method |
 
 ## Basic Examples
+
+Prove that Wolfram's single axiom for Boolean algebra, in terms of one operator, implies that the operator is commutative:
+
+```wl
+TFindProof["Commutativity", "WolframAxioms"]
+```
+
+<!-- => a ProofObject summary box, logic EquationalLogic -->
+
+---
+
+Prove a deeper notable theorem of the same axiom, the associativity of the Or operation built from its operator:
+
+```wl
+TFindProof["OrAssociativity", "WolframAxioms"]
+```
+
+<!-- => a ProofObject summary box, logic EquationalLogic -->
+
+---
 
 Prove that the inverse of the inverse of an element of an abelian group is the element itself:
 
@@ -541,6 +561,16 @@ TFindProof["AbelianGroupAxioms", TimeConstraint -> 2]
 ```
 
 <!-- => the message TFindProof::cplpo is issued, and the result is a ProofObject summary box, logic EquationalLogic, with no theorem and the four axioms as its only steps -->
+
+---
+
+Not every notable theorem is within reach: the Wolfram axiom implies the three Sheffer axioms, and the first two take about a second each, but the search for the third runs out of time even after five minutes:
+
+```wl
+TFindProof["ImpliesShefferAxioms", "WolframAxioms", "Status", TimeConstraint -> 10]
+```
+
+<!-- => "TimedOut" -->
 
 ---
 

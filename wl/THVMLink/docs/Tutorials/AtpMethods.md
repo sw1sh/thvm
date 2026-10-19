@@ -65,6 +65,13 @@ The axioms of `"WolframAxioms"` use a single operator, and the commutativity of 
 TFindProof["Commutativity", "WolframAxioms", Method -> {"GoalDirected", "Ordering" -> "LPO", "SkolemHighest" -> True, "CriticalPairWeight" -> "Add", "UnfailingCP" -> True}, TimeConstraint -> 10]
 ```
 
+For a single-operator axiomatization, [Automatic]() runs the `"Waldmeister"` configuration first, with six shares of the time, since it is the configuration that proves the deeper theorems, such as the associativity of the Or operation built from the operator of `"WolframAxioms"`:
+
+```wl
+First[TAtpSchedule[Automatic, "OrAssociativity", "WolframAxioms"]]
+```
+<!-- => {"Waldmeister", "ScheduleShare" -> 6} -->
+
 ### Filtering the axioms
 
 The `"AxiomRelevance"` suboption filters the axioms before the search. `"SInE"` selects axioms by following symbols from the goal, as the Vampire prover does:
@@ -265,7 +272,7 @@ TAtpDescribeMethod["VampirePortfolioCompact"]
 ```
 <!-- => <|"Schedule" -> {"VampireUEQ", "Twee", {"Completion", "CriticalPairWeight" -> "Mix2", "AutoPrecedence" -> True, "AutoMaxWeight" -> 20}}|> -->
 
-A schedule shares the [TimeConstraint]() of [TFindProof]() among its entries: each entry gets the time left divided by the number of entries left, except that each of the first *n* entries gets twice that share with the option <code>[PortfolioFrontLoad]() -> *n*</code>, whose default is 1. <code>[PortfolioFrontLoad]() -> 0</code> shares the time equally. With the default <code>[TimeConstraint]() -> [Infinity]()</code>, each entry gets 60 seconds. The option [MaxSteps]() bounds the number of critical pairs a configuration processes; its default, [Automatic](), is 200000, and 500000 for the `"Waldmeister"` configuration.
+A schedule shares the [TimeConstraint]() of [TFindProof]() among its entries: each entry gets the time left in proportion to its weight among the entries left. The weight of an entry is 1, doubled for each of the first *n* entries with the option <code>[PortfolioFrontLoad]() -> *n*</code>, whose default is 1, and multiplied by *w* for an entry <code>{*name*, …, "ScheduleShare" -> *w*}</code>. <code>[PortfolioFrontLoad]() -> 0</code> shares the time equally among plain entries. With the default <code>[TimeConstraint]() -> [Infinity]()</code>, each entry gets 60 seconds. The option [MaxSteps]() bounds the number of critical pairs a configuration processes; its default, [Automatic](), is 200000, and 500000 for the `"Waldmeister"` configuration.
 
 ## More configurations
 

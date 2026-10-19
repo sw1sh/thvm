@@ -26,6 +26,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 - A schedule such as `"Portfolio"`, `"VampirePortfolio"`, `"VampirePortfolioCompact"` or `"AllPresets"` gives its entries in order.
 - [Automatic]() with no problem gives the `"Portfolio"` schedule. For a problem, [Automatic]() detects the structure of the axioms and puts configurations suited to it before the `"Portfolio"` entries.
 - [TFindProof]() tries the entries in order, shares its [TimeConstraint]() among them, and stops at the first proof.
+- An entry <code>{*name*, …, "ScheduleShare" -> *w*}</code> gets *w* times the share of the time of a plain entry. `"ScheduleShare"` weighs the entry and is not passed to the configuration.
 - The suboptions of each configuration are described in [Methods and Presets for TFindProof](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods), and [TAtpDescribeMethod]() gives their values.
 
 ## Basic Examples
@@ -107,6 +108,16 @@ TAtpSchedule[Automatic, "InverseOfInverse", "AbelianGroupAxioms"]
 ```
 
 <!-- => the same seven entries as for OverBar[OverBar[x]] == x -->
+
+---
+
+For Wolfram's single axiom for Boolean algebra, [Automatic]() runs the `"Waldmeister"` configuration first, with six times the share of the time of each other entry:
+
+```wl
+First[TAtpSchedule[Automatic, "OrAssociativity", "WolframAxioms"]]
+```
+
+<!-- => {"Waldmeister", "ScheduleShare" -> 6} -->
 
 ## Properties and Relations
 

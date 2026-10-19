@@ -2896,11 +2896,17 @@ atpParseMethod["Completion"] := atpParseMethod[{"Completion"}];
    defaults; "GoalDirected" -> True/False in subopts overrides the
    preset default (post-merge).  Returns the option vector that
    atpParseCompletionOpts produces. *)
+(* A schedule entry's "ScheduleShare" weighs its slice of the budget; it is no engine setting. *)
+atpScheduleShare[{_String, subopts___}] := Replace[Lookup[Cases[{subopts}, _Rule], "ScheduleShare", 1.], Except[_ ? Positive] -> 1.]
+atpScheduleShare[_] := 1.
+atpDropScheduleShare[{name_String, subopts___}] := Prepend[DeleteCases[{subopts}, "ScheduleShare" -> _], name]
+atpDropScheduleShare[m_] := m
+
 atpDispatchPreset[defaults_Association, defaultGD_, subopts_List] :=
     Block[{o = Association[subopts], merged, mnf},
         merged = Join[defaults, o];
         mnf = If[ TrueQ @ Lookup[merged, "GoalDirected", defaultGD], 1, 0];
-        merged = KeyDrop[merged, "GoalDirected"];
+        merged = KeyDrop[merged, {"GoalDirected", "ScheduleShare"}];
         atpParseCompletionOpts[Normal[merged], mnf]
     ];
 
@@ -4915,33 +4921,29 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
        introspectives ("Lemmas"/"RawTrace"/...) still reflect a real run. *)
     Module[{atpSub, atpR = $Failed, atpEnd, atpTrace = {}},
         (* TimeConstraint is a TOTAL budget across the schedule (like the
-           built-in FindEquationalProof).  Divide the REMAINING time
-           FAIRLY among the REMAINING configs (recomputed each step) so a
-           late-but-winning strategy -- typically GoalDirected/MNF, which
-           closes goal-shaped theorems plain completion misses -- is never
-           starved by an earlier config that fails slowly.  A config that
+           built-in FindEquationalProof).  Each step divides the REMAINING
+           time among the REMAINING configs by weight, w_i / Total[w_i ;; n],
+           so a late-but-winning strategy -- typically GoalDirected/MNF,
+           which closes goal-shaped theorems plain completion misses -- is
+           never starved by an earlier config that fails slowly.  The weight
+           is 1, doubled for the first PortfolioFrontLoad entries and
+           multiplied by an entry's own "ScheduleShare" (a class schedule's
+           deep preset that needs most of the budget).  A config that
            returns early rolls its unused time forward to the rest.
            Unset TimeConstraint stays at the per-config default 60s. *)
         atpEnd = If[ OptionValue[TimeConstraint] =!= Infinity,
             AbsoluteTime[] + N[OptionValue[TimeConstraint]], Infinity];
         Module[{n = Length[atpSched],
                 fl = Min[Max[OptionValue[PortfolioFrontLoad], 0],
-                         Length[atpSched]]},
+                         Length[atpSched]], weights},
+        weights = MapIndexed[If[ First[#2] <= fl, 2., 1.] * atpScheduleShare[#1] &, atpSched];
         Do[ atpSub = If[ atpEnd =!= Infinity,
                 With[{rem = atpEnd - AbsoluteTime[]},
-                    (* PortfolioFrontLoad -> k allocates 2x time to each
-                       of the first k entries (vs an equal-share each).
-                       Remaining entries split the unused remainder fairly
-                       on every step.  k=0 reproduces the fair-share
-                       behavior byte-identical. *)
-                    Which[
-                        fl == 0, rem / (n - i + 1),
-                        i <= fl, 2. * rem / (2. * (fl - i + 1) + (n - fl)),
-                        True,    rem / (n - i + 1)]],
+                    rem * weights[[i]] / Total[weights[[i ;; n]]]],
                 60.];
             If[ atpSub <= 0., Break[]];
             atpR = atpProveBundle[conjecture, axioms,
-                Method -> atpSched[[i]], TimeConstraint -> atpSub,
+                Method -> atpDropScheduleShare[atpSched[[i]]], TimeConstraint -> atpSub,
                 MaxSteps -> OptionValue[MaxSteps]];
             (* Record this slice's outcome for the "PortfolioTrace"
                return spec: which Method, how long the C-engine call
