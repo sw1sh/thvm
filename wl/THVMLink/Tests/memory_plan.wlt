@@ -129,3 +129,14 @@ VerificationTest[
     True,
     TestID -> "memory-plan/makeboxes-renders-summary"
 ]
+
+VerificationTest[
+    (* the Gantt draws one bar per buffer (the bar map was parsed as one Function) *)
+    TReset[];
+    a = TTensorCreate[Range[1., 64.]];
+    TMaterialize[Total[a^2] * Total[a]];
+    g = TMemoryPlanGantt[TMemoryPlan[]];
+    {Length[Cases[g, _Rectangle, Infinity]] > 0, FreeQ[g, _Function]},
+    {True, True},
+    TestID -> "memory-plan/gantt-draws-bars"
+]
