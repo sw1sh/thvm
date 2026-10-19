@@ -526,3 +526,11 @@ VerificationTest[
     {Term["NUM", "f32", 1065353216], True, 1065353216},
     TestID -> "term/num-dtype-round-trips"
 ]
+
+(* A snapshot's cells carry a NUM's dtype as its name; the term tree drops i32 and names the rest. *)
+VerificationTest[
+    {TContextToTermTree[TContextSnapshot[TLam[x, x + 1]]], TContextToTermTree[TContextSnapshot[TNum[3, "u8"] + TNum[4, "u8"]]]},
+    {"LAM"["OP2"["+", "VAR"[_Integer], "NUM"[1]]], "OP2"["+", "NUM"["u8", 3], "NUM"["u8", 4]]},
+    SameTest -> MatchQ,
+    TestID -> "context-snapshot/term-tree-num-dtype"
+]

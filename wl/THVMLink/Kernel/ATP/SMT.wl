@@ -47,6 +47,7 @@ SetUsage[TSmtDecide, "TSmtDecide[formula$] decides a quantifier-free Boolean com
 Returns an Association keyed by \"Status\" (\"SAT\" or \"UNSAT\"); on SAT a \"Model\" key gives a satisfying atom assignment (each atom to True or False) certified by congruence closure.
 Handles the And, Or, Not, Implies, Equivalent, and Xor combinators."];
 
+TSmtDecide::quant = "TSmtDecide decides quantifier-free formulas; `1` has a quantifier.";
 TSmtDecide::theory = "TSmtDecide decides Boolean combinations of equalities over uninterpreted functions and predicates; `1` is arithmetic.";
 TSatEUF::badin = "TSatEUF inputs must be lists of equalities (HoldPattern[Equal[_,_]]) " <> "and disequalities (HoldPattern[Unequal[_,_]]); got `1` / `2`.";
 
@@ -258,7 +259,8 @@ tptpDispatchSMT[imported_Association] := Block[{axioms = imported["Axioms"], con
         (nonGround = SelectFirst[Append[axioms, conj], ! groundQ[#] &, None]) =!= None,
             Message[TFindProof::nonground, nonGround]; $Failed,
         True,
-            atpSmtEntail[conj, axioms]
+            (* the same WL symbols the other TPTP paths decide over, so the result reads as WL *)
+            atpSmtEntail[tptpInternalize[conj], tptpInternalize /@ axioms]
     ]
 ]
 
@@ -284,6 +286,10 @@ TSmtDecide[formula_] := Block[{atoms, propVars, abstraction, blocking = True, in
        filter never fires, and the formula falls through to the empty-
        atoms TrueQ branch (UNSAT for every non-literally-True input). *)
     normFormula = formula /. {Inactive[Equal][a_, b_] :> a == b, Inactive[Unequal][a_, b_] :> Unequal[a, b]};
+    If[ ! FreeQ[normFormula, _ForAll | _Exists],
+        Message[TSmtDecide::quant, FirstCase[normFormula, _ForAll | _Exists, None, {0, Infinity}]];
+        Return[$Failed]
+    ];
     If[ (arith = SelectFirst[smtAtoms[normFormula], ! FreeQ[#, $smtArithmetic] &, None]) =!= None,
         Message[TSmtDecide::theory, arith];
         Return[$Failed]

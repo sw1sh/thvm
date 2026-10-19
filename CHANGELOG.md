@@ -329,6 +329,9 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- TContextToTermTree names a NUM's dtype again (it printed `dtypeName["i32"]` for every number of a snapshot).
+- TSmtDecide refuses a quantified formula with `TSmtDecide::quant` (it read `ForAll[x, f[x] == x]` as an atom); TPTP problems under `Method -> "SMT"` are decided over WL symbols like the other TPTP paths, so the result reads `a == c`, not `"a"[] == "c"[]`.
+- TFindProof's `"LiftToProofObject"` defaults to Automatic: a WaldmeisterProcess proof, whose protocol lifts in a fraction of a second to a ProofObject that verifies, comes back as a ProofObject again; the TPTP provers' results stay unlifted.
 - A goal-less completion keeps its TimeConstraint: `TFindProof[axioms, "Status", TimeConstraint -> 10]` returns at 10 s (the right-group axioms ran past 10 minutes building a derivation dataset no return spec but "ProofObject" reads). A completion's ProofObject builds that dataset in the time left and otherwise lists the axioms, with `TFindProof::cplpo` pointing to "Lemmas".
 - TFindProof gives a theory's variables names its goal does not use, so `TFindEquationalPath[OverBar[a ⊗ b] == OverBar[b] ⊗ OverBar[a], "AbelianGroupAxioms"]` keeps `a` and `b` constant (its path read them as the variables `a_`, `b_`).
 - An unknown TFindProof Method falls back to Automatic as its message says (it handed the engine a stale configuration and gave `$Failed`); a goal that is no equation (`"BBAA" == "AABB"` is False before TFindProof sees it) gives the encoder's Failure instead of `Lookup` messages and `Missing`.

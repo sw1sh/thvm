@@ -160,3 +160,19 @@ VerificationTest[
     {"TimedOut", True},
     TestID -> "Waldmeister/time-limit"
 ]
+
+(* TFindProof lifts a WaldmeisterProcess proof to a ProofObject by default and leaves a Vampire
+   proof as the prover's result, whose lift parses every formula with TPTPImport. *)
+VerificationTest[
+    If[ ! StringQ[WolframInstitute`THVMLink`ATP`Private`wmBinary[Automatic]], ProofObject,
+        Head @ TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "WaldmeisterProcess", TimeConstraint -> 10]],
+    ProofObject,
+    TestID -> "Lift/default-waldmeister-lifts"
+]
+
+VerificationTest[
+    If[ ! StringQ[WolframInstitute`THVMLink`ATP`Private`vampireBinary[Automatic]], "SZS",
+        TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "VampireProcess", TimeConstraint -> 5]["Backend"]],
+    "SZS",
+    TestID -> "Lift/default-vampire-unlifted"
+]
