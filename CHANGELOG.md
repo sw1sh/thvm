@@ -329,6 +329,7 @@ for the per-commit story.
 - Metal autotune (GEMM beam search) in progress.
 
 ### Frontend
+- `TGrad` refuses a target or wrt that is not a term with `TGrad::args`; `TGrad[{1, 2}, q]` exposed a private symbol and `TGrad[Total[q], {1, 2}]` gave `{TGradOf[1], TGradOf[2]}`.
 - `TBench` checks its spec: without `"InitFn"`, `"StepFn"` or a positive `"NumSteps"` it gives `TBench::spec` (it gave `Do::iterb` and an association with private symbols). `"Name"` defaults to `"bench"`.
 - A `TKernel` in `Plus`, `Times` or `Dot` stands for its output, as it already did inside `TUOp*` constructors: `TKernel[TMaterialize[x^2]] + x` built a malformed term. `kernel["Source", "Metal"]` works as `TKernelSource`'s usage says.
 - `TMultiTrace` with an unknown key gives `TMultiTrace::key` (it gave a list of `Missing`). `TMultiwayGraph` refuses anything but step records or a term with `TMultiwayGraph::needsteps`, which now names `TMultiTrace`. A per-key list such as `TMultiTrace[t, "Events"]` used to flood `MapThread` and `Part` messages and give a meaningless graph.

@@ -478,8 +478,8 @@ TGrad[y_TTerm] := Module[{leaves = gradFloatLeafTerms[y]},
     y
 ]
 
-TGrad[y_, target_TTerm] := TGrad[y, target, gradOnesSeed[y]]
-TGrad[y_, target_TTerm, gy_TTerm] := tGradWithLeaves[y, target, gy, uopLeafTids[y]]
+TGrad[y_ ? termLikeQ, target_TTerm] := TGrad[y, target, gradOnesSeed[y]]
+TGrad[y_ ? termLikeQ, target_TTerm, gy_TTerm] := tGradWithLeaves[y, target, gy, uopLeafTids[y]]
 
 (* Shared-leaves form: caller supplies leafTids so the list-form TGrad
    can compute them ONCE per forward graph instead of once per target.
@@ -503,7 +503,7 @@ tGradWithLeaves[y_, target_TTerm, gy_TTerm, leafTids_List] := (
    TTerms in `targets` order.  A single-element list delegates to the
    target-aware unary TGrad; the multi-element form below is the
    requires_grad single walk. *)
-TGrad[y_, {target_}] := {TGrad[y, target]}
+TGrad[y_ ? termLikeQ, {target_TTerm}] := {TGrad[y, target]}
 
 (* Multi-target VJP via the auto-grad-all-float-leaves single walk.
    Mark every reachable float leaf, fire ONE target-free backward
@@ -522,7 +522,7 @@ TGrad[y_, {target_}] := {TGrad[y, target]}
 
    The float leaves are unmarked afterward so the global GRAD_REQ_NCOUNT
    mark state is restored for any later TGrad. *)
-TGrad[y_, targets_List] := Module[{leaves, grads},
+TGrad[y_ ? termLikeQ, targets : {__TTerm}] := Module[{leaves, grads},
     leaves = gradFloatLeafTerms[y];
     markGradLeaf /@ leaves;
     TClearGrad /@ leaves; (* fresh grad per walk *)
@@ -531,6 +531,8 @@ TGrad[y_, targets_List] := Module[{leaves, grads},
     markGradLeaf[#, False] & /@ leaves; (* restore global state *)
     grads
 ]
+TGrad[y_, ___] := Null /; (Message[TGrad::args, y]; False)
+TGrad::args = "TGrad differentiates a term with respect to a tensor term or a list of them; the arguments with `1` are not that.";
 
 (* TRealize: heap-walk materialize (in-place rewrite UOPs to UOP_KERNELs)
    then TWnf to beta-reduce and fire the kernels.  No UOP_MATERIALIZE
