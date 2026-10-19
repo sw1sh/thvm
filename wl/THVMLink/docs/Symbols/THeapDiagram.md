@@ -17,7 +17,7 @@ RelatedGuides: [THVMLink]
 
 <code>[THeapDiagram]()[]</code> gives a string diagram of every agent on the dynamic heap.
 
-<!-- #| annotation: 26.10.19: Diagram.wl builds one DC Diagram per compound agent with one port per heap slot, plus a leaf Diagram for each atom referenced from a rendered slot, and wires them into a DiagramNetwork, which evaluates to a single Diagram. Its BeginPackage imports only the main context Wolfram`DiagrammaticComputation`; DC 1.0.8 (the version in the paclet repository on the probe machine) defines Diagram and DiagramNetwork in the subcontext Wolfram`DiagrammaticComputation`Diagram`, so with 1.0.8 the names resolve to WolframInstitute`THVMLink`Private` symbols and THeapDiagram gives an inert Private`DiagramNetwork[Private`Diagram[...]] with no message. With DC 1.0.13 (the dev checkout) every example on this page evaluates to a Diagram as the hints describe; the hints were verified that way. The page needs DC >= 1.0.13 in the build kernel, or Diagram.wl importing the subcontext. -->
+<!-- #| annotation: 26.10.19: Diagram.wl builds one DC Diagram per compound agent with one port per heap slot, plus a leaf Diagram for each atom referenced from a rendered slot, and wires them into a DiagramNetwork, which evaluates to a single Diagram. It puts the Wolfram`DiagrammaticComputation`Diagram` subcontext on its path, where DC 1.0.8 defines Diagram and DiagramNetwork, so the page renders with DC 1.0.8 as well as 1.0.13. -->
 
 ## Details & Options
 
@@ -26,7 +26,7 @@ RelatedGuides: [THVMLink]
 - The two projections of a duplication leave through two separately named ports, so its arms are drawn apart.
 - Each box is labeled with its tag and heap location, in the colors used by <code>[THeapGraph]()</code>.
 - Only the agents reachable from the seed terms are drawn. <code>[THeapDiagram]()[]</code> draws every agent on the heap that some cell refers to.
-- [THeapDiagram]() requires version 1.0.13 or later of the `Wolfram/DiagrammaticComputation` paclet.
+- [THeapDiagram]() requires the `Wolfram/DiagrammaticComputation` paclet.
 
 ## Basic Examples
 

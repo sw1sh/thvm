@@ -13,14 +13,14 @@ RelatedGuides: [THVMLink]
 
 <code>[THeapRead]()[*loc*]</code> gives the term stored at location *loc* of the dynamic heap.
 
-<!-- #| annotation: 26.10.19: THeapRead wraps heap_read (src/heap/read.c) and packs the 64-bit word into a fresh TTerm, which adds a pin for that word. There is no bounds check: THeapRead[-1] crashed the kernel with a bus error in a probe, so the page only reads locations inside [THeapBase[], THeapPos[]). After a beta reduction the cell that held the lambda body carries the substituted argument with its SUB flag set, which is what Term follows when it resolves a VAR. -->
+<!-- #| annotation: 26.10.19: THeapRead wraps heap_read (src/heap/read.c) and packs the 64-bit word into a fresh TTerm, which adds a pin for that word. The C side checks the location against the heap capacity, not THeapPos[], so a location past THeapPos[] reads an old or empty cell without a message. After a beta reduction the cell that held the lambda body carries the substituted argument with its SUB flag set, which is what Term follows when it resolves a VAR. -->
 
 ## Details & Options
 
 - A heap cell holds one term. The result is a new [TTerm]() for it, and reading does not change the heap.
 - The cells of a node hold its children: a superposition or an application at location *loc* keeps its two children at *loc* and *loc* + 1, a lambda keeps its body at *loc*, and a constructor keeps its child count at *loc* followed by its children.
 - The value field of a node term, <code>[TTermVal]()[*t*]</code>, is the location of its first cell.
-- The location is not checked: only locations from <code>[THeapBase]()[]</code> to <code>[THeapPos]()[]</code> - 1 hold live cells.
+- Only locations from <code>[THeapBase]()[]</code> to <code>[THeapPos]()[]</code> - 1 hold live cells. A location outside the heap issues the message `THeapRead::loc`, and the input returns unevaluated.
 - The book heap of ahead-of-time (AOT) Metal kernels is read with <code>[TBookRead]()</code>.
 
 ## Basic Examples
@@ -155,3 +155,12 @@ Read its child count and its child from the book heap:
 TTermVal /@ TBookRead /@ (TTermVal[bc] + Range[0, 1])
 ```
 <!-- => {1, 7} -->
+
+## Possible Issues
+
+A location outside the heap is refused:
+
+```wl
+THeapRead[-1]
+```
+<!-- => the message THeapRead::loc is issued and the expression returns unevaluated -->

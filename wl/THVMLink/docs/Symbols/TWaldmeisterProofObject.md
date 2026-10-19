@@ -23,12 +23,14 @@ RelatedTutorials: ["[The Waldmeister Method in THVMLink](Waldmeister)", "[Method
 - The form <code>[TWaldmeisterProofObject]()["*theory*", "*theorem*"]</code> reads the file `tools/baselines/wm_pr/`*theory*`__`*theorem*`.pr` under the current directory when it exists, and otherwise writes the problem from the axioms and the theorem of the theory.
 - The steps of the proof are keyed as in the proofs of [TFindProof](): `{"Axiom", n}`, `{"Hypothesis", n}`, `{"CriticalPairLemma", n}`, `{"SubstitutionLemma", n}` and `{"Conclusion", 1}`.
 - With the default `"LiftToProofObject" -> True`, the formulas are parsed into expressions and the result is a [ProofObject](). With `"LiftToProofObject" -> False`, the result is an Association with the keys `"Backend"`, `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`, with the formulas as Waldmeister writes them.
-- When Waldmeister finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>.
+- When Waldmeister finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>, whose `"Status"` is `"Failed"`, or `"TimedOut"` when Waldmeister was stopped at the time limit.
+- A *file* that does not exist issues the message `TWaldmeisterProof::badfile` and gives `$Failed`; a theorem that the theory does not have gives <code>[Failure]()["WmGenerate", …]</code>.
 - <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "WaldmeisterProcess"]</code> gives the same result.
 - The following options can be given:
 
 | | | |
 | --- | --- | --- |
+| [TimeConstraint]() | `30` | time limit in seconds |
 | `"LiftToProofObject"` | [True]() | whether to give a [ProofObject]() |
 | `"ParseFormulas"` | [False]() | whether to parse the formulas into expressions |
 | `"Binary"` | [Automatic]() | path of the `wmcli` program |
@@ -91,6 +93,16 @@ TWaldmeisterProofObject["GroupAxioms", "LeftIdentity", "LiftToProofObject" -> Fa
 
 ## Options
 
+### TimeConstraint
+
+A time limit too short for Waldmeister gives a [Failure]():
+
+```wl
+TWaldmeisterProofObject["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]
+```
+
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Waldmeister", "Status" -> "TimedOut", "Seconds" -> a time of about 1|>] -->
+
 ### LiftToProofObject
 
 With `"LiftToProofObject" -> False`, the result is an Association rather than a [ProofObject]():
@@ -119,7 +131,7 @@ A path with no program gives a [Failure]():
 TWaldmeisterProofObject["GroupAxioms", "LeftIdentity", "Binary" -> "/nonexistent/wmcli"]
 ```
 
-<!-- => Failure["ExternalNoProof", <|"Tool" -> "Waldmeister", "Status" -> "Failed", "Seconds" -> 0.01|>] -->
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Waldmeister", "Status" -> "Failed", "Seconds" -> a time|>] -->
 
 ### WMCLI
 
@@ -129,7 +141,7 @@ TWaldmeisterProofObject["GroupAxioms", "LeftIdentity", "Binary" -> "/nonexistent
 TWaldmeisterProofObject["GroupAxioms", "LeftIdentity", "WMCLI" -> "/nonexistent/wmcli"]
 ```
 
-<!-- => Failure["ExternalNoProof", <|"Tool" -> "Waldmeister", "Status" -> "Failed", "Seconds" -> 0.01|>] -->
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Waldmeister", "Status" -> "Failed", "Seconds" -> a time|>] -->
 
 ### MathlinkPath
 
@@ -139,7 +151,7 @@ The program does not start without the MathLink framework:
 TWaldmeisterProofObject["GroupAxioms", "LeftIdentity", "MathlinkPath" -> "/nonexistent"]
 ```
 
-<!-- => Failure["ExternalNoProof", <|"Tool" -> "Waldmeister", "Status" -> "Failed", "Seconds" -> 0.02|>] -->
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Waldmeister", "Status" -> "Failed", "Seconds" -> a time|>] -->
 
 ## Properties and Relations
 
@@ -150,3 +162,23 @@ TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "WaldmeisterProce
 ```
 
 <!-- => True -->
+
+## Possible Issues
+
+A file that does not exist issues a message and gives `$Failed`:
+
+```wl
+TWaldmeisterProofObject["/nonexistent/problem.pr"]
+```
+
+<!-- => the message TWaldmeisterProof::badfile is issued and the result is $Failed -->
+
+---
+
+A theorem that the theory does not have gives a [Failure]():
+
+```wl
+TWaldmeisterProofObject["GroupAxioms", "NoSuchTheorem"]
+```
+
+<!-- => Failure["WmGenerate", <|"Reason" -> "theorem \"NoSuchTheorem\" not in AxiomaticTheory[\"GroupAxioms\", \"NotableTheorems\"]"|>] -->

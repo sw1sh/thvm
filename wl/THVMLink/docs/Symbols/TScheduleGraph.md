@@ -13,11 +13,11 @@ RelatedGuides: [THVMLink]
 
 <code>[TScheduleGraph]()[]</code> gives the graph of the kernels of the current schedule, with an edge from each kernel to every kernel that reads its output.
 
-<!-- #| annotation: 26.10.19: The graph is built from the KernelEntry table (kids 1 .. TKernelCount[] - 1) and the TENS producer_kid / input_tids edges; an input tensor with no producer kernel becomes a TEN-shaped vertex. Two defects are reported 26.10.19: the kernel vertex label reads "k2 (2[OpCount]ops)" because scheduleKernelLabel indexes decodeKernelInfo[kid][[1]] as if it were an association, and the edges carry no tensor-id labels although the usage message says they do. -->
+<!-- #| annotation: 26.10.19: The graph is built from the KernelEntry table (kids 1 .. TKernelCount[] - 1) and the TENS producer_kid / input_tids edges; an input tensor with no producer kernel becomes a TEN-shaped vertex. A kernel vertex is labeled "k1 (0ops)" and so on, with the "OpCount" of the kernel. The edges carry no tensor-id labels although the usage message says they do (reported 26.10.19). -->
 
 ## Details & Options
 
-- The result is a directed acyclic [Graph](). Each kernel is a vertex named `"k`*id*`"`, showing the kernel id, its output shape and its dtype.
+- The result is a directed acyclic [Graph](). Each kernel is a vertex named `"k`*id*`"`, showing the kernel id, its number of operations, its output shape and its dtype.
 - An input tensor that no kernel produces, such as a weight or data created with <code>[TTensorCreate]()</code>, is a vertex named `"t`*id*`"`, drawn in the shape of a tensor, with an edge to each kernel that reads it.
 - A kernel that neither reads from nor feeds another kernel is an isolated vertex.
 - The graph covers every kernel scheduled since the runtime was last reset with <code>[TReset]()</code>. Taken after <code>[TMaterialize]()</code>, it shows the schedule before anything runs.

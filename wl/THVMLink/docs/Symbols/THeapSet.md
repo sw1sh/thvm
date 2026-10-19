@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[THeapSet]()[*loc*, *t*]</code> writes the term *t* into location *loc* of the dynamic heap.
 
-<!-- #| annotation: 26.10.19: THeapSet wraps heap_set (src/heap/set.c) and writes ttermRaw[t] verbatim: unlike the constructors it does not apply numCoerce, so THeapSet[loc, 42] stores the raw word 42, which the reducer decodes as an APP at location 42. That is deliberate (it is the escape hatch the constructors themselves build on) and is also how a raw tag word can be planted for testing. Like THeapRead it does not bounds-check loc. -->
+<!-- #| annotation: 26.10.19: THeapSet wraps heap_set (src/heap/set.c) and writes ttermRaw[t] verbatim: unlike the constructors it does not apply numCoerce, so THeapSet[loc, 42] stores the raw word 42, which the reducer decodes as an APP at location 42. That is deliberate (it is the escape hatch the constructors themselves build on) and is also how a raw tag word can be planted for testing. Like THeapRead it checks loc against the heap capacity, not THeapPos[]. -->
 
 ## Details & Options
 
@@ -21,7 +21,7 @@ RelatedGuides: [THVMLink]
 - Cells are reserved first with <code>[THeapAlloc]()</code>, and <code>[THeapRead]()</code> reads them back.
 - Writing into a cell of an existing node changes that node, for instance one branch of a superposition.
 - A bare integer is written as a raw heap word, not as a number; a number is written as <code>[TNum]()[*n*]</code>.
-- The location is not checked: write only locations from <code>[THeapBase]()[]</code> to <code>[THeapPos]()[]</code> - 1.
+- Write only locations from <code>[THeapBase]()[]</code> to <code>[THeapPos]()[]</code> - 1, the live cells. A location outside the heap issues the message `THeapSet::loc`, and the input returns unevaluated.
 
 ## Basic Examples
 
@@ -155,3 +155,12 @@ The cell does not hold the number 42 but a raw word that reads as an application
 TTagName[TTermTag[THeapRead[loc]]]
 ```
 <!-- => "APP" -->
+
+---
+
+A location outside the heap is refused:
+
+```wl
+THeapSet[-1, TNum[3]]
+```
+<!-- => the message THeapSet::loc is issued and the expression returns unevaluated -->

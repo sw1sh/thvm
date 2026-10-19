@@ -16,7 +16,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 
 <code>[TEproverProof]()["*theory*", "*theorem*"]</code> runs E on the problem file of a named theorem of an [AxiomaticTheory]() theory.
 
-<!-- #| annotation: 26.10.19: The E examples are kept unevaluated: TEproverProof passes ToString[N[tc]] ("5.") to eprover --cpu-limit, which E 3.2 rejects, so every run reports "Failed". The hints were verified with TimeConstraint -> "5", which reaches the same code path with an integer limit; evaluate the cells again once the limit is passed as an integer. -->
+<!-- #| annotation: 26.10.19: TEproverProof passes Ceiling[TimeConstraint] to eprover --cpu-limit and does not stop E itself. When E reaches that limit it reports SZS status GaveUp, which TEproverProof reads as "Failed", not "TimedOut" (reported 26.10.19). -->
 
 ## Details & Options
 
@@ -34,7 +34,8 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 | `"Inferences"` | the steps of the proof, one Association for each |
 | `"RawSZS"` | the output of E |
 
-- Each inference has the keys `"Name"`, `"Role"`, `"Formula"`, `"Rule"` and `"Parents"`. E names its rules `"pm"` (paramodulation), `"rw"` (rewriting), `"cn"` and others.
+- Each inference has the keys `"Head"`, `"Name"`, `"Role"`, `"Formula"`, `"Rule"`, `"Status"`, `"RawSource"` and `"Parents"`. E names its rules `"pm"` and `"spm"` (paramodulation), `"rw"` (rewriting), `"cn"` and others; a copy of a clause has the rule `"equation_copy"`, and an axiom or the goal has the rule `"file"`.
+- E takes its time limit in whole seconds, so a [TimeConstraint]() that is not a whole number is rounded up. E stops itself at the limit.
 - [TEproverProofObject]() converts the result into the proof form of [TFindProof](), and <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "EproverProcess"]</code> runs E from [TFindProof]().
 - The following options can be given:
 
@@ -56,31 +57,38 @@ file = Export[FileNameJoin[{$TemporaryDirectory, "involution.p"}], "cnf(involuti
 Run E on it:
 
 ```wl
-#| eval: false
 TEproverProof[file, TimeConstraint -> 5]
 ```
 
-<!-- => <|"Status" -> "Proved", "Strategy" -> "eprover-auto-schedule", "Seconds" -> 0.04, "ProofLength" -> 6, "Inferences" -> {<|"Head" -> "cnf", "Name" -> "goal", "Role" -> "negated_conjecture", ...|>, ...}, "RawSZS" -> "# Preprocessing class: ...\n..."|> -->
+<!-- => <|"Status" -> "Proved", "Strategy" -> "eprover-auto-schedule", "Seconds" -> a time, "ProofLength" -> 6, "Inferences" -> {<|"Head" -> "cnf", "Name" -> "goal", "Role" -> "negated_conjecture", ...|>, ...}, "RawSZS" -> "# Preprocessing class: ...\n..."|> -->
 
 ## Scope
 
 Prove a named theorem of a theory from its problem file:
 
 ```wl
-#| eval: false
 TEproverProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 5]["ProofLength"]
 ```
 
 <!-- => 15 -->
 
+---
+
+The rule of each step of the proof:
+
+```wl
+TEproverProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 5]["Inferences"][[All, "Rule"]]
+```
+
+<!-- => {"file", "file", "file", "file", "file", "equation_copy", "equation_copy", "equation_copy", "equation_copy", "spm", "equation_copy", "rw", "equation_copy", "rw", "cn"} -->
+
 ## Options
 
 ### TimeConstraint
 
-The time limit is given to E:
+The time limit is given to E, which proves this theorem within one second:
 
 ```wl
-#| eval: false
 TEproverProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 1]["Status"]
 ```
 
@@ -107,6 +115,16 @@ TVampireProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 5]["St
 <!-- => "Proved" -->
 
 ## Possible Issues
+
+E gives up when it reaches its time limit, so a problem that E does not settle in time has the status `"Failed"` rather than `"TimedOut"`:
+
+```wl
+TEproverProof["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]["Status"]
+```
+
+<!-- => "Failed" -->
+
+---
 
 A file that does not exist issues a message and gives `$Failed`:
 

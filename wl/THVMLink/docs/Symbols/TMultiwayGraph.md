@@ -17,7 +17,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TMultiwayGraph]()[*steps*]</code> gives the multiway graph of the step records *steps* from [TMultiTrace]().
 
-<!-- #| annotation: 26.10.19: A VertexLabels option is accepted but has no effect, since the graph sets its own VertexLabels before the user options. The TMultiwayGraph::needsteps text still names TMultiSteps, the former name of TMultiTrace; and a per-key list such as TMultiTrace[t, "Events"] slips past the needsteps check and floods Lookup/MapThread messages. -->
+<!-- #| annotation: 26.10.19: A VertexLabels option is accepted but has no effect, since the graph sets its own VertexLabels before the user options. -->
 
 ## Details & Options
 

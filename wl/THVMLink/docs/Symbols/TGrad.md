@@ -28,6 +28,7 @@ RelatedGuides: [THVMLink]
 - <code>[TGrad]()[*y*, *x*]</code> and <code>[TGrad]()[*y*, *x*, *g*]</code> give a lazy [TTerm]() with the shape of *x* and leave every gradient slot unchanged.
 - <code>[TGrad]()[*y*, {$x_1$, $x_2$, …}]</code> computes every gradient in one backward walk; realizing the whole list with one <code>[TRealize]()</code> computes the part they share once. It empties and refills the gradient slots of the tensors *y* depends on, and a target that *y* does not depend on gets a zero gradient.
 - The gradients are lazy: <code>[TRealize]()</code> computes them, and <code>[Normal]()</code> reads the values back.
+- Arguments of other forms, such as a list in place of *y* or a number in place of *x*, issue the message `TGrad::args`, and the input returns unevaluated.
 - The derivatives of the arithmetic, reduction, matrix and elementwise functions that build a [TTerm]() graph, such as [Plus](), [Times](), [Power](), [Total](), [Dot](), [Exp]() and [Tanh](), are all supported.
 
 ## Basic Examples
@@ -375,3 +376,13 @@ Normal[TRealize[TGradOf[v]]]
 ```
 
 <!-- => {2., 4., 6.} -->
+
+---
+
+A list is not a term to differentiate:
+
+```wl
+TGrad[{1, 2}]
+```
+
+<!-- => the message TGrad::args is issued and the expression returns unevaluated -->

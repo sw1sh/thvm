@@ -13,11 +13,12 @@ RelatedGuides: [THVMLink]
 
 <code>[TBench]()[*spec*]</code> runs the step function given in the association *spec* for a number of steps and gives an association of timing and memory measurements.
 
-<!-- #| annotation: 26.10.19: TBench times the Do loop of StepFn with AbsoluteTime and snapshots TMemoryPlan[] afterwards, so its kernel, tensor and memory figures cover the whole session since the last TReset, not just the benchmark; the examples reset first. It is meant for diffing a stable record across commits, which is what TBenchReport and TBenchExport (no reference pages yet) format and write. A spec missing a key gives Do::iterb and an association with an unevaluated ms_per_step that leaks private symbols, and the rounded times can carry float noise such as 31.900000000000002 (reported 26.10.19). -->
+<!-- #| annotation: 26.10.19: TBench times the Do loop of StepFn with AbsoluteTime and snapshots TMemoryPlan[] afterwards, so its kernel, tensor and memory figures cover the whole session since the last TReset, not just the benchmark; the examples reset first. It is meant for diffing a stable record across commits, which is what TBenchReport and TBenchExport (no reference pages yet) format and write. The rounded times can carry float noise such as 31.900000000000002 (reported 26.10.19). -->
 
 ## Details & Options
 
-- *spec* has the keys `"Name"`, a label; `"InitFn"`, a function of no arguments that sets up the state; `"StepFn"`, a function of the state and the 0-based step number that runs one step and gives the new state; and `"NumSteps"`, the number of steps.
+- *spec* has the keys `"Name"`, a label, `"bench"` by default; `"InitFn"`, a function of no arguments that sets up the state; `"StepFn"`, a function of the state and the 0-based step number that runs one step and gives the new state; and `"NumSteps"`, the number of steps, a positive integer.
+- A *spec* without `"InitFn"`, `"StepFn"` or a positive integer `"NumSteps"` issues the message `TBench::spec` and gives `$Failed`.
 - <code>[TBench]()</code> applies `"InitFn"` once, untimed, then applies `"StepFn"` `"NumSteps"` times, timing the loop.
 - The result has the keys `"name"`, `"backend"`, `"n_steps"`, `"wall_time_ms"` and `"ms_per_step"`, the time of the loop and of one step in milliseconds, `"kernel_count"` and `"ten_count"`, the numbers of kernels and tensors, and `"total_live_kib"`, `"peak_concurrent_kib"` and `"slot_reuse_headroom_pct"`, the memory figures of <code>[TMemoryPlan]()</code> in kibibytes (KiB) and percent.
 - The kernel, tensor and memory figures describe everything scheduled since the runtime was last reset with <code>[TReset]()</code>, so resetting before the benchmark limits them to it.
@@ -71,6 +72,16 @@ TBench[<|"Name" -> "noop", "InitFn" -> Function[Null], "StepFn" -> Function[{h, 
 ```
 
 <!-- => <|"name" -> "noop", "backend" -> "?", "n_steps" -> 1, "wall_time_ms" -> 0., "ms_per_step" -> 0., "kernel_count" -> 0, "ten_count" -> 0, "total_live_kib" -> 0., "peak_concurrent_kib" -> 0., "slot_reuse_headroom_pct" -> 0|> -->
+
+---
+
+Without a `"Name"`, the result is labeled `"bench"`:
+
+```wl
+TBench[<|"InitFn" -> Function[Null], "StepFn" -> Function[{h, t}, h], "NumSteps" -> 1|>]["name"]
+```
+
+<!-- => "bench" -->
 
 ## Applications
 
@@ -146,3 +157,13 @@ TBench[<|"Name" -> "lazy", "InitFn" -> Function[TTensorCreate[ConstantArray[1., 
 ```
 
 <!-- => 0 -->
+
+---
+
+A spec without the number of steps is refused:
+
+```wl
+TBench[<|"Name" -> "add", "InitFn" -> Function[Null], "StepFn" -> Function[{h, t}, h]|>]
+```
+
+<!-- => the message TBench::spec is issued and the result is $Failed -->

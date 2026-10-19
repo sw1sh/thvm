@@ -17,12 +17,12 @@ RelatedGuides: [THVMLink]
 
 <code>[TKernel]()[*spec*]</code> represents a custom kernel whose C source and launch parameters are given by the association *spec*.
 
-<!-- #| annotation: 26.10.19: A kernel object is TKernel[<|"Term" -> t, "Kid" -> kid|>], a wrapper around the pinned UOP_KERNEL heap cell; TKernel[kid] finds that cell by scanning the heap. Properties read the C KernelEntry side table. ttermRaw, TTermVal, TTermTag and TTermExt route through the inner term, which is what lets the TUOp* constructors take a kernel object; the arithmetic UpValues of TTerm do not, so k + x does not build a graph (reported 26.10.19). The custom form registers the source with thvm_wl_kernel_emit_program once per distinct buffer binding and fires it through the backend vtable, so a fire inside a TJit body is recorded. -->
+<!-- #| annotation: 26.10.19: A kernel object is TKernel[<|"Term" -> t, "Kid" -> kid|>], a wrapper around the pinned UOP_KERNEL heap cell; TKernel[kid] finds that cell by scanning the heap. Properties read the C KernelEntry side table. ttermRaw, TTermVal, TTermTag and TTermExt route through the inner term, which is what lets the TUOp* constructors take a kernel object, and Plus, Times and Dot UpValues on TKernel hand the inner term to the TTerm arithmetic. The custom form registers the source with thvm_wl_kernel_emit_program once per distinct buffer binding and fires it through the backend vtable, so a fire inside a TJit body is recorded. -->
 
 ## Details & Options
 
 - A kernel object displays as a summary box showing its id, number of inputs, output size and dtype.
-- *kernel*`["`*prop*`"]` gives a property of the kernel, and <code>[Information]()[*kernel*, "Properties"]</code> lists them all. Among them are:
+- *kernel*`["`*prop*`"]` gives a property of the kernel, and <code>[Information]()[*kernel*, "Properties"]</code> lists them all. *kernel*`["Source", "`*backend*`"]` gives the source code for the backend `"C"` or `"Metal"`. Among the properties are:
 
   | | |
   | --- | --- |
@@ -39,7 +39,7 @@ RelatedGuides: [THVMLink]
 
 - *kernel*`[]` dispatches the kernel and gives the tensor it writes.
 - Kernel ids count up from 1 as <code>[TMaterialize]()</code> and <code>[TRealize]()</code> schedule new kernels, so the newest kernel has id <code>[TKernelCount]()[] - 1</code>.
-- The graph-node constructors, such as <code>[TUOpAdd]()</code>, accept a kernel object in place of the tensor it writes.
+- The graph-node constructors, such as <code>[TUOpAdd]()</code>, accept a kernel object in place of the tensor it writes, and so do the arithmetic operators `+` and `*` and [Dot]().
 - In a custom *spec*, `"Program"` is C source defining `void k(void *const *bufs, unsigned const *grid, unsigned const *block)`. `"Name"` names the entry point (default `"k"`), `"Grid"` and `"Block"` give up to three launch dimensions (default `{1, 1, 1}`), and `"Outs"` lists the positions of the arguments the program writes (default [All]()).
 - <code>[TKernel]()[*spec*][$b_1$, $b_2$, …]</code> realizes the tensors $b_i$, passes their buffers to the program in that order, runs it, and gives the written tensor, or the list of written tensors when there are several.
 - <code>[TKernel]()[*kid*]</code> gives a [Failure]() for an id with no kernel.
@@ -143,6 +143,14 @@ k["DispatchKind"]
 ```
 
 <!-- => "jit" -->
+
+The source of the kernel for a named backend, here the Metal Shading Language:
+
+```wl
+StringStartsQ[k["Source", "Metal"], "#include <metal_stdlib>"]
+```
+
+<!-- => True -->
 
 ---
 
@@ -252,6 +260,14 @@ A graph-node constructor takes the kernel object in place of the tensor it write
 
 ```wl
 Normal[TRealize[TUOpAdd[k, x]]]
+```
+
+<!-- => {2., 6., 12., 20., 30., 42., 56., 72.} -->
+
+Arithmetic takes the kernel object in the same way:
+
+```wl
+Normal[TRealize[k + x]]
 ```
 
 <!-- => {2., 6., 12., 20., 30., 42., 56., 72.} -->

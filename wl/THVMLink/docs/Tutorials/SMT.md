@@ -16,7 +16,7 @@ A ground problem is one whose equations contain no variables. Whether a ground g
 | | |
 | --- | --- |
 | <code>[TSatEUF]()[*equalities*, *disequalities*]</code> | decide whether ground equalities and disequalities can hold together |
-| <code>[TSmtDecide]()[*formula*]</code> | decide whether a Boolean combination of ground equations can hold |
+| <code>[TSmtDecide]()[*formula*]</code> | decide whether a Boolean combination of ground equations and predicates can hold |
 | <code>[TFindProof]()[*goal*, *hypotheses*, [Method]() -> "SMT"]</code> | decide whether *goal* follows from ground *hypotheses* |
 
 Every symbol is uninterpreted: `a`, `b` and compound terms such as `f[a, b]` stand for unknown values of unknown functions, related only by the equations given.
@@ -69,6 +69,13 @@ TSmtDecide[(a == b || c == d) && c == e]
 ```
 <!-- => <|"Status" -> "SAT", "Model" -> <|a == b -> False, c == d -> True, c == e -> True|>|> -->
 
+An atom can also be a predicate applied to terms, such as `p[a]`. Predicates are uninterpreted like functions, so equal arguments give equal truth values:
+
+```wl
+TSmtDecide[a == b && p[a] && !p[b]]
+```
+<!-- => <|"Status" -> "UNSAT"|> -->
+
 The procedure is lazy DPLL(T), the Davis-Putnam-Logemann-Loveland search modulo a theory T. Each atom is replaced by a propositional variable, [SatisfiabilityInstances]() proposes a truth assignment for the propositional formula, and [TSatEUF]() checks the equations that assignment asserts. An assignment that contradicts them is excluded by a blocking clause, and the next one is requested; there are finitely many assignments, so the search ends. Here the propositional formula is satisfiable, but every assignment that satisfies it contradicts congruence, since `a == b` and `c == d` force `f[a, c] == f[b, d]`:
 
 ```wl
@@ -104,12 +111,14 @@ When the goal does not follow, the result is a [CounterexampleObject](), a finit
 ```wl
 TFindProof[a == d, hyps, Method -> "SMT"]
 ```
+<!-- => a CounterexampleObject summary box, method CongruenceClosure -->
 
 The `"Counterexample"` spec gives the same object without the method setting, since [TFindProof]() uses congruence closure for a ground problem on its own:
 
 ```wl
 co = TFindProof[a == d, hyps, "Counterexample"]
 ```
+<!-- => a CounterexampleObject summary box, method CongruenceClosure -->
 
 Its model is the quotient of the terms by the hypotheses: a domain of two elements, with `a`, `b` and `c` in one and `d` in the other:
 
@@ -144,12 +153,14 @@ A Boolean goal that does not follow is refuted by a truth assignment to its atom
 ```wl
 TFindProof[Implies[a == b, a == c], {}, Method -> "SMT"]
 ```
+<!-- => a CounterexampleObject summary box, method DPLL(T)+CongruenceClosure, with a == b True and a == c False -->
 
 Without the method setting, [TFindProof]() proves a ground goal with its completion engine and gives a [ProofObject]():
 
 ```wl
 TFindProof[a == c, hyps]
 ```
+<!-- => a ProofObject summary box, logic EquationalLogic -->
 
 The `"SMT"` method gives an [Association]() instead of a [ProofObject]() because its evidence is a contradiction found by congruence closure, not a chain of rewrites.
 
@@ -172,13 +183,13 @@ fof(g, conjecture, f(a) = f(b)).", Method -> "SMT"]
 ```
 <!-- => <|"Status" -> "Proved", "Method" -> "CongruenceClosure", "Goal" -> f[a] == f[b], "Hypotheses" -> {a == b}, "Witness" -> f[a] != f[b]|> -->
 
-A problem with variables is not ground, and the `"SMT"` method gives `$Failed` for it:
+A problem with variables is not ground, and the `"SMT"` method refuses it with a message:
 
 ```wl
 TFindProof["cnf(a1, axiom, and(X, Y) = and(Y, X)).
 cnf(g, negated_conjecture, and(a, b) != and(b, a)).", Method -> "SMT"]
 ```
-<!-- => $Failed -->
+<!-- => the message TFindProof::nonground is issued and the result is $Failed -->
 
 Without the method setting, the completion engine proves the same problem:
 
@@ -204,4 +215,4 @@ cnf(g, negated_conjecture, and(a, b) != and(b, a)).", "Status"]
 
 ## Scope
 
-Congruence closure and DPLL(T) decide the quantifier-free theory of equality with uninterpreted functions, and Boolean combinations over it, completely: every input gets a SAT or an UNSAT verdict. Quantified formulas are outside that theory; for equations with variables, [TFindProof]() uses its completion engine, described in [Theorem Proving with THVMLink](paclet:WolframInstitute/THVMLink/tutorial/ATP). Other theories, such as linear arithmetic, arrays and bit vectors, are not decided. DPLL(T) checks one truth assignment at a time, so a formula whose Boolean structure admits very many assignments can take correspondingly long. Refuting models are the subject of [Disproving Conjectures with Countermodels](paclet:WolframInstitute/THVMLink/tutorial/Disproof).
+Congruence closure and DPLL(T) decide the quantifier-free theory of equality with uninterpreted functions, and Boolean combinations over it, completely: every input gets a SAT or an UNSAT verdict. Quantified formulas are outside that theory, and [TSmtDecide]() refuses them with a message; for equations with variables, [TFindProof]() uses its completion engine, described in [Theorem Proving with THVMLink](paclet:WolframInstitute/THVMLink/tutorial/ATP). Other theories, such as linear arithmetic, arrays and bit vectors, are not decided, and [TSmtDecide]() refuses a formula with arithmetic. DPLL(T) checks one truth assignment at a time, so a formula whose Boolean structure admits very many assignments can take correspondingly long. Refuting models are the subject of [Disproving Conjectures with Countermodels](paclet:WolframInstitute/THVMLink/tutorial/Disproof).

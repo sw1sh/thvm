@@ -188,3 +188,11 @@ Normal[TRealize[TUOpMul[n, TUOpConst[2.5]]]]
 ```
 
 <!-- => {2, 5, 7} -->
+
+The product written with `*` gives reals instead, as in tinygrad:
+
+```wl
+Normal[TRealize[n*2.5]]
+```
+
+<!-- => {2.5, 5., 7.5} -->

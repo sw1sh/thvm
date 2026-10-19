@@ -31,8 +31,8 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)", "[Importi
 | `"Inferences"` | the steps of the proof, one Association for each |
 | `"RawSZS"` | the output of Vampire, in the SZS (Sutcliffe-Zimmer-Schulz) format |
 
-- Each inference has the keys `"Name"`, `"Role"`, `"Formula"`, `"Rule"` and `"Parents"`. Steps that only reorient an equation are left out.
-- A problem that is not a theorem gives the status `"Failed"`, with no inferences.
+- Each inference has the keys `"Head"`, `"Name"`, `"Role"`, `"Formula"`, `"Rule"`, `"Status"`, `"RawSource"` and `"Parents"`. Steps that only reorient an equation are left out.
+- A problem that is not a theorem gives the status `"Failed"`, with no inferences. Vampire runs with the time limit [TimeConstraint]() and reports `"TimedOut"` when it reaches it; a Vampire that has not ended 2 seconds after the limit is stopped.
 - [TVampireProofObject]() converts the result into the proof form of [TFindProof](), and <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "VampireProcess"]</code> runs Vampire from [TFindProof]().
 - The following options can be given:
 
@@ -58,7 +58,7 @@ Run Vampire on it:
 TVampireProof[file, TimeConstraint -> 5]
 ```
 
-<!-- => <|"Status" -> "Proved", "Strategy" -> "lrs+10_1_random_seed=1198963420:st=3:sd=2:ss=axioms:sgt=8_1" (the seed varies), "Seconds" -> 0.06, "ProofLength" -> 3, "Inferences" -> {<|"Head" -> "fof", "Name" -> "f1", "Role" -> "axiom", ...|>, ...}, "RawSZS" -> "% Running in auto input_syntax mode. Trying TPTP\n..."|> -->
+<!-- => <|"Status" -> "Proved", "Strategy" -> a strategy such as "lrs+10_1_random_seed=1198963420:st=3:sd=2:ss=axioms:sgt=8_1" (the seed varies), "Seconds" -> a time, "ProofLength" -> 3, "Inferences" -> {<|"Head" -> "fof", "Name" -> "f1", "Role" -> "axiom", ...|>, ...}, "RawSZS" -> "% Running in auto input_syntax mode. Trying TPTP\n..."|> -->
 
 ## Scope
 
@@ -142,7 +142,7 @@ TVampireProof[file, TimeConstraint -> 5, "Mode" -> "vampire"]["Strategy"]
 TVampireProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 5, "Binary" -> "/nonexistent/vampire"]
 ```
 
-<!-- => <|"Status" -> "Failed", "Strategy" -> Missing["NoProof"], "Seconds" -> 0.01, "ProofLength" -> 0, "Inferences" -> {}, "RawSZS" -> "/bin/sh: /nonexistent/vampire: No such file or directory\n"|> -->
+<!-- => <|"Status" -> "Failed", "Strategy" -> Missing["NoProof"], "Seconds" -> a time, "ProofLength" -> 0, "Inferences" -> {}, "RawSZS" -> "sh: /nonexistent/vampire: No such file or directory\nsh: line 0: exec: /nonexistent/vampire: cannot execute: No such file or directory\n"|> -->
 
 ## Properties and Relations
 
@@ -152,7 +152,7 @@ TVampireProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 5, "Bi
 TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "LiftToProofObject" -> False]
 ```
 
-<!-- => <|"Backend" -> "SZS", "Status" -> "Proved", "Goal" -> "(\n  sk_c1 != and(sk_c1,or(sk_c2,not(sk_c2))))", "Axioms" -> {"(\n  ( ! [X0,X1] : (and(X0,or(X1,not(X1))) = X0) ))"}, "ProofDataset" -> <|{"Axiom", 1} -> ..., {"Hypothesis", 1} -> ..., {"Conclusion", 1} -> ...|>, "ProofLength" -> 2, "RuleHistogram" -> <|"forward_subsumption_resolution" -> 1|>|> -->
+<!-- => <|"Backend" -> "SZS", "Status" -> "Proved", "Goal" -> "skc1"[] != "and"["skc1"[], "or"["skc2"[], "not"["skc2"[]]]], "Axioms" -> {"(\n  ( ! [X0,X1] : (and(X0,or(X1,not(X1))) = X0) ))"}, "ProofDataset" -> <|{"Axiom", 1} -> ..., {"Hypothesis", 1} -> ..., {"Conclusion", 1} -> ...|>, "ProofLength" -> 2, "RuleHistogram" -> <|"forward_subsumption_resolution" -> 1|>|> -->
 
 ---
 

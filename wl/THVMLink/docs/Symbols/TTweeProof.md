@@ -24,7 +24,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 
 | | |
 | --- | --- |
-| `"Status"` | `"Proved"` or `"Failed"` |
+| `"Status"` | `"Proved"`, `"Failed"` or `"TimedOut"` |
 | `"Strategy"` | `"twee"` |
 | `"Seconds"` | the time Twee took |
 | `"ProofLength"` | the number of axioms, lemmas and goals of the proof |
@@ -33,7 +33,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 | `"RawProof"` | the proof as Twee writes it |
 
 - Twee writes its proof as a chain of equations, with no record of the inference rules, so [TTweeProof]() gives the axioms and lemmas of the proof but no inference steps.
-- A problem that is not a theorem, or that Twee does not prove within the time limit, gives the status `"Failed"`.
+- A problem that is not a theorem gives the status `"Failed"`. Twee is stopped at the time limit [TimeConstraint](), and the status is then `"TimedOut"`.
 - [TTweeProofObject]() converts the result into the proof form of [TFindProof](), and <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "TweeProcess"]</code> runs Twee from [TFindProof]().
 - The following options can be given:
 
@@ -58,7 +58,7 @@ Run Twee on it:
 TTweeProof[file, TimeConstraint -> 5]
 ```
 
-<!-- => <|"Status" -> "Proved", "Strategy" -> "twee", "Seconds" -> 0.07, "ProofLength" -> 2, "Axioms" -> {<|"Name" -> "axiom1", "Statement" -> "f(f(X)) = X."|>}, "Lemmas" -> {}, "RawProof" -> "Axiom 1 (involution): f(f(X)) = X.\n\nGoal 1 (goal): f(f(f(a))) = f(a).\nProof:\n  f(f(f(a)))\n= { by axiom 1 (involution) }\n  f(a)\n%"|> -->
+<!-- => <|"Status" -> "Proved", "Strategy" -> "twee", "Seconds" -> a time, "ProofLength" -> 2, "Axioms" -> {<|"Name" -> "axiom1", "Statement" -> "f(f(X)) = X."|>}, "Lemmas" -> {}, "RawProof" -> "Axiom 1 (involution): f(f(X)) = X.\n\nGoal 1 (goal): f(f(f(a))) = f(a).\nProof:\n  f(f(f(a)))\n= { by axiom 1 (involution) }\n  f(a)\n%"|> -->
 
 ## Scope
 
@@ -94,13 +94,13 @@ TTweeProof["GroupAxioms", "LeftIdentity", TimeConstraint -> 5]["Axioms"][[All, "
 
 ### TimeConstraint
 
-A time limit of one second is too short for Twee to settle the Robbins problem:
+A time limit of one second is too short for Twee to settle the Robbins problem, so Twee is stopped after about one second:
 
 ```wl
 TTweeProof["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]
 ```
 
-<!-- => <|"Status" -> "Failed", "Strategy" -> "twee", "Seconds" -> 3.06, "ProofLength" -> 0, "Axioms" -> {}, "Lemmas" -> {}, "RawProof" -> ""|> -->
+<!-- => <|"Status" -> "TimedOut", "Strategy" -> "twee", "Seconds" -> a time of about 1, "ProofLength" -> 0, "Axioms" -> {}, "Lemmas" -> {}, "RawProof" -> ""|> -->
 
 ### Binary
 
@@ -110,7 +110,7 @@ TTweeProof["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]
 TTweeProof["GroupAxioms", "LeftIdentity", TimeConstraint -> 5, "Binary" -> "/nonexistent/twee"]
 ```
 
-<!-- => <|"Status" -> "Failed", "Strategy" -> "twee", "Seconds" -> 0.01, "ProofLength" -> 0, "Axioms" -> {}, "Lemmas" -> {}, "RawProof" -> ""|> -->
+<!-- => <|"Status" -> "Failed", "Strategy" -> "twee", "Seconds" -> a time, "ProofLength" -> 0, "Axioms" -> {}, "Lemmas" -> {}, "RawProof" -> ""|> -->
 
 ## Properties and Relations
 
@@ -120,7 +120,7 @@ TTweeProof["GroupAxioms", "LeftIdentity", TimeConstraint -> 5, "Binary" -> "/non
 TTweeProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5]
 ```
 
-<!-- => <|"Backend" -> "Twee-TSTP", "Status" -> "Proved", "Goal" -> Missing["NotEmittedByTwee"], ..., "ProofLength" -> 6, "RuleHistogram" -> <|"twee-rewrite" -> 2|>|> -->
+<!-- => <|"Backend" -> "Twee-TSTP", "Status" -> "Proved", "Goal" -> Missing["NotEmittedByTwee"], "Axioms" -> {"and(X, op_overtilde(k1)) = X.", "and(X, not(X)) = op_overtilde(k1).", "and(X, and(Y, Z)) = and(and(X, Y), Z)."}, "ProofDataset" -> <|...|>, "ProofLength" -> 6, "RuleHistogram" -> <|"twee-rewrite" -> 2|>|> -->
 
 ---
 

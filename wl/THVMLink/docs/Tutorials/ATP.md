@@ -116,7 +116,7 @@ TFindProof[ForAll[a, inv[inv[a]] == a], groupAxioms, "AppliedMethod", TimeConstr
 ```
 <!-- => {"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True, "SelectionRatio" -> 51, "RHSInterreduce" -> True, "UnfailingCP" -> True, "CPSetInterreduce" -> True} -->
 
-A list of specs gives an [Association](). `"Statistics"` counts the completion steps, the rules and the critical pairs left in the queue:
+A list of specs gives an [Association](). `"Statistics"` gives the number of rewrite steps in the chain that closes the goal, and the numbers of rules, entries of the inference trace and critical pairs left in the queue:
 
 ```wl
 TFindProof[ForAll[a, inv[inv[a]] == a], groupAxioms, {"Status", "Statistics"}, TimeConstraint -> 10]
@@ -129,7 +129,7 @@ The possible specs are:
 | --- | --- |
 | `"ProofObject"` | the [ProofObject]() (default) |
 | `"Status"` | `"Proved"`, `"Saturated"`, `"TimedOut"` or `"Failed"` |
-| `"Statistics"` | the status with counts of steps, rules and trace entries |
+| `"Statistics"` | the status, the rewrite steps that close the goal, and the numbers of rules, trace entries and queued critical pairs |
 | `"Lemmas"` | the rewrite rules derived by the completion |
 | `"Path"` | the rewrite path between the two sides of the conjecture |
 | `"Counterexample"` | a [CounterexampleObject]() refuting the conjecture, or `$Failed` |
@@ -170,14 +170,14 @@ TAtpSchedule[Automatic, ForAll[a, inv[inv[a]] == a], groupAxioms]
 ```wl
 TAtpDescribeMethod["Twee"]
 ```
-<!-- => <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "UnfailingCP" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20|> -->
+<!-- => <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "UnfailingCP" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "GoalDirected" -> False|> -->
 
 A list with a name and suboptions changes or adds to the settings of the named configuration:
 
 ```wl
 TAtpDescribeMethod[{"Twee", "Ordering" -> "LPO"}]
 ```
-<!-- => <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "UnfailingCP" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "Ordering" -> "LPO"|> -->
+<!-- => <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "UnfailingCP" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "GoalDirected" -> False, "Ordering" -> "LPO"|> -->
 
 A single configuration with explicit suboptions, here the Knuth-Bendix ordering (KBO) with the `"Mix"` ranking of critical pairs, proves commutativity in an abelian group:
 

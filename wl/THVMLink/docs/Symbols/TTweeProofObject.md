@@ -17,9 +17,10 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 ## Details & Options
 
 - [TTweeProofObject]() runs [TTweeProof]() on the problem file of the theorem and collects its axioms and lemmas.
-- The result has the keys `"Backend"` (`"Twee-TSTP"`), `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`.
+- The result has the keys `"Backend"` (`"Twee-TSTP"`), `"Status"`, `"Goal"`, `"Axioms"` (the statement of every axiom the proof uses), `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`.
 - `"ProofDataset"` keys the steps `{"Axiom", n}` and `{"Lemma", n}`, with each statement as Twee writes it. Twee records no inference rules and does not repeat the goal, so the steps carry no derivations and `"Goal"` is [Missing]().
-- When Twee finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>.
+- When Twee finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>, whose `"Status"` is `"Failed"`, or `"TimedOut"` when Twee was stopped at the time limit.
+- A theorem with no problem file issues the message `TTweeProof::badfile` and gives `$Failed`.
 - <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "TweeProcess"]</code> gives the same result.
 - The following options can be given:
 
@@ -36,7 +37,7 @@ The steps of a Twee proof of a group theorem:
 TTweeProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5]
 ```
 
-<!-- => <|"Backend" -> "Twee-TSTP", "Status" -> "Proved", "Goal" -> Missing["NotEmittedByTwee"], "Axioms" -> ..., "ProofDataset" -> <|{"Axiom", 1} -> ..., {"Axiom", 2} -> ..., {"Axiom", 3} -> ..., {"Lemma", 1} -> ..., {"Lemma", 2} -> ...|>, "ProofLength" -> 6, "RuleHistogram" -> <|"twee-rewrite" -> 2|>|> -->
+<!-- => <|"Backend" -> "Twee-TSTP", "Status" -> "Proved", "Goal" -> Missing["NotEmittedByTwee"], "Axioms" -> {"and(X, op_overtilde(k1)) = X.", "and(X, not(X)) = op_overtilde(k1).", "and(X, and(Y, Z)) = and(and(X, Y), Z)."}, "ProofDataset" -> <|{"Axiom", 1} -> ..., {"Axiom", 2} -> ..., {"Axiom", 3} -> ..., {"Lemma", 1} -> ..., {"Lemma", 2} -> ...|>, "ProofLength" -> 6, "RuleHistogram" -> <|"twee-rewrite" -> 2|>|> -->
 
 ## Scope
 
@@ -58,7 +59,7 @@ A time limit too short for Twee gives a [Failure]():
 TTweeProofObject["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]
 ```
 
-<!-- => Failure["ExternalNoProof", <|"Tool" -> "Twee", "Status" -> "Failed", "Seconds" -> 3.03|>] -->
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Twee", "Status" -> "TimedOut", "Seconds" -> a time of about 1|>] -->
 
 ### Binary
 
@@ -68,7 +69,7 @@ A path with no program gives a [Failure]():
 TTweeProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5, "Binary" -> "/nonexistent/twee"]
 ```
 
-<!-- => Failure["ExternalNoProof", <|"Tool" -> "Twee", "Status" -> "Failed", "Seconds" -> 0.01|>] -->
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Twee", "Status" -> "Failed", "Seconds" -> a time|>] -->
 
 ## Properties and Relations
 
@@ -89,3 +90,13 @@ TVampireProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5, "LiftToP
 ```
 
 <!-- => <|"forward_demodulation" -> 1, "superposition" -> 6, "trivial_inequality_removal" -> 1|> -->
+
+## Possible Issues
+
+A theorem with no problem file issues a message and gives `$Failed`:
+
+```wl
+TTweeProofObject["GroupAxioms", "NoSuchTheorem", TimeConstraint -> 5]
+```
+
+<!-- => the message TTweeProof::badfile is issued and the result is $Failed -->

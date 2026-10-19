@@ -13,13 +13,13 @@ RelatedGuides: [THVMLink]
 
 <code>[TCtr]()[*label*, $c_1$, $c_2$, …]</code> builds a constructor term with the integer *label* and the children $c_i$.
 
-<!-- #| annotation: 26.10.19: TCtr wraps thvm_wl_term_new_ctr, which lays the constructor out in the dynamic heap as its child count (a NUM) followed by the children, with the label in the term's ext field. The arity cap of 16 matches HVM4's CTR limit; a constructor with 17 children currently comes back as TTerm[LibraryFunctionError[...]] with no message. TCtr passes its children through ttermRaw without numCoerce, so a bare Integer child is spliced in as a raw heap word (an APP pointing at that location), and TNf on such a term can crash the kernel; the examples always write TNum[n]. -->
+<!-- #| annotation: 26.10.19: TCtr wraps thvm_wl_term_new_ctr, which lays the constructor out in the dynamic heap as its child count (a NUM) followed by the children, with the label in the term's ext field. The arity cap of 16 is REWRITE_MAX_ARITY of src/thvm.h, which matches HVM4's CTR limit. -->
 
 ## Details & Options
 
 - A constructor is a tagged record: *label* names the constructor and the children are its fields. The result is a [TTerm]() with tag `CTR` whose extension field is *label*.
-- A constructor has at most 16 children, and it may have none.
-- The children are terms. A number child is written <code>[TNum]()[*n*]</code>.
+- A constructor has at most 16 children, and it may have none. More children issue the message `TCtr::arity`, and the input returns unevaluated.
+- The children are terms. A bare [Integer]() child is read as <code>[TNum]()[*n*]</code>.
 - A constructor is already in weak head normal form, so <code>[TWnf]()</code> leaves it unchanged.
 - <code>[TMatCtr]()</code> and <code>[TMatChain]()</code> select a handler by the label of a constructor and apply it to the children in order.
 - Duplicating a constructor copies it together with its children, and a superposition among the children is lifted to the top by <code>[TCnf]()</code> and <code>[TCollapse]()</code>.
@@ -49,6 +49,15 @@ A constructor may have no children:
 Term[TCtr[0]]
 ```
 <!-- => Term["CTR", 0] -->
+
+---
+
+Bare integer children are read as numbers:
+
+```wl
+Term[TCtr[1, 5, 6]]
+```
+<!-- => Term["CTR", 1, Term["NUM", 5], Term["NUM", 6]] -->
 
 ---
 
@@ -137,3 +146,12 @@ A constructor whose label has no matcher goes to the fallback, here the constant
 TTermVal[TWnf[TApp[TMatCtr[1, TLam[a, TLam[b, a + b]], TLam[k, TNum[0]]], TCtr[2, TNum[10], TNum[20]]]]]
 ```
 <!-- => 0 -->
+
+---
+
+A constructor takes at most 16 children:
+
+```wl
+TCtr[1, Sequence @@ Range[17]]
+```
+<!-- => the message TCtr::arity is issued and TCtr[1, 1, 2, ..., 17] returns unevaluated -->

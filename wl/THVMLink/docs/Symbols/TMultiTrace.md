@@ -21,13 +21,13 @@ RelatedGuides: [THVMLink]
 
 <code>[TMultiTrace]()[*expr*, *keys*, *max*]</code> gives records with the keys *keys* for at most *max* steps.
 
-<!-- #| annotation: 26.10.19: The "Diagram" key and the "DiagramSeeds" option are not demonstrated: in this build THeapDiagram resolves Diagram and DiagramNetwork to WolframInstitute`THVMLink`Private` shadows (DiagrammaticComputation 1.0.8 keeps them in its Diagram` subcontext), so the per-step diagrams come back as inert expressions. Each record also carries private _evBefore/_frontier/_anchors/_parent keys during the walk, stripped before return. -->
+<!-- #| annotation: 26.10.19: Each record carries private _evBefore/_frontier/_anchors/_parent keys during the walk, stripped before return. -->
 
 ## Details & Options
 
 - [TMultiTrace]() holds *expr* unevaluated and evaluates it with recording on. Step 0 holds the events that fired while *expr* evaluated, and each later step holds the one interaction a [TStep]() fired.
 - The walk follows the order of [TCollapse](): it steps the head until it is a value, then enters the first branch of a superposition and comes back to the second branch afterwards. The walk ends when every branch is a value.
-- By default each record has the keys `"CanonicalSlice"` and `"Events"`. *keys* can also be [All]().
+- By default each record has the keys `"CanonicalSlice"` and `"Events"`. *keys* can also be [All](). A key that is not one of those below issues the message `TMultiTrace::key`, and the input returns unevaluated.
 - The keys of a record:
 
 | | |
@@ -203,6 +203,28 @@ Map[#["rule"] &, TMultiTrace[TCollapse[TSup[1, 2] + 3], "Events"], {2}]
 
 <!-- => {{"OP2_SUP", "DUP_NUM", "OP2_NUM_NUM", "OP2_NUM_NUM"}} -->
 
+---
+
+A string diagram of the heap at each step, drawn by [THeapDiagram]():
+
+```wl
+TMultiTrace[TNum[3] + TNum[4], "Diagram"]
+```
+
+<!-- => a list of two string diagrams: the numbers 3 and 4 wired into an OP2 + box, then the number 7 alone -->
+
+## Options
+
+### DiagramSeeds
+
+A seed term is drawn in the diagram of every step, here a superposition beside the sum:
+
+```wl
+TMultiTrace[TNum[3] + TNum[4], "Diagram", "DiagramSeeds" -> {TSup[5, 6]}]
+```
+
+<!-- => a list of two string diagrams, each with the numbers 5 and 6 wired into a SUP box: the first with the numbers 3 and 4 wired into an OP2 + box beside it, the second with the number 7 -->
+
 ## Properties and Relations
 
 Start from an empty heap:
@@ -246,3 +268,13 @@ TMultiwayGraph[TMultiTrace[TSup[1, 2] + 3, {"Events", "CanonicalSlice", "SliceBo
 ```
 
 <!-- => a Graph from the vertex <1, 2> + 3 down two branches, OP2_SUP then DUP_NUM then OP2_NUM_NUM, ending at the vertices 4 and 5 -->
+
+## Possible Issues
+
+A key that is not a key of a record is refused:
+
+```wl
+TMultiTrace[TNum[3] + TNum[4], "Foo"]
+```
+
+<!-- => the message TMultiTrace::key is issued and the expression returns unevaluated -->

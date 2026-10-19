@@ -12,16 +12,17 @@ RelatedTutorials: ["[Congruence Closure and Lazy DPLL(T)](SMT)"]
 
 ## Usage
 
-<code>[TSmtDecide]()[*formula*]</code> decides whether the Boolean combination *formula* of equations between terms is satisfiable.
+<code>[TSmtDecide]()[*formula*]</code> decides whether the Boolean combination *formula* of equations and predicates over terms is satisfiable.
 
 ## Details & Options
 
-- *formula* combines equations `lhs == rhs` and disequations `lhs != rhs` between terms with [And](), [Or](), [Not](), [Implies](), [Equivalent]() and [Xor](). The functions in the terms are uninterpreted, as in [TSatEUF]().
-- For a satisfiable formula, [TSmtDecide]() gives `<|"Status" -> "SAT", "Model" -> model|>`, where *model* gives the truth value of each equation.
+- *formula* combines equations `lhs == rhs`, disequations `lhs != rhs` and predicate atoms such as `p[a]` with [And](), [Or](), [Not](), [Implies](), [Equivalent]() and [Xor](). The functions and predicates are uninterpreted, as in [TSatEUF](): equal arguments give equal values and equal truth values.
+- For a satisfiable formula, [TSmtDecide]() gives `<|"Status" -> "SAT", "Model" -> model|>`, where *model* gives the truth value of each equation and predicate atom.
 - For an unsatisfiable formula, it gives `<|"Status" -> "UNSAT"|>`.
 - [TSmtDecide]() replaces each equation by a Boolean variable, finds a truth assignment with [SatisfiabilityInstances](), and checks it against the theory of equality with [TSatEUF](). An assignment that contradicts the theory is excluded, and the search continues.
 - [TSmtDecide]() always terminates and is correct for both answers. A formula with *n* equations can need up to $2^n$ truth assignments.
 - A formula is valid when its negation is unsatisfiable.
+- [TSmtDecide]() decides formulas without quantifiers and without arithmetic. A formula with [ForAll]() or [Exists]() issues the message `TSmtDecide::quant`, and one with an inequality, an approximate number, [Plus](), [Times]() or [Power]() issues `TSmtDecide::theory`; both give `$Failed`.
 
 ## Basic Examples
 
@@ -62,6 +63,26 @@ TSmtDecide[a == b && f[a] != f[b]]
 ```
 
 <!-- => <|"Status" -> "UNSAT"|> -->
+
+---
+
+Equal arguments give equal truth values of a predicate:
+
+```wl
+TSmtDecide[a == b && p[a] && ! p[b]]
+```
+
+<!-- => <|"Status" -> "UNSAT"|> -->
+
+---
+
+The model gives the truth value of each predicate atom:
+
+```wl
+TSmtDecide[a == b && p[a] && ! p[c]]
+```
+
+<!-- => <|"Status" -> "SAT", "Model" -> <|a == b -> True, p[a] -> True, p[c] -> False|>|> -->
 
 ---
 
@@ -115,13 +136,23 @@ TSatEUF[{a == b}, {f[a] != f[b]}]
 
 ## Possible Issues
 
-Quantifiers are not interpreted, so a quantified equation is treated as a single Boolean variable:
+A quantified formula is refused:
 
 ```wl
 TSmtDecide[ForAll[x, f[x] == x]]
 ```
 
-<!-- => <|"Status" -> "SAT", "Model" -> <|f[x] == x -> True|>|> -->
+<!-- => the message TSmtDecide::quant is issued and the result is $Failed -->
+
+---
+
+Arithmetic is refused:
+
+```wl
+TSmtDecide[x > 1]
+```
+
+<!-- => the message TSmtDecide::theory is issued and the result is $Failed -->
 
 ---
 

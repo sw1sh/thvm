@@ -31,12 +31,13 @@ RelatedTutorials: ["[The Waldmeister Method in THVMLink](Waldmeister)", "[Method
 | `"RawProtocol"` | the output of Waldmeister |
 
 - Each inference has the keys `"Name"`, `"Role"`, `"Formula"`, `"Rule"` and `"Parents"`. The rule is `"orient"` for an equation turned into a rule, `"superposition"` for a critical pair, `"forward_demodulation"` for a rewrite, and `"file"` for an axiom or the goal.
-- Waldmeister runs without a time limit, so a problem that is not a theorem can run without end.
+- Waldmeister is stopped at the time limit [TimeConstraint](), and the status is then `"TimedOut"`.
 - [TWaldmeisterProofObject]() converts the result into the proof form of [TFindProof]().
 - The following options can be given:
 
 | | | |
 | --- | --- | --- |
+| [TimeConstraint]() | `30` | time limit in seconds |
 | `"Binary"` | [Automatic]() | path of the `wmcli` program |
 | `"WMCLI"` | [Automatic]() | path of the `wmcli` program, used instead of `"Binary"` when given |
 | `"MathlinkPath"` | [Automatic]() | directory of the MathLink framework the program loads |
@@ -57,7 +58,7 @@ Run Waldmeister on it:
 TWaldmeisterProof[file]
 ```
 
-<!-- => <|"Status" -> "Proved", "Strategy" -> "waldmeister-auto", "Seconds" -> 0.02, "ProofLength" -> 5, "Inferences" -> {<|"Head" -> "wm", "Name" -> "1", "Role" -> "axiom", "Formula" -> "x1 = f(f(x1))", "Rule" -> "file", "Parents" -> {}|>, ...}, "RawProtocol" -> "****...\n*  W A L D M E I S T E R ...\n..."|> -->
+<!-- => <|"Status" -> "Proved", "Strategy" -> "waldmeister-auto", "Seconds" -> a time, "ProofLength" -> 5, "Inferences" -> {<|"Head" -> "wm", "Name" -> "1", "Role" -> "axiom", "Formula" -> "x1 = f(f(x1))", "Rule" -> "file", "Parents" -> {}|>, ...}, "RawProtocol" -> "****...\n*  W A L D M E I S T E R ...\n..."|> -->
 
 ## Scope
 
@@ -89,6 +90,16 @@ TWaldmeisterProof[FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", "Abe
 
 ## Options
 
+### TimeConstraint
+
+A time limit of one second is too short for Waldmeister to settle the Robbins problem, so Waldmeister is stopped:
+
+```wl
+TWaldmeisterProof[FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", "RobbinsAxioms__DoubleNegation.pr"}], TimeConstraint -> 1]["Status"]
+```
+
+<!-- => "TimedOut" -->
+
 ### Binary
 
 Write the problem to a file:
@@ -105,7 +116,7 @@ file = Export[FileNameJoin[{$TemporaryDirectory, "involution.pr"}], "NAME involu
 TWaldmeisterProof[file, "Binary" -> "/nonexistent/wmcli"]
 ```
 
-<!-- => <|"Status" -> "Failed", "Strategy" -> "waldmeister-auto", "Seconds" -> 0.01, "ProofLength" -> 0, "Inferences" -> {}, "RawProtocol" -> "/bin/sh: /nonexistent/wmcli: No such file or directory\n"|> -->
+<!-- => <|"Status" -> "Failed", "Strategy" -> "waldmeister-auto", "Seconds" -> a time, "ProofLength" -> 0, "Inferences" -> {}, "RawProtocol" -> "env: /nonexistent/wmcli: No such file or directory\n"|> -->
 
 ### WMCLI
 

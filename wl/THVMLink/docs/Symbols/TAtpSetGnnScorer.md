@@ -24,7 +24,7 @@ RelatedTutorials: ["[Learned Guidance: a GNN for Critical-Pair Selection](GnnGui
 - *model* is a graph convolutional network (GCN), as [TAtpTrainGnn]() gives in its `"Model"` and [TAtpLoadGnnScorer]() reads from a file. Its first layer takes the 12 node features of [TAtpCpGraph]().
 - The prover runs the network itself, with no evaluation in the Wolfram Language during the proof search.
 - <code>[TAtpSetGnnScorer]()[[None]()]</code> is equivalent to <code>[TAtpSetGnnScorer]()[[Clear]()]</code>.
-- A network whose first layer does not take 12 features is rejected with the message `TAtpSetGnnScorer::rejected`.
+- A *model* without the keys `"W1"`, `"Ws"`, `"Bh"`, `"Wout"` and `"Bout"` is refused with the message `TAtpSetGnnScorer::model`, and a network whose first layer does not take 12 features is rejected with the message `TAtpSetGnnScorer::rejected`; both give [False]().
 - [TAtpSetLearnedScorer]() gives the prover a model of critical-pair features instead.
 
 ## Basic Examples
@@ -78,6 +78,16 @@ TFindProofGnnReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTim
 <!-- => "PROVED" -->
 
 ## Possible Issues
+
+A model without the weights of a GCN is refused:
+
+```wl
+TAtpSetGnnScorer[<|"Kind" -> "GNN", "W1" -> {1, 2}|>]
+```
+
+<!-- => the message TAtpSetGnnScorer::model is issued and the result is False -->
+
+---
 
 A network whose first layer takes 6 features instead of 12 is rejected:
 

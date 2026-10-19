@@ -20,7 +20,7 @@ RelatedGuides: [THVMLink]
 - Both sides are reduced before they are compared, and two numbers are compared by value. The result is <code>[TNum]()[1]</code> or <code>[TNum]()[0]</code>.
 - A bare integer on either side is read as a <code>[TNum]()</code> term.
 - A superposition on either side distributes the comparison over its branches, so the result is a superposition of ones and zeros.
-- With the eraser <code>[TEra]()[]</code> on either side the result is the eraser, and with the wildcard term `ANY` the result is 1.
+- With the eraser <code>[TEra]()[]</code> on either side the result is the eraser, and with the wildcard term <code>[TAny]()[]</code> the result is 1.
 - Constructors, lambdas and tensors are not compared in this version: such a comparison stays an unreduced term with tag `EQL`.
 - The canonical form of an unreduced comparison, `Term["EQL", loc, 0]`, does not show its sides.
 - <code>[TTermEq]()</code> compares two terms in the Wolfram Language and gives [True]() or [False]() directly.
@@ -103,6 +103,15 @@ The eraser on either side gives the eraser:
 Term[TWnf[TEql[TEra[], TNum[2]]]]
 ```
 <!-- => Term["ERA"] -->
+
+---
+
+The wildcard term on either side gives 1:
+
+```wl
+TTermVal[TWnf[TEql[TNum[2], TAny[]]]]
+```
+<!-- => 1 -->
 
 ## Properties and Relations
 

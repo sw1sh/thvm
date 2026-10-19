@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TMemoryPlan]()[]</code> gives a snapshot of the kernels, tensors and buffers of the current schedule, with the range of kernel-graph depths over which each buffer is in use.
 
-<!-- #| annotation: 26.10.19: TMemoryPlan reads the KERNELS, TENS and CPU and Metal buffer side tables and derives each kernel's topological depth from the producer_kid and input_tids edges; TenDescs that share a buf_id collapse into one Bufs record whose alias_tids lists them, so views and constants never double-count. "Peak" is the lower bound a perfect slot-reusing allocator would need. The snapshot covers everything scheduled since the last TReset, which is why the examples reset first. formatBytes in the summary box and in TMemoryPlanReport prints small byte counts as "140.B" and "4.00B" (reported 26.10.19). -->
+<!-- #| annotation: 26.10.19: TMemoryPlan reads the KERNELS, TENS and CPU and Metal buffer side tables and derives each kernel's topological depth from the producer_kid and input_tids edges; TenDescs that share a buf_id collapse into one Bufs record whose alias_tids lists them, so views and constants never double-count. "Peak" is the lower bound a perfect slot-reusing allocator would need. The snapshot covers everything scheduled since the last TReset, which is why the examples reset first. -->
 
 ## Details & Options
 
@@ -57,7 +57,7 @@ The memory plan of the schedule:
 plan = TMemoryPlan[]
 ```
 
-<!-- => a TMemoryPlan summary box: kernels 3, bufs 4, live 140.B, backend CPU -->
+<!-- => a TMemoryPlan summary box: kernels 3, bufs 4, live 140B, backend CPU -->
 
 ## Scope
 
@@ -209,7 +209,7 @@ Length[First[TMemoryPlan[]]["Kernels"]] == TKernelCount[] - 1
 TMemoryPlanReport[TMemoryPlan[]]
 ```
 
-<!-- => a Column starting "TMemoryPlan: 3 kernels, 4 bufs, 140.B live", then the status and backend counts, the peak of 136 bytes at depth 0, and the largest and longest-lived buffers -->
+<!-- => a Column starting "TMemoryPlan: 3 kernels, 4 bufs, 140B live", then the status and backend counts, the peak of 136 bytes at depth 0, and the largest and longest-lived buffers -->
 
 ## Possible Issues
 

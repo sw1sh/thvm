@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TSet]()[*dst*, *src*]</code> writes the values of *src* into the buffer of the tensor *dst* in place and gives *dst*.
 
-<!-- #| annotation: 26.10.19: TSet[dst, src] is TRealize[TAssign[dst, src]]; dst: a UOP_ASSIGN redex that, once src reduces to a TEN, memcpys src's buffer into dst's and rewrites to dst, as tinygrad's ASSIGN does. dst keeps its TenDesc id, so every handle on it sees the new values, a TJit recording that reads it replays on them, and an optimizer loop allocates no new tensor per step. A src whose shape differs from dst, or that is not a TTerm (a list, a number), leaves dst unchanged with no message (reported 26.10.19). TAssign has no reference page yet. -->
+<!-- #| annotation: 26.10.19: TSet[dst, src] is TRealize[TAssign[dst, src]]; dst: a UOP_ASSIGN redex that, once src reduces to a TEN, memcpys src's buffer into dst's and rewrites to dst, as tinygrad's ASSIGN does. dst keeps its TenDesc id, so every handle on it sees the new values, a TJit recording that reads it replays on them, and an optimizer loop allocates no new tensor per step. A src with another number of elements, or one that is not a TTerm (a list, a number), is refused with TSet::src; one with the same number of elements in another shape is written in order. TAssign has no reference page yet. -->
 
 ## Details & Options
 
@@ -21,7 +21,7 @@ RelatedGuides: [THVMLink]
 - *dst* keeps its identity: every expression that refers to *dst* sees the new values, including a [TJit]() closure that reads it.
 - *src* may read *dst* itself, so <code>[TSet]()[*w*, *w* - *rate* *g*]</code> is a gradient-descent step in place.
 - On a [TTerm]() *w*, <code>[Evaluate]()[*w*] = *expr*</code> writes into *w* the same way, rather than assigning a new value to the symbol.
-- A *src* of a different shape, or one that is not a [TTerm](), leaves *dst* unchanged.
+- A *src* whose number of elements differs from that of *dst*, or one that is not a [TTerm](), is refused with the message `TSet::src`: the [TSet]() expression returns unevaluated and *dst* is unchanged.
 
 ## Basic Examples
 
@@ -255,18 +255,26 @@ d = TTensorCreate[{1., 2., 3.}]
 
 <!-- => a TTensor summary box: shape 3, dtype f32 -->
 
-A source of a different shape is not written, and no message is issued:
+A source with a different number of elements is refused:
 
 ```wl
-Normal[TSet[d, TTensorCreate[{5., 6.}]]]
+TSet[d, TTensorCreate[{5., 6.}]]
 ```
 
-<!-- => {1., 2., 3.} -->
+<!-- => the message TSet::src is issued and the expression returns unevaluated -->
 
-A plain list is not written either; make it a tensor with [TTensorCreate]() first:
+A plain list is refused too; make it a tensor with [TTensorCreate]() first:
 
 ```wl
-Normal[TSet[d, {5., 6., 7.}]]
+TSet[d, {5., 6., 7.}]
+```
+
+<!-- => the message TSet::src is issued and the expression returns unevaluated -->
+
+The destination keeps its values:
+
+```wl
+Normal[d]
 ```
 
 <!-- => {1., 2., 3.} -->

@@ -18,7 +18,7 @@ RelatedTutorials: ["[Learned Guidance: a GNN for Critical-Pair Selection](GnnGui
 
 - *model* is a graph convolutional network (GCN), as [TAtpTrainGnn]() gives in its `"Model"` and [TAtpLoadGnnScorer]() reads from a file.
 - [TFindProofGnnReranked]() gives *model* to the prover with [TAtpSetGnnScorer](), which then ranks the queued critical pairs every `"RerankPeriod"` selections by running the network itself, with no evaluation in the Wolfram Language during the search. The network is removed when the search ends.
-- The status is `"PROVED"`, `"QUEUE_EMPTY"` (the axioms completed without proving the conjecture), or `"RUNNING"` when the step budget runs out first.
+- The status is `"PROVED"`, `"QUEUE_EMPTY"` (the axioms completed without proving the conjecture) or `"TIMEOUT"` (the step budget ran out).
 - The ranking only changes the order in which the critical pairs are processed, and the prover still selects a pair in order of age from time to time, so every proof the prover can find is still found.
 - [TFindProofReranked]() ranks the queue from the Wolfram Language between chunks of the search instead.
 - The following options can be given:
@@ -81,7 +81,7 @@ A small step budget stops the search before the proof:
 TFindProofGnnReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, <|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, MaxSteps -> 5]
 ```
 
-<!-- => "RUNNING" -->
+<!-- => "TIMEOUT" -->
 
 ### CriticalPairWeight
 

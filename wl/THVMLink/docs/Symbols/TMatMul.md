@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TMatMul]()[*a*, *b*]</code> gives the matrix product of the tensors *a* and *b*.
 
-<!-- #| annotation: 26.10.19: TMatMul lowers tinygrad-style: reshape and expand both operands to a common {m, k, n} shape, an elementwise MUL, then a SUM reduce over axis 1. The CPU dispatcher recognizes that pattern and routes it to cblas_sgemm (DispatchKind "blas-gemm"); a product whose two operands are the same tensor is not matched and compiles as an ordinary loop kernel ("jit"). The inner dimensions are not checked, so a mismatch is broadcast instead of rejected, and a rank-1 operand leaks Part and LibraryFunction messages (reported 26.10.19). The Dot UpValue on TTerm dispatches rank-2 by rank-2 here and handles the vector cases with TMatVec and TDot. -->
+<!-- #| annotation: 26.10.19: TMatMul lowers tinygrad-style: reshape and expand both operands to a common {m, k, n} shape, an elementwise MUL, then a SUM reduce over axis 1. The CPU dispatcher recognizes that pattern and routes it to cblas_sgemm (DispatchKind "blas-gemm"); a product whose two operands are the same tensor is not matched and compiles as an ordinary loop kernel ("jit"). The Dot UpValue on TTerm dispatches rank-2 by rank-2 here and handles the vector cases with TMatVec and TDot. -->
 
 ## Details & Options
 
@@ -23,7 +23,7 @@ RelatedGuides: [THVMLink]
 - Under <code>[TGrad]()</code>, the gradient flows to both factors.
 - On the central processing unit (CPU), the product of two different `"f32"` matrices is computed by the matrix multiplication of the Basic Linear Algebra Subprograms (BLAS), reported as the dispatch kind `"blas-gemm"` of its kernel.
 - Two `"i32"` matrices multiply in integer arithmetic.
-- The inner dimensions are not checked. Both arguments must be matrices, and an argument that is not a [TTerm]() returns unevaluated.
+- Both arguments must be matrices whose inner dimensions agree; otherwise [TMatMul]() issues the message `TMatMul::dims` and returns unevaluated. An argument that is not a [TTerm]() returns unevaluated.
 
 ## Basic Examples
 
@@ -233,13 +233,13 @@ a = TTensorCreate[{{1., 2.}, {3., 4.}}]
 
 <!-- => a TTensor summary box: shape 2 x 2, dtype f32 -->
 
-The inner dimensions of a 2 x 2 and a 1 x 3 matrix do not agree, but no message is issued and the factors are broadcast instead:
+The inner dimensions of a 2 x 2 and a 1 x 3 matrix do not agree, so [TMatMul]() issues a message and returns unevaluated:
 
 ```wl
-Normal[TRealize[TMatMul[a, TTensorCreate[{{1., 2., 3.}}]]]]
+TMatMul[a, TTensorCreate[{{1., 2., 3.}}]]
 ```
 
-<!-- => {{1., 2., 3.}, {3., 6., 9.}} -->
+<!-- => the message TMatMul::dims is issued and the expression returns unevaluated -->
 
 ---
 

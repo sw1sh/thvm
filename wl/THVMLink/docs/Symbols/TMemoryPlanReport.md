@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TMemoryPlanReport]()[*plan*]</code> gives a text summary of the memory plan *plan*.
 
-<!-- #| annotation: 26.10.19: The report is the notebook form of the memory-probe script's text summary. Its peak line is peakConcurrentLive over the Bufs records, the same numbers as the plan's "Peak" entry, and the headroom is total_bytes - peak_bytes, what a slot-reusing allocator could save. Small sizes print as "140.B" and the headroom percentage can carry float noise such as 2.9000000000000004 (reported 26.10.19). -->
+<!-- #| annotation: 26.10.19: The report is the notebook form of the memory-probe script's text summary. Its peak line is peakConcurrentLive over the Bufs records, the same numbers as the plan's "Peak" entry, and the headroom is total_bytes - peak_bytes, what a slot-reusing allocator could save. The headroom percentage can carry float noise such as 2.9000000000000004 (reported 26.10.19). -->
 
 ## Details & Options
 
@@ -54,7 +54,7 @@ The report of the memory plan:
 TMemoryPlanReport[TMemoryPlan[]]
 ```
 
-<!-- => Column: "TMemoryPlan: 3 kernels, 4 bufs, 140.B live" / "by status: <|External -> 1, Live -> 3|>" / "by backend: <|CPU -> 4|>" / "peak concurrent live: 136.B at depth 0 (slot-reuse headroom: 4.00B = 2.9% of total)" / "top-5 by bytes:" buf 1 128 B External, bufs 2, 3, 4 at 4 B Live / "top-5 by alive span:" bufs 2 and 3 with span 2 first -->
+<!-- => Column: "TMemoryPlan: 3 kernels, 4 bufs, 140B live" / "by status: <|External -> 1, Live -> 3|>" / "by backend: <|CPU -> 4|>" / "peak concurrent live: 136B at depth 0 (slot-reuse headroom: 4B = 2.9% of total)" / "top-5 by bytes:" buf 1 128 B External, bufs 2, 3, 4 at 4 B Live / "top-5 by alive span:" bufs 2 and 3 with span 2 first -->
 
 ## Scope
 
@@ -150,7 +150,7 @@ First[TMemoryPlan[]]["Peak"]
 TMemoryPlanGantt[TMemoryPlan[]]
 ```
 
-<!-- => a Legended Graphics titled "TMemoryPlan / CPU - 4 bufs / 3 kernels / 140.B total / depth 2", with a status legend; its buffer bars are currently not drawn (paclet bug reported 26.10.19) -->
+<!-- => a Legended Graphics titled "TMemoryPlan / CPU - 4 bufs / 3 kernels / 140B total / depth 2", with one bar for each of the four buffers and a status legend -->
 
 ## Possible Issues
 

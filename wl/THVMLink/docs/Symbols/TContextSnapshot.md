@@ -15,7 +15,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TContextSnapshot]()[*root*]</code> also records the term *root* as the entry point of the snapshot.
 
-<!-- #| annotation: 26.10.19: TContextToTermTree has no reference page yet, so it is written as code rather than linked. TInitialize of a stripped snapshot without "ZeroFill" -> True issues TInitialize::uninit and then leaks an uncaught Throw[$Failed, TInitialize::uninit] to top level, so that case is described rather than shown. -->
+<!-- #| annotation: 26.10.19: TContextToTermTree has no reference page yet, so it is written as code rather than linked. -->
 
 ## Details & Options
 

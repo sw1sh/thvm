@@ -19,7 +19,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 - *derivation* is the `"Inferences"` list of [TVampireProof](), [TEproverProof]() or [TWaldmeisterProof](): one Association for each inference, with its `"Name"`, `"Role"`, `"Formula"`, `"Rule"` and `"Parents"`.
 - The result has the keys `"Backend"` (`"SZS"`, for the SZS (Sutcliffe-Zimmer-Schulz) proof format), `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`.
 - `"ProofDataset"` keys each step as `{"Axiom", n}`, `{"Hypothesis", n}`, `{"CriticalPairLemma", n}`, `{"SubstitutionLemma", n}` or `{"Conclusion", 1}`, with its `"Statement"` and the steps it is derived from.
-- The step type comes from the inference rule: `"superposition"` and `"resolution"` give a `"CriticalPairLemma"`, a demodulation or rewrite gives a `"SubstitutionLemma"`, and a final contradiction gives the `"Conclusion"`. The Association `$SZSRuleToConstruct` holds this correspondence, and a rule not in it gives a `"SubstitutionLemma"`.
+- The step type comes from the inference rule: `"superposition"` and `"resolution"` give a `"CriticalPairLemma"`, a demodulation or rewrite gives a `"SubstitutionLemma"`, and a final contradiction gives the `"Conclusion"`. The rule names of the E prover map the same way: `"spm"` and `"pm"` give a `"CriticalPairLemma"`, `"rw"` a `"SubstitutionLemma"` and `"cn"` the `"Conclusion"`. The Association `$SZSRuleToConstruct` holds this correspondence, and a rule not in it gives a `"SubstitutionLemma"`.
 - Steps that only reorient or copy an equation are left out.
 - `"RuleHistogram"` counts the inference rules of the derivation.
 - The following option can be given:
@@ -110,7 +110,7 @@ The correspondence between inference rules and step types:
 $SZSRuleToConstruct
 ```
 
-<!-- => <|"file" -> "Axiom", "superposition" -> "CriticalPairLemma", "forward_demodulation" -> "SubstitutionLemma", ..., "paramodulation" -> "CriticalPairLemma"|> -->
+<!-- => <|"file" -> "Axiom", "superposition" -> "CriticalPairLemma", "forward_demodulation" -> "SubstitutionLemma", ..., "paramodulation" -> "CriticalPairLemma", "spm" -> "CriticalPairLemma", "pm" -> "CriticalPairLemma", "rw" -> "SubstitutionLemma", "cn" -> "Conclusion"|> -->
 
 ---
 

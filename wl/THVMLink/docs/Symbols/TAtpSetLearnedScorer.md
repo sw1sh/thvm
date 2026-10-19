@@ -95,14 +95,14 @@ The `"ENIGMA"` configuration ranks critical pairs with the learned model:
 TAtpDescribeMethod["ENIGMA"]
 ```
 
-<!-- => <|"CriticalPairWeight" -> "Learned", "Ordering" -> "KBO", "AutoPrecedence" -> True, "UnfailingCP" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "CoopWeight" -> "Gt", "CoopRatio" -> 2|> -->
+<!-- => <|"CriticalPairWeight" -> "Learned", "Ordering" -> "KBO", "AutoPrecedence" -> True, "UnfailingCP" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "CoopWeight" -> "Gt", "CoopRatio" -> 2, "GoalDirected" -> False|> -->
 
 ## Possible Issues
 
-A model without its weights is rejected, with a message:
+A linear model needs 14 weights and a number `"B"`; a model without them is refused with a message:
 
 ```wl
 TAtpSetLearnedScorer[<|"Kind" -> "Linear", "W" -> {1, 2}|>]
 ```
 
-<!-- => the message LibraryFunction::cfta is issued and the result is False -->
+<!-- => the message TAtpSetLearnedScorer::model is issued and the result is False -->

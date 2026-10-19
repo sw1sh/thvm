@@ -55,6 +55,8 @@ RelatedTutorials: ["[Disproving Conjectures with Countermodels](Disproof)"]
 | `"CongruenceClosureC"` | the same backtracking search with congruence closure in C |
 | `"Z3"` | a search with the Z3 SMT (satisfiability modulo theories) solver |
 
+- Any other setting of [Method]() issues the message `TFindFiniteModels::method` and gives `$Failed`.
+
 ## Basic Examples
 
 The models of a nullary operator over two elements:
@@ -388,6 +390,16 @@ TFindFiniteModels[a + b == b + a]
 ```
 
 <!-- => <|{0} -> <|True -> 0|>, {1} -> <|True -> 1|>|> -->
+
+---
+
+An unknown method issues a message and gives `$Failed`:
+
+```wl
+TFindFiniteModels[f[x] == x, Method -> "Foo"]
+```
+
+<!-- => the message TFindFiniteModels::method is issued and the result is $Failed -->
 
 ## Neat Examples
 

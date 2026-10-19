@@ -18,6 +18,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 
 - For a named configuration such as `"Waldmeister"`, `"Twee"`, `"VampireUEQ"`, `"EProver"`, `"VampireRandom"` or `"ENIGMA"`, [TAtpDescribeMethod]() gives the suboptions of that configuration.
 - For a list <code>{*name*, *opt* -> *val*, …}</code> it gives the suboptions of *name* with the explicit settings added or replacing them.
+- The last key of a named configuration is `"GoalDirected"`, which says whether the configuration adds to completion a search from both sides of the goal. It is [True]() for `"VampireUEQ"` and `"VampireRandom"` and [False]() for the others; an explicit `"GoalDirected"` setting replaces it.
 - For `"Completion"` or `"GoalDirected"` with explicit suboptions, it gives only those suboptions.
 - For a schedule such as [Automatic](), `"Portfolio"` or `"VampirePortfolio"`, it gives `<|"Schedule" -> {…}|>` with the entries of the schedule, as [TAtpSchedule]() does.
 - The suboptions are described in [Methods and Presets for TFindProof](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods).
@@ -30,7 +31,7 @@ The suboptions of the `"Twee"` configuration:
 TAtpDescribeMethod["Twee"]
 ```
 
-<!-- => <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "UnfailingCP" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20|> -->
+<!-- => <|"CriticalPairWeight" -> "Twee", "GroundJoin" -> True, "Connectedness" -> True, "UnfailingCP" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "GoalDirected" -> False|> -->
 
 ## Scope
 
@@ -40,7 +41,7 @@ An explicit setting is added to the suboptions of a configuration:
 TAtpDescribeMethod[{"Twee", "Ordering" -> "LPO"}]
 ```
 
-<!-- => <|"CriticalPairWeight" -> "Twee", ..., "AutoMaxWeight" -> 20, "Ordering" -> "LPO"|> -->
+<!-- => <|"CriticalPairWeight" -> "Twee", ..., "AutoMaxWeight" -> 20, "GoalDirected" -> False, "Ordering" -> "LPO"|> -->
 
 ---
 
@@ -50,7 +51,27 @@ An explicit setting replaces the value a configuration gives:
 TAtpDescribeMethod[{"Twee", "AutoMaxWeight" -> 40}]
 ```
 
-<!-- => <|"CriticalPairWeight" -> "Twee", ..., "AutoMaxWeight" -> 40|> -->
+<!-- => <|"CriticalPairWeight" -> "Twee", ..., "AutoMaxWeight" -> 40, "GoalDirected" -> False|> -->
+
+---
+
+A `"GoalDirected"` setting replaces the configuration's own:
+
+```wl
+TAtpDescribeMethod[{"Twee", "GoalDirected" -> True}]
+```
+
+<!-- => <|"CriticalPairWeight" -> "Twee", ..., "AutoMaxWeight" -> 20, "GoalDirected" -> True|> -->
+
+---
+
+The `"VampireUEQ"` configuration searches from both sides of the goal:
+
+```wl
+TAtpDescribeMethod["VampireUEQ"]
+```
+
+<!-- => <|"Ordering" -> "LPO", "AutoPrecedence" -> True, "SelectionRatio" -> 10, "UnfailingCP" -> True, "AutoMaxWeight" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "GoalDirected" -> True|> -->
 
 ---
 
@@ -70,7 +91,7 @@ The `"ENIGMA"` configuration ranks critical pairs with a learned model:
 TAtpDescribeMethod["ENIGMA"]
 ```
 
-<!-- => <|"CriticalPairWeight" -> "Learned", "Ordering" -> "KBO", "AutoPrecedence" -> True, "UnfailingCP" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "CoopWeight" -> "Gt", "CoopRatio" -> 2|> -->
+<!-- => <|"CriticalPairWeight" -> "Learned", "Ordering" -> "KBO", "AutoPrecedence" -> True, "UnfailingCP" -> True, "RHSInterreduce" -> True, "AutoMaxWeight" -> 20, "CoopWeight" -> "Gt", "CoopRatio" -> 2, "GoalDirected" -> False|> -->
 
 ---
 
@@ -80,7 +101,7 @@ The `"Waldmeister"` configuration sets many suboptions:
 TAtpDescribeMethod["Waldmeister"]
 ```
 
-<!-- => <|"CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True, "SkolemHighest" -> True, "SelectionRatio" -> 51, ...|> -->
+<!-- => <|"CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True, "SkolemHighest" -> True, "SelectionRatio" -> 51, ..., "GoalDirected" -> False|> -->
 
 ---
 

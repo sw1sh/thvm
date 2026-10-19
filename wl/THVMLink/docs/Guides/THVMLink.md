@@ -146,13 +146,14 @@ THVMLink computes with `thvm`, a runtime that evaluates programs by rewriting an
 - `TRelevantAxioms` the axioms a relevance filter keeps for a conjecture
 - `TAtpSchedule` the list of configurations a proving method runs
 - `TAtpDescribeMethod` the settings a proving method resolves to
+- `PortfolioFrontLoad` an option giving the first configurations of a schedule twice their share of the time
 - `TATP` run the saturation engine on axioms and a conjecture
 - `TFindEquationalProof` an earlier name of TFindProof
 
 ### Ground decision procedures
 
 - `TSatEUF` decide equalities and disequalities between terms built from uninterpreted functions
-- `TSmtDecide` decide the satisfiability of a Boolean combination of equalities
+- `TSmtDecide` decide the satisfiability of a Boolean combination of equalities and predicates
 
 ### External provers
 

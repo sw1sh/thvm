@@ -96,7 +96,14 @@ The possible settings of [Method]() are:
 | `"SMT"` | congruence closure, for a problem without variables |
 | `"VampireProcess"`, `"EproverProcess"`, `"TweeProcess"`, `"WaldmeisterProcess"` | the external prover programs |
 
-Since [Automatic]() ends with the `"Portfolio"` schedule, it proves every theorem that `"Portfolio"` proves, given time for both.
+Since [Automatic]() ends with the `"Portfolio"` schedule, it proves every theorem that `"Portfolio"` proves, given time for both. Any other setting issues the message `TFindProof::badmethod`, and [Automatic]() runs instead.
+
+The variable `$AtpMethodPresets` lists the named configurations and schedules:
+
+```wl
+$AtpMethodPresets
+```
+<!-- => {"Waldmeister", "VampireUEQ", "Twee", "EProver", "VampireRandom", "ENIGMA", "Portfolio", "VampirePortfolio", "VampirePortfolioCompact", "AllPresets"} -->
 
 ## Named configurations
 
@@ -105,7 +112,7 @@ Each named configuration sets the suboptions after the defaults of a prover. [TA
 ```wl
 TAtpDescribeMethod["VampireUEQ"]
 ```
-<!-- => <|"Ordering" -> "LPO", "AutoPrecedence" -> True, "SelectionRatio" -> 10, "UnfailingCP" -> True, "AutoMaxWeight" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True|> -->
+<!-- => <|"Ordering" -> "LPO", "AutoPrecedence" -> True, "SelectionRatio" -> 10, "UnfailingCP" -> True, "AutoMaxWeight" -> True, "BackwardSubsume" -> True, "BackwardDemod" -> True, "RHSInterreduce" -> True, "GoalDirected" -> True|> -->
 
 The named configurations are:
 
@@ -123,7 +130,7 @@ A list with the name and suboptions changes or adds suboptions:
 ```wl
 TAtpDescribeMethod[{"EProver", "Ordering" -> "LPO"}]
 ```
-<!-- => <|"CriticalPairWeight" -> "ConjSym", "Ordering" -> "LPO", "AutoPrecedence" -> "Occurrence", "SelectionRatio" -> 10, "AutoMaxWeight" -> 20, "BackwardSubsume" -> True, "RHSInterreduce" -> True, "UnfailingCP" -> True|> -->
+<!-- => <|"CriticalPairWeight" -> "ConjSym", "Ordering" -> "LPO", "AutoPrecedence" -> "Occurrence", "SelectionRatio" -> 10, "AutoMaxWeight" -> 20, "BackwardSubsume" -> True, "RHSInterreduce" -> True, "UnfailingCP" -> True, "GoalDirected" -> False|> -->
 
 The random selection of `"VampireRandom"` is seeded, so its search is reproducible, and the suboption `"RandomSeed"` changes the seed:
 
@@ -189,11 +196,12 @@ Four settings run an external prover program on the problem instead of the compl
 | `"TweeProcess"` | the Twee prover |
 | `"WaldmeisterProcess"` | the Waldmeister prover |
 
-The result is a [ProofObject](), with the steps of the external proof as its lemmas:
+With `"WaldmeisterProcess"`, the result is a [ProofObject](), with the steps of the external proof as its lemmas:
 
 ```wl
 TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "WaldmeisterProcess", TimeConstraint -> 10]
 ```
+<!-- => a ProofObject summary box, logic EquationalLogic -->
 
 With `"LiftToProofObject" -> False`, the result is an [Association]() of the steps as the program states them:
 
@@ -202,7 +210,7 @@ TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "WaldmeisterProce
 ```
 <!-- => <|"Backend" -> "SZS", "Status" -> "Proved", "Goal" -> "not(not(skC1())) = skC1()", "Axioms" -> {"x1 = and(x1,opOvertilde(k1()))", "and(x1,x2) = and(x2,x1)", "and(x1,and(x2,x3)) = and(and(x1,x2),x3)", "and(x1,not(x1)) = opOvertilde(k1())"}, "ProofDataset" -> <|{"Axiom", 1} -> <|"Statement" -> "x1 = and(x1,opOvertilde(k1()))", "Proof" -> <||>|>, …|>, "ProofLength" -> …, "RuleHistogram" -> <|…|>|> -->
 
-`"TweeProcess"` always gives such an [Association](). When a program is not installed, or gives no proof, the result is a [Failure]() with the tag `"ExternalNoProof"`. The setting `"Binary"` gives the location of the program, and with `"ParseFormulas" -> True` the statements of an [Association]() are parsed into Wolfram Language expressions. The builders behind these settings are [TVampireProofObject](), [TEproverProofObject](), [TTweeProofObject]() and [TWaldmeisterProofObject](), and the conversion from the SZS (Sutcliffe-Zimmer-Schulz) output format of the provers is [TSZSDerivationToProofObject]().
+`"VampireProcess"` and `"EproverProcess"` give such an [Association]() unless they are given `"LiftToProofObject" -> True`, and `"TweeProcess"` always gives one. When a program is not installed, or gives no proof, the result is a [Failure]() with the tag `"ExternalNoProof"`. The setting `"Binary"` gives the location of the program, and with `"ParseFormulas" -> True` the statements of an [Association]() are parsed into Wolfram Language expressions. The builders behind these settings are [TVampireProofObject](), [TEproverProofObject](), [TTweeProofObject]() and [TWaldmeisterProofObject](), and the conversion from the SZS (Sutcliffe-Zimmer-Schulz) output format of the provers is [TSZSDerivationToProofObject]().
 
 ## Suboptions
 
@@ -257,7 +265,7 @@ TAtpDescribeMethod["VampirePortfolioCompact"]
 ```
 <!-- => <|"Schedule" -> {"VampireUEQ", "Twee", {"Completion", "CriticalPairWeight" -> "Mix2", "AutoPrecedence" -> True, "AutoMaxWeight" -> 20}}|> -->
 
-A schedule shares the [TimeConstraint]() of [TFindProof]() among its entries: each entry gets the time left divided by the number of entries left. The option `PortfolioFrontLoad -> n` gives each of the first *n* entries twice that share. With the default <code>[TimeConstraint]() -> [Infinity]()</code>, each entry gets 60 seconds. The option [MaxSteps]() bounds the number of critical pairs a configuration processes; its default, [Automatic](), is 200000, and 500000 for the `"Waldmeister"` configuration.
+A schedule shares the [TimeConstraint]() of [TFindProof]() among its entries: each entry gets the time left divided by the number of entries left, except that each of the first *n* entries gets twice that share with the option <code>[PortfolioFrontLoad]() -> *n*</code>, whose default is 1. <code>[PortfolioFrontLoad]() -> 0</code> shares the time equally. With the default <code>[TimeConstraint]() -> [Infinity]()</code>, each entry gets 60 seconds. The option [MaxSteps]() bounds the number of critical pairs a configuration processes; its default, [Automatic](), is 200000, and 500000 for the `"Waldmeister"` configuration.
 
 ## More configurations
 

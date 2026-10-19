@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TReset]()[]</code> rewinds the heap of the current runtime context to empty and restarts its counters.
 
-<!-- #| annotation: 26.10.19: TReset[ctx] and TInit[ctx] are defined in Kernel/THVMLink.wl before Context.wl makes TContext public, so their patterns use a Private`TContext shadow and never match; TReset[TContext[0]] returns unevaluated. The page documents only TReset[] until that is fixed. -->
+<code>[TReset]()[*ctx*]</code> resets the runtime context *ctx* in the same way.
 
 ## Details & Options
 
@@ -23,6 +23,7 @@ RelatedGuides: [THVMLink]
 - The tensors and compiled kernels that belong to terms on the heap are released, and tensor ids restart at 1.
 - Constructors stored in the book heap with [TBookCtr]() survive the reset.
 - Cells are reused, not cleared: a [TTerm]() made before the reset refers to cells that the next terms overwrite.
+- *ctx* is a [TContext]() handle, such as `TContext[0]` for the default context. <code>[TReset]()[*ctx*]</code> resets that context and leaves the current context as it is.
 - [TInit]() initializes the runtime; [TReset]() starts a fresh computation in a runtime that is already initialized.
 
 ## Basic Examples
@@ -44,6 +45,32 @@ THeapPos[]
 <!-- => 0 -->
 
 ## Scope
+
+Build a term on the heap of the default context:
+
+```wl
+TLam[x, x]
+```
+
+<!-- => a TTerm summary box showing tag LAM -->
+
+Reset the default context by its handle:
+
+```wl
+TReset[TContext[0]]
+```
+
+<!-- => 1 -->
+
+The heap is empty again:
+
+```wl
+THeapPos[]
+```
+
+<!-- => 0 -->
+
+---
 
 Start from an empty heap:
 

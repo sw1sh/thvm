@@ -85,7 +85,7 @@ TFindStringProof[{"BA" -> "AB", "BBA" -> "ABB"}, {"BA" -> "AB"}]
 
 ---
 
-The `"Statistics"` spec counts the steps of the proof search:
+The `"Statistics"` spec gives the number of rewrite steps in the chain that closes the goal, here the eight steps of the path, and the numbers of rules, trace entries and queued critical pairs:
 
 ```wl
 TFindStringProof["BBBAAA" -> "AAABBB", {"BA" -> "AB"}, "Statistics"]

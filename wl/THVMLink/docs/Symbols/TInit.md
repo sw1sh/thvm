@@ -13,7 +13,9 @@ RelatedGuides: [THVMLink]
 
 <code>[TInit]()[]</code> initializes the runtime, or initializes it again, and gives [True]().
 
-<!-- #| annotation: 26.10.19: TInit[] sets the WL label counter to 1, marks the current context slot initialized and runs thvm_init (src/thvm.c), which reallocates the heap, splits it into the two GC semi-spaces, clears the kernel, tensor and pin tables and installs the default backend from getenv("DEV"). Every heap-touching function runs ensureInit[] first, so a session never needs an explicit TInit. The TInit[ctx_TContext] overload in THVMLink.wl came back unevaluated in a probe (TInit[TContextNew["cpu"]] gave TInit[TContext[1]]), most likely the private-TContext shadow its neighbouring comment warns about, so the page documents only TInit[]. -->
+<code>[TInit]()[*ctx*]</code> initializes the runtime context *ctx*.
+
+<!-- #| annotation: 26.10.19: TInit[] sets the WL label counter to 1, marks the current context slot initialized and runs thvm_init (src/thvm.c), which reallocates the heap, splits it into the two GC semi-spaces, clears the kernel, tensor and pin tables and installs the default backend from getenv("DEV"). Every heap-touching function runs ensureInit[] first, so a session never needs an explicit TInit. -->
 
 ## Details & Options
 
@@ -21,6 +23,7 @@ RelatedGuides: [THVMLink]
 - Initializing again starts the runtime from scratch: the dynamic heap, the interaction counter of <code>[TItrs]()</code>, the label counter of <code>[TFreshLabel]()</code>, the pin table and the table of compiled kernels all start empty.
 - Terms built before a new initialization refer to cells that no longer exist and are not to be used afterwards.
 - The default device for new tensors is chosen when the runtime initializes, from the `DEV` environment variable, and is the central processing unit (CPU) when the variable is unset.
+- *ctx* is a [TContext]() handle, such as `TContext[0]` for the default context.
 - <code>[TReset]()</code> empties the heap and the counters without initializing the runtime again.
 
 ## Basic Examples
@@ -54,6 +57,15 @@ The heap is empty:
 THeapPos[]
 ```
 <!-- => 0 -->
+
+---
+
+Initialize the default context by its handle:
+
+```wl
+TInit[TContext[0]]
+```
+<!-- => True -->
 
 ---
 

@@ -22,8 +22,9 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 - With `"LiftToProofObject" -> False`, the result is an Association with the keys `"Backend"`, `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`, with the formulas as Vampire writes them.
 - With the default `"LiftToProofObject" -> True`, the formulas are parsed into expressions and the result is a [ProofObject](). Parsing takes a few seconds for each formula.
 - When Vampire finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>.
+- A theorem with no problem file issues the message `TVampireProof::badfile` and gives `$Failed`.
 - The steps of a Vampire proof do not record the positions and orientations of the rewrites, so the `"ProofFunction"` of the [ProofObject]() cannot check them.
-- <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "VampireProcess"]</code> gives the same result.
+- <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "VampireProcess"]</code> gives the Association of `"LiftToProofObject" -> False`, and the [ProofObject]() when it is given `"LiftToProofObject" -> True`.
 - The following options can be given:
 
 | | | |
@@ -111,7 +112,7 @@ A time limit too short for Vampire gives a [Failure]():
 TVampireProofObject["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]
 ```
 
-<!-- => Failure["ExternalNoProof", <|"Tool" -> "Vampire", "Status" -> "TimedOut", "Seconds" -> 0.94, "Strategy" -> Missing["NoProof"]|>] -->
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Vampire", "Status" -> "TimedOut", "Seconds" -> a time, "Strategy" -> Missing["NoProof"]|>] -->
 
 ### Mode
 
@@ -131,7 +132,7 @@ A path with no program gives a [Failure]():
 TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, "Binary" -> "/nonexistent/vampire"]
 ```
 
-<!-- => Failure["ExternalNoProof", <|"Tool" -> "Vampire", "Status" -> "Failed", "Seconds" -> 0.01, "Strategy" -> Missing["NoProof"]|>] -->
+<!-- => Failure["ExternalNoProof", <|"Tool" -> "Vampire", "Status" -> "Failed", "Seconds" -> a time, "Strategy" -> Missing["NoProof"]|>] -->
 
 ## Properties and Relations
 
@@ -142,3 +143,13 @@ TFindProof["DroppingAlwaysTrue", "BooleanAxioms", Method -> "VampireProcess", Ti
 ```
 
 <!-- => True -->
+
+## Possible Issues
+
+A theorem with no problem file issues a message and gives `$Failed`:
+
+```wl
+TVampireProofObject["GroupAxioms", "NoSuchTheorem", TimeConstraint -> 5]
+```
+
+<!-- => the message TVampireProof::badfile is issued and the result is $Failed -->

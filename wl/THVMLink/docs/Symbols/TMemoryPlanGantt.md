@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TMemoryPlanGantt]()[*plan*]</code> draws the lifetimes of the buffers of the memory plan *plan* as a Gantt chart over the depths of the kernel graph.
 
-<!-- #| annotation: 26.10.19: The chart packs each buffer into a row with a linear-scan slot allocator (Preserved buffers keep their slot forever), so overlapping rows show the reuse an allocator could make; the dashed red line marks the peak depth. The bars are not drawn at present: the body of the Graphics is written b |-> Block[...] /@ packed, which parses as b |-> (Block[...] /@ packed), so the Graphics holds a Function instead of the rectangles (reported 26.10.19). The examples' hints record the chart as it renders today. The usage message once called the default bar height "Log"; Options[TMemoryPlanGantt] has "Linear". -->
+<!-- #| annotation: 26.10.19: The chart packs each buffer into a row with a linear-scan slot allocator (Preserved buffers keep their slot forever), so overlapping rows show the reuse an allocator could make; the dashed red line marks the peak depth. The headroom percentage in the title can carry float noise such as 2.9000000000000004 (reported 26.10.19). -->
 
 ## Details & Options
 
@@ -59,7 +59,7 @@ The buffer lifetimes of the schedule:
 TMemoryPlanGantt[TMemoryPlan[]]
 ```
 
-<!-- => a Legended Graphics titled "TMemoryPlan / CPU - 4 bufs / 3 kernels / 140.B total / depth 2" and "peak concurrent: 136.B at depth 0 (slot-reuse headroom 2.9%)", with a legend of the statuses External and Live; the bars themselves are currently not drawn (paclet bug reported 26.10.19) -->
+<!-- => a Legended Graphics titled "TMemoryPlan / CPU - 4 bufs / 3 kernels / 140B total / depth 2" and "peak concurrent: 136B at depth 0 (slot-reuse headroom 2.9%)", with one bar for each of the four buffers, colored by the statuses External and Live of the legend -->
 
 ## Scope
 
@@ -99,7 +99,7 @@ The chart of its seven buffers:
 TMemoryPlanGantt[TMemoryPlan[]]
 ```
 
-<!-- => a Legended Graphics titled "TMemoryPlan / CPU - 7 bufs / 2 kernels / 1.52KiB total / depth 2", with a status legend; the bars are currently not drawn -->
+<!-- => a Legended Graphics titled "TMemoryPlan / CPU - 7 bufs / 2 kernels / 1.52KiB total / depth 2" and "peak concurrent: 1.51KiB at depth 0", with a bar for each of the seven buffers and a status legend -->
 
 ---
 
@@ -221,7 +221,7 @@ Head[TMemoryPlanGantt[TMemoryPlan[]]]
 TMemoryPlanReport[TMemoryPlan[]]
 ```
 
-<!-- => a Column starting "TMemoryPlan: 3 kernels, 4 bufs, 140.B live", with the peak of 136 bytes at depth 0 -->
+<!-- => a Column starting "TMemoryPlan: 3 kernels, 4 bufs, 140B live", with the peak of 136 bytes at depth 0 -->
 
 ## Possible Issues
 

@@ -42,7 +42,7 @@ TFindProof["InverseOfInverse", "AbelianGroupAxioms", "Lemmas", Method -> "Waldme
 ```wl
 TAtpDescribeMethod["Waldmeister"]
 ```
-<!-- => <|"CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True, "SkolemHighest" -> True, "SelectionRatio" -> 51, "RHSInterreduce" -> True, "UnfailingCP" -> True, "CPSetInterreduce" -> False, "DemoteOnLhsSimplify" -> True, "OrphanMurder" -> True, "PopSubsume" -> True, "ESetSubsume" -> True, "QueueSubsume" -> False, "EmissionOrder" -> True, "IntakeOrder" -> True, "MixmostNF" -> True, "Einsstern" -> False, "NoOverlapBelowSkolem" -> False, "Reclassify" -> False, "ReversedCompletion" -> False, "SUEManagement" -> False, "CriticalGoalInterreduce" -> False, "CriticalGoalWeight" -> False, "BackwardGoalArgue" -> False, "TracePack" -> True, "RecordNorm" -> False, "UseImplicitCp" -> False, "CPSide" -> True, "FlatSubsume" -> True, "FormationFifo" -> True, "EsetDistdir" -> True, "ForceCombinatorOrient" -> True|> -->
+<!-- => <|"CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True, "SkolemHighest" -> True, "SelectionRatio" -> 51, "RHSInterreduce" -> True, "UnfailingCP" -> True, "CPSetInterreduce" -> False, "DemoteOnLhsSimplify" -> True, "OrphanMurder" -> True, "PopSubsume" -> True, "ESetSubsume" -> True, "QueueSubsume" -> False, "EmissionOrder" -> True, "IntakeOrder" -> True, "MixmostNF" -> True, "Einsstern" -> False, "NoOverlapBelowSkolem" -> False, "Reclassify" -> False, "ReversedCompletion" -> False, "SUEManagement" -> False, "CriticalGoalInterreduce" -> False, "CriticalGoalWeight" -> False, "BackwardGoalArgue" -> False, "TracePack" -> True, "RecordNorm" -> False, "UseImplicitCp" -> False, "CPSide" -> True, "FlatSubsume" -> True, "FormationFifo" -> True, "EsetDistdir" -> True, "ForceCombinatorOrient" -> True, "GoalDirected" -> False|> -->
 
 The first group of suboptions sets the search strategy, as in other configurations:
 
@@ -90,7 +90,7 @@ The Sheffer stroke is a single operator from which all Boolean operations can be
 TFindProof["Commutativity", "ShefferAxioms", Method -> "Waldmeister", TimeConstraint -> 10]
 ```
 
-The `"Statistics"` spec shows the size of the search: the rules derived, the entries of the inference trace and the critical pairs still waiting in the queue when the proof was found:
+The `"Statistics"` spec shows the size of the search: the rewrite steps in the chain that closes the goal, the rules derived, the entries of the inference trace and the critical pairs still waiting in the queue when the proof was found:
 
 ```wl
 TFindProof["Commutativity", "ShefferAxioms", "Statistics", Method -> "Waldmeister", TimeConstraint -> 10]

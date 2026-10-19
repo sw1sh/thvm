@@ -15,10 +15,10 @@ RelatedGuides: [THVMLink]
 
 ## Details & Options
 
-- The operators are `"+"`, `"-"`, `"*"`, `"=="` and `"<"`.
+- The operators are `"+"`, `"-"` and `"*"`; `"/"` and `"%"`, the integer quotient and remainder; `"&"`, `"|"` and `"^"`, the bitwise and, or and exclusive or; `"<<"` and `">>"`, the shifts; and the comparisons `"=="`, `"!="`, `"<"`, `">"`, `"<="` and `">="`. Each also has a name, such as `"ADD"` for `"+"`. Any other operator issues the message `TOp2::badop`, and the input returns unevaluated.
 - A bare [Integer]() operand is read as <code>[TNum]()[*i*]</code>.
 - The operation is strict in both operands: it fires once both have reduced to numbers, and gives a number.
-- Arithmetic is on unsigned 32-bit patterns. `"=="` and `"<"` give 1 for true and 0 for false.
+- Arithmetic is on unsigned 32-bit patterns, and a division by zero gives 0. A comparison gives 1 for true and 0 for false.
 - An operand that reduces to a superposition distributes the operation over its branches.
 - The `+` and `*` operators between number-valued terms, and `+`, `-`, `*`, `==` and `<` between such a term and an integer, build [TOp2]() terms: <code>*a* + *b*</code> is <code>[TOp2]()["+", *a*, *b*]</code>.
 - `"=="` compares numbers. [TEql]() compares arbitrary terms structurally.
@@ -63,6 +63,36 @@ TTermVal[TWnf[TOp2["-", 10, 3]]]
 ```
 
 <!-- => 7 -->
+
+---
+
+An integer quotient:
+
+```wl
+TTermVal[TWnf[TOp2["/", 7, 2]]]
+```
+
+<!-- => 3 -->
+
+---
+
+A remainder:
+
+```wl
+TTermVal[TWnf[TOp2["%", 7, 2]]]
+```
+
+<!-- => 1 -->
+
+---
+
+A left shift:
+
+```wl
+TTermVal[TWnf[TOp2["<<", 7, 2]]]
+```
+
+<!-- => 28 -->
 
 ---
 
@@ -153,3 +183,13 @@ TTermVal[TWnf[TOp2["-", 3, 4]]]
 ```
 
 <!-- => 4294967295 -->
+
+---
+
+An operator that is not one of the operators of [TOp2]() is refused:
+
+```wl
+TOp2["foo", 1, 2]
+```
+
+<!-- => the message TOp2::badop is issued and the expression returns unevaluated -->

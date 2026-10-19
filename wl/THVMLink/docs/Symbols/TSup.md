@@ -22,7 +22,7 @@ RelatedGuides: [THVMLink]
 - A superposition stands for both of its branches at once. [TCollapse]() lists the values it stands for.
 - A bare [Integer]() branch is read as <code>[TNum]()[*i*]</code>.
 - Without an explicit label, the superposition takes the next value of the fresh-label counter of [TFreshLabel](), which [TReset]() restarts at 1.
-- The list form folds from the left: <code>[TSup]()[{*a*, *b*, *c*}]</code> is <code>[TSup]()[[TSup]()[*a*, *b*], *c*]</code>.
+- The list form folds from the left: <code>[TSup]()[{*a*, *b*, *c*}]</code> is <code>[TSup]()[[TSup]()[*a*, *b*], *c*]</code>. A list of one element gives the term of that element, and an empty list issues the message `TSup::empty`.
 - Integer operations, applications and matchers distribute over a superposition, giving a superposition of the results.
 - Labels decide how superpositions combine. Two with the same label combine branch by branch; two with different labels give every combination.
 - A duplication ([TDup]()) with the same label as a superposition takes its two branches apart; with a different label, it duplicates the whole superposition.
@@ -99,6 +99,16 @@ TTermVal /@ TCollapse[TSup[{5, 7, 9}]]
 ```
 
 <!-- => {5, 7, 9} -->
+
+---
+
+A list of one element gives the term of that element, with no superposition:
+
+```wl
+Term[TSup[{5}]]
+```
+
+<!-- => Term["NUM", 5] -->
 
 ---
 
@@ -188,10 +198,10 @@ TTermExt[TSup[9, 5, 7]]
 
 ## Possible Issues
 
-A list of one element gives the element itself, here the integer 5 rather than a term:
+A superposition of no terms is refused:
 
 ```wl
-TSup[{5}]
+TSup[{}]
 ```
 
-<!-- => 5 -->
+<!-- => the message TSup::empty is issued and the expression returns unevaluated -->

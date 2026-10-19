@@ -2,10 +2,11 @@
 Template: Symbol
 Name: TFindProof
 Context: WolframInstitute`THVMLink`ATP`
+ContextPath: [Wolfram`Parser`]
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TFindProof
 Keywords: [theorem proving, ATP, equational logic, completion, Knuth-Bendix, proof object, AxiomaticTheory, Waldmeister, Vampire]
-SeeAlso: [FindEquationalProof, ProofObject, AxiomaticTheory, TFindEquationalPath, TFindStringProof, TRelevantAxioms, TAtpSchedule, TAtpDescribeMethod, TProofObject, CounterexampleObject]
+SeeAlso: [FindEquationalProof, ProofObject, AxiomaticTheory, TFindEquationalPath, TFindStringProof, TRelevantAxioms, TAtpSchedule, TAtpDescribeMethod, PortfolioFrontLoad, TProofObject, CounterexampleObject]
 RelatedGuides: [THVMLink]
 RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets for TFindProof](AtpMethods)", "[Disproving Conjectures with Countermodels](Disproof)"]
 ---
@@ -24,7 +25,7 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets
 
 <code>[TFindProof]()[*conjecture*, *axioms*, "*spec*"]</code> gives the property *spec* of the proof search instead of the proof object.
 
-<!-- #| annotation: 26.10.19: MaxSteps -> Automatic resolves to 200000 critical pairs, and to 500000 under the "Waldmeister" presets; the external-process methods dispatch only on the TFindProof["theorem", "theory"] form ("WaldmeisterProcess" also on explicit equations), and give TFindProof::badmethod and $Failed elsewhere. -->
+<!-- #| annotation: 26.10.19: MaxSteps -> Automatic resolves to 200000 critical pairs, and to 500000 under the "Waldmeister" presets. The external-process methods dispatch only on the TFindProof["theorem", "theory"] form ("WaldmeisterProcess" also on explicit equations); elsewhere they issue TFindProof::badmethod and Automatic runs instead. "LiftToProofObject" -> True has no effect on "TweeProcess", whose result stays an Association. -->
 
 ## Details & Options
 
@@ -34,16 +35,16 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets
 - An axiom written as a rule `lhs -> rhs` rewrites from left to right only. An axiom written as `lhs <-> rhs` or `{lhs, rhs}` is an equation, oriented by the prover.
 - Equations are best written over operators that do not evaluate, such as [CircleTimes](), [CenterDot]() or an undefined head `f`. [Times]() and [Plus]() are [Orderless](), so an equation over them can evaluate before the prover sees it.
 - A list of conjectures is proved as one conjunction, and gives one [ProofObject]() with a hypothesis and a conclusion for each conjecture.
-- Predicate-logic input, with predicates, the connectives [And](), [Or](), [Not](), [Implies]() and [Equivalent](), and the quantifiers [ForAll]() and [Exists](), is converted to an equational problem and gives a `"Predicate/EquationalLogic"` proof.
-- A problem in the TPTP (Thousands of Problems for Theorem Provers) format, given as text or as <code>[File]()["*file*"]</code>, is proved from its own axioms and negated conjecture.
-- [TFindProof]() gives `$Failed` when it finds no proof: when the axioms complete without joining the two sides of the conjecture, or when the step or time budget runs out.
+- Predicate-logic input, with predicates, the connectives [And](), [Or](), [Not](), [Implies]() and [Equivalent](), and the quantifiers [ForAll]() and [Exists](), is converted to an equational problem and gives a `"Predicate/EquationalLogic"` proof. A pattern variable such as `x_` in a predicate axiom is universally quantified, as in an equation.
+- A problem in the TPTP (Thousands of Problems for Theorem Provers) format, given as text, as <code>[File]()["*file*"]</code> or as the Association that `TPTPImport` gives, is proved from its own axioms and negated conjecture.
+- [TFindProof]() gives `$Failed` when it finds no proof: when the axioms complete without joining the two sides of the conjecture, or when the step or time budget runs out. A conjecture that is not an equation gives a <code>[Failure]()["TATPParseError", …]</code>.
 - The possible values of *spec* are:
 
 | | |
 | --- | --- |
 | `"ProofObject"` | the [ProofObject]() (default) |
 | `"Status"` | `"Proved"`, `"Saturated"`, `"TimedOut"` or `"Failed"` |
-| `"Statistics"` | the status with the counts of steps, rules and trace entries |
+| `"Statistics"` | the status, the number of rewrite steps in the chain that closes the goal (0 for a completion without a goal), and the numbers of rules, trace entries and queued critical pairs |
 | `"Lemmas"` | the rewrite rules derived by the completion |
 | `"Path"` | the rewrite path from the left side of the conjecture to its right side |
 | `"Counterexample"` | a [CounterexampleObject]() refuting the conjecture, or `$Failed` |
@@ -71,9 +72,11 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets
 | `"VampireProcess"`, `"EproverProcess"`, `"TweeProcess"`, `"WaldmeisterProcess"` | run the external prover program |
 | <code>{*name*, *opt* -> *val*, …}</code> | a configuration with explicit suboptions |
 
+- Any other setting of [Method]() issues the message `TFindProof::badmethod`, and [Automatic]() is used instead. `$AtpMethodPresets` lists the named configurations and schedules.
 - [TAtpSchedule]() gives the schedule a method expands to and [TAtpDescribeMethod]() the suboptions of a configuration. The suboptions are described in [Methods and Presets for TFindProof](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods).
-- [TimeConstraint]() is the total time for a schedule, shared among its entries. With the default setting <code>[TimeConstraint]() -> [Infinity]()</code>, each entry of a schedule is given 60 seconds.
-- With a process method, the options of the matching builder, such as `"LiftToProofObject"`, `"ParseFormulas"` and `"Binary"` of [TVampireProofObject](), are passed on to it.
+- [TimeConstraint]() is the total time for a schedule, shared among its entries: each entry gets the time left divided by the number of entries left, and each of the first [PortfolioFrontLoad]() entries gets twice that share. With the default setting <code>[TimeConstraint]() -> [Infinity]()</code>, each entry of a schedule is given 60 seconds.
+- A completion without a goal keeps its [TimeConstraint]() for every *spec*. When the derivations of the rules it found do not fit in the time left, its [ProofObject]() lists the axioms only, and the message `TFindProof::cplpo` is issued.
+- With a process method, the options of the matching builder, such as `"LiftToProofObject"`, `"ParseFormulas"` and `"Binary"` of [TVampireProofObject](), are passed on to it. With the default `"LiftToProofObject" -> Automatic`, `"WaldmeisterProcess"` gives a [ProofObject](), and `"VampireProcess"`, `"TweeProcess"` and `"EproverProcess"` give the Association of the proof as the prover writes it; `"LiftToProofObject" -> True` gives a [ProofObject]() for Vampire and E.
 - The following options can be given:
 
 | | | |
@@ -81,7 +84,11 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets
 | [MaxSteps]() | [Automatic]() | maximum number of critical pairs to process |
 | [Method]() | [Automatic]() | proof search method |
 | [TimeConstraint]() | [Infinity]() | time limit in seconds |
+| [PortfolioFrontLoad]() | `1` | number of entries at the start of a schedule that get twice the equal share of the time |
 | `"ProofForm"` | `"ProofObject"` | form of the proof, `"ProofObject"` or `"TProofObject"` |
+| `"LiftToProofObject"` | [Automatic]() | whether a process method gives a [ProofObject]() |
+| `"ParseFormulas"` | [False]() | whether a process method parses the formulas of the proof into expressions |
+| `"Binary"` | [Automatic]() | path of the program of a process method |
 
 ## Basic Examples
 
@@ -167,10 +174,30 @@ TFindProof[mortal[socrates], {ForAll[x, Implies[man[x], mortal[x]]], man[socrate
 
 ---
 
+A pattern variable in a predicate axiom is universally quantified:
+
+```wl
+TFindProof[mortal[socrates], {Implies[man[x_], mortal[x_]], man[socrates]}]
+```
+
+<!-- => a ProofObject summary box, logic Predicate/EquationalLogic -->
+
+---
+
 A TPTP problem is proved from its own axioms and negated conjecture:
 
 ```wl
 TFindProof["cnf(a1, axiom, f(f(X)) = X).\ncnf(g, negated_conjecture, f(f(f(a))) != f(a)).", "Status"]
+```
+
+<!-- => "Proved" -->
+
+---
+
+A problem that `TPTPImport` has parsed is proved the same way:
+
+```wl
+TFindProof[TPTPImport["cnf(a1, axiom, f(f(X)) = X).\ncnf(g, negated_conjecture, f(f(f(a))) != f(a))."], "Status"]
 ```
 
 <!-- => "Proved" -->
@@ -207,7 +234,7 @@ TFindProof["MonoidAxioms"]
 
 ### Properties of the proof search
 
-The `"Statistics"` spec counts the processed critical pairs, the rules and the trace entries:
+The `"Statistics"` spec gives the number of rewrite steps in the chain that closes the goal, and the numbers of rules, trace entries and queued critical pairs:
 
 ```wl
 TFindProof["InverseOfComposite", "AbelianGroupAxioms", "Statistics"]
@@ -243,7 +270,7 @@ The `"PortfolioTrace"` spec shows each scheduled attempt, its time and whether i
 TFindProof[x \[CircleTimes] y == y \[CircleTimes] x, "AbelianGroupAxioms", "PortfolioTrace", TimeConstraint -> 5]
 ```
 
-<!-- => {<|"Method" -> {"Completion", "CriticalPairWeight" -> "Mix", ...}, "WallTime" -> 1.3, "Proved" -> False|>, <|..., "Proved" -> False|>, <|"Method" -> {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50}, "WallTime" -> 0.0015, "Proved" -> True|>} -->
+<!-- => {<|"Method" -> {"Completion", "CriticalPairWeight" -> "Mix", ...}, "WallTime" -> a time, "Proved" -> False|>, <|..., "Proved" -> False|>, <|"Method" -> {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50}, "WallTime" -> a time, "Proved" -> True|>} -->
 
 ---
 
@@ -349,6 +376,16 @@ TFindProof["InverseOfComposite", "AbelianGroupAxioms", "AppliedMethod", Method -
 
 ---
 
+An unknown method issues a message, and the [Automatic]() schedule proves the theorem:
+
+```wl
+TFindProof[OverBar[OverBar[x]] == x, "AbelianGroupAxioms", "Status", Method -> "Foo"]
+```
+
+<!-- => the message TFindProof::badmethod is issued and the result is "Proved" -->
+
+---
+
 The `"SMT"` method decides a ground problem by congruence closure and gives the decision:
 
 ```wl
@@ -369,13 +406,13 @@ TFindProof[f[a] == c, {a == b, b == c}, Method -> "SMT"]
 
 ---
 
-The `"VampireProcess"` method runs the Vampire prover program on a named theorem; with `"LiftToProofObject" -> False` the result is an Association of its proof steps:
+The `"VampireProcess"` method runs the Vampire prover program on a named theorem; with `"LiftToProofObject" -> False`, as by default for this method, the result is an Association of its proof steps:
 
 ```wl
 TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "VampireProcess", "LiftToProofObject" -> False, TimeConstraint -> 10]
 ```
 
-<!-- => <|"Backend" -> "SZS", "Status" -> "Proved", "Goal" -> "(\n  not(not(sk_c1)) != sk_c1)", "Axioms" -> {...}, "ProofDataset" -> <|...|>, ...|> -->
+<!-- => <|"Backend" -> "SZS", "Status" -> "Proved", "Goal" -> "not"["not"["skc1"[]]] != "skc1"[], "Axioms" -> {...}, "ProofDataset" -> <|...|>, ...|> -->
 
 ### TimeConstraint
 
@@ -386,6 +423,16 @@ TFindProof[x ** y == y ** x, "AbelianGroupAxioms", "Status", TimeConstraint -> 2
 ```
 
 <!-- => "TimedOut" -->
+
+### PortfolioFrontLoad
+
+With `PortfolioFrontLoad -> 2`, each of the first two entries of the `"Portfolio"` schedule gets twice the share of the time of each of the others, as the `"PortfolioTrace"` spec shows:
+
+```wl
+TFindProof[x ** y == y ** x, "AbelianGroupAxioms", "PortfolioTrace", Method -> "Portfolio", TimeConstraint -> 6, PortfolioFrontLoad -> 2]
+```
+
+<!-- => {<|"Method" -> {"Completion", "CriticalPairWeight" -> "Mix2"}, "WallTime" -> a time of about 2, "Proved" -> False|>, <|..., "WallTime" -> a time of about 2, ...|>, <|..., "WallTime" -> a time of about 1, ...|>, <|"Method" -> "GoalDirected", "WallTime" -> a time of about 1, "Proved" -> False|>} -->
 
 ### ProofForm
 
@@ -474,6 +521,26 @@ TFindProof[x y == y x, "AbelianGroupAxioms"]
 ```
 
 <!-- => TFindProof[True, "AbelianGroupAxioms"] -->
+
+---
+
+An equation between two different strings evaluates to [False]() before [TFindProof]() sees it, so the conjecture is not an equation; [TFindStringProof]() proves theorems about strings:
+
+```wl
+TFindProof["BBAA" == "AABB", {"BA" -> "AB"}]
+```
+
+<!-- => Failure["TATPParseError", <|"Axiom" -> "conjecture", "Reason" -> "expected `lhs == rhs`"|>] -->
+
+---
+
+A completion that its time limit stops gives a [ProofObject]() of the axioms only, with a message:
+
+```wl
+TFindProof["AbelianGroupAxioms", TimeConstraint -> 2]
+```
+
+<!-- => the message TFindProof::cplpo is issued, and the result is a ProofObject summary box, logic EquationalLogic, with no theorem and the four axioms as its only steps -->
 
 ---
 

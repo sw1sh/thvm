@@ -15,7 +15,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TInitialize]()[*expr*]</code> builds the term whose canonical form is the [Term]() expression *expr*.
 
-<!-- #| annotation: 26.10.19: The snapshot form (Heap.wl) resets the book heap, DEFS and ALO_STATES when the snapshot bundles them, then TResets the dynamic heap, reallocates the tensors (renumbered densely, so a snapshot survives TFree and a fresh kernel), writes the cells back from location 0, restores the label counter and repacks the root. The Term form walks the expression bottom-up through the public constructors with Unique[] binders, so binder ids are alpha-renamed; it has rules for NUM, ERA, ANY, REF, TEN, VAR, LAM, APP, SUP, OP2, DUP, DP0 and DP1 only, so CTR and MAT come back unevaluated. Two defects seen in probes: TInitialize::orphanvar has two `` slots but one argument, so an orphan VAR also issues StringForm::sfr; and an Uninitialized snapshot without "ZeroFill" -> True issues TInitialize::uninit and then lets Throw[$Failed, "TInitialize::uninit"] escape to top level uncaught. -->
+<!-- #| annotation: 26.10.19: The snapshot form (Heap.wl) resets the book heap, DEFS and ALO_STATES when the snapshot bundles them, then TResets the dynamic heap, reallocates the tensors (renumbered densely, so a snapshot survives TFree and a fresh kernel), writes the cells back from location 0, restores the label counter and repacks the root. The Term form walks the expression bottom-up through the public constructors with Unique[] binders, so binder ids are alpha-renamed; it has rules for NUM, ERA, ANY, REF, TEN, VAR, LAM, APP, SUP, OP2, DUP, DP0 and DP1 only, so CTR and MAT come back unevaluated. An orphan VAR inside a lambda, as in TInitialize[Term["LAM", 5, Term["VAR", 99]]], issues TInitialize::orphanvar and then THeapSet::loc for location 0, and still gives a LAM term (reported 26.10.19). -->
 
 ## Details & Options
 
@@ -23,9 +23,9 @@ RelatedGuides: [THVMLink]
 - Restoring a snapshot first empties the runtime, as <code>[TReset]()</code> does, then writes its cells and tensors back and gives its root as a [TTerm](). Terms built before the restore are no longer valid.
 - The runtime does not need to be the one that took the snapshot: a snapshot restores after the runtime has been shut down and initialized again.
 - A snapshot with no root gives <code>[Missing]()["NoRoot"]</code>.
-- A snapshot whose tensor data was removed by <code>[TContextStrip]()</code> is restored only with the option `"ZeroFill" -> True`, which fills its tensors with zeros.
+- A snapshot whose tensor data was removed by <code>[TContextStrip]()</code> is restored only with the option `"ZeroFill" -> True`, which fills its tensors with zeros. Without it, the message `TInitialize::uninit` is issued and the input returns unevaluated.
 - <code>[TInitialize]()[*expr*]</code> inverts <code>[Term]()</code> for numbers, the eraser, lambdas, applications, superpositions, arithmetic, duplications and tensors. Lambda and duplication binders are renamed, so the new term has the same structure as the original but its own heap locations.
-- A [TTerm]() is left as it is, and an expression with a constructor or a matcher returns unevaluated.
+- A [TTerm]() is left as it is, and an expression with a constructor or a matcher returns unevaluated. A variable outside the lambda that binds it issues the message `TInitialize::orphanvar` and gives `$Failed`.
 - [TInitialize]() takes the following option:
 
 | | | |
@@ -174,6 +174,13 @@ stripped = TContextStrip[TContextSnapshot[TTensorCreate[{1., 2., 3.}]]]
 ```
 <!-- => TContext[<|"Root" -> Term["TEN", "f32", 0], ..., "Tensors" -> <|0 -> <|"shape" -> {3}, "dtype" -> "f32"|>|>, ..., "State" -> "Uninitialized"|>] -->
 
+Without the option, the snapshot is refused:
+
+```wl
+TInitialize[stripped]
+```
+<!-- => the message TInitialize::uninit is issued and the expression returns unevaluated -->
+
 Restore it with its tensor filled with zeros:
 
 ```wl
@@ -207,3 +214,12 @@ The canonical form of a constructor is not rebuilt, and the expression returns u
 TInitialize[Term["CTR", 1, Term["NUM", 2]]]
 ```
 <!-- => TInitialize[Term["CTR", 1, Term["NUM", 2]]] -->
+
+---
+
+A variable outside its lambda is refused:
+
+```wl
+TInitialize[Term["VAR", 7]]
+```
+<!-- => the message TInitialize::orphanvar is issued and the result is $Failed -->

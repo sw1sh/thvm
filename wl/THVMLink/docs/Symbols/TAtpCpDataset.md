@@ -19,7 +19,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 ## Details & Options
 
 - [TAtpCpDataset]() gives the training data for a learned critical-pair ranking in the style of ENIGMA (Efficient Learning-Based Inference Guiding Machine): [TAtpTrainScorer]() trains a model on it, [TAtpSetLearnedScorer]() gives the model to the prover, and <code>[TFindProof]()[…, [Method]() -> "ENIGMA"]</code> uses it.
-- The result has the keys `"Features"` (a matrix with one row of 14 numbers for each processed critical pair), `"Labels"` (`1` for a critical pair the proof uses and `0` otherwise), `"FeatureNames"`, `"NRows"`, `"NPositive"` (the number of rows labeled `1`) and `"NProofs"`.
+- The result has the keys `"Features"` (a matrix with one row of 14 numbers for each processed critical pair), `"Labels"` (`1` for a critical pair the proof uses and `0` otherwise), `"FeatureNames"`, `"NRows"`, `"NPositive"` (the number of rows labeled `1`) and `"NProofs"` (the number of conjectures that were proved).
 - The 14 features describe the size, depth, variables and weights of a critical pair, its age in the search, its top symbols, whether it shares a subterm with the goal, whether it can be oriented, and how it unifies.
 - Only the conjectures that are proved contribute rows.
 - The following options can be given:
@@ -78,6 +78,14 @@ A conjecture that is not proved within the time limit contributes no rows:
 
 ```wl
 TAtpCpDataset[{x ** y == y ** x}, AxiomaticTheory["AbelianGroupAxioms"], TimeConstraint -> 1]["NRows"]
+```
+
+<!-- => 0 -->
+
+It is not counted as a proof:
+
+```wl
+TAtpCpDataset[{x ** y == y ** x}, AxiomaticTheory["AbelianGroupAxioms"], TimeConstraint -> 1]["NProofs"]
 ```
 
 <!-- => 0 -->
