@@ -144,7 +144,7 @@ parseProtocol[raw_String] := Block[{lines},
 
 TWaldmeisterProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "pr" :=
-    Block[{bin, fwk, cmd, out, secs, status, derivation},
+    Block[{bin, fwk, cmd, run, out, secs, status, derivation},
         (* "WMCLI" suboption wins; else "Binary"; else Automatic ->
            $WMCLI env / PATH / dev-location auto-detect in wmBinary. *)
         bin = wmBinary[Replace[OptionValue["WMCLI"], Automatic :> OptionValue["Binary"]]];
@@ -161,12 +161,13 @@ TWaldmeisterProof[problemFile_String, opts : OptionsPattern[]] /;
            heuristic picks the goal-directed shortcut (a shorter proof); bare
            wmcli does blind completion and finds a longer proof.  Add -auto so
            Method->"WaldmeisterProcess" matches FindEquationalProof. *)
-        cmd = StringJoin["DYLD_FRAMEWORK_PATH='", fwk, "' ", bin, " -auto ", problemFile, " 2>&1"];
-        {secs, out} = AbsoluteTiming @ RunProcess[{"sh", "-c", cmd}, "StandardOutput"];
+        cmd = StringJoin["env DYLD_FRAMEWORK_PATH='", fwk, "' ", bin, " -auto ", problemFile, " 2>&1"];
+        run = atpRunLimited[cmd, OptionValue[TimeConstraint]];
+        {secs, out} = {run["Seconds"], run["Output"]};
         status = Which[
             StringContainsQ[out, "Waldmeister states: Goal proved"] || StringContainsQ[out, "this proves the goal"],
                 "Proved",
-            StringContainsQ[out, "Time limit"],
+            run["TimedOut"] || StringContainsQ[out, "Time limit"],
                 "TimedOut",
             True,
                 "Failed"

@@ -27,6 +27,29 @@ Begin["`Private`"]
 
 Options[TEproverProof] = {TimeConstraint -> 30, "Binary" -> Automatic}
 
+(* E's TSTP proofs differ from Vampire's in two ways the SZS converter does not expect.  E copies
+   input clauses under new names with no inference (cnf(c_0_5, axiom, ..., ax3)) and keeps
+   identity simplifications; a single-parent step with its parent's formula becomes an
+   equation_copy, which the converter folds away.  And E nests inferences
+   (inference(rw, _, [inference(spm, _, [c_0_7, c_0_8]), c_0_9])), which arrive as parent strings;
+   their parents are the clause names inside. *)
+eNormalizeDerivation[steps_List] := Module[{names = Lookup[steps, "Name"], formulas},
+    formulas = AssociationThread[names, Lookup[steps, "Formula"]];
+    Map[
+        s |-> Module[{parents = Flatten[Map[
+                p |-> If[ StringStartsQ[p, "inference("],
+                    Select[StringCases[p, RegularExpression["[A-Za-z_][A-Za-z0-9_]*"]], MemberQ[names, #] &],
+                    p],
+                Lookup[s, "Parents", {}]]]},
+            Which[
+                Length[parents] === 1 && s["Rule"] =!= "file" && Lookup[formulas, First[parents]] === s["Formula"],
+                    Join[s, <|"Rule" -> "equation_copy", "Parents" -> parents|>],
+                True,
+                    Append[s, "Parents" -> DeleteDuplicates[parents]]
+            ]],
+        steps]
+]
+
 (* Resolve eprover: the known prefixes first, then any $PATH dir.  No
    default, so a truly-absent binary yields Missing -> the noeprover
    message fires instead of RunProcess failing opaquely on bare "eprover". *)
@@ -50,7 +73,7 @@ TEproverProof[theory_String, thm_String, opts : OptionsPattern[]] := TEproverPro
 
 TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=
-    Block[{bin, tc, cmd, out, secs, status, derivation, foldedDerivation},
+    Block[{bin, tc, cmd, run, out, secs, status, derivation, foldedDerivation},
         bin = eproverBinary[OptionValue["Binary"]];
         If[ MissingQ[bin],
             Message[TEproverProof::noeprover];
@@ -61,12 +84,16 @@ TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
             Return[$Failed]
         ];
         tc = OptionValue[TimeConstraint];
-        cmd = StringJoin[bin, " --auto-schedule --proof-object --tstp-format", " --cpu-limit=", ToString[N[tc]], " ", problemFile, " 2>&1"];
-        {secs, out} = AbsoluteTiming @ RunProcess[{"sh", "-c", cmd}, "StandardOutput"];
+        cmd = StringJoin[bin, " --auto-schedule --proof-object --tstp-format", " --cpu-limit=", ToString[Ceiling[tc]], " ", problemFile, " 2>&1"];
+        run = atpRunLimited[cmd, Ceiling[tc] + 2];
+        {secs, out} = {run["Seconds"], run["Output"]};
         status = Which[
             StringContainsQ[out, "SZS status Theorem"] || StringContainsQ[out, "SZS status Unsatisfiable"],
                 "Proved",
-            StringContainsQ[out, "SZS status ResourceOut"] || StringContainsQ[out, "SZS status Timeout"] || StringContainsQ[out, "CPU time limit"],
+            (* E's automatic schedule reports GaveUp when its CPU limit runs out, as it does for a
+               strategy that gives up early: a GaveUp near the limit is the limit. *)
+            run["TimedOut"] || StringContainsQ[out, "SZS status ResourceOut"] || StringContainsQ[out, "SZS status Timeout"] || StringContainsQ[out, "CPU time limit"] ||
+                    (StringContainsQ[out, "SZS status GaveUp"] && secs >= 0.9 Ceiling[tc]),
                 "TimedOut",
             True,
                 "Failed"
@@ -75,7 +102,7 @@ TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
             Quiet @ Check[Wolfram`Parser`TPTPImport[out, "SZS"], $Failed],
             Missing["NoProof"]
         ];
-        foldedDerivation = If[AssociationQ[derivation] && KeyExistsQ[derivation, "Derivation"], derivation["Derivation"], {}];
+        foldedDerivation = If[AssociationQ[derivation] && KeyExistsQ[derivation, "Derivation"], eNormalizeDerivation[derivation["Derivation"]], {}];
         <|
             "Status" -> status,
             "Strategy" -> "eprover-auto-schedule",

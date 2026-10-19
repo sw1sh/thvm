@@ -128,8 +128,8 @@ VerificationTest[
     x  = TTensorCreate @ NumericArray[Range[8] * 1.0, "Real32"];
     w1 = TTensorCreate @ NumericArray[Table[i + j * 0.1, {i, 4}, {j, 8}], "Real32"];
     w2 = TTensorCreate @ NumericArray[Table[i - j * 0.1, {i, 2}, {j, 4}], "Real32"];
-    h1 = TReLU @ TDot[w1, x];
-    out = TDot[w2, h1];
+    h1 = TReLU[w1 . x];
+    out = w2 . h1;
     before = TKernelCount[];
     TRealize @ out;
     kernelDelta[before, TKernelCount[]] <= 3,
@@ -150,7 +150,7 @@ VerificationTest[
     a  = TTensorCreate @ NumericArray[Table[i + j * 0.1, {i, 4}, {j, 8}], "Real32"];
     b  = TTensorCreate @ NumericArray[Table[i - j * 0.1, {i, 2}, {j, 4}], "Real32"];
     c  = TTensorCreate @ NumericArray[Range[2] * 1.0, "Real32"];
-    out = TDot[b, TReLU @ TDot[a, x]] + c;
+    out = b . TReLU[a . x] + c;
     loss = TSum @ (out * out);
     before = TKernelCount[];
     TRealize /@ TGrad[loss, {x, a, b, c}];

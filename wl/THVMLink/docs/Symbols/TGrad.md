@@ -4,131 +4,385 @@ Name: TGrad
 Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TGrad
-Keywords: [autodiff, gradient, backward, VJP, auto-grad leaves]
-SeeAlso: [TGradOf, TClearGrad, TUOpGrad, TRealize, TAdam]
+Keywords: [autodiff, automatic differentiation, gradient, backward, backpropagation, vector-Jacobian product]
+SeeAlso: [TGradOf, TClearGrad, TRealize, TSet, Grad]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TGrad]()[*y*]</code> is `loss.backward()`: one backward walk seeded with `ones-at-y` that auto-grads every reachable non-`CONST` float leaf, accumulating each one's cotangent into its `TenDesc.grad`. No `requires_grad` flag - gradients flow to every float leaf, matching tinygrad. Returns *y* for chaining.
+<code>[TGrad]()[*y*]</code> differentiates *y* with respect to every floating-point tensor it depends on, adds each gradient to that tensor's gradient slot, and gives *y*.
 
-<code>[TGrad]()[*y*, *target*]</code> computes the gradient of *y* with respect to *target* as a target-aware vector-Jacobian product (VJP), returning the gradient `TTerm` without touching other leaves.
+<code>[TGrad]()[*y*, *x*]</code> gives the gradient of *y* with respect to the tensor *x*.
 
-<code>[TGrad]()[*y*, {*x*<sub>1</sub>, ..., *x*<sub>n</sub>}]</code> computes the gradient of *y* with respect to each *x*<sub>i</sub> in one shared walk and returns a list of *n* gradient `TTerm`s in target order.
+<code>[TGrad]()[*y*, *x*, *g*]</code> gives the vector-Jacobian product of the cotangent *g* with the derivative of *y* with respect to *x*.
+
+<code>[TGrad]()[*y*, {$x_1$, $x_2$, …}]</code> gives the list of gradients of *y* with respect to each $x_i$.
+
+<!-- #| annotation: 26.10.19: TGrad[y] is loss.backward() of PyTorch and tinygrad: it marks every reachable float TEN leaf, fires one backward walk seeded with ones at y's shape (a UOP_GRAD node reduced by wnf), and the C leaf rule accumulates each leaf's cotangent into its TenDesc.grad; there is no requires_grad flag and no tape, the backward graph is built in the heap. TGrad[y, x] and TGrad[y, x, g] use the target-aware walk (UOP_GRAD with a target), which emits the cotangent only at the target and leaves the grad slots alone. The list form with two or more targets is the auto-grad-all walk again: it clears every reachable float leaf's slot, walks once, reads the targets back with TGradOf and substitutes TZeros for a target the walk never reached. -->
 
 ## Details & Options
 
-- The walk is lazy: it builds a single backward graph rooted at the cotangent seed, with one DUP per branch that shares an upstream factor. <code>[TRealize]()</code> forces evaluation.
-- For the full-graph form, gradients accumulate into `TenDesc.grad`; read them per tensor with <code>[TGradOf]()</code> and zero them between steps with <code>[TClearGrad]()</code>.
-- For the multi-target form, realize the entire list together (`TRealize[grads]`) so the shared upstream emits once.
-- The default cotangent seed is `ones-at-y.shape`. For a non-default seed (e.g. an upstream gradient threaded from another source), call <code>[TUOpGrad]()</code> directly.
+- The gradient of a *y* with several elements is the gradient of the sum of its elements: the default cotangent is a tensor of ones with the shape of *y*. A cotangent *g* given explicitly has the shape of *y*.
+- <code>[TGrad]()[*y*]</code> differentiates every floating-point tensor that *y* depends on; no tensor needs to be marked as trainable. Each gradient is added to the tensor's gradient slot, read with <code>[TGradOf]()</code> and emptied with <code>[TClearGrad]()</code>, so a second walk adds to the first.
+- <code>[TGrad]()[*y*, *x*]</code> and <code>[TGrad]()[*y*, *x*, *g*]</code> give a lazy [TTerm]() with the shape of *x* and leave every gradient slot unchanged.
+- <code>[TGrad]()[*y*, {$x_1$, $x_2$, …}]</code> computes every gradient in one backward walk; realizing the whole list with one <code>[TRealize]()</code> computes the part they share once. It empties and refills the gradient slots of the tensors *y* depends on, and a target that *y* does not depend on gets a zero gradient.
+- The gradients are lazy: <code>[TRealize]()</code> computes them, and <code>[Normal]()</code> reads the values back.
+- Arguments of other forms, such as a list in place of *y* or a number in place of *x*, issue the message `TGrad::args`, and the input returns unevaluated.
+- The derivatives of the arithmetic, reduction, matrix and elementwise functions that build a [TTerm]() graph, such as [Plus](), [Times](), [Power](), [Total](), [Dot](), [Exp]() and [Tanh](), are all supported.
 
 ## Basic Examples
 
-A single backward over a small inner product:
+Two tensors:
 
 ```wl
-w    = TTensorCreate[{1., 2., 3.}];
-x    = TTensorCreate[{10., 20., 30.}];
-loss = Total[w*x];
-TRealize @ TGrad[loss];
-Normal @ TRealize @ TGradOf[w]
+w = TTensorCreate[{1., 2., 3.}]
 ```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+The second:
+
+```wl
+x = TTensorCreate[{10., 20., 30.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+Their inner product, a lazy scalar:
+
+```wl
+loss = Total[w*x]
+```
+
+<!-- => a TUOp summary box of kind REDUCE -->
+
+Differentiating it fills the gradient slot of every tensor it depends on, and gives the loss back:
+
+```wl
+TGrad[loss]
+```
+
+<!-- => the TUOp summary box of loss -->
+
+The gradient with respect to *w* is *x*:
+
+```wl
+Normal[TRealize[TGradOf[w]]]
+```
+
 <!-- => {10., 20., 30.} -->
 
-## Scope
-
-Multi-target VJP returns the gradients in target order:
+The gradient with respect to *x* is *w*:
 
 ```wl
-w1 = TTensorCreate[{1., 2., 3.}];
-w2 = TTensorCreate[{4., 5., 6.}];
-y  = Total[w1^2 + w2^2];
-{g1, g2} = TGrad[y, {w1, w2}];
-Normal @ TRealize @ g1
+Normal[TRealize[TGradOf[x]]]
 ```
-<!-- => {2., 4., 6.} -->
 
-```wl
-Normal @ TRealize @ g2
-```
-<!-- => {8., 10., 12.} -->
-
-## Applications
-
-Drive one SGD step against a tiny linear regression. <code>[TL2Loss]()</code> wraps the squared-error of the residual into a scalar loss. Take the gradient first, then write the parameter update back through <code>[TSet]()</code> with a small learning rate:
-
-```wl
-W = TGlorot[{4}];
-x = TTensorCreate[{1., 2., 3., 4.}];
-y = TTensorCreate[{1.}];
-
-loss = TL2Loss[ Total[W*x] - y ];
-TClearGrad[W];
-TRealize @ TGrad[loss];
-gW = Normal @ TRealize @ TGradOf[W]
-```
-<!-- => the linear-regression gradient, a length-4 list (varies with the Glorot draw) -->
-
-Apply the update; the original `W` `TTerm` still points at the same `TenDesc`, now shifted by the learning rate times the gradient:
-
-```wl
-TSet[W, W + (-0.01)*TGradOf[W]];
-Normal @ W
-```
-<!-- => the post-step W, a length-4 list -->
-
-## Properties and Relations
-
-<code>[TGrad]()[*y*]</code> is the full-graph projection; calling it again WITHOUT clearing accumulates. The first walk:
-
-```wl
-w  = TTensorCreate[{1., 2., 3.}];
-y1 = Total[w];
-TClearGrad[w];
-TRealize @ TGrad[y1];
-Normal @ TRealize @ TGradOf[w]
-```
-<!-- => {1., 1., 1.} -->
-
-A second <code>[TGrad]()</code> without a <code>[TClearGrad]()</code> in between accumulates on top:
-
-```wl
-TRealize @ TGrad[y1];
-Normal @ TRealize @ TGradOf[w]
-```
-<!-- => {2., 2., 2.} -- the second walk accumulated again -->
-
-## Possible Issues
-
-A leaf the loss never reaches stays `Missing["NoGrad"]` - the walk only fills the gradient of leaves in scope of the loss term:
-
-```wl
-w         = TTensorCreate[{1., 2., 3.}];
-unrelated = TTensorCreate[{9., 9., 9.}];
-loss      = Total[w];
-TRealize @ TGrad[loss];
-TGradOf[unrelated]
-```
-<!-- => Missing["NoGrad"] -->
+<!-- => {1., 2., 3.} -->
 
 ---
 
-The multi-target form requires that every target reaches the seed; an unreachable target's gradient is zero, not an error. The reachable target:
+A tensor:
 
 ```wl
-w        = TTensorCreate[{1., 2.}];
-unrelated = TTensorCreate[{0., 0.}];
-loss     = Total[w];
-{gw, gu} = TGrad[loss, {w, unrelated}];
-Normal @ TRealize @ gw
+w = TTensorCreate[{1., 2., 3.}]
 ```
-<!-- => {1., 1.} -->
 
-and the unreachable one comes back all zeros:
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+The gradient of $\sum_i w_i^3$ with respect to *w* is $3 w_i^2$:
 
 ```wl
-Normal @ TRealize @ gu
+Normal[TRealize[TGrad[Total[w^3], w]]]
 ```
-<!-- => {0., 0.} -->
+
+<!-- => {3., 12., 27.} -->
+
+## Scope
+
+A tensor:
+
+```wl
+z = TTensorCreate[{1., 2., 3.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+For a *y* with several elements, the gradient is that of their sum, here $2 z$:
+
+```wl
+Normal[TRealize[TGrad[z^2, z]]]
+```
+
+<!-- => {2., 4., 6.} -->
+
+An explicit cotangent weights each element of *y*, giving $2 z_i g_i$:
+
+```wl
+Normal[TRealize[TGrad[z^2, z, TTensorCreate[{1., 10., 100.}]]]]
+```
+
+<!-- => {2., 40., 600.} -->
+
+Elementwise functions differentiate too; the derivative of [Exp]() is itself:
+
+```wl
+Normal[TRealize[TGrad[Exp[z], z]]]
+```
+
+<!-- => {2.71828, 7.38906, 20.0855} -->
+
+---
+
+Two tensors:
+
+```wl
+w1 = TTensorCreate[{1., 2., 3.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+The second:
+
+```wl
+w2 = TTensorCreate[{4., 5., 6.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+The gradients of one loss with respect to both, from one walk:
+
+```wl
+grads = TGrad[Total[w1^2 + w2^2], {w1, w2}]
+```
+
+<!-- => a list of two TUOp summary boxes -->
+
+Realize the list together and read both:
+
+```wl
+Normal /@ TRealize[grads]
+```
+
+<!-- => {{2., 4., 6.}, {8., 10., 12.}} -->
+
+---
+
+A 2 x 2 weight matrix:
+
+```wl
+m = TTensorCreate[{{1., 2.}, {3., 4.}}]
+```
+
+<!-- => a TTensor summary box: shape 2 x 2, dtype f32 -->
+
+An input row:
+
+```wl
+v = TTensorCreate[{{1., 1.}}]
+```
+
+<!-- => a TTensor summary box: shape 1 x 2, dtype f32 -->
+
+The gradient of the summed product with respect to the input row is the row sums of the matrix:
+
+```wl
+Normal[TRealize[TGrad[Total[v . m, All], v]]]
+```
+
+<!-- => {{3., 7.}} -->
+
+## Applications
+
+Gradient descent on $\sum_i (w_i - 1)^2$ from a starting point:
+
+```wl
+w = TTensorCreate[{3., -2.}]
+```
+
+<!-- => a TTensor summary box: shape 2, dtype f32 -->
+
+Ten steps with rate 0.25, each clearing the gradient slot, differentiating, and writing the step into *w* in place with [TSet]():
+
+```wl
+Do[TClearGrad[w]; TGrad[Total[(w - 1)^2]]; TSet[w, w - 0.25*TGradOf[w]], {10}]
+```
+
+The parameters approach the minimum at 1:
+
+```wl
+Normal[w]
+```
+
+<!-- => {1.00195, 0.99707} -->
+
+## Properties and Relations
+
+A tensor:
+
+```wl
+w = TTensorCreate[{1., 2., 3.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+The gradient agrees with the symbolic gradient [Grad]() of the same function, $3 w_i^2$:
+
+```wl
+Normal[TRealize[TGrad[Total[w^3], w]]] == (Grad[Total[{a, b, c}^3], {a, b, c}] /. {a -> 1., b -> 2., c -> 3.})
+```
+
+<!-- => True -->
+
+---
+
+A tensor:
+
+```wl
+w = TTensorCreate[{1., 2., 3.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+The loss:
+
+```wl
+loss = Total[w^2]
+```
+
+<!-- => a TUOp summary box of kind REDUCE -->
+
+A gradient with respect to *w*:
+
+```wl
+Normal[TRealize[TGrad[loss, w]]]
+```
+
+<!-- => {2., 4., 6.} -->
+
+It leaves the gradient slot of *w* empty:
+
+```wl
+TGradOf[w]
+```
+
+<!-- => Missing["NoGrad"] -->
+
+The one-argument form fills it:
+
+```wl
+TGrad[loss]
+```
+
+<!-- => the TUOp summary box of loss -->
+
+Read the slot:
+
+```wl
+Normal[TRealize[TGradOf[w]]]
+```
+
+<!-- => {2., 4., 6.} -->
+
+A second walk adds to it:
+
+```wl
+TGrad[loss]
+```
+
+<!-- => the TUOp summary box of loss -->
+
+The slot now holds twice the gradient:
+
+```wl
+Normal[TRealize[TGradOf[w]]]
+```
+
+<!-- => {4., 8., 12.} -->
+
+## Possible Issues
+
+Two tensors, the second unrelated to the loss below:
+
+```wl
+w = TTensorCreate[{1., 2.}]
+```
+
+<!-- => a TTensor summary box: shape 2, dtype f32 -->
+
+The unrelated one:
+
+```wl
+u = TTensorCreate[{0., 0.}]
+```
+
+<!-- => a TTensor summary box: shape 2, dtype f32 -->
+
+A walk over $\sum_i w_i$:
+
+```wl
+TGrad[Total[w]]
+```
+
+<!-- => a TUOp summary box of kind REDUCE -->
+
+The unrelated tensor gets no gradient:
+
+```wl
+TGradOf[u]
+```
+
+<!-- => Missing["NoGrad"] -->
+
+In the list form, an unrelated target gets a zero gradient instead:
+
+```wl
+Normal /@ TRealize[TGrad[Total[w], {w, u}]]
+```
+
+<!-- => {{1., 1.}, {0., 0.}} -->
+
+---
+
+A tensor:
+
+```wl
+v = TTensorCreate[{1., 2., 3.}]
+```
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+Fill its gradient slot:
+
+```wl
+TGrad[Total[v^2]]
+```
+
+<!-- => a TUOp summary box of kind REDUCE -->
+
+The list form empties the slots before its walk, so after it the slot of *v* holds only the list form's gradient, not the sum of both:
+
+```wl
+Normal /@ TRealize[TGrad[Total[v^2], {v, TTensorCreate[{5., 5., 5.}]}]]
+```
+
+<!-- => {{2., 4., 6.}, {0., 0., 0.}} -->
+
+Read the slot:
+
+```wl
+Normal[TRealize[TGradOf[v]]]
+```
+
+<!-- => {2., 4., 6.} -->
+
+---
+
+A list is not a term to differentiate:
+
+```wl
+TGrad[{1, 2}]
+```
+
+<!-- => the message TGrad::args is issued and the expression returns unevaluated -->

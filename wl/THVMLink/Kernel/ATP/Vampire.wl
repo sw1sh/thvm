@@ -108,7 +108,7 @@ TVampireProof[theory_String, thm_String, opts : OptionsPattern[]] := TVampirePro
 
 TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=
-    Block[{bin, tc, mode, cmd, out, secs, status, proofText, solutionFile, derivation, foldedDerivation},
+    Block[{bin, tc, mode, cmd, run, out, secs, status, proofText, solutionFile, derivation, foldedDerivation},
         bin = vampireBinary[OptionValue["Binary"]];
         If[ MissingQ[bin],
             Message[TVampireProof::novamp];
@@ -121,11 +121,13 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
         tc = OptionValue[TimeConstraint];
         mode = OptionValue["Mode"];
         cmd = StringJoin[bin, " --mode ", mode, " --proof tptp -t ", ToString[N[tc]], " ", problemFile, " 2>&1"];
-        {secs, out} = AbsoluteTiming @ RunProcess[{"sh", "-c", cmd}, "StandardOutput"];
+        (* Vampire's own -t overruns in casc mode; the outer limit stops it 2 s later. *)
+        run = atpRunLimited[cmd, tc + 2];
+        {secs, out} = {run["Seconds"], run["Output"]};
         status = Which[
             StringContainsQ[out, "SZS status Unsatisfiable"] || StringContainsQ[out, "SZS status Theorem"],
                 "Proved",
-            StringContainsQ[out, "SZS status Timeout"] || StringContainsQ[out, "Time limit reached"],
+            run["TimedOut"] || StringContainsQ[out, "SZS status Timeout"] || StringContainsQ[out, "Time limit reached"],
                 "TimedOut",
             True,
                 "Failed"

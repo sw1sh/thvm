@@ -78,11 +78,19 @@ $termNewCtrFn := $termNewCtrFn = load["thvm_wl_term_new_ctr", {Integer, {Integer
 $termNewBookCtrFn := $termNewBookCtrFn = load["thvm_wl_term_new_book_ctr", {Integer, {Integer, 1}}, Integer]
 
 (* TAG_NUM is just a packed term - no library call needed. *)
+(* NUMs are unsigned 32-bit words (OP2 arithmetic wraps mod 2^32), so an i32 NUM stores a
+   negative integer as its two's-complement pattern, the value arithmetic gives for it. *)
 TNum[i_Integer] := TNum[i, "i32"]
-TNum[i_Integer, dtype_String] := (
+TNum[i_Integer, "i32"] /; -2^31 <= i < 2^32 := TNum[BitAnd[i, 2^32 - 1], $DTInt32]
+TNum[i_Integer, "i32"] := Null /; (Message[TNum::range, i]; False)
+TNum::range = "`1` does not fit in a 32-bit NUM.";
+TNum[i_Integer, code_Integer] := (
     ensureInit[];
-    TTerm[$termNewFn[0, $TagNUM, dtypeCode[dtype], i]]
+    TTerm[$termNewFn[0, $TagNUM, code, i]]
 )
+TNum[i_Integer, dtype_String] /; dtype =!= "i32" && IntegerQ[dtypeCode[dtype]] := TNum[i, dtypeCode[dtype]]
+TNum[_Integer, dtype_String] /; dtype =!= "i32" := Null /; (Message[TNum::dtype, dtype]; False)
+TNum::dtype = "`1` is not a dtype; a NUM takes \"i32\", \"f32\", \"bool\" or another THVMLink dtype name.";
 
 (* numCoerce - term-constructor sugar.  A bare Integer in a value
    position means "the i32 NUM with that value", so TSup[1, 2] is
@@ -105,11 +113,12 @@ TNum[i_Integer, dtype_String] := (
 numCoerce[i_Integer] := TNum[i]
 numCoerce[x_] := x
 
-TOp2[op_String, x_, y_] := (
+TOp2[op_String, x_, y_] /; KeyExistsQ[$op2Codes, op] := (
     ensureInit[];
-    TTerm[$termNewOp2Fn[Lookup[$op2Codes, op, (Message[TOp2::badop, op]; 0)], ttermRaw[numCoerce[x]], ttermRaw[numCoerce[y]]]]
+    TTerm[$termNewOp2Fn[$op2Codes[op], ttermRaw[numCoerce[x]], ttermRaw[numCoerce[y]]]]
 )
-TOp2::badop = "Unknown OP2 opcode `1`; expected one of \"+\", \"-\", \"*\", \"==\", \"<\".";
+TOp2[op_String, _, _] := Null /; (Message[TOp2::badop, op]; False)
+TOp2::badop = "Unknown OP2 opcode `1`; expected one of \"+\", \"-\", \"*\", \"/\", \"%\", \"==\", \"!=\", \"<\", \">\", \"<=\", \">=\", \"&\", \"|\", \"^\", \"<<\", \">>\".";
 
 (* TAG_EQL: structural equality, strict on both sides.  Reducer
    handles NUM-NUM, ERA/ANY shorts, and EQL-SUP commutes (both
@@ -124,7 +133,7 @@ TEql[a_, b_] := (
 
 TMatNum[matchVal_Integer, handler_, fallback_] := (
     ensureInit[];
-    TTerm[$termNewMatFn[matchVal, ttermRaw[handler], ttermRaw[fallback]]]
+    TTerm[$termNewMatFn[matchVal, ttermRaw[numCoerce[handler]], ttermRaw[numCoerce[fallback]]]]
 )
 TMatCtr[ctorName_Integer, handler_, fallback_] := TMatNum[ctorName, handler, fallback]
 
@@ -133,9 +142,12 @@ TMatCtr[ctorName_Integer, handler_, fallback_] := TMatNum[ctorName, handler, fal
    never referenced) so MAT-MIS lands correctly. *)
 TIfZero[counter_, thenTerm_, elseTerm_] := TApp[TMatNum[0, thenTerm, TLam[ignored, elseTerm]], counter]
 
-TCtr[label_Integer, children___] := (
+(* REWRITE_MAX_ARITY in src/thvm.h *)
+$ctrMaxArity = 16;
+
+TCtr[label_Integer, children___] /; Length[{children}] <= $ctrMaxArity := (
     ensureInit[];
-    TTerm[$termNewCtrFn[label, ttermRaw /@ {children}]]
+    TTerm[$termNewCtrFn[label, ttermRaw[numCoerce[#]] & /@ {children}]]
 )
 
 (* TBookCtr - like TCtr but allocates the cell sequence in BOOK_HEAP
@@ -143,10 +155,13 @@ TCtr[label_Integer, children___] := (
    destined for the Metal AOT path: the kernel's `device Term *heap`
    buffer is zero-copy bound to BOOK_HEAP, so destructure derefs only
    work for vals in book_heap range. *)
-TBookCtr[label_Integer, children___] := (
+TBookCtr[label_Integer, children___] /; Length[{children}] <= $ctrMaxArity := (
     ensureInit[];
-    TTerm[$termNewBookCtrFn[label, ttermRaw /@ {children}]]
+    TTerm[$termNewBookCtrFn[label, ttermRaw[numCoerce[#]] & /@ {children}]]
 )
+TCtr[_Integer, children___] := Null /; (Message[TCtr::arity, Length[{children}], $ctrMaxArity]; False)
+TBookCtr[_Integer, children___] := Null /; (Message[TBookCtr::arity, Length[{children}], $ctrMaxArity]; False)
+TCtr::arity = TBookCtr::arity = "A constructor takes at most `2` children; `1` were given.";
 
 (* TMatChain[<|0 -> h0, 1 -> h1, ...|>, fb] expands to
      TMatNum[0, h0, TMatNum[1, h1, ... TMatNum[k, hk, fb] ...]].
@@ -203,6 +218,10 @@ TTerm /: Subtract[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] := TOp2["-", a
 TTerm /: Subtract[t_TTerm ? numericTermQ, n_Integer] := TOp2["-", t, TNum[n]]
 
 (* Times[k, n] / Times[n, k] / Times[k1, k2]. *)
+(* A negative factor negates in the unsigned ring, 0 - (|n| t), so a - b (which WL writes as
+   Plus[a, Times[-1, b]]) is a - b mod 2^32. *)
+TTerm /: Times[t_TTerm ? numericTermQ, n_Integer ? Negative] := TOp2["-", TNum[0], If[n === -1, t, TOp2["*", TNum[-n], t]]]
+TTerm /: Times[n_Integer ? Negative, t_TTerm ? numericTermQ] := TOp2["-", TNum[0], If[n === -1, t, TOp2["*", TNum[-n], t]]]
 TTerm /: Times[t_TTerm ? numericTermQ, n_Integer] := TOp2["*", t, TNum[n]]
 TTerm /: Times[n_Integer, t_TTerm ? numericTermQ] := TOp2["*", TNum[n], t]
 TTerm /: Times[a_TTerm ? numericTermQ, b_TTerm ? numericTermQ] := TOp2["*", a, b]

@@ -4,50 +4,95 @@ Name: TAtpSetGnnScorer
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TAtpSetGnnScorer
-Keywords: [ENIGMA, GNN, GCN, ATP, scorer, clause selection, safetensors, graph neural network, learned guidance]
+Keywords: [ENIGMA, graph neural network, GNN, theorem proving, critical pair, clause selection, learned guidance]
 SeeAlso: [TAtpTrainGnn, TAtpLoadGnnScorer, TAtpSaveGnnScorer, TAtpGnnScorerAsset, TFindProofGnnReranked, TAtpSetLearnedScorer]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Learned Guidance: a GNN for Critical-Pair Selection](GnnGuidance)"]
 ---
 
 ## Usage
 
-<code>[TAtpSetGnnScorer]()[*model*]</code> pushes a trained GCN *model* (the `"Model"` Association from [TAtpTrainGnn]()) into the C ATP engine, so a persistent proof handle with a non-zero re-rank period ([TFindProofGnnReranked]()) re-ranks the critical-pair queue by running the graph convolutional network forward on `thvm`'s own tensor runtime in C, with no Wolfram round-trip in the proof loop.
+<code>[TAtpSetGnnScorer]()[*model*]</code> gives the graph neural network *model* to the prover, which then ranks critical pairs with it in a proof search of [TFindProofGnnReranked]().
 
-<code>[TAtpSetGnnScorer]()[*path*]</code> loads a pretrained GCN from a `.safetensors` file (`TSafeTensorLoad`, lazy mmap-backed) and pushes it.
+<code>[TAtpSetGnnScorer]()["*file*"]</code> reads the network from *file* and gives it to the prover.
 
-<code>[TAtpSetGnnScorer]()[Clear]</code> (or `None`) drops the model.
-
-Returns `True` on success, `False` on a malformed model.
+<code>[TAtpSetGnnScorer]()[[Clear]()]</code> removes the network.
 
 ## Details & Options
 
-- This is the Tier-2 graph-neural-network scorer push; the Tier-1 hand-feature analogue is [TAtpSetLearnedScorer]().
-- <code>[TAtpSetGnnScorer]()[*path*]</code> is shorthand for <code>[TAtpSetGnnScorer]()[[TAtpLoadGnnScorer]()[*path*]]</code>.
+- [TAtpSetGnnScorer]() gives [True]() when the prover accepts the network, and [False]() otherwise.
+- *model* is a graph convolutional network (GCN), as [TAtpTrainGnn]() gives in its `"Model"` and [TAtpLoadGnnScorer]() reads from a file. Its first layer takes the 12 node features of [TAtpCpGraph]().
+- The prover runs the network itself, with no evaluation in the Wolfram Language during the proof search.
+- <code>[TAtpSetGnnScorer]()[[None]()]</code> is equivalent to <code>[TAtpSetGnnScorer]()[[Clear]()]</code>.
+- A *model* without the keys `"W1"`, `"Ws"`, `"Bh"`, `"Wout"` and `"Bout"` is refused with the message `TAtpSetGnnScorer::model`, and a network whose first layer does not take 12 features is rejected with the message `TAtpSetGnnScorer::rejected`; both give [False]().
+- [TAtpSetLearnedScorer]() gives the prover a model of critical-pair features instead.
 
 ## Basic Examples
 
-Push the bundled pretrained scorer:
+Give the prover a small network written by hand, with one round and two hidden units:
 
 ```wl
-TAtpSetGnnScorer[TAtpGnnScorerAsset[]]
+TAtpSetGnnScorer[<|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>]
 ```
+
 <!-- => True -->
 
 ## Scope
 
-Drop the scorer and revert:
+Give the prover the bundled pretrained network from its file:
+
+```wl
+TAtpSetGnnScorer[TAtpGnnScorerAsset[]]
+```
+
+<!-- => True -->
+
+---
+
+Remove the network:
 
 ```wl
 TAtpSetGnnScorer[Clear]
 ```
+
 <!-- => True -->
 
-## Properties & Relations
+---
 
-- [TAtpTrainGnn]() produces the `"Model"`; [TAtpLoadGnnScorer]() / [TAtpGnnScorerAsset]() supply a file path; [TAtpSaveGnnScorer]() writes one.
-- [TFindProofGnnReranked]() pushes the model itself, then drives one C-side re-ranked saturation.
-- [TAtpSetLearnedScorer]() is the feature-vector-scorer counterpart.
+[None]() removes the network too:
+
+```wl
+TAtpSetGnnScorer[None]
+```
+
+<!-- => True -->
+
+## Properties and Relations
+
+[TFindProofGnnReranked]() gives a network to the prover and ranks the critical pairs of a proof search with it:
+
+```wl
+TFindProofGnnReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, TAtpLoadGnnScorer[TAtpGnnScorerAsset[]]]
+```
+
+<!-- => "PROVED" -->
 
 ## Possible Issues
 
-- A malformed model returns `False` (no exception); check the return before assuming the scorer was installed.
+A model without the weights of a GCN is refused:
+
+```wl
+TAtpSetGnnScorer[<|"Kind" -> "GNN", "W1" -> {1, 2}|>]
+```
+
+<!-- => the message TAtpSetGnnScorer::model is issued and the result is False -->
+
+---
+
+A network whose first layer takes 6 features instead of 12 is rejected:
+
+```wl
+TAtpSetGnnScorer[<|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{6, 2}]]}, "Ws" -> {N[IdentityMatrix[{6, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>]
+```
+
+<!-- => the message TAtpSetGnnScorer::rejected is issued and the result is False -->

@@ -4,46 +4,143 @@ Name: TATP
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TATP
-Keywords: [ATP, raw saturator, Waldmeister, .pr file, statistics]
+Keywords: [theorem proving, ATP, saturation, completion, Waldmeister, .pr file, statistics]
 SeeAlso: [TFindProof, TRelevantAxioms, TAtpSchedule]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)"]
 ---
 
 ## Usage
 
-<code>[TATP]()[$axioms$, $conjecture$]</code> runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with `"Status"`, `"Steps"`, `"Rules"`, `"QueueSize"`.  Variables are written as patterns (`x_`): universally quantified in an axiom, unification (witness) variables in the conjecture.
+<code>[TATP]()[*axioms*, *conjecture*]</code> runs the saturation prover on the equational *axioms* and *conjecture*, and gives an Association describing the outcome.
 
-<code>[TATP]()[File["$path$.pr"]]</code> parses a Waldmeister `.pr` spec file via the C-side `wald_parse_file` and runs the saturator directly.
+<code>[TATP]()[[File]()["*file*"]]</code> runs the saturation prover on a problem in the Waldmeister `.pr` format.
 
 ## Details & Options
 
-- [TATP]() is the lower-level cousin of [TFindProof](): same C engine, simpler return shape.  Use it when you want the raw saturation statistics without the `ProofObject` reconstruction pass.
-- `"Status"` is the engine's raw terminal tag: `"PROVED"`, `"REFUTED"`, `"TIMEOUT"` (the `MaxSteps` budget ran out), or `"QUEUE_EMPTY"` (saturated without reaching the goal).
-- Options are `MaxSteps` (the selection budget, default 64), `Witness`, `AllWitnesses`, `MaxDepth`, and `MaxWitnesses`.  The [TFindProof]() options (`Method`, `TimeConstraint`, ...) are **not** accepted here - this is the raw fixed-strategy saturator.
-- Unlike [TFindProof]() (which Skolemizes goal variables into constants for the universally-quantified reading), the raw saturator treats the conjecture's pattern variables as unification variables: `Witness -> {$x_, ...$}` captures their bindings on a successful proof, and `AllWitnesses -> True` enumerates bounded existential proofs with `MaxDepth` / `MaxWitnesses` caps.
-- Write axioms over inert operators ([CircleTimes](), [CenterDot](), a plain head `f`).  An evaluating operator like [Times]() is `Flat` and `Orderless`, so the axioms mangle before the (held) encoding sees them.
+- [TATP]() runs unfailing Knuth-Bendix completion with one fixed strategy and reports how the run ended. It gives no proof; [TFindProof]() runs the same engine with a choice of strategies and gives a [ProofObject]().
+- The *axioms* are a list of equations, or a single equation. An equation is written `lhs == rhs` or <code>[ForAll]()[*vars*, *lhs* == *rhs*]</code>, and pattern variables such as `x_` in an axiom are universally quantified.
+- The result has the keys `"Status"`, `"Steps"` (the number of completion steps), `"Rules"` (the number of rewrite rules) and `"QueueSize"` (the number of critical pairs left in the queue).
+- The possible values of `"Status"` are:
+
+| | |
+| --- | --- |
+| `"PROVED"` | the two sides of the conjecture were joined |
+| `"QUEUE_EMPTY"` | the axioms completed without joining the two sides |
+| `"TIMEOUT"` | the [MaxSteps]() budget ran out |
+
+- [TATP]() has attribute [HoldAll](), so an equation such as `a == a` reaches it unevaluated. A <code>[File]()[*path*]</code> argument has to be given with a literal string, or evaluated with [Evaluate](). A file that does not exist issues the message `TATP::nofile` and gives `$Failed`.
+- Equations are best written over operators that do not evaluate, such as [CircleTimes](), [CenterDot]() or an undefined head `f`.
+- The following option can be given:
+
+| | | |
+| --- | --- | --- |
+| [MaxSteps]() | `64` | maximum number of completion steps |
 
 ## Basic Examples
 
-Prove that the inverse is an involution, from the right-unit / right-inverse / associativity axioms:
+Prove that the inverse is an involution, from the right identity, right inverse and associativity axioms:
 
 ```wl
-TATP[
-    {x_ \[CircleTimes] 1 == x_,
-     x_ \[CircleTimes] inv[x_] == 1,
-     x_ \[CircleTimes] (y_ \[CircleTimes] z_) == (x_ \[CircleTimes] y_) \[CircleTimes] z_},
-    inv[inv[a]] == a]
+TATP[{x_ \[CircleTimes] 1 == x_, x_ \[CircleTimes] inv[x_] == 1, x_ \[CircleTimes] (y_ \[CircleTimes] z_) == (x_ \[CircleTimes] y_) \[CircleTimes] z_}, inv[inv[a]] == a]
 ```
+
 <!-- => <|"Status" -> "PROVED", "Steps" -> 41, "Rules" -> 8, "QueueSize" -> 11|> -->
 
-A Waldmeister `.pr` benchmark file:
+---
+
+A conjecture that does not follow from the axioms completes without a proof:
 
 ```wl
-TATP[File["tests/data/atp/wolfram_axiom_literal.pr"]]
+TATP[{f[f[x_]] == x_}, f[a] == a]
 ```
-<!-- => <|"Status" -> "PROVED", "Steps" -> 6, "Rules" -> 1, "QueueSize" -> 4|> -->
 
-## Properties & Relations
+<!-- => <|"Status" -> "QUEUE_EMPTY", "Steps" -> 2, "Rules" -> 1, "QueueSize" -> 0|> -->
 
-- [TFindProof]() wraps the same engine with a verifier-shaped `ProofObject` reconstruction pass, the `Method` strategy surface, `TimeConstraint`, and the relevance filter.  Reach for [TFindProof]() when you want a real Wolfram `ProofObject` (the [FindEquationalProof]() interface); see [the AtpMethods tech note](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods) for the strategy catalog.
-- The `.pr` file driver is the same `wald_parse_file` entry the C-side bench harness uses, so a Waldmeister benchmark file runs identically here and at the C bench.
+## Scope
+
+A single axiom can be given without a list, and quantified with [ForAll]():
+
+```wl
+TATP[ForAll[{x, y, z}, f[f[x, y], z] == f[x, f[y, z]]], f[f[a, b], f[c, d]] == f[a, f[b, f[c, d]]]]
+```
+
+<!-- => <|"Status" -> "PROVED", "Steps" -> 2, "Rules" -> 1, "QueueSize" -> 0|> -->
+
+---
+
+Write a problem in the Waldmeister `.pr` format to a file:
+
+```wl
+file = Export[FileNameJoin[{$TemporaryDirectory, "involution.pr"}], "NAME involution\nMODE PROOF\nSORTS ANY\nSIGNATURE a: -> ANY\n          f: ANY -> ANY\nORDERING LPO\n         f > a\nVARIABLES x : ANY\nEQUATIONS f(f(x)) = x\nCONCLUSION f(f(f(a))) = f(a)\n", "Text"]
+```
+
+<!-- => the path of involution.pr in $TemporaryDirectory -->
+
+Run the prover on the file, evaluating the argument that [TATP]() holds:
+
+```wl
+TATP[Evaluate[File[file]]]
+```
+
+<!-- => <|"Status" -> "PROVED", "Steps" -> 2, "Rules" -> 1, "QueueSize" -> 0|> -->
+
+## Options
+
+### MaxSteps
+
+A small budget stops the completion before it joins the two sides:
+
+```wl
+TATP[{x_ \[CircleTimes] 1 == x_, x_ \[CircleTimes] inv[x_] == 1, x_ \[CircleTimes] (y_ \[CircleTimes] z_) == (x_ \[CircleTimes] y_) \[CircleTimes] z_}, inv[inv[a]] == a, MaxSteps -> 10]
+```
+
+<!-- => <|"Status" -> "TIMEOUT", "Steps" -> 32, "Rules" -> 7, "QueueSize" -> 9|> -->
+
+## Properties and Relations
+
+[TFindProof]() proves the same theorem and gives a [ProofObject]():
+
+```wl
+TFindProof[inv[inv[a]] == a, {x_ \[CircleTimes] 1 == x_, x_ \[CircleTimes] inv[x_] == 1, x_ \[CircleTimes] (y_ \[CircleTimes] z_) == (x_ \[CircleTimes] y_) \[CircleTimes] z_}]
+```
+
+<!-- => a ProofObject summary box, logic EquationalLogic -->
+
+---
+
+[TATP]() holds its arguments, so a goal `a == a` is not evaluated to [True]() first:
+
+```wl
+TATP[{f[x_] == x_}, a == a]
+```
+
+<!-- => <|"Status" -> "PROVED", "Steps" -> 1, "Rules" -> 0, "QueueSize" -> 1|> -->
+
+## Possible Issues
+
+Write the problem to a file:
+
+```wl
+file = Export[FileNameJoin[{$TemporaryDirectory, "involution.pr"}], "NAME involution\nMODE PROOF\nSORTS ANY\nSIGNATURE a: -> ANY\n          f: ANY -> ANY\nORDERING LPO\n         f > a\nVARIABLES x : ANY\nEQUATIONS f(f(x)) = x\nCONCLUSION f(f(f(a))) = f(a)\n", "Text"]
+```
+
+<!-- => the path of involution.pr in $TemporaryDirectory -->
+
+[TATP]() holds its arguments, so a file name given through a variable is not evaluated, and the input returns unevaluated:
+
+```wl
+TATP[File[file]]
+```
+
+<!-- => TATP[File[file]] -->
+
+---
+
+A file that does not exist issues a message and gives `$Failed`:
+
+```wl
+TATP[File["/nonexistent/problem.pr"]]
+```
+
+<!-- => the message TATP::nofile is issued and the result is $Failed -->

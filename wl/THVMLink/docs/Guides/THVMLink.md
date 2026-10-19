@@ -5,203 +5,176 @@ Title: THVMLink
 Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/guide/THVMLink
-Description: Wolfram Language bridge to thvm - observe and drive the interaction-net runtime.
-Keywords: [interaction net, HVM, tensor, JIT, autodiff, ATP, equational]
-RelatedGuides: [ComputationalGraphs, NeuralNetworks, EquationalProofs]
-Links: ["[thvm on GitHub](https://github.com/sw1sh/thvm)"]
+Description: Lambda terms and their reduction as interaction nets, lazy tensor graphs compiled to kernels, gradients, memory plans, runtime snapshots and equational theorem proving
+Keywords: [interaction net, lambda calculus, superposition, reduction, tensor, lazy graph, kernel, automatic differentiation, gradient, training, memory plan, snapshot, theorem proving, equational logic]
+RelatedTutorials: [Overview, Tensors, Train, Gpt2, ATP, AtpMethods, Disproof, FindReplacePath, TPTPImport, Waldmeister, SMT, GnnGuidance]
+Links: ["[thvm source repository](https://github.com/sw1sh/thvm)", "[Neural Networks](https://reference.wolfram.com/language/guide/NeuralNetworks.html)", "[Theorem Proving](https://reference.wolfram.com/language/guide/TheoremProving.html)"]
 ---
 
 ## Abstract
 
-THVMLink is the Wolfram-language driver for `thvm`, a tensor-aware interaction-
-combinator runtime. One symbolic graph carries lambda terms, the tensor UOp
-DAG, and the kernel schedule; the same paclet renders the live heap as an IC
-string diagram, plans buffer lifetimes, fires autodiff over the heap, autotunes
-the CPU/CUDA/Metal back ends, and proves equational theorems through the
-C-side ATP. Bring a tensor with <code>[TTensorCreate]()</code>, build a
-combinator term with <code>[TLam]()</code> or a UOp graph with the `TUOp*`
-family, and drive it through <code>[TRealize]()</code> on whichever back end
-the active <code>[TContext]()</code> selects.
+THVMLink computes with `thvm`, a runtime that evaluates programs by rewriting an interaction net held in one heap. It covers lambda terms and superpositions and their reduction; the inspection of terms and the heap, and drawings of interaction nets and reductions; tensors, whose arithmetic builds a lazy graph of micro-operations; the kernels such a graph compiles to, with their schedules and memory plans; gradients, training and models; runtime contexts and their snapshots; and equational theorem proving, with ground decision procedures, external provers and learned proof guidance.
 
 ## Functions
 
-### Lifecycle
+### Lambda terms and superpositions
 
-- `TInit` initializes the runtime
-- `TFree` tears the runtime down
-- `TReset` zeroes the heap, the WNF stack, and the interaction counter
+- `TLam` a lambda whose variable is a symbol
+- `TApp` the application of a term to an argument
+- `TNum` a number term
+- `TOp2` an integer operation on two terms
+- `TSup` a superposition of two terms, standing for both at once
+- `TDup` the two copies of a duplicated term
+- `TEra` the eraser, a term that discards what it interacts with
+- `TCtr` a constructor with an integer label and children
+- `TMatCtr` a matcher that dispatches on the label of a constructor
+- `TIfZero` a conditional on whether a number term is 0
+- `TEql` a test of structural equality that reduces to 1 or 0
 
-### Term calculus
-
-- `TLam` constructs a lambda; bodies that are UOp graphs JIT into a kernel on first application
-- `TApp` constructs an application
-- `TSup` constructs a SUP (superposition) with a fresh label
-- `TDup` constructs a DUP and returns the projected pair `{dp0, dp1}`
-- `TEra` constructs an eraser
-- `TVarFor` constructs a VAR pointing at a binder loc
-- `TFreshLabel` returns the next monotonic SUP/DUP label
+- `TMatNum`, `TMatChain`, `TDsu`, `TDdu`, `TAny`, `TVarFor`, `TBookCtr`, `TFreshLabel`
 
 ### Reduction
 
-- `TWnf` reduces to weak normal form
-- `TNf` reduces to full normal form by firing every reachable redex
-- `TCnf` runs the readback layer that lifts the first SUP to the top
-- `TStep` fires exactly one interaction
-- `TInteract` fires one named redex by its `TTerm` key
-- `TRedexes` lists every redex in the live heap
-- `TCollapse` enumerates the SUP-tree of a term as a list of leaves
-- `TReduce` reduces in-place and returns the original root
+- `TWnf` reduce a term to weak normal form
+- `TNf` reduce a term to full normal form
+- `TCollapse` the list of values a superposition stands for
+- `TCnf` reduce a term to collapsed normal form, with superpositions lifted to the top
+- `TStep` fire at most one interaction at the head of a term
+- `TReduce` reduce a term to weak normal form in place
+- `TRedexes` the redexes in the live heap
+- `TInteract` fire the interaction at one redex
+- `TItrs` the number of interactions fired so far
 
-### Inspection
+- `TStack`, `TTermEq`, `TTermSame`
 
-- `TTermExpr` walks the heap and returns a tag-headed nested expression
-- `TTermTree` renders `TTermExpr` as a Wolfram `Tree`
-- `TTermSubexprs` returns every `path -> subterm` rule, pre-order DFS
-- `TTermShape` runs the runtime's `term_shape_in` shape inference
-- `THeap` returns an Association snapshot of the live heap
-- `THeapGraph` renders the heap as an IC string-diagram Graph
-- `THeapDiagram` renders the heap as a `DiagramNetwork`
+### Inspecting terms and the heap
+
+- `TTerm` a term of the runtime
+- `Term` the nested canonical form of a term
+- `TTermExpr` a nested expression of the tag names of the cells a term reaches
+- `TTermTree` the tag names of the cells a term reaches as a tree
+- `TTermSubexprs` the subterms of a term together with their positions
+- `TTermVal` the value field of a term, such as the value of a number
+
+- `TSubexprAt`, `TTermTag`, `TTagName`, `TTermExt`, `TTermSub`, `THeapRead`, `THeapSet`, `THeapAlloc`, `THeapPos`, `THeapBase`, `TBookRead`, `TGCCollect`, `TExternPinCount`
+
+### Drawing interaction nets and reductions
+
+- `THeapGraph` the interaction net of a term as a graph
+- `THeapDiagram` the interaction net of a term as a string diagram
+- `TMultiwayGraph` the multiway graph of the reduction of a term
+- `TCausalGraph` the causal graph of the interactions that reduce a term
+- `TMultiTrace` a record of each step of the reduction of a term
+- `TMultiTraceQ` whether the runtime can record the events of a reduction
 
 ### Tensors
 
-- `TTensor` allocates a tensor with given shape and dtype
-- `TTensorCreate` builds a tensor from a `NumericArray` or nested list, zero-copy on CPU
-- `TTensorShape` returns the tensor's shape
-- `TTensorData` reads the tensor's buffer as a `NumericArray`
-- `TTensorDType` returns the dtype as a string
-- `TSet` writes the bytes of one tensor into another's backing buffer in place
+- `TTensorCreate` a tensor holding the numbers of a list or a numeric array
+- `TTensorShape` the shape of a tensor
+- `TTensorDType` the element type of a tensor
+- `Plus` (WL), `Times` (WL), `Power` (WL), `Dot` (WL), `Total` (WL), `Transpose` (WL), `ArrayReshape` (WL), `ArrayReduce` (WL) arithmetic and array operations, which on tensors build a lazy graph
+- `TRealize` compute a lazy tensor graph, giving a tensor of its values
+- `Normal` (WL) the values of a computed tensor as a list
+- `TTensorData` the values of a tensor as a numeric array
+- `TSet` write new values into the buffer of a tensor in place
+- `TMatMul` the matrix product of two tensors
+- `TWhere` an elementwise choice between two tensors by a mask
 
-### UOp graph constructors
+- `TMaximum`, `TMinimum`, `TClip`, `TGather`, `TTakeAlongAxis`
 
-- `TUOpAdd` builds elementwise `+`
-- `TUOpMul` builds elementwise `*`
-- `TUOpNeg`, `TUOpRecip`, `TUOpExp2`, `TUOpLog2`, `TUOpSqrt` build the corresponding unary nodes
-- `TUOpCmplt`, `TUOpCmpeq` build comparison masks
-- `TUOpReshape`, `TUOpPermute`, `TUOpExpand`, `TUOpPad`, `TUOpShrink`, `TUOpFlip` build the movement primitives
-- `TUOpReduce` builds a `SUM` or `MAX` reduction along one axis
-- `TUOpCast` value-preservingly casts to a named dtype
-- `TUOpBitcast` reinterprets bits at the same itemsize
-- `TUOpGrad` builds the backward projection of a grad cell
-- `TUOpLoad`, `TUOpStore`, `TUOpBuffer`, `TUOpRange`, `TUOpIndexE`, `TUOpAfter`, `TUOpOpt` build the Phase E index-layer primitives
+### Graphs of micro-operations
 
-### Materialization and dispatch
-
-- `TMaterialize` schedules the UOp DAG into kernels without dispatching
-- `TRealize` materializes then drives the result through `TWnf`
-- `TAssign` lazily writes a source UOp's result into a destination tensor
-- `TGrad` is `loss.backward()` - one walk that auto-grads every reachable float leaf
-- `TGradOf` returns a leaf's lazy accumulated gradient
-- `TClearGrad` zeroes a leaf's gradient (PyTorch `zero_grad` analogue)
-
-### Neural-net building blocks
-
-- `TLinear` is the `nn.Linear` analogue, `x @ W + b` with broadcasted bias
-- `TConv2D` is a stride-1, no-pad 2-D convolution, dispatched via im2col + `cblas_sgemm`
-- `TMatMul`, `TMatVec`, `TDot` are the matrix / vector / inner-product surface
-- `TReLU`, `TTanh`, `TGELU`, `TSoftmax`, `TLog` are the activations
-- `TLayerNorm`, `TLayerNormAffine`, `TBatchNorm`, `TBatchNormTrain` are the normalization layers
-- `TAttention`, `TMultiHeadAttention`, `TCausalMask`, `TEmbedding`, `TEmbeddingMatrix` are the transformer primitives
-- `TCrossEntropyLoss`, `TCategoricalCrossEntropy`, `TSparseCategoricalCrossEntropy`, `TMSELoss`, `TL2Loss` are the losses
-- `TGlorot`, `TZeros`, `TOnes`, `TZerosLike`, `TOneHot` are the initializers
-- `TFromNet`, `TFromLayer`, `TLayerWeights`, `TLayerToTensors` import a Wolfram NN expression into a UOp graph
-
-### Optimization
-
-- `TAdam` is the Adam optimizer wrapper
-- The single-step SGD update is conventionally expressed as `TSet[w, w - lr * grad]`
+- `TUOpAdd` the node for an elementwise sum
+- `TUOpMul` the node for an elementwise product
+- `TUOpNeg` the node for an elementwise negation
+- `TUOpConst` the node for a constant
+- `TUOpReduce` the node for a sum or a maximum along an axis
+- `TUOpReshape` the node for a view of a tensor in a new shape
+- `TUOpPermute` the node for a reordering of the axes of a tensor
 
 ### Kernels
 
-- `TKernel` wraps a UOP_KERNEL term as a typed object with a property surface
-- `TKernelSource` returns the C99 or Metal source of a lifted kernel
-- `TKernelInfo` returns the input/output shape header
-- `TKernelStoreRoot` returns the lifted UOp DAG as a `TTerm`
-- `TKernelDispatch` dispatches the kernel; same as calling `k[]`
-- `TOpt` builds a typed kernel-optimization action (UPCAST, UNROLL, LOCAL, GLOBAL, TC, ...)
-- `TKernelOpts` returns the axis-typed scheduling plan
-- `TKernelApplyOpt` mutates the plan with one `TOpt`
-- `TKernelProposed` lists the C-side proposer's candidate `TOpt`s
-- `TKernelAutotune`, `TKernelAutotuneAll`, `TKernelAutotuneUnique`, `TKernelAutotuneTop` benchmark proposed candidates and apply the winner
-- `TKernelVariants` returns each proposed candidate's wallclock without committing
-- `TKernelTable`, `TKernelCount`, `TKernelInputs` are the side-table accessors
+- `TMaterialize` schedule a lazy tensor graph into kernels without running them
+- `TKernel` a scheduled kernel as an object with properties
+- `TKernelSource` the C or Metal source code of a kernel
+- `TKernelFlops` an estimate of the arithmetic operations in one dispatch of a kernel
+- `TKernelProposed` candidate optimizations of the loop schedule of a kernel
+- `TKernelApplyOpt` apply an optimization to the loop schedule of a kernel
+- `TKernelCount` the number of entries in the kernel table of the runtime
 
-### Memory and profiling
+### Schedules and memory
 
-- `TMemoryPlan` returns a per-buffer alive-span snapshot, alias-aware
-- `TMemoryPlanReport` formats it as a `Column` with top-k by bytes and span
-- `TMemoryPlanGantt` renders the buffer life cycle as a Gantt chart
-- `TCpuBufTable`, `TMetalBufTable`, `TMetalBufSummary`, `TMetalMemoryProfile` are the backend buffer tables
-- `TMetalGpuTime`, `TMetalPerOpProfile` are the Metal GPU-time accessors
-- `TProfile` is the headline-metric snapshot (cells by tag, tensors, kernels, interactions)
-- `TProfileTable`, `TProfileGrowth`, `TProfilePlot`, `TProfileReport` are the multi-snapshot views
-- `THotCounters`, `THotCountersDelta`, `THotCountersReport` expose the per-context hot-path counters
+- `TScheduleGraph` the graph of the kernels of the current schedule
+- `TMemoryPlan` the kernels, tensors and buffers of the current schedule
+- `TMemoryPlanReport` a text summary of a memory plan
+- `TMemoryPlanGantt` the lifetimes of the buffers of a memory plan as a Gantt chart
 
-### Visualization
+### Gradients
 
-- `THeapGraph` renders the IC string diagram
-- `THeapDiagram` renders the diagram-network form via `DiagrammaticComputation`
-- `TScheduleGraph` renders the kernel DAG
-- `TMemoryPlanGantt` renders the buffer Gantt
+- `TGrad` differentiate a scalar with respect to every floating-point tensor it depends on
+- `TGradOf` the gradient held for a tensor
+- `TClearGrad` clear the gradient held for a tensor
 
-### Snapshots
+### Training and models
 
-- `TContextSnapshot` captures every live heap cell, book cell, tensor, definition, and ALO state
-- `TInitialize` restores a snapshot into a fresh runtime
-- `TContextStrip` drops the tensor buffers for a small portable copy
-- `TContextToTermTree` renders the snapshot's term tree without touching the runtime
+- `TGlorot` random weights for a layer, scaled by its number of inputs
+- `TJit` a closure that records the kernels a function dispatches and replays them
+- `TBench` timing and memory measurements of a training step
+- `FluxGenerate` an image generated from a text prompt by a text-to-image model
 
-### Contexts (back-end + heap partitioning)
+### Runtime contexts and snapshots
 
-- `TContext` is the typed handle to a runtime context
-- `TContextNew` allocates a fresh context with a given default device
-- `TContextDestroy` frees a context's C-side state
-- `TContextCurrent` returns the active context
-- `TContextList` lists every allocated context
-- `TInContext` evaluates a body with `$TContext` rebound
+- `TInit` initialize the runtime
+- `TReset` empty the heap of the runtime and restart its counters
+- `TContext` a runtime context, or a snapshot of one
+- `TContextSnapshot` a snapshot of the runtime as an expression
+- `TInitialize` restore a snapshot into the runtime
+- `TContextStrip` a snapshot with the data of each tensor replaced by its shape
 
-### Benchmarking
+### Equational theorem proving
 
-- `TBench` runs a training step under controlled timing and snapshots the memory plan
-- `TBenchReport` formats a `TBench` result for stdout
-- `TBenchExport` writes the report to a file for diffing
+- `TFindProof` prove a theorem from equational axioms, giving a proof object
+- `ProofObject` (WL) a proof as an object with properties
+- `FindEquationalProof` (WL) the built-in prover for equational theorems
+- `TProofObject` a proof object in the native form of the runtime
+- `TToProofObject` convert a native proof object to a built-in proof object
+- `TFindEquationalPath` the rewrite path from one side of a theorem to the other
+- `TFindStringProof` prove a theorem about rewriting strings
+- `TStringPath` the rewrite path of a string theorem as a list of words
+- `CounterexampleObject` a disproof of a conjecture by a counterexample
+- `TFindFiniteModels` finite models of a set of relations as multiplication tables
+- `TRelevantAxioms` the axioms a relevance filter keeps for a conjecture
+- `TAtpSchedule` the list of configurations a proving method runs
+- `TAtpDescribeMethod` the settings a proving method resolves to
+- `PortfolioFrontLoad` an option giving the first configurations of a schedule twice their share of the time
+- `TATP` run the saturation engine on axioms and a conjecture
+- `TFindEquationalProof` an earlier name of TFindProof
 
-### Multiway and pattern surface
+### Ground decision procedures
 
-- `TMultiwayGraph` builds the multiway reduction graph
-- `TPattern`, `TMatchQ`, and the `Rewrite.wl` surface drive WL-side pattern-rewriting against `TTerm`
-- `TLazy` exposes lazy WL expressions to the runtime
-
-### Theorem proving (`WolframInstitute`THVMLink`ATP``)
-
-- `TFindProof` runs the C-engine equational completion and returns a Wolfram `ProofObject`; predicate-logic input is equationalized automatically
-- `TFindEquationalProof` is a deprecated alias for `TFindProof`
-- `TProofObject` is the native thvm proof object (`TFindProof[..., "ProofForm" -> "TProofObject"]`)
-- `TToProofObject` converts a `TProofObject` to the built-in `ProofObject`
-- `TFindEquationalPath` returns the witnessing rewrite path from one term to another
-- `TFindStringProof` proves string-rewriting theorems; `TStringPath` decodes the word-level path
-- `CounterexampleObject` is the disproof artifact `TFindProof[..., "Counterexample"]` returns
-- `TFindFiniteModels` finds finite multiplication-table models of equational relations
-- `TSatEUF` and `TSmtDecide` decide ground problems by congruence closure
-- `TRelevantAxioms` reports the relevance filter's `Kept` / `Dropped` partition without running a proof
-- `TAtpSchedule` returns the per-config schedule a `Method` would expand to
-- `TAtpDescribeMethod` describes a `Method` preset's defaults
-- `TATP` is the lower-level entry point that consumes a Waldmeister `.pr` file or raw equational axioms
+- `TSatEUF` decide equalities and disequalities between terms built from uninterpreted functions
+- `TSmtDecide` decide the satisfiability of a Boolean combination of equalities and predicates
 
 ### External provers
 
-- `TVampireProof`, `TTweeProof`, `TEproverProof` run the local Vampire / Twee / E binaries on a TPTP problem
-- `TWaldmeisterProof` runs the local `wmcli` binary on a Waldmeister `.pr` problem
-- `TVampireProofObject`, `TTweeProofObject`, `TEproverProofObject`, `TWaldmeisterProofObject` lift those results into thvm-shaped proofs (the `Method -> "*Process"` dispatch targets)
-- `TSZSDerivationToProofObject` is the shared SZS-derivation lift; `$SZSRuleToConstruct` maps SZS rule names to proof constructs
+- `TVampireProof` run the Vampire prover on a problem file
+- `TTweeProof` run the Twee prover on a problem file
+- `TEproverProof` run the E prover on a problem file
+- `TWaldmeisterProof` run the Waldmeister prover on a problem file
+- `TVampireProofObject`, `TTweeProofObject`, `TEproverProofObject`, `TWaldmeisterProofObject` a proof from an external prover in the form of the runtime's proofs
+- `TSZSDerivationToProofObject` a proof from a derivation in the SZS output format
 
-### Learned guidance (ENIGMA)
+### Learned proof guidance
 
-- `TAtpCpDataset` records labelled critical-pair feature rows; `TAtpTrainScorer` trains the Tier-1 scorer; `TAtpSetLearnedScorer` pushes it (`Method -> "ENIGMA"`)
-- `TAtpCpGraph` / `TAtpCpGraphEquation` encode and decode the anonymized equation hypergraph
-- `TAtpGraphDataset` builds a labelled graph dataset; `TAtpTrainGnn` trains the graph convolutional scorer
-- `TAtpGnnScore` scores graphs; `TAtpSetGnnScorer`, `TAtpSaveGnnScorer`, `TAtpLoadGnnScorer`, `TAtpGnnScorerAsset` manage the pushed / serialized model
-- `TFindProofReranked` re-ranks the live critical-pair queue from Wolfram; `TFindProofGnnReranked` runs the same loop entirely in C
+- `TAtpCpDataset` labeled features of the critical pairs a prover processes
+- `TAtpTrainScorer` train a model that scores critical pairs
+- `TAtpSetLearnedScorer` make the prover select critical pairs with a trained model
+- `TAtpCpGraph` an equation as a graph for a graph neural network
+- `TAtpCpGraphEquation` the equation a graph encodes
+- `TAtpGraphDataset` a labeled dataset of equation graphs from proofs
+- `TAtpTrainGnn` train a graph convolutional network on equation graphs
+- `TAtpGnnScore` the scores a trained network gives equation graphs
+- `TFindProofReranked` prove a theorem, reordering the critical pairs with a trained network
+- `TFindProofGnnReranked` prove a theorem with a trained network scoring critical pairs inside the prover
 
-### Tutorials
-
-- [Overview tutorial](paclet:WolframInstitute/THVMLink/tutorial/Overview) walks an end-to-end forward + backward pass and prints the resulting heap, schedule, and Metal source.
+- `TAtpSetGnnScorer`, `TAtpSaveGnnScorer`, `TAtpLoadGnnScorer`, `TAtpGnnScorerAsset`

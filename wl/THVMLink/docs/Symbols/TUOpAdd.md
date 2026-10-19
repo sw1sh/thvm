@@ -4,85 +4,213 @@ Name: TUOpAdd
 Context: WolframInstitute`THVMLink`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TUOpAdd
-Keywords: [UOp, add, elementwise, tensor]
-SeeAlso: [TUOpMul, TUOpReduce, TUOpReshape, TRealize, TMaterialize, TGrad]
+Keywords: [UOp, add, sum, elementwise, graph node, tensor]
+SeeAlso: [TUOpMul, TUOpNeg, TUOpConst, TUOpReduce, TRealize, Plus]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
-<code>[TUOpAdd]()[$a$, $b$]</code> builds a `UOP_ADD` node representing the elementwise sum of two UOp inputs.
+<code>[TUOpAdd]()[*a*, *b*]</code> gives the graph node for the elementwise sum of *a* and *b*.
+
+<!-- #| annotation: 26.10.19: TUOpAdd allocates a UOP_ADD heap node over the raw terms of its operands (thvm_wl_uop_binary) with no lifting or shape check; the Plus UpValue on TTerm is the user surface and lifts numbers with liftNumeric. A bare integer operand is read as a raw term id and builds a meaningless node, and tensors of different shapes are not broadcast but read past the smaller buffer (both reported 26.10.19), so the page sticks to TUOpConst for numbers and to equal shapes. -->
 
 ## Details & Options
 
-- Lazy: the node sits in the heap until <code>[TMaterialize]()</code> schedules it or <code>[TRealize]()</code> fires it. No buffer is allocated or written until then.
-- Broadcasts when one side carries a broadcastable shape. For an explicit broadcast, wrap with <code>[TUOpExpand]()</code> first.
-- Differentiable: <code>[TGrad]()</code> threads the cotangent through both inputs.
-- `TTensor` leaves and <code>[TUOpConst]()</code> leaves are accepted directly; bare integers and reals are NOT lifted automatically into UOPs (use <code>[TUOpConst]()</code> or wrap in <code>[TTensorCreate]()</code>).
+- *a* and *b* are tensors, other graph nodes, or constants made with <code>[TUOpConst]()</code>. A number must be made a constant with <code>[TUOpConst]()</code> first.
+- The node is lazy, with kind `ADD` and the two operands as sources. <code>[TRealize]()</code> computes it, and <code>[Normal]()</code> reads the values back.
+- Tensor operands have the same shape. A <code>[TUOpConst]()</code> constant is added to every element.
+- On [TTerm]() objects, *a* + *b* builds the same kind of node and converts numbers to constants itself; *a* - *b* adds *a* to the negation of *b*.
+- Under <code>[TGrad]()</code>, the gradient passes unchanged to both operands.
 
 ## Basic Examples
 
-Add two small tensors:
+A tensor:
 
 ```wl
-TInit[];
-a = TTensorCreate[{1., 2., 3., 4.}];
-b = TTensorCreate[{10., 20., 30., 40.}];
-TTensorData @ TRealize @ TUOpAdd[a, b]
+a = TTensorCreate[{1., 2., 3., 4.}]
 ```
-<!-- => NumericArray[{11., 22., 33., 44.}, "Real32"] -->
+
+<!-- => a TTensor summary box: shape 4, dtype f32 -->
+
+Another:
+
+```wl
+b = TTensorCreate[{10., 20., 30., 40.}]
+```
+
+<!-- => a TTensor summary box: shape 4, dtype f32 -->
+
+The node for their sum:
+
+```wl
+s = TUOpAdd[a, b]
+```
+
+<!-- => a TUOp summary box: kind ADD, srcs 2 -->
+
+Realize it:
+
+```wl
+Normal[TRealize[s]]
+```
+
+<!-- => {11., 22., 33., 44.} -->
 
 ## Scope
 
-Compose with other UOps; the whole graph is lazy until <code>[TRealize]()</code>:
+A tensor:
 
 ```wl
-x = TTensorCreate[{1., 2., 3., 4.}];
-y = TTensorCreate[{5., 6., 7., 8.}];
-TTensorData @ TRealize @ TUOpMul[TUOpAdd[x, y], TUOpAdd[x, y]]
+a = TTensorCreate[{1., 2., 3., 4.}]
 ```
-<!-- => NumericArray[{36., 64., 100., 144.}, "Real32"] -->
+
+<!-- => a TTensor summary box: shape 4, dtype f32 -->
+
+A constant is added to every element:
+
+```wl
+Normal[TRealize[TUOpAdd[a, TUOpConst[0.5]]]]
+```
+
+<!-- => {1.5, 2.5, 3.5, 4.5} -->
+
+An operand may itself be a node, here a product:
+
+```wl
+Normal[TRealize[TUOpAdd[TUOpMul[a, a], a]]]
+```
+
+<!-- => {2., 6., 12., 20.} -->
+
+---
+
+Two matrices of the same shape:
+
+```wl
+m = TTensorCreate[{{1., 2.}, {3., 4.}}]
+```
+
+<!-- => a TTensor summary box: shape 2 x 2, dtype f32 -->
+
+Add the matrix to itself:
+
+```wl
+Normal[TRealize[TUOpAdd[m, m]]]
+```
+
+<!-- => {{2., 4.}, {6., 8.}} -->
+
+---
+
+Integer tensors add exactly:
+
+```wl
+Normal[TRealize[TUOpAdd[TTensorCreate[{1, 2}], TTensorCreate[{10, 20}]]]]
+```
+
+<!-- => {11, 22} -->
 
 ## Applications
 
-`TUOpAdd` underlies the addition operator surface on `TTerm`s; <code>[TLinear]()</code> uses it for `x @ W + b`:
+A tensor:
 
 ```wl
-W = TGlorot[{3, 8}];
-x = TTensorCreate[ConstantArray[1., {1, 3}]];
-b = TZeros[{8}];
-TTensorShape @ TRealize @ TLinear[x, W, b]
+x = TTensorCreate[{0., 1., 2., 3.}]
 ```
-<!-- => {1, 8} - TLinear lowers to TMatMul, which expects rank >= 2 inputs -->
+
+<!-- => a TTensor summary box: shape 4, dtype f32 -->
+
+The affine map $2 x + 1$, built from nodes:
+
+```wl
+Normal[TRealize[TUOpAdd[TUOpMul[x, TUOpConst[2.]], TUOpConst[1.]]]]
+```
+
+<!-- => {1., 3., 5., 7.} -->
 
 ## Properties and Relations
 
-Addition is commutative, so the realized buffers compare equal regardless of source order:
+A tensor:
 
 ```wl
-a = TTensorCreate[{1., 2., 3.}];
-b = TTensorCreate[{4., 5., 6.}];
-TTensorData @ TRealize @ TUOpAdd[a, b] === TTensorData @ TRealize @ TUOpAdd[b, a]
+a = TTensorCreate[{1., 2., 3., 4.}]
 ```
+
+<!-- => a TTensor summary box: shape 4, dtype f32 -->
+
+Another:
+
+```wl
+b = TTensorCreate[{10., 20., 30., 40.}]
+```
+
+<!-- => a TTensor summary box: shape 4, dtype f32 -->
+
+[Plus]() on the tensors computes the same sum:
+
+```wl
+Normal[TRealize[TUOpAdd[a, b]]] === Normal[TRealize[a + b]]
+```
+
+<!-- => True -->
+
+The sum does not depend on the order of the operands:
+
+```wl
+Normal[TRealize[TUOpAdd[a, b]]] === Normal[TRealize[TUOpAdd[b, a]]]
+```
+
 <!-- => True -->
 
 ---
 
-The backward rule is identity in both inputs; the cotangent passes through unchanged:
+A tensor:
 
 ```wl
-w = TTensorCreate[{1., 2., 3.}];
-x = TTensorCreate[{10., 20., 30.}];
-TRealize @ TGrad @ TUOpReduce[TUOpAdd[w, x], 0, "SUM"];
-TTensorData @ TRealize @ TGradOf[w]
+w = TTensorCreate[{1., 2., 3.}]
 ```
-<!-- => NumericArray[{1., 1., 1.}, "Real32"] -->
+
+<!-- => a TTensor summary box: shape 3, dtype f32 -->
+
+Differentiate the sum of $w + w^2$:
+
+```wl
+TGrad[TUOpReduce[TUOpAdd[w, TUOpMul[w, w]], 0, "SUM"]]
+```
+
+<!-- => a TUOp summary box of kind REDUCE -->
+
+The gradient is $1 + 2 w$:
+
+```wl
+Normal[TRealize[TGradOf[w]]]
+```
+
+<!-- => {3., 5., 7.} -->
 
 ## Possible Issues
 
-A shape mismatch is rejected at schedule time, not at construction:
+A tensor:
 
 ```wl
-TMaterialize @ TUOpAdd[TTensorCreate[{1., 2., 3.}], TTensorCreate[{1., 2.}]]
+a = TTensorCreate[{1., 2.}]
 ```
-<!-- => Failure["shape-mismatch", ...] -->
+
+<!-- => a TTensor summary box: shape 2, dtype f32 -->
+
+Each application builds a new node, so two equal sums are different expressions:
+
+```wl
+TUOpAdd[a, a] === TUOpAdd[a, a]
+```
+
+<!-- => False -->
+
+Their values agree:
+
+```wl
+Normal[TRealize[TUOpAdd[a, a]]] === Normal[TRealize[TUOpAdd[a, a]]]
+```
+
+<!-- => True -->

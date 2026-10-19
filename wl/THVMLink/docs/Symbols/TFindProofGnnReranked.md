@@ -4,43 +4,131 @@ Name: TFindProofGnnReranked
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TFindProofGnnReranked
-Keywords: [ENIGMA, GNN, GCN, ATP, critical pair, re-rank, learned guidance, theorem proving, clause selection]
-SeeAlso: [TFindProofReranked, TAtpTrainGnn, TAtpSetGnnScorer, TAtpGnnScore, TFindProof]
+Keywords: [ENIGMA, graph neural network, GNN, theorem proving, critical pair, ranking, learned guidance]
+SeeAlso: [TFindProofReranked, TAtpGnnScore, TAtpSetGnnScorer, TAtpTrainGnn, TAtpLoadGnnScorer, TFindProof]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Learned Guidance: a GNN for Critical-Pair Selection](GnnGuidance)"]
 ---
 
 ## Usage
 
-<code>[TFindProofGnnReranked]()[*conjecture*, *axioms*, *model*]</code> proves the *conjecture* with the trained GCN *model* (the `"Model"` from [TAtpTrainGnn]()) guiding critical-pair selection entirely in C: it pushes the GCN weights into the engine ([TAtpSetGnnScorer]()), then drives one saturation in which the engine re-ranks the live queue every `"RerankPeriod"` selections on `thvm`'s own tensor runtime. Returns the status string (`"PROVED"`, `"TIMEOUT"`, `"QUEUE_EMPTY"`, ...).
+<code>[TFindProofGnnReranked]()[*conjecture*, *axioms*, *model*]</code> proves *conjecture* from *axioms* with the prover ranking its queue of critical pairs by the graph neural network *model*, and gives the status of the proof search.
 
 ## Details & Options
 
-- Unlike [TFindProofReranked]() there is no Wolfram round-trip in the proof loop, so it is far faster. Completeness is preserved: re-ranking only permutes selection order, and the periodic first-in-first-out pick still fires.
-- Options:
-  - `"RerankPeriod"` - how many selections between re-rankings.
-  - `MaxSteps` - the saturation step cap.
-  - `"CriticalPairWeight"`, `"Ordering"`, `"AutoPrecedence"` - the base heuristic the re-rank rides on.
+- *model* is a graph convolutional network (GCN), as [TAtpTrainGnn]() gives in its `"Model"` and [TAtpLoadGnnScorer]() reads from a file.
+- [TFindProofGnnReranked]() gives *model* to the prover with [TAtpSetGnnScorer](), which then ranks the queued critical pairs every `"RerankPeriod"` selections by running the network itself, with no evaluation in the Wolfram Language during the search. The network is removed when the search ends.
+- The status is `"PROVED"`, `"QUEUE_EMPTY"` (the axioms completed without proving the conjecture) or `"TIMEOUT"` (the step budget ran out).
+- The ranking only changes the order in which the critical pairs are processed, and the prover still selects a pair in order of age from time to time, so every proof the prover can find is still found.
+- [TFindProofReranked]() ranks the queue from the Wolfram Language between chunks of the search instead.
+- The following options can be given:
+
+| | | |
+| --- | --- | --- |
+| `"RerankPeriod"` | `200` | number of selections between two rankings |
+| [MaxSteps]() | `30000` | maximum number of steps |
+| `"CriticalPairWeight"` | `"Gt"` | weight that orders new critical pairs between rankings |
+| `"Ordering"` | `"KBO"` | reduction ordering, `"KBO"` (Knuth-Bendix ordering) or `"LPO"` (lexicographic path ordering) |
+| `"AutoPrecedence"` | [True]() | whether to choose the precedence of the symbols from the axioms |
 
 ## Basic Examples
 
-Prove a group-theory goal with the bundled pretrained model guiding selection:
+Prove that the inverse is an involution, ranking the critical pairs with the bundled pretrained network:
 
 ```wl
-model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
-axioms = {
-    ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]],
-    ForAll[{x}, CircleTimes[x, ident] == x],
-    ForAll[{x}, CircleTimes[x, inv[x]] == ident]};
-TFindProofGnnReranked[ForAll[{x}, CircleTimes[ident, x] == x], axioms, model,
-    "RerankPeriod" -> 50, MaxSteps -> 8000]
+TFindProofGnnReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, TAtpLoadGnnScorer[TAtpGnnScorerAsset[]]]
 ```
+
 <!-- => "PROVED" -->
 
-## Properties & Relations
+## Scope
 
-- [TFindProofReranked]() does the same re-ranking from Wolfram (each chunk scored with [TAtpGnnScore]() over the persistent-handle bridge); this symbol keeps the whole loop in C.
-- [TAtpTrainGnn]() produces the `"Model"`; [TAtpSetGnnScorer]() is the explicit push this calls internally.
+Rank with a small network written by hand, with one round and two hidden units:
 
-## Possible Issues
+```wl
+TFindProofGnnReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, <|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>]
+```
 
-- Whether learned guidance speeds up a proof depends on the scorer's quality and how aggressively it coops with the primary heuristic; a cold or over-fit model only slows a proof, never loses one (the periodic FIFO pick preserves completeness).
+<!-- => "PROVED" -->
+
+---
+
+A conjecture that does not follow from the axioms ends with an empty queue:
+
+```wl
+TFindProofGnnReranked[f[a] == a, {f[f[x_]] == x_}, <|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>]
+```
+
+<!-- => "QUEUE_EMPTY" -->
+
+## Options
+
+### RerankPeriod
+
+Rank the queue every five steps:
+
+```wl
+TFindProofGnnReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, <|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, "RerankPeriod" -> 5]
+```
+
+<!-- => "PROVED" -->
+
+### MaxSteps
+
+A small step budget stops the search before the proof:
+
+```wl
+TFindProofGnnReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, <|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, MaxSteps -> 5]
+```
+
+<!-- => "TIMEOUT" -->
+
+### CriticalPairWeight
+
+Order new critical pairs by their size:
+
+```wl
+TFindProofGnnReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, <|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, "CriticalPairWeight" -> "Add"]
+```
+
+<!-- => "PROVED" -->
+
+### Ordering
+
+Orient the rules with the lexicographic path ordering:
+
+```wl
+TFindProofGnnReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, <|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, "Ordering" -> "LPO"]
+```
+
+<!-- => "PROVED" -->
+
+### AutoPrecedence
+
+Keep the default precedence of the symbols:
+
+```wl
+TFindProofGnnReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, <|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, "AutoPrecedence" -> False]
+```
+
+<!-- => "PROVED" -->
+
+## Properties and Relations
+
+[TFindProof]() proves the same theorem without a network:
+
+```wl
+TFindProof[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, "Status"]
+```
+
+<!-- => "Proved" -->
+
+---
+
+[TFindProofReranked]() ranks with the same network:
+
+```wl
+TFindProofReranked[inv[inv[a]] == a, {ForAll[{x, y, z}, CircleTimes[CircleTimes[x, y], z] == CircleTimes[x, CircleTimes[y, z]]], ForAll[x, CircleTimes[x, ident] == x], ForAll[x, CircleTimes[x, inv[x]] == ident]}, <|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>]
+```
+
+<!-- => "PROVED" -->

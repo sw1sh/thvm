@@ -155,7 +155,7 @@ termFromTTermDepth[t_TTerm, d_Integer] := Block[{tag, val, ext, cell},
     val = TTermVal[t];
     ext = TTermExt[t];
     Switch[tag,
-        $TagNUM, Term["NUM", val],
+        $TagNUM, If[ext === $DTInt32, Term["NUM", val], Term["NUM", dtypeName[ext], val]],
         $TagERA, Term["ERA"],
         $TagTEN, Term["TEN", val],
         $TagREF, Term["REF", ext],
@@ -432,13 +432,14 @@ Options[TInitialize] = {"ZeroFill" -> False}
 
 TInitialize[t_TTerm] := t (* identity *)
 TInitialize[Term["NUM", v_Integer]] := TNum[v]
+TInitialize[Term["NUM", dtype_String, v_Integer]] := TNum[v, dtype]
 TInitialize[Term["NUM", _, v_Integer]] := TNum[v]
 TInitialize[Term["ERA"]] := TEra[]
 TInitialize[Term["ANY"]] := TAny[]
 TInitialize[Term["REF", slot_Integer]] := packTerm[0, $TagREF, slot, 0]
 TInitialize[Term["TEN", id_Integer]] := packTerm[0, $TagTEN, 5, id]
 TInitialize[Term["VAR", binderId_]] := (Message[TInitialize::orphanvar, binderId]; $Failed)
-TInitialize::orphanvar = "Term[\"VAR\", ``] outside any enclosing Term[\"LAM\", ``, ...] - VARs only make sense in a LAM body.";
+TInitialize::orphanvar = "Term[\"VAR\", `1`] is outside the Term[\"LAM\", `1`, ...] that binds it; a VAR belongs in its lambda's body.";
 
 (* Identity rule for already-built TTerms: lets nested recursion mix
    freshly-built TTerm leaves into a Term-shaped expression. *)
@@ -481,7 +482,12 @@ TInitialize[Term["DP0", label_Integer, body_]] :=
 TInitialize[Term["DP1", label_Integer, body_]] :=
     Last  @ TDup[label, TInitialize[body]]
 
-TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
+(* An uninitialized tensor (TContextStrip's) needs "ZeroFill" -> True: without it the snapshot
+   is refused before anything is written to the heap. *)
+snapshotRestorableQ[a_Association, {opts___}] :=
+    TrueQ[OptionValue[TInitialize, {opts}, "ZeroFill"]] || ! AnyTrue[Values[Lookup[a, "Tensors", <||>]], AssociationQ]
+
+TInitialize[TContext[a_Association], opts:OptionsPattern[]] /; snapshotRestorableQ[a, {opts}] := Module[{
     cellsAssoc, bookCellsAssoc, tensorsAssoc, defs, aloStates,
     root, labels, zeroFill, hasBundle,
     cellList, n, bookKeys, base, slotToRuntime, rootRaw
@@ -502,7 +508,7 @@ TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
     TReset[];
 
     slotToRuntime = Association @ KeyValueMap[
-        {slot, entry} |-> slot -> initTensorEntry[entry, zeroFill],
+        {slot, entry} |-> slot -> initTensorEntry[entry],
         tensorsAssoc
     ];
 
@@ -562,9 +568,11 @@ TInitialize[TContext[a_Association], opts:OptionsPattern[]] := Module[{
     If[MissingQ[rootRaw], Missing["NoRoot"], TTerm[rootRaw]]
 ]
 
+TInitialize[TContext[_Association], OptionsPattern[]] := Null /; (Message[TInitialize::uninit]; False)
+
 (* Allocate + (optionally) write a single tensor entry; return the
    runtime tensor id (TenDesc slot, not the packed TAG_TEN term). *)
-initTensorEntry[na_NumericArray, _] := Module[{shape, dtype, rid},
+initTensorEntry[na_NumericArray] := Module[{shape, dtype, rid},
     shape = Dimensions[na];
     dtype = numericArrayDType[na];
     rid = TTermVal @ $tensorAllocFn[dtypeCode[dtype], shape];
@@ -575,11 +583,7 @@ initTensorEntry[na_NumericArray, _] := Module[{shape, dtype, rid},
     rid
 ]
 
-initTensorEntry[a_Association, zeroFill_] := Module[{shape = a["shape"], dtype = a["dtype"], rid, count},
-    If[ ! zeroFill,
-        Message[TInitialize::uninit];
-        Throw[$Failed, "TInitialize::uninit"]
-    ];
+initTensorEntry[a_Association] := Module[{shape = a["shape"], dtype = a["dtype"], rid, count},
     rid = TTermVal @ $tensorAllocFn[dtypeCode[dtype], shape];
     count = Times @@ shape;
     If[ dtype === "f32",
@@ -589,7 +593,7 @@ initTensorEntry[a_Association, zeroFill_] := Module[{shape = a["shape"], dtype =
     rid
 ]
 
-TInitialize::uninit = "TInitialize: snapshot is Uninitialized; pass \"ZeroFill\" -> True to allocate zero-filled tensor buffers.";
+TInitialize::uninit = "The snapshot holds uninitialized tensors; give \"ZeroFill\" -> True to restore them as zero-filled buffers.";
 
 (* Convert a Term[...] back into a packed runtime u64 via $termNewFn.
    Symbolic ext fields for OP2 / UOP / TEN / NUM are decoded back to
@@ -647,10 +651,13 @@ cellTreeWalkLoc[cells_, idx_Integer, seen_] := With[{cell = Lookup[cells, idx, M
 cellTreeWalkTerm[cells_, Term[tag_String, ext_, val_, ___], seen_] := Module[{tagCode = tagToCode[tag], n, seen2, stateCell},
     Switch[tagCode,
         $TagERA, "ERA",
+        $TagANY, "ANY",
         $TagVAR, "VAR"[val],
-        (* Mirror TTermExpr in THVMLink.wl: drop dtype for the common
-           i32 case, surface "f32" only for f32 NUM cells. *)
-        $TagNUM, If[ext === 0, "NUM"["f32", val], "NUM"[val]],
+        (* Mirror TTermExpr in THVMLink.wl: drop the dtype for the common
+           i32 case and name it for every other.  A snapshot's cells carry the
+           dtype as its name already. *)
+        $TagNUM, With[{d = If[StringQ[ext], ext, dtypeName[ext]]},
+            If[d === "i32", "NUM"[val], "NUM"[d, val]]],
         $TagTEN, "TEN"[val],
         $TagREF, "REF"[ext, val],
         $TagDP0, "DP0"[ext, cellTreeWalkLoc[cells, val, seen]],

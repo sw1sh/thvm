@@ -49,7 +49,7 @@ SetUsage[THeapAlloc, "THeapAlloc[size$] reserves size$ consecutive cells and ret
 SetUsage[THeapRead, "THeapRead[loc$] returns the Term at heap[loc$]."];
 SetUsage[TBookRead, "TBookRead[loc$] returns the Term at book_heap[loc$], useful for inspecting CTR cells allocated via TBookCtr or built by the Metal AOT kernel."];
 SetUsage[THeapSet, "THeapSet[loc$, term$] writes term$ to heap[loc$]."];
-SetUsage[TGCCollect, "TGCCollect[] runs a Cheney semi-space collection of the dyn heap and returns the new live cell count."];
+SetUsage[TGCCollect, "TGCCollect[] runs a Cheney semi-space collection of the dynamic heap and gives the new heap position THeapPos[]."];
 SetUsage[TGCCount, "TGCCount[] returns the number of GC cycles since thvm_init."];
 (* TKernelSource / TKernelFlops / TKernelDispatchKind / TKernelDispatchCount /
    TKernelTotalUs / TKernelJitDylibPath / TKernelProfile / TProfileAll
@@ -90,6 +90,7 @@ Returns Missing[\"OutOfBounds\", path$] when the route doesn't fit the term shap
 (* === high-level constructors === *)
 SetUsage[TFreshLabel, "TFreshLabel[] returns the next integer from a monotonic SUP/DUP label counter, then bumps it.  Reset by TReset[]."];
 SetUsage[TEra, "TEra[] constructs an eraser term."];
+SetUsage[TAny, "TAny[] constructs the wildcard term ANY, which structural equality (TEql) treats as equal to every term."];
 SetUsage[TVarFor, "TVarFor[lamLoc$] constructs a VAR pointing at a binder loc."];
 SetUsage[TLam, "TLam[x$, body$] constructs a lambda (HoldAll, so x$ is the binder symbol and body$ the lambda body referring to it, e.g. TLam[w, TUOpAdd[w, w]]).
 When body$ is a UOP graph and the first TApp's argument carries a shape, the APP-LAM interaction JIT-materializes the body into a kernel with the bound var as a symbolic input slot (compile once, dispatch each subsequent arg).
@@ -320,6 +321,10 @@ SetUsage[TUOpSrcs, "TUOpSrcs[u$] returns the source-cell terms for a UOp term, i
    `BeginPackage["WolframInstitute`THVMLink`"]` reuses the same symbol. *)
 {TPriDrain};
 
+(* Context.wl and Kernel.wl make these public, after this file and Format.wl have used them
+   in their Private sections; named here, those uses are the public symbols. *)
+{TContext, TInContext, TKernel, TKernelInputs};
+
 (* Forward-declare the public symbols owned by Kernel/NN/*.wl.  Those files
    live one directory deeper, so the sibling loader (sorted {depth, path})
    Gets them AFTER the depth-1 siblings - including Tensor.wl, whose Dot
@@ -414,7 +419,8 @@ $tagNames = <|
     30 -> "DDU"
 |>;
 
-$op2Names = <| 0 -> "+", 1 -> "-", 2 -> "*", 3 -> "==", 4 -> "<" |>;
+$op2Names = <| 0 -> "+", 1 -> "-", 2 -> "*", 3 -> "==", 4 -> "<", 5 -> "/", 6 -> "%", 7 -> "^", 8 -> "&",
+    9 -> "|", 10 -> "<<", 11 -> ">>", 12 -> ">", 13 -> "<=", 14 -> ">=", 15 -> "!=" |>;
 
 (* Dtype constants - keep in sync with src/thvm.h.  The enum mirrors
    tinygrad's full dtype set; only f32/i32 are wired through the
@@ -891,9 +897,16 @@ TTerm[c_Integer, id_Integer, _]["info"] := <|
 THeapPos[] := (ensureInit[]; $heapPosFn[])
 THeapBase[] := (ensureInit[]; $heapBaseFn[])
 THeapAlloc[size_Integer] := (ensureInit[]; $heapAllocFn[size])
-THeapRead[loc_Integer] := (ensureInit[]; TTerm[$heapReadFn[loc]])
-TBookRead[loc_Integer] := (ensureInit[]; TTerm[$bookReadFn[loc]])
-THeapSet[loc_Integer, t_] := (ensureInit[]; $heapSetFn[loc, ttermRaw[t]])
+(* A location outside the heap (or the book heap) gives a message and leaves the expression
+   unevaluated; the library refuses it rather than reading or writing past the mapping. *)
+THeapRead[loc_Integer] := Module[{r}, TTerm[r] /;
+    (ensureInit[]; r = Quiet[$heapReadFn[loc]]; IntegerQ[r] || (Message[THeapRead::loc, loc]; False))]
+TBookRead[loc_Integer] := Module[{r}, TTerm[r] /;
+    (ensureInit[]; r = Quiet[$bookReadFn[loc]]; IntegerQ[r] || (Message[TBookRead::loc, loc]; False))]
+THeapSet[loc_Integer, t_] := Module[{r}, r /;
+    (ensureInit[]; r = Quiet[$heapSetFn[loc, ttermRaw[t]]]; IntegerQ[r] || (Message[THeapSet::loc, loc]; False))]
+THeapRead::loc = THeapSet::loc = "`1` is not a location in the heap.";
+TBookRead::loc = "`1` is not a location in the book heap.";
 TGCCollect[] := (ensureInit[]; $gcCollectFn[])
 TGCCount[] := (ensureInit[]; $gcCountFn[])
 TWnf[t_] := Module[{r},
@@ -914,6 +927,7 @@ TWnf[t_, n_Integer /; n >= 0] := Module[{r},
     r
 ]
 TNf[t_] := (ensureInit[]; withTermCtx[t, TTerm[$nfFn[ttermRaw[t]]]])
+TCnf[i_Integer] := TCnf[numCoerce[i]]
 TCnf[t_] := (ensureInit[]; withTermCtx[t, TTerm[$cnfFn[ttermRaw[t]]]])
 
 (* TCollapse[t]: enumerate the SUP-tree of a term.  Walks the SUP
@@ -1141,11 +1155,12 @@ tTreeWalkWith[reader_, t_, seen_] := Block[{raw = ttermRaw[t], tag, val, ext, se
     ext = $termExtFn[raw];
     Switch[tag,
         $TagERA, "ERA",
+        $TagANY, "ANY",
         $TagVAR, "VAR"[val],
-        (* Drop the dtype field for the common i32 case; surface it
-           only when the cell holds an f32 (CONST scalar payload).
-           Keeps "NUM"[2] readable for kernel kid / view dim cells. *)
-        $TagNUM, If[ext === 0, "NUM"["f32", val], "NUM"[val]],
+        (* Drop the dtype for the common i32 case and name it for every
+           other (an f32 CONST scalar payload, a bool).  Keeps "NUM"[2]
+           readable for kernel kid / view dim cells. *)
+        $TagNUM, If[ext === $DTInt32, "NUM"[val], "NUM"[dtypeName[ext], val]],
         $TagTEN, "TEN"[val],
         $TagREF, "REF"[ext],
         (* DP0 / DP1 recurse into the dup body so each projection's
@@ -1283,13 +1298,17 @@ heapWith[fields__] := With[{loc = THeapAlloc[Length[{fields}]]},
 heapTerm[tag_Integer, ext_Integer, fields__] := packTerm[0, tag, ext, heapWith[fields]]
 
 TEra[] := packTerm[0, $TagERA, 0, 0]
+TAny[] := packTerm[0, $TagANY, 0, 0]
 TVarFor[lamLoc_Integer] := packTerm[0, $TagVAR, 0, lamLoc]
 
 TApp[fun_, arg_] := heapTerm[$TagAPP, 0, fun, arg] (* heapWith coerces bare-Integer args *)
 
 TSup[a_, b_] := TSup[TFreshLabel[], a, b]
 TSup[label_Integer, a_, b_] := heapTerm[$TagSUP, label, a, b] (* heapWith coerces bare-Integer children *)
-TSup[xs_List] := Fold[TSup, xs]
+TSup[{x_}] := numCoerce[x]
+TSup[xs : {_, __}] := Fold[TSup, xs]
+TSup[{}] := Null /; (Message[TSup::empty]; False)
+TSup::empty = "A superposition needs at least one term.";
 
 (* Dynamic-label SUP / DUP (HVM4 DSU / DDU).  The label is a Term
    that wnf reduces strict-left before dispatching the matching
@@ -1326,7 +1345,7 @@ TTermSame[a_Integer, b_Integer] := (ensureInit[]; $termEqStructFn[a, b] === 1)
    a no-op anyway.  See src/interact/app_lam.c. *)
 SetAttributes[TLam, HoldAll]
 TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
-    THeapSet[loc, Function[x, body][TVarFor[loc]]];
+    THeapSet[loc, numCoerce[Function[x, body][TVarFor[loc]]]];
     packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 
@@ -1337,7 +1356,7 @@ TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
    return a constant, and any "thunk" pattern.  HoldAll preserves
    any heap-side construction inside `body` until evaluated. *)
 TLam[body_] := With[{loc = THeapAlloc[1]},
-    THeapSet[loc, body];
+    THeapSet[loc, numCoerce[body]];
     packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 
@@ -1351,7 +1370,7 @@ TLam[body_] := With[{loc = THeapAlloc[1]},
 SetAttributes[TLamShape, HoldAll]
 TLamShape[shape_List, x_Symbol, body_] := With[{loc = THeapAlloc[1]},
     WolframInstitute`THVMLink`Private`$lamShapeSetFn[loc, shape];
-    THeapSet[loc, Function[x, body][TVarFor[loc]]];
+    THeapSet[loc, numCoerce[Function[x, body][TVarFor[loc]]]];
     packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 

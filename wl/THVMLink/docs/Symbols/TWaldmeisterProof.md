@@ -4,56 +4,182 @@ Name: TWaldmeisterProof
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TWaldmeisterProof
-Keywords: [Waldmeister, wmcli, ATP, unfailing completion, proof protocol, external prover, CLI, equational, theorem proving]
-SeeAlso: [TWaldmeisterProofObject, TVampireProof, TTweeProof, TEproverProof, TSZSDerivationToProofObject, TFindProof]
+Keywords: [Waldmeister, wmcli, theorem proving, ATP, unfailing completion, proof protocol, external prover, equational logic]
+SeeAlso: [TWaldmeisterProofObject, TVampireProof, TTweeProof, TEproverProof, TATP, TFindProof, FindEquationalProof]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[The Waldmeister Method in THVMLink](Waldmeister)", "[Methods and Presets for TFindProof](AtpMethods)"]
 ---
 
 ## Usage
 
-<code>[TWaldmeisterProof]()[*file*]</code> runs the local Waldmeister `wmcli` binary on the Waldmeister `.pr` problem *file*, parses its proof-protocol output, and returns a normalized result Association.
-
-The result Association is keyed `"Status"` (`"Proved"`, `"TimedOut"`, or `"Failed"`), `"Strategy"` (always `"waldmeister-auto"`), `"Seconds"` (wall time), `"ProofLength"` (the protocol step count), `"Inferences"` (the parsed proof-protocol derivation), and `"RawProtocol"` (the raw output text).
+<code>[TWaldmeisterProof]()["*file*"]</code> runs the Waldmeister prover on the problem in *file*, and gives an Association describing the result.
 
 ## Details & Options
 
-- The binary runs with `-auto` (Waldmeister's Automodus, the goal-directed shortcut heuristic), matching how [FindEquationalProof]()'s own `ELProver` link drives it - a bare `wmcli` run does blind completion and finds a longer proof.
-- Waldmeister emits its own proof-protocol format (not SZS / TPTP `fof`): numbered `tes-eqn` / `tes-goal` / `tes-rule` / `tes-final` lines whose source field records the inference (`orient(K, x)`, `cp(I, ..., J, ...)`, `tes-red(I, ..., J, ...)`, `initial`, `hypothesis`). [TWaldmeisterProof]() parses these into a structured derivation list shaped for [TSZSDerivationToProofObject]()'s input, mapping each protocol kind to a `thvm` inference role (`cp` to `superposition`, `tes-red` to `forward_demodulation`, `orient` to `orient`, and so on).
-- The input must be Waldmeister's `.pr` format, not TPTP. A two-argument `(theory, thm)` form would need a TPTP-to-`.pr` converter and is not supported here; use [TWaldmeisterProofObject]()`[theory, thm]`, which resolves a pre-generated `.pr` file under `tools/baselines/wm_pr/`.
-- Options:
-  - `TimeConstraint` - wall-clock seconds (default 30).
-  - `"Binary"` (and its alias `"WMCLI"`, which wins when both are set) - an absolute path override; `Automatic` (the default) reads the `$WMCLI` environment variable, then scans `$PATH`, then the common dev-build locations under the home directory (`~/.local/bin`, `~/bin`, `~/src/wolfram/waldmeister`). There is no canonical install location for the `wmcli` build, so point `$WMCLI` at it.
-  - `"MathlinkPath"` - the `DYLD_FRAMEWORK_PATH` Waldmeister's MathLink shim needs; `Automatic` resolves it under the current kernel's `$InstallationDirectory`.
-- To lift the result into a `thvm`-shaped proof Association (or a literal `ProofObject`), use [TWaldmeisterProofObject](). See the [Method-and-preset](paclet:WolframInstitute/THVMLink/tutorial/AtpMethods) tech note for the `Method -> "WaldmeisterProcess"` dispatch path.
+- [TWaldmeisterProof]() runs `wmcli`, the command-line Waldmeister program, which has to be installed. The program is looked for at the path in the `WMCLI` environment variable, in the directories of the `PATH` environment variable, and in `~/.local/bin`, `~/bin` and `~/src/wolfram/waldmeister`.
+- The *file* is a problem in the Waldmeister `.pr` format, with a signature, an ordering, variables, equations and a conclusion.
+- Waldmeister runs in its automatic mode, as it does for [FindEquationalProof]().
+- The result has the following keys:
+
+| | |
+| --- | --- |
+| `"Status"` | `"Proved"`, `"TimedOut"` or `"Failed"` |
+| `"Strategy"` | `"waldmeister-auto"` |
+| `"Seconds"` | the time Waldmeister took |
+| `"ProofLength"` | the number of steps of the proof |
+| `"Inferences"` | the steps of the proof, one Association for each |
+| `"RawProtocol"` | the output of Waldmeister |
+
+- Each inference has the keys `"Name"`, `"Role"`, `"Formula"`, `"Rule"` and `"Parents"`. The rule is `"orient"` for an equation turned into a rule, `"superposition"` for a critical pair, `"forward_demodulation"` for a rewrite, and `"file"` for an axiom or the goal.
+- Waldmeister is stopped at the time limit [TimeConstraint](), and the status is then `"TimedOut"`.
+- [TWaldmeisterProofObject]() converts the result into the proof form of [TFindProof]().
+- The following options can be given:
+
+| | | |
+| --- | --- | --- |
+| [TimeConstraint]() | `30` | time limit in seconds |
+| `"Binary"` | [Automatic]() | path of the `wmcli` program |
+| `"WMCLI"` | [Automatic]() | path of the `wmcli` program, used instead of `"Binary"` when given |
+| `"MathlinkPath"` | [Automatic]() | directory of the MathLink framework the program loads |
 
 ## Basic Examples
 
-Run Waldmeister on a banked `.pr` problem file (checked in under `tools/baselines/wm_pr/`, resolved from the repository root) and read the status:
+Write a Waldmeister problem that asks whether `f[f[f[a]]] == f[a]` follows from `f[f[x]] == x`:
 
 ```wl
-TWaldmeisterProof[
-    FileNameJoin[{Directory[], "tools", "baselines", "wm_pr",
-        "AbelianGroupAxioms__InverseOfInverse.pr"}],
-    TimeConstraint -> 10]["Status"]
+file = Export[FileNameJoin[{$TemporaryDirectory, "involution.pr"}], "NAME involution\nMODE PROOF\nSORTS ANY\nSIGNATURE a: -> ANY\n          f: ANY -> ANY\nORDERING LPO\n         f > a\nVARIABLES x : ANY\nEQUATIONS f(f(x)) = x\nCONCLUSION f(f(f(a))) = f(a)\n", "Text"]
 ```
-<!-- => "Proved" -->
+
+<!-- => the path of involution.pr in $TemporaryDirectory -->
+
+Run Waldmeister on it:
+
+```wl
+TWaldmeisterProof[file]
+```
+
+<!-- => <|"Status" -> "Proved", "Strategy" -> "waldmeister-auto", "Seconds" -> a time, "ProofLength" -> 5, "Inferences" -> {<|"Head" -> "wm", "Name" -> "1", "Role" -> "axiom", "Formula" -> "x1 = f(f(x1))", "Rule" -> "file", "Parents" -> {}|>, ...}, "RawProtocol" -> "****...\n*  W A L D M E I S T E R ...\n..."|> -->
 
 ## Scope
 
-Read the protocol step count straight off the result:
+Write a problem:
 
 ```wl
-TWaldmeisterProof[
-    FileNameJoin[{Directory[], "tools", "baselines", "wm_pr",
-        "AbelianGroupAxioms__InverseOfInverse.pr"}]]["ProofLength"]
+file = Export[FileNameJoin[{$TemporaryDirectory, "involution.pr"}], "NAME involution\nMODE PROOF\nSORTS ANY\nSIGNATURE a: -> ANY\n          f: ANY -> ANY\nORDERING LPO\n         f > a\nVARIABLES x : ANY\nEQUATIONS f(f(x)) = x\nCONCLUSION f(f(f(a))) = f(a)\n", "Text"]
 ```
+
+<!-- => the path of involution.pr in $TemporaryDirectory -->
+
+The formula and rule of each step:
+
+```wl
+TWaldmeisterProof[file]["Inferences"][[All, {"Formula", "Rule"}]]
+```
+
+<!-- => {<|"Formula" -> "x1 = f(f(x1))", "Rule" -> "file"|>, <|"Formula" -> "f(f(f(a()))) = f(a())", "Rule" -> "file"|>, <|"Formula" -> "f(f(x1)) -> x1", "Rule" -> "orient"|>, <|"Formula" -> "f(a()) = f(a())", "Rule" -> "forward_demodulation"|>, <|"Formula" -> "f(a()) = f(a())", "Rule" -> "trivial_inequality_removal"|>} -->
+
+---
+
+The double-inverse theorem of abelian groups, from its problem file:
+
+```wl
+TWaldmeisterProof[FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", "AbelianGroupAxioms__InverseOfInverse.pr"}]]["ProofLength"]
+```
+
 <!-- => 19 -->
 
-## Properties & Relations
+## Options
 
-- [TWaldmeisterProofObject]() converts the parsed protocol into the same `thvm` proof shape the internal engine produces, and accepts a `(theory, thm)` pair that resolves a pre-generated `.pr` file.
-- [TVampireProof](), [TTweeProof](), and [TEproverProof]() are the sibling external-prover wrappers; those consume TPTP `.p` files, whereas Waldmeister consumes its own `.pr` format.
+### TimeConstraint
+
+A time limit of one second is too short for Waldmeister to settle the Robbins problem, so Waldmeister is stopped:
+
+```wl
+TWaldmeisterProof[FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", "RobbinsAxioms__DoubleNegation.pr"}], TimeConstraint -> 1]["Status"]
+```
+
+<!-- => "TimedOut" -->
+
+### Binary
+
+Write the problem to a file:
+
+```wl
+file = Export[FileNameJoin[{$TemporaryDirectory, "involution.pr"}], "NAME involution\nMODE PROOF\nSORTS ANY\nSIGNATURE a: -> ANY\n          f: ANY -> ANY\nORDERING LPO\n         f > a\nVARIABLES x : ANY\nEQUATIONS f(f(x)) = x\nCONCLUSION f(f(f(a))) = f(a)\n", "Text"]
+```
+
+<!-- => the path of involution.pr in $TemporaryDirectory -->
+
+`"Binary"` gives the path of the program; a path with no program gives the status `"Failed"`:
+
+```wl
+TWaldmeisterProof[file, "Binary" -> "/nonexistent/wmcli"]
+```
+
+<!-- => <|"Status" -> "Failed", "Strategy" -> "waldmeister-auto", "Seconds" -> a time, "ProofLength" -> 0, "Inferences" -> {}, "RawProtocol" -> "env: /nonexistent/wmcli: No such file or directory\n"|> -->
+
+### WMCLI
+
+Write the problem to a file:
+
+```wl
+file = Export[FileNameJoin[{$TemporaryDirectory, "involution.pr"}], "NAME involution\nMODE PROOF\nSORTS ANY\nSIGNATURE a: -> ANY\n          f: ANY -> ANY\nORDERING LPO\n         f > a\nVARIABLES x : ANY\nEQUATIONS f(f(x)) = x\nCONCLUSION f(f(f(a))) = f(a)\n", "Text"]
+```
+
+<!-- => the path of involution.pr in $TemporaryDirectory -->
+
+`"WMCLI"` is used instead of `"Binary"`:
+
+```wl
+TWaldmeisterProof[file, "WMCLI" -> "/nonexistent/wmcli", "Binary" -> Automatic]["Status"]
+```
+
+<!-- => "Failed" -->
+
+### MathlinkPath
+
+Write the problem to a file:
+
+```wl
+file = Export[FileNameJoin[{$TemporaryDirectory, "involution.pr"}], "NAME involution\nMODE PROOF\nSORTS ANY\nSIGNATURE a: -> ANY\n          f: ANY -> ANY\nORDERING LPO\n         f > a\nVARIABLES x : ANY\nEQUATIONS f(f(x)) = x\nCONCLUSION f(f(f(a))) = f(a)\n", "Text"]
+```
+
+<!-- => the path of involution.pr in $TemporaryDirectory -->
+
+The program does not start without the MathLink framework:
+
+```wl
+TWaldmeisterProof[file, "MathlinkPath" -> "/nonexistent"]["Status"]
+```
+
+<!-- => "Failed" -->
+
+## Properties and Relations
+
+[TWaldmeisterProofObject]() gives the proof in the proof form of [TFindProof]():
+
+```wl
+TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse"]
+```
+
+<!-- => a ProofObject summary box, logic EquationalLogic -->
+
+---
+
+[TATP]() reads the same `.pr` format and runs the completion of THVMLink on it:
+
+```wl
+TATP[File["tools/baselines/wm_pr/AbelianGroupAxioms__InverseOfInverse.pr"]]
+```
+
+<!-- => <|"Status" -> "PROVED", "Steps" -> 27, "Rules" -> 8, "QueueSize" -> 9|> -->
 
 ## Possible Issues
 
-- When the `wmcli` binary is absent, [TWaldmeisterProof]() returns `$Failed` and issues `TWaldmeisterProof::nowm`. A missing `.pr` file issues `TWaldmeisterProof::badfile`.
+A file that does not exist issues a message and gives `$Failed`:
+
+```wl
+TWaldmeisterProof["/nonexistent/problem.pr"]
+```
+
+<!-- => the message TWaldmeisterProof::badfile is issued and the result is $Failed -->

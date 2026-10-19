@@ -562,6 +562,9 @@ EXTERN_C DLLEXPORT int thvm_wl_heap_read(WolframLibraryData libData, mint argc,
                                          MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   u64 loc = (u64)MArgument_getInteger(args[0]);
+  if (loc >= thvm_heap_map_cells()) {
+    return LIBRARY_DIMENSION_ERROR;
+  }
   MArgument_setInteger(res, (mint)heap_read(loc));
   return LIBRARY_NO_ERROR;
 }
@@ -571,6 +574,9 @@ EXTERN_C DLLEXPORT int thvm_wl_heap_set(WolframLibraryData libData, mint argc,
   (void)libData; (void)argc;
   u64  loc = (u64) MArgument_getInteger(args[0]);
   Term t   = (Term)MArgument_getInteger(args[1]);
+  if (loc >= thvm_heap_map_cells()) {
+    return LIBRARY_DIMENSION_ERROR;
+  }
   heap_set(loc, t);
   MArgument_setInteger(res, 1);
   return LIBRARY_NO_ERROR;
@@ -2075,12 +2081,35 @@ EXTERN_C DLLEXPORT int thvm_wl_term_device(WolframLibraryData libData, mint argc
   return LIBRARY_NO_ERROR;
 }
 
+static u64 wl_shape_numel(const Shape *s) {
+  u64 n = 1;
+  for (u32 i = 0; i < s->ndim; i++) {
+    n *= s->dims[i];
+  }
+  return n;
+}
+
+// An elementwise kernel reads each source by element count, so operands of different counts
+// read past the smaller buffer; a single-element operand broadcasts.  An unshapeable operand
+// (a lambda-bound VAR) has nothing to check yet.
+static int wl_elementwise_ok(Term a, Term b) {
+  Shape sa = {0}, sb = {0};
+  if (!term_shape_in(a, 0, &sa) || !term_shape_in(b, 0, &sb)) {
+    return 1;
+  }
+  u64 na = wl_shape_numel(&sa), nb = wl_shape_numel(&sb);
+  return na == nb || na == 1 || nb == 1;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_uop_binary(WolframLibraryData libData, mint argc,
                                           MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   mint op = MArgument_getInteger(args[0]);
   Term a  = (Term)MArgument_getInteger(args[1]);
   Term b  = (Term)MArgument_getInteger(args[2]);
+  if (!wl_elementwise_ok(a, b)) {
+    return LIBRARY_DIMENSION_ERROR;
+  }
   Term r = uop_binary((u32)op, a, b);
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
@@ -2102,14 +2131,72 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_reduce(WolframLibraryData libData, mint argc,
 // returns the packed term.
 typedef Term (*uop_move_ctor)(Term src, u32 ndim, const u32 *dims);
 
+// The movement ops' argument checks, against the source's shape when it is known: a reshape
+// keeps the element count, a permute is a permutation of the source's axes, an expand of a
+// single element goes to any shape, and otherwise the target aligns with the source on the
+// right (leading axes may be new) and only grows its size-1 axes.
+// Each would otherwise index past a buffer.
+enum { WL_MOVE_RESHAPE, WL_MOVE_PERMUTE, WL_MOVE_EXPAND };
+
+static int wl_movement_ok(int kind, Term src, u32 n, const u32 *dims) {
+  Shape s = {0};
+  if (!term_shape_in(src, 0, &s)) {
+    return 1;
+  }
+  switch (kind) {
+    case WL_MOVE_RESHAPE: {
+      u64 m = 1;
+      for (u32 i = 0; i < n; i++) {
+        m *= dims[i];
+      }
+      return m == wl_shape_numel(&s);
+    }
+    case WL_MOVE_PERMUTE: {
+      u32 seen[MAX_DIM] = {0};
+      if (n != s.ndim) {
+        return 0;
+      }
+      for (u32 i = 0; i < n; i++) {
+        if (dims[i] >= n || seen[dims[i]]) {
+          return 0;
+        }
+        seen[dims[i]] = 1;
+      }
+      return 1;
+    }
+    case WL_MOVE_EXPAND: {
+      if (wl_shape_numel(&s) == 1) {
+        return 1;
+      }
+      if (n < s.ndim) {
+        return 0;
+      }
+      for (u32 i = 0; i < s.ndim; i++) {
+        u32 want = dims[n - s.ndim + i];
+        if (s.dims[i] != want && s.dims[i] != 1) {
+          return 0;
+        }
+      }
+      return 1;
+    }
+  }
+  return 1;
+}
+
 static int movement_op_shared(WolframLibraryData libData, MArgument *args,
-                              MArgument res, uop_move_ctor ctor) {
+                              MArgument res, uop_move_ctor ctor, int kind) {
   Term     src  = (Term)MArgument_getInteger(args[0]);
   MTensor  dims = MArgument_getMTensor(args[1]);
   mint     n    = libData->MTensor_getFlattenedLength(dims);
   mint    *raw  = libData->MTensor_getIntegerData(dims);
   u32      buf[2 * MAX_DIM];
-  for (mint i = 0; i < n && i < (mint)(2 * MAX_DIM); i++) buf[i] = (u32)raw[i];
+  if (n > MAX_DIM) {
+    return LIBRARY_DIMENSION_ERROR;
+  }
+  for (mint i = 0; i < n; i++) buf[i] = (u32)raw[i];
+  if (!wl_movement_ok(kind, src, (u32)n, buf)) {
+    return LIBRARY_DIMENSION_ERROR;
+  }
   Term r = ctor(src, (u32)n, buf);
   MArgument_setInteger(res, (mint)r);
   return LIBRARY_NO_ERROR;
@@ -2118,19 +2205,19 @@ static int movement_op_shared(WolframLibraryData libData, MArgument *args,
 EXTERN_C DLLEXPORT int thvm_wl_uop_reshape(WolframLibraryData libData, mint argc,
                                            MArgument *args, MArgument res) {
   (void)argc;
-  return movement_op_shared(libData, args, res, uop_reshape);
+  return movement_op_shared(libData, args, res, uop_reshape, WL_MOVE_RESHAPE);
 }
 
 EXTERN_C DLLEXPORT int thvm_wl_uop_permute(WolframLibraryData libData, mint argc,
                                            MArgument *args, MArgument res) {
   (void)argc;
-  return movement_op_shared(libData, args, res, uop_permute);
+  return movement_op_shared(libData, args, res, uop_permute, WL_MOVE_PERMUTE);
 }
 
 EXTERN_C DLLEXPORT int thvm_wl_uop_expand(WolframLibraryData libData, mint argc,
                                           MArgument *args, MArgument res) {
   (void)argc;
-  return movement_op_shared(libData, args, res, uop_expand);
+  return movement_op_shared(libData, args, res, uop_expand, WL_MOVE_EXPAND);
 }
 
 // PAD/SHRINK use 2*ndim entries (begin, end pairs per axis).
@@ -4018,6 +4105,9 @@ EXTERN_C DLLEXPORT int thvm_wl_book_read(WolframLibraryData libData, mint argc,
                                          MArgument *args, MArgument res) {
   (void)libData; (void)argc;
   u64 loc = (u64)MArgument_getInteger(args[0]);
+  if (loc >= BOOK_CAP) {
+    return LIBRARY_DIMENSION_ERROR;
+  }
   MArgument_setInteger(res, (mint)book_read(loc));
   return LIBRARY_NO_ERROR;
 }

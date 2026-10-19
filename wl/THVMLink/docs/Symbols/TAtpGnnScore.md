@@ -4,38 +4,61 @@ Name: TAtpGnnScore
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TAtpGnnScore
-Keywords: [ENIGMA, GNN, GCN, ATP, scoring, proof relevance, graph neural network, learned guidance]
-SeeAlso: [TAtpTrainGnn, TAtpGraphDataset, TAtpCpGraph, TFindProofGnnReranked]
+Keywords: [ENIGMA, graph neural network, GNN, theorem proving, scoring, proof relevance, learned guidance]
+SeeAlso: [TAtpTrainGnn, TAtpGraphDataset, TAtpCpGraph, TAtpLoadGnnScorer, TFindProofReranked]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Learned Guidance: a GNN for Critical-Pair Selection](GnnGuidance)"]
 ---
 
 ## Usage
 
-<code>[TAtpGnnScore]()[*model*, *dataset*]</code> scores a graph *dataset* (a [TAtpGraphDataset]() output, or any `<|"Graphs"|>`) with a trained GNN *model* (the `"Model"` from [TAtpTrainGnn]()), returning the per-graph proof-relevance score as a list, one entry per graph.
-
-The score is the readout's `logit_pos` minus `logit_neg`.
+<code>[TAtpGnnScore]()[*model*, *dataset*]</code> scores each graph of *dataset* with the graph neural network *model*, giving a list of scores.
 
 ## Details & Options
 
-- It runs the same forward as training with the model's weights held constant. The graph convolutional network is node-count agnostic, so a model trained on one corpus scores graphs of any size; this is what held-out evaluation and the engine's critical-pair re-rank use.
+- *model* is a graph convolutional network (GCN), as [TAtpTrainGnn]() gives in its `"Model"` and [TAtpLoadGnnScorer]() reads from a file.
+- *dataset* is an Association with the key `"Graphs"`, a list of [TAtpCpGraph]() graphs, as [TAtpGraphDataset]() gives.
+- The score of a graph is the difference between the two outputs of the network, for relevant and not relevant: the higher the score, the more relevant the network considers the equation to a proof.
+- The scores are not probabilities, and their scale depends on the model.
+- The network passes messages between neighboring nodes for its number of rounds, averages over the nodes, and reads out the two outputs. A model can score graphs of any size.
+- [TFindProofReranked]() uses the scores to rank the critical pairs of a proof search.
 
 ## Basic Examples
 
-Score two equation graphs with the bundled pretrained model - the group inverse law outranks bare commutativity:
+Score two equations with a small network written by hand, with one round and two hidden units:
 
 ```wl
-model = TAtpLoadGnnScorer[TAtpGnnScorerAsset[]];
-TAtpGnnScore[model, <|"Graphs" -> {
-    TAtpCpGraph[CircleTimes[x, y] == CircleTimes[y, x]],
-    TAtpCpGraph[CircleTimes[x, OverBar[x]] == ident]}|>]
+TAtpGnnScore[<|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, <|"Graphs" -> {TAtpCpGraph[CircleTimes[x, y] == CircleTimes[y, x]], TAtpCpGraph[CircleTimes[x, OverBar[x]] == ident]}|>]
 ```
-<!-- => {-3.88736, 9.42424} - one proof-relevance score per graph -->
 
-## Properties & Relations
+<!-- => {-0.68, -0.356667} -->
 
-- [TAtpTrainGnn]() produces the `"Model"`; [TAtpGraphDataset]() / [TAtpCpGraph]() produce the `"Graphs"`.
-- [TFindProofReranked]() uses this from Wolfram to re-rank the live critical-pair queue; [TFindProofGnnReranked]() does the equivalent re-rank entirely in C.
+## Scope
 
-## Possible Issues
+Score the graphs of a dataset:
 
-- The scores are raw logit differences, not probabilities; higher means more proof-relevant, but the absolute scale depends on the trained model.
+```wl
+TAtpGnnScore[<|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, TAtpGraphDataset[{OverBar[OverBar[x]] == x}, AxiomaticTheory["AbelianGroupAxioms"]]]
+```
+
+<!-- => {-0.582353, -0.356667, -0.597222, -0.460256, -0.630952, -0.356667, -0.345833, -0.817778, -0.68, -0.555555} -->
+
+---
+
+Score with the bundled pretrained network:
+
+```wl
+TAtpGnnScore[TAtpLoadGnnScorer[TAtpGnnScorerAsset[]], <|"Graphs" -> {TAtpCpGraph[CircleTimes[x, y] == CircleTimes[y, x]], TAtpCpGraph[CircleTimes[x, OverBar[x]] == ident]}|>]
+```
+
+<!-- => {-5.11179, 0.3535} -->
+
+## Properties and Relations
+
+Equations that differ by a renaming of their symbols have the same score:
+
+```wl
+TAtpGnnScore[<|"Kind" -> "GNN", "W1" -> {N[IdentityMatrix[{12, 2}]]}, "Ws" -> {N[IdentityMatrix[{12, 2}]]}, "Bh" -> {{0., 0.}}, "Wout" -> {{1., 0.}, {0., 1.}}, "Bout" -> {0., 0.}, "Rounds" -> 1, "Hidden" -> 2, "NMax" -> 64|>, <|"Graphs" -> {TAtpCpGraph[CircleTimes[x, OverBar[x]] == ident], TAtpCpGraph[p[y, q[y]] == r]}|>]
+```
+
+<!-- => {-0.356667, -0.356667} -->

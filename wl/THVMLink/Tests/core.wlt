@@ -419,3 +419,92 @@ VerificationTest[
     {{4}, {5}},
     TestID -> "collapse TDup[7, TOp2[\"+\", TSup[7,1,2], 3]] -- shared label, annihilate"
 ]
+
+(* An unknown dtype or operator gives a message and stays unevaluated, rather
+   than building a malformed term. *)
+VerificationTest[
+    TNum[3, "foo"],
+    TNum[3, "foo"],
+    {TNum::dtype},
+    TestID -> "core/tnum-unknown-dtype-unevaluated"
+]
+
+VerificationTest[
+    TOp2["$", 1, 2],
+    TOp2["$", 1, 2],
+    {TOp2::badop},
+    TestID -> "core/top2-unknown-op-unevaluated"
+]
+
+(* Every OP2 opcode has a display name. *)
+VerificationTest[
+    TTermExpr[TOp2["!=", 7, 2]],
+    "OP2"["!=", "NUM"[7], "NUM"[2]],
+    TestID -> "core/top2-opcode-names"
+]
+
+(* A location outside the heap gives a message and stays unevaluated, rather
+   than reading or writing past the mapping (THeapRead[-1] was a bus error). *)
+VerificationTest[
+    {THeapRead[-1], TBookRead[-1], THeapSet[-1, 0]},
+    {THeapRead[-1], TBookRead[-1], THeapSet[-1, 0]},
+    {THeapRead::loc, TBookRead::loc, THeapSet::loc},
+    TestID -> "core/heap-location-out-of-range"
+]
+
+(* A bare integer in a constructor slot is the NUM with that value, as in
+   TOp2 and TSup; TNf[TCtr[3, 10, 20]] used to crash the kernel. *)
+VerificationTest[
+    TTermExpr[TNf[TCtr[3, 10, 20]]],
+    "CTR"[3, "NUM"[10], "NUM"[20]],
+    TestID -> "core/tctr-lifts-integers"
+]
+
+VerificationTest[
+    {TTermVal[TWnf[TApp[TMatNum[0, 100, TLam[k, 200]], 0]]], TTermVal[TWnf[TApp[TMatNum[0, 100, TLam[k, 200]], 3]]]},
+    {100, 200},
+    TestID -> "core/tmatnum-lifts-integers"
+]
+
+VerificationTest[
+    {TTermVal[TWnf[TIfZero[0, 10, 20]]], TTermVal[TWnf[TIfZero[5, 10, 20]]], TTermVal[TWnf[TApp[TLam[x, 5], 1]]], TTermVal[TWnf[TApp[TLam[7], 1]]], TTermExpr[TCnf[5]]},
+    {10, 20, 5, 7, "NUM"[5]},
+    TestID -> "core/lambda-and-branch-bodies-lift-integers"
+]
+
+VerificationTest[
+    TCtr[1, Sequence @@ Range[17]],
+    TCtr[1, Sequence @@ Range[17]],
+    {TCtr::arity},
+    TestID -> "core/tctr-arity-limit"
+]
+
+(* A one-element superposition is that term; an empty one is refused. *)
+VerificationTest[
+    {TTermExpr[TSup[{5}]], TSup[{}]},
+    {"NUM"[5], TSup[{}]},
+    {TSup::empty},
+    TestID -> "core/tsup-list-edge-cases"
+]
+
+(* TAny[] is the ANY wildcard: equal to every term under TEql. *)
+VerificationTest[
+    {TTermExpr[TAny[]], TTermVal[TWnf[TEql[TAny[], TNum[7]]]], TTermExpr[TInitialize[Term["ANY"]]]},
+    {"ANY", 1, "ANY"},
+    TestID -> "core/tany-wildcard"
+]
+
+(* NUMs are unsigned 32-bit words: a negative i32 is stored as the two's-complement pattern
+   arithmetic gives for it, and a - b on terms is the wrapped difference. *)
+VerificationTest[
+    {TTermVal[TNum[-1]], TTermVal[TWnf[TOp2["-", 3, 4]]], TTermVal[TWnf[TNum[3] - TNum[4]]], TTermVal[TWnf[TNum[10] - TNum[3]]], TTermVal[TWnf[-2 TNum[5]]]},
+    {4294967295, 4294967295, 4294967295, 7, 4294967286},
+    TestID -> "core/num-negatives-wrap-32bit"
+]
+
+VerificationTest[
+    TNum[2^40],
+    TNum[2^40, "i32"],
+    {TNum::range},
+    TestID -> "core/num-out-of-range"
+]

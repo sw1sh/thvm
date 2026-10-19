@@ -4,33 +4,68 @@ Name: TAtpCpGraphEquation
 Context: WolframInstitute`THVMLink`ATP`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TAtpCpGraphEquation
-Keywords: [ENIGMA, GNN, ATP, critical pair, hypergraph, decoder, inverse, graph neural network]
-SeeAlso: [TAtpCpGraph, TAtpGraphDataset, TAtpTrainGnn, TFindProof]
+Keywords: [ENIGMA, graph neural network, GNN, theorem proving, equation graph, decoder]
+SeeAlso: [TAtpCpGraph, TAtpGraphDataset, TAtpTrainGnn]
 RelatedGuides: [THVMLink]
+RelatedTutorials: ["[Learned Guidance: a GNN for Critical-Pair Selection](GnnGuidance)"]
 ---
 
 ## Usage
 
-<code>[TAtpCpGraphEquation]()[*graph*]</code> reconstructs the original equation from a [TAtpCpGraph]() result, returning `Inactive[Equal][lhs, rhs]` (inert, so an identical-sides reconstruction cannot collapse to `True`).
+<code>[TAtpCpGraphEquation]()[*graph*]</code> rebuilds the equation encoded by a [TAtpCpGraph]() *graph*.
 
 ## Details & Options
 
-- It is the exact inverse of [TAtpCpGraph](), reading the per-node `"Symbols"` identities and the `"Edges"` term structure (each term node's head, ordered children, and the two side roots).
-- Returns `$Failed` if the *graph* carries no `"Symbols"` (for example a graph decoded without the live encoder state).
+- [TAtpCpGraphEquation]() reads the term structure from the `"Edges"` of *graph* and the symbols from its `"Symbols"`, and gives <code>[Inactive]()[[Equal]()][*lhs*, *rhs*]</code>.
+- The equation is inactive, so an equation with two equal sides does not evaluate to [True]().
+- A graph without `"Symbols"` gives `$Failed`.
 
 ## Basic Examples
 
-Round-trip an equation through the encoder and back:
+Rebuild an equation from its graph:
 
 ```wl
-TAtpCpGraphEquation @ TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]
+TAtpCpGraphEquation[TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]]
 ```
-<!-- => Inactive[Equal][a \[CircleTimes] OverBar[a], ident] -->
 
-## Properties & Relations
+<!-- => Inactive[Equal][a ⊗ OverBar[a], ident] -->
 
-- [TAtpCpGraph]() is the forward encoder; the anonymized structural features are symbol-blind, but `"Symbols"` and `"NodeLabels"` preserve the concrete identities this decoder reads to invert the encoding losslessly.
+## Scope
+
+The order of the arguments is kept:
+
+```wl
+TAtpCpGraphEquation[TAtpCpGraph[f[a, b] == f[b, a]]]
+```
+
+<!-- => Inactive[Equal][f[a, b], f[b, a]] -->
+
+---
+
+An equation with two equal sides stays inactive:
+
+```wl
+TAtpCpGraphEquation[TAtpCpGraph[Inactive[Equal][a, a]]]
+```
+
+<!-- => Inactive[Equal][a, a] -->
+
+## Properties and Relations
+
+[Activate]() gives the equation:
+
+```wl
+Activate[TAtpCpGraphEquation[TAtpCpGraph[f[a, b] == f[b, a]]]]
+```
+
+<!-- => f[a, b] == f[b, a] -->
 
 ## Possible Issues
 
-- A graph stripped of `"Symbols"` cannot be inverted; [TAtpCpGraphEquation]() returns `$Failed` rather than guessing the operator names.
+A graph without its symbols gives `$Failed`:
+
+```wl
+TAtpCpGraphEquation[KeyDrop[TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident], "Symbols"]]
+```
+
+<!-- => $Failed -->

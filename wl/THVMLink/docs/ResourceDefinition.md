@@ -3,10 +3,11 @@ Template: Paclet
 ResourceType: Paclet
 Name: WolframInstitute/THVMLink
 Context: WolframInstitute`THVMLink`
+ContextPath: [WolframInstitute`THVMLink`ATP`]
 Paclet: WolframInstitute/THVMLink
-Description: Wolfram Language bridge to thvm - observe and drive the interaction-net runtime.
+Description: Lambda terms, lazy tensor graphs compiled to kernels, gradients and equational theorem proving on an interaction-net runtime
 ContributedBy: Wolfram Institute
-Keywords: [interaction net, HVM, tensor, JIT, autodiff, ATP, equational]
+Keywords: [interaction net, lambda calculus, superposition, tensor, lazy graph, kernel, automatic differentiation, gradient, memory plan, theorem proving, equational logic]
 MainGuide: Documentation/English/Guides/THVMLink.nb
 License: MIT
 WolframVersion: 13.0+
@@ -16,130 +17,215 @@ SourceControlURL: https://github.com/sw1sh/thvm
 
 ## Details & Options
 
-- THVMLink is the Wolfram-language driver for `thvm`, a tensor-aware interaction-net runtime that compiles to CPU, CUDA, and Metal back ends from one symbolic graph.
-- Construction is purely symbolic. <code>[TLam]()</code>, <code>[TApp]()</code>, <code>[TSup]()</code>, and <code>[TDup]()</code> build interaction-combinator terms; <code>[TUOpAdd]()</code> and the rest of the `TUOp*` family build the tensor UOp graph; <code>[TTensorCreate]()</code> ingests a [NumericArray]() zero-copy on CPU.
-- Reduction is staged. <code>[TWnf]()</code> drives a term to weak normal form, <code>[TMaterialize]()</code> schedules the UOp DAG into kernels, and <code>[TRealize]()</code> fires the whole pipeline (schedule + dispatch).
-- Differentiation lives in the runtime. <code>[TGrad]()</code> seeds a single backward walk that auto-grads every reachable float leaf; per-leaf adjoints are readable via <code>[TGradOf]()</code>.
-- Introspection is first class. <code>[THeapGraph]()</code> renders the live heap as an IC string diagram, <code>[TMemoryPlan]()</code> projects per-buffer alive spans, and <code>[TKernel]()</code> exposes per-kernel timing, source, and autotune candidates.
-- The ATP submodule wraps `thvm`'s equational saturation engine via <code>[TFindProof]()</code> (a drop-in [FindEquationalProof]() replacement that returns a full `ProofObject`) and the lower-level <code>[TATP]()</code>.
+- THVMLink connects the Wolfram Language to `thvm`, a runtime that computes by rewriting an interaction net: a graph of agents joined by wires, reduced by local rules. Lambda terms, lazy tensor expressions and the compiled kernels that compute them are all cells of one heap.
+- <code>[TLam]()</code>, <code>[TApp]()</code>, <code>[TSup]()</code> and <code>[TDup]()</code> build lambda terms, superpositions and duplications. <code>[TWnf]()</code> reduces a term to weak normal form, and <code>[TCollapse]()</code> lists the values a superposition stands for.
+- <code>[TTensorCreate]()</code> makes a tensor from a list or a [NumericArray](). Arithmetic and array operations such as [Plus](), [Dot]() and [Total]() on tensors build a lazy graph of micro-operations, which <code>[TRealize]()</code> schedules into kernels, compiles to native code and runs, on the central processing unit (CPU) by default.
+- <code>[TGrad]()</code> differentiates a scalar with respect to every floating-point tensor it depends on by adding a backward branch to the graph, and <code>[TGradOf]()</code> gives the gradient held for a tensor. <code>[TJit]()</code> records the kernels a function dispatches and replays them without building the graph again.
+- <code>[THeapGraph]()</code> draws a term as an interaction net, <code>[TKernel]()</code> gives the properties of a compiled kernel, such as its source code, and <code>[TScheduleGraph]()</code> and <code>[TMemoryPlan]()</code> describe the kernels and buffers of the current schedule.
+- <code>[TContextSnapshot]()</code> records the runtime as an ordinary expression, and <code>[TInitialize]()</code> restores it.
+- The `` WolframInstitute`THVMLink`ATP` `` context holds the automated theorem proving functions. <code>[TFindProof]()</code> proves an equational theorem from axioms and gives a [ProofObject](), as [FindEquationalProof]() does.
 
 ## Usage
 
-THVMLink exposes <code>[TLam]()</code>, <code>[TApp]()</code>, <code>[TTensorCreate]()</code>, <code>[TUOpAdd]()</code>, <code>[TUOpMul]()</code>, <code>[TUOpReduce]()</code>, <code>[TRealize]()</code>, <code>[TGrad]()</code>, <code>[TKernel]()</code>, <code>[TMemoryPlan]()</code>, <code>[TFindProof]()</code>, and many more.
+THVMLink builds terms with [TLam](), [TApp]() and [TSup]() and reduces them with [TWnf]() and [TCollapse](); makes tensors with [TTensorCreate]() and computes their lazy graphs with [TRealize](); differentiates with [TGrad]() and [TGradOf](); inspects kernels and schedules with [TKernel](), [TScheduleGraph]() and [TMemoryPlan](); saves and restores the runtime with [TContextSnapshot]() and [TInitialize](); and proves equational theorems with [TFindProof]().
 
 ## Basic Examples
 
-Build and reduce a tiny term:
+Reduce the application of a lambda that adds 1 to its argument:
 
 ```wl
-Needs["WolframInstitute`THVMLink`"];
-TInit[];
-TWnf[TApp[TLam[x, x], TLam[y, y]]]
+result = TWnf[TApp[TLam[n, n + 1], TNum[41]]]
 ```
-<!-- => TTerm[<LAM identity>] -->
+
+The value of the result:
+
+```wl
+TTermVal[result]
+```
+<!-- => 42 -->
 
 ---
 
-Build a UOp graph and realize it on the active backend:
+A tensor:
 
 ```wl
-x = TTensorCreate[{1., 2., 3., 4.}];
-y = TTensorCreate[{10., 20., 30., 40.}];
-TTensorData @ TRealize[TUOpAdd[x, y]]
+x = TTensorCreate[{1., 2., 3., 4.}]
 ```
-<!-- => NumericArray[{11., 22., 33., 44.}, "Real32"] -->
+
+A second tensor:
+
+```wl
+y = TTensorCreate[{10., 20., 30., 40.}]
+```
+
+Their sum is a lazy graph, which [TRealize]() computes and [Normal]() reads back:
+
+```wl
+Normal @ TRealize[x + y]
+```
+<!-- => {11., 22., 33., 44.} -->
 
 ---
 
-Take a gradient through a small expression (every float leaf is auto-graded, no marking):
+A weight vector:
 
 ```wl
-w = TTensorCreate[{1., 2., 3.}];
-x = TTensorCreate[{4., 5., 6.}];
-TRealize @ TGrad[TUOpReduce[TUOpMul[w, x], 0, "SUM"]];
-TTensorData @ TRealize @ TGradOf[w]
+w = TTensorCreate[{1., 2., 3.}]
 ```
-<!-- => NumericArray[{4., 5., 6.}, "Real32"] -->
+
+An input:
+
+```wl
+x = TTensorCreate[{4., 5., 6.}]
+```
+
+Differentiate the dot product of the two:
+
+```wl
+TGrad[Total[w*x]]
+```
+
+The gradient with respect to the weights is the input:
+
+```wl
+Normal @ TRealize @ TGradOf[w]
+```
+<!-- => {4., 5., 6.} -->
 
 ## Scope
 
-Render the live interaction-net heap as an IC string diagram, seeded at a particular term:
+The interaction net of the application of the successor function to 41, before it is reduced:
 
 ```wl
-THeapGraph @ TApp[TLam[v, TUOpAdd[v, v]], TTensorCreate[{1., 2.}]]
+THeapGraph[TLam[n, n + 1][TNum[41]], ImageSize -> 300]
 ```
-<!-- => a Graph of the heap reachable from the seed term, with LAM / APP / TEN / UOP nodes coloured per Style.wl -->
 
 ---
 
-Snapshot the live runtime to a transportable Wolfram expression, restore it across a fresh kernel:
+Start from an empty heap, so that the snapshot below holds only one lambda:
 
 ```wl
-#| eval: False
-snap = TContextSnapshot[TLam[x, TUOpAdd[x, x]]];
-TFree[]; TInit[];
-TInitialize[snap]
+TReset[];
 ```
-<!-- => the original lambda, live again in the freshly initialized runtime -->
+
+A snapshot of the successor function, an ordinary expression:
+
+```wl
+snap = TContextSnapshot[TLam[n, n + 1]]
+```
+<!-- => TContext[<|"Root" -> Term["LAM", 0, 0], "Cells" -> <|0 -> Term["OP2", "+", 1], 1 -> Term["VAR", 0, 0], 2 -> Term["NUM", "i32", 1]|>, "BookCells" -> <||>, "Tensors" -> <||>, "Defs" -> <||>, "AloStates" -> {}, "Labels" -> 1, "State" -> "Initialized"|>] -->
+
+Restore the snapshot and apply the restored lambda to 9:
+
+```wl
+TTermVal @ TWnf[TInitialize[snap][TNum[9]]]
+```
+<!-- => 10 -->
 
 ## Applications
 
-Project the schedule the materializer produces from a small neural-net forward pass and gate it through the memory planner:
+Start from an empty heap, so that the plan below covers only one schedule:
 
 ```wl
-W = TGlorot[{4, 10}]; b = TZeros[{10}]; xs = TTensorCreate[ConstantArray[1., {1, 4}]];
-loss = TL2Loss @ TLinear[xs, W, b];
-TMaterialize[loss];
-TMemoryPlanReport @ TMemoryPlan[]
+TReset[];
 ```
-<!-- => a Column of top-5 largest buffers + alive-span summary for the scheduled DAG -->
+
+An input matrix:
+
+```wl
+x = TTensorCreate[ConstantArray[0.5, {16, 16}]]
+```
+
+A weight matrix:
+
+```wl
+w = TTensorCreate[ConstantArray[0.25, {16, 4}]]
+```
+
+Schedule one layer and a sum over its output, without running it:
+
+```wl
+TMaterialize[Total[Tanh[x . w], All]]
+```
+
+A summary of the buffers of the schedule:
+
+```wl
+TMemoryPlanReport[TMemoryPlan[]]
+```
 
 ---
 
-Prove a small equational theorem with the C-engine ATP and reconstruct it as a Wolfram `ProofObject`:
+Prove that in an abelian group, written with [CircleTimes]() and [OverBar]() for the inverse, the inverse of a product is the product of the inverses:
 
 ```wl
-#| eval: False
-Needs["WolframInstitute`THVMLink`ATP`"];
-TFindProof[
-    Inactive[Equal][x \[CircleTimes] y \[CircleTimes] z, z \[CircleTimes] y \[CircleTimes] x],
-    "AbelianGroupAxioms",
-    TimeConstraint -> 10
-]
+TFindProof[ForAll[{a, b}, OverBar[a \[CircleTimes] b] == OverBar[a] \[CircleTimes] OverBar[b]], "AbelianGroupAxioms", TimeConstraint -> 10]
 ```
-<!-- => ProofObject[...] supporting ["ProofDataset"], ["ProofGraph"], ["ProofLength"], etc. -->
 
 ## Properties and Relations
 
-Per-kernel introspection - source, autotune candidates, and dispatch counters live on <code>[TKernel]()</code>:
+A tensor:
 
 ```wl
-TRealize @ TUOpAdd[TTensorCreate[Range[1., 8.]], TTensorCreate[Range[1., 8.]]];
-k = TKernel[1];
-{k["DispatchKind"], k["DispatchCount"], TKernelProposed[1]}
+v = TTensorCreate[Range[1., 8.]]
 ```
-<!-- => {"jit" or "blas-...", n_dispatches, {TOpt[op, axis, arg], ...}} -->
+
+Schedule the sum of its squares as a kernel, without running it:
+
+```wl
+k = TKernel[TMaterialize[Total[v^2]]]
+```
+
+The candidate optimizations of its loop schedule, unrolling the loop over the 8 elements by 8, 4 or 2:
+
+```wl
+TKernelProposed[k["Kid"]]
+```
+
+Dispatch the kernel:
+
+```wl
+Normal[k[]]
+```
+<!-- => {204.} -->
+
+The kernel ran as natively compiled code:
+
+```wl
+k["DispatchKind"]
+```
+<!-- => "jit" -->
 
 ## Possible Issues
 
-The default `make` target does not rebuild the WL paclet dynamic library; the host `.wlt` tests and notebooks dispatch through the stale `LibraryResources/THVMLink.dylib`. Always run `make && make wl` from the repository root after touching C sources.
+Reduction rewrites the heap in place and consumes the term it reduces. An application:
+
+```wl
+t = TApp[TLam[n, n + 1], TNum[41]]
+```
+
+The first reduction gives 42:
+
+```wl
+TTermVal[TWnf[t]]
+```
+<!-- => 42 -->
+
+Reducing the same term again reads cells that the first reduction rewrote, and does not give 42. Reduce the term that the first reduction gives instead:
+
+```wl
+TTermVal[TWnf[t]]
+```
+<!-- => 41 -->
 
 ## Hero Image
 
-A single luminous symbolic graph morphs from an interaction-net string diagram on the left, through a stack of translucent tensor planes in the middle, into an equational rewrite proof graph on the right - the three computational surfaces THVMLink unifies behind one symbolic graph:
+Agents of an interaction net wired into a stack of tensors and a neural network, under an equation:
 
 ```wl
-ImageResize[
-    Import[PacletObject["WolframInstitute/THVMLink"]["AssetLocation", "Hero"]],
-    {1500, Automatic}
-]
+ImageResize[Import[PacletObject["WolframInstitute/THVMLink"]["AssetLocation", "Hero"]], {1500, Automatic}]
 ```
 
 ## Author Notes
 
-Drafted with assistance from Claude (Anthropic, model `claude-opus-4-7`) under
-human supervision. Frontmatter, section structure, and prose were machine-
-generated from the in-source `::usage` strings; the Wolfram Language examples
-were reviewed by a human contributor against the live paclet before publishing.
-The C runtime, the LibraryLink bridge, and the `Kernel/*.wl` sources THVMLink
-documents are hand-written and pre-date this documentation pass.
+The documentation was written with the assistance of Claude (Anthropic). The examples are evaluated against the paclet when the documentation is built.
