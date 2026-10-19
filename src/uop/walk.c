@@ -9,10 +9,7 @@ typedef struct {
   UOpMap seen;
 } UOpWalk;
 
-fn void uop_walk_push(UOpWalk *w, Term t) {
-  if (term_tag(t) != TAG_UOP || !uop_map_put(&w->seen, t, 0)) {
-    return;
-  }
+static void uop_walk_stack_push(UOpWalk *w, Term t) {
   if (w->sp == w->stack_cap) {
     u32   cap   = w->stack_cap ? w->stack_cap * 2 : 64;
     Term *stack = (Term *)realloc(w->stack, cap * sizeof(Term));
@@ -25,8 +22,33 @@ fn void uop_walk_push(UOpWalk *w, Term t) {
   w->stack[w->sp++] = t;
 }
 
+fn void uop_walk_push(UOpWalk *w, Term t) {
+  if (term_tag(t) != TAG_UOP || !uop_map_put(&w->seen, t, 0)) {
+    return;
+  }
+  uop_walk_stack_push(w, t);
+}
+
 fn Term uop_walk_pop(UOpWalk *w) {
   return w->sp > 0 ? w->stack[--w->sp] : 0;
+}
+
+// Marking at pop instead: a node may be queued more than once and is taken
+// once, so the nodes come out in a plain depth-first walk's first-pop order.
+fn void uop_walk_queue(UOpWalk *w, Term t) {
+  if (term_tag(t) == TAG_UOP) {
+    uop_walk_stack_push(w, t);
+  }
+}
+
+fn Term uop_walk_take(UOpWalk *w) {
+  Term t;
+  while ((t = uop_walk_pop(w)) != 0) {
+    if (uop_map_put(&w->seen, t, 0)) {
+      return t;
+    }
+  }
+  return 0;
 }
 
 fn void uop_walk_free(UOpWalk *w) {

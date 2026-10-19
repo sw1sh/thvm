@@ -1137,14 +1137,13 @@ int uop_dag_extract_conv2d_flat_shape(Term addr_w, Term addr_x,
 u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
                          u32 *out_extent, u32 cap) {
   if (root == 0 || term_tag(root) != TAG_UOP || cap == 0) return 0;
-  Term stack[512];
-  u32  sp = 0;
-  stack[sp++] = root;
-  // Dedup by axis_id: a well-formed DAG has one RANGE per axis_id.
-  u32 n = 0;
-  while (sp > 0) {
-    Term t = stack[--sp];
-    if (term_tag(t) != TAG_UOP) continue;
+  // Dedup by axis_id, the first RANGE found winning: a well-formed DAG has one
+  // RANGE per axis_id.
+  UOpWalk w = {0};
+  uop_walk_queue(&w, root);
+  u32  n = 0;
+  Term t;
+  while ((t = uop_walk_take(&w)) != 0) {
     u32 op = term_ext(t);
     if (op == UOP_RANGE) {
       u32 aid  = uop_range_axis_id(t);
@@ -1162,17 +1161,16 @@ u32 uop_dag_collect_axes(Term root, u32 *out_axis_id, u32 *out_axis_type,
     }
     if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID) continue;
     if (op == UOP_OPT) {
-      Term tgt = uop_opt_target(t);
-      if (term_tag(tgt) == TAG_UOP && sp < 512) stack[sp++] = tgt;
+      uop_walk_queue(&w, uop_opt_target(t));
       continue;
     }
-    u8 ar = uop_arity(op);
+    u8  ar  = uop_arity(op);
     u64 loc = term_val(t);
-    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 512; i++) {
-      Term child = heap_read(loc + i);
-      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+      uop_walk_queue(&w, heap_read(loc + i));
     }
   }
+  uop_walk_free(&w);
   for (u32 i = 1; i < n; i++) {
     u32 aid = out_axis_id[i], at = out_axis_type[i], ext = out_extent[i];
     i32 j = (i32)i - 1;
@@ -1264,31 +1262,32 @@ u32 uop_dag_addr_coeff_lookup(UopDagAddrCoeffsView const *a, u32 axis_id) {
 // Static extent (a symbolic one's upper bound) of axis `want_axis_id`, or 0.
 static u32 udg_axis_extent(Term root, u32 want_axis_id) {
   if (root == 0 || term_tag(root) != TAG_UOP) return 0;
-  Term stack[256];
-  u32 sp = 0;
-  stack[sp++] = root;
-  while (sp > 0) {
-    Term t = stack[--sp];
-    if (term_tag(t) != TAG_UOP) continue;
+  UOpWalk w = {0};
+  uop_walk_queue(&w, root);
+  u32  extent = 0;
+  Term t;
+  while ((t = uop_walk_take(&w)) != 0) {
     u32 op = term_ext(t);
     if (op == UOP_RANGE) {
-      if (uop_range_axis_id(t) == want_axis_id) return uop_range_static_extent(t);
+      if (uop_range_axis_id(t) == want_axis_id) {
+        extent = uop_range_static_extent(t);
+        break;
+      }
       continue;
     }
     if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID) continue;
     if (op == UOP_OPT) {
-      Term tgt = uop_opt_target(t);
-      if (term_tag(tgt) == TAG_UOP && sp < 256) stack[sp++] = tgt;
+      uop_walk_queue(&w, uop_opt_target(t));
       continue;
     }
-    u8 ar = uop_arity(op);
+    u8  ar  = uop_arity(op);
     u64 loc = term_val(t);
-    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 256; i++) {
-      Term child = heap_read(loc + i);
-      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+      uop_walk_queue(&w, heap_read(loc + i));
     }
   }
-  return 0;
+  uop_walk_free(&w);
+  return extent;
 }
 
 // out[M, N] = sum_K A[K, N] * B[M, K]: N axes only in A, M axes only in B, K
@@ -1939,13 +1938,13 @@ u32 uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap) {
   if (root == 0 || term_tag(root) != TAG_UOP || out_addrs == NULL || cap == 0) {
     return 0;
   }
-  Term stack[512];
-  u32  sp = 0;
-  stack[sp++] = root;
-  u32 n = 0;
-  while (sp > 0) {
-    Term t = stack[--sp];
-    if (term_tag(t) != TAG_UOP) continue;
+  // hand_opts iterates the addresses, so they keep a plain depth-first walk's
+  // first-pop order (uop_walk_take).
+  UOpWalk w = {0};
+  uop_walk_queue(&w, root);
+  u32  n = 0;
+  Term t;
+  while ((t = uop_walk_take(&w)) != 0) {
     u32 op = term_ext(t);
     if (op == UOP_INDEX_E) {
       Term addr = heap_read(term_val(t) + 1);
@@ -1958,16 +1957,15 @@ u32 uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap) {
       continue;
     }
     if (op == UOP_OPT) {
-      Term tgt = uop_opt_target(t);
-      if (term_tag(tgt) == TAG_UOP && sp < 512) stack[sp++] = tgt;
+      uop_walk_queue(&w, uop_opt_target(t));
       continue;
     }
-    u8 ar = uop_arity(op);
+    u8  ar  = uop_arity(op);
     u64 loc = term_val(t);
-    for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 512; i++) {
-      Term child = heap_read(loc + i);
-      if (term_tag(child) == TAG_UOP) stack[sp++] = child;
+    for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+      uop_walk_queue(&w, heap_read(loc + i));
     }
   }
+  uop_walk_free(&w);
   return n;
 }
