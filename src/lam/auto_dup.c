@@ -50,6 +50,9 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
       out_locs[found++] = cur_loc;
       continue;
     }
+    if (lam_body_leaf(tag)) {
+      continue;
+    }
 
     // A REF's or ALO's body is a book template over its own binders, never
     // over the LAM being sealed here.
@@ -62,31 +65,7 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
       return LAM_AUTODUP_BAIL;
     }
 
-    // CTR: [NUM(n), c_0, ..., c_{n-1}].
-    if (tag == TAG_CTR) {
-      u32 n = term_ctr_n(t);
-      if (n == 0) continue;
-      u8 seen = 0;
-      for (u32 i = 0; i < v_count; i++) {
-        if (visited_bases[i] == val) { seen = 1; break; }
-      }
-      if (seen) continue;
-      if (v_count >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
-      visited_bases[v_count++] = val;
-      // Pushed in reverse so pops run left to right, as HVM4's descent does;
-      // any other order hands DP0/DP1 to the wrong uses, and DUP-SUP pairs
-      // the wrong SUP arms.
-      for (u32 i = n; i > 0; i--) {
-        if (s_pos >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
-        u64 cloc = val + i;
-        stack_locs[s_pos]  = cloc;
-        stack_terms[s_pos] = heap_read(cloc);
-        s_pos++;
-      }
-      continue;
-    }
-
-    u32 ar = lam_body_arity(t);
+    u32 ar = term_cells(t, HEAP);
     if (ar == 0) continue;
 
     u8 seen = 0;
@@ -97,7 +76,9 @@ static u32 auto_dup_collect(u64 lam_loc, u64 *out_locs, u32 max_count) {
     if (v_count >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
     visited_bases[v_count++] = val;
 
-    // Reversed, as for CTR.
+    // Pushed in reverse so pops run left to right, as HVM4's descent does; any
+    // other order hands DP0/DP1 to the wrong uses, and DUP-SUP pairs the wrong
+    // SUP arms.
     for (u32 i = ar; i > 0; i--) {
       if (s_pos >= LAM_BODY_MAX_VISITS) return LAM_AUTODUP_BAIL;
       u64 cloc = val + i - 1;

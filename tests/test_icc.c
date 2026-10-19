@@ -115,6 +115,59 @@ int main(void) {
     CHECK(ITRS - itrs0 >= 1);
   }
 
+  // APP-BRI's inner λ$k binds the ANN's $k: (θx. x 5) 7, its type erased
+  // by ANN(λy.y, _), is ANN(5, 7), whose value is the 5 that x was applied to.
+  TEST_BEGIN("icc/app-bri-inner-lam-binds-k");
+  {
+    Term x;
+    Term bri = build_bri(&x);
+    u64  xa  = heap_alloc(2);
+    heap_set(xa + 0, x);
+    heap_set(xa + 1, term_new(0, TAG_NUM, 0, 5));
+    heap_set(term_val(bri), term_new(0, TAG_APP, 0, xa));
+    u64 app_loc = heap_alloc(2);
+    heap_set(app_loc + 0, bri);
+    heap_set(app_loc + 1, term_new(0, TAG_NUM, 0, 7));
+    Term y;
+    Term id = build_lam(&y);
+    heap_set(term_val(id), y);
+    Term r = wnf(term_new_ann(id, term_new(0, TAG_APP, 0, app_loc)));
+    CHECK_EQ(term_tag(r), TAG_ANN);
+    if (term_tag(r) == TAG_ANN) {
+      Term v = wnf(heap_read(term_val(r) + 0));
+      CHECK_EQ(term_tag(v), TAG_NUM);
+      CHECK_EQ(term_val(v), 5u);
+    }
+  }
+
+  // ANN-LAM's new λ binds the x its bridge reads: (ANN 99 (λx.x)) 3 is 3.
+  TEST_BEGIN("icc/ann-lam-new-lam-binds-its-var");
+  {
+    Term x;
+    Term lam_xx = build_lam(&x);
+    heap_set(term_val(lam_xx), x);
+    u64 app_loc = heap_alloc(2);
+    heap_set(app_loc + 0, term_new_ann(term_new(0, TAG_NUM, 0, 99), lam_xx));
+    heap_set(app_loc + 1, term_new(0, TAG_NUM, 0, 3));
+    Term r = wnf(term_new(0, TAG_APP, 0, app_loc));
+    CHECK_EQ(term_tag(r), TAG_NUM);
+    CHECK_EQ(term_val(r), 3u);
+  }
+
+  // The binder-use walk sees every child cell: a VAR under a DSU is a use.
+  TEST_BEGIN("icc/binder-use-under-a-dsu");
+  {
+    Term x;
+    Term lam = build_lam(&x);
+    u64  d   = heap_alloc(3);
+    heap_set(d + 0, term_new(0, TAG_NUM, 0, 1));
+    heap_set(d + 1, x);
+    heap_set(d + 2, term_new(0, TAG_NUM, 0, 2));
+    heap_set(term_val(lam), term_new(0, TAG_DSU, 0, d));
+    CHECK(lam_body_uses_var(term_val(lam)));
+    CHECK_EQ(lam_seal_ext(term_val(lam), 0) & LAM_ERA_MASK, 0u);
+  }
+
   // === DUP-BRI: commutation ========================================
 
   TEST_BEGIN("icc/dup-bri-commutes-into-two-bris");

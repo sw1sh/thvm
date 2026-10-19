@@ -3,7 +3,9 @@
 // = lam x. (ANN (APP val $k) body[x <- bri $k. x])
 //
 // Mirror of APP-BRI: $k, the inner bridge's binder, is also the APP's argument,
-// so both are the one cell k_loc.
+// so both are the one cell k_loc.  The new x is read only through the bridge
+// that replaces the old x, so the new lam is erasable exactly when the old one
+// was; a walk of the new body cannot see that use.
 fn Term interact_ann_lam(Term val, Term lam) {
   ITRS++;
   multi_emit(RULE_ANN_LAM, MULTI_TERM, (u64)val, (u64)lam, 0);
@@ -32,5 +34,5 @@ fn Term interact_ann_lam(Term val, Term lam) {
   heap_set(new_lam_loc, ann_inner_term);
 
   heap_subst_var(lam_loc, inner_val);
-  return term_new(0, TAG_LAM, lam_seal_ext(new_lam_loc, 0), new_lam_loc);
+  return term_new(0, TAG_LAM, term_ext(lam) & LAM_ERA_MASK, new_lam_loc);
 }
