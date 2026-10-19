@@ -305,6 +305,7 @@ TESTS := \
   $(BIN)/test_gc_mark_term \
   $(BIN)/test_gc_node_size \
   $(BIN)/test_book_def_gc \
+  $(BIN)/test_alo_gc \
   $(BIN)/test_kernel_gc_unfired \
   $(BIN)/test_extern_pin \
   $(BIN)/test_bufferize_classify \

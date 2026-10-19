@@ -130,6 +130,23 @@ fn u64 gc_from_end(void)     { return GC_FROM_END; }
 
 static Term gc_evacuate(Term t, u64 *alloc);
 
+// States of the unforced ALOs this collection moves: their chain entries name
+// dyn LAM cells (ALO_STATES) and dup cells (DUP_SHARE) that must move too.
+static u32 *GC_ALO_WORK     = NULL;
+static u32  GC_ALO_WORK_LEN = 0;
+static u32  GC_ALO_WORK_CAP = 0;
+
+static void gc_alo_note(u32 state) {
+  if (GC_ALO_WORK_LEN == GC_ALO_WORK_CAP) {
+    u32  cap = GC_ALO_WORK_CAP ? 2 * GC_ALO_WORK_CAP : 1024;
+    u32 *w   = (u32 *)realloc(GC_ALO_WORK, (size_t)cap * sizeof *w);
+    if (w == NULL) thvm_fatal("gc: out of memory for the ALO state worklist");
+    GC_ALO_WORK     = w;
+    GC_ALO_WORK_CAP = cap;
+  }
+  GC_ALO_WORK[GC_ALO_WORK_LEN++] = state;
+}
+
 // Cells below `first` move as they are.
 static u64 gc_evacuate_cells(u64 loc, u32 size, u32 first, u64 *alloc) {
   u64 dst = *alloc;
@@ -172,8 +189,44 @@ static Term gc_evacuate(Term t, u64 *alloc) {
   // An unforced ALO's cell 0 is a book term, its NUM state in cell 1; alo_force
   // leaves the dyn result and an ERA.
   u32 first = (tag == TAG_ALO && term_tag(HEAP[loc + 1]) == TAG_NUM) ? 1 : 0;
+  if (first) gc_alo_note((u32)term_val(HEAP[loc + 1]));
   u64 new_loc = gc_evacuate_cells(loc, size, first, alloc);
   return term_new(term_sub_get(t), tag, term_ext(t), new_loc);
+}
+
+// Keep and re-point what the live ALO states name: each chain entry's LAM cell
+// and the dup cell DUP_SHARE holds for a live state (state 0 included, the REF
+// unfold's).  Moving a cell can reach more unforced ALOs, so this runs until no
+// state turns live and no entry moves.
+static void gc_evacuate_alo_states(u64 *alloc) {
+  if (GC_ALO_WORK_LEN == 0) return;
+  u32 n    = ALO_STATES_NEXT > 0 ? ALO_STATES_NEXT : 1;
+  u8 *live = (u8 *)calloc(n, 1);
+  if (live == NULL) thvm_fatal("gc: out of memory for the ALO state marks");
+  for (;;) {
+    while (GC_ALO_WORK_LEN > 0) {
+      u32 st = GC_ALO_WORK[--GC_ALO_WORK_LEN];
+      if (st >= n || live[st]) continue;
+      live[st] = 1;
+      if (st != 0) {
+        Term v = gc_evacuate(term_new(0, TAG_VAR, 0, ALO_STATES[st].new_loc), alloc);
+        ALO_STATES[st].new_loc = term_val(v);
+        gc_alo_note(ALO_STATES[st].parent);
+      }
+    }
+    u32 moved = 0;
+    for (u32 i = 0; i < DUP_SHARE_SLOTS; i++) {
+      DupShareEntry *e = &DUP_SHARE[i];
+      if (e->gen != DUP_SHARE_GEN || e->state_id >= n || !live[e->state_id]) continue;
+      Term v = gc_evacuate(term_new(0, TAG_VAR, 0, e->dyn_loc), alloc);
+      if (term_val(v) != e->dyn_loc) {
+        e->dyn_loc = term_val(v);
+        moved++;
+      }
+    }
+    if (GC_ALO_WORK_LEN == 0 && moved == 0) break;
+  }
+  free(live);
 }
 
 // Re-key the lam-shape table through the forward pointers, before the swap.
@@ -293,6 +346,7 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   if (!GC_ENABLED) return;
 
   GC_COUNT++;
+  GC_ALO_WORK_LEN = 0;
   u64 alloc = gc_space_base(GC_TO_START);
   materialized_loc_gc_before();
 
@@ -301,6 +355,7 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   }
 
   gc_evacuate_side_tables(&alloc);
+  gc_evacuate_alo_states(&alloc);
 
   // After every evacuation and before the swap: its keys are from-space locs.
   gc_remap_lam_shape();
