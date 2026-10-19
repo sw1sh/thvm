@@ -11,7 +11,8 @@
 // Contract:
 //   - Every argument buffer (read or written) occupies one input slot
 //     (input_tids[i]); custom_outs_mask marks the written slots and
-//     output_tid is the tensor of out_slots[0].
+//     output_tid is the tensor of the lowest one, where the backends bind
+//     out_buf_id (kernel_custom_primary_out_slot).
 //   - Arguments must be live, contiguous, offset-0 leaf tensors on one
 //     backend; the WL layer realizes each one first.
 //   - The source ABI is per backend:
@@ -108,7 +109,7 @@ fn u32 kernel_emit_custom_program(char const *name, char const *source,
   }
   ke->n_inputs = n_args;
 
-  u32 primary = arg_tids[out_slots[0]];
+  u32 primary = arg_tids[__builtin_ctzll(outs_mask)];
   ke->output_tid   = primary;
   ke->output_dtype = TENS[primary].dtype;
   ke->output_shape = TENS[primary].view.shape;

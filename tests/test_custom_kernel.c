@@ -177,6 +177,25 @@ int main(void) {
   }
   jit_capture_drop(slot);
 
+  // === 4b. outs listed out of order: each slot keeps its own buffer ===
+  TEST_BEGIN("custom-kernel/outs-in-any-order");
+  {
+    u32 rx  = mk_f32(n, xv);
+    u32 ry1 = mk_f32(n, NULL);
+    u32 ry2 = mk_f32(n, NULL);
+    u32 args_r[3] = {rx, ry1, ry2};
+    u32 outs_r[2] = {2, 1};
+    u32 k_rev = kernel_emit_custom_program("twoout", SRC_TWO_OUT, grid, block,
+                                           args_r, 3, outs_r, 2, 0);
+    CHECK(k_rev != 0);
+    CHECK(kernel_custom_fire(k_rev) == 0);
+    float o1[8], o2[8];
+    CPU_BACKEND.buf_read(TENS[ry1].buf_id, o1, (u64)n * 4);
+    CPU_BACKEND.buf_read(TENS[ry2].buf_id, o2, (u64)n * 4);
+    for (u32 i = 0; i < n; i++) CHECK(o1[i] == xv[i] + 1.0f);
+    for (u32 i = 0; i < n; i++) CHECK(o2[i] == xv[i] * 10.0f);
+  }
+
   // === 5. emit-time validation rejects bad specs =====================
   u32 bad_out[1] = {5};
   CHECK(kernel_emit_custom_program("addone", SRC_ADDONE, grid, block,
