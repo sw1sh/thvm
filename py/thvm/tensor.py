@@ -541,17 +541,17 @@ class Tensor(metaclass=_TensorMeta):
     def exp2(self) -> "Tensor":  return self._unary(K.EXP2)
     def log2(self) -> "Tensor":  return self._unary(K.LOG2)
     def sqrt(self) -> "Tensor":  return self._unary(K.SQRT)
-    def _elementwise(self, op: int) -> "Tensor":
-        """A composite elementwise op of src/nn/elementwise.c."""
-        return Tensor._from_nn(_TH.nn("elementwise", [self._nn()], [op]), "elementwise")
+    def _elementwise(self, op: str) -> "Tensor":
+        """A composite elementwise op of src/nn/elementwise.c, by name."""
+        return Tensor._from_nn(_TH.nn(op, [self._nn()]), op)
 
-    def rsqrt(self) -> "Tensor":   return self._elementwise(K.NN_RSQRT)
-    def exp(self) -> "Tensor":     return self._elementwise(K.NN_EXP)
-    def log(self) -> "Tensor":     return self._elementwise(K.NN_LOG)
+    def rsqrt(self) -> "Tensor":   return self._elementwise("rsqrt")
+    def exp(self) -> "Tensor":     return self._elementwise("exp")
+    def log(self) -> "Tensor":     return self._elementwise("log")
     def abs(self) -> "Tensor":
         return (self * self).sqrt()
-    def sigmoid(self) -> "Tensor": return self._elementwise(K.NN_SIGMOID)
-    def tanh(self) -> "Tensor":    return self._elementwise(K.NN_TANH)
+    def sigmoid(self) -> "Tensor": return self._elementwise("sigmoid")
+    def tanh(self) -> "Tensor":    return self._elementwise("tanh")
 
     def softmax(self, axis: int = -1) -> "Tensor":
         return Tensor._from_nn(_TH.nn("softmax", [self._nn()], [axis, 0]), "softmax")
@@ -592,7 +592,7 @@ class Tensor(metaclass=_TensorMeta):
         return 1.0 - (self == other)
 
     def relu(self) -> "Tensor":
-        return self._elementwise(K.NN_RELU)
+        return self._elementwise("relu")
 
     def elu(self, alpha: float = 1.0) -> "Tensor":
         # elu(x) = relu(x) + alpha * (exp(min(x, 0)) - 1), with min(x, 0) = -relu(-x).
@@ -608,7 +608,7 @@ class Tensor(metaclass=_TensorMeta):
         return Tensor._from_nn(r, f"minimum {self._shape}")
 
     def square(self) -> "Tensor":
-        return self._elementwise(K.NN_SQUARE)
+        return self._elementwise("square")
 
     def __lt__(self, other) -> "Tensor":
         # A 0/1 mask in a's dtype: thvm has no bool dtype.
@@ -1255,11 +1255,11 @@ class Tensor(metaclass=_TensorMeta):
         """tinygrad mixin/elementwise.py:780-795 (src/nn/elementwise.c)."""
         if approximate not in ("tanh", "none"):
             raise RuntimeError(f"{approximate=} is not supported")
-        return self._elementwise(K.NN_GELU if approximate == "tanh" else K.NN_GELU_ERF)
+        return self._elementwise("gelu" if approximate == "tanh" else "gelu_erf")
 
     def erf(self) -> "Tensor":
         """Abramowitz and Stegun 7.1.26, as tinygrad (mixin/elementwise.py:1059-1071)."""
-        return self._elementwise(K.NN_ERF)
+        return self._elementwise("erf")
 
     def triu(self, diagonal: int = 0) -> "Tensor":
         """The upper-triangular part, other elements 0 (src/nn/tri.c)."""

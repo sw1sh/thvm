@@ -216,7 +216,7 @@ EXPORT uint64_t py_nn(uint32_t op, uint64_t const *terms, uint32_t *desc, uint32
   return r.t;
 }
 
-// An NN_OP_* id by its name ("conv2d", ...); NN_OP_COUNT for none.
+// An nn op's id by its name ("conv2d", "relu", ...); UINT32_MAX for none.
 EXPORT uint32_t py_nn_op(char const *name) {
   return nn_op_id(name);
 }
@@ -542,14 +542,4 @@ EXPORT uint32_t py_const_KAX_REDUCE(void)       { return KAX_REDUCE; }
 EXPORT uint32_t py_const_KAX_LOCAL(void)        { return KAX_LOCAL; }
 EXPORT uint32_t py_const_KAX_GLOBAL(void)       { return KAX_GLOBAL; }
 
-EXPORT uint32_t py_const_NN_EXP(void)           { return NN_EXP; }
-EXPORT uint32_t py_const_NN_LOG(void)           { return NN_LOG; }
-EXPORT uint32_t py_const_NN_SIGMOID(void)       { return NN_SIGMOID; }
-EXPORT uint32_t py_const_NN_TANH(void)          { return NN_TANH; }
-EXPORT uint32_t py_const_NN_RELU(void)          { return NN_RELU; }
-EXPORT uint32_t py_const_NN_GELU(void)          { return NN_GELU; }
-EXPORT uint32_t py_const_NN_GELU_ERF(void)      { return NN_GELU_ERF; }
-EXPORT uint32_t py_const_NN_ERF(void)           { return NN_ERF; }
-EXPORT uint32_t py_const_NN_RSQRT(void)         { return NN_RSQRT; }
-EXPORT uint32_t py_const_NN_SQUARE(void)        { return NN_SQUARE; }
 

@@ -4,8 +4,7 @@
 
 BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-SetUsage[TLayerNorm, "TLayerNorm[x$] and TLayerNorm[x$, eps$] normalise along the last axis: y = (x$ - mean) / sqrt(var + eps$). Default eps$ = 1e-5. mean and var are per-row reductions broadcast back via the softmax-style reduce-broadcast pattern."];
-SetUsage[TLayerNormAffine, "TLayerNormAffine[x$, gamma$, beta$] applies TLayerNorm[x$] then multiplies by gamma$ and adds beta$ along the last axis. GPT-2's layer-norm carries learned gamma/beta; bare TLayerNorm normalises only."];
+SetUsage[TLayerNorm, "TLayerNorm[x$] and TLayerNorm[x$, eps$] normalise along the last axis: y = (x$ - mean) / sqrt(var + eps$), the biased variance (tinygrad's layernorm). Default eps$ = 1e-5."];
 SetUsage[TLayerNormAffine, "TLayerNormAffine[x$, gamma$, beta$] applies TLayerNorm[x$] then multiplies by gamma$ and adds beta$ along the last axis. GPT-2's layer-norm carries learned gamma/beta; bare TLayerNorm normalises only."];
 SetUsage[TRMSNorm, "TRMSNorm[x$, weight$, eps$] is RMS normalisation over the last axis: y = x$ * rsqrt(mean(x$^2) + eps$) * weight$, with weight$ a rank-1 {D} gain over the feature axis. The per-head q/k norm of FLUX / Qwen3 attention and the LLaMA-style pre-norm. No mean-subtraction (unlike LayerNorm)."];
 SetUsage[TGroupNorm, "TGroupNorm[x$, weight$, bias$, groups$, eps$] is GroupNorm over a {C, H, W} tensor: split C into groups$ groups, normalise each group over its (C/groups$, H, W) elements, then apply a per-channel affine weight$/bias$ ({C}). The VAE / U-Net spatial normalisation."];
@@ -31,19 +30,7 @@ Begin["`Private`"];
    ends in an EXPAND (which it does -- (x - mean) feeds into a
    square-sum-recip-sqrt-broadcast-mul). *)
 TLayerNorm[x_TTerm] := TLayerNorm[x, 1.0*^-5]
-TLayerNorm[x_TTerm, eps_ ? NumericQ] := With[{shape = tUopShape[x]},
-    Module[{rank, axis, n, sumShape, broadcast, mean, centered, var},
-        rank = Length[shape];
-        axis = rank - 1;
-        n = shape[[rank]];
-        sumShape = ReplacePart[shape, rank -> 1];
-        broadcast = TUOpExpand[TUOpReshape[#, sumShape], shape] &;
-        mean = broadcast[TUOpReduce[x, axis, "SUM"] / n];
-        centered = x - mean;
-        var = broadcast[TUOpReduce[centered * centered, axis, "SUM"] / n];
-        centered / Sqrt[var + eps]
-    ]
-]
+TLayerNorm[x_TTerm, eps_ ? NumericQ] := nnCall[TLayerNorm, "layernorm", {x}, {-1}, {eps}]
 
 TLayerNormAffine[x_TTerm, gamma_TTerm, beta_TTerm] := With[{shape = tUopShape[x], norm = TLayerNorm[x]},
     Module[{rank, gammaB, betaB, broadcastShape},

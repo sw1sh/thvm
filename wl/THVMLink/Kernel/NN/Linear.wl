@@ -14,7 +14,7 @@ SetUsage[TL2Loss, "TL2Loss[x$] = TSum[TSquare[x$]]."];
 SetUsage[TMSELoss, "TMSELoss[pred$, target$] = TL2Loss[pred$ - target$]."];
 SetUsage[TMatVec, "TMatVec[W$, x$] computes W$ @ x$ where W$ is {out, in} and x$ is {in} (rank-1) or {1, in} (rank-2), giving {out}. Expand-broadcast then sum-reduce along the inner axis."];
 SetUsage[TMatMul, "TMatMul[A$, B$] computes A$ @ B$ where A$ is {M, K} and B$ is {K, N}, giving {M, N}. Lowered as reshape + expand to a common {M, K, N} shape, elementwise multiply, then sum-reduce along axis 1; this pattern is recognised and routed to cblas_sgemm."];
-SetUsage[TLinear, "TLinear[x$, W$, b$] computes x$ @ W$ + b$ where x$ is {$$, M, K}, W$ is {K, N}, and b$ is {N} (or None for bias-free). The bias is reshaped to {1, $$, 1, N} and expanded to the matmul output shape. Standard nn.Linear analogue (tinygrad's Tensor.linear)."];
+SetUsage[TLinear, "TLinear[x$, W$, b$] computes x$ @ W$ + b$ (tinygrad's Tensor.linear): x$ is {$$, K}, W$ is {K, N} (a rank-1 W$ multiplies elementwise), and b$ is {N} or None for bias-free; leading axes of x$ broadcast."];
 
 Begin["`Private`"];
 
@@ -50,34 +50,10 @@ matMulShapesOkQ[{_, k_Integer}, {k_Integer, _}] := True
 matMulShapesOkQ[_, _] := False
 TMatMul::dims = "TMatMul multiplies an m by k matrix with a k by n one; the shapes are `1` and `2`.";
 
-TMatMul[a_TTerm, b_TTerm] /; matMulShapesOkQ[tUopShape[a], tUopShape[b]] := With[{shapeA = tUopShape[a], shapeB = tUopShape[b]},
-    Module[{m, k, n, ab, bb},
-        m = shapeA[[1]];
-        k = shapeA[[2]];
-        n = shapeB[[2]];
-        ab = TUOpExpand[TUOpReshape[a, {m, k, 1}], {m, k, n}];
-        bb = TUOpExpand[TUOpReshape[b, {1, k, n}], {m, k, n}];
-        TUOpReduce[TUOpMul[ab, bb], 1, "SUM"]
-    ]
-]
+TMatMul[a_TTerm, b_TTerm] /; matMulShapesOkQ[tUopShape[a], tUopShape[b]] := nnCall[TMatMul, "dot", {a, b}]
 TMatMul[a_TTerm, b_TTerm] := Null /; (Message[TMatMul::dims, tUopShape[a], tUopShape[b]]; False)
 
-(* TLinear[x, W, b] -- standard nn.Linear forward = x @ W + b.
-   The bias is rank-1 {N}; reshape to {1, ..., 1, N} and EXPAND
-   to the matmul's output shape.  Without the explicit EXPAND,
-   {seq,N} + {N} via the elementwise numel-cycle aligns only the
-   first row and writes garbage into the rest.  The TLayerNorm
-   reduction-broadcast pattern uses the same EXPAND trick. *)
-TLinear[x_TTerm, w_TTerm, b_TTerm] := With[{shapeX = tUopShape[x], shapeW = tUopShape[w]},
-    Module[{out, bcast, prod, biasShape},
-        prod = TMatMul[x, w];
-        out = ReplacePart[shapeX, Length[shapeX] -> shapeW[[2]]];
-        biasShape = ConstantArray[1, Length[out]];
-        biasShape[[Length[out]]] = shapeW[[2]];
-        bcast = TUOpExpand[TUOpReshape[b, biasShape], out];
-        prod + bcast
-    ]
-]
+TLinear[x_TTerm, w_TTerm, b : (_TTerm | None) : None] := nnCall[TLinear, "linear", {x, w, b}]
 
 End[];
 

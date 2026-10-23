@@ -335,8 +335,8 @@ SetUsage[TUOpSrcs, "TUOpSrcs[u$] returns the source-cell terms for a UOp term, i
    NN/*.wl's SetUsage + definitions reuse them. *)
 {
     TAttention, TBatchNorm, TBatchNormTrain, TCategoricalCrossEntropy, TCausalMask,
-    TCausalMaskSym, TClip, TConv2D, TConv2DIm2Col, TConv2DIm2ColBatched,
-    TConv2DIm2ColPoolGemm, TConv2DKhKw,
+    TCausalMaskSym, TClip, TConv2D,
+    TConv2DIm2ColPoolGemm,
     TCrossEntropyLoss, TDecodeAttend, TDot, TEmbedding, TEmbeddingMatrix, TFromLayer,
     TFromNet, TGELU, TGather, TGlorot, TGroupNorm, THeadAttention, TL2Loss, TLayerNorm,
     TLayerNormAffine, TLayerToTensors, TLayerWeights, TLinear, TLog, TMSELoss, TMatMul,
@@ -666,6 +666,9 @@ $uopExpandFn := $uopExpandFn = load["thvm_wl_uop_expand", {Integer, {Integer, 1}
 $uopPadFn := $uopPadFn = load["thvm_wl_uop_pad", {Integer, {Integer, 1}}, Integer];
 $uopShrinkFn := $uopShrinkFn = load["thvm_wl_uop_shrink", {Integer, {Integer, 1}}, Integer];
 $uopFlipFn := $uopFlipFn = load["thvm_wl_uop_flip", {Integer, Integer}, Integer];
+(* The src/nn ops through their one entry, nn_call (docs/nn.md). *)
+$nnFn := $nnFn = load["thvm_wl_nn", {Integer, {Integer, 1}, {Integer, 1}, {Real, 1}}, Integer];
+$nnOpFn := $nnOpFn = load["thvm_wl_nn_op", {"UTF8String"}, Integer];
 $uopGradFn := $uopGradFn = load["thvm_wl_uop_grad", {Integer, Integer}, Integer];
 $uopGradWithTargetFn := $uopGradWithTargetFn = load["thvm_wl_uop_grad_with_target", {Integer, Integer, Integer}, Integer];
 $uopFwdFn := $uopFwdFn = load["thvm_wl_uop_fwd", {Integer, Integer}, Integer];

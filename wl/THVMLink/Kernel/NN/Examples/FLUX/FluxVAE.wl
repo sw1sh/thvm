@@ -44,7 +44,7 @@ Begin["`Private`"];
    gather (~64 GB at ImageSize 1024).  The fused view keeps the footprint flat in
    resolution, so it is the default; THVM_VAE_CONV_GEMM=1 opts back into the
    faster-but-heavy GEMM for small sizes.  Both reuse the same _pool windowing and
-   are byte-faithful to TConv2DKhKw (validated to 1e-6 vs the correlation
+   are byte-faithful to the kh*kw partial-sum conv (validated to 1e-6 vs the correlation
    reference; pool vs gemm bit-identical).  Rank-4 inputs route to the batched
    _pool body. *)
 vaeConvGemmQ[] := Environment["THVM_VAE_CONV_GEMM"] === "1"

@@ -176,16 +176,6 @@ class _Constants:
     AXIS_LOCAL = _read_uint32_const("py_const_KAX_LOCAL")
     AXIS_GLOBAL = _read_uint32_const("py_const_KAX_GLOBAL")
     KOP_UPCAST = _read_uint32_const("py_const_KOP_UPCAST")
-    NN_EXP = _read_uint32_const("py_const_NN_EXP")
-    NN_LOG = _read_uint32_const("py_const_NN_LOG")
-    NN_SIGMOID = _read_uint32_const("py_const_NN_SIGMOID")
-    NN_TANH = _read_uint32_const("py_const_NN_TANH")
-    NN_RELU = _read_uint32_const("py_const_NN_RELU")
-    NN_GELU = _read_uint32_const("py_const_NN_GELU")
-    NN_GELU_ERF = _read_uint32_const("py_const_NN_GELU_ERF")
-    NN_ERF = _read_uint32_const("py_const_NN_ERF")
-    NN_RSQRT = _read_uint32_const("py_const_NN_RSQRT")
-    NN_SQUARE = _read_uint32_const("py_const_NN_SQUARE")
 
 
 K = _Constants

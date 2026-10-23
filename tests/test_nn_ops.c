@@ -283,7 +283,7 @@ int main(void) {
     Tensor r = nn_call(NN_OP_SOFTMAX, &x, 1, sm, 2, NULL, 0);
     CHECK(r.t != 0);
     CHECK_EQ(r.shape.ndim, 2);
-    CHECK_EQ(nn_call(NN_OP_COUNT, &x, 1, sm, 2, NULL, 0).t, 0);
+    CHECK_EQ(nn_call(NN_OP_COUNT + NN_ELEMENTWISE_COUNT, &x, 1, sm, 2, NULL, 0).t, 0);
     CHECK_EQ(nn_call(NN_OP_MOVE, &x, 1, pad_short, 3, NULL, 0).t, 0);
     CHECK_EQ(nn_call(NN_OP_MOVE, &x, 1, perm_dup, 3, NULL, 0).t, 0);
     CHECK_EQ(nn_call(NN_OP_SOFTMAX, &x, 1, bad_axis, 2, NULL, 0).t, 0);
@@ -291,7 +291,10 @@ int main(void) {
     Tensor xw[3] = {leaf(4, (u32[4]){1, 1, 3, 3}, xs), leaf(4, (u32[4]){1, 1, 2, 2}, xs), {0}};
     CHECK_EQ(nn_call(NN_OP_CONV2D, xw, 3, conv_short, 3, NULL, 0).t, 0);
     CHECK_EQ(nn_op_id("conv_transpose2d"), NN_OP_CONV_TRANSPOSE2D);
-    CHECK_EQ(nn_op_id("nope"), NN_OP_COUNT);
+    CHECK_EQ(nn_op_id("nope"), UINT32_MAX);
+    i32 const none_i[1] = {0};
+    check(nn_call(nn_op_id("square"), &x, 1, none_i, 0, NULL, 0),
+          (f32[6]){4.0f, 0.25f, 0.0f, 0.0625f, 1.0f, 9.0f}, 6, 0, "square by name");
   }
 
   TEST_REPORT();

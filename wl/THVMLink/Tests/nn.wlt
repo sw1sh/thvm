@@ -1119,6 +1119,19 @@ VerificationTest[
     TestID -> "nn/where"
 ]
 
+(* TConv2D's tinygrad options: a 2x2 window of ones over a 3x3 of ones, padded by 1
+   and strided by 2, sees 1, 2, 2 and 4 of the input; unbatched input drops the batch. *)
+VerificationTest[
+    TInit[];
+    x = TTensorCreate @ NumericArray[ConstantArray[1., {1, 1, 3, 3}], "Real32"];
+    w = TTensorCreate @ NumericArray[ConstantArray[1., {1, 1, 2, 2}], "Real32"];
+    xu = TTensorCreate @ NumericArray[ConstantArray[1., {1, 3, 3}], "Real32"];
+    {Normal @ TTensorData @ TRealize @ TConv2D[x, w, "Padding" -> 1, "Stride" -> 2],
+     Normal @ TTensorData @ TRealize @ TConv2D[xu, w, "Padding" -> {0, 1, 0, 1}]},
+    {{{{1., 2.}, {2., 4.}}}, {{{4., 4., 2.}, {4., 4., 2.}, {2., 2., 1.}}}},
+    TestID -> "nn/conv2d-options"
+]
+
 VerificationTest[
     TInit[];
     a = TTensorCreate @ NumericArray[{-1., 2., 3.}, "Real32"];

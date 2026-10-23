@@ -46,7 +46,7 @@ arguments at the boundary.  Hosts reach it through one export each:
 // py/csource/thvm_py.c, libthvm_py (Python's ctypes, any FFI)
 uint64_t py_nn(uint32_t op, uint64_t const *terms, uint32_t *desc, uint32_t nt,
                int32_t const *ints, uint32_t ni, double const *reals, uint32_t nr);
-uint32_t py_nn_op(char const *name);       // the NN_OP_* id of "conv2d", ...
+uint32_t py_nn_op(char const *name);       // the op id of "conv2d", "relu", ...
 ```
 
 A tensor crosses as its term plus a descriptor `desc[2 + MAX_DIM] = [dtype, ndim,
@@ -62,7 +62,7 @@ dtype from its graph.
 | `cast` | x | dtype | |
 | `full` | | dtype, dims... | value |
 | `binop` | a, b | a binary UOp | |
-| `elementwise` | x | `NN_EXP` .. `NN_SQUARE` (`py_const_NN_*`) | |
+| `exp`, `log`, `sigmoid`, `tanh`, `relu`, `gelu`, `gelu_erf`, `erf`, `rsqrt`, `square` | x | | |
 | `reduce` | x | `REDUCE_SUM` or `REDUCE_MAX`, keepdim, mean, axes... | |
 | `where` | cond, x, y | | |
 | `maximum` | a, b | [1 for the minimum] | |

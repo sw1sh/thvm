@@ -267,6 +267,21 @@ shapeOrArg[t_TTerm] := Replace[tUopShape[t], $Failed -> t]
 shapeOrArg[x_] := x
 General::shape = "`1` and `2` do not fit together: an elementwise operation needs equal element counts or a single element, and a movement operation a shape the source can take.";
 
+(* The src/nn ops (nn_call, docs/nn.md) by name over TTerms (None: an absent bias or weight),
+   with their integer and real arguments.  A failed op is head::nn and $Failed.  Empty
+   argument lists go as {0} and {0.}: LibraryLink vectors must be typed, and the ops that take
+   none ignore them. *)
+nnOpId[name_String] := nnOpId[name] = $nnOpFn[name]
+nnCall[head_, name_String, ts_List, ints_List : {}, reals_List : {}] := Module[{raw},
+    ensureInit[];
+    raw = Quiet[$nnFn[nnOpId[name], Replace[ts, {None -> 0, t_ :> ttermRaw[t]}, {1}],
+        If[ints === {}, {0}, Round[ints]], If[reals === {}, {0.}, N[reals]]]];
+    If[ IntegerQ[raw],
+        TTerm[raw],
+        Message[MessageName[head, "nn"], name, shapeOrArg /@ DeleteCases[ts, None]]; $Failed]
+]
+General::nn = "The `1` operation does not take arguments of shapes `2`.";
+
 TUOpAdd[a_, b_] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TUOpAdd, {a, b}, Quiet[$uopBinaryFn[$UopAdd, ttermRaw[a], ttermRaw[b]]]]; IntegerQ[r])]
 TUOpMul[a_, b_] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TUOpMul, {a, b}, Quiet[$uopBinaryFn[$UopMul, ttermRaw[a], ttermRaw[b]]]]; IntegerQ[r])]
 TUOpCmplt[a_, b_] := Module[{r}, TTerm[r] /; (ensureInit[]; r = uopChecked[TUOpCmplt, {a, b}, Quiet[$uopBinaryFn[$UopCmplt, ttermRaw[a], ttermRaw[b]]]]; IntegerQ[r])]

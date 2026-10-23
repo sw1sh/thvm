@@ -8,7 +8,6 @@
 //   CAST         t: x; ia: dtype
 //   FULL         ia: dtype, dims...; ra: value
 //   BINOP        t: a, b; ia: a binary UOp
-//   ELEMENTWISE  t: x; ia: NN_EXP .. NN_SQUARE
 //   REDUCE       t: x; ia: REDUCE_SUM or REDUCE_MAX, keepdim, mean, axes...
 //   WHERE        t: cond, x, y
 //   MAXIMUM      t: a, b; ia: [1 for the minimum]
@@ -23,23 +22,26 @@
 //   POOL, MAX_POOL2D  t: x; ia: kernel[nk], stride[nk], dilation[nk]
 //   CONV2D       t: x, w, b; ia: groups, stride[n], dilation[n], (begin, end)[n]
 //   CONV_TRANSPOSE2D  the same, then output_padding[n]
+//   exp, log, sigmoid, tanh, relu, gelu, gelu_erf, erf, rsqrt, square
+//                t: x (ids NN_OP_COUNT + NN_EXP ..)
 // with n = rank(w) - 2 spatial axes; a negative axis counts from the end.
 
 // The NN_OP_* ids by name, so a host need not hard-code them.
-static char const *const NN_OP_NAMES[NN_OP_COUNT] = {
-  "move", "cast", "full", "binop", "elementwise", "reduce", "where", "maximum", "softmax",
-  "layernorm", "batchnorm", "dot", "linear", "arange", "tri", "sparse_categorical_crossentropy",
+static char const *const NN_OP_NAMES[NN_OP_COUNT + NN_ELEMENTWISE_COUNT] = {
+  "move", "cast", "full", "binop", "reduce", "where", "maximum", "softmax", "layernorm",
+  "batchnorm", "dot", "linear", "arange", "tri", "sparse_categorical_crossentropy",
   "scaled_dot_product_attention", "pool", "max_pool2d", "conv2d", "conv_transpose2d",
+  "exp", "log", "sigmoid", "tanh", "relu", "gelu", "gelu_erf", "erf", "rsqrt", "square",
 };
 
-// name's NN_OP_* id, or NN_OP_COUNT for none.
+// name's op id, or UINT32_MAX for none.
 fn u32 nn_op_id(char const *name) {
-  for (u32 i = 0; i < NN_OP_COUNT; i++) {
+  for (u32 i = 0; i < NN_OP_COUNT + NN_ELEMENTWISE_COUNT; i++) {
     if (strcmp(NN_OP_NAMES[i], name) == 0) {
       return i;
     }
   }
-  return NN_OP_COUNT;
+  return UINT32_MAX;
 }
 
 // ia[0..n) as distinct in-range axes of x into out; 0 when one is not.
@@ -61,9 +63,12 @@ static int nn_call_axes(Tensor const *x, u32 n, i32 const *ia, u32 *out) {
 
 fn Tensor nn_call(u32 op, Tensor const *t, u32 nt, i32 const *ia, u32 ni, double const *ra,
                   u32 nr) {
-  static u32 const need_t[NN_OP_COUNT] = {1, 1, 0, 2, 1, 1, 3, 2, 1, 1, 5, 2, 3, 0, 1, 2, 4,
+  static u32 const need_t[NN_OP_COUNT] = {1, 1, 0, 2, 1, 3, 2, 1, 1, 5, 2, 3, 0, 1, 2, 4,
                                           1, 1, 3, 3};
   Tensor fail = {0, DT_FP32, {0, {0}}};
+  if (op >= NN_OP_COUNT && op < NN_OP_COUNT + NN_ELEMENTWISE_COUNT) {
+    return nt >= 1 && t[0].t != 0 ? nn_elementwise(op - NN_OP_COUNT, t[0]) : fail;
+  }
   if (op >= NN_OP_COUNT || nt < need_t[op] || (need_t[op] > 0 && t[0].t == 0)) {
     return fail;
   }
@@ -113,9 +118,6 @@ fn Tensor nn_call(u32 op, Tensor const *t, u32 nt, i32 const *ia, u32 ni, double
     }
     case NN_OP_BINOP: {
       return ni >= 1 && t[1].t != 0 ? nn_binop((u32)ia[0], t[0], t[1]) : fail;
-    }
-    case NN_OP_ELEMENTWISE: {
-      return ni >= 1 ? nn_elementwise((u32)ia[0], t[0]) : fail;
     }
     case NN_OP_REDUCE: {
       if (ni < 3 || ((u32)ia[0] != REDUCE_SUM && (u32)ia[0] != REDUCE_MAX)
