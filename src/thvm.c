@@ -323,7 +323,12 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "nn/batchnorm.c"
 #include "nn/dot.c"
 #include "nn/linear.c"
+#include "nn/arange.c"
+#include "nn/tri.c"
+#include "nn/sparse_categorical_crossentropy.c"
+#include "nn/scaled_dot_product_attention.c"
 #include "nn/pool.c"
+#include "nn/max_pool2d.c"
 #include "nn/conv2d.c"
 // codegen/hand_opts.c -- tinygrad's hand_coded_optimizations port.
 // Needs kernel_apply_opt (codegen/apply_opt.c) + the DAG axis

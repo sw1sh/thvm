@@ -27,7 +27,10 @@ end that switches to an `nn_*` op keeps its kernel keys:
 | `nn_softmax` | `softmax`, `log_softmax` | mixin/op.py:657-700 |
 | `nn_layernorm`, `nn_batchnorm` | `layernorm`, `batchnorm` | mixin/op.py:1646-1683 |
 | `nn_dot`, `nn_linear` | `__matmul__`, `linear` | mixin/op.py:387-392, 1254-1271 |
-| `nn_pool`, `nn_conv2d` | `_pool`, `conv2d` | mixin/movement.py:598-616, mixin/op.py:1564-1605 |
+| `nn_pool`, `nn_conv2d`, `nn_max_pool2d` | `_pool`, `conv2d`, `max_pool2d` | mixin/movement.py:598-616, mixin/op.py:1335-1378, 1564-1605 |
+| `nn_arange`, `nn_tri` | `arange` (a host-written leaf), `triu`, `tril` | mixin/op.py:166-195, 233-280 |
+| `nn_sparse_categorical_crossentropy` | `sparse_categorical_crossentropy` | mixin/op.py:1723-1746 |
+| `nn_scaled_dot_product_attention` | `scaled_dot_product_attention` (no dropout) | mixin/rand.py:298-327 |
 
 Where tensor.py differs from tinygrad (softmax's max is not detached,
 batchnorm scales by invstd before weight), the C keeps tensor.py's graph for
@@ -54,7 +57,11 @@ back.  A failed op returns 0.
 | `py_nn_layernorm(x, desc, n, axes, eps)` | i32 axes, a double eps |
 | `py_nn_batchnorm(xwbmi, desc)` | x, weight, bias, mean, invstd |
 | `py_nn_dot(xw, desc)`, `py_nn_linear(xwb, desc)` | |
-| `py_nn_pool(x, desc, nk, ksd)` | kernel[nk], stride[nk], dilation[nk] |
+| `py_nn_pool(x, desc, nk, ksd)`, `py_nn_max_pool2d(x, desc, nk, ksd)` | kernel[nk], stride[nk], dilation[nk] |
+| `py_nn_arange(start, stop, step, dtype, desc)` | doubles; desc receives the result's |
+| `py_nn_tri(x, desc, diagonal, lower)` | |
+| `py_nn_sparse_categorical_crossentropy(xy, desc, axis)` | logits, int labels |
+| `py_nn_scaled_dot_product_attention(qkvm, desc, causal)` | q, k, v, an additive mask (0: none) |
 | `py_nn_conv2d(xwb, desc, opts)` | groups, stride[2], dilation[2], padding[2] |
 
 A host other than Python (an FFI such as WolframKernel's) needs three more

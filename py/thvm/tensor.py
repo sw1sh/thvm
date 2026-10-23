@@ -548,12 +548,11 @@ class Tensor(metaclass=_TensorMeta):
 
     def sparse_categorical_crossentropy(self, Y: "Tensor",
                                         axis: int = -1) -> "Tensor":
-        """Mean NLL of log_softmax(self) at the int labels Y (tinygrad mixin/op.py:1723-1746), the
-        one-hot an in-graph compare (:1005-1008), so a TinyJit replay reads each step's labels."""
-        ax = axis if axis >= 0 else axis + self.ndim
-        n = self._shape[ax]
-        oh = Y.unsqueeze(ax) == Tensor.arange(n).reshape(n, *[1] * (self.ndim - ax - 1))
-        return (self.log_softmax(axis=ax) * oh).sum(axis=ax).mean() * -1.0
+        """Mean NLL of log_softmax(self) at the int labels Y (src/nn/
+        sparse_categorical_crossentropy.c), the one-hot an in-graph compare, so a TinyJit replay
+        reads each step's labels."""
+        r = _TH.nn_many(_TH.nn_sparse_ce_fn, [self._nn(), Y._nn()], axis)
+        return Tensor._from_nn(r, f"sparse_categorical_crossentropy {self._shape} {Y._shape}")
 
     def argmax(self, axis=None, keepdim: bool = False) -> "Tensor":
         """Index of the max along `axis` (the flattened tensor for None):
@@ -1143,20 +1142,7 @@ class Tensor(metaclass=_TensorMeta):
                 if s * (o - 1) + (d * (k - 1) + 1) - i - max(s * (o - 1) - (i - 1), 0) > 0:
                     raise NotImplementedError(
                         "max_pool2d ceil_mode past the input needs a -inf pad (not yet wired)")
-        # Non-overlapping windows are a reshape into (out, k) per axis that fuses into the max,
-        # where _pool's repeat / expand unfold cannot stay a view and materializes a large buffer.
-        if (all(s == k for s, k in zip(s_, k_)) and all(d == 1 for d in d_)
-                and all(i % k == 0 for i, k in zip(spatial, k_))):
-            prefix = list(self._shape[:-len(k_)])
-            split = []
-            for i, k in zip(spatial, k_):
-                split.extend([i // k, k])
-            x = self.reshape(*prefix, *split)
-            base = len(prefix)
-            kaxes = tuple(base + 2 * j + 1 for j in range(len(k_)))
-            return x.max(axis=kaxes)
-        x = self._pool(k_, stride=stride, dilation=dilation)
-        return x.max(axis=tuple(range(-len(k_), 0)))
+        return Tensor._from_nn(_TH.nn_max_pool2d(self._nn(), k_, s_, d_), "max_pool2d")
 
     def conv2d(self, weight: "Tensor",
                bias: "Tensor | None" = None,
@@ -1187,9 +1173,7 @@ class Tensor(metaclass=_TensorMeta):
             dtype = (dtypes.default_float
                      if any(isinstance(x, float) for x in (start, stop, step))
                      else dtypes.default_int)
-        return cls._from_numpy(
-            np.arange(start, stop, step).astype(dtype.np_dtype, copy=False),
-            dtype)
+        return Tensor._from_nn(_TH.nn_arange(start, stop, step, dtype.thvm_id), "arange")
 
     def cast(self, dtype: DType) -> "Tensor":
         """Cast to `dtype` (thvm UOP_CAST)."""
@@ -1225,22 +1209,13 @@ class Tensor(metaclass=_TensorMeta):
         """Abramowitz and Stegun 7.1.26, as tinygrad (mixin/elementwise.py:1059-1071)."""
         return self._elementwise(K.NN_ERF)
 
-    def _tri(self, r: int, c: int, diagonal: int = 0) -> "Tensor":
-        """0/1 mask arange(r)[:, None] + diagonal <= arange(c) (tinygrad mixin/op.py:233-234)."""
-        row = Tensor.arange(r, dtype=dtypes.default_int).reshape(r, 1)
-        col = Tensor.arange(c, dtype=dtypes.default_int).reshape(1, c)
-        # <= on ints as < col + 1: there is no CMPLE.
-        return (row + diagonal) < (col + 1)
-
     def triu(self, diagonal: int = 0) -> "Tensor":
-        """The upper-triangular part, other elements 0 (tinygrad mixin/op.py:236-257)."""
-        mask = self._tri(self._shape[-2], self._shape[-1], diagonal)
-        return mask.where(self, self.const_like(0))
+        """The upper-triangular part, other elements 0 (src/nn/tri.c)."""
+        return Tensor._from_nn(_TH.nn_tri(self._nn(), diagonal, False), "triu")
 
     def tril(self, diagonal: int = 0) -> "Tensor":
-        """The lower-triangular part, other elements 0 (tinygrad mixin/op.py:259-280)."""
-        mask = self._tri(self._shape[-2], self._shape[-1], diagonal + 1)
-        return mask.where(self.const_like(0), self)
+        """The lower-triangular part, other elements 0 (src/nn/tri.c)."""
+        return Tensor._from_nn(_TH.nn_tri(self._nn(), diagonal, True), "tril")
 
     def embedding(self, idx: "Tensor") -> "Tensor":
         """Rows of self (vocab, embed) at the int ids `idx`, a zero row outside [0, vocab) (tinygrad
@@ -1265,16 +1240,11 @@ class Tensor(metaclass=_TensorMeta):
             # thvm has no dropout.
             raise NotImplementedError("scaled_dot_product_attention dropout_p "
                                       "under TRAINING (thvm has no dropout)")
-        qk = (q @ key.transpose(-2, -1)) / math.sqrt(q._shape[-1])
-        if is_causal:
-            if attn_mask is not None:
-                raise RuntimeError("cannot set attn_mask when is_causal=True")
-            attn_mask = qk.const_like(1).tril()
-            attn_mask = attn_mask.where(qk.const_like(0),
-                                        qk.const_like(float("-inf")))
-        if attn_mask is not None:
-            qk = qk + attn_mask
-        return qk.softmax(axis=-1) @ value
+        if is_causal and attn_mask is not None:
+            raise RuntimeError("cannot set attn_mask when is_causal=True")
+        args = [q._nn(), key._nn(), value._nn(), None if attn_mask is None else attn_mask._nn()]
+        r = _TH.nn_many(_TH.nn_sdpa_fn, args, 1 if is_causal else 0)
+        return Tensor._from_nn(r, "scaled_dot_product_attention")
 
     @staticmethod
     def manual_seed(seed: int = 0) -> None:

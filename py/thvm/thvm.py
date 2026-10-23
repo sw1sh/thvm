@@ -99,7 +99,14 @@ _nn_layernorm = _bind("py_nn_layernorm", c_uint64, c_uint64, ctypes.POINTER(c_ui
 _NN_MANY = {name: _bind(f"py_nn_{name}", c_uint64, ctypes.POINTER(c_uint64),
                         ctypes.POINTER(c_uint32), *extra)
             for name, extra in (("dot", ()), ("linear", ()), ("where", ()),
-                                ("batchnorm", ()), ("maximum", (c_uint32,)))}
+                                ("batchnorm", ()), ("maximum", (c_uint32,)),
+                                ("sparse_categorical_crossentropy", (c_int32,)),
+                                ("scaled_dot_product_attention", (c_uint32,)))}
+_nn_arange = _bind("py_nn_arange", c_uint64, ctypes.c_double, ctypes.c_double, ctypes.c_double,
+                   c_uint32, ctypes.POINTER(c_uint32))
+_nn_tri = _bind("py_nn_tri", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_int32, c_uint32)
+_nn_max_pool2d = _bind("py_nn_max_pool2d", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_uint32,
+                       ctypes.POINTER(c_uint32))
 _grad_with_target = _bind("py_grad_with_target", c_uint64,
                           c_uint64, c_uint64, c_uint64)
 _realize = _bind("py_realize", c_uint64, c_uint64)
@@ -385,6 +392,24 @@ class Thvm:
     nn_where_fn     = _NN_MANY["where"]
     nn_batchnorm_fn = _NN_MANY["batchnorm"]
     nn_maximum_fn   = _NN_MANY["maximum"]
+    nn_sparse_ce_fn = _NN_MANY["sparse_categorical_crossentropy"]
+    nn_sdpa_fn      = _NN_MANY["scaled_dot_product_attention"]
+
+    def nn_arange(self, start, stop, step, dtype: int):
+        desc = self._nn_desc([None])
+        return self._nn_out(_nn_arange(ctypes.c_double(start), ctypes.c_double(stop),
+                                       ctypes.c_double(step), c_uint32(dtype), desc), desc)
+
+    def nn_tri(self, x, diagonal: int, lower: bool):
+        desc = self._nn_desc([x])
+        return self._nn_out(_nn_tri(c_uint64(int(x[0])), desc, c_int32(diagonal),
+                                    c_uint32(1 if lower else 0)), desc)
+
+    def nn_max_pool2d(self, x, k, s, d):
+        desc = self._nn_desc([x])
+        ksd = (c_uint32 * (3 * len(k)))(*[int(v) for v in (*k, *s, *d)])
+        return self._nn_out(_nn_max_pool2d(c_uint64(int(x[0])), desc, c_uint32(len(k)), ksd),
+                            desc)
 
     def nn_many(self, fn, args, *extra):
         """One of the nn_*_fn exports over (term, dtype id, shape) triples (None: no tensor),

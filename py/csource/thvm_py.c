@@ -350,6 +350,51 @@ EXPORT uint64_t py_nn_dot(uint64_t const *xw, uint32_t *desc) {
   return py_nn_out(nn_dot(t[0], t[1]), desc);
 }
 
+// [start, stop) by step as a host-written leaf; desc receives its descriptor.
+EXPORT uint64_t py_nn_arange(double start, double stop, double step, uint32_t dtype,
+                             uint32_t *desc) {
+  return py_nn_out(nn_arange(start, stop, step, dtype), desc);
+}
+
+// triu, or tril when `lower`.
+EXPORT uint64_t py_nn_tri(uint64_t x, uint32_t *desc, int32_t diagonal, uint32_t lower) {
+  Tensor xt;
+  if (!py_nn_in(x, desc, &xt)) {
+    return 0;
+  }
+  return py_nn_out(nn_tri(xt, diagonal, (int)lower), desc);
+}
+
+// xy = {logits, int labels}.
+EXPORT uint64_t py_nn_sparse_categorical_crossentropy(uint64_t const *xy, uint32_t *desc,
+                                                      int32_t axis) {
+  Tensor t[2];
+  u32 ax;
+  if (!py_nn_ins(xy, desc, 2, t) || !py_nn_axes(&t[0], 1, &axis, &ax)) {
+    return 0;
+  }
+  return py_nn_out(nn_sparse_categorical_crossentropy(t[0], t[1], (i32)ax), desc);
+}
+
+// qkvm = {q, k, v, mask (0: none)}.
+EXPORT uint64_t py_nn_scaled_dot_product_attention(uint64_t const *qkvm, uint32_t *desc,
+                                                   uint32_t causal) {
+  Tensor t[4];
+  if (!py_nn_ins(qkvm, desc, 4, t)) {
+    return 0;
+  }
+  return py_nn_out(nn_scaled_dot_product_attention(t[0], t[1], t[2], t[3], (int)causal), desc);
+}
+
+// ksd = kernel[nk], stride[nk], dilation[nk].
+EXPORT uint64_t py_nn_max_pool2d(uint64_t x, uint32_t *desc, uint32_t nk, uint32_t const *ksd) {
+  Tensor xt;
+  if (!py_nn_in(x, desc, &xt)) {
+    return 0;
+  }
+  return py_nn_out(nn_max_pool2d(xt, nk, ksd, ksd + nk, ksd + 2 * nk), desc);
+}
+
 // xwb = {x, w, b}, b 0 for none.
 EXPORT uint64_t py_nn_linear(uint64_t const *xwb, uint32_t *desc) {
   Tensor t[3];

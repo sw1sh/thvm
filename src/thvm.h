@@ -1709,6 +1709,7 @@ fn u64 kernel_bench_us(u32 kid, u32 n_runs, u64 early_stop);
 fn u32  tensor_alloc  (Backend *b, Shape shape, u32 dtype);
 fn void tensor_release(u32 id);   // decref + buf_decref; free at 0
 fn u32  tensor_view_of(u32 src_id, View new_view);  // alias; bumps buf_incref
+fn void kernel_assign_write_record(void *backend, u32 buf_id);   // a host write, for the fire memo
 
 // === view/ ===
 

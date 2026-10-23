@@ -198,5 +198,82 @@ int main(void) {
     CHECK_EQ(bad.t, 0);
   }
 
+  TEST_BEGIN("nn/tri-attention-loss-pool");
+  {
+    // tril / triu of (2, 3).
+    f32 lo[6], up[6];
+    for (u32 i = 0; i < 6; i++) {
+      u32 r = i / 3, c = i % 3;
+      lo[i] = c <= r ? xs[i] : 0.0f;
+      up[i] = c >= r ? xs[i] : 0.0f;
+    }
+    check(nn_tri(leaf(2, d23, xs), 0, 1), lo, 6, 0, "tril");
+    check(nn_tri(leaf(2, d23, xs), 0, 0), up, 6, 0, "triu");
+    // Causal attention, q = k = v = xs as (2, 3): row i attends to rows <= i.
+    f32 att[6];
+    for (u32 i = 0; i < 2; i++) {
+      double s[2], m = -INFINITY, z = 0;
+      for (u32 j = 0; j <= i; j++) {
+        s[j] = 0;
+        for (u32 c = 0; c < 3; c++) {
+          s[j] += (double)xs[i * 3 + c] * xs[j * 3 + c] / sqrt(3.0);
+        }
+        m = fmax(m, s[j]);
+      }
+      for (u32 j = 0; j <= i; j++) {
+        z += exp(s[j] - m);
+      }
+      for (u32 c = 0; c < 3; c++) {
+        double a = 0;
+        for (u32 j = 0; j <= i; j++) {
+          a += exp(s[j] - m) / z * xs[j * 3 + c];
+        }
+        att[i * 3 + c] = (f32)a;
+      }
+    }
+    Tensor none = {0};
+    check(nn_scaled_dot_product_attention(leaf(2, d23, xs), leaf(2, d23, xs), leaf(2, d23, xs),
+                                          none, 1), att, 6, 1e-5, "causal attention");
+    // Sparse cross-entropy of (2, 3) logits at labels {2, 0}.
+    u32 lab_tid = tensor_alloc(&CPU_BACKEND, (Shape){1, {2}}, DT_INT32);
+    i32 const labels[2] = {2, 0};
+    CPU_BACKEND.buf_write(TENS[lab_tid].buf_id, (void *)labels, sizeof labels);
+    Tensor y = {term_new(0, TAG_TEN, DT_INT32, lab_tid), DT_INT32, {1, {2}}};
+    double nll = 0;
+    for (u32 r = 0; r < 2; r++) {
+      double mx = fmax(fmax(xs[r * 3], xs[r * 3 + 1]), xs[r * 3 + 2]), z = 0;
+      for (u32 c = 0; c < 3; c++) {
+        z += exp(xs[r * 3 + c] - mx);
+      }
+      nll -= (xs[r * 3 + (u32)labels[r]] - mx - log(z)) / 2.0;
+    }
+    f32 const ce[1] = {(f32)nll};
+    check(nn_sparse_categorical_crossentropy(leaf(2, d23, xs), y, -1), ce, 1, 1e-6, "sparse ce");
+    // max_pool2d of (1, 4, 4): 2x2 tiles (the reshape path) and 3x3 stride 1 (the unfold).
+    f32 img[16];
+    for (u32 i = 0; i < 16; i++) {
+      img[i] = (f32)((i * 5) % 16);
+    }
+    u32 const d144[3] = {1, 4, 4}, k2[2] = {2, 2}, k3[2] = {3, 3}, one[2] = {1, 1};
+    f32 p2[4], p3[4];
+    for (u32 oh = 0; oh < 2; oh++) {
+      for (u32 ow = 0; ow < 2; ow++) {
+        f32 a = -INFINITY, b = -INFINITY;
+        for (u32 kh = 0; kh < 3; kh++) {
+          for (u32 kw = 0; kw < 3; kw++) {
+            if (kh < 2 && kw < 2) {
+              a = fmaxf(a, img[(oh * 2 + kh) * 4 + ow * 2 + kw]);
+            }
+            b = fmaxf(b, img[(oh + kh) * 4 + ow + kw]);
+          }
+        }
+        p2[oh * 2 + ow] = a;
+        p3[oh * 2 + ow] = b;
+      }
+    }
+    check(nn_max_pool2d(leaf(3, d144, img), 2, k2, k2, one), p2, 4, 0, "max_pool2d tiles");
+    check(nn_max_pool2d(leaf(3, d144, img), 2, k3, one, one), p3, 4, 0, "max_pool2d unfold");
+  }
+
   TEST_REPORT();
 }
