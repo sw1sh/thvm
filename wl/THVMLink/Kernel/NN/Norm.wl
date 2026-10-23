@@ -50,24 +50,6 @@ TLayerNormAffine[x_TTerm, gamma_TTerm, beta_TTerm] := With[{shape = tUopShape[x]
     ]
 ]
 
-TLayerNormAffine[x_TTerm, gamma_TTerm, beta_TTerm] := With[{shape = tUopShape[x], norm = TLayerNorm[x]},
-    Module[{rank, gammaB, betaB, broadcastShape},
-        rank = Length[shape];
-        broadcastShape = ConstantArray[1, rank];
-        broadcastShape[[rank]] = shape[[rank]];
-        (* Reshape rank-1 {D} -> {1,...,1,D} then EXPAND to full
-           shape.  Without the explicit EXPAND, the elementwise
-           numel-cycle in MUL/ADD reads gamma/beta in the wrong
-           stride pattern across the leading axes and silently
-           produces denormals.  Tested at seq=4, dim=16: bare
-           {seq,dim}*{1,dim} returns garbage; EXPAND[{1,dim} ->
-           {seq,dim}] is correct. *)
-        gammaB = TUOpExpand[TUOpReshape[gamma, broadcastShape], shape];
-        betaB = TUOpExpand[TUOpReshape[beta, broadcastShape], shape];
-        norm * gammaB + betaB
-    ]
-]
-
 (* TRMSNorm[x, weight, eps]: RMS norm over the last axis (the FLUX / Qwen3
    per-head q/k norm and the LLaMA pre-norm), weight a rank-1 {D} gain:
        y = x * rsqrt(mean(x^2) + eps) * weight
