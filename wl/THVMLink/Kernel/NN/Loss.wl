@@ -5,7 +5,7 @@
 BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
 SetUsage[TCrossEntropyLoss, "TCrossEntropyLoss[pred$, target$] = -sum(target$ * log(pred$)), probability-form categorical cross-entropy. Both inputs are same-shape TTerms; target$ is typically a one-hot vector. A small eps is added before the log to keep it finite."];
-SetUsage[TSparseCategoricalCrossEntropy, "TSparseCategoricalCrossEntropy[logits$, intLabels$] is the categorical cross-entropy loss from pre-softmax logits$ and integer class labels$ (one int per sample, not one-hot; the tinygrad / Keras convention). intLabels$ has logits$' shape with the last (class) axis dropped. It builds a one-hot mask inline and defers to TCategoricalCrossEntropy, inheriting the stable max-subtract logsumexp. For one-hot targets use TCategoricalCrossEntropy."];
+SetUsage[TSparseCategoricalCrossEntropy, "TSparseCategoricalCrossEntropy[logits$, intLabels$] is the categorical cross-entropy loss from pre-softmax logits$ and integer class labels$ (one int per sample, not one-hot; the tinygrad / Keras convention). intLabels$ has logits$' shape with the last (class) axis dropped; the loss is the mean over every sample (tinygrad's sparse_categorical_crossentropy). For one-hot targets use TCategoricalCrossEntropy."];
 SetUsage[TCategoricalCrossEntropy, "TCategoricalCrossEntropy[logits$, targetOneHot$] is the categorical cross-entropy loss from pre-softmax logits$ and a one-hot target$. It uses the stable logsumexp form max(logits$) + log(sum(exp(logits$ - max(logits$)))) - sum(target$ * logits$) along the last axis, then averages over the leading batch axis (rank-1 logits$ skip the average). The max-subtract is grad-transparent and prevents exp overflow. For integer class labels use TSparseCategoricalCrossEntropy."];
 
 Begin["`Private`"];
@@ -48,37 +48,15 @@ TCategoricalCrossEntropy[logits_TTerm, target_TTerm] := With[{shape = tUopShape[
     ]
 ]
 
-(* TSparseCategoricalCrossEntropy[logits, intLabels] -- same loss as
-   TCategoricalCrossEntropy but the target is INTEGER class labels
-   (one int per sample, NOT one-hot), matching tinygrad / Keras.
-   `intLabels` shape = logits shape with the last (class) axis dropped:
-       logits {C}        -> labels scalar {}        (rank-1)
-       logits {B, C}     -> labels {B}              (rank-2)
-       logits {B, T, C}  -> labels {B, T}           (rank-3)
-   Builds a 0/1 one-hot mask inline via (arange(C) == labels) -- same
-   pattern tinygrad uses (no UOP_GATHER yet), then defers to the same
-   logsumexp - sum(mask * logits) reduction. *)
-TSparseCategoricalCrossEntropy[logits_TTerm, intLabels_TTerm] := With[{shape = tUopShape[logits]},
-    Module[{rank, classAxis, nClasses, ramp, rampShape, labelShape, mask, labels},
-        rank = Length[shape];
-        classAxis = rank - 1;
-        nClasses = shape[[rank]];
-        (* Build [0, 1, ..., C-1] as a {C} f32 ramp, then reshape to
-           {1, ..., 1, C} so it broadcasts against the labels along
-           every non-class axis. *)
-        ramp = TTensorCreate @ NumericArray[Range[0, nClasses - 1], "Real32"];
-        rampShape = Append[ConstantArray[1, rank - 1], nClasses];
-        ramp = TUOpReshape[ramp, rampShape];
-        ramp = TUOpExpand[ramp, shape];
-        (* Cast labels to f32, reshape to {..., 1}, expand to logits'
-           full shape so the cmpeq is a pure elementwise broadcast. *)
-        labelShape = Append[Drop[shape, -1], 1];
-        labels = TUOpCast[intLabels, "f32"];
-        labels = TUOpReshape[labels, labelShape];
-        labels = TUOpExpand[labels, shape];
-        mask = TUOpCmpeq[ramp, labels];  (* {..., C} 0/1 f32 *)
-        TCategoricalCrossEntropy[logits, mask]
-    ]
+(* TSparseCategoricalCrossEntropy[logits, intLabels]: log_softmax over the
+   last axis at the labels, the one-hot an in-graph compare against an
+   arange (src/nn/sparse_categorical_crossentropy.c).  Labels of another
+   shape with one label per sample (a {1} for rank-1 logits) take the
+   logits' shape without the class axis first. *)
+TSparseCategoricalCrossEntropy[logits_TTerm, intLabels_TTerm] := With[{want = Most[tUopShape[logits]]},
+    nnCall[TSparseCategoricalCrossEntropy, "sparse_categorical_crossentropy",
+        {logits, If[tUopShape[intLabels] === want || Times @@ tUopShape[intLabels] =!= Times @@ want,
+            intLabels, TUOpReshape[intLabels, want]]}, {-1}]
 ]
 
 End[];

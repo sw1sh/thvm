@@ -6,7 +6,7 @@
 
 BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
-SetUsage[TAttention, "TAttention[Q$, K$, V$] computes scaled dot-product attention softmax(Q$ @ Transpose[K$] / sqrt(d_k)) @ V$. Q$ is {seq_q, d_k}, K$ is {seq_k, d_k}, V$ is {seq_k, d_v}, giving {seq_q, d_v}. Pure assembly of TMatMul + TSoftmax + TMatMul, the two matmuls dispatching through cblas_sgemm."];
+SetUsage[TAttention, "TAttention[Q$, K$, V$] computes scaled dot-product attention softmax(Q$ @ Transpose[K$] / sqrt(d_k)) @ V$. Q$ is {seq_q, d_k}, K$ is {seq_k, d_k}, V$ is {seq_k, d_v}, giving {seq_q, d_v}. tinygrad's scaled_dot_product_attention (src/nn/scaled_dot_product_attention.c); leading batch axes broadcast."];
 SetUsage[THeadAttention, "THeadAttention[q$, k$, v$, scale$] computes scaled dot-product attention over ALREADY head-split tensors q$, k$, v$ of shape {S, H, D} (heads ride a batched matmul over the leading H axis), returning {S, H*D}. The model applies per-head RMSNorm / RoPE / GQA-expansion before calling this (so TMultiHeadAttention's own head split cannot be reused). scores are q$ @ Transpose[k$] * scale$ softmaxed over keys.
 THeadAttention[q$, k$, v$, scale$, addMask$] adds the additive bias addMask$ ({S, S_k}, e.g. a causal+padding mask) to the scores before softmax."];
 SetUsage[TMultiHeadAttention, "TMultiHeadAttention[Q$, K$, V$, nHeads$, mask$] computes multi-head scaled dot-product attention. Q$ is {seq_q, dim}; K$, V$ are {seq_k, dim} (read independently, so seq_k may differ for cross-attention or a single-query step over a KV cache); dim = nHeads$ * d_head; mask$ is a {seq_q, seq_k} additive bias (use TCausalMask) or None. Each projection is split to {nHeads$, seq, d_head}, scaled-dot per head, concatenated back to {seq_q, dim}.
@@ -25,14 +25,7 @@ Begin["`Private`"];
 
 (* === whole-tensor scaled-dot attention =================================== *)
 
-(* Idiomatic: `q . Transpose[k]` lowers via the Dot + Transpose
-   UpValues; `SoftmaxLayer[2][...]` lowers via the Layer-call
-   UpValue installed in Tensor.wl; `/ Sqrt[N @ dk]` and `... . v`
-   ride the Times / Power / Dot UpValues.  Reads as the textbook
-   formula. *)
-TAttention[q_TTerm, k_TTerm, v_TTerm] := With[{dk = tUopShape[k][[2]]},
-    SoftmaxLayer[2][(q . Transpose[k]) / Sqrt[N @ dk]] . v
-]
+TAttention[q_TTerm, k_TTerm, v_TTerm] := nnCall[TAttention, "scaled_dot_product_attention", {q, k, v, None}, {0}]
 
 (* === batched matmul over a head / batch axis ============================= *)
 
