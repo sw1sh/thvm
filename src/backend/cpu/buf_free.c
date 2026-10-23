@@ -1,18 +1,10 @@
-// backend/cpu/buf_free.c - release a buffer's storage unconditionally.
-//
-// Callers should almost always go through cpu_buf_decref (refcount
-// aware).  Direct free is kept for the shutdown path.
+// backend/cpu/buf_free.c - release a buffer's storage whatever its refcount.
 
 fn void cpu_buf_free(u32 buf_id) {
   if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
   CpuBuf *b = &CPU_BUFS[buf_id];
-  // Snapshot parent BEFORE we zero the slot.  Arena views (external
-  // bufs pointing into a parent arena CpuBuf) must drop their parent
-  // ref no matter which code path frees them -- pool_rollback's
-  // direct cpu_buf_free path is one such case (vs cpu_buf_decref /
-  // cpu_buf_freelist_push which already snapshot+decref themselves).
-  // Without this, the parent arena's refcount stays inflated by the
-  // freed view's contribution and the arena leaks until session end.
+  // An arena view drops its parent's ref here, whichever path frees it, or
+  // the parent arena leaks; read the parent before the slot is zeroed.
   u32 parent = b->parent_buf_id;
   if (b->owns_data) {
     extern u64 CPU_MEM_LIVE;

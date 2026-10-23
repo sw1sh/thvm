@@ -1,15 +1,7 @@
-// backend/cpu/buf_alloc.c - allocate a host-memory buffer.
-//
-// Returns a non-zero buffer id on success (0 reserved for "no buffer").
-// The id indexes into a parallel CPU_BUFS[] table defined alongside the
-// backend init code, which pairs each allocation with a refcount so the
-// same buffer can be shared across multiple TenDesc aliases.
+// backend/cpu/buf_alloc.c - allocate a host-memory buffer; id 0 means none.
 
-// Process-global resident buffer-byte accounting (device-agnostic
-// memory metric, the analog of tinygrad's GlobalCounters live mem).
-// Incremented only on a fresh calloc and decremented only on a real
-// free(); free-list reuse is invisible because the recycled storage was
-// already counted at its original calloc and never freed while parked.
+// Resident buffer bytes (tinygrad helpers.py GlobalCounters.mem_used).  Parked
+// freelist storage stays counted, so only a fresh calloc or a real free moves it.
 u64 CPU_MEM_LIVE = 0;
 u64 CPU_MEM_PEAK = 0;
 
@@ -17,29 +9,15 @@ fn u64 cpu_buf_peak_bytes(void) { return CPU_MEM_PEAK; }
 fn u64 cpu_buf_live_bytes(void) { return CPU_MEM_LIVE; }
 fn void cpu_buf_peak_reset(void) { CPU_MEM_PEAK = CPU_MEM_LIVE; }
 
-// When > 0 the next cpu_buf_alloc is the per-realize working-set ARENA block
-// (arena_ensure), whose size is bounded by the faithful memory planner
-// (arena_compute's TLSF working-set, the analog of tinygrad schedule/memory.py)
-// -- NOT a runaway im2col/EXPAND.  A large eval batch legitimately needs a
-// multi-GB packed working set (beautiful_mnist BS=10000 eval forward = 1.19 GB,
-// tinygrad's own peak there is 1.31 GB), so the per-buffer im2col ceiling must
-// not refuse it.  The total-live ceiling (thvm_live_byte_ceiling, 8 GiB) still
-// backstops a genuinely pathological arena.  Set by cpu_arena_alloc_inflight_set
-// around arena_ensure's alloc; the metal arena path uses the same gate.
+// Set around arena_ensure's alloc: the per-realize arena is the memory
+// planner's working set (tinygrad schedule/memory.py), legitimately multi-GB.
 int CPU_ARENA_ALLOC_INFLIGHT = 0;
 void cpu_arena_alloc_inflight_set(int on) { CPU_ARENA_ALLOC_INFLIGHT = on; }
 int  cpu_arena_alloc_inflight(void) { return CPU_ARENA_ALLOC_INFLIGHT; }
 
 fn u32 cpu_buf_alloc(u64 nbytes) {
-  // Refuse a pathologically large single allocation rather than
-  // calloc() it and thrash the host.  See thvm_buf_byte_ceiling.
-  //
-  // The per-realize ARENA block (CPU_ARENA_ALLOC_INFLIGHT) is exempt from this
-  // per-buffer im2col ceiling: its size is the planner's bounded working set,
-  // not a runaway EXPAND, and a large eval batch legitimately needs multi-GB
-  // (BS=10000 forward = 1.19 GB, matching tinygrad's 1.31 GB).  It is instead
-  // bounded by the total-live ceiling so a genuinely pathological arena (e.g. a
-  // mis-planned tens-of-GB working set) is still caught.
+  // The per-buffer ceiling catches a runaway im2col or EXPAND before calloc
+  // thrashes the host; the arena answers to the total-live ceiling instead.
   if (CPU_ARENA_ALLOC_INFLIGHT) {
     u64 live_ceiling = thvm_live_byte_ceiling();
     if (live_ceiling != 0 && CPU_MEM_LIVE + nbytes > live_ceiling) {
@@ -65,10 +43,6 @@ fn u32 cpu_buf_alloc(u64 nbytes) {
       exit(1);
     }
   }
-  // bm4a: free-list lookup first.  Recycles a slot whose nbytes
-  // matches; reset to a clean state by cpu_buf_freelist_try_pop.
-  // No-op when the list is empty or no size match -- falls
-  // through to the fresh-calloc path below.
   u32 recycled = cpu_buf_freelist_try_pop(nbytes);
   if (recycled != 0) {
     return recycled;
@@ -108,10 +82,8 @@ fn u64 cpu_buf_nbytes(u32 buf_id) {
   return CPU_BUFS[buf_id].req_nbytes;
 }
 
-// Borrow an existing buffer.  The caller owns `data` for the lifetime
-// of the returned buf_id; when the refcount hits zero we invoke
-// `on_release(handle)` instead of free().  Used by the WL bridge to
-// wrap a Shared NumericArray's bytes without copying.
+// Wrap caller-owned bytes (a WL Shared NumericArray) without copying; the
+// last decref calls on_release(handle) instead of free().
 fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
                               void (*on_release)(void *), void *handle) {
   if (CPU_BUFS_NEXT >= CPU_BUFS_CAP) {
@@ -133,13 +105,8 @@ fn u32 cpu_buf_alloc_external(void *data, u64 nbytes,
   return id;
 }
 
-// Allocate an arena view: external buf at (data, nbytes) whose lifetime
-// is tied to `parent_buf_id` (the arena CpuBuf).  Each incref of this
-// view increments the parent; each decref-to-zero decrements the parent
-// and frees the view cell, but leaves the parent's bytes alive until
-// the parent's own refcount drops to zero.  Mirror: tinygrad
-// schedule/memory.py:60 emits BUFFER_VIEW(arena, nbytes, offset) whose
-// arena edge keeps the underlying buffer alive while any view persists.
+// An external view into the arena parent_buf_id that holds one parent ref
+// until the view is freed.  tinygrad schedule/memory.py:59 (arena SLICE).
 fn u32 cpu_buf_alloc_arena_view(void *data, u64 nbytes, u32 parent_buf_id) {
   u32 id = cpu_buf_alloc_external(data, nbytes, NULL, NULL);
   if (id != 0 && parent_buf_id != 0 && parent_buf_id < CPU_BUFS_NEXT) {

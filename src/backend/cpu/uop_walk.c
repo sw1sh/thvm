@@ -1,66 +1,26 @@
-// backend/cpu/uop_walk.c -- F6-finish (b): UOp DAG walker interpreter.
-//
-// Replaces cpu_interpret + cpu/op/*.c on the per-op fallback path.
-// Lifts a scheduled kernel to a UOp DAG via kernel_lift_to_uop, then
-// walks the DAG evaluating instead of emitting C. Mirrors the
-// traversal pattern of cg_render_uop_kernel_c (in render_uop.c) but
-// allocates result accumulators and writes the output buffer directly.
-//
-// Op coverage: UOP_BUFFER, UOP_INDEX_E, UOP_STORE, UOP_AFTER, UOP_RANGE,
-// UOP_OPT, UOP_CONST, UOP_IADD/ISUB/IMUL/IDIV/IMOD/ILT/IAND/IOR/IXOR, UOP_IWHERE,
-// UOP_INVALID, UOP_ADD/MUL/CMPLT/CMPEQ/NEG/RECIP/EXP2/LOG2/SQRT,
-// UOP_CAST, UOP_BITCAST, UOP_REDUCE (SUM/MAX) -- the same set the
-// renderer emits.  An op outside it declines the kernel, with a stderr
-// line, instead of evaluating to 0.
-//
-// Wired into cpu_dispatch_kernel after cpu_blas_dispatch.  The
-// scalar-UOp interpreter fallback (cpu_dispatch_scalar) and the
-// tile interpreter (cpu_dispatch_tile) were deleted once the
-// walker's coverage reached every kernel shape the suite produces.
-// Default-ON; THVM_CPU_UOP_WALK=0 retained for bisection but the
-// only remaining downstream fallback is cpu_jit_dispatch.
-//
-// Each subterm has the C type the legacy C emit gives it
-// (uwalk_term_dtype) and walks in the evaluator that type picks: a float
-// or a double in the float evaluator, an int or bool in the i64 one.  An
-// f32 value is a C float, as are f16, bf16 and fp8 values
-// (rmu_c_type_name); an f64 value, a CONST of any other float dtype (a
-// double literal) and EXP2 / LOG2 / SQRT (math.h's double functions) are
-// doubles.  A float op converts its operands to its type as C's usual
-// arithmetic conversions do, computes in a double and rounds a float
-// result to f32.  That is the float operation's result: a double holds a
-// float product exactly, and a double sum, quotient or square root of
-// floats rounds to the same f32 as the float operation.  A float REDUCE
-// accumulator is a float (a double for f64) that each combine rounds
-// into; an int or bool one accumulates exactly in its dtype
-// (uwalk_run_reduce).  A comparison compares in its operands' type (a u64
-// unsigned), and a CAST converts as the C emit's `((T)x)` does.  A float
-// subterm the int evaluator meets anyway, such as the operand of an index
-// op, which the C emit casts `(int)(x)`, converts its float result, never
-// its truncated operands.
-//
-// LIMITATIONS: int ALU results stay i64, wrapped to a narrower dtype only
-// by a CAST, a REDUCE or the store, so a u32 or i32 sum that overflows its
-// width feeds a comparison unwrapped.  A JIT compiler that contracts
-// `a * b + c` into a fused multiply-add (clang does by default on arm64)
-// rounds once where the walker rounds twice.
+// backend/cpu/uop_walk.c - the UOp DAG walker, the CPU ladder's last rung: it
+// evaluates a lifted kernel as its rendered C would run.  An op without a rule
+// declines the kernel with a stderr line instead of evaluating to 0.
+
+// A subterm walks in the evaluator its rendered C type picks (uwalk_term_dtype):
+// a float op computes in a double and rounds a float result to f32, as C does.
+
+// Limits: an int ALU result stays i64 until a CAST, REDUCE or store wraps it,
+// and clang's fma contraction (arm64) rounds once where the walker rounds twice.
 
 #define UWALK_MAX_RANGES   16
 #define UWALK_MAX_REDUCES  64
 
-// A REDUCE's value.  An int or bool reduce keeps its exact value `i` in
-// its dtype (two's complement for u64), and `f` converts it; a float
-// reduce has only `f`.
+// A REDUCE's value: an int or bool reduce keeps the exact `i` in its dtype and
+// `f` converts it; a float reduce has only `f`.
 typedef struct {
   double f;
   i64    i;
   int    is_int;
 } UWalkRed;
 
-// THVM_TRACE_UOP_WALK_DECLINE=1 emits one stderr line per decline
-// site, classified by short tag + detail. Off by default; one cached
-// getenv on first call. Stable prefix `THVM_UOP_WALK_DECLINE` so
-// `grep | sort | uniq -c` over a suite tabulates the decline taxonomy.
+// THVM_TRACE_UOP_WALK_DECLINE=1: one stderr line per decline, prefixed
+// THVM_UOP_WALK_DECLINE so a suite's declines tabulate with sort | uniq -c.
 static int uwalk_decline_trace_enabled(void) {
   static int known = 0, on = 0;
   if (!known) {
@@ -91,70 +51,50 @@ fn char const *cpu_uop_walk_last_decline(void) {
   } while (0)
 
 typedef struct {
-  // Range state: indexed by range slot in the kernel's collected
-  // range list. Each entry holds the axis_id (used for lookup) and
-  // current iteration value.
+  // The pushed ranges: axis id and current iteration per slot.
   u32   axis_id[UWALK_MAX_RANGES];
   u32   iter   [UWALK_MAX_RANGES];
   u32   n_ranges;
-  // Reduce results, indexed by reduce slot.
   Term     red_term[UWALK_MAX_REDUCES];   // identity term that selects this acc
   UWalkRed red_acc [UWALK_MAX_REDUCES];
-  // Iter-aware cache validation: each cached REDUCE result carries the
-  // FREE-axis iter snapshot at the moment of compute.  A subsequent
-  // eval_float of the same REDUCE term reuses the cached value iff the
-  // current iter for every free axis matches the snapshot.  Without
-  // this, an inner REDUCE inside another REDUCE's body is recomputed
-  // on every outer iteration even when its body doesn't depend on the
-  // outer axis -- explodes the per-output cost by ~Π(outer extents).
+  // A cached REDUCE value is reused while its free axes' iters match the
+  // snapshot taken when it was computed.
   u8    red_n_free   [UWALK_MAX_REDUCES];                       // valid axes in snapshot
   u32   red_free_ids [UWALK_MAX_REDUCES][UWALK_MAX_RANGES];     // axis_id per snapshot slot
   u32   red_free_iter[UWALK_MAX_REDUCES][UWALK_MAX_RANGES];     // iter value at cache time
   u32   n_reduces;
-  // Split-inner axes of the current store: the UNROLL/UPCAST half of a
-  // hand_opts-split reduce axis, which REDUCE.axes does not name.  Each is
-  // iterated by the reduce owning it (uop_reduce_owns_split_axis), never as
-  // a store loop.  An owner of 0 (no split composition found) makes every
-  // reduce whose body holds the axis iterate it, as the renderer does.
+  // The store's split-inner axes (the UNROLL or UPCAST half of a split reduce
+  // axis): the owning reduce iterates one; owner 0 means every reduce over it.
   u32   split_aid  [UWALK_MAX_RANGES];
   Term  split_owner[UWALK_MAX_RANGES];
   u32   n_split;
-  // Input buffer terms (for slot match), pointers and dtypes, indexed by
-  // slot: heap arrays of n_inputs entries, so a kernel may take any
-  // number of inputs without growing the stack.
+  // Per input slot, on the heap so any input count fits.
   Term  *in_terms;
   void **in_ptrs;
   u32   *in_dtypes;
   u32    n_inputs;
-  // Single output buffer (every emitted kernel writes one buffer).
+  // Every emitted kernel writes one buffer.
   Term  out_term;
   void *out_ptr;
   u32   out_dtype;
-  // The C type of the current store's value, and 1 while the store writes
-  // an int or bool buffer from a float value, which converts as the
-  // rendered C store `out[i] = v` does.
+  // The store value's C type, and 1 when a float value goes to an int or bool
+  // buffer, converting as the rendered `out[i] = v` does.
   u32   store_dt;
   int   store_from_float;
-  // uwalk_term_dtype's memo of the ops that take their operands' type, so
-  // a walk types each once however often it evaluates it: open addressing
-  // on the term (a UOP term is never 0, so 0 marks a free slot) over
-  // ty_cap = 2^(64 - ty_shift) slots.
+  // uwalk_term_dtype's memo, open addressing over ty_cap = 2^(64 - ty_shift)
+  // slots; a UOP term is never 0, so 0 marks a free slot.
   Term *ty_key;
   u8   *ty_dt;
   u32   ty_cap;
   u32   ty_shift;
   u32   ty_n;
-  // Kid (index into KERNELS[]) of the currently-walking entry, used
-  // only for THVM_TRACE_UOP_WALK_DECLINE telemetry. Set by
-  // cpu_uop_walk before any uwalk_emit_* helper runs.
-  u32   kid;
+  u32   kid;   // for decline messages
   // Set by an evaluator that meets an op it has no rule for; the walk
   // then stops and cpu_uop_walk declines the kernel.
   u8    bad;
   u32   bad_op;
 } UWalkCtx;
 
-// Resolve a UOP_BUFFER term to (ptr, dtype). Returns 1 on hit.
 static int uwalk_resolve_buf(UWalkCtx const *c, Term buf, void **out_ptr,
                              u32 *out_dt) {
   if (c->out_term == buf) {
@@ -169,19 +109,8 @@ static int uwalk_resolve_buf(UWalkCtx const *c, Term buf, void **out_ptr,
       return 1;
     }
   }
-  // Fallback: instance-based lookup (needed when hash-cons collisions
-  // make the term identity unreliable across kernel rebuilds).  This
-  // path is ONLY valid for UOP_BUFFER terms -- uop_buffer_inst_get
-  // returns 0 for any non-UOP_BUFFER tag (UOP_BUFFERIZE, TAG_TEN), and
-  // routing those through the inst==0 -> out_ptr branch silently aliases
-  // the (typically large) BUFFERIZE-shaped read to the (typically scalar)
-  // output buffer, producing out-of-bounds reads of adjacent heap memory
-  // -- the BN-fused-reduce kernel's mean BUFFERIZE hits this exact case
-  // and the chain-fusion walker amplifies the garbage into per-step
-  // divergence (beautiful_mnist step 2 diverges).  Restrict the fallback
-  // to genuine UOP_BUFFER terms so a BUFFERIZE left inlined in the
-  // kernel body causes the dispatcher to bail (INDEX_E sees a 0 ptr and
-  // returns 0.0) rather than reading wherever out_ptr happens to live.
+  // By BUFFER instance when hash-consing makes term identity unreliable; any
+  // other tag reads instance 0 and would alias the output buffer.
   if (term_tag(buf) == TAG_UOP && term_ext(buf) == UOP_BUFFER) {
     u32 inst = uop_buffer_inst_get(buf);
     if (inst == 0) {
@@ -200,24 +129,15 @@ static int uwalk_resolve_buf(UWalkCtx const *c, Term buf, void **out_ptr,
 }
 
 static u32 uwalk_lookup_iter(UWalkCtx const *c, u32 axis_id) {
-  // Walk last-to-first so the most-recently pushed slot wins.  This
-  // gives correct innermost-binding semantics for nested reduces: when
-  // an outer REDUCE iterates its axis a1 and its body's inner REDUCE
-  // iterates a2, the inner's a2 slot (pushed last) shadows any earlier
-  // a2 slot pushed by the output loop.
+  // The last pushed slot wins: an inner reduce's slot shadows an outer one.
   for (u32 i = c->n_ranges; i > 0; i--) {
     if (c->axis_id[i - 1] == axis_id) return c->iter[i - 1];
   }
   return 0;
 }
 
-// Read a value at (buf, offset) with dtype dt; returns f32 bits in
-// the low half of u64 for float, raw bits otherwise.
-//
-// `off` is signed (i64) because FLIP-residue input views address
-// elements at negative element offsets relative to the view.offset
-// pre-bias on the input pointer (F6-finish (b) flip-widen). For
-// writes the output is contig so off is always non-negative.
+// `off` is signed: a FLIP-residue input view reads at negative offsets from
+// its view.offset-biased base pointer.
 static double uwalk_load_f64(void *p, i64 off, u32 dt) {
   switch (dt) {
     case DT_FP32: { f32 v = ((f32 *)p)[off]; return (double)v; }
@@ -266,9 +186,8 @@ static int uwalk_dtype_is_float(u32 dt) {
       || dt == DT_FP8E4M3 || dt == DT_FP8E5M2;
 }
 
-// fp8 narrows through the _sat encoders, as a tinygrad kernel store does
-// (codegen/decomp/dtype.py:115-134): inf saturates to maxnorm, unlike
-// the host-side float_to_fp8.
+// fp8 narrows through the _sat encoders, inf to maxnorm, as a tinygrad kernel
+// store does (tinygrad codegen/decomp/dtype.py:115), unlike dtype/fp8.c's host one.
 static void uwalk_store_f64(void *p, i64 off, u32 dt, double v) {
   switch (dt) {
     case DT_FP32:  ((f32 *)p)[off] = (f32)v; break;
@@ -311,7 +230,6 @@ static void uwalk_store_i64(void *p, i64 off, u32 dt, i64 v) {
   }
 }
 
-// Forward decls.
 static double   uwalk_eval_float(UWalkCtx *c, Term t, u32 dt);
 static i64      uwalk_eval_int  (UWalkCtx *c, Term t);
 static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red);
@@ -335,10 +253,8 @@ static i64 uwalk_int_wrap(u32 dt, i64 v) {
   return (i64)u;
 }
 
-// The value of an int or bool CONST of dtype `dt` with payload `bits`, as
-// const_to_tendesc fills it and the C emit spells it: an unsigned int
-// payload zero-extends and wraps to the dtype's width (a u32 0xFFFFFFFF is
-// 4294967295, not -1), any other sign-extends from 32 bits.
+// An int CONST's 32-bit payload as const_to_tendesc reads it: an unsigned dtype
+// zero-extends and wraps to its width, any other sign-extends.
 static i64 uwalk_const_int(u32 dt, u32 bits) {
   if (dtype_kind(dt) == DK_UINT) {
     return uwalk_int_wrap(dt, (i64)bits);
@@ -351,15 +267,14 @@ static double uwalk_int_to_f64(u32 dt, i64 v) {
   return (dt == DT_UINT64) ? (double)(u64)v : (double)v;
 }
 
-// v held in float dtype `dt` as the C emit holds it: a double for an f64,
+// v held in float dtype `dt` as the rendered C holds it: a double for an f64,
 // else a float, so v rounds to f32.
 static double uwalk_round(u32 dt, double v) {
   return (dt == DT_FP64) ? v : (double)(f32)v;
 }
 
-// Int or bool value v of dtype `sdt` converted to float dtype `dst` as C
-// converts it: to a double for an f64, else to a float rounded once from
-// the exact value, not through a double.  A u64 is unsigned.
+// v of int dtype `sdt` to float dtype `dst` as C converts it: a double for an
+// f64, else a float rounded once from the exact value; a u64 is unsigned.
 static double uwalk_int_to_float(u32 sdt, u32 dst, i64 v) {
   if (dst == DT_FP64) {
     return uwalk_int_to_f64(sdt, v);
@@ -367,10 +282,8 @@ static double uwalk_int_to_float(u32 sdt, u32 dst, i64 v) {
   return (sdt == DT_UINT64) ? (double)(f32)(u64)v : (double)(f32)v;
 }
 
-// f converted to int or bool dtype `dt` as a C cast converts it: toward
-// zero, then wrapped to the dtype; a bool is f != 0.  Where C leaves the
-// conversion undefined, NaN is 0 and a value past the i64 range (the u64
-// range for a u64) saturates first.
+// f to int dtype `dt` as a C cast: toward zero, then wrapped (a bool is f != 0);
+// where C is undefined, NaN is 0 and a value past the i64 (u64) range saturates.
 static i64 uwalk_f64_to_int(u32 dt, double f) {
   if (dtype_is_bool(dt)) {
     return f != 0.0;
@@ -401,10 +314,8 @@ static int uwalk_reduce_int_dtype(Term red, u32 *dt) {
   return 1;
 }
 
-// The dtype C's usual arithmetic conversions give an op over C types a and
-// b, as far as the evaluators tell them apart: a double wins, then a
-// float, then a u64; any other int pair computes exactly in the i64
-// evaluator.
+// C's usual arithmetic conversions as far as the evaluators differ: a double
+// wins, then a float, then a u64; any other int pair is exact in the i64 one.
 static u32 uwalk_dtype_promote(u32 a, u32 b) {
   if (a == DT_FP64 || b == DT_FP64) {
     return DT_FP64;
@@ -415,9 +326,8 @@ static u32 uwalk_dtype_promote(u32 a, u32 b) {
   return (b == DT_UINT64) ? b : a;
 }
 
-// The C type the legacy C emit gives a value of dtype `dt`
-// (rmu_c_type_name): a double for an f64, a float for every other float
-// dtype, and an int or bool dtype itself.
+// The C type the C render gives dtype `dt` (rmu_c_type_name): a double for an
+// f64, a float for any other float, an int or bool dtype itself.
 static u32 uwalk_c_dtype(u32 dt) {
   if (!uwalk_dtype_is_float(dt)) {
     return dt;
@@ -425,16 +335,8 @@ static u32 uwalk_c_dtype(u32 dt) {
   return (dt == DT_FP64) ? DT_FP64 : DT_FP32;
 }
 
-// The C type of the expression the legacy C emit renders for `t`, as
-// DT_FP64 for a double, DT_FP32 for a float and an int or bool dtype
-// otherwise; it picks the evaluator `t` walks in.  Index arithmetic
-// (RANGE, the I-ops, INVALID) is an int and a comparison an int 0 or 1.  A
-// load, CAST or REDUCE has its dtype's C type; a CONST too, except that a
-// CONST of a float dtype other than f32 renders as a double literal.
-// RECIP renders `1.0f/x`, a float unless x is a double, and EXP2, LOG2 and
-// SQRT call math.h's double functions.  ADD, MUL, NEG and an IWHERE's
-// branches take their operands' type, by C's usual arithmetic conversions
-// when they mix.
+// The C type of the expression the C render emits for `t`: a non-f32 float
+// CONST is a double literal, and EXP2, LOG2 and SQRT call math.h's doubles.
 static u32 uwalk_term_dtype_of(UWalkCtx *c, Term t) {
   u64 loc = term_val(t);
   switch (term_ext(t)) {
@@ -550,13 +452,8 @@ static void uwalk_mark_bad(UWalkCtx *c, u32 op) {
   }
 }
 
-// CAST(src, dst) as the C emit converts it, `((T)x)`, and a bool as
-// `(x != 0)`, which is tinygrad's bool(x).  src walks in its own C type
-// (uwalk_term_dtype): a float reaches an int dtype truncated toward zero
-// and wrapped, an int wraps into a narrower one, and an int or a double
-// reaches a float rounded once.  A u64 converts from its unsigned value.
-// An implicit conversion, an operand of a wider C type or the value of a
-// store, converts the same way.
+// CAST(src, dst) as the C render's `((T)x)`, a bool as `(x != 0)`; src walks
+// in its own C type, and an implicit conversion (an operand, a store) matches.
 static i64 uwalk_cast_int(UWalkCtx *c, Term src, u32 dst) {
   u32 sdt = uwalk_term_dtype(c, src);
   if (uwalk_dtype_is_float(sdt)) {
@@ -592,10 +489,8 @@ static double uwalk_cast_float(UWalkCtx *c, Term src, u32 dst) {
   return uwalk_convert_float(c, src, uwalk_term_dtype(c, src), dst);
 }
 
-// Look up a hoisted reduce accumulator by REDUCE term identity.
-// NOTE: callers that get a non-negative idx must verify the iter
-// snapshot via uwalk_reduce_snapshot_matches before using its value --
-// the cache may be stale if a relevant free axis has advanced.
+// A cached reduce slot by term; its value holds only while
+// uwalk_reduce_snapshot_matches.
 static int uwalk_reduce_lookup(UWalkCtx const *c, Term red) {
   for (u32 i = 0; i < c->n_reduces; i++) {
     if (c->red_term[i] == red) {
@@ -605,9 +500,6 @@ static int uwalk_reduce_lookup(UWalkCtx const *c, Term red) {
   return -1;
 }
 
-// Forward decl -- uwalk_collect_ranges is defined later (in the block
-// that handles the inner-reduce range collection); free-axis discovery
-// for the iter-aware reduce cache uses it from here.
 static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out);
 
 // 1 iff `red` iterates split-inner axis `aid` of the current store: it owns
@@ -631,9 +523,8 @@ static int uwalk_reduce_folds_split(UWalkCtx const *c, Term red, u32 aid,
   return 0;
 }
 
-// Walk a REDUCE's body and collect axis_ids the body references,
-// excluding the axes the REDUCE binds (its n_axes plus the split-inner
-// axes it folds).  Returns the count, writes ids into out[] up to cap.
+// The axis ids a REDUCE's body reads besides the ones it binds (its own axes
+// and the split-inner axes it folds).
 static u8 uwalk_reduce_free_axes(UWalkCtx const *c, Term red, u32 *out, u8 cap) {
   Term body      = uop_reduce_src(red);
   u32  n_axes    = uop_reduce_n_axes(red);
@@ -657,9 +548,6 @@ static u8 uwalk_reduce_free_axes(UWalkCtx const *c, Term red, u32 *out, u8 cap) 
   return n_free;
 }
 
-// Check whether the cached entry's free-axis snapshot matches the
-// CURRENT iter values.  Returns 1 if all free axes are still at
-// their cached iter, 0 if any has advanced (cache stale).
 static int uwalk_reduce_snapshot_matches(UWalkCtx const *c, u32 slot) {
   for (u32 i = 0; i < c->red_n_free[slot]; i++) {
     u32 ax  = c->red_free_ids[slot][i];
@@ -669,22 +557,14 @@ static int uwalk_reduce_snapshot_matches(UWalkCtx const *c, u32 slot) {
   return 1;
 }
 
-// Refresh the cached entry's snapshot to current iter values.  Called
-// right after a (re)compute so the next lookup is keyed correctly.
 static void uwalk_reduce_snapshot_save(UWalkCtx *c, u32 slot) {
   for (u32 i = 0; i < c->red_n_free[slot]; i++) {
     c->red_free_iter[slot][i] = uwalk_lookup_iter(c, c->red_free_ids[slot][i]);
   }
 }
 
-// A REDUCE's value through the iter-aware cache: if the REDUCE has a slot
-// whose snapshot still matches the current iter for its free axes, return
-// the cached value; otherwise recompute and refresh or register the slot.
-// Without this, an inner REDUCE inside another REDUCE's body is recomputed
-// every outer iteration even when its body is invariant to the outer's
-// axis (e.g. conv-backward x-grad has reduces over (Cout,kH,kW) nested with
-// the unfold sub-reduces; ~25x speedup for the inner Conv2d weight/input
-// grad kernels).
+// The cache keeps a nested REDUCE that ignores an outer axis from rerunning on
+// every outer iteration (~25x on conv-backward kernels).
 static UWalkRed uwalk_reduce_value(UWalkCtx *c, Term t) {
   int idx = uwalk_reduce_lookup(c, t);
   if (idx >= 0 && uwalk_reduce_snapshot_matches(c, (u32)idx)) {
@@ -708,10 +588,8 @@ static UWalkRed uwalk_reduce_value(UWalkCtx *c, Term t) {
   return v;
 }
 
-// a < b (CMPLT) or a == b (CMPEQ) in the operands' type, as the rendered
-// C compares them: when either is a float or a double, both convert to the
-// wider of their types, so an int past 2^24 meets a float rounded to f32;
-// else in the int evaluator, unsigned when either is a u64.
+// CMPLT or CMPEQ as the rendered C compares: in the wider float type when a
+// side is a float (an int past 2^24 rounds to f32), else as ints, u64 unsigned.
 static int uwalk_compare(UWalkCtx *c, u32 op, Term a, Term b) {
   u32 da = uwalk_term_dtype(c, a);
   u32 db = uwalk_term_dtype(c, b);
@@ -747,11 +625,8 @@ static int uwalk_is_arith(Term x) {
   return op == UOP_ADD || op == UOP_MUL || op == UOP_NEG;
 }
 
-// The ADD, MUL or NEG `t` of an int C type, in integer arithmetic, which
-// keeps wrap and unsigned bits.  Its operands have int types too, since a
-// float operand makes the op a float (uwalk_dtype_promote), so an ADD, MUL
-// or NEG operand recurses here without the type lookup the int evaluator
-// makes to catch a float one.
+// An int-typed ADD, MUL or NEG in integer arithmetic; its operands are ints too
+// (a float one would make the op float), so nested ones skip the type lookup.
 static i64 uwalk_int_arith(UWalkCtx *c, Term t) {
   u64  loc = term_val(t);
   Term x   = heap_read(loc + 0);
@@ -769,9 +644,8 @@ static i64 uwalk_eval_known_int(UWalkCtx *c, Term x) {
   return uwalk_is_arith(x) ? uwalk_int_arith(c, x) : uwalk_eval_int(c, x);
 }
 
-// The value of `t` as a double, where `dt` is t's C type
-// (uwalk_term_dtype), a float or a double: a float value is an f32 value.
-// An ADD, MUL, NEG or IWHERE of an int type walks in the int evaluator.
+// `t` as a double, `dt` its C type (a float value is an f32 value); an
+// int-typed ADD, MUL, NEG or IWHERE walks in the int evaluator.
 static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
   if (term_tag(t) == TAG_NUM) return (double)(u32)term_val(t);
   if (term_tag(t) != TAG_UOP) return 0.0;
@@ -781,11 +655,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
     case UOP_CONST: {
       u32 dt   = term_ext(heap_read(loc));
       u32 bits = (u32)term_val(heap_read(loc));
-      // thvm_wl_uop_const stores every float dtype's bits as the f32
-      // representation of the input mreal (see thvmlink.c:1836-1848), so
-      // CONST nodes flagged DT_FP64/FP16/BF16 still carry an f32 payload
-      // here.  Decode uniformly as f32 for any float dtype; upcast to
-      // f64 happens via the (double)pun.f promotion.
+      // A float CONST's payload is its f32 bits whatever the dtype (uop/const.c).
       if (uwalk_dtype_is_float(dt)) {
         union { u32 b; f32 f; } pun = { .b = bits };
         return (double)pun.f;
@@ -797,9 +667,6 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
       Term addr = heap_read(loc + 1);
       void *bp; u32 bdt;
       if (!uwalk_resolve_buf(c, buf, &bp, &bdt)) return 0.0;
-      // FLIP-residue input views address elements at negative element
-      // offsets relative to the view.offset pre-bias on bp; pass off
-      // through as signed (F6-finish (b) flip-widen).
       i64 off = uwalk_eval_int(c, addr);
       return uwalk_load_f64(bp, off, bdt);
     }
@@ -835,7 +702,6 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
       if (dst == DT_FP32) {
-        // Reinterpret 32 bits.
         i64 raw = uwalk_eval_int(c, src);
         u32 bits = (u32)raw;
         union { u32 b; f32 f; } pun = { .b = bits };
@@ -883,8 +749,7 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
     case UOP_CONST: {
       u32 dt   = term_ext(heap_read(loc));
       u32 bits = (u32)term_val(heap_read(loc));
-      // See uwalk_eval_float's UOP_CONST: producer stores f32 bits for
-      // every float dtype, so decode uniformly here too.
+      // f32 bits for every float dtype, as in uwalk_eval_float.
       if (uwalk_dtype_is_float(dt)) {
         union { u32 b; f32 f; } pun = { .b = bits };
         return (i64)pun.f;
@@ -933,7 +798,6 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       Term addr = heap_read(loc + 1);
       void *bp; u32 bdt;
       if (!uwalk_resolve_buf(c, buf, &bp, &bdt)) return 0;
-      // Signed offset: see uwalk_eval_float's UOP_INDEX_E for rationale.
       i64 off = uwalk_eval_int(c, addr);
       return uwalk_load_i64(bp, off, bdt);
     }
@@ -949,12 +813,8 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
       if (dst == DT_INT32 || dst == DT_UINT32) {
-        // Int-to-int BITCAST at the same itemsize is a value passthrough
-        // at the bit level (e.g. u32 -> i32 keeps the bit pattern).
-        // Going through uwalk_eval_float would round-trip the u32 value
-        // through a double and lose the original bits when the value
-        // can't be represented exactly in f32, or even when it CAN --
-        // 1.0_u32 becomes (f32)1.0 whose bit pattern is 0x3F800000.
+        // An int source passes its bits through; a trip through the float
+        // evaluator would turn 1u into the bits of 1.0f.
         u32 sdt = uwalk_term_dtype(c, src);
         if (!uwalk_dtype_is_float(sdt)) {
           return uwalk_eval_int(c, src);
@@ -964,10 +824,8 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
         pun.f = (f32)f;
         return (i64)(i32)pun.b;
       }
-      // For smaller-than-32-bit bit reinterpret (u16, u8, etc.) and
-      // f16/bf16/fp8 sources, eval_int(INDEX_E) would route through
-      // fp_convert.c's value-preserving load and lose the bits.  Read
-      // raw bytes from the source buffer when src is a direct INDEX_E.
+      // A direct load reads raw bytes: uwalk_load_i64 converts a narrow
+      // float's value and would lose its bits.
       if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_INDEX_E) {
         u64 iloc = term_val(src);
         Term buf = heap_read(iloc + 0);
@@ -990,10 +848,8 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       UWalkRed r = uwalk_reduce_value(c, t);
       return r.is_int ? r.i : (i64)r.f;
     }
-    // UOP_ADD / MUL / NEG serve int tensors too (the WL Plus / Times emit
-    // them for every element type).  An int value (uwalk_term_dtype) stays
-    // in integer arithmetic; a float one converts its float result, never
-    // its truncated operands.
+    // ADD, MUL and NEG serve int tensors too; a float-typed one converts its
+    // float result, never its truncated operands.
     case UOP_ADD: case UOP_MUL: case UOP_NEG: {
       u32 dt = uwalk_term_dtype(c, t);
       if (uwalk_dtype_is_float(dt)) {
@@ -1011,9 +867,7 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
   }
 }
 
-// Collect unique RANGE leaves from a term tree (mirrors
-// rmu_collect_ranges in render_uop.c). axis_id-deduped; up to
-// UWALK_MAX_RANGES entries.
+// The RANGE leaves under `t`, one per axis (rmu_collect_ranges in render_uop.c).
 static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out) {
   if (term_tag(t) != TAG_UOP) return;
   if (*n_out >= UWALK_MAX_RANGES) return;
@@ -1050,12 +904,8 @@ static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out) {
       uwalk_collect_ranges(heap_read(loc + 2), ranges, n_out);
       return;
     case UOP_REDUCE:
-      // Recurse into the reduce body so outer reduces over chained
-      // inner reduces find their own reduce-axis range (extent) and
-      // any output axes used by the inner body.  Without this, an
-      // outer REDUCE whose body is itself a UOP_REDUCE sees zero
-      // ranges in uwalk_run_reduce -> r_extent==0 -> returns
-      // 0.0 / -INFINITY immediately.
+      // Into the body, so an outer REDUCE over an inner one finds its own
+      // axis's RANGE and the output axes the inner body reads.
       uwalk_collect_ranges(heap_read(loc + 0), ranges, n_out);
       return;
     default:
@@ -1063,14 +913,8 @@ static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out) {
   }
 }
 
-// Collect TOP-LEVEL REDUCE nodes (those reachable from `t` without
-// crossing another UOP_REDUCE boundary).  Reduces nested inside another
-// reduce's body are NOT collected here: the outer's uwalk_run_reduce
-// will iterate its axis, and evaluating the inner UOP_REDUCE re-runs it
-// on every iteration via uwalk_run_reduce (see uwalk_reduce_value's
-// cache-miss branch).  Pre-registering inner reduces would
-// cache a stale value (computed once with the outer's axis at 0) and
-// the outer's accumulator would combine the same value N times.
+// The top-level REDUCEs under `t`: a nested one reruns inside its outer one,
+// and registering it here would cache its value at outer iteration 0.
 static void uwalk_collect_reduces(Term t, Term *reduces, u32 *n_out) {
   if (term_tag(t) != TAG_UOP) return;
   if (*n_out >= UWALK_MAX_REDUCES) return;
@@ -1152,9 +996,8 @@ static void uwalk_collect_all_reduces(Term t, Term *reduces, u32 *n_out,
   }
 }
 
-// Collect the RANGE leaves under `t` that uop_dag_apply_split minted as the
-// inner half of a split (wrapped in OPT(UNROLL|UPCAST)), nested reduce
-// bodies included.
+// The RANGEs under `t` that uop_dag_apply_split minted as a split's inner half
+// (OPT(UNROLL|UPCAST)-wrapped), nested reduce bodies included.
 static void uwalk_collect_split_ranges(Term t, Term *ranges, u32 *n_out,
                                        u32 depth) {
   if (depth > 256 || term_tag(t) != TAG_UOP || *n_out >= UWALK_MAX_RANGES) {
@@ -1204,10 +1047,8 @@ static void uwalk_collect_split_ranges(Term t, Term *ranges, u32 *n_out,
   }
 }
 
-// Record the store's split-inner axes and their owning reduces: every
-// OPT(UNROLL|UPCAST) range inside some reduce body that indexes no store
-// position.  Mirrors the renderer's inner-reduce-decomposition set
-// (rmu_range_is_inner_reduce_decomp + rmu_reduce_folds_split_axis).
+// The store's split-inner axes, each with its owning reduce: the renderer's
+// set (rmu_range_is_inner_reduce_decomp, rmu_reduce_folds_split_axis).
 static void uwalk_split_axes_init(UWalkCtx *c, Term store_addr, Term value) {
   c->n_split = 0;
   Term reds[UWALK_MAX_REDUCES];
@@ -1256,9 +1097,8 @@ static UWalkRed uwalk_int_red(u32 dt, i64 v) {
   return r;
 }
 
-// tinygrad's identity_element (uop/ops.py:61): 0 for SUM, dt.min for MAX,
-// which is -2^(bits-1) for a signed int, 0 for an unsigned int or bool
-// (dtype.py:70-72), and -inf for a float.
+// tinygrad uop/ops.py:61 identity_element: 0 for SUM, dt.min for MAX, which is
+// -2^(bits-1) signed, 0 for unsigned or bool (dtype.py:70), -inf for a float.
 static UWalkRed uwalk_reduce_identity(u32 kind, int is_int, u32 dt) {
   if (!is_int) {
     UWalkRed r = { (kind == REDUCE_MAX) ? -INFINITY : 0.0, 0, 0 };
@@ -1271,9 +1111,8 @@ static UWalkRed uwalk_reduce_identity(u32 kind, int is_int, u32 dt) {
   return uwalk_int_red(dt, id);
 }
 
-// acc <kind> v in int or bool dtype `dt`.  SUM wraps as the dtype's
-// accumulator does, MAX compares in the dtype's order, and a bool SUM or
-// MAX is an OR (tinygrad uop/symbolic.py:163-166).
+// acc <kind> v in int dtype `dt`: SUM wraps, MAX compares in the dtype's order,
+// and a bool SUM or MAX is an OR (tinygrad uop/symbolic.py:163).
 static i64 uwalk_int_combine(u32 kind, u32 dt, i64 acc, i64 v) {
   v = uwalk_int_wrap(dt, v);
   if (dtype_is_bool(dt)) {
@@ -1288,10 +1127,8 @@ static i64 uwalk_int_combine(u32 kind, u32 dt, i64 acc, i64 v) {
   return (acc < v) ? v : acc;
 }
 
-// acc <kind> v for a body value v of C float type `fdt` (a float or a
-// double) of an int or bool reduce, as the rendered C combines it: `acc =
-// acc + v` converts acc to v's type, adds there and converts the sum back,
-// while a MAX converts v into the dtype before it compares.
+// A float body value into an int reduce as the rendered C combines it: a SUM
+// adds in v's type `fdt` and converts back, a MAX converts v before comparing.
 static i64 uwalk_int_combine_f64(u32 kind, u32 dt, u32 fdt, i64 acc, double v) {
   if (kind == REDUCE_SUM && !dtype_is_bool(dt)) {
     return uwalk_f64_to_int(dt, uwalk_round(fdt, uwalk_int_to_float(dt, fdt, acc) + v));
@@ -1312,33 +1149,11 @@ static int uwalk_odometer_next(UWalkCtx *c, u32 slot0, u32 const *extents,
   return 0;
 }
 
-// Compute one reduce accumulator over its axis range.
-// Run a (possibly multi-axis) REDUCE by chaining through nested
-// same-kind UOP_REDUCE shells.  Mirrors tinygrad's lowered form
-// `UOp(Ops.REDUCE, (body,) + tuple(reduce_range), alu_op)` where one
-// REDUCE node iterates over MULTIPLE range axes simultaneously
-// (tinygrad/codegen/lowerer.py:100, tinygrad/schedule/indexing.py:94).
-//
-// thvm's UOP_REDUCE encodes a single axis per node, so the Python
-// `sum(axis=(4,5,6))` lowers to three nested REDUCE shells.  Without
-// chain-fusion the walker re-evaluates the inner REDUCE on every
-// outer iteration: even with the iter-aware cache that's still
-// recursive-recompute O(prod(axes)) per output position, vs the
-// flat O(prod(axes)) we get from one nested loop.  For a Conv2d
-// (C_in*kH*kW = 32*5*5 = 800) at 2*32*20*20 = 25600 outputs that's
-// the difference between seconds and "doesn't terminate".
-//
-// Both SUM and MAX are commutative+associative, so fusing axes into
-// one nested loop preserves the value.  Chain only follows direct
-// `r_src == UOP_REDUCE(same_kind)` shells; if the body branches into
-// elementwise ops over multiple sibling REDUCEs, those siblings stay
-// as separate uwalk_eval_float entries (handled via the iter-cache).
-//
-// An int or bool reduce accumulates in its dtype, as tinygrad allocates
-// the accumulator like the reduce (reduce_ranges_to_acc,
-// codegen/__init__.py:197-204); a double accumulator rounds past 2^53.  A
-// float reduce accumulates in the C type the legacy C emit declares
-// (rmu_hold_type): a double for an f64 reduce, else a float.
+// A REDUCE and its chain of same-kind REDUCE shells run as one odometer over
+// all their axes (tinygrad schedule/indexing.py:94), not a walk per shell.
+
+// An int or bool reduce accumulates exactly in its dtype (tinygrad
+// codegen/__init__.py:197), a float one in rmu_hold_type's float or double.
 static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
   u32  axes  [UWALK_MAX_RANGES];
   u32  extents[UWALK_MAX_RANGES];

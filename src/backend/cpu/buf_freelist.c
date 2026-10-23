@@ -1,48 +1,18 @@
-// backend/cpu/buf_freelist.c - per-size-class free-list of
-// recyclable cpu_buf slots (bm4a of the bench arc).
-//
-// `cpu_buf_freelist_push(buf_id)` records that `buf_id`'s storage
-// is no longer needed.  The buf's data pointer survives in
-// CPU_BUFS[buf_id].data (the underlying calloc'd memory is NOT
-// freed), but downstream ops MUST treat the buf as dead until
-// it's reissued by `cpu_buf_alloc`.
-//
-// `cpu_buf_alloc(nbytes)` (modified in buf_alloc.c) first scans
-// CPU_FREELIST for a slot whose nbytes matches the request and
-// pops it, returning the recycled buf_id with refcount/preserved/
-// freeable cleared and data zeroed.  Only on a miss does it fall
-// back to a fresh calloc.
-//
-// Linear scan is fine for our scale (LeNet generates < 500
-// kernels per Adam step; beautiful_mnist a few hundred forward
-// kernels; CPU_FREELIST_CAP is 4096).  A bucketed hash would help
-// at higher fan-outs but isn't worth the bookkeeping today.
-//
-// Bigger picture: this complements the existing watermark pool
-// (cpu_buf_pool_begin/rollback) -- those bound an entire
-// thvm_realize call and free everything not preserved.  The
-// free-list operates at finer grain (per-buffer) and is driven
-// by the consumer_count + freeable signals from kernel_fire_by_id.
+// backend/cpu/buf_freelist.c - parked CPU buffers for reuse.  A pushed slot is
+// dead but keeps its storage until cpu_buf_alloc pops the block into a fresh
+// slot id; finer-grained than the per-realize watermark pool (buf_pool.c).
 
 fn void cpu_buf_freelist_push(u32 buf_id) {
-  if (CPU_BUFS == NULL) return;   // Metal-active: no CPU bufs.
+  if (CPU_BUFS == NULL) return;
   if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;
   if (CPU_BUFS[buf_id].jit_pinned) return;   // held by an active JIT capture
   if (CPU_FREELIST_LEN >= CPU_FREELIST_CAP) {
-    // Free-list saturated; drop the slot on the floor.  The buf's
-    // memory stays alive until cpu_shutdown, so we leak storage
-    // until end-of-session but never lose correctness.
+    // Full: the slot stays live and its storage is held until shutdown.
     return;
   }
   CPU_FREELIST[CPU_FREELIST_LEN++] = buf_id;
-  // Drop refcount to 0 so the recycled-but-unallocated buf
-  // doesn't keep counting toward TTotalBufBytes / the
-  // memory-probe sums.  cpu_buf_freelist_try_pop resets
-  // refcount = 1 on the next allocation.
-  // Note: arena views are external (owns_data=0); cpu_buf_freelist_try_pop
-  // explicitly skips externals so they never get recycled through here.
-  // Their parent_buf_id link is dropped through cpu_buf_free() when the
-  // rollback path retires them, NOT here.
+  // Refcount 0 keeps a parked slot out of the live-byte probes.  try_pop never
+  // recycles an external (an arena view); cpu_buf_free drops its parent.
   CpuBuf *b = &CPU_BUFS[buf_id];
   b->refcount  = 0;
   b->preserved = 0;
@@ -51,28 +21,13 @@ fn void cpu_buf_freelist_push(u32 buf_id) {
 
 fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   if (CPU_BUFS == NULL) return 0;
-  // Best-fit: reuse the smallest parked buffer whose storage is >=
-  // nbytes.  Exact-match-only barely recycled across a net's varied
-  // activation sizes (peak memory ~= sum of all activations); best-fit
-  // lets a freed 10MB activation back a later 8MB one, so the live set
-  // (not the sum) bounds memory -- tinygrad's reuse behaviour.  The
-  // kernel only touches [0,nbytes); the slot keeps its larger nbytes.
-  //
-  // Slot identity: the recycled storage block is handed to a FRESH
-  // CPU_BUFS slot id; the donor slot is left with data=NULL (dead).
-  // Without this swap, the planner's same-pass push/pop would alias
-  // two TenDescs onto one slot id (planner pushes while the donor's
-  // owning TenDesc still holds buf_id; pop binds the new TenDesc to
-  // the same id).  A subsequent re-fire of the donor's producer kernel
-  // would then write back through the alias and overwrite the new
-  // tensor.  Mirrors cuda_buf_freelist_try_pop; tinygrad parity:
-  // their schedule/memory.py + Buffer object give each recycle a
-  // fresh logical Buffer wrapping reused storage.
-  // With no slot id left for the block, miss before touching the donor;
-  // the caller's fresh-alloc path then reports the full table.
+  // With no slot id left for the block, miss before touching the donor; the
+  // caller's fresh-alloc path then reports the full table.
   if (CPU_BUFS_NEXT >= CPU_BUFS_CAP) {
     return 0;
   }
+  // Best fit: the smallest parked block of at least nbytes, so the live set,
+  // not the sum of all activations, bounds memory.
   u32 best = 0; u64 best_nb = (u64)-1;
   for (u32 i = 0; i < CPU_FREELIST_LEN; i++) {
     u32 bid = CPU_FREELIST[i];
@@ -82,7 +37,9 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
     if (b->nbytes < nbytes) continue;
     if (b->nbytes < best_nb) { best_nb = b->nbytes; best = i; }
   }
-  if (best_nb == (u64)-1) return 0;   // miss
+  if (best_nb == (u64)-1) return 0;
+  // The block moves to a fresh slot id: the donor's TenDesc may still name the
+  // old one, and a re-fire of its producer would overwrite the new tensor.
   u32 donor_bid = CPU_FREELIST[best];
   CPU_FREELIST[best] = CPU_FREELIST[CPU_FREELIST_LEN - 1];
   CPU_FREELIST_LEN--;
@@ -115,12 +72,8 @@ fn u32 cpu_buf_freelist_try_pop(u64 nbytes) {
   return new_id;
 }
 
-// Undo a cpu_buf_freelist_push: if `buf_id` is still parked on the
-// free-list (i.e. no intervening cpu_buf_alloc re-issued it), pull it
-// off and restore refcount = 1 so the buf goes back to its prior
-// "live" state.  Used by the per-realize memory planner to roll back
-// speculative pushes at end-of-pass.  No-op if the buf isn't on the
-// list (it was already recycled, or never pushed).
+// Undo a cpu_buf_freelist_push whose block no pop took: the memory planner
+// rolls back its speculative pushes at the end of a pass.
 fn void cpu_buf_freelist_remove(u32 buf_id) {
   if (CPU_BUFS == NULL) return;
   if (buf_id == 0 || buf_id >= CPU_BUFS_NEXT) return;

@@ -1,28 +1,16 @@
-// backend/cpu/blas.c - pattern-recognise matmul-shaped kernels (gemm,
-// batched gemm, contraction, im2col) from the lifted UOp DAG and dispatch
-// them to cblas_*: Apple Accelerate on macOS, OpenBLAS / BLIS on Linux.
-//
-// Every dispatcher reads M/N/K + dtype + slot mapping from
-// ke->cached_lift.store_root via the uop_dag_classify_* extractors.
-// The unified rangeify pass produces the canonical MUL+REDUCE+OPT_TC
-// UOp DAG pattern for every matmul-shaped kernel, which
-// kernel_lift_to_uop packages as the per-kernel root these dispatchers
-// inspect.
+// backend/cpu/blas.c - recognise matmul-shaped kernels (gemm, batched gemm,
+// contraction, im2col) in the lifted UOp DAG (uop_dag_classify_*) and run them
+// in cblas: Apple Accelerate on macOS, OpenBLAS or BLIS on Linux.
 
 #ifdef __APPLE__
 #define ACCELERATE_NEW_LAPACK
-// Include only the cblas sub-header, NOT the <Accelerate/Accelerate.h>
-// umbrella: recent Command Line Tools SDKs (Xcode 26.x) ship a broken
-// Sparse/SolveImplementationTyped.h that fails to compile even from C TUs
-// ("too many arguments to function call").  This file uses only cblas_*
-// (sgemm/dgemm), so the narrow header is sufficient
-// and sidesteps the SDK breakage.
+// The cblas sub-header, not the Accelerate.h umbrella: Xcode 26 SDKs ship a
+// Sparse header that fails to compile from C.
 #include <vecLib/cblas_new.h>
 #define HAVE_BLAS 1
 #elif defined(THVM_HAVE_CBLAS)
-// Linux: OpenBLAS / BLIS through the standard cblas interface.  The
-// Makefile defines THVM_HAVE_CBLAS when it finds one (THVM_CBLAS=0 opts
-// out); without it matmuls run as JIT-compiled loops, ~60x slower.
+// The Makefile defines THVM_HAVE_CBLAS when it finds OpenBLAS or BLIS
+// (THVM_CBLAS=0 opts out); without it matmuls run as JIT loops, ~60x slower.
 #include <cblas.h>
 #define HAVE_BLAS 1
 #else
@@ -31,20 +19,11 @@
 
 #if HAVE_BLAS
 
-// Count cblas dispatches landed via the DAG-side classifier.
-// Queried by tests through the blas_*_dispatch_dag accessors below.
-// Reset by thvm_init.
+// GEMM and batched-GEMM dispatches, read by tests.
 static u64 BLAS_GEMM_DISPATCH_DAG = 0;
 
-// Cached "env flag set to '1'" check.  Each dispatcher had its own
-// `static int known; static int on;` block; this collapses them.  The
-// cache is keyed by the static variable's address (one cache slot per
-// call site -- pass a unique &on_flag_var as `slot`).  Returns 1 iff
-// getenv(name)[0] == '1' on first call; subsequent calls return the
-// cached value without touching getenv again.
+// 1 iff getenv(name) starts with '1', read once into *slot (-1 = unread).
 static int env_flag_on(int *slot, const char *name) {
-  // -1 = unread, 0 = off, 1 = on.  Single-threaded init is safe for
-  // the dispatch path; the cache hides the getenv after first call.
   if (*slot == -1) {
     char const *e = getenv(name);
     *slot = (e != NULL && e[0] == '1') ? 1 : 0;
@@ -52,7 +31,6 @@ static int env_flag_on(int *slot, const char *name) {
   return *slot;
 }
 
-// Counter accessors -- see top-of-file definition block.
 fn u64 cpu_blas_gemm_dispatch_dag_count(void) {
   return BLAS_GEMM_DISPATCH_DAG;
 }
@@ -60,9 +38,6 @@ fn void cpu_blas_gemm_dispatch_counters_reset(void) {
   BLAS_GEMM_DISPATCH_DAG = 0;
 }
 
-// Issue cblas_{s,d}gemm given a fully-populated shape (M, N, K, ldA,
-// ldB, transA, transB, a_input, b_input).  Every route funnels through
-// this so the actual dispatch site stays single-source.
 static void blas_emit_gemm(u32 dt, u32 M, u32 N, u32 K,
                            u32 ldA, u32 ldB, u32 ldC,
                            u32 trans_a, u32 trans_b,
@@ -91,21 +66,16 @@ static void blas_emit_gemm(u32 dt, u32 M, u32 N, u32 K,
 // Each route's classifier plus the checks that need no buffer, shared by
 // the route's dispatcher and cpu_blas_takes.
 
-// GEMM: M/N/K + slot mapping + ldA/ldB + transpose flags from
-// `uop_dag_classify_matmul_shape`.
 static int blas_gemm_shape(KernelEntry const *ke, UopDagGemmShape *g) {
   if (ke->cached_lift.store_root == 0) return 0;
   if (!uop_dag_classify_matmul_shape(ke->cached_lift.store_root, ke, g)) {
     return 0;
   }
   // cblas has no bf16 GEMM (the classifier admits bf16 for the Metal
-  // tensor-core path); decline so a bf16 matmul falls to the interpreter.
+  // tensor-core path), so a bf16 matmul falls through to the walker.
   if (g->dtype != DT_FP32 && g->dtype != DT_FP64) return 0;
-  // Resolve symbolic (kvar) shape dims to their per-dispatch bound value.
-  // classify returns the output leading dim M kvar-packed for a symbolic-M
-  // matmul ({S, dim} = onehot . tokT, S the seq kvar); the bind is set before
-  // fire, so GEMM runs the actual M (buffers are sized at the kvar upper
-  // bound, GEMM writes the first M rows).  Identity for literal dims.
+  // A symbolic (kvar) dim runs at its bound value; buffers are sized at the
+  // kvar's upper bound, so the GEMM fills the first M rows.
   g->M   = kvar_extent_runtime(g->M);
   g->N   = kvar_extent_runtime(g->N);
   g->K   = kvar_extent_runtime(g->K);
@@ -114,7 +84,6 @@ static int blas_gemm_shape(KernelEntry const *ke, UopDagGemmShape *g) {
   return g->N > 1;
 }
 
-// TRUE batched gemm (see blas_try_batched_gemm).
 static int blas_batched_gemm_shape(KernelEntry const *ke,
                                    UopDagBatchedGemmShape *g) {
   if (ke->cached_lift.store_root == 0) return 0;
@@ -124,7 +93,6 @@ static int blas_batched_gemm_shape(KernelEntry const *ke,
   return g->dtype == DT_FP32 && (g->N >= 2 || g->M >= 2);
 }
 
-// Generalized contraction (see blas_try_contraction).
 static int blas_contraction_shape(KernelEntry const *ke,
                                   UopDagContractionShape *c) {
   if (ke->cached_lift.store_root == 0) return 0;
@@ -137,30 +105,24 @@ static int blas_contraction_shape(KernelEntry const *ke,
   return c->dtype == DT_FP32;
 }
 
-// im2col conv contraction (see blas_try_im2col_contraction).
 static int blas_im2col_shape(KernelEntry const *ke, UopDagIm2colShape *c) {
   if (ke->cached_lift.store_root == 0) return 0;
   if (!uop_dag_classify_im2col_contraction(ke->cached_lift.store_root, ke, c)) {
     return 0;
   }
   if (c->dtype != DT_FP32) return 0;
-  // Sanity bounds (defensive).
   if (c->M < 2 || (u64)c->K_row * c->K_col < 4) return 0;
   u64 n_total = (u64)c->N_patchless * c->KH_total;
   if (n_total < 2) return 0;
   if (c->N_outer_extent < 1) return 0;
-  // The per-dispatch patches scratch is capped below 1 GiB.
+  // Caps the per-dispatch patches scratch at 2^28 floats (1 GiB).
   u64 scratch_n = n_total * c->K_row * c->K_col;
   return scratch_n != 0 && scratch_n <= (u64)1 << 28;
 }
 
-// DAG-side GEMM dispatcher.  Returns 1 on dispatch, 0 on no-match.
 static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   UopDagGemmShape gemm;
   if (!blas_gemm_shape(ke, &gemm)) return 0;
-  // Buffer-size sanity: a_input / b_input are pinned by BUFFER.instance
-  // so storage sanity reduces to "buffer ids exist + at least M*K /
-  // K*N elements addressable".  Bail if either is 0.
   u32 a_buf = in_buf_ids[gemm.a_input];
   u32 b_buf = in_buf_ids[gemm.b_input];
   if (a_buf == 0 || b_buf == 0) return 0;
@@ -169,11 +131,8 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   u32 b_elems = (u32)(CPU_BUFS[b_buf].nbytes / elem_bytes);
   if (a_elems < gemm.M * gemm.K) return 0;
   if (b_elems < gemm.K * gemm.N) return 0;
-  // ldC is the OUTPUT buffer's logical row stride, NOT N: a symbolic-seq
-  // matmul output ({S, *}) is allocated at the kvar STATIC upper bound, so its
-  // row stride is hi >= N (the runtime extent).  Passing N would pack the
-  // cblas rows at the wrong pitch into a buffer every consumer indexes at the
-  // static stride.  Identity for literal matmuls (strides[0] == N).
+  // ldC is the output's row stride, not N: a symbolic-seq output is allocated
+  // at the kvar's upper bound, so its stride can exceed the runtime N.
   u32 ldC = (u32) TENS[ke->output_tid].view.strides[0];
   if (ldC == 0) ldC = gemm.N;
   blas_emit_gemm(gemm.dtype, gemm.M, gemm.N, gemm.K, gemm.ldA, gemm.ldB, ldC,
@@ -183,11 +142,8 @@ static int blas_try_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   return 1;
 }
 
-// TRUE batched gemm: A{batch,M,K} . B{batch,K,N} -> C{batch,M,N} as a loop of
-// cblas_sgemm (one per batch).  The batched multi-head attention's mhaBmm is
-// the instance -- it would otherwise fall to the slow codegen reduce (the
-// per-head loop it replaced used 12 BLAS sgemms).  Operands are permuted
-// views, so ld/trans/batch-strides come from the address coefficients.
+// A{batch,M,K} . B{batch,K,N} as one sgemm per batch (multi-head attention);
+// ld, trans and batch strides come from the permuted views' addresses.
 static int blas_try_batched_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   UopDagBatchedGemmShape g;
   if (!blas_batched_gemm_shape(ke, &g)) return 0;
@@ -215,26 +171,8 @@ static int blas_try_batched_gemm(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_i
   return 1;
 }
 
-// DAG-side generalized-contraction dispatcher.  Recognises a kernel
-// shape `out[M_axes, N_axes] = sum_{K} A[K, N_axes] * B[M_outer, K,
-// M_inner]` and routes it to a batched cblas_sgemm over M_outer (or
-// a single sgemm when n_M == 1).
-//
-// In contraction-space: the W operand is the (K, N) factor (= a_input)
-// and the G operand is the (M_outer, K, M_inner) factor (= b_input).
-// Per-batch BLAS arguments:
-//   sub_A_blas = G_slice (K, inner_M)  -- transposed in BLAS to (inner_M, K)
-//   sub_B_blas = W       (K, N)        -- as-is
-//   sub_C_blas = out_slice (inner_M, N)
-//   cblas_sgemm(RowMajor, Trans, NoTrans,
-//               M=inner_M, N=N, K=K,
-//               1.0, sub_A_blas, ldB,
-//                    sub_B_blas, ldA,
-//               0.0, sub_C_blas, ldC)
-//
-// The conv-backward x-grad kernel `out[a0,a1,a2,a3,a4,a5] =
-// sum_{a6} W[a6,a3,a4,a5] * G[a0,a6,a1,a2]` is the canonical instance:
-// inner_M = (OH*OW), N = (C_in*KH*KW), K = C_out, batch = B.
+// out[M_outer, M_inner, N] = sum_K W[K, N] * G[M_outer, K, M_inner] (the
+// conv-backward x-grad) as one sgemm per M_outer slice, G transposed.
 static int blas_try_contraction(KernelEntry *ke, u32 *in_buf_ids,
                                 u32 out_buf_id) {
   UopDagContractionShape c;
@@ -268,16 +206,8 @@ static int blas_try_contraction(KernelEntry *ke, u32 *in_buf_ids,
   return 1;
 }
 
-// im2col patch-gather helper.  Materialises a row-major
-// patches[N_total, K_pixels] block from a single batch slice of X.
-//
-//   patches[((cin*KH + kh)*KW + kw) * K_pixels + oh*OW + ow]
-//     = X_b[cin*X_Cin_str + (oh+kh)*X_W + (ow+kw)]
-//
-// The innermost OW loop is stride-1 in both source and destination so we
-// fold it into a single memcpy of length OW.  Used by both the BWD
-// weight-grad dispatcher (per K_outer B iter) and the FWD conv dispatcher
-// (per N_outer B iter) -- the gather shape is the same.
+// patches[((cin*KH + kh)*KW + kw)*OH*OW + oh*OW + ow] =
+// X_b[cin*X_Cin_str + (oh + kh)*X_W + ow + kw], one memcpy per OW-long row.
 static void im2col_gather_patches(float *patches,
                                   float const *X_b,
                                   u32 N_patch, u32 KH, u32 KW,
@@ -298,30 +228,8 @@ static void im2col_gather_patches(float *patches,
   }
 }
 
-// C7.2 dispatcher: im2col conv as a batched GEMM.  Handles two duals:
-//
-//   BWD (forward_conv=0): conv-backward weight-grad
-//     dW[Cout, Cin, KH, KW] = sum_{B, OH, OW}
-//                              dY[B, Cout, OH, OW] * X[B, Cin, OH+KH, OW+KW]
-//     Per-batch:
-//       patches[Cin*KH*KW, OH*OW] from X[b];   sub_dY = dY[b] (Cout, OH*OW)
-//       cblas_sgemm(NoTrans, Trans, M=Cout, N=Cin*KH*KW, K=OH*OW,
-//                   1.0, sub_dY, ldB=OH*OW, patches, ldA=OH*OW,
-//                   beta=(b==0?0:1), dW, ldC=Cin*KH*KW)
-//
-//   FWD (forward_conv=1): conv forward
-//     out[B, Cout, OH, OW] = sum_{Cin, KH, KW}
-//                              X[B, Cin, OH+KH, OW+KW] * W[Cout, Cin, KH, KW]
-//     Per-batch:
-//       patches[Cin*KH*KW, OH*OW] from X[b];   W is (Cout, Cin*KH*KW)
-//       cblas_sgemm(NoTrans, NoTrans, M=Cout, N=OH*OW, K=Cin*KH*KW,
-//                   1.0, W, ldB=Cin*KH*KW, patches, ldA=OH*OW,
-//                   beta=0, out[b], ldC=OH*OW)
-//
-// Per dispatch one scratch (N_total * K_pixels) float block is allocated
-// once and reused across the B loop.  Reference: tinygrad's `_pool`
-// lowering (mixin/movement.py:569) expresses both directions as the same
-// im2col ShapeTracker view.
+// im2col conv (tinygrad mixin/movement.py:569 _pool), one sgemm per batch:
+// forward out[b] = W . patches, weight-grad dW += dY[b] . patches^T.
 static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
                                        u32 out_buf_id) {
   UopDagIm2colShape c;
@@ -347,7 +255,6 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
   }
   if (a_elems < a_need || b_elems < b_need || o_elems < o_need) return 0;
 
-  // Scratch patches buffer.  Allocated once per dispatch, reused across batches.
   u64 scratch_n = N_total * K_total;
   float *patches = (float *)malloc((size_t)(scratch_n * sizeof(float)));
   if (patches == NULL) return 0;
@@ -368,14 +275,8 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
   for (u32 b = 0; b < c.N_outer_extent; b++) {
     float const *X_b = X_base + (u64)b * X_outer;
     im2col_gather_patches(patches, X_b, N_patch, KH, KW, OH, OW, X_W, X_Cin_str);
-    // The gather wrote patches in (N_total=Cin*KH*KW rows, K_pixels=OH*OW cols)
-    // row-major layout.  Both branches use that same buffer; they only differ
-    // in (a) which axis of patches is the sgemm-K axis vs the sgemm-N axis,
-    // and (b) where the output is written / whether to accumulate.
     if (c.forward_conv) {
-      // FWD per-batch: out[b] = W @ patches.  sgemm-K = Cin*KH*KW (channels),
-      // sgemm-N = OH*OW (pixels).  patches is already (K, N)-shaped, so
-      // NoTrans on both.  beta=0 since each batch writes a distinct out slice.
+      // Each batch writes its own out slice, so beta is 0.
       float *out_b = out_base + (u64)b * c.N_outer_out_stride;
       cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                   (int)c.M, (int)K_total, (int)N_total,
@@ -383,10 +284,7 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
                         patches, (int)K_total,          // patches, ldB = K_total
                   0.0f, out_b,   (int)c.out_M_stride);  // out[b],  ldC = K_total
     } else {
-      // BWD per-batch: dW += dY[b] @ patches^T.  sgemm-K = OH*OW (pixels),
-      // sgemm-N = Cin*KH*KW (channels).  patches is (N, K)-shaped for this
-      // direction so use TransB.  beta=1 after the first batch to accumulate
-      // dW across the batch dimension.
+      // beta 1 after the first batch accumulates dW over the batch.
       float const *dY_b = B_base + (u64)b * c.Y_outer_stride;
       float beta = (b == 0) ? 0.0f : 1.0f;
       cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
@@ -400,18 +298,14 @@ static int blas_try_im2col_contraction(KernelEntry *ke, u32 *in_buf_ids,
   return 1;
 }
 
-// Bisection knob: THVM_CPU_BLAS_DISABLE=1 forces every kernel past the
-// BLAS try-ladder so the walker / JIT path runs instead.  Used for
-// isolating BLAS-classifier bugs (mis-mapped A/B operand order, bad
-// transA/transB recovery) from kernel-body bugs.
+// THVM_CPU_BLAS_DISABLE=1 sends every kernel past BLAS, to bisect a classifier.
 static int blas_disabled(void) {
   static int slot = -1;
   return env_flag_on(&slot, "THVM_CPU_BLAS_DISABLE");
 }
 
-// 1 iff cpu_blas_dispatch would take this kernel, judged from its lifted
-// DAG before any buffer exists.  hand_opts leaves exactly these kernels
-// bare: an UPCAST/UNROLL would stop the classifiers from recognising them.
+// 1 iff cpu_blas_dispatch would take this kernel, judged before any buffer
+// exists: hand_opts leaves these bare, as an UPCAST would hide the pattern.
 fn int cpu_blas_takes(KernelEntry const *ke) {
   if (blas_disabled()) return 0;
   UopDagGemmShape        gemm;
@@ -422,25 +316,14 @@ fn int cpu_blas_takes(KernelEntry const *ke) {
       || blas_contraction_shape(ke, &contr) || blas_im2col_shape(ke, &im2col);
 }
 
-// Returns KDISPATCH_BLAS_GEMM when a route fired so the profiler can
-// record it, or 0 on no-match (caller falls through to JIT / interpreter).
+// KDISPATCH_BLAS_GEMM, for the profiler, when a route ran; 0 otherwise.
 fn int cpu_blas_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   if (blas_disabled()) return 0;
   if (blas_try_gemm(ke, in_buf_ids, out_buf_id)) return KDISPATCH_BLAS_GEMM;
-  // True batched gemm (batch axis in A AND B AND output) -- the batched
-  // multi-head attention bmm.  Before the contraction try (whose batch is
-  // M-side / A-shared and would decline on a batch-in-both axis anyway).
   if (blas_try_batched_gemm(ke, in_buf_ids, out_buf_id))
     return KDISPATCH_BLAS_GEMM;
-  // Generalized contraction (compound M/N axes; conv-backward x-grad
-  // is the canonical instance).  Routed as KDISPATCH_BLAS_GEMM so the
-  // profiler aggregates it with the simple-matmul route.
   if (blas_try_contraction(ke, in_buf_ids, out_buf_id))
     return KDISPATCH_BLAS_GEMM;
-  // C7.2 im2col conv-bwd weight-grad: per-batch im2col gather + sgemm.
-  // Only matches the multi-K REDUCE shape produced by C7.3 chain-fuse,
-  // so it's a no-op until reduce.c's uop_reduce_multi activates the
-  // REDUCE-of-REDUCE collapse.
   if (blas_try_im2col_contraction(ke, in_buf_ids, out_buf_id))
     return KDISPATCH_BLAS_GEMM;
   return 0;

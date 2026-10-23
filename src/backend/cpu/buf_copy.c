@@ -12,11 +12,8 @@ fn int cpu_buf_copy(u32 dst_buf_id, u32 src_buf_id, u64 nbytes) {
   return 0;
 }
 
-// Offset-aware copy: copy `nbytes` from src (byte 0) into dst at
-// `dst_byte_off`.  The KV-cache append's same-backend fast path -- the
-// SHRUNK dst view's row offset becomes a byte offset into the persistent
-// cache buffer, leaving the other rows untouched.  Bounds-checks the
-// destination span; never truncates (a too-large span is a caller bug).
+// Copy nbytes from src byte 0 into dst at dst_byte_off (the KV-cache append's
+// row write).  Unlike cpu_buf_copy it refuses an oversized span, never truncates.
 fn int cpu_buf_copy_at(u32 dst_buf_id, u64 dst_byte_off, u32 src_buf_id, u64 nbytes) {
   if (dst_buf_id == 0 || dst_buf_id >= CPU_BUFS_NEXT) return -1;
   if (src_buf_id == 0 || src_buf_id >= CPU_BUFS_NEXT) return -1;

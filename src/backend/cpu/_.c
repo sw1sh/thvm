@@ -1,12 +1,9 @@
-// backend/cpu/_.c - wire the CPU Backend vtable.
-//
-// Defined here so every cpu_* helper above is already in scope.  The
-// single instance CPU_BACKEND is installed as CURRENT_BACKEND by
-// thvm_init.
+// backend/cpu/_.c - the CPU Backend vtable, defined after every cpu_* helper
+// it names.
 
 Backend CPU_BACKEND = {
   .id              = 1,
-  .view_aware      = 1,   // cpu_dispatch_kernel gathers chained inputs; rungs read strided views
+  .view_aware      = 1,   // every rung reads a strided input view in place
   .init            = cpu_init,
   .shutdown        = cpu_shutdown,
   .buf_alloc       = cpu_buf_alloc,

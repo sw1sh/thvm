@@ -1,23 +1,13 @@
-// backend/cpu/custom.c - compile + dispatch a raw injected kernel
-// (KernelEntry.custom_program) on the CPU backend.
-//
-// Reuses the CPU JIT's compile and load helpers (backend/cpu/jit.c, the
-// same TU): hash the source, compile it into a /tmp dylib with the JIT's
-// compiler and opt level, dlopen once, and cache the resolved entry point
-// by content hash so repeat fires and JIT replays skip the compile.
-//
-// ABI (documented in schedule/kernel_custom.c): the source defines
-//   void <name>(void *const *bufs, unsigned const *grid,
-//               unsigned const *block);
-// bufs[i] is argument slot i's raw buffer pointer (reads and writes
-// alike, per custom_outs_mask); grid / block are the 3-wide launch
-// dims, advisory on CPU (the kernel loops itself).
+// backend/cpu/custom.c - compile and dispatch a raw injected kernel
+// (KernelEntry.custom_program) with the CPU JIT's compiler, caching the entry
+// point by content hash.  The ABI is documented in schedule/kernel_custom.c.
 
+// bufs[i] is argument slot i's buffer; grid and block are advisory on CPU,
+// where the kernel loops itself.
 typedef void (*CpuCustomFn)(void *const *bufs, unsigned const *grid,
                             unsigned const *block);
 
-// Defined in schedule/kernel_custom.c (included after the interact
-// pass in thvm.c; same TU, so a forward decl suffices).
+// Defined in schedule/kernel_custom.c, included later in thvm.c.
 fn u32 kernel_custom_primary_out_slot(KernelEntry const *ke);
 
 #define CPU_CUSTOM_CACHE_CAP 64
@@ -50,9 +40,8 @@ static CpuCustomSlot *cpu_custom_lookup_slot(u64 key) {
   return NULL;
 }
 
-// Content key: source hash (cpu_src_hash, jit.c) mixed with the entry
-// name so two programs sharing a source body but exporting different
-// entry points resolve distinct functions.
+// The source hash mixed with the entry name: one source body may export
+// several entry points.
 static u64 cpu_custom_key(KernelEntry const *ke) {
   u64 h = cpu_src_hash(ke->custom_program);
   for (char const *p = ke->custom_name; *p; p++) {
@@ -62,9 +51,8 @@ static u64 cpu_custom_key(KernelEntry const *ke) {
   return h | (1ULL << 63);
 }
 
-// Compile the program (or reuse the on-disk dylib) and resolve its
-// entry point: cpu_jit_build's flow with the custom entry name in place
-// of the renderer's "k".
+// cpu_jit_build's flow with the custom entry name in place of the
+// renderer's "k".
 static CpuCustomFn cpu_custom_build(KernelEntry const *ke, u64 key) {
   char src_path[256], dl_path[256];
   snprintf(src_path, sizeof src_path, "/tmp/thvm_custom_%016llx.c",
@@ -98,11 +86,8 @@ static CpuCustomFn cpu_custom_build(KernelEntry const *ke, u64 key) {
   return jfn;
 }
 
-// Backend dispatch for an injected kernel: bind every argument slot's
-// raw pointer and make ONE call.  out_buf_id overrides the primary out
-// slot's binding; at JIT replay that field is the rebound / planned
-// buffer while the mirrored input slot may still name the capture-time
-// id.  Returns 0 on success, -1 on compile / binding failure.
+// out_buf_id overrides the primary out slot: at JIT replay it is the rebound or
+// planned buffer, while the mirrored input slot may name the capture-time one.
 fn int cpu_custom_dispatch(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
   u64 t0  = cg_now_us();
   u32 kid = (u32)(ke - KERNELS);

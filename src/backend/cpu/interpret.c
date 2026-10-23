@@ -1,47 +1,25 @@
-// backend/cpu/interpret.c - CPU dispatch ladder + chained-input pre-materialise.
-//
-// The UOp DAG walker (backend/cpu/uop_walk.c) covers every kernel
-// shape the surgical suite produces; BLAS / JIT sit above it for
-// the patterns those paths handle faster.
-//
-// What stays here:
-//   - cpu_dispatch_kernel: the dispatch ladder + chained-input
-//     pre-materialise wrapper.
+// backend/cpu/interpret.c - the CPU dispatch ladder: BLAS, then the C JIT, then
+// the UOp walker (uop_walk.c) as the last rung.
 
-
-// Forward decls: defined in backend/cpu/{blas,jit,custom,uop_walk}.c
-// (included after this file in thvm.c, so declare here for the
-// dispatcher).
+// Defined in blas.c, jit.c, custom.c and uop_walk.c, included after this file.
 fn int cpu_blas_dispatch       (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn int cpu_jit_dispatch        (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn int cpu_custom_dispatch     (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn int cpu_uop_walk            (KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id);
 fn char const *cpu_uop_walk_last_decline(void);
 
-// Dispatches in which no rung of the ladder ran, so the kernel's output
-// holds no result: nothing wrote it, or a walk that declined partway (at
-// an op without a rule, or at a later store of an AFTER chain) wrote part
-// of it.  C tests read it through cpu_dispatch_no_rung_count.
+// Dispatches no rung completed, whose output holds no result (a walk that
+// declined partway may have written part of it).
 static u64 CPU_DISPATCH_NO_RUNG;
 
 fn u64 cpu_dispatch_no_rung_count(void) {
   return CPU_DISPATCH_NO_RUNG;
 }
 
-// === ShapeTracker-chained input pre-materialise (CPU side) ===
-//
-// cpu_tendesc_strided_index: map an output flat index to the
-// underlying-buffer ELEMENT index through a TenDesc's full ShapeTracker
-// (`view` + `prior_views[0..nviews)`).  Same composition as
-// metal_tendesc_strided_index, just returning a host-pointer element
-// offset (add to an f32*/i32* base).  Thin wrapper over the shared
-// tendesc_strided_index in view/strided_index.c.
 static u32 cpu_tendesc_strided_index(TenDesc const *t, u32 flat_idx) {
   return tendesc_strided_index(t, flat_idx);
 }
 
-// Per-slot save state for a pre-materialise swap (restore + release
-// after dispatch).
 typedef struct {
   int  swapped;
   u32  saved_tid;
@@ -50,23 +28,8 @@ typedef struct {
   u32  temp_tid;
 } CpuPrematSlot;
 
-// Pre-materialise a kernel-input slot whose TenDesc carries a
-// ShapeTracker chain (nviews > 0) into a fresh contiguous CPU buffer.
-// The dispatch ladder (BLAS shape classifier / UOp-walk / JIT) all
-// read inputs through
-// `ke->input_views[slot]`, which for a chained TenDesc mirrors only the
-// OUTERMOST (public) view -- the inner prior_views aren't applied, so a
-// direct read lands on the wrong bytes.  We gather the strided view
-// once via cpu_tendesc_strided_index, then swap in a fresh
-// canonical-contig offset-0 TenDesc (+ its buffer) for the dispatch,
-// restoring the original afterwards.  The CPU counterpart of the
-// strided pre-mat metal_dispatch_kernel does (and of the deleted
-// cpu_interpret pre-mat loop).
-//
-// Returns 1 if a swap was performed (caller restores via
-// cpu_premat_restore), 0 otherwise.  On allocation/lookup failure
-// returns 0 (input left as-is -- the chain case is bounded by the
-// buffer-byte ceiling so a huge gather is refused upstream).
+// The rungs read an input through ke->input_views[slot], only the outermost
+// view, so a ShapeTracker-chained input must arrive composed into its INDEX.
 static int cpu_premat_chained_input(KernelEntry *ke, u32 slot,
                                     u32 *in_buf_ids, CpuPrematSlot *st) {
   st->swapped = 0;
@@ -75,17 +38,13 @@ static int cpu_premat_chained_input(KernelEntry *ke, u32 slot,
   if (tid == 0 || tid >= TENS_NEXT) return 0;
   TenDesc const *td = &TENS[tid];
   if (td->nviews == 0) return 0;                 // simple view -- ladder handles it
-  // rangeify already folded this chain into the kernel INDEX (the LOAD
-  // composes the full chain over the raw buffer) -- no gather needed.
+  // rangeify folded the chain into the kernel INDEX over the raw buffer.
   if (ke->input_chain_composed != NULL && ke->input_chain_composed[slot]) return 0;
   if (dtype_is_packed(td->dtype)) return 0;      // packed nibbles: out of scope
   u32 esz = dtype_itemsize(td->dtype);
   if (esz == 0) return 0;
-  // Byte source: the DISPATCH-PROVIDED buffer id, not the TenDesc's live
-  // buf_id.  At eager fire they agree; at JIT replay in_buf_ids[slot] is the
-  // substituted buffer (input_replace), while td->buf_id still names the
-  // capture-time buffer, so reading it replays stale bytes.  td supplies only the
-  // stride/offset METADATA for the gather, which persists on the KernelEntry.
+  // The dispatch's buffer, not td->buf_id: at JIT replay in_buf_ids holds the
+  // substituted input while td still names the capture-time buffer.
   u32 src_buf = in_buf_ids[slot];
   if (src_buf == 0 || src_buf >= CPU_BUFS_NEXT
       || CPU_BUFS[src_buf].data == NULL) {
@@ -136,31 +95,21 @@ static void cpu_premat_restore(KernelEntry *ke, u32 slot, CpuPrematSlot *st) {
 }
 
 static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  // Recover kid by pointer arithmetic into KERNELS[].  Used for
-  // per-kid profiling (cg_profile_record).
   u32 kid = (u32)(ke - KERNELS);
   u64 t0  = cg_now_us();
-  // 1. BLAS first: matmul / matvec / dot patterns get cblas_*
-  //    (Accelerate on macOS) -- 10-100x faster than anything we can
-  //    JIT-compile or scalar-interpret near-term.  Pattern-matches
-  //    on the lifted UOp DAG; UOp DAG walker runs only on no-match.
+  // BLAS first: cblas runs a matmul-shaped kernel 10-100x faster than the
+  // JIT-compiled loops.
   int blas_kind = cpu_blas_dispatch(ke, in_buf_ids, out_buf_id);
   if (blas_kind) {
     cg_profile_record(kid, (KDispatchKind)blas_kind, cg_now_us() - t0);
     return 0;
   }
-  // 2. CPU JIT: clang-compiled fused kernel, keyed by the canonicalized
-  //    rendered source so a hot training-loop kernel crosses the warmup
-  //    gate and runs compiled (10-50x faster than the walker).  During
-  //    warmup (and for kernels the JIT declines) it returns 0 and the
-  //    walker below handles the fire -- so one-shot kernels still pay no
-  //    compile cost.  (Was AFTER the walker, which meant the walker
-  //    handled every steady-state kernel and the JIT never ran.)
+  // The C JIT runs a kernel 10-50x faster than the walker, which takes the
+  // kernels it declines.
   if (cpu_jit_dispatch(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_JIT, cg_now_us() - t0);
     return 0;
   }
-  // 3. UOp DAG walker (interpreter): warmup + JIT-declined kernels.
   if (cpu_uop_walk(ke, in_buf_ids, out_buf_id)) {
     cg_profile_record(kid, KDISPATCH_INTERPRETER, cg_now_us() - t0);
     return 0;
@@ -169,20 +118,11 @@ static int cpu_dispatch_kernel_inner(KernelEntry *ke, u32 *in_buf_ids, u32 out_b
   return -1;
 }
 
-// Public dispatch entry: pre-materialise any ShapeTracker-chained
-// input (nviews > 0) into a contiguous temp, run the dispatch ladder,
-// then restore + release.  Conv lowered the tinygrad-`_pool` way
-// reaches here -- xCol is a multi-view strided view over the layer
-// input -- so the gather collapses it to a dense matmul operand.  The
-// gather is O(numel * nviews), done once per fire, freed right after.
-//
 // Returns -1 when no rung ran.  The inner ladder only reports it: the
 // swapped input_tids must be restored on the cached KernelEntry first.
 fn int cpu_dispatch_kernel(KernelEntry *ke, u32 *in_buf_ids, u32 out_buf_id) {
-  // Raw injected kernel: skip the lift-driven ladder entirely (no
-  // cached_lift to classify) and bind the argument buffers directly.
-  // Arguments are contiguous leaves by the emit-time contract, so the
-  // chained-input pre-materialise below never applies.
+  // A raw injected kernel has no lift to classify, and its arguments are
+  // contiguous leaves.
   if (kernel_is_custom(ke)) {
     return cpu_custom_dispatch(ke, in_buf_ids, out_buf_id);
   }
