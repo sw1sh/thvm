@@ -39,32 +39,46 @@ now; `nn_linear` follows tinygrad (a 1-D weight multiplies).
 
 ## Flat ABI
 
-`py_nn_*` in py/csource/thvm_py.c export the ops with plain integers only, so
-any FFI can call them: a tensor is its term plus a descriptor
-`desc[2 + MAX_DIM] = [dtype, ndim, dims...]`, and the result's descriptor is
-written over the first input's.  An op over several tensors takes their terms
-as an array (0 for an absent bias or weight) and their descriptors back to
-back.  A failed op returns 0.
+Every op goes through one function, `nn_call` (src/nn/call.c), which checks its
+arguments at the boundary.  Hosts reach it through one export each:
 
-| Export | Arguments after the tensors |
-|---|---|
-| `py_nn_move(op, x, desc, n, arg)` | a `UOP_RESHAPE`/`PERMUTE`/`EXPAND` (n dims), `PAD`/`SHRINK` (2 * ndim) or `FLIP` (an axes bitmask) |
-| `py_nn_binop(op, ab, desc)` | |
-| `py_nn_elementwise(op, x, desc)` | op from `py_const_NN_*` |
-| `py_nn_reduce(kind, x, desc, n, axes, keepdim, mean)` | `REDUCE_SUM` / `REDUCE_MAX`, i32 axes |
-| `py_nn_where(cxy, desc)` | |
-| `py_nn_maximum(ab, desc, min)` | |
-| `py_nn_softmax(x, desc, axis, log)` | |
-| `py_nn_layernorm(x, desc, n, axes, eps)` | i32 axes, a double eps |
-| `py_nn_batchnorm(xwbmi, desc)` | x, weight, bias, mean, invstd |
-| `py_nn_dot(xw, desc)`, `py_nn_linear(xwb, desc)` | |
-| `py_nn_pool(x, desc, nk, ksd)`, `py_nn_max_pool2d(x, desc, nk, ksd)` | kernel[nk], stride[nk], dilation[nk] |
-| `py_nn_arange(start, stop, step, dtype, desc)` | doubles; desc receives the result's |
-| `py_nn_tri(x, desc, diagonal, lower)` | |
-| `py_nn_sparse_categorical_crossentropy(xy, desc, axis)` | logits, int labels |
-| `py_nn_scaled_dot_product_attention(qkvm, desc, causal)` | q, k, v, an additive mask (0: none) |
-| `py_nn_conv2d(xwb, desc, opts)` | i32 opts over the n = rank(w) - 2 spatial axes: groups, stride[n], dilation[n], (begin, end)[n] of padding, a negative side shrinking |
-| `py_nn_conv_transpose2d(xwb, desc, opts)` | the same, then output_padding[n]; w is (C_in, C_out / groups, *kernel) |
+```c
+// py/csource/thvm_py.c, libthvm_py (Python's ctypes, any FFI)
+uint64_t py_nn(uint32_t op, uint64_t const *terms, uint32_t *desc, uint32_t nt,
+               int32_t const *ints, uint32_t ni, double const *reals, uint32_t nr);
+uint32_t py_nn_op(char const *name);       // the NN_OP_* id of "conv2d", ...
+```
+
+A tensor crosses as its term plus a descriptor `desc[2 + MAX_DIM] = [dtype, ndim,
+dims...]`, the nt descriptors back to back (term 0: an absent bias or weight); the
+result's descriptor is written over the first.  A failed op returns 0.  THVMLink's
+`thvm_wl_nn(op, {terms}, {ints}, {reals})` and `thvm_wl_nn_op(name)` take the same
+arguments as LibraryLink integer and real vectors, reading each tensor's shape and
+dtype from its graph.
+
+| op | tensors | ints | reals |
+|---|---|---|---|
+| `move` | x | a `UOP_RESHAPE` / `PERMUTE` / `EXPAND` / `PAD` / `SHRINK` / `FLIP`, then its dims, perm, (begin, end) per axis or axes bitmask | |
+| `cast` | x | dtype | |
+| `full` | | dtype, dims... | value |
+| `binop` | a, b | a binary UOp | |
+| `elementwise` | x | `NN_EXP` .. `NN_SQUARE` (`py_const_NN_*`) | |
+| `reduce` | x | `REDUCE_SUM` or `REDUCE_MAX`, keepdim, mean, axes... | |
+| `where` | cond, x, y | | |
+| `maximum` | a, b | [1 for the minimum] | |
+| `softmax` | x | axis, [1 for log_softmax] | |
+| `layernorm` | x | axes... | eps |
+| `batchnorm` | x, weight, bias, mean, invstd | | |
+| `dot`, `linear` | x, w[, b] | | |
+| `arange` | | dtype | start, stop, step |
+| `tri` | x | diagonal, [1 for tril] | |
+| `sparse_categorical_crossentropy` | logits, int labels | axis | |
+| `scaled_dot_product_attention` | q, k, v, an additive mask | causal | |
+| `pool`, `max_pool2d` | x | kernel[nk], stride[nk], dilation[nk] | |
+| `conv2d` | x, w, b | groups, stride[n], dilation[n], (begin, end)[n] of padding, a negative side shrinking | |
+| `conv_transpose2d` | x, w (C_in, C_out / groups, *kernel), b | the same, then output_padding[n] | |
+
+n is rank(w) - 2, the spatial axes; a negative axis counts from the end.
 
 A host other than Python (an FFI such as WolframKernel's) needs three more
 pieces, all in the same library:

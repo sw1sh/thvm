@@ -567,6 +567,30 @@ typedef struct {
 #define NN_SQUARE    9
 #define NN_ELEMENTWISE_COUNT 10
 
+// nn_call's ops (src/nn/call.c): the one entry the py, WL and FFI hosts call.
+#define NN_OP_MOVE              0
+#define NN_OP_CAST              1
+#define NN_OP_FULL              2
+#define NN_OP_BINOP             3
+#define NN_OP_ELEMENTWISE       4
+#define NN_OP_REDUCE            5
+#define NN_OP_WHERE             6
+#define NN_OP_MAXIMUM           7
+#define NN_OP_SOFTMAX           8
+#define NN_OP_LAYERNORM         9
+#define NN_OP_BATCHNORM        10
+#define NN_OP_DOT              11
+#define NN_OP_LINEAR           12
+#define NN_OP_ARANGE           13
+#define NN_OP_TRI              14
+#define NN_OP_SPARSE_CE        15
+#define NN_OP_SDPA             16
+#define NN_OP_POOL             17
+#define NN_OP_MAX_POOL2D       18
+#define NN_OP_CONV2D           19
+#define NN_OP_CONV_TRANSPOSE2D 20
+#define NN_OP_COUNT            21
+
 typedef struct Backend Backend;
 
 // ShapeTracker = primary `view` (the public-facing shape) + an

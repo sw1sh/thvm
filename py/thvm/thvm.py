@@ -85,28 +85,9 @@ _uop_flip = _bind("py_uop_flip", c_uint64, c_uint64, c_uint32)
 _uop_broadcast2 = _bind("py_uop_broadcast2", c_int32, ctypes.POINTER(c_uint64),
                         c_uint32, ctypes.POINTER(c_uint32), c_uint32, ctypes.POINTER(c_uint32),
                         ctypes.POINTER(c_uint32))
-_nn_pool = _bind("py_nn_pool", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_uint32,
-                 ctypes.POINTER(c_uint32))
-_nn_elementwise = _bind("py_nn_elementwise", c_uint64, c_uint32, c_uint64,
-                        ctypes.POINTER(c_uint32))
-_nn_softmax = _bind("py_nn_softmax", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_int32,
-                    c_uint32)
-_nn_layernorm = _bind("py_nn_layernorm", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_uint32,
-                      ctypes.POINTER(c_int32), ctypes.c_double)
-# The ops over a term array and its descs: {x, w}, {cond, x, y}, ...
-_NN_MANY = {name: _bind(f"py_nn_{name}", c_uint64, ctypes.POINTER(c_uint64),
-                        ctypes.POINTER(c_uint32), *extra)
-            for name, extra in (("dot", ()), ("linear", ()), ("where", ()),
-                                ("batchnorm", ()), ("maximum", (c_uint32,)),
-                                ("sparse_categorical_crossentropy", (c_int32,)),
-                                ("scaled_dot_product_attention", (c_uint32,)),
-                                ("conv2d", (ctypes.POINTER(c_int32),)),
-                                ("conv_transpose2d", (ctypes.POINTER(c_int32),)))}
-_nn_arange = _bind("py_nn_arange", c_uint64, ctypes.c_double, ctypes.c_double, ctypes.c_double,
-                   c_uint32, ctypes.POINTER(c_uint32))
-_nn_tri = _bind("py_nn_tri", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_int32, c_uint32)
-_nn_max_pool2d = _bind("py_nn_max_pool2d", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_uint32,
-                       ctypes.POINTER(c_uint32))
+_nn = _bind("py_nn", c_uint64, c_uint32, ctypes.POINTER(c_uint64), ctypes.POINTER(c_uint32),
+            c_uint32, ctypes.POINTER(c_int32), c_uint32, ctypes.POINTER(ctypes.c_double), c_uint32)
+_nn_op = _bind("py_nn_op", c_uint32, c_char_p)
 _grad_with_target = _bind("py_grad_with_target", c_uint64,
                           c_uint64, c_uint64, c_uint64)
 _realize = _bind("py_realize", c_uint64, c_uint64)
@@ -362,84 +343,31 @@ class Thvm:
             return None
         return Term(ab[0]), Term(ab[1]), tuple(int(d) for d in out[:nd])
 
-    def _nn_desc(self, args):
-        """The src/nn descs (py_nn_* in thvm_py.c) of (term, dtype id, shape) triples; None is
-        no tensor."""
+    _NN_OPS: dict = {}
+
+    def nn(self, op: str, args, ints=(), reals=()):
+        """nn_call (src/nn/call.c): the op named `op` over (term, dtype id, shape) triples (None:
+        no tensor) with its integer and real arguments, as (term, dtype id, shape), or None when
+        the op fails."""
+        code = Thvm._NN_OPS.get(op)
+        if code is None:
+            code = Thvm._NN_OPS[op] = int(_nn_op(op.encode()))
         n = 2 + K.MAX_DIM
-        desc = (c_uint32 * (n * len(args)))()
+        desc = (c_uint32 * (n * max(len(args), 1)))()
+        terms = (c_uint64 * max(len(args), 1))()
         for i, a in enumerate(args):
             if a is not None:
+                terms[i] = int(a[0])
                 desc[i * n], desc[i * n + 1] = a[1], len(a[2])
                 for j, d in enumerate(a[2]):
                     desc[i * n + 2 + j] = int(d)
-        return desc
-
-    @staticmethod
-    def _nn_out(t: int, desc):
-        """A py_nn_* result as (term, dtype id, shape), or None when the op failed."""
+        ia = (c_int32 * max(len(ints), 1))(*[int(v) for v in ints])
+        ra = (ctypes.c_double * max(len(reals), 1))(*[float(v) for v in reals])
+        t = _nn(c_uint32(code), terms, desc, c_uint32(len(args)), ia, c_uint32(len(ints)), ra,
+                c_uint32(len(reals)))
         if t == 0:
             return None
         return Term(t), int(desc[0]), tuple(int(d) for d in desc[2:2 + desc[1]])
-
-    def nn_pool(self, x, k, s, d):
-        """nn_pool (src/nn/pool.c) of x = (term, dtype id, shape)."""
-        desc = self._nn_desc([x])
-        ksd = (c_uint32 * (3 * len(k)))(*[int(v) for v in (*k, *s, *d)])
-        return self._nn_out(_nn_pool(c_uint64(int(x[0])), desc, c_uint32(len(k)), ksd), desc)
-
-    nn_dot_fn       = _NN_MANY["dot"]
-    nn_linear_fn    = _NN_MANY["linear"]
-    nn_where_fn     = _NN_MANY["where"]
-    nn_batchnorm_fn = _NN_MANY["batchnorm"]
-    nn_maximum_fn   = _NN_MANY["maximum"]
-    nn_sparse_ce_fn = _NN_MANY["sparse_categorical_crossentropy"]
-    nn_sdpa_fn      = _NN_MANY["scaled_dot_product_attention"]
-    nn_conv2d_fn    = _NN_MANY["conv2d"]
-    nn_conv_transpose2d_fn = _NN_MANY["conv_transpose2d"]
-
-    @staticmethod
-    def i32s(vals):
-        """vals as a C int32 array (an op's integer options)."""
-        return (c_int32 * max(len(vals), 1))(*[int(v) for v in vals])
-
-    def nn_arange(self, start, stop, step, dtype: int):
-        desc = self._nn_desc([None])
-        return self._nn_out(_nn_arange(ctypes.c_double(start), ctypes.c_double(stop),
-                                       ctypes.c_double(step), c_uint32(dtype), desc), desc)
-
-    def nn_tri(self, x, diagonal: int, lower: bool):
-        desc = self._nn_desc([x])
-        return self._nn_out(_nn_tri(c_uint64(int(x[0])), desc, c_int32(diagonal),
-                                    c_uint32(1 if lower else 0)), desc)
-
-    def nn_max_pool2d(self, x, k, s, d):
-        desc = self._nn_desc([x])
-        ksd = (c_uint32 * (3 * len(k)))(*[int(v) for v in (*k, *s, *d)])
-        return self._nn_out(_nn_max_pool2d(c_uint64(int(x[0])), desc, c_uint32(len(k)), ksd),
-                            desc)
-
-    def nn_many(self, fn, args, *extra):
-        """One of the nn_*_fn exports over (term, dtype id, shape) triples (None: no tensor),
-        passed as a term array and their descs, then `extra`."""
-        desc = self._nn_desc(args)
-        terms = (c_uint64 * len(args))(*[0 if a is None else int(a[0]) for a in args])
-        return self._nn_out(fn(terms, desc, *extra), desc)
-
-    def nn_elementwise(self, op: int, x):
-        """nn_elementwise (src/nn/elementwise.c): op is a K.NN_* id."""
-        desc = self._nn_desc([x])
-        return self._nn_out(_nn_elementwise(c_uint32(op), c_uint64(int(x[0])), desc), desc)
-
-    def nn_softmax(self, x, axis: int, log: bool):
-        desc = self._nn_desc([x])
-        return self._nn_out(_nn_softmax(c_uint64(int(x[0])), desc, c_int32(axis),
-                                        c_uint32(1 if log else 0)), desc)
-
-    def nn_layernorm(self, x, axes, eps: float):
-        desc = self._nn_desc([x])
-        ax = (c_int32 * max(len(axes), 1))(*[int(a) for a in axes])
-        return self._nn_out(_nn_layernorm(c_uint64(int(x[0])), desc, c_uint32(len(axes)), ax,
-                                          ctypes.c_double(eps)), desc)
 
     def permute(self, src: Term, perm) -> Term:
         return self._move(_uop_permute, src, perm)

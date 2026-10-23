@@ -275,5 +275,24 @@ int main(void) {
     check(nn_max_pool2d(leaf(3, d144, img), 2, k3, one, one), p3, 4, 0, "max_pool2d unfold");
   }
 
+  TEST_BEGIN("nn/call");
+  {
+    Tensor x = leaf(2, d23, xs);
+    i32 const sm[2] = {-1, 0}, pad_short[3] = {UOP_PAD, 1, 1}, perm_dup[3] = {UOP_PERMUTE, 0, 0};
+    i32 const bad_axis[2] = {2, 0}, conv_short[3] = {1, 1, 1};
+    Tensor r = nn_call(NN_OP_SOFTMAX, &x, 1, sm, 2, NULL, 0);
+    CHECK(r.t != 0);
+    CHECK_EQ(r.shape.ndim, 2);
+    CHECK_EQ(nn_call(NN_OP_COUNT, &x, 1, sm, 2, NULL, 0).t, 0);
+    CHECK_EQ(nn_call(NN_OP_MOVE, &x, 1, pad_short, 3, NULL, 0).t, 0);
+    CHECK_EQ(nn_call(NN_OP_MOVE, &x, 1, perm_dup, 3, NULL, 0).t, 0);
+    CHECK_EQ(nn_call(NN_OP_SOFTMAX, &x, 1, bad_axis, 2, NULL, 0).t, 0);
+    CHECK_EQ(nn_call(NN_OP_DOT, &x, 1, NULL, 0, NULL, 0).t, 0);
+    Tensor xw[3] = {leaf(4, (u32[4]){1, 1, 3, 3}, xs), leaf(4, (u32[4]){1, 1, 2, 2}, xs), {0}};
+    CHECK_EQ(nn_call(NN_OP_CONV2D, xw, 3, conv_short, 3, NULL, 0).t, 0);
+    CHECK_EQ(nn_op_id("conv_transpose2d"), NN_OP_CONV_TRANSPOSE2D);
+    CHECK_EQ(nn_op_id("nope"), NN_OP_COUNT);
+  }
+
   TEST_REPORT();
 }

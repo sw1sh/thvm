@@ -2257,6 +2257,55 @@ EXTERN_C DLLEXPORT int thvm_wl_uop_flip(WolframLibraryData libData, mint argc,
   return LIBRARY_NO_ERROR;
 }
 
+// The src/nn ops (nn_call): {op, {terms}, {ints}, {reals}} -> the result term.
+// A term 0 is an absent bias or weight; each tensor's shape and dtype come from
+// its graph.  A failed op is a LibraryFunctionError.
+EXTERN_C DLLEXPORT int thvm_wl_nn(WolframLibraryData libData, mint argc, MArgument *args,
+                                  MArgument res) {
+  (void)argc;
+  MTensor tt = MArgument_getMTensor(args[1]), it = MArgument_getMTensor(args[2]);
+  MTensor rt = MArgument_getMTensor(args[3]);
+  mint nt = libData->MTensor_getFlattenedLength(tt), ni = libData->MTensor_getFlattenedLength(it);
+  mint nr = libData->MTensor_getFlattenedLength(rt);
+  if (nt > 8 || ni > 64 || nr > 8) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  mint const *traw = libData->MTensor_getIntegerData(tt), *iraw = libData->MTensor_getIntegerData(it);
+  mreal const *rraw = libData->MTensor_getRealData(rt);
+  Tensor t[8];
+  i32 ia[64];
+  double ra[8];
+  for (mint i = 0; i < nt; i++) {
+    t[i] = (Tensor){(Term)traw[i], DT_FP32, {0, {0}}};
+    if (t[i].t != 0 && (!term_shape_in(t[i].t, 0, &t[i].shape)
+                        || !term_dtype_in(t[i].t, 0, &t[i].dtype))) {
+      return LIBRARY_FUNCTION_ERROR;
+    }
+  }
+  for (mint i = 0; i < ni; i++) {
+    ia[i] = (i32)iraw[i];
+  }
+  for (mint i = 0; i < nr; i++) {
+    ra[i] = (double)rraw[i];
+  }
+  Tensor r = nn_call((u32)MArgument_getInteger(args[0]), t, (u32)nt, ia, (u32)ni, ra, (u32)nr);
+  if (r.t == 0) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  MArgument_setInteger(res, (mint)r.t);
+  return LIBRARY_NO_ERROR;
+}
+
+// An NN_OP_* id by its name ("conv2d", ...).
+EXTERN_C DLLEXPORT int thvm_wl_nn_op(WolframLibraryData libData, mint argc, MArgument *args,
+                                     MArgument res) {
+  (void)argc;
+  char *name = MArgument_getUTF8String(args[0]);
+  MArgument_setInteger(res, (mint)nn_op_id(name));
+  libData->UTF8String_disown(name);
+  return LIBRARY_NO_ERROR;
+}
+
 // Builds the dup-like GRAD pair: heap cell holds [y, gy]; the returned
 // Term is the BWD projection (TAG_DP1 + DUP_GRAD_FLAG).  WL pairs it
 // with a FWD projection (TAG_DP0) at the same cell loc via packTerm.

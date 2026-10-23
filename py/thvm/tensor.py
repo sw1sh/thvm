@@ -523,7 +523,7 @@ class Tensor(metaclass=_TensorMeta):
     def __matmul__(self, other: "Tensor") -> "Tensor":
         """Matmul as RESHAPE, EXPAND, MUL and REDUCE, which thvm fuses; N-D operands take
         tinygrad's dot (src/nn/dot.c)."""
-        r = _TH.nn_many(_TH.nn_dot_fn, [self._nn(), other._nn()])
+        r = _TH.nn("dot", [self._nn(), other._nn()])
         if r is None:
             err = ValueError if self.ndim == 2 and other.ndim == 2 else RuntimeError
             raise err(f"cannot dot {self._shape} and {other._shape}")
@@ -543,7 +543,7 @@ class Tensor(metaclass=_TensorMeta):
     def sqrt(self) -> "Tensor":  return self._unary(K.SQRT)
     def _elementwise(self, op: int) -> "Tensor":
         """A composite elementwise op of src/nn/elementwise.c."""
-        return Tensor._from_nn(_TH.nn_elementwise(op, self._nn()), "elementwise")
+        return Tensor._from_nn(_TH.nn("elementwise", [self._nn()], [op]), "elementwise")
 
     def rsqrt(self) -> "Tensor":   return self._elementwise(K.NN_RSQRT)
     def exp(self) -> "Tensor":     return self._elementwise(K.NN_EXP)
@@ -554,21 +554,21 @@ class Tensor(metaclass=_TensorMeta):
     def tanh(self) -> "Tensor":    return self._elementwise(K.NN_TANH)
 
     def softmax(self, axis: int = -1) -> "Tensor":
-        return Tensor._from_nn(_TH.nn_softmax(self._nn(), axis, False), "softmax")
+        return Tensor._from_nn(_TH.nn("softmax", [self._nn()], [axis, 0]), "softmax")
 
     def softmin(self, axis: int = -1) -> "Tensor":
         # tinygrad mixin/op.py:709-729.
         return (-self).softmax(axis=axis)
 
     def log_softmax(self, axis: int = -1) -> "Tensor":
-        return Tensor._from_nn(_TH.nn_softmax(self._nn(), axis, True), "log_softmax")
+        return Tensor._from_nn(_TH.nn("softmax", [self._nn()], [axis, 1]), "log_softmax")
 
     def sparse_categorical_crossentropy(self, Y: "Tensor",
                                         axis: int = -1) -> "Tensor":
         """Mean NLL of log_softmax(self) at the int labels Y (src/nn/
         sparse_categorical_crossentropy.c), the one-hot an in-graph compare, so a TinyJit replay
         reads each step's labels."""
-        r = _TH.nn_many(_TH.nn_sparse_ce_fn, [self._nn(), Y._nn()], axis)
+        r = _TH.nn("sparse_categorical_crossentropy", [self._nn(), Y._nn()], [axis])
         return Tensor._from_nn(r, f"sparse_categorical_crossentropy {self._shape} {Y._shape}")
 
     def argmax(self, axis=None, keepdim: bool = False) -> "Tensor":
@@ -600,11 +600,11 @@ class Tensor(metaclass=_TensorMeta):
         return self.relu() + (neg_relu_neg.exp() - 1.0) * alpha
 
     def maximum(self, other) -> "Tensor":
-        r = _TH.nn_many(_TH.nn_maximum_fn, [self._nn(), _wrap_other(self, other)._nn()], 0)
+        r = _TH.nn("maximum", [self._nn(), _wrap_other(self, other)._nn()], [0])
         return Tensor._from_nn(r, f"maximum {self._shape}")
 
     def minimum(self, other) -> "Tensor":
-        r = _TH.nn_many(_TH.nn_maximum_fn, [self._nn(), _wrap_other(self, other)._nn()], 1)
+        r = _TH.nn("maximum", [self._nn(), _wrap_other(self, other)._nn()], [1])
         return Tensor._from_nn(r, f"minimum {self._shape}")
 
     def square(self) -> "Tensor":
@@ -623,7 +623,7 @@ class Tensor(metaclass=_TensorMeta):
         unselected value never leaks in."""
         ref = x if isinstance(x, Tensor) else y if isinstance(y, Tensor) else self
         args = [self._nn(), _wrap_other(ref, x)._nn(), _wrap_other(ref, y)._nn()]
-        return Tensor._from_nn(_TH.nn_many(_TH.nn_where_fn, args), "where")
+        return Tensor._from_nn(_TH.nn("where", args), "where")
 
     def newton_schulz(self, steps: int, params, eps: float = 1.0e-7) -> "Tensor":
         """Newton-Schulz for an odd polynomial: each step G <- sum_i params[i] * (G G^T)^i G, from
@@ -809,7 +809,7 @@ class Tensor(metaclass=_TensorMeta):
         s_ = (stride,) * len(k_) if isinstance(stride, int) else tuple(stride)
         d_ = (dilation,) * len(k_) if isinstance(dilation, int) else tuple(dilation)
         assert len(k_) == len(s_) == len(d_)
-        return Tensor._from_nn(_TH.nn_pool(self._nn(), k_, s_, d_), "_pool")
+        return Tensor._from_nn(_TH.nn("pool", [self._nn()], [*k_, *s_, *d_]), "_pool")
 
     def pad(self, begin_end) -> "Tensor":
         """Zero-pad by tinygrad's per-axis (before, after) pairs or a flat [b0, e0, ...]; a negative
@@ -1146,7 +1146,7 @@ class Tensor(metaclass=_TensorMeta):
                ) -> "Tensor":
         """x * weight for a 1-D weight, else x @ weight, then + bias (src/nn/linear.c)."""
         args = [self._nn(), weight._nn(), None if bias is None else bias._nn()]
-        r = _TH.nn_many(_TH.nn_linear_fn, args)
+        r = _TH.nn("linear", args)
         if r is None:
             raise ValueError(f"cannot linear {self._shape} and {weight._shape}")
         return Tensor._from_nn(r, "linear")
@@ -1156,11 +1156,11 @@ class Tensor(metaclass=_TensorMeta):
         """Apply pre-computed batchnorm given (mean, invstd=1/sqrt(var+eps))."""
         args = [self._nn(), None if weight is None else weight._nn(),
                 None if bias is None else bias._nn(), mean._nn(), invstd._nn()]
-        return Tensor._from_nn(_TH.nn_many(_TH.nn_batchnorm_fn, args), "batchnorm")
+        return Tensor._from_nn(_TH.nn("batchnorm", args), "batchnorm")
 
     def layernorm(self, axis=-1, eps: float = 1e-5) -> "Tensor":
         axes = [axis] if isinstance(axis, int) else list(axis)
-        return Tensor._from_nn(_TH.nn_layernorm(self._nn(), axes, eps), "layernorm")
+        return Tensor._from_nn(_TH.nn("layernorm", [self._nn()], axes, [eps]), "layernorm")
 
     def max_pool2d(self, kernel_size=(2, 2), stride=None, dilation=1,
                    padding=0, ceil_mode=False) -> "Tensor":
@@ -1187,7 +1187,7 @@ class Tensor(metaclass=_TensorMeta):
                 if s * (o - 1) + (d * (k - 1) + 1) - i - max(s * (o - 1) - (i - 1), 0) > 0:
                     raise NotImplementedError(
                         "max_pool2d ceil_mode past the input needs a -inf pad (not yet wired)")
-        return Tensor._from_nn(_TH.nn_max_pool2d(self._nn(), k_, s_, d_), "max_pool2d")
+        return Tensor._from_nn(_TH.nn("max_pool2d", [self._nn()], [*k_, *s_, *d_]), "max_pool2d")
 
     def conv2d(self, weight: "Tensor",
                bias: "Tensor | None" = None,
@@ -1196,7 +1196,7 @@ class Tensor(metaclass=_TensorMeta):
         _pool unfold, one broadcast MUL and a sum over (cin, *kernel)."""
         opts = _conv_opts(weight.ndim - 2, groups, stride, dilation, padding)
         args = [self._nn(), weight._nn(), None if bias is None else bias._nn()]
-        r = _TH.nn_many(_TH.nn_conv2d_fn, args, _TH.i32s(opts))
+        r = _TH.nn("conv2d", args, opts)
         return Tensor._from_nn(r, f"conv2d {self._shape} * {weight._shape} groups={groups}")
 
     def conv_transpose2d(self, weight: "Tensor", bias: "Tensor | None" = None, groups: int = 1,
@@ -1205,7 +1205,7 @@ class Tensor(metaclass=_TensorMeta):
         *kernel)."""
         opts = _conv_opts(weight.ndim - 2, groups, stride, dilation, padding, output_padding)
         args = [self._nn(), weight._nn(), None if bias is None else bias._nn()]
-        r = _TH.nn_many(_TH.nn_conv_transpose2d_fn, args, _TH.i32s(opts))
+        r = _TH.nn("conv_transpose2d", args, opts)
         return Tensor._from_nn(r, f"conv_transpose2d {self._shape} * {weight._shape}")
 
     # ---- transformer / GPT2 ops ---------------------------------------
@@ -1225,7 +1225,7 @@ class Tensor(metaclass=_TensorMeta):
             dtype = (dtypes.default_float
                      if any(isinstance(x, float) for x in (start, stop, step))
                      else dtypes.default_int)
-        return Tensor._from_nn(_TH.nn_arange(start, stop, step, dtype.thvm_id), "arange")
+        return Tensor._from_nn(_TH.nn("arange", [], [dtype.thvm_id], [start, stop, step]), "arange")
 
     def cast(self, dtype: DType) -> "Tensor":
         """Cast to `dtype` (thvm UOP_CAST)."""
@@ -1263,11 +1263,11 @@ class Tensor(metaclass=_TensorMeta):
 
     def triu(self, diagonal: int = 0) -> "Tensor":
         """The upper-triangular part, other elements 0 (src/nn/tri.c)."""
-        return Tensor._from_nn(_TH.nn_tri(self._nn(), diagonal, False), "triu")
+        return Tensor._from_nn(_TH.nn("tri", [self._nn()], [diagonal, 0]), "triu")
 
     def tril(self, diagonal: int = 0) -> "Tensor":
         """The lower-triangular part, other elements 0 (src/nn/tri.c)."""
-        return Tensor._from_nn(_TH.nn_tri(self._nn(), diagonal, True), "tril")
+        return Tensor._from_nn(_TH.nn("tri", [self._nn()], [diagonal, 1]), "tril")
 
     def embedding(self, idx: "Tensor") -> "Tensor":
         """Rows of self (vocab, embed) at the int ids `idx`, a zero row outside [0, vocab) (tinygrad
@@ -1295,7 +1295,7 @@ class Tensor(metaclass=_TensorMeta):
         if is_causal and attn_mask is not None:
             raise RuntimeError("cannot set attn_mask when is_causal=True")
         args = [q._nn(), key._nn(), value._nn(), None if attn_mask is None else attn_mask._nn()]
-        r = _TH.nn_many(_TH.nn_sdpa_fn, args, 1 if is_causal else 0)
+        r = _TH.nn("scaled_dot_product_attention", args, [1 if is_causal else 0])
         return Tensor._from_nn(r, "scaled_dot_product_attention")
 
     @staticmethod

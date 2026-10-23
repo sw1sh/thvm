@@ -189,255 +189,36 @@ EXPORT uint64_t py_uop_flip(uint64_t src, uint32_t axes_bitmask) {
   return uop_flip(src, axes_bitmask);
 }
 
-// The src/nn ops.  A Tensor crosses as its term plus desc[2 + MAX_DIM] =
-// [dtype, ndim, dims...]; the result term comes back (0 when the op fails) with
-// its desc written over the first one.
+// The src/nn ops (nn_call, src/nn/call.c).  A tensor crosses as its term plus
+// desc[2 + MAX_DIM] = [dtype, ndim, dims...] (term 0: an absent bias or weight);
+// the result term comes back (0 when the op fails) with its desc written over
+// desc[0..2 + MAX_DIM).
 #define PY_NN_DESC (2 + MAX_DIM)
 
-static int py_nn_in(uint64_t t, uint32_t const *desc, Tensor *out) {
-  if (desc[1] > MAX_DIM) {
+EXPORT uint64_t py_nn(uint32_t op, uint64_t const *terms, uint32_t *desc, uint32_t nt,
+                      int32_t const *ia, uint32_t ni, double const *ra, uint32_t nr) {
+  Tensor t[8];
+  if (nt > 8) {
     return 0;
   }
-  *out = (Tensor){t, desc[0], {desc[1], {0}}};
-  memcpy(out->shape.dims, desc + 2, desc[1] * sizeof desc[0]);
-  return 1;
-}
-
-static uint64_t py_nn_out(Tensor r, uint32_t *desc) {
+  for (uint32_t i = 0; i < nt; i++) {
+    uint32_t const *d = desc + i * PY_NN_DESC;
+    if (d[1] > MAX_DIM) {
+      return 0;
+    }
+    t[i] = (Tensor){terms[i], d[0], {d[1], {0}}};
+    memcpy(t[i].shape.dims, d + 2, d[1] * sizeof d[0]);
+  }
+  Tensor r = nn_call(op, t, nt, ia, ni, ra, nr);
   desc[0] = r.dtype;
   desc[1] = r.shape.ndim;
   memcpy(desc + 2, r.shape.dims, r.shape.ndim * sizeof desc[0]);
   return r.t;
 }
 
-// The n tensors ts[] (0: none) with their n descs.
-static int py_nn_ins(uint64_t const *ts, uint32_t const *desc, uint32_t n, Tensor *out) {
-  for (uint32_t i = 0; i < n; i++) {
-    if (!py_nn_in(ts[i], desc + i * PY_NN_DESC, &out[i])) {
-      return 0;
-    }
-  }
-  return 1;
-}
-
-// n axes as distinct in-range u32s, a negative one counted from the end.
-static int py_nn_axes(Tensor const *x, uint32_t n, int32_t const *axes, u32 *out) {
-  u32 seen = 0;
-  for (uint32_t i = 0; i < n; i++) {
-    i32 a = axes[i] < 0 ? axes[i] + (i32)x->shape.ndim : axes[i];
-    if (a < 0 || a >= (i32)x->shape.ndim || (seen >> a & 1)) {
-      return 0;
-    }
-    seen |= 1u << a;
-    out[i] = (u32)a;
-  }
-  return 1;
-}
-
-// ksd = kernel[nk], stride[nk], dilation[nk].
-EXPORT uint64_t py_nn_pool(uint64_t x, uint32_t *desc, uint32_t nk, uint32_t const *ksd) {
-  Tensor xt;
-  if (!py_nn_in(x, desc, &xt)) {
-    return 0;
-  }
-  return py_nn_out(nn_pool(xt, nk, ksd, ksd + nk, ksd + 2 * nk), desc);
-}
-
-// The n = rank(w) - 2 spatial axes' options of a conv: opts = groups, stride[n],
-// dilation[n], then (begin, end)[n] of padding (negative shrinks) and, for a
-// transposed conv, output_padding[n].
-static int py_nn_conv_opts(Tensor const *w, int32_t const *opts, int transposed, u32 *groups,
-                           u32 *stride, u32 *dilation, i32 *pad, u32 *out_pad) {
-  if (w->shape.ndim < 3) {
-    return 0;
-  }
-  u32 n = w->shape.ndim - 2;
-  *groups = (u32)opts[0];
-  for (u32 j = 0; j < n; j++) {
-    stride[j]   = (u32)opts[1 + j];
-    dilation[j] = (u32)opts[1 + n + j];
-    pad[2 * j]     = opts[1 + 2 * n + 2 * j];
-    pad[2 * j + 1] = opts[2 + 2 * n + 2 * j];
-    if (transposed) {
-      out_pad[j] = (u32)opts[1 + 4 * n + j];
-    }
-  }
-  return 1;
-}
-
-// xwb = {x, w, b} (b == 0: no bias) with their three descs.
-EXPORT uint64_t py_nn_conv2d(uint64_t const *xwb, uint32_t *desc, int32_t const *opts) {
-  Tensor t[3];
-  u32 groups, stride[MAX_DIM], dilation[MAX_DIM], out_pad[MAX_DIM];
-  i32 pad[2 * MAX_DIM];
-  if (!py_nn_ins(xwb, desc, 3, t)
-      || !py_nn_conv_opts(&t[1], opts, 0, &groups, stride, dilation, pad, out_pad)) {
-    return 0;
-  }
-  return py_nn_out(nn_conv2d(t[0], t[1], t[2], groups, stride, dilation, pad), desc);
-}
-
-EXPORT uint64_t py_nn_conv_transpose2d(uint64_t const *xwb, uint32_t *desc,
-                                       int32_t const *opts) {
-  Tensor t[3];
-  u32 groups, stride[MAX_DIM], dilation[MAX_DIM], out_pad[MAX_DIM];
-  i32 pad[2 * MAX_DIM];
-  if (!py_nn_ins(xwb, desc, 3, t)
-      || !py_nn_conv_opts(&t[1], opts, 1, &groups, stride, dilation, pad, out_pad)) {
-    return 0;
-  }
-  return py_nn_out(nn_conv_transpose2d(t[0], t[1], t[2], groups, stride, dilation, pad,
-                                       out_pad), desc);
-}
-
-// op: a UOP_RESHAPE / PERMUTE / EXPAND (n entries) or PAD / SHRINK (2 * ndim).
-EXPORT uint64_t py_nn_move(uint32_t op, uint64_t x, uint32_t *desc, uint32_t n,
-                           uint32_t const *arg) {
-  Tensor xt;
-  if (!py_nn_in(x, desc, &xt) || n > 2 * MAX_DIM) {
-    return 0;
-  }
-  return py_nn_out(nn_move(op, xt, n, arg), desc);
-}
-
-// A binary UOp on a broadcast, promoted pair ab[2].
-EXPORT uint64_t py_nn_binop(uint32_t op, uint64_t const *ab, uint32_t *desc) {
-  Tensor t[2];
-  if (!py_nn_ins(ab, desc, 2, t)) {
-    return 0;
-  }
-  return py_nn_out(nn_binop(op, t[0], t[1]), desc);
-}
-
-// op: NN_EXP .. NN_SQUARE (py_const_NN_*).
-EXPORT uint64_t py_nn_elementwise(uint32_t op, uint64_t x, uint32_t *desc) {
-  Tensor xt;
-  if (!py_nn_in(x, desc, &xt)) {
-    return 0;
-  }
-  return py_nn_out(nn_elementwise(op, xt), desc);
-}
-
-// kind: REDUCE_SUM or REDUCE_MAX, or with `mean` the mean.
-EXPORT uint64_t py_nn_reduce(uint32_t kind, uint64_t x, uint32_t *desc, uint32_t n,
-                             int32_t const *axes, uint32_t keepdim, uint32_t mean) {
-  Tensor xt;
-  u32 ax[MAX_DIM];
-  if (!py_nn_in(x, desc, &xt) || n > MAX_DIM || !py_nn_axes(&xt, n, axes, ax)) {
-    return 0;
-  }
-  Tensor r = mean ? nn_mean(xt, n, ax, (int)keepdim) : nn_reduce(kind, xt, n, ax, (int)keepdim);
-  return py_nn_out(r, desc);
-}
-
-// cxy = {cond, x, y}.
-EXPORT uint64_t py_nn_where(uint64_t const *cxy, uint32_t *desc) {
-  Tensor t[3];
-  if (!py_nn_ins(cxy, desc, 3, t)) {
-    return 0;
-  }
-  return py_nn_out(nn_where(t[0], t[1], t[2]), desc);
-}
-
-// ab = {a, b}; minimum when `min`.
-EXPORT uint64_t py_nn_maximum(uint64_t const *ab, uint32_t *desc, uint32_t min) {
-  Tensor t[2];
-  if (!py_nn_ins(ab, desc, 2, t)) {
-    return 0;
-  }
-  return py_nn_out(min ? nn_minimum(t[0], t[1]) : nn_maximum(t[0], t[1]), desc);
-}
-
-// log_softmax when `log`.
-EXPORT uint64_t py_nn_softmax(uint64_t x, uint32_t *desc, int32_t axis, uint32_t log) {
-  Tensor xt;
-  u32 ax;
-  if (!py_nn_in(x, desc, &xt) || !py_nn_axes(&xt, 1, &axis, &ax)) {
-    return 0;
-  }
-  return py_nn_out(nn_softmax(xt, (i32)ax, (int)log), desc);
-}
-
-EXPORT uint64_t py_nn_layernorm(uint64_t x, uint32_t *desc, uint32_t n, int32_t const *axes,
-                                double eps) {
-  Tensor xt;
-  u32 ax[MAX_DIM];
-  if (!py_nn_in(x, desc, &xt) || n > MAX_DIM || !py_nn_axes(&xt, n, axes, ax)) {
-    return 0;
-  }
-  return py_nn_out(nn_layernorm(xt, n, ax, eps), desc);
-}
-
-// xwbmi = {x, weight, bias, mean, invstd}, weight and bias 0 for none.
-EXPORT uint64_t py_nn_batchnorm(uint64_t const *xwbmi, uint32_t *desc) {
-  Tensor t[5];
-  if (!py_nn_ins(xwbmi, desc, 5, t)) {
-    return 0;
-  }
-  return py_nn_out(nn_batchnorm(t[0], t[1], t[2], t[3], t[4]), desc);
-}
-
-// xw = {x, w}.
-EXPORT uint64_t py_nn_dot(uint64_t const *xw, uint32_t *desc) {
-  Tensor t[2];
-  if (!py_nn_ins(xw, desc, 2, t)) {
-    return 0;
-  }
-  return py_nn_out(nn_dot(t[0], t[1]), desc);
-}
-
-// [start, stop) by step as a host-written leaf; desc receives its descriptor.
-EXPORT uint64_t py_nn_arange(double start, double stop, double step, uint32_t dtype,
-                             uint32_t *desc) {
-  return py_nn_out(nn_arange(start, stop, step, dtype), desc);
-}
-
-// triu, or tril when `lower`.
-EXPORT uint64_t py_nn_tri(uint64_t x, uint32_t *desc, int32_t diagonal, uint32_t lower) {
-  Tensor xt;
-  if (!py_nn_in(x, desc, &xt)) {
-    return 0;
-  }
-  return py_nn_out(nn_tri(xt, diagonal, (int)lower), desc);
-}
-
-// xy = {logits, int labels}.
-EXPORT uint64_t py_nn_sparse_categorical_crossentropy(uint64_t const *xy, uint32_t *desc,
-                                                      int32_t axis) {
-  Tensor t[2];
-  u32 ax;
-  if (!py_nn_ins(xy, desc, 2, t) || !py_nn_axes(&t[0], 1, &axis, &ax)) {
-    return 0;
-  }
-  return py_nn_out(nn_sparse_categorical_crossentropy(t[0], t[1], (i32)ax), desc);
-}
-
-// qkvm = {q, k, v, mask (0: none)}.
-EXPORT uint64_t py_nn_scaled_dot_product_attention(uint64_t const *qkvm, uint32_t *desc,
-                                                   uint32_t causal) {
-  Tensor t[4];
-  if (!py_nn_ins(qkvm, desc, 4, t)) {
-    return 0;
-  }
-  return py_nn_out(nn_scaled_dot_product_attention(t[0], t[1], t[2], t[3], (int)causal), desc);
-}
-
-// ksd = kernel[nk], stride[nk], dilation[nk].
-EXPORT uint64_t py_nn_max_pool2d(uint64_t x, uint32_t *desc, uint32_t nk, uint32_t const *ksd) {
-  Tensor xt;
-  if (!py_nn_in(x, desc, &xt)) {
-    return 0;
-  }
-  return py_nn_out(nn_max_pool2d(xt, nk, ksd, ksd + nk, ksd + 2 * nk), desc);
-}
-
-// xwb = {x, w, b}, b 0 for none.
-EXPORT uint64_t py_nn_linear(uint64_t const *xwb, uint32_t *desc) {
-  Tensor t[3];
-  if (!py_nn_ins(xwb, desc, 3, t)) {
-    return 0;
-  }
-  return py_nn_out(nn_linear(t[0], t[1], t[2]), desc);
+// An NN_OP_* id by its name ("conv2d", ...); NN_OP_COUNT for none.
+EXPORT uint32_t py_nn_op(char const *name) {
+  return nn_op_id(name);
 }
 
 // The chain-rule (DP1) projection of a grad cell [y, gy, target]
