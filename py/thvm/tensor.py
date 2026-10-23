@@ -505,44 +505,12 @@ class Tensor(metaclass=_TensorMeta):
 
     def __matmul__(self, other: "Tensor") -> "Tensor":
         """Matmul as RESHAPE, EXPAND, MUL and REDUCE, which thvm fuses; N-D operands take
-        tinygrad's dot (mixin/op.py:387-392)."""
-        if self.ndim == 2 and other.ndim == 2:
-            M, K_in = self._shape
-            K2, N = other._shape
-            if K_in != K2:
-                raise ValueError(
-                    f"matmul shape mismatch: {self._shape} @ {other._shape}")
-            a = self.reshape(M, K_in, 1).expand(M, K_in, N)
-            b = other.reshape(1, K_in, N).expand(M, K_in, N)
-            return (a * b).sum(axis=1)
-        return self._dot_nd(other)
-
-    def _dot_nd(self, w: "Tensor") -> "Tensor":
-        """N-D dot, tinygrad's rule (mixin/op.py:387-392)."""
-        x = self
-        dx, dw = x.ndim, w.ndim
-        if not (dx > 0 and dw > 0):
-            raise RuntimeError(
-                f"both tensors need to be at least 1D, got {dx}D and {dw}D")
-        axis_w = -min(dw, 2)
-        if x._shape[-1] != w._shape[axis_w]:
-            raise RuntimeError(f"cannot dot {x._shape} and {w._shape}")
-
-        pad = (1,) * min(dx - 1, dw - 1, 1)
-        xs = (*x._shape[:-1], *pad, x._shape[-1])
-        x = x.reshape(*xs)
-        ws = (*w._shape[:-2], *pad, *w._shape[axis_w:])
-        w = w.reshape(*ws).transpose(-1, axis_w)
-
-        # After the transpose the contraction axis is last in both x and w.
-        r = _TH.broadcast2(x.term, x._shape, w.term, w._shape)
+        tinygrad's dot (src/nn/dot.c)."""
+        r = _TH.nn_many(_TH.nn_dot_fn, [self._nn(), other._nn()])
         if r is None:
-            raise RuntimeError(f"cannot dot {self._shape} and {w._shape}: "
-                               f"non-broadcastable {x._shape} vs {w._shape}")
-        xt, wt, bshape = r
-        x = Tensor._from_term(xt, x._dtype, bshape)
-        w = Tensor._from_term(wt, w._dtype, bshape)
-        return (x * w).sum(axis=-1)
+            err = ValueError if self.ndim == 2 and other.ndim == 2 else RuntimeError
+            raise err(f"cannot dot {self._shape} and {other._shape}")
+        return Tensor._from_nn(r, "dot")
 
     # ---- elementwise unary --------------------------------------------
 
@@ -556,33 +524,27 @@ class Tensor(metaclass=_TensorMeta):
     def exp2(self) -> "Tensor":  return self._unary(K.EXP2)
     def log2(self) -> "Tensor":  return self._unary(K.LOG2)
     def sqrt(self) -> "Tensor":  return self._unary(K.SQRT)
-    def rsqrt(self) -> "Tensor": return self.sqrt().recip()
+    def _elementwise(self, op: int) -> "Tensor":
+        """A composite elementwise op of src/nn/elementwise.c."""
+        return Tensor._from_nn(_TH.nn_elementwise(op, self._nn()), "elementwise")
 
-    def exp(self) -> "Tensor":
-        return (self * 1.4426950408889634).exp2()  # exp2(x*log2(e))
-    def log(self) -> "Tensor":
-        return self.log2() * 0.6931471805599453  # ln(x) = log2(x)*ln(2)
+    def rsqrt(self) -> "Tensor":   return self._elementwise(K.NN_RSQRT)
+    def exp(self) -> "Tensor":     return self._elementwise(K.NN_EXP)
+    def log(self) -> "Tensor":     return self._elementwise(K.NN_LOG)
     def abs(self) -> "Tensor":
         return (self * self).sqrt()
-    def sigmoid(self) -> "Tensor":
-        return (1.0 + self.neg().exp()).reciprocal()
-    def tanh(self) -> "Tensor":
-        return 2.0 * (2.0 * self).sigmoid() - 1.0
+    def sigmoid(self) -> "Tensor": return self._elementwise(K.NN_SIGMOID)
+    def tanh(self) -> "Tensor":    return self._elementwise(K.NN_TANH)
+
     def softmax(self, axis: int = -1) -> "Tensor":
-        m = self.max(axis=axis, keepdim=True)
-        e = (self - m).exp()
-        return e * e.sum(axis=axis, keepdim=True).reciprocal()
+        return Tensor._from_nn(_TH.nn_softmax(self._nn(), axis, False), "softmax")
 
     def softmin(self, axis: int = -1) -> "Tensor":
         # tinygrad mixin/op.py:709-729.
         return (-self).softmax(axis=axis)
 
     def log_softmax(self, axis: int = -1) -> "Tensor":
-        # Unlike tinygrad's (mixin/op.py:658) the max is not detached: its gradient flows through
-        # REDUCE_MAX's backward, a mask at the argmax.
-        m = self.max(axis=axis, keepdim=True)
-        shifted = self - m
-        return shifted - shifted.exp().sum(axis=axis, keepdim=True).log()
+        return Tensor._from_nn(_TH.nn_softmax(self._nn(), axis, True), "log_softmax")
 
     def sparse_categorical_crossentropy(self, Y: "Tensor",
                                         axis: int = -1) -> "Tensor":
@@ -614,9 +576,7 @@ class Tensor(metaclass=_TensorMeta):
         return 1.0 - (self == other)
 
     def relu(self) -> "Tensor":
-        # tinygrad mixin/elementwise.py:675-684; maximum(0) would pass half
-        # the gradient through at 0.
-        return (self > 0).where(self, 0)
+        return self._elementwise(K.NN_RELU)
 
     def elu(self, alpha: float = 1.0) -> "Tensor":
         # elu(x) = relu(x) + alpha * (exp(min(x, 0)) - 1), with min(x, 0) = -relu(-x).
@@ -624,19 +584,15 @@ class Tensor(metaclass=_TensorMeta):
         return self.relu() + (neg_relu_neg.exp() - 1.0) * alpha
 
     def maximum(self, other) -> "Tensor":
-        # tinygrad's MAX as selects: at a tie the average gives each side half the gradient, as
-        # MAX's gradient rule does (mixin/gradient.py:78-79).
-        a, b = _promote(*self._broadcast(other))
-        if not dtypes.is_float(a._dtype):
-            return (a < b).where(b, a)
-        return (a < b).where(b, (a == b).where(a * 0.5 + b * 0.5, a))
+        r = _TH.nn_many(_TH.nn_maximum_fn, [self._nn(), _wrap_other(self, other)._nn()], 0)
+        return Tensor._from_nn(r, f"maximum {self._shape}")
 
     def minimum(self, other) -> "Tensor":
-        return -(-self).maximum(-_wrap_other(self, other))
+        r = _TH.nn_many(_TH.nn_maximum_fn, [self._nn(), _wrap_other(self, other)._nn()], 1)
+        return Tensor._from_nn(r, f"minimum {self._shape}")
 
     def square(self) -> "Tensor":
-        # tinygrad mixin/elementwise.py:576-585.
-        return self * self
+        return self._elementwise(K.NN_SQUARE)
 
     def __lt__(self, other) -> "Tensor":
         # A 0/1 mask in a's dtype: thvm has no bool dtype.
@@ -647,14 +603,11 @@ class Tensor(metaclass=_TensorMeta):
         return _wrap_other(self, other).__lt__(self)
 
     def where(self, x, y) -> "Tensor":
-        """x where self is nonzero, else y (tinygrad mixin/elementwise.py:426-438): a true select,
-        so a non-finite unselected value never leaks in."""
+        """x where self is nonzero, else y (src/nn/where.c): a true select, so a non-finite
+        unselected value never leaks in."""
         ref = x if isinstance(x, Tensor) else y if isinstance(y, Tensor) else self
-        x, y = _promote(_wrap_other(ref, x), _wrap_other(ref, y))
-        cond, x = self._broadcast(x)
-        cond, y = cond._broadcast(y)
-        x, _ = x._broadcast(cond)
-        return Tensor._from_term(_TH.where(cond.term, x.term, y.term), x._dtype, x._shape)
+        args = [self._nn(), _wrap_other(ref, x)._nn(), _wrap_other(ref, y)._nn()]
+        return Tensor._from_nn(_TH.nn_many(_TH.nn_where_fn, args), "where")
 
     def newton_schulz(self, steps: int, params, eps: float = 1.0e-7) -> "Tensor":
         """Newton-Schulz for an odd polynomial: each step G <- sum_i params[i] * (G G^T)^i G, from
@@ -1147,28 +1100,23 @@ class Tensor(metaclass=_TensorMeta):
 
     def linear(self, weight: "Tensor", bias: "Tensor | None" = None
                ) -> "Tensor":
-        """y = x @ weight + bias."""
-        out = self @ weight
-        if bias is not None:
-            out = out + bias
-        return out
+        """x * weight for a 1-D weight, else x @ weight, then + bias (src/nn/linear.c)."""
+        args = [self._nn(), weight._nn(), None if bias is None else bias._nn()]
+        r = _TH.nn_many(_TH.nn_linear_fn, args)
+        if r is None:
+            raise ValueError(f"cannot linear {self._shape} and {weight._shape}")
+        return Tensor._from_nn(r, "linear")
 
     def batchnorm(self, weight: "Tensor | None", bias: "Tensor | None",
                   mean: "Tensor", invstd: "Tensor") -> "Tensor":
         """Apply pre-computed batchnorm given (mean, invstd=1/sqrt(var+eps))."""
-        shape = [1, -1] + [1] * (self.ndim - 2)
-        x_hat = (self - mean.reshape(*shape)) * invstd.reshape(*shape)
-        if weight is not None:
-            x_hat = x_hat * weight.reshape(*shape)
-        if bias is not None:
-            x_hat = x_hat + bias.reshape(*shape)
-        return x_hat
+        args = [self._nn(), None if weight is None else weight._nn(),
+                None if bias is None else bias._nn(), mean._nn(), invstd._nn()]
+        return Tensor._from_nn(_TH.nn_many(_TH.nn_batchnorm_fn, args), "batchnorm")
 
     def layernorm(self, axis=-1, eps: float = 1e-5) -> "Tensor":
-        m = self.mean(axis=axis, keepdim=True)
-        y = self - m
-        var = (y * y).mean(axis=axis, keepdim=True)
-        return y * (var + eps).rsqrt()
+        axes = [axis] if isinstance(axis, int) else list(axis)
+        return Tensor._from_nn(_TH.nn_layernorm(self._nn(), axes, eps), "layernorm")
 
     def max_pool2d(self, kernel_size=(2, 2), stride=None, dilation=1,
                    padding=0, ceil_mode=False) -> "Tensor":
@@ -1268,22 +1216,14 @@ class Tensor(metaclass=_TensorMeta):
         return _const_broadcast(value, self._shape, self._dtype)
 
     def gelu(self, approximate: str = "tanh") -> "Tensor":
-        """tinygrad mixin/elementwise.py:780-795."""
-        if approximate == "tanh":
-            return 0.5 * self * (
-                1.0 + (math.sqrt(2.0 / math.pi)
-                       * (self + 0.044715 * (self * self * self))).tanh())
-        if approximate == "none":
-            return self * 0.5 * (1.0 + (self / math.sqrt(2)).erf())
-        raise RuntimeError(f"{approximate=} is not supported")
+        """tinygrad mixin/elementwise.py:780-795 (src/nn/elementwise.c)."""
+        if approximate not in ("tanh", "none"):
+            raise RuntimeError(f"{approximate=} is not supported")
+        return self._elementwise(K.NN_GELU if approximate == "tanh" else K.NN_GELU_ERF)
 
     def erf(self) -> "Tensor":
         """Abramowitz and Stegun 7.1.26, as tinygrad (mixin/elementwise.py:1059-1071)."""
-        s = (self < 0).where(-1.0, 1.0)
-        t = 1.0 / (1.0 + 0.3275911 * (s * self))
-        poly = functools.reduce(lambda acc, c: acc * t + c,
-                                [1.061405429, -1.453152027, 1.421413741, -0.284496736, 0.254829592], 0.0)
-        return s * (1.0 - t * poly * (-self.square()).exp())
+        return self._elementwise(K.NN_ERF)
 
     def _tri(self, r: int, c: int, diagonal: int = 0) -> "Tensor":
         """0/1 mask arange(r)[:, None] + diagonal <= arange(c) (tinygrad mixin/op.py:233-234)."""

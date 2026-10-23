@@ -313,6 +313,7 @@ TESTS := \
   $(BIN)/test_rangeify_unified \
   $(BIN)/test_expand_shared_view \
   $(BIN)/test_nn_conv \
+  $(BIN)/test_nn_ops \
   $(BIN)/test_shared_weight_levels \
   $(BIN)/test_uop_mov_cache_growth \
   $(BIN)/test_hashcons_realize \

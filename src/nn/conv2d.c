@@ -33,7 +33,7 @@ fn Tensor nn_conv2d(Tensor x, Tensor w, Tensor b, u32 groups, u32 const stride[2
     u32 red[3]  = {4, 5, 6};
     x   = nn_expand(nn_reshape(nn_permute(x, 6, perm), 7, xr), 7, full);
     w   = nn_expand(nn_reshape(w, 7, wr), 7, full);
-    out = nn_reduce(REDUCE_SUM, nn_binop(UOP_MUL, x, w), 3, red);
+    out = nn_reduce(REDUCE_SUM, nn_binop(UOP_MUL, x, w), 3, red, 0);
   } else {
     // C_in split into (groups, cin), C_out into (groups, rcout); both broadcast
     // to (B, groups, rcout, Ho, Wo, cin, kH, kW).
@@ -47,7 +47,7 @@ fn Tensor nn_conv2d(Tensor x, Tensor w, Tensor b, u32 groups, u32 const stride[2
     u32 o4[4]   = {B, C_out, Ho, Wo};
     x   = nn_permute(nn_expand(nn_reshape(x, 8, xr), 8, xe), 8, perm);
     w   = nn_expand(nn_reshape(w, 8, wr), 8, full);
-    out = nn_reshape(nn_reduce(REDUCE_SUM, nn_binop(UOP_MUL, x, w), 3, red), 4, o4);
+    out = nn_reshape(nn_reduce(REDUCE_SUM, nn_binop(UOP_MUL, x, w), 3, red, 0), 4, o4);
   }
   if (b.t != 0) {
     u32 b4[4] = {1, shape_numel(b.shape), 1, 1};

@@ -554,6 +554,19 @@ typedef struct {
   Shape shape;
 } Tensor;
 
+// nn_elementwise's ops (src/nn/elementwise.c).
+#define NN_EXP       0
+#define NN_LOG       1
+#define NN_SIGMOID   2
+#define NN_TANH      3
+#define NN_RELU      4
+#define NN_GELU      5   // the tanh form
+#define NN_GELU_ERF  6
+#define NN_ERF       7
+#define NN_RSQRT     8
+#define NN_SQUARE    9
+#define NN_ELEMENTWISE_COUNT 10
+
 typedef struct Backend Backend;
 
 // ShapeTracker = primary `view` (the public-facing shape) + an

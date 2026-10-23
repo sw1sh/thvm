@@ -89,6 +89,17 @@ _nn_pool = _bind("py_nn_pool", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_u
                  ctypes.POINTER(c_uint32))
 _nn_conv2d = _bind("py_nn_conv2d", c_uint64, ctypes.POINTER(c_uint64), ctypes.POINTER(c_uint32),
                    ctypes.POINTER(c_uint32))
+_nn_elementwise = _bind("py_nn_elementwise", c_uint64, c_uint32, c_uint64,
+                        ctypes.POINTER(c_uint32))
+_nn_softmax = _bind("py_nn_softmax", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_int32,
+                    c_uint32)
+_nn_layernorm = _bind("py_nn_layernorm", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_uint32,
+                      ctypes.POINTER(c_int32), ctypes.c_double)
+# The ops over a term array and its descs: {x, w}, {cond, x, y}, ...
+_NN_MANY = {name: _bind(f"py_nn_{name}", c_uint64, ctypes.POINTER(c_uint64),
+                        ctypes.POINTER(c_uint32), *extra)
+            for name, extra in (("dot", ()), ("linear", ()), ("where", ()),
+                                ("batchnorm", ()), ("maximum", (c_uint32,)))}
 _grad_with_target = _bind("py_grad_with_target", c_uint64,
                           c_uint64, c_uint64, c_uint64)
 _realize = _bind("py_realize", c_uint64, c_uint64)
@@ -177,6 +188,16 @@ class _Constants:
     AXIS_LOCAL = _read_uint32_const("py_const_KAX_LOCAL")
     AXIS_GLOBAL = _read_uint32_const("py_const_KAX_GLOBAL")
     KOP_UPCAST = _read_uint32_const("py_const_KOP_UPCAST")
+    NN_EXP = _read_uint32_const("py_const_NN_EXP")
+    NN_LOG = _read_uint32_const("py_const_NN_LOG")
+    NN_SIGMOID = _read_uint32_const("py_const_NN_SIGMOID")
+    NN_TANH = _read_uint32_const("py_const_NN_TANH")
+    NN_RELU = _read_uint32_const("py_const_NN_RELU")
+    NN_GELU = _read_uint32_const("py_const_NN_GELU")
+    NN_GELU_ERF = _read_uint32_const("py_const_NN_GELU_ERF")
+    NN_ERF = _read_uint32_const("py_const_NN_ERF")
+    NN_RSQRT = _read_uint32_const("py_const_NN_RSQRT")
+    NN_SQUARE = _read_uint32_const("py_const_NN_SQUARE")
 
 
 K = _Constants
@@ -358,6 +379,35 @@ class Thvm:
         desc = self._nn_desc([x])
         ksd = (c_uint32 * (3 * len(k)))(*[int(v) for v in (*k, *s, *d)])
         return self._nn_out(_nn_pool(c_uint64(int(x[0])), desc, c_uint32(len(k)), ksd), desc)
+
+    nn_dot_fn       = _NN_MANY["dot"]
+    nn_linear_fn    = _NN_MANY["linear"]
+    nn_where_fn     = _NN_MANY["where"]
+    nn_batchnorm_fn = _NN_MANY["batchnorm"]
+    nn_maximum_fn   = _NN_MANY["maximum"]
+
+    def nn_many(self, fn, args, *extra):
+        """One of the nn_*_fn exports over (term, dtype id, shape) triples (None: no tensor),
+        passed as a term array and their descs, then `extra`."""
+        desc = self._nn_desc(args)
+        terms = (c_uint64 * len(args))(*[0 if a is None else int(a[0]) for a in args])
+        return self._nn_out(fn(terms, desc, *extra), desc)
+
+    def nn_elementwise(self, op: int, x):
+        """nn_elementwise (src/nn/elementwise.c): op is a K.NN_* id."""
+        desc = self._nn_desc([x])
+        return self._nn_out(_nn_elementwise(c_uint32(op), c_uint64(int(x[0])), desc), desc)
+
+    def nn_softmax(self, x, axis: int, log: bool):
+        desc = self._nn_desc([x])
+        return self._nn_out(_nn_softmax(c_uint64(int(x[0])), desc, c_int32(axis),
+                                        c_uint32(1 if log else 0)), desc)
+
+    def nn_layernorm(self, x, axes, eps: float):
+        desc = self._nn_desc([x])
+        ax = (c_int32 * max(len(axes), 1))(*[int(a) for a in axes])
+        return self._nn_out(_nn_layernorm(c_uint64(int(x[0])), desc, c_uint32(len(axes)), ax,
+                                          ctypes.c_double(eps)), desc)
 
     def nn_conv2d(self, x, w, b, groups, stride, dilation, padding):
         """nn_conv2d (src/nn/conv2d.c) of (term, dtype id, shape) triples; b None for no bias."""

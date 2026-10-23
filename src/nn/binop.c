@@ -1,23 +1,20 @@
-// Tensor._binop: broadcast a and b to one shape (uop_broadcast2), compute a
-// mixed pair in f32 (least_upper_dtype on the f32 / i32 lattice, tinygrad
+// Tensor._binop: broadcast a and b, compute a mixed pair in f32
+// (least_upper_dtype on the f32 / i32 lattice, tinygrad
 // mixin/elementwise.py:24-34), then the binary op in a's dtype.
 fn Tensor nn_binop(u32 op, Tensor a, Tensor b) {
-  Tensor r = a;
-  if (a.shape.ndim != b.shape.ndim
-      || memcmp(a.shape.dims, b.shape.dims, a.shape.ndim * sizeof a.shape.dims[0]) != 0) {
-    int nd = uop_broadcast2(&a.t, a.shape.ndim, a.shape.dims, &b.t, b.shape.ndim, b.shape.dims,
-                            r.shape.dims);
-    if (nd < 0) {
-      r.t = 0;
-      return r;
-    }
-    r.shape.ndim = (u32)nd;
+  if (!nn_broadcast(&a, &b)) {
+    a.t = 0;
+    return a;
   }
   if (a.dtype != b.dtype) {
     a = nn_cast(a, DT_FP32);
     b = nn_cast(b, DT_FP32);
   }
-  r.dtype = a.dtype;
-  r.t     = uop_binary(op, a.t, b.t);
-  return r;
+  a.t = uop_binary(op, a.t, b.t);
+  return a;
+}
+
+// a - b as Tensor.__sub__ builds it: a + (-b).
+fn Tensor nn_sub(Tensor a, Tensor b) {
+  return nn_binop(UOP_ADD, a, nn_unary(UOP_NEG, b));
 }
