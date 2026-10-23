@@ -548,8 +548,8 @@ class Tensor(metaclass=_TensorMeta):
     def rsqrt(self) -> "Tensor":   return self._elementwise("rsqrt")
     def exp(self) -> "Tensor":     return self._elementwise("exp")
     def log(self) -> "Tensor":     return self._elementwise("log")
-    def abs(self) -> "Tensor":
-        return (self * self).sqrt()
+    def sign(self) -> "Tensor":    return self._elementwise("sign")
+    def abs(self) -> "Tensor":     return self._elementwise("abs")
     def sigmoid(self) -> "Tensor": return self._elementwise("sigmoid")
     def tanh(self) -> "Tensor":    return self._elementwise("tanh")
 

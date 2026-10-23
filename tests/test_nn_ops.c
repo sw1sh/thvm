@@ -2,7 +2,7 @@
 // against host loops, the way a C or FFI caller builds them (no py layer).
 //
 //   1. nn_elementwise: exp, log, sigmoid, tanh, relu, gelu (both), erf, rsqrt,
-//      square, within f32 rounding of libm;
+//      square, sign, abs, within f32 rounding of libm;
 //   2. nn_reduce / nn_mean with keepdim, nn_softmax and its log form;
 //   3. nn_layernorm and nn_batchnorm with weight and bias;
 //   4. nn_maximum / nn_minimum on a broadcast pair with ties, nn_where;
@@ -64,7 +64,8 @@ int main(void) {
     struct { u32 op; double (*f)(double); double tol; } const ops[] = {
       {NN_EXP, exp, 1e-6},      {NN_SIGMOID, NULL, 1e-6}, {NN_TANH, tanh, 1e-6},
       {NN_GELU, gelu_tanh, 1e-6}, {NN_ERF, erf, 2e-6},    {NN_GELU_ERF, NULL, 2e-6},
-      {NN_SQUARE, NULL, 0},     {NN_RELU, NULL, 0},
+      {NN_SQUARE, NULL, 0},     {NN_RELU, NULL, 0},        {NN_SIGN, NULL, 0},
+      {NN_ABS, fabs, 0},
     };
     for (u32 k = 0; k < sizeof ops / sizeof ops[0]; k++) {
       for (u32 i = 0; i < 6; i++) {
@@ -74,6 +75,7 @@ int main(void) {
           case NN_GELU_ERF: want[i] = (f32)(0.5 * x * (1.0 + erf(x / sqrt(2.0)))); break;
           case NN_SQUARE:   want[i] = (f32)(x * x); break;
           case NN_RELU:     want[i] = (f32)(x > 0 ? x : 0); break;
+          case NN_SIGN:     want[i] = (f32)(x > 0 ? 1 : x < 0 ? -1 : 0); break;
           default:          want[i] = (f32)ops[k].f(x); break;
         }
       }

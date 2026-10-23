@@ -565,7 +565,9 @@ typedef struct {
 #define NN_ERF       7
 #define NN_RSQRT     8
 #define NN_SQUARE    9
-#define NN_ELEMENTWISE_COUNT 10
+#define NN_SIGN     10
+#define NN_ABS      11
+#define NN_ELEMENTWISE_COUNT 12
 
 // nn_call's ops (src/nn/call.c): the one entry the py, WL and FFI hosts call,
 // which look the ids up by name (nn_op_id).  NN_OP_COUNT + NN_EXP .. are the

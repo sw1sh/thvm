@@ -22,7 +22,7 @@ end that switches to an `nn_*` op keeps its kernel keys:
 | `nn_full`, `nn_scalar`, `nn_binop_f` | `_const_broadcast`, `_wrap_other`, an op with a float | uop/ops.py:603-605 |
 | `nn_cmplt`, `nn_where` | `__lt__`, `where` | mixin/elementwise.py:426-438 |
 | `nn_reduce`, `nn_mean` | `_reduce`, `mean` | |
-| `nn_elementwise` (`NN_EXP` .. `NN_SQUARE`) | `exp`, `log`, `sigmoid`, `tanh`, `relu`, `gelu`, `erf`, `rsqrt`, `square` | mixin/elementwise.py |
+| `nn_elementwise` (`NN_EXP` .. `NN_ABS`) | `exp`, `log`, `sigmoid`, `tanh`, `relu`, `gelu`, `erf`, `rsqrt`, `square`, `sign`, `abs` | mixin/elementwise.py |
 | `nn_maximum`, `nn_minimum` | `maximum`, `minimum` | mixin/gradient.py:78-79 |
 | `nn_softmax` | `softmax`, `log_softmax` | mixin/op.py:657-700 |
 | `nn_layernorm`, `nn_batchnorm` | `layernorm`, `batchnorm` | mixin/op.py:1646-1683 |
@@ -33,9 +33,11 @@ end that switches to an `nn_*` op keeps its kernel keys:
 | `nn_sparse_categorical_crossentropy` | `sparse_categorical_crossentropy` | mixin/op.py:1723-1746 |
 | `nn_scaled_dot_product_attention` | `scaled_dot_product_attention` (no dropout) | mixin/rand.py:298-327 |
 
-Where tensor.py differs from tinygrad (softmax's max is not detached,
-batchnorm scales by invstd before weight), the C keeps tensor.py's graph for
-now; `nn_linear` follows tinygrad (a 1-D weight multiplies).
+The ops follow tinygrad where tensor.py did not: `nn_linear` multiplies by a
+1-D weight, `nn_batchnorm` scales by weight before invstd, and `abs` is
+x * sign(x).  One difference stays: softmax's max is not detached, since a
+DETACH under a nested reduce's backward hits an open scheduler bug
+(py/tests/test_detach_reduce_bwd_parity.py); its gradient is zero either way.
 
 ## Flat ABI
 
@@ -62,7 +64,7 @@ dtype from its graph.
 | `cast` | x | dtype | |
 | `full` | | dtype, dims... | value |
 | `binop` | a, b | a binary UOp | |
-| `exp`, `log`, `sigmoid`, `tanh`, `relu`, `gelu`, `gelu_erf`, `erf`, `rsqrt`, `square` | x | | |
+| `exp`, `log`, `sigmoid`, `tanh`, `relu`, `gelu`, `gelu_erf`, `erf`, `rsqrt`, `square`, `sign`, `abs` | x | | |
 | `reduce` | x | `REDUCE_SUM` or `REDUCE_MAX`, keepdim, mean, axes... | |
 | `where` | cond, x, y | | |
 | `maximum` | a, b | [1 for the minimum] | |

@@ -62,6 +62,17 @@ fn Tensor nn_elementwise(u32 op, Tensor x) {
     case NN_SQUARE: {
       return nn_binop(UOP_MUL, x, x);
     }
+    case NN_SIGN: {
+      // (x != 0).where((x < 0).where(-1, 1), 0) (mixin/elementwise.py:902-910), with
+      // the outer select on x == 0 since there is no CMPNE.
+      Tensor zero = nn_scalar(x, 0.0, 0);
+      Tensor neg  = nn_where(nn_cmplt(x, zero), nn_scalar(x, -1.0, 0), nn_scalar(x, 1.0, 0));
+      return nn_where(nn_binop(UOP_CMPEQ, x, zero), nn_scalar(x, 0.0, 0), neg);
+    }
+    case NN_ABS: {
+      // x * sign(x) (mixin/elementwise.py:912-920): its gradient at 0 is 0.
+      return nn_binop(UOP_MUL, x, nn_elementwise(NN_SIGN, x));
+    }
     default: {
       x.t = 0;
       return x;

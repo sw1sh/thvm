@@ -22,7 +22,7 @@
 //   POOL, MAX_POOL2D  t: x; ia: kernel[nk], stride[nk], dilation[nk]
 //   CONV2D       t: x, w, b; ia: groups, stride[n], dilation[n], (begin, end)[n]
 //   CONV_TRANSPOSE2D  the same, then output_padding[n]
-//   exp, log, sigmoid, tanh, relu, gelu, gelu_erf, erf, rsqrt, square
+//   exp, log, sigmoid, tanh, relu, gelu, gelu_erf, erf, rsqrt, square, sign, abs
 //                t: x (ids NN_OP_COUNT + NN_EXP ..)
 // with n = rank(w) - 2 spatial axes; a negative axis counts from the end.
 
@@ -32,6 +32,7 @@ static char const *const NN_OP_NAMES[NN_OP_COUNT + NN_ELEMENTWISE_COUNT] = {
   "batchnorm", "dot", "linear", "arange", "tri", "sparse_categorical_crossentropy",
   "scaled_dot_product_attention", "pool", "max_pool2d", "conv2d", "conv_transpose2d",
   "exp", "log", "sigmoid", "tanh", "relu", "gelu", "gelu_erf", "erf", "rsqrt", "square",
+  "sign", "abs",
 };
 
 // name's op id, or UINT32_MAX for none.

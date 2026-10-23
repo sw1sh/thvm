@@ -35,6 +35,18 @@ CASES = [
 
 @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
 class TestNnLayersParity(unittest.TestCase):
+    def test_abs_sign(self):
+        # abs is x * sign(x), as tinygrad's: the gradient at 0 is 0, where sqrt(x * x) gave NaN.
+        import thvm
+        import tinygrad
+        X = np.array([-2.0, -0.5, 0.0, 0.25, 3.0], np.float32)
+        xt, xm = tinygrad.Tensor(X), thvm.Tensor(X)
+        xt.abs().sum().backward()
+        xm.abs().sum().backward()
+        np.testing.assert_array_equal(xm.grad.numpy(), xt.grad.numpy())
+        np.testing.assert_array_equal(thvm.Tensor(X).abs().numpy(), np.abs(X))
+        np.testing.assert_array_equal(thvm.Tensor(X).sign().numpy(), np.sign(X))
+
     def test_lstm_cell(self):
         import thvm
         import tinygrad
