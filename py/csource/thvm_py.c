@@ -189,6 +189,47 @@ EXPORT uint64_t py_uop_flip(uint64_t src, uint32_t axes_bitmask) {
   return uop_flip(src, axes_bitmask);
 }
 
+// The src/nn ops.  A Tensor crosses as its term plus desc[2 + MAX_DIM] =
+// [dtype, ndim, dims...]; the result term comes back (0 when the op fails) with
+// its desc written over the first one.
+#define PY_NN_DESC (2 + MAX_DIM)
+
+static int py_nn_in(uint64_t t, uint32_t const *desc, Tensor *out) {
+  if (desc[1] > MAX_DIM) {
+    return 0;
+  }
+  *out = (Tensor){t, desc[0], {desc[1], {0}}};
+  memcpy(out->shape.dims, desc + 2, desc[1] * sizeof desc[0]);
+  return 1;
+}
+
+static uint64_t py_nn_out(Tensor r, uint32_t *desc) {
+  desc[0] = r.dtype;
+  desc[1] = r.shape.ndim;
+  memcpy(desc + 2, r.shape.dims, r.shape.ndim * sizeof desc[0]);
+  return r.t;
+}
+
+// ksd = kernel[nk], stride[nk], dilation[nk].
+EXPORT uint64_t py_nn_pool(uint64_t x, uint32_t *desc, uint32_t nk, uint32_t const *ksd) {
+  Tensor xt;
+  if (!py_nn_in(x, desc, &xt)) {
+    return 0;
+  }
+  return py_nn_out(nn_pool(xt, nk, ksd, ksd + nk, ksd + 2 * nk), desc);
+}
+
+// xwb = {x, w, b} (b == 0: no bias) with their three descs; opts = groups,
+// stride[2], dilation[2], padding[2].
+EXPORT uint64_t py_nn_conv2d(uint64_t const *xwb, uint32_t *desc, uint32_t const *opts) {
+  Tensor x, w, b;
+  if (!py_nn_in(xwb[0], desc, &x) || !py_nn_in(xwb[1], desc + PY_NN_DESC, &w)
+      || !py_nn_in(xwb[2], desc + 2 * PY_NN_DESC, &b)) {
+    return 0;
+  }
+  return py_nn_out(nn_conv2d(x, w, b, opts[0], opts + 1, opts + 3, opts + 5), desc);
+}
+
 // The chain-rule (DP1) projection of a grad cell [y, gy, target]
 // (uop/grad.c); a nonzero target runs the target walk.
 EXPORT uint64_t py_grad_with_target(uint64_t y, uint64_t gy,

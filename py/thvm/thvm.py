@@ -85,6 +85,10 @@ _uop_flip = _bind("py_uop_flip", c_uint64, c_uint64, c_uint32)
 _uop_broadcast2 = _bind("py_uop_broadcast2", c_int32, ctypes.POINTER(c_uint64),
                         c_uint32, ctypes.POINTER(c_uint32), c_uint32, ctypes.POINTER(c_uint32),
                         ctypes.POINTER(c_uint32))
+_nn_pool = _bind("py_nn_pool", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_uint32,
+                 ctypes.POINTER(c_uint32))
+_nn_conv2d = _bind("py_nn_conv2d", c_uint64, ctypes.POINTER(c_uint64), ctypes.POINTER(c_uint32),
+                   ctypes.POINTER(c_uint32))
 _grad_with_target = _bind("py_grad_with_target", c_uint64,
                           c_uint64, c_uint64, c_uint64)
 _realize = _bind("py_realize", c_uint64, c_uint64)
@@ -329,6 +333,38 @@ class Thvm:
         if nd < 0:
             return None
         return Term(ab[0]), Term(ab[1]), tuple(int(d) for d in out[:nd])
+
+    def _nn_desc(self, args):
+        """The src/nn descs (py_nn_* in thvm_py.c) of (term, dtype id, shape) triples; None is
+        no tensor."""
+        n = 2 + K.MAX_DIM
+        desc = (c_uint32 * (n * len(args)))()
+        for i, a in enumerate(args):
+            if a is not None:
+                desc[i * n], desc[i * n + 1] = a[1], len(a[2])
+                for j, d in enumerate(a[2]):
+                    desc[i * n + 2 + j] = int(d)
+        return desc
+
+    @staticmethod
+    def _nn_out(t: int, desc):
+        """A py_nn_* result as (term, dtype id, shape), or None when the op failed."""
+        if t == 0:
+            return None
+        return Term(t), int(desc[0]), tuple(int(d) for d in desc[2:2 + desc[1]])
+
+    def nn_pool(self, x, k, s, d):
+        """nn_pool (src/nn/pool.c) of x = (term, dtype id, shape)."""
+        desc = self._nn_desc([x])
+        ksd = (c_uint32 * (3 * len(k)))(*[int(v) for v in (*k, *s, *d)])
+        return self._nn_out(_nn_pool(c_uint64(int(x[0])), desc, c_uint32(len(k)), ksd), desc)
+
+    def nn_conv2d(self, x, w, b, groups, stride, dilation, padding):
+        """nn_conv2d (src/nn/conv2d.c) of (term, dtype id, shape) triples; b None for no bias."""
+        desc = self._nn_desc([x, w, b])
+        xwb = (c_uint64 * 3)(int(x[0]), int(w[0]), 0 if b is None else int(b[0]))
+        opts = (c_uint32 * 7)(int(groups), *[int(v) for v in (*stride, *dilation, *padding)])
+        return self._nn_out(_nn_conv2d(xwb, desc, opts), desc)
 
     def permute(self, src: Term, perm) -> Term:
         return self._move(_uop_permute, src, perm)

@@ -303,6 +303,16 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // thvm folds the construction to its closed form instead of iterating the
 // reduce axis, matching tinygrad's arange/reduce-collapse.
 #include "uop/reduce_collapse.c"
+
+// === nn/ ===
+// tinygrad's NN-level Tensor ops over the uop constructors, on Tensor values;
+// the one copy the py, THVMLink and WolframKernel front ends call.
+#include "nn/move.c"
+#include "nn/cast.c"
+#include "nn/binop.c"
+#include "nn/reduce.c"
+#include "nn/pool.c"
+#include "nn/conv2d.c"
 // codegen/hand_opts.c -- tinygrad's hand_coded_optimizations port.
 // Needs kernel_apply_opt (codegen/apply_opt.c) + the DAG axis
 // scanners (uop/dag_scan.c) above, so it lands here.

@@ -822,54 +822,25 @@ class Tensor(metaclass=_TensorMeta):
                 begin_end.extend([0, int(s)])
         return self.shrink(begin_end)
 
+    def _nn(self):
+        """This tensor as the src/nn ops take it: (term, dtype id, shape)."""
+        return (self.term, self._dtype.thvm_id, self._shape)
+
+    @staticmethod
+    def _from_nn(r, what: str) -> "Tensor":
+        if r is None:
+            raise ValueError(f"{what}: invalid shapes or arguments")
+        t, dt, shape = r
+        return Tensor._from_term(t, dtypes.float32 if dt == K.FP32 else dtypes.int32, shape)
+
     def _pool(self, k_, stride=1, dilation=1) -> "Tensor":
-        """tinygrad's _pool unfold (mixin/movement.py:598-616): shape (..., *o_, *k_), each (o, k)
-        slice the window at output position o."""
-        if isinstance(k_, int):
-            k_ = (k_,)
-        k_ = tuple(int(k) for k in k_)
+        """tinygrad's _pool unfold (src/nn/pool.c): shape (..., *o_, *k_), each (o, k) slice the
+        window at output position o."""
+        k_ = (int(k_),) if isinstance(k_, int) else tuple(int(k) for k in k_)
         s_ = (stride,) * len(k_) if isinstance(stride, int) else tuple(stride)
         d_ = (dilation,) * len(k_) if isinstance(dilation, int) else tuple(dilation)
         assert len(k_) == len(s_) == len(d_)
-        noop_ndim = self.ndim - len(k_)
-        i_ = self._shape[-len(k_):]
-        o_ = tuple((i - d * (k - 1) + s - 1) // s
-                   for i, d, k, s in zip(i_, d_, k_, s_))   # ceildiv
-        f_ = tuple(max(1, (o * s - d + i - 1) // i)
-                   for o, s, i, d in zip(o_, s_, i_, d_))
-        reps = [1] * noop_ndim + [(k * (i * f + d) + i - 1) // i
-                                  for k, i, d, f in zip(k_, i_, d_, f_)]
-        x = self.repeat(reps)
-        prefix = list(self._shape[:noop_ndim])
-        x = x.shrink_to(prefix + [k * (i * f + d)
-                                  for k, i, d, f in zip(k_, i_, d_, f_)])
-        reshape1 = list(prefix)
-        for k, i, d, f in zip(k_, i_, d_, f_):
-            reshape1.extend([k, i * f + d])
-        x = x.reshape(*reshape1)
-        target2 = list(prefix)
-        for k, o, s in zip(k_, o_, s_):
-            target2.extend([k, o * s])
-        x = x.shrink_to(target2)
-        reshape2 = list(prefix)
-        for k, o, s in zip(k_, o_, s_):
-            reshape2.extend([k, o, s])
-        x = x.reshape(*reshape2)
-        target3 = list(prefix)
-        for k, o in zip(k_, o_):
-            target3.extend([k, o, 1])
-        x = x.shrink_to(target3)
-        reshape3 = list(prefix)
-        for k, o in zip(k_, o_):
-            reshape3.extend([k, o])
-        x = x.reshape(*reshape3)
-        # prefix, k_0, o_0, k_1, o_1, ... -> prefix, o_0, o_1, ..., k_0, k_1, ...
-        perm = list(range(noop_ndim))
-        for i in range(len(i_)):
-            perm.append(noop_ndim + i * 2 + 1)
-        for i in range(len(i_)):
-            perm.append(noop_ndim + i * 2)
-        return x.permute(*perm)
+        return Tensor._from_nn(_TH.nn_pool(self._nn(), k_, s_, d_), "_pool")
 
     def pad(self, begin_end) -> "Tensor":
         """Zero-pad by tinygrad's per-axis (before, after) pairs or a flat [b0, e0, ...]; a negative
@@ -1242,57 +1213,14 @@ class Tensor(metaclass=_TensorMeta):
     def conv2d(self, weight: "Tensor",
                bias: "Tensor | None" = None,
                groups: int = 1, stride=1, dilation=1, padding=0) -> "Tensor":
-        """conv2d as a pad, the _pool unfold, one broadcast MUL and a sum over (C_in, kH, kW)
-        (tinygrad mixin/op.py:1564-1605)."""
-        sH, sW = (stride, stride) if isinstance(stride, int) else stride
-        dH, dW = (dilation, dilation) if isinstance(dilation, int) else dilation
-        if isinstance(padding, int):
-            pH = pW = padding
-        else:
-            pH, pW = padding[0], padding[1]
-
-        x = self
-        if pH or pW:
-            x = x.pad([0, 0, 0, 0, pH, pH, pW, pW])
-
-        B, C_in = x._shape[:2]
-        kH, kW = weight._shape[2:]
-        C_out = weight._shape[0]
-        # _pool: (B, C_in, H, W) -> (B, C_in, H_out, W_out, kH, kW)
-        x = x._pool((kH, kW), stride=(sH, sW), dilation=(dH, dW))
-        H_out, W_out = x._shape[2:4]
-
-        if groups == 1:
-            # Both broadcast to (B, C_out, H_out, W_out, C_in, kH, kW): the reduce axes go last, as
-            # reduce_chain_collect (schedule/uop_meta.c) fuses only contiguous trailing axes.
-            x_b = (x.permute(0, 2, 3, 1, 4, 5)
-                    .reshape(B, 1, H_out, W_out, C_in, kH, kW)
-                    .expand(B, C_out, H_out, W_out, C_in, kH, kW))
-            w_b = (weight.reshape(1, C_out, 1, 1, C_in, kH, kW)
-                         .expand(B, C_out, H_out, W_out, C_in, kH, kW))
-            out = (x_b * w_b).sum(axis=(4, 5, 6))
-            if bias is not None:
-                out = out + bias.reshape(1, -1, 1, 1)
-            return out
-
-        # Grouped / depthwise: tinygrad's conv2d (mixin/op.py:1599-1604) on 2 spatial dims, C_in
-        # split into (groups, cin) and C_out into (groups, rcout); (cin, kH, kW) stay last.
-        cin = weight._shape[1]
-        if groups * cin != C_in:
-            raise ValueError(
-                f"conv2d groups mismatch: groups({groups})*cin({cin}) "
-                f"!= C_in({C_in})")
-        rcout = C_out // groups
-        # Both broadcast to (B, groups, rcout, H_out, W_out, cin, kH, kW).
-        x_b = (x.reshape(B, groups, cin, 1, H_out, W_out, kH, kW)
-                .expand(B, groups, cin, rcout, H_out, W_out, kH, kW)
-                .permute(0, 1, 3, 4, 5, 2, 6, 7))
-        w_b = (weight.reshape(1, groups, rcout, 1, 1, cin, kH, kW)
-                     .expand(B, groups, rcout, H_out, W_out, cin, kH, kW))
-        out = (x_b * w_b).sum(axis=(5, 6, 7)).reshape(B, C_out, H_out, W_out)
-        if bias is not None:
-            out = out + bias.reshape(1, -1, 1, 1)
-        return out
+        """tinygrad's conv2d (src/nn/conv2d.c): a pad, the _pool unfold, one broadcast MUL and a
+        sum over (cin, kH, kW)."""
+        stride = (stride, stride) if isinstance(stride, int) else tuple(stride)
+        dilation = (dilation, dilation) if isinstance(dilation, int) else tuple(dilation)
+        padding = (padding, padding) if isinstance(padding, int) else tuple(padding[:2])
+        r = _TH.nn_conv2d(self._nn(), weight._nn(), None if bias is None else bias._nn(),
+                          groups, stride, dilation, padding)
+        return Tensor._from_nn(r, f"conv2d {self._shape} * {weight._shape} groups={groups}")
 
     # ---- transformer / GPT2 ops ---------------------------------------
 

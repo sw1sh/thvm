@@ -33,6 +33,9 @@ If you are new to the project, read these in order:
    `UOP_SCATTER` indexed ops -- semantics, lowering, gradients, the py
    `gather` / `embedding` / `x[idx]` / `scatter_reduce` / `scatter`
    surface, and where they deviate from tinygrad.
+10. [nn.md](nn.md): the NN layer (`src/nn/`) -- tinygrad's `_pool` and
+   conv2d ported once in C on `Tensor` values, and the flat `py_nn_*`
+   ABI the front ends call.
 
 ## What's not here yet
 

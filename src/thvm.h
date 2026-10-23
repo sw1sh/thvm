@@ -545,6 +545,15 @@ typedef struct {
   u8    contiguous;             // 1 if row-major from offset 0
 } View;
 
+// A lazy value as tinygrad's Tensor carries it (src/nn/): the UOp graph with its
+// dtype and shape, so building a layer never walks the graph under it.  t == 0
+// is a failed op.
+typedef struct {
+  Term  t;
+  u32   dtype;
+  Shape shape;
+} Tensor;
+
 typedef struct Backend Backend;
 
 // ShapeTracker = primary `view` (the public-facing shape) + an
