@@ -293,6 +293,14 @@ int main(void) {
     Tensor xw[3] = {leaf(4, (u32[4]){1, 1, 3, 3}, xs), leaf(4, (u32[4]){1, 1, 2, 2}, xs), {0}};
     CHECK_EQ(nn_call(NN_OP_CONV2D, xw, 3, conv_short, 3, NULL, 0).t, 0);
     CHECK_EQ(nn_op_id("conv_transpose2d"), NN_OP_CONV_TRANSPOSE2D);
+    // tinygrad's least_upper_dtype.
+    CHECK_EQ(nn_promote(DT_FP32, DT_FP64), DT_FP64);
+    CHECK_EQ(nn_promote(DT_INT32, DT_FP32), DT_FP32);
+    CHECK_EQ(nn_promote(DT_INT32, DT_FP16), DT_FP16);
+    CHECK_EQ(nn_promote(DT_FP16, DT_BF16), DT_FP32);
+    CHECK_EQ(nn_promote(DT_UINT8, DT_INT8), DT_INT16);
+    CHECK_EQ(nn_promote(DT_BOOL, DT_INT32), DT_INT32);
+    CHECK_EQ(nn_promote(DT_INT64, DT_UINT64), DT_FP32);
     CHECK_EQ(nn_op_id("nope"), UINT32_MAX);
     i32 const none_i[1] = {0};
     check(nn_call(nn_op_id("square"), &x, 1, none_i, 0, NULL, 0),

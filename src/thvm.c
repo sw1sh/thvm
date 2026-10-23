@@ -311,6 +311,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "nn/cast.c"
 #include "nn/unary.c"
 #include "nn/broadcast.c"
+#include "nn/promote.c"
 #include "nn/binop.c"
 #include "nn/full.c"
 #include "nn/cmplt.c"

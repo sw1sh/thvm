@@ -7,8 +7,9 @@ fn Tensor nn_maximum(Tensor a, Tensor b) {
     return a;
   }
   if (a.dtype != b.dtype) {
-    a = nn_cast(a, DT_FP32);
-    b = nn_cast(b, DT_FP32);
+    u32 d = nn_promote(a.dtype, b.dtype);
+    a = nn_cast(a, d);
+    b = nn_cast(b, d);
   }
   Tensor lt = nn_cmplt(a, b);
   if (!dtype_is_float(a.dtype)) {

@@ -4,8 +4,9 @@
 // with y, and x against that cond, whose own rewrite is dropped.
 fn Tensor nn_where(Tensor cond, Tensor x, Tensor y) {
   if (x.dtype != y.dtype) {
-    x = nn_cast(x, DT_FP32);
-    y = nn_cast(y, DT_FP32);
+    u32 d = nn_promote(x.dtype, y.dtype);
+    x = nn_cast(x, d);
+    y = nn_cast(y, d);
   }
   Tensor c = cond;
   int ok = nn_broadcast(&c, &x) && nn_broadcast(&c, &y);

@@ -18,7 +18,7 @@ end that switches to an `nn_*` op keeps its kernel keys:
 |---|---|---|
 | `nn_move`, `nn_reshape`, `nn_permute`, `nn_expand`, `nn_shrink_to` | `reshape`, `permute`, `expand`, `pad`, `shrink`, `shrink_to` | mixin/movement.py |
 | `nn_cast`, `nn_unary` | `cast`, `_unary` | |
-| `nn_broadcast`, `nn_binop`, `nn_sub` | `_broadcast`, `_binop` (a mixed pair in f32), `__sub__` | mixin/elementwise.py:24-34 |
+| `nn_broadcast`, `nn_promote`, `nn_binop`, `nn_sub` | `_broadcast`, `_binop` (a mixed pair in its least upper dtype), `__sub__` | mixin/elementwise.py:24-34, dtype.py:180-194 |
 | `nn_full`, `nn_scalar`, `nn_binop_f` | `_const_broadcast`, `_wrap_other`, an op with a float | uop/ops.py:603-605 |
 | `nn_cmplt`, `nn_where` | `__lt__`, `where` | mixin/elementwise.py:426-438 |
 | `nn_reduce`, `nn_mean` | `_reduce`, `mean` | |

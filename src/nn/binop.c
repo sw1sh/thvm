@@ -1,14 +1,14 @@
-// Tensor._binop: broadcast a and b, compute a mixed pair in f32
-// (least_upper_dtype on the f32 / i32 lattice, tinygrad
-// mixin/elementwise.py:24-34), then the binary op in a's dtype.
+// Tensor._binop: broadcast a and b, compute a mixed pair in their least upper
+// dtype (nn_promote, tinygrad mixin/elementwise.py:24-34), then the binary op.
 fn Tensor nn_binop(u32 op, Tensor a, Tensor b) {
   if (!nn_broadcast(&a, &b)) {
     a.t = 0;
     return a;
   }
   if (a.dtype != b.dtype) {
-    a = nn_cast(a, DT_FP32);
-    b = nn_cast(b, DT_FP32);
+    u32 d = nn_promote(a.dtype, b.dtype);
+    a = nn_cast(a, d);
+    b = nn_cast(b, d);
   }
   a.t = uop_binary(op, a.t, b.t);
   return a;

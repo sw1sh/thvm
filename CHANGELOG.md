@@ -6,6 +6,7 @@ for the per-commit story.
 ## Unreleased
 
 ### Runtime
+- A mixed-dtype nn op (binop, where, maximum) computes in tinygrad's least upper dtype (nn_promote, dtype.py:180-194): f32 with f64 in f64 and an int with f16 in f16, where every mixed pair went to f32. py's only mixed pair, i32 with f32, is unchanged. Test: test_nn_ops nn/call.
 - Tensor.abs is tinygrad's x * sign(x) (mixin/elementwise.py:902-920), with a new Tensor.sign: it was sqrt(x * x), whose gradient at 0 is NaN where tinygrad's is 0. batchnorm scales by weight before invstd, as tinygrad does (mixin/op.py:1664-1683), with the parameters shaped from x's channel axis. Tests: test_nn_ops, test_nn_layers_parity test_abs_sign.
 - The elementwise nn ops are named like the rest ("relu", "gelu", ...: nn_op_id), so the py_const_NN_* exports are gone, and nn_arange rounds up without libm's ceil, which libthvm_py does not link (batch r13 showed the new undefined symbol). Test: test_nn_ops nn/call.
 - The src/nn ops have one entry, nn_call (src/nn/call.c), which checks every op's tensor count, axes, movement arguments and conv options at the boundary: libthvm_py exports it as py_nn plus py_nn_op (an op id by name), in place of one export per op, and THVMLink as thvm_wl_nn / thvm_wl_nn_op over LibraryLink integer and real vectors, reading shapes and dtypes from the graph. py's Thvm.nn is the one binding. Docs: docs/nn.md. Tests: test_nn_ops nn/call, the py suite.
