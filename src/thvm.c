@@ -330,6 +330,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "nn/pool.c"
 #include "nn/max_pool2d.c"
 #include "nn/conv2d.c"
+#include "nn/conv_transpose2d.c"
 // codegen/hand_opts.c -- tinygrad's hand_coded_optimizations port.
 // Needs kernel_apply_opt (codegen/apply_opt.c) + the DAG axis
 // scanners (uop/dag_scan.c) above, so it lands here.

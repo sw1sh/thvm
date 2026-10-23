@@ -82,6 +82,23 @@ def _promote(a: "Tensor", b: "Tensor") -> "tuple[Tensor, Tensor]":
     return a, b
 
 
+def _conv_opts(n: int, groups, stride, dilation, padding, output_padding=None) -> list[int]:
+    """A conv's py_nn_* options over n spatial axes: groups, stride[n], dilation[n], then
+    (begin, end) per axis in axis order from tinygrad's int, per-axis or per-side (last axis
+    first) padding (helpers.py:57-62), then output_padding[n]."""
+    tup = (lambda v: (int(v),) * n if isinstance(v, int) else tuple(int(x) for x in v))
+    if isinstance(padding, int):
+        pads = [padding] * (2 * n)
+    elif len(padding) == n:
+        pads = [int(q) for q in padding for _ in (0, 1)]
+    elif len(padding) == 2 * n:
+        pads = [int(q) for pair in zip(padding[-2::-2], padding[::-2]) for q in pair]
+    else:
+        raise ValueError(f"padding {padding} does not fit {n} spatial axes")
+    opts = [groups, *tup(stride), *tup(dilation), *pads]
+    return opts if output_padding is None else opts + list(tup(output_padding))
+
+
 def _normalize_pairs(arg, shape, full):
     """A shrink / pad argument as a flat [b0, e0, b1, e1, ...] list, from tinygrad's per-axis pairs
     (a None pair is full(axis size)) or an already-flat int list."""
@@ -822,6 +839,34 @@ class Tensor(metaclass=_TensorMeta):
         out._view_begin_end = [int(x) for x in begin_end]
         return out
 
+    def size(self, dim: int | None = None):
+        """The shape, or one axis of it (tinygrad mixin/movement.py:59-72)."""
+        return self._shape if dim is None else self._shape[self._resolve_dim(dim)]
+
+    def flip(self, axis, *args) -> "Tensor":
+        """The axes reversed (tinygrad mixin/movement.py:233-255)."""
+        axes = [self._resolve_dim(a) for a in argfix(axis, *args)]
+        mask = sum(1 << a for a in set(axes))
+        return Tensor._from_term(_TH.flip(self.term, mask), self._dtype, self._shape)
+
+    def split(self, sizes, dim: int = 0) -> "tuple[Tensor, ...]":
+        """Pieces of `sizes` along dim, an int size leaving a shorter last piece (tinygrad
+        mixin/movement.py:423-448)."""
+        dim = self._resolve_dim(dim)
+        n = self._shape[dim]
+        if isinstance(sizes, int):
+            sizes = [min(sizes, n - i) for i in range(0, max(1, n), max(1, sizes))]
+        out, at = [], 0
+        for sz in sizes:
+            out.append(self.shrink([(at, at + sz) if a == dim else None for a in range(self.ndim)]))
+            at += sz
+        return tuple(out)
+
+    def chunk(self, chunks: int, dim: int = 0) -> "list[Tensor]":
+        """chunks pieces of ceil(size / chunks) along dim (tinygrad mixin/movement.py:449-473)."""
+        n = self._shape[self._resolve_dim(dim)]
+        return list(self.split(-(-n // chunks) if n else [0] * chunks, dim=dim))
+
     def unsqueeze(self, dim: int) -> "Tensor":
         """A new axis of size 1 at `dim` (tinygrad mixin/movement.py:308-321)."""
         dim = self._resolve_dim(dim, extra=1)
@@ -1147,14 +1192,21 @@ class Tensor(metaclass=_TensorMeta):
     def conv2d(self, weight: "Tensor",
                bias: "Tensor | None" = None,
                groups: int = 1, stride=1, dilation=1, padding=0) -> "Tensor":
-        """tinygrad's conv2d (src/nn/conv2d.c): a pad, the _pool unfold, one broadcast MUL and a
-        sum over (cin, kH, kW)."""
-        stride = (stride, stride) if isinstance(stride, int) else tuple(stride)
-        dilation = (dilation, dilation) if isinstance(dilation, int) else tuple(dilation)
-        padding = (padding, padding) if isinstance(padding, int) else tuple(padding[:2])
-        r = _TH.nn_conv2d(self._nn(), weight._nn(), None if bias is None else bias._nn(),
-                          groups, stride, dilation, padding)
+        """tinygrad's conv2d over weight.ndim - 2 spatial axes (src/nn/conv2d.c): a pad, the
+        _pool unfold, one broadcast MUL and a sum over (cin, *kernel)."""
+        opts = _conv_opts(weight.ndim - 2, groups, stride, dilation, padding)
+        args = [self._nn(), weight._nn(), None if bias is None else bias._nn()]
+        r = _TH.nn_many(_TH.nn_conv2d_fn, args, _TH.i32s(opts))
         return Tensor._from_nn(r, f"conv2d {self._shape} * {weight._shape} groups={groups}")
+
+    def conv_transpose2d(self, weight: "Tensor", bias: "Tensor | None" = None, groups: int = 1,
+                         stride=1, dilation=1, padding=0, output_padding=0) -> "Tensor":
+        """tinygrad's conv_transpose2d (src/nn/conv_transpose2d.c), weight (C_in, C_out / groups,
+        *kernel)."""
+        opts = _conv_opts(weight.ndim - 2, groups, stride, dilation, padding, output_padding)
+        args = [self._nn(), weight._nn(), None if bias is None else bias._nn()]
+        r = _TH.nn_many(_TH.nn_conv_transpose2d_fn, args, _TH.i32s(opts))
+        return Tensor._from_nn(r, f"conv_transpose2d {self._shape} * {weight._shape}")
 
     # ---- transformer / GPT2 ops ---------------------------------------
 

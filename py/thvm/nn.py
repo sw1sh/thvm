@@ -26,20 +26,28 @@ class Linear:
 
 
 class Conv2d:
-    """tinygrad's nn.Conv2d (nn/__init__.py:80-109) over (B, C_in, H, W)."""
+    """tinygrad's nn.Conv2d (nn/__init__.py:80-109) over (B, C_in, *spatial), one spatial axis
+    per kernel_size entry; padding="same" pads to the input's size at stride 1."""
 
     def __init__(self, in_channels: int, out_channels: int,
                  kernel_size, stride=1, padding=0, dilation=1,
                  groups: int = 1, bias: bool = True):
-        if isinstance(kernel_size, int):
-            kernel_size = (kernel_size, kernel_size)
-        self.kernel_size = tuple(kernel_size)
+        self.kernel_size = ((kernel_size, kernel_size) if isinstance(kernel_size, int)
+                            else tuple(kernel_size))
+        if isinstance(padding, str):
+            if padding.lower() != "same":
+                raise ValueError(f"Invalid padding string {padding!r}, only 'same' is supported")
+            if stride != 1:
+                raise ValueError("padding='same' is not supported for strided convolutions")
+            dils = ((dilation,) * len(self.kernel_size) if isinstance(dilation, int)
+                    else tuple(dilation))
+            padding = tuple(v for d, k in zip(dils[::-1], self.kernel_size[::-1])
+                            for v in (d * (k - 1) // 2, d * (k - 1) - d * (k - 1) // 2))
         self.stride = stride
         self.padding = padding
         self.dilation = dilation
         self.groups = groups
-        scale = 1.0 / math.sqrt(in_channels * self.kernel_size[0]
-                                * self.kernel_size[1])
+        scale = 1.0 / math.sqrt(in_channels * math.prod(self.kernel_size))
         self.weight = Tensor.uniform(out_channels, in_channels // groups,
                                      *self.kernel_size,
                                      low=-scale, high=scale)
@@ -49,6 +57,39 @@ class Conv2d:
     def __call__(self, x: Tensor) -> Tensor:
         return x.conv2d(self.weight, self.bias, self.groups,
                         self.stride, self.dilation, self.padding)
+
+
+def Conv1d(in_channels: int, out_channels: int, kernel_size: int, stride=1, padding=0,
+           dilation=1, groups: int = 1, bias: bool = True) -> Conv2d:
+    """tinygrad's nn.Conv1d (nn/__init__.py:62-79): a Conv2d with one spatial axis."""
+    return Conv2d(in_channels, out_channels, (kernel_size,), stride, padding, dilation, groups,
+                  bias)
+
+
+class ConvTranspose2d(Conv2d):
+    """tinygrad's nn.ConvTranspose2d (nn/__init__.py:130-155): weight (C_in, C_out / groups,
+    *kernel)."""
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size, stride=1, padding=0,
+                 output_padding=0, dilation=1, groups: int = 1, bias: bool = True):
+        super().__init__(in_channels, out_channels, kernel_size, stride, padding, dilation,
+                         groups, bias)
+        scale = 1.0 / math.sqrt(in_channels * math.prod(self.kernel_size))
+        self.weight = Tensor.uniform(in_channels, out_channels // groups, *self.kernel_size,
+                                     low=-scale, high=scale)
+        self.output_padding = output_padding
+
+    def __call__(self, x: Tensor) -> Tensor:
+        return x.conv_transpose2d(self.weight, self.bias, self.groups, self.stride,
+                                  self.dilation, self.padding, self.output_padding)
+
+
+def ConvTranspose1d(in_channels: int, out_channels: int, kernel_size: int, stride=1, padding=0,
+                    output_padding=0, dilation=1, groups: int = 1,
+                    bias: bool = True) -> ConvTranspose2d:
+    """tinygrad's nn.ConvTranspose1d (nn/__init__.py:111-129)."""
+    return ConvTranspose2d(in_channels, out_channels, (kernel_size,), stride, padding,
+                           output_padding, dilation, groups, bias)
 
 
 class BatchNorm:
@@ -132,6 +173,56 @@ class LayerNorm2d(LayerNorm):
         return super().__call__(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
 
 
+class GroupNorm:
+    """tinygrad's nn.GroupNorm (nn/__init__.py:179-208): layernorm over each of num_groups channel
+    groups, then a per-channel affine."""
+
+    def __init__(self, num_groups: int, num_channels: int, eps: float = 1e-5,
+                 affine: bool = True):
+        self.num_groups, self.num_channels, self.eps = num_groups, num_channels, eps
+        self.weight = Tensor.ones(num_channels) if affine else None
+        self.bias = Tensor.zeros(num_channels) if affine else None
+
+    def __call__(self, x: Tensor) -> Tensor:
+        x = x.reshape(x.shape[0], self.num_groups, -1).layernorm(eps=self.eps).reshape(x.shape)
+        if self.weight is None or self.bias is None:
+            return x
+        ones = [1] * (x.ndim - 2)
+        return x * self.weight.reshape(1, -1, *ones) + self.bias.reshape(1, -1, *ones)
+
+
+class InstanceNorm:
+    """tinygrad's nn.InstanceNorm (nn/__init__.py:209-234): layernorm over each channel's spatial
+    axes, then a per-channel affine."""
+
+    def __init__(self, num_features: int, eps: float = 1e-5, affine: bool = True):
+        self.num_features, self.eps = num_features, eps
+        self.weight = Tensor.ones(num_features) if affine else None
+        self.bias = Tensor.zeros(num_features) if affine else None
+
+    def __call__(self, x: Tensor) -> Tensor:
+        x = x.reshape(x.shape[0], self.num_features, -1).layernorm(eps=self.eps).reshape(x.shape)
+        if self.weight is None or self.bias is None:
+            return x
+        ones = [1] * (x.ndim - 2)
+        return x * self.weight.reshape(1, -1, *ones) + self.bias.reshape(1, -1, *ones)
+
+
+class RMSNorm:
+    """tinygrad's nn.RMSNorm (nn/__init__.py:281-306): x * rsqrt(mean(x^2, -1) + eps) in f32."""
+
+    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine: bool = True):
+        self.eps = eps
+        self.weight = Tensor.ones(dim) if elementwise_affine else None
+
+    def _norm(self, x: Tensor) -> Tensor:
+        return x * (x.square().mean(-1, keepdim=True) + self.eps).rsqrt()
+
+    def __call__(self, x: Tensor) -> Tensor:
+        x = self._norm(x.float()).cast(x.dtype)
+        return x if self.weight is None else x * self.weight
+
+
 class Embedding:
     """tinygrad's nn.Embedding.  On the CPU backend an out-of-range id reads a zero row
     and gets no gradient; tinygrad's atomic backward clips it (nn/__init__.py:356)."""
@@ -149,6 +240,28 @@ class Embedding:
         if not dtypes.is_int(idx.dtype):
             raise TypeError(f"Expected integer dtype for index in embedding, got {idx.dtype}")
         return self.weight.embedding(idx)
+
+
+class LSTMCell:
+    """tinygrad's nn.LSTMCell (nn/__init__.py:398-420): one step from x and (h, c), zeros when
+    hc is None."""
+
+    def __init__(self, input_size: int, hidden_size: int, bias: bool = True):
+        stdv = 1.0 / math.sqrt(hidden_size)
+        self.weight_ih = Tensor.uniform(hidden_size * 4, input_size, low=-stdv, high=stdv)
+        self.weight_hh = Tensor.uniform(hidden_size * 4, hidden_size, low=-stdv, high=stdv)
+        self.bias_ih = Tensor.zeros(hidden_size * 4) if bias else None
+        self.bias_hh = Tensor.zeros(hidden_size * 4) if bias else None
+
+    def __call__(self, x: Tensor, hc=None):
+        if hc is None:
+            hc = (Tensor.zeros(x.size(0), self.weight_hh.size(1), dtype=x.dtype),) * 2
+        gates = x.linear(self.weight_ih.T, self.bias_ih) + hc[0].linear(self.weight_hh.T,
+                                                                        self.bias_hh)
+        i, f, g, o = gates.chunk(4, dim=1)
+        i, f, g, o = i.sigmoid(), f.sigmoid(), g.tanh(), o.sigmoid()
+        new_c = f * hc[1] + i * g
+        return o * new_c.tanh(), new_c
 
 
 def _get_state_dict(obj, prefix: str = "") -> dict[str, Tensor]:

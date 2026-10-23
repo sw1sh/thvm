@@ -210,26 +210,6 @@ static uint64_t py_nn_out(Tensor r, uint32_t *desc) {
   return r.t;
 }
 
-// ksd = kernel[nk], stride[nk], dilation[nk].
-EXPORT uint64_t py_nn_pool(uint64_t x, uint32_t *desc, uint32_t nk, uint32_t const *ksd) {
-  Tensor xt;
-  if (!py_nn_in(x, desc, &xt)) {
-    return 0;
-  }
-  return py_nn_out(nn_pool(xt, nk, ksd, ksd + nk, ksd + 2 * nk), desc);
-}
-
-// xwb = {x, w, b} (b == 0: no bias) with their three descs; opts = groups,
-// stride[2], dilation[2], padding[2].
-EXPORT uint64_t py_nn_conv2d(uint64_t const *xwb, uint32_t *desc, uint32_t const *opts) {
-  Tensor x, w, b;
-  if (!py_nn_in(xwb[0], desc, &x) || !py_nn_in(xwb[1], desc + PY_NN_DESC, &w)
-      || !py_nn_in(xwb[2], desc + 2 * PY_NN_DESC, &b)) {
-    return 0;
-  }
-  return py_nn_out(nn_conv2d(x, w, b, opts[0], opts + 1, opts + 3, opts + 5), desc);
-}
-
 // The n tensors ts[] (0: none) with their n descs.
 static int py_nn_ins(uint64_t const *ts, uint32_t const *desc, uint32_t n, Tensor *out) {
   for (uint32_t i = 0; i < n; i++) {
@@ -252,6 +232,62 @@ static int py_nn_axes(Tensor const *x, uint32_t n, int32_t const *axes, u32 *out
     out[i] = (u32)a;
   }
   return 1;
+}
+
+// ksd = kernel[nk], stride[nk], dilation[nk].
+EXPORT uint64_t py_nn_pool(uint64_t x, uint32_t *desc, uint32_t nk, uint32_t const *ksd) {
+  Tensor xt;
+  if (!py_nn_in(x, desc, &xt)) {
+    return 0;
+  }
+  return py_nn_out(nn_pool(xt, nk, ksd, ksd + nk, ksd + 2 * nk), desc);
+}
+
+// The n = rank(w) - 2 spatial axes' options of a conv: opts = groups, stride[n],
+// dilation[n], then (begin, end)[n] of padding (negative shrinks) and, for a
+// transposed conv, output_padding[n].
+static int py_nn_conv_opts(Tensor const *w, int32_t const *opts, int transposed, u32 *groups,
+                           u32 *stride, u32 *dilation, i32 *pad, u32 *out_pad) {
+  if (w->shape.ndim < 3) {
+    return 0;
+  }
+  u32 n = w->shape.ndim - 2;
+  *groups = (u32)opts[0];
+  for (u32 j = 0; j < n; j++) {
+    stride[j]   = (u32)opts[1 + j];
+    dilation[j] = (u32)opts[1 + n + j];
+    pad[2 * j]     = opts[1 + 2 * n + 2 * j];
+    pad[2 * j + 1] = opts[2 + 2 * n + 2 * j];
+    if (transposed) {
+      out_pad[j] = (u32)opts[1 + 4 * n + j];
+    }
+  }
+  return 1;
+}
+
+// xwb = {x, w, b} (b == 0: no bias) with their three descs.
+EXPORT uint64_t py_nn_conv2d(uint64_t const *xwb, uint32_t *desc, int32_t const *opts) {
+  Tensor t[3];
+  u32 groups, stride[MAX_DIM], dilation[MAX_DIM], out_pad[MAX_DIM];
+  i32 pad[2 * MAX_DIM];
+  if (!py_nn_ins(xwb, desc, 3, t)
+      || !py_nn_conv_opts(&t[1], opts, 0, &groups, stride, dilation, pad, out_pad)) {
+    return 0;
+  }
+  return py_nn_out(nn_conv2d(t[0], t[1], t[2], groups, stride, dilation, pad), desc);
+}
+
+EXPORT uint64_t py_nn_conv_transpose2d(uint64_t const *xwb, uint32_t *desc,
+                                       int32_t const *opts) {
+  Tensor t[3];
+  u32 groups, stride[MAX_DIM], dilation[MAX_DIM], out_pad[MAX_DIM];
+  i32 pad[2 * MAX_DIM];
+  if (!py_nn_ins(xwb, desc, 3, t)
+      || !py_nn_conv_opts(&t[1], opts, 1, &groups, stride, dilation, pad, out_pad)) {
+    return 0;
+  }
+  return py_nn_out(nn_conv_transpose2d(t[0], t[1], t[2], groups, stride, dilation, pad,
+                                       out_pad), desc);
 }
 
 // op: a UOP_RESHAPE / PERMUTE / EXPAND (n entries) or PAD / SHRINK (2 * ndim).

@@ -1,6 +1,7 @@
 // A movement op on x and the shape it gives, as Tensor.reshape / permute /
-// expand / pad / shrink compute it (py/thvm/tensor.py).  arg has n entries for
-// RESHAPE, PERMUTE and EXPAND, and 2 * ndim (begin, end) pairs for PAD and SHRINK.
+// expand / pad / shrink / flip compute it (py/thvm/tensor.py).  arg has n entries
+// for RESHAPE, PERMUTE and EXPAND, 2 * ndim (begin, end) pairs for PAD and SHRINK,
+// and FLIP's axes bitmask in arg[0].
 fn Tensor nn_move(u32 op, Tensor x, u32 n, u32 const *arg) {
   Tensor r = x;
   switch (op) {
@@ -32,6 +33,10 @@ fn Tensor nn_move(u32 op, Tensor x, u32 n, u32 const *arg) {
         r.shape.dims[i] = arg[2 * i + 1] - arg[2 * i];
       }
       r.t = uop_shrink(x.t, x.shape.ndim, arg);
+      break;
+    }
+    case UOP_FLIP: {
+      r.t = uop_flip(x.t, arg[0]);
       break;
     }
     default: {

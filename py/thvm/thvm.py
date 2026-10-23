@@ -87,8 +87,6 @@ _uop_broadcast2 = _bind("py_uop_broadcast2", c_int32, ctypes.POINTER(c_uint64),
                         ctypes.POINTER(c_uint32))
 _nn_pool = _bind("py_nn_pool", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_uint32,
                  ctypes.POINTER(c_uint32))
-_nn_conv2d = _bind("py_nn_conv2d", c_uint64, ctypes.POINTER(c_uint64), ctypes.POINTER(c_uint32),
-                   ctypes.POINTER(c_uint32))
 _nn_elementwise = _bind("py_nn_elementwise", c_uint64, c_uint32, c_uint64,
                         ctypes.POINTER(c_uint32))
 _nn_softmax = _bind("py_nn_softmax", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_int32,
@@ -101,7 +99,9 @@ _NN_MANY = {name: _bind(f"py_nn_{name}", c_uint64, ctypes.POINTER(c_uint64),
             for name, extra in (("dot", ()), ("linear", ()), ("where", ()),
                                 ("batchnorm", ()), ("maximum", (c_uint32,)),
                                 ("sparse_categorical_crossentropy", (c_int32,)),
-                                ("scaled_dot_product_attention", (c_uint32,)))}
+                                ("scaled_dot_product_attention", (c_uint32,)),
+                                ("conv2d", (ctypes.POINTER(c_int32),)),
+                                ("conv_transpose2d", (ctypes.POINTER(c_int32),)))}
 _nn_arange = _bind("py_nn_arange", c_uint64, ctypes.c_double, ctypes.c_double, ctypes.c_double,
                    c_uint32, ctypes.POINTER(c_uint32))
 _nn_tri = _bind("py_nn_tri", c_uint64, c_uint64, ctypes.POINTER(c_uint32), c_int32, c_uint32)
@@ -394,6 +394,13 @@ class Thvm:
     nn_maximum_fn   = _NN_MANY["maximum"]
     nn_sparse_ce_fn = _NN_MANY["sparse_categorical_crossentropy"]
     nn_sdpa_fn      = _NN_MANY["scaled_dot_product_attention"]
+    nn_conv2d_fn    = _NN_MANY["conv2d"]
+    nn_conv_transpose2d_fn = _NN_MANY["conv_transpose2d"]
+
+    @staticmethod
+    def i32s(vals):
+        """vals as a C int32 array (an op's integer options)."""
+        return (c_int32 * max(len(vals), 1))(*[int(v) for v in vals])
 
     def nn_arange(self, start, stop, step, dtype: int):
         desc = self._nn_desc([None])
@@ -433,13 +440,6 @@ class Thvm:
         ax = (c_int32 * max(len(axes), 1))(*[int(a) for a in axes])
         return self._nn_out(_nn_layernorm(c_uint64(int(x[0])), desc, c_uint32(len(axes)), ax,
                                           ctypes.c_double(eps)), desc)
-
-    def nn_conv2d(self, x, w, b, groups, stride, dilation, padding):
-        """nn_conv2d (src/nn/conv2d.c) of (term, dtype id, shape) triples; b None for no bias."""
-        desc = self._nn_desc([x, w, b])
-        xwb = (c_uint64 * 3)(int(x[0]), int(w[0]), 0 if b is None else int(b[0]))
-        opts = (c_uint32 * 7)(int(groups), *[int(v) for v in (*stride, *dilation, *padding)])
-        return self._nn_out(_nn_conv2d(xwb, desc, opts), desc)
 
     def permute(self, src: Term, perm) -> Term:
         return self._move(_uop_permute, src, perm)

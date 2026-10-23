@@ -27,7 +27,8 @@ end that switches to an `nn_*` op keeps its kernel keys:
 | `nn_softmax` | `softmax`, `log_softmax` | mixin/op.py:657-700 |
 | `nn_layernorm`, `nn_batchnorm` | `layernorm`, `batchnorm` | mixin/op.py:1646-1683 |
 | `nn_dot`, `nn_linear` | `__matmul__`, `linear` | mixin/op.py:387-392, 1254-1271 |
-| `nn_pool`, `nn_conv2d`, `nn_max_pool2d` | `_pool`, `conv2d`, `max_pool2d` | mixin/movement.py:598-616, mixin/op.py:1335-1378, 1564-1605 |
+| `nn_pool`, `nn_conv2d`, `nn_max_pool2d` | `_pool`, `conv2d` (1 or 2 spatial axes), `max_pool2d` | mixin/movement.py:598-616, mixin/op.py:1335-1378, 1564-1605 |
+| `nn_conv_transpose2d` | `conv_transpose2d` | mixin/op.py:1607-1645 |
 | `nn_arange`, `nn_tri` | `arange` (a host-written leaf), `triu`, `tril` | mixin/op.py:166-195, 233-280 |
 | `nn_sparse_categorical_crossentropy` | `sparse_categorical_crossentropy` | mixin/op.py:1723-1746 |
 | `nn_scaled_dot_product_attention` | `scaled_dot_product_attention` (no dropout) | mixin/rand.py:298-327 |
@@ -47,7 +48,7 @@ back.  A failed op returns 0.
 
 | Export | Arguments after the tensors |
 |---|---|
-| `py_nn_move(op, x, desc, n, arg)` | a `UOP_RESHAPE`/`PERMUTE`/`EXPAND` (n dims) or `PAD`/`SHRINK` (2 * ndim) |
+| `py_nn_move(op, x, desc, n, arg)` | a `UOP_RESHAPE`/`PERMUTE`/`EXPAND` (n dims), `PAD`/`SHRINK` (2 * ndim) or `FLIP` (an axes bitmask) |
 | `py_nn_binop(op, ab, desc)` | |
 | `py_nn_elementwise(op, x, desc)` | op from `py_const_NN_*` |
 | `py_nn_reduce(kind, x, desc, n, axes, keepdim, mean)` | `REDUCE_SUM` / `REDUCE_MAX`, i32 axes |
@@ -62,7 +63,8 @@ back.  A failed op returns 0.
 | `py_nn_tri(x, desc, diagonal, lower)` | |
 | `py_nn_sparse_categorical_crossentropy(xy, desc, axis)` | logits, int labels |
 | `py_nn_scaled_dot_product_attention(qkvm, desc, causal)` | q, k, v, an additive mask (0: none) |
-| `py_nn_conv2d(xwb, desc, opts)` | groups, stride[2], dilation[2], padding[2] |
+| `py_nn_conv2d(xwb, desc, opts)` | i32 opts over the n = rank(w) - 2 spatial axes: groups, stride[n], dilation[n], (begin, end)[n] of padding, a negative side shrinking |
+| `py_nn_conv_transpose2d(xwb, desc, opts)` | the same, then output_padding[n]; w is (C_in, C_out / groups, *kernel) |
 
 A host other than Python (an FFI such as WolframKernel's) needs three more
 pieces, all in the same library:
