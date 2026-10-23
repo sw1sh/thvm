@@ -276,6 +276,46 @@ EXPORT void py_pin_set(uint64_t handle, uint64_t term) {
 EXPORT void py_pin_drop(uint64_t handle) {
   extern_pin_handle_drop(handle);
 }
+// A handle's current term, which a collection relocates; 0 when unset.  A host
+// that holds only handles reads the term here right before an op.
+EXPORT uint64_t py_pin_get(uint64_t handle) {
+  return extern_pin_handle_get(handle);
+}
+
+// A CPU TAG_TEN over the caller's bytes, without a copy: the buffer's last
+// release calls release(handle).  0 when nbytes does not cover the shape.
+EXPORT uint64_t py_ten_external(uint32_t dtype, uint32_t ndim, uint32_t const *dims, void *data,
+                                uint64_t nbytes, void (*release)(void *), void *handle) {
+  if (ndim > MAX_DIM) {
+    return 0;
+  }
+  Shape shape = {ndim, {0}};
+  memcpy(shape.dims, dims, ndim * sizeof dims[0]);
+  if (dtype_storage_bytes(dtype, shape_numel(shape)) > nbytes) {
+    return 0;
+  }
+  u32 buf = cpu_buf_alloc_external(data, nbytes, release, handle);
+  u32 id  = tensor_alloc_adopt(&CPU_BACKEND, shape, dtype, buf);
+  CPU_BACKEND.buf_decref(buf);   // the descriptor holds the one reference
+  return term_new(0, TAG_TEN, dtype, id);
+}
+
+// A CPU TAG_TEN's buffer, with its view's element offset and strides (in
+// elements, 0 broadcasts, MAX_DIM of them); NULL off the CPU.  The pointer
+// stays valid while the tensor is pinned.
+EXPORT void *py_ten_data(uint64_t t, int32_t *offset, int32_t *strides) {
+  if (term_tag(t) != TAG_TEN) {
+    return NULL;
+  }
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT || TENS[id].backend != &CPU_BACKEND) {
+    return NULL;
+  }
+  TenDesc *d = &TENS[id];
+  *offset = d->view.offset;
+  memcpy(strides, d->view.strides, sizeof d->view.strides);
+  return CPU_BUFS[d->buf_id].data;
+}
 
 static uint64_t PY_RECLAIM_AFTER = 0;   // resident bytes after the last reclaim
 

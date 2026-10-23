@@ -39,4 +39,21 @@ uint64_t py_nn_conv2d(uint64_t const *xwb,          // x, w, b (0: no bias)
                                                     // dilation[2], padding[2]
 ```
 
-Tests: tests/test_nn_conv.c (values against a direct loop).
+A host other than Python (an FFI such as WolframKernel's) needs three more
+pieces, all in the same library:
+
+- **Lifetime.** A term is a heap word that a collection moves.  The host
+  holds a pin handle instead: `py_pin_set(id, term)` roots the term under an id
+  the host picks, `py_pin_get(id)` reads its current term (read it right before
+  an op, then pin the result), `py_pin_drop(id)` releases it.  Collections run
+  only in `py_gc_collect(roots, n)`, which the host calls after a realize when
+  `py_gc_pending()` is nonzero; with every live term pinned, `n` is 0.
+- **Buffers in.** `py_ten_external(dtype, ndim, dims, data, nbytes, release,
+  handle)` makes a CPU tensor over the host's bytes without a copy; the
+  buffer's last release calls `release(handle)`.
+- **Buffers out.** `py_ten_data(t, &offset, strides)` gives a CPU tensor's
+  buffer, its view's element offset and its strides (in elements, 0
+  broadcasts); the pointer stays valid while the tensor is pinned.
+
+Tests: tests/test_nn_conv.c (values against a direct loop),
+py/tests/test_flat_abi.py (the host-facing exports through ctypes).
