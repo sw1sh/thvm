@@ -539,6 +539,27 @@ static void rmu_emit_term(Term t, FILE *fp) {
       fputs(")", fp);
       return;
     }
+    case UOP_POW: {
+      // An int POW, which uop_sym leaves to thvm_ipow (codegen/ipow.c) on the
+      // CPU: a float one is lowered before the renderer sees it.
+      u32 dt = rmu_dtype_of(t);
+      char const *ty = rmu_c_type_name(dt);
+      Term e = heap_read(loc + 1);
+      fprintf(fp, "((%s)thvm_ipow((unsigned long long)(", ty);
+      rmu_emit_term(heap_read(loc + 0), fp);
+      fputs("), (unsigned long long)(", fp);
+      rmu_emit_term(e, fp);
+      fputs("), ", fp);
+      if (dtype_is_signed(dt)) {
+        fputs("(", fp);
+        rmu_emit_term(e, fp);
+        fputs(") < 0", fp);
+      } else {
+        fputs("0", fp);
+      }
+      fprintf(fp, ", %uu))", dtype_info(dt)->bits);
+      return;
+    }
     case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN: {
       int xexp2f = op == UOP_EXP2 && RMU_TARGET == CG_TARGET_C && rmu_dtype_of(t) == DT_FP32;
       const char *fn_name = xexp2f ? "thvm_xexp2f"
@@ -711,7 +732,7 @@ static u32 rmu_walk_arity(u32 op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR: case UOP_ISHL:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW:
     case UOP_INDEX_E:
       return 2;
     case UOP_NEG:  case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN:
@@ -4566,6 +4587,7 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   // Guarded: several kernels can share one source file.
   fputs("#ifndef THVM_XEXP2F\n#define THVM_XEXP2F\n", fp);
   fputs(THVM_XEXP2F_SRC, fp);
+  fputs(THVM_IPOW_SRC, fp);
   fputs("\n#endif\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
   fputs("              unsigned n, const unsigned *in_numels,\n", fp);
@@ -4700,6 +4722,7 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   // Guarded: several kernels can share one source file.
   fputs("#ifndef THVM_XEXP2F\n#define THVM_XEXP2F\n", fp);
   fputs(THVM_XEXP2F_SRC, fp);
+  fputs(THVM_IPOW_SRC, fp);
   fputs("\n#endif\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
   fputs("              unsigned n, const unsigned *in_numels,\n", fp);

@@ -1,4 +1,4 @@
-// opcode is ADD, MUL, CMPLT, CMPEQ or ASSIGN; heap layout [a, b].
+// opcode is ADD, MUL, POW, CMPLT, CMPEQ or ASSIGN; heap layout [a, b].
 fn Term uop_binary(u32 opcode, Term a, Term b) {
   Term r = uop_rewrite_binary(opcode, a, b);
   if (r != 0) return r;

@@ -482,7 +482,9 @@ u64             dtype_storage_bytes(u32 dt, u64 numel);
 // identical but the backward graph is far smaller.
 #define UOP_DETACH      43
 // 44 = UOP_ISHL, 51 = UOP_ISHR (declared in the Symbolic INDEX layer above).
-// 45-50: unassigned.
+#define UOP_POW         45   // heap = [b, e]; b ** e, tinygrad's Ops.POW, which
+                             //   uop/sym.c lowers to xpow or xpow_int at emit.
+// 46-50: unassigned.
 // UOP_COPY: lazy device transfer.  Heap = [src, NUM(device+1)] (arity 1,
 //   src is the only child; the trailing NUM holds the EXPLICIT target
 //   device, device+1 so generic=-1 stores as 0).  The COPY carries src's

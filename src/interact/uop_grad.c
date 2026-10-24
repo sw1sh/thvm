@@ -10,6 +10,8 @@
 //
 //   ADD(a, b)        gy_for_a = gy            ; gy_for_b = gy
 //   MUL(a, b)        gy_for_a = MUL(b_fwd,gy) ; gy_for_b = MUL(a_fwd,gy)
+//   POW(b, e)        gy_for_b = gy * (e == 0 ? e : e * b ** (e - 1)),
+//                    gy_for_e = gy * (b == 0 ? (e < 0 ? -inf : 0) : y * log2(b) * ln 2)
 //   IWHERE(c, t, e)  gy_for_t = where(c, gy, 0) ; gy_for_e = where(c, 0, gy)
 //                    (c gets none)
 //   NEG(a)           gy_for_a = NEG(gy)
@@ -893,6 +895,36 @@ static Term interact_grad_dispatch(Term grad_term) {
       Term a_bwd = grad_bwd_emit_uop(a_resolved, gy_a);
       Term b_bwd = grad_bwd_emit_uop(b_resolved, gy_b);
       return uop_binary(UOP_ADD, a_bwd, b_bwd);
+    }
+
+    // tinygrad mixin/gradient.py:75-76: b gets e * b ** (e - 1), e where e is 0;
+    // e gets y * log2(b) * ln 2, where b is 0 instead 0, or -inf under e < 0.
+    case UOP_POW: {
+      Term b = heap_read(y_loc + 0);
+      Term e = heap_read(y_loc + 1);
+      Term b_resolved = term_resolve(b);
+      Term e_resolved = term_resolve(e);
+      u64  cb = 0, ce = 0;
+      Term b_fwd = b_resolved, e_fwd = e_resolved;
+      if (term_tag(b_resolved) != TAG_TEN) { cb = grad_cell_alloc(b); b_fwd = grad_fwd_of(cb); }
+      if (term_tag(e_resolved) != TAG_TEN) { ce = grad_cell_alloc(e); e_fwd = grad_fwd_of(ce); }
+      u32  dt = grad_target_dtype();
+      f32  fv[2] = { 1.0f, -INFINITY };
+      u32  bits[2];
+      memcpy(bits, fv, sizeof bits);
+      Term zero = uop_const(dt, 0), one = uop_const(dt, bits[0]), ninf = uop_const(dt, bits[1]);
+      Term pw   = uop_binary(UOP_POW, b_fwd, e_fwd);
+      Term db   = uop_where(uop_binary(UOP_CMPEQ, e_fwd, zero), e_fwd,
+                            uop_binary(UOP_MUL, e_fwd, uop_binary(UOP_POW, b_fwd,
+                                uop_binary(UOP_ADD, e_fwd, uop_unary(UOP_NEG, one)))));
+      Term de   = uop_where(uop_binary(UOP_CMPEQ, b_fwd, zero),
+                            uop_where(uop_binary(UOP_CMPLT, e_fwd, zero), ninf, zero),
+                            uop_binary(UOP_MUL, uop_binary(UOP_MUL, pw, uop_unary(UOP_LOG2, b_fwd)),
+                                       grad_ln2_const()));
+      (void)cb; (void)ce;
+      Term b_bwd = grad_bwd_emit_uop(b_resolved, uop_binary(UOP_MUL, gy, db));
+      Term e_bwd = grad_bwd_emit_uop(e_resolved, uop_binary(UOP_MUL, gy, de));
+      return uop_binary(UOP_ADD, b_bwd, e_bwd);
     }
 
     case UOP_CMPLT: case UOP_CMPEQ: {

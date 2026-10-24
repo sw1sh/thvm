@@ -106,7 +106,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
       return uop_unary(op, srcs[0]);
 
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT:
-    case UOP_CMPEQ: case UOP_ASSIGN:
+    case UOP_CMPEQ: case UOP_ASSIGN: case UOP_POW:
       return uop_binary(op, srcs[0], srcs[1]);
 
     case UOP_REDUCE: {
