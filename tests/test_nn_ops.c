@@ -318,6 +318,22 @@ int main(void) {
       CHECK(fabsf(got[0] - 8.0f) < 1e-5f && fabsf(got[1] + 8.0f) < 1e-5f && isnan(got[2]));
       CHECK(got[3] == 1.0f && fabsf(got[4] - 3.0f) < 1e-5f);
     }
+    // An int pair: a negative exponent truncates to 0 but for a base of +-1 (xpow_int).
+    i32 const ib[5] = {0, 1, -1, 2, -1}, ie[5] = {-1, -5, -5, -1, -6};
+    Tensor ix[2];
+    for (u32 k = 0; k < 2; k++) {
+      u32 tid = tensor_alloc(&CPU_BACKEND, (Shape){1, {5}}, DT_INT32);
+      CPU_BACKEND.buf_write(TENS[tid].buf_id, (void *)(k ? ie : ib), sizeof ib);
+      ix[k] = (Tensor){term_new(0, TAG_TEN, DT_INT32, tid), DT_INT32, {1, {5}}};
+    }
+    Tensor ip = nn_call(nn_op_id("pow"), ix, 2, NULL, 0, NULL, 0);
+    CHECK(ip.t != 0 && ip.dtype == DT_INT32);
+    if (ip.t != 0) {
+      i32 got[5] = {0};
+      Term done = term_resolve(thvm_realize(ip.t));
+      CPU_BACKEND.buf_read(TENS[term_val(done)].buf_id, got, sizeof got);
+      CHECK(got[0] == 0 && got[1] == 1 && got[2] == -1 && got[3] == 0 && got[4] == 1);
+    }
   }
 
   TEST_REPORT();

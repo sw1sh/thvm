@@ -2,7 +2,10 @@
 // (codegen/decomp/transcendental.py:257-265): exp2(log2|b| * e), NaN for a negative
 // base under a non-integer exponent (a -inf base stays |b| ** e), negated for an
 // odd integer exponent, and 1 wherever e == 0.  An int pair computes in f32 and
-// rounds back to its dtype.
+// rounds back to its dtype, a negative exponent giving xpow_int's 0, or +-1 for a
+// base of +-1 (transcendental.py:279-282).  The gradient is the decomposition's;
+// tinygrad's POW has its own rule (mixin/gradient.py:75-76), which differs at a
+// zero or negative base.
 fn Tensor nn_pow(Tensor b, Tensor e) {
   if (!nn_broadcast(&b, &e)) {
     b.t = 0;
@@ -28,9 +31,15 @@ fn Tensor nn_pow(Tensor b, Tensor e) {
   Tensor out   = nn_where(neg, negb, ret);
   out = nn_where(nn_binop(UOP_CMPEQ, e, nn_scalar(e, 0.0, 1)), nn_scalar(out, 1.0, 1), out);
   if (fdt != dt) {
-    // Round half away from zero, then truncate into the int dtype.
+    // Round half away from zero; under a negative exponent only a base of +-1
+    // keeps a nonzero value, its sign that of odd e for -1.
     Tensor down = nn_binop_f(UOP_ADD, out, -0.5), up = nn_binop_f(UOP_ADD, out, 0.5);
-    out = nn_cast(nn_where(nn_cmplt(out, nn_scalar(out, 0.0, 1)), down, up), dt);
+    Tensor near = nn_where(nn_cmplt(out, nn_scalar(out, 0.0, 1)), down, up);
+    Tensor sgn  = nn_where(odd, nn_scalar(out, -1.0, 1), nn_scalar(out, 1.0, 1));
+    Tensor neg1 = nn_where(nn_binop(UOP_CMPEQ, b, nn_scalar(b, -1.0, 1)), sgn,
+                           nn_where(nn_binop(UOP_CMPEQ, b, nn_scalar(b, 1.0, 1)),
+                                    nn_scalar(out, 1.0, 1), nn_scalar(out, 0.0, 1)));
+    out = nn_cast(nn_where(nn_cmplt(e, nn_scalar(e, 0.0, 1)), neg1, near), dt);
   }
   return out;
 }
