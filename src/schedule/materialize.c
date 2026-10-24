@@ -4505,7 +4505,11 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // contiguous.  A multi-store root or a data-dependent address turns the opt
   // passes off (KernelEntry.no_opts).
   if (ke->cached_lift.store_root != 0) {
-    Term root = uop_dag_renumber_axes(ke->cached_lift.store_root);
+    Term root = ke->cached_lift.store_root;
+    // tinygrad merges ranges before its opts; CPU only until a GPU run checks
+    // the Metal and CUDA renderers on merged axes.
+    if (CURRENT_BACKEND == &CPU_BACKEND) root = uop_simplify_ranges(root);
+    root = uop_dag_renumber_axes(root);
     ke->cached_lift.store_root = root;
     ke->no_opts = (term_tag(root) == TAG_UOP && term_ext(root) == UOP_AFTER)
                || uop_dag_has_dynamic_index(root);
