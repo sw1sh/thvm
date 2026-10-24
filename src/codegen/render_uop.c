@@ -234,6 +234,7 @@ static const char *rmu_gpu_alu_type_name(u32 dtype) {
 static void rmu_emit_fp8_helpers(FILE *fp) {
   if (RMU_TARGET == CG_TARGET_CUDA) {
     fputs(
+      "#include <cuda_fp8.h>\n"
       "__device__ __forceinline__ float thvm_fp8e5m2_decode(unsigned char x){\n"
       "  unsigned short ur=(unsigned short)x<<8;\n"
       "  if((ur&0x7FFFu)>0x7C00u) ur=0x7FFFu;\n"
@@ -255,6 +256,13 @@ static void rmu_emit_fp8_helpers(FILE *fp) {
       "    ur=(unsigned short)(sign|exponent|mantissa);\n"
       "  } else { ur=(unsigned short)(sign|exponent|mantissa); }\n"
       "  return __half2float(__ushort_as_half(ur));\n"
+      "}\n"
+      // tinygrad's CUDA fp8: __nv_fp8_e4m3(float) saturates to the finite range.
+      "__device__ __forceinline__ unsigned char thvm_fp8e4m3_encode(float x){\n"
+      "  return __nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3);\n"
+      "}\n"
+      "__device__ __forceinline__ unsigned char thvm_fp8e5m2_encode(float x){\n"
+      "  return __nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E5M2);\n"
       "}\n", fp);
   } else {
     fputs(
@@ -304,15 +312,23 @@ static u32 rmu_slot_dtype(Term t) {
 // An MSL bfloat lvalue rejects implicit float narrowing, so a bf16/fp16 Metal
 // store wraps its rhs.  C types those buffers float; CUDA converts implicitly.
 static void rmu_store_cast_open(Term buf, FILE *fp) {
-  if (RMU_TARGET != CG_TARGET_METAL) return;
   u32 dt = rmu_slot_dtype(buf);
+  if (RMU_TARGET == CG_TARGET_CUDA && (dt == DT_FP8E4M3 || dt == DT_FP8E5M2)) {
+    fputs(dt == DT_FP8E4M3 ? "thvm_fp8e4m3_encode(" : "thvm_fp8e5m2_encode(", fp);
+    return;
+  }
+  if (RMU_TARGET != CG_TARGET_METAL) return;
   if (dt == DT_BF16 || dt == DT_FP16) {
     fprintf(fp, "%s(", rmu_msl_type_name(dt));
   }
 }
 static void rmu_store_cast_close(Term buf, FILE *fp) {
-  if (RMU_TARGET != CG_TARGET_METAL) return;
   u32 dt = rmu_slot_dtype(buf);
+  if (RMU_TARGET == CG_TARGET_CUDA && (dt == DT_FP8E4M3 || dt == DT_FP8E5M2)) {
+    fputc(')', fp);
+    return;
+  }
+  if (RMU_TARGET != CG_TARGET_METAL) return;
   if (dt == DT_BF16 || dt == DT_FP16) {
     fputc(')', fp);
   }
@@ -616,6 +632,18 @@ static void rmu_emit_term(Term t, FILE *fp) {
           rmu_emit_term(src, fp);
           fputs(")", fp);
         }
+      } else if (RMU_TARGET == CG_TARGET_CUDA
+                 && (dst_dt == DT_FP16 || dst_dt == DT_BF16
+                     || dst_dt == DT_FP8E4M3 || dst_dt == DT_FP8E5M2)) {
+        // CUDA computes these in float (rmu_gpu_alu_type_name): the cast
+        // rounds through the narrow type and back, as a stored buffer would.
+        char const *open = dst_dt == DT_FP16    ? "__half2float(__float2half(("
+                         : dst_dt == DT_BF16    ? "__bfloat162float(__float2bfloat16(("
+                         : dst_dt == DT_FP8E4M3 ? "thvm_fp8e4m3_decode(thvm_fp8e4m3_encode(("
+                         :                        "thvm_fp8e5m2_decode(thvm_fp8e5m2_encode((";
+        fprintf(fp, "%sfloat)(", open);
+        rmu_emit_term(src, fp);
+        fputs(")))", fp);
       } else if (dst_dt == DT_BOOL) {
         // A bool cast is truthiness (x != 0), not truncation.
         fputs("((", fp);
@@ -880,6 +908,20 @@ static int rmu_term_has_call(Term t, u32 depth) {
   if (op == UOP_EXP2 || op == UOP_LOG2 || op == UOP_SIN) return 1;
   for (u32 i = 0, n = rmu_walk_arity(op); i < n; i++) {
     if (rmu_term_has_call(heap_read(term_val(t) + i), depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// 1 iff the kernel under `t` casts to fp8.
+static int rmu_term_casts_fp8(Term t, u32 depth) {
+  if (depth > RMU_MAX_WALK_DEPTH || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_CAST) {
+    u32 dt = term_val(heap_read(term_val(t) + 1));
+    if (dt == DT_FP8E4M3 || dt == DT_FP8E5M2) return 1;
+  }
+  for (u32 i = 0, n = rmu_walk_arity_kernel(op); i < n; i++) {
+    if (rmu_term_casts_fp8(heap_read(term_val(t) + i), depth + 1)) return 1;
   }
   return 0;
 }
@@ -4888,8 +4930,10 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
     fputs("using namespace nvcuda;\n", fp);
   }
   fputs("typedef unsigned int uint;\n", fp);
-  // fp8 decode helpers if any input/output is fp8 (rmu_emit_fp8_helpers).
-  if (rmu_kernel_has_fp8_input(slot_bufs, n_inputs)) rmu_emit_fp8_helpers(fp);
+  // The fp8 decoders and encoders if a slot is fp8 or the kernel casts to it.
+  if (rmu_kernel_has_fp8_input(slot_bufs, n_inputs) || rmu_term_casts_fp8(root, 0)) {
+    rmu_emit_fp8_helpers(fp);
+  }
   // nvrtc predefines no <math.h> macros, and the MAX init uses -INFINITY.
   fputs("#ifndef INFINITY\n"
         "#define INFINITY __int_as_float(0x7f800000)\n"
