@@ -368,7 +368,14 @@ static u32 uwalk_term_dtype_of(UWalkCtx *c, Term t) {
       return DT_BOOL;
     case UOP_RECIP:
       return (uwalk_term_dtype(c, heap_read(loc)) == DT_FP64) ? DT_FP64 : DT_FP32;
-    case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN:
+    case UOP_EXP2: {
+      // A float32 exp2 is thvm_xexp2f's float (codegen/xexp2f.c), as the
+      // renderer's rmu_dtype_of picks it; any other is libm's double.
+      u32 dt = DT_FP32;
+      (void)term_dtype_in(t, 0, &dt);
+      return (dt == DT_FP32) ? DT_FP32 : DT_FP64;
+    }
+    case UOP_LOG2: case UOP_SQRT: case UOP_SIN:
       return DT_FP64;
     case UOP_NEG: case UOP_OPT:
       return uwalk_term_dtype(c, heap_read(loc));
@@ -687,7 +694,12 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
       return -uwalk_eval_float(c, heap_read(loc + 0), dt);
     case UOP_RECIP:
       return uwalk_round(dt, 1.0 / uwalk_cast_float(c, heap_read(loc + 0), dt));
-    case UOP_EXP2: return exp2(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
+    case UOP_EXP2:
+      // A float32 exp2 is the C kernels' thvm_xexp2f (codegen/xexp2f.c).
+      if (uwalk_term_dtype(c, t) == DT_FP32) {
+        return thvm_xexp2f((f32)uwalk_cast_float(c, heap_read(loc + 0), DT_FP32));
+      }
+      return exp2(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
     case UOP_LOG2: return log2(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
     case UOP_SQRT: return sqrt(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
     case UOP_SIN:  return sin(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));

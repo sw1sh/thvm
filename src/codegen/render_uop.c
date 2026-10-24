@@ -5,6 +5,7 @@
 // binds by axis type and OPT annotation; TC matmuls use simdgroup / WMMA tiles.
 
 static void rmu_emit_term(Term t, FILE *fp);
+static u32  rmu_dtype_of(Term t);
 
 // Renderer target.  The body emit is shared: C renders LOCAL/GLOBAL axes as
 // plain loops, while Metal and CUDA bind them to thread positions.
@@ -513,7 +514,9 @@ static void rmu_emit_term(Term t, FILE *fp) {
       return;
     }
     case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN: {
-      const char *fn_name = (op == UOP_EXP2) ? "exp2"
+      int xexp2f = op == UOP_EXP2 && RMU_TARGET == CG_TARGET_C && rmu_dtype_of(t) == DT_FP32;
+      const char *fn_name = xexp2f ? "thvm_xexp2f"
+                          : (op == UOP_EXP2) ? "exp2"
                           : (op == UOP_LOG2) ? "log2"
                           : (op == UOP_SIN)  ? "sin"
                           :                    "sqrt";
@@ -4527,6 +4530,10 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   // stores, valid at any base offset.
   fputs("typedef float float4 __attribute__((vector_size(16),"
         "aligned(4)));\n", fp);
+  // Guarded: several kernels can share one source file.
+  fputs("#ifndef THVM_XEXP2F\n#define THVM_XEXP2F\n", fp);
+  fputs(THVM_XEXP2F_SRC, fp);
+  fputs("\n#endif\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
   fputs("              unsigned n, const unsigned *in_numels,\n", fp);
   fputs("              const unsigned *kvar_vals) {\n", fp);
@@ -4650,6 +4657,10 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   // stores, valid at any base offset.
   fputs("typedef float float4 __attribute__((vector_size(16),"
         "aligned(4)));\n", fp);
+  // Guarded: several kernels can share one source file.
+  fputs("#ifndef THVM_XEXP2F\n#define THVM_XEXP2F\n", fp);
+  fputs(THVM_XEXP2F_SRC, fp);
+  fputs("\n#endif\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
   fputs("              unsigned n, const unsigned *in_numels,\n", fp);
   fputs("              const unsigned *kvar_vals) {\n", fp);
