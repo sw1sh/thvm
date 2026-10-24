@@ -1363,7 +1363,7 @@ static u32 rmu_dtype_of(Term t) {
   return dt;
 }
 
-// `<acc> = combine(acc, src);` for the REDUCE kind.  An int MAX compares, as
+// `<acc> = combine(acc, src);` for the REDUCE kind.  A MAX in C compares, as
 // tinygrad lowers MAX without a native op (codegen/decomp/op.py:84); a bool
 // SUM or MAX is an OR (uop/symbolic.py:163-166).
 static void rmu_emit_reduce_combine(const char *acc_name, u32 kind, u32 dt,
@@ -1372,15 +1372,14 @@ static void rmu_emit_reduce_combine(const char *acc_name, u32 kind, u32 dt,
     fprintf(fp, "%s = %s | ((", acc_name, acc_name);
     rmu_emit_term(src, fp);
     fputs(") != 0);\n", fp);
-  } else if (rmu_holds_int(dt) && kind == REDUCE_MAX) {
-    fprintf(fp, "{ %s _v = ", rmu_c_type_name(dt));
+  } else if (kind == REDUCE_MAX && RMU_TARGET == CG_TARGET_C) {
+    // A float too: one maxss, where fmaxf's NaN and signed-zero rules take a
+    // call without -ffinite-math-only, and the walker's compare besides.
+    fprintf(fp, "{ %s _v = ", rmu_hold_type(dt));
     rmu_emit_term(src, fp);
     fprintf(fp, "; %s = (%s < _v) ? _v : %s; }\n", acc_name, acc_name, acc_name);
   } else if (kind == REDUCE_MAX) {
-    // fmaxf for a float accumulator: fmax promotes to double, which does not
-    // vectorize.
-    fprintf(fp, "%s = %s(%s, ", acc_name,
-            RMU_TARGET == CG_TARGET_C && !rmu_holds_double(dt) ? "fmaxf" : "fmax", acc_name);
+    fprintf(fp, "%s = fmax(%s, ", acc_name, acc_name);
     rmu_emit_term(src, fp);
     fputs(");\n", fp);
   } else {
