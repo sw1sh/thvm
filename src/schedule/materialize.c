@@ -2115,6 +2115,42 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
                                     UnifiedSubst const *sub,
                                     Term t, u32 depth);
 static u64 uop_buffer_numel(Term t);
+static int slot_needs_chain_skip(u32 tid);
+
+// addr with every RANGE at 0.
+static Term unified_addr_at_zero(Term t, u32 depth) {
+  Term r = term_resolve(t);
+  if (term_tag(r) != TAG_UOP || depth > MAT_MAX_WALK_DEPTH) {
+    return r;
+  }
+  if (term_ext(r) == UOP_RANGE) {
+    return uop_const(DT_INT32, 0);
+  }
+  u8   ar = uop_arity(term_ext(r));
+  Term srcs[MAX_UOP_SRC] = {0};
+  int  changed = 0;
+  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
+    Term old = heap_read(term_val(r) + i);
+    srcs[i]  = unified_addr_at_zero(old, depth + 1);
+    changed |= srcs[i] != old;
+  }
+  return changed ? uop_graph_rebuild_with_srcs(r, srcs) : r;
+}
+
+// The address that reads a one-element BUFFER: 0, the unified addr being the
+// consumer's multi-axis expression, which can pass the one element.  A slot
+// whose tid is an offset or chained view binds the raw buffer
+// (unified_fold_chain_scan), and several such views of one buffer share it, so
+// there the addr keeps its composed view, at the coordinates 0.
+static Term unified_one_elem_addr(UnifiedRewriteState const *st, Term buf, Term addr) {
+  KernelEntry const *ke   = st->ke;
+  u32                inst = uop_buffer_inst_get(buf);
+  if (ke != NULL && ke->input_tids != NULL && inst > 0 && inst - 1 < ke->n_inputs
+      && slot_needs_chain_skip(ke->input_tids[inst - 1])) {
+    return unified_addr_at_zero(addr, 0);
+  }
+  return uop_const(DT_INT32, 0);
+}
 
 static Term unified_rewrite_rec(UnifiedRewriteState *st, Term t, u32 depth) {
   return unified_rewrite_rec_sub(st, NULL, t, depth);
@@ -2311,10 +2347,16 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
       // rewriting the value (a per-row reduce to scalar: cross-entropy, a
       // softmax denominator, a layer-norm mean).  A compound addr takes the
       // side-table path below: substituting it whole decodes strided or
-      // transposed views wrong (a pool MAX-then-sum gradient).
+      // transposed views wrong (a pool MAX-then-sum gradient).  The side table
+      // goes first here too: a partly realized producer's addr spans its open
+      // axes as well, and folds to one of their RANGEs when the closed
+      // coordinate is 0 (x[0:1] + x[1:2] of a lazy 2-D x).
       if (v != 0 && n_ranges == 1
           && term_tag(addr_term) == TAG_UOP
           && term_ext(addr_term) == UOP_RANGE) {
+        Term axis_hit = try_inline_bufferize_via_axis_table(st, sub, resolved, inner_buf, v, 1,
+                                                            depth);
+        if (axis_hit != 0) return axis_hit;
         Term old_r = uop_bufferize_range_at(inner_buf, 0);
         if (old_r == addr_term) {
           // Already the consumer's range: no substitution.
@@ -2355,11 +2397,9 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
     if (sub != NULL && addr_term != term_resolve(heap_read(term_val(resolved) + 1))) {
       Term buf_rw = unified_rewrite_rec_sub(st, sub, heap_read(term_val(resolved) + 0),
                                             depth + 1);
-      // A one-element BUFFER is in bounds only at 0, and the substituted addr
-      // can be the consumer's multi-axis expression: read at CONST(0).
       if (term_tag(buf_rw) == TAG_UOP && term_ext(buf_rw) == UOP_BUFFER
           && uop_buffer_numel(buf_rw) == 1) {
-        addr_term = uop_const(DT_INT32, 0);
+        addr_term = unified_one_elem_addr(st, buf_rw, addr_term);
       }
       Term new_index = uop_index_e(buf_rw, addr_term);
       // Carry the per-axis side-table entry (the consumer's in_rngs) over to
@@ -2420,13 +2460,11 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
     srcs[i] = new_child;
     if (new_child != old_child) changed = 1;
   }
-  // A one-element BUFFER is read at 0: the unified pass builds the addr from
-  // the consumer's ranges, which can exceed the producer's numel.
   if (op == UOP_INDEX_E
       && term_tag(srcs[0]) == TAG_UOP && term_ext(srcs[0]) == UOP_BUFFER
       && uop_buffer_numel(srcs[0]) == 1) {
-    Term czero = uop_const(DT_INT32, 0);
-    if (srcs[1] != czero) { srcs[1] = czero; changed = 1; }
+    Term elem = unified_one_elem_addr(st, srcs[0], srcs[1]);
+    if (srcs[1] != elem) { srcs[1] = elem; changed = 1; }
   }
   Term out = changed ? uop_graph_rebuild_with_srcs(resolved, srcs) : resolved;
   if (sub == NULL) unified_rewrite_memo_insert(st, resolved, out);

@@ -26,7 +26,7 @@ fn int uop_broadcast2(Term *a, u32 na, u32 const *sa, Term *b, u32 nb, u32 const
     if (pa[i] != pb[i] && pa[i] != 1 && pb[i] != 1) {
       return -1;
     }
-    out[i] = pa[i] > pb[i] ? pa[i] : pb[i];
+    out[i] = pa[i] == 1 ? pb[i] : pa[i];          // a 1 against a 0 is 0
   }
   *a = uop_broadcast_to(*a, na, pa, nd, out);
   *b = uop_broadcast_to(*b, nb, pb, nd, out);

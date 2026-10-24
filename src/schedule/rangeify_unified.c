@@ -2812,8 +2812,11 @@ fn void pm_apply_rangeify(Term root) {
       // tinygrad's removable (indexing.py:90) excludes ALWAYS_CONTIGUOUS srcs;
       // thvm has no such set, and remove_bufferize has already run.
       u32 removable = 1;
-      Term b = uop_bufferize_new(rewritten, addrspace, removable,
-                                 n_closed, closed_ranges);
+      // A PAD stages its guarded value, as tinygrad stages the PAD's WHERE: a
+      // consumer that inlines the BUFFERIZE strips the shell, and its INDEX_E
+      // alone would load at the folded INVALID address instead of reading 0.
+      Term b = uop_bufferize_new(info->op == UOP_PAD ? store_value : rewritten, addrspace,
+                                 removable, n_closed, closed_ranges);
       RU_BUFFERIZE_TERM[i] = b;
       RU_LAST_BUFFERIZES_EMITTED++;
       // The kernel root: STORE(buffer of the node's shape and dtype, my_addr,

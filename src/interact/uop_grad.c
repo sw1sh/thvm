@@ -848,13 +848,8 @@ static Term interact_grad_dispatch(Term grad_term) {
       }
       return uop_const(grad_target_dtype(), 0);
     }
-    u32 tid = (u32)term_val(y);
-    u32 leaf_dt = DT_FP32;
-    term_dtype_in(y, 0, &leaf_dt);
-    u64 sloc = heap_alloc(2);
-    heap_set(sloc + 0, uop_const(leaf_dt, 0));   // scalar 0, broadcasts in any ADD/MUL
-    heap_set(sloc + 1, gy);
-    return term_new(0, TAG_SUP, tid, sloc);
+    // y is itself a leaf (x.sum() of a 0-D x): the seed is its gradient.
+    return grad_leaf_sup(y, gy);
   }
 
   if (y_tag == TAG_NUM) {
@@ -1116,20 +1111,20 @@ static Term interact_grad_dispatch(Term grad_term) {
 
       Shape a_shape;
       Term gy_a;
-      if (term_shape_in(a, 0, &a_shape) && a_shape.ndim > 0
-          && ndim >= a_shape.ndim) {
+      if (term_shape_in(a, 0, &a_shape) && ndim >= a_shape.ndim) {
         // Leading 1s up to out's rank, so a rank increase reads as broadcast.
         u32 pad = ndim - a_shape.ndim;
         u32 a_padded[MAX_DIM] = {0};
         for (u32 i = 0; i < pad; i++) a_padded[i] = 1;
         for (u32 i = 0; i < a_shape.ndim; i++) a_padded[pad + i] = a_shape.dims[i];
 
-        // Sum the broadcast axes in one REDUCE (the per-axis reduces merge), as
-        // tinygrad does (mixin/gradient.py:131-133); reduce_chain_collect makes
-        // it one kernel only over contiguous trailing axes, so they move last.
+        // Sum every axis whose size changed, 1 -> 0 included, in one REDUCE (the
+        // per-axis reduces merge), as tinygrad does (mixin/gradient.py:131-133);
+        // reduce_chain_collect makes it one kernel only over contiguous trailing
+        // axes, so they move last.
         u32 bcast_axes[MAX_DIM]; u32 n_bcast = 0;
         for (u32 i = 0; i < ndim; i++) {
-          if (a_padded[i] == 1 && out_dims[i] > 1) bcast_axes[n_bcast++] = i;
+          if (a_padded[i] != out_dims[i]) bcast_axes[n_bcast++] = i;
         }
         Term cur = gy;
         int already_trailing = (n_bcast == 0)
@@ -1146,17 +1141,14 @@ static Term interact_grad_dispatch(Term grad_term) {
             cur = uop_reduce(REDUCE_SUM, (u32)axis, cur);
         } else {
           for (i32 axis = (i32)ndim - 1; axis >= 0; axis--) {
-            if (a_padded[axis] == 1 && out_dims[axis] > 1) {
+            if (a_padded[axis] != out_dims[axis]) {
               cur = uop_reduce(REDUCE_SUM, (u32)axis, cur);
             }
           }
         }
-        // The reduces drop the broadcast axes; reshaping restores a's own 1s.
-        if (a_shape.ndim == 1 && a_shape.dims[0] == 1) {
-          gy_a = uop_reshape(cur, 1, a_shape.dims);
-        } else {
-          gy_a = uop_reshape(cur, a_shape.ndim, a_shape.dims);
-        }
+        // The reduces drop the broadcast axes; reshaping restores a's own 1s
+        // (a 0-D a is the full reduce itself).
+        gy_a = a_shape.ndim == 0 ? cur : uop_reshape(cur, a_shape.ndim, a_shape.dims);
       } else {
         gy_a = gy;
       }

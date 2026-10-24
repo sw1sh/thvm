@@ -23,12 +23,13 @@ fn Tensor nn_reduce(u32 kind, Tensor x, u32 n, u32 const *axes, int keepdim) {
   return nn_reshape(r, x.shape.ndim, kept);
 }
 
-// Tensor.mean: the sum times 1 / (the reduced count), the sum alone when it is 0.
+// Tensor.mean: the sum times 1 / (the reduced count); nan over an empty axis,
+// tinygrad's 0 / 0.
 fn Tensor nn_mean(Tensor x, u32 n, u32 const *axes, int keepdim) {
   u64 count = 1;
   for (u32 i = 0; i < n; i++) {
     count *= x.shape.dims[axes[i]];
   }
   Tensor s = nn_reduce(REDUCE_SUM, x, n, axes, keepdim);
-  return count != 0 ? nn_binop_f(UOP_MUL, s, 1.0 / (double)count) : s;
+  return nn_binop_f(UOP_MUL, s, count != 0 ? 1.0 / (double)count : NAN);
 }
