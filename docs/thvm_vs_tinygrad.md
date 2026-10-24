@@ -156,8 +156,8 @@ The key code is `ru_seed_boundary_holds` (`rangeify_unified.c`): it holds only f
 | IMAGE float4 (51-62) | `UPCAST` | **MISSING** | thvm has no `ImageDType` |
 | MATVEC (65-82) | `GROUP`+`LOCAL`+`UPCAST` | **PORTED** | `hand_opt_match_matvec` (`hand_opts.c:241-281`); same `MV_*` defaults (4/8/4) |
 | GROUPTOP early gate (84-90) | `GROUPTOP` | **PORTED + ENHANCED** | Selects *largest* divisible reduce axis (not just 0,1,2); load-bearing on CUDA (2.2x: 10.8 ms on vs 23.5 ms off); size 16 as tinygrad |
-| Mask UPCAST (97-106) | `UPCAST` | **MISSING** | no `IWHERE`/`WHERE` mask-axis detection in DAG walk |
-| Main UPCAST loop (108-134) | `UPCAST` | **PORTED + ENHANCED** | stride heuristic 1:1; thvm adds a reduce-heavy **occupancy floor** (CUDA SM count x 80) - no tinygrad equivalent |
+| Mask UPCAST (93-110) | `UPCAST` | **PORTED (CPU)** | `hand_opt_where_gate_axes` collects the ranges under an `IWHERE` condition; an equal-size cat, stacked as tinygrad's, takes it after `pm_split_ranges` (`src/uop/simplify_ranges.c`) splits its selector off. No IMAGE occupancy branch |
+| Main UPCAST loop (112-137) | `UPCAST` | **PORTED + ENHANCED** | stride heuristic 1:1, its bufs holding the output's address and a bare-range address reading as strideless, as tinygrad's `backward_slice`; thvm adds a reduce-heavy **occupancy floor** (CUDA SM count x 80) - no tinygrad equivalent |
 | UNROLL last reduce (138-150) | `UNROLL` | **PORTED** | full-extent `UNROLL(last,0)` + split-by-4 + the `s<=3` second-axis unroll. `uop_dag_apply_split` keeps an extent-1 reduce RANGE so `rmu_emit_store_reduce` emits straight-line `#pragma unroll(extent)` accumulation (verified bit-exact). Unlike tinygrad's `shift_to` (postrange.py:79-87), `REDUCE.axes` names only the outer half; the renderer and the CPU walker fold the unrolled inner half into the one reduce `uop_reduce_owns_split_axis` names, which matters once a kernel nests reduces. CUDA still skips (V100 register pressure) per heuristic.py:37/109 |
 | Easy UPCAST fallback (153-155) | `UPCAST` | **PORTED** | identical |
 | LOCAL placement (159-176) | `LOCAL` | **PORTED** | identical ranking + factor picking |
@@ -329,7 +329,7 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 **Optimization heuristic (opt coverage)**
 
 - **ImageDType float4 UPCAST** - *medium* (small if no image workloads). No `ImageDType`.
-- **Mask UPCAST (WHERE detection)** - *medium/small*. No `IWHERE` mask-axis walker; masked dims count against occupancy.
+- **Mask UPCAST (WHERE detection)** - *PORTED on the CPU* (`hand_opt_where_gate_axes`); Metal and CUDA wait for a GPU run, as do `split_reduceop` and the range split and merge (`src/uop/simplify_ranges.c`).
 - **THREAD axis + warp-shuffle reduce** - *large*. No `KOP_THREAD`; CPU via cBLAS; CUDA uses 16-thread GROUP_REDUCE instead of 32-lane warp-shuffle (2-3x slower per-warp reduce).
 - **Full-extent UNROLL** - *PORTED*. `hand_opts.c` Section 7 now applies tinygrad's `UNROLL(last, 0)` (full extent) + the `s<=3` second-axis unroll; `uop_dag_apply_split` leaves a live extent-1 reduce RANGE so `rmu_emit_store_reduce` renders straight-line `#pragma unroll(extent)` accumulation (numerically exact). The historical "bare #pragma unroll, no loop" defect predated the multi-axis reduce machinery and no longer reproduces. In a kernel that nests reduces the unrolled inner half lies inside every enclosing reduce's body; it folds only into its owner (`uop_reduce_owns_split_axis`), else an enclosing SUM re-accumulated the inner reduce once per lane (9x on a mean-subtract-then-sum).
 - **Multi-reduce TC (`TC_OPT>=1`)** - *small*. `hand_opt_classify_matmul` requires single reduce axis. Where: `hand_opts.c:192-202`.

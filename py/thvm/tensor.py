@@ -1110,15 +1110,19 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         return self.reshape(*self._shape[:dim], 1, *self._shape[dim:])
 
     def cat(self, *args: "Tensor", dim: int = 0) -> "Tensor":
-        """Concatenate self and `args` along `dim`, each piece zero-padded to the output extent and
-        the pads summed (tinygrad mixin/op.py:731-750)."""
+        """Concatenate self and `args` along `dim` (tinygrad mixin/op.py:754-773): equal pieces
+        stack and flatten, others are zero-padded to the output extent and the pads summed."""
         dim = self._resolve_dim(dim)
         for arg in args:
             assert arg.ndim == self.ndim and all(
                 ti == ai for i, (ti, ai) in enumerate(zip(self._shape, arg._shape)) if i != dim)
-        tensors = [self, *args]
-        # With no STACK op, equal pieces take this path too, where tinygrad stacks them (:747):
-        # a -0.0 then comes out as +0.0, where tinygrad keeps it.
+        if all(t._shape[dim] == self._shape[dim] for t in args):
+            return self.stack(*args, dim=dim).flatten(dim, dim + 1)
+        return Tensor._cat_padded([self, *args], dim)
+
+    @staticmethod
+    def _cat_padded(tensors: list, dim: int) -> "Tensor":
+        # The pads sum, so a -0.0 comes out as +0.0, where tinygrad's STACK keeps it.
         dim_cumsum = list(itertools.accumulate([t._shape[dim] for t in tensors], initial=0))
         padded = [t.pad(tuple((dim_cumsum[i], dim_cumsum[-1] - dim_cumsum[i + 1]) if j == dim else None
                               for j in range(t.ndim)))
@@ -1127,12 +1131,12 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     def stack(self, *args: "Tensor", dim: int = 0) -> "Tensor":
         """Stack self and `args` along a new axis `dim` (tinygrad mixin/movement.py:256-272); with
-        no STACK op it is unsqueeze, then cat."""
+        no STACK op the unsqueezed pieces concatenate padded."""
         tensors = argfix(self, *args)
         dim = tensors[0]._resolve_dim(dim, extra=1)
         assert all(t._shape == tensors[0]._shape for t in tensors), \
             f"all shapes must match for stack, got {[t._shape for t in tensors]}"
-        return tensors[0].unsqueeze(dim).cat(*[t.unsqueeze(dim) for t in tensors[1:]], dim=dim)
+        return Tensor._cat_padded([t.unsqueeze(dim) for t in tensors], dim)
 
     # ---- indexed ops (native UOP_GATHER on the CPU backend) -----------
 

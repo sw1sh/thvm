@@ -3884,6 +3884,23 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // the axes each reduce binds are left to rmu_emit_one_reduce_lb.
   rmu_collect_ranges_with_opts_through_reduce_kernel(
       value, ranges, opt_kinds, opt_factors, &n_ranges);
+  // tinygrad orders UPCAST axes last: in C a plain store loops its lanes
+  // innermost, beside the contiguous loads of the axis they were split from.
+  if (RMU_TARGET == CG_TARGET_C && !rmu_term_has_reduce(value, 0)) {
+    u32 m = 0;
+    for (u32 i = 0; i < n_ranges; i++) {
+      if (opt_kinds[i] == UOP_OPT_UPCAST) continue;
+      Term r = ranges[i];
+      u32  k = opt_kinds[i], f = opt_factors[i];
+      for (u32 j = i; j > m; j--) {
+        ranges[j]      = ranges[j - 1];
+        opt_kinds[j]   = opt_kinds[j - 1];
+        opt_factors[j] = opt_factors[j - 1];
+      }
+      ranges[m] = r; opt_kinds[m] = k; opt_factors[m] = f;
+      m++;
+    }
+  }
 
   // Output axes are the ranges of `addr`.
   Term addr_ranges[RMU_MAX_RANGES];

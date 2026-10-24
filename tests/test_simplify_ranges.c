@@ -1,7 +1,8 @@
-// test_simplify_ranges.c - uop_simplify_ranges, tinygrad's pm_simplify_ranges
-// (codegen/simplify.py:21-38) on a kernel's output ranges: adjacent ranges
-// that every address reads row-major merge into one; a transposed or
-// broadcast read, which would need an IDIV or IMOD, keeps them apart.
+// test_simplify_ranges.c - uop_simplify_ranges, tinygrad's pm_split_ranges and
+// pm_simplify_ranges (codegen/simplify.py:21-75) on a kernel's output ranges: a
+// range read modulo a divisor splits; adjacent ranges that every address reads
+// row-major merge into one; a transposed or broadcast read, which would need an
+// IDIV or IMOD, keeps them apart.
 
 #include "../src/thvm.c"
 #include "test.h"
@@ -68,8 +69,25 @@ static void test_reduce_output_merges(void) {
   CHECK(term_ext(v) == UOP_REDUCE && uop_reduce_axis(v, 0) == 2);
 }
 
+static void test_mod_read_splits_range(void) {
+  // out[a] = in[a % 16], a < 64: tinygrad's pm_split_ranges makes a an outer
+  // 4 and an inner 16, which the read uses alone; no IDIV or IMOD is left, and
+  // the merge does not undo the split, the read needing a divmod again.
+  Term a    = uop_range(0, KAX_LOOP, 64);
+  Term rd   = uop_int_binary(UOP_IMOD, a, kc(16));
+  Term root = uop_store(buf(0, 64), a, uop_index_e(buf(1, 16), rd));
+  CHECK_EQ(simplify_ranges_count_divmod(root), 1);
+  Term out = uop_simplify_ranges(root);
+  CHECK_EQ(loop_count(out), 2);
+  CHECK_EQ(simplify_ranges_count_divmod(out), 0);
+  Term inner = uop_range(1, KAX_LOOP, 16);
+  Term load  = heap_read(term_val(out) + 2);
+  CHECK(term_ext(load) == UOP_INDEX_E && heap_read(term_val(load) + 1) == inner);
+}
+
 int main(void) {
   thvm_init();
+  TEST_BEGIN("mod_read_splits_range");       test_mod_read_splits_range();
   TEST_BEGIN("row_major_copy_merges");       test_row_major_copy_merges();
   TEST_BEGIN("transposed_read_keeps_ranges"); test_transposed_read_keeps_ranges();
   TEST_BEGIN("broadcast_read_keeps_ranges");  test_broadcast_read_keeps_ranges();

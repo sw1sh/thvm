@@ -288,6 +288,32 @@ static int hand_opt_upcast_buf_stride(Term root, u32 rng,
   return any_strideless;
 }
 
+// The axis ids of the RANGEs under an IWHERE condition, tinygrad's
+// where_gate_rngs (heuristic.py:95), into out[0..cap).
+static u32 hand_opt_where_gate_axes(Term root, u32 *out, u32 cap) {
+  UOpWalk w = {0};
+  uop_walk_push(&w, root);
+  UOpWalk c = {0};
+  u32  n = 0;
+  Term t;
+  while ((t = uop_walk_pop(&w)) != 0) {
+    if (term_ext(t) == UOP_IWHERE) uop_walk_push(&c, heap_read(term_val(t) + 0));
+    u32 ns = uop_src_count(t);
+    for (u32 i = 0; i < ns; i++) uop_walk_push(&w, uop_src_at(t, i));
+  }
+  while ((t = uop_walk_pop(&c)) != 0) {
+    if (term_ext(t) == UOP_RANGE) {
+      if (n < cap) out[n++] = uop_range_axis_id(t);
+      continue;
+    }
+    u32 ns = uop_src_count(t);
+    for (u32 i = 0; i < ns; i++) uop_walk_push(&c, uop_src_at(t, i));
+  }
+  uop_walk_free(&w);
+  uop_walk_free(&c);
+  return n;
+}
+
 // The CUDA floor, set by the first CUDA kernel; -1 before.
 static int OCC_FLOOR_AUTO = -1;
 // The smallest launch grid an UPCAST may leave a reduce-heavy CUDA kernel: 80
@@ -491,7 +517,37 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
     }
   }
 
-  // The masked-axis upcast (heuristic.py:94-110) is not ported.
+  // Masked-axis upcast (heuristic.py:93-110): a small output axis a WHERE gates,
+  // as Tensor.stack and an equal-size cat leave, UPCASTs fully, so each lane's
+  // gate folds; leading axes first, at most 7 * 7 lanes.  CPU only until a GPU
+  // run checks it.
+  if (on_cpu && hand_opt_snapshot_axes(ke, &ax)) {
+    u32 gates[64];
+    u32 n_gates = hand_opt_where_gate_axes(ke->cached_lift.store_root, gates, 64);
+    u32 dims[MAX_AXES];
+    u32 n_dims = hand_opt_upcastable_dims(&ax, dims);
+    u32 up_ids[MAX_AXES], up_exts[MAX_AXES];
+    u32 n_up  = 0;
+    u64 lanes = 1;
+    for (u32 di = 0; di < n_dims; di++) {
+      u32 a = dims[di];
+      int masked = 0;
+      for (u32 g = 0; g < n_gates; g++) {
+        if (gates[g] == ax.axis_id[a]) { masked = 1; break; }
+      }
+      if (ax.extent[a] <= 7 && masked && lanes * ax.extent[a] <= 7 * 7) {
+        up_ids [n_up] = ax.axis_id[a];
+        up_exts[n_up] = ax.extent[a];
+        n_up++;
+        lanes *= ax.extent[a];
+      }
+    }
+    // Last first, as an UPCAST shifts the axis ids above its own.
+    for (u32 i = n_up; i-- > 0;) {
+      KOpt opt = { KOP_UPCAST, up_ids[i], up_exts[i] };
+      if (kernel_apply_opt(ke, opt)) n_applied++;
+    }
+  }
 
   // Upcasts (heuristic.py:112-138): while the output has >= 1024 elements and
   // the upcast size is under 32, UPCAST by 3 or 4 the least-strided axis.

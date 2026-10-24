@@ -649,6 +649,51 @@ static void test_hand_opts_upcasts_bare_output_range(void) {
   CHECK_EQ(unroll, 1);
 }
 
+// The masked-axis upcast (heuristic.py:93-110): a stack's selector, a small
+// axis WHERE gates, UPCASTs fully; out[s, c] = (s < 1 ? x[c] : -) + (0 < s ? y[c] : -)
+// takes UPCAST 2 on s, where an ungated copy of the same shape upcasts c.
+static u32 hand_opts_upcast_extent_of(Term root, Term X, Term Y, Term O) {
+  u32 kid = kernel_alloc();
+  KernelEntry *ke = &KERNELS[kid];
+  kernel_lift_reserve(&ke->cached_lift, 2);
+  ke->cached_lift.store_root = root;
+  ke->cached_lift.out_buf    = O;
+  ke->cached_lift.in_bufs[0] = X;
+  ke->cached_lift.in_bufs[1] = Y;
+  ke->cached_lift.n_inputs   = Y != 0 ? 2 : 1;
+  ke->n_inputs = ke->cached_lift.n_inputs;
+  (void)kernel_hand_coded_opts(ke);
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types, exts, MAX_AXES);
+  for (u32 i = 0; i < n; i++) {
+    if (types[i] == KAX_UPCAST) return exts[i];
+  }
+  return 0;
+}
+
+static void test_hand_opts_upcasts_masked_axis(void) {
+  unsetenv("NOOPT");
+  setenv("HAND_CODED_OPTS", "1", 1);
+  u32 d8[1] = { 8 }, d16[1] = { 16 };
+  Term X = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d8, 1);
+  Term Y = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d8, 2);
+  Term O = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d16, 0);
+  Term r_s = uop_range(0, KAX_LOOP, 2);
+  Term r_c = uop_range(1, KAX_LOOP, 8);
+  Term out = uop_int_binary(UOP_IADD,
+                            uop_int_binary(UOP_IMUL, r_s, uop_const(DT_INT32, 8)), r_c);
+  Term lo  = uop_iwhere(uop_int_binary(UOP_ILT, r_s, uop_const(DT_INT32, 1)),
+                        uop_index_e(X, r_c), uop_invalid());
+  Term hi  = uop_iwhere(uop_int_binary(UOP_ILT, uop_const(DT_INT32, 0), r_s),
+                        uop_index_e(Y, r_c), uop_invalid());
+  Term stacked = uop_store(O, out, uop_binary(UOP_ADD, lo, hi));
+  CHECK_EQ(hand_opts_upcast_extent_of(stacked, X, Y, O), 2);
+
+  Term Z = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d16, 1);
+  Term copy = uop_store(O, out, uop_index_e(Z, out));
+  CHECK_EQ(hand_opts_upcast_extent_of(copy, Z, 0, O), 4);
+}
+
 // === KOP_SWAP DAG mutation ============================================
 
 static void test_apply_swap_axes(void) {
@@ -817,6 +862,7 @@ int main(void) {
                                                     test_hand_opts_unroll_skips_orphan_reduce_axis();
   TEST_BEGIN("hand_opts_upcasts_bare_output_range");
                                                     test_hand_opts_upcasts_bare_output_range();
+  TEST_BEGIN("hand_opts_upcasts_masked_axis");     test_hand_opts_upcasts_masked_axis();
   TEST_BEGIN("apply_swap_axes");                   test_apply_swap_axes();
   TEST_BEGIN("apply_swap_noop_when_axes_equal");   test_apply_swap_noop_when_axes_equal();
   TEST_BEGIN("apply_swap_follows_reduce_axis");    test_apply_swap_follows_reduce_axis();
