@@ -368,7 +368,7 @@ static u32 uwalk_term_dtype_of(UWalkCtx *c, Term t) {
       return DT_BOOL;
     case UOP_RECIP:
       return (uwalk_term_dtype(c, heap_read(loc)) == DT_FP64) ? DT_FP64 : DT_FP32;
-    case UOP_EXP2: case UOP_LOG2: case UOP_SQRT:
+    case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN:
       return DT_FP64;
     case UOP_NEG: case UOP_OPT:
       return uwalk_term_dtype(c, heap_read(loc));
@@ -690,6 +690,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
     case UOP_EXP2: return exp2(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
     case UOP_LOG2: return log2(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
     case UOP_SQRT: return sqrt(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
+    case UOP_SIN:  return sin(uwalk_cast_float(c, heap_read(loc + 0), DT_FP64));
     case UOP_CAST: {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
@@ -859,7 +860,7 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
     }
     case UOP_CMPLT: case UOP_CMPEQ:
       return uwalk_compare(c, op, heap_read(loc + 0), heap_read(loc + 1));
-    case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT:
+    case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN:
       return uwalk_f64_to_int(DT_INT64, uwalk_eval_float(c, t, uwalk_term_dtype(c, t)));
     default:
       uwalk_mark_bad(c, op);
@@ -893,7 +894,7 @@ static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out) {
       uwalk_collect_ranges(heap_read(loc + 1), ranges, n_out);
       return;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_LOG2:  case UOP_SQRT:  case UOP_SIN:
     case UOP_CAST:  case UOP_BITCAST:
     case UOP_OPT:
       uwalk_collect_ranges(heap_read(loc + 0), ranges, n_out);
@@ -938,7 +939,7 @@ static void uwalk_collect_reduces(Term t, Term *reduces, u32 *n_out) {
       uwalk_collect_reduces(heap_read(loc + 1), reduces, n_out);
       return;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_LOG2:  case UOP_SQRT:  case UOP_SIN:
     case UOP_CAST:  case UOP_BITCAST:
     case UOP_OPT:
       uwalk_collect_reduces(heap_read(loc + 0), reduces, n_out);
@@ -981,7 +982,7 @@ static void uwalk_collect_all_reduces(Term t, Term *reduces, u32 *n_out,
       uwalk_collect_all_reduces(heap_read(loc + 1), reduces, n_out, depth + 1);
       return;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_LOG2:  case UOP_SQRT:  case UOP_SIN:
     case UOP_CAST:  case UOP_BITCAST:
     case UOP_OPT:
       uwalk_collect_all_reduces(heap_read(loc + 0), reduces, n_out, depth + 1);
@@ -1032,7 +1033,7 @@ static void uwalk_collect_split_ranges(Term t, Term *ranges, u32 *n_out,
       uwalk_collect_split_ranges(heap_read(loc + 1), ranges, n_out, depth + 1);
       return;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_LOG2:  case UOP_SQRT:  case UOP_SIN:
     case UOP_CAST:  case UOP_BITCAST:
     case UOP_REDUCE:
       uwalk_collect_split_ranges(heap_read(loc + 0), ranges, n_out, depth + 1);

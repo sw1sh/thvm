@@ -501,7 +501,8 @@ u64             dtype_storage_bytes(u32 dt, u64 numel);
 //   uop/scatter.c.
 #define UOP_GATHER      53
 #define UOP_SCATTER     54
-#define UOP_COUNT       55
+#define UOP_SIN         55   // heap = [src]
+#define UOP_COUNT       56
 
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0

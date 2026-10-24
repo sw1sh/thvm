@@ -13,7 +13,7 @@ fn u8 uop_arity(u8 op) {
     case UOP_OPT:
       return 1;
     case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2: case UOP_SQRT:
+    case UOP_LOG2: case UOP_SQRT: case UOP_SIN:
     case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND:
     case UOP_PAD:     case UOP_SHRINK:  case UOP_FLIP:
     case UOP_REDUCE:  case UOP_LOAD:    case UOP_DETACH:
@@ -49,7 +49,7 @@ fn u8 uop_arity(u8 op) {
 
 fn u8 uop_is_unary_elementwise(u8 op) {
   return op == UOP_NEG || op == UOP_RECIP || op == UOP_EXP2
-      || op == UOP_LOG2 || op == UOP_SQRT;
+      || op == UOP_LOG2 || op == UOP_SQRT || op == UOP_SIN;
 }
 
 fn u8 uop_is_binary_elementwise(u8 op) {

@@ -948,6 +948,24 @@ static Term interact_grad_dispatch(Term grad_term) {
       return grad_bwd_emit_uop(a_resolved, gy_a);
     }
 
+    case UOP_SIN: {
+      // d sin(a) = sin(pi/2 - a) (tinygrad mixin/gradient.py SIN rule).
+      Term a = heap_read(y_loc + 0);
+      Term a_resolved = term_resolve(a);
+      u8 a_is_ten = term_tag(a_resolved) == TAG_TEN;
+      u64 ca = 0;
+      Term a_fwd = a_resolved;
+      if (!a_is_ten) { ca = grad_cell_alloc(a); a_fwd = grad_fwd_of(ca); }
+      f32  half_pi = 1.5707963267948966f;
+      u32  bits;
+      memcpy(&bits, &half_pi, sizeof bits);
+      Term shifted = uop_binary(UOP_ADD, uop_unary(UOP_NEG, a_fwd),
+                                uop_const(grad_target_dtype(), bits));
+      Term gy_a = uop_binary(UOP_MUL, gy, uop_unary(UOP_SIN, shifted));
+      (void)ca;
+      return grad_bwd_emit_uop(a_resolved, gy_a);
+    }
+
     case UOP_RECIP: {
       Term a = heap_read(y_loc + 0);
       Term a_resolved = term_resolve(a);

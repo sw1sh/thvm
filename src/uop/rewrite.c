@@ -101,6 +101,7 @@ fn Term uop_rewrite_unary(u32 opcode, Term src) {
       case UOP_EXP2:  r = (f32)exp2(v); break;
       case UOP_LOG2:  r = (f32)log2(v); break;
       case UOP_SQRT:  r = (f32)sqrt(v); break;
+      case UOP_SIN:   r = (f32)sin(v); break;
       default: folded = 0; r = 0;
     }
     if (folded) return uop_const(DT_FP32, f32_bits(r));

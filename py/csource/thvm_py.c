@@ -522,6 +522,7 @@ EXPORT uint32_t py_const_UOP_CMPLT(void) { return UOP_CMPLT; }
 EXPORT uint32_t py_const_UOP_CMPEQ(void) { return UOP_CMPEQ; }
 EXPORT uint32_t py_const_UOP_RECIP(void) { return UOP_RECIP; }
 EXPORT uint32_t py_const_UOP_EXP2(void)  { return UOP_EXP2; }
+EXPORT uint32_t py_const_UOP_SIN(void)   { return UOP_SIN; }
 EXPORT uint32_t py_const_UOP_LOG2(void)  { return UOP_LOG2; }
 EXPORT uint32_t py_const_UOP_SQRT(void)  { return UOP_SQRT; }
 

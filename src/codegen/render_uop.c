@@ -482,9 +482,10 @@ static void rmu_emit_term(Term t, FILE *fp) {
       fputs(")", fp);
       return;
     }
-    case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: {
+    case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN: {
       const char *fn_name = (op == UOP_EXP2) ? "exp2"
                           : (op == UOP_LOG2) ? "log2"
+                          : (op == UOP_SIN)  ? "sin"
                           :                    "sqrt";
       fprintf(fp, "%s(", fn_name);
       rmu_emit_term(heap_read(loc + 0), fp);
@@ -654,7 +655,7 @@ static u32 rmu_walk_arity(u32 op) {
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       return 2;
-    case UOP_NEG:  case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT:
+    case UOP_NEG:  case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN:
     case UOP_CAST: case UOP_BITCAST: case UOP_OPT:
       return 1;
     case UOP_IWHERE:

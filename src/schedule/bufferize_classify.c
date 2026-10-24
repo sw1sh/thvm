@@ -244,7 +244,7 @@ static u64 bufferize_unique_uop_parent(u64 child_loc) {
 
 // A scalar unary: NEG, RECIP, SQRT, EXP2 or LOG2.
 static u8 const bufferize_upat_scalar_unary_alt[] = {
-  UOP_NEG, UOP_RECIP, UOP_SQRT, UOP_EXP2, UOP_LOG2, 0
+  UOP_NEG, UOP_RECIP, UOP_SQRT, UOP_EXP2, UOP_LOG2, UOP_SIN, 0
 };
 static UPat const bufferize_upat_scalar_unary = {
   0, 1, 0, -1, NULL, bufferize_upat_scalar_unary_alt

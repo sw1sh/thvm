@@ -3104,6 +3104,7 @@ static char const *bypass_dbg_op_name(u8 op) {
     case UOP_NEG:         return "NEG";
     case UOP_RECIP:       return "RECIP";
     case UOP_EXP2:        return "EXP2";
+    case UOP_SIN:         return "SIN";
     case UOP_LOG2:        return "LOG2";
     case UOP_SQRT:        return "SQRT";
     case UOP_CMPLT:       return "CMPLT";

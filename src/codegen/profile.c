@@ -101,7 +101,7 @@ static u64 cg_kernel_flops_dag(Term t, u64 iter_extent, u32 depth) {
   // Elementwise compute ops: count this node then recurse.
   switch (op) {
     case UOP_NEG: case UOP_RECIP: case UOP_SQRT:
-    case UOP_EXP2: case UOP_LOG2:
+    case UOP_EXP2: case UOP_LOG2: case UOP_SIN:
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
       total += iter_extent;
       break;

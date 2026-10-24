@@ -4,7 +4,7 @@
 // no case would be skipped by all four (44-50 are unassigned).  A wnf frame
 // owns the cells of the node it points at.
 _Static_assert(TAG_COUNT == 35, "a new tag needs its heap size in term_cells");
-_Static_assert(UOP_COUNT == 55, "a new UOp opcode needs its heap size in term_cells");
+_Static_assert(UOP_COUNT == 56, "a new UOp opcode needs its heap size in term_cells");
 fn u32 term_cells(Term t, Term const *mem) {
   u8  tag = term_tag(t);
   u64 loc = term_val(t);
@@ -43,7 +43,7 @@ fn u32 term_cells(Term t, Term const *mem) {
       switch (op) {
         case UOP_CONST: return 1;
         case UOP_KERNEL: case UOP_ASSIGN: return 2;
-        case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
+        case UOP_NEG: case UOP_RECIP: case UOP_EXP2: case UOP_SIN:
         case UOP_LOG2: case UOP_SQRT: case UOP_LOAD:
           return 1;
         case UOP_COPY: return 2;              // [src, NUM(device+1)]

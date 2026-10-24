@@ -244,7 +244,7 @@ static void kvar_scan_rec(Term t, u32 *out_ids, u32 *n_out, u32 cap) {
     case UOP_OPT:
     case UOP_LOAD: case UOP_CAST: case UOP_BITCAST:
     case UOP_NEG:  case UOP_RECIP: case UOP_EXP2: case UOP_LOG2:
-    case UOP_SQRT: {
+    case UOP_SQRT: case UOP_SIN: {
       kvar_scan_rec(heap_read(loc + 0), out_ids, n_out, cap);
       break;
     }

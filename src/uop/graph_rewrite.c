@@ -102,7 +102,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
   u64 loc = term_val(t);
   switch (op) {
     case UOP_NEG: case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2: case UOP_SQRT:
+    case UOP_LOG2: case UOP_SQRT: case UOP_SIN:
       return uop_unary(op, srcs[0]);
 
     case UOP_ADD: case UOP_MUL: case UOP_CMPLT:

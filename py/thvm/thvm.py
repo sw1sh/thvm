@@ -160,6 +160,7 @@ class _Constants:
     CMPEQ = _read_uint32_const("py_const_UOP_CMPEQ")
     RECIP = _read_uint32_const("py_const_UOP_RECIP")
     EXP2 = _read_uint32_const("py_const_UOP_EXP2")
+    SIN = _read_uint32_const("py_const_UOP_SIN")
     LOG2 = _read_uint32_const("py_const_UOP_LOG2")
     SQRT = _read_uint32_const("py_const_UOP_SQRT")
     IADD = _read_uint32_const("py_const_UOP_IADD")

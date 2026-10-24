@@ -36,7 +36,7 @@ int uop_dag_dtype_uniform(Term t, u32 dt) {
     case UOP_ISHR:
       return 1;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_LOG2:  case UOP_SQRT:  case UOP_SIN:
     case UOP_REDUCE:
     case UOP_OPT:
     case UOP_LOAD:
@@ -86,7 +86,7 @@ u32 uop_dag_reduce_axis_extent(Term t) {
       return uop_dag_reduce_axis_extent(heap_read(loc + 1));
     }
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
-    case UOP_LOG2:  case UOP_SQRT:
+    case UOP_LOG2:  case UOP_SQRT:  case UOP_SIN:
     case UOP_CAST:  case UOP_BITCAST:
     case UOP_OPT:   case UOP_REDUCE:
     case UOP_LOAD:
@@ -130,7 +130,7 @@ static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
       uop_dag_reduce_unroll_walk(heap_read(loc + 1), out_ok, out_has_reduce);
       return;
     case UOP_NEG: case UOP_RECIP: case UOP_EXP2: case UOP_LOG2:
-    case UOP_SQRT: case UOP_OPT: case UOP_LOAD:
+    case UOP_SQRT: case UOP_SIN: case UOP_OPT: case UOP_LOAD:
       uop_dag_reduce_unroll_walk(heap_read(loc + 0), out_ok, out_has_reduce);
       return;
     case UOP_IWHERE:
