@@ -1492,12 +1492,19 @@ static int uwalk_emit_store(UWalkCtx *c, Term store) {
     Term r_src = uop_reduce_src(reduce_as_value);
     uwalk_collect_ranges(r_src, all_ranges, &n_all);
   }
-  u32 reduce_axes[MAX_DIM + UWALK_MAX_RANGES];
+  // A top-level REDUCE's axes loop inside it, never around the store, whether
+  // it is the stored value or under an epilogue (-x.max(), x.max() == 0): as
+  // output loops they reran it at every one of its own iterations.
+  u32 reduce_axes[MAX_DIM * UWALK_MAX_REDUCES + UWALK_MAX_RANGES];
   u32 n_reduce_axes = 0;
-  if (reduce_as_value != 0) {
-    n_reduce_axes = uop_reduce_n_axes(reduce_as_value);
-    for (u32 i = 0; i < n_reduce_axes; i++) {
-      reduce_axes[i] = uop_reduce_axis(reduce_as_value, i);
+  {
+    Term tops[UWALK_MAX_REDUCES];
+    u32  n_tops = 0;
+    uwalk_collect_reduces(value_for_emit, tops, &n_tops);
+    for (u32 r = 0; r < n_tops; r++) {
+      for (u32 i = 0; i < uop_reduce_n_axes(tops[r]); i++) {
+        reduce_axes[n_reduce_axes++] = uop_reduce_axis(tops[r], i);
+      }
     }
   }
   // Split-inner axes are iterated inside their owning reduce.
