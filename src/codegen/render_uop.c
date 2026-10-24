@@ -3380,6 +3380,23 @@ static int rmu_axis_index_stride(Term addr, u32 axis_id, i64 *stride) {
 // STORE(buf, addr, REDUCE(src)): an accumulator hoisted outside the reduce
 // loops, or the TC template for an OPT(TC) value (uop_recognise_tc).  Returns 0
 // for the generic rmu_emit_store path.
+// The reduce axes that unroll fully: the innermost unwrapped ones while the
+// unrolls they nest (their extents and the UNROLL factors inside them)
+// multiply to at most RMU_REDUCE_UNROLL_MAX.  Bounded per axis, a 6-D gather's
+// short axes (2x3x4x5x6) unrolled 720 ways and took clang 92 s at -O2.
+static void rmu_reduce_full_unroll(Term const *ranges, u32 const *kinds, u32 const *factors,
+                                   u32 n, u8 *full) {
+  u32 prod = 1;
+  for (u32 i = 0; i < n; i++) full[i] = 0;
+  for (u32 i = n; i-- > 0;) {
+    u32 e = kinds[i] == UOP_OPT_UNROLL ? factors[i]
+          : kinds[i] == RMU_NO_OPT     ? uop_range_extent(ranges[i]) : 1;
+    if (e == 0 || prod * e > RMU_REDUCE_UNROLL_MAX) return;
+    prod *= e;
+    full[i] = kinds[i] == RMU_NO_OPT;
+  }
+}
+
 static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
   u64 sloc = term_val(store);
@@ -3533,18 +3550,17 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
       fputs(";\n", fp);
     }
     // One loop per reduce axis, outermost first; OPT(UNROLL) keeps its
-    // factor, and a short unwrapped axis unrolls fully.
+    // factor, and short unwrapped axes unroll fully (rmu_reduce_full_unroll).
     u32 pa_red_depth = pa_body_depth;
+    u8  pa_full[MAX_DIM];
+    rmu_reduce_full_unroll(red_ranges, red_kind_opts, red_factor_opts, red_n_axes, pa_full);
     for (u32 ai = 0; ai < red_n_axes; ai++) {
       if (red_kind_opts[ai] == UOP_OPT_UNROLL) {
         for (u32 d = 0; d < pa_red_depth; d++) fputs("  ", fp);
         rmu_emit_unroll_pragma(fp, red_factor_opts[ai]);
-      } else if (red_kind_opts[ai] == RMU_NO_OPT) {
-        u32 red_extent = uop_range_extent(red_ranges[ai]);
-        if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {
-          for (u32 d = 0; d < pa_red_depth; d++) fputs("  ", fp);
-          fprintf(fp, "#pragma unroll(%u)\n", red_extent);
-        }
+      } else if (pa_full[ai]) {
+        for (u32 d = 0; d < pa_red_depth; d++) fputs("  ", fp);
+        fprintf(fp, "#pragma unroll(%u)\n", uop_range_extent(red_ranges[ai]));
       }
       rmu_emit_range_open(red_ranges[ai], fp, pa_red_depth, red_kind_opts[ai]);
       pa_red_depth++;
@@ -3673,20 +3689,17 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   rmu_emit_reduce_init(red_kind, red_dt, fp);
   fputs(";\n", fp);
   // One loop per reduce axis, outermost first: OPT(UNROLL) keeps its factor,
-  // and on GPU a short unwrapped axis unrolls fully.
+  // and on GPU short unwrapped axes unroll fully (rmu_reduce_full_unroll).
   u32 red_depth = body_depth;
+  u8  red_full[MAX_DIM];
+  rmu_reduce_full_unroll(red_ranges, red_kind_opts, red_factor_opts, red_n_axes, red_full);
   for (u32 ai = 0; ai < red_n_axes; ai++) {
-    if (red_kind_opts[ai] != RMU_NO_OPT
-        && red_kind_opts[ai] == UOP_OPT_UNROLL) {
+    if (red_kind_opts[ai] == UOP_OPT_UNROLL) {
       for (u32 d = 0; d < red_depth; d++) fputs("  ", fp);
       rmu_emit_unroll_pragma(fp, red_factor_opts[ai]);
-    } else if (red_kind_opts[ai] == RMU_NO_OPT
-               && RMU_TARGET != CG_TARGET_C) {
-      u32 red_extent = uop_range_extent(red_ranges[ai]);
-      if (red_extent > 0 && red_extent <= RMU_REDUCE_UNROLL_MAX) {
-        for (u32 d = 0; d < red_depth; d++) fputs("  ", fp);
-        fprintf(fp, "#pragma unroll(%u)\n", red_extent);
-      }
+    } else if (red_full[ai] && RMU_TARGET != CG_TARGET_C) {
+      for (u32 d = 0; d < red_depth; d++) fputs("  ", fp);
+      fprintf(fp, "#pragma unroll(%u)\n", uop_range_extent(red_ranges[ai]));
     }
     rmu_emit_range_open(red_ranges[ai], fp, red_depth, red_kind_opts[ai]);
     red_depth++;
