@@ -42,26 +42,6 @@ _PIN_NEXT = 1
 _LIVE_ADD = Thvm.live_terms.add
 
 
-def _host_scatter_extreme(base, flat, vals, is_max: bool, include_self: bool):
-    """amax / amin scatter on the host, folded as the native kernel does: S starts at the
-    identity and takes x when S < x (amax) or x < S (amin), in index order; out = S (op) T,
-    T = base, or the identity where something lands without include_self."""
-    if base.dtype.kind == "f":
-        ident = base.dtype.type(-np.inf if is_max else np.inf)
-    else:
-        info = np.iinfo(base.dtype)
-        ident = base.dtype.type(info.min if is_max else info.max)
-    acc = np.full(base.size, ident, base.dtype)
-    for j, x in zip(flat.tolist(), vals.tolist()):
-        if (acc[j] < x) if is_max else (x < acc[j]):
-            acc[j] = x
-    T = base.reshape(-1).copy()
-    if not include_self:
-        T[np.unique(flat)] = ident
-    take = (acc < T) if is_max else (T < acc)
-    return np.where(take, T, acc).reshape(base.shape)
-
-
 def _native_indexing() -> bool:
     """Gather / scatter kernels run on the CPU backend only (emit declines them on a GPU), so the
     native UOP_GATHER / UOP_SCATTER are built only when DEV picked the CPU."""
@@ -1137,7 +1117,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     def gather(self, dim: int, index: "Tensor") -> "Tensor":
         """Values of self along `dim` at `index`, 0 out of range (tinygrad mixin/op.py:1023-1041):
-        a differentiable UOP_GATHER on the CPU, elsewhere a host gather without gradient."""
+        a UOP_GATHER on the CPU, elsewhere tinygrad's one-hot select; both differentiable."""
         if index.ndim != self.ndim:
             raise RuntimeError(
                 f"self.ndim must equal index.ndim, {self.ndim=}, {index.ndim=}")
@@ -1148,26 +1128,17 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         if not dtypes.is_int(index._dtype):
             raise RuntimeError(
                 f"_one_hot_along_dim expects int index tensor, getting {index._dtype}")
-        if index.numel() == 0 or self._shape[dim] == 0 or not _native_indexing():
-            return self._gather_host(dim, index)
+        if index.numel() == 0 or self._shape[dim] == 0:
+            return Tensor(np.zeros(index._shape, dtype=_to_np_dtype(self._dtype)), dtype=self._dtype)
+        if not _native_indexing():
+            x = self.shrink_to(tuple(i if d != dim else None for d, i in enumerate(index._shape)))
+            x = x.unsqueeze(-1).transpose(-1, dim)
+            return index.unsqueeze(-1)._one_hot_along_dim(self._shape[dim]).where(x, 0).sum(-1, dtype=self._dtype)
         t = _TH.gather(self.term, index.term, dim)
         if int(t) == 0:
             raise RuntimeError(
                 f"gather: cannot index {self._shape} along {dim} by {index._shape}")
         return Tensor._from_term(t, self._dtype, index._shape)
-
-    def _gather_host(self, dim: int, index: "Tensor") -> "Tensor":
-        """gather on the host: an empty index or axis (no kernel to run), or
-        a device without native gather kernels."""
-        out = np.zeros(index._shape, dtype=_to_np_dtype(self._dtype))
-        if out.size and self._shape[dim]:
-            idx = index.numpy().astype(np.int64)
-            sl = tuple(slice(None) if d == dim else slice(0, s)
-                       for d, s in enumerate(index._shape))
-            valid = (idx >= 0) & (idx < self._shape[dim])
-            vals = np.take_along_axis(self.numpy()[sl], np.where(valid, idx, 0), axis=dim)
-            out = np.where(valid, vals, out)
-        return Tensor(out, dtype=self._dtype)
 
     def _pre_scatter(self, dim: int, index: "Tensor", src: "Tensor"
                      ) -> "tuple[int, Tensor]":
@@ -1201,7 +1172,8 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     def _scatter_reduced(self, dim: int, index: "Tensor", src: "Tensor",
                          reduce: "str | None", include_self: bool) -> "Tensor":
         """Scatter for reduce "sum", "prod", "mean", "amax", "amin" or None (the last write wins): native
-        UOP_SCATTERs on the CPU (two for mean), else the host; empty operands run no kernel."""
+        UOP_SCATTERs on the CPU (two for mean), elsewhere tinygrad's one-hot folds; empty operands run
+        no kernel."""
         if self.numel() == 0:
             dt = dtypes.float32 if reduce == "mean" else self._dtype
             return Tensor(np.zeros(self._shape, dtype=_to_np_dtype(dt)), dtype=dt)
@@ -1216,7 +1188,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
                                  f"({tuple(moved)}, {tuple(moved)}, {tuple(self._shape)})")
             return (self.cast(dtypes.float32) if reduce == "mean" else self) * 1
         if not _native_indexing():
-            return self._scatter_host(dim, index, src, reduce, include_self)
+            return self._scatter_one_hot(dim, index, src, reduce, include_self)
         if reduce is None:
             return self._scatter_native(dim, index, src, K.SCATTER_REPLACE, False)
         if reduce in ("amax", "amin", "prod"):
@@ -1232,39 +1204,31 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             K.SCATTER_SUM, include_self)
         return total.cast(dtypes.float32) / count
 
-    def _scatter_host(self, dim: int, index: "Tensor", src: "Tensor",
-                      reduce: "str | None", include_self: bool) -> "Tensor":
-        """_scatter_reduced on the host, for a device without native scatter
-        kernels: the same values, no gradient."""
-        base = self.numpy()
-        idx = index.numpy().astype(np.int64)
-        vals = src.numpy()
-        valid = (idx >= 0) & (idx < self._shape[dim])
-        pos = list(np.indices(idx.shape))
-        pos[dim] = np.where(valid, idx, 0)
-        flat = np.ravel_multi_index(tuple(pos), self._shape)[valid]
-        if reduce in ("amax", "amin"):
-            return Tensor(_host_scatter_extreme(base, flat, vals[valid], reduce == "amax",
-                                                include_self), dtype=self._dtype)
+    def _scatter_one_hot(self, dim: int, index: "Tensor", src: "Tensor",
+                         reduce: "str | None", include_self: bool) -> "Tensor":
+        """tinygrad's scatter_reduce and scatter (mixin/op.py:1078-1187): src beside a one-hot mask of
+        index over a new last axis, both padded to self, folded along it; no data-dependent store."""
+        n = self._shape[dim]
+        src = src.unsqueeze(-1).expand(*src._shape, n).transpose(-1, dim).pad_to(*self._shape, None)
+        mask = index.unsqueeze(-1)._one_hot_along_dim(n).transpose(-1, dim).pad_to(*self._shape, None)
+        def keep(a, b): return a if include_self else mask.any(-1).logical_not().where(a, b)
         if reduce is None:
-            # Positions that meet differ only along dim, so the last write
-            # along dim is the last one in row-major order.
-            out = base.copy().reshape(-1)
-            targets, first_rev = np.unique(flat[::-1], return_index=True)
-            out[targets] = vals[valid][len(flat) - 1 - first_rev]
-            return Tensor(out.reshape(self._shape), dtype=self._dtype)
-        acc = np.float32 if dtypes.is_float(self._dtype) else np.int32
-        fold, ident = (np.multiply, 1) if reduce == "prod" else (np.add, 0)
-        S = np.full(base.size, ident, acc)
-        fold.at(S, flat, vals[valid].astype(acc))
-        hits = np.bincount(flat, minlength=base.size)
-        keep = base.reshape(-1) if include_self else np.where(hits == 0, base.reshape(-1), ident)
-        total = fold(S, keep.astype(acc)).reshape(self._shape)
-        if reduce in ("sum", "prod"):
-            return Tensor(total, dtype=self._dtype)
-        count = (hits + (1 if include_self else (hits == 0))).astype(np.float32)
-        out = total.astype(np.float32) * (np.float32(1) / count.reshape(self._shape))
-        return Tensor(out, dtype=dtypes.float32)
+            # _masked_merge: the last write along the axis wins.
+            m, v = functools.reduce(lambda x, y: (x[0] | y[0], y[0].where(y[1], x[1])),
+                                    zip(mask.split(1, -1), src.split(1, -1)))
+            return m.squeeze(-1).where(v.squeeze(-1), self)
+        if reduce == "sum":
+            return mask.where(src, 0).sum(-1).add(keep(self, 0))
+        if reduce == "prod":
+            return mask.where(src, 1).prod(-1).mul(keep(self, 1))
+        if reduce == "amax":
+            m = dtypes.min(src._dtype)
+            return mask.where(src, m).max(-1).maximum(keep(self, m))
+        if reduce == "amin":
+            m = dtypes.max(src._dtype)
+            return mask.where(src, m).min(-1).minimum(keep(self, m))
+        count = mask.where(1, 0).sum(-1).add(keep(1, 0))
+        return mask.where(src, 0).sum(-1).add(keep(self, 0)).div(count)
 
     def scatter_reduce(self, dim: int, index: "Tensor", src: "Tensor", reduce: str,
                        include_self: bool = True) -> "Tensor":
@@ -1476,14 +1440,12 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     def embedding(self, idx: "Tensor") -> "Tensor":
         """Rows of self (vocab, embed) at the int ids `idx`, a zero row outside [0, vocab) (tinygrad
-        nn/__init__.py:369-371): on the CPU one native gather, differentiable into self."""
+        nn/__init__.py:366-368): on the CPU one native gather, elsewhere tinygrad's one-hot select;
+        both differentiable into self."""
         if _native_indexing():
             return self._gather_rows(idx, wrap=False)
-        # Host gather off the CPU backend: no native gather kernels there.
-        sel = idx.numpy().astype(np.int64)
-        rows = self.numpy()[sel.reshape(-1)]
-        out_shape = tuple(sel.shape) + (self._shape[-1],)
-        return Tensor(rows.reshape(out_shape), dtype=self._dtype)
+        hit = Tensor.arange(self._shape[0]) == idx.unsqueeze(-1)
+        return hit.unsqueeze(-1).where(self, 0).sum(-2, dtype=self._dtype)
 
     def scaled_dot_product_attention(self, key: "Tensor", value: "Tensor",
                                      attn_mask: "Tensor | None" = None,

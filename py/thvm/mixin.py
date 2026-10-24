@@ -521,9 +521,9 @@ class OpMixin:
             parsed = {"size": size, "boundary": (0, size), "stride": 1, "collapse_dim": False}
             if isinstance(index, (list, tuple)):
                 flat = _fully_flatten(index)
-                if not all(isinstance(i, int) and not isinstance(i, bool) for i in flat):
+                if not dtypes.is_int(inferred := dtypes.from_py(flat)):
                     raise IndexError(f"{index=} contains non-int element")
-                index = type(self)([i + size if i < 0 else i for i in flat], dtype=dtypes.int32).reshape(_get_shape(index))
+                index = type(self)([i + size if i < 0 else i for i in flat], dtype=inferred).reshape(_get_shape(index))
             elif isinstance(index, type(self)):
                 if not dtypes.is_int(index.dtype):
                     raise IndexError(f"index dtype {index.dtype} is not supported")
