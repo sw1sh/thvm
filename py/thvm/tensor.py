@@ -6,6 +6,7 @@ runs thvm's materialize, schedule and dispatch, and backward() its chain rule.
 """
 from __future__ import annotations
 
+import ctypes
 import functools
 import itertools
 import math
@@ -15,8 +16,10 @@ import weakref
 import numpy as np
 
 from .device import Device
-from .dtypes import DType, dtypes
-from .helpers import TRAINING, argfix
+from .dtypes import (DType, dtypes, from_thvm_id, least_upper_dtype, sum_acc_dtype, to_dtype,
+                     _from_np_dtype, _to_np_dtype)
+from .helpers import TRAINING, argfix, make_tuple
+from .mixin import OpMixin, _align_left
 from .thvm import K, Term, Thvm
 
 
@@ -64,21 +67,28 @@ def _native_indexing() -> bool:
     return Device.DEFAULT == "CPU"
 
 
+def _host_bytes(arr: np.ndarray, dt: DType) -> bytes:
+    """arr's elements in dt's storage; bf16 and fp8 go through the C f32 conversion."""
+    if dt.np_dtype is not None:
+        return arr.astype(dt.np_dtype, copy=False).tobytes()
+    src = np.ascontiguousarray(arr, dtype=np.float32)
+    out = (ctypes.c_uint8 * (src.size * dt.itemsize))()
+    _TH.dtype_from_f32(out, dt.thvm_id, src, src.size)
+    return bytes(out)
+
+
 def _const_broadcast(value, shape, dtype: DType) -> "Tensor":
     """A lazy constant of `shape`, EXPAND(RESHAPE(CONST)) with no host buffer, like tinygrad's
     const_like (uop/ops.py:603-605)."""
-    c = (_TH.iconst(int(value)) if dtypes.is_int(dtype)
-         else _TH.fconst(float(value)))
     shape = tuple(int(d) for d in shape)
-    t = _TH.expand(_TH.reshape(c, [1] * len(shape)), list(shape))
-    return Tensor._from_term(t, dtype, shape)
+    return Tensor._from_nn(_TH.nn("full", [], [dtype.thvm_id, *shape], [float(value)]), "full")
 
 
 def _promote(a: "Tensor", b: "Tensor") -> "tuple[Tensor, Tensor]":
-    """least_upper_dtype on the float32/int32 lattice: a mixed pair computes
-    in float32 (tinygrad mixin/elementwise.py:24-34)."""
+    """A mixed pair in its least_upper_dtype (tinygrad mixin/elementwise.py:24-34)."""
     if a._dtype != b._dtype:
-        return a.cast(dtypes.float32), b.cast(dtypes.float32)
+        dt = least_upper_dtype(a._dtype, b._dtype)
+        return a.cast(dt), b.cast(dt)
     return a, b
 
 
@@ -124,8 +134,10 @@ def _wrap_other(self_t: "Tensor", other) -> "Tensor":
     dtype = self_t._dtype
     if isinstance(other, float) and not dtypes.is_float(self_t._dtype):
         dtype = dtypes.float32
+    elif isinstance(other, int) and not isinstance(other, bool) and dtype == dtypes.bool:
+        dtype = dtypes.int32
     if np.ndim(other) > 0:
-        return Tensor(np.asarray(other, dtype=dtype.np_dtype), dtype=dtype)
+        return Tensor(np.asarray(other, dtype=_to_np_dtype(dtype)), dtype=dtype)
     return _const_broadcast(other, (), dtype)
 
 
@@ -145,7 +157,7 @@ _TRAINING_MOVED = ("Tensor.training was removed (tinygrad #16774): use "
                    "`with Context(TRAINING=1):` or `@Context(TRAINING=1)`")
 
 
-class Tensor(metaclass=_TensorMeta):
+class Tensor(OpMixin, metaclass=_TensorMeta):
     """A thvm term (a lazy UOp graph or a realized TAG_TEN) plus its dtype and shape."""
 
     __slots__ = ("term", "_dtype", "_shape", "is_param", "grad",
@@ -167,24 +179,26 @@ class Tensor(metaclass=_TensorMeta):
             self._shape = data._shape
         elif data is None:
             self.term = Term(0)
-            self._dtype = dtype or dtypes.default_float
+            self._dtype = to_dtype(dtype) if dtype is not None else dtypes.default_float
             self._shape = ()
         else:
-            arr = np.asarray(data)
-            if dtype is None:
-                dtype = (dtypes.default_int
-                         if np.issubdtype(arr.dtype, np.integer)
-                         else dtypes.default_float)
-            arr = arr.astype(dtype.np_dtype, copy=False)
-            # ascontiguousarray promotes 0-D -> (1,); only call for >=1D
-            if arr.ndim >= 1 and not arr.flags["C_CONTIGUOUS"]:
+            # tinygrad's inference (tensor.py:72-86): a numpy array keeps its dtype, bytes are u8,
+            # a Python value takes from_py's.
+            if isinstance(data, (np.ndarray, np.generic)):
+                dt = to_dtype(dtype) if dtype is not None else _from_np_dtype(data.dtype)
+            elif isinstance(data, bytes):
+                data, dt = np.frombuffer(data, np.uint8), to_dtype(dtype or dtypes.uint8)
+            else:
+                dt = to_dtype(dtype) if dtype is not None else dtypes.from_py(data)
+            arr = np.asarray(data).astype(_to_np_dtype(dt), copy=False)
+            if arr.ndim >= 1 and not arr.flags["C_CONTIGUOUS"]:   # 0-D would become (1,)
                 arr = np.ascontiguousarray(arr)
-            self._dtype = dtype
+            self._dtype = dt
             self._shape = tuple(int(d) for d in arr.shape)
             _TH.reclaim_if_due()
-            self.term = _TH.ten_create(dtype.thvm_id, list(self._shape))
+            self.term = _TH.ten_create(dt.thvm_id, list(self._shape))
             if arr.size > 0:
-                _TH.ten_write(self.term, arr.tobytes())
+                _TH.ten_write(self.term, _host_bytes(arr, dt))
         # is_param only splits an optimizer's list into params and buffers (BatchNorm running
         # stats opt out); backward() fills .grad on every in-scope float leaf regardless.
         self.is_param: bool = True
@@ -247,6 +261,8 @@ class Tensor(metaclass=_TensorMeta):
     @property
     def dtype(self) -> DType: return self._dtype
     @property
+    def device(self) -> str: return Device.DEFAULT
+    @property
     def ndim(self) -> int: return len(self._shape)
 
     def numel(self) -> int:
@@ -305,13 +321,17 @@ class Tensor(metaclass=_TensorMeta):
         return ret.is_param_(self.is_param)
 
     def numpy(self) -> np.ndarray:
+        """The value on the host; bf16 and fp8 read back as f32, as tinygrad's do."""
         self.realize()
         n = self.numel()
         if n == 0:
-            return np.zeros(self._shape, dtype=self._dtype.np_dtype)
+            return np.zeros(self._shape, dtype=_to_np_dtype(self._dtype))
         raw = _TH.ten_read(self.term, n * self._dtype.itemsize)
-        arr = np.frombuffer(raw, dtype=self._dtype.np_dtype)
-        return arr.reshape(self._shape).copy()
+        if self._dtype.np_dtype is None:
+            out = np.empty(n, np.float32)
+            _TH.dtype_to_f32(out, raw, self._dtype.thvm_id, n)
+            return out.reshape(self._shape)
+        return np.frombuffer(raw, dtype=self._dtype.np_dtype).reshape(self._shape).copy()
 
     def tolist(self): return self.numpy().tolist()
     def item(self):   return self.numpy().item()
@@ -402,6 +422,37 @@ class Tensor(metaclass=_TensorMeta):
                 leaf.grad = Tensor._from_term(Term(g), leaf._dtype, leaf._shape)
         return self
 
+    def gradient(self, *targets: "Tensor", gradient: "Tensor | None" = None) -> "list[Tensor]":
+        """d self / d target for each realized target, leaving every .grad alone (tinygrad
+        mixin/op.py:473-488); a target self does not depend on gets zeros."""
+        if gradient is None:
+            if self._shape != ():
+                raise AssertionError("when no gradient is provided, backward must be called on a scalar tensor")
+            gradient = self.const_like(1.0)
+        if not (dtypes.is_float(self._dtype) and all(dtypes.is_float(t._dtype) for t in targets)):
+            raise RuntimeError("only float Tensors have gradient")
+        for t in targets:
+            t.realize()
+        tids = [int(_TH.term_val(t.term)) for t in targets]
+        # The C rule accumulates into each leaf's grad; clear it on both sides so this call
+        # neither reads nor leaves one.
+        for t in targets:
+            _TH.ten_clear_grad(t.term)
+        grads, _, err = _TH.backward(self.term, gradient.term, tids)
+        for t in targets:
+            _TH.ten_clear_grad(t.term)
+        if err is not None:
+            raise RuntimeError(f"gradient(): {err}")
+        return [Tensor._from_term(Term(g), t._dtype, t._shape) if g != 0 else t.zeros_like()
+                for g, t in zip(grads, targets)]
+
+    def matmul(self, x: "Tensor", dtype: DType | None = None) -> "Tensor":
+        out = self @ x
+        return out if dtype is None else out.cast(dtype)
+
+    def dot(self, w: "Tensor", dtype: DType | None = None) -> "Tensor":
+        return self.matmul(w, dtype)
+
     def sequential(self, layers) -> "Tensor":
         """Apply a list of callables to self in sequence."""
         out = self
@@ -416,64 +467,103 @@ class Tensor(metaclass=_TensorMeta):
         return cls(arr, dtype=dtype)
 
     @classmethod
+    def full(cls, shape, fill_value, dtype: DType | None = None, **kw) -> "Tensor":
+        """fill_value everywhere, in dtype or the one fill_value implies (tinygrad
+        mixin/creation.py full)."""
+        dt = to_dtype(dtype) if dtype is not None else dtypes.from_py(fill_value)
+        return cls(np.full(argfix(shape), fill_value, dtype=_to_np_dtype(dt)), dtype=dt)
+
+    @classmethod
     def ones(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
-        dt = dtype or dtypes.default_float
-        return cls._from_numpy(np.ones(shape, dtype=dt.np_dtype), dt)
+        return cls.full(argfix(*shape), 1.0, dtype=dtype)
 
     @classmethod
     def zeros(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
-        dt = dtype or dtypes.default_float
-        return cls._from_numpy(np.zeros(shape, dtype=dt.np_dtype), dt)
+        return cls.full(argfix(*shape), 0.0, dtype=dtype)
 
     @classmethod
-    def eye(cls, n: int, m: int | None = None,
-            dtype: DType | None = None, **kw) -> "Tensor":
-        dt = dtype or dtypes.default_float
-        return cls._from_numpy(np.eye(n, m or n, dtype=dt.np_dtype), dt)
-
-    @classmethod
-    def rand(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
-        dt = dtype or dtypes.default_float
-        return cls._from_numpy(
-            np.random.rand(*shape).astype(dt.np_dtype, copy=False), dt)
-
-    @classmethod
-    def uniform(cls, *shape, low: float = 0.0, high: float = 1.0,
-                dtype: DType | None = None, **kw) -> "Tensor":
-        dt = dtype or dtypes.default_float
-        arr = np.random.uniform(low, high, shape).astype(dt.np_dtype,
-                                                          copy=False)
-        return cls._from_numpy(arr, dt)
-
-    @classmethod
-    def randint(cls, *shape, low: int = 0, high: int = 10,
-                dtype: DType | None = None, **kw) -> "Tensor":
-        dt = dtype or dtypes.default_int
-        arr = np.random.randint(low, high, size=shape or (1,))
-        return cls._from_numpy(arr.astype(dt.np_dtype, copy=False), dt)
+    def eye(cls, n: int, m: int | None = None, dtype: DType | None = None, **kw) -> "Tensor":
+        dt = to_dtype(dtype) if dtype is not None else dtypes.default_float
+        return cls(np.eye(n, m or n, dtype=_to_np_dtype(dt)), dtype=dt)
 
     @classmethod
     def empty(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
         """An unfilled buffer (tinygrad empty): allocated, never written."""
-        dt = dtype or dtypes.default_float
-        shape = tuple(int(d) for d in shape)
+        dt = to_dtype(dtype) if dtype is not None else dtypes.default_float
+        shape = tuple(int(d) for d in argfix(*shape))
         _TH.reclaim_if_due()
         return cls._from_term(_TH.ten_create(dt.thvm_id, list(shape)), dt, shape)
 
-    @classmethod
-    def full(cls, shape, value, dtype: DType | None = None,
-             **kw) -> "Tensor":
-        dt = dtype or dtypes.default_float
-        return cls._from_numpy(np.full(shape, value, dtype=dt.np_dtype),
-                               dt)
+    # Random factories draw from numpy's global RNG (manual_seed seeds it); tinygrad draws
+    # in-graph (mixin/rand.py), with the same distributions and init formulas.
 
     @classmethod
-    def ones_like(cls, t: "Tensor") -> "Tensor":
-        return cls.ones(*t._shape, dtype=t._dtype)
+    def _random(cls, arr, dtype) -> "Tensor":
+        dt = to_dtype(dtype) if dtype is not None else dtypes.default_float
+        return cls(np.asarray(arr).astype(_to_np_dtype(dt)), dtype=dt)
 
     @classmethod
-    def zeros_like(cls, t: "Tensor") -> "Tensor":
-        return cls.zeros(*t._shape, dtype=t._dtype)
+    def rand(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
+        return cls._random(np.random.rand(*argfix(*shape)), dtype)
+
+    @classmethod
+    def randn(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
+        return cls._random(np.random.standard_normal(argfix(*shape)), dtype)
+
+    @classmethod
+    def normal(cls, *shape, mean: float = 0.0, std: float = 1.0, dtype=None, **kw) -> "Tensor":
+        if std < 0:
+            raise ValueError(f"Tensor.normal requires std >= 0, got {std=}")
+        return cls._random(np.random.normal(mean, std, argfix(*shape)), dtype)
+
+    @classmethod
+    def uniform(cls, *shape, low: float = 0.0, high: float = 1.0, dtype: DType | None = None,
+                **kw) -> "Tensor":
+        if low >= high:
+            raise ValueError(f"Tensor.uniform requires low < high, got {low=}, {high=}")
+        return cls._random(np.random.uniform(low, high, argfix(*shape)), dtype)
+
+    @classmethod
+    def randint(cls, *shape, low: int = 0, high: int = 10, dtype: DType | None = None,
+                **kw) -> "Tensor":
+        dt = to_dtype(dtype) if dtype is not None else dtypes.int32
+        if not dtypes.is_int(dt):
+            raise TypeError(f"{dt=} must be int")
+        if low >= high:
+            raise ValueError(f"Tensor.randint requires low < high, got {low=}, {high=}")
+        return cls._random(np.random.randint(low, high, size=argfix(*shape)), dt)
+
+    @classmethod
+    def scaled_uniform(cls, *shape, **kw) -> "Tensor":
+        return cls.uniform(*shape, low=-1.0, high=1.0, **kw).mul(math.prod(argfix(*shape)) ** -0.5)
+
+    @classmethod
+    def glorot_uniform(cls, *shape, **kw) -> "Tensor":
+        s = argfix(*shape)
+        bound = (6 / (s[0] + math.prod(s[1:]))) ** 0.5
+        return cls.uniform(*shape, low=-bound, high=bound, **kw)
+
+    @classmethod
+    def kaiming_uniform(cls, *shape, a: float = 0.01, **kw) -> "Tensor":
+        bound = (6 / (1 + a ** 2) / math.prod(argfix(*shape)[1:])) ** 0.5
+        return cls.uniform(*shape, low=-bound, high=bound, **kw)
+
+    @classmethod
+    def kaiming_normal(cls, *shape, a: float = 0.01, **kw) -> "Tensor":
+        std = (2 / (1 + a ** 2) / math.prod(argfix(*shape)[1:])) ** 0.5
+        return cls.normal(*shape, mean=0.0, std=std, **kw)
+
+    def rand_like(self, **kw) -> "Tensor":
+        return Tensor.rand(*self._shape, dtype=kw.pop("dtype", self._dtype))
+
+    def randn_like(self, dtype: DType | None = None, **kw) -> "Tensor":
+        return Tensor.randn(*self._shape, dtype=dtype or self._dtype)
+
+    def full_like(self, fill_value, dtype: DType | None = None, **kw) -> "Tensor":
+        return Tensor.full(self._shape, fill_value, dtype=dtype or self._dtype)
+
+    def ones_like(self, **kw) -> "Tensor": return self.full_like(1, **kw)
+    def zeros_like(self, **kw) -> "Tensor": return self.full_like(0, **kw)
 
     # ---- broadcasting (tinygrad rule: align trailing, expand 1s) ------
 
@@ -489,44 +579,164 @@ class Tensor(metaclass=_TensorMeta):
 
     # ---- elementwise binary -------------------------------------------
 
+    def _broadcasted(self, y, reverse: bool = False) -> tuple["Tensor", "Tensor"]:
+        """self and y broadcast and promoted, y first when reverse (tinygrad
+        mixin/elementwise.py:24-34)."""
+        a, b = _promote(*self._broadcast(y))
+        return (b, a) if reverse else (a, b)
+
+    def _ufix(self, x) -> "Tensor":
+        return x if isinstance(x, Tensor) else _wrap_other(self, x)
+
     def _binop(self, other, opcode: int) -> "Tensor":
-        a, b = _promote(*self._broadcast(other))
+        a, b = self._broadcasted(other)
+        if opcode == K.ADD and a._dtype == dtypes.bool:
+            # A bool sum saturates, as tinygrad's rendered bool does.
+            return a | b
         return Tensor._from_term(_TH.binary(opcode, a.term, b.term), a._dtype, a._shape)
 
     def __add__(self, o):  return self._binop(o, K.ADD)
     def __radd__(self, o): return self.__add__(o)
-    def __sub__(self, o):
-        if isinstance(o, (int, float)):
-            return self.__add__(-o)
-        return self.__add__(-(o if isinstance(o, Tensor) else Tensor(o)))
-    def __rsub__(self, o): return (-self).__add__(o)
+    def sub(self, x, reverse: bool = False) -> "Tensor":
+        """a + (-b) after the broadcast and promotion (tinygrad mixin/elementwise.py:102-122), so
+        a bool b is negated as a number, not by logical_not."""
+        if isinstance(x, (int, float)) and not isinstance(x, bool) and not reverse:
+            return self.__add__(-x)
+        a, b = self._broadcasted(x, reverse)
+        return a.__add__(-b)
+
+    def __sub__(self, o):  return self.sub(o)
+    def __rsub__(self, o): return self.sub(o, True)
     def __mul__(self, o):  return self._binop(o, K.MUL)
     def __rmul__(self, o): return self.__mul__(o)
 
-    def __truediv__(self, o):
-        if isinstance(o, (int, float)):
-            return self.__mul__(1.0 / float(o))
-        other = o if isinstance(o, Tensor) else Tensor(o)
-        return self.__mul__(other.recip())
-    def __rtruediv__(self, o):
-        return self.recip().__mul__(o)
+    def div(self, x, reverse: bool = False, rounding_mode=None) -> "Tensor":
+        """a * (1 / b), an int or bool pair in float32 (tinygrad mixin/elementwise.py:228-258); an
+        int pair with a rounding_mode rounds in float32, thvm having no integer divide."""
+        if rounding_mode not in (None, "trunc", "floor"):
+            raise RuntimeError(f"{rounding_mode=} is not supported")
+        if (isinstance(x, (int, float)) and not reverse and rounding_mode is None
+                and dtypes.is_float(self._dtype)):
+            # tinygrad folds 1 / b for a constant b.
+            return self * (1.0 / x if x else math.copysign(math.inf, x))
+        a, b = self._broadcasted(x, reverse)
+        if dtypes.is_int(a._dtype) and rounding_mode is not None:
+            # |a| // |b| as floor(|a| * (1 / |b|)) in float32, corrected by its remainder for the
+            # rounding of 1 / b (110 // 55 read 1.9999999): exact below 2**24.
+            fa, fb = a.float(), b.float()
+            na, nb = fa.abs(), fb.abs()
+            q = (na * nb.reciprocal()).floor()
+            r = na - q * nb
+            t = (q - (r < 0) + (r >= nb)) * (fa.sign() * fb.sign())
+            if rounding_mode == "floor":
+                t = t - ((fa - t * fb).ne(0) & (fa < 0).ne(fb < 0))
+            return t.cast(a._dtype)
+        if not dtypes.is_float(a._dtype):
+            a, b = a.float(), b.float()
+        d = a * b.reciprocal()
+        if rounding_mode is None:
+            return d
+        if rounding_mode == "trunc":
+            return d.trunc()
+        return d.floor()
+
+    def __truediv__(self, o):  return self.div(o)
+    def __rtruediv__(self, o): return self.div(o, True)
 
     def __neg__(self) -> "Tensor":
+        if self._dtype == dtypes.bool:
+            return self.logical_not()
         return Tensor._from_term(_TH.neg(self.term), self._dtype,
                                  self._shape)
 
     def add(self, o): return self.__add__(o)
-    def sub(self, o): return self.__sub__(o)
     def mul(self, o): return self.__mul__(o)
-    def div(self, o): return self.__truediv__(o)
+
+    def trunc(self) -> "Tensor":
+        """Toward zero through an int cast, thvm having no TRUNC (tinygrad
+        mixin/elementwise.py:469-477): a float past 2**mantissa (or inf, nan) is its own."""
+        if not dtypes.is_float(self._dtype):
+            return self
+        mant = dtypes.finfo(self._dtype)[1]
+        cut = self.cast(dtypes.int64 if mant > 30 else dtypes.int32).cast(self._dtype)
+        return (self.abs() < 2.0 ** mant).where(cut, self)
+
+    # ---- compare and logic (tinygrad mixin/elementwise.py:144-375) ----
+
+    def _cmp(self, x, opcode: int, reverse: bool = False) -> "Tensor":
+        # thvm's compare yields 0 / 1 in the operands' dtype, so the mask casts to bool.
+        a, b = self._broadcasted(x, reverse)
+        return Tensor._from_term(_TH.binary(opcode, a.term, b.term), a._dtype, a._shape).cast(dtypes.bool)
+
+    def __lt__(self, x): return self._cmp(x, K.CMPLT)
+    def __gt__(self, x): return self._cmp(x, K.CMPLT, True)
+    def __ge__(self, x): return (self < x).logical_not()
+    def __le__(self, x): return (self > x).logical_not()
+    def eq(self, x):     return self._cmp(x, K.CMPEQ)
+    def ne(self, x):     return self.eq(x).logical_not()
+    def __eq__(self, x): return self.eq(x)
+    def __ne__(self, x): return self.ne(x)
+    def logical_not(self) -> "Tensor": return self.cast(dtypes.bool).eq(False)
+
+    def _bool_op(self, x, reverse: bool, op: str) -> "Tensor":
+        a, b = self._broadcasted(x, reverse)
+        if a._dtype != dtypes.bool:
+            raise NotImplementedError(f"{op} on {a._dtype}: thvm has no integer bit ops")
+        if op == "and":
+            return a.where(b, False)
+        return a.where(True, b) if op == "or" else a.where(b.logical_not(), b)
+
+    def bitwise_and(self, x, reverse: bool = False): return self._bool_op(x, reverse, "and")
+    def bitwise_or(self, x, reverse: bool = False):  return self._bool_op(x, reverse, "or")
+    def bitwise_xor(self, x, reverse: bool = False): return self._bool_op(x, reverse, "xor")
+    def __and__(self, x):  return self.bitwise_and(x)
+    def __or__(self, x):   return self.bitwise_or(x)
+    def __xor__(self, x):  return self.bitwise_xor(x)
+    def __rand__(self, x): return self.bitwise_and(x, True)
+    def __ror__(self, x):  return self.bitwise_or(x, True)
+    def __rxor__(self, x): return self.bitwise_xor(x, True)
+
+    def bitwise_not(self) -> "Tensor":
+        # ~x as -x - 1, or max - x unsigned, which agree with tinygrad's x ^ -1 / x ^ max.
+        if self._dtype == dtypes.bool:
+            return self.logical_not()
+        if not dtypes.is_int(self._dtype):
+            raise RuntimeError(f"{self._dtype} has no bitwise_not")
+        return self._dtype.max - self if dtypes.is_unsigned(self._dtype) else -self - 1
+
+    def __invert__(self): return self.bitwise_not()
+
+    def lshift(self, x: int, reverse: bool = False) -> "Tensor":
+        # x << n as x * 2**n, there being no SHL; a Python int shift only.
+        if reverse or not isinstance(x, int):
+            raise NotImplementedError("thvm shifts an int tensor by a Python int only")
+        return self * (1 << x)
+
+    def rshift(self, x: int, reverse: bool = False) -> "Tensor":
+        if reverse or not isinstance(x, int):
+            raise NotImplementedError("thvm shifts an int tensor by a Python int only")
+        return self // (1 << x)
+
+    def __lshift__(self, x): return self.lshift(x)
+    def __rshift__(self, x): return self.rshift(x)
+
+    def pow(self, x, reverse: bool = False) -> "Tensor":
+        """self ** x, or x ** self when reverse (tinygrad mixin/elementwise.py:547-570)."""
+        if not reverse and isinstance(x, int) and x < 0 and not dtypes.is_float(self._dtype):
+            raise RuntimeError("integers to negative integer powers are not allowed")
+        o = _wrap_other(self, x)
+        b, e = (o, self) if reverse else (self, o)
+        return Tensor._from_nn(_TH.nn("pow", [b._nn(), e._nn()]), "pow")
+
+    def __pow__(self, x): return self.pow(x)
+    def __rpow__(self, x): return self.pow(x, True)
 
     def __matmul__(self, other: "Tensor") -> "Tensor":
         """Matmul as RESHAPE, EXPAND, MUL and REDUCE, which thvm fuses; N-D operands take
         tinygrad's dot (src/nn/dot.c)."""
         r = _TH.nn("dot", [self._nn(), other._nn()])
         if r is None:
-            err = ValueError if self.ndim == 2 and other.ndim == 2 else RuntimeError
-            raise err(f"cannot dot {self._shape} and {other._shape}")
+            raise RuntimeError(f"cannot dot {self._shape} and {other._shape}")
         return Tensor._from_nn(r, "dot")
 
     # ---- elementwise unary --------------------------------------------
@@ -541,6 +751,11 @@ class Tensor(metaclass=_TensorMeta):
     def exp2(self) -> "Tensor":  return self._unary(K.EXP2)
     def log2(self) -> "Tensor":  return self._unary(K.LOG2)
     def sqrt(self) -> "Tensor":  return self._unary(K.SQRT)
+
+    def sin(self) -> "Tensor":
+        # tinygrad mixin/elementwise.py:489-497, an int in float32.
+        x = self if dtypes.is_float(self._dtype) else self.float()
+        return x._unary(K.SIN)
     def _elementwise(self, op: str) -> "Tensor":
         """A composite elementwise op of src/nn/elementwise.c, by name."""
         return Tensor._from_nn(_TH.nn(op, [self._nn()]), op)
@@ -554,6 +769,8 @@ class Tensor(metaclass=_TensorMeta):
     def tanh(self) -> "Tensor":    return self._elementwise("tanh")
 
     def softmax(self, axis: int = -1) -> "Tensor":
+        if self.ndim == 0:
+            return self.reshape(1).softmax(self._resolve_dim(axis)).reshape(())
         return Tensor._from_nn(_TH.nn("softmax", [self._nn()], [axis, 0]), "softmax")
 
     def softmin(self, axis: int = -1) -> "Tensor":
@@ -561,13 +778,18 @@ class Tensor(metaclass=_TensorMeta):
         return (-self).softmax(axis=axis)
 
     def log_softmax(self, axis: int = -1) -> "Tensor":
+        if self.ndim == 0:
+            return self.reshape(1).log_softmax(self._resolve_dim(axis)).reshape(())
         return Tensor._from_nn(_TH.nn("softmax", [self._nn()], [axis, 1]), "log_softmax")
 
-    def sparse_categorical_crossentropy(self, Y: "Tensor",
+    def sparse_categorical_crossentropy(self, Y: "Tensor", ignore_index: int = -1,
+                                        label_smoothing: float = 0.0, reduction: str = "mean",
                                         axis: int = -1) -> "Tensor":
         """Mean NLL of log_softmax(self) at the int labels Y (src/nn/
         sparse_categorical_crossentropy.c), the one-hot an in-graph compare, so a TinyJit replay
-        reads each step's labels."""
+        reads each step's labels; other arguments take tinygrad's composition."""
+        if ignore_index != -1 or label_smoothing != 0.0 or reduction != "mean":
+            return self._sparse_categorical_crossentropy(Y, ignore_index, label_smoothing, reduction)
         r = _TH.nn("sparse_categorical_crossentropy", [self._nn(), Y._nn()], [axis])
         return Tensor._from_nn(r, f"sparse_categorical_crossentropy {self._shape} {Y._shape}")
 
@@ -583,21 +805,12 @@ class Tensor(metaclass=_TensorMeta):
         idx = m * ramp.reshape(n, *[1] * (self.ndim - ax - 1))
         return (n - idx.max(axis=ax, keepdim=keepdim)).cast(dtypes.int32)
 
-    def __eq__(self, other) -> "Tensor":
-        """Elementwise equality mask (1.0/0.0), so `(pred == labels).mean()`
-        reads as an accuracy; tinygrad's CMPEQ compare."""
-        return self._binop(other, K.CMPEQ).cast(dtypes.float32)
-
-    def __ne__(self, other) -> "Tensor":
-        return 1.0 - (self == other)
-
     def relu(self) -> "Tensor":
         return self._elementwise("relu")
 
     def elu(self, alpha: float = 1.0) -> "Tensor":
-        # elu(x) = relu(x) + alpha * (exp(min(x, 0)) - 1), with min(x, 0) = -relu(-x).
-        neg_relu_neg = -((-self).relu())
-        return self.relu() + (neg_relu_neg.exp() - 1.0) * alpha
+        # tinygrad mixin/elementwise.py:962-972: its gradient at 0 is alpha.
+        return (self > 0).where(self, alpha * ((self - self.relu()).exp() - 1))
 
     def maximum(self, other) -> "Tensor":
         r = _TH.nn("maximum", [self._nn(), _wrap_other(self, other)._nn()], [0])
@@ -610,18 +823,13 @@ class Tensor(metaclass=_TensorMeta):
     def square(self) -> "Tensor":
         return self._elementwise("square")
 
-    def __lt__(self, other) -> "Tensor":
-        # A 0/1 mask in a's dtype: thvm has no bool dtype.
-        a, b = self._broadcast(other)
-        return Tensor._from_term(_TH.cmplt(a.term, b.term), a._dtype, a._shape)
-
-    def __gt__(self, other) -> "Tensor":
-        return _wrap_other(self, other).__lt__(self)
-
     def where(self, x, y) -> "Tensor":
         """x where self is nonzero, else y (src/nn/where.c): a true select, so a non-finite
-        unselected value never leaks in."""
-        ref = x if isinstance(x, Tensor) else y if isinstance(y, Tensor) else self
+        unselected value never leaks in; two Python values take their own dtypes."""
+        if not isinstance(x, Tensor) and not isinstance(y, Tensor):
+            dt = least_upper_dtype(dtypes.from_py(x), dtypes.from_py(y))
+            x, y = _const_broadcast(x, (), dt), _const_broadcast(y, (), dt)
+        ref = x if isinstance(x, Tensor) else y
         args = [self._nn(), _wrap_other(ref, x)._nn(), _wrap_other(ref, y)._nn()]
         return Tensor._from_nn(_TH.nn("where", args), "where")
 
@@ -650,11 +858,9 @@ class Tensor(metaclass=_TensorMeta):
     # ---- reductions ---------------------------------------------------
 
     def _reduce_axes(self, axis) -> list[int]:
-        if axis is None:
-            return list(range(self.ndim))
-        if isinstance(axis, int):
-            return [axis if axis >= 0 else axis + self.ndim]
-        return sorted(set(a if a >= 0 else a + self.ndim for a in axis))
+        # tinygrad mixin/reduce.py:13-18: each axis resolved, none for a 0-D tensor.
+        axes = range(self.ndim) if axis is None else [self._resolve_dim(a) for a in make_tuple(axis, 1)]
+        return [] if self.ndim == 0 else sorted(set(axes))
 
     def _reduce_count(self, axis) -> int:
         return math.prod(self._shape[a] for a in self._reduce_axes(axis))
@@ -669,16 +875,22 @@ class Tensor(metaclass=_TensorMeta):
         shape = tuple(s for i, s in enumerate(self._shape) if i not in axes)
         return Tensor._from_term(t, self._dtype, shape)
 
-    def sum(self, axis=None, keepdim: bool = False) -> "Tensor":
-        return self._reduce(K.REDUCE_SUM, axis, keepdim)
+    def sum(self, axis=None, keepdim: bool = False, dtype=None) -> "Tensor":
+        """In sum_acc_dtype, or dtype, a half sum cast back (tinygrad mixin/reduce.py:20-45)."""
+        acc = sum_acc_dtype(self._dtype) if dtype is None else to_dtype(dtype)
+        ret = self.cast(acc)._reduce(K.REDUCE_SUM, axis, keepdim)
+        halves = (dtypes.f16, dtypes.bf16, *dtypes.fp8s)
+        return ret.cast(self._dtype) if dtype is None and self._dtype in halves else ret
 
     def max(self, axis=None, keepdim: bool = False) -> "Tensor":
         return self._reduce(K.REDUCE_MAX, axis, keepdim)
 
     def mean(self, axis=None, keepdim: bool = False) -> "Tensor":
-        s = self.sum(axis=axis, keepdim=keepdim)
+        """tinygrad mixin/op.py:519-540, 0 / 0 over an empty axis."""
+        out = self._dtype if dtypes.is_float(self._dtype) else dtypes.float32
         div = self._reduce_count(axis)
-        return s * (1.0 / div) if div else s
+        numerator = self.cast(sum_acc_dtype(self._dtype)).sum(axis=axis, keepdim=keepdim)
+        return (numerator * (1.0 / div if div else math.nan)).cast(out)
 
     def var(self, axis=None, keepdim: bool = False,
             correction=1) -> "Tensor":
@@ -717,7 +929,8 @@ class Tensor(metaclass=_TensorMeta):
         s = list(int(d) for d in shape)
         if -1 in s:
             if s.count(-1) > 1:
-                raise ValueError("only one -1 allowed in reshape")
+                # tinygrad mixin/movement.py:177-178.
+                raise RuntimeError(f"only one dimension can be inferred using -1, getting {tuple(s)}")
             known = 1
             for d in s:
                 if d != -1:
@@ -726,16 +939,21 @@ class Tensor(metaclass=_TensorMeta):
                 raise ValueError(f"cannot infer reshape: {s}")
             s[s.index(-1)] = self.numel() // known
         shape = tuple(s)
+        if math.prod(shape) != self.numel():
+            raise ValueError(f"size mismatch, can't reshape ({self._shape}) -> ({shape})")
+        if shape == self._shape:
+            # tinygrad's reshape returns self (mixin/movement.py:184), so a view keeps its base.
+            return self
         t = _TH.reshape(self.term, list(shape))
         return Tensor._from_term(t, self._dtype, shape)
 
     def permute(self, *axes) -> "Tensor":
-        if len(axes) == 1 and isinstance(axes[0], (tuple, list)):
-            axes = tuple(axes[0])
-        new_shape = tuple(self._shape[a if a >= 0 else a + self.ndim]
-                          for a in axes)
-        t = _TH.permute(self.term, list(axes))
-        return Tensor._from_term(t, self._dtype, new_shape)
+        """tinygrad mixin/movement.py permute: a negative axis counts from the end."""
+        order = [self._resolve_dim(a) for a in argfix(*axes)]
+        if sorted(order) != list(range(self.ndim)):
+            raise RuntimeError(f"order is not a valid permutation, getting {order}")
+        t = _TH.permute(self.term, order)
+        return Tensor._from_term(t, self._dtype, tuple(self._shape[a] for a in order))
 
     def transpose(self, dim0: int = 1, dim1: int = 0) -> "Tensor":
         """tinygrad mixin/movement.py:330-343."""
@@ -743,19 +961,23 @@ class Tensor(metaclass=_TensorMeta):
         order[dim0], order[dim1] = order[dim1], order[dim0]
         return self.permute(*order)
 
-    def expand(self, *shape) -> "Tensor":
-        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
-            shape = tuple(shape[0])
-        shape = tuple(int(d) for d in shape)
-        t = _TH.expand(self.term, list(shape))
-        return Tensor._from_term(t, self._dtype, shape)
+    def expand(self, shape, *args) -> "Tensor":
+        """tinygrad mixin/movement.py:149-162: -1 or None keeps an axis, a shorter shape aligns
+        right."""
+        new_shape = tuple(f if t == -1 or t is None else t
+                          for f, t in zip(*_align_left(self._shape, argfix(shape, *args))))
+        return self._broadcast_to(new_shape)
 
-    def flatten(self, start_dim: int = 0) -> "Tensor":
-        before = self._shape[:start_dim]
-        flat = 1
-        for d in self._shape[start_dim:]:
-            flat *= d
-        return self.reshape(*before, flat)
+    def _broadcast_to(self, new_shape) -> "Tensor":
+        # The new leading axes as 1s, then one EXPAND (tinygrad mixin/movement.py:128-147).
+        new_shape = tuple(int(d) for d in new_shape)
+        if self._shape == new_shape:
+            return self
+        shape = (1,) * (len(new_shape) - self.ndim) + self._shape
+        if self.ndim > len(new_shape) or not all(s == ns or s == 1 for s, ns in zip(shape, new_shape)):
+            raise ValueError(f"cannot broadcast {self._shape} to {new_shape=}")
+        x = self if shape == self._shape else self.reshape(shape)
+        return Tensor._from_term(_TH.expand(x.term, list(new_shape)), self._dtype, new_shape)
 
     def repeat(self, *repeats) -> "Tensor":
         """Repeat each axis by `repeats[i]` (tinygrad-style: pads shape
@@ -800,7 +1022,7 @@ class Tensor(metaclass=_TensorMeta):
         if r is None:
             raise ValueError(f"{what}: invalid shapes or arguments")
         t, dt, shape = r
-        return Tensor._from_term(t, dtypes.float32 if dt == K.FP32 else dtypes.int32, shape)
+        return Tensor._from_term(t, from_thvm_id(dt), shape)
 
     def _pool(self, k_, stride=1, dilation=1) -> "Tensor":
         """tinygrad's _pool unfold (src/nn/pool.c): shape (..., *o_, *k_), each (o, k) slice the
@@ -809,20 +1031,20 @@ class Tensor(metaclass=_TensorMeta):
         s_ = (stride,) * len(k_) if isinstance(stride, int) else tuple(stride)
         d_ = (dilation,) * len(k_) if isinstance(dilation, int) else tuple(dilation)
         assert len(k_) == len(s_) == len(d_)
+        if 0 in k_:
+            # An empty window: tinygrad's output extents ceildiv(i + d, s), each window empty.
+            i_ = self._shape[-len(k_):]
+            o_ = [-(-(i - d * (k - 1)) // s) for i, d, k, s in zip(i_, d_, k_, s_)]
+            return Tensor.zeros(*self._shape[:-len(k_)], *o_, *k_, dtype=self._dtype)
         return Tensor._from_nn(_TH.nn("pool", [self._nn()], [*k_, *s_, *d_]), "_pool")
 
-    def pad(self, begin_end) -> "Tensor":
-        """Zero-pad by tinygrad's per-axis (before, after) pairs or a flat [b0, e0, ...]; a negative
-        pad shrinks that side first, as tinygrad's _pad_constant does (mixin/op.py:282-288)."""
-        begin_end = _normalize_pairs(begin_end, self._shape,
-                                     full=lambda n: (0, 0))
-        if any(int(x) < 0 for x in begin_end):
-            kept = [(-min(int(begin_end[2*i]), 0), min(int(begin_end[2*i+1]) + s, s))
-                    for i, s in enumerate(self._shape)]
-            return self.shrink(kept).pad([max(int(x), 0) for x in begin_end])
-        new_shape = tuple(self._shape[i] + int(begin_end[2*i]) + int(begin_end[2*i+1])
-                          for i in range(self.ndim))
-        t = _TH.pad(self.term, [int(x) for x in begin_end])
+    def _pad_zero(self, pX) -> "Tensor":
+        """Zeros by non-negative per-axis (before, after) pairs, self for none (tinygrad
+        mixin/movement.py:186-190)."""
+        if all(b == 0 and e == 0 for b, e in pX):
+            return self
+        new_shape = tuple(s + int(b) + int(e) for s, (b, e) in zip(self._shape, pX))
+        t = _TH.pad(self.term, [int(v) for p in pX for v in p])
         return Tensor._from_term(t, self._dtype, new_shape)
 
     def shrink(self, begin_end) -> "Tensor":
@@ -832,6 +1054,9 @@ class Tensor(metaclass=_TensorMeta):
                                      full=lambda n: (0, n))
         new_shape = tuple(int(begin_end[2*i+1]) - int(begin_end[2*i])
                           for i in range(self.ndim))
+        if new_shape == self._shape:
+            # tinygrad's shrink returns self (mixin/movement.py:192-212).
+            return self
         t = _TH.shrink(self.term, [int(x) for x in begin_end])
         out = Tensor._from_term(t, self._dtype, new_shape)
         # Kept so assign() into this view can scatter into the base (see assign()).
@@ -846,6 +1071,10 @@ class Tensor(metaclass=_TensorMeta):
     def flip(self, axis, *args) -> "Tensor":
         """The axes reversed (tinygrad mixin/movement.py:233-255)."""
         axes = [self._resolve_dim(a) for a in argfix(axis, *args)]
+        if len(axes) != len(set(axes)):
+            raise RuntimeError(f"dim can appear at most once, getting {axes}")
+        if not axes:
+            return self
         mask = sum(1 << a for a in set(axes))
         return Tensor._from_term(_TH.flip(self.term, mask), self._dtype, self._shape)
 
@@ -931,7 +1160,7 @@ class Tensor(metaclass=_TensorMeta):
     def _gather_host(self, dim: int, index: "Tensor") -> "Tensor":
         """gather on the host: an empty index or axis (no kernel to run), or
         a device without native gather kernels."""
-        out = np.zeros(index._shape, dtype=self._dtype.np_dtype)
+        out = np.zeros(index._shape, dtype=_to_np_dtype(self._dtype))
         if out.size and self._shape[dim]:
             idx = index.numpy().astype(np.int64)
             sl = tuple(slice(None) if d == dim else slice(0, s)
@@ -976,7 +1205,7 @@ class Tensor(metaclass=_TensorMeta):
         UOP_SCATTERs on the CPU (two for mean), else the host; empty operands run no kernel."""
         if self.numel() == 0:
             dt = dtypes.float32 if reduce == "mean" else self._dtype
-            return Tensor(np.zeros(self._shape, dtype=dt.np_dtype), dtype=dt)
+            return Tensor(np.zeros(self._shape, dtype=_to_np_dtype(dt)), dtype=dt)
         if index.numel() == 0:
             # Nothing lands: tinygrad keeps self exactly (mean in float32), but its amax / amin turn
             # a NaN self into the identity (mixin/op.py:1129-1130) where this keeps the NaN; its
@@ -1059,7 +1288,7 @@ class Tensor(metaclass=_TensorMeta):
             raise TypeError(f"{reduce=} must be one of None, 'multiply', or 'add'")
         if isinstance(src, (int, float, bool)):
             if index.numel() == 0:
-                src = Tensor(np.zeros(index._shape, self._dtype.np_dtype), dtype=self._dtype)
+                src = Tensor(np.zeros(index._shape, _to_np_dtype(self._dtype)), dtype=self._dtype)
             else:
                 src = _const_broadcast(src, index._shape, self._dtype)
         elif reduce:
@@ -1077,7 +1306,7 @@ class Tensor(metaclass=_TensorMeta):
         rest = tuple(self._shape[1:])
         n = idx.numel()
         if n == 0:
-            return Tensor(np.zeros((*idx._shape, *rest), dtype=self._dtype.np_dtype),
+            return Tensor(np.zeros((*idx._shape, *rest), dtype=_to_np_dtype(self._dtype)),
                           dtype=self._dtype)
         ix = idx.reshape(n, *([1] * len(rest))).expand(n, *rest)
         if wrap:
@@ -1104,41 +1333,15 @@ class Tensor(metaclass=_TensorMeta):
         arr = np.where((arr >= 0) & (arr < size), arr, -1).astype(np.int32)
         return self._gather_rows(Tensor(arr, dtype=dtypes.int32), wrap=False)
 
-    def __getitem__(self, idx):
-        """Basic indexing by int / slice per leading dim through shrink, an int dropping its axis; a
-        Tensor / list / ndarray index selects rows on axis 0 (_index_rows)."""
-        if isinstance(idx, (Tensor, np.ndarray, list)):
-            if _native_indexing():
-                return self._index_rows(idx)
-            # Host gather off the CPU backend: no native gather kernels there.
-            sel = idx.numpy() if isinstance(idx, Tensor) else np.asarray(idx)
-            gathered = self.numpy()[sel.astype(np.int64)]
-            return Tensor(gathered, dtype=self._dtype)
-        if not isinstance(idx, tuple):
-            idx = (idx,)
-        if len(idx) > self.ndim:
-            raise IndexError(f"too many indices for ndim {self.ndim}")
-        begin_end = []
-        squeeze = []
-        for d in range(self.ndim):
-            n = self._shape[d]
-            ix = idx[d] if d < len(idx) else slice(None)
-            if isinstance(ix, slice):
-                start, stop, step = ix.indices(n)
-                if step != 1:
-                    raise NotImplementedError("strided slice")
-                begin_end += [start, stop]
-            elif isinstance(ix, int):
-                i = ix if ix >= 0 else ix + n
-                begin_end += [i, i + 1]
-                squeeze.append(d)
-            else:
-                raise NotImplementedError(f"index type {type(ix).__name__}")
-        out = self.shrink(begin_end)
-        if squeeze:
-            keep = [out._shape[d] for d in range(out.ndim) if d not in squeeze]
-            out = out.reshape(tuple(keep))
-        return out
+    def __getitem__(self, indices):
+        """tinygrad's getitem (mixin/op.py:57-146, OpMixin._getitem); on the CPU an int Tensor,
+        list or ndarray index alone takes the native row gather (_index_rows)."""
+        if isinstance(indices, list) and all(isinstance(i, int) for i in indices) or \
+                not isinstance(indices, (tuple, list)):
+            indices = [indices]
+        if len(indices) == 1 and isinstance(indices[0], (Tensor, np.ndarray, list)) and _native_indexing():
+            return self._index_rows(indices[0])
+        return self._getitem([i.tolist() if isinstance(i, np.ndarray) else i for i in indices])
 
     # ---- nn-flavoured helpers (compose Tensor ops) --------------------
 
@@ -1152,41 +1355,21 @@ class Tensor(metaclass=_TensorMeta):
         return Tensor._from_nn(r, "linear")
 
     def batchnorm(self, weight: "Tensor | None", bias: "Tensor | None",
-                  mean: "Tensor", invstd: "Tensor") -> "Tensor":
-        """Apply pre-computed batchnorm given (mean, invstd=1/sqrt(var+eps))."""
+                  mean: "Tensor", invstd: "Tensor", axis=1) -> "Tensor":
+        """Batchnorm over `axis` with a precomputed mean and invstd = 1 / sqrt(var + eps)
+        (src/nn/batchnorm.c)."""
         args = [self._nn(), None if weight is None else weight._nn(),
                 None if bias is None else bias._nn(), mean._nn(), invstd._nn()]
-        return Tensor._from_nn(_TH.nn("batchnorm", args), "batchnorm")
+        axes = [axis] if isinstance(axis, int) else list(axis)
+        return Tensor._from_nn(_TH.nn("batchnorm", args, axes), "batchnorm")
 
     def layernorm(self, axis=-1, eps: float = 1e-5) -> "Tensor":
         axes = [axis] if isinstance(axis, int) else list(axis)
         return Tensor._from_nn(_TH.nn("layernorm", [self._nn()], axes, [eps]), "layernorm")
 
-    def max_pool2d(self, kernel_size=(2, 2), stride=None, dilation=1,
-                   padding=0, ceil_mode=False) -> "Tensor":
-        """Max pool: the _pool unfold, then a max over the trailing window axes (tinygrad
-        mixin/op.py:1335-1378)."""
-        if isinstance(kernel_size, int):
-            kernel_size = (kernel_size, kernel_size)
-        k_ = tuple(int(k) for k in kernel_size)
-        if stride is None:
-            stride = k_
-        if padding:
-            # tinygrad pads with the dtype's min (mixin/op.py:1372) so a pad never wins the max;
-            # thvm's pad is zero-only, so refuse rather than corrupt the max.
-            raise NotImplementedError(
-                "max_pool2d padding != 0 needs a -inf pad (not yet wired)")
-        s_ = (stride,) * len(k_) if isinstance(stride, int) else tuple(stride)
-        d_ = (dilation,) * len(k_) if isinstance(dilation, int) else tuple(dilation)
-        spatial = self._shape[-len(k_):]
-        if ceil_mode:
-            # The trailing pad _apply_ceil_mode adds (mixin/op.py:1273-1284); none
-            # when the floor sizes already cover the input.
-            for i, k, s, d in zip(spatial, k_, s_, d_):
-                o = -(-(i - (d * (k - 1) + 1)) // s) + 1
-                if s * (o - 1) + (d * (k - 1) + 1) - i - max(s * (o - 1) - (i - 1), 0) > 0:
-                    raise NotImplementedError(
-                        "max_pool2d ceil_mode past the input needs a -inf pad (not yet wired)")
+    def _max_pool(self, k_, s_, d_) -> "Tensor":
+        """_pool(k_, s_, d_).max over the window axes (src/nn/max_pool2d.c)."""
+        s_, d_ = make_tuple(s_, len(k_)), make_tuple(d_, len(k_))
         return Tensor._from_nn(_TH.nn("max_pool2d", [self._nn()], [*k_, *s_, *d_]), "max_pool2d")
 
     def conv2d(self, weight: "Tensor",
@@ -1229,17 +1412,23 @@ class Tensor(metaclass=_TensorMeta):
 
     def cast(self, dtype: DType) -> "Tensor":
         """Cast to `dtype` (thvm UOP_CAST)."""
+        dtype = to_dtype(dtype)
         if dtype == self._dtype:
             return self
         t = _TH.cast(self.term, dtype.thvm_id)
         return Tensor._from_term(t, dtype, self._shape)
 
-    def float(self) -> "Tensor":
-        return self.cast(dtypes.float32)
-
-    def half(self) -> "Tensor":
-        # No float16 dtype, so half() is the identity (the gpt2 bench calls it only under HALF=1).
-        return self
+    # tinygrad mixin/dtype.py:55-142.
+    def float(self) -> "Tensor":    return self.cast(dtypes.float32)
+    def half(self) -> "Tensor":     return self.cast(dtypes.float16)
+    def int(self) -> "Tensor":      return self.cast(dtypes.int32)
+    def bool(self) -> "Tensor":     return self.cast(dtypes.bool)
+    def bfloat16(self) -> "Tensor": return self.cast(dtypes.bfloat16)
+    def double(self) -> "Tensor":   return self.cast(dtypes.double)
+    def long(self) -> "Tensor":     return self.cast(dtypes.long)
+    def short(self) -> "Tensor":    return self.cast(dtypes.short)
+    def is_floating_point(self) -> bool: return dtypes.is_float(self._dtype)
+    def element_size(self) -> int:  return self._dtype.itemsize
 
     def to(self, device, force: bool = False) -> "Tensor":
         """Device move (tinygrad tensor.py:353-367): the identity, as DEV picks thvm's one device at
@@ -1247,9 +1436,14 @@ class Tensor(metaclass=_TensorMeta):
         del device, force
         return self
 
-    def const_like(self, value) -> "Tensor":
-        """A lazy constant of self's shape and dtype (tinygrad const_like)."""
-        return _const_broadcast(value, self._shape, self._dtype)
+    def to_(self, device) -> "Tensor":
+        """In-place device move (tinygrad tensor.py:345-356): the identity, as for to()."""
+        del device
+        return self
+
+    def const_like(self, value, dtype: DType | None = None) -> "Tensor":
+        """A lazy constant of self's shape, in self's dtype or dtype (tinygrad const_like)."""
+        return _const_broadcast(value, self._shape, self._dtype if dtype is None else to_dtype(dtype))
 
     def gelu(self, approximate: str = "tanh") -> "Tensor":
         """tinygrad mixin/elementwise.py:780-795 (src/nn/elementwise.c)."""
@@ -1283,10 +1477,13 @@ class Tensor(metaclass=_TensorMeta):
     def scaled_dot_product_attention(self, key: "Tensor", value: "Tensor",
                                      attn_mask: "Tensor | None" = None,
                                      dropout_p: float = 0.0,
-                                     is_causal: bool = False) -> "Tensor":
+                                     is_causal: bool = False, enable_gqa: bool = False) -> "Tensor":
         """softmax((q @ k^T) / sqrt(d_k) + mask) @ value, the mask causal or additive (tinygrad
-        mixin/rand.py:298-327)."""
+        mixin/rand.py:298-327); enable_gqa repeats each key / value head over its query group."""
         q = self
+        if enable_gqa:
+            key = key.repeat_interleave(int(self._shape[-3] // key.shape[-3]), dim=-3)
+            value = value.repeat_interleave(int(self._shape[-3] // value.shape[-3]), dim=-3)
         if dropout_p and TRAINING:
             # tinygrad drops out softmax(qk) under TRAINING (mixin/rand.py:294, 327);
             # thvm has no dropout.

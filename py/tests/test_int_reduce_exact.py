@@ -15,13 +15,12 @@ reference.  The 37-wide rows are not unrolled, so hand_opts UPCASTs their
 output axis into parallel accumulators.  When tinygrad is importable it must
 agree with the reference too.
 
-An int32 true division stays int32 in thvm (tinygrad promotes it to float), so
-`(a / b).sum()` reduces a float body into an int accumulator.  The rendered C
-computes each quotient as `a * (1.0f/b)` in float32, adds it to the
-accumulator in float32 and truncates the sum back, and a store truncates the
-quotient; math.h's sqrt is a double, so a sqrt body adds in float64.  The
-walker must compute the same values: 1312 / 41 is 31.999998 in float32 and
-truncates to 31, where float64 gives 32.
+An int32 division with rounding_mode="trunc" computes its quotient in float32,
+thvm having no integer divide, and casts it back, so `a.div(b, "trunc")` keeps a
+float body inside an int kernel.  The rendered C computes each quotient as
+`a * (1.0f/b)` in float32, which reads 1312 / 41 as 31.999998, and corrects it
+by its remainder to the exact 32; an int32 sqrt's body is math.h's double sqrt,
+added in float64.  The walker must compute the same values.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_int_reduce_exact.py -q
 """
@@ -65,21 +64,21 @@ def run_float_body(name):
     """thvm's int32 result for an int reduce or store of a float body."""
     a, b = Tensor(_A.astype(np.int32)), Tensor(_B.astype(np.int32))
     if name == "div-sum":
-        return (a / b).sum(axis=1).numpy()
+        return a.div(b, rounding_mode="trunc").sum(axis=1).numpy()
     if name == "div":
-        return (a / b).numpy()
+        return a.div(b, rounding_mode="trunc").numpy()
     return Tensor(np.abs(_A).astype(np.int32)).sqrt().sum(axis=1).numpy()
 
 
 def float_body_reference(name):
     """`acc = acc + v` per element in v's type, truncated toward zero, as the
-    rendered C runs it: a quotient `a * (1.0f/b)` is float32, a sqrt float64."""
+    rendered C runs it: a quotient is the exact truncated one, a sqrt float64."""
     if name == "sqrt-sum":
         rows = np.sqrt(np.abs(_A).astype(np.float64))
     else:
-        rows = _A.astype(np.float32) * (np.float32(1) / _B.astype(np.float32))
+        rows = np.trunc(_A / _B)
     if name == "div":
-        return np.trunc(rows).astype(np.int32)
+        return rows.astype(np.int32)
     out = []
     for row in rows:
         acc = 0

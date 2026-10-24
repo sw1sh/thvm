@@ -216,6 +216,28 @@ EXPORT uint64_t py_nn(uint32_t op, uint64_t const *terms, uint32_t *desc, uint32
   return r.t;
 }
 
+// A DT_* id by its short name ("f32", "bf16", ...), UINT32_MAX for none; the
+// least upper dtype of a mixed pair (nn_promote); n values converted between f32
+// and a dtype numpy has no type for (bf16, fp8).
+EXPORT uint32_t py_dtype_id(char const *name) {
+  for (u32 i = 0; i < DT_COUNT; i++) {
+    DTypeInfo const *d = dtype_info(i);
+    if (d != NULL && d->name != NULL && strcmp(d->name, name) == 0) {
+      return i;
+    }
+  }
+  return UINT32_MAX;
+}
+EXPORT uint32_t py_dtype_promote(uint32_t a, uint32_t b) {
+  return nn_promote(a, b);
+}
+EXPORT void py_dtype_from_f32(void *dst, uint32_t dtype, float const *src, uint32_t n) {
+  from_fp32_lane(dst, dtype, src, n);
+}
+EXPORT void py_dtype_to_f32(float *dst, void const *src, uint32_t dtype, uint32_t n) {
+  to_fp32_lane(dst, src, dtype, n);
+}
+
 // An nn op's id by its name ("conv2d", "relu", ...); UINT32_MAX for none.
 EXPORT uint32_t py_nn_op(char const *name) {
   return nn_op_id(name);

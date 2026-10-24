@@ -1,6 +1,5 @@
 """tinygrad's nn.state (nn/state.py) as `thvm.nn.state`: safetensors, torch_load and
-state dicts.  py/thvm holds float32 and int32 tensors only, so a load converts a float
-format to float32 and an integer one to int32."""
+state dicts.  A load keeps each tensor's dtype, except that torch_load widens bf16 to f32."""
 from __future__ import annotations
 
 import io
@@ -11,7 +10,8 @@ import zipfile
 
 import numpy as np
 
-from .tensor import Tensor
+from .dtypes import dtypes
+from .tensor import Tensor, _TH
 from .nn import _get_state_dict
 
 # PyTorch storage dtype tag -> (numpy dtype, itemsize, is_bf16).
@@ -29,25 +29,14 @@ _TORCH_DTYPES = {
 }
 
 
-# safetensors dtype tag -> numpy storage dtype (tinygrad nn/state.py:33-35); BF16 has
-# no numpy dtype and _safe_array widens it, the fp8 tags are unsupported.
-_SAFE_NP = {
-    "BOOL": np.bool_, "I8": np.int8, "U8": np.uint8, "I16": np.int16,
-    "U16": np.uint16, "I32": np.int32, "U32": np.uint32, "I64": np.int64,
-    "U64": np.uint64, "F16": np.float16, "BF16": np.uint16,
-    "F32": np.float32, "F64": np.float64,
+# safetensors dtype tags (tinygrad nn/state.py:33-35).
+_SAFE_DTYPES = {
+    "BOOL": dtypes.bool, "I8": dtypes.int8, "U8": dtypes.uint8, "I16": dtypes.int16,
+    "U16": dtypes.uint16, "I32": dtypes.int32, "U32": dtypes.uint32, "I64": dtypes.int64,
+    "U64": dtypes.uint64, "F16": dtypes.float16, "BF16": dtypes.bfloat16, "F32": dtypes.float32,
+    "F64": dtypes.float64, "F8_E4M3": dtypes.fp8e4m3, "F8_E5M2": dtypes.fp8e5m2,
 }
-
-
-def _safe_array(raw, tag: str, shape) -> np.ndarray:
-    if tag == "BF16":
-        u16 = np.frombuffer(raw, dtype=np.uint16)
-        flat = (u16.astype(np.uint32) << 16).view(np.float32)
-    elif tag in _SAFE_NP:
-        flat = np.frombuffer(raw, dtype=_SAFE_NP[tag])
-    else:
-        raise NotImplementedError(f"safetensors dtype {tag} is not supported by py/thvm")
-    return flat.reshape(shape)
+_SAFE_TAGS = {v: k for k, v in _SAFE_DTYPES.items()}
 
 
 def safe_load_metadata(fn):
@@ -59,7 +48,7 @@ def safe_load_metadata(fn):
 
 
 def safe_load(fn) -> dict[str, "Tensor"]:
-    """Loads a .safetensors file, returning the `state_dict`
+    """Loads a .safetensors file, returning the `state_dict` with each tensor's own dtype
     (tinygrad nn/state.py:51-62)."""
     t, data_start, metadata = safe_load_metadata(fn)
     data = t[data_start:]
@@ -68,7 +57,11 @@ def safe_load(fn) -> dict[str, "Tensor"]:
         if k == "__metadata__":
             continue
         lo, hi = v["data_offsets"]
-        out[k] = Tensor(np.array(_safe_array(data[lo:hi], v["dtype"], v["shape"])))
+        dt, shape = _SAFE_DTYPES[v["dtype"]], tuple(v["shape"])
+        term = _TH.ten_create(dt.thvm_id, list(shape))
+        if hi > lo:
+            _TH.ten_write(term, data[lo:hi].tobytes())
+        out[k] = Tensor._from_term(term, dt, shape)
     return out
 
 
@@ -79,12 +72,12 @@ def safe_save(tensors: dict[str, "Tensor"], fn, metadata: dict | None = None):
     if metadata:
         headers["__metadata__"] = metadata
     for k, v in tensors.items():
-        arr = np.ascontiguousarray(v.numpy(), dtype=v.dtype.np_dtype)
-        tag = {np.dtype(np.float32): "F32", np.dtype(np.int32): "I32"}[arr.dtype]
-        headers[k] = {"dtype": tag, "shape": list(v.shape),
-                      "data_offsets": [offset, offset + arr.nbytes]}
-        offset += arr.nbytes
-        blobs.append(arr.tobytes())
+        nbytes = v.numel() * v.dtype.itemsize
+        raw = _TH.ten_read(v.contiguous().term, nbytes) if nbytes else b""
+        headers[k] = {"dtype": _SAFE_TAGS[v.dtype], "shape": list(v.shape),
+                      "data_offsets": [offset, offset + nbytes]}
+        offset += nbytes
+        blobs.append(raw)
     j = json.dumps(headers, separators=(",", ":"))
     j += "\x20" * ((len(j) + 7) // 8 * 8 - len(j))
     with open(fn, "wb") as f:

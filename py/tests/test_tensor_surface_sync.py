@@ -11,7 +11,6 @@ import numpy as np
 
 import helpers
 from thvm import Tensor, dtypes
-from thvm.dtypes import DType
 from thvm.tensor import _TH
 
 
@@ -86,10 +85,10 @@ class TestClone(unittest.TestCase):
     def test_clone_copies_narrow_dtypes_bit_exact(self):
         # NaN payloads, subnormals and -0 survive only a byte copy.
         cases = [
-            (DType("float16", 2, np.float16, 11), np.uint16, [0x7C01, 0xFE01, 0x0001, 0x8000]),
-            (DType("bfloat16", 2, np.uint16, 12), np.uint16, [0x7F81, 0xFFC1, 0x0001, 0x8000]),
-            (DType("fp8e5m2", 1, np.uint8, 10), np.uint8, [0x7D, 0xFE, 0x01, 0x80]),
-            (DType("int8", 1, np.int8, 1), np.uint8, [0x80, 0xFF, 0x01, 0x7F]),
+            (dtypes.float16, np.uint16, [0x7C01, 0xFE01, 0x0001, 0x8000]),
+            (dtypes.bfloat16, np.uint16, [0x7F81, 0xFFC1, 0x0001, 0x8000]),
+            (dtypes.fp8e5m2, np.uint8, [0x7D, 0xFE, 0x01, 0x80]),
+            (dtypes.int8, np.uint8, [0x80, 0xFF, 0x01, 0x7F]),
         ]
         for dt, raw, bits in cases:
             data = np.array(bits, raw).tobytes()
@@ -210,17 +209,19 @@ class TestGelu(unittest.TestCase):
 
 
 class TestMaxPoolCeilMode(unittest.TestCase):
-    """ceil_mode (mixin/op.py:1273-1284): a no-op when the floor sizes cover the
-    input; a window past it needs the -inf pad thvm lacks, so it raises."""
+    """ceil_mode (mixin/op.py:1294-1305, 1356-1399): a no-op when the floor sizes cover the
+    input; a window past it reads the dtype's min pad, so it takes the max of what it covers."""
 
     def test_covered_input_matches_floor(self):
         x = np.arange(32.).reshape(1, 2, 4, 4).astype(np.float32)
         np.testing.assert_array_equal(Tensor(x).max_pool2d(ceil_mode=True).numpy(),
                                       Tensor(x).max_pool2d().numpy())
 
-    def test_window_past_the_input_raises(self):
+    def test_window_past_the_input(self):
         x = np.arange(50.).reshape(1, 2, 5, 5).astype(np.float32)
-        self.assertRaises(NotImplementedError, Tensor(x).max_pool2d, ceil_mode=True)
+        want = np.pad(x, ((0, 0), (0, 0), (0, 1), (0, 1)), constant_values=-np.inf)
+        want = want.reshape(1, 2, 3, 2, 3, 2).max((3, 5))
+        np.testing.assert_array_equal(Tensor(x).max_pool2d(ceil_mode=True).numpy(), want)
 
 
 class TestTranspose(unittest.TestCase):

@@ -93,7 +93,7 @@ class Adam(Optimizer):
     def __init__(self, params, lr=0.001, b1=0.9, b2=0.999, eps=1e-8,
                  weight_decay=0.0, **_):
         super().__init__(params, lr)
-        self.b1, self.b2, self.eps, self.wd = b1, b2, eps, weight_decay
+        self.b1, self.b2, self.eps, self.wd, self.adam = b1, b2, eps, weight_decay, True
         self.m = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
         self.v = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
         # b1**t and b2**t are on-graph Tensors that _step advances by an assign, so
@@ -128,15 +128,33 @@ class Adam(Optimizer):
                 continue
             m_hat = self.m[i] / (1.0 - self.b1_t)
             v_hat = self.v[i] / (1.0 - self.b2_t)
-            upd = m_hat * self.lr * (v_hat.sqrt() + self.eps).reciprocal()
-            if self.wd:
-                # Decoupled (AdamW) decay, up += wd * p (tinygrad nn/optim.py:171);
-                # gated so plain Adam keeps its exact expression.
-                upd = upd + p.detach() * (self.wd * self.lr)
+            if self.adam:
+                upd = m_hat * self.lr * (v_hat.sqrt() + self.eps).reciprocal()
+                if self.wd:
+                    # Decoupled (AdamW) decay, up += wd * p (tinygrad nn/optim.py:171);
+                    # gated so plain Adam keeps its exact expression.
+                    upd = upd + p.detach() * (self.wd * self.lr)
+            else:
+                # LAMB scales the update by the trust ratio ||p|| / ||up|| (nn/optim.py:171-178).
+                up = m_hat / (v_hat.sqrt() + self.eps) + p.detach() * self.wd
+                r1, r2 = p.detach().square().sum().sqrt(), up.square().sum().sqrt()
+                upd = up * (r1 > 0).where((r2 > 0).where(r1 / r2, 1.0), 1.0) * self.lr
             p.assign(p - upd)
             out.append(p)
         # tinygrad nn/optim.py:179 returns b1_t and b2_t with the step's tensors.
         return out + [self.b1_t, self.b2_t]
+
+
+class LAMB(Adam):
+    """tinygrad's LAMB (nn/optim.py:147-179): Adam's moments, the update scaled by the trust
+    ratio ||p|| / ||up||; adam=True drops the ratio."""
+
+    def __init__(self, params, lr=0.001, b1=0.9, b2=0.999, eps=1e-6, weight_decay=0.0,
+                 adam=False, **_):
+        if weight_decay < 0:
+            raise ValueError(f"Invalid weight_decay value: {weight_decay}")
+        super().__init__(params, lr, b1, b2, eps, weight_decay)
+        self.adam = adam
 
 
 # tinygrad nn/optim.py:132-138: Adam with decoupled weight decay, default 0.01.

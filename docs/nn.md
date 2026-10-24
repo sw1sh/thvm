@@ -29,9 +29,14 @@ end that switches to an `nn_*` op keeps its kernel keys:
 | `nn_dot`, `nn_linear` | `__matmul__`, `linear` | mixin/op.py:387-392, 1254-1271 |
 | `nn_pool`, `nn_conv2d`, `nn_max_pool2d` | `_pool`, `conv2d` (1 or 2 spatial axes), `max_pool2d` | mixin/movement.py:598-616, mixin/op.py:1335-1378, 1564-1605 |
 | `nn_conv_transpose2d` | `conv_transpose2d` | mixin/op.py:1607-1645 |
+| `nn_pow` | `pow`, `__pow__` (tinygrad's decomposition: an int pair in f32, rounded) | mixin/elementwise.py:547-570 |
 | `nn_arange`, `nn_tri` | `arange` (a host-written leaf), `triu`, `tril` | mixin/op.py:166-195, 233-280 |
 | `nn_sparse_categorical_crossentropy` | `sparse_categorical_crossentropy` | mixin/op.py:1723-1746 |
 | `nn_scaled_dot_product_attention` | `scaled_dot_product_attention` (no dropout) | mixin/rand.py:298-327 |
+
+The rest of tinygrad's Tensor API (compares, div / mod, pad modes, getitem, the
+cumulative, pool, sort and loss ops) is py/thvm/mixin.py, ported from tinygrad's
+mixins over these ops, as tinygrad's Tensor inherits its own.
 
 The ops follow tinygrad where tensor.py did not: `nn_linear` multiplies by a
 1-D weight, `nn_batchnorm` scales by weight before invstd, and `abs` is
@@ -70,7 +75,7 @@ dtype from its graph.
 | `maximum` | a, b | [1 for the minimum] | |
 | `softmax` | x | axis, [1 for log_softmax] | |
 | `layernorm` | x | axes... | eps |
-| `batchnorm` | x, weight, bias, mean, invstd | | |
+| `batchnorm` | x, weight, bias, mean, invstd | axes... (none: axis 1) | |
 | `dot`, `linear` | x, w[, b] | | |
 | `arange` | | dtype | start, stop, step |
 | `tri` | x | diagonal, [1 for tril] | |
@@ -79,6 +84,7 @@ dtype from its graph.
 | `pool`, `max_pool2d` | x | kernel[nk], stride[nk], dilation[nk] | |
 | `conv2d` | x, w, b | groups, stride[n], dilation[n], (begin, end)[n] of padding, a negative side shrinking | |
 | `conv_transpose2d` | x, w (C_in, C_out / groups, *kernel), b | the same, then output_padding[n] | |
+| `pow` | base, exponent | | |
 
 n is rank(w) - 2, the spatial axes; a negative axis counts from the end.
 

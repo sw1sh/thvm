@@ -95,13 +95,14 @@ class TestSafetensors(unittest.TestCase):
         with open(self.path, "wb") as f:
             f.write(len(j).to_bytes(8, "little") + j.encode() + b"".join(r for _, r in blobs.values()))
         got = safe_load(self.path)
-        np.testing.assert_array_equal(got["h"].numpy(), h.astype(np.float32))
+        # Each tensor keeps the file's dtype, as tinygrad's do; bf16 reads back as f32.
+        np.testing.assert_array_equal(got["h"].numpy(), h)
         np.testing.assert_array_equal(got["bf"].numpy(), bf)
-        np.testing.assert_array_equal(got["f64"].numpy(), f64.astype(np.float32))
-        np.testing.assert_array_equal(got["i64"].numpy(), i64.astype(np.int32))
-        np.testing.assert_array_equal(got["u8"].numpy(), u8.astype(np.int32))
-        self.assertEqual(got["h"].dtype, dtypes.float32)
-        self.assertEqual(got["i64"].dtype, dtypes.int32)
+        np.testing.assert_array_equal(got["f64"].numpy(), f64)
+        np.testing.assert_array_equal(got["i64"].numpy(), i64)
+        np.testing.assert_array_equal(got["u8"].numpy(), u8)
+        self.assertEqual([got[k].dtype for k in ("h", "bf", "f64", "i64", "u8")],
+                         [dtypes.float16, dtypes.bfloat16, dtypes.float64, dtypes.int64, dtypes.uint8])
 
     @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_loads_tinygrad_file_with_other_dtypes(self):

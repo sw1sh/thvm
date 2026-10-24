@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import gzip
 import os
 import pathlib
@@ -22,6 +23,22 @@ def argfix(*x):
             raise ValueError(f"bad arg {x}")
         return tuple(x[0])
     return x
+
+
+def prod(x, start=1):
+    for v in x:
+        start = start * v
+    return start
+
+
+def ceildiv(num, amt): return -(num // -amt)
+def make_tuple(x, cnt: int) -> tuple: return (x,) * cnt if isinstance(x, int) else tuple(x)
+def argsort(x): return type(x)(sorted(range(len(x)), key=x.__getitem__))
+def polyN(x, p): return functools.reduce(lambda acc, c: acc * x + c, p, 0.0)
+def round_up(num: int, amt: int) -> int: return (num + amt - 1) // amt * amt
+def all_int(t) -> bool: return all(isinstance(s, int) for s in t)
+def flatten(l): return [item for sublist in l for item in sublist]
+def dedup(x): return list(dict.fromkeys(x))
 
 
 def getenv(key: str, default: Any = 0):

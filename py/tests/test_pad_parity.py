@@ -50,9 +50,10 @@ class TestNegativePad(unittest.TestCase):
                 np.testing.assert_array_equal(x.grad.numpy(), g)
 
     def test_flat_form(self):
+        # torch's flat order, last axis first (tinygrad helpers.py:58 flat_to_grouped).
         x0 = np.arange(12, dtype=np.float32).reshape(4, 3)
         got = Tensor(x0).pad([0, -1, -1, 2]).numpy()
-        np.testing.assert_array_equal(got, np_pad(x0, [(0, -1), (-1, 2)]))
+        np.testing.assert_array_equal(got, np_pad(x0, [(-1, 2), (0, -1)]))
 
     @unittest.skipUnless(helpers.have_tinygrad(), "tinygrad not on path")
     def test_matches_tinygrad(self):

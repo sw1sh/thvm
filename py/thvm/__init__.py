@@ -7,7 +7,7 @@ from .dtypes import dtypes, DType
 from .device import Device
 from .helpers import Context
 from ._misc import Variable, TinyJit, UOp
-from .helpers import GlobalCounters, function
+from .helpers import GlobalCounters, function, getenv
 from .from_tinygrad import from_tinygrad
 
 # nn, uop and llm are not packages, so their dotted names are registered for
@@ -30,9 +30,17 @@ _sys.modules[__name__ + ".llm.gguf"] = _gguf
 
 _sys.modules[__name__ + ".nn.state"] = _nn_state
 
+# tinygrad's module names for the same objects: dtype.py and engine/jit.py.
+_sys.modules[__name__ + ".dtype"] = _sys.modules[__name__ + ".dtypes"]
+_engine_pkg = _types.ModuleType(__name__ + ".engine")
+_engine_pkg.jit = _types.ModuleType(__name__ + ".engine.jit")
+_engine_pkg.jit.TinyJit = TinyJit
+_sys.modules[__name__ + ".engine"] = _engine_pkg
+_sys.modules[__name__ + ".engine.jit"] = _engine_pkg.jit
+
 __all__ = [
     "Tensor", "dtypes", "DType", "Device", "Context",
-    "Variable", "TinyJit", "UOp", "nn", "helpers", "GlobalCounters", "function",
+    "Variable", "TinyJit", "UOp", "nn", "helpers", "GlobalCounters", "function", "getenv",
     "from_tinygrad",
     "Thvm", "K", "Term",
 ]

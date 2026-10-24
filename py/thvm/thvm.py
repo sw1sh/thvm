@@ -64,6 +64,8 @@ _ten_create = _bind("py_ten_create", c_uint64,
                     c_uint32, c_uint32, ctypes.POINTER(c_uint32))
 _ten_write = _bind("py_ten_write", c_int32, c_uint64, c_void_p, c_uint64)
 _ten_read = _bind("py_ten_read", c_int32, c_uint64, c_void_p, c_uint64)
+_dtype_from_f32 = _bind("py_dtype_from_f32", None, c_void_p, c_uint32, c_void_p, c_uint32)
+_dtype_to_f32 = _bind("py_dtype_to_f32", None, c_void_p, c_char_p, c_uint32, c_uint32)
 _ten_dtype = _bind("py_ten_dtype", c_uint32, c_uint64)
 _ten_numel = _bind("py_ten_numel", c_uint64, c_uint64)
 _ten_shape = _bind("py_ten_shape", c_uint32, c_uint64,
@@ -182,6 +184,11 @@ class _Constants:
 K = _Constants
 
 
+def _check_rank(ndim: int) -> None:
+    if ndim > K.MAX_DIM:
+        raise NotImplementedError(f"thvm tensors have at most {K.MAX_DIM} dims, got {ndim}")
+
+
 class Thvm:
     """Handle to the process-global runtime: the first instance initializes it,
     close() frees it."""
@@ -282,11 +289,20 @@ class Thvm:
     def ten_create(self, dtype: int, dims) -> Term:
         """A fresh TAG_TEN tensor on the DEV-selected backend."""
         ndim = len(dims)
+        _check_rank(ndim)
         arr = (c_uint32 * max(ndim, 1))(*[c_uint32(int(d)) for d in dims])
         return Term(_ten_create(c_uint32(int(dtype)), c_uint32(ndim), arr))
 
     def ten_write(self, t: Term, data: bytes) -> bool:
         return bool(_ten_write(c_uint64(int(t)), data, c_uint64(len(data))))
+
+    def dtype_from_f32(self, dst, dtype: int, src, n: int) -> None:
+        """n f32 values of the numpy array src into dst in dtype's storage (bf16, fp8)."""
+        _dtype_from_f32(dst, c_uint32(dtype), src.ctypes.data, c_uint32(n))
+
+    def dtype_to_f32(self, dst, src: bytes, dtype: int, n: int) -> None:
+        """n values of dtype's storage (bytes) into the f32 numpy array dst."""
+        _dtype_to_f32(dst.ctypes.data, src, c_uint32(dtype), c_uint32(n))
 
     def ten_read(self, t: Term, nbytes: int) -> bytes:
         buf = ctypes.create_string_buffer(nbytes)
@@ -316,6 +332,7 @@ class Thvm:
         return Term(_uop_bitcast(c_uint64(int(x)), c_uint32(int(dst_dtype))))
 
     def _move(self, fn, src: Term, dims) -> Term:
+        _check_rank(len(dims))
         arr = (c_uint32 * max(len(dims), 1))(*[c_uint32(int(d)) for d in dims])
         return Term(fn(c_uint64(int(src)), c_uint32(len(dims)), arr))
 
@@ -368,11 +385,13 @@ class Thvm:
 
     def pad(self, src: Term, begin_end) -> Term:
         """begin_end has 2*ndim entries: (begin, end) pad per axis."""
+        _check_rank(len(begin_end) // 2)
         arr = (c_uint32 * len(begin_end))(*[c_uint32(int(d)) for d in begin_end])
         return Term(_uop_pad(c_uint64(int(src)),
                              c_uint32(len(begin_end) // 2), arr))
 
     def shrink(self, src: Term, begin_end) -> Term:
+        _check_rank(len(begin_end) // 2)
         arr = (c_uint32 * len(begin_end))(*[c_uint32(int(d)) for d in begin_end])
         return Term(_uop_shrink(c_uint64(int(src)),
                                 c_uint32(len(begin_end) // 2), arr))
