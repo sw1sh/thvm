@@ -39,8 +39,9 @@ static int rmt_dag_dispatch_shape(KernelEntry const *ke, u32 *groups_x,
   u64 total = 1;            // product of promoted-LOOP output extents
   u64 local_total = 1;      // product of KAX_LOCAL extents
   int has_group_reduce = 0;
+  // An empty reduce axis loops zero times inside its thread; only an empty
+  // output axis leaves nothing to launch.
   for (u32 i = 0; i < n; i++) {
-    if (exts[i] == 0) return 0;
     switch (types[i]) {
       case KAX_LOOP:         total *= (u64)exts[i]; break;
       case KAX_LOCAL:        local_total *= (u64)exts[i]; break;
@@ -51,7 +52,7 @@ static int rmt_dag_dispatch_shape(KernelEntry const *ke, u32 *groups_x,
   }
   u32 group_reduce_extent = has_group_reduce
       ? rmu_group_reduce_factor(ke->cached_lift.store_root) : 0;
-  if (total == 0 || total > 0xFFFFFFFFu) return 0;
+  if (total == 0 || local_total == 0 || total > 0xFFFFFFFFu) return 0;
   u32 groups, threads;
   if (group_reduce_extent != 0) {
     if (group_reduce_extent > 256) return 0;
