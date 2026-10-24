@@ -167,6 +167,8 @@ class _Constants:
     SQRT = _read_uint32_const("py_const_UOP_SQRT")
     IADD = _read_uint32_const("py_const_UOP_IADD")
     IMUL = _read_uint32_const("py_const_UOP_IMUL")
+    IDIV = _read_uint32_const("py_const_UOP_IDIV")
+    IMOD = _read_uint32_const("py_const_UOP_IMOD")
     IAND = _read_uint32_const("py_const_UOP_IAND")
     IOR = _read_uint32_const("py_const_UOP_IOR")
     IXOR = _read_uint32_const("py_const_UOP_IXOR")

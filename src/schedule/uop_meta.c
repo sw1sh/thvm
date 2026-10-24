@@ -52,12 +52,12 @@ fn u8 uop_is_unary_elementwise(u8 op) {
       || op == UOP_LOG2 || op == UOP_SQRT || op == UOP_SIN;
 }
 
-// The bit ops are also index-layer ops; those sit inside INDEX_E addresses,
-// never as scheduled value nodes, as for IWHERE below.
+// The int divide and bit ops are also index-layer ops; those sit inside
+// INDEX_E addresses, never as scheduled value nodes, as for IWHERE below.
 fn u8 uop_is_binary_elementwise(u8 op) {
   return op == UOP_ADD  || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ
-      || op == UOP_IAND || op == UOP_IOR || op == UOP_IXOR  || op == UOP_ISHL
-      || op == UOP_ISHR;
+      || op == UOP_IDIV || op == UOP_IMOD || op == UOP_IAND || op == UOP_IOR
+      || op == UOP_IXOR || op == UOP_ISHL || op == UOP_ISHR;
 }
 
 // IWHERE doubles as tinygrad's value-graph Ops.WHERE.  Its index-layer uses

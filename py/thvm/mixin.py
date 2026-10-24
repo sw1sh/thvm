@@ -1,10 +1,6 @@
 """tinygrad's composite Tensor ops, ported from its mixins at master (mixin/elementwise.py,
 movement.py, reduce.py and op.py, cited by line) over the primitives of py/thvm/tensor.py.
-Tensor inherits OpMixin as tinygrad's Tensor inherits its mixins.
-
-thvm has no value-level integer divide, modulo or bit op, so tensor.py divides an int pair in
-float32 (exact below 2**24) and takes &, |, ^ and ~ on bool only; with no MUL reduce there is
-no prod, cumprod or scatter_reduce "prod"."""
+Tensor inherits OpMixin as tinygrad's Tensor inherits its mixins."""
 from __future__ import annotations
 
 import functools
@@ -14,6 +10,7 @@ import string
 
 from .dtypes import dtypes, least_upper_dtype, to_dtype
 from .helpers import argfix, argsort, ceildiv, flatten, make_tuple, polyN, prod, round_up
+from .thvm import K
 
 
 def flat_to_grouped(padding):
@@ -82,13 +79,18 @@ class OpMixin:
         return (self > 0).eq(b.trunc().eq(b)).where((self - 0.5).ceil(), (self + 0.5).floor())
 
     def mod(self, x, reverse: bool = False):
-        # :201-213.
+        # :202-213; an int pair is FLOORMOD as floormod_to_mod (codegen/decomp/op.py:58-62).
         a, b = self._broadcasted(x, reverse)
+        if dtypes.is_int(a.dtype):
+            r = a._int_op(b, K.IMOD)
+            return r + (r.ne(0) & (a < 0).ne(b < 0)).where(b, 0)
         return a - a.div(b, rounding_mode="floor") * b
 
     def fmod(self, x):
-        # :215-226.
+        # :214-227; an int pair is CMOD.
         a, b = self._broadcasted(x)
+        if dtypes.is_int(a.dtype):
+            return a._int_op(b, K.IMOD)
         return a - a.div(b, rounding_mode="trunc") * b
 
     def __floordiv__(self, x):  return self.div(x, rounding_mode="floor")

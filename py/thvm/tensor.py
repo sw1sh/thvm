@@ -625,8 +625,8 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     def __rmul__(self, o): return self.__mul__(o)
 
     def div(self, x, reverse: bool = False, rounding_mode=None) -> "Tensor":
-        """a * (1 / b), an int or bool pair in float32 (tinygrad mixin/elementwise.py:228-258); an
-        int pair with a rounding_mode rounds in float32, thvm having no integer divide."""
+        """a * (1 / b), an int or bool pair in float32 (tinygrad mixin/elementwise.py:229-259); an
+        int pair with a rounding_mode divides as ints, a zero divisor giving 0."""
         if rounding_mode not in (None, "trunc", "floor"):
             raise RuntimeError(f"{rounding_mode=} is not supported")
         if (isinstance(x, (int, float)) and not reverse and rounding_mode is None
@@ -635,16 +635,11 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             return self * (1.0 / x if x else math.copysign(math.inf, x))
         a, b = self._broadcasted(x, reverse)
         if dtypes.is_int(a._dtype) and rounding_mode is not None:
-            # |a| // |b| as floor(|a| * (1 / |b|)) in float32, corrected by its remainder for the
-            # rounding of 1 / b (110 // 55 read 1.9999999): exact below 2**24.
-            fa, fb = a.float(), b.float()
-            na, nb = fa.abs(), fb.abs()
-            q = (na * nb.reciprocal()).floor()
-            r = na - q * nb
-            t = (q - (r < 0) + (r >= nb)) * (fa.sign() * fb.sign())
-            if rounding_mode == "floor":
-                t = t - ((fa - t * fb).ne(0) & (fa < 0).ne(fb < 0))
-            return t.cast(a._dtype)
+            # tinygrad's CDIV, and FLOORDIV as its floordiv_to_idiv (codegen/decomp/op.py:54-56).
+            q = a._int_op(b, K.IDIV)
+            if rounding_mode == "trunc":
+                return q
+            return q - (a._int_op(b, K.IMOD).ne(0) & (a < 0).ne(b < 0)).cast(a._dtype)
         if not dtypes.is_float(a._dtype):
             a, b = a.float(), b.float()
         d = a * b.reciprocal()
@@ -692,6 +687,10 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     def __ne__(self, x): return self.ne(x)
     def logical_not(self) -> "Tensor": return self.cast(dtypes.bool).eq(False)
 
+    def _int_op(self, b: "Tensor", opcode: int) -> "Tensor":
+        # An int binop on operands _broadcasted already promoted.
+        return Tensor._from_term(_TH.binary(opcode, self.term, b.term), self._dtype, self._shape)
+
     def _bit_op(self, x, reverse: bool, opcode: int) -> "Tensor":
         # tinygrad's Ops.AND / OR / XOR / SHL / SHR binops (mixin/elementwise.py:159-200, 344-364),
         # in the operands' promoted int dtype; a bool and / or / xor is a select.
@@ -702,7 +701,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             return a.where(True, b) if opcode == K.IOR else a.where(b.logical_not(), b)
         if not dtypes.is_int(a._dtype):
             raise RuntimeError(f"{a._dtype} is not supported")
-        return Tensor._from_term(_TH.binary(opcode, a.term, b.term), a._dtype, a._shape)
+        return a._int_op(b, opcode)
 
     def bitwise_and(self, x, reverse: bool = False): return self._bit_op(x, reverse, K.IAND)
     def bitwise_or(self, x, reverse: bool = False):  return self._bit_op(x, reverse, K.IOR)
@@ -1435,6 +1434,15 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     # tinygrad mixin/dtype.py:55-142.
     def float(self) -> "Tensor":    return self.cast(dtypes.float32)
+    def bitcast(self, dtype: DType) -> "Tensor":
+        """self's bits read as `dtype` of the same itemsize (tinygrad mixin/dtype.py:38-53)."""
+        dtype = to_dtype(dtype)
+        if dtype == self._dtype:
+            return self
+        if dtype.itemsize != self._dtype.itemsize:
+            raise RuntimeError(f"bitcast from {self._dtype} to {dtype} needs equal itemsizes")
+        return Tensor._from_term(_TH.bitcast(self.term, dtype.thvm_id), dtype, self._shape)
+
     def half(self) -> "Tensor":     return self.cast(dtypes.float16)
     def int(self) -> "Tensor":      return self.cast(dtypes.int32)
     def bool(self) -> "Tensor":     return self.cast(dtypes.bool)

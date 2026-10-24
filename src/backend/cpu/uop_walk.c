@@ -781,15 +781,19 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
                        - uwalk_eval_int(c, heap_read(loc+1));
     case UOP_IMUL: return uwalk_eval_int(c, heap_read(loc+0))
                        * uwalk_eval_int(c, heap_read(loc+1));
-    case UOP_IDIV: {
-      i64 b = uwalk_eval_int(c, heap_read(loc+1));
+    case UOP_IDIV: case UOP_IMOD: {
+      // As the renderer: a value divide in its own int dtype, unsigned for an
+      // unsigned one, and 0 for a zero divisor.
+      u32 dt = DT_FP32;
+      (void)term_dtype_in(t, 0, &dt);
+      if (!dtype_is_int(dt) || dtype_is_bool(dt)) dt = DT_INT64;
+      i64 a = uwalk_int_wrap(dt, uwalk_eval_int(c, heap_read(loc+0)));
+      i64 b = uwalk_int_wrap(dt, uwalk_eval_int(c, heap_read(loc+1)));
       if (b == 0) return 0;
-      return uwalk_eval_int(c, heap_read(loc+0)) / b;
-    }
-    case UOP_IMOD: {
-      i64 b = uwalk_eval_int(c, heap_read(loc+1));
-      if (b == 0) return 0;
-      return uwalk_eval_int(c, heap_read(loc+0)) % b;
+      if (!dtype_is_signed(dt)) {
+        return uwalk_int_wrap(dt, (i64)(op == UOP_IDIV ? (u64)a / (u64)b : (u64)a % (u64)b));
+      }
+      return uwalk_int_wrap(dt, op == UOP_IDIV ? a / b : a % b);
     }
     case UOP_ILT:  return (uwalk_eval_int(c, heap_read(loc+0))
                         <  uwalk_eval_int(c, heap_read(loc+1))) ? 1 : 0;

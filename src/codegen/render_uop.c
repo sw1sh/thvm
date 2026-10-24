@@ -474,18 +474,28 @@ static void rmu_emit_term(Term t, FILE *fp) {
       Term a = heap_read(loc + 0);
       Term b = heap_read(loc + 1);
       u32  dt = rmu_dtype_of(t);
-      if ((op == UOP_IAND || op == UOP_IOR || op == UOP_IXOR || op == UOP_ISHR
+      int  div = op == UOP_IDIV || op == UOP_IMOD;
+      // A divisor other than a nonzero CONST is guarded, as the walker is: a
+      // zero gives 0, where tinygrad's C divide traps.
+      int  guard = div && !(term_tag(b) == TAG_UOP && term_ext(b) == UOP_CONST
+                            && term_val(heap_read(term_val(b))) != 0);
+      if ((div || op == UOP_IAND || op == UOP_IOR || op == UOP_IXOR || op == UOP_ISHR
            || op == UOP_ISHL)
-          && dtype_is_int(dt) && dt != DT_INT32 && !dtype_is_bool(dt)) {
-        // A value bit op of another int dtype computes in its own type: a
-        // uint32 shift right is logical, an int64 one keeps its high bits.
+          && dtype_is_int(dt) && (dt != DT_INT32 || guard) && !dtype_is_bool(dt)) {
+        // A value op of another int dtype computes in its own type: a uint32
+        // shift right is logical, an int64 one keeps its high bits.
         char const *ty = (RMU_TARGET == CG_TARGET_C) ? rmu_c_type_name(dt)
                                                      : rmu_gpu_alu_type_name(dt);
+        if (guard) {
+          fprintf(fp, "(((%s)(", ty);
+          rmu_emit_term(b, fp);
+          fprintf(fp, ")) == 0 ? (%s)0 : ", ty);
+        }
         fprintf(fp, "((%s)(", ty);
         rmu_emit_term(a, fp);
         fprintf(fp, ") %s (%s)(", rmu_int_op_name(op), ty);
         rmu_emit_term(b, fp);
-        fputs("))", fp);
+        fputs(guard ? ")))" : "))", fp);
         return;
       }
       fputc('(', fp);

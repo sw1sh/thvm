@@ -71,6 +71,14 @@ def case_bool_ops():
     _eq((Tensor(p) | Tensor(q)).numpy(), p | q)
 
 
+def case_bitcast():
+    # tinygrad's Tensor.bitcast (mixin/dtype.py:38-53) at an equal itemsize.
+    f = np.array([[1.5, -2.0, 0.0], [3.25, 1e-30, -0.0]], np.float32)
+    _eq(Tensor(f).bitcast(dtypes.int32).numpy(), f.view(np.int32))
+    _eq((Tensor(f) * 2).bitcast(dtypes.uint32).numpy(), (f * 2).view(np.uint32))
+    _eq(Tensor(f.view(np.int32)).bitcast(dtypes.float32).numpy().view(np.uint32), f.view(np.uint32))
+
+
 def case_bit_op_of_bit_op():
     # Two kernels: the second shifts the first's output.
     _eq(((Tensor(A) & Tensor(B)).contiguous() << 2).numpy(), (A & B) << 2)
