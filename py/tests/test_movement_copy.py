@@ -8,8 +8,8 @@ path, the copy kernel tinygrad schedules for `.contiguous()`, and a TinyJit repl
 kernel over the live input, where the gather was recorded as a replayable op.
 
 The cases cover a transpose, tinygrad's array_packing, an offset shrink, a flip, a permuted
-shrink and an expand against numpy on both CPU routes (the C JIT and the UOp walker) in child
-processes, and a TinyJit replay over inputs that change between calls.
+shrink, an expand and a copy of a copy against numpy on both CPU routes (the C JIT and the UOp
+walker) in child processes, and a TinyJit replay over inputs that change between calls.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_movement_copy.py -q
 """
@@ -50,6 +50,12 @@ def case_permuted_shrink():
 
 def case_expand():
     _eq(Tensor(X[:1]).expand(5, 96).contiguous().numpy(), np.broadcast_to(X[:1], (5, 96)))
+
+
+def case_copy_of_copy():
+    # Two copy kernels: the second reads the first's output through a flip.
+    y = Tensor(X)[5:20].T.contiguous()
+    _eq(y.flip(1).contiguous().numpy(), X[5:20].T[:, ::-1])
 
 
 ROUTE_CASES = [(n[5:], f) for n, f in sorted(globals().items()) if n.startswith("case_")]
