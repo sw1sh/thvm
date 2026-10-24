@@ -64,16 +64,14 @@ int main(void) {
   // src has producer_kid == 0 (leaf); alias should mirror.
   CHECK_EQ(TENS[alias_tid].producer_kid, TENS[src_tid].producer_kid);
 
-  TEST_BEGIN("view-shrink/root-materialize-flatten-gives-cropped-values");
-  // Re-build the SHRINK fresh so the materialize_root_alias path
-  // runs end-to-end (post-walk, contig buf populated via
-  // view_strided_index).  Read flat -> [6, 7, 10, 11].
+  TEST_BEGIN("view-shrink/root-realize-gives-cropped-values");
+  // A fresh SHRINK root realizes into a contiguous buffer, on the CPU by
+  // the copy kernel its materialize emits.  Read flat -> [6, 7, 10, 11].
   Term shrunk2 = uop_shrink(src, 2, be);
-  Term mat = thvm_materialize(shrunk2);
+  Term mat = thvm_realize(shrunk2);
   CHECK_EQ(term_tag(mat), TAG_TEN);
   u32 mat_tid = (u32)term_val(mat);
-  // Root-aliased into a contig buf -- different tid AND buf from
-  // the alias above.
+  // A new tid and buffer, not the alias above.
   CHECK(TENS[mat_tid].view.contiguous);
   f32 out_buf[4] = {0};
   CURRENT_BACKEND->buf_read(TENS[mat_tid].buf_id, out_buf, sizeof(out_buf));

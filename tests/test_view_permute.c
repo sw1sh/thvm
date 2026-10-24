@@ -78,9 +78,10 @@ int main(void) {
   // result, so two swaps give back the source term itself.
   CHECK_EQ(uop_permute(uop_permute(src, 2, perm), 2, perm), src);
 
-  TEST_BEGIN("view-permute/root-materialize-flatten-gives-transposed");
+  TEST_BEGIN("view-permute/root-realize-gives-transposed");
+  // On the CPU the root's materialize emits a copy kernel, which wnf fires.
   Term permuted2 = uop_permute(src, 2, perm);
-  Term mat = thvm_materialize(permuted2);
+  Term mat = thvm_realize(permuted2);
   CHECK_EQ(term_tag(mat), TAG_TEN);
   u32 mat_tid = (u32)term_val(mat);
   CHECK(TENS[mat_tid].view.contiguous);

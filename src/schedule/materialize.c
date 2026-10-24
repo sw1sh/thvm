@@ -4897,14 +4897,16 @@ fn Term thvm_materialize(Term term) {
     u32 alias_tid = view_resolve(term);
     // A non-plain alias (strided, offset or chained) of a kernel output is not
     // gathered here: the producer fires later in wnf, so the gather would copy
-    // unwritten bytes.  It takes the kernel path instead.  An external source
-    // (producer_kid 0) gathers safely; a plain contiguous alias needs no
-    // gather.
+    // unwritten bytes.  It takes the kernel path instead, as does any non-plain
+    // alias on the CPU, a compiled copy like tinygrad's where the host gather
+    // decodes each element's index.  Elsewhere an external source
+    // (producer_kid 0) gathers safely; a plain contiguous alias needs no gather.
     if (alias_tid != 0) {
       TenDesc const *ad = &TENS[alias_tid];
       int plain = ad->view.contiguous && ad->view.offset == 0 && ad->nviews == 0;
-      int unsafe_chain_root = (!plain && ad->producer_kid != 0);
-      if (!unsafe_chain_root) {
+      int kernel_path = !plain && (ad->producer_kid != 0
+                                   || CURRENT_BACKEND == &CPU_BACKEND);
+      if (!kernel_path) {
         Term alias_term = term_new(0, TAG_TEN, ad->dtype, alias_tid);
         // Under a capture, record the gather as a replayable JIT_OP_GATHER, so
         // it re-runs off the live source each step instead of baking the

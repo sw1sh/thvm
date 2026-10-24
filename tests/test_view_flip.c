@@ -65,9 +65,10 @@ int main(void) {
   CHECK_EQ(TENS[alias0_tid].view.offset, 0);
   CHECK_EQ(TENS[alias0_tid].view.strides[0], 1);
 
-  TEST_BEGIN("view-flip/root-materialize-flatten-gives-reversed");
+  TEST_BEGIN("view-flip/root-realize-gives-reversed");
+  // On the CPU the root's materialize emits a copy kernel, which wnf fires.
   Term flipped2 = uop_flip(src, 1);
-  Term mat = thvm_materialize(flipped2);
+  Term mat = thvm_realize(flipped2);
   CHECK_EQ(term_tag(mat), TAG_TEN);
   u32 mat_tid = (u32)term_val(mat);
   CHECK(TENS[mat_tid].view.contiguous);
@@ -97,9 +98,10 @@ int main(void) {
   // offset: 0 + (2-1)*3 + (3-1)*1 = 5.
   CHECK_EQ(TENS[alias2_tid].view.offset, 5);
 
-  TEST_BEGIN("view-flip/2d-root-materialize-correct");
+  TEST_BEGIN("view-flip/2d-root-realize-correct");
   Term flip2b = uop_flip(src2, 3);
-  Term mat2 = thvm_materialize(flip2b);
+  Term mat2 = thvm_realize(flip2b);
+  CHECK_EQ(term_tag(mat2), TAG_TEN);
   u32 mat2_tid = (u32)term_val(mat2);
   f32 out2_buf[6] = {0};
   CURRENT_BACKEND->buf_read(TENS[mat2_tid].buf_id, out2_buf, sizeof(out2_buf));
