@@ -61,7 +61,8 @@ static const char *cpu_jit_opt_tag(void) {
 
 static int cpu_cc_is_clang(void);
 
-// 1 iff the kernels compile with -march=native (cpu_jit_compile_shared).
+// 1 iff the kernels compile with -march=native -mno-avx512f
+// (cpu_jit_compile_shared).
 static int cpu_jit_native(void) {
 #if defined(__x86_64__)
   return cpu_cc_is_clang();
@@ -71,11 +72,11 @@ static int cpu_jit_native(void) {
 }
 
 // The on-disk dylib of one kernel (stem "", keyed by its source hash) or of
-// one combined cold-start batch (stem "comb_", keyed by the batch key); "n"
-// marks a -march=native build.
+// one combined cold-start batch (stem "comb_", keyed by the batch key);
+// "native" marks a cpu_jit_native build.
 static void cpu_jit_dylib_path(char *out, size_t cap, char const *stem, u64 key) {
   snprintf(out, cap, "/tmp/thvm_jit_%s%016llx_%s%s.dylib", stem,
-           (unsigned long long)key, cpu_jit_opt_tag(), cpu_jit_native() ? "n" : "");
+           (unsigned long long)key, cpu_jit_opt_tag(), cpu_jit_native() ? "native" : "");
 }
 
 static int cpu_jit_dylib_cached(u64 key) {
@@ -310,13 +311,15 @@ static void cpu_jit_warn_compile_failed(char const *what) {
 // tinygrad compiles (runtime/support/compiler_cpu.py), so a sqrt is an
 // instruction, not a libm call; contraction stays off, so a kernel's floats
 // match the walker's.  tinygrad's -march=native on x86-64 only with clang: gcc
-// 11 with AVX-512 miscompiles a where over three 10x10 buffers.  The dylibs
-// stay in this machine's /tmp.
+// 11 with AVX-512 miscompiles a where over three 10x10 buffers.  And without
+// AVX-512, where tinygrad keeps it: clang 14's AVX-512 code for these scalar
+// lanes ran a 512^3 broadcast GEMM in 27 ms, its AVX2 code in 10 (conv 64 -> 32
+// channels 35 -> 39, tinygrad 41).  The dylibs stay in this machine's /tmp.
 fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path, int loud) {
   char opt[8], bracket[40];
   snprintf(opt, sizeof opt, "-%s", cpu_jit_opt_tag());
   snprintf(bracket, sizeof bracket, "-fbracket-depth=%d", CPU_JIT_BRACKET_DEPTH);
-  char *argv[12];
+  char *argv[13];
   u32   ac = 0;
   argv[ac++] = (char *)cpu_cc();
   argv[ac++] = opt;
@@ -327,6 +330,7 @@ fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path, int lou
   }
   if (cpu_jit_native()) {
     argv[ac++] = (char *)"-march=native";
+    argv[ac++] = (char *)"-mno-avx512f";
   }
   argv[ac++] = (char *)"-fPIC";
   argv[ac++] = (char *)"-shared";
