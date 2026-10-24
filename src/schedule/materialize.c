@@ -2471,14 +2471,15 @@ static Term unified_rewrite_rec_sub(UnifiedRewriteState *st,
   return out;
 }
 
-// Broadcast-collapsed REDUCE check.  A UOP_REDUCE stores only axis ids, and
+// Broadcast-collapsed REDUCE repair.  A UOP_REDUCE stores only axis ids, and
 // uwalk_run_reduce takes each extent from a RANGE with that id in the body
 // (fatal if none).  Inlining a producer invariant over a reduce axis (a
-// per-channel mean broadcast, a bias.expand(...).sum() gradient) can drop that
-// axis's RANGEs.  ru_reduce_unparented repairs this before the inline;
-// repair_collapsed_reduces_rec computes the repair after it (a SUM becomes
-// `body * extent`, a MAX or MIN the body, with extents from the pre-inline
-// tree), and a needed one is fatal.  tinygrad's REDUCE carries its ranges
+// per-channel mean broadcast, a bias.expand(...).sum() gradient, a replicate
+// pad's gradient) can drop that axis's RANGEs.  ru_reduce_unparented repairs
+// this before the inline and repair_collapsed_reduces_rec after it, tinygrad's
+// reduce_unparented (codegen/simplify.py:81-91), which runs on the final
+// kernel: a SUM becomes `body * extent`, a MAX, MIN or bool SUM the body, with
+// extents from the pre-inline tree.  tinygrad's REDUCE carries its ranges
 // (schedule/indexing.py:107-113).
 
 #define RU_AXEXT_CAP 256
@@ -2576,8 +2577,6 @@ static int subtree_uses_axis_mat(Term t, u32 aid, u32 depth) {
   return 0;
 }
 
-static u32 f32_to_bits(f32 v) { u32 b; memcpy(&b, &v, sizeof b); return b; }
-
 static Term repair_collapsed_reduces_rec(Term t, AxExtMap const *m, u32 depth) {
   if (depth > MAT_MAX_WALK_DEPTH) return t;
   Term r = term_resolve(t);
@@ -2629,9 +2628,10 @@ static Term repair_collapsed_reduces_rec(Term t, AxExtMap const *m, u32 depth) {
     return uop_reduce_multi(kind, n_axes, all_axes, body);
   }
   Term new_body = body;
-  if (kind == REDUCE_SUM && prod != 1) {
-    Term k = uop_const(DT_FP32, f32_to_bits((f32)prod));
-    new_body = uop_binary(UOP_MUL, body, k);
+  u32  dt       = DT_FP32;
+  (void)term_dtype_in(r, 0, &dt);
+  if (kind == REDUCE_SUM && prod != 1 && !dtype_is_bool(dt)) {
+    new_body = uop_binary(UOP_MUL, body, ru_const_of(dt, prod));
   }
   // Rebuild the reduce over only the surviving (still-referenced) axes;
   // if none survive, the reduce degenerates to its (scaled) body.
@@ -2640,19 +2640,15 @@ static Term repair_collapsed_reduces_rec(Term t, AxExtMap const *m, u32 depth) {
 }
 
 // Walker rewrite of one store: substitute its TAG_TEN and BUFFERIZE leaves,
-// then check that no REDUCE lost a reduce axis's RANGE leaves to the inline
-// (repair_collapsed_reduces_rec, with extents from the pre-inline store).  One
-// that did is fatal: uwalk_run_reduce could not recover the extent.
+// then repair each REDUCE that lost a reduce axis's RANGE leaves to the inline
+// (repair_collapsed_reduces_rec, with extents from the pre-inline store).
 static Term unified_rewrite_store_for_walker(Term store, void *ctx) {
   UnifiedRewriteState *st = (UnifiedRewriteState *)ctx;
   Term rewritten = unified_rewrite_rec(st, store, 0);
   AxExtMap axm;
   axm.n = 0;
   axext_collect(&axm, store);
-  if (repair_collapsed_reduces_rec(rewritten, &axm, 0) != rewritten) {
-    thvm_fatal("walker rewrite: a broadcast-collapsed REDUCE needs the post-inline repair");
-  }
-  return rewritten;
+  return repair_collapsed_reduces_rec(rewritten, &axm, 0);
 }
 
 static Term unified_store_root_for_walker(KernelEntry *ke, Term root) {

@@ -1209,6 +1209,17 @@ static Term interact_grad_dispatch(Term grad_term) {
         ranges[2 * i + 1] = (u32)term_val(heap_read(y_loc + 3 + 2 * i));
       }
 
+      // A PAD or SHRINK that changes nothing passes gy through, as tinygrad's
+      // returns self (mixin/movement.py:186-212): its inverse as a zero-width
+      // PAD left the scheduler a reduce it could not inline.
+      int noop = 1;
+      for (u32 i = 0; i < ndim; i++) {
+        noop &= y_op == UOP_PAD ? ranges[2 * i] == 0 && ranges[2 * i + 1] == 0
+                                : ranges[2 * i] == 0 && ranges[2 * i + 1] == a_shape.dims[i];
+      }
+      if (noop) {
+        return grad_bwd_for_child(a, gy);
+      }
       Term gy_a;
       if (y_op == UOP_PAD) {
         // ranges are the pad widths (b_i, e_i).
