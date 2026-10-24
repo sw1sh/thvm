@@ -475,6 +475,17 @@ fn Term thvm_realize(Term expr) {
   // VAR-SUB / ALO chains pointing at a TEN.
   Term resolved = term_resolve(expr);
   if (term_tag(resolved) == TAG_TEN) return resolved;
+  // An empty result has nothing to compute, as tinygrad schedules no kernel
+  // for an empty buffer: a fresh one of its shape and dtype.  Lowering it would
+  // reach a zero-size chained view the CPU dispatch cannot gather.
+  {
+    Shape es;
+    u32   edt = DT_FP32;
+    if (term_tag(resolved) == TAG_UOP && term_shape_in(resolved, 0, &es) && shape_numel(es) == 0
+        && term_dtype_in(resolved, 0, &edt)) {
+      return term_new(0, TAG_TEN, edt, tensor_alloc(CURRENT_BACKEND, es, edt));
+    }
+  }
   // CTR-bundle short-circuit: dispatch to the multi-root entry so
   // every child shares one materialize pass + one buffer-pool
   // boundary.  Per-param TAdam ASSIGNs land here.  Returns 0 when the
