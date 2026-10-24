@@ -861,6 +861,17 @@ static int rmu_term_has_reduce(Term t, u32 depth) {
   return 0;
 }
 
+// 1 iff `t` holds an EXP2, LOG2, SIN or SQRT, which C renders as a call.
+static int rmu_term_has_call(Term t, u32 depth) {
+  if (depth > RMU_MAX_WALK_DEPTH || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_EXP2 || op == UOP_LOG2 || op == UOP_SIN || op == UOP_SQRT) return 1;
+  for (u32 i = 0, n = rmu_walk_arity(op); i < n; i++) {
+    if (rmu_term_has_call(heap_read(term_val(t) + i), depth + 1)) return 1;
+  }
+  return 0;
+}
+
 // Collect the distinct REDUCEs of `t` (up to MAX_DIM), inner before outer.
 static void rmu_collect_reduces(Term t, Term *reduces, u32 *n_out) {
   if (term_tag(t) != TAG_UOP) return;
@@ -4170,9 +4181,19 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
             (unsigned long long)g_decode.total);
   }
 
-  // Register-block only when at least one reduce exists (a pure
-  // elementwise UPCAST is already vectorizable as a serial unroll loop).
-  RmuLaneBlock *lbp = (lb.n_lanes > 1 && n_reduces > 0) ? &lb : NULL;
+  // Register-block when a reduce exists, or when the lanes store as float4 (the
+  // vec4 path below): the four lane values load before the vector store, so
+  // clang packs the loads with no alias check, as tinygrad's float4 loads and
+  // stores (codegen/late/coalesce.py), where a serial lane loop stayed scalar.
+  // A body with a call stays a loop, which clang vectorizes across the lanes
+  // (exp 2048^2 4.2 ms as a loop, 6.0 as four calls; sqrt 1.0 and 1.5).
+  int lanes_vec4 = 0;
+  if (RMU_TARGET == CG_TARGET_C && lb.n > 0 && uop_buffer_dtype(buf) == DT_FP32
+      && lb.up_exts[lb.n - 1] % 4 == 0 && !rmu_term_has_call(value, 0)) {
+    i64 s;
+    lanes_vec4 = rmu_axis_index_stride(addr, lb.up_axes[lb.n - 1], &s) && s == 1;
+  }
+  RmuLaneBlock *lbp = (lb.n_lanes > 1 && (n_reduces > 0 || lanes_vec4)) ? &lb : NULL;
   if (lbp == NULL)
     for (u32 i = 0; i < n_ranges; i++) lane_is_axis[i] = 0;
 
