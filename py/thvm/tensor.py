@@ -21,6 +21,7 @@ from .dtypes import (DType, dtypes, from_thvm_id, least_upper_dtype, sum_acc_dty
 from .helpers import TRAINING, argfix, make_tuple
 from .mixin import OpMixin, _align_left
 from .thvm import K, Term, Thvm
+from ._misc import jit_record_random
 
 
 _TH = Thvm()
@@ -498,30 +499,37 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     # in-graph (mixin/rand.py), with the same distributions and init formulas.
 
     @classmethod
-    def _random(cls, arr, dtype) -> "Tensor":
+    def _random(cls, draw, dtype) -> "Tensor":
+        """A host draw; under a TinyJit capture each replay redraws it into the same buffer
+        (_misc.jit_record_random), as tinygrad's in-graph RNG gives fresh values per call."""
         dt = to_dtype(dtype) if dtype is not None else dtypes.default_float
-        return cls(np.asarray(arr).astype(_to_np_dtype(dt)), dtype=dt)
+        t = cls(np.asarray(draw()).astype(_to_np_dtype(dt)), dtype=dt)
+        jit_record_random(t, draw)
+        return t
+
+    def _redraw(self, draw) -> None:
+        _TH.ten_write(self.term, _host_bytes(np.asarray(draw()).astype(_to_np_dtype(self._dtype)), self._dtype))
 
     @classmethod
     def rand(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
-        return cls._random(np.random.rand(*argfix(*shape)), dtype)
+        return cls._random(lambda: np.random.rand(*argfix(*shape)), dtype)
 
     @classmethod
     def randn(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
-        return cls._random(np.random.standard_normal(argfix(*shape)), dtype)
+        return cls._random(lambda: np.random.standard_normal(argfix(*shape)), dtype)
 
     @classmethod
     def normal(cls, *shape, mean: float = 0.0, std: float = 1.0, dtype=None, **kw) -> "Tensor":
         if std < 0:
             raise ValueError(f"Tensor.normal requires std >= 0, got {std=}")
-        return cls._random(np.random.normal(mean, std, argfix(*shape)), dtype)
+        return cls._random(lambda: np.random.normal(mean, std, argfix(*shape)), dtype)
 
     @classmethod
     def uniform(cls, *shape, low: float = 0.0, high: float = 1.0, dtype: DType | None = None,
                 **kw) -> "Tensor":
         if low >= high:
             raise ValueError(f"Tensor.uniform requires low < high, got {low=}, {high=}")
-        return cls._random(np.random.uniform(low, high, argfix(*shape)), dtype)
+        return cls._random(lambda: np.random.uniform(low, high, argfix(*shape)), dtype)
 
     @classmethod
     def randint(cls, *shape, low: int = 0, high: int = 10, dtype: DType | None = None,
@@ -531,7 +539,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             raise TypeError(f"{dt=} must be int")
         if low >= high:
             raise ValueError(f"Tensor.randint requires low < high, got {low=}, {high=}")
-        return cls._random(np.random.randint(low, high, size=argfix(*shape)), dt)
+        return cls._random(lambda: np.random.randint(low, high, size=argfix(*shape)), dt)
 
     @classmethod
     def scaled_uniform(cls, *shape, **kw) -> "Tensor":

@@ -84,6 +84,15 @@ def _jit_realize_result(result):
         t.realize()
 
 
+# The (tensor, draw) pairs of the host random draws a TinyJit capture makes, or None outside one.
+_JIT_RANDOM = None
+
+
+def jit_record_random(t, draw):
+    if _JIT_RANDOM is not None:
+        _JIT_RANDOM.append((t, draw))
+
+
 def TinyJit(fn):
     """tinygrad's TinyJit (engine/jit.py:126-178): the second call captures fn's
     dispatches, later ones replay them on their Tensor arguments; JIT=0 returns fn."""
@@ -99,6 +108,7 @@ def TinyJit(fn):
     def _capture(args, kwargs):
         # The input buf_ids are read before fn runs, as the buffers the captured
         # ops reference are the baseline a replay rebinds.
+        global _JIT_RANDOM
         if state["slot"]:
             _TH.jit_drop(state["slot"])
             state["slot"] = 0
@@ -110,17 +120,20 @@ def TinyJit(fn):
             return result, False
         input_ids = _jit_input_buf_ids(_TH, args, kwargs)
         result = None
+        _JIT_RANDOM = drawn = []
         try:
             result = fn(*args, **kwargs)
             # A lazy result records nothing until realized (tinygrad engine/jit.py:142).
             _jit_realize_result(result)
         finally:
+            _JIT_RANDOM = None
             # Every result is a root: jit_capture_finalize replays only the
             # dispatches a root needs.
             _TH.jit_end([t.term for t in _jit_result_tensors(result)])
         _TH.jit_set_inputs(slot, input_ids)
         state["slot"] = slot
         state["result"] = result
+        state["random"] = drawn
         state["sig"] = _jit_symbolic_sig(args, kwargs)
         return result, True
 
@@ -139,6 +152,8 @@ def TinyJit(fn):
             result, _ = _capture(args, kwargs)
             return result
         new_ids = _jit_input_buf_ids(_TH, args, kwargs)
+        for t, draw in state["random"]:
+            t._redraw(draw)
         _TH.jit_replay_with_inputs(state["slot"], new_ids)
         return state["result"]
 
