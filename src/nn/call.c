@@ -13,7 +13,7 @@
 //   MAXIMUM      t: a, b; ia: [1 for the minimum]
 //   SOFTMAX      t: x; ia: axis, [1 for log_softmax]
 //   LAYERNORM    t: x; ia: axes...; ra: eps
-//   BATCHNORM    t: x, weight, bias, mean, invstd
+//   BATCHNORM    t: x, weight, bias, mean, invstd; ia: axes... (none: axis 1)
 //   DOT, LINEAR  t: x, w[, b]
 //   ARANGE       ia: dtype; ra: start, stop, step
 //   TRI          t: x; ia: diagonal, lower
@@ -22,6 +22,7 @@
 //   POOL, MAX_POOL2D  t: x; ia: kernel[nk], stride[nk], dilation[nk]
 //   CONV2D       t: x, w, b; ia: groups, stride[n], dilation[n], (begin, end)[n]
 //   CONV_TRANSPOSE2D  the same, then output_padding[n]
+//   POW          t: base, exponent
 //   exp, log, sigmoid, tanh, relu, gelu, gelu_erf, erf, rsqrt, square, sign, abs
 //                t: x (ids NN_OP_COUNT + NN_EXP ..)
 // with n = rank(w) - 2 spatial axes; a negative axis counts from the end.
@@ -30,7 +31,7 @@
 static char const *const NN_OP_NAMES[NN_OP_COUNT + NN_ELEMENTWISE_COUNT] = {
   "move", "cast", "full", "binop", "reduce", "where", "maximum", "softmax", "layernorm",
   "batchnorm", "dot", "linear", "arange", "tri", "sparse_categorical_crossentropy",
-  "scaled_dot_product_attention", "pool", "max_pool2d", "conv2d", "conv_transpose2d",
+  "scaled_dot_product_attention", "pool", "max_pool2d", "conv2d", "conv_transpose2d", "pow",
   "exp", "log", "sigmoid", "tanh", "relu", "gelu", "gelu_erf", "erf", "rsqrt", "square",
   "sign", "abs",
 };
@@ -65,7 +66,7 @@ static int nn_call_axes(Tensor const *x, u32 n, i32 const *ia, u32 *out) {
 fn Tensor nn_call(u32 op, Tensor const *t, u32 nt, i32 const *ia, u32 ni, double const *ra,
                   u32 nr) {
   static u32 const need_t[NN_OP_COUNT] = {1, 1, 0, 2, 1, 3, 2, 1, 1, 5, 2, 3, 0, 1, 2, 4,
-                                          1, 1, 3, 3};
+                                          1, 1, 3, 3, 2};
   Tensor fail = {0, DT_FP32, {0, {0}}};
   if (op >= NN_OP_COUNT && op < NN_OP_COUNT + NN_ELEMENTWISE_COUNT) {
     return nt >= 1 && t[0].t != 0 ? nn_elementwise(op - NN_OP_COUNT, t[0]) : fail;
@@ -149,7 +150,11 @@ fn Tensor nn_call(u32 op, Tensor const *t, u32 nt, i32 const *ia, u32 ni, double
       return nn_layernorm(t[0], ni, ax, ra[0]);
     }
     case NN_OP_BATCHNORM: {
-      return t[3].t != 0 && t[4].t != 0 ? nn_batchnorm(t[0], t[1], t[2], t[3], t[4]) : fail;
+      u32 one = 1;
+      if (t[3].t == 0 || t[4].t == 0 || (ni > 0 && !nn_call_axes(&t[0], ni, ia, ax))) {
+        return fail;
+      }
+      return nn_batchnorm(t[0], t[1], t[2], t[3], t[4], ni > 0 ? ni : 1, ni > 0 ? ax : &one);
     }
     case NN_OP_DOT: {
       return t[1].t != 0 ? nn_dot(t[0], t[1]) : fail;
@@ -211,6 +216,9 @@ fn Tensor nn_call(u32 op, Tensor const *t, u32 nt, i32 const *ia, u32 ni, double
       }
       return tr ? nn_conv_transpose2d(t[0], t[1], t[2], (u32)ia[0], stride, dilation, pad, out_pad)
                 : nn_conv2d(t[0], t[1], t[2], (u32)ia[0], stride, dilation, pad);
+    }
+    case NN_OP_POW: {
+      return t[1].t != 0 ? nn_pow(t[0], t[1]) : fail;
     }
     default: {
       return fail;

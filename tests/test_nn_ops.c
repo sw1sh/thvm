@@ -7,7 +7,7 @@
 //   3. nn_layernorm and nn_batchnorm with weight and bias;
 //   4. nn_maximum / nn_minimum on a broadcast pair with ties, nn_where;
 //   5. nn_dot at 2-D, N-D and a vector, nn_linear with a 1-D weight (a multiply);
-//   6. shape errors give t == 0.
+//   6. shape errors give t == 0, and pow by name.
 #include "../src/thvm.c"
 #include "test.h"
 #include <math.h>
@@ -141,7 +141,7 @@ int main(void) {
       bn[i] = (xs[i] - mean[c]) * inv[c] * wt[c] + bs[c];
     }
     check(nn_batchnorm(leaf(2, d23, xs), leaf(1, d3, wt), leaf(1, d3, bs), leaf(1, d3, mean),
-                       leaf(1, d3, inv)), bn, 6, 0, "batchnorm");
+                       leaf(1, d3, inv), 1, ax1), bn, 6, 0, "batchnorm");
   }
 
   TEST_BEGIN("nn/select");
@@ -305,6 +305,19 @@ int main(void) {
     i32 const none_i[1] = {0};
     check(nn_call(nn_op_id("square"), &x, 1, none_i, 0, NULL, 0),
           (f32[6]){4.0f, 0.25f, 0.0f, 0.0625f, 1.0f, 9.0f}, 6, 0, "square by name");
+    // tinygrad's pow: a negative base takes an integer exponent's sign, a fractional one is nan,
+    // 0 ** 0 is 1.
+    f32 const be[2][5] = {{2.0f, -2.0f, -2.0f, 0.0f, 9.0f}, {3.0f, 3.0f, 0.5f, 0.0f, 0.5f}};
+    Tensor bx[2] = {leaf(1, (u32[1]){5}, be[0]), leaf(1, (u32[1]){5}, be[1])};
+    Tensor pw = nn_call(nn_op_id("pow"), bx, 2, NULL, 0, NULL, 0);
+    CHECK(pw.t != 0);
+    if (pw.t != 0) {
+      f32 got[5] = {0};
+      Term done = term_resolve(thvm_realize(pw.t));
+      CPU_BACKEND.buf_read(TENS[term_val(done)].buf_id, got, sizeof got);
+      CHECK(fabsf(got[0] - 8.0f) < 1e-5f && fabsf(got[1] + 8.0f) < 1e-5f && isnan(got[2]));
+      CHECK(got[3] == 1.0f && fabsf(got[4] - 3.0f) < 1e-5f);
+    }
   }
 
   TEST_REPORT();

@@ -593,7 +593,8 @@ typedef struct {
 #define NN_OP_MAX_POOL2D       17
 #define NN_OP_CONV2D           18
 #define NN_OP_CONV_TRANSPOSE2D 19
-#define NN_OP_COUNT            20
+#define NN_OP_POW              20
+#define NN_OP_COUNT            21
 
 typedef struct Backend Backend;
 
