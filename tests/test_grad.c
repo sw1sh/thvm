@@ -116,9 +116,10 @@ int main(void) {
   TEST_BEGIN("grad/no-target-reshape-passes-through-shape");
   u32 d31[2] = {3, 1};
   Term rs = uop_reshape(a, 2, d31);
-  Term g_rs = wnf(uop_grad(rs, gy));
+  // The (3, 1) cotangent reshapes back to a's (3,), which undoes it to gy.
+  Term g_rs = wnf(uop_grad(rs, uop_reshape(gy, 2, d31)));
   check_leaf_sup(g_rs, a);
-  CHECK_EQ(term_ext(sup_grad(g_rs)), UOP_RESHAPE);
+  CHECK_EQ(sup_grad(g_rs), gy);
 
   TEST_BEGIN("grad/no-target-expand-reduces-cotangent");
   u32 d1[1] = {1};

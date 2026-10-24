@@ -3,6 +3,13 @@
 fn Term uop_reshape(Term src, u32 ndim, const u32 *dims) {
   Term collapsed = uop_rewrite_movement_src(UOP_RESHAPE, src);
   if (collapsed != 0) src = collapsed;
+  // A reshape to src's own shape is src, as tinygrad's (mixin/movement.py:184),
+  // here after the RESHAPE(RESHAPE) collapse: an unsqueeze a flatten undoes, as
+  // a one-piece cat's, leaves no node.
+  Shape s;
+  if (term_shape_in(src, 0, &s) && s.ndim == ndim && memcmp(s.dims, dims, ndim * sizeof *dims) == 0) {
+    return src;
+  }
   u32 key_buf[1 + MAX_DIM];
   key_buf[0] = ndim;
   for (u32 i = 0; i < ndim; i++) key_buf[1 + i] = dims[i];

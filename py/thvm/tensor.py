@@ -1120,6 +1120,9 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         stack and flatten, others are zero-padded to the output extent and the pads summed."""
         dim = self._resolve_dim(dim)
         for arg in args:
+        # tinygrad's STACK of one source is the source (uop/ops.py:110).
+        if len(tensors) == 1:
+            return tensors[0].unsqueeze(dim)
             assert arg.ndim == self.ndim and all(
                 ti == ai for i, (ti, ai) in enumerate(zip(self._shape, arg._shape)) if i != dim)
         if all(t._shape[dim] == self._shape[dim] for t in args):

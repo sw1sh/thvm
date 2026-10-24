@@ -2223,7 +2223,8 @@ static Term try_inline_bufferize_via_axis_table(
     // When this BUFFERIZE is itself inlined into a further consumer, the active
     // subst maps them to that consumer's live ranges, so the range goes through
     // it first, as tinygrad always indexes at the current consumer's ranges
-    // (schedule/indexing.py:79).
+    // (schedule/indexing.py:79).  An in_rng may be an expression over ranges (a
+    // PAD's gated index), so the subst rewrites inside it.
     Term to_rng = ax_rngs[ax];
     if (sub != NULL) {
       for (u32 si = 0; si < sub->n; si++) {
