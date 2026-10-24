@@ -553,7 +553,7 @@ static void rmu_emit_term(Term t, FILE *fp) {
     }
     case UOP_POW: {
       // An int POW, which uop_sym leaves to thvm_ipow (codegen/ipow.c) on the
-      // CPU: a float one is lowered before the renderer sees it.
+      // CPU and CUDA: a float one is lowered before the renderer sees it.
       u32 dt = rmu_dtype_of(t);
       char const *ty = rmu_c_type_name(dt);
       Term e = heap_read(loc + 1);
@@ -4894,6 +4894,9 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   fputs("#ifndef INFINITY\n"
         "#define INFINITY __int_as_float(0x7f800000)\n"
         "#endif\n\n", fp);
+  fputs("__device__ ", fp);
+  fputs(THVM_IPOW_SRC, fp);
+  fputs("\n", fp);
   // __launch_bounds__ from the LOCAL extents, the block cuda_dag_dispatch_shape
   // launches, so nvcc sizes registers for it; none for a GROUP_REDUCE or a flat
   // launch.

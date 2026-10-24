@@ -2,7 +2,8 @@
 // for an int POW: square and multiply over e's bits in the unsigned type of `bits`,
 // so products wrap, and a negative e (`neg`) truncates to 0 but for a base of 1 or
 // -1.  One text is both compiled here, for the walker, and written into each C
-// kernel's prologue (THVM_IPOW_SRC), so the two compute the same ints: rendered as
+// kernel's prologue (THVM_IPOW_SRC), and as a __device__ function into each
+// CUDA one, so they compute the same ints: rendered as
 // a DAG of squarings, as tinygrad's linearizer shares them, it would render and
 // walk as a tree, each square doubling it.
 #define THVM_IPOW_TEXT(...) __VA_ARGS__ static char const THVM_IPOW_SRC[] = #__VA_ARGS__;

@@ -135,7 +135,7 @@ static int sym_const(Term t, double *v) {
   return 1;
 }
 
-static int  SYM_CPU;
+static int  SYM_IPOW;
 static Term sym_pow(Term b, Term e);
 
 // tinygrad's simplify_pow (uop/symbolic.py:16-22) for a CONST exponent c: 1 at
@@ -163,7 +163,7 @@ static Term sym_pow_c(Term b, double c, u32 dt) {
 // tinygrad's POW lowering (uop/symbolic.py:194-197, 451): simplify_pow for a
 // CONST exponent, exp2(e log2 c) for a positive float CONST base c (c itself at
 // 1), else xpow for a float POW; an int one stays a POW for thvm_ipow
-// (codegen/ipow.c) on the CPU.
+// (codegen/ipow.c) where the renderer holds it.
 static Term sym_pow(Term b, Term e) {
   u32    dt = DT_FP32;
   (void)term_dtype_in(b, 0, &dt);
@@ -173,7 +173,7 @@ static Term sym_pow(Term b, Term e) {
     if (r != 0) return r;
   }
   if (dtype_is_int(dt) && !dtype_is_bool(dt)) {
-    return SYM_CPU ? uop_binary(UOP_POW, b, e) : sym_ipow_f32(b, e, dt);
+    return SYM_IPOW ? uop_binary(UOP_POW, b, e) : sym_ipow_f32(b, e, dt);
   }
   f32 cb;
   if (sym_float_const(b, &cb) && cb > 0) {
@@ -192,10 +192,10 @@ static Term uop_sym_rule(Term t, void *user) {
   return sym_mul_rule(heap_read(term_val(t)), heap_read(term_val(t) + 1));
 }
 
-// `cpu`: the kernel renders through the C renderer and the walker, which hold
-// thvm_ipow.
-fn Term uop_sym(Term root, int cpu) {
+// `ipow`: the kernel renders through the C, walker or CUDA route, which hold
+// thvm_ipow; Metal's int POW keeps the f32 path.
+fn Term uop_sym(Term root, int ipow) {
   UOpGraphRewriteRule rules[1] = { { "sym", uop_sym_rule } };
-  SYM_CPU = cpu;
+  SYM_IPOW = ipow;
   return uop_graph_rewrite(root, rules, 1, NULL);
 }

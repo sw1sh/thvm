@@ -4501,7 +4501,7 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // contiguous.  A multi-store root or a data-dependent address turns the opt
   // passes off (KernelEntry.no_opts).
   if (ke->cached_lift.store_root != 0) {
-    Term root = uop_sym(ke->cached_lift.store_root, CURRENT_BACKEND == &CPU_BACKEND);
+    Term root = uop_sym(ke->cached_lift.store_root, CURRENT_BACKEND != &METAL_BACKEND);
     // tinygrad merges ranges before its opts; CPU only until a GPU run checks
     // the Metal and CUDA renderers on merged axes.
     if (CURRENT_BACKEND == &CPU_BACKEND) root = uop_simplify_ranges(root);
