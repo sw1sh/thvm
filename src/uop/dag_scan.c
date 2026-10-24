@@ -1931,9 +1931,10 @@ int uop_dag_classify_im2col_contraction(Term root,
 #undef IM2COL_REJ
 }
 
-// The distinct INDEX_E addresses under `root`, at most `cap`: the counterpart of
-// tinygrad's Scheduler.bufs (codegen/opt/postrange.py:250).
-u32 uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap) {
+// The distinct INDEX_E and STORE addresses under `root`, at most `cap`: the
+// counterpart of tinygrad's Scheduler.bufs (codegen/opt/postrange.py:231),
+// whose INDEX ops include the output's.
+u32 uop_dag_collect_buf_addrs(Term root, Term *out_addrs, u32 cap) {
   if (root == 0 || term_tag(root) != TAG_UOP || out_addrs == NULL || cap == 0) {
     return 0;
   }
@@ -1945,7 +1946,7 @@ u32 uop_dag_collect_index_e_addrs(Term root, Term *out_addrs, u32 cap) {
   Term t;
   while ((t = uop_walk_take(&w)) != 0) {
     u32 op = term_ext(t);
-    if (op == UOP_INDEX_E) {
+    if (op == UOP_INDEX_E || op == UOP_STORE) {
       Term addr = heap_read(term_val(t) + 1);
       int seen = 0;
       for (u32 i = 0; i < n; i++) if (out_addrs[i] == addr) { seen = 1; break; }

@@ -609,6 +609,46 @@ static void test_hand_opts_unroll_skips_orphan_reduce_axis(void) {
   CHECK(!unrolled_o);
 }
 
+// tinygrad's bufs hold the output's INDEX, and `rng in idx.backward_slice`
+// excludes idx itself (uop/ops.py:265-268), so a 1-D output whose address is
+// the bare range reads as strideless there: a row sum out[m] = sum_k x[m*64+k]
+// takes "more upcast axis" UPCAST 4 on m (heuristic.py:114-137), then UNROLL 4
+// on k, as tinygrad's r_1024_4_1024_4.
+static void test_hand_opts_upcasts_bare_output_range(void) {
+  unsetenv("NOOPT");
+  setenv("HAND_CODED_OPTS", "1", 1);
+  u32 dimsX[1] = { 1024 * 64 };
+  u32 dimsO[1] = { 1024 };
+  Term X = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsX, 1);
+  Term O = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dimsO, 0);
+  Term r_m = uop_range(0, KAX_LOOP,   1024);
+  Term r_k = uop_range(1, KAX_REDUCE, 64);
+  Term addr = uop_int_binary(UOP_IADD,
+                             uop_int_binary(UOP_IMUL, r_m, uop_const(DT_INT32, 64)), r_k);
+  Term root = uop_store(O, r_m, uop_reduce(REDUCE_SUM, 1, uop_index_e(X, addr)));
+
+  u32 kid = kernel_alloc();
+  KernelEntry *ke = &KERNELS[kid];
+  kernel_lift_reserve(&ke->cached_lift, 1);
+  ke->cached_lift.store_root = root;
+  ke->cached_lift.out_buf    = O;
+  ke->cached_lift.in_bufs[0] = X;
+  ke->cached_lift.n_inputs   = 1;
+  ke->n_inputs = 1;
+  CHECK(kernel_hand_coded_opts(ke) > 0);
+
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(ke->cached_lift.store_root, ids, types, exts,
+                               MAX_AXES);
+  int upcast = 0, unroll = 0;
+  for (u32 i = 0; i < n; i++) {
+    if (types[i] == KAX_UPCAST && exts[i] == 4) upcast++;
+    if (types[i] == KAX_UNROLL && exts[i] == 4) unroll++;
+  }
+  CHECK_EQ(upcast, 1);
+  CHECK_EQ(unroll, 1);
+}
+
 // === KOP_SWAP DAG mutation ============================================
 
 static void test_apply_swap_axes(void) {
@@ -775,6 +815,8 @@ int main(void) {
                                                     test_apply_group_reduce_over_wide_nested_unroll();
   TEST_BEGIN("hand_opts_unroll_skips_orphan_reduce_axis");
                                                     test_hand_opts_unroll_skips_orphan_reduce_axis();
+  TEST_BEGIN("hand_opts_upcasts_bare_output_range");
+                                                    test_hand_opts_upcasts_bare_output_range();
   TEST_BEGIN("apply_swap_axes");                   test_apply_swap_axes();
   TEST_BEGIN("apply_swap_noop_when_axes_equal");   test_apply_swap_noop_when_axes_equal();
   TEST_BEGIN("apply_swap_follows_reduce_axis");    test_apply_swap_follows_reduce_axis();

@@ -251,7 +251,7 @@ static int hand_opt_upcast_buf_stride(Term root, u32 rng,
                                       u32 *out_num_strides,
                                       u32 *out_sum_strides) {
   Term addrs[64];
-  u32 n_bufs = uop_dag_collect_index_e_addrs(root, addrs, 64);
+  u32 n_bufs = uop_dag_collect_buf_addrs(root, addrs, 64);
   int any_strideless = 0;
   u32 num_strides = 0;
   u32 sum_strides = 0;
@@ -261,8 +261,15 @@ static int hand_opt_upcast_buf_stride(Term root, u32 rng,
     if (!cv.ok) {
       continue;
     }
+    // tinygrad tests `rng in idx.backward_slice`, which excludes idx itself
+    // (uop/ops.py:265-268): a bare RANGE address, a 1-D output's, holds no
+    // axis there, while its split_uop(ADD) term still adds 1 to sum_strides.
+    int bare  = term_tag(addrs[i]) == TAG_UOP && term_ext(addrs[i]) == UOP_RANGE;
     u32 coeff = uop_dag_addr_coeff_lookup(&cv, rng);
-    if (coeff != 0) {
+    if (bare) {
+      sum_strides += coeff;
+      if (n_uu == 0) any_strideless = 1;
+    } else if (coeff != 0) {
       num_strides += 1;
       sum_strides += coeff;
     } else {
@@ -634,7 +641,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
       if (hand_opt_snapshot_axes(ke, &ax)) {
         // expand: some address does not use the axis (heuristic.py:179).
         Term addrs[64];
-        u32 n_bufs = uop_dag_collect_index_e_addrs(ke->cached_lift.store_root,
+        u32 n_bufs = uop_dag_collect_buf_addrs(ke->cached_lift.store_root,
                                                    addrs, 64);
         UopDagAddrCoeffsView decoded[64];
         u32 n_decoded = 0;
