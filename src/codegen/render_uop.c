@@ -4550,10 +4550,12 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   Term    *slot_bufs = slots.bufs;
   Term     out_buf   = slot_bufs[0];
   // Decline, writing nothing so cpu_jit_render_canon falls back to the
-  // interpreter, on an untyped slot (dtype 0): it would be declared unsigned
-  // char under a float body.  A hole (an unread input) gets no declaration.
+  // interpreter, on a slot that holds no UOP_BUFFER (a bare TAG_TEN leaf): it
+  // has no dtype to declare.  A BUFFER's dtype 0 is DT_BOOL, an unsigned char.
+  // A hole (an unread input) gets no declaration.
   for (u32 i = 1; i <= n_inputs; i++) {
-    if (slot_bufs[i] != 0 && uop_buffer_dtype(slot_bufs[i]) == 0) {
+    Term b = slot_bufs[i];
+    if (b != 0 && !(term_tag(b) == TAG_UOP && term_ext(b) == UOP_BUFFER)) {
       rmu_c_decline("slot is not a typed buffer", i);
       rmu_slots_free(&slots);
       return;

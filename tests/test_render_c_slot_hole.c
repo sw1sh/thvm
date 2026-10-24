@@ -3,9 +3,10 @@
 // cg_render_uop_kernel_c_root numbers a kernel's inputs by UOP_BUFFER
 // instance.  A slot no BUFFER claims (a hole) is an input the kernel does
 // not read: it renders with no declaration.  Declining it instead pushed
-// whole conv+BatchNorm kernels onto the CPU walker.  A slot holding
-// something other than a real buffer (dtype 0) still declines: it would
-// render as `unsigned char` while the body reads floats.
+// whole conv+BatchNorm kernels onto the CPU walker.  A slot holding a bare
+// TAG_TEN leaf, no UOP_BUFFER, still declines: it has no dtype to declare.  A
+// BUFFER of dtype 0 is a bool one (DT_BOOL is 0) and renders as unsigned char;
+// declining it sent every kernel reading a bool mask to the walker.
 #include "../src/thvm.c"
 #include "test.h"
 
@@ -47,15 +48,36 @@ static void test_unread_hole_renders(void) {
   }
 }
 
-// A dtype-0 slot is not a real buffer: decline (render nothing).
+// A bare TAG_TEN leaf in a slot is no typed buffer: decline (render nothing).
 static void test_untyped_slot_declines(void) {
   u32 d[1] = { N };
-  Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d, 0);
-  Term x   = uop_buffer_inst(UOP_SCOPE_GLOBAL, 0,       1, d, 1);
-  Term i   = uop_range(0, KAX_LOOP, N);
-  Term root = uop_store(out, i, uop_index_e(x, i));
+  Shape s = {1, { N }};
+  Term out  = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d, 0);
+  Term leaf = term_new(0, TAG_TEN, DT_FP32, tensor_alloc(&CPU_BACKEND, s, DT_FP32));
+  Term i    = uop_range(0, KAX_LOOP, N);
+  Term root = uop_store(out, i, uop_index_e(leaf, i));
   static char src[16384];
   CHECK(render_c(root, src, sizeof src) == 0);
+}
+
+// A bool (dtype 0) slot renders and reads its bytes as 0 / 1.
+static void test_bool_slot_renders(void) {
+  u32 d[1] = { N };
+  Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, d, 0);
+  Term m   = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_BOOL, 1, d, 1);
+  Term i   = uop_range(0, KAX_LOOP, N);
+  Term root = uop_store(out, i, uop_cast(uop_index_e(m, i), DT_FP32));
+  static char src[16384];
+  CHECK(render_c(root, src, sizeof src) > 0);
+  CHECK(strstr(src, "const unsigned char *in0") != NULL);
+  unsigned char mv[N] = { 1, 0, 0, 1 };
+  f32 got[N] = { 0 };
+  const void *ins[1]    = { mv };
+  unsigned    numels[1] = { N };
+  CHECK(cpu_jit_run_root(root, got, ins, N, numels) == 0);
+  for (u32 r = 0; r < N; r++) {
+    CHECK(got[r] == (f32)mv[r]);
+  }
 }
 
 // The body-reference check matches `in<k>` as a whole identifier only.
@@ -83,6 +105,8 @@ int main(void) {
   test_unread_hole_renders();
   TEST_BEGIN("render-c-slot-hole/untyped-slot-declines");
   test_untyped_slot_declines();
+  TEST_BEGIN("render-c-slot-hole/bool-slot-renders");
+  test_bool_slot_renders();
   TEST_BEGIN("render-c-slot-hole/names-ident");
   test_names_ident();
   TEST_BEGIN("render-c-slot-hole/named-hole-declines");
