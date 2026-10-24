@@ -56,7 +56,7 @@ fn u32 term_cells(Term t, Term const *mem) {
         case UOP_INDEX_E: case UOP_AFTER:
         case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
         case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IOR:
-        case UOP_IXOR: case UOP_ISHR:
+        case UOP_IXOR: case UOP_ISHR: case UOP_ISHL:
           return 2;
         case UOP_INVALID:     return 1;       // [NUM(0)]
         case UOP_DEFINE_VAR:  return 1;       // [NUM(packed_extent)]

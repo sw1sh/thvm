@@ -46,7 +46,7 @@ static u32 rec_tc_count_distinct_ranges(Term t, u32 *seen, u32 cap,
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
       n_seen = rec_tc_count_distinct_ranges(heap_read(loc + 0),
                                             seen, cap, n_seen, depth + 1);
       n_seen = rec_tc_count_distinct_ranges(heap_read(loc + 1),
@@ -75,7 +75,7 @@ static int rec_tc_addr_has_divmod(Term t, int depth) {
   u64 loc = term_val(t);
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
-    case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR: case UOP_ISHR:
+    case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR: case UOP_ISHR: case UOP_ISHL:
       if (rec_tc_addr_has_divmod(heap_read(loc + 0), depth + 1)) return 1;
       return rec_tc_addr_has_divmod(heap_read(loc + 1), depth + 1);
     case UOP_IWHERE:
@@ -101,7 +101,7 @@ static u32 rec_tc_find_range_extent(Term t, u32 want_axis_id, int depth) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR: {
+    case UOP_ISHR: case UOP_ISHL: {
       u32 e = rec_tc_find_range_extent(heap_read(loc + 0), want_axis_id, depth + 1);
       if (e != 0) return e;
       return rec_tc_find_range_extent(heap_read(loc + 1), want_axis_id, depth + 1);
@@ -200,7 +200,7 @@ fn int uop_classify_matmul(Term root, u32 *out_k_extent, u32 *out_unit_axis) {
 static int rec_tc_is_index_int_op(u32 op) {
   return op == UOP_IADD || op == UOP_ISUB || op == UOP_IMUL || op == UOP_IDIV
       || op == UOP_IMOD || op == UOP_ILT  || op == UOP_IAND || op == UOP_IOR
-      || op == UOP_IXOR || op == UOP_ISHR || op == UOP_IWHERE;
+      || op == UOP_IXOR || op == UOP_ISHR || op == UOP_ISHL || op == UOP_IWHERE;
 }
 
 // rmu_epilogue_walk with a bare REDUCE where the renderer wants an OPT_TC:

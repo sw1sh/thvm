@@ -31,7 +31,7 @@ fn u8 uop_arity(u8 op) {
     // walkers descend both to reach the RANGE leaves of an address.
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
     case UOP_INDEX_E:
     // GATHER = [src, idx, NUM(dim)]: the trailing NUM is payload.
     case UOP_GATHER:
@@ -52,8 +52,12 @@ fn u8 uop_is_unary_elementwise(u8 op) {
       || op == UOP_LOG2 || op == UOP_SQRT || op == UOP_SIN;
 }
 
+// The bit ops are also index-layer ops; those sit inside INDEX_E addresses,
+// never as scheduled value nodes, as for IWHERE below.
 fn u8 uop_is_binary_elementwise(u8 op) {
-  return op == UOP_ADD || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ;
+  return op == UOP_ADD  || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ
+      || op == UOP_IAND || op == UOP_IOR || op == UOP_IXOR  || op == UOP_ISHL
+      || op == UOP_ISHR;
 }
 
 // IWHERE doubles as tinygrad's value-graph Ops.WHERE.  Its index-layer uses

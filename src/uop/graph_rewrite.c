@@ -183,7 +183,7 @@ static Term uop_graph_rebuild_with_srcs(Term t, const Term *srcs) {
     // Address arithmetic, so rules reach the RANGE leaves inside an INDEX_E.
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
       return uop_int_binary(op, srcs[0], srcs[1]);
 
     case UOP_IWHERE:

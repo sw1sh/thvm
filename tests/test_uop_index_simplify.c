@@ -216,8 +216,10 @@ int main(void) {
   CHECK_EQ(uop_int_binary(UOP_IAND, zero, r), zero);
 
   TEST_BEGIN("simplify/iand-one-identity");
-  CHECK_EQ(uop_int_binary(UOP_IAND, r, one), r);
-  CHECK_EQ(uop_int_binary(UOP_IAND, one, r), r);
+  // x & 1 -> x only on a 0/1 x (tinygrad uop/symbolic.py:127, bool x); r spans [0,7].
+  CHECK_EQ(uop_int_binary(UOP_IAND, lt2, one), lt2);
+  CHECK_EQ(uop_int_binary(UOP_IAND, one, lt2), lt2);
+  CHECK_EQ(term_ext(uop_int_binary(UOP_IAND, r, one)), UOP_IAND);
 
   TEST_BEGIN("simplify/iand-self-idempotent");
   CHECK_EQ(uop_int_binary(UOP_IAND, r, r), r);
@@ -1208,30 +1210,25 @@ int main(void) {
     // Rule 27: x | c -> c if c else x.
     TEST_BEGIN("ported/or-const");
     CHECK_EQ(uop_int_binary(UOP_IOR, rb, zero), rb);  // x|0 -> x
-    CHECK_EQ(uop_int_binary(UOP_IOR, rb, one), one);  // x|1 -> 1
+    CHECK_EQ(term_ext(uop_int_binary(UOP_IOR, rb, one)), UOP_IOR);  // a value OR keeps its bits
+    Term lt27 = uop_int_binary(UOP_ILT, ra, rb);
+    CHECK_EQ(uop_int_binary(UOP_IOR, lt27, one), one);  // a 0/1 x: x|1 -> 1
     TEST_BEGIN("ported/or-self-idempotent");
     CHECK_EQ(uop_int_binary(UOP_IOR, rb, rb), rb);
 
     // Rule 28: (x AND c1) AND c2 -> x AND (c1 AND c2); OR version.
     TEST_BEGIN("ported/and-two-stage");
-    // rb & 5 keeps the IAND (5 is neither 0 nor 1, no contract fold), so the
-    // two-stage fold is exercised: (rb & 5) & 3 -> rb & (5&3==1) -> rb.
+    // (rb & 5) & 3 -> rb & (5&3 == 1), which stays: rb spans [0,99].
     Term and5 = uop_int_binary(UOP_IAND, rb, c5);
     CHECK_EQ(term_ext(and5), UOP_IAND);
     Term r28 = uop_int_binary(UOP_IAND, and5, c3);
-    CHECK_EQ(r28, rb);
+    CHECK_EQ(r28, uop_int_binary(UOP_IAND, rb, one));
     TEST_BEGIN("ported/or-two-stage");
-    // The IOR boolean contract collapses x|c (c truthy) to c first, so the
-    // chain folds entirely to const: (rb|5)|2 -> 5|2 -> 7.
+    // (rb | 5) | 2 -> rb | 7.
     Term or5 = uop_int_binary(UOP_IOR, rb, c5);
-    CHECK_EQ(term_ext(or5), UOP_CONST);
+    CHECK_EQ(term_ext(or5), UOP_IOR);
     Term r28b = uop_int_binary(UOP_IOR, or5, c2);
-    CHECK_EQ(term_ext(r28b), UOP_CONST);
-    {
-      i64 cc;
-      CHECK(uop_iconst_value(r28b, &cc));
-      CHECK_EQ(cc, 7);
-    }
+    CHECK_EQ(r28b, uop_int_binary(UOP_IOR, rb, uop_const(DT_INT32, 7)));
 
     // Rule 29: an op over an invalid gate is not pushed inside it.
     TEST_BEGIN("ported/no-gate-push-through-ixor");

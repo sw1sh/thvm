@@ -341,6 +341,7 @@ static const char *rmu_int_op_name(u32 op) {
     case UOP_IOR:  return "|";
     case UOP_IXOR: return "^";
     case UOP_ISHR: return ">>";
+    case UOP_ISHL: return "<<";
     default:       return "?";
   }
 }
@@ -390,7 +391,7 @@ static int rmu_is_int_binary(Term t) {
   switch (term_ext(t)) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
     case UOP_IDIV: case UOP_IMOD: case UOP_ILT:
-    case UOP_IAND: case UOP_IOR:  case UOP_IXOR: case UOP_ISHR:
+    case UOP_IAND: case UOP_IOR:  case UOP_IXOR: case UOP_ISHR: case UOP_ISHL:
       return 1;
     default: return 0;
   }
@@ -466,12 +467,27 @@ static void rmu_emit_term(Term t, FILE *fp) {
     }
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
     case UOP_IDIV: case UOP_IMOD: case UOP_ILT:
-    case UOP_IAND: case UOP_IOR:  case UOP_IXOR: case UOP_ISHR: {
+    case UOP_IAND: case UOP_IOR:  case UOP_IXOR: case UOP_ISHR: case UOP_ISHL: {
       // RANGE vars are `uint`, but ISUB is signed and may go negative (`r - k`,
       // `-1 < x`), so operands cast to `int`; tinygrad's RANGE vars are signed
       // too (renderer/cstyle.py:18-19).  A nested int binary is already int.
       Term a = heap_read(loc + 0);
       Term b = heap_read(loc + 1);
+      u32  dt = rmu_dtype_of(t);
+      if ((op == UOP_IAND || op == UOP_IOR || op == UOP_IXOR || op == UOP_ISHR
+           || op == UOP_ISHL)
+          && dtype_is_int(dt) && dt != DT_INT32 && !dtype_is_bool(dt)) {
+        // A value bit op of another int dtype computes in its own type: a
+        // uint32 shift right is logical, an int64 one keeps its high bits.
+        char const *ty = (RMU_TARGET == CG_TARGET_C) ? rmu_c_type_name(dt)
+                                                     : rmu_gpu_alu_type_name(dt);
+        fprintf(fp, "((%s)(", ty);
+        rmu_emit_term(a, fp);
+        fprintf(fp, ") %s (%s)(", rmu_int_op_name(op), ty);
+        rmu_emit_term(b, fp);
+        fputs("))", fp);
+        return;
+      }
       fputc('(', fp);
       if (rmu_is_int_binary(a)) {
         rmu_emit_term(a, fp);
@@ -684,7 +700,7 @@ static u32 rmu_walk_arity(u32 op) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       return 2;
@@ -1299,7 +1315,7 @@ static int rmu_tc_batched_on(void) {
 static int rmu_epilogue_is_index_int_op(u32 op) {
   return op == UOP_RANGE || op == UOP_IADD || op == UOP_ISUB || op == UOP_IMUL
       || op == UOP_IDIV  || op == UOP_IMOD || op == UOP_ILT  || op == UOP_IAND
-      || op == UOP_IOR   || op == UOP_IXOR || op == UOP_ISHR || op == UOP_IWHERE;
+      || op == UOP_IOR   || op == UOP_IXOR || op == UOP_ISHR || op == UOP_ISHL || op == UOP_IWHERE;
 }
 
 // 1 if `t` is an elementwise/CAST/index tree over INDEX_E/CONST leaves and
@@ -3144,7 +3160,7 @@ static int rmu_term_is_index(Term t) {
   switch (term_ext(t)) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
-    case UOP_IXOR: case UOP_ISHR: case UOP_INVALID: case UOP_RANGE:
+    case UOP_IXOR: case UOP_ISHR: case UOP_ISHL: case UOP_INVALID: case UOP_RANGE:
     case UOP_DEFINE_VAR:
       return 1;
     case UOP_CONST:
@@ -3167,7 +3183,7 @@ static int rmu_hoist_worth(Term t) {
   if (op == UOP_INDEX_E) return 1;
   switch (op) {
     case UOP_IWHERE: case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ILT:    case UOP_IDIV: case UOP_IMOD: case UOP_ISHR:
+    case UOP_ILT:    case UOP_IDIV: case UOP_IMOD: case UOP_ISHR: case UOP_ISHL:
     case UOP_IADD:   case UOP_ISUB: case UOP_IMUL:
     case UOP_ADD:    case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
       return 1;

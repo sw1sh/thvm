@@ -265,6 +265,18 @@ static int uop_int_bounds(Term t, i64 *lo, i64 *hi) {
   return uop_int_bounds_d(t, lo, hi, 0);
 }
 
+// 1 iff `t` is 0 or 1: a compare, a bool, or an int bounded to [0, 1].
+static int uop_term_is_01(Term t) {
+  if (term_tag(t) == TAG_UOP) {
+    u32 op = term_ext(t);
+    if (op == UOP_CMPLT || op == UOP_CMPEQ || op == UOP_ILT) return 1;
+  }
+  u32 dt = DT_FP32;
+  if (term_dtype_in(t, 0, &dt) && dtype_is_bool(dt)) return 1;
+  i64 lo, hi;
+  return uop_int_bounds(t, &lo, &hi) && lo >= 0 && hi <= 1;
+}
+
 // 1 iff `y` is provably in [0, bound); IWHERE-blind through uop_term_nonneg.
 static int uop_term_strictly_below(Term y, i64 bound) {
   i64 lo, hi;
@@ -530,6 +542,7 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       case UOP_IOR:  return uop_iconst(av | bv);
       case UOP_IXOR: return uop_iconst(av ^ bv);
       case UOP_ISHR: return uop_iconst((i64)((i32)av >> (i32)bv));
+      case UOP_ISHL: return uop_iconst((i64)(i32)((u32)(i32)av << (i32)bv));
       default: break;
     }
   }
@@ -1019,9 +1032,9 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
     case UOP_IAND:
       if (a_const && av == 0) return uop_iconst(0);
       if (b_const && bv == 0) return uop_iconst(0);
-      // Treat 1 as boolean-true on bool/cond inputs.
-      if (a_const && av == 1) return b;
-      if (b_const && bv == 1) return a;
+      // 1 is boolean-true on a 0/1 operand (a cond); a value AND keeps its bits.
+      if (a_const && av == 1 && uop_term_is_01(b)) return b;
+      if (b_const && bv == 1 && uop_term_is_01(a)) return a;
       if (a == b)             return a;
       // (x & c1) & c2 -> x & (c1 & c2) (tinygrad uop/symbolic.py:279-280).
       if (b_const && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IAND) {
@@ -1032,10 +1045,12 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
       }
       break;
     case UOP_IOR:
-      // x | c -> c if c else x (tinygrad uop/symbolic.py:128, bool only): like
-      // x & 1 -> x above, it treats an operand combined with a const as 0/1.
-      if (a_const) return av ? a : b;
-      if (b_const) return bv ? b : a;
+      // x | 0 -> x, and x | 1 -> 1 on a 0/1 x (tinygrad uop/symbolic.py:128,
+      // bool only); a value OR keeps its bits.
+      if (a_const && av == 0) return b;
+      if (b_const && bv == 0) return a;
+      if (a_const && av == 1 && uop_term_is_01(b)) return a;
+      if (b_const && bv == 1 && uop_term_is_01(a)) return b;
       if (a == b)  return a;
       // (x | c1) | c2 -> x | (c1 | c2) (tinygrad uop/symbolic.py:279-280).
       if (b_const && term_tag(a) == TAG_UOP && term_ext(a) == UOP_IOR) {
@@ -1109,7 +1124,7 @@ static u32 uop_index_scan(Term root, Term const *find, u32 nfind, u32 budget) {
     switch (term_ext(t)) {
       case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
       case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
-      case UOP_IXOR: case UOP_ISHR: n = 2; break;
+      case UOP_IXOR: case UOP_ISHR: case UOP_ISHL: n = 2; break;
       case UOP_IWHERE:              n = 3; break;
       case UOP_RANGE: case UOP_CONST: case UOP_INVALID: break;
       default: out |= UOP_SCAN_OPAQUE; break;

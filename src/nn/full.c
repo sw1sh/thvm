@@ -1,13 +1,14 @@
 // A lazy constant of `shape`: EXPAND(RESHAPE(CONST)) with no buffer, tinygrad's
 // const_like (uop/ops.py:603-605).  A float dtype keeps v's f32 bits, an int
-// dtype its truncation.
+// dtype the low 32 bits of its truncation, through 64 bits so 0xFFFFFFFF stays
+// itself, where (i32) of it overflows to INT32_MIN.
 fn Tensor nn_full(double v, u32 dtype, Shape shape) {
   u32 bits;
   if (dtype_is_float(dtype)) {
     f32 f = (f32)v;
     memcpy(&bits, &f, sizeof bits);
   } else {
-    bits = (u32)(i32)v;
+    bits = (v >= 0) ? (u32)(u64)v : (u32)(i64)v;
   }
   u32 ones[MAX_DIM] = {1, 1, 1, 1, 1, 1, 1, 1};
   Tensor c = {uop_const(dtype, bits), dtype, {0, {0}}};

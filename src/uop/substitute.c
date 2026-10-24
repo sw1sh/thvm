@@ -26,7 +26,7 @@ fn u32 uop_src_count(Term t) {
     case UOP_BITCAST: case UOP_INDEX_E: case UOP_IADD: case UOP_ISUB: case UOP_IMUL:
     case UOP_IDIV: case UOP_IMOD: case UOP_ILT: case UOP_IAND: case UOP_IWHERE:
     case UOP_STORE: case UOP_OPT: case UOP_IOR: case UOP_IXOR: case UOP_DETACH:
-    case UOP_ISHR: case UOP_COPY: case UOP_GATHER: case UOP_SCATTER:
+    case UOP_ISHR: case UOP_ISHL: case UOP_COPY: case UOP_GATHER: case UOP_SCATTER:
       return uop_arity((u8)op);
     default: {
       char msg[80];

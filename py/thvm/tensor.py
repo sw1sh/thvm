@@ -82,6 +82,12 @@ def _const_broadcast(value, shape, dtype: DType) -> "Tensor":
     """A lazy constant of `shape`, EXPAND(RESHAPE(CONST)) with no host buffer, like tinygrad's
     const_like (uop/ops.py:603-605)."""
     shape = tuple(int(d) for d in shape)
+    if isinstance(value, int) and not isinstance(value, bool) and dtypes.is_int(dtype):
+        # An int wraps to the dtype, as tinygrad's const renders in C: 0xFFFFFFFF in int32 is -1.
+        bits = 8 * dtype.itemsize
+        value &= (1 << bits) - 1
+        if not dtypes.is_unsigned(dtype) and value >> (bits - 1):
+            value -= 1 << bits
     return Tensor._from_nn(_TH.nn("full", [], [dtype.thvm_id, *shape], [float(value)]), "full")
 
 
@@ -686,17 +692,21 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     def __ne__(self, x): return self.ne(x)
     def logical_not(self) -> "Tensor": return self.cast(dtypes.bool).eq(False)
 
-    def _bool_op(self, x, reverse: bool, op: str) -> "Tensor":
+    def _bit_op(self, x, reverse: bool, opcode: int) -> "Tensor":
+        # tinygrad's Ops.AND / OR / XOR / SHL / SHR binops (mixin/elementwise.py:159-200, 344-364),
+        # in the operands' promoted int dtype; a bool and / or / xor is a select.
         a, b = self._broadcasted(x, reverse)
-        if a._dtype != dtypes.bool:
-            raise NotImplementedError(f"{op} on {a._dtype}: thvm has no integer bit ops")
-        if op == "and":
-            return a.where(b, False)
-        return a.where(True, b) if op == "or" else a.where(b.logical_not(), b)
+        if a._dtype == dtypes.bool and opcode in (K.IAND, K.IOR, K.IXOR):
+            if opcode == K.IAND:
+                return a.where(b, False)
+            return a.where(True, b) if opcode == K.IOR else a.where(b.logical_not(), b)
+        if not dtypes.is_int(a._dtype):
+            raise RuntimeError(f"{a._dtype} is not supported")
+        return Tensor._from_term(_TH.binary(opcode, a.term, b.term), a._dtype, a._shape)
 
-    def bitwise_and(self, x, reverse: bool = False): return self._bool_op(x, reverse, "and")
-    def bitwise_or(self, x, reverse: bool = False):  return self._bool_op(x, reverse, "or")
-    def bitwise_xor(self, x, reverse: bool = False): return self._bool_op(x, reverse, "xor")
+    def bitwise_and(self, x, reverse: bool = False): return self._bit_op(x, reverse, K.IAND)
+    def bitwise_or(self, x, reverse: bool = False):  return self._bit_op(x, reverse, K.IOR)
+    def bitwise_xor(self, x, reverse: bool = False): return self._bit_op(x, reverse, K.IXOR)
     def __and__(self, x):  return self.bitwise_and(x)
     def __or__(self, x):   return self.bitwise_or(x)
     def __xor__(self, x):  return self.bitwise_xor(x)
@@ -714,19 +724,12 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     def __invert__(self): return self.bitwise_not()
 
-    def lshift(self, x: int, reverse: bool = False) -> "Tensor":
-        # x << n as x * 2**n, there being no SHL; a Python int shift only.
-        if reverse or not isinstance(x, int):
-            raise NotImplementedError("thvm shifts an int tensor by a Python int only")
-        return self * (1 << x)
-
-    def rshift(self, x: int, reverse: bool = False) -> "Tensor":
-        if reverse or not isinstance(x, int):
-            raise NotImplementedError("thvm shifts an int tensor by a Python int only")
-        return self // (1 << x)
-
-    def __lshift__(self, x): return self.lshift(x)
-    def __rshift__(self, x): return self.rshift(x)
+    def lshift(self, x, reverse: bool = False) -> "Tensor": return self._bit_op(x, reverse, K.ISHL)
+    def rshift(self, x, reverse: bool = False) -> "Tensor": return self._bit_op(x, reverse, K.ISHR)
+    def __lshift__(self, x):  return self.lshift(x)
+    def __rshift__(self, x):  return self.rshift(x)
+    def __rlshift__(self, x): return self.lshift(x, True)
+    def __rrshift__(self, x): return self.rshift(x, True)
 
     def pow(self, x, reverse: bool = False) -> "Tensor":
         """self ** x, or x ** self when reverse (tinygrad mixin/elementwise.py:547-570)."""

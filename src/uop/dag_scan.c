@@ -33,7 +33,7 @@ int uop_dag_dtype_uniform(Term t, u32 dt) {
     case UOP_RANGE: case UOP_INVALID:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
       return 1;
     case UOP_NEG:   case UOP_RECIP: case UOP_EXP2:
     case UOP_LOG2:  case UOP_SQRT:  case UOP_SIN:
@@ -78,7 +78,7 @@ u32 uop_dag_reduce_axis_extent(Term t) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E: case UOP_AFTER: {
       u32 a = uop_dag_reduce_axis_extent(heap_read(loc + 0));
@@ -150,7 +150,7 @@ static void uop_dag_reduce_unroll_walk(Term t, int *out_ok,
     case UOP_RANGE: case UOP_INVALID:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
       return;
     case UOP_CAST: case UOP_BITCAST:
       // propose.c has already required an all-f32 DAG (uop_dag_dtype_uniform),
@@ -776,7 +776,7 @@ static int udg_x_has_rq_divmod(Term t, u32 axis_r_q, int depth) {
   }
   if (op == UOP_IADD || op == UOP_IMUL || op == UOP_ISUB || op == UOP_IDIV
       || op == UOP_IMOD || op == UOP_ILT  || op == UOP_IAND
-      || op == UOP_IOR  || op == UOP_IXOR || op == UOP_ISHR) {
+      || op == UOP_IOR  || op == UOP_IXOR || op == UOP_ISHR || op == UOP_ISHL) {
     Term a = heap_read(term_val(t) + 0);
     Term b = heap_read(term_val(t) + 1);
     if (udg_x_has_rq_divmod(a, axis_r_q, depth + 1)) return 1;

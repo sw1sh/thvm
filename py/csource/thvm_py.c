@@ -550,6 +550,11 @@ EXPORT uint32_t py_const_UOP_SQRT(void)  { return UOP_SQRT; }
 
 EXPORT uint32_t py_const_UOP_IADD(void)  { return UOP_IADD; }
 EXPORT uint32_t py_const_UOP_IMUL(void)  { return UOP_IMUL; }
+EXPORT uint32_t py_const_UOP_IAND(void)  { return UOP_IAND; }
+EXPORT uint32_t py_const_UOP_IOR(void)   { return UOP_IOR; }
+EXPORT uint32_t py_const_UOP_IXOR(void)  { return UOP_IXOR; }
+EXPORT uint32_t py_const_UOP_ISHL(void)  { return UOP_ISHL; }
+EXPORT uint32_t py_const_UOP_ISHR(void)  { return UOP_ISHR; }
 
 EXPORT uint32_t py_const_REDUCE_SUM(void) { return REDUCE_SUM; }
 EXPORT uint32_t py_const_REDUCE_MAX(void) { return REDUCE_MAX; }

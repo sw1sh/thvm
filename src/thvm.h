@@ -383,10 +383,14 @@ u64             dtype_storage_bytes(u32 dt, u64 numel);
 #define UOP_IAND        33   // heap = [a, b]; bitwise AND (boolean conjunction on 0/1).
 #define UOP_IOR         41   // heap = [a, b]; bitwise OR.
 #define UOP_IXOR        42   // heap = [a, b]; bitwise XOR.
-#define UOP_ISHR        51   // heap = [a, b]; signed arithmetic right-shift
-                             //   (a >> b).  Emitted by the fast_idiv index
-                             //   rewrite to lower `x // c` to a magic-number
-                             //   multiply-shift; see uop/index_simplify.c.
+#define UOP_ISHR        51   // heap = [a, b]; right shift (a >> b), arithmetic
+                             //   for a signed dtype.  Emitted by the fast_idiv
+                             //   index rewrite to lower `x // c` to a
+                             //   magic-number multiply-shift (uop/index_simplify.c)
+                             //   and by Tensor.rshift, tinygrad's Ops.SHR.
+#define UOP_ISHL        44   // heap = [a, b]; left shift (a << b), tinygrad's
+                             //   Ops.SHL.  IAND, IOR, IXOR and the shifts are also
+                             //   value ops, typed by their operands.
 #define UOP_IWHERE      34   // heap = [cond, then_v, else_v]; ternary select.
 #define UOP_INVALID     35   // heap = [NUM(0)]; sentinel for PAD masking.
                              //   `IWHERE(in_bounds, load(...), INVALID)` is
@@ -477,8 +481,8 @@ u64             dtype_storage_bytes(u32 dt, u64 numel);
 // through the mean -- mathematically d(var)/d(mean)=0, so the result is
 // identical but the backward graph is far smaller.
 #define UOP_DETACH      43
-// 44-50: unassigned.
-// 51 = UOP_ISHR (declared in the Symbolic INDEX layer above).
+// 44 = UOP_ISHL, 51 = UOP_ISHR (declared in the Symbolic INDEX layer above).
+// 45-50: unassigned.
 // UOP_COPY: lazy device transfer.  Heap = [src, NUM(device+1)] (arity 1,
 //   src is the only child; the trailing NUM holds the EXPLICIT target
 //   device, device+1 so generic=-1 stores as 0).  The COPY carries src's

@@ -743,7 +743,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
     case UOP_RANGE: case UOP_DEFINE_VAR:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
-    case UOP_IXOR: case UOP_ISHR:
+    case UOP_IXOR: case UOP_ISHR: case UOP_ISHL:
       return (double)uwalk_eval_int(c, t);
     case UOP_INVALID:
       return 0.0;
@@ -799,8 +799,17 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
                         | uwalk_eval_int(c, heap_read(loc+1));
     case UOP_IXOR: return uwalk_eval_int(c, heap_read(loc+0))
                         ^ uwalk_eval_int(c, heap_read(loc+1));
-    case UOP_ISHR: return (i64)((i32)uwalk_eval_int(c, heap_read(loc+0))
-                        >> (i32)uwalk_eval_int(c, heap_read(loc+1)));
+    case UOP_ISHR: case UOP_ISHL: {
+      // As the renderer: a value shift of another int dtype in its own type,
+      // logical for an unsigned one, any other in int32.
+      u32 dt = DT_FP32;
+      (void)term_dtype_in(t, 0, &dt);
+      if (!dtype_is_int(dt) || dt == DT_INT32 || dtype_is_bool(dt)) dt = DT_INT32;
+      i64 a = uwalk_int_wrap(dt, uwalk_eval_int(c, heap_read(loc+0)));
+      i64 b = uwalk_eval_int(c, heap_read(loc+1));
+      if (op == UOP_ISHL) return uwalk_int_wrap(dt, (i64)((u64)a << (b & 63)));
+      return dtype_is_signed(dt) ? (a >> (b & 63)) : (i64)((u64)a >> (b & 63));
+    }
     case UOP_IWHERE:
       return uwalk_cond_truth(c, heap_read(loc + 0))
            ? uwalk_eval_int(c, heap_read(loc + 1))
@@ -899,7 +908,7 @@ static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       uwalk_collect_ranges(heap_read(loc + 0), ranges, n_out);
@@ -944,7 +953,7 @@ static void uwalk_collect_reduces(Term t, Term *reduces, u32 *n_out) {
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       uwalk_collect_reduces(heap_read(loc + 0), reduces, n_out);
@@ -987,7 +996,7 @@ static void uwalk_collect_all_reduces(Term t, Term *reduces, u32 *n_out,
   switch (op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       uwalk_collect_all_reduces(heap_read(loc + 0), reduces, n_out, depth + 1);
@@ -1038,7 +1047,7 @@ static void uwalk_collect_split_ranges(Term t, Term *ranges, u32 *n_out,
     }
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
-    case UOP_ISHR:
+    case UOP_ISHR: case UOP_ISHL:
     case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_INDEX_E:
       uwalk_collect_split_ranges(heap_read(loc + 0), ranges, n_out, depth + 1);
