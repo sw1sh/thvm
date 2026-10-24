@@ -1224,6 +1224,7 @@ fn void bufferize_classify(Term root) {
       if (!info->realized) continue;
       if (info->reasons & BUFFERIZE_REASON_MATMUL) continue;
       if (info->consumer_count != 1) continue;
+      if (split_reduceop_keeps(info->loc)) continue;
       u64 consumer_locs[1];
       u32 n_cons = bufferize_consumers_for_loc(info->loc, consumer_locs, 1);
       if (n_cons != 1) continue;

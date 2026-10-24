@@ -4911,6 +4911,7 @@ fn Term thvm_materialize(Term term) {
     }
   }
 
+  split_reduceop(term);
   bufferize_classify(term);
   topo_sort_buffers_unified(term);
   mem_plan_reset();

@@ -182,6 +182,7 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 
 | Name | Effect | Default |
 |---|---|---|
+| `SPLIT_REDUCEOP` | tinygrad's split of a large reduce into two (`src/schedule/split_reduceop.c`, CPU only) | 1 |
 | `THVM_TILE` | Enable Metal conv2d tiling (autotune cache key) | unset |
 | `THVM_METAL_FUSION_MAX_INPUTS` | Cap inputs to a fused Metal kernel | unset |
 

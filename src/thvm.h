@@ -1871,6 +1871,10 @@ fn int  apply_movement_op_reshape(u32 out_ndim, u32 const *out_shape,
 // onto the main heap at realize boundaries.  See
 // src/schedule/rangeify_unified.c for design notes.
 fn void run_rangeify_unified                   (Term root);
+// tinygrad's split_reduceop (src/schedule/split_reduceop.c), run before
+// bufferize_classify; split_reduceop_keeps names the first REDUCEs it made.
+fn void split_reduceop                         (Term root);
+fn int  split_reduceop_keeps                   (u64 loc);
 // THVM_FUSE_MATMUL_INPUT gate (default OFF): fuse a single-consumer elementwise
 // producer into its consuming matmul's reduce/A-staging load.  Read by both the
 // scheduler (rangeify_unified.c) and the codegen (render_uop.c).

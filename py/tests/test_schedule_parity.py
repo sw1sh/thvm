@@ -109,6 +109,10 @@ CASES = [
     ("conv2d_bwd", _conv2d_bwd, [_f(2, 3, 8, 8), _f(4, 3, 3, 3)]),
     ("maxpool_bwd", _maxpool_bwd, [_f(2, 3, 8, 8)]),
     ("matmul_bwd", _matmul_bwd, [_f(8, 16), _f(16, 4)]),
+    # split_reduceop (schedule/prepare.py:110-132): one split, then two.
+    ("sum_split", _sum_all, [_f(256, 256)]),
+    ("max_split", _max_axis, [_f(65536, 4)]),
+    ("sum_split_twice", _sum_all, [_f(4096, 2048)]),
 ]
 
 
