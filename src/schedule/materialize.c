@@ -2189,11 +2189,11 @@ static Term try_inline_bufferize_via_axis_table(
   // real UOP_RANGE keeps n_realized == n_ranges and binds by position, not
   // extent.
   int prod_full = rangeify_unified_realized_full_at(prod_idx);
-  u8 axes_mask = rangeify_unified_axes_mask_at(prod_idx);
+  u32 axes_mask = rangeify_unified_axes_mask_at(prod_idx);
   u32 realized_axes[MAX_DIM] = {0};
   u32 n_realized = 0;
   for (u32 a = 0; a < prod_ndim && a < MAX_DIM; a++) {
-    int axis_realized = prod_full || (axes_mask & (u8)(1u << a));
+    int axis_realized = prod_full || (axes_mask & (1u << a));
     if (!axis_realized) continue;
     Term r = rangeify_unified_out_rng_at(prod_idx, a);
     if (r == 0 || term_tag(r) != TAG_UOP || term_ext(r) != UOP_RANGE) continue;
@@ -2226,10 +2226,8 @@ static Term try_inline_bufferize_via_axis_table(
     // (schedule/indexing.py:79).  An in_rng may be an expression over ranges (a
     // PAD's gated index), so the subst rewrites inside it.
     Term to_rng = ax_rngs[ax];
-    if (sub != NULL) {
-      for (u32 si = 0; si < sub->n; si++) {
-        if (sub->from[si] == to_rng) { to_rng = sub->to[si]; break; }
-      }
+    if (sub != NULL && sub->n > 0) {
+      to_rng = uop_substitute(to_rng, sub->from, sub->to, sub->n);
     }
     new_sub.from[new_sub.n] = cr;
     new_sub.to  [new_sub.n] = to_rng;

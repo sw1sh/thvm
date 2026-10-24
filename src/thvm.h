@@ -528,7 +528,7 @@ u64             dtype_storage_bytes(u32 dt, u64 numel);
 #define BOOK_CAP     (1ULL << 28)   // 256M cells of static def template heap (2 GiB) -- iter Z+? per-thread arena needs at V>=8 SAT collapse.
 #define DEFS_CAP     256            // max named definitions for TAG_REF.
 #define ALO_STATE_CAP (1ULL << 22)  // ALO substitution-chain entries.
-#define MAX_DIM      8              // max tensor rank
+#define MAX_DIM      16             // max tensor rank
 #define KERNEL_INIT_INPUT 8         // initial input-arrays capacity (grows on demand)
 #define KERNEL_MAX_INPUT  (1ULL<<20) // hard sanity bound (1M inputs/kernel)
                                     // (Conv2D fuses 2*kh*kw input/weight
@@ -688,7 +688,7 @@ struct KernelEntry;
 #define KAX_GLOBAL        5    // Metal: bound to threadgroup_position_in_grid
 #define KAX_GROUP_REDUCE  6    // Metal: threadgroup-shared accumulator + barrier
 
-#define MAX_AXES   16
+#define MAX_AXES   32
 #define MAX_OPTS   32
 
 // KOpt op encoding -- matches WL TOpt's op_String at the LibraryLink

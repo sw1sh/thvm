@@ -8,7 +8,7 @@
 // Limits: an int ALU result stays i64 until a CAST, REDUCE or store wraps it,
 // and clang's fma contraction (arm64) rounds once where the walker rounds twice.
 
-#define UWALK_MAX_RANGES   16
+#define UWALK_MAX_RANGES   32
 #define UWALK_MAX_REDUCES  64
 
 // A REDUCE's value: an int or bool reduce keeps the exact `i` in its dtype and
@@ -278,6 +278,9 @@ static double uwalk_round(u32 dt, double v) {
 // NaN passes as is, so a store encodes its payload once.
 static double uwalk_narrow(u32 dt, double v) {
   f32 f = (f32)v;
+  if (f != f) {
+    return v;
+  }
   switch (dt) {
     case DT_FP16:    return fp16_to_f32(f32_to_fp16(f));
     case DT_BF16:    return bf16_to_f32(f32_to_bf16(f));

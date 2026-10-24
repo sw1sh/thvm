@@ -37,7 +37,7 @@ typedef struct {
 typedef struct {
   u8  realized_full;
   u8  realized_partial;
-  u8  axes_mask;          // bit i set iff axis i is realized
+  u32 axes_mask;          // bit i set iff axis i is realized
   u8  n_realized_axes;
   u8  pinned;             // ru_limit_bufs_node split; remove_bufferize keeps it
 } RuRealizeEntry;
@@ -1249,7 +1249,7 @@ fn void run_rangeify_unified(Term root) {
       }
       RU_REALIZE_MAP[node_idx].realized_full = 1;
       RU_REALIZE_MAP[node_idx].realized_partial = 0;
-      RU_REALIZE_MAP[node_idx].axes_mask = (my_ndim < 8) ? ((1u << my_ndim) - 1u) : 0xFFu;
+      RU_REALIZE_MAP[node_idx].axes_mask = (1u << my_ndim) - 1u;
       RU_REALIZE_MAP[node_idx].n_realized_axes = my_ndim;
       RU_ENDING_RANGES[node_idx].n = 0;
     } else if (n_crngs == 0) {
@@ -1264,7 +1264,7 @@ fn void run_rangeify_unified(Term root) {
       // indexing.py:245-268: two or more consumers.  tinygrad shares the ranges
       // when every axis agrees and otherwise realizes every axis; thvm realizes
       // only the diverging axes (a partial realize), with the exceptions below.
-      u8 partial_mask = 0;
+      u32 partial_mask = 0;
       u8 n_realized = 0;
       int all_all_same = 1;
       for (u8 a = 0; a < my_ndim; a++) {
@@ -1296,7 +1296,7 @@ fn void run_rangeify_unified(Term root) {
             out_rngs[a] = consumer_rngs[0].rngs[a];
           } else {
             out_rngs[a] = ru_new_range(shape.dims[a], KAX_LOOP);
-            partial_mask |= (u8)(1u << a);
+            partial_mask |= 1u << a;
             n_realized++;
           }
         }
@@ -1314,13 +1314,12 @@ fn void run_rangeify_unified(Term root) {
           if (n_realized == my_ndim || is_mv) {
             RU_REALIZE_MAP[node_idx].realized_full = 1;
             RU_REALIZE_MAP[node_idx].realized_partial = 0;
-            RU_REALIZE_MAP[node_idx].axes_mask =
-                (my_ndim < 8) ? (u8)((1u << my_ndim) - 1u) : 0xFFu;
+            RU_REALIZE_MAP[node_idx].axes_mask = (1u << my_ndim) - 1u;
             RU_REALIZE_MAP[node_idx].n_realized_axes = my_ndim;
             // Fresh ranges on the agreeing axes too, so the buffer is iterated
             // over its whole shape.
             for (u8 a = 0; a < my_ndim; a++) {
-              if (!(partial_mask & (u8)(1u << a))) {
+              if (!(partial_mask & (1u << a))) {
                 out_rngs[a] = ru_new_range(shape.dims[a], KAX_LOOP);
               }
             }
@@ -1343,11 +1342,11 @@ fn void run_rangeify_unified(Term root) {
                       || info->op == UOP_GATHER;
     if (RU_ENDING_RANGES[node_idx].n
         && (is_elementwise || info->op == UOP_REDUCE)) {
-      u8 mask = RU_REALIZE_MAP[node_idx].axes_mask;
+      u32 mask = RU_REALIZE_MAP[node_idx].axes_mask;
       u8 added = 0;
       for (u8 a = 0; a < my_ndim; a++) {
-        if (mask & (u8)(1u << a)) continue;
-        mask |= (u8)(1u << a);
+        if (mask & (1u << a)) continue;
+        mask |= 1u << a;
         out_rngs[a] = ru_new_range(shape.dims[a], KAX_LOOP);
         added++;
       }
@@ -1581,7 +1580,7 @@ fn void rangeify_unified_index_axes_register(Term index_e_term,
 }
 
 // The node's realized-axes mask (bit i: axis i is closed in its BUFFERIZE).
-fn u8 rangeify_unified_axes_mask_at(u32 node_idx) {
+fn u32 rangeify_unified_axes_mask_at(u32 node_idx) {
   if (node_idx >= RU_MAX_NODES) return 0;
   return RU_REALIZE_MAP[node_idx].axes_mask;
 }

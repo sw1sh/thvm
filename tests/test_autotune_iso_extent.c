@@ -51,7 +51,10 @@ static Term ten(u32 tid) {
 }
 
 static Term bcast_scalar(f32 const *s, u32 ndim, u32 const *dims) {
-  u32 sd[1] = { 1 }, ones[MAX_DIM] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+  u32 sd[1] = { 1 }, ones[MAX_DIM] = {0};
+  for (u32 i = 0; i < MAX_DIM; i++) {
+    ones[i] = 1;
+  }
   return uop_expand(uop_reshape(ten(mk(1, sd, s)), ndim, ones), ndim, dims);
 }
 

@@ -47,7 +47,10 @@ static Term ten(u32 tid) {
 static Term fconst(u32 ndim, u32 const *dims, f32 v) {
   u32 bits;
   memcpy(&bits, &v, sizeof bits);
-  u32 ones[MAX_DIM] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+  u32 ones[MAX_DIM] = {0};
+  for (u32 i = 0; i < MAX_DIM; i++) {
+    ones[i] = 1;
+  }
   return uop_expand(uop_reshape(uop_const(DT_FP32, bits), ndim, ones), ndim, dims);
 }
 

@@ -384,6 +384,14 @@ class OpMixin:
                            for i, (n, s) in enumerate(zip(self.shape, shift)))
         return self.repeat(*tuple(2 if i in dims else 1 for i in range(self.ndim))).shrink(shrink_arg)
 
+    def repeat(self, repeats, *args):
+        # :576-595; fewer repeats than axes fail the reshape, as tinygrad's.
+        repeats = argfix(repeats, *args)
+        base = _align_left(self.shape, repeats)[0]
+        unsq = flatten([[s] if r == 1 else [1, s] for r, s in zip(repeats, base)])
+        expd = flatten([[s] if r == 1 else [r, s] for r, s in zip(repeats, base)])
+        return self.reshape(unsq).expand(expd).reshape([r * s for r, s in zip(repeats, base)])
+
     def repeat_interleave(self, repeats: int, dim=None):
         # :575-589.
         x, dim = (self.flatten(), 0) if dim is None else (self, self._resolve_dim(dim))

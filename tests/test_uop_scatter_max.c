@@ -80,7 +80,10 @@ static Term ten(u32 tid) {
 
 // A CONST of `dtype` holding payload `bits`, expanded to shape s.
 static Term full(u32 dtype, Shape const *s, u32 bits) {
-  u32 ones[MAX_DIM] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+  u32 ones[MAX_DIM] = {0};
+  for (u32 i = 0; i < MAX_DIM; i++) {
+    ones[i] = 1;
+  }
   return uop_expand(uop_reshape(uop_const(dtype, bits), s->ndim, ones),
                     s->ndim, s->dims);
 }

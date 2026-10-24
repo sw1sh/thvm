@@ -10,7 +10,10 @@ fn Tensor nn_full(double v, u32 dtype, Shape shape) {
   } else {
     bits = (v >= 0) ? (u32)(u64)v : (u32)(i64)v;
   }
-  u32 ones[MAX_DIM] = {1, 1, 1, 1, 1, 1, 1, 1};
+  u32 ones[MAX_DIM] = {0};
+  for (u32 i = 0; i < MAX_DIM; i++) {
+    ones[i] = 1;
+  }
   Tensor c = {uop_const(dtype, bits), dtype, {0, {0}}};
   return nn_expand(nn_reshape(c, shape.ndim, ones), shape.ndim, shape.dims);
 }

@@ -993,28 +993,6 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         x = self if shape == self._shape else self.reshape(shape)
         return Tensor._from_term(_TH.expand(x.term, list(new_shape)), self._dtype, new_shape)
 
-    def repeat(self, *repeats) -> "Tensor":
-        """Repeat each axis by `repeats[i]` (tinygrad-style: pads shape
-        left with 1s when repeats is longer than ndim)."""
-        if len(repeats) == 1 and isinstance(repeats[0], (tuple, list)):
-            repeats = tuple(repeats[0])
-        repeats = tuple(int(r) for r in repeats)
-        base = list(self._shape)
-        if len(repeats) > len(base):
-            base = [1] * (len(repeats) - len(base)) + base
-        if len(repeats) < len(base):
-            repeats = (1,) * (len(base) - len(repeats)) + repeats
-        unsqueezed: list[int] = []
-        expanded: list[int] = []
-        for r, s in zip(repeats, base):
-            if r == 1:
-                unsqueezed.append(s); expanded.append(s)
-            else:
-                unsqueezed.extend([1, s]); expanded.extend([r, s])
-        final = [r * s for r, s in zip(repeats, base)]
-        t = self if list(self._shape) == base else self.reshape(*base)
-        return t.reshape(*unsqueezed).expand(*expanded).reshape(*final)
-
     def shrink_to(self, *shape) -> "Tensor":
         """tinygrad-style: shrink to target dims from offset 0."""
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
@@ -1120,9 +1098,6 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         stack and flatten, others are zero-padded to the output extent and the pads summed."""
         dim = self._resolve_dim(dim)
         for arg in args:
-        # tinygrad's STACK of one source is the source (uop/ops.py:110).
-        if len(tensors) == 1:
-            return tensors[0].unsqueeze(dim)
             assert arg.ndim == self.ndim and all(
                 ti == ai for i, (ti, ai) in enumerate(zip(self._shape, arg._shape)) if i != dim)
         if all(t._shape[dim] == self._shape[dim] for t in args):
@@ -1145,6 +1120,9 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         dim = tensors[0]._resolve_dim(dim, extra=1)
         assert all(t._shape == tensors[0]._shape for t in tensors), \
             f"all shapes must match for stack, got {[t._shape for t in tensors]}"
+        # tinygrad's STACK of one source is the source (uop/ops.py:110).
+        if len(tensors) == 1:
+            return tensors[0].unsqueeze(dim)
         return Tensor._cat_padded([t.unsqueeze(dim) for t in tensors], dim)
 
     # ---- indexed ops (native UOP_GATHER on the CPU backend) -----------
