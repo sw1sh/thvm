@@ -1,7 +1,7 @@
 // backend/cpu/buf_alloc.c - allocate a host-memory buffer; id 0 means none.
 
 // Resident buffer bytes (tinygrad helpers.py GlobalCounters.mem_used).  Parked
-// freelist storage stays counted, so only a fresh calloc or a real free moves it.
+// freelist storage stays counted, so only a fresh allocation or a real free moves it.
 u64 CPU_MEM_LIVE = 0;
 u64 CPU_MEM_PEAK = 0;
 
@@ -15,9 +15,32 @@ int CPU_ARENA_ALLOC_INFLIGHT = 0;
 void cpu_arena_alloc_inflight_set(int on) { CPU_ARENA_ALLOC_INFLIGHT = on; }
 int  cpu_arena_alloc_inflight(void) { return CPU_ARENA_ALLOC_INFLIGHT; }
 
+// A block of 64 KiB or more is its own mmap, as tinygrad's HostAllocator
+// (device.py:300): page-aligned, so a float4 or AVX access never splits a cache
+// line, and its zero pages fault in on first touch.  calloc's large chunks sit
+// 16 bytes into a page, and glibc's rising mmap threshold moves later ones onto
+// the heap, where calloc zeroes them by hand.
+#define CPU_BUF_MMAP_MIN (64u << 10)
+
+static void *cpu_buf_storage_alloc(u64 nbytes) {
+  if (nbytes < CPU_BUF_MMAP_MIN) {
+    return calloc(1, nbytes);
+  }
+  void *p = mmap(NULL, (size_t)nbytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+  return p == MAP_FAILED ? NULL : p;
+}
+
+fn void cpu_buf_storage_free(void *data, u64 nbytes) {
+  if (nbytes < CPU_BUF_MMAP_MIN) {
+    free(data);
+  } else {
+    munmap(data, (size_t)nbytes);
+  }
+}
+
 fn u32 cpu_buf_alloc(u64 nbytes) {
-  // The per-buffer ceiling catches a runaway im2col or EXPAND before calloc
-  // thrashes the host; the arena answers to the total-live ceiling instead.
+  // The per-buffer ceiling catches a runaway im2col or EXPAND before an
+  // allocation thrashes the host; the arena answers to the total-live ceiling instead.
   if (CPU_ARENA_ALLOC_INFLIGHT) {
     u64 live_ceiling = thvm_live_byte_ceiling();
     if (live_ceiling != 0 && CPU_MEM_LIVE + nbytes > live_ceiling) {
@@ -54,9 +77,9 @@ fn u32 cpu_buf_alloc(u64 nbytes) {
   }
   u32 id = (u32)CPU_BUFS_NEXT++;
   CpuBuf *b = &CPU_BUFS[id];
-  b->data = calloc(1, nbytes);
+  b->data = cpu_buf_storage_alloc(nbytes);
   if (b->data == NULL) {
-    fprintf(stderr, "cpu_buf_alloc: calloc(%llu) failed\n", (unsigned long long)nbytes);
+    fprintf(stderr, "cpu_buf_alloc: allocating %llu bytes failed\n", (unsigned long long)nbytes);
     exit(1);
   }
   b->nbytes     = nbytes;

@@ -7,6 +7,9 @@ fn int cpu_init(void) {
   return CPU_BUFS == NULL ? -1 : 0;
 }
 
+// Defined in buf_alloc.c, included after this file.
+fn void cpu_buf_storage_free(void *data, u64 nbytes);
+
 // Release every live buffer's payload and rewind the slot and freelist
 // cursors, for cpu_shutdown and thvm_reset.  CPU_BUFS itself stays mapped.
 fn void cpu_buf_free_all(void) {
@@ -16,7 +19,7 @@ fn void cpu_buf_free_all(void) {
     CpuBuf *b = &CPU_BUFS[i];
     if (b->refcount == 0) continue;
     if (b->owns_data) {
-      if (b->data) free(b->data);
+      if (b->data) cpu_buf_storage_free(b->data, b->nbytes);
     } else if (b->on_release) {
       b->on_release(b->handle);
     }

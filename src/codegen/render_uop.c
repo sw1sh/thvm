@@ -861,11 +861,11 @@ static int rmu_term_has_reduce(Term t, u32 depth) {
   return 0;
 }
 
-// 1 iff `t` holds an EXP2, LOG2, SIN or SQRT, which C renders as a call.
+// 1 iff `t` holds an EXP2, LOG2 or SIN, which C renders as a call.
 static int rmu_term_has_call(Term t, u32 depth) {
   if (depth > RMU_MAX_WALK_DEPTH || term_tag(t) != TAG_UOP) return 0;
   u32 op = term_ext(t);
-  if (op == UOP_EXP2 || op == UOP_LOG2 || op == UOP_SIN || op == UOP_SQRT) return 1;
+  if (op == UOP_EXP2 || op == UOP_LOG2 || op == UOP_SIN) return 1;
   for (u32 i = 0, n = rmu_walk_arity(op); i < n; i++) {
     if (rmu_term_has_call(heap_read(term_val(t) + i), depth + 1)) return 1;
   }
@@ -4186,7 +4186,10 @@ static void rmu_emit_store(Term store, FILE *fp, u32 depth) {
   // clang packs the loads with no alias check, as tinygrad's float4 loads and
   // stores (codegen/late/coalesce.py), where a serial lane loop stayed scalar.
   // A body with a call stays a loop, which clang vectorizes across the lanes
-  // (exp 2048^2 4.2 ms as a loop, 6.0 as four calls; sqrt 1.0 and 1.5).
+  // (exp 2048^2 4.2 ms as a loop, 6.0 as four calls).  A sqrt is one
+  // instruction and takes the float4 path, as tinygrad's: the loop's
+  // interleaved lanes ran it in 1.0 ms on an AVX-512 machine, 3.3 on an AVX2
+  // one, where float4 ran in 1.5 and 2.4, tinygrad's own 1.7 and 2.4.
   int lanes_vec4 = 0;
   if (RMU_TARGET == CG_TARGET_C && lb.n > 0 && uop_buffer_dtype(buf) == DT_FP32
       && lb.up_exts[lb.n - 1] % 4 == 0 && !rmu_term_has_call(value, 0)) {
