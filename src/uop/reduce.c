@@ -65,6 +65,21 @@ fn Term uop_reduce(u32 kind, u32 axis, Term src) {
   return uop_reduce_multi(kind, 1, &axis, src);
 }
 
+// x ** n (n >= 1) by squaring, as MULs: a PROD over n copies of x, which
+// tinygrad's reduce_unparented writes ret ** extent (codegen/simplify.py:89-90).
+fn Term uop_reduce_pow(Term x, u64 n) {
+  Term acc = 0;
+  for (Term p = x;; p = uop_binary(UOP_MUL, p, p)) {
+    if (n & 1) {
+      acc = acc ? uop_binary(UOP_MUL, acc, p) : p;
+    }
+    n >>= 1;
+    if (n == 0) {
+      return acc;
+    }
+  }
+}
+
 fn u32 uop_reduce_kind(Term red) {
   return (u32)term_val(heap_read(term_val(red) + 1));
 }

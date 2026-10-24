@@ -91,7 +91,6 @@ static int split_reduceop_is_gemm(u64 loc, Shape const *xs) {
 // of the same kind, which fits, as the original holds at least one axis.
 static void split_reduceop_one(Term red) {
   u32 kind = uop_reduce_kind(red);
-  if (kind != REDUCE_SUM && kind != REDUCE_MAX) return;
   u64   loc = term_val(red);
   Term  x   = term_resolve(uop_reduce_src(red));
   Shape xs  = {0};

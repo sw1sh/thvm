@@ -176,6 +176,7 @@ class _Constants:
     ISHR = _read_uint32_const("py_const_UOP_ISHR")
     REDUCE_SUM = _read_uint32_const("py_const_REDUCE_SUM")
     REDUCE_MAX = _read_uint32_const("py_const_REDUCE_MAX")
+    REDUCE_PROD = _read_uint32_const("py_const_REDUCE_PROD")
     SCATTER_SUM = _read_uint32_const("py_const_SCATTER_SUM")
     SCATTER_PROD = _read_uint32_const("py_const_SCATTER_PROD")
     SCATTER_MAX = _read_uint32_const("py_const_SCATTER_MAX")

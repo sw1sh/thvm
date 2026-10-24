@@ -60,21 +60,23 @@ def np_hits(shape, dim, idx):
 
 
 def np_scatter_reduce(base, dim, idx, src, reduce, include_self=True):
-    """tinygrad's sum / mean algebra (mixin/op.py:1127, :1131-1133), summed in
-    float64 (int64 for an int base).  A float base keeps its dtype; an int
-    mean is float32, as tinygrad's int division is."""
+    """tinygrad's sum / prod / mean algebra (mixin/op.py:1127-1128, :1131-1133),
+    folded in float64 (int64 for an int base).  A float base keeps its dtype; an
+    int mean is float32, as tinygrad's int division is."""
     d = dim % base.ndim
     is_float = base.dtype.kind == "f"
     acc = np.float64 if is_float else np.int64
-    S = np.zeros(base.shape, acc)
+    fold, ident = (np.multiply, 1) if reduce == "prod" else (np.add, 0)
+    S = np.full(base.shape, ident, acc)
     for p in np.ndindex(*idx.shape):
         i = int(idx[p])
         if 0 <= i < base.shape[d]:
-            S[_target(p, d, i)] += src[p]
+            t = _target(p, d, i)
+            S[t] = fold(S[t], src[p])
     hits = np_hits(base.shape, dim, idx)
     b = base.astype(acc)
-    total = S + (b if include_self else np.where(hits == 0, b, 0))
-    if reduce == "sum":
+    total = fold(S, b if include_self else np.where(hits == 0, b, ident))
+    if reduce in ("sum", "prod"):
         return total.astype(base.dtype)
     count = hits + (1 if include_self else (hits == 0))
     return (total / count).astype(base.dtype if is_float else np.float32)
@@ -665,13 +667,28 @@ class TestScatterErrors(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "non-scalar src"):
             self.x.scatter(0, self.idx, self.src, reduce="add")
 
-    def test_unimplemented_kinds_name_themselves(self):
-        # prod has no native combine yet; it raises naming itself rather
-        # than computing something else.
-        with self.assertRaisesRegex(NotImplementedError, "'prod'"):
-            self.x.scatter_reduce(0, self.idx, self.src, "prod")
-        with self.assertRaisesRegex(NotImplementedError, "'prod'"):
-            self.x.scatter(0, self.idx, 2.0, reduce="multiply")
+    def test_prod_and_multiply(self):
+        # test_ops.py test_scatter_reduce "prod", test_scatter_mul and
+        # test_scatter_reduce_prod_zeros, forward only as theirs; ids out of range dropped.
+        rng = np.random.default_rng(11)
+        b = rng.integers(-1, 4, (3, 4, 5)).astype(np.int32)
+        x0 = rng.uniform(-2, 2, (3, 4, 5)).astype(np.float32)
+        s0 = rng.uniform(-2, 2, (3, 4, 5)).astype(np.float32)
+        for dim in (-1, 1, -3):
+            for include_self in (True, False):
+                with self.subTest(dim=dim, include_self=include_self):
+                    got = Tensor(x0).scatter_reduce(dim, Tensor(b), Tensor(s0), "prod",
+                                                    include_self=include_self).numpy()
+                    want = np_scatter_reduce(x0, dim, b, s0, "prod", include_self)
+                    np.testing.assert_allclose(got, want, rtol=2e-6, atol=1e-7)
+        zeros = np.zeros((3, 4, 5), np.float32)
+        got = Tensor(zeros).scatter_reduce(1, Tensor(b), Tensor(s0), "prod").numpy()
+        np.testing.assert_array_equal(got, np_scatter_reduce(zeros, 1, b, s0, "prod"))
+        for v in (float("inf"), float("nan"), 2.0):
+            with self.subTest(multiply=v):
+                got = Tensor(x0).scatter(1, Tensor(b), v, reduce="multiply").numpy()
+                want = np_scatter_reduce(x0, 1, b, np.full(b.shape, v, np.float32), "prod")
+                np.testing.assert_array_equal(got, want)
 
 
 @unittest.skipUnless(NATIVE, "native scatter runs on the CPU backend")

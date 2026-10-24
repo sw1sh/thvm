@@ -795,22 +795,6 @@ static void test_gc_live_graphs(void) {
   }
 }
 
-// === PROD still has no lowering ===
-static void test_prod_declined(void) {
-  u32   bd[2] = { SV, SD }, id[2] = { SE, SD };
-  Shape bs = shape_of(2, bd), is = shape_of(2, id);
-  f32   base[SV * SD], src[SE * SD];
-  fill(base, SV * SD, 0.5f, 0.25f);
-  fill(src, SE * SD, 0.37f, 0.11f);
-  Term s = uop_scatter(ten(mk(DT_FP32, &bs, base)), ten(mk(DT_INT32, &is, IDX0)),
-                       ten(mk(DT_FP32, &is, src)), 0, SCATTER_PROD, 1);
-  CHECK(s != 0);
-  u32 k0 = KERNELS_NEXT;
-  Term r = term_resolve(thvm_realize(s));
-  CHECK(term_tag(r) != TAG_TEN);
-  CHECK_EQ(KERNELS_NEXT, k0);
-}
-
 int main(void) {
   thvm_init();
   TEST_BEGIN("scatter-max/maxmin");
@@ -827,8 +811,6 @@ int main(void) {
   test_beam();
   TEST_BEGIN("scatter-max/gc-live-graphs");
   test_gc_live_graphs();
-  TEST_BEGIN("scatter-max/prod-declined");
-  test_prod_declined();
   TEST_BEGIN("scatter-max/dispatched");
   CHECK(DISPATCHED >= 60);
   thvm_free();

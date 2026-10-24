@@ -1429,11 +1429,11 @@ static u32 rmu_dtype_of(Term t) {
 
 // `<acc> = combine(acc, src);` for the REDUCE kind.  A MAX in C compares, as
 // tinygrad lowers MAX without a native op (codegen/decomp/op.py:84); a bool
-// SUM or MAX is an OR (uop/symbolic.py:163-166).
+// SUM or MAX is an OR (uop/symbolic.py:163-166), a bool PROD an AND.
 static void rmu_emit_reduce_combine(const char *acc_name, u32 kind, u32 dt,
                                     Term src, FILE *fp) {
   if (rmu_holds_int(dt) && dtype_is_bool(dt)) {
-    fprintf(fp, "%s = %s | ((", acc_name, acc_name);
+    fprintf(fp, "%s = %s %c ((", acc_name, acc_name, (kind == REDUCE_PROD) ? '&' : '|');
     rmu_emit_term(src, fp);
     fputs(") != 0);\n", fp);
   } else if (kind == REDUCE_MAX && RMU_TARGET == CG_TARGET_C) {
@@ -1447,22 +1447,28 @@ static void rmu_emit_reduce_combine(const char *acc_name, u32 kind, u32 dt,
     rmu_emit_term(src, fp);
     fputs(");\n", fp);
   } else {
-    fprintf(fp, "%s = %s + ", acc_name, acc_name);
+    fprintf(fp, "%s = %s %c ", acc_name, acc_name, (kind == REDUCE_PROD) ? '*' : '+');
     rmu_emit_term(src, fp);
     fputs(";\n", fp);
   }
 }
 
 // Init of a REDUCE accumulator, tinygrad's identity_element (uop/ops.py:61):
-// 0 for SUM; for MAX, dt.min (dtype.py:70-72): -2^(bits-1) for a signed int,
-// 0 for unsigned and bool, -INFINITY for a float.
+// 0 for SUM, 1 for PROD; for MAX, dt.min (dtype.py:70-72): -2^(bits-1) for a
+// signed int, 0 for unsigned and bool, -INFINITY for a float.
 static void rmu_emit_reduce_init(u32 kind, u32 dt, FILE *fp) {
   if (!rmu_holds_int(dt)) {
     if (kind == REDUCE_MAX) {
       fputs("-INFINITY", fp);
+    } else if (kind == REDUCE_PROD) {
+      fputs(rmu_holds_double(dt) ? "1.0" : "1.0f", fp);
     } else {
       fputs(rmu_holds_double(dt) ? "0.0" : "0.0f", fp);
     }
+    return;
+  }
+  if (kind == REDUCE_PROD) {
+    fputs("1", fp);
     return;
   }
   if (kind != REDUCE_MAX || !dtype_is_signed(dt)) {
@@ -2780,13 +2786,13 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
   return 1;
 }
 
-// `acc = acc + body;`, or for MAX `acc = acc > body ? acc : body;`.
+// `acc = acc + body;` (`*` for PROD), or for MAX `acc = acc > body ? acc : body;`.
 static void rmu_emit_group_combine_line(const char *acc_lhs, u32 red_kind,
                                         Term body, FILE *fp) {
   fprintf(fp, "%s = ", acc_lhs);
   fprintf(fp, "%s", acc_lhs);
-  if (red_kind == REDUCE_SUM)      fputs(" + ", fp);
-  else if (red_kind == REDUCE_MAX) fputs(" > ", fp);
+  if (red_kind == REDUCE_MAX)       fputs(" > ", fp);
+  else if (red_kind == REDUCE_PROD) fputs(" * ", fp);
   else                              fputs(" + ", fp);
   rmu_emit_term(body, fp);
   if (red_kind == REDUCE_MAX) {
@@ -2890,8 +2896,9 @@ static int rmu_emit_group_reduce(Term buf, Term addr,
   for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
   fprintf(fp, "for (uint _i = 0; _i < %u; _i++) {\n", group_extent);
   for (u32 d = 0; d < body_depth + 2; d++) fputs("  ", fp);
-  if (red_kind == REDUCE_SUM) {
-    fprintf(fp, "_total = _total + %s[tt + _i];\n", acc_name);
+  if (red_kind != REDUCE_MAX) {
+    fprintf(fp, "_total = _total %c %s[tt + _i];\n",
+            (red_kind == REDUCE_PROD) ? '*' : '+', acc_name);
   } else {
     fprintf(fp, "_total = (_total > %s[tt + _i]) ? _total : %s[tt + _i];\n",
             acc_name, acc_name);

@@ -1123,29 +1123,34 @@ static UWalkRed uwalk_int_red(u32 dt, i64 v) {
   return r;
 }
 
-// tinygrad uop/ops.py:61 identity_element: 0 for SUM, dt.min for MAX, which is
-// -2^(bits-1) signed, 0 for unsigned or bool (dtype.py:70), -inf for a float.
+// tinygrad uop/ops.py:61 identity_element: 0 for SUM, 1 for PROD, dt.min for
+// MAX, which is -2^(bits-1) signed, 0 for unsigned or bool (dtype.py:70), -inf
+// for a float.
 static UWalkRed uwalk_reduce_identity(u32 kind, int is_int, u32 dt) {
   if (!is_int) {
-    UWalkRed r = { (kind == REDUCE_MAX) ? -INFINITY : 0.0, 0, 0 };
+    UWalkRed r = { (kind == REDUCE_MAX) ? -INFINITY : (kind == REDUCE_PROD) ? 1.0 : 0.0, 0, 0 };
     return r;
   }
-  i64 id = 0;
+  i64 id = (kind == REDUCE_PROD) ? 1 : 0;
   if (kind == REDUCE_MAX && dtype_is_signed(dt)) {
     id = uwalk_int_wrap(dt, (i64)((u64)1 << (dtype_info(dt)->bits - 1)));
   }
   return uwalk_int_red(dt, id);
 }
 
-// acc <kind> v in int dtype `dt`: SUM wraps, MAX compares in the dtype's order,
-// and a bool SUM or MAX is an OR (tinygrad uop/symbolic.py:163).
+// acc <kind> v in int dtype `dt`: SUM and PROD wrap, MAX compares in the
+// dtype's order; a bool SUM or MAX is an OR (tinygrad uop/symbolic.py:163), a
+// bool PROD an AND.
 static i64 uwalk_int_combine(u32 kind, u32 dt, i64 acc, i64 v) {
   v = uwalk_int_wrap(dt, v);
   if (dtype_is_bool(dt)) {
-    return acc | v;
+    return (kind == REDUCE_PROD) ? (acc & v) : (acc | v);
   }
   if (kind == REDUCE_SUM) {
     return uwalk_int_wrap(dt, (i64)((u64)acc + (u64)v));
+  }
+  if (kind == REDUCE_PROD) {
+    return uwalk_int_wrap(dt, (i64)((u64)acc * (u64)v));
   }
   if (dt == DT_UINT64) {
     return ((u64)acc < (u64)v) ? v : acc;
@@ -1154,10 +1159,12 @@ static i64 uwalk_int_combine(u32 kind, u32 dt, i64 acc, i64 v) {
 }
 
 // A float body value into an int reduce as the rendered C combines it: a SUM
-// adds in v's type `fdt` and converts back, a MAX converts v before comparing.
+// or PROD computes in v's type `fdt` and converts back, a MAX converts v
+// before comparing.
 static i64 uwalk_int_combine_f64(u32 kind, u32 dt, u32 fdt, i64 acc, double v) {
-  if (kind == REDUCE_SUM && !dtype_is_bool(dt)) {
-    return uwalk_f64_to_int(dt, uwalk_round(fdt, uwalk_int_to_float(dt, fdt, acc) + v));
+  if (kind != REDUCE_MAX && !dtype_is_bool(dt)) {
+    double a = uwalk_int_to_float(dt, fdt, acc);
+    return uwalk_f64_to_int(dt, uwalk_round(fdt, (kind == REDUCE_PROD) ? a * v : a + v));
   }
   return uwalk_int_combine(kind, dt, acc, uwalk_f64_to_int(dt, v));
 }
@@ -1287,16 +1294,17 @@ static UWalkRed uwalk_run_reduce(UWalkCtx *c, Term red) {
     c->n_ranges -= chain_len;
     return uwalk_int_red(dt, acc);
   }
-  // `acc = acc + v` adds in the wider of acc's and v's C types and rounds
-  // into acc; `acc = fmax(acc, v)` compares doubles and rounds into acc.
-  // Either way one rounding into acc's type gives C's value: a double sum
-  // rounds only into a float acc, and a float one is a float's.
+  // `acc = acc + v` (or `* v`) computes in the wider of acc's and v's C types
+  // and rounds into acc; `acc = fmax(acc, v)` compares doubles and rounds into
+  // acc.  Either way one rounding into acc's type gives C's value: a double
+  // sum rounds only into a float acc, and a float one is a float's.
   u32    adt = uwalk_term_dtype(c, red);
   u32    sdt = (kind == REDUCE_MAX) ? DT_FP64 : uwalk_dtype_promote(adt, bdt);
   double acc = identity.f;
   do {
     double v = uwalk_convert_float(c, body, bdt, sdt);
-    acc = uwalk_round(adt, (kind == REDUCE_MAX) ? ((v > acc) ? v : acc) : acc + v);
+    acc = uwalk_round(adt, (kind == REDUCE_MAX)  ? ((v > acc) ? v : acc)
+                         : (kind == REDUCE_PROD) ? acc * v : acc + v);
   } while (!c->bad && uwalk_odometer_next(c, slot0, extents, chain_len));
   c->n_ranges -= chain_len;
   UWalkRed r = { acc, 0, 0 };

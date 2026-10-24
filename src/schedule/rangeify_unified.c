@@ -342,9 +342,9 @@ static Term ru_const_of(u32 dt, u64 v) {
 
 // tinygrad's reduce_unparented (codegen/simplify.py:81-91): a reduce range the
 // body never reads (a stride-0 broadcast collapsed it to CONST(0)) leaves the
-// REDUCE.  A SUM multiplies by its extent (a DEFINE_VAR for a symbolic one); a
-// MAX, or a bool SUM (an OR), keeps the body's value.  With no range left the
-// REDUCE is its body.
+// REDUCE.  A SUM multiplies by its extent (a DEFINE_VAR for a symbolic one), a
+// PROD raises to it; a MAX, or a bool SUM or PROD (an OR, an AND), keeps the
+// body's value.  With no range left the REDUCE is its body.
 static Term ru_reduce_unparented(Term red, Term const *ranges, u32 n_ranges) {
   if (term_tag(red) != TAG_UOP || term_ext(red) != UOP_REDUCE) {
     return red;
@@ -372,7 +372,7 @@ static Term ru_reduce_unparented(Term red, Term const *ranges, u32 n_ranges) {
   u32 dt = DT_FP32;
   (void)term_dtype_in(red, 0, &dt);
   Term ret = (n_par > 0) ? uop_reduce_multi(kind, n_par, parented, body) : body;
-  if (kind != REDUCE_SUM || dtype_is_bool(dt)) {
+  if (kind == REDUCE_MAX || dtype_is_bool(dt)) {
     return ret;
   }
   u64 prod = 1;
@@ -380,7 +380,12 @@ static Term ru_reduce_unparented(Term red, Term const *ranges, u32 n_ranges) {
     u32 ext = uop_range_extent(unparented[k]);
     if (!kvar_extent_is_var(ext)) {
       prod *= (u64)ext;
+    } else if (kind == REDUCE_PROD) {
+      thvm_fatal("a PROD over an unread symbolic range has no power to raise its body to");
     }
+  }
+  if (kind == REDUCE_PROD) {
+    return prod ? uop_reduce_pow(ret, prod) : ru_const_of(dt, 1);
   }
   if (prod != 1) {
     ret = uop_binary(UOP_MUL, ret, ru_const_of(dt, prod));
@@ -2368,7 +2373,7 @@ static Term ru_lower_gather(Term self, u64 loc, RuRangeMap const *rm) {
   return uop_iwhere(valid, ru_index_leaf(src, coords, rm->in_ndim), uop_invalid());
 }
 
-// acc (op) x for a SUM, MAX or MIN scatter.  MAX is tinygrad's
+// acc (op) x for a SUM, PROD, MAX or MIN scatter.  MAX is tinygrad's
 // (acc < x) ? x : acc, the CPU form of Ops.MAX (codegen/decomp/op.py:84)
 // that a reduce folds as acc = MAX(acc, x) (codegen/__init__.py:203); MIN
 // is its mirror (x < acc) ? x : acc, which tinygrad's negated (float) or
@@ -2380,6 +2385,8 @@ static Term ru_scatter_combine(u32 kind, Term acc, Term x) {
       return uop_where(uop_binary(UOP_CMPLT, acc, x), x, acc);
     case SCATTER_MIN:
       return uop_where(uop_binary(UOP_CMPLT, x, acc), x, acc);
+    case SCATTER_PROD:
+      return uop_binary(UOP_MUL, acc, x);
     default:
       return uop_binary(UOP_ADD, acc, x);
   }
@@ -2399,13 +2406,12 @@ static Term ru_scatter_combine(u32 kind, Term acc, Term x) {
 //   include_self    OUT[R] = I; accumulate; OUT[R] = OUT[R] (op) base[R]
 //                   (the last store drops when base is the CONST I);
 //   no self         OUT[R] = I (op) base[R] for MAX / MIN, base[R] for
-//                   SUM; OUT[t] = valid ? I : OUT[t]; accumulate;
+//                   SUM / PROD; OUT[t] = valid ? I : OUT[t]; accumulate;
 //   REPLACE         OUT[R] = base[R]; accumulate.
 // Without include_self a written position holds S and an untouched one I (op)
 // base, which is base except that MAX(I, NaN) = I (tinygrad keeps a NaN base
 // outside the index's extent for some shapes).  The BUFFERIZE wraps the SCATTER
-// itself, so no consumer can inline it.  PROD has no lowering: the node is
-// still a boundary, and visit() declines its kernel.
+// itself, so no consumer can inline it.
 static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {
   u64  loc  = BUFFERIZE_NODES[i].loc;
   Term self = term_new(0, TAG_UOP, UOP_SCATTER, loc);
@@ -2415,10 +2421,7 @@ static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {
   RU_BUFFERIZE_TERM[i] = b;
   RU_SUBST[i]          = b;
   RU_LAST_BUFFERIZES_EMITTED++;
-  u32 kind = uop_scatter_kind(self);
-  if (kind == SCATTER_PROD) {
-    return;
-  }
+  u32   kind = uop_scatter_kind(self);
   u32   dim = uop_scatter_dim(self);
   u32   dtype, ident;
   Shape bs, is;
@@ -2460,8 +2463,8 @@ static void ru_lower_scatter(u32 i, RuRangeMap const *rm) {
       root = uop_after(uop_store(out, my_addr, fin), root);
     }
   } else {
-    Term init  = (kind == SCATTER_SUM) ? base
-                                       : ru_scatter_combine(kind, identity, base);
+    Term init  = (kind == SCATTER_SUM || kind == SCATTER_PROD)
+                 ? base : ru_scatter_combine(kind, identity, base);
     Term reset = uop_store(out, t_addr, uop_where(valid, identity, old));
     root = uop_after(acc, uop_after(reset, uop_store(out, my_addr, init)));
   }

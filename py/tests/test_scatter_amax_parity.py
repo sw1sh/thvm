@@ -271,8 +271,6 @@ class TestScatterExtreme(unittest.TestCase):
                                  reduce)
             with self.assertRaises(IndexError):
                 x.scatter_reduce(2, idx, Tensor(np.ones((2, 3), np.float32)), reduce)
-        with self.assertRaisesRegex(NotImplementedError, "'prod'"):
-            x.scatter_reduce(0, idx, Tensor(np.ones((2, 3), np.float32)), "prod")
 
 
 class TestScatterExtremeHost(unittest.TestCase):

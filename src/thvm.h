@@ -511,6 +511,7 @@ u64             dtype_storage_bytes(u32 dt, u64 numel);
 // REDUCE kinds packed into the high bits of UOP_REDUCE's EXT field.
 #define REDUCE_SUM   0
 #define REDUCE_MAX   1
+#define REDUCE_PROD  2   // tinygrad Ops.MUL
 
 // UOP_SCATTER combine kinds (NUM(kind) cell).
 #define SCATTER_SUM      0

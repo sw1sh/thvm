@@ -429,8 +429,8 @@ static u64 shape_numel_u32(Shape const *s) {
 
 // Describes in *out the single REDUCE equivalent to the chain of same-kind
 // REDUCEs at root, which visit() (materialize.c) then emits as one kernel;
-// 0 when there is none.  A SUM chain must consume its axes inner to outer,
-// so the fused loop keeps the chain's row-major addition order.
+// 0 when there is none.  A SUM or PROD chain must consume its axes inner to outer,
+// so the fused loop keeps the chain's row-major combine order.
 static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
   memset(out, 0, sizeof(*out));
   root = term_resolve(root);
@@ -504,7 +504,7 @@ static int reduce_chain_collect(Term root, ReduceChainInfo *out) {
   if (max_axis - min_axis + 1 != n) return 0;
   if (max_axis != src_shape.ndim - 1) return 0;
 
-  if (kind == REDUCE_SUM) {
+  if (kind != REDUCE_MAX) {
     for (u32 i = 1; i < n; i++) {
       if (removed[i - 1] <= removed[i]) return 0;
     }

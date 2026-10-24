@@ -8,7 +8,7 @@
 //   CAST         t: x; ia: dtype
 //   FULL         ia: dtype, dims...; ra: value
 //   BINOP        t: a, b; ia: a binary UOp
-//   REDUCE       t: x; ia: REDUCE_SUM or REDUCE_MAX, keepdim, mean, axes...
+//   REDUCE       t: x; ia: REDUCE_SUM, REDUCE_MAX or REDUCE_PROD, keepdim, mean, axes...
 //   WHERE        t: cond, x, y
 //   MAXIMUM      t: a, b; ia: [1 for the minimum]
 //   SOFTMAX      t: x; ia: axis, [1 for log_softmax]
@@ -122,7 +122,7 @@ fn Tensor nn_call(u32 op, Tensor const *t, u32 nt, i32 const *ia, u32 ni, double
       return ni >= 1 && t[1].t != 0 ? nn_binop((u32)ia[0], t[0], t[1]) : fail;
     }
     case NN_OP_REDUCE: {
-      if (ni < 3 || ((u32)ia[0] != REDUCE_SUM && (u32)ia[0] != REDUCE_MAX)
+      if (ni < 3 || (u32)ia[0] > REDUCE_PROD
           || !nn_call_axes(&t[0], ni - 3, ia + 3, ax)) {
         return fail;
       }

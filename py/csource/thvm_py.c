@@ -560,6 +560,7 @@ EXPORT uint32_t py_const_UOP_ISHR(void)  { return UOP_ISHR; }
 
 EXPORT uint32_t py_const_REDUCE_SUM(void) { return REDUCE_SUM; }
 EXPORT uint32_t py_const_REDUCE_MAX(void) { return REDUCE_MAX; }
+EXPORT uint32_t py_const_REDUCE_PROD(void) { return REDUCE_PROD; }
 
 EXPORT uint32_t py_const_SCATTER_SUM(void)     { return SCATTER_SUM; }
 EXPORT uint32_t py_const_SCATTER_PROD(void)    { return SCATTER_PROD; }

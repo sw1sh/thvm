@@ -1,4 +1,4 @@
-// test_uop_scatter.c -- UOP_SCATTER forward (SUM and REPLACE) through
+// test_uop_scatter.c -- UOP_SCATTER forward (SUM, PROD and REPLACE) through
 // thvm_realize.
 //
 // Every case compares the realized tensor with a host reference byte for
@@ -27,8 +27,8 @@
 //      the kernel is flagged no_opts;
 //   7. JIT capture, then replays with the index rewritten in place and the
 //      output poisoned first;
-//   8. a kind without a lowering yet (PROD) is declined, not mis-run;
-//      MAX and MIN are covered by test_uop_scatter_max.c.
+//   8. PROD folds src from 1 by MUL, out = S * T, with include_self 1 and 0
+//      and dims 0 and 1; MAX and MIN are covered by test_uop_scatter_max.c.
 #include "../src/thvm.c"
 #include "test.h"
 #include "tu_probes.h"
@@ -95,25 +95,36 @@ static i32 target_of(u32 p, Shape const *bs, Shape const *is, i32 const *idx,
   return (i32)j;
 }
 
-static void ref_sum(f32 const *base, Shape const *bs, i32 const *idx,
-                    f32 const *src, Shape const *is, u32 dim, int self,
-                    f32 *out) {
+// SUM or PROD: S[j] folds src from the identity in p order, out = S (op) T.
+static void ref_fold(u32 kind, f32 const *base, Shape const *bs, i32 const *idx,
+                     f32 const *src, Shape const *is, u32 dim, int self,
+                     f32 *out) {
   u32 bn = numel_of(bs), in = numel_of(is);
-  f32 *s  = (f32 *)calloc(bn, 4);
+  f32 id  = (kind == SCATTER_PROD) ? 1.0f : 0.0f;
+  f32 *s  = (f32 *)malloc((size_t)bn * 4);
   u8  *hit = (u8 *)calloc(bn, 1);
+  for (u32 j = 0; j < bn; j++) {
+    s[j] = id;
+  }
   for (u32 p = 0; p < in; p++) {
     i32 j = target_of(p, bs, is, idx, dim);
     if (j >= 0) {
-      s[j] = s[j] + src[p];
+      s[j] = (kind == SCATTER_PROD) ? s[j] * src[p] : s[j] + src[p];
       hit[j] = 1;
     }
   }
   for (u32 j = 0; j < bn; j++) {
-    f32 t = (self || !hit[j]) ? base[j] : 0.0f;
-    out[j] = s[j] + t;
+    f32 t = (self || !hit[j]) ? base[j] : id;
+    out[j] = (kind == SCATTER_PROD) ? s[j] * t : s[j] + t;
   }
   free(s);
   free(hit);
+}
+
+static void ref_sum(f32 const *base, Shape const *bs, i32 const *idx,
+                    f32 const *src, Shape const *is, u32 dim, int self,
+                    f32 *out) {
+  ref_fold(SCATTER_SUM, base, bs, idx, src, is, dim, self, out);
 }
 
 static void ref_replace(f32 const *base, Shape const *bs, i32 const *idx,
@@ -278,8 +289,8 @@ static void scatter_case(Shape const *bs, Shape const *is, u32 dim, u32 kind,
   u32 bn = numel_of(bs), in = numel_of(is);
   f32 *want = (f32 *)malloc((size_t)bn * 4);
   f32 *got  = (f32 *)malloc((size_t)bn * 4);
-  if (kind == SCATTER_SUM) {
-    ref_sum(base, bs, idx, src, is, dim, (int)self, want);
+  if (kind == SCATTER_SUM || kind == SCATTER_PROD) {
+    ref_fold(kind, base, bs, idx, src, is, dim, (int)self, want);
   } else {
     ref_replace(base, bs, idx, src, is, dim, want);
   }
@@ -693,19 +704,21 @@ static void test_jit_replay(void) {
   jit_capture_drop(slot);
 }
 
-// === 8. kinds without a lowering are declined ===
-static void test_declined_kind(void) {
-  u32 bd[2] = { SV, SD }, id[2] = { SE, SD };
+// === 8. PROD, tinygrad's scatter_reduce "prod" (mixin/op.py:1128) ===
+static void test_prod(void) {
+  Shape bs = shape2(SV, SD), is = shape2(SE, SD);
   f32 base[SV * SD], src[SE * SD];
   fill(base, SV * SD, 0.5f, 0.25f);
   fill(src, SE * SD, 0.37f, 0.11f);
-  Term s = uop_scatter(ten(mk(DT_FP32, 2, bd, base)), ten(mk(DT_INT32, 2, id, IDX0)),
-                       ten(mk(DT_FP32, 2, id, src)), 0, SCATTER_PROD, 1);
-  CHECK(s != 0);
-  u32 k0 = KERNELS_NEXT;
-  Term r = term_resolve(thvm_realize(s));
-  CHECK(term_tag(r) != TAG_TEN);
-  CHECK_EQ(KERNELS_NEXT, k0);
+  scatter_case(&bs, &is, 0, SCATTER_PROD, 1, base, IDX0, src, 3, "prod self dim 0");
+  scatter_case(&bs, &is, 0, SCATTER_PROD, 0, base, IDX0, src, 3, "prod no-self dim 0");
+  Shape bs1 = shape2(3, 6), is1 = shape2(3, 4);
+  static i32 const idx1[12] = { 5, 0, 5, 6,  -1, 2, 2, 2,  3, 1, 0, 3 };
+  f32 base1[18], src1[12];
+  fill(base1, 18, 0.5f, 0.0f);
+  fill(src1, 12, 0.25f, 0.0f);
+  scatter_case(&bs1, &is1, 1, SCATTER_PROD, 1, base1, idx1, src1, 3, "prod self dim 1");
+  scatter_case(&bs1, &is1, 1, SCATTER_PROD, 0, base1, idx1, src1, 3, "prod no-self dim 1");
 }
 
 int main(void) {
@@ -728,8 +741,8 @@ int main(void) {
   test_intermediate();
   TEST_BEGIN("scatter/jit-replay");
   test_jit_replay();
-  TEST_BEGIN("scatter/declined-kind");
-  test_declined_kind();
+  TEST_BEGIN("scatter/prod");
+  test_prod();
   TEST_BEGIN("scatter/dispatched");
   CHECK(DISPATCHED >= 12);
   thvm_free();

@@ -21,6 +21,8 @@
 //                    up(g) = EXPAND(reshape_keepdim(g, x), a.shape)
 //   REDUCE_MAX(a, x) gy_for_a = MUL(MUL(m, RECIP(up(SUM(m, x)))), up(gy)),
 //                    m = (a == up(y)): tied maxima share gy
+//   REDUCE_PROD(a,x) gy_for_a = up(gy) * (a == 0 ? (one zero ? up(PROD(s, x)) : 0)
+//                                        : up(y) / a), s = (a == 0 ? 1 : a)
 //   EXPAND(a, S)     gy_for_a = REDUCE_SUM_along(expanded_axes, gy)
 //   RESHAPE(a, S)    gy_for_a = RESHAPE(gy, a.shape)
 //   PERMUTE(a, p)    gy_for_a = PERMUTE(gy, inv_perm)
@@ -1040,6 +1042,22 @@ static Term interact_grad_dispatch(Term grad_term) {
         Term inv_cnt    = uop_unary(UOP_RECIP, cnt_lifted);
         Term mask_norm  = uop_binary(UOP_MUL, mask, inv_cnt);
         gy_a            = uop_binary(UOP_MUL, mask_norm, gy_lifted);
+      } else if (kind == REDUCE_PROD) {
+        // tinygrad mixin/gradient.py:14-18: y / x_j where x_j != 0; at the
+        // only zero, the product of the others; past one zero, 0.
+        u32  dt      = DT_FP32;
+        (void)term_dtype_in(a, 0, &dt);
+        Term zero    = ru_const_of(dt, 0);
+        Term is_zero = uop_binary(UOP_CMPEQ, a_fwd, zero);
+        Term safe_x  = uop_where(is_zero, ru_const_of(dt, 1), a_fwd);
+        Term n_zero  = uop_reduce_multi(REDUCE_SUM, n_axes, axes, uop_cast(is_zero, DT_INT32));
+        Term others  = uop_reduce_multi(REDUCE_PROD, n_axes, axes, safe_x);
+        Term one_zero = uop_binary(UOP_CMPEQ, n_zero, uop_const(DT_INT32, 1));
+        Term at_zero = uop_where(one_zero, others, uop_const(dt, 0));
+        Term y_keep  = uop_expand(uop_reshape(y, a_shape.ndim, keep_dims), a_shape.ndim, a_shape.dims);
+        Term ratio   = uop_binary(UOP_MUL, y_keep, uop_unary(UOP_RECIP, safe_x));
+        Term az_up   = uop_expand(uop_reshape(at_zero, a_shape.ndim, keep_dims), a_shape.ndim, a_shape.dims);
+        gy_a = uop_binary(UOP_MUL, gy_lifted, uop_where(is_zero, az_up, ratio));
       } else {
         // Unknown reduce kind: pass gy through unchanged (best effort).
         gy_a = gy_lifted;

@@ -895,6 +895,10 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     def max(self, axis=None, keepdim: bool = False) -> "Tensor":
         return self._reduce(K.REDUCE_MAX, axis, keepdim)
 
+    def prod(self, axis=None, keepdim: bool = False, dtype=None) -> "Tensor":
+        """In dtype, else self's (tinygrad mixin/reduce.py:47-71)."""
+        return (self if dtype is None else self.cast(to_dtype(dtype)))._reduce(K.REDUCE_PROD, axis, keepdim)
+
     def mean(self, axis=None, keepdim: bool = False) -> "Tensor":
         """tinygrad mixin/op.py:519-540, 0 / 0 over an empty axis."""
         out = self._dtype if dtypes.is_float(self._dtype) else dtypes.float32
@@ -1215,7 +1219,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     def _scatter_reduced(self, dim: int, index: "Tensor", src: "Tensor",
                          reduce: "str | None", include_self: bool) -> "Tensor":
-        """Scatter for reduce "sum", "mean", "amax", "amin" or None (the last write wins): native
+        """Scatter for reduce "sum", "prod", "mean", "amax", "amin" or None (the last write wins): native
         UOP_SCATTERs on the CPU (two for mean), else the host; empty operands run no kernel."""
         if self.numel() == 0:
             dt = dtypes.float32 if reduce == "mean" else self._dtype
@@ -1234,8 +1238,8 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             return self._scatter_host(dim, index, src, reduce, include_self)
         if reduce is None:
             return self._scatter_native(dim, index, src, K.SCATTER_REPLACE, False)
-        if reduce in ("amax", "amin"):
-            kind = K.SCATTER_MAX if reduce == "amax" else K.SCATTER_MIN
+        if reduce in ("amax", "amin", "prod"):
+            kind = {"amax": K.SCATTER_MAX, "amin": K.SCATTER_MIN, "prod": K.SCATTER_PROD}[reduce]
             return self._scatter_native(dim, index, src, kind, include_self)
         total = self._scatter_native(dim, index, src, K.SCATTER_SUM, include_self)
         if reduce == "sum":
@@ -1269,12 +1273,13 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             out[targets] = vals[valid][len(flat) - 1 - first_rev]
             return Tensor(out.reshape(self._shape), dtype=self._dtype)
         acc = np.float32 if dtypes.is_float(self._dtype) else np.int32
-        S = np.zeros(base.size, acc)
-        np.add.at(S, flat, vals[valid].astype(acc))
+        fold, ident = (np.multiply, 1) if reduce == "prod" else (np.add, 0)
+        S = np.full(base.size, ident, acc)
+        fold.at(S, flat, vals[valid].astype(acc))
         hits = np.bincount(flat, minlength=base.size)
-        keep = base.reshape(-1) if include_self else np.where(hits == 0, base.reshape(-1), 0)
-        total = (S + keep.astype(acc)).reshape(self._shape)
-        if reduce == "sum":
+        keep = base.reshape(-1) if include_self else np.where(hits == 0, base.reshape(-1), ident)
+        total = fold(S, keep.astype(acc)).reshape(self._shape)
+        if reduce in ("sum", "prod"):
             return Tensor(total, dtype=self._dtype)
         count = (hits + (1 if include_self else (hits == 0))).astype(np.float32)
         out = total.astype(np.float32) * (np.float32(1) / count.reshape(self._shape))
@@ -1282,15 +1287,12 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     def scatter_reduce(self, dim: int, index: "Tensor", src: "Tensor", reduce: str,
                        include_self: bool = True) -> "Tensor":
-        """src folded into self at `index` along `dim` by "sum", "mean", "amax" or "amin" (tinygrad
-        mixin/op.py:1095-1134); an out-of-range index is dropped, and "prod" is not implemented."""
+        """src folded into self at `index` along `dim` by "sum", "prod", "mean", "amax" or "amin"
+        (tinygrad mixin/op.py:1095-1134); an out-of-range index is dropped."""
         # amax / amin fold from the dtype's min / max (mixin/op.py:1129-1130) by tinygrad's CPU
         # compare-select: the first of equal values stays, and a NaN, src or self, never wins.
         dim, src = self._pre_scatter(dim, index, src)
-        if reduce == "prod":
-            raise NotImplementedError(
-                f"scatter_reduce: reduce={reduce!r} has no native scatter combine yet")
-        if reduce not in ("sum", "mean", "amax", "amin"):
+        if reduce not in ("sum", "prod", "mean", "amax", "amin"):
             raise RuntimeError(f"{reduce=} must be one of 'sum', 'prod', 'mean', 'amax', 'amin'")
         return self._scatter_reduced(dim, index, src, reduce, include_self)
 
@@ -1432,8 +1434,6 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         t = _TH.cast(self.term, dtype.thvm_id)
         return Tensor._from_term(t, dtype, self._shape)
 
-    # tinygrad mixin/dtype.py:55-142.
-    def float(self) -> "Tensor":    return self.cast(dtypes.float32)
     def bitcast(self, dtype: DType) -> "Tensor":
         """self's bits read as `dtype` of the same itemsize (tinygrad mixin/dtype.py:38-53)."""
         dtype = to_dtype(dtype)
@@ -1443,6 +1443,8 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             raise RuntimeError(f"bitcast from {self._dtype} to {dtype} needs equal itemsizes")
         return Tensor._from_term(_TH.bitcast(self.term, dtype.thvm_id), dtype, self._shape)
 
+    # tinygrad mixin/dtype.py:55-142.
+    def float(self) -> "Tensor":    return self.cast(dtypes.float32)
     def half(self) -> "Tensor":     return self.cast(dtypes.float16)
     def int(self) -> "Tensor":      return self.cast(dtypes.int32)
     def bool(self) -> "Tensor":     return self.cast(dtypes.bool)

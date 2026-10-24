@@ -2597,8 +2597,8 @@ static Term repair_collapsed_reduces_rec(Term t, AxExtMap const *m, u32 depth) {
     return changed ? uop_graph_rebuild_with_srcs(r, srcs) : r;
   }
   // Axes the rebuilt body no longer reads: a SUM gains each one's extent as a
-  // factor, a MAX or MIN drops it (reducing a body constant over an axis gives
-  // the body).
+  // factor, a PROD as a power, a MAX or MIN drops it (reducing a body constant
+  // over an axis gives the body).
   u32 n_axes = uop_reduce_n_axes(r);
   u32 kind   = uop_reduce_kind(r);
   Term body  = srcs[0];   // the recursively-repaired body
@@ -2632,6 +2632,8 @@ static Term repair_collapsed_reduces_rec(Term t, AxExtMap const *m, u32 depth) {
   (void)term_dtype_in(r, 0, &dt);
   if (kind == REDUCE_SUM && prod != 1 && !dtype_is_bool(dt)) {
     new_body = uop_binary(UOP_MUL, body, ru_const_of(dt, prod));
+  } else if (kind == REDUCE_PROD && !dtype_is_bool(dt)) {
+    new_body = uop_reduce_pow(body, prod);
   }
   // Rebuild the reduce over only the surviving (still-referenced) axes;
   // if none survive, the reduce degenerates to its (scaled) body.
@@ -4097,15 +4099,9 @@ static u32 visit(Term t, KernelEntry *ke, u64 root_loc, VisitMemo *memo) {
 
   // SCATTER (always its own kernel root): idx and src are read at lowered
   // addresses composed against their storage; base is bound as rangeify reads
-  // it.  PROD has no lowering and declines the kernel.
+  // it.
   if (op == UOP_SCATTER) {
     memo->indexed = 1;
-    u32 kind = uop_scatter_kind(t);
-    if (kind == SCATTER_PROD) {
-      fprintf(stderr, "thvm: scatter kind %u has no lowering yet; "
-                      "its kernel was not emitted\n", kind);
-      return VISIT_BAIL;
-    }
     u32 bi = visit_operand_at_ranges(heap_read(loc + 0), ke, root_loc, memo);
     if (bi == VISIT_BAIL) {
       return VISIT_BAIL;

@@ -201,9 +201,7 @@ class OpMixin:
 
     def any(self, axis=None, keepdim=False):  return self.bool().max(axis, keepdim)          # reduce.py:96-116
 
-    def all(self, axis=None, keepdim=False):
-        # reduce.py:118-138 reduces by MUL; with none, all is not any of the negation.
-        return self.logical_not().any(axis, keepdim).logical_not()
+    def all(self, axis=None, keepdim=False):  return self.bool().prod(axis, keepdim)         # reduce.py:118-138
 
     def argmin(self, axis=None, keepdim=False):
         return self._inverse().argmax(axis=axis, keepdim=keepdim)                           # op.py:913-934
@@ -228,7 +226,7 @@ class OpMixin:
         # op.py:775-779: a window over the axis padded by op's identity, then op over it.
         assert self.shape[axis] != 0
         pads = (None,) * (self.ndim - 1) + ((self.shape[axis] - 1, 0),)
-        ident = 0 if op == "sum" else self.dtype.min
+        ident = {"sum": 0, "prod": 1}.get(op, self.dtype.min)
         pooled = self.transpose(axis, -1)._pad_constant(pads, ident)._pool((self.shape[axis],))
         return getattr(pooled, op)(-1).transpose(axis, -1)
 
@@ -237,16 +235,18 @@ class OpMixin:
         axis = self._resolve_dim(axis)
         if self.ndim == 0 or 0 in self.shape:
             return self.cast(self.sum().dtype) if op == "sum" else self
-        SPLIT, ident = 256, 0 if op == "sum" else self.dtype.min
+        SPLIT, ident = 256, {"sum": 0, "prod": 1}.get(op, self.dtype.min)
         if (s := self.shape[axis]) <= SPLIT * 2:
             return self._cumalu(axis, op)
         pads = (None,) * (self.ndim - 1) + ((round_up(s, SPLIT) - s, 0),)
         chunks = self.transpose(axis, -1)._pad_constant(pads, ident).unflatten(-1, (-1, SPLIT))._cumalu(-1, op)
         base = chunks[..., -1]._cumalu(-1, op)._pad_constant((None,) * (chunks.ndim - 2) + ((1, -1),), ident)
-        merged = chunks + base.unsqueeze(-1) if op == "sum" else chunks.maximum(base.unsqueeze(-1))
+        merged = {"sum": chunks.add, "prod": chunks.mul, "max": chunks.maximum}[op](base.unsqueeze(-1))
         return merged.flatten(start_dim=-2)[..., -s:].transpose(axis, -1)
 
-    def cumsum(self, axis: int = 0):  return self._split_cumalu(axis, "sum")                 # op.py:793-805
+    def cumsum(self, axis: int = 0):  return self._split_cumalu(axis, "sum")                 # op.py:770-782
+
+    def cumprod(self, axis: int):  return self._split_cumalu(axis, "prod")                   # op.py:784-796
 
     def cummax(self, axis: int = 0):
         # op.py:821-837: the values, and the last index each running max is reached at.
