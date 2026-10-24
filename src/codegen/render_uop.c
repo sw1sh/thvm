@@ -18,6 +18,36 @@ static cg_target RMU_TARGET = CG_TARGET_METAL;
 // 1 when the kernel has a KAX_GROUP_REDUCE axis: a block's threads cooperate on
 // its outputs, so the grid axes decode from the block index `tg`, not `tid`.
 static int RMU_HAS_GROUP_REDUCE = 0;
+// The C kernel rendering and its UPCAST lane count, the vector width tinygrad's
+// heuristic picked (1: none).
+static Term RMU_C_ROOT  = 0;
+static u32  RMU_C_LANES = 1;
+
+static u32 rmu_dag_upcast_lanes(Term root) {
+  u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
+  u32 n = uop_dag_collect_axes(root, ids, types, exts, MAX_AXES);
+  u32 lanes = 1;
+  for (u32 i = 0; i < n; i++) {
+    if (types[i] == KAX_UPCAST) lanes *= exts[i];
+  }
+  return lanes;
+}
+
+// 1 when an address steps output loop `aid` by more than the lane count, so
+// clang's loop vectorizer would gather or scatter across it: with AVX-512 it
+// vectorized a strided copy over its rows (array_packing 1.9 -> 8 ms), where
+// the lanes alone vectorize.  An address that does not decode (a gated one)
+// leaves the loop to clang.
+static int rmu_c_loop_strided(u32 aid) {
+  Term addrs[64];
+  u32  n = uop_dag_collect_buf_addrs(RMU_C_ROOT, addrs, 64);
+  for (u32 i = 0; i < n; i++) {
+    UopDagAddrCoeffsView cv;
+    uop_dag_decode_addr_coeffs(addrs[i], &cv);
+    if (cv.ok && uop_dag_addr_coeff_lookup(&cv, aid) > RMU_C_LANES) return 1;
+  }
+  return 0;
+}
 
 // A GROUP_REDUCE beside LOCAL axes (tinygrad's matvec) is the innermost local
 // dim: the block holds local_total * group_extent threads, and the LOCAL axes
@@ -1012,6 +1042,11 @@ static void rmu_emit_range_open_ctx(Term r, FILE *fp, u32 depth,
   if (axis_type == 5 /* KAX_GLOBAL without a decode context */) {
     fprintf(fp, "uint a%u = tg; /* global ext=%u */\n", axis_id, extent);
     return;
+  }
+  if (RMU_C_LANES > 1 && axis_type == KAX_LOOP && opt_kind != UOP_OPT_UPCAST
+      && opt_kind != UOP_OPT_UNROLL && rmu_c_loop_strided(axis_id)) {
+    fputs("#pragma clang loop vectorize(disable)\n", fp);
+    for (u32 i = 0; i < depth; i++) fputs("  ", fp);
   }
   if (axis_type == 1 /*REDUCE*/) {
     fprintf(fp, "for (uint a%u = 0; a%u < %s; a%u++) /*reduce*/ {\n",
@@ -4489,6 +4524,8 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   }
   cg_emit_cpu_kvar_decls(root, fp);
   RMU_TARGET = CG_TARGET_C;
+  RMU_C_ROOT  = root;
+  RMU_C_LANES = rmu_dag_upcast_lanes(root);
   // Late fast_idiv (tinygrad codegen/__init__.py:360, off upstream by
   // DISABLE_FAST_IDIV, helpers.py:249): constant div/mod of bounded indices
   // become a vectorizable multiply-shift.  C only: Metal miscompiles it.
@@ -4508,6 +4545,8 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
     fputs("  /* empty kernel */\n", fp);
   }
   RMU_TARGET = CG_TARGET_METAL;
+  RMU_C_ROOT  = 0;
+  RMU_C_LANES = 1;
   fputs("}\n", fp);
 }
 
@@ -4612,6 +4651,8 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   }
   cg_emit_cpu_kvar_decls(root, fp);
   RMU_TARGET = CG_TARGET_C;
+  RMU_C_ROOT  = root;
+  RMU_C_LANES = rmu_dag_upcast_lanes(root);
   // Late fast_idiv (tinygrad codegen/__init__.py:360, off upstream by
   // DISABLE_FAST_IDIV, helpers.py:249): constant div/mod of bounded indices
   // become a vectorizable multiply-shift.  C only: Metal miscompiles it.
@@ -4631,6 +4672,8 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
     fputs("  /* empty kernel */\n", fp);
   }
   RMU_TARGET = CG_TARGET_METAL;
+  RMU_C_ROOT  = 0;
+  RMU_C_LANES = 1;
   fputs("}\n", fp);
   fclose(fp);
   if (rmu_src_names_hole(src, slot_bufs, n_inputs)) {

@@ -1968,6 +1968,10 @@ typedef struct {
   i32 offset;
   int ok;
 } UopDagAddrCoeffsView;
+void uop_dag_decode_addr_coeffs(Term addr, UopDagAddrCoeffsView *out);
+u32  uop_dag_addr_coeff_lookup (UopDagAddrCoeffsView const *a, u32 axis_id);
+// The distinct INDEX_E and STORE addresses under `root`, tinygrad's bufs.
+u32  uop_dag_collect_buf_addrs (Term root, Term *out_addrs, u32 cap);
 
 // Should this kernel get the hand-coded opt heuristic on its next
 // fire?  True iff the env opt-in is on (default ON; HAND_CODED_OPTS=0
