@@ -13,8 +13,8 @@
 //   IWHERE(c, t, e)  gy_for_t = where(c, gy, 0) ; gy_for_e = where(c, 0, gy)
 //                    (c gets none)
 //   NEG(a)           gy_for_a = NEG(gy)
-//   RECIP(a)         gy_for_a = MUL(gy, NEG(MUL(RECIP(a), RECIP(a))))
-//   EXP2(a)          gy_for_a = MUL(gy, MUL(EXP2(a), CONST(ln 2)))
+//   RECIP(a)         gy_for_a = MUL(MUL(NEG(gy), RECIP(a)), RECIP(a))
+//   EXP2(a)          gy_for_a = MUL(MUL(EXP2(a), gy), CONST(ln 2))
 //   LOG2(a)          gy_for_a = MUL(gy, MUL(RECIP(a), CONST(1/ln2)))
 //   SQRT(a)          gy_for_a = MUL(gy, MUL(CONST(0.5), RECIP(SQRT(a))))
 //   REDUCE_SUM(a, x) gy_for_a = up(gy),
@@ -940,10 +940,10 @@ static Term interact_grad_dispatch(Term grad_term) {
       u64 ca = 0;
       Term a_fwd = a_resolved;
       if (!a_is_ten) { ca = grad_cell_alloc(a); a_fwd = grad_fwd_of(ca); }
-      Term ea     = uop_unary(UOP_EXP2, a_fwd);
-      Term k      = grad_ln2_const();
-      Term factor = uop_binary(UOP_MUL, ea, k);
-      Term gy_a   = uop_binary(UOP_MUL, gy, factor);
+      // tinygrad's ret * ctx * ln2 (mixin/gradient.py:71), which uop_sym's
+      // x * (d * y) reads under a sigmoid.
+      Term ea   = uop_unary(UOP_EXP2, a_fwd);
+      Term gy_a = uop_binary(UOP_MUL, uop_binary(UOP_MUL, ea, gy), grad_ln2_const());
       (void)ca;
       return grad_bwd_emit_uop(a_resolved, gy_a);
     }
@@ -973,12 +973,9 @@ static Term interact_grad_dispatch(Term grad_term) {
       u64 ca = 0;
       Term a_fwd = a_resolved;
       if (!a_is_ten) { ca = grad_cell_alloc(a); a_fwd = grad_fwd_of(ca); }
-      // uop_unary hash-conses, so r2 is r1.
-      Term r1 = uop_unary(UOP_RECIP, a_fwd);
-      Term r2 = uop_unary(UOP_RECIP, a_fwd);
-      Term sq = uop_binary(UOP_MUL, r1, r2);
-      Term ns = uop_unary(UOP_NEG, sq);
-      Term gy_a = uop_binary(UOP_MUL, gy, ns);
+      // tinygrad's -ctx * ret * ret (mixin/gradient.py:68).
+      Term r    = uop_unary(UOP_RECIP, a_fwd);
+      Term gy_a = uop_binary(UOP_MUL, uop_binary(UOP_MUL, uop_unary(UOP_NEG, gy), r), r);
       (void)ca;
       return grad_bwd_emit_uop(a_resolved, gy_a);
     }

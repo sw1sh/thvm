@@ -297,6 +297,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "uop/recognise_tc.c"
 #include "uop/apply_opt_dag.c"
 #include "uop/simplify_ranges.c"
+#include "uop/sym.c"
 #include "uop/dag_scan.c"
 // uop/reduce_collapse.c -- closed-form collapse of a single-axis SUM
 // REDUCE over a pure RANGE (the arange / cumsum / one-hot triangular-mask

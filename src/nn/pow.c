@@ -1,3 +1,48 @@
+// e's value when it is a broadcast CONST, as a Python scalar exponent is.
+static int nn_pow_const_exp(Tensor e, double *c) {
+  Term t = e.t;
+  while (term_tag(t) == TAG_UOP && (term_ext(t) == UOP_RESHAPE || term_ext(t) == UOP_EXPAND)) {
+    t = heap_read(term_val(t));
+  }
+  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_CONST) return 0;
+  Term k    = heap_read(term_val(t));
+  u32  bits = (u32)term_val(k);
+  if (dtype_is_float(term_ext(k))) {
+    f32 f;
+    memcpy(&f, &bits, sizeof f);
+    *c = f;
+  } else {
+    *c = dtype_is_signed(term_ext(k)) ? (double)(i32)bits : (double)bits;
+  }
+  return 1;
+}
+
+// tinygrad's simplify_pow (uop/symbolic.py:16-21) for a constant exponent c: 1 at
+// 0, (1 / x) ** -c below it, x ** (c - 0.5) * sqrt(x) at a half-integer, and
+// y * y (* x for an odd c), y = x ** (c // 2), at an integer; t == 0 otherwise.
+static Tensor nn_pow_c(Tensor x, double c) {
+  if (c < 0) {
+    return nn_pow_c(nn_unary(UOP_RECIP, x), -c);
+  }
+  if (c == 0) {
+    return nn_full(1.0, x.dtype, x.shape);
+  }
+  if (c == 1) {
+    return x;
+  }
+  double h = c - 0.5;
+  if ((double)(i64)h + 0.5 == c) {
+    return h == 0 ? nn_unary(UOP_SQRT, x) : nn_binop(UOP_MUL, nn_pow_c(x, h), nn_unary(UOP_SQRT, x));
+  }
+  if ((double)(i64)c != c) {
+    x.t = 0;
+    return x;
+  }
+  Tensor y  = nn_pow_c(x, (double)((i64)c / 2));
+  Tensor yy = nn_binop(UOP_MUL, y, y);
+  return ((i64)c % 2) ? nn_binop(UOP_MUL, yy, x) : yy;
+}
+
 // b ** e, tinygrad's POW (mixin/elementwise.py:547-570) as its float decomposition
 // (codegen/decomp/transcendental.py:257-265): exp2(log2|b| * e), NaN for a negative
 // base under a non-integer exponent (a -inf base stays |b| ** e), negated for an
@@ -12,6 +57,14 @@ fn Tensor nn_pow(Tensor b, Tensor e) {
     return b;
   }
   u32 dt  = b.dtype == e.dtype ? b.dtype : nn_promote(b.dtype, e.dtype);
+  double c;
+  if (nn_pow_const_exp(e, &c) && (dtype_is_float(dt) || c >= 0) && c > -2147483648.0
+      && c < 2147483648.0) {
+    Tensor r = nn_pow_c(nn_cast(b, dt), c);
+    if (r.t != 0) {
+      return r;
+    }
+  }
   u32 fdt = dtype_is_float(dt) ? dt : DT_FP32;
   b = nn_cast(b, fdt);
   e = nn_cast(e, fdt);

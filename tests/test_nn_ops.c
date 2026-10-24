@@ -334,6 +334,21 @@ int main(void) {
       CPU_BACKEND.buf_read(TENS[term_val(done)].buf_id, got, sizeof got);
       CHECK(got[0] == 0 && got[1] == 1 && got[2] == -1 && got[3] == 0 && got[4] == 1);
     }
+    // A constant exponent is tinygrad's simplify_pow: an int x ** 7 by squaring, exact
+    // where exp2(7 log2 x) in f32 reads 19487160 for 11 ** 7.
+    i32 const sb[3] = {11, 12, 13};
+    u32 stid = tensor_alloc(&CPU_BACKEND, (Shape){1, {3}}, DT_INT32);
+    CPU_BACKEND.buf_write(TENS[stid].buf_id, (void *)sb, sizeof sb);
+    Tensor sp[2] = {{term_new(0, TAG_TEN, DT_INT32, stid), DT_INT32, {1, {3}}},
+                    nn_full(7.0, DT_INT32, (Shape){0, {0}})};
+    Tensor p7 = nn_call(nn_op_id("pow"), sp, 2, NULL, 0, NULL, 0);
+    CHECK(p7.t != 0 && p7.dtype == DT_INT32);
+    if (p7.t != 0) {
+      i32 got[3] = {0};
+      Term done = term_resolve(thvm_realize(p7.t));
+      CPU_BACKEND.buf_read(TENS[term_val(done)].buf_id, got, sizeof got);
+      CHECK(got[0] == 19487171 && got[1] == 35831808 && got[2] == 62748517);
+    }
   }
 
   TEST_REPORT();
