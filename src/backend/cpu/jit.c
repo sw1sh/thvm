@@ -294,15 +294,21 @@ static void cpu_jit_warn_compile_failed(char const *what) {
 }
 
 // Spawned without a shell; diagnostics are dropped unless `loud` (an injected
-// kernel has no walker to fall back on) or THVM_CPU_JIT_VERBOSE=1.
+// kernel has no walker to fall back on) or THVM_CPU_JIT_VERBOSE=1.  No errno, as
+// tinygrad compiles (runtime/support/compiler_cpu.py), so a sqrt is an
+// instruction, not a libm call; contraction stays off, so a kernel's floats
+// match the walker's.  Not tinygrad's -march=native: gcc 11 with AVX-512
+// miscompiles a where over three 10x10 buffers.
 fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path, int loud) {
   char opt[8], bracket[40];
   snprintf(opt, sizeof opt, "-%s", cpu_jit_opt_tag());
   snprintf(bracket, sizeof bracket, "-fbracket-depth=%d", CPU_JIT_BRACKET_DEPTH);
-  char *argv[9];
+  char *argv[11];
   u32   ac = 0;
   argv[ac++] = (char *)cpu_cc();
   argv[ac++] = opt;
+  argv[ac++] = (char *)"-fno-math-errno";
+  argv[ac++] = (char *)"-ffp-contract=off";
   if (cpu_cc_is_clang()) {
     argv[ac++] = bracket;
   }

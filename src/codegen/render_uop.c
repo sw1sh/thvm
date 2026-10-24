@@ -1377,7 +1377,10 @@ static void rmu_emit_reduce_combine(const char *acc_name, u32 kind, u32 dt,
     rmu_emit_term(src, fp);
     fprintf(fp, "; %s = (%s < _v) ? _v : %s; }\n", acc_name, acc_name, acc_name);
   } else if (kind == REDUCE_MAX) {
-    fprintf(fp, "%s = fmax(%s, ", acc_name, acc_name);
+    // fmaxf for a float accumulator: fmax promotes to double, which does not
+    // vectorize.
+    fprintf(fp, "%s = %s(%s, ", acc_name,
+            RMU_TARGET == CG_TARGET_C && !rmu_holds_double(dt) ? "fmaxf" : "fmax", acc_name);
     rmu_emit_term(src, fp);
     fputs(");\n", fp);
   } else {
@@ -3366,7 +3369,9 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
 
   // Parallel accumulators (path #1 of docs/tinygrad_late_passes.md): UPCAST
   // output axes become F accumulators over one loop, on C too (independent
-  // lanes vectorize without -ffast-math); not beside GROUP_REDUCE or split K.
+  // lanes vectorize without -ffast-math), a split K's inner halves looping
+  // inside the reduce as in the single-accumulator path (tinygrad's CPU gemm,
+  // UPCAST with an UNROLLed K); not beside GROUP_REDUCE.
   int multi_axis_reject = 0;
   for (u32 ai = 0; ai < red_n_axes; ai++) {
     if (red_kind_opts[ai] == UOP_OPT_GROUP_REDUCE) {
@@ -3376,7 +3381,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
   RmuConvMSubstCtx pa_up = {0};
   u32 pa_up_exts[RMU_CONV_UPCAST_MAX] = {0};
   u32 pa_total = 1;
-  if (n_inner == 0 && !multi_axis_reject) {
+  if (!multi_axis_reject) {
     for (u32 i = 0; i < n_out_true && pa_up.n < RMU_CONV_UPCAST_MAX; i++) {
       if (out_kinds[i] != UOP_OPT_UPCAST) continue;
       Term r = out_ranges[i];
@@ -3442,6 +3447,9 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
       rmu_emit_range_open(red_ranges[ai], fp, pa_red_depth, red_kind_opts[ai]);
       pa_red_depth++;
     }
+    u32 pa_inner_depth = rmu_emit_inner_reduce_decomp_loops(
+        out_ranges + n_out_true, out_kinds + n_out_true,
+        out_factors + n_out_true, n_inner, fp, pa_red_depth);
     // Shared loads (path #2) hoist once per K iteration, before the F MADs.
     rmu_hoist_clear();
     char hoist_name_pool[RMU_HOIST_MAX * 32] = {0};
@@ -3450,7 +3458,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
                                          red_axis,
                                          hoist_name_pool,
                                          (u32)sizeof(hoist_name_pool),
-                                         fp, pa_red_depth);
+                                         fp, pa_inner_depth);
     (void)n_hoist;  // emitted inline; declarations precede the F MADs
     // F MADs, each with the UPCAST RANGEs replaced by constants; the innermost
     // UPCAST axis varies fastest, so adjacent lanes share outer-axis math.
@@ -3466,10 +3474,15 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
       Term rk = uop_graph_rewrite(red_src, pa_rules, 1, &pa_up);
       char lane_acc[48];
       snprintf(lane_acc, sizeof(lane_acc), "%s_%u", pa_acc_name, k);
-      for (u32 d = 0; d < pa_red_depth; d++) fputs("  ", fp);
+      for (u32 d = 0; d < pa_inner_depth; d++) fputs("  ", fp);
       rmu_emit_reduce_combine(lane_acc, red_kind, red_dt, rk, fp);
     }
     rmu_hoist_clear();
+    for (u32 i = 0; i < n_inner; i++) {
+      pa_inner_depth--;
+      for (u32 d = 0; d < pa_inner_depth; d++) fputs("  ", fp);
+      fputs("}\n", fp);
+    }
     // Close all reduce loops (innermost first).
     for (i32 ai = (i32)red_n_axes - 1; ai >= 0; ai--) {
       pa_red_depth--;
