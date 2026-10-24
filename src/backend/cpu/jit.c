@@ -59,11 +59,23 @@ static const char *cpu_jit_opt_tag(void) {
   return tag;
 }
 
+static int cpu_cc_is_clang(void);
+
+// 1 iff the kernels compile with -march=native (cpu_jit_compile_shared).
+static int cpu_jit_native(void) {
+#if defined(__x86_64__)
+  return cpu_cc_is_clang();
+#else
+  return 0;
+#endif
+}
+
 // The on-disk dylib of one kernel (stem "", keyed by its source hash) or of
-// one combined cold-start batch (stem "comb_", keyed by the batch key).
+// one combined cold-start batch (stem "comb_", keyed by the batch key); "n"
+// marks a -march=native build.
 static void cpu_jit_dylib_path(char *out, size_t cap, char const *stem, u64 key) {
-  snprintf(out, cap, "/tmp/thvm_jit_%s%016llx_%s.dylib", stem,
-           (unsigned long long)key, cpu_jit_opt_tag());
+  snprintf(out, cap, "/tmp/thvm_jit_%s%016llx_%s%s.dylib", stem,
+           (unsigned long long)key, cpu_jit_opt_tag(), cpu_jit_native() ? "n" : "");
 }
 
 static int cpu_jit_dylib_cached(u64 key) {
@@ -297,13 +309,14 @@ static void cpu_jit_warn_compile_failed(char const *what) {
 // kernel has no walker to fall back on) or THVM_CPU_JIT_VERBOSE=1.  No errno, as
 // tinygrad compiles (runtime/support/compiler_cpu.py), so a sqrt is an
 // instruction, not a libm call; contraction stays off, so a kernel's floats
-// match the walker's.  Not tinygrad's -march=native: gcc 11 with AVX-512
-// miscompiles a where over three 10x10 buffers.
+// match the walker's.  tinygrad's -march=native on x86-64 only with clang: gcc
+// 11 with AVX-512 miscompiles a where over three 10x10 buffers.  The dylibs
+// stay in this machine's /tmp.
 fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path, int loud) {
   char opt[8], bracket[40];
   snprintf(opt, sizeof opt, "-%s", cpu_jit_opt_tag());
   snprintf(bracket, sizeof bracket, "-fbracket-depth=%d", CPU_JIT_BRACKET_DEPTH);
-  char *argv[11];
+  char *argv[12];
   u32   ac = 0;
   argv[ac++] = (char *)cpu_cc();
   argv[ac++] = opt;
@@ -311,6 +324,9 @@ fn int cpu_jit_compile_shared(char const *src_path, char const *dl_path, int lou
   argv[ac++] = (char *)"-ffp-contract=off";
   if (cpu_cc_is_clang()) {
     argv[ac++] = bracket;
+  }
+  if (cpu_jit_native()) {
+    argv[ac++] = (char *)"-march=native";
   }
   argv[ac++] = (char *)"-fPIC";
   argv[ac++] = (char *)"-shared";
