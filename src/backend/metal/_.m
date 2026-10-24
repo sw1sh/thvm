@@ -3587,13 +3587,6 @@ static id<MTLComputePipelineState> metal_pipeline_for(uint32_t opcode,
     case UOP_SQRT:   base = "thvm_sqrt";    break;
     case UOP_EXP2:   base = "thvm_exp2";    break;
     case UOP_LOG2:   base = "thvm_log2";    break;
-    case UOP_REDUCE: base = "thvm_reduce";  break;
-    case UOP_EXPAND: base = "thvm_expand";  break;
-    case UOP_RESHAPE:base = "thvm_reshape"; break;
-    case UOP_FLIP:   base = "thvm_flip";    break;
-    case UOP_PAD:    base = "thvm_pad";     break;
-    case UOP_SHRINK: base = "thvm_shrink";  break;
-    case UOP_PERMUTE:base = "thvm_permute"; break;
     default:         return nil;
   }
   NSString *fnName = [NSString stringWithFormat:@"%s_%s", base, suffix];

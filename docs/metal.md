@@ -49,11 +49,10 @@ src/backend/metal/
   dispatch.m          -- kernel dispatch (the analogue of cpu/interpret.c)
   _.m                 -- assembles the Backend vtable
   shaders/
-    elementwise.metal -- ADD, MUL, NEG, RECIP, SQRT, EXP2, LOG2, CMPLT
-    reduce.metal      -- REDUCE_SUM, REDUCE_MAX
-    movement.metal    -- RESHAPE, EXPAND, PAD, SHRINK, FLIP, PERMUTE
-    conv2d.metal      -- UOP_CONV2D
+    binary.metal      -- ADD, MUL, CMPLT, CMPEQ, the DAG encoder's per-op kernels
+    unary.metal       -- NEG, RECIP, SQRT, EXP2, LOG2
     const.metal       -- UOP_CONST (constant fill)
+    aot_*.metal       -- AOT-on-Metal kernels
 ```
 
 ## Build wiring
