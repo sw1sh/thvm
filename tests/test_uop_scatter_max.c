@@ -245,9 +245,8 @@ static int check_bytes(void const *got, void const *want, u32 n, u32 dt,
 static u32 DISPATCHED = 0;
 
 // The CPU JIT declines a kernel with a narrow-float buffer
-// (cpu_jit_narrow_float, backend/cpu/jit.c) or a bool input (DT_BOOL is
-// dtype 0, the untyped-slot decline of cg_render_uop_kernel_c_root), so the
-// walker runs it in either mode.
+// (cpu_jit_narrow_float, backend/cpu/jit.c), so the walker runs it in either
+// mode; a bool input compiles (an unsigned char slot).
 static int jit_declines(u32 k) {
   u32 od = KERNELS[k].output_dtype;
   if (dtype_is_float(od) && dtype_itemsize(od) < 4) {
@@ -255,7 +254,7 @@ static int jit_declines(u32 k) {
   }
   for (u32 i = 0; i < KERNELS[k].n_inputs && KERNELS[k].input_dtypes != NULL; i++) {
     u32 d = KERNELS[k].input_dtypes[i];
-    if (d == DT_BOOL || (dtype_is_float(d) && dtype_itemsize(d) < 4)) {
+    if (dtype_is_float(d) && dtype_itemsize(d) < 4) {
       return 1;
     }
   }
