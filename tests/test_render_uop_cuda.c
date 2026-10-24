@@ -84,6 +84,36 @@ int main(void) {
     free(cu);
   }
 
+  // === Storage types ================================================
+  // A bool is one byte in its buffer, so the pointer is too: a float pointer
+  // wrote 4-byte 0.0/1.0 into a 1-byte-per-element buffer.  Each dtype gets the
+  // C kernels' storage type (rmu_c_type_name).
+  TEST_BEGIN("render-uop-cuda/storage-types-of-every-dtype");
+  {
+    u32 const   dts[]   = { DT_BOOL, DT_INT16, DT_UINT16, DT_UINT32, DT_UINT64, DT_FP64 };
+    char const *names[] = { "unsigned char", "short", "unsigned short", "unsigned int",
+                            "unsigned long long", "double" };
+    u32 dims[1] = { 8 };
+    for (u32 i = 0; i < 6; i++) {
+      Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, dts[i], 1, dims, 0);
+      Term in0 = uop_buffer_inst(UOP_SCOPE_GLOBAL, dts[i], 1, dims, 1);
+      Term r0  = uop_range(0, KAX_LOOP, 8);
+      char *cu = render_cuda(uop_store(out, r0, uop_index_e(in0, r0)), "k_ty");
+      char want_out[64], want_in[64];
+      snprintf(want_out, sizeof want_out, "    %s *out", names[i]);
+      snprintf(want_in, sizeof want_in, "const %s *in0", names[i]);
+      CHECK(cu != NULL && contains(cu, want_out) && contains(cu, want_in));
+      free(cu);
+    }
+    Term out = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_BOOL, 1, dims, 0);
+    Term in0 = uop_buffer_inst(UOP_SCOPE_GLOBAL, DT_FP32, 1, dims, 1);
+    Term r0  = uop_range(0, KAX_LOOP, 8);
+    Term lt  = uop_binary(UOP_CMPLT, uop_const(DT_FP32, 0), uop_index_e(in0, r0));
+    char *cu = render_cuda(uop_store(out, r0, lt), "k_lt");
+    CHECK(cu != NULL && contains(cu, "unsigned char *out") && contains(cu, "const float *in0"));
+    free(cu);
+  }
+
   // === Empty kernel ==================================================
   TEST_BEGIN("render-uop-cuda/empty-root");
   {

@@ -169,15 +169,21 @@ static const char *rmu_buf_name(Term t) {
   return fallback;
 }
 
+// A bool is one byte, as its host buffer (rmu_c_type_name).
 static const char *rmu_msl_type_name(u32 dtype) {
   switch (dtype) {
+    case DT_BOOL:  return "uchar";
     case DT_FP32:  return "float";
     case DT_FP16:  return "half";
     // Metal 3.1 `bfloat`, as tinygrad MetalRenderer.type_map
     // (tinygrad/renderer/cstyle.py:366); the JIT compiles with -std=metal3.1.
     case DT_BF16:  return "bfloat";
     case DT_INT32: return "int";
+    case DT_UINT32:return "uint";
     case DT_INT64: return "long";
+    case DT_UINT64:return "ulong";
+    case DT_INT16: return "short";
+    case DT_UINT16:return "ushort";
     case DT_INT8:  return "char";   // MSL char is signed 8-bit
     case DT_UINT8: return "uchar";
     // fp8 has no GPU scalar: the pointer is the raw byte and the load site
@@ -190,11 +196,17 @@ static const char *rmu_msl_type_name(u32 dtype) {
 
 static const char *rmu_cuda_type_name(u32 dtype) {
   switch (dtype) {
+    case DT_BOOL:  return "unsigned char";
     case DT_FP32:  return "float";
+    case DT_FP64:  return "double";
     case DT_FP16:  return "__half";
     case DT_BF16:  return "__nv_bfloat16";
     case DT_INT32: return "int";
+    case DT_UINT32:return "unsigned int";
     case DT_INT64: return "long long";
+    case DT_UINT64:return "unsigned long long";
+    case DT_INT16: return "short";
+    case DT_UINT16:return "unsigned short";
     case DT_INT8:  return "signed char";
     case DT_UINT8: return "unsigned char";
     // fp8: the raw byte, decoded at the load site as on Metal.
