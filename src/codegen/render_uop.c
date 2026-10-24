@@ -4669,6 +4669,13 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
       return;
     }
   }
+  // C holds a 16- or 8-bit float as a float, so a CAST to one would not round;
+  // the walker narrows it as tinygrad's kernel does.
+  if (uop_dag_has_narrow_cast(root)) {
+    rmu_c_decline("casts to a 16- or 8-bit float", 0);
+    rmu_slots_free(&slots);
+    return;
+  }
   char  *src    = NULL;
   size_t src_sz = 0;
   FILE  *out_fp = fp;

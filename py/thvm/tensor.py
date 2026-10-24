@@ -1420,10 +1420,15 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         """1-D ramp [start, stop) by `step` (tinygrad mixin/op.py:166-195)."""
         if stop is None:
             stop, start = start, 0
+        lo, hi = (start, stop - step) if step > 0 else (stop - step, start)
         if dtype is None:
-            dtype = (dtypes.default_float
-                     if any(isinstance(x, float) for x in (start, stop, step))
-                     else dtypes.default_int)
+            # An int range takes the first of tinygrad's commit_int ladder that holds it (dtype.py:171-174).
+            ladder = (dtypes.default_int, dtypes.int32, dtypes.int64, dtypes.uint64)
+            dtype = (dtypes.default_float if any(isinstance(x, float) for x in (start, stop, step))
+                     else next((d for d in ladder if d.min <= lo and hi <= d.max), dtypes.int64))
+        dtype = to_dtype(dtype)
+        if lo < dtype.min or dtype.max < hi:
+            raise OverflowError(f"arange [{start}, {stop}) is not representable in dtype {dtype}")
         return Tensor._from_nn(_TH.nn("arange", [], [dtype.thvm_id], [start, stop, step]), "arange")
 
     def cast(self, dtype: DType) -> "Tensor":

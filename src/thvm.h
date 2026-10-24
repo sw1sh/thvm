@@ -1977,6 +1977,8 @@ void uop_dag_decode_addr_coeffs(Term addr, UopDagAddrCoeffsView *out);
 u32  uop_dag_addr_coeff_lookup (UopDagAddrCoeffsView const *a, u32 axis_id);
 // The distinct INDEX_E and STORE addresses under `root`, tinygrad's bufs.
 u32  uop_dag_collect_buf_addrs (Term root, Term *out_addrs, u32 cap);
+// 1 iff `root` holds a CAST to a 16- or 8-bit float.
+fn int uop_dag_has_narrow_cast(Term root);
 
 // Should this kernel get the hand-coded opt heuristic on its next
 // fire?  True iff the env opt-in is on (default ON; HAND_CODED_OPTS=0

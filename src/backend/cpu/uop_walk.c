@@ -273,6 +273,20 @@ static double uwalk_round(u32 dt, double v) {
   return (dt == DT_FP64) ? v : (double)(f32)v;
 }
 
+// A CAST to a 16- or 8-bit float rounds through its storage, as the store
+// encoders narrow it and tinygrad's kernel casts do; C declines the kernel.  A
+// NaN passes as is, so a store encodes its payload once.
+static double uwalk_narrow(u32 dt, double v) {
+  f32 f = (f32)v;
+  switch (dt) {
+    case DT_FP16:    return fp16_to_f32(f32_to_fp16(f));
+    case DT_BF16:    return bf16_to_f32(f32_to_bf16(f));
+    case DT_FP8E4M3: return fp8e4m3_to_f32(f32_to_fp8e4m3_sat(f));
+    case DT_FP8E5M2: return fp8e5m2_to_f32(f32_to_fp8e5m2_sat(f));
+    default:         return v;
+  }
+}
+
 // v of int dtype `sdt` to float dtype `dst` as C converts it: a double for an
 // f64, else a float rounded once from the exact value; a u64 is unsigned.
 static double uwalk_int_to_float(u32 sdt, u32 dst, i64 v) {
@@ -707,7 +721,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
       if (uwalk_dtype_is_float(dst)) {
-        return uwalk_cast_float(c, src, dst);
+        return uwalk_narrow(dst, uwalk_cast_float(c, src, dst));
       }
       return uwalk_int_to_f64(dst, uwalk_cast_int(c, src, dst));
     }
@@ -831,7 +845,7 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       Term src = heap_read(loc + 0);
       u32  dst = term_val(heap_read(loc + 1));
       if (uwalk_dtype_is_float(dst)) {
-        return uwalk_f64_to_int(DT_INT64, uwalk_cast_float(c, src, dst));
+        return uwalk_f64_to_int(DT_INT64, uwalk_narrow(dst, uwalk_cast_float(c, src, dst)));
       }
       return uwalk_cast_int(c, src, dst);
     }
