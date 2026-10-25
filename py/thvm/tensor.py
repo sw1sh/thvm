@@ -162,7 +162,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     def __init__(self, data=None, dtype: DType | None = None,
                  device: str | None = None):
-        del device  # accepted for tinygrad compat; DEV picks at init
+        Device.canonicalize(device)
         if isinstance(data, Tensor):
             self.term = data.term
             self._dtype = data._dtype
@@ -487,6 +487,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         """fill_value everywhere, in dtype or the one fill_value implies: a lazy constant, as
         tinygrad's Tensor(fill_value).reshape(1s).expand(shape) (mixin/creation.py full), but for
         an int past int32, which a CONST holds only the low 32 bits of."""
+        Device.canonicalize(kw.get("device"))
         dt = to_dtype(dtype) if dtype is not None else dtypes.from_py(fill_value)
         if isinstance(fill_value, int) and not -2**31 <= fill_value < 2**31:
             return cls(np.full(argfix(shape), fill_value, dtype=_to_np_dtype(dt)), dtype=dt)
@@ -497,11 +498,11 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     @classmethod
     def ones(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
-        return cls.full(argfix(*shape), 1.0, dtype=dtype)
+        return cls.full(argfix(*shape), 1.0, dtype=dtype, **kw)
 
     @classmethod
     def zeros(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
-        return cls.full(argfix(*shape), 0.0, dtype=dtype)
+        return cls.full(argfix(*shape), 0.0, dtype=dtype, **kw)
 
     @classmethod
     def eye(cls, n: int, m: int | None = None, dtype: DType | None = None, **kw) -> "Tensor":
@@ -511,6 +512,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     @classmethod
     def empty(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
         """An unfilled buffer (tinygrad empty): allocated, never written."""
+        Device.canonicalize(kw.get("device"))
         dt = to_dtype(dtype) if dtype is not None else dtypes.default_float
         shape = tuple(int(d) for d in argfix(*shape))
         _TH.reclaim_if_due()
@@ -1443,12 +1445,13 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     def to(self, device, force: bool = False) -> "Tensor":
         """Device move (tinygrad tensor.py:353-367): the identity, as DEV picks thvm's one device at
         process start; `force` has nothing to transfer, thvm's leaves being backend buffers."""
-        del device, force
+        del force
+        Device.canonicalize(device)
         return self
 
     def to_(self, device) -> "Tensor":
         """In-place device move (tinygrad tensor.py:345-356): the identity, as for to()."""
-        del device
+        Device.canonicalize(device)
         return self
 
     def const_like(self, value, dtype: DType | None = None) -> "Tensor":

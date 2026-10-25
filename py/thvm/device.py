@@ -27,7 +27,12 @@ class _Device:
     DEFAULT: str = (os.environ.get("DEV", "") or "cpu").split(":", 1)[0].upper()
 
     def canonicalize(self, device: str | None) -> str:
-        return (device or self.DEFAULT).split(":", 1)[0].upper()
+        """The device's kind; thvm drives one device of each, so an index past 0 names none, as a
+        second device tinygrad cannot open (test/helpers.py needs_second_gpu)."""
+        kind, _, idx = (device or self.DEFAULT).partition(":")
+        if idx.isdigit() and int(idx) != 0:
+            raise RuntimeError(f"thvm drives one {kind.upper()} device, not {device}")
+        return kind.upper()
 
     def __getitem__(self, device: str) -> _Dev:
         return _Dev(self.canonicalize(device))
