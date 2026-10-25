@@ -1,10 +1,7 @@
-"""A TinyJit replay redraws the host random tensors its capture drew.
-
-thvm's random factories draw on the host from numpy's RNG, where tinygrad's draw in-graph, so a
-replay of the captured kernels read the capture's draw again: beautiful_mnist's
-`Tensor.randint(BS, high=N)` batch never changed after the second step, and training overfit it.
-Each draw a capture makes is recorded with its generator, and a replay writes a fresh draw into
-the same buffer first.
+"""A TinyJit replay draws fresh random values, as tinygrad's (test/unit/test_jit_footguns.py
+test_random_regenerates): the draws are threefry over a counter buffer that each call advances, and
+the replay advances it too, so beautiful_mnist's `Tensor.randint(BS, high=N)` batch changes every
+step.  manual_seed repeats an eager sequence.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_jit_random.py -q
 """
@@ -28,18 +25,24 @@ class TestJitRandom(unittest.TestCase):
         for d in draws:
             self.assertTrue(all(0 <= v < 100 for v in d))
 
-    def test_rand_and_seed(self):
+    def test_random_regenerates(self):
         @TinyJit
-        def noise(y):
-            return (y + Tensor.rand(8)).realize()
+        def f(x):
+            return (x + Tensor.rand(3)).realize()
 
-        y = Tensor(np.zeros(8, np.float32))
+        f(Tensor([0.0, 0.0, 0.0]))
+        f(Tensor([0.0, 0.0, 0.0]))
+        results = {tuple(f(Tensor([0.0, 0.0, 0.0])).numpy().tolist()) for _ in range(5)}
+        self.assertEqual(len(results), 5)
+
+    def test_seed_repeats(self):
         Tensor.manual_seed(3)
-        first = [noise(y).numpy() for _ in range(4)]
+        first = [Tensor.rand(8).numpy() for _ in range(3)]
         Tensor.manual_seed(3)
-        again = [noise(y).numpy() for _ in range(4)]
-        self.assertFalse(np.array_equal(first[2], first[3]))
-        np.testing.assert_array_equal(first[3], again[3])
+        again = [Tensor.rand(8).numpy() for _ in range(3)]
+        for a, b in zip(first, again):
+            np.testing.assert_array_equal(a, b)
+        self.assertFalse(np.array_equal(first[0], first[1]))
 
 
 if __name__ == "__main__":

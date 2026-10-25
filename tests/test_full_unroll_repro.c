@@ -63,7 +63,9 @@ int main(void) {
   // inner loop), NOT a split-by-4 nest, and must keep a live reduce loop.
   TEST_BEGIN("full-unroll/renders-full-extent-not-split4");
   CHECK(contains(after, "unroll(16)") || contains(after, "unroll_count(16)"));
-  CHECK(!contains(after, "< 4;"));         // no split-by-4 inner trip count
+  // The body only: the prologue's helpers (thvm_threefry) loop over 4 too.
+  char const *body = strstr(after, "k_unroll");
+  CHECK(body != NULL && !contains(body, "< 4;"));   // no split-by-4 inner trip count
   CHECK(contains(after, "_acc"));          // accumulator survives
 
   // --- Numeric exactness: compile both kernels, run, compare ---

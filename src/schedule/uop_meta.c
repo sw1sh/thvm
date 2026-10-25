@@ -25,7 +25,7 @@ fn u8 uop_arity(u8 op) {
     // first slot counts.
     case UOP_BUFFERIZE:
       return 1;
-    case UOP_ADD: case UOP_MUL: case UOP_POW: case UOP_CMPLT: case UOP_CMPEQ:
+    case UOP_ADD: case UOP_MUL: case UOP_POW: case UOP_THREEFRY: case UOP_CMPLT: case UOP_CMPEQ:
     case UOP_ASSIGN:
     // The index-layer integer ops = [a, b] and INDEX_E = [buffer, addr];
     // walkers descend both to reach the RANGE leaves of an address.
@@ -57,7 +57,7 @@ fn u8 uop_is_unary_elementwise(u8 op) {
 fn u8 uop_is_binary_elementwise(u8 op) {
   return op == UOP_ADD  || op == UOP_MUL || op == UOP_CMPLT || op == UOP_CMPEQ
       || op == UOP_POW  || op == UOP_IDIV || op == UOP_IMOD || op == UOP_IAND || op == UOP_IOR
-      || op == UOP_IXOR || op == UOP_ISHL || op == UOP_ISHR;
+      || op == UOP_IXOR || op == UOP_ISHL || op == UOP_ISHR || op == UOP_THREEFRY;
 }
 
 // IWHERE doubles as tinygrad's value-graph Ops.WHERE.  Its index-layer uses

@@ -177,6 +177,7 @@ class _Constants:
     IOR = _read_uint32_const("py_const_UOP_IOR")
     IXOR = _read_uint32_const("py_const_UOP_IXOR")
     ISHL = _read_uint32_const("py_const_UOP_ISHL")
+    THREEFRY = _read_uint32_const("py_const_UOP_THREEFRY")
     ISHR = _read_uint32_const("py_const_UOP_ISHR")
     REDUCE_SUM = _read_uint32_const("py_const_REDUCE_SUM")
     REDUCE_MAX = _read_uint32_const("py_const_REDUCE_MAX")

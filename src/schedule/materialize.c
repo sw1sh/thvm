@@ -3099,6 +3099,7 @@ static char const *bypass_dbg_op_name(u8 op) {
     case UOP_ADD:         return "ADD";
     case UOP_MUL:         return "MUL";
     case UOP_POW:         return "POW";
+    case UOP_THREEFRY:    return "THREEFRY";
     case UOP_NEG:         return "NEG";
     case UOP_RECIP:       return "RECIP";
     case UOP_EXP2:        return "EXP2";

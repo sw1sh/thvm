@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import ctypes
 import functools
+import hashlib
 import itertools
 import math
+import time
 import warnings
 import weakref
 
@@ -18,10 +20,9 @@ import numpy as np
 from .device import Device
 from .dtypes import (DType, dtypes, from_thvm_id, least_upper_dtype, sum_acc_dtype, to_dtype,
                      _from_np_dtype, _to_np_dtype)
-from .helpers import TRAINING, argfix, argsort, make_tuple
+from .helpers import TRAINING, argfix, argsort, ceildiv, make_tuple
 from .mixin import OpMixin, _align_left
 from .thvm import K, Term, Thvm
-from ._misc import jit_record_random
 
 
 _TH = Thvm()
@@ -519,47 +520,105 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         _TH.reclaim_if_due()
         return cls._from_term(_TH.ten_create(dt.thvm_id, list(shape)), dt, shape)
 
-    # Random factories draw from numpy's global RNG (manual_seed seeds it); tinygrad draws
-    # in-graph (mixin/rand.py), with the same distributions and init formulas.
+    # tinygrad's RNG (mixin/rand.py:10-238, tensor.py:470-504): threefry2x32 keyed by a per-device
+    # seed over a per-device counter, in the graph, so a TinyJit replay draws afresh as it advances
+    # the counter.  A factory's value is realized, as thvm's backward() gives .grad to buffers.
+    _seed: int = int(time.time())
+    _device_seeds: dict = {}
+    _device_rng_counters: dict = {}
+
+    @staticmethod
+    def manual_seed(seed: int = 0) -> None:
+        Tensor._seed, Tensor._device_seeds, Tensor._device_rng_counters = seed, {}, {}
+
+    @staticmethod
+    def _next_counter(device: str, num: int):
+        """The device's key and its counter before `num` more words; the counter's advance is realized
+        here, where tinygrad leaves it pending, so a draw never reads an assign that fires again."""
+        if device not in Tensor._device_seeds:
+            h = int.from_bytes(hashlib.sha256(len(Tensor._device_seeds).to_bytes(4, "big")).digest(), "big")
+            Tensor._device_seeds[device] = Tensor([h & 0xffffffff, Tensor._seed & 0xffffffff], dtype=dtypes.uint32)
+            Tensor._device_rng_counters[device] = Tensor([0, 0], dtype=dtypes.uint32)
+        counter = Tensor._device_rng_counters[device]
+        new_low = counter[0:1] + (num & 0xffffffff)
+        new_high = counter[1:2] + (num >> 32) + (new_low < counter[0]).cast(dtypes.uint32)
+        counter.assign(new_low.cat(new_high)).realize()
+        low = counter[0:1] - (num & 0xffffffff)
+        high = counter[1:2] - (num >> 32) - (counter[0] < (num & 0xffffffff)).cast(dtypes.uint32)
+        return Tensor._device_seeds[device], low.cat(high)
+
+    def threefry(self, seed: "Tensor") -> "Tensor":
+        return Tensor._from_term(_TH.binary(K.THREEFRY, self.term, seed.term), self._dtype, self._shape)
+
+    @staticmethod
+    def _threefry_random_bits(key, counts0, counts1):
+        x = (counts1.cast(dtypes.uint64) << 32) | counts0.cast(dtypes.uint64)
+        x = x.threefry((key[1]._broadcast_to(x.shape).cast(dtypes.uint64) << 32) | key[0]._broadcast_to(x.shape).cast(dtypes.uint64))
+        return (x & 0xffffffff).cast(dtypes.uint32).cat(((x >> 32) & 0xffffffff).cast(dtypes.uint32))
 
     @classmethod
-    def _random(cls, draw, dtype) -> "Tensor":
-        """A host draw; under a TinyJit capture each replay redraws it into the same buffer
-        (_misc.jit_record_random), as tinygrad's in-graph RNG gives fresh values per call."""
-        dt = to_dtype(dtype) if dtype is not None else dtypes.default_float
-        t = cls(np.asarray(draw()).astype(_to_np_dtype(dt)), dtype=dt)
-        jit_record_random(t, draw)
-        return t
+    def random_bits(cls, key, counter, num: int):
+        low, high = counter[0:1], counter[1:2]
+        bits = []
+        for i in range(0, num, dtypes.uint32.max):
+            chunk_num = min(num - i, dtypes.uint32.max)
+            c_low = low + (i & 0xffffffff)
+            c_high = high + (i >> 32) + (c_low < low).cast(dtypes.uint32)
+            new_key = cls._threefry_random_bits(key, c_low, c_high)
+            counts0 = cls.arange(ceildiv(chunk_num, 2), dtype=dtypes.uint32)
+            counts1 = counts0 + ceildiv(chunk_num, 2)
+            bits.append(cls._threefry_random_bits(new_key, counts0, counts1)[:chunk_num])
+        return bits[0].cat(*bits[1:]) if bits else counter[0:0]
 
-    def _redraw(self, draw) -> None:
-        _TH.ten_write(self.term, _host_bytes(np.asarray(draw()).astype(_to_np_dtype(self._dtype)), self._dtype))
+    @staticmethod
+    def _bits_to_rand(bits, shape, dtype):
+        """k / 2**nmant from each element's top nmant bits, the value tinygrad builds as the float 1.k
+        less 1, with no bitcast to a narrow float.  A narrower or wider dtype reads the uint32 words
+        little-endian, as tinygrad's size-changing bitcast."""
+        n, nmant = dtype.itemsize, dtypes.finfo(dtype)[1]
+        if n == 8:
+            w = bits.reshape(-1, 2).cast(dtypes.uint64)
+            bits = (w[:, 1] << 32) | w[:, 0]
+        elif n < 4:
+            sh = Tensor([8 * n * k for k in range(4 // n)], dtype=dtypes.uint32)
+            bits = ((bits.unsqueeze(-1) >> sh) & ((1 << (8 * n)) - 1)).cast({1: dtypes.uint8, 2: dtypes.uint16}[n]).flatten()
+        k = bits.rshift(dtype.bitsize - nmant).cast(dtypes.float64 if n == 8 else dtypes.float32)
+        return (k * 2.0 ** -nmant).cast(dtype)[:math.prod(shape)].reshape(shape)
 
     @classmethod
-    def rand(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
-        """[0, 1) on the dtype's mantissa grid, k / 2**nmant as tinygrad's draw (mixin/rand.py:32-37),
-        so a narrow float never rounds up to 1."""
+    def rand(cls, *shape, dtype: DType | None = None, contiguous: bool = True, **kw) -> "Tensor":
+        """[0, 1) on the dtype's mantissa grid (tinygrad mixin/rand.py:40-68)."""
         dt = to_dtype(dtype) if dtype is not None else dtypes.default_float
         if not dtypes.is_float(dt):
             raise ValueError(f"rand only supports float dtypes, got {dt}")
-        m = 2 ** dtypes.finfo(dt)[1]
-        return cls._random(lambda: np.floor(np.random.rand(*argfix(*shape)) * m) / m, dt)
+        shape = argfix(*shape)
+        if not all(isinstance(s, int) and s >= 0 for s in shape):
+            raise ValueError(f"invalid input {shape=}")
+        key, counter = cls._next_counter(Device.canonicalize(kw.get("device")), ceildiv(math.prod(shape) * dt.itemsize, 4))
+        out = cls._bits_to_rand(cls.random_bits(key, counter, ceildiv(math.prod(shape) * dt.itemsize, 4)), shape, dt)
+        return out.contiguous() if contiguous else out
 
     @classmethod
-    def randn(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
-        return cls._random(lambda: np.random.standard_normal(argfix(*shape)), dtype)
+    def randn(cls, *shape, dtype: DType | None = None, contiguous: bool = True, **kw) -> "Tensor":
+        """Box-Muller over two float32 draws (tinygrad mixin/rand.py:94-117)."""
+        src = cls.rand(2, *argfix(*shape), dtype=dtypes.float32, contiguous=False, **kw)
+        out = src[0].mul(2 * math.pi).cos().mul((1 - src[1]).log().mul(-2).sqrt())
+        out = out.cast(to_dtype(dtype) if dtype is not None else dtypes.default_float)
+        return out.contiguous() if contiguous else out
 
     @classmethod
-    def normal(cls, *shape, mean: float = 0.0, std: float = 1.0, dtype=None, **kw) -> "Tensor":
+    def normal(cls, *shape, mean: float = 0.0, std: float = 1.0, **kw) -> "Tensor":
         if std < 0:
             raise ValueError(f"Tensor.normal requires std >= 0, got {std=}")
-        return cls._random(lambda: np.random.normal(mean, std, argfix(*shape)), dtype)
+        return (std * cls.randn(*shape, contiguous=False, **kw) + mean).contiguous()
 
     @classmethod
     def uniform(cls, *shape, low: float = 0.0, high: float = 1.0, dtype: DType | None = None,
                 **kw) -> "Tensor":
         if low >= high:
             raise ValueError(f"Tensor.uniform requires low < high, got {low=}, {high=}")
-        return cls._random(lambda: np.random.uniform(low, high, argfix(*shape)), dtype)
+        u = (high - low) * cls.rand(*shape, contiguous=False, **kw)
+        return (u.cast(to_dtype(dtype) if dtype is not None else dtypes.default_float) + low).contiguous()
 
     @classmethod
     def randint(cls, *shape, low: int = 0, high: int = 10, dtype: DType | None = None,
@@ -571,7 +630,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             raise TypeError(f"{dt=} must be int")
         if low >= high:
             raise ValueError(f"Tensor.randint requires low < high, got {low=}, {high=}")
-        return cls._random(lambda: np.random.randint(low, high, size=argfix(*shape)), dt)
+        return cls.uniform(*shape, low=low, high=high, dtype=dt, **kw)
 
     @classmethod
     def scaled_uniform(cls, *shape, **kw) -> "Tensor":
@@ -593,11 +652,15 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         std = (2 / (1 + a ** 2) / math.prod(argfix(*shape)[1:])) ** 0.5
         return cls.normal(*shape, mean=0.0, std=std, **kw)
 
+    @classmethod
+    def randperm(cls, n: int, dtype: DType | None = None, **kw) -> "Tensor":
+        return cls.rand(n, **kw).argsort().cast(to_dtype(dtype) if dtype is not None else dtypes.int32)
+
     def rand_like(self, **kw) -> "Tensor":
-        return Tensor.rand(*self._shape, dtype=kw.pop("dtype", self._dtype))
+        return Tensor.rand(*self._shape, dtype=kw.pop("dtype", self._dtype), **kw)
 
     def randn_like(self, dtype: DType | None = None, **kw) -> "Tensor":
-        return Tensor.randn(*self._shape, dtype=dtype or self._dtype)
+        return Tensor.randn(*self._shape, dtype=dtype or self._dtype, **kw)
 
     def full_like(self, fill_value, dtype: DType | None = None, **kw) -> "Tensor":
         return Tensor.full(self._shape, fill_value, dtype=dtype or self._dtype)
@@ -1552,12 +1615,6 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         args = [q._nn(), key._nn(), value._nn(), None if attn_mask is None else attn_mask._nn()]
         r = _TH.nn("scaled_dot_product_attention", args, [1 if is_causal else 0])
         return Tensor._from_nn(r, "scaled_dot_product_attention")
-
-    @staticmethod
-    def manual_seed(seed: int = 0) -> None:
-        """Seed numpy's global RNG, which thvm's random factories and multinomial draw from
-        (tinygrad tensor.py:441-457)."""
-        np.random.seed(seed)
 
     def multinomial(self, num_samples: int = 1, replacement: bool = False) -> "Tensor":
         """`num_samples` indices per row drawn by the weights in self (tinygrad mixin/rand.py:251-276):

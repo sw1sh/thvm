@@ -47,7 +47,7 @@ fn u32 term_cells(Term t, Term const *mem) {
         case UOP_LOG2: case UOP_SQRT: case UOP_LOAD:
           return 1;
         case UOP_COPY: return 2;              // [src, NUM(device+1)]
-        case UOP_ADD: case UOP_MUL: case UOP_POW:
+        case UOP_ADD: case UOP_MUL: case UOP_POW: case UOP_THREEFRY:
         case UOP_CMPLT: case UOP_CMPEQ:
           return 2;
         // CAST/BITCAST = [src, NUM(dst_dtype)]; INDEX_E/AFTER and the integer

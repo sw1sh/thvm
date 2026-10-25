@@ -20,7 +20,7 @@ fn u32 uop_src_count(Term t) {
     case UOP_AFTER:
       return 2;
     case UOP_RESHAPE: case UOP_PERMUTE: case UOP_EXPAND: case UOP_PAD:
-    case UOP_SHRINK: case UOP_FLIP: case UOP_ADD: case UOP_MUL: case UOP_POW: case UOP_NEG:
+    case UOP_SHRINK: case UOP_FLIP: case UOP_ADD: case UOP_MUL: case UOP_POW: case UOP_THREEFRY: case UOP_NEG:
     case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN: case UOP_CMPLT:
     case UOP_REDUCE: case UOP_CMPEQ: case UOP_LOAD: case UOP_ASSIGN: case UOP_CAST:
     case UOP_BITCAST: case UOP_INDEX_E: case UOP_IADD: case UOP_ISUB: case UOP_IMUL:

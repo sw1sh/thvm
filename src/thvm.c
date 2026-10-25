@@ -191,6 +191,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // The C kernels' exp2 and int pow and the walker's (render_uop.c, backend/cpu/uop_walk.c).
 #include "codegen/xexp2f.c"
 #include "codegen/ipow.c"
+#include "codegen/threefry.c"
 #include "codegen/render_uop.c"
 // CPU dispatch: interpreter + BLAS pattern dispatch + clang-JIT.
 // cpu_dispatch_kernel composes the three (BLAS first, then JIT, then

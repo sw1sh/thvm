@@ -1122,7 +1122,7 @@ int main(void) {
   // F6: cg_render_uop_kernel_c emits a C99 kernel for CPU JIT use.
   // Same UOp DAG, different prologue (no kernel/[[buffer]]/thread attrs).
   TEST_BEGIN("render-uop-c/empty-root-prints-empty");
-  char bufc0[2048];
+  char bufc0[8192];
   fp = fmemopen(bufc0, sizeof(bufc0), "w");
   CHECK(fp != NULL);
   cg_render_uop_kernel_c(/*root=*/0, "k0c", out, NULL, 0, fp);

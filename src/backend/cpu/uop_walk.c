@@ -398,7 +398,7 @@ static u32 uwalk_term_dtype_of(UWalkCtx *c, Term t) {
     case UOP_ADD: case UOP_MUL:
       return uwalk_dtype_promote(uwalk_term_dtype(c, heap_read(loc)),
                                  uwalk_term_dtype(c, heap_read(loc + 1)));
-    case UOP_POW: {
+    case UOP_POW: case UOP_THREEFRY: {
       u32 dt = DT_INT32;
       (void)term_dtype_in(t, 0, &dt);
       return uwalk_c_dtype(dt);
@@ -771,7 +771,7 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
     case UOP_RANGE: case UOP_DEFINE_VAR:
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR:
-    case UOP_IXOR: case UOP_ISHR: case UOP_ISHL: case UOP_POW:
+    case UOP_IXOR: case UOP_ISHR: case UOP_ISHL: case UOP_POW: case UOP_THREEFRY:
       return (double)uwalk_eval_int(c, t);
     case UOP_INVALID:
       return 0.0;
@@ -818,6 +818,10 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
       u64 r = thvm_ipow((u64)b, (u64)e, dtype_is_signed(dt) && e < 0, dtype_info(dt)->bits);
       return uwalk_int_wrap(dt, (i64)r);
     }
+    case UOP_THREEFRY:
+      // thvm_threefry, as the C kernels call it (codegen/threefry.c).
+      return (i64)thvm_threefry((u64)uwalk_eval_int(c, heap_read(loc + 0)),
+                                (u64)uwalk_eval_int(c, heap_read(loc + 1)));
     case UOP_IDIV: case UOP_IMOD: {
       // As the renderer: a value divide in its own int dtype, unsigned for an
       // unsigned one, and 0 for a zero divisor.
@@ -958,7 +962,7 @@ static void uwalk_collect_ranges(Term t, Term *ranges, u32 *n_out) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR: case UOP_ISHL:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW: case UOP_THREEFRY:
     case UOP_INDEX_E:
       uwalk_collect_ranges(heap_read(loc + 0), ranges, n_out);
       uwalk_collect_ranges(heap_read(loc + 1), ranges, n_out);
@@ -1003,7 +1007,7 @@ static void uwalk_collect_reduces(Term t, Term *reduces, u32 *n_out) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR: case UOP_ISHL:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW: case UOP_THREEFRY:
     case UOP_INDEX_E:
       uwalk_collect_reduces(heap_read(loc + 0), reduces, n_out);
       uwalk_collect_reduces(heap_read(loc + 1), reduces, n_out);
@@ -1046,7 +1050,7 @@ static void uwalk_collect_all_reduces(Term t, Term *reduces, u32 *n_out,
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR: case UOP_ISHL:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW: case UOP_THREEFRY:
     case UOP_INDEX_E:
       uwalk_collect_all_reduces(heap_read(loc + 0), reduces, n_out, depth + 1);
       uwalk_collect_all_reduces(heap_read(loc + 1), reduces, n_out, depth + 1);
@@ -1097,7 +1101,7 @@ static void uwalk_collect_split_ranges(Term t, Term *ranges, u32 *n_out,
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR: case UOP_ISHL:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW: case UOP_THREEFRY:
     case UOP_INDEX_E:
       uwalk_collect_split_ranges(heap_read(loc + 0), ranges, n_out, depth + 1);
       uwalk_collect_split_ranges(heap_read(loc + 1), ranges, n_out, depth + 1);

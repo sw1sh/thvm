@@ -614,6 +614,15 @@ static void rmu_emit_term(Term t, FILE *fp) {
       fprintf(fp, ", %uu))", dtype_info(dt)->bits);
       return;
     }
+    case UOP_THREEFRY: {
+      // codegen/threefry.c's text, written into every kernel's prologue.
+      fputs("thvm_threefry((thvm_u64)(", fp);
+      rmu_emit_term(heap_read(loc + 0), fp);
+      fputs("), (thvm_u64)(", fp);
+      rmu_emit_term(heap_read(loc + 1), fp);
+      fputs("))", fp);
+      return;
+    }
     case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN: {
       u32 dt     = rmu_dtype_of(t);
       int xexp2f = op == UOP_EXP2 && RMU_TARGET == CG_TARGET_C && dt == DT_FP32;
@@ -810,7 +819,7 @@ static u32 rmu_walk_arity(u32 op) {
     case UOP_IADD: case UOP_ISUB: case UOP_IMUL: case UOP_IDIV:
     case UOP_IMOD: case UOP_ILT:  case UOP_IAND: case UOP_IOR: case UOP_IXOR:
     case UOP_ISHR: case UOP_ISHL:
-    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW:
+    case UOP_ADD:  case UOP_MUL:  case UOP_CMPLT: case UOP_CMPEQ: case UOP_POW: case UOP_THREEFRY:
     case UOP_INDEX_E:
       return 2;
     case UOP_NEG:  case UOP_RECIP: case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN:
@@ -4562,6 +4571,7 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
   fputs("#include <metal_stdlib>\n", fp);
   fputs(THVM_IPOW_U64(CG_TARGET_METAL), fp);
   fputs(THVM_IPOW_SRC, fp);
+  fputs(THVM_THREEFRY_SRC, fp);
   fputc('\n', fp);
   fputs("using namespace metal;\n\n", fp);
   // fp8 decode helpers if any input/output is fp8 (rmu_emit_fp8_helpers).
@@ -4629,6 +4639,7 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   fputs("#include <metal_stdlib>\n", fp);
   fputs(THVM_IPOW_U64(CG_TARGET_METAL), fp);
   fputs(THVM_IPOW_SRC, fp);
+  fputs(THVM_THREEFRY_SRC, fp);
   fputc('\n', fp);
   fputs("using namespace metal;\n\n", fp);
   // fp8 decode helpers if any input/output is fp8 (rmu_emit_fp8_helpers).
@@ -4726,6 +4737,7 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   fputs(THVM_XEXP2F_SRC, fp);
   fputs(THVM_IPOW_U64(CG_TARGET_C), fp);
   fputs(THVM_IPOW_SRC, fp);
+  fputs(THVM_THREEFRY_SRC, fp);
   fputs("\n#endif\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
   fputs("              unsigned n, const unsigned *in_numels,\n", fp);
@@ -4862,6 +4874,7 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   fputs(THVM_XEXP2F_SRC, fp);
   fputs(THVM_IPOW_U64(CG_TARGET_C), fp);
   fputs(THVM_IPOW_SRC, fp);
+  fputs(THVM_THREEFRY_SRC, fp);
   fputs("\n#endif\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
   fputs("              unsigned n, const unsigned *in_numels,\n", fp);
@@ -4989,6 +5002,8 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   fputs(THVM_IPOW_U64(CG_TARGET_CUDA), fp);
   fputs("__device__ ", fp);
   fputs(THVM_IPOW_SRC, fp);
+  fputs("\n__device__ ", fp);
+  fputs(THVM_THREEFRY_SRC, fp);
   fputs("\n", fp);
   // __launch_bounds__ from the LOCAL extents, the block cuda_dag_dispatch_shape
   // launches, so nvcc sizes registers for it; none for a GROUP_REDUCE or a flat

@@ -71,7 +71,7 @@ int main(void) {
   {
     u64 loc = heap_alloc(1);
     heap_set(loc, a);
-    CHECK(substitute_stops(term_new(0, TAG_UOP, 46, loc), a, b));
+    CHECK(substitute_stops(term_new(0, TAG_UOP, 47, loc), a, b));
   }
 
   thvm_free();

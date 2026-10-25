@@ -417,7 +417,7 @@ static int grad_prewalk_visited(u64 loc, Term target) {
 static int grad_op_is_diff_sink(u8 op) {
   return op == UOP_CMPLT  || op == UOP_CMPEQ
       || op == UOP_BITCAST || op == UOP_DETACH
-      || op == UOP_CONST  || op == UOP_LOAD || op == UOP_ASSIGN;
+      || op == UOP_CONST  || op == UOP_LOAD || op == UOP_ASSIGN || op == UOP_THREEFRY;
 }
 
 static void grad_prewalk_credit_and_descend(Term child, Term target) {
@@ -1322,6 +1322,7 @@ static Term interact_grad_dispatch(Term grad_term) {
     case UOP_CONST:
     case UOP_LOAD:
     case UOP_ASSIGN:
+    case UOP_THREEFRY:
       return grad_zero_at(y);
 
     case UOP_DETACH:
