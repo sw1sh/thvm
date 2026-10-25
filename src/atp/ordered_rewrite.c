@@ -867,7 +867,7 @@ static u32 atp_twee_term_score_sd(Term t) {
 // mechanics).  Our analog: the CLI registers the equals-goal
 // encoding's fresh eq symbol (tools/atp_cli/def_unfold.c
 // tp_equals_goal) and name-keyed ifeq*/equals heads by exact shape --
-// see the registration site in tests/test_atp_wolfram_bench.c.  Note
+// see the registration site in tests/atp/test_atp_wolfram_bench.c.  Note
 // the 4-ary -10 ifeq guards compare a `>=`-rooted guard against the
 // constant true, which NEVER unify, so the bonus is structurally
 // inert there (measured on LCL890-10) -- arity-2 eq is the live case.

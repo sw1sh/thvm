@@ -1006,7 +1006,7 @@ CODE:   src/atp/_.c thvm_atp_generate_cps_wm DROP-DUP re-age block;
         atp_pair_is_slot15_term + atp_term_is_slot15_lhs/atp_term_is_slot15_rhs +
         atp_slot15_rule_is_live; src/thvm.h use_comm_drop_dup; setter
         thvm_atp_set_use_comm_drop_dup + THVM_ATP_COMM_DROP_DUP env in
-        tests/test_atp_wolfram_bench.c.
+        tests/atp/test_atp_wolfram_bench.c.
 KNOB OFF (default): byte-identical -- bin/test_atp 136232/136232; REAGE-only soa
         firstdiv still 288; ZeroIsAbsorbing@5000 unchanged ON and OFF (steps=546
         cps=1097 max_cps=1117 -- the detector never fires off-Sheffer, slot15's
@@ -1036,7 +1036,7 @@ CODE:   src/atp/_.c thvm_atp_generate_cps_wm re-age block (the comm-reage gate),
         atp_pair_is_seq564_sibling + atp_term_is_sq_dot_var/atp_term_is_dot_xy_dot_y
         + atp_eq_is_noncanonical_comm_side (slot15) + atp_rule_is_seq564_producer
         (rule13/slot19); src/thvm.h use_comm_reage; setter +
-        THVM_ATP_COMM_REAGE env in tests/test_atp_wolfram_bench.c.
+        THVM_ATP_COMM_REAGE env in tests/atp/test_atp_wolfram_bench.c.
 KNOB OFF (default): byte-identical -- bin/test_atp 136232/136232, soa firstdiv still
         125 (base two knobs) / 126 (+comm-defer); ZeroIsAbsorbing@5000 unchanged
         (proves steps=546 cps=1097, no AC-thrash -- reage is surgical, scoped to

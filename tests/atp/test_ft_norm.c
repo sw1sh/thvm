@@ -19,7 +19,7 @@
 
 // --- Random term generator ------------------------------------------
 //
-// Same pattern as tests/test_ft_match.c.  Var ids cycle mod 4 (well
+// Same pattern as tests/atp/test_ft_match.c.  Var ids cycle mod 4 (well
 // under ATPFT_MAX_VARS=64), CTR labels mod 4 (small signature so
 // random matches actually fire).
 static u32 rng32(u32 *seed) {

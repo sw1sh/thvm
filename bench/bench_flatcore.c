@@ -477,7 +477,7 @@ int main(int argc, char **argv) {
   u64 n_ops  = (argc > 2) ? strtoull(argv[2], NULL, 10)     : 2000000ull;
 
   // Sheffer KBO config (one binary nand=label 1; identity precedence;
-  // var_weight 1) -- identical to tests/test_atp_wolfram_bench.c.
+  // var_weight 1) -- identical to tests/atp/test_atp_wolfram_bench.c.
   static u32 weights[2]    = { 0u, 1u };
   static u32 precedence[2] = { 0u, 1u };
   KboConfig cfg = { .weights = weights, .precedence = precedence,
