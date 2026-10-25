@@ -529,21 +529,11 @@ EXPORT uint64_t py_uop_substitute(uint64_t root, uint64_t const *from, uint64_t 
 // cleared by the call; NULL when there is none.
 EXPORT char const *py_grad_err_take(void) { return grad_err_take(); }
 
-// Tensor.backward's leaf protocol (uop_backward): NULL, or the chain rule's
-// error message with every leaf's .grad rolled back.
+// Tensor.backward's chain rule (uop_backward): each leaf's fresh gradient, and
+// NULL or the rule's error message.
 EXPORT char const *py_backward(uint64_t y, uint64_t gy, uint32_t const *tids, uint32_t n,
-                               uint64_t *grads, uint8_t *had_grad) {
-  return uop_backward(y, gy, tids, n, (Term *)grads, had_grad);
-}
-
-// Clears the lazy TenDesc.grad the single walk accumulates into; the
-// optimizer's zero_grad calls it between steps.
-EXPORT int py_ten_clear_grad(uint64_t t) {
-  if (term_tag(t) != TAG_TEN) return 0;
-  u32 id = (u32)term_val(t);
-  if (id == 0 || id >= TENS_NEXT) return 0;
-  TENS[id].grad = 0;
-  return 1;
+                               uint64_t *grads) {
+  return uop_backward(y, gy, tids, n, (Term *)grads);
 }
 
 EXPORT uint32_t py_ten_get_buf_id(uint64_t t) {

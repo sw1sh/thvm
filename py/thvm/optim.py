@@ -31,11 +31,8 @@ class Optimizer:
         self.lr = lr
 
     def zero_grad(self):
-        # backward() accumulates into the C-side TenDesc.grad, so it is cleared too.
-        from .tensor import _TH
         for p in self.params:
             p.grad = None
-            _TH.ten_clear_grad(p.term)
 
     def step(self):
         # tinygrad nn/optim.py:39.

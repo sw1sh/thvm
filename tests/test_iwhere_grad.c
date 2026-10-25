@@ -148,9 +148,8 @@ static void grad_single_walk(Term (*build)(Term), double (*host)(double),
   u32  tid;
   Term x  = x_ten(&tid);
   Term gt = 0;
-  u8   had = 1;
-  CHECK(uop_backward(build(x), ones_n(), &tid, 1, &gt, &had) == NULL);
-  CHECK_EQ(had, 0);
+  CHECK(uop_backward(build(x), ones_n(), &tid, 1, &gt) == NULL);
+  CHECK_EQ(TENS[tid].grad, 0);
   CHECK_EQ(TENS[tid].requires_grad, 0);
   CHECK_EQ(GRAD_REQ_NCOUNT, 0u);
   CHECK_EQ(grad_slot_stuck_get(), 0u);

@@ -150,8 +150,8 @@ A(Tensor(x).realize(), 2)
 churn()
 check("JIT_SHARED", B(Tensor(x).realize(), 1).numpy(), x * 0.5 + 1)
 
-# A gradient of a dead loss, and TenDesc.grad: backward() accumulates into it
-# even after the frontend dropped its grad handle without zero_grad().
+# A gradient of a dead loss, and one taken again after .grad = None, which starts
+# over (tinygrad tensor.py:465-466).
 p = Tensor(x)
 (p * p).sum().backward()
 g = p.grad
@@ -160,9 +160,9 @@ check("GRAD", g.numpy(), 2 * x)
 q = Tensor(x)
 (q * Tensor(x + 1)).sum().backward()
 q.grad = None
-churn()
 (q * Tensor(x + 1)).sum().backward()
-check("GRAD_ACC", q.grad.numpy(), 2 * (x + 1))
+churn()
+check("GRAD_ACC", q.grad.numpy(), x + 1)
 
 # A detached copy and a clone of a dead tensor.
 d = Tensor(x).realize().detach()

@@ -393,11 +393,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 - **MULTI / AFTER / TUPLE / FUNCTION+grad_fxn** - *large*. No custom grad functions; blocks higher-order grads.
 - **Higher-order gradients (grad of grad)** - *large*. thvm grads are AST Terms, not differentiable Tensors; would need `TENS[tid].grad` rearchitected as a Tensor.
 - **LARS / Muon optimizers** - *medium each*. Only SGD + Adam; Muon aliased to Adam.
-- **zero_grad footgun** (not a code gap). thvm's `backward()` accumulates into the
-  C-side `TENS[tid].grad` (tinygrad-faithful `grads[k]+=v`); you must call
-  `opt.zero_grad()` (a bare `p.grad=None` only drops the Python handle). The benches now
-  do (`bb24342d`). A warning guard was considered and SKIPPED: it would false-positive
-  on legitimate gradient-accumulation-over-microbatches, and tinygrad doesn't warn either.
 
 ---
 

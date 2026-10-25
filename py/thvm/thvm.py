@@ -134,9 +134,8 @@ _grad_err_take     = _bind("py_grad_err_take",     c_char_p)
 _uop_substitute = _bind("py_uop_substitute", c_uint64, c_uint64, ctypes.POINTER(c_uint64),
                         ctypes.POINTER(c_uint64), c_uint32)
 _backward = _bind("py_backward", c_char_p, c_uint64, c_uint64, ctypes.POINTER(c_uint32),
-                  c_uint32, ctypes.POINTER(c_uint64), ctypes.POINTER(ctypes.c_uint8))
+                  c_uint32, ctypes.POINTER(c_uint64))
 _ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
-_ten_clear_grad   = _bind("py_ten_clear_grad",   c_int32,  c_uint64)
 
 _run_uop_kernel_c = _bind("py_run_uop_kernel_c", c_int32, c_uint64, c_void_p,
                           ctypes.POINTER(c_void_p), c_uint32, ctypes.POINTER(c_uint32))
@@ -552,16 +551,14 @@ class Thvm:
         out = (ctypes.c_int64 * 512)()
         return tuple(out[:int(_ten_view_words(c_uint64(int(t)), out, c_uint32(512)))])
 
-    def backward(self, y: Term, gy: Term, tids) -> "tuple[list[int], list[bool], str | None]":
-        """uop_backward: each leaf's grad term, whether it held one before, and the
-        chain rule's error (every grad rolled back) or None."""
+    def backward(self, y: Term, gy: Term, tids) -> "tuple[list[int], str | None]":
+        """uop_backward: each leaf's fresh gradient term (0: none), and the chain rule's
+        error or None."""
         n = len(tids)
         arr = (c_uint32 * max(n, 1))(*tids)
         grads = (c_uint64 * max(n, 1))()
-        had = (ctypes.c_uint8 * max(n, 1))()
-        err = _backward(c_uint64(int(y)), c_uint64(int(gy)), arr, c_uint32(n), grads, had)
-        return [int(g) for g in grads[:n]], [bool(h) for h in had[:n]], (
-            None if err is None else err.decode())
+        err = _backward(c_uint64(int(y)), c_uint64(int(gy)), arr, c_uint32(n), grads)
+        return [int(g) for g in grads[:n]], None if err is None else err.decode()
 
     def grad_err_take(self) -> "str | None":
         """The chain rule's pending error (a node it has no gradient rule
@@ -569,8 +566,6 @@ class Thvm:
         msg = _grad_err_take()
         return None if msg is None else msg.decode()
 
-    def ten_clear_grad(self, t: Term) -> bool:
-        return bool(_ten_clear_grad(c_uint64(int(t))))
 
     def term_tag(self, t: Term) -> int: return int(_term_tag(c_uint64(int(t))))
     def term_val(self, t: Term) -> int: return int(_term_val(c_uint64(int(t))))

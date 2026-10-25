@@ -12,7 +12,6 @@ import hashlib
 import itertools
 import math
 import time
-import warnings
 import weakref
 
 import numpy as np
@@ -425,22 +424,21 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         # buffer, so the float test is all that is left.
         tids = [tid for tid in _TH.uop_leaf_tids(root)
                 if (leaf := _LEAF_TENSORS.get(tid)) is not None and dtypes.is_float(leaf._dtype)]
-        grads, had_grad, err = _TH.backward(root, gradient.term, tids)
+        grads, err = _TH.backward(root, gradient.term, tids)
         if err is not None:
             # tinygrad's compute_gradient raises for a node without a rule
-            # (mixin/gradient.py:127); every .grad is rolled back.
+            # (mixin/gradient.py:127); no .grad changes.
             raise RuntimeError(f"backward(): {err}")
-        if any(had_grad):
-            warnings.warn(
-                "backward(): a leaf entered with a non-zero gradient from a prior "
-                "backward(); thvm accumulates into TenDesc.grad, so call "
-                "opt.zero_grad() between backward passes to avoid stale accumulation "
-                "(intentional accumulation can filter this warning).",
-                stacklevel=2)
         for tid, g in zip(tids, grads):
-            if g != 0:
-                leaf = _LEAF_TENSORS[tid]
-                leaf.grad = Tensor._from_term(Term(g), leaf._dtype, leaf._shape)
+            if g == 0:
+                continue
+            leaf = _LEAF_TENSORS[tid]
+            g = Tensor._from_term(Term(g), leaf._dtype, leaf._shape)
+            # tinygrad tensor.py:465-466: .grad accumulates until it is set to None.
+            if leaf.grad is None:
+                leaf.grad = g
+            else:
+                leaf.grad.assign(leaf.grad + g)
         return self
 
     def gradient(self, *targets: "Tensor", gradient: "Tensor | None" = None) -> "list[Tensor]":
@@ -465,13 +463,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         for root in dict.fromkeys(roots):
             idx = [i for i, r in enumerate(roots) if r == root]
             ts = [targets[i] for i in idx]
-            # The C rule accumulates into each leaf's grad; clear it on both sides so this call
-            # neither reads nor leaves one.
-            for t in ts:
-                _TH.ten_clear_grad(t.term)
-            gs, _, err = _TH.backward(root, gradient.term, [int(_TH.term_val(t.term)) for t in ts])
-            for t in ts:
-                _TH.ten_clear_grad(t.term)
+            gs, err = _TH.backward(root, gradient.term, [int(_TH.term_val(t.term)) for t in ts])
             if err is not None:
                 raise RuntimeError(f"gradient(): {err}")
             for i, g in zip(idx, gs):
