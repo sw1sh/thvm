@@ -3,8 +3,10 @@
 //
 // The C emit types an f32 value `float` and an f64 one `double`, as it
 // renders their buffers (rmu_c_type_name).  RECIP renders `1.0f/x`, a float
-// unless x is a double; EXP2, LOG2 and SQRT call math.h's double functions;
-// a CONST of a float dtype other than f32 is a double literal.  An op over
+// unless x is a double; an f32 EXP2, LOG2, SQRT or SIN is a float, as
+// tinygrad's f32 ops are (thvm_xexp2f, or math.h's double function rounded
+// to float), and any other calls math.h's double function; a CONST of a
+// float dtype other than f32 is a double literal.  An op over
 // mixed types converts by C's usual arithmetic conversions, so an int
 // operand of a float op reaches f32 rounded once, and a float reduce
 // accumulator is a `float` that each `acc = acc + v` rounds into.  The
@@ -15,9 +17,9 @@
 // Each kernel runs through the walker (cpu_uop_walk) and through the
 // legacy C emit's explicit-buffer entry, compiled as the CPU JIT compiles
 // it, and both must store the bytes C gives.  The expected values are
-// computed here in C, one rounding per statement.  The guard kernels hold
-// a double value in a double: a sqrt or a double CONST that a float op
-// would round, and an f64 quotient.
+// computed here in C, one rounding per statement.  The guard kernels check
+// where a value rounds: an f32 sqrt rounds to float before the float ops that
+// read it, while a double CONST and an f64 quotient stay doubles.
 //
 // The lane-block kernels UPCAST the output axis of reduce + y[i], so the C
 // emit register-blocks the reduce and hoists its lane-invariant subterm
@@ -298,8 +300,7 @@ static void build_reduces(void) {
     for (u32 i = 0; i < NO; i++) {
       f32 acc = 0.0f;
       for (u32 j = 0; j < NJ; j++) {
-        f64 s = (f64)acc + sqrt((f64)x[i * NJ + j]);
-        acc = (f32)s;
+        acc = acc + (f32)sqrt((f64)x[i * NJ + j]);
       }
       w[i] = acc;
     }
@@ -369,9 +370,9 @@ static void build_guards(void) {
     f32 const z[NO] = { 3.0f * 0x1p-26f, 0x1p-22f, 1e-8f, 0.0f, 1e-8f, 0.25f, 0.0f, -1e-7f };
     f32 w[NO];
     for (u32 i = 0; i < NO; i++) {
-      f64 p = sqrt((f64)x[i]) * (f64)y[i];
-      f64 s = p + (f64)z[i];
-      w[i] = (f32)s;
+      f32 r = (f32)sqrt((f64)x[i]);
+      f32 p = r * y[i];
+      w[i] = p + z[i];
     }
     Kern *k = kern("guard-sqrt-times-f32", DT_FP32, NO);
     input(k, DT_FP32, NO, x);
@@ -575,7 +576,7 @@ static void build_index_ops(void) {
     i32 w[NO];
     for (u32 i = 0; i < NO; i++) {
       f32 r = 1.0f / x[i];
-      f64 q = sqrt((f64)y[i]);
+      f32 q = (f32)sqrt((f64)y[i]);
       w[i] = (i32)r + (i32)q;
     }
     Kern *k = index_op_kern("index-op-of-recip-and-sqrt", x, y);
@@ -589,8 +590,8 @@ static void build_index_ops(void) {
     f32 const y[NO] = { 10.0f, 0.3f, 1.0f, 1000.0f, 3.0f, 0.75f, 2.0f, 1e-3f };
     i32 w[NO];
     for (u32 i = 0; i < NO; i++) {
-      f64 e = exp2((f64)x[i]);
-      f64 l = log2((f64)y[i]);
+      f32 e = thvm_xexp2f(x[i]);
+      f32 l = (f32)log2((f64)y[i]);
       w[i] = (i32)e + (i32)l;
     }
     Kern *k = index_op_kern("index-op-of-exp2-and-log2", x, y);

@@ -615,15 +615,22 @@ static void rmu_emit_term(Term t, FILE *fp) {
       return;
     }
     case UOP_EXP2: case UOP_LOG2: case UOP_SQRT: case UOP_SIN: {
-      int xexp2f = op == UOP_EXP2 && RMU_TARGET == CG_TARGET_C && rmu_dtype_of(t) == DT_FP32;
+      u32 dt     = rmu_dtype_of(t);
+      int xexp2f = op == UOP_EXP2 && RMU_TARGET == CG_TARGET_C && dt == DT_FP32;
+      // math.h's functions return double: the result rounds to the op's dtype
+      // here, as a stored one does, so a fused consumer reads the stored value.
+      int narrow = RMU_TARGET == CG_TARGET_C && !xexp2f && dt != DT_FP64;
       const char *fn_name = xexp2f ? "thvm_xexp2f"
                           : (op == UOP_EXP2) ? "exp2"
                           : (op == UOP_LOG2) ? "log2"
                           : (op == UOP_SIN)  ? "sin"
                           :                    "sqrt";
+      if (narrow) {
+        fprintf(fp, "((%s)", rmu_c_type_name(dt));
+      }
       fprintf(fp, "%s(", fn_name);
       rmu_emit_term(heap_read(loc + 0), fp);
-      fputs(")", fp);
+      fputs(narrow ? "))" : ")", fp);
       return;
     }
     case UOP_CAST: case UOP_BITCAST: {
