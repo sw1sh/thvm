@@ -40,8 +40,9 @@ class TestLazyArange(unittest.TestCase):
                                    rtol=1e-6)
 
     def test_one_kernel_linear_ops(self):
+        # realize() leaves an arange lazy (test_realize_lazy.py); contiguous() makes its buffer.
         GlobalCounters.reset()
-        Tensor.arange(4096).realize()
+        Tensor.arange(4096).contiguous()
         self.assertEqual(GlobalCounters.kernel_count, 1)
         self.assertLess(GlobalCounters.global_ops, 16 * 4096)
 

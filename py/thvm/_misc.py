@@ -83,14 +83,14 @@ def _prepare_jit_inputs(args, kwargs):
     by keyword, then those one container deep, realized; their buf_ids, their names, and per input
     the (shape, dtype, views) a replay must match, as a capture bakes in each input's view.  Also
     the tensors themselves."""
-    from .tensor import Tensor, _TH
+    from .tensor import Tensor, _TH, _realize_now
     named = [(n, t) for n, t in list(enumerate(args)) + sorted(kwargs.items()) if t.__class__ is Tensor]
     names, tensors = [n for n, _ in named], [t for _, t in named]
     for x in args + tuple(kwargs.values()):
         it = x if isinstance(x, (tuple, list)) else x.values() if isinstance(x, dict) else []
         tensors += [t for t in it if t.__class__ is Tensor and not any(t is y for y in tensors)]
     if tensors:
-        Tensor.realize(*tensors)
+        _realize_now(*tensors)
     ids = [_TH.ten_get_buf_id(t.term) for t in tensors]
     if 0 in ids:
         raise JitError("JIT inputs must be real buffers; use .clone()")
@@ -185,13 +185,13 @@ class _TinyJit:
         return functools.partial(self.__call__, obj)
 
     def __call__(self, *args, **kwargs):
-        from .tensor import Tensor, _TH, _realize_pending
+        from .tensor import Tensor, _TH, _realize_now, _realize_pending
         ids, names, info, inputs = _prepare_jit_inputs(args, kwargs)
         sig = _jit_symbolic_sig(args, kwargs)
         if not getenv("JIT", 1) or self.cnt == 0:
             ret = self.fxn(*args, **kwargs)
             if ts := _ret_tensors(ret):
-                Tensor.realize(*ts)
+                _realize_now(*ts)
         elif self.cnt == 1 or (self.fxn is not None and (sig != self._sig or self.captured.slot == 0)):
             if capturing:
                 raise RuntimeError(f"having TinyJit inside another TinyJit is not supported {len(capturing)=} {capturing=}")
@@ -203,7 +203,7 @@ class _TinyJit:
                 # No capture slot is free: run fxn uncaptured, and capture on a later call.
                 ret = self.fxn(*args, **kwargs)
                 if ts := _ret_tensors(ret):
-                    Tensor.realize(*ts)
+                    _realize_now(*ts)
                 return ret
             ret = None
             capturing.append(self)
@@ -211,7 +211,7 @@ class _TinyJit:
                 ret = self.fxn(*args, **kwargs)
                 # A lazy result records nothing until realized (tinygrad engine/jit.py:140).
                 if ts := _ret_tensors(ret):
-                    Tensor.realize(*ts)
+                    _realize_now(*ts)
             finally:
                 capturing.clear()
                 # Every result is a root: jit_capture_finalize replays only the dispatches a

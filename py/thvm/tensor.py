@@ -42,6 +42,18 @@ _LAZY_FULLS: "weakref.WeakValueDictionary[int, Tensor]" = weakref.WeakValueDicti
 _PENDING_ASSIGNS: "weakref.WeakValueDictionary[int, Tensor]" = weakref.WeakValueDictionary()
 
 
+def _realize_now(t: "Tensor", *lst: "Tensor") -> "Tensor":
+    """Realize t and lst into buffers whatever they read: the data reads, contiguous() and the leaves
+    backward() needs.  A TinyJit capture does not record it under CAPTURING=0, as tinygrad's."""
+    if not capturing or CAPTURING:
+        return t._realize(*lst)
+    _TH.jit_pause()
+    try:
+        return t._realize(*lst)
+    finally:
+        _TH.jit_resume()
+
+
 def _realize_pending() -> None:
     """Realize every pending assign (a TinyJit capture starts with none outside its function)."""
     for t in list(_PENDING_ASSIGNS.values())[:1]:
@@ -183,6 +195,14 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             self.term = Term(0)
             self._dtype = to_dtype(dtype) if dtype is not None else dtypes.default_float
             self._shape = ()
+        elif isinstance(data, (bool, int, float)) and (not isinstance(data, int) or -2**31 <= data < 2**31):
+            # A Python scalar is a lazy CONST, as tinygrad's (tensor.py:72-86); an int past int32 takes
+            # a buffer, since a CONST holds 32 bits.
+            self._dtype = to_dtype(dtype) if dtype is not None else dtypes.from_py(data)
+            self._shape = ()
+            self.term = _const_broadcast(data, (), self._dtype).term
+            if dtypes.is_float(self._dtype):
+                _LAZY_FULLS[id(self)] = self
         else:
             # tinygrad's inference (tensor.py:72-86): a numpy array keeps its dtype, bytes are u8,
             # a Python value takes from_py's.
@@ -284,15 +304,13 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     def realize(self, *lst: "Tensor", **kwargs) -> "Tensor":
         """Run thvm's pipeline and swap each term for its TAG_TEN; several tensors realize in one
         realize_many pass (tinygrad tensor.py:219-225), so shared kernels emit once.  Every pending
-        assign realizes with it, ordered against the reads as below."""
-        if not capturing or CAPTURING:
-            return self._realize(*lst)
-        # tinygrad's CAPTURING=0: the realize runs, and the TinyJit capture does not record it.
-        _TH.jit_pause()
-        try:
-            return self._realize(*lst)
-        finally:
-            _TH.jit_resume()
+        assign realizes with it, ordered against the reads as below.  A tensor whose graph reads no
+        buffer (an arange, a full) stays lazy, as tinygrad realizes only what needs storage
+        (tensor.py:217-222, uop/ops.py:747); contiguous() gives it a buffer."""
+        ts = [t for t in (self, *lst) if not _TH.term_reads_no_buffer(t.term)]
+        if ts:
+            _realize_now(*ts)
+        return self
 
     def _realize(self, *lst: "Tensor") -> "Tensor":
         lst = (*lst, *(t for t in list(_PENDING_ASSIGNS.values()) if t is not self and all(t is not x for x in lst)))
@@ -316,7 +334,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         return self
 
     def contiguous(self) -> "Tensor":
-        return self.realize()
+        return _realize_now(self)
 
     def clone(self, device=None) -> "Tensor":
         """Fresh storage holding self's value (tinygrad tensor.py:344-351, uop/ops.py:887-893);
@@ -335,7 +353,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     def numpy(self) -> np.ndarray:
         """The value on the host; bf16 and fp8 read back as f32, as tinygrad's do."""
-        self.realize()
+        _realize_now(self)
         n = self.numel()
         if n == 0:
             return np.zeros(self._shape, dtype=_to_np_dtype(self._dtype))
@@ -375,7 +393,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             xb, inside = inv(x._broadcast_to(self._shape).cast(self._dtype))
             base.assign(xb if inside is None else inside.where(xb, base))
             if base._view is None:
-                base.realize()
+                _realize_now(base)
             self.term = fwd(base).term
             return self
         tag = int(_TH.term_tag(self.term))
@@ -419,7 +437,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         lazy = [t for t in list(_LAZY_FULLS.values()) if int(_TH.term_tag(t.term)) != _TAG_TEN]
         if lazy:
             old = [t.term for t in lazy]
-            lazy[0].realize(*lazy[1:])
+            _realize_now(*lazy)
             root = _TH.uop_substitute(root, old, [t.term for t in lazy])
         # tinygrad keeps the float leaves with a device (tensor.py:486-488); a TEN leaf is a
         # buffer, so the float test is all that is left.
@@ -457,7 +475,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         # compute_gradient).
         old = [t.term for t in targets]
         for t in targets:
-            t.realize()
+            _realize_now(t)
         roots = [_TH.uop_substitute(self.term, [o], [t.term]) if int(o) != int(t.term) else self.term
                  for o, t in zip(old, targets)]
         grads = [0] * len(targets)

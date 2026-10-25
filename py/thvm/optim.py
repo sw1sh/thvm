@@ -23,7 +23,7 @@ class Optimizer:
         # backward() finds a param by its TAG_TEN leaf, so a lazy factory init
         # (a UOp graph) is realized first.
         for x in params:
-            x.realize()
+            x.contiguous()
         # tinygrad nn/optim.py:13-15: params are updated, buffers only realized.
         self.params = _dedup([x for x in params if x.is_param])
         self.buffers = _dedup([x for x in params if not x.is_param])
@@ -66,7 +66,7 @@ class SGD(Optimizer):
         self.momentum, self.wd, self.nesterov = momentum, weight_decay, nesterov
         self.b = [Tensor.zeros(*(p.shape or (1,))) for p in self.params]
         for b in self.b:
-            b.realize()
+            b.contiguous()
 
     def _step(self):
         out = []
@@ -101,7 +101,7 @@ class Adam(Optimizer):
         self.b1_t.realize()
         self.b2_t.realize()
         for x in [*self.m, *self.v]:
-            x.realize()
+            x.contiguous()
 
     def _step(self):
         self.b1_t.assign(self.b1_t * self.b1)
@@ -177,7 +177,7 @@ class LARS(Optimizer):
         self.b = ([Tensor.zeros(*(p.shape or (1,))) for p in self.params]
                   if self.momentum else [])
         for b in self.b:
-            b.realize()
+            b.contiguous()
 
     def _step(self):
         # tinygrad nn/optim.py:109-129.  The momentum buffers realize with the

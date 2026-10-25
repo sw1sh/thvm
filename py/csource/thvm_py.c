@@ -20,6 +20,10 @@ EXPORT void py_thvm_free(void) { thvm_free(); }
 EXPORT uint32_t py_term_tag(uint64_t t) { return term_tag(t); }
 EXPORT uint64_t py_term_val(uint64_t t) { return term_val(t); }
 EXPORT uint32_t py_term_ext(uint64_t t) { return term_ext(t); }
+// 1 iff t is a UOp graph that reads no buffer, which Tensor.realize leaves lazy.
+EXPORT uint32_t py_term_reads_no_buffer(uint64_t t) {
+  return term_tag(t) == TAG_UOP && bufferize_reads_no_buffer(term_val(t), (u8)term_ext(t));
+}
 
 EXPORT uint64_t py_term_iconst(int32_t v) {
   // A UOP_CONST, not a bare TAG_NUM: the DAG classifiers match UOP_CONST
