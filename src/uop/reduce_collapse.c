@@ -194,6 +194,13 @@ static Term rc_collapse_one(Term red) {
   }
   if (count == 0) return 0;
 
+  // val multiplies in its own dtype: IMUL is int32 index math, rendered
+  // (int)val * (int)count, so a running sum of 0.1 read 0 and an int64 ramp
+  // past 2^31 or a uint32 one wrapped.
+  u32 vdt;
+  if (term_dtype_in(then_v, 0, &vdt) && vdt != DT_INT32) {
+    return uop_binary(UOP_MUL, then_v, uop_cast(count, vdt));
+  }
   return uop_int_binary(UOP_IMUL, then_v, count);
 }
 

@@ -1545,6 +1545,9 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         dtype = to_dtype(dtype)
         if lo < dtype.min or dtype.max < hi:
             raise OverflowError(f"arange [{start}, {stop}) is not representable in dtype {dtype}")
+        if not dtypes.is_float(dtype) and any(abs(int(v)) > 2**31 - 1 for v in (start, stop, step)):
+            # An int CONST holds 32 bits, so the lazy ramp cannot carry a wider start or step.
+            return Tensor(np.arange(start, stop, step, dtype=_to_np_dtype(dtype)), dtype=dtype)
         return Tensor._from_nn(_TH.nn("arange", [], [dtype.thvm_id], [start, stop, step]), "arange")
 
     def cast(self, dtype: DType) -> "Tensor":
