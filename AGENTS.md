@@ -31,6 +31,9 @@ Architecture docs, one piece per page: [docs/README.md](docs/README.md)
 - **HVM4** ([HigherOrderCO/HVM](https://github.com/HigherOrderCO/HVM)) is the
   model for the IC runtime: the term layout, the WNF stack machine, one
   interaction per file, and the path = function name rule.
+- Other checkouts this repo reads (reference kernels, Waldmeister, MLX, the
+  research prototype) live under `external/`, which is gitignored. The repo
+  has no submodules: `.gitmodules` stays empty.
 
 ## Conventions
 
