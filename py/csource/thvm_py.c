@@ -469,6 +469,24 @@ EXPORT uint64_t py_cpu_live_bytes(void) {
   return cpu_buf_live_bytes();
 #endif
 }
+// tinygrad's GlobalCounters (helpers.py:296-304): the kernels run from start,
+// their ops and bytes (cg_count_dispatch), and mem_used, the bytes of the CPU
+// and CUDA buffers a reference holds: a freelisted buffer is uncounted, as
+// tinygrad's Buffer.deallocate uncounts what its LRU allocator keeps.
+EXPORT void py_global_counters(uint64_t *out) {
+  out[0] = GC_COUNTS[0];
+  out[1] = GC_COUNTS[1];
+  out[2] = GC_COUNTS[2];
+  out[3] = thvm_metal_live_bytes();
+  for (u64 i = 1; CPU_BUFS != NULL && i < CPU_BUFS_NEXT; i++) {
+    if (CPU_BUFS[i].refcount > 0 && CPU_BUFS[i].owns_data) out[3] += CPU_BUFS[i].nbytes;
+  }
+#ifdef THVM_HAS_CUDA
+  for (u64 i = 1; CUDA_BUFS != NULL && i < CUDA_BUFS_NEXT; i++) {
+    if (CUDA_BUFS[i].refcount > 0 && CUDA_BUFS[i].owns_data) out[3] += CUDA_BUFS[i].nbytes;
+  }
+#endif
+}
 EXPORT void py_cpu_peak_reset(void) {
   cpu_buf_peak_reset();
 #ifdef THVM_HAS_CUDA

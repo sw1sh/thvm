@@ -123,6 +123,7 @@ _kernel_count = _bind("py_kernel_count", c_uint32)
 _cpu_peak_bytes = _bind("py_cpu_peak_bytes", c_uint64)
 _cpu_live_bytes = _bind("py_cpu_live_bytes", c_uint64)
 _cpu_peak_reset = _bind("py_cpu_peak_reset", None)
+_global_counters = _bind("py_global_counters", None, ctypes.POINTER(c_uint64))
 _cuda_jit_compiles = _bind("py_cuda_jit_compiles", c_uint64)
 _cuda_jit_evictions = _bind("py_cuda_jit_evictions", c_uint64)
 _cg_profile_dump = _bind("py_cg_profile_dump", None, c_uint32)
@@ -487,6 +488,11 @@ class Thvm:
         arr = (c_uint32 * n)(*[c_uint32(int(i)) for i in ids]) if n else None
         return int(_jit_replay_with_inputs(c_uint32(s), arr, c_uint32(n)))
     def jit_drop(self, s: int) -> None: _jit_drop(c_uint32(s))
+    def global_counters(self) -> tuple[int, ...]:
+        """(kernels run, their ops, their bytes, live buffer bytes), the first three from start."""
+        out = (c_uint64 * 4)()
+        _global_counters(out)
+        return tuple(int(x) for x in out)
     def jit_prune(self, s: int) -> int: return int(_jit_prune(c_uint32(s)))
     def jit_pause(self) -> None: _jit_pause()
     def jit_resume(self) -> None: _jit_resume()

@@ -211,20 +211,38 @@ def tqdm(iterable, **_):
     return _Trange(iterable)
 
 
-class GlobalCounters:
-    """tinygrad's GlobalCounters (helpers.py:301-309), which thvm never increments."""
-    global_ops = 0
-    global_mem = 0
+class _Counters(type):
+    """The C runtime's counts from start, less those at the last reset; mem_used is never reset."""
+
+    def _count(cls, i):
+        from .tensor import _TH
+        return _TH.global_counters()[i] - (cls._base[i] if i < 3 else 0)
+
+    def _set(cls, i, v):
+        from .tensor import _TH
+        cls._base[i] = _TH.global_counters()[i] - v
+
+    kernel_count = property(lambda c: c._count(0), lambda c, v: c._set(0, v))
+    global_ops = property(lambda c: c._count(1), lambda c, v: c._set(1, v))
+    global_mem = property(lambda c: c._count(2), lambda c, v: c._set(2, v))
+    mem_used = property(lambda c: c._count(3))
+
+
+class GlobalCounters(metaclass=_Counters):
+    """tinygrad's GlobalCounters (helpers.py:296-304): kernels run since the last reset and their
+    estimated ops and bytes (tinygrad's Estimates, counted at each dispatch), and the bytes of every
+    live buffer."""
     time_sum_s = 0.0
-    kernel_count = 0
+    _base = [0, 0, 0]
 
     @classmethod
     def reset(cls):
-        cls.global_ops = cls.global_mem = cls.kernel_count = 0
+        # Imported here: tensor imports this module.
+        from .tensor import _TH
+        cls._base = list(_TH.global_counters()[:3])
         cls.time_sum_s = 0.0
         # A step boundary frees what died since the last reclaim, tightening the peak
-        # of a loop that calls it.  Imported here: tensor imports this module.
-        from .tensor import _TH
+        # of a loop that calls it.
         _TH.reclaim_if_due(force=True)
 
 

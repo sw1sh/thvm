@@ -1022,6 +1022,11 @@ typedef struct KernelEntry {
   // per-input arrays above (kernel_inputs_reserve) and freed by
   // kernel_free_arrays.
   KernelUopLift cached_lift;
+  // One run's ops and bytes (cg_kernel_estimates), taken from est_root, a
+  // past store_root compared only: a moved or new root takes them again.
+  Term      est_root;
+  u64       est_ops;
+  u64       est_mem;
 
   // Snapshot of cached_lift.store_root at materialize time, before any
   // kernel_apply_opt DAG mutations.  axes_reset_to_default restores
@@ -1924,6 +1929,8 @@ fn Term uop_buffer_inst(u32 scope, u32 dtype, u32 ndim, const u32 *dims,
 // Read accessors for UOP_BUFFER fields (returns 0 on tag mismatch).
 fn u32  uop_buffer_scope(Term t);
 fn u32  uop_buffer_dtype(Term t);
+fn u32  uop_buffer_ndim(Term t);
+fn u32  uop_buffer_dim(Term t, u32 d);
 fn u32  uop_buffer_inst_get(Term t);       // 0 if not UOP_BUFFER
 
 // === DAG read-side scanners ===

@@ -2300,6 +2300,7 @@ static u32 jit_replay_try_metal_serial_run(JitCapture *c, u32 start) {
   // Under four ops, the flush, commit and wait cost more than per-op dispatch.
   if (n < 4) return 0;
   if (thvm_metal_serial_run(recs, n, kinds, zf, gx, tx, gsh) != 0) return 0;
+  for (u32 k = 0; k < n; k++) cg_count_dispatch(recs[k].kid);
   for (u32 k = 0; k < n_dispatch; k++) {
     HOT_KERNEL_FIRES++;
     HOT_JIT_REPLAY_DISPATCHES++;
@@ -2420,6 +2421,7 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   }
   HOT_JIT_GRAPH_RUNS++;
   HOT_JIT_GRAPH_DISPATCHES += n;
+  for (u32 i = 0; i < n; i++) cg_count_dispatch(recs[i].kid);
   for (u32 i = 0; i < live_consumed; i++) {
     HOT_KERNEL_FIRES++;
     HOT_JIT_REPLAY_DISPATCHES++;
@@ -2794,6 +2796,7 @@ fn u32 jit_replay(u32 slot) {
       JitCaptureOp *op = &c->ops[i];
       if (op->replay_skip) continue;
       if (op->kind == JIT_OP_DISPATCH) {
+        cg_count_dispatch(op->kid);
         HOT_KERNEL_FIRES++;
         HOT_JIT_REPLAY_DISPATCHES++;
         HOT_JIT_GRAPH_DISPATCHES++;
@@ -2856,6 +2859,7 @@ fn u32 jit_replay(u32 slot) {
         int rc = b->dispatch_kernel(ke, ids, op->out_buf_id);
         if (rc == 0) {
           ke->dispatched = 1;
+          cg_count_dispatch(op->kid);
           HOT_KERNEL_FIRES++;
           HOT_JIT_REPLAY_DISPATCHES++;
           ITRS++;

@@ -150,6 +150,14 @@ class CapturedJit:
             return self.ret
         return _ret_map(self.ret, lambda t: inputs[self._ret_inputs[id(t)]] if id(t) in self._ret_inputs else t)
 
+    def free_intermediates(self):
+        """tinygrad's free_intermediates (engine/jit.py:80): the capture's buffers are released,
+        and the next call captures again."""
+        from .tensor import _TH
+        _TH.jit_drop(self.slot)
+        self.slot = 0
+        _TH.reclaim()
+
     def __del__(self):
         try:
             from .tensor import _TH
@@ -184,7 +192,7 @@ class _TinyJit:
             ret = self.fxn(*args, **kwargs)
             if ts := _ret_tensors(ret):
                 Tensor.realize(*ts)
-        elif self.cnt == 1 or (self.fxn is not None and sig != self._sig):
+        elif self.cnt == 1 or (self.fxn is not None and (sig != self._sig or self.captured.slot == 0)):
             if capturing:
                 raise RuntimeError(f"having TinyJit inside another TinyJit is not supported {len(capturing)=} {capturing=}")
             # An assign from outside fn realizes now, so the capture never records it.

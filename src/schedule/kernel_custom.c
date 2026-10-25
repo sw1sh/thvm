@@ -199,6 +199,7 @@ fn int kernel_custom_fire(u32 kid) {
   int rc = b->dispatch_kernel(ke, in_buf_ids, out_buf_id);
   if (rc != 0) return -1;
   ke->dispatched = 1;
+  cg_count_dispatch((u32)(ke - KERNELS));
 
   // Each written argument voids downstream kernels' precise-fire-memo skip,
   // as a scheduler kernel's output write does.

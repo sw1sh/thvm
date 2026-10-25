@@ -406,6 +406,7 @@ fn void kernel_fire_by_id(u32 kid) {
     // A CPU dispatch that ran no rung wrote nothing: leave the memo unstamped
     // so a later fire tries again.
     if (!(rc < 0 && b == &CPU_BACKEND)) {
+      cg_count_dispatch(kid);
       // Log the output write so a reader re-fires exactly when this kernel did;
       // logged before stamping, so the kernel's own write never dirties it.
       if (b == out_b && out_buf_id != 0) kernel_assign_write_record(b, out_buf_id);

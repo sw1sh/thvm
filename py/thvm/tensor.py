@@ -35,15 +35,16 @@ _LEAF_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
     weakref.WeakValueDictionary()
 
 # Each float full still a lazy constant: backward() makes it a leaf (Tensor.ones as a weight).
-_LAZY_FULLS: "weakref.WeakSet[Tensor]" = weakref.WeakSet()
+# Keyed by id: a WeakSet finds a member by ==, which on Tensors builds an elementwise compare.
+_LAZY_FULLS: "weakref.WeakValueDictionary[int, Tensor]" = weakref.WeakValueDictionary()
 # Tensors whose term is a pending UOP_ASSIGN.  Every realize takes them along, so one fired inside
 # another tensor's realize never stays a term whose kernel the kernel GC strips.
-_PENDING_ASSIGNS: "weakref.WeakSet[Tensor]" = weakref.WeakSet()
+_PENDING_ASSIGNS: "weakref.WeakValueDictionary[int, Tensor]" = weakref.WeakValueDictionary()
 
 
 def _realize_pending() -> None:
     """Realize every pending assign (a TinyJit capture starts with none outside its function)."""
-    for t in list(_PENDING_ASSIGNS)[:1]:
+    for t in list(_PENDING_ASSIGNS.values())[:1]:
         t.realize()
 
 # The next pin handle (_pin).  Tensor allocation and realize call reclaim_if_due(), which bounds
@@ -294,7 +295,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             _TH.jit_resume()
 
     def _realize(self, *lst: "Tensor") -> "Tensor":
-        lst = (*lst, *(t for t in _PENDING_ASSIGNS if t is not self and all(t is not x for x in lst)))
+        lst = (*lst, *(t for t in list(_PENDING_ASSIGNS.values()) if t is not self and all(t is not x for x in lst)))
         _PENDING_ASSIGNS.clear()
         if not lst:
             self.term = _TH.realize(self.term)
@@ -382,10 +383,10 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             # A pending value has no buffer to write, so it takes x's value, as tinygrad initializes
             # one that views no live tensor (tensor.py:253-257).
             self.term = x._broadcast_to(self._shape).term
-            _LAZY_FULLS.discard(self)
+            _LAZY_FULLS.pop(id(self), None)
             return self
         self.term = _TH.binary(K.ASSIGN, self.term, x.term)
-        _PENDING_ASSIGNS.add(self)
+        _PENDING_ASSIGNS[id(self)] = self
         return self
 
     def replace(self, x: "Tensor") -> "Tensor":
@@ -394,7 +395,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         self.term = x.term
         self._dtype = x._dtype
         self._shape = x._shape
-        _LAZY_FULLS.discard(self)
+        _LAZY_FULLS.pop(id(self), None)
         self._pin()
         return self
 
@@ -415,7 +416,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         # A float full still lazy is a constant node with no inputs: its buffer takes its place,
         # cutting no other path, so it is a leaf as tinygrad's backward sees it (tensor.py:457-460).
         root = self.term
-        lazy = [t for t in _LAZY_FULLS if int(_TH.term_tag(t.term)) != _TAG_TEN]
+        lazy = [t for t in list(_LAZY_FULLS.values()) if int(_TH.term_tag(t.term)) != _TAG_TEN]
         if lazy:
             old = [t.term for t in lazy]
             lazy[0].realize(*lazy[1:])
@@ -502,7 +503,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             return cls(np.full(argfix(shape), fill_value, dtype=_to_np_dtype(dt)), dtype=dt)
         t = _const_broadcast(fill_value, argfix(shape), dt)
         if dtypes.is_float(dt):
-            _LAZY_FULLS.add(t)
+            _LAZY_FULLS[id(t)] = t
         return t
 
     @classmethod
@@ -1172,6 +1173,12 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         if self._view is not None or int(_TH.term_tag(self.term)) == _TAG_TEN:
             out._view = (self, fwd, inv)
         return out
+
+    def __len__(self):
+        # tinygrad tensor.py:136-138.
+        if not self._shape:
+            raise TypeError("len() of a 0-d tensor")
+        return self._shape[0]
 
     def size(self, dim: int | None = None):
         """The shape, or one axis of it (tinygrad mixin/movement.py:59-72)."""

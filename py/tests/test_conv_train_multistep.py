@@ -35,6 +35,8 @@ def _layers(model):
 
 def _train(model):
     np.random.seed(7)
+    # The layers initialize from Tensor's RNG, seeded by the clock unless set.
+    Tensor.manual_seed(7)
     layers = _layers(model)
     opt = nn.optim.Adam(nn.state.get_parameters(layers), lr=1e-2)
     x = Tensor(np.random.randn(BS, 1, 28, 28).astype(np.float32))

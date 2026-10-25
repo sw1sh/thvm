@@ -46,7 +46,7 @@ def _broadcast_shape(*shapes):
 
 def _get_shape(x) -> tuple[int, ...]:
     # helpers.py:30-34.
-    if not hasattr(x, "__len__") or isinstance(x, str):
+    if not hasattr(x, "__len__") or isinstance(x, str) or getattr(x, "shape", None) == ():
         return ()
     subs = [_get_shape(xi) for xi in x]
     if any(s != subs[0] for s in subs):

@@ -3,14 +3,9 @@
 // dispatch counters are bumped from the per-backend dispatchers
 // (cpu_blas_dispatch, cpu_jit_dispatch, cpu_uop_walk).
 //
-// FLOPS estimate is the static count baked into the lifted DAG:
-// per UOp we charge a tiny constant cost based on its opcode
-// (1 flop for ADD/MUL, 2 for FMA-style chains, 1 for unary, 0 for
-// movement / reshape / load).  Multiplied by the op's element
-// count because each compute node writes one value per element.
-// This is the same methodology tinygrad's `BEAM` profiler uses;
-// it's a coarse number but useful for "are we hitting BLAS GFLOPs?"
-// sanity checks.
+// The ops and bytes of a kernel run are tinygrad's Estimates
+// (renderer/__init__.py:16-61), taken over the lifted DAG, and every
+// dispatch adds them to tinygrad's GlobalCounters.
 
 // KDispatchKind is declared in thvm.h so the Metal .m file (compiled
 // in a separate TU) can pass route ids back to cg_profile_record.
@@ -36,94 +31,198 @@ fn void cg_profile_reset(void) {
   memset(K_PROFILE, 0, sizeof(K_PROFILE));
 }
 
-// Walk a lifted DAG counting FLOPs.  Each elementwise compute op
-// contributes `iter_extent` flops; UOP_REDUCE multiplies its body's
-// inner contribution by the reduce-axis extent (the source iterates
-// reduce_extent times per output element).  Bounded depth.
-static u64 cg_kernel_flops_dag(Term t, u64 iter_extent, u32 depth) {
-  if (depth > 256 || iter_extent == 0 || term_tag(t) != TAG_UOP) return 0;
-  u32 op = term_ext(t);
-  if (op == UOP_BUFFER || op == UOP_CONST || op == UOP_INVALID
-      || op == UOP_RANGE || op == UOP_INDEX_E) return 0;
-  u64 total = 0;
-  u64 loc = term_val(t);
-  if (op == UOP_OPT) {
-    return cg_kernel_flops_dag(uop_opt_target(t), iter_extent, depth + 1);
-  }
-  if (op == UOP_REDUCE) {
-    // Multi-axis REDUCE: multiply EVERY reduce-axis extent into body_iter.
-    Term tred = term_new(0, TAG_UOP, op, loc);
-    Term src = uop_reduce_src(tred);
-    u32 n_axes = uop_reduce_n_axes(tred);
-    u64 body_iter = iter_extent;
-    for (u32 ai = 0; ai < n_axes; ai++) {
-      u32 red_axis = uop_reduce_axis(tred, ai);
-      u32 red_ext = 0;
-      Term stack[64];
-      u32 sp = 0;
-      if (term_tag(src) == TAG_UOP) stack[sp++] = src;
-      while (sp > 0 && red_ext == 0) {
-        Term n = stack[--sp];
-        if (term_tag(n) != TAG_UOP) continue;
-        u32 nop = term_ext(n);
-        if (nop == UOP_RANGE && uop_range_axis_id(n) == red_axis) {
-          red_ext = uop_range_extent(n);
-          break;
-        }
-        if (nop == UOP_BUFFER || nop == UOP_CONST || nop == UOP_INVALID) continue;
-        u8 ar = uop_arity((u8)nop);
-        u64 nloc = term_val(n);
-        for (u8 i = 0; i < ar && i < MAX_UOP_SRC && sp < 64; i++) {
-          Term c = heap_read(nloc + i);
-          if (term_tag(c) == TAG_UOP) stack[sp++] = c;
-        }
-      }
-      if (red_ext == 0) red_ext = 1;
-      body_iter *= (u64)red_ext;
-    }
-    // The REDUCE itself contributes one accumulator-combine op per
-    // source element (the implicit SUM/MAX/MIN over the body's value).
-    total += body_iter;
-    // Recurse into body with multiplied iter_extent.
-    total += cg_kernel_flops_dag(src, body_iter, depth + 1);
-    return total;
-  }
-  // STORE/AFTER: pass through to value.
-  if (op == UOP_STORE) {
-    Term val = heap_read(loc + 2);
-    return cg_kernel_flops_dag(val, iter_extent, depth + 1);
-  }
-  if (op == UOP_AFTER) {
-    total += cg_kernel_flops_dag(heap_read(loc + 0), iter_extent, depth + 1);
-    total += cg_kernel_flops_dag(heap_read(loc + 1), iter_extent, depth + 1);
-    return total;
-  }
-  // Elementwise compute ops: count this node then recurse.
-  switch (op) {
-    case UOP_NEG: case UOP_RECIP: case UOP_SQRT:
-    case UOP_EXP2: case UOP_LOG2: case UOP_SIN:
-    case UOP_ADD: case UOP_MUL: case UOP_CMPLT: case UOP_CMPEQ:
-      total += iter_extent;
-      break;
-    default: break;
-  }
-  u8 ar = uop_arity((u8)op);
-  for (u8 i = 0; i < ar && i < MAX_UOP_SRC; i++) {
-    Term c = heap_read(loc + i);
-    if (term_tag(c) == TAG_UOP) {
-      total += cg_kernel_flops_dag(c, iter_extent, depth + 1);
+// tinygrad's Estimates.from_uops (renderer/__init__.py:26-61) over a lifted
+// DAG, where a node runs once per value of the RANGE axes it reads, its free
+// axes (a REDUCE binds its own): an ALU node charges the product of their
+// extents in ops and a REDUCE one combine per iteration of its source, and a
+// buffer's loads, and apart its stores, charge the bytes their addresses
+// span, capped at the buffer's size.  Free axes are a bitmask over the first
+// 64 axes met; a node past them charges as if it ran once.
+typedef struct {
+  u64  *memo_loc;
+  u64  *memo_axes;
+  u32   memo_cap, memo_n;
+  u32   axis_id[64];
+  u64   axis_ext[64];
+  u32   n_axes;
+  Term  buf[64];
+  u8    buf_store[64];
+  u64   buf_bytes[64], buf_acc[64];
+  u32   n_bufs;
+  u64   ops;
+} CgEst;
+
+static u64 cg_est_prod(CgEst const *e, u64 axes) {
+  u64 p = 1;
+  for (u32 i = 0; i < e->n_axes; i++) {
+    if ((axes >> i) & 1) {
+      p = e->axis_ext[i] != 0 && p > UINT64_MAX / e->axis_ext[i] ? UINT64_MAX : p * e->axis_ext[i];
     }
   }
-  return total;
+  return p;
 }
 
-// Compute static FLOPs for a single execution of the kernel program.
-// Returns u64 -- typical kernels stay well below 2^63 even for
-// 4096x4096 GEMV (=33 MFLOP per fire).
+static u64 cg_est_axis(CgEst *e, u32 id, u64 ext) {
+  for (u32 i = 0; i < e->n_axes; i++) {
+    if (e->axis_id[i] == id) {
+      return 1ull << i;
+    }
+  }
+  if (e->n_axes == 64) {
+    return 0;
+  }
+  e->axis_id[e->n_axes] = id;
+  e->axis_ext[e->n_axes] = ext;
+  return 1ull << e->n_axes++;
+}
+
+static void cg_est_access(CgEst *e, Term buf, u64 axes, u8 store) {
+  if (term_tag(buf) != TAG_UOP || term_ext(buf) != UOP_BUFFER || uop_buffer_scope(buf) != UOP_SCOPE_GLOBAL) {
+    return;
+  }
+  u64 isz = dtype_itemsize(uop_buffer_dtype(buf));
+  u32 k = 0;
+  while (k < e->n_bufs && !(e->buf[k] == buf && e->buf_store[k] == store)) {
+    k++;
+  }
+  if (k == e->n_bufs) {
+    if (k == 64) {
+      return;
+    }
+    u64 numel = 1;
+    for (u32 d = 0; d < uop_buffer_ndim(buf); d++) {
+      numel *= uop_buffer_dim(buf, d);
+    }
+    e->buf[k] = buf;
+    e->buf_store[k] = store;
+    e->buf_bytes[k] = numel * isz;
+    e->buf_acc[k] = 0;
+    e->n_bufs++;
+  }
+  u64 acc = e->buf_acc[k] + cg_est_prod(e, axes) * isz;
+  e->buf_acc[k] = acc < e->buf_bytes[k] ? acc : e->buf_bytes[k];
+}
+
+static u64 cg_est_axes(CgEst *e, Term t, u32 depth) {
+  if (term_tag(t) != TAG_UOP || depth > 4096) {
+    return 0;
+  }
+  u64 loc = term_val(t);
+  u32 h = (u32)((loc * 0x9E3779B97F4A7C15ull) >> 40) & (e->memo_cap - 1);
+  while (e->memo_loc[h] != 0) {
+    if (e->memo_loc[h] == loc + 1) {
+      return e->memo_axes[h];
+    }
+    h = (h + 1) & (e->memo_cap - 1);
+  }
+  u32 op = term_ext(t);
+  u64 axes = 0;
+  switch (op) {
+    case UOP_RANGE:
+      axes = cg_est_axis(e, uop_range_axis_id(t), uop_range_extent(t));
+      break;
+    case UOP_OPT:
+      axes = cg_est_axes(e, uop_opt_target(t), depth + 1);
+      break;
+    case UOP_REDUCE: {
+      axes = cg_est_axes(e, uop_reduce_src(t), depth + 1);
+      e->ops += cg_est_prod(e, axes);
+      for (u32 i = 0; i < uop_reduce_n_axes(t); i++) {
+        axes &= ~cg_est_axis(e, uop_reduce_axis(t, i), 1);
+      }
+      break;
+    }
+    case UOP_INDEX_E:
+      axes = cg_est_axes(e, heap_read(loc + 1), depth + 1);
+      cg_est_access(e, heap_read(loc + 0), axes, 0);
+      break;
+    case UOP_STORE:
+      axes = cg_est_axes(e, heap_read(loc + 1), depth + 1);
+      cg_est_access(e, heap_read(loc + 0), axes, 1);
+      axes |= cg_est_axes(e, heap_read(loc + 2), depth + 1);
+      break;
+    case UOP_AFTER:
+      axes = cg_est_axes(e, heap_read(loc + 0), depth + 1) | cg_est_axes(e, heap_read(loc + 1), depth + 1);
+      break;
+    default: {
+      for (u8 i = 0; i < uop_arity((u8)op) && i < MAX_UOP_SRC; i++) {
+        axes |= cg_est_axes(e, heap_read(loc + i), depth + 1);
+      }
+      if (uop_is_unary_elementwise((u8)op) || uop_is_binary_elementwise((u8)op)
+          || op == UOP_IADD || op == UOP_ISUB || op == UOP_IMUL || op == UOP_ILT || op == UOP_IWHERE) {
+        e->ops += cg_est_prod(e, axes);
+      }
+      break;
+    }
+  }
+  if (2 * (e->memo_n + 1) > e->memo_cap) {
+    // Grow, rehashing, so the walk stays linear in the DAG.
+    u32 cap = e->memo_cap * 2;
+    u64 *nl = (u64 *)calloc(cap, sizeof(u64)), *na = (u64 *)calloc(cap, sizeof(u64));
+    if (nl == NULL || na == NULL) {
+      free(nl); free(na);
+      return axes;
+    }
+    for (u32 k = 0; k < e->memo_cap; k++) {
+      if (e->memo_loc[k] == 0) continue;
+      u32 g = (u32)(((e->memo_loc[k] - 1) * 0x9E3779B97F4A7C15ull) >> 40) & (cap - 1);
+      while (nl[g] != 0) g = (g + 1) & (cap - 1);
+      nl[g] = e->memo_loc[k];
+      na[g] = e->memo_axes[k];
+    }
+    free(e->memo_loc); free(e->memo_axes);
+    e->memo_loc = nl;
+    e->memo_axes = na;
+    e->memo_cap = cap;
+  }
+  h = (u32)((loc * 0x9E3779B97F4A7C15ull) >> 40) & (e->memo_cap - 1);
+  while (e->memo_loc[h] != 0) h = (h + 1) & (e->memo_cap - 1);
+  e->memo_loc[h] = loc + 1;
+  e->memo_axes[h] = axes;
+  e->memo_n++;
+  return axes;
+}
+
+// A run's ops and bytes, cached on the kernel for the root they were taken
+// from.  0 for a kernel with no lifted DAG.
+fn void cg_kernel_estimates(KernelEntry *ke, u64 *ops, u64 *mem) {
+  if (ke->est_root != ke->cached_lift.store_root || ke->est_root == 0) {
+    CgEst e = {0};
+    e.memo_cap = 1024;
+    e.memo_loc = (u64 *)calloc(e.memo_cap, sizeof(u64));
+    e.memo_axes = (u64 *)calloc(e.memo_cap, sizeof(u64));
+    if (e.memo_loc != NULL && e.memo_axes != NULL && ke->cached_lift.store_root != 0) {
+      cg_est_axes(&e, ke->cached_lift.store_root, 0);
+    }
+    free(e.memo_loc);
+    free(e.memo_axes);
+    ke->est_ops = e.ops;
+    ke->est_mem = 0;
+    for (u32 k = 0; k < e.n_bufs; k++) ke->est_mem += e.buf_acc[k];
+    ke->est_root = ke->cached_lift.store_root;
+  }
+  *ops = ke->est_ops;
+  *mem = ke->est_mem;
+}
+
 fn u64 cg_kernel_flops(KernelEntry const *ke) {
-  if (ke == NULL || ke->cached_lift.store_root == 0) return 0;
-  u64 iter = ke->output_numel ? (u64)ke->output_numel : 1;
-  return cg_kernel_flops_dag(ke->cached_lift.store_root, iter, 0);
+  u64 ops = 0, mem = 0;
+  if (ke != NULL) cg_kernel_estimates((KernelEntry *)ke, &ops, &mem);
+  return ops;
+}
+
+// tinygrad's GlobalCounters (helpers.py:296-304), counted from start: the
+// kernels run and their ops and bytes (engine/realize.py:65-67).  py's
+// GlobalCounters reads them less their values at its last reset.
+static u64 GC_COUNTS[3];
+
+fn void cg_count_dispatch(u32 kid) {
+  if (kid == 0 || kid >= KERNELS_NEXT) return;
+  u64 ops, mem;
+  cg_kernel_estimates(&KERNELS[kid], &ops, &mem);
+  GC_COUNTS[0] += 1;
+  GC_COUNTS[1] += ops;
+  GC_COUNTS[2] += mem;
 }
 
 // THVM_KERNEL_PROFILE=N: arm an atexit handler the first time any
