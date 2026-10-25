@@ -124,6 +124,8 @@ _ten_set_grad_leaf = _bind("py_ten_set_grad_leaf", c_int32,
 _uop_leaf_tids = _bind("py_uop_leaf_tids", c_uint32,
                        c_uint64, ctypes.POINTER(c_uint32), c_uint32)
 _grad_err_take     = _bind("py_grad_err_take",     c_char_p)
+_uop_substitute = _bind("py_uop_substitute", c_uint64, c_uint64, ctypes.POINTER(c_uint64),
+                        ctypes.POINTER(c_uint64), c_uint32)
 _backward = _bind("py_backward", c_char_p, c_uint64, c_uint64, ctypes.POINTER(c_uint32),
                   c_uint32, ctypes.POINTER(c_uint64), ctypes.POINTER(ctypes.c_uint8))
 _ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
@@ -515,6 +517,12 @@ class Thvm:
         buf = (c_uint32 * cap)()
         n = int(_uop_leaf_tids(c_uint64(int(root)), buf, c_uint32(cap)))
         return [int(buf[i]) for i in range(n)]
+
+    def uop_substitute(self, root: Term, frm, to) -> Term:
+        """root with each frm[i] replaced by to[i]."""
+        n = len(frm)
+        a, b = (c_uint64 * max(1, n))(*map(int, frm)), (c_uint64 * max(1, n))(*map(int, to))
+        return Term(int(_uop_substitute(c_uint64(int(root)), a, b, c_uint32(n))))
 
     def ten_get_buf_id(self, t: Term) -> int:
         return int(_ten_get_buf_id(c_uint64(int(t))))

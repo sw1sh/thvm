@@ -418,18 +418,30 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             gradient = self.const_like(1.0)
         if not (dtypes.is_float(self._dtype) and all(dtypes.is_float(t._dtype) for t in targets)):
             raise RuntimeError("only float Tensors have gradient")
+        # An unrealized target is a node of self's graph: d self / d target holds it independent of
+        # what it reads, so its buffer takes the node's place in a graph of its own, while a buffer
+        # target keeps the whole graph, its gradient flowing through every node (tinygrad's
+        # compute_gradient).
+        old = [t.term for t in targets]
         for t in targets:
             t.realize()
-        tids = [int(_TH.term_val(t.term)) for t in targets]
-        # The C rule accumulates into each leaf's grad; clear it on both sides so this call
-        # neither reads nor leaves one.
-        for t in targets:
-            _TH.ten_clear_grad(t.term)
-        grads, _, err = _TH.backward(self.term, gradient.term, tids)
-        for t in targets:
-            _TH.ten_clear_grad(t.term)
-        if err is not None:
-            raise RuntimeError(f"gradient(): {err}")
+        roots = [_TH.uop_substitute(self.term, [o], [t.term]) if int(o) != int(t.term) else self.term
+                 for o, t in zip(old, targets)]
+        grads = [0] * len(targets)
+        for root in dict.fromkeys(roots):
+            idx = [i for i, r in enumerate(roots) if r == root]
+            ts = [targets[i] for i in idx]
+            # The C rule accumulates into each leaf's grad; clear it on both sides so this call
+            # neither reads nor leaves one.
+            for t in ts:
+                _TH.ten_clear_grad(t.term)
+            gs, _, err = _TH.backward(root, gradient.term, [int(_TH.term_val(t.term)) for t in ts])
+            for t in ts:
+                _TH.ten_clear_grad(t.term)
+            if err is not None:
+                raise RuntimeError(f"gradient(): {err}")
+            for i, g in zip(idx, gs):
+                grads[i] = g
         return [Tensor._from_term(Term(g), t._dtype, t._shape) if g != 0 else t.zeros_like()
                 for g, t in zip(grads, targets)]
 

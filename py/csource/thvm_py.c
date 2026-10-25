@@ -488,6 +488,13 @@ EXPORT uint32_t py_uop_leaf_tids(uint64_t root, uint32_t *out, uint32_t cap) {
   return n;
 }
 
+// `root` with each from[i] replaced by to[i] (uop_substitute): gradient() swaps a
+// target's buffer in for its node.
+EXPORT uint64_t py_uop_substitute(uint64_t root, uint64_t const *from, uint64_t const *to,
+                                  uint32_t n) {
+  return uop_substitute((Term)root, (Term const *)from, (Term const *)to, n);
+}
+
 // The chain rule's pending error message (a node it has no rule for),
 // cleared by the call; NULL when there is none.
 EXPORT char const *py_grad_err_take(void) { return grad_err_take(); }
