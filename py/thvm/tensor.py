@@ -506,8 +506,12 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     @classmethod
     def eye(cls, n: int, m: int | None = None, dtype: DType | None = None, **kw) -> "Tensor":
-        dt = to_dtype(dtype) if dtype is not None else dtypes.default_float
-        return cls(np.eye(n, m or n, dtype=_to_np_dtype(dt)), dtype=dt)
+        """Ones on the diagonal: an arange compare, as tinygrad's (mixin/op.py:238-253)."""
+        m_ = n if m is None else m
+        if n < 0 or m_ < 0:
+            raise ValueError(f"cannot have negative {n=}, {m_=}")
+        out_dtype = to_dtype(dtype) if dtype is not None else dtypes.default_float
+        return cls.arange(n).unsqueeze(-1).eq(cls.arange(m_)).cast(out_dtype)
 
     @classmethod
     def empty(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
@@ -535,7 +539,13 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     @classmethod
     def rand(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
-        return cls._random(lambda: np.random.rand(*argfix(*shape)), dtype)
+        """[0, 1) on the dtype's mantissa grid, k / 2**nmant as tinygrad's draw (mixin/rand.py:32-37),
+        so a narrow float never rounds up to 1."""
+        dt = to_dtype(dtype) if dtype is not None else dtypes.default_float
+        if not dtypes.is_float(dt):
+            raise ValueError(f"rand only supports float dtypes, got {dt}")
+        m = 2 ** dtypes.finfo(dt)[1]
+        return cls._random(lambda: np.floor(np.random.rand(*argfix(*shape)) * m) / m, dt)
 
     @classmethod
     def randn(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
@@ -557,6 +567,8 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     @classmethod
     def randint(cls, *shape, low: int = 0, high: int = 10, dtype: DType | None = None,
                 **kw) -> "Tensor":
+        if not all(isinstance(v, int) for v in (low, high)):
+            raise TypeError(f"{low=} and {high=} must be integers")
         dt = to_dtype(dtype) if dtype is not None else dtypes.int32
         if not dtypes.is_int(dt):
             raise TypeError(f"{dt=} must be int")
@@ -1512,20 +1524,16 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         (tinygrad tensor.py:441-457)."""
         np.random.seed(seed)
 
-    def multinomial(self, num_samples: int = 1,
-                    replacement: bool = False) -> "Tensor":
-        """`num_samples` indices per row, drawn by the weights in self on the host from numpy's
-        seeded RNG, with no gradient (tinygrad mixin/rand.py:251-276)."""
-        w = self.numpy().astype(np.float64)
-        if w.ndim == 1:
-            w = w[None, :]
-            squeeze = True
+    def multinomial(self, num_samples: int = 1, replacement: bool = False) -> "Tensor":
+        """`num_samples` indices per row drawn by the weights in self (tinygrad mixin/rand.py:251-276):
+        uniform draws counted against the row's cdf, or Efraimidis-Spirakis keys without replacement."""
+        assert 1 <= self.ndim <= 2 and num_samples > 0, f"{self.ndim=} must be 1 or 2 dim, {num_samples=} must be positive"
+        weight = self.unsqueeze(0) if self.ndim == 1 else self
+        assert replacement or num_samples <= weight.shape[1], "no replacement samples must not exceed population size"
+        if replacement or num_samples == 1:
+            cdf = (cw := weight.cumsum(1).float()) / cw[:, -1].unsqueeze(1)
+            unif_samples = Tensor.rand(num_samples, cdf.shape[0], 1)
+            indices = (unif_samples >= cdf).sum(2).permute((1, 0))
         else:
-            squeeze = False
-        out = np.empty((w.shape[0], num_samples), dtype=np.int32)
-        for i in range(w.shape[0]):
-            p = w[i] / w[i].sum()
-            out[i] = np.random.choice(w.shape[1], size=num_samples,
-                                      replace=replacement, p=p)
-        res = out[0] if squeeze else out
-        return Tensor(res.astype(np.int32), dtype=dtypes.default_int)
+            indices = (weight.rand_like(dtype=dtypes.float32).log2() / weight).topk(num_samples, dim=1)[1]
+        return (indices.squeeze(0) if self.ndim == 1 else indices).cast(dtypes.int32)
