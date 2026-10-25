@@ -121,7 +121,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 // Multicomputation reduction trace.  Self-gated by `#ifdef THVM_TRACE`:
 // in default builds the entire translation unit is empty and the
 // `multi_emit(...)` macro at every call site is `((void)0)`.  See
-// docs/plans/multicomputation_trace.md and src/instrument/multi.c.
+// docs/multicomputation/multicomputation_trace.md and src/instrument/multi.c.
 #include "instrument/multi.c"
 
 // === lam/ ===

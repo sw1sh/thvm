@@ -1,9 +1,7 @@
 (* lazy.wlt -- VerificationTest specs for Lazy.wl.
 
    IC-native laziness: TLazyRange uses TDef + TRef so forcing
-   one element fires only the interactions needed for that element.
-
-   See docs/plans/lazy_patterns.md (Phase 0). *)
+   one element fires only the interactions needed for that element. *)
 
 (* === lifecycle === *)
 

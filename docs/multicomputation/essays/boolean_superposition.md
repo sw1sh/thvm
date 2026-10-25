@@ -190,7 +190,7 @@ Count[satVector, 1]
 
 ## Why this is multicomputation
 
-Reading `docs/multicomputation.md`: a superposition is a *slice* of parallel
+Reading `docs/multicomputation/multicomputation.md`: a superposition is a *slice* of parallel
 worlds, reduction is *slice evolution*, and `TCollapse` is an *observer* that
 reads out the leaves. The boolean model-finder is a multicomputation whose
 worlds are the variable assignments:

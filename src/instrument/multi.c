@@ -1,4 +1,4 @@
-// Multicomputation trace (docs/multicomputation.md). Without -DTHVM_TRACE this
+// Multicomputation trace (docs/multicomputation/multicomputation.md). Without -DTHVM_TRACE this
 // file is empty and multi_emit / WIRE_PROV_BUMP compile to nothing.
 //
 // With it, the macros (thvm.h) test CURRENT_CTX->trace and call the out-of-line

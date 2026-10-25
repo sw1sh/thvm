@@ -1,10 +1,10 @@
 (* ::Package:: *)
 (* Multicomputation.wl -- WL surface for the MultiEvent reduction
    trace (src/instrument/multi.c).  Conceptual reading in
-   docs/multicomputation.md: a SUP-term is a "slice", reduction is
+   docs/multicomputation/multicomputation.md: a SUP-term is a "slice", reduction is
    "slice evolution", collapse is an "observer", INC is a "foliation".
    Build trajectory + the rule-family table in
-   docs/plans/multicomputation_trace.md.
+   docs/multicomputation/multicomputation_trace.md.
 
    TMultiTrace[expr]    evaluates `expr` (HoldFirst) with trace
                             recording on, returns
@@ -19,7 +19,7 @@
                             SPLIT / MERGE / PRUNE / DIST.
                             "consumed" is a list of event ids the
                             current event read from (M1 wire prov,
-                            see docs/plans/multicomputation_trace.md
+                            see docs/multicomputation/multicomputation_trace.md
                             section 10.2); empty list for events whose
                             active-pair payload came from outside the
                             trace (pre-trace construction).
@@ -324,7 +324,7 @@ multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List, singleKey_] := Block
    ids.  Edges: F -> E iff F.id appears in E.consumed.  Wire-provenance
    is recorded by the C side (wire_prov[loc]) and surfaced here via the
    "consumed" field on each event.  Soundness: interaction nets are
-   causally invariant in Wolfram's sense (docs/multicomputation.md
+   causally invariant in Wolfram's sense (docs/multicomputation/multicomputation.md
    section 3.1 layer (4)), so the graph is a property of the program,
    not the reducer's schedule.  Option "VertexLabels" -> Automatic
    labels each event with its rule name; "Family" -> {"TERM", ...}

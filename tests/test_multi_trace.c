@@ -19,8 +19,8 @@
 //       exactly one MultiEvent whose `rule` is RULE_APP_LAM and
 //       `family` is MULTI_TERM.
 //
-// Conceptual reading: docs/multicomputation.md.
-// Build trajectory: docs/plans/multicomputation_trace.md.
+// Conceptual reading: docs/multicomputation/multicomputation.md.
+// Build trajectory: docs/multicomputation/multicomputation_trace.md.
 
 #include "../src/thvm.c"
 #include "test.h"

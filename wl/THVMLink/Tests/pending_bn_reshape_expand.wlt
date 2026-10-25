@@ -21,7 +21,7 @@
 
    The fix is in C: the rangeify reduce->reshape->expand fusion or the
    kernel_lift index walk needs to handle this pattern.  See
-   docs/plans/multicomputation_trace.md and the probe scripts under
+   docs/multicomputation/multicomputation_trace.md and the probe scripts under
    `scripts/probe_*.wls`. *)
 
 PacletDirectoryLoad["wl/THVMLink"];

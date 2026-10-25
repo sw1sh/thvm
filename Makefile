@@ -820,7 +820,7 @@ endif
 # in src/interact/*.c compile to ((void)0) and src/instrument/multi.c
 # is empty.  test_multi_trace_on adds -DTHVM_TRACE, so the runtime
 # flag and all multi_trace_* API are present.  Both binaries must
-# pass; see docs/plans/multicomputation_trace.md.
+# pass; see docs/multicomputation/multicomputation_trace.md.
 $(BIN)/test_multi_trace_on: tests/test_multi_trace.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_TRACE -o $@ $< $(TEST_LDFLAGS)
 

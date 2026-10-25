@@ -8,7 +8,7 @@ For the IC-side terminology (`term`, `agent`, `port`, `wire`, ...)
 see [term.md](term.md).  For the multicomputation reading of the
 SUP / DUP / INC machinery (slice, branch cylinder, observer,
 foliation, the reduction trace) see
-[../multicomputation.md](../multicomputation.md); the *Multicomputation*
+[../multicomputation/multicomputation.md](../multicomputation/multicomputation.md); the *Multicomputation*
 section near the bottom of this file is the short version.
 
 ## Tensor and storage
@@ -192,9 +192,9 @@ the plan memo for the full treatment.
 
 > The *multiway* face of the SUP / DUP / INC machinery -- the same
 > structure the ATP section above calls *entailment cones*.  Full
-> treatment in [../multicomputation.md](../multicomputation.md); this is the
+> treatment in [../multicomputation/multicomputation.md](../multicomputation/multicomputation.md); this is the
 > vocabulary table.  Nothing in the "trace" rows is implemented yet --
-> see [the trace plan](../plans/multicomputation_trace.md).
+> see [the trace plan](../multicomputation/multicomputation_trace.md).
 
 | word | meaning | which layer |
 |---|---|---|
@@ -212,15 +212,15 @@ the plan memo for the full treatment.
 | **observer** | Whatever sequentialises a slice into a definite *stream* of states.  In thvm: the priority collapser, [src/collapse/ordered.c](../../src/collapse/ordered.c).  A bounded computation; it cannot present a slice "all at once," it walks the branches in some order. | runtime / IC |
 | **foliation / reference frame** | A choice of how to slice multiway time -- here, the order the collapser walks the branches in, set by the `INC` (`TAG_INC`) decoration: descending into a SUP raises the priority key, an `INC` wrapper lowers it.  Different `INC` schemes = different observers; by confluence they emit the same *set* of states, only the *order* differs. | runtime / IC |
 | **causal invariance** | Wolfram's term for "any two derivations produce *isomorphic causal graphs*" -- a *strictly stronger* property than confluence (which only requires the final state to agree).  Confluence is about endpoint states; causal invariance is about the entire event structure (same events, same partial order, only interleaved differently in clock time).  Most WPP-relevant string-rewriting systems satisfy it only asymptotically; **interaction nets satisfy it strictly, by construction** -- the per-active-pair rule discipline makes every event determined by the net and every causal dependency determined by wire-provenance, neither of which depends on the schedule.  This is what makes both "the multiway states graph of a trace" a well-defined quotient *and* "the causal graph of a trace" a program invariant. | concept / IC |
-| **reduction trace** | The recorded sequence of interactions of one run, the thing the multiway / branchial / causal / token-event graphs are projections of.  Proposed encoding: a **branch-cylinder-tagged token-event graph** -- see [the trace plan](../plans/multicomputation_trace.md). | proposed |
+| **reduction trace** | The recorded sequence of interactions of one run, the thing the multiway / branchial / causal / token-event graphs are projections of.  Proposed encoding: a **branch-cylinder-tagged token-event graph** -- see [the trace plan](../multicomputation/multicomputation_trace.md). | proposed |
 | **token-event graph** (Wolfram) | Tokens (persistent atoms) as one kind of node, events (rule firings, consuming/producing tokens) as the other.  An interaction net *is* one: wires = tokens, interactions = events.  The states / branchial / causal graphs are quotients of it. | concept / IC |
-| **multiway / branchial / causal / token-event view** | The four `Graph[]` objects derivable from a trace: states + `fork`/`merge`/`term` edges; the SUP-label tree at one antichain; events + token-provenance edges; the raw token-event graph.  Proposed WL surface `TMultiwayGraph` / `TBranchialGraph` / `TCausalGraph` / `TTokenEventGraph` -- see [plans/multicomputation_trace.md, §7](../plans/multicomputation_trace.md#7-wl-surface). | proposed |
+| **multiway / branchial / causal / token-event view** | The four `Graph[]` objects derivable from a trace: states + `fork`/`merge`/`term` edges; the SUP-label tree at one antichain; events + token-provenance edges; the raw token-event graph.  Proposed WL surface `TMultiwayGraph` / `TBranchialGraph` / `TCausalGraph` / `TTokenEventGraph` -- see [plans/multicomputation_trace.md, §7](../multicomputation/multicomputation_trace.md#7-wl-surface). | proposed |
 
 For why this matters (debugging SUP-heavy code: spurious merges =
 label collisions, runaway splits = unintended branch dimensions; making
 the observer a first-class object; the contrast with the Wolfram
 Physics Project -- free confluence, branchial space as literal sharing,
-`INC` as foliation) see [multicomputation.md, §5 and §6](../multicomputation.md); the implementation sketch lives in [../plans/multicomputation_trace.md](../plans/multicomputation_trace.md).
+`INC` as foliation) see [multicomputation.md, §5 and §6](../multicomputation/multicomputation.md); the implementation sketch lives in [../multicomputation/multicomputation_trace.md](../multicomputation/multicomputation_trace.md).
 
 ## Visualization
 

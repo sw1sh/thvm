@@ -25,7 +25,7 @@ tree; cylinders; foliations).  See
 [rule-coverage table](#101-rule-coverage-as-of-this-commit) below
 for the M0+wnf-inline detail, and [M1 wire provenance](#102-m1-wire-provenance)
 for what landed this round.  Conceptual companion:
-[docs/multicomputation.md](../multicomputation.md) reads the
+[docs/multicomputation/multicomputation.md](multicomputation.md) reads the
 SUP / DUP / INC machinery through Wolfram's multicomputation paradigm
 (a SUP-term is a *slice*; reduction is *slice evolution*; the
 collapser is an *observer*; `INC` is a *foliation*).  *This* memo is
@@ -290,7 +290,7 @@ event has one -- the cone the redex lives in -- and a *shared* sub-term
 contributes its cylinder to *every* event happening inside it ("do it
 once, it counts everywhere it's shared"; this is the branchial
 restatement of Levy-optimal sharing, see
-[docs/plans/levy_optimal.md](levy_optimal.md)).
+[docs/core/normal_form.md](../core/normal_form.md)).
 
 Maintain the **live SUP-label forest** during the traced reduction:
 
@@ -322,7 +322,7 @@ deterministic projections.  Implemented in
 Soundness note: each view is a property of the *program*, not of the
 reducer's schedule.  Interaction nets are *causally invariant* in
 Wolfram's sense (a strictly stronger property than confluence -- see
-[docs/multicomputation.md, §3.1 layer (4) and §5](../multicomputation.md#31-a-finer-point-about-confluence)):
+[docs/multicomputation/multicomputation.md, §3.1 layer (4) and §5](multicomputation.md#31-a-finer-point-about-confluence)):
 the per-active-pair rule discipline makes every event determined by
 the net and every causal dependency determined by wire-provenance,
 neither of which depends on the order our `interact_*` happened to
@@ -446,8 +446,7 @@ the project lives in (cf. [docs/core/heap_graph.md](../core/heap_graph.md),
   `MULTI_FORK` / `MULTI_SPLIT` / `MULTI_MERGE` / `MULTI_PRUNE` precisely;
   `TBranchialGraph[trace, k]`.  Validate:
   - label-collision detection: a deliberately bad SAT encoding
-    (independent variables given the same label, per
-    [docs/research/sat_solver_paths.md](../research/sat_solver_paths.md))
+    (independent variables given the same label)
     must show a *spurious* `MULTI_MERGE` -- the failure mode IC's label
     discipline is meant to prevent;
   - on the SupGen-encoded SAT bench, total `MULTI_FORK` count matches the
@@ -489,8 +488,7 @@ Three concrete payoffs once M0-M3 are in:
    branch dimension you didn't mean to add) become *visible* in the
    branch tree; both are bugs that, today, only manifest as "the
    collapse count is wrong by a factor of two and I don't know why."
-   The branch-tree view will close those bugs trivially on the SAT
-   bench ([docs/research/sat_solver_paths.md](../research/sat_solver_paths.md))
+   The branch-tree view will close those bugs trivially on SAT encodings
    and the IC-native ATP ([docs/ATP/waldmeister_ic_atp.md](../ATP/waldmeister_ic_atp.md)).
 2. **The observer becomes a first-class, inspectable object.**  "This
    `TAG_INC` decoration is this foliation is this traversal order"
@@ -505,7 +503,7 @@ Three concrete payoffs once M0-M3 are in:
    beside `ResourceFunction["MultiwaySystem"][...]` in a notebook for
    side-by-side comparison.  The contrast (IC's free confluence,
    branchial space as literal heap-sharing, `INC` as foliation -- see
-   [docs/multicomputation.md, §5](../multicomputation.md)) becomes
+   [docs/multicomputation/multicomputation.md, §5](multicomputation.md)) becomes
    showable rather than just statable.
 
 ## 10. M0 spike outcome

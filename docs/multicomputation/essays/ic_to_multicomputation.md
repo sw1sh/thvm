@@ -528,7 +528,7 @@ Grid[
 
 ## Where next
 
-`docs/multicomputation.md` -- the conceptual essay (SUP = slice,
+`docs/multicomputation/multicomputation.md` -- the conceptual essay (SUP = slice,
 collapser = observer, INC = foliation).
-`docs/plans/multicomputation_trace.md` -- the C-side build trajectory
+`docs/multicomputation/multicomputation_trace.md` -- the C-side build trajectory
 through milestones M0-M4.

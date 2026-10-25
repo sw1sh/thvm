@@ -1211,8 +1211,8 @@ typedef struct {
 
 // === MultiEvent: multicomputation reduction trace ===
 //
-// See docs/multicomputation.md (conceptual reading) and
-// docs/plans/multicomputation_trace.md (build trajectory).
+// See docs/multicomputation/multicomputation.md (conceptual reading) and
+// docs/multicomputation/multicomputation_trace.md (build trajectory).
 //
 // Off by default.  Build with -DTHVM_TRACE to enable; even in that
 // build, the runtime flag CURRENT_CTX->trace must be set for events
@@ -1222,7 +1222,7 @@ typedef struct {
 // The default-build acceptance gate is: `bench-train` / `bench-atp`
 // / AOT match their pre-trace numbers within noise.
 
-// Family classification (docs/plans/multicomputation_trace.md §4).
+// Family classification (docs/multicomputation/multicomputation_trace.md §4).
 #define MULTI_TERM   0  // within-branch compute event (states-graph edge)
 #define MULTI_SLIDE  1  // re-foliation (APP-SUP commute, cnf lift, INC rules)
 #define MULTI_FORK   2  // 1 -> 2 (seeded SUP, DUP-CTR/LAM/NOD)
@@ -1393,7 +1393,7 @@ typedef struct TContext {
 
 #ifdef THVM_TRACE
     /* Multicomputation trace (see MultiEvent above and
-       docs/plans/multicomputation_trace.md).  Only present when the
+       docs/multicomputation/multicomputation_trace.md).  Only present when the
        binary is built with -DTHVM_TRACE; even then, events are
        appended only while the runtime flag `trace` is non-zero. */
     MultiEvent *multi_events;

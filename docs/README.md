@@ -58,15 +58,12 @@ the ENIGMA plan and the knob table ([ATP/env_knobs.md](ATP/env_knobs.md)).
 
 Research and essays outside the two tracks:
 
-- [multicomputation.md](multicomputation.md) and
-  [plans/multicomputation_trace.md](plans/multicomputation_trace.md): the
-  interaction calculus read as multicomputation, and the trace that records it.
-- [essays/](essays/): worked examples of superposition and the trace, run cell
-  by cell.
-- [plans/lazy_patterns.md](plans/lazy_patterns.md): lazy streams and pattern
-  matching on the reducer.
-- [research/sat_solver_paths.md](research/sat_solver_paths.md): SAT solving on
-  the interaction calculus and on GPU.
+- [multicomputation/](multicomputation/multicomputation.md): the interaction
+  calculus read as multicomputation
+  ([multicomputation.md](multicomputation/multicomputation.md)), the trace that
+  records it ([multicomputation_trace.md](multicomputation/multicomputation_trace.md))
+  and worked essays on superposition and the trace, run cell by cell
+  ([essays/](multicomputation/essays/)).
 - [neuroscience/README.md](neuroscience/README.md),
   [symbolic/README.md](symbolic/README.md): primers on neuroscience for toy AI
   and on symbolic and neuro-symbolic AI.
