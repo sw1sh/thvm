@@ -352,7 +352,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             _TH.ten_create(self._dtype.thvm_id, list(self._shape)),
             self._dtype, self._shape)
         # Realized eagerly, so the clone is a new leaf: backward() does not reach self through it,
-        # where tinygrad passes the gradient to the source (mixin/gradient.py:100-101).
+        # where tinygrad passes the gradient to the source (mixin/gradient.py:98-99).
         ret = dst.assign(self).realize()
         if self.grad is not None:
             ret.grad = self.grad.clone()

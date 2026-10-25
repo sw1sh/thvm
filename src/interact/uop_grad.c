@@ -417,7 +417,7 @@ static int grad_prewalk_visited(u64 loc, Term target) {
 static int grad_op_is_diff_sink(u8 op) {
   return op == UOP_CMPLT  || op == UOP_CMPEQ
       || op == UOP_BITCAST || op == UOP_DETACH
-      || op == UOP_CONST  || op == UOP_LOAD || op == UOP_ASSIGN || op == UOP_THREEFRY;
+      || op == UOP_CONST  || op == UOP_LOAD || op == UOP_THREEFRY;
 }
 
 static void grad_prewalk_credit_and_descend(Term child, Term target) {
@@ -443,6 +443,7 @@ static u32 grad_op_diff_slot_mask(u8 op) {
     case UOP_IWHERE:  return 0x6u;   // then, else
     case UOP_GATHER:  return 0x1u;   // src
     case UOP_SCATTER: return 0x5u;   // base, src
+    case UOP_ASSIGN:  return 0x2u;   // the value, not the dst
     default:          return (1u << uop_arity(op)) - 1u;
   }
 }
@@ -1319,9 +1320,13 @@ static Term interact_grad_dispatch(Term grad_term) {
       // tinygrad mixin/gradient.py:105-106: a bitcast has no gradient.
       return grad_zero_at(y);
 
+    case UOP_ASSIGN:
+      // tinygrad mixin/gradient.py:98-99: an assign (or a clone) passes the
+      // cotangent to the value it writes.
+      return grad_bwd_for_child(heap_read(y_loc + 1), gy);
+
     case UOP_CONST:
     case UOP_LOAD:
-    case UOP_ASSIGN:
     case UOP_THREEFRY:
       return grad_zero_at(y);
 

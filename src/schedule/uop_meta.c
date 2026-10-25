@@ -209,7 +209,8 @@ static int term_shape_in_uncached(Term t, u32 env_id, Shape *out) {
   if (op == UOP_GATHER) {
     return term_shape_in(heap_read(loc + 1), 0, out);
   }
-  if (op == UOP_SCATTER) {
+  // SCATTER and ASSIGN have their destination's shape (slot 0).
+  if (op == UOP_SCATTER || op == UOP_ASSIGN) {
     return term_shape_in(heap_read(loc + 0), 0, out);
   }
   if (uop_is_binary_elementwise(op)) {
