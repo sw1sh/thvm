@@ -749,6 +749,11 @@ static double uwalk_eval_float(UWalkCtx *c, Term t, u32 dt) {
         union { u64 b; f64 f; } pun = { .b = bits };
         return pun.f;
       }
+      if (uwalk_dtype_is_float(dst)) {
+        // A 16- or 8-bit float reads the low bits as its storage holds them.
+        u64 bits = (u64)uwalk_eval_int(c, src);
+        return uwalk_load_f64(&bits, 0, dst);
+      }
       return (double)uwalk_eval_int(c, src);
     }
     case UOP_IWHERE: {
@@ -897,6 +902,14 @@ static i64 uwalk_eval_int(UWalkCtx *c, Term t) {
           if (sz == 4) return (i64)((u32 *)bp)[off];
           if (sz == 8) return (i64)((u64 *)bp)[off];
         }
+      }
+      // A computed 16- or 8-bit float gives the bits its storage would hold.
+      u32 sdt = DT_FP32;
+      (void)term_dtype_in(src, 0, &sdt);
+      if (uwalk_dtype_is_float(sdt) && dtype_itemsize(sdt) < 4) {
+        u64 bits = 0;
+        uwalk_store_f64(&bits, 0, sdt, uwalk_eval_float(c, src, uwalk_term_dtype(c, src)));
+        return (i64)bits;
       }
       return uwalk_eval_int(c, src);
     }
