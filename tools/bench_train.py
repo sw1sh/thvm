@@ -32,6 +32,8 @@ MODEL = os.environ.get("MODEL", "beautiful")
 BS    = int(os.environ.get("BS", "8"))
 NITER = int(os.environ.get("NITER", "12"))
 np.random.seed(42)
+# Weight init draws from Tensor's in-graph RNG, which tinygrad seeds from the clock.
+Tensor.manual_seed(42)
 
 
 def _peak_bytes():

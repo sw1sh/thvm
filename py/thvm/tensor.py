@@ -36,6 +36,15 @@ _LEAF_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
 
 # Each float full still a lazy constant: backward() makes it a leaf (Tensor.ones as a weight).
 _LAZY_FULLS: "weakref.WeakSet[Tensor]" = weakref.WeakSet()
+# Tensors whose term is a pending UOP_ASSIGN.  Every realize takes them along, so one fired inside
+# another tensor's realize never stays a term whose kernel the kernel GC strips.
+_PENDING_ASSIGNS: "weakref.WeakSet[Tensor]" = weakref.WeakSet()
+
+
+def _realize_pending() -> None:
+    """Realize every pending assign (a TinyJit capture starts with none outside its function)."""
+    for t in list(_PENDING_ASSIGNS)[:1]:
+        t.realize()
 
 # The next pin handle (_pin).  Tensor allocation and realize call reclaim_if_due(), which bounds
 # memory without GlobalCounters.reset(); both are safe points, where every term still needed is
@@ -273,7 +282,10 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     def realize(self, *lst: "Tensor", **kwargs) -> "Tensor":
         """Run thvm's pipeline and swap each term for its TAG_TEN; several tensors realize in one
-        realize_many pass (tinygrad tensor.py:219-225), so shared kernels emit once."""
+        realize_many pass (tinygrad tensor.py:219-225), so shared kernels emit once.  Every pending
+        assign realizes with it, ordered against the reads as below."""
+        lst = (*lst, *(t for t in _PENDING_ASSIGNS if t is not self and all(t is not x for x in lst)))
+        _PENDING_ASSIGNS.clear()
         if not lst:
             self.term = _TH.realize(self.term)
             self._pin()
@@ -363,6 +375,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             _LAZY_FULLS.discard(self)
             return self
         self.term = _TH.binary(K.ASSIGN, self.term, x.term)
+        _PENDING_ASSIGNS.add(self)
         return self
 
     def replace(self, x: "Tensor") -> "Tensor":

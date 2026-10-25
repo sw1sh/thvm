@@ -102,6 +102,8 @@ def TinyJit(fn):
         if state["slot"]:
             _TH.jit_drop(state["slot"])
             state["slot"] = 0
+        from .tensor import _realize_pending
+        _realize_pending()
         slot = _TH.jit_begin()
         if slot == 0:
             # No capture slot is free: run fn uncaptured.
