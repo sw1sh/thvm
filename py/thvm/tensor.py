@@ -313,8 +313,15 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         return self
 
     def _realize(self, *lst: "Tensor") -> "Tensor":
-        lst = (*lst, *(t for t in list(_PENDING_ASSIGNS.values()) if t is not self and all(t is not x for x in lst)))
-        _PENDING_ASSIGNS.clear()
+        # The pending assigns the roots read realize with them, so no tensor keeps a fired ASSIGN as its
+        # term; one they do not read stays pending, as tinygrad realizes only what the graph needs
+        # (a read before two writes, and one between them, see each write in turn).
+        pend = [t for t in list(_PENDING_ASSIGNS.values()) if t is not self and all(t is not x for x in lst)]
+        if pend:
+            hit = _TH.uop_reaches([self.term, *(x.term for x in lst)], [t.term for t in pend])
+            lst = (*lst, *(t for t, h in zip(pend, hit) if h))
+        for t in (self, *lst):
+            _PENDING_ASSIGNS.pop(id(t), None)
         if not lst:
             self.term = _TH.realize(self.term)
             self._pin()
@@ -387,13 +394,12 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         x = x if isinstance(x, Tensor) else Tensor(x, dtype=self._dtype)
         # A view of a buffer (the kv-cache write `cache[:, :, p:p+n].assign(...)`): its base takes x
         # where the view reads it, as tinygrad's STORE through the view (tensor.py:250-267), down to
-        # the buffer, which realizes; UOP_ASSIGN would write one contiguous run at the view's offset.
+        # the buffer, a pending assign like any other; UOP_ASSIGN would write one contiguous run at
+        # the view's offset.
         if self._view is not None:
             base, fwd, inv = self._view
             xb, inside = inv(x._broadcast_to(self._shape).cast(self._dtype))
             base.assign(xb if inside is None else inside.where(xb, base))
-            if base._view is None:
-                _realize_now(base)
             self.term = fwd(base).term
             return self
         tag = int(_TH.term_tag(self.term))
@@ -403,7 +409,9 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             self.term = x._broadcast_to(self._shape).term
             _LAZY_FULLS.pop(id(self), None)
             return self
-        self.term = _TH.binary(K.ASSIGN, self.term, x.term)
+        # A second assign to a pending one writes its buffer, x reading the first: chains stay flat,
+        # as tinygrad's AFTER over one buffer.
+        self.term = _TH.binary(K.ASSIGN, _TH.assign_base(self.term), x.term)
         _PENDING_ASSIGNS[id(self)] = self
         return self
 
@@ -1185,10 +1193,11 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
                              Tensor.ones(*new_shape, dtype=dtypes.bool)._pad_zero(pX)))
 
     def _as_view(self, out: "Tensor", fwd, inv) -> "Tensor":
-        """out as a view of self when self is a buffer or a view of one, so an assign into out writes
-        self (see assign()): fwd remakes out from self, inv takes a value of out's shape to self's
-        shape and the mask of the elements out reads (None: all of them)."""
-        if self._view is not None or int(_TH.term_tag(self.term)) == _TAG_TEN:
+        """out as a view of self when self is a buffer, a pending assign into one, or a view of one, so
+        an assign into out writes self (see assign()): fwd remakes out from self, inv takes a value
+        of out's shape to self's shape and the mask of the elements out reads (None: all of them)."""
+        tag = int(_TH.term_tag(self.term))
+        if self._view is not None or tag == _TAG_TEN or (tag == _TAG_UOP and _TH.term_ext(self.term) == K.ASSIGN):
             out._view = (self, fwd, inv)
         return out
 

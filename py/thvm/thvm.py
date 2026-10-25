@@ -133,6 +133,9 @@ _ten_set_grad_leaf = _bind("py_ten_set_grad_leaf", c_int32,
 _uop_leaf_tids = _bind("py_uop_leaf_tids", c_uint32,
                        c_uint64, ctypes.POINTER(c_uint32), c_uint32)
 _grad_err_take     = _bind("py_grad_err_take",     c_char_p)
+_assign_base = _bind("py_assign_base", c_uint64, c_uint64)
+_uop_reaches = _bind("py_uop_reaches", None, ctypes.POINTER(c_uint64), c_uint32,
+                     ctypes.POINTER(c_uint64), c_uint32, ctypes.POINTER(ctypes.c_uint8))
 _uop_substitute = _bind("py_uop_substitute", c_uint64, c_uint64, ctypes.POINTER(c_uint64),
                         ctypes.POINTER(c_uint64), c_uint32)
 _backward = _bind("py_backward", c_char_p, c_uint64, c_uint64, ctypes.POINTER(c_uint32),
@@ -535,6 +538,18 @@ class Thvm:
         backward() marks its leaves through uop_backward instead."""
         return bool(_ten_set_grad_leaf(c_uint64(int(t)),
                                        c_int32(1 if on else 0)))
+
+    def assign_base(self, t: Term) -> Term:
+        """The buffer under `t`'s ASSIGN chain (t itself when it is no ASSIGN)."""
+        return Term(int(_assign_base(c_uint64(int(t)))))
+
+    def uop_reaches(self, roots: "list[Term]", targets: "list[Term]") -> "list[bool]":
+        """Which of `targets` occur under one of `roots`."""
+        r = (c_uint64 * max(1, len(roots)))(*[int(t) for t in roots])
+        t = (c_uint64 * max(1, len(targets)))(*[int(x) for x in targets])
+        out = (ctypes.c_uint8 * max(1, len(targets)))()
+        _uop_reaches(r, c_uint32(len(roots)), t, c_uint32(len(targets)), out)
+        return [bool(out[i]) for i in range(len(targets))]
 
     def uop_leaf_tids(self, root: Term) -> "list[int]":
         """The distinct TAG_TEN tids reachable from `root`, backward()'s in-scope

@@ -540,6 +540,44 @@ EXPORT uint32_t py_uop_leaf_tids(uint64_t root, uint32_t *out, uint32_t cap) {
   return n;
 }
 
+// The buffer an ASSIGN chain writes: a second assign to a pending one writes
+// that buffer, its value reading the first, as tinygrad's AFTER chain does.
+EXPORT uint64_t py_assign_base(uint64_t t) {
+  Term a = term_resolve((Term)t);
+  while (term_tag(a) == TAG_UOP && term_ext(a) == UOP_ASSIGN) {
+    a = term_resolve(heap_read(term_val(a) + 0));
+  }
+  return a;
+}
+
+// out[i] = 1 iff targets[i] occurs under one of roots[]: realize() takes along
+// the pending assigns its roots read.
+EXPORT void py_uop_reaches(uint64_t const *roots, uint32_t n_roots, uint64_t const *targets,
+                           uint32_t n_targets, uint8_t *out) {
+  UOpMap want = {0};
+  for (u32 i = 0; i < n_targets; i++) {
+    out[i] = 0;
+    uop_map_put(&want, term_resolve((Term)targets[i]), (Term)(i + 1));
+  }
+  UOpWalk w = {0};
+  for (u32 i = 0; i < n_roots; i++) {
+    uop_walk_push(&w, term_resolve((Term)roots[i]));
+  }
+  Term n;
+  while ((n = uop_walk_pop(&w)) != 0) {
+    Term hit;
+    if (uop_map_get(&want, n, &hit)) {
+      out[(u32)hit - 1] = 1;
+    }
+    u8 op = term_ext(n);
+    for (u8 s = 0; op != UOP_KERNEL && s < uop_arity(op); s++) {
+      uop_walk_push(&w, term_resolve(heap_read(term_val(n) + s)));
+    }
+  }
+  uop_walk_free(&w);
+  uop_map_free(&want);
+}
+
 // `root` with each from[i] replaced by to[i] (uop_substitute): gradient() swaps a
 // target's buffer in for its node.
 EXPORT uint64_t py_uop_substitute(uint64_t root, uint64_t const *from, uint64_t const *to,

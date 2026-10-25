@@ -44,6 +44,18 @@ class TestPendingAssign(unittest.TestCase):
         self.assertEqual(s0.item(), 3.0)
         np.testing.assert_array_equal(t.numpy(), [10.0, 20.0])
 
+    def test_reads_between_view_writes(self):
+        # tinygrad's test_lazy_sum_between_writes: a view assign stays pending, and a realize takes only
+        # the assigns its graph reads, so each sum sees the writes made before it.
+        t = Tensor.zeros(6).contiguous()
+        s0 = t.sum()
+        t[:3].assign(1.0)
+        s1 = t.sum()
+        t[3:].assign(2.0)
+        s2 = t.sum()
+        self.assertEqual([s0.item(), s1.item(), s2.item()], [0.0, 3.0, 9.0])
+        np.testing.assert_array_equal(t.numpy(), [1, 1, 1, 2, 2, 2])
+
     def test_outside_assign_is_not_captured(self):
         x = Tensor([1.0, 2.0]).clone()
         x.assign(x + 1)
