@@ -25,7 +25,6 @@ update the matching row here in the same change. The ATP rows (`THVM_ATP*`,
 | --- | --- | --- |
 | `JIT` (Python, tinygrad's name) | on (`1`) | Enable the Python JIT capture/replay. `0` disables. |
 | `THVM_JIT_NO_PIN` | off | Disable JIT buffer pinning. |
-| `THVM_JIT_REPLAY_NOSKIP` | off | Disable replay skip optimization. |
 | `THVM_JIT_REPLAY_PACK` | on | Pack replay dispatch records. `0` disables. |
 | `THVM_PRECISE_FIRE_MEMO` | on | Skip a kernel re-fire when none of its buffers was written since its last dispatch this pass. `0` disables. |
 | `THVM_DISPATCH_TRACE` | off | Trace dispatch memoization. |

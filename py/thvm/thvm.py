@@ -119,6 +119,7 @@ _jit_resume = _bind("py_jit_resume", None)
 _jit_op_count = _bind("py_jit_op_count", c_uint32, c_uint32)
 _jit_export_ops = _bind("py_jit_export_ops", c_uint32, c_uint32, ctypes.POINTER(c_uint64), c_uint32)
 _ten_view_words = _bind("py_ten_view_words", c_uint32, c_uint64, ctypes.POINTER(ctypes.c_int64), c_uint32)
+_view_chain = _bind("py_view_chain", c_uint32, c_uint64, ctypes.POINTER(c_uint64), ctypes.POINTER(ctypes.c_int64), c_uint32)
 _tens_count = _bind("py_tens_count", c_uint32)
 _kernel_count = _bind("py_kernel_count", c_uint32)
 _cpu_peak_bytes = _bind("py_cpu_peak_bytes", c_uint64)
@@ -572,6 +573,13 @@ class Thvm:
         """The views t reads its buffer through, outermost first: equal words, equal reads."""
         out = (ctypes.c_int64 * 512)()
         return tuple(out[:int(_ten_view_words(c_uint64(int(t)), out, c_uint32(512)))])
+
+    def view_chain(self, t: Term) -> "tuple[Term, tuple[int, ...]] | None":
+        """For a view of a realized buffer, its TEN and the words of every movement op above it
+        and of its own views; None for any other term."""
+        base, out = c_uint64(0), (ctypes.c_int64 * 1024)()
+        n = int(_view_chain(c_uint64(int(t)), ctypes.byref(base), out, c_uint32(1024)))
+        return (Term(base.value), tuple(out[:n])) if n else None
 
     def backward(self, y: Term, gy: Term, tids) -> "tuple[list[int], str | None]":
         """uop_backward: each leaf's fresh gradient term (0: none), and the chain rule's

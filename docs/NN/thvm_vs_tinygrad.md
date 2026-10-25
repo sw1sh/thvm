@@ -205,7 +205,6 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 
 | Name | Effect | Default |
 |---|---|---|
-| `THVM_JIT_REPLAY_NOSKIP` | Force every dispatch to run | off |
 | `THVM_JIT_REPLAY_PACK` | Pack replay ops (inline inputs -> sidecar) | on |
 | `THVM_JIT_NO_PIN` | Disable buffer pinning during capture | off |
 | `THVM_METAL_GRAPH_REPLAY` / `THVM_METAL_GRAPH_MAX_DISPATCHES` | Metal command-buffer graph replay + cap | off / unset |

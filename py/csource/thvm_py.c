@@ -451,6 +451,36 @@ EXPORT uint32_t py_ten_view_words(uint64_t t, int64_t *out, uint32_t cap) {
   return n;
 }
 
+// A view of a realized buffer, which tinygrad's JIT takes as an input without
+// realizing it (engine/jit.py:234-243): *base is the buffer's TEN, out holds
+// {op, payload...} per movement op from the root down, then the base's view
+// words.  Returns the word count; 0 when t is no movement chain over a TEN
+// with a buffer.
+EXPORT uint32_t py_view_chain(uint64_t t, uint64_t *base, int64_t *out, uint32_t cap) {
+  u32  n   = 0;
+  Term cur = term_resolve(t);
+  for (; term_tag(cur) == TAG_UOP; cur = term_resolve(heap_read(term_val(cur)))) {
+    u8  op  = term_ext(cur);
+    u64 loc = term_val(cur);
+    u32 npay;
+    switch (op) {
+      case UOP_FLIP:    npay = 1; break;
+      case UOP_RESHAPE: case UOP_EXPAND: case UOP_PERMUTE:
+        npay = 1 + (u32)term_val(heap_read(loc + 1)); break;
+      case UOP_PAD:     case UOP_SHRINK:
+        npay = 1 + 2 * (u32)term_val(heap_read(loc + 1)); break;
+      default: return 0;
+    }
+    if (n + 1 + npay > cap) return 0;
+    out[n++] = op;
+    for (u32 i = 0; i < npay; i++) out[n++] = (int64_t)term_val(heap_read(loc + 1 + i));
+  }
+  u32 id = term_tag(cur) == TAG_TEN ? (u32)term_val(cur) : 0;
+  if (n == 0 || id == 0 || id >= TENS_NEXT || TENS[id].buf_id == 0) return 0;
+  *base = cur;
+  return n + py_ten_view_words(cur, out + n, cap - n);
+}
+
 EXPORT uint32_t py_tens_count(void) {
   return TENS_NEXT > 1 ? TENS_NEXT - 1 : 0;
 }

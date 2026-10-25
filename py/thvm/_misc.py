@@ -80,23 +80,26 @@ def _check_no_non_tensor_return(ret):
 
 def _prepare_jit_inputs(args, kwargs):
     """tinygrad's _prepare_jit_inputs (engine/jit.py:82-100): the Tensor arguments, positional then
-    by keyword, then those one container deep, realized; their buf_ids, their names, and per input
-    the (shape, dtype, views) a replay must match, as a capture bakes in each input's view.  Also
-    the tensors themselves."""
+    by keyword, then those one container deep, realized unless a view of a realized buffer; their
+    buf_ids, their names, and per input the (shape, dtype, views) a replay must match, as a capture
+    bakes in each input's view.  Also the tensors themselves."""
     from .tensor import Tensor, _TH, _realize_now
     named = [(n, t) for n, t in list(enumerate(args)) + sorted(kwargs.items()) if t.__class__ is Tensor]
     names, tensors = [n for n, _ in named], [t for _, t in named]
     for x in args + tuple(kwargs.values()):
         it = x if isinstance(x, (tuple, list)) else x.values() if isinstance(x, dict) else []
         tensors += [t for t in it if t.__class__ is Tensor and not any(t is y for y in tensors)]
-    if tensors:
-        _realize_now(*tensors)
-    ids = [_TH.ten_get_buf_id(t.term) for t in tensors]
+    views = [_TH.view_chain(t.term) for t in tensors]
+    if lazy := [t for t, v in zip(tensors, views) if v is None]:
+        _realize_now(*lazy)
+    bases = [v[0] if v else t.term for t, v in zip(tensors, views)]
+    ids = [_TH.ten_get_buf_id(b) for b in bases]
     if 0 in ids:
         raise JitError("JIT inputs must be real buffers; use .clone()")
     if len(set(ids)) != len(ids):
         raise JitError("duplicate inputs to JIT")
-    return ids, names, [(t._shape, t._dtype, _TH.ten_view_words(t.term)) for t in tensors], tensors
+    info = [(t._shape, t._dtype, ("view", *v[1]) if v else _TH.ten_view_words(t.term)) for t, v in zip(tensors, views)]
+    return ids, names, info, tensors
 
 
 def _jit_symbolic_sig(args, kwargs):
@@ -214,8 +217,7 @@ class _TinyJit:
                     _realize_now(*ts)
             finally:
                 capturing.clear()
-                # Every result is a root: jit_capture_finalize replays only the dispatches a
-                # root needs.
+                # Every result is a root, whose buffer the replay's packing never reuses.
                 _TH.jit_end([t.term for t in _ret_tensors(ret)])
             captured = CapturedJit(ret, slot, names, info, inputs)
             if _TH.jit_op_count(slot) == 0:

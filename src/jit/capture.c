@@ -716,8 +716,8 @@ fn void jit_capture_end_with_result(Term root) {
 }
 
 // For a function returning several tensors (TGrad over several parameters):
-// every returned buffer must be a root, or finalize treats it as dead, skips
-// it on replay and lets the next step's arena reclaim it.
+// every returned buffer must be a root, or the replay's buffer packing may
+// hand it to a later op.
 fn void jit_capture_end_with_results(const Term *roots, u32 n_roots) {
   jit_capture_end_common(JIT_ACTIVE_SLOT, roots, n_roots);
 }
@@ -755,19 +755,6 @@ static int jit_metal_graph_replay_enabled(void) {
 fn int jit_trace_capture_enabled(void) {
   char const *e = getenv("THVM_JIT_TRACE_CAPTURE");
   return (e == NULL || e[0] != '0');
-}
-
-// THVM_JIT_REPLAY_NOSKIP=1 replays every dispatch, needed or not: a measurement
-// aid for a bench that discards its result, whose replay would do no GPU work.
-static int jit_replay_noskip(void) {
-  static int known = 0;
-  static int v = 0;
-  if (!known) {
-    char const *e = getenv("THVM_JIT_REPLAY_NOSKIP");
-    v = (e != NULL && e[0] == '1');
-    known = 1;
-  }
-  return v;
 }
 
 static u32 jit_metal_graph_max_dispatches(void) {
@@ -1890,73 +1877,10 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
     return;
   }
 
-  JitCaptureBufRef *needed = (JitCaptureBufRef *)calloc(
-      JIT_CAPTURE_RETAIN_CAP, sizeof(JitCaptureBufRef));
-  if (needed == NULL) {
-    return;
-  }
-  u32 n_needed = 0;
-  for (u32 ri = 0; ri < n_roots; ri++) {
-    jit_capture_root_needed(roots[ri], needed, &n_needed);
-  }
-
-  int noskip = jit_replay_noskip();
-  for (u32 rev = c->n_ops; rev > 0; rev--) {
-    JitCaptureOp *op = &c->ops[rev - 1];
-    op->replay_skip = 0;
-    op->replay_packed = 0;
-    switch (op->kind) {
-      case JIT_OP_DISPATCH: {
-        Backend *out_backend = jit_dispatch_output_backend(op);
-        int output_needed = noskip || jit_bufref_contains(needed, n_needed,
-                                                          out_backend,
-                                                          op->out_buf_id);
-        // A raw program's out_buf_id is only its first written argument; the
-        // others are in in_buf_ids and may escape, so it always replays.
-        if (jit_dispatch_op_custom(op)) output_needed = 1;
-        if (!output_needed) {
-          op->replay_skip = 1;
-          break;
-        }
-        u32 const *ids = op->heap_in_buf_ids != NULL
-                       ? op->heap_in_buf_ids
-                       : op->in_buf_ids;
-        for (u32 i = 0; i < op->n_inputs; i++) {
-          jit_bufref_add(needed, &n_needed,
-                         jit_dispatch_input_backend(op, i),
-                         ids[i]);
-        }
-        break;
-      }
-      case JIT_OP_ASSIGN: {
-        if (op->assign_dst_tid != 0 && op->assign_dst_tid < TENS_NEXT) {
-          TenDesc *td = &TENS[op->assign_dst_tid];
-          jit_bufref_add(needed, &n_needed, td->backend, td->buf_id);
-        }
-        if (op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT) {
-          TenDesc *td = &TENS[op->assign_src_tid];
-          jit_bufref_add(needed, &n_needed, td->backend, td->buf_id);
-        }
-        break;
-      }
-      case JIT_OP_GATHER: {
-        // Live only if its destination is needed, and then so is its source.
-        Backend *gb = (Backend *)op->gather_backend;
-        int dst_needed = noskip || jit_bufref_contains(needed, n_needed,
-                                                       gb, op->gather_dst_buf);
-        if (!dst_needed) {
-          op->replay_skip = 1;
-          break;
-        }
-        jit_bufref_add(needed, &n_needed, gb, op->gather_src_buf);
-        break;
-      }
-    }
-  }
-
+  // Every captured op replays, as tinygrad's jit_cache keeps each kernel the
+  // capture ran; only assign sinking and prune skip one.
   jit_capture_sink_assigns(c, has_result);
-  // held_bufs (tinygrad memory.py:13): the result roots and declared inputs,
-  // re-derived as `needed` now holds intermediates too.
+  // held_bufs (tinygrad memory.py:13): the result roots and declared inputs.
   JitCaptureBufRef *held = (JitCaptureBufRef *)calloc(
       JIT_CAPTURE_RETAIN_CAP, sizeof(JitCaptureBufRef));
   u32 n_held = 0;
@@ -2188,7 +2112,6 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
     }
   }
 
-  free(needed);
 }
 
 #ifdef THVM_HAS_METAL

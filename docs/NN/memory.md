@@ -168,15 +168,15 @@ touching refcounts.  This is covered by
 TJit capture is also a memory root.  During the first call, every
 recorded dispatch buffer is retained and marked preserved so the
 post-realize rollback cannot free buffers that a future replay will
-read.  At capture end, the replay sequence is walked backward:
+read.  Every record replays, as tinygrad's jit cache keeps each kernel
+the capture ran, with two exceptions marked `ReplaySkip`:
 
-- assignment records are always live, because they mutate optimizer
-  state or weights;
-- a dispatch is live only when its output feeds a later live record or
-  the first-call return tensor;
-- dead dispatches are marked `ReplaySkip` and their speculative output
-  buffers are dropped;
-- live buffers remain retained until `TJitDrop` or runtime reset.
+- in a rootless capture, an assignment whose source is a dispatch
+  output is sunk into that dispatch, which then writes the destination;
+- under `prune=True`, a dispatch that depends on no JIT input is not
+  replayed: its output from the capture stands.
+
+Retained buffers stay retained until `TJitDrop` or runtime reset.
 
 `TJitCaptureSummary` reports `ReplayLiveDispatches` and
 `ReplaySkipped` so benchmark output separates the captured IR size

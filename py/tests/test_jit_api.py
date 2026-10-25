@@ -1,8 +1,10 @@
 """TinyJit as tinygrad's class (engine/jit.py:39-183): `captured._linear.src` holds the ops a replay
 runs, reset() captures afresh, a method jits through __get__, a call whose inputs alias, mismatch the
 capture's shape, dtype or view, return a non-Tensor or capture nothing raises JitError, a TinyJit
-capturing inside another raises RuntimeError, CAPTURING=0 keeps a realize out of the capture, and
-prune=True runs the ops that read no input once.  A pruned op's output is read through a copy, as a
+capturing inside another raises RuntimeError, every op the capture ran replays (a kernel no result
+reads too) but CAPTURING=0 keeps a realize out of the capture, and prune=True runs the ops that read
+no input once.  A view of a realized buffer is an input as it stands: the capture reads its base
+through the view, and a later call's other view raises JitError.  A pruned op's output is read through a copy, as a
 later intermediate may take its arena slot.  A jit returning one of its inputs returns, on a replay,
 that call's tensor, where it returned the capture call's stale one.
 
@@ -99,15 +101,19 @@ class TestJitApi(unittest.TestCase):
             return (a + 1).realize()
 
         base = Tensor.arange(20).float().reshape(4, 5).realize()
-        got = []
-        try:
+        with self.assertRaises(JitError):
             for i in range(4):
-                v = base[:, i:i + 2]
-                got.append((inc(v).numpy(), base.numpy()[:, i:i + 2] + 1))
-        except JitError:
-            pass
-        for g, want in got:
-            np.testing.assert_array_equal(g, want)
+                np.testing.assert_array_equal(inc(base[:, i:i + 2]).numpy(), base.numpy()[:, i:i + 2] + 1)
+
+    def test_view_input_replays_on_its_base(self):
+        @TinyJit
+        def inc(a):
+            return (a + 1).realize()
+
+        for i in range(5):
+            base = (Tensor.arange(20).float().reshape(4, 5) * (i + 1)).realize()
+            np.testing.assert_array_equal(inc(base[:, 1:3]).numpy(), base.numpy()[:, 1:3] + 1)
+        self.assertEqual(ops(inc), 1)
 
     def test_jit_inside_jit(self):
         @TinyJit
@@ -123,6 +129,15 @@ class TestJitApi(unittest.TestCase):
             g(Tensor([2])).realize()
 
     def test_not_capturing(self):
+        @TinyJit
+        def add_dead(a, b):
+            Tensor.zeros(4, 4).contiguous().realize()
+            return (a + b).realize()
+
+        for i in range(4):
+            np.testing.assert_array_equal(add_dead(Tensor([i]), Tensor([i])).numpy(), [2 * i])
+        self.assertEqual(ops(add_dead), 2)
+
         @TinyJit
         def add(a, b):
             with Context(CAPTURING=0):
