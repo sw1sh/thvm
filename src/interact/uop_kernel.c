@@ -419,6 +419,15 @@ fn void kernel_fire_by_id(u32 kid) {
   multi_emit(RULE_UOP_KERNEL, MULTI_TERM, (u64)kid, 0, 0);
 }
 
+// 1 iff `t` is a kernel that ran and that the kernel GC then stripped: the
+// GC strips only a dead output, so an ASSIGN reading it copied it already.
+fn int kernel_term_spent(Term t) {
+  Term s = term_resolve(t);
+  if (term_tag(s) != TAG_UOP || term_ext(s) != UOP_KERNEL) return 0;
+  u32 kid = (u32)term_val(heap_read(term_val(s) + 1));
+  return kid != 0 && kid < KERNELS_NEXT && KERNELS[kid].stripped && KERNELS[kid].dispatched;
+}
+
 fn Term interact_kernel(Term kernel) {
   HOT_KERNEL_FIRES++;
   u64  loc    = term_val(kernel);

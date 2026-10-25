@@ -43,6 +43,8 @@ fn Term interact_assign(Term assign_term) {
   u64  loc = term_val(assign_term);
   Term dst = term_resolve(heap_read(loc + 0));
   Term src = term_resolve(heap_read(loc + 1));
+  // An earlier pass wrote dst (a spent src kernel, as in wnf's ASSIGN).
+  if (term_tag(dst) == TAG_TEN && kernel_term_spent(src)) return dst;
   // Stuck until both sides are TENs: redex_fire re-drives it once the src
   // kernel chain has landed one.
   if (term_tag(dst) != TAG_TEN || term_tag(src) != TAG_TEN) return assign_term;

@@ -1,7 +1,9 @@
-"""A pending assign realizes with every realize: one fired inside another tensor's realize stayed its
-tensor's term, a UOP_ASSIGN over a kernel the kernel GC then stripped, so x.assign(x + 1); (x * 2).numpy();
-x.numpy() raised "realize fired kernel ..., which the kernel GC stripped".  Reads still come before
-the write (tinygrad's WAR order), and a TinyJit capture starts with no pending assign from outside it.
+"""A fired assign reads as its buffer.  One fired inside another tensor's realize stayed its tensor's
+term, and any term built on it held it too, a UOP_ASSIGN over a kernel the kernel GC then stripped, so
+x.assign(x + 1); (x * 2).numpy(); x.numpy() raised "realize fired kernel ..., which the kernel GC
+stripped", as did a y = x * 2 read after x's own realize.  Every realize takes the pending assigns
+along, and wnf reads an ASSIGN whose src kernel is spent as its dst.  Reads still come before the
+write (tinygrad's WAR order), and a TinyJit capture starts with no pending assign from outside it.
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_pending_assign.py -q
 """
@@ -19,6 +21,21 @@ class TestPendingAssign(unittest.TestCase):
         x.assign(x + 1)
         np.testing.assert_array_equal((x * 2).numpy(), [4.0, 6.0])
         np.testing.assert_array_equal(x.numpy(), [2.0, 3.0])
+
+    def test_later_dependent_read_after_the_assign_fired(self):
+        # y reads the pending assign; x's own realize fires it, and the kernel GC strips its src.
+        x = Tensor([1.0, 2.0]).clone()
+        x.assign(x + 1)
+        y = x * 2
+        np.testing.assert_array_equal(x.numpy(), [2.0, 3.0])
+        np.testing.assert_array_equal(y.numpy(), [4.0, 6.0])
+
+    def test_view_read_after_setitem_fired(self):
+        t = Tensor([1.0, 2.0, 3.0]).clone()
+        t[0:1] = 5.0
+        v = t[0:2] * 1
+        np.testing.assert_array_equal(t.numpy(), [5.0, 2.0, 3.0])
+        np.testing.assert_array_equal(v.numpy(), [5.0, 2.0])
 
     def test_earlier_read_sees_the_old_value(self):
         t = Tensor([1.0, 2.0]).clone()

@@ -144,6 +144,12 @@ enter:
         // it each pass (uop_assign.c).
         u64  aloc   = term_val(next);
         if (BUDGET_HIT) BAIL_AT(next);
+        // A spent src kernel: an earlier pass wrote dst, so the assign reads as
+        // dst, as tinygrad's AFTER once realized, where a re-fire is stale.
+        if (kernel_term_spent(heap_read(aloc + 1))) {
+          next = heap_read(aloc + 0);
+          goto enter;
+        }
         WNF_S_POS = s_pos;
         Term src_w  = wnf(heap_read(aloc + 1));
         s_pos = WNF_S_POS;
