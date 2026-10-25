@@ -12,7 +12,7 @@
    + OP2 just enough to expose ONE Cons cell whose tail is another
    unfired APP-APP-APP-REF redex.  Walking the tail forces the next
    layer.  This is the canonical HVM lazy-stream encoding -- cf.
-   `@X = &L{#Z, #S{@X}}` in TinyHVM/HVM4/test/collapse_9.hvm and
+   `@X = &L{#Z, #S{@X}}` in HVM4 test/collapse_9.hvm and
    the SGD recursion in Optim.wl.
 
    `TLazyPermutations`, `TLazySplits`, `TLazyTuples`, `TLazySubsets`

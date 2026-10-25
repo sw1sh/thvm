@@ -2,7 +2,7 @@
 // ----------------- OP2-NUM-SUP
 // &L{ OP2(opr, NUM, a), OP2(opr, NUM, b) }
 //
-// HVM4's wnf_op2_num_sup (TinyHVM/HVM4/clang/wnf/op2_num_sup.c); the NUM is an
+// HVM4's wnf_op2_num_sup (HVM4 clang/wnf/op2_num_sup.c); the NUM is an
 // atom both OP2s share.  Cells: [num, a, num, b, OP2(num, a), OP2(num, b)].
 fn Term interact_op2_num_sup(u32 opr, Term num, Term sup, u64 op2_loc) {
     ITRS++;

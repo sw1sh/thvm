@@ -6,7 +6,7 @@
 // X0 <- #K{A0, B0, ...}
 // X1 <- #K{A1, B1, ...}
 //
-// HVM4's wnf_dup_nod (TinyHVM/HVM4/clang/wnf/dup_nod.c) for TAG_CTR; an arity-0
+// HVM4's wnf_dup_nod (HVM4 clang/wnf/dup_nod.c) for TAG_CTR; an arity-0
 // CTR is an atom, shared by both sides.
 
 fn Term interact_dup_ctr(u32 lab, u64 loc, u8 side, Term ctr) {

@@ -3,7 +3,7 @@
 // ! X &n = v
 // b(X0, X1)
 //
-// HVM4's wnf_ddu_num (TinyHVM/HVM4/clang/wnf/ddu_num.c).
+// HVM4's wnf_ddu_num (HVM4 clang/wnf/ddu_num.c).
 fn Term interact_ddu_num(u64 ddu_loc, Term lab_num) {
   u32 lab  = (u32)term_val(lab_num);
   Term v   = heap_read(ddu_loc + 1);

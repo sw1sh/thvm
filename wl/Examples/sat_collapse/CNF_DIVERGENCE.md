@@ -19,7 +19,7 @@ DP chain that needs to fire at wnf time.
 Two separate tag families for projections:
 
 ```
-TinyHVM/HVM4/clang/wnf/_.c
+HVM4 clang/wnf/_.c
 
   case DP0: case DP1: {
     u64 loc = term_val(next);
@@ -38,7 +38,7 @@ So `DP0`/`DP1` are wnf-time redexes -- DUP-LAM, DUP-SUP, DUP-NUM,
 DUP-CTR all fire as soon as the body reaches WHNF.
 
 ```
-TinyHVM/HVM4/clang/cnf/_.c
+HVM4 clang/cnf/_.c
 
   case BJ0:
   case BJ1: {

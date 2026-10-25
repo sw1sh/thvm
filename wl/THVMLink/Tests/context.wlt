@@ -1,6 +1,6 @@
 (* context.wlt -- multi-heap support via TContext.
 
-   Reference design: TinyHVM/src/tinyhvm.h (struct TinyHVM).  Each
+   Reference design: external/TinyHVM/src/tinyhvm.h (struct TinyHVM).  Each
    TContext slot owns its own heap, book, defs, alo state, tensors,
    kernels, and backend default.  Slot 0 is the always-present
    default; slots 1..15 are user-allocated via TContextNew[].

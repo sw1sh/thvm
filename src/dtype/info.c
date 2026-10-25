@@ -6,7 +6,7 @@
 // plus packed int4/uint4).  Reserved rows trip the assertion in
 // dtype_itemsize().
 //
-// Reference: TinyHVM/tinygrad/tinygrad/dtype.py:130-146.
+// Reference: tinygrad/dtype.py:130-146.
 //
 // Function prototypes (dtype_itemsize, dtype_storage_bytes, dtype_kind,
 // ...) live in src/thvm.h so that translation units compiled

@@ -1,6 +1,6 @@
 (* ::Package:: *)
 (* Context.wl - multi-heap support for THVMLink.
-   Reference design: TinyHVM/src/tinyhvm.h:1102-1169 (struct TinyHVM
+   Reference design: external/TinyHVM/src/tinyhvm.h:1102-1169 (struct TinyHVM
    + per-tensor backend + ctx_default_backend).
 
    Three roles for the WL `TContext` symbol:

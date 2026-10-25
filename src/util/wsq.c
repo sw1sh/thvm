@@ -1,4 +1,4 @@
-// Chase-Lev work-stealing deque of u64 tasks (TinyHVM/HVM4/clang/data/wsq.c):
+// Chase-Lev work-stealing deque of u64 tasks (HVM4 clang/data/wsq.c):
 // the owner works the bottom wait-free; thieves steal the top lock-free.
 //
 // Fixed capacity; the u64 counters never wrap in practice and are unguarded.

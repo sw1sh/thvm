@@ -2,7 +2,7 @@
 // one LIFO (last-in first-out) stack; aot_run_parallel runs Bend2's SEED phase
 // (one dispatch per task until there are two per worker), then WORK (each
 // worker drains its tasks on a private stack),
-// TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c:520-597.
+// external/TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c:520-597.
 
 #ifndef THVM_AOT_WORKER_INCLUDED
 #define THVM_AOT_WORKER_INCLUDED

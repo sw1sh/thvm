@@ -1,6 +1,6 @@
 // Whether the body at HEAP[lam_loc] holds a VAR(lam_loc), for LAM_ERA_MASK: 0
 // only when the binder is certainly unused, 1 when used or the walk can't tell.
-// HVM4 counts on its parse tree (TinyHVM/HVM4/clang/parse/count_uses.c).
+// HVM4 counts on its parse tree (HVM4 clang/parse/count_uses.c).
 // Nodes are sized by term_cells, so every child cell is seen.
 
 #define LAM_BODY_MAX_VISITS 4096

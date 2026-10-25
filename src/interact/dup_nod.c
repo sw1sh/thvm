@@ -6,7 +6,7 @@
 // X0 <- T{A0_0, A1_0, ..., A_{n-1}_0}
 // X1 <- T{A0_1, A1_1, ..., A_{n-1}_1}
 //
-// HVM4's wnf_dup_nod (TinyHVM/HVM4/clang/wnf/dup_nod.c) for the tags
+// HVM4's wnf_dup_nod (HVM4 clang/wnf/dup_nod.c) for the tags
 // dup_nod_arity lists; never APP, where an eager DUP would copy a beta redex.
 // Trace: term_a is the DUP cell, term_b the term (its tag names T), label L.
 

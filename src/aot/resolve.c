@@ -1,5 +1,5 @@
 // src/aot/resolve.c -- carry a finished value up the continuation tree, as
-// Bend2's resolve (TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c:491).
+// Bend2's resolve (external/TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c:491).
 
 #include "task.h"
 

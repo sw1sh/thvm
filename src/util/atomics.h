@@ -1,5 +1,5 @@
 // Concurrency primitives of the parallel reducer, after the platform stanza of
-// TinyHVM/HVM4/clang/hvm.c, so the wsq port (util/wsq.c) keeps HVM4's types.
+// HVM4 clang/hvm.c, so the wsq port (util/wsq.c) keeps HVM4's types.
 
 #ifndef THVM_UTIL_ATOMICS_H
 #define THVM_UTIL_ATOMICS_H

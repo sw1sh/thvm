@@ -4,7 +4,7 @@
 // ! B &L = b
 // &L{&(x){A0, B0}, &(y){A1, B1}}
 //
-// HVM4's wnf_dsu_sup (TinyHVM/HVM4/clang/wnf/dsu_sup.c).
+// HVM4's wnf_dsu_sup (HVM4 clang/wnf/dsu_sup.c).
 fn Term interact_dsu_sup(u64 dsu_loc, Term lab_sup) {
   u32 lab     = term_ext(lab_sup);
   u64 sup_loc = term_val(lab_sup);

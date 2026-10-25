@@ -3,7 +3,7 @@
 // ! &L{y0, y1} = y
 // &L{ OP2(opr, a, y0), OP2(opr, b, y1) }
 //
-// HVM4's wnf_op2_sup (TinyHVM/HVM4/clang/wnf/op2_sup.c), in fresh cells:
+// HVM4's wnf_op2_sup (HVM4 clang/wnf/op2_sup.c), in fresh cells:
 // [y, a, y0, b, y1, OP2(a, y0), OP2(b, y1)], the SUP over the last two.
 fn Term interact_op2_sup(u32 opr, Term sup, Term y, u64 op2_loc) {
     ITRS++;

@@ -3,7 +3,7 @@
 // ! &L{x0, x1} = arg
 // &L{ APP(f, x0), APP(g, x1) }
 //
-// HVM4's wnf_app_sup (TinyHVM/HVM4/clang/wnf/app_sup.c), in fresh cells:
+// HVM4's wnf_app_sup (HVM4 clang/wnf/app_sup.c), in fresh cells:
 // [arg, f, x0, g, x1, APP(f, x0), APP(g, x1)], the SUP over the last two.
 fn Term interact_app_sup(Term sup, Term arg) {
   ITRS++;

@@ -1,12 +1,12 @@
 // test_icc.c - ICC type-flow primitives: TAG_BRI + TAG_ANN.
 //
-// Three reductions from icc_spec.md (TinyHVM/resources/gists):
+// Three reductions from icc_spec.md (external/TinyHVM/resources/gists):
 //   APP (θx.body) arg = θx (APP body[x ← λ$k.x]  (ANN $k arg))
 //   ANN val (λx.body) = λx (ANN (APP val $k) body[x ← θ$k.x])
 //   ANN val (θx.body) = body[x ← val]                          (type erasure)
 // plus DUP-BRI commutation (mirrors DUP-LAM).
 //
-// These are the actual ICC rules, not the "BRI ≡ LAM" alias TinyHVM
+// These are the actual ICC rules, not the "BRI ≡ LAM" alias the research prototype
 // shipped with.  Type erasure (ANN-BRI) is the cleanest demo: the
 // annotation is consumed and the type's body is returned with x
 // replaced by the value.

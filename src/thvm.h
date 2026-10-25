@@ -121,7 +121,7 @@ typedef u64 Term;
 #define TAG_UOP  9   // uop graph node.   val = heap loc, ext = opcode
 #define TAG_NUM  10  // 32-bit scalar.    atom; val = raw u32 / f32 bits, ext = dtype
 
-// === Lazy named definitions + allocator (HVM4 / TinyHVM style) ===
+// === Lazy named definitions + allocator (HVM4 style) ===
 #define TAG_REF  11  // book reference.   val = name id (index into DEFS)
 #define TAG_ALO  12  // lazy alloc.       val = dyn heap loc holding [book_term, NUM(state_id)]
 
@@ -244,7 +244,7 @@ typedef u64 Term;
 
 // === Dtypes ===
 //
-// Mirrors tinygrad's full dtype set (TinyHVM/tinygrad/tinygrad/dtype.py:
+// Mirrors tinygrad's full dtype set (tinygrad/dtype.py:
 // 130-146) plus packed int4/uint4 for modern quantization.  Enum
 // values are stable; new dtypes append at the bottom.  Reserved
 // slots have itemsize=0 in src/dtype/info.c -- the call site aborts
@@ -1326,7 +1326,7 @@ typedef struct MultiEvent {
 // can hold multiple coexisting heaps via TContextNew[] / TInContext[].
 // The legacy single-runtime API (TInit / TWnf / ...) operates on slot
 // 0 by default; explicit TContext args switch CURRENT_CTX for the
-// duration of the call.  Reference design: TinyHVM/src/tinyhvm.h:1102.
+// duration of the call.  Reference design: external/TinyHVM/src/tinyhvm.h:1102.
 //
 // All existing globals (HEAP, BOOK_HEAP, DEFS, ALO_STATES, TENS,
 // KERNELS, CURRENT_BACKEND, plus the file-scope statics for the WNF

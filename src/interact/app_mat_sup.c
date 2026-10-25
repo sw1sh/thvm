@@ -4,7 +4,7 @@
 // ! M &L = m
 // &L{(lam{#K:H0; M0} a), (lam{#K:H1; M1} b)}
 //
-// HVM4's wnf_app_mat_sup (TinyHVM/HVM4/clang/wnf/app_mat_sup.c); fresh cells
+// HVM4's wnf_app_mat_sup (HVM4 clang/wnf/app_mat_sup.c); fresh cells
 // [h, m, H0, M0, H1, M1, MAT_0, a, MAT_1, b, APP_0, APP_1], the SUP at c+10.
 fn Term interact_app_mat_sup(Term mat, Term sup) {
     ITRS++;

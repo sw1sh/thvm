@@ -57,7 +57,7 @@ static Term clone_to_book_rec(Term t, BookRemap *map, u32 *map_pos) {
       if (ext & DUP_GRAD_FLAG) break;
       // A plain projection becomes BJ0/BJ1, Levy-opaque under wnf and cnf;
       // alo_realize turns it back into a DP per instance, its dup cell shared
-      // by both sides (HVM4's DP/BJ split, TinyHVM/HVM4/clang/cnf/_.c).
+      // by both sides (HVM4's DP/BJ split, HVM4 clang/cnf/_.c).
       u8 bj_tag = (tag == TAG_DP0) ? TAG_BJ0 : TAG_BJ1;
       if (remap_find(map, *map_pos, val, &b)) return term_new(0, bj_tag, ext, b);
       b = remap_add(map, map_pos, val, 1);

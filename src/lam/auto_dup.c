@@ -1,5 +1,5 @@
 // Auto-dup for a LAM whose binder occurs n > 1 times, done on the built heap
-// where HVM4 does it on the parse tree (TinyHVM/HVM4/clang/parse/auto_dup.c).
+// where HVM4 does it on the parse tree (HVM4 clang/parse/auto_dup.c).
 //
 // n-1 DUPs split the binder: D_1 holds VAR(lam_loc), D_i holds DP1(D_{i-1});
 // use i becomes DP0(D_i) and use n becomes DP1(D_{n-1}).

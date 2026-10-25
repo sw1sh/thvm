@@ -2,7 +2,7 @@
 // ------------- APP-PRI
 // prim_fun(id)(args) at prim_arity(id) args, else a PRI holding one more
 //
-// The registry follows HVM4's (TinyHVM/HVM4/clang/prim/register.c).  val is 0
+// The registry follows HVM4's (HVM4 clang/prim/register.c).  val is 0
 // (no args yet) or a block [NUM(n), arg_0, ..., arg_{n-1}], copied per arg.
 fn Term interact_app_pri(Term pri, Term arg) {
   ITRS++;

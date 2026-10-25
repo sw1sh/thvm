@@ -1,7 +1,7 @@
 // src/aot/halloc.h -- per-thread bump allocator for the AOT (ahead-of-time)
 // runtime: one atomic on heap_next per chunk instead of one per continuation
 // cell or CTR, like Bend2's tl_hp / tl_he
-// (TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c:82).  A header of
+// (external/TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c:82).  A header of
 // its own because cont.c, included before worker.c, allocates through it.
 
 #ifndef THVM_AOT_HALLOC_H

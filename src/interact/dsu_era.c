@@ -2,7 +2,7 @@
 // ------------ DSU-ERA
 // &{}
 //
-// HVM4's wnf_dsu_era (TinyHVM/HVM4/clang/wnf/dsu_era.c).
+// HVM4's wnf_dsu_era (HVM4 clang/wnf/dsu_era.c).
 fn Term interact_dsu_era(void) {
   ITRS++;
   multi_emit(RULE_DSU_ERA, MULTI_PRUNE, 0, 0, 0);

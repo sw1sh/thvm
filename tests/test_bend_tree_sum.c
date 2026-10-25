@@ -1,7 +1,7 @@
 // tests/test_bend_tree_sum.c
 //
 // Phase 1 verification: hand-coded equivalent of the Bend2 reference
-// program at TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c.
+// program at external/TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c.
 //
 //   type Tree { leaf{U32}, node{Tree, Tree} }
 //   def build(d, x): if d==0 then leaf{x}
