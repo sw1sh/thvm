@@ -45,8 +45,10 @@ fn u32 kernel_gc_sweep(Term result) {
   u32 freed = 0;
   for (u32 kid = 1; kid < KERNELS_NEXT; kid++) {
     KernelEntry *ke = &KERNELS[kid];
-    // Already-stripped slot (idempotent across multiple sweeps).
-    if (ke->n_inputs == 0 && ke->input_tids == NULL) continue;
+    // Already-stripped slot (idempotent across multiple sweeps).  The flag,
+    // not empty input arrays: a fill (a realized zeros) has no inputs, and
+    // skipped it kept its producer link and re-fired over every assign.
+    if (ke->stripped) continue;
     if (ke->output_tid == 0 || ke->output_tid >= TENS_NEXT) continue;
     Backend *b   = TENS[ke->output_tid].backend;
     u32      buf_id = TENS[ke->output_tid].buf_id;
@@ -82,6 +84,10 @@ fn u32 kernel_gc_sweep(Term result) {
     // Buffer is dead.  Only the CPU sweep strips input arrays here; other
     // backends keep their kernels inspectable for their own teardown.
     if (b != &CPU_BACKEND) {
+      continue;
+    }
+    // A kernel without inputs re-fires from nothing, so it stays live.
+    if (ke->n_inputs == 0) {
       continue;
     }
     // Buffer is dead.  Strip the input arrays; leave output_tid
