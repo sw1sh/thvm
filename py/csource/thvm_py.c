@@ -19,6 +19,7 @@ EXPORT void py_thvm_free(void) { thvm_free(); }
 
 EXPORT uint32_t py_term_tag(uint64_t t) { return term_tag(t); }
 EXPORT uint64_t py_term_val(uint64_t t) { return term_val(t); }
+EXPORT uint32_t py_term_ext(uint64_t t) { return term_ext(t); }
 
 EXPORT uint64_t py_term_iconst(int32_t v) {
   // A UOP_CONST, not a bare TAG_NUM: the DAG classifiers match UOP_CONST
@@ -465,6 +466,7 @@ EXPORT void py_cg_profile_dump(uint32_t top_n) {
   fflush(stderr);
 }
 EXPORT uint32_t py_const_TAG_TEN(void) { return TAG_TEN; }
+EXPORT uint32_t py_const_TAG_UOP(void) { return TAG_UOP; }
 EXPORT uint32_t py_const_MAX_DIM(void) { return MAX_DIM; }
 
 // Marks or unmarks a leaf for the single walk, in which grad_leaf_sup adds the

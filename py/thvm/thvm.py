@@ -39,6 +39,7 @@ _thvm_free = _bind("py_thvm_free", None)
 
 _term_tag = _bind("py_term_tag", c_uint32, c_uint64)
 _term_val = _bind("py_term_val", c_uint64, c_uint64)
+_term_ext = _bind("py_term_ext", c_uint32, c_uint64)
 
 _term_iconst = _bind("py_term_iconst", c_uint64, c_int32)
 _term_fconst = _bind("py_term_fconst", c_uint64, c_float)
@@ -154,6 +155,7 @@ class _Constants:
     INT32 = _read_uint32_const("py_const_DT_INT32")
     FP32 = _read_uint32_const("py_const_DT_FP32")
     TAG_TEN = _read_uint32_const("py_const_TAG_TEN")
+    TAG_UOP = _read_uint32_const("py_const_TAG_UOP")
     MAX_DIM = _read_uint32_const("py_const_MAX_DIM")
     SCOPE_GLOBAL = _read_uint32_const("py_const_UOP_SCOPE_GLOBAL")
     ADD = _read_uint32_const("py_const_UOP_ADD")
@@ -549,6 +551,7 @@ class Thvm:
 
     def term_tag(self, t: Term) -> int: return int(_term_tag(c_uint64(int(t))))
     def term_val(self, t: Term) -> int: return int(_term_val(c_uint64(int(t))))
+    def term_ext(self, t: Term) -> int: return int(_term_ext(c_uint64(int(t))))
 
     def uop_dag_apply_kopt(self, root: Term,
                            opt: tuple[int, int, int]) -> Term | None:

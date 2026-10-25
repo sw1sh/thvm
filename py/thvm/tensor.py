@@ -18,7 +18,7 @@ import numpy as np
 from .device import Device
 from .dtypes import (DType, dtypes, from_thvm_id, least_upper_dtype, sum_acc_dtype, to_dtype,
                      _from_np_dtype, _to_np_dtype)
-from .helpers import TRAINING, argfix, make_tuple
+from .helpers import TRAINING, argfix, argsort, make_tuple
 from .mixin import OpMixin, _align_left
 from .thvm import K, Term, Thvm
 from ._misc import jit_record_random
@@ -26,6 +26,7 @@ from ._misc import jit_record_random
 
 _TH = Thvm()
 _TAG_TEN = K.TAG_TEN
+_TAG_UOP = K.TAG_UOP
 
 # Each TAG_TEN tid -> its Tensor, so backward() can fill .grad on the in-scope float leaves
 # (tinygrad tensor.py:485-494); weak values, so a dead Tensor drops out.
@@ -151,7 +152,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
     """A thvm term (a lazy UOp graph or a realized TAG_TEN) plus its dtype and shape."""
 
     __slots__ = ("term", "_dtype", "_shape", "is_param", "grad",
-                 "_pin_id", "_view_base", "_view_begin_end", "__weakref__")
+                 "_pin_id", "_view", "__weakref__")
 
     # Identity hashing: __eq__ is overridden to build an elementwise mask
     # (tinygrad semantics), which would otherwise make Tensor unhashable.
@@ -194,8 +195,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         self.is_param: bool = True
         self.grad: Tensor | None = None
         self._pin_id = 0
-        self._view_base = None
-        self._view_begin_end = None
+        self._view = None
         _LIVE_ADD(self)
         self._pin()
 
@@ -209,8 +209,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         t.is_param = True
         t.grad = None
         t._pin_id = 0
-        t._view_base = None
-        t._view_begin_end = None
+        t._view = None
         _LIVE_ADD(t)
         t._pin()
         return t
@@ -338,35 +337,27 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         # The result reads self's storage, as tinygrad's DETACH does, so it pins its term to keep
         # that storage after self is gone.
         t._pin(lazy=True)
-        return t
+        return self._as_view(t, lambda b: b.detach(), lambda x: (x, None))
 
     def assign(self, x: "Tensor") -> "Tensor":
         """Lazy in-place update (tinygrad tensor.py:236-274): UOP_ASSIGN(self, x) writes x into
         self's buffer when realized, keeping the buffer, so a JIT capture can replay it."""
         x = x if isinstance(x, Tensor) else Tensor(x, dtype=self._dtype)
-        # A shrink-view dst (the kv-cache write `cache[:, :, p:p+n].assign(...)`): UOP_ASSIGN
-        # writes one contiguous run at the view's offset, ignoring strides, so scatter on the host.
-        if self._view_base is not None and self._view_begin_end is not None:
-            base = self._view_base
-            base.realize()
-            arr = base.numpy()
-            be = self._view_begin_end
-            sl = tuple(slice(be[2*i], be[2*i+1]) for i in range(base.ndim))
-            arr[sl] = x.numpy().reshape(arr[sl].shape)
-            new_base = Tensor(arr, dtype=base._dtype).realize()
-            # Re-point base at the new buffer so later reads through it see the write.
-            base.term = new_base.term
-            base._pin()
-            self.term = new_base.term
-            self._dtype = new_base._dtype
-            self._shape = new_base._shape
-            self._view_base = None
-            self._view_begin_end = None
-            self._pin()
+        # A view of a buffer (the kv-cache write `cache[:, :, p:p+n].assign(...)`): its base takes x
+        # where the view reads it, as tinygrad's STORE through the view (tensor.py:250-267), down to
+        # the buffer, which realizes; UOP_ASSIGN would write one contiguous run at the view's offset.
+        if self._view is not None:
+            base, fwd, inv = self._view
+            xb, inside = inv(x._broadcast_to(self._shape).cast(base._dtype))
+            base.assign(xb if inside is None else inside.where(xb, base))
+            if base._view is None:
+                base.realize()
+            self.term = fwd(base).term
             return self
-        if int(_TH.term_tag(self.term)) != _TAG_TEN and not _TH.uop_leaf_tids(self.term):
-            # A pending value that reads no buffer (a full) is initialized, not written
-            # (tinygrad tensor.py:253-256).
+        tag = int(_TH.term_tag(self.term))
+        if tag != _TAG_TEN and not (tag == _TAG_UOP and _TH.term_ext(self.term) == K.ASSIGN):
+            # A pending value has no buffer to write, so it takes x's value, as tinygrad initializes
+            # one that views no live tensor (tensor.py:253-257).
             self.term = x._broadcast_to(self._shape).term
             _LAZY_FULLS.discard(self)
             return self
@@ -379,6 +370,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         self.term = x.term
         self._dtype = x._dtype
         self._shape = x._shape
+        _LAZY_FULLS.discard(self)
         self._pin()
         return self
 
@@ -988,7 +980,8 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             # tinygrad's reshape returns self (mixin/movement.py:184), so a view keeps its base.
             return self
         t = _TH.reshape(self.term, list(shape))
-        return Tensor._from_term(t, self._dtype, shape)
+        return self._as_view(Tensor._from_term(t, self._dtype, shape), lambda b: b.reshape(shape),
+                             lambda x: (x.reshape(self._shape), None))
 
     def permute(self, *axes) -> "Tensor":
         """tinygrad mixin/movement.py permute: a negative axis counts from the end."""
@@ -996,7 +989,8 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         if sorted(order) != list(range(self.ndim)):
             raise RuntimeError(f"order is not a valid permutation, getting {order}")
         t = _TH.permute(self.term, order)
-        return Tensor._from_term(t, self._dtype, tuple(self._shape[a] for a in order))
+        return self._as_view(Tensor._from_term(t, self._dtype, tuple(self._shape[a] for a in order)),
+                             lambda b: b.permute(order), lambda x: (x.permute(argsort(order)), None))
 
     def transpose(self, dim0: int = 1, dim1: int = 0) -> "Tensor":
         """tinygrad mixin/movement.py:330-343."""
@@ -1078,11 +1072,18 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         if new_shape == self._shape:
             # tinygrad's shrink returns self (mixin/movement.py:192-212).
             return self
-        t = _TH.shrink(self.term, [int(x) for x in begin_end])
-        out = Tensor._from_term(t, self._dtype, new_shape)
-        # Kept so assign() into this view can scatter into the base (see assign()).
-        out._view_base = self
-        out._view_begin_end = [int(x) for x in begin_end]
+        be = [int(x) for x in begin_end]
+        pX = [(be[2*i], s - be[2*i+1]) for i, s in enumerate(self._shape)]
+        return self._as_view(Tensor._from_term(_TH.shrink(self.term, be), self._dtype, new_shape),
+                             lambda b: b.shrink(be), lambda x: (x._pad_zero(pX),
+                             Tensor.ones(*new_shape, dtype=dtypes.bool)._pad_zero(pX)))
+
+    def _as_view(self, out: "Tensor", fwd, inv) -> "Tensor":
+        """out as a view of self when self is a buffer or a view of one, so an assign into out writes
+        self (see assign()): fwd remakes out from self, inv takes a value of out's shape to self's
+        shape and the mask of the elements out reads (None: all of them)."""
+        if self._view is not None or int(_TH.term_tag(self.term)) == _TAG_TEN:
+            out._view = (self, fwd, inv)
         return out
 
     def size(self, dim: int | None = None):
@@ -1097,7 +1098,8 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         if not axes:
             return self
         mask = sum(1 << a for a in set(axes))
-        return Tensor._from_term(_TH.flip(self.term, mask), self._dtype, self._shape)
+        return self._as_view(Tensor._from_term(_TH.flip(self.term, mask), self._dtype, self._shape),
+                             lambda b: b.flip(axes), lambda x: (x.flip(axes), None))
 
     def split(self, sizes, dim: int = 0) -> "tuple[Tensor, ...]":
         """Pieces of `sizes` along dim, an int size leaving a shorter last piece (tinygrad
@@ -1262,10 +1264,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         mask = index.unsqueeze(-1)._one_hot_along_dim(n).transpose(-1, dim).pad_to(*self._shape, None)
         def keep(a, b): return a if include_self else mask.any(-1).logical_not().where(a, b)
         if reduce is None:
-            # _masked_merge: the last write along the axis wins.
-            m, v = functools.reduce(lambda x, y: (x[0] | y[0], y[0].where(y[1], x[1])),
-                                    zip(mask.split(1, -1), src.split(1, -1)))
-            return m.squeeze(-1).where(v.squeeze(-1), self)
+            return self._masked_merge(src, mask, (-1,))
         if reduce == "sum":
             return mask.where(src, 0).sum(-1).add(keep(self, 0))
         if reduce == "prod":
@@ -1352,6 +1351,35 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         if len(indices) == 1 and isinstance(indices[0], (Tensor, np.ndarray, list)) and _native_indexing():
             return self._index_rows(indices[0])
         return self._getitem([i.tolist() if isinstance(i, np.ndarray) else i for i in indices])
+
+    def __setitem__(self, indices, v) -> None:
+        """tinygrad's setitem (tensor.py:474-498): self takes v at the indices through _getitem's
+        masks; a buffer, or a view of one, keeps its storage by an assign."""
+        if isinstance(v, Tensor) and v.dtype != self.dtype:
+            raise RuntimeError(f"setitem dtype mismatch: {self.dtype=} != {v.dtype=}")
+        v = v if isinstance(v, Tensor) else Tensor(v, dtype=self._dtype)
+        if isinstance(indices, list) and all(isinstance(i, int) for i in indices) or \
+                not isinstance(indices, (tuple, list)):
+            indices = [indices]
+        merged = self._getitem([i.tolist() if isinstance(i, np.ndarray) else i for i in indices], v)
+        if int(_TH.term_tag(self.term)) == _TAG_TEN or self._view is not None:
+            self.assign(merged)
+        else:
+            self.replace(merged)
+
+    # An in-place op assigns (tinygrad tensor.py:506-517).
+    def __iadd__(self, x):      return self.assign(self.add(x))
+    def __isub__(self, x):      return self.assign(self.sub(x))
+    def __imul__(self, x):      return self.assign(self.mul(x))
+    def __itruediv__(self, x):  return self.assign(self.div(x))
+    def __ifloordiv__(self, x): return self.assign(self.__floordiv__(x))
+    def __ipow__(self, x):      return self.assign(self.pow(x))
+    def __iand__(self, x):      return self.assign(self.bitwise_and(x))
+    def __ior__(self, x):       return self.assign(self.bitwise_or(x))
+    def __ixor__(self, x):      return self.assign(self.bitwise_xor(x))
+    def __ilshift__(self, x):   return self.assign(self.lshift(x))
+    def __irshift__(self, x):   return self.assign(self.rshift(x))
+    def __imatmul__(self, x):   return self.assign(self.matmul(x))
 
     # ---- nn-flavoured helpers (compose Tensor ops) --------------------
 

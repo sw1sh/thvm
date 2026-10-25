@@ -511,9 +511,10 @@ class OpMixin:
             x = x.shrink_to(tuple(flatten((s, 1) for s in x.shape[::2]))).reshape(x.shape[::2])
         return x
 
-    def _getitem(self, indices):
+    def _getitem(self, indices, v=None):
         """Views for slices, ints, None and an Ellipsis; an int Tensor or list index selects through
-        a one-hot mask, consecutive ones through one linear index."""
+        a one-hot mask, consecutive ones through one linear index.  With v, self with v written at the
+        indices (tinygrad's setitem, mixin/op.py:97-186)."""
         def is_adv(i): return isinstance(i, (list, tuple, type(self)))
         indices_parsed, dim = [], 0
         for index in self._normalize_indices(list(indices)):
@@ -533,15 +534,15 @@ class OpMixin:
             indices_parsed.append({**parsed, "index": index})
             if index is not None:
                 dim += 1
-        x = self._apply_view_ops([p for p in indices_parsed if p["index"] is not None])
+        x = self._apply_view_ops(mops := [p for p in indices_parsed if p["index"] is not None])
         x_dims = [p for p in indices_parsed if not p["collapse_dim"]]
         x = x.reshape(tuple(p["size"] for p in x_dims))
         if not (tops := [(d, p) for d, p in enumerate(x_dims) if is_adv(p["index"])]):
-            return x
+            return x if v is None else self._setitem_merge(mops, v.cast(self.dtype)._broadcast_to(x.shape))
         dims, tensors = [d for d, _ in tops], [p["index"] for _, p in tops]
         big_shape = _broadcast_shape(*(t.shape for t in tensors))
         consecutive = dims == list(range(dims[0], dims[0] + len(dims)))
-        if len(dims) > 1 and consecutive:
+        if v is None and len(dims) > 1 and consecutive:
             ishp = tuple(x.shape[d] for d in dims)
             strides = tuple(prod(ishp[i + 1:]) for i in range(len(dims)))
             linear_idx = functools.reduce(operator.add, [t * s for t, s in zip(tensors, strides)])
@@ -559,11 +560,44 @@ class OpMixin:
             masks.append(i._one_hot_along_dim(num_classes=x.shape[d], dim=(d - x.ndim)))
         mask = functools.reduce(operator.and_, masks)
         reshape_arg = x.shape[:dims[0]] + (1,) * len(big_shape) + x.shape[dims[0]:]
-        x = mask.where(x.reshape(reshape_arg), 0).sum(tuple(d + len(big_shape) for d in dims), dtype=x.dtype)
-        if dims[0] != 0 and not consecutive:
-            x = x.permute(*range(dims[0], dims[0] + len(big_shape)), *range(0, dims[0]),
-                          *range(dims[0] + len(big_shape), x.ndim))
-        return x
+        x_pre, sum_axis = x, tuple(d + len(big_shape) for d in dims)
+        x = mask.where(x.reshape(reshape_arg), 0).sum(sum_axis, dtype=x.dtype)
+        if permuted := dims[0] != 0 and not consecutive:
+            mask, x = (y.permute(*range(dims[0], dims[0] + len(big_shape)), *range(0, dims[0]),
+                                 *range(dims[0] + len(big_shape), y.ndim)) for y in (mask, x))
+        if v is None:
+            return x
+        vb = v.cast(self.dtype)._broadcast_to(_broadcast_shape(x.shape, v.shape))
+        for d in sum_axis:
+            vb = vb.unsqueeze(d)
+        start = 0 if permuted else dims[0]
+        return self._setitem_merge(mops, x_pre._masked_merge(vb, mask, tuple(range(start, start + len(big_shape)))))
+
+    def _setitem_merge(self, mops: list, vb):
+        """Self with vb, the indexed view's new values, written where the view ops took them from:
+        each axis un-strided, flipped back and padded to self, then a where by the axes' masks."""
+        vb = vb.reshape(tuple(1 if m["collapse_dim"] else m["size"] for m in mops))
+        per_dim = []
+        for d, m in enumerate(mops):
+            (s, e), st = m["boundary"], abs(m["stride"])
+            if st != 1:
+                vb = vb.unsqueeze(d + 1)
+                vb = vb.pad_to(tuple(st if j == d + 1 else None for j in range(vb.ndim)))
+                vb = vb.reshape(vb.shape[:d] + (vb.shape[d] * vb.shape[d + 1],) + vb.shape[d + 2:])
+                vb = vb.shrink_to(tuple(e - s if j == d else None for j in range(self.ndim)))
+            idx = type(self).arange(self.shape[d]).reshape([1] * d + [self.shape[d]] + [1] * (self.ndim - d - 1))
+            per_dim.append((idx >= s) & (idx < e) & ((((e - 1 - idx) if m["stride"] < 0 else (idx - s)) % st) == 0))
+        vb = vb.flip(tuple(d for d, m in enumerate(mops) if m["stride"] < 0))
+        vb = vb.pad(tuple((m["boundary"][0], self.shape[d] - m["boundary"][1]) for d, m in enumerate(mops)))
+        return functools.reduce(operator.and_, per_dim).where(vb, self) if per_dim else vb
+
+    def _masked_merge(self, values, mask, axes: tuple):
+        # mixin/op.py:1193-1200: along each axis the last True wins, else self.
+        for dim in reversed(axes):
+            mask, values = functools.reduce(lambda x, y: (x[0] | y[0], y[0].where(y[1], x[1])),
+                                            zip(mask.split(1, dim), values.split(1, dim)))
+        mask, values = mask.squeeze(axes), values.squeeze(axes)
+        return mask.where(values, self)
 
     def _one_hot_along_dim(self, num_classes: int, dim: int = -1):
         # op.py:1028-1031.
