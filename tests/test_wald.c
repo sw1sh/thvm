@@ -909,14 +909,14 @@ int main(void) {
 
   TEST_BEGIN("wald/parse-file/null-spec");
   {
-    CHECK_EQ((int)wald_parse_file("waldmeister/documents/example.pr", NULL),
+    CHECK_EQ((int)wald_parse_file("external/waldmeister/documents/example.pr", NULL),
              (int)WALD_ERR_NULL);
   }
 
   TEST_BEGIN("wald/parse-file/missing-file");
   {
     WaldSpec *spec = wald_init();
-    CHECK_EQ((int)wald_parse_file("waldmeister/documents/__NO_SUCH_FILE__.pr",
+    CHECK_EQ((int)wald_parse_file("external/waldmeister/documents/__NO_SUCH_FILE__.pr",
                                   spec),
              (int)WALD_ERR_FILE);
     wald_free(spec);
@@ -924,13 +924,13 @@ int main(void) {
 
   TEST_BEGIN("wald/parse-file/example.pr-from-disk");
   {
-    // Tries to load the actual example.pr from the waldmeister/
-    // symlink at the repo root.  If the symlink isn't present
+    // Tries to load the actual example.pr from the external/waldmeister
+    // checkout (or symlink).  If it isn't present
     // (CI checkout without the vendored tree) we silently skip
     // the structural assertions -- this is a research fixture,
     // not a regression test.
     WaldSpec *spec = wald_init();
-    WaldErr e = wald_parse_file("waldmeister/documents/example.pr", spec);
+    WaldErr e = wald_parse_file("external/waldmeister/documents/example.pr", spec);
     if (e == WALD_OK) {
       // group axioms: e, i, f, a + 3 vars + 3 axioms + 1 goal.
       CHECK((int)strcmp(spec->name, "group") == 0);
@@ -961,9 +961,9 @@ int main(void) {
   TEST_BEGIN("wald/example.pr/end-to-end-pcl-trace");
   {
     WaldSpec *spec = wald_init();
-    WaldErr pe = wald_parse_file("waldmeister/documents/example.pr", spec);
+    WaldErr pe = wald_parse_file("external/waldmeister/documents/example.pr", spec);
     if (pe != WALD_OK) {
-      // Symlink absent.  Skip silently.
+      // external/waldmeister absent.  Skip silently.
       CHECK_EQ((int)pe, (int)WALD_ERR_FILE);
       wald_free(spec);
     } else {
@@ -1049,7 +1049,7 @@ int main(void) {
   TEST_BEGIN("wald/example.pr/pcl-dag-well-formed");
   {
     WaldSpec *spec = wald_init();
-    WaldErr pe = wald_parse_file("waldmeister/documents/example.pr", spec);
+    WaldErr pe = wald_parse_file("external/waldmeister/documents/example.pr", spec);
     if (pe != WALD_OK) {
       CHECK_EQ((int)pe, (int)WALD_ERR_FILE);
       wald_free(spec);

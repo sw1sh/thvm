@@ -63,7 +63,7 @@ ATP_DEFINES  += $(if $(filter-out 0,$(ATP_VAR_NORM)),-DATP_VAR_NORM,)
 
 # thm convergence (Waldmeister lever 1): -DATP_GOAL_HEURISTIC adds
 # goal-directed CP selection (Waldmeister CPinGoal / GoalinCP, see
-# waldmeister/sources/CLAS/Clas_CP_Goal.c).  A CP whose subterms
+# external/waldmeister/sources/CLAS/Clas_CP_Goal.c).  A CP whose subterms
 # structurally match the conjecture is preferred; one unrelated to the
 # goal has its priority scaled up so it sinks in the selection heap.
 # This steers saturation toward the goal instead of blindly enumerating
@@ -1026,7 +1026,7 @@ $(BIN)/test_atp_ac: tests/test_atp.c $(SRC) | $(BIN)
 	  -o $@ $< $(TEST_LDFLAGS)
 
 # AC bench: commutative-monoid theorem mirrored from
-# waldmeister/commutative_monoid.pr.  Times thvm with + without AC
+# external/waldmeister/commutative_monoid.pr.  Times thvm with + without AC
 # mask + outputs side-by-side with wmcli's recorded run.
 $(BIN)/test_atp_ac_bench: tests/test_atp_ac_bench.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
