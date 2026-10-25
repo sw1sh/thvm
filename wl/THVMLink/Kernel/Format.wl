@@ -63,7 +63,7 @@ termSummaryIcon[] := Graphics[
 ]
 
 (* Colored-square icon for TTensor: cyan fill matches the heap-graph
-   TAG_TEN styling (docs/tensors.md). *)
+   TAG_TEN styling. *)
 tenSummaryIcon[] := Graphics[
     {EdgeForm[LightDarkSwitched[Black, White]],
      FaceForm[LightDarkSwitched[Lighter[StandardCyan, 0.55], Darker[StandardCyan, 0.45]]],

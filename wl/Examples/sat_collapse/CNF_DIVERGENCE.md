@@ -53,7 +53,7 @@ into book templates, which alo_realize unfolds carefully via
 
 ## What we did
 
-`docs/plans/levy_optimal.md` Phase 1+2: made `TAG_DP0`/`TAG_DP1`
+`docs/core/normal_form.md`: made `TAG_DP0`/`TAG_DP1`
 Levy-opaque under wnf, moved DUP-XXX firing to `cnf_dp` (`src/cnf/_.c`).
 Phase 4 enabled `lam_seal_ext_with_auto_dup` for recursive lambdas
 (dropped the REF/ALO bail).

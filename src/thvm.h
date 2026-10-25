@@ -114,8 +114,7 @@ typedef u64 Term;
 #define TAG_SUP  6   // {a, b}.            Heap[loc..loc+1] = [a, b]; ext = label
 #define TAG_DUP  7   // ! &L{x0,x1} = e; … val = dup loc; Heap[loc] = e
 
-// === Tensor tags (PLAN.md step 12) ===
-// See docs/tensors.md for the full design.
+// === Tensor tags ===
 
 #define TAG_TEN  8   // tensor handle.    atom; val = tensor id, ext = dtype
 #define TAG_UOP  9   // uop graph node.   val = heap loc, ext = opcode
@@ -297,7 +296,7 @@ typedef struct {
 u64             dtype_storage_bytes(u32 dt, u64 numel);
 
 // === UOp opcodes (TAG_UOP ext field) ===
-// See docs/tensors.md for per-opcode heap layouts.
+// Each opcode's heap layout is noted beside its #define.
 
 // slot 0 reserved.
 #define UOP_KERNEL       1   // heap = [output_buf, ast_root]; ext bits: see uop_kernel.c
@@ -342,7 +341,7 @@ u64             dtype_storage_bytes(u32 dt, u64 numel);
 #define UOP_LOAD        21   // heap = [src]; explicit "read this tensor" boundary
                              //   marker (mirrors tinygrad's UOps.LOAD).  Slot
                              //   reserved -- constructor + materializer land in
-                             //   sub-item (b); see TASKS.md UOP_LOAD arc.
+                             //   sub-item (b).
 #define UOP_ASSIGN      22   // heap = [dst, src]; in-place buffer write.
                              //   Both children must reduce to TAG_TEN.  Wnf-fired
                              //   (interact_assign) -- copies src.buf -> dst.buf
@@ -834,7 +833,7 @@ struct Backend {
 // materializes a multi-billion-element intermediate -- the conv-1
 // backward dInput on the per-op fallback path is ~947M elements ≈
 // 3.8 GiB at BS=512, and the doc records a 5.24-billion-element ≈
-// 21 GiB variant; see docs/plans/profiling_methodology.md sec 4.6)
+// 21 GiB variant)
 // can otherwise drive cpu_buf_alloc / metal_buf_alloc to request many
 // GB in one shot, which thrashes / OOM-kills the host before any other
 // guardrail can react.  Default 1 GiB: ~25x the largest legitimate
@@ -1844,7 +1843,7 @@ void thvm_metal_buf_free_borrowed(u32 buf_id);
 
 // === uop/ ===
 // Constructors for raw UOp graph nodes.  Each helper allocates the
-// heap cells laid out in docs/tensors.md and returns a TAG_UOP term.
+// heap cells its opcode's #define describes and returns a TAG_UOP term.
 // They do NOT reduce or fire kernels -- they just build graph
 // structure.  Materialization (commit 3) consumes a graph built
 // from these.

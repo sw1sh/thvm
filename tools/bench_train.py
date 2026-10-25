@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Warm train-step benchmark for the simple 2-conv and beautiful_mnist models.
 
-Consolidates the ad-hoc /tmp bench scripts used during ideal_pipeline_v2/v3 perf
+Consolidates the ad-hoc /tmp bench scripts used during the pipeline perf
 work into one stable, parameterized harness so milestone verification stops
 re-deriving it each session.
 

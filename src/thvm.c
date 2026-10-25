@@ -10,7 +10,7 @@
 
 // === util/ ===
 // Shared concurrency primitives.  Foundation for the parallel WNF /
-// CNF redex bag (Phase 1 of docs/core/aot.md / docs/plans/levy_optimal.md).
+// CNF redex bag (docs/core/normal_form.md).
 // Pulled in early because the data structures are pure (no thvm
 // runtime dependency) and downstream code may build per-context
 // scheduler state on top.
@@ -357,7 +357,7 @@ static void thvm_set_current_ctx(TContext *ctx) {
 #include "schedule/uop_meta.c"
 #include "schedule/consumer_count.c"
 #include "schedule/bufferize_classify.c"
-// Phase 2 (ideal_pipeline_v2): unified rangeify pass. Must follow
+// The unified rangeify pass. Must follow
 // bufferize_classify.c (uses BUFFERIZE_NODES + CMAP_LL +
 // bufferize_consumers_for_loc) and indexing.c (apply_movement_op_*).
 #include "schedule/rangeify_unified.c"

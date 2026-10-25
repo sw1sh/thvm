@@ -1,7 +1,6 @@
 """Phase 1 bridge smoke test -- exercises the py.thvm C bridge directly.
 
-Verifies the high-level TAG_TEN surface (docs/plans/py_tensor_frontend.md
-Phase 1): tensor create, host I/O, the tensor algebra + movement ops,
+Verifies the high-level TAG_TEN surface: tensor create, host I/O, the tensor algebra + movement ops,
 autodiff, and realize -- without the Phase-2 Tensor class.
 
     make py && python -m pytest py/tests/test_bridge_phase1.py

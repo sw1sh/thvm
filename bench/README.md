@@ -30,4 +30,3 @@ BS=512 WARMUP_STEPS=5 N_STEPS=20 DEV=metal THVM_TILE=1 \
   wolframscript -f wl/Examples/beautiful-mnist/bench-train.wls
 ```
 
-Results recorded in [docs/plans/profiling_methodology.md] §4.6.

@@ -23,8 +23,7 @@
                        intermediates (GPU equivalent).
        SWAP            swap two global axis indices.
 
-   The C-side codegen consumer is tracked in docs/bench/history.md
-   as part of the kernel-variant/autotune arc; this demo exercises
+   This demo exercises
    the WL surface today.
 
    Run from repo root:

@@ -5,8 +5,7 @@
 // the Makefile wires it under the CUDA guard, so the macOS build never
 // sees it.
 //
-// The exit criterion of the CUDA backend slice (docs/plans/
-// cuda_backend.md Stage 2): build a small UOp DAG, render it via
+// The CUDA backend end to end: build a small UOp DAG, render it via
 // cg_render_uop_kernel_cuda_root, compile the .cu with nvrtc, allocate
 // device buffers, cuLaunchKernel, copy the result back, and assert it
 // matches a CPU reference within fp32 tolerance.

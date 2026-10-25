@@ -1,5 +1,4 @@
-// test_rangeify_unified.c - exercise the unified rangeify pass
-// (Phase 2 of docs/plans/ideal_pipeline_v2.md).
+// test_rangeify_unified.c - exercise the unified rangeify pass.
 //
 // The unified pass is a 1-to-1 port of tinygrad's run_rangeify +
 // pm_apply_rangeify.  This test builds a small UOp graph and inspects

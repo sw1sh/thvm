@@ -2,7 +2,7 @@
    equivalence: the _pool view lowering the FLUX / Krea VAEs call against
    TConv2D's C body (src/nn/conv2d.c).
 
-   M1 of the beautiful-mnist parity arc (docs/plans/beautiful_mnist_parity.md):
+   The beautiful-mnist parity arc:
    im2col + matmul lowering of stride-1 / no-padding 2D conv.  Both
    forms must agree on:
      (a) forward output bit-for-bit (within f32 tolerance)

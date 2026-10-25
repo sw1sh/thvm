@@ -2,8 +2,7 @@
 (* forward.wls -- LeNet forward inference on a few MNIST samples.
 
    No training: backprop through Conv2D / Pool / RESHAPE / EXP2 /
-   RECIP isn't implemented yet (see docs/grad-roadmap.md when it
-   lands).  Predictions come from a NetInitialize'd random-weight
+   RECIP isn't implemented yet.  Predictions come from a NetInitialize'd random-weight
    LeNet so accuracy is ~chance (~10%).
 
    Run from the repo root:

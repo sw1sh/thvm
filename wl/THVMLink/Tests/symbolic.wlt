@@ -2,7 +2,7 @@
    symbolic with TSymbolicAxis is sized at its upper bound but loops the value
    bound by TKVarSet, so ONE materialized graph runs at any length with no
    re-lift (tinygrad symbolic shapes).  The on-ramp to symbolic-sequence
-   inference: see docs/plans/decode_roadmap.md. *)
+   inference: see docs/NN/symbolic_shapes.md. *)
 
 (* A {16,4} tensor of ones with axis 0 reinterpreted as a symbolic dim S;
    summing over S yields S in every output cell. *)

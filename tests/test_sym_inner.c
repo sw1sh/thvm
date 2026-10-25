@@ -5,7 +5,7 @@
 // NOTE: full inner-symbolic *realize* additionally needs the addr-coefficient
 // layer (the lift bakes a tensor's outer stride = product of inner RANGE
 // extents straight from the raw kvar) to be kvar-aware -- see
-// docs/plans/decode_roadmap.md M2.5.  The OUTER-symbolic case ({S, dim}, all
+// docs/NN/symbolic_shapes.md.  The OUTER-symbolic case ({S, dim}, all
 // of GPT-2 so far) already realizes (M1 / M2-GEMM); only {S,S} is blocked.
 #include "../src/thvm.c"
 #include "test.h"

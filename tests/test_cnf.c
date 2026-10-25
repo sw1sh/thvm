@@ -4,7 +4,7 @@
 // Plain (non-grad) DP projections are Levy-opaque under wnf; cnf is
 // the readback layer where their duplication actually fires.  This
 // test exercises the four behaviours called out in the Levy-optimal
-// plan (docs/plans/levy_optimal.md):
+// design (docs/core/normal_form.md):
 //   1. Pure terms pass through unchanged.
 //   2. ERA propagates / DUP-ERA returns ERA.
 //   3. Same-label DUP-SUP annihilates.

@@ -30,7 +30,7 @@ current working directory, so run from the repo root.
 ## Why this network
 
 LeNet's the eventual goal but its convolutional + max-pool layers
-have no grad rules yet (see `docs/grad-roadmap.md`).  This
+have no grad rules yet.  This
 fully-connected MLP exercises only operations whose grad rules ARE
 implemented: Linear (MUL + REDUCE_SUM + ADD), ReLU (MUL + CMPLT),
 Softmax (EXP2 + REDUCE_SUM + RECIP + EXPAND + MUL), and

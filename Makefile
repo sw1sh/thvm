@@ -466,7 +466,7 @@ endif
 # The CUDA driver lib (libcuda) ships with the GPU driver and lives in
 # the system lib dir; libnvrtc lives in the toolkit.  Both -L paths are
 # passed so a driver-only image (libcuda in /usr/lib, nvrtc symlinked
-# there per docs/plans/cuda_backend.md) and a full-toolkit image both
+# there) and a full-toolkit image both
 # link.
 # NB: uname is queried inline via $(shell ...) -- the same idiom the
 # Metal block uses -- because the shared UNAME_S variable is not

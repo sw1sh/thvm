@@ -7,7 +7,7 @@
 
    Synthetic config (tiny on purpose; eager-mode constant-arg
    kernels do not hit the kernel-program-cache, so each block
-   costs O(seconds) without TJit -- see docs/bench/history.md):
+   costs O(seconds) without TJit):
 
        vocab    = 32
        dim      = 16

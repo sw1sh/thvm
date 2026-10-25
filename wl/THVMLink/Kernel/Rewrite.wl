@@ -120,8 +120,7 @@ TUOpDagApplyKOpt[t_TTerm, op_Integer, axis_Integer, arg_Integer] := (
 
 (* === KOpt rule operators =========================================
  * All rules pattern-match against TTermExpr's `"UOP"[name, child, ...]`
- * form with `"NUM"[value]` atoms for opcode parameters.  See
- * docs/plans/wl_kopt_rewriting.md Part 3 for the design.
+ * form with `"NUM"[value]` atoms for opcode parameters.
  *)
 
 (* ---- TC: wrap inner REDUCE with OPT(_, TC, factor) ---------------- *)

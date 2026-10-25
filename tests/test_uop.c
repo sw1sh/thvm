@@ -2,7 +2,7 @@
 //
 // Commit 2 only builds graph structure -- no materialize, no
 // dispatch yet.  These tests verify each constructor lays out heap
-// cells the way docs/tensors.md's layout table says.
+// cells the way its opcode's #define in src/thvm.h says.
 
 #include "../src/thvm.c"
 #include "test.h"

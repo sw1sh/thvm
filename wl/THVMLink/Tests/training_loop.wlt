@@ -9,8 +9,7 @@
    fresh w UOP graph per iter via APP-LAM beta -- there each
    iter's compute lives at a different heap loc, so materialize
    emits N independent kernels (N=iter-count).  The bound-w
-   pattern hits a cubic scaling cliff past n~12 (see
-   docs/loop-profile.md); the ASSIGN pattern is linear in n at the
+   pattern hits a cubic scaling cliff past n~12; the ASSIGN pattern is linear in n at the
    per-iter cost and constant in kernel count. *)
 
 (* === scalar weight: f(w) = (w - target)^2, lr=0.1 === *)

@@ -1,5 +1,5 @@
 // test_uop_symbolic_shape.c - M1 of the symbolic-sequence roadmap
-// (docs/plans/decode_roadmap.md): a SYMBOLIC shape dim realized + executed
+// (docs/NN/symbolic_shapes.md): a SYMBOLIC shape dim realized + executed
 // at a runtime-bound length.  A {S} tensor (S a kvar in [1,16], buffer
 // sized at the upper bound) summed over the symbolic axis yields S -- the
 // bound value drives the loop, proving the dormant kvar infra

@@ -10,13 +10,9 @@
 // kid references survive in heap UOP_KERNEL terms, and a future
 // realize that touches a still-pinned TenDesc could DFS-fire its
 // producer kid.  Freeing only the input arrays keeps the arena
-// bounded; a re-fire of a stripped kernel would read freed inputs, so
-// it fails the realize (kernel_fire_by_id).  See M4 in
-// docs/plans/beautiful_mnist_parity.md for the architectural
-// trade-offs and the orphan-kernel-emission issue that blocks the
-// more ambitious slot-reuse design.  A re-fire is a stale reference:
-// the slot is marked `stripped` and kernel_fire_by_id fails the realize
-// instead of running it.
+// bounded.  A re-fire of a stripped kernel would read freed inputs: it is
+// a stale reference, so the slot is marked `stripped` and
+// kernel_fire_by_id fails the realize instead of running it.
 //
 // Liveness signal: CPU_BUFS[buf_id].refcount.  After
 // cpu_buf_pool_rollback_with_preserve runs (in thvm_realize), a

@@ -49,7 +49,7 @@ static const char *test_name = "<unnamed>";
 } while (0)
 
 // PENDING - used at the top of a test whose implementation arrives in a
-// later PLAN.md step. Prints a notice and exits 0 so the suite stays green.
+// later change. Prints a notice and exits 0 so the suite stays green.
 // Delete the call when the implementation lands and the body should run.
 #define PENDING(reason) do {                                                 \
   printf("  pend  %s\n", (reason));                                          \

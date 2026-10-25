@@ -1,7 +1,7 @@
 # Cross-test: tinygrad's test/test_tiny.py, ported to the thvm Python
 # frontend by swapping the `tinygrad` -> `thvm` imports.  Source:
-# tinygrad/test/test_tiny.py at 365f87a8a (MIT).  This is the Phase-4
-# cross-test (docs/plans/py_tensor_frontend.md) -- the SAME test code runs
+# tinygrad/test/test_tiny.py at 365f87a8a (MIT).  This is a
+# cross-test: the SAME test code runs
 # on tinygrad and thvm via a one-line import swap.
 #
 # Kept as the executable target spec, deliberately not skipped: test_hgemm
