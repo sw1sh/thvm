@@ -7,7 +7,7 @@ Architecturally IDENTICAL to bench_thvm.py / bench_tinygrad.py:
     MSE loss against a fixed target, gradient w.r.t. every param, Adam step.
 
 Runs on CPU by default. COMPILE=1 enables torch.compile.
-    STEPS=200 python3 tools/mlp_bench/bench_torch.py
+    STEPS=200 python3 bench/mlp_bench/bench_torch.py
 """
 import os, time, torch
 from torch import nn, optim

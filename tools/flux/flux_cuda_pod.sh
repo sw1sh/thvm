@@ -8,7 +8,7 @@
 # Metal baseline, 625 ms/step synth vs 632-650 ms/step real).
 #
 # Usage:
-#   WOLFRAM_ENTITLEMENT_ID=O-XXXX-... ./tools/flux_cuda_pod.sh [gpu-type] [pod-name]
+#   WOLFRAM_ENTITLEMENT_ID=O-XXXX-... ./tools/flux/flux_cuda_pod.sh [gpu-type] [pod-name]
 #
 # The entitlement is a Wolfram on-demand license; mint one from a cloud-connected
 # kernel ($CloudConnected===True):
@@ -25,7 +25,7 @@ GPU_TYPE="${1:-H100 80GB}"
 POD_NAME="${2:-flux-cuda}"
 TEMPLATE_ID="${WOLFRAM_POD_TEMPLATE:-cmqct4j5z003fvxxj2e2gre02}"
 ENT="${WOLFRAM_ENTITLEMENT_ID:?Set WOLFRAM_ENTITLEMENT_ID (see header for the mint one-liner)}"
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 SSH_KEY="$(jq -r '.ssh_key_path' ~/.prime/config.json)"
 SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
 

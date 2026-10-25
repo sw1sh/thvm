@@ -16,7 +16,7 @@
 #   4. Returns the wolframscript exit code; nonzero on kill.
 #
 # Usage:
-#   tools/wolframscript_guarded.sh [-w WALL] [-m RSS_MB] script.wls [args...]
+#   tools/guards/wolframscript_guarded.sh [-w WALL] [-m RSS_MB] script.wls [args...]
 #
 #   -w WALL    wall-clock seconds (default 60)
 #   -m RSS_MB  RSS cap in megabytes for the spawned WolframKernel (default 2000)

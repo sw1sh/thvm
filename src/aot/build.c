@@ -18,7 +18,7 @@
 #endif
 
 // src/thvm.c with its own includes inlined (build/thvm_runtime_blob.c, made by
-// tools/inline_includes.py and tools/embed_blob.py).  A precompiled object
+// tools/build/inline_includes.py and tools/build/embed_blob.py).  A precompiled object
 // would not do: the helpers the emitted code calls are static inline.
 extern const char     thvm_runtime_src[];
 extern const uint64_t thvm_runtime_src_len;

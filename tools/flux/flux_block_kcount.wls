@@ -3,7 +3,7 @@
    so the matmul-epilogue fusion can be measured by KERNEL COUNT (thermal-
    independent), not warm time.  DEV=metal.  Run from repo root:
 
-     DEV=metal wolframscript -f tools/flux_block_kcount.wls
+     DEV=metal wolframscript -f tools/flux/flux_block_kcount.wls
 *)
 PacletDirectoryLoad["wl/THVMLink"];
 Get["WolframInstitute`THVMLink`Examples`"];

@@ -1,4 +1,4 @@
-// tools/xbackend_bench.c - cross-backend raw-kernel-dispatch microbench.
+// bench/xbackend_bench.c - cross-backend raw-kernel-dispatch microbench.
 //
 // Builds a hand-written UOp DAG (matmul / elementwise / reduce), wraps it
 // in a synthetic KernelEntry exactly as the schedule's materialize lift
@@ -8,9 +8,9 @@
 // an apples-to-apples comparison of thvm's own codegen across backends
 // (no vendor BLAS path).
 //
-//   build (cpu/metal): make tools/xbackend_bench
+//   build (cpu/metal): make bin/xbackend_bench
 //   build (cuda pod):  CUDA on, -DTHVM_HAS_CUDA wired by the Makefile
-//   run:               DEV=cpu ./tools/xbackend_bench <which> <n> <reps>
+//   run:               DEV=cpu ./bin/xbackend_bench <which> <n> <reps>
 //                      which in {matmul,ew,reduce}
 
 #include "../src/thvm.c"

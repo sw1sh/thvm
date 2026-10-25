@@ -611,10 +611,10 @@ WL_XCC_FLAGS := -std=c11 -O2 -w -D_GNU_SOURCE $(WL_TRACE_DEF) $(ATP_DEFINES) $(W
 # Per-format runtime blobs: the embedded thvm source is .incbin'd into
 # every per-platform library, and the host object must match the
 # linker's format (Mach-O native, ELF Linux, COFF Windows).
-build/thvm_runtime_blob_elf.c: build/thvm_inline.c tools/embed_blob.py
-	python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src elf > $@
-build/thvm_runtime_blob_coff.c: build/thvm_inline.c tools/embed_blob.py
-	python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src coff > $@
+build/thvm_runtime_blob_elf.c: build/thvm_inline.c tools/build/embed_blob.py
+	python3 tools/build/embed_blob.py build/thvm_inline.c thvm_runtime_src elf > $@
+build/thvm_runtime_blob_coff.c: build/thvm_inline.c tools/build/embed_blob.py
+	python3 tools/build/embed_blob.py build/thvm_inline.c thvm_runtime_src coff > $@
 
 .PHONY: wl-cross wl-mac wl-linux-x64 wl-linux-arm64 wl-win-x64 wl-linux-cuda
 
@@ -763,13 +763,13 @@ TEST_DEFINES := $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,) $(ATP
 .PHONY: FORCE
 FORCE:
 
-build/thvm_inline.c: $(SRC) $(wildcard src/codegen/*.c src/backend/*/*.c src/backend/*/*/*.c) tools/inline_includes.py FORCE | $(BUILD)
-	@python3 tools/inline_includes.py src/thvm.c > $@.tmp
+build/thvm_inline.c: $(SRC) $(wildcard src/codegen/*.c src/backend/*/*.c src/backend/*/*/*.c) tools/build/inline_includes.py FORCE | $(BUILD)
+	@python3 tools/build/inline_includes.py src/thvm.c > $@.tmp
 	@if [ -f $@ ] && cmp -s $@.tmp $@; then rm -f $@.tmp; \
 	 else mv -f $@.tmp $@; echo "regenerated $@"; fi
 
-build/thvm_runtime_blob.c: build/thvm_inline.c tools/embed_blob.py FORCE
-	@python3 tools/embed_blob.py build/thvm_inline.c thvm_runtime_src macho > $@.tmp
+build/thvm_runtime_blob.c: build/thvm_inline.c tools/build/embed_blob.py FORCE
+	@python3 tools/build/embed_blob.py build/thvm_inline.c thvm_runtime_src macho > $@.tmp
 	@if [ -f $@ ] && cmp -s $@.tmp $@; then rm -f $@.tmp; \
 	 else mv -f $@.tmp $@; echo "regenerated $@"; fi
 
@@ -799,7 +799,7 @@ $(CUDA_TESTS): $(BIN)/%: tests/%.c $(SRC) | $(BIN)
 # once and replayed.  DEV={cpu,cuda} at runtime; on a CUDA pod build with
 # CUDA_HOME pointing at the toolkit.  Not part of TESTS (it is a benchmark);
 # the WL twin is wl/THVMLink/Examples/deepseek_v2/decode_bench.wls.
-$(BIN)/dsv2_decode_bench: tools/dsv2_decode_bench.c $(SRC) | $(BIN)
+$(BIN)/dsv2_decode_bench: bench/dsv2_decode_bench.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 
 # Cross-backend dispatch microbench.  One binary; the backend is chosen
@@ -807,10 +807,10 @@ $(BIN)/dsv2_decode_bench: tools/dsv2_decode_bench.c $(SRC) | $(BIN)
 # backend (so DEV=cpu and DEV=metal both work); on Linux+CUDA it links
 # the CUDA backend (DEV=cpu and DEV=cuda).
 ifeq ($(UNAME_S),Darwin)
-$(BIN)/xbackend_bench: tools/xbackend_bench.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
+$(BIN)/xbackend_bench: bench/xbackend_bench.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
 else
-$(BIN)/xbackend_bench: tools/xbackend_bench.c $(SRC) | $(BIN)
+$(BIN)/xbackend_bench: bench/xbackend_bench.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(CUDA_DEFINES) -o $@ $< $(CUDA_LDFLAGS) $(TEST_LDFLAGS)
 endif
 

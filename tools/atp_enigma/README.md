@@ -833,7 +833,7 @@ wl -t 200 -f tools/atp_enigma/loop_timed.wls 200 800                # measure gu
 engine's CP queue past the system limit (it has no queue-size cap). So wrap
 every proving/training pass in `safe_wl.sh RSS_CAP_MB -- <wl-cmd>`, which kills
 the run's `WolframKernel` the moment its RSS exceeds the cap (poll 2s), well
-below `tools/kernel_reaper.sh`'s system-wide backstop. `tptp_build.sh` already
+below `tools/guards/kernel_reaper.sh`'s system-wide backstop. `tptp_build.sh` already
 does this per problem (4 GB). For a single train/measure run:
 
 ```

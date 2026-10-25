@@ -12,7 +12,7 @@
 #     server sessions); log a loud warning when one exceeds
 #     OTHER_CAP_MB so a runaway MCP evaluation is at least visible.
 #
-# This complements tools/wolframscript_guarded.sh: the guard caps the
+# This complements tools/guards/wolframscript_guarded.sh: the guard caps the
 # kernels it spawns, but a kernel escapes the guard when (a) an agent
 # runs wolframscript or the `wl` wrapper directly, or (b) the guard's
 # watchdog dies with its parent (rate-limit kill, TaskStop) while the
@@ -20,7 +20,7 @@
 # forced reboots four times; the reaper is the always-on backstop.
 #
 # Usage:
-#   tools/kernel_reaper.sh [script_cap_mb] [other_cap_mb] [poll_s]
+#   tools/guards/kernel_reaper.sh [script_cap_mb] [other_cap_mb] [poll_s]
 # Defaults: script 8192 MB, other 16384 MB, poll 10 s.
 
 set -u

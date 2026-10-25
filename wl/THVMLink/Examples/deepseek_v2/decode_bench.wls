@@ -13,7 +13,7 @@
    is env-overridable, e.g.:
        DSV2_DIM=2048 DSV2_LAYERS=27 DEV=cuda wolframscript decode_bench.wls
    The full-size CUDA benchmark for the pod is the C binary
-   tools/dsv2_decode_bench.c (no Wolfram needed there). *)
+   bench/dsv2_decode_bench.c (no Wolfram needed there). *)
 
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], "..", ".."}]];
 Get["WolframInstitute`THVMLink`Examples`"];

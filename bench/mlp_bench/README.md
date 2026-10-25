@@ -36,9 +36,9 @@ All three read `IN H OUT BS WARMUP STEPS` from the environment.
 
 ```bash
 # from the repo root (build the thvm dylib first: make py)
-DEV=cpu  STEPS=200 python3 tools/mlp_bench/bench_thvm.py
-DEV=CPU  STEPS=200 python3 tools/mlp_bench/bench_tinygrad.py
-         STEPS=200 python3 tools/mlp_bench/bench_torch.py
+DEV=cpu  STEPS=200 python3 bench/mlp_bench/bench_thvm.py
+DEV=CPU  STEPS=200 python3 bench/mlp_bench/bench_tinygrad.py
+         STEPS=200 python3 bench/mlp_bench/bench_torch.py
 ```
 
 Each script captures the step once (thvm: `jit_begin`/`jit_end`; tinygrad:

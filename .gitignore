@@ -24,7 +24,7 @@ tools/baselines/vampire_tptp/
 tools/baselines/parity_perstep_partial.tsv
 tools/baselines/compare_methods_batch.tsv
 
-# Run outputs: make atp-pgo profiles, tools/flux_cuda_e2e.wls images
+# Run outputs: make atp-pgo profiles, tools/flux/flux_cuda_e2e.wls images
 .pgo/
 flux_out_cuda/
 

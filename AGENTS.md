@@ -161,9 +161,11 @@ Elsewhere:
   examples; `wl/scripts/`: docs build, lint and release scripts.
 - `tests/`: one self-contained C test per executable, plus probes and data.
 - `tools/`: the FindProof CLI (`thvm_atp_cli.c`, `atp_cli/`), CASC and ProoVer
-  packaging (`casc/`, `proover/`), ATP baselines and the ENIGMA tooling, model
-  converters and benchmarks.
-- `bench/`: cross-framework benchmarks against tinygrad, PyTorch and MLX.
+  packaging (`casc/`, `proover/`), ATP baselines and the ENIGMA tooling, the
+  build helpers (`build/`), the DSV2 converters (`dsv2/`), the FLUX scripts
+  (`flux/`) and the WolframKernel process guards (`guards/`).
+- `bench/`: every benchmark, thvm against tinygrad, PyTorch and MLX
+  ([bench/README.md](bench/README.md)).
 - `docs/`: architecture pages ([docs/README.md](docs/README.md)).
 
 ## When in doubt

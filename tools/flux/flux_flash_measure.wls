@@ -2,7 +2,7 @@
    real (tiny) FLUX generation.  Reports per-buffer >30MB table + TMetalBufSummary
    + ImageQ/std for correctness.  SAFE: single small gen, TimeConstrained.
 
-     IS=128 wolframscript -f tools/flux_flash_measure.wls
+     IS=128 wolframscript -f tools/flux/flux_flash_measure.wls
    Env: IS (image size, default 128), TWO (1 = two prompts for distinctness check).
 *)
 PacletDirectoryLoad["wl/THVMLink"];

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# tools/dsv2_pack_weights.py - DeepSeek-V2-Lite HF checkpoint -> flat weight pack
-# for tools/dsv2_decode_bench.c (DSV2_WEIGHTS=<pack>).  No Wolfram / torch /
+# tools/dsv2/dsv2_pack_weights.py - DeepSeek-V2-Lite HF checkpoint -> flat weight pack
+# for bench/dsv2_decode_bench.c (DSV2_WEIGHTS=<pack>).  No Wolfram / torch /
 # safetensors-lib dependency: the sharded .safetensors are parsed directly
 # (8-byte LE header length + JSON header + raw little-endian payloads) and bf16
 # tensors are handled as uint16 words.
@@ -13,7 +13,7 @@
 #     (deepseek_v2.py:1266-1271, MoE.__init__ deepseek_v2.py:1133-1135)
 #   * kv_b_proj ABSORB split: reshape {H*(dn+dv),kv} -> {H,dn+dv,kv};
 #     w_uk = [:, :dn] contiguous, w_uv = [:, dn:] contiguous (deepseek_v2.py:993-997)
-# plus the layout conventions of the C bench (tools/dsv2_decode_bench.c
+# plus the layout conventions of the C bench (bench/dsv2_decode_bench.c
 # model_init): mm() consumes {in,out} matrices, so every nn.Linear weight
 # ({out,in} in the checkpoint) is TRANSPOSED, and the norm/gate weights are
 # widened bf16 -> f32 (exact; tinygrad keeps them bf16 and upcasts in-op).
@@ -26,8 +26,8 @@
 #   payloads, each 64-byte aligned
 #
 # usage:
-#   python3 tools/dsv2_pack_weights.py --snap <hf snapshot dir> --out dsv2.pack
-#   python3 tools/dsv2_pack_weights.py --fake --out test.pack \
+#   python3 tools/dsv2/dsv2_pack_weights.py --snap <hf snapshot dir> --out dsv2.pack
+#   python3 tools/dsv2/dsv2_pack_weights.py --fake --out test.pack \
 #       --dims dim=128,n_layers=4,n_heads=8,kv_lora=64,d_nope=32,d_rope=16,d_v=32,\
 #              n_exp=8,top_k=3,moe_inter=64,dense_inter=256,vocab=1024
 #     (--fake generates seeded random HF-LAYOUT weights and runs them through
@@ -85,7 +85,7 @@ def cfg_from_snapshot(snap):
 def pack_tensors(cfg, rd):
   """Yield (pack_name, dtype, ndarray) in a fixed order.  `rd(hf_name)` returns
   the checkpoint tensor (bf16 as uint16).  Names match the C loader
-  (tools/dsv2_decode_bench.c pack_ld calls)."""
+  (bench/dsv2_decode_bench.c pack_ld calls)."""
   d, hn = cfg["dim"], cfg["n_heads"]
   dn, dr, dv, kv = cfg["d_nope"], cfg["d_rope"], cfg["d_v"], cfg["kv_lora"]
   E, mi, si = cfg["n_exp"], cfg["moe_inter"], cfg["moe_inter"] * cfg["n_shared"]

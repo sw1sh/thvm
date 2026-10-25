@@ -120,5 +120,5 @@ update the matching row here in the same change. The ATP rows (`THVM_ATP*`,
 
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `THVM_BENCH_OPT` | off | Benchmark optimization selector (`tools/xbackend_bench`). |
+| `THVM_BENCH_OPT` | off | Benchmark optimization selector (`bench/xbackend_bench.c`). |
 | `THVM_WL_TENSOR_VIEW_DEBUG` | off | WL tensor-view debug output. |

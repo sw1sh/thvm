@@ -1,4 +1,4 @@
-// tools/dsv2_decode_bench.c - DeepSeek-V2-Lite BS=1 decode-step microbenchmark
+// bench/dsv2_decode_bench.c - DeepSeek-V2-Lite BS=1 decode-step microbenchmark
 // at the C level (no Wolfram on the pod).  Same math as the WL example
 // (wl/THVMLink/Kernel/NN/Examples/DeepSeekV2/Decode.wl), port of tinygrad
 // examples/deepseek_v2.py, restructured into ~14 fused custom kernels per
@@ -40,7 +40,7 @@
 // values.
 //
 // REAL WEIGHTS (Stage 2): DSV2_WEIGHTS=<pack> loads a flat weight pack written
-// by tools/dsv2_pack_weights.py (the tinygrad load_weights mapping,
+// by tools/dsv2/dsv2_pack_weights.py (the tinygrad load_weights mapping,
 // deepseek_v2.py:1257-1272 + the kv_b absorb split :993-997, pre-applied so
 // every payload is already in the exact layout the step consumes; the merged
 // q|kv weight is row-concatenated at load).
@@ -226,7 +226,7 @@ static u32 mk_i32(u32 n, int v0) {
   return tid;
 }
 
-// === weight pack (tools/dsv2_pack_weights.py) ===============================
+// === weight pack (tools/dsv2/dsv2_pack_weights.py) ===============================
 // "DSV2PK01" magic, u64 count, count x {char name[48]; u32 dtype (0=bf16,
 // 1=f32); u32 pad; u64 offset; u64 nbytes}, then 64-byte-aligned payloads
 // already in the exact layouts the kernels index (transposed {in,out}

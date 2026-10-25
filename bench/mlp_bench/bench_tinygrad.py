@@ -8,7 +8,7 @@ compare kernel quality (not dispatch overhead) at a compute-bound size:
     MSE loss against a fixed target, gradient w.r.t. every param, Adam step.
 
 Force the CPU backend with CPU=1 (tinygrad defaults to METAL on macOS):
-    CPU=1 STEPS=200 python3 tools/mlp_bench/bench_tinygrad.py
+    CPU=1 STEPS=200 python3 bench/mlp_bench/bench_tinygrad.py
 """
 import os, sys, time
 sys.path.insert(0, os.environ.get("TINYGRAD", "/Users/swish/src/tinygrad"))

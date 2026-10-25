@@ -42,7 +42,7 @@ BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`
 dsvConfig::usage = "dsvConfig[opts] returns the DeepSeek-V2-Lite decode config association (defaults = the real model constants, tinygrad examples/deepseek_v2.py:26-29); override any key as an option, e.g. dsvConfig[\"NLayers\" -> 2, \"Dim\" -> 64].";
 dsvSynthInit::usage = "dsvSynthInit[cfg] allocates synthetic bf16 weights, per-layer latent caches, persistent scratch, and the device token/length state for cfg, returning the decode state association (prefill-free: caches empty, position 0, token id 1).";
 dsvHfWeights::usage = "dsvHfWeights[cfg, sd] maps a HuggingFace DeepSeek-V2-Lite checkpoint association sd (name -> TTerm, e.g. from TSafeTensorLoad of the sharded snapshot's index.json) into the decode weight layouts: nn.Linear {out,in} matrices transposed to the {in,out} the matmuls consume, kv_b_proj absorb-split into flat w_uk/w_uv (tinygrad deepseek_v2.py:993-997), per-layer experts stacked into flat w_gate/w_up/w_down (deepseek_v2.py:1266-1271), and norm/gate weights widened to f32.";
-dsvHfInit::usage = "dsvHfInit[cfg, sd] returns the decode state association over the real checkpoint weights dsvHfWeights[cfg, sd] (caches empty, position 0, token id 1); the pod-scale twin is the C bench's DSV2_WEIGHTS pack loader (tools/dsv2_pack_weights.py + tools/dsv2_decode_bench.c).";
+dsvHfInit::usage = "dsvHfInit[cfg, sd] returns the decode state association over the real checkpoint weights dsvHfWeights[cfg, sd] (caches empty, position 0, token id 1); the pod-scale twin is the C bench's DSV2_WEIGHTS pack loader (tools/dsv2/dsv2_pack_weights.py + bench/dsv2_decode_bench.c).";
 dsvDecodeStep::usage = "dsvDecodeStep[state] builds and runs one BS=1 decode step over state's device buffers and returns {token, logits} TTerms; the greedy next token is written on-device into state[\"Tok\"] and the device length advances by 1.";
 dsvDecodeJit::usage = "dsvDecodeJit[state] returns a zero-argument TJit closure over dsvDecodeStep[state]: the first call captures the step, later calls replay it (each replay = one decode step, no host values in the loop).";
 dsvReset::usage = "dsvReset[state] rewinds the device decode state to a fresh conversation (length 1, token id 1) in place, so the captured step and its buffers are reused across requests; stale cache rows beyond the length are never read.";
@@ -1288,7 +1288,7 @@ dsvState[cfg_Association, weights_Association] := Block[{dev, d, hn, kv, dr, dv,
        shared-expert matrices flatten as-is (moe_full_h/out index row-major
        {out, in}).
      * norm gains widen bf16 -> f32 (exact).
-   The C twin is tools/dsv2_pack_weights.py (same mapping, pre-applied into a
+   The C twin is tools/dsv2/dsv2_pack_weights.py (same mapping, pre-applied into a
    flat pack for the no-Wolfram pod bench). *)
 dsvHfLayer[cfg_, sd_, l_] := Block[{
     d = cfg["Dim"], hn = cfg["NHeads"], dn = cfg["DNope"], dr = cfg["DRope"],

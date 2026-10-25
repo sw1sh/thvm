@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# tools/inline_includes.py
+# tools/build/inline_includes.py
 #
 # Recursively expand `#include "..."` (relative-path) directives
 # starting from a root .c file, leaving `#include <...>` (system
@@ -13,7 +13,7 @@
 # present at runtime.
 #
 # Usage:
-#   python3 tools/inline_includes.py src/thvm.c > build/thvm_inline.c
+#   python3 tools/build/inline_includes.py src/thvm.c > build/thvm_inline.c
 
 import sys
 import os

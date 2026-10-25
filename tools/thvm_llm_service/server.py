@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 OpenAI-compatible front-end for the thvm DeepSeek-V2-Lite serve loop
-(tools/dsv2_decode_bench.c DSV2_SERVE=1).  Spawns the C binary as a warm
+(bench/dsv2_decode_bench.c DSV2_SERVE=1).  Spawns the C binary as a warm
 child (weights + captured step stay resident), applies the DeepSeek-V2 chat
 template via transformers AutoTokenizer, and speaks the exact JSON schema of
 tools/thvm_llm_service/thvm_mock_openai.py, so a Wolfram LLM service

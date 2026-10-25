@@ -3,7 +3,7 @@ second-step trigger.
 
 On the second train step a backward conv contraction re-read a now-realized
 pooled activation through the `_pool` col2im window, and the fused reduce
-grew to ~6.8e12 iterations (6cc9b6c10).  This trains the two tools/bench_train
+grew to ~6.8e12 iterations (6cc9b6c10).  This trains the two bench/bench_train
 models, the 2-conv `simple` net and beautiful_mnist, for four eager Adam steps
 on one batch and checks every loss is finite and that training on the fixed
 batch lowers it.

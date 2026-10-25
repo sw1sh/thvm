@@ -9,7 +9,7 @@ expert tensors into per-expert tensors (dsvHfWeights re-stacks them).  Streaming
 each GGUF tensor is dequantized once, so peak RAM is one tensor.
 
 Usage:
-  python3 tools/dsv2_gguf_to_safetensors.py \
+  python3 tools/dsv2/dsv2_gguf_to_safetensors.py \
       --gguf ~/.ollama/models/blobs/sha256-458d... \
       --out  ~/.cache/thvm/dsv2_q8_hf.safetensors [--layers N]
 """
