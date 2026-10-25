@@ -15,7 +15,7 @@ Conventions:
 
 This index is maintained by hand. When you add or remove a `THVM_*` getenv,
 update the matching row here in the same change. The ATP rows (`THVM_ATP*`,
-`THVM_FOL*`, `THVM_PROOFCHECK*`) live in [ATP/env_knobs.md](ATP/env_knobs.md).
+`THVM_FOL*`, `THVM_PROOFCHECK*`) live in [../ATP/env_knobs.md](../ATP/env_knobs.md).
 
 ---
 
