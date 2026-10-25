@@ -2,9 +2,9 @@
 
 How thvm uses machine learning (ML) to guide its automated theorem prover
 (ATP), what the wider field does, and the concrete API + architecture that
-ship today. Companion to the staged plan in
-`docs/ATP/atp_ml_roadmap.md` and the practitioner's tour in
-`docs/ATP/atp_methods.md`.
+ship today. The user-facing side is the paclet tutorial
+`wl/THVMLink/docs/Tutorials/GnnGuidance.md`; the current learned-selection
+program is [enigma_portfolio.md](enigma_portfolio.md).
 
 Abbreviations (spelled out on first use):
 
@@ -114,8 +114,8 @@ generates proof scripts for Coq / Lean / Isabelle (GPT-f, HyperTree Proof
 Search, AlphaProof, DeepSeek-Prover). Powerful but not applicable to a
 saturation engine; out of scope here.
 
-A standing survey of where thvm sits relative to the field is in
-`docs/ATP/survey.md`.
+The field's provers and their techniques are surveyed in
+[prover_landscape.md](prover_landscape.md).
 
 ## 4. What thvm ships
 
@@ -175,8 +175,7 @@ it is a transitive ancestor, in the recorded trace DAG, of the
 goal-closing step, else 0. It seeds from the rules the proof extractor
 says joined the goal, walks their `TRACE_ORIENT` lineage backward, and
 flags every recorded CP whose trace id falls in that set. This is exact
-dependency, not a size/age heuristic. Design note:
-`docs/ATP/atp_enigma_cp_selector.md`.
+dependency, not a size/age heuristic.
 
 ### 4.3 Dataset generation -- `TAtpCpDataset`
 
@@ -326,22 +325,55 @@ roadmap:
    generalise across signatures; the anonymising hypergraph GNN is what
    cracks unseen-symbol hold-outs in the literature.
 
-## 6. Roadmap
+## 6. The GNN scorer
 
-Four tiers, built top-to-bottom; full detail in
-`docs/ATP/atp_ml_roadmap.md`.
+The 14 features include two symbol-name features (`top_symbol_l/r`),
+which mean nothing across problems with different signatures, so a
+feature model cannot transfer what it learns from one theory to another.
+The graph neural network (GNN) scorer (`src/atp/gnn.c`; trained by
+`TAtpTrainGnn`, installed by `TAtpSetGnnScorer`) scores a critical pair (CP) from
+its structure alone, invariant to renaming symbols and variables, as
+ENIGMA Anonymous does (IJCAR 2020; Olsak, Kaliszyk and Urban, ECAI 2020).
 
-1. **Neural scorer on the 14 features + the learning loop** -- BUILT
-   (this document). Toolchain done, loop closes, measured baseline above.
-2. **GNN on the term/clause hypergraph** (ENIGMA Anonymous) --
-   symbol-independent, highest ceiling. The hard part is inference
-   latency in the hot loop, which thvm's batched-tensor + JIT design is
-   the right lever for (batch-score the queued CPs, compile the scorer to
-   a fused kernel).
-3. **Derivation-history network** (Deepire-style) over the trace DAG --
-   cheap, orthogonal signal.
-4. **RL clause selection** (TRAIL / neural-RL) -- learn from proof
-   success; wants the Tier 1 loop in place first.
+**Representation.** A CP `lhs = rhs` is a typed graph:
+
+- term nodes, one per subterm occurrence of either side, plus a CP
+  super-node;
+- symbol nodes, one per distinct function or constant label, whose
+  initial embedding depends only on structure (arity bucket, constant or
+  not, occurrence count), never on the label;
+- variable nodes, one per distinct variable, seeded only by "is a
+  variable".
+
+Typed edges link a term to its top symbol or variable, a term to each
+child (with an argument-position embedding), and the super-node to the
+two side roots (a distinct edge type per side). Two CPs that differ by a
+consistent renaming of symbols and variables give identical node features
+and isomorphic edges; `tests/atp/test_atp_cp_graph.c` asserts it.
+
+**Network.** R rounds of message passing over the typed edges
+(gather/scatter over the edge index, `TMatMul`, `Ramp`), then a logit from
+the super-node's embedding; it trains on the thvm tensor stack with the
+same labels the feature scorer uses.
+
+**Labels and splits.** Positives are proof-relevant CPs or lemmas, a low
+and theory-dependent rate, so the loss and the AUC matter more than
+accuracy. Negatives come from one saturation run and so are
+strategy-relative. Split by problem, never by row: CPs of one proof share
+structure. Anonymization removes signature leakage, but a theory's
+structural idioms can still leak, so the real test is solved-count on
+disjoint theories.
+
+**Latency.** A saturation prover selects thousands of CPs a second, so a
+per-CP GNN call in the hot loop is the bottleneck. The levers are a cheap
+feature-scorer pre-filter, batched scoring of the queue, a compiled
+forward, and periodic re-ranking every K selections, with the age and FIFO
+picks keeping completeness.
+
+The current learned-selection program (lane-conditioned heads, the
+selection-budget metric and its pre-registered gates) is
+[enigma_portfolio.md](enigma_portfolio.md); its runtime layer is
+[guide.md](guide.md).
 
 ## References
 

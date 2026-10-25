@@ -1,6 +1,7 @@
 # thvm CASC strategy: how FindProof proves competition problems
 
-This describes the strategy the `FindProof` CLI (`tools/thvm_atp_cli.c`) runs
+This describes the strategy the `FindProof` CLI (`tools/thvm_atp_cli.c` and
+its modules in `tools/atp_cli/`) runs
 for the CASC (CADE ATP System Competition) UEQ (Unit EQuality) division and
 the day-1 FOF (First-Order Form) lane: the problem pipeline, the concurrent
 slice portfolio, the underlying saturation engine, and the proof story.
@@ -109,17 +110,17 @@ given knob set reproduces a bench run exactly.
 ## 3. The portfolio: concurrent slices
 
 `FindProof --schedule` runs a **portfolio** of strategy slices concurrently
-(`tools/thvm_atp_cli.c`, the `SCHEDULE[]` table -- 29 slices as of
-2026-07-16). Each slice is a full `FindProof` invocation with a distinct flag
-set, forked into its own process group, each given the full wall clock; the
-**first slice to print `SZS status Unsatisfiable` wins** and the rest are
+(the `SCHEDULE[]` table in `tools/atp_cli/main.c`, 46 slices). Each slice
+is a full `FindProof` invocation with a distinct flag set, forked into its
+own process group, each given the full wall clock; the **first slice to print `SZS status Unsatisfiable` wins** and the rest are
 killed. Concurrency width is `THVM_ATP_SCHED_MAX_PAR` (default 5; the
 StarExec run script pins it to the node's core count so the whole portfolio
 races in one wave -- under a hard wall, later waves never run). Exit-fast
 slices (the `=2` gates below) free their pool slot immediately on
 inapplicable problems, backfilling the rest.
 
-The slices, and what each is for:
+The main slices, and what each is for (`FindProof --list-lanes=flags` prints
+every slice with its flags):
 
 | slice | flags (essence) | targets |
 |---|---|---|
@@ -127,8 +128,8 @@ The slices, and what each is for:
 | `equals` | `--equals-goal=2` | existential goals (COL009-1); exits fast otherwise |
 | `narrowq` | `--narrow-queue=2` | existential goals via goal-descendant narrowing (COL011-1); complementary to `equals` |
 | `horn-cd` / `horn-back` | `--horn-cd=2` / `--horn-back=2` | condensed detachment, forward and backward (encoded-Horn LCL family) |
-| `fof-*` (7 slices) | `--fof-slice=2` + one front-end lever | the FOF portfolio pack -- section 3.1 |
-| `full-ac` | `--full-ac=2` | ring/lattice AC-completion (RNG021 family) -- section 5; first wave, exits fast on non-AC problems |
+| `fof-*` (16 slices) | `--fof-slice=2` + one front-end lever | the FOF portfolio pack -- section 3.1 |
+| `full-ac` | `--full-ac=2` | off: commented out of `SCHEDULE[]`, since the sound AC lane recovers nothing (section 5) |
 | `unfold` | `--def-unfold=2` + the flatten dressing | pure function definitions: unfolded + flattened, COL002-5's 6-superposition proof surfaces in 0.02 s under any presentation (verified 2026-07-16) |
 | `unfold-tgt` | `--def-unfold=2 --tgt=1 --preset=none --horn=0` | definition-heavy conjectures where neither transform alone reaches the proof: KLE122-10 in 6.7 s (verified 2026-07-16; Vampire's official time 44.4 s) |
 | `flatten` | `--flatten-goal --lazy-ground-join --backward-subsume --backward-demod --auto-max-weight=6 --max-weight-slope=1` | deep-goal UEQ completion stalls on (COL060, GRP167) |
@@ -155,8 +156,8 @@ clausifies (`src/fol/cnf.c`: NNF, skolemization, distribution up to
 equations: Horn clauses via the '-10' `ifeq` scheme, non-Horn clauses via a
 sound-but-incomplete or/eq reification (`--fof-or`; `0` restores the
 Horn-only give-up, `2` eq-reifies predicate atoms too). Before the equational
-lanes run, a bounded clausal-saturation pre-pass (`fof_clausal_prepass`,
-`src/fol/sat.c`) races resolution/superposition on the clausal form for up to
+lanes run, a bounded clausal-saturation pre-pass (`fof_clausal_prepass` in
+`tools/atp_cli/fof_split.c`, stepping the clausal engine of `src/fol/sat.c`) races resolution/superposition on the clausal form for up to
 60% of the remaining wall (step budget `--fof-sat`).
 
 **Walls and clocks.** Every front-end stage -- clausification, the
@@ -194,6 +195,13 @@ corpus the pack costs one fork + read per slice.
 | `fof-nopre` | `--fof-sat=0` | no pre-pass: the Horn/or equational lanes get the whole wall |
 | `fof-or2` | `--fof-or=2` | eq-reified or-lane encoding (predicate atoms as `eq(p,true)`) |
 | `fof-full` | `--fof-sine=0` | pre-pass on the FULL clausified set where the default SInE-cones it |
+| `fof-split` | `--fof-split=2` | k-bounded ground case splitting on near-Horn sets (one Horn branch per choice); exits fast on any other shape |
+| `fof-avatar` / `fof-avatar2` | `--fol-avatar=1` / `--fol-avatar=2` | AVATAR-lite variable-disjoint component splitting in the pre-pass |
+| `fof-freq` | `--fol-sp=1 --fol-nwc=2.5` | frequency symbol precedence + multiplicative non-goal weight (Vampire `sp`, `nwc`) |
+| `fof-sos` | `--fol-sos=1 --fol-sp=1` | set of support |
+| `fof-wall` | `--fof-sat-wall=95 --fol-lrs=1` | the whole slice wall for the pre-pass, with the limited-resource strategy |
+| `fof-selL` | `--fol-select=3 --fol-sp=1 --fof-sat-wall=95` | largest-negative literal selection |
+| `fof-spb` | `--fol-spb=1 --fol-nwc=5` | conjecture-cone symbols above all others (Vampire `spb=goal`) |
 
 Three mechanisms ride along:
 
@@ -288,8 +296,9 @@ FindProof's only Satisfiable / CounterSatisfiable answer on FOF input is a
 
 ## 4. The saturation engine (what a slice actually does)
 
-Each slice runs the shared completion engine (`src/atp/_.c`, ~31k lines,
-single translation unit; flatterm cells `AtpFtCell`, not heap terms). The core
+Each slice runs the shared completion engine (`src/atp/`: the `_.c` spine
+includes one file per subsystem into a single translation unit; flatterm cells
+`AtpFtCell`, not heap terms). The core
 loop is unfailing KB completion:
 
 1. **Orient** each equation into a rule under the reduction ordering (KBO by
@@ -334,23 +343,26 @@ Key faithfulness details that took the most work:
   discipline runs on process CPU time, Twee's own clock (`Task.hs` reads
   `getCPUTime`), so a slice descheduled by a loaded machine sweeps at the
   same selection indices as an unloaded one.
-- **AC-completion** (`--full-ac`): the engine has a full AC subsystem
-  (AC-matching, Stickel AC-unification, AC-flatten/canon in `src/atp/ac.c`)
-  that used to be compiled in but inert. `--full-ac` auto-detects AC operators
-  (from their commutativity+associativity axioms) and runs AC-modulo
-  completion; `=2` gives up instantly when no AC operator is detected. This
-  flips the ring family (RNG021-6 verified 1.2 s on 2026-07-16, plus
-  021-7/025-5/027-7/029-5/029-6) that plain completion drowns on -- the same
-  problems Vampire solves in 0.3 s, but by a different route (superposition,
-  not AC).
+- **AC-completion** (`--full-ac`, not in the schedule): the engine has a full
+  AC subsystem (AC-matching, Stickel AC-unification, AC-flatten/canon in
+  `src/atp/ac.c`). `--full-ac` auto-detects AC operators (from their
+  commutativity+associativity axioms) and runs AC-modulo completion; `=2`
+  gives up instantly when no AC operator is detected. Its former wins on the
+  ring family (RNG021-6 and neighbours) came from an AC-matching soundness bug:
+  with both AC-match bugs fixed, the sound matcher no longer finds those short
+  proofs (RNG021-6 now times out) and a sound `full-ac` lane recovers none of
+  them, so the slice stays commented out of `SCHEDULE[]`. The CASC-J13 false
+  refutations (LAT016-1, RNG030-6/031-6/032-6) stay non-refuting under the
+  sound matcher (`tests/atp/soundness` covers them).
 - **Vampire's definition unfolding + goal naming** (`--def-unfold`, `--tgt`,
   and their composition -- the `unfold`/`unfold-tgt`/`tgt` slices above).
 - **Existential-goal lanes**: the Twee equals encoding (`--equals-goal`) and
   the goal-descendant narrowing queue (`--narrow-queue`).
 - **Vampire's LPO ordering** (`--ord=lpo`): LPO orients permutative laws KBO
-  cannot. Wired but not in the schedule -- realizing Vampire's LPO gains needs
-  its per-problem precedence+selection tuning. `--sym-prec` exposes the
-  frequency / reverse-frequency symbol precedences to pair with it.
+  cannot. It runs in the `otter-lpo`, `otter-lpo-cmin` and `otter-ladr`
+  slices, each paired with a `--sym-prec` symbol precedence
+  (`const-frequency`, `const-min`, `ladr`) and the Otter simplification set
+  (`--otter`); see [vampire_port.md](vampire_port.md).
 - **Encoded-Horn condensed detachment**: the LCL family is not equational
   completion at all; it is Horn-clause CD, run with forward/backward chaining
   and Otter-style max-weight + generalization-subsumption discipline.
@@ -448,7 +460,6 @@ The standing lesson from mining Vampire's source: its UEQ edge is **portfolio
 breadth** -- ~400 auto-sampled single-strategy configs (ordering x symbol
 precedence x selection x demodulation), dominated by LPO and
 symbol-precedence-by-frequency, with no AC reasoning. thvm's complementary
-edges are AC-completion (which Vampire lacks), the WM-faithful trajectory,
-the exit-fast transform lanes, and encoded-Horn CD -- the union now outscores
+edges are the WM-faithful trajectory, the exit-fast transform lanes, and encoded-Horn CD -- the union now outscores
 Vampire on all three corpora at equal conditions (the standing table at the
 top of this document).

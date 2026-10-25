@@ -308,8 +308,8 @@ EXTERN_C DLLEXPORT int thvm_wl_heap_pos(WolframLibraryData libData, mint argc,
 // to a huge value, forcing a spurious collection that evacuated nothing (the
 // new run's terms sat outside from-space) and stranded them ABOVE HEAP_NEXT
 // -- subsequent allocations overwrote live rule/goal cells, corrupting the
-// reduction order into a non-terminating search (the cross-run hang in
-// docs/ATP/atp_heap_leak.md).  A collection sidesteps the absolute
+// reduction order into a non-terminating search (a cross-run hang).  A
+// collection sidesteps the absolute
 // checkpoint entirely: it always leaves HEAP_NEXT correct relative to
 // gc_from_start() regardless of swap parity.
 static int      g_atp_heap_base_set = 0;

@@ -1,4 +1,4 @@
-# thvm/atp — Engineering
+# thvm/atp: Engineering
 
 How the algorithms in [algorithms.md](algorithms.md) map to thvm's
 data structures, what's hot, what's gated.  Read algorithms.md first
@@ -20,9 +20,9 @@ for the math.
 
 ## Term representation
 
-The engine operates on heap-cell `Term`s — thvm's universal 64-bit
+The engine operates on heap-cell `Term`s, thvm's universal 64-bit
 packed pointer into a copying IC heap (shared with the rest of
-thvm — IC reduction, UOP, WL bridge).  A `Term` is one of `TAG_CTR`
+thvm: IC reduction, UOP, WL bridge).  A `Term` is one of `TAG_CTR`
 (constructor with label + arity + child cells), `TAG_FVR` (free
 variable with a 32-bit id), `TAG_NUM` (numeric leaf), plus a few
 others that don't appear in ATP-internal terms.  Accessors:
@@ -32,7 +32,7 @@ others that don't appear in ATP-internal terms.  Accessors:
 
 Heap cells are GC-relocated by a Cheney collector; the ATP engine
 participates as a root provider (`thvm_atp_gc_collect` in
-`src/atp/_.c`) and invalidates its term-keyed memos on every
+`src/atp/gc.c`) and invalidates its term-keyed memos on every
 GC.
 
 The engine's WORKING representation inside the saturation loop is a
@@ -55,7 +55,7 @@ big fields (a sketch; the struct has grown many mode flags and
 counters beyond this):
 
 ```
-// rules — append-only with periodic compaction; index-stable
+// rules: append-only with periodic compaction; index-stable
 // between compactions
 Term       *lhs, *rhs;
 u8         *r_orient;   // 1 = lhs > rhs under ordering; 0 = unorient
@@ -76,7 +76,7 @@ u32         n_cps, cap_cps;
 // indexes
 struct AtpRuleIndex  *rule_index;       // orientable rule LHSs
 struct AtpRuleIndex  *unorient_index;   // unorientable equation faces
-struct AtpFvIndex    *fv_index;         // CP feature vectors
+struct AtpFvIndex    *fv_index;         // queued-CP subsumption index
 struct AtpRuleIndex  *cp_index;         // optional CP-subterm index
 struct AtpRuleIndex  *cp_subindex;
 
@@ -89,7 +89,7 @@ RewriteSubst witness_subst;
 Term  *trace;
 u32    n_trace, t_max;
 
-// MNF (Mandatory Normal Form) — opt-in eager normalization
+// MNF (Multiple Normal Forms): opt-in goal search
 u8     use_mnf;
 u32    mnf_color_count;
 // ... mnf_* fields, ~40 of them ...
@@ -116,7 +116,7 @@ Init: `thvm_atp_init(kbo_cfg, step_cap)` mallocs and calls
 
 ## Rule storage
 
-Append-only.  `atp_push_rule(s, lhs, rhs)` (`src/atp/_.c`)
+Append-only.  `atp_push_rule(s, lhs, rhs)` (`src/atp/rerank.c`)
 writes `s->lhs[n_rules] = lhs; s->rhs[n_rules] = rhs;
 r_orient[n_rules] = (atp_compare(s, lhs, rhs) == KBO_GT)`.
 Unorientable rules increment `n_unorient`.  Marks the rule index
@@ -158,21 +158,21 @@ cannot outlive an R change.
 The queue is a min-heap on `cp_pri[]` with `cp_seq[]` as a stable
 FIFO tiebreaker.  Each slot `i` stores:
 
-* `cp_packed[i]` — pointer to a malloc'd byte string that encodes
+* `cp_packed[i]`: pointer to a malloc'd byte string that encodes
   the CP's two terms in pre-order varint format (`acp_pack` in
-  `src/atp/_.c`).  1 discriminator byte + LEB128 varints per
+  `src/atp/cp_store.c`).  1 discriminator byte + LEB128 varints per
   symbol.  Self-delimiting (the unpacker walks pre-order via
   discriminator + arity until two terms are reconstituted).
-* `cp_pri[i]`, `cp_seq[i]`, `cp_goal[i]`, `cp_pri2[i]` — the four
+* `cp_pri[i]`, `cp_seq[i]`, `cp_goal[i]`, `cp_pri2[i]`: the four
   parallel heap-key arrays.
-* `cp_trace[i]` — trace index for the CP's two parent rules.
+* `cp_trace[i]`: trace index for the CP's two parent rules.
 
 The byte-string encoding is small (avg ~12 B per CP) and survives
-GC unchanged because it contains no Term cell pointers — just symbol
+GC unchanged because it contains no Term cell pointers, just symbol
 labels and var ids.  Heap insertion is the standard sift-up/sift-
 down in `atp_cp_swap` + `atp_cp_sift_*`.
 
-Pop (`thvm_atp_select_cp`, `src/atp/_.c`) decodes via
+Pop (`thvm_atp_select_cp` in `src/atp/cp_heap.c`) decodes via
 `acp_unpack` into two fresh heap Terms.  Periodic non-min picks
 (FIFO/random/goal/K-D) replace the min-pop with a linear scan over
 the queue.
@@ -187,18 +187,18 @@ check operates on `AtpFtCell *` directly via
 
 ## Discrimination tree
 
-`AtpRuleIndex` (`src/atp/_.c`) is a left-child / right-
+`AtpRuleIndex` (`src/atp/rule_index.c`) is a left-child / right-
 sibling tree with a single `sym : u32` edge label per node, drawn
 from three disjoint ranges:
 
-* `[CTR_BASE, CTR_BASE + n_labels)` — exact constructor label.
-* `NUM` — any numeric leaf (collapsed to one symbol).
-* `[STAR_BASE, STAR_BASE + ATP_RI_MAXVARS)` — a rule variable, with
+* `[CTR_BASE, CTR_BASE + n_labels)`: exact constructor label.
+* `NUM`: any numeric leaf (collapsed to one symbol).
+* `[STAR_BASE, STAR_BASE + ATP_RI_MAXVARS)`: a rule variable, with
   the *first-appearance* var-renumbering.  Distinct rule vars get
   distinct STAR edges, so the tree distinguishes `f(x,x)` from
   `f(x,y)` structurally.
 
-`atp_ri_rebuild` (`src/atp/_.c`) walks every live rule LHS in
+`atp_ri_rebuild` (`src/atp/rule_index.c`) walks every live rule LHS in
 pre-order and inserts.  Leaves carry an `AtpRiRec` list pointing
 back into `s->lhs[]`.
 
@@ -224,9 +224,10 @@ check differs.
 
 ### FV index
 
-`AtpFvIndex` (`src/atp/_.c`) keys on a per-CP feature
-vector — symbol-multiset, depth, var count, etc. — and returns CPs
-whose FVs are componentwise-dominated by the query.  Used by
+`AtpFvIndex` (`src/atp/fv_index.c`) keeps the feature-vector (FV)
+name, but the structure is a perfect discrimination tree over the
+preorder of `Cp(lhs, rhs)`, keyed on label ids, with each CP's
+variables numbered by first appearance.  Used by
 `atp_cp_queue_subsumed` to find CPs the new one might be a
 substitution instance of.  Cheaper than walking the whole queue.
 
@@ -237,7 +238,7 @@ discipline:
 
 | Memo                       | Key                                | Invalidation                  |
 |----------------------------|------------------------------------|-------------------------------|
-| `g_kbo_wmemo`              | (Term, epoch)                      | `thvm_kbo_invalidate()` (GC)  |
+| `g_kbo_wmemo`              | (structural hash, epoch)           | `thvm_kbo_invalidate()` (GC)  |
 | `g_lpo_memo`               | (Term, Term, epoch)                | `thvm_lpo_invalidate()` (GC)  |
 | `g_atp_unf_memo`           | `atp_term_struct_hash(t)`          | every rule_index rebuild      |
 | `g_atp_unf_pos_memo`       | (subtree_phash, folded bit)        | every rule_index rebuild      |
@@ -257,10 +258,7 @@ orientability cache (`src/atp/lpo_cache.c`, build define
 top-level (lhs_hash, rhs_hash) hit rate is high (99% on AndAssoc)
 but the existing `kbo_subtree_memo` already deduplicates most of
 the work, so the live AndAssoc bench shows the orient cache as
-neutral-to-slightly-negative.  TODO: re-key `kbo_subtree_memo`
-itself from Term-pointer to shape-hash, which would lift its 35%
-hit rate toward 70% and let the orient cache fall back to its
-intended role.
+neutral-to-slightly-negative.
 
 ## AtpFt
 
@@ -337,7 +335,7 @@ The AtpFt module exports:
 * **CP queue** (`src/atp/ft_cpq.c`): `AtpCpEntry { lhs, rhs; size;
   weight; priority; origin_rule; }` array parallel to
   `cp_packed[]`.  Native joinability via
-  `atp_cp_trivially_joinable_ft` — `atp_rewrite_normalize_ft` on
+  `atp_cp_trivially_joinable_ft`: `atp_rewrite_normalize_ft` on
   both sides + `ft_eq` for the verdict, no `ft_from_term` at entry,
   no `ft_to_term` at exit.
 
@@ -346,7 +344,7 @@ The AtpFt module exports:
 The AtpFt path is the default engine path and byte-equivalent to
 the Term reference path: the full ~136k-assertion ATP regression
 suite passes under every flag combination, including
-`THVM_ATPFT_NORM_VERIFY=1` (live differential — every push-norm
+`THVM_ATPFT_NORM_VERIFY=1` (live differential: every push-norm
 runs both paths and aborts on disagreement).  The saturation loop
 runs IC-Term-free (zero `ft_from_term` conversions on the hot
 path); the Term representation appears only at the boundary
@@ -364,7 +362,7 @@ The engine's behavior is shaped through three layers of controls:
   but read by the test harness so a saturation can be reshaped from
   the shell).
 
-This section catalogs the **C-level controls** — what exists below
+This section catalogs the **C-level controls**: what exists below
 the WL `Method` surface.  For the WL `Method` / preset / portfolio
 surface, see `wl/THVMLink/docs/Tutorials/ATP.md` and
 `AtpMethods.md`.
@@ -381,7 +379,7 @@ Set via `-D` at compile time (`CFLAGS` or per-target Makefile rule).
 | `THVM_ATPFT_MATCH`              | `ft_match` + `ft_subst_apply`                                  |
 | `THVM_ATPFT_RULES`              | `s->lhs_ft / rhs_ft` dual-store                                |
 | `THVM_ATPFT_NORM`               | `atp_rewrite_normalize_ft` + `ft_splice` in join check         |
-| `THVM_ATPFT_RI`                 | `atp_ri_descend_ft` (cell-walking discrim tree)                |
+| `THVM_ATPFT_RI`                 | `atp_ri_descend_ft_at` (cell-walking discrim tree)             |
 | `THVM_ATPFT_CPQ`                | native AtpFt CP queue alongside byte queue                     |
 | `THVM_ATP_LPO_ORIENT_CACHE`     | LPO/KBO orientability cache (top-level)                        |
 | `THVM_ATP_AC`                   | AC declarations + canonical form + AC-eq trivial-join hook    |
@@ -395,12 +393,12 @@ Set via `-D` at compile time (`CFLAGS` or per-target Makefile rule).
 | `ATP_FLATTERM_SELFCHECK`        | per-call flatterm-vs-tree NF assertion (build-only)             |
 | `ATP_FLATTERM_DIFF`             | per-call flatterm-vs-tree mismatch counter (test-only)          |
 
-The AtpFt flags stack — `*_NORM` requires `*_MATCH`, etc.; the
+The AtpFt flags stack: `*_NORM` requires `*_MATCH`, etc.; the
 Makefile test targets bundle the correct subset.  The standard
-build (`ATP_DEFINES` in the `Makefile`) and the CASC build
+build (`ATP_DEFINES` in `atp.mk`) and the CASC build
 (`tools/casc/Makefile` `DEFS`) both enable the
 ALLOC/CONVERT/LPO/MATCH/RULES/NORM AtpFt stack plus `THVM_ATP_AC`
-and the `ATP_*` index/front defines — for those, "gated" means you
+and the `ATP_*` index/front defines; for those, "gated" means you
 can compile them OUT, not that you must opt in.  `THVM_ATPFT_RI`
 and `THVM_ATPFT_CPQ` remain test-target opt-ins.
 
@@ -411,95 +409,95 @@ Apply at any time after `thvm_atp_init`.  Each setter mutates one
 
 Selection + queue ordering:
 
-* `thvm_atp_set_cp_weight_mode(s, mode)` — `ATP_CP_WEIGHT_*` from
+* `thvm_atp_set_cp_weight_mode(s, mode)`: `ATP_CP_WEIGHT_*` from
   ADD / MAX / ORD / GT / MIX / MIX2 / UNIF / GOAL / TWEE /
   LEARNED / CONJSYM / DIVERSITY / RELLEVEL / STAGGERED.
-* `thvm_atp_set_selection_ratio(s, modulo)` — one FIFO pick every
+* `thvm_atp_set_selection_ratio(s, modulo)`: one FIFO pick every
   `modulo` weight picks (default 0 = pure weight).  WM's typical
   value is 51.
 * `thvm_atp_set_random_modulo(s, modulo)` and
-  `thvm_atp_set_random_seed(s, seed)` — Vampire-style random pop
+  `thvm_atp_set_random_seed(s, seed)`: Vampire-style random pop
   every Nth pick.
-* `thvm_atp_set_goal_interleave(s, ratio)` — pick the most goal-
+* `thvm_atp_set_goal_interleave(s, ratio)`: pick the most goal-
   relevant CP every Nth time.
-* `thvm_atp_set_w2(s, modulo, mode)` — Waldmeister K-D Heap
+* `thvm_atp_set_w2(s, modulo, mode)`: Waldmeister K-D Heap
   secondary dimension: every `modulo` picks, take the min of a
   second weight (the `mode` ATP_CP_WEIGHT_*).
 * `thvm_atp_set_max_cp_weight(s, w)` and
-  `thvm_atp_set_auto_max_cp_weight(s, base)` — hard / soft cap on
+  `thvm_atp_set_auto_max_cp_weight(s, base)`: hard / soft cap on
   CP weight; heavier CPs are dropped or stashed.
 
 Filters:
 
 * `thvm_atp_set_use_perm_subsume(s, on)` and
-  `thvm_atp_set_perm_subsume_mask(mask)` — WM `GZ_ACVerzichtbar`
+  `thvm_atp_set_perm_subsume_mask(mask)`: WM `GZ_ACVerzichtbar`
   filter: drop CPs whose two sides are AC-equal at the top symbol,
   for the bit-masked symbols.
 * `thvm_atp_set_ac_mask(mask)` / `thvm_atp_get_ac_mask()` /
-  `thvm_atp_auto_ac(lhs, rhs, n)` — register the engine-global AC
+  `thvm_atp_auto_ac(lhs, rhs, n)`: register the engine-global AC
   bit-mask (each bit = "this CTR label is associative + commutative").
   When set, `atp_cp_trivially_joinable` treats AC-equal normal forms
   as joined.  `auto_ac` derives the mask from a caller-supplied
   axiom set.  Requires `-DTHVM_ATP_AC` at build time.
-* `thvm_atp_set_use_rule_subsume_drop(s, on)` — WM `dokgS`:
+* `thvm_atp_set_use_rule_subsume_drop(s, on)`: WM `dokgS`:
   push-time rule-subsumption drop.
 * `thvm_atp_set_use_fwd_subsume(s, on)` and
-  `thvm_atp_set_use_bwd_subsume(s, on)` — Vampire-style forward
+  `thvm_atp_set_use_bwd_subsume(s, on)`: Vampire-style forward
   and backward subsumption on rule add.
-* `thvm_atp_set_use_bwd_demod(s, on)` — backward demodulation
+* `thvm_atp_set_use_bwd_demod(s, on)`: backward demodulation
   (rule's RHS rewriting existing rules).
-* `thvm_atp_set_use_orphan_murder(s, on)` — drop queued CPs whose
+* `thvm_atp_set_use_orphan_murder(s, on)`: drop queued CPs whose
   parent rules have retired.
-* `thvm_atp_set_use_ground_join(s, on)` — Martin-Nipkow / Twee
+* `thvm_atp_set_use_ground_join(s, on)`: Martin-Nipkow / Twee
   ground-joinability redundancy.
-* `thvm_atp_set_use_connectedness(s, on)` — Bachmair-Dershowitz
+* `thvm_atp_set_use_connectedness(s, on)`: Bachmair-Dershowitz
   connectedness-below-peak redundancy.
 
 Normalization paths:
 
-* `thvm_atp_set_use_flatterm(s, on)` — flatterm-mixed normalize
+* `thvm_atp_set_use_flatterm(s, on)`: flatterm-mixed normalize
   fast path (keeps the subject in flat arrays across orientable +
   unorientable inner loops).
-* `thvm_atp_set_use_cp_index(s, on)` — opt-in CP-subterm
+* `thvm_atp_set_use_cp_index(s, on)`: opt-in CP-subterm
   discrimination index for CP enumeration.
-* `thvm_atp_set_use_unorient_index(s, on)` — opt-in unorient-
+* `thvm_atp_set_use_unorient_index(s, on)`: opt-in unorient-
   equation index for the ordered rewrite path.
-* `thvm_atp_set_use_lazy_normalize(s, on)` — WM `lohntSichBehandlung`
+* `thvm_atp_set_use_lazy_normalize(s, on)`: WM `lohntSichBehandlung`
   gate (push-time normalize only for small CPs).
-* `thvm_atp_set_use_mnf(s, on)` — opt-in mandatory normal form
+* `thvm_atp_set_use_mnf(s, on)`: opt-in mandatory normal form
   (eager normalization with goal-directed front search).
-* `thvm_atp_set_use_sos(s, on)` — Set-of-Support style restriction.
-* `thvm_atp_set_use_lrs(s, on)` — Riazanov-Voronkov Limited
+* `thvm_atp_set_use_sos(s, on)`: Set-of-Support style restriction.
+* `thvm_atp_set_use_lrs(s, on)`: Riazanov-Voronkov Limited
   Resource Strategy: prune the queue by predicted reachability.
-* `thvm_atp_set_use_unfailing_cp(s, on)` — superpose BOTH faces of
+* `thvm_atp_set_use_unfailing_cp(s, on)`: superpose BOTH faces of
   every unorientable equation (the unfailing-completion
   completeness requirement; off = overlap the stored lhs only).
-* `thvm_atp_set_right_reduce(s, on)` — RHS-rewriting during
+* `thvm_atp_set_right_reduce(s, on)`: RHS-rewriting during
   interreduction.
-* `thvm_atp_set_cp_set_interreduce(s, on)` — periodic full-rule
+* `thvm_atp_set_cp_set_interreduce(s, on)`: periodic full-rule
   re-normalization of the CP queue.
-* `thvm_atp_set_record_norm_steps(s, on)` — emit per-rewrite-step
+* `thvm_atp_set_record_norm_steps(s, on)`: emit per-rewrite-step
   trace records for proof reconstruction.
 
 Ordering and goal:
 
-* `thvm_atp_set_lpo(s, lpo_cfg)` — switch from KBO to LPO with the
+* `thvm_atp_set_lpo(s, lpo_cfg)`: switch from KBO to LPO with the
   given precedence.
-* `thvm_atp_set_spec(s, spec)` — sorted-signature spec (per-arg
+* `thvm_atp_set_spec(s, spec)`: sorted-signature spec (per-arg
   sorts; rejects ill-sorted inputs).
-* `thvm_atp_set_goal_existential(s, on)` — treat the goal as
+* `thvm_atp_set_goal_existential(s, on)`: treat the goal as
   `∃x. lhs(x) ≈ rhs(x)`; on proof, `s->witness_subst` carries
   the witness.
 
 Wall budget:
 
-* `thvm_atp_set_wall_deadline(s, seconds_from_now)` — soft wall
-  cap; the saturator polls and returns `ATP_BUDGET` past the
+* `thvm_atp_set_wall_deadline(s, seconds_from_now)`: soft wall
+  cap; the saturator polls and returns `ATP_TIMEOUT` past the
   deadline.
 
 ENIGMA-style learning hook:
 
-* `thvm_atp_set_record_cp_features(s, on)` — emit per-CP feature
+* `thvm_atp_set_record_cp_features(s, on)`: emit per-CP feature
   vectors at push time for offline training.
 
 ### Env knobs
@@ -509,7 +507,7 @@ itself read well over 100 `THVM_ATP*` env variables (the full
 inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
 `src/fol/`, the bench, and the CLI).  Discovery paths:
 
-* `bin/FindProof --list-knobs` prints the 127-row `--flag -> env ->
+* `bin/FindProof --list-knobs` prints the 183-row `--flag -> env ->
   Method-name` table (every CLI flag is exactly an env setter, so
   the table is also the env catalog for the strategy surface).
 * `bin/FindProof --list-lanes` prints the schedule's lane names in
@@ -557,7 +555,7 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
 * `docs/NN/env_knobs.md` carries the repo-wide index; its ATP section
   points here.
 
-The table below is the STABLE bench/debug subset — the knobs that
+The table below is the STABLE bench/debug subset: the knobs that
 translate directly to the C setters above and are safe to reach for
 first.  Everything else is either a strategy knob (see
 `--list-knobs` and [casc_strategy.md](casc_strategy.md)) or a
@@ -621,7 +619,7 @@ override on top.
 
 ### WL Method reach vs CLI-only transforms
 
-The FindProof CLI's `KNOBS[]` table (`tools/thvm_atp_cli.c`) maps every
+The FindProof CLI's `KNOBS[]` table (`tools/atp_cli/knobs.c`) maps every
 `--flag` to its `THVM_ATP_*` env and, where one exists, its `TFindProof`
 Method suboption name.  Engine knobs are WL-reachable: the Method
 options `"SimplerJoin"`, `"EncompassDemod"`, `"GoalNarrow"`,
@@ -658,7 +656,8 @@ Mechanisms that arrived with the CASC arc, each with its own
 engineering surface.  [casc_strategy.md](casc_strategy.md) covers
 what they are FOR; this is where they live and how they are wired.
 
-* **Single-walk CP formation** (`src/atp/ft_cp.c`, default on).
+* **Single-walk CP formation** (`thvm_atp_generate_cps_singlewalk` in
+  `src/atp/step.c`, default on).
   Native flatterm critical-pair formation: one walk over the treated
   rule emits both overlap directions, matching Waldmeister's
   formation trajectory byte-for-byte.  `THVM_ATP_SW_FT=0` reverts to
@@ -692,7 +691,7 @@ what they are FOR; this is where they live and how they are wired.
   + `--nwc` (Vampire's conjecture-descended weight discipline), and
   `--drc-off` (keep join-redundant CPs carrying folded `sF*` symbols).
 
-* **Critical-goal queue (CGQ)** (`AtpCgq` in `src/atp/_.c`,
+* **Critical-goal queue (CGQ)** (`AtpCgq` in `src/atp/narrow.c`,
   `--narrow-queue`).  A separate best-first queue of goal DESCENDANTS
   for existential (non-ground) goals: a goal variable closes only by
   instantiation, so goal-side narrowing steps get their own selection
@@ -741,19 +740,20 @@ after every rule add.
 `-DATP_FLATTERM_SELFCHECK` compiles a build that runs both the
 tree normalize and the flatterm-mixed normalize on every push-norm,
 aborting on mismatch.  Build-only (defeats the speedup).
-`-DATP_FLATTERM_DIFF` is the test-only counter variant — bumps
+`-DATP_FLATTERM_DIFF` is the test-only counter variant: bumps
 `g_atp_ft_diff_mism` on each mismatch so a test can `CHECK_EQ` it
 to zero.
 
 ### GC
 
-`thvm_atp_gc_collect` (`src/atp/_.c`) is the engine's GC root
-provider.  It gathers Term roots — `s->lhs[]`, `s->rhs[]`,
+`thvm_atp_gc_collect` (`src/atp/gc.c`) is the engine's GC root
+provider.  It gathers Term roots (`s->lhs[]`, `s->rhs[]`,
 `s->r_dead_*_save[]`, `s->goal_*`, `s->trace[]`, witness bindings,
-MNF colored nodes — into a Cheney evacuation
+MNF colored nodes) into a Cheney evacuation
 array, which the collector relocates.  Writeback stores the
-relocated Terms back.  Term-keyed memos (`g_kbo_wmemo`,
-`g_lpo_memo`) are invalidated; structural-hash memos
+relocated Terms back.  The KBO and LPO memos are invalidated
+(`g_lpo_memo` is Term-keyed, and `g_kbo_wmemo` is reached through the
+Term-keyed hash cache `g_kbo_thash`); the ATP structural-hash memos
 (`atp_unf_memo`, `atp_norm_cache`) survive unchanged because their
 key isn't cell-keyed.
 
@@ -762,45 +762,41 @@ run); GC doesn't touch them.
 
 ## Profiling
 
-* **`THVM_ATP_PROFILE=1`** — emits per-phase wall-time accounting
+* **`THVM_ATP_PROFILE=1`**: emits per-phase wall-time accounting
   at bench exit (pop-norm, cp-gen, push-norm, interreduce,
   goal-check, norm-graph).  Phase sums can exceed wall because
   re-entrant inner loops are double-counted.
 
-* **Counter dumps** — at PROFILE=1, additional counters print:
+* **Counter dumps**: at PROFILE=1, additional counters print:
 
-  * `lpo: top / rec / compute / memo-hit` — top-level call count,
+  * `lpo: top / rec / compute / memo-hit`: top-level call count,
     recursive depth, computed-not-memoed count, memo hit rate.
-  * `unorient-step: calls / fires / empty / total` — the empty
+  * `unorient-step: calls / fires / empty / total`: the empty
     fraction is the cracker's main pain on saturating workloads.
-  * `unf-memo` / `pos-memo` / `splice-inline` / `rhs-flat-cache` —
+  * `unf-memo` / `pos-memo` / `splice-inline` / `rhs-flat-cache`:
     each cache's hit ratio.
-  * `ri-index` / `fv-index` — query count, tree nodes, candidates
+  * `ri-index` / `fv-index`: query count, tree nodes, candidates
     per query, `thvm_match` calls per query, prune ratio vs full
     rule list.
 
-* **`sample` (macOS)** or **`dtrace`** — for true self-time
+* **`sample` (macOS)** or **`dtrace`**: for true self-time
   attribution; the env-knob counters give phase-level breakdowns
   but not function-level self-time.
 
-* **`THVM_ATP_RULE_TRACE=1`** — emit each rule as it's added to R
+* **`THVM_ATP_RULE_TRACE=1`**: emit each rule as it's added to R
   (`atp_push_rule` log line).  Lets a script reconstruct the
   saturation trajectory for A/B comparison against wmcli or
   `FindEquationalProof`.
 
 ## TODOs
 
-The AtpFt port is structurally complete; the open work-items live
-in [roadmap.md](roadmap.md).  Quick pointers to the items that
-touch this file's surface:
+The AtpFt port is structurally complete.  The open items that touch
+this file's surface:
 
-* **kbo_subtree_memo rekey.** Currently keyed by Term pointer; a
-  shape-hash key would lift the 35% hit rate and let the LPO
-  orient cache pay off.
 * **Legacy mirror retire.** The Term-side `atp_dt_*` and
   `acp_unpack_term` paths still run alongside the FT paths.  Once
   every reader of `cp_packed[]` migrates to `cp_packed_ft[]`
   (FV-index), the byte queue can retire.
 * **Unorient-step waste.** 96% of `atp_ft_unorient_step` calls on
   saturating workloads return no fire.  This is a CP-selection
-  / search-strategy problem; addressing it is in roadmap.md.
+  / search-strategy problem.

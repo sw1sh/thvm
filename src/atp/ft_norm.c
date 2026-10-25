@@ -3359,8 +3359,8 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   // g_goalnf_active and psteps scope [mixstep]/[mixstep-term] to).  Used
   // to trace AC-match soundness bugs through the rule-maintenance paths
   // (collapse/re-orient) that never set either scope flag -- see the
-  // RNG030-6 residual-unsound-inference note in
-  // docs/ATP/atp_ac_soundness.md.
+  // RNG030-6 residual-unsound-inference note (tools/atp_cli/main.c, the
+  // full-ac lane).
   static int dbg_all = -1;
   if (dbg_all < 0) dbg_all = getenv("THVM_ATP_MIXSTEP_ALL") != NULL;
   if (m->record || m->psteps != NULL || m->sink != NULL || dbg_goal_nf ||

@@ -516,8 +516,7 @@ int main(void) {
   //
   // thvm_atp_goal_check (src/atp/_.c:9051) returns ATP_PROVED when
   // the goal's two sides are AC-equal under the current mask, even if
-  // syntactically distinct.  Covers the documented "AC-eq goal-check
-  // short-circuit" in roadmap.md.
+  // syntactically distinct: the AC-eq goal-check short-circuit.
   //
   // Goal: f(a, b) = f(b, a) -- AC-flat both sides = {a, b}, equal as
   // multisets.  No rules required; the check fires on the initial

@@ -1,6 +1,6 @@
 #!/bin/bash
-# Safe wrapper for wolframscript probes that can hang the C engine
-# (per docs/ATP/wolfram_assoc_wl_hang.md).  Sets a sensible heap cap
+# Safe wrapper for wolframscript probes that can hang the C engine.
+# Sets a sensible heap cap
 # and enforces a hard wall-clock timeout via `timeout`.
 #
 # If the inner wolframscript overruns the timeout, `timeout` sends

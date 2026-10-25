@@ -1,9 +1,9 @@
-# Gate G2.1 problem list (tests/atp/atp_history_v2_obs.sh): family, lane, problem
+# Gate G2.1 problem list (tests/atp_history_v2_obs.sh): family, lane, problem
 # path under the TPTP root (the pool, tptp_pool.tgz).  Made by --pick from the
 # sealed lane matrix of 2026-10-02 (TRAIN rows only, engine proofs at 60 s in
 # 1-40 s, 10 per family so NONDET / WALL rows have spares; horn-cd has 5,
 # every engine proof the matrix holds for it).  Regenerate:
-#   tests/atp/atp_history_v2_obs.sh --pick ~/.cache/thvm/enigma/matrix/matrix.tsv ~/.cache/thvm/enigma/matrix/problems.tsv
+#   tests/atp_history_v2_obs.sh --pick ~/.cache/thvm/enigma/matrix/matrix.tsv ~/.cache/thvm/enigma/matrix/problems.tsv
 twee	twee	Problems/GRP/GRP436-1.p
 twee	twee	Problems/LAT/LAT023-1.p
 twee	twee	Problems/GRP/GRP170-4.p

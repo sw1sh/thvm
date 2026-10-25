@@ -8,9 +8,8 @@ bridge them to interactive proof assistants.
 
 ## Why this document exists
 
-thvm carries its own equational ATP: an Interaction-Calculus-native port
-of Waldmeister's unfailing Knuth-Bendix completion (see
-[docs/ATP/atp_ic_native.md](atp_ic_native.md) and the ATP
+thvm carries its own equational ATP: a port of Waldmeister's unfailing
+Knuth-Bendix completion (see [README.md](README.md) and the ATP
 vocabulary in [docs/core/glossary.md](../core/glossary.md)). To know which ideas are
 worth porting next, and to understand where a completion-based equational
 engine sits in the broader field, we surveyed the source code, papers, and

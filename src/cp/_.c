@@ -1,6 +1,5 @@
 // thvm_critical_pairs - enumerate critical pairs of an oriented
-// rule set on TAG_CTR + TAG_FVR terms.  Stage 4 of
-// docs/ATP/waldmeister_ic_atp.md.
+// rule set on TAG_CTR + TAG_FVR terms.
 //
 // A critical pair (CP) arises when two rules  l_i -> r_i  and
 // l_j -> r_j  overlap: there exists a non-variable position p in

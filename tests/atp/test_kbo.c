@@ -1,6 +1,6 @@
 // test_kbo.c - Knuth-Bendix ordering on first-order terms.
 //
-// Stage 2 demo from docs/ATP/waldmeister_ic_atp.md: orient the
+// Orient the
 // group axiom f(x, e) = x correctly under the Waldmeister default
 // KBO config (weights i=0, f=1, e=1, a=1; precedence i > f > e > a;
 // w0 = 1).

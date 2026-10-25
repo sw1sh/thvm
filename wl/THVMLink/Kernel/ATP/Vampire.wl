@@ -4,7 +4,7 @@
    TPTP problem file and returns a normalized result Association.
    Use it to validate a thvm preset's behavior against the actual
    Vampire 5.0.1 CLI proof on the same problem
-   (see docs/ATP/vampire_case_teardown.md).
+   (see docs/ATP/vampire_port.md).
 
    Result shape:
        <|

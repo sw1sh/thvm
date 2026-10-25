@@ -1,7 +1,8 @@
 # ENIGMA dataset + guidance experiment harness
 
-Tooling for the ATP machine-learned guidance roadmap
-([docs/ATP/atp_ml_roadmap.md](../../docs/ATP/atp_ml_roadmap.md)): build a
+Tooling for the ATP machine-learned guidance
+([docs/ATP/ml_guidance.md](../../docs/ATP/ml_guidance.md),
+[docs/ATP/enigma_portfolio.md](../../docs/ATP/enigma_portfolio.md)): build a
 proof corpus, train the Tier-2 GNN (Graph Neural Network) proof-relevance
 scorer, and measure GNN-guided critical-pair reranking.
 
@@ -111,10 +112,10 @@ recompile); NOT enabled by default and NOT added to SCHEDULE[].
 The Tier-2 lane scores a critical pair from its anonymised term
 *structure* (a graph convolutional network, GCN), so it transfers across
 signatures the way the 14 hand features cannot. The in-engine forward
-runs on thvm's own tensor runtime in C (`atp_gnn_forward`, `src/atp/_.c`);
+runs on thvm's own tensor runtime in C (`atp_gnn_forward`, `src/atp/gnn.c`);
 it is loaded at run time from a `.safetensors` file and drives the
 critical-pair queue via a periodic re-rank hook. See
-[docs/ATP/atp_tier2_gnn.md](../../docs/ATP/atp_tier2_gnn.md).
+[docs/ATP/ml_guidance.md](../../docs/ATP/ml_guidance.md) section 6.
 
 Pipeline (CPU-only; no WL, no GPU):
 

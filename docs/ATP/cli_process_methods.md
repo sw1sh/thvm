@@ -31,9 +31,8 @@ All four route to a per-CLI `T<Name>ProofObject` builder in
    / `{"SubstitutionLemma", n}` / `{"Conclusion", 1}`) per the
    shared `$SZSRuleToConstruct` mapping.
 3. Optionally lifts to a literal `ProofObject["EquationalLogic",
-   goal, axioms, data]` head via `liftToProofObject` (see
-   docs/ATP/cli_lift_status.md for the achievement + verification
-   gap).
+   goal, axioms, data]` head via `liftToProofObject` (see "Known gap"
+   below).
 
 ## Shared options
 
@@ -54,7 +53,7 @@ Twee's `--quiet` output carries lemmas, not a liftable inference DAG):
   `ParseFormulas -> True`).  Property accessors work
   (`ProofFunction` / `ProofGraph` / `ProofLength` / `Theorems`);
   `pf[Theorems]` full verification still fails on some entries
-  per cli_lift_status.md.  Set `False` for the raw thvm-shaped
+  (see "Known gap" below).  Set `False` for the raw thvm-shaped
   Association (`"Backend" -> "SZS"`).
 
 ## Skip-through behavior
@@ -101,11 +100,16 @@ p3raw["Backend"]    (* -> "SZS" *)
 (Dispatch verified 2026-07-16: `p1` and `p3` return `ProofObject`,
 `p3raw` returns the Association with `"Backend" -> "SZS"`.)
 
-## Related docs
+## Known gap: verifying a lifted Waldmeister proof
 
-* docs/ATP/cli_lift_status.md -- LiftToProofObject achievement +
-  the verifier-internal Failure gap
-* docs/ATP/wolfram_assoc_wl_hang.md -- WL TFindProof's
-  TimeConstraint enforcement gap on WolframAxioms/AndAssoc
-* docs/ATP/proof_parity_inverseofinverse.md -- WaldmeisterProcess
-  vs internal preset structural comparison
+With `"LiftToProofObject" -> True`, the lifted `ProofObject` has a
+working `"ProofFunction"`, `"ProofGraph"` and `"ProofLength"`, but
+`pf["Theorems"]` does not verify. The structural wrap is not the cause:
+fed thvm's own preset data, it verifies. The failures come from the
+critical-pair lemmas: for Waldmeister's `cp(I, side_i, J, side_j)` steps,
+the search over sides, orientations and positions in
+`wl/THVMLink/Kernel/ATP/ProcessProofObject.wl` finds no candidate whose
+rewritten equation matches the step's statement up to renaming. An
+identity-rule placeholder for an unreconstructed lemma makes verification
+worse (the verifier then fails to unify it with the real axiom), so such
+an entry is left as a skeleton.

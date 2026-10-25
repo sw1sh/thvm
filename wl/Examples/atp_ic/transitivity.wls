@@ -19,8 +19,7 @@
      - Reduce + collapse + AnyTrue[#, # === 1 &] = is conjecture
        provable in <= D steps?
 
-   Limitation (toy): atoms-only.  Substitutivity / pattern axioms
-   come in milestone 2+ per docs/ATP/atp_ic_native.md. *)
+   Limitation (toy): atoms only, no substitutivity or pattern axioms. *)
 
 PacletDirectoryAdd[FileNameJoin[{Directory[], "wl"}]];
 Needs["WolframInstitute`THVMLink`"];

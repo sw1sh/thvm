@@ -1,144 +1,99 @@
-# thvm/atp -- Automated Theorem Proving
+# ATP: automated theorem proving
 
-`src/atp/` is thvm's equational theorem prover. Given a set of
-equational axioms and a goal equation, it attempts a proof by unfailing
-Knuth-Bendix completion: orient each axiom into a rewrite rule under a
-reduction ordering, generate critical pairs (CPs) by superposition,
-normalize them, and check whether the goal's two sides reach a common
-normal form. The default trajectory is byte-faithful to Waldmeister
-(the historically dominant unit-equality prover); everything beyond
-that -- mechanisms ported from Twee and Vampire, an
-associative-commutative (AC) completion mode, condensed-detachment
-lanes, a first-order-logic (FOL) clausal front end -- is opt-in flags
-and portfolio slices layered on top.
+`src/atp/` is thvm's equational theorem prover. Given equational axioms
+and a goal equation, it searches for a proof by unfailing Knuth-Bendix
+completion: it orients axioms into rewrite rules under a reduction
+ordering, forms critical pairs (CPs) by superposition, normalizes them,
+and checks whether the goal's two sides reach a common normal form. The
+default trajectory follows Waldmeister step for step; mechanisms ported
+from Twee, Vampire and Prover9, associative-commutative (AC) completion,
+the condensed-detachment lanes, the first-order (FOF) clausal front end
+and the learned selection layer are flags and schedule entries on top.
 
-The prover has two user surfaces:
+Two surfaces drive it:
 
-* **`bin/FindProof`** (`tools/thvm_atp_cli.c`, built by
-  `make bin/FindProof`): a self-contained CLI over TPTP input. This is
-  the CASC competition entry; see
-  [casc_strategy.md](casc_strategy.md) and [starexec.md](starexec.md).
-* **`TFindProof`** in the Wolfram Language (WL) paclet
-  (`wl/THVMLink/Kernel/ATP/`): returns a real `ProofObject`. See
-  `docs/ATP/atp_methods.md` and
-  [cli_process_methods.md](cli_process_methods.md).
+* **`bin/FindProof`** (`tools/thvm_atp_cli.c` over `tools/atp_cli/`,
+  `make bin/FindProof`): the CLI over TPTP input and the CASC (CADE ATP
+  System Competition) entry. `bin/FindProof --check` is the proof checker
+  (`tools/proof_check.c`), entered in ProoVer as CheckProof.
+* **`TFindProof`** in the THVMLink paclet (`wl/THVMLink/Kernel/ATP/`),
+  which returns a `ProofObject`. Its methods and options are documented
+  in the paclet's pages (`wl/THVMLink/docs/Symbols/TFindProof.md`,
+  `wl/THVMLink/docs/Tutorials/AtpMethods.md`).
 
-## Current standing (as of 2026-07-16)
+At CASC-J13 (2026) FindProof placed 4th of 10 in UEQ (unit equality,
+269 of 400) and 11th of 17 in FOF (91 of 400); CheckProof placed last in
+ProoVer. [casc_j13_postmortem.md](casc_j13_postmortem.md) has the
+analysis.
 
-Unit EQuality (UEQ) division, 300 problems per corpus, 240 s wall on
-pod hardware (48-core Linux, `THVM_ATP_SCHED_MAX_PAR` = slice count so
-the whole portfolio races in one wave; result TSVs under
-`~/.cache/thvm/casc/pod_results/`):
+## Documents
 
-| corpus | thvm | official winner | Vampire 5.0.1 from source, same pod + wall |
-|---|---|---|---|
-| CASC-30 (2025) | 281 | Vampire 263 | 269 |
-| CASC-29 (2023) | 282 | Twee 2.4.1 260 | 271 |
-| CASC-J12 (2024) | 279 | Vampire 4.9 265 | 273 |
+* [casc_strategy.md](casc_strategy.md): how FindProof proves competition
+  problems: the problem pipeline, the transforms, the concurrent slice
+  schedule, the engine loop, the proof output.
+* [engineering.md](engineering.md): how the algorithms map to data
+  structures: rule storage, the CP queue, discrimination trees, memos,
+  flatterms, the build defines and setters, soundness probes, profiling.
+* [algorithms.md](algorithms.md): the mathematics the engine implements:
+  completion, orderings, matching and unification, redundancy criteria.
+* [env_knobs.md](env_knobs.md): the `THVM_ATP_*` environment knobs.
+* [starexec.md](starexec.md): building and running the competition
+  tarballs (FindProof and CheckProof) the way StarExec does.
+* [cli_process_methods.md](cli_process_methods.md): the
+  `Method -> "<X>Process"` bridge to the external provers and the shared
+  proof lift.
+* [vampire_port.md](vampire_port.md): Vampire and Prover9 options against
+  their thvm equivalents.
+* [guide.md](guide.md): the ENIGMA selection layer (`--guide`,
+  `src/atp/guide.c`): integrations, inputs, compiled-in heads.
+* [enigma_portfolio.md](enigma_portfolio.md): the pre-registered plan for
+  learned selection against the CASC portfolio, with its frozen DEV-S
+  list [enigma_devs.tsv](enigma_devs.tsv). Changes to it are dated
+  amendments only.
+* [ml_guidance.md](ml_guidance.md): the learned CP scorers behind
+  `Method -> "ENIGMA"` and the GNN scorer.
+* [atp_neural_selection.md](atp_neural_selection.md): the derivation-history
+  design behind `src/atp/history.c` and its phase 0c results.
+* [unification_roadmap.md](unification_roadmap.md): a design for unifying
+  SMT (CDCL(T), theories) with completion.
+* [prover_landscape.md](prover_landscape.md): a survey of the field's
+  provers and their techniques.
 
-thvm beats every official UEQ winner and the from-source Vampire
-baseline on all three corpora. (Official numbers are from 120 s
-StarExec competition runs; the pod comparison against Vampire is
-like-for-like at 240 s on identical hardware.)
+## Code map
 
-First-Order Form (FOF): the day-1 hybrid pipeline (clausification +
-Horn/or equational encoding + a bounded clausal-saturation pre-pass)
-proves 112/500 of a stratified FEQ+FNE sample at 240 s
-(84/400 FEQ + 28/100 FNE, `pod_results/fof_*_240.tsv`). This is a new
-lane, not yet a competitive FOF entry.
+The engine is one translation unit: `src/atp/_.c` includes its modules in
+build order.
 
-## Documentation map
+| Concern | Files in `src/atp/` |
+| --- | --- |
+| state, the step loop, the run's lifecycle | `_.c`, `state.c`, `step.c`, `lifecycle.c`, `gc.c` (heap checkpoints, collection, trace materialization) |
+| critical pairs: formation, emission, queue, weights | `cp_gen.c`, `cp_emit.c`, `cp_push.c`, `cp_store.c`, `cp_heap.c`, `cp_weight.c`, `overlap_index.c` |
+| redundancy | `cp_interreduce.c`, `subsume.c`, `fv_index.c`, `ground_join.c` |
+| rules and normalization | `rule_index.c`, `norm_paths.c`, `ordered_rewrite.c`, `lpo_cache.c` |
+| the goal | `goal_check.c`, `goal_incr.c`, `goal_narrow.c`, `narrow.c`, `mnf.c` (Waldmeister's multiple-normal-forms goal search) |
+| proofs | `trace.c`, `rule_journal.c`, `proof_cone.c` |
+| flatterms | `ft.h`, `ft.c`, `ft_alloc.c`, `ft_match.c`, `ft_unify.c`, `ft_order.c`, `ft_norm.c`, `ft_splice.c`, `ft_ri.c`, `ft_cp.c`, `ft_cpq.c`, `ft_ac_eq.c`, `ft_ac_match.c` |
+| Waldmeister fidelity | `wm_order.c` (CP emission order), `wm_intake.c` (axiom intake), `wm_drain.c` (interreduction order) |
+| AC, precedence, Otter-loop passive demodulation | `ac.c`, `precedence.c`, `otter.c` |
+| learned selection | `enigma_data.c`, `gnn.c`, `rerank.c`, `topk.c`, `guide.c`, `guide_models.c` (generated), `history.c` |
+| diagnostics, IC primitives | `diag.c`, `prim.c` |
 
-Living documents (kept current with the code):
+Outside `src/atp/`: the term-side orderings (`src/kbo/`, `src/lpo/`,
+`src/rpo/`, `src/wpo/`), unification, critical pairs and rewriting
+(`src/unify/`, `src/cp/`, `src/rewrite/`), the FOF clause core and
+clausal saturation (`src/fol/`), congruence closure (`src/cc/`),
+finite-model enumeration (`src/ffmep/`), the Waldmeister normalization
+port (`src/wmfpa/`) and the `.pr` parser (`src/wald/`).
 
-* **[casc_strategy.md](casc_strategy.md)** -- how `FindProof` proves
-  CASC problems: the problem pipeline, the transform inventory, the
-  concurrent slice schedule, the engine loop, the proof story.
-* **[engineering.md](engineering.md)** -- how the algorithms map to
-  data structures: rule storage, CP queue, discrimination trees,
-  memos, the flatterm representation, controls (build defines, C
-  setters, env knobs), soundness probes, profiling.
-* **[guide.md](guide.md)** -- the ENIGMA selection layer
-  (`--guide`): integrations, the input layout, compiled-in heads and
-  their generator, the exactness discipline, cost counters.
-* **[starexec.md](starexec.md)** -- building and running the
-  competition tarballs (FindProof + CheckProof) the way StarExec does.
-* **[cli_process_methods.md](cli_process_methods.md)** -- the WL
-  `Method -> "<X>Process"` bridge to external provers
-  (Vampire/Twee/Waldmeister/E) and the shared proof-object lift.
-* **`docs/ATP/atp_methods.md`** -- the WL `TFindProof` Method /
-  suboption catalog (the user-facing knob surface).
-* **`docs/NN/env_knobs.md`** -- the repo-wide env-variable index; the ATP
-  section points back here.
-
-Historical snapshots (design notes and closed investigations; knob
-names there may predate the current CLI):
-
-* **[algorithms.md](algorithms.md)** -- the math the engine implements:
-  completion, orderings, matching/unification, redundancy criteria.
-* **[roadmap.md](roadmap.md)**, **[survey.md](survey.md)** -- coverage
-  and peer-prover positioning at the time they were written.
-* **[ml_guidance.md](ml_guidance.md)**, **[gnn_pipeline.md](gnn_pipeline.md)**
-  -- the ENIGMA-style learned CP selection arc (see also
-  `tools/atp_enigma/README.md` for the current dataset tooling).
-* **[vampire_port.md](vampire_port.md)**,
-  **[vampire_case_teardown.md](vampire_case_teardown.md)** -- the
-  Vampire flag-mapping and per-problem teardown studies.
-* **[unification_roadmap.md](unification_roadmap.md)**,
-  **[unification_phase01_plan.md](unification_phase01_plan.md)** -- the
-  SMT-unification design arc.
-* **[proof_parity_waldmeister.md](proof_parity_waldmeister.md)**,
-  **[proof_parity_inverseofinverse.md](proof_parity_inverseofinverse.md)**,
-  **[cli_lift_status.md](cli_lift_status.md)**,
-  **[wolfram_assoc_wl_hang.md](wolfram_assoc_wl_hang.md)** -- WL-side
-  proof-object parity and lift studies.
-
-## Code coverage: what lives where
-
-Line counts as of 2026-07-16 (`wc -l`). The engine proper is a single
-translation unit: `src/atp/_.c` directly `#include`s `lpo_cache.c`,
-`ac.c`, `goal_narrow.c`, `wm_order.c`, and `wm_intake.c`, so their
-"entry points" are internal functions the saturation loop calls; the
-`ft_*.c` files compile separately. The CLI compiles the whole engine
-into one binary via
-`tools/thvm_atp_cli.c -> tests/atp/test_atp_wolfram_bench.c -> src/thvm.c`.
-
-| file | lines | responsibility | main entry points |
-|---|---|---|---|
-| `src/atp/_.c` | 30812 | the saturation engine: rule storage, CP queue + selection, interreduction, indexes, memos, goal check, proof trace, rule-set journal (`rule_journal.c`: every rule birth, content and death, for the `--proof` re-derivation), GC roots | `thvm_atp_init`, `thvm_atp_add_equation`, `thvm_atp_set_goal`, `thvm_atp_step`, `thvm_atp_free`, the `thvm_atp_set_*` knob setters |
-| `src/atp/ft.c` | 777 | flatterm (AtpFt) cell representation: constructors, Term converters, equality/hash, pretty-print | `ftnew_var/const/ctr`, `ft_from_term`, `ft_to_term`, `ft_eq`, `ft_hash` |
-| `src/atp/ft_alloc.c` | 425 | flatterm arenas: persistent slab pool + bump-pointer scratch | `ft_alloc_persistent`, `ft_free_span`, `ft_scratch_reset` |
-| `src/atp/ft_match.c` | 405 | flatterm matching + substitution application | `ft_match`, `ft_subst_apply` |
-| `src/atp/ft_unify.c` | 199 | flatterm unification (CP formation side) | `ft_unify` |
-| `src/atp/ft_norm.c` | 4865 | the flatterm normalizer: innermost rewriting fixpoint, treated-CP classes, Waldmeister flat-path emulation, the goal walk's record and replay (`goal_incr.c`) | `atp_rewrite_normalize_ft` |
-| `src/atp/ft_splice.c` | 431 | in-place rewrite at a redex position (Waldmeister `SigmaRInEZ`/`InLZ` port) | `ft_splice` |
-| `src/atp/ft_order.c` | 838 | Knuth-Bendix Ordering (KBO) + Lexicographic Path Ordering (LPO) over flatterm cells | `thvm_kbo_ft`, `thvm_lpo_ft` |
-| `src/atp/ft_ri.c` | 399 | discrimination-tree descent walking flatterm cells | `atp_ri_descend_ft_at` |
-| `src/atp/ft_cp.c` | 410 | single-walk native critical-pair formation (the Waldmeister CP-walk port) | `vcp_ft_*` |
-| `src/atp/ft_cpq.c` | 319 | flatterm CP-queue store (decode-free pop, native joinability) | `atp_cp_trivially_joinable_ft` |
-| `src/atp/ft_ac_eq.c` | 110 | AC-equality on flatterms | `ft_ac_eq` |
-| `src/atp/ft_ac_match.c` | 434 | AC matching on flatterms | `ft_ac_match` |
-| `src/atp/ac.c` | 974 | the AC subsystem: AC-operator detection, AC-canonical flatten, Stickel AC-unification | `thvm_atp_auto_ac`, `thvm_atp_set_ac_mask` |
-| `src/atp/goal_narrow.c` | 695 | ground congruence-closure + goal-cone e-matching endgame (`--goal-narrow`) | `gn_*`, switched by `thvm_atp_set_use_goal_narrow` |
-| `src/atp/precedence.c` | 976 | automatic precedence from algebraic-structure analysis (Waldmeister PhilMarlow port), the Vampire `sp=` / `spb=goal` / LADR precedence ports, KBO weight schemes, and the floor that keeps the reserved grounding constants below every user symbol | `atp_auto_precedence`, `atp_analyze_axioms`, `atp_vampire_precedence_g`, `atp_precedence_floor_reserved` |
-| `src/atp/goal_incr.c` | 474 | incremental goal check: the single universal goal keeps its last full normalization while a replay of its walk against the rules added since shows a full normalization would retrace it | `atp_goal_incr_same`, `atp_goal_incr_store` (called from the goal check) |
-| `src/atp/lpo_cache.c` | 139 | LPO orientability cache (build-gated) | `atp_lpo_orient_cache_invalidate`, `thvm_atp_orient_stats` |
-| `src/atp/wm_intake.c` | 462 | Waldmeister intake ordering / CP classification | `thvm_atp_wm_intake_order` |
-| `src/atp/wm_order.c` | 2989 | Waldmeister CP-selection order: MixWeight comparator, rank trie, N-way rank cache | `atp_wmo_insert_fact`, `wmo_*` |
-| `src/fol/_.c` | 595 | FOL clause core: clause store, resolution, factoring, paramodulation | `fol_clause_new`, `fol_resolve`, `fol_factor`, `fol_paramodulate` |
-| `src/fol/cnf.c` | 592 | clausification: negation normal form, skolemization, distribution with Tseitin fallback | `fol_nnf`, `fol_skolemize`, `fol_formula_to_clauses`, `fol_formula_to_clauses_tseitin` |
-| `src/fol/sat.c` | 1172 | bounded clausal-saturation pre-pass (given-clause loop with age/goal-tier selection) | `cnf_run` |
-| `tools/thvm_atp_cli.c` | 8317 | the `FindProof` CLI: TPTP parsing, problem transforms, `.pr` emission, the slice schedule, SZS output, proof emission | `main`, `tp_*` transforms, `fof_clausal_prepass`, `cli_proof_hook`, `SCHEDULE[]`, `KNOBS[]` |
-| `tools/proof_check.c` | 1868 | the independent proof checker (`FindProof --check`, the ProoVer CheckProof entry) | `proof_check_main` |
-| `tests/atp/test_atp.c` | 6935 | the engine regression suite (~136k assertions) | `make test_atp` |
-| `tests/atp/test_atp_wolfram_bench.c` | 3599 | the bench harness: env-knob glue, `.pr` ingestion, corpus problems; the CLI includes it as its engine layer | `make test_atp_wolfram_bench` |
-
-Supporting modules outside `src/atp/`: `src/kbo/_.c` and `src/lpo/_.c`
-(the Term-side reduction orderings), `src/rewrite/_.c` (Term match +
-substitution), `src/unify/_.c` (Term unification), `src/cp/_.c`
-(Term-side CP enumeration). The flatterm lanes above are the default
-path; the Term-side modules remain as the reference implementation and
-for the WL bridge.
+The CLI: `tools/atp_cli/main.c` holds `main` and the slice schedule
+`SCHEDULE[]`, `knobs.c` the `KNOBS[]` table; the TPTP side is
+`tptp_ueq.c`, `tptp_include.c` and `canon_input.c`; the problem
+transforms are `curry.c`, `def_unfold.c`, `equals_encode.c`; the FOF and
+Horn lanes are `fof_prepass.c`, `fof_split.c`, `horn_back.c`,
+`horn_release.c` and `ifeq10.c`; `szs.c` and `provenance.c` write the SZS
+output and the proof; `problem_features.c` and `lane_gates.c` compute the
+problem features and the static gates of the ENIGMA lanes. The engine
+layer it compiles is `tests/atp/test_atp_wolfram_bench.c`.
 
 ## Entry points
 
@@ -146,41 +101,36 @@ for the WL bridge.
 AtpState *s = thvm_atp_init(kbo_cfg, /*step_cap=*/100000);
 thvm_atp_set_lpo(s, lpo_cfg);          // optional: LPO mode
 thvm_atp_add_equation(s, lhs, rhs);    // axioms
-thvm_atp_set_goal(s, gl, gr);          // proof goal (single equation)
+thvm_atp_set_goal(s, gl, gr);          // proof goal
 
 while (thvm_atp_step(s) == ATP_RUNNING) { /* ... */ }
-// terminal status: ATP_PROVED, ATP_DISPROVED, ATP_SATURATED, ATP_BUDGET
+// then ATP_PROVED, ATP_REFUTED, ATP_TIMEOUT, ATP_QUEUE_EMPTY or ATP_ABORTED
 ```
 
-The driver is `thvm_atp_step` in `src/atp/_.c`: it pops the
-top-priority CP, normalizes both sides, joins or commits-as-rule, then
-runs interreduction and the goal check.
-
-CLI equivalent (verified 2026-07-16; `TPTP` points at the directory
-containing `Axioms/`):
+`thvm_atp_step` (`src/atp/rerank.c`) pops the best CP, normalizes both
+sides, joins it or adds it as a rule, then interreduces and checks the
+goal. From the CLI (`TPTP` names the directory holding `Axioms/`):
 
 ```sh
 make bin/FindProof
-TPTP=~/.cache/thvm/casc ./bin/FindProof --schedule --szs --proof --wall=30 \
-    ~/.cache/thvm/casc/Problems30/UEQ/LAT171-1.p
-# -> % SZS status Unsatisfiable ... + a CNFRefutation block (0.3 s)
-./bin/FindProof --check --szs proof.p    # -> % SZS status VerifiedGood
+TPTP=~/.cache/thvm/casc ./bin/FindProof --schedule --szs --proof --wall=30 problem.p
+./bin/FindProof --check --szs proof.p
 ```
 
-## Test suite
+## Tests
 
-`tests/atp/test_atp.c` is the regression baseline (~136k assertions,
-default build). Feature-gated binaries cover the flatterm stack, the
-AC subsystem, and the opt-in caches -- the full list is the
-`test_atp*` / `test_ft*` targets in the `Makefile`; the most-used ones:
+`tests/atp/` holds the track's tests (built by [atp.mk](../../atp.mk) and
+listed in `ATP_TESTS`), its shell gates (`atp_*.sh`), the diagnostic
+probes (`make probes`), the `.pr` problems of `tests/atp/data/` and the
+FindProof soundness corpus (`tests/atp/soundness/`). `bin/test_atp` is
+the engine regression suite; `test_atp_ft*`, `test_ft*`, `test_ac` and
+`test_lpo_cache` cover the flatterm stack, AC and the caches; the
+`*_deep` tests pin the deep-term walks; `test_atp_wolfram_bench` runs one
+`.pr` problem (`tools/baselines/wm_pr/`) and is what the Waldmeister pins
+measure:
 
-    make test_atp                 # engine regression suite
-    make test_atp_ft_norm_verify  # live Term-vs-flatterm differential
-    make test_ft_cpq              # flatterm CP-queue invariants
-    make test_ac                  # AC declarations + canonical flatten
-    make test_lpo_cache           # LPO orient-cache differential
-
-The strongest soundness gate is `bin/test_atp_ft_norm_verify` --
-the suite built with the full flatterm stack plus
-`THVM_ATPFT_NORM_VERIFY=1`, which runs every push-normalization through
-both the Term path and the flatterm path and aborts on disagreement.
+```sh
+make bin/test_atp_wolfram_bench
+THVM_ATP_WALDMEISTER=1 THVM_ATP_LAZY_NORM=1 ./bin/test_atp_wolfram_bench \
+    tools/baselines/wm_pr/WolframAxioms__OrAssociativity.pr 500000 280
+```

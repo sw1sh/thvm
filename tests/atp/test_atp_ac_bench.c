@@ -7,8 +7,7 @@
 //   2. AC mask set (Stage 4b wiring + Stage 5 orderings).
 //   3. AC mask set + AC-LPO precedence (Stage 5 fully active).
 //
-// Side-by-side with wmcli's reported run (run separately, recorded
-// in docs/ATP/roadmap.md):
+// Side-by-side with wmcli's reported run (run separately):
 //   wmcli commutative_monoid.pr  -> 2 ms / 1 rule / 3 CPs / Goal proved.
 //
 // Built with -DTHVM_ATP_AC; default build needs no change.

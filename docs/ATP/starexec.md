@@ -62,9 +62,11 @@ FindProof/
   tools/
     thvm_atp_cli.c               # the CLI translation unit (the whole build)
     proof_check.c                # included by thvm_atp_cli.c (--check mode)
+    atp_cli/*.c                  # the CLI modules thvm_atp_cli.c includes
   tests/
-    test_atp_wolfram_bench.c     # included by thvm_atp_cli.c (the engine)
-  src/                           # the thvm ATP engine sources (unity build)
+    atp/
+      test_atp_wolfram_bench.c   # included by thvm_atp_cli.c (the engine)
+  src/                           # every .c and .h of the repo's src/ (unity build)
 ```
 
 The whole engine compiles as ONE translation unit: `tools/thvm_atp_cli.c`
@@ -77,9 +79,9 @@ Apple's Accelerate framework instead, but on StarExec (Linux) it is `-lm` only.
 The Makefile rule:
 
 ```make
-bin/FindProof: tools/thvm_atp_cli.c tools/proof_check.c
+bin/FindProof: tools/thvm_atp_cli.c tools/proof_check.c $(wildcard tools/atp_cli/*.c)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $(DEFS) -o bin/FindProof tools/thvm_atp_cli.c $(LDFLAGS)
+	$(CC) $(CFLAGS) $(DEFS) -o $@ tools/thvm_atp_cli.c $(LDFLAGS)
 ```
 
 `DEFS` is the set of engine feature flags (the ATP flatterm, ground-join,
@@ -99,8 +101,10 @@ sh tools/casc/mk_tarball.sh                       # writes ./FindProof.tgz
 sh tools/casc/mk_tarball.sh /path/to/FindProof.tgz  # or a chosen path
 ```
 
-The script copies the engine sources plus the CLI, the run script, the
-build script, the Makefile, and the README into a staging `FindProof/` tree and
+The script copies the engine sources (`src/` and
+`tests/atp/test_atp_wolfram_bench.c`) plus the CLI (`tools/thvm_atp_cli.c`,
+`tools/proof_check.c`, `tools/atp_cli/*.c`), the run script, the build
+script, the Makefile, and the README into a staging `FindProof/` tree and
 tars it. It does not compile anything; StarExec (or you) compiles from source.
 (`tools/casc/mk_bin_tarball.sh` is the variant that ships a prebuilt binary;
 `tools/proover/mk_tarball.sh` builds the CheckProof tarball the same way.)
@@ -336,9 +340,9 @@ wall limit.)
   (`Unknown`) rather than exhausting memory. Still set a sane
   `STAREXEC_MAX_MEM` on the job.
 - Regenerate the tarball after any source change. `mk_tarball.sh` copies the
-  live sources; the Makefile depends on both `tools/thvm_atp_cli.c` and the
-  `#include`d `tools/proof_check.c`, so a checker-only edit does trigger a
-  rebuild.
+  live sources; the Makefile depends on `tools/thvm_atp_cli.c` and the
+  `#include`d `tools/proof_check.c` and `tools/atp_cli/*.c`, so a checker-only
+  or CLI-module-only edit does trigger a rebuild.
 
 ---
 

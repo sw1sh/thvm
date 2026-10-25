@@ -1,7 +1,5 @@
 // thvm_rewrite_* - one-shot equational rewriter on TAG_CTR + TAG_FVR.
 //
-// Stage 3 of docs/ATP/waldmeister_ic_atp.md.
-//
 // A rule is a pair (lhs, rhs); lhs may contain TAG_FVR variables and
 // rhs may use the same variables.  thvm_rewrite_step tries each rule
 // in order, matching the LHS against the term *at the top position*
@@ -277,8 +275,7 @@ static Term rewrite_try_top(Term t, const Term *lhs, const Term *rhs,
 // a child whose step returns an equal term passes to the next sibling.
 // Returns t unchanged if nothing reducible was found.
 //
-// Stage 5.4 of docs/ATP/waldmeister_ic_atp_tasks.md: extends
-// the original top-only rewriter so saturation's interreduce,
+// Extends the original top-only rewriter so saturation's interreduce,
 // goal_check, and normalize work on compound terms.
 //
 // The descent keeps one frame per open CTR (`i` = the child being

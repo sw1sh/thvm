@@ -471,9 +471,8 @@ the project lives in (cf. [docs/core/heap_graph.md](../core/heap_graph.md),
   `TMultiwayGraph[trace, "Frame" -> incScheme]`.  Validate:
   - two `INC` schemes give the *same* `TMultiwayGraph` but different
     emission order (confluence in pictures);
-  - the cost-ordered observer of
-    [docs/ATP/waldmeister_ic_atp.md](../ATP/waldmeister_ic_atp.md) walks
-    the entailment cone cheapest-first, as one foliation among many.
+  - the cost-ordered observer of the IC-native ATP plan walks the
+    entailment cone cheapest-first, as one foliation among many.
   Files: `wl/THVMLink/Kernel/Multicomputation.wl` (foliation
   enumeration + frame re-traversal);
   `wl/THVMLink/Tests/multicomputation_atp.wlt` (worked example).
@@ -489,7 +488,7 @@ Three concrete payoffs once M0-M3 are in:
    branch tree; both are bugs that, today, only manifest as "the
    collapse count is wrong by a factor of two and I don't know why."
    The branch-tree view will close those bugs trivially on SAT encodings
-   and the IC-native ATP ([docs/ATP/waldmeister_ic_atp.md](../ATP/waldmeister_ic_atp.md)).
+   and the IC-native ATP plan.
 2. **The observer becomes a first-class, inspectable object.**  "This
    `TAG_INC` decoration is this foliation is this traversal order"
    stops being folklore about

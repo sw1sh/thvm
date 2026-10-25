@@ -7,7 +7,7 @@ rather than as a separate bolted-on solver?*
 
 This is a research-grade target, not a checklist. But thvm starts from
 a rare position - it already owns **both** a congruence-closure engine
-([survey.md](survey.md) "SMT core") **and** a mature completion engine
+(`src/cc/`, behind `TSatEUF`) **and** a mature completion engine
 ("equational ATP") - and that changes the shape of the work. The two
 are not two things to glue. They are one calculus at two operating
 points.
@@ -73,7 +73,7 @@ the latter; the union is the goal.
 ## Phases
 
 Each lands behind a flag; the default engine stays unchanged at every
-step (thvm's standing discipline - see [roadmap.md](roadmap.md)).
+step.
 
 ### Phase 0 - shared substrate: CC as ground completion
 
@@ -86,6 +86,10 @@ Low risk (both halves exist); it is the keystone that makes the eventual
 integration *white-box* rather than Vampire-style black-box.
 
 *Reuses:* `TSatEUF`, the saturation engine, `AtpRuleIndex`.
+
+*Status:* `src/cc/_.c` is the C congruence closure behind `TSatEUF`
+(Downey-Sethi-Tarjan over its own integer-encoded egraph, not the term
+heap); running it through the saturation engine is not built.
 
 ### Phase 1 - online CDCL(T) spine
 
@@ -171,8 +175,7 @@ This is the clean end-state architecture; Phases 1-4 converge here.
 
 Unify the outward interfaces: a single proof object spanning the SMT
 resolution proof and the superposition refutation DAG (extend the
-existing `s->trace[]` with the per-step substitution - the gap already
-noted in [roadmap.md](roadmap.md) "External proof certificates");
+existing `s->trace[]` with the per-step substitution);
 incrementality (push/pop); an SMT-LIB 2 front end; and unified model
 generation (CC quotient + arithmetic assignment + Herbrand/finite model
 from saturation, generalizing today's `CounterexampleObject`).
@@ -208,11 +211,17 @@ and (c) is a hard prerequisite for arithmetic, combination, E-matching,
 and AVATAR alike. Everything after it is additive theories on a sound,
 shared spine.
 
-The code-grounded build for this step - the `src/cc/` module, the
-incremental proof-producing CC, the `src/sat/` CDCL(T) core, and the
-flag-gated landing sequence against the current `SMT.wl` / `src/atp/`
-seam - is written up in
-[unification_phase01_plan.md](unification_phase01_plan.md).
+Open design decisions for it:
+
+* **Egraph term encoding:** curry to binary `app` nodes, or keep n-ary
+  signatures. N-ary matches the saturation engine's `Term` shape and the
+  existing arity check; currying simplifies the signature table. N-ary
+  favors sharing the substrate.
+* **CDCL: build or embed.** A minimal in-house watched-literal CDCL
+  keeps the theory-propagation interface white-box, unlike Vampire's
+  black-box Z3.
+* **Where atom abstraction lives:** moving it to C couples the SAT core
+  to the term encoding; a thin WL pre-pass keeps the binding simple.
 
 ## References
 
@@ -232,10 +241,3 @@ seam - is written up in
   (Zipperposition) PhD thesis, 2015.
 - Voronkov. *AVATAR: The New Architecture for First-Order Theorem
   Provers.* CAV 2014. (and AVATAR-modulo-theories follow-ups)
-
-## See also
-
-- [survey.md](survey.md) - where thvm sits today (the starting point).
-- [roadmap.md](roadmap.md) - the per-arc C-engine coverage, including
-  the "Theory reasoning" arc that Phase 2 fills in.
-- [algorithms.md](algorithms.md) - the completion calculus this builds on.

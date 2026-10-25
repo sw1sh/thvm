@@ -1,6 +1,6 @@
 // test_cp.c - critical-pair enumeration on TAG_CTR + TAG_FVR.
 //
-// Stage 4 demo (docs/ATP/waldmeister_ic_atp.md): given the rule
+// Given the rule
 // set { f(e, x) = x ;  f(f(x, y), z) = f(x, f(y, z)) }, the
 // non-trivial CP comes from overlapping the left-id rule into the
 // [0] position of the assoc rule's LHS, yielding (f(y, z), f(e, f(y, z))).

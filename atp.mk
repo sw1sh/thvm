@@ -175,7 +175,7 @@ WL_ATP_DEFINES  += -DTHVM_ATP_AC
 # AtpFtCell mirror into s->lhs_ft[]/s->rhs_ft[] in lockstep with the
 # Term-side rule slot, and every rule-array mutation path (grow,
 # soft-delete, set_goal, interreduce compaction, swap, free) syncs the
-# mirror via the helpers in the THVM_ATPFT_RULES blocks of src/atp/_.c.
+# mirror via the helpers in the THVM_ATPFT_RULES blocks of src/atp/.
 # All compile-time ATPFT readers (NORM verdict, RI discrim descend,
 # CPQ queue mirror, match) gate on RULES; without it they #error out.
 # Runtime activation of the read-side accelerators stays env-knob:
@@ -311,8 +311,8 @@ $(BIN)/test_atp_ft: tests/atp/test_atp.c $(SRC) | $(BIN)
 # Stage 5 AtpFt-native match + substitution-apply -- src/atp/ft_match.c
 # is gated on THVM_ATPFT_MATCH (and depends on ALLOC + CONVERT + LPO).
 # Stage 5 is purely additive: ft_match.c has no live callers in
-# src/atp/_.c at this stage (wiring lands in Stage 5b / 6 per
-# docs/ATP/atpft_plan.md), so only this test binary turns the flag on.
+# src/atp/_.c at this stage (wiring landed later), so only this test
+# binary turns the flag on.
 # The test file #includes ft_alloc.c + ft.c + ft_order.c + ft_match.c
 # directly after src/thvm.c; the per-rule -D defines unlock all four.
 $(BIN)/test_ft_match: tests/atp/test_ft_match.c $(SRC) | $(BIN)
@@ -449,8 +449,7 @@ $(BIN)/test_atp_guide_ac: tests/atp/test_atp_guide.c $(SRC) | $(BIN)
 
 # AC reasoning (src/atp/ac.c).  Gated by THVM_ATP_AC.  With the mask
 # left at 0 (the default), the AC-eq trivial-join hook is a no-op,
-# so the test suite is byte-identical to the default build.  See
-# docs/ATP/roadmap.md for the staged AC arc.
+# so the test suite is byte-identical to the default build.
 $(BIN)/test_ac: tests/atp/test_ac.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_AC \

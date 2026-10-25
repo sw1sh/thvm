@@ -61,7 +61,7 @@ static inline u32  ft_ctr_sym(const AtpFtCell *c) {
 // trajectory (pins gate it).  THVM_ATP_FT_RAW_ALLOC_CHECK forces the raw
 // route AND poisons the scalar fields so a constructor that fails to
 // overwrite a read field trips ft_raw_check below -- proven to fire on a
-// deliberate constructor-field skip.  See docs/ATP/atp_inplace_rewrite.md.
+// deliberate constructor-field skip.
 static int g_ft_raw_alloc       = -1;   // -1 unresolved, 0 off, 1 on
 static int g_ft_raw_alloc_check = -1;
 static void ft_raw_alloc_resolve(void) {

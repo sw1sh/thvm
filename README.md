@@ -83,9 +83,9 @@ autograd basics and the training pipelines
 src/            C runtime, one translation unit through src/thvm.c
 py/             Python package thvm (py/thvm/) and its tests (py/tests/)
 wl/             THVMLink paclet (wl/THVMLink/), examples, scripts, GUIDE.md
-tests/          one self-contained C test per executable
+tests/          one self-contained C test per executable; the ATP track's in tests/atp/
 tools/          FindProof CLI, CASC and ProoVer packaging, ATP and model tooling
-bench/          cross-framework benchmarks (tinygrad, PyTorch, MLX)
+bench/          benchmarks against tinygrad, PyTorch, MLX and Twee
 docs/           architecture: core/, NN/, ATP/
 ```
 

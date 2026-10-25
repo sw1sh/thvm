@@ -128,7 +128,7 @@ typedef u64 Term;
 #define TAG_OP2  13  // binary op.        val = heap loc -> [x, y], ext = opcode (OP_*)
 #define TAG_MAT  14  // numeric switch.   val = heap loc -> [handler, fallback], ext = match value
 
-// === IC-as-ATP layer (PLAN: docs/ATP/waldmeister_ic_atp.md) ===
+// === IC-as-ATP layer ===
 #define TAG_EQL  15  // structural eq.    val = heap loc -> [a, b]; strict both sides
 #define TAG_AND  16  // short-circuit AND.val = heap loc -> [a, b]; strict on a, lazy on b
 #define TAG_OR   17  // short-circuit OR. val = heap loc -> [a, b]; strict on a, lazy on b
@@ -2484,7 +2484,6 @@ fn Term cnf_at(Term term, u32 depth);
 
 // === kbo/ ===
 // Knuth-Bendix ordering on first-order terms (TAG_CTR + TAG_FVR).
-// Stage 2 of the IC-native ATP roadmap (docs/ATP/waldmeister_ic_atp.md).
 typedef enum {
   KBO_EQ =  0,
   KBO_GT =  1,
@@ -2551,7 +2550,7 @@ fn KboCmp thvm_kbo_flat_slice(const struct KboFlatNode *a, u32 na,
 // driven purely by a precedence relation on function symbols
 // -- no per-symbol weights.  More discriminating than KBO on
 // some rewrite systems; the standard pick for many TPTP-UEQ
-// problems.  Stage 8.5b of `docs/ATP/waldmeister_ic_atp.md` section 7.8.
+// problems.
 typedef enum {
   LPO_EQ =  0,
   LPO_GT =  1,
@@ -2788,8 +2787,7 @@ fn void thvm_lpo_selfcheck_report(FILE *f);
 #endif
 
 // === rewrite/ ===
-// One-shot equational rewriter on TAG_CTR + TAG_FVR (stage 3 of
-// docs/ATP/waldmeister_ic_atp.md).  No recursive descent into
+// One-shot equational rewriter on TAG_CTR + TAG_FVR.  No recursive descent into
 // sub-terms yet -- rules match the top position only.
 #define REWRITE_MAX_VAR    64
 #define REWRITE_MAX_ARITY  16
@@ -2811,7 +2809,7 @@ fn Term thvm_rewrite_normalize(Term t, const Term *lhs, const Term *rhs,
 
 // === unify/ ===
 // Most-general-unifier on TAG_CTR + TAG_FVR terms (Robinson with
-// occurs check).  Stage 4 of docs/ATP/waldmeister_ic_atp.md.
+// occurs check).
 // Reuses RewriteSubst for the result; caller zero-inits before the
 // first call.  Returns 1 on success, 0 if the mgu doesn't exist.
 fn u8   thvm_unify        (Term s, Term t, RewriteSubst *subst);
@@ -2901,8 +2899,7 @@ fn void thvm_cp_caps_reset(void);
 fn void thvm_cp_caps_get(u64 *out_dropped, u64 *out_depth_capped);
 
 // === atp/ ===
-// Saturation loop state (stage 5).  See
-// docs/ATP/waldmeister_ic_atp.md section 7.1 for the design.  AtpState is heap-
+// Saturation loop state.  AtpState is heap-
 // allocated by thvm_atp_init; thvm_atp_free reclaims.  Struct
 // fields are public; tests / step / run helpers all read directly.
 typedef enum {
@@ -3578,8 +3575,7 @@ typedef struct { u32 w; u32 tid; u32 nt; } AtpRjEv;
 //     and returns either `thvm_subst_apply(rhs, &σ)` on
 //     successful match (where σ = match(lhs, target)) or `ERA`
 //     on failure.  Dispatch entry-point for IC-native rule
-//     application per `docs/ATP/waldmeister_ic_atp.md` section 7.5's
-//     Strategy B; combined with APP-SUP fan-out (8.3c) it lets
+//     application (one PRI per rule); combined with APP-SUP fan-out it lets
 //     a SUP of partial-PRI rules run in parallel.
 #define ATP_PRIM_KBO          2u
 #define ATP_PRIM_KBO_EQ_IC    3u
@@ -4184,8 +4180,8 @@ typedef struct {
   // the problem.
   Term goal_orig_lhs, goal_orig_rhs;
 
-  // Refutational goal driver (unified-engine Phase 2; opt-in, see the
-  // atp_goal_drive_* lane at the end of src/atp/_.c).  Admits the
+  // Refutational goal driver (opt-in; the atp_goal_drive_* lane in
+  // src/atp/narrow.c).  Admits the
   // ground negated goal as an ACTIVE participant: a backward
   // condensed-detachment regression over the RAW ifeq-guarded
   // equations, run interleaved with completion (from goal_check) so
@@ -4577,8 +4573,7 @@ typedef struct {
   u32  cap_s2a_ax;
 
   // Reduction ordering (caller-owned).  When `lpo` is non-NULL,
-  // it takes precedence over `kbo` per Choice C of
-  // `docs/ATP/waldmeister_ic_atp.md` section 7.8: orient_and_add dispatches to
+  // it takes precedence over `kbo`: orient_and_add dispatches to
   // `thvm_lpo`.  When both are NULL, every comparison is
   // incomparable (KBO_UN) -- saturation falls into unfailing
   // fallback.
@@ -4683,8 +4678,7 @@ typedef struct {
 
   // Stage 7.2b: count of CPs that are source-rule-disjoint
   // connected (joinable under R \ {rule_a, rule_b}, the two rules
-  // that birthed the CP).  Per the domination lemma in
-  // `docs/ATP/waldmeister_ic_atp.md` section 7.2, this is bounded above
+  // that birthed the CP).  By a domination lemma, this is bounded above
   // by `n_cps_dropped_joinable`; it ticks unconditionally for
   // measurement, even if 7.1's filter would also fire.  Useful
   // infrastructure for stage 7.4+ when AC theories may break
@@ -5207,8 +5201,7 @@ typedef struct {
   // default OFF (diverges from WM's incremental interreduce), so the WM
   // preset (test_atp byte-parity) is untouched.
   u8   use_full_interreduce;
-  // Encompassment demodulation (Twee reducesSkolem, Rule.hs:425; plan
-  // docs/ATP/unified_automatic_engine.md Phase 3): permit an
+  // Encompassment demodulation (Twee reducesSkolem, Rule.hs:425): permit an
   // UNORIENTABLE equation to rewrite when its instance is strictly
   // decreasing under the SKOLEM-GROUND KBO (variables read as fresh
   // constants: weight var_weight, precedence below every function
@@ -5221,8 +5214,7 @@ typedef struct {
   // OFF (byte-identical): env THVM_ATP_ENCOMPASS / --encompass-demod.
   u8   use_encompass_demod;
   // Simpler-join CP discipline (Twee Join.hs:55 joinCriticalPair,
-  // allSteps = step1 >=> step2 >=> step3; plan
-  // docs/ATP/unified_automatic_engine.md): when the standard join
+  // allSteps = step1 >=> step2 >=> step3): when the standard join
   // normalize leaves a CP's sides distinct, re-normalize both sides
   // admitting oriented rules AND unorientable equations, with every
   // step gated on the rewriting equation being strictly SIMPLER than
@@ -6704,8 +6696,7 @@ fn Term      thvm_atp_get_witness (const AtpState *s, u32 var_id);
 // Stateless w.r.t. `s->witness_subst`: leaves `s` unchanged.
 // `witnesses[]` must hold at least `max_witnesses` `RewriteSubst`
 // slots.  v0 returns DFS-order raw witnesses without alpha-equivalent
-// dedup; callers post-filter if needed.  See
-// `docs/ATP/waldmeister_ic_atp.md` section 7.4 for the algorithm sketch.
+// dedup; callers post-filter if needed.
 fn u32       thvm_atp_narrow_all  (AtpState *s, Term lhs, Term rhs,
                                    u32 max_depth, u32 max_witnesses,
                                    RewriteSubst *witnesses);
@@ -7280,8 +7271,7 @@ fn int       thvm_atp_gnn_score_graphs(const AtpCpGraph *gs, u32 n,
 fn u32       thvm_atp_gnn_rerank(AtpState *s);
 
 // === wald/ ===
-// Parser for Waldmeister .pr-style spec files.  Stage 6.3 of
-// docs/ATP/waldmeister_ic_atp_tasks.md.  WaldSpec holds the
+// Parser for Waldmeister .pr-style spec files.  WaldSpec holds the
 // parsed signature + variable table + equations + single
 // conclusion goal; downstream feeds it to thvm_atp_run.
 #define WALD_MAX_SYMBOLS 64

@@ -116,9 +116,8 @@ file paths, and other docs.
 > The word "superposition" means *two completely different things* on the
 > two sides of this project.  HVM-SUP is a runtime data primitive (a
 > labelled non-deterministic value); ATP-superposition is a logical
-> inference rule.  The IC-native ATP plan
-> ([docs/ATP/waldmeister_ic_atp.md](../ATP/waldmeister_ic_atp.md))
-> uses the former to represent the search-space of the latter -- but
+> inference rule.  The IC-native ATP plan (a design the engine did
+> not follow) used the former to represent the search space of the latter -- but
 > they live at different layers and reading the codebase requires
 > keeping them apart.
 
@@ -170,8 +169,7 @@ completion engine's vocabulary; the subsection below describes the plan.
 
 ### How the layers connect (in the IC-native ATP plan)
 
-The plan ([docs/ATP/waldmeister_ic_atp.md](../ATP/waldmeister_ic_atp.md))
-proposes encoding the ATP search-space inside HVM-SUPs:
+The plan proposed encoding the ATP search space inside HVM-SUPs:
 
 - **The ruleset becomes one HVM-SUP**: `R = &L{r0, &L{r1, &L{r2, ...}}}`.
   Applying `R` to a term via APP-SUP commutes the SUP up, fanning out

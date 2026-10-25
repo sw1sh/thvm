@@ -51,8 +51,9 @@ ahead-of-time compiler for `TDef` bodies, C and Metal targets).
 
 Start at [ATP/README.md](ATP/README.md): `bin/FindProof` (the CASC entry) and
 `TFindProof` (the Wolfram surface), the algorithms and engineering pages, the
-CASC strategy, the tutorials (`atp_methods.md`, `tptp_import.md`, `smt.md`),
-the ENIGMA plan and the knob table ([ATP/env_knobs.md](ATP/env_knobs.md)).
+CASC strategy, the ENIGMA plan and the knob table
+([ATP/env_knobs.md](ATP/env_knobs.md)). The `TFindProof`, TPTP import and SMT
+tutorials are the paclet's pages under `wl/THVMLink/docs/Tutorials/`.
 
 ## Side tracks
 

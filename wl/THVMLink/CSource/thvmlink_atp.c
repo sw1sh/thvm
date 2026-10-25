@@ -621,7 +621,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // odd number of Cheney collects have swapped the active from-space
   // into the UPPER half (the canonical layout has from_start=0).  A
   // divergent post-Automatic run is expected to enter here with
-  // from_upper=1 (docs/ATP/atp_heap_leak.md).
+  // from_upper=1.
   { static int dbg = -1; if (dbg < 0) dbg = getenv("THVM_ATP_RECYCLE_DEBUG") ? 1 : 0;
   if (dbg) {
     u64 fs = gc_enabled() ? gc_from_start() : 0;
