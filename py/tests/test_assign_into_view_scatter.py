@@ -77,6 +77,19 @@ class TestAssignIntoViewScatter(unittest.TestCase):
         view *= 2
         np.testing.assert_array_equal(x.numpy(), [8.0, 5.0])
 
+    def test_view_write_reaches_other_views(self):
+        # tinygrad's test_setitem_swap_rows: tmp views t, so it reads t after the first write; a max
+        # over t is no view and keeps the state it was built on.
+        for row in (0, slice(0, 1)):
+            t = Tensor.arange(6, dtype=dtypes.float).reshape(3, 2).clone().realize()
+            nxt = 1 if row == 0 else slice(1, 2)
+            last = 2 if row == 0 else slice(2, 3)
+            tmp, m = t[row], t.max()
+            t[row] = t[nxt]
+            t[last] = tmp
+            self.assertEqual(m.item(), 5.0)
+            np.testing.assert_array_equal(t.numpy(), [[2, 3], [2, 3], [2, 3]])
+
     def test_assign_through_bitcast(self):
         a = Tensor.full((4,), 1.0).contiguous()
         a.bitcast(dtypes.uint32).assign(Tensor([0x40800000, 0x40400000, 0x40000000, 0x3f800000],

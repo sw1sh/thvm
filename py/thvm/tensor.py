@@ -81,6 +81,29 @@ def _becomes(ts, old, assigns, share: bool) -> None:
             x._pin(lazy=x._pin_id != 0)
 
 
+def _refresh_views(base: "Tensor") -> None:
+    """After a write into base's storage, every live view of it, at any depth, reads after the write,
+    as tinygrad's assign moves each tensor whose storage_base is the written one past the store
+    (tensor.py assign).  A computation over the old state is no view and keeps it, and so does a view
+    a realize gave a buffer of its own, which tinygrad's would have aliased."""
+    root = base
+    while root._view is not None:
+        root = root._view[0]
+    buf = _TH.ten_get_buf_id(_TH.assign_base(root.term))
+    kids: "dict[int, list[Tensor]]" = {}
+    for x in list(Thvm.live_terms):
+        if x._view is not None:
+            kids.setdefault(id(x._view[0]), []).append(x)
+    todo = [base]
+    while todo:
+        p = todo.pop()
+        for x in kids.get(id(p), ()):
+            if _TH.term_tag(x.term) == _TAG_TEN and _TH.ten_get_buf_id(x.term) != buf:
+                continue
+            x.term = x._view[1](p).term
+            todo.append(x)
+
+
 def _realize_pending() -> None:
     """Realize every pending assign (a TinyJit capture starts with none outside its function)."""
     for t in list(_PENDING_ASSIGNS.values())[:1]:
@@ -424,6 +447,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             xb, inside = inv(x._broadcast_to(self._shape).cast(self._dtype))
             base.assign(xb if inside is None else inside.where(xb, base))
             self.term = fwd(base).term
+            _refresh_views(base)
             return self
         tag = int(_TH.term_tag(self.term))
         if tag != _TAG_TEN and not (tag == _TAG_UOP and _TH.term_ext(self.term) == K.ASSIGN):
@@ -1518,6 +1542,10 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         merged = self._getitem([i.tolist() if isinstance(i, np.ndarray) else i for i in indices], v)
         if int(_TH.term_tag(self.term)) == _TAG_TEN or self._view is not None:
             self.assign(merged)
+            # A basic setitem is tinygrad's view assign, self[indices].assign(v), which every view of
+            # the storage reads past; an advanced one assigns the merged value, as here.
+            if self._view is None and not any(isinstance(i, (Tensor, list, tuple, np.ndarray)) for i in indices):
+                _refresh_views(self)
         else:
             self.replace(merged)
 
