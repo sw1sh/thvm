@@ -348,7 +348,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         # the buffer, which realizes; UOP_ASSIGN would write one contiguous run at the view's offset.
         if self._view is not None:
             base, fwd, inv = self._view
-            xb, inside = inv(x._broadcast_to(self._shape).cast(base._dtype))
+            xb, inside = inv(x._broadcast_to(self._shape).cast(self._dtype))
             base.assign(xb if inside is None else inside.where(xb, base))
             if base._view is None:
                 base.realize()
@@ -504,6 +504,11 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             raise ValueError(f"cannot have negative {n=}, {m_=}")
         out_dtype = to_dtype(dtype) if dtype is not None else dtypes.default_float
         return cls.arange(n).unsqueeze(-1).eq(cls.arange(m_)).cast(out_dtype)
+
+    @classmethod
+    def invalids(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
+        """tinygrad's full of Invalid (mixin/creation.py:23-31), an anonymous buffer: thvm's empty."""
+        return cls.empty(*shape, dtype=dtype, **kw)
 
     @classmethod
     def empty(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
@@ -1468,7 +1473,9 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             return self
         if dtype.itemsize != self._dtype.itemsize:
             raise RuntimeError(f"bitcast from {self._dtype} to {dtype} needs equal itemsizes")
-        return Tensor._from_term(_TH.bitcast(self.term, dtype.thvm_id), dtype, self._shape)
+        src = self._dtype
+        return self._as_view(Tensor._from_term(_TH.bitcast(self.term, dtype.thvm_id), dtype, self._shape),
+                             lambda b: b.bitcast(dtype), lambda x: (x.bitcast(src), None))
 
     # tinygrad mixin/dtype.py:55-142.
     def float(self) -> "Tensor":    return self.cast(dtypes.float32)

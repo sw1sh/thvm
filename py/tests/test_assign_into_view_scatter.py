@@ -77,6 +77,19 @@ class TestAssignIntoViewScatter(unittest.TestCase):
         view *= 2
         np.testing.assert_array_equal(x.numpy(), [8.0, 5.0])
 
+    def test_assign_through_bitcast(self):
+        a = Tensor.full((4,), 1.0).contiguous()
+        a.bitcast(dtypes.uint32).assign(Tensor([0x40800000, 0x40400000, 0x40000000, 0x3f800000],
+                                               dtype=dtypes.uint32)).realize()
+        np.testing.assert_array_equal(a.numpy(), [4.0, 3.0, 2.0, 1.0])
+
+    def test_setitem_into_invalids(self):
+        z = Tensor.invalids(10, dtype=dtypes.int32).realize()
+        z[2:5] = 2
+        z[6:7] = 3
+        self.assertEqual(z[2:5].tolist(), [2, 2, 2])
+        self.assertEqual(z[6:7].tolist(), [3])
+
     def test_assign_into_pending_value_takes_it(self):
         a = Tensor([1.0, 2.0]) * 2
         a.assign(a + 1)
