@@ -287,7 +287,33 @@ static void rmu_emit_fp8_helpers(FILE *fp) {
       "    ur=(ushort)(sign|exponent|mantissa);\n"
       "  } else { ur=(ushort)(sign|exponent|mantissa); }\n"
       "  return float(as_type<half>(ur));\n"
-      "}\n", fp);
+      "}\n"
+      // x rounded to the fp8 grid (bias, mbits) to nearest even, |x| capped at maxv, a NaN
+      // kept: the step is a power of two built from its exponent bits, so the scaling is exact.
+      // Bit tests, not isnan: Metal compiles with fast math.  thvm_fp8_encode gives the CPU
+      // kernel store's byte for every 32-bit input; a cast rounds as decode(encode(x)).
+      "static inline float thvm_fp8_round(float x, int bias, int mbits, float maxv){\n"
+      "  uint b=as_type<uint>(x);\n"
+      "  if((b&0x7FFFFFFFu)>0x7F800000u) return x;\n"
+      "  int e=max((int)((b>>23)&0xFFu)-127,1-bias);\n"
+      "  float step=as_type<float>((uint)(e-mbits+127)<<23);\n"
+      "  return copysign(min(rint(fabs(x)/step)*step,maxv),x);\n"
+      "}\n"
+      "static inline uchar thvm_fp8_encode(float x, int bias, int mbits, float maxv, uint nan){\n"
+      "  uint b=as_type<uint>(x), s=(b>>24)&0x80u;\n"
+      "  if((b&0x7FFFFFFFu)>0x7F800000u) return (uchar)(s|nan);\n"
+      "  uint q=as_type<uint>(fabs(thvm_fp8_round(x,bias,mbits,maxv)));\n"
+      "  int e=(int)((q>>23)&0xFFu)-127;\n"
+      "  if(q==0u) return (uchar)s;\n"
+      "  if(e<1-bias) return (uchar)(s|(uint)(as_type<float>(q)*as_type<float>((uint)(bias-1+mbits+127)<<23)));\n"
+      "  return (uchar)(s|((uint)(e+bias)<<mbits)|((q>>(23-mbits))&((1u<<mbits)-1u)));\n"
+      "}\n"
+      "static inline uchar thvm_fp8e4m3_encode(float x){ return thvm_fp8_encode(x,7,3,448.0f,0x7Fu); }\n"
+      "static inline uchar thvm_fp8e5m2_encode(float x){\n"
+      "  return thvm_fp8_encode(x,15,2,57344.0f,0x7Cu|((as_type<uint>(x)>>21)&0x3u));\n"
+      "}\n"
+      "static inline float thvm_fp8e4m3_round(float x){ return thvm_fp8e4m3_decode(thvm_fp8e4m3_encode(x)); }\n"
+      "static inline float thvm_fp8e5m2_round(float x){ return thvm_fp8e5m2_decode(thvm_fp8e5m2_encode(x)); }\n", fp);
   }
 }
 
@@ -313,7 +339,7 @@ static u32 rmu_slot_dtype(Term t) {
 // store wraps its rhs.  C types those buffers float; CUDA converts implicitly.
 static void rmu_store_cast_open(Term buf, FILE *fp) {
   u32 dt = rmu_slot_dtype(buf);
-  if (RMU_TARGET == CG_TARGET_CUDA && (dt == DT_FP8E4M3 || dt == DT_FP8E5M2)) {
+  if (RMU_TARGET != CG_TARGET_C && (dt == DT_FP8E4M3 || dt == DT_FP8E5M2)) {
     fputs(dt == DT_FP8E4M3 ? "thvm_fp8e4m3_encode(" : "thvm_fp8e5m2_encode(", fp);
     return;
   }
@@ -324,7 +350,7 @@ static void rmu_store_cast_open(Term buf, FILE *fp) {
 }
 static void rmu_store_cast_close(Term buf, FILE *fp) {
   u32 dt = rmu_slot_dtype(buf);
-  if (RMU_TARGET == CG_TARGET_CUDA && (dt == DT_FP8E4M3 || dt == DT_FP8E5M2)) {
+  if (RMU_TARGET != CG_TARGET_C && (dt == DT_FP8E4M3 || dt == DT_FP8E5M2)) {
     fputc(')', fp);
     return;
   }
@@ -568,14 +594,14 @@ static void rmu_emit_term(Term t, FILE *fp) {
       return;
     }
     case UOP_POW: {
-      // An int POW, which uop_sym leaves to thvm_ipow (codegen/ipow.c) on the
-      // CPU and CUDA: a float one is lowered before the renderer sees it.
+      // An int POW, which uop_sym leaves to thvm_ipow (codegen/ipow.c): a float
+      // one is lowered before the renderer sees it.
       u32 dt = rmu_dtype_of(t);
-      char const *ty = rmu_c_type_name(dt);
+      char const *ty = RMU_TARGET == CG_TARGET_C ? rmu_c_type_name(dt) : rmu_gpu_type_name(dt);
       Term e = heap_read(loc + 1);
-      fprintf(fp, "((%s)thvm_ipow((unsigned long long)(", ty);
+      fprintf(fp, "((%s)thvm_ipow((thvm_u64)(", ty);
       rmu_emit_term(heap_read(loc + 0), fp);
-      fputs("), (unsigned long long)(", fp);
+      fputs("), (thvm_u64)(", fp);
       rmu_emit_term(e, fp);
       fputs("), ", fp);
       if (dtype_is_signed(dt)) {
@@ -644,6 +670,11 @@ static void rmu_emit_term(Term t, FILE *fp) {
         fprintf(fp, "%sfloat)(", open);
         rmu_emit_term(src, fp);
         fputs(")))", fp);
+      } else if (RMU_TARGET == CG_TARGET_METAL
+                 && (dst_dt == DT_FP8E4M3 || dst_dt == DT_FP8E5M2)) {
+        fputs(dst_dt == DT_FP8E4M3 ? "thvm_fp8e4m3_round((float)(" : "thvm_fp8e5m2_round((float)(", fp);
+        rmu_emit_term(src, fp);
+        fputs("))", fp);
       } else if (dst_dt == DT_BOOL) {
         // A bool cast is truthiness (x != 0), not truncation.
         fputs("((", fp);
@@ -4522,6 +4553,9 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
     rmu_buf_names_set(in_bufs[i], name);
   }
   fputs("#include <metal_stdlib>\n", fp);
+  fputs(THVM_IPOW_U64(CG_TARGET_METAL), fp);
+  fputs(THVM_IPOW_SRC, fp);
+  fputc('\n', fp);
   fputs("using namespace metal;\n\n", fp);
   // fp8 decode helpers if any input/output is fp8 (rmu_emit_fp8_helpers).
   {
@@ -4586,9 +4620,14 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
     rmu_buf_names_set(b, nm);
   }
   fputs("#include <metal_stdlib>\n", fp);
+  fputs(THVM_IPOW_U64(CG_TARGET_METAL), fp);
+  fputs(THVM_IPOW_SRC, fp);
+  fputc('\n', fp);
   fputs("using namespace metal;\n\n", fp);
   // fp8 decode helpers if any input/output is fp8 (rmu_emit_fp8_helpers).
-  if (rmu_kernel_has_fp8_input(slot_bufs, n_inputs)) rmu_emit_fp8_helpers(fp);
+  if (rmu_kernel_has_fp8_input(slot_bufs, n_inputs) || rmu_term_casts_fp8(root, 0)) {
+    rmu_emit_fp8_helpers(fp);
+  }
   fprintf(fp, "kernel void %s(\n", kernel_name);
   u32 out_dtype = rmu_slot_dtype(out_buf);
   fprintf(fp, "    device %s *out [[ buffer(0) ]]",
@@ -4678,6 +4717,7 @@ fn void cg_render_uop_kernel_c(Term root, const char *kernel_name,
   // Guarded: several kernels can share one source file.
   fputs("#ifndef THVM_XEXP2F\n#define THVM_XEXP2F\n", fp);
   fputs(THVM_XEXP2F_SRC, fp);
+  fputs(THVM_IPOW_U64(CG_TARGET_C), fp);
   fputs(THVM_IPOW_SRC, fp);
   fputs("\n#endif\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
@@ -4813,6 +4853,7 @@ fn void cg_render_uop_kernel_c_root(Term root, const char *kernel_name,
   // Guarded: several kernels can share one source file.
   fputs("#ifndef THVM_XEXP2F\n#define THVM_XEXP2F\n", fp);
   fputs(THVM_XEXP2F_SRC, fp);
+  fputs(THVM_IPOW_U64(CG_TARGET_C), fp);
   fputs(THVM_IPOW_SRC, fp);
   fputs("\n#endif\n", fp);
   fprintf(fp, "void %s(void *out_v, const void *const *ins_v,\n", kernel_name);
@@ -4938,6 +4979,7 @@ fn void cg_render_uop_kernel_cuda_root(Term root, const char *kernel_name,
   fputs("#ifndef INFINITY\n"
         "#define INFINITY __int_as_float(0x7f800000)\n"
         "#endif\n\n", fp);
+  fputs(THVM_IPOW_U64(CG_TARGET_CUDA), fp);
   fputs("__device__ ", fp);
   fputs(THVM_IPOW_SRC, fp);
   fputs("\n", fp);

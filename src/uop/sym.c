@@ -105,21 +105,6 @@ static Term sym_xpow(Term b, Term e, u32 dt) {
   return uop_where(uop_binary(UOP_CMPEQ, e, zero), one, uop_where(neg, neg_b, ret));
 }
 
-// An int POW off the CPU, whose renderers have no thvm_ipow: xpow in f32 rounded
-// half away from zero, and xpow_int's 0 under a negative exponent but for a base
-// of 1 or -1 (transcendental.py:279-283); exact below 2**24.
-static Term sym_ipow_f32(Term b, Term e, u32 dt) {
-  Term r   = sym_xpow(uop_cast(b, DT_FP32), uop_cast(e, DT_FP32), DT_FP32);
-  Term ret = uop_cast(uop_binary(UOP_ADD, r, uop_where(uop_binary(UOP_CMPLT, r, sym_c(DT_FP32, 0)),
-                                                         sym_c(DT_FP32, -0.5), sym_c(DT_FP32, 0.5))), dt);
-  if (!dtype_is_signed(dt)) return ret;
-  Term one = sym_c(dt, 1);
-  Term neg = uop_where(uop_binary(UOP_CMPEQ, b, sym_c(dt, -1)),
-                       uop_where(sym_ne(uop_int_binary(UOP_IAND, e, one), sym_c(dt, 0)), sym_c(dt, -1), one),
-                       uop_where(uop_binary(UOP_CMPEQ, b, one), one, sym_c(dt, 0)));
-  return uop_where(uop_binary(UOP_CMPLT, e, sym_c(dt, 0)), neg, ret);
-}
-
 // The value of a CONST behind RESHAPE and EXPAND, float or int.
 static int sym_const(Term t, double *v) {
   f32 f;
@@ -135,7 +120,6 @@ static int sym_const(Term t, double *v) {
   return 1;
 }
 
-static int  SYM_IPOW;
 static Term sym_pow(Term b, Term e);
 
 // tinygrad's simplify_pow (uop/symbolic.py:16-22) for a CONST exponent c: 1 at
@@ -163,7 +147,7 @@ static Term sym_pow_c(Term b, double c, u32 dt) {
 // tinygrad's POW lowering (uop/symbolic.py:194-197, 451): simplify_pow for a
 // CONST exponent, exp2(e log2 c) for a positive float CONST base c (c itself at
 // 1), else xpow for a float POW; an int one stays a POW for thvm_ipow
-// (codegen/ipow.c) where the renderer holds it.
+// (codegen/ipow.c), which every renderer holds.
 static Term sym_pow(Term b, Term e) {
   u32    dt = DT_FP32;
   (void)term_dtype_in(b, 0, &dt);
@@ -173,7 +157,7 @@ static Term sym_pow(Term b, Term e) {
     if (r != 0) return r;
   }
   if (dtype_is_int(dt) && !dtype_is_bool(dt)) {
-    return SYM_IPOW ? uop_binary(UOP_POW, b, e) : sym_ipow_f32(b, e, dt);
+    return uop_binary(UOP_POW, b, e);
   }
   f32 cb;
   if (sym_float_const(b, &cb) && cb > 0) {
@@ -192,10 +176,7 @@ static Term uop_sym_rule(Term t, void *user) {
   return sym_mul_rule(heap_read(term_val(t)), heap_read(term_val(t) + 1));
 }
 
-// `ipow`: the kernel renders through the C, walker or CUDA route, which hold
-// thvm_ipow; Metal's int POW keeps the f32 path.
-fn Term uop_sym(Term root, int ipow) {
+fn Term uop_sym(Term root) {
   UOpGraphRewriteRule rules[1] = { { "sym", uop_sym_rule } };
-  SYM_IPOW = ipow;
   return uop_graph_rewrite(root, rules, 1, NULL);
 }
