@@ -512,9 +512,9 @@ class OpMixin:
         return x
 
     def _getitem(self, indices, v=None):
-        """Views for slices, ints, None and an Ellipsis; an int Tensor or list index selects through
-        a one-hot mask, consecutive ones through one linear index.  With v, self with v written at the
-        indices (tinygrad's setitem, mixin/op.py:97-186)."""
+        """Views for slices, ints, None and an Ellipsis; one int Tensor or list index reads through
+        gather, several through a one-hot mask, consecutive ones through one linear index.  With v,
+        self with v written at the indices (tinygrad's setitem, mixin/op.py:97-186)."""
         def is_adv(i): return isinstance(i, (list, tuple, type(self)))
         indices_parsed, dim = [], 0
         for index in self._normalize_indices(list(indices)):
@@ -540,6 +540,14 @@ class OpMixin:
         if not (tops := [(d, p) for d, p in enumerate(x_dims) if is_adv(p["index"])]):
             return x if v is None else self._setitem_merge(mops, v.cast(self.dtype)._broadcast_to(x.shape))
         dims, tensors = [d for d, _ in tops], [p["index"] for _, p in tops]
+        if v is None and len(dims) == 1:
+            # One index tensor reads through gather, O(the result), where the one-hot mask below is
+            # O(the result times the axis) unless codegen folds it into a load, as tinygrad's
+            # pm_load_collapse does (codegen/simplify.py:124-126).
+            d, t = dims[0], tensors[0]
+            n = prod(t.shape)
+            idx = t.reshape((1,) * d + (n,) + (1,) * (x.ndim - d - 1)).expand(x.shape[:d] + (n,) + x.shape[d + 1:])
+            return x.gather(d, idx).reshape(x.shape[:d] + t.shape + x.shape[d + 1:])
         big_shape = _broadcast_shape(*(t.shape for t in tensors))
         consecutive = dims == list(range(dims[0], dims[0] + len(dims)))
         if v is None and len(dims) > 1 and consecutive:

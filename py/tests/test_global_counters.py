@@ -11,7 +11,7 @@ import unittest
 import numpy as np
 
 import helpers  # noqa: F401
-from thvm import GlobalCounters, Tensor, TinyJit
+from thvm import Device, GlobalCounters, Tensor, TinyJit
 
 
 class TestGlobalCounters(unittest.TestCase):
@@ -43,6 +43,18 @@ class TestGlobalCounters(unittest.TestCase):
         (a @ b).realize()
         self.assertGreaterEqual(GlobalCounters.global_ops, 2 * m * n * k)
         self.assertLessEqual(GlobalCounters.global_mem, (m * k + k * n + m * n) * 4)
+
+    @unittest.skipUnless(Device.DEFAULT == "CPU", "off the CPU gather is tinygrad's one-hot, and thvm's "
+                         "codegen does not fold it into a load (pm_load_collapse)")
+    def test_tensor_index_after_a_slice_reads_through_a_gather(self):
+        # tinygrad's test_two_tensor_indices: O(the result), not O(the result times the axis).
+        src_np = np.random.rand(10, 100, 200).astype(np.float32)
+        i1, i2 = np.random.randint(0, 100, (50, 60)), np.random.randint(0, 200, (50, 60))
+        src, t1, t2 = Tensor(src_np), Tensor(i1.astype(np.int32)), Tensor(i2.astype(np.int32))
+        for idx, want in (((slice(None), t1, t2), src_np[:, i1, i2]), ((slice(None), t1), src_np[:, i1])):
+            GlobalCounters.reset()
+            np.testing.assert_allclose(src[idx].numpy(), want)
+            self.assertLess(GlobalCounters.global_ops, 20 * want.size)
 
     def test_jit_replay_counts(self):
         @TinyJit
