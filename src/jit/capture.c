@@ -44,9 +44,12 @@ typedef struct {
   u32  n_inputs;
   u32  in_buf_ids[JIT_OP_INLINE_INPUTS];
   u32 *heap_in_buf_ids;
-  // ASSIGN
+  // ASSIGN; a dst or src that is a declared input takes this call's buffer
+  // (jit_replay_with_inputs), 0 keeping the tensor's own.
   u32  assign_dst_tid;
   u32  assign_src_tid;
+  u32  assign_dst_buf;
+  u32  assign_src_buf;
   // GATHER: source read through the copied view (and chain) into the
   // contiguous destination.
   void    *gather_backend;
@@ -70,6 +73,8 @@ typedef struct {
 #define JIT_INPUT_OUT_POS  0xFFFFFFFFu
 #define JIT_GATHER_SRC_POS 0xFFFFFFFEu
 #define JIT_GATHER_DST_POS 0xFFFFFFFDu
+#define JIT_ASSIGN_DST_POS 0xFFFFFFFCu
+#define JIT_ASSIGN_SRC_POS 0xFFFFFFFBu
 typedef struct {
   u32 op_index;
   u32 pos;          // input position within the op, or a *_POS sentinel
@@ -1191,6 +1196,8 @@ fn void jit_capture_record_assign(u32 dst_tid, u32 src_tid) {
   op->heap_in_buf_ids = NULL;
   op->assign_dst_tid  = dst_tid;
   op->assign_src_tid  = src_tid;
+  op->assign_dst_buf  = 0;
+  op->assign_src_buf  = 0;
   // Replay copies between the live tensors (weights, KV caches).
   jit_capture_retain_tensor_buf(c, dst_tid);
   jit_capture_retain_tensor_buf(c, src_tid);
@@ -2482,6 +2489,25 @@ static void jit_capture_build_input_sites(JitCapture *c) {
         }
         continue;
       }
+      // Unrebound, an assign would write or read the capture call's input.
+      if (op->kind == JIT_OP_ASSIGN) {
+        u32 tids[2] = { op->assign_dst_tid, op->assign_src_tid };
+        u32 poss[2] = { JIT_ASSIGN_DST_POS, JIT_ASSIGN_SRC_POS };
+        for (u32 a = 0; a < 2; a++) {
+          if (tids[a] == 0 || tids[a] >= TENS_NEXT) continue;
+          for (u32 k = 0; k < c->n_inputs_decl; k++) {
+            if (TENS[tids[a]].buf_id != c->input_buf_ids[k]) continue;
+            if (pass == 1) {
+              c->sites[count].op_index   = i;
+              c->sites[count].pos        = poss[a];
+              c->sites[count].slot_index = k;
+            }
+            count++;
+            break;
+          }
+        }
+        continue;
+      }
       if (op->kind != JIT_OP_DISPATCH) continue;
       u32 const *ids = op->heap_in_buf_ids != NULL
                      ? op->heap_in_buf_ids
@@ -2541,6 +2567,10 @@ fn u32 jit_replay_with_inputs(u32 slot, u32 const *new_ids, u32 n) {
         op->gather_src_buf = fresh;
       } else if (site->pos == JIT_GATHER_DST_POS) {
         op->gather_dst_buf = fresh;
+      } else if (site->pos == JIT_ASSIGN_DST_POS) {
+        op->assign_dst_buf = fresh;
+      } else if (site->pos == JIT_ASSIGN_SRC_POS) {
+        op->assign_src_buf = fresh;
       } else if (site->pos < op->n_inputs) {
         u32 *ids = op->heap_in_buf_ids != NULL
                  ? op->heap_in_buf_ids
@@ -2707,7 +2737,15 @@ fn u32 jit_replay(u32 slot) {
         u64 off_elems = (dd->assign_kvar_id != 0)
             ? (u64)kvar_runtime(dd->assign_kvar_id) * (u32)dd->view.strides[0]
             : (u64)(u32)dd->view.offset;
-        if (tensor_assign(dst, src, off_elems) == 0) {
+        // tensor_assign writes and reads the tensors' buffers, so a rebound
+        // input stands in for the copy and the tensors keep their own.
+        u32 dbuf = dd->buf_id, sbuf = sd->buf_id;
+        if (op->assign_dst_buf != 0) dd->buf_id = op->assign_dst_buf;
+        if (op->assign_src_buf != 0) sd->buf_id = op->assign_src_buf;
+        int rc = tensor_assign(dst, src, off_elems);
+        sd->buf_id = sbuf;
+        dd->buf_id = dbuf;
+        if (rc == 0) {
           ITRS++;
         }
         break;
