@@ -422,7 +422,7 @@ that they are byte-identical.  The job lists use the runner's shard format
 `static_gates.py <tptp_root> <problem.p>...` prints the gate bits and live
 lanes of the CLI's exit-fast lanes, the static replica that T7 checks.
 `g04_dryrun.tsv` holds the 20 TRAIN problems of gate G0.4's dry run
-(`tests/atp_sched_teardown.sh FINDPROOF TPTP_ROOT dryrun
+(`tests/atp/atp_sched_teardown.sh FINDPROOF TPTP_ROOT dryrun
 tools/atp_enigma/g04_dryrun.tsv 180`); its header says how they were drawn,
 and the plan's amendment A1 records its sha256.
 
@@ -457,7 +457,7 @@ weights_to_c.py featparity run.npz dump.tsv out.txt
 # a head's LaneNames against the binary's lanes:
 FindProof --list-lanes > listed.txt; weights_to_c.py lanes head.safetensors listed.txt
 # gates G2.2 / G2.4 / featparity over a spec of "family lane problem..." lines:
-HEAD=head.safetensors MODEL=id FEATPARITY=1 tests/atp_guide_gates.sh bin/FindProof spec.txt
+HEAD=head.safetensors MODEL=id FEATPARITY=1 tests/atp/atp_guide_gates.sh bin/FindProof spec.txt
 ```
 
 `weights_to_c.py example ex.safetensors` and `weights_to_c.py harvest
@@ -466,7 +466,7 @@ hv.safetensors` write the two shipped heads (`example`, the default, and
 top-64); `build example=ex.safetensors harvest=hv.safetensors`
 reproduces `src/atp/guide_models.c` byte for byte.  A head that reads
 phi(p) gets FindProof's `--problem-features` row in each lane process
-(`tests/atp_guide_phi.sh` checks the dumped columns against it); a
+(`tests/atp/atp_guide_phi.sh` checks the dumped columns against it); a
 problem without the row runs without the layer.
 
 ## Guided harvest, label join and the M3 trainer
@@ -533,8 +533,8 @@ transform. The export records the completion loop of every lane family;
 the narrowing lanes' critical-goal queue and the CLI front ends (Horn
 release, horn-cd chaining) are searches outside it and leave no records.
 
-Gate G2.1 (the export only observes) is `tests/atp_history_v2_obs.sh`
-(pods only) over `tests/atp_history_v2_obs.tsv` (10 TRAIN problems per
+Gate G2.1 (the export only observes) is `tests/atp/atp_history_v2_obs.sh`
+(pods only) over `tests/atp/atp_history_v2_obs.tsv` (10 TRAIN problems per
 family, picked from the sealed lane matrix by `--pick`): each problem runs
 with the export off, on and off again under the gate's step clock
 (`THVM_ATP_WORK_CLOCK=steps`, which the export cannot advance). A row is
@@ -577,7 +577,7 @@ means that the source is unit equality already.
 
 On a pod, in this order (the Mac only edits and syntax-checks).  Steps 2,
 3, 5 and 6 are `tools/atp_enigma/ifeq10_pod.sh TPTP_ROOT INPUT_DIR OUT_DIR`
-(step 6 with `CORPUS=1`), which also runs `tests/atp_ifeq10_diff.sh`, gives
+(step 6 with `CORPUS=1`), which also runs `tests/atp/atp_ifeq10_diff.sh`, gives
 every step a deadline, stops at the first failure and leaves sentinels;
 steps 1 and 4 are the lane matrix's `pod_gates.sh`.  Copy to INPUT_DIR,
 with a `SHA256SUMS` file the script checks:
@@ -600,14 +600,14 @@ the driver records its release and the sha256 of its problem list.
    the static musl build of `tools/casc/mk_bin_tarball.sh`.
 2. `make bin/test_atp_ifeq10 && bin/test_atp_ifeq10`: the ten cases
    inlined from TPTP v9.2.1, the exits, the header and Encoding lines.
-3. `TPTP=<TPTP root> ALL=1 tests/atp_ifeq10_tptp.sh bin/FindProof`: the
+3. `TPTP=<TPTP root> ALL=1 tests/atp/atp_ifeq10_tptp.sh bin/FindProof`: the
    eleven cases (the ten plus SYN143-1) and every other [CS18] pair of the
    tree outside the J13 stems, judged by the decision rule in the
    script's header.  A pass writes `bin/FindProof.ifeq10-pass`.
 4. G2.3: ifeq10.c is part of FindProof's translation unit, so `bin/test_atp`
    in full and the OA and DN pins must not move (the commands are in the
    lane matrix's `pod_gates.sh`).
-5. `tests/atp_ifeq10_corpus.sh bin/FindProof`: the driver on a fake
+5. `tests/atp/atp_ifeq10_corpus.sh bin/FindProof`: the driver on a fake
    TPTP-v9.3.1 tree.
 6. Only then the corpus, on the TPTP-v9.3.1 tree:
 

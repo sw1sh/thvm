@@ -68,7 +68,7 @@ FindProof/
 ```
 
 The whole engine compiles as ONE translation unit: `tools/thvm_atp_cli.c`
-`#include`s `tests/test_atp_wolfram_bench.c`, which `#include`s `src/thvm.c`,
+`#include`s `tests/atp/test_atp_wolfram_bench.c`, which `#include`s `src/thvm.c`,
 which pulls in the rest of `src/`. There are no object files and no link step
 beyond the one compiler invocation. The only external dependency is the C
 standard library and the math library (`-lm`); on macOS the Makefile links
@@ -261,7 +261,7 @@ bin/FindProof --schedule --szs --proof --wall=<limit> PROBLEM.p
   losers are killed and reaped. A SIGTERM or SIGINT to the parent, or its own
   wall alarm, removes the slices' output files and kills the process group of
   every launched slice before the parent exits, so a run stopped that way
-  leaves no engine behind (`tests/atp_sched_teardown.sh`); a SIGTERM to a
+  leaves no engine behind (`tests/atp/atp_sched_teardown.sh`); a SIGTERM to a
   slice process kills that slice's group and removes its output file. A
   SIGKILL of the parent (a kernel OOM kill included) runs no handler: its
   slices run on to their own walls. The slice set (the `SCHEDULE[]`

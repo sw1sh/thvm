@@ -34,7 +34,7 @@
 // Heap-key invariance: `cp_pri[i]`, `cp_pri2[i]`, `cp_seq[i]`,
 // `cp_goal[i]` are byte-identical to the Term path.  Selection
 // trajectory parity is the gated acceptance test (see
-// tests/test_ft_cpq.c).
+// tests/atp/test_ft_cpq.c).
 //
 // Gated on THVM_ATPFT_CPQ (implies THVM_ATPFT_RULES + THVM_ATPFT_NORM
 // for the FT-norm fixpoint inside the joinability check).

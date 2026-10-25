@@ -39,7 +39,7 @@ Method: captured the @6078 CP's RELIABLE formation parents from the instrumented
 ELProver (WM_CLASSDUMP, w2=23993): aP=126 = `x.(y.((z.x).(w.z))) -> (y.z).x`
 [**4 vars** -- the prior unit test used a wrong 3-var rule126, an ElternNr-reuse
 artifact], oP=36 = `x.((x.y).(y.z)) -> y.x`, overlap position = rule126's pos-1
-subterm `y.((z.x).(w.z))`. New probe tests/test_cp_mered6078.c builds those exact
+subterm `y.((z.x).(w.z))`. A probe (test_cp_mered6078.c, since removed) built those exact
 terms and enumerates all CPs. thvm's pos-1 overlap (A1#1) NORMALIZES to
 `(C3 V0 (C3 V0 V1)) # (C3 (C3 V1 V1) V0)` = `a.(a.b) # (b.b).a`, which IS T
 `(x.x).y # y.(y.x)` under the renaming V0<->V1 + orientation swap. (The probe's
@@ -346,7 +346,7 @@ the missed overlap; then fix cp_visit/thvm_unify; verify vs matrix.
 
 ## MAJOR REFRAME (2026-06-17, confound-free unit test): likely NOT a thvm bug
 
-Added a confound-free isolation test (tests/test_atp.c
+Added a confound-free isolation test (tests/atp/test_atp.c
 "atp/meredith-6078-126x36-superposition"): construct rule126 + rule36 by their
 TERMS, call thvm_critical_pairs (FULL enumeration -- both directions, all
 positions, no slots/counters/run/slot-reuse).  Result: **14 CPs, NONE is the

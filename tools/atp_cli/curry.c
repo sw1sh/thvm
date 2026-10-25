@@ -16,7 +16,7 @@
 // elements.  A model of the curried set is a model of the original
 // (read f off the chains); the converse fails for a non-Horn set --
 // X = a | X = b with four distinct binary residuals of f is satisfiable,
-// its curried form is not (tests/soundness/curry_wide*_dc.p).  This
+// its curried form is not (tests/atp/soundness/curry_wide*_dc.p).  This
 // pass curries the table AFTER the unit encoding (tp_parse's unit
 // equations, or tp_fof_load's ifeq / or-chain equations) with negative
 // unit goals: a Horn set.  A satisfiable Horn set has a one-element

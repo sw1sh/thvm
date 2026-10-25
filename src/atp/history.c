@@ -15,7 +15,7 @@
 // about, because the hook's test, the call and the window's own framing
 // still count.  Exact identity is tested under the logical step clock
 // (THVM_ATP_WORK_CLOCK=steps, rerank.c), which no hook can advance:
-// tests/atp_history_v2_obs.sh (gate G2.1) runs there.
+// tests/atp/atp_history_v2_obs.sh (gate G2.1) runs there.
 //
 // Format: fixed 64-byte little-endian records, appended to <path>.  One
 // exporting process per file at a time: sessions are delimited by their

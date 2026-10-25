@@ -7,10 +7,10 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 OUT=${1:-$PWD/CheckProof.tgz}
 STAGE=$(mktemp -d)
 D="$STAGE/CheckProof"
-mkdir -p "$D/src" "$D/tests" "$D/tools" "$D/bin"
+mkdir -p "$D/src" "$D/tests/atp" "$D/tools" "$D/bin"
 # whole engine unity-build source tree (.c/.h only)
 ( cd "$REPO/src" && tar cf - $(find . \( -name '*.c' -o -name '*.h' \)) ) | ( cd "$D/src" && tar xf - )
-cp "$REPO/tests/test_atp_wolfram_bench.c" "$D/tests/"
+cp "$REPO/tests/atp/test_atp_wolfram_bench.c" "$D/tests/atp/"
 cp "$REPO/tools/thvm_atp_cli.c"            "$D/tools/"
 cp "$REPO/tools/proof_check.c"             "$D/tools/"
 # the CLI modules tools/thvm_atp_cli.c includes

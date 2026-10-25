@@ -4,7 +4,7 @@
 //
 // Exposes the same knob surface as TFindProof's Method option, mapped
 // onto the engine's env-var toggles, and runs the exact code path of
-// tests/test_atp_wolfram_bench.c (this file includes that translation
+// tests/atp/test_atp_wolfram_bench.c (this file includes that translation
 // unit with its main() renamed, so a CLI run is byte-identical to a
 // bench run given the same knobs).
 //
@@ -45,7 +45,7 @@
 // restores the Horn-only give-up on non-Horn input.
 
 #define main atp_bench_main
-#include "../tests/test_atp_wolfram_bench.c"
+#include "../tests/atp/test_atp_wolfram_bench.c"
 #undef main
 
 // Concurrent-portfolio process management (run_schedule).
@@ -77,12 +77,12 @@
 #include "atp_cli/provenance.c"
 #include "atp_cli/fof_split.c"
 #include "atp_cli/szs.c"
-// tests/test_atp_cli_deep.c includes this unit without the entry point and
+// tests/atp/test_atp_cli_deep.c includes this unit without the entry point and
 // without the units that read main.c's SCHEDULE[].
 #ifndef THVM_ATP_CLI_NO_MAIN
 #include "atp_cli/ifeq10.c"
 // FINDPROOF_LIB: the CLI without its main, for a test that calls the
-// front end directly (tests/test_atp_problem_features.c).
+// front end directly (tests/atp/test_atp_problem_features.c).
 #ifdef FINDPROOF_LIB
 #define main findproof_main
 #endif

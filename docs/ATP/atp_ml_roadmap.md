@@ -60,7 +60,7 @@ full corpus, see step 4):
   `thvm_wl_atp_set_learned_scorer` in `wl/THVMLink/CSource/thvmlink_atp.c`.
   Features are standardized (mean / inv_std shipped with the model) then run
   through a plain forward emitting a raw logit, reusing the existing
-  score -> priority mapping. Tests: `tests/test_atp_enigma.c` (forward
+  score -> priority mapping. Tests: `tests/atp/test_atp_enigma.c` (forward
   hand-checks, linear-reproduces-baked-in, malformed rejection) +
   `ATP/enigma/*` in `wl/THVMLink/Tests/atp.wlt`.
 - **Step 1, dataset surface.** `TAtpCpDataset[conjectures, axioms]` /
@@ -87,7 +87,7 @@ full corpus, see step 4):
   (`ft_alloc: free_span underflow`): `ft_splice_inplace_const_or_unbound_var`
   collapsed an inner subtree without bubbling ancestor `->end` pointers
   past the freed span. Fixed in `src/atp/ft_splice.c` (mirrors the sibling
-  regime's bubble-up); regression test `tests/test_atp_multiproof.c`;
+  regime's bubble-up); regression test `tests/atp/test_atp_multiproof.c`;
   `test_atp` stays 135623/135623 with FT normal forms byte-consistent.
 - **Loop close, validated.** prove -> `TAtpCpDataset` -> `TAtpTrainScorer`
   -> `TAtpSetLearnedScorer` -> reprove runs end-to-end. On a 12-row toy

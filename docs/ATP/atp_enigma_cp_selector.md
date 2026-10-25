@@ -182,7 +182,7 @@ Integrate the learned scorer back into selection:
 
 ## 6. Test
 
-`tests/test_atp_enigma.c` runs the headline group-axiom proof
+`tests/atp/test_atp_enigma.c` runs the headline group-axiom proof
 (`f(a, i(a)) == e` from right-id / right-inv / assoc) with recording on
 and asserts: the dataset has rows, every feature value is finite, at least
 one row is labelled 1, and the proof-set size is `<=` the recorded count.

@@ -63,7 +63,7 @@ The mission brief's premise "WM's andassoc.pr uses universal p,q,r" is
 - `CONCLUSION` is a **rigid ground instance** of AndAssociativity in the
   constants p,q,r.
 
-thvm match: **`goal_andassoc`** (rigid; `tests/test_atp_wolfram_bench.c:173`,
+thvm match: **`goal_andassoc`** (rigid; `tests/atp/test_atp_wolfram_bench.c:173`,
 `konst(L_P/Q/R)`), NOT `goal_andassocu` (universal `fv`, :187). Verified:
 thvm `and2(x,y)=nand(nand(x,y),nand(x,y))` expands the conclusion
 term-for-term to WM's; thvm `axiom_inst` (:66) is byte-equal to WM's

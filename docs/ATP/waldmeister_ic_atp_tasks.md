@@ -45,18 +45,18 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       step counter; `thvm_atp_init` / `_free` / `_add_equation` /
       `_set_goal` helpers in `src/atp/_.c`.  AtpStatus enum +
       ATP_MAX_RULES (256) + ATP_MAX_CPS (4096) public in
-      `src/thvm.h`.  Tests in `tests/test_atp.c` cover init/free,
+      `src/thvm.h`.  Tests in `tests/atp/test_atp.c` cover init/free,
       queue overflow, goal set/clear.
 - [x] 5.2a `thvm_atp_select_cp`: FIFO pop in `src/atp/_.c`; shifts
       tail down to keep the array dense; returns 0 on empty queue,
       1 on success with out-params populated.  Tests in
-      `tests/test_atp.c` cover empty pop, three-element FIFO order,
+      `tests/atp/test_atp.c` cover empty pop, three-element FIFO order,
       and post-pop densification.  5.3 upgrades to INC-priority.
 - [x] 5.2b `thvm_atp_orient_and_add`: KBO + atomic push to R via
       `AtpAddedRange { first, count }`.  GT/LT -> count=1 (LT
       swaps); UN -> count=2 (unfailing fallback, atomic on
       capacity); EQ or full -> count=0.  Tests in
-      `tests/test_atp.c` cover all four branches with the standard
+      `tests/atp/test_atp.c` cover all four branches with the standard
       group-axiom KBO config.
 - [x] 5.2d `thvm_atp_generate_cps`: enumerate (new x all_R) +
       (old x new) via new `thvm_critical_pairs_range` (added to
@@ -94,7 +94,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       a SUP tree, and runs `thvm_collapse_ordered` to enumerate
       cheapest-first.  The CTR label decodes back to the original
       queue index for popping.  Singleton case skips the SUP/INC
-      plumbing.  FIFO test in `tests/test_atp.c` upgraded to
+      plumbing.  FIFO test in `tests/atp/test_atp.c` upgraded to
       `select-cp-priority-order` confirming l2/r2 (k=2) -> l3/r3
       (k=2) -> l1/r1 (k=4) order.
 - [x] 5.4 `thvm_rewrite_step` now does outermost-leftmost recursive
@@ -104,9 +104,9 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       `thvm_rewrite_normalize` now reaches sub-positions through
       successive calls; 5.2c interreduce + 5.2e goal_check + 5.2f
       step driver inherit the wider coverage automatically.  Tests:
-      `tests/test_rewrite.c` adds 3 new cases (subterm fires,
+      `tests/atp/test_rewrite.c` adds 3 new cases (subterm fires,
       multi-level descent, top-tried-before-children precedence).
-- [x] 5.5 demo lands in `tests/test_atp.c` as
+- [x] 5.5 demo lands in `tests/atp/test_atp.c` as
       `atp/headline-prove-f-a-ia-equals-e-from-group-axioms`:
       under the standard group-axiom KBO config, `thvm_atp_run`
       proves `f(a, i(a)) == e` from {right-id, right-inv, assoc}
@@ -121,7 +121,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       `Term trace[ATP_MAX_TRACE]` + `u32 n_trace` (zero-init via
       calloc).  Internal `atp_trace_push(s, reason, p_a, p_b, lhs,
       rhs) -> u32` (returns entry index or ATP_TRACE_NONE on
-      overflow).  Tests in `tests/test_atp.c` decode an
+      overflow).  Tests in `tests/atp/test_atp.c` decode an
       AXIOM-shape entry, an ORIENT-with-parent entry, and verify
       the overflow-returns-NONE behavior.
 - [x] 6.1b `thvm_atp_add_equation` now records TRACE_AXIOM and
@@ -356,15 +356,15 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         table populated with our ATP's wall-clock / step
         count / `n_cps_dropped_*` for the group example only.
         No Twee comparison yet -- 7.4d adds that.
-  - [x] 7.4b small `.pr` test corpus under `tests/data/atp/`:
+  - [x] 7.4b small `.pr` test corpus under `tests/atp/data/`:
         hand-write `group_assoc_left_inverse.pr`,
         `monoid_left_id.pr`, `commutative_inverse.pr` (3-5
         small-but-non-trivial group-flavored conjectures).
         Each file is the `.pr` we feed our ATP; pair each with
         a `.expect` describing the expected proof outcome
         (PROVED / TIMEOUT / specific n_rules range).
-  - [x] 7.4c `tests/test_bench_atp.c` (or a `make bench-atp`
-        target): runs our ATP on every `tests/data/atp/*.pr`,
+  - [x] 7.4c `tests/atp/test_bench_atp.c` (or a `make bench-atp`
+        target): runs our ATP on every `tests/atp/data/*.pr`,
         records wall-clock (via `clock_gettime`) and the four
         `n_cps_dropped_*` counters into a CSV
         `build/bench-atp.csv`.  Hand-checks the output column
@@ -374,7 +374,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         thvm" heading.
   - [x] 7.4d Twee comparison: install Twee (Haskell, via
         `cabal install twee` or `brew install twee`), convert
-        each `.pr` in `tests/data/atp/` to TPTP-UEQ format
+        each `.pr` in `tests/atp/data/` to TPTP-UEQ format
         (small adapter -- our `.pr` is already close), run
         Twee with a matching step budget, and record its
         wall-clock + reported saturation steps in a parallel
@@ -476,7 +476,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         `cfg_id` is an index into a small process-global table
         of registered KboConfigs (since `KboConfig*` doesn't
         fit in a Term).  Returns a NUM whose value encodes
-        `KBO_EQ / GT / LT / UN`.  Tests: `tests/test_kbo_pri.c`
+        `KBO_EQ / GT / LT / UN`.  Tests: `tests/atp/test_kbo_pri.c`
         -- 4-6 cases covering each outcome and the
         APP-PRI-saturation roundtrip.
   - [x] 8.2c pure-IC port of `kbo_eq` (the structural-equality
@@ -586,7 +586,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         `wald_sort_check`.  Update tests to confirm the gate
         fires on a hand-constructed sort-mismatched equation.
   - [x] 8.4e add a multi-sort `.pr` fixture under
-        `tests/data/atp/` (e.g. a small sorted-list fragment:
+        `tests/atp/data/` (e.g. a small sorted-list fragment:
         nat, list, with cons taking a nat and a list).  Bench
         harness picks it up automatically.
 - [x] 8.5 LPO ordering as alternative to KBO (Waldmeister has both
@@ -605,7 +605,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
         mirroring `src/kbo/_.c`'s structure: kbo_eq -> lpo_eq
         (or reuse), variable-domination, top-symbol comparison
         by precedence, lexicographic recursion.  Tests in
-        `tests/test_lpo.c` cover GT / LT / EQ / UN outcomes
+        `tests/atp/test_lpo.c` cover GT / LT / EQ / UN outcomes
         on hand-constructed term pairs.  Scope: ~120 LOC + ~50
         LOC tests.
   - [x] 8.5c wire LPO into the saturation engine: extend
@@ -683,7 +683,7 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
   - [x] 8.9d existential-goal `.pr` syntax / WL surface:
         decide how users declare existential vars in input
         files (extension to `CONCLUSION` syntax? sidecar
-        keyword?).  Add a fixture under `tests/data/atp/` and
+        keyword?).  Add a fixture under `tests/atp/data/` and
         wire the bench harness.
   - [x] 8.9e WL bridge integration: `TATP[axioms, conjecture,
         Witness -> {x_, y_}]` returns `<|"Status" -> "PROVED",
@@ -768,8 +768,8 @@ Plan sec.5.5: outer loop normalizes the goal; if not closed, expand
       back after the rewrite, reclaiming intermediate cells.
       Lets `use_ic_rewrite = 1` scale to longer runs.
 - [x] 9.4 TPTP-UEQ corpus expansion: add 3-5 fixtures from
-      GRP / RNG / LCL / LAT divisions to `tests/data/atp/`.
-      Re-run `tools/bench_twee.c` and `test_bench_atp` on the
+      GRP / RNG / LCL / LAT divisions to `tests/atp/data/`.
+      Re-run `bench/bench_twee.c` and `test_bench_atp` on the
       enlarged corpus; document IC-vs-Twee gaps where they
       emerge.  This is where the 8.5d "KBO and LPO agree on
       our corpus" finding gets stress-tested.

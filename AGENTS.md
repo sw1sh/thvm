@@ -89,7 +89,8 @@ source file by including it from `src/thvm.c`, never by editing the Makefile.
 
 ## Build and test
 
-The [Makefile](Makefile) is the source of truth.
+The [Makefile](Makefile) is the source of truth; the ATP track's defines,
+tests, CLI and benches are in [atp.mk](atp.mk), which it includes.
 
 ```bash
 make                  # the THVMLink library (default goal; a full compile check)
@@ -101,7 +102,7 @@ make wl-cross         # THVMLink libraries for all five Wolfram platforms
 make clean            # remove bin/
 ```
 
-- Run the tests that cover what you changed (`grep -l <symbol> tests/`, then
+- Run the tests that cover what you changed (`grep -rl <symbol> tests/`, then
   `make bin/test_<name> && bin/test_<name>`) rather than the whole suite.
 - WL tests load the library `make wl` built; rebuild it after a runtime change.
 - Python tests: `make py`, then `python -m pytest py/tests/test_<name>.py`
@@ -159,13 +160,14 @@ Elsewhere:
   concern, `Kernel/README.md` maps them; `Kernel/NN/`, `Kernel/ATP/`),
   `Tests/`, `docs/` (paclet documentation source). `wl/Examples/`: runnable
   examples; `wl/scripts/`: docs build, lint and release scripts.
-- `tests/`: one self-contained C test per executable, plus probes and data.
+- `tests/`: one self-contained C test per executable; the ATP track's tests,
+  shell gates, probes, problem data and soundness corpus are under `tests/atp/`.
 - `tools/`: the FindProof CLI (`thvm_atp_cli.c`, `atp_cli/`), CASC and ProoVer
   packaging (`casc/`, `proover/`), ATP baselines and the ENIGMA tooling, the
   build helpers (`build/`), the DSV2 converters (`dsv2/`), the FLUX scripts
   (`flux/`) and the WolframKernel process guards (`guards/`).
-- `bench/`: every benchmark, thvm against tinygrad, PyTorch and MLX
-  ([bench/README.md](bench/README.md)).
+- `bench/`: every benchmark, thvm against tinygrad, PyTorch and MLX and the
+  ATP engine against Twee ([bench/README.md](bench/README.md)).
 - `docs/`: architecture pages ([docs/README.md](docs/README.md)).
 
 ## When in doubt

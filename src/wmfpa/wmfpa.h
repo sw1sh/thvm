@@ -575,7 +575,7 @@ static uint32_t wf_normalize(WfTree *ix, WfNode *a, uint32_t alen,
 //     lowest slot (fork witnessed at HigmanNeumann cp 597).
 // The wf_*_wm / wf_mm_* family below ports exactly those two policies
 // onto the flat WfNode + DSBaum substrate; the original functions stay
-// untouched for the bench (tools/bench_wmfpa.c) and the Term-side
+// untouched for the bench (bench/bench_wmfpa.c) and the Term-side
 // legacy path.
 
 // --- wf_pattern_before: Regelbaum DFS order over flat patterns -------

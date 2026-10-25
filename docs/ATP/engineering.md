@@ -504,7 +504,7 @@ ENIGMA-style learning hook:
 
 ### Env knobs
 
-The bench harness (`tests/test_atp_wolfram_bench.c`) and the engine
+The bench harness (`tests/atp/test_atp_wolfram_bench.c`) and the engine
 itself read well over 100 `THVM_ATP*` env variables (the full
 inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
 `src/fol/`, the bench, and the CLI).  Discovery paths:
@@ -519,7 +519,7 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
   schedule mode exits 2), and `--lane=NAME` runs one lane exactly as
   `--schedule` launches it (its flags, `FINDPROOF_SLICE`, slice RSS
   cap, slice wall and wall stop) with its stderr kept: the per-lane
-  measurement path (`tests/atp_lane_cli.sh`).
+  measurement path (`tests/atp/atp_lane_cli.sh`).
 * `bin/FindProof --problem-features problem.p` prints one TSV row of
   the problem's features phi(p), the per-problem input of the ENIGMA
   selection layer (`AtpPhi` in `src/thvm.h`, layout version
@@ -548,7 +548,7 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
   (pinned columns, layout version, float32).
   `bin/test_atp_problem_features` checks the features, verdicts and
   isolation on inline and generated problems;
-  `tests/atp_problem_features.sh` (pods, with `OLD_FP` set to a build
+  `tests/atp/atp_problem_features.sh` (pods, with `OLD_FP` set to a build
   from before the gate refactor) checks the replica's lines, the lanes'
   .pr files and phi(p)'s gate bits against live lane runs on the pool,
   and with `-s` only phi(p) and the replica (the J13 set);

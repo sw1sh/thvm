@@ -198,7 +198,7 @@ wm_align_reports md5 + bin/test_atp 136236 + the 12 wm_pr CPSEL prefixes.
 ## CURSOR-WALK PORT 2026-06-23 (gated, byte-identical OFF, MEASURED): the emit-on-every-arrival single-cursor walk does NOT advance soa firstdiv -- the validated WM mirror proves 1953 is CP-formation OVERLAP-GEOMETRY (WM and thvm build the 8 collapse CPs from DIFFERENT face x position lineages), upstream of the discrimination-tree walk
 
 Landed the gated `use_wmo_cursor_walk` (THVM_ATP_WMO_CURSOR_WALK, src/thvm.h /
-src/atp/_.c thvm_atp_set_use_wmo_cursor_walk / tests/test_atp_wolfram_bench.c):
+src/atp/_.c thvm_atp_set_use_wmo_cursor_walk / tests/atp/test_atp_wolfram_bench.c):
 the faithful port of WM's RumpfTermMitDSBaumUnifizieren + Delta* cursor
 (Unifikation1.c:847-865 + :626-820) -- (a) wmo_dfs emits a CP on EVERY leaf
 arrival (no per-leaf dedup, WmoDfs.no_dedup), (b) atp_wmo_rank bypasses the

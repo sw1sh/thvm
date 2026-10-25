@@ -8,8 +8,8 @@ them, and the reference results thvm is compared against.
 * **`wm_pr/`** -- Waldmeister `.pr` files, one per `<Theory>__<Theorem>`
   of the `AxiomaticTheory` notable theorems (and `__c<k>` for one conjunct
   of a multi-conjunct theorem). Read by the C tests
-  (`tests/test_atp_session_reuse.c`, `tests/atp_lane_cli.sh`,
-  `tests/atp_guide_gates.sh`), the Makefile's pin targets and the WL
+  (`tests/atp/test_atp_session_reuse.c`, `tests/atp/atp_lane_cli.sh`,
+  `tests/atp/atp_guide_gates.sh`), the Makefile's pin targets and the WL
   `"WaldmeisterProcess"` method (`wl/THVMLink/Kernel/ATP/ProcessProofObject.wl`).
 * **`vampire_tptp/`**, **`vampire_raw/`** (gitignored, regenerable) --
   TPTP CNF files for the same problems and Vampire's raw output. The WL

@@ -1,0 +1,35 @@
+# The phi(p) seam test (tests/atp/atp_guide_phi.sh): lane TAB problem path under
+# the pool's TPTP root (tptp_pool.tgz).  TRAIN pairs the M0 label harvest
+# proved in 0.3-10 s with 20+ selections, first two by sha256 of the name per
+# lane (plus a -10 problem where neither is one), on lanes whose front ends
+# differ: goal naming, the Horn release, canon off, the equals encoding,
+# definition unfolding and tgt.
+tgt-sel	Problems/LAT/LAT027-1.p
+tgt-sel	Problems/GRP/GRP438-1.p
+tgt-sel	Problems/LCL/LCL416-10.p
+encompass	Problems/GRP/GRP411-1.p
+encompass	Problems/LDA/LDA002-1.p
+encompass	Problems/LCL/LCL211-10.p
+twee-deep	Problems/GRP/GRP418-1.p
+twee-deep	Problems/GRP/GRP407-1.p
+twee-deep	Problems/LCL/LCL211-10.p
+unfold-tgt-awr	Problems/GRP/GRP604-1.p
+unfold-tgt-awr	Problems/GRP/GRP571-1.p
+unfold-tgt-awr	Problems/LCL/LCL211-10.p
+twee-raw	Problems/GRP/GRP411-1.p
+twee-raw	Problems/GRP/GRP604-1.p
+twee-raw	Problems/LCL/LCL211-10.p
+equals-twee	Problems/COL/COL063-1.p
+equals-twee	Problems/COL/COL062-1.p
+flatten	Problems/LDA/LDA002-1.p
+flatten	Problems/GRP/GRP407-1.p
+flatten	Problems/LCL/LCL211-10.p
+bare	Problems/LAT/LAT027-1.p
+bare	Problems/GRP/GRP407-1.p
+bare	Problems/GRP/GRP715-10.p
+tgt-fold	Problems/GRP/GRP185-2.p
+tgt-fold	Problems/COL/COL064-7.p
+tgt-fold	Problems/ALG/ALG030-10.p
+wm	Problems/GRP/GRP411-1.p
+wm	Problems/LDA/LDA002-1.p
+wm	Problems/LCL/LCL211-10.p

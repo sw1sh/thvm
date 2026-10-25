@@ -42,7 +42,7 @@ this; for now the skeleton is hand-driven.
 ## Problem set
 
 Initial set is whatever we already have on hand; stage 7.4b
-adds a hand-curated corpus under `tests/data/atp/`.
+adds a hand-curated corpus under `tests/atp/data/`.
 
 | File | Shape | Goal |
 |---|---|---|
@@ -50,7 +50,7 @@ adds a hand-curated corpus under `tests/data/atp/`.
 | `tmp/group_simple.pr` (ad-hoc) | Same axioms | `f(a, i(a)) = e` (immediate from the right-inverse axiom) |
 
 Stage 7.4b will replace `tmp/group_simple.pr` with versioned
-fixtures under `tests/data/atp/`.
+fixtures under `tests/atp/data/`.
 
 ## Results -- thvm
 
@@ -62,14 +62,14 @@ Last refresh, darwin/arm64 with `cc -std=c11 -O2`, 2026-04-26:
 
 | File | Mode | Status | Wall (ms) | Steps | Rules | Trace | drop_joinable | drop_connected | drop_rule_subs | drop_queue_subs |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `tests/data/atp/group_commutative_inverse.pr` | c  | TIMEOUT | 132.474 | 256 | 231 | 1426 | 743 | 697 | 212 | 2 |
-| `tests/data/atp/group_commutative_inverse.pr` | ic | TIMEOUT | 119.391 | 256 | 231 | 1426 | 743 | 697 | 212 | 2 |
-| `tests/data/atp/group_right_inverse_to_e.pr` | c  | PROVED | 0.004 | 1 | 2 | 5 | 2 | 2 | 0 | 0 |
-| `tests/data/atp/group_right_inverse_to_e.pr` | ic | PROVED | 0.002 | 1 | 2 | 5 | 2 | 2 | 0 | 0 |
-| `tests/data/atp/idempotent_nested.pr` | c  | PROVED | 0.001 | 0 | 1 | 2 | 1 | 1 | 0 | 0 |
-| `tests/data/atp/idempotent_nested.pr` | ic | PROVED | 0.001 | 0 | 1 | 2 | 1 | 1 | 0 | 0 |
-| `tests/data/atp/monoid_right_id.pr` | c  | PROVED | 0.001 | 0 | 1 | 3 | 1 | 1 | 0 | 0 |
-| `tests/data/atp/monoid_right_id.pr` | ic | PROVED | 0.000 | 0 | 1 | 3 | 1 | 1 | 0 | 0 |
+| `tests/atp/data/group_commutative_inverse.pr` | c  | TIMEOUT | 132.474 | 256 | 231 | 1426 | 743 | 697 | 212 | 2 |
+| `tests/atp/data/group_commutative_inverse.pr` | ic | TIMEOUT | 119.391 | 256 | 231 | 1426 | 743 | 697 | 212 | 2 |
+| `tests/atp/data/group_right_inverse_to_e.pr` | c  | PROVED | 0.004 | 1 | 2 | 5 | 2 | 2 | 0 | 0 |
+| `tests/atp/data/group_right_inverse_to_e.pr` | ic | PROVED | 0.002 | 1 | 2 | 5 | 2 | 2 | 0 | 0 |
+| `tests/atp/data/idempotent_nested.pr` | c  | PROVED | 0.001 | 0 | 1 | 2 | 1 | 1 | 0 | 0 |
+| `tests/atp/data/idempotent_nested.pr` | ic | PROVED | 0.001 | 0 | 1 | 2 | 1 | 1 | 0 | 0 |
+| `tests/atp/data/monoid_right_id.pr` | c  | PROVED | 0.001 | 0 | 1 | 3 | 1 | 1 | 0 | 0 |
+| `tests/atp/data/monoid_right_id.pr` | ic | PROVED | 0.000 | 0 | 1 | 3 | 1 | 1 | 0 | 0 |
 
 Observations:
 
@@ -177,7 +177,7 @@ that today; documented as future work.
 ## Results -- Twee
 
 Twee installed via `cabal install twee` (twee-2.6.1, see
-release notes for upstream).  `tools/bench_twee.c` parses each
+release notes for upstream).  `bench/bench_twee.c` parses each
 `.pr` via `wald_parse_file`, emits TPTP-CNF
 (`cnf(eqn<i>, axiom, lhs = rhs).` for axioms,
 `cnf(goal, negated_conjecture, lhs != rhs).` for the goal)
@@ -191,10 +191,10 @@ Last refresh, darwin/arm64, twee 2.6.1, 2026-04-26:
 
 | File | Twee Status | Twee wall (ms) | thvm Status | thvm wall (ms) |
 |---|---|---|---|---|
-| `tests/data/atp/group_commutative_inverse.pr` | PROVED | 26.1 | TIMEOUT | 132.7 |
-| `tests/data/atp/group_right_inverse_to_e.pr` | PROVED | 26.7 | PROVED | 0.006 |
-| `tests/data/atp/idempotent_nested.pr` | PROVED | 24.2 | PROVED | 0.001 |
-| `tests/data/atp/monoid_right_id.pr` | PROVED | 30.0 | PROVED | 0.001 |
+| `tests/atp/data/group_commutative_inverse.pr` | PROVED | 26.1 | TIMEOUT | 132.7 |
+| `tests/atp/data/group_right_inverse_to_e.pr` | PROVED | 26.7 | PROVED | 0.006 |
+| `tests/atp/data/idempotent_nested.pr` | PROVED | 24.2 | PROVED | 0.001 |
+| `tests/atp/data/monoid_right_id.pr` | PROVED | 30.0 | PROVED | 0.001 |
 
 Observations:
 

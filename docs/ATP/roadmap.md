@@ -87,7 +87,7 @@ Remaining sub-items:
   + distributive), boolean-ring (`x*x = x` simplification), Robbins
   algebra (Hilbert-prize problem -- gates on goal-directed search +
   AC selection tuning, not just unification).  Harness scaffolding
-  is in `tests/test_atp_ac_bench.c`; add cases as the engine
+  is in `tests/atp/test_atp_ac_bench.c`; add cases as the engine
   unblocks each.
 * Lift the per-call CP cap from 64 once a real workload hits it
   (none today; the cap exists so Stickel can't explode on pathological
@@ -186,11 +186,11 @@ CNF pipeline closed end-to-end:
 * `fol_formula_to_clauses(f, &n_out)` -- one-shot wrapper: NNF +
   Skolem + distribute + extract.  Resets Skolem counter each call.
 
-End-to-end smoke (in tests/test_fol.c):
+End-to-end smoke (in tests/atp/test_fol.c):
   `∀x.(P(x) -> Q(x)) ∧ P(a) ∧ ¬Q(a)`  -> PROVED via cnf_run.
   Russell-style `∀x.(R(x,x) <-> ¬R(x,x))`  -> PROVED.
 
-Standard FOL bench (in tests/test_fol_pelletier.c):
+Standard FOL bench (in tests/atp/test_fol_pelletier.c):
   Pelletier P1-P14 + P16 (propositional) + P15/P18/P19 (FOL with
   quantifier alternation) all PROVE end-to-end via
   fol_formula_to_clauses -> cnf_run.  Covers contrapositive,

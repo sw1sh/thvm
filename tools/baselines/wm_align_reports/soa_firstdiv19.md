@@ -187,7 +187,7 @@ rules-only normalize + perm-subsume + rule-subsume (all ON in the WALDMEISTER
 preset). Selection breaks weight ties by min cp_seq (atp_cp_before:7345).
 The NEW gate THVM_ATP_FORMATION_FIFO (struct src/thvm.h use_formation_fifo;
 setter src/atp/_.c thvm_atp_set_use_formation_fifo; env in
-tests/test_atp_wolfram_bench.c; WL Method "FormationFifo" via ATP.wl
+tests/atp/test_atp_wolfram_bench.c; WL Method "FormationFifo" via ATP.wl
 atpFormationFifoOpt + ATP_ProofGraph.wl cEngineProof param + thvmlink_atp.c
 args[61]) orders each batch STRICTLY by the raw combined-scan arrival key
 (atp_wmo_rank's k3 = wmo_tops_rank's single-DFS arrival, tree-before-equation)

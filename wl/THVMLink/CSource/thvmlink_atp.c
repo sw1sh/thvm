@@ -744,7 +744,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     }
   }
   // Method "FlattenGoal" fresh-constant precedence BAND (port of
-  // pr_flatten_goal in tests/test_atp_wolfram_bench.c, the CLI's
+  // pr_flatten_goal in tests/atp/test_atp_wolfram_bench.c, the CLI's
   // --flatten-goal / Twee --flatten-goal / Vampire naming transform).
   // The WL problem builder (atpFlattenGoalTransform in ATP.wl) appended
   // `fresh == subterm` definitional axioms naming the goal's compound

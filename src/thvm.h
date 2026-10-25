@@ -4443,7 +4443,7 @@ typedef struct {
   // as pre-needle).  needle_ax_l/r hold the pre-transform EQUATIONS
   // block (n_needle_ax == 0 disarms the instance test but not x=x).
   // Populated once at problem intake via thvm_atp_set_fold_defs /
-  // thvm_atp_set_orig_axioms (tests/test_atp_wolfram_bench.c); both
+  // thvm_atp_set_orig_axioms (tests/atp/test_atp_wolfram_bench.c); both
   // Term arrays are GC roots (thvm_atp_gc_collect).  See
   // atp_drc_needle_ok in src/atp/_.c.  Inert (0 cost) unless
   // THVM_ATP_DRC_NEEDLE is armed -- byte-identical otherwise.

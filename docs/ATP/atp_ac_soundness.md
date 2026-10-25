@@ -59,7 +59,7 @@ Verified:
 - Hand-derivation of the LAT016-1 trace (see below) predicted the bug
   exactly; the fix makes the SAME derivation fail cleanly (`return 0`).
 - Standalone unit repro (`atp_match_ac` called directly, mirroring
-  tests/test_ac.c's harness) on the isolated pattern
+  tests/atp/test_ac.c's harness) on the isolated pattern
   `add(add(y,inv(y)),z)` vs a 4-leaf `{x0,x0,inv(x0),inv(x0)}` subject
   confirms the fix accepts the legitimately-decomposable case (leaves
   a real leftover match) and rejects the fabricated one.
@@ -181,7 +181,7 @@ exercised the bug this fix closes).
 
 ## Soundness sweep results (2026-07-18, THVM_ATP_FULL_AC=1 forced, --wall=15)
 
-The 6 CASC-J13-reported problems (tests/soundness/*.p):
+The 6 CASC-J13-reported problems (tests/atp/soundness/*.p):
 
 | Problem   | Verdict  |
 |-----------|----------|
@@ -220,9 +220,9 @@ after the fix -- the bug closed here was not on their derivation path.
 
 ```
 export TPTP=~/.cache/thvm/casc   # has Axioms/ at top level
-THVM_ATP_FULL_AC=1 ./bin/FindProof --wall=15 --szs tests/soundness/RNG030-6.p
+THVM_ATP_FULL_AC=1 ./bin/FindProof --wall=15 --szs tests/atp/soundness/RNG030-6.p
 # still: SZS status Unsatisfiable  (WRONG -- Satisfiable per TPTP)
 
-THVM_ATP_FULL_AC=1 ./bin/FindProof --wall=15 --szs tests/soundness/LAT016-1.p
+THVM_ATP_FULL_AC=1 ./bin/FindProof --wall=15 --szs tests/atp/soundness/LAT016-1.p
 # now: no SZS status printed / GaveUp on wall cap (correct -- was Unsatisfiable before the fix)
 ```

@@ -500,7 +500,7 @@ depth 4096 -> heap exhausted.
 
 - **7b -- convergence assessment** (DONE -- verdict: does NOT
   converge).  Measured with the standalone bench
-  `tests/test_atp_wolfram_bench.c` (a plain C process with an
+  `tests/atp/test_atp_wolfram_bench.c` (a plain C process with an
   in-loop wall-clock guard -- it cannot orphan a kernel the way
   `timeout`-wrapped `wolframscript` probes did).  Wolfram-axiom
   DoubleNegation completion: at **step 250 the CP queue is
@@ -867,7 +867,7 @@ over the unchanged `cp_pri` / `cp_seq` side arrays.
   (`thvm_atp_add_equation`, `atp_push_cps_traced`, the `select_cp`
   pop) maintains `cp_graph` in lockstep and the engine reads CP
   terms from it; the `cp_lhs` / `cp_rhs` arrays are kept as a
-  synced mirror so `tests/test_atp.c`'s ~30 direct `s->cp_lhs[i]`
+  synced mirror so `tests/atp/test_atp.c`'s ~30 direct `s->cp_lhs[i]`
   / `s->n_cps` reads need no edits.  Selection stays the 7c' heap
   over `cp_pri` / `cp_seq` -- INC-priority is 8d, not here.  A
   debug assertion checks `decode(cp_graph)` equals the mirror
@@ -1027,7 +1027,7 @@ This is the research bet of the arc, stated plainly:
 1. `test_atp` stays 8544/8544 -- a correctness gate for every
    workstream (inference is unchanged throughout).
 2. `cpgen` still derives `CriticalPairLemma 1/2` exactly.
-3. `tests/test_atp_wolfram_bench.c` -- the orphan-free harness --
+3. `tests/atp/test_atp_wolfram_bench.c` -- the orphan-free harness --
    shows the intended cost drop for that workstream (8b:
    normalization cost; 8e: the 91% match scan collapses).
 4. Bit-identical step counts are required of **8a only** -- it is

@@ -4823,7 +4823,7 @@ atpEnsureWmHeap[m_] := If[ atpWmPresetNameQ[m] &&
 (* === "FlattenGoal" problem transform ==============================
    Twee --flatten-goal (default ON there) / Vampire function-definition
    naming; the WL port of pr_flatten_goal in
-   tests/test_atp_wolfram_bench.c (the FindProof CLI's --flatten-goal /
+   tests/atp/test_atp_wolfram_bench.c (the FindProof CLI's --flatten-goal /
    env THVM_ATP_FLATTEN_GOAL).  Name every distinct COMPOUND subterm of
    the (skolemized) goal sides with a fresh minimal constant, appending
    `fresh == subterm` as a definitional axiom.  KBO orients each as

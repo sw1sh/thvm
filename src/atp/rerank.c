@@ -1490,7 +1490,7 @@ int (*thvm_atp_abort_hook)(void) = NULL;
 // Every deadline and wall-limit test reads this clock: the competition
 // kills on wall.
 #ifdef THVM_ATP_TEST_CLOCK
-// Test builds set the wall and CPU clocks by hand (tests/test_atp_guide.c
+// Test builds set the wall and CPU clocks by hand (tests/atp/test_atp_guide.c
 // drives --lrs to a deterministic prune with it).
 static u64 g_atp_test_clock_us = 1u;
 #endif

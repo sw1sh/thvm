@@ -2118,7 +2118,7 @@ static u8 atp_cp_lazy_scorenf_probe(AtpState *s, const u8 *packed,
 //
 // A SELECTION-side companion to the tgt preprocessing port (Vampire's
 // tgt=full/ground is a preprocessing transformation -- see
-// pr_tgt_transform in tests/test_atp_wolfram_bench.c): per-symbol
+// pr_tgt_transform in tests/atp/test_atp_wolfram_bench.c): per-symbol
 // CP-selection weights derived from the GOAL, so goal-flavored terms
 // are systematically lighter and their CPs float to the queue front.
 // Symbols occurring in the conjecture (goal equation + the labels fed

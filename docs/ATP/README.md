@@ -101,7 +101,7 @@ translation unit: `src/atp/_.c` directly `#include`s `lpo_cache.c`,
 "entry points" are internal functions the saturation loop calls; the
 `ft_*.c` files compile separately. The CLI compiles the whole engine
 into one binary via
-`tools/thvm_atp_cli.c -> tests/test_atp_wolfram_bench.c -> src/thvm.c`.
+`tools/thvm_atp_cli.c -> tests/atp/test_atp_wolfram_bench.c -> src/thvm.c`.
 
 | file | lines | responsibility | main entry points |
 |---|---|---|---|
@@ -130,8 +130,8 @@ into one binary via
 | `src/fol/sat.c` | 1172 | bounded clausal-saturation pre-pass (given-clause loop with age/goal-tier selection) | `cnf_run` |
 | `tools/thvm_atp_cli.c` | 8317 | the `FindProof` CLI: TPTP parsing, problem transforms, `.pr` emission, the slice schedule, SZS output, proof emission | `main`, `tp_*` transforms, `fof_clausal_prepass`, `cli_proof_hook`, `SCHEDULE[]`, `KNOBS[]` |
 | `tools/proof_check.c` | 1868 | the independent proof checker (`FindProof --check`, the ProoVer CheckProof entry) | `proof_check_main` |
-| `tests/test_atp.c` | 6935 | the engine regression suite (~136k assertions) | `make test_atp` |
-| `tests/test_atp_wolfram_bench.c` | 3599 | the bench harness: env-knob glue, `.pr` ingestion, corpus problems; the CLI includes it as its engine layer | `make test_atp_wolfram_bench` |
+| `tests/atp/test_atp.c` | 6935 | the engine regression suite (~136k assertions) | `make test_atp` |
+| `tests/atp/test_atp_wolfram_bench.c` | 3599 | the bench harness: env-knob glue, `.pr` ingestion, corpus problems; the CLI includes it as its engine layer | `make test_atp_wolfram_bench` |
 
 Supporting modules outside `src/atp/`: `src/kbo/_.c` and `src/lpo/_.c`
 (the Term-side reduction orderings), `src/rewrite/_.c` (Term match +
@@ -169,7 +169,7 @@ TPTP=~/.cache/thvm/casc ./bin/FindProof --schedule --szs --proof --wall=30 \
 
 ## Test suite
 
-`tests/test_atp.c` is the regression baseline (~136k assertions,
+`tests/atp/test_atp.c` is the regression baseline (~136k assertions,
 default build). Feature-gated binaries cover the flatterm stack, the
 AC subsystem, and the opt-in caches -- the full list is the
 `test_atp*` / `test_ft*` targets in the `Makefile`; the most-used ones:

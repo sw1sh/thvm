@@ -221,7 +221,7 @@ typedef struct {
 // leftmost strategy (try top, else descend into CTR children
 // left-to-right); per-rule matching dispatches through APP-PRI
 // evaluation via `prim_rewrite_step`.  Same outputs as the C path
-// (parity-tested in `tests/test_atp.c`).
+// (parity-tested in `tests/atp/test_atp.c`).
 static Term atp_ic_rewrite_step(Term t, const Term *lhs, const Term *rhs,
                             u32 n_rules) {
   // One frame per open CTR (`i` = the child being stepped): a child's

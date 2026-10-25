@@ -218,7 +218,7 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 // recursive descent will widen coverage to sub-positions.
 //
 // Step cap NORM_CAP = 64 bounds the normalization (matches the
-// ballpark used in tests/test_rewrite.c's headline demo); tune
+// ballpark used in tests/atp/test_rewrite.c's headline demo); tune
 // once we have benchmark data.
 // 8.9c: per-iteration narrow budget.  Each goal_check call tries
 // up to this many narrow_step iterations before giving up; the

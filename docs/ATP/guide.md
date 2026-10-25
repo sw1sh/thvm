@@ -155,7 +155,7 @@ prints with the same function in the same forked child under the same
 1 s CPU budget (`tp_problem_features`, `phi_compute`), copies its
 `ATP_PHI_N` (40) columns into an `AtpGuidePhi` and calls
 `thvm_atp_guide_set_phi`.  The plan's single function (section 3.1) is
-thus the one row both sides see: `tests/atp_guide_phi.sh` runs lanes with
+thus the one row both sides see: `tests/atp/atp_guide_phi.sh` runs lanes with
 different front ends and checks that their dumps carry x[20..60) equal to
 the `--problem-features` row bit for bit.  A problem without the row
 (past the budget, not unit-equality CNF, a .pr file, a failed replay)
@@ -175,7 +175,7 @@ push and no row move reaches it:
   scored against, logged where the goal can change -- `thvm_atp_set_goals`,
   both goal checks of a step, the WM intake (one version from seq 0) --
   at `cp_seq_next`.  A version no CP was pushed under is replaced.
-  `tests/test_atp_guide.c` checks the resulting push features against the
+  `tests/atp/test_atp_guide.c` checks the resulting push features against the
   history export's `F` records seq by seq.
 - the selection log: `cp_seq_next` at every non-orphan selection, so the
   push step of seq q is the number of entries at or below q.
@@ -237,7 +237,7 @@ Unarmed, `s->guide` is NULL and every hook is one predictable branch.
 
 ## Gates G2.2 and G2.4
 
-`tests/atp_guide_gates.sh` (pods only) runs, per family, lane and
+`tests/atp/atp_guide_gates.sh` (pods only) runs, per family, lane and
 problem, the base lane and its zero twin under the gate clock
 `THVM_ATP_WORK_CLOCK=steps` (amendments A3 and A8), with `--lane=L
 --proof --szs`, the selection trace and the clock trace, and prints one
@@ -282,7 +282,7 @@ the non-zero twin with the dump and `weights_to_c.py parity` (G2.4);
   input from the dump (label_join.py joins it with the export by seq);
   `featparity` checks the other columns against the export, and the
   phi(p) columns are checked against `--problem-features` by
-  `tests/atp_guide_phi.sh` and by the join.
+  `tests/atp/atp_guide_phi.sh` and by the join.
 - A schedule with twins computes phi(p) once per twin process (each lane
   is its own exec); the plan's single parent-side computation would need
   the row handed to the twins without lengthening the unarmed lanes'
@@ -392,7 +392,7 @@ pod (plan section 3.2):
    `weights_to_c.py lanes` checks its lanes against `--list-lanes`, and
    G2.4 (`HEAD=`, `FEATPARITY=1`) checks C against Python.
 
-Tests: `tests/test_atp_guide.c`, built with `THVM_ATP_GUIDE_CHECK` (a
+Tests: `tests/atp/test_atp_guide.c`, built with `THVM_ATP_GUIDE_CHECK` (a
 clean pick that writes a cell-keyed KBO or LPO memo aborts) and
 `THVM_ATP_TEST_CLOCK` (the test sets the wall and CPU clocks), and again
 as `test_atp_guide_ac` with FindProof's AC and MNF defines: zero-correction
@@ -412,7 +412,7 @@ unchanged; per-problem normalization; layered-lazy semantics; coop
 cadence, orphan re-picks included; LRS side-key isolation; cost counters;
 the dump, its sampler and row cap, and a zero twin's whole runs with the
 sampled dump on; the harvest head; the phi(p) seam's environment probe
-and switch-off; arming from the environment.  `tests/atp_guide_phi.sh`
+and switch-off; arming from the environment.  `tests/atp/atp_guide_phi.sh`
 checks the seam on FindProof itself, `label_join.py selftest` and
 `guide_net.py selftest` the training tools on synthetic files (pods
 only, like every test).

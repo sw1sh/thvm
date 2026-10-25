@@ -1,6 +1,6 @@
 # Benchmarks
 
-thvm against tinygrad, PyTorch and MLX. The Python scripts take tinygrad from
+thvm against tinygrad, PyTorch and MLX, and the ATP engine against Twee and its own inner loops. The Python scripts take tinygrad from
 the sibling checkout `../tinygrad` (put it on `PYTHONPATH`, or set `TINYGRAD`
 where a script reads it); the thvm ones need `make py` and `PYTHONPATH=py`.
 
@@ -14,6 +14,9 @@ where a script reads it); the thvm ones need `make py` and `PYTHONPATH=py`.
 | [mnist-step/](mnist-step/README.md), [mnist-train/](mnist-train/README.md), [netmodel-mnist/](netmodel-mnist/README.md) | MNIST steps and training from the Wolfram side (`NetTrain`, LeNet, beautiful_mnist) beside tinygrad. |
 | [xbackend_bench.c](xbackend_bench.c) | Raw kernel dispatch on CPU, Metal and CUDA (`make bin/xbackend_bench`). |
 | [dsv2_decode_bench.c](dsv2_decode_bench.c) | The DeepSeek-V2-Lite BS=1 decode step (`make bin/dsv2_decode_bench`); its weight pack comes from `tools/dsv2/dsv2_pack_weights.py`. |
+| [bench_twee.c](bench_twee.c) | ATP: the prover against Twee on `tests/atp/data/*.pr` at the same step budget (`make bench-twee`, needs `twee`), into `build/bench-twee.csv`. |
+| [bench_flatcore.c](bench_flatcore.c) | ATP: a flatterm match, normalize and KBO core against the IC inner loop on a harvested Sheffer rule set (`make bin/bench_flatcore`). |
+| [bench_wmfpa.c](bench_wmfpa.c) | ATP: the Waldmeister flatterm normalization port (`src/wmfpa/`) against the IC normalize, at several rule-set sizes (`make bin/bench_wmfpa`). |
 
 ## Run
 

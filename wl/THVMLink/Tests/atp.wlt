@@ -328,7 +328,7 @@ VerificationTest[
     (* File-form runs wald_parse_file + saturation directly.
        monoid_right_id.pr is a basic universal-goal fixture
        (status=PROVED per its .expect file). *)
-    TATP[File["tests/data/atp/monoid_right_id.pr"]]["Status"],
+    TATP[File["tests/atp/data/monoid_right_id.pr"]]["Status"],
     "PROVED",
     TestID -> "ATP/TATP/file/monoid-right-id-proves"
 ]
@@ -338,7 +338,7 @@ VerificationTest[
        runner picks that up via spec->n_existential and switches
        to set_goal_existential.  Witness bindings are not surfaced
        in v0; the file form returns just stats. *)
-    TATP[File["tests/data/atp/exists_inverse.pr"]]["Status"],
+    TATP[File["tests/atp/data/exists_inverse.pr"]]["Status"],
     "PROVED",
     TestID -> "ATP/TATP/file/exists-inverse-proves"
 ]
@@ -346,7 +346,7 @@ VerificationTest[
 VerificationTest[
     (* The result Association has the same shape as the expression
        form (Status/Rules/Steps/QueueSize) but no Witness key. *)
-    Sort @ Keys @ TATP[File["tests/data/atp/monoid_right_id.pr"]],
+    Sort @ Keys @ TATP[File["tests/atp/data/monoid_right_id.pr"]],
     Sort[{"Status", "Rules", "Steps", "QueueSize"}],
     TestID -> "ATP/TATP/file/keys-shape-matches-expression-form"
 ]
@@ -354,7 +354,7 @@ VerificationTest[
 VerificationTest[
     (* A non-existent file path is refused before the C-side parser, which would
        report its parse failure as the ATP_RUNNING (=0) sentinel. *)
-    TATP[File["tests/data/atp/_does_not_exist_.pr"]],
+    TATP[File["tests/atp/data/_does_not_exist_.pr"]],
     $Failed,
     {TATP::nofile},
     TestID -> "ATP/TATP/file/missing-path-is-refused"
@@ -1850,7 +1850,7 @@ VerificationTest[
 (* AbelianMcCuneAxioms: single CAG axiom over 1 binary + 1 unary, all
    law detectors hidden in the compound -> "CancellativeAbelianGroup".
    Closes the WL Method->Automatic dispatch gap exposed by
-   tests/test_atp_wolfram_bench.c's amc_assoc probe (1464ab1a):
+   tests/atp/test_atp_wolfram_bench.c's amc_assoc probe (1464ab1a):
    pre-fix this class fell through to "General" -> $AtpSchedule's
    Mix2-bare first entry, which fails to crack the CAG saturation
    in reasonable time.  Post-fix the GT-bare front cracks it. *)

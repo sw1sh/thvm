@@ -2,7 +2,7 @@
 // equality / hash, and pretty-print mirroring atp_pretty_term.
 //
 // Stage 2 is purely additive: no caller in the rest of the engine
-// reads through these yet.  The unit test tests/test_ft.c builds 1000
+// reads through these yet.  The unit test tests/atp/test_ft.c builds 1000
 // random Terms and round-trips them via ft_from_term / ft_to_term,
 // also asserting ft_hash agrees with the existing atp_term_struct_hash
 // (the latter is the bridge for the Stage-9 memo re-key).
@@ -15,7 +15,7 @@
 //
 // Gated on THVM_ATPFT_CONVERT.  src/atp/_.c pulls this TU in under
 // THVM_ATPFT_RULES (default-on); the stage-2 standalone test
-// (tests/test_ft.c) also includes it directly.  The
+// (tests/atp/test_ft.c) also includes it directly.  The
 // ATPFT_FT_C_INCLUDED guard makes the second textual inclusion a no-op.
 
 #ifdef THVM_ATPFT_CONVERT

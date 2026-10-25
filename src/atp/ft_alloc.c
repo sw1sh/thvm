@@ -12,7 +12,7 @@
 // Gated on THVM_ATPFT_ALLOC.  Once Stage 4 (THVM_ATPFT_RULES) defaulted
 // the FT mirror on in the default build, src/atp/_.c #includes this TU
 // inside the THVM_ATPFT_RULES block.  The standalone Stage-1 test
-// (tests/test_ft_alloc.c) also #includes this TU directly so its
+// (tests/atp/test_ft_alloc.c) also #includes this TU directly so its
 // dual-arena unit tests can run regardless of whether the runtime
 // pulled it in first.  The ATPFT_ALLOC_C_INCLUDED guard turns the
 // second textual inclusion into a no-op so the function bodies don't

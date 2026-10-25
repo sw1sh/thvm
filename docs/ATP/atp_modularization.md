@@ -16,8 +16,8 @@ checker rebuild) lands in reviewable units.
   soundness gates, SZS plumbing, main.
 - The FT family (`ft_*.c`, 16 files) is already well-factored; leave it.
 - Single-TU build: `tools/thvm_atp_cli.c` includes
-  `tests/test_atp_wolfram_bench.c` and `tools/proof_check.c`; the bench
-  includes `src/atp/_.c`; `tests/test_atp.c` includes it too.
+  `tests/atp/test_atp_wolfram_bench.c` and `tools/proof_check.c`; the bench
+  includes `src/atp/_.c`; `tests/atp/test_atp.c` includes it too.
 
 ## Ground rules (the mechanical pass)
 
@@ -32,8 +32,8 @@ checker rebuild) lands in reviewable units.
    against the pre-refactor capture:
 
    ```
-   cc -E <exact-flags> tests/test_atp.c               | sed '/^#/d;/^$/d' > A
-   cc -E <exact-flags> tests/test_atp_wolfram_bench.c | sed '/^#/d;/^$/d' > B
+   cc -E <exact-flags> tests/atp/test_atp.c               | sed '/^#/d;/^$/d' > A
+   cc -E <exact-flags> tests/atp/test_atp_wolfram_bench.c | sed '/^#/d;/^$/d' > B
    cc -E <exact-flags> tools/thvm_atp_cli.c           | sed '/^#/d;/^$/d' > C
    ```
 

@@ -354,7 +354,7 @@ static Term   atp_ordered_rewrite_step(AtpState *s, Term t,
 //   * then ONE unorientable step (lowest-index equation, outermost-
 //     leftmost position, both directions order-gated + variable-safe),
 //   * repeat to a joint fixpoint.
-// The differential test (tests/test_atp.c, ATP_FLATTERM_DIFF) asserts
+// The differential test (tests/atp/test_atp.c, ATP_FLATTERM_DIFF) asserts
 // equality against the tree path over random terms + rule sets.
 
 // Run the orientable indexed fixpoint over the ALREADY-FLATTENED shared

@@ -3,10 +3,10 @@
 # "Synthetic -10 corpus" and gate G2.6 (plan section 5.4), each step with
 # its own deadline, stopping at the first failure:
 #   unit       make bin/test_atp_ifeq10 && bin/test_atp_ifeq10
-#   diff       tests/atp_ifeq10_diff.sh (ifeq10_diff.py, ifeq10_keys.py)
-#   tptp       ALL=1 tests/atp_ifeq10_tptp.sh bin/FindProof: writes
+#   diff       tests/atp/atp_ifeq10_diff.sh (ifeq10_diff.py, ifeq10_keys.py)
+#   tptp       ALL=1 tests/atp/atp_ifeq10_tptp.sh bin/FindProof: writes
 #              bin/FindProof.ifeq10-pass
-#   driver     tests/atp_ifeq10_corpus.sh bin/FindProof
+#   driver     tests/atp/atp_ifeq10_corpus.sh bin/FindProof
 #   corpus     tools/atp_enigma/make_ifeq10_corpus.sh (CORPUS=1 only)
 # The builds of FindProof (gcc, clang 14, static) and G2.3 (test_atp, the
 # OA and DN pins) are the lane matrix's pod_gates.sh; bin/FindProof must
@@ -42,7 +42,7 @@ DEADLINE_S=${DEADLINE_S:-14400}
 export JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 8)}
 
 [ -x "$ROOT/bin/FindProof" ] || { echo "ifeq10_pod: no bin/FindProof under $ROOT" >&2; exit 2; }
-[ -f "$ROOT/tests/atp_ifeq10_tptp.sh" ] || { echo "ifeq10_pod: run from the repository root" >&2; exit 2; }
+[ -f "$ROOT/tests/atp/atp_ifeq10_tptp.sh" ] || { echo "ifeq10_pod: run from the repository root" >&2; exit 2; }
 for f in j13_ueq_names.txt pool.tsv dev_t.tsv train_t.tsv SHA256SUMS; do
   [ -s "$IN/$f" ] || { echo "ifeq10_pod: $IN/$f is missing" >&2; exit 2; }
 done
@@ -70,10 +70,10 @@ step() {
 }
 
 step unit 1800 bash -c 'make bin/test_atp_ifeq10 && bin/test_atp_ifeq10'
-step diff 300 bash tests/atp_ifeq10_diff.sh
+step diff 300 bash tests/atp/atp_ifeq10_diff.sh
 step tptp $((DEADLINE_S + 1800)) env TPTP="$TPTP_ROOT" ALL=1 J13_NAMES="$IN/j13_ueq_names.txt" \
-  DEADLINE_S="$DEADLINE_S" bash tests/atp_ifeq10_tptp.sh bin/FindProof
-step driver 3600 bash tests/atp_ifeq10_corpus.sh bin/FindProof
+  DEADLINE_S="$DEADLINE_S" bash tests/atp/atp_ifeq10_tptp.sh bin/FindProof
+step driver 3600 bash tests/atp/atp_ifeq10_corpus.sh bin/FindProof
 if [ "${CORPUS:-0}" = 1 ]; then
   awk -F'\t' '$5 == "heldout" { print $1 }' "$IN/pool.tsv" > "$OUT/devh_names.txt"
   awk -F'\t' '$5 == "train" { print $1 }' "$IN/pool.tsv" > "$OUT/pool_train_names.txt"

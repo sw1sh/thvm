@@ -23,7 +23,7 @@
 // src/lpo/_.c).
 //
 // Gated on THVM_ATPFT_CONVERT (same envelope as ft.c).  Double-include
-// guard mirrors ft_alloc.c / ft.c: tests/test_ft_order.c #includes this
+// guard mirrors ft_alloc.c / ft.c: tests/atp/test_ft_order.c #includes this
 // directly, and src/atp/_.c reaches it indirectly through ft.c.
 
 #ifdef THVM_ATPFT_CONVERT

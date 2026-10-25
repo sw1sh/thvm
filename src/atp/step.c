@@ -249,7 +249,7 @@ static SwRnFtEnt g_sw_rn_ft[SW_RN_FT_SLOTS];
 // them there on the first r_revision bump -- the cross-run free_span
 // underflow / SIGBUS (WolframAxioms Commutativity -> DoubleNegation,
 // AbelianGroup -> Sheffer OrAssociativity in one WL kernel;
-// tests/test_atp_session_reuse.c is the in-process regression).
+// tests/atp/test_atp_session_reuse.c is the in-process regression).
 static AtpFtCell **g_sw_rn_park         = NULL;
 static u32         g_sw_rn_park_n       = 0;
 static u32         g_sw_rn_park_cap     = 0;
@@ -1790,7 +1790,7 @@ static u32 cp_visit_ic(const u32 *p, u32 p_len, void *raw) {
 // rectangles -- but the per-position unify+apply flows through
 // the TAG_PRI machinery via `cp_visit_ic` / `ic_unify_apply3`.
 // Output CPs are structurally identical to the C path (verified
-// by parity tests in `tests/test_atp.c`).
+// by parity tests in `tests/atp/test_atp.c`).
 static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
   u32 first = added.first;
   u32 last  = added.first + added.count;

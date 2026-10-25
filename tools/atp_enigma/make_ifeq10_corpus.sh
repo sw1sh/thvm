@@ -78,7 +78,7 @@
 # list, the TPTP release and problem list, TIMEOUT_S, MEM_MB and
 # ALLOW_LEAKY.  A rerun resumes only when they match and exits 2
 # otherwise, so one corpus never mixes two encoder builds or two sets of
-# exclusions.  FINDPROOF must have passed ALL=1 tests/atp_ifeq10_tptp.sh,
+# exclusions.  FINDPROOF must have passed ALL=1 tests/atp/atp_ifeq10_tptp.sh,
 # whose pass file FINDPROOF.ifeq10-pass names its sha256 (IFEQ10_PASS
 # names another file; IFEQ10_UNCHECKED=1 runs without one and says so in
 # summary.txt).  The TPTP tree must be v9.3.1, the release after which
@@ -179,9 +179,9 @@ fi
 
 FP_SHA=$(sha_of "$FP")
 if [ "${IFEQ10_UNCHECKED:-0}" = 1 ]; then
-  PASS="unchecked (IFEQ10_UNCHECKED=1): no ALL=1 tests/atp_ifeq10_tptp.sh pass on record"
+  PASS="unchecked (IFEQ10_UNCHECKED=1): no ALL=1 tests/atp/atp_ifeq10_tptp.sh pass on record"
 elif [ ! -s "$IFEQ10_PASS" ]; then
-  die "no pass file $IFEQ10_PASS: run ALL=1 tests/atp_ifeq10_tptp.sh on this binary first"
+  die "no pass file $IFEQ10_PASS: run ALL=1 tests/atp/atp_ifeq10_tptp.sh on this binary first"
 elif ! grep -qx "findproof_sha256=$FP_SHA" "$IFEQ10_PASS"; then
   die "$IFEQ10_PASS is the pass file of another binary (this one is $FP_SHA)"
 else

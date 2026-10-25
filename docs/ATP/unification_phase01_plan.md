@@ -76,7 +76,7 @@ ground rewrite system; `cc_rep` reads off the normal form.
 
 ### Validation (the keystone, made operational)
 
-`tests/test_cc.c`, two differentials over random ground QF_UF instances:
+`tests/atp/test_cc.c`, two differentials over random ground QF_UF instances:
 
 * **vs the WL `TSatEUF` partition** - same SAT/UNSAT, same classes.
   Guards the port.
@@ -99,7 +99,7 @@ lines) is deleted once the native path is default.
 
 ### Landing
 
-1. `src/cc/` + `tests/test_cc.c`, default-off; WL `TSatEUF` unchanged.
+1. `src/cc/` + `tests/atp/test_cc.c`, default-off; WL `TSatEUF` unchanged.
 2. Flip `TSatEUF` to `ccDecide` behind `THVM_SMT_CC_NATIVE`; burn in
    against the WL path on `atp_smt.wlt` + the differential.
 3. Make native the default; delete the WL CC body.

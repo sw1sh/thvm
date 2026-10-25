@@ -150,7 +150,7 @@ static const SchedSlice SCHEDULE[] = {
   // (bare-variable multiplicity drop, then the deferred-count re-scan
   // double-charge; the CASC-J13-reported false refutations LAT016-1 /
   // RNG030-6/031-6/032-6 all stay non-refuting under forced
-  // --full-ac=2, held to a 120s wall; tests/soundness covers them).
+  // --full-ac=2, held to a 120s wall; tests/atp/soundness covers them).
   // But the SOUND matcher no longer over-matches, so it also no longer
   // finds the short RNG-family proofs the unsound one did (RNG021-6:
   // 3s unsound -> Timeout sound) -- the slice's former ~8-problem gain
@@ -1247,7 +1247,7 @@ int main(int argc, char **argv) {
     }
     if (nlen == 10 && strncmp(name, "list-lanes", 10) == 0) {
       // Names only, one per line, is the form the G0.4 judge
-      // (tests/atp_sched_teardown.sh, pinned by sha256) reads.
+      // (tests/atp/atp_sched_teardown.sh, pinned by sha256) reads.
       if (val == NULL) {
         want_list_lanes = 1;
       } else if (strcmp(val, "flags") == 0) {
