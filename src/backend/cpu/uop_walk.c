@@ -482,12 +482,14 @@ static void uwalk_mark_bad(UWalkCtx *c, u32 op) {
 
 // CAST(src, dst) as the C render's `((T)x)`, a bool as `(x != 0)`; src walks
 // in its own C type, and an implicit conversion (an operand, a store) matches.
+// x wraps to its own width first: the int evaluator keeps an add's carry, so a
+// uint32 sum past 2^32 widened to uint64 kept bit 32.
 static i64 uwalk_cast_int(UWalkCtx *c, Term src, u32 dst) {
   u32 sdt = uwalk_term_dtype(c, src);
   if (uwalk_dtype_is_float(sdt)) {
     return uwalk_f64_to_int(dst, uwalk_eval_float(c, src, sdt));
   }
-  return uwalk_int_wrap(dst, uwalk_eval_int(c, src));
+  return uwalk_int_wrap(dst, uwalk_int_wrap(sdt, uwalk_eval_int(c, src)));
 }
 
 // The value of `t`, of C type `tdt`, converted to float dtype `dst`.

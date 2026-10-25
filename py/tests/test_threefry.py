@@ -1,6 +1,7 @@
 """Tensor.rand is tinygrad's threefry2x32 (uop/decompositions.py:308-320, mixin/rand.py): the bits and
 the seeded draw equal tinygrad's jax-generated references (test/unit/test_randomness.py
-test_threefry_against_reference and _full), on both CPU routes; a 16-bit float draw stays in [0, 1)
+test_threefry_against_reference and _full), on both CPU routes, where a uint32 counter word wraps before it
+widens; a 16-bit float draw stays in [0, 1)
 (its kernels are the walker's, as for any narrow-float CAST).
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_threefry.py -q
@@ -23,6 +24,14 @@ def case_bits():
     counts0, counts1 = Tensor.arange(20, dtype=dtypes.uint32).chunk(2)
     r = Tensor._threefry_random_bits(Tensor([0, 1337], dtype=dtypes.uint32), counts0, counts1).numpy()
     np.testing.assert_array_equal(r, np.array(BITS, np.uint32))
+
+
+def case_counter_word_wraps():
+    # rand's counter combine: a uint32 sum past 2^32 wraps before it widens, as the C kernels compute it;
+    # the walker kept the carry, which landed in the high word.
+    x = Tensor([0xFFFFFFFF, 0xFFFFFFFE, 7], dtype=dtypes.uint32).realize()
+    w = ((x + 4).cast(dtypes.uint64) << 32) | (x + 2).cast(dtypes.uint64)
+    np.testing.assert_array_equal(w.numpy(), np.array([(3 << 32) | 1, (2 << 32) | 0, (11 << 32) | 9], np.uint64))
 
 
 def case_seeded_rand():
