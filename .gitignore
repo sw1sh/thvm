@@ -31,9 +31,8 @@ flux_out_cuda/
 # External checkouts and reference repos (reference-kernels, mlx, brain, TinyHVM, ...); no submodules
 /external/
 
-# Local work: notebooks, hackathon problems, agent state, editor settings, Finder metadata
+# Local work: notebooks, agent state, editor settings, Finder metadata
 wl/Notebooks
-bench/metal-problems/
 .claude/
 .vscode/
 .DS_Store
