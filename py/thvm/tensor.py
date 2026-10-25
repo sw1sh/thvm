@@ -32,6 +32,9 @@ _TAG_TEN = K.TAG_TEN
 _LEAF_TENSORS: "weakref.WeakValueDictionary[int, Tensor]" = \
     weakref.WeakValueDictionary()
 
+# Each float full still a lazy constant: backward() makes it a leaf (Tensor.ones as a weight).
+_LAZY_FULLS: "weakref.WeakSet[Tensor]" = weakref.WeakSet()
+
 # The next pin handle (_pin).  Tensor allocation and realize call reclaim_if_due(), which bounds
 # memory without GlobalCounters.reset(); both are safe points, where every term still needed is
 # held by a live Tensor, never only as a raw integer in a local.
@@ -361,6 +364,12 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
             self._view_begin_end = None
             self._pin()
             return self
+        if int(_TH.term_tag(self.term)) != _TAG_TEN and not _TH.uop_leaf_tids(self.term):
+            # A pending value that reads no buffer (a full) is initialized, not written
+            # (tinygrad tensor.py:253-256).
+            self.term = x._broadcast_to(self._shape).term
+            _LAZY_FULLS.discard(self)
+            return self
         self.term = _TH.binary(K.ASSIGN, self.term, x.term)
         return self
 
@@ -387,11 +396,19 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
                 raise RuntimeError(
                     "backward(): implicit gradient only for scalar outputs")
             gradient = self.const_like(1.0)
+        # A float full still lazy is a constant node with no inputs: its buffer takes its place,
+        # cutting no other path, so it is a leaf as tinygrad's backward sees it (tensor.py:457-460).
+        root = self.term
+        lazy = [t for t in _LAZY_FULLS if int(_TH.term_tag(t.term)) != _TAG_TEN]
+        if lazy:
+            old = [t.term for t in lazy]
+            lazy[0].realize(*lazy[1:])
+            root = _TH.uop_substitute(root, old, [t.term for t in lazy])
         # tinygrad keeps the float leaves with a device (tensor.py:486-488); a TEN leaf is a
         # buffer, so the float test is all that is left.
-        tids = [tid for tid in _TH.uop_leaf_tids(self.term)
+        tids = [tid for tid in _TH.uop_leaf_tids(root)
                 if (leaf := _LEAF_TENSORS.get(tid)) is not None and dtypes.is_float(leaf._dtype)]
-        grads, had_grad, err = _TH.backward(self.term, gradient.term, tids)
+        grads, had_grad, err = _TH.backward(root, gradient.term, tids)
         if err is not None:
             # tinygrad's compute_gradient raises for a node without a rule
             # (mixin/gradient.py:127); every .grad is rolled back.
@@ -467,10 +484,16 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     @classmethod
     def full(cls, shape, fill_value, dtype: DType | None = None, **kw) -> "Tensor":
-        """fill_value everywhere, in dtype or the one fill_value implies (tinygrad
-        mixin/creation.py full)."""
+        """fill_value everywhere, in dtype or the one fill_value implies: a lazy constant, as
+        tinygrad's Tensor(fill_value).reshape(1s).expand(shape) (mixin/creation.py full), but for
+        an int past int32, which a CONST holds only the low 32 bits of."""
         dt = to_dtype(dtype) if dtype is not None else dtypes.from_py(fill_value)
-        return cls(np.full(argfix(shape), fill_value, dtype=_to_np_dtype(dt)), dtype=dt)
+        if isinstance(fill_value, int) and not -2**31 <= fill_value < 2**31:
+            return cls(np.full(argfix(shape), fill_value, dtype=_to_np_dtype(dt)), dtype=dt)
+        t = _const_broadcast(fill_value, argfix(shape), dt)
+        if dtypes.is_float(dt):
+            _LAZY_FULLS.add(t)
+        return t
 
     @classmethod
     def ones(cls, *shape, dtype: DType | None = None, **kw) -> "Tensor":
