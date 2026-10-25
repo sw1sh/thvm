@@ -85,7 +85,8 @@ plus an outer combiner. The adjoint table mirrors tinygrad / JAX:
 | `SCATTER(b, i, s, d, SUM, self)` | `gy_for_s = GATHER(gy, i, d)`; `gy_for_b = gy` when `self`, else `SCATTER(REPLACE, gy, i, zeros(i.shape), d)` (`gy` with every written position zeroed); `i` gets none |
 | `SCATTER(b, i, s, d, MAX, self)` | With `M = SCATTER(MAX, full(I), i, s, d, 1)` and `T = b` (`self`) or `SCATTER(REPLACE, b, i, full(I), d)`: `g_M` / `g_T` = `gy` where `M` / `T` is larger, `gy * 0.5` where `M == T`, else 0; `gy_for_b = g_T`, written positions zeroed unless `self`; `gy_for_s = (s == G(M)) * G(1 / cnt) * G(g_M)` with `G` a gather along `d` and `cnt` the ties of `M` among the `K = i.shape[d]` one-hot entries; MIN mirrors it; `i` gets none |
 | `CMPLT/CMPEQ`     | non-differentiable; emits scalar zero                               |
-| `BITCAST/CONST/LOAD/ASSIGN` | non-differentiable; cotangent dies                        |
+| `BITCAST/CONST/LOAD` | non-differentiable; cotangent dies                                |
+| `ASSIGN(dst, v)`  | `gy` to `v`, none to `dst`: an assign or a clone passes the cotangent to the value it writes (tinygrad `mixin/gradient.py:98-99`) |
 | `KERNEL(...)`     | `grad_kernel_backprop` (see below)                                  |
 
 The outer combiner for binary ops is `UOP_ADD(BWD_a, BWD_b)`
@@ -264,6 +265,14 @@ themselves fresh `DP1+grad` cells — and wnf re-enters on that
 result. Without further help the re-entered wnf would stop at the
 ADD head and leave the two grad children unfired, since plain WHNF
 doesn't descend into UOP children.
+
+A BWD projection whose `y` is a UOP other than a `KERNEL` runs the
+rule on `y` as it stands, as tinygrad's `compute_gradient` never
+evaluates the graph: reducing `y` first would fire its active
+children, and a copy `ASSIGN` among them (a clone of a buffer) would
+leave its `dst` in `y`, cutting the cotangent to the value it writes.
+Only a `KERNEL` or a non-UOP `y` (a DP chain from an earlier fire, an
+ALO) is reduced before the rule.
 
 The TAG_F_UOP_CHILD stack-machine frames at
 [`src/wnf/_.c:214-243`](../../src/wnf/_.c#L214-L243) and

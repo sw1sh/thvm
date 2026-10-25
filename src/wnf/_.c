@@ -45,12 +45,14 @@ enter:
           next = heap_read(loc);
           goto enter;
         }
-        // DETACH stops the gradient (tinygrad mixin/gradient.py:113-114), but
-        // the descent below would unwrap it and run its child's rule: pin y to
-        // the DETACH so interact_grad's UOP_DETACH case returns zero.
+        // A UOP y but a KERNEL goes to its rule as it stands, as tinygrad's
+        // compute_gradient never evaluates the graph: the descent below would
+        // unwrap a DETACH, which stops the gradient (mixin/gradient.py:113-114),
+        // and fire a copy ASSIGN under y into its dst, cutting the cotangent to
+        // the value it writes (mixin/gradient.py:98-99).
         {
           Term y_raw = term_resolve(heap_read(loc + 0));
-          if (term_tag(y_raw) == TAG_UOP && term_ext(y_raw) == UOP_DETACH) {
+          if (term_tag(y_raw) == TAG_UOP && term_ext(y_raw) != UOP_KERNEL) {
             if (BUDGET_HIT) BAIL_AT(next);
             heap_set(loc + 0, y_raw);
             Term g = interact_grad(next);

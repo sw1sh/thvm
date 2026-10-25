@@ -69,6 +69,7 @@ TESTS := \
   $(BIN)/test_uop_upat \
   $(BIN)/test_grad \
   $(BIN)/test_iwhere_grad \
+  $(BIN)/test_assign_grad \
   $(BIN)/test_grad_gather_scatter \
   $(BIN)/test_grad_scatter_max \
   $(BIN)/test_ref \
