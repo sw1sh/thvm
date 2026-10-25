@@ -74,13 +74,12 @@ class TestClone(unittest.TestCase):
         self.assertNotEqual(_TH.ten_get_buf_id(c.grad.term),
                             _TH.ten_get_buf_id(x.grad.realize().term))
 
-    def test_clone_does_not_pass_gradient_through(self):
-        # tinygrad's clone passes the gradient to the source
-        # (mixin/gradient.py:100-101); thvm's clone realizes eagerly, so
-        # the source falls out of the loss's scope and its grad stays None.
+    def test_clone_passes_gradient_through(self):
+        # A lazy assign into a new buffer passes the gradient to its source
+        # (mixin/gradient.py:98-99).
         x = Tensor([1., 2, 3])
         (x.clone() * 2).sum().backward()
-        self.assertIsNone(x.grad)
+        np.testing.assert_array_equal(x.grad.numpy(), [2., 2., 2.])
 
     def test_clone_copies_narrow_dtypes_bit_exact(self):
         # NaN payloads, subnormals and -0 survive only a byte copy.
@@ -95,7 +94,7 @@ class TestClone(unittest.TestCase):
             src = _TH.ten_create(dt.thvm_id, [len(bits)])
             _TH.ten_write(src, data)
             t = Tensor._from_term(src, dt, (len(bits),))
-            c = t.clone()
+            c = t.clone().realize()
             self.assertEqual(c.dtype, dt)
             self.assertNotEqual(_TH.ten_get_buf_id(c.term), _TH.ten_get_buf_id(t.term))
             self.assertEqual(_TH.ten_read(c.term, len(data)), data, dt.name)

@@ -139,6 +139,10 @@ _uop_reaches = _bind("py_uop_reaches", None, ctypes.POINTER(c_uint64), c_uint32,
                      ctypes.POINTER(c_uint64), c_uint32, ctypes.POINTER(ctypes.c_uint8))
 _uop_substitute = _bind("py_uop_substitute", c_uint64, c_uint64, ctypes.POINTER(c_uint64),
                         ctypes.POINTER(c_uint64), c_uint32)
+_uop_substitute_many = _bind("py_uop_substitute_many", None, ctypes.POINTER(c_uint64), c_uint32,
+                             ctypes.POINTER(c_uint64), ctypes.POINTER(c_uint64), c_uint32)
+_assign_dsts = _bind("py_assign_dsts", c_uint32, ctypes.POINTER(c_uint64), c_uint32,
+                     ctypes.POINTER(c_uint64), ctypes.POINTER(c_uint64), c_uint32)
 _backward = _bind("py_backward", c_char_p, c_uint64, c_uint64, ctypes.POINTER(c_uint32),
                   c_uint32, ctypes.POINTER(c_uint64))
 _ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
@@ -565,6 +569,21 @@ class Thvm:
         n = len(frm)
         a, b = (c_uint64 * max(1, n))(*map(int, frm)), (c_uint64 * max(1, n))(*map(int, to))
         return Term(int(_uop_substitute(c_uint64(int(root)), a, b, c_uint32(n))))
+
+    def assign_dsts(self, roots) -> "list[tuple[Term, Term]]":
+        """Each ASSIGN under roots with what it reads as once fired."""
+        cap = 1 << 16
+        r = (c_uint64 * max(1, len(roots)))(*map(int, roots))
+        a, b = (c_uint64 * cap)(), (c_uint64 * cap)()
+        n = int(_assign_dsts(r, c_uint32(len(roots)), a, b, c_uint32(cap)))
+        return [(Term(int(a[i])), Term(int(b[i]))) for i in range(n)]
+
+    def uop_substitute_many(self, roots, frm, to) -> "list[Term]":
+        """Each of roots with each frm[i] replaced by to[i], over one shared rewrite."""
+        r = (c_uint64 * max(1, len(roots)))(*map(int, roots))
+        a, b = (c_uint64 * len(frm))(*map(int, frm)), (c_uint64 * len(frm))(*map(int, to))
+        _uop_substitute_many(r, c_uint32(len(roots)), a, b, c_uint32(len(frm)))
+        return [Term(int(x)) for x in r[:len(roots)]]
 
     def ten_get_buf_id(self, t: Term) -> int:
         return int(_ten_get_buf_id(c_uint64(int(t))))

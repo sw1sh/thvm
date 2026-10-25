@@ -91,7 +91,7 @@ def _prepare_jit_inputs(args, kwargs):
         tensors += [t for t in it if t.__class__ is Tensor and not any(t is y for y in tensors)]
     views = [_TH.view_chain(t.term) for t in tensors]
     if lazy := [t for t, v in zip(tensors, views) if v is None]:
-        _realize_now(*lazy)
+        _realize_now(*lazy, share=True)
     bases = [v[0] if v else t.term for t, v in zip(tensors, views)]
     ids = [_TH.ten_get_buf_id(b) for b in bases]
     if 0 in ids:
@@ -194,7 +194,7 @@ class _TinyJit:
         if not getenv("JIT", 1) or self.cnt == 0:
             ret = self.fxn(*args, **kwargs)
             if ts := _ret_tensors(ret):
-                _realize_now(*ts)
+                _realize_now(*ts, share=True)
         elif self.cnt == 1 or (self.fxn is not None and (sig != self._sig or self.captured.slot == 0)):
             if capturing:
                 raise RuntimeError(f"having TinyJit inside another TinyJit is not supported {len(capturing)=} {capturing=}")
@@ -206,7 +206,7 @@ class _TinyJit:
                 # No capture slot is free: run fxn uncaptured, and capture on a later call.
                 ret = self.fxn(*args, **kwargs)
                 if ts := _ret_tensors(ret):
-                    _realize_now(*ts)
+                    _realize_now(*ts, share=True)
                 return ret
             ret = None
             capturing.append(self)
@@ -214,7 +214,7 @@ class _TinyJit:
                 ret = self.fxn(*args, **kwargs)
                 # A lazy result records nothing until realized (tinygrad engine/jit.py:140).
                 if ts := _ret_tensors(ret):
-                    _realize_now(*ts)
+                    _realize_now(*ts, share=True)
             finally:
                 capturing.clear()
                 # Every result is a root, whose buffer the replay's packing never reuses.

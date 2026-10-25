@@ -42,16 +42,43 @@ _LAZY_FULLS: "weakref.WeakValueDictionary[int, Tensor]" = weakref.WeakValueDicti
 _PENDING_ASSIGNS: "weakref.WeakValueDictionary[int, Tensor]" = weakref.WeakValueDictionary()
 
 
-def _realize_now(t: "Tensor", *lst: "Tensor") -> "Tensor":
+def _realize_now(t: "Tensor", *lst: "Tensor", share: bool = False) -> "Tensor":
     """Realize t and lst into buffers whatever they read: the data reads, contiguous() and the leaves
-    backward() needs.  A TinyJit capture does not record it under CAPTURING=0, as tinygrad's."""
+    backward() needs; `share` for tinygrad's own realize (see _becomes).  A TinyJit capture does not
+    record it under CAPTURING=0, as tinygrad's."""
     if not capturing or CAPTURING:
-        return t._realize(*lst)
+        return t._realize(*lst, share=share)
     _TH.jit_pause()
     try:
-        return t._realize(*lst)
+        return t._realize(*lst, share=share)
     finally:
         _TH.jit_resume()
+
+
+def _becomes(ts, old, assigns, share: bool) -> None:
+    """tinygrad's _apply_map_to_tensors after a realize (tensor.py:22-36): every other live tensor
+    reading an assign the realize ran (`assigns`, taken before it, as a realize rewrites the nodes
+    it fires in place) reads what it wrote, so the assign never fires again.  A
+    realized root's other node maps to its buffer only under `share`, tinygrad's realize of the
+    tensor's own node: numpy() and contiguous() realize a CONTIGUOUS of it there, which no other
+    tensor reads.  Neither a node that reads no buffer (a full, an arange) nor a view of a buffer
+    maps, as tinygrad gives neither a buffer of its own, and every equal construction shares the
+    node."""
+    roots = [(o, t.term) for t, o in zip(ts, old)
+             if int(o) != int(t.term) and _TH.term_tag(o) == _TAG_UOP
+             and (_TH.term_ext(o) == K.ASSIGN
+                  or share and not _TH.term_reads_no_buffer(o) and _TH.view_chain(o) is None)]
+    pairs = {int(a): (a, d) for a, d in assigns}
+    pairs |= {int(o): (o, n) for o, n in roots}
+    if not pairs:
+        return
+    done = {id(t) for t in ts}
+    scope = [x for x in list(Thvm.live_terms) if id(x) not in done]
+    frm, to = zip(*pairs.values())
+    for x, r in zip(scope, _TH.uop_substitute_many([x.term for x in scope], frm, to)):
+        if int(r) != int(x.term):
+            x.term = r
+            x._pin(lazy=x._pin_id != 0)
 
 
 def _realize_pending() -> None:
@@ -309,10 +336,10 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         (tensor.py:217-222, uop/ops.py:747); contiguous() gives it a buffer."""
         ts = [t for t in (self, *lst) if not _TH.term_reads_no_buffer(t.term)]
         if ts:
-            _realize_now(*ts)
+            _realize_now(*ts, share=True)
         return self
 
-    def _realize(self, *lst: "Tensor") -> "Tensor":
+    def _realize(self, *lst: "Tensor", share: bool = False) -> "Tensor":
         # The pending assigns the roots read realize with them, so no tensor keeps a fired ASSIGN as its
         # term; one they do not read stays pending, as tinygrad realizes only what the graph needs
         # (a read before two writes, and one between them, see each write in turn).
@@ -320,23 +347,20 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         if pend:
             hit = _TH.uop_reaches([self.term, *(x.term for x in lst)], [t.term for t in pend])
             lst = (*lst, *(t for t, h in zip(pend, hit) if h))
-        for t in (self, *lst):
+        ts = (self, *lst)
+        for t in ts:
             _PENDING_ASSIGNS.pop(id(t), None)
-        if not lst:
-            self.term = _TH.realize(self.term)
-            self._pin()
-            _TH.reclaim_if_due()
-            return self
+        old = [t.term for t in ts]
+        lazy = [o for o in old if _TH.term_tag(o) == _TAG_UOP]
+        assigns = _TH.assign_dsts(lazy) if lazy else []
         # Assigns follow the data: a tensor reading a buffer's prior state realizes before another
         # tensor's assign overwrites it (tinygrad's WAR edges, schedule/__init__.py:57-65); within
         # one tensor the graph order holds, and a cycle raises RuntimeError.
-        terms_all = [self.term] + [x.term for x in lst]
-        out = _TH.realize_many(terms_all)
-        self.term = out[0]
-        self._pin()
-        for x, r in zip(lst, out[1:]):
-            x.term = r
-            x._pin()
+        out = _TH.realize_many(old) if lst else [_TH.realize(old[0])]
+        for t, r in zip(ts, out):
+            t.term = r
+            t._pin()
+        _becomes(ts, old, assigns, share)
         _TH.reclaim_if_due()
         return self
 
@@ -344,16 +368,15 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         return _realize_now(self)
 
     def clone(self, device=None) -> "Tensor":
-        """Fresh storage holding self's value (tinygrad tensor.py:344-351, uop/ops.py:887-893);
-        `device` is ignored, DEV picks thvm's one device."""
+        """Fresh storage holding self's value, a lazy assign into a new buffer, so backward() reaches
+        self through it (tinygrad tensor.py:318-325, mixin/gradient.py:98-99); `device` is ignored,
+        DEV picks thvm's one device."""
         del device
         _TH.reclaim_if_due()
         dst = Tensor._from_term(
             _TH.ten_create(self._dtype.thvm_id, list(self._shape)),
             self._dtype, self._shape)
-        # Realized eagerly, so the clone is a new leaf: backward() does not reach self through it,
-        # where tinygrad passes the gradient to the source (mixin/gradient.py:98-99).
-        ret = dst.assign(self).realize()
+        ret = dst.assign(self)
         if self.grad is not None:
             ret.grad = self.grad.clone()
         return ret.is_param_(self.is_param)
@@ -481,10 +504,12 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         # what it reads, so its buffer takes the node's place in a graph of its own, while a buffer
         # target keeps the whole graph, its gradient flowing through every node (tinygrad's
         # compute_gradient).
-        old = [t.term for t in targets]
+        # Realizing a target rewrites self.term to read it, so each graph substitutes into the graph
+        # from before any target realized.
+        old, root = [t.term for t in targets], self.term
         for t in targets:
             _realize_now(t)
-        roots = [_TH.uop_substitute(self.term, [o], [t.term]) if int(o) != int(t.term) else self.term
+        roots = [_TH.uop_substitute(root, [o], [t.term]) if int(o) != int(t.term) else root
                  for o, t in zip(old, targets)]
         grads = [0] * len(targets)
         for root in dict.fromkeys(roots):

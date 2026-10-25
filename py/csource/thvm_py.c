@@ -608,11 +608,52 @@ EXPORT void py_uop_reaches(uint64_t const *roots, uint32_t n_roots, uint64_t con
   uop_map_free(&want);
 }
 
+// The ASSIGNs under roots (not inside a KERNEL), each in from[] with what it
+// reads as once fired in to[]: its dst, ASSIGNs in the dst mapped too, as
+// tinygrad's realize maps every assign it ran to its buffer.  Returns the
+// count, at most cap.
+EXPORT uint32_t py_assign_dsts(uint64_t const *roots, uint32_t n_roots, uint64_t *from,
+                               uint64_t *to, uint32_t cap) {
+  UOpWalk w = {0};
+  for (u32 i = 0; i < n_roots; i++) {
+    uop_walk_push(&w, term_resolve((Term)roots[i]));
+  }
+  u32  n = 0;
+  Term t;
+  while ((t = uop_walk_pop(&w)) != 0) {
+    u8 op = term_ext(t);
+    if (op == UOP_ASSIGN && n < cap) {
+      from[n] = t;
+      to[n++] = term_resolve(heap_read(term_val(t)));
+    }
+    for (u8 s = 0; op != UOP_KERNEL && s < uop_arity(op); s++) {
+      uop_walk_push(&w, term_resolve(heap_read(term_val(t) + s)));
+    }
+  }
+  uop_walk_free(&w);
+  for (u32 pass = 0; pass < n; pass++) {
+    int changed = 0;
+    for (u32 i = 0; i < n; i++) {
+      Term v  = uop_substitute((Term)to[i], (Term const *)from, (Term const *)to, n);
+      changed |= v != (Term)to[i];
+      to[i]   = v;
+    }
+    if (!changed) {
+      break;
+    }
+  }
+  return n;
+}
+
 // `root` with each from[i] replaced by to[i] (uop_substitute): gradient() swaps a
 // target's buffer in for its node.
 EXPORT uint64_t py_uop_substitute(uint64_t root, uint64_t const *from, uint64_t const *to,
                                   uint32_t n) {
   return uop_substitute((Term)root, (Term const *)from, (Term const *)to, n);
+}
+EXPORT void py_uop_substitute_many(uint64_t *roots, uint32_t nr, uint64_t const *from,
+                                   uint64_t const *to, uint32_t n) {
+  uop_substitute_many((Term *)roots, nr, (Term const *)from, (Term const *)to, n);
 }
 
 // The chain rule's pending error message (a node it has no rule for),

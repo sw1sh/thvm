@@ -64,9 +64,11 @@ static Term uop_substitute_rebuild(Term t, Term const *srcs) {
   }
 }
 
-fn Term uop_substitute(Term root, Term const *from, Term const *to, u32 n) {
-  if (n == 0 || root == 0) {
-    return root;
+// Each of roots[0..nr) substituted in place, over one memo: tinygrad's
+// substitute of one SINK of them (tensor.py:22-36 _apply_map_to_tensors).
+fn void uop_substitute_many(Term *roots, u32 nr, Term const *from, Term const *to, u32 n) {
+  if (n == 0) {
+    return;
   }
   UOpMap m     = {0};
   u32    scap  = 256, sp = 0;
@@ -79,49 +81,57 @@ fn Term uop_substitute(Term root, Term const *from, Term const *to, u32 n) {
   for (u32 i = 0; i < n; i++) {
     (void)uop_map_put(&m, from[i], to[i]);
   }
-  stack[sp++] = root;
   Term v;
-  while (sp > 0) {
-    Term t = stack[sp - 1];
-    if (uop_map_get(&m, t, &v)) {
-      sp--;
+  for (u32 r = 0; r < nr; r++) {
+    if (roots[r] == 0) {
       continue;
     }
-    u32 ns      = uop_src_count(t);
-    int pending = 0;
-    for (u32 i = 0; i < ns; i++) {
-      Term s = uop_src_at(t, i);
-      if (s != 0 && !uop_map_get(&m, s, &v)) {
-        if (sp == scap) {
-          scap *= 2;
-          stack = realloc(stack, scap * sizeof(Term));
-          if (stack == NULL) {
-            thvm_fatal("uop_substitute: out of memory");
+    stack[sp++] = roots[r];
+    while (sp > 0) {
+      Term t = stack[sp - 1];
+      if (uop_map_get(&m, t, &v)) {
+        sp--;
+        continue;
+      }
+      u32 ns      = uop_src_count(t);
+      int pending = 0;
+      for (u32 i = 0; i < ns; i++) {
+        Term s = uop_src_at(t, i);
+        if (s != 0 && !uop_map_get(&m, s, &v)) {
+          if (sp == scap) {
+            scap *= 2;
+            stack = realloc(stack, scap * sizeof(Term));
+            if (stack == NULL) {
+              thvm_fatal("uop_substitute: out of memory");
+            }
           }
+          stack[sp++] = s;
+          pending = 1;
         }
-        stack[sp++] = s;
-        pending = 1;
       }
-    }
-    if (pending) {
-      continue;
-    }
-    sp--;
-    Term srcs[1 + MAX_UOP_SRC + MAX_DIM];
-    int  changed = 0;
-    for (u32 i = 0; i < ns; i++) {
-      Term s  = uop_src_at(t, i);
-      srcs[i] = s;
-      if (s != 0 && uop_map_get(&m, s, &v)) {
-        srcs[i] = v;
+      if (pending) {
+        continue;
       }
-      changed |= srcs[i] != s;
+      sp--;
+      Term srcs[1 + MAX_UOP_SRC + MAX_DIM];
+      int  changed = 0;
+      for (u32 i = 0; i < ns; i++) {
+        Term s  = uop_src_at(t, i);
+        srcs[i] = s;
+        if (s != 0 && uop_map_get(&m, s, &v)) {
+          srcs[i] = v;
+        }
+        changed |= srcs[i] != s;
+      }
+      (void)uop_map_put(&m, t, changed ? uop_substitute_rebuild(t, srcs) : t);
     }
-    (void)uop_map_put(&m, t, changed ? uop_substitute_rebuild(t, srcs) : t);
+    uop_map_get(&m, roots[r], &roots[r]);
   }
-  Term out = root;
-  uop_map_get(&m, root, &out);
   free(stack);
   uop_map_free(&m);
-  return out;
+}
+
+fn Term uop_substitute(Term root, Term const *from, Term const *to, u32 n) {
+  uop_substitute_many(&root, 1, from, to, n);
+  return root;
 }
