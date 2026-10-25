@@ -51,7 +51,7 @@ has Vampire-INSPIRED knobs implemented inside thvm's completion loop
 forward/backward subsumption analogs, `bd=all` demod, occurrence /
 reverse-frequency precedence -- but these are analogs living in a
 Knuth-Bendix completion engine, NOT an emulation of Vampire's
-given-clause saturation loop. `docs/atp/vampire_port.md` catalogs the
+given-clause saturation loop. `docs/ATP/vampire_port.md` catalogs the
 ported flags and explicitly separates them from concepts that are
 "NOT a Vampire port" (CPSetInterreduce, MNF front, UnfailingCP).
 
@@ -65,7 +65,7 @@ Committed baseline artifacts (comparison already done):
   `vampire_constructs` with `cli_minus_preset` delta and notes.
 - `tools/parity_diff_vampire.sh` -- joins thvm tracker vs CLI TSV on
   **status** (OK_OK / *_FAIL_only / BOTH_FAIL), not trajectory.
-- `docs/atp/vampire_case_teardown.md`, `docs/atp/vampire_port.md` --
+- `docs/ATP/vampire_case_teardown.md`, `docs/ATP/vampire_port.md` --
   prior deep teardown + flag-port catalog.
 - `wl/THVMLink/docs/Symbols/TVampireProof*.md` -- documented surface.
 

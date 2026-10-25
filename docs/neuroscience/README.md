@@ -236,8 +236,8 @@ directory.)
 ## How to use this with thvm
 
 thvm already has the pieces you need for breakthroughs 1-3 at toy
-scale: reverse-mode autodiff ([../grad.md](../grad.md)), a tensor /
-NN surface in Wolfram ([../wl.md](../wl.md), `wl/NN.wl`), and
+scale: reverse-mode autodiff ([../NN/grad.md](../NN/grad.md)), a tensor /
+NN surface in Wolfram ([../core/wl.md](../core/wl.md), `wl/NN.wl`), and
 MNIST-scale training (`docs/plans/beautiful_mnist_parity.md`). The
 natural progression is: TD-learning / actor-critic on a gridworld
 (breakthrough 2), then a tiny generative / predictive model -- a

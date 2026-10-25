@@ -5,7 +5,7 @@ Something then has to turn those tags into code: one accumulator per
 lane, loads shared across lanes, straight-line unrolled bodies. tinygrad
 does it with graph rewrites over the UOp graph before rendering. thvm
 does it while it emits source, in
-[render_uop.c](../src/codegen/render_uop.c).
+[render_uop.c](../../src/codegen/render_uop.c).
 
 ## tinygrad at 365f87a8a
 
@@ -88,4 +88,4 @@ back to the emit walk when a stage declined. It was deleted, about
 Opcodes 44-50 stay unassigned, so the other opcodes keep their numbers.
 The port's design notes, its V100 measurements, and the 2026-05 CUDA
 performance log that shared this page are in
-`git show 3c2f2c96:docs/tinygrad_late_passes.md`.
+`git show 3c2f2c96:docs/NN/tinygrad_late_passes.md`.

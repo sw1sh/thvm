@@ -69,7 +69,7 @@ fn Term interact_dup_sup(u32 lab, u64 loc, u8 side, Term sup) {
 `side` is 0 for DP0, 1 for DP1; the active projection (whichever one
 the reducer popped from the stack) gets its result returned and the
 other one is installed at the dup loc with SUB=1 via
-`heap_subst_cop` (see [heap.md](../heap.md)).
+`heap_subst_cop` (see [heap.md](../core/heap.md)).
 
 ## Worked example
 

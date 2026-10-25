@@ -1,6 +1,6 @@
 # IC-native ATP benchmark log
 
-*Historical snapshot (2026-05 from git log); knob names and numbers may predate the current CLI -- see docs/atp/README.md for the live map.*
+*Historical snapshot (2026-05 from git log); knob names and numbers may predate the current CLI -- see docs/ATP/README.md for the live map.*
 
 > Skeleton landed by stage 7.4a.  Will accumulate side-by-side
 > comparisons with Twee (stage 7.4d) once Twee is wired in.

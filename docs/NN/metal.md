@@ -113,7 +113,7 @@ side does. Per opcode, it:
 5. Commits the command buffer. Synchronous wait
    (`[cmdBuffer waitUntilCompleted]`) at the dispatch boundary; the
    batch / deferred-decref scaffolding for amortising encoder cost
-   lives in `metal_dispatch_flush` (see `docs/memory.md`).
+   lives in `metal_dispatch_flush` (see `docs/NN/memory.md`).
 
 ## Buffers
 
@@ -133,7 +133,7 @@ swapping the implementation is mechanical.
 - **Dtypes.** The generated MSL of the tile path takes the dtypes
   `rmu_msl_type_name` maps (f32, f16, bf16, fp8 bytes, i8 / u8 / i32 /
   i64); the shader-library DAG encoder takes f32 and i32 only
-  (`metal_kernel_supported`). See `docs/dtypes.md` for backend
+  (`metal_kernel_supported`). See `docs/NN/dtypes.md` for backend
   coverage.
 
 ## Build dependency

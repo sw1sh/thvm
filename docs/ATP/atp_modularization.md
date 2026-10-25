@@ -1,7 +1,7 @@
 # ATP source modularization (post-CASC-J13 cleanup)
 
 Started 2026-07-27, right after the J13 post-mortem
-(`docs/plans/casc_j13_postmortem.md`). One year to the next competition; first
+(`docs/ATP/casc_j13_postmortem.md`). One year to the next competition; first
 structural investment is breaking the two monoliths into organized modules so
 the coming year's engine work (endgame queue economics, FOF saturation,
 checker rebuild) lands in reviewable units.

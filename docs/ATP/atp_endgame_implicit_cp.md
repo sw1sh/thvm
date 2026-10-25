@@ -48,7 +48,7 @@ infrastructure map and gate definitions.
 The trie / selection-order parity arc is DONE. On `andassoc_kbo.pr` at main
 `145c5ed6`, thvm is byte-exact to WM for `firstdiv = 38291` selections
 (prefix 38290), 13x past the old pick-2923 fork that
-`docs/plans/atp_andassoc_parity.md` (stale, HEAD 25240924) describes.
+`docs/ATP/atp_andassoc_parity.md` (stale, HEAD 25240924) describes.
 Selection order is no longer the blocker.
 
 What blocks proving the class is the ENDGAME. Measured this cycle,

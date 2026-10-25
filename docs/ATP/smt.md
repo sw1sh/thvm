@@ -23,7 +23,7 @@ Abbreviations used throughout (spelled out on first appearance):
 
 ## 1. Why SMT alongside an equational saturator
 
-`TFindProof` (see `docs/tutorial/atp_methods.md`) is an unfailing
+`TFindProof` (see `docs/ATP/atp_methods.md`) is an unfailing
 Knuth-Bendix completion engine: it handles universally-quantified
 equational axioms by saturating critical pairs (CPs). That is the right
 tool when axioms have free variables (e.g. `and(X, Y) = and(Y, X)`).

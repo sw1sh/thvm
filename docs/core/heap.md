@@ -1,59 +1,53 @@
 # Heap
 
-A flat array of `Term` cells with a single bump pointer. Single
-threaded today. Defined in [src/thvm.h](../src/thvm.h)
-(`HEAP`, `HEAP_NEXT`, `HEAP_CAP`), allocated by `thvm_init` in
-[src/thvm.c](../src/thvm.c).
+A flat array of `Term` cells with a bump pointer per context, collected by a
+Cheney copying GC. `HEAP` and `HEAP_CAP` are defined in
+[src/thvm.h](../../src/thvm.h); the arenas are mapped by `thvm_init` in
+[src/thvm.c](../../src/thvm.c).
 
 ## Capacity
 
 ```c
-#define HEAP_CAP (1ULL << 24)   // 16M cells * 8 bytes = 128 MiB
+#define HEAP_CAP (1ULL << 28)   // 256M cells * 8B = 2 GiB
 ```
 
-The cap is sized for tests and exploration, not production. Bump it
-when needed.
+`THVM_HEAP_CELLS` overrides the allowance once per process
+(`thvm_heap_cells`, [src/heap/collect.c](../../src/heap/collect.c)). The dyn
+heap and the book heap (static terms, `THVM_BOOK_CELLS`) are `mmap(MAP_ANON)`
+arenas: reserving the range costs no resident memory until cells are touched,
+and the pages are page-aligned so Metal can wrap the book heap as a shared
+buffer.
 
 ## Allocator
 
-[src/heap/alloc.c](../src/heap/alloc.c):
+[src/heap/alloc.c](../../src/heap/alloc.c): `heap_alloc(size)` bumps
+`CURRENT_CTX->heap_next` with an atomic fetch-add, so the parallel `nf` pool
+([src/wnf/pool.c](../../src/wnf/pool.c)) allocates without losing cells. The
+limit is the end of the GC from-space when the GC is on, else the heap
+allowance. Exhaustion calls `thvm_fatal`, which returns an error to Wolfram
+when a LibraryLink entry installed a recovery point and exits otherwise.
 
-```c
-fn u64 heap_alloc(u64 size) {
-  u64 at   = HEAP_NEXT;
-  u64 next = at + size;
-  if (next > HEAP_CAP) {
-    fprintf(stderr, "heap_alloc: out of memory ...");
-    exit(1);
-  }
-  HEAP_NEXT = next;
-  return at;
-}
-```
+## Garbage collection
 
-Bump-only, no freelist, no GC. Interaction-net programs do not need
-a GC: terms become unreachable when they are erased by an interaction
-(the eraser end of an active pair leaves dangling cells that are
-never visited again). A periodic compaction pass could reclaim them
-if memory pressure ever matters; today, it doesn't.
+[src/heap/collect.c](../../src/heap/collect.c) splits `HEAP` into two
+semi-spaces. After a realize under heap or device pressure
+(`thvm_realize_maybe_gc`, [src/schedule/realize.c](../../src/schedule/realize.c);
+`THVM_GC_KB`, `THVM_GC_DEVICE_MB`) `gc_collect` evacuates the roots and every
+side table that holds Terms; tables keyed by loc re-key through forward
+pointers, and the hash-cons and upload caches are cleared. A permanent tail
+past the semi-spaces (`THVM_HEAP_PERM_CELLS`, `heap_perm_alloc`) holds
+atom-only nodes that are never collected.
 
-## Read / write / take
+## Read / write
 
-[src/heap/read.c](../src/heap/read.c),
-[src/heap/set.c](../src/heap/set.c),
-[src/heap/take.c](../src/heap/take.c):
-
-```c
-fn Term heap_read(u64 loc) { return HEAP[loc]; }
-fn void heap_set(u64 loc, Term t) { HEAP[loc] = t; }
-fn Term heap_take(u64 loc) { Term t = HEAP[loc]; HEAP[loc] = 0; return t; }
-```
-
-`heap_take` is "read and zero". The reducer uses it on DP0/DP1 entry
-to claim the dup cell exactly once: the first projection to arrive
-sees the body (and pushes a DP frame); the second sees a zero or, if
-the first projection has already fired its interaction, sees a
-SUB-tagged cell holding its value.
+[src/heap/read.c](../../src/heap/read.c), [src/heap/set.c](../../src/heap/set.c)
+are plain loads and stores. The concurrent variants pair up for the parallel
+pool: `heap_set_rel` ([src/heap/set_rel.c](../../src/heap/set_rel.c)) and
+`heap_subst_var` release-store, `heap_read_acq`
+([src/heap/read_acq.c](../../src/heap/read_acq.c)) acquire-loads, and
+`heap_take_atomic` ([src/heap/take_atomic.c](../../src/heap/take_atomic.c))
+exchanges a cell with 0, so of the workers racing for a DP body exactly one
+gets it.
 
 ## Substitution model
 
@@ -70,11 +64,12 @@ something the other side will eventually look up. The convention:
    strips the bit with `term_sub_set(cell, 0)`, and continues with
    that value as if the indirection never existed.
 
-[src/heap/subst_var.c](../src/heap/subst_var.c):
+[src/heap/subst_var.c](../../src/heap/subst_var.c):
 
 ```c
 fn void heap_subst_var(u64 loc, Term value) {
-  HEAP[loc] = term_sub_set(value, 1);
+  __atomic_store_n(&HEAP[loc], (u64)term_sub_set(value, 1), __ATOMIC_RELEASE);
+  WIRE_PROV_BUMP(loc);
 }
 ```
 
@@ -83,7 +78,7 @@ one of them is "active" right now (the one whose frame is on the
 stack). The active side gets the result returned; the other side gets
 a substitution installed at the dup cell.
 
-[src/heap/subst_cop.c](../src/heap/subst_cop.c):
+[src/heap/subst_cop.c](../../src/heap/subst_cop.c):
 
 ```c
 fn Term heap_subst_cop(u8 side, u64 loc, Term r0, Term r1) {
@@ -98,10 +93,9 @@ side 1.
 
 ## Lifecycle
 
-`thvm_init()` calloc's `HEAP_CAP` cells (zeroed) and resets
-`HEAP_NEXT` and the WNF stack. `thvm_free()` releases the buffers.
-`TReset[]` from the WL paclet zeroes the heap and reinitializes the
-counters without freeing.
+`thvm_init()` maps the arenas and resets the heap pointer and the WNF stack;
+`thvm_free()` unmaps them. `TReset[]` from the WL paclet zeroes the heap and
+reinitializes the counters without unmapping.
 
 ## Worked example: APP-LAM substitution flow
 

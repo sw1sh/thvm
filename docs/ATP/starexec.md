@@ -267,7 +267,7 @@ bin/FindProof --schedule --szs --proof --wall=<limit> PROBLEM.p
   slices run on to their own walls. The slice set (the `SCHEDULE[]`
   table in `tools/atp_cli/main.c`; `FindProof --list-lanes` prints the lane
   names) is documented in
-  `docs/atp/casc_strategy.md` section 3: the Waldmeister preset, the
+  `docs/ATP/casc_strategy.md` section 3: the Waldmeister preset, the
   existential-goal lanes (equals encoding + narrowing queue), the forward and
   backward condensed-detachment lanes, the FOF pack,
   definition unfolding (alone and composed with goal naming), goal flattening

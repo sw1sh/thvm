@@ -523,7 +523,7 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
 * `bin/FindProof --problem-features problem.p` prints one TSV row of
   the problem's features phi(p), the per-problem input of the ENIGMA
   selection layer (`AtpPhi` in `src/thvm.h`, layout version
-  `ATP_PHI_VERSION`; docs/plans/enigma_portfolio.md, section 3.1): the
+  `ATP_PHI_VERSION`; docs/ATP/enigma_portfolio.md, section 3.1): the
   lanes' exit-fast gate bits, computed by the gates' own predicates;
   Waldmeister's structure detection over the loaded .pr (AC pairs,
   units, inverses, distributivity); sizes as floor(log2(1 + n)); then
@@ -554,7 +554,7 @@ inventory is a grep for `getenv` / `atp_env_on` across `src/atp/`,
   and with `-s` only phi(p) and the replica (the J13 set);
   `tools/atp_enigma/matrix_tables.py --t7c` checks the replica against
   the pool rows of the lane matrix.
-* `docs/ENV_KNOBS.md` carries the repo-wide index; its ATP section
+* `docs/NN/env_knobs.md` carries the repo-wide index; its ATP section
   points here.
 
 The table below is the STABLE bench/debug subset — the knobs that

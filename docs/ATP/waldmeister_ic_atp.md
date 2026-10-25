@@ -29,7 +29,7 @@ ATP-superposition (a logical inference rule, refined paramodulation).
 The plan below uses the former to encode the search-space of the
 latter, but they live at different layers.  See the *Equational
 reasoning and the IC-as-ATP layer* section of
-[../glossary.md](../glossary.md) for a complete table including
+[../core/glossary.md](../core/glossary.md) for a complete table including
 related terms (paramodulation, critical pair, bisubstitution / cosubstitution
 in Wolfram's sense, unification, joinability, saturation, ...).
 

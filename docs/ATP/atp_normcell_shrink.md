@@ -5,7 +5,7 @@ mission demanded BEFORE any multi-week rewrite of thvm's hottest data
 structure (the 24-byte `AtpFtCell` traversed by `ftdt_descend3`, ~50% of
 engine self-time on the byte-identical OrAssociativity/FEQ trajectory).
 
-READ-ORDER: docs/plans/atp_inplace_rewrite.md (the payoff table + the
+READ-ORDER: docs/ATP/atp_inplace_rewrite.md (the payoff table + the
 "normalize excess = per-node constant factor" finding, Section 2) ->
 project_atp_wm_speed_profiled.md later-14/23/24/25/28 (the sub-bar
 refutations) -> this doc.

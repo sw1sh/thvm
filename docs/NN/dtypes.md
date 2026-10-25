@@ -10,10 +10,10 @@ run in the UOp walker instead.  BLAS and Metal cover narrower sets (see
 Backend coverage).
 
 Reference:
-- enum + DTypeInfo:    [src/dtype/info.c](../src/dtype/info.c)
-- dtype primitives:    [src/dtype/lane.c](../src/dtype/lane.c) · [src/dtype/fp_convert.c](../src/dtype/fp_convert.c) · [src/dtype/fp8.c](../src/dtype/fp8.c) · [src/dtype/nibble.c](../src/dtype/nibble.c)
-- enum:                [src/thvm.h:167](../src/thvm.h#L167)
-- WL surface:          [wl/THVMLink/Kernel/Tensor.wl](../wl/THVMLink/Kernel/Tensor.wl) (`naTypeFor`, `TTensorCreate[..., dtype_String]`, `TUOpCast`, `TUOpBitcast`)
+- enum + DTypeInfo:    [src/dtype/info.c](../../src/dtype/info.c)
+- dtype primitives:    [src/dtype/lane.c](../../src/dtype/lane.c) · [src/dtype/fp_convert.c](../../src/dtype/fp_convert.c) · [src/dtype/fp8.c](../../src/dtype/fp8.c) · [src/dtype/nibble.c](../../src/dtype/nibble.c)
+- enum:                [src/thvm.h:167](../../src/thvm.h#L167)
+- WL surface:          [wl/THVMLink/Kernel/Tensor.wl](../../wl/THVMLink/Kernel/Tensor.wl) (`naTypeFor`, `TTensorCreate[..., dtype_String]`, `TUOpCast`, `TUOpBitcast`)
 
 ## Table
 
@@ -61,7 +61,7 @@ hoists is an `__auto_type` local, which keeps the type of its
 expression, so hoisting never converts a value.
 
 The CPU UOp walker
-([src/backend/cpu/uop_walk.c](../src/backend/cpu/uop_walk.c)) gives
+([src/backend/cpu/uop_walk.c](../../src/backend/cpu/uop_walk.c)) gives
 each subterm the C type the legacy C emit renders for it and computes
 in that type, so it agrees with the CPU JIT.  An f32 value is a
 `float`, as are f16, bf16 and fp8 values; an f64 value, a CONST of
@@ -86,9 +86,9 @@ arm64 by default) rounds once where the walker rounds twice.
 Promote-to-f32 lanes -- f16, bf16, fp8e4m3, fp8e5m2.  No native ALU
 on the CPU.  The CPU JIT declines any kernel with a buffer of these
 dtypes (`cpu_jit_narrow_float` in
-[src/backend/cpu/jit.c](../src/backend/cpu/jit.c)), so the kernel runs
+[src/backend/cpu/jit.c](../../src/backend/cpu/jit.c)), so the kernel runs
 in the UOp walker
-([src/backend/cpu/uop_walk.c](../src/backend/cpu/uop_walk.c)): each
+([src/backend/cpu/uop_walk.c](../../src/backend/cpu/uop_walk.c)): each
 load decodes to f32, the ALU computes in the C emit's types (a float,
 or a double for exp2, log2 and sqrt), and each store narrows through
 f32.  bf16 and fp8 round-trip exact for their representable values,
@@ -110,7 +110,7 @@ through `f2f_clamp(sat=True)` and `f2f`
 (codegen/decomp/dtype.py:115-134).  The walker's STORE into an fp8
 buffer ports that rule in `f32_to_fp8e4m3_sat` / `f32_to_fp8e5m2_sat`,
 and so does the fill of a realized CONST (`const_to_tendesc` in
-[src/schedule/materialize.c](../src/schedule/materialize.c)), because
+[src/schedule/materialize.c](../../src/schedule/materialize.c)), because
 tinygrad realizes a constant in a kernel: `Tensor.full`, a 0-d Tensor
 and a CAST that folds to a constant all store it.  inf stores as
 MAXNORM (0x7e / 0xfe for fp8e4m3, 0x7b / 0xfb for fp8e5m2), so a
@@ -169,7 +169,7 @@ lanes and a lowered inner reduce included, and combines a bool SUM as
 it does a MAX, which is an OR on {0, 1}.
 
 Packed nibble lanes -- i4, u4.  Storage is 2 nibbles per byte, low
-nibble first ([src/dtype/nibble.c](../src/dtype/nibble.c)).  No
+nibble first ([src/dtype/nibble.c](../../src/dtype/nibble.c)).  No
 kernel handles them: the UOp walker has no nibble load or store, and
 the C renderer would type an i4 / u4 buffer as float.  A realize that
 would compute one (an elementwise, movement or reduce op over an i4 /
@@ -209,7 +209,7 @@ packed nibbles survive; a destination view of packed nibbles that
 starts or ends inside a byte keeps the byte's other nibble.  When they
 differ it stores the source values
 at the destination dtype as a CAST kernel would (`tensor_assign` in
-[src/tensor/assign.c](../src/tensor/assign.c)): it reads each value in
+[src/tensor/assign.c](../../src/tensor/assign.c)): it reads each value in
 the source's lane, so a float stored into a bool is x != 0 and an int
 reaches a float rounded once.  tinygrad casts a weak (Python-scalar)
 value before assigning and raises on any other mismatch
@@ -242,9 +242,7 @@ Folding rules, all at the constructor level:
 ## Quantization
 
 The dequantization pattern composes through CAST + arithmetic.  No
-dedicated UOP_DEQUANT / UOP_QUANT primitives -- matches tinygrad's
-choice (see TinyHVM/tinygrad/tinygrad/codegen/quantize.py for
-tinygrad's pattern-rewrite-based approach).  The CPU backend has no
+dedicated UOP_DEQUANT / UOP_QUANT primitives, as in tinygrad.  The CPU backend has no
 kernel path for the int4 CAST (see ALU strategy), so the example
 shows the pattern, not a result thvm computes.
 
@@ -274,7 +272,7 @@ a view-only no-op when contiguous-compatible).
 | Metal shader library (DAG encoder) | f32 / i32 (`metal_kernel_supported`) |
 
 A CPU kernel goes down the ladder in `cpu_dispatch_kernel`
-([src/backend/cpu/interpret.c](../src/backend/cpu/interpret.c)):
+([src/backend/cpu/interpret.c](../../src/backend/cpu/interpret.c)):
 BLAS, then the JIT, then the UOp walker, which takes whatever the
 first two decline.
 

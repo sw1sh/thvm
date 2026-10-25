@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# docs/aot_emitted_examples/_gen.sh
+# docs/core/aot_emitted_examples/_gen.sh
 #
 # Regenerate the emit snapshots in this directory.  Each snapshot
 # is produced by a fresh wolframscript invocation -- chaining
@@ -8,14 +8,14 @@
 # unrelated to the new emit code).
 #
 # Run from repo root:
-#     bash docs/aot_emitted_examples/_gen.sh
+#     bash docs/core/aot_emitted_examples/_gen.sh
 #
 # Refresh after any non-trivial change to src/aot/emit.c.
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-OUT_DIR="docs/aot_emitted_examples"
+OUT_DIR="docs/core/aot_emitted_examples"
 
 emit_one() {
     local name="$1" wl_def="$2" header="$3"
@@ -35,11 +35,11 @@ emit_one() {
     commented_header=$(printf '%s\n' "$header" | awk '{print "// " $0}')
 
     cat > "$out" <<EOF
-// docs/aot_emitted_examples/$name.c
+// docs/core/aot_emitted_examples/$name.c
 //
 $commented_header
 //
-// Regenerate via: bash docs/aot_emitted_examples/_gen.sh
+// Regenerate via: bash docs/core/aot_emitted_examples/_gen.sh
 
 $body
 EOF
@@ -101,7 +101,7 @@ emit_one "tree_build" \
      ][d]]]" \
     "Bend2-style tree builder.  Returns a binary tree of depth
 args[0] = d, with leaves carrying args[1] = x.  Source matches
-TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c's
+Bend2's compiled parallel tree sum's
 \`build\` def (same fork shape, different surface syntax).
 
 Shows:
@@ -121,4 +121,4 @@ Shows:
     unwrap before the tag check fires"
 
 echo
-echo "done -- regenerate any time with: bash docs/aot_emitted_examples/_gen.sh"
+echo "done -- regenerate any time with: bash docs/core/aot_emitted_examples/_gen.sh"

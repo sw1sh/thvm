@@ -2,7 +2,7 @@
 
 Scoping plan (2026-09-28). Not a landed change; go / no-go gates per phase.
 
-Superseded 2026-10-01 for all ENIGMA work by docs/plans/enigma_portfolio.md (ENIGMA versus the CASC portfolio); the phase results below stay as the record.
+Superseded 2026-10-01 for all ENIGMA work by docs/ATP/enigma_portfolio.md (ENIGMA versus the CASC portfolio); the phase results below stay as the record.
 
 ## Why now
 

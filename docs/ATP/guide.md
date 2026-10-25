@@ -1,6 +1,6 @@
 # The ENIGMA selection layer (`src/atp/guide.c`)
 
-The learned layer of a guided twin (docs/plans/enigma_portfolio.md,
+The learned layer of a guided twin (docs/ATP/enigma_portfolio.md,
 section 3.1).  A twin is a base lane's flags plus `--guide=<family>`; at
 every weight pick (the heap-root branch of `thvm_atp_select_cp`, once the
 KD-heap, w2, goal, random and FIFO / age dimensions declined) a

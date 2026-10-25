@@ -16,7 +16,7 @@
 > throughput + queue-economics (implicit-pair storage), NOT selection order -- c3 still
 > diverges on the SAME HEAD that already has 38290-pick parity.
 
-*Historical snapshot (2026-07 from git log); knob names and numbers may predate the current CLI -- see docs/atp/README.md for the live map.*
+*Historical snapshot (2026-07 from git log); knob names and numbers may predate the current CLI -- see docs/ATP/README.md for the live map.*
 
 Scoped follow-up plan. This document pins the *matched* goal/config, the
 Waldmeister reference trajectory, thvm's trajectory, the first divergence

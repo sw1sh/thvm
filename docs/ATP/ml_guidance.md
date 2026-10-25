@@ -3,8 +3,8 @@
 How thvm uses machine learning (ML) to guide its automated theorem prover
 (ATP), what the wider field does, and the concrete API + architecture that
 ship today. Companion to the staged plan in
-`docs/plans/atp_ml_roadmap.md` and the practitioner's tour in
-`docs/tutorial/atp_methods.md`.
+`docs/ATP/atp_ml_roadmap.md` and the practitioner's tour in
+`docs/ATP/atp_methods.md`.
 
 Abbreviations (spelled out on first use):
 
@@ -115,7 +115,7 @@ Search, AlphaProof, DeepSeek-Prover). Powerful but not applicable to a
 saturation engine; out of scope here.
 
 A standing survey of where thvm sits relative to the field is in
-`docs/atp/survey.md`.
+`docs/ATP/survey.md`.
 
 ## 4. What thvm ships
 
@@ -176,7 +176,7 @@ goal-closing step, else 0. It seeds from the rules the proof extractor
 says joined the goal, walks their `TRACE_ORIENT` lineage backward, and
 flags every recorded CP whose trace id falls in that set. This is exact
 dependency, not a size/age heuristic. Design note:
-`docs/plans/atp_enigma_cp_selector.md`.
+`docs/ATP/atp_enigma_cp_selector.md`.
 
 ### 4.3 Dataset generation -- `TAtpCpDataset`
 
@@ -329,7 +329,7 @@ roadmap:
 ## 6. Roadmap
 
 Four tiers, built top-to-bottom; full detail in
-`docs/plans/atp_ml_roadmap.md`.
+`docs/ATP/atp_ml_roadmap.md`.
 
 1. **Neural scorer on the 14 features + the learning loop** -- BUILT
    (this document). Toolchain done, loop closes, measured baseline above.

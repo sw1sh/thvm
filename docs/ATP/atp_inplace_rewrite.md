@@ -1,6 +1,6 @@
 # ATP in-place architectural rewrite (Phase A: decision-grade plan)
 
-*Historical snapshot (2026-07 from git log); knob names and numbers may predate the current CLI -- see docs/atp/README.md for the live map.*
+*Historical snapshot (2026-07 from git log); knob names and numbers may predate the current CLI -- see docs/ATP/README.md for the live map.*
 
 Status: PHASE A DELIVERED 2026-07-04. This is the consolidated payoff model
 plus a dependency-ordered phased design for closing the residual ~1.1-1.25x
@@ -11,7 +11,7 @@ sub-bar (retrieval index, normalize recursion, heap-Term interchange,
 CP-selection heap; see memory project_atp_wm_speed_profiled.md later-21..27).
 
 READ-ORDER for a future implementing agent: this doc (payoff + phases) ->
-docs/plans/atp_heap_leak.md ("Connection to the heap-overhead refactor") ->
+docs/ATP/atp_heap_leak.md ("Connection to the heap-overhead refactor") ->
 project_atp_wm_speed_profiled.md later-23/24/25/27 (the sub-bar refutations
 this plan must not re-litigate).
 
@@ -29,7 +29,7 @@ THE HEADLINE VERDICT (see Section 6 for the full argument):
   killed EVERY piecemeal attempt so far (O(1) free +0.35s, iterative descent
   +1.15s, FT-pop -0.07s, index-heap ~0.00s).
 - GO/NO-GO: Phase 1 (arena consolidation) has an INDEPENDENT correctness
-  justification (it subsumes the heap-leak bug class, docs/plans/atp_heap_leak.md)
+  justification (it subsumes the heap-leak bug class, docs/ATP/atp_heap_leak.md)
   and is ~90% already realized for FT cells -- recommended. Phase 2 (in-place
   RHS splice) is the largest speed lever and the one untested combination --
   worth ONE gated round. Phases 3-4 (dual-storage collapse, flatterm CP queue)
@@ -85,7 +85,7 @@ THE HEADLINE VERDICT (see Section 6 for the full argument):
   the redex cells (~0 net alloc) + O(1) dealloc.
 - The heap-leak recycle stopgap (693cedfa, recycle via full gc_collect) is
   live; a dedicated arena for the remaining heap-Terms would supersede it
-  (docs/plans/atp_heap_leak.md).
+  (docs/ATP/atp_heap_leak.md).
 
 The mission's one-line framing -- "native uses a bump arena + in-place rewrite,
 thvm uses a GC + per-rewrite alloc" -- is thus HALF ALREADY DONE: the FT arena
@@ -167,7 +167,7 @@ otherwise keep default-OFF and record the measured negative.
 Change: carve the ATP heap-Terms (s->lhs dual store, trace Terms, CP-unpack
 images) out of the shared Cheney semi-space into a dedicated ATP bump arena,
 reset per outermost run. This SUPERSEDES the heap-leak recycle stopgap
-(docs/plans/atp_heap_leak.md) and removes thvm_atp_gc_collect from the ATP
+(docs/ATP/atp_heap_leak.md) and removes thvm_atp_gc_collect from the ATP
 steady state. The KBO weight memo is keyed by (epoch, Term loc); an arena
 never relocates, so the memo's GC-relocation invalidation dance
 (src/atp/_.c:6633) disappears and the memo stays valid across the whole run.

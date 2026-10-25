@@ -20,7 +20,7 @@ The prover has two user surfaces:
   [casc_strategy.md](casc_strategy.md) and [starexec.md](starexec.md).
 * **`TFindProof`** in the Wolfram Language (WL) paclet
   (`wl/THVMLink/Kernel/ATP/`): returns a real `ProofObject`. See
-  `docs/tutorial/atp_methods.md` and
+  `docs/ATP/atp_methods.md` and
   [cli_process_methods.md](cli_process_methods.md).
 
 ## Current standing (as of 2026-07-16)
@@ -66,9 +66,9 @@ Living documents (kept current with the code):
 * **[cli_process_methods.md](cli_process_methods.md)** -- the WL
   `Method -> "<X>Process"` bridge to external provers
   (Vampire/Twee/Waldmeister/E) and the shared proof-object lift.
-* **`docs/tutorial/atp_methods.md`** -- the WL `TFindProof` Method /
+* **`docs/ATP/atp_methods.md`** -- the WL `TFindProof` Method /
   suboption catalog (the user-facing knob surface).
-* **`docs/ENV_KNOBS.md`** -- the repo-wide env-variable index; the ATP
+* **`docs/NN/env_knobs.md`** -- the repo-wide env-variable index; the ATP
   section points back here.
 
 Historical snapshots (design notes and closed investigations; knob

@@ -1,38 +1,45 @@
 # Wolfram Language bridge
 
-[wl/THVMLink/](../wl/THVMLink/) is a LibraryLink paclet that exposes
-the C runtime to Wolfram. It is primarily an *observation* layer: you
-construct terms from Wolfram, reduce them, inspect the heap as an
-`Association`, and correlate results against `ITRS`. All higher-level
-constructors (`TLam`, `TApp`, `TSup`, `TDup`) are synthesized on the
-WL side from a minimal C surface.
+[wl/THVMLink/](../../wl/THVMLink/) is the LibraryLink paclet
+(`WolframInstitute`THVMLink``) that exposes the C runtime to Wolfram: IC terms
+and the heap, tensors and UOps, kernels and autotuning, the NN layers, the
+optimizers, the JIT, and the ATP (automated theorem proving) entries
+(`TFindProof`). This page covers the bridge and the IC-level constructors; the
+tensor and NN surfaces are documented with their pieces under [../NN/](../NN/),
+the ATP surface under [../ATP/](../ATP/).
 
-WL-side style rules live in [wl/GUIDE.md](../wl/GUIDE.md). Read that
-before touching anything under `wl/`.
+WL-side style rules live in [wl/GUIDE.md](../../wl/GUIDE.md), and the paclet
+documentation rules in [wl/THVMLink/docs/DOC_GUIDE.md](../../wl/THVMLink/docs/DOC_GUIDE.md).
+Read them before touching anything under `wl/`.
 
 ## Layout
 
 ```
 wl/THVMLink/
   PacletInfo.wl                   paclet manifest
-  Kernel/THVMLink.wl              public API + LibraryFunctionLoad bindings
-  Kernel/Format.wl                summary boxes for THeap, TTermInfo, ...
-  CSource/thvmlink.c              LibraryLink bridge, single-TU
-  Tests/core.wlt                  VerificationTest specs
-  Tests/run.wls                   test runner script
-  LibraryResources/<platform>/    compiled dylib (gitignored)
+  CSource/thvmlink.c              LibraryLink bridge, single-TU (#includes src/thvm.c)
+  CSource/thvmlink_atp.c          the ATP entries of the bridge
+  Kernel/THVMLink.wl              loader hub: LibraryFunctionLoad bindings,
+                                  constants, IC constructors
+  Kernel/*.wl                     one sibling package per concern (Tensor, Uop,
+                                  Kernel, Jit, Optim, Heap, Visualization, ...)
+  Kernel/NN/                      NN layers and model examples
+  Kernel/ATP/                     TFindProof and the external-prover methods
+  Tests/*.wlt                     VerificationTest suites; Tests/run.wls runs them
+  docs/                           paclet documentation source (Markdown)
+  LibraryResources/<platform>/    compiled library (gitignored)
 ```
 
-`Kernel/THVMLink.wl` `Get`s `Format.wl` after the public symbols are
-declared so the formatter can attach `MakeBoxes` rules to them.
+[wl/THVMLink/Kernel/README.md](../../wl/THVMLink/Kernel/README.md) maps each
+Kernel file to the symbols it owns.
 
-## C bridge (scalar-in, scalar-out)
+## C bridge
 
-[wl/THVMLink/CSource/thvmlink.c](../wl/THVMLink/CSource/thvmlink.c)
-includes the entire runtime via
-`#include "../../../src/thvm.c"` (single-TU build) and exports 14
-`EXTERN_C DLLEXPORT` functions. Every function takes only `Integer`
-arguments and returns a single `Integer`:
+[wl/THVMLink/CSource/thvmlink.c](../../wl/THVMLink/CSource/thvmlink.c)
+includes the entire runtime via `#include "../../../src/thvm.c"` (single-TU
+build) and exports the `thvm_wl_*` `EXTERN_C DLLEXPORT` functions;
+[thvmlink_atp.c](../../wl/THVMLink/CSource/thvmlink_atp.c) adds the ATP ones.
+The IC core of that surface is scalar-in, scalar-out:
 
 | Kind       | Symbol               | Wraps                     |
 | ---------- | -------------------- | ------------------------- |
@@ -44,67 +51,55 @@ arguments and returns a single `Integer`:
 |            | `thvm_wl_term_ext`   | `term_ext`                |
 |            | `thvm_wl_term_val`   | `term_val`                |
 |            | `thvm_wl_term_sub`   | `term_sub_get`            |
-| heap       | `thvm_wl_heap_pos`   | read `HEAP_NEXT`          |
+| heap       | `thvm_wl_heap_pos`   | read the heap pointer     |
 |            | `thvm_wl_heap_alloc` | `heap_alloc`              |
 |            | `thvm_wl_heap_read`  | `heap_read`               |
 |            | `thvm_wl_heap_set`   | `heap_set`                |
 | reduce     | `thvm_wl_wnf`        | `wnf`                     |
 | stats      | `thvm_wl_itrs`       | read `ITRS`               |
 
-Higher-level constructors that bind names (`TLam[x, body]` with
-HoldAll, `TDup[body]` returning `{dp0, dp1}`) are synthesized on the
-WL side from these scalars. This keeps the C surface tiny and
-testable from C alone.
+Higher-level constructors that bind names (`TLam[x, body]` with HoldAll,
+`TDup[body]` returning `{dp0, dp1}`) are synthesized on the WL side from these
+scalars, which keeps the C surface small and testable from C alone. The NN
+layers go through one flat entry, `thvm_wl_nn` (see [../NN/nn.md](../NN/nn.md)).
 
-## WL package
+## IC constructors
 
-[wl/THVMLink/Kernel/THVMLink.wl](../wl/THVMLink/Kernel/THVMLink.wl)
-maps each scalar function to a named `LibraryFunctionLoad` result
-(lazy, memoized via `:=`) and builds higher-level helpers on top.
-
-High-level constructors use two shared helpers:
+[wl/THVMLink/Kernel/THVMLink.wl](../../wl/THVMLink/Kernel/THVMLink.wl) maps
+each bridge function to a named `LibraryFunctionLoad` result and builds the
+constructors on two shared helpers:
 
 ```wolfram
 heapWith[fields__] := With[{loc = THeapAlloc[Length[{fields}]]},
-    ScanIndexed[THeapSet[loc + First[#2] - 1, #1] &, {fields}];
+    ScanIndexed[THeapSet[loc + First[#2] - 1, numCoerce[#1]] &, {fields}];
     loc
 ]
 
-heapTerm[tag_Integer, ext_Integer, fields__] :=
-    TTermNew[0, tag, ext, heapWith[fields]]
+heapTerm[tag_Integer, ext_Integer, fields__] := packTerm[0, tag, ext, heapWith[fields]]
 ```
 
-Then `TApp[f, x]` is `heapTerm[$TagAPP, 0, f, x]`, `TSup[label, a, b]`
-is `heapTerm[$TagSUP, label, a, b]`, and so on.
+`numCoerce` lifts a bare Integer field to the NUM with that value. Then
+`TApp[f, x]` is `heapTerm[$TagAPP, 0, f, x]`, `TSup[label, a, b]` is
+`heapTerm[$TagSUP, label, a, b]`, and so on.
 
-`TLam[x, body]` needs the binder loc *before* it can compute the
-body (the body references the binder), so it doesn't share
-`heapWith`.  It uses `HoldAll` so the body stays unevaluated until
-`Function[x, body]` substitutes the freshly-allocated `TVarFor[loc]`
-for `x`:
+`TLam[x, body]` needs the binder loc *before* it can compute the body (the body
+references the binder), so it does not share `heapWith`. It uses `HoldAll` so
+the body stays unevaluated until `Function[x, body]` substitutes the
+freshly allocated `TVarFor[loc]` for `x`:
 
 ```wolfram
 SetAttributes[TLam, HoldAll]
 TLam[x_Symbol, body_] := With[{loc = THeapAlloc[1]},
-    THeapSet[loc, Function[x, body][TVarFor[loc]]];
-    TTermNew[0, $TagLAM, 0, loc]
+    THeapSet[loc, numCoerce[Function[x, body][TVarFor[loc]]]];
+    packTerm[0, $TagLAM, $lamSealExtFn[loc, 0], loc]
 ]
 ```
 
-`TDup[body]` returns the pair `{dp0, dp1}` because `TDup` allocates
-a single dup cell but produces two terms (a DP0 and a DP1 sharing
-that cell):
-
-```wolfram
-TDup[label_Integer, body_] := With[{loc = heapWith[body]},
-    {TTermNew[0, $TagDP0, label, loc],
-     TTermNew[0, $TagDP1, label, loc]}
-]
-```
-
-The CPS variants `TDup[body, k]` / `TDup[label, body, k]` just apply
-`k` to that pair (`k @@ TDup[label, body]`), which reads well inside
-a term builder: `TDup[s, {s0, s1} |-> ...]`.
+`TLam[body]` is the lambda whose binder is unused. `TDup[label, body]` returns
+the pair `{dp0, dp1}`: one dup cell, two projections sharing it. `TDup[body]`
+draws a fresh label from `TFreshLabel[]`, and the CPS variants
+`TDup[body, k]` / `TDup[label, body, k]` apply `k` to the pair, which reads
+well inside a term builder: `TDup[s, {s0, s1} |-> ...]`.
 
 ## Sugar
 
@@ -160,18 +155,18 @@ render".
 ## Build
 
 ```sh
-make wl            # compile wl/THVMLink/CSource/thvmlink.c -> dylib
-make wl-test       # build + run wl/THVMLink/Tests/run.wls
+make wl            # compile the bridge into LibraryResources/<platform>/
+make wl-test       # build, then run every wl/THVMLink/Tests/*.wlt
+make wl-cross      # libraries for all five Wolfram platforms (PacletPack)
 ```
 
-The Makefile auto-detects the newest `/Applications/Wolfram*.app`;
-override with `make WOLFRAM_APP="/Applications/Wolfram X.Y.app" wl`.
+The Makefile picks the newest `/Applications/Wolfram*.app` that ships the
+LibraryLink headers; override with
+`make WOLFRAM_APP="/Applications/Wolfram X.Y.app" wl`.
 
 ## Tests
 
-[wl/THVMLink/Tests/core.wlt](../wl/THVMLink/Tests/core.wlt) is a
-sequence of `VerificationTest` entries. The runner
-[wl/THVMLink/Tests/run.wls](../wl/THVMLink/Tests/run.wls) loads the
-paclet, calls `TestReport` on every `.wlt` in the Tests directory,
-prints a one-line summary to stdout, lists any failures, and exits
-non-zero on any failure.
+[wl/THVMLink/Tests/run.wls](../../wl/THVMLink/Tests/run.wls) loads the paclet,
+calls `TestReport` on every `.wlt` in the Tests directory, prints a one-line
+summary, lists any failures, and exits non-zero on any failure.
+[core.wlt](../../wl/THVMLink/Tests/core.wlt) holds the IC-level specs.

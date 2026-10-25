@@ -57,7 +57,7 @@ would unify all five" -- is more rallying cry than result, but the
   revival is **neurosymbolic AI** (concept bottlenecks, program
   synthesis, formal verification of LLM outputs, theorem-prover-in-the-
   loop reasoning). thvm's own waldmeister / ATP (automated theorem
-  proving) layer (see `docs/research/atp_ic_native.md`) is firmly in
+  proving) layer (see `docs/ATP/atp_ic_native.md`) is firmly in
   this tribe.
 
 ### 2. Connectionists -- "intelligence emerges from networks of simple units"
@@ -371,8 +371,8 @@ engineering line:
   (domain-specific language) today.
 - **JAX, tinygrad, thvm** -- whole compute stacks built on
   *tensor primitives plus a small set of universal operations*.
-  thvm's UOps + rangeify pipeline ([../wl.md](../wl.md),
-  [../grad.md](../grad.md)) lives explicitly in this lineage:
+  thvm's UOps + rangeify pipeline ([../core/wl.md](../core/wl.md),
+  [../NN/grad.md](../NN/grad.md)) lives explicitly in this lineage:
   programs are tensor expressions that get lowered to
   scheduled / kernelised / fused contractions.
 
@@ -624,7 +624,7 @@ for fully-fleshed experiments.
   DeepSeek-R1-Zero, and it stresses the same autodiff + sampling +
   reward loop you'd want for any RL-on-LLM experiment.
 - **Symbolist-connectionist hybrid.** Pair thvm's autodiff with the
-  waldmeister / ATP layer (`docs/research/atp_ic_native.md`) so a
+  waldmeister / ATP layer (`docs/ATP/atp_ic_native.md`) so a
   small neural net proposes rewrites and the ATP layer verifies them
   -- a tiny neurosymbolic verifier-in-the-loop loop. This is the
   experimental shape that RLVR is generalising at LLM scale.

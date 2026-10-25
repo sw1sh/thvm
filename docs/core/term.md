@@ -1,9 +1,9 @@
 # Term layout
 
 Every value in the runtime is a single 64-bit word called a **term**.
-Defined in [src/thvm.h](../src/thvm.h), packed by
-[src/term/new.c](../src/term/new.c), unpacked by the four accessors
-under [src/term/](../src/term/).
+Defined in [src/thvm.h](../../src/thvm.h), packed by
+[src/term/new.c](../../src/term/new.c), unpacked by the four accessors
+under [src/term/](../../src/term/).
 
 For the visual / IC interpretation of these terms (agents, ports,
 wires, eraser dots, substitution holders), see
@@ -88,12 +88,12 @@ Pure bit-twiddling, all `static inline`:
 
 | Function          | Source                               |
 | ----------------- | ------------------------------------ |
-| `term_new`        | [src/term/new.c](../src/term/new.c) |
-| `term_tag`        | [src/term/tag.c](../src/term/tag.c) |
-| `term_ext`        | [src/term/ext.c](../src/term/ext.c) |
-| `term_val`        | [src/term/val.c](../src/term/val.c) |
-| `term_sub_get`    | [src/term/sub/get.c](../src/term/sub/get.c) |
-| `term_sub_set`    | [src/term/sub/set.c](../src/term/sub/set.c) |
+| `term_new`        | [src/term/new.c](../../src/term/new.c) |
+| `term_tag`        | [src/term/tag.c](../../src/term/tag.c) |
+| `term_ext`        | [src/term/ext.c](../../src/term/ext.c) |
+| `term_val`        | [src/term/val.c](../../src/term/val.c) |
+| `term_sub_get`    | [src/term/sub/get.c](../../src/term/sub/get.c) |
+| `term_sub_set`    | [src/term/sub/set.c](../../src/term/sub/set.c) |
 
 `term_sub_set(t, b)` returns a copy of `t` with the SUB bit replaced
 by `b`. It does not mutate; the caller writes the result back to the
@@ -122,7 +122,7 @@ base `lam_loc`:
 The body term is `VAR(val=lam_loc)` -- a wire from the body port
 back to the binder, which is the IC string-diagram form of the
 identity lambda. APP-LAM works with one heap write (see
-[interact/app_lam.md](interact/app_lam.md)).
+[../interact/app_lam.md](../interact/app_lam.md)).
 
 Application `(f x)`:
 

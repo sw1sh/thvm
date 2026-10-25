@@ -4,8 +4,8 @@ How to go from a corpus of equational problems to a trained graph neural
 network (GNN) that guides thvm's automated theorem prover (ATP), and where
 the open design problems are. This is the concrete, end-to-end "build it"
 companion to the conceptual explainer in [ml_guidance.md](ml_guidance.md)
-and the staged plan in [../plans/atp_ml_roadmap.md](../plans/atp_ml_roadmap.md)
-/ [../plans/atp_tier2_gnn.md](../plans/atp_tier2_gnn.md).
+and the staged plan in [atp_ml_roadmap.md](atp_ml_roadmap.md)
+/ [atp_tier2_gnn.md](atp_tier2_gnn.md).
 
 Abbreviations on first use: ATP (automated theorem prover), CP (critical
 pair, the Knuth-Bendix overlap the engine selects), GNN (graph neural
@@ -135,7 +135,7 @@ ENIGMA Anonymous design: the network generalizes across theories with
 different signatures because it never sees "this is `nand`" versus "this is
 `+`", only the shape. The Tier-1 hand-feature alternative (14 scalar
 features per CP, `thvm_atp_cp_features`) is documented in
-[../plans/atp_enigma_cp_selector.md](../plans/atp_enigma_cp_selector.md).
+[atp_enigma_cp_selector.md](atp_enigma_cp_selector.md).
 
 ### 2.4 Design problem: OOM-safe generation at corpus scale
 

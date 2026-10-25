@@ -8,7 +8,7 @@ For the IC-side terminology (`term`, `agent`, `port`, `wire`, ...)
 see [term.md](term.md).  For the multicomputation reading of the
 SUP / DUP / INC machinery (slice, branch cylinder, observer,
 foliation, the reduction trace) see
-[multicomputation.md](multicomputation.md); the *Multicomputation*
+[../multicomputation.md](../multicomputation.md); the *Multicomputation*
 section near the bottom of this file is the short version.
 
 ## Tensor and storage
@@ -25,7 +25,7 @@ section near the bottom of this file is the short version.
 | **offset** | Starting element offset into the buffer. Lets multiple views slice into the same buffer. |
 | **contiguous** | A view whose stride pattern matches the row-major layout of `shape` with no offset. Most kernels are faster on contiguous inputs. |
 | **View** | One layer of (`shape`, `strides`, `offset`, optional mask). Movement ops modify a View; if they can't, a new View is pushed onto the ShapeTracker. |
-| **ShapeTracker** | Stack of up to `ST_MAX_VIEWS` Views, oldest at the bottom. Indexing walks the stack innermost-first to derive a buffer offset. |
+| **ShapeTracker** | A primary View plus an optional chain of prior Views (`prior_views`), as tinygrad's `tuple[View, ...]`. Indexing composes through the chain from the outermost view inward. |
 | **broadcast** | Simulating a larger shape by reusing values along axes that have stride `0`. Cheap; no copy. |
 | **mask** | Per-axis `[begin, end)` validity range; positions outside read as 0. Used by `pad`, `shrink`, conv-backward edge handling. |
 | **refcount** | `TenDesc.refcount`. Bumped by DUP rules on `TAG_TEN`, decremented by ERA. Backend buffers also have their own refcount tracked via `Backend.buf_incref` / `buf_decref`. |
@@ -55,7 +55,7 @@ file paths, and other docs.
 | **kernelize** | Rewrite the raw UOp graph into `UOP_KERNEL[output_buf, ast_root]` (with `UOP_ASSIGN` / `UOP_SINK` for in-place / multi-output) nodes. | src/schedule/kernel_lift.c |
 | **bufferize / rangeify** | Schedule IR pass that picks materialization boundaries via `UOP_BUFFERIZE` and lowers index ranges. Default on (`THVM_RANGEIFY_DIRECT=1`). | src/schedule/bufferize*.c, rangeify*.c |
 | **fusion** | Decide which compute ops run in one kernel without intermediate buffers. Driven by bufferize boundaries plus the rewrite-driven kernel-lift pass. | src/schedule/kernel_lift.c |
-| **linearization** | Flatten a kernel's AST into an SSA-over-indices list (`KernelEntry.program[]`). Each entry is `{opcode, dtype, src_indices, arg}` referencing earlier positions. | src/schedule/uop_to_scalar.c |
+| **linearization** | tinygrad's flattening of a kernel's UOp graph into an ordered list before rendering. thvm has no such list: the renderer walks the lifted UOp DAG directly. | src/codegen/render_uop.c |
 | **codegen / render** | Emit source code (C for the CPU JIT, Metal Shading Language for the Metal backend) from the linearized kernel. "Render" is the tinygrad-style synonym used for source emission. | src/codegen/ |
 | **compile** | Turn the emitted source into something `dispatch_fn` can invoke. CPU JIT = `cc -shared` + `dlsym`; Metal = `newComputePipelineState` (cached PSO). | src/jit/, src/backend/metal/ |
 | **autotune** | For tile-shaped kernels, beam-search over UPCAST / LOCAL annotations and pick the fastest variant. | src/codegen/autotune.c, hand_opts.c |
@@ -68,7 +68,7 @@ file paths, and other docs.
 
 | word | meaning |
 |-----|-----|
-| **Backend** | A vtable of buffer + dispatch hooks. CPU and Metal each have one. Tensors carry a `Backend *`. |
+| **Backend** | A vtable of buffer + dispatch hooks. CPU, Metal and CUDA each have one. Tensors carry a `Backend *`. |
 | **device** | The hardware target a backend talks to: a CPU, a GPU, an accelerator. Sometimes used loosely as a synonym for Backend. |
 | **device id** | Disambiguates multiple devices of the same kind (`cpu:0`, `metal:0`, `metal:1`). Encoded in `UOP_DEVICE`. |
 | **dispatch_kernel** | Backend hook: given a compiled kernel id and a tuple of input buffer ids + an output buffer id, run the kernel. |
@@ -79,11 +79,10 @@ file paths, and other docs.
 | word | meaning |
 |-----|-----|
 | **forward** | The original UOp graph the user built. |
-| **backward** | The graph that computes gradients with respect to leaves marked `requires_grad`. We build this lazily by rewriting `UOP_GRAD` rather than constructing a separate IR. |
+| **backward** | The graph that computes gradients with respect to the target leaves. We build this lazily by rewriting `UOP_GRAD` rather than constructing a separate IR. |
 | **VJP** | Vector-Jacobian product: reverse-mode gradient of a function at a point, against a cotangent vector. What `UOP_GRAD` computes. |
-| **JVP** | Jacobian-vector product: forward-mode gradient. Tinygrad's `UOP_GRAD_FWD` / TinyHVM's equivalent; not in our scope yet. |
+| **JVP** | Jacobian-vector product: forward-mode gradient. Not implemented. |
 | **tape** | An eager autograd implementation records every forward op into a list (the tape) and replays it backwards. *We don't have one*; `UOP_GRAD` is a rewrite rule, not a tape. |
-| **GRAD_PIN** | A handle that keeps a forward-pass tensor alive long enough to be used by backward, even if the forward path otherwise erased it. TinyHVM's term for the same thing. |
 
 ## Multi-output and writes
 
@@ -118,7 +117,7 @@ file paths, and other docs.
 > two sides of this project.  HVM-SUP is a runtime data primitive (a
 > labelled non-deterministic value); ATP-superposition is a logical
 > inference rule.  The IC-native ATP plan
-> ([docs/plans/waldmeister_ic_atp.md](plans/waldmeister_ic_atp.md))
+> ([docs/ATP/waldmeister_ic_atp.md](../ATP/waldmeister_ic_atp.md))
 > uses the former to represent the search-space of the latter -- but
 > they live at different layers and reading the codebase requires
 > keeping them apart.
@@ -126,17 +125,17 @@ file paths, and other docs.
 | word | meaning | which layer |
 |---|---|---|
 | **HVM-SUP** | `&L{a, b}`: a labeled superposition node in the interaction net.  A *value* that "is both `a` and `b` at once," carrying a label `L`.  Reduces via DUP-SUP rules.  Lives in the heap as `TAG_SUP` (`src/thvm.h:62`). | runtime / IC |
-| **DUP-SUP** | The interaction rule that fires when a duplicator meets a superposition.  Same label = annihilate (project both sides); different labels = commute (push the SUP up through a fresh DUP pair).  See [docs/interact/](interact/) and [src/interact/dup_sup.c](../src/interact/dup_sup.c). | runtime / IC |
-| **collapse** | Enumerate all branches of an HVM-SUP-tree to a flat list of normal forms.  In thvm: `thvm_collapse` ([src/collapse/_.c](../src/collapse/_.c)).  ERA branches are dropped (failed candidates disappear).  *Not* related to wave-function collapse. | runtime / IC |
+| **DUP-SUP** | The interaction rule that fires when a duplicator meets a superposition.  Same label = annihilate (project both sides); different labels = commute (push the SUP up through a fresh DUP pair).  See [docs/interact/](../interact/) and [src/interact/dup_sup.c](../../src/interact/dup_sup.c). | runtime / IC |
+| **collapse** | Enumerate all branches of an HVM-SUP-tree to a flat list of normal forms.  In thvm: `thvm_collapse` ([src/collapse/_.c](../../src/collapse/_.c)).  ERA branches are dropped (failed candidates disappear).  *Not* related to wave-function collapse. | runtime / IC |
 | **label (SUP/DUP)** | The 18-bit `EXT` field that pairs a SUP with the DUP that is allowed to annihilate it.  Same label = pairwise (correlated) choice; different labels = full cross product across collapse. | runtime / IC |
 | **substitution** | Apply a variable assignment `σ` to a term `t`, producing `σ(t)`.  In thvm, lazy via the SUB bit on heap cells; in ATP, eager and explicit. | both |
 | **cosubstitution** (Wolfram) | The dual of substitution: instead of specializing the rule's pattern variables to fit the expression, specialize the *expression's* pattern variables to fit the rule.  See [Wolfram, "Beyond Substitution"](https://www.wolframscience.com/metamathematics/beyond-substitution-cosubstitution-and-bisubstitution/). | logic / ATP |
 | **bisubstitution** (Wolfram) | Substitution + cosubstitution mixed: both the rule pattern and the expression pattern can specialize.  Wolfram identifies this as the same operation that ATP literature calls **paramodulation**.  This *is* the basic equational inference step. | logic / ATP |
-| **unification** | Find a most-general substitution `σ` such that `σ(s) = σ(t)`.  Underlies bisubstitution / paramodulation / CP generation.  In Waldmeister: [sources/INF/Unifikation1.c](../waldmeister/sources/INF/Unifikation1.c). | logic / ATP |
+| **unification** | Find a most-general substitution `σ` such that `σ(s) = σ(t)`.  Underlies bisubstitution / paramodulation / CP generation.  In Waldmeister: [sources/INF/Unifikation1.c](../../waldmeister/sources/INF/Unifikation1.c). | logic / ATP |
 | **matching** | One-way unification: find `σ` such that `σ(pattern) = term`, with no constraints on `term`'s variables.  Used inside rewriting (find applicable rule) and subsumption. | logic / ATP |
 | **paramodulation** | Inference rule: given equation `s = t` and a clause `C[s']` where `s` and `s'` are unifiable with mgu `σ`, derive `σ(C[t])`.  Replaces a term *up to unification* rather than only by literal match.  Wolfram: this *is* bisubstitution. | logic / ATP |
 | **superposition (ATP)** | Refined paramodulation, central to modern ATPs (Vampire, E, Twee).  Fires only at *non-variable* positions and respects an ordering on terms.  Stronger redundancy criteria.  *Has nothing to do with HVM-SUP except sharing a name.* | logic / ATP |
-| **critical pair (CP)** | Two rules `l1 -> r1` and `l2 -> r2` whose LHSs unify on a non-variable subterm.  Their CP is the pair of distinct rewrites of the unified overlap; they should join to the same normal form for the system to be confluent.  Generated by [waldmeister/sources/INF/Grundzusammenfuehrung.c](../waldmeister/sources/INF/Grundzusammenfuehrung.c). | logic / ATP |
+| **critical pair (CP)** | Two rules `l1 -> r1` and `l2 -> r2` whose LHSs unify on a non-variable subterm.  Their CP is the pair of distinct rewrites of the unified overlap; they should join to the same normal form for the system to be confluent.  Generated by [waldmeister/sources/INF/Grundzusammenfuehrung.c](../../waldmeister/sources/INF/Grundzusammenfuehrung.c). | logic / ATP |
 | **Knuth-Bendix completion** | Algorithm that takes a set of equations and tries to produce a confluent terminating rewrite system by iterating: select CP -> normalize -> orient -> add to ruleset.  Semi-decision procedure for the word problem. | logic / ATP |
 | **unfailing completion** | KB variant (Bachmair-Dershowitz-Plaisted) that handles unorientable equations by treating them as both-directional.  What Waldmeister implements. | logic / ATP |
 | **reduction ordering** | A well-founded ordering on terms, total on ground terms, that decides which side of an equation becomes the LHS of a rule.  KBO (Knuth-Bendix) and LPO (Lexicographic Path) are the standard choices. | logic / ATP |
@@ -144,19 +143,19 @@ file paths, and other docs.
 | **saturation** | A clause/rule set is saturated under an inference calculus iff every conclusion of every applicable inference is already in the set (or redundant).  Saturation = proof if `false` is derived, refutation otherwise. | logic / ATP |
 | **subsumption** | One clause/rule is subsumed by another iff the second is more general.  Subsumed clauses are deleted as redundant. | logic / ATP |
 | **PCL** | Proof-Construction Language: Schulz/Waldmeister's stepwise proof object format.  One entry per rewrite, citing parent steps + applied substitution. | logic / ATP |
-| **MNF (Multiple Normal Forms)** | Goal-directed bidirectional search that *augments* completion: the goal's two sides seed opposite-coloured fronts (GREEN from the lhs, RED from the rhs) that rewrite under `R` until an opposite-colour collision joins them.  The only detector that closes a *symmetric* goal whose two sides never share a single normal form (Boolean commutativity / `Noncontradiction` / `ExcludedMiddle`, `SKIToBCKW`).  thvm: `mnf_step` ([src/atp/_.c](../src/atp/_.c)), gated on `use_mnf`; ported from Waldmeister's MNF.  Reached via `Method -> "GoalDirected"`. | logic / ATP |
+| **MNF (Multiple Normal Forms)** | Goal-directed bidirectional search that *augments* completion: the goal's two sides seed opposite-coloured fronts (GREEN from the lhs, RED from the rhs) that rewrite under `R` until an opposite-colour collision joins them.  The only detector that closes a *symmetric* goal whose two sides never share a single normal form (Boolean commutativity / `Noncontradiction` / `ExcludedMiddle`, `SKIToBCKW`).  thvm: `mnf_step` ([src/atp/_.c](../../src/atp/_.c)), gated on `use_mnf`; ported from Waldmeister's MNF.  Reached via `Method -> "GoalDirected"`. | logic / ATP |
 | **strategy schedule / portfolio** | An ordered list of saturator configs tried in turn until one proves + verifies (E / Vampire style).  thvm's `Automatic` schedule: Mix2 weight -> LPO + auto-precedence -> GT weight -> GoalDirected (MNF).  Cheap, broadly-effective configs first, so an easy goal closes immediately and only a hard goal pays for the later variants. | logic / ATP |
 | **CP-selection weight** | The heuristic that picks which pending critical pair to process next (Waldmeister `ClasHeuristics`).  thvm exposes Add / Max / Ord / Gt / Mix / Mix2 / Unif via `Method -> {"Completion", "CriticalPairWeight" -> ...}`; `Mix2` is the `Automatic` default. | logic / ATP |
-| **auto-precedence** | Structure-driven symbol precedence for the reduction ordering, detecting algebraic structure to orient rules a fixed precedence cannot (Waldmeister PhilMarlow).  thvm: `atp_auto_precedence` ([src/atp/precedence.c](../src/atp/precedence.c)); `Method -> {..., "AutoPrecedence" -> True}`. | logic / ATP |
+| **auto-precedence** | Structure-driven symbol precedence for the reduction ordering, detecting algebraic structure to orient rules a fixed precedence cannot (Waldmeister PhilMarlow).  thvm: `atp_auto_precedence` ([src/atp/precedence.c](../../src/atp/precedence.c)); `Method -> {..., "AutoPrecedence" -> True}`. | logic / ATP |
 | **relevance filter** | SInE-style axiom pruning: drop axioms whose symbols cannot reach the goal.  thvm's `"Safe"` mode is sound *and* completeness-preserving (drops only a symbol private to one axiom and occurring on both of its sides, so it cannot enter a proof of this goal); `"Connected"` is a heuristic that may over-drop.  WL: `TRelevantAxioms`, `Method -> {..., "AxiomRelevance" -> ...}`. | logic / ATP |
-| **ProofObject / critical-pair lemma** | The verifiable WL proof the engine emits: a chain of `CriticalPairLemma` / `SubstitutionLemma` entries resolved from the completion (or MNF front-collision) trace DAG, checked by `ProofObject["ProofFunction"]`.  Built by `buildCplDataset` ([wl/THVMLink/Kernel/ATP.wl](../wl/THVMLink/Kernel/ATP.wl)). | logic / ATP |
+| **ProofObject / critical-pair lemma** | The verifiable WL proof the engine emits: a chain of `CriticalPairLemma` / `SubstitutionLemma` entries resolved from the completion (or MNF front-collision) trace DAG, checked by `ProofObject["ProofFunction"]`.  Built by `buildCplDataset` ([wl/THVMLink/Kernel/ATP/ATP.wl](../../wl/THVMLink/Kernel/ATP/ATP.wl)). | logic / ATP |
 
 ### The shipped engine vs. the SUP-encoded plan
 
 Two distinct things wear the "IC-native ATP" name, and the table above
 spans both:
 
-- **The shipped engine** ([src/atp/_.c](../src/atp/_.c)) is a direct
+- **The shipped engine** ([src/atp/_.c](../../src/atp/_.c)) is a direct
   port of Waldmeister-style **unfailing completion** -- a conventional
   `lhs`/`rhs` rule array, a trace DAG, KBO/LPO orderings, the MNF front
   search, and a `ProofObject` extractor.  It does *not* encode its
@@ -171,7 +170,7 @@ completion engine's vocabulary; the subsection below describes the plan.
 
 ### How the layers connect (in the IC-native ATP plan)
 
-The plan ([docs/plans/waldmeister_ic_atp.md](plans/waldmeister_ic_atp.md))
+The plan ([docs/ATP/waldmeister_ic_atp.md](../ATP/waldmeister_ic_atp.md))
 proposes encoding the ATP search-space inside HVM-SUPs:
 
 - **The ruleset becomes one HVM-SUP**: `R = &L{r0, &L{r1, &L{r2, ...}}}`.
@@ -193,35 +192,35 @@ the plan memo for the full treatment.
 
 > The *multiway* face of the SUP / DUP / INC machinery -- the same
 > structure the ATP section above calls *entailment cones*.  Full
-> treatment in [multicomputation.md](multicomputation.md); this is the
+> treatment in [../multicomputation.md](../multicomputation.md); this is the
 > vocabulary table.  Nothing in the "trace" rows is implemented yet --
-> see [the trace plan](plans/multicomputation_trace.md).
+> see [the trace plan](../plans/multicomputation_trace.md).
 
 | word | meaning | which layer |
 |---|---|---|
 | **multiway system** (Wolfram) | A rewriting system viewed as the graph of *all* possible derivations: states as nodes, rule applications as edges, with derivations that reach the same state identified.  See [Wolfram, "Multicomputation"](https://writings.stephenwolfram.com/2021/09/multicomputation-a-fourth-paradigm-for-theoretical-science/). | concept |
-| **slice** | The multiway state-set at one moment of multiway time.  In thvm: **one IC term that contains SUPs** -- the slice carried in shared (compressed) form.  `collapse` / the CNF readback ([src/cnf/_.c](../src/cnf/_.c)) enumerates the states in a slice. | runtime / IC |
+| **slice** | The multiway state-set at one moment of multiway time.  In thvm: **one IC term that contains SUPs** -- the slice carried in shared (compressed) form.  `collapse` / the CNF readback ([src/cnf/_.c](../../src/cnf/_.c)) enumerates the states in a slice. | runtime / IC |
 | **branch** | One state of the slice = one leaf of the term's SUP-label tree = one path "left/right at each label". | runtime / IC |
 | **branch cylinder** | A *partial* `label -> side` map: picks out a *cone* of branches (all leaves below that point).  The compressed representative of "all branches that share this much ancestry."  A *shared sub-term* lives in the cylinder of all branches below it -- which is why one IC interaction can be many multiway events at once. | runtime / IC |
 | **branchial space / branchial graph** | The metric on branches given by how recently they forked -- in thvm, *reified* as the live SUP-label tree plus literal heap-sharing.  Two branches are branchially close iff they still point at the same cells. | concept / IC |
 | **term evolution** | A *within-branch* interaction (`APP-LAM`, `OP2-NUM-NUM`, `MAT-CTR`, `USE-VAL`, ...).  A genuine multiway event -- an edge of the states graph. | runtime / IC |
 | **slice evolution** | A *re-foliation* interaction (`APP-SUP` / `OP2-SUP` / `MAT-SUP`, the `cnf` lift-first-SUP, every `INC` rule).  The state-set is unchanged; only the SUP boundary inside the term (or the observer's order) moves.  Not a states-graph edge. | runtime / IC |
 | **fork** | A step that fans a state out 1 -> 2: a seeded `&L{a,b}`, or `DUP` commuting through a constructor (`DUP-LAM`, `DUP-CTR`, `DUP-NOD`) which manufactures a SUP.  Analogue of a string multiway system's "the rule matched in two places."  (May be sharing plumbing if a same-label `merge` follows.) | runtime / IC |
-| **split** | `DUP-SUP` with *different* labels ([dup_sup.md](interact/dup_sup.md), commute case): the branchial cross product -- state count * 2.  Analogue of two disjoint regions of a string each branching independently. | runtime / IC |
-| **merge** | `DUP-SUP` with the *same* label ([dup_sup.md](interact/dup_sup.md), annihilate case): two separately-tracked branches reconverge / are identified -- a diamond closes.  Analogue of a string system identifying two derivations that produce equal states (by direct equality, not hashing).  A *label collision* is a *spurious* merge -- a failure mode unique to IC's label-as-branch-identity scheme. | runtime / IC |
+| **split** | `DUP-SUP` with *different* labels ([dup_sup.md](../interact/dup_sup.md), commute case): the branchial cross product -- state count * 2.  Analogue of two disjoint regions of a string each branching independently. | runtime / IC |
+| **merge** | `DUP-SUP` with the *same* label ([dup_sup.md](../interact/dup_sup.md), annihilate case): two separately-tracked branches reconverge / are identified -- a diamond closes.  Analogue of a string system identifying two derivations that produce equal states (by direct equality, not hashing).  A *label collision* is a *spurious* merge -- a failure mode unique to IC's label-as-branch-identity scheme. | runtime / IC |
 | **prune** | `ERA` absorbing a neighbour (`APP-ERA`, `DUP-ERA`, ... and ERA propagation): a dead-end branch dropped from the slice.  In `#SAT`, the unsatisfying assignment. | runtime / IC |
-| **observer** | Whatever sequentialises a slice into a definite *stream* of states.  In thvm: the priority collapser, [src/collapse/ordered.c](../src/collapse/ordered.c).  A bounded computation; it cannot present a slice "all at once," it walks the branches in some order. | runtime / IC |
+| **observer** | Whatever sequentialises a slice into a definite *stream* of states.  In thvm: the priority collapser, [src/collapse/ordered.c](../../src/collapse/ordered.c).  A bounded computation; it cannot present a slice "all at once," it walks the branches in some order. | runtime / IC |
 | **foliation / reference frame** | A choice of how to slice multiway time -- here, the order the collapser walks the branches in, set by the `INC` (`TAG_INC`) decoration: descending into a SUP raises the priority key, an `INC` wrapper lowers it.  Different `INC` schemes = different observers; by confluence they emit the same *set* of states, only the *order* differs. | runtime / IC |
 | **causal invariance** | Wolfram's term for "any two derivations produce *isomorphic causal graphs*" -- a *strictly stronger* property than confluence (which only requires the final state to agree).  Confluence is about endpoint states; causal invariance is about the entire event structure (same events, same partial order, only interleaved differently in clock time).  Most WPP-relevant string-rewriting systems satisfy it only asymptotically; **interaction nets satisfy it strictly, by construction** -- the per-active-pair rule discipline makes every event determined by the net and every causal dependency determined by wire-provenance, neither of which depends on the schedule.  This is what makes both "the multiway states graph of a trace" a well-defined quotient *and* "the causal graph of a trace" a program invariant. | concept / IC |
-| **reduction trace** | The recorded sequence of interactions of one run, the thing the multiway / branchial / causal / token-event graphs are projections of.  Proposed encoding: a **branch-cylinder-tagged token-event graph** -- see [the trace plan](plans/multicomputation_trace.md). | proposed |
+| **reduction trace** | The recorded sequence of interactions of one run, the thing the multiway / branchial / causal / token-event graphs are projections of.  Proposed encoding: a **branch-cylinder-tagged token-event graph** -- see [the trace plan](../plans/multicomputation_trace.md). | proposed |
 | **token-event graph** (Wolfram) | Tokens (persistent atoms) as one kind of node, events (rule firings, consuming/producing tokens) as the other.  An interaction net *is* one: wires = tokens, interactions = events.  The states / branchial / causal graphs are quotients of it. | concept / IC |
-| **multiway / branchial / causal / token-event view** | The four `Graph[]` objects derivable from a trace: states + `fork`/`merge`/`term` edges; the SUP-label tree at one antichain; events + token-provenance edges; the raw token-event graph.  Proposed WL surface `TMultiwayGraph` / `TBranchialGraph` / `TCausalGraph` / `TTokenEventGraph` -- see [plans/multicomputation_trace.md, §7](plans/multicomputation_trace.md#7-wl-surface). | proposed |
+| **multiway / branchial / causal / token-event view** | The four `Graph[]` objects derivable from a trace: states + `fork`/`merge`/`term` edges; the SUP-label tree at one antichain; events + token-provenance edges; the raw token-event graph.  Proposed WL surface `TMultiwayGraph` / `TBranchialGraph` / `TCausalGraph` / `TTokenEventGraph` -- see [plans/multicomputation_trace.md, §7](../plans/multicomputation_trace.md#7-wl-surface). | proposed |
 
 For why this matters (debugging SUP-heavy code: spurious merges =
 label collisions, runaway splits = unintended branch dimensions; making
 the observer a first-class object; the contrast with the Wolfram
 Physics Project -- free confluence, branchial space as literal sharing,
-`INC` as foliation) see [multicomputation.md, §5 and §6](multicomputation.md); the implementation sketch lives in [plans/multicomputation_trace.md](plans/multicomputation_trace.md).
+`INC` as foliation) see [multicomputation.md, §5 and §6](../multicomputation.md); the implementation sketch lives in [../plans/multicomputation_trace.md](../plans/multicomputation_trace.md).
 
 ## Visualization
 

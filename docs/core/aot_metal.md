@@ -2,7 +2,7 @@
 
 Emit a Metal compute kernel from a TDef'd body, compile it via
 `xcrun -sdk macosx metal/metallib`, and dispatch on the GPU.  Sister
-to the CPU AOT path (`docs/aot.md`); chosen by the `Method` option on
+to the CPU AOT path (`docs/core/aot.md`); chosen by the `Method` option on
 `TAOTRun`.
 
 ## Quickstart
@@ -62,8 +62,8 @@ buffers read back after the dispatch.
 | Method spec                              | Backend            | Implementation       |
 | ---------------------------------------- | ------------------ | -------------------- |
 | `"Metal"`                                | GPU                | this doc             |
-| `"CPU"`                                  | single-thread C    | `docs/aot.md`        |
-| `{"CPU", "NumThreads" -> n}` (`n>1`)     | C + work-stealing  | `docs/aot.md`        |
+| `"CPU"`                                  | single-thread C    | `docs/core/aot.md`        |
+| `{"CPU", "NumThreads" -> n}` (`n>1`)     | C + work-stealing  | `docs/core/aot.md`        |
 
 Default `Method -> "Metal"`.  Method dispatcher in
 `wl/THVMLink/Kernel/AOT.wl` routes to the right path.  Bare `"CPU"`
@@ -194,7 +194,6 @@ TAOTBatchOp2Fold test for a worked example.
 | `wl/THVMLink/Kernel/AOT.wl` (`aotMetalRunImpl`, `TAOTBatchOp2Fold`) | WL Method dispatcher + batch surface |
 | `tests/test_aot_metal_run.c`                      | C-level e2e tests                   |
 | `wl/THVMLink/Tests/aot_metal.wlt`                 | WL e2e regression suite             |
-| `src/aot/wnf_metal_shim.h`                        | wnf() macro-shim scaffold           |
 
 ## Coverage gaps
 

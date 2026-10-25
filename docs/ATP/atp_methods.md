@@ -4,7 +4,7 @@ A practitioner's tour of thvm's automated theorem-proving (ATP) surface.
 Covers every `Method` head, the `Method` suboptions, every top-level
 `Option`, and every return spec as of main `2a3f0f50` (2026-07-16).
 The TPTP-file CLI over the same engine (`bin/FindProof`, the CASC
-entry) is documented separately in `docs/atp/casc_strategy.md`; its
+entry) is documented separately in `docs/ATP/casc_strategy.md`; its
 `--list-knobs` table maps every CLI flag to its env variable and,
 where one exists, the `Method` suboption name used here.
 
@@ -60,8 +60,8 @@ brings everything into scope by bare name:
 
 (Equivalent to `Get["THVMLink\`ATP\`"]` / `Needs["THVMLink\`ATP\`"]`.)
 All examples below assume this entry has run. The SMT and TPTP-import
-companion entries are documented in `docs/tutorial/smt.md` and
-`docs/tutorial/tptp_import.md` respectively.
+companion entries are documented in `docs/ATP/smt.md` and
+`docs/ATP/tptp_import.md` respectively.
 
 ## 3. Quick start
 
@@ -676,7 +676,7 @@ The mechanisms ported for the CASC portfolio are WL-reachable as
 tri-state Method suboptions: unset means the engine default (which
 honors the matching `THVM_ATP_*` env), `True`/`False` (or an integer
 where noted) pins the field. Semantics and evidence live in
-`docs/atp/casc_strategy.md` and `docs/atp/engineering.md`; the
+`docs/ATP/casc_strategy.md` and `docs/ATP/engineering.md`; the
 env/CLI-flag mapping is `bin/FindProof --list-knobs`.
 
 | Suboption | What it switches |
@@ -759,7 +759,7 @@ remains the design source for `Method -> "VampireUEQ"`; the mapping:
 | `gtg=exists_sym` | (not ported as premise selection; the related goal-subterm naming is the CLI's `--tgt` transform) |
 
 For the competition-scale standing (where the current hard residue
-actually lives) see `docs/atp/casc_strategy.md`.
+actually lives) see `docs/ATP/casc_strategy.md`.
 
 ## 7. Return specs
 
@@ -1005,7 +1005,7 @@ WolframInstitute`THVMLink`ATP`Private`$AtpMethodPresets
 ```
 
 (`"ENIGMA"` is the learned-CP-selection preset -- see
-`docs/atp/ml_guidance.md`; `"WaldmeisterLazy"` is additionally
+`docs/ATP/ml_guidance.md`; `"WaldmeisterLazy"` is additionally
 recognized as a Method name: the Waldmeister preset plus
 `"LazyNormalize"` with CP-set interreduction as its memory-safety
 pair.)

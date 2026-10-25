@@ -137,13 +137,13 @@ A few design rules for this fixed set:
 
 - **Reverse-mode autodiff** (automatic differentiation) -- dup-like
   grad cells, chain-rule adjoints, materialization. See
-  [../grad.md](../grad.md).  `TGradMany` for multi-output gradients;
+  [../NN/grad.md](../NN/grad.md).  `TGradMany` for multi-output gradients;
   `TProfile` to catch allocation leaks.
 - **A tensor / NN (neural-network) surface in the Wolfram Language
   (WL)** -- `wl/THVMLink/Kernel/NN.wl` has `TLinear`, `TConv`,
   `TEmbedding`, `TBatchNorm`/`TBatchNormTrain`, `TLayerNorm`, `TReLU`,
   `TSoftmax`/`TSoftmaxAxis`, and `TGlorot` / `TZeros` / `TOnes`
-  initialisers. `Optim.wl` has `TAdam`. See [../wl.md](../wl.md).
+  initialisers. `Optim.wl` has `TAdam`. See [../core/wl.md](../core/wl.md).
 - **Worked training examples** -- `wl/Examples/`: `linear-train`,
   `mlp-mnist`, `lenet-mnist`, `beautiful-mnist` (MNIST -- the
   handwritten-digit benchmark -- parity is tracked in
@@ -151,8 +151,8 @@ A few design rules for this fixed set:
   (gradient-based optimisation of a scalar). Copy one of these as a
   skeleton.
 - **CPU (central processing unit) and Metal backends**, just-in-time
-  (JIT) compilation, autotune -- [../cpu.md](../cpu.md),
-  [../metal.md](../metal.md). MNIST-scale
+  (JIT) compilation, autotune -- [../NN/cpu.md](../NN/cpu.md),
+  [../NN/metal.md](../NN/metal.md). MNIST-scale
   is comfortable; anything bigger, watch host RAM (random-access
   memory) (see the memory note in the repo's auto-memory).
 
@@ -718,6 +718,6 @@ artefact:
 - JEPA / LeJEPA / LeWorldModel details: [03-jepa-and-world-models.md](03-jepa-and-world-models.md).
 - NeuroAI / Sakana / Numenta / mentalizing AI: [04-brain-inspired-ai.md](04-brain-inspired-ai.md).
 - Classical ML pillars / Tensor Logic / RLHF: [06-classical-ml-and-rlhf.md](06-classical-ml-and-rlhf.md).
-- thvm mechanics: [../grad.md](../grad.md), [../wl.md](../wl.md),
-  [../cpu.md](../cpu.md); `wl/Examples/`;
+- thvm mechanics: [../NN/grad.md](../NN/grad.md), [../core/wl.md](../core/wl.md),
+  [../NN/cpu.md](../NN/cpu.md); `wl/Examples/`;
   `docs/plans/beautiful_mnist_parity.md`.

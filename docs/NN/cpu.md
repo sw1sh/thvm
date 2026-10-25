@@ -10,44 +10,44 @@ the UOp walker.
 ## Runtime layer (`src/backend/cpu/`)
 
 One file per piece of state or per logical operation. The dispatch
-order lives in [src/backend/cpu/_.c](../src/backend/cpu/_.c) (the
-`Backend` vtable) and [src/backend/cpu/interpret.c](../src/backend/cpu/interpret.c)
+order lives in [src/backend/cpu/_.c](../../src/backend/cpu/_.c) (the
+`Backend` vtable) and [src/backend/cpu/interpret.c](../../src/backend/cpu/interpret.c)
 (the body of `cpu_dispatch_kernel`).
 
 Vtable wiring + lifecycle:
 
-- [src/backend/cpu/_.c](../src/backend/cpu/_.c): assembles the
+- [src/backend/cpu/_.c](../../src/backend/cpu/_.c): assembles the
   `CPU_BACKEND` vtable. Every `cpu_*` function below is wired here.
-- [src/backend/cpu/init.c](../src/backend/cpu/init.c): `cpu_init` /
+- [src/backend/cpu/init.c](../../src/backend/cpu/init.c): `cpu_init` /
   `cpu_shutdown`. Walks live `CPU_BUFS[]` on shutdown to release
   owned + external storage.
 
 Buffer lifecycle (one file per primitive, all reading/writing the
 same `CPU_BUFS[]` table that `TenDesc.buf_id` indexes into):
 
-- [buf_alloc.c](../src/backend/cpu/buf_alloc.c): `cpu_buf_alloc`
+- [buf_alloc.c](../../src/backend/cpu/buf_alloc.c): `cpu_buf_alloc`
   (calloc + freelist scan) and `cpu_buf_alloc_external` (zero-copy
   wrap of someone else's bytes, with an `on_release` callback).
-- [buf_free.c](../src/backend/cpu/buf_free.c): hard release of one
+- [buf_free.c](../../src/backend/cpu/buf_free.c): hard release of one
   slot. Honors `owns_data` vs external.
-- [buf_incref.c](../src/backend/cpu/buf_incref.c),
-  [buf_decref.c](../src/backend/cpu/buf_decref.c): refcount nudges;
+- [buf_incref.c](../../src/backend/cpu/buf_incref.c),
+  [buf_decref.c](../../src/backend/cpu/buf_decref.c): refcount nudges;
   decref to zero pushes the slot onto the freelist (it does not
   `free`).
-- [buf_read.c](../src/backend/cpu/buf_read.c),
-  [buf_write.c](../src/backend/cpu/buf_write.c): host-pointer
+- [buf_read.c](../../src/backend/cpu/buf_read.c),
+  [buf_write.c](../../src/backend/cpu/buf_write.c): host-pointer
   read/write of buffer bytes. The runtime uses these for WL
   bridge round-trips and for tests.
-- [buf_pool.c](../src/backend/cpu/buf_pool.c): high-water-mark
+- [buf_pool.c](../../src/backend/cpu/buf_pool.c): high-water-mark
   scope for `TRealize` brackets. `pool_begin` / `pool_rollback`
   free everything allocated in between, modulo a per-buf
   `preserved` bit.
-- [buf_freelist.c](../src/backend/cpu/buf_freelist.c): per-size
+- [buf_freelist.c](../../src/backend/cpu/buf_freelist.c): per-size
   freelist of recyclable slots. Linear scan; fine at our scale.
 
 Compute paths:
 
-- [uop_walk.c](../src/backend/cpu/uop_walk.c): UOp DAG walker.
+- [uop_walk.c](../../src/backend/cpu/uop_walk.c): UOp DAG walker.
   Reads the cached lift root (`ke->cached_lift.store_root`) and
   evaluates the DAG directly against the input/output buffers,
   mirroring the traversal pattern of `cg_render_uop_kernel_c`
@@ -66,19 +66,19 @@ Compute paths:
   the C emit's `(int)(x)` does, and an int or bool REDUCE accumulates
   exactly in its dtype. An op the walker has no rule for declines the
   kernel with a stderr line instead of reading 0.
-- [interpret.c](../src/backend/cpu/interpret.c): holds the
+- [interpret.c](../../src/backend/cpu/interpret.c): holds the
   `cpu_dispatch_kernel` entry point that pre-materializes
   non-contiguous + multi-view inputs into temp buffers before
   running the dispatch ladder. The legacy interpreters
   (`cpu_interpret`, `cpu_dispatch_scalar`, `cpu_dispatch_tile`) have
   all been deleted; the UOp DAG walker in `uop_walk.c` is the
   primary compute path.
-- [blas.c](../src/backend/cpu/blas.c): pattern matcher. Recognizes
+- [blas.c](../../src/backend/cpu/blas.c): pattern matcher. Recognizes
   matmul-shaped kernels (gemm, batched gemm, contraction, im2col) in
   the lifted UOp DAG and routes them to `cblas_{s,d}gemm`. Returns
   `KDISPATCH_BLAS_GEMM` on a hit, 0 on a miss; dot and matvec kernels
   run in the JIT.
-- [jit.c](../src/backend/cpu/jit.c): clang JIT. Renders C99 source by
+- [jit.c](../../src/backend/cpu/jit.c): clang JIT. Renders C99 source by
   calling `cg_render_uop_kernel_c_root` against
   `ke->cached_lift.store_root`, hashes it, looks the hash up in the
   in-memory `CPU_JIT_CACHE`, and on a miss writes
@@ -91,7 +91,7 @@ Compute paths:
 
 `cpu_dispatch_kernel` is the function the rest of the runtime calls
 through `Backend.dispatch_kernel`. The body lives at the bottom of
-[interpret.c](../src/backend/cpu/interpret.c) and reads:
+[interpret.c](../../src/backend/cpu/interpret.c) and reads:
 
 1. Recover `kid = ke - KERNELS` and snapshot `t0 = cg_now_us()`.
 2. `cpu_blas_dispatch(ke, ...)` first. On a non-zero return, record
@@ -107,7 +107,7 @@ through `Backend.dispatch_kernel`. The body lives at the bottom of
    and prints one line naming the walker's decline reason.
 
 Each path writes its elapsed wallclock through `cg_profile_record`
-(see [src/codegen/profile.c](../src/codegen/profile.c)) so per-kid
+(see [src/codegen/profile.c](../../src/codegen/profile.c)) so per-kid
 counters are aggregated regardless of which route fired.
 
 ## Codegen layer (`src/codegen/`)
@@ -116,38 +116,41 @@ Backend-agnostic. Produces source text plus optimization metadata.
 The CPU JIT and the Metal backend both consume the same UOp DAG
 renderer.
 
-- [axis.c](../src/codegen/axis.c): `axes_default_for(ke)`. Builds the
+- [axis.c](../../src/codegen/axis.c): `axes_default_for(ke)`. Builds the
   default `KernelAxes` for a kernel: one `KAX_LOOP` axis per output
   dim, plus a trailing `KAX_REDUCE` axis sized at `src_numel /
   out_numel` if the program ends in `UOP_REDUCE`.
-- [apply_opt.c](../src/codegen/apply_opt.c): `axes_apply_opt(ax,
+- [apply_opt.c](../../src/codegen/apply_opt.c): `axes_apply_opt(ax,
   opt)`. Mutates the axes to record one `KOpt`. Splits an axis (UPCAST
   / UNROLL / LOCAL / GROUP / GROUPTOP), marks a full LOOP axis as
   GLOBAL, or swaps two (SWAP); appends to `applied_opts[]` either way.
-- [propose.c](../src/codegen/propose.c): `kernel_opts_propose(ke, out,
+- [propose.c](../../src/codegen/propose.c): `kernel_opts_propose(ke, out,
   cap)`. Shape heuristics that nominate `KOpt` candidates: reduce-tail
   kernels get `UNROLL` candidates in `{2, 4, 8, 16}` where divisible;
   flat elementwise kernels get `UPCAST` candidates on the same factor
   set.
-- [cg.c](../src/codegen/cg.c): the driver. `cg_supports(ke)` gates
-  acceptance (uniform dtype, no movement ops, REDUCE only as the
-  final op, kinds restricted to SUM / MAX).
-- [render_uop.c](../src/codegen/render_uop.c): the UOp DAG renderer.
+- [xexp2f.c](../../src/codegen/xexp2f.c), [ipow.c](../../src/codegen/ipow.c),
+  [threefry.c](../../src/codegen/threefry.c): tinygrad's float32 exp2,
+  integer power and threefry2x32 RNG decompositions as one C text each,
+  compiled into the walker and written into the kernel prologues (exp2
+  into each C kernel; the integer power and threefry into each C, Metal
+  and CUDA kernel).
+- [render_uop.c](../../src/codegen/render_uop.c): the UOp DAG renderer.
   Walks a lifted UOp DAG rooted at a `STORE` and emits either C99
   (via `cg_render_uop_kernel_c_root`, consumed by the CPU JIT) or
   Metal Shading Language (via `cg_render_uop_kernel_root`, consumed
   by the Metal tile JIT).
-- [render_metal.c](../src/codegen/render_metal.c): `cg_emit_metal`
+- [render_metal.c](../../src/codegen/render_metal.c): `cg_emit_metal`
   and `cg_emit_tile_metal`. Lifts every accepted kernel shape
   (matmul, conv2d_flat, elementwise, reduce, movement-fused) to a
   UOp DAG and routes through `render_uop`. Multi-output kernels and
   a few legacy shapes fall through to the per-shape MSL emitters in
   this file.
-- [profile.c](../src/codegen/profile.c): per-kid counters
+- [profile.c](../../src/codegen/profile.c): per-kid counters
   (`cg_profile_record`, `cg_kernel_dispatch_count`,
   `cg_kernel_total_us`) and static FLOPS estimation
   (`cg_kernel_flops`).
-- [autotune.c](../src/codegen/autotune.c): `kernel_autotune(kid)`.
+- [autotune.c](../../src/codegen/autotune.c): `kernel_autotune(kid)`.
   Proposes against the bare kernel (`kautotune_propose` resets the
   hand-coded opts, calls `kernel_opts_propose`, and restores them),
   applies each candidate in isolation, benches `KAUTOTUNE_N_RUNS`
@@ -158,11 +161,11 @@ renderer.
   `$HOME/.cache/thvm/autotune`, or `AUTOTUNE_CACHE_DIR`).  Set
   `AUTOTUNE_CACHE=0` or `AUTOTUNE_DISABLE=1` to force
   fresh benchmarking.
-- [hand_opts.c](../src/codegen/hand_opts.c): handcrafted opt
+- [hand_opts.c](../../src/codegen/hand_opts.c): handcrafted opt
   templates for recognized GEMM / conv shapes. Bypasses the propose
   + bench loop for shapes where a known opt sequence is already a
   good answer.
-- [tile_anno.c](../src/codegen/tile_anno.c): a façade over
+- [tile_anno.c](../../src/codegen/tile_anno.c): a façade over
   `applied_opts[]` plus per-axis `KAX_*` types. Single source of
   truth for the JIT hash and for the renderer's split-structure
   reads.
@@ -244,10 +247,10 @@ verification).
 
 ## Comparison with Metal
 
-The Metal backend at [src/backend/metal/_.m](../src/backend/metal/_.m)
+The Metal backend at [src/backend/metal/_.m](../../src/backend/metal/_.m)
 emits MSL through `cg_emit_tile_metal`, which lifts every kernel
 shape it accepts to a UOp DAG via `kernel_lift_to_uop` and renders
-through `cg_render_uop_kernel_root`. See `docs/lowering_passes.md`
+through `cg_render_uop_kernel_root`. See `docs/NN/lowering_passes.md`
 for the pipeline. Both backends share `render_uop.c`; the CPU side
 just appends a clang invocation, while the Metal side hands MSL to
 the Apple driver.
@@ -267,8 +270,6 @@ the renderer honors them as follows.
   `applied_opts[]`, so Metal `metal-gemm` can benchmark 8/16/32
   threadgroup tile variants.
 - `KOP_PADTO`, `KOP_NOLOCALS`: reserved and rejected by
-  [apply_opt.c](../src/codegen/apply_opt.c) until a renderer reads
+  [apply_opt.c](../../src/codegen/apply_opt.c) until a renderer reads
   them. This keeps no-op opts out of `applied_opts[]` and out of JIT
   cache keys.
-
-The roadmap for each lives in [PLAN.md](../PLAN.md).

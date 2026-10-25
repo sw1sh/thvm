@@ -9,7 +9,7 @@ same as one over a 1e3-row table.
 
 ## Semantics
 
-`UOP_GATHER(src, idx, dim)` ([src/uop/gather.c](../src/uop/gather.c)) has
+`UOP_GATHER(src, idx, dim)` ([src/uop/gather.c](../../src/uop/gather.c)) has
 idx's shape and src's dtype:
 
 ```
@@ -30,7 +30,7 @@ to `x[...]` maps an out-of-range index to -1 on the host first, so it
 reads 0.  A scatter reads its index the same way.
 
 `UOP_SCATTER(base, idx, src, dim, kind, include_self)`
-([src/uop/scatter.c](../src/uop/scatter.c)) has base's shape and dtype.
+([src/uop/scatter.c](../../src/uop/scatter.c)) has base's shape and dtype.
 With `t(p)` = p with `p_dim := idx[p]` and a valid p one whose index is in
 range:
 
@@ -185,41 +185,41 @@ Measured on the Linux CPU pod (C JIT):
 
 ## Tests
 
-- [tests/test_uop_gather_scatter_ir.c](../tests/test_uop_gather_scatter_ir.c):
+- [tests/test_uop_gather_scatter_ir.c](../../tests/test_uop_gather_scatter_ir.c):
   constructors, checks, hash-consing, rewrite and GC round trips.
-- [tests/test_uop_gather.c](../tests/test_uop_gather.c),
-  [tests/test_uop_scatter.c](../tests/test_uop_scatter.c): forward values
+- [tests/test_uop_gather.c](../../tests/test_uop_gather.c),
+  [tests/test_uop_scatter.c](../../tests/test_uop_scatter.c): forward values
   against host loops on both CPU backends, operand forms and views,
   fusion, loop bounds, JIT replay.
-- [tests/test_uop_scatter_max.c](../tests/test_uop_scatter_max.c): MAX
+- [tests/test_uop_scatter_max.c](../../tests/test_uop_scatter_max.c): MAX
   and MIN forward on both CPU backends: ties, signed zeros, identity hits,
   NaN, the exact identity bytes of ten dtypes, BEAM=2, JIT replay and a
   GC of live graphs.
-- [tests/test_grad_gather_scatter.c](../tests/test_grad_gather_scatter.c):
+- [tests/test_grad_gather_scatter.c](../../tests/test_grad_gather_scatter.c):
   gradients in every chain-rule mode, finite differences, second order.
-- [tests/test_grad_scatter_max.c](../tests/test_grad_scatter_max.c): MAX
+- [tests/test_grad_scatter_max.c](../../tests/test_grad_scatter_max.c): MAX
   and MIN gradients in every chain-rule mode: a case pinned to tinygrad
   master's own gradients, tie-rich data, finite differences, a computed
   src, linear backward kernels under JIT capture and replay, half, and a GC
   between firing the chain rule and realizing it.
-- [py/tests/test_gather_parity.py](../py/tests/test_gather_parity.py):
+- [py/tests/test_gather_parity.py](../../py/tests/test_gather_parity.py):
   ports of tinygrad's gather, embedding and index tests.
-- [py/tests/test_gather_scale.py](../py/tests/test_gather_scale.py): the
+- [py/tests/test_gather_scale.py](../../py/tests/test_gather_scale.py): the
   table size barely moves an embedding step.
-- [py/tests/test_scatter_reduce_parity.py](../py/tests/test_scatter_reduce_parity.py):
+- [py/tests/test_scatter_reduce_parity.py](../../py/tests/test_scatter_reduce_parity.py):
   ports of tinygrad's scatter, scatter_add and scatter_reduce (sum, mean)
   tests, with gradients against tinygrad's autograd, numpy and finite
   differences; -1 padded indices; the ATP aggregation; TinyJit replays
   with fresh index buffers; both CPU routes.
-- [py/tests/test_scatter_amax_parity.py](../py/tests/test_scatter_amax_parity.py):
+- [py/tests/test_scatter_amax_parity.py](../../py/tests/test_scatter_amax_parity.py):
   scatter_reduce amax and amin, forward bit for bit and gradients against
   tinygrad master and its dense formulation in float64 numpy: ties,
   include_self, dims 0 / 1 / -1, -inf bases, -1 padded ids, int32, the
   host fallback, both CPU routes.
-- [py/tests/test_segment_log_softmax.py](../py/tests/test_segment_log_softmax.py):
+- [py/tests/test_segment_log_softmax.py](../../py/tests/test_segment_log_softmax.py):
   the ATP listwise loss (amax shift, sum mass) against tinygrad master and
   float64 numpy, and 10 TinyJit Adam steps whose parameters track
   tinygrad's step by step, on both CPU routes.
-- [py/tests/test_graphsage_train.py](../py/tests/test_graphsage_train.py):
+- [py/tests/test_graphsage_train.py](../../py/tests/test_graphsage_train.py):
   10 TinyJit Adam steps of a mean-aggregation GraphSAGE on fresh -1
   padded edge buffers, against a float64 numpy run.

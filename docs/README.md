@@ -1,121 +1,80 @@
 # thvm docs
 
-Architecture notes, one self-contained markdown per piece. Every page
-links the C source it documents so the prose and the implementation
-move together.
+One self-contained page per piece. Pages link the source they describe, so the
+prose and the implementation move together. The two tracks, the tensor
+compiler (NN) and the theorem prover (ATP), share the core runtime.
 
-## Reading order
+## core/: the interaction-calculus runtime
 
-If you are new to the project, read these in order:
+Read in this order if you are new:
 
-1. [term.md](term.md): how a 64-bit `Term` is packed.
-2. [heap.md](heap.md): the flat heap, the bump allocator, and the
+1. [core/term.md](core/term.md): how a 64-bit `Term` is packed.
+2. [core/heap.md](core/heap.md): the flat heap, the allocator, the GC and the
    substitution model that makes interactions work.
-3. [normal_form.md](normal_form.md): two reducers -- `wnf` (weak
-   normal form, two-phase enter/apply stack machine) and `nf`
-   (full normal form, redex-list sweep).
-4. [interact/_.md](interact/_.md): index of the active-pair rules,
-   one page per rule.
-5. [wl.md](wl.md): the Wolfram LibraryLink bridge and the high-level
-   constructors that sit on top of it.
-6. [heap_graph.md](heap_graph.md): the `THeapGraph[]` snapshot model,
-   port conventions, and worked-example diagrams.
-7. [grad.md](grad.md): automatic differentiation -- dup-like grad
-   cells with gy threading, chain-rule adjoint table, leaf-SUP +
-   DUP routing, higher-order, materialization integration, and
-   `TProfile` for spotting allocation leaks.
-8. [cpu.md](cpu.md): the CPU backend (`src/backend/cpu/`) and the
-   codegen pipeline (`src/codegen/`).  Walks the
-   `cpu_dispatch_kernel` order (BLAS, optional tile path, JITs,
-   interpreters), the `propose -> apply_opt` chain, and the JIT
-   cache key.
-9. [gather_scatter.md](gather_scatter.md): the native `UOP_GATHER` /
-   `UOP_SCATTER` indexed ops -- semantics, lowering, gradients, the py
-   `gather` / `embedding` / `x[idx]` / `scatter_reduce` / `scatter`
-   surface, and where they deviate from tinygrad.
-10. [nn.md](nn.md): the NN layer (`src/nn/`) -- tinygrad's NN-level
-   Tensor ops ported once in C on `Tensor` values, and the one flat entry
-   (`py_nn`, `thvm_wl_nn`) the front ends call.
+3. [core/normal_form.md](core/normal_form.md): the reducers (`wnf`, `cnf`, the
+   collapsers, the parallel `nf` pool) and tracing.
+4. [interact/_.md](interact/_.md): the active-pair rules, one page per rule,
+   paired with `src/interact/<name>.c`.
+5. [core/wl.md](core/wl.md): the Wolfram LibraryLink bridge (THVMLink) and the
+   IC constructors on top of it.
+6. [core/heap_graph.md](core/heap_graph.md) and
+   [core/diagrams.md](core/diagrams.md): `THeapGraph` and `THeapDiagram`, the
+   two heap visualizations.
 
-## What's not here yet
+Also: [core/glossary.md](core/glossary.md) (vocabulary of both tracks),
+[core/aot.md](core/aot.md) and [core/aot_metal.md](core/aot_metal.md) (the
+ahead-of-time compiler for `TDef` bodies, C and Metal targets).
 
-Anything marked "in progress" or "open" in the status table at
-[../README.md](../README.md) is documented only where the live code
-already exists; design memos for not-yet-built layers live under
-[plans/](plans/).
+## NN/: tensors, compiler, backends
 
-## Plans and references
+- [NN/lowering_passes.md](NN/lowering_passes.md): UOp DAG to dispatched kernel,
+  pass by pass.
+- [NN/cpu.md](NN/cpu.md), [NN/metal.md](NN/metal.md): the CPU backend with the
+  shared codegen layer, and the Metal backend.
+- [NN/tinygrad_late_passes.md](NN/tinygrad_late_passes.md): how UPCAST and
+  UNROLL reach rendered source, against tinygrad's expander and devectorizer.
+- [NN/dtypes.md](NN/dtypes.md), [NN/symbolic_shapes.md](NN/symbolic_shapes.md),
+  [NN/memory.md](NN/memory.md): dtypes, runtime-variable dimensions, buffer
+  lifetime.
+- [NN/grad.md](NN/grad.md), [NN/gather_scatter.md](NN/gather_scatter.md),
+  [NN/nn.md](NN/nn.md): autograd as an interaction, the native indexed ops,
+  and the C NN layer behind the Python and Wolfram front ends.
+- [NN/inert_loop_nettrain.md](NN/inert_loop_nettrain.md): a whole `NetTrain`
+  run as one inert term.
+- [NN/flux_forward_spec.md](NN/flux_forward_spec.md): the FLUX.2-klein-4B
+  forward-pass spec the port follows.
+- [NN/thvm_vs_tinygrad.md](NN/thvm_vs_tinygrad.md): pipeline comparison, knob
+  reference and coverage gaps against tinygrad.
+- [NN/env_knobs.md](NN/env_knobs.md): every `THVM_*` environment variable.
 
-- [plans/hvm4_cross_reference.md](plans/hvm4_cross_reference.md):
-  side-by-side of every piece of our runtime vs the corresponding
-  HVM4 source. Refresh when a new interaction lands or HVM4 itself
-  moves.
-- [plans/waldmeister_ic_atp.md](plans/waldmeister_ic_atp.md):
-  IC-native ATP design memo.  Summary of Waldmeister's unfailing
-  Knuth-Bendix completion, prior art on interaction-net + ATP
-  (Twee, Vampire, egg, HVM4 SupGen), and a SupGen/NeoGen-style
-  build trajectory.  Read alongside the
-  *Equational reasoning and the IC-as-ATP layer* section of
-  [glossary.md](glossary.md) -- "superposition" means two different
-  things on the two sides.
-- [plans/tile_uops.md](plans/tile_uops.md): tile-level schedule
-  plan above scalar UOps.  Documents the opt-in CPU/Metal tile paths
-  and the remaining work toward an autotuning target.
-- [plans/rewrite_fusion.md](plans/rewrite_fusion.md): tinygrad-style
-  rewrite-driven fusion plan.  Documents the named realize-map rewrite
-  harness and the path from boundary rewrites to scalar/tile
-  canonicalization.
-- [plans/bufferize.md](plans/bufferize.md): comprehensive plan for
-  first-class `BUFFERIZE`/`INDEX` schedule IR, edge-local movement
-  contexts, bufferize rewrites, memory planning, and autotune
-  integration.  Its data layer was deleted unread (2026-10).
-- [tinygrad_late_passes.md](tinygrad_late_passes.md): how UPCAST and
-  UNROLL reach the rendered source, against tinygrad's expander and
-  devectorizer at 365f87a8a, and why the UOp-level port of the older
-  design was removed (2026-10).
-- [bench/history.md](bench/history.md): consolidated benchmark
-  history and current canaries for training, GPT-2, Metal, tile, and
-  autotune work.
-- [multicomputation.md](multicomputation.md): self-contained
-  conceptual essay reading the SUP / DUP / INC machinery through
-  Wolfram's multicomputation paradigm -- a SUP-term is a *slice*,
-  reduction is *slice evolution*, the collapser is an *observer*,
-  `INC` is a *foliation*.  Vocabulary in
-  [glossary.md](glossary.md#multicomputation-slices-observers-and-the-reduction-trace).
-- [plans/multicomputation_trace.md](plans/multicomputation_trace.md):
-  thvm-side build trajectory for the trace -- a branch-cylinder-tagged
-  token-event log on top of `ITRS` + the hot-counter pattern -- and the
-  multiway / branchial / causal graph views derived from it.
-  Implementation memo for the ideas in `multicomputation.md`.
-- [neuroscience/README.md](neuroscience/README.md): a primer on
-  neuroscience for toy AI, organised around Max Bennett's *A Brief
-  History of Intelligence* (the five evolutionary breakthroughs and
-  their AI analogies -- dopamine as TD error, basal ganglia as
-  actor-critic, neocortex as a Helmholtz-style world model, ...),
-  extended to JEPA / LeJEPA / LeWorldModel, the wider NeuroAI
-  literature, Domingos's five tribes of classical ML, and modern
-  LLM alignment (RLHF / DPO / GRPO / DeepSeek-R1), with a closing
-  menu of thvm-sized experiments.  Reading and orientation only --
-  nothing here is implemented in the repo yet.
-- [symbolic/README.md](symbolic/README.md): a research orientation on
-  symbolic and neuro-symbolic AI -- the symbolist/connectionist
-  divide and the Symbolica cautionary tale, Kautz's integration
-  taxonomy and the systems that work (neural-proposes /
-  symbolic-verifies; program synthesis a la DreamCoder), the geometry
-  of learning (geometric and categorical deep learning, quasimetric
-  planning and the IQE upgrade to our metric head), and a closing page
-  tying it to the `brain/experiments/` arc (rule induction as the
-  missing ingredient; waldmeister as the program-synthesis engine).
-  Motivated by, and linked to, live experiments (200 onward).
+## ATP/: the equational theorem prover
 
-## Conventions
+Start at [ATP/README.md](ATP/README.md): `bin/FindProof` (the CASC entry) and
+`TFindProof` (the Wolfram surface), the algorithms and engineering pages, the
+CASC strategy, the tutorials (`atp_methods.md`, `tptp_import.md`, `smt.md`),
+the ENIGMA plan and the knob table ([ATP/env_knobs.md](ATP/env_knobs.md)).
 
-- C source under [src/](../src/) follows path-is-the-function-name
-  (see [AGENTS.md](../AGENTS.md) and HVM4's
-  [STYLEGUIDE.md](../TinyHVM/HVM4/clang/STYLEGUIDE.md)).
-- WL source under [wl/](../wl/) follows [wl/GUIDE.md](../wl/GUIDE.md).
-- Each interaction lives in [src/interact/<name>.c](../src/interact/)
-  and has a matching page in [docs/interact/<name>.md](interact/).
-  The C file's leading comment block mirrors the sequent calculus
-  rule from the doc -- if they disagree, the doc wins and the comment
-  needs updating.
+## Side tracks
+
+Research and essays outside the two tracks:
+
+- [multicomputation.md](multicomputation.md) and
+  [plans/multicomputation_trace.md](plans/multicomputation_trace.md): the
+  interaction calculus read as multicomputation, and the trace that records it.
+- [essays/](essays/): worked examples of superposition and the trace, run cell
+  by cell.
+- [plans/lazy_patterns.md](plans/lazy_patterns.md): lazy streams and pattern
+  matching on the reducer.
+- [research/sat_solver_paths.md](research/sat_solver_paths.md): SAT solving on
+  the interaction calculus and on GPU.
+- [neuroscience/README.md](neuroscience/README.md),
+  [symbolic/README.md](symbolic/README.md): primers on neuroscience for toy AI
+  and on symbolic and neuro-symbolic AI.
+
+## Elsewhere
+
+- [../AGENTS.md](../AGENTS.md): conventions, build, code map.
+- [../wl/GUIDE.md](../wl/GUIDE.md): Wolfram Language style rules.
+- [../wl/THVMLink/docs/](../wl/THVMLink/docs/): the paclet's own documentation
+  source (guides, tutorials, reference pages), with its rules in
+  [DOC_GUIDE.md](../wl/THVMLink/docs/DOC_GUIDE.md).

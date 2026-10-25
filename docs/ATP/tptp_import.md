@@ -26,7 +26,7 @@ needs an importer.
 
 The importer also lets `TFindProof` — both the default equational
 saturator and the `Method -> "SMT"` QF_UF decision procedure (see
-`docs/tutorial/smt.md`) — accept a `File["..."]` or inline string
+`docs/ATP/smt.md`) — accept a `File["..."]` or inline string
 without forcing the caller to hand-translate clauses to WL.
 
 ## 2. Loading
@@ -141,7 +141,7 @@ TFindProof[
 (* -> $Failed *)
 ```
 
-See `docs/tutorial/smt.md` for the SMT entry.
+See `docs/ATP/smt.md` for the SMT entry.
 
 ### 3.7 FOF (first-order form) with explicit universal
 
@@ -306,7 +306,7 @@ For a UEQ problem with the standard `negated_conjecture` shape, a
 `Satisfiable` / `CounterSatisfiable` (the C engine reached a finite
 complete system without closing the goal); a `TimedOut` / `Failed`
 return is SZS `Timeout` / `GaveUp`. The `"Statistics"["Status"]` key
-on a bundle (`docs/tutorial/atp_methods.md` 7.1) surfaces these
+on a bundle (`docs/ATP/atp_methods.md` 7.1) surfaces these
 directly.
 
 ### 4.2 Bottom line
@@ -522,7 +522,7 @@ TFindProof["...source...", Method -> "SMT"]       (* SMT, inline *)
 ```
 
 `opts` is the usual `TFindProof` option set (see
-`docs/tutorial/atp_methods.md` §3 / §4). All Method presets,
+`docs/ATP/atp_methods.md` §3 / §4). All Method presets,
 suboptions, and return specs work the same way as with WL-form
 input — the importer is purely an alternative encoding path for the
 same `Axioms / Conjecture` pair.
@@ -552,7 +552,7 @@ same `Axioms / Conjecture` pair.
   overloads + `tptpDispatch` helper that routes to the appropriate
   ATP entry.
 - `wl/THVMLink/Kernel/ATP/SMT.wl` -- the `tptpDispatchSMT` ground-input
-  gate behind `Method -> "SMT"` (see `docs/tutorial/smt.md`).
+  gate behind `Method -> "SMT"` (see `docs/ATP/smt.md`).
 - `wl/THVMLink/Tests/atp_tptp.wlt` -- 30 `VerificationTest`s
   exercising the cnf / fof / tff / tcf / thf / ncf / include /
   sequent paths plus the inline-string / file / no-conjecture /

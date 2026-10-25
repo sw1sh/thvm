@@ -60,7 +60,7 @@ i(i(x)) = x); thvm collapses this into its SubstitutionLemma 2
 which already does that reduction inline.
 
 Same structural shape as the Vampire parity case
-(docs/atp/proof_parity_inverseofinverse.md): the two ports agree
+(docs/ATP/proof_parity_inverseofinverse.md): the two ports agree
 on the CP-generation side (3 superpositions both) and on the
 final-step count (1 Conclusion both); they differ only by ONE
 forward-demodulation step that's a question of where the

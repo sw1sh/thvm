@@ -4,8 +4,7 @@
 
 > **Revision (2026-06-01).** The first draft of this report was assembled by
 > excerpt-reading agents and overstated three gaps; each was disproved by reading the
-> full source + runtime tests, and the corrections are folded throughout (see
-> `docs/plans/ideal_pipeline_v3.md` for the milestone log):
+> full source + runtime tests, and the corrections are folded throughout:
 > - **BEAM is NOT missing.** `src/codegen/autotune.c` (855 lines) is a real
 >   propose -> bench -> cache -> pick-winner search, wired in the fire path
 >   (`uop_kernel.c:255`) and WL-exposed. It was *blocked on the py/JIT path* by a flag
@@ -398,11 +397,11 @@ Grouped by purpose. Defaults from source; "toggle" = any non-`0`/non-empty value
 
 ## 7. Plan to close the algorithmic coverage gap
 
-> The **authoritative, audited, executable** milestone plan lives in
-> `docs/plans/ideal_pipeline_v3.md` (with a per-commit status log). The draft plan that
-> was here was built on the three premises corrected in the Revision banner above
-> (build-BEAM, reduce-into-reduce-is-the-residual, missing-backward-rules) and is
-> superseded. The corrected priorities are summarized below.
+> The milestone plan that followed this report (`ideal_pipeline_v3`, finished and
+> removed; git history keeps it) superseded the draft plan that was here, which
+> was built on the three premises corrected in the Revision banner above
+> (build-BEAM, reduce-into-reduce-is-the-residual, missing-backward-rules). The
+> corrected priorities are summarized below.
 
 **Already landed** (branch `py-jit-speedup`): `e14f7da9` faithful conv-bwd compiles;
 `bb24342d` bench zero_grad; `d595fcb7` py dylib links the real Metal backend;

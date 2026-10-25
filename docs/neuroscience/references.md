@@ -1206,9 +1206,9 @@ Neuroscience grounding (page 12 connections):
 
 ## thvm internal docs referenced
 
-- [../grad.md](../grad.md) -- autodiff.
-- [../wl.md](../wl.md) -- the Wolfram LibraryLink surface.
-- [../cpu.md](../cpu.md), [../metal.md](../metal.md) -- backends.
+- [../NN/grad.md](../NN/grad.md) -- autodiff.
+- [../core/wl.md](../core/wl.md) -- the Wolfram LibraryLink surface.
+- [../NN/cpu.md](../NN/cpu.md), [../NN/metal.md](../NN/metal.md) -- backends.
 - `wl/THVMLink/Kernel/NN.wl`, `wl/THVMLink/Kernel/Optim.wl` -- NN
   primitives and `TAdam`.
 - `wl/Examples/` -- `linear-train`, `mlp-mnist`, `lenet-mnist`,

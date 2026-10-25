@@ -8,7 +8,7 @@ vertex, each `VAR` is absorbed into a wire labelled `var`, and each
 
 Display formatting (the summary boxes that render `THeap[...]`,
 `TTermInfo[...]`, etc. in a notebook) lives in a separate
-[wl/THVMLink/Kernel/Format.wl](../wl/THVMLink/Kernel/Format.wl)
+[wl/THVMLink/Kernel/Format.wl](../../wl/THVMLink/Kernel/Format.wl)
 sibling file -- see [wl.md](wl.md#summary-boxes-formatwl).
 
 For the underlying heap layout, see [heap.md](heap.md). For how the
@@ -62,12 +62,12 @@ matching against another `SUP` / `DUP`).
 Each example below shows the WL constructor, the resulting heap
 state, and the picture `THeapGraph[]` produces. The mermaid renders
 on GitHub. Runnable counterparts of every example live under
-[wl/Examples/](../wl/Examples/) -- one folder per example, each
+[wl/Examples/](../../wl/Examples/) -- one folder per example, each
 holding a minimal `term.wl` and the rendered `graph.png` regenerated
 by `make wl-examples` (or
-[wl/Examples/run.wls](../wl/Examples/run.wls) directly). A couple of
+[wl/Examples/run.wls](../../wl/Examples/run.wls) directly). A couple of
 the examples below embed that live PNG alongside the mermaid so you
-can compare; see [wl/Examples/README.md](../wl/Examples/README.md)
+can compare; see [wl/Examples/README.md](../../wl/Examples/README.md)
 for the full catalogue.
 
 ### 1. Identity lambda
@@ -112,10 +112,10 @@ flowchart LR
 ```
 
 Live `THeapGraph[app]` (regenerated from
-[wl/Examples/id-app-era/](../wl/Examples/id-app-era/) by
+[wl/Examples/id-app-era/](../../wl/Examples/id-app-era/) by
 `make wl-examples`):
 
-![identity applied to ERA](../wl/Examples/id-app-era/term.png)
+![identity applied to ERA](../../wl/Examples/id-app-era/term.png)
 
 The APP feeds the LAM into its `f` port and the ERA dot into its `x`
 port. The LAM still has its identity self-loop because nothing has
@@ -186,10 +186,10 @@ flowchart LR
 ```
 
 Live `THeapGraph[dp0]` (regenerated from
-[wl/Examples/dup-sup-annihilate/](../wl/Examples/dup-sup-annihilate/)
+[wl/Examples/dup-sup-annihilate/](../../wl/Examples/dup-sup-annihilate/)
 by `make wl-examples`):
 
-![dup of sup setup](../wl/Examples/dup-sup-annihilate/term.png)
+![dup of sup setup](../../wl/Examples/dup-sup-annihilate/term.png)
 
 Two agents joined through the SUP value at cell `2`. `DP0` and `DP1`
 are the WL return values; they only appear once they are stored
@@ -205,7 +205,7 @@ TDup[7, TSup[7, TEra[], TLam[id, id]],
 
 Explicit label `7` so DUP-SUP annihilates instead of commuting (the
 commute case is currently stuck; see
-[interact/dup_sup.md](interact/dup_sup.md)). Heap state after
+[../interact/dup_sup.md](../interact/dup_sup.md)). Heap state after
 `TWnf[dp0]`:
 
 | Cell | Term            | Notes                                    |

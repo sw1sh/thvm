@@ -1,8 +1,7 @@
 # AOT (ahead-of-time compilation)
 
 thvm's AOT compiles a `TDef`'d body to fork-friendly C source. The
-output has the same shape as Bend2's compiler at
-[TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c](../TinyHVM/resources/gists/par_tree_sum_bend2_compiled.c).
+output has the same shape as Bend2's compiled parallel tree sum.
 The runtime is in `src/aot/`; the WL surface is `WolframInstitute`THVMLink`TAOTEmit`,
 `TAOTCompile`, `TAOTRun`, `TAOTPath`.
 
@@ -50,7 +49,7 @@ Three result shapes per `dispatch(task)` call:
 | `src/aot/worker.c` | `AotBarrier` + `AotRun` + seed/work-phase pattern; `aot_run_serial` (T=1) + `aot_run_parallel` (T>1) |
 | `src/aot/emit.c` | `thvm_aot_emit_program(def_id, name)` - walks a TDef'd body and produces compilable C source |
 | `src/aot/build.c` | drives clang to compile the emitted C into a dylib for `TAOTCompile` / `TAOTRun` |
-| `src/aot/metal_emit.c`, `src/aot/wnf_metal_shim.h` | Metal-targeted emit for `TAOTRun[..., Method -> "Metal"]` |
+| `src/aot/metal_emit.c` | Metal-targeted emit for `TAOTRun[..., Method -> "Metal"]` |
 | `src/aot/_.c` | bundle that `src/thvm.c` includes |
 | `tests/test_aot_emit.c` | unit tests on the emit string |
 | `tests/test_aot_build.c` | end-to-end via the `TAOTCompile` path (emit -> clang -> dlopen) |
@@ -165,7 +164,7 @@ function-pointer ABI that `build.c` injects into the wrapper.
 
 ## Compile + run via the test harness
 
-[tests/test_aot_e2e.c](../tests/test_aot_e2e.c) is the canonical
+[tests/test_aot_e2e.c](../../tests/test_aot_e2e.c) is the canonical
 external-process harness. Each test:
 
 1. Builds a def in `BOOK_HEAP` directly (skipping the WL bridge for

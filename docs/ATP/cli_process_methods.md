@@ -32,7 +32,7 @@ All four route to a per-CLI `T<Name>ProofObject` builder in
    shared `$SZSRuleToConstruct` mapping.
 3. Optionally lifts to a literal `ProofObject["EquationalLogic",
    goal, axioms, data]` head via `liftToProofObject` (see
-   docs/atp/cli_lift_status.md for the achievement + verification
+   docs/ATP/cli_lift_status.md for the achievement + verification
    gap).
 
 ## Shared options
@@ -103,9 +103,9 @@ p3raw["Backend"]    (* -> "SZS" *)
 
 ## Related docs
 
-* docs/atp/cli_lift_status.md -- LiftToProofObject achievement +
+* docs/ATP/cli_lift_status.md -- LiftToProofObject achievement +
   the verifier-internal Failure gap
-* docs/atp/wolfram_assoc_wl_hang.md -- WL TFindProof's
+* docs/ATP/wolfram_assoc_wl_hang.md -- WL TFindProof's
   TimeConstraint enforcement gap on WolframAxioms/AndAssoc
-* docs/atp/proof_parity_inverseofinverse.md -- WaldmeisterProcess
+* docs/ATP/proof_parity_inverseofinverse.md -- WaldmeisterProcess
   vs internal preset structural comparison

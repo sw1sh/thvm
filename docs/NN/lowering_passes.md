@@ -54,9 +54,9 @@ How a high-level UOp DAG gets compiled into GPU/CPU dispatches.
 
 ## Pass 1: UOp graph simplify
 
-- Constructor rewrites: [src/uop/rewrite.c](../src/uop/rewrite.c)
-- Movement: [src/schedule/indexing.c](../src/schedule/indexing.c)
-- Index simplifier: [src/uop/index_simplify.c](../src/uop/index_simplify.c)
+- Constructor rewrites: [src/uop/rewrite.c](../../src/uop/rewrite.c)
+- Movement: [src/schedule/indexing.c](../../src/schedule/indexing.c)
+- Index simplifier: [src/uop/index_simplify.c](../../src/uop/index_simplify.c)
 
 The UOp constructors simplify as they build: `uop_binary` and
 `uop_unary` call `uop_rewrite_*` (constant folding and identities
@@ -77,8 +77,8 @@ shader compiler can't reduce.
 
 ## Pass 2: Schedule (bufferize)
 
-- Files: [src/schedule/bufferize_classify.c](../src/schedule/bufferize_classify.c),
-  [src/schedule/rangeify_unified.c](../src/schedule/rangeify_unified.c)
+- Files: [src/schedule/bufferize_classify.c](../../src/schedule/bufferize_classify.c),
+  [src/schedule/rangeify_unified.c](../../src/schedule/rangeify_unified.c)
 
 The bufferize pass walks the simplified DAG and decides which UOp
 nodes get a backing buffer (kernel boundaries).  ROOT (the value the
@@ -93,10 +93,10 @@ the lift reads.
 
 ## Pass 3: Lift kernel boundary to UOp DAG root
 
-- File: [src/schedule/kernel_lift.c](../src/schedule/kernel_lift.c)
+- File: [src/schedule/kernel_lift.c](../../src/schedule/kernel_lift.c)
 
 For each boundary,
-[materialize.c](../src/schedule/materialize.c) calls
+[materialize.c](../../src/schedule/materialize.c) calls
 `emit_kernel_for_boundary` which reserves a `KernelEntry` slot.
 `kernel_lift_to_uop` then synthesises the `UOP_STORE` root that
 represents the kernel's compute:
@@ -134,7 +134,7 @@ A kernel root may also be an `UOP_AFTER` chain of `UOP_STORE`s: a
 kernel that writes its output in ordered passes (a scatter's init,
 accumulate and finish stores).  `uop_arity(UOP_AFTER)` is 0, so every
 materialize-time pass over a kernel root goes through `uop_root_map_stores` /
-`uop_root_each_store` ([src/uop/root_map_stores.c](../src/uop/root_map_stores.c)):
+`uop_root_each_store` ([src/uop/root_map_stores.c](../../src/uop/root_map_stores.c)):
 the arange collapse, the walker rewrite with its REDUCE repair and the
 chain-fold scan each see every store; `uop_dag_renumber_axes` gives all
 stores one dense axis-id space;
@@ -155,7 +155,7 @@ a raw-buffer slot a scratch buffer of the whole buffer behind it, as
 tinygrad sizes each beam buffer to its whole PARAM
 (codegen/opt/postrange.py:256-258).
 
-A `UOP_GATHER(src, idx, dim)` ([src/uop/gather.c](../src/uop/gather.c))
+A `UOP_GATHER(src, idx, dim)` ([src/uop/gather.c](../../src/uop/gather.c))
 lowers in `pm_apply_rangeify` (`ru_lower_gather`) straight to the form
 tinygrad's `pm_reduce_load_collapse` leaves once the one-hot sum of
 `Tensor.gather` collapses: idx loads at the node's own ranges, and src
@@ -179,7 +179,7 @@ computed idx (`idx + 1`, a cast) fuses into the gather kernel.  Gather and
 scatter kernels run on the CPU backend only; emit declines them on a GPU
 backend.
 
-A `UOP_SCATTER` ([src/uop/scatter.c](../src/uop/scatter.c)) is always its
+A `UOP_SCATTER` ([src/uop/scatter.c](../../src/uop/scatter.c)) is always its
 own kernel (`BUFFERIZE_REASON_SCATTER`): `ru_lower_scatter` builds an AFTER
 chain of stores over the output buffer instead of an expression.  base is
 read at the node's ranges, as a gather's idx is (through its storage when
@@ -206,7 +206,7 @@ gradients and py surface are in [gather_scatter.md](gather_scatter.md).
 
 ## Pass 4: Render
 
-- File: [src/codegen/render_uop.c](../src/codegen/render_uop.c)
+- File: [src/codegen/render_uop.c](../../src/codegen/render_uop.c)
 - Entry: `cg_render_uop_kernel(root, name, out_buf, in_bufs, n_inputs, fp)`
 
 Walks the UOp DAG rooted at a `UOP_STORE` (or `UOP_AFTER` chain for
@@ -241,13 +241,13 @@ multi-store kernels) and emits MSL.  Coverage:
   when `UOP_AFTER` crosses a `UOP_BUFFER(scope=LOCAL)` boundary.
 
 The output is validated through `xcrun metal -c` in
-[tests/test_render_uop_metal.c](../tests/test_render_uop_metal.c)
+[tests/test_render_uop_metal.c](../../tests/test_render_uop_metal.c)
 and through real WL workloads (cmpeq/cast/reduce/bitcast/bn_grad/
 grad_edge/assign/flip/core/conv_im2col).
 
 ## Dispatch
 
-- File: [src/backend/metal/_.m](../src/backend/metal/_.m)
+- File: [src/backend/metal/_.m](../../src/backend/metal/_.m)
 
 The Metal backend maintains an MTLLibrary cache keyed on the
 `cg_emit_tile_metal` source string.  At first dispatch:
@@ -265,10 +265,10 @@ GROUP_REDUCE modes).  Threads-per-threadgroup are configured from
 
 | Concern | File |
 |---|---|
-| Movement-as-INDEX rewrites | [src/schedule/indexing.c](../src/schedule/indexing.c) |
-| Symbolic index folds | [src/uop/index_simplify.c](../src/uop/index_simplify.c) |
-| New UOp opcodes | [src/uop/buffer.c](../src/uop/buffer.c), [store.c](../src/uop/store.c), [opt.c](../src/uop/opt.c), [index.c](../src/uop/index.c) |
-| Bufferize / schedule | [src/schedule/bufferize_classify.c](../src/schedule/bufferize_classify.c), [rangeify_unified.c](../src/schedule/rangeify_unified.c) |
-| Kernel boundary -> UOp DAG | [src/schedule/kernel_lift.c](../src/schedule/kernel_lift.c) |
-| MSL renderer | [src/codegen/render_uop.c](../src/codegen/render_uop.c) |
-| Metal dispatch | [src/backend/metal/_.m](../src/backend/metal/_.m) |
+| Movement-as-INDEX rewrites | [src/schedule/indexing.c](../../src/schedule/indexing.c) |
+| Symbolic index folds | [src/uop/index_simplify.c](../../src/uop/index_simplify.c) |
+| New UOp opcodes | [src/uop/buffer.c](../../src/uop/buffer.c), [store.c](../../src/uop/store.c), [opt.c](../../src/uop/opt.c), [index.c](../../src/uop/index.c) |
+| Bufferize / schedule | [src/schedule/bufferize_classify.c](../../src/schedule/bufferize_classify.c), [rangeify_unified.c](../../src/schedule/rangeify_unified.c) |
+| Kernel boundary -> UOp DAG | [src/schedule/kernel_lift.c](../../src/schedule/kernel_lift.c) |
+| MSL renderer | [src/codegen/render_uop.c](../../src/codegen/render_uop.c) |
+| Metal dispatch | [src/backend/metal/_.m](../../src/backend/metal/_.m) |

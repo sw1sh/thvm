@@ -66,7 +66,7 @@ Two runtime fixes make this work (both small, both regression-clean):
 MNIST, 512 train / 512 held-out, same hidden architecture
 (`LinearLayer[64] -> Ramp -> LinearLayer[10]`):
 
-![accuracy vs rounds](../wl/THVMLink/Examples/nettrain_tutorial.png)
+![accuracy vs rounds](../../wl/THVMLink/Examples/nettrain_tutorial.png)
 
 | trainer                                   | held-out test accuracy |
 |-------------------------------------------|------------------------|

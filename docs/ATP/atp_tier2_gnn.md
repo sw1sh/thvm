@@ -1,8 +1,8 @@
 # Tier 2: symbol-independent GNN critical-pair scorer
 
 Design for the ENIGMA-Anonymous tier of the ML-in-ATP roadmap
-(`docs/plans/atp_ml_roadmap.md`; field context in
-`docs/atp/ml_guidance.md`). Tier 1 (the 14 hand-features + linear/MLP
+(`docs/ATP/atp_ml_roadmap.md`; field context in
+`docs/ATP/ml_guidance.md`). Tier 1 (the 14 hand-features + linear/MLP
 scorer + coop) is landed. Its ceiling is the two symbol-name features
 (`top_symbol_l/r`): a raw functor label means nothing across problems
 with different signatures, so a Tier 1 model cannot transfer what it
@@ -113,7 +113,7 @@ it is the second implementation step, after the extractor.
    WL-computed priority vector every K selections, gated behind the
    pre-filter; coop/FIFO keep completeness.
 4. **Measure** on the held-out corpus vs Tier 1 + GT, same harness as
-   `docs/atp/ml_guidance.md` section 5.
+   `docs/ATP/ml_guidance.md` section 5.
 
 ## 5. Open questions
 

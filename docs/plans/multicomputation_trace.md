@@ -35,7 +35,7 @@ causal, and token-event graphs reconstruct deterministically, with
 the priority-collapse foliation falling out as the canonical one.
 
 Vocabulary lives in
-[docs/glossary.md](../glossary.md#multicomputation-slices-observers-and-the-reduction-trace);
+[docs/core/glossary.md](../core/glossary.md#multicomputation-slices-observers-and-the-reduction-trace);
 the runtime pieces it leans on are `TAG_SUP` / `TAG_DUP` / `TAG_INC` in
 [src/thvm.h](../../src/thvm.h), the CNF readback in
 [src/cnf/_.c](../../src/cnf/_.c), the priority collapser in
@@ -187,7 +187,7 @@ typedef struct {
 Two intrusive requirements, both small:
 
 1. **Stable wire identity across rewrites.**  A `loc` is *not* stable
-   -- thvm's bump allocator (see [docs/heap.md](../heap.md) and
+   -- thvm's bump allocator (see [docs/core/heap.md](../core/heap.md) and
    [src/heap/](../../src/heap/)) reuses freed cells.  Maintain
    `wire_prov[loc] = {producing_event, generation}`, bumped on every
    `heap_set` / fresh `heap_alloc` *when tracing is on*.  A wire's
@@ -351,7 +351,7 @@ program" a well-typed object rather than an artifact of
   `|leaves(C)|` parallel edges in the expanded graph (state `s|_b ->
   s'|_b`, one per branch `b` in the cone).  Canonicalise states (alpha
   + DUP-floating + the slide-quotient -- well-defined because IC is
-  confluent, see [docs/normal_form.md](../normal_form.md) for the
+  confluent, see [docs/core/normal_form.md](../core/normal_form.md) for the
   reducer's notion of normal form) and identify; `MULTI_MERGE` events
   supply the diamond-closing edges; `MULTI_FORK` events the 1 -> 2
   fan-outs.  `MULTI_SLIDE` events contribute *no* edges.
@@ -367,7 +367,7 @@ program" a well-typed object rather than an artifact of
 
 ## 7. WL surface
 
-LibraryLink bridge ([docs/wl.md](../wl.md)), echoing `THotCounters` /
+LibraryLink bridge ([docs/core/wl.md](../core/wl.md)), echoing `THotCounters` /
 `THeapGraph` / `THeapDiagram`:
 
 - **`TMultiTrace[expr]`** -- run `expr` with tracing on, return the
@@ -398,8 +398,8 @@ LibraryLink bridge ([docs/wl.md](../wl.md)), echoing `THotCounters` /
 These deliberately produce ordinary `Graph[]` objects so they sit
 beside Wolfram's `ResourceFunction["MultiwaySystem"]`-style output for
 direct comparison, and so they render in the IDE workflow the rest of
-the project lives in (cf. [docs/heap_graph.md](../heap_graph.md),
-[docs/diagrams.md](../diagrams.md)).
+the project lives in (cf. [docs/core/heap_graph.md](../core/heap_graph.md),
+[docs/core/diagrams.md](../core/diagrams.md)).
 
 ## 8. Milestones
 
@@ -431,7 +431,7 @@ the project lives in (cf. [docs/heap_graph.md](../heap_graph.md),
   - the graph is a DAG;
   - `#events == ITRS`;
   - on a tiny example, the causal graph matches one drawn by hand from
-    the trace (compare against [docs/heap_graph.md](../heap_graph.md)
+    the trace (compare against [docs/core/heap_graph.md](../core/heap_graph.md)
     snapshots);
   - **default-build bench delta still zero.**  `WIRE_PROV_BUMP(loc)`
     inside `heap_set` / `heap_alloc` is a macro that expands to
@@ -473,7 +473,7 @@ the project lives in (cf. [docs/heap_graph.md](../heap_graph.md),
   - two `INC` schemes give the *same* `TMultiwayGraph` but different
     emission order (confluence in pictures);
   - the cost-ordered observer of
-    [docs/plans/waldmeister_ic_atp.md](waldmeister_ic_atp.md) walks
+    [docs/ATP/waldmeister_ic_atp.md](../ATP/waldmeister_ic_atp.md) walks
     the entailment cone cheapest-first, as one foliation among many.
   Files: `wl/THVMLink/Kernel/Multicomputation.wl` (foliation
   enumeration + frame re-traversal);
@@ -491,7 +491,7 @@ Three concrete payoffs once M0-M3 are in:
    collapse count is wrong by a factor of two and I don't know why."
    The branch-tree view will close those bugs trivially on the SAT
    bench ([docs/research/sat_solver_paths.md](../research/sat_solver_paths.md))
-   and the IC-native ATP ([docs/plans/waldmeister_ic_atp.md](waldmeister_ic_atp.md)).
+   and the IC-native ATP ([docs/ATP/waldmeister_ic_atp.md](../ATP/waldmeister_ic_atp.md)).
 2. **The observer becomes a first-class, inspectable object.**  "This
    `TAG_INC` decoration is this foliation is this traversal order"
    stops being folklore about

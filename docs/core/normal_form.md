@@ -5,10 +5,10 @@ caller: pick the shallowest one that exposes what you need.
 
 | Reducer | Source | What it exposes | What it doesn't |
 | ------- | ------ | --------------- | --------------- |
-| `wnf(t)` | [src/wnf/_.c](../src/wnf/_.c) | head WHNF of the spine | redexes inside arguments; DUP-XXX through compound bodies (Levy-opaque) |
-| `cnf(t)` | [src/cnf/_.c](../src/cnf/_.c) | head WHNF with SUPs lifted to the top; DUP-XXX fired during readback | redexes that aren't on the path to lifting a SUP |
-| `thvm_collapse(t)` / `thvm_collapse_ordered(t)` / `eval_collapse(t)` | [src/collapse/](../src/collapse/), [src/eval/collapse.c](../src/eval/collapse.c) | the set of pure leaves of the SUP-tree (multi-valued evaluation) | nothing new beyond `cnf`; this is a walk of cnf-driven heads |
-| `nf(t)` | [src/wnf/nf.c](../src/wnf/nf.c) | every redex fired (parallel pool drain) | --- |
+| `wnf(t)` | [src/wnf/_.c](../../src/wnf/_.c) | head WHNF of the spine | redexes inside arguments; DUP-XXX through compound bodies (Levy-opaque) |
+| `cnf(t)` | [src/cnf/_.c](../../src/cnf/_.c) | head WHNF with SUPs lifted to the top; DUP-XXX fired during readback | redexes that aren't on the path to lifting a SUP |
+| `thvm_collapse(t)` / `thvm_collapse_ordered(t)` / `eval_collapse(t)` | [src/collapse/](../../src/collapse/), [src/eval/collapse.c](../../src/eval/collapse.c) | the set of pure leaves of the SUP-tree (multi-valued evaluation) | nothing new beyond `cnf`; this is a walk of cnf-driven heads |
+| `nf(t)` | [src/wnf/nf.c](../../src/wnf/nf.c) | every redex fired (parallel pool drain) | --- |
 
 Use the shallowest one that exposes the work you need.  `wnf` is right
 when only the head matters (OP2 strict eval, APP-LAM re-entry).  `cnf`
@@ -154,18 +154,18 @@ The full apply dispatch:
 Adding an interaction means:
 
 1. Write `src/interact/<active_pair>.c` defining `interact_<active_pair>(...)`.
-2. Declare it in [src/thvm.h](../src/thvm.h).
+2. Declare it in [src/thvm.h](../../src/thvm.h).
 3. Add a case to the relevant frame's apply dispatch in
-   [src/wnf/_.c](../src/wnf/_.c) AND the matching arm in
-   [src/wnf/redex.c](../src/wnf/redex.c) (so the parallel pool can fire
+   [src/wnf/_.c](../../src/wnf/_.c) AND the matching arm in
+   [src/wnf/redex.c](../../src/wnf/redex.c) (so the parallel pool can fire
    it through `redex_fire`).
 4. Decide if it's a DUP-XXX readback rule: if so, also add it to
-   [src/cnf/_.c](../src/cnf/_.c)'s `cnf_dp` switch.
+   [src/cnf/_.c](../../src/cnf/_.c)'s `cnf_dp` switch.
 5. Pick a `RULE_*` code, add a `multi_emit` call inside the rule, list
-   it in [MULTI_RULE_NAMES](../src/instrument/multi.c) so the trace
+   it in [MULTI_RULE_NAMES](../../src/instrument/multi.c) so the trace
    surfaces a readable name.
-6. Add or extend a test under [tests/](../tests/) and document the
-   rule under [docs/interact/](interact/).
+6. Add or extend a test under [tests/](../../tests/) and document the
+   rule under [docs/interact/](../interact/).
 
 ## `cnf`: SUP-lift readback
 
@@ -188,7 +188,7 @@ two branches share work via the existing dup-cell mechanism.  `ERA` /
 `INC` pass through; SUP at the head is the lifted result; pure
 (DP-free, SUP-free) terms pass through unchanged.
 
-Per-tag handlers in [src/cnf/_.c](../src/cnf/_.c):
+Per-tag handlers in [src/cnf/_.c](../../src/cnf/_.c):
 
 | Tag | Handler |
 | --- | ------- |
@@ -213,7 +213,7 @@ wnf) get fired during the walk.
 
 ### `thvm_collapse` (naive)
 
-[src/collapse/_.c](../src/collapse/_.c): a straight recursive walk.
+[src/collapse/_.c](../../src/collapse/_.c): a straight recursive walk.
 At each step, `cnf` the term:
 
 - `TAG_SUP` -> recurse on both children.
@@ -222,7 +222,7 @@ At each step, `cnf` the term:
 
 ### `thvm_collapse_ordered` (INC-priority)
 
-[src/collapse/ordered.c](../src/collapse/ordered.c): the multicomputation
+[src/collapse/ordered.c](../../src/collapse/ordered.c): the multicomputation
 foliation primitive.  Same shallow walk, but each leaf is tagged with
 the number of `TAG_INC` wrappers seen on the path from the root.
 Lower INC-depth = higher priority = emitted first; ties are broken by
@@ -236,7 +236,7 @@ that the observer enumerates in order.
 
 ### `eval_collapse` (HVM4-style priority queue)
 
-[src/eval/collapse.c](../src/eval/collapse.c): variant with finer-
+[src/eval/collapse.c](../../src/eval/collapse.c): variant with finer-
 grained priority semantics:
 
 - `INC` *decreases* the key (raises priority).
@@ -289,7 +289,7 @@ Per-fire flow:
 3. T=1 with a step session attached: parent-promotion redexes (where
    `heap_replace` patched a child slot, flipping the parent's
    `is_redex`) get surfaced via the inverse index in
-   [src/wnf/redex.c](../src/wnf/redex.c) and pushed straight into the
+   [src/wnf/redex.c](../../src/wnf/redex.c) and pushed straight into the
    worker bag, no full-heap re-enumerate.
 4. T>1: legacy O(HEAP_NEXT) re-enumerate after each round catches
    promotions (the inverse-index lift for the parallel path is
@@ -316,7 +316,7 @@ emits no fresh kernel.
 
 ### Redex identification
 
-[src/wnf/redex.c](../src/wnf/redex.c) defines:
+[src/wnf/redex.c](../../src/wnf/redex.c) defines:
 
 - `is_redex(t)` -- predicate.  APP-with-{LAM, ERA, MAT}-function,
   DP-with-{SUP/LAM/ERA/NUM/TEN/CTR/ANY/BRI/UOP/OP2/MAT/EQL/AND/OR/
@@ -339,9 +339,9 @@ O(HEAP_NEXT) into O(uses-of-old).  See `redex_step_attach` /
 ## Tracing
 
 Tracing is live in the default build via `WL_TRACE ?= 1` in the
-[Makefile](../Makefile); pass `WL_TRACE=0` to opt out for benching.
+[Makefile](../../Makefile); pass `WL_TRACE=0` to opt out for benching.
 
-`ITRS` (the global interaction counter, [src/thvm.h](../src/thvm.h))
+`ITRS` (the global interaction counter, [src/thvm.h](../../src/thvm.h))
 gets bumped once at the head of every `interact_*` rule.  In a
 THVM_TRACE build, each bump is followed by a `multi_emit(rule, family,
 term_a, term_b, delta_label)` call that appends a `MultiEvent` to
@@ -370,12 +370,12 @@ last wrote it is that event's producer.
 | PRUNE | ERA at any active pair | APP_ERA, DUP_ERA, AND_ERA, OR_ERA, WHEN_ERA, EQL_ERA |
 | PLUMB | sharing housekeeping | (currently unused; reserved for explicit copy/share events) |
 
-See [src/instrument/multi.c](../src/instrument/multi.c) for the
+See [src/instrument/multi.c](../../src/instrument/multi.c) for the
 `MULTI_RULE_NAMES` and `MULTI_FAMILY_NAMES` tables.
 
 ### WL surface
 
-[wl/THVMLink/Kernel/Multicomputation.wl](../wl/THVMLink/Kernel/Multicomputation.wl):
+[wl/THVMLink/Kernel/Multicomputation.wl](../../wl/THVMLink/Kernel/Multicomputation.wl):
 
 - `TMultiTrace[expr]` -- run `expr` with tracing on, return
   `<|"Result" -> ..., "Trace" -> {event, ...}|>`.
@@ -395,7 +395,7 @@ See [src/instrument/multi.c](../src/instrument/multi.c) for the
 These are known mismatches between the implementation and the "right"
 shape.  Listed so the next maintainer doesn't have to rediscover them.
 
-1. **`TMultiSteps` ignores INC priorities** ([Multicomputation.wl](../wl/THVMLink/Kernel/Multicomputation.wl)).
+1. **`TMultiSteps` ignores INC priorities** ([Multicomputation.wl](../../wl/THVMLink/Kernel/Multicomputation.wl)).
    The WL stepper does a naive left-right collapse walk with a
    frontier stack; the C-side `thvm_collapse_ordered` and
    `eval_collapse` honor `TAG_INC` as a priority observer.  The
@@ -405,14 +405,14 @@ shape.  Listed so the next maintainer doesn't have to rediscover them.
    than the naive walk.  This is the largest user-visible gap right
    now.
 
-2. **No WL constructor for `TAG_INC`**.  There's `term_new_inc` in
-   [src/term/new_inc.c](../src/term/new_inc.c) and an INC arm in
+2. **No WL constructor for `TAG_INC`**.  There's `TAG_INC` in
+   [src/thvm.h](../../src/thvm.h) and an INC arm in
    `is_redex` / `cnf` / `interact_dup_nod`, but no `TInc[body]` in
-   [wl/THVMLink/Kernel/THVMLink.wl](../wl/THVMLink/Kernel/THVMLink.wl)
+   [wl/THVMLink/Kernel/THVMLink.wl](../../wl/THVMLink/Kernel/THVMLink.wl)
    for users to mark priorities.  As a result it's impossible to
    demonstrate the priority semantics from a notebook today.
 
-3. **`F_OP2_NUM` heap-roundtrip is unconditional** ([src/wnf/_.c](../src/wnf/_.c)).
+3. **`F_OP2_NUM` heap-roundtrip is unconditional** ([src/wnf/_.c](../../src/wnf/_.c)).
    The OP2 frame stashes the WHNF'd x into `heap[loc+0]` before
    pushing F_OP2_NUM so the frame can carry the OP2's original `loc`
    as a wire-provenance carrier; F_OP2_NUM then re-reads x from the
@@ -422,7 +422,7 @@ shape.  Listed so the next maintainer doesn't have to rediscover them.
    it.  No benchmark has shown the cost matters yet -- before doing
    this, measure the impact on OP2-heavy workloads.
 
-4. **AOT cache key is hand-rolled** ([Makefile](../Makefile) or hash
+4. **AOT cache key is hand-rolled** ([Makefile](../../Makefile) or hash
    logic).  When the TContext layout changes (e.g. adding
    `multi_events[]` / `multi_wire_prov[]` for the trace machinery),
    stale AOT modules crash unless a magic number is XOR'd into the
@@ -434,7 +434,7 @@ shape.  Listed so the next maintainer doesn't have to rediscover them.
 5. **`interact_dup_nod`'s `ari=0` fallback is unused**.  The dispatch
    table maps every dispatchable tag to a non-zero arity, and atom
    tags (NUM/ANY/ERA/...) have their own dispatch arms in `wnf`'s DP
-   apply switch.  The `ari=0` arm in [src/interact/dup_nod.c](../src/interact/dup_nod.c)
+   apply switch.  The `ari=0` arm in [src/interact/dup_nod.c](../../src/interact/dup_nod.c)
    exists only as defensive fallback for a "compound tag with no
    children" case that can't happen.  Drop it or document it as
    intentional dead code.
@@ -443,7 +443,7 @@ shape.  Listed so the next maintainer doesn't have to rediscover them.
    session's inverse index; T>1 falls back to O(HEAP_NEXT) re-enumerate
    after every drain round.  The MT inverse-index path is off: it has
    "remaining ordering bugs that surface as duplicate fires on some
-   shared-substructure workloads" (per [src/wnf/nf.c](../src/wnf/nf.c)).  Until
+   shared-substructure workloads" (per [src/wnf/nf.c](../../src/wnf/nf.c)).  Until
    that's fixed, T>1 perf suffers on heaps where most fires are
    parent-promotions of a long chain.
 
@@ -464,7 +464,7 @@ shape.  Listed so the next maintainer doesn't have to rediscover them.
    `_Static_assert` on the table size matching `RULE_COUNT` would
    force the maintainer to update it.
 
-9. **`step_session` globals race under MT** ([src/wnf/redex.c](../src/wnf/redex.c) STEP_* statics).
+9. **`step_session` globals race under MT** ([src/wnf/redex.c](../../src/wnf/redex.c) STEP_* statics).
    `STEP_USE_HEAD`, `STEP_PRE`, `STEP_FRESH_BUF` etc. are file-static
    pointers, not per-context fields.  `nf` works around this by
    refusing to attach a session at T>1.  The right shape is to move

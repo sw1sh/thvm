@@ -13,7 +13,7 @@ having to re-run the WL kernel.
 ## Regenerate
 
 ```
-bash docs/aot_emitted_examples/_gen.sh
+bash docs/core/aot_emitted_examples/_gen.sh
 ```
 
 Each example uses a fresh `wolframscript` invocation because chaining
