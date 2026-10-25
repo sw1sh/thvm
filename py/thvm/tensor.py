@@ -455,8 +455,8 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         return self
 
     def backward(self, gradient: "Tensor | None" = None) -> "Tensor":
-        """Fill .grad on every live in-scope float leaf, with no requires_grad flag (tinygrad
-        tensor.py:475-495); the grads stay lazy until realized."""
+        """Fill .grad on every live in-scope float tensor, with no requires_grad flag (tinygrad
+        tensor.py:527-547); the grads stay lazy until realized."""
         if gradient is None:
             if self.numel() != 1:
                 raise RuntimeError(
@@ -466,23 +466,31 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         # cutting no other path, so it is a leaf as tinygrad's backward sees it (tensor.py:457-460).
         root = self.term
         lazy = [t for t in list(_LAZY_FULLS.values()) if int(_TH.term_tag(t.term)) != _TAG_TEN]
+        # The other float tensors in scope but a bare CONST get .grad too, interior ones as the
+        # cotangent their node gathers (tensor.py:537-540).
+        ids = {id(t) for t in lazy}
+        scope = [t for t in list(Thvm.live_terms) if id(t) not in ids and dtypes.is_float(t._dtype)
+                 and _TH.term_tag(t.term) == _TAG_UOP and _TH.term_ext(t.term) != K.CONST]
+        scope = [t for t, h in zip(scope, _TH.uop_reaches([root], [t.term for t in scope])) if h]
+        nodes = [t.term for t in scope]
         if lazy:
             old = [t.term for t in lazy]
             _realize_now(*lazy)
-            root = _TH.uop_substitute(root, old, [t.term for t in lazy])
+            root, *nodes = _TH.uop_substitute_many([root, *nodes], old, [t.term for t in lazy])
         # tinygrad keeps the float leaves with a device (tensor.py:486-488); a TEN leaf is a
-        # buffer, so the float test is all that is left.
+        # buffer, so the float test is all that is left.  A buffer whose tensor has moved on to an
+        # assign is an older state of it, which no tensor holds: the tensor's grad is its node's.
         tids = [tid for tid in _TH.uop_leaf_tids(root)
-                if (leaf := _LEAF_TENSORS.get(tid)) is not None and dtypes.is_float(leaf._dtype)]
-        grads, err = _TH.backward(root, gradient.term, tids)
+                if (leaf := _LEAF_TENSORS.get(tid)) is not None and dtypes.is_float(leaf._dtype)
+                and _TH.term_tag(leaf.term) == _TAG_TEN and _TH.term_val(leaf.term) == tid]
+        grads, node_grads, err = _TH.backward(root, gradient.term, tids, nodes)
         if err is not None:
             # tinygrad's compute_gradient raises for a node without a rule
             # (mixin/gradient.py:127); no .grad changes.
             raise RuntimeError(f"backward(): {err}")
-        for tid, g in zip(tids, grads):
+        for leaf, g in [*zip((_LEAF_TENSORS[tid] for tid in tids), grads), *zip(scope, node_grads)]:
             if g == 0:
                 continue
-            leaf = _LEAF_TENSORS[tid]
             g = Tensor._from_term(Term(g), leaf._dtype, leaf._shape)
             # tinygrad tensor.py:465-466: .grad accumulates until it is set to None.
             if leaf.grad is None:
@@ -515,7 +523,7 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         for root in dict.fromkeys(roots):
             idx = [i for i, r in enumerate(roots) if r == root]
             ts = [targets[i] for i in idx]
-            gs, err = _TH.backward(root, gradient.term, [int(_TH.term_val(t.term)) for t in ts])
+            gs, _, err = _TH.backward(root, gradient.term, [int(_TH.term_val(t.term)) for t in ts])
             if err is not None:
                 raise RuntimeError(f"gradient(): {err}")
             for i, g in zip(idx, gs):

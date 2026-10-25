@@ -660,11 +660,13 @@ EXPORT void py_uop_substitute_many(uint64_t *roots, uint32_t nr, uint64_t const 
 // cleared by the call; NULL when there is none.
 EXPORT char const *py_grad_err_take(void) { return grad_err_take(); }
 
-// Tensor.backward's chain rule (uop_backward): each leaf's fresh gradient, and
-// NULL or the rule's error message.
+// Tensor.backward's chain rule (uop_backward): each leaf's and each interior
+// node's fresh gradient, and NULL or the rule's error message.
 EXPORT char const *py_backward(uint64_t y, uint64_t gy, uint32_t const *tids, uint32_t n,
-                               uint64_t *grads) {
-  return uop_backward(y, gy, tids, n, (Term *)grads);
+                               uint64_t *grads, uint64_t const *nodes, uint32_t n_nodes,
+                               uint64_t *node_grads) {
+  return uop_backward(y, gy, tids, n, (Term *)grads, (Term const *)nodes, n_nodes,
+                      (Term *)node_grads);
 }
 
 EXPORT uint32_t py_ten_get_buf_id(uint64_t t) {
@@ -698,6 +700,7 @@ EXPORT uint32_t py_const_UOP_ADD(void)   { return UOP_ADD; }
 EXPORT uint32_t py_const_UOP_MUL(void)   { return UOP_MUL; }
 EXPORT uint32_t py_const_UOP_NEG(void)   { return UOP_NEG; }
 EXPORT uint32_t py_const_UOP_ASSIGN(void){ return UOP_ASSIGN; }
+EXPORT uint32_t py_const_UOP_CONST(void) { return UOP_CONST; }
 EXPORT uint32_t py_const_UOP_CMPLT(void) { return UOP_CMPLT; }
 EXPORT uint32_t py_const_UOP_CMPEQ(void) { return UOP_CMPEQ; }
 EXPORT uint32_t py_const_UOP_RECIP(void) { return UOP_RECIP; }

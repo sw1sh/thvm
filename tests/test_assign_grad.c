@@ -45,7 +45,7 @@ static void grad_through_assign(Term (*value)(Term), char const *what) {
   u32  dims[1] = { N };
   Term y   = uop_binary(UOP_MUL, uop_binary(UOP_ASSIGN, dst, value(x)), w);
   Term gt  = 0;
-  CHECK(uop_backward(y, uop_expand(fconst(1.0f), 1, dims), &xt, 1, &gt) == NULL);
+  CHECK(uop_backward(y, uop_expand(fconst(1.0f), 1, dims), &xt, 1, &gt, NULL, 0, NULL) == NULL);
   CHECK_EQ(grad_slot_stuck_get(), 0u);
   CHECK(gt != 0);
   if (gt == 0) {

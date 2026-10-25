@@ -2,10 +2,11 @@
 #
 # tinygrad REMOVED requires_grad from Tensor.__init__ + the
 # requires_grad_() method; backward() now auto-fills .grad for every
-# in-scope non-CONST float leaf, with no flag anywhere.  thvm follows
+# in-scope non-CONST float tensor, with no flag anywhere.  thvm follows
 # the same spec: a plain `Tensor(data)` leaf gets a .grad after a
-# backward() that reaches it, and the OPTIMIZER's param list (not a
-# flag) decides what updates.
+# backward() that reaches it, an interior tensor the cotangent its node
+# gathers, and the OPTIMIZER's param list (not a flag) decides what
+# updates.
 import unittest
 
 import numpy as np
@@ -42,6 +43,24 @@ class TestAutoGradAllFloatLeaves(unittest.TestCase):
     (x * x).sum().backward()
     self.assertIsNotNone(x.grad)
     self.assertIsNone(other.grad, "an out-of-scope leaf must stay grad-free")
+
+  def test_interior_tensor_gets_its_cotangent(self):
+    a = Tensor(np.array([1.0, 2.0], dtype=np.float32))
+    h = a * 3
+    (h * h).sum().backward()
+    np.testing.assert_array_equal(h.grad.numpy(), [6.0, 12.0])
+    np.testing.assert_array_equal(a.grad.numpy(), [18.0, 36.0])
+
+  def test_overlapping_setitem_backward(self):
+    # tinygrad's test_setitem.py test_set_overlapping_backward: y is lazy.
+    z = Tensor.zeros(6)
+    x = Tensor.ones(4).contiguous()
+    y = Tensor.ones(4) * 2
+    z[:4] = x
+    z[2:] = y
+    z.sum().backward()
+    np.testing.assert_array_equal(x.grad.numpy(), [1.0, 1.0, 0.0, 0.0])
+    np.testing.assert_array_equal(y.grad.numpy(), [1.0, 1.0, 1.0, 1.0])
 
   def test_is_param_default_and_opt_out(self):
     # is_param defaults True (optimizer-parameter candidate); a buffer

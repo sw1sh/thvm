@@ -31,7 +31,8 @@ junk = [Tensor(np.full(1 << 18, 7.0, np.float32)).realize() for _ in range(4)]
 print("READ", bool(np.array_equal(xd.numpy(), x)), flush=True)
 print("SUM", bool(np.array_equal((xd * 2.0).numpy(), 2.0 * x)), flush=True)
 (w * yd).sum().backward()
-print("GRAD", bool(np.array_equal(w.grad.numpy(), y)), yd.grad is None, flush=True)
+# tinygrad fills .grad on the detached tensor too: the cotangent its DETACH node gathers.
+print("GRAD", bool(np.array_equal(w.grad.numpy(), y)), bool(np.array_equal(yd.grad.numpy(), y)), flush=True)
 """
 
 

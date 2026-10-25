@@ -80,6 +80,35 @@ fn void grad_req_ncount_dec(void) {
   if (GRAD_REQ_NCOUNT > 0) GRAD_REQ_NCOUNT--;
 }
 
+// Interior nodes whose whole cotangent uop_backward returns, as tinygrad's
+// backward fills .grad for every tensor in scope (tensor.py:537-546): the
+// single walk fires a node once with the sum of its arrivals, and each fire
+// adds its gy here, padded to the node's shape.
+static Term const *GRAD_NODES      = NULL;
+static Term       *GRAD_NODE_GRADS = NULL;
+static u32         GRAD_NODES_N    = 0;
+
+static void grad_node_note(Term y, Term gy) {
+  for (u32 i = 0; i < GRAD_NODES_N; i++) {
+    if (term_resolve(GRAD_NODES[i]) != y) {
+      continue;
+    }
+    Shape ys, gs;
+    if (term_shape_in(y, 0, &ys) && term_shape_in(gy, 0, &gs) && ys.ndim > 0) {
+      u8 mismatch = gs.ndim != ys.ndim;
+      for (u32 d = 0; !mismatch && d < ys.ndim; d++) {
+        mismatch = gs.dims[d] != ys.dims[d];
+      }
+      if (mismatch) {
+        u32 dt = DT_FP32;
+        term_dtype_in(y, 0, &dt);
+        gy = uop_binary(UOP_ADD, gy, uop_expand(uop_const(dt, 0), ys.ndim, ys.dims));
+      }
+    }
+    GRAD_NODE_GRADS[i] = GRAD_NODE_GRADS[i] == 0 ? gy : uop_binary(UOP_ADD, GRAD_NODE_GRADS[i], gy);
+  }
+}
+
 // Chain-rule scalars (zeros, ln 2, 0.5) take the target's dtype, else f32, so
 // their buffer's itemsize matches the kernel that reads them.
 fn u32 grad_target_dtype(void) {
@@ -822,6 +851,9 @@ static Term interact_grad_dispatch(Term grad_term) {
   Term target    = heap_read(cell_orig + 2);
 
   grad_slot_mark_fired(cell_orig, y, target);
+  if (target == 0 && GRAD_NODES_N > 0) {
+    grad_node_note(y, gy);
+  }
 
   u8 y_tag = term_tag(y);
 

@@ -144,7 +144,8 @@ _uop_substitute_many = _bind("py_uop_substitute_many", None, ctypes.POINTER(c_ui
 _assign_dsts = _bind("py_assign_dsts", c_uint32, ctypes.POINTER(c_uint64), c_uint32,
                      ctypes.POINTER(c_uint64), ctypes.POINTER(c_uint64), c_uint32)
 _backward = _bind("py_backward", c_char_p, c_uint64, c_uint64, ctypes.POINTER(c_uint32),
-                  c_uint32, ctypes.POINTER(c_uint64))
+                  c_uint32, ctypes.POINTER(c_uint64), ctypes.POINTER(c_uint64), c_uint32,
+                  ctypes.POINTER(c_uint64))
 _ten_get_buf_id   = _bind("py_ten_get_buf_id",   c_uint32, c_uint64)
 
 _run_uop_kernel_c = _bind("py_run_uop_kernel_c", c_int32, c_uint64, c_void_p,
@@ -177,6 +178,7 @@ class _Constants:
     MUL = _read_uint32_const("py_const_UOP_MUL")
     NEG = _read_uint32_const("py_const_UOP_NEG")
     ASSIGN = _read_uint32_const("py_const_UOP_ASSIGN")
+    CONST = _read_uint32_const("py_const_UOP_CONST")
     CMPLT = _read_uint32_const("py_const_UOP_CMPLT")
     CMPEQ = _read_uint32_const("py_const_UOP_CMPEQ")
     RECIP = _read_uint32_const("py_const_UOP_RECIP")
@@ -600,14 +602,15 @@ class Thvm:
         n = int(_view_chain(c_uint64(int(t)), ctypes.byref(base), out, c_uint32(1024)))
         return (Term(base.value), tuple(out[:n])) if n else None
 
-    def backward(self, y: Term, gy: Term, tids) -> "tuple[list[int], str | None]":
-        """uop_backward: each leaf's fresh gradient term (0: none), and the chain rule's
-        error or None."""
-        n = len(tids)
+    def backward(self, y: Term, gy: Term, tids, nodes=()) -> "tuple[list[int], list[int], str | None]":
+        """uop_backward: each leaf's and each interior node's fresh gradient term (0: none),
+        and the chain rule's error or None."""
+        n, m = len(tids), len(nodes)
         arr = (c_uint32 * max(n, 1))(*tids)
         grads = (c_uint64 * max(n, 1))()
-        err = _backward(c_uint64(int(y)), c_uint64(int(gy)), arr, c_uint32(n), grads)
-        return [int(g) for g in grads[:n]], None if err is None else err.decode()
+        nd, ng = (c_uint64 * max(m, 1))(*map(int, nodes)), (c_uint64 * max(m, 1))()
+        err = _backward(c_uint64(int(y)), c_uint64(int(gy)), arr, c_uint32(n), grads, nd, c_uint32(m), ng)
+        return [int(g) for g in grads[:n]], [int(g) for g in ng[:m]], None if err is None else err.decode()
 
     def grad_err_take(self) -> "str | None":
         """The chain rule's pending error (a node it has no gradient rule
