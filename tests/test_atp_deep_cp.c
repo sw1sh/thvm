@@ -1,7 +1,7 @@
 // test_atp_deep_cp.c - the engine's critical-pair push and a few
 // saturation steps on a deep critical pair (CP), end to end.
 //
-// G0.1 of docs/plans/enigma_portfolio.md recorded SIGSEGV rows on
+// G0.1 of docs/ATP/enigma_portfolio.md recorded SIGSEGV rows on
 // SYN986-10.005 / .006: a CP thousands of levels deep overflowed the C
 // stack in the push-time treatment (atp_cp_trivially_joinable,
 // ft_to_term) and in the ground-join index flatten (atp_ri_flatten).

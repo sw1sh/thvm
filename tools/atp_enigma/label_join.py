@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# The label join (docs/plans/enigma_portfolio.md, M2 deliverable 3 and
+# The label join (docs/ATP/enigma_portfolio.md, M2 deliverable 3 and
 # section 3.2): listwise training groups for guide_net.py from a guided
 # harvest (tools/atp_enigma/guide_harvest.sh).  Per (problem, lane) run it
 # joins
-#   - the run's THVM_ATP_GUIDE_DUMP (docs/atp/guide.md): every dumped pick's
+#   - the run's THVM_ATP_GUIDE_DUMP (docs/ATP/guide.md): every dumped pick's
 #     candidates with their inputs x (layout v1) and seqs, with
 #   - the same run's history-export labels (np0_extract.py, export v2) by
 #     CP seq: a candidate is a proof positive when the run proved and the

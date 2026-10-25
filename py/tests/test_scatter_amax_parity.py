@@ -8,7 +8,7 @@ with I the dtype's minimum (amax) or maximum (amin).  Its gradient is the
 REDUCE MAX rule (ties split by their count, mixin/gradient.py:8-12) and the
 MAX rule (a tie of the reduced value and self halves, :78-79).  On the CPU
 backend thvm runs one native UOP_SCATTER(MAX / MIN) and differentiates it
-with the C rule (grad_scatter_maxmin, docs/grad.md).
+with the C rule (grad_scatter_maxmin, docs/NN/grad.md).
 
 The reference is that dense formulation, written out in float64 numpy, and
 tinygrad master itself when it is importable: forward values bit for bit

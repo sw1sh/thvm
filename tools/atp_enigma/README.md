@@ -1,7 +1,7 @@
 # ENIGMA dataset + guidance experiment harness
 
 Tooling for the ATP machine-learned guidance roadmap
-([docs/plans/atp_ml_roadmap.md](../../docs/plans/atp_ml_roadmap.md)): build a
+([docs/ATP/atp_ml_roadmap.md](../../docs/ATP/atp_ml_roadmap.md)): build a
 proof corpus, train the Tier-2 GNN (Graph Neural Network) proof-relevance
 scorer, and measure GNN-guided critical-pair reranking.
 
@@ -114,7 +114,7 @@ signatures the way the 14 hand features cannot. The in-engine forward
 runs on thvm's own tensor runtime in C (`atp_gnn_forward`, `src/atp/_.c`);
 it is loaded at run time from a `.safetensors` file and drives the
 critical-pair queue via a periodic re-rank hook. See
-[docs/plans/atp_tier2_gnn.md](../../docs/plans/atp_tier2_gnn.md).
+[docs/ATP/atp_tier2_gnn.md](../../docs/ATP/atp_tier2_gnn.md).
 
 Pipeline (CPU-only; no WL, no GPU):
 
@@ -306,7 +306,7 @@ At every weight pick the engine's K best queued CPs are scored by a small
 listwise head (rank, queue size, priority, the 14 push features, age) and
 the argmax is selected. Offline it beats the engine's pick on held-out
 problems; online it solves the same set as the twee lane (see
-[docs/plans/atp_neural_selection.md](../../docs/plans/atp_neural_selection.md)),
+[docs/ATP/atp_neural_selection.md](../../docs/ATP/atp_neural_selection.md)),
 so it stays opt-in and out of `SCHEDULE[]`. Pod-only pipeline over a
 history-export harvest (`np0_harvest.sh` with `THVM_ATP_HISTORY_CPFEAT=1`):
 
@@ -347,7 +347,7 @@ It beats R32h32 on both state distributions (held-out top-1 proof-CP hit
 further online, yet solves twee's set at 60 s and one more problem of the 37
 twee misses at 300 s; it stays opt-in as well.
 
-## Lane matrix (docs/plans/enigma_portfolio.md section 5)
+## Lane matrix (docs/ATP/enigma_portfolio.md section 5)
 
 `matrix_tables.py` turns the harvested lane matrix
 (`~/.cache/thvm/enigma/matrix`, described by its `FORMAT.txt`) into the M0
@@ -440,7 +440,7 @@ instruction counts and CPU time.
 
 ## ENIGMA selection layer: compiled-in heads (`weights_to_c.py`)
 
-The guided twins' layer (`src/atp/guide.c`, [docs/atp/guide.md](../../docs/atp/guide.md))
+The guided twins' layer (`src/atp/guide.c`, [docs/ATP/guide.md](../../docs/ATP/guide.md))
 reads its heads from `src/atp/guide_models.c`, which `weights_to_c.py`
 generates from safetensors heads (metadata `Layout`, `Phi`, `Lanes`,
 optional `LaneNames`, `Families`; a `topk_net.py export` file is a
@@ -471,7 +471,7 @@ problem without the row runs without the layer.
 
 ## Guided harvest, label join and the M3 trainer
 
-The loop of plan section 3.2 (docs/atp/guide.md, "Training"), pod-only:
+The loop of plan section 3.2 (docs/ATP/guide.md, "Training"), pod-only:
 
 ```
 # 1. the jobs: every TRAIN / TRAIN-X pair the families' lanes searched at 60 s
@@ -498,7 +498,7 @@ label_join.py selftest; guide_net.py selftest  # synthetic files
 ```
 
 The dump sampler (`THVM_ATP_GUIDE_DUMP_EVERY`, `_MAX`, `_ROWS`) and the
-dump's footer are described in docs/atp/guide.md ("The dump").
+dump's footer are described in docs/ATP/guide.md ("The dump").
 
 ## History export, version 2
 
@@ -719,7 +719,7 @@ the rest `<source>-S<k>`.
 ## Comparison protocol (`protocol/`)
 
 The tools that run and judge every arm comparison of
-[docs/plans/enigma_portfolio.md](../../docs/plans/enigma_portfolio.md)
+[docs/ATP/enigma_portfolio.md](../../docs/ATP/enigma_portfolio.md)
 (sections 1.3 to 1.5, gates G0.2 and G0.3, and the readings registered in
 section 5.4).  Each file's header holds its exact definitions.
 

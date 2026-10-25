@@ -4788,7 +4788,7 @@ int main(void) {
 
   TEST_BEGIN("atp/headline-prove-f-a-ia-equals-e-from-group-axioms");
   {
-    // Stage 5.5 demo from docs/plans/waldmeister_ic_atp.md sec.5:
+    // Stage 5.5 demo from docs/ATP/waldmeister_ic_atp.md sec.5:
     // prove f(a, i(a)) == e from the standard group axioms via
     // saturation.  Under the same KBO config as test_kbo.c
     // (weights i=0, f=1, e=1, a=1; precedence i > f > e > a; w0=1)

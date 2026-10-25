@@ -10,7 +10,7 @@
 
 // === util/ ===
 // Shared concurrency primitives.  Foundation for the parallel WNF /
-// CNF redex bag (Phase 1 of docs/aot.md / docs/plans/levy_optimal.md).
+// CNF redex bag (Phase 1 of docs/core/aot.md / docs/plans/levy_optimal.md).
 // Pulled in early because the data structures are pure (no thvm
 // runtime dependency) and downstream code may build per-context
 // scheduler state on top.

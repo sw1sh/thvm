@@ -54,10 +54,10 @@ SetUsage[TGCCount, "TGCCount[] returns the number of GC cycles since thvm_init."
 (* TKernelSource / TKernelFlops / TKernelDispatchKind / TKernelDispatchCount /
    TKernelTotalUs / TKernelJitDylibPath / TKernelProfile / TProfileAll
    are declared and defined in Kernel.wl as TKernel-property accessors. *)
-SetUsage[THeap, "THeap[] returns an Association snapshot with keys \"nextLoc\", \"cells\", \"Graph\".  See docs/heap_graph.md."];
+SetUsage[THeap, "THeap[] returns an Association snapshot with keys \"nextLoc\", \"cells\", \"Graph\".  See docs/core/heap_graph.md."];
 SetUsage[THeapGraph, "THeapGraph[] renders the heap state as an interaction-net string-diagram Graph.
 THeapGraph[term$] also seeds discovery with term$ so heapless compounds held only by the WL caller appear.
-THeapGraph[{t$1, t$2, $$}] seeds with several.  See docs/heap_graph.md."];
+THeapGraph[{t$1, t$2, $$}] seeds with several.  See docs/core/heap_graph.md."];
 SetUsage[THeapDiagram, "THeapDiagram[term$] builds a Wolfram`DiagrammaticComputation`DiagramNetwork from the heap, with one Diagram per compound agent and one ERA Diagram per ERA cell.
 Wires share string identifiers keyed off heap loc; VAR cells collapse to their binder loc."];
 
@@ -666,7 +666,7 @@ $uopExpandFn := $uopExpandFn = load["thvm_wl_uop_expand", {Integer, {Integer, 1}
 $uopPadFn := $uopPadFn = load["thvm_wl_uop_pad", {Integer, {Integer, 1}}, Integer];
 $uopShrinkFn := $uopShrinkFn = load["thvm_wl_uop_shrink", {Integer, {Integer, 1}}, Integer];
 $uopFlipFn := $uopFlipFn = load["thvm_wl_uop_flip", {Integer, Integer}, Integer];
-(* The src/nn ops through their one entry, nn_call (docs/nn.md). *)
+(* The src/nn ops through their one entry, nn_call (docs/NN/nn.md). *)
 $nnFn := $nnFn = load["thvm_wl_nn", {Integer, {Integer, 1}, {Integer, 1}, {Real, 1}}, Integer];
 $nnOpFn := $nnOpFn = load["thvm_wl_nn_op", {"UTF8String"}, Integer];
 $uopGradFn := $uopGradFn = load["thvm_wl_uop_grad", {Integer, Integer}, Integer];

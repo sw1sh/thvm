@@ -18,7 +18,7 @@
 
        src = TAOTEmit["count"];
        (* `src` is the C source string -- inspect, save, or compile
-          via tests/test_aot_e2e.c-style harness.  See docs/aot.md. *)
+          via tests/test_aot_e2e.c-style harness.  See docs/core/aot.md. *)
 
    TAOTCompile (compile + dlopen + run in-process) lands once the
    runtime-OPS ABI is in place -- without it, the dylib's #include

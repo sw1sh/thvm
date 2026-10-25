@@ -3,7 +3,7 @@
    logical nibble count; dtype_storage_bytes(numel) = (numel+1)/2.
    Arithmetic wraps at 4 bits; movement ops keep the logical nibble
    order.  The CPU backend has no kernel path for packed nibbles
-   (docs/dtypes.md).
+   (docs/NN/dtypes.md).
    Dequantization at the user surface is CAST(int4_tensor, "f32"). *)
 
 (* === pack / unpack helpers === *)

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Rerun the 24 (problem, lane) rows that crashed in the G0.1 lane matrix
-# (docs/plans/enigma_portfolio.md M0; ~/.cache/thvm/enigma/matrix/g01.txt):
+# (docs/ATP/enigma_portfolio.md M0; ~/.cache/thvm/enigma/matrix/g01.txt):
 # SWX233-1 on 14 lanes, SYN986-10.005 and SYN986-10.006 on 5 lanes each,
 # all slice exit 139 (SIGSEGV) at 60 s on binary d3946ff1.
 #

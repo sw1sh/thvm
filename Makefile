@@ -872,7 +872,7 @@ $(BIN)/test_atp_ft: tests/test_atp.c $(SRC) | $(BIN)
 # is gated on THVM_ATPFT_MATCH (and depends on ALLOC + CONVERT + LPO).
 # Stage 5 is purely additive: ft_match.c has no live callers in
 # src/atp/_.c at this stage (wiring lands in Stage 5b / 6 per
-# docs/atp/atpft_plan.md), so only this test binary turns the flag on.
+# docs/ATP/atpft_plan.md), so only this test binary turns the flag on.
 # The test file #includes ft_alloc.c + ft.c + ft_order.c + ft_match.c
 # directly after src/thvm.c; the per-rule -D defines unlock all four.
 $(BIN)/test_ft_match: tests/test_ft_match.c $(SRC) | $(BIN)
@@ -1010,7 +1010,7 @@ $(BIN)/test_atp_guide_ac: tests/test_atp_guide.c $(SRC) | $(BIN)
 # AC reasoning (src/atp/ac.c).  Gated by THVM_ATP_AC.  With the mask
 # left at 0 (the default), the AC-eq trivial-join hook is a no-op,
 # so the test suite is byte-identical to the default build.  See
-# docs/atp/roadmap.md for the staged AC arc.
+# docs/ATP/roadmap.md for the staged AC arc.
 $(BIN)/test_ac: tests/test_ac.c $(SRC) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) \
 	  -DTHVM_ATP_AC \

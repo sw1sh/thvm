@@ -1,5 +1,5 @@
 #!/bin/bash
-# M0 WDEP calibration, gate G0.3 (docs/plans/enigma_portfolio.md, sections
+# M0 WDEP calibration, gate G0.3 (docs/ATP/enigma_portfolio.md, sections
 # 1.3 and 4).
 #
 # The J13 submission build (~/.cache/thvm/casc/FindProof.tgz: a static

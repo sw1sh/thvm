@@ -1,5 +1,5 @@
 #!/bin/bash
-# The synthetic -10 corpus (docs/plans/enigma_portfolio.md, M2 deliverable
+# The synthetic -10 corpus (docs/ATP/enigma_portfolio.md, M2 deliverable
 # 5, decision D1): every CNF and FOF problem of a TPTP tree whose status
 # is Unsatisfiable or Theorem, encoded by FindProof --emit-ifeq10 into
 # TPTP's -10 unit-equality scheme, split 80/20 into TRAIN-X and DEV-X by

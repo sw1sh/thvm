@@ -1,5 +1,5 @@
 #!/bin/bash
-# The selection layer's phi(p) seam (docs/atp/guide.md): a FindProof-shaped
+# The selection layer's phi(p) seam (docs/ATP/guide.md): a FindProof-shaped
 # run whose head reads phi(p) dumps x[20 .. 20 + Phi) equal to the
 # problem's FindProof --problem-features row, bit for bit as float32, on
 # lanes whose front ends differ (phi(p) reads the default configuration

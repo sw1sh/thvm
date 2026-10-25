@@ -3720,7 +3720,7 @@ static u32 view_resolve_inner(Term t, int boundary_base) {
     // Packed nibble dtypes have no view path: materialize_root_alias's gather
     // moves whole 1, 2, 4 or 8-byte elements.  Declining sends the chain to the
     // kernel path, which lacks packed-nibble support on the CPU backend too
-    // (docs/dtypes.md).
+    // (docs/NN/dtypes.md).
     if (tid != 0 && tid < TENS_NEXT && dtype_is_packed(TENS[tid].dtype)) return 0;
     return tid;
   }

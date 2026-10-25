@@ -1551,7 +1551,7 @@ static u64 atp_cpu_now_us(void) {
 // on every run, loaded or not, on any host running the same binary.
 // Linux only; where the counter cannot be opened the CPU clock is used.
 // THVM_ATP_WORK_CLOCK=steps is the gate clock (G2.1 / G2.2 in
-// docs/plans/enigma_portfolio.md): the engine's disciplines read a
+// docs/ATP/enigma_portfolio.md): the engine's disciplines read a
 // logical clock, ATP_WORK_STEP_US nominal microseconds per search event
 // (g_atp_work_ticks: CP queue inserts and selection attempts), which code
 // that only observes the search -- the history export, a guide's scoring

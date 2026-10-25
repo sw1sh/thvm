@@ -10,7 +10,7 @@
 
    This file is illustrative -- the wlt regression suite at
    wl/THVMLink/Tests/aot_metal.wlt is the source of truth for
-   correctness.  See docs/aot_metal.md for the manual.
+   correctness.  See docs/core/aot_metal.md for the manual.
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];

@@ -1,6 +1,6 @@
 // test_rewrite.c - one-shot equational rewriter on TAG_CTR + TAG_FVR.
 //
-// Stage 3 demo (docs/plans/waldmeister_ic_atp.md): normalize
+// Stage 3 demo (docs/ATP/waldmeister_ic_atp.md): normalize
 // f(a, e) -> a under the group axiom f(x, e) = x.  Plus matching
 // and substitution unit cases.
 

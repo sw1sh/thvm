@@ -1,6 +1,6 @@
 #!/bin/bash
 # FindProof --problem-features: the static gate replica and the gate bits
-# of phi(p) against the live lanes (docs/plans/enigma_portfolio.md,
+# of phi(p) against the live lanes (docs/ATP/enigma_portfolio.md,
 # section 3.1).  Runs on pods only.
 #
 # 0. The CLI entry: --header alone, --header --lanes, --lanes without

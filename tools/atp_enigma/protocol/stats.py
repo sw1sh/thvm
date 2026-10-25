@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ENIGMA comparison statistics.
 
-The analysis of docs/plans/enigma_portfolio.md section 1.5, the delta of
+The analysis of docs/ATP/enigma_portfolio.md section 1.5, the delta of
 section 1.2, the J13 seal of section 1.4, gates G0.2 and G0.3, and the
 readings registered in section 5.4, over the rows run_arms.py writes.
 Python 3.8 or later, standard library only; it processes text and runs

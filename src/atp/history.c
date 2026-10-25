@@ -2,7 +2,7 @@
 //
 // Opt-in, observation-only stream of the completion's derivation
 // history for offline training of learned CP selection (see
-// docs/plans/atp_neural_selection.md and docs/plans/enigma_portfolio.md
+// docs/ATP/atp_neural_selection.md and docs/ATP/enigma_portfolio.md
 // section 3.2).  Armed by THVM_ATP_HISTORY_EXPORT=<path>; with the env
 // unset every hook is one predictable branch and the engine is
 // byte-identical.  The hooks only READ engine state: no IC heap

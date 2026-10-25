@@ -62,7 +62,7 @@ generating .pr/.p problem files, sweeping per-step parity, and plotting.
 
 * **`probe_safely.sh`** -- `exec timeout` wrapper for interactive
   wolframscript probes that risk hanging thvm's C engine (per
-  `docs/atp/wolfram_assoc_wl_hang.md`).  Sets a sensible heap
+  `docs/ATP/wolfram_assoc_wl_hang.md`).  Sets a sensible heap
   cap (`THVM_HEAP_CELLS=512M`) and a hard wall-clock budget.
   Docstring includes a `ps + xargs` reaper one-liner for orphan
   kernels surviving SIGTERM grace.
@@ -104,9 +104,9 @@ generating .pr/.p problem files, sweeping per-step parity, and plotting.
 
 ## Related docs
 
-* `docs/atp/cli_lift_status.md` -- the CLI -> ProofObject lift's
+* `docs/ATP/cli_lift_status.md` -- the CLI -> ProofObject lift's
   achievement + verification gap
-* `docs/atp/cli_process_methods.md` -- TFindProof Method->"*Process"
+* `docs/ATP/cli_process_methods.md` -- TFindProof Method->"*Process"
   tutorial
-* `docs/atp/wolfram_assoc_wl_hang.md` -- the WL TFindProof hang on
+* `docs/ATP/wolfram_assoc_wl_hang.md` -- the WL TFindProof hang on
   WolframAxioms/AndAssoc + safe-probe pattern

@@ -400,7 +400,7 @@ static const char *rmu_int_op_name(u32 op) {
   }
 }
 
-// Hoisted subterms (path #2 of docs/tinygrad_late_passes.md): rmu_emit_term
+// Hoisted subterms (path #2 of docs/NN/tinygrad_late_passes.md): rmu_emit_term
 // prints the name in place of the key.  Keys are original reduce-source Terms,
 // which the per-lane rewrite rebuilds unchanged off the UPCAST'd subtrees.
 #define RMU_HOIST_MAX 64
@@ -3587,7 +3587,7 @@ static int rmu_emit_store_reduce(Term store, FILE *fp, u32 depth) {
                                             out_factors, n_out, addr);
   u32 n_inner    = n_out - n_out_true;
 
-  // Parallel accumulators (path #1 of docs/tinygrad_late_passes.md): UPCAST
+  // Parallel accumulators (path #1 of docs/NN/tinygrad_late_passes.md): UPCAST
   // output axes become F accumulators over one loop, on C too (independent
   // lanes vectorize without -ffast-math), a split K's inner halves looping
   // inside the reduce as in the single-accumulator path (tinygrad's CPU gemm,

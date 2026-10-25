@@ -1,5 +1,5 @@
 #!/bin/bash
-# Gate G2.1 (docs/plans/enigma_portfolio.md, M2): history export v2 only
+# Gate G2.1 (docs/ATP/enigma_portfolio.md, M2): history export v2 only
 # observes.  Every listed (family, lane, problem) runs through the harvest
 # path -- FindProof --lane=NAME --szs --proof -- under the gate's logical
 # work clock (THVM_ATP_WORK_CLOCK=steps: the engine's clock-gated

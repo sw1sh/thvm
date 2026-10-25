@@ -129,7 +129,7 @@ typedef u64 Term;
 #define TAG_OP2  13  // binary op.        val = heap loc -> [x, y], ext = opcode (OP_*)
 #define TAG_MAT  14  // numeric switch.   val = heap loc -> [handler, fallback], ext = match value
 
-// === IC-as-ATP layer (PLAN: docs/plans/waldmeister_ic_atp.md) ===
+// === IC-as-ATP layer (PLAN: docs/ATP/waldmeister_ic_atp.md) ===
 #define TAG_EQL  15  // structural eq.    val = heap loc -> [a, b]; strict both sides
 #define TAG_AND  16  // short-circuit AND.val = heap loc -> [a, b]; strict on a, lazy on b
 #define TAG_OR   17  // short-circuit OR. val = heap loc -> [a, b]; strict on a, lazy on b
@@ -2484,7 +2484,7 @@ fn Term cnf_at(Term term, u32 depth);
 
 // === kbo/ ===
 // Knuth-Bendix ordering on first-order terms (TAG_CTR + TAG_FVR).
-// Stage 2 of the IC-native ATP roadmap (docs/plans/waldmeister_ic_atp.md).
+// Stage 2 of the IC-native ATP roadmap (docs/ATP/waldmeister_ic_atp.md).
 typedef enum {
   KBO_EQ =  0,
   KBO_GT =  1,
@@ -2551,7 +2551,7 @@ fn KboCmp thvm_kbo_flat_slice(const struct KboFlatNode *a, u32 na,
 // driven purely by a precedence relation on function symbols
 // -- no per-symbol weights.  More discriminating than KBO on
 // some rewrite systems; the standard pick for many TPTP-UEQ
-// problems.  Stage 8.5b of `docs/plans/waldmeister_ic_atp.md` section 7.8.
+// problems.  Stage 8.5b of `docs/ATP/waldmeister_ic_atp.md` section 7.8.
 typedef enum {
   LPO_EQ =  0,
   LPO_GT =  1,
@@ -2789,7 +2789,7 @@ fn void thvm_lpo_selfcheck_report(FILE *f);
 
 // === rewrite/ ===
 // One-shot equational rewriter on TAG_CTR + TAG_FVR (stage 3 of
-// docs/plans/waldmeister_ic_atp.md).  No recursive descent into
+// docs/ATP/waldmeister_ic_atp.md).  No recursive descent into
 // sub-terms yet -- rules match the top position only.
 #define REWRITE_MAX_VAR    64
 #define REWRITE_MAX_ARITY  16
@@ -2811,7 +2811,7 @@ fn Term thvm_rewrite_normalize(Term t, const Term *lhs, const Term *rhs,
 
 // === unify/ ===
 // Most-general-unifier on TAG_CTR + TAG_FVR terms (Robinson with
-// occurs check).  Stage 4 of docs/plans/waldmeister_ic_atp.md.
+// occurs check).  Stage 4 of docs/ATP/waldmeister_ic_atp.md.
 // Reuses RewriteSubst for the result; caller zero-inits before the
 // first call.  Returns 1 on success, 0 if the mgu doesn't exist.
 fn u8   thvm_unify        (Term s, Term t, RewriteSubst *subst);
@@ -2902,7 +2902,7 @@ fn void thvm_cp_caps_get(u64 *out_dropped, u64 *out_depth_capped);
 
 // === atp/ ===
 // Saturation loop state (stage 5).  See
-// docs/plans/waldmeister_ic_atp.md section 7.1 for the design.  AtpState is heap-
+// docs/ATP/waldmeister_ic_atp.md section 7.1 for the design.  AtpState is heap-
 // allocated by thvm_atp_init; thvm_atp_free reclaims.  Struct
 // fields are public; tests / step / run helpers all read directly.
 typedef enum {
@@ -3578,7 +3578,7 @@ typedef struct { u32 w; u32 tid; u32 nt; } AtpRjEv;
 //     and returns either `thvm_subst_apply(rhs, &σ)` on
 //     successful match (where σ = match(lhs, target)) or `ERA`
 //     on failure.  Dispatch entry-point for IC-native rule
-//     application per `docs/plans/waldmeister_ic_atp.md` section 7.5's
+//     application per `docs/ATP/waldmeister_ic_atp.md` section 7.5's
 //     Strategy B; combined with APP-SUP fan-out (8.3c) it lets
 //     a SUP of partial-PRI rules run in parallel.
 #define ATP_PRIM_KBO          2u
@@ -4578,7 +4578,7 @@ typedef struct {
 
   // Reduction ordering (caller-owned).  When `lpo` is non-NULL,
   // it takes precedence over `kbo` per Choice C of
-  // `docs/plans/waldmeister_ic_atp.md` section 7.8: orient_and_add dispatches to
+  // `docs/ATP/waldmeister_ic_atp.md` section 7.8: orient_and_add dispatches to
   // `thvm_lpo`.  When both are NULL, every comparison is
   // incomparable (KBO_UN) -- saturation falls into unfailing
   // fallback.
@@ -4684,7 +4684,7 @@ typedef struct {
   // Stage 7.2b: count of CPs that are source-rule-disjoint
   // connected (joinable under R \ {rule_a, rule_b}, the two rules
   // that birthed the CP).  Per the domination lemma in
-  // `docs/plans/waldmeister_ic_atp.md` section 7.2, this is bounded above
+  // `docs/ATP/waldmeister_ic_atp.md` section 7.2, this is bounded above
   // by `n_cps_dropped_joinable`; it ticks unconditionally for
   // measurement, even if 7.1's filter would also fire.  Useful
   // infrastructure for stage 7.4+ when AC theories may break
@@ -5208,7 +5208,7 @@ typedef struct {
   // preset (test_atp byte-parity) is untouched.
   u8   use_full_interreduce;
   // Encompassment demodulation (Twee reducesSkolem, Rule.hs:425; plan
-  // docs/plans/unified_automatic_engine.md Phase 3): permit an
+  // docs/ATP/unified_automatic_engine.md Phase 3): permit an
   // UNORIENTABLE equation to rewrite when its instance is strictly
   // decreasing under the SKOLEM-GROUND KBO (variables read as fresh
   // constants: weight var_weight, precedence below every function
@@ -5222,7 +5222,7 @@ typedef struct {
   u8   use_encompass_demod;
   // Simpler-join CP discipline (Twee Join.hs:55 joinCriticalPair,
   // allSteps = step1 >=> step2 >=> step3; plan
-  // docs/plans/unified_automatic_engine.md): when the standard join
+  // docs/ATP/unified_automatic_engine.md): when the standard join
   // normalize leaves a CP's sides distinct, re-normalize both sides
   // admitting oriented rules AND unorientable equations, with every
   // step gated on the rewriting equation being strictly SIMPLER than
@@ -5940,7 +5940,7 @@ typedef struct {
   void   *cp_graph_scratch; // reusable AtpCpGraph build scratch (lazy)
 
 #ifdef THVM_ATPFT_RULES
-  // Parallel AtpFt rule storage; see docs/atp/engineering.md.
+  // Parallel AtpFt rule storage; see docs/ATP/engineering.md.
   // Eagerly mirror every Term written into lhs[]/rhs[]/r_dead_*_save[]/
   // goal_* into AtpFtCell* slots that share the slot lifetime exactly
   // (allocate-with-grow, write-with-set, shift-with-compact).  The Term
@@ -6080,7 +6080,7 @@ typedef struct {
   u8   tgt_ready;
 
 #ifdef THVM_ATPFT_CPQ
-  // Parallel native AtpFt CP queue; see docs/atp/engineering.md.
+  // Parallel native AtpFt CP queue; see docs/ATP/engineering.md.
   // Each populated slot owns its two FT spans in Arena A; the legacy
   // cp_packed[] byte queue stays populated in parallel (FV index +
   // peek/stash consumers).  Capacity tracks
@@ -6705,7 +6705,7 @@ fn Term      thvm_atp_get_witness (const AtpState *s, u32 var_id);
 // `witnesses[]` must hold at least `max_witnesses` `RewriteSubst`
 // slots.  v0 returns DFS-order raw witnesses without alpha-equivalent
 // dedup; callers post-filter if needed.  See
-// `docs/plans/waldmeister_ic_atp.md` section 7.4 for the algorithm sketch.
+// `docs/ATP/waldmeister_ic_atp.md` section 7.4 for the algorithm sketch.
 fn u32       thvm_atp_narrow_all  (AtpState *s, Term lhs, Term rhs,
                                    u32 max_depth, u32 max_witnesses,
                                    RewriteSubst *witnesses);
@@ -6914,7 +6914,7 @@ fn void      thvm_atp_history_search_end(AtpState *s);
 // THVM_ATP_RERANK_MODEL; this entry is for hosts and tests.
 fn int       thvm_atp_topk_load(const char *path);
 
-// Problem features phi(p) (docs/plans/enigma_portfolio.md, section 3.1),
+// Problem features phi(p) (docs/ATP/enigma_portfolio.md, section 3.1),
 // the per-problem input of the selection layer.  tp_problem_features
 // (tools/atp_cli/problem_features.c) fills it and FindProof
 // --problem-features prints it, so training rows and the deployed layer
@@ -6987,7 +6987,7 @@ enum {
 typedef struct { float v[ATP_PHI_N]; } AtpPhi;
 
 // ENIGMA selection layer (src/atp/guide.c).  The problem features
-// phi(p) it reads (docs/plans/enigma_portfolio.md 3.1), one row per
+// phi(p) it reads (docs/ATP/enigma_portfolio.md 3.1), one row per
 // problem: set them in the process that runs the engine before its first
 // weight pick (the layer folds them in then, and again whenever they are
 // set anew); a head reading more than `n`, or a non-finite value, takes
@@ -7281,7 +7281,7 @@ fn u32       thvm_atp_gnn_rerank(AtpState *s);
 
 // === wald/ ===
 // Parser for Waldmeister .pr-style spec files.  Stage 6.3 of
-// docs/plans/waldmeister_ic_atp_tasks.md.  WaldSpec holds the
+// docs/ATP/waldmeister_ic_atp_tasks.md.  WaldSpec holds the
 // parsed signature + variable table + equations + single
 // conclusion goal; downstream feeds it to thvm_atp_run.
 #define WALD_MAX_SYMBOLS 64

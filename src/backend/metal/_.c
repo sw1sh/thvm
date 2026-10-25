@@ -1,6 +1,6 @@
 // backend/metal/_.c - Metal backend STUB.
 //
-// Placeholder while the real Objective-C backend (per docs/metal.md)
+// Placeholder while the real Objective-C backend (per docs/NN/metal.md)
 // gets built up kernel-by-kernel.  All entries return error sentinels
 // so a runtime that gets switched here via `DEV=metal`
 // fails LOUDLY at any compute-touching call -- much better than

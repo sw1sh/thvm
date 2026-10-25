@@ -1,4 +1,4 @@
-// === ENIGMA selection layer (docs/plans/enigma_portfolio.md, 3.1) =====
+// === ENIGMA selection layer (docs/ATP/enigma_portfolio.md, 3.1) =====
 //
 // Opt-in: FindProof --guide=<family> [--guide-model=<id>] [--guide-zero]
 // (THVM_ATP_GUIDE / THVM_ATP_GUIDE_MODEL / THVM_ATP_GUIDE_ZERO).  In a

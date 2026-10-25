@@ -1081,7 +1081,7 @@ static u32 bufferize_rmsnorm_feeds_matmul(UOpInfo const *info) {
   return marked;
 }
 
-// No backend computes a packed int4 / uint4 buffer (docs/dtypes.md): the C
+// No backend computes a packed int4 / uint4 buffer (docs/NN/dtypes.md): the C
 // renderer would type it as float and write past its nibbles.
 static void bufferize_reject_packed(void) {
   for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {

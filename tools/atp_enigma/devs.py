@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DEV-S, the manufactured band set (docs/plans/enigma_portfolio.md, M2
+"""DEV-S, the manufactured band set (docs/ATP/enigma_portfolio.md, M2
 deliverable 4 and gate G2.5; amendment A25 registers every reading here).
 
 A DEV-S problem is a ground goal that a held-out run derived: a rule that
@@ -461,7 +461,7 @@ class Source:
 
     def problem_text(self, row):
         head_lines = [
-            "% DEV-S candidate: docs/plans/enigma_portfolio.md M2 deliverable 4, amendment A25"
+            "% DEV-S candidate: docs/ATP/enigma_portfolio.md M2 deliverable 4, amendment A25"
             " (tools/atp_enigma/devs.py)",
             "%% Source : %s, lane %s, session %s, rule birth step %s of %s selections"
             % (row["source"], row["lane"], row["session"], row["birth_step"], row["n_sel"]),

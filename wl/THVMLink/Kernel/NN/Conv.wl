@@ -16,7 +16,7 @@ SetUsage[TMaxPool2d, "TMaxPool2d[x$] and TMaxPool2d[x$, k$] run a non-overlappin
 
 Begin["`Private`"];
 
-(* TConv2D: one C body for every rank and option (docs/nn.md); an unbatched
+(* TConv2D: one C body for every rank and option (docs/NN/nn.md); an unbatched
    input runs as a batch of 1. *)
 Options[TConv2D] = {"Stride" -> 1, "Dilation" -> 1, "Padding" -> 0, "Groups" -> 1};
 convTuple[v_Integer, n_] := ConstantArray[v, n]

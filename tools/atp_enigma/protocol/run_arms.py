@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pod-side runner for one ENIGMA arm comparison.
 
-Implements the run protocol of docs/plans/enigma_portfolio.md section 1.3
+Implements the run protocol of docs/ATP/enigma_portfolio.md section 1.3
 and the readings registered in its section 5.4.  Python 3.8 or later,
 standard library only, Linux only (it reads /proc and /sys/fs/cgroup).
 

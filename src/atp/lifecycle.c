@@ -126,7 +126,7 @@ fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   // the same structural key denotes a DIFFERENT true normal form, so a
   // survivor hands the new run a WRONG NF -> a non-decreasing order-gated
   // rewrite that never joins -> the cross-run hang in
-  // docs/plans/atp_heap_leak.md (init already drops LPO/KBO/orient/unf above;
+  // docs/ATP/atp_heap_leak.md (init already drops LPO/KBO/orient/unf above;
   // this closes the one loc/structure-keyed memo it missed).  Byte-neutral on
   // a single run (the memo starts empty; only the gen's starting value moves).
   ftnfm_bump_gen();

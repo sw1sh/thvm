@@ -12,7 +12,7 @@
 # data, lays out the batches, rebuilds the queues and computes the gate
 # metrics.
 #
-# Model ([Sud25] minus the input GNN; see docs/plans/atp_neural_selection.md):
+# Model ([Sud25] minus the input GNN; see docs/ATP/atp_neural_selection.md):
 #   axiom a        E = act(W_ax [role(a) ; phi_ax(a)] + b_ax)
 #   CP c = (p, q)  E = act(W_cp [E(p) ; E(q)] + b_cp)        p outer, q inner
 #   rule o from src with simplifiers S (the NORM_STEP chain, collapsed):

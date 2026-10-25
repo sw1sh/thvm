@@ -3,7 +3,7 @@
 // Compares two terms over a signature of TAG_CTR (function symbols)
 // and TAG_FVR (variables) under a KBO config (per-symbol weights +
 // total precedence + scalar variable weight w0).  Stage 2 of the
-// IC-native ATP roadmap (docs/plans/waldmeister_ic_atp.md).
+// IC-native ATP roadmap (docs/ATP/waldmeister_ic_atp.md).
 //
 // Returns:
 //   KBO_EQ : s and t are structurally identical

@@ -341,7 +341,7 @@ fn u32 kernel_hand_coded_opts(struct KernelEntry *ke) {
   if (ke->schedule != NULL) ke->schedule->hand_coded_done = 1;
   if (!hand_coded_opts_enabled()) return 0;
   // tinygrad runs this on every renderer (postrange.py:272-276), gating sections
-  // inside; a slow opt'd kernel is a renderer gap (docs/tinygrad_late_passes.md).
+  // inside; a slow opt'd kernel is a renderer gap (docs/NN/tinygrad_late_passes.md).
   // On CPU only a kernel cBLAS takes stays bare, since BLAS matches the bare DAG.
   int on_cpu = hand_opt_kernel_on_cpu(ke);
   if (on_cpu) {

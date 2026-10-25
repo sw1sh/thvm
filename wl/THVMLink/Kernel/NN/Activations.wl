@@ -1,7 +1,7 @@
 (* ::Package:: *)
 (* NN/Activations.wl - elementwise activations and selections (tinygrad's
    where / maximum / minimum / clamp, relu / sigmoid / tanh / softmax / gelu /
-   silu), built by the C ops of src/nn (docs/nn.md) through nnCall. *)
+   silu), built by the C ops of src/nn (docs/NN/nn.md) through nnCall. *)
 
 BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 

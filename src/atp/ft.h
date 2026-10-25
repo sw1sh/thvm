@@ -1,7 +1,7 @@
 // ft.h - AtpFt flatterm cell + dual-arena allocator state.
 //
 // Parallel native-flatterm representation modeled on Waldmeister's
-// TermzellenT.  See docs/atp/engineering.md for the design.  This
+// TermzellenT.  See docs/ATP/engineering.md for the design.  This
 // header pins the cell layout and the allocator state; operations
 // live in ft_alloc.c, ft.c, ft_match.c, ft_splice.c, ft_norm.c,
 // ft_ri.c, ft_cpq.c.

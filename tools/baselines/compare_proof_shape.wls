@@ -117,7 +117,7 @@ vampShape = If[
 (* ---- rule-name mapping thvm <-> Vampire -------------------------
    Apply BEFORE comparing histograms, so a faithful port shows as
    "identical" instead of as a vocabulary mismatch.  See
-   docs/atp/vampire_case_teardown.md "Inference-rule mapping". *)
+   docs/ATP/vampire_case_teardown.md "Inference-rule mapping". *)
 canonRule[r_String] := Replace[r, {
     "CriticalPairLemma"              -> "superposition",
     "SubstitutionLemma"              -> "forward_demodulation",

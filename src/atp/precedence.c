@@ -452,7 +452,7 @@ fn u32 atp_occurrence_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
 // side of rules where the rewrite goes toward rarer-symbol RHSs.
 //
 // Empirically Vampire's most common winning precedence on UEQ targets
-// (122 wins in tools/baselines/vampire_raw/).  See docs/atp/vampire_port.md.
+// (122 wins in tools/baselines/vampire_raw/).  See docs/ATP/vampire_port.md.
 fn u32 atp_reverse_frequency_precedence(const Term *lhs, const Term *rhs,
                                         u32 n_eqns, u32 n_labels, u32 *prec) {
   if (n_labels > WALD_MAX_SYMBOLS) n_labels = WALD_MAX_SYMBOLS;

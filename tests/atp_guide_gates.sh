@@ -1,5 +1,5 @@
 #!/bin/bash
-# ENIGMA gates G2.2 and G2.4 on FindProof (docs/plans/enigma_portfolio.md,
+# ENIGMA gates G2.2 and G2.4 on FindProof (docs/ATP/enigma_portfolio.md,
 # M2; G2.2 reads exact identity under the steps clock, amendment A8).
 # Runs on a pod, never on the Mac.
 #

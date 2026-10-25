@@ -3360,7 +3360,7 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   // to trace AC-match soundness bugs through the rule-maintenance paths
   // (collapse/re-orient) that never set either scope flag -- see the
   // RNG030-6 residual-unsound-inference note in
-  // docs/plans/atp_ac_soundness.md.
+  // docs/ATP/atp_ac_soundness.md.
   static int dbg_all = -1;
   if (dbg_all < 0) dbg_all = getenv("THVM_ATP_MIXSTEP_ALL") != NULL;
   if (m->record || m->psteps != NULL || m->sink != NULL || dbg_goal_nf ||

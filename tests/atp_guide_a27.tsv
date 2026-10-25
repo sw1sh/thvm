@@ -1,5 +1,5 @@
 # Gates G2.1 and G2.2 for the A24 twin families and their replacements
-# (docs/plans/enigma_portfolio.md, amendment A27): family TAB lane TAB problem
+# (docs/ATP/enigma_portfolio.md, amendment A27): family TAB lane TAB problem
 # path under the pool's TPTP root (tptp_pool.tgz).  Made by
 #   FAMILIES="twee-deep=twee-deep unfold-tgt-awr=unfold-tgt-awr tgt-sel=tgt-sel
 #     encompass=encompass twee=twee wm=wm equals-twee=equals-twee unfold=unfold

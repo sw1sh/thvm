@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# The M3 trainer (docs/plans/enigma_portfolio.md, sections 3.2 and M3): heads
-# for the ENIGMA selection layer (src/atp/guide.c, layout v1, docs/atp/guide.md)
+# The M3 trainer (docs/ATP/enigma_portfolio.md, sections 3.2 and M3): heads
+# for the ENIGMA selection layer (src/atp/guide.c, layout v1, docs/ATP/guide.md)
 # on py/thvm, grown from topk_net.py's train2 step.
 #
 # Data: label_join.py's groups_<lane>.npz, one group per dumped pick (its

@@ -1,6 +1,6 @@
 #!/bin/bash
 # FindProof --schedule teardown, ENIGMA gate G0.4
-# (docs/plans/enigma_portfolio.md, M0, as amendment A1 in section 5.4 fixes
+# (docs/ATP/enigma_portfolio.md, M0, as amendment A1 in section 5.4 fixes
 # it): a schedule run stopped by a signal leaves no FindProof process
 # behind, and no run ends later than its wall + 10 s.
 #

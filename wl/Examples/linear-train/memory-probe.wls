@@ -28,7 +28,7 @@ debugPrint[args___] := WriteString["stdout",
 
 $renderBudget = 90;
 
-(* Try Grid arrange first (matches docs/images/diagrams/ style);
+(* Try Grid arrange first (matches docs/core/images/diagrams/ style);
    fall back to the default layout if Grid takes too long.  Grid
    is O(n^2) in heap cells; for the post-grad chain (~150 cells)
    it doesn't finish in any reasonable budget, but the default

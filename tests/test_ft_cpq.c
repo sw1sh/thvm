@@ -1,5 +1,5 @@
 // test_ft_cpq.c - AtpFt-native CP queue (dual-store) smoke test.
-// See docs/atp/engineering.md.
+// See docs/ATP/engineering.md.
 //
 // Built with -DTHVM_ATPFT_ALLOC -DTHVM_ATPFT_CONVERT -DTHVM_ATPFT_LPO
 // -DTHVM_ATPFT_MATCH -DTHVM_ATPFT_RULES -DTHVM_ATPFT_NORM

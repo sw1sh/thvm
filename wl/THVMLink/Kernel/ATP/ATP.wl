@@ -37,7 +37,7 @@
      MaxDepth       (TATP / AllWitnesses)   -> 8
      MaxWitnesses   (TATP / AllWitnesses)   -> 16
 
-   See docs/plans/waldmeister_ic_atp.md for the algorithmic intent. *)
+   See docs/ATP/waldmeister_ic_atp.md for the algorithmic intent. *)
 
 (* WolframInstitute`THVMLink`ATP` is the single ATP entry context.  All public ATP /
    SMT symbols live here so user code can do `Get["WolframInstitute`THVMLink`ATP`"]`
@@ -1409,7 +1409,7 @@ atpGnnForwardLogits[xT_, aT_, maskRowT_, nNodesT_,
 (* Defaults: Hidden 32 + Rounds 3.  The term graphs are shallow but the
    lemma corpus is small and class-skewed, so 2 rounds at width 16
    under-propagates and the rank AUC stays near chance; H = 32 / R = 3
-   reliably lifts the train AUC.  See docs/plans/atp_tier2_gnn.md. *)
+   reliably lifts the train AUC.  See docs/ATP/atp_tier2_gnn.md. *)
 Options[TAtpTrainGnn] = {
     "Hidden" -> 32,
     "Rounds" -> 3,
@@ -3065,7 +3065,7 @@ $AtpPresetDefaults = <|
        later LPO-flavored slot): default KBO ordering, age:weight=1:1
        (thvm SR=2, i.e. 1 FIFO per 2 picks = full alternation), SInE
        axiom-relevance filter active.  See
-       docs/atp/vampire_case_teardown.md for the full mapping. *)
+       docs/ATP/vampire_case_teardown.md for the full mapping. *)
     "VampireUEQDefault" -> <|
         "Ordering" -> "KBO",
         "AutoPrecedence" -> True,
@@ -3129,7 +3129,7 @@ $AtpPresetDefaults = <|
        weight, the rest the learned scorer -- pure-learned selection is
        markedly slower (measured), so this mirrors real ENIGMA's
        cooperative selection.  Override with "CoopRatio" -> 0 for
-       pure-learned.  See docs/atp/ml_guidance.md. *)
+       pure-learned.  See docs/ATP/ml_guidance.md. *)
     "ENIGMA" -> <|
         "CriticalPairWeight" -> "Learned",
         "Ordering" -> "KBO",
@@ -3325,7 +3325,7 @@ atpParseMethod[{"VampireUEQ", subopts___Rule}] :=
         $AtpPresetGoalDirected["VampireUEQ"], {subopts}];
 
 (* Method -> "VampireUEQDefault": the Vampire 5.0.1 UEQ portfolio
-   first-slot mirror; see $AtpPresetDefaults comment + docs/atp/
+   first-slot mirror; see $AtpPresetDefaults comment + docs/ATP/
    vampire_case_teardown.md for the per-token decode of
    `lrs+10_1:1_sil=4000:st=3.0:i=102:sd=2:ss=axioms:sgt=8_0`. *)
 atpParseMethod["VampireUEQDefault"] := atpParseMethod[{"VampireUEQDefault"}];
@@ -3411,7 +3411,7 @@ atpParseMethod[{"VampireRandom", subopts___Rule}] :=
         $AtpPresetGoalDirected["VampireRandom"], {subopts}];
 
 (* Method -> "ENIGMA": ML-guided critical-pair selection (the learned
-   scorer of docs/plans/atp_ml_roadmap.md) as a first-class preset, so
+   scorer of docs/ATP/atp_ml_roadmap.md) as a first-class preset, so
    `TFindProof[conj, ax, Method -> "ENIGMA"]` runs the trained model
    instead of requiring the explicit {"Completion", "CriticalPairWeight"
    -> "Learned"} spec.  Push a custom model with TAtpSetLearnedScorer

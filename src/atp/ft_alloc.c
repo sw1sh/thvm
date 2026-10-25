@@ -79,7 +79,7 @@ static void ft_normcore2_resolve(void) {
 // shipping path -- ft_cell_at(base,i) == &base[i], scratch bump == ++,
 // block malloc == sizeof(AtpFtBlock)).
 //
-// This is the amplifier for the cell-shrink question (docs/plans/
+// This is the amplifier for the cell-shrink question (docs/ATP/
 // atp_normcell_shrink.md): if normalize wall scales UP with the stride, the
 // normalizer is footprint/cache-bound and a 24->16->12 byte shrink is a
 // real lever; if wall is FLAT under padding, normalize is compute-bound and

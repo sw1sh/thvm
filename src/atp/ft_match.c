@@ -9,7 +9,7 @@
 // the AtpFt-native rule-index descent without the per-call
 // AtpFtCell -> Term encode that today's bridge would force).
 //
-// API shape (see docs/atp/engineering.md):
+// API shape (see docs/ATP/engineering.md):
 //
 //   typedef struct AtpFtSubst {
 //     AtpFtCell *bind[ATPFT_MAX_VARS];   // NULL = unbound

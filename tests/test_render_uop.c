@@ -475,7 +475,7 @@ int main(void) {
     fp = fmemopen(bufma, sizeof(bufma), "w");
     cg_render_uop_kernel(st_up, "k_conv_up", Y, ins, 2, fp);
     fclose(fp);
-    // Path #1 (docs/tinygrad_late_passes.md): the UPCAST'd output axis
+    // Path #1 (docs/NN/tinygrad_late_passes.md): the UPCAST'd output axis
     // is fully unrolled at the renderer level into F parallel
     // accumulators sharing ONE inner reduce nest -- the
     // register-blocking pattern from tinygrad expander.py:do_expand +
@@ -501,7 +501,7 @@ int main(void) {
   }
 
   TEST_BEGIN("render-uop/parallel-accumulators-on-upcast-output-axis");
-  // The "path #1" of docs/tinygrad_late_passes.md, in isolation.  When
+  // The "path #1" of docs/NN/tinygrad_late_passes.md, in isolation.  When
   // the heuristic UPCASTs an OUTPUT axis enclosing a REDUCE, the
   // renderer must emit F parallel accumulators sharing ONE inner
   // reduce loop -- the register-blocking pattern from tinygrad
@@ -593,7 +593,7 @@ int main(void) {
   }
 
   TEST_BEGIN("render-uop/parallel-acc-hoists-shared-loads");
-  // Path #2 of docs/tinygrad_late_passes.md: in the parallel-accumulator
+  // Path #2 of docs/NN/tinygrad_late_passes.md: in the parallel-accumulator
   // emit, UOP_INDEX_E loads whose address does NOT depend on any UPCAST'd
   // axis must be hoisted to ONE local variable per shared load before the
   // F MAD lines, then reused.  Same conv-flavoured shape as

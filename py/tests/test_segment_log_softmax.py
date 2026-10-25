@@ -20,7 +20,7 @@ out, minus kappa * raw.  The checks:
     processes.
 The step realizes the loss before opt.step(): a loss realized after the
 step reads the pre-step parameters on thvm's TinyJit replays (an open bug,
-docs/thvm_vs_tinygrad.md).
+docs/NN/thvm_vs_tinygrad.md).
 
     make py && DEV=cpu PYTHONPATH=py python -m pytest py/tests/test_segment_log_softmax.py -q
 """

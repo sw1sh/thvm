@@ -5,7 +5,7 @@
    Mirrors verify.wls's setup but doesn't run all 4 steps -- the
    goal is to characterise per-step memory usage so we know what
    reuse / lifetime tracking would need to handle.  Numbers feed
-   into docs/memory.md.
+   into docs/NN/memory.md.
 
    Run from the repo root:
        wolframscript -f wl/Examples/lenet-mnist/memory-probe.wls

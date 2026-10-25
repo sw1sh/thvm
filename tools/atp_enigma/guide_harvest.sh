@@ -1,5 +1,5 @@
 #!/bin/bash
-# A guided harvest (docs/plans/enigma_portfolio.md, section 3.2 and M3): one
+# A guided harvest (docs/ATP/enigma_portfolio.md, section 3.2 and M3): one
 # FindProof twin run per (problem, lane) job, the label-harvest runner's run
 # (--lane=NAME --szs --proof --wall=WALL, history export v2 at rate 1,
 # --work-clock=instr on the clock-gated lanes of gated.txt) with the

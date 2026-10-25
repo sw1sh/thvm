@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Lane matrix: the J13 seal, the G0.1 validation, the pool tables T1-T8
-and the section 5.3 decisions of docs/plans/enigma_portfolio.md.
+and the section 5.3 decisions of docs/ATP/enigma_portfolio.md.
 
 Text processing only: it runs no prover.  Inputs live in the matrix
 directory (default ~/.cache/thvm/enigma/matrix; FORMAT.txt there describes
@@ -796,7 +796,7 @@ def mode_supplement(paths):
         fp.write(data)
     solved = sorted({r[0] for r in rows if r[8] == "proved"})
     head = [
-        f"180 s supplement (docs/plans/enigma_portfolio.md M0 deliverable 3): "
+        f"180 s supplement (docs/ATP/enigma_portfolio.md M0 deliverable 3): "
         f"{len(jobs)} jobs on {len({j[0] for j in jobs})} pool problems",
         f"overall: {'PASS' if ok else 'FAIL'}",
         f"rows {len(rows)}; missing {missing}, extra {extra}, duplicate {dup}",
@@ -977,7 +977,7 @@ def mode_validate(paths):
          ok, lines)
 
     head = [
-        "G0.1 (docs/plans/enigma_portfolio.md M0): lane-matrix validity",
+        "G0.1 (docs/ATP/enigma_portfolio.md M0): lane-matrix validity",
         f"matrix.tsv sha256 {seal['matrix_tsv_sha256']}; train+heldout rows "
         f"only; the j13 rows are sealed (count {seal['archive_rows']}, "
         f"archive sha256 {seal['archive_sha256']})",
@@ -1633,7 +1633,7 @@ def mode_decisions(paths, pf):
     out = []
     W = out.append
 
-    W("Section 5.3 decisions (docs/plans/enigma_portfolio.md), applied to "
+    W("Section 5.3 decisions (docs/ATP/enigma_portfolio.md), applied to "
       "the lane matrix")
     W(f"Built by tools/atp_enigma/matrix_tables.py --decisions from "
       f"matrix.tsv (sha256 {seal['matrix_tsv_sha256']}): train and heldout "
@@ -2503,7 +2503,7 @@ def mode_xmatrix(xp):
     with open(xp.m("xmatrix.tsv"), "wb") as fp:
         fp.write(blob)
     head = [
-        "X matrix validation (docs/plans/enigma_portfolio.md amendment A22): "
+        "X matrix validation (docs/ATP/enigma_portfolio.md amendment A22): "
         "the synthetic -10 corpus, TRAIN-X and DEV-X, on all 46 lanes at 60 s",
         f"overall: {'PASS' if overall else 'FAIL'}",
         f"xmatrix.tsv: {len(rows)} rows, sha256 {sha256_bytes(blob)} (the 14 "
@@ -2780,7 +2780,7 @@ def mode_xtwins(paths, xp):
     out = []
     W = out.append
     W("Twin families: section 5.3's rule over TRAIN and TRAIN-X together "
-      "(docs/plans/enigma_portfolio.md, amendment A24)")
+      "(docs/ATP/enigma_portfolio.md, amendment A24)")
     W("Built by tools/atp_enigma/matrix_tables.py --xtwins.  Inputs "
       "(sha256):")
     W(f"  matrix.tsv {sha('matrix.tsv', paths)} (train and heldout rows; "
@@ -2836,7 +2836,7 @@ def mode_xtwins(paths, xp):
 
 
 TABLES_README = [
-    "Lane-matrix pool tables (docs/plans/enigma_portfolio.md 5.2 step 4),",
+    "Lane-matrix pool tables (docs/ATP/enigma_portfolio.md 5.2 step 4),",
     "built by tools/atp_enigma/matrix_tables.py --tables from matrix.tsv",
     "(train and heldout rows only; the j13 rows are sealed).  One file per",
     "table and split: <table>_<split>.tsv with a header row.  Times are the",

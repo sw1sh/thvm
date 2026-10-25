@@ -1,4 +1,4 @@
-# ENIGMA gate G0.4 dry-run list (docs/plans/enigma_portfolio.md, amendment A1):
+# ENIGMA gate G0.4 dry-run list (docs/ATP/enigma_portfolio.md, amendment A1):
 #   tests/atp_sched_teardown.sh FINDPROOF TPTP_ROOT dryrun tools/atp_enigma/g04_dryrun.tsv 180
 # problems.tsv rows: name, path under the TPTP root (the pool tree or a full
 # TPTP v9.3.1 tree), split, source.  The first 20, in order of the sha256 of

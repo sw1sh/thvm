@@ -267,7 +267,7 @@ shapeOrArg[t_TTerm] := Replace[tUopShape[t], $Failed -> t]
 shapeOrArg[x_] := x
 General::shape = "`1` and `2` do not fit together: an elementwise operation needs equal element counts or a single element, and a movement operation a shape the source can take.";
 
-(* The src/nn ops (nn_call, docs/nn.md) by name over TTerms (None: an absent bias or weight),
+(* The src/nn ops (nn_call, docs/NN/nn.md) by name over TTerms (None: an absent bias or weight),
    with their integer and real arguments.  A failed op is head::nn and $Failed.  Empty
    argument lists go as {0} and {0.}: LibraryLink vectors must be typed, and the ops that take
    none ignore them. *)

@@ -4,7 +4,7 @@
    tensors out of the diffusers safetensors and wire ops, looped over the
    block config -- NOT a hand-exported per-block NetGraph.  Get-loaded
    after WolframInstitute`THVMLink` (uses the public TUOp* surface + the NN library).
-   Architecture + tensor names: docs/flux_forward_spec.md.
+   Architecture + tensor names: docs/NN/flux_forward_spec.md.
 
    The reusable NN primitives (RMSNorm, SiLU, SwiGLU, interleaved RoPE,
    head-split attention) now live in WolframInstitute`THVMLink`s NN library; this file keeps
@@ -228,7 +228,7 @@ fxSingleBlock[x0_, mod_, ropeCos_, ropeSin_, W_, cfg_] := Module[{h, dh, eps, sc
 
 (* ============================================================
    Full transformer forward (loop 5 double + 20 single blocks).
-   See docs/flux_forward_spec.md + diffusers Flux2Transformer2DModel.
+   See docs/NN/flux_forward_spec.md + diffusers Flux2Transformer2DModel.
    ============================================================ *)
 
 (* --- temb-modulation matmul.  temb is {1,dim} (one timestep), so SiLU(temb).W^T

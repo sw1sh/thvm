@@ -4,7 +4,7 @@
 // `s->cp_packed_ft[]` (one `AtpCpEntry` per slot) holding the
 // lhs/rhs AtpFt cells in Arena A.  The legacy packed-byte queue
 // (`s->cp_packed[]`) is kept populated in parallel for the FV
-// index, peek/stash and trace paths.  See docs/atp/engineering.md.
+// index, peek/stash and trace paths.  See docs/ATP/engineering.md.
 // Byte queue retires once those consumers are re-keyed onto the
 // AtpFt structural hash.
 //
