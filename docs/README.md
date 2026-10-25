@@ -64,9 +64,9 @@ Research and essays outside the two tracks:
   records it ([multicomputation_trace.md](multicomputation/multicomputation_trace.md))
   and worked essays on superposition and the trace, run cell by cell
   ([essays/](multicomputation/essays/)).
-- [neuroscience/README.md](neuroscience/README.md),
-  [symbolic/README.md](symbolic/README.md): primers on neuroscience for toy AI
-  and on symbolic and neuro-symbolic AI.
+- The primers on neuroscience for toy AI and on symbolic and neuro-symbolic AI
+  live with the ARC work, in the brain-arc repo's `docs/neuroscience/` and
+  `docs/symbolic/` (`external/brain/`).
 
 ## Elsewhere
 
