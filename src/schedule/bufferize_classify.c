@@ -1098,6 +1098,50 @@ static void bufferize_reject_packed(void) {
   }
 }
 
+static int bufferize_reads_no_buffer_rec(Term t, u32 *budget) {
+  if (term_tag(t) == TAG_NUM) return 1;
+  if (term_tag(t) != TAG_UOP || *budget == 0) return 0;
+  --*budget;
+  u32 op = term_ext(t);
+  switch (op) {
+    case UOP_KERNEL: case UOP_BUFFERIZE: case UOP_BUFFER: case UOP_DEFINE_VAR:
+    case UOP_ASSIGN: case UOP_GATHER:    case UOP_SCATTER: case UOP_COPY:
+    case UOP_LOAD:   case UOP_INDEX_E:   case UOP_STORE:
+      return 0;
+  }
+  u64 loc = term_val(t);
+  for (u8 i = 0; i < uop_arity((u8)op); i++) {
+    if (!bufferize_reads_no_buffer_rec(term_resolve(heap_read(loc + i)), budget)) return 0;
+  }
+  return 1;
+}
+
+// 1 iff the node at `loc` reads no buffer: every leaf is a constant, so it is
+// index math (an arange's running sum).  A walk past 1024 nodes of a shared
+// DAG reads as a buffer.
+fn int bufferize_reads_no_buffer(u64 loc, u8 op) {
+  u32 budget = 1024;
+  return bufferize_reads_no_buffer_rec(term_new(0, TAG_UOP, op, loc), &budget);
+}
+
+// tinygrad keeps a bufferize only while a reduce under it reads a buffer
+// (remove_bufferize, schedule/rangeify.py:281-288), so a reduce over constants,
+// such as an arange's running sum, fuses into each consumer, where
+// pm_reduce_simplify folds it to index math.  A node seeded only as a REDUCE or
+// a multi-consumer one that reads no buffer stays unrealized for the
+// per-kernel fold (uop_reduce_arange_collapse); run_rangeify_unified skips
+// its ending-range realize too.
+static void bufferize_rule_bufferless(Term root) {
+  for (u32 i = 0; i < BUFFERIZE_NODES_LEN; i++) {
+    UOpInfo *info = &BUFFERIZE_NODES[i];
+    if (!info->realized || info->loc == term_val(root)) continue;
+    if (info->reasons & ~(BUFFERIZE_REASON_MULTI | BUFFERIZE_REASON_REDUCE | BUFFERIZE_REASON_INLINE)) continue;
+    if (bufferize_reads_no_buffer(info->loc, info->op)) {
+      bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
+    }
+  }
+}
+
 // The schedule entry point: walk the DAG at root, seed the boundaries, run
 // the unmark rules, then the unified rangeify pass.
 fn void bufferize_classify(Term root) {
@@ -1284,6 +1328,7 @@ fn void bufferize_classify(Term root) {
       if (!same) continue;
       bufferize_node_unmark(info, BUFFERIZE_REASON_INLINE);
     }
+    bufferize_rule_bufferless(root);
     // After the unmark rules, so the fan-in split sees the final boundaries.
     bufferize_rule_metal_tile_fanin_cap(root);
     bufferize_seed_indexed_operands();

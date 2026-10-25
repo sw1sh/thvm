@@ -1614,6 +1614,7 @@ typedef struct {
 extern UOpInfo BUFFERIZE_NODES[BUFFERIZE_NODES_CAP];
 extern u32     BUFFERIZE_NODES_LEN;
 fn u32  bufferize_info_find(u64 loc);
+fn int  bufferize_reads_no_buffer(u64 loc, u8 op);
 
 // Per-node consumer-list pool. Each producer node's UOpInfo.cmap_head
 // indexes into CMAP_LL; chain via .next. Populated by the bufferize

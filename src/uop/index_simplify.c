@@ -572,6 +572,10 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           if (uop_iconst_value(rhs, &inner_c)) {
             return uop_int_binary(UOP_IADD, lhs, uop_iconst(bv - inner_c));
           }
+          // (c1 - x) + c2 -> (c1 + c2) - x.
+          if (uop_iconst_value(lhs, &inner_c)) {
+            return uop_int_binary(UOP_ISUB, uop_iconst(inner_c + bv), rhs);
+          }
         }
       }
       // (c1*x) + (c2*x) -> (c1+c2)*x (tinygrad uop/symbolic.py:240).
@@ -649,6 +653,20 @@ fn Term uop_simplify_int_binary(u32 opcode, Term a, Term b) {
           if (uop_iconst_value(rhs, &inner_c)) {
             return uop_int_binary(UOP_ISUB, lhs, uop_iconst(inner_c + bv));
           }
+        }
+      }
+      // c1 - (c2 - x) -> x + (c1 - c2); c1 - (x + c2) -> (c1 - c2) - x: the
+      // constants meet, as tinygrad's x + y*-1 form folds them.
+      if (a_const && term_tag(b) == TAG_UOP
+          && (term_ext(b) == UOP_ISUB || term_ext(b) == UOP_IADD)) {
+        Term lhs = heap_read(term_val(b) + 0);
+        Term rhs = heap_read(term_val(b) + 1);
+        i64 inner_c;
+        if (term_ext(b) == UOP_ISUB && uop_iconst_value(lhs, &inner_c)) {
+          return uop_int_binary(UOP_IADD, rhs, uop_iconst(av - inner_c));
+        }
+        if (term_ext(b) == UOP_IADD && uop_iconst_value(rhs, &inner_c)) {
+          return uop_int_binary(UOP_ISUB, uop_iconst(av - inner_c), lhs);
         }
       }
       break;

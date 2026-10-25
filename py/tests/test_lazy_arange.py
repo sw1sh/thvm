@@ -45,6 +45,30 @@ class TestLazyArange(unittest.TestCase):
         self.assertEqual(GlobalCounters.kernel_count, 1)
         self.assertLess(GlobalCounters.global_ops, 16 * 4096)
 
+    def test_one_hot_index_reads_through(self):
+        # tinygrad's test_index_two_in_one_reduce: the arange fuses into the reduce, which folds to two
+        # gated reads (pm_load_collapse), so the ops do not scale with the 2048 rows.  An index out of
+        # range reads 0.
+        a, b = Tensor.rand(2048, 32).realize(), Tensor.rand(2048, 32).realize()
+        i, j = Tensor([3, 50, -1]).realize(), Tensor([7, 2048, 2000]).realize()
+        GlobalCounters.reset()
+        r = Tensor.arange(2048)[None, :, None]
+        got = ((r == i[:, None, None]).where(a[None], 0) + (r == j[:, None, None]).where(b[None], 0)).sum(1).numpy()
+        self.assertEqual(GlobalCounters.kernel_count, 1)
+        self.assertLess(GlobalCounters.global_ops, 4 * 2048)
+        an, bn = a.numpy(), b.numpy()
+        np.testing.assert_allclose(got, np.stack([an[3] + bn[7], an[50], bn[2000]]), rtol=1e-6)
+
+    def test_interpolate_linear(self):
+        # The index aranges are realized over the axes their consumers disagree on; such a partial
+        # realize completes rather than stay a BUFFERIZE materialize cannot inline (a CUDA fatal).
+        x = np.random.default_rng(0).random((2, 3, 29), dtype=np.float32)
+        for out in (52, 1):
+            got = Tensor(x).interpolate(size=(out,), mode="linear", align_corners=True).numpy()
+            pos = np.linspace(0, 28, out) if out > 1 else np.zeros(1)
+            want = np.stack([np.interp(pos, np.arange(29), r) for r in x.reshape(-1, 29)]).reshape(2, 3, out)
+            np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

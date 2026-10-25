@@ -4478,6 +4478,10 @@ static Term emit_kernel_for_boundary(u32 bi) {
     ke->cached_lift.store_root =
         uop_reduce_arange_collapse(ke->cached_lift.store_root);
     Term ru_rewritten = unified_store_root_for_walker(ke, ke->cached_lift.store_root);
+    // Again on the walker's root, with the gated-load rule: the walker inlines
+    // removable BUFFERIZEs, whose values (a one-hot over an arange) the pass
+    // above saw only as buffer reads.
+    ru_rewritten = uop_reduce_load_collapse(ru_rewritten);
     // Flag the slots whose tid has a non-trivial layout (a chain, a
     // non-contiguous view) that INDEX_E reads; the marks commit below.
     ChainFoldMarks _cf_marks;

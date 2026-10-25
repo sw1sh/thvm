@@ -1340,6 +1340,16 @@ fn void run_rangeify_unified(Term root) {
                       || uop_is_binary_elementwise(info->op)
                       || uop_is_ternary_elementwise(info->op)
                       || info->op == UOP_GATHER;
+    // A node that reads no buffer is recomputed where its ranges end instead,
+    // as tinygrad's remove_bufferize then drops the buffer
+    // (bufferize_rule_bufferless).  One already realized over its diverging
+    // axes completes that realize: a partial BUFFERIZE of it has no per-axis
+    // entry for materialize to inline it through.
+    if (RU_ENDING_RANGES[node_idx].n
+        && !RU_REALIZE_MAP[node_idx].realized_partial && !RU_REALIZE_MAP[node_idx].realized_full
+        && bufferize_reads_no_buffer(info->loc, info->op)) {
+      RU_ENDING_RANGES[node_idx].n = 0;
+    }
     if (RU_ENDING_RANGES[node_idx].n
         && (is_elementwise || info->op == UOP_REDUCE)) {
       u32 mask = RU_REALIZE_MAP[node_idx].axes_mask;

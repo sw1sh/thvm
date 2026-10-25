@@ -93,18 +93,25 @@ static int rc_const_i32(Term t, i32 *out) {
   return 1;
 }
 
+static int rc_is_int32_const(Term t) {
+  return term_tag(t) == TAG_UOP && term_ext(t) == UOP_CONST
+      && term_ext(heap_read(term_val(t) + 0)) == DT_INT32;
+}
+
 // Splits an IADD chain holding exactly one RANGE(aid) into that range (*rng)
 // and the aid-free rest (*rest, 0 for a bare range); 0 for any other shape.
+// An ADD of an int32 CONST (an arange's start - step) wraps as IADD does.
 static int rc_split_affine(Term t, u32 aid, Term *rng, Term *rest) {
   if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_RANGE
       && (u32)term_val(heap_read(term_val(t) + 0)) == aid) {
     *rng = t; *rest = 0; return 1;
   }
-  if (term_tag(t) == TAG_UOP && term_ext(t) == UOP_IADD) {
+  if (term_tag(t) == TAG_UOP && (term_ext(t) == UOP_IADD || term_ext(t) == UOP_ADD)) {
     Term a = heap_read(term_val(t) + 0);
     Term b = heap_read(term_val(t) + 1);
     int a_has = rc_uses_axis(a, aid);
     int b_has = rc_uses_axis(b, aid);
+    if (term_ext(t) == UOP_ADD && !rc_is_int32_const(a_has ? b : a)) return 0;
     if (a_has && !b_has) {
       Term ar, arest;
       if (!rc_split_affine(a, aid, &ar, &arest)) return 0;
@@ -204,26 +211,130 @@ static Term rc_collapse_one(Term red) {
   return uop_int_binary(UOP_IMUL, then_v, count);
 }
 
-// tinygrad pm_reduce_simplify as a graph_rewrite rule (codegen/simplify.py:147-150,
-// applied in schedule/rangeify.py:357): a foldable REDUCE folds wherever it sits.
-static Term rc_collapse_rule(Term t, void *user) {
-  (void)user;
-  if (term_tag(t) != TAG_UOP || term_ext(t) != UOP_REDUCE) return t;
-  Term folded = rc_collapse_one(t);
+// 1 iff a REDUCE sits under `t`, through UOp sources and not past a buffer.
+static int rc_has_reduce(Term t) {
+  UOpWalk w = {0};
+  uop_walk_push(&w, t);
+  int found = 0;
+  Term n;
+  while (!found && (n = uop_walk_pop(&w)) != 0) {
+    u8 op = term_ext(n);
+    if (op == UOP_REDUCE) {
+      found = 1;
+    } else if (op != UOP_BUFFER && op != UOP_BUFFERIZE && op != UOP_KERNEL) {
+      for (u8 i = 0; i < uop_arity(op); i++) {
+        uop_walk_push(&w, heap_read(term_val(n) + i));
+      }
+    }
+  }
+  uop_walk_free(&w);
+  return found;
+}
+
+static Term rc_peel_casts(Term t) {
+  while (term_tag(t) == TAG_UOP && term_ext(t) == UOP_CAST) {
+    t = heap_read(term_val(t) + 0);
+  }
+  return t;
+}
+
+// tinygrad's gated-load rule (codegen/simplify.py:125-127): a one-hot SUM over
+// r of IWHERE(r + rest == idx, val, 0) reads val at r = idx - rest, gated to
+// [0, extent), and the reduce goes.  The gather address is clamped in range too,
+// so a renderer that hoists the load never reads past the buffer.  A 64-bit idx
+// stays a reduce: as int32 index math it would wrap back into range.  So does an
+// idx a REDUCE computes in the kernel (masked_select's cumsum): its accumulator
+// renders as float, which cannot subscript a load.
+static Term rc_load_collapse_one(Term red) {
+  if (uop_reduce_kind(red) != REDUCE_SUM || uop_reduce_n_axes(red) != 1) return 0;
+  u32 aid = uop_reduce_axis(red, 0);
+  Term body = uop_reduce_src(red);
+  if (term_tag(body) != TAG_UOP || term_ext(body) != UOP_IWHERE) return 0;
+  u64 bloc = term_val(body);
+  Term cond = rc_peel_casts(heap_read(bloc + 0));
+  Term val = heap_read(bloc + 1);
+  Term zero = heap_read(bloc + 2);
+  i32 zv;
+  if (!(term_tag(zero) == TAG_UOP && term_ext(zero) == UOP_INVALID) && !(rc_const_i32(zero, &zv) && zv == 0)) {
+    return 0;
+  }
+  if (term_tag(cond) != TAG_UOP || term_ext(cond) != UOP_CMPEQ) return 0;
+  Term x = heap_read(term_val(cond) + 0);
+  Term y = heap_read(term_val(cond) + 1);
+  if (rc_uses_axis(y, aid)) {
+    Term s = x; x = y; y = s;
+  }
+  u32 ydt;
+  if (rc_uses_axis(y, aid) || !term_dtype_in(y, 0, &ydt) || !dtype_is_int(ydt)
+      || ydt == DT_INT64 || ydt == DT_UINT64 || rc_has_reduce(y)) {
+    return 0;
+  }
+  Term rng, rest;
+  if (!rc_split_affine(x, aid, &rng, &rest)) return 0;
+  u32 ext = uop_range_extent(rng);
+  if (ext == 0 || ext > (1u << 24)) return 0;
+  Term idx = rest == 0 ? y : uop_int_binary(UOP_ISUB, y, rest);
+  Term safe = rc_clamp_0_hi(idx, ext - 1);
+  Term read = uop_substitute(val, &rng, &safe, 1);
+  if (rc_uses_axis(read, aid)) return 0;
+  Term in_hi = uop_where(uop_int_binary(UOP_ILT, idx, uop_const(DT_INT32, ext)), read, zero);
+  return uop_where(uop_int_binary(UOP_ILT, idx, uop_const(DT_INT32, 0)), zero, in_hi);
+}
+
+static Term rc_fold(Term red, int load);
+
+// tinygrad's REDUCE on ADD (codegen/simplify.py:112-114) inside reduce_collapse,
+// which keeps the split only when no range is left (simplify.py:141): a SUM
+// over a + b folds when both halves do.
+static Term rc_split_add(Term red, int load) {
+  if (uop_reduce_kind(red) != REDUCE_SUM) return 0;
+  Term body = uop_reduce_src(red);
+  if (term_tag(body) != TAG_UOP || term_ext(body) != UOP_ADD) return 0;
+  Term half[2];
+  for (u32 i = 0; i < 2; i++) {
+    Term src = heap_read(term_val(body) + i);
+    half[i] = rc_fold(uop_substitute(red, &body, &src, 1), load);
+    if (half[i] == 0) return 0;
+  }
+  return uop_binary(UOP_ADD, half[0], half[1]);
+}
+
+// The folded form of `red`, or 0 when no rule folds it; `load` adds the
+// gated-load rule.
+static Term rc_fold(Term red, int load) {
+  if (term_tag(red) != TAG_UOP || term_ext(red) != UOP_REDUCE) return 0;
+  Term folded = rc_collapse_one(red);
+  if (folded == 0 && load) folded = rc_load_collapse_one(red);
+  if (folded == 0) folded = rc_split_add(red, load);
+  return folded;
+}
+
+static Term rc_collapse_rule(Term t, void *load) {
+  Term folded = rc_fold(t, load != NULL);
   return folded != 0 ? folded : t;
 }
 
-static Term rc_collapse_store(Term store, void *ctx) {
-  (void)ctx;
+static Term rc_collapse_store(Term store, void *load) {
   UOpGraphRewriteRule rules[] = {
     { "reduce-collapse", rc_collapse_rule },
   };
-  return uop_graph_rewrite(store, rules, 1, NULL);
+  return uop_graph_rewrite(store, rules, 1, load);
 }
 
 // `root` is a kernel's store_root (a STORE, or an AFTER chain of them); returns
-// it with every foldable REDUCE in its stores collapsed.
+// it with every foldable REDUCE in its stores collapsed: tinygrad's
+// pm_reduce_simplify (codegen/simplify.py:147-150, applied in
+// schedule/rangeify.py:606).
 fn Term uop_reduce_arange_collapse(Term root) {
   if (root == 0) return root;
   return uop_root_map_stores(root, rc_collapse_store, NULL);
+}
+
+// The same plus pm_load_collapse (codegen/simplify.py:153-157), which tinygrad
+// runs in codegen: it rewrites load addresses, so it waits for the walker
+// rewrite, whose per-axis table is keyed by the INDEX_E nodes rangeify built.
+fn Term uop_reduce_load_collapse(Term root) {
+  static int load = 1;
+  if (root == 0) return root;
+  return uop_root_map_stores(root, rc_collapse_store, &load);
 }
