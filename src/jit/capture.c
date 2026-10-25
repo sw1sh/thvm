@@ -2452,6 +2452,144 @@ fn void jit_capture_set_inputs(u32 slot, u32 const *ids, u32 n) {
   c->n_inputs_decl = n;
 }
 
+static int jit_ids_contain(u32 const *ids, u32 n, u32 id) {
+  for (u32 i = 0; i < n; i++) {
+    if (ids[i] == id) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// tinygrad's prune (engine/jit.py:14-22): an op that reads no declared input,
+// directly or through a kept op, writes the same bytes every call, so its run
+// at capture is its only one.  A kept op reads such an output through a copy:
+// the realize's arena or the capture recycle pool may give the original's
+// storage to a later op.  Call after jit_capture_set_inputs, before a replay.
+// Returns the ops pruned; 0 and nothing changed when a copy fails.
+fn u32 jit_capture_prune(u32 slot) {
+  if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) return 0;
+  JitCapture *c = &JIT_CAPTURES[slot];
+  if (!c->in_use || c->n_ops == 0) return 0;
+  u32 cap = c->n_inputs_decl + 1;
+  for (u32 i = 0; i < c->n_ops; i++) {
+    cap += c->ops[i].kind == JIT_OP_DISPATCH ? c->ops[i].n_inputs + 1 : 1;
+  }
+  u32 *live  = (u32 *)malloc((size_t)cap * sizeof(u32));
+  u8  *once  = (u8 *)calloc(c->n_ops, 1);
+  u32 *outs  = (u32 *)calloc(c->n_ops, sizeof(u32));   // a once op's output
+  u32 *copy  = (u32 *)calloc(c->n_ops, sizeof(u32));   // and its copy, 0 unread
+  if (live == NULL || once == NULL || outs == NULL || copy == NULL) {
+    free(live); free(once); free(outs); free(copy);
+    return 0;
+  }
+  u32 n_live = 0;
+  for (u32 k = 0; k < c->n_inputs_decl; k++) live[n_live++] = c->input_buf_ids[k];
+
+  // Ids alone, not (backend, id): a cross-backend collision only keeps more.
+  for (u32 i = 0; i < c->n_ops; i++) {
+    JitCaptureOp *op = &c->ops[i];
+    if (op->replay_skip) continue;
+    switch (op->kind) {
+      case JIT_OP_DISPATCH: {
+        u32 const *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
+        int keep = jit_dispatch_op_custom(op);
+        for (u32 j = 0; j < op->n_inputs && !keep; j++) keep = jit_ids_contain(live, n_live, ids[j]);
+        if (!keep) {
+          once[i] = 1;
+          outs[i] = op->out_buf_id;
+          break;
+        }
+        live[n_live++] = op->out_buf_id;
+        // A raw program writes any of its arguments.
+        for (u32 j = 0; j < op->n_inputs && jit_dispatch_op_custom(op); j++) live[n_live++] = ids[j];
+        break;
+      }
+      case JIT_OP_ASSIGN: {
+        u32 dst = op->assign_dst_tid != 0 && op->assign_dst_tid < TENS_NEXT ? TENS[op->assign_dst_tid].buf_id : 0;
+        u32 src = op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT ? TENS[op->assign_src_tid].buf_id : 0;
+        if (!jit_ids_contain(live, n_live, dst) && !jit_ids_contain(live, n_live, src)) {
+          once[i] = 1;
+          break;
+        }
+        live[n_live++] = dst;
+        break;
+      }
+      case JIT_OP_GATHER: {
+        if (!jit_ids_contain(live, n_live, op->gather_src_buf)) {
+          once[i] = 1;
+          outs[i] = op->gather_dst_buf;
+          break;
+        }
+        live[n_live++] = op->gather_dst_buf;
+        break;
+      }
+    }
+  }
+
+  // Copy every once output a kept op reads, before changing anything.
+  int ok = 1;
+  for (u32 i = 0; i < c->n_ops && ok; i++) {
+    if (outs[i] == 0) continue;
+    Backend *b = c->ops[i].kind == JIT_OP_GATHER ? (Backend *)c->ops[i].gather_backend
+                                                 : jit_dispatch_output_backend(&c->ops[i]);
+    int read = 0;
+    for (u32 p = i + 1; p < c->n_ops && !read; p++) {
+      JitCaptureOp const *op = &c->ops[p];
+      if (op->replay_skip || once[p]) continue;
+      if (op->kind == JIT_OP_DISPATCH) {
+        u32 const *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
+        read = jit_ids_contain(ids, op->n_inputs, outs[i]);
+      } else if (op->kind == JIT_OP_GATHER) {
+        read = op->gather_src_buf == outs[i];
+      } else if (op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT) {
+        read = TENS[op->assign_src_tid].buf_id == outs[i];
+      }
+    }
+    if (!read) continue;
+    u64 nbytes = b != NULL && b->buf_nbytes != NULL ? b->buf_nbytes(outs[i]) : 0;
+    copy[i] = nbytes > 0 && b->buf_alloc != NULL && b->buf_copy != NULL ? b->buf_alloc(nbytes) : 0;
+    ok = copy[i] != 0 && b->buf_copy(copy[i], outs[i], nbytes) == 0;
+  }
+  u32 pruned = 0;
+  for (u32 i = 0; i < c->n_ops; i++) {
+    if (copy[i] == 0) continue;
+    Backend *b = c->ops[i].kind == JIT_OP_GATHER ? (Backend *)c->ops[i].gather_backend
+                                                 : jit_dispatch_output_backend(&c->ops[i]);
+    if (ok) {
+      jit_capture_retain_buf(c, b, copy[i]);
+    }
+    b->buf_decref(copy[i]);
+  }
+  for (u32 p = 0; p < c->n_ops && ok; p++) {
+    JitCaptureOp *op = &c->ops[p];
+    if (once[p]) {
+      op->replay_skip = 1;
+      pruned++;
+      continue;
+    }
+    for (u32 i = 0; i < p; i++) {
+      if (copy[i] == 0) continue;
+      if (op->kind == JIT_OP_DISPATCH) {
+        u32 *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
+        for (u32 j = 0; j < op->n_inputs; j++) {
+          if (ids[j] == outs[i]) ids[j] = copy[i];
+        }
+      } else if (op->kind == JIT_OP_GATHER && op->gather_src_buf == outs[i]) {
+        op->gather_src_buf = copy[i];
+      } else if (op->kind == JIT_OP_ASSIGN && op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT
+                 && TENS[op->assign_src_tid].buf_id == outs[i]) {
+        op->assign_src_buf = copy[i];
+      }
+    }
+  }
+#ifdef THVM_HAS_CUDA
+  if (pruned > 0) cuda_jit_graph_invalidate(slot);
+#endif
+  free(live); free(once); free(outs); free(copy);
+  return pruned;
+}
+
 // Every dispatch input or output and gather source or destination that names a
 // declared input, built on the first jit_replay_with_inputs.
 static void jit_capture_build_input_sites(JitCapture *c) {

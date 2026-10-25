@@ -33,8 +33,7 @@ _sys.modules[__name__ + ".nn.state"] = _nn_state
 # tinygrad's module names for the same objects: dtype.py and engine/jit.py.
 _sys.modules[__name__ + ".dtype"] = _sys.modules[__name__ + ".dtypes"]
 _engine_pkg = _types.ModuleType(__name__ + ".engine")
-_engine_pkg.jit = _types.ModuleType(__name__ + ".engine.jit")
-_engine_pkg.jit.TinyJit = TinyJit
+_engine_pkg.jit = _sys.modules[__name__ + "._misc"]
 _sys.modules[__name__ + ".engine"] = _engine_pkg
 _sys.modules[__name__ + ".engine.jit"] = _engine_pkg.jit
 

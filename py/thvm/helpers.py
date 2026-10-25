@@ -110,6 +110,9 @@ class ContextVar:
 # step only while it is set.
 TRAINING = ContextVar("TRAINING", 0)
 
+# tinygrad helpers.py: 0 keeps a realize out of the TinyJit capture around it.
+CAPTURING = ContextVar("CAPTURING", 1)
+
 # tinygrad helpers.py:288, accepted and ignored: nn.Embedding is the same either way.
 USE_ATOMICS = ContextVar("USE_ATOMICS", 0)
 

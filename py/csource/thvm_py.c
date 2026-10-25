@@ -418,6 +418,34 @@ EXPORT uint32_t py_jit_replay_with_inputs(uint32_t s, uint32_t const *new_ids,
   return jit_replay_with_inputs(s, new_ids, n);
 }
 EXPORT void     py_jit_drop(uint32_t s)     { jit_capture_drop(s); }
+EXPORT uint32_t py_jit_prune(uint32_t s)    { return jit_capture_prune(s); }
+// Kernels realized between pause and resume dispatch but are not recorded.
+EXPORT void     py_jit_pause(void)          { jit_capture_pause(); }
+EXPORT void     py_jit_resume(void)         { jit_capture_resume(); }
+EXPORT uint32_t py_jit_op_count(uint32_t s) { return jit_capture_op_count(s); }
+// {n_ops, row_width, rows...} as jit_capture_export_ops writes them.
+EXPORT uint32_t py_jit_export_ops(uint32_t s, uint64_t *out, uint32_t cap) {
+  return jit_capture_export_ops(s, out, cap);
+}
+
+// The views a TEN reads its buffer through, outermost first, each as
+// {ndim, offset, dims[ndim], strides[ndim]}: equal words, equal reads of the
+// buffer.  Returns the word count; 0 for a term that is not a TEN.
+EXPORT uint32_t py_ten_view_words(uint64_t t, int64_t *out, uint32_t cap) {
+  if (term_tag(t) != TAG_TEN) return 0;
+  u32 id = (u32)term_val(t);
+  if (id == 0 || id >= TENS_NEXT) return 0;
+  TenDesc const *td = &TENS[id];
+  u32 n = 0;
+  for (u32 v = 0; v <= td->nviews && n + 2 + 2 * MAX_DIM <= cap; v++) {
+    View const *w = v == 0 ? &td->view : &td->prior_views[td->nviews - v];
+    out[n++] = w->shape.ndim;
+    out[n++] = w->offset;
+    for (u32 d = 0; d < w->shape.ndim; d++) out[n++] = w->shape.dims[d];
+    for (u32 d = 0; d < w->shape.ndim; d++) out[n++] = w->strides[d];
+  }
+  return n;
+}
 
 EXPORT uint32_t py_tens_count(void) {
   return TENS_NEXT > 1 ? TENS_NEXT - 1 : 0;

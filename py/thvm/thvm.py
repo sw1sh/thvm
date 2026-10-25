@@ -112,6 +112,12 @@ _jit_set_inputs = _bind("py_jit_set_inputs", None, c_uint32,
 _jit_replay_with_inputs = _bind("py_jit_replay_with_inputs", c_uint32,
                                 c_uint32, ctypes.POINTER(c_uint32), c_uint32)
 _jit_drop = _bind("py_jit_drop", None, c_uint32)
+_jit_prune = _bind("py_jit_prune", c_uint32, c_uint32)
+_jit_pause = _bind("py_jit_pause", None)
+_jit_resume = _bind("py_jit_resume", None)
+_jit_op_count = _bind("py_jit_op_count", c_uint32, c_uint32)
+_jit_export_ops = _bind("py_jit_export_ops", c_uint32, c_uint32, ctypes.POINTER(c_uint64), c_uint32)
+_ten_view_words = _bind("py_ten_view_words", c_uint32, c_uint64, ctypes.POINTER(ctypes.c_int64), c_uint32)
 _tens_count = _bind("py_tens_count", c_uint32)
 _kernel_count = _bind("py_kernel_count", c_uint32)
 _cpu_peak_bytes = _bind("py_cpu_peak_bytes", c_uint64)
@@ -482,6 +488,17 @@ class Thvm:
         arr = (c_uint32 * n)(*[c_uint32(int(i)) for i in ids]) if n else None
         return int(_jit_replay_with_inputs(c_uint32(s), arr, c_uint32(n)))
     def jit_drop(self, s: int) -> None: _jit_drop(c_uint32(s))
+    def jit_prune(self, s: int) -> int: return int(_jit_prune(c_uint32(s)))
+    def jit_pause(self) -> None: _jit_pause()
+    def jit_resume(self) -> None: _jit_resume()
+    def jit_op_count(self, s: int) -> int: return int(_jit_op_count(c_uint32(s)))
+    def jit_ops(self, s: int) -> list[tuple[int, ...]]:
+        """The capture's ops as jit_capture_export_ops rows."""
+        cap = 2 + 16 * max(1, int(_jit_op_count(c_uint32(s))))
+        out = (c_uint64 * cap)()
+        _jit_export_ops(c_uint32(s), out, c_uint32(cap))
+        n, w = int(out[0]), int(out[1])
+        return [tuple(out[2 + i * w:2 + (i + 1) * w]) for i in range(n)]
 
     def tens_count(self) -> int:
         return int(_tens_count())
@@ -529,6 +546,11 @@ class Thvm:
 
     def ten_get_buf_id(self, t: Term) -> int:
         return int(_ten_get_buf_id(c_uint64(int(t))))
+
+    def ten_view_words(self, t: Term) -> tuple[int, ...]:
+        """The views t reads its buffer through, outermost first: equal words, equal reads."""
+        out = (ctypes.c_int64 * 512)()
+        return tuple(out[:int(_ten_view_words(c_uint64(int(t)), out, c_uint32(512)))])
 
     def backward(self, y: Term, gy: Term, tids) -> "tuple[list[int], list[bool], str | None]":
         """uop_backward: each leaf's grad term, whether it held one before, and the

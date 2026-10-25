@@ -20,7 +20,8 @@ import numpy as np
 from .device import Device
 from .dtypes import (DType, dtypes, from_thvm_id, least_upper_dtype, sum_acc_dtype, to_dtype,
                      _from_np_dtype, _to_np_dtype)
-from .helpers import TRAINING, argfix, argsort, ceildiv, make_tuple
+from ._misc import capturing
+from .helpers import CAPTURING, TRAINING, argfix, argsort, ceildiv, make_tuple
 from .mixin import OpMixin, _align_left
 from .thvm import K, Term, Thvm
 
@@ -284,6 +285,16 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         """Run thvm's pipeline and swap each term for its TAG_TEN; several tensors realize in one
         realize_many pass (tinygrad tensor.py:219-225), so shared kernels emit once.  Every pending
         assign realizes with it, ordered against the reads as below."""
+        if not capturing or CAPTURING:
+            return self._realize(*lst)
+        # tinygrad's CAPTURING=0: the realize runs, and the TinyJit capture does not record it.
+        _TH.jit_pause()
+        try:
+            return self._realize(*lst)
+        finally:
+            _TH.jit_resume()
+
+    def _realize(self, *lst: "Tensor") -> "Tensor":
         lst = (*lst, *(t for t in _PENDING_ASSIGNS if t is not self and all(t is not x for x in lst)))
         _PENDING_ASSIGNS.clear()
         if not lst:
@@ -671,6 +682,9 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
 
     def rand_like(self, **kw) -> "Tensor":
         return Tensor.rand(*self._shape, dtype=kw.pop("dtype", self._dtype), **kw)
+
+    def empty_like(self, **kw) -> "Tensor":
+        return Tensor.empty(*self._shape, dtype=kw.pop("dtype", self._dtype), **kw)
 
     def randn_like(self, dtype: DType | None = None, **kw) -> "Tensor":
         return Tensor.randn(*self._shape, dtype=dtype or self._dtype, **kw)
