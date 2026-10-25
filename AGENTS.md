@@ -1,160 +1,170 @@
 # AGENTS.md
 
 Working notes for agents (LLM or human) contributing to **thvm**. Keep this
-file *current* - when you change conventions, update here in the same commit.
+file current: when you change a convention, update it here in the same commit.
 
 ## What this project is
 
-`thvm` is a from-scratch implementation of an Interaction Calculus runtime
-unified with a tinygrad-style tensor IR. The goal is to express deep-learning
-computation (forward, autograd, kernel fusion, codegen, dispatch) as a single
-interaction-net rewrite system over a flat heap.
+thvm is an Interaction Calculus (IC) runtime in C: one flat heap of 64-bit
+terms, reduced by interaction rules. Two tracks run on it:
 
-It is being built from the ground up alongside a reference research project
-located at `./TinyHVM` (symlink). That repo is sloppy by design - it was the
-prototype. We mine it for ideas and snippets but do not depend on it.
+- **NN**: a tinygrad-style tensor compiler. Tensors are UOp graphs on the heap;
+  scheduling (rangeify), codegen and dispatch to the CPU, Metal and CUDA
+  backends, autograd as an interaction rule, JIT capture and replay. Front
+  ends: the Python package `py/thvm` (tinygrad's API, `import thvm` in place
+  of `import tinygrad`) and the Wolfram paclet THVMLink.
+- **ATP** (automated theorem proving): an equational prover by unfailing
+  Knuth-Bendix completion, faithful to Waldmeister by default, with the CASC
+  (CADE ATP System Competition) CLI `bin/FindProof` and the Wolfram
+  `TFindProof`.
 
-- Roadmap: [PLAN.md](PLAN.md). Read before making structural changes.
-- Architecture, one piece per page: [docs/README.md](docs/README.md).
-- WL-side style rules: [wl/GUIDE.md](wl/GUIDE.md).
+Architecture docs, one piece per page: [docs/README.md](docs/README.md)
+(`docs/core/`, `docs/NN/`, `docs/ATP/`).
 
-## Reference repos (read-only siblings)
+## References
 
-- [`TinyHVM/`](TinyHVM/) - research prototype. Whole pipeline exists here in
-  rough form: heap, interactions, tensor ops, autograd via interactions,
-  Metal codegen, Wolfram paclet.
-- [`TinyHVM/HVM4/clang/`](TinyHVM/HVM4/clang/) - canonical HVM4 C runtime.
-  Term layout, WNF stack machine, and per-interaction file split are all
-  copied/adapted from here.
-- [`TinyHVM/tinygrad/`](TinyHVM/tinygrad/) - tinygrad source for the UOp /
-  pattern-rewrite / kernelization machinery we will mirror in C.
+- **tinygrad is the spec** for the NN track: port its behavior, and cite the
+  tinygrad file and lines a port follows (`codegen/opt/heuristic.py:27-189`)
+  in the comment or commit message. Keep a tinygrad checkout next to this repo
+  (`../tinygrad`); the importers and parity tests assume tinygrad commit
+  `365f87a8a`.
+- **HVM4** ([HigherOrderCO/HVM](https://github.com/HigherOrderCO/HVM)) is the
+  model for the IC runtime: the term layout, the WNF stack machine, one
+  interaction per file, and the path = function name rule.
 
 ## Conventions
 
 ### File layout: path = function name
 
-Inherited from HVM4's STYLEGUIDE.md. The function `foo_bar_baz()` lives at
-`src/foo/bar/baz.c`. The directory entry-point is `_.c`:
+The function `foo_bar_baz()` lives at `src/foo/bar/baz.c`. The directory
+entry point is `_.c`:
 
 ```
-src/term/tag.c            → term_tag()
-src/term/new/lam.c        → term_new_lam()
-src/heap/alloc.c          → heap_alloc()
-src/wnf/_.c               → wnf()
-src/interact/app_lam.c    → interact_app_lam()
+src/term/tag.c            -> term_tag()
+src/heap/alloc.c          -> heap_alloc()
+src/wnf/_.c               -> wnf()
+src/interact/app_lam.c    -> interact_app_lam()
 ```
 
-A file may declare helper variants, but the primary function must match the
+A file may declare helper variants, but the primary function matches the
 filename.
 
 ### One interaction per file
 
-Each WNF interaction rule (APP-LAM, DUP-SUP, ERA-LAM, etc.) lives in its
-own file under `src/interact/`. Documentation for each interaction lives at
-the same path under `docs/interact/`. The C file's leading comment block
-mirrors the sequent-calculus rule from the doc.
+Each interaction rule (APP-LAM, DUP-SUP, OP2-SUP, ...) lives in its own file
+under `src/interact/`. Its page, if it has one, lives at the same path under
+`docs/interact/` ([docs/interact/_.md](docs/interact/_.md) is the index). The
+C file's leading comment mirrors the sequent rule from the page; if they
+disagree, the page wins and the comment is fixed.
 
 ### Single translation unit
 
-`src/thvm.c` is the umbrella - it `#include`s every `.c` file in build
-order. We compile one TU. This matches HVM4 and gives the optimizer maximum
-inlining freedom. It also keeps the build trivial (one `clang` invocation).
+`src/thvm.c` `#include`s every `.c` file in build order. Every artifact is one
+TU over it: each C test, the THVMLink library
+(`wl/THVMLink/CSource/thvmlink.c`), the Python library
+(`py/csource/thvm_py.c`) and `bin/FindProof` (`tools/thvm_atp_cli.c`). Add a
+source file by including it from `src/thvm.c`, never by editing the Makefile.
 
 ### C style
 
-- C11. `static inline` on small functions (`fn` macro = `static inline`).
-- Switch (not if-chains) for tag dispatch.
-- No single-line `if`/`while`/function bodies - always braces.
+- C11. `static inline` on small functions (the `fn` macro).
+- Switch, not if-chains, for tag dispatch.
+- Always braces: no single-line `if` / `while` / function bodies.
 - Align declaration columns when adjacent.
 - Trust internal invariants; validate only at boundaries.
 
-### Comments
+### Comments and docs
 
-Default to none. Add a short `WHY` comment only when behavior would surprise
-a careful reader. Do **not** restate what the code already says.
+- Code comments: default to none. Add a short comment only where behavior
+  would surprise a careful reader; never restate the code.
+- Docs and comments: no em dashes; plain ASCII in tables and diagrams;
+  repo-relative paths; spell an abbreviation out on first use; no dated
+  "as of" status notes.
+- Wolfram Language sources follow [wl/GUIDE.md](wl/GUIDE.md); the paclet
+  documentation follows
+  [wl/THVMLink/docs/DOC_GUIDE.md](wl/THVMLink/docs/DOC_GUIDE.md).
 
 ## Build and test
 
+The [Makefile](Makefile) is the source of truth.
+
 ```bash
-make           # build src/thvm.c + tests/* into bin/
-make test      # build then run every bin/test_*
-make wl        # build the Wolfram LibraryLink dylib
-make wl-test   # build the dylib and run the WL VerificationTest suite
-make clean
+make                  # the THVMLink library (default goal; a full compile check)
+make bin/test_foo     # one C test; make all builds every test, make test runs them
+make wl-test          # run every wl/THVMLink/Tests/*.wlt against the built library
+make py               # py/thvm/libthvm_py.{dylib,so}
+make bin/FindProof    # the ATP CLI (the CASC entry)
+make wl-cross         # THVMLink libraries for all five Wolfram platforms
+make clean            # remove bin/
 ```
 
-The Makefile is the source of truth. Each C test is an independent
-program that `#include`s `src/thvm.c` (single-TU, recompiled per test;
-fast at this size). The WL paclet shares `src/thvm.c` via a single
-`#include` from `wl/THVMLink/CSource/thvmlink.c`, so the C runtime has
-exactly one compiled-from copy per build target.
-
-For Wolfram-side conventions (no `Print`, no em dashes, no Unicode
-box-drawing in source, `VerificationTest` for tests), read
-[wl/GUIDE.md](wl/GUIDE.md).
+- Run the tests that cover what you changed (`grep -l <symbol> tests/`, then
+  `make bin/test_<name> && bin/test_<name>`) rather than the whole suite.
+- WL tests load the library `make wl` built; rebuild it after a runtime change.
+- Python tests: `make py`, then `python -m pytest py/tests/test_<name>.py`
+  (`py/tests/helpers.py` puts `py/` on the path).
+- The Metal backend builds on macOS; CUDA builds on Linux when the toolkit
+  headers are found (`CUDA_HOME`). `DEV=cpu|metal|cuda` picks the device at
+  runtime.
+- `THVM_*` environment knobs are indexed in
+  [docs/NN/env_knobs.md](docs/NN/env_knobs.md) and
+  [docs/ATP/env_knobs.md](docs/ATP/env_knobs.md); add or remove a row with the
+  `getenv` that reads it.
 
 ## Workflow
 
-1. **Read PLAN.md first.** It defines the staged build order.
-2. **Tests describe behavior.** Write or update `tests/test_*.c` *before*
-   touching implementation when adding a feature.
-3. **Commit often, small commits.** Update `CHANGELOG.md` in the same commit
-   with a human-readable line under `## Unreleased`. Commit messages are
-   short imperative summaries.
-4. **Update docs alongside code.** `docs/interact/<name>.md` and the
-   matching C file's header comment must agree. The doc is the source
-   of truth; if they disagree, fix the comment.
-5. **Keep README.md synchronized with the current shippable state.**
-   When you add a new piece, link it from [docs/README.md](docs/README.md)
-   and add a row to the README's status table if applicable.
+1. **Tests describe behavior.** Write or update the test (`tests/test_*.c`,
+   `wl/THVMLink/Tests/*.wlt`, `py/tests/test_*.py`) before changing behavior.
+2. **Commit often, small commits.** Describe the change in the commit message:
+   a short imperative summary line with a scope prefix (`fix(cpu): ...`,
+   `docs: ...`), then what changed and why.
+3. **Update docs alongside code.** A changed mechanism updates its page; a new
+   piece gets a page under `docs/core/`, `docs/NN/` or `docs/ATP/` and a line
+   in [docs/README.md](docs/README.md).
+4. **Keep [README.md](README.md) true** to what ships.
 
-## Code map (current)
+## Code map
 
-C runtime:
+`src/` (C runtime, one TU through `src/thvm.c`; public types and the term bit
+layout in `src/thvm.h`):
 
-- `src/thvm.h`: public types, term bit layout, tag constants, function decls
-- `src/thvm.c`: single-TU hub
-- `src/term/{new,tag,ext,val}.c` + `src/term/sub/{get,set}.c`: term packing
-- `src/heap/{alloc,read,set,take,subst_var,subst_cop}.c`: flat heap
-  primitives + the pair-substitution helper used by DUP rules
-- `src/wnf/_.c`: stack-machine reducer (enter pushes APP/DP frames and
-  walks to a WHNF, apply pops frames and dispatches active-pair
-  interactions; stuck frames rebuild the original node)
-- `src/interact/app_lam.c`: APP-LAM (beta)
-- `src/interact/app_era.c`: APP-ERA
-- `src/interact/dup_sup.c`: DUP-SUP same-label annihilation
-  (different-label commute is left stuck for now)
-- `src/interact/dup_era.c`: DUP-ERA
-- `tests/test_term.c`, `tests/test_heap.c`: passing checks of the above
-- `tests/test_app_lam.c`, `tests/test_era.c`, `tests/test_dup_sup.c`:
-  end-to-end spec tests that drive `wnf` and assert both the result
-  shape and the ITRS counter delta (one interaction per fired rule).
+| Directory | What it holds |
+| --- | --- |
+| `term/`, `heap/` | term packing; the flat heap, allocator and Cheney GC |
+| `wnf/`, `cnf/`, `collapse/`, `eval/` | the reducers: WNF stack machine, parallel `nf` pool, SUP-lift readback, collapsers |
+| `interact/` | one interaction rule per file (31 rules) |
+| `book/`, `alo/`, `lam/` | static definitions (`TDef`), their lazy realization, auto-dup of non-linear binders |
+| `aot/` | ahead-of-time compiler for `TDef` bodies (C and Metal) |
+| `instrument/` | hot counters and the multicomputation trace |
+| `uop/`, `view/`, `dtype/`, `tensor/` | UOp constructors and rewrites, views, dtypes, tensor descriptors |
+| `schedule/` | realize classification, rangeify, materialize, kernel GC, symbolic dims |
+| `codegen/` | the UOp DAG renderer (C, Metal, CUDA), kernel opts, BEAM autotune |
+| `backend/{cpu,metal,cuda,dispatch}/` | backends: clang JIT, BLAS and UOp walker; Metal; CUDA; batched dispatch |
+| `jit/` | kernel-sequence capture and replay |
+| `nn/` | tinygrad's NN-level ops in C behind one flat entry (`nn_call`) |
+| `atp/` | the equational prover (completion loop, indexing, selection, proofs) |
+| `kbo/`, `lpo/`, `rpo/`, `wpo/` | reduction orderings |
+| `unify/`, `cp/`, `rewrite/` | unification, critical pairs, rewriting |
+| `fol/`, `cc/`, `ffmep/`, `wmfpa/`, `wald/` | clausal resolution, congruence closure, finite-model enumeration, the Waldmeister normalization port, the `.pr` parser |
+| `util/` | concurrency primitives of the parallel reducer |
 
-WL paclet (`wl/THVMLink/`):
+Elsewhere:
 
-- `wl/THVMLink/CSource/thvmlink.c`: 14 scalar `EXTERN_C DLLEXPORT`
-  functions (lifecycle, term packing, heap, wnf, itrs). Single-TU
-  build that `#include`s `../../../src/thvm.c`.
-- `wl/THVMLink/Kernel/THVMLink.wl`: `WolframInstitute`THVMLink`` package wrapping the
-  scalar primitives and synthesizing `TLam` / `TApp` / `TSup` / `TDup`
-  via shared `heapWith` / `heapTerm` helpers.
-- `wl/THVMLink/Tests/core.wlt`: `VerificationTest` specs.
-- `wl/THVMLink/Tests/run.wls`: runner script (invoked by
-  `make wl-test`); calls `TestReport`, prints summary, exits non-zero
-  on any failure.
-- `wl/GUIDE.md`: WL style rules. Read this before touching `wl/`.
-
-## What's deliberately not here yet
-
-Tracked in PLAN.md. Do not pre-build for them.
-
-- Autograd interactions (`src/grad/`): step 13
-- Kernel fusion / codegen / Metal backend: step 14
-- Multi-threading: not in the initial roadmap; runtime is single-threaded
+- `py/thvm/`: the Python package (`tensor.py`, `mixin.py`, `nn.py`,
+  `optim.py`, ...) over `libthvm_py` (`py/csource/thvm_py.c`); `py/tests/`.
+- `wl/THVMLink/`: the paclet: `CSource/` (bridge), `Kernel/` (one package per
+  concern, `Kernel/README.md` maps them; `Kernel/NN/`, `Kernel/ATP/`),
+  `Tests/`, `docs/` (paclet documentation source). `wl/Examples/`: runnable
+  examples; `wl/scripts/`: docs build, lint and release scripts.
+- `tests/`: one self-contained C test per executable, plus probes and data.
+- `tools/`: the FindProof CLI (`thvm_atp_cli.c`, `atp_cli/`), CASC and ProoVer
+  packaging (`casc/`, `proover/`), ATP baselines and the ENIGMA tooling, model
+  converters and benchmarks.
+- `bench/`: cross-framework benchmarks against tinygrad, PyTorch and MLX.
+- `docs/`: architecture pages ([docs/README.md](docs/README.md)).
 
 ## When in doubt
 
-- Match HVM4's style and the existing scaffold.
-- Prefer deletion over flag/option proliferation.
+- Match the existing scaffold; for the NN track, match tinygrad.
+- Prefer deletion over flag or option proliferation.
 - Ask before introducing a new top-level directory.
-- If a step in PLAN.md is ambiguous, surface it before guessing.
