@@ -16,9 +16,7 @@
 
    Honest expectation: under our 32-step bench budget every Sheffer
    goal TIMEs OUT; lemma discovery from the depth-4 Wolfram axiom
-   exceeds the budget.  See docs/plans/wolfram_axiom_design.md and
-   docs/plans/corpus_expansion_findings.md (stage 10c update) for
-   the cell-budget analysis.
+   exceeds the budget.
 *)
 
 PacletDirectoryLoad["wl/THVMLink"];
@@ -103,5 +101,4 @@ debugPrint["Score: ", provedCount, " / ", Length[results],
 
 debugPrint[""];
 debugPrint["Note: Twee at --max-cps 256 proves all three; our 32-64"];
-debugPrint["step budget exceeds lemma-discovery cost.  See"];
-debugPrint["docs/plans/corpus_expansion_findings.md."];
+debugPrint["step budget exceeds lemma-discovery cost."];

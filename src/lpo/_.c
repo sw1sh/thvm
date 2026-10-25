@@ -2,8 +2,7 @@
 //
 // Compares two terms over a signature of TAG_CTR (function symbols)
 // and TAG_FVR (variables) under an LpoConfig (per-symbol precedence
-// table).  Stage 8.5 of the IC-native ATP roadmap; per the
-// `docs/plans/lpo_design.md` decision memo.
+// table).
 //
 // Returns:
 //   LPO_EQ : s and t are structurally identical

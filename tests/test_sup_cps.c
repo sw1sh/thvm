@@ -1,9 +1,8 @@
 // test_sup_cps.c -- stage 8.1d-ii: SUP-encoded CP fan-out demo.
 //
 // Demonstrates that a SUP of PRI-unify calls reduces to the same
-// terms as C-side `thvm_unify_apply` would produce for each pair.
-// This is the structural parity check the design memo
-// (`docs/plans/sup_encoded_cps.md`) calls for.
+// terms as C-side `thvm_unify_apply` would produce for each pair:
+// the structural parity check between the two paths.
 //
 // Caveat: APP-SUP shares its argument via a DUP, but our IC has
 // no DUP-CTR or DUP-FVR yet, so passing CTR-shaped rule LHSs via

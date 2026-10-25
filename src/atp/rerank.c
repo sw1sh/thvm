@@ -693,8 +693,7 @@ lazy_skip_varnorm: ;
   return 1;
 }
 
-// One full saturation step.  See docs/plans/saturation_loop.md
-// sec.2 for the algorithm.  Order:
+// One full saturation step.  Order:
 //   1. goal_check   -- cheap; may close if a prior step proved
 //   2. step_cap     -- TIMEOUT if exceeded
 //   3. select_cp    -- QUEUE_EMPTY if exhausted

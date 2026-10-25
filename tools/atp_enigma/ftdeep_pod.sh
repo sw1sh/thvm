@@ -2,7 +2,7 @@
 # Pod validation of the explicit-stack branch (enigma-ftdeep) against main
 # before it merges: the deep-term tests, the unarmed-identity pins and a
 # paired cost measurement.  Writes everything under <out_dir>; the
-# numbers go into CHANGELOG.md and docs/ATP/enigma_portfolio.md 5.4.
+# numbers go into the commit message and docs/ATP/enigma_portfolio.md 5.4.
 #
 #   1. Builds, in each tree: the competition FindProof
 #      (tools/casc/Makefile) and bin/test_atp_wolfram_bench; sha256 of each.

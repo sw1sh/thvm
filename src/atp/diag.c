@@ -491,8 +491,8 @@ static u8 atp_cp_perm_subsumed(Term lhs, Term rhs) {
 // without using either parent rule, the parent rules' interaction
 // was redundant.
 //
-// Per the domination lemma in `docs/plans/connectedness_design.md`,
-// this is strictly weaker pruning than 7.1's full-R joinability
+// By a domination lemma, this is strictly weaker pruning than 7.1's
+// full-R joinability
 // (since reducing the rule set cannot uncover joins that the full
 // set misses).  We compute it for measurement: the resulting
 // counter `n_cps_dropped_connected` is bounded above by
@@ -725,8 +725,7 @@ static u8 atp_cp_connected_below_peak(AtpState *s, Term lhs, Term rhs,
 // be CONSISTENT across both sides simultaneously, so we extend the
 // same `RewriteSubst` across the two `thvm_match` calls.
 //
-// Per the domination lemma in `docs/plans/connectedness_design.md`:
-// if (lhs, rhs) is rule-subsumed by (l_k, r_k), then rule
+// Domination: if (lhs, rhs) is rule-subsumed by (l_k, r_k), then rule
 // (l_k, r_k) rewrites lhs to rhs in one step under σ, so
 // `thvm_rewrite_normalize` collapses the pair too.  Hence
 // `n_cps_dropped_rule_subsumed <= n_cps_dropped_joinable` always.

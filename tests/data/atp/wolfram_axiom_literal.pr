@@ -3,7 +3,7 @@
 % goal-rewrite path applies the axiom rule once at the top and
 % reduces lhs to r.  Predicted PROVED @ 0; sanity check that
 % the parser + KBO/LPO config handle the axiom's depth-4 NAND
-% nesting.  See docs/plans/wolfram_axiom_design.md.
+% nesting.
 NAME            wolfram_axiom_literal
 MODE            PROOF
 SORTS           ANY
