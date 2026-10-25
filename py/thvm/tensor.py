@@ -1595,6 +1595,17 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         hit = Tensor.arange(self._shape[0]) == idx.unsqueeze(-1)
         return hit.unsqueeze(-1).where(self, 0).sum(-2, dtype=self._dtype)
 
+    def dropout(self, p: float = 0.5) -> "Tensor":
+        """Each element zeroed with probability p under TRAINING, the rest scaled by 1 / (1 - p)
+        (tinygrad mixin/rand.py, Srivastava et al. 2014); outside TRAINING, self."""
+        if not 0 <= p <= 1:
+            raise ValueError(f"{p=} is out of range [0, 1]")
+        if not TRAINING or p == 0:
+            return self
+        if p == 1:
+            return self.const_like(0)
+        return (self.rand_like(dtype=dtypes.default_float, contiguous=False) >= p).contiguous().where(self, 0) / (1.0 - p)
+
     def scaled_dot_product_attention(self, key: "Tensor", value: "Tensor",
                                      attn_mask: "Tensor | None" = None,
                                      dropout_p: float = 0.0,
@@ -1605,13 +1616,17 @@ class Tensor(OpMixin, metaclass=_TensorMeta):
         if enable_gqa:
             key = key.repeat_interleave(int(self._shape[-3] // key.shape[-3]), dim=-3)
             value = value.repeat_interleave(int(self._shape[-3] // value.shape[-3]), dim=-3)
-        if dropout_p and TRAINING:
-            # tinygrad drops out softmax(qk) under TRAINING (mixin/rand.py:294, 327);
-            # thvm has no dropout.
-            raise NotImplementedError("scaled_dot_product_attention dropout_p "
-                                      "under TRAINING (thvm has no dropout)")
         if is_causal and attn_mask is not None:
             raise RuntimeError("cannot set attn_mask when is_causal=True")
+        if dropout_p and TRAINING:
+            # Dropout falls inside the C op, so tinygrad's composition (mixin/rand.py:298-327).
+            qk = q.matmul(key.transpose(-2, -1), dtype=least_upper_dtype(q.dtype, key.dtype, dtypes.float32))
+            qk = qk / math.sqrt(q.shape[-1])
+            if is_causal:
+                attn_mask = qk.const_like(1).cast(dtypes.bool).tril()
+            if attn_mask is not None:
+                qk = qk + (attn_mask.where(0, -float("inf")) if attn_mask.dtype == dtypes.bool else attn_mask)
+            return qk.cast(self._dtype).softmax(-1).dropout(dropout_p) @ value
         args = [q._nn(), key._nn(), value._nn(), None if attn_mask is None else attn_mask._nn()]
         r = _TH.nn("scaled_dot_product_attention", args, [1 if is_causal else 0])
         return Tensor._from_nn(r, "scaled_dot_product_attention")
