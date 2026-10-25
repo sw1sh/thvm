@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Profile tinygrad's beautiful_mnist training loop from the thvm tree.
 
-This does not modify the sibling tinygrad checkout.  It imports it via
-TinyHVM/tinygrad, builds the same beautiful_mnist architecture on a
-synthetic fixed batch, and reports warmup/capture/replay counters in the
-same shape as wl/Examples/beautiful-mnist/bench-train.wls.
+This does not modify the sibling tinygrad checkout (../tinygrad next to
+the repo; override with TINYGRAD=/path/to/tinygrad).  It builds the same
+beautiful_mnist architecture on a synthetic fixed batch, and reports
+warmup/capture/replay counters in the same shape as
+wl/Examples/beautiful-mnist/bench-train.wls.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from typing import Callable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TINYGRAD_ROOT = REPO_ROOT / "TinyHVM" / "tinygrad"
+TINYGRAD_ROOT = Path(os.environ.get("TINYGRAD", REPO_ROOT.parent / "tinygrad"))
 
 if not TINYGRAD_ROOT.exists():
   raise SystemExit(f"tinygrad checkout not found: {TINYGRAD_ROOT}")
