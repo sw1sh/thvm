@@ -105,7 +105,7 @@ thvm's CP heap is *missing* a weight-120 critical pair that Waldmeister has.~~
 ## Method (the user's "modify wmcli and debug it properly" steer)
 
 Built a faithful standalone instrumented Waldmeister CLI from source
-(`/Users/swish/src/wolfram/waldmeister/ELProver`, byte-identical -a4 trace to
+(`external/waldmeister/ELProver`, byte-identical -a4 trace to
 the reference `wmcli` modulo a `## FIFO ##` annotation + whitespace) and added
 two env-gated dumps:
 

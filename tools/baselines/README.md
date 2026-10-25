@@ -1,112 +1,65 @@
-# tools/baselines/ -- ATP comparison + sweep tooling
+# tools/baselines/ -- ATP reference problems and results
 
-Drivers for comparing thvm's ATP engine against external CLI provers,
-generating .pr/.p problem files, sweeping per-step parity, and plotting.
+Problem files the ATP tests and tools read, the generators that rebuild
+them, and the reference results thvm is compared against.
 
-## ATP-CLI comparison (this session's work)
+## Problems
 
-* **`diff_one_case.wls`** -- single-case parity diff between a thvm
-  preset proof and the corresponding CLI ProofObject.  Emits one
-  TSV row.  Designed for shell-loop parallelism + memory isolation
-  (each invocation gets its own kernel).
+* **`wm_pr/`** -- Waldmeister `.pr` files, one per `<Theory>__<Theorem>`
+  of the `AxiomaticTheory` notable theorems (and `__c<k>` for one conjunct
+  of a multi-conjunct theorem). Read by the C tests
+  (`tests/test_atp_session_reuse.c`, `tests/atp_lane_cli.sh`,
+  `tests/atp_guide_gates.sh`), the Makefile's pin targets and the WL
+  `"WaldmeisterProcess"` method (`wl/THVMLink/Kernel/ATP/ProcessProofObject.wl`).
+* **`vampire_tptp/`**, **`vampire_raw/`** (gitignored, regenerable) --
+  TPTP CNF files for the same problems and Vampire's raw output. The WL
+  `"VampireProcess"`, `"TweeProcess"` and `"EproverProcess"` methods read
+  `vampire_tptp/` on the named-theorem form. Rebuild both with
+  `run_vampire_baseline.sh`.
+* **`all_theorems.txt`** -- the `Theory::Theorem` list
+  `run_vampire_baseline.sh` exports.
+
+## Generators
+
+* **`run_vampire_baseline.sh`** -- exports TPTP files for every notable
+  theorem (through `tools/vampire/export_all.wls`), runs Vampire on each,
+  and writes `vampire_notable_theorems.tsv`. One Vampire process at a time.
+* **`tptp_to_pr.wls`** -- TPTP CNF to Waldmeister `.pr`, by direct string
+  parsing (no `Wolfram`Parser` dependency), KBO with a precedence by arity:
+
   ```
-  diff_one_case.wls THEORY THM PRESET [wm|vampire]
-  ```
-
-* **`diff_proofobject_lib.wl`** -- shared canon library used by
-  both `diff_one_case.wls` and `diff_proofobject.wls`.  Exports
-  `THVMBaselines\`runDiff[poP, poC]` which returns the
-  per-step diff Association.
-
-* **`diff_proofobject.wls`** -- sweep version: walks all 12 cases
-  (8 easy + 4 hard) x 3 presets (Waldmeister + Automatic +
-  VampireUEQ).  Writes `parity_perstep.tsv` + the per-case
-  match-rate plot.  Uses incremental TSV writes
-  (`parity_perstep_partial.tsv`) so a mid-sweep crash leaves
-  partial data.
-
-* **`lift_telemetry.wls`** -- across 8 easy cases, probes the
-  lifted ProofObject's property dispatch:
-    - Head -> ProofObject
-    - ProofFunction -> Function
-    - ProofGraph -> Graph
-    - ProofLength -> Integer
-    - Verify[Theorems] -> Success | Failure
-  Output: `lift_telemetry.tsv`.
-
-* **`metadata_diff.wls`** -- side-by-side preset vs CLI Proof
-  field diff per construct key.  Used during the verification
-  investigation to find which specific reconstructed fields
-  mismatch.
-  ```
-  metadata_diff.wls THEORY THM
-  ```
-
-* **`lift_pipeline_test.wls`** -- diagnostic that confirms the
-  lift's structural wrap (`ProofObject["EquationalLogic", goal,
-  axioms, data]`) preserves verification when fed preset data.
-  Isolates verification failures to specific reconstructed field
-  values, not the wrap itself.
-
-## Plot generators
-
-* **`plot_atp_parity.wls`** -- consolidated 3-CLI bar chart
-  (preset construct count + delta vs CLI for WM / Vampire / Twee).
-  Writes `plots/atp_parity.png`.
-
-* **`plot_perstep_parity.wls`** -- per-step match-rate bar chart
-  across 12 cases x 3 presets.  Writes
-  `plots/perstep_match_rate.png`.
-
-## Probe wrapper
-
-* **`probe_safely.sh`** -- `exec timeout` wrapper for interactive
-  wolframscript probes that risk hanging thvm's C engine (per
-  `docs/ATP/wolfram_assoc_wl_hang.md`).  Sets a sensible heap
-  cap (`THVM_HEAP_CELLS=512M`) and a hard wall-clock budget.
-  Docstring includes a `ps + xargs` reaper one-liner for orphan
-  kernels surviving SIGTERM grace.
-  ```
-  probe_safely.sh 60 diff_one_case.wls AbelianGroupAxioms \
-      InverseOfInverse Waldmeister
-  ```
-
-## Sweep drivers
-
-* **`sweep_hard_tier.sh`** -- runs `diff_one_case.wls` over the
-  4 hard-tier theorems (WolframAxioms And/Or/Commut + Meredith
-  And/OrAssoc + others) x 3 presets, one kernel per cell.
-  Output: `parity_perstep_hard.tsv`.
-
-## TPTP -> Waldmeister .pr converter
-
-* **`tptp_to_pr.wls`** -- direct string-parsing TPTP CNF -> WM
-  `.pr` converter (no `Wolfram\`Parser\`TPTPImport` dependency
-  -- that EBNF-fetch path stalled for hours on first-run).
-  KBO ordering with auto-precedence by arity + alphabetical.
-  ```
-  tptp_to_pr.wls tools/baselines/vampire_tptp/<Theory>__<Thm>.p \
+  wl -f tools/baselines/tptp_to_pr.wls tools/baselines/vampire_tptp/<Theory>__<Thm>.p \
       tools/baselines/wm_pr/<Theory>__<Thm>.pr
   ```
 
-## Output files committed to repo
+## Reference results
 
-* `parity_perstep.tsv` -- per-step parity sweep (3 presets x 12 cases)
-* `parity_perstep_hard.tsv` -- hard tier sweep
-* `parity_wm_wmcli.tsv` -- WM preset vs WaldmeisterProcess parity
-* `parity_vampire.tsv` -- Vampire preset vs VampireProcess parity
-* `parity_twee.tsv` -- Twee preset vs TweeProcess parity
-* `lift_telemetry.tsv` -- LiftToProofObject status across 8 cases
-* `plots/atp_parity.png` -- 3-CLI consolidated bar chart
-* `plots/perstep_match_rate.png` -- per-step match-rate plot
-* `wm_pr/` -- pre-generated WM .pr files for the 8 easy + 4 hard
-  AbelianGroup/Group/Boolean/Hillman/Meredith/Wolfram cases
+* **`thvm_notable_theorems.tsv`**, **`wl_notable_theorems.tsv`**,
+  **`vampire_notable_theorems.tsv`** -- status, time and proof length of
+  every notable theorem under thvm, `FindEquationalProof` and Vampire.
+  `tools/atp_enigma/build_all_safe.sh` takes its problem list from the thvm
+  table.
+* **`proofs/`** -- `FindEquationalProof` proofs of the notable theorems
+  (`<Theory>__<Theorem>.m`), the manifest `tools/atp_enigma/gen_tier2_data.sh`
+  reads.
+* **`compare_vampireueq_vs_vampire.tsv`** -- the `"VampireUEQ"`
+  configuration against the Vampire program, per theorem.
+* **`wm_align_matrix.tsv`**, **`wm_align_reports/`** -- the Waldmeister
+  alignment matrix (`tools/wm_align_sweep/`) and its per-problem selection
+  reports.
+* **`wm_order_sim/`** -- the Python mirror of Waldmeister's critical-pair
+  emission order that `src/atp/wm_order.c` was validated against.
+* **`trace_diff_agioc.md`** -- the thvm and Waldmeister trajectory diff on
+  AbelianGroupAxioms InverseOfComposite that traced thvm's critical-pair
+  weight against Waldmeister's.
 
-## Related docs
+## Runners
 
-* `docs/ATP/cli_lift_status.md` -- the CLI -> ProofObject lift's
-  achievement + verification gap
-* `docs/ATP/cli_process_methods.md` -- TFindProof Method->"*Process"
-  tutorial
-* `docs/ATP/wolfram_assoc_wl_hang.md` -- the WL TFindProof hang on
-  WolframAxioms/AndAssoc + safe-probe pattern
+* **`run_atp_tests.sh`** -- runs every ATP `wl/THVMLink/Tests/*.wlt` file in
+  its own kernel and reports the totals.
+* **`probe_safely.sh`** -- runs a `wolframscript` probe under a heap cap and
+  a hard wall-clock limit:
+
+  ```
+  tools/baselines/probe_safely.sh 60 probe.wls [args...]
+  ```

@@ -165,7 +165,7 @@ per-CP overlap event.  To port without guessing the insertion-order detail, the
 exact WM per-CP formation dump is needed.
 
 ### EXACT WM DUMP SPEC NEEDED (request to the parent; safe -- 6MB peak)
-Instrument the faithful ELProver (/Users/swish/src/wolfram/waldmeister, the
+Instrument the faithful ELProver (external/waldmeister, the
 already-built instrumented binary) at the `recentCPinsert` call site inside
 U1_KPsBildenZuRegel (INF/Unifikation1.c:1486-1553) AND U1_KPsBildenZuGleichung
 (:1556-...), and at the Delta* eq-tree scan emit points (:694-802).  For EVERY CP

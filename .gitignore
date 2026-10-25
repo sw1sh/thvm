@@ -18,11 +18,8 @@ __pycache__/
 *.pyc
 
 # Regenerable ATP baselines: Vampire exports (tools/baselines/run_vampire_baseline.sh)
-# and partial sweep outputs (diff_proofobject.wls, the method comparators)
 tools/baselines/vampire_raw/
 tools/baselines/vampire_tptp/
-tools/baselines/parity_perstep_partial.tsv
-tools/baselines/compare_methods_batch.tsv
 
 # Run outputs: make atp-pgo profiles, tools/flux/flux_cuda_e2e.wls images
 .pgo/

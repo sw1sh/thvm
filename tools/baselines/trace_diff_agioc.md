@@ -8,7 +8,7 @@ Captured 2026-06-07 via:
 
   # WM CLI:
   DYLD_FRAMEWORK_PATH="/Applications/Wolfram 15.0.app/Contents/Frameworks" \
-      /Users/swish/src/wolfram/waldmeister/wmcli \
+      external/waldmeister/wmcli \
       tools/baselines/wm_pr/AbelianGroupAxioms__InverseOfComposite.pr
 
 ## Rule-derivation order

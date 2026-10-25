@@ -101,7 +101,7 @@ principled reason. soa is also non-tracked (not in the 82 baseline); the tracked
 port is 78 identical + cf8aa3bb SKIToBCKW.
 
 ## Durable tooling built this session (env-gated, revertible)
-WM source (revert: `git -C /Users/swish/src/wolfram/waldmeister checkout sources/`):
+WM source (revert: `git -C external/waldmeister checkout sources/`):
 - `NewClassification.c` WM_CLASSDUMP (+w1, pos, hist, true parent terms)
 - `KPVerwaltung.c` WM_OVLBUILD (per-build CP + parents) + WM_DROPDUMP (drop reason)
 - `Unifikation1.c` WM_OVLBUILD (unused path)
