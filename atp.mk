@@ -610,7 +610,7 @@ probes: $(PROBE_BINS)
 # (256), writes build/bench-twee.csv.  Not part of `make test`
 # because Twee is an external dependency.
 $(BUILD)/bench_twee: bench/bench_twee.c $(SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) -o $@ $< $(TEST_LDFLAGS)
 
 .PHONY: bench-twee
 bench-twee: $(BUILD)/bench_twee
