@@ -176,7 +176,18 @@ fn void split_reduceop(Term root) {
   while ((t = uop_walk_pop(&w)) != 0) {
     u32 op = term_ext(t);
     if (op == UOP_KERNEL || op == UOP_BUFFER || op == UOP_BUFFERIZE) continue;
-    if (op == UOP_REDUCE) split_reduceop_one(t);
+    if (op == UOP_REDUCE) {
+      // A same-kind REDUCE of a REDUCE is a pair an earlier realize split in
+      // place (uop_reduce_multi folds every other): a graph built before that
+      // realize still reads it, so its first REDUCE stays a kernel of its own.
+      Term src = term_resolve(uop_reduce_src(t));
+      if (term_tag(src) == TAG_UOP && term_ext(src) == UOP_REDUCE
+          && uop_reduce_kind(src) == uop_reduce_kind(t)) {
+        split_reduceop_keep(term_val(src));
+      } else {
+        split_reduceop_one(t);
+      }
+    }
     u8  ar  = uop_arity((u8)op);
     u64 loc = term_val(t);
     for (u8 i = 0; i < ar; i++) {

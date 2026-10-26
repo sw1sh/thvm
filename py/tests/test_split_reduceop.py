@@ -9,7 +9,8 @@ whose operands broadcast, keeps its matmul path.
 
 The cases cover a full and a partial sum, a max, a keepdim sum, an int32 sum,
 a reduce over a permuted, a broadcast and a padded view, an unbroadcast
-product, a GEMV, and the gradients of a sum and of a max, against float64
+product, a GEMV, a graph built before a realize that splits a reduce it
+shares, and the gradients of a sum and of a max, against float64
 numpy, on both CPU routes (the C JIT and the UOp walker) in child processes.
 test_schedule_parity.py checks the kernel counts against tinygrad.
 
@@ -94,6 +95,16 @@ def case_sum_grad():
     x, w = Tensor(P[0]), Tensor(P[1])
     (x * w).sum().backward()
     _close(x.grad.numpy(), P[1].astype(np.float64), atol=1e-6)
+
+
+def case_shared_before_realize():
+    # A graph built before a realize that splits a reduce it shares reads the split pair afterwards: its
+    # first reduce must stay a kernel of its own in that later realize too.
+    x = Tensor(P)
+    twice = x.sum(axis=1) * 2
+    first = x.sum(axis=1).numpy()
+    _close(first, P.astype(np.float64).sum(axis=1))
+    _close(twice.numpy(), 2 * P.astype(np.float64).sum(axis=1))
 
 
 def case_max_grad():
