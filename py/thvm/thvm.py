@@ -574,11 +574,14 @@ class Thvm:
 
     def assign_dsts(self, roots) -> "list[tuple[Term, Term]]":
         """Each ASSIGN under roots with what it reads as once fired."""
-        cap = 1 << 16
         r = (c_uint64 * max(1, len(roots)))(*map(int, roots))
-        a, b = (c_uint64 * cap)(), (c_uint64 * cap)()
-        n = int(_assign_dsts(r, c_uint32(len(roots)), a, b, c_uint32(cap)))
-        return [(Term(int(a[i])), Term(int(b[i]))) for i in range(n)]
+        cap = 64
+        while True:
+            a, b = (c_uint64 * cap)(), (c_uint64 * cap)()
+            n = int(_assign_dsts(r, c_uint32(len(roots)), a, b, c_uint32(cap)))
+            if n < cap:
+                return [(Term(int(a[i])), Term(int(b[i]))) for i in range(n)]
+            cap *= 16
 
     def uop_substitute_many(self, roots, frm, to) -> "list[Term]":
         """Each of roots with each frm[i] replaced by to[i], over one shared rewrite."""
