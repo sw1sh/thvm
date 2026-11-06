@@ -270,18 +270,23 @@ ifeq ($(UNAME_S),Darwin)
   endif
   WL_DYLIB_EXT := .dylib
   WL_DYLIB_FLAGS := -dynamiclib
+  WL_BLOB_FMT := macho
+  # The newest /Applications/Wolfram*.app that ships the LibraryLink C
+  # headers, unless WOLFRAM_APP is set.  Filtering on IncludeFiles/C skips
+  # co-installed non-kernel apps (Wolfram VPN.app, WolframScript.app) that
+  # would otherwise win `sort -V | tail -1` and break `make wl`.
+  WOLFRAM_APP ?= $(shell ls -d "/Applications/Wolfram"*.app 2>/dev/null | sort -V | while IFS= read -r d; do [ -d "$$d/Contents/SystemFiles/IncludeFiles/C" ] && printf '%s\n' "$$d"; done | tail -1)
+  WL_INCLUDE  ?= $(WOLFRAM_APP)/Contents/SystemFiles/IncludeFiles/C
 else
-  WL_PLATFORM ?= Linux-$(UNAME_M)
+  # The directory the loader reads is $SystemID's spelling (Kernel/THVMLink.wl).
+  WL_PLATFORM ?= $(if $(filter x86_64,$(UNAME_M)),Linux-x86-64,$(if $(filter aarch64 arm64,$(UNAME_M)),Linux-ARM64,Linux-$(UNAME_M)))
   WL_DYLIB_EXT := .so
   WL_DYLIB_FLAGS := -shared
+  WL_BLOB_FMT := elf
+  # A Linux install keeps SystemFiles at its root (/usr/local/Wolfram/WolframEngine/15.0).
+  WOLFRAM_APP ?= $(shell ls -d /usr/local/Wolfram/*/* 2>/dev/null | sort -V | while IFS= read -r d; do [ -d "$$d/SystemFiles/IncludeFiles/C" ] && printf '%s\n' "$$d"; done | tail -1)
+  WL_INCLUDE  ?= $(WOLFRAM_APP)/SystemFiles/IncludeFiles/C
 endif
-
-# Pick the newest /Applications/Wolfram*.app that ships the LibraryLink
-# C headers, unless WOLFRAM_APP is set.  Filtering on IncludeFiles/C
-# skips co-installed non-kernel apps (Wolfram VPN.app, WolframScript.app)
-# that would otherwise win `sort -V | tail -1` and break `make wl`.
-WOLFRAM_APP ?= $(shell ls -d "/Applications/Wolfram"*.app 2>/dev/null | sort -V | while IFS= read -r d; do [ -d "$$d/Contents/SystemFiles/IncludeFiles/C" ] && printf '%s\n' "$$d"; done | tail -1)
-WL_INCLUDE   := $(WOLFRAM_APP)/Contents/SystemFiles/IncludeFiles/C
 
 WL_PACLET   := wl/THVMLink
 WL_LIB_DIR  := $(WL_PACLET)/LibraryResources/$(WL_PLATFORM)
@@ -308,19 +313,19 @@ WL_TRACE      ?= 1
 WL_TRACE_DEF  := $(if $(filter-out 0,$(WL_TRACE)),-DTHVM_TRACE,)
 
 $(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) build/thvm_runtime_blob.c | $(WL_LIB_DIR)
-	@if [ -z "$(WOLFRAM_APP)" ] || [ ! -d "$(WL_INCLUDE)" ]; then \
-	  echo "ERROR: Wolfram install not found.  Set WOLFRAM_APP=/Applications/Wolfram*.app"; \
+	@if [ ! -d "$(WL_INCLUDE)" ]; then \
+	  echo "ERROR: LibraryLink headers not found at $(WL_INCLUDE).  Set WOLFRAM_APP to a Wolfram install, or WL_INCLUDE to the directory holding WolframLibrary.h"; \
 	  exit 1; \
 	fi
 	$(CC) $(CFLAGS) -fPIC $(WL_DYLIB_FLAGS) \
-	  -DACCELERATE_NEW_LAPACK \
+	  -DACCELERATE_NEW_LAPACK $(if $(filter Darwin,$(UNAME_S)),,-D_GNU_SOURCE) \
 	  $(WL_TRACE_DEF) \
 	  $(ATP_DEFINES) \
 	  $(WL_ATP_DEFINES) \
 	  -I"$(WL_INCLUDE)" \
 	  $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) \
 	  -o $@ $(WL_SRC) build/thvm_runtime_blob.c $(METAL_OBJ) $(METAL_LDFLAGS) \
-	  $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,)
+	  $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm -ldl)
 ifeq ($(UNAME_S),Darwin)
 	codesign --force --sign - $@
 endif
@@ -524,7 +529,7 @@ build/thvm_inline.c: $(SRC) $(wildcard src/codegen/*.c src/backend/*/*.c src/bac
 	 else mv -f $@.tmp $@; echo "regenerated $@"; fi
 
 build/thvm_runtime_blob.c: build/thvm_inline.c tools/build/embed_blob.py FORCE
-	@python3 tools/build/embed_blob.py build/thvm_inline.c thvm_runtime_src macho > $@.tmp
+	@python3 tools/build/embed_blob.py build/thvm_inline.c thvm_runtime_src $(WL_BLOB_FMT) > $@.tmp
 	@if [ -f $@ ] && cmp -s $@.tmp $@; then rm -f $@.tmp; \
 	 else mv -f $@.tmp $@; echo "regenerated $@"; fi
 
