@@ -36,6 +36,10 @@ Two surfaces drive it:
   the shared heap leave it intact. A completion stops at `MaxSteps` or
   at an allocation budget in heap cells (`thvm_atp_set_max_alloc`),
   both machine-independent.
+* **`WolframInstitute`ATP``** (`wl/ATP/`) is the same handle as a
+  standalone package over its own library, `libthvm_atp` (one TU over
+  the runtime and `thvmlink_atp.c`, 1.4 MB), for v2's SystemLibrary.
+  `wl/ATP/README.md` has its build and the determinism harness.
 
 At CASC-J13 (2026) FindProof placed 4th of 10 in UEQ (unit equality,
 269 of 400) and 11th of 17 in FOF (91 of 400); CheckProof placed last in
