@@ -228,9 +228,13 @@ static KboCmp kbo_rec(Term s, Term t, const KboConfig *cfg) {
   if (wb > 0) return s_dom ? KBO_GT : KBO_UN;
   if (wb < 0) return t_dom ? KBO_LT : KBO_UN;
 
-  // weights equal: compare top symbols
+  // weights equal: compare top symbols.  A variable against a compound
+  // term of the same weight (f(...f(x)) with f a unary symbol of weight 0)
+  // is smaller when it occurs in that term.
   u8 s_is_fvr = (term_tag(s) == TAG_FVR);
   u8 t_is_fvr = (term_tag(t) == TAG_FVR);
+  if (t_is_fvr && !s_is_fvr) return s_dom ? KBO_GT : KBO_UN;
+  if (s_is_fvr && !t_is_fvr) return t_dom ? KBO_LT : KBO_UN;
   if (s_is_fvr || t_is_fvr) return KBO_UN;
   if (term_tag(s) != TAG_CTR || term_tag(t) != TAG_CTR) return KBO_UN;
 
@@ -1144,10 +1148,14 @@ static KboCmp kbo_lin_rek(KboLin *st, Term s, Term t, long long phidiff,
       default: here = KBO_UN; break;                 // incomparable var sets
     }
     if (phi_tie) {
-      // phi tie: compare top symbols by precedence.
+      // phi tie: compare top symbols by precedence.  A variable against
+      // a compound term of the same weight (a weight-0 unary symbol
+      // applied to it) is smaller when it occurs in that term.
       u8 s_fvr = (term_tag(s) == TAG_FVR);
       u8 t_fvr = (term_tag(t) == TAG_FVR);
-      if (s_fvr || t_fvr) { here = KBO_UN; }
+      if (t_fvr && !s_fvr) { here = (varcmp == KBO_LT) ? KBO_UN : KBO_GT; }
+      else if (s_fvr && !t_fvr) { here = (varcmp == KBO_GT) ? KBO_UN : KBO_LT; }
+      else if (s_fvr || t_fvr) { here = KBO_UN; }
       else if (term_tag(s) != TAG_CTR || term_tag(t) != TAG_CTR) {
         here = KBO_UN;
       } else {
@@ -1481,9 +1489,13 @@ static KboCmp kbo_flat_rek(KboLin *st, const KboFlatNode *a, u32 pa,
     default: return KBO_UN;
   }
 
-  // phi tie: compare top symbols by precedence.
+  // phi tie: compare top symbols by precedence.  A variable against a
+  // compound term of the same weight (a weight-0 unary symbol applied to
+  // it) is smaller when it occurs in that term.
   u8 s_fvr = (a[pa].sym < 0);
   u8 t_fvr = (b[pb].sym < 0);
+  if (t_fvr && !s_fvr) return (varcmp == KBO_LT) ? KBO_UN : KBO_GT;
+  if (s_fvr && !t_fvr) return (varcmp == KBO_GT) ? KBO_UN : KBO_LT;
   if (s_fvr || t_fvr) return KBO_UN;
 
   const KboConfig *cfg = st->cfg;

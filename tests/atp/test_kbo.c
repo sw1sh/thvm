@@ -112,6 +112,27 @@ int main(void) {
     CHECK_EQ((int)thvm_kbo(s, t, &GROUP_CFG), KBO_GT);
   }
 
+  TEST_BEGIN("kbo/weight-zero-inverse-above-its-argument");
+  {
+    // i has weight 0 and the highest precedence (Knuth and Bendix's
+    // group ordering).  i(i(x)) and x weigh the same, and x occurs in
+    // i(i(x)), so i(i(x)) > x; this orients i(i(x)) -> x and, through
+    // it, completes the group axioms to the 10-rule system.
+    Term x = term_new_fvr(VAR_x), y = term_new_fvr(VAR_y);
+    Term ii = mk_i(mk_i(term_new_fvr(VAR_x)));
+    CHECK_EQ((int)thvm_kbo(ii, x, &GROUP_CFG), KBO_GT);
+    CHECK_EQ((int)thvm_kbo(x, ii, &GROUP_CFG), KBO_LT);
+    CHECK_EQ((int)thvm_kbo_naive(ii, x, &GROUP_CFG), KBO_GT);
+    CHECK_EQ((int)thvm_kbo_naive(x, ii, &GROUP_CFG), KBO_LT);
+    // A variable that does not occur in the term stays incomparable.
+    CHECK_EQ((int)thvm_kbo(mk_i(mk_i(term_new_fvr(VAR_y))), x, &GROUP_CFG), KBO_UN);
+    // i(f(x, y)) > f(i(y), i(x)): equal weight, i above f.
+    Term s = mk_i(mk_f(term_new_fvr(VAR_x), term_new_fvr(VAR_y)));
+    Term t = mk_f(mk_i(y), mk_i(term_new_fvr(VAR_x)));
+    CHECK_EQ((int)thvm_kbo(s, t, &GROUP_CFG), KBO_GT);
+    CHECK_EQ((int)thvm_kbo_naive(s, t, &GROUP_CFG), KBO_GT);
+  }
+
   // === soa eqn-2: unorientable single-binary-op equation ===============
   // ShefferAxiomsOrAssociativity's 3rd axiom (tools/baselines/wm_align_
   // reports/soa.txt).  Under the Sheffer KBO (one binary symbol

@@ -78,8 +78,14 @@ in `t` (the var-balance condition) AND either:
 
 * `weight(s) > weight(t)`, or
 * `weight(s) == weight(t)` and one of:
+  * `t` is a variable and `s` is not (then `s = f(f(..f(t)..))` for a
+    unary `f` of weight 0), or
   * `s = f(s₁..sₘ)`, `t = g(t₁..tₙ)`, and `f > g`, or
   * `s = f(s₁..sₘ)`, `t = f(t₁..tₘ)`, and `(s₁..sₘ) >_kbo (t₁..tₘ)` lexicographically.
+
+Weight 0 is admissible only for a unary symbol greatest in the
+precedence (Knuth and Bendix's group inverse); with every weight
+positive, the variable case never arises.
 
 Implementation: `thvm_kbo` walks both terms with a "divergence" cursor
 (`kbo_vortest` in `src/kbo/_.c`). Identical sibling pairs cancel
