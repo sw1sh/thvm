@@ -206,11 +206,11 @@ VerificationTest[
     TestID -> "training-loop/200-iters-bounded-kernels-under-5s"
 ]
 
-(* === Kernel program hash-cons: structurally identical kernels
-       across iterations share one KProgOp[] in the cache, even
-       in the slow bound-w pattern where each iter emits its own
-       KernelEntry.  Verifies kernel_program_cache_size stays
-       bounded as n grows. === *)
+(* === Bound-w loop: the kernel count does not grow with n.  Every step
+       is elementwise in w0 and the target (the sum's gradient broadcasts
+       a constant seed), so the whole loop schedules as one kernel at any
+       n, as tinygrad's scheduler would.  TKernelProgramCacheSize is 0
+       since the program cache was retired (4a7431b7). === *)
 
 VerificationTest[
     TInit[];
@@ -242,17 +242,10 @@ VerificationTest[
         kernels10 = TKernelCount[] - 1;
         prog10    = TKernelProgramCacheSize[];
 
-        (* Post-cache-retirement (commit 4a7431b7), TKernelProgramCacheSize
-           stubs to 0 unconditionally.  Kernel reuse is now aggressive
-           enough that the bound-w loop emits a SHARED step kernel rather
-           than one KernelEntry per iter -- kernel count stays at 2
-           regardless of n (the per-iter grad memo + structural kernel
-           hash-cons collapse identical step shapes).  Both counts must
-           NOT grow with n. *)
         {kernels5, prog5, kernels10, prog10,
          kernels5 === kernels10 && prog5 === prog10}
     ],
-    {2, 0, 2, 0, True},
+    {1, 0, 1, 0, True},
     TestID -> "training-loop/bound-w-kernel-program-hash-cons"
 ]
 
