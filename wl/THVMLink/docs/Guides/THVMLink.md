@@ -135,6 +135,10 @@ THVMLink computes with `thvm`, a runtime that evaluates programs by rewriting an
 
 - `TFindProof` prove a theorem from equational axioms, giving a proof object
 - `TKnuthBendixCompletion` complete equational axioms to a rewrite system, or give a normal form under it
+- `TAtpComplete` complete equational axioms once and keep the system for many queries
+- `TAtpSystem` a completed equational system kept in the engine
+- `TAtpNormalForm` the normal form of a term under a kept system
+- `TAtpEqualQ` whether a kept system's axioms entail an equation
 - `ProofObject` (WL) a proof as an object with properties
 - `FindEquationalProof` (WL) the built-in prover for equational theorems
 - `TProofObject` a proof object in the native form of the runtime
