@@ -123,7 +123,7 @@ EXTERN_C DLLEXPORT int thvm_wl_term_new_ctr(WolframLibraryData libData,
 // Designed for direct WL test usage with manually-built Terms
 // (per the 8.7a memo's two-layer plan).  Stage 8.7c-d add the
 // WL-side encoder + TATP[] surface.
-#define ATP_WL_CFG_MAX_LABELS 64
+#define ATP_WL_CFG_MAX_LABELS 4096
 
 // === ATP wire layout =============================================
 //
@@ -617,6 +617,174 @@ static void atp_rp_release(void) {
   g_rp_wire = NULL;
 }
 
+// === Kept completed systems (TAtpComplete) ===========================
+//
+// A run asked to keep its state (thvm_wl_atp_next_run) registers it here,
+// under the id of a WL "AtpSystem" managed expression, instead of freeing
+// it; the expression's collection frees it again (atp_sys_manager).  A kept
+// system answers normal-form queries through the flatterm normalizer
+// (thvm_atp_normal_form), which reads only the off-heap rule mirror, so
+// later runs that collect the shared heap do not disturb it.  Its ordering
+// is copied out of the run's static config arrays, which the next run
+// overwrites.
+
+#define ATP_SYS_MAX 256
+
+typedef struct {
+  mint      id;           // the managed expression's id; 0 = free slot
+  AtpState *s;
+  KboConfig kbo;
+  LpoConfig lpo;
+  u32      *weights;
+  u32      *kbo_prec;
+  u32      *lpo_prec;
+} AtpSystem;
+
+static AtpSystem g_sys[ATP_SYS_MAX];
+static mint      g_next_keep      = 0;    // managed id the next run keeps under
+static u64       g_next_max_alloc = 0u;   // allocation budget of the next run
+
+static AtpSystem *atp_sys_find(mint id) {
+  if (id <= 0) return NULL;
+  for (u32 i = 0; i < ATP_SYS_MAX; i++) {
+    if (g_sys[i].id == id) return &g_sys[i];
+  }
+  return NULL;
+}
+
+static void atp_sys_release(AtpSystem *h) {
+  if (h->s != NULL) thvm_atp_free(h->s);
+  free(h->weights);
+  free(h->kbo_prec);
+  free(h->lpo_prec);
+  memset(h, 0, sizeof *h);
+}
+
+// WL calls a manager with mode 0 when the managed expression is created
+// and mode 1 when it is released.
+static void atp_sys_manager(WolframLibraryData libData, mbool mode, mint id) {
+  (void)libData;
+  if (mode == 0) return;
+  AtpSystem *h = atp_sys_find(id);
+  if (h != NULL) atp_sys_release(h);
+}
+
+static u32 *atp_sys_copy_u32(const u32 *src, u32 n) {
+  u32 *dst = (u32 *)malloc((size_t)(n > 0u ? n : 1u) * sizeof(u32));
+  if (dst != NULL && n > 0u) memcpy(dst, src, (size_t)n * sizeof(u32));
+  return dst;
+}
+
+// Keep `s` under managed id `id`.  Returns 1 on success; on failure the
+// caller frees `s` as usual.  AC completion normalizes through the rules'
+// heap Terms, which a later collection moves, so it is not kept.
+static int atp_sys_keep(AtpState *s, mint id) {
+  if (thvm_atp_get_ac_mask() != 0ull || s->kbo == NULL) return 0;
+  AtpSystem *h = NULL;
+  for (u32 i = 0; i < ATP_SYS_MAX; i++) {
+    if (g_sys[i].id == 0) { h = &g_sys[i]; break; }
+  }
+  if (h == NULL) return 0;
+  u32 n = s->kbo->n_labels;
+  h->weights  = atp_sys_copy_u32(s->kbo->weights, n);
+  h->kbo_prec = atp_sys_copy_u32(s->kbo->precedence, n);
+  if (s->lpo != NULL) h->lpo_prec = atp_sys_copy_u32(s->lpo->precedence, s->lpo->n_labels);
+  if (h->weights == NULL || h->kbo_prec == NULL || (s->lpo != NULL && h->lpo_prec == NULL)) {
+    free(h->weights); free(h->kbo_prec); free(h->lpo_prec);
+    memset(h, 0, sizeof *h);
+    return 0;
+  }
+  h->kbo            = *s->kbo;
+  h->kbo.weights    = h->weights;
+  h->kbo.precedence = h->kbo_prec;
+  s->kbo            = &h->kbo;
+  if (s->lpo != NULL) {
+    h->lpo            = *s->lpo;
+    h->lpo.precedence = h->lpo_prec;
+    s->lpo            = &h->lpo;
+  }
+  s->wall_deadline_us = 0u;
+  s->gc_extra_roots   = NULL;
+  s->n_gc_extra_roots = 0u;
+  atp_ft_mirror_ensure(s);
+  h->s  = s;
+  h->id = id;
+  return 1;
+}
+
+// Configure the next thvm_wl_atp_run_proof call: args[0] the managed id to
+// keep its completed state under (0 = free it as usual), args[1] an
+// allocation budget in heap cells (0 = none).
+EXTERN_C DLLEXPORT int thvm_wl_atp_next_run(WolframLibraryData libData,
+                                            mint argc, MArgument *args,
+                                            MArgument res) {
+  (void)libData; (void)argc;
+  g_next_keep      = MArgument_getInteger(args[0]);
+  mint cells       = MArgument_getInteger(args[1]);
+  g_next_max_alloc = cells > 0 ? (u64)cells : 0u;
+  MArgument_setInteger(res, 1);
+  return LIBRARY_NO_ERROR;
+}
+
+// Whether a system is kept under managed id args[0].
+EXTERN_C DLLEXPORT int thvm_wl_atp_system_q(WolframLibraryData libData,
+                                            mint argc, MArgument *args,
+                                            MArgument res) {
+  (void)libData; (void)argc;
+  MArgument_setInteger(res, atp_sys_find(MArgument_getInteger(args[0])) != NULL ? 1 : 0);
+  return LIBRARY_NO_ERROR;
+}
+
+// Normal forms of the heap Terms in args[1] (Int64 NumericArray) under the
+// system kept under managed id args[0], as an Int64 NumericArray of Terms.
+// Under heap pressure the inputs are collected first (as roots), so a long
+// series of queries does not fill the heap.
+EXTERN_C DLLEXPORT int thvm_wl_atp_system_normalize(WolframLibraryData libData,
+                                                    mint argc, MArgument *args,
+                                                    MArgument res) {
+  (void)argc;
+  AtpSystem *h = atp_sys_find(MArgument_getInteger(args[0]));
+  if (h == NULL) return LIBRARY_FUNCTION_ERROR;
+  MNumericArray na = MArgument_getMNumericArray(args[1]);
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+    = libData->numericarrayLibraryFunctions;
+  if (naf->MNumericArray_getType(na) != MNumericArray_Type_Bit64) {
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  mint n = naf->MNumericArray_getFlattenedLength(na);
+  const int64_t *in = (const int64_t *)naf->MNumericArray_getData(na);
+  Term *terms = (Term *)malloc((size_t)(n > 0 ? n : 1) * sizeof(Term));
+  if (terms == NULL) return LIBRARY_FUNCTION_ERROR;
+  for (mint i = 0; i < n; i++) terms[i] = (Term)in[i];
+  if (atp_heap_under_pressure()) gc_collect(terms, (u32)n);
+  static jmp_buf jb;
+  thvm_heap_exhaust_jmp = &jb;
+  thvm_heap_exhausted   = 0;
+  u64 ac = thvm_atp_get_ac_mask();
+  if (setjmp(jb) != 0) {
+    thvm_heap_exhaust_jmp = NULL;
+    thvm_atp_set_ac_mask(ac);
+    free(terms);
+    gc_collect(NULL, 0);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  thvm_atp_set_ac_mask(0ull);
+  for (mint i = 0; i < n; i++) terms[i] = thvm_atp_normal_form(h->s, terms[i]);
+  thvm_atp_set_ac_mask(ac);
+  thvm_heap_exhaust_jmp = NULL;
+  mint dims[1] = {n};
+  MNumericArray out;
+  if (naf->MNumericArray_new(MNumericArray_Type_Bit64, 1, dims, &out) != 0) {
+    free(terms);
+    return LIBRARY_FUNCTION_ERROR;
+  }
+  int64_t *o = (int64_t *)naf->MNumericArray_getData(out);
+  for (mint i = 0; i < n; i++) o[i] = (int64_t)terms[i];
+  free(terms);
+  MArgument_setMNumericArray(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
                                              mint argc, MArgument *args,
                                              MArgument res) {
@@ -635,6 +803,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // calls.  A static buffer lives across calls; we just overwrite it
   // on each entry's setjmp.  Not thread-safe, which is fine -- thvm
   // is single-threaded inside a LibraryLink entry.
+  mint next_keep      = g_next_keep;
+  u64  next_max_alloc = g_next_max_alloc;
+  g_next_keep      = 0;
+  g_next_max_alloc = 0u;
   static jmp_buf jb;
   thvm_heap_exhaust_jmp = &jb;
   thvm_heap_exhausted   = 0;
@@ -887,6 +1059,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   AtpState *atp = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
   g_rp_atp = atp;
   if (atp == NULL) { ATP_RP_ERR("atp-init"); return LIBRARY_FUNCTION_ERROR; }
+  if (next_max_alloc != 0u) thvm_atp_set_max_alloc(atp, next_max_alloc);
   // LPO ordering: drives orientation purely by symbol precedence
   // (same precedence array as KBO).  Attached after init so it
   // overrides the KBO config in thvm_atp_orient_and_add / compare.
@@ -1610,8 +1783,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     extern u64 g_atp_gc_us, g_atp_gc_n;
     clock_gettime(CLOCK_MONOTONIC, &_tp1);
     double d = (_tp1.tv_sec - _tp0.tv_sec) + (_tp1.tv_nsec - _tp0.tv_nsec)/1e9;
-    fprintf(stderr, "[atp-phase] thvm_atp_run: %.3fs steps=%u n_rules=%u n_cps=%u n_trace=%u gc=%llu/%.2fs status=%d rt_pin=%d qos_bump=%d\n",
+    fprintf(stderr, "[atp-phase] thvm_atp_run: %.3fs steps=%u n_rules=%u n_cps=%u n_trace=%u alloc=%llu gc=%llu/%.2fs status=%d rt_pin=%d qos_bump=%d\n",
             d, atp->step, atp->n_rules, atp->n_cps, atp->n_trace,
+            (unsigned long long)atp_alloc_cells(atp),
             (unsigned long long)g_atp_gc_n, g_atp_gc_us / 1e6, (int)st,
 #ifdef __APPLE__
             rt_pinned, qos_bumped);
@@ -1948,7 +2122,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   g_rp_wire = NULL;
   free(wire_live);
   g_rp_atp = NULL;
-  thvm_atp_free(atp);
+  if (next_keep == 0 || !atp_sys_keep(atp, next_keep)) thvm_atp_free(atp);
   MArgument_setMNumericArray(res, out);
   thvm_heap_exhaust_jmp = NULL;
   return LIBRARY_NO_ERROR;

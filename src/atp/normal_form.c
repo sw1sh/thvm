@@ -13,6 +13,10 @@ fn Term thvm_atp_normal_form(AtpState *s, Term t) {
 #endif
   atp_ft_mirror_ensure(s);
   AtpFt *a = (AtpFt *)s->ft_arena_ptr;
-  return ft_to_term(atp_rewrite_normalize_ft(s, ft_from_term(a, t, 0),
-                                             ATP_GOAL_NORM_CAP));
+  AtpFtCell *nf = atp_rewrite_normalize_ft(s, ft_from_term(a, t, 0),
+                                           ATP_GOAL_NORM_CAP);
+  Term out = ft_to_term(nf);
+  // A kept system answers many queries out of one arena.
+  ft_free_span(a, nf, nf->end);
+  return out;
 }

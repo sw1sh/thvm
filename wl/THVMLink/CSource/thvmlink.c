@@ -78,9 +78,14 @@ static mbool pri_cb_manager(WolframLibraryData libData, mint id, MTensor data) {
   return True;
 }
 
+// Defined with the ATP entries (thvmlink_atp.c): frees a kept completed
+// system when its "AtpSystem" managed expression is collected.
+static void atp_sys_manager(WolframLibraryData libData, mbool mode, mint id);
+
 EXTERN_C DLLEXPORT int WolframLibrary_initialize(WolframLibraryData libData) {
   CACHED_LIB_DATA = libData;
   libData->registerLibraryExpressionManager("ExternPin", extern_pin_manager);
+  libData->registerLibraryExpressionManager("AtpSystem", atp_sys_manager);
   libData->registerLibraryCallbackManager("thvm_pri_cb", pri_cb_manager);
   return LIBRARY_NO_ERROR;
 }

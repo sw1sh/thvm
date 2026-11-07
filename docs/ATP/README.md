@@ -27,6 +27,15 @@ Two surfaces drive it:
   side normalized under the final rules by `thvm_atp_normal_form`
   (`src/atp/normal_form.c`). Its page is
   `wl/THVMLink/docs/Symbols/TKnuthBendixCompletion.md`.
+* **`TAtpComplete`** in the same paclet completes once and keeps the
+  engine state for many queries (`TAtpNormalForm`, `TAtpEqualQ`), the
+  handle v2's FullSimplify drives. The bridge keeps the state under a
+  managed `AtpSystem` expression with its ordering copied out of the
+  run's static config, and answers through the flatterm normalizer,
+  which reads only the off-heap rule mirror, so other runs collecting
+  the shared heap leave it intact. A completion stops at `MaxSteps` or
+  at an allocation budget in heap cells (`thvm_atp_set_max_alloc`),
+  both machine-independent.
 
 At CASC-J13 (2026) FindProof placed 4th of 10 in UEQ (unit equality,
 269 of 400) and 11th of 17 in FOF (91 of 400); CheckProof placed last in
