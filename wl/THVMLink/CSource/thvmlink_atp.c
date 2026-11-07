@@ -595,6 +595,28 @@ static u32 wl_atp_tree_count_upto(Term t, u32 cap) {
   return n;
 }
 
+// The run in flight.  The heap-exhaustion handler frees it and collects,
+// so a run that ran out of heap leaves neither its state nor its cells to
+// the next call (which would otherwise exhaust the full heap at once).
+static AtpState *g_rp_atp  = NULL;
+static AtpState *g_rp_ext  = NULL;
+static Term     *g_rp_wire = NULL;
+
+static void atp_rp_release(void) {
+  if (g_rp_ext != NULL) {
+    thvm_atp_free(g_rp_ext);
+    g_rp_ext = NULL;
+  }
+  if (g_rp_atp != NULL) {
+    g_rp_atp->gc_extra_roots   = NULL;
+    g_rp_atp->n_gc_extra_roots = 0u;
+    thvm_atp_free(g_rp_atp);
+    g_rp_atp = NULL;
+  }
+  free(g_rp_wire);
+  g_rp_wire = NULL;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
                                              mint argc, MArgument *args,
                                              MArgument res) {
@@ -618,6 +640,8 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   thvm_heap_exhausted   = 0;
   if (setjmp(jb) != 0) {
     thvm_heap_exhaust_jmp = NULL;
+    atp_rp_release();
+    gc_collect(NULL, 0);
     fprintf(stderr, "thvm_wl_atp_run_proof: heap exhausted -- returning "
                     "LIBRARY_FUNCTION_ERROR (kernel preserved)\n");
     return LIBRARY_FUNCTION_ERROR;
@@ -861,6 +885,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   wl_kbo_p.var_weight = var_weight_in > 0 ? (u32)var_weight_in : 1u;
 
   AtpState *atp = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
+  g_rp_atp = atp;
   if (atp == NULL) { ATP_RP_ERR("atp-init"); return LIBRARY_FUNCTION_ERROR; }
   // LPO ordering: drives orientation purely by symbol precedence
   // (same precedence array as KBO).  Attached after init so it
@@ -1282,6 +1307,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
 
   if (!atp_wire_install_axioms(atp, &wire)) {
     ATP_RP_ERR("install-axioms");
+    g_rp_atp = NULL;
     thvm_atp_free(atp);
     return LIBRARY_FUNCTION_ERROR;
   }
@@ -1341,6 +1367,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // MaxSteps / TimeConstraint.
   if (!atp_wire_install_goals(atp, &wire)) {
     ATP_RP_ERR("install-goals");
+    g_rp_atp = NULL;
     thvm_atp_free(atp);
     return LIBRARY_FUNCTION_ERROR;
   }
@@ -1361,8 +1388,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   Term *wire_live   = (Term *)malloc((size_t)(n_wire_live > 0u
                                               ? n_wire_live : 1u)
                                      * sizeof(Term));
+  g_rp_wire = wire_live;
   if (wire_live == NULL) {
     ATP_RP_ERR("wire-live-alloc");
+    g_rp_atp = NULL;
     thvm_atp_free(atp);
     return LIBRARY_FUNCTION_ERROR;
   }
@@ -1632,7 +1661,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     ATP_RP_ERR("aborted");
     atp->gc_extra_roots   = NULL;
     atp->n_gc_extra_roots = 0u;
+    g_rp_wire = NULL;
     free(wire_live);
+    g_rp_atp = NULL;
     thvm_atp_free(atp);
     return LIBRARY_FUNCTION_ERROR;
   }
@@ -1714,6 +1745,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     // (forwarding stubs); wire_live was relocated in place by every
     // collect, so these reads see live terms.
     ext = thvm_atp_init(&wl_kbo_p, (u32)max_steps);
+    g_rp_ext = ext;
     if (ext != NULL) {
       ext->wall_deadline_us = atp->wall_deadline_us;
       for (u32 i = 0; i < n_ax; i++) {
@@ -1896,6 +1928,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   ATP_PHASE_MARK("wire-encode");
 #undef ATP_PHASE_MARK
 
+  g_rp_ext = NULL;
   if (ext != NULL) thvm_atp_free(ext);
   // Exit probe (THVM_ATP_RECYCLE_DEBUG): the successful-return shape.
   // Pairs with the [atp-gcstate] entry line so a WL-side $Failed can be
@@ -1912,7 +1945,9 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   }
   atp->gc_extra_roots   = NULL;
   atp->n_gc_extra_roots = 0u;
+  g_rp_wire = NULL;
   free(wire_live);
+  g_rp_atp = NULL;
   thvm_atp_free(atp);
   MArgument_setMNumericArray(res, out);
   thvm_heap_exhaust_jmp = NULL;
