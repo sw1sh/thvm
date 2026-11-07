@@ -30,8 +30,9 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)"]
 - The *axioms* are equations, possibly quantified with [ForAll](), as [TFindProof]() takes them. A symbol bound by [ForAll]() is a variable; any other symbol is a constant.
 - The `"Theorems"` of the result are the completed system. A rule `l -> r` rewrites an instance of `l` to the instance of `r`. An equation `l <-> r` that the ordering cannot orient rewrites an instance in whichever direction makes the term smaller in the ordering.
 - When completion ends, the system is ground convergent: two terms over the symbols of the axioms are equal in the theory exactly when they have the same normal form. When it stops at the [TimeConstraint]() or [MaxSteps](), the normal form of a term is still equal to the term, but equal terms can have different normal forms.
-- <code>[TKnuthBendixCompletion]()[*axioms*, *term*]</code> completes with the goal *term* == *c* for a fresh constant *c*, as Waldmeister's simplification does, and gives the normal form of *term* when completion ends. The symbols of *term* are constants.
-- For an equation *lhs* == *rhs* as *term*, the result is [True]() when both sides have the same normal form, and the equation between the normal forms otherwise.
+- <code>[TKnuthBendixCompletion]()[*axioms*, *term*]</code> completes with the goal *term* == *c* for a fresh constant *c*, as Waldmeister's simplification does, and gives the normal form of *term* when completion ends. The symbols of *term* are constants; *c* is greatest in the precedence, so it never appears in a normal form.
+- For an equation *lhs* == *rhs* as *term*, the result is [True]() when both sides have the same normal form. It is [False]() when completion ends with every critical pair joined and the sides have different normal forms: the system is then ground convergent. Otherwise it is the equation between the normal forms.
+- When completion for *term* runs out of memory, [TKnuthBendixCompletion]() completes again with fewer steps, issues the message `TKnuthBendixCompletion::heap`, and gives the normal form under the smaller system.
 - By default the ordering is the Knuth-Bendix ordering with weight 1 for every symbol. Its precedence puts the function symbols of the axioms first, by decreasing arity, then their constants, then the other symbols of *term*, so that the arguments of a commutative operator come out in canonical order.
 - In an explicit precedence or weight list, the symbols left out follow the listed ones. A Knuth-Bendix weight is a nonnegative integer; weight 0 is allowed for a unary symbol that is greatest in the precedence.
 - Completion drops critical pairs whose every ground instance already rewrites to a common term. Such ground joinability lets completion terminate on permutative equations such as commutativity.
@@ -104,6 +105,16 @@ TKnuthBendixCompletion[{ForAll[{x, y}, x \[CirclePlus] y == y \[CirclePlus] x], 
 ```
 
 <!-- => a ⊕ (b ⊕ c) -->
+
+---
+
+Refute an equation: the completed system has the rule `k[k[x]] -> x` and no other, and the two sides are distinct normal forms:
+
+```wl
+TKnuthBendixCompletion[ForAll[x, k[k[x]] == x], k[a] == a]
+```
+
+<!-- => False -->
 
 ---
 

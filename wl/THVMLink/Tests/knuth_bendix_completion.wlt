@@ -93,6 +93,30 @@ VerificationTest[
     TestID -> "KBC/equation-decided"
 ]
 
+(* A saturated, ground-convergent system refutes an equation whose sides
+   reach two normal forms. *)
+VerificationTest[
+    TKnuthBendixCompletion[ForAll[x, k[k[x]] == x], k[a] == a],
+    False,
+    TestID -> "KBC/equation-refuted"
+]
+
+(* The fresh goal constant never appears in a normal form, even when the
+   axioms make every term of its kind equal. *)
+VerificationTest[
+    TKnuthBendixCompletion[{ForAll[x, q[c1] == q[x]]}, q[c2]],
+    q[c2],
+    TestID -> "KBC/goal-constant-hidden"
+]
+
+(* Sheffer's single axiom for Boolean algebra has no finite completed
+   system; the time-bounded completion still reduces an instance of it. *)
+VerificationTest[
+    TKnuthBendixCompletion[{ForAll[{x, y}, nn[nn[x, y], nn[x, nn[y, y]]] == x]}, nn[nn[a, b], nn[a, nn[b, b]]]],
+    a,
+    TestID -> "KBC/sheffer-instance"
+]
+
 VerificationTest[
     TKnuthBendixCompletion[ForAll[x, g[g[x]] == x], g[g[g[a]]]],
     g[a],

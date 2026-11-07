@@ -23,9 +23,11 @@ Options[TKnuthBendixCompletion] = {MaxSteps -> Automatic, Method -> "Waldmeister
 
 TKnuthBendixCompletion::badord = "`1` is not an ordering: give a precedence {s1, s2, ...} or symbol weights {{s1, w1}, {s2, w2}, ...}.";
 TKnuthBendixCompletion::theory = "AxiomaticTheory[\"`1`\"] does not give a list of axioms.";
+TKnuthBendixCompletion::heap = "Completion ran out of memory; the normal form comes from a completion of at most `1` steps.";
 TKnuthBendixCompletion::nodata = "Deriving the `1` completed rules takes longer than the TimeConstraint, so the ProofObject's proof lists only the axioms.";
 
-(* The fresh constant C of the goal t == C. *)
+(* The fresh constant c of the goal t == c.  It ranks highest in the
+   precedence, so no normal form ever prefers a term holding it. *)
 $kbcGoalConstant = "KnuthBendixCompletionGoal";
 
 TKnuthBendixCompletion[theory_String, rest___] := Block[{ax = atpAxiomaticTheory[theory]},
@@ -46,7 +48,7 @@ TKnuthBendixCompletion[axioms_List, term : Except[_List | Automatic | _Rule | _R
     kbcComplete[axioms, term, order, opts];
 
 kbcComplete[axiomsIn_List, term_, order_, opts___] := Catch[
-    Module[{method, maxSteps, wall, axioms, enc, cRes},
+    Module[{method, maxSteps, wall, axioms, goal, cRes, steps, nf},
         If[ order =!= Automatic && ! kbcOrderQ[order],
             Message[TKnuthBendixCompletion::badord, order];
             Throw[$Failed, "TATPError"]];
@@ -54,21 +56,52 @@ kbcComplete[axiomsIn_List, term_, order_, opts___] := Catch[
         wall = Replace[kbcSeconds[wall], Infinity -> 0.];
         axioms = atpNormalizeAxioms[axiomsIn];
         atpEnsureWmHeap[method];
-        enc = Block[{$atpWmIntakeApply = atpWmIntakeOrderQ[method]},
-            With[{ax = axioms, t = term, c = $kbcGoalConstant},
-                If[ term === None,
-                    atpEncodeProblem[ax, None, False],
-                    atpEncodeProblem[ax, t == c, False]]]];
-        method = kbcMethod[method, order, kbcAxiomSides[axioms], term];
-        cRes = cEngineProof[enc, atpResolveMaxSteps[maxSteps, method], wall,
-            Sequence @@ atpParseMethod[method]];
+        goal = Replace[term, Equal[l_, r_] :> kbcEqual[l, r]];
+        method = kbcMethod[method, order, kbcAxiomSides[axioms], goal];
+        steps = atpResolveMaxSteps[maxSteps, method];
+        cRes = kbcRun[axioms, goal, method, steps, wall];
+        (* A normal form needs only a sound system, not a complete one: when
+           completion runs out of heap, a smaller one still gives it. *)
+        If[ goal =!= None && ! IntegerQ[cRes["Status"]],
+            steps = Min[steps, 1024];
+            While[ ! IntegerQ[cRes["Status"]] && steps > 1,
+                steps = Max[1, Quotient[steps, 4]];
+                cRes = kbcRun[axioms, goal, method, steps, wall]];
+            If[ IntegerQ[cRes["Status"]], Message[TKnuthBendixCompletion::heap, steps]]];
         If[ ! IntegerQ[cRes["Status"]], Throw[$Failed, "TATPError"]];
-        If[ term === None,
-            kbcProofObject[enc, cRes, wall],
-            Replace[cRes["GoalNormalForms"], {{{nf_, _}, ___} :> nf, _ :> $Failed}]]
+        If[ goal === None,
+            kbcProofObject[cRes["Encoding"], cRes, wall],
+            nf = Replace[cRes["GoalNormalForms"], {{{n_, _}, ___} :> n, _ :> Throw[$Failed, "TATPError"]}];
+            (* An equation holds when both sides reach one normal form, and fails
+               when they reach two under a saturated system: its ordering is
+               total on ground terms, so the system is ground convergent. *)
+            Replace[nf, kbcEqual[l_, r_] :> Which[
+                l === r, True,
+                cRes["Status"] === 4 && kbcCompleteQ[method], False,
+                NumericQ[l] && NumericQ[r], Inactive[Equal][l, r],
+                True, l == r]]]
     ],
     "TATPError"
 ];
+
+(* One completion run of the axioms, with the goal goal == c when goal is not
+   None.  The problem is encoded afresh each time: a run that runs out of heap
+   collects it, which moves the cells of the previous encoding. *)
+kbcRun[axioms_, goal_, method_, steps_, wall_] := Block[{enc, cRes},
+    enc = Block[{$atpWmIntakeApply = atpWmIntakeOrderQ[method]},
+        With[{ax = axioms, t = goal, c = $kbcGoalConstant},
+            If[ goal === None,
+                atpEncodeProblem[ax, None, False],
+                atpEncodeProblem[ax, t == c, False]]]];
+    cRes = cEngineProof[enc, steps, wall, Sequence @@ atpParseMethod[method]];
+    If[ AssociationQ[cRes], Append[cRes, "Encoding" -> enc], <|"Status" -> $Failed|>]
+];
+
+(* Whether a run that ends with an empty queue (status 4) has saturated: no
+   critical pair was dropped for its size, a queue cap or a resource limit. *)
+kbcCompleteQ[m_List] := With[{o = Join[Lookup[$AtpPresetDefaults, First[m], <||>], Association[Rest[m]]]},
+    ! (TrueQ[Lookup[o, "LRS"]] || TrueQ[Lookup[o, "MaxWeight", 0] > 0] ||
+       TrueQ[Lookup[o, "AutoMaxWeight", 0] > 0] || KeyExistsQ[o, "QueueCap"])];
 
 kbcSeconds[q_Quantity] := QuantityMagnitude[q, "Seconds"];
 kbcSeconds[Infinity] := Infinity;
@@ -94,11 +127,11 @@ kbcMethod[method_, order_, axSides_, term_] := Block[{m, given, prec, names, wei
             names = atpSymName /@ Replace[order, {s_, _Integer} :> s, {1}];
             weights = Cases[order, {s_, w_Integer} :> atpSymName[s] -> w];
             {"Ordering" -> If[ weights === {}, "LPO", "KBO"],
-             "Precedence" -> Join[names, Select[prec, ! MemberQ[names, #] &]],
+             "Precedence" -> Join[{$kbcGoalConstant}, names, Select[prec, ! MemberQ[names, #] &]],
              "SymbolWeights" -> If[ weights === {}, None, weights],
              "AutoPrecedence" -> False, "SkolemHighest" -> False},
         ContainsNone[given, {"Precedence", "AutoPrecedence", "SkolemHighest"}],
-            {"Precedence" -> prec, "AutoPrecedence" -> False, "SkolemHighest" -> False},
+            {"Precedence" -> Prepend[prec, $kbcGoalConstant], "AutoPrecedence" -> False, "SkolemHighest" -> False},
         True,
             {}];
     Join[m, If[ MemberQ[given, "GroundJoin"], {}, {"GroundJoin" -> True}], sub]
@@ -108,8 +141,8 @@ kbcMethod[method_, order_, axSides_, term_] := Block[{m, given, prec, names, wei
    function symbols by descending arity (ties in order of appearance), the
    axioms' constants, then the term's other symbols in reverse canonical
    order, so that a term's normal form does not depend on how it is written
-   and lists commuting arguments in canonical order.  The goal's fresh
-   constant, left out, ranks lowest. *)
+   and lists commuting arguments in canonical order.  kbcMethod puts the
+   goal's fresh constant above all of them. *)
 kbcPrecedence[axSides_, term_] := Block[{sig, fs, own, axNames},
     sig = kbcSignature[axSides];
     fs = Select[sig, #[[2]] > 0 &];
