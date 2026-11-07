@@ -20,6 +20,13 @@ Two surfaces drive it:
   which returns a `ProofObject`. Its methods and options are documented
   in the paclet's pages (`wl/THVMLink/docs/Symbols/TFindProof.md`,
   `wl/THVMLink/docs/Tutorials/AtpMethods.md`).
+* **`TKnuthBendixCompletion`** in the same paclet, which runs the
+  completion without a goal and returns the completed system, or the
+  normal form of a term under it: the term is run as the goal
+  `term == c` with `c` a fresh constant, and the bridge returns each goal
+  side normalized under the final rules by `thvm_atp_normal_form`
+  (`src/atp/normal_form.c`). Its page is
+  `wl/THVMLink/docs/Symbols/TKnuthBendixCompletion.md`.
 
 At CASC-J13 (2026) FindProof placed 4th of 10 in UEQ (unit equality,
 269 of 400) and 11th of 17 in FOF (91 of 400); CheckProof placed last in
