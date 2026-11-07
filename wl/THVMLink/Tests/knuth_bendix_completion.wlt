@@ -93,12 +93,12 @@ VerificationTest[
     TestID -> "KBC/equation-decided"
 ]
 
-(* A saturated, ground-convergent system refutes an equation whose sides
-   reach two normal forms. *)
+(* Two normal forms show only that the axioms do not entail the equation
+   (k the identity satisfies it), so the result is the equation, not False. *)
 VerificationTest[
     TKnuthBendixCompletion[ForAll[x, k[k[x]] == x], k[a] == a],
-    False,
-    TestID -> "KBC/equation-refuted"
+    k[a] == a,
+    TestID -> "KBC/equation-not-entailed"
 ]
 
 (* The fresh goal constant never appears in a normal form, even when the

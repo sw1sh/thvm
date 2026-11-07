@@ -72,12 +72,13 @@ kbcComplete[axiomsIn_List, term_, order_, opts___] := Catch[
         If[ goal === None,
             kbcProofObject[cRes["Encoding"], cRes, wall],
             nf = Replace[cRes["GoalNormalForms"], {{{n_, _}, ___} :> n, _ :> Throw[$Failed, "TATPError"]}];
-            (* An equation holds when both sides reach one normal form, and fails
-               when they reach two under a saturated system: its ordering is
-               total on ground terms, so the system is ground convergent. *)
+            (* An equation is True when both sides reach one normal form.
+               Two normal forms, even under a saturated system, show only that
+               the axioms do not entail it (k[a] == a holds for k the identity
+               under k[k[x]] == x), so the result is then the equation between
+               them, never False. *)
             Replace[nf, kbcEqual[l_, r_] :> Which[
                 l === r, True,
-                cRes["Status"] === 4 && kbcCompleteQ[method], False,
                 NumericQ[l] && NumericQ[r], Inactive[Equal][l, r],
                 True, l == r]]]
     ],
@@ -98,7 +99,8 @@ kbcRun[axioms_, goal_, method_, steps_, wall_] := Block[{enc, cRes},
 ];
 
 (* Whether a run that ends with an empty queue (status 4) has saturated: no
-   critical pair was dropped for its size, a queue cap or a resource limit. *)
+   critical pair was dropped for its size, a queue cap or a resource limit.
+   TAtpSystem's "Complete" (and so TAtpEqualQ's NotEntailed) rests on it. *)
 kbcCompleteQ[m_List] := With[{o = Join[Lookup[$AtpPresetDefaults, First[m], <||>], Association[Rest[m]]]},
     ! (TrueQ[Lookup[o, "LRS"]] || TrueQ[Lookup[o, "MaxWeight", 0] > 0] ||
        TrueQ[Lookup[o, "AutoMaxWeight", 0] > 0] || KeyExistsQ[o, "QueueCap"])];
