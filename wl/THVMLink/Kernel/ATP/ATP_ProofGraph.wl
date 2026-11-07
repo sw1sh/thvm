@@ -597,7 +597,7 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     useFullInterreduce_] := Block[{
     raw, status, nRules, nTrace, nSteps, nCps, extNRules, extNSteps,
     mnfNSteps, cur, labelToName, idToName, mainSteps, extSteps,
-    mnfSteps, mainRules, rTrace, traceEntries, precArray, symbolWeightsArr,
+    mnfSteps, mainRules, goalNfs, ruleKinds, rTrace, traceEntries, precArray, symbolWeightsArr,
     flattenLabels,
     (* restore the caller's held originals during this build's decoding *)
     $atpSymObj = Lookup[enc["State"], "symObj", <||>],
@@ -709,6 +709,16 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
     (* MNF steps block: the GREEN/RED front chains for a goal closed
        by the MNF bidirectional search.  Same per-step layout. *)
     {mnfSteps, cur} = decodeStepsBlock[raw, cur, mnfNSteps, labelToName, idToName];
+    (* Goal normal forms block: each goal side normalized under the final
+       rules, {lhs, rhs} per goal. *)
+    goalNfs = If[ raw[[cur + 1]] > 0,
+        Partition[decodeAtpTerm[#, labelToName, idToName] & /@
+            raw[[cur + 2 ;; cur + 1 + raw[[cur + 1]]]], 2],
+        {}];
+    cur = cur + 1 + raw[[cur + 1]];
+    (* Rule kinds block: per MainRule, 1 oriented, 0 an unorientable
+       equation, -1 an empty slot. *)
+    ruleKinds = raw[[cur + 1 ;; cur + nRules]];
     {$decT, $atpVarSymsTmp} = AbsoluteTiming @ Quiet[Block[{
                 Global`a, Global`b, Global`c, Global`d, Global`e,
                 Global`f, Global`g, Global`h, Global`i, Global`j,
@@ -741,6 +751,8 @@ cEngineProof[enc_, maxSteps_, wallSeconds_,
         "MainSteps" -> If[nSteps === 0, {}, mainSteps],
         "MnfSteps" -> If[mnfNSteps === 0, {}, mnfSteps],
         "MainRules" -> mainRules,
+        "GoalNormalForms" -> goalNfs,
+        "RuleKinds" -> ruleKinds,
         "RTrace" -> rTrace,
         "TraceRaw" -> raw, "TraceOffsets" -> traceOffsets, "NTrace" -> nTrace,
         "NCps" -> nCps,

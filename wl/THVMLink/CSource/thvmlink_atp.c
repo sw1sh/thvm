@@ -539,6 +539,12 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_set_gnn_scorer(WolframLibraryData libData,
 //                  pos[0..pos_len), before, after.
 //     mnf_steps -- variable: same per-step layout; the GREEN/RED
 //                  front chains for a goal closed by the MNF search.
+//   then the goal normal forms and the rule kinds:
+//     n_nf, then lhs_0, rhs_0, lhs_1, ... -- each goal side normalized
+//     under the final R and E (n_nf = 2*n_goals).
+//     kinds    -- n_rules ints: 1 an oriented rule, 0 an unorientable
+//                 equation (applied by ordered rewriting), -1 an empty
+//                 or deleted slot.
 //   WL walks the variable-width blocks with a cursor (pos_len
 //   drives the stride).
 
@@ -1753,9 +1759,23 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     }
   }
 
+  // Each goal side's normal form under the final R and E.  A goal t == C
+  // with C a fresh constant never closes, so its left normal form is the
+  // simplified t (Waldmeister's simplify mode; see
+  // TKnuthBendixCompletion).
+  Term nf[2u * ATP_MAX_GOALS];
+  u32  n_nf = 0u;
+  atp->wall_deadline_us = 0u;   // the run is over; normalize to the end
+  for (u32 g = 0; g < atp->n_goals; g++) {
+    nf[n_nf++] = thvm_atp_normal_form(atp, atp->goals_lhs[g]);
+    nf[n_nf++] = thvm_atp_normal_form(atp, atp->goals_rhs[g]);
+  }
+  ATP_PHASE_MARK("goal-nf");
+
   // Size the output: 8-int header + main blocks + ext blocks + the
-  // MNF steps block.  A trace entry's pos_len is its TRACE_CP
-  // superposition-path length (0 for AXIOM / ORIENT / SIMPLIFY).
+  // MNF steps block + the goal normal forms.  A trace entry's pos_len
+  // is its TRACE_CP superposition-path length (0 for AXIOM / ORIENT /
+  // SIMPLIFY).
   mint out_len = 8 + 2 * (mint)n_rules + (mint)n_rules
                + 2 * (mint)ext_n_rules;
   for (u32 i = 0; i < n_trace; i++) {
@@ -1766,6 +1786,7 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   for (u32 i = 0; i < n_steps; i++)     out_len += 6 + (mint)proof[i].pos_len;
   for (u32 i = 0; i < ext_n_steps; i++) out_len += 6 + (mint)ext_proof[i].pos_len;
   for (u32 i = 0; i < mnf_n_steps; i++) out_len += 6 + (mint)mnf_proof[i].pos_len;
+  out_len += 1 + (mint)n_nf + (mint)n_rules;
 
   if (g_phase) {
     fprintf(stderr, "[atp-phase] wire out_len=%lld (%.1f MB)\n",
@@ -1861,6 +1882,15 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
     for (u8 k = 0; k < p->pos_len; k++) odata[w++] = (int64_t)p->pos[k];
     odata[w++] = (int64_t)p->before;
     odata[w++] = (int64_t)p->after;
+  }
+  // Goal normal forms block: n_nf, then lhs_0, rhs_0, lhs_1, ...
+  odata[w++] = (int64_t)n_nf;
+  for (u32 i = 0; i < n_nf; i++) odata[w++] = (int64_t)nf[i];
+  // Rule kinds block.
+  for (u32 i = 0; i < n_rules; i++) {
+    u8 dead = (u8)(atp->lhs[i] == 0 ||
+                   (atp->r_dead != NULL && atp->r_dead[i]));
+    odata[w++] = dead ? -1 : (int64_t)(atp->r_orient[i] != 0);
   }
 
   ATP_PHASE_MARK("wire-encode");

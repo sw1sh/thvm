@@ -236,6 +236,7 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 #endif
 
 #include "goal_check.c"
+#include "normal_form.c"
 #include "cp_interreduce.c"
 #include "wm_drain.c"
 #include "proof_cone.c"

@@ -7563,6 +7563,10 @@ fn u32 thvm_atp_interreduce(AtpState *s, AtpAddedRange added);
 // when goal_lhs == 0, i.e. completion mode).
 fn AtpStatus thvm_atp_goal_check(AtpState *s);
 
+// The normal form of t under the current R and E by ordered rewriting;
+// canonical for t's equivalence class once completion has saturated.
+fn Term thvm_atp_normal_form(AtpState *s, Term t);
+
 // One saturation step: goal_check -> select -> normalize ->
 // trivialize -> orient+add -> interreduce -> generate_cps ->
 // goal_check.  Returns ATP_PROVED / ATP_TIMEOUT /
