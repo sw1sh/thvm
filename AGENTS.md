@@ -65,7 +65,8 @@ disagree, the page wins and the comment is fixed.
 `src/thvm.c` `#include`s every `.c` file in build order. Every artifact is one
 TU over it: each C test, the THVMLink library
 (`wl/THVMLink/CSource/thvmlink.c`), the Python library
-(`py/csource/thvm_py.c`) and `bin/FindProof` (`tools/thvm_atp_cli.c`). Add a
+(`py/csource/thvm_py.c`), `bin/FindProof` (`tools/thvm_atp_cli.c`) and the
+standalone prover library `libthvm_atp` (`wl/ATP/CSource/libthvm_atp.c`). Add a
 source file by including it from `src/thvm.c`, never by editing the Makefile.
 
 ### C style
@@ -98,6 +99,7 @@ make bin/test_foo     # one C test; make all builds every test, make test runs t
 make wl-test          # run every wl/THVMLink/Tests/*.wlt against the built library
 make py               # py/thvm/libthvm_py.{dylib,so}
 make bin/FindProof    # the ATP CLI (the CASC entry)
+make atp-lib          # libthvm_atp for the WolframInstitute`ATP` package (wl/ATP)
 make wl-cross         # THVMLink libraries for all five Wolfram platforms
 make clean            # remove bin/
 ```
@@ -156,6 +158,8 @@ Elsewhere:
 
 - `py/thvm/`: the Python package (`tensor.py`, `mixin.py`, `nn.py`,
   `optim.py`, ...) over `libthvm_py` (`py/csource/thvm_py.c`); `py/tests/`.
+- `wl/ATP/`: the WolframInstitute`ATP` package (completed equational systems
+  for v2's FullSimplify) over its own library `libthvm_atp`.
 - `wl/THVMLink/`: the paclet: `CSource/` (bridge), `Kernel/` (one package per
   concern, `Kernel/README.md` maps them; `Kernel/NN/`, `Kernel/ATP/`),
   `Tests/`, `docs/` (paclet documentation source). `wl/Examples/`: runnable

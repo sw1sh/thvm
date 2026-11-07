@@ -712,6 +712,115 @@ static int atp_sys_keep(AtpState *s, mint id) {
   return 1;
 }
 
+// Terms in prefix form, one Int64 array for a whole list: [n, t_1, ..., t_n]
+// with a compound term written label (>= 1), arity, then its arguments, and
+// variable k written -(k + 1).  These build and read a problem or a batch of
+// queries in one call instead of one per node.
+static int atp_prefix_build(const int64_t *d, mint n, mint *pos, Term *out, u32 depth) {
+  if (*pos >= n || depth > 100000u) return 0;
+  int64_t v = d[(*pos)++];
+  if (v < 0) {
+    *out = term_new_fvr((u32)(-v - 1));
+    return 1;
+  }
+  if (v == 0 || *pos >= n) return 0;
+  int64_t ar = d[(*pos)++];
+  if (ar < 0 || ar > (int64_t)(n - *pos)) return 0;
+  Term  small[8];
+  Term *cs = ar <= 8 ? small : (Term *)malloc((size_t)ar * sizeof(Term));
+  if (cs == NULL) return 0;
+  int ok = 1;
+  for (int64_t k = 0; k < ar && ok; k++) ok = atp_prefix_build(d, n, pos, &cs[k], depth + 1u);
+  if (ok) *out = term_new_ctr((u32)v, cs, (u32)ar);
+  if (cs != small) free(cs);
+  return ok;
+}
+
+typedef struct { int64_t *d; mint n, cap; } AtpPrefixBuf;
+
+static int atp_prefix_push(AtpPrefixBuf *b, int64_t v) {
+  if (b->n == b->cap) {
+    mint cap = b->cap ? 2 * b->cap : 256;
+    int64_t *nd = (int64_t *)realloc(b->d, (size_t)cap * sizeof(int64_t));
+    if (nd == NULL) return 0;
+    b->d = nd;
+    b->cap = cap;
+  }
+  b->d[b->n++] = v;
+  return 1;
+}
+
+static int atp_prefix_write(AtpPrefixBuf *b, Term t, u32 depth) {
+  if (depth > 100000u) return 0;
+  switch (term_tag(t)) {
+    case TAG_FVR:
+      return atp_prefix_push(b, -(int64_t)term_ext(t) - 1);
+    case TAG_CTR: {
+      u32 ar = term_ctr_n(t);
+      if (!atp_prefix_push(b, (int64_t)term_ext(t)) || !atp_prefix_push(b, (int64_t)ar)) return 0;
+      for (u32 k = 0; k < ar; k++) {
+        if (!atp_prefix_write(b, term_ctr_at(t, k), depth + 1u)) return 0;
+      }
+      return 1;
+    }
+    default:
+      return 0;
+  }
+}
+
+// args[0]: terms in prefix form; result: the heap Terms, one per term.
+EXTERN_C DLLEXPORT int thvm_wl_atp_terms_from_prefix(WolframLibraryData libData,
+                                                     mint argc, MArgument *args,
+                                                     MArgument res) {
+  (void)argc;
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+    = libData->numericarrayLibraryFunctions;
+  MNumericArray na = MArgument_getMNumericArray(args[0]);
+  if (naf->MNumericArray_getType(na) != MNumericArray_Type_Bit64) return LIBRARY_FUNCTION_ERROR;
+  mint n = naf->MNumericArray_getFlattenedLength(na);
+  const int64_t *d = (const int64_t *)naf->MNumericArray_getData(na);
+  if (n < 1 || d[0] < 0) return LIBRARY_FUNCTION_ERROR;
+  mint count = (mint)d[0], pos = 1;
+  mint dims[1] = {count};
+  MNumericArray out;
+  if (naf->MNumericArray_new(MNumericArray_Type_Bit64, 1, dims, &out) != 0) return LIBRARY_FUNCTION_ERROR;
+  int64_t *o = (int64_t *)naf->MNumericArray_getData(out);
+  for (mint i = 0; i < count; i++) {
+    Term t = 0;
+    if (!atp_prefix_build(d, n, &pos, &t, 0u)) {
+      naf->MNumericArray_free(out);
+      return LIBRARY_FUNCTION_ERROR;
+    }
+    o[i] = (int64_t)t;
+  }
+  MArgument_setMNumericArray(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
+// args[0]: heap Terms; result: the terms in prefix form.
+EXTERN_C DLLEXPORT int thvm_wl_atp_terms_to_prefix(WolframLibraryData libData,
+                                                   mint argc, MArgument *args,
+                                                   MArgument res) {
+  (void)argc;
+  const struct st_WolframNumericArrayLibrary_Functions *naf
+    = libData->numericarrayLibraryFunctions;
+  MNumericArray na = MArgument_getMNumericArray(args[0]);
+  if (naf->MNumericArray_getType(na) != MNumericArray_Type_Bit64) return LIBRARY_FUNCTION_ERROR;
+  mint n = naf->MNumericArray_getFlattenedLength(na);
+  const int64_t *d = (const int64_t *)naf->MNumericArray_getData(na);
+  AtpPrefixBuf b = {NULL, 0, 0};
+  int ok = atp_prefix_push(&b, (int64_t)n);
+  for (mint i = 0; i < n && ok; i++) ok = atp_prefix_write(&b, (Term)d[i], 0u);
+  if (!ok) { free(b.d); return LIBRARY_FUNCTION_ERROR; }
+  mint dims[1] = {b.n};
+  MNumericArray out;
+  if (naf->MNumericArray_new(MNumericArray_Type_Bit64, 1, dims, &out) != 0) { free(b.d); return LIBRARY_FUNCTION_ERROR; }
+  memcpy(naf->MNumericArray_getData(out), b.d, (size_t)b.n * sizeof(int64_t));
+  free(b.d);
+  MArgument_setMNumericArray(res, out);
+  return LIBRARY_NO_ERROR;
+}
+
 // Configure the next thvm_wl_atp_run_proof call: args[0] the managed id to
 // keep its completed state under (0 = free it as usual), args[1] an
 // allocation budget in heap cells (0 = none).

@@ -9,6 +9,7 @@ build/
 
 # Paclet library and documentation notebooks (make wl, wl/scripts/build_docs.wls)
 wl/THVMLink/LibraryResources/
+wl/ATP/LibraryResources/
 wl/THVMLink/Documentation/
 wl/THVMLink/ResourceDefinition.nb
 

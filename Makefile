@@ -333,6 +333,38 @@ endif
 
 wl: $(WL_LIB)
 
+# libthvm_atp: the prover as a standalone LibraryLink library for the
+# WolframInstitute`ATP` package (wl/ATP): one TU over the runtime and the
+# prover's bridge only (wl/ATP/CSource/libthvm_atp.c), so the tensor and GPU
+# code is left out (1.4 MB on macOS arm64).
+ATP_LIB_DIR := wl/ATP/LibraryResources/$(WL_PLATFORM)
+ATP_LIB     := $(ATP_LIB_DIR)/libthvm_atp$(WL_DYLIB_EXT)
+
+$(ATP_LIB): wl/ATP/CSource/libthvm_atp.c $(WL_SRC_ATP) $(SRC)
+	@if [ ! -d "$(WL_INCLUDE)" ]; then \
+	  echo "ERROR: LibraryLink headers not found at $(WL_INCLUDE).  Set WOLFRAM_APP or WL_INCLUDE"; \
+	  exit 1; \
+	fi
+	@mkdir -p $(ATP_LIB_DIR)
+	$(CC) $(CFLAGS) -fPIC $(WL_DYLIB_FLAGS) \
+	  -DACCELERATE_NEW_LAPACK $(if $(filter Darwin,$(UNAME_S)),,-D_GNU_SOURCE) \
+	  $(ATP_DEFINES) $(WL_ATP_DEFINES) -I"$(WL_INCLUDE)" \
+	  -o $@ wl/ATP/CSource/libthvm_atp.c \
+	  $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm -ldl)
+ifeq ($(UNAME_S),Darwin)
+	codesign --force --sign - $@
+endif
+
+.PHONY: atp-lib
+atp-lib: $(ATP_LIB)
+
+# Runs the package's completions and queries through libthvm_atp's entries
+# without a Wolfram kernel, for the cross-platform determinism check.
+$(BIN)/atp_lib_determinism: wl/ATP/CSource/determinism.c wl/ATP/CSource/libthvm_atp.c $(WL_SRC_ATP) $(SRC) | $(BIN)
+	$(CC) $(CFLAGS) $(if $(filter Darwin,$(UNAME_S)),,-D_GNU_SOURCE) $(ATP_DEFINES) $(WL_ATP_DEFINES) \
+	  -I"$(WL_INCLUDE)" -o $@ $< \
+	  $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm -ldl)
+
 wl-test: $(WL_LIB)
 	wolframscript -f $(WL_PACLET)/Tests/run.wls
 
