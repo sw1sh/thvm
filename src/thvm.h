@@ -4641,6 +4641,15 @@ typedef struct {
   u8    trace_pack;
   u64  gc_live_after;       // live cells after the last collection
   u8   heap_full;           // a pressure collection left the heap above the abort fraction
+  // Allocation budget (thvm_atp_set_max_alloc): cells the run allocated,
+  // counted across collections (alloc_acc plus HEAP_NEXT past alloc_mark).
+  // Unlike the wall clock it is the same on every machine for the same
+  // input and heap size.  Past max_alloc_cells, budget_out ends the run as
+  // ATP_TIMEOUT, so its rules and goal normal forms are still reported.
+  u64  max_alloc_cells;
+  u64  alloc_acc;
+  u64  alloc_mark;
+  u8   budget_out;
   u8   *trace_eq_buf;     // append-only packed (lhs,rhs) pairs
   u64   trace_eq_len;     // bytes used
   u64   trace_eq_cap;     // bytes allocated
@@ -6167,6 +6176,8 @@ fn void      thvm_atp_set_max_cp_side(AtpState *s, u32 w);
 // Hard CP-queue-size cap (memory leash): drop new CPs once the live queue
 // reaches `n` (0 = unbounded).  Lossy; bounds C memory on runaway saturations.
 fn void      thvm_atp_set_max_cp_queue(AtpState *s, u32 n);
+// Allocation budget in heap cells (0 = none); see max_alloc_cells.
+fn void      thvm_atp_set_max_alloc(AtpState *s, u64 cells);
 // Enable the automatic, completeness-preserving growing CP-weight
 // bound (Waldmeister MaxWeight, but the deferred CPs are stashed and
 // re-admitted, never dropped).  `base` seeds the bound (bound = base +

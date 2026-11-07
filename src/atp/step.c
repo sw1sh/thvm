@@ -1615,7 +1615,7 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
     // re-superpose against it.
     if (s->use_overlap_exhaust && !s->r_orient[f]) s->r_overlap_done[f] = 1u;
     atp_pressure_collect(s);
-    if (s->heap_full) break;   // the step ends the run (ResourceOut)
+    if (s->heap_full || s->budget_out) break;   // the step ends the run (ResourceOut)
   }
   return pushed;
 }
@@ -1831,7 +1831,7 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
       // semi-space in raw-CP + normalisation scratch.  `buf` is fully
       // processed here, so a collection between overlap pairs is safe.
       atp_pressure_collect(s);
-      if (s->heap_full) return pushed;
+      if (s->heap_full || s->budget_out) return pushed;
     }
   }
 
@@ -1854,7 +1854,7 @@ static u32 thvm_atp_generate_cps_ic(AtpState *s, AtpAddedRange added) {
                                     s->r_trace[i], s->r_trace[j],
                                     i, j);
       atp_pressure_collect(s);   // see above
-      if (s->heap_full) return pushed;
+      if (s->heap_full || s->budget_out) return pushed;
     }
   }
 

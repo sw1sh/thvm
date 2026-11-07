@@ -2236,6 +2236,8 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     atp_dbg_abort_site("heap-full", s);
     return ATP_ABORTED;
   }
+  atp_alloc_budget_check(s);
+  if (s->budget_out) return ATP_TIMEOUT;
 
   Term cp_lhs = 0, cp_rhs = 0;
   if (!thvm_atp_select_cp(s, &cp_lhs, &cp_rhs)) {
@@ -3119,6 +3121,7 @@ static AtpStatus thvm_atp_step_impl(AtpState *s) {
     atp_dbg_abort_site("heap-full", s);
     return ATP_ABORTED;
   }
+  if (s->budget_out) return ATP_TIMEOUT;
 
 #ifdef ATP_CP_GROUND_JOIN
   // WM RueckwaertsGrundzusammenfuehrbarkeit (ArbeitsAufnahme,

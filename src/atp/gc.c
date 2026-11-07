@@ -194,7 +194,9 @@ fn u8 thvm_atp_gc_collect(AtpState *s) {
   u32 guide_root = w;
   atp_guide_gc_gather(s, roots, &w);
 
+  if (HEAP_NEXT > s->alloc_mark) s->alloc_acc += HEAP_NEXT - s->alloc_mark;
   gc_collect(roots, w);
+  s->alloc_mark = HEAP_NEXT;
   g_atp_gc_epoch++;   // invalidate handle-keyed caches (cells moved)
 
   // Per-collect swap probe (THVM_ATP_RECYCLE_DEBUG): each gc_collect
@@ -349,7 +351,20 @@ static u8 atp_heap_under_pressure(void) {
 // thirty-second).  A collection that leaves the live set above
 // atp_heap_abort_frac() raises heap_full; the step ends the run
 // (ResourceOut) at its next check instead of thrashing.
+// Cells the run has allocated so far (see max_alloc_cells in thvm.h).
+static inline u64 atp_alloc_cells(const AtpState *s) {
+  return s->alloc_acc + (HEAP_NEXT > s->alloc_mark ? HEAP_NEXT - s->alloc_mark : 0u);
+}
+
+// Raise budget_out once the run has allocated past its budget.
+static inline void atp_alloc_budget_check(AtpState *s) {
+  if (s->max_alloc_cells != 0u && atp_alloc_cells(s) > s->max_alloc_cells) {
+    s->budget_out = 1u;
+  }
+}
+
 static void atp_pressure_collect(AtpState *s) {
+  atp_alloc_budget_check(s);
   if (!atp_heap_under_pressure()) return;
   u64 lo = gc_from_start(), cap = gc_from_end() - lo, used = HEAP_NEXT - lo;
   if (s->gc_live_after > cap / 2u && used < s->gc_live_after + cap / 8u &&
@@ -3274,6 +3289,14 @@ fn void thvm_atp_set_max_cp_weight(AtpState *s, u32 w) {
 
 fn void thvm_atp_set_max_cp_side(AtpState *s, u32 w) {
   if (s != NULL) s->max_cp_side = w;
+}
+
+fn void thvm_atp_set_max_alloc(AtpState *s, u64 cells) {
+  if (s == NULL) return;
+  s->max_alloc_cells = cells;
+  s->alloc_acc       = 0u;
+  s->alloc_mark      = HEAP_NEXT;
+  s->budget_out      = 0u;
 }
 
 fn void thvm_atp_set_max_cp_queue(AtpState *s, u32 n) {

@@ -29,6 +29,7 @@ fn u32 thvm_atp_trace_cap(void) {
 fn AtpState *thvm_atp_init(const KboConfig *cfg, u32 step_cap) {
   AtpState *s = (AtpState *)calloc(1, sizeof(AtpState));
   if (s == NULL) return NULL;
+  s->alloc_mark = HEAP_NEXT;
   // A new engine may carry a different ordering config: retire every
   // snapshot-orientation memo entry (atp_orient_memo_gt) and the
   // simpler-join rule-encode cache (ft_order.c).
