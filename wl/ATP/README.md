@@ -1,5 +1,13 @@
 # WolframInstitute`ATP`
 
+**Temporary.** This package and its library are a stopgap that lets v2's
+FullSimplify use the prover before v2 ships THVMLink whole (THVMLink's tensor
+and GPU code is moving into v2's System as well). When it does, v2 calls
+THVMLink's `TAtpComplete`, `TAtpNormalForm` and `TAtpEqualQ`, which have the
+same API, and `wl/ATP` is deleted. Until then THVMLink's
+`wl/THVMLink/Kernel/ATP/AtpSystem.wl` and this package are two copies of the
+same handle, kept in step by the agreement test in `Tests/ATP.wlt`.
+
 Completed equational systems from thvm's prover, for simplifiers that ask
 many normal-form questions of one theory. `TAtpComplete` completes the axioms
 once by unfailing Knuth-Bendix completion (Waldmeister's configuration) and

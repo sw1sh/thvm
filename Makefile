@@ -336,7 +336,8 @@ wl: $(WL_LIB)
 # libthvm_atp: the prover as a standalone LibraryLink library for the
 # WolframInstitute`ATP` package (wl/ATP): one TU over the runtime and the
 # prover's bridge only (wl/ATP/CSource/libthvm_atp.c), so the tensor and GPU
-# code is left out (1.4 MB on macOS arm64).
+# code is left out (1.4 MB on macOS arm64).  Temporary: it goes once v2
+# ships THVMLink whole (wl/ATP/README.md).
 ATP_LIB_DIR := wl/ATP/LibraryResources/$(WL_PLATFORM)
 ATP_LIB     := $(ATP_LIB_DIR)/libthvm_atp$(WL_DYLIB_EXT)
 

@@ -159,7 +159,9 @@ Elsewhere:
 - `py/thvm/`: the Python package (`tensor.py`, `mixin.py`, `nn.py`,
   `optim.py`, ...) over `libthvm_py` (`py/csource/thvm_py.c`); `py/tests/`.
 - `wl/ATP/`: the WolframInstitute`ATP` package (completed equational systems
-  for v2's FullSimplify) over its own library `libthvm_atp`.
+  for v2's FullSimplify) over its own library `libthvm_atp`. Temporary: it
+  duplicates THVMLink's `Kernel/ATP/AtpSystem.wl` until v2 ships THVMLink
+  whole, then it is deleted; change both copies together until then.
 - `wl/THVMLink/`: the paclet: `CSource/` (bridge), `Kernel/` (one package per
   concern, `Kernel/README.md` maps them; `Kernel/NN/`, `Kernel/ATP/`),
   `Tests/`, `docs/` (paclet documentation source). `wl/Examples/`: runnable
