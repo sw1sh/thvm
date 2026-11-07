@@ -542,14 +542,14 @@ atpPrecedenceArray[_, enc_] := {}
 
 (* Method "SymbolWeights" -> {sym -> w, ...}: an explicit per-symbol
    KBO weight map.  Returns a label-indexed Int64 list (element i = the
-   weight to assign to label i; 0 = leave at default 1, mirroring
-   atpPrecedenceArray's "leave at default" sentinel).  An empty list
+   weight to assign to label i; -1 = leave at default 1, since 0 is a
+   real KBO weight).  An empty list
    short-circuits to the engine default (uniform 1).  Waldmeister
    SymbolGewichte port (CLAS/SymbolGewichte.c::SG_SymbGewichteEintragen,
    -w DEF=2:VAR=5:f=5:g=0). *)
 atpSymbolWeightsArray[None, enc_] := {}
 atpSymbolWeightsArray[map_Association, enc_] := Block[{sym = enc["State"]["sym"], maxLab = enc["MaxLab"], arr, nameMap = KeyMap[atpSymName, map]},
-    arr = ConstantArray[0, maxLab + 1];
+    arr = ConstantArray[-1, maxLab + 1];
     KeyValueMap[
         {nm, lab} |-> If[KeyExistsQ[nameMap, nm] && lab >= 1 && lab <= maxLab, arr[[lab + 1]] = nameMap[nm]],
         sym];

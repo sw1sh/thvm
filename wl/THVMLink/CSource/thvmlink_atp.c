@@ -798,12 +798,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
         u32 n_copy = (u32)sw_len <= (u32)max_label + 1 ? (u32)sw_len
                                                        : (u32)max_label + 1;
         for (u32 i = 0; i < n_copy; i++) {
-          // Sentinel 0 in the input means "leave at default 1" so the
-          // WL side can pass a full label-length array with unset
-          // entries.  Genuine weight 0 is supported by passing -1 (which
-          // wraps to a high u32 and matches Waldmeister's convention of
-          // "default+overrides" rather than a single uniform table).
-          if (sw_data[i] > 0) {
+          // A negative entry leaves the label at the default weight 1,
+          // so the WL side passes a full label-length array; 0 is a real
+          // weight (KBO admits it for the greatest unary symbol).
+          if (sw_data[i] >= 0) {
             wl_weights_p[i] = (u32)sw_data[i];
           }
         }
