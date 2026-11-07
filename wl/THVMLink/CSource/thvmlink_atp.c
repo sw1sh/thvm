@@ -1984,10 +1984,14 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // SIMPLIFY).
   mint out_len = 8 + 2 * (mint)n_rules + (mint)n_rules
                + 2 * (mint)ext_n_rules;
+  // Exactly what the trace writer below emits (a TRACE_CP entry can carry
+  // more children than it writes), so the blocks after the trace end the
+  // wire and a reader may find them from its end.
   for (u32 i = 0; i < n_trace; i++) {
     Term e = atp->trace[i];
-    u32  arity = term_ctr_n(e);
-    out_len += 6 + (mint)(arity > 5u ? arity - 5u : 0u);
+    u32  arity   = term_ctr_n(e);
+    u32  pos_len = (arity > 5u) ? (u32)term_val(term_ctr_at(e, 4)) : 0u;
+    out_len += 6 + (mint)pos_len + (term_ext(e) == TRACE_NORM_STEP ? 2 : 0);
   }
   for (u32 i = 0; i < n_steps; i++)     out_len += 6 + (mint)proof[i].pos_len;
   for (u32 i = 0; i < ext_n_steps; i++) out_len += 6 + (mint)ext_proof[i].pos_len;
