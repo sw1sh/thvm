@@ -202,15 +202,22 @@ is non-zero:
 
 `TGrad[y, target]` calls `TUOpGradWithTarget[y, gy, target]` which
 puts `target` in cell[2]. On entry, `interact_grad` pushes target
-on the per-fire stack so every sub-cell inherits it. At a `TAG_TEN`
-leaf:
+on the per-fire stack so every sub-cell inherits it. A child, a
+cell's `y` and a `TAG_TEN` leaf all go through one test,
+`grad_term_matches_target`, and get `gy` when they are the target:
 
-  - If the leaf alo-resolves to the same TVAR as target, return
-    `gy` (catches recursive-lambda iter-2+ where the bound `w`
-    substitutes to a yet-unmaterialized UOP graph).
-  - If the leaf's tid matches target's resolved-TEN tid, return `gy`.
-  - Otherwise return `uop_const(target.dtype, 0)` — a scalar zero
-    that broadcasts cleanly through any outer ADD/MUL.
+  - the same bound variable once ALOs are forced;
+  - the same tid;
+  - the same value, read without firing anything: `term_resolve`,
+    then through a DUP that has not fired to the body both of its
+    projections copy.
+
+The last case is a recursive loop past its first step. There the
+bound `w` is a graph, and auto-dup hands the update, the loss and
+the target three projections of one DUP over it. The rule sees `y`
+unreduced, so the loss's `w` reaches the test before that DUP fires.
+A leaf that is not the target returns `uop_const(target.dtype, 0)`,
+a scalar zero that broadcasts through any outer ADD or MUL.
 
 No SUP, no per-leaf-tid DUP nest, no cross-product fires across
 distinct leaves. This is what makes TGrad cheap on graphs with

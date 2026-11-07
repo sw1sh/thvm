@@ -134,8 +134,8 @@ VerificationTest[
 ]
 
 (* === end-to-end sugared training: a TFromNet-lifted MLP trains via the
-   inert loop.  TNetParams reads the 4 trainable weights off the forward
-   GRAPH (float leaves), each gets a materialized SGD ASSIGN step, and one
+   inert loop.  The 4 trainable weights are read off the forward GRAPH
+   (float leaves), each gets a materialized SGD ASSIGN step, and one
    TWnf drives 80 iters of the chained loop.  Exercises the WHOLE sugared
    path: TFromNet conv/linear lowering + graph param-collection + stable
    TCategoricalCrossEntropy + the multi-param inert loop.  A linearly-
@@ -152,8 +152,9 @@ VerificationTest[
         net = NetInitialize[NetChain[{LinearLayer[6], Ramp, LinearLayer[2]}, "Input" -> 2], RandomSeeding -> 7];
         xS = TTensorCreate[xd]; yT = TTensorCreate[yd]; lr = TUOpConst[0.3, "f32"];
         fwd = TFromNet[net, xS];
-        (* float leaves of the forward minus the input slot = the 4 weights *)
-        params = Select[TNetParams[fwd], TTermVal[#] =!= TTermVal[xS] &];
+        (* float leaves of the forward minus the input slot = the 4 weights,
+           as TNetTrain reads them; TNetParams takes only the lifted LAM *)
+        params = WolframInstitute`THVMLink`Private`trainableParams[fwd, xS];
         mk[i_] := TMaterialize[TNf[TAssign[params[[i]],
             TUOpAdd[params[[i]], TUOpNeg[TUOpMul[lr, TGrad[TCategoricalCrossEntropy[fwd, yT], params[[i]]]]]]]]];
         TDef["fnmlp_s1", mk[1]]; TDef["fnmlp_s2", mk[2]];

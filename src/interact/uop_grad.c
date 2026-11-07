@@ -149,6 +149,43 @@ static Term grad_alo_resolve(Term t) {
   return t;
 }
 
+// The value t stands for, firing nothing: term_resolve, then through a DUP that
+// has not fired to the body both its projections copy (DUP-UOP hands each side
+// the node itself).  A SUP body splits per side, so its projections stay apart.
+static Term grad_value_of(Term t) {
+  for (;;) {
+    t = term_resolve(t);
+    u8 tag = term_tag(t);
+    if ((tag != TAG_DP0 && tag != TAG_DP1) || (term_ext(t) & DUP_GRAD_FLAG)) {
+      return t;
+    }
+    Term body = term_resolve(heap_read(term_val(t)));
+    if (term_tag(body) == TAG_SUP) {
+      return t;
+    }
+    t = body;
+  }
+}
+
+// t is the target: the same bound variable, the same tid or the same value.
+// The rule sees y unreduced, so past a recursive loop's first step the loss's w
+// and the target can be projections of one DUP over the substituted graph that
+// has not fired yet.
+static int grad_term_matches_target(Term t, Term target) {
+  if (target == 0) {
+    return 0;
+  }
+  if (grad_alo_resolve(target) == grad_alo_resolve(t)) {
+    return 1;
+  }
+  Term tv = grad_value_of(target);
+  Term v  = grad_value_of(t);
+  if (term_tag(tv) == TAG_TEN && term_tag(v) == TAG_TEN) {
+    return term_val(tv) == term_val(v);
+  }
+  return tv == v;
+}
+
 // The cotangent a TEN leaf returns.  Target walk: gy at the target, else
 // zero.  Single walk: zero, having added gy to the leaf's .grad if marked.
 // SUP/DUP walk: SUP^tid(0, gy), for a DUP nest labelled by tid to project.
@@ -159,21 +196,11 @@ static Term grad_leaf_sup(Term ten, Term gy_for_leaf) {
   if (term_tag(ten_r) != TAG_TEN) ten_r = ten;   // best effort
   Term target = grad_current_target();
   if (target != 0) {
-    // The target is this leaf as the same bound variable or the same tid.
-    Term ty = grad_alo_resolve(target);
-    Term tn = grad_alo_resolve(ten);
-    int matched = (ty == tn);
-    Term tr = term_resolve(target);
-    if (!matched && term_tag(tr) == TAG_TEN
-        && term_val(tr) == term_val(ten_r)) {
-      matched = 1;
-    }
-    if (matched) {
-      // tinygrad mixin/op.py:450 Tensor.gradient: a named target gets gy
-      // whether or not it is marked; marks only pick the single walk's leaves.
-      return gy_for_leaf;
-    }
-    return uop_const(grad_target_dtype(), 0);
+    // tinygrad mixin/op.py:450 Tensor.gradient: a named target gets gy whether
+    // or not it is marked; marks only pick the single walk's leaves.
+    return grad_term_matches_target(ten, target)
+         ? gy_for_leaf
+         : uop_const(grad_target_dtype(), 0);
   }
   u32 tid = (u32)term_val(ten_r);
   u32 leaf_dt = DT_FP32;
@@ -300,27 +327,6 @@ static inline u32 grad_dep_hash(u64 loc, Term target) {
   h ^= (u64)target; h *= 0xc4ceb9fe1a85ec53ULL;
   h ^= h >> 33;
   return (u32)h & (GRAD_DEP_CAP - 1);
-}
-
-static int grad_term_matches_target(Term t, Term target) {
-  if (target == 0) {
-    return 0;
-  }
-  // The same bound variable, the same tid, or the same substituted graph.
-  Term ty = grad_alo_resolve(target);
-  Term tt = grad_alo_resolve(t);
-  if (ty == tt) {
-    return 1;
-  }
-  Term tr = term_resolve(target);
-  Term rr = term_resolve(t);
-  if (term_tag(tr) == TAG_TEN && term_tag(rr) == TAG_TEN
-      && term_val(tr) == term_val(rr)) {
-    return 1;
-  }
-  // A recursive loop's `w` past the first iteration: grad_alo_resolve stops at
-  // its DP1 wrapper, term_resolve reaches the shared graph and fires nothing.
-  return tr == rr;
 }
 
 static int grad_depends_on_target(Term t, Term target) {
@@ -857,20 +863,14 @@ static Term interact_grad_dispatch(Term grad_term) {
 
   u8 y_tag = term_tag(y);
 
-  // === LEAF: y is a TEN ===
-  // y is the target itself, as the same bound variable.
-  if (target != 0) {
-    Term ty = grad_alo_resolve(target);
-    Term yr = grad_alo_resolve(heap_read(cell_orig + 0));
-    if (ty == yr) return gy;
+  // y is the target itself.
+  if (grad_term_matches_target(heap_read(cell_orig + 0), target)) {
+    return gy;
   }
 
+  // === LEAF: y is a TEN ===
   if (y_tag == TAG_TEN) {
     if (target != 0) {
-      Term tr = term_resolve(target);
-      if (term_tag(tr) == TAG_TEN && term_val(tr) == term_val(y)) {
-        return gy;
-      }
       Term kterm = grad_kernel_term_from_ten(y);
       if (kterm != 0) {
         u32 tid = (u32)term_val(y);
