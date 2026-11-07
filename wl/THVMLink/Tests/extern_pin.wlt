@@ -8,14 +8,15 @@ BeginPackage["THVMLinkTests`Extern`Pin`",
 
 Begin["`Private`"];
 
-(* === a fresh TTerm pins a Term on construction === *)
+(* === a fresh TTerm pins a Term on construction; it is held, since a
+       discarded wrapper may release its pin by the next library call === *)
 
 VerificationTest[
     TInit[];
     TReset[];
-    Module[{before, after},
+    Module[{before, t, after},
         before = TExternPinCount[];
-        TEra[];
+        t = TEra[];
         after = TExternPinCount[];
         after - before
     ],
