@@ -7,11 +7,18 @@
 Needs["Wolfram`Parser`"]
 
 
+(* The file overload reads a problem this test writes itself: inv(inv(a)) = a in an abelian group. *)
 VerificationTest[
-    Module[{p = TFindProof[
-        File[FileNameJoin[{Directory[], "tools", "baselines", "vampire_tptp",
-            "AbelianGroupAxioms__InverseOfInverse.p"}]],
-        TimeConstraint -> 10]},
+    Module[{f = FileNameJoin[{$TemporaryDirectory, "thvm-" <> CreateUUID[] <> ".p"}], p},
+        WriteString[f,
+            "cnf(left_identity, axiom, mult(e, X) = X).\n" <>
+            "cnf(left_inverse, axiom, mult(inv(X), X) = e).\n" <>
+            "cnf(associativity, axiom, mult(mult(X, Y), Z) = mult(X, mult(Y, Z))).\n" <>
+            "cnf(commutativity, axiom, mult(X, Y) = mult(Y, X)).\n" <>
+            "cnf(goal, negated_conjecture, inv(inv(a)) != a).\n"];
+        Close[f];
+        p = TFindProof[File[f], TimeConstraint -> 10];
+        DeleteFile[f];
         Head @ Quiet @ p["ProofFunction"][p["Theorems"]]
     ],
     Success,
