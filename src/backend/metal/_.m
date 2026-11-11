@@ -121,14 +121,12 @@ static void metal_freelist_trim(void);
 #define THVM_METAL_METALLIB "build/default.metallib"
 #endif
 
-// Resolve the metallib to load.  THVM_METAL_METALLIB is a CWD-relative
-// dev path ("build/default.metallib") that works when running from the
-// repo root.  In an installed paclet the CWD is arbitrary, so fall back
-// to a "default.metallib" sitting next to this dylib -- `make wl-mac`
-// ships one there.  dladdr on this very function yields the dylib path.
-// Returns a pointer to a static buffer (single-threaded init path).
+// Resolve the metallib to load: the "default.metallib" beside this library first (`make wl` and
+// `make wl-mac` put one there, and an installed library must not load whatever build tree the
+// working directory holds), else THVM_METAL_METALLIB, the build tree's path relative to the repo
+// root.  dladdr on this very function yields the library path.  Returns a pointer to a static
+// buffer (single-threaded init path).
 static const char *metal_metallib_path(void) {
-  if (access(THVM_METAL_METALLIB, R_OK) == 0) return THVM_METAL_METALLIB;
   Dl_info info;
   static char sibling[1024];
   if (dladdr((const void *)&metal_metallib_path, &info) && info.dli_fname) {
@@ -142,7 +140,7 @@ static const char *metal_metallib_path(void) {
       }
     }
   }
-  return THVM_METAL_METALLIB;  // last resort: let newLibraryWithURL report it
+  return THVM_METAL_METALLIB;  // newLibraryWithURL reports a missing one
 }
 
 // Forward-declared here so metal_init can reset the length on
@@ -391,13 +389,15 @@ static int metal_init(void) {
   }
   METAL_DEVICE = MTLCreateSystemDefaultDevice();
   if (METAL_DEVICE == nil) {
-    fprintf(stderr, "thvm: metal_init -- no Metal device available\n");
+    snprintf(BACKEND_INIT_REASON, sizeof BACKEND_INIT_REASON, "no Metal device available");
+    fprintf(stderr, "thvm: metal_init -- %s\n", BACKEND_INIT_REASON);
     return -1;
   }
   METAL_QUEUE = [METAL_DEVICE newCommandQueue];
   if (METAL_QUEUE == nil) {
-    fprintf(stderr, "thvm: metal_init -- failed to create command queue on %s\n",
-            [[METAL_DEVICE name] UTF8String]);
+    snprintf(BACKEND_INIT_REASON, sizeof BACKEND_INIT_REASON, "failed to create a command queue on %s",
+             [[METAL_DEVICE name] UTF8String]);
+    fprintf(stderr, "thvm: metal_init -- %s\n", BACKEND_INIT_REASON);
     METAL_DEVICE = nil;
     return -1;
   }
@@ -407,9 +407,9 @@ static int metal_init(void) {
       [NSString stringWithUTF8String:metallib_path]];
   METAL_LIB = [METAL_DEVICE newLibraryWithURL:libURL error:&err];
   if (METAL_LIB == nil) {
-    fprintf(stderr, "thvm: metal_init -- failed to load metallib at %s: %s\n",
-            metallib_path,
-            err ? [[err localizedDescription] UTF8String] : "(no error)");
+    snprintf(BACKEND_INIT_REASON, sizeof BACKEND_INIT_REASON, "failed to load metallib at %s: %s",
+             metallib_path, err ? [[err localizedDescription] UTF8String] : "(no error)");
+    fprintf(stderr, "thvm: metal_init -- %s\n", BACKEND_INIT_REASON);
     METAL_QUEUE  = nil;
     METAL_DEVICE = nil;
     return -1;

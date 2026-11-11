@@ -395,8 +395,18 @@ TDevice[t_TTerm] := (ensureInit[]; deviceName[$termDeviceFn[ttermRaw[t]]])
    on CPU and move only the result, so to run an imported forward on the GPU
    you just write TToDevice[net[x], "metal"] (no need to wrap the input
    separately).  A bare realized tensor is the degenerate one-leaf upload.
-   Mirrors tinygrad's model.to(device) moving the parameters. *)
-TToDevice[t_TTerm, device_String] := (ensureInit[]; TTerm[$uopToDeviceFn[ttermRaw[t], deviceCode[device]]])
+   Mirrors tinygrad's model.to(device) moving the parameters.
+   A device whose backend cannot compute (Metal without its default.metallib, a
+   device this build lacks) is refused, as tinygrad raises when a device fails to
+   open, rather than handing back a tensor that reads zeros. *)
+TToDevice::nodev = "Device `1` cannot compute: `2`";
+TToDevice[t_TTerm, device_String] := (
+    ensureInit[];
+    With[{why = $deviceUnavailableFn[deviceCode[device]]},
+        If[ why =!= "",
+            Message[TToDevice::nodev, device, why]; $Failed,
+            TTerm[$uopToDeviceFn[ttermRaw[t], deviceCode[device]]]]]
+)
 
 (* === INDEX-layer UOp constructors ===
    INDEX layer + BUFFER/STORE/AFTER/OPT.  Used by Rewrite.wl and the

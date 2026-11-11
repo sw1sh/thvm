@@ -939,12 +939,18 @@ static Term materialize_copy(Term term) {
   if (src_mat != src) heap_set(loc, src_mat);
 
   // The target is the COPY's explicit device, else the realize backend.  An
-  // explicit device's backend is installed on demand; when it is unavailable
-  // (Metal on a non-Metal build) the COPY passes through on the realize
-  // backend.
+  // explicit device's backend is installed on demand; one that cannot compute
+  // fails the realize (realize_needs_device), and the COPY lowers on the realize
+  // backend only so materialize can finish.
   Backend *target      = (cpy_dev < 0) ? CURRENT_BACKEND : ctx_ensure_backend(cpy_dev);
-  if (target == NULL) target = CURRENT_BACKEND;
+  if (target == NULL) {
+    realize_needs_device(cpy_dev);
+    target = CURRENT_BACKEND;
+  }
   Backend *src_backend = (src_dev >= 0) ? ctx_ensure_backend(src_dev) : NULL;
+  if (src_dev >= 0 && src_backend == NULL) {
+    realize_needs_device(src_dev);
+  }
 
   // A compute src: the transfer must run after its kernel.  Across devices it
   // becomes a fire-time cross-backend ASSIGN (interact_assign reads the src's
@@ -4352,7 +4358,10 @@ static Term emit_kernel_for_boundary(u32 bi) {
   // kernel on another device skips it.
   i32      op_dev     = term_device_in(root_term);
   Backend *op_backend = (op_dev < 0) ? CURRENT_BACKEND : ctx_ensure_backend(op_dev);
-  if (op_backend == NULL) op_backend = CURRENT_BACKEND;
+  if (op_backend == NULL) {
+    realize_needs_device(op_dev);
+    op_backend = CURRENT_BACKEND;
+  }
   // Resident weight-movement hit: a TRealize@Transpose of a resident weight
   // that a warmup or an earlier replay already realized and pinned is reused as
   // a pre-capture leaf instead of re-emitting the permute as a recorded

@@ -100,26 +100,30 @@ static void cuda_set_error(const char *where, CUresult r) {
            "%s: %s", where, cuda_err_str(r));
 }
 
+// cuda_init's failure: the reason goes to stderr and to BACKEND_INIT_REASON.
+fn int cuda_init_fail(char const *why) {
+  snprintf(BACKEND_INIT_REASON, sizeof BACKEND_INIT_REASON, "%s", why);
+  fprintf(stderr, "thvm: cuda_init -- %s\n", why);
+  return -1;
+}
+
 fn int cuda_init(void) {
   if (CUDA_READY) return 0;
   CUresult r = cuInit(0);
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuInit", r);
-    fprintf(stderr, "thvm: cuda_init -- %s\n", CUDA_LAST_ERROR);
-    return -1;
+    return cuda_init_fail(CUDA_LAST_ERROR);
   }
   int n_dev = 0;
   r = cuDeviceGetCount(&n_dev);
   if (r != CUDA_SUCCESS || n_dev < 1) {
     cuda_set_error("cuDeviceGetCount", r);
-    fprintf(stderr, "thvm: cuda_init -- no CUDA device available\n");
-    return -1;
+    return cuda_init_fail("no CUDA device available");
   }
   r = cuDeviceGet(&CUDA_DEVICE, 0);
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuDeviceGet", r);
-    fprintf(stderr, "thvm: cuda_init -- %s\n", CUDA_LAST_ERROR);
-    return -1;
+    return cuda_init_fail(CUDA_LAST_ERROR);
   }
   // CUDA 13 headers remap cuCtxCreate to the 4-argument _v4 entry (a
   // leading CUctxCreateParams*, NULL = defaults); earlier toolkits keep
@@ -132,8 +136,7 @@ fn int cuda_init(void) {
 #endif
   if (r != CUDA_SUCCESS) {
     cuda_set_error("cuCtxCreate", r);
-    fprintf(stderr, "thvm: cuda_init -- %s\n", CUDA_LAST_ERROR);
-    return -1;
+    return cuda_init_fail(CUDA_LAST_ERROR);
   }
   char name[128] = {0};
   cuDeviceGetName(name, sizeof name, CUDA_DEVICE);

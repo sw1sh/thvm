@@ -699,6 +699,7 @@ $materializeFn := $materializeFn = load["thvm_wl_materialize", {Integer}, Intege
 $realizeFn := $realizeFn = load["thvm_wl_realize", {Integer}, Integer];
 $realizeManyFn := $realizeManyFn = load["thvm_wl_realize_many", {{Integer, 1}}, Integer];
 $realizeErrorFn := $realizeErrorFn = load["thvm_wl_realize_error", {}, "UTF8String"];
+$deviceUnavailableFn := $deviceUnavailableFn = load["thvm_wl_device_unavailable", {Integer}, "UTF8String"];
 $kernelCountFn := $kernelCountFn = load["thvm_wl_kernel_count", {}, Integer];
 $kernelProgramCacheSizeFn := $kernelProgramCacheSizeFn = load["thvm_wl_kernel_program_cache_size", {}, Integer];
 $kernelProgramKeyFn := $kernelProgramKeyFn = load["thvm_wl_kernel_program_key", {Integer}, Integer];

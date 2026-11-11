@@ -23,11 +23,36 @@ fn Term thvm_realize_many(Term ctr_term);
 // Why the last thvm_realize / thvm_realize_many returned 0 ("" when it
 // did not fail).  A realize error must not exit(): the py interpreter or
 // the WolframKernel hosting the runtime has to survive it.
-static char REALIZE_ERROR[96];
+static char REALIZE_ERROR[320];
 
 // Deferred heap collection for a host that holds raw Terms (realize.c).
 fn char const *thvm_realize_error(void) {
   return REALIZE_ERROR;
+}
+
+// The device a realize had to run on and could not (materialize records it), or -1.
+static i32 REALIZE_DEAD_DEVICE = -1;
+
+fn void realize_needs_device(i32 dev) {
+  if (REALIZE_DEAD_DEVICE < 0) {
+    REALIZE_DEAD_DEVICE = dev;
+  }
+}
+
+// Fails the realize, with the reason, when `dev` cannot compute.
+static int realize_device_failed(i32 dev) {
+  char const *why = backend_unavailable_reason(dev);
+  if (why[0] == '\0') {
+    return 0;
+  }
+  snprintf(REALIZE_ERROR, sizeof REALIZE_ERROR, "device %s cannot compute: %s", thvm_dev_label(dev), why);
+  return 1;
+}
+
+static int realize_dead_device_failed(void) {
+  i32 dev = REALIZE_DEAD_DEVICE;
+  REALIZE_DEAD_DEVICE = -1;
+  return dev >= 0 && realize_device_failed(dev);
 }
 
 // A realize that fired a GC-stripped kernel computed on stale bytes
@@ -458,7 +483,7 @@ static Term realize_end(RealizeMarks m, Term res) {
   uop_mov_cache_reset();
 
   CURRENT_CTX->default_device = m.device;
-  if (realize_stale_fire_failed()) {
+  if (realize_stale_fire_failed() || realize_dead_device_failed()) {
     return 0;
   }
   return res;
@@ -468,6 +493,7 @@ fn Term thvm_realize(Term expr) {
   HOT_REALIZE_CALLS++;
   REALIZE_ERROR[0] = '\0';
   (void)kernel_stale_fire_take();
+  REALIZE_DEAD_DEVICE = -1;
   // TEN short-circuit: a Term that's already a TAG_TEN (typical when
   // the user holds onto a TTerm wrapper and re-realizes it) has no
   // remaining compute -- skip the wnf+materialize loop entirely so
@@ -516,8 +542,10 @@ fn Term thvm_realize(Term expr) {
     route_term = term_resolve(heap_read(term_val(route_term) + 0));
   }
   i32 want_device = term_device_in(route_term);
-  if (want_device >= 0 && want_device != (i32)saved_default_device
-      && ctx_ensure_backend(want_device) != NULL) {
+  if (want_device >= 0 && want_device != (i32)saved_default_device) {
+    if (realize_device_failed(want_device)) {
+      return 0;
+    }
     CURRENT_CTX->default_device = (u32)want_device;
   }
 
@@ -636,6 +664,7 @@ fn Term thvm_realize_many(Term ctr_term) {
   HOT_REALIZE_CALLS++;
   REALIZE_ERROR[0] = '\0';
   (void)kernel_stale_fire_take();
+  REALIZE_DEAD_DEVICE = -1;
   if (term_tag(ctr_term) != TAG_CTR) return thvm_realize(ctr_term);
   u32 n = term_ctr_n(ctr_term);
   if (n == 0) return ctr_term;

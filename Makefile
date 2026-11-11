@@ -79,6 +79,7 @@ TESTS := \
   $(BIN)/test_redex \
   $(BIN)/test_step_incremental \
   $(BIN)/test_metal_stub \
+  $(BIN)/test_backend_unavailable \
   $(BIN)/test_expand_axis \
   $(BIN)/test_view_strided \
   $(BIN)/test_view_chain_merge \
@@ -332,6 +333,7 @@ $(WL_LIB): $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) build/th
 	  $(if $(METAL_OBJ),-DTHVM_HAS_METAL,) \
 	  -o $@ $(WL_SRC) build/thvm_runtime_blob.c $(METAL_OBJ) $(METAL_LDFLAGS) \
 	  $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm -ldl)
+	$(if $(METAL_LIBPATH),cp $(METAL_LIBPATH) $(WL_LIB_DIR)/default.metallib)
 ifeq ($(UNAME_S),Darwin)
 	codesign --force --sign - $@
 endif
@@ -586,6 +588,15 @@ $(AOT_TESTS): $(BIN)/test_%: tests/test_%.c $(SRC) $(AOT_BLOB) | $(BIN)
 
 $(METAL_TESTS): $(BIN)/%: tests/%.c $(SRC) $(METAL_OBJ) $(METAL_LIBPATH) | $(BIN)
 	$(CC) $(CFLAGS) $(TEST_DEFINES) -DTHVM_HAS_METAL -o $@ $< $(METAL_OBJ) $(METAL_LDFLAGS) $(TEST_LDFLAGS)
+
+# test_backend_unavailable: where Metal builds, the real backend with its metallib path pointing at
+# no file (and none beside the binary); elsewhere the Metal stub.  Either fails to start.
+$(BUILD)/backend_metal_nolib.o: src/backend/metal/_.m src/thvm.h | $(BUILD)
+	clang -fobjc-arc -O2 -c -DTHVM_METAL_METALLIB='"$(BUILD)/no-such.metallib"' -o $@ $<
+
+$(BIN)/test_backend_unavailable: tests/test_backend_unavailable.c $(SRC) $(if $(HAVE_METAL),$(BUILD)/backend_metal_nolib.o) | $(BIN)
+	$(CC) $(CFLAGS) $(TEST_DEFINES) $(ATP_DEFINES) $(if $(HAVE_METAL),-DTHVM_HAS_METAL) -o $@ $< \
+	  $(if $(HAVE_METAL),$(BUILD)/backend_metal_nolib.o $(METAL_LDFLAGS)) $(TEST_LDFLAGS)
 
 # CUDA tests: -DTHVM_HAS_CUDA pulls backend/cuda/ into the single-TU build;
 # -lcuda -lnvrtc link the driver + nvrtc.  Reachable only when the CUDA

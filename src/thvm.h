@@ -2411,6 +2411,13 @@ extern Backend METAL_BACKEND;
 // Install (on first use) + return the backend for device `dev`
 // (THVM_DEV_*) in the current context; NULL if unavailable.  See thvm.c.
 Backend *ctx_ensure_backend(i32 dev);
+// Why `dev` cannot compute ("" when it can), its name, and the reason a failing backend init
+// leaves for them.
+char const *backend_unavailable_reason(i32 dev);
+char const *thvm_dev_label(i32 dev);
+extern char BACKEND_INIT_REASON[192];
+// A COPY or kernel the realize must run on `dev` found it unable to compute: the realize fails.
+fn void realize_needs_device(i32 dev);
 // CUDA backend -- defined only in the Linux+CUDA build (THVM_HAS_CUDA).
 // Plain C99 (driver API + nvrtc are C), so it lives in this single-TU
 // build rather than a separate object like the Objective-C Metal one.

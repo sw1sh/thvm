@@ -2433,6 +2433,15 @@ EXTERN_C DLLEXPORT int thvm_wl_realize_error(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Why device args[0] (THVM_DEV_*) cannot compute, starting its backend if need be; "" when it can.
+EXTERN_C DLLEXPORT int thvm_wl_device_unavailable(WolframLibraryData libData,
+                                                  mint argc, MArgument *args,
+                                                  MArgument res) {
+  (void)libData; (void)argc;
+  MArgument_setUTF8String(res, (char *)backend_unavailable_reason((i32)MArgument_getInteger(args[0])));
+  return LIBRARY_NO_ERROR;
+}
+
 // Expose kernel-entry introspection for tests.
 EXTERN_C DLLEXPORT int thvm_wl_kernel_count(WolframLibraryData libData, mint argc,
                                             MArgument *args, MArgument res) {

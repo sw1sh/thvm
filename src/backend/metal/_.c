@@ -6,16 +6,20 @@
 // fails LOUDLY at any compute-touching call -- much better than
 // silently returning zeros.
 //
-// init() succeeds (no resources to allocate yet); shutdown() is a
-// no-op.  buf_alloc returns 0 (the "no buffer" sentinel reserved by
-// the CPU backend convention), so any subsequent buf_read/write/
-// dispatch hits the error paths.
+// init() fails, so ctx_ensure_backend never hands the stub out and a
+// realize on Metal fails with the reason; shutdown() is a no-op.
+// buf_alloc returns 0 (the "no buffer" sentinel reserved by the CPU
+// backend convention), so any direct buf_read/write/dispatch hits the
+// error paths.
 //
 // Once src/backend/metal/init.m + the per-op .m files arrive, this
 // file gets replaced with the .m glue (and CPU_BACKEND remains the
 // other choice).
 
-static int  metal_init(void)                                    { return 0; }
+static int metal_init(void) {
+  snprintf(BACKEND_INIT_REASON, sizeof BACKEND_INIT_REASON, "this build has no Metal backend");
+  return -1;
+}
 static void metal_shutdown(void)                                { /* nop */ }
 
 static u32  metal_buf_alloc(u64 nbytes)                         { (void)nbytes;     return 0; }

@@ -668,17 +668,50 @@ static void install_ctx_backends(TContext *ctx, const char *want) {
 #endif
 }
 
-// Ensure the backend for device `dev` (THVM_DEV_CPU/METAL/CUDA) is
-// installed in the current context, initialising it on first use, and
-// return it (NULL if `dev` is out of range or its backend is a no-op
-// stub on this build).  Lets an explicit-device UOP_COPY upload to a
-// device the session did not start on -- the context's default_device is
-// UNTOUCHED (the device lives in the graph, not the context, per
-// tinygrad's model); only the per-device vtable slot is populated so a
-// Metal-targeted COPY works from a CPU-default session.
+// A backend whose init failed computes nothing, as tinygrad raises when a device fails to open:
+// ctx_ensure_backend refuses it and a realize that needs it fails with the reason, which a failing
+// init writes to BACKEND_INIT_REASON.  thvm_init clears the record, so a later TInit retries.
+char        BACKEND_INIT_REASON[192];
+static char BACKEND_FAILED[THVM_MAX_BACKENDS][256];
+static char const *const THVM_DEV_NAMES[THVM_MAX_BACKENDS] = {"cpu", "metal", "cuda", "device 3"};
+
+char const *thvm_dev_label(i32 dev) {
+    return (dev >= 0 && dev < THVM_MAX_BACKENDS) ? THVM_DEV_NAMES[dev] : "no device";
+}
+
+static int backend_start(i32 dev, Backend *b) {
+    BACKEND_INIT_REASON[0] = '\0';
+    if (b->init() == 0) {
+        return 1;
+    }
+    snprintf(BACKEND_FAILED[dev], sizeof BACKEND_FAILED[dev], "%s",
+             BACKEND_INIT_REASON[0] ? BACKEND_INIT_REASON : "its backend failed to start");
+    return 0;
+}
+
+// The default device's backend, started; one that fails leaves the CPU the default, so a tensor
+// is never allocated on a device that cannot compute.
+static void backend_start_default(TContext *ctx) {
+    i32 dev = (i32)ctx->default_device;
+    if (backend_start(dev, ctx->backends[dev])) {
+        return;
+    }
+    fprintf(stderr, "thvm: device %s cannot compute (%s); the default device is cpu\n",
+            thvm_dev_label(dev), BACKEND_FAILED[dev]);
+    ctx->backends[dev]  = NULL;
+    ctx->default_device = THVM_DEV_CPU;
+    (void)backend_start(THVM_DEV_CPU, &CPU_BACKEND);
+}
+
+// Ensure the backend for device `dev` (THVM_DEV_CPU/METAL/CUDA) is installed in the current
+// context, starting it on first use, and return it; NULL when `dev` is out of range, has no
+// backend in this build, or failed to start.  Lets an explicit-device UOP_COPY upload to a device
+// the session did not start on -- the context's default_device is UNTOUCHED (the device lives in
+// the graph, not the context, per tinygrad's model).
 Backend *ctx_ensure_backend(i32 dev) {
     TContext *ctx = CURRENT_CTX;
     if (dev < 0 || dev >= THVM_MAX_BACKENDS) return NULL;
+    if (BACKEND_FAILED[dev][0] != '\0') return NULL;
     if (ctx->backends[dev] != NULL) return ctx->backends[dev];
     Backend *b = NULL;
     switch (dev) {
@@ -687,12 +720,21 @@ Backend *ctx_ensure_backend(i32 dev) {
 #ifdef THVM_HAS_CUDA
         case THVM_DEV_CUDA:  b = &CUDA_BACKEND;  break;
 #endif
-        default: return NULL;
+        default:
+            snprintf(BACKEND_FAILED[dev], sizeof BACKEND_FAILED[dev], "this build has no %s backend",
+                     thvm_dev_label(dev));
+            return NULL;
     }
+    if (!backend_start(dev, b)) return NULL;
     ctx->backends[dev] = b;
     if ((u32)dev + 1 > ctx->n_backends) ctx->n_backends = (u32)dev + 1;
-    b->init();
     return b;
+}
+
+// Why device `dev` cannot compute, starting its backend if need be; "" when it can.
+char const *backend_unavailable_reason(i32 dev) {
+    if (dev < 0 || dev >= THVM_MAX_BACKENDS) return "no such device";
+    return ctx_ensure_backend(dev) != NULL ? "" : BACKEND_FAILED[dev];
 }
 
 void thvm_init(void) {
@@ -743,8 +785,9 @@ void thvm_init(void) {
   // device for newly allocated tensors.  Per-tensor backends are still
   // stored on TenDesc.backend, so tensors created in a future session
   // could in principle live on a different backend than the default.
+  memset(BACKEND_FAILED, 0, sizeof BACKEND_FAILED);
   install_ctx_backends(CURRENT_CTX, getenv("DEV"));
-  DEFAULT_BACKEND->init();
+  backend_start_default(CURRENT_CTX);
   // Register core PRI primitives (SEQ + LOG) -- idempotent overwrite,
   // safe across re-init.  ATP registers its own block separately on
   // first thvm_atp_init.
@@ -898,7 +941,7 @@ u32 thvm_context_create(const char *default_device) {
         thvm_set_current_ctx(ctx);
         init_ctx_arrays(ctx);
         install_ctx_backends(ctx, default_device);
-        DEFAULT_BACKEND->init();
+        backend_start_default(ctx);
         thvm_set_current_ctx(prev);
         return slot;
     }
