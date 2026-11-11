@@ -39,7 +39,8 @@ make wl-test       # run every wl/THVMLink/Tests/*.wlt
 ```
 
 Requires a C11 compiler (`clang` by default). The Metal backend builds on
-macOS, CUDA on Linux with the toolkit; `DEV=cpu|metal|cuda` picks the device at
+macOS with Xcode's Metal toolchain (`make HAVE_METAL=` builds CPU-only), CUDA
+on Linux with the toolkit; `DEV=cpu|metal|cuda` picks the device at
 runtime. `make wl` finds the newest Wolfram install (`/Applications/Wolfram*.app`
 on macOS, `/usr/local/Wolfram/*/*` on Linux); `WOLFRAM_APP=<install>` picks
 another, and `WL_INCLUDE=<dir>` points at any directory holding

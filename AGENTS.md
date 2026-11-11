@@ -109,7 +109,8 @@ make clean            # remove bin/
 - WL tests load the library `make wl` built; rebuild it after a runtime change.
 - Python tests: `make py`, then `python -m pytest py/tests/test_<name>.py`
   (`py/tests/helpers.py` puts `py/` on the path).
-- The Metal backend builds on macOS; CUDA builds on Linux when the toolkit
+- The Metal backend builds on macOS when Xcode's Metal toolchain runs
+  (`make HAVE_METAL=` builds CPU-only); CUDA builds on Linux when the toolkit
   headers are found (`CUDA_HOME`). `DEV=cpu|metal|cuda` picks the device at
   runtime.
 - `THVM_*` environment knobs are indexed in

@@ -191,11 +191,16 @@ METAL_TESTS := $(addprefix $(BIN)/,test_metal_real test_metal_pad_softmax \
 CUDA_TESTS  := $(addprefix $(BIN)/,test_cuda_backend test_cuda_mixed \
   test_custom_kernel_cuda)
 
-# === Metal backend (Darwin only) =====================================
+# === Metal backend (Darwin with the Metal toolchain) =================
 # src/backend/metal/_.m compiles separately into build/backend_metal.o.
 # Tests / dylib that #define THVM_HAS_METAL link this object + the
-# Metal frameworks; src/thvm.c then skips the C-side stub.
-ifeq ($(shell uname -s),Darwin)
+# Metal frameworks; src/thvm.c then skips the C-side stub.  HAVE_METAL
+# is 1 when xcrun runs the Metal compiler, which Xcode ships as a
+# separate component; `make HAVE_METAL=` builds CPU-only.
+ifeq ($(origin HAVE_METAL),undefined)
+  HAVE_METAL := $(if $(filter Darwin,$(shell uname -s)),$(shell xcrun -sdk macosx metal --version >/dev/null 2>&1 && echo 1),)
+endif
+ifneq ($(HAVE_METAL),)
   METAL_OBJ      := $(BUILD)/backend_metal.o
   METAL_LDFLAGS  := -framework Metal -framework Foundation -framework MetalPerformanceShaders
   METAL_LIBPATH  := $(BUILD)/default.metallib
