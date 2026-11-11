@@ -23,7 +23,7 @@
    from the Wolfram/WolframParser paclet (declared in BeginPackage so
    Needs auto-loads it). *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`"}]
 
 SetUsage[TVampireProof, "TVampireProof[file$] runs the local Vampire CLI on the TPTP problem file$ and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
 TVampireProof[theory$, thm$] resolves the TPTP file under tools/baselines/vampire_tptp from the (theory$, thm$) pair (the bench-harness convention) and proves it.
@@ -144,7 +144,7 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
             True, out
         ];
         derivation = If[ status === "Proved",
-            Quiet @ Check[Wolfram`Parser`TPTPImport[proofText, "SZS"], $Failed],
+            Quiet @ Check[tptpImport[proofText, "SZS"], $Failed],
             Missing["NoProof"]
         ];
         (* A proof that Vampire found but TPTPImport could not parse must

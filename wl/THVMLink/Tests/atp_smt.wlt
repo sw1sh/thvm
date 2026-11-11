@@ -2,6 +2,10 @@
    TFindProof Method -> "SMT" entailment surface.  Each VerificationTest is
    self-contained; the file is exercised by wl/THVMLink/Tests/run.wls. *)
 
+(* One test parses its problem with TPTPImport itself; THVMLink loads Wolfram`Parser` only on its
+   own first TPTP parse. *)
+Needs["Wolfram`Parser`"]
+
 VerificationTest[
     TSatEUF[{}, {}]["Status"],
     "SAT",

@@ -42,10 +42,8 @@
    (or equivalently `<< WolframInstitute`THVMLink`ATP``) and call them by bare name.
    WolframInstitute`THVMLink` is on the context path so bare IC primitives (TDef /
    TRef / TLam / ...) owned by sibling Kernel files still resolve
-   transparently.  Wolfram`Parser` is on the path so `TPTPImport`
-   (the EBNFParse-driven TPTP parser, now a sibling in the
-   Wolfram/WolframParser paclet) resolves without qualification. *)
-Needs["Wolfram`Parser`"];
+   transparently.  Wolfram`Parser` (TPTPImport) loads on the first TPTP
+   parse, through tptpImport: a plain TFindProof never needs it. *)
 
 (* Implementation split across sibling files in this directory (Gotten
    after this one by the recursive Kernel loader, all sharing the
@@ -53,7 +51,7 @@ Needs["Wolfram`Parser`"];
      ATP_ProofGraph.wl   proof decoder + ProofDataset + critical-pair-lemma DAG
      ATP_Method.wl       TAtpSchedule / TAtpDescribeMethod + structure auto-tune
      ATP_Relevance.wl    TRelevantAxioms premise-selection filter *)
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`"}];
 
 SetUsage[TATP, "TATP[{lhs$1 == rhs$1, $$}, conjecture$] runs the IC-native ATP saturation on the given equational axioms and conjecture, returning an Association with Status, Steps, Rules, QueueSize.
 TATP[File[path$]] parses a Waldmeister .pr file and runs the saturator directly.
@@ -144,9 +142,7 @@ SetUsage[PortfolioFrontLoad, "PortfolioFrontLoad is an option for TFindProof tha
    rather than creating a phantom WolframInstitute`THVMLink`ATP`Private`X.  The
    alphabetical autoload order means those symbols don't exist yet
    when this file is parsed; the bare mention here pre-creates them
-   in the public context.  TPTPImport now lives in Wolfram`Parser`
-   (added to the context path above) so it doesn't need
-   pre-declaration. *)
+   in the public context. *)
 {TSatEUF, TSmtDecide};
 
 (* SafeTensors.wl (a depth-4 sibling, loaded earlier) owns these; the
@@ -4388,28 +4384,32 @@ TFindProof[thms_Association, theory_String, returnSpec_ ? atpReturnSpecQ, opts :
    skipped with a console warning.  See Kernel/ATP/TPTPImport.wl. *)
 atpTptpTextQ[s_String] := StringContainsQ[s, "cnf(" | "fof("]
 
+(* Wolfram`Parser`'s TPTPImport, loading the paclet on the first TPTP parse.  ATP.wl, the process
+   provers and ProcessProofObject.wl all parse through here. *)
+tptpImport[args___] := (Needs["Wolfram`Parser`"]; Wolfram`Parser`TPTPImport[args])
+
 TFindProof[File[path_String], opts : OptionsPattern[]] :=
-    tptpDispatch[TPTPImport[File[path]], opts]
+    tptpDispatch[tptpImport[File[path]], opts]
 TFindProof[s_String ? atpTptpTextQ, opts : OptionsPattern[]] :=
-    tptpDispatch[TPTPImport[s], opts]
+    tptpDispatch[tptpImport[s], opts]
 (* A bare filename string is accepted as the TPTP file -- no File[...] wrapper
    needed.  The FileExistsQ pattern test makes this more specific than the
    theory-name string form, so an existing path is read as a file, not resolved
    through AxiomaticTheory. *)
 TFindProof[path_String ? FileExistsQ, opts : OptionsPattern[]] :=
-    tptpDispatch[TPTPImport[File[path]], opts]
+    tptpDispatch[tptpImport[File[path]], opts]
 
 (* TPTP input + a return spec (e.g. "TPTP" for the SZS+TPTP CNFRefutation
    string): scope the SZS problem name to the file's basename, then thread the
    spec through the dispatcher. *)
 TFindProof[File[path_String], returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     Block[{$atpProblemName = FileNameTake[path]},
-        tptpDispatch[TPTPImport[File[path]], returnSpec, opts]]
+        tptpDispatch[tptpImport[File[path]], returnSpec, opts]]
 TFindProof[s_String ? atpTptpTextQ, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
-    tptpDispatch[TPTPImport[s], returnSpec, opts]
+    tptpDispatch[tptpImport[s], returnSpec, opts]
 TFindProof[path_String ? FileExistsQ, returnSpec_ ? atpReturnSpecQ, opts : OptionsPattern[]] :=
     Block[{$atpProblemName = FileNameTake[path]},
-        tptpDispatch[TPTPImport[File[path]], returnSpec, opts]]
+        tptpDispatch[tptpImport[File[path]], returnSpec, opts]]
 
 (* A problem TPTPImport already parsed. *)
 atpTptpImportedQ[a_Association] := MatchQ[Keys[a], {"Axioms", "Conjecture"}]

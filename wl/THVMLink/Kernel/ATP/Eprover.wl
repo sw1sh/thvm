@@ -13,7 +13,7 @@
    "fof_nnf"; these map through $SZSRuleToConstruct's table (any
    unmapped name defaults to SubstitutionLemma). *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`"}]
 
 SetUsage[TEproverProof, "TEproverProof[file$, opts$] runs the local E prover binary on the TPTP problem file$ (path ending in .p) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
 TEproverProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.
@@ -99,7 +99,7 @@ TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
                 "Failed"
         ];
         derivation = If[ status === "Proved",
-            Quiet @ Check[Wolfram`Parser`TPTPImport[out, "SZS"], $Failed],
+            Quiet @ Check[tptpImport[out, "SZS"], $Failed],
             Missing["NoProof"]
         ];
         foldedDerivation = If[AssociationQ[derivation] && KeyExistsQ[derivation, "Derivation"], eNormalizeDerivation[derivation["Derivation"]], {}];

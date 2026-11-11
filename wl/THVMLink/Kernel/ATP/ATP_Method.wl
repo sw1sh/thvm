@@ -8,7 +8,7 @@
    and it shares the WolframInstitute`THVMLink`ATP`Private` context, so it references
    ATP.wl's loaders, encoder, and helpers by bare name. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`"}];
 
 (* ATP_Method.wl loads before ATP.wl, which assigns the list: the public symbol must exist first. *)
 SetUsage[$AtpMethodPresets, "$AtpMethodPresets lists the names of TFindProof's Method presets."];

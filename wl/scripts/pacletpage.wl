@@ -26,13 +26,15 @@ $unevaluatedPages = {};
    MarkdownToNotebook, through its ResourceObject as parallel kernels need it. *)
 thvmConvertPage[args___] := (
     WolframInstitute`THVMLink`TInit[];
+    Needs["Wolfram`Parser`"];
     ResourceFunction[ResourceObject["https://www.wolframcloud.com/obj/wolframinstitute/DeployedResources/Function/MarkdownToNotebook"]][args]
 );
 
 (* The converter's own resets: a symbol page clears its bindings at every --- and heading, so each
    example group stands alone (run_doc_examples.wls checks the same), and a tutorial threads its
-   state from the first cell to the last.  THVMLink`ATP` loads Wolfram`Parser`, so the examples run against
-   it too, which PacletPage does not read from PacletInfo.wl's {name, version} form.  Each page
+   state from the first cell to the last.  The converter loads Wolfram`Parser`, which THVMLink loads
+   only on its first TPTP parse, so the TPTP pages' examples run against it; "Dependencies" names it
+   because PacletPage does not read PacletInfo.wl's {name, version} form.  Each page
    converts in its own parallel kernel, so an ATP saturation that outlives its time limit, or a
    crash, ends that kernel and not the build; six of them leave the machine to other builds. *)
 $documentationOptions = {

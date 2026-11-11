@@ -9,7 +9,7 @@
    and it shares the WolframInstitute`THVMLink`ATP`Private` context, so it references
    ATP.wl's loaders, encoder, and helpers by bare name. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"WolframInstitute`THVMLink`"}];
 
 Begin["`Private`"];
 

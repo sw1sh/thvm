@@ -299,7 +299,7 @@ RunDocExamples`ensureLoaded[] :=
 	If[ Names["WolframInstitute`THVMLink`TRealize"] === {},
 		Off[General::shdw];
 		PacletDirectoryLoad[RunDocExamples`pacletDir];
-		Needs["WolframInstitute`THVMLink`"]; Needs["WolframInstitute`THVMLink`ATP`"];
+		Needs["WolframInstitute`THVMLink`"]; Needs["WolframInstitute`THVMLink`ATP`"]; Needs["Wolfram`Parser`"];
 		Quiet[Check[Needs[#], Null]] & /@ RunDocExamples`framePackages;
 		$harnessGlobalSymbols = Names["Global`*"]
 	]
@@ -437,7 +437,7 @@ With[{pd = pacletDir},
 		   same contexts in its own order and the built page carries no such message *)
 		Off[General::shdw];
 		PacletDirectoryLoad[pd];
-		Needs["WolframInstitute`THVMLink`"]; Needs["WolframInstitute`THVMLink`ATP`"];
+		Needs["WolframInstitute`THVMLink`"]; Needs["WolframInstitute`THVMLink`ATP`"]; Needs["Wolfram`Parser`"];
 		(* the converter Needs its frame packages before evaluating a page, which
 		   puts them on the page's context path; mirror that once per worker *)
 		Quiet[Check[Needs[#], Null]] & /@ RunDocExamples`framePackages;
@@ -445,8 +445,10 @@ With[{pd = pacletDir},
 	]
 ]
 Off[General::shdw]
+(* The TPTP pages call Wolfram`Parser`'s TPTPImport, which THVMLink loads only on its own first
+   TPTP parse, so each kernel loads it here. *)
 PacletDirectoryLoad[pacletDir]
-Needs["WolframInstitute`THVMLink`"]; Needs["WolframInstitute`THVMLink`ATP`"]
+Needs["WolframInstitute`THVMLink`"]; Needs["WolframInstitute`THVMLink`ATP`"]; Needs["Wolfram`Parser`"]
 Quiet[Check[Needs[#], Null]] & /@ RunDocExamples`framePackages;
 $harnessGlobalSymbols = Names["Global`*"];
 

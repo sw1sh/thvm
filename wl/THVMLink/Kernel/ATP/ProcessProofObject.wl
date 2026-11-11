@@ -28,7 +28,7 @@
      to "SubstitutionLemma" (a benign default; tweak the table to
      add a prover's idiosyncratic inference). *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`"}]
 
 SetUsage[TSZSDerivationToProofObject, "TSZSDerivationToProofObject[derivation$] builds a thvm-shaped proof Association from a parsed SZS derivation (the list returned by Wolfram`Parser`TPTPImport[$$, \"SZS\"]).
 Works for any ATP that emits SZS-framed fof+inference output (Vampire, E, iProver, Twee --tstp, Otter, ...).
@@ -128,7 +128,7 @@ reverseEncodeFormula[expr_] := expr //. {
 parseFormulaBody[body_String] := Block[{cleaned, wrapped, parsed},
     cleaned = StringReplace[body, RegularExpression["([a-zA-Z_][a-zA-Z_0-9]*)\\(\\)"] :> "$1"];
     wrapped = "fof(p, axiom, " <> cleaned <> ").";
-    parsed = Quiet @ Check[Wolfram`Parser`TPTPImport[wrapped], $Failed];
+    parsed = Quiet @ Check[tptpImport[wrapped], $Failed];
     Which[
         AssociationQ[parsed] && Length[parsed["Axioms"]] > 0,
             reverseEncodeFormula @ First @ parsed["Axioms"],

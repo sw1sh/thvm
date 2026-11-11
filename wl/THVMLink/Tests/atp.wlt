@@ -4,6 +4,10 @@
    WL-expression encoder (deferred to 8.7c-d).
 *)
 
+(* The TPTPImport pipe-through test parses with Wolfram`Parser` directly; THVMLink loads it only on
+   its own first TPTP parse. *)
+Needs["Wolfram`Parser`"]
+
 (* === ATP runner roundtrip === *)
 
 (* The ATP runner expects a packed Int64 NumericArray in the wire

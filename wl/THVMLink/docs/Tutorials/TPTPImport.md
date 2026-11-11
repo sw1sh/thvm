@@ -11,7 +11,7 @@ RelatedGuides: [THVMLink]
 RelatedTutorials: [ATP, SMT, Disproof]
 ---
 
-The TPTP (Thousands of Problems for Theorem Provers) library is the standard collection of problems on which automated theorem provers such as Vampire, E, Twee and Waldmeister are compared, and its text format is how those provers exchange problems and proofs. [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport), from the WolframParser paclet, parses that format into Wolfram Language equations, and [TFindProof]() takes a TPTP problem as text or as a file and proves it:
+The TPTP (Thousands of Problems for Theorem Provers) library is the standard collection of problems on which automated theorem provers such as Vampire, E, Twee and Waldmeister are compared, and its text format is how those provers exchange problems and proofs. [TPTPImport](paclet:Wolfram/WolframParser/ref/TPTPImport), from the WolframParser paclet (load it with `Needs["Wolfram`Parser`"]`), parses that format into Wolfram Language equations, and [TFindProof]() takes a TPTP problem as text or as a file and proves it:
 
 | | |
 | --- | --- |

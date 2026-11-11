@@ -8,7 +8,7 @@
    The "ExpressionPrune" (default / Automatic) and "BruteForce" methods are the
    original code, kept identical to ResourceFunction["FindFiniteModels"]. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`"}]
 
 SetUsage[TFindFiniteModels, "TFindFiniteModels[rels$] finds multiplication-table models consistent with the relations rels$ over each operator, assuming each variable takes one of two values.
 TFindFiniteModels[rels$, k$] allows k$ values (k$ >= 2) per variable.

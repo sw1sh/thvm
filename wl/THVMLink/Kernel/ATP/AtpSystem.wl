@@ -5,7 +5,7 @@
    configuration) and keeps the engine state; TAtpNormalForm and TAtpEqualQ
    answer from it by ordered rewriting, without completing again. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`"}]
 
 SetUsage[TAtpComplete, "TAtpComplete[axioms$] completes the equations axioms$ by unfailing Knuth-Bendix completion and gives a TAtpSystem that keeps the completed system in the engine.
 TAtpComplete[axioms$, order$] completes under the ordering order$, as in TKnuthBendixCompletion.

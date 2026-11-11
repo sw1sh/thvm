@@ -6,7 +6,7 @@
    its normal form under them, the way Waldmeister's simplify mode runs the
    goal t == C with C a fresh constant and reads off t's normal form. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}]
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`"}]
 
 SetUsage[TKnuthBendixCompletion, "TKnuthBendixCompletion[axioms$] completes the equations axioms$ by unfailing Knuth-Bendix completion and returns a ProofObject whose \"Theorems\" are the completed rules.
 TKnuthBendixCompletion[axioms$, term$] gives the normal form of term$ under the completed rules.

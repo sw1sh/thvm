@@ -7,7 +7,7 @@
    and it shares the WolframInstitute`THVMLink`ATP`Private` context, so it references
    ATP.wl's loaders, encoder, and helpers by bare name. *)
 
-BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`", "Wolfram`Parser`"}];
+BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframInstitute`THVMLink`"}];
 
 SetUsage[TRelevantAxioms, "TRelevantAxioms[conjecture$, axioms$] reports which axioms the relevance filter keeps versus drops for proving conjecture$, without running a proof.
 TRelevantAxioms[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory.
