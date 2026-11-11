@@ -28,8 +28,8 @@
 *)
 
 (* Wolfram`DiagrammaticComputation` is assumed to be installed
-   (PacletInstall["Wolfram/DiagrammaticComputation"]).  THVMLink's
-   Diagram subpackage Needs it on load. *)
+   (PacletInstall["Wolfram/DiagrammaticComputation"]).  THeapDiagram
+   loads it on its first call. *)
 PacletDirectoryLoad["wl/THVMLink"];
 Get["WolframInstitute`THVMLink`"];   (* Get not Needs: avoids Global`TInit shadow *)
 

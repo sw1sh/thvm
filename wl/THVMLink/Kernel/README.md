@@ -3,7 +3,8 @@
 Each `.wl` here is a sibling package: every file does
 `BeginPackage["WolframInstitute`THVMLink`"]` + `Begin["`Private`"]` and is auto-loaded
 in alphabetical order by `THVMLink.wl` (which Get's every sibling
-through a `Sort @ FileNames` scan). They all share the
+through a `Sort @ FileNames` scan).  The exception is `Diagram.wl`, read on
+`THeapDiagram`'s first call, since it loads the DiagrammaticComputation paclet. They all share the
 `WolframInstitute`THVMLink`Private` context, so cross-file references resolve via
 `SetDelayed` regardless of load order.
 

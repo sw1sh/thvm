@@ -453,11 +453,23 @@ icLabel[base_Integer, tag_Integer] := With[{arity = Length[icPorts[tag]]},
 ]
 
 (* For KERNEL: surface kid + program op count for at-a-glance read.
-   uopHeader (defined in Diagram.wl) returns "KERNEL@<base>#<kid>"
-   already, but kid alone is more useful in this view. *)
+   uopHeader returns "KERNEL@<base>#<kid>" already, but kid alone is
+   more useful in this view. *)
 kernelLabel[loc_Integer] := Block[{kid = TTermVal[THeapRead[loc + 1]]},
     "KERNEL\nk" <> ToString[kid]
 ]
+
+(* A UOP's one-line label, shared with THeapDiagram: the opcode name at its heap base, plus the
+   kernel id of a KERNEL and the target tensor of a GRAD. *)
+uopHeader[base_Integer, $UopKernel] := With[{kid = TTermVal[THeapRead[base + 1]]},
+    "KERNEL@" <> ToString[base] <> "#" <> ToString[kid]
+]
+
+uopHeader[base_Integer, $UopGrad] := With[{targetCell = THeapRead[base + 2]},
+    "GRAD@" <> ToString[base] <> If[TTermTag[targetCell] === $TagTEN, "#" <> ToString[TTermVal[targetCell]], ""]
+]
+
+uopHeader[base_Integer, opcode_Integer] := uopName[opcode] <> "@" <> ToString[base]
 
 (* CONST: surface decoded scalar value via scalarTextFromCell from
    Shape.wl, so "CONST" reads as "1.0" / "0" instead of an opaque

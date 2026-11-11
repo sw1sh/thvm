@@ -1450,15 +1450,16 @@ EndPackage[];
 (* Quiet the sibling-file loader's Get calls against General::shdw:
    parse-time shdw messages don't go through Message[] (they're emitted
    directly by the symbol resolver), so plain Off doesn't catch them;
-   Quiet, applied at the Scan boundary, does. *)
+   Quiet, applied around the loop, does.  Each file's load time, in
+   seconds, stays in Private`$loadSeconds. *)
 With[{base = DirectoryName[$InputFileName]},
     Quiet[
-        Scan[
-            Get,
+        WolframInstitute`THVMLink`Private`$loadSeconds = AssociationMap[
+            First @ AbsoluteTiming @ Get[#] &,
             SortBy[
                 Select[
                     FileNames["*.wl", base, Infinity],
-                    (FileBaseName[#] =!= "THVMLink" && FreeQ[FileNameSplit[#], "Examples"]) &
+                    (FreeQ[{"THVMLink", "Diagram"}, FileBaseName[#]] && FreeQ[FileNameSplit[#], "Examples"]) &
                 ],
                 f |-> {Length @ FileNameSplit[f], ToLowerCase[f]}
             ]
@@ -1470,3 +1471,15 @@ With[{base = DirectoryName[$InputFileName]},
 (* Restore General::shdw now that every sub-package is loaded.  See
    the matching `Off[General::shdw]` at the top of this file. *)
 On[General::shdw];
+
+(* THeapDiagram reads Diagram.wl on its first call: that file loads Wolfram`DiagrammaticComputation`
+   and, under it, WolframInstitute`Hypergraph`, which nothing else in the paclet needs. *)
+Begin["WolframInstitute`THVMLink`Private`"];
+With[{file = FileNameJoin[{DirectoryName[$InputFileName], "Diagram.wl"}]},
+    THeapDiagram[args___] := (
+        DownValues[THeapDiagram] = {};
+        Quiet[Get[file], {General::shdw}];
+        THeapDiagram[args]
+    )
+];
+End[];

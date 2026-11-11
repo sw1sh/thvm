@@ -5,8 +5,9 @@
 interaction-net string diagram. It is the second visualization
 of the heap alongside [`THeapGraph`](heap_graph.md).
 
-Implementation lives in [`wl/THVMLink/Kernel/Diagram.wl`](../../wl/THVMLink/Kernel/Diagram.wl)
-(subcontext `WolframInstitute`THVMLink`Diagram``). The examples runner
+Implementation lives in [`wl/THVMLink/Kernel/Diagram.wl`](../../wl/THVMLink/Kernel/Diagram.wl),
+which THVMLink reads on `THeapDiagram`'s first call, so the DiagrammaticComputation
+paclet (and Hypergraph under it) loads only then. The examples runner
 [`wl/Examples/run.wls`](../../wl/Examples/run.wls) exports
 `diagram["Arrange"]["Grid"]` to `diagram.png` alongside each
 example's `term.png`.

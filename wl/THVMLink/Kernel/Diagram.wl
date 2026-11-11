@@ -4,8 +4,8 @@
    Puts the DC package on its $ContextPath (BeginPackage's import list, plus the Diagram`
    subcontext where DC 1.0.8 defines them) so it can use `Diagram` / `DiagramNetwork` directly.
 
-   Loaded from THVMLink.wl after the public symbol THeapDiagram is
-   declared.
+   THVMLink.wl reads this file on THeapDiagram's first call, so the DC
+   paclet (and Hypergraph under it) loads only then.
 
    Polarity convention (chosen so DC's NetGraph never inserts an
    identity binary spider on a wire and `diagram["Arrange"]["Grid"]`
@@ -338,16 +338,6 @@ uopLabelText[base_Integer, opcode_Integer] := With[{shape = uopShapeOf[base]},
         Center, Spacings -> 0
     ]
 ]
-
-uopHeader[base_Integer, $UopKernel] := With[{kid = TTermVal[THeapRead[base + 1]]},
-    "KERNEL@" <> ToString[base] <> "#" <> ToString[kid]
-]
-
-uopHeader[base_Integer, $UopGrad] := With[{targetCell = THeapRead[base + 2]},
-    "GRAD@" <> ToString[base] <> If[TTermTag[targetCell] === $TagTEN, "#" <> ToString[TTermVal[targetCell]], ""]
-]
-
-uopHeader[base_Integer, opcode_Integer] := uopName[opcode] <> "@" <> ToString[base]
 
 (* TEN leaf label: just the tensor handle id + optional shape.
    No "@<cell-loc>" - the cell holding the TAG_TEN reference is
