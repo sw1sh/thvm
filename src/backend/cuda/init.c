@@ -138,15 +138,6 @@ fn int cuda_init(void) {
     cuda_set_error("cuCtxCreate", r);
     return cuda_init_fail(CUDA_LAST_ERROR);
   }
-  char name[128] = {0};
-  cuDeviceGetName(name, sizeof name, CUDA_DEVICE);
-  int cc_major = 0, cc_minor = 0;
-  cuDeviceGetAttribute(&cc_major,
-      CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, CUDA_DEVICE);
-  cuDeviceGetAttribute(&cc_minor,
-      CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, CUDA_DEVICE);
-  fprintf(stderr, "thvm: cuda_init -- device: %s (sm_%d%d)\n",
-          name, cc_major, cc_minor);
   CUDA_READY = 1;
   return 0;
 }
