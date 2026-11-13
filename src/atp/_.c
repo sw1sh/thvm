@@ -290,3 +290,5 @@ static u8 atp_eq_is_mono(const AtpState *s, u32 i);
 // Otter-loop passive demodulators (--otter): needs the step, the
 // interreduce, and the uid lookup above.
 #include "otter.c"
+// The THVM_ATP_PROFILE report reads counters from every file above.
+#include "profile.c"

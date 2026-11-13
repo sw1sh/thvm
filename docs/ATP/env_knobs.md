@@ -17,7 +17,7 @@ operational ones.
 | `THVM_ATP_RSS_ABORT_MB` | 8192 (schedule slices: 4500) | Live-RSS GROWTH abort cap (MB, `0` disables): bounds the run's own RSS growth over the baseline sampled at its first step-0 poll, and the run degrades to a clean SZS `ResourceOut` instead of flooding the host. Growth-relative (not absolute) so a large-ambient host process -- WolframKernel after a cold-JIT `TNetTrain` sits at 8-9 GB for a while -- does not insta-abort every following proof (the silent post-train `$Failed` wedge). |
 | `THVM_ATP_SCHED_MAX_PAR` | 5 | `--schedule` concurrency width (clamped to the slice count). The StarExec run script pins it to the core count. |
 | `THVM_ATP_VERBOSE` | off | Restore engine progress chatter on the quiet competition path (same as `--verbose`). |
-| `THVM_ATP_PROFILE` | off | Per-phase wall-time + counter breakdown at exit. |
+| `THVM_ATP_PROFILE` | off | `1`: per-phase wall-time breakdown after each run; `2`: also the detail counters (push-normalize parts, discrimination-tree and memo counts). Printed by `thvm_atp_profile_print` (`src/atp/profile.c`) from the bench, `bin/FindProof` and THVMLink's run_proof, so `bin/atp_replay` and `TFindProof` print it too. |
 | `THVM_ATP_DIAG` | off | Diagnostics level. |
 | `THVM_ATP_TRACE_MAX` | (impl) | ATP proof-trace capacity. |
 | `THVM_ATP_RULE_TRACE` | off | Print each rule as it is added (trajectory A/B debugging). |

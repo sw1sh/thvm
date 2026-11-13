@@ -1887,7 +1887,17 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
              g_atp_phase_us_push_normalize, g_atp_phase_us_interreduce,
              g_atp_phase_us_goal_check, g_atp_phase_us_cp_set_ir;
   if (g_phase) g_atp_phase_enabled = 1u;
+  // THVM_ATP_PROFILE: the shared phase report (src/atp/profile.c) after the run.
+  u8 profile = thvm_atp_profile_arm();
+  struct timespec prof0, prof1;
+  clock_gettime(CLOCK_MONOTONIC, &prof0);
   AtpStatus st = thvm_atp_run(atp);
+  if (profile) {
+    clock_gettime(CLOCK_MONOTONIC, &prof1);
+    thvm_atp_profile_print(atp, (double)(prof1.tv_sec - prof0.tv_sec) +
+                                1e-9 * (double)(prof1.tv_nsec - prof0.tv_nsec));
+    fflush(stdout);
+  }
   if (g_phase) {
     extern u64 g_atp_gc_us, g_atp_gc_n;
     clock_gettime(CLOCK_MONOTONIC, &_tp1);

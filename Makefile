@@ -373,6 +373,14 @@ $(BIN)/atp_lib_determinism: wl/ATP/CSource/determinism.c wl/ATP/CSource/libthvm_
 	  -I"$(WL_INCLUDE)" -o $@ $< \
 	  $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm -ldl)
 
+# Replays one captured thvm_wl_atp_run_proof call (wl/scripts/capture_run_proof.wls) through
+# THVMLink's own entry without a Wolfram kernel: times exactly what TFindProof runs.
+WL_BLOB := $(if $(filter Darwin,$(UNAME_S)),build/thvm_runtime_blob.c,build/thvm_runtime_blob_elf.c)
+$(BIN)/atp_replay: wl/THVMLink/CSource/replay.c $(WL_SRC) $(WL_SRC_ATP) $(SRC) $(WL_BLOB) | $(BIN)
+	$(CC) $(CFLAGS) $(if $(filter Darwin,$(UNAME_S)),-DACCELERATE_NEW_LAPACK,-D_GNU_SOURCE) \
+	  $(WL_TRACE_DEF) $(ATP_DEFINES) $(WL_ATP_DEFINES) -I. -I"$(WL_INCLUDE)" -o $@ $< $(WL_BLOB) \
+	  $(if $(filter Darwin,$(UNAME_S)),-framework Accelerate,-lm -ldl -lpthread)
+
 wl-test: $(WL_LIB)
 	wolframscript -f $(WL_PACLET)/Tests/run.wls
 

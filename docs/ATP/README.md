@@ -155,3 +155,17 @@ make bin/test_atp_wolfram_bench
 THVM_ATP_WALDMEISTER=1 THVM_ATP_LAZY_NORM=1 ./bin/test_atp_wolfram_bench \
     tools/baselines/wm_pr/WolframAxioms__OrAssociativity.pr 500000 280
 ```
+
+The bench runs its own configuration, not the one `TFindProof` sends (OrAssociativity of
+`"WolframAxioms"` takes 735 rules there and 775 under `TFindProof`), and none of the engine
+switches ATP.wl sets at load. To time exactly what `TFindProof` runs, capture its engine call once
+in a kernel and replay it without one, with ATP.wl's environment; the output line carries a hash
+of the whole proof wire, so a change that keeps the proof byte-identical keeps the hash, and
+`THVM_ATP_PROFILE=2` adds the phase report:
+
+```sh
+CAP_OUT=oa.txt CAP_THM=OrAssociativity wolframscript -f wl/scripts/capture_run_proof.wls
+make bin/atp_replay
+THVM_ATP_FLATTERM=1 THVM_ATP_KBO_FLAT=1 THVM_ATP_CP_INDEX=1 THVM_ATP_TRACE_MAX=4194304 \
+    bin/atp_replay oa.txt
+```
