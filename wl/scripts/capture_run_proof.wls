@@ -4,7 +4,10 @@
    bin/atp_replay (wl/THVMLink/CSource/replay.c) can rebuild them in another process.
 
      CAP_OUT=case.txt CAP_THM=OrAssociativity CAP_THEORY=WolframAxioms \
-       wolframscript -f wl/scripts/capture_run_proof.wls *)
+       wolframscript -f wl/scripts/capture_run_proof.wls
+
+   CAP_METHOD (a Method setting in InputForm, default Automatic) and CAP_PART (k: only the
+   k-th conjunct of a conjunction theorem) select a variant. *)
 PacletDirectoryLoad[FileNameJoin[{DirectoryName[$InputFileName], ".."}]];
 Needs["WolframInstitute`THVMLink`"];
 out = Environment["CAP_OUT"];
@@ -13,7 +16,13 @@ theory = Replace[Environment["CAP_THEORY"], $Failed -> "WolframAxioms"];
 toPrefix = WolframInstitute`THVMLink`Private`load["thvm_wl_atp_terms_to_prefix",
     {{"NumericArray", "Constant"}}, "NumericArray"];
 WolframInstitute`THVMLink`ATP`Private`$atpRunProofFn = Function[Null, Throw[{##}, "capture"]];
-args = Catch[TFindProof[thm, theory], "capture"];
+method = Replace[Environment["CAP_METHOD"], {$Failed -> Automatic, m_String :> ToExpression[m]}];
+part = Replace[Environment["CAP_PART"], {$Failed -> None, k_String :> ToExpression[k]}];
+args = Catch[
+    If[ part === None,
+        TFindProof[thm, theory, Method -> method],
+        TFindProof[AxiomaticTheory[theory, "NotableTheorems"][thm][[part]], theory, Method -> method]],
+    "capture"];
 If[ ! ListQ[args], Print["no capture: ", Short[args]]; Exit[1]];
 Print["captured ", Length[args], " arguments"];
 w = Normal[args[[1]]];
