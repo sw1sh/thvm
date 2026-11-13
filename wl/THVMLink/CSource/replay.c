@@ -7,8 +7,8 @@
 //     bin/atp_replay case.txt
 //
 // The environment is the one ATP.wl sets at load.  The output line gives the status, the rule
-// count, the wire length, an FNV-1a hash of the whole wire (equal hashes mean byte-identical
-// proof output) and the time.  The LibraryLink table serves only what run_proof uses, as
+// count, the wire length, an FNV-1a hash of the whole wire with every term hashed by content
+// (equal hashes mean the same proof output wherever the engine allocated its terms) and the time.  The LibraryLink table serves only what run_proof uses, as
 // wl/ATP/CSource/determinism.c does.
 
 #include "wl/THVMLink/CSource/thvmlink.c"
@@ -73,6 +73,24 @@ static int build(const int64_t *d, mint n, mint *pos, Term *out, u32 depth) {
   }
   *out = term_new_ctr((u32)v, cs, (u32)ar);
   return 1;
+}
+
+// FNV-1a over a wire word, with a constructor handle replaced by its content (label, arity,
+// children, recursively), so the hash does not depend on where the engine allocated a term.
+static u64 fnv(u64 h, u64 v) {
+  h ^= v;
+  return h * 1099511628211ull;
+}
+static u64 content_hash(u64 h, Term t, u32 depth) {
+  if (term_tag(t) != TAG_CTR || depth > 100000u) {
+    return fnv(h, (u64)t);
+  }
+  u32 n = term_ctr_n(t);
+  h = fnv(fnv(fnv(h, 0xC7u), term_ext(t)), n);
+  for (u32 k = 0; k < n; k++) {
+    h = content_hash(h, term_ctr_at(t, k), depth + 1u);
+  }
+  return h;
 }
 
 static double now_s(void) {
@@ -166,11 +184,10 @@ int main(int argc, char **argv) {
     return 1;
   }
   const int64_t *raw = (const int64_t *)out->data;
-  // FNV-1a over the whole wire: equal hashes mean byte-identical proof output.
-  uint64_t h = 1469598103934665603ull;
+  // FNV-1a over the whole wire with terms by content: equal hashes mean the same proof output.
+  u64 h = 1469598103934665603ull;
   for (mint i = 0; i < out->n; i++) {
-    h ^= (uint64_t)raw[i];
-    h *= 1099511628211ull;
+    h = content_hash(h, (Term)raw[i], 0u);
   }
   printf("REPLAY %s status=%lld rules=%lld wire=%lld hash=%016llx time=%.3f\n", name,
          (long long)raw[0], (long long)raw[1], (long long)out->n, (unsigned long long)h, t1 - t0);
