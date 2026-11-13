@@ -211,6 +211,15 @@ Scan[
 If[ Environment["THVM_ATP_TRACE_MAX"] === $Failed || Environment["THVM_ATP_TRACE_MAX"] === None,
     SetEnvironment["THVM_ATP_TRACE_MAX" -> "4194304"]];
 
+(* The trace entries past the search-visible bound (ATP_MAX_TRACE) hold only numbers, so they
+   go to the heap's permanent tail, which the collector never scans; without one they stay on
+   the collected heap, where a deep run's trace is almost the whole live set and every
+   collection copies it (ImpliesShefferAxioms of "WolframAxioms": 101M of 101M live cells at
+   1.5M steps, then a collection every few steps).  268435456 cells is 2 GiB of address space,
+   touched only as entries arrive; it is read when the heap is first mapped, so set it here. *)
+If[ Environment["THVM_HEAP_PERM_CELLS"] === $Failed || Environment["THVM_HEAP_PERM_CELLS"] === None,
+    SetEnvironment["THVM_HEAP_PERM_CELLS" -> "268435456"]];
+
 (* `load` is the LibraryFunctionLoad helper defined in
    WolframInstitute`THVMLink`Private` by THVMLink.wl; alias it here so bare `load[...]`
    in $atpRunProofFn / $atpRunExistFn / ... resolves to the same

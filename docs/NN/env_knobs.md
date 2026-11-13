@@ -44,6 +44,7 @@ update the matching row here in the same change. The ATP rows (`THVM_ATP*`,
 | `THVM_GC_KB` | (impl) | Heap GC trigger threshold (KB). |
 | `THVM_RECLAIM_MB` | 64 | py: free dead tensors' backend buffers once resident bytes exceed the last reclaim's survivors by max(this many MB, half the survivors); 0 reclaims after any growth. |
 | `THVM_HEAP_CELLS` | (impl) | Initial heap cell count. |
+| `THVM_HEAP_PERM_CELLS` | 0 (THVMLink sets 268435456) | Cells of the permanent tail past the semi-spaces: append-only atom-only nodes (the ATP proof trace past its search-visible bound) go there, and the collector never scans it. Read when the heap is first mapped. |
 | `THVM_MAX_BUF_BYTES` | (impl) | Max single-buffer allocation (KB). |
 | `THVM_MAX_LIVE_BYTES` | (impl) | Max live-buffer memory. |
 | `THVM_CUDA_REUSE_BUFS` | (impl) | CUDA-specific buffer reuse. |

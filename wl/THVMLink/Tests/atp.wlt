@@ -2441,6 +2441,15 @@ VerificationTest[
     TestID -> "ATP/env/WMFPA-mirror-not-forced-on"
 ]
 
+(* Loading the package gives the heap a permanent tail, where the proof
+   trace past its search-visible bound lives outside the collector's
+   reach, unless the user set one. *)
+VerificationTest[
+    StringQ[Environment["THVM_HEAP_PERM_CELLS"]],
+    True,
+    TestID -> "ATP/env/heap-perm-tail-set"
+]
+
 (* An entry's time limit is the time left in proportion to its weight
    among the entries left; with no TimeConstraint it is 60 s per unit of
    weight, so the default call keeps the Waldmeister entry's shares (the
