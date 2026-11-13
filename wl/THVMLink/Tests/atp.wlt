@@ -2431,6 +2431,16 @@ VerificationTest[
     TestID -> "ATP/schedule/ScheduleShare-weight-and-drop"
 ]
 
+(* Loading the package does not switch on THVM_ATP_WMFPA: it arms the
+   opt-in flat mirror of the Waldmeister push normalize, the same proof
+   (byte-identical wire) at 1.8 times the engine time on OrAssociativity
+   of "WolframAxioms". *)
+VerificationTest[
+    MatchQ[Environment["THVM_ATP_WMFPA"], $Failed | None | "0"],
+    True,
+    TestID -> "ATP/env/WMFPA-mirror-not-forced-on"
+]
+
 (* An entry's time limit is the time left in proportion to its weight
    among the entries left; with no TimeConstraint it is 60 s per unit of
    weight, so the default call keeps the Waldmeister entry's shares (the

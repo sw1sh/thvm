@@ -185,8 +185,11 @@ Off[General::shdw];
 
    THVM_ATP_FLATTERM    fast indexed/flatterm mixed-normalize loop
    THVM_ATP_KBO_FLAT    cache-dense pre-order KBO compare
-   THVM_ATP_WMFPA       faithful Waldmeister-FPA normalize path
    THVM_ATP_CP_INDEX    CP-generation overlap-partner unification index
+
+   THVM_ATP_WMFPA is not among them: it now arms the opt-in flat mirror
+   of the Waldmeister preset's push normalize, which gives the same
+   proof in 1.8 times the time (OrAssociativity of "WolframAxioms").
 
    Users can disable any of them by SetEnvironment["..." -> "0"]
    before the call - the engine reads at AtpState init. *)
@@ -194,8 +197,7 @@ Scan[
     With[{ev = #},
         If[ Environment[ev] === $Failed || Environment[ev] === None,
             SetEnvironment[ev -> "1"]]] &,
-    {"THVM_ATP_FLATTERM", "THVM_ATP_KBO_FLAT",
-     "THVM_ATP_WMFPA",    "THVM_ATP_CP_INDEX"}];
+    {"THVM_ATP_FLATTERM", "THVM_ATP_KBO_FLAT", "THVM_ATP_CP_INDEX"}];
 
 (* Default the proof-trace cap high enough that real completions (e.g.
    MeredithAxioms OrAssociativity, ~hundreds of thousands of trace entries
