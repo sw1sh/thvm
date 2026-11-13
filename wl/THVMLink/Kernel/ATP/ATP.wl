@@ -2896,6 +2896,12 @@ atpScheduleShare[_] := 1.
 atpDropScheduleShare[{name_String, subopts___}] := Prepend[DeleteCases[{subopts}, "ScheduleShare" -> _], name]
 atpDropScheduleShare[m_] := m
 
+(* The time limit of entry i of a schedule with the given weights: the time left in proportion to
+   its weight among the entries left, or, with no time limit, 60 s per unit of weight, so the
+   deep entry an Automatic schedule leads with keeps its shares. *)
+atpScheduleSlice[Infinity, weights_List, i_Integer] := 60. * weights[[i]]
+atpScheduleSlice[rem_ ? NumericQ, weights_List, i_Integer] := rem * weights[[i]] / Total[weights[[i ;;]]]
+
 atpDispatchPreset[defaults_Association, defaultGD_, subopts_List] :=
     Block[{o = Association[subopts], merged, mnf},
         merged = Join[defaults, o];
@@ -4928,17 +4934,16 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
            multiplied by an entry's own "ScheduleShare" (a class schedule's
            deep preset that needs most of the budget).  A config that
            returns early rolls its unused time forward to the rest.
-           Unset TimeConstraint stays at the per-config default 60s. *)
+           With no TimeConstraint an entry gets 60 s per unit of weight
+           (atpScheduleSlice). *)
         atpEnd = If[ OptionValue[TimeConstraint] =!= Infinity,
             AbsoluteTime[] + N[OptionValue[TimeConstraint]], Infinity];
         Module[{n = Length[atpSched],
                 fl = Min[Max[OptionValue[PortfolioFrontLoad], 0],
                          Length[atpSched]], weights},
         weights = MapIndexed[If[ First[#2] <= fl, 2., 1.] * atpScheduleShare[#1] &, atpSched];
-        Do[ atpSub = If[ atpEnd =!= Infinity,
-                With[{rem = atpEnd - AbsoluteTime[]},
-                    rem * weights[[i]] / Total[weights[[i ;; n]]]],
-                60.];
+        Do[ atpSub = atpScheduleSlice[
+                If[ atpEnd === Infinity, Infinity, atpEnd - AbsoluteTime[]], weights, i];
             If[ atpSub <= 0., Break[]];
             atpR = atpProveBundle[conjecture, axioms,
                 Method -> atpDropScheduleShare[atpSched[[i]]], TimeConstraint -> atpSub,

@@ -21,7 +21,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 - An entry <code>{*name*, …, "ScheduleShare" -> *w*}</code> weighs *w* times as much as a plain entry, so that each entry gets the time left in proportion to its weight among the entries left. The [Automatic]() schedule gives its `"Waldmeister"` entry six shares for a single-operator axiomatization such as `"WolframAxioms"`.
 - The default setting is <code>[PortfolioFrontLoad]() -> 1</code>. <code>[PortfolioFrontLoad]() -> 0</code> shares the time equally among all entries.
 - An entry that ends before its share is used up leaves the rest of its time to the entries after it.
-- With the default <code>[TimeConstraint]() -> [Infinity]()</code>, each entry gets 60 seconds and [PortfolioFrontLoad]() has no effect.
+- With the default <code>[TimeConstraint]() -> [Infinity]()</code>, each entry gets 60 seconds per unit of weight.
 - The `"PortfolioTrace"` spec of [TFindProof]() gives the time each entry took. [TAtpSchedule]() gives the entries of a schedule.
 
 ## Basic Examples

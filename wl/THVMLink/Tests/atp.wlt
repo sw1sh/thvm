@@ -2431,6 +2431,21 @@ VerificationTest[
     TestID -> "ATP/schedule/ScheduleShare-weight-and-drop"
 ]
 
+(* An entry's time limit is the time left in proportion to its weight
+   among the entries left; with no TimeConstraint it is 60 s per unit of
+   weight, so the default call keeps the Waldmeister entry's shares (the
+   first entry of WolframAxioms' Automatic schedule weighs 2 * 6) instead
+   of cutting it at 60 s. *)
+VerificationTest[
+    With[{w = {12., 1., 1.}},
+        {WolframInstitute`THVMLink`ATP`Private`atpScheduleSlice[Infinity, w, 1],
+         WolframInstitute`THVMLink`ATP`Private`atpScheduleSlice[Infinity, w, 2],
+         WolframInstitute`THVMLink`ATP`Private`atpScheduleSlice[70., w, 1],
+         WolframInstitute`THVMLink`ATP`Private`atpScheduleSlice[10., w, 3]}],
+    {720., 60., 60., 10.},
+    TestID -> "ATP/schedule/slice-by-weight"
+]
+
 (* The weighted first entry proves a WolframAxioms notable theorem
    on its own slice, so the trace has one proved entry. *)
 VerificationTest[
