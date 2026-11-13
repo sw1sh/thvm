@@ -70,9 +70,17 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
   if (s->n_goals > 1u) {
     const u64 all_mask = (s->n_goals >= 64u)
         ? ~0ull : (((u64)1 << s->n_goals) - 1ull);
+    // An unjoined conjunct's normal forms depend on R alone, so under
+    // the R of the last check they stay unjoined: re-normalize only
+    // after R changed.  Without this every step normalized every
+    // unjoined conjunct twice; ImpliesShefferAxioms of "WolframAxioms"
+    // spent 1750 of 1800 s there past step 500000.
+    u8 renorm = (u8)(s->goals_check_running_rev != s->r_revision + 1u);
+    s->goals_check_running_rev = s->r_revision + 1u;
     for (u32 g = 0; g < s->n_goals; g++) {
       if (s->goals_joined_mask & ((u64)1 << g)) continue;
-      if (atp_goal_pair_joined(s, s->goals_lhs[g], s->goals_rhs[g],
+      if (renorm &&
+          atp_goal_pair_joined(s, s->goals_lhs[g], s->goals_rhs[g],
                                &s->goals_lhs_nf[g], &s->goals_rhs_nf[g])) {
         s->goals_joined_mask |= (u64)1 << g;
       }

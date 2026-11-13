@@ -2859,6 +2859,7 @@ static void atp_goals_release(AtpState *s) {
 #endif
   s->n_goals = 0;
   s->goals_joined_mask = 0;
+  s->goals_check_running_rev = 0u;
 }
 
 // Set the conjecture (single equation goal_lhs == goal_rhs).

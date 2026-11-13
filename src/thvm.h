@@ -4499,6 +4499,10 @@ typedef struct {
   // wall on big goals (OrAssociativity).  PROVED is never cached (it stops
   // the loop), so a stale cache can only DELAY, never miss, a proof.
   u32 goal_check_running_rev;
+  // The multi-goal twin: r_revision + 1 of the last conjunct-loop check,
+  // after which the unjoined conjuncts are re-normalized only when R has
+  // changed (their normal forms are a function of R alone).
+  u32 goals_check_running_rev;
 
   // Multi-goal conjunction (FindEquationalProof[{g1, g2}, axioms]):
   // every conjunct proved off ONE saturation.  goals_lhs/goals_rhs are
