@@ -28,7 +28,7 @@ result = PublishPacletPage[$pacletDirectory, "THVMLink",
     "Build" -> False,
     "Monitor" -> True,
     "ResourceOptions" -> $resourceOptions,
-    "SiteOptions" -> {"FeedbackOptions" -> {"Domains" -> {"wolframinstitute.org", "wolfram.com"}}}
+    "SiteOptions" -> {"VersionLabel" -> True, "FeedbackOptions" -> {"Domains" -> {"wolframinstitute.org", "wolfram.com"}}}
 ]
 If[ ! AssociationQ[result], Exit[1]]
 Print["resource: ", result["Resource"]["Resource"], If[TrueQ[result["Resource"]["Deployed"]], "", " (dry run)"]]
