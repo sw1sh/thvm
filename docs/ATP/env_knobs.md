@@ -27,6 +27,7 @@ operational ones.
 | `THVM_ATP_TRACE_MAX` | (impl) | ATP proof-trace capacity. |
 | `THVM_ATP_RULE_TRACE` | off | Print each rule as it is added (trajectory A/B debugging). |
 | `THVM_ATP_GC_MB` | (impl) | Lower the ATP heap-GC trigger (MB) to collect more often. |
+| `THVM_ATP_GC_STRESS` | off | `1`: collect at every safe point (every trigger test answers yes), so a Term held across one without a root fails on the next collection. Debug only; `make atp-gc-stress` runs the ATP tests under it, once per release. |
 | `THVM_ATP_HEAP_ABORT_FRAC` | (impl) | Semi-space fraction past which the saturation aborts cleanly. |
 | `THVM_ATP_WALDMEISTER` | off | Bench shorthand for the Waldmeister-preset runtime knobs (SelectionRatio 51, RHSInterreduce, UnfailingCP, lazy normalize, ...). |
 | `THVM_ATP_SINE` / `_SINE_TOL` / `_SINE_GT` / `_SINE_RC` | on / (impl) | SInE axiom selection on oversized knowledge bases; `THVM_ATP_SINE=0` disables. |

@@ -488,6 +488,20 @@ static u64 atp_gc_threshold_bytes(void) {
   return (u64)v << 20;
 }
 
+// THVM_ATP_GC_STRESS=1: every collection test below answers yes, so the
+// engine collects at every safe point and a Term held across one without
+// a root fails on the next collection, not on the rare run whose heap
+// happens to fill there.  A debug switch, far too slow to ship on: the
+// suite runs under it once per release (`make atp-gc-stress`).
+static int g_atp_gc_stress = -1;
+static int atp_gc_stress(void) {
+  if (g_atp_gc_stress < 0) {
+    const char *e = getenv("THVM_ATP_GC_STRESS");
+    g_atp_gc_stress = (e != NULL && e[0] == '1') ? 1 : 0;
+  }
+  return g_atp_gc_stress;
+}
+
 // Whether the threshold collection is due: once the cells allocated since
 // the last collection pass the threshold.  Measured from the live set that
 // collection left, not from the from-space start, so a live set past the
@@ -496,6 +510,7 @@ static u64 atp_gc_threshold_bytes(void) {
 // 1661 such collections).  Gated on trace_pack, the off-heap trace that
 // keeps the live set small and makes deep runs reachable.
 static u8 atp_transient_gc_due(const AtpState *s) {
+  if (atp_gc_stress()) return 1u;
   return s->trace_pack &&
          (HEAP_NEXT - gc_from_start()) > s->gc_live_after + atp_gc_threshold_bytes();
 }

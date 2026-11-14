@@ -100,6 +100,7 @@ make wl-test          # run every wl/THVMLink/Tests/*.wlt against the built libr
 make py               # py/thvm/libthvm_py.{dylib,so}
 make bin/FindProof    # the ATP CLI (the CASC entry)
 make atp-lib          # libthvm_atp for the WolframInstitute`ATP` package (wl/ATP)
+make atp-gc-stress    # the ATP tests collecting at every safe point (once per release)
 make wl-cross         # THVMLink libraries for all five Wolfram platforms
 make clean            # remove bin/
 ```

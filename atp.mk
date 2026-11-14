@@ -672,3 +672,15 @@ atp-pgo:
 	        -fprofile-instr-use=$(CURDIR)/.pgo/atp.profdata \
 	        -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date" \
 	  $(MAKE) -B bin/FindProof
+
+# Every ATP test with THVM_ATP_GC_STRESS=1: the engine collects at every
+# safe point, so a Term held across one without a root fails here rather
+# than on the rare run whose heap fills there.  Slow; run once per release.
+.PHONY: atp-gc-stress
+atp-gc-stress: $(ATP_TESTS)
+	@fail=0; \
+	for t in $(ATP_TESTS); do \
+	  printf '%s\n' "> $$t"; \
+	  THVM_ATP_GC_STRESS=1 $$t || fail=1; \
+	done; \
+	exit $$fail

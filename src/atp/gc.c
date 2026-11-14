@@ -337,6 +337,7 @@ static double atp_heap_abort_frac(void) {
 // the default trigger in `thvm_realize` (realize.c).
 static u8 atp_heap_under_pressure(void) {
   if (!gc_enabled()) return 0;
+  if (atp_gc_stress()) return 1;
   u64 lo   = gc_from_start();
   u64 hi   = gc_from_end();
   u64 half = lo + (hi - lo) / 2;
@@ -367,8 +368,8 @@ static void atp_pressure_collect(AtpState *s) {
   atp_alloc_budget_check(s);
   if (!atp_heap_under_pressure()) return;
   u64 lo = gc_from_start(), cap = gc_from_end() - lo, used = HEAP_NEXT - lo;
-  if (s->gc_live_after > cap / 2u && used < s->gc_live_after + cap / 8u &&
-      used < cap - cap / 32u) {
+  if (!atp_gc_stress() && s->gc_live_after > cap / 2u &&
+      used < s->gc_live_after + cap / 8u && used < cap - cap / 32u) {
     return;
   }
   thvm_atp_gc_collect(s);

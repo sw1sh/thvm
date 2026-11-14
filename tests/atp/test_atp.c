@@ -4813,6 +4813,42 @@ int main(void) {
     thvm_atp_free(s);
   }
 
+  TEST_BEGIN("atp/gc-stress/same-completion-collecting-every-step");
+  {
+    // THVM_ATP_GC_STRESS collects at every safe point.  The left inverse
+    // from right-id / right-inv / assoc needs derived rules, so the run
+    // crosses many safe points; it must prove in the same steps with the
+    // same rules and trace as the unstressed run, collecting at least
+    // once per step.  The first run's state is freed before the second
+    // starts: a collection roots only the state it is given.
+    u64 sig[2][5];
+    for (u32 stress = 0; stress < 2u; stress++) {
+      g_atp_gc_stress = (int)stress;
+      u64 gc0 = gc_count();
+      AtpState *s = thvm_atp_init(&DUMMY_CFG, 200);
+      thvm_atp_set_goal(s, mk_f(mk_i(mk_a()), mk_a()), mk_e());
+      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_e()), mk_v(VAR_x));
+      thvm_atp_add_equation(s, mk_f(mk_v(VAR_x), mk_i(mk_v(VAR_x))), mk_e());
+      thvm_atp_add_equation(s, mk_f(mk_f(mk_v(VAR_x), mk_v(1u)), mk_v(2u)),
+                            mk_f(mk_v(VAR_x), mk_f(mk_v(1u), mk_v(2u))));
+      sig[stress][0] = (u64)thvm_atp_run(s);
+      sig[stress][1] = s->step;
+      sig[stress][2] = s->n_rules;
+      sig[stress][3] = s->n_trace;
+      u64 h = 0u;
+      for (u32 r = 0; r < s->n_rules; r++) {
+        h = h * 0x100000001b3ull ^ atp_term_struct_hash(s->lhs[r]);
+        h = h * 0x100000001b3ull ^ atp_term_struct_hash(s->rhs[r]);
+      }
+      sig[stress][4] = h;
+      if (stress == 1u) CHECK(gc_count() - gc0 >= (u64)s->step);
+      thvm_atp_free(s);
+    }
+    g_atp_gc_stress = -1;
+    CHECK_EQ((int)sig[0][0], (int)ATP_PROVED);
+    for (u32 k = 0; k < 5u; k++) CHECK_EQ(sig[0][k], sig[1][k]);
+  }
+
   TEST_BEGIN("atp/headline-prove-f-a-ia-equals-e-from-group-axioms");
   {
     // Prove f(a, i(a)) == e from the standard group axioms via
