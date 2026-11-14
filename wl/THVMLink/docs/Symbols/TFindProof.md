@@ -45,7 +45,7 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets
 | | |
 | --- | --- |
 | `"ProofObject"` | the [ProofObject]() (default) |
-| `"Status"` | `"Proved"`, `"Saturated"`, `"TimedOut"` or `"Failed"` |
+| `"Status"` | `"Proved"`, `"Saturated"`, `"TimedOut"`, `"Aborted"` (the prover filled its memory) or `"Failed"` |
 | `"Statistics"` | the status, the number of rewrite steps in the chain that closes the goal (0 for a completion without a goal), and the numbers of rules, trace entries and queued critical pairs |
 | `"Lemmas"` | the rewrite rules derived by the completion |
 | `"Path"` | the rewrite path from the left side of the conjecture to its right side |

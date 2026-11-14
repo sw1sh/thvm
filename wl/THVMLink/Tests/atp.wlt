@@ -2835,6 +2835,19 @@ VerificationTest[
     TestID -> "ATP/wellfounded/accepts-axiom-lemmas"
 ]
 
+(* A run the engine stops on a full heap (the bridge returns a
+   LibraryFunctionError and keeps the kernel) gives $Aborted with a
+   message rather than a silent $Failed. *)
+VerificationTest[
+    Block[{WolframInstitute`THVMLink`ATP`Private`$atpRunProofFn =
+            Function[LibraryFunctionError["LIBRARY_FUNCTION_ERROR", 6]]},
+        {TFindProof[f[a] == a, {f[x_] == x}, Method -> "Completion", TimeConstraint -> 5],
+         TFindProof[f[a] == a, {f[x_] == x}, "Status", Method -> "Completion", TimeConstraint -> 5]}],
+    {$Aborted, "Aborted"},
+    {TFindProof::heap, TFindProof::heap},
+    TestID -> "ATP/heap/full-heap-aborts-with-message"
+]
+
 (* Occurrence precedence ranks the goal's constants too: the goal of
    AndCommutativity is the commutativity axiom's own instance, which
    ordered rewriting closes only when its two constants are ordered. *)

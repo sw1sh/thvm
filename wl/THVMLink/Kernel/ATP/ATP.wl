@@ -3639,7 +3639,7 @@ atpReturnSpecQ[_] := False;
    finite complete system; the natural completion-mode terminal state);
    TIMEOUT(3) -> TimedOut; everything else -> Failed. *)
 atpReturnStatus[code_] := Switch[code,
-    1, "Proved", 4, "Saturated", 3, "TimedOut", _, "Failed"];
+    1, "Proved", 4, "Saturated", 3, "TimedOut", "Aborted", "Aborted", _, "Failed"];
 
 (* The completion rule set (cRes["MainRules"], a list of decoded
    {lhs, rhs} expression pairs) rendered as inert equations.  Inactive
@@ -5063,13 +5063,17 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                 enc, atpResolveMaxSteps[OptionValue[MaxSteps], OptionValue[Method], atpWall],
                 atpWall, Sequence @@ atpMethodCfg]];
         (* status 1 == PROVED.  A non-PROVED run still returns a bundle
-           (the ProofObject is $Failed) so the introspectives reflect it. *)
+           (the ProofObject is $Failed) so the introspectives reflect it;
+           a run the engine stopped on a full heap or its memory guard
+           gives $Aborted with a message. *)
         If[ cRes["Status"] =!= 1,
             Return[
                 <|
                     "enc" -> enc,
                     "cRes" -> cRes,
-                    "ProofObject" -> $Failed,
+                    "ProofObject" -> If[ cRes["Status"] === "Aborted",
+                        Message[TFindProof::heap, Round[atpWallTime, 0.1]]; $Aborted,
+                        $Failed],
                     "RelevantAxioms" -> relAx,
                     "AppliedMethod" -> OptionValue[Method],
                     "WallTime" -> atpWallTime
@@ -5296,7 +5300,8 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     "TATPError"
 ];
 
-TFindProof::cpgeom = "Critical pair `1` of the completion trace is not the overlap of its parents at its recorded position; the proof is not built.";
+TFindProof::heap = "The prover filled its memory after `1` seconds; the attempt stops.";
+TFindProof::cpgeom ="Critical pair `1` of the completion trace is not the overlap of its parents at its recorded position; the proof is not built.";
 TFindProof::cplpo ="The completed rule set has `1` rules; building their derivations exceeds the TimeConstraint, so the ProofObject lists the axioms only. \"Lemmas\" gives the rules.";
 
 (* Construct a ProofObject with "Theorems" -> None.  Use the same buildCplDataset path the
