@@ -207,6 +207,7 @@ Four settings run an external prover program on the problem instead of the compl
 With `"WaldmeisterProcess"`, the result is a [ProofObject](), with the steps of the external proof as its lemmas:
 
 ```wl
+#| eval: false
 TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "WaldmeisterProcess", TimeConstraint -> 10]
 ```
 <!-- => a ProofObject summary box, logic EquationalLogic -->
@@ -214,6 +215,7 @@ TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "WaldmeisterProce
 With `"LiftToProofObject" -> False`, the result is an [Association]() of the steps as the program states them:
 
 ```wl
+#| eval: false
 TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "WaldmeisterProcess", "LiftToProofObject" -> False, TimeConstraint -> 10]
 ```
 <!-- => <|"Backend" -> "SZS", "Status" -> "Proved", "Goal" -> "not(not(skC1())) = skC1()", "Axioms" -> {"x1 = and(x1,opOvertilde(k1()))", "and(x1,x2) = and(x2,x1)", "and(x1,and(x2,x3)) = and(and(x1,x2),x3)", "and(x1,not(x1)) = opOvertilde(k1())"}, "ProofDataset" -> <|{"Axiom", 1} -> <|"Statement" -> "x1 = and(x1,opOvertilde(k1()))", "Proof" -> <||>|>, …|>, "ProofLength" -> …, "RuleHistogram" -> <|…|>|> -->

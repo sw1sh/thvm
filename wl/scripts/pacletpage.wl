@@ -17,7 +17,10 @@ Needs["WolframInstitute`PacletPage`"];
 (* Pages built without evaluating their examples: their code and the `<!-- => -->` hints are shown
    as written.  None at present; a page goes here only while a crash keeps its examples from
    running, and cells that cannot run yet are marked `#| eval: false` on their own page. *)
-$unevaluatedPages = {};
+$unevaluatedPages = Join[{},
+    (* a build machine without some external program also lists the pages that need it, by file
+       name: THVMLINK_UNEVALUATED_PAGES="TVampireProof.md,TTweeProof.md" *)
+    StringSplit[Replace[Environment["THVMLINK_UNEVALUATED_PAGES"], Except[_String] -> ""], ","]];
 
 (* Every page starts from a fresh runtime, as its examples assume and run_doc_examples.wls checks:
    a parallel kernel converts many pages, and the heap, the book of definitions and the kernel
@@ -55,9 +58,12 @@ pacletSymbolNames[] := (
     Needs["WolframInstitute`THVMLink`"];
     Sort @ Flatten[Function[c, (c <> Last[StringSplit[#, "`"]] &) /@ Names[c <> "*"]] /@ $pacletContexts]
 );
+(* The commit the release records: git's, or THVMLINK_RELEASE_COMMIT for a copy of the paclet
+   built outside a checkout (the documentation builds on a pod, from `git archive`). *)
 $resourceOptions := {
     "Exclude" -> {"*.dSYM", "*.dSYM/*", "*.pdb", "*.lib", "*.exp", "*.DS_Store", "docs/*", "Tests/*"},
-    "Symbols" -> pacletSymbolNames[]
+    "Symbols" -> pacletSymbolNames[],
+    "Commit" -> Replace[Environment["THVMLINK_RELEASE_COMMIT"], Except[_String?(StringLength[#] > 0 &)] -> Automatic]
 };
 
 (* Pages whose examples compute in parallel kernels of their own (TFindFiniteModels'

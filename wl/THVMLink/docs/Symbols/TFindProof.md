@@ -432,6 +432,7 @@ TFindProof[f[a] == c, {a == b, b == c}, Method -> "SMT"]
 The `"VampireProcess"` method runs the Vampire prover program on a named theorem; with `"LiftToProofObject" -> False`, as by default for this method, the result is an Association of its proof steps:
 
 ```wl
+#| eval: false
 TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "VampireProcess", "LiftToProofObject" -> False, TimeConstraint -> 10]
 ```
 
