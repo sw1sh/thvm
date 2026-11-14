@@ -92,7 +92,7 @@ TAOTCompile[name_String] := (
     ensureInit[];
     Module[{path = $aotCompileFn[TDefName[name], name]},
         If[ StringLength[path] == 0,
-            $Failed,
+            thvmFailure[TAOTCompile::fail, name],
             $aotPaths[name] = path;
             path
         ]
@@ -103,7 +103,7 @@ TAOTCompile[name_Integer] := (
     Module[{nm = "def" <> ToString[name], path},
         path = $aotCompileFn[name, nm];
         If[ StringLength[path] == 0,
-            $Failed,
+            thvmFailure[TAOTCompile::fail, nm],
             $aotPaths[nm] = path;
             path
         ]
@@ -115,7 +115,7 @@ TAOTPath[name_String] := Lookup[$aotPaths, name, Missing["NotCompiled"]]
 TAOTRun[name_String, input_TTerm] := (
     ensureInit[];
     Module[{path = TAOTPath[name], in, raw},
-        If[MissingQ[path], Return[$Failed]];
+        If[MissingQ[path], Return[thvmFailure[TAOTRun::notcompiled, name]]];
         in = ttermRaw[input];
         raw = $aotRunFn[path, name, in];
         TTerm[raw]
@@ -137,16 +137,17 @@ toRawArg[_] := 0
 TAOTRun[name_String, inputs_List] := (
     ensureInit[];
     Module[{path = TAOTPath[name], raws, raw},
-        If[MissingQ[path], Return[$Failed]];
+        If[MissingQ[path], Return[thvmFailure[TAOTRun::notcompiled, name]]];
         If[ Length[inputs] > 4,
-            Message[TAOTRun::nargs, Length[inputs]];
-            Return[$Failed]];
+            Return[thvmFailure[TAOTRun::nargs, Length[inputs]]]];
         raws = PadRight[toRawArg /@ inputs, 4, 0];
         raw = $aotRun4Fn[path, name, raws[[1]], raws[[2]], raws[[3]], raws[[4]]];
         TTerm[raw]
     ]
 )
 TAOTRun::nargs = "TAOTRun supports up to 4 args (got `1`).";
+TAOTRun::notcompiled = "`1` is not compiled; compile it with TAOTCompile first.";
+TAOTCompile::fail = "The C compiler did not build `1`.";
 TAOTRun::method = "Method `1` not supported in this build.";
 
 (* === Method dispatcher ==============================================
@@ -290,7 +291,7 @@ TAOTRun[name_String, args_, Method -> spec_] := Module[{head, opts},
                 aotMetalIcDefRunImpl[name, args],
                 aotMetalRunImpl[name, args]],
         "CPU", aotCpuRunImpl[name, args, spec],
-        _, Message[TAOTRun::method, spec]; $Failed
+        _, thvmFailure[TAOTRun::method, spec]
     ]
 ]
 
@@ -306,8 +307,8 @@ TAOTRun[name_String, args_, Method -> spec_] := Module[{head, opts},
 aotCpuRunImpl[name_String, args_, spec_] := Module[{path, raws, slots, threads},
     path = TAOTPath[name];
     If[MissingQ[path], path = TAOTCompile[name]];
-    If[ path === $Failed || MissingQ[path],
-        Message[TAOTRun::method, spec]; Return[$Failed]];
+    If[ FailureQ[path] || MissingQ[path],
+        Return[thvmFailure[TAOTRun::method, spec]]];
     threads = Replace[spec, {_String -> 1, {_String, OrderlessPatternSequence["NumThreads" -> n_Integer, ___]} :> n, _ -> 1}];
     If[ threads <= 1,
         TAOTRun[name, args],

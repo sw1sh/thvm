@@ -42,7 +42,7 @@ ggufSkipVal[strm_, t_] := Which[
 
 dsvGgufHeader[path_String] := Module[{strm, ver, nTensors, nKv, align = 32, tensors, k, t, v, name, nd, dims, qt, off, ds},
     strm = OpenRead[path, BinaryFormat -> True];
-    If[ FromCharacterCode @ BinaryReadList[strm, "Byte", 4] =!= "GGUF", Close[strm]; Return[$Failed]];
+    If[ FromCharacterCode @ BinaryReadList[strm, "Byte", 4] =!= "GGUF", Close[strm]; Return[WolframInstitute`THVMLink`Private`thvmFailure[dsvGgufHeader::magic, path]]];
     ver = BinaryRead[strm, "UnsignedInteger32", ByteOrdering -> -1];
     nTensors = BinaryRead[strm, "UnsignedInteger64", ByteOrdering -> -1];
     nKv = BinaryRead[strm, "UnsignedInteger64", ByteOrdering -> -1];
@@ -175,11 +175,12 @@ dsvGgufTensor[path_, ds_, spec_, dev_] := Block[{n, shape, raw, out},
             dsvDeqKernel[dev, n][out, If[dev === "cpu", raw, TToDevice[raw, dev]]];
             TDiskDropWeight[raw];   (* the raw block stream is transient; release its mmap pages *)
             TRealize @ TUOpReshape[out, shape],
-        True, Message[dsvGgufWeights::quant, spec["Quant"]]; $Failed
+        True, WolframInstitute`THVMLink`Private`thvmFailure[dsvGgufWeights::quant, spec["Quant"]]
     ]
 ]
 
 dsvGgufWeights::quant = "Unsupported GGUF quant type `1` (only F32 and Q8_0).";
+dsvGgufHeader::magic = "`1` does not start with the GGUF magic bytes, so it is not a GGUF file.";
 
 (* Raw Q8_0 passthrough (cfg "ExpertsQ8"): the block stream mmaps to the device
    untouched; the q8 MoE kernels read scale+int8 in place.  Skipping the expert
@@ -229,6 +230,7 @@ dsvGgufLayerRoles[cfg_, l_] := Join[
    this interleaves so peak RAM is one model + one layer, matching the lazy-mmap
    safetensors path. *)
 dsvGgufWeights[cfg_Association, path_String] := Block[{hdr = dsvGgufHeader[path], dev = cfg["Device"], gt, layerSd},
+    If[FailureQ[hdr], Return[hdr, Block]];
     gt[gname_] := dsvGgufTensor[path, hdr["DataStart"], hdr["Tensors"][gname], dev];
     (* routed-expert stacks (the _exps roles) stay raw Q8_0 under ExpertsQ8 *)
     layerSd[l_] := With[{n = ToString[l - 1]},

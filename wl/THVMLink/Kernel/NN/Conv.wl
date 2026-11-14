@@ -32,7 +32,7 @@ TConv2D[input_TTerm, weights_TTerm, bias : (_TTerm | None) : None, opts : Option
     ints = Join[{OptionValue["Groups"]}, convTuple[OptionValue["Stride"], n],
         convTuple[OptionValue["Dilation"], n], convPads[OptionValue["Padding"], n]];
     out = nnCall[TConv2D, "conv2d", {x, weights, bias}, ints];
-    If[unbatched && out =!= $Failed, TUOpReshape[out, Rest[tUopShape[out]]], out]
+    If[unbatched && ! FailureQ[out], TUOpReshape[out, Rest[tUopShape[out]]], out]
 ]
 
 (* === tinygrad-`_pool` STRIDED-VIEW conv lowering ============

@@ -18,7 +18,7 @@ RelatedGuides: [THVMLink]
 ## Details & Options
 
 - *spec* has the keys `"Name"`, a label, `"bench"` by default; `"InitFn"`, a function of no arguments that sets up the state; `"StepFn"`, a function of the state and the 0-based step number that runs one step and gives the new state; and `"NumSteps"`, the number of steps, a positive integer.
-- A *spec* without `"InitFn"`, `"StepFn"` or a positive integer `"NumSteps"` issues the message `TBench::spec` and gives `$Failed`.
+- A *spec* without `"InitFn"`, `"StepFn"` or a positive integer `"NumSteps"` issues the message `TBench::spec` and gives a [Failure]().
 - <code>[TBench]()</code> applies `"InitFn"` once, untimed, then applies `"StepFn"` `"NumSteps"` times, timing the loop.
 - The result has the keys `"name"`, `"backend"`, `"n_steps"`, `"wall_time_ms"` and `"ms_per_step"`, the time of the loop and of one step in milliseconds, `"kernel_count"` and `"ten_count"`, the numbers of kernels and tensors, and `"total_live_kib"`, `"peak_concurrent_kib"` and `"slot_reuse_headroom_pct"`, the memory figures of <code>[TMemoryPlan]()</code> in kibibytes (KiB) and percent.
 - The kernel, tensor and memory figures describe everything scheduled since the runtime was last reset with <code>[TReset]()</code>, so resetting before the benchmark limits them to it.
@@ -166,4 +166,4 @@ A spec without the number of steps is refused:
 TBench[<|"Name" -> "add", "InitFn" -> Function[Null], "StepFn" -> Function[{h, t}, h]|>]
 ```
 
-<!-- => the message TBench::spec is issued and the result is $Failed -->
+<!-- => the message TBench::spec is issued and the result is a Failure with tag "TBench" -->

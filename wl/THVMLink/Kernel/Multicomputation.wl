@@ -50,7 +50,7 @@ Each event is an Association with keys \"id\", \"rule\", \"ruleCode\", \"family\
 Needs a trace-enabled dylib (the default make wl); check TMultiTraceQ[].
 Option \"DiagramSeeds\" seeds the per-step diagrams with additional root terms."];
 SetUsage[TMultiTraceQ, "TMultiTraceQ[] returns True iff the loaded THVMLink dylib was built with -DTHVM_TRACE, the default for make wl.
-Rebuilding with WL_TRACE=0 opts out of the trace machinery (e.g. for benching), in which case TMultiTrace returns $Failed."];
+Rebuilding with WL_TRACE=0 opts out of the trace machinery (e.g. for benching), in which case TMultiTrace issues TMultiTrace::notrace and returns a Failure."];
 SetUsage[TCausalGraph, "TCausalGraph[input$] returns a directed Graph of the causal structure of a reduction.
 TCausalGraph[t$] and TCausalGraph[t$, max$] run TMultiTrace on a TTerm t$ internally (capping at max$ steps).
 input$ is either a flat trace (a list of event Associations) or a steps list (per-step Associations whose events are flattened across all records).
@@ -174,8 +174,7 @@ SetAttributes[multiTraceImpl, HoldFirst];
 multiTraceImpl[term0_, keys_List, maxSteps_, auxSeeds_List, singleKey_] := Block[{seedTerm, snapshot, mkRecord, advance, recs, preEvents, wantSlice = keysNeedSlice[keys], wantDiagram = keysNeedDiagram[keys], produced, wireProv, records},
     ensureInit[];
     If[ ! TMultiTraceQ[],
-        Message[TMultiTrace::notrace];
-        Return[$Failed]
+        Return[thvmFailure[TMultiTrace::notrace]]
     ];
     $multiTraceInitFn[0];
     $multiTraceSetFn[1];
@@ -380,7 +379,9 @@ traceFromInput[x : $multiTracePat] := x
 Options[TCausalGraph] = Join[{"Family" -> All, "TransitiveReduction" -> True, PlotLegends -> None}, Options[Graph]]
 (* Term-input forms: run TMultiTrace internally with just the
    keys this view needs (Events) and feed the result into the
-   list-of-steps dispatch.  `max` defaults to Infinity. *)
+   list-of-steps dispatch.  `max` defaults to Infinity.  A trace that
+   failed (no recording in this build) passes its Failure through. *)
+TCausalGraph[f_Failure, OptionsPattern[]] := f
 TCausalGraph[t_TTerm, opts : OptionsPattern[]] := TCausalGraph[TMultiTrace[t, {"Events"}], opts]
 TCausalGraph[t_TTerm, max_Integer ? Positive, opts : OptionsPattern[]] := TCausalGraph[TMultiTrace[t, {"Events"}, max], opts]
 
@@ -472,15 +473,17 @@ Options[TMultiwayGraph] = Join[{"Branchial" -> False, PlotLegends -> None}, Opti
 
 (* Term-input forms: run TMultiTrace internally with the keys
    needed for vertices (CanonicalSlice), edge labels (Events), and
-   nice rendering (SliceBoxes), then dispatch to the steps form. *)
+   nice rendering (SliceBoxes), then dispatch to the steps form.  A
+   failed trace passes its Failure through. *)
+TMultiwayGraph[f_Failure, OptionsPattern[]] := f
 TMultiwayGraph[t_TTerm, opts : OptionsPattern[]] := TMultiwayGraph[TMultiTrace[t, {"Events", "CanonicalSlice", "SliceBoxes"}], opts]
 TMultiwayGraph[t_TTerm, max_Integer ? Positive, opts : OptionsPattern[]] := TMultiwayGraph[TMultiTrace[t, {"Events", "CanonicalSlice", "SliceBoxes"}, max], opts]
 
 (* Trace shape -- no slice info, can't build the multiway view. *)
-TMultiwayGraph[trace_List ? multiTraceQ, OptionsPattern[]] := (Message[TMultiwayGraph::needsteps]; $Failed)
+TMultiwayGraph[trace_List ? multiTraceQ, OptionsPattern[]] := thvmFailure[TMultiwayGraph::needsteps]
 
 (* Anything else that is not a list of step records (a per-key list, a bare list) is refused. *)
-TMultiwayGraph[steps_List, OptionsPattern[]] /; ! VectorQ[steps, AssociationQ] := (Message[TMultiwayGraph::needsteps]; $Failed)
+TMultiwayGraph[steps_List, OptionsPattern[]] /; ! VectorQ[steps, AssociationQ] := thvmFailure[TMultiwayGraph::needsteps]
 
 TMultiwayGraph[steps_List, opts : OptionsPattern[]] := Block[{slices, sliceKeys, vertexLabel, allKeys, edges, branchial, vlabels, labelStyle, presentFamilies, legend, edgeStyles, edgeFamilies, edgeRules, edgeList},
     (* Vertex identity = canonical SUB-resolved form of the slice

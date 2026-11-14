@@ -316,9 +316,9 @@ If[ ! TMultiTraceQ[],
         Block[{trace},
             trace = Catenate[
                 TMultiTrace[TSup[1, 2] + 3][[All, "Events"]]];
-            TMultiwayGraph[trace]
+            MatchQ[TMultiwayGraph[trace], Failure["TMultiwayGraph", _]]
         ],
-        $Failed,
+        True,
         TMultiwayGraph::needsteps,
         TestID -> "TMultiwayGraph rejects flat-trace input with a clear message"
     ];
@@ -499,8 +499,8 @@ If[ ! TMultiTraceQ[],
     ];
 
     VerificationTest[
-        TMultiwayGraph[TMultiTrace[TSup[1, 2] + 3, "Events"]],
-        $Failed,
+        MatchQ[TMultiwayGraph[TMultiTrace[TSup[1, 2] + 3, "Events"]], Failure["TMultiwayGraph", _]],
+        True,
         {TMultiwayGraph::needsteps},
         TestID -> "multiway/per-key-list-refused"
     ];

@@ -57,7 +57,7 @@ benchSpecOkQ[spec_Association] := KeyExistsQ[spec, "InitFn"] && KeyExistsQ[spec,
     MatchQ[Lookup[spec, "NumSteps"], _Integer ? Positive]
 TBench::spec = "A TBench spec gives \"InitFn\", \"StepFn\" and a positive integer \"NumSteps\"; `1` does not.";
 
-TBench[spec_Association] /; ! benchSpecOkQ[spec] := (Message[TBench::spec, spec]; $Failed)
+TBench[spec_Association] /; ! benchSpecOkQ[spec] := thvmFailure[TBench::spec, spec]
 TBench[spec_Association] := Block[{
     name = Lookup[spec, "Name", "bench"],
     initFn = spec["InitFn"],

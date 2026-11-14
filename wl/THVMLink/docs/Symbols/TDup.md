@@ -31,7 +31,7 @@ RelatedGuides: [THVMLink]
 - When *v* is a superposition with the same label as the duplication, the first projection takes the first branch and the second projection the second branch.
 - When *v* is a superposition with another label, each projection is a copy of the whole superposition, and <code>[TCollapse]()</code> takes the same branch in both copies.
 - In <code>[TDup]()[*v*, *f*]</code>, *f* is any function of two arguments, such as a pure [Function]().
-- <code>[TDup]()[{*p*, *q*}]</code> requires the two projections of one duplication, in order, and gives `$Failed` for any other pair.
+- <code>[TDup]()[{*p*, *q*}]</code> requires the two projections of one duplication, in order; any other pair issues the message `TDup::pair` and gives a [Failure]().
 - A lambda whose variable occurs more than once in its body duplicates its argument automatically, with labels from a range separate from <code>[TFreshLabel]()</code>.
 
 ## Basic Examples
@@ -188,4 +188,4 @@ Projections of two different duplications do not form a pair:
 ```wl
 TDup[{First[TDup[TNum[1]]], Last[TDup[TNum[2]]]}]
 ```
-<!-- => $Failed -->
+<!-- => the message TDup::pair is issued and the result is a Failure with tag "TDup" -->

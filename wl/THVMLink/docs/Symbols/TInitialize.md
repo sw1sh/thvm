@@ -25,7 +25,7 @@ RelatedGuides: [THVMLink]
 - A snapshot with no root gives <code>[Missing]()["NoRoot"]</code>.
 - A snapshot whose tensor data was removed by <code>[TContextStrip]()</code> is restored only with the option `"ZeroFill" -> True`, which fills its tensors with zeros. Without it, the message `TInitialize::uninit` is issued and the input returns unevaluated.
 - <code>[TInitialize]()[*expr*]</code> inverts <code>[Term]()</code> for numbers, the eraser, lambdas, applications, superpositions, arithmetic, duplications and tensors. Lambda and duplication binders are renamed, so the new term has the same structure as the original but its own heap locations.
-- A [TTerm]() is left as it is, and an expression with a constructor or a matcher returns unevaluated. A variable outside the lambda that binds it issues the message `TInitialize::orphanvar` and gives `$Failed`.
+- A [TTerm]() is left as it is, and an expression with a constructor or a matcher returns unevaluated. A variable outside the lambda that binds it issues the message `TInitialize::orphanvar` and gives a [Failure]().
 - [TInitialize]() takes the following option:
 
 | | | |
@@ -222,4 +222,4 @@ A variable outside its lambda is refused:
 ```wl
 TInitialize[Term["VAR", 7]]
 ```
-<!-- => the message TInitialize::orphanvar is issued and the result is $Failed -->
+<!-- => the message TInitialize::orphanvar is issued and the result is a Failure with tag "TInitialize" -->

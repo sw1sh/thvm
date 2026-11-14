@@ -37,6 +37,7 @@ SetUsage[TNetPredict, "TNetPredict[trainedNet$, inputs$] runs the trained forwar
 inputs$ is reshaped to the net's input shape and predicted in batch-sized chunks, so any number of inputs works.
 TNetPredict[handle$, x$] consumes the handle association the {x$, y$} TNetTrain overload returns and returns the raw logits rows."];
 
+TNetPredict::untrained = "`1` is not a forward that TNetTrain trained, and no net has been trained yet.";
 TNetTrain::needsnet = "Training a lifted TFromNet term needs a batched re-lift, which needs the NetChain; pass the NetChain (NetModel/NetChain) to TNetTrain. The lifted term is for inference.";
 
 Begin["`Private`"];
@@ -188,10 +189,7 @@ buildLoopAdam[params_List, grads_List, ms_List, vs_List, lr_TTerm, name_String] 
 inertTrainFrom[net_NetChain, dataSpec_, rounds_Integer, opt_Association] := Module[{logitNet, inShape, nClasses, data, xSlot, tgtSlot, fwd, params},
     logitNet = stripSoftmax[net];
     inShape = netInputShape[logitNet];
-    If[ inShape === $Failed,
-        Message[TFromNet::noinput, net];
-        Return[$Failed]
-    ];
+    If[inShape === $Failed, Return[thvmFailure[TFromNet::noinput, net]]];
     data = resolveData[dataSpec];
     nClasses = Max[data[[All, 2]]] + 1;
     {xSlot, tgtSlot} = batchTensors[data, inShape, nClasses];
@@ -261,10 +259,7 @@ inertTrainCore[fwd_, params_, xSlot_, tgtSlot_, inShape_, nData_, rounds_Integer
    batch shape, and that re-lift needs the NetChain (nothing stores the
    net).  Guide the caller to pass the NetChain to TNetTrain instead, which
    lifts the batched forward directly (inertTrainFrom). *)
-inertTrainTerm[_TTerm, _, _Integer, _Association] := (
-    Message[TNetTrain::needsnet];
-    $Failed
-)
+inertTrainTerm[_TTerm, _, _Integer, _Association] := thvmFailure[TNetTrain::needsnet]
 
 (* === public dispatch ===
    `prop` argument like built-in NetTrain: "TrainingNet" returns the inert
@@ -290,8 +285,8 @@ TNetTrain[net : (_TTerm | _NetChain), dataSpec_, "TrainingNet", opts : OptionsPa
 ]
 
 TNetTrain[net : (_TTerm | _NetChain), dataSpec_, opts : OptionsPattern[]] := With[{t = TNetTrain[net, dataSpec, "TrainingNet", opts]},
-    If[ t === $Failed,
-        $Failed,
+    If[ FailureQ[t],
+        t,
         TWnf[t]; (* drive the inert loop -> trains in place *)
         $thvmLastTrained["Fwd"] (* the trained forward term *)
     ]
@@ -327,7 +322,7 @@ TNetTrain[net_, x_List, y_List, opts : OptionsPattern[]] := Module[{xS, yT, lr, 
    discarded), so any number of inputs works. *)
 TNetPredict[net_TTerm, inputs_List] := Module[{entry, xSlot, inShape, fwd, nBatch, n, padded, chunkPreds},
     entry = Lookup[$thvmTrainRegistry, TTermVal[net], $thvmLastTrained];
-    If[MissingQ[entry], Return[$Failed]];
+    If[MissingQ[entry], Return[thvmFailure[TNetPredict::untrained, net]]];
     xSlot = entry["Input"];
     inShape = entry["InShape"];
     fwd = entry["Fwd"];

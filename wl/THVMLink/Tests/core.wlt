@@ -510,3 +510,21 @@ VerificationTest[
     {TNum::range},
     TestID -> "core/num-out-of-range"
 ]
+
+(* Projections of two different duplications are not a pair. *)
+VerificationTest[
+    TInit[];
+    MatchQ[TDup[{First[TDup[TNum[1]]], Last[TDup[TNum[2]]]}], Failure["TDup", _]],
+    True,
+    {TDup::pair},
+    TestID -> "core/dup-mismatched-pair-failure"
+]
+
+(* A variable outside the lambda that binds it cannot be initialized. *)
+VerificationTest[
+    TInit[];
+    MatchQ[TInitialize[Term["VAR", 7]], Failure["TInitialize", _]],
+    True,
+    {TInitialize::orphanvar},
+    TestID -> "core/initialize-orphan-var-failure"
+]

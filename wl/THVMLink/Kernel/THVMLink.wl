@@ -349,6 +349,16 @@ SetUsage[TUOpSrcs, "TUOpSrcs[u$] returns the source-cell terms for a UOp term, i
 
 Begin["`Private`"];
 
+(* How a public function fails: it issues its message, as before, and returns a Failure tagged by
+   the function's name that carries the message, so a caller reads why as data instead of a bare
+   $Failed.  The ATP context reaches it as WolframInstitute`THVMLink`Private`thvmFailure.
+   HoldFirst: a defined sym::tag evaluates to its text, which would lose the symbol. *)
+SetAttributes[thvmFailure, HoldFirst];
+thvmFailure[mn : MessageName[sym_Symbol, tag_String], args___] := (
+    Message[mn, args];
+    Failure[SymbolName[sym], <|"MessageTemplate" :> mn, "MessageParameters" -> {args}, "Tag" -> tag|>]
+);
+
 $libDir = FileNameJoin[{DirectoryName[$InputFileName], "..", "LibraryResources", $SystemID}];
 
 $libCpu = FileNameJoin[{$libDir, "THVMLink" <> Switch[$OperatingSystem,
@@ -1397,12 +1407,13 @@ TDup[label_Integer, body_, k_] := k @@ TDup[label, body]
    projection's tag field (DP0=4 / DP1=5) to DUP (7), keeping ext
    (label) and val (loc) unchanged.  No heap access; the body
    already lives at heap[loc] from the original TDup that produced
-   the pair.  Mismatched projections (different DUPs) stay
-   unevaluated rather than falling through to the body-constructor. *)
+   the pair.  Mismatched projections (different DUPs) give a Failure
+   rather than falling through to the body-constructor. *)
 TDup[{dp0_TTerm, dp1_TTerm}] /; (
     TTermTag[dp0] === $TagDP0 && TTermTag[dp1] === $TagDP1 && TTermExt[dp0] === TTermExt[dp1] && TTermVal[dp0] === TTermVal[dp1]) :=
     packTerm[0, $TagDUP, TTermExt[dp0], TTermVal[dp0]]
-TDup[{_TTerm, _TTerm}] := $Failed
+TDup[{dp0_TTerm, dp1_TTerm}] := thvmFailure[TDup::pair, dp0, dp1]
+TDup::pair = "`1` and `2` are not the two projections of one DUP.";
 
 (* === heap graph rendering ===
    Defined in Visualization.wl (loaded below).  Public symbol

@@ -365,9 +365,9 @@ VerificationTest[
 VerificationTest[
     TInit[];
     TDef["add2", TLam[a, TLam[b, TOp2["+", a, b]]]];
-    Quiet @ TAOTRun["add2", {TNum[1], TNum[2]}, Method -> "GPU2"],
-    $Failed,
-    TestID -> "Method -> unknown spec returns $Failed"
+    MatchQ[Quiet @ TAOTRun["add2", {TNum[1], TNum[2]}, Method -> "GPU2"], Failure["TAOTRun", _]],
+    True,
+    TestID -> "Method -> unknown spec returns a Failure"
 ]
 
 (* === iter Z: Church-encoded IC bodies (SUP / nested LAM) ===

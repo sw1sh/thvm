@@ -18,7 +18,7 @@ RelatedGuides: [THVMLink]
 ## Details & Options
 
 - The runtime THVMLink ships with records events, so [TMultiTraceQ]() gives [True]().
-- A runtime built without event recording gives [False](). [TMultiTrace]() then issues `TMultiTrace::notrace` and gives `$Failed`. [TMultiwayGraph]() and [TCausalGraph]() of a term run [TMultiTrace](), so they need recording too.
+- A runtime built without event recording gives [False](). [TMultiTrace]() then issues `TMultiTrace::notrace` and gives a [Failure](). [TMultiwayGraph]() and [TCausalGraph]() of a term run [TMultiTrace](), so they need recording too.
 - [TMultiTraceQ]() initializes the runtime if needed and does not change its state.
 
 ## Basic Examples

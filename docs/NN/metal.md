@@ -16,8 +16,8 @@ names by string lookup. It looks for `default.metallib` beside the
 library first (`make wl` copies one there), then at
 `build/default.metallib`. A backend whose init fails (no device, no
 metallib, a build without Metal) computes nothing: a realize on it
-fails with the reason, `TToDevice` to it gives a message and
-`$Failed`, and `DEV=metal` leaves the CPU the default, as tinygrad
+fails with the reason, `TToDevice` to it gives the message
+`TToDevice::nodev` and a `Failure`, and `DEV=metal` leaves the CPU the default, as tinygrad
 raises when a device fails to open (`tests/test_backend_unavailable.c`).
 
 ## Why not pure-C bindings

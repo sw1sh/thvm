@@ -137,10 +137,10 @@ TTermVal /@ TCollapse[TSup[1, 2] + 3]
 
 ## Possible Issues
 
-A flat list of events has no branch states, so the message `TMultiwayGraph::needsteps` is issued and the result is `$Failed`:
+A flat list of events has no branch states, so the message `TMultiwayGraph::needsteps` is issued and the result is a [Failure]():
 
 ```wl
 TMultiwayGraph[Flatten[TMultiTrace[TSup[1, 2] + 3, "Events"]]]
 ```
 
-<!-- => the message TMultiwayGraph::needsteps is issued and the result is $Failed -->
+<!-- => the message TMultiwayGraph::needsteps is issued and the result is a Failure with tag "TMultiwayGraph" -->

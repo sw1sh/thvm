@@ -367,8 +367,7 @@ KreaGenerate[prompt_, opts : OptionsPattern[]] := Module[{modelDir, dev, steps, 
     modelDir = OptionValue["ModelDir"];
     If[modelDir === Automatic, modelDir = krDefaultModelDir[]];
     If[ ! FileExistsQ[FileNameJoin[{modelDir, "model_index.json"}]],
-        Message[KreaGenerate::nodir, modelDir];
-        Return[$Failed]
+        Return[WolframInstitute`THVMLink`Private`thvmFailure[KreaGenerate::nodir, modelDir]]
     ];
     dev = OptionValue["Device"];
     (* "Q8" controls the on-device ACTIVATION precision (weights stay fp8-resident

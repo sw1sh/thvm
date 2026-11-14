@@ -57,8 +57,7 @@ tisReadConfig[dir_String] := Module[{f = FileNameJoin[{dir, "config.json"}]},
 tisModelSpec[modelDir_String] := Module[{idxFile, idx, roles, comps},
     idxFile = FileNameJoin[{modelDir, "model_index.json"}];
     If[ ! FileExistsQ[idxFile],
-        Message[tisPipeline::nospec, modelDir];
-        Return[$Failed]
+        Return[WolframInstitute`THVMLink`Private`thvmFailure[tisPipeline::nospec, modelDir]]
     ];
     idx = Import[idxFile, "RawJSON"];
     roles = Select[Keys[idx], tisComponentRoleQ];
@@ -152,8 +151,7 @@ tisBuildComponent[spec_, role_String, dev_] := Module[{comp, class, impl, key},
     class = comp["class"];
     impl = tisComponent[class];
     If[ MissingQ[impl],
-        Message[tisPipeline::nocomp, class, role];
-        Return[$Failed]
+        Return[WolframInstitute`THVMLink`Private`thvmFailure[tisPipeline::nocomp, class, role]]
     ];
     key = {spec["modelDir"], role, dev};
     Lookup[$tisBuilt, Key[key],
@@ -191,7 +189,7 @@ tisPipelineCore[spec_Association, prompt_, opts_Association] := Module[{
     enc = tisBuildComponent[spec, "text_encoder", dev];
     tf = tisBuildComponent[spec, "transformer", dev];
     vae = tisBuildComponent[spec, "vae", dev];
-    If[ AnyTrue[{tok, enc, tf, vae}, # === $Failed &], Return[$Failed]];
+    With[{bad = SelectFirst[{tok, enc, tf, vae}, FailureQ]}, If[! MissingQ[bad], Return[bad]]];
     (* --- STAGE 1: tokenize --- *)
     tisReport["Tokenizing the prompt...", 0.02];
     {ids, attMask} = tok["impl"]["forward"][tok["built"], prompt, seqLen];
@@ -206,8 +204,7 @@ tisPipelineCore[spec_Association, prompt_, opts_Association] := Module[{
        Part / TUOpConst failures deep in the denoise loop. --- *)
     sigmas = Lookup[opts, "Sigmas", fxSigmas[simg, nSteps]];
     If[ ! VectorQ[sigmas, NumericQ],
-        Message[tisPipeline::sigmas, Short[sigmas]];
-        Return[$Failed]
+        Return[WolframInstitute`THVMLink`Private`thvmFailure[tisPipeline::sigmas, Short[sigmas]]]
     ];
     tisReport["Building the velocity net...", 0.25];
     stepFn = tf["impl"]["forward"][tf["built"], textEmb, attMask, <|

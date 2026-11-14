@@ -115,13 +115,14 @@ VerificationTest[
     TestID -> "TAOTCompile cache hit: same source -> same path"
 ]
 
-(* === TAOTRun without prior TAOTCompile -> $Failed === *)
+(* === TAOTRun without prior TAOTCompile -> a Failure === *)
 
 VerificationTest[
     TInit[];
-    TAOTRun["never_compiled_aot_def", 0],
-    $Failed,
-    TestID -> "TAOTRun on never-compiled name returns $Failed"
+    MatchQ[TAOTRun["never_compiled_aot_def", 0], Failure["TAOTRun", _]],
+    True,
+    {TAOTRun::notcompiled},
+    TestID -> "TAOTRun on never-compiled name returns a Failure"
 ]
 
 (* === fib(N) end-to-end: exercises value-position TOp2 emit + recursion ===

@@ -255,6 +255,24 @@ and `}`, body, and the closing `]` all return to the column where
 the line that opens `Block[` starts. This keeps the variable list
 visually distinct from the body and matches IDE auto-formatting.
 
+### Failing: a Failure, never a bare `$Failed`
+
+A public function that cannot do its job returns a `Failure` whose
+message says why. Bad input or a broken environment (a missing file,
+an unknown option value) issues the function's own message and
+returns its Failure through `thvmFailure` (`Kernel/THVMLink.wl`;
+`atpFailure` in the ATP context). A run that ends without the value
+asked for, such as no proof, is no error: `atpOutcome` returns the
+Failure without issuing the message. Callers pass a Failure through.
+A private helper may still return `$Failed` as a sentinel its caller
+turns into a Failure.
+
+```wolfram
+TATP::nofile = "The problem file `1` does not exist."
+
+TATP[File[path_String], OptionsPattern[]] /; ! FileExistsQ[path] := atpFailure[TATP::nofile, path]
+```
+
 ## Control flow
 
 ### No `For` loops

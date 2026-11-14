@@ -154,3 +154,24 @@ VerificationTest[
     {1.25, 2.5, -3.0, 4.75},
     TestID -> "safetensors/mmap/raw-region-page-aligned-offset"
 ]
+
+(* A bf16 tensor is not written to a safetensors file here: a Failure names the tensor. *)
+VerificationTest[
+    TInit[]; TReset[];
+    MatchQ[TSafeTensorSave[<|"w" -> TUOpCast[TTensorCreate[{1., 2.}], "bf16"]|>,
+        FileNameJoin[{$TemporaryDirectory, "thvm_st_" <> ToString[$ProcessID] <> "_bf16.safetensors"}]],
+        Failure["TSafeTensorSave", KeyValuePattern["MessageParameters" -> {"w"}]]],
+    True,
+    {TSafeTensorSave::dtype},
+    TestID -> "safetensors/save/unsupported-dtype-failure"
+]
+
+(* A region of a file that does not exist cannot be mapped. *)
+VerificationTest[
+    TInit[]; TReset[];
+    MatchQ[TTensorMMap[FileNameJoin[{$TemporaryDirectory, "thvm_st_no_such_file.bin"}], 0, 16, "f32", {4}],
+        Failure["TTensorMMap", _]],
+    True,
+    {TTensorMMap::map},
+    TestID -> "safetensors/mmap/missing-file-failure"
+]

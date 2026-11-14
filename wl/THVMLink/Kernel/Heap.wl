@@ -438,7 +438,7 @@ TInitialize[Term["ERA"]] := TEra[]
 TInitialize[Term["ANY"]] := TAny[]
 TInitialize[Term["REF", slot_Integer]] := packTerm[0, $TagREF, slot, 0]
 TInitialize[Term["TEN", id_Integer]] := packTerm[0, $TagTEN, 5, id]
-TInitialize[Term["VAR", binderId_]] := (Message[TInitialize::orphanvar, binderId]; $Failed)
+TInitialize[Term["VAR", binderId_]] := thvmFailure[TInitialize::orphanvar, binderId]
 TInitialize::orphanvar = "Term[\"VAR\", `1`] is outside the Term[\"LAM\", `1`, ...] that binds it; a VAR belongs in its lambda's body.";
 
 (* Identity rule for already-built TTerms: lets nested recursion mix

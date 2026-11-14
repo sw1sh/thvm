@@ -268,7 +268,7 @@ shapeOrArg[x_] := x
 General::shape = "`1` and `2` do not fit together: an elementwise operation needs equal element counts or a single element, and a movement operation a shape the source can take.";
 
 (* The src/nn ops (nn_call, docs/NN/nn.md) by name over TTerms (None: an absent bias or weight),
-   with their integer and real arguments.  A failed op is head::nn and $Failed.  Empty
+   with their integer and real arguments.  A failed op is head::nn and a Failure.  Empty
    argument lists go as {0} and {0.}: LibraryLink vectors must be typed, and the ops that take
    none ignore them. *)
 nnOpId[name_String] := nnOpId[name] = $nnOpFn[name]
@@ -278,7 +278,7 @@ nnCall[head_, name_String, ts_List, ints_List : {}, reals_List : {}] := Module[{
         If[ints === {}, {0}, Round[ints]], If[reals === {}, {0.}, N[reals]]]];
     If[ IntegerQ[raw],
         TTerm[raw],
-        Message[MessageName[head, "nn"], name, shapeOrArg /@ DeleteCases[ts, None]]; $Failed]
+        thvmFailure[MessageName[head, "nn"], name, shapeOrArg /@ DeleteCases[ts, None]]]
 ]
 General::nn = "The `1` operation does not take arguments of shapes `2`.";
 
@@ -404,7 +404,7 @@ TToDevice[t_TTerm, device_String] := (
     ensureInit[];
     With[{why = $deviceUnavailableFn[deviceCode[device]]},
         If[ why =!= "",
-            Message[TToDevice::nodev, device, why]; $Failed,
+            thvmFailure[TToDevice::nodev, device, why],
             TTerm[$uopToDeviceFn[ttermRaw[t], deviceCode[device]]]]]
 )
 

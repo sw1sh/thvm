@@ -152,7 +152,7 @@ fromLayer[ElementwiseLayer, layer_, x_TTerm] := Module[{f, op, applied},
     If[op =!= None, Return @ op[x]];
     applied = f[x];
     If[ MatchQ[applied, _TTerm], applied,
-        Message[TFromNet::eltunsupported, f]; $Failed
+        thvmFailure[TFromNet::eltunsupported, f]
     ]
 ]
 
@@ -544,12 +544,14 @@ TIdentity[x_] := x
    leaving an unevaluated fromLayer[...] to masquerade as a tensor and
    realize to garbage downstream.  Least specific (h_ first arg), so WL
    orders it after every concrete fromLayer case above. *)
-fromLayer[h_, layer_, _] := (Message[TFromNet::unsupportedlayer, h]; $Failed)
+fromLayer[h_, layer_, _] := thvmFailure[TFromNet::unsupportedlayer, h]
 
 (* Entry-level dispatch.  Accepts a TTerm (the usual case), a
    List[Integer] (EmbeddingLayer ids), or a List[TTerm] (multi-
    input layers like ThreadingLayer that NetGraph traversal feeds
-   their predecessor outputs to). *)
+   their predecessor outputs to).  A layer that failed passes its
+   Failure through the rest of the chain unchanged. *)
+TFromLayer[_, f_Failure] := f
 TFromLayer[layer_, x_] := fromLayer[Head[layer], layer, x]
 
 (* A nested NetChain (e.g. GPT-2's transformer sub-chain inside the top
@@ -647,7 +649,7 @@ netInputShape[net_] := Module[{ports, raw, shape},
 
 (* TFromNet[net]: no input argument -- builds a TLam whose bound
    variable carries the net's input shape, body = TFromNet[net, x].
-   Returns $Failed (with TFromNet::noinput) if the input shape can't
+   Returns a Failure (with TFromNet::noinput) if the input shape can't
    be inferred.  TLamShape is HoldAll, so we substitute the shape
    list in via With so the `_List` pattern matches before the body
    captures `x`.
@@ -800,7 +802,7 @@ TDecodeInit[net_] := Module[{tokTable, posTable, dim, nCtx, nBlocks},
     tokTable = tokenEmbeddingArray[net];
     posTable = positionEmbeddingArray[net];
     If[ tokTable === None || posTable === None,
-        Message[TDecodeInit::tokennet, net]; Return[$Failed]];
+        Return[thvmFailure[TDecodeInit::tokennet, net]]];
     dim = Last[Dimensions[tokTable]];
     nCtx = First[Dimensions[posTable]];
     nBlocks = Count[allLayers[net], _AttentionLayer];
@@ -867,13 +869,11 @@ TFromNet[net_NetChain, oneHot_TTerm] /; tokenLmOneHotQ[net, oneHot] := tokenLmFo
    still guides to the 2-arg id graph form.) *)
 TFromNet[net_NetChain] /; tokenEmbeddingArray[net] =!= None := oneHot |-> TFromNet[net, oneHot]
 
-TFromNet[net_] /; tokenEmbeddingArray[net] =!= None := (
-    Message[TFromNet::tokennet, net]; $Failed
-)
+TFromNet[net_] /; tokenEmbeddingArray[net] =!= None := thvmFailure[TFromNet::tokennet, net]
 
 TFromNet[net_] := With[{shape = netInputShape[net]},
     If[ shape === $Failed,
-        Message[TFromNet::noinput, net]; $Failed,
+        thvmFailure[TFromNet::noinput, net],
         Module[{x}, TLamShape[shape, x, TFromNet[net, x]]]
     ]
 ]
@@ -903,7 +903,7 @@ lamBodyTerm[lam_TTerm] := THeapRead[TTermVal[lam]]
 TNetParams::applied = "TNetParams expects a network (the TFromNet[net] LAM, whose input is a bound variable).  `1` is an applied forward TFromNet[net, x] with a concrete input baked in as a leaf, so it has no distinguished parameters; lift with TFromNet[net] instead.";
 TNetParams[lam_TTerm] := If[ TTermTag[lam] === $TagLAM,
     gradFloatLeafTerms[lamBodyTerm[lam]],
-    (Message[TNetParams::applied, lam]; $Failed)
+    thvmFailure[TNetParams::applied, lam]
 ]
 
 (* TNetParamInfo[lam]: the same handles paired with provenance.  Without the
@@ -1023,7 +1023,8 @@ TToNet[lam_TTerm] := Module[{body, layers, t, step, guard},
         Return @ Failure["TToNetUnsupported", <|"Message" -> "TToNet: did not reach the input variable."|>]];
     NetChain[Reverse[layers]]
 ]
-TToNet[_] := $Failed
+TToNet[x_] := thvmFailure[TToNet::lam, x]
+TToNet::lam = "TToNet takes the TTerm that TFromNet[net] lifts; `1` is not a TTerm.";
 
 TFromNet::unsupportedlayer = "No TFromNet lift rule for layer head `1`.  Add a fromLayer[`1`, ...] case (forward, plus a grad rule if it is to be trained).";
 TFromNet::eltunsupported = "ElementwiseLayer with function `1` has no UOp equivalent yet (interact_grad would need a corresponding grad rule).";

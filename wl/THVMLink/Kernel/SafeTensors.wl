@@ -33,6 +33,10 @@ SetUsage[TSafeTensorSave, "TSafeTensorSave[assoc$, path$] writes assoc$ (name$ t
 TSafeTensorSave[assoc$, path$, metadata$] also writes a string-valued __metadata__ Association into the header.
 The file is an 8-byte little-endian header length, a space-padded JSON header (dtype, shape, data_offsets per tensor), then each tensor's little-endian bytes; each TTerm is realized and read once."];
 
+TTensorMMap::map = "Mapping `3` bytes at offset `2` of `1` failed.";
+TSafeTensorLoad::dtype = "The safetensors dtype `1` has no thvm dtype.";
+TSafeTensorSave::dtype = "TSafeTensorSave writes only bool, integer, f32 and f64 tensors; the tensor `1` is none of these.";
+
 SetUsage[TSafeTensorLoadMetadata, "TSafeTensorLoadMetadata[path$] returns the __metadata__ Association of a .safetensors file (an empty Association if absent), without loading any tensors."];
 
 SetUsage[TTensorMMap, "TTensorMMap[path$, byteOffset$, nbytes$, dtype$, shape$] maps the file region [byteOffset$, byteOffset$ + nbytes$) of path$ read-only and wraps it as a CPU TTerm of the given dtype$ (a thvm dtype string like \"f32\") and integer shape$ list.
@@ -86,7 +90,7 @@ TDiskWarmAsync[w_] := w
    a downstream TUOpCast lifts them to f32/f16 for compute -- bf16 is the
    FLUX / modern-LLM weight format).  SAVE stays byte-aligned only: the
    narrow floats have no WL NumericArray carrier, so $thvmToSafe omits
-   them and TSafeTensorSave declines them ($Failed) rather than
+   them and TSafeTensorSave declines them (a Failure) rather than
    malforming the file (a bitcast-to-uint save path is a follow-up). *)
 $safeToThvm = <|
     "BOOL" -> "bool",
@@ -110,7 +114,7 @@ $safeToThvm = <|
    fp8) load fine via mmap (raw bytes + a runtime dtype tag, dequant/cast
    downstream), but they have no WL NumericArray carrier, so TSafeTensorSave
    cannot emit them without a bitcast-to-uint path -- left out so save
-   gracefully declines them ($Failed) rather than malforming the file. *)
+   gracefully declines them (a Failure) rather than malforming the file. *)
 $thvmToSafe = <|
     "bool" -> "BOOL",
     "i8" -> "I8",
@@ -160,7 +164,7 @@ $thvmByteWidth = <|
 TTensorMMap[path_String, byteOffset_Integer, nbytes_Integer, dtype_String, shape_List] := (
     ensureInit[];
     With[{t = $tensorMMapFn[path, byteOffset, nbytes, dtypeCode[dtype], shape]},
-        If[IntegerQ[t] && t =!= 0, TTerm[t], $Failed]
+        If[IntegerQ[t] && t =!= 0, TTerm[t], thvmFailure[TTensorMMap::map, path, byteOffset, nbytes]]
     ]
 )
 
@@ -179,13 +183,13 @@ safeReadHeader[path_String] := Module[{strm, hlen, jsonBytes, json},
 (* The header's __metadata__ (string -> string), or an empty Association. *)
 TSafeTensorLoadMetadata[path_String] := Lookup[Last @ safeReadHeader[path], "__metadata__", <||>]
 
-(* One lazy mmap-backed disk tensor for a single safetensors header entry.
-   $Failed if the entry's dtype is outside the byte-aligned round-trip set. *)
+(* One lazy mmap-backed disk tensor for a single safetensors header entry,
+   or a Failure if thvm has no dtype for the entry's. *)
 loadSafeEntry[path_String, dataStart_Integer, spec_Association] := Module[{thvmDt, begin, end},
     thvmDt = Lookup[$safeToThvm, spec["dtype"], $Failed];
     {begin, end} = spec["data_offsets"];
     If[ thvmDt === $Failed,
-        $Failed,
+        thvmFailure[TSafeTensorLoad::dtype, spec["dtype"]],
         TTensorMMap[path, dataStart + begin, end - begin, thvmDt, spec["shape"]]
     ]
 ]
@@ -234,7 +238,7 @@ TSafeTensorSave[assoc_Association, path_String, metadata_Association] := Module[
     ensureInit[];
     names = Keys[assoc];
     infos = saveTensorInfo /@ Values[assoc];
-    If[MemberQ[infos, $Failed], Return[$Failed]];
+    If[MemberQ[infos, $Failed], Return[thvmFailure[TSafeTensorSave::dtype, First @ Pick[names, infos, $Failed]]]];
     (* Lay out the data section: each tensor's byte span end-to-end.  An
        empty assoc Sows nothing, so Reap yields {} (not {{...}}); guard the
        [[2, 1]] Part for the valid degenerate empty-safetensors case. *)

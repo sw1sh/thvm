@@ -999,10 +999,11 @@ fxGenerateBody[prompts_, spec_, imgSize_, seed_, initLat_, showSteps_, dev_, nSt
                host backstop, BEFORE building (else the cold capture climbs to it and
                aborts slowly under heavy host pressure). *)
             If[ est > 0.9 hostCap,
-                Message[FluxGenerate::imgtoobig, imgSize, Round[est / 1.*^9],
-                    Round[hostCap / 1.*^9], 16 Floor[Sqrt[0.9 hostCap 256.0 / (3.64*^9)]],
-                    Round[$SystemMemory / 1.*^9]];
-                Return[ConstantArray[$Failed, n], Module]
+                Return[ConstantArray[
+                    WolframInstitute`THVMLink`Private`thvmFailure[FluxGenerate::imgtoobig, imgSize, Round[est / 1.*^9],
+                        Round[hostCap / 1.*^9], 16 Floor[Sqrt[0.9 hostCap 256.0 / (3.64*^9)]],
+                        Round[$SystemMemory / 1.*^9]],
+                    n], Module]
             ];
             (* Anchor the runtime device ceiling to THIS gen's known cold-capture
                footprint, NOT a flat RAM fraction: the whole-net velocity capture

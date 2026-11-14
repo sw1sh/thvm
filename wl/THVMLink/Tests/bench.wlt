@@ -116,8 +116,8 @@ VerificationTest[
 
 (* A spec without InitFn, StepFn or a positive NumSteps is refused with TBench::spec. *)
 VerificationTest[
-    TBench[<|"Name" -> "x"|>],
-    $Failed,
+    MatchQ[TBench[<|"Name" -> "x"|>], Failure["TBench", _]],
+    True,
     {TBench::spec},
     TestID -> "bench/spec-checked"
 ]

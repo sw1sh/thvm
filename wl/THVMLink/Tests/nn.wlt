@@ -1162,3 +1162,31 @@ VerificationTest[
     {{0., 0., 1.}, {1., 0., 0.}},
     TestID -> "nn/gather-gradient-scatters"
 ]
+
+(* An op whose argument shapes do not fit gives a Failure named after the function. *)
+VerificationTest[
+    TInit[];
+    MatchQ[TAttention[TTensorCreate[{{1., 2.}}], TTensorCreate[{{1., 2., 3.}}], TTensorCreate[{{1.}}]],
+        Failure["TAttention", KeyValuePattern["Tag" -> "nn"]]],
+    True,
+    {TAttention::nn},
+    TestID -> "nn/op-shape-mismatch-failure"
+]
+
+(* A layer with no lift fails, and its Failure passes through the rest of the chain. *)
+VerificationTest[
+    TInit[];
+    MatchQ[TFromNet[NetInitialize @ NetChain[{LinearLayer[2], ElementwiseLayer[Erf], LinearLayer[3]}, "Input" -> 2],
+            TTensorCreate[{1., 2.}]],
+        Failure["TFromNet", KeyValuePattern["Tag" -> "eltunsupported"]]],
+    True,
+    {TFromNet::eltunsupported},
+    TestID -> "nn/fromnet-unsupported-layer-failure"
+]
+
+VerificationTest[
+    MatchQ[TToNet[5], Failure["TToNet", _]],
+    True,
+    {TToNet::lam},
+    TestID -> "nn/tonet-non-term-failure"
+]
