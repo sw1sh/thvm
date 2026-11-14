@@ -119,7 +119,7 @@ static AtpFtCell *ft_splice_build_rhs(AtpFt *a, const AtpFtCell *tmpl,
   // diverts the saturator -- mccune cracks in 28s under the dual-flip
   // (vs 49s under the legacy SKEL_FRESH=1 + MNF=1 baseline).  Legacy
   // policy still accessible via THVM_ATPFT_SKEL_FRESH=1.
-  static int skel_fresh_cached = -1;
+  static _Atomic int skel_fresh_cached = -1;
   if (skel_fresh_cached < 0) {
     const char *e = getenv("THVM_ATPFT_SKEL_FRESH");
     skel_fresh_cached = (e != NULL && e[0] == '1') ? 1 : 0;

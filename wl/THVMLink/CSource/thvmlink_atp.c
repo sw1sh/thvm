@@ -643,6 +643,7 @@ typedef struct {
 static AtpSystem g_sys[ATP_SYS_MAX];
 static mint      g_next_keep      = 0;    // managed id the next run keeps under
 static u64       g_next_max_alloc = 0u;   // allocation budget of the next run
+static u32       g_next_push_threads = 0u;   // push-batch threads of the next run (0: default)
 
 static AtpSystem *atp_sys_find(mint id) {
   if (id <= 0) return NULL;
@@ -823,14 +824,17 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_terms_to_prefix(WolframLibraryData libData,
 
 // Configure the next thvm_wl_atp_run_proof call: args[0] the managed id to
 // keep its completed state under (0 = free it as usual), args[1] an
-// allocation budget in heap cells (0 = none).
+// allocation budget in heap cells (0 = none), args[2] when given the
+// push-batch threads (0 = the default; THVM_ATP_PUSH_THREADS still wins).
 EXTERN_C DLLEXPORT int thvm_wl_atp_next_run(WolframLibraryData libData,
                                             mint argc, MArgument *args,
                                             MArgument res) {
-  (void)libData; (void)argc;
+  (void)libData;
   g_next_keep      = MArgument_getInteger(args[0]);
   mint cells       = MArgument_getInteger(args[1]);
   g_next_max_alloc = cells > 0 ? (u64)cells : 0u;
+  mint threads     = (argc > 2) ? MArgument_getInteger(args[2]) : 0;
+  g_next_push_threads = threads > 0 ? (u32)threads : 0u;
   MArgument_setInteger(res, 1);
   return LIBRARY_NO_ERROR;
 }
@@ -916,6 +920,10 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   u64  next_max_alloc = g_next_max_alloc;
   g_next_keep      = 0;
   g_next_max_alloc = 0u;
+  // every run sets its own push-batch thread request, so a configured run
+  // never carries over to the next
+  thvm_atp_set_push_threads(g_next_push_threads);
+  g_next_push_threads = 0u;
   static jmp_buf jb;
   thvm_heap_exhaust_jmp = &jb;
   thvm_heap_exhausted   = 0;

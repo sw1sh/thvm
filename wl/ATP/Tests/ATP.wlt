@@ -30,6 +30,19 @@ VerificationTest[
     TestID -> "ATP/group-budget"
 ]
 
+(* The completion treats critical pairs on the kernel's parallel threads, at most 4; the
+   system it gives does not depend on how many. *)
+VerificationTest[
+    With[{opts = SystemOptions["ParallelOptions"]},
+        WithCleanup[
+            SameQ @@ Table[
+                SetSystemOptions["ParallelOptions" -> "ParallelThreadNumber" -> n];
+                WolframInstitute`ATP`TAtpComplete[pkGroup]["Rules"], {n, {1, 4}}],
+            SetSystemOptions[opts]]],
+    True,
+    TestID -> "ATP/rules-independent-of-threads"
+]
+
 VerificationTest[
     {#["Status"], Length[#["Rules"]]} & /@ {WolframInstitute`ATP`TAtpComplete[pkGroup, {i, m, ee}],
         WolframInstitute`ATP`TAtpComplete[pkGroup, {{i, 0}, {m, 1}, {ee, 1}}]},

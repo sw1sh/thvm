@@ -129,7 +129,20 @@ typedef struct AtpFt {
   u64         n_scratch_alive;
   u64         session;      // process-unique instance id (never 0)
   u32         n_blocks;
-  u32         _pad;
+  // Spans are freed without the per-arena underflow check: push-batch
+  // workers move cells between arenas (a worker frees the main arena's
+  // redexes, the main thread frees a worker's normal forms), so one
+  // arena's count can wrap while the sum over the arenas stays exact.
+  u32         loose;
+  // A push-batch worker's arena keeps at most reuse_cap freed cells on
+  // free_head (n_reuse, approximate) and spills the rest onto
+  // spill_head..spill_tail, which the caller's arena takes whole after
+  // each flush (a worker frees far more than it allocates).  reuse_cap 0:
+  // no spill.
+  u64         n_reuse;
+  u64         reuse_cap;
+  AtpFtCell  *spill_head;
+  AtpFtCell  *spill_tail;
 } AtpFt;
 
 // --- API ---------------------------------------------------------------

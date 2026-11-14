@@ -22,6 +22,7 @@ RelatedGuides: [THVMLink]
 - [TAtpComplete]() runs the unfailing Knuth-Bendix completion of [TKnuthBendixCompletion]() once and keeps its result, so that [TAtpNormalForm]() and [TAtpEqualQ]() answer many questions about one theory without completing again.
 - The *axioms* and *order* are as in [TKnuthBendixCompletion](): a precedence list {*s*<sub>1</sub>, *s*<sub>2</sub>, ...} gives the lexicographic path ordering, a list {{*s*<sub>1</sub>, *w*<sub>1</sub>}, ...} the Knuth-Bendix ordering with weights *w*<sub>i</sub>, and the default is the Knuth-Bendix ordering with weight 1 for every symbol.
 - Completion stops when every critical pair is joined, or when it reaches [MaxSteps]() selected equations or its allocation budget. Both budgets give the same result on every machine; [TimeConstraint]() is not used by default.
+- When the system option `"ParallelThreadNumber"` is 4 or more, completion normalizes critical pairs on 4 threads. The completed system does not depend on the number of threads.
 - The following options can be given:
 
 | | | |

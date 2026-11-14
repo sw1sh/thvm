@@ -67,6 +67,16 @@ extern void atp_ri_ft_sync(AtpState *s);
 // recorder packs each step pair straight from spans -- m->root plus
 // this unchanged other side -- instead of decoding a Term per step.
 // Set/cleared around the cone's slice_record calls only.
+// The arena a normalize allocates from: the state's own, or a push-batch
+// worker's (push_batch.c sets it on the worker's thread).
+static _Thread_local AtpFt *g_ft_arena_tl = NULL;
+// Set on push-batch worker threads, which poll the wall deadline but not
+// the host abort hook (that belongs to the host's thread).
+static _Thread_local u8 g_atp_norm_worker = 0u;
+static inline AtpFt *atp_ft_arena(const AtpState *s) {
+  return g_ft_arena_tl != NULL ? g_ft_arena_tl : (AtpFt *)s->ft_arena_ptr;
+}
+
 static const AtpFtCell *g_rec_eq_other_ft = NULL;
 // Splice log of ONE mixmost walk: armed by the caller right before a
 // normalize, consumed (and cleared) by the next atp_normalize_mixmost_ft
@@ -76,8 +86,8 @@ static const AtpFtCell *g_rec_eq_other_ft = NULL;
 // have_pos == 0 means the path overflowed ATP_PROOF_MAX_DEPTH.
 typedef void (*AtpFtStepSink)(AtpState *s, u8 side, u32 rule, u8 dir,
                               const u8 *pos, u8 pos_len, int have_pos);
-static AtpFtStepSink g_ft_step_sink = NULL;
-static u8 g_ft_step_sink_side = 0u;
+static _Thread_local AtpFtStepSink g_ft_step_sink = NULL;
+static _Thread_local u8 g_ft_step_sink_side = 0u;
 // Incremental goal normal form (goal_incr.c).  A goal-side normalize can
 // record its firings (the fired rule, its direction and pass, and the
 // redex position), and a later normalize of the same side can replay
@@ -120,8 +130,8 @@ typedef struct {
   AtpFtSubst   scratch;
 } AtpGoalReplay;
 
-static AtpGoalWalk   *g_goal_rec_arm    = NULL;
-static AtpGoalReplay *g_goal_replay_arm = NULL;
+static _Thread_local AtpGoalWalk   *g_goal_rec_arm    = NULL;
+static _Thread_local AtpGoalReplay *g_goal_replay_arm = NULL;
 
 static void atp_goal_walk_clear(AtpGoalWalk *w) {
   w->n_fire   = 0u;
@@ -220,7 +230,7 @@ static int ft_subst_ground_extras(AtpState *s, const AtpFtCell *tmpl,
       if (s->min_const_ft == NULL || s->min_const_ft_src != s->min_const) {
         // min_const is a 0-ary constructor: build its single cell
         // directly (exactly what ft_from_term would emit).
-        s->min_const_ft     = ftnew_const((AtpFt *)s->ft_arena_ptr,
+        s->min_const_ft     = ftnew_const(atp_ft_arena(s),
                                           term_ext(s->min_const), 0);
         s->min_const_ft_src = s->min_const;
       }
@@ -434,7 +444,7 @@ static inline int ft_match_maybe_ac(AtpFt *a,
                                     const AtpFtCell *subj,
                                     AtpFtSubst *subst) {
 #if defined(THVM_ATP_AC) && defined(THVM_ATPFT_MATCH)
-  static int ac_on = -1;
+  static _Atomic int ac_on = -1;
   if (ac_on < 0) {
     const char *e = getenv("THVM_ATPFT_AC_MATCH");
     ac_on = (e == NULL || (e[0] != '0' && e[0] != '\0')) ? 1 : 0;
@@ -675,17 +685,7 @@ typedef struct {
   // ascending.  These are merged into every query.
   u32        *var_rules;
   u32         n_var, cap_var;
-  // Scratch candidate buffer (ascending slot order), reused per query.
-  u32        *cand;
-  u32         cand_cap;
-  // Scratch ping-pong buffer for the LSD-radix candidate sort (sized in
-  // lockstep with `cand`; reused per query, no per-call malloc).
-  u32        *cand_tmp;
-  u32         cand_tmp_cap;
   // Instrumentation (THVM_ATPFT_PRUNE_STATS=1 prints on teardown).
-  u64         q_queries;
-  u64         q_candidates;   // candidates returned (summed over queries)
-  u64         q_rules_seen;   // n_rules summed over queries (the no-index cost)
   u64         n_rebuilds;     // full index rebuilds (revision/count changes)
   u64         n_extends;      // incremental pure-append extends
   u64         rebuild_work;   // rules processed across all rebuilds
@@ -713,12 +713,6 @@ typedef struct {
   // pattern face (see FtDtRec).  Reset with the tree on rebuild.
   u16        *dt_idmap;
   u32         dt_idmap_n, dt_idmap_cap;
-  // Per-query descent-binding capture (reset at each ftdt_candidates):
-  // bind snapshots + acceptance records.
-  const AtpFtCell **dtb_snap;
-  u32         dtb_snap_n, dtb_snap_cap;
-  struct FtDtRec_s *dtb_rec;
-  u32         dtb_rec_n, dtb_rec_cap;
   // Per-node branch-visit counters (THVM_ATP_PROFILE=2 attribution
   // only; NULL otherwise).  Node ids are reused across rebuilds, so a
   // slot aggregates the structurally-similar role the id plays in each
@@ -731,14 +725,38 @@ typedef struct {
 
 static FtPiIndex g_ftpi = {0};
 
+// The index's per-query scratch, one per thread: the tree above is shared
+// and only read while push-batch workers normalize (built before them by
+// ftpi_ensure), but every query writes and reallocs these buffers.
+typedef struct {
+  // Candidate buffer (ascending slot order), reused per query.
+  u32        *cand;
+  u32         cand_cap;
+  // Ping-pong buffer for the LSD-radix candidate sort (sized in lockstep
+  // with `cand`; reused per query, no per-call malloc).
+  u32        *cand_tmp;
+  u32         cand_tmp_cap;
+  // Descent-binding capture (reset at each ftdt_candidates): bind
+  // snapshots + acceptance records.
+  const AtpFtCell **dtb_snap;
+  u32         dtb_snap_n, dtb_snap_cap;
+  struct FtDtRec_s *dtb_rec;
+  u32         dtb_rec_n, dtb_rec_cap;
+  // Instrumentation (THVM_ATPFT_PRUNE_STATS=1 prints on teardown).
+  u64         q_queries;
+  u64         q_candidates;   // candidates returned (summed over queries)
+  u64         q_rules_seen;   // n_rules summed over queries (the no-index cost)
+} FtPiScratch;
+static _Thread_local FtPiScratch g_ftps = {0};
+
 // Per-query snapshot of the detail-tier gate (THVM_ATP_PROFILE=2 push
 // scope) for the descend's per-node shape counters -- one u8 test per
 // visited node instead of two global loads.  Set in ftdt_candidates.
-static u8 g_ftdt_pd = 0;
+static _Thread_local u8 g_ftdt_pd = 0;
 // Tree depth of the NEXT ftdt_descend call (edges from the root) --
 // maintained only under g_ftdt_pd for the per-depth visit histogram;
 // the caller sets it before each recursion, so no unwind is needed.
-static u32 g_ftdt_dp = 0;
+static _Thread_local u32 g_ftdt_dp = 0;
 
 // Profile-only subject-subtree cell count (the ft_eq cost proxy).
 static u32 ftdt_prof_cells(const AtpFtCell *c) {
@@ -776,16 +794,16 @@ static void ftnfm_bump_gen(void);
 // candidates-per-query vs the n_rules a linear scan would have visited.
 static void ftpi_stats_atexit(void) {
   FtPiIndex *ix = &g_ftpi;
-  if (ix->q_queries == 0u) return;
+  if (g_ftps.q_queries == 0u) return;
   fprintf(stderr,
           "[ftpi] queries=%llu  cand/query=%.2f  no-index n_rules/query=%.2f  "
           "prune-ratio=%.4f  ft_match-calls-saved~%.1fx\n",
-          (unsigned long long)ix->q_queries,
-          (double)ix->q_candidates / (double)ix->q_queries,
-          (double)ix->q_rules_seen / (double)ix->q_queries,
-          ix->q_rules_seen ? (double)ix->q_candidates / (double)ix->q_rules_seen
+          (unsigned long long)g_ftps.q_queries,
+          (double)g_ftps.q_candidates / (double)g_ftps.q_queries,
+          (double)g_ftps.q_rules_seen / (double)g_ftps.q_queries,
+          g_ftps.q_rules_seen ? (double)g_ftps.q_candidates / (double)g_ftps.q_rules_seen
                            : 0.0,
-          ix->q_candidates ? (double)ix->q_rules_seen / (double)ix->q_candidates
+          g_ftps.q_candidates ? (double)g_ftps.q_rules_seen / (double)g_ftps.q_candidates
                            : 0.0);
   fprintf(stderr, "[ftpi] rebuilds=%llu  extends=%llu  rebuild_work=%llu rules\n",
           (unsigned long long)ix->n_rebuilds,
@@ -795,7 +813,7 @@ static void ftpi_stats_atexit(void) {
 }
 
 static void ftpi_stats_arm(void) {
-  static int armed = -1;
+  static _Atomic int armed = -1;
   if (armed >= 0) return;
   const char *e = getenv("THVM_ATPFT_PRUNE_STATS");
   armed = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
@@ -985,7 +1003,7 @@ static int ftpi_try_extend(AtpState *s) {
 // linear scan wins on a handful of rules).  Cached env disable knob for
 // before/after measurement.
 static int ftpi_applicable(const AtpState *s, u32 slice_first, u32 slice_end) {
-  static int disabled = -1;
+  static _Atomic int disabled = -1;
   if (disabled < 0) {
     const char *e = getenv("THVM_ATPFT_NO_PRUNE");
     disabled = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
@@ -1043,7 +1061,7 @@ static int ftpi_pruning_worthwhile(void) {
 
 // Fill the scratch candidate buffer with the rule slots compatible with
 // `p` (a CTR subject cell), in ASCENDING slot order.  Returns the count;
-// the candidates are in g_ftpi.cand[0..count).  Merges the var-rooted
+// the candidates are in g_ftps.cand[0..count).  Merges the var-rooted
 // list with the matched root bucket (filtered by the arg0/arg1
 // fingerprint), deduping the bucket's possible double RHS entry.
 static u32 ftpi_candidates(AtpState *s, const AtpFtCell *p) {
@@ -1054,13 +1072,13 @@ static u32 ftpi_candidates(AtpState *s, const AtpFtCell *p) {
                                             : ftpi_bucket_find(ix, sp.fp[0]);
   u32 bn = (b != NULL) ? b->n : 0u;
   u32 need = ix->n_var + bn;
-  if (need > ix->cand_cap) {
-    u32 nc = ix->cand_cap ? ix->cand_cap : 64u;
+  if (need > g_ftps.cand_cap) {
+    u32 nc = g_ftps.cand_cap ? g_ftps.cand_cap : 64u;
     while (nc < need) nc *= 2u;
-    u32 *nb = (u32 *)realloc(ix->cand, nc * sizeof(u32));
+    u32 *nb = (u32 *)realloc(g_ftps.cand, nc * sizeof(u32));
     if (nb == NULL) thvm_fatal("ftpi: candidate buffer OOM");
-    ix->cand = nb;
-    ix->cand_cap = nc;
+    g_ftps.cand = nb;
+    g_ftps.cand_cap = nc;
   }
   // Merge the two ascending lists (var_rules and the bucket's compatible
   // entries) into ascending order, deduping equal slots.
@@ -1087,13 +1105,13 @@ static u32 ftpi_candidates(AtpState *s, const AtpFtCell *p) {
     if (vr <= br) { pick = vr; vi++; }
     else          { pick = br; bi++; }
     if (pick != last) {   // dedup (var double-push or bucket double-entry)
-      ix->cand[out++] = pick;
+      g_ftps.cand[out++] = pick;
       last = pick;
     }
   }
-  ix->q_queries++;
-  ix->q_candidates += out;
-  ix->q_rules_seen += s->n_rules;
+  g_ftps.q_queries++;
+  g_ftps.q_candidates += out;
+  g_ftps.q_rules_seen += s->n_rules;
   return out;
 }
 
@@ -1506,32 +1524,32 @@ static void ftdt_reset(FtPiIndex *ix) {
 // Snapshot the current canonical bindings bind[0..nbound) into the
 // per-query pool; returns the snapshot offset.
 static u32 ftdt_snap_push(FtPiIndex *ix, const AtpFtCell **bind, u32 nbound) {
-  if (ix->dtb_snap_n + nbound > ix->dtb_snap_cap) {
-    u32 nc = ix->dtb_snap_cap ? ix->dtb_snap_cap : 128u;
-    while (nc < ix->dtb_snap_n + nbound) nc *= 2u;
+  if (g_ftps.dtb_snap_n + nbound > g_ftps.dtb_snap_cap) {
+    u32 nc = g_ftps.dtb_snap_cap ? g_ftps.dtb_snap_cap : 128u;
+    while (nc < g_ftps.dtb_snap_n + nbound) nc *= 2u;
     const AtpFtCell **nb =
-        (const AtpFtCell **)realloc(ix->dtb_snap, nc * sizeof(*nb));
+        (const AtpFtCell **)realloc(g_ftps.dtb_snap, nc * sizeof(*nb));
     if (nb == NULL) thvm_fatal("ftdt: binding snapshot pool OOM");
-    ix->dtb_snap = nb;
-    ix->dtb_snap_cap = nc;
+    g_ftps.dtb_snap = nb;
+    g_ftps.dtb_snap_cap = nc;
   }
-  u32 ofs = ix->dtb_snap_n;
-  for (u32 k = 0; k < nbound; k++) ix->dtb_snap[ofs + k] = bind[k];
-  ix->dtb_snap_n += nbound;
+  u32 ofs = g_ftps.dtb_snap_n;
+  for (u32 k = 0; k < nbound; k++) g_ftps.dtb_snap[ofs + k] = bind[k];
+  g_ftps.dtb_snap_n += nbound;
   return ofs;
 }
 
 // Append one per-query acceptance record (see FtDtRec).
 static void ftdt_rec_push(FtPiIndex *ix, u32 rule, u32 snap_ofs, u32 aux,
                           u16 nvar) {
-  if (ix->dtb_rec_n == ix->dtb_rec_cap) {
-    u32 nc = ix->dtb_rec_cap ? ix->dtb_rec_cap * 2u : 64u;
-    FtDtRec *nb = (FtDtRec *)realloc(ix->dtb_rec, nc * sizeof(FtDtRec));
+  if (g_ftps.dtb_rec_n == g_ftps.dtb_rec_cap) {
+    u32 nc = g_ftps.dtb_rec_cap ? g_ftps.dtb_rec_cap * 2u : 64u;
+    FtDtRec *nb = (FtDtRec *)realloc(g_ftps.dtb_rec, nc * sizeof(FtDtRec));
     if (nb == NULL) thvm_fatal("ftdt: binding record pool OOM");
-    ix->dtb_rec = nb;
-    ix->dtb_rec_cap = nc;
+    g_ftps.dtb_rec = nb;
+    g_ftps.dtb_rec_cap = nc;
   }
-  FtDtRec *r = &ix->dtb_rec[ix->dtb_rec_n++];
+  FtDtRec *r = &g_ftps.dtb_rec[g_ftps.dtb_rec_n++];
   r->rule      = rule;
   r->snap_ofs  = snap_ofs;
   r->idmap_ofs = aux >> 1;
@@ -1545,16 +1563,16 @@ static void ftdt_rec_push(FtPiIndex *ix, u32 rule, u32 snap_ofs, u32 aux,
 static void ftdt_emit_leaf_class(FtPiIndex *ix, const u32 *lf, const u32 *aux,
                                  u32 n, u32 *out, u32 snap_ofs, u16 nvar,
                                  u8 rec_on) {
-  if (*out + n > ix->cand_cap) {
-    u32 nc = ix->cand_cap ? ix->cand_cap : 64u;
+  if (*out + n > g_ftps.cand_cap) {
+    u32 nc = g_ftps.cand_cap ? g_ftps.cand_cap : 64u;
     while (nc < *out + n) nc *= 2u;
-    u32 *nb = (u32 *)realloc(ix->cand, nc * sizeof(u32));
+    u32 *nb = (u32 *)realloc(g_ftps.cand, nc * sizeof(u32));
     if (nb == NULL) thvm_fatal("ftdt: candidate buffer OOM");
-    ix->cand = nb;
-    ix->cand_cap = nc;
+    g_ftps.cand = nb;
+    g_ftps.cand_cap = nc;
   }
   for (u32 i = 0; i < n; i++) {
-    ix->cand[(*out)++] = lf[i];
+    g_ftps.cand[(*out)++] = lf[i];
     if (rec_on) ftdt_rec_push(ix, lf[i], snap_ofs, aux[i], nvar);
   }
 }
@@ -1579,7 +1597,7 @@ static void ftdt_emit_leaf(FtPiIndex *ix, u32 node, u32 *out, u8 want,
 
 // Recursive descent: match the subject preorder [sc, sc_end) against the
 // tree rooted at `node`, appending every reachable leaf's rule slots to
-// ix->cand[0..*out).  `sc` is the current subject cell, `sc_end` is the
+// g_ftps.cand[0..*out).  `sc` is the current subject cell, `sc_end` is the
 // one-past cell of the WHOLE redex subterm (descent succeeds only when a
 // pattern consumes EXACTLY up to sc_end -- mirroring ft_match matching
 // the ENTIRE lhs against the ENTIRE redex).
@@ -2253,7 +2271,7 @@ static void ftdt_descend3(const FtDtDesc *d, u32 node,
 //     calls; the small-n bucket is the bulk of them).
 //   * n >= FTDT_SORT_INS: 8-bit LSD radix with the pass count adapted to the
 //     max key (rule slots live in [0, n_rules), typically < 65536 -> 2
-//     passes).  Uses ix->cand_tmp as the ping-pong buffer.
+//     passes).  Uses g_ftps.cand_tmp as the ping-pong buffer.
 enum { FTDT_SORT_INS = 24u };
 static void ftdt_sort_u32(FtPiIndex *ix, u32 *a, u32 n) {
   if (n < FTDT_SORT_INS) {
@@ -2270,15 +2288,15 @@ static void ftdt_sort_u32(FtPiIndex *ix, u32 *a, u32 n) {
   u32 passes = 1u;
   for (u64 lim = 0xffull; mx > lim && passes < 4u; lim = (lim << 8) | 0xffull)
     passes++;
-  if (ix->cand_tmp_cap < n) {
-    u32 nc = ix->cand_tmp_cap ? ix->cand_tmp_cap : 64u;
+  if (g_ftps.cand_tmp_cap < n) {
+    u32 nc = g_ftps.cand_tmp_cap ? g_ftps.cand_tmp_cap : 64u;
     while (nc < n) nc *= 2u;
-    u32 *nb = (u32 *)realloc(ix->cand_tmp, (size_t)nc * sizeof(u32));
+    u32 *nb = (u32 *)realloc(g_ftps.cand_tmp, (size_t)nc * sizeof(u32));
     if (nb == NULL) thvm_fatal("ftdt: radix scratch OOM");
-    ix->cand_tmp = nb;
-    ix->cand_tmp_cap = nc;
+    g_ftps.cand_tmp = nb;
+    g_ftps.cand_tmp_cap = nc;
   }
-  u32 *src = a, *dst = ix->cand_tmp;
+  u32 *src = a, *dst = g_ftps.cand_tmp;
   for (u32 pass = 0u; pass < passes; pass++) {
     u32 shift = pass * 8u;
     u32 cnt[256] = {0};
@@ -2289,7 +2307,7 @@ static void ftdt_sort_u32(FtPiIndex *ix, u32 *a, u32 n) {
     u32 *t = src; src = dst; dst = t;
   }
   // If an odd number of passes left the sorted data in cand_tmp, copy back
-  // so the caller's `a` (== ix->cand) holds the result.
+  // so the caller's `a` (== g_ftps.cand) holds the result.
   if (src != a)
     for (u32 i = 0u; i < n; i++) a[i] = src[i];
 }
@@ -2418,7 +2436,7 @@ static u64 atp_ftnfm_gen(void) { return g_ftnfm_gen; }
 
 static void ftnfm_bump_gen(void) { g_ftnfm_gen++; }
 
-// Fill ix->cand[0..count) with the rule slots whose LHS/RHS preorder is
+// Fill g_ftps.cand[0..count) with the rule slots whose LHS/RHS preorder is
 // STRUCTURALLY COMPATIBLE with subject cell `p`, in ASCENDING slot order
 // with duplicates removed (a rule appears in two leaves only via the
 // unorientable LHS+RHS double-insert; the dedup offers it once).  This is
@@ -2434,9 +2452,9 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
   // Statically zeroed once; ftdt_descend's bind/unbind bracket restores
   // every slot to NULL before returning (no early exits), so no per-query
   // reset is needed.
-  static const AtpFtCell *ftdt_bind[ATPFT_MAX_VARS];
-  ix->dtb_snap_n = 0u;      // per-query binding capture (see FtDtRec)
-  ix->dtb_rec_n  = 0u;
+  static _Thread_local const AtpFtCell *ftdt_bind[ATPFT_MAX_VARS];
+  g_ftps.dtb_snap_n = 0u;      // per-query binding capture (see FtDtRec)
+  g_ftps.dtb_rec_n  = 0u;
   g_ftdt_pd = (u8)(g_atp_phase_detail && g_atp_pushn_active);
   if (g_ftdt_pd) g_ftdt_dp = 0u;
   // `pure` doubles as the recording gate: a caller that will not
@@ -2449,8 +2467,8 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
   // back to ftdt_descend2, THVM_NO_FT_DTV2=1 to the classic
   // ftdt_descend -- same-binary A/B ladder.  Identical candidate /
   // record SET at every rung.
-  static int dtv2_off = -1;
-  static int dtv3_off = -1;
+  static _Atomic int dtv2_off = -1;
+  static _Atomic int dtv3_off = -1;
   if (dtv2_off < 0) {
     const char *e = getenv("THVM_NO_FT_DTV2");
     dtv2_off = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
@@ -2460,7 +2478,7 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
   // Divergence harness (THVM_FT_DTV2_DIFF=1): run BOTH walks per query
   // and fatal on the first candidate-set difference, dumping the
   // subject preorder + both sets.  Diagnostic only.
-  static int dtv2_diff = -1;
+  static _Atomic int dtv2_diff = -1;
   if (dtv2_diff < 0) {
     const char *e = getenv("THVM_FT_DTV2_DIFF");
     dtv2_diff = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
@@ -2469,20 +2487,21 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
     u32 out1 = 0u;
     FtDtDesc d1 = { ix, p_end, &out1, ftdt_bind, want };
     ftdt_descend(&d1, 0u, p, 0u, 0u);   // classic, impure (no records)
-    static u32 c1[65536];
+    u32 *c1 = (u32 *)malloc(2u * 65536u * sizeof(u32));
+    u32 *c2 = c1 + 65536u;
+    if (c1 == NULL) thvm_fatal("dtv2: out of memory");
     u32 n1 = (out1 < 65536u) ? out1 : 65536u;
-    for (u32 i = 0; i < n1; i++) c1[i] = ix->cand[i];
+    for (u32 i = 0; i < n1; i++) c1[i] = g_ftps.cand[i];
     ftdt_sort_u32(ix, c1, n1);
     out1 = 0u;   // discard; rerun v2 below fills for real
-    ix->dtb_snap_n = 0u;
-    ix->dtb_rec_n  = 0u;
+    g_ftps.dtb_snap_n = 0u;
+    g_ftps.dtb_rec_n  = 0u;
     u32 out2 = 0u;
     FtDtDesc d2 = { ix, p_end, &out2, ftdt_bind, want };
     if (dtv3_off) ftdt_descend2(&d2, 0u, p, 0u, 0u);
     else          ftdt_descend3(&d2, 0u, p, 0u, 0u);
-    static u32 c2[65536];
     u32 n2 = (out2 < 65536u) ? out2 : 65536u;
-    for (u32 i = 0; i < n2; i++) c2[i] = ix->cand[i];
+    for (u32 i = 0; i < n2; i++) c2[i] = g_ftps.cand[i];
     ftdt_sort_u32(ix, c2, n2);
     int bad = (n1 != n2);
     for (u32 i = 0; !bad && i < n1; i++) bad = (c1[i] != c2[i]);
@@ -2506,29 +2525,30 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
       }
       thvm_fatal("dtv2: candidate-set divergence");
     }
-    ix->dtb_snap_n = 0u;
-    ix->dtb_rec_n  = 0u;
+    free(c1);
+    g_ftps.dtb_snap_n = 0u;
+    g_ftps.dtb_rec_n  = 0u;
   }
   if (dtv2_off)      ftdt_descend (&d, 0u, p, 0u, rec_on ? 1u : 0u);
   else if (dtv3_off) ftdt_descend2(&d, 0u, p, 0u, rec_on ? 1u : 0u);
   else               ftdt_descend3(&d, 0u, p, 0u, rec_on ? 1u : 0u);
   if (out > 1u) {
-    ftdt_sort_u32(ix, ix->cand, out);
+    ftdt_sort_u32(ix, g_ftps.cand, out);
     u32 w = 1u;
     for (u32 r = 1u; r < out; r++) {
-      if (ix->cand[r] != ix->cand[w - 1u]) ix->cand[w++] = ix->cand[r];
+      if (g_ftps.cand[r] != g_ftps.cand[w - 1u]) g_ftps.cand[w++] = g_ftps.cand[r];
     }
     out = w;
   }
-  ix->q_queries++;
-  ix->q_candidates += out;
-  ix->q_rules_seen += s->n_rules;
+  g_ftps.q_queries++;
+  g_ftps.q_candidates += out;
+  g_ftps.q_rules_seen += s->n_rules;
   // THVM_ATPFT_DT_CHECK=1: airtight superset proof.  For EVERY live rule,
   // if ft_match accepts its LHS (or, for an unorientable rule, its RHS)
   // against `p`, that slot MUST appear in the tree candidate set -- else
   // the tree dropped a real match (unsound).  O(n_rules) per query, so
   // gated off by default; run it on a saturation to certify soundness.
-  static int dt_check = -1;
+  static _Atomic int dt_check = -1;
   if (dt_check < 0) {
     const char *e = getenv("THVM_ATPFT_DT_CHECK");
     dt_check = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
@@ -2552,7 +2572,7 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
       u8 r_class = unor ? (u8)FTDT_WANT_UNORIENT : (u8)FTDT_WANT_ORIENT;
       if ((r_class & want) == 0u) continue;
       int found = 0;
-      for (u32 k = 0; k < out; k++) if (ix->cand[k] == r) { found = 1; break; }
+      for (u32 k = 0; k < out; k++) if (g_ftps.cand[k] == r) { found = 1; break; }
       if (!found) {
         fprintf(stderr, "[ftdt SOUNDNESS VIOLATION] rule %u (orient=%u) "
                 "ft_matches p but is NOT in the tree candidate set "
@@ -2569,8 +2589,8 @@ static u32 ftdt_candidates(AtpState *s, const AtpFtCell *p, u8 want,
 // record list length equals the (tiny) per-query emission count, so a
 // linear scan beats any keyed structure here.
 static const FtDtRec *ftdt_rec_find(const FtPiIndex *ix, u32 rule, u8 face) {
-  for (u32 k = 0; k < ix->dtb_rec_n; k++) {
-    const FtDtRec *r = &ix->dtb_rec[k];
+  for (u32 k = 0; k < g_ftps.dtb_rec_n; k++) {
+    const FtDtRec *r = &g_ftps.dtb_rec[k];
     if (r->rule == rule && r->face == face) return r;
   }
   return NULL;
@@ -2584,7 +2604,7 @@ static const FtDtRec *ftdt_rec_find(const FtPiIndex *ix, u32 rule, u8 face) {
 static void ftdt_fill_subst(const FtPiIndex *ix, const FtDtRec *rec,
                             AtpFtSubst *out) {
   ft_subst_reset(out);
-  const AtpFtCell **snap = ix->dtb_snap + rec->snap_ofs;
+  const AtpFtCell **snap = g_ftps.dtb_snap + rec->snap_ofs;
   const u16       *ids   = ix->dt_idmap + rec->idmap_ofs;
   for (u16 k = 0; k < rec->nvar; k++) {
     u32 id = ids[k];
@@ -2601,7 +2621,7 @@ static void ftdt_fill_subst(const FtPiIndex *ix, const FtDtRec *rec,
 // default; run a saturation with it on to certify the fused path.
 static void ftdt_dtb_verify(const FtPiIndex *ix, const FtDtRec *rec,
                             const AtpFtCell *pat, const AtpFtCell *p) {
-  static AtpFtSubst chk;   // static zero-init satisfies first-use contract
+  static _Thread_local AtpFtSubst chk;   // zero-init satisfies first-use contract
   ft_subst_reset(&chk);
   int m = ft_match(pat, p, &chk);
   if (m != (rec != NULL)) {
@@ -2609,7 +2629,7 @@ static void ftdt_dtb_verify(const FtPiIndex *ix, const FtDtRec *rec,
     thvm_fatal("ftdt: descent-binding acceptance diverges from ft_match");
   }
   if (!m) return;
-  static AtpFtSubst fil;
+  static _Thread_local AtpFtSubst fil;
   ftdt_fill_subst(ix, rec, &fil);
   if (fil.wm != chk.wm) {
     fprintf(stderr, "[ftdt DTB MISMATCH] wm fill=%u match=%u\n", fil.wm, chk.wm);
@@ -2691,7 +2711,7 @@ static int ft_cell_try_rules(AtpState   *s,
   // A/B gate for the orient-pass winner re-match skip (default ON).
   // THVM_NO_FT_REMATCH_SKIP=1 forces the unconditional re-match so an
   // ON-vs-OFF sweep proves the skip is byte-identical, never just faster.
-  static int no_rematch_skip = -1;
+  static _Atomic int no_rematch_skip = -1;
   if (no_rematch_skip < 0) {
     const char *e = getenv("THVM_NO_FT_REMATCH_SKIP");
     no_rematch_skip = (e != NULL && e[0] == '1') ? 1 : 0;
@@ -2699,7 +2719,7 @@ static int ft_cell_try_rules(AtpState   *s,
   // Arena handle for the AC-match dispatch (AC-chain bindings allocate
   // into the scratch arena).  NULL-safe: the dispatch only deref's it
   // when the AC path actually fires.
-  AtpFt *ft_arena_local = (AtpFt *)s->ft_arena_ptr;
+  AtpFt *ft_arena_local = atp_ft_arena(s);
   // Candidate-pruning index (ftpi_*): on the full-range / AC-off hot
   // path, replace the [slice_first, slice_end) iteration with only the
   // rules structurally compatible with `p`, in ascending slot order.
@@ -2721,8 +2741,8 @@ static int ft_cell_try_rules(AtpState   *s,
   // THVM_ATPFT_DTB_CHECK=1 certifies every consulted record against a
   // real ft_match.
   int        use_dtb  = 0;
-  static int dtb_off = -1;
-  static int dtb_check = -1;
+  static _Atomic int dtb_off = -1;
+  static _Atomic int dtb_check = -1;
   if (dtb_off < 0) {
     const char *e = getenv("THVM_NO_FT_DTB");
     dtb_off = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
@@ -2745,7 +2765,7 @@ static int ft_cell_try_rules(AtpState   *s,
       // ON-vs-OFF byte-identity measurement.  Both return the identical
       // candidate SET in ascending slot order (the tree just prunes
       // deeper), so the winner below is byte-identical either way.
-      static int no_disctree = -1;
+      static _Atomic int no_disctree = -1;
       if (no_disctree < 0) {
         const char *e = getenv("THVM_NO_DISCTREE");
         no_disctree = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
@@ -2764,7 +2784,7 @@ static int ft_cell_try_rules(AtpState   *s,
       use_dtb  = !no_disctree && !dtb_off;
       pi_ncand = no_disctree ? ftpi_candidates(s, p)
                              : ftdt_candidates(s, p, want, (u8)use_dtb);
-      pi_cand  = g_ftpi.cand;
+      pi_cand  = g_ftps.cand;
     }
   }
   // Iteration bound: candidate count when indexed, else the dense slice
@@ -2887,7 +2907,7 @@ static int ft_cell_try_rules(AtpState   *s,
     // for an ON-vs-OFF byte-identity sweep; the THVM_ATPFT_KBO_DIFF
     // probe also forces it (its side-by-side Term compare reads the
     // OPEN verdict).
-    static int skolem_only = -1;
+    static _Atomic int skolem_only = -1;
     if (skolem_only < 0) {
       const char *e = getenv("THVM_NO_FT_SKOLEM_ONLY");
       skolem_only = (e != NULL && e[0] != '0' && e[0] != '\0') ? 0 : 1;
@@ -2980,10 +3000,10 @@ static int ft_cell_try_rules(AtpState   *s,
               ft_v = KBO_GT;
             }
           }
-          static int dbg_diff = -1;
+          static _Atomic int dbg_diff = -1;
           if (dbg_diff < 0) dbg_diff = getenv("THVM_ATPFT_KBO_DIFF") != NULL ? 1 : 0;
           if (dbg_diff && !ld_lpo) {
-            AtpFt *arena_chk = (AtpFt *)s->ft_arena_ptr;
+            AtpFt *arena_chk = atp_ft_arena(s);
             AtpFtCell *repl = ft_subst_apply(arena_chk, rhs, subst_buf, 1);
             if (repl != NULL) {
               Term t_p    = ft_to_term(p);
@@ -3351,7 +3371,7 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   u8  pos[ATP_PROOF_MAX_DEPTH];
   u8  pos_len  = 0u;
   int have_pos = 0;
-  static int dbg_goal_nf = -1;
+  static _Atomic int dbg_goal_nf = -1;
   if (dbg_goal_nf < 0) dbg_goal_nf = getenv("THVM_ATP_GOAL_NF_DEBUG") != NULL;
   // THVM_ATP_MIXSTEP_ALL=1: unscoped sibling of dbg_goal_nf's [mixstep] --
   // fires for EVERY splice this call makes (interreduction / CP push-
@@ -3361,7 +3381,7 @@ static int ft_mixmost_reduce_here(FtMixmost *m) {
   // (collapse/re-orient) that never set either scope flag -- see the
   // RNG030-6 residual-unsound-inference note (tools/atp_cli/main.c, the
   // full-ac lane).
-  static int dbg_all = -1;
+  static _Atomic int dbg_all = -1;
   if (dbg_all < 0) dbg_all = getenv("THVM_ATP_MIXSTEP_ALL") != NULL;
   if (m->record || m->psteps != NULL || m->sink != NULL || dbg_goal_nf ||
       dbg_all) {
@@ -3512,9 +3532,9 @@ typedef struct {
   u8  len;
   u8  want;
 } FtNfmEnt;
-static FtNfmEnt *g_ftnfm = NULL;
-u64 g_atp_ftnfm_probe = 0, g_atp_ftnfm_hit = 0, g_atp_ftnfm_store = 0;
-u64 g_atp_ftnfm_toolong = 0;
+static _Thread_local FtNfmEnt *g_ftnfm = NULL;
+_Thread_local u64 g_atp_ftnfm_probe = 0, g_atp_ftnfm_hit = 0, g_atp_ftnfm_store = 0;
+_Thread_local u64 g_atp_ftnfm_toolong = 0;
 
 static u32 ftnfm_key(const AtpFtCell *c, u32 *syms, u64 *hash_out) {
   const AtpFtCell *e = (c->end != NULL) ? c->end->next : NULL;
@@ -3601,7 +3621,7 @@ static int atp_ft_slice_fires(AtpState *s, const AtpFtCell *c,
   return 0;
 }
 
-u64 g_atp_ftnfm_reval = 0, g_atp_ftnfm_reval_ok = 0;
+_Thread_local u64 g_atp_ftnfm_reval = 0, g_atp_ftnfm_reval_ok = 0;
 
 // 1 iff subtree `c` is memoized normal under want-config `wantk` at the
 // current generation.  A single var cell never probes (the walk's var
@@ -3678,7 +3698,7 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
   if (s->lex_dep_lim != 0u) doE = 1u;
   FtNfPathEnt st_fixed[64];
   FtMixmost m = {
-    .s = s, .arena = (AtpFt *)s->ft_arena_ptr, .root = t,
+    .s = s, .arena = atp_ft_arena(s), .root = t,
     .st = st_fixed, .cap = 64u, .depth = 0u,
     .slice_first = slice_first, .slice_end = slice_end,
     .doE = doE, .budget = step_cap, .record = record,
@@ -3700,8 +3720,8 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
   // Subtree-NF memo gate (see FtNfmEnt): full-range index-applicable
   // calls only, index synced FIRST so the generation stamp reflects the
   // CURRENT rule content (rules cannot change inside one call).
-  static int nfm_off = -1;
-  static int nfm_check = -1;
+  static _Atomic int nfm_off = -1;
+  static _Atomic int nfm_check = -1;
   if (nfm_off < 0) {
     const char *e = getenv("THVM_NO_FT_NFMEMO");
     nfm_off = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
@@ -3734,7 +3754,7 @@ static AtpFtCell *atp_normalize_mixmost_ft(AtpState *s, AtpFtCell *t,
   // <~250 symbols), so on-path proofs are byte-identical.  Off (0) = no cap.
   AtpFt *nf_arena = m.arena;
   u64 nf_start = nf_arena->n_persistent_alive;
-  static int nf_cap = -1;
+  static _Atomic int nf_cap = -1;
   if (nf_cap < 0) { const char *e = getenv("THVM_ATP_NF_CAP");
     nf_cap = (e && *e) ? (int)strtol(e, NULL, 10) : 0; }
   // Root fixpoint (the loop before WeiterInVO, NFBildung.c:355).
@@ -3921,17 +3941,17 @@ static void wf_mm_stats_atexit(void) {
           (unsigned long long)g_wfmm.n_rebuilds,
           (unsigned long long)g_wfmm.n_extends);
   const WfTree *ix = &g_wfmm.tree;
-  if (ix->q_queries == 0u) return;
+  if (g_ftps.q_queries == 0u) return;
   fprintf(stderr,
           "[wfmm] descents=%llu  nodevisits/descent=%.2f  "
           "confirms/descent=%.2f\n",
-          (unsigned long long)ix->q_queries,
-          (double)ix->q_nodevisits / (double)ix->q_queries,
-          (double)ix->q_matchcalls / (double)ix->q_queries);
+          (unsigned long long)g_ftps.q_queries,
+          (double)ix->q_nodevisits / (double)g_ftps.q_queries,
+          (double)ix->q_matchcalls / (double)g_ftps.q_queries);
 }
 
 static void wf_mm_stats_arm(void) {
-  static int armed = -1;
+  static _Atomic int armed = -1;
   if (armed >= 0) return;
   const char *e = getenv("THVM_ATP_WMFPA_STATS");
   armed = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
@@ -4094,7 +4114,7 @@ static void atp_wf_mm_note_rhs_edit(AtpState *s, u32 r) {
 // preorder, end = the subtree's last cell via the size field.
 static AtpFtCell *wf_mm_decode_cells(AtpState *s, const WfNode *a, u32 len) {
   static AtpFtCell *cells[WF_MM_SUBJ_CAP];
-  AtpFt *arena = (AtpFt *)s->ft_arena_ptr;
+  AtpFt *arena = atp_ft_arena(s);
   for (u32 i = 0; i < len; i++) cells[i] = ft_alloc_persistent_raw(arena);
   for (u32 i = 0; i < len; i++) {
     AtpFtCell *c = cells[i];
@@ -4127,7 +4147,7 @@ static AtpFtCell *atp_rules_only_normalize_wf(AtpState *s, AtpFtCell *t,
   // THVM_ATP_NF_CAP counts Arena A live cells inside the engine walk;
   // the flat path never allocates there mid-walk, so it cannot honor
   // the cap -- stay on the engine path when it is armed (default off).
-  static int nf_cap_armed = -1;
+  static _Atomic int nf_cap_armed = -1;
   if (nf_cap_armed < 0) {
     const char *e = getenv("THVM_ATP_NF_CAP");
     nf_cap_armed = (e != NULL && *e != '\0' && strtol(e, NULL, 10) > 0) ? 1 : 0;
@@ -4195,7 +4215,7 @@ static AtpFtCell *atp_rules_only_normalize_wf(AtpState *s, AtpFtCell *t,
   // The engine walk rewrites in place, returning displaced spans to the
   // free list as it goes; the flat path abandons the whole input chain,
   // so return it in one span to keep Arena A liveness bounded.
-  if (t->end != NULL) ft_free_span((AtpFt *)s->ft_arena_ptr, t, t->end);
+  if (t->end != NULL) ft_free_span(atp_ft_arena(s), t, t->end);
   return nf;
 }
 
@@ -4453,7 +4473,7 @@ static void ftsj_span_flip_vars(AtpFtCell *t, u32 n) {
 // span; the returned span replaces it.
 static AtpFtCell *ftsj_below_peak_normalize(AtpState *s, AtpFtCell *t,
                                             const AtpFtCell *top) {
-  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFt *a = atp_ft_arena(s);
   for (u32 step = 0; step < 64u; step++) {
     AtpFtCell *prev = ft_clone_span(a, t, 0);
     if (prev == NULL) return t;
@@ -4481,7 +4501,7 @@ static AtpFtCell *ftsj_below_peak_normalize(AtpState *s, AtpFtCell *t,
 static u8 ftsj_step3_joins(AtpState *s, const AtpFtCell *l2,
                            const AtpFtCell *r2, const AtpFtCell *peak,
                            u8 flip) {
-  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFt *a = atp_ft_arena(s);
   AtpFtCell *lc = ft_clone_span(a, (AtpFtCell *)l2, 0);
   AtpFtCell *rc = ft_clone_span(a, (AtpFtCell *)r2, 0);
   AtpFtCell *pk = ft_clone_span(a, (AtpFtCell *)peak, 0);
@@ -4549,7 +4569,7 @@ u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r) {
   ftsj_pass_bump();
   // Normalize CLONES: the gated walk splices/frees spans in place, and
   // the caller's l/r must stay the engine NFs (verdict-only contract).
-  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFt *a = atp_ft_arena(s);
   AtpFtCell *lc = ft_clone_span(a, l, 0);
   AtpFtCell *rc = ft_clone_span(a, r, 0);
   if (lc == NULL || rc == NULL) {
@@ -4600,7 +4620,7 @@ u8 atp_cp_sj_joinable_ft(AtpState *s, AtpFtCell *l, AtpFtCell *r) {
   }
   // Env-gated dissection tap: which allSteps leg dropped this CP
   // (correlates with the [cpfate] line the treat prints right after).
-  static int sj_dbg = -1;
+  static _Atomic int sj_dbg = -1;
   if (sj_dbg < 0) sj_dbg = atp_env_on("THVM_ATP_SJ_DEBUG");
   if (sj_dbg && joined) {
     static const char *tag[5] = {"?", "step2", "checkOrder", "step3",
@@ -4781,7 +4801,7 @@ static int ft_goal_replay_outer(AtpState *s, AtpFtCell *root,
       AtpFtCell *pat = (f->dir == 0u) ? s->lhs_ft[f->slot] : s->rhs_ft[f->slot];
       AtpFtCell *tpl = (f->dir == 0u) ? s->rhs_ft[f->slot] : s->lhs_ft[f->slot];
       ft_subst_reset(subst);
-      if (!ft_match_maybe_ac((AtpFt *)s->ft_arena_ptr, pat, p, subst) ||
+      if (!ft_match_maybe_ac(atp_ft_arena(s), pat, p, subst) ||
           (f->pass == 2u && !ft_subst_ground_extras(s, tpl, subst))) {
         rp->diverged = 1u;
         return 0;
@@ -4821,7 +4841,7 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   if (slice_first + slice_count > s->n_rules) {
     slice_count = s->n_rules - slice_first;
   }
-  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  AtpFt *a = atp_ft_arena(s);
   // Entry-clear pass.  NOTE (later-14, measured): the mixmost walk
   // never reads ATPFT_FLAG_SUBST_FRESH (find_redex_ft is the sole
   // reader), so skipping this clear on the mixmost path is sound --
@@ -4870,7 +4890,7 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   // build (which also has THVM_ATPFT_RI not defined at all).  The RI
   // path indexes the FULL rule set; only enable it when the slice IS
   // the full range.
-  static int ri_env_cached = -1;
+  static _Atomic int ri_env_cached = -1;
   if (ri_env_cached < 0) {
     const char *env = getenv("THVM_ATPFT_RI");
     ri_env_cached = (env != NULL && env[0] != '0') ? 1 : 0;
@@ -4920,7 +4940,7 @@ static AtpFtCell *atp_rewrite_normalize_ft_impl(AtpState *s, AtpFtCell *t,
   // use, or when recording, we fall back to the per-step inner loop
   // (the indexed path would rewrite against the full R, not the
   // slice, and it does not emit TRACE_NORM_STEP entries).
-  static int batch_env_cached = -1;
+  static _Atomic int batch_env_cached = -1;
   if (batch_env_cached < 0) {
     const char *env = getenv("THVM_ATPFT_BATCH_ORIENT");
     batch_env_cached = (env != NULL && env[0] != '0' && env[0] != '\0') ? 1 : 0;

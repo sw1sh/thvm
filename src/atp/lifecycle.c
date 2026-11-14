@@ -391,6 +391,13 @@ static void gn_gc_writeback(struct AtpGoalNarrow *g, const Term *roots,
                             u32 base);
 #endif
 
+#ifdef THVM_ATPFT_RULES
+static u64 atp_push_pool_live(const AtpState *s);   // push_batch.c
+static void atp_push_pool_free(AtpState *s);        // push_batch.c
+#endif
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+static void sw_rename_park_release(AtpState *s);    // step.c
+#endif
 fn void thvm_atp_free(AtpState *s) {
   if (s == NULL) return;
   thvm_atp_history_finish(s, 0xffu);   // no-op unless still recording
@@ -440,10 +447,22 @@ fn void thvm_atp_free(AtpState *s) {
   }
 # endif
   if (s->ft_arena_ptr != NULL) {
+    // THVM_ATP_FT_LIVE=1: the run's live FT cells over every arena, which
+    // must not depend on the push-batch thread count (a leak or a double
+    // free across arenas would show here).
+    if (atp_env_on("THVM_ATP_FT_LIVE")) {
+#ifdef THVM_ATPFT_NORM
+      sw_rename_park_release(s);
+#endif
+      fprintf(stderr, "ft-live cells=%llu\n",
+              (unsigned long long)(((AtpFt *)s->ft_arena_ptr)->n_persistent_alive +
+                                   atp_push_pool_live(s)));
+    }
     ft_destroy((AtpFt *)s->ft_arena_ptr);
     free(s->ft_arena_ptr);
     s->ft_arena_ptr = NULL;
   }
+  atp_push_pool_free(s);
 #endif
   // Each cp_packed[] slot is a malloc'd byte string the queue owns;
   // free every non-NULL slot (free(NULL) is a no-op) then the array.

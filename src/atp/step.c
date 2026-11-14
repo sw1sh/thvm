@@ -294,6 +294,20 @@ static AtpFtCell *sw_rename_ft(AtpState *s, const AtpFtCell *src) {
   return out;
 }
 
+// Frees the state's parked rename spans and empties the cache.  How many
+// spans are parked at a given moment follows the cache's address-hashed
+// slots, so it varies from run to run; thvm_atp_free's live-cell report
+// (THVM_ATP_FT_LIVE) counts them out this way.
+static void sw_rename_park_release(AtpState *s) {
+  AtpFt *a = (AtpFt *)s->ft_arena_ptr;
+  if (a == NULL || a->session != g_sw_rn_park_session) return;
+  for (u32 k = 0; k < g_sw_rn_park_n; k++) {
+    ft_free_span(a, g_sw_rn_park[k], g_sw_rn_park[k]->end);
+  }
+  g_sw_rn_park_n = 0;
+  memset(g_sw_rn_ft, 0, sizeof g_sw_rn_ft);
+}
+
 // Recover the mirror span of a stored rule FACE by handle identity --
 // exact: `t` is one of the two stored Terms of row `i`, so the
 // lockstep invariant pins its mirror.  NULL when the handle matches

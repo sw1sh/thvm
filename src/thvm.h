@@ -5972,6 +5972,10 @@ typedef struct {
                                      // forward-decl is enough in this
                                      // header; full AtpFt comes in via
                                      // ft.h at the .c boundary).
+  // Push-batch worker threads and their arenas (push_batch.c); NULL until
+  // the first parallel flush.  Their cells end up in this state's
+  // structures, so thvm_atp_free releases them after ft_arena_ptr.
+  void            *push_pool;
   struct AtpFtCell **lhs_ft;
   struct AtpFtCell **rhs_ft;
   // Subsumer SHAPE spans for the remove-and-re-derive locate: exact

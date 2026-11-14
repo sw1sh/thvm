@@ -177,6 +177,43 @@ Pop (`thvm_atp_select_cp` in `src/atp/cp_heap.c`) decodes via
 (FIFO/random/goal/K-D) replace the min-pop with a linear scan over
 the queue.
 
+### Push batch and its threads
+
+Before a CP is queued, the push treats it: the doR normal forms of both
+sides, about half of an OrAssociativity run.  The walk former
+(`src/atp/step.c`) hands each treated CP to `src/atp/push_batch.c`, which
+takes its raw bytes and cells out of the shared formation state.  A flush
+treats the chunk in contiguous runs over `THVM_ATP_PUSH_THREADS` threads,
+the caller included, then runs the push tail (joined drop, gates, trace,
+queue insert) per CP in formation order.  The treatment reads only the
+rule set, its mirrors and its discrimination tree, which no push changes,
+so the trace and the queue are byte-identical at any thread count.  Any
+other route flushes first, and `atp_push_cps_traced` stops on a push while
+a batch is pending.
+
+A worker normalizes in its own arena (the thread-local `g_ft_arena_tl`)
+with its own subterm-NF memo and index scratch, and polls the wall
+deadline but not the host abort hook.  The mirrors and the tree are
+built on the caller before a parallel flush, and the knobs the treatment
+caches on first read are atomic, since a worker may read one first
+(ThreadSanitizer finds no race on a full OrAssociativity run).  Cells
+move between arenas, so with workers every arena frees without its
+underflow check
+(`AtpFt.loose`); the sum of live cells over the arenas stays exact, and
+`THVM_ATP_FT_LIVE=1` prints it for a cross-thread-count leak check.  A
+worker frees far more cells than it allocates, so it keeps up to
+`THVM_ATP_PUSH_REUSE_CAP` freed cells and spills the rest to the caller's
+arena, which reuses them after its own; the cap bounds memory at a cost in
+time, since the caller misses cache on cells another core touched last.
+AC matching, WMFPA, the NF cap and the detail profile keep the treatment
+on the caller.  The threads end with the run (`thvm_atp_run`), and the
+caller's arena takes the cells the workers kept, so a state kept for
+queries (`TAtpSystem`) holds no idle threads.  Batching is on from four
+threads; at two its overhead outweighs the split.  On an 8-vCPU EPYC
+Genoa, OrAssociativity goes from 13.7 s to 11.2 s at eight threads with
++20% peak RSS (10.0 s and +66% without the cap), and the Sheffer AutoKBO
+run from 94.5 s to 88.2 s with +2.5%.
+
 ### AtpFt CP queue mirror
 
 Under `THVM_ATPFT_CPQ`, a parallel `AtpCpEntry[]` array (`src/atp/

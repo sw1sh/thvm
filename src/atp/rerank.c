@@ -1725,13 +1725,13 @@ static void atp_clock_trace_end(FILE *tf) {
 // fires once the deadline has actually passed or a host Abort[] is
 // pending, so a normal (non-aborting) normalize is never cut short.
 static int atp_norm_deadline_fired(AtpState *s) {
-  static u32 tick = 0u;
+  static _Thread_local u32 tick = 0u;
   if ((++tick & 0xFFu) != 0u) return 0;
   if (s->wall_deadline_us != 0u) {
     u64 now = atp_now_us();
     if (now != 0u && now >= s->wall_deadline_us) return 1;
   }
-  if (thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return 1;
+  if (!g_atp_norm_worker && thvm_atp_abort_hook != NULL && thvm_atp_abort_hook()) return 1;
   return 0;
 }
 

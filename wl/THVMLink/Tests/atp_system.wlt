@@ -29,6 +29,19 @@ VerificationTest[
     TestID -> "AtpSystem/group-normal-forms"
 ]
 
+(* The completion treats critical pairs on the kernel's parallel threads, at most 4; the
+   system it gives does not depend on how many. *)
+VerificationTest[
+    With[{opts = SystemOptions["ParallelOptions"]},
+        WithCleanup[
+            SameQ @@ Table[
+                SetSystemOptions["ParallelOptions" -> "ParallelThreadNumber" -> n];
+                TAtpComplete[asGroup]["Rules"], {n, {1, 4}}],
+            SetSystemOptions[opts]]],
+    True,
+    TestID -> "AtpSystem/rules-independent-of-threads"
+]
+
 (* Symbols and numbers outside the axioms are constants below every axiom
    symbol, in canonical order. *)
 VerificationTest[

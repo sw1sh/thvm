@@ -28,7 +28,14 @@ TAtpComplete::theory = "AxiomaticTheory[\"`1`\"] does not give a list of axioms.
 TAtpNormalForm::nosys = "`1` is not a live TAtpSystem.";
 TAtpNormalForm::fail = "Normalizing under the system failed.";
 
-$atpNextRunFn := $atpNextRunFn = load["thvm_wl_atp_next_run", {Integer, Integer}, Integer];
+$atpNextRunFn := $atpNextRunFn = load["thvm_wl_atp_next_run", {Integer, Integer, Integer}, Integer];
+
+(* Threads the completion treats critical pairs with: the kernel's own
+   parallel thread setting, at most 4, since the handle runs inside
+   Simplify on the user's machine; THVM_ATP_PUSH_THREADS overrides. *)
+atpSystemThreads[] := Min[4, Replace[
+    "ParallelThreadNumber" /. ("ParallelOptions" /. SystemOptions["ParallelOptions"]),
+    Except[_Integer ? Positive] -> $ProcessorCount]];
 $atpSystemQFn := $atpSystemQFn = load["thvm_wl_atp_system_q", {Integer}, Integer];
 $atpSystemNormalizeFn := $atpSystemNormalizeFn = load[
     "thvm_wl_atp_system_normalize", {Integer, {"NumericArray", "Constant"}}, "NumericArray"];
@@ -72,7 +79,7 @@ atpSystemComplete[axiomsIn_List, order_, opts___] := Catch[
         st = Fold[Last[ensureSym[#2, #1]] &, enc["State"], $atpSystemSpares];
         enc = Join[enc, <|"State" -> st, "MaxLab" -> st["next_lab"]|>];
         handle = CreateManagedLibraryExpression["AtpSystem", atpSystemHandle];
-        $atpNextRunFn[ManagedLibraryExpressionID[handle], alloc];
+        $atpNextRunFn[ManagedLibraryExpressionID[handle], alloc, atpSystemThreads[]];
         cRes = cEngineProof[enc, atpResolveMaxSteps[maxSteps, method], wall,
             Sequence @@ atpParseMethod[method]];
         If[ ! IntegerQ[cRes["Status"]] || $atpSystemQFn[ManagedLibraryExpressionID[handle]] =!= 1,

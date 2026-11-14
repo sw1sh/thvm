@@ -34,8 +34,8 @@
 // is readable in isolation.  Defined here (the first textual include of
 // this TU) so every consumer -- _.c, ft_norm.c, the bench -- sees one
 // definition.
-u64 g_ft_persist_alloc_total = 0;   // ft_alloc_persistent successes
-u64 g_ft_free_span_total     = 0;   // cells returned to the free list
+_Thread_local u64 g_ft_persist_alloc_total = 0;   // ft_alloc_persistent successes
+_Thread_local u64 g_ft_free_span_total     = 0;   // cells returned to the free list
 
 // PHASE-1 norm-core increment #1 (THVM_ATP_NORMCORE2, default OFF):
 // O(1) span free matching native Waldmeister's SV_NestedDealloc (a bare
@@ -163,7 +163,7 @@ static u64 g_ft_session_next = 0;
 // stale cross-session span reaching the wrong allocator.  Diagnostic
 // only; the default build resolves the env once and stays silent.
 static int ft_trace_on(void) {
-  static int on = -1;
+  static _Atomic int on = -1;
   if (on < 0) {
     const char *e = getenv("THVM_FT_ALLOC_TRACE");
     on = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
@@ -197,7 +197,11 @@ void ft_init(AtpFt *a) {
   a->n_scratch_alive    = 0;
   a->session            = ++g_ft_session_next;
   a->n_blocks           = 0;
-  a->_pad               = 0;
+  a->loose              = 0;
+  a->n_reuse            = 0;
+  a->reuse_cap          = 0;
+  a->spill_head         = NULL;
+  a->spill_tail         = NULL;
   if (ft_trace_on()) {
     fprintf(stderr, "ft_alloc: init    arena=%p session=%llu\n",
             (void *)a, (unsigned long long)a->session);
@@ -225,6 +229,12 @@ void ft_destroy(AtpFt *a) {
 }
 
 AtpFtCell *ft_alloc_persistent(AtpFt *a) {
+  if (a->free_head == NULL && a->spill_head != NULL) {
+    // the spill pool: cells other arenas freed (push_batch.c), taken only
+    // once this arena's own freed cells run out
+    a->free_head  = a->spill_head;
+    a->spill_head = a->spill_tail = NULL;
+  }
   if (a->free_head == NULL) {
     AtpFtBlock *b = ft_block_new();
     // Thread the new block onto the (currently empty) free list, then
@@ -236,6 +246,7 @@ AtpFtCell *ft_alloc_persistent(AtpFt *a) {
   }
   AtpFtCell *cell = a->free_head;
   a->free_head    = cell->next;
+  if (a->n_reuse != 0u) a->n_reuse--;
   // Zero the cell so a caller can populate fields without worrying
   // about the lingering free-list link in `next`.  The plan's
   // constructors (Stage 2) overwrite every field, but Stage 1 callers
@@ -265,6 +276,32 @@ void ft_free_span(AtpFt *a, AtpFtCell *first, AtpFtCell *last) {
   // (only at GC / fixpoint boundaries) and keeps the counter honest
   // for ft_walk_persistent.  Stage 4 GC will replace this with a
   // batch-reset on a known root set.
+  if (a->loose) {
+    // Counted like the default path below, but with no per-arena
+    // underflow check: a span allocated by another arena drives this
+    // arena's count past zero (it wraps), while the sum over all arenas
+    // stays exact (the THVM_ATP_FT_LIVE certifier compares it across
+    // thread counts).
+    AtpFtCell *q = first;
+    u64 qn = 1;
+    for (u64 _s = 0; q != last && _s < (1ull << 24); _s++) {
+      if (q->next == NULL) break;
+      q = q->next;
+      qn += 1;
+    }
+    a->n_persistent_alive -= qn;
+    g_ft_free_span_total += qn;
+    if (a->reuse_cap != 0u && a->n_reuse >= a->reuse_cap) {
+      last->next = a->spill_head;
+      if (a->spill_head == NULL) a->spill_tail = last;
+      a->spill_head = first;
+    } else {
+      last->next   = a->free_head;
+      a->free_head = first;
+      a->n_reuse  += qn;
+    }
+    return;
+  }
   if (g_ft_normcore2 < 0) ft_normcore2_resolve();
   // THVM_FT_ALLOC_TRACE: flag a span head the arena does not own BEFORE
   // any dereference -- a foreign head means a caller parked the span
@@ -421,6 +458,12 @@ void ft_scratch_reset(AtpFt *a) {
 // hand-out and asserts every READ field was overwritten by the
 // constructor -- so a constructor that skips a read field is caught.
 AtpFtCell *ft_alloc_persistent_raw(AtpFt *a) {
+  if (a->free_head == NULL && a->spill_head != NULL) {
+    // the spill pool: cells other arenas freed (push_batch.c), taken only
+    // once this arena's own freed cells run out
+    a->free_head  = a->spill_head;
+    a->spill_head = a->spill_tail = NULL;
+  }
   if (a->free_head == NULL) {
     AtpFtBlock *b = ft_block_new();
     a->free_head  = ft_block_threaded(b, NULL);
@@ -430,6 +473,7 @@ AtpFtCell *ft_alloc_persistent_raw(AtpFt *a) {
   }
   AtpFtCell *cell = a->free_head;
   a->free_head    = cell->next;
+  if (a->n_reuse != 0u) a->n_reuse--;
   a->n_persistent_alive += 1u;
   g_ft_persist_alloc_total += 1u;
   return cell;

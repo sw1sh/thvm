@@ -34,7 +34,14 @@ $initFn := $initFn = load["thvm_atp_lib_init", {}, Integer];
 $fromPrefixFn := $fromPrefixFn = load["thvm_wl_atp_terms_from_prefix", {{"NumericArray", "Constant"}}, "NumericArray"];
 $toPrefixFn := $toPrefixFn = load["thvm_wl_atp_terms_to_prefix", {{"NumericArray", "Constant"}}, "NumericArray"];
 $intakeFn := $intakeFn = load["thvm_wl_atp_wm_intake_order", {{"NumericArray", "Shared"}}, "NumericArray"];
-$nextRunFn := $nextRunFn = load["thvm_wl_atp_next_run", {Integer, Integer}, Integer];
+$nextRunFn := $nextRunFn = load["thvm_wl_atp_next_run", {Integer, Integer, Integer}, Integer];
+
+(* Threads the completion treats critical pairs with: the kernel's own
+   parallel thread setting, at most 4, since the handle runs inside
+   Simplify on the user's machine; THVM_ATP_PUSH_THREADS overrides. *)
+atpSystemThreads[] := Min[4, Replace[
+    "ParallelThreadNumber" /. ("ParallelOptions" /. SystemOptions["ParallelOptions"]),
+    Except[_Integer ? Positive] -> $ProcessorCount]];
 $systemQFn := $systemQFn = load["thvm_wl_atp_system_q", {Integer}, Integer];
 $normalizeFn := $normalizeFn = load["thvm_wl_atp_system_normalize", {Integer, {"NumericArray", "Constant"}}, "NumericArray"];
 $runProofFn := $runProofFn = load["thvm_wl_atp_run_proof",
@@ -220,7 +227,7 @@ complete[axioms_List, order_, opts___] := Catch[
         terms = toTerms[prep["Prefix"], 2 n];
         wire = NumericArray[Join[{0, n}, terms, ConstantArray[0, n]], "Integer64"];
         handle = CreateManagedLibraryExpression["ThvmAtpSystem", atpSystemHandle];
-        $nextRunFn[ManagedLibraryExpressionID[handle], prep["Allocation"]];
+        $nextRunFn[ManagedLibraryExpressionID[handle], prep["Allocation"], atpSystemThreads[]];
         raw = Quiet @ Check[Normal[$runProofFn @@ ReplacePart[prep["Arguments"], 1 -> wire]], $Failed];
         If[ ! ListQ[raw] || $systemQFn[ManagedLibraryExpressionID[handle]] =!= 1,
             Message[TAtpComplete::fail]; Throw[$Failed, "WolframInstitute`ATP`"]];

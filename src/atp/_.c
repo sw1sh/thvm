@@ -184,6 +184,10 @@ static void      cgq_gc_writeback(struct AtpCgq *q, const Term *roots,
 #include "trace.c"
 #include "enigma_data.c"
 
+#ifdef THVM_ATPFT_RULES
+static void atp_push_pool_stop(AtpState *s);   // push_batch.c
+#endif
+
 // Drive thvm_atp_step until it returns a non-RUNNING status.
 fn AtpStatus thvm_atp_run(AtpState *s) {
   AtpStatus st;
@@ -201,6 +205,9 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
     tick++;
     st = thvm_atp_step(s);
   } while (st == ATP_RUNNING);
+#ifdef THVM_ATPFT_RULES
+  atp_push_pool_stop(s);
+#endif
   if (trace_every) {
     fprintf(stderr, "[atp_run] exit st=%d step=%u n_rules=%u n_cps=%u\n",
             (int)st, s->step, s->n_rules, s->n_cps);
