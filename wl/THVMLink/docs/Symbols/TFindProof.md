@@ -564,7 +564,7 @@ TFindProof["AbelianGroupAxioms", TimeConstraint -> 2]
 
 ---
 
-Not every notable theorem is within reach: the Wolfram axiom implies the three Sheffer axioms, and the first two take about a second each, but the search for the third runs out of time even after five minutes:
+The deepest notable theorems take minutes: the Wolfram axiom implies the three Sheffer axioms, and the first two take about a second each, but the third needs about 1.5 million steps of Waldmeister's automatic mode, `"WaldmeisterAuto"`, which the default schedule runs second, and with its proof the whole call takes about four and a half minutes. With a short time limit the search runs out of time:
 
 ```wl
 TFindProof["ImpliesShefferAxioms", "WolframAxioms", "Status", TimeConstraint -> 10]
