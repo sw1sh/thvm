@@ -977,12 +977,17 @@ static void mnf_destroy(struct AtpMnf *m) {
   free(m->nodes); free(m->qred); free(m->qgreen); free(m->buckets); free(m);
 }
 
-// GC support: the coloured nodes' terms are collector roots.  Gather
-// them for thvm_atp_gc_collect and write the relocated terms back; the
-// hash table (structural hashes, node indices) is GC-invariant.
+// GC support: the coloured nodes' terms, the pending pairs and the two
+// seeds are collector roots.  Gather them for thvm_atp_gc_collect and
+// write the relocated terms back; the hash table (structural hashes,
+// node indices) is GC-invariant.  An unrooted seed was a stale handle
+// after a collection, so the extractor's colour-to-side map
+// (mnf_proof_extract) fell back to GREEN = side 0 and lifted a
+// seed-swapped chain onto the wrong sides (ImpliesShefferAxioms' third
+// conjunct, four collections in).
 static u32 mnf_gc_count(struct AtpMnf *m) {
   if (m == NULL) return 0u;
-  return m->n_nodes + 2u * m->n_pend;
+  return m->n_nodes + 2u * m->n_pend + 2u;
 }
 static void mnf_gc_gather(struct AtpMnf *m, Term *roots, u32 *w) {
   if (m == NULL) return;
@@ -991,6 +996,8 @@ static void mnf_gc_gather(struct AtpMnf *m, Term *roots, u32 *w) {
     roots[(*w)++] = m->pend_l[i];
     roots[(*w)++] = m->pend_r[i];
   }
+  roots[(*w)++] = m->seed_green;
+  roots[(*w)++] = m->seed_red;
 }
 static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base) {
   if (m == NULL) return;
@@ -1000,6 +1007,8 @@ static void mnf_gc_writeback(struct AtpMnf *m, const Term *roots, u32 base) {
     m->pend_l[i] = roots[w++];
     m->pend_r[i] = roots[w++];
   }
+  m->seed_green = roots[w++];
+  m->seed_red   = roots[w++];
 }
 
 // Take a node from a colour's worklist.  WM's PQ default discipline is

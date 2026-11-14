@@ -4068,6 +4068,33 @@ int main(void) {
   }
 #endif
 
+#ifdef ATP_MNF
+  TEST_BEGIN("atp/mnf-seeds-survive-collections");
+  {
+    // The MNF fronts' seeds are collector roots: across collections they
+    // still name the goal's two sides, through which the proof extractor
+    // maps the fronts' colours to goal sides.  Two collections with
+    // allocation between them reuse the cells a stale seed would name.
+    AtpState *s = thvm_atp_init(&DUMMY_CFG, 100);
+    thvm_atp_set_use_mnf(s, 1);
+    Term gl = mk_f(mk_f(mk_a(), mk_e()), mk_e()), gr = mk_f(mk_a(), mk_a());
+    CHECK_EQ((int)thvm_atp_set_goal(s, gl, gr), 1);
+    s->mnf = mnf_create(s);
+    CHECK(s->mnf != NULL);
+    for (u32 round = 0; round < 2u; round++) {
+      for (u32 i = 0; i < 4096u; i++) (void)mk_f(mk_f(mk_e(), mk_a()), mk_e());
+      thvm_atp_gc_collect(s);
+    }
+    u8 green_ok = (u8)(kbo_eq(s->mnf->seed_green, s->goal_lhs) ||
+                       kbo_eq(s->mnf->seed_green, s->goal_rhs));
+    u8 red_ok   = (u8)(kbo_eq(s->mnf->seed_red, s->goal_lhs) ||
+                       kbo_eq(s->mnf->seed_red, s->goal_rhs));
+    CHECK(green_ok);
+    CHECK(red_ok);
+    thvm_atp_free(s);
+  }
+#endif
+
   TEST_BEGIN("atp/set-goals-clear-and-cap");
   {
     // n == 0 clears back to completion mode; n > ATP_MAX_GOALS is
