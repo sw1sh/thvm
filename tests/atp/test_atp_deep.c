@@ -5654,8 +5654,8 @@ static void dt_run_free(DtRun *r) {
 static int dt_query(FtPiIndex *ix, const AtpFtCell *p, u8 want, u8 pure,
                     u8 ref, DtRun *r) {
   static const AtpFtCell *bind[ATPFT_MAX_VARS];
-  ix->dtb_snap_n = 0u;
-  ix->dtb_rec_n  = 0u;
+  g_ftps.dtb_snap_n = 0u;
+  g_ftps.dtb_rec_n  = 0u;
   if (g_ftdt_pd) {
     g_ftdt_dp = 0u;
   }
@@ -5667,14 +5667,14 @@ static int dt_query(FtPiIndex *ix, const AtpFtCell *p, u8 want, u8 pure,
     ftdt_descend3(&d, 0u, p, 0u, pure);
   }
   r->n      = out < 65536u ? out : 65536u;
-  r->n_rec  = ix->dtb_rec_n < 65536u ? ix->dtb_rec_n : 65536u;
-  r->n_snap = ix->dtb_snap_n < 65536u ? ix->dtb_snap_n : 65536u;
-  memcpy(r->cand, ix->cand, (size_t)r->n * sizeof(u32));
+  r->n_rec  = g_ftps.dtb_rec_n < 65536u ? g_ftps.dtb_rec_n : 65536u;
+  r->n_snap = g_ftps.dtb_snap_n < 65536u ? g_ftps.dtb_snap_n : 65536u;
+  memcpy(r->cand, g_ftps.cand, (size_t)r->n * sizeof(u32));
   if (r->n_rec > 0u) {
-    memcpy(r->rec, ix->dtb_rec, (size_t)r->n_rec * sizeof(FtDtRec));
+    memcpy(r->rec, g_ftps.dtb_rec, (size_t)r->n_rec * sizeof(FtDtRec));
   }
   if (r->n_snap > 0u) {
-    memcpy(r->snap, ix->dtb_snap, (size_t)r->n_snap * sizeof(const AtpFtCell *));
+    memcpy(r->snap, g_ftps.dtb_snap, (size_t)r->n_snap * sizeof(const AtpFtCell *));
   }
   for (u32 k = 0; k < ATPFT_MAX_VARS; k++) {
     if (bind[k] != NULL) {
