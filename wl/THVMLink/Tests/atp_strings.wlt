@@ -64,6 +64,31 @@ VerificationTest[
     TestID -> "ATPStrings/directional/bubble-sort-proves-and-verifies"
 ]
 
+(* A rule theorem is stated as the rewrite the proof shows: BBAA rewrites into AABB, so the
+   ProofObject's theorem is a rule and it still verifies. *)
+VerificationTest[
+    Block[{po = TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, TimeConstraint -> 30]},
+        {Head[po["Theorem"]], MatchQ[po["ProofFunction"][], _Success]}
+    ],
+    {Rule, True},
+    TestID -> "ATPStrings/directional/rule-theorem-stated-as-rule"
+]
+
+(* AB and BA only join (BA rewrites to AB, AB to nothing): the theorem "AB" -> "BA" stays an
+   equation, with a message. *)
+VerificationTest[
+    Head[TFindStringProof["AB" -> "BA", {"BA" -> "AB"}, TimeConstraint -> 30]["Theorem"]],
+    Equal,
+    {TFindStringProof::equal},
+    TestID -> "ATPStrings/directional/joined-rule-theorem-stays-equation"
+]
+
+VerificationTest[
+    Head[TFindStringProof[{"BBAA", "AABB"}, {"BA" -> "AB"}, TimeConstraint -> 30]["Theorem"]],
+    Equal,
+    TestID -> "ATPStrings/directional/equation-theorem-stays-equation"
+]
+
 VerificationTest[
     (* Multi-goal: a list of string theorems is ONE ProofObject with a
        Hypothesis row per conjunct (the TFindProof multi-goal

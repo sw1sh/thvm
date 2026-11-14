@@ -15,8 +15,10 @@ BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframIns
 SetUsage[TFindStringProof, "TFindStringProof[thm$, axioms$] proves a string-rewriting theorem over the multiway/semi-Thue axioms and returns the ProofObject.
 Words are encoded as right-nested CenterDot terms over one symbol per character ('ABC' encodes to A\[CenterDot](B\[CenterDot]C)), with the associativity bridge axiom appended so a rewrite applies at any position of a word; the encoding follows the Wolfram Function Repository FindStringProof.
 An axiom written 'BA' -> 'AB' is installed as a PRE-ORIENTED rewrite rule (one-directional string rewriting); an axiom written {'BA', 'AB'}, 'BA' == 'AB', or 'BA' <-> 'AB' is an equation the engine orients itself.
-A theorem is a pair in any of the same shapes (direction is meaningless for a goal); a list of theorems is a multi-goal conjunction returning ONE ProofObject with a Hypothesis/Conclusion row pair per conjunct.
+A theorem is a pair in any of the same shapes; a theorem 'l' -> 'r' is stated as a rewrite rule when every step of the proof path from l to r is reached by the rule axioms applied forward, and as an equation (with the message TFindStringProof::equal) otherwise; a list of theorems is a multi-goal conjunction returning ONE ProofObject with a Hypothesis/Conclusion row pair per conjunct.
 An optional last argument picks the TFindProof return spec ('Status', 'Path', $$); options are TFindProof's (MaxSteps, TimeConstraint, Method, PortfolioFrontLoad)."];
+
+TFindStringProof::equal = "The proof shows that `1` and `2` are equal, but not that the rules rewrite `1` into `2`, so the theorem is stated as an equation.";
 
 (* TFindEquationalPath (the full replacement-path surface ported from the
    Wolfram Function Repository) lives in ATP_EquationalPath.wl.  Forward-
@@ -122,10 +124,55 @@ TFindStringProof[thms_, axioms_, returnSpec_ ? atpReturnSpecQ, opts : OptionsPat
         $Context = "Global`",
         $ContextPath = Prepend[DeleteCases[$ContextPath, "Global`"], "Global`"]
     },
-        TFindProof[goals, axs, returnSpec, opts] /. EquationalLogic -> StringLogic
+        atpStringDirect[TFindProof[goals, axs, returnSpec, opts], atpStringRuleGoals[thms], atpStringRules[axioms]]
     ],
     "TATPError"
 ]
+
+(* Which theorems were written as rules "l" -> "r", in goal order. *)
+atpStringRuleGoals[{_String, _String}] := {False}
+atpStringRuleGoals[thms_List] := MatchQ[#, _String -> _String] & /@ thms
+atpStringRuleGoals[thm_] := {MatchQ[thm, _String -> _String]}
+
+(* The engine proves that the two words of a goal are equal: completion orients the lemmas it
+   derives by its term ordering, not by the direction of the rules, and "AB" -> "BA" under
+   "BA" -> "AB" is equal too.  A theorem written as a rule is stated as one when the rewrite holds:
+   every step of the proof's path from its left word to its right word is reached by the rule
+   axioms applied forward (atpStringReachQ).  Otherwise it stays an equation, with a message. *)
+atpStringDirect[po_ProofObject, ruleQ_List, rules_List] /; Or @@ ruleQ := Block[{rows, thm, thms, paths, stated},
+    rows = Association @ Normal @ po["ProofDataset"];
+    thm = po[[2]];
+    thms = Replace[thm, {l_List :> l, a_And :> List @@ a, t_ :> {t}}];
+    If[ ! AssociationQ[rows] || Length[thms] =!= Length[ruleQ], Return[po]];
+    paths = Replace[atpDatasetGoalPath[rows, #], p_List :> atpSquashDups[atpWordToString /@ p]] & /@ Range[Length[ruleQ]];
+    stated = MapThread[
+        Function[{t, rule, path},
+            Which[
+                ! rule, t,
+                ListQ[path] && FreeQ[path, $Failed] && AllTrue[Partition[path, 2, 1], atpStringReachQ[#[[1]], #[[2]], rules] &],
+                    Replace[t, Equal[l_, r_] :> Rule[l, r]],
+                True,
+                    Message[TFindStringProof::equal, atpWordToString[t[[1]]], atpWordToString[t[[2]]]];
+                    t]],
+        {thms, ruleQ, paths}];
+    ReplacePart[po, 2 -> Replace[thm, {_List :> stated, _And :> And @@ stated, _ :> First[stated]}]]
+]
+atpStringDirect[other_, _, _] := other
+
+(* Whether word v is reached from word u by the rules {l, r} applied forward: a breadth-first
+   search over at most 2000 words. *)
+atpStringReachQ[u_String, v_String, rules_List] := Block[{seen = <|u -> True|>, frontier = {u}, next},
+    While[ frontier =!= {} && ! KeyExistsQ[seen, v] && Length[seen] < 2000,
+        next = DeleteDuplicates @ Flatten[Function[w, StringReplaceList[w, #[[1]] -> #[[2]]] & /@ rules] /@ frontier];
+        frontier = Select[next, ! KeyExistsQ[seen, #] &];
+        Scan[(seen[#] = True) &, frontier]];
+    KeyExistsQ[seen, v]
+]
+
+(* The axioms that rewrite in one direction, as {l, r} words. *)
+atpStringRules[{_String, _String}] := {}
+atpStringRules[axs_List] := Cases[axs, (l_String -> r_String) :> {l, r}]
+atpStringRules[ax_] := atpStringRules[{ax}]
 
 (* === Dataset path re-walk (shared with ATP_EquationalPath.wl) ====== *)
 
@@ -148,7 +195,7 @@ atpRowEq[row_] := Replace[row["Statement"], {
    walker (ATP_EquationalPath.wl) leans on for proofs whose steps its
    upstream unifier cannot reconstruct -- notably string-rewriting
    CriticalPairLemmas. *)
-atpDatasetGoalPath[rows_Association, g_Integer] := Block[{hypKey = {"Hypothesis", g}, concKey = {"Conclusion", g}, walk, eqs, lSeq, rSeq},
+atpDatasetGoalSides[rows_Association, g_Integer] := Block[{hypKey = {"Hypothesis", g}, concKey = {"Conclusion", g}, walk, eqs, lSeq, rSeq},
     If[! KeyExistsQ[rows, hypKey] || ! KeyExistsQ[rows, concKey], Return[$Failed]];
     (* The per-goal chain is linear: walk backward from the Conclusion
        via Proof.Input until the Hypothesis (bounded by the row count,
@@ -159,8 +206,11 @@ atpDatasetGoalPath[rows_Association, g_Integer] := Block[{hypKey = {"Hypothesis"
     If[MemberQ[eqs, $Failed], Return[$Failed]];
     lSeq = First /@ Split[eqs[[All, 1]]];
     rSeq = First /@ Split[eqs[[All, 2]]];
-    If[Last[lSeq] === Last[rSeq], Join[lSeq, Rest @ Reverse @ rSeq], $Failed]
+    If[Last[lSeq] === Last[rSeq], {lSeq, rSeq}, $Failed]
 ]
+
+atpDatasetGoalPath[rows_Association, g_Integer] := Replace[atpDatasetGoalSides[rows, g],
+    {l_List, r_List} :> Join[l, Rest @ Reverse @ r]]
 
 (* The bare path off a ProofObject: one path per Hypothesis, the single
    path when there is one goal.  $Failed when no chain reconstructs. *)

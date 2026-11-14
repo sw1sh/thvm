@@ -22,6 +22,7 @@ RelatedTutorials: ["[Finding Replacement Paths with Directed Rules](FindReplaceP
 - A word is a nonempty string of letters. Each letter becomes a symbol, and a word becomes a product of its letters under [CenterDot](), so `"ABC"` becomes `A·(B·C)`. An associativity axiom is added, so a rule can rewrite any part of a word.
 - An axiom written as a rule `"BA" -> "AB"` rewrites from left to right only, as in a semi-Thue system. An axiom written as a pair `{"BA", "AB"}` or as `"BA" <-> "AB"` is an equation, oriented by the prover.
 - A theorem is a pair of words in any of these forms. A list of theorems is proved as one conjunction, and gives one [ProofObject]().
+- The prover proves that the two words of a theorem are equal. A theorem written as a rule `"l" -> "r"` is stated as a rule when each step of the proof's path from *l* to *r* is reached by the rule axioms applied from left to right; otherwise it is stated as an equation, and the message `TFindStringProof::equal` is issued.
 - The proof is a [ProofObject]() over the words as products of letters, with all the properties of an equational proof. [TStringPath]() gives the rewrite path as a list of words.
 - The values of *spec* are those of [TFindProof](), such as `"Status"`, `"Statistics"` and `"Path"`.
 - [TFindStringProof]() gives `$Failed` when no proof is found, and a [Failure]() for input that is not a pair of words.
