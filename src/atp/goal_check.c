@@ -77,6 +77,7 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
     // spent 1750 of 1800 s there past step 500000.
     u8 renorm = (u8)(s->goals_check_running_rev != s->r_revision + 1u);
     s->goals_check_running_rev = s->r_revision + 1u;
+    const u64 mask0 = s->goals_joined_mask;
     for (u32 g = 0; g < s->n_goals; g++) {
       if (s->goals_joined_mask & ((u64)1 << g)) continue;
       if (renorm &&
@@ -93,6 +94,12 @@ fn AtpStatus thvm_atp_goal_check(AtpState *s) {
 #endif
     }
     if (s->goals_joined_mask == all_mask) return ATP_PROVED;
+    // Under the R of the last check with no conjunct newly joined, the
+    // alias and the MNF fronts stand, as the single-goal path's revision
+    // cache keeps them: the MNF search advances only when R changes.
+    // Running it twice per step on ImpliesShefferAxioms' three
+    // conjuncts took two thirds of the time.
+    if (!renorm && s->goals_joined_mask == mask0) return ATP_RUNNING;
     // Re-point the alias at the first unjoined conjunct so every
     // goal-directed heuristic (CPinGoal, goal-interleave, MNF) steers
     // toward a goal that still needs closing.
