@@ -97,7 +97,7 @@ The possible settings of [Method]() are:
 | `"Portfolio"` | four configurations: the `"Mix2"` ranking, the LPO with an automatic precedence, the `"Gt"` ranking, and `"GoalDirected"` |
 | `"Completion"` | plain unfailing completion, with the `"Gt"` ranking and the Knuth-Bendix ordering (KBO) |
 | `"GoalDirected"`, `"MNF"` | completion together with a search from both sides of the goal |
-| `"VampirePortfolio"` | a schedule of 13 configurations modeled on the Vampire prover |
+| `"VampirePortfolio"` | a schedule of 12 configurations modeled on the Vampire prover |
 | `"VampirePortfolioCompact"` | a schedule of three configurations for short time limits |
 | `"Waldmeister"`, `"WaldmeisterAuto"`, `"VampireUEQ"`, `"Twee"`, `"EProver"`, `"VampireRandom"`, `"ENIGMA"` | named configurations |
 | `"SMT"` | congruence closure, for a problem without variables |

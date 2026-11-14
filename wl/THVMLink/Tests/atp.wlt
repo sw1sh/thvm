@@ -2340,14 +2340,15 @@ VerificationTest[
     TestID -> "ATP/schedule/single-config-preset-len-1"
 ]
 
-(* "VampirePortfolio" expands to the 13-entry $VampirePortfolio: the
-   Mix2 + SelectionRatio 2 cross-system entry 11, "VampireRandom" as
-   entry 12 (d3fa5e37b), LPO with occurrence precedence as entry 13
-   (e15cfc30e). *)
+(* "VampirePortfolio" expands to the 12-entry $VampirePortfolio:
+   "VampireRandom" (d3fa5e37b) and LPO with occurrence precedence
+   (e15cfc30e) are entries 11 and 12.  The Mix2 + SelectionRatio 2 entry
+   for the cross-system Sheffer goals is gone: since c32fef12b they fill
+   the heap under it, and the "Waldmeister" entry proves them. *)
 VerificationTest[
     Length @ TAtpSchedule["VampirePortfolio"],
-    13,
-    TestID -> "ATP/schedule/VampirePortfolio-len-13"
+    12,
+    TestID -> "ATP/schedule/VampirePortfolio-len-12"
 ]
 
 (* "VampirePortfolioCompact": 3-entry rotation for small budgets. *)
@@ -2933,32 +2934,23 @@ VerificationTest[
     TestID -> "ATP/footgun/canonicalize-survives-global-collision"
 ]
 
-(* === Hard Sheffer Implies-X via Mix2 + SelectionRatio 2 (iter 75) == *)
+(* === Cross-system Sheffer Implies-X ================================= *)
 
 (* ShefferAxioms/ImpliesWolframAxioms + ImpliesWolframAlternateAxioms
-   are cross-system "Sheffer implies Wolfram's nand axioms" goals that
-   the default schedule (SelectionRatio 11) leaves unreachable in a
-   reasonable budget.  Mix2 + SelectionRatio 2 (aggressive
-   1-FIFO-per-2 age bias) cracks both in ~4s by forcing the saturator
-   through the long derivation chain before the CP queue explodes.
-   Generous TimeConstraint (60s) so the test survives a loaded box;
-   the proof's C-engine cost is ~4s. *)
+   are cross-system "Sheffer implies Wolfram's nand axioms" goals.  Once
+   only Mix2 + SelectionRatio 2 cracked them; since the Waldmeister
+   free-variable-instance ordered rewriting (c32fef12b) that config fills
+   the heap, and the default options prove both in about 0.5 s. *)
 VerificationTest[
-    Head @ TFindProof["ImpliesWolframAxioms", "ShefferAxioms",
-        Method -> {"Completion", "CriticalPairWeight" -> "Mix2",
-            "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
-        TimeConstraint -> 60],
+    Head @ TFindProof["ImpliesWolframAxioms", "ShefferAxioms", TimeConstraint -> 30],
     ProofObject,
-    TestID -> "ATP/sheffer/ImpliesWolframAxioms-Mix2-SR2"
+    TestID -> "ATP/sheffer/ImpliesWolframAxioms-default"
 ]
 
 VerificationTest[
-    Head @ TFindProof["ImpliesWolframAlternateAxioms", "ShefferAxioms",
-        Method -> {"Completion", "CriticalPairWeight" -> "Mix2",
-            "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
-        TimeConstraint -> 60],
+    Head @ TFindProof["ImpliesWolframAlternateAxioms", "ShefferAxioms", TimeConstraint -> 30],
     ProofObject,
-    TestID -> "ATP/sheffer/ImpliesWolframAlternateAxioms-Mix2-SR2"
+    TestID -> "ATP/sheffer/ImpliesWolframAlternateAxioms-default"
 ]
 
 (* === ENIGMA Tier 1: learned CP scorer (WL surface) + coop ========= *)

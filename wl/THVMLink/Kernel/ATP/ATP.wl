@@ -3475,10 +3475,10 @@ $AtpMethodPresets = {"Waldmeister", "WaldmeisterAuto",
     "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
     "AllPresets"};
 
-(* Method -> "VampirePortfolio": a 13-entry rotation modeled on the
+(* Method -> "VampirePortfolio": a 12-entry rotation modeled on the
    portfolio-cycling shape Vampire 5.0.1 ships for UEQ -- many short
    strategy slices rather than one tuned config.  With TimeConstraint
-   -> T, each entry runs at T / 11 wall time.  Designed to exercise
+   -> T, each entry runs at T / 12 wall time.  Designed to exercise
    the full knob surface (CP weight modes, orderings, redundancy
    criteria) on a single Method invocation.
 
@@ -3487,7 +3487,7 @@ $AtpMethodPresets = {"Waldmeister", "WaldmeisterAuto",
    that walls on one slice has a chance to surface on the next.
    Returns a SCHEDULE (list of configs) rather than a single config,
    so the engine's existing portfolio dispatcher fairly divides
-   TimeConstraint across the 10 entries. *)
+   TimeConstraint across the entries. *)
 atpParseMethod["VampirePortfolio"] :=
     (* atpScheduleFor pattern-matches a list directly, but
        atpParseMethod's contract is "single config".  Return a sentinel
@@ -3515,21 +3515,14 @@ $VampirePortfolio = {
     {"GoalDirected", "AxiomRelevance" -> "SInE"},
     (* 10: Add weight, the bare default for combinator / Sheffer-X. *)
     {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20},
-    (* 11: Mix2 + SelectionRatio 2 (aggressive 1-FIFO-per-2 age bias).
-       Cracks the cross-system Sheffer Implies-X family
-       (ImpliesWolframAxioms + ImpliesWolframAlternate, ~3.7s) that every
-       other rotation entry walls on.  The tight age bias forces the long
-       derivation chain through before the CP queue blows up; SR=1 and
-       SR>=5 both miss it. *)
-    {"Completion", "CriticalPairWeight" -> "Mix2", "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
-    (* 12: Vampire's McCune-cracking config (LPO + arity + LRS +
+    (* 11: Vampire's McCune-cracking config (LPO + arity + LRS +
        RandomRatio 32 + Vampire's exact seed + GroundJoin +
        BackwardDemod + RHSInterreduce + UnfailingCP).  The
        experimentally-validated entry for McCuneAxioms /
        EqualityOfInverses; random selection samples paths the
        weight-greedy entries miss. *)
     "VampireRandom",
-    (* 13: LPO + Occurrence-frequency precedence (Vampire `sp=occurrence`
+    (* 12: LPO + Occurrence-frequency precedence (Vampire `sp=occurrence`
        / E `-G InvFreqRank`).  Rarer symbols outrank common ones; on
        cross-system goals where a symbol appears in few axioms the
        trajectory differs from the AutoPrecedence Fuchs-arity entry. *)
