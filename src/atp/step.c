@@ -401,6 +401,9 @@ static u8 sw_form_push_ft_try(AtpState *s, Term lo, Term ro, Term sub_pre,
     // that against, so route the class to the classic Term build (its
     // push still takes the fused pack + atp_cp_twee_fused_base).
     if (s->cp_weight_mode == ATP_CP_WEIGHT_TWEE) return 0u;
+    // The untreated emit writes the shared scratch and pushes at once:
+    // the batched pairs formed before it go first.
+    g_pb_mid += atp_push_batch_flush(s);
     if (!vcp_ft_emit_fused(s->kbo, lo_ft, sub_ft, rin_ft, ro_ft, &fsubst)) {
       return 0u;
     }
@@ -469,6 +472,16 @@ static u8 sw_form_push_ft_try(AtpState *s, Term lo, Term ro, Term sub_pre,
       g_rdesc_push.armed    = 1u;
     }
   }
+  if (ft_treat && atp_push_batch_on(s)) {
+    if (atp_push_batch_add(s, &cp, t_out, t_in, i_out, i_in, vtot)) {
+      g_cp_rawsz_hint = 0u;
+      g_acp_fuse.valid = 0u;
+      *rv = 0u;
+      if (g_pb_n >= atp_push_batch_chunk()) g_pb_mid += atp_push_batch_flush(s);
+      return 1u;
+    }
+    g_pb_mid += atp_push_batch_flush_around(s);
+  }
   if (ft_treat) g_vcp_treat.armed = 1u;
   *rv = atp_push_cps_traced(s, &cp, 1u, t_out, t_in, i_out, i_in);
   if (ft_route) {
@@ -528,6 +541,8 @@ static u32 sw_form_push_impl(AtpState *s, Term lo, Term ro, Term sub_pre,
       return _ft_rv;
     }
   }
+  // The classic arm forms and pushes at once: batched pairs go first.
+  g_pb_mid += atp_push_batch_flush(s);
   // FT-arm decline with lazy sentinel operands: resolve each face's
   // SIDE from the sentinel's value tag (0xFA151 = lhs, 0xFA152 = rhs;
   // stale-proof -- a mid-sweep materialization by an earlier position
@@ -1610,6 +1625,13 @@ static u32 thvm_atp_generate_cps_singlewalk(AtpState *s, AtpAddedRange added) {
       sw_self_phase(s, f, fr, fl, fr, fl, f_eq, 1u, path, &pushed); // G root r=?r (combo3)
     }
     g_sw_phase = 0xffu;
+#if defined(THVM_ATPFT_NORM) && defined(THVM_ATPFT_RULES)
+    // The fact's treated pairs, then the count of those pushed by
+    // flushes inside its sweeps.
+    pushed += atp_push_batch_flush(s);
+    pushed += g_pb_mid;
+    g_pb_mid = 0u;
+#endif
     // Mark f overlap-exhausted (mirror of the batch path): its superposition
     // lane is fully enumerated, so a later flat-transposition fact will not
     // re-superpose against it.

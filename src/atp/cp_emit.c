@@ -333,6 +333,9 @@ typedef struct {
   // (raw formation var space, same as fl/fr) and kept for the push
   // loop's peak-stash pack; owned by the stash, freed on release.
   AtpFtCell *peak;
+  // fl/fr already hold their doR normal forms (the push batch treated
+  // them before the push): vcp_treat_joinable only takes the verdict.
+  u8         prenorm;
 } VcpTreat;
 #else
 typedef struct {

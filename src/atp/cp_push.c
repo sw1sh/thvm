@@ -168,14 +168,16 @@ static u8 vcp_treat_joinable(AtpState *s) {
     // kept CP is the same equation modulo renaming.
     ft_normalize_vars_pair(g_drc_raw_l, g_drc_raw_r);
   }
-  atp_ft_mirror_ensure(s);
-  if (_dl) {
-    u64 _n = atp_now_us();
-    g_atp_pushn_us_mirror += _n - _dt;
-    _dt = _n;
+  if (!g_vcp_treat.prenorm) {
+    atp_ft_mirror_ensure(s);
+    if (_dl) {
+      u64 _n = atp_now_us();
+      g_atp_pushn_us_mirror += _n - _dt;
+      _dt = _n;
+    }
+    g_vcp_treat.fl = atp_rules_only_normalize_ft(s, g_vcp_treat.fl, 64u);
+    g_vcp_treat.fr = atp_rules_only_normalize_ft(s, g_vcp_treat.fr, 64u);
   }
-  g_vcp_treat.fl = atp_rules_only_normalize_ft(s, g_vcp_treat.fl, 64u);
-  g_vcp_treat.fr = atp_rules_only_normalize_ft(s, g_vcp_treat.fr, 64u);
   if (_dl) {
     u64 _n = atp_now_us();
     g_atp_pushn_us_norm += _n - _dt;
@@ -250,9 +252,19 @@ static void atp_cp_raw_pend(AtpState *s, Term raw_lhs, Term raw_rhs,
   g_cp_raw_pending = acp_pack(l, r, NULL, NULL);
 }
 
+// Treated CPs the walk former has formed but not yet pushed, and whether
+// atp_push_batch_flush is pushing them (push_batch.c).
+static u32 g_pb_n        = 0u;
+static u8  g_pb_flushing = 0u;
+
 static u32 atp_push_cps_traced(AtpState *s, const CriticalPair *cps,
                                u32 ncps, u32 parent_a, u32 parent_b,
                                u32 rule_a, u32 rule_b) {
+  // A push while treated CPs wait in the batch would queue this CP ahead
+  // of CPs formed before it: every such route flushes first.
+  if (g_pb_n != 0u && !g_pb_flushing) {
+    thvm_fatal("atp_push_cps_traced: a push batch is pending");
+  }
   u32 pushed = 0;
   u8 fuse = atp_cp_push_fuse_ok(s);
   // Consume the singleton size hint (see g_cp_rawsz_hint): valid for

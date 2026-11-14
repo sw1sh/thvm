@@ -244,6 +244,7 @@ fn AtpStatus thvm_atp_run(AtpState *s) {
 #include "subsume.c"
 #include "ground_join.c"
 #include "cp_push.c"
+#include "push_batch.c"
 // 8.1e-i: C-direct critical-pair enumerator -- the path
 // `thvm_atp_generate_cps` takes when `s->use_ic_cp_gen == 0`
 // (the default).  Bulk of the work happens in
