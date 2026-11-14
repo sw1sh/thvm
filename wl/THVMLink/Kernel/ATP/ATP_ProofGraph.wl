@@ -1111,8 +1111,13 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            completion-derived -- resolves through the trace DAG into an
            Axiom / CriticalPairLemma entry, so an MNF front-collision
            proof verifies the same way a completion proof does. *)
-        usingMnf = (Environment["THVM_ATP_PREFER_MAINSTEPS"] === $Failed) && ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {},
-        mainSteps = If[(Environment["THVM_ATP_PREFER_MAINSTEPS"] === $Failed) && ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {}, cRes["MnfSteps"], cRes["MainSteps"]],
+        (* A multi-goal run's MnfSteps belong to one conjunct (goal-tagged
+           like MainSteps); the per-conjunct chain build below takes them
+           for that conjunct alone. *)
+        usingMnf = (Environment["THVM_ATP_PREFER_MAINSTEPS"] === $Failed) && ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {} &&
+            Length[enc["ConjPairs"]] <= 1,
+        mainSteps = If[(Environment["THVM_ATP_PREFER_MAINSTEPS"] === $Failed) && ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {} &&
+            Length[enc["ConjPairs"]] <= 1, cRes["MnfSteps"], cRes["MainSteps"]],
         axPairs = enc["AxPairs"], varSyms, entries, traceInfo,
         inProgress, aliveRulesAt, slN, cpN, entryTi, entryTag, axiomKeyFor, rewriteOnce,
         prepareRules, runBfs, reverseBfsPath, emitNorm, resolveCp,
@@ -2124,7 +2129,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             Print["[buildCpl] mainSteps=", Length[mainSteps],
                 " MainSteps=", Length[cRes["MainSteps"]],
                 " usingMnf=", usingMnf, " conjPair=", conjPair];
-            Do[Print["  step ", si, ": ", mainSteps[[si]]], {si, Length[mainSteps]}]];
+            Do[Print["  step ", si, ": ", mainSteps[[si]]], {si, Length[mainSteps]}];
+            If[ ! usingMnf && ListQ[cRes["MnfSteps"]],
+                Do[Print["  mnf step ", si, ": ", cRes["MnfSteps"][[si]]], {si, Length[cRes["MnfSteps"]]}]]];
 
         (* the goal chains: conjunct g's MainSteps slice rewrites one
            side of that conjunct's running equation, citing its
@@ -2137,8 +2144,13 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            inside a conjunction) is not single-NF expressible, so the
            lift fails. *)
         chainEntries = Join @@ Table[
-            Block[{gSteps, runEq, prevChainKey},
+            Block[{gSteps, runEq, prevChainKey, gMnf = usingMnf},
                 gSteps = Select[mainSteps, Quotient[#["Side"], 2] === g - 1 &];
+                (* a conjunct the MNF search closed inside a conjunction:
+                   its chain is its MnfSteps slice, citing by trace index *)
+                If[ gSteps === {} && nGoals > 1 && ListQ[cRes["MnfSteps"]],
+                    gSteps = Select[cRes["MnfSteps"], Quotient[#["Side"], 2] === g - 1 &];
+                    gMnf = gSteps =!= {}];
                 gSteps = Append[#, "Side" -> Mod[#["Side"], 2]] & /@ gSteps;
                 runEq = cjps[[g]];
                 prevChainKey = {$HypothesisSym, g};
@@ -2165,9 +2177,9 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                    rule's oriented equation, read off
                                    mainRules for a live rule or the
                                    trace node for an MNF citation. *)
-                                cInfo = If[usingMnf, resolveTrace[step["RuleC"]], resolveRule[step["RuleC"]]];
+                                cInfo = If[gMnf, resolveTrace[step["RuleC"]], resolveRule[step["RuleC"]]];
                                 cKey = cInfo["Key"];
-                                mr = If[ usingMnf,
+                                mr = If[ gMnf,
                                     With[{te = trace[[step["RuleC"] + 1]]},
                                         {tL[te], tR[te]}],
                                     mainRules[[step["RuleC"] + 1]]];

@@ -4083,9 +4083,12 @@ atpChainPath[start_, steps_List] := Block[{afters = #["After"] & /@ steps},
 atpGoalPaths[bundle_] := Block[{cRes, steps, cjps, paths},
     cRes = bundle["cRes"];
     If[ ! AssociationQ[cRes] || cRes["Status"] =!= 1, Return[$Failed]];
-    steps = If[ ListQ[cRes["MnfSteps"]] && cRes["MnfSteps"] =!= {},
-        cRes["MnfSteps"], cRes["MainSteps"]];
-    If[ ! ListQ[steps], Return[$Failed]];
+    (* MNF steps exist only for a goal with no single-NF chain (one
+       conjunct of a conjunction, goal-tagged like MainSteps), so the
+       two blocks together hold every conjunct's chain once. *)
+    steps = Join[Replace[cRes["MainSteps"], Except[_List] -> {}],
+        Replace[cRes["MnfSteps"], Except[_List] -> {}]];
+    If[ steps === {} && ! ListQ[cRes["MainSteps"]], Return[$Failed]];
     cjps = bundle["enc"]["ConjPairs"] /.
         Verbatim[Pattern][s_Symbol, _] :> s;
     If[ cjps === {}, Return[$Failed]];

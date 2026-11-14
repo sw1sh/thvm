@@ -1975,6 +1975,16 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   // run extracts one chain per conjunct off the shared R, goal-tagged
   // in `side` (see atp_extract_goal_chains).
   static AtpProofStep proof[ATP_PROOF_MAX_STEPS];
+  // The alias conjunct at the end of the run: in a multi-goal run the
+  // MNF search works on it, so a proof the MNF search closed closed it
+  // (atp_extract_goal_chains moves the alias as it walks the conjuncts).
+  u32 alias_g = ATP_MAX_GOALS;
+  for (u32 g = 0; g < atp->n_goals; g++) {
+    if (atp->goals_lhs[g] == atp->goal_lhs && atp->goals_rhs[g] == atp->goal_rhs) {
+      alias_g = g;
+      break;
+    }
+  }
   u32 n_steps  = atp_extract_goal_chains(atp, proof, ATP_PROOF_MAX_STEPS);
   ATP_PHASE_MARK("main-extract");
   u32 n_rules  = atp->n_rules;
@@ -2008,6 +2018,24 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
   if (use_mnf && st == ATP_PROVED && n_steps == 0 && atp->n_goals <= 1u) {
     mnf_n_steps = thvm_atp_mnf_proof_extract(atp, mnf_proof,
                                              ATP_PROOF_MAX_STEPS);
+  }
+  // A multi-goal run whose alias conjunct has no single-NF chain was
+  // closed there by the MNF search: extract that conjunct's MNF chain,
+  // goal-tagged (side 2*g + side) like the conjunct chains, so the WL
+  // lift cites it for that conjunct alone.
+  if (use_mnf && st == ATP_PROVED && atp->n_goals > 1u && alias_g < atp->n_goals) {
+    u32 in_alias = 0u;
+    for (u32 k = 0; k < n_steps; k++) {
+      if (proof[k].side / 2u == alias_g) in_alias++;
+    }
+    if (in_alias == 0u) {
+      atp->goal_lhs = atp->goals_lhs[alias_g];
+      atp->goal_rhs = atp->goals_rhs[alias_g];
+      mnf_n_steps = thvm_atp_mnf_proof_extract(atp, mnf_proof, ATP_PROOF_MAX_STEPS);
+      for (u32 k = 0; k < mnf_n_steps; k++) {
+        mnf_proof[k].side = 2u * alias_g + mnf_proof[k].side;
+      }
+    }
   }
 #endif
 
