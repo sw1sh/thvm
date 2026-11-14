@@ -159,16 +159,23 @@ TStringPath[{"BBA" -> "ABB", "BAA" -> "AAB"}, {"BA" -> "AB"}, TimeConstraint -> 
 ```
 <!-- => {{"BBA", "BAB", "ABB"}, {"BAA", "AAB"}} -->
 
-## Direction belongs to the axioms
+## A theorem written as a rule asks for a rewrite
 
-Equality is symmetric: a theorem `s == t` holds exactly when `t == s` does. So the reversed theorem, from the sorted word back to the unsorted one, is also proved from the rule `"BA" -> "AB"`. Its path is the sorting path read backwards, and each step undoes a rule application:
+A theorem written as a rule `"s" -> "t"` holds when the rules rewrite *s* into *t*. Sorting never unsorts, so the reversed theorem, from the sorted word back to the unsorted one, does not hold under the rule `"BA" -> "AB"`:
 
 ```wl
 TStringPath["AAABBB" -> "BBBAAA", {"BA" -> "AB"}, TimeConstraint -> 10]
 ```
+<!-- => a Failure: "AAABBB and BBBAAA are equal when the rules are read as equations, but the rules do not rewrite AAABBB into BBBAAA." -->
+
+The two words are still equal, and equality is symmetric. Written as an equation, a pair of words, the reversed theorem is proved, and its path is the sorting path read backwards, each step undoing a rule application:
+
+```wl
+TStringPath[{"AAABBB", "BBBAAA"}, {"BA" -> "AB"}, TimeConstraint -> 10]
+```
 <!-- => {"AAABBB", "AABABB", "ABAABB", "BAAABB", "BAABAB", "BABAAB", "BBAAAB", "BBABAA", "BBBAAA"} -->
 
-The same holds for terms. The reversed associativity goal is proved, and its path moves parentheses to the left:
+A goal between terms is an equation. The reversed associativity goal is proved, and its path moves parentheses to the left:
 
 ```wl
 TFindEquationalPath[a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d)) == ((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d, rassoc, TimeConstraint -> 10]

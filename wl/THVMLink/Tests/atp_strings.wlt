@@ -64,8 +64,8 @@ VerificationTest[
     TestID -> "ATPStrings/directional/bubble-sort-proves-and-verifies"
 ]
 
-(* A rule theorem is stated as the rewrite the proof shows: BBAA rewrites into AABB, so the
-   ProofObject's theorem is a rule and it still verifies. *)
+(* A rule theorem holds when the rules rewrite its left word into its right one: BBAA rewrites
+   into AABB, so the ProofObject's theorem is a rule and it still verifies. *)
 VerificationTest[
     Block[{po = TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, TimeConstraint -> 30]},
         {Head[po["Theorem"]], MatchQ[po["ProofFunction"][], _Success]}
@@ -74,13 +74,37 @@ VerificationTest[
     TestID -> "ATPStrings/directional/rule-theorem-stated-as-rule"
 ]
 
-(* AB and BA only join (BA rewrites to AB, AB to nothing): the theorem "AB" -> "BA" stays an
-   equation, with a message. *)
+(* AB and BA only join (BA rewrites to AB, AB to nothing): the rule never rewrites AB into BA, so
+   the theorem "AB" -> "BA" is not proved, and its status says the search saw every word AB
+   reaches. *)
 VerificationTest[
-    Head[TFindStringProof["AB" -> "BA", {"BA" -> "AB"}, TimeConstraint -> 30]["Theorem"]],
-    Equal,
-    {TFindStringProof::equal},
-    TestID -> "ATPStrings/directional/joined-rule-theorem-stays-equation"
+    {Replace[TFindStringProof["AB" -> "BA", {"BA" -> "AB"}, TimeConstraint -> 30], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+     TFindStringProof["AB" -> "BA", {"BA" -> "AB"}, "Status", TimeConstraint -> 30]},
+    {{"TFindStringProof", "norewrite"}, "Refuted"},
+    TestID -> "ATPStrings/directional/joined-rule-theorem-is-not-proved"
+]
+
+(* Sorting never unsorts: AABB and BBAA are equal under BA -> AB, but AABB is already sorted. *)
+VerificationTest[
+    Replace[TFindStringProof["AABB" -> "BBAA", {"BA" -> "AB"}, TimeConstraint -> 30], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindStringProof", "norewrite"},
+    TestID -> "ATPStrings/directional/reverse-sort-is-not-proved"
+]
+
+(* BBA rewrites into BAB in one step, though the proof joins both at ABB: the theorem is a rule,
+   and the path is the rewrite, not the join. *)
+VerificationTest[
+    {Head[TFindStringProof["BBA" -> "BAB", {"BA" -> "AB"}, TimeConstraint -> 30]["Theorem"]],
+     TStringPath["BBA" -> "BAB", {"BA" -> "AB"}, TimeConstraint -> 30]},
+    {Rule, {"BBA", "BAB"}},
+    TestID -> "ATPStrings/directional/rewrite-against-the-join"
+]
+
+(* An equation axiom rewrites both ways, so with equations only a rule theorem is its equation. *)
+VerificationTest[
+    Head[TFindStringProof["AB" -> "BA", {{"BA", "AB"}}, TimeConstraint -> 30]["Theorem"]],
+    Rule,
+    TestID -> "ATPStrings/directional/equation-axioms-rewrite-both-ways"
 ]
 
 VerificationTest[
@@ -157,17 +181,12 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* A goal is an EQUATION, so "AB" -> "BA" still proves: both
-       sides JOIN at the normal form AB (the rhs chain runs backward
-       through the join).  The path makes the traversal visible:
-       lhs AB is already normal, rhs BA rewrites forward to AB, so the
-       lhs-to-rhs path is {AB, BA} with the second step a reversed
-       rewrite.  Directionality lives in the AXIOM (the engine never
-       rewrites AB back to BA during search), not in goal
-       provability. *)
-    TStringPath["AB" -> "BA", {"BA" -> "AB"}, TimeConstraint -> 10],
-    {"AB", "BA"},
-    TestID -> "ATPStrings/path/goal-joins-through-reversed-side"
+    (* AB and BA join at AB, but no rewrite takes AB to BA, so there
+       is no path; written as an equation the goal joins. *)
+    {Replace[TStringPath["AB" -> "BA", {"BA" -> "AB"}, TimeConstraint -> 10], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+     TStringPath[{"AB", "BA"}, {"BA" -> "AB"}, TimeConstraint -> 10]},
+    {{"TFindStringProof", "norewrite"}, {"AB", "BA"}},
+    TestID -> "ATPStrings/path/rule-goal-needs-a-rewrite"
 ]
 
 VerificationTest[

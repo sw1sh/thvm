@@ -21,7 +21,7 @@ RelatedTutorials: ["[Finding Replacement Paths with Directed Rules](FindReplaceP
 - A step can apply a rule derived by the proof, a combination of the axioms, so consecutive words can differ by more than one application of an axiom.
 - With rule axioms and a theorem stated from a start word to an end word, the path is a chain of forward replacements. See [Finding Replacement Paths](paclet:WolframInstitute/THVMLink/tutorial/FindReplacePath).
 - A list of theorems gives one path for each theorem.
-- [TStringPath]() gives `$Failed` when no proof is found.
+- [TStringPath]() gives a [Failure]() when no proof is found.
 - [TStringPath]() takes the options of [TFindProof]():
 
 | | | |
@@ -80,7 +80,7 @@ A small step budget leaves the theorem unproved:
 TStringPath["BBBAAA" -> "AAABBB", {"BA" -> "AB"}, MaxSteps -> 1]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No rewrite path was found: the time limit was reached." -->
 
 ### Method
 
@@ -100,7 +100,7 @@ A time limit bounds a search that does not end:
 TStringPath["AB" -> "BA", {"ABA" -> "BAB"}, TimeConstraint -> 2]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No rewrite path was found: the time limit was reached." -->
 
 ## Properties and Relations
 
@@ -132,20 +132,30 @@ TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, "Status"]
 
 ## Possible Issues
 
-A theorem stated against the direction of a rule still proves, since equality is symmetric, and its path runs the rule backward:
+A theorem written as a rule against the direction of the rules gives a [Failure](), since the rules never rewrite the sorted word:
 
 ```wl
 TStringPath["AAABBB" -> "BBBAAA", {"BA" -> "AB"}]
+```
+
+<!-- => a Failure: "AAABBB and BBBAAA are equal when the rules are read as equations, but the rules do not rewrite AAABBB into BBBAAA." -->
+
+---
+
+Written as an equation, a pair of words, the theorem is proved, since equality is symmetric, and its path runs the rule backward:
+
+```wl
+TStringPath[{"AAABBB", "BBBAAA"}, {"BA" -> "AB"}]
 ```
 
 <!-- => {"AAABBB", "AABABB", "ABAABB", "BAAABB", "BAABAB", "BABAAB", "BBAAAB", "BBABAA", "BBBAAA"} -->
 
 ---
 
-A theorem that does not follow from the axioms gives `$Failed`:
+A theorem that does not follow from the axioms gives a [Failure]():
 
 ```wl
 TStringPath["AB" -> "BA", {"AA" -> "A"}]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No rewrite path was found: the completion saturated without joining the two sides of the conjecture." -->

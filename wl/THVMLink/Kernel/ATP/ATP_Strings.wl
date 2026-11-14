@@ -15,10 +15,9 @@ BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`", "WolframIns
 SetUsage[TFindStringProof, "TFindStringProof[thm$, axioms$] proves a string-rewriting theorem over the multiway/semi-Thue axioms and returns the ProofObject.
 Words are encoded as right-nested CenterDot terms over one symbol per character ('ABC' encodes to A\[CenterDot](B\[CenterDot]C)), with the associativity bridge axiom appended so a rewrite applies at any position of a word; the encoding follows the Wolfram Function Repository FindStringProof.
 An axiom written 'BA' -> 'AB' is installed as a PRE-ORIENTED rewrite rule (one-directional string rewriting); an axiom written {'BA', 'AB'}, 'BA' == 'AB', or 'BA' <-> 'AB' is an equation the engine orients itself.
-A theorem is a pair in any of the same shapes; a theorem 'l' -> 'r' is stated as a rewrite rule when every step of the proof path from l to r is reached by the rule axioms applied forward, and as an equation (with the message TFindStringProof::equal) otherwise; a list of theorems is a multi-goal conjunction returning ONE ProofObject with a Hypothesis/Conclusion row pair per conjunct.
+A theorem is a pair in any of the same shapes; a theorem 'l' -> 'r' holds when the axioms rewrite l into r (rules forward, equations both ways), and is then stated as a rewrite rule; when l and r are only equal it gives a Failure and the status 'Refuted'; a list of theorems is a multi-goal conjunction returning ONE ProofObject with a Hypothesis/Conclusion row pair per conjunct.
 An optional last argument picks the TFindProof return spec ('Status', 'Path', $$); options are TFindProof's (MaxSteps, TimeConstraint, Method, PortfolioFrontLoad)."];
 
-TFindStringProof::equal = "The proof shows that `1` and `2` are equal, but not that the rules rewrite `1` into `2`, so the theorem is stated as an equation.";
 
 (* TFindEquationalPath (the full replacement-path surface ported from the
    Wolfram Function Repository) lives in ATP_EquationalPath.wl.  Forward-
@@ -79,9 +78,10 @@ atpStringItem[{l_String, r_String}] :=
     Inactive[Equal][atpStringToWord[l], atpStringToWord[r]]
 atpStringItem[bad_] := Throw[Failure["TATPParseError", <|"Item" -> bad, "Reason" -> "expected a word pair: \"l\" -> \"r\", \"l\" == \"r\", \"l\" <-> \"r\", or {\"l\", \"r\"}"|>], "TATPError"]
 
-(* A theorem's direction is meaningless (the goal is an equation), so
-   normalize Rule theorems to equations; only AXIOMS keep Rule's
-   pre-orientation. *)
+(* The engine proves a goal as an equation, so a Rule theorem goes in as
+   one; atpStringDirect then checks that the axioms rewrite its left word
+   into its right word.  Only AXIOMS keep Rule's pre-orientation in the
+   engine. *)
 atpStringGoal[l_String -> r_String] :=
     Inactive[Equal][atpStringToWord[l], atpStringToWord[r]]
 atpStringGoal[item_] := atpStringItem[item]
@@ -124,55 +124,100 @@ TFindStringProof[thms_, axioms_, returnSpec_ ? atpReturnSpecQ, opts : OptionsPat
         $Context = "Global`",
         $ContextPath = Prepend[DeleteCases[$ContextPath, "Global`"], "Global`"]
     },
-        atpStringDirect[TFindProof[goals, axs, returnSpec, opts], atpStringRuleGoals[thms], atpStringRules[axioms]]
+        atpStringDirect[TFindProof[goals, axs, returnSpec, opts], returnSpec, atpStringTheorems[thms], axioms]
     ],
     "TATPError"
 ]
 
-(* Which theorems were written as rules "l" -> "r", in goal order. *)
-atpStringRuleGoals[{_String, _String}] := {False}
-atpStringRuleGoals[thms_List] := MatchQ[#, _String -> _String] & /@ thms
-atpStringRuleGoals[thm_] := {MatchQ[thm, _String -> _String]}
+(* Which theorems were written as rules "l" -> "r", as {l, r} in goal order; None for the others. *)
+atpStringTheorems[{_String, _String}] := {None}
+atpStringTheorems[thms_List] := Replace[thms, {(l_String -> r_String) :> {l, r}, _ -> None}, {1}]
+atpStringTheorems[thm_] := atpStringTheorems[{thm}]
+
+(* The axioms as directed word pairs {l, r}: a rule rewrites one way, an equation both ways. *)
+atpStringPairs[{l_String, r_String}] := {{l, r}, {r, l}}
+atpStringPairs[axs_List] := Join @@ (atpStringPair /@ axs)
+atpStringPairs[ax_] := atpStringPair[ax]
+atpStringPair[l_String -> r_String] := {{l, r}}
+atpStringPair[HoldPattern[TwoWayRule[l_String, r_String] | Equal[l_String, r_String] | {l_String, r_String}]] := {{l, r}, {r, l}}
+atpStringPair[_] := {}
+
+(* A shortest rewrite path from word u to word v under the directed pairs, found by a breadth-first
+   search: the list of words, Missing["NotReachable"] when every word the pairs reach from u is
+   seen without v, or Missing["Bound"] after $atpStringRewriteCap words. *)
+$atpStringRewriteCap = 20000;
+atpStringRewrite[u_String, v_String, pairs_List] := Module[{parent = <|u -> None|>, frontier = {u}},
+    While[ frontier =!= {} && ! KeyExistsQ[parent, v] && Length[parent] < $atpStringRewriteCap,
+        frontier = Join @@ Last @ Reap @ Do[
+            Scan[If[ ! KeyExistsQ[parent, #], parent[#] = x; Sow[#]] &,
+                Flatten[StringReplaceList[x, #[[1]] -> #[[2]]] & /@ pairs]],
+            {x, frontier}]];
+    Which[
+        KeyExistsQ[parent, v], Reverse @ NestWhileList[parent, v, parent[#] =!= None &],
+        frontier === {}, Missing["NotReachable"],
+        True, Missing["Bound"]]
+]
 
 (* The engine proves that the two words of a goal are equal: completion orients the lemmas it
-   derives by its term ordering, not by the direction of the rules, and "AB" -> "BA" under
-   "BA" -> "AB" is equal too.  A theorem written as a rule is stated as one when the rewrite holds:
-   every step of the proof's path from its left word to its right word is reached by the rule
-   axioms applied forward (atpStringReachQ).  Otherwise it stays an equation, with a message. *)
-atpStringDirect[po_ProofObject, ruleQ_List, rules_List] /; Or @@ ruleQ := Block[{rows, thm, thms, paths, stated},
-    rows = Association @ Normal @ po["ProofDataset"];
-    thm = po[[2]];
-    thms = Replace[thm, {l_List :> l, a_And :> List @@ a, t_ :> {t}}];
-    If[ ! AssociationQ[rows] || Length[thms] =!= Length[ruleQ], Return[po]];
-    paths = Replace[atpDatasetGoalPath[rows, #], p_List :> atpSquashDups[atpWordToString /@ p]] & /@ Range[Length[ruleQ]];
-    stated = MapThread[
-        Function[{t, rule, path},
-            Which[
-                ! rule, t,
-                ListQ[path] && FreeQ[path, $Failed] && AllTrue[Partition[path, 2, 1], atpStringReachQ[#[[1]], #[[2]], rules] &],
-                    Replace[t, Equal[l_, r_] :> Rule[l, r]],
-                True,
-                    Message[TFindStringProof::equal, atpWordToString[t[[1]]], atpWordToString[t[[2]]]];
-                    t]],
-        {thms, ruleQ, paths}];
-    ReplacePart[po, 2 -> Replace[thm, {_List :> stated, _And :> And @@ stated, _ :> First[stated]}]]
-]
-atpStringDirect[other_, _, _] := other
+   derives by its term ordering, not by the direction of the rules, so "AABB" -> "BBAA" under
+   "BA" -> "AB" is equal (both words reduce to AABB) though the rule never rewrites AABB into
+   BBAA.  A theorem written as a rule holds when the rules rewrite its left word into its right
+   word, the equations applied both ways (atpStringRewrite).  The engine's proof of equality
+   comes first, so the search runs only on words the axioms make equal, and with no one-way rule
+   among the axioms equality is the rewrite.  A rewrite gives the theorem as a rule and its
+   path; no rewrite gives a Failure, and the status "Refuted" when the search saw every word the
+   rules reach. *)
+TFindStringProof::norewrite = "`1` and `2` are equal when the rules are read as equations, but the rules do not rewrite `1` into `2`.";
+TFindStringProof::rewritebound = "No rewrite of `1` into `2` was found among the first `3` words the rules reach from `1`.";
 
-(* Whether word v is reached from word u by the rules {l, r} applied forward: a breadth-first
-   search over at most 2000 words. *)
-atpStringReachQ[u_String, v_String, rules_List] := Block[{seen = <|u -> True|>, frontier = {u}, next},
-    While[ frontier =!= {} && ! KeyExistsQ[seen, v] && Length[seen] < 2000,
-        next = DeleteDuplicates @ Flatten[Function[w, StringReplaceList[w, #[[1]] -> #[[2]]] & /@ rules] /@ frontier];
-        frontier = Select[next, ! KeyExistsQ[seen, #] &];
-        Scan[(seen[#] = True) &, frontier]];
-    KeyExistsQ[seen, v]
+atpStringDirect[res_, spec_, thms_List, axioms_] /; ! FreeQ[thms, {_String, _String}] := Module[{
+    pairs = atpStringPairs[axioms], dirsFn
+},
+    dirsFn[] := dirsFn[] = If[ AllTrue[pairs, MemberQ[pairs, Reverse[#]] &],
+        Replace[thms, {_String, _String} -> True, {1}],
+        Replace[thms, {l_String, r_String} :> atpStringRewrite[l, r, pairs], {1}]];
+    Replace[res, {
+        a_Association /; ListQ[spec] || spec === All :>
+            Association @ KeyValueMap[#1 -> atpStringDirectValue[#1, #2, thms, dirsFn, pairs] &, a],
+        v_ :> atpStringDirectValue[spec, v, thms, dirsFn, pairs]}]
 ]
+atpStringDirect[res_, _, _, _] := res
 
-(* The axioms that rewrite in one direction, as {l, r} words. *)
-atpStringRules[{_String, _String}] := {}
-atpStringRules[axs_List] := Cases[axs, (l_String -> r_String) :> {l, r}]
-atpStringRules[ax_] := atpStringRules[{ax}]
+(* dirsFn[] gives, per goal, None (not a rule), True (no one-way axiom, so equality is the
+   rewrite), a list of words (a rewrite path), or a Missing (no rewrite). *)
+atpStringDirectValue["ProofObject", po_ProofObject, thms_, dirsFn_, _] := With[{d = dirsFn[]},
+    If[ MemberQ[d, _Missing],
+        atpStringNoRewrite[thms, d],
+        ReplacePart[po, 2 -> atpStringStateRules[po[[2]], d]]]]
+atpStringDirectValue["Status", "Proved", thms_, dirsFn_, _] := With[{d = dirsFn[]},
+    Which[
+        MemberQ[d, Missing["NotReachable"]], "Refuted",
+        MemberQ[d, _Missing], "Failed",
+        True, "Proved"]]
+atpStringDirectValue["Path", path_List, thms_, dirsFn_, pairs_] := With[{d = dirsFn[]},
+    Which[
+        MemberQ[d, _Missing], atpStringNoRewrite[thms, d],
+        Length[d] === 1, atpStringPathOf[First[d], path, pairs],
+        True, MapThread[atpStringPathOf[#1, #2, pairs] &, {d, path}]]]
+atpStringDirectValue["Statistics", a : KeyValuePattern["Status" -> "Proved"], thms_, dirsFn_, pairs_] :=
+    Append[a, "Status" -> atpStringDirectValue["Status", "Proved", thms, dirsFn, pairs]]
+atpStringDirectValue[_, v_, _, _, _] := v
+
+(* The engine's path when each of its steps is a rewrite by the axioms, else the search's. *)
+atpStringPathOf[words_List, enginePath_, pairs_] := With[{ws = atpWordToString /@ enginePath},
+    If[ ListQ[enginePath] && FreeQ[ws, $Failed] &&
+            AllTrue[Partition[atpSquashDups[ws], 2, 1], ListQ[atpStringRewrite[#[[1]], #[[2]], pairs]] &],
+        enginePath,
+        atpStringToWord /@ words]]
+atpStringPathOf[_, enginePath_, _] := enginePath
+
+atpStringStateRules[thm_, d_List] := Module[{thms = Replace[thm, {l_List :> l, a_And :> List @@ a, t_ :> {t}}], stated},
+    stated = MapThread[If[ #2 === None, #1, Replace[#1, Equal[l_, r_] :> Rule[l, r]]] &, {thms, d}];
+    Replace[thm, {_List :> stated, _And :> And @@ stated, _ :> First[stated]}]]
+
+atpStringNoRewrite[thms_, d_List] := Replace[First @ Cases[Transpose[{thms, d}], {_, _Missing}],
+    {{{l_, r_}, Missing["NotReachable"]} :> atpOutcome[TFindStringProof::norewrite, l, r],
+     {{l_, r_}, _} :> atpOutcome[TFindStringProof::rewritebound, l, r, $atpStringRewriteCap]}]
 
 (* === Dataset path re-walk (shared with ATP_EquationalPath.wl) ====== *)
 

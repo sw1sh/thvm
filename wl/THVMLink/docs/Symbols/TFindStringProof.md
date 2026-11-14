@@ -22,10 +22,10 @@ RelatedTutorials: ["[Finding Replacement Paths with Directed Rules](FindReplaceP
 - A word is a nonempty string of letters. Each letter becomes a symbol, and a word becomes a product of its letters under [CenterDot](), so `"ABC"` becomes `A·(B·C)`. An associativity axiom is added, so a rule can rewrite any part of a word.
 - An axiom written as a rule `"BA" -> "AB"` rewrites from left to right only, as in a semi-Thue system. An axiom written as a pair `{"BA", "AB"}` or as `"BA" <-> "AB"` is an equation, oriented by the prover.
 - A theorem is a pair of words in any of these forms. A list of theorems is proved as one conjunction, and gives one [ProofObject]().
-- The prover proves that the two words of a theorem are equal. A theorem written as a rule `"l" -> "r"` is stated as a rule when each step of the proof's path from *l* to *r* is reached by the rule axioms applied from left to right; otherwise it is stated as an equation, and the message `TFindStringProof::equal` is issued.
+- A theorem written as a pair `{"l", "r"}`, as `"l" <-> "r"` or with [Equal]() holds when the two words are equal. A theorem written as a rule `"l" -> "r"` holds when the axioms rewrite *l* into *r*, rules from left to right and equations both ways; the prover shows that the words are equal, a breadth-first search over words finds the rewrite, and the theorem is stated as a rule. When the words are only equal, the result is a [Failure]() and the `"Status"` is `"Refuted"`.
 - The proof is a [ProofObject]() over the words as products of letters, with all the properties of an equational proof. [TStringPath]() gives the rewrite path as a list of words.
 - The values of *spec* are those of [TFindProof](), such as `"Status"`, `"Statistics"` and `"Path"`.
-- [TFindStringProof]() gives `$Failed` when no proof is found, and a [Failure]() for input that is not a pair of words.
+- [TFindStringProof]() gives a [Failure]() when no proof is found, and for input that is not a pair of words.
 - [TFindStringProof]() takes the options of [TFindProof]():
 
 | | | |
@@ -106,13 +106,13 @@ TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}, "Path"]
 
 ---
 
-The theorem of the proof is an equation between products of letters:
+The theorem of the proof is a rule between products of letters:
 
 ```wl
 TFindStringProof["BBAA" -> "AABB", {"BA" -> "AB"}]["Theorems"]
 ```
 
-<!-- => B · (B · (A · A)) == A · (A · (B · B)) -->
+<!-- => B · (B · (A · A)) -> A · (A · (B · B)) -->
 
 ## Options
 
@@ -176,13 +176,39 @@ TStringPath["BBAA" -> "AABB", {"BA" -> "AB"}]
 
 ## Possible Issues
 
-A theorem that does not follow from the axioms gives `$Failed`:
+The rule `"BA" -> "AB"` sorts but never unsorts, so a theorem written as a rule from a sorted word to an unsorted one does not hold, though the two words are equal:
+
+```wl
+TFindStringProof["AABB" -> "BBAA", {"BA" -> "AB"}]
+```
+
+<!-- => a Failure: "AABB and BBAA are equal when the rules are read as equations, but the rules do not rewrite AABB into BBAA." -->
+
+The `"Status"` says that the search saw every word the rules reach from `"AABB"`:
+
+```wl
+TFindStringProof["AABB" -> "BBAA", {"BA" -> "AB"}, "Status"]
+```
+
+<!-- => "Refuted" -->
+
+Written as a pair of words, the theorem is an equation, and it is proved:
+
+```wl
+TFindStringProof[{"AABB", "BBAA"}, {"BA" -> "AB"}, "Status"]
+```
+
+<!-- => "Proved" -->
+
+---
+
+A theorem that does not follow from the axioms gives a [Failure]():
 
 ```wl
 TFindStringProof["AB" -> "BA", {"AA" -> "A"}]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No proof was found: the completion saturated without joining the two sides of the conjecture." -->
 
 ---
 
