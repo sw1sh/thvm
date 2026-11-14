@@ -80,6 +80,21 @@ VerificationTest[
     TestID -> "AtpSystem/allocation-budget"
 ]
 
+(* Misuse reports TAtpComplete's own messages. *)
+VerificationTest[
+    Quiet[TAtpComplete["NoSuchTheory"], All, {TAtpComplete::theory}],
+    $Failed,
+    {TAtpComplete::theory},
+    TestID -> "AtpSystem/unknown-theory-message"
+]
+
+VerificationTest[
+    TAtpComplete[asAC, {{h, -1}}],
+    $Failed,
+    {TAtpComplete::badord},
+    TestID -> "AtpSystem/bad-order-message"
+]
+
 (* Dropping the last reference frees the engine state. *)
 VerificationTest[
     Module[{sys = TAtpComplete[asAC], id},

@@ -22,7 +22,9 @@ Begin["`Private`"]
 
 Options[TAtpComplete] = {MaxSteps -> 2000, "AllocationLimit" -> Automatic, TimeConstraint -> Infinity, Method -> "Waldmeister"};
 
+TAtpComplete::badord = "`1` is not an ordering: give a precedence {s1, s2, ...} or symbol weights {{s1, w1}, {s2, w2}, ...}.";
 TAtpComplete::fail = "The completion failed.";
+TAtpComplete::theory = "AxiomaticTheory[\"`1`\"] does not give a list of axioms.";
 TAtpNormalForm::nosys = "`1` is not a live TAtpSystem.";
 TAtpNormalForm::fail = "Normalizing under the system failed.";
 
@@ -45,7 +47,7 @@ $atpSystemAllocation = 2^24;
 TAtpComplete[theory_String, rest___] := Block[{ax = atpAxiomaticTheory[theory]},
     If[ ListQ[ax],
         TAtpComplete[ax, rest],
-        Message[TKnuthBendixCompletion::theory, theory]; $Failed]];
+        Message[TAtpComplete::theory, theory]; $Failed]];
 TAtpComplete[ax : (_Equal | _ForAll | _TwoWayRule | Inactive[Equal][_, _]), rest___] :=
     TAtpComplete[{ax}, rest];
 TAtpComplete[axioms_List, opts : OptionsPattern[]] := atpSystemComplete[axioms, Automatic, opts];
@@ -55,7 +57,7 @@ TAtpComplete[axioms_List, order : _List | Automatic, opts : OptionsPattern[]] :=
 atpSystemComplete[axiomsIn_List, order_, opts___] := Catch[
     Module[{method, maxSteps, wall, alloc, axioms, enc, st, handle, cRes, status},
         If[ order =!= Automatic && ! kbcOrderQ[order],
-            Message[TKnuthBendixCompletion::badord, order];
+            Message[TAtpComplete::badord, order];
             Throw[$Failed, "TATPError"]];
         {method, maxSteps, wall, alloc} = OptionValue[TAtpComplete, {opts},
             {Method, MaxSteps, TimeConstraint, "AllocationLimit"}];
