@@ -184,10 +184,10 @@ TVampireProof[file, TimeConstraint -> 5]["Status"]
 
 ---
 
-A file that does not exist issues a message and gives `$Failed`:
+A file that does not exist issues a message and gives a [Failure]():
 
 ```wl
 TVampireProof["/nonexistent/problem.p"]
 ```
 
-<!-- => the message TVampireProof::badfile is issued and the result is $Failed -->
+<!-- => the message TVampireProof::badfile is issued and the result is a Failure: "TPTP problem file not found: /nonexistent/problem.p" -->

@@ -179,10 +179,10 @@ TATP[Evaluate[File[file]]]
 
 ## Possible Issues
 
-A file that does not exist issues a message and gives `$Failed`:
+A file that does not exist issues a message and gives a [Failure]():
 
 ```wl
 TWaldmeisterProof["/nonexistent/problem.pr"]
 ```
 
-<!-- => the message TWaldmeisterProof::badfile is issued and the result is $Failed -->
+<!-- => the message TWaldmeisterProof::badfile is issued and the result is a Failure: "Waldmeister .pr file not found: /nonexistent/problem.pr" -->

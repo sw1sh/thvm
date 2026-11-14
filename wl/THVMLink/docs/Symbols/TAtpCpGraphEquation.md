@@ -18,7 +18,7 @@ RelatedTutorials: ["[Learned Guidance: a GNN for Critical-Pair Selection](GnnGui
 
 - [TAtpCpGraphEquation]() reads the term structure from the `"Edges"` of *graph* and the symbols from its `"Symbols"`, and gives <code>[Inactive]()[[Equal]()][*lhs*, *rhs*]</code>.
 - The equation is inactive, so an equation with two equal sides does not evaluate to [True]().
-- A graph without `"Symbols"` gives `$Failed`.
+- A graph without `"Symbols"` issues the message `TAtpCpGraphEquation::syms` and gives a [Failure]().
 
 ## Basic Examples
 
@@ -62,10 +62,10 @@ Activate[TAtpCpGraphEquation[TAtpCpGraph[f[a, b] == f[b, a]]]]
 
 ## Possible Issues
 
-A graph without its symbols gives `$Failed`:
+A graph without its symbols gives a [Failure]():
 
 ```wl
 TAtpCpGraphEquation[KeyDrop[TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident], "Symbols"]]
 ```
 
-<!-- => $Failed -->
+<!-- => the message TAtpCpGraphEquation::syms is issued and the result is a Failure: "The graph has no \"Symbols\" to name its nodes with." -->

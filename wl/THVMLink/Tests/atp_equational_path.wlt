@@ -103,13 +103,13 @@ VerificationTest[
     TestID -> "ATPEqPath/proofobject/path"
 ]
 
-(* === An unproved goal is $Failed ==================================== *)
+(* === An unproved goal is a Failure ================================== *)
 
 VerificationTest[
     TFindEquationalPath[
         ForAll[{a, b}, a \[CircleTimes] b == b \[CircleTimes] a],
         {ForAll[{x, y, z}, (x \[CircleTimes] y) \[CircleTimes] z -> x \[CircleTimes] (y \[CircleTimes] z)]},
-        TimeConstraint -> 5],
-    $Failed,
+        TimeConstraint -> 5] // Replace[f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindProof", "noproof"},
     TestID -> "ATPEqPath/unproved/failed"
 ]

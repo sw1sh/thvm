@@ -126,8 +126,8 @@ VerificationTest[
 (* === errors === *)
 
 VerificationTest[
-    TKnuthBendixCompletion[kbcGroup, {{OverBar, -1}}],
-    $Failed,
+    Replace[TKnuthBendixCompletion[kbcGroup, {{OverBar, -1}}], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TKnuthBendixCompletion", "badord"},
     {TKnuthBendixCompletion::badord},
     TestID -> "KBC/bad-order"
 ]

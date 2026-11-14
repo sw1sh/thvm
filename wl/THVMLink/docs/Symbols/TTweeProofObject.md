@@ -20,7 +20,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 - The result has the keys `"Backend"` (`"Twee-TSTP"`), `"Status"`, `"Goal"`, `"Axioms"` (the statement of every axiom the proof uses), `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`.
 - `"ProofDataset"` keys the steps `{"Axiom", n}` and `{"Lemma", n}`, with each statement as Twee writes it. Twee records no inference rules and does not repeat the goal, so the steps carry no derivations and `"Goal"` is [Missing]().
 - When Twee finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>, whose `"Status"` is `"Failed"`, or `"TimedOut"` when Twee was stopped at the time limit.
-- A theorem with no problem file issues the message `TTweeProof::badfile` and gives `$Failed`.
+- A theorem that the theory does not have issues the message `TFindProof::nothm` and gives a [Failure]().
 - <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "TweeProcess"]</code> gives the same result.
 - The following options can be given:
 
@@ -93,10 +93,10 @@ TVampireProofObject["GroupAxioms", "LeftIdentity", TimeConstraint -> 5, "LiftToP
 
 ## Possible Issues
 
-A theorem with no problem file issues a message and gives `$Failed`:
+A theorem that the theory does not have issues a message and gives a [Failure]():
 
 ```wl
 TTweeProofObject["GroupAxioms", "NoSuchTheorem", TimeConstraint -> 5]
 ```
 
-<!-- => the message TTweeProof::badfile is issued and the result is $Failed -->
+<!-- => the message TFindProof::nothm is issued and the result is a Failure: "\"NoSuchTheorem\" is not a notable theorem of AxiomaticTheory[\"GroupAxioms\"]." -->

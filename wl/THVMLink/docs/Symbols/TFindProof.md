@@ -39,7 +39,7 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets
 - Every lemma of a proof that [TFindProof]() gives derives from the axioms alone: no lemma rests on a conjecture, so no conjecture of a conjunction is proved from itself or from another.
 - Predicate-logic input, with predicates, the connectives [And](), [Or](), [Not](), [Implies]() and [Equivalent](), and the quantifiers [ForAll]() and [Exists](), is converted to an equational problem and gives a `"Predicate/EquationalLogic"` proof. A pattern variable such as `x_` in a predicate axiom is universally quantified, as in an equation.
 - A problem in the TPTP (Thousands of Problems for Theorem Provers) format, given as text, as <code>[File]()["*file*"]</code> or as the Association that `TPTPImport` gives, is proved from its own axioms and negated conjecture.
-- [TFindProof]() gives `$Failed` when it finds no proof: when the axioms complete without joining the two sides of the conjecture, or when the step or time budget runs out. A conjecture that is not an equation gives a <code>[Failure]()["TATPParseError", …]</code>.
+- [TFindProof]() gives a [Failure]() when it finds no proof, and its message says why: the axioms complete without joining the two sides of the conjecture, or the step or time budget runs out. A conjecture that is not an equation gives a <code>[Failure]()["TATPParseError", …]</code>.
 - The possible values of *spec* are:
 
 | | |
@@ -49,7 +49,7 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets
 | `"Statistics"` | the status, the number of rewrite steps in the chain that closes the goal (0 for a completion without a goal), and the numbers of rules, trace entries and queued critical pairs |
 | `"Lemmas"` | the rewrite rules derived by the completion |
 | `"Path"` | the rewrite path from the left side of the conjecture to its right side |
-| `"Counterexample"` | a [CounterexampleObject]() refuting the conjecture, or `$Failed` |
+| `"Counterexample"` | a [CounterexampleObject]() refuting the conjecture, or a [Failure]() |
 | `"AppliedMethod"` | the method that found the proof |
 | `"PortfolioTrace"` | the method, time and outcome of each scheduled attempt |
 | `"WallTime"` | the time in seconds of the attempt that found the proof |
@@ -518,13 +518,13 @@ TFindEquationalPath[((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == 
 
 ## Possible Issues
 
-A conjecture that does not follow from the axioms gives `$Failed`:
+A conjecture that does not follow from the axioms gives a [Failure]():
 
 ```wl
 TFindProof[g[a] == a, {ForAll[x, g[g[x]] == x]}]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No proof was found: the completion saturated without joining the two sides of the conjecture." -->
 
 ---
 
@@ -584,7 +584,7 @@ A single configuration can fail where the [Automatic]() schedule succeeds, since
 TFindProof[x \[CircleTimes] y == y \[CircleTimes] x, "AbelianGroupAxioms", Method -> {"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO", "AutoPrecedence" -> True}, TimeConstraint -> 5]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No proof was found: the time limit was reached." -->
 
 ## Neat Examples
 

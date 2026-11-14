@@ -74,12 +74,10 @@ TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
     Block[{bin, tc, cmd, run, out, secs, status, derivation, foldedDerivation},
         bin = eproverBinary[OptionValue["Binary"]];
         If[ MissingQ[bin],
-            Message[TEproverProof::noeprover];
-            Return[$Failed]
+            Return[atpFailure[TEproverProof::noeprover]]
         ];
         If[ ! FileExistsQ[problemFile],
-            Message[TEproverProof::badfile, problemFile];
-            Return[$Failed]
+            Return[atpFailure[TEproverProof::badfile, problemFile]]
         ];
         tc = OptionValue[TimeConstraint];
         cmd = StringJoin[bin, " --auto-schedule --proof-object --tstp-format", " --cpu-limit=", ToString[Ceiling[tc]], " ", problemFile, " 2>&1"];

@@ -132,7 +132,7 @@ The possible specs are:
 | `"Statistics"` | the status, the rewrite steps that close the goal, and the numbers of rules, trace entries and queued critical pairs |
 | `"Lemmas"` | the rewrite rules derived by the completion |
 | `"Path"` | the rewrite path between the two sides of the conjecture |
-| `"Counterexample"` | a [CounterexampleObject]() refuting the conjecture, or `$Failed` |
+| `"Counterexample"` | a [CounterexampleObject]() refuting the conjecture, or a [Failure]() |
 | `"AppliedMethod"` | the configuration that found the proof |
 | `"PortfolioTrace"` | the outcome of each scheduled configuration |
 | `"WallTime"` | the time of the configuration that found the proof |

@@ -1,17 +1,17 @@
 (* atp_inputs.wlt -- the theorem-proving functions refuse bad input with their own message and
-   $Failed (or False), report what they did, and keep public names public. *)
+   a Failure (or False), report what they did, and keep public names public. *)
 
 VerificationTest[
     (* TATP holds its arguments, so the path goes in evaluated. *)
-    With[{p = FileNameJoin[{$TemporaryDirectory, "thvm_no_such_problem.pr"}]}, TATP[File[p]]],
-    $Failed,
+    With[{p = FileNameJoin[{$TemporaryDirectory, "thvm_no_such_problem.pr"}]}, TATP[File[p]]] // Replace[f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TATP", "nofile"},
     {TATP::nofile},
     TestID -> "ATP/inputs/tatp-missing-file"
 ]
 
 VerificationTest[
-    TFindFiniteModels[f[a, b] == a, 2, Method -> "Foo"],
-    $Failed,
+    Replace[TFindFiniteModels[f[a, b] == a, 2, Method -> "Foo"], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindFiniteModels", "method"},
     {TFindFiniteModels::method},
     TestID -> "ATP/inputs/finite-models-unknown-method"
 ]
@@ -45,8 +45,8 @@ VerificationTest[
 ]
 
 VerificationTest[
-    TStringPath["A1" -> "AB", {"A" -> "B"}, TimeConstraint -> 5],
-    $Failed,
+    FailureQ @ TStringPath["A1" -> "AB", {"A" -> "B"}, TimeConstraint -> 5],
+    True,
     TestID -> "ATP/inputs/string-path-unreachable"
 ]
 
@@ -110,15 +110,15 @@ VerificationTest[
 (* TAtpTrainScorer refuses a dataset that is not 14-feature rows with 0/1 labels, and a hidden width
    outside 0 to 64, with its own message instead of training on garbage. *)
 VerificationTest[
-    TAtpTrainScorer[<|"Features" -> {{1., 2.}}, "Labels" -> {1}|>],
-    $Failed,
+    Replace[TAtpTrainScorer[<|"Features" -> {{1., 2.}}, "Labels" -> {1}|>], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TAtpTrainScorer", "data"},
     {TAtpTrainScorer::data},
     TestID -> "ATP/inputs/train-scorer-bad-data"
 ]
 
 VerificationTest[
-    TAtpTrainScorer[<|"Features" -> Table[N[Mod[i + j, 4]], {i, 6}, {j, 14}], "Labels" -> {1, 0, 0, 0, 1, 0}|>, "Hidden" -> 100],
-    $Failed,
+    Replace[TAtpTrainScorer[<|"Features" -> Table[N[Mod[i + j, 4]], {i, 6}, {j, 14}], "Labels" -> {1, 0, 0, 0, 1, 0}|>, "Hidden" -> 100], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TAtpTrainScorer", "hidden"},
     {TAtpTrainScorer::hidden},
     TestID -> "ATP/inputs/train-scorer-bad-hidden"
 ]

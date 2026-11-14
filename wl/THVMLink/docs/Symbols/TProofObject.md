@@ -213,10 +213,10 @@ TFindProof[((a \[CircleTimes] b) \[CircleTimes] c) \[CircleTimes] d == a \[Circl
 
 ---
 
-When no proof is found, [TFindProof]() gives `$Failed` rather than a [TProofObject]():
+When no proof is found, [TFindProof]() gives a [Failure]() rather than a [TProofObject]():
 
 ```wl
 TFindProof[a == c, {a == b}, "ProofForm" -> "TProofObject"]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No proof was found: the completion saturated without joining the two sides of the conjecture." -->

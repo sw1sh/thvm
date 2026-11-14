@@ -125,10 +125,10 @@ TAtpDescribeMethod["VampirePortfolioCompact"]["Schedule"] === TAtpSchedule["Vamp
 
 ## Possible Issues
 
-An unknown method issues a message and gives `$Failed`:
+An unknown method issues a message and gives a [Failure]():
 
 ```wl
 TAtpDescribeMethod["Foo"]
 ```
 
-<!-- => the message TFindProof::badmethod is issued and the result is $Failed -->
+<!-- => the message TAtpDescribeMethod::badmethod is issued and the result is a Failure: "Foo is not a method: give Automatic, \"Completion\", \"GoalDirected\", \"MNF\" or one of $AtpMethodPresets." -->

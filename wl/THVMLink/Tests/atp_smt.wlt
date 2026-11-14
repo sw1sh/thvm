@@ -122,7 +122,7 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* SAT TPTP input returns a refuting CounterexampleObject, not $Failed. *)
+    (* SAT TPTP input returns a refuting CounterexampleObject, not a Failure. *)
     Head @ TFindProof[
         "cnf(a1, axiom, a = b).
          cnf(g, negated_conjecture, a != c).", Method -> "SMT"],
@@ -134,8 +134,8 @@ VerificationTest[
     (* Non-ground TPTP input under Method -> "SMT" is rejected with a message. *)
     TFindProof[
         "cnf(a1, axiom, and(X, Y) = and(Y, X)).
-         cnf(g, negated_conjecture, and(a, b) != and(b, a)).", Method -> "SMT"],
-    $Failed,
+         cnf(g, negated_conjecture, and(a, b) != and(b, a)).", Method -> "SMT"] // Replace[f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindProof", "nonground"},
     {TFindProof::nonground},
     TestID -> "ATP/smt/tptp-nonground-rejected"
 ]
@@ -323,8 +323,8 @@ VerificationTest[
 ]
 
 VerificationTest[
-    TSmtDecide[x > 1],
-    $Failed,
+    Replace[TSmtDecide[x > 1], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TSmtDecide", "theory"},
     {TSmtDecide::theory},
     TestID -> "SMT/arithmetic-refused"
 ]
@@ -339,8 +339,8 @@ VerificationTest[
 
 (* TSmtDecide is quantifier-free: a quantifier is refused, not read as an atom. *)
 VerificationTest[
-    TSmtDecide[ForAll[x, f[x] == x]],
-    $Failed,
+    Replace[TSmtDecide[ForAll[x, f[x] == x]], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TSmtDecide", "quant"},
     {TSmtDecide::quant},
     TestID -> "SMT/quantifier-refused"
 ]

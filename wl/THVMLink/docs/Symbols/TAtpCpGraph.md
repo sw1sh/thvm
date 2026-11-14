@@ -110,10 +110,10 @@ TAtpCpGraphEquation[TAtpCpGraph[CircleTimes[a, OverBar[a]] == ident]]
 
 ## Possible Issues
 
-An expression that is not an equation gives `$Failed`:
+An expression that is not an equation gives a [Failure]():
 
 ```wl
 TAtpCpGraph[a]
 ```
 
-<!-- => $Failed -->
+<!-- => the message TAtpCpGraph::eq is issued and the result is a Failure: "a is not an equation lhs == rhs." -->

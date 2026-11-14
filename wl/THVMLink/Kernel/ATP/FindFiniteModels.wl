@@ -55,7 +55,7 @@ TFindFiniteModels::method = "Method `1` is not one of Automatic, `2`.";
 $ffmMethods = {"ExpressionPrune", "BruteForce", "SAT", "CongruenceClosure", "CongruenceClosureC", "ExpressionPruneC", "Z3"};
 TFindFiniteModels[relations_, k_Integer : 2, prop_String : "Association", opts : OptionsPattern[]] /;
         ! MemberQ[Append[$ffmMethods, Automatic], OptionValue[TFindFiniteModels, {opts}, Method]] :=
-    (Message[TFindFiniteModels::method, OptionValue[TFindFiniteModels, {opts}, Method], $ffmMethods]; $Failed)
+    atpFailure[TFindFiniteModels::method, OptionValue[TFindFiniteModels, {opts}, Method], $ffmMethods]
 TFindFiniteModels[relations_, k_Integer : 2, prop_String : "Association", opts : OptionsPattern[]] := Catch[
     Module[{arities, atoms, atomSymbols, strippedRelations, activeRelations},
         (* strip quantifiers *)

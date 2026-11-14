@@ -21,7 +21,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 - With `"LiftToProofObject" -> False`, the result is an Association with the keys `"Backend"`, `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`, with the formulas in the symbols of the TPTP problem, such as `"and"[X1_, X2_]`.
 - With the default `"LiftToProofObject" -> True`, the formulas are parsed into expressions and the result is a [ProofObject]().
 - When E finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>.
-- A theorem with no problem file issues the message `TEproverProof::badfile` and gives `$Failed`.
+- A theorem that the theory does not have issues the message `TFindProof::nothm` and gives a [Failure]().
 - <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "EproverProcess"]</code> gives the Association of `"LiftToProofObject" -> False`, and the [ProofObject]() when it is given `"LiftToProofObject" -> True`.
 - The following options can be given:
 
@@ -126,10 +126,10 @@ TVampireProofObject["BooleanAxioms", "DroppingAlwaysTrue", TimeConstraint -> 5, 
 
 ## Possible Issues
 
-A theorem with no problem file issues a message and gives `$Failed`:
+A theorem that the theory does not have issues a message and gives a [Failure]():
 
 ```wl
 TEproverProofObject["GroupAxioms", "NoSuchTheorem", TimeConstraint -> 5]
 ```
 
-<!-- => the message TEproverProof::badfile is issued and the result is $Failed -->
+<!-- => the message TFindProof::nothm is issued and the result is a Failure: "\"NoSuchTheorem\" is not a notable theorem of AxiomaticTheory[\"GroupAxioms\"]." -->

@@ -147,7 +147,7 @@ congruentQ[u_, v_] := u =!= v && Head[u] === Head[v] && Length[u] === Length[v] 
    what gets in) are immediate UNSAT contradictions.  Without this
    preprocessing, a user passing a reflexive `a == a` (which WL
    evaluates to True before TSatEUF sees it) hits the badin guard and
-   gets $Failed instead of the obvious SAT verdict. *)
+   gets a Failure instead of the obvious SAT verdict. *)
 atpSmtPreprocess[eqs_List, diseqs_List] := Module[{eqsFalse, diseqsTrue, eqsClean, diseqsClean},
     eqsFalse = MemberQ[eqs, False];
     diseqsTrue = MemberQ[diseqs, False];
@@ -168,7 +168,7 @@ TSatEUF[eqs_List, diseqs_List] := Module[{pre = atpSmtPreprocess[eqs, diseqs], e
     eqsC = Replace[eqsC, Inactive[Equal][a_, b_] :> Equal[a, b], {1}];
     diseqsC = Replace[diseqsC, Inactive[Unequal][a_, b_] :> Unequal[a, b], {1}];
     If[ ! (AllTrue[eqsC, MatchQ[#, _Equal] &] && AllTrue[diseqsC, MatchQ[#, _Unequal] &]),
-        Message[TSatEUF::badin, eqs, diseqs]; $Failed,
+        atpFailure[TSatEUF::badin, eqs, diseqs],
         Block[{$parent, $rank, $use, $subterms, witness, classes},
             ccInit[];
             Scan[(ccAddTerm[#[[1]]]; ccAddTerm[#[[2]]]) &, eqsC];
@@ -192,7 +192,7 @@ TSatEUF[eqs_List, diseqs_List] := Module[{pre = atpSmtPreprocess[eqs, diseqs], e
      - entailment holds  -> a small "Proved" decision Association;
      - entailment fails   -> a CounterexampleObject built from the refuting
                              model (the equational dual of the ProofObject);
-     - malformed input    -> $Failed. *)
+     - malformed input    -> a Failure. *)
 
 (* Single non-list hypothesis: auto-wrap. *)
 atpSmtEntail[goal_, hyp : (_Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] := atpSmtEntail[goal, {hyp}]
@@ -200,9 +200,10 @@ atpSmtEntail[goal_, hyp : (_Equal | _Unequal | Inactive[Equal][_, _] | Inactive[
 atpSmtEntail[goal_, hypotheses_List : {}] := Block[{eqs, diseqs, res},
     {eqs, diseqs} = collectLiterals[Append[hypotheses, negate[goal]]];
     If[ eqs === $Failed,
-        $Failed,
+        atpFailure[TSatEUF::badin, Append[hypotheses, goal], {}],
         res = TSatEUF[eqs, diseqs];
         Which[
+            FailureQ[res], res,
             res["Status"] === "UNSAT",
             <|
                 "Status" -> "Proved",
@@ -218,14 +219,14 @@ atpSmtEntail[goal_, hypotheses_List : {}] := Block[{eqs, diseqs, res},
                FindEquationalCounterexample returns). *)
             res["Status"] === "SAT",
             atpGroundCounterexample[goal, hypotheses],
-            True, $Failed
+            True, res
         ]
     ]
 ]
 
 negate[Equal[a_, b_]] := Unequal[a, b]
 negate[Unequal[a_, b_]] := Equal[a, b]
-negate[other_] := (Message[TSatEUF::badin, other, {}]; $Failed)
+negate[other_] := $Failed
 
 collectLiterals[lits_List] := Module[{eqAcc = {}, diseqAcc = {}, l},
     Do[ l = lits[[i]];
@@ -255,9 +256,9 @@ collectLiterals[lits_List] := Module[{eqAcc = {}, diseqAcc = {}, l},
 tptpDispatchSMT[imported_Association] := Block[{axioms = imported["Axioms"], conj = imported["Conjecture"], nonGround},
     Which[
         conj === None,
-            Message[TFindProof::noconjecture]; $Failed,
+            atpFailure[TFindProof::noconjecture],
         (nonGround = SelectFirst[Append[axioms, conj], ! groundQ[#] &, None]) =!= None,
-            Message[TFindProof::nonground, nonGround]; $Failed,
+            atpFailure[TFindProof::nonground, nonGround],
         True,
             (* the same WL symbols the other TPTP paths decide over, so the result reads as WL *)
             atpSmtEntail[tptpInternalize[conj], tptpInternalize /@ axioms]
@@ -287,12 +288,10 @@ TSmtDecide[formula_] := Block[{atoms, propVars, abstraction, blocking = True, in
        atoms TrueQ branch (UNSAT for every non-literally-True input). *)
     normFormula = formula /. {Inactive[Equal][a_, b_] :> a == b, Inactive[Unequal][a_, b_] :> Unequal[a, b]};
     If[ ! FreeQ[normFormula, _ForAll | _Exists],
-        Message[TSmtDecide::quant, FirstCase[normFormula, _ForAll | _Exists, None, {0, Infinity}]];
-        Return[$Failed]
+        Return[atpFailure[TSmtDecide::quant, FirstCase[normFormula, _ForAll | _Exists, None, {0, Infinity}]]]
     ];
     If[ (arith = SelectFirst[smtAtoms[normFormula], ! FreeQ[#, $smtArithmetic] &, None]) =!= None,
-        Message[TSmtDecide::theory, arith];
-        Return[$Failed]
+        Return[atpFailure[TSmtDecide::theory, arith]]
     ];
     normFormula = smtEncodePredicates[normFormula];
     atoms = collectAtoms[normFormula];
@@ -343,6 +342,7 @@ modelToLiterals[model_Association] := Module[{eqAcc = {}, diseqAcc = {}},
 
 atpSmtEntail[goal_ /; ! MatchQ[goal, _Equal | _Unequal | _String | _File], hypotheses_List : {}] := Block[{res = TSmtDecide[And @@ Append[hypotheses, Not[goal]]]},
     Which[
+        FailureQ[res], res,
         res["Status"] === "UNSAT",
         <|
             "Status" -> "Proved",
@@ -356,7 +356,7 @@ atpSmtEntail[goal_ /; ! MatchQ[goal, _Equal | _Unequal | _String | _File], hypot
            No finite algebra here, so "Setup" carries the assignment. *)
         res["Status"] === "SAT",
         CounterexampleObject["DPLL(T)+CongruenceClosure", goal, hypotheses, <|"Setup" -> res["Model"], "Counterexample" -> res["Model"]|>],
-        True, $Failed
+        True, res
     ]
 ]
 

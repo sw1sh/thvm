@@ -124,10 +124,10 @@ TVampireProof["AbelianGroupAxioms", "InverseOfInverse", TimeConstraint -> 5]["St
 
 ## Possible Issues
 
-A file that does not exist issues a message and gives `$Failed`:
+A file that does not exist issues a message and gives a [Failure]():
 
 ```wl
 TEproverProof["/nonexistent/problem.p"]
 ```
 
-<!-- => the message TEproverProof::badfile is issued and the result is $Failed -->
+<!-- => the message TEproverProof::badfile is issued and the result is a Failure: "TPTP problem file not found: /nonexistent/problem.p" -->

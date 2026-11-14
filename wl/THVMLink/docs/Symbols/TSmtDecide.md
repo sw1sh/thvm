@@ -22,7 +22,7 @@ RelatedTutorials: ["[Congruence Closure and Lazy DPLL(T)](SMT)"]
 - [TSmtDecide]() replaces each equation by a Boolean variable, finds a truth assignment with [SatisfiabilityInstances](), and checks it against the theory of equality with [TSatEUF](). An assignment that contradicts the theory is excluded, and the search continues.
 - [TSmtDecide]() always terminates and is correct for both answers. A formula with *n* equations can need up to $2^n$ truth assignments.
 - A formula is valid when its negation is unsatisfiable.
-- [TSmtDecide]() decides formulas without quantifiers and without arithmetic. A formula with [ForAll]() or [Exists]() issues the message `TSmtDecide::quant`, and one with an inequality, an approximate number, [Plus](), [Times]() or [Power]() issues `TSmtDecide::theory`; both give `$Failed`.
+- [TSmtDecide]() decides formulas without quantifiers and without arithmetic. A formula with [ForAll]() or [Exists]() issues the message `TSmtDecide::quant`, and one with an inequality, an approximate number, [Plus](), [Times]() or [Power]() issues `TSmtDecide::theory`; both give a [Failure]().
 
 ## Basic Examples
 
@@ -142,7 +142,7 @@ A quantified formula is refused:
 TSmtDecide[ForAll[x, f[x] == x]]
 ```
 
-<!-- => the message TSmtDecide::quant is issued and the result is $Failed -->
+<!-- => the message TSmtDecide::quant is issued and the result is a Failure: "TSmtDecide decides quantifier-free formulas; ForAll[x, f[x] == x] has a quantifier." -->
 
 ---
 
@@ -152,7 +152,7 @@ Arithmetic is refused:
 TSmtDecide[x > 1]
 ```
 
-<!-- => the message TSmtDecide::theory is issued and the result is $Failed -->
+<!-- => the message TSmtDecide::theory is issued and the result is a Failure: "TSmtDecide decides Boolean combinations of equalities over uninterpreted functions and predicates; x > 1 is arithmetic." -->
 
 ---
 

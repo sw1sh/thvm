@@ -106,12 +106,10 @@ TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
     Block[{bin, tc, mode, cmd, run, out, secs, status, proofText, solutionFile, derivation, foldedDerivation},
         bin = vampireBinary[OptionValue["Binary"]];
         If[ MissingQ[bin],
-            Message[TVampireProof::novamp];
-            Return[$Failed]
+            Return[atpFailure[TVampireProof::novamp]]
         ];
         If[ ! FileExistsQ[problemFile],
-            Message[TVampireProof::badfile, problemFile];
-            Return[$Failed]
+            Return[atpFailure[TVampireProof::badfile, problemFile]]
         ];
         tc = OptionValue[TimeConstraint];
         mode = OptionValue["Mode"];

@@ -39,7 +39,7 @@ RelatedTutorials: ["[Finding Replacement Paths with Directed Rules](FindReplaceP
 | `"ProofObject"` | the [ProofObject]() the path is read from |
 
 - A list of properties gives an Association, and [All]() gives every property.
-- [TFindEquationalPath]() gives `$Failed` when *thm* is not proved.
+- [TFindEquationalPath]() gives a [Failure]() when *thm* is not proved.
 - The following options can be given:
 
 | | | |
@@ -291,7 +291,7 @@ A small step budget leaves the theorem unproved:
 TFindEquationalPath[OverBar[OverBar[x]] == x, "AbelianGroupAxioms", MaxSteps -> 2]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No proof was found: the time limit was reached." -->
 
 ### Method
 
@@ -311,7 +311,7 @@ A time limit bounds the proof search:
 TFindEquationalPath[x ** y == y ** x, "AbelianGroupAxioms", TimeConstraint -> 2]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No proof was found: the time limit was reached." -->
 
 ## Properties and Relations
 
@@ -363,10 +363,10 @@ TFindEquationalPath[a \[CircleTimes] (b \[CircleTimes] (c \[CircleTimes] d)) == 
 
 ---
 
-A theorem that does not follow from the axioms gives `$Failed`:
+A theorem that does not follow from the axioms gives a [Failure]():
 
 ```wl
 TFindEquationalPath[x \[CircleTimes] y == y \[CircleTimes] x, {(x_ \[CircleTimes] y_) \[CircleTimes] z_ -> x_ \[CircleTimes] (y_ \[CircleTimes] z_)}]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No proof was found: the completion saturated without joining the two sides of the conjecture." -->

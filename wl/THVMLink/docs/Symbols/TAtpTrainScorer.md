@@ -26,7 +26,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 - With `"Hidden" -> 0` the model is linear, with the kind `"Linear"` and the weights `"W"` and `"B"`. With `"Hidden" -> n`, it has one hidden layer of *n* rectified linear units, at most 64, with the kind `"MLP"` and the weights `"W1"`, `"B1"`, `"W2"` and `"B2"`.
 - `"TrainAUC"` is the area under the receiver operating characteristic (ROC) curve of the model on the training rows: `1` when the model ranks every label-1 row above every label-0 row, and about `0.5` for a random ranking.
 - With the forms that build the dataset, the options of [TAtpCpDataset]() are used for the proofs.
-- A *dataset* whose rows are not 14 numbers each, or whose labels are not one `0` or `1` for each row, issues `TAtpTrainScorer::data` and gives `$Failed`; a `"Hidden"` value outside `0` to `64` issues `TAtpTrainScorer::hidden`.
+- A *dataset* whose rows are not 14 numbers each, or whose labels are not one `0` or `1` for each row, issues `TAtpTrainScorer::data` and gives a [Failure](); a `"Hidden"` value outside `0` to `64` issues `TAtpTrainScorer::hidden` and gives a [Failure]().
 - The model is used by <code>[TFindProof]()[…, [Method]() -> "ENIGMA"]</code> after <code>[TAtpSetLearnedScorer]()[*model*]</code>, in the style of ENIGMA (Efficient Learning-Based Inference Guiding Machine).
 - [TAtpTrainGnn]() trains a graph neural network on equation graphs instead of feature rows.
 - The following options can be given:
@@ -172,10 +172,10 @@ Length[TAtpCpDataset[{OverBar[OverBar[x]] == x}, AxiomaticTheory["AbelianGroupAx
 
 ## Possible Issues
 
-A dataset whose rows do not have 14 features issues a message and gives `$Failed`:
+A dataset whose rows do not have 14 features issues a message and gives a [Failure]():
 
 ```wl
 TAtpTrainScorer[<|"Features" -> {{1., 2.}}, "Labels" -> {1}|>]
 ```
 
-<!-- => TAtpTrainScorer::data is issued; $Failed -->
+<!-- => the message TAtpTrainScorer::data is issued and the result is a Failure: "A dataset has a \"Features\" matrix of rows of 14 numbers and as many \"Labels\", each 0 or 1, as TAtpCpDataset gives." -->

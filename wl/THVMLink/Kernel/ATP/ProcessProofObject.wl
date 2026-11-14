@@ -1052,7 +1052,7 @@ wmGenerateProblem[nameRaw_String, axioms_List, conjecture_] := Block[{axBodies, 
     conjuncts = Replace[conjecture, {l_List :> l, a_And :> List @@ a, c_ :> {c}}];
     goalBodies = wmGoalBody /@ conjuncts;
     If[ axBodies === {} || conjuncts === {} || MemberQ[goalBodies, $Failed],
-        Return[Failure["WmGenerate", <|"Reason" -> "no equational axioms or non-equational goal", "Name" -> nameRaw|>]]];
+        Return[atpFailure[TFindProof::eqonly, nameRaw]]];
     wmBuildPr[nameRaw, axBodies, goalBodies]];
 
 (* (theory, thm) -> .pr string, resolving axioms + the NotableTheorem
@@ -1070,11 +1070,11 @@ wmGenerateProblem[nameRaw_String, axioms_List, conjecture_] := Block[{axBodies, 
 wmGenerateProblemFor[theory_String, thm_String, takeConjunct : (_Integer | All) : All] := Block[{axioms, nt, cjRaw, conjuncts, idx, nm},
     axioms = AxiomaticTheory[theory];
     If[ ! ListQ[axioms],
-        Return[Failure["WmGenerate", <|"Reason" -> "AxiomaticTheory[\"" <> theory <> "\"] did not resolve to an axiom list"|>]]];
+        Return[atpTheoryFailure[theory]]];
     nt = AxiomaticTheory[theory, "NotableTheorems"];
     cjRaw = If[ AssociationQ[nt], Lookup[nt, thm, Missing[]], Missing[]];
     If[ MissingQ[cjRaw],
-        Return[Failure["WmGenerate", <|"Reason" -> "theorem \"" <> thm <> "\" not in AxiomaticTheory[\"" <> theory <> "\", \"NotableTheorems\"]"|>]]];
+        Return[atpTheoryFailure[theory, thm]]];
     conjuncts = If[ MatchQ[cjRaw, _List], cjRaw, {cjRaw}];
     If[ takeConjunct === All,
         nm = theory <> "__" <> thm;
@@ -1098,16 +1098,16 @@ wmGoalSides[expr_] := Block[{body = wmStripForAll[expr], vmap = wmSkolemMap[wmEx
 tptpGenerateProblemFor[theory_String, thm_String] := Block[{axioms, nt, cjRaw, conjuncts, axBodies, goals},
     axioms = AxiomaticTheory[theory];
     If[ ! ListQ[axioms],
-        Return[Failure["TptpGenerate", <|"Reason" -> "AxiomaticTheory[\"" <> theory <> "\"] did not resolve to an axiom list"|>]]];
+        Return[atpTheoryFailure[theory]]];
     nt = AxiomaticTheory[theory, "NotableTheorems"];
     cjRaw = If[ AssociationQ[nt], Lookup[nt, thm, Missing[]], Missing[]];
     If[ MissingQ[cjRaw],
-        Return[Failure["TptpGenerate", <|"Reason" -> "theorem \"" <> thm <> "\" not in AxiomaticTheory[\"" <> theory <> "\", \"NotableTheorems\"]"|>]]];
+        Return[atpTheoryFailure[theory, thm]]];
     conjuncts = Replace[cjRaw, {l_List :> l, a_And :> List @@ a, c_ :> {c}}];
     axBodies = wmAxBody /@ axioms;
     goals = wmGoalSides /@ conjuncts;
     If[ MemberQ[axBodies, $Failed] || MemberQ[goals, $Failed],
-        Return[Failure["TptpGenerate", <|"Reason" -> "an axiom or a conjunct of \"" <> thm <> "\" is not an equation"|>]]];
+        Return[atpFailure[TFindProof::eqonly, theory <> "::" <> thm]]];
     StringRiffle[
         Join[
             {"% TPTP problem: " <> theory <> "::" <> thm,
@@ -1220,7 +1220,7 @@ Options[TEproverProofObject] = {
 
 TEproverProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{epR = TEproverProof[theory, thm, FilterRules[{opts}, Options[TEproverProof]]], liftQ = TrueQ @ OptionValue["LiftToProofObject"], parseOpt, assoc},
     parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
-    If[ ! AssociationQ[epR], Return[$Failed]];
+    If[ ! AssociationQ[epR], Return[epR]];
     If[ epR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Eprover",
@@ -1240,7 +1240,7 @@ TEproverProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
    SZS-to-ProofObject builder. *)
 TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{vampR = TVampireProof[theory, thm, FilterRules[{opts}, Options[TVampireProof]]], liftQ = TrueQ @ OptionValue["LiftToProofObject"], parseOpt, assoc},
     parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
-    If[ ! AssociationQ[vampR], Return[$Failed]];
+    If[ ! AssociationQ[vampR], Return[vampR]];
     If[ vampR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Vampire",
@@ -1286,7 +1286,7 @@ TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /; FileExte
     (* LiftToProofObject implies ParseFormulas: the lift needs
        WL-parsed formula bodies to walk. *)
     parseOpt = "ParseFormulas" -> (liftQ || TrueQ @ OptionValue["ParseFormulas"]);
-    If[ ! AssociationQ[wmR], Return[$Failed]];
+    If[ ! AssociationQ[wmR], Return[wmR]];
     If[ wmR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Waldmeister",
@@ -1310,7 +1310,7 @@ Options[TTweeProofObject] = {
 }
 
 TTweeProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block[{tR = TTweeProof[theory, thm, FilterRules[{opts}, {TimeConstraint, "Binary"}]], ds, axs, lems},
-    If[ ! AssociationQ[tR], Return[$Failed]];
+    If[ ! AssociationQ[tR], Return[tR]];
     If[ tR["Status"] =!= "Proved",
         Failure["ExternalNoProof", <|
             "Tool" -> "Twee",

@@ -24,6 +24,8 @@ Options[TKnuthBendixCompletion] = {MaxSteps -> Automatic, Method -> "Waldmeister
 TKnuthBendixCompletion::badord = "`1` is not an ordering: give a precedence {s1, s2, ...} or symbol weights {{s1, w1}, {s2, w2}, ...}.";
 TKnuthBendixCompletion::theory = "AxiomaticTheory[\"`1`\"] does not give a list of axioms.";
 TKnuthBendixCompletion::heap = "Completion ran out of memory; the normal form comes from a completion of at most `1` steps.";
+TKnuthBendixCompletion::fail = "The completion did not finish: its memory filled up or the evaluation was aborted.";
+TKnuthBendixCompletion::nonf = "The completion gave no normal form of `1`.";
 TKnuthBendixCompletion::nodata = "Deriving the `1` completed rules takes longer than the TimeConstraint, so the ProofObject's proof lists only the axioms.";
 
 (* The fresh constant c of the goal t == c.  It ranks highest in the
@@ -33,7 +35,7 @@ $kbcGoalConstant = "KnuthBendixCompletionGoal";
 TKnuthBendixCompletion[theory_String, rest___] := Block[{ax = atpAxiomaticTheory[theory]},
     If[ ListQ[ax],
         TKnuthBendixCompletion[ax, rest],
-        Message[TKnuthBendixCompletion::theory, theory]; $Failed]];
+        atpFailure[TKnuthBendixCompletion::theory, theory]]];
 
 TKnuthBendixCompletion[ax : (_Equal | _ForAll | _TwoWayRule | Inactive[Equal][_, _]), rest___] :=
     TKnuthBendixCompletion[{ax}, rest];
@@ -50,8 +52,7 @@ TKnuthBendixCompletion[axioms_List, term : Except[_List | Automatic | _Rule | _R
 kbcComplete[axiomsIn_List, term_, order_, opts___] := Catch[
     Module[{method, maxSteps, wall, axioms, goal, cRes, steps, nf},
         If[ order =!= Automatic && ! kbcOrderQ[order],
-            Message[TKnuthBendixCompletion::badord, order];
-            Throw[$Failed, "TATPError"]];
+            Throw[atpFailure[TKnuthBendixCompletion::badord, order], "TATPError"]];
         {method, maxSteps, wall} = OptionValue[TKnuthBendixCompletion, {opts}, {Method, MaxSteps, TimeConstraint}];
         wall = Replace[kbcSeconds[wall], Infinity -> 0.];
         axioms = atpNormalizeAxioms[axiomsIn];
@@ -68,10 +69,10 @@ kbcComplete[axiomsIn_List, term_, order_, opts___] := Catch[
                 steps = Max[1, Quotient[steps, 4]];
                 cRes = kbcRun[axioms, goal, method, steps, wall]];
             If[ IntegerQ[cRes["Status"]], Message[TKnuthBendixCompletion::heap, steps]]];
-        If[ ! IntegerQ[cRes["Status"]], Throw[$Failed, "TATPError"]];
+        If[ ! IntegerQ[cRes["Status"]], Throw[atpFailure[TKnuthBendixCompletion::fail], "TATPError"]];
         If[ goal === None,
             kbcProofObject[cRes["Encoding"], cRes, wall],
-            nf = Replace[cRes["GoalNormalForms"], {{{n_, _}, ___} :> n, _ :> Throw[$Failed, "TATPError"]}];
+            nf = Replace[cRes["GoalNormalForms"], {{{n_, _}, ___} :> n, _ :> Throw[atpFailure[TKnuthBendixCompletion::nonf, term], "TATPError"]}];
             (* An equation is True when both sides reach one normal form.
                Two normal forms, even under a saturated system, show only that
                the axioms do not entail it (k[a] == a holds for k the identity

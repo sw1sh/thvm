@@ -27,6 +27,7 @@ TAtpComplete::fail = "The completion failed.";
 TAtpComplete::theory = "AxiomaticTheory[\"`1`\"] does not give a list of axioms.";
 TAtpNormalForm::nosys = "`1` is not a live TAtpSystem.";
 TAtpNormalForm::fail = "Normalizing under the system failed.";
+TAtpNormalForm::spares = "The terms have more than `1` symbols outside the system's signature.";
 
 $atpNextRunFn := $atpNextRunFn = load["thvm_wl_atp_next_run", {Integer, Integer, Integer}, Integer];
 
@@ -54,7 +55,7 @@ $atpSystemAllocation = 2^24;
 TAtpComplete[theory_String, rest___] := Block[{ax = atpAxiomaticTheory[theory]},
     If[ ListQ[ax],
         TAtpComplete[ax, rest],
-        Message[TAtpComplete::theory, theory]; $Failed]];
+        atpFailure[TAtpComplete::theory, theory]]];
 TAtpComplete[ax : (_Equal | _ForAll | _TwoWayRule | Inactive[Equal][_, _]), rest___] :=
     TAtpComplete[{ax}, rest];
 TAtpComplete[axioms_List, opts : OptionsPattern[]] := atpSystemComplete[axioms, Automatic, opts];
@@ -64,8 +65,7 @@ TAtpComplete[axioms_List, order : _List | Automatic, opts : OptionsPattern[]] :=
 atpSystemComplete[axiomsIn_List, order_, opts___] := Catch[
     Module[{method, maxSteps, wall, alloc, axioms, enc, st, handle, cRes, status},
         If[ order =!= Automatic && ! kbcOrderQ[order],
-            Message[TAtpComplete::badord, order];
-            Throw[$Failed, "TATPError"]];
+            Throw[atpFailure[TAtpComplete::badord, order], "TATPError"]];
         {method, maxSteps, wall, alloc} = OptionValue[TAtpComplete, {opts},
             {Method, MaxSteps, TimeConstraint, "AllocationLimit"}];
         wall = Replace[kbcSeconds[wall], Infinity -> 0.];
@@ -83,7 +83,7 @@ atpSystemComplete[axiomsIn_List, order_, opts___] := Catch[
         cRes = cEngineProof[enc, atpResolveMaxSteps[maxSteps, method], wall,
             Sequence @@ atpParseMethod[method]];
         If[ ! IntegerQ[cRes["Status"]] || $atpSystemQFn[ManagedLibraryExpressionID[handle]] =!= 1,
-            Message[TAtpComplete::fail]; Throw[$Failed, "TATPError"]];
+            Throw[atpFailure[TAtpComplete::fail], "TATPError"]];
         status = cRes["Status"];
         TAtpSystem[<|
             "Handle" -> handle,
@@ -131,7 +131,7 @@ atpSystemLiveQ[_] := False;
 
 TAtpNormalForm[sys_TAtpSystem, terms_List] := Catch[atpSystemNormalize[sys, terms], "TATPError"];
 TAtpNormalForm[sys_TAtpSystem, term_] := Replace[TAtpNormalForm[sys, {term}], {{t_} :> t}];
-TAtpNormalForm[sys_, _] := (Message[TAtpNormalForm::nosys, sys]; $Failed);
+TAtpNormalForm[sys_, _] := atpFailure[TAtpNormalForm::nosys, sys];
 
 (* Map the query's symbols and numbers outside the system's signature onto
    the spare labels (in canonical order), encode against the system's
@@ -139,10 +139,10 @@ TAtpNormalForm[sys_, _] := (Message[TAtpNormalForm::nosys, sys]; $Failed);
    own symbols. *)
 atpSystemNormalize[sys : TAtpSystem[a_Association], terms_List] := Module[
     {st = a["State"], known, foreign, spares, enc, raws, out, lab2name, symObj},
-    If[ ! atpSystemLiveQ[sys], Message[TAtpNormalForm::nosys, sys]; Throw[$Failed, "TATPError"]];
+    If[ ! atpSystemLiveQ[sys], Throw[atpFailure[TAtpNormalForm::nosys, sys], "TATPError"]];
     known = st["sym"];
     foreign = SortBy[Select[kbcSignature[terms], ! KeyExistsQ[known, #[[1]]] &], Last];
-    If[ Length[foreign] > Length[$atpSystemSpares], Message[TAtpNormalForm::fail]; Throw[$Failed, "TATPError"]];
+    If[ Length[foreign] > Length[$atpSystemSpares], Throw[atpFailure[TAtpNormalForm::spares, Length[$atpSystemSpares]], "TATPError"]];
     spares = Take[$atpSystemSpares, Length[foreign]];
     enc = Fold[
         {acc, t} |-> With[{r = encodeAtpTerm[t, Last[acc]]}, {Append[First[acc], First[r]], Last[r]}],
@@ -150,7 +150,7 @@ atpSystemNormalize[sys : TAtpSystem[a_Association], terms_List] := Module[
         terms /. Thread[foreign[[All, 3]] -> spares]];
     raws = Quiet @ Check[Normal @ $atpSystemNormalizeFn[ManagedLibraryExpressionID[a["Handle"]],
         NumericArray[First[enc], "Integer64"]], $Failed];
-    If[ ! ListQ[raws], Message[TAtpNormalForm::fail]; Throw[$Failed, "TATPError"]];
+    If[ ! ListQ[raws], Throw[atpFailure[TAtpNormalForm::fail], "TATPError"]];
     lab2name = Association[Reverse /@ Normal[st["sym"]]];
     symObj = Join[Lookup[st, "symObj", <||>],
         AssociationThread[Lookup[known, spares], Hold /@ foreign[[All, 3]]]];
@@ -164,7 +164,7 @@ TAtpEqualQ[sys_TAtpSystem, x_, y_] := Replace[TAtpNormalForm[sys, {x, y}], {
         "MessageTemplate" -> "The axioms do not entail `1` == `2`: their normal forms differ under a complete system.",
         "MessageParameters" -> {x, y}, "NormalForms" -> {nx, ny}|>],
     {_, _} :> Indeterminate,
-    _ :> $Failed}];
+    other_ :> other}];
 
 End[]
 

@@ -171,10 +171,10 @@ VerificationTest[
 ]
 
 VerificationTest[
-    (* Genuinely unjoinable words yield $Failed: AB and BB have
+    (* Genuinely unjoinable words yield a Failure: AB and BB have
        distinct normal forms under BA -> AB, and saturation of the
        single ground rule terminates immediately. *)
-    TStringPath["AB" -> "BB", {"BA" -> "AB"}, TimeConstraint -> 10],
-    $Failed,
+    TStringPath["AB" -> "BB", {"BA" -> "AB"}, TimeConstraint -> 10] // Replace[f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindProof", "nopath"},
     TestID -> "ATPStrings/path/unjoinable-is-failed"
 ]

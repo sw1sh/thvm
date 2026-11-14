@@ -101,12 +101,10 @@ TTweeProof[problemFile_String, opts : OptionsPattern[]] /;
     Block[{bin, tc, cmd, run, out, secs, status, proofBody, parsed},
         bin = tweeBinary[OptionValue["Binary"]];
         If[ MissingQ[bin],
-            Message[TTweeProof::notwee];
-            Return[$Failed]
+            Return[atpFailure[TTweeProof::notwee]]
         ];
         If[ ! FileExistsQ[problemFile],
-            Message[TTweeProof::badfile, problemFile];
-            Return[$Failed]
+            Return[atpFailure[TTweeProof::badfile, problemFile]]
         ];
         tc = OptionValue[TimeConstraint];
         cmd = StringJoin[bin, " --tstp --quiet ", problemFile, " 2>&1"];

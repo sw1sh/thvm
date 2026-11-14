@@ -19,7 +19,7 @@ RelatedTutorials: ["[Learned Guidance: a GNN for Critical-Pair Selection](GnnGui
 - The model is an Association with the keys `"Kind"` (`"GNN"`), the weights `"W1"` and `"Ws"` (for each round, the weights applied to the average of the neighbors of a node and to the node itself), `"Bh"` (the biases of each round), `"Wout"` and `"Bout"` (the readout to the two outputs), and `"Rounds"`, `"Hidden"` and `"NMax"`.
 - The model is the `"Model"` that [TAtpTrainGnn]() gives, and the form that [TAtpGnnScore]() and [TAtpSetGnnScorer]() take.
 - <code>[TAtpSetGnnScorer]()["*file*"]</code> is equivalent to <code>[TAtpSetGnnScorer]()[[TAtpLoadGnnScorer]()["*file*"]]</code>.
-- A file that does not exist gives `$Failed`.
+- A file that does not exist issues the message `TAtpLoadGnnScorer::nofile` and gives a [Failure]().
 
 ## Basic Examples
 
@@ -71,10 +71,10 @@ TAtpGnnScore[TAtpLoadGnnScorer[TAtpGnnScorerAsset[]], <|"Graphs" -> {TAtpCpGraph
 
 ## Possible Issues
 
-A file that does not exist gives `$Failed`:
+A file that does not exist gives a [Failure]():
 
 ```wl
 TAtpLoadGnnScorer["/nonexistent/gcn.safetensors"]
 ```
 
-<!-- => $Failed -->
+<!-- => the message TAtpLoadGnnScorer::nofile is issued and the result is a Failure: "The model file /nonexistent/gcn.safetensors does not exist." -->

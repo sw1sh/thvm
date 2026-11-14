@@ -254,14 +254,14 @@ Options[TRelevantAxioms] = {Method -> Automatic}
 TRelevantAxioms[thm_String, theory_String, opts : OptionsPattern[]] := Block[{axRaw, cjRaw},
     axRaw = AxiomaticTheory[theory];
     cjRaw = AxiomaticTheory[theory, "NotableTheorems"][thm];
-    If[! ListQ[axRaw] || MissingQ[cjRaw], Return[$Failed]];
+    If[! ListQ[axRaw] || MissingQ[cjRaw], Return[atpTheoryFailure[theory, thm]]];
     TRelevantAxioms[cjRaw, axRaw, opts]
 ]
 (* Conjecture-expression against a NAMED theory: resolve the axioms
    through AxiomaticTheory, then run the relevance partition. *)
 TRelevantAxioms[conjRaw : (_List | _ForAll | _Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _]), theory_String, opts : OptionsPattern[]] := Block[{axRaw},
     axRaw = AxiomaticTheory[theory];
-    If[! ListQ[axRaw], Return[$Failed]];
+    If[! ListQ[axRaw], Return[atpTheoryFailure[theory]]];
     TRelevantAxioms[conjRaw, axRaw, opts]
 ]
 (* Single non-list axiom: auto-wrap to a 1-element list, same shape

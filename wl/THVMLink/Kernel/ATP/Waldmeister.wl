@@ -153,12 +153,10 @@ TWaldmeisterProof[problemFile_String, opts : OptionsPattern[]] /;
            $WMCLI env / PATH / dev-location auto-detect in wmBinary. *)
         bin = wmBinary[Replace[OptionValue["WMCLI"], Automatic :> OptionValue["Binary"]]];
         If[ MissingQ[bin],
-            Message[TWaldmeisterProof::nowm];
-            Return[$Failed]
+            Return[atpFailure[TWaldmeisterProof::nowm]]
         ];
         If[ ! FileExistsQ[problemFile],
-            Message[TWaldmeisterProof::badfile, problemFile];
-            Return[$Failed]
+            Return[atpFailure[TWaldmeisterProof::badfile, problemFile]]
         ];
         fwk = wmMathlinkPath[OptionValue["MathlinkPath"]];
         (* Match FEQ/ELProver: ELProver.c prepends "-auto" so the Automodus

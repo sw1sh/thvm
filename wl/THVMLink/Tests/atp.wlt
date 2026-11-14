@@ -361,8 +361,8 @@ VerificationTest[
 VerificationTest[
     (* A non-existent file path is refused before the C-side parser, which would
        report its parse failure as the ATP_RUNNING (=0) sentinel. *)
-    TATP[File["tests/atp/data/_does_not_exist_.pr"]],
-    $Failed,
+    Replace[TATP[File["tests/atp/data/_does_not_exist_.pr"]], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TATP", "nofile"},
     {TATP::nofile},
     TestID -> "ATP/TATP/file/missing-path-is-refused"
 ]
@@ -370,7 +370,7 @@ VerificationTest[
 (* === TFindProof: C ATP engine ============================ *)
 
 (* TFindProof runs thvm's C ATP completion engine and
-   returns a real WL ProofObject for provable conjectures, $Failed
+   returns a real WL ProofObject for provable conjectures, a Failure
    otherwise.  The proof chain is extracted over the oriented input
    axioms, so the dataset cites axioms and the ProofFunction
    verifier accepts it. *)
@@ -382,8 +382,8 @@ VerificationTest[
 ]
 
 VerificationTest[
-    TFindProof[a == d, {a == b, b == c}],
-    $Failed,
+    Replace[TFindProof[a == d, {a == b, b == c}], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindProof", "noproof"},
     TestID -> "ATP/TFEP/unprovable-yields-failed"
 ]
 
@@ -414,8 +414,8 @@ VerificationTest[
 ]
 
 VerificationTest[
-    TFindProof[f[a] == g[a], {a == b}],
-    $Failed,
+    Replace[TFindProof[f[a] == g[a], {a == b}], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindProof", "noproof"},
     TestID -> "ATP/TFEP/head-mismatch-yields-failed"
 ]
 
@@ -622,8 +622,8 @@ VerificationTest[
 
 VerificationTest[
     (* WL doc Scope example: a == c from a == b alone -> unprovable. *)
-    TFindProof[a == c, {a == b}],
-    $Failed,
+    Replace[TFindProof[a == c, {a == b}], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindProof", "noproof"},
     TestID -> "ATP/TFEP/doc-scope-insufficient-axioms"
 ]
 
@@ -657,7 +657,7 @@ VerificationTest[
 
 (* TFindProof["Theorem", "Theory"] resolves both names
    through AxiomaticTheory.  An unknown theorem name surfaces a
-   parse Failure rather than $Failed. *)
+   parse Failure. *)
 
 VerificationTest[
     Head @ TFindProof["NoSuchTheorem", "WolframAxioms"],
@@ -822,7 +822,7 @@ VerificationTest[
 (* the knob is accepted and keeps the proof SOUND (proves and, where  *)
 (* asserted, verifies); the search-bounding / abort knobs are tested  *)
 (* on a hard theorem (AndAssociativity / WolframAxioms) where they    *)
-(* must cut the search off and return $Failed / $Aborted.             *)
+(* must cut the search off and return a Failure or $Aborted.         *)
 (* ================================================================== *)
 
 (* --- Method head: Automatic | Portfolio | Completion | GoalDirected *)
@@ -932,7 +932,7 @@ VerificationTest[
        (FindEquationalProof parity): ONE ProofObject whose Proof
        dataset carries a {Hypothesis, g} / {Conclusion, g} row pair
        per conjunct and whose ProofFunction verifies.  An unprovable
-       conjunct fails the whole conjunction ($Failed), and "Status"
+       conjunct fails the whole conjunction (a Failure), and "Status"
        is a single tag for the conjunction. *)
     Module[{po, ks},
         po = TFindProof[{a == c, a == b}, {a -> b, b -> c},
@@ -943,12 +943,12 @@ VerificationTest[
          SubsetQ[ks, {{"Hypothesis", 1}, {"Hypothesis", 2},
              {"Conclusion", 1}, {"Conclusion", 2}}],
          Head @ Quiet @ Check[po["ProofFunction"][], $Failed],
-         TFindProof[{a == c, a == q}, {a -> b, b -> c},
+         FailureQ @ TFindProof[{a == c, a == q}, {a -> b, b -> c},
              TimeConstraint -> 5],
          TFindProof[{a == c, a == q}, {a -> b, b -> c}, "Status",
              TimeConstraint -> 5]}
     ],
-    {ProofObject, True, Success, $Failed, "Saturated"},
+    {ProofObject, True, Success, True, "Saturated"},
     TestID -> "ATP/multi-goal/explicit-axioms-list"
 ];
 
@@ -1507,9 +1507,9 @@ VerificationTest[
 (* --- MaxSteps: a tight cap on a hard theorem fails; loose proves --- *)
 
 VerificationTest[
-    TFindProof["AndAssociativity", "WolframAxioms",
+    FailureQ @ TFindProof["AndAssociativity", "WolframAxioms",
         Method -> "Completion", MaxSteps -> 5, TimeConstraint -> 20.],
-    $Failed,
+    True,
     TestID -> "ATP/option/maxsteps-tight-on-hard-fails"
 ]
 
@@ -1526,8 +1526,8 @@ VerificationTest[
     TFindProof["AndAssociativity", "WolframAxioms",
         Method -> {"Completion", "Ordering" -> "LPO",
             "CriticalPairWeight" -> "Gt"},
-        TimeConstraint -> 2.],
-    $Failed,
+        TimeConstraint -> 2.] // FailureQ,
+    True,
     TestID -> "ATP/option/timeconstraint-tiny-on-hard-fails"
 ]
 
@@ -1696,24 +1696,24 @@ VerificationTest[
     TestID -> "ATP/returnspec/counterexample-refutes-involution"
 ]
 
-(* A genuine theorem has no counterexample: the spec is $Failed while the
+(* A genuine theorem has no counterexample: the spec is a Failure while the
    ProofObject still verifies. *)
 VerificationTest[
-    TFindProof[g[g[g[g[a]]]] == a, {ForAll[{x}, g[g[x]] == x]},
-        "Counterexample", TimeConstraint -> 10],
-    $Failed,
+    Replace[TFindProof[g[g[g[g[a]]]] == a, {ForAll[{x}, g[g[x]] == x]},
+        "Counterexample", TimeConstraint -> 10], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindProof", "nocex"},
     TestID -> "ATP/returnspec/counterexample-none-for-theorem"
 ]
 
 (* Soundness gate: a commutative axiom saturates WITH an unorientable
    equation (x*y == y*x) that needs ordered rewriting.  The extractor must
-   DECLINE ($Failed) rather than risk an unsound verdict off a one-way
+   DECLINE (a Failure) rather than risk an unsound verdict off a one-way
    orientation. *)
 VerificationTest[
     TFindProof[CircleTimes[a, b] == b,
         {ForAll[{x, y}, CircleTimes[x, y] == CircleTimes[y, x]]},
-        "Counterexample", TimeConstraint -> 10],
-    $Failed,
+        "Counterexample", TimeConstraint -> 10] // FailureQ,
+    True,
     TestID -> "ATP/returnspec/counterexample-declines-unorientable"
 ]
 
@@ -2116,7 +2116,7 @@ VerificationTest[
 
 (* --- TimeConstraint + Abort: effective abort inside the LibraryLink.
    Both forms must INTERRUPT the running C engine at the budget rather
-   than hang: the TimeConstraint option returns $Failed, and a
+   than hang: the TimeConstraint option returns a Failure, and a
    TimeConstrained[...] wrapper (3rd-arg form) returns its timeout value.
    Both run in ONE Module so the aborts stay within a single evaluation
    -- across separate VerificationTests the abort flag leaks (the harness
@@ -2137,7 +2137,7 @@ VerificationTest[
            GT, ~677 rules / ~345s under Mix), far beyond a 2s budget, so
            a 2s budget must interrupt the running engine and yield NO
            proof via either form -- the contract is "no hang, no spurious
-           proof".  (Asserting === $Failed / === "TimedOut" directly is
+           proof".  (Asserting FailureQ / === "TimedOut" directly is
            flaky: late in a long suite the WL test harness can leak a
            prior test's abort flag into this one; the not-a-ProofObject
            assertion is robust to that artifact and still catches a
@@ -2305,27 +2305,28 @@ VerificationTest[
     TestID -> "ATP/describe/single-preset-ignores-problem-context"
 ]
 
-(* Unknown theorem in the AxiomaticTheory-name form yields $Failed. *)
+(* Unknown theorem in the AxiomaticTheory-name form yields a Failure. *)
 VerificationTest[
-    TAtpDescribeMethod[Automatic, "NotAThm", "BooleanAxioms"],
-    $Failed,
+    Replace[TAtpDescribeMethod[Automatic, "NotAThm", "BooleanAxioms"], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindProof", "nothm"},
+    {TFindProof::nothm},
     TestID -> "ATP/describe/unknown-theorem-name-fails"
 ]
 
 (* Unknown Method NAME (not in $AtpMethodPresets or the canonical
-   completion family) should yield $Failed with TFindProof::badmethod
+   completion family) should yield a Failure with its own badmethod message
    rather than silently being accepted as a 1-element schedule.  The
    iter 56 fix flags this gap in both TAtpSchedule and
    TAtpDescribeMethod. *)
 VerificationTest[
-    Quiet @ TAtpSchedule["NotARealMethod"],
-    $Failed,
+    Replace[Quiet @ TAtpSchedule["NotARealMethod"], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TAtpSchedule", "badmethod"},
     TestID -> "ATP/schedule/unknown-method-name-fails"
 ]
 
 VerificationTest[
-    Quiet @ TAtpDescribeMethod["NotARealMethod"],
-    $Failed,
+    Replace[Quiet @ TAtpDescribeMethod["NotARealMethod"], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TAtpDescribeMethod", "badmethod"},
     TestID -> "ATP/describe/unknown-method-name-fails"
 ]
 
@@ -2496,10 +2497,11 @@ VerificationTest[
     TestID -> "ATP/schedule/WolframAxioms-OrAssociativity-default-60s"
 ]
 
-(* Unknown theorem name yields $Failed (catch-all path). *)
+(* Unknown theorem name yields a Failure. *)
 VerificationTest[
-    TAtpSchedule[Automatic, "NotAThm", "BooleanAxioms"],
-    $Failed,
+    Replace[TAtpSchedule[Automatic, "NotAThm", "BooleanAxioms"], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindProof", "nothm"},
+    {TFindProof::nothm},
     TestID -> "ATP/schedule/unknown-theorem-name-fails"
 ]
 
@@ -2546,7 +2548,7 @@ VerificationTest[
 ]
 
 (* Each named single-config preset should ACCEPT a call without
-   crashing and return either a ProofObject (proved) or $Failed
+   crashing and return either a ProofObject (proved) or a Failure
    (timed out / saturated short) -- never an unevaluated form, never
    a Failure[].  Regressions in a preset's parse logic (suboption
    merge, mnf computation, returned arg vector) surface here.  We
@@ -2559,7 +2561,7 @@ VerificationTest[
         AllTrue[prs,
             With[{p = TFindProof["AndCommutativity", "BooleanAxioms",
                     Method -> #, TimeConstraint -> 5]},
-                Head[p] === ProofObject || p === $Failed] &]],
+                Head[p] === ProofObject || FailureQ[p]] &]],
     True,
     TestID -> "ATP/method/single-config-presets-do-not-crash"
 ]
@@ -3096,10 +3098,11 @@ VerificationTest[
     TestID -> "ATP/enigma/cpgraph-reconstructs-equation"
 ]
 
-(* No symbols (a graph decoded without the live encoder state) -> $Failed. *)
+(* No symbols (a graph decoded without the live encoder state) -> a Failure. *)
 VerificationTest[
-    TAtpCpGraphEquation[<|"NodeTypes" -> {}, "Edges" -> {}, "Symbols" -> {}|>],
-    $Failed,
+    Replace[TAtpCpGraphEquation[<|"NodeTypes" -> {}, "Edges" -> {}, "Symbols" -> {}|>], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TAtpCpGraphEquation", "syms"},
+    {TAtpCpGraphEquation::syms},
     TestID -> "ATP/enigma/cpgraph-equation-no-symbols"
 ]
 
@@ -3300,7 +3303,7 @@ VerificationTest[
    Method -> "WaldmeisterLazy" on McCune-II dies in proof extraction
    with Part::partw on index 4294967296 = ATP_TRACE_NONE + 1 -- an
    unguarded sentinel parent id in a trace record (Reason -> 3 =
-   NORM_STEP) on the lazy path.  TFindProof returns $Failed.  Fix the
+   NORM_STEP) on the lazy path.  TFindProof returns a Failure.  Fix the
    sentinel guard in the lift, then this test goes green. *)
 VerificationTest[
     Head @ Quiet @ TFindProof["InverseOfInverse", "McCuneAxioms",

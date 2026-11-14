@@ -21,7 +21,7 @@
          interface (p["ProofDataset"], p["ProofGraph"],
          p["ProofFunction"], p["ProofLength"], ...).  The string
          form resolves theorem + theory names through
-         AxiomaticTheory.  Returns $Failed when the conjecture is
+         AxiomaticTheory.  Returns a Failure when the conjecture is
          not proved.
 
          The legacy spelling TFindEquationalProof is kept as a
@@ -62,10 +62,10 @@ SetUsage[TFindProof, "TFindProof[conjecture$, axioms$] runs thvm's C equational-
 TFindProof[\"Theorem\", \"Theory\"] resolves names through AxiomaticTheory; a multi-equation theorem (an n$-element list) is proved as one conjunction off a single saturation, returning ONE ProofObject with a {\"Hypothesis\", g$} / {\"Conclusion\", g$} row pair per conjunct (FindEquationalProof parity).
 TFindProof[conjecture$, \"Theory\"] proves the conjecture (an equation, a list of equations, or an Association whose Values are taken) against the named theory's axioms.
 TFindProof[axioms$] and TFindProof[\"Theory\"] saturate with no goal, returning a ProofObject whose Theorems is None; bound these with TimeConstraint since a non-terminating axiom set never saturates.
-Argument order is conjecture-first (matching FindEquationalProof); TATP is the axioms-first surface. Equations may be written lhs$ == rhs$, a pre-oriented rewrite rule, or a two-way rule (plus their Inactive forms). A List conjecture is a multi-goal conjunction proved off ONE saturation: the result is one ProofObject whose Proof dataset carries one Hypothesis/Conclusion row pair per conjunct, $Failed unless every conjunct is proved; \"Status\" returns a single tag for the whole conjunction.
-An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\", \"TPTP\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns $Failed when not proved. \"TPTP\" renders the proof as an SZS-wrapped TPTP CNFRefutation string -- the CASC output format -- for File / TPTP-string input.
-\"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or $Failed when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
-\"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or $Failed when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
+Argument order is conjecture-first (matching FindEquationalProof); TATP is the axioms-first surface. Equations may be written lhs$ == rhs$, a pre-oriented rewrite rule, or a two-way rule (plus their Inactive forms). A List conjecture is a multi-goal conjunction proved off ONE saturation: the result is one ProofObject whose Proof dataset carries one Hypothesis/Conclusion row pair per conjunct, a Failure unless every conjunct is proved; \"Status\" returns a single tag for the whole conjunction.
+An optional last argument picks the return type from \"ProofObject\", \"Lemmas\", \"PreprocessedAxioms\", \"RelevantAxioms\", \"RawTrace\", \"Statistics\", \"Status\", \"Path\", \"Counterexample\", \"TPTP\" (or a list of these, or All); default \"ProofObject\". A single string returns that value bare, a list an Association keyed by the requested names. Returns a Failure that says why when not proved. \"TPTP\" renders the proof as an SZS-wrapped TPTP CNFRefutation string -- the CASC output format -- for File / TPTP-string input.
+\"Path\" returns the witnessing rewrite path of a proved goal: the list of terms from the conjecture's lhs to its rhs (the lhs-side goal chain forward, then the rhs-side chain reversed through the shared normal form; one path per conjunct for a multi-goal conjunction), or a Failure when no goal chain was recorded. TFindEquationalPath is the dedicated surface for this spec.
+\"Counterexample\" returns a CounterexampleObject disproving the goal (a finite model in FindFiniteModels structure for a ground problem, the convergent rules plus separating normal forms otherwise), or a Failure when no countermodel is extractable. Method \"SMT\" decides a ground entailment by congruence closure and accepts a TPTP File or cnf/fof string.
 Options: MaxSteps, TimeConstraint, Method, PortfolioFrontLoad. Method accepts Automatic (problem-aware structure detection that front-loads a tailored config then falls back to the fixed portfolio), \"Portfolio\", a named preset (\"Waldmeister\", \"VampireUEQ\", \"Twee\", \"EProver\", \"VampirePortfolio\", \"VampirePortfolioCompact\", \"ENIGMA\", \"SMT\"), or an explicit config association whose keys include \"CriticalPairWeight\", \"Ordering\", \"AutoPrecedence\", \"AxiomRelevance\", \"MaxWeight\", \"AutoMaxWeight\", \"SelectionRatio\", \"GoalInterleave\", \"GroundJoin\", \"Connectedness\", \"RHSInterreduce\", \"UnfailingCP\", \"CPSetInterreduce\", \"DemoteOnLhsSimplify\", \"OrphanMurder\", \"PopSubsume\", \"ESetSubsume\", \"QueueSubsume\", \"EmissionOrder\", \"IntakeOrder\", \"MixmostNF\", \"BackwardGroundJoin\", \"Einsstern\", \"NoOverlapBelowSkolem\", \"Reclassify\", \"ReversedCompletion\", \"SUEManagement\", \"CriticalGoalInterreduce\", \"CriticalGoalWeight\", \"BackwardGoalArgue\", \"CPSide\", \"FlatSubsume\", \"CommSubsume\", \"FormationFifo\", \"EsetDistdir\", \"TracePack\", \"Precedence\", \"SkolemHighest\", \"RecordNorm\", \"SimplerJoin\", \"EncompassDemod\", \"GoalNarrow\", \"CPSetIRBudget\", \"PopRulesOnly\", \"GjDeleteRule\", \"FullInterreduce\", \"FlattenGoal\". $AtpMethodPresets lists the named presets; TAtpSchedule and TAtpDescribeMethod expand a Method. See the ATP documentation for the full option surface."];
 
 SetUsage[TFindEquationalProof, "TFindEquationalProof[$$] is a deprecated alias for TFindProof; every call forwards to TFindProof. New code should call TFindProof."];
@@ -94,7 +94,7 @@ The node-feature columns are purely structural (kind, arity, occurrence counts) 
 This is the per-equation encoder TAtpGraphDataset emits; pair it with a GNN trained on the dataset."];
 
 SetUsage[TAtpCpGraphEquation, "TAtpCpGraphEquation[graph$] reconstructs the original equation from a TAtpCpGraph result, returning Inactive[Equal][lhs$, rhs$]. It is the exact inverse of TAtpCpGraph, reading the per-node \"Symbols\" identities and the \"Edges\" term structure (each term node's head, ordered children, and the two side roots).
-Returns $Failed if the graph carries no \"Symbols\" (e.g. a graph decoded without the live encoder state)."];
+Returns a Failure if the graph carries no \"Symbols\" (e.g. a graph decoded without the live encoder state)."];
 
 SetUsage[TAtpGraphDataset, "TAtpGraphDataset[conjectures$, axioms$] proves each conjecture against the shared axioms and turns the verified ProofObject's lemmas into a labelled graph dataset <|\"Graphs\", \"Labels\", \"NPos\", \"NNeg\", \"NProofs\"|>, where each graph is a TAtpCpGraph Association, label 1 marks a proof-essential lemma and 0 a saturated-but-unused rule.
 TAtpGraphDataset[theory$] runs every AxiomaticTheory[theory$, \"NotableTheorems\"] against the theory's axioms.
@@ -155,6 +155,18 @@ SetUsage[PortfolioFrontLoad, "PortfolioFrontLoad is an option for TFindProof tha
    WolframInstitute`THVMLink` pushed by the BeginPackage second arg.) *)
 
 Begin["`Private`"];
+
+(* The Failures the ATP functions return.  atpFailure issues the message: an error in the input or
+   the environment.  atpOutcome only describes a result the run did not reach, such as no proof,
+   which is no error, so it is quiet as the bare $Failed it replaces was. *)
+SetAttributes[{atpFailure, atpOutcome}, HoldFirst];
+atpFailure[args___] := WolframInstitute`THVMLink`Private`thvmFailure[args];
+atpOutcome[mn : MessageName[sym_Symbol, tag_String], args___] :=
+    Failure[SymbolName[sym], <|"MessageTemplate" :> mn, "MessageParameters" -> {args}, "Tag" -> tag|>];
+(* The Failure for a named theorem or theory that AxiomaticTheory does not give. *)
+atpTheoryFailure[theory_String] := atpFailure[TFindProof::notheory, theory];
+atpTheoryFailure[theory_String, thm_String] :=
+    If[ ListQ[Quiet @ AxiomaticTheory[theory]], atpFailure[TFindProof::nothm, thm, theory], atpTheoryFailure[theory]];
 
 (* Run a shell command under a wall-clock limit of tc seconds.  perl ships with macOS and Linux,
    and an alarm set before exec survives it, so the prover itself gets SIGALRM at the limit (exit
@@ -638,8 +650,9 @@ TAtpSaveGnnScorer[model_Association, path_String] := Module[{rR, hH, nMax, meta}
 
 (* Rebuild the Model Association from a .safetensors file (lazy tensors
    read via Normal). *)
+TAtpLoadGnnScorer::nofile = "The model file `1` does not exist.";
 TAtpLoadGnnScorer[path_String] := Module[{meta, tens, rR},
-    If[ ! FileExistsQ[path], Return[$Failed]];
+    If[ ! FileExistsQ[path], Return[atpFailure[TAtpLoadGnnScorer::nofile, path]]];
     meta = TSafeTensorLoadMetadata[path];
     tens = TSafeTensorLoad[path];
     rR = ToExpression @ Lookup[meta, "Rounds", ToString @ Length @ Select[Keys[tens], StringStartsQ["W1_"]]];
@@ -773,18 +786,23 @@ Options[TAtpTrainScorer] = {"Hidden" -> 16, MaxTrainingRounds -> 300, "LearningR
 
 TAtpTrainScorer::data = "A dataset has a \"Features\" matrix of rows of `1` numbers and as many \"Labels\", each 0 or 1, as TAtpCpDataset gives.";
 TAtpTrainScorer::hidden = "\"Hidden\" is a number of hidden units from 0 to 64; `1` is not.";
+TAtpTrainScorer::empty = "The dataset has no rows to train on.";
+TAtpTrainScorer::noproofs = "No proof of the corpus gave a critical pair to train on.";
+TAtpGnnScore::empty = "The dataset has no graphs to score.";
+TFindProofReranked::init = "The engine could not start a proof of the problem.";
+TFindProofGnnReranked::model = "The GCN model could not be loaded into the engine.";
 scorerDataOkQ[d_Association] := With[{f = Lookup[d, "Features"], y = Lookup[d, "Labels"]},
     MatrixQ[f, NumericQ] && Last[Dimensions[f]] === $AtpFeatureDim && ListQ[y] && Length[y] === Length[f] && SubsetQ[{0, 1}, y]]
 TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] /; ! scorerDataOkQ[dataset] :=
-    (Message[TAtpTrainScorer::data, $AtpFeatureDim]; $Failed)
+    atpFailure[TAtpTrainScorer::data, $AtpFeatureDim]
 TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] /; ! MatchQ[OptionValue[TAtpTrainScorer, {opts}, "Hidden"], _Integer ? (0 <= # <= 64 &)] :=
-    (Message[TAtpTrainScorer::hidden, OptionValue[TAtpTrainScorer, {opts}, "Hidden"]]; $Failed)
+    atpFailure[TAtpTrainScorer::hidden, OptionValue[TAtpTrainScorer, {opts}, "Hidden"]]
 TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] := Module[{
     x = N[dataset["Features"]], y = dataset["Labels"], mean, sd, invStd,
     z, h = OptionValue["Hidden"], net, yOneHot, trained, pv,
     w1, b1, w2, b2, wMat, bVec, model, scores
 },
-    If[ Length[x] === 0, Return[$Failed]];
+    If[ Length[x] === 0, Return[atpFailure[TAtpTrainScorer::empty]]];
     mean = Mean[x];
     sd = StandardDeviation[x];
     invStd = MapThread[If[ # > 0., 1./#, 1.] &, {sd}] // Quiet;
@@ -799,7 +817,7 @@ TAtpTrainScorer[dataset_Association, opts : OptionsPattern[]] := Module[{
         MaxTrainingRounds -> OptionValue[MaxTrainingRounds],
         "LearningRate" -> OptionValue["LearningRate"],
         "Method" -> OptionValue["Method"]];
-    If[ trained === $Failed, Return[$Failed]];
+    If[ FailureQ[trained], Return[trained]];
     (* Read trained parameters back, identifying each by shape.  thvm may
        store a LinearLayer's weight transposed relative to WL's
        {output, input}; orientW forces columns = inDim (so W . z works
@@ -870,12 +888,12 @@ TAtpTrainScorer[conjectures_List, axioms_List, opts : OptionsPattern[]] :=
 
 atpTrainOnCorpus[ds_Association, opts_List] := If[
     ds["NRows"] === 0,
-    $Failed,
+    atpFailure[TAtpTrainScorer::noproofs],
     Join[
         TAtpTrainScorer[ds,
             Sequence @@ FilterRules[opts, Options[TAtpTrainScorer]]],
         <|"NProofs" -> ds["NProofs"]|>]]
-atpTrainOnCorpus[_, _] := $Failed
+atpTrainOnCorpus[f_Failure, _] := f
 
 (* CTR-builder for the expression encoder: takes a label + a
    NumericArray of child Term values, returns the packed Term value
@@ -1095,8 +1113,9 @@ atpCpGraphFromSides[{lhsHC_HoldComplete, rhsHC_HoldComplete}] := Module[{st = en
         {g["NodeTypes"], g["NodeLabels"]}]]
 ]
 
+TAtpCpGraph::eq = "`1` is not an equation lhs == rhs.";
 TAtpCpGraph[eq_] := Module[{sides = atpCpSides[eq]},
-    If[ sides === $Failed, $Failed, atpCpGraphFromSides[sides]]]
+    If[ sides === $Failed, atpFailure[TAtpCpGraph::eq, HoldForm[eq]], atpCpGraphFromSides[sides]]]
 SetAttributes[TAtpCpGraph, HoldAllComplete];
 
 (* Exact inverse of TAtpCpGraph: rebuild the original equation from a graph
@@ -1104,12 +1123,13 @@ SetAttributes[TAtpCpGraph, HoldAllComplete];
    edges (type 2 / 3) name the two side roots; each TERM node's E_TERM_SYM
    edge (type 0) names its head and its E_TERM_CHILD edges (type 1) its
    children in order.  Node ids in "Edges" are 0-based; "Symbols" is
-   1-based.  Returns Inactive[Equal][lhs, rhs], or $Failed without symbols. *)
+   1-based.  Returns Inactive[Equal][lhs, rhs], or a Failure without symbols. *)
+TAtpCpGraphEquation::syms = "The graph has no \"Symbols\" to name its nodes with.";
 TAtpCpGraphEquation[graph_Association] := Module[{
     types = graph["NodeTypes"], syms = graph["Symbols"], edges = graph["Edges"],
     symOf, childOf, rootSide, rebuild
 },
-    If[ MissingQ[syms] || syms === {}, Return[$Failed]];
+    If[ MissingQ[syms] || syms === {}, Return[atpFailure[TAtpCpGraphEquation::syms]]];
     symOf[t_] := SelectFirst[edges, MatchQ[#, {t, _, 0}] &][[2]];
     childOf[t_] := Cases[edges, {t, c_, 1} :> c];
     rootSide[e_] := SelectFirst[edges, MatchQ[#, {0, _, e}] &][[2]];
@@ -1440,7 +1460,7 @@ TAtpTrainGnn[dataset_Association, opts : OptionsPattern[]] := Module[{
     fwd, lossStart, lossEnd, scores, auc, model
 },
     nG = Length[graphs];
-    If[ nG === 0, Return[$Failed]];
+    If[ nG === 0, Return[atpFailure[TAtpTrainGnn::empty]]];
     (* the node-feature width of the data, which the engine's TAtpCpGraph sets *)
     f = Length @ First @ graphs[[1]]["NodeFeatures"];
     hH = OptionValue["Hidden"];  rR = OptionValue["Rounds"];
@@ -1548,13 +1568,15 @@ TAtpTrainGnn[conjectures_List, axioms_List, opts : OptionsPattern[]] :=
             FilterRules[{opts}, Options[TAtpGraphDataset]]],
         {opts}]
 
+TAtpTrainGnn::empty = "The dataset has no graphs to train on.";
+TAtpTrainGnn::noproofs = "No proof of the corpus gave a critical-pair graph to train on.";
 atpTrainGnnOnCorpus[ds_Association, opts_List] := If[
     Length[ds["Graphs"]] === 0,
-    $Failed,
+    atpFailure[TAtpTrainGnn::noproofs],
     Join[
         TAtpTrainGnn[ds, FilterRules[opts, Options[TAtpTrainGnn]]],
         <|"NProofs" -> ds["NProofs"]|>]]
-atpTrainGnnOnCorpus[_, _] := $Failed
+atpTrainGnnOnCorpus[f_Failure, _] := f
 
 (* Score a graph dataset with a trained GNN model (the "Model" from
    TAtpTrainGnn): run the same forward with the model's weights as
@@ -1563,7 +1585,7 @@ atpTrainGnnOnCorpus[_, _] := $Failed
    held-out (by-problem) measure and, later, the engine re-rank hook. *)
 TAtpGnnScore[model_Association, dataset_Association] := Module[{bt, b, n, f, hH, rR, xT, aT, maskRowT, nNodesT, w1s, wss, bhs, wout, bout, logits, p},
     bt = atpGnnTensors[dataset];
-    If[ bt === $Failed, Return[$Failed]];
+    If[ bt === $Failed, Return[atpFailure[TAtpGnnScore::empty]]];
     b = bt["B"];  n = bt["N"];  f = bt["F"];
     hH = model["Hidden"];  rR = model["Rounds"];
     xT       = TTensorCreate[bt["X"]];
@@ -1616,7 +1638,7 @@ TFindProofReranked[conjecture_, axioms_List, model_Association, opts : OptionsPa
 },
     handle = $atpProofInitFn[enc["Packed"], maxSteps, enc["MaxLab"],
         cpw, ord, ap];
-    If[ handle == 0, Return[$Failed]];
+    If[ handle == 0, Return[atpFailure[TFindProofReranked::init]]];
     chunks = Ceiling[maxSteps / k] + 2;
     Do[
         st = $atpProofStepFn[handle, k];
@@ -1659,10 +1681,10 @@ TFindProofGnnReranked[conjecture_, axioms_List, model_Association, opts : Option
     ap = If[ TrueQ[OptionValue["AutoPrecedence"]], 1, 0],
     handle, st
 },
-    If[ TAtpSetGnnScorer[model] =!= True, Return[$Failed]];
+    If[ TAtpSetGnnScorer[model] =!= True, Return[atpOutcome[TFindProofGnnReranked::model]]];
     handle = $atpProofInitFn[enc["Packed"], maxSteps, enc["MaxLab"],
         cpw, ord, ap];
-    If[ handle == 0, TAtpSetGnnScorer[Clear]; Return[$Failed]];
+    If[ handle == 0, TAtpSetGnnScorer[Clear]; Return[atpFailure[TFindProofReranked::init]]];
     $atpProofSetGnnPeriodFn[handle, k];
     st = $atpProofStepFn[handle, maxSteps];
     $atpProofFreeFn[handle];
@@ -2041,7 +2063,7 @@ atpResolveWitnessIds[witnessSpec_List, state_Association] := Block[{pairs = Map[
 
 (* File-form dispatch (.pr file). *)
 TATP::nofile = "The problem file `1` does not exist.";
-TATP[File[path_String], OptionsPattern[]] /; ! FileExistsQ[path] := (Message[TATP::nofile, path]; $Failed)
+TATP[File[path_String], OptionsPattern[]] /; ! FileExistsQ[path] := atpFailure[TATP::nofile, path]
 TATP[File[path_String], OptionsPattern[]] := Catch[
     Block[{stats},
         ensureInit[];
@@ -4150,11 +4172,33 @@ atpReturnValue[bundle_, "PortfolioTrace"] :=
 
 (* A problem the encoder refused comes back as its Failure, which says why; "Status" stays a tag. *)
 atpProjectReturn[f_Failure, spec_String] /; spec =!= "Status" := f;
-atpProjectReturn[bundle_, spec_String] := atpReturnValue[bundle, spec];
+atpProjectReturn[bundle_, spec_String] := atpNoResult[bundle, spec, atpReturnValue[bundle, spec]];
 atpProjectReturn[bundle_, All] :=
-    Association[# -> atpReturnValue[bundle, #] & /@ $AtpReturnSpecs];
+    Association[# -> atpNoResult[bundle, #, atpReturnValue[bundle, #]] & /@ $AtpReturnSpecs];
 atpProjectReturn[bundle_, spec_List] :=
-    Association[# -> atpReturnValue[bundle, #] & /@ spec];
+    Association[# -> atpNoResult[bundle, #, atpReturnValue[bundle, #]] & /@ spec];
+
+(* A spec the run has no value for (no proof, no path, no counterexample) is a Failure that says
+   what the run did instead. *)
+atpNoResult[bundle_, spec_, $Failed] := With[{reason = atpRunReason[bundle, spec]},
+    Switch[spec,
+        "Counterexample", atpOutcome[TFindProof::nocex, reason],
+        "Path", atpOutcome[TFindProof::nopath, reason],
+        _, atpOutcome[TFindProof::noproof, reason]]];
+atpNoResult[_, _, value_] := value;
+
+atpRunReason[bundle_, spec_] := Switch[
+    Lookup[Replace[Quiet[bundle["cRes"]], Except[_Association] -> <||>], "Status", None],
+    1, Switch[spec,
+        "Counterexample", "the conjecture is proved",
+        "Path", "the proof recorded no rewrite chain for the goal",
+        _, "the proof could not be turned into a proof object"],
+    2, "the conjecture is refuted",
+    3, "the time limit was reached",
+    4, "the completion saturated without joining the two sides of the conjecture",
+    5 | "Aborted", "the prover stopped before it finished: its memory filled up or the evaluation was aborted",
+    0, "the step limit MaxSteps was reached",
+    _, "the prover did not finish"];
 
 Options[TFindProof] = {
     (* Automatic resolves per-Method at run time (atpResolveMaxSteps):
@@ -4552,7 +4596,9 @@ TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : Option
 (* Project an atpSmtEntail result (a "Proved" decision Association or a
    refuting CounterexampleObject) onto a TFindProof return spec. *)
 atpSmtProject[r_, "Counterexample"] :=
-    If[ MatchQ[r, _CounterexampleObject], r, $Failed];
+    Which[
+        MatchQ[r, _CounterexampleObject | _Failure], r,
+        True, atpOutcome[TFindProof::nocex, "the conjecture is proved"]];
 atpSmtProject[r_, "Status"] := Which[
     MatchQ[r, _CounterexampleObject], "Refuted",
     AssociationQ[r] && KeyExistsQ[r, "Status"], r["Status"],
@@ -4599,8 +4645,7 @@ atpEquationalizeGoal[conjecture_, axioms_List] :=
         With[{goal = If[Length[eq[[1]]] === 1, First[eq[[1]]], eq[[1]]]},
             If[ eqzEquationalProblemQ[goal, eq[[2]]],
                 {goal, eq[[2]]},
-                Message[TFindProof::noneq, First[Select[Flatten[{goal, eq[[2]]}], ! eqzIsEquationQ[#] &], goal]];
-                $Failed
+                atpFailure[TFindProof::noneq, First[Select[Flatten[{goal, eq[[2]]}], ! eqzIsEquationQ[#] &], goal]]
             ]
         ]
     ];
@@ -4623,7 +4668,7 @@ TFindProof[conjecture_, axioms_List, opts : OptionsPattern[]] /;
     If[ atpWaldmeisterProcessQ[{opts}],
         atpWaldmeisterPredicateProof[conjecture, axioms, opts],
         With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-            If[ eq === $Failed, $Failed,
+            If[ FailureQ[eq], eq,
                 atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]]
         ]
     ];
@@ -4632,13 +4677,13 @@ TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, opts : Option
     Which[
         ! MatchQ[returnSpec, "ProofObject"],
             With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-                If[ eq === $Failed, $Failed, TFindProof[eq[[1]], eq[[2]], returnSpec, opts]]
+                If[ FailureQ[eq], eq, TFindProof[eq[[1]], eq[[2]], returnSpec, opts]]
             ],
         atpWaldmeisterProcessQ[{opts}],
             atpWaldmeisterPredicateProof[conjecture, axioms, opts],
         True,
             With[{eq = atpEquationalizeGoal[conjecture, axioms]},
-                If[ eq === $Failed, $Failed,
+                If[ FailureQ[eq], eq,
                     atpReconstructPredicateProof[TFindProof[eq[[1]], eq[[2]], opts], conjecture, axioms]]
             ]
     ];
@@ -5294,6 +5339,12 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
 ];
 
 TFindProof::heap = "The prover filled its memory after `1` seconds; the attempt stops.";
+TFindProof::noproof = "No proof was found: `1`.";
+TFindProof::notheory = "AxiomaticTheory[\"`1`\"] does not give a list of axioms.";
+TFindProof::nothm = "\"`1`\" is not a notable theorem of AxiomaticTheory[\"`2`\"].";
+TFindProof::eqonly = "The problem `1` has an axiom or a goal that is not an equation, and the external provers take equations only.";
+TFindProof::nopath = "No rewrite path was found: `1`.";
+TFindProof::nocex = "No counterexample was found: `1`.";
 TFindProof::cpgeom ="Critical pair `1` of the completion trace is not the overlap of its parents at its recorded position; the proof is not built.";
 TFindProof::cplpo ="The completed rule set has `1` rules; building their derivations exceeds the TimeConstraint, so the ProofObject lists the axioms only. \"Lemmas\" gives the rules.";
 

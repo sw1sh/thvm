@@ -491,7 +491,7 @@ atpWaldmeisterPredicateProof[propositions_, axioms_, opts___] := Module[{
     wmAxioms = eqForAll[[2]] /. eqzWmSymRules;
     wmGoal = First[eqForAll[[1]] /. eqzWmSymRules];
     pr = WolframInstitute`THVMLink`ATP`Private`wmGenerateProblem["thvmPredicateWm", wmAxioms, wmGoal];
-    If[ FailureQ[pr], Return[$Failed]];
+    If[ FailureQ[pr], Return[pr]];
     tmp = FileNameJoin[{$TemporaryDirectory, "thvm_predicate_wm.pr"}];
     Export[tmp, pr, "Text"];
     (* Bound the lift + metadata reconstruction: on a complex proof the
@@ -504,7 +504,7 @@ atpWaldmeisterPredicateProof[propositions_, axioms_, opts___] := Module[{
         Module[{lifted, unmangled},
             lifted = WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[tmp, "LiftToProofObject" -> True, FilterRules[{opts}, {TimeConstraint}]];
             If[ Head[lifted] =!= ProofObject,
-                $Failed,
+                Replace[lifted, Except[_Failure] -> atpOutcome[TFindProof::noproof, "the Waldmeister proof could not be lifted to a proof object"]],
                 (* Un-mangle the extracted PARTS (rewriting the ProofObject
                    wrapper re-runs its validation), then rename the lift's
                    Global`x<n> universal variables to fresh symbols
@@ -516,7 +516,7 @@ atpWaldmeisterPredicateProof[propositions_, axioms_, opts___] := Module[{
             ]
         ],
         tc,
-        $Failed
+        atpOutcome[TFindProof::noproof, "the time limit was reached"]
     ]
 ];
 
@@ -525,7 +525,7 @@ atpWaldmeisterPredicateProof[propositions_, axioms_, opts___] := Module[{
    the real binary's proof (mirrors the named-theory string form). *)
 atpWaldmeisterEquationalProof[conjecture_, axioms_, opts___] := Module[{pr, tmp},
     pr = WolframInstitute`THVMLink`ATP`Private`wmGenerateProblem["thvmEquationalWm", axioms, conjecture];
-    If[ FailureQ[pr], Return[$Failed]];
+    If[ FailureQ[pr], Return[pr]];
     tmp = FileNameJoin[{$TemporaryDirectory, "thvm_equational_wm.pr"}];
     Export[tmp, pr, "Text"];
     WolframInstitute`THVMLink`ATP`TWaldmeisterProofObject[tmp, "LiftToProofObject" -> True, FilterRules[{opts}, {TimeConstraint}]]

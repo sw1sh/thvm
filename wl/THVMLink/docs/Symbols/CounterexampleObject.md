@@ -232,13 +232,13 @@ co["FalsificationFunction"]
 
 ---
 
-A conjecture that does follow from the axioms has no counterexample, and gives `$Failed`:
+A conjecture that does follow from the axioms has no counterexample, and gives a [Failure]():
 
 ```wl
 TFindProof[f[a] == b, {f[f[x_]] == x_, f[b] == a}, "Counterexample"]
 ```
 
-<!-- => $Failed -->
+<!-- => a Failure: "No counterexample was found: the conjecture is proved." -->
 
 ---
 

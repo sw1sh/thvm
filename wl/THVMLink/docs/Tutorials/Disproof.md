@@ -15,7 +15,7 @@ A goal follows from a set of axioms exactly when no structure satisfies the axio
 
 | | |
 | --- | --- |
-| <code>[TFindProof]()[*goal*, *axioms*, "Counterexample"]</code> | a [CounterexampleObject]() refuting *goal*, or `$Failed` |
+| <code>[TFindProof]()[*goal*, *axioms*, "Counterexample"]</code> | a [CounterexampleObject]() refuting *goal*, or a [Failure]() |
 | <code>[TFindProof]()[*goal*, *axioms*, {"Status", "Counterexample"}]</code> | the outcome of the search together with the counterexample |
 | <code>*co*["Model"]</code> | the refuting model of the counterexample *co* |
 | <code>*co*["FalsificationFunction"]</code> | a function that evaluates *goal* in the model |
@@ -42,12 +42,12 @@ involution = {ForAll[x, g[g[x]] == x]}
 ```
 <!-- => {ForAll[x, g[g[x]] == x]} -->
 
-The goal `g[a] == a` does not follow, and [TFindProof]() gives `$Failed` for it:
+The goal `g[a] == a` does not follow, and [TFindProof]() gives a [Failure]() for it:
 
 ```wl
 TFindProof[g[a] == a, involution]
 ```
-<!-- => $Failed -->
+<!-- => a Failure: "No proof was found: the completion saturated without joining the two sides of the conjecture." -->
 
 The status records how the search ended. The completion engine turned the axiom into the single rewrite rule `g[g[x]] -> x`, derived nothing further and stopped with the goal unproved:
 
@@ -122,12 +122,12 @@ co["VerificationFunction"][]
 
 ## A theorem has no countermodel
 
-Applying `g` four times gives back `a`, so `g[g[g[g[a]]]] == a` is a theorem, and the `"Counterexample"` spec gives `$Failed`:
+Applying `g` four times gives back `a`, so `g[g[g[g[a]]]] == a` is a theorem, and the `"Counterexample"` spec gives a [Failure]():
 
 ```wl
 TFindProof[g[g[g[g[a]]]] == a, involution, "Counterexample"]
 ```
-<!-- => $Failed -->
+<!-- => a Failure: "No counterexample was found: the conjecture is proved." -->
 
 The proof goes through:
 
@@ -142,7 +142,7 @@ TFindProof[g[a] == a, involution, {"Status", "Counterexample"}]
 ```
 <!-- => <|"Status" -> "Saturated", "Counterexample" -> CounterexampleObject["SaturationNormalForm", g[a] == a, {ForAll[x, g[g[x]] == x]}, <|...|>]|> -->
 
-[All]() includes both the `"ProofObject"` and the `"Counterexample"` specs, and for a goal that the search decides, one of them is `$Failed`.
+[All]() includes both the `"ProofObject"` and the `"Counterexample"` specs, and for a goal that the search decides, one of them is a [Failure]().
 
 ## Larger and infinite models
 
@@ -174,12 +174,12 @@ TFindProof[s[s[z]] == z, {ForAll[x, p[s[x]] == x]}, "Counterexample"]["NormalFor
 
 ## Declining an unorientable equation
 
-Commutativity cannot be oriented into a terminating rewrite rule: neither side of `x ⊗ y == y ⊗ x` is larger than the other. Completion can still saturate, by using such an equation only in the direction that decreases a given instance, but then distinct normal forms no longer prove that two terms differ. The counterexample is extracted only when every rule of the completed set is strictly size-reducing, so for a commutative theory the `"Counterexample"` spec gives `$Failed`, even though the goal is not a theorem:
+Commutativity cannot be oriented into a terminating rewrite rule: neither side of `x ⊗ y == y ⊗ x` is larger than the other. Completion can still saturate, by using such an equation only in the direction that decreases a given instance, but then distinct normal forms no longer prove that two terms differ. The counterexample is extracted only when every rule of the completed set is strictly size-reducing, so for a commutative theory the `"Counterexample"` spec gives a [Failure](), even though the goal is not a theorem:
 
 ```wl
 TFindProof[a \[CircleTimes] b == b, {ForAll[{x, y}, x \[CircleTimes] y == y \[CircleTimes] x]}, "Counterexample"]
 ```
-<!-- => $Failed -->
+<!-- => a Failure: "No counterexample was found: the completion saturated without joining the two sides of the conjecture." -->
 
 The search itself ends saturated, without a proof:
 
@@ -226,6 +226,6 @@ TFindProof[Implies[a == b, a == c], {}, "Counterexample"]["Model"]
 | a ground Boolean combination of equations | `"DPLL(T)+CongruenceClosure"` | a truth assignment to the equations |
 | axioms with variables, finitely many normal forms | `"SaturationNormalForm"` | a finite table over the normal forms |
 | axioms with variables, infinitely many normal forms | `"SaturationNormalForm"` | the completed rewrite rules |
-| axioms with an unorientable equation | none, `$Failed` | use [TFindFiniteModels]() |
+| axioms with an unorientable equation | none, a [Failure]() | use [TFindFiniteModels]() |
 
-For ground problems the `"Counterexample"` spec is a complete decision: a goal that is not proved is refuted. For axioms with variables it is a sound refutation whenever completion saturates into a terminating rewrite system, and it gives `$Failed` when completion relies on an unorientable equation. The completion engine itself is the subject of [Theorem Proving with THVMLink](paclet:WolframInstitute/THVMLink/tutorial/ATP).
+For ground problems the `"Counterexample"` spec is a complete decision: a goal that is not proved is refuted. For axioms with variables it is a sound refutation whenever completion saturates into a terminating rewrite system, and it gives a [Failure]() when completion relies on an unorientable equation. The completion engine itself is the subject of [Theorem Proving with THVMLink](paclet:WolframInstitute/THVMLink/tutorial/ATP).

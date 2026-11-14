@@ -95,15 +95,15 @@ VerificationTest[
 
 (* Misuse reports TAtpComplete's own messages. *)
 VerificationTest[
-    Quiet[TAtpComplete["NoSuchTheory"], All, {TAtpComplete::theory}],
-    $Failed,
+    Replace[Quiet[TAtpComplete["NoSuchTheory"], All, {TAtpComplete::theory}], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TAtpComplete", "theory"},
     {TAtpComplete::theory},
     TestID -> "AtpSystem/unknown-theory-message"
 ]
 
 VerificationTest[
-    TAtpComplete[asAC, {{h, -1}}],
-    $Failed,
+    Replace[TAtpComplete[asAC, {{h, -1}}], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TAtpComplete", "badord"},
     {TAtpComplete::badord},
     TestID -> "AtpSystem/bad-order-message"
 ]

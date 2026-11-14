@@ -189,7 +189,7 @@ A problem with variables is not ground, and the `"SMT"` method refuses it with a
 TFindProof["cnf(a1, axiom, and(X, Y) = and(Y, X)).
 cnf(g, negated_conjecture, and(a, b) != and(b, a)).", Method -> "SMT"]
 ```
-<!-- => the message TFindProof::nonground is issued and the result is $Failed -->
+<!-- => the message TFindProof::nonground is issued and the result is a Failure that names the term and[X_, Y_] == and[Y_, X_] -->
 
 Without the method setting, the completion engine proves the same problem:
 

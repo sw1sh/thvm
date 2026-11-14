@@ -27,7 +27,7 @@ TFindStringProof::equal = "The proof shows that `1` and `2` are equal, but not t
 TFindEquationalPath;
 
 SetUsage[TStringPath, "TStringPath[thm$, axioms$] proves a string-rewriting theorem (TFindStringProof shapes) and returns the rewrite path decoded back to plain strings: the list of words from the theorem's source word to its target word.
-Returns $Failed when the goal is not proved.  Intermediate CenterDot re-bracketings introduced by the associativity bridge decode to the same word; adjacent duplicates are deleted."];
+Returns a Failure when the goal is not proved.  Intermediate CenterDot re-bracketings introduced by the associativity bridge decode to the same word; adjacent duplicates are deleted."];
 
 (* Forward declarations: the Kernel loader's canonical string sort
    places this file BEFORE ATP.wl ("atp_strings" sorts ahead of
@@ -224,18 +224,20 @@ atpDatasetEqPath[po_ProofObject] := Block[{rows = Association @ Normal @ po["Pro
 
 atpSquashDups[l_List] := First /@ Split[l]
 
-TStringPath[thms_, axioms_, opts : OptionsPattern[TFindProof]] := Block[{path = TFindStringProof[thms, axioms, "Path", opts]},
+TStringPath[thms_, axioms_, opts : OptionsPattern[TFindProof]] := Block[{res = TFindStringProof[thms, axioms, {"Status", "Path"}, opts], path},
+    If[ ! AssociationQ[res], Return[res]];
+    path = res["Path"];
     (* The prove-time "Path" reads the engine's live goal chain, which is
-       not always recorded for a multi-goal conjunction.  Fall back to
-       re-walking a ProofObject's proof dataset, which reconstructs the
-       same per-goal chains -- the complete route at the cost of building
-       the ProofObject. *)
-    If[ path === $Failed,
+       not always recorded for a multi-goal conjunction.  When the goal is
+       proved, fall back to re-walking a ProofObject's proof dataset, which
+       reconstructs the same per-goal chains at the cost of building the
+       ProofObject. *)
+    If[ FailureQ[path] && res["Status"] === "Proved",
         With[{po = TFindStringProof[thms, axioms, "ProofObject", opts]},
-            If[MatchQ[po, _ProofObject], path = atpDatasetEqPath[po]]]
+            If[MatchQ[po, _ProofObject], path = Replace[atpDatasetEqPath[po], $Failed -> path]]]
     ];
     Which[
-        ! ListQ[path], $Failed,
+        ! ListQ[path], path,
         path =!= {} && ListQ[First[path]],
             atpSquashDups[atpWordToString /@ #] & /@ path,
         True, atpSquashDups[atpWordToString /@ path]

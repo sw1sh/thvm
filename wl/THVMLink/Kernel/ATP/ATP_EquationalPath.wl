@@ -448,21 +448,21 @@ TFindEquationalPath[po_ProofObject, prop_ ? atpEqPathPropQ, opts : OptionsPatter
         ! FailureQ[res],
             res,
         prop === "Path",
-            atpDatasetEqPath[po],
+            Replace[atpDatasetEqPath[po], $Failed -> res],
         True,
             res
     ]
 ]
 
 (* Theorem + axioms form: prove to a ProofObject via TFindProof, then walk
-   it.  $Failed when the goal is not proved. *)
+   it.  TFindProof's Failure when the goal is not proved. *)
 
 TFindEquationalPath[thm_, axioms_, opts : OptionsPattern[]] := TFindEquationalPath[thm, axioms, "Path", opts]
 
 TFindEquationalPath[thm_, axioms_, prop_ ? atpEqPathPropQ, opts : OptionsPattern[]] := Block[{po = TFindProof[thm, axioms, "ProofObject", Sequence @@ FilterRules[{opts}, Options[TFindProof]]]},
     If[ MatchQ[po, _ProofObject],
         TFindEquationalPath[po, prop, Sequence @@ FilterRules[{opts}, $atpEqPathOptions]],
-        $Failed
+        po
     ]
 ]
 

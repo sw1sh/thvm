@@ -29,7 +29,7 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)"]
 | `"QUEUE_EMPTY"` | the axioms completed without joining the two sides |
 | `"TIMEOUT"` | the [MaxSteps]() budget ran out |
 
-- [TATP]() has attribute [HoldAll](), so an equation such as `a == a` reaches it unevaluated. A <code>[File]()[*path*]</code> argument has to be given with a literal string, or evaluated with [Evaluate](). A file that does not exist issues the message `TATP::nofile` and gives `$Failed`.
+- [TATP]() has attribute [HoldAll](), so an equation such as `a == a` reaches it unevaluated. A <code>[File]()[*path*]</code> argument has to be given with a literal string, or evaluated with [Evaluate](). A file that does not exist issues the message `TATP::nofile` and gives a [Failure]().
 - Equations are best written over operators that do not evaluate, such as [CircleTimes](), [CenterDot]() or an undefined head `f`.
 - The following option can be given:
 
@@ -137,10 +137,10 @@ TATP[File[file]]
 
 ---
 
-A file that does not exist issues a message and gives `$Failed`:
+A file that does not exist issues a message and gives a [Failure]():
 
 ```wl
 TATP[File["/nonexistent/problem.pr"]]
 ```
 
-<!-- => the message TATP::nofile is issued and the result is $Failed -->
+<!-- => the message TATP::nofile is issued and the result is a Failure: "The problem file /nonexistent/problem.pr does not exist." -->

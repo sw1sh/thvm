@@ -24,7 +24,7 @@ RelatedTutorials: ["[The Waldmeister Method in THVMLink](Waldmeister)", "[Method
 - The steps of the proof are keyed as in the proofs of [TFindProof](): `{"Axiom", n}`, `{"Hypothesis", n}`, `{"CriticalPairLemma", n}`, `{"SubstitutionLemma", n}` and `{"Conclusion", 1}`.
 - With the default `"LiftToProofObject" -> True`, the formulas are parsed into expressions and the result is a [ProofObject](). With `"LiftToProofObject" -> False`, the result is an Association with the keys `"Backend"`, `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`, with the formulas as Waldmeister writes them.
 - When Waldmeister finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>, whose `"Status"` is `"Failed"`, or `"TimedOut"` when Waldmeister was stopped at the time limit.
-- A *file* that does not exist issues the message `TWaldmeisterProof::badfile` and gives `$Failed`; a theorem that the theory does not have gives <code>[Failure]()["WmGenerate", …]</code>.
+- A *file* that does not exist issues the message `TWaldmeisterProof::badfile` and gives a [Failure](); a theorem that the theory does not have issues `TFindProof::nothm` and gives a [Failure]().
 - <code>[TFindProof]()["*theorem*", "*theory*", [Method]() -> "WaldmeisterProcess"]</code> gives the same result.
 - The following options can be given:
 
@@ -165,13 +165,13 @@ TFindProof["InverseOfInverse", "AbelianGroupAxioms", Method -> "WaldmeisterProce
 
 ## Possible Issues
 
-A file that does not exist issues a message and gives `$Failed`:
+A file that does not exist issues a message and gives a [Failure]():
 
 ```wl
 TWaldmeisterProofObject["/nonexistent/problem.pr"]
 ```
 
-<!-- => the message TWaldmeisterProof::badfile is issued and the result is $Failed -->
+<!-- => the message TWaldmeisterProof::badfile is issued and the result is a Failure: "Waldmeister .pr file not found: /nonexistent/problem.pr" -->
 
 ---
 
@@ -181,4 +181,4 @@ A theorem that the theory does not have gives a [Failure]():
 TWaldmeisterProofObject["GroupAxioms", "NoSuchTheorem"]
 ```
 
-<!-- => Failure["WmGenerate", <|"Reason" -> "theorem \"NoSuchTheorem\" not in AxiomaticTheory[\"GroupAxioms\", \"NotableTheorems\"]"|>] -->
+<!-- => the message TFindProof::nothm is issued and the result is a Failure: "\"NoSuchTheorem\" is not a notable theorem of AxiomaticTheory[\"GroupAxioms\"]." -->

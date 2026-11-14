@@ -20,8 +20,9 @@ VerificationTest[
 ]
 
 VerificationTest[
-    FailureQ[WolframInstitute`THVMLink`ATP`Private`tptpGenerateProblemFor["AbelianGroupAxioms", "NoSuchTheorem"]],
-    True,
+    Replace[WolframInstitute`THVMLink`ATP`Private`tptpGenerateProblemFor["AbelianGroupAxioms", "NoSuchTheorem"], f_Failure :> {f[[1]], f[[2, "Tag"]]}],
+    {"TFindProof", "nothm"},
+    {TFindProof::nothm},
     TestID -> "ATP/process/unknown-theorem-fails"
 ]
 

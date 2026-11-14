@@ -55,7 +55,7 @@ RelatedTutorials: ["[Disproving Conjectures with Countermodels](Disproof)"]
 | `"CongruenceClosureC"` | the same backtracking search with congruence closure in C |
 | `"Z3"` | a search with the Z3 SMT (satisfiability modulo theories) solver |
 
-- Any other setting of [Method]() issues the message `TFindFiniteModels::method` and gives `$Failed`.
+- Any other setting of [Method]() issues the message `TFindFiniteModels::method` and gives a [Failure]().
 
 ## Basic Examples
 
@@ -393,13 +393,13 @@ TFindFiniteModels[a + b == b + a]
 
 ---
 
-An unknown method issues a message and gives `$Failed`:
+An unknown method issues a message and gives a [Failure]():
 
 ```wl
 TFindFiniteModels[f[x] == x, Method -> "Foo"]
 ```
 
-<!-- => the message TFindFiniteModels::method is issued and the result is $Failed -->
+<!-- => the message TFindFiniteModels::method is issued and the result is a Failure: "Method Foo is not one of Automatic, {ExpressionPrune, BruteForce, SAT, CongruenceClosure, CongruenceClosureC, ExpressionPruneC, Z3}." -->
 
 ## Neat Examples
 

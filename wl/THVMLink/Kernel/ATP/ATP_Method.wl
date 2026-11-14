@@ -39,23 +39,25 @@ Begin["`Private`"];
    Recognized strings are the named presets + the three completion-
    family heads + "Automatic". *)
 $AtpKnownMethodNames := Join[$AtpMethodPresets, {"Completion", "GoalDirected", "MNF", "Automatic"}]
+TAtpSchedule::badmethod = TAtpDescribeMethod::badmethod =
+    "`1` is not a method: give Automatic, \"Completion\", \"GoalDirected\", \"MNF\" or one of $AtpMethodPresets.";
 TAtpSchedule[m_String] /; ! MemberQ[$AtpKnownMethodNames, m] :=
-    (Message[TFindProof::badmethod, m]; $Failed)
+    atpFailure[TAtpSchedule::badmethod, m]
 TAtpSchedule[m_] := atpScheduleFor[m]
 TAtpSchedule[m_String, cj_, ax_List] /; ! MemberQ[$AtpKnownMethodNames, m] :=
-    (Message[TFindProof::badmethod, m]; $Failed)
+    atpFailure[TAtpSchedule::badmethod, m]
 TAtpSchedule[m_, cj_, axiom : (_Equal | _Unequal | _ForAll | Inactive[Equal][_, _] | Inactive[Unequal][_, _])] :=
     TAtpSchedule[m, cj, {axiom}]
 TAtpSchedule[m_, cj_, ax_List] := atpScheduleFor[m, ax, cj]
 TAtpSchedule[m_, thm_String, theory_String] := With[{cj = AxiomaticTheory[theory, "NotableTheorems"][thm], ax = AxiomaticTheory[theory]},
     If[ MissingQ[cj] || ! ListQ[ax],
-        $Failed,
+        atpTheoryFailure[theory, thm],
         TAtpSchedule[m, cj, ax]]
 ]
 (* Conjecture-expression against a NAMED theory: resolve the axioms
    through AxiomaticTheory, then thread through atpScheduleFor. *)
 TAtpSchedule[m_, cj : (_List | _ForAll | _Equal | _Unequal | Inactive[Equal][_, _] | Inactive[Unequal][_, _]), theory_String] := With[{ax = AxiomaticTheory[theory]},
-    If[ ! ListQ[ax], $Failed, TAtpSchedule[m, cj, ax]]
+    If[ ! ListQ[ax], atpTheoryFailure[theory], TAtpSchedule[m, cj, ax]]
 ]
 
 (* TAtpDescribeMethod: human-readable Method expansion.  Returns the
@@ -77,9 +79,9 @@ TAtpDescribeMethod[Automatic] :=
 (* Catch unrecognized string Method names BEFORE the catch-all
    silently returns <||>.  Same recognized set as TAtpSchedule. *)
 TAtpDescribeMethod[m_String] /; ! MemberQ[$AtpKnownMethodNames, m] :=
-    (Message[TFindProof::badmethod, m]; $Failed)
+    atpFailure[TAtpDescribeMethod::badmethod, m]
 TAtpDescribeMethod[{m_String, subopts___Rule}] /; ! MemberQ[$AtpKnownMethodNames, m] :=
-    (Message[TFindProof::badmethod, m]; $Failed)
+    atpFailure[TAtpDescribeMethod::badmethod, m]
 TAtpDescribeMethod[{m_String, subopts___Rule}] :=
     Association[{subopts}]
 TAtpDescribeMethod[m_String] := <||>
@@ -97,7 +99,7 @@ TAtpDescribeMethod[m_, cj_, ax_List] :=
             TAtpDescribeMethod[m]]]
 TAtpDescribeMethod[m_, thm_String, theory_String] := With[{cj = AxiomaticTheory[theory, "NotableTheorems"][thm], ax = AxiomaticTheory[theory]},
     If[ MissingQ[cj] || ! ListQ[ax],
-        $Failed,
+        atpTheoryFailure[theory, thm],
         TAtpDescribeMethod[m, cj, ax]]]
 
 (* ====================================================================
