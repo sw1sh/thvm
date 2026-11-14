@@ -209,16 +209,17 @@ Scan[
    memoized at the engine's first proof call, so set it before then; users can
    still override THVM_ATP_TRACE_MAX. *)
 If[ Environment["THVM_ATP_TRACE_MAX"] === $Failed || Environment["THVM_ATP_TRACE_MAX"] === None,
-    SetEnvironment["THVM_ATP_TRACE_MAX" -> "4194304"]];
+    SetEnvironment["THVM_ATP_TRACE_MAX" -> "33554432"]];
 
 (* The trace entries past the search-visible bound (ATP_MAX_TRACE) hold only numbers, so they
    go to the heap's permanent tail, which the collector never scans; without one they stay on
    the collected heap, where a deep run's trace is almost the whole live set and every
    collection copies it (ImpliesShefferAxioms of "WolframAxioms": 101M of 101M live cells at
-   1.5M steps, then a collection every few steps).  268435456 cells is 2 GiB of address space,
-   touched only as entries arrive; it is read when the heap is first mapped, so set it here. *)
+   1.5M steps, then a collection every few steps).  536870912 cells is 4 GiB of address space,
+   touched only as entries arrive (about 9 cells each, so room for the 2^25-entry trace cap
+   above); it is read when the heap is first mapped, so set it here. *)
 If[ Environment["THVM_HEAP_PERM_CELLS"] === $Failed || Environment["THVM_HEAP_PERM_CELLS"] === None,
-    SetEnvironment["THVM_HEAP_PERM_CELLS" -> "268435456"]];
+    SetEnvironment["THVM_HEAP_PERM_CELLS" -> "536870912"]];
 
 (* `load` is the LibraryFunctionLoad helper defined in
    WolframInstitute`THVMLink`Private` by THVMLink.wl; alias it here so bare `load[...]`
@@ -3314,10 +3315,14 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
    default Automatic schedule's Mix2+Gt slot sequence CRASHes on
    (WolframAxioms/Implies{Hillman,Meredith,WolframAlternate,
    WolframCommutative}*Axioms c1/c2). *)
+(* Lazy normalization without a CP-set sweep is this preset's definition
+   (wmcli -auto), bounded by its slice of the time, so its own
+   TFindProof::lazyunsafe warning would only be noise. *)
 atpParseMethod["WaldmeisterAuto"] := atpParseMethod[{"WaldmeisterAuto"}];
-atpParseMethod[{"WaldmeisterAuto", subopts___Rule}] :=
+atpParseMethod[{"WaldmeisterAuto", subopts___Rule}] := Quiet[
     atpDispatchPreset[$AtpPresetDefaults["WaldmeisterAuto"],
-        $AtpPresetGoalDirected["WaldmeisterAuto"], {subopts}];
+        $AtpPresetGoalDirected["WaldmeisterAuto"], {subopts}],
+    TFindProof::lazyunsafe];
 
 atpParseMethod["WaldmeisterLazy"] := atpParseMethod[{"WaldmeisterLazy"}];
 atpParseMethod[{"WaldmeisterLazy", subopts___Rule}] :=
