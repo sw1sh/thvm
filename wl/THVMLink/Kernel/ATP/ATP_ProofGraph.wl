@@ -393,6 +393,31 @@ atpHeadFor[label_, name_] := If[ KeyExistsQ[$atpSymObj, label],
     ReleaseHold @ $atpSymObj[label],
     If[ StringMatchQ[name, NumberString], Interpreter["Number"][name], Symbol[name]]]
 
+(* A proof dataset is well-founded when no lemma rests on a goal
+   hypothesis: each Conclusion g is reached by the Input chain from
+   Hypothesis g, and every Construct / MatchingConstruct any row cites
+   derives from the axioms alone.  A row derived from a hypothesis is an
+   instance of that goal, not a general lemma; citing one lets a
+   conclusion rest on itself, directly or through another conjunct.  The
+   ProofObject verifier replays every step but does not check this, so
+   TFindProof does before it returns a proof. *)
+atpProofWellFoundedQ[ds_] := Module[{rows, deps, onGoal, busy = <||>},
+    rows = Association[ds];
+    deps[k_] := With[{p = Lookup[Lookup[rows, Key[k], <||>], "Proof", <||>]},
+        DeleteMissing[{Lookup[p, "Input", Missing[]], Lookup[p, "Construct", Missing[]],
+            Lookup[p, "MatchingConstruct", Missing[]]}]];
+    (* a citation cycle counts as resting on a goal: such a dataset is
+       not a derivation at all *)
+    onGoal[k_] := onGoal[k] = Which[
+        MatchQ[k, {"Hypothesis", _}], True,
+        KeyExistsQ[busy, k], True,
+        True, busy[k] = True; AnyTrue[deps[k], onGoal]];
+    NoneTrue[Values[rows],
+        Function[r, With[{p = Lookup[r, "Proof", <||>]},
+            AnyTrue[DeleteMissing[{Lookup[p, "Construct", Missing[]],
+                Lookup[p, "MatchingConstruct", Missing[]]}], onGoal]]]]
+]
+
 (* The encoder skolemizes a universal goal by stripping its Pattern
    wrappers, so the goal's constants are the user's own symbols.  A goal
    that reuses the axioms' variable names then holds one symbol both as a

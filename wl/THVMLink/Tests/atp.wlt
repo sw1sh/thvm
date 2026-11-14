@@ -2797,6 +2797,44 @@ VerificationTest[
     TestID -> "ATP/decode/goal-constants-apart-from-variables"
 ]
 
+(* A proof is accepted only when no lemma rests on a goal hypothesis.
+   Conclusion 1 cites a lemma rewritten from Hypothesis 2 and Conclusion 2
+   one rewritten from Hypothesis 1: each conjunct rests on the other, a
+   cycle the ProofObject verifier's step replay does not see. *)
+$atpWfRows[l1_, l2_] := {
+    {"Axiom", 1} -> <|"Statement" -> HoldForm[f[x] == x], "Proof" -> <||>|>,
+    {"Hypothesis", 1} -> <|"Statement" -> HoldForm[f[f[a]] == a], "Proof" -> <||>|>,
+    {"Hypothesis", 2} -> <|"Statement" -> HoldForm[f[f[b]] == b], "Proof" -> <||>|>,
+    {"SubstitutionLemma", 1} -> <|"Statement" -> HoldForm[f[b] == b],
+        "Proof" -> <|"Input" -> l1, "Construct" -> {"Axiom", 1}|>|>,
+    {"SubstitutionLemma", 2} -> <|"Statement" -> HoldForm[f[a] == a],
+        "Proof" -> <|"Input" -> l2, "Construct" -> {"Axiom", 1}|>|>,
+    {"Conclusion", 1} -> <|"Statement" -> HoldForm[a == a],
+        "Proof" -> <|"Input" -> {"Hypothesis", 1}, "Construct" -> {"SubstitutionLemma", 2}|>|>,
+    {"Conclusion", 2} -> <|"Statement" -> HoldForm[b == b],
+        "Proof" -> <|"Input" -> {"Hypothesis", 2}, "Construct" -> {"SubstitutionLemma", 1}|>|>};
+
+VerificationTest[
+    WolframInstitute`THVMLink`ATP`Private`atpProofWellFoundedQ[
+        $atpWfRows[{"Hypothesis", 1}, {"Hypothesis", 2}]],
+    False,
+    TestID -> "ATP/wellfounded/rejects-conjuncts-resting-on-each-other"
+]
+
+VerificationTest[
+    WolframInstitute`THVMLink`ATP`Private`atpProofWellFoundedQ[
+        $atpWfRows[{"Hypothesis", 2}, {"Axiom", 1}]],
+    False,
+    TestID -> "ATP/wellfounded/rejects-goal-derived-lemma"
+]
+
+VerificationTest[
+    WolframInstitute`THVMLink`ATP`Private`atpProofWellFoundedQ[
+        $atpWfRows[{"Axiom", 1}, {"Axiom", 1}]],
+    True,
+    TestID -> "ATP/wellfounded/accepts-axiom-lemmas"
+]
+
 
 (* TRelevantAxioms on an unquantified pattern axiom should keep
    the axiom (Pattern variables shouldn't be misclassified as

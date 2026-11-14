@@ -5202,6 +5202,11 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                         Lookup[#, "Reason", 0] === $TraceFvi &];
                     Which[
                         ! MatchQ[p, _ProofObject], $Failed,
+                        (* the ProofObject verifier replays every step but
+                           accepts a lemma that rests on a goal hypothesis *)
+                        ! atpProofWellFoundedQ[ds],
+                            atpDbgFail["tryBuild.goal-premise chain=" <> ToString[chainOn]];
+                            $Failed,
                         MatchQ[v, _Success], p,
                         hasFvi, p,
                         True, $Failed
