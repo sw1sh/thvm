@@ -2784,6 +2784,20 @@ VerificationTest[
     TestID -> "ATP/context/no-private-stub-of-public-name"
 ]
 
+(* A goal that reuses the axioms' variable names skolemizes them to the
+   same symbols: the proof lift decodes those goal constants to formal
+   letters of their own, so no lemma row reads a constant as a variable.
+   The goal's free c is a constant only and keeps its symbol. *)
+VerificationTest[
+    Values @ WolframInstitute`THVMLink`ATP`Private`atpSkolemSymbols[
+        WolframInstitute`THVMLink`ATP`Private`atpEncodeProblem[
+            {ForAll[{a, b}, f[a, b] == f[b, a]]},
+            ForAll[{a, b}, f[f[a, b], c] == f[c, f[b, a]]], True]],
+    {\[FormalA], \[FormalB]},
+    TestID -> "ATP/decode/goal-constants-apart-from-variables"
+]
+
+
 (* TRelevantAxioms on an unquantified pattern axiom should keep
    the axiom (Pattern variables shouldn't be misclassified as
    confined symbols).  Iter 66 fixed atpFnSyms to skip Pattern-

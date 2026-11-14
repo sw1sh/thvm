@@ -32,6 +32,7 @@ RelatedTutorials: ["[Theorem Proving with THVMLink](ATP)", "[Methods and Presets
 - [TFindProof]() searches for an equational proof by unfailing Knuth-Bendix completion: it orients the axioms into rewrite rules, adds the critical pairs between them, and stops when both sides of the conjecture rewrite to the same term.
 - The [ProofObject]() it gives is the one [FindEquationalProof]() gives, with the same properties, such as `"ProofDataset"`, `"ProofGraph"`, `"ProofLength"` and `"ProofFunction"`.
 - An equation is written `lhs == rhs` or <code>[ForAll]()[*vars*, *lhs* == *rhs*]</code>. Pattern variables such as `x_` in an axiom are universally quantified, and the free symbols of a conjecture are arbitrary constants.
+- When a constant of the conjecture has the name of a variable of the axioms, the proof writes the constant as a formal symbol, such as `\[FormalC]` for `c`, as [FindEquationalProof]() does, so that no lemma reads a constant as a variable.
 - An axiom written as a rule `lhs -> rhs` rewrites from left to right only. An axiom written as `lhs <-> rhs` or `{lhs, rhs}` is an equation, oriented by the prover.
 - Equations are best written over operators that do not evaluate, such as [CircleTimes](), [CenterDot]() or an undefined head `f`. [Times]() and [Plus]() are [Orderless](), so an equation over them can evaluate before the prover sees it.
 - A list of conjectures is proved as one conjunction, and gives one [ProofObject]() with a hypothesis and a conclusion for each conjecture.

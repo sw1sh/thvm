@@ -393,6 +393,31 @@ atpHeadFor[label_, name_] := If[ KeyExistsQ[$atpSymObj, label],
     ReleaseHold @ $atpSymObj[label],
     If[ StringMatchQ[name, NumberString], Interpreter["Number"][name], Symbol[name]]]
 
+(* The encoder skolemizes a universal goal by stripping its Pattern
+   wrappers, so the goal's constants are the user's own symbols.  A goal
+   that reuses the axioms' variable names then holds one symbol both as a
+   constant label and as a variable: ImpliesShefferAxioms' c is label 6
+   and the WolframAxioms axiom's variable c.  The proof lift decodes each
+   such constant to a symbol of its own, the formal letter
+   FindEquationalProof writes for a goal symbol, so no lemma row reads a
+   constant as a variable.  <|label -> symbol|>, empty when no name is
+   shared. *)
+atpSkolemSymbols[enc_Association] := Block[{st = enc["State"], vars, held},
+    vars = Values[Lookup[st, "varObj", <||>]];
+    held = Join[vars, Values[Lookup[st, "symObj", <||>]]];
+    Association @ KeyValueMap[
+        If[ MemberQ[vars, #2], #1 -> atpGoalSymbol[#2, held], Nothing] &,
+        Lookup[st, "symObj", <||>]]]
+
+atpGoalSymbol[Hold[s_Symbol], held_List] := With[{name = SymbolName[Unevaluated[s]]},
+    With[{formal = Which[
+            StringMatchQ[name, RegularExpression["[a-z]"]], ToExpression["\\[Formal" <> ToUpperCase[name] <> "]"],
+            StringMatchQ[name, RegularExpression["[A-Z]"]], ToExpression["\\[FormalCapital" <> name <> "]"],
+            True, None]},
+        If[ formal =!= None && ! MemberQ[held, Hold[formal]],
+            formal,
+            Symbol["WolframInstitute`THVMLink`ATP`Private`" <> name <> "Goal"]]]]
+
 (* Decode a raw packed ATP Term back to a WL expression.  CTR ->
    head[children...] (arity 0 -> bare symbol); FVR -> the bound
    variable's bare symbol.  labelToName / idToName invert the
@@ -1092,10 +1117,12 @@ cplReconCp[cEq_, mEq_, pos_, varSyms_] := Block[{cf, cv, mf, mv, peak, subt, sub
 buildCplDataset[enc_, conjPair_, cRes_] := Catch[
     Block[{$RecursionLimit = 100000, $IterationLimit = 1000000,
         (* the caller's held originals for decodeAtpTerm, which reads them
-           dynamically, so a Module variable would not reach it *)
-        $atpSymObj = Lookup[enc["State"], "symObj", <||>],
+           dynamically, so a Module variable would not reach it; a goal
+           constant named like a variable decodes to its own symbol *)
+        $atpSymObj = Join[Lookup[enc["State"], "symObj", <||>], Hold /@ atpSkolemSymbols[enc]],
         $atpVarObj = Lookup[enc["State"], "varObj", <||>]},
     Module[{
+        goalRules, goalTerm, goalSteps,
         trace, traceRaw, traceOffsets, decodeTraceEntry, traceReasons,
         orientFviIdx, deathOf, mainRules = cRes["MainRules"],
         rTrace = cRes["RTrace"],
@@ -1136,6 +1163,17 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             Print["[recon] cpl-", label, " = ", AbsoluteTime[] - cplT0, " s"];
             cplT0 = AbsoluteTime[]];
         varSyms = cRes["VarSyms"];
+        (* The goal pair and the goal-chain terms were decoded with the
+           user's symbols; they are ground, so every goal-constant symbol
+           in them is a constant and takes its own symbol here too. *)
+        goalRules = KeyValueMap[
+            With[{sk = #2}, Lookup[enc["State"]["symObj"], #1] /. Hold[s_] :> (HoldPattern[s] :> sk)] &,
+            atpSkolemSymbols[enc]];
+        goalTerm[t_] := t /. goalRules;
+        goalSteps[st_] := If[ ListQ[st],
+            Join[#, <|"Before" -> goalTerm[#["Before"]], "After" -> goalTerm[#["After"]]|>] & /@ st,
+            st];
+        mainSteps = goalSteps[mainSteps];
         (* Lazy, memoized trace-term decode: trace entries ship raw Term
            ints (LhsRaw/RhsRaw); decodeAtpTerm walks the C heap per cell,
            so eagerly decoding all ~15k saturation entries cost seconds.
@@ -1200,7 +1238,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
            wrappers -- strip them so every comparison is bare-to-bare
            (cplAsRule re-patternizes when building rewrite rules). *)
         axPairs = axPairs /. Verbatim[Pattern][s_Symbol, _] :> s;
-        cjp = conjPair /. Verbatim[Pattern][s_Symbol, _] :> s;
+        cjp = goalTerm[conjPair /. Verbatim[Pattern][s_Symbol, _] :> s];
         entries = {};         (* lemma key -> assoc, accumulated *)
         (* per-entry chronology tag (key -> {major, minor}): the sort
            key wmSelectionOrderEntries orders the lemma block by, so
@@ -1761,14 +1799,19 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
             If[ cplEqSetQ[aInfo["Eq"], cpEq, varSyms], Return[aInfo]];
             If[ cplEqSetQ[bInfo["Eq"], cpEq, varSyms], Return[bInfo]];
             (* Select the face/role geometry that reproduces the stored CP
-               under the verifier's convention.  When no combination does
-               (a position truncated past CP_MAX_DEPTH, say), fall back to
-               the sound emitNorm bridge instead of emitting a Critical-
-               PairLemma whose geometry the verifier would replay into a
-               different equation. *)
+               under the verifier's convention.  The trace stores the raw
+               overlap of the two parents (cp_push.c), so one combination
+               reproduces it unless the recorded position was truncated at
+               CP_MAX_DEPTH (64), where the sound emitNorm bridge takes
+               over.  A miss at a shorter position means the decode no
+               longer matches the engine, which the lift reports and stops
+               on rather than searching. *)
             geom = chooseCpGeometry[aInfo, ruleAEq, bInfo, ruleBEq, pos, cpEq];
             If[ MissingQ[geom],
                 atpDbgFail["resolveCp.no-geometry@" <> ToString[ti]];
+                If[ Length[pos] < 64,
+                    Message[TFindProof::cpgeom, ti];
+                    Throw[$Failed]];
                 If[ Environment["THVM_ATP_BUILD_DEBUG"] =!= $Failed,
                     WriteString["stderr", "CP25 pA=", ToString[cte["ParentA"]],
                         " rA=", ToString[trace[[cte["ParentA"]+1]]["Reason"]],
@@ -2149,7 +2192,7 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                 (* a conjunct the MNF search closed inside a conjunction:
                    its chain is its MnfSteps slice, citing by trace index *)
                 If[ gSteps === {} && nGoals > 1 && ListQ[cRes["MnfSteps"]],
-                    gSteps = Select[cRes["MnfSteps"], Quotient[#["Side"], 2] === g - 1 &];
+                    gSteps = goalSteps @ Select[cRes["MnfSteps"], Quotient[#["Side"], 2] === g - 1 &];
                     gMnf = gSteps =!= {}];
                 gSteps = Append[#, "Side" -> Mod[#["Side"], 2]] & /@ gSteps;
                 runEq = cjps[[g]];
@@ -2174,15 +2217,17 @@ buildCplDataset[enc_, conjPair_, cRes_] := Catch[
                                    rTrace -> resolveTrace).  Both land
                                    on the same Axiom /
                                    CriticalPairLemma key; mr is the
-                                   rule's oriented equation, read off
-                                   mainRules for a live rule or the
+                                   rule's oriented equation, decoded like
+                                   the trace (goal constants apart from
+                                   variables): the live rule's terms in
+                                   the wire's MAIN rules block, or the
                                    trace node for an MNF citation. *)
                                 cInfo = If[gMnf, resolveTrace[step["RuleC"]], resolveRule[step["RuleC"]]];
                                 cKey = cInfo["Key"];
                                 mr = If[ gMnf,
                                     With[{te = trace[[step["RuleC"] + 1]]},
                                         {tL[te], tR[te]}],
-                                    mainRules[[step["RuleC"] + 1]]];
+                                    {dterm[traceRaw[[9 + 2 step["RuleC"]]]], dterm[traceRaw[[10 + 2 step["RuleC"]]]]}];
                                 (* Ordered rewriting in the C engine
                                    fires whichever direction strictly
                                    decreases the redex.  Fwd = 1 for an

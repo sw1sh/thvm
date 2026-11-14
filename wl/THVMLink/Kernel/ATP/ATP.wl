@@ -5169,7 +5169,11 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                         {$pt, p} = AbsoluteTiming @
                             ProofObject["EquationalLogic", conjStmt, axEq,
                                 <|"Variables" -> Union[varNames,
-                                    Cases[ds, s_Symbol /; atpXVarQ[s], {0, Infinity}]],
+                                    Cases[ds, s_Symbol /; atpXVarQ[s], {0, Infinity}],
+                                    (* the goal constants' own symbols, which the
+                                       verifier generalizes as FindEquationalProof
+                                       does its goal's formal symbols *)
+                                    Values[atpSkolemSymbols[enc]]],
                                   "Constants" -> Union @ Cases[ds,
                                     s_Symbol /; MemberQ[{"cAtp1", "cAtp2"},
                                         SymbolName[s]], {0, Infinity}],
@@ -5287,7 +5291,8 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
     "TATPError"
 ];
 
-TFindProof::cplpo = "The completed rule set has `1` rules; building their derivations exceeds the TimeConstraint, so the ProofObject lists the axioms only. \"Lemmas\" gives the rules.";
+TFindProof::cpgeom = "Critical pair `1` of the completion trace is not the overlap of its parents at its recorded position; the proof is not built.";
+TFindProof::cplpo ="The completed rule set has `1` rules; building their derivations exceeds the TimeConstraint, so the ProofObject lists the axioms only. \"Lemmas\" gives the rules.";
 
 (* Construct a ProofObject with "Theorems" -> None.  Use the same buildCplDataset path the
    goal-directed bundle uses, which recognises the (conjPair == {0, 0}, no main steps) no-goal
