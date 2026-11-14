@@ -468,9 +468,13 @@ atpAutoTuneForClass["Sheffer"] := {
          completion configs because a known engine bug can hang MNF on a hard cross-axiom
          Implies-X, and its slice of the budget bounds the hang.
        - SInE relevance pruning helps the cross-system Meredith-class Implies-X.
+       - "WaldmeisterAuto" (Waldmeister's automatic mode, wmcli -auto) follows with as many
+         shares: it proves ImpliesShefferAxioms, whose third conjunct takes 3068992 steps that the
+         "Waldmeister" configuration does not reach, and its step budget is its slice of the time.
        Every entry after the first Mix2 one caps critical-pair weight with AutoMaxWeight 20, so
        none thrashes memory. *)
     {"Waldmeister", "ScheduleShare" -> 6},
+    {"WaldmeisterAuto", "ScheduleShare" -> 6},
     {"Completion", "CriticalPairWeight" -> "Mix2", "SelectionRatio" -> 2},
     {"Completion", "CriticalPairWeight" -> "Mix2", "SelectionRatio" -> 2, "AutoMaxWeight" -> 20},
     {"Completion", "CriticalPairWeight" -> "Add", "AutoMaxWeight" -> 20},

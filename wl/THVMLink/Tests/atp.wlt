@@ -2492,6 +2492,31 @@ VerificationTest[
     TestID -> "ATP/schedule/unknown-theorem-name-fails"
 ]
 
+(* The single-operator class schedule follows the Waldmeister entry with
+   Waldmeister's automatic mode, which reaches ImpliesShefferAxioms. *)
+VerificationTest[
+    TAtpSchedule[Automatic, "ImpliesShefferAxioms", "WolframAxioms"][[;; 2]],
+    {{"Waldmeister", "ScheduleShare" -> 6}, {"WaldmeisterAuto", "ScheduleShare" -> 6}},
+    TestID -> "ATP/schedule/WolframAxioms-WaldmeisterAuto-second"
+]
+
+(* "WaldmeisterAuto" runs to its wall when it has one and stops at
+   500000 steps without; "Waldmeister" stops at 500000 either way. *)
+VerificationTest[
+    WolframInstitute`THVMLink`ATP`Private`atpResolveMaxSteps[Automatic, Sequence @@ #] & /@
+        {{"WaldmeisterAuto", 360.}, {"WaldmeisterAuto", 0.}, {"Waldmeister", 720.}, {"Completion", 60.}},
+    {2^31 - 1, 500000, 500000, 200000},
+    TestID -> "ATP/method/WaldmeisterAuto-step-budget"
+]
+
+(* "WaldmeisterAuto" keeps the axioms as given; "Waldmeister" takes
+   FindEquationalProof's loader order and sides. *)
+VerificationTest[
+    WolframInstitute`THVMLink`ATP`Private`atpWmIntakeOrderQ /@ {"WaldmeisterAuto", "Waldmeister"},
+    {False, True},
+    TestID -> "ATP/method/WaldmeisterAuto-intake"
+]
+
 (* === $AtpMethodPresets coverage =================================== *)
 
 (* The named-preset registry should be non-empty and include the

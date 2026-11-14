@@ -99,7 +99,7 @@ The possible settings of [Method]() are:
 | `"GoalDirected"`, `"MNF"` | completion together with a search from both sides of the goal |
 | `"VampirePortfolio"` | a schedule of 13 configurations modeled on the Vampire prover |
 | `"VampirePortfolioCompact"` | a schedule of three configurations for short time limits |
-| `"Waldmeister"`, `"VampireUEQ"`, `"Twee"`, `"EProver"`, `"VampireRandom"`, `"ENIGMA"` | named configurations |
+| `"Waldmeister"`, `"WaldmeisterAuto"`, `"VampireUEQ"`, `"Twee"`, `"EProver"`, `"VampireRandom"`, `"ENIGMA"` | named configurations |
 | `"SMT"` | congruence closure, for a problem without variables |
 | `"VampireProcess"`, `"EproverProcess"`, `"TweeProcess"`, `"WaldmeisterProcess"` | the external prover programs |
 
@@ -110,7 +110,7 @@ The variable `$AtpMethodPresets` lists the named configurations and schedules:
 ```wl
 $AtpMethodPresets
 ```
-<!-- => {"Waldmeister", "VampireUEQ", "Twee", "EProver", "VampireRandom", "ENIGMA", "Portfolio", "VampirePortfolio", "VampirePortfolioCompact", "AllPresets"} -->
+<!-- => {"Waldmeister", "WaldmeisterAuto", "VampireUEQ", "Twee", "EProver", "VampireRandom", "ENIGMA", "Portfolio", "VampirePortfolio", "VampirePortfolioCompact", "AllPresets"} -->
 
 ## Named configurations
 
@@ -126,6 +126,7 @@ The named configurations are:
 | | |
 | --- | --- |
 | `"Waldmeister"` | the `"Mix"` ranking, KBO, an automatic precedence and Waldmeister's order of operations; see [The Waldmeister Method in THVMLink](paclet:WolframInstitute/THVMLink/tutorial/Waldmeister) |
+| `"WaldmeisterAuto"` | Waldmeister's automatic mode: as `"Waldmeister"`, but critical pairs of 50 or more symbols are queued unnormalized, equations and axioms keep their sides as given, and the goal is also searched from both sides |
 | `"VampireUEQ"` | LPO, an automatic precedence, a selection ratio of 10, a growing weight bound, backward simplification and a search from both sides of the goal, after the Vampire prover |
 | `"Twee"` | the `"Twee"` ranking, deletion of ground-joinable and connected critical pairs, backward simplification and a growing weight bound starting at 20, after the Twee prover |
 | `"EProver"` | the `"ConjSym"` ranking, KBO with the rarest symbols ranked highest, a selection ratio of 10 and a growing weight bound starting at 20, after the E prover |
@@ -272,7 +273,7 @@ TAtpDescribeMethod["VampirePortfolioCompact"]
 ```
 <!-- => <|"Schedule" -> {"VampireUEQ", "Twee", {"Completion", "CriticalPairWeight" -> "Mix2", "AutoPrecedence" -> True, "AutoMaxWeight" -> 20}}|> -->
 
-A schedule shares the [TimeConstraint]() of [TFindProof]() among its entries: each entry gets the time left in proportion to its weight among the entries left. The weight of an entry is 1, doubled for each of the first *n* entries with the option <code>[PortfolioFrontLoad]() -> *n*</code>, whose default is 1, and multiplied by *w* for an entry <code>{*name*, …, "ScheduleShare" -> *w*}</code>. <code>[PortfolioFrontLoad]() -> 0</code> shares the time equally among plain entries. With the default <code>[TimeConstraint]() -> [Infinity]()</code>, each entry gets 60 seconds. The option [MaxSteps]() bounds the number of critical pairs a configuration processes; its default, [Automatic](), is 200000, and 500000 for the `"Waldmeister"` configuration.
+A schedule shares the [TimeConstraint]() of [TFindProof]() among its entries: each entry gets the time left in proportion to its weight among the entries left. The weight of an entry is 1, doubled for each of the first *n* entries with the option <code>[PortfolioFrontLoad]() -> *n*</code>, whose default is 1, and multiplied by *w* for an entry <code>{*name*, …, "ScheduleShare" -> *w*}</code>. <code>[PortfolioFrontLoad]() -> 0</code> shares the time equally among plain entries. With the default <code>[TimeConstraint]() -> [Infinity]()</code>, each entry gets 60 seconds per unit of weight. The option [MaxSteps]() bounds the number of critical pairs a configuration processes; its default, [Automatic](), is 200000, 500000 for the `"Waldmeister"` configuration, and for `"WaldmeisterAuto"` as many as its slice of the time allows.
 
 ## More configurations
 

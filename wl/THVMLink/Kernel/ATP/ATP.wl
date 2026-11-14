@@ -3152,11 +3152,31 @@ $AtpPresetDefaults = <|
         "CoopRatio" -> 2|>
 |>;
 
+(* "WaldmeisterAuto": Waldmeister's automatic mode, `wmcli -auto`, where
+   "Waldmeister" is the configuration FindEquationalProof runs.  It
+   treats only the critical pairs under 50 symbols at push and queues
+   the rest raw (LazyNormalize), keeps an unorientable equation's sides
+   and the axioms as given (no CPSide swap, no FindEquationalProof
+   loader canonicalization: "FEQIntake" -> False), takes none of the
+   FEQ formation-order corrections, and runs the MNF goal search.  It is
+   the selection the bench's Waldmeister mode is certified against
+   (rule for rule to step 1000000 on the third conjunct of
+   ImpliesShefferAxioms of "WolframAxioms", which it proves at step
+   3068992 where "Waldmeister" does not within 4 million). *)
+$AtpPresetDefaults["WaldmeisterAuto"] = Join[$AtpPresetDefaults["Waldmeister"], <|
+    "LazyNormalize" -> True,
+    "CPSide" -> False,
+    "EsetDistdir" -> False,
+    "FormationFifo" -> False,
+    "ForceCombinatorOrient" -> False,
+    "FEQIntake" -> False|>];
+
 (* Per-preset default for the GoalDirected (MNF front) toggle.  Mostly
    False -- VampireUEQ is the lone True per Vampire's `tgt=full`. *)
 $AtpPresetGoalDirected = <|
     "Waldmeister" -> False,
     "WaldmeisterLazy" -> False,
+    "WaldmeisterAuto" -> True,
     "VampireUEQ" -> True,
     "VampireUEQDefault" -> False,  (* matches Vampire's UEQ portfolio default slot which doesn't enable goal-MNF *)
     "Twee" -> False,
@@ -3294,6 +3314,11 @@ atpParseMethod[{"Waldmeister", subopts___Rule}] :=
    default Automatic schedule's Mix2+Gt slot sequence CRASHes on
    (WolframAxioms/Implies{Hillman,Meredith,WolframAlternate,
    WolframCommutative}*Axioms c1/c2). *)
+atpParseMethod["WaldmeisterAuto"] := atpParseMethod[{"WaldmeisterAuto"}];
+atpParseMethod[{"WaldmeisterAuto", subopts___Rule}] :=
+    atpDispatchPreset[$AtpPresetDefaults["WaldmeisterAuto"],
+        $AtpPresetGoalDirected["WaldmeisterAuto"], {subopts}];
+
 atpParseMethod["WaldmeisterLazy"] := atpParseMethod[{"WaldmeisterLazy"}];
 atpParseMethod[{"WaldmeisterLazy", subopts___Rule}] :=
     atpDispatchPreset[$AtpPresetDefaults["WaldmeisterLazy"],
@@ -3439,7 +3464,7 @@ atpParseMethod[{"ENIGMA", subopts___Rule}] :=
    configs); the rest are single-config presets.  Exposed as
    $AtpMethodPresets so a downstream tool (test sweep, doc generator,
    tuner) can enumerate them without re-encoding the set. *)
-$AtpMethodPresets = {"Waldmeister",
+$AtpMethodPresets = {"Waldmeister", "WaldmeisterAuto",
     "VampireUEQ", "Twee", "EProver",
     "VampireRandom", "ENIGMA",
     "Portfolio", "VampirePortfolio", "VampirePortfolioCompact",
@@ -4785,30 +4810,39 @@ TFindProof[conjecture_, axioms_List, returnSpec_ ? atpReturnSpecQ, OptionsPatter
 atpHeapRecycleOuter[] := If[ ! TrueQ[$atpInRun], $atpHeapRecycleFn[]];
 
 (* True iff the Method spec resolves to a preset with the WM loader
-   intake ("IntakeOrder" -> True after subopt merge).  Gates the
-   loader-level axiom canonicalization below. *)
-atpWmIntakeOrderQ[m_] := Block[{name, subs},
+   intake ("IntakeOrder" -> True after subopt merge) that also takes
+   FindEquationalProof's axiom order and sides ("FEQIntake", default
+   True).  Gates the loader-level axiom canonicalization in the
+   encoder; the engine's intake ordering follows "IntakeOrder" alone. *)
+atpWmIntakeOrderQ[m_] := Block[{name, subs, o},
     {name, subs} = Replace[m, {
         {n_String, s___Rule} :> {n, {s}},
         n_String :> {n, {}},
         _ :> {None, {}}}];
     name =!= None && KeyExistsQ[$AtpPresetDefaults, name] &&
-        TrueQ @ Lookup[Join[$AtpPresetDefaults[name], Association[subs]],
-            "IntakeOrder", False]
+        (o = Join[$AtpPresetDefaults[name], Association[subs]];
+         TrueQ[Lookup[o, "IntakeOrder", False]] && Lookup[o, "FEQIntake", True] =!= False)
 ]
 
 (* True iff the Method spec names one of the "Waldmeister"* presets
    (bare name or {name, subopts...}). *)
 atpWmPresetNameQ[m_] := MatchQ[Replace[m, {n_String, ___} :> n],
-    "Waldmeister" | "WaldmeisterLazy"];
+    "Waldmeister" | "WaldmeisterLazy" | "WaldmeisterAuto"];
 
 (* MaxSteps -> Automatic resolution (see Options[TFindProof]): the
-   Waldmeister presets get the deep-proof budget, everything else keeps
-   the historical default.  A portfolio schedule forwards Automatic
-   into each slice's recursive atpProveBundle, so the budget resolves
-   per-slice against that slice's Method. *)
-atpResolveMaxSteps[Automatic, m_] := If[ atpWmPresetNameQ[m], 500000, 200000];
-atpResolveMaxSteps[n_, _] := n;
+   "WaldmeisterAuto" preset under a wall runs until the wall, since its
+   deep proofs take millions of steps (the third conjunct of
+   ImpliesShefferAxioms of "WolframAxioms" 3068992); the other
+   Waldmeister presets stop at 500000, which bounds the memory of the
+   eager queue; every other method keeps the historical 200000.  A
+   portfolio schedule forwards Automatic into each slice's recursive
+   atpProveBundle with the slice's wall, so the budget resolves per
+   slice. *)
+atpResolveMaxSteps[Automatic, m_, wall_ : 0.] := Which[
+    ! atpWmPresetNameQ[m], 200000,
+    MatchQ[Replace[m, {n_String, ___} :> n], "WaldmeisterAuto"] && TrueQ[wall > 0], 2^31 - 1,
+    True, 500000];
+atpResolveMaxSteps[n_, _, ___] := n;
 
 (* Deep "Waldmeister"* completions materialize a multi-million-entry
    proof trace on the dyn heap; the compile-time default heap (HEAP_CAP
@@ -5018,7 +5052,7 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
         ruleList = buildRuleList[enc["AxPairs"], axiomKeys];
         Block[{atpMethodCfg = atpParseMethod[OptionValue[Method]]},
             {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
-                enc, atpResolveMaxSteps[OptionValue[MaxSteps], OptionValue[Method]],
+                enc, atpResolveMaxSteps[OptionValue[MaxSteps], OptionValue[Method], atpWall],
                 atpWall, Sequence @@ atpMethodCfg]];
         (* status 1 == PROVED.  A non-PROVED run still returns a bundle
            (the ProofObject is $Failed) so the introspectives reflect it. *)
@@ -5226,7 +5260,7 @@ atpCompletionBundle[axioms_List, OptionsPattern[TFindProof]] :=
             atpEncodeProblem[axioms, None, False]];
         atpMethodCfg = atpParseMethod[OptionValue[Method]];
         {atpWallTime, cRes} = AbsoluteTiming @ cEngineProof[
-            enc, atpResolveMaxSteps[OptionValue[MaxSteps], OptionValue[Method]],
+            enc, atpResolveMaxSteps[OptionValue[MaxSteps], OptionValue[Method], atpWall],
             atpWall, Sequence @@ atpMethodCfg];
         deadline = If[ atpWall > 0., tStart + atpWall, Infinity];
         (* The ProofObject's dataset walks every critical pair of the saturation, minutes for a
