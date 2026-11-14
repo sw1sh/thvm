@@ -1908,7 +1908,8 @@ VerificationTest[
 ]
 
 (* The tuned Automatic schedule front-loads the structure config BEFORE
-   the fixed tail (a Group config with AutoPrecedence comes first). *)
+   the fixed tail: for an abelian group, the Waldmeister-faithful Mix
+   configuration, whose proofs match Waldmeister's length (a27cdb0e0). *)
 VerificationTest[
     Module[{tuned},
         tuned = WolframInstitute`THVMLink`ATP`Private`atpScheduleFor[Automatic,
@@ -1917,8 +1918,9 @@ VerificationTest[
                 "InverseOfInverse"]];
         First[tuned]
     ],
-    {"Completion", "CriticalPairWeight" -> "Gt", "GoalInterleave" -> 50,
-        "AutoPrecedence" -> True},
+    {"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
+        "AutoPrecedence" -> True, "SelectionRatio" -> 51, "RHSInterreduce" -> True,
+        "UnfailingCP" -> True, "CPSetInterreduce" -> True},
     TestID -> "ATP/autotune/front-loads-group-config"
 ]
 
@@ -2280,13 +2282,14 @@ VerificationTest[
 ]
 
 (* Problem-aware describe: Automatic with conj + ax in hand should
-   reflect the structure-tailored schedule (6 entries for
-   AbelianGroup with the auto-tuned front). *)
+   reflect the structure-tailored schedule (7 entries for
+   AbelianGroup: the Waldmeister-faithful Mix front of a27cdb0e0, then
+   the earlier auto-tuned six). *)
 VerificationTest[
     Length @ Lookup[
         TAtpDescribeMethod[Automatic, "InverseOfInverse", "AbelianGroupAxioms"],
         "Schedule"],
-    6,
+    7,
     TestID -> "ATP/describe/Automatic-with-problem-front-loads-Group"
 ]
 
@@ -2334,12 +2337,14 @@ VerificationTest[
     TestID -> "ATP/schedule/single-config-preset-len-1"
 ]
 
-(* "VampirePortfolio" expands to the 11-entry $VampirePortfolio
-   (iter 76 added the Mix2 + SelectionRatio 2 cross-system entry). *)
+(* "VampirePortfolio" expands to the 13-entry $VampirePortfolio: the
+   Mix2 + SelectionRatio 2 cross-system entry 11, "VampireRandom" as
+   entry 12 (d3fa5e37b), LPO with occurrence precedence as entry 13
+   (e15cfc30e). *)
 VerificationTest[
     Length @ TAtpSchedule["VampirePortfolio"],
-    11,
-    TestID -> "ATP/schedule/VampirePortfolio-len-11"
+    13,
+    TestID -> "ATP/schedule/VampirePortfolio-len-13"
 ]
 
 (* "VampirePortfolioCompact": 3-entry rotation for small budgets. *)
@@ -2398,14 +2403,16 @@ VerificationTest[
     TestID -> "ATP/schedule/Automatic-no-problem-falls-back-to-AtpSchedule"
 ]
 
-(* Automatic with a Group problem in hand front-loads the Gt+
-   AutoPrecedence config that the auto-tuner picks for groups. *)
+(* Automatic with an abelian group problem in hand front-loads the
+   Waldmeister-faithful Mix configuration (a27cdb0e0); the Gt +
+   AutoPrecedence configuration follows it. *)
 VerificationTest[
     First @ TAtpSchedule[Automatic,
         "InverseOfInverse", "AbelianGroupAxioms"],
-    {"Completion", "CriticalPairWeight" -> "Gt",
-        "GoalInterleave" -> 50, "AutoPrecedence" -> True},
-    TestID -> "ATP/schedule/AbelianGroup-front-load-is-Gt+AutoPrec"
+    {"Completion", "CriticalPairWeight" -> "Mix", "Ordering" -> "KBO",
+        "AutoPrecedence" -> True, "SelectionRatio" -> 51, "RHSInterreduce" -> True,
+        "UnfailingCP" -> True, "CPSetInterreduce" -> True},
+    TestID -> "ATP/schedule/AbelianGroup-front-load-is-Mix-Waldmeister"
 ]
 
 (* The Sheffer class (WolframAxioms and the other single-operator
@@ -2614,9 +2621,11 @@ VerificationTest[
 (* Single-arg completion form should also strip Inactive (iter 61).
    Pre-iter-61, TFindProof[{Inactive[Equal][f[x_], g[x_]]}] returned
    empty Lemmas because the encoder rejected Inactive[Equal] as a
-   bad axiom shape.  Now identical results to the bare-Equal form. *)
+   bad axiom shape.  Now identical results to the bare-Equal form.
+   The completion form returns a ProofObject by default (b25ea718c), so
+   the saturated rules come from the "Lemmas" return spec. *)
 VerificationTest[
-    Length @ TFindProof[{Inactive[Equal][f[x_], g[x_]]},
+    Length @ TFindProof[{Inactive[Equal][f[x_], g[x_]]}, "Lemmas",
         TimeConstraint -> 3],
     1,
     TestID -> "ATP/inactive/single-arg-completion-strips-Inactive"
@@ -2661,19 +2670,22 @@ VerificationTest[
 ]
 
 (* Single-arg completion form also auto-wraps a non-list axiom
-   (iter 69 parity with iter 68's prove path). *)
+   (iter 69 parity with iter 68's prove path); its saturated rules come
+   from the "Lemmas" return spec (b25ea718c). *)
 VerificationTest[
-    Length @ TFindProof[a == b, TimeConstraint -> 3],
+    Length @ TFindProof[a == b, "Lemmas", TimeConstraint -> 3],
     1,
     TestID -> "ATP/single-axiom/single-arg-completion-wraps"
 ]
 
 (* TRelevantAxioms and TATP also auto-wrap a single non-list axiom
    (iter 70 parity).  Pre-iter-70, TRelAx returned unevaluated and
-   TATP threw TATPParseError. *)
+   TATP threw TATPParseError.  The kept axioms are the normalized
+   Inactive[Equal] form, so a reflexive a == a stays an equation
+   (60f7268d3). *)
 VerificationTest[
     Lookup[TRelevantAxioms[a == b, a == b], "Kept"],
-    {a == b},
+    {Inactive[Equal][a, b]},
     TestID -> "ATP/single-axiom/TRelAx-wraps"
 ]
 
