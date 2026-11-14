@@ -2835,6 +2835,15 @@ VerificationTest[
     TestID -> "ATP/wellfounded/accepts-axiom-lemmas"
 ]
 
+(* Occurrence precedence ranks the goal's constants too: the goal of
+   AndCommutativity is the commutativity axiom's own instance, which
+   ordered rewriting closes only when its two constants are ordered. *)
+VerificationTest[
+    Head @ TFindProof["AndCommutativity", "BooleanAxioms",
+        Method -> {"Completion", "AutoPrecedence" -> "Occurrence"}, TimeConstraint -> 5],
+    ProofObject,
+    TestID -> "ATP/precedence/occurrence-ranks-goal-constants"
+]
 
 (* TRelevantAxioms on an unquantified pattern axiom should keep
    the axiom (Pattern variables shouldn't be misclassified as

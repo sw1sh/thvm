@@ -375,6 +375,26 @@ fn u32 atp_auto_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
   return atp_generate_precedence(props, cap, prec);
 }
 
+// Labels the census never saw (the reserved grounding constants, a
+// constant only the goal names, an unused label) take distinct ranks
+// below every counted symbol, in label order, and the counted ranks move
+// up above them.  A tie between two constants leaves their ground terms
+// KBO-incomparable: a.b and b.a under commutativity never rewrite, so a
+// goal that is an axiom instance never closes.  Label order keeps the
+// grounding constant (label 1) the least.
+static void prec_rank_unseen_low(const u32 *count, u32 n_labels, u32 n_seen,
+                                 u32 *prec) {
+  u32 n_unseen = n_labels - n_seen;
+  u32 r = 0u;
+  for (u32 l = 0; l < n_labels; l++) {
+    if (count[l] == 0u) {
+      prec[l] = ++r;
+    } else {
+      prec[l] += n_unseen;
+    }
+  }
+}
+
 // === occurrence-frequency precedence ================================
 //
 // Vampire's `sp=occurrence` / E's `-G InvFreqRank`: rank symbols by
@@ -383,9 +403,10 @@ fn u32 atp_auto_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
 // frequent symbols often makes the term set smaller, while a rule
 // rewriting AWAY from rare symbols tends to terminate faster.
 //
-// Mirrors atp_auto_precedence's contract: `prec[label]` is the rank
-// (1..n_seen, 0 = unseen).  Returns n_seen.  Unlike auto_precedence
-// this ignores structural detection -- it's a pure frequency count.
+// `prec[label]` is a rank in 1..n_labels, every label distinct, the
+// unseen ones lowest (prec_rank_unseen_low).  Returns n_seen.  Unlike
+// auto_precedence this ignores structural detection -- it's a pure
+// frequency count.
 fn u32 atp_occurrence_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
                                  u32 n_labels, u32 *prec) {
   if (n_labels > WALD_MAX_SYMBOLS) n_labels = WALD_MAX_SYMBOLS;
@@ -442,6 +463,7 @@ fn u32 atp_occurrence_precedence(const Term *lhs, const Term *rhs, u32 n_eqns,
   for (u32 i = 0; i < n_seen; i++) {
     prec[order[i]] = n_seen - i;
   }
+  prec_rank_unseen_low(count, n_labels, n_seen, prec);
   return n_seen;
 }
 
@@ -504,6 +526,7 @@ fn u32 atp_reverse_frequency_precedence(const Term *lhs, const Term *rhs,
   for (u32 i = 0; i < n_seen; i++) {
     prec[order[i]] = i + 1u;
   }
+  prec_rank_unseen_low(count, n_labels, n_seen, prec);
   return n_seen;
 }
 

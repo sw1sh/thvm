@@ -7336,7 +7336,8 @@ int main(void) {
     //   f(a, f(i(a), a)) = a                 -- f=2, a=4, i=1
     // Cumulative CTR counts: e=1, i=2, f=4, a=9.
     // Ascending: e(1) < i(2) < f(4) < a(9).
-    // Ranks (rare = high): e -> 4, i -> 3, f -> 2, a -> 1.
+    // Ranks (rare = high) above the one unseen label, 0, at rank 1:
+    // e -> 5, i -> 4, f -> 3, a -> 2.
     Term oa_l[3], oa_r[3];
     oa_l[0] = mk_f(mk_e(), mk_a());          oa_r[0] = mk_a();
     oa_l[1] = mk_f(mk_a(), mk_i(mk_a()));    oa_r[1] = mk_a();
@@ -7346,13 +7347,43 @@ int main(void) {
     u32 prec[5] = {0u};
     u32 n_seen = atp_occurrence_precedence(oa_l, oa_r, 3u, 5u, prec);
     CHECK_EQ(n_seen, 4u);              // e, i, f, a all appear
-    CHECK_EQ(prec[LAB_e], 4u);         // count 1 -> top (rarest)
-    CHECK_EQ(prec[LAB_i], 3u);         // count 2
-    CHECK_EQ(prec[LAB_f], 2u);         // count 4
-    CHECK_EQ(prec[LAB_a], 1u);         // count 9 -> bottom
+    CHECK_EQ(prec[LAB_e], 5u);         // count 1 -> top (rarest)
+    CHECK_EQ(prec[LAB_i], 4u);         // count 2
+    CHECK_EQ(prec[LAB_f], 3u);         // count 4
+    CHECK_EQ(prec[LAB_a], 2u);         // count 9 -> lowest counted
+    CHECK_EQ(prec[0], 1u);             // unseen -> below every counted symbol
     // Distinguishes from auto_precedence on the same axioms (which
     // would key off arity, not frequency).
     CHECK(prec[LAB_e] > prec[LAB_a]);
+  }
+
+  TEST_BEGIN("atp/frequency-precedence/total-with-unseen-labels");
+  {
+    // Labels the census never sees (the reserved grounding constants, a
+    // goal-only constant) take distinct ranks below every counted
+    // symbol, in label order, so the precedence is total: two tied
+    // constants would leave c1.c2 and c2.c1 KBO-incomparable and
+    // ordered rewriting by commutativity could never fire on them.
+    // Axiom f(e, a) = a over labels 0..6: e, f, a counted; 0, i and the
+    // labels 5, 6 unseen.
+    Term fl[1], fr[1];
+    fl[0] = mk_f(mk_e(), mk_a());  fr[0] = mk_a();
+    for (int dir = 0; dir < 2; dir++) {
+      u32 prec[7] = {0u};
+      if (dir == 0) {
+        atp_occurrence_precedence(fl, fr, 1u, 7u, prec);
+      } else {
+        atp_reverse_frequency_precedence(fl, fr, 1u, 7u, prec);
+      }
+      CHECK_EQ(prec[0], 1u);
+      CHECK_EQ(prec[LAB_i], 2u);
+      CHECK_EQ(prec[5], 3u);
+      CHECK_EQ(prec[6], 4u);
+      for (u32 x = 0; x < 7u; x++) {
+        for (u32 y = x + 1u; y < 7u; y++) CHECK(prec[x] != prec[y]);
+      }
+      CHECK(prec[LAB_e] > 4u && prec[LAB_f] > 4u && prec[LAB_a] > 4u);
+    }
   }
 
   TEST_BEGIN("atp/precedence/reserved-constants-below-every-symbol");

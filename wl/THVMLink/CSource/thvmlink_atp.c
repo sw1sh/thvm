@@ -1025,6 +1025,17 @@ EXTERN_C DLLEXPORT int thvm_wl_atp_run_proof(WolframLibraryData libData,
       ax_lhs[i] = atp_wire_ax_lhs(&wire, i);
       ax_rhs[i] = atp_wire_ax_rhs(&wire, i);
     }
+    // The frequency schemes count the goals too, as E's InvFreqRank and
+    // Vampire's sp= count the conjecture (the CLI's
+    // atp_frequency_precedence_g): a goal constant then has a rank of
+    // its own rather than the unseen band.
+    if (auto_prec == 2 || auto_prec == 3) {
+      for (u32 g = 0; g < wire.n_goals && n_ax_use < ATP_WL_CFG_MAX_LABELS; g++) {
+        ax_lhs[n_ax_use] = atp_wire_goal_lhs(&wire, g);
+        ax_rhs[n_ax_use] = atp_wire_goal_rhs(&wire, g);
+        n_ax_use++;
+      }
+    }
     if (auto_prec == 3) {
       atp_reverse_frequency_precedence(ax_lhs, ax_rhs, n_ax_use,
                                        (u32)max_label + 1, wl_precedence_p);
