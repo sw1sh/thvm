@@ -538,9 +538,12 @@ static int atp_trace_eq_load(AtpState *s, u32 idx, Term *lhs, Term *rhs) {
 // ORIENT/FVI + all rule births + the parent closure) and materialize
 // only it; unmarked entries keep their NUM sentinels, which the wire
 // encoder, GC root walk, and orphan scan already handle (they touch
-// only tags/handles, not the pair content).  An MNF-closed goal cites
-// TRACE indices directly from the goal chain (usingMnf), so use_mnf
-// keeps the historical full materialization.
+// only tags/handles, not the pair content).  An MNF-closed goal's chain
+// (thvm_atp_mnf_proof_extract) cites the ORIENT / AXIOM / SIMPLIFY /
+// FVI entry of each rule it replays, so under MNF the AXIOM and SIMPLIFY
+// entries are seeds too (a few per interreduction, not per CP); materializing
+// the whole trace instead filled 4 GiB of heap on a 31M-entry trace
+// (ImpliesShefferAxioms' third conjunct under "WaldmeisterAuto").
 // Kill switch: THVM_ATP_NO_CONE_MAT=1 -> full materialization.
 //
 // GC-safe: runs OUTSIDE the step loop, so no mid-loop collection moves
@@ -557,7 +560,7 @@ fn void thvm_atp_materialize_trace(AtpState *s) {
     no_cone = (ev != NULL && ev[0] == '1') ? 1 : 0;
   }
   u8 *mark = NULL;
-  if (!no_cone && !s->use_mnf && s->n_trace > 0u) {
+  if (!no_cone && s->n_trace > 0u) {
     mark = (u8 *)calloc(s->n_trace, 1u);
     u32 *stk = (mark != NULL)
       ? (u32 *)malloc((size_t)s->n_trace * sizeof(u32)) : NULL;
@@ -566,12 +569,16 @@ fn void thvm_atp_materialize_trace(AtpState *s) {
       mark = NULL;                      // OOM: degrade to full materialize
     } else {
       u32 sp = 0u;
-      // Seed (a): every ORIENT / FVI entry (population-wide WL reads).
+      // Seed (a): every ORIENT / FVI entry (population-wide WL reads)
+      // and, under MNF, every AXIOM / SIMPLIFY entry (an MNF chain's
+      // rule citations).
       for (u32 i = 0; i < s->n_trace; i++) {
         Term e = s->trace[i];
         if (term_tag(e) != TAG_CTR) continue;
         u32 reason = term_ext(e);
-        if (reason != TRACE_ORIENT && reason != TRACE_FVI) continue;
+        u8 mnf_cited = (u8)(s->use_mnf &&
+                            (reason == TRACE_AXIOM || reason == TRACE_SIMPLIFY));
+        if (reason != TRACE_ORIENT && reason != TRACE_FVI && !mnf_cited) continue;
         mark[i] = 1u;
         stk[sp++] = i;
       }
