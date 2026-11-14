@@ -26,7 +26,7 @@
 BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`"}]
 
 SetUsage[TTweeProof, "TTweeProof[file$] runs the local Twee 2.x binary on a TPTP problem file$ (with --tstp --quiet) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Lemmas, Axioms, RawProof.
-TTweeProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.
+TTweeProof[theory$, thm$] writes the TPTP problem of the notable theorem thm$ of AxiomaticTheory[theory$] to a temporary file and proves it.
 Options: TimeConstraint, Binary. Twee emits no per-step inference DAG; for that use TVampireProof."]
 
 TTweeProof::notwee = "Twee CLI not found.  Install via: cabal install twee"
@@ -93,10 +93,8 @@ parseTweeProof[proofText_String] := Block[{lines, axEntries, lemEntries, goalSee
     |>
 ]
 
-TTweeProof[theory_String, thm_String, opts : OptionsPattern[]] := TTweeProof[
-    FileNameJoin[{Directory[], "tools", "baselines", "vampire_tptp", theory <> "__" <> thm <> ".p"}],
-    opts
-]
+TTweeProof[theory_String, thm_String, opts : OptionsPattern[]] :=
+    atpWithTheoremFile[theory, thm, "p", TTweeProof[#, opts] &]
 
 TTweeProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=

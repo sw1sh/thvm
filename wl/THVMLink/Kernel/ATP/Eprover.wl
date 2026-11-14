@@ -16,7 +16,7 @@
 BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`"}]
 
 SetUsage[TEproverProof, "TEproverProof[file$, opts$] runs the local E prover binary on the TPTP problem file$ (path ending in .p) and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
-TEproverProof[\"Theory\", \"thm\"] resolves the TPTP file via tools/baselines/vampire_tptp/{Theory}__{thm}.p.
+TEproverProof[theory$, thm$] writes the TPTP problem of the notable theorem thm$ of AxiomaticTheory[theory$] to a temporary file and proves it.
 Options: TimeConstraint, Binary; see the ATP documentation."];
 
 TEproverProof::noeprover = "E prover binary not found.  Install via: brew install eprover"
@@ -66,10 +66,8 @@ eproverBinary[Automatic] := SelectFirst[
 
 eproverBinary[s_String] := s
 
-TEproverProof[theory_String, thm_String, opts : OptionsPattern[]] := TEproverProof[
-    FileNameJoin[{Directory[], "tools", "baselines", "vampire_tptp", theory <> "__" <> thm <> ".p"}],
-    opts
-]
+TEproverProof[theory_String, thm_String, opts : OptionsPattern[]] :=
+    atpWithTheoremFile[theory, thm, "p", TEproverProof[#, opts] &]
 
 TEproverProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=

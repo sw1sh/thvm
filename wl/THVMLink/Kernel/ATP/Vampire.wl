@@ -26,7 +26,7 @@
 BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`"}]
 
 SetUsage[TVampireProof, "TVampireProof[file$] runs the local Vampire CLI on the TPTP problem file$ and returns a normalized result Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawSZS.
-TVampireProof[theory$, thm$] resolves the TPTP file under tools/baselines/vampire_tptp from the (theory$, thm$) pair (the bench-harness convention) and proves it.
+TVampireProof[theory$, thm$] writes the TPTP problem of the notable theorem thm$ of AxiomaticTheory[theory$] to a temporary file and proves it.
 Options: TimeConstraint, Mode, Binary; see the ATP documentation for the strategy decode and ProofObject mapping."];
 
 TVampireProof::novamp = "Vampire CLI not found on PATH.  Install via: brew install vampire"
@@ -97,14 +97,9 @@ extractStrategy[src_String] := Block[{lines, idx, stratLine},
     ]
 ]
 
-(* Two-arg form: resolve (Theory, thm) to the canonical TPTP problem
-   file under tools/baselines/vampire_tptp/.  Mirrors the bench
-   harness convention so callers can use the same (theory, thm) tuple
-   they use elsewhere. *)
-TVampireProof[theory_String, thm_String, opts : OptionsPattern[]] := TVampireProof[
-    FileNameJoin[{Directory[], "tools", "baselines", "vampire_tptp", theory <> "__" <> thm <> ".p"}],
-    opts
-]
+(* Two-arg form: the theorem's TPTP problem, written to a temporary file. *)
+TVampireProof[theory_String, thm_String, opts : OptionsPattern[]] :=
+    atpWithTheoremFile[theory, thm, "p", TVampireProof[#, opts] &]
 
 TVampireProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "p" :=

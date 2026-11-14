@@ -10,9 +10,8 @@ vampireAvailable := FileExistsQ["/opt/homebrew/bin/vampire"] ||
 
 VerificationTest[
     If[ ! vampireAvailable, "Proved",
-        Module[{r = TVampireProof[FileNameJoin[{Directory[], "tools",
-                "baselines", "vampire_tptp",
-                "AbelianGroupAxioms__InverseOfInverse.p"}],
+        Module[{r = TVampireProof[Export[FileNameJoin[{$TemporaryDirectory, "InverseOfInverse.p"}],
+                WolframInstitute`THVMLink`ATP`Private`tptpGenerateProblemFor["AbelianGroupAxioms", "InverseOfInverse"], "Text"],
                 TimeConstraint -> 5]},
             r["Status"]]],
     "Proved",

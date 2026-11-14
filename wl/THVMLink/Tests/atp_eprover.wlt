@@ -12,9 +12,8 @@ eproverAvailable := FileExistsQ["/opt/homebrew/bin/eprover"] ||
 
 VerificationTest[
     If[ ! eproverAvailable, "Proved",
-        Module[{r = TEproverProof[FileNameJoin[{Directory[], "tools",
-                "baselines", "vampire_tptp",
-                "AbelianGroupAxioms__InverseOfInverse.p"}],
+        Module[{r = TEproverProof[Export[FileNameJoin[{$TemporaryDirectory, "InverseOfInverse.p"}],
+                WolframInstitute`THVMLink`ATP`Private`tptpGenerateProblemFor["AbelianGroupAxioms", "InverseOfInverse"], "Text"],
                 TimeConstraint -> 8]},
             r["Status"]]],
     "Proved",

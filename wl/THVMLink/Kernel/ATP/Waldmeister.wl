@@ -21,7 +21,8 @@
 BeginPackage["WolframInstitute`THVMLink`ATP`", {"GeneralUtilities`"}]
 
 SetUsage[TWaldmeisterProof, "TWaldmeisterProof[file$] runs the local Waldmeister wmcli binary on the WM .pr problem file$, parses its proof-protocol output, and returns a normalized Association with keys Status, Strategy, Seconds, ProofLength, Inferences, RawProtocol.
-The input must be Waldmeister's own .pr format, not TPTP; a (theory, theorem) two-argument form would need a TPTP-to-pr converter and is not yet supported.
+The input must be Waldmeister's own .pr format, not TPTP.
+TWaldmeisterProof[theory$, thm$] writes the .pr problem of the notable theorem thm$ of AxiomaticTheory[theory$] to a temporary file and proves it.
 Options: TimeConstraint, \"Binary\", \"MathlinkPath\"."];
 
 TWaldmeisterProof::nowm = "Waldmeister wmcli binary not found."
@@ -141,6 +142,9 @@ parseProtocol[raw_String] := Block[{lines},
     lines = Select[lines, StringMatchQ[StringTrim[#], DigitCharacter .. ~~ " : tes-" ~~ __] &];
     DeleteCases[Map[parseProofLine, lines], Nothing]
 ]
+
+TWaldmeisterProof[theory_String, thm_String, opts : OptionsPattern[]] :=
+    atpWithTheoremFile[theory, thm, "pr", TWaldmeisterProof[#, opts] &]
 
 TWaldmeisterProof[problemFile_String, opts : OptionsPattern[]] /;
         FileExtension[problemFile] === "pr" :=

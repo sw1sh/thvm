@@ -14,10 +14,12 @@ RelatedTutorials: ["[The Waldmeister Method in THVMLink](Waldmeister)", "[Method
 
 <code>[TWaldmeisterProof]()["*file*"]</code> runs the Waldmeister prover on the problem in *file*, and gives an Association describing the result.
 
+<code>[TWaldmeisterProof]()["*theory*", "*theorem*"]</code> runs Waldmeister on a named theorem of an [AxiomaticTheory]() theory.
+
 ## Details & Options
 
 - [TWaldmeisterProof]() runs `wmcli`, the command-line Waldmeister program, which has to be installed. The program is looked for at the path in the `WMCLI` environment variable, in the directories of the `PATH` environment variable, and in `~/.local/bin`, `~/bin` and `~/src/wolfram/waldmeister`.
-- The *file* is a problem in the Waldmeister `.pr` format, with a signature, an ordering, variables, equations and a conclusion.
+- The *file* is a problem in the Waldmeister `.pr` format, with a signature, an ordering, variables, equations and a conclusion. The form <code>[TWaldmeisterProof]()["*theory*", "*theorem*"]</code> writes the problem from the axioms of the theory and the theorem to a temporary file.
 - Waldmeister runs in its automatic mode, as it does for [FindEquationalProof]().
 - The result has the following keys:
 
@@ -80,10 +82,10 @@ TWaldmeisterProof[file]["Inferences"][[All, {"Formula", "Rule"}]]
 
 ---
 
-The double-inverse theorem of abelian groups, from its problem file:
+The double-inverse theorem of abelian groups, named by its theory:
 
 ```wl
-TWaldmeisterProof[FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", "AbelianGroupAxioms__InverseOfInverse.pr"}]]["ProofLength"]
+TWaldmeisterProof["AbelianGroupAxioms", "InverseOfInverse"]["ProofLength"]
 ```
 
 <!-- => 19 -->
@@ -95,7 +97,7 @@ TWaldmeisterProof[FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", "Abe
 A time limit of one second is too short for Waldmeister to settle the Robbins problem, so Waldmeister is stopped:
 
 ```wl
-TWaldmeisterProof[FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", "RobbinsAxioms__DoubleNegation.pr"}], TimeConstraint -> 1]["Status"]
+TWaldmeisterProof["RobbinsAxioms", "DoubleNegation", TimeConstraint -> 1]["Status"]
 ```
 
 <!-- => "TimedOut" -->
@@ -169,10 +171,11 @@ TWaldmeisterProofObject["AbelianGroupAxioms", "InverseOfInverse"]
 [TATP]() reads the same `.pr` format and runs the completion of THVMLink on it:
 
 ```wl
-TATP[File["tools/baselines/wm_pr/AbelianGroupAxioms__InverseOfInverse.pr"]]
+file = Export[FileNameJoin[{$TemporaryDirectory, "involution.pr"}], "NAME involution\nMODE PROOF\nSORTS ANY\nSIGNATURE a: -> ANY\n          f: ANY -> ANY\nORDERING LPO\n         f > a\nVARIABLES x : ANY\nEQUATIONS f(f(x)) = x\nCONCLUSION f(f(f(a))) = f(a)\n", "Text"];
+TATP[Evaluate[File[file]]]
 ```
 
-<!-- => <|"Status" -> "PROVED", "Steps" -> 27, "Rules" -> 8, "QueueSize" -> 9|> -->
+<!-- => <|"Status" -> "PROVED", "Steps" -> 2, "Rules" -> 1, "QueueSize" -> 0|> -->
 
 ## Possible Issues
 

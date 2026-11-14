@@ -9,13 +9,16 @@ them, and the reference results thvm is compared against.
   of the `AxiomaticTheory` notable theorems (and `__c<k>` for one conjunct
   of a multi-conjunct theorem). Read by the C tests
   (`tests/atp/test_atp_session_reuse.c`, `tests/atp/atp_lane_cli.sh`,
-  `tests/atp/atp_guide_gates.sh`), the Makefile's pin targets and the WL
-  `"WaldmeisterProcess"` method (`wl/THVMLink/Kernel/ATP/ProcessProofObject.wl`).
+  `tests/atp/atp_guide_gates.sh`) and the Makefile's pin targets.
 * **`vampire_tptp/`**, **`vampire_raw/`** (gitignored, regenerable) --
-  TPTP CNF files for the same problems and Vampire's raw output. The WL
-  `"VampireProcess"`, `"TweeProcess"` and `"EproverProcess"` methods read
-  `vampire_tptp/` on the named-theorem form. Rebuild both with
-  `run_vampire_baseline.sh`.
+  TPTP CNF files for the same problems and Vampire's raw output. Rebuild
+  both with `run_vampire_baseline.sh`.
+
+The paclet reads none of these: its process methods (`"VampireProcess"`,
+`"EproverProcess"`, `"TweeProcess"`, `"WaldmeisterProcess"`) write a
+named theorem's problem from the theory to a temporary file
+(`atpWithTheoremFile` in `wl/THVMLink/Kernel/ATP/ProcessProofObject.wl`),
+byte-identical to the files here for a single-conjunct theorem.
 * **`all_theorems.txt`** -- the `Theory::Theorem` list
   `run_vampire_baseline.sh` exports.
 

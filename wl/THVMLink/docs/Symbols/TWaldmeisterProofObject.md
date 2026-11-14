@@ -20,7 +20,7 @@ RelatedTutorials: ["[The Waldmeister Method in THVMLink](Waldmeister)", "[Method
 ## Details & Options
 
 - [TWaldmeisterProofObject]() runs [TWaldmeisterProof]() and converts its proof with [TSZSDerivationToProofObject]().
-- The form <code>[TWaldmeisterProofObject]()["*theory*", "*theorem*"]</code> reads the file `tools/baselines/wm_pr/`*theory*`__`*theorem*`.pr` under the current directory when it exists, and otherwise writes the problem from the axioms and the theorem of the theory.
+- The form <code>[TWaldmeisterProofObject]()["*theory*", "*theorem*"]</code> writes the problem from the axioms of the theory and the theorem to a temporary file.
 - The steps of the proof are keyed as in the proofs of [TFindProof](): `{"Axiom", n}`, `{"Hypothesis", n}`, `{"CriticalPairLemma", n}`, `{"SubstitutionLemma", n}` and `{"Conclusion", 1}`.
 - With the default `"LiftToProofObject" -> True`, the formulas are parsed into expressions and the result is a [ProofObject](). With `"LiftToProofObject" -> False`, the result is an Association with the keys `"Backend"`, `"Status"`, `"Goal"`, `"Axioms"`, `"ProofDataset"`, `"ProofLength"` and `"RuleHistogram"`, with the formulas as Waldmeister writes them.
 - When Waldmeister finds no proof, the result is <code>[Failure]()["ExternalNoProof", …]</code>, whose `"Status"` is `"Failed"`, or `"TimedOut"` when Waldmeister was stopped at the time limit.

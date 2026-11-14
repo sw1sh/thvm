@@ -77,7 +77,7 @@ TSZSDerivationToProofObject[TVampireProof[file, TimeConstraint -> 5]["Inferences
 The rules of a Waldmeister proof of a group theorem:
 
 ```wl
-TSZSDerivationToProofObject[TWaldmeisterProof[FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", "GroupAxioms__LeftIdentity.pr"}]]["Inferences"]]["RuleHistogram"]
+TSZSDerivationToProofObject[TWaldmeisterProof["GroupAxioms", "LeftIdentity"]["Inferences"]]["RuleHistogram"]
 ```
 
 <!-- => <|"forward_demodulation" -> 3, "orient" -> 8, "superposition" -> 4, "trivial_inequality_removal" -> 1|> -->

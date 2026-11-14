@@ -43,7 +43,7 @@ Used as the Method \[Rule] \"VampireProcess\" dispatch target in TFindProof, so 
 Options: TimeConstraint, Mode, Binary, ParseFormulas, LiftToProofObject; see the ATP documentation."];
 
 SetUsage[TWaldmeisterProofObject, "TWaldmeisterProofObject[file$.pr] runs the local Waldmeister binary via TWaldmeisterProof on a .pr problem file and converts the proof protocol through TSZSDerivationToProofObject to a thvm-shaped proof Association.
-TWaldmeisterProofObject[theory$, thm$] resolves to a banked .pr file under tools/baselines/wm_pr/ when present, and otherwise GENERATES the .pr at runtime from the theory's symbolic axioms + the NotableTheorem conjecture (byte-identical to the banked-file construction).
+TWaldmeisterProofObject[theory$, thm$] writes the .pr from AxiomaticTheory[theory$] and its notable theorem thm$ to a temporary file and proves it.
 Used as the Method \[Rule] \"WaldmeisterProcess\" dispatch target in TFindProof.
 Options: TimeConstraint, Binary, MathlinkPath, ParseFormulas, LiftToProofObject; see the ATP documentation."];
 
@@ -63,9 +63,9 @@ Options: TimeConstraint, Binary, ParseFormulas, LiftToProofObject; LiftToProofOb
 Begin["`Private`"]
 
 (* TPTP-symbol -> WL-operator reverse map.  Mirrors the encoder
-   table in tools/vampire/export_all.wls's $opNames (the script
-   that generated the TPTP problem files in
-   tools/baselines/vampire_tptp/).  Keep in sync with that table.
+   table $wmOpNames below, which writes the process methods' problems
+   (and tools/vampire/export_all.wls's $opNames, which wrote the
+   baseline fixtures).  Keep the three in sync.
 
    For operators NOT in this map, parsed TPTP heads stay as
    String-headed compounds ("op_overtilde"[...], etc.) which the
@@ -864,8 +864,8 @@ buildDatasetFromDerivation[derivation_List, parseFormulasQ_:False] := Block[{fol
 
    Turns AxiomaticTheory axioms + a NotableTheorem conjecture (or
    explicit ForAll/Equal axioms + a goal) into a Waldmeister .pr
-   problem string, so TWaldmeisterProofObject no longer hard-fails on
-   a cache-miss against the banked tools/baselines/wm_pr/ files.
+   problem string, which the named-theorem forms of the Waldmeister
+   wrappers write to a temporary file (atpWithTheoremFile).
 
    Path: symbolic -> TPTP CNF strings (in-memory, the same encoding
    tools/vampire/export_tptp.wls bakes) -> .pr (the same construction
@@ -1084,6 +1084,52 @@ wmGenerateProblemFor[theory_String, thm_String, takeConjunct : (_Integer | All) 
         wmGenerateProblem[nm, axioms, conjuncts[[idx]]]
     ]];
 
+(* The theorem's sides with its variables as fresh sk_c constants, or $Failed for a goal
+   that is not an equation. *)
+wmGoalSides[expr_] := Block[{body = wmStripForAll[expr], vmap = wmSkolemMap[wmExtractVars[expr]]},
+    If[ ! MatchQ[body, _Equal | Inactive[Equal][_, _]], Return[$Failed]];
+    {wmRenderTerm[body[[1]], vmap], wmRenderTerm[body[[2]], vmap]}];
+
+(* (theory, thm) -> TPTP problem text, from the axioms and theorem TFindProof proves and
+   with the .pr writer's term rendering (X1.. variables, sk_c1.. constants for the
+   theorem's variables), which the SZS lift reads back.  One conjunct gives the negated
+   conjecture as a disequation; several give one fof conjecture, their conjunction, so a
+   prover proves them all in one run. *)
+tptpGenerateProblemFor[theory_String, thm_String] := Block[{axioms, nt, cjRaw, conjuncts, axBodies, goals},
+    axioms = AxiomaticTheory[theory];
+    If[ ! ListQ[axioms],
+        Return[Failure["TptpGenerate", <|"Reason" -> "AxiomaticTheory[\"" <> theory <> "\"] did not resolve to an axiom list"|>]]];
+    nt = AxiomaticTheory[theory, "NotableTheorems"];
+    cjRaw = If[ AssociationQ[nt], Lookup[nt, thm, Missing[]], Missing[]];
+    If[ MissingQ[cjRaw],
+        Return[Failure["TptpGenerate", <|"Reason" -> "theorem \"" <> thm <> "\" not in AxiomaticTheory[\"" <> theory <> "\", \"NotableTheorems\"]"|>]]];
+    conjuncts = Replace[cjRaw, {l_List :> l, a_And :> List @@ a, c_ :> {c}}];
+    axBodies = wmAxBody /@ axioms;
+    goals = wmGoalSides /@ conjuncts;
+    If[ MemberQ[axBodies, $Failed] || MemberQ[goals, $Failed],
+        Return[Failure["TptpGenerate", <|"Reason" -> "an axiom or a conjunct of \"" <> thm <> "\" is not an equation"|>]]];
+    StringRiffle[
+        Join[
+            {"% TPTP problem: " <> theory <> "::" <> thm,
+             "% axioms = " <> ToString[Length[axBodies]] <> ", conjuncts total = " <> ToString[Length[goals]]},
+            MapIndexed["cnf(ax" <> ToString[First[#2]] <> ", axiom, " <> #1 <> ")." &, axBodies],
+            If[ Length[goals] === 1,
+                {"cnf(goal, negated_conjecture, " <> goals[[1, 1]] <> " != " <> goals[[1, 2]] <> ")."},
+                {"fof(goal, conjecture, " <> StringRiffle["(" <> #[[1]] <> " = " <> #[[2]] <> ")" & /@ goals, " & "] <> ")."}]],
+        "\n"] <> "\n"];
+
+(* Runs prove[file] on a fresh temporary file holding the problem of theorem thm of
+   theory, as TPTP (ext "p") or Waldmeister input (ext "pr"), and deletes the file after.
+   The process methods prove a named theorem this way, so an installed paclet needs no
+   problem files of its own. *)
+atpWithTheoremFile[theory_String, thm_String, ext : "p" | "pr", prove_] := Block[{text, file},
+    text = If[ ext === "p", tptpGenerateProblemFor[theory, thm], wmGenerateProblemFor[theory, thm]];
+    If[ FailureQ[text], Return[text]];
+    file = FileNameJoin[{$TemporaryDirectory,
+        "thvm_" <> StringReplace[theory <> "__" <> thm, Except[WordCharacter] -> "_"] <> "_" <> CreateUUID[] <> "." <> ext}];
+    Export[file, text, "Text"];
+    WithCleanup[prove[file], Quiet[DeleteFile[file]]]];
+
 (* ----------------------------------------------------------------- *)
 
 Options[TSZSDerivationToProofObject] = {"ParseFormulas" -> False}
@@ -1214,9 +1260,7 @@ TVampireProofObject[theory_String, thm_String, opts : OptionsPattern[]] := Block
    SZS-shaped builder.  WM's proof protocol parses into the same
    inference-record Association shape as Vampire's SZS, so the
    exact same TSZSDerivationToProofObject path lifts it.  The
-   (Theory, thm) form resolves a banked .pr under
-   tools/baselines/wm_pr/ when present (byte-stable fast path) and
-   otherwise GENERATES the .pr at runtime via wmGenerateProblemFor. *)
+   (Theory, thm) form writes the .pr via wmGenerateProblemFor. *)
 Options[TWaldmeisterProofObject] = {
     TimeConstraint -> 30,
     "WMCLI" -> Automatic,
@@ -1233,22 +1277,10 @@ Options[TWaldmeisterProofObject] = {
     "LiftToProofObject" -> True
 }
 
-(* Two-arg (Theory, thm) form: resolve to a banked .pr file under
-   tools/baselines/wm_pr/ when present (byte-stable fast path); on
-   cache-miss, GENERATE the .pr at runtime from the symbolic axioms +
-   conjecture (wmGenerateProblemFor) to a temp file and proceed.  Never
-   hard-fails on a missing banked file. *)
-TWaldmeisterProofObject[theory_String, thm_String, opts : OptionsPattern[]] /; FileExtension[theory] =!= "pr" := Block[{path = FileNameJoin[{Directory[], "tools", "baselines", "wm_pr", theory <> "__" <> thm <> ".pr"}], pr, tmp},
-    If[ FileExistsQ[path],
-        TWaldmeisterProofObject[path, opts],
-        (* cache-miss: generate the .pr from the symbolic theory. *)
-        pr = WolframInstitute`THVMLink`ATP`Private`wmGenerateProblemFor[theory, thm];
-        If[ FailureQ[pr], Return[pr]];
-        tmp = FileNameJoin[{$TemporaryDirectory, WolframInstitute`THVMLink`ATP`Private`wmSanitize[theory <> "__" <> thm] <> ".pr"}];
-        Export[tmp, pr, "Text"];
-        TWaldmeisterProofObject[tmp, opts]
-    ]
-]
+(* Two-arg (Theory, thm) form: the .pr written from the symbolic axioms and theorem
+   (wmGenerateProblemFor) to a temporary file. *)
+TWaldmeisterProofObject[theory_String, thm_String, opts : OptionsPattern[]] /; FileExtension[theory] =!= "pr" :=
+    WolframInstitute`THVMLink`ATP`Private`atpWithTheoremFile[theory, thm, "pr", TWaldmeisterProofObject[#, opts] &]
 
 TWaldmeisterProofObject[problemFile_String, opts : OptionsPattern[]] /; FileExtension[problemFile] === "pr" := Block[{wmR = TWaldmeisterProof[problemFile, FilterRules[{opts}, {TimeConstraint, "WMCLI", "Binary", "MathlinkPath"}]], liftQ = TrueQ @ OptionValue["LiftToProofObject"], parseOpt, assoc},
     (* LiftToProofObject implies ParseFormulas: the lift needs

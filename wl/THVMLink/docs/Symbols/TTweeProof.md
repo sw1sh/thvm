@@ -19,7 +19,7 @@ RelatedTutorials: ["[Methods and Presets for TFindProof](AtpMethods)"]
 ## Details & Options
 
 - [TTweeProof]() runs the Twee program, an equational prover, which has to be installed. The program is looked for in `~/.cabal/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and the directories of the `PATH` environment variable.
-- The *file* is a problem in the TPTP (Thousands of Problems for Theorem Provers) format with the extension `.p`. The form <code>[TTweeProof]()["*theory*", "*theorem*"]</code> reads the file `tools/baselines/vampire_tptp/`*theory*`__`*theorem*`.p` under the current directory.
+- The *file* is a problem in the TPTP (Thousands of Problems for Theorem Provers) format with the extension `.p`. The form <code>[TTweeProof]()["*theory*", "*theorem*"]</code> writes the problem from the axioms of the theory and the theorem to a temporary file.
 - The result has the following keys:
 
 | | |
