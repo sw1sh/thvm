@@ -28,8 +28,12 @@ $ConclusionSym = "Conclusion"
    Inactive[Equal] head for plain Equal -- Equal stays held by
    HoldForm, so tautologies like Equal[x, x] do NOT collapse to
    True.  Verifier path: With-binds Statement, Inactivate restores
-   Inactive[Equal], ReleaseHold strips HoldForm. *)
-toHoldEq[expr_] := HoldForm[expr] /. Inactive[Equal] -> Equal
+   Inactive[Equal], ReleaseHold strips HoldForm.  A pattern x_ becomes
+   the symbol x: FindEquationalProof's statements name variables plainly
+   (its Rule fields carry the patterns), and a statement with x_ in it
+   reads as a foreign term to a consumer that replays the dataset, such
+   as TypeTheory's FindEquationalProof tactic. *)
+toHoldEq[expr_] := HoldForm[expr] /. {Inactive[Equal] -> Equal, Verbatim[Pattern][s_Symbol, _] :> s}
 
 (* === axiom / hypothesis preprocessing ============================= *)
 

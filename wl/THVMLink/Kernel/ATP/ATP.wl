@@ -5222,8 +5222,10 @@ atpProveBundle[conjecture_, axioms_List, OptionsPattern[TFindProof]] :=
                                   "Proof" -> ds|>];
                         If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
                             Print["[recon] proofobject-build = ", $pt, " s"]]];
+                    (* the ProofObject's own ProofFunction where the kernel
+                       gives one, else the replay of ProofCheck.wl *)
                     {$atpVerifyT, v} = AbsoluteTiming @ Quiet @ Check[
-                        p["ProofFunction"][p["Theorems"]], $Failed];
+                        atpProofVerify[p], $Failed];
                     If[ Environment["THVM_ATP_TIME_SPLIT"] =!= $Failed,
                         Print["[recon] verify-replay = ", $atpVerifyT, " s"]];
                     If[ (TrueQ[$AtpDebugDataset] ||
