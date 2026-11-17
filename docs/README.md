@@ -55,6 +55,10 @@ CASC strategy, the ENIGMA plan and the knob table
 ([ATP/env_knobs.md](ATP/env_knobs.md)). The `TFindProof`, TPTP import and SMT
 tutorials are the paclet's pages under `wl/THVMLink/docs/Tutorials/`.
 
+- [ATP/v2_find_equational_proof.md](ATP/v2_find_equational_proof.md): Wolfram
+  15's `FindEquationalProof` and `ProofObject` as observed, THVMLink's proof
+  check, and the spec v2 builds its `FindEquationalProof` on `TFindProof` from.
+
 ## Side tracks
 
 Research and essays outside the two tracks:

@@ -63,6 +63,11 @@ analysis.
 * [cli_process_methods.md](cli_process_methods.md): the
   `Method -> "<X>Process"` bridge to the external provers and the shared
   proof lift.
+* [v2_find_equational_proof.md](v2_find_equational_proof.md): Wolfram 15's
+  `FindEquationalProof` and `ProofObject` as observed, the step-by-step proof
+  check THVMLink falls back on (`Kernel/ATP/ProofCheck.wl`), and the spec for
+  v2's `FindEquationalProof` on `TFindProof`, with its test transcript. The
+  recorded cases are [data/fep_w15_records.wl](data/fep_w15_records.wl).
 * [vampire_port.md](vampire_port.md): Vampire and Prover9 options against
   their thvm equivalents.
 * [guide.md](guide.md): the ENIGMA selection layer (`--guide`,
