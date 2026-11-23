@@ -1545,6 +1545,7 @@ fn u64  gc_from_end(void);
 fn u64  gc_count(void);
 fn void gc_collect(Term *roots, u32 n_roots);
 fn void gc_collect_low(Term *roots, u32 n_roots);
+fn void thvm_gc_low_space(int on);
 fn u64  gc_forward_loc(u64 loc);
 
 // === op2 + mat ===
