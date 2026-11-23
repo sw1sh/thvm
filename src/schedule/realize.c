@@ -156,15 +156,14 @@ fn void thvm_realize_fwd_reclaim(void) {
 
 // Auto-trigger a Cheney collection at a realize boundary on EITHER heap-cell
 // pressure (the historical trigger) OR device-byte pressure.  The dyn heap
-// fills slowly (a few cells per realize), but each WL-held TTerm wrapper for a
-// discarded prior-realize result pins a LARGE device buffer; WL's
-// ManagedLibraryExpression GC is lazy in script mode, so those wrappers (and
-// their buffers) accumulate -- device bytes grow ~6-8GB/denoise-step long
-// before the heap-cell trigger fires.  A Cheney collection re-roots through
-// EXTERN_PINNED (the live WL wrappers) and drops nothing WL still holds, but it
-// compacts the heap so the next realize's fwd_reclaim free-unpreserved pass can
-// reclaim buffers whose wrappers WL HAS since collected (the manager fired
-// extern_pin_handle_drop).  Trigger when metal live bytes have grown
+// fills slowly (a few cells per realize), but the dead graph cells of a
+// discarded prior-realize result still name its LARGE device buffer, and the
+// heap-rooted preserve scan keeps every buffer a heap cell names -- device
+// bytes grow ~6-8GB/denoise-step long before the heap-cell trigger fires.  A
+// Cheney collection re-roots through EXTERN_PINNED (the live WL wrappers) and
+// drops nothing WL still holds, but it compacts the heap so the next realize's
+// fwd_reclaim free-unpreserved pass can reclaim the buffers of wrappers WL has
+// released (extern_pin_manager).  Trigger when metal live bytes have grown
 // past a bound since the last GC (default 512MB; THVM_GC_DEVICE_MB overrides,
 // 0 disables).  Off-Metal thvm_metal_live_bytes() returns 0 -> never fires.
 // `*res_io` rides the GC root set and is re-fetched after the space swap.

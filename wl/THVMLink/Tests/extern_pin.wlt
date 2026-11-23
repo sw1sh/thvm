@@ -40,8 +40,8 @@ VerificationTest[
     TestID -> "extern-pin/duplicate-wrappers-each-pin"
 ]
 
-(* === leaving a Module scope drops the wrappers; WL GC eventually
-       fires the manager and the pin count returns to baseline === *)
+(* === leaving a Module scope drops the wrappers: WL releases their handles
+       and the pin count is back at its baseline === *)
 
 VerificationTest[
     TInit[];
@@ -52,12 +52,24 @@ VerificationTest[
             mid = TExternPinCount[];
             Length[terms]
         ];
-        ClearSystemCache[];
-        Share[];
         {mid - before, TExternPinCount[] - before}
-    ] // MatchQ[{3, _Integer ? (# <= 3 &)}],
-    True,
+    ],
+    {3, 0},
     TestID -> "extern-pin/scope-exit-drops-pins"
+]
+
+(* === discarded temporaries hold no pins (the evaluator may still hold the
+       loop's last value) === *)
+
+VerificationTest[
+    TInit[];
+    TReset[];
+    Module[{before = TExternPinCount[]},
+        Do[TEra[], {100}];
+        TExternPinCount[] - before <= 1
+    ],
+    True,
+    TestID -> "extern-pin/temporaries-release"
 ]
 
 (* === explicit TTermUnpin still works alongside managed handles === *)
@@ -75,6 +87,20 @@ VerificationTest[
     ],
     {1, -1},
     TestID -> "extern-pin/explicit-unpin-decrements"
+]
+
+(* === a wrapper unpinned by hand releases nothing more when it is dropped:
+       the other wrapper of the same term keeps its pin === *)
+
+VerificationTest[
+    TInit[];
+    TReset[];
+    Module[{before = TExternPinCount[], e2 = TEra[]},
+        Module[{e1 = TEra[]}, TTermUnpin[e1]];
+        TExternPinCount[] - before
+    ],
+    1,
+    TestID -> "extern-pin/unpinned-wrapper-drop-keeps-other-pins"
 ]
 
 End[];

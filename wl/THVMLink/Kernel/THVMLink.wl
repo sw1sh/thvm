@@ -38,7 +38,7 @@ SetUsage[TTermVal, "TTermVal[term$] returns the VAL field (heap loc, etc.)."];
 SetUsage[TTermSub, "TTermSub[term$] returns the SUB flag (0 or 1)."];
 SetUsage[TTermUnpin, "TTermUnpin[term$] drops term$ from the extern-pinned-Terms GC root set.
 Mostly superseded by the managed-handle auto-unpin on TTerm; kept for callers that want to release a pin without dropping the WL wrapper."];
-SetUsage[TExternPinCount, "TExternPinCount[] returns the number of entries in the external-caller pin table, useful for observing that WL's GC has dropped TTerm wrappers between evaluations."];
+SetUsage[TExternPinCount, "TExternPinCount[] returns the number of entries in the external-caller pin table: one for each TTerm wrapper the Wolfram Language still holds."];
 SetUsage[TTagName, "TTagName[tag$] returns the name string for a tag id."];
 
 (* === heap === *)
@@ -875,6 +875,12 @@ TTermTag[t_] := $termTagFn[ttermRaw[t]]
 TTermExt[t_] := $termExtFn[ttermRaw[t]]
 TTermVal[t_] := $termValFn[ttermRaw[t]]
 TTermSub[t_] := $termSubFn[ttermRaw[t]]
+(* A wrapper's pin goes with its handle entry, so that the release of the handle later does not unpin
+   the term a second time, which would take the pin of another wrapper of the same term. *)
+TTermUnpin[t : TTerm[_Integer, _Integer, h_]] := (
+    ensureInit[];
+    With[{res = $termUnpinFn[ttermRaw[t]]}, $externPinAssociateFn[ManagedLibraryExpressionID[h], 0]; res]
+)
 TTermUnpin[t_] := (ensureInit[]; $termUnpinFn[ttermRaw[t]])
 TExternPinCount[] := (ensureInit[]; $externPinCountFn[])
 

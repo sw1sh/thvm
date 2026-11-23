@@ -28,14 +28,12 @@ static void release_numeric_array(void *handle) {
   CACHED_LIB_DATA->numericarrayLibraryFunctions->MNumericArray_disown((MNumericArray)handle);
 }
 
-// Manager for the "ExternPin" managed-library-expression family.
-// WL fires mode=1 when a fresh handle is created and mode=0 when
-// the handle has no remaining references and is being collected.
-// The collection signal is what makes WL's standard GC release
-// the corresponding C-side pin without explicit user action.
+// Manager for the "ExternPin" managed-library-expression family.  LibraryLink
+// calls it with mode 0 when a handle is created and nonzero when the handle
+// has no references left: that release drops the C-side pin.
 static void extern_pin_manager(WolframLibraryData libData, mbool mode, mint id) {
   (void)libData;
-  if (mode == 0) extern_pin_handle_drop((u64)id);
+  if (mode != 0) extern_pin_handle_drop((u64)id);
 }
 
 // === ceiling / heap-exhaust recovery (mirrors thvmlink_atp.c) ===
