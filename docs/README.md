@@ -43,6 +43,8 @@ ahead-of-time compiler for `TDef` bodies, C and Metal targets).
   run as one inert term.
 - [NN/flux_forward_spec.md](NN/flux_forward_spec.md): the FLUX.2-klein-4B
   forward-pass spec the port follows.
+- [NN/phonon.md](NN/phonon.md): the Phonon 31M text-to-speech port, its
+  fixed-shape captured steps and how it is checked.
 - [NN/thvm_vs_tinygrad.md](NN/thvm_vs_tinygrad.md): pipeline comparison, knob
   reference and coverage gaps against tinygrad.
 - [NN/env_knobs.md](NN/env_knobs.md): every `THVM_*` environment variable.

@@ -121,6 +121,7 @@ THVMLink computes with `thvm`, a runtime that evaluates programs by rewriting an
 - `TJit` a closure that records the kernels a function dispatches and replays them
 - `TBench` timing and memory measurements of a training step
 - `FluxGenerate` an image generated from a text prompt by a text-to-image model
+- `PhononSynthesize` speech synthesized from English text by a text-to-speech model
 
 ### Runtime contexts and snapshots
 

@@ -16,8 +16,8 @@ API) and the Wolfram Language (the THVMLink paclet) are the hosts.
   by one UOp DAG renderer and dispatched to CPU (clang JIT, BLAS, a UOp
   walker), Metal or CUDA kernels. Autograd is an interaction rule
   (`UOP_GRAD`); `TinyJit` captures and replays kernel sequences; dimensions
-  can be symbolic. Examples train LeNet and beautiful_mnist, decode GPT-2 and
-  run FLUX.2 image generation.
+  can be symbolic. Examples train LeNet and beautiful_mnist, decode GPT-2,
+  run FLUX.2 image generation and speak with the Phonon text-to-speech model.
 - **Theorem proving (ATP).** Unfailing Knuth-Bendix completion, faithful to
   Waldmeister by default, with ports from Twee and Vampire, AC completion and a
   first-order clausal front end. `bin/FindProof` is the CASC entry (StarExec
