@@ -188,7 +188,7 @@ fn int thvm_gc_pending(void) {
 
 static void thvm_realize_gc_run(Term *roots, u32 n_roots) {
   GC_PENDING = 0;
-  gc_collect(roots, n_roots);
+  gc_collect_low(roots, n_roots);
   GC_DEVICE_BASELINE = thvm_metal_live_bytes();
 #ifdef THVM_HAS_CUDA
   GC_CUDA_BASELINE = cuda_buf_live_bytes();
@@ -250,7 +250,10 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
       device_pressure = 1;
   }
 #endif
-  if (!heap_pressure && !device_pressure) return;
+  // Live cells still in the high semi-space (a host that defers collections
+  // skipped thvm_realize_low_space): collect back to the low one.
+  int high_space = gc_from_start() != 0;
+  if (!heap_pressure && !device_pressure && !high_space) return;
   if (GC_DEFER) {
     GC_PENDING = 1;
     return;
@@ -258,6 +261,17 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
   Term roots[1] = { *res_io };
   thvm_realize_gc_run(roots, 1);
   *res_io = roots[0];
+}
+
+// A realize that starts with the live cells in the high semi-space (a
+// collection outside a realize left them there, the prover's for one) collects
+// back before it schedules: its scratch arrays span HEAP_NEXT (gc_collect_low).
+// A host that defers collections is left to thvm_realize_maybe_gc.
+static Term thvm_realize_low_space(Term expr) {
+  if (!gc_enabled() || gc_from_start() == 0 || GC_DEFER) return expr;
+  Term roots[1] = { expr };
+  thvm_realize_gc_run(roots, 1);
+  return roots[0];
 }
 
 // === Ceiling-abort cleanup (Q2: the THVM_MAX_LIVE_BYTES retry-leak) ===
@@ -493,6 +507,7 @@ fn Term thvm_realize(Term expr) {
   REALIZE_ERROR[0] = '\0';
   (void)kernel_stale_fire_take();
   REALIZE_DEAD_DEVICE = -1;
+  expr = thvm_realize_low_space(expr);
   // TEN short-circuit: a Term that's already a TAG_TEN (typical when
   // the user holds onto a TTerm wrapper and re-realizes it) has no
   // remaining compute -- skip the wnf+materialize loop entirely so
@@ -664,6 +679,7 @@ fn Term thvm_realize_many(Term ctr_term) {
   REALIZE_ERROR[0] = '\0';
   (void)kernel_stale_fire_take();
   REALIZE_DEAD_DEVICE = -1;
+  ctr_term = thvm_realize_low_space(ctr_term);
   if (term_tag(ctr_term) != TAG_CTR) return thvm_realize(ctr_term);
   u32 n = term_ctr_n(ctr_term);
   if (n == 0) return ctr_term;

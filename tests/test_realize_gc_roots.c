@@ -92,6 +92,9 @@ static int closeN(float const *got, float const *want) {
 int main(void) {
   // A collection at every realize boundary.
   setenv("THVM_GC_KB", "1", 1);
+  // A small heap: one test realizes from the high semi-space, where the
+  // scheduler's scratch arrays are a semi-space long.
+  setenv("THVM_HEAP_CELLS", "2097152", 1);
   thvm_init();
   float xs[N * N], want_b[N], want_a[N];
   for (u32 i = 0; i < N * N; i++) {
@@ -278,6 +281,25 @@ int main(void) {
     CHECK(term_val(roots[0]) >= gc_from_start() && term_val(roots[0]) < gc_from_end());
     CHECK_EQ(heap_read(term_val(roots[0]) + 0), x);
     thvm_gc_defer(0);
+  }
+
+  TEST_BEGIN("realize-gc-roots/a-realize-runs-and-ends-in-the-low-space");
+  {
+    gc_collect(NULL, 0);
+    if (gc_from_start() == 0) {
+      gc_collect(NULL, 0);
+    }
+    CHECK(gc_from_start() != 0);
+    Term x   = tenNN();
+    u64  gc0 = gc_count();
+    // One collection back to the low space before scheduling, one at the end.
+    CHECK(term_tag(term_resolve(thvm_realize(uop_binary(UOP_MUL, x, x)))) == TAG_TEN);
+    CHECK_EQ(gc_count(), gc0 + 2);
+    CHECK_EQ(gc_from_start(), 0);
+    gc0 = gc_count();
+    CHECK(term_tag(term_resolve(thvm_realize(uop_binary(UOP_ADD, x, x)))) == TAG_TEN);
+    CHECK_EQ(gc_count(), gc0 + 1);
+    CHECK_EQ(gc_from_start(), 0);
   }
 
   TEST_REPORT();
