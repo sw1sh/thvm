@@ -283,7 +283,7 @@ int main(void) {
     thvm_gc_defer(0);
   }
 
-  TEST_BEGIN("realize-gc-roots/a-realize-runs-and-ends-in-the-low-space");
+  TEST_BEGIN("realize-gc-roots/a-pinning-host-realizes-in-the-low-space");
   {
     gc_collect(NULL, 0);
     if (gc_from_start() == 0) {
@@ -292,7 +292,15 @@ int main(void) {
     CHECK(gc_from_start() != 0);
     Term x   = tenNN();
     u64  gc0 = gc_count();
-    // One collection back to the low space before scheduling, one at the end.
+    // By default only the collection this file forces at the end of a realize.
+    CHECK(term_tag(term_resolve(thvm_realize(uop_binary(UOP_MUL, x, x)))) == TAG_TEN);
+    CHECK_EQ(gc_count(), gc0 + 1);
+    CHECK_EQ(gc_from_start(), 0);
+    gc_collect(NULL, 0);
+    CHECK(gc_from_start() != 0);
+    // A host that pins its Terms: one more, back to the low space before scheduling.
+    thvm_gc_low_space(1);
+    gc0 = gc_count();
     CHECK(term_tag(term_resolve(thvm_realize(uop_binary(UOP_MUL, x, x)))) == TAG_TEN);
     CHECK_EQ(gc_count(), gc0 + 2);
     CHECK_EQ(gc_from_start(), 0);
@@ -300,6 +308,7 @@ int main(void) {
     CHECK(term_tag(term_resolve(thvm_realize(uop_binary(UOP_ADD, x, x)))) == TAG_TEN);
     CHECK_EQ(gc_count(), gc0 + 1);
     CHECK_EQ(gc_from_start(), 0);
+    thvm_gc_low_space(0);
   }
 
   TEST_REPORT();

@@ -178,6 +178,20 @@ static int GC_PENDING = 0;
 static u64 GC_DEVICE_BASELINE = 0;
 static u64 GC_CUDA_BASELINE   = 0;
 
+// A host that pins every Term it holds across a realize (the WL bridge: each
+// TTerm wrapper is a pin) asks for the live cells to be kept in the low
+// semi-space, where the scheduler's scratch arrays, which span HEAP_NEXT, stay
+// small (gc_collect_low).  A realize that finds them in the high one (a
+// collection outside a realize left them there, the prover's for one) then
+// collects.  That collection roots only the realized expression and the side
+// tables, so a caller that holds other lazy graphs unpinned, as a C test does,
+// must not ask.
+static int GC_LOW_SPACE = 0;
+
+fn void thvm_gc_low_space(int on) {
+  GC_LOW_SPACE = on;
+}
+
 fn void thvm_gc_defer(int on) {
   GC_DEFER = on;
 }
@@ -250,9 +264,9 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
       device_pressure = 1;
   }
 #endif
-  // Live cells still in the high semi-space (a host that defers collections
-  // skipped thvm_realize_low_space): collect back to the low one.
-  int high_space = gc_from_start() != 0;
+  // thvm_gc_low_space: collect back when the realize left the live cells in
+  // the high semi-space.
+  int high_space = GC_LOW_SPACE && gc_from_start() != 0;
   if (!heap_pressure && !device_pressure && !high_space) return;
   if (GC_DEFER) {
     GC_PENDING = 1;
@@ -263,12 +277,10 @@ fn void thvm_realize_maybe_gc(Term *res_io) {
   *res_io = roots[0];
 }
 
-// A realize that starts with the live cells in the high semi-space (a
-// collection outside a realize left them there, the prover's for one) collects
-// back before it schedules: its scratch arrays span HEAP_NEXT (gc_collect_low).
-// A host that defers collections is left to thvm_realize_maybe_gc.
+// Under thvm_gc_low_space, a realize that starts with the live cells in the
+// high semi-space collects back before it schedules.
 static Term thvm_realize_low_space(Term expr) {
-  if (!gc_enabled() || gc_from_start() == 0 || GC_DEFER) return expr;
+  if (!GC_LOW_SPACE || !gc_enabled() || gc_from_start() == 0 || GC_DEFER) return expr;
   Term roots[1] = { expr };
   thvm_realize_gc_run(roots, 1);
   return roots[0];
