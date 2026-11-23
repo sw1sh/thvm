@@ -143,6 +143,8 @@ $phMonths = <|"Jan" -> "January", "Feb" -> "February", "Mar" -> "March", "Apr" -
     "Jul" -> "July", "Aug" -> "August", "Sep" -> "September", "Sept" -> "September", "Oct" -> "October",
     "Nov" -> "November", "Dec" -> "December"|>;
 
+phMonth[m_String] := $phMonths[m]
+
 (* A number with thousands separators, group by group: "2,500,000" reads "2 million 500 thousand". *)
 phGroups[n_String] := With[{g = FromDigits /@ StringSplit[n, ","]},
     StringRiffle[MapThread[If[#1 == 0, Nothing, StringTrim[ToString[#1] <> " " <> #2]] &,
@@ -150,16 +152,17 @@ phGroups[n_String] := With[{g = FromDigits /@ StringSplit[n, ","]},
 
 phCount[n_String, {one_String, many_String}] := n <> " " <> If[n === "1", one, many]
 
-(* An amount of money: "$3.50" reads "3 dollars and 50 cents", "$0.99" reads "99 cents". *)
-phMoney[unit_List, cent_List][whole_String, frac_String] := With[
-    {w = phGroups[whole], c = If[frac === "", 0, FromDigits[frac]]},
+$phCurrencies = <|"$" -> {{"dollar", "dollars"}, {"cent", "cents"}}, "\[Euro]" -> {{"euro", "euros"}, {"cent", "cents"}},
+    "\[Sterling]" -> {{"pound", "pounds"}, {"penny", "pence"}}, "\[Yen]" -> {{"yen", "yen"}, {"sen", "sen"}}|>;
+
+(* An amount of money after its currency sign: "$3.50" reads "3 dollars and 50 cents", "$0.99" reads
+   "99 cents". *)
+phMoney[sign_String, whole_String, frac_String] := With[
+    {unit = $phCurrencies[sign][[1]], cent = $phCurrencies[sign][[2]], w = phGroups[whole], c = If[frac === "", 0, FromDigits[frac]]},
     Which[
         c == 0, phCount[w, unit],
         w === "0", phCount[ToString[c], cent],
         True, phCount[w, unit] <> " and " <> phCount[ToString[c], cent]]]
-
-$phCurrencies = <|"$" -> {{"dollar", "dollars"}, {"cent", "cents"}}, "\[Euro]" -> {{"euro", "euros"}, {"cent", "cents"}},
-    "\[Sterling]" -> {{"pound", "pounds"}, {"penny", "pence"}}, "\[Yen]" -> {{"yen", "yen"}, {"sen", "sen"}}|>;
 
 (* A web or mail address read out: the scheme and "www" letter by letter, the separators by name. *)
 phAddress[a_String] := StringReplace[a, {
@@ -174,7 +177,7 @@ phNormalize[text_String] := Module[{t, amount = "(\\d{1,3}(?:,\\d{3})+|\\d+)(?:\
     t = StringReplace[text, {
         RegularExpression["[A-Za-z]+://\\S*[^\\s.,!?;:)]"] :> phAddress["$0"],
         RegularExpression["[\\w.+-]+@[\\w-]+(?:\\.[\\w-]+)+"] :> phAddress["$0"],
-        RegularExpression["([$\[Euro]\[Sterling]\[Yen]])" <> amount] :> (phMoney @@ $phCurrencies["$1"])["$2", "$3"],
+        RegularExpression["([$\[Euro]\[Sterling]\[Yen]])" <> amount] :> phMoney["$1", "$2", "$3"],
         RegularExpression["(\\d+)\[Cent]"] :> phCount["$1", {"cent", "cents"}],
         RegularExpression["(?<![\\w.,])\\d{1,3}(?:,\\d{3})+(?![\\d])"] :> phGroups["$0"],
         RegularExpression["(?<![\\w.])(\\d+)\\.(\\d+)(?![\\d%]|\\.\\d)"] :> "$1 point $2",
@@ -182,7 +185,7 @@ phNormalize[text_String] := Module[{t, amount = "(\\d{1,3}(?:,\\d{3})+|\\d+)(?:\
         RegularExpression["(\\d)\\s*[\[Dash]\[LongDash]]\\s*(\\d)"] :> "$1 to $2",
         RegularExpression["~(\\d)"] :> "about $1",
         "\[Degree]C" -> " degrees Celsius", "\[Degree]F" -> " degrees Fahrenheit", "\[Degree]" -> " degrees",
-        RegularExpression["\\b(" <> StringRiffle[Keys[$phMonths], "|"] <> ")\\. (\\d)"] :> $phMonths["$1"] <> " $2",
+        RegularExpression["\\b(" <> StringRiffle[Keys[$phMonths], "|"] <> ")\\. (\\d)"] :> phMonth["$1"] <> " $2",
         RegularExpression["\\bvs\\."] -> "versus",
         RegularExpression["\\s*\\+\\s*"] -> " plus ", RegularExpression["\\s*=\\s*"] -> " equals ",
         RegularExpression["\\s*\[Times]\\s*"] -> " times ", RegularExpression["\\s*\[Divide]\\s*"] -> " divided by ",

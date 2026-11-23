@@ -9,7 +9,7 @@
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
-PhononSynthesize::usage = "PhononSynthesize[text$] synthesizes speech for the English string text$ with the Phonon 31M text-to-speech model and gives an Audio object (24 kHz, mono). The model files are fetched to the model directory on first use and stay loaded between calls. Options: \"Voice\" (Automatic for the model's default voice, the path of a .safetensors voice file, or a {frames$, 512} array of voice frames), \"Temperature\" (the noise variance of the latents, 0.3; 0 gives the same audio every time), \"Normalize\" (True writes money, addresses and other symbols as words first), \"ModelDirectory\" (Automatic is ~/.cache/thvm/phonon-31m-en).";
+PhononSynthesize::usage = "PhononSynthesize[text$] synthesizes speech for the English string text$ with the Phonon 31M text-to-speech model and gives an Audio object (24 kHz, mono). PhononSynthesize[text$, \"Samples\"] gives the list of samples instead. The model files are fetched to the model directory on first use and stay loaded between calls. Options: \"Voice\" (Automatic for the model's default voice, the path of a .safetensors voice file, or a {frames$, 512} array of voice frames), \"Temperature\" (the noise variance of the latents, 0.3; 0 gives the same audio every time), \"Normalize\" (True writes money, addresses and other symbols as words first), \"ModelDirectory\" (Automatic is ~/.cache/thvm/phonon-31m-en).";
 PhononUnload::usage = "PhononUnload[] unloads the Phonon model and frees its buffers by resetting the thvm engine, so terms made before it are no longer valid; the next PhononSynthesize loads the model again.";
 
 PhononSynthesize::fetch = "Could not fetch `1` to `2`.";
@@ -112,7 +112,9 @@ phSpeak[rows_, chunk_String, temperature_] := Module[
 
 Options[PhononSynthesize] = {"Voice" -> Automatic, "Temperature" -> 0.3, "Normalize" -> True, "ModelDirectory" -> Automatic};
 
-PhononSynthesize[text_String, opts : OptionsPattern[]] := Module[{rows, chunks, tok},
+PhononSynthesize[text_String, opts : OptionsPattern[]] := PhononSynthesize[text, "Audio", opts]
+
+PhononSynthesize[text_String, spec : "Audio" | "Samples", opts : OptionsPattern[]] := Module[{rows, chunks, tok},
     If[phLoad[phModelDirectory[OptionValue["ModelDirectory"]]] === $Failed, Return[$Failed]];
     rows = phVoiceRows[OptionValue["Voice"]];
     If[rows === $Failed, Return[$Failed]];
@@ -121,7 +123,7 @@ PhononSynthesize[text_String, opts : OptionsPattern[]] := Module[{rows, chunks, 
     If[chunks === {}, Message[PhononSynthesize::empty]; Return[$Failed]];
     With[{samples = Join @@ (phSpeak[rows, #, OptionValue["Temperature"]] & /@ chunks)},
         phReclaim[64 * 2^20];
-        Audio[samples, SampleRate -> 24000]]
+        If[spec === "Samples", samples, Audio[samples, SampleRate -> 24000]]]
 ]
 
 End[];

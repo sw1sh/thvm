@@ -83,5 +83,34 @@ If[$phononFiles,
         TestID -> "phonon/temperature-zero-is-deterministic"
     ];
 
+    (* The Samples form is the audio's data, and the WAV writer gives a 44-byte header and 16-bit samples. *)
+    VerificationTest[
+        With[{s = TSpeechSynthesize["Twice the same.", "Samples", "Temperature" -> 0],
+              file = FileNameJoin[{$TemporaryDirectory, "thvm-phonon-test.wav"}]},
+            WolframInstitute`THVMLink`Examples`Private`speechWavWrite[file, s, 24000];
+            With[{bytes = BinaryReadList[file, "Byte", 44], n = FileByteCount[file]},
+                DeleteFile[file];
+                {VectorQ[s, NumericQ], Max[Abs[s - Flatten[Normal[AudioData[TSpeechSynthesize["Twice the same.", "Temperature" -> 0]]]]]] < 1.*^-6,
+                 n == 44 + 2 Length[s], FromCharacterCode[bytes[[;; 4]]], FromCharacterCode[bytes[[9 ;; 16]]],
+                 FromDigits[Reverse[bytes[[25 ;; 28]]], 256]}]],
+        {True, True, True, "RIFF", "WAVEfmt ", 24000},
+        TestID -> "phonon/samples-form-and-wav-writer"
+    ];
+
+    (* TSpeak at volume 0 goes through the system's player without a sound; skipped where there is none. *)
+    If[WolframInstitute`THVMLink`Examples`Private`speechPlayer[] =!= None,
+        VerificationTest[
+            TSpeak["Yes.", "Volume" -> 0, "Temperature" -> 0],
+            Null,
+            TestID -> "phonon/speak-plays-through-the-system-player"
+        ]
+    ];
+
+    VerificationTest[
+        Quiet[TSpeak["Yes.", Method -> "Unknown"], TSpeechSynthesize::badmethod],
+        $Failed,
+        TestID -> "phonon/speak-unknown-method-fails"
+    ];
+
     PhononUnload[]
 ]

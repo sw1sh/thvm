@@ -4,7 +4,8 @@
 (`gradium/phonon-31m-en`, Apache 2.0), a 31 million parameter text-to-speech
 model, on the thvm tensor runtime. The port is Wolfram Language over THVMLink:
 [wl/THVMLink/Kernel/NN/Examples/Phonon/](../../wl/THVMLink/Kernel/NN/Examples/Phonon/).
-`TSpeechSynthesize` is the generic entry that picks a synthesizer by `Method`
+`TSpeechSynthesize` is the generic entry that picks a synthesizer by `Method`,
+and `TSpeak` plays the speech
 ([wl/THVMLink/Kernel/NN/Examples/SpeechSynthesize.wl](../../wl/THVMLink/Kernel/NN/Examples/SpeechSynthesize.wl)).
 
 ```wl
@@ -100,6 +101,24 @@ The tokenizer gives the HuggingFace tokenizer's ids, byte fallback included,
 and the normaliser follows the reference runtime's on its test sentences except
 where that one is wrong ("1 dollars") or drops a range dash
 ([wl/THVMLink/Tests/phonon.wlt](../../wl/THVMLink/Tests/phonon.wlt)).
+
+## Without the kernel's audio support
+
+The engine asks little of the kernel it runs on, so that it also runs on a
+Wolfram Language kernel that has no audio functions yet:
+
+- `TSpeechSynthesize[text, "Samples"]` gives the samples as a list; the
+  `Audio` form only wraps them.
+- `TSpeak` writes the samples to a 16-bit WAV file itself and hands the file to
+  the system's player (`afplay` on macOS; `paplay`, `aplay` or `ffplay` on
+  Linux), so it needs neither `AudioPlay` nor `Export`.
+- Host arrays reach thvm through `TTensor[shape, data]`, which converts to f32
+  in C. Building a `"Real32"` `NumericArray` first, as `TTensorCreate` does, is
+  what a kernel may be slow at: on the v2 kernel it took 11 microseconds an
+  element, 499 seconds for the weights against 14 this way.
+
+On the v2 kernel (build 0.7.96, no fallback kernel) the samples of the test
+sentence are byte for byte those of Wolfram 15.
 
 ## Speed and memory
 

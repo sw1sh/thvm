@@ -5,13 +5,15 @@ Context: WolframInstitute`THVMLink`Examples`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TSpeechSynthesize
 Keywords: [text-to-speech, speech synthesis, voice, audio]
-SeeAlso: [PhononSynthesize, SpeechSynthesize, Audio, FluxGenerate]
+SeeAlso: [TSpeak, PhononSynthesize, SpeechSynthesize, Audio, FluxGenerate]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
 <code>[TSpeechSynthesize]()["*text*"]</code> synthesizes speech for *text* with a text-to-speech model run by thvm and gives an [Audio]() object.
+
+<code>[TSpeechSynthesize]()["*text*", "Samples"]</code> gives the list of samples.
 
 <!-- #| annotation: 26.11.23: TSpeechSynthesize dispatches on Method to a per-model synthesizer and forwards the options that synthesizer declares (Kernel/NN/Examples/SpeechSynthesize.wl, laid out like TImageSynthesize in ImageSynthesize.wl). The one method is "Phonon", PhononSynthesize. An unknown method issues TSpeechSynthesize::badmethod and gives $Failed. -->
 
@@ -31,6 +33,17 @@ TSpeechSynthesize["Hello! This is a test of speech synthesis."]
 ```
 
 <!-- => an Audio object, about 3.4 seconds, 24 kHz mono -->
+
+## Scope
+
+The samples as a list, at 24000 samples a second for the default method:
+
+```wl
+#| eval: false
+Length[TSpeechSynthesize["Hello! This is a test of speech synthesis.", "Samples", "Temperature" -> 0]]
+```
+
+<!-- => 80640 -->
 
 ## Options
 

@@ -5,13 +5,15 @@ Context: WolframInstitute`THVMLink`Examples`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/PhononSynthesize
 Keywords: [Phonon, text-to-speech, speech synthesis, voice, audio, flow matching]
-SeeAlso: [TSpeechSynthesize, TJit, TSet, TReclaim, Audio, SpeechSynthesize, FluxGenerate]
+SeeAlso: [TSpeechSynthesize, TSpeak, TJit, TSet, TReclaim, Audio, SpeechSynthesize, FluxGenerate]
 RelatedGuides: [THVMLink]
 ---
 
 ## Usage
 
 <code>[PhononSynthesize]()["*text*"]</code> synthesizes speech for the English *text* with the Phonon 31M text-to-speech model and gives an [Audio]() object.
+
+<code>[PhononSynthesize]()["*text*", "Samples"]</code> gives the list of samples.
 
 <!-- #| annotation: 26.11.23: The model is Gradium's Phonon 31M (gradium/phonon-31m-en, Apache 2.0), ported from pocket_tts's modules: a 6-layer flow transformer reads the voice frames, the text tokens and a start latent, a one-step flow head draws a 32-dim latent per 80 ms frame until the end-of-speech logit passes 4, and the Mimi decoder turns the latents into 24 kHz samples. The prefill, one decode step and one Mimi chunk are each captured once with TJit and replayed, with every tensor padded to one shape (prompt 256 positions, context 512, Mimi chunks of 16 frames) and the state updated in place with TSet. Sources: Kernel/NN/Examples/Phonon/ (PhononModel.wl, PhononText.wl, PhononGenerate.wl); architecture page docs/NN/phonon.md; the port is checked against a NumPy reference by tools/phonon/phonon_check.wls. PhononSynthesize calls TReclaim once the session's buffers have grown by 64 MB (each chunk leaves a 0.5 MB prompt upload). PhononUnload[] (no reference page) unloads the model by resetting the engine (TReset), as FluxUnload does. -->
 

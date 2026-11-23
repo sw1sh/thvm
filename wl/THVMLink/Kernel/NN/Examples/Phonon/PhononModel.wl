@@ -54,7 +54,9 @@ phGguf[path_String] := Module[{hdr = dsvGgufHeader[path], strm, ds, read},
     With[{res = read /@ hdr["Tensors"]}, Close[strm]; res]
 ]
 
-phT[a_] := TTensorCreate[NumericArray[a, "Real32"]]
+(* A host array as an f32 tensor.  TTensor writes the reals into the tensor and converts them in C, with
+   no Real32 NumericArray built on the way: that conversion costs the v2 kernel seconds per megabyte. *)
+phT[a_] := TTensor[Dimensions[a], a]
 (* A linear layer's weight {out, in} as the {in, out} matrix TLinear multiplies by. *)
 phLin[a_] := phT[Transpose[a]]
 
