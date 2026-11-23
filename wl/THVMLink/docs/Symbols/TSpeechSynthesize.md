@@ -15,7 +15,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TSpeechSynthesize]()["*text*", "Samples"]</code> gives the list of samples.
 
-<!-- #| annotation: 26.11.23: TSpeechSynthesize dispatches on Method to a per-model synthesizer and forwards the options that synthesizer declares (Kernel/NN/Examples/SpeechSynthesize.wl, laid out like TImageSynthesize in ImageSynthesize.wl). The one method is "Phonon", PhononSynthesize. An unknown method issues TSpeechSynthesize::badmethod and gives $Failed. -->
+<!-- #| annotation: 26.11.23: TSpeechSynthesize dispatches on Method to a per-model synthesizer and forwards the options that synthesizer declares (Kernel/NN/Examples/SpeechSynthesize.wl, laid out like TImageSynthesize in ImageSynthesize.wl). The one method is "Phonon", PhononSynthesize. An unknown method issues TSpeechSynthesize::badmethod and gives a Failure. -->
 
 ## Details & Options
 
@@ -78,4 +78,4 @@ An unknown method issues a message:
 TSpeechSynthesize["Good morning.", Method -> "Unknown"]
 ```
 
-<!-- => the message TSpeechSynthesize::badmethod is issued and the result is $Failed -->
+<!-- => the message TSpeechSynthesize::badmethod is issued and the result is a Failure -->

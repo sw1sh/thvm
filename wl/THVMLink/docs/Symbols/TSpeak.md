@@ -13,7 +13,7 @@ RelatedGuides: [THVMLink]
 
 <code>[TSpeak]()["*text*"]</code> speaks *text* through the system's audio player.
 
-<!-- #| annotation: 26.11.24: TSpeak synthesizes the samples with the synthesizer TSpeechSynthesize would use (Kernel/NN/Examples/SpeechSynthesize.wl), writes them to a mono 16-bit WAV file in $TemporaryDirectory with BinaryWrite, runs the system's player on the file with RunProcess (afplay on macOS; the first of paplay, aplay, ffplay found on Linux) and deletes the file. It uses no Audio function of the kernel, so it also works on a kernel without audio support; checked on Wolfram 15.1 and on the v2 kernel 0.7.96. With no player installed it issues TSpeak::player and gives $Failed. -->
+<!-- #| annotation: 26.11.24: TSpeak synthesizes the samples with the synthesizer TSpeechSynthesize would use (Kernel/NN/Examples/SpeechSynthesize.wl), writes them to a mono 16-bit WAV file in $TemporaryDirectory with BinaryWrite, runs the system's player on the file with RunProcess (afplay on macOS; the first of paplay, aplay, ffplay found on Linux) and deletes the file. It uses no Audio function of the kernel, so it also works on a kernel without audio support; checked on Wolfram 15.1 and on the v2 kernel 0.7.96. With no player installed it issues TSpeak::player and gives a Failure. -->
 
 ## Details & Options
 
@@ -66,4 +66,4 @@ An unknown method issues a message:
 TSpeak["Good morning.", Method -> "Unknown"]
 ```
 
-<!-- => the message TSpeechSynthesize::badmethod is issued and the result is $Failed -->
+<!-- => the message TSpeechSynthesize::badmethod is issued and the result is a Failure -->

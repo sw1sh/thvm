@@ -5,7 +5,7 @@ Context: WolframInstitute`THVMLink`Examples`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/PhononSynthesize
 Keywords: [Phonon, text-to-speech, speech synthesis, voice, audio, flow matching]
-SeeAlso: [TSpeechSynthesize, TSpeak, TJit, TSet, TReclaim, Audio, SpeechSynthesize, FluxGenerate]
+SeeAlso: [TSpeechSynthesize, TSpeak, TJit, TSet, TReclaim, Audio, SpeechSynthesize, ProgressReporting, FluxGenerate]
 RelatedGuides: [THVMLink]
 ---
 
@@ -22,7 +22,9 @@ RelatedGuides: [THVMLink]
 - The model is Phonon 31M, a 31 million parameter English text-to-speech model: a transformer generates one audio latent for every 80 milliseconds of speech, and a neural audio decoder turns the latents into sound.
 - The result is a mono [Audio]() object at 24 kHz.
 - The text is first normalized, so that money, web addresses and other symbols are read as words, then split into chunks of whole sentences of at most 50 tokens, and each chunk is spoken on its own.
-- The first call fetches the model files, about 65 megabytes, to the model directory, loads the weights and records the kernels of each stage; later calls replay the recorded kernels, so only the first is slow.
+- The weights are not part of the paclet. The first call fetches the model's three files, about 65 megabytes, from its HuggingFace repository, `gradium/phonon-31m-en`, at a pinned revision, showing the file, the source and the megabytes received as it goes. A download is kept only when its size and SHA-256 are the expected ones.
+- The first call also loads the weights and records the kernels of each stage; later calls replay the recorded kernels, so only the first is slow.
+- A call that cannot do its job gives a [Failure]() that says why, such as a file that could not be fetched.
 - On a central processing unit (CPU), a later call takes about an eighth of the duration of the speech it produces.
 - The following options can be given:
 
@@ -31,7 +33,8 @@ RelatedGuides: [THVMLink]
   | `"Voice"` | [Automatic]() | the voice: [Automatic]() for the model's default voice, the path of a voice file, or a `{`*n*`, 512}` array of voice frames |
   | `"Temperature"` | 0.3 | the variance of the noise the latents are drawn from; 0 gives the same audio every time |
   | `"Normalize"` | [True]() | whether to write symbols as words before speaking |
-  | `"ModelDirectory"` | [Automatic]() | the directory of the model files; [Automatic]() is `~/.cache/thvm/phonon-31m-en` |
+  | `"ModelDirectory"` | [Automatic]() | the directory of the model files; [Automatic]() is `~/.cache/thvm/phonon-31m-en`, and a directory that already holds the files is used without a fetch |
+  | [ProgressReporting]() | [Automatic]() | whether to show the progress of the fetch and the load of the first call |
 
 ## Basic Examples
 
@@ -123,6 +126,17 @@ PhononSynthesize["Good morning.", "ModelDirectory" -> FileNameJoin[{$TemporaryDi
 
 <!-- => an Audio object -->
 
+### ProgressReporting
+
+Fetch and load without a progress display:
+
+```wl
+#| eval: false
+PhononSynthesize["Good morning.", ProgressReporting -> False]
+```
+
+<!-- => an Audio object -->
+
 ## Properties and Relations
 
 [TSpeechSynthesize]() with its default method gives the same speech:
@@ -135,6 +149,17 @@ AudioData[TSpeechSynthesize["Good morning.", "Temperature" -> 0]] == AudioData[P
 <!-- => True -->
 
 ## Possible Issues
+
+Without a network connection and without the files in the model directory, the result is a failure that names the file:
+
+```wl
+#| eval: false
+PhononSynthesize["Good morning.", "ModelDirectory" -> CreateDirectory[]]
+```
+
+<!-- => the message PhononSynthesize::fetch is issued and the result is a Failure whose parameters name model.q8.gguf, its address and "the download failed" -->
+
+---
 
 The model speaks English only; text in another language is read with English sounds:
 

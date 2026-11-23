@@ -107,9 +107,39 @@ If[$phononFiles,
     ];
 
     VerificationTest[
-        Quiet[TSpeak["Yes.", Method -> "Unknown"], TSpeechSynthesize::badmethod],
-        $Failed,
-        TestID -> "phonon/speak-unknown-method-fails"
+        With[{r = Quiet[TSpeak["Yes.", Method -> "Unknown"], TSpeechSynthesize::badmethod]}, {FailureQ[r], r["Tag"]}],
+        {True, "badmethod"},
+        TestID -> "phonon/speak-unknown-method-is-a-failure"
+    ];
+
+    (* The model directory holds the three files at their pinned sizes, so nothing is fetched. *)
+    VerificationTest[
+        WolframInstitute`THVMLink`Examples`Private`phFetch[$phononDir],
+        True,
+        TestID -> "phonon/fetch-accepts-a-complete-directory"
+    ];
+
+    (* A file of the wrong size does not count as there. *)
+    VerificationTest[
+        With[{dir = CreateDirectory[]},
+            BinaryWrite[FileNameJoin[{dir, "tokenizer.json"}], {1, 2, 3}] // Close;
+            With[{have = WolframInstitute`THVMLink`Examples`Private`phHaveQ[dir, "tokenizer.json"]},
+                DeleteDirectory[dir, DeleteContents -> True];
+                have]],
+        False,
+        TestID -> "phonon/fetch-rejects-a-truncated-file"
+    ];
+
+    (* A source that cannot be reached gives a Failure that names the file, and leaves nothing behind. *)
+    VerificationTest[
+        With[{dir = CreateDirectory[]},
+            With[{r = Block[{WolframInstitute`THVMLink`Examples`Private`$phRepository = "gradium/no-such-model-here"},
+                    Quiet[WolframInstitute`THVMLink`Examples`Private`phFetch[dir], PhononSynthesize::fetch]]},
+                With[{left = FileNames["*", dir]},
+                    DeleteDirectory[dir, DeleteContents -> True];
+                    {FailureQ[r], r["Tag"], First[r["MessageParameters"]], left}]]],
+        {True, "fetch", "model.q8.gguf", {}},
+        TestID -> "phonon/fetch-failure-names-the-file"
     ];
 
     PhononUnload[]

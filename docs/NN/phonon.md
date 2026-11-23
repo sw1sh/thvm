@@ -41,6 +41,31 @@ the flow transformer's projections) and decoded to f32 on the host at load.
 | `PhononText.wl` | the tokenizer, prompt preparation, chunking, the normaliser |
 | `PhononGenerate.wl` | `PhononSynthesize`, `PhononUnload`, model fetch, voices |
 
+## Weights
+
+The weights are not shipped with the paclet. The first call fetches three
+files from the model's HuggingFace repository, `gradium/phonon-31m-en`, at the
+revision the port was checked against, into `~/.cache/thvm/phonon-31m-en` (or
+the `"ModelDirectory"` given):
+
+| File | Bytes | What |
+| --- | --- | --- |
+| `model.q8.gguf` | 64512352 | the flow transformer, flow head and Mimi decoder |
+| `tokenizer.json` | 277967 | the SentencePiece Unigram vocabulary |
+| `default-voice.safetensors` | 256136 | the default voice's frames |
+
+- The fetch runs under a progress display that names the file and the source
+  and counts megabytes (`ProgressReporting -> False` hides it).
+- A download goes to a `.part` file and is kept only when its size and SHA-256
+  are the pinned ones (`$phFiles` in `PhononGenerate.wl`); otherwise it is
+  deleted and the call returns a `Failure` that names the file, its address
+  and the reason.
+- A file already in the directory counts when it has its pinned size, so a
+  directory filled by hand works offline.
+- The download is `curl` in the background, its growing file polled for the
+  progress, because not every kernel can download asynchronously; without
+  `curl` it is one `URLDownload`.
+
 ## One shape per step
 
 A decode loop whose tensors grow with the text would compile new kernels for

@@ -22,16 +22,17 @@ $speechSynthesizers = <|
     "Phonon" -> <|"Synthesize" -> WolframInstitute`THVMLink`Examples`PhononSynthesize, "SampleRate" -> 24000|>
 |>;
 
+(* The registry entry of the Method among opts, or a Failure for an unknown one. *)
 speechMethod[opts_List] := With[{method = FirstCase[opts, (Method -> m_) :> m, "Phonon"]},
     If[KeyExistsQ[$speechSynthesizers, method],
         $speechSynthesizers[method],
-        Message[TSpeechSynthesize::badmethod, method, Keys[$speechSynthesizers]]; $Failed]]
+        WolframInstitute`THVMLink`Private`thvmFailure[TSpeechSynthesize::badmethod, method, Keys[$speechSynthesizers]]]]
 
 Options[TSpeechSynthesize] = {Method -> "Phonon"};
 
 TSpeechSynthesize[text_String, spec : ("Audio" | "Samples") : "Audio", opts : OptionsPattern[]] :=
     With[{m = speechMethod[{opts}]},
-        If[m === $Failed, $Failed,
+        If[FailureQ[m], m,
             m["Synthesize"][text, spec, FilterRules[{opts}, Options[m["Synthesize"]]]]]]
 
 (* Samples in [-1, 1] at `rate` Hz as a mono 16-bit WAV file. *)
@@ -63,10 +64,10 @@ speechPlayer[] := speechPlayer[] = SelectFirst[$speechPlayers,
 Options[TSpeak] = {Method -> "Phonon", "Volume" -> 1};
 
 TSpeak[text_String, opts : OptionsPattern[]] := Module[{m = speechMethod[{opts}], player = speechPlayer[], samples, file},
-    If[m === $Failed, Return[$Failed]];
-    If[player === None, Message[TSpeak::player, $speechPlayers[[All, 1]]]; Return[$Failed]];
+    If[FailureQ[m], Return[m]];
+    If[player === None, Return[WolframInstitute`THVMLink`Private`thvmFailure[TSpeak::player, $speechPlayers[[All, 1]]]]];
     samples = m["Synthesize"][text, "Samples", FilterRules[{opts}, Options[m["Synthesize"]]]];
-    If[! ListQ[samples], Return[$Failed]];
+    If[! ListQ[samples], Return[samples]];
     file = FileNameJoin[{$TemporaryDirectory, "thvm-speak-" <> ToString[$ProcessID] <> "-" <> ToString[RandomInteger[10^9]] <> ".wav"}];
     speechWavWrite[file, FirstCase[{opts}, ("Volume" -> v_) :> v, 1] samples, m["SampleRate"]];
     RunProcess[Append[player, file]];
