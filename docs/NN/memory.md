@@ -50,6 +50,17 @@ The schedule planner also recycles CPU buffers: it pushes proven-dead
 same-pass outputs onto the CPU freelist, then drains unused pushes at the
 end of the pass so reuse cannot leak into a later WNF/materialize pass.
 
+The rollback covers only the buffers of the realize that just ran. The
+buffer of an older result whose `TTerm` wrapper the Wolfram Language has
+dropped is freed by `TReclaim[]` (`thvm_wl_reclaim`,
+[wl/THVMLink/CSource/thvmlink.c](../../wl/THVMLink/CSource/thvmlink.c)), the
+twin of the Python bridge's `py_reclaim`: a collection, then a mark from the
+pin table, the definitions, the surviving heap cells and the JIT captures,
+then a table-wide free of what is unmarked. A buffer a fired kernel read
+stays: the kernel's entry keeps its source graph until `TReset[]`. A dropped
+wrapper releases its pin at once (the `ExternPin` manager), so the pin table
+is exactly the wrappers still held.
+
 ## Metal Accounting
 
 Metal has a different lifetime problem: command buffers can still be

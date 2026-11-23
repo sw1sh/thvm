@@ -51,6 +51,7 @@ SetUsage[TBookRead, "TBookRead[loc$] returns the Term at book_heap[loc$], useful
 SetUsage[THeapSet, "THeapSet[loc$, term$] writes term$ to heap[loc$]."];
 SetUsage[TGCCollect, "TGCCollect[] runs a Cheney semi-space collection of the dynamic heap and gives the new heap position THeapPos[]."];
 SetUsage[TGCCount, "TGCCount[] returns the number of GC cycles since thvm_init."];
+SetUsage[TReclaim, "TReclaim[] frees the buffers of the central processing unit (CPU) backend that no term held by the Wolfram Language, no TJit capture and no definition reaches, and returns the number of bytes freed. It runs a garbage collection first. A buffer that a realized kernel read stays until TReset."];
 (* TKernelSource / TKernelFlops / TKernelDispatchKind / TKernelDispatchCount /
    TKernelTotalUs / TKernelJitDylibPath / TKernelProfile / TProfileAll
    are declared and defined in Kernel.wl as TKernel-property accessors. *)
@@ -572,6 +573,7 @@ $heapReadFn := $heapReadFn = load["thvm_wl_heap_read", {Integer}, Integer];
 $heapSetFn := $heapSetFn = load["thvm_wl_heap_set", {Integer, Integer}, Integer];
 $gcCollectFn := $gcCollectFn = load["thvm_wl_gc_collect", {}, Integer];
 $gcCountFn := $gcCountFn = load["thvm_wl_gc_count", {}, Integer];
+$reclaimFn := $reclaimFn = load["thvm_wl_reclaim", {}, Integer];
 $atpHeapRecycleFn := $atpHeapRecycleFn = load["thvm_wl_atp_heap_recycle", {}, Integer];
 $kernelSourceCFn := $kernelSourceCFn = load["thvm_wl_kernel_source_c", {Integer}, "UTF8String"];
 $kernelSourceMetalFn := $kernelSourceMetalFn = load["thvm_wl_kernel_source_metal", {Integer}, "UTF8String"];
@@ -919,6 +921,7 @@ THeapRead::loc = THeapSet::loc = "`1` is not a location in the heap.";
 TBookRead::loc = "`1` is not a location in the book heap.";
 TGCCollect[] := (ensureInit[]; $gcCollectFn[])
 TGCCount[] := (ensureInit[]; $gcCountFn[])
+TReclaim[] := (ensureInit[]; $reclaimFn[])
 TWnf[t_] := Module[{r},
     ensureInit[];
     r = withTermCtx[t, TTerm[$wnfFn[ttermRaw[t]]]];

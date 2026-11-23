@@ -56,7 +56,7 @@ THVMLink computes with `thvm`, a runtime that evaluates programs by rewriting an
 - `TTermSubexprs` the subterms of a term together with their positions
 - `TTermVal` the value field of a term, such as the value of a number
 
-- `TSubexprAt`, `TTermTag`, `TTagName`, `TTermExt`, `TTermSub`, `THeapRead`, `THeapSet`, `THeapAlloc`, `THeapPos`, `THeapBase`, `TBookRead`, `TGCCollect`, `TExternPinCount`
+- `TSubexprAt`, `TTermTag`, `TTagName`, `TTermExt`, `TTermSub`, `THeapRead`, `THeapSet`, `THeapAlloc`, `THeapPos`, `THeapBase`, `TBookRead`, `TGCCollect`, `TReclaim`, `TExternPinCount`
 
 ### Drawing interaction nets and reductions
 
