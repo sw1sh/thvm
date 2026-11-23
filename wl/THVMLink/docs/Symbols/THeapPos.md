@@ -20,7 +20,7 @@ RelatedGuides: [THVMLink]
 - The live cells are at the locations from <code>[THeapBase]()[]</code> up to <code>[THeapPos]()[]</code> - 1.
 - Every allocation advances it: <code>[THeapAlloc]()[*n*]</code> by *n*, and a term constructor by the number of cells of its node.
 - A lambda takes one cell, an application or a superposition two, and a constructor one more than its number of children. Numbers and the eraser are stored in the term itself and take no cell.
-- <code>[TReset]()</code> sets it to 1, since location 0 never holds a cell, and after <code>[TGCCollect]()</code> it is just past the last live cell in the other half of the heap.
+- <code>[TReset]()</code> sets it to 1, since location 0 never holds a cell, and after <code>[TGCCollect]()</code> it is just past the last live cell, with the live cells packed at the start of the heap.
 
 ## Basic Examples
 
@@ -123,12 +123,12 @@ THeapPos[] - THeapBase[]
 ```
 <!-- => 2 -->
 
-After a garbage collection the position is in the other half of the heap:
+A garbage collection packs the live cells at the start of the heap and gives the position just past them:
 
 ```wl
 TGCCollect[]
 ```
-<!-- => 134217730 -->
+<!-- => 3 -->
 
 The size of the active region is unchanged:
 

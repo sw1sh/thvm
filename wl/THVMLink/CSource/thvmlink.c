@@ -380,7 +380,7 @@ EXTERN_C DLLEXPORT int thvm_wl_gc_collect(WolframLibraryData libData,
                                           mint argc, MArgument *args,
                                           MArgument res) {
   (void)libData; (void)argc; (void)args;
-  gc_collect(NULL, 0);
+  gc_collect_low(NULL, 0);
   MArgument_setInteger(res, (mint)HEAP_NEXT);
   return LIBRARY_NO_ERROR;
 }

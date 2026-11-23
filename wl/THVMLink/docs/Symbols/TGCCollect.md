@@ -13,15 +13,15 @@ RelatedGuides: [THVMLink]
 
 <code>[TGCCollect]()[]</code> runs a garbage collection of the dynamic heap and gives the new heap position.
 
-<!-- #| annotation: 26.10.19: TGCCollect wraps gc_collect (src/heap/collect.c), a Cheney copying collector over two equal semi-spaces of the dynamic heap: it evacuates every cell reachable from the root set (the extern pin table, the DEFS table, the last wnf stack, tensor grad slots and kernel source terms) to to-space with forward pointers, re-keys the lam_shape side table and swaps the spaces. The second semi-space starts at 2^27 cells with the default heap size (THVM_HEAP_CELLS). The realize loop also collects on its own once HEAP_NEXT passes a high-water mark. Because every TTerm wrapper is a root and the managed handles were not observed to release in probes, garbage is only what the runtime allocated without handing a wrapper back, such as the internal cells of a reduction. -->
+<!-- #| annotation: 26.11.23: TGCCollect wraps gc_collect_low (src/heap/collect.c). gc_collect is a Cheney copying collector over two equal semi-spaces of the dynamic heap: it evacuates every cell reachable from the root set (the extern pin table, the DEFS table, the last wnf stack, tensor grad slots and kernel source terms) to to-space with forward pointers, re-keys the lam_shape side table and swaps the spaces. gc_collect_low runs it and, when that leaves the live cells in the high semi-space (which starts at 2^27 cells with the default heap size, THVM_HEAP_CELLS), runs it once more to copy them back, so a collection ends with the live cells at the bottom of the heap, where the scheduler's scratch arrays, which are indexed by heap location and span HEAP_NEXT, stay proportional to the live cells. The pair counts as one collection in TGCCount. The realize loop collects through the same function once HEAP_NEXT passes a high-water mark. A TTerm wrapper is a root only while the Wolfram Language holds it, since its managed handle releases the pin when the wrapper is dropped, so garbage is the cells of terms whose wrappers are gone and what the runtime allocated without handing a wrapper back, such as the internal cells of a reduction. -->
 
 ## Details & Options
 
-- The collector copies the cells reachable from the terms the Wolfram Language holds into the other half of the heap, updates the references, and frees the cells left behind.
+- The heap is split into two halves. The collector copies the cells reachable from the terms the Wolfram Language holds into the empty half and updates the references, then copies them back when that half is the second one. A collection so ends with the live cells packed at the start of the first half and the rest of the heap free.
 - Terms held by the Wolfram Language stay valid across a collection, and their wrappers follow the cells to their new locations.
-- The result is <code>[THeapPos]()[]</code> after the collection. The live cells occupy the locations from <code>[THeapBase]()[]</code> up to it, in the half of the heap that was empty before the collection.
-- Every [TTerm]() wrapper is a root, so the cells freed are the ones the runtime allocated without giving out a term for them, such as the intermediate cells of a reduction.
-- The runtime also collects on its own after <code>[TRealize]()</code> once the heap passes a high-water mark. <code>[TReset]()</code> empties the heap and moves it back to its first half.
+- The result is <code>[THeapPos]()[]</code> after the collection, one more than the number of live cells. The live cells occupy the locations from <code>[THeapBase]()[]</code>, which is 1 after a collection, up to it.
+- Every [TTerm]() wrapper the Wolfram Language still holds is a root. The cells freed are the ones no held term reaches: the cells of terms whose wrappers were dropped, and the ones the runtime allocated without giving out a term for them, such as the intermediate cells of a reduction.
+- The runtime also collects on its own after <code>[TRealize]()</code> once the heap passes a high-water mark, and that collection ends in the first half too. <code>[TReset]()</code> empties the heap.
 
 ## Basic Examples
 
@@ -57,14 +57,14 @@ Collect the garbage:
 ```wl
 TGCCollect[]
 ```
-<!-- => 134217770 -->
+<!-- => 5 -->
 
-The live cells that remain:
+The live cells that remain are the four cells of the term kept:
 
 ```wl
 THeapPos[] - THeapBase[]
 ```
-<!-- => 42 -->
+<!-- => 4 -->
 
 The term kept across the collection still reduces:
 
@@ -81,21 +81,21 @@ Start from an empty heap:
 TReset[];
 ```
 
-The first collection after a reset moves the heap to its second half:
+Hold a superposition, a node of two cells:
+
+```wl
+s = TSup[1, 2]
+```
+<!-- => a TTerm summary box with tag SUP -->
+
+A collection packs the live cells at the start of the heap and gives the position just past them:
 
 ```wl
 TGCCollect[]
 ```
-<!-- => 134217728 -->
+<!-- => 3 -->
 
-The next collection moves it back to the first half:
-
-```wl
-TGCCollect[]
-```
-<!-- => 1 -->
-
-The heap base follows:
+The heap base stays at 1:
 
 ```wl
 THeapBase[]
@@ -117,19 +117,19 @@ x = TSup[1, 2] + 3
 ```
 <!-- => a TTerm summary box with tag OP2 -->
 
-Its wrappers are the roots of the collection:
+Its wrapper is the only root of the collection:
 
 ```wl
 TExternPinCount[]
 ```
-<!-- => 5 -->
+<!-- => 1 -->
 
 Collect:
 
 ```wl
 TGCCollect[]
 ```
-<!-- => 134217732 -->
+<!-- => 5 -->
 
 Every cell of the held term survives:
 
@@ -146,10 +146,10 @@ Start from an empty heap:
 TReset[];
 ```
 
-Build fifty superpositions without keeping them:
+Build fifty superpositions and keep them in a variable:
 
 ```wl
-Table[TSup[i, i + 1], {i, 50}];
+sups = Table[TSup[i, i + 1], {i, 50}];
 ```
 
 They occupy a hundred cells:
@@ -164,7 +164,7 @@ Collect:
 ```wl
 TGCCollect[]
 ```
-<!-- => 134217828 -->
+<!-- => 101 -->
 
 Each superposition is still pinned by its wrapper, so none of its cells is freed:
 
@@ -172,3 +172,16 @@ Each superposition is still pinned by its wrapper, so none of its cells is freed
 THeapPos[] - THeapBase[]
 ```
 <!-- => 100 -->
+
+Clear the variable, which drops the wrappers:
+
+```wl
+Clear[sups];
+```
+
+The next collection frees every cell:
+
+```wl
+TGCCollect[]
+```
+<!-- => 1 -->

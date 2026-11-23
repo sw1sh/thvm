@@ -378,3 +378,18 @@ fn void gc_collect(Term *roots, u32 n_roots) {
   HEAP_NEXT = alloc;
 }
 
+// One collection that ends in the low semi-space, copying back when the swap
+// left the live cells in the high one.  The scheduler's loc-indexed scratch
+// arrays span HEAP_NEXT (materialize.c, bufferize_classify.c), so a realize
+// costs memory in proportion to live work only while the live cells sit at the
+// bottom of the heap: from the high space each array is the size of a whole
+// semi-space.
+fn void gc_collect_low(Term *roots, u32 n_roots) {
+  if (!GC_ENABLED) return;
+  gc_collect(roots, n_roots);
+  if (GC_FROM_START != 0) {
+    gc_collect(roots, n_roots);
+    GC_COUNT--;
+  }
+}
+
