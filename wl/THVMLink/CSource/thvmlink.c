@@ -385,6 +385,37 @@ EXTERN_C DLLEXPORT int thvm_wl_gc_collect(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// Frees each CPU buffer no live term reaches, as py_reclaim does for the Python
+// host (tinygrad frees a Buffer on its last reference, device.py:133-134): a
+// collection drops the dead heap cells, the marks preserve what the pin table
+// (the TTerm wrappers the Wolfram Language holds), the definitions, the JIT
+// captures and every surviving heap cell name, and the rest is freed.  Off
+// Metal nothing else frees the buffer of a dropped wrapper.  A buffer a fired
+// kernel read stays: the kernel's entry keeps its source graph until a reset.
+// Returns the bytes freed; nothing is freed during a JIT capture, whose
+// buffers are still being recorded.
+EXTERN_C DLLEXPORT int thvm_wl_reclaim(WolframLibraryData libData,
+                                       mint argc, MArgument *args,
+                                       MArgument res) {
+  (void)libData; (void)argc; (void)args;
+  u64 before = cpu_buf_live_bytes();
+  if (!jit_is_capturing() && CPU_BUFS != NULL) {
+    gc_collect_low(NULL, 0);
+    cpu_buf_clear_preserved(1);
+    thvm_metal_buf_clear_preserved(1);
+    if (mark_gc_preserve_host_roots(NULL, 0)) {
+      mark_heap_rooted_preserve();
+      jit_capture_mark_preserved();
+      cpu_buf_pool_free_unpreserved(1);
+    }
+    cpu_buf_clear_preserved(1);
+    thvm_metal_buf_clear_preserved(1);
+  }
+  u64 after = cpu_buf_live_bytes();
+  MArgument_setInteger(res, (mint)(before > after ? before - after : 0));
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_gc_count(WolframLibraryData libData,
                                         mint argc, MArgument *args,
                                         MArgument res) {

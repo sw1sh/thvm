@@ -34,9 +34,16 @@ semi-spaces. After a realize under heap or device pressure
 (`thvm_realize_maybe_gc`, [src/schedule/realize.c](../../src/schedule/realize.c);
 `THVM_GC_KB`, `THVM_GC_DEVICE_MB`) `gc_collect` evacuates the roots and every
 side table that holds Terms; tables keyed by loc re-key through forward
-pointers, and the hash-cons and upload caches are cleared. A permanent tail
-past the semi-spaces (`THVM_HEAP_PERM_CELLS`, `heap_perm_alloc`) holds
-atom-only nodes that are never collected.
+pointers, and the hash-cons and upload caches are cleared. The realize-boundary
+collection and `TGCCollect` call `gc_collect_low`, which collects once more
+when a collection ends in the high semi-space, so the live cells end at the
+bottom of the heap: the scheduler's loc-indexed scratch arrays span
+`HEAP_NEXT`, and from the high semi-space each is a whole semi-space long.
+A realize that starts with the live cells there (the prover's collections
+leave them in either half) collects back before it schedules
+(`thvm_realize_low_space`), and `TReclaim` does the same before it frees the
+buffers nothing reaches. A permanent tail past the semi-spaces (`THVM_HEAP_PERM_CELLS`, `heap_perm_alloc`)
+holds atom-only nodes that are never collected.
 
 ## Read / write
 
