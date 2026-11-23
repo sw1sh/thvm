@@ -18,7 +18,8 @@ TSwiGLU[x$, wIn$, wOut$] is the projected form linear_out(SwiGLU(linear_in(x$)))
 SetUsage[TSoftmax, "TSoftmax[x$] is exp(x$ - max(x$)) / sum(exp(x$ - max(x$))) over the last axis (the class / key axis).
 TSoftmax[x$, axis$] reduces along axis$ (0-indexed; a negative axis counts from the end)."];
 SetUsage[TLog, "TLog[x$] is the elementwise natural log, lowered as log2(x$) * ln(2) since the runtime has log2 but no native log. Kept as a public alias; new code should write Log[x$]."];
-SetUsage[TGELU, "TGELU[x$] applies the tanh-form GELU approximation 0.5 * x$ * (1 + tanh(sqrt(2/pi) * (x$ + 0.044715 * x$^3))), tinygrad's gelu."];
+SetUsage[TGELU, "TGELU[x$] applies the tanh-form GELU approximation 0.5 * x$ * (1 + tanh(sqrt(2/pi) * (x$ + 0.044715 * x$^3))), tinygrad's gelu.
+TGELU[x$, \"Erf\"] applies the exact GELU 0.5 * x$ * (1 + erf(x$ / sqrt(2))), torch's gelu with approximate=\"none\"."];
 
 Begin["`Private`"];
 
@@ -70,6 +71,7 @@ TSoftmax[x_TTerm] := TSoftmax[x, -1]
 TSoftmax[x_TTerm, axis_Integer] := nnCall[TSoftmax, "softmax", {x}, {axis, 0}]
 
 TGELU[x_TTerm] := nnCall[TGELU, "gelu", {x}]
+TGELU[x_TTerm, "Erf"] := nnCall[TGELU, "gelu_erf", {x}]
 
 End[];
 

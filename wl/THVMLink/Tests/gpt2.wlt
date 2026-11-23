@@ -70,6 +70,15 @@ With[{seq = 4, dim = 8},
     ]
 ];
 
+(* The "Erf" form is the exact GELU, x Phi(x). *)
+With[{xe = RandomReal[{-6, 6}, {4, 8}]},
+    VerificationTest[
+        md[0.5 xe (1 + Erf[xe / Sqrt[2.]]), rd @ TGELU[tc[xe], "Erf"]] < 1.*^-4,
+        True,
+        TestID -> "gpt2/gelu-erf-is-exact"
+    ]
+];
+
 (* No GELU output is NaN / Inf even deep in the cubic-overflow tail. *)
 VerificationTest[
     AllTrue[Flatten[rd @ TGELU[tc[RandomReal[{-40, 60}, {3, 5}]]]],
