@@ -40,6 +40,10 @@ FluxGenerate::usage = "FluxGenerate[prompt$] generates an Image from a text prom
 
 FluxGenerate::fetch = "Could not fetch `1` from `2`: `3`.";
 
+FluxGenerate::tokenizer = "The tokenizer files in `1` (vocab.json, added_tokens.json, merges.txt) could not be read.";
+
+FluxGenerate::normalize = "The prompt `1` has characters from U+0300 on, and this kernel's CharacterNormalize does not give their composed normal form.";
+
 FluxGenerate::nocfg = "FLUX.2-klein-4B is a guidance-distilled 4-step flow-matching model with no classifier-free guidance, so the \"NegativePrompt\" `1` cannot be applied (a negative prompt needs the conditional-vs-unconditional CFG pass klein was distilled to skip).  It is ignored.";
 
 FluxGenerate::badlatent = "The \"InitialLatent\" value has dimensions `1`, but the current \"ImageSize\" needs a {`2`, 128} latent.  Sampling fresh random noise instead.";
@@ -96,14 +100,19 @@ qwByteToUnicode[] := Module[{bs, cs, n, b},
 ]
 
 (* load + memoise the tokenizer tables (vocab string->id, merge-pair->rank,
-   byte->unicode, special-token ids) from a tokenizer dir. *)
+   byte->unicode, special-token ids) from a tokenizer dir.  A file that cannot be
+   read gives a Failure, which is not kept: everything after the tokenizer would
+   otherwise run on the unevaluated imports. *)
 
-qwTokenizerData[dir_] := qwTokenizerData[dir] = Module[{vocab, added, mergeLines, mergePairs, bpeRank, b2u, specials},
-    vocab = Import[FileNameJoin[{dir, "vocab.json"}], "RawJSON"];
-    added = Import[FileNameJoin[{dir, "added_tokens.json"}], "RawJSON"];
+qwTokenizerData[dir_] := Module[{vocab, added, merges, mergeLines, mergePairs, bpeRank, b2u, specials},
+    vocab = Quiet @ Import[FileNameJoin[{dir, "vocab.json"}], "RawJSON"];
+    added = Quiet @ Import[FileNameJoin[{dir, "added_tokens.json"}], "RawJSON"];
+    merges = Quiet @ Import[FileNameJoin[{dir, "merges.txt"}], "Text"];
+    If[! (AssociationQ[vocab] && AssociationQ[added] && StringQ[merges]),
+        Return[WolframInstitute`THVMLink`Private`thvmFailure[FluxGenerate::tokenizer, dir]]];
     vocab = Join[vocab, added];
     mergeLines = Select[
-        StringSplit[Import[FileNameJoin[{dir, "merges.txt"}], "Text"], "\n"],
+        StringSplit[merges, "\n"],
         (# =!= "" && ! StringStartsQ[#, "#version"])&
     ];
     mergePairs = StringSplit[#, " "]& /@ mergeLines;
@@ -113,7 +122,7 @@ qwTokenizerData[dir_] := qwTokenizerData[dir] = Module[{vocab, added, mergeLines
     specials = <|
         "im_start" -> 151644, "im_end" -> 151645, "think" -> 151667, "think_end" -> 151668, "pad" -> 151643
     |>;
-    <|"vocab" -> vocab, "rank" -> bpeRank, "b2u" -> b2u, "special" -> specials|>
+    qwTokenizerData[dir] = <|"vocab" -> vocab, "rank" -> bpeRank, "b2u" -> b2u, "special" -> specials|>
 ]
 
 (* the Qwen pre-tokenization regex (GPT-4 split: case-insensitive contractions,
@@ -158,6 +167,11 @@ qwBpe[mapped_String, bpeRank_] := Module[{word, n, pairs, ranks, best, bi, a, b,
     word
 ]
 
+(* The composed normal form (NFC) of a text.  A text whose characters are all below U+0300 has no
+   combining mark and is in that form already; any other goes to CharacterNormalize, which a kernel
+   without it leaves unevaluated (the entry checks the prompts with this before anything is loaded). *)
+qwNfc[text_String] := If[Max[ToCharacterCode[text], 0] < 768, text, CharacterNormalize[text, "NFC"]]
+
 (* encode one plain text fragment (no special tokens) -> list of ids:
    NFC-normalise, pre-tokenise, byte->unicode each pre-token, BPE-merge, lookup. *)
 
@@ -165,7 +179,7 @@ qwEncodeText[text_String, td_] := Module[{nfc, pretoks, vocab, b2u, rank},
     vocab = td["vocab"];
     b2u = td["b2u"];
     rank = td["rank"];
-    nfc = CharacterNormalize[text, "NFC"];
+    nfc = qwNfc[text];
     pretoks = StringCases[nfc, RegularExpression[$qwPretokRegex]];
     Flatten @
         Map[
@@ -273,13 +287,14 @@ fxTransformerLoader[wt_, dev_, q8_, loraDeltas_] := Module[{cache = <||>},
    diffusers q/k/v/o/gate/up/down weights are stored {out,in}; qwLayer reuses
    fxLinear = TMatMul[x {S,in}, Transpose[w]], reading the weight transposed via
    the tiled-transpose matmul -- so they upload AS STORED, no pre-transpose.  The
-   embed table stays HOST-resident and un-transposed (qwEmbed host-gathers its
-   rows). *)
+   embedding table goes to no device: with embed given (qwEmbedSource), qwEmbed
+   reads the rows of a prompt's ids from the file; without it the name gives the
+   loaded tensor, whose rows qwEmbed takes on the host. *)
 
-fxQwenLoader[qwt_, dev_] := Module[{cache = <||>},
+fxQwenLoader[qwt_, dev_, embed_ : Automatic] := Module[{cache = <||>},
     n
     |->
-    Lookup[cache, n, cache[n] = If[n === "model.embed_tokens.weight", qwt[n], TToDevice[qwt[n], dev]]]
+    Lookup[cache, n, cache[n] = If[n === "model.embed_tokens.weight", Replace[embed, Automatic :> qwt[n]], TToDevice[qwt[n], dev]]]
 ]
 
 (* VAE weights uploaded to the device.  On a GPU keep them bf16 (their stored
@@ -705,7 +720,7 @@ fxWeightBaseBuild[dev_, modelDir_, q8_, loraResolved_] := Module[{stxt, tokDir, 
         ,
         Module[{qw, wfqL, qct, qcos, qsin, qj, tLoadQw, tCapQw},
             {tLoadQw, qw} = AbsoluteTiming[Join[TSafeTensorLoad[qwPaths[[1]]], TSafeTensorLoad[qwPaths[[2]]]]];
-            wfqL = fxQwenLoader[qw, dev];
+            wfqL = fxQwenLoader[qw, dev, qwEmbedSource[qwPaths, "model.embed_tokens.weight"]];
             qct = TRoPEHalfSplitTable[stxt, qwCfg["head_dim"], qwCfg["theta"]];
             qcos = TToDevice[qct[[1]], dev];
             qsin = TToDevice[qct[[2]], dev];
@@ -913,7 +928,13 @@ FluxGenerate[prompts_List, spec_ ? fxSpecQ, opts : OptionsPattern[]] := Module[{
         With[{fetched = fxFetch[modelDir]},
             If[fetched =!= True,
                 fetched,
-                fxGenerateBody[prompts, spec, imgSize, seed, initLat, showSteps, dev, nSteps, modelDir, q8, loraResolved, loraKey]]]]
+                (* the tokenizer first: a failure to read it ends the call here *)
+                With[{td = qwTokenizerData[FileNameJoin[{modelDir, "tokenizer"}]],
+                      unnormalized = SelectFirst[prompts, ! StringQ[Quiet[qwNfc[#]]] &]},
+                    Which[
+                        FailureQ[td], td,
+                        StringQ[unnormalized], WolframInstitute`THVMLink`Private`thvmFailure[FluxGenerate::normalize, unnormalized],
+                        True, fxGenerateBody[prompts, spec, imgSize, seed, initLat, showSteps, dev, nSteps, modelDir, q8, loraResolved, loraKey]]]]]]
 ]
 
 (* === the model's files ================================================= *)

@@ -44,18 +44,31 @@ Begin["`Private`"];
 qwEmbedWords[table_] := qwEmbedWords[table] = Normal[TTensorData[table]]
 qwEmbed[table_, ids_List] := TTensorCreate @ qwBf16ToF32 @ qwEmbedWords[table][[ids + 1]]
 
-qwBf16ToF32[u16_] := With[{shape = Dimensions[u16], flat = Flatten[u16]},
-    ArrayReshape[
-        Flatten @ ImportByteArray[
-            ByteArray @ Flatten @ Transpose @ {
-                ConstantArray[0, Length[flat]], ConstantArray[0, Length[flat]],
-                Mod[flat, 256], Quotient[flat, 256]
-            },
-            {"Binary", "Real32"}
-        ],
-        shape
-    ]
-]
+(* Where a tensor is in the files of an encoder: the file that has it, the byte its data starts at and
+   its shape; Missing if none has it. *)
+qwEmbedSource[paths_List, name_String] := Catch[
+    Scan[
+        Function[path,
+            With[{header = WolframInstitute`THVMLink`Private`safeReadHeader[path]},
+                If[KeyExistsQ[Last[header], name],
+                    Throw[<|"File" -> path, "At" -> First[header] + First[Last[header][name]["data_offsets"]],
+                        "Shape" -> Last[header][name]["shape"]|>]]]],
+        paths];
+    Missing["NotFound", name]]
+
+(* The rows of ids read from the file, 2 bytes a word: the table itself (3 GB as host integers) is
+   never read.  Each distinct id is read and decoded once; a padded prompt is mostly the padding id. *)
+qwEmbed[source_Association, ids_List] := Module[{strm = OpenRead[source["File"], BinaryFormat -> True], width = Last[source["Shape"]], distinct = DeleteDuplicates[ids], rows},
+    rows = Function[id,
+        SetStreamPosition[strm, source["At"] + 2 width id];
+        BinaryReadList[strm, "UnsignedInteger16", width, ByteOrdering -> -1]] /@ distinct;
+    Close[strm];
+    TTensorCreate @ Lookup[AssociationThread[distinct -> qwBf16ToF32[rows]], ids]]
+
+(* bf16 words to reals by their fields: sign (1 bit), exponent (8), fraction (7).  An exponent of 0 is
+   a zero or a subnormal; the weights have no infinity. *)
+qwBf16ToF32[u16_] := With[{sign = 1 - 2 Quotient[u16, 32768], exponent = Mod[Quotient[u16, 128], 256], fraction = Mod[u16, 128] / 128.},
+    sign * (Unitize[exponent] * 2.^(exponent - 127) * (1 + fraction) + (1 - Unitize[exponent]) * 2.^-126 * fraction)]
 
 (* Per-layer weight Association from a name -> TTerm loader wf (HF names).
    Weights stay bf16; fxLinear's bf16-direct matmul reads them as-is. *)

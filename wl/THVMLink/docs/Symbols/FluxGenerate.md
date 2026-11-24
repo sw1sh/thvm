@@ -33,6 +33,7 @@ RelatedGuides: [THVMLink]
 - The first generation loads the weights and records the kernels of each stage; later generations with the same settings replay the recorded kernels, so only the first is slow. The forms with *n* or a list of prompts share one such session, and each of *n* images gets its own random seed.
 - The weights are not part of the paclet. The first call fetches the model's seven files, 16 gigabytes in total, from its HuggingFace repository, `black-forest-labs/FLUX.2-klein-4B`, at a pinned revision, into `"ModelDir"`, showing the file, the source and the megabytes received as it goes. A download is kept only when its size and SHA-256 are the expected ones, and one that stops is continued by the next call.
 - A call that cannot fetch a file gives a [Failure]() that names the file and says why.
+- A file that is in `"ModelDir"` but cannot be opened, tokenizer files that cannot be read, and a prompt with characters from U+0300 on in a kernel whose [CharacterNormalize]() does not give their composed normal form each give a [Failure]() too, before any weight is loaded.
 - FLUX.2-klein is distilled to sample without classifier-free guidance, so it has no guidance scale and no negative prompt.
 - The default device is the graphics processing unit (GPU) through Metal. The following options can be given:
 
