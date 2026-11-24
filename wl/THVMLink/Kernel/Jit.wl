@@ -91,37 +91,30 @@ TJit[fn_] := TJitClosure[<|
     "fn" -> Function[args, fn[Sequence @@ args]]
 |>]
 
-(* Direct invocation: dispatch through the side store.  Two paths:
-     (a) closure has captured -> replay only
-     (b) first call -> capture-begin, run fn, capture-end, store slot. *)
-(* The TenDesc tids of the call's TTerm arguments, realized so each has a
-   live buffer.  These are the per-call INPUTS: on capture they declare the
-   input_replace baseline; on replay each call's fresh tids are substituted
-   at the captured input sites, so passing a new input rebinds it with no
-   explicit TSet.  No TTerm args (the slot-feeding TJit[fn] usage) -> {}. *)
-jitArgTids[args_List] := TTermVal /@ TRealize /@ Cases[args, _TTerm]
+(* A call's arguments with each tensor argument realized, done before the capture
+   or the replay: tinygrad's TinyJit realizes its inputs first and then captures
+   (engine/jit.py:93 in _prepare_jit_inputs, called at :127 before capturing at
+   :139).  The function body gets these realized tensors.  Realized inside the
+   capture instead, the kernels that compute a lazy argument (a cast of a running
+   value, say) are recorded with it; every replay then runs them again on the
+   capture call's source and writes the result over the call's fresh input, so
+   each replay computes on the first call's argument. *)
+jitRealizeArgs[args_List] := Replace[args, t_TTerm :> TRealize[t], {1}]
 
-(* One capture pass over the held fn: begin a slot, run the body, end+pin the
-   result roots, declare the input-rebind sites.  Returns the state assoc
-   <|slot, result|> or a Failure when the slot pool is full.
+(* The TenDesc tids of the realized tensor arguments.  These are the per-call
+   INPUTS: on capture they declare the input_replace baseline; on replay each
+   call's tids are substituted at the captured input sites, so passing a new
+   input rebinds it with no explicit TSet.  No TTerm args (the slot-feeding
+   TJit[fn] usage) -> {}. *)
+jitArgTids[args_List] := TTermVal /@ Cases[args, _TTerm]
 
-   The input args are REALIZED inside the capture scope (jit_is_capturing)
-   so materialize_copy pins + caches each upload by copy-loc.  The fn body
-   then re-realizes the same input arg (a TToDevice / lazy leaf) and HITS
-   that cache, reusing the very buffer we declare as the input_replace
-   baseline.  Without this, the input realize would happen OUTSIDE the
-   capture (jit_is_capturing false -> uncached), and the fn body's own
-   re-realize inside the capture would upload a SECOND, distinct buffer:
-   the captured kernels would read that derived buffer while the declared
-   input named the first one, so input_replace finds 0 rebind sites and a
-   warm replay re-reads the capture-time bytes (the conv / im2col VAE
-   replay collapse -- every gen reuses the first prompt's latent).  Realize
-   once, inside the scope, so declared buffer == kernel-read buffer. *)
-jitCaptureOnce[a_Association, args_List] := Module[{slot, fnRes, inTids},
+(* One capture pass over the held fn on realized arguments: begin a slot, run the
+   body, end+pin the result roots, declare the input-rebind sites.  Returns the
+   state assoc <|slot, result|> or a Failure when the slot pool is full. *)
+jitCaptureOnce[a_Association, args_List] := Module[{slot, fnRes, inTids = jitArgTids[args]},
     slot = $jitCaptureBeginFn[];
     If[ slot === 0,
         Failure["TJit", <|"MessageTemplate" -> "TJit capture-slot pool full (cap = 16)"|>],
-        inTids = jitArgTids[args];
         Internal`WithLocalSettings[
             Null,
             fnRes = a["fn"][args],
@@ -143,25 +136,23 @@ jitCaptureOnce[a_Association, args_List] := Module[{slot, fnRes, inTids},
 (* Direct invocation: dispatch through the side store.  Two paths:
      (a) closure has captured -> replay only
      (b) first call -> capture-begin, run fn, capture-end, store slot. *)
-TJitClosure[a_Association][args___] := Module[{key = Hash[a], rec, inTids, st},
+TJitClosure[a_Association][args___] := Module[{key = Hash[a], rec, inTids, st, realized},
     ensureInit[];
+    realized = jitRealizeArgs[{args}];
     rec = $tJitState[key];
     If[ ! MissingQ[rec]
         ,
-        (* (a) replay: realize this call's inputs to get their fresh per-call
-           buffers, substitute them at the captured sites (tinygrad
-           input_replace), re-dispatch, and return the SAME result handle --
-           the replay rewrites its pinned output buffer, so reading it
-           surfaces the fresh result.  No inputs -> plain re-dispatch (the
-           slot-feeding usage). *)
-        inTids = jitArgTids[{args}];
+        (* (a) replay: substitute this call's input buffers at the captured
+           sites (tinygrad input_replace), re-dispatch, and return the SAME
+           result handle -- the replay rewrites its pinned output buffer, so
+           reading it surfaces the fresh result.  No inputs -> plain
+           re-dispatch (the slot-feeding usage). *)
+        inTids = jitArgTids[realized];
         If[inTids === {}, $jitReplayFn[rec["slot"]], $jitReplayWithInputsFn[rec["slot"], inTids]];
         rec["result"]
         ,
-        (* (b) capture: jitCaptureOnce realizes the inputs INSIDE the capture
-           scope so the upload caches by copy-loc and the fn body reuses the
-           declared input buffer (see jitCaptureOnce). *)
-        st = jitCaptureOnce[a, {args}];
+        (* (b) capture, on the realized arguments. *)
+        st = jitCaptureOnce[a, realized];
         If[ FailureQ[st],
             st,
             $tJitState[key] = st;
