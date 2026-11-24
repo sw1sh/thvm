@@ -60,6 +60,8 @@ the `"ModelDirectory"` given):
   are the pinned ones (`$phFiles` in `PhononGenerate.wl`); otherwise it is
   deleted and the call returns a `Failure` that names the file, its address
   and the reason.
+- The fetch itself (`hubFetch`) is in `Models.wl` beside the model
+  directories, for every example model that fetches from HuggingFace.
 - A file already in the directory counts when it has its pinned size, so a
   directory filled by hand works offline.
 - The download is `curl` in the background, its growing file polled for the
@@ -158,4 +160,6 @@ A session holds about 600 MB of buffers. Each chunk leaves its prompt upload
 tensor on its own; `PhononSynthesize` calls `TReclaim` once the buffers have
 grown by 64 MB. `PhononUnload` resets the engine, as `FluxUnload` does: the
 kernel table keeps every tensor a session's kernels read, so nothing short of
-a reset frees them.
+a reset frees them. The reset takes the other loaded example models with it;
+each registers what to drop (`modelOnReset` in `Models.wl`) and loads again on
+its next call.

@@ -397,9 +397,12 @@ $fxWeightBase = <||>;
    weight pages.  A bare TReset is deliberately avoided DURING a session's life (it
    would clear the persistent qwJit/velJit captures), but here we are dropping the
    whole session, so the full reset is exactly right.  The next FluxGenerate
-   cold-starts. *)
+   cold-starts.  The reset takes every other loaded example model with it, so it
+   goes through modelEngineReset (Models.wl), which has each forget its session. *)
 
-fxUnloadAll[] := ($fxSession = <||>; $fxWeightBase = <||>; Quiet[TReset[]];);
+modelOnReset["FLUX", Function[$fxSession = <||>; $fxWeightBase = <||>;]];
+
+fxUnloadAll[] := modelEngineReset[];
 
 FluxUnload[] := fxUnloadAll[];
 

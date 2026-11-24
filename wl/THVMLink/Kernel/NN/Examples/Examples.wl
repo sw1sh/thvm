@@ -44,7 +44,8 @@ Needs["WolframInstitute`THVMLink`"];
    1. The generic pipeline framework (Pipeline.wl) FIRST -- a model file references
       its PUBLIC symbols (tisModelSpec / tisPipeline / tisRegisterComponent), and a
       bare reference would resolve to a Private stub if the public symbol did not
-      exist at the model file's parse time.
+      exist at the model file's parse time.  Models.wl loads with it: a model file
+      registers its unload with modelOnReset as it loads.
    2. Implementation files (KreaForward / KreaVAE / FLUX layers, ...) next, sorted.
    3. Assembler files, those named with a Generate suffix, LAST.  An assembler's
       registered forward closures reference the implementation files' PUBLIC helpers
@@ -56,7 +57,7 @@ Needs["WolframInstitute`THVMLink`"];
 With[{base = DirectoryName[$InputFileName]},
     Module[{all, framework, assemblers, impl},
         all = Select[FileNames["*.wl", base, Infinity], FileBaseName[#] =!= "Examples" &];
-        framework = Select[all, FileBaseName[#] === "Pipeline" &];
+        framework = Select[all, MemberQ[{"Pipeline", "Models"}, FileBaseName[#]] &];
         assemblers = Select[all, StringEndsQ[FileBaseName[#], "Generate"] &];
         impl = Complement[all, framework, assemblers];
         Scan[Get, framework];

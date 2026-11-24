@@ -35,72 +35,16 @@ $phFiles = <|
     "default-voice.safetensors" -> <|"Bytes" -> 256136, "SHA256" -> "dc537478eaadc1a5257fcda2e3501ab81e14c111a5d95a5838f350db2afd0f1a"|>
 |>;
 
-phUrl[name_String] := "https://huggingface.co/" <> $phRepository <> "/resolve/" <> $phRevision <> "/" <> name
+phSource[] := <|"Repository" -> $phRepository, "Revision" -> $phRevision, "Files" -> $phFiles|>
 
 phModelDirectory[Automatic] := FileNameJoin[{$HomeDirectory, ".cache", "thvm", "phonon-31m-en"}]
 phModelDirectory[dir_String] := ExpandFileName[dir]
 
-phHaveQ[dir_String, name_String] := With[{file = FileNameJoin[{dir, name}]},
-    FileExistsQ[file] && FileByteCount[file] == $phFiles[name]["Bytes"]]
+phHaveQ[dir_String, name_String] := hubHaveQ[phSource[], dir, name]
 
-(* phReport[text, fraction] sets what the progress display shows; nothing outside phWithProgress. *)
-phReport[_, _] := Null
-
-(* Evaluates body under a progress display that follows phReport, as fxWithProgress does for FLUX. *)
-SetAttributes[phWithProgress, HoldRest];
-phWithProgress[reportQ_, body_] := If[TrueQ[reportQ],
-    Module[{text = "Loading Phonon 31M", progress = Indeterminate},
-        Block[{phReport = Function[{t, p}, text = t; progress = p]},
-            Progress`EvaluateWithProgress[body, <|"Text" :> text, "Progress" :> progress|>]]],
-    body
-]
-
-phCurlQ[] := phCurlQ[] = Quiet[RunProcess[{"curl", "--version"}, "ExitCode"]] === 0
-
-(* Downloads url to file, calling report[bytes so far] while it runs: by curl in the background where the
-   system has it, the size of its growing file read five times a second, since not every kernel can
-   download asynchronously; else by URLDownload in one step. *)
-phDownload[url_String, file_String, report_] := (
-    If[FileExistsQ[file], DeleteFile[file]];
-    If[phCurlQ[],
-        With[{proc = StartProcess[{"curl", "-fsSL", "--retry", "2", "-o", file, url}]},
-            While[ProcessStatus[proc] === "Running",
-                report[If[FileExistsQ[file], FileByteCount[file], 0]];
-                Pause[0.2]]],
-        Quiet[URLDownload[url, file]]];
-)
-
-(* A byte count in megabytes with one decimal, "64.5". *)
-phMegabytes[bytes_] := With[{tenths = Round[bytes / 100000]},
-    IntegerString[Quotient[tenths, 10]] <> "." <> IntegerString[Mod[tenths, 10]]]
-
-(* True when dir holds the model's files, the missing ones fetched and checked first; a Failure that says
-   which file could not be had and why. *)
-phFetch[dir_String] := Module[{missing = Select[Keys[$phFiles], ! phHaveQ[dir, #] &], total, done = 0},
-    If[missing === {}, Return[True]];
-    If[! DirectoryQ[dir], CreateDirectory[dir, CreateIntermediateDirectories -> True]];
-    total = Total[$phFiles[#]["Bytes"] & /@ missing];
-    Catch[
-        Do[
-            With[{file = FileNameJoin[{dir, name}], part = FileNameJoin[{dir, name <> ".part"}], want = $phFiles[name]},
-                phDownload[phUrl[name], part, Function[bytes, phReport[
-                    "Fetching " <> name <> " from huggingface.co/" <> $phRepository <> " (" <> phMegabytes[done + bytes] <>
-                        " of " <> phMegabytes[total] <> " MB)",
-                    (done + bytes) / total]]];
-                Which[
-                    ! FileExistsQ[part],
-                        Throw[WolframInstitute`THVMLink`Private`thvmFailure[PhononSynthesize::fetch, name, phUrl[name], "the download failed"]],
-                    FileByteCount[part] != want["Bytes"] || FileHash[part, "SHA256", All, "HexString"] =!= want["SHA256"],
-                        DeleteFile[part];
-                        Throw[WolframInstitute`THVMLink`Private`thvmFailure[PhononSynthesize::fetch, name, phUrl[name],
-                            "what arrived is not the file expected, of " <> ToString[want["Bytes"]] <> " bytes and SHA-256 " <> want["SHA256"]]],
-                    True,
-                        If[FileExistsQ[file], DeleteFile[file]];
-                        RenameFile[part, file];
-                        done += want["Bytes"]]],
-            {name, missing}];
-        True]
-]
+(* True when dir holds the model's files, the missing ones fetched and checked first (hubFetch); a
+   Failure that says which file could not be had and why. *)
+phFetch[dir_String] := hubFetch[PhononSynthesize, phSource[], dir]
 
 (* The frames {F, 512} of a voice file: its one tensor, {1, 512, F} of f32 (or {F, 512}). *)
 phVoiceFile[path_String] := Module[{strm = OpenRead[path, BinaryFormat -> True], n, entry, data, shape},
@@ -121,26 +65,23 @@ $phLoaded = None;
    under the progress display; a Failure when a file cannot be had. *)
 phLoad[dir_String, reportQ_] := If[AssociationQ[$phLoaded] && $phLoaded["Directory"] === dir,
     $phLoaded,
-    phWithProgress[reportQ,
+    hubWithProgress[{reportQ, "Loading Phonon 31M"},
         With[{fetched = phFetch[dir]},
             If[fetched =!= True,
                 fetched,
-                phReport["Loading the Phonon 31M weights", Indeterminate];
+                hubReport["Loading the Phonon 31M weights", Indeterminate];
                 PhononUnload[];
                 $phLoaded = <|"Directory" -> dir, "Session" -> phSession[phLoadGguf[FileNameJoin[{dir, "model.q8.gguf"}]]],
                     "Tokenizer" -> phTokenizer[FileNameJoin[{dir, "tokenizer.json"}]], "Voices" -> <||>|>]]]
 ]
 
-(* Unloading resets the engine, as FluxUnload does: the kernel table keeps every tensor a session's
-   kernels read, so nothing short of a reset frees them.  Terms made before it are no longer valid. *)
-PhononUnload[] := (
-    If[AssociationQ[$phLoaded],
-        phSessionClose[$phLoaded["Session"]];
-        $phLoaded = None;
-        $phInputs = <||>;
-        Quiet[TReset[]];
-        $phReclaimed = 0];
-)
+(* Unloading resets the engine (modelEngineReset), so the other loaded models go with it; this is what
+   Phonon drops when any of them unloads. *)
+modelOnReset["Phonon", Function[
+    If[AssociationQ[$phLoaded], phSessionClose[$phLoaded["Session"]]];
+    $phLoaded = None; $phInputs = <||>; $phReclaimed = 0;]];
+
+PhononUnload[] := (If[AssociationQ[$phLoaded], modelEngineReset[]];)
 
 (* Each chunk leaves its prompt upload behind: reclaim once the buffers have grown by `slack` bytes since
    the last time. *)
