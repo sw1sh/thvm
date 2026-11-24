@@ -60,6 +60,17 @@ hubFreeBytes[dir_String] := With[{out = Quiet[RunProcess[{"df", "-Pk", dir}, "St
             {}]},
         If[free === {}, Infinity, 1024 FromDigits[Last[free]]]]]
 
+(* The SHA-256 of a file in hexadecimal, by the system's tool where there is one: it reads the file in
+   pieces, where a kernel's FileHash may read the whole of a 7 GB file into memory first. *)
+hubHashTool[] := hubHashTool[] = SelectFirst[{{"shasum", "-a", "256"}, {"sha256sum"}},
+    Quiet[RunProcess[{"which", First[#]}, "ExitCode"]] === 0 &, None]
+
+hubSha256[file_String] := With[{tool = hubHashTool[]},
+    With[{out = If[tool === None, None, Quiet[RunProcess[Append[tool, file], "StandardOutput"]]]},
+        If[StringQ[out] && StringLength[out] >= 64 && StringMatchQ[StringTake[out, 64], HexadecimalCharacter ..],
+            ToLowerCase[StringTake[out, 64]],
+            FileHash[file, "SHA256", All, "HexString"]]]]
+
 (* A byte count in megabytes with one decimal, "64.5". *)
 hubMegabytes[bytes_] := With[{tenths = Round[bytes / 100000]},
     IntegerString[Quotient[tenths, 10]] <> "." <> IntegerString[Mod[tenths, 10]]]
@@ -98,7 +109,7 @@ hubFetch[sym_Symbol, source_Association, dir_String] := Module[
                         fail[name, "the download stopped at " <> hubMegabytes[FileByteCount[part]] <> " of " <>
                             hubMegabytes[want["Bytes"]] <> " MB; the next call continues it"],
                     (hubReport["Checking " <> name, (done + want["Bytes"]) / total];
-                     FileByteCount[part] != want["Bytes"] || FileHash[part, "SHA256", All, "HexString"] =!= want["SHA256"]),
+                     FileByteCount[part] != want["Bytes"] || hubSha256[part] =!= want["SHA256"]),
                         DeleteFile[part];
                         fail[name, "what arrived is not the file expected, of " <> ToString[want["Bytes"]] <> " bytes and SHA-256 " <> want["SHA256"]],
                     True,

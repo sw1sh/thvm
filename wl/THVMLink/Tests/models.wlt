@@ -47,6 +47,17 @@ VerificationTest[
     TestID -> "models/a-file-counts-by-its-size"
 ]
 
+(* The hash of a file is the same by the system's tool and by FileHash. *)
+VerificationTest[
+    With[{file = FileNameJoin[{$TemporaryDirectory, "thvm-models-test-hash-" <> ToString[$ProcessID]}]},
+        BinaryWrite[file, Mod[Range[100000] ^ 2, 251], "Byte"] // Close;
+        With[{h = WolframInstitute`THVMLink`Examples`Private`hubSha256[file], k = FileHash[file, "SHA256", All, "HexString"]},
+            DeleteFile[file];
+            {h === k, StringLength[h], LowerCaseQ[StringReplace[h, DigitCharacter -> ""]]}]],
+    {True, 64, True},
+    TestID -> "models/sha256-of-a-file"
+]
+
 VerificationTest[
     WolframInstitute`THVMLink`Examples`Private`hubMegabytes /@ {0, 49999, 64512352, 15968662007},
     {"0.0", "0.0", "64.5", "15968.7"},

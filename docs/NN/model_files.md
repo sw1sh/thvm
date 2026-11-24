@@ -42,7 +42,10 @@ message `sym::fetch`) that names the file, its address and the reason.
   says how much is needed and how much is free.
 - A download goes to a `.part` file beside its place. A `.part` of the full
   size is checked against the SHA-256: it becomes the file when it matches and
-  is deleted when it does not.
+  is deleted when it does not. The hash is taken by the system's tool
+  (`shasum`, `sha256sum`) where there is one, since it reads the file in
+  pieces: a kernel's `FileHash` may read all of a 7 GB file into memory, as the
+  v2 kernel's does.
 - A download that stops short is kept, and the `Failure` says so; the next call
   continues it from where it stopped (`curl -C -`). A dropped connection in the
   middle of 15 GB costs only what was in flight.
