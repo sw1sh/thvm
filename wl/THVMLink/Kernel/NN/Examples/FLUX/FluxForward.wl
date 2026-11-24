@@ -96,14 +96,20 @@ fxLinearFused[x_, q_Association] := fxLinear[x, q]
 fxQuantizableQ[name_String, dims_List] := Length[dims] === 2 && Min[dims] >= 2048 && ! StringContainsQ[name, "modulation" | "norm_out" | "timestep_embedder"];
 
 fxQuantizeWeight[w_TTerm] := With[{shape = Dimensions[w]},
-    Module[{sumShape, maxsq, rms, scale, inv, wq},
+    Module[{sumShape, wf, maxsq, scale, steps, wq},
         sumShape = ReplacePart[shape, Length[shape] -> 1];       (* {out, 1} *)
-        maxsq = TUOpReshape[TUOpReduce[w * w, Length[shape] - 1, "MAX"], sumShape];
-        rms   = Sqrt[maxsq + 1.*^-12];                           (* max|w| per row *)
-        scale = rms * (1. / 127.);                                 (* {out, 1} *)
-        inv   = TUOpRecip[scale];                                (* exact 1/scale *)
-        wq    = TUOpCast[w * TUOpExpand[inv, shape], "i8"];      (* truncate to int8 *)
-        <|"q" -> TRealize[wq], "s" -> TRealize[TUOpCast[TUOpReshape[scale, {First[shape]}], "bf16"]]|>
+        wf    = TUOpCast[w, "f32"];
+        maxsq = TUOpReshape[TUOpReduce[wf * wf, Length[shape] - 1, "MAX"], sumShape];
+        (* The scale as it is stored, bf16: the weights are divided by that one, so that
+           q * scale is within half a step of w whatever bf16 rounded the scale to. *)
+        scale = TRealize[TUOpCast[Sqrt[maxsq + 1.*^-12] * (1. / 127.), "bf16"]];
+        steps = wf * TUOpExpand[TUOpRecip[TUOpCast[scale, "f32"]], shape];
+        (* Rounded to the nearest integer.  A cast truncates toward zero, which makes every
+           weight half a step smaller on average and a linear's output 1 to 2 percent too
+           small; so the value is shifted to a positive one, cast, and shifted back.  The clip
+           keeps a row's largest weight at 127 where the stored scale came out a little low. *)
+        wq    = TUOpCast[TUOpCast[TClip[steps, -127., 127.] + 127.5, "i32"] - 127, "i8"];
+        <|"q" -> TRealize[wq], "s" -> TRealize[TUOpReshape[scale, {First[shape]}]]|>
     ]
 ]
 
