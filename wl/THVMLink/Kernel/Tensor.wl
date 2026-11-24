@@ -659,15 +659,16 @@ $sharedNATypes = {
 asSharableNA[na_NumericArray] /; MemberQ[$sharedNATypes, NumericArrayType[na]] := na
 asSharableNA[na_NumericArray] := NumericArray[Normal[na], "Real32"]
 
-(* A plain list (possibly nested): let NumericArray pick a storage
-   type based on element heads.  Preserve the shape; no Flatten. *)
-asSharableNA[data_List] := With[{type = If[AllTrue[Flatten[{data}], IntegerQ], "Integer32", "Real32"]},
-    NumericArray[data, type]
-]
-
-(* PackedArray: dispatch on element type. *)
-asSharableNA[data_ ? Developer`PackedArrayQ] := With[{t = Developer`PackedArrayType[data]},
-    NumericArray[data, Switch[t, Integer, "Integer32", Real, "Real32", _, "Real32"]]
+(* A list (possibly nested), shape kept: integers are i32, anything else f32.  The list is packed
+   first: NumericArray copies a packed array in one pass, where a kernel may convert an unpacked list
+   element by element (15 s for 512 by 2560 on the v2 kernel).  A list that does not pack, as one
+   with a rational, goes as it is. *)
+asSharableNA[data_List] := With[{packed = Developer`ToPackedArray[data]},
+    NumericArray[packed,
+        If[ If[Developer`PackedArrayQ[packed], IntegerQ[Min[packed]], AllTrue[Flatten[{data}], IntegerQ]],
+            "Integer32",
+            "Real32"
+        ]]
 ]
 
 (* dtype label -> NumericArray storage type.  Default (no dtype
@@ -755,7 +756,7 @@ TTensorCreate[data_, dtype_String] /; tensorDataQ[data] && IntegerQ[dtypeCode[dt
                 ,
             (* Default int / float path: coerce through the NA carrier. *)
             True,
-                normalized = If[MatchQ[data, _NumericArray], Normal[data], data];
+                normalized = If[MatchQ[data, _NumericArray], Normal[data], Developer`ToPackedArray[data]];
                 na = NumericArray[normalized, naTypeFor[dtype]]
         ];
         If[ useTyped,

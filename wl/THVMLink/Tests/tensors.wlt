@@ -275,3 +275,18 @@ VerificationTest[
     {{0.5, 1.}, "f32", {0.5, 0.5}, {2., 3.}, "i32"},
     TestID -> "tensors/integer-true-division"
 ]
+
+(* An unpacked list is the tensor of its packed form: integers i32, reals f32, a list of both f32, the
+   shape kept; so is one with a dtype given. *)
+VerificationTest[
+    With[{reals = Developer`FromPackedArray[{{1.5, -2.}, {0.25, 8.}}], integers = Developer`FromPackedArray[{{1, -2}, {3, 4}}]},
+        {
+            Developer`PackedArrayQ[reals],
+            TTensorDType[TTensorCreate[reals]], Normal[TRealize[TTensorCreate[reals]]],
+            TTensorDType[TTensorCreate[integers]], Normal[TRealize[TTensorCreate[integers]]],
+            TTensorDType[TTensorCreate[{1, 2.5}]], Normal[TRealize[TTensorCreate[{1, 2.5}]]],
+            TTensorDType[TTensorCreate[integers, "f32"]], Normal[TRealize[TTensorCreate[integers, "f32"]]]
+        }],
+    {False, "f32", {{1.5, -2.}, {0.25, 8.}}, "i32", {{1, -2}, {3, 4}}, "f32", {1., 2.5}, "f32", {{1., -2.}, {3., 4.}}},
+    TestID -> "TTensorCreate/an-unpacked-list-is-its-packed-form"
+]
