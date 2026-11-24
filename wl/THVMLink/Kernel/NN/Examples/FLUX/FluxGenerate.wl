@@ -36,7 +36,9 @@
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
-FluxGenerate::usage = "FluxGenerate[prompt$] generates an Image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder).\nFluxGenerate[prompt$, spec$] returns the part(s) named by spec$: \"Image\" (the default Image), \"Latent\" (the initial packed-latent noise z$0, a {S$img, 128} NumericArray that can be fed back via \"InitialLatent\" to reproduce the image -- the round-trip handle), \"Embedding\" (the Qwen text embedding, a {512, 7680} NumericArray), All (an Association of all parts), or a list of those keys (an Association of just those parts).\nFluxGenerate[prompt$, n$] generates n$ images of the same prompt, each with a distinct fresh seed, reusing one model session (only the first is a cold start); FluxGenerate[prompt$, n$, spec$] returns a list of n$ spec$ results.\nFluxGenerate[{prompt$1, prompt$2, $$}] (optionally with a trailing spec$) generates one result per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (every result after the first is warm).\nThe following options can be given:\n  \"ImageSize\" {256, 256}    output size; a scalar n$ means a square n$ x n$ image, a pair {w$, h$} a rectangle (rounded to the /16 patch grid).\n  \"Steps\" Automatic    number of Euler sampling steps; Automatic uses \"NumSteps\".\n  RandomSeeding Automatic    Automatic gives a fresh random image each call; an integer seed makes the result reproducible (same seed -> byte-identical image).\n  \"InitialLatent\" Automatic    Automatic samples fresh z$0 ~ N(0,1); a {S$img, 128} array (e.g. a \"Latent\" result) is used as z$0 to seed STAGE 2 deterministically instead of the per-image random noise, so a saved latent reproduces its image (a latent round-trip).\n  \"NegativePrompt\" None    FLUX.2-klein is guidance-distilled (4-step, no classifier-free guidance), so a negative prompt is unsupported; giving one issues FluxGenerate::nocfg and is ignored.\n  \"ShowSteps\" False    True decodes each Euler-step latent through the VAE and shows the denoising progression live (in a notebook); the per-step Images + raw latents are then included under the \"Steps\" key of an All / {\"Steps\"} return.\n  ProgressReporting Automatic    Automatic or True shows a live progress panel (a no-op with no front end); False runs silent.\n  \"Device\" \"metal\"    backend to run on (\"metal\" | \"cpu\" | \"cuda\").\n  \"NumSteps\" 4    legacy alias for \"Steps\".\n  \"ModelDir\" Automatic    weight directory (Automatic -> ~/.cache/thvm/flux2-klein-4b).\n  \"Q8\" False    weight-only int8 quantization of the large QKV/MLP projections; default False (bf16).  q8 halves the device weight footprint but Metal has no int8 matmul (it casts to bf16 in-kernel), so it is a memory-fit option, not a speed one (env FLUX_Q8=1 is an equivalent fallback).\n  \"LoRA\" None    apply one or more LoRA (Low-Rank Adaptation) .safetensors files to the transformer at load time.  None applies no LoRA; a path String applies that LoRA at scale 1; a list of path Strings applies several; a list of (path -> scale) Rules applies each at its own scale (a real, default 1.0).  Each target weight W is merged to W + scale*(alpha/rank)*(up.down); diffusers/PEFT (lora_A/lora_B) and kohya (lora_down/lora_up) naming are both handled.  Modules that do not map to a FLUX.2-klein weight issue FluxGenerate::loraskip (FLUX.1 LoRAs only partially apply).";
+FluxGenerate::usage = "FluxGenerate[prompt$] generates an Image from a text prompt with the FLUX.2-klein-4B text-to-image model (Qwen3-4B text encoder -> MMDiT velocity net, 4-step Euler flow-match -> AutoencoderKLFlux2 decoder).\nFluxGenerate[prompt$, spec$] returns the part(s) named by spec$: \"Image\" (the default Image), \"Latent\" (the initial packed-latent noise z$0, a {S$img, 128} NumericArray that can be fed back via \"InitialLatent\" to reproduce the image -- the round-trip handle), \"Embedding\" (the Qwen text embedding, a {512, 7680} NumericArray), All (an Association of all parts), or a list of those keys (an Association of just those parts).\nFluxGenerate[prompt$, n$] generates n$ images of the same prompt, each with a distinct fresh seed, reusing one model session (only the first is a cold start); FluxGenerate[prompt$, n$, spec$] returns a list of n$ spec$ results.\nFluxGenerate[{prompt$1, prompt$2, $$}] (optionally with a trailing spec$) generates one result per prompt as a batch, building the model session ONCE and replaying the captured kernels per prompt (every result after the first is warm).\nThe following options can be given:\n  \"ImageSize\" {256, 256}    output size; a scalar n$ means a square n$ x n$ image, a pair {w$, h$} a rectangle (rounded to the /16 patch grid).\n  \"Steps\" Automatic    number of Euler sampling steps; Automatic uses \"NumSteps\".\n  RandomSeeding Automatic    Automatic gives a fresh random image each call; an integer seed makes the result reproducible (same seed -> byte-identical image).\n  \"InitialLatent\" Automatic    Automatic samples fresh z$0 ~ N(0,1); a {S$img, 128} array (e.g. a \"Latent\" result) is used as z$0 to seed STAGE 2 deterministically instead of the per-image random noise, so a saved latent reproduces its image (a latent round-trip).\n  \"NegativePrompt\" None    FLUX.2-klein is guidance-distilled (4-step, no classifier-free guidance), so a negative prompt is unsupported; giving one issues FluxGenerate::nocfg and is ignored.\n  \"ShowSteps\" False    True decodes each Euler-step latent through the VAE and shows the denoising progression live (in a notebook); the per-step Images + raw latents are then included under the \"Steps\" key of an All / {\"Steps\"} return.\n  ProgressReporting Automatic    Automatic or True shows a live progress panel (a no-op with no front end); False runs silent.\n  \"Device\" \"metal\"    backend to run on (\"metal\" | \"cpu\" | \"cuda\").\n  \"NumSteps\" 4    legacy alias for \"Steps\".\n  \"ModelDir\" Automatic    weight directory (Automatic -> ~/.cache/thvm/flux2-klein-4b).\n  \"Q8\" False    weight-only int8 quantization of the large QKV/MLP projections; default False (bf16).  q8 halves the device weight footprint but Metal has no int8 matmul (it casts to bf16 in-kernel), so it is a memory-fit option, not a speed one (env FLUX_Q8=1 is an equivalent fallback).\n  \"LoRA\" None    apply one or more LoRA (Low-Rank Adaptation) .safetensors files to the transformer at load time.  None applies no LoRA; a path String applies that LoRA at scale 1; a list of path Strings applies several; a list of (path -> scale) Rules applies each at its own scale (a real, default 1.0).  Each target weight W is merged to W + scale*(alpha/rank)*(up.down); diffusers/PEFT (lora_A/lora_B) and kohya (lora_down/lora_up) naming are both handled.  Modules that do not map to a FLUX.2-klein weight issue FluxGenerate::loraskip (FLUX.1 LoRAs only partially apply). The first call fetches the model's files (16 GB) from its HuggingFace repository, black-forest-labs/FLUX.2-klein-4B, into \"ModelDir\" (Automatic is ~/.cache/thvm/flux2-klein-4b), showing its progress and checking each file against its SHA-256; a download that stops is continued by the next call, and a directory that already holds the files is used as it is.";
+
+FluxGenerate::fetch = "Could not fetch `1` from `2`: `3`.";
 
 FluxGenerate::nocfg = "FLUX.2-klein-4B is a guidance-distilled 4-step flow-matching model with no classifier-free guidance, so the \"NegativePrompt\" `1` cannot be applied (a negative prompt needs the conditional-vs-unconditional CFG pass klein was distilled to skip).  It is ignored.";
 
@@ -424,12 +426,16 @@ fxSpecQ[ks_List] := ks =!= {} && AllTrue[ks, fxSpecQ];
 
 fxSpecQ[_] := False;
 
-(* --- single prompt: First @ the one-element batch (so a {prompt} carries the
-   spec through one code path). --- *)
+(* --- single prompt: the one result of the one-element batch (so a {prompt}
+   carries the spec through one code path).  A batch that could not run, as when
+   a file could not be fetched, is a Failure and is given as it is. --- *)
 
-FluxGenerate[prompt_String, opts : OptionsPattern[]] := First @ FluxGenerate[{prompt}, "Image", opts];
+fxOnly[results_List] := First[results]
+fxOnly[other_] := other
 
-FluxGenerate[prompt_String, spec_ ? fxSpecQ, opts : OptionsPattern[]] := First @ FluxGenerate[{prompt}, spec, opts];
+FluxGenerate[prompt_String, opts : OptionsPattern[]] := fxOnly @ FluxGenerate[{prompt}, "Image", opts];
+
+FluxGenerate[prompt_String, spec_ ? fxSpecQ, opts : OptionsPattern[]] := fxOnly @ FluxGenerate[{prompt}, spec, opts];
 
 (* n images of the SAME prompt: one entry per copy, so each gets a distinct fresh
    seed (the per-image SeedRandom in STAGE 2), reusing the one session -- only the
@@ -903,8 +909,36 @@ FluxGenerate[prompts_List, spec_ ? fxSpecQ, opts : OptionsPattern[]] := Module[{
 (* FLUX.2-klein is guidance-distilled (no CFG), so a negative prompt cannot be
    applied -- warn loudly (don't silently no-op) and proceed without it. *)
     If[negPrompt =!= None, Message[FluxGenerate::nocfg, negPrompt]];
-    fxWithProgress[reportQ, fxGenerateBody[prompts, spec, imgSize, seed, initLat, showSteps, dev, nSteps, modelDir, q8, loraResolved, loraKey]]
+    fxWithProgress[reportQ,
+        With[{fetched = fxFetch[modelDir]},
+            If[fetched =!= True,
+                fetched,
+                fxGenerateBody[prompts, spec, imgSize, seed, initLat, showSteps, dev, nSteps, modelDir, q8, loraResolved, loraKey]]]]
 ]
+
+(* === the model's files ================================================= *)
+
+(* Where the files come from and what each must be (Models.wl): the diffusers layout of the model's own
+   repository, at the revision the port was checked against.  These seven are all the port reads: the
+   transformer, the two halves of the Qwen3-4B text encoder, the VAE, and the tokenizer's tables. *)
+$fxRepository = "black-forest-labs/FLUX.2-klein-4B";
+$fxRevision = "e7b7dc27f91deacad38e78976d1f2b499d76a294";
+$fxFiles = <|
+    "tokenizer/vocab.json" -> <|"Bytes" -> 2776833, "SHA256" -> "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"|>,
+    "tokenizer/merges.txt" -> <|"Bytes" -> 1671853, "SHA256" -> "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"|>,
+    "tokenizer/added_tokens.json" -> <|"Bytes" -> 707, "SHA256" -> "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680"|>,
+    "vae/diffusion_pytorch_model.safetensors" -> <|"Bytes" -> 168120878, "SHA256" -> "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"|>,
+    "text_encoder/model-00001-of-00002.safetensors" -> <|"Bytes" -> 4967215360, "SHA256" -> "8c0506e7f4936fa7e26183a4fd8da4e2bdbc5990ba64ae441f965d51228f36ea"|>,
+    "text_encoder/model-00002-of-00002.safetensors" -> <|"Bytes" -> 3077766632, "SHA256" -> "82f2bd839378541b0557bfabaf37c7d3d637071fdcb73302dedd7cf61162ce07"|>,
+    "transformer/diffusion_pytorch_model.safetensors" -> <|"Bytes" -> 7751109744, "SHA256" -> "9f29f9edcfdae452a653ffb51a534ca4decd389952c225724ff3b94042612a6e"|>
+|>;
+
+fxSource[] := <|"Repository" -> $fxRepository, "Revision" -> $fxRevision, "Files" -> $fxFiles|>
+
+(* True when modelDir holds the model's files, the missing ones fetched and checked first (hubFetch),
+   their progress shown by the panel of fxWithProgress; a Failure that says which file could not be had
+   and why.  A directory filled by hand counts when its files have the pinned sizes. *)
+fxFetch[modelDir_String] := Block[{hubReport = fxReport}, hubFetch[FluxGenerate, fxSource[], modelDir]]
 
 (* Run `body` under a live progress panel that re-reads the mutated `text` +
    `progress` (RuleDelayed so each panel refresh sees the current values).  When

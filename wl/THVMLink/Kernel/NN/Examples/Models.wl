@@ -37,25 +37,37 @@ hubWithProgress[{reportQ_, title_String}, body_] := If[TrueQ[reportQ],
 
 hubCurlQ[] := hubCurlQ[] = Quiet[RunProcess[{"curl", "--version"}, "ExitCode"]] === 0
 
-(* Downloads url to file, calling report[bytes so far] while it runs: by curl in the background where the
-   system has it, the size of its growing file read five times a second, since not every kernel can
-   download asynchronously; else by URLDownload in one step. *)
+(* Downloads url to file, calling report[bytes so far] while it runs.  By curl in the background where the
+   system has it: the size of its growing file is read five times a second, since not every kernel can
+   download asynchronously, and a file already there is a download that stopped, which curl continues
+   where it stopped (-C -).  Else by URLDownload in one step, from the start. *)
 hubDownload[url_String, file_String, report_] := (
-    If[FileExistsQ[file], DeleteFile[file]];
     If[hubCurlQ[],
-        With[{proc = StartProcess[{"curl", "-fsSL", "--retry", "2", "-o", file, url}]},
+        With[{proc = StartProcess[{"curl", "-fsSL", "--retry", "2", "-C", "-", "-o", file, url}]},
             While[ProcessStatus[proc] === "Running",
                 report[If[FileExistsQ[file], FileByteCount[file], 0]];
                 Pause[0.2]]],
+        If[FileExistsQ[file], DeleteFile[file]];
         Quiet[URLDownload[url, file]]];
 )
+
+(* The bytes free on the disk that holds dir (df -Pk: blocks, used, available, capacity), or Infinity
+   where the system does not say. *)
+hubFreeBytes[dir_String] := With[{out = Quiet[RunProcess[{"df", "-Pk", dir}, "StandardOutput"]]},
+    With[{free = If[StringQ[out],
+            StringCases[out, DigitCharacter .. ~~ Whitespace .. ~~ DigitCharacter .. ~~ Whitespace .. ~~ (a : DigitCharacter ..) ~~
+                Whitespace .. ~~ DigitCharacter .. ~~ "%" :> a],
+            {}]},
+        If[free === {}, Infinity, 1024 FromDigits[Last[free]]]]]
 
 (* A byte count in megabytes with one decimal, "64.5". *)
 hubMegabytes[bytes_] := With[{tenths = Round[bytes / 100000]},
     IntegerString[Quotient[tenths, 10]] <> "." <> IntegerString[Mod[tenths, 10]]]
 
 (* True when dir holds the source's files, the missing ones fetched and checked first; else a Failure of
-   sym, by its message sym::fetch (file, URL, reason), that says which file could not be had and why. *)
+   sym, by its message sym::fetch (file, URL, reason), that says which file could not be had and why.
+   A download goes to a .part file.  One that stopped short is left for the next call to continue; one of
+   the full size is kept only with the pinned SHA-256. *)
 hubFetch[sym_Symbol, source_Association, dir_String] := Module[
     {files = source["Files"], missing, total, done = 0, fail},
     missing = Select[Keys[files], ! hubHaveQ[source, dir, #] &];
@@ -68,6 +80,11 @@ hubFetch[sym_Symbol, source_Association, dir_String] := Module[
         missing];
     total = Total[files[#]["Bytes"] & /@ missing];
     Catch[
+        (* What is still to arrive must fit on the disk: said before a long download, not at its end. *)
+        With[{need = total - Total[With[{part = FileNameJoin[{dir, # <> ".part"}]}, If[FileExistsQ[part], FileByteCount[part], 0]] & /@ missing],
+              free = hubFreeBytes[dir]},
+            If[need > free,
+                fail[First[missing], "the files still to fetch need " <> hubMegabytes[need] <> " MB and the disk has " <> hubMegabytes[free] <> " MB free"]]];
         Do[
             With[{file = FileNameJoin[{dir, name}], part = FileNameJoin[{dir, name <> ".part"}], want = files[name]},
                 hubDownload[hubUrl[source, name], part, Function[bytes, hubReport[
@@ -77,7 +94,11 @@ hubFetch[sym_Symbol, source_Association, dir_String] := Module[
                 Which[
                     ! FileExistsQ[part],
                         fail[name, "the download failed"],
-                    FileByteCount[part] != want["Bytes"] || FileHash[part, "SHA256", All, "HexString"] =!= want["SHA256"],
+                    FileByteCount[part] < want["Bytes"],
+                        fail[name, "the download stopped at " <> hubMegabytes[FileByteCount[part]] <> " of " <>
+                            hubMegabytes[want["Bytes"]] <> " MB; the next call continues it"],
+                    (hubReport["Checking " <> name, (done + want["Bytes"]) / total];
+                     FileByteCount[part] != want["Bytes"] || FileHash[part, "SHA256", All, "HexString"] =!= want["SHA256"]),
                         DeleteFile[part];
                         fail[name, "what arrived is not the file expected, of " <> ToString[want["Bytes"]] <> " bytes and SHA-256 " <> want["SHA256"]],
                     True,

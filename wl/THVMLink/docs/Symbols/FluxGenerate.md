@@ -31,7 +31,8 @@ RelatedGuides: [THVMLink]
 - *spec* is `"Image"` (the default), `"Latent"`, `"Embedding"`, [All](), or a list of those names. `"Latent"` gives the initial noise latent $z_0$, a [NumericArray]() of shape `{`*s*`, 128}` for *s* image tokens, and `"Embedding"` the text embedding, a [NumericArray]() of shape `{512, 7680}`. [All]() or a list gives an [Association]() of the named parts.
 - A *spec* that needs no image runs fewer stages: `"Embedding"` alone runs only the text encoder, and `"Latent"` alone runs the sampler without the image decoder.
 - The first generation loads the weights and records the kernels of each stage; later generations with the same settings replay the recorded kernels, so only the first is slow. The forms with *n* or a list of prompts share one such session, and each of *n* images gets its own random seed.
-- The weights, about 16 gigabytes in total, are read from `"ModelDir"`; without them no session can be built.
+- The weights are not part of the paclet. The first call fetches the model's seven files, 16 gigabytes in total, from its HuggingFace repository, `black-forest-labs/FLUX.2-klein-4B`, at a pinned revision, into `"ModelDir"`, showing the file, the source and the megabytes received as it goes. A download is kept only when its size and SHA-256 are the expected ones, and one that stops is continued by the next call.
+- A call that cannot fetch a file gives a [Failure]() that names the file and says why.
 - FLUX.2-klein is distilled to sample without classifier-free guidance, so it has no guidance scale and no negative prompt.
 - The default device is the graphics processing unit (GPU) through Metal. The following options can be given:
 
@@ -46,7 +47,7 @@ RelatedGuides: [THVMLink]
   | [ProgressReporting]() | [Automatic]() | whether to show a progress panel in a notebook |
   | `"Device"` | `"metal"` | the backend: `"metal"`, `"cpu"` for the central processing unit (CPU), or `"cuda"` |
   | `"NumSteps"` | 4 | the number of sampling steps when `"Steps"` is [Automatic]() |
-  | `"ModelDir"` | [Automatic]() | the directory of the weights; [Automatic]() is `~/.cache/thvm/flux2-klein-4b` |
+  | `"ModelDir"` | [Automatic]() | the directory of the weights; [Automatic]() is `~/.cache/thvm/flux2-klein-4b`, and a directory that already holds the files is used without a fetch |
   | `"Q8"` | [False]() | whether to store the large projection weights as 8-bit integers, halving their memory |
   | `"LoRA"` | [None]() | a low-rank adaptation (LoRA) file, a list of files, or a list of *file* -> *scale* rules, merged into the transformer weights |
 
@@ -239,7 +240,7 @@ FluxGenerate["a cat", "NumSteps" -> 6]
 
 ### ModelDir
 
-Read the weights from another directory:
+Read the weights from another directory, fetching them there if they are missing:
 
 ```wl
 #| eval: false
@@ -291,6 +292,17 @@ ImageQ[FluxGenerate["a cat", "InitialLatent" -> lat, "ImageSize" -> {128, 128}]]
 <!-- => True -->
 
 ## Possible Issues
+
+A download that stops, as when the connection drops, gives a failure that says how far it got; calling again continues it:
+
+```wl
+#| eval: false
+FluxGenerate["a cat"]
+```
+
+<!-- => the message FluxGenerate::fetch is issued and the result is a Failure whose parameters name the file, its address and "the download stopped at 3120.4 of 7751.1 MB; the next call continues it" -->
+
+---
 
 On a GPU, the reductions in 16-bit floating point are not reproducible bit for bit, so two runs with the same seed, or a latent round trip, agree to about 1/64 per channel rather than exactly:
 

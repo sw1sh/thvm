@@ -64,8 +64,8 @@ model's name, at the revision the port was checked against, into
 | `small` | 966995080 | 835550 |
 | `small.en` | 966992008 | 798156 |
 
-The fetch is the one Phonon uses ([phonon.md](phonon.md), Weights), now in
-`Models.wl`: a progress display that names the file, the source and the
+The fetch is the one every example model uses
+([model_files.md](model_files.md)): a progress display that names the file, the source and the
 megabytes; a download kept only when its size and SHA-256 are the pinned ones
 (`$whModels` in `WhisperRecognize.wl`); a `Failure` that names the file, its
 address and the reason otherwise.

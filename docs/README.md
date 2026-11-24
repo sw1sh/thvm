@@ -43,6 +43,9 @@ ahead-of-time compiler for `TDef` bodies, C and Metal targets).
   run as one inert term.
 - [NN/flux_forward_spec.md](NN/flux_forward_spec.md): the FLUX.2-klein-4B
   forward-pass spec the port follows.
+- [NN/model_files.md](NN/model_files.md): where the example models' weights
+  come from: pinned sources on HuggingFace, the fetch with progress and
+  resume, and what unloading a model does.
 - [NN/phonon.md](NN/phonon.md): the Phonon 31M text-to-speech port, its
   fixed-shape captured steps and how it is checked.
 - [NN/whisper.md](NN/whisper.md): the Whisper speech-to-text port, its

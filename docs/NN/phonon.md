@@ -58,11 +58,10 @@ the `"ModelDirectory"` given):
 - The fetch runs under a progress display that names the file and the source
   and counts megabytes (`ProgressReporting -> False` hides it).
 - A download goes to a `.part` file and is kept only when its size and SHA-256
-  are the pinned ones (`$phFiles` in `PhononGenerate.wl`); otherwise it is
-  deleted and the call returns a `Failure` that names the file, its address
-  and the reason.
-- The fetch itself (`hubFetch`) is in `Models.wl` beside the model
-  directories, for every example model that fetches from HuggingFace.
+  are the pinned ones (`$phFiles` in `PhononGenerate.wl`); otherwise the call
+  returns a `Failure` that names the file, its address and the reason.
+- The fetch itself (`hubFetch`) is in `Models.wl`, for every example model
+  that fetches from HuggingFace: [model_files.md](model_files.md).
 - A file already in the directory counts when it has its pinned size, so a
   directory filled by hand works offline.
 - The download is `curl` in the background, its growing file polled for the
