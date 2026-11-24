@@ -317,7 +317,37 @@ static void rmu_emit_fp8_helpers(FILE *fp) {
   }
 }
 
+// bf16 <-> float by the bit pattern on Metal: tinygrad's pm_manual_bf16_cast
+// (renderer/cstyle.py:94-104), which its Metal renderer takes (:376).  The
+// Metal compiler's own conversion of a computed bfloat value gives wrong
+// numbers inside an unrolled reduce loop.  An argument that already has the
+// result's type passes through; an integer or a half goes through float.
+static void rmu_emit_bf16_helpers(FILE *fp) {
+  fputs(
+    "static inline float thvm_bf2f(bfloat v){ return as_type<float>(((uint)as_type<ushort>(v))<<16); }\n"
+    "static inline float thvm_bf2f(float v){ return v; }\n"
+    "static inline bfloat thvm_f2bf(float f){\n"
+    "  uint x=as_type<uint>(f);\n"
+    "  x=(((0u-x)&0x7f800000u)!=0u) ? (x+((x>>16)&1u)+0x7fffu) : (((x&0xffffu)!=0u) ? (x|0x10000u) : x);\n"
+    "  return as_type<bfloat>((ushort)(x>>16));\n"
+    "}\n"
+    "static inline bfloat thvm_f2bf(bfloat v){ return v; }\n"
+    "static inline bfloat thvm_f2bf(half v){ return thvm_f2bf((float)v); }\n"
+    "static inline bfloat thvm_f2bf(int v){ return thvm_f2bf((float)v); }\n"
+    "static inline bfloat thvm_f2bf(uint v){ return thvm_f2bf((float)v); }\n"
+    "static inline bfloat thvm_f2bf(long v){ return thvm_f2bf((float)v); }\n"
+    "static inline bfloat thvm_f2bf(ulong v){ return thvm_f2bf((float)v); }\n", fp);
+}
+
 static u32 rmu_slot_dtype(Term t);
+// 1 when a slot (0 = output, 1..n_inputs = inputs) is bf16.
+static int rmu_kernel_has_bf16_slot(Term const *slot_bufs, u32 n_inputs) {
+  for (u32 i = 0; i <= n_inputs; i++) {
+    if (slot_bufs[i] != 0 && rmu_slot_dtype(slot_bufs[i]) == DT_BF16) return 1;
+  }
+  return 0;
+}
+
 // 1 when a slot (0 = output, 1..n_inputs = inputs) is fp8.
 static int rmu_kernel_has_fp8_input(Term const *slot_bufs, u32 n_inputs) {
   for (u32 i = 0; i <= n_inputs; i++) {
@@ -344,7 +374,9 @@ static void rmu_store_cast_open(Term buf, FILE *fp) {
     return;
   }
   if (RMU_TARGET != CG_TARGET_METAL) return;
-  if (dt == DT_BF16 || dt == DT_FP16) {
+  if (dt == DT_BF16) {
+    fputs("thvm_f2bf(", fp);
+  } else if (dt == DT_FP16) {
     fprintf(fp, "%s(", rmu_msl_type_name(dt));
   }
 }
@@ -691,6 +723,13 @@ static void rmu_emit_term(Term t, FILE *fp) {
         fputs(dst_dt == DT_FP8E4M3 ? "thvm_fp8e4m3_round((float)(" : "thvm_fp8e5m2_round((float)(", fp);
         rmu_emit_term(src, fp);
         fputs("))", fp);
+      } else if (RMU_TARGET == CG_TARGET_METAL
+                 && ((dst_dt == DT_FP32 && rmu_dtype_of(src) == DT_BF16)
+                     || (dst_dt == DT_BF16 && rmu_dtype_of(src) == DT_FP32))) {
+        // By the bit pattern (rmu_emit_bf16_helpers).
+        fputs(dst_dt == DT_FP32 ? "thvm_bf2f(" : "thvm_f2bf(", fp);
+        rmu_emit_term(src, fp);
+        fputs(")", fp);
       } else if (dst_dt == DT_BOOL) {
         // A bool cast is truthiness (x != 0), not truncation.
         fputs("((", fp);
@@ -775,7 +814,7 @@ static void rmu_emit_term(Term t, FILE *fp) {
         switch (RMU_TARGET) {
           case CG_TARGET_METAL:
             // bfloat/half round on conversion and promote back in arithmetic.
-            cast_open  = (red_dt == DT_BF16) ? "((bfloat)(" : "((half)(";
+            cast_open  = (red_dt == DT_BF16) ? "(thvm_f2bf(" : "((half)(";
             cast_close = "))";
             break;
           case CG_TARGET_CUDA:
@@ -969,6 +1008,17 @@ static int rmu_term_casts_fp8(Term t, u32 depth) {
   }
   for (u32 i = 0, n = rmu_walk_arity_kernel(op); i < n; i++) {
     if (rmu_term_casts_fp8(heap_read(term_val(t) + i), depth + 1)) return 1;
+  }
+  return 0;
+}
+
+// 1 when the kernel casts a value to bf16 (it may have no bf16 slot).
+static int rmu_term_casts_bf16(Term t, u32 depth) {
+  if (depth > RMU_MAX_WALK_DEPTH || term_tag(t) != TAG_UOP) return 0;
+  u32 op = term_ext(t);
+  if (op == UOP_CAST && term_val(heap_read(term_val(t) + 1)) == DT_BF16) return 1;
+  for (u32 i = 0, n = rmu_walk_arity_kernel(op); i < n; i++) {
+    if (rmu_term_casts_bf16(heap_read(term_val(t) + i), depth + 1)) return 1;
   }
   return 0;
 }
@@ -1575,14 +1625,19 @@ static void rmu_emit_reduce_combine(const char *acc_name, u32 kind, u32 dt,
     fprintf(fp, "{ %s _v = ", rmu_hold_type(dt));
     rmu_emit_term(src, fp);
     fprintf(fp, "; %s = (%s < _v) ? _v : %s; }\n", acc_name, acc_name, acc_name);
-  } else if (kind == REDUCE_MAX) {
-    fprintf(fp, "%s = fmax(%s, ", acc_name, acc_name);
-    rmu_emit_term(src, fp);
-    fputs(");\n", fp);
   } else {
-    fprintf(fp, "%s = %s %c ", acc_name, acc_name, (kind == REDUCE_PROD) ? '*' : '+');
+    // The accumulator is float: on Metal a bf16 body widens by the bit pattern
+    // (rmu_emit_bf16_helpers), not by the compiler's implicit conversion.
+    int bf = RMU_TARGET == CG_TARGET_METAL && rmu_dtype_of(src) == DT_BF16;
+    if (kind == REDUCE_MAX) {
+      fprintf(fp, "%s = fmax(%s, ", acc_name, acc_name);
+    } else {
+      fprintf(fp, "%s = %s %c ", acc_name, acc_name, (kind == REDUCE_PROD) ? '*' : '+');
+    }
+    if (bf) fputs("thvm_bf2f(", fp);
     rmu_emit_term(src, fp);
-    fputs(";\n", fp);
+    if (bf) fputc(')', fp);
+    fputs(kind == REDUCE_MAX ? ");\n" : ";\n", fp);
   }
 }
 
@@ -2302,7 +2357,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
           (void)term_dtype_in(opt_tc_term, 0, &mm_dt);
           if (stage_bf && mm_dt == DT_FP32) mm_dt = DT_BF16;
           char const *mm_read = (mm_dt == DT_BF16)
-                              ? "((bfloat)_cstage[_sgi64 + _e])"
+                              ? "(thvm_f2bf(_cstage[_sgi64 + _e]))"
                               : (mm_dt == DT_FP16)
                               ? "((half)_cstage[_sgi64 + _e])"
                               : "(_cstage[_sgi64 + _e])";
@@ -2312,7 +2367,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
             "    uint _m = _tm + _sm + %uu + _e / 8u; uint _n = _tn + _sn + %uu + _e %% 8u;"
             " (void)_m; (void)_n;\n", mi * 8u, ni * 8u);
           IND(depth); fprintf(fp,
-            "    %s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)(", c_name, c_row_stride);
+            "    %s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = thvm_f2bf(", c_name, c_row_stride);
           rmu_hoist_clear();
           rmu_hoist_add(opt_tc_term,  mm_read);
           rmu_hoist_add(m_range_term, "_m");
@@ -2324,7 +2379,7 @@ static void rmu_emit_matmul_tc_tiled(const char *a_name, const char *b_name,
         } else {
           IND(depth); fprintf(fp,
             "  for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) "
-            "%s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)_cstage[_sgi64 + _e]; }\n",
+            "%s[_cb + (_e / 8u) * %uu + (_e %% 8u)] = thvm_f2bf(_cstage[_sgi64 + _e]); }\n",
             c_name, c_row_stride);
         }
         IND(depth); fputs("simdgroup_barrier(mem_flags::mem_threadgroup);\n", fp);
@@ -2889,7 +2944,7 @@ static int rmu_emit_matmul_tc(Term store, Term tc_red, FILE *fp,
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     fputs("for (uint _e = thread_index_in_simdgroup; _e < 64u; _e += 32u) {\n", fp);
     for (u32 d = 0; d < body_depth + 1; d++) fputs("  ", fp);
-    fprintf(fp, "%s[_cbase + (_e / 8u) * %uu + (_e %% 8u)] = (bfloat)_ctile[_e];\n",
+    fprintf(fp, "%s[_cbase + (_e / 8u) * %uu + (_e %% 8u)] = thvm_f2bf(_ctile[_e]);\n",
             rmu_buf_name(buf_c), (u32)c_m);
     for (u32 d = 0; d < body_depth; d++) fputs("  ", fp);
     fputs("}\n", fp);
@@ -4584,6 +4639,13 @@ fn void cg_render_uop_kernel(Term root, const char *kernel_name,
     }
     if (has_fp8) rmu_emit_fp8_helpers(fp);
   }
+  {
+    int has_bf16 = rmu_slot_dtype(out_buf) == DT_BF16 || rmu_term_casts_bf16(root, 0);
+    for (u32 i = 0; i < n_inputs && !has_bf16; i++) {
+      has_bf16 = rmu_slot_dtype(in_bufs[i]) == DT_BF16;
+    }
+    if (has_bf16) rmu_emit_bf16_helpers(fp);
+  }
   fprintf(fp, "kernel void %s(\n", kernel_name);
   // Output goes to buffer(0); each input goes to buffer(1+i).
   u32 out_dtype = rmu_slot_dtype(out_buf);
@@ -4645,6 +4707,9 @@ fn void cg_render_uop_kernel_root(Term root, const char *kernel_name,
   // fp8 decode helpers if any input/output is fp8 (rmu_emit_fp8_helpers).
   if (rmu_kernel_has_fp8_input(slot_bufs, n_inputs) || rmu_term_casts_fp8(root, 0)) {
     rmu_emit_fp8_helpers(fp);
+  }
+  if (rmu_kernel_has_bf16_slot(slot_bufs, n_inputs) || rmu_term_casts_bf16(root, 0)) {
+    rmu_emit_bf16_helpers(fp);
   }
   fprintf(fp, "kernel void %s(\n", kernel_name);
   u32 out_dtype = rmu_slot_dtype(out_buf);

@@ -477,6 +477,33 @@ VerificationTest[
 ]
 
 VerificationTest[
+    (* A 1 by 1 convolution of bf16 tensors on Metal, the first stage of the FLUX.2 image decoder
+       (32 channels to 32 on a 32 by 32 map): a product of two bf16 values summed in f32 inside an
+       unrolled reduce loop.  The Metal compiler's own bf16 to float conversion of the product gave
+       wrong sums there (20 of 32 terms); the kernel converts by the bit pattern, as tinygrad's Metal
+       renderer does (renderer/cstyle.py:94-104, :376).  Every value is a small multiple of 1/8, so
+       the products and sums are exact in bf16 and in f32, in the sizes that failed and two that
+       did not. *)
+    TInit[]; TReset[];
+    Module[{ctx = TContextNew["metal"], check, result},
+        If[ ctx === 0, Return[True]];
+        check[{co_, ci_, h_, w_}] := Module[{xData, wData, bData, ref, got},
+            xData = Table[(Mod[7 i + 3 j + 5 k, 17] - 8) / 8., {i, ci}, {j, h}, {k, w}];
+            wData = Table[(Mod[3 o + 5 i, 9] - 4) / 8., {o, co}, {i, ci}, {a, 1}, {b, 1}];
+            bData = Table[Mod[o, 5] / 4., {o, co}];
+            ref = Table[bData[[o]] + Sum[wData[[o, i, 1, 1]] xData[[i]], {i, ci}], {o, co}];
+            got = N @ Normal @ TRealize @ TUOpCast[
+                TConv2DIm2ColPool[TTensorCreate[xData, "bf16"], TTensorCreate[wData, "bf16"], TTensorCreate[bData, "bf16"]], "f32"];
+            Max[Abs[got - ref]]];
+        result = TInContext[ctx, check /@ {{32, 32, 32, 32}, {32, 32, 16, 16}, {16, 16, 16, 16}, {64, 64, 32, 32}, {33, 32, 32, 32}, {8, 8, 4, 4}}];
+        TContextDestroy[ctx];
+        result
+    ],
+    {0., 0., 0., 0., 0., 0.},
+    TestID -> "metal/bf16-conv-1x1-sums-exactly"
+]
+
+VerificationTest[
     (* FLUX-shaped f32 GEMM takes the threadgroup-staged register-blocked
        tensor-core path: M=768, N=3072, K=3072 -- the emitted MSL stages A/B
        K-blocks into `threadgroup` memory and accumulates via simdgroup_load

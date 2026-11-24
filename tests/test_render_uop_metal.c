@@ -96,6 +96,34 @@ int main(void) {
   fclose(mpr);
   CHECK_EQ(compile_through_metal(bufr), 0);
 
+  TEST_BEGIN("render-uop-metal/bf16-converts-by-the-bit-pattern");
+  // tinygrad's pm_manual_bf16_cast on Metal (renderer/cstyle.py:94-104, :376):
+  // a bf16 product widened to float for the sum, and the float sum stored into
+  // a bf16 buffer, convert through the helpers, with no cast of the compiler's.
+  u32 bdO[1] = { 48 }, bdA[1] = { 768 }, bdB[1] = { 1536 };
+  Term bOut = uop_buffer(UOP_SCOPE_GLOBAL, DT_BF16, 1, bdO);
+  Term bA   = uop_buffer(UOP_SCOPE_GLOBAL, DT_BF16, 1, bdA);
+  Term bB   = uop_buffer(UOP_SCOPE_GLOBAL, DT_BF16, 1, bdB);
+  Term b_o  = uop_range(0, 0, 48);
+  Term b_k  = uop_range(1, 1, 16);
+  Term bprod = uop_binary(UOP_MUL, uop_index_e(bA, b_k), uop_index_e(bB, b_k));
+  Term bred  = uop_reduce(REDUCE_SUM, /*axis=*/1, uop_cast(bprod, DT_FP32));
+  Term bst   = uop_store(bOut, b_o, uop_cast(bred, DT_BF16));
+  Term b_in[2] = { bA, bB };
+  char bufb[8192];
+  FILE *mpb = fmemopen(bufb, sizeof(bufb), "w");
+  cg_render_uop_kernel(bst, "k_bf", bOut, b_in, 2, mpb);
+  fclose(mpb);
+  CHECK(strstr(bufb, "static inline float thvm_bf2f(bfloat v)") != NULL);
+  CHECK(strstr(bufb, "static inline bfloat thvm_f2bf(float f)") != NULL);
+  CHECK(strstr(bufb, "thvm_bf2f((in0[") != NULL);
+  CHECK(strstr(bufb, "= thvm_f2bf(") != NULL);
+  CHECK(strstr(bufb, "(float)(in0[") == NULL);
+  CHECK(strstr(bufb, "(bfloat)") == NULL);
+  CHECK_EQ(compile_through_metal(bufb), 0);
+  // An f32 kernel gets no bf16 helper.
+  CHECK(strstr(bufr, "thvm_bf2f") == NULL);
+
   TEST_BEGIN("render-uop-metal/matmul-tc-compiles");
   // STORE(out, m*16+n, OPT(REDUCE(MUL(A[m*32+k], B[k*16+n]), SUM, k=2), TC, 0))
   // Distinct 2-D buffers so A/B hash-cons separately (1-D would

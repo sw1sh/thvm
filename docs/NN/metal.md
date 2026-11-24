@@ -141,6 +141,14 @@ swapping the implementation is mechanical.
   i64); the shader-library DAG encoder takes f32 and i32 only
   (`metal_kernel_supported`). See `docs/NN/dtypes.md` for backend
   coverage.
+- **bf16 conversions.** A cast between float and bf16, a bf16 reduce body
+  added to its float accumulator, and a store into a bf16 buffer convert by
+  the bit pattern (`thvm_bf2f`, `thvm_f2bf`, emitted by
+  `rmu_emit_bf16_helpers` into a kernel that touches bf16). This is tinygrad's
+  `pm_manual_bf16_cast` (`renderer/cstyle.py:94-104`, taken by its Metal
+  renderer at `:376`). The Metal compiler's own conversion of a computed
+  `bfloat` value gives wrong numbers inside an unrolled reduce loop: a 1 by 1
+  convolution of 32 channels lost 20 of its 32 terms.
 
 ## Build dependency
 
