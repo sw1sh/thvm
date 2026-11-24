@@ -22,6 +22,12 @@ hubUrl[source_Association, name_String] :=
 hubHaveQ[source_Association, dir_String, name_String] := With[{file = FileNameJoin[{dir, name}]},
     FileExistsQ[file] && FileByteCount[file] == source["Files"][name]["Bytes"]]
 
+(* Whether a file can be opened and read.  A file of the right size may still refuse that: on a drive the
+   system does not let this process read, its size shows and its contents do not. *)
+hubReadableQ[file_String] := With[{strm = Quiet[OpenRead[file, BinaryFormat -> True]]},
+    Head[strm] === InputStream &&
+        With[{bytes = Quiet[BinaryReadList[strm, "Byte", 1]]}, Close[strm]; MatchQ[bytes, {_Integer} | {}]]]
+
 (* hubReport[text, fraction] sets what the progress display shows; nothing outside hubWithProgress. *)
 hubReport[_, _] := Null
 
@@ -82,8 +88,15 @@ hubMegabytes[bytes_] := With[{tenths = Round[bytes / 100000]},
 hubFetch[sym_Symbol, source_Association, dir_String] := Module[
     {files = source["Files"], missing, total, done = 0, fail},
     missing = Select[Keys[files], ! hubHaveQ[source, dir, #] &];
-    If[missing === {}, Return[True]];
     fail[name_, why_] := Throw[WolframInstitute`THVMLink`Private`thvmFailure[MessageName[sym, "fetch"], name, hubUrl[source, name], why]];
+    If[missing === {},
+        (* All there by size: they must open too, or the model would be loaded from what cannot be read. *)
+        Return[Catch[
+            Scan[
+                If[! hubReadableQ[FileNameJoin[{dir, #}]],
+                    fail[#, "the file is in " <> dir <> " with its size, but the system refuses to open it"]] &,
+                Keys[files]];
+            True]]];
     (* A file's name may have directories, as it has in its repository. *)
     Scan[
         With[{parent = DirectoryName[FileNameJoin[{dir, #}]]},

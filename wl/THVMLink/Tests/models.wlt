@@ -47,6 +47,24 @@ VerificationTest[
     TestID -> "models/a-file-counts-by-its-size"
 ]
 
+(* A file that is there with its size but cannot be opened is a Failure, not a model loaded from nothing.
+   The file is made unreadable by its permissions. *)
+VerificationTest[
+    With[{dir = CreateDirectory[], s = <|"Repository" -> "none/none", "Revision" -> StringRepeat["0", 40],
+            "Files" -> <|"a.bin" -> <|"Bytes" -> 3, "SHA256" -> StringRepeat["0", 64]|>|>|>},
+        BinaryWrite[FileNameJoin[{dir, "a.bin"}], {1, 2, 3}, "Byte"] // Close;
+        With[{open = WolframInstitute`THVMLink`Examples`Private`hubFetch[FluxGenerate, s, dir]},
+            RunProcess[{"chmod", "000", FileNameJoin[{dir, "a.bin"}]}];
+            With[{shut = Quiet[WolframInstitute`THVMLink`Examples`Private`hubFetch[FluxGenerate, s, dir], FluxGenerate::fetch],
+                  readable = WolframInstitute`THVMLink`Examples`Private`hubReadableQ[FileNameJoin[{dir, "a.bin"}]]},
+                RunProcess[{"chmod", "600", FileNameJoin[{dir, "a.bin"}]}];
+                DeleteDirectory[dir, DeleteContents -> True];
+                {open, readable, FailureQ[shut], shut["Tag"], First[shut["MessageParameters"]],
+                 StringContainsQ[Last[shut["MessageParameters"]], "refuses to open it"]}]]],
+    {True, False, True, "fetch", "a.bin", True},
+    TestID -> "models/a-file-that-cannot-be-opened-is-a-failure"
+]
+
 (* The hash of a file is the same by the system's tool and by FileHash. *)
 VerificationTest[
     With[{file = FileNameJoin[{$TemporaryDirectory, "thvm-models-test-hash-" <> ToString[$ProcessID]}]},

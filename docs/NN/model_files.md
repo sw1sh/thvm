@@ -36,7 +36,10 @@ fetching the missing ones first, or a `Failure` of the function `sym` (by its
 message `sym::fetch`) that names the file, its address and the reason.
 
 - A file already in the directory counts when it has its pinned size, so a
-  directory filled by hand works offline.
+  directory filled by hand works offline. When all are there, each is opened
+  once: a file whose size shows but which the system refuses to open, as on a
+  drive this process may not read, is a `Failure` rather than a model loaded
+  from nothing.
 - Before anything is downloaded, what is still to arrive is compared with the
   free space of the disk (`df`); a fetch that would not fit fails at once and
   says how much is needed and how much is free.
