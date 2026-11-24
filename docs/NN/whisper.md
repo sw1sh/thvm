@@ -119,6 +119,20 @@ the input taken in pairs. As generic convolution kernels they took 241 ms of a
    as GPT-2's: each character of a token stands for a byte, and the bytes of
    all tokens together are UTF-8.
 
+Two guards keep the model from writing text where there is no speech, which it
+otherwise does ("you" for silence):
+
+- A segment whose samples stay within one 16-bit step is digital silence and
+  is not decoded.
+- A decoded segment is dropped when the model itself takes it for no speech: a
+  probability of the no-speech token above 0.6 after the start token, with a
+  mean log-probability of the decoded tokens below -1 (`whNoSpeechQ`; OpenAI's
+  `transcribe`, `no_speech_threshold` and `logprob_threshold`). tinygrad's
+  example has neither guard.
+
+Sounds that pass both come out as the model describes them, such as
+"[BLANK_AUDIO]" for faint noise or "(phone ringing)" for a tone.
+
 `Language -> Automatic` has a multilingual model detect the language from the
 first segment: the likeliest of the 99 language tokens after the
 start-of-transcript token (OpenAI's `detect_language`; tinygrad's example

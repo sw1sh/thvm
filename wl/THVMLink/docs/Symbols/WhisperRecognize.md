@@ -23,6 +23,7 @@ RelatedGuides: [THVMLink]
 - Audio at another rate than 16 kHz is resampled, and several channels are averaged.
 - The weights are not part of the paclet. The first call with a model fetches its two files from its HuggingFace repository, `openai/whisper-` followed by the model's name, at a pinned revision, showing the file, the source and the megabytes received as it goes. A download is kept only when its size and SHA-256 are the expected ones.
 - The first call with a model also loads the weights and records the kernels of each stage; later calls replay the recorded kernels, so only the first is slow.
+- Silence gives an empty string: a silent stretch of 30 seconds is skipped, and so is one the model itself takes for no speech.
 - A call that cannot do its job gives a [Failure]() that says why, such as audio that cannot be read or a file that could not be fetched.
 - The following options can be given:
 
@@ -85,6 +86,17 @@ WhisperRecognize["german.wav"]
 ```
 
 <!-- => the German text spoken in the file -->
+
+---
+
+Silence gives no text:
+
+```wl
+#| eval: false
+WhisperRecognize[ConstantArray[0., 16000]]
+```
+
+<!-- => "" -->
 
 ---
 
@@ -200,11 +212,11 @@ WhisperRecognize["missing.wav"]
 
 ---
 
-Silence is not speech, and the model may still write a few words for it:
+A sound that is not speech may come out as a description of it:
 
 ```wl
 #| eval: false
-WhisperRecognize[ConstantArray[0., 16000]]
+WhisperRecognize[0.3 Sin[2. Pi 440. Range[0, 79999] / 16000], "Model" -> "tiny.en"]
 ```
 
-<!-- => a short string -->
+<!-- => "(phone ringing)" -->

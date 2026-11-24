@@ -133,12 +133,12 @@ VerificationTest[
 
 VerificationTest[
     With[{en = WolframInstitute`THVMLink`Examples`Private`whSpecials[51864], all = WolframInstitute`THVMLink`Examples`Private`whSpecials[51865]},
-        {Lookup[en, {"EndOfText", "Start", "Previous", "NoTimestamps", "Multilingual"}],
-         Lookup[all, {"EndOfText", "Start", "Transcribe", "Previous", "NoTimestamps", "Multilingual"}],
+        {Lookup[en, {"EndOfText", "Start", "Previous", "NoSpeech", "NoTimestamps", "Multilingual"}],
+         Lookup[all, {"EndOfText", "Start", "Transcribe", "Previous", "NoSpeech", "NoTimestamps", "Multilingual"}],
          WolframInstitute`THVMLink`Examples`Private`whStartTokens[en, "en"],
          WolframInstitute`THVMLink`Examples`Private`whStartTokens[all, "en"],
          WolframInstitute`THVMLink`Examples`Private`whStartTokens[all, "de"]}],
-    {{50256, 50257, 50360, 50362, False}, {50257, 50258, 50359, 50361, 50363, True},
+    {{50256, 50257, 50360, 50361, 50362, False}, {50257, 50258, 50359, 50361, 50362, 50363, True},
      {50257, 50362}, {50258, 50259, 50359, 50363}, {50258, 50261, 50359, 50363}},
     TestID -> "whisper/special-and-start-tokens"
 ]
@@ -148,6 +148,16 @@ VerificationTest[
      Length /@ {WolframInstitute`THVMLink`Examples`Private`$whLanguages, WolframInstitute`THVMLink`Examples`Private`$whLanguageNames}},
     {{Automatic, "de", "de", "de", "ht", None, None}, {99, 99}},
     TestID -> "whisper/language-names-and-codes"
+]
+
+(* A decoded segment is no speech when the model says so twice: by the no-speech token and by the low
+   probability of what it wrote. *)
+VerificationTest[
+    WolframInstitute`THVMLink`Examples`Private`whNoSpeechQ /@ {
+        <|"NoSpeech" -> 0.9, "LogProbability" -> -1.2|>, <|"NoSpeech" -> 0.9, "LogProbability" -> -0.5|>,
+        <|"NoSpeech" -> 0.1, "LogProbability" -> -2.|>, <|"NoSpeech" -> 0.02, "LogProbability" -> -0.14|>},
+    {True, False, False, False},
+    TestID -> "whisper/no-speech-rule"
 ]
 
 (* === failures ========================================================== *)
@@ -200,11 +210,11 @@ If[$whisperFiles,
         TestID -> "whisper/model-sizes-and-embedding-rows"
     ];
 
-    (* Silence is no speech: whatever the model makes of it is a string. *)
+    (* Silence is not decoded. *)
     VerificationTest[
-        StringQ[WhisperRecognize[ConstantArray[0., 16000], "Model" -> "tiny.en", ProgressReporting -> False]],
-        True,
-        TestID -> "whisper/silence-gives-a-string"
+        WhisperRecognize[ConstantArray[0., 16000], "Model" -> "tiny.en", ProgressReporting -> False],
+        "",
+        TestID -> "whisper/silence-gives-no-text"
     ];
 
     If[$whisperPhononFiles,
@@ -224,6 +234,13 @@ If[$whisperFiles,
                     texts]],
             ConstantArray["Hello, this is a test of speech synthesis.", 3],
             TestID -> "whisper/hears-what-phonon-says"
+        ];
+
+        (* Two segments, the second silent: its text is the first one's. *)
+        VerificationTest[
+            WhisperRecognize[PadRight[$whisperSpoken, 40 * 24000, 0.], "Model" -> "tiny.en", "SampleRate" -> 24000, ProgressReporting -> False],
+            "Hello, this is a test of speech synthesis.",
+            TestID -> "whisper/a-silent-segment-adds-nothing"
         ];
 
         (* Unloading one model resets the engine under the other, which loads again on its next call. *)

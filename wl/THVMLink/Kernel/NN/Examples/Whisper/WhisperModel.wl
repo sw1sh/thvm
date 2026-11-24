@@ -280,7 +280,7 @@ whStep[S_, token_Integer, pos_Integer] := Flatten @ whHost[
    multilingual one at 50257 (tinygrad get_encoding). *)
 whSpecials[n_Integer] := With[{eot = If[n == 51864, 50256, 50257]},
     <|"EndOfText" -> eot, "Start" -> eot + 1, "Language" -> eot + 2, "Transcribe" -> eot + 102, "Previous" -> eot + 104,
-      "NoTimestamps" -> eot + 106, "Multilingual" -> n != 51864|>]
+      "NoSpeech" -> eot + 105, "NoTimestamps" -> eot + 106, "Multilingual" -> n != 51864|>]
 
 $whLanguages = {"en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv", "it", "id", "hi", "fi", "vi",
     "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no", "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te",
@@ -294,16 +294,25 @@ whStartTokens[sp_, language_String] := Join[{sp["Start"]},
     {sp["NoTimestamps"]}]
 
 (* Feeds the context tokens, then decodes greedily until the end-of-text token, half the context of new
-   tokens, or the end of the context (tinygrad inferloop).  Gives the context with the new tokens. *)
-whGreedy[S_, context_List, eot_Integer] := Module[{ctx = context, n = S["M"]["Context"], logits, next},
-    Do[logits = whStep[S, ctx[[i]], i - 1], {i, Length[ctx]}];
+   tokens, or the end of the context (tinygrad inferloop).  Gives the context with the new tokens, the
+   probability of the no-speech token after the start token, and the mean log-probability of the new
+   tokens, which is minus the log of the sum of the exponentials of the logits less their largest. *)
+whGreedy[S_, context_List, sp_] := Module[
+    {ctx = context, n = S["M"]["Context"], logits, next, noSpeech = 0., sum = 0., count = 0},
+    Do[
+        logits = whStep[S, ctx[[i]], i - 1];
+        If[ctx[[i]] == sp["Start"],
+            noSpeech = Exp[logits[[sp["NoSpeech"] + 1]] - Max[logits]] / Total[Exp[logits - Max[logits]]]],
+        {i, Length[ctx]}];
     Do[
         next = First @ Ordering[logits, -1] - 1;
+        sum -= Log[Total[Exp[logits - Max[logits]]]];
+        count++;
         AppendTo[ctx, next];
-        If[next == eot || Length[ctx] >= n, Break[]];
+        If[next == sp["EndOfText"] || Length[ctx] >= n, Break[]];
         logits = whStep[S, next, Length[ctx] - 1],
         {Quotient[n, 2]}];
-    ctx
+    <|"Context" -> ctx, "NoSpeech" -> noSpeech, "LogProbability" -> sum / Max[count, 1]|>
 ]
 
 (* The language of the segment just encoded, of a multilingual model: the likeliest language token after
@@ -311,28 +320,41 @@ whGreedy[S_, context_List, eot_Integer] := Module[{ctx = context, n = S["M"]["Co
 whDetectLanguage[S_, sp_] := With[{logits = whStep[S, sp["Start"], 0]},
     $whLanguages[[First @ Ordering[logits[[sp["Language"] + 1 ;; sp["Language"] + Length[$whLanguages]]], -1]]]]
 
+(* A segment whose samples stay within one 16-bit step is digital silence: there is nothing to decode,
+   and the model would write a word for it all the same. *)
+$whSilence = 2.^-15;
+
+(* Whether the model itself takes a decoded segment (whGreedy) for no speech: a no-speech probability
+   above 0.6 with a mean log-probability below -1 (OpenAI whisper transcribe.py, no_speech_threshold and
+   logprob_threshold). *)
+whNoSpeechQ[out_] := out["NoSpeech"] > 0.6 && out["LogProbability"] < -1.
+
 (* The text tokens of 16 kHz samples and the language they were read in, segment by segment; each
    segment's decoding is prompted with the text of the one before (tinygrad transcribe_waveform).
    language is a code of $whLanguages or Automatic, which a multilingual model detects from the first
-   segment.  report[s, n] is called before segment s of n. *)
+   segment with sound.  A silent segment is not decoded, and a decoded one that is no speech
+   (whNoSpeechQ) is dropped.  report[s, n] is called before segment s of n. *)
 whTranscribe[S_, samples_List, language_, report_ : (Null &)] := Module[
     {sp = whSpecials[S["M"]["Vocabulary"]], lang = language, half = Quotient[S["M"]["Context"], 2], n = whSegmentCount[samples],
-     start, ctx = None, tokens = {}, text, textQ},
+     start, ctx = None, tokens = {}, seg, out, full, textQ},
     textQ = # < sp["EndOfText"] || # > sp["NoTimestamps"] &;
     Do[
-        report[seg, n];
-        whEncode[S, whT[whSegmentSamples[samples, seg]]];
-        If[ctx === None,
-            If[lang === Automatic, lang = If[sp["Multilingual"], whDetectLanguage[S, sp], "en"]];
-            start = whStartTokens[sp, lang];
-            ctx = start];
-        ctx = whGreedy[S, ctx, sp["EndOfText"]];
-        text = Drop[ctx, First @ FirstPosition[ctx, sp["NoTimestamps"]]];
-        tokens = Join[tokens, TakeWhile[text, # =!= sp["EndOfText"] &]];
-        ctx = With[{prev = Select[ctx, textQ]},
-            Join[{sp["Previous"]}, Take[prev, -Min[half - Length[start], Length[prev]]], start]];
-        TReclaim[],
-        {seg, n}];
+        report[s, n];
+        seg = whSegmentSamples[samples, s];
+        If[Max[Abs[seg]] > $whSilence,
+            whEncode[S, whT[seg]];
+            If[ctx === None,
+                If[lang === Automatic, lang = If[sp["Multilingual"], whDetectLanguage[S, sp], "en"]];
+                start = whStartTokens[sp, lang];
+                ctx = start];
+            out = whGreedy[S, ctx, sp];
+            If[! whNoSpeechQ[out],
+                full = out["Context"];
+                tokens = Join[tokens, TakeWhile[Drop[full, First @ FirstPosition[full, sp["NoTimestamps"]]], # =!= sp["EndOfText"] &]];
+                ctx = With[{prev = Select[full, textQ]},
+                    Join[{sp["Previous"]}, Take[prev, -Min[half - Length[start], Length[prev]]], start]]];
+            TReclaim[]],
+        {s, n}];
     <|"Tokens" -> Select[tokens, # < sp["EndOfText"] &], "Language" -> lang|>
 ]
 
