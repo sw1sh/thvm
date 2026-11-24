@@ -10,8 +10,12 @@ BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`
 TSpeechSynthesize::usage = "TSpeechSynthesize[text$] synthesizes speech for the string text$ with a thvm text-to-speech model chosen by the Method option and gives an Audio object. TSpeechSynthesize[text$, \"Samples\"] gives the list of samples. Method -> \"Phonon\" (the default) is the English Phonon 31M model; the other options are the chosen synthesizer's (see PhononSynthesize).";
 TSpeak::usage = "TSpeak[text$] speaks the string text$: it synthesizes the speech as TSpeechSynthesize does and plays it through the system's audio player, returning when the speech has ended. \"Volume\" -> v$ scales the loudness (1 by default); the other options are those of TSpeechSynthesize.";
 
+TVoiceStyleData::usage = "TVoiceStyleData[] gives the voices of a thvm text-to-speech model, each an association of its name, language, gender and description. TVoiceStyleData[voice$] gives the association of the voice named voice$, and TVoiceStyleData[voice$, prop$] its property prop$. A voice's name is what the \"Voice\" option of TSpeechSynthesize and TSpeak takes. Method -> \"Phonon\" (the default) gives the English voices of Gradium's catalogue for Phonon.";
+
 TSpeechSynthesize::badmethod = "`1` is not a known Method; use one of `2`.";
 TSpeak::player = "No audio player was found on this system (looked for `1`).";
+TVoiceStyleData::voice = "`1` is not a voice; TVoiceStyleData[] gives the voices.";
+TVoiceStyleData::prop = "`1` is not a property of a voice; use one of `2`.";
 
 Begin["`Private`"];
 
@@ -19,7 +23,8 @@ Begin["`Private`"];
    context-qualified so the registry binds the public symbol whatever order Examples.wl loads the model
    files in. *)
 $speechSynthesizers = <|
-    "Phonon" -> <|"Synthesize" -> WolframInstitute`THVMLink`Examples`PhononSynthesize, "SampleRate" -> 24000|>
+    "Phonon" -> <|"Synthesize" -> WolframInstitute`THVMLink`Examples`PhononSynthesize, "SampleRate" -> 24000,
+        "Voices" -> phVoiceStyles|>
 |>;
 
 (* The registry entry of the Method among opts, or a Failure for an unknown one. *)
@@ -34,6 +39,24 @@ TSpeechSynthesize[text_String, spec : ("Audio" | "Samples") : "Audio", opts : Op
     With[{m = speechMethod[{opts}]},
         If[FailureQ[m], m,
             m["Synthesize"][text, spec, FilterRules[{opts}, Options[m["Synthesize"]]]]]]
+
+(* The voices of the Method's synthesizer, shaped after the built-in VoiceStyleData: all of them, one by
+   its name in any case, or one property of one. *)
+Options[TVoiceStyleData] = {Method -> "Phonon"};
+
+TVoiceStyleData[opts : OptionsPattern[]] := With[{m = speechMethod[{opts}]},
+    If[FailureQ[m], m, m["Voices"][]]]
+
+TVoiceStyleData[voice_String, opts : OptionsPattern[]] := With[{voices = TVoiceStyleData[opts]},
+    If[FailureQ[voices], voices,
+        SelectFirst[voices, ToLowerCase[#Name] === ToLowerCase[voice] &,
+            WolframInstitute`THVMLink`Private`thvmFailure[TVoiceStyleData::voice, voice]]]]
+
+TVoiceStyleData[voice_String, prop_String, opts : OptionsPattern[]] := With[{data = TVoiceStyleData[voice, opts]},
+    Which[
+        FailureQ[data], data,
+        KeyExistsQ[data, prop], data[prop],
+        True, WolframInstitute`THVMLink`Private`thvmFailure[TVoiceStyleData::prop, prop, Keys[data]]]]
 
 (* Samples in [-1, 1] at `rate` Hz as a mono 16-bit WAV file. *)
 speechWavWrite[file_String, samples_List, rate_Integer] := Module[

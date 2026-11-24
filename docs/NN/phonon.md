@@ -40,6 +40,7 @@ the flow transformer's projections) and decoded to f32 on the host at load.
 | `PhononModel.wl` | weight loading, the transformer layer, the flow head, the Mimi decoder, the session |
 | `PhononText.wl` | the tokenizer, prompt preparation, chunking, the normaliser |
 | `PhononGenerate.wl` | `PhononSynthesize`, `PhononUnload`, model fetch, voices |
+| `PhononVoices.wl` | the table of the catalogue's English voices (generated) |
 
 ## Weights
 
@@ -67,6 +68,29 @@ the `"ModelDirectory"` given):
 - The download is `curl` in the background, its growing file polled for the
   progress, because not every kernel can download asynchronously; without
   `curl` it is one `URLDownload`.
+
+## Voices
+
+A voice is 125 frames of 512 numbers, one file of 256136 bytes (a
+`.safetensors` with the tensor `speaker_wavs`, 1 x 512 x 125). The model's
+repository has one, the default voice. Gradium's catalogue,
+`gradium/phonon-voices` (Apache 2.0), has 102 for this model in five languages;
+the 37 English ones are the port's named voices, since the model speaks
+English: 12 American, 13 British and 12 characters.
+
+- `TVoiceStyleData[]` lists them, each with its name, language, language code,
+  gender, age and the catalogue's description, in the form of the built-in
+  `VoiceStyleData`; `TVoiceStyleData[voice]` and `TVoiceStyleData[voice, prop]`
+  look one up, the name in any case.
+- `"Voice" -> name` in `PhononSynthesize`, `TSpeechSynthesize` and `TSpeak`
+  uses one. Its file is fetched on first use into `voices/` of the model
+  directory, under the name it has in the catalogue, and kept only when it has
+  the pinned size and SHA-256.
+- The table of names, identifiers and hashes is `PhononVoices.wl`, written by
+  [tools/phonon/voices_manifest.py](../../tools/phonon/voices_manifest.py) from
+  the catalogue's `voices.jsonl` and file list at a pinned revision.
+- `"Voice"` also takes the path of any voice file in that format, or the frames
+  themselves.
 
 ## One shape per step
 

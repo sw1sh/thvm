@@ -1,5 +1,5 @@
-(* phonon.wlt - Phonon 31M text to speech (NN/Examples/Phonon).  The text normaliser and the prompt
-   preparation need no model.  With the model's files in place (~/.cache/thvm/phonon-31m-en, where the
+(* phonon.wlt - Phonon 31M text to speech (NN/Examples/Phonon).  The text normaliser, the prompt
+   preparation and the table of voices need no model.  With the model's files in place (~/.cache/thvm/phonon-31m-en, where the
    first PhononSynthesize fetches them): the tokenizer against the HuggingFace tokenizer's ids, the
    chunker's token limit, and a deterministic synthesis against the NumPy reference
    (tools/phonon/ref_phonon.py), by its frame count and signal level. *)
@@ -32,6 +32,35 @@ VerificationTest[
         "A sentence of more than four words"},
     {{"Hello world.", 3}, {"Wait, what.", 3}, {"He said \"go\".", 3}, {"A sentence of more than four words.", 1}},
     TestID -> "phonon/prepare-capitalizes-terminates-and-counts-words"
+]
+
+(* The voices are the catalogue's English ones, in the terms of VoiceStyleData. *)
+VerificationTest[
+    With[{all = TVoiceStyleData[]},
+        {Length[all], Sort @ Keys @ First[all], Sort @ Normal @ Counts[#LanguageCode & /@ all],
+         Sort @ Normal @ Counts[#Gender & /@ all /. _Missing -> "None"], DuplicateFreeQ[#Name & /@ all],
+         AllTrue[all, #Language === "English" && StringQ[#Description] &]}],
+    {37, {"Age", "Description", "Gender", "Language", "LanguageCode", "Name"}, {"en" -> 12, "en-GB" -> 13, "en-US" -> 12},
+     {"Female" -> 13, "Male" -> 12, "None" -> 12}, True, True},
+    TestID -> "phonon/voice-styles-are-the-catalogues-english-voices"
+]
+
+VerificationTest[
+    {TVoiceStyleData["zoey"]["Name"], TVoiceStyleData["Hugh", "Gender"], TVoiceStyleData["Hugh", "LanguageCode"],
+     TVoiceStyleData["Grub the Ogre", "Gender"],
+     Quiet[{TVoiceStyleData["Nobody"], TVoiceStyleData["Hugh", "Shoe size"], TVoiceStyleData[Method -> "Other"]}] /. f_Failure :> f["Tag"]},
+    {"Zoey", "Male", "en-GB", Missing["NotAvailable"], {"voice", "prop", "badmethod"}},
+    TestID -> "phonon/voice-style-lookups-and-failures"
+]
+
+(* Every voice names its file in the catalogue and pins it. *)
+VerificationTest[
+    With[{voices = Values[WolframInstitute`THVMLink`Examples`Private`$phVoices]},
+        {AllTrue[voices, StringLength[#Identifier] == 16 && StringMatchQ[#SHA256, Repeated[HexadecimalCharacter, {64}]] &],
+         DuplicateFreeQ[#Identifier & /@ voices], StringLength[WolframInstitute`THVMLink`Examples`Private`$phVoiceRevision],
+         WolframInstitute`THVMLink`Examples`Private`phVoiceName /@ {"ZOEY", "sir bramwell", "Nobody"}}],
+    {True, True, 40, {"Zoey", "Sir Bramwell", None}},
+    TestID -> "phonon/voices-are-pinned"
 ]
 
 If[$phononFiles,
@@ -110,6 +139,29 @@ If[$phononFiles,
         With[{r = Quiet[TSpeak["Yes.", Method -> "Unknown"], TSpeechSynthesize::badmethod]}, {FailureQ[r], r["Tag"]}],
         {True, "badmethod"},
         TestID -> "phonon/speak-unknown-method-is-a-failure"
+    ];
+
+    VerificationTest[
+        With[{r = Quiet[PhononSynthesize["Good morning.", "Samples", "Voice" -> "Nobody"], PhononSynthesize::voice]},
+            {FailureQ[r], r["Tag"], r["MessageParameters"]}],
+        {True, "voice", {"Nobody"}},
+        TestID -> "phonon/unknown-voice-is-a-failure"
+    ];
+
+    (* A named voice, with its file in place (where the first use of the name fetches it): the same speech
+       as from the file itself, and another speaker than the default voice. *)
+    With[{file = FileNameJoin[{$phononDir, "voices", "NbpkqMVS3CJeq2j8.safetensors"}]},
+        If[FileExistsQ[file],
+            VerificationTest[
+                With[{named = PhononSynthesize["Good morning.", "Samples", "Voice" -> "zoey", "Temperature" -> 0],
+                      default = PhononSynthesize["Good morning.", "Samples", "Temperature" -> 0]},
+                    {named == PhononSynthesize["Good morning.", "Samples", "Voice" -> file, "Temperature" -> 0],
+                     named == default, Max[Abs[named]] > 0.05,
+                     TSpeechSynthesize["Good morning.", "Samples", "Voice" -> "Zoey", "Temperature" -> 0] == named}],
+                {True, False, True, True},
+                TestID -> "phonon/named-voice-is-its-catalogue-file"
+            ]
+        ]
     ];
 
     (* The model directory holds the three files at their pinned sizes, so nothing is fetched. *)

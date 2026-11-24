@@ -5,7 +5,7 @@ Context: WolframInstitute`THVMLink`Examples`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/TSpeechSynthesize
 Keywords: [text-to-speech, speech synthesis, voice, audio]
-SeeAlso: [TSpeak, PhononSynthesize, SpeechSynthesize, Audio, FluxGenerate]
+SeeAlso: [TSpeak, TVoiceStyleData, PhononSynthesize, SpeechSynthesize, Audio, FluxGenerate]
 RelatedGuides: [THVMLink]
 ---
 
@@ -68,6 +68,17 @@ TSpeechSynthesize["Good morning.", Method -> "Phonon", "Temperature" -> 0]
 ```
 
 <!-- => an Audio object, the same every time -->
+
+---
+
+A voice of [TVoiceStyleData]() by its name:
+
+```wl
+#| eval: false
+TSpeechSynthesize["Good morning.", "Voice" -> "Maeve"]
+```
+
+<!-- => an Audio object in a British female voice -->
 
 ## Possible Issues
 

@@ -13,11 +13,11 @@
 
 BeginPackage["WolframInstitute`THVMLink`Examples`", {"WolframInstitute`THVMLink`"}];
 
-PhononSynthesize::usage = "PhononSynthesize[text$] synthesizes speech for the English string text$ with the Phonon 31M text-to-speech model and gives an Audio object (24 kHz, mono). PhononSynthesize[text$, \"Samples\"] gives the list of samples instead. The first call fetches the model's files (65 MB) from its HuggingFace repository, gradium/phonon-31m-en, to the model directory, showing its progress and checking each file against its SHA-256; the model then stays loaded between calls. Options: \"Voice\" (Automatic for the model's default voice, the path of a .safetensors voice file, or a {frames$, 512} array of voice frames), \"Temperature\" (the noise variance of the latents, 0.3; 0 gives the same audio every time), \"Normalize\" (True writes money, addresses and other symbols as words first), \"ModelDirectory\" (Automatic is ~/.cache/thvm/phonon-31m-en; a directory that already holds the files is used as it is), ProgressReporting (False hides the progress of the fetch and the load).";
+PhononSynthesize::usage = "PhononSynthesize[text$] synthesizes speech for the English string text$ with the Phonon 31M text-to-speech model and gives an Audio object (24 kHz, mono). PhononSynthesize[text$, \"Samples\"] gives the list of samples instead. The first call fetches the model's files (65 MB) from its HuggingFace repository, gradium/phonon-31m-en, to the model directory, showing its progress and checking each file against its SHA-256; the model then stays loaded between calls. Options: \"Voice\" (Automatic for the model's default voice, the name of a voice of TVoiceStyleData, fetched on first use, the path of a .safetensors voice file, or a {frames$, 512} array of voice frames), \"Temperature\" (the noise variance of the latents, 0.3; 0 gives the same audio every time), \"Normalize\" (True writes money, addresses and other symbols as words first), \"ModelDirectory\" (Automatic is ~/.cache/thvm/phonon-31m-en; a directory that already holds the files is used as it is), ProgressReporting (False hides the progress of the fetch and the load).";
 PhononUnload::usage = "PhononUnload[] unloads the Phonon model and frees its buffers by resetting the thvm engine, so terms made before it are no longer valid; the next PhononSynthesize loads the model again.";
 
 PhononSynthesize::fetch = "Could not fetch `1` from `2`: `3`.";
-PhononSynthesize::voice = "`1` is not a voice: give Automatic, a .safetensors voice file or a {frames, 512} array.";
+PhononSynthesize::voice = "`1` is not a voice: give Automatic, the name of a voice of TVoiceStyleData, a .safetensors voice file or a {frames, 512} array.";
 PhononSynthesize::empty = "There is no text to speak.";
 
 Begin["`Private`"];
@@ -45,6 +45,33 @@ phHaveQ[dir_String, name_String] := hubHaveQ[phSource[], dir, name]
 (* True when dir holds the model's files, the missing ones fetched and checked first (hubFetch); a
    Failure that says which file could not be had and why. *)
 phFetch[dir_String] := hubFetch[PhononSynthesize, phSource[], dir]
+
+(* === the catalogue's voices ============================================ *)
+
+(* Voice name -> what the catalogue says of it (PhononVoices.wl), in the terms of VoiceStyleData, with
+   the identifier and the SHA-256 of its file. *)
+$phVoices := $phVoices = Association[
+    Function[{name, id, locale, gender, age, sha, description},
+        name -> <|"Name" -> name, "Language" -> "English",
+            "LanguageCode" -> Replace[locale, {"en-us" -> "en-US", "en-gb" -> "en-GB", _ -> "en"}],
+            "Gender" -> Replace[gender, {"female" -> "Female", "male" -> "Male", _ -> Missing["NotAvailable"]}],
+            "Age" -> Replace[age, None -> Missing["NotAvailable"]], "Description" -> description,
+            "Identifier" -> id, "SHA256" -> sha|>] @@@ $phVoiceTable]
+
+(* What TVoiceStyleData gives of the voices: everything but the file's particulars. *)
+phVoiceStyles[] := Values[KeyDrop[#, {"Identifier", "SHA256"}] & /@ $phVoices]
+
+(* The catalogue's name for a voice name given in any case, or None. *)
+phVoiceName[voice_String] := SelectFirst[Keys[$phVoices], ToLowerCase[#] === ToLowerCase[voice] &, None]
+
+(* The file of a catalogue voice in the model directory dir, under its repository's name
+   voices/identifier.safetensors, fetched and checked first when it is not there; a Failure when it
+   cannot be had. *)
+phVoiceFetch[dir_String, name_String] := With[{file = "voices/" <> $phVoices[name]["Identifier"] <> ".safetensors"},
+    With[{fetched = hubFetch[PhononSynthesize,
+            <|"Repository" -> $phVoiceRepository, "Revision" -> $phVoiceRevision,
+              "Files" -> <|file -> <|"Bytes" -> $phVoiceBytes, "SHA256" -> $phVoices[name]["SHA256"]|>|>|>, dir]},
+        If[fetched === True, FileNameJoin[{dir, file}], fetched]]]
 
 (* The frames {F, 512} of a voice file: its one tensor, {1, 512, F} of f32 (or {F, 512}). *)
 phVoiceFile[path_String] := Module[{strm = OpenRead[path, BinaryFormat -> True], n, entry, data, shape},
@@ -90,13 +117,17 @@ phReclaim[slack_] := If[TTotalBufBytes[] > $phReclaimed + slack, TReclaim[]; $ph
 
 (* The prompt rows of a voice: its frames through the speaker projection, kept per voice.  The frames
    leave room in the prompt for a chunk's tokens and the start latent. *)
-phVoiceRows[voice_] := Module[{frames, key = voice},
+phVoiceRows[voice_] := Module[{frames, key = voice, name = If[StringQ[voice], phVoiceName[voice], None], file},
     If[KeyExistsQ[$phLoaded["Voices"], key], Return[$phLoaded["Voices"][key]]];
     frames = Which[
         voice === Automatic, phVoiceFile[FileNameJoin[{$phLoaded["Directory"], "default-voice.safetensors"}]],
+        name =!= None,
+            file = phVoiceFetch[$phLoaded["Directory"], name];
+            If[FailureQ[file], Return[file]];
+            phVoiceFile[file],
         StringQ[voice] && FileExistsQ[voice], phVoiceFile[voice],
         MatrixQ[voice, NumericQ] && Last[Dimensions[voice]] == 512, N[voice],
-        True, Return[WolframInstitute`THVMLink`Private`thvmFailure[PhononSynthesize::voice, Short[voice]]]];
+        True, Return[WolframInstitute`THVMLink`Private`thvmFailure[PhononSynthesize::voice, If[StringQ[voice], voice, Short[voice]]]]];
     frames = Take[frames, UpTo[$phPromptRows - $phChunkTokens - 1]];
     $phLoaded["Voices"][key] = frames . Transpose[$phLoaded["Session"]["Host"]["Speaker"]]
 ]

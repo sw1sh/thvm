@@ -61,7 +61,11 @@ hubFetch[sym_Symbol, source_Association, dir_String] := Module[
     missing = Select[Keys[files], ! hubHaveQ[source, dir, #] &];
     If[missing === {}, Return[True]];
     fail[name_, why_] := Throw[WolframInstitute`THVMLink`Private`thvmFailure[MessageName[sym, "fetch"], name, hubUrl[source, name], why]];
-    If[! DirectoryQ[dir], CreateDirectory[dir, CreateIntermediateDirectories -> True]];
+    (* A file's name may have directories, as it has in its repository. *)
+    Scan[
+        With[{parent = DirectoryName[FileNameJoin[{dir, #}]]},
+            If[! DirectoryQ[parent], CreateDirectory[parent, CreateIntermediateDirectories -> True]]] &,
+        missing];
     total = Total[files[#]["Bytes"] & /@ missing];
     Catch[
         Do[

@@ -5,7 +5,7 @@ Context: WolframInstitute`THVMLink`Examples`
 Paclet: WolframInstitute/THVMLink
 URI: WolframInstitute/THVMLink/ref/PhononSynthesize
 Keywords: [Phonon, text-to-speech, speech synthesis, voice, audio, flow matching]
-SeeAlso: [TSpeechSynthesize, TSpeak, TJit, TSet, TReclaim, Audio, SpeechSynthesize, ProgressReporting, FluxGenerate]
+SeeAlso: [TSpeechSynthesize, TSpeak, TVoiceStyleData, TJit, TSet, TReclaim, Audio, SpeechSynthesize, ProgressReporting, FluxGenerate]
 RelatedGuides: [THVMLink]
 ---
 
@@ -30,7 +30,7 @@ RelatedGuides: [THVMLink]
 
   | | | |
   | --- | --- | --- |
-  | `"Voice"` | [Automatic]() | the voice: [Automatic]() for the model's default voice, the path of a voice file, or a `{`*n*`, 512}` array of voice frames |
+  | `"Voice"` | [Automatic]() | the voice: [Automatic]() for the model's default voice, the name of a voice of [TVoiceStyleData](), the path of a voice file, or a `{`*n*`, 512}` array of voice frames |
   | `"Temperature"` | 0.3 | the variance of the noise the latents are drawn from; 0 gives the same audio every time |
   | `"Normalize"` | [True]() | whether to write symbols as words before speaking |
   | `"ModelDirectory"` | [Automatic]() | the directory of the model files; [Automatic]() is `~/.cache/thvm/phonon-31m-en`, and a directory that already holds the files is used without a fetch |
@@ -83,6 +83,17 @@ Duration[PhononSynthesize["Speech synthesis has a long history. The first machin
 ## Options
 
 ### Voice
+
+A voice of [TVoiceStyleData]() by its name; its file, a quarter of a megabyte, is fetched on first use:
+
+```wl
+#| eval: false
+PhononSynthesize["Good morning.", "Voice" -> "Hugh"]
+```
+
+<!-- => an Audio object in a British male voice -->
+
+---
 
 The frames of a voice file select the speaker:
 
