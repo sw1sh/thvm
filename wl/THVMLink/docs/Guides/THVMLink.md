@@ -123,6 +123,7 @@ THVMLink computes with `thvm`, a runtime that evaluates programs by rewriting an
 - `FluxGenerate` an image generated from a text prompt by a text-to-image model
 - `PhononSynthesize` speech synthesized from English text by a text-to-speech model
 - `TSpeak` text spoken through the system's audio player
+- `WhisperRecognize` the text of speech, recognized by a speech-to-text model
 
 ### Runtime contexts and snapshots
 
