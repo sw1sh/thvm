@@ -1128,7 +1128,7 @@ VerificationTest[
     xu = TTensorCreate @ NumericArray[ConstantArray[1., {1, 3, 3}], "Real32"];
     {Normal @ TTensorData @ TRealize @ TConv2D[x, w, "Padding" -> 1, "Stride" -> 2],
      Normal @ TTensorData @ TRealize @ TConv2D[xu, w, "Padding" -> {0, 1, 0, 1}]},
-    {{{{1., 2.}, {2., 4.}}}, {{{4., 4., 2.}, {4., 4., 2.}, {2., 2., 1.}}}},
+    {{{{{1., 2.}, {2., 4.}}}}, {{{4., 4., 2.}, {4., 4., 2.}, {2., 2., 1.}}}},
     TestID -> "nn/conv2d-options"
 ]
 
