@@ -113,6 +113,31 @@ int main(void) {
   CHECK_EQ(term_tag(done5), TAG_TEN);
   CHECK_EQ(TENS[(u32)term_val(done5)].view.numel, 6);
 
+  TEST_BEGIN("expand-axis/rank-growing-reads-its-source-by-suffix");
+  // {3} expanded to {2,3}: the new axis leads, so each row is the source,
+  // whether the source is storage, a computed value, or a view of either.
+  u32 d6[1] = {3};
+  u32 d6row[2] = {1, 3};
+  u32 to6[2] = {2, 3};
+  f32 data6[3] = {1.0f, 10.0f, 100.0f};
+  Term leaf6 = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(d6, 1, data6));
+  Term row6  = term_new(0, TAG_TEN, DT_FP32, alloc_f32_tensor(d6row, 2, data6));
+  Term srcs6[4] = {
+    leaf6,
+    uop_binary(UOP_ADD, leaf6, leaf6),
+    uop_reshape(row6, 1, d6),
+    uop_reshape(uop_binary(UOP_ADD, row6, row6), 1, d6),
+  };
+  f32 scale6[4] = {1.0f, 2.0f, 1.0f, 2.0f};
+  for (u32 s = 0; s < 4; s++) {
+    Term done6 = wnf(thvm_materialize(uop_expand(srcs6[s], 2, to6)));
+    f32 out6[6] = {0};
+    read_buf((u32)term_val(done6), out6, 6);
+    for (u32 i = 0; i < 6; i++) {
+      CHECK(out6[i] == scale6[s] * data6[i % 3]);
+    }
+  }
+
   thvm_free();
   TEST_REPORT();
 }

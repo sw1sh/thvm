@@ -656,15 +656,21 @@ static int ru_apply_movement(u64 loc, u8 op,
 
   if (op == UOP_EXPAND) {
     // Broadcast aligns by SUFFIX: when target rank > src rank, the new
-    // axes are prepended at the front and contribute extent 1 each.
+    // axes are prepended at the front and contribute extent 1 each.  The
+    // input ranges are the source's own: the new axes' are dropped, or a
+    // source of lower rank would take them for its leading axes.
     u32 ins[RU_MAX_AXES], outs[RU_MAX_AXES];
+    Term full[RU_MAX_AXES];
     u32 rank_diff = out_ndim > src_shape.ndim ? out_ndim - src_shape.ndim : 0;
     for (u32 i = 0; i < out_ndim; i++) {
       ins[i]  = (i < rank_diff) ? 1 : src_shape.dims[i - rank_diff];
       outs[i] = (u32)term_val(heap_read(loc + 2 + i));
     }
-    apply_movement_op_expand(out_ndim, ins, outs, out_rngs, in_rngs);
-    *in_ndim = out_ndim;
+    apply_movement_op_expand(out_ndim, ins, outs, out_rngs, full);
+    for (u32 i = rank_diff; i < out_ndim; i++) {
+      in_rngs[i - rank_diff] = full[i];
+    }
+    *in_ndim = out_ndim - rank_diff;
     return 1;
   }
 
@@ -2318,18 +2324,15 @@ static Term ru_index_leaf(Term t, Term const *coords, u32 ndim) {
       }
       case UOP_PERMUTE: case UOP_EXPAND: case UOP_SHRINK: case UOP_FLIP:
         if (!ru_apply_movement(loc, op, c, ndim, in, &in_ndim)
-            || in_ndim < ss.ndim) {
+            || in_ndim != ss.ndim) {
           ru_index_leaf_fail(op, "has no index swizzle");
         }
         break;
       default:
         ru_index_leaf_fail(op, "is neither storage nor realized");
     }
-    // A rank-growing EXPAND aligns its source by suffix: the leading
-    // coordinates are the broadcast axes.
-    u32 lead = in_ndim - ss.ndim;
     for (u32 d = 0; d < ss.ndim; d++) {
-      c[d] = in[lead + d];
+      c[d] = in[d];
     }
     ndim = ss.ndim;
     t    = heap_read(loc);
