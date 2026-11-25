@@ -448,6 +448,115 @@ int uop_dag_classify_matmul_shape(Term root,
   return 1;
 }
 
+// === store coverage ===
+// For the JIT replay: a kernel that writes every element of its output needs no
+// zero fill before it when the buffer is recycled.
+
+#define UDG_COVER_MAX_AXES 16
+typedef struct {
+  u32 n;
+  u32 axis  [UDG_COVER_MAX_AXES];
+  u64 extent[UDG_COVER_MAX_AXES];
+  i64 coeff [UDG_COVER_MAX_AXES];
+  i64 constant;
+} UdgAffine;
+
+// Adds mul * t to `a` when t is a sum of RANGEs times constants plus a
+// constant (IADD, IMUL by a CONST, RANGE, CONST); 0 on anything else, or on a
+// symbolic extent.
+static int udg_affine_add(Term t, i64 mul, UdgAffine *a, u32 depth) {
+  if (depth > 64 || term_tag(t) != TAG_UOP) return 0;
+  switch (term_ext(t)) {
+    case UOP_RANGE: {
+      u32 id  = uop_range_axis_id(t);
+      u32 ext = uop_range_extent(t);
+      if (ext == 0 || (ext & 0x80000000u) != 0) return 0;
+      for (u32 i = 0; i < a->n; i++) {
+        if (a->axis[i] == id) {
+          if (a->extent[i] != ext) return 0;
+          a->coeff[i] += mul;
+          return 1;
+        }
+      }
+      if (a->n == UDG_COVER_MAX_AXES) return 0;
+      a->axis  [a->n] = id;
+      a->extent[a->n] = ext;
+      a->coeff [a->n] = mul;
+      a->n++;
+      return 1;
+    }
+    case UOP_CONST: {
+      Term num = heap_read(term_val(t) + 0);
+      if (term_tag(num) != TAG_NUM || term_val(num) > 0x7fffffffull) return 0;
+      a->constant += mul * (i64)term_val(num);
+      return 1;
+    }
+    // An OPT (UPCAST, UNROLL, LOCAL) says how its range is launched, not what
+    // values it takes: every one, as an unannotated range.
+    case UOP_OPT:
+      return udg_affine_add(heap_read(term_val(t) + 0), mul, a, depth + 1);
+    case UOP_IADD:
+      return udg_affine_add(heap_read(term_val(t) + 0), mul, a, depth + 1)
+          && udg_affine_add(heap_read(term_val(t) + 1), mul, a, depth + 1);
+    case UOP_IMUL: {
+      Term lhs = heap_read(term_val(t) + 0);
+      Term rhs = heap_read(term_val(t) + 1);
+      Term c = 0, other = 0;
+      if (term_tag(rhs) == TAG_UOP && term_ext(rhs) == UOP_CONST) {
+        c = rhs; other = lhs;
+      } else if (term_tag(lhs) == TAG_UOP && term_ext(lhs) == UOP_CONST) {
+        c = lhs; other = rhs;
+      } else {
+        return 0;
+      }
+      Term num = heap_read(term_val(c) + 0);
+      if (term_tag(num) != TAG_NUM || term_val(num) > 0x7fffffffull) return 0;
+      return udg_affine_add(other, mul * (i64)term_val(num), a, depth + 1);
+    }
+    default:
+      return 0;
+  }
+}
+
+// The bytes `store` writes when it writes every element of its BUFFER exactly
+// once, else 0.  It does when the address is sum(coeff_i * RANGE_i) with no
+// constant, and the coefficients in ascending order are the strides of the
+// ranges' extents (1, e0, e0*e1, ...) up to the buffer's element count.  An
+// address in any other form (a window, IDIV or IMOD, a symbolic extent) is not
+// proven and gives 0.
+u64 uop_dag_store_full_bytes(Term store) {
+  if (term_tag(store) != TAG_UOP || term_ext(store) != UOP_STORE) return 0;
+  Term buf  = heap_read(term_val(store) + 0);
+  Term addr = heap_read(term_val(store) + 1);
+  if (term_tag(buf) != TAG_UOP || term_ext(buf) != UOP_BUFFER) return 0;
+  u64 numel = 1;
+  u32 ndim = uop_buffer_ndim(buf);
+  for (u32 d = 0; d < ndim; d++) {
+    u32 dim = uop_buffer_dim(buf, d);
+    if (dim == 0 || (dim & 0x80000000u) != 0) return 0;
+    numel *= dim;
+  }
+  UdgAffine a;
+  memset(&a, 0, sizeof(a));
+  if (!udg_affine_add(addr, 1, &a, 0)) return 0;
+  if (a.constant != 0) return 0;
+  u64 stride = 1;
+  u32 used = 0;
+  for (u32 round = 0; round < a.n; round++) {
+    // An extent-1 range always reads 0 and takes no stride.
+    u32 pick = a.n;
+    for (u32 i = 0; i < a.n; i++) {
+      if ((used >> i) & 1u) continue;
+      if (a.extent[i] == 1 || a.coeff[i] == (i64)stride) { pick = i; break; }
+    }
+    if (pick == a.n) return 0;
+    used |= 1u << pick;
+    if (a.extent[pick] != 1) stride *= a.extent[pick];
+  }
+  if (stride != numel) return 0;
+  return numel * (u64)dtype_itemsize(uop_buffer_dtype(buf));
+}
+
 // === conv2d-flat ===
 // The structural gate of tile_analyze_conv2d_flat (schedule/tile.c): a STORE of
 // a bare REDUCE_SUM.  tile.c reads the shape from the decoder below, else from

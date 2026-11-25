@@ -38,6 +38,9 @@ typedef struct {
   // The output adopted a capture-recycled buffer, so replay zeroes it first
   // as the pop did.  Unlike replay_packed, finalize keeps it.
   u8   replay_zero;
+  // Whether the kernel writes its whole output buffer, found at the first
+  // replay that would zero it: 0 not looked at, 1 it does, 2 it does not.
+  u8   replay_cover;
   // DISPATCH
   u32  kid;
   u32  out_buf_id;
@@ -1151,6 +1154,7 @@ fn void jit_capture_record(u32 kid, u32 const *in_buf_ids,
   op->replay_skip   = 0;
   op->replay_packed = 0;
   op->replay_zero   = jit_caprecycle_take_pending(out_buf_id) ? 1 : 0;
+  op->replay_cover  = 0;
   op->kid           = kid;
   op->out_buf_id    = out_buf_id;
   op->n_inputs      = n_inputs;
@@ -1180,6 +1184,7 @@ fn void jit_capture_record_assign(u32 dst_tid, u32 src_tid) {
   op->replay_skip     = 0;
   op->replay_packed   = 0;
   op->replay_zero     = 0;
+  op->replay_cover    = 0;
   op->heap_in_buf_ids = NULL;
   op->assign_dst_tid  = dst_tid;
   op->assign_src_tid  = src_tid;
@@ -1204,6 +1209,7 @@ fn void jit_capture_record_gather(u32 src_tid, u32 dst_buf) {
   op->replay_skip     = 0;
   op->replay_packed   = 0;
   op->replay_zero     = 0;
+  op->replay_cover    = 0;
   op->heap_in_buf_ids = NULL;
   op->gather_backend  = (void *)sd->backend;
   op->gather_src_buf  = sd->buf_id;
@@ -2114,6 +2120,29 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
 
 }
 
+// 1 when replay must zero the op's recycled output before its kernel fires.
+// A fresh buffer is zero and a recycled one is not, which shows only where the
+// kernel leaves bytes unwritten (a windowed store).  A scheduler kernel whose
+// STORE covers its BUFFER, in a buffer of exactly that size, writes all of it
+// and needs no fill: tinygrad's planner reuses buffers without one
+// (schedule/memory.py:24-53).  The proof takes the kernel's launch to cover
+// every RANGE of the address (cg_tile_metal_dispatch_shape).
+static int jit_replay_zero_first(JitCaptureOp *op) {
+  if (!(op->replay_packed || op->replay_zero)) return 0;
+  if (op->replay_cover == 0) {
+    op->replay_cover = 2;
+    if (op->kid != 0 && op->kid < KERNELS_NEXT && !kernel_is_custom(&KERNELS[op->kid])) {
+      u64 bytes = uop_dag_store_full_bytes(KERNELS[op->kid].cached_lift.store_root);
+      Backend *b = jit_dispatch_output_backend(op);
+      if (bytes != 0 && b != NULL && b->buf_nbytes != NULL
+          && b->buf_nbytes(op->out_buf_id) == bytes) {
+        op->replay_cover = 1;
+      }
+    }
+  }
+  return op->replay_cover == 2;
+}
+
 #ifdef THVM_HAS_METAL
 // THVM_METAL_SERIAL_REPLAY (default on; =0 disables): replay a run of ops on
 // one serial compute encoder.  Serial order makes every write-after-write and
@@ -2210,7 +2239,7 @@ static u32 jit_replay_try_metal_serial_run(JitCapture *c, u32 start) {
     if (fc == 0 && !thvm_metal_jit_replay_dispatch_ready(r)) { why = 8; break; }
     kinds[n] = fc;
     // A recycled output is zeroed on the encoder first, as per-op does.
-    zf[n] = (op->replay_packed || op->replay_zero) ? 1 : 0;
+    zf[n] = jit_replay_zero_first(op) ? 1 : 0;
     gx[n] = groups;
     tx[n] = threads;
     n++;
@@ -2328,7 +2357,7 @@ static u32 jit_replay_try_metal_graph_run(u32 slot, JitCapture *c, u32 start) {
   for (u32 i = start; i < start + consumed && i < c->n_ops; i++) {
     JitCaptureOp *po = &c->ops[i];
     if (po->kind == JIT_OP_DISPATCH && !po->replay_skip
-        && (po->replay_packed || po->replay_zero))
+        && jit_replay_zero_first(po))
       thvm_metal_buf_gpu_zero(po->out_buf_id);
   }
   if (thvm_metal_jit_replay_run(slot, start, recs, n) != 0) {
@@ -2776,7 +2805,7 @@ fn u32 jit_replay(u32 slot) {
         // A recycled output may be written only in part (a windowed store),
         // while the eager pass saw a fresh zeroed buffer: zero it first, as
         // metal_buf_freelist_try_pop does, or readers see the prior bytes.
-        if ((op->replay_packed || op->replay_zero) && b->buf_zero != NULL) {
+        if (b->buf_zero != NULL && jit_replay_zero_first(op)) {
           b->buf_zero(op->out_buf_id);
         }
         int rc = b->dispatch_kernel(ke, ids, op->out_buf_id);

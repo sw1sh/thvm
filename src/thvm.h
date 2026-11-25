@@ -2047,6 +2047,10 @@ int uop_dag_classify_matmul_shape(Term root,
                                   struct KernelEntry const *ke,
                                   UopDagGemmShape *out);
 
+// The bytes a STORE writes when it writes every element of its BUFFER exactly
+// once, else 0 (uop/dag_scan.c).
+u64 uop_dag_store_full_bytes(Term store);
+
 // TRUE batched matmul: A{batch,M,K} . B{batch,K,N} -> C{batch,M,N}, the batch
 // axis present in A, B, AND the output (each batch an independent gemm) --
 // distinct from the conv-contraction's A-shared / M-side batch.  Operands may

@@ -136,6 +136,7 @@ TESTS := \
   $(BIN)/test_uop_scatter \
   $(BIN)/test_uop_scatter_max \
   $(BIN)/test_uop_opt \
+  $(BIN)/test_uop_dag_store_full \
   $(BIN)/test_uop_recognise_tc \
   $(BIN)/test_apply_opt_dag \
   $(BIN)/test_simplify_ranges \

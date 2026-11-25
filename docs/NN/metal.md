@@ -160,9 +160,13 @@ swapping the implementation is mechanical.
   under the second kernel writes only the first rows of the output.
 - **Replay zero fill.** A JIT replay reuses buffers, and a kernel that
   writes only part of a reused buffer (a windowed store) must find zeros in
-  the rest, as it did in the fresh buffer of the first run. The serial replay
-  zeroes a reused output on its own encoder, with a compute kernel that
-  clears 256 bytes a thread (`metal_zero_encode_on`).
+  the rest, as it did in the fresh buffer of the first run. The replay
+  zeroes a reused output first unless `uop_dag_store_full_bytes` proves that
+  the kernel's STORE writes every element of a buffer of exactly that size
+  (`jit_replay_zero_first`, decided once per recorded kernel). tinygrad's
+  planner reuses buffers with no fill (`schedule/memory.py:24-53`). The fill
+  itself is a compute kernel on the replay's serial encoder that clears 256
+  bytes a thread (`metal_zero_encode_on`).
 
 ## Build dependency
 
