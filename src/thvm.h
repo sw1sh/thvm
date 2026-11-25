@@ -1777,6 +1777,7 @@ fn void materialized_loc_clear        (void);
 u32  thvm_metal_buf_pool_begin(void);
 void thvm_metal_buf_pool_rollback_with_preserve(u32 wm);
 void thvm_metal_buf_mark_preserved(u32 buf_id);
+int  thvm_metal_buf_is_preserved(u32 buf_id);
 // GPU-side zero-fill of a buffer's full extent (blit fillBuffer), ordered
 // before the next dispatch by Metal's hazard tracking.  Used by the JIT replay
 // loop to clear a recycled (replay_packed) output slot before a partial-write

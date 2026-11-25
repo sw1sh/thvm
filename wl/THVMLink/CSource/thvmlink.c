@@ -498,6 +498,30 @@ EXTERN_C DLLEXPORT int thvm_wl_jit_capture_op_count(WolframLibraryData libData,
   return LIBRARY_NO_ERROR;
 }
 
+// A capture that will be pruned keeps the buffers of the host's tensors out of
+// its replay packing (jit_capture_hold_host).  Called between begin and end.
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_hold_host(WolframLibraryData libData,
+                                                     mint argc, MArgument *args,
+                                                     MArgument res) {
+  (void)libData; (void)argc;
+  jit_capture_hold_host((u32)MArgument_getInteger(args[0]));
+  MArgument_setInteger(res, 0);
+  return LIBRARY_NO_ERROR;
+}
+
+// tinygrad's TinyJit(prune=True) (engine/jit.py:14-22): the ops of the capture
+// that read no declared input, directly or through another op, have run for the
+// last time.  Called after thvm_wl_jit_capture_set_inputs.  Returns the ops
+// pruned.
+EXTERN_C DLLEXPORT int thvm_wl_jit_capture_prune(WolframLibraryData libData,
+                                                 mint argc, MArgument *args,
+                                                 MArgument res) {
+  (void)libData; (void)argc;
+  u32 slot = (u32)MArgument_getInteger(args[0]);
+  MArgument_setInteger(res, (mint)jit_capture_prune(slot));
+  return LIBRARY_NO_ERROR;
+}
+
 EXTERN_C DLLEXPORT int thvm_wl_jit_capture_ops(WolframLibraryData libData,
                                                mint argc, MArgument *args,
                                                MArgument res) {

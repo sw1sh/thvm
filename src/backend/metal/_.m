@@ -1563,6 +1563,10 @@ void thvm_metal_buf_mark_preserved(u32 buf_id) {
   METAL_BUFS[buf_id].preserved = 1;
 }
 
+int thvm_metal_buf_is_preserved(u32 buf_id) {
+  return buf_id != 0 && buf_id < METAL_BUFS_NEXT && METAL_BUFS[buf_id].preserved;
+}
+
 // STICKY JIT retain (mirror of cpu_buf_jit_pin / cuda_buf_jit_pin).  A
 // capture's recorded buffers must survive clear_preserved across every
 // sub-realize's rollback and every replay; the sticky flag is honoured

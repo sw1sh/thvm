@@ -33,7 +33,8 @@ BeginPackage["WolframInstitute`THVMLink`", {"GeneralUtilities`"}];
 
 SetUsage[TJit, "TJit[fn$] returns a closure that captures fn$'s kernel-dispatch sequence on the first call and replays it on later calls, returning the same result handle whose buffer each replay rewrites.
 closure$[x$] passes per-call TTerm inputs: the first call captures over x$, and each later call rebinds its input in place (tinygrad's input_replace), so a fixed forward generates by closure$[next$] with no explicit TSet.
-Per-call wallclock drops from materialize+dispatch to dispatch only. HoldFirst; recapture with TJitDrop[closure$] then re-create."];
+Per-call wallclock drops from materialize+dispatch to dispatch only. HoldFirst; recapture with TJitDrop[closure$] then re-create.
+TJit[fn$, \"Prune\" -> True] replays only the dispatches that depend on the call's inputs: one that reads no input, directly or through another dispatch, ran for the last time in the capture call (tinygrad's TinyJit prune)."];
 SetUsage[TJitOpCount, "TJitOpCount[closure$] returns the number of kernel dispatches captured for the JIT closure (0 before the first call)."];
 SetUsage[TJitCaptureOps, "TJitCaptureOps[closure$] returns the decoded captured TJit replay sequence as a list of associations.
 Dispatch rows carry Kid, DispatchKind, ProgramKey, NInputs, OutBuf, Input0, Input1, OutputNumel, OpCount, ScalarUopCount, TileUopCount, ReplaySkip, and ReplayPacked; assign rows carry DstTid and SrcTid."];
@@ -58,6 +59,8 @@ $jitCaptureOpCountFn := $jitCaptureOpCountFn = load["thvm_wl_jit_capture_op_coun
 $jitCaptureOpsFn := $jitCaptureOpsFn = load["thvm_wl_jit_capture_ops", {Integer}, {Integer, 1}]
 $jitReplayFn := $jitReplayFn = load["thvm_wl_jit_replay", {Integer}, Integer]
 $jitCaptureSetInputsFn := $jitCaptureSetInputsFn = load["thvm_wl_jit_capture_set_inputs", {Integer, {Integer, 1}}, Integer]
+$jitCapturePruneFn := $jitCapturePruneFn = load["thvm_wl_jit_capture_prune", {Integer}, Integer]
+$jitCaptureHoldHostFn := $jitCaptureHoldHostFn = load["thvm_wl_jit_capture_hold_host", {Integer}, Integer]
 $jitReplayWithInputsFn := $jitReplayWithInputsFn = load["thvm_wl_jit_replay_with_inputs", {Integer, {Integer, 1}}, Integer]
 
 (* Side-store of captured slot ids, keyed by the closure's
@@ -86,9 +89,11 @@ $tJitState = <||>
    No slot is allocated until the first call so wrapping a function
    that's never invoked is free. *)
 SetAttributes[TJit, HoldFirst]
-TJit[fn_] := TJitClosure[<|
+Options[TJit] = {"Prune" -> False};
+TJit[fn_, opts : OptionsPattern[]] := TJitClosure[<|
     "id" -> Unique["jit$"],
-    "fn" -> Function[args, fn[Sequence @@ args]]
+    "fn" -> Function[args, fn[Sequence @@ args]],
+    "prune" -> TrueQ[OptionValue["Prune"]]
 |>]
 
 (* A call's arguments with each tensor argument realized, done before the capture
@@ -115,6 +120,10 @@ jitCaptureOnce[a_Association, args_List] := Module[{slot, fnRes, inTids = jitArg
     slot = $jitCaptureBeginFn[];
     If[ slot === 0,
         Failure["TJit", <|"MessageTemplate" -> "TJit capture-slot pool full (cap = 16)"|>],
+        (* A pruned dispatch runs once, so a tensor the body makes and the caller
+           keeps (a weight a loader prepares on first use) must keep its own
+           buffer: the capture is told before it ends. *)
+        If[TrueQ[a["prune"]] && inTids =!= {}, $jitCaptureHoldHostFn[slot]];
         Internal`WithLocalSettings[
             Null,
             fnRes = a["fn"][args],
@@ -129,6 +138,10 @@ jitCaptureOnce[a_Association, args_List] := Module[{slot, fnRes, inTids = jitArg
         (* Declare this call's input tensors so later calls rebind them
            in place of an explicit TSet. *)
         If[inTids =!= {}, $jitCaptureSetInputsFn[slot, inTids]];
+        (* tinygrad prunes right after the capture (engine/jit.py:178-183).  Without
+           a declared input every dispatch would count as independent of the
+           inputs, so a closure called with no tensor argument is left whole. *)
+        If[TrueQ[a["prune"]] && inTids =!= {}, $jitCapturePruneFn[slot]];
         <|"slot" -> slot, "result" -> fnRes|>
     ]
 ]

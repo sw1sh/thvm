@@ -184,8 +184,14 @@ the capture ran, with two exceptions marked `ReplaySkip`:
 
 - in a rootless capture, an assignment whose source is a dispatch
   output is sunk into that dispatch, which then writes the destination;
-- under `prune=True`, a dispatch that depends on no JIT input is not
-  replayed: its output from the capture stands.
+- under `prune=True` (Python) or `"Prune" -> True` (TJit), a dispatch
+  that depends on no JIT input is not replayed: its output from the
+  capture stands.  A kept dispatch reads such an output through a private
+  copy (`jit_capture_prune`), because the output's own storage may go to
+  another dispatch.  Where replay packing has already given several
+  dispatches one buffer, that buffer holds the last writer's bytes once
+  the capture has run, so the pruned dispatches run one more time, in
+  order, and each copy is taken as its dispatch finishes.
 
 Retained buffers stay retained until `TJitDrop` or runtime reset.
 
@@ -207,6 +213,14 @@ Replay slot packing is deliberately conservative:
   records still refer to tensor ids rather than captured buffer ids;
 - it reuses only exact-size slots whose last captured dispatch read is
   before the candidate producer.
+- in a capture that will be pruned, it skips every output a tensor the
+  host still holds reaches (`jit_capture_hold_host`, marked from the
+  host's pinned terms).  tinygrad holds the buffers of every live Tensor
+  out of its planner (`engine/jit.py:161`).  A weight that a lazy loader
+  prepares inside the captured forward and keeps is such a tensor: packed
+  away, its buffer would hold another dispatch's bytes, and a later
+  capture that reuses the weight would compute with those.  Prune then
+  reads the weight in place, without a copy.
 
 Set `THVM_JIT_REPLAY_PACK=0` to disable this rewrite when bisecting a
 memory or correctness issue.

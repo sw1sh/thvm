@@ -25,6 +25,7 @@ RelatedGuides: [THVMLink]
 - A closure of no arguments, built from <code>[Function]()[{}, …]</code>, replays on the current contents of the tensors it recorded, which <code>[TSet]()</code> changes in place.
 - The body of *f* must realize its result with <code>[TRealize]()</code>. A body that only builds a lazy graph dispatches nothing, and there is nothing to replay.
 - The recording keeps the shapes of the first application. `TJitDrop[`*closure*`]` releases it, so the next application records afresh.
+- With the option `"Prune" -> True`, a recorded kernel that reads none of the arguments, directly or through another recorded kernel, is not replayed: its result from the first application stands. A weight that *f* prepares inside its body, such as a cast or a quantization of a stored tensor, is then computed once. The default is `False`, and a closure applied to no tensor argument is never pruned.
 
 ## Basic Examples
 

@@ -118,6 +118,9 @@ typedef struct {
   // just pending: the skip is Metal-only, and replaying a CPU or CUDA capture
   // would run every kernel twice (wrong for an in-place custom kernel).
   u32               trace_capture_skipped;
+  // Set by jit_capture_hold_host before the capture ends: every buffer a term
+  // the host holds reaches stays out of the replay packing.
+  u32               hold_host;
 } JitCapture;
 
 static JitCapture JIT_CAPTURES[JIT_CAPTURE_NSLOTS];
@@ -670,6 +673,7 @@ fn u32 jit_capture_begin(void) {
       JIT_CAPTURES[i].trace_capture_pending =
           jit_trace_capture_enabled() ? 1u : 0u;
       JIT_CAPTURES[i].trace_capture_skipped = 0;
+      JIT_CAPTURES[i].hold_host = 0;
       JIT_ACTIVE_SLOT          = i;
       JIT_PAUSE_DEPTH          = 0;
       jit_caprecycle_reset();
@@ -1515,6 +1519,37 @@ static u64 jit_dispatch_output_nbytes(JitCaptureOp const *op) {
   return dtype_storage_bytes(ke->output_dtype, ke->output_numel);
 }
 
+// The host's tensors.  tinygrad holds every buffer a live Tensor reaches out of
+// its memory planner (engine/jit.py:161, held_bufs over all_tensors): a tensor
+// the host still has, made inside the capture (a weight a lazy loader quantized
+// there), keeps its bytes.  The marks are the preserve bits, set from the
+// host's pinned terms and the definitions and cleared again by the caller.
+fn int mark_gc_preserve_host_roots(Term const *roots, u32 n);
+static int jit_host_marks_begin(void) {
+  if (CPU_BUFS != NULL) cpu_buf_clear_preserved(1);
+  thvm_metal_buf_clear_preserved(1);
+  return mark_gc_preserve_host_roots(NULL, 0);
+}
+static void jit_host_marks_end(void) {
+  if (CPU_BUFS != NULL) cpu_buf_clear_preserved(1);
+  thvm_metal_buf_clear_preserved(1);
+}
+static int jit_buf_host_marked(Backend *b, u32 buf_id) {
+  if (b == NULL || buf_id == 0) return 0;
+  switch (b->id) {
+    case 1:  return CPU_BUFS != NULL && buf_id < CPU_BUFS_NEXT && CPU_BUFS[buf_id].preserved;
+    case 2:  return thvm_metal_buf_is_preserved(buf_id);
+    default: return 0;
+  }
+}
+
+// A capture that will be pruned: its pruned ops run once, so an output the host
+// holds must stay in its own buffer.  Call between begin and end.
+fn void jit_capture_hold_host(u32 slot) {
+  if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS || !JIT_CAPTURES[slot].in_use) return;
+  JIT_CAPTURES[slot].hold_host = 1;
+}
+
 #if defined(THVM_HAS_METAL) || defined(THVM_HAS_CUDA)
 typedef struct {
   Backend *backend;
@@ -1926,6 +1961,17 @@ static void jit_capture_finalize(u32 slot, const Term *roots, u32 n_roots) {
       }
     }
   }
+  if (held != NULL && c->hold_host && jit_host_marks_begin()) {
+    for (u32 oi = 0; oi < c->n_ops; oi++) {
+      JitCaptureOp *hop = &c->ops[oi];
+      if (hop->replay_skip || hop->kind != JIT_OP_DISPATCH) continue;
+      Backend *hb = jit_dispatch_output_backend(hop);
+      if (jit_buf_host_marked(hb, hop->out_buf_id)) {
+        jit_bufref_add(held, &n_held, hb, hop->out_buf_id);
+      }
+    }
+  }
+  if (c->hold_host) jit_host_marks_end();
   jit_capture_pack_replay_temporaries(c, has_result, held, n_held);
   free(held);
 
@@ -2415,12 +2461,50 @@ static int jit_ids_contain(u32 const *ids, u32 n, u32 id) {
   return 0;
 }
 
+// The buffer an op writes, 0 for none.
+static u32 jit_op_written_buf(JitCaptureOp const *op) {
+  switch (op->kind) {
+    case JIT_OP_DISPATCH: return op->out_buf_id;
+    case JIT_OP_GATHER:   return op->gather_dst_buf;
+    case JIT_OP_ASSIGN:
+      return op->assign_dst_tid != 0 && op->assign_dst_tid < TENS_NEXT ? TENS[op->assign_dst_tid].buf_id : 0;
+  }
+  return 0;
+}
+
+// The op whose output op `p` finds in buffer `id`: the latest replayed op before
+// p that writes it, or -1.  With packing several ops write one buffer, so the id
+// alone does not name the producer.
+static i64 jit_capture_writer_before(JitCapture const *c, u32 p, u32 id) {
+  if (id == 0) return -1;
+  for (u32 i = p; i-- > 0;) {
+    if (!c->ops[i].replay_skip && jit_op_written_buf(&c->ops[i]) == id) return (i64)i;
+  }
+  return -1;
+}
+
+// A private copy of buffer `src`, 0 on failure.
+static u32 jit_prune_copy(Backend *b, u32 src) {
+  u64 nbytes = b != NULL && b->buf_nbytes != NULL ? b->buf_nbytes(src) : 0;
+  if (nbytes == 0 || b->buf_alloc == NULL || b->buf_copy == NULL) return 0;
+  u32 dst = b->buf_alloc(nbytes);
+  if (dst == 0) return 0;
+  if (b->buf_copy(dst, src, nbytes) != 0) {
+    b->buf_decref(dst);
+    return 0;
+  }
+  return dst;
+}
+
 // tinygrad's prune (engine/jit.py:14-22): an op that reads no declared input,
 // directly or through a kept op, writes the same bytes every call, so its run
 // at capture is its only one.  A kept op reads such an output through a copy:
-// the realize's arena or the capture recycle pool may give the original's
-// storage to a later op.  Call after jit_capture_set_inputs, before a replay.
-// Returns the ops pruned; 0 and nothing changed when a copy fails.
+// the realize's arena, the capture recycle pool or the replay's packing may
+// give the original's storage to another op.  Where packing already has
+// (several ops of the stream write the buffer), the buffer holds the last
+// writer's bytes by now, so the once ops run one more time, in order, and each
+// copy is taken as its op finishes.  Call after jit_capture_set_inputs, before
+// a replay.  Returns the ops pruned; 0 and nothing changed when a copy fails.
 fn u32 jit_capture_prune(u32 slot) {
   if (slot == 0 || slot >= JIT_CAPTURE_NSLOTS) return 0;
   JitCapture *c = &JIT_CAPTURES[slot];
@@ -2481,29 +2565,84 @@ fn u32 jit_capture_prune(u32 slot) {
     }
   }
 
-  // Copy every once output a kept op reads, before changing anything.
+  // need[q]: a kept op reads once op q's output.
+  u8 *need = (u8 *)calloc(c->n_ops, 1);
+  if (need == NULL) {
+    free(live); free(once); free(outs); free(copy);
+    return 0;
+  }
+  for (u32 p = 0; p < c->n_ops; p++) {
+    JitCaptureOp const *op = &c->ops[p];
+    if (op->replay_skip || once[p]) continue;
+    if (op->kind == JIT_OP_DISPATCH) {
+      u32 const *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
+      for (u32 j = 0; j < op->n_inputs; j++) {
+        i64 q = jit_capture_writer_before(c, p, ids[j]);
+        if (q >= 0 && once[q] && outs[q] != 0) need[q] = 1;
+      }
+    } else {
+      u32 src = op->kind == JIT_OP_GATHER ? op->gather_src_buf
+              : op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT ? TENS[op->assign_src_tid].buf_id : 0;
+      i64 q = jit_capture_writer_before(c, p, src);
+      if (q >= 0 && once[q] && outs[q] != 0) need[q] = 1;
+    }
+  }
+  // An output the host holds, in a buffer no other op writes, stays where it is:
+  // the capture held it out of the packing (hold_host), the host's tensor keeps
+  // it alive, and a copy would double a weight.
+  if (c->hold_host && jit_host_marks_begin()) {
+    for (u32 i = 0; i < c->n_ops; i++) {
+      if (!need[i] || c->ops[i].kind != JIT_OP_DISPATCH) continue;
+      if (!jit_buf_host_marked(jit_dispatch_output_backend(&c->ops[i]), outs[i])) continue;
+      int alone = 1;
+      for (u32 p = 0; p < c->n_ops && alone; p++) {
+        alone = p == i || c->ops[p].replay_skip || jit_op_written_buf(&c->ops[p]) != outs[i];
+      }
+      if (alone) need[i] = 0;
+    }
+  }
+  if (c->hold_host) jit_host_marks_end();
+  int shared = 0;
+  for (u32 i = 0; i < c->n_ops && !shared; i++) {
+    if (!need[i]) continue;
+    for (u32 p = 0; p < c->n_ops && !shared; p++) {
+      shared = p != i && !c->ops[p].replay_skip && jit_op_written_buf(&c->ops[p]) == outs[i];
+    }
+  }
+
+  // Copy every needed output, before changing anything.
   int ok = 1;
-  for (u32 i = 0; i < c->n_ops && ok; i++) {
-    if (outs[i] == 0) continue;
-    Backend *b = c->ops[i].kind == JIT_OP_GATHER ? (Backend *)c->ops[i].gather_backend
-                                                 : jit_dispatch_output_backend(&c->ops[i]);
-    int read = 0;
-    for (u32 p = i + 1; p < c->n_ops && !read; p++) {
-      JitCaptureOp const *op = &c->ops[p];
-      if (op->replay_skip || once[p]) continue;
-      if (op->kind == JIT_OP_DISPATCH) {
-        u32 const *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
-        read = jit_ids_contain(ids, op->n_inputs, outs[i]);
-      } else if (op->kind == JIT_OP_GATHER) {
-        read = op->gather_src_buf == outs[i];
-      } else if (op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT) {
-        read = TENS[op->assign_src_tid].buf_id == outs[i];
+  if (shared) {
+    // Only kernels run again.
+    for (u32 i = 0; i < c->n_ops && ok; i++) {
+      ok = !once[i] || (c->ops[i].kind == JIT_OP_DISPATCH && c->ops[i].kid != 0 && c->ops[i].kid < KERNELS_NEXT);
+    }
+    int began = ok;
+    if (began) backend_dispatch_begin_all();
+    for (u32 i = 0; i < c->n_ops && ok; i++) {
+      if (!once[i]) continue;
+      JitCaptureOp *op = &c->ops[i];
+      KernelEntry *ke = &KERNELS[op->kid];
+      Backend *b = jit_dispatch_output_backend(op);
+      u32 *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
+      ok = b != NULL && b->dispatch_kernel != NULL;
+      if (!ok) break;
+      if (b->buf_zero != NULL && jit_replay_zero_first(op)) b->buf_zero(op->out_buf_id);
+      ok = b->dispatch_kernel(ke, ids, op->out_buf_id) == 0;
+      if (ok && need[i]) {
+        copy[i] = jit_prune_copy(b, outs[i]);
+        ok = copy[i] != 0;
       }
     }
-    if (!read) continue;
-    u64 nbytes = b != NULL && b->buf_nbytes != NULL ? b->buf_nbytes(outs[i]) : 0;
-    copy[i] = nbytes > 0 && b->buf_alloc != NULL && b->buf_copy != NULL ? b->buf_alloc(nbytes) : 0;
-    ok = copy[i] != 0 && b->buf_copy(copy[i], outs[i], nbytes) == 0;
+    if (began) backend_dispatch_end_all();
+  } else {
+    for (u32 i = 0; i < c->n_ops && ok; i++) {
+      if (!need[i]) continue;
+      Backend *b = c->ops[i].kind == JIT_OP_GATHER ? (Backend *)c->ops[i].gather_backend
+                                                   : jit_dispatch_output_backend(&c->ops[i]);
+      copy[i] = jit_prune_copy(b, outs[i]);
+      ok = copy[i] != 0;
+    }
   }
   u32 pruned = 0;
   for (u32 i = 0; i < c->n_ops; i++) {
@@ -2515,28 +2654,32 @@ fn u32 jit_capture_prune(u32 slot) {
     }
     b->buf_decref(copy[i]);
   }
+  // Each kept op reads its producer's copy; the producers are looked up before
+  // any op is marked skipped.
   for (u32 p = 0; p < c->n_ops && ok; p++) {
     JitCaptureOp *op = &c->ops[p];
-    if (once[p]) {
-      op->replay_skip = 1;
-      pruned++;
-      continue;
-    }
-    for (u32 i = 0; i < p; i++) {
-      if (copy[i] == 0) continue;
-      if (op->kind == JIT_OP_DISPATCH) {
-        u32 *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
-        for (u32 j = 0; j < op->n_inputs; j++) {
-          if (ids[j] == outs[i]) ids[j] = copy[i];
-        }
-      } else if (op->kind == JIT_OP_GATHER && op->gather_src_buf == outs[i]) {
-        op->gather_src_buf = copy[i];
-      } else if (op->kind == JIT_OP_ASSIGN && op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT
-                 && TENS[op->assign_src_tid].buf_id == outs[i]) {
-        op->assign_src_buf = copy[i];
+    if (op->replay_skip || once[p]) continue;
+    if (op->kind == JIT_OP_DISPATCH) {
+      u32 *ids = op->heap_in_buf_ids != NULL ? op->heap_in_buf_ids : op->in_buf_ids;
+      for (u32 j = 0; j < op->n_inputs; j++) {
+        i64 q = jit_capture_writer_before(c, p, ids[j]);
+        if (q >= 0 && copy[q] != 0) ids[j] = copy[q];
       }
+    } else if (op->kind == JIT_OP_GATHER) {
+      i64 q = jit_capture_writer_before(c, p, op->gather_src_buf);
+      if (q >= 0 && copy[q] != 0) op->gather_src_buf = copy[q];
+    } else if (op->assign_src_tid != 0 && op->assign_src_tid < TENS_NEXT) {
+      i64 q = jit_capture_writer_before(c, p, TENS[op->assign_src_tid].buf_id);
+      if (q >= 0 && copy[q] != 0) op->assign_src_buf = copy[q];
     }
   }
+  for (u32 p = 0; p < c->n_ops && ok; p++) {
+    if (once[p]) {
+      c->ops[p].replay_skip = 1;
+      pruned++;
+    }
+  }
+  free(need);
 #ifdef THVM_HAS_CUDA
   if (pruned > 0) cuda_jit_graph_invalidate(slot);
 #endif
