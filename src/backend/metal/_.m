@@ -2380,8 +2380,23 @@ static int metal_gather_encode_on(id<MTLComputeCommandEncoder> enc,
 // Compute-shader zero fill for the serial replay: zeroes a recycled slot's
 // [byte_offset, nbytes) window on the SAME serial encoder (a blit fill would
 // force an encoder switch per zero -- the DSV2 capture zeroes ~half its
-// outputs).  PSO compiled once via the shared source cache.
-static id<MTLComputePipelineState> METAL_FILL0_PSO = nil;
+// outputs).  One thread clears 256 bytes through 32-bit stores; the bytes left
+// over, and a window at an offset that is not a multiple of 4, go one byte per
+// thread.  PSOs compiled once via the shared source cache.
+#define METAL_FILL0_BLOCK 256u
+static id<MTLComputePipelineState> METAL_FILL0_PSO      = nil;
+static id<MTLComputePipelineState> METAL_FILL0_WIDE_PSO = nil;
+
+static void metal_fill0_dispatch(id<MTLComputeCommandEncoder> enc,
+                                 id<MTLComputePipelineState> pso,
+                                 id<MTLBuffer> buf, u64 off, u32 n) {
+  [enc setComputePipelineState:pso];
+  [enc setBuffer:buf offset:(NSUInteger)off atIndex:0];
+  [enc setBytes:&n length:sizeof(n) atIndex:1];
+  NSUInteger tg = MIN((NSUInteger)n, [pso maxTotalThreadsPerThreadgroup]);
+  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
+   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+}
 
 static int metal_zero_encode_on(id<MTLComputeCommandEncoder> enc, u32 buf_id) {
   if (buf_id == 0 || buf_id >= METAL_BUFS_NEXT) return -1;
@@ -2390,28 +2405,36 @@ static int metal_zero_encode_on(id<MTLComputeCommandEncoder> enc, u32 buf_id) {
   u64 off = METAL_BUFS[buf_id].byte_offset;
   u64 cap = METAL_BUFS[buf_id].nbytes;
   if (off >= cap) return 0;
-  if (METAL_FILL0_PSO == nil) {
+  if (METAL_FILL0_PSO == nil || METAL_FILL0_WIDE_PSO == nil) {
     NSError *err = nil;
     int via_data = 0;
     id<MTLLibrary> lib = metal_lib_for_src(
         "#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void thvm_fill0(device uchar* p [[buffer(0)]], constant uint& n [[buffer(1)]],\n"
-        "    uint gid [[thread_position_in_grid]]) { if (gid < n) p[gid] = 0; }\n",
+        "    uint gid [[thread_position_in_grid]]) { if (gid < n) p[gid] = 0; }\n"
+        "kernel void thvm_fill0_wide(device uint* p [[buffer(0)]], constant uint& n [[buffer(1)]],\n"
+        "    uint gid [[thread_position_in_grid]]) {\n"
+        "  if (gid < n) { uint b = gid * 64u; for (uint i = 0u; i < 64u; i++) p[b + i] = 0u; } }\n",
         &err, &via_data);
     if (lib == nil) return -1;
     id<MTLFunction> fill_fn = [lib newFunctionWithName:@"thvm_fill0"];
-    if (fill_fn == nil) return -1;
+    id<MTLFunction> wide_fn = [lib newFunctionWithName:@"thvm_fill0_wide"];
+    if (fill_fn == nil || wide_fn == nil) return -1;
     METAL_FILL0_PSO = [METAL_DEVICE newComputePipelineStateWithFunction:fill_fn
                                                                   error:&err];
-    if (METAL_FILL0_PSO == nil) return -1;
+    METAL_FILL0_WIDE_PSO = [METAL_DEVICE newComputePipelineStateWithFunction:wide_fn
+                                                                       error:&err];
+    if (METAL_FILL0_PSO == nil || METAL_FILL0_WIDE_PSO == nil) return -1;
   }
-  u32 n = (u32)(cap - off);
-  [enc setComputePipelineState:METAL_FILL0_PSO];
-  [enc setBuffer:buf offset:(NSUInteger)off atIndex:0];
-  [enc setBytes:&n length:sizeof(n) atIndex:1];
-  NSUInteger tg = MIN((NSUInteger)n, [METAL_FILL0_PSO maxTotalThreadsPerThreadgroup]);
-  [enc dispatchThreads:MTLSizeMake(n, 1, 1)
-   threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+  u64 bytes = cap - off;
+  u64 blocks = ((off & 3u) == 0) ? bytes / METAL_FILL0_BLOCK : 0;
+  if (blocks != 0) {
+    metal_fill0_dispatch(enc, METAL_FILL0_WIDE_PSO, buf, off, (u32)blocks);
+  }
+  u64 done = blocks * METAL_FILL0_BLOCK;
+  if (done < bytes) {
+    metal_fill0_dispatch(enc, METAL_FILL0_PSO, buf, off + done, (u32)(bytes - done));
+  }
   return 0;
 }
 
@@ -4379,6 +4402,7 @@ static void metal_custom_cache_reset(void) {
     METAL_CUSTOM_PSOS[i]       = nil;
   }
   METAL_FILL0_PSO = nil;
+  METAL_FILL0_WIDE_PSO = nil;
 }
 
 // Content key: MSL source hash (metal_src_hash) mixed with the entry name so

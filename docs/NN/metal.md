@@ -158,6 +158,12 @@ swapping the implementation is mechanical.
   per 8 by 8 output tile and the launch is `(M / 8) * (N / 8)` threadgroups
   of 32 threads (`rmt_matmul_a_layout`). A launch sized for staged tiles
   under the second kernel writes only the first rows of the output.
+- **Replay zero fill.** A JIT replay reuses buffers, and a kernel that
+  writes only part of a reused buffer (a windowed store) must find zeros in
+  the rest, as it did in the fresh buffer of the first run. The serial replay
+  zeroes a reused output on its own encoder, with a compute kernel that
+  clears 256 bytes a thread (`metal_zero_encode_on`).
+
 ## Build dependency
 
 Shader compilation with `xcrun metal` requires the macOS SDK and

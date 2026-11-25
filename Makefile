@@ -188,7 +188,7 @@ TESTS := \
 METAL_TESTS := $(addprefix $(BIN)/,test_metal_real test_metal_pad_softmax \
   test_metal_mixed_input test_metal_tc_transpose test_metal_fuse_matmul_input \
   test_metal_fuse_matmul_compile test_metal_copy_retarget test_metal_group_local \
-  test_aot_metal test_aot_metal_run)
+  test_aot_metal test_aot_metal_run test_metal_serial_zero)
 CUDA_TESTS  := $(addprefix $(BIN)/,test_cuda_backend test_cuda_mixed \
   test_custom_kernel_cuda)
 
