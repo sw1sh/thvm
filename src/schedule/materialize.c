@@ -1010,7 +1010,11 @@ static Term materialize_copy(Term term) {
     if (zc_enabled && target == &METAL_BACKEND && srcb == &CPU_BACKEND && isz != 0
         && thvm_disk_buf_map_info(sd->buf_id, &map_base, &maplen, &minor)
         && (minor % isz) == 0) {
-      u32 wbid = thvm_metal_buf_wrap_external(map_base, maplen, minor);
+      int file_fd = -1;
+      u64 file_off = 0;
+      (void)thvm_disk_buf_file_info(sd->buf_id, &file_fd, &file_off);
+      u32 wbid = thvm_metal_buf_wrap_external(map_base, maplen, minor,
+                                                  file_fd, file_off);
       if (wbid != 0) {
         // Copy the src's offset-0 leaf view unchanged: the byte offset rides on
         // the wrapped buffer, because the matmul codegen rebuilds a fresh

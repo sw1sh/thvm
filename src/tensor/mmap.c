@@ -27,9 +27,51 @@
 // callback can munmap the exact region it mapped (the page-aligned base
 // and full length), independent of the buffer pointer handed to the
 // TenDesc (which is offset into the mapping by minor_offset).
+// One open descriptor per mapped file, shared by its tensors and closed with
+// the last of them: a device upload reads the file through it
+// (thvm_disk_buf_file_info), so it reads the file the mappings show even after
+// the path has been replaced.
+typedef struct {
+  int fd;
+  u32 refs;       // tensors mapped from the file; 0 marks a free slot
+  u64 dev, ino;
+} DiskFile;
+#define DISK_FILES_CAP 256
+static DiskFile DISK_FILES[DISK_FILES_CAP];
+
+// The slot of the file `fd` is open on, taking a reference; NULL when the
+// table is full or the descriptor cannot be duplicated.
+static DiskFile *disk_file_acquire(int fd, struct stat const *st) {
+  DiskFile *spare = NULL;
+  for (u32 i = 0; i < DISK_FILES_CAP; i++) {
+    DiskFile *f = &DISK_FILES[i];
+    if (f->refs == 0) {
+      if (spare == NULL) spare = f;
+    } else if (f->dev == (u64)st->st_dev && f->ino == (u64)st->st_ino) {
+      f->refs++;
+      return f;
+    }
+  }
+  if (spare == NULL) return NULL;
+  int keep = dup(fd);
+  if (keep < 0) return NULL;
+  spare->fd   = keep;
+  spare->refs = 1;
+  spare->dev  = (u64)st->st_dev;
+  spare->ino  = (u64)st->st_ino;
+  return spare;
+}
+
+static void disk_file_release(DiskFile *f) {
+  if (f == NULL || f->refs == 0) return;
+  if (--f->refs == 0) close(f->fd);
+}
+
 typedef struct {
   void *base;     // page-aligned mmap base (the munmap address)
   u64   maplen;   // mmap length in bytes (the munmap length)
+  DiskFile *file; // the file's shared descriptor, or NULL
+  u64   file_off; // file offset of `base`
 } DiskMap;
 
 static void disk_map_release(void *handle) {
@@ -38,6 +80,7 @@ static void disk_map_release(void *handle) {
   if (m->base != NULL && m->base != MAP_FAILED && m->maplen != 0) {
     munmap(m->base, m->maplen);
   }
+  disk_file_release(m->file);
   free(m);
 }
 
@@ -198,6 +241,19 @@ fn int thvm_disk_buf_map_info(u32 cpu_buf_id, void **base_out, u64 *maplen_out,
   return 1;
 }
 
+// An open descriptor of the file behind a disk tensor's mapping and the file
+// offset of the map base thvm_disk_buf_map_info reports, so a device upload can
+// read the bytes from the file instead of faulting the mapping in; 0 when the
+// tensor has none.  The descriptor stays open while the tensor lives.
+fn int thvm_disk_buf_file_info(u32 cpu_buf_id, int *fd_out, u64 *file_off_out) {
+  if (!thvm_disk_buf_is_mapped(cpu_buf_id)) return 0;
+  DiskMap *m = (DiskMap *)CPU_BUFS[cpu_buf_id].handle;
+  if (m == NULL || m->file == NULL) return 0;
+  if (fd_out)       *fd_out       = m->file->fd;
+  if (file_off_out) *file_off_out = m->file_off;
+  return 1;
+}
+
 // Background fault-in of a disk-mmap weight's pages into THIS process.  The
 // inverse of thvm_disk_buf_dontneed: it touches one byte per page across the
 // weight's whole mapping so the OS faults every page resident, then returns
@@ -347,6 +403,7 @@ fn Term thvm_tensor_mmap(const char *path, u64 byte_offset, u64 nbytes,
   // rather than scribble the file.  Lazy paging is automatic.
   void *base = mmap(NULL, (size_t)map_len, PROT_READ, MAP_PRIVATE,
                     fd, (off_t)map_off);
+  DiskFile *file = (base == MAP_FAILED) ? NULL : disk_file_acquire(fd, &st);
   // The fd may be closed immediately: the mapping keeps its own reference
   // to the underlying file object (POSIX mmap semantics).
   close(fd);
@@ -383,10 +440,13 @@ fn Term thvm_tensor_mmap(const char *path, u64 byte_offset, u64 nbytes,
   DiskMap *m = (DiskMap *)malloc(sizeof(DiskMap));
   if (m == NULL) {
     munmap(base, (size_t)map_len);
+    disk_file_release(file);
     return 0;
   }
-  m->base   = base;
-  m->maplen = map_len;
+  m->base     = base;
+  m->maplen   = map_len;
+  m->file     = file;
+  m->file_off = map_off;
 
   if (TENS_NEXT >= TENS_CAP) {
     fprintf(stderr, "tensor_mmap: out of descriptor slots\n");

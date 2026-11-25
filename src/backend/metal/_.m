@@ -902,6 +902,40 @@ void thvm_metal_buf_arena_release(u32 arena_buf_id) {
 // large non-resident region (weights evicted between the build-time prefetch
 // and the first-forward fault-in).  Blocks until resident (the GPU bind right
 // after needs the pages).
+// Reads [file_off, file_off + len) of the file `fd` into dst with parallel preads, as
+// tinygrad's DiskAllocator._copyout does on macOS in place of a copy out of the
+// mapping ("OSX doesn't seem great at mmap, this is faster",
+// runtime/ops_disk.py:91-97).  From an internal disk: 9.7 GB/s, against 1.1 to
+// 1.7 GB/s for faulting the mapping in from 8 threads.  F_NOCACHE keeps the
+// bytes out of the page cache, where they would be a second copy of the device
+// buffer; pages already cached are still used.  1 when every byte was read.
+#define METAL_FILE_READ_CHUNK (32ull << 20)
+static u64 METAL_FILE_READ_BYTES = 0;
+u64 thvm_metal_file_read_bytes(void) { return METAL_FILE_READ_BYTES; }
+static int metal_read_file_into(void *dst, int fd, u64 file_off, u64 len) {
+  (void)fcntl(fd, F_NOCACHE, 1);
+  char *out = (char *)dst;
+  size_t n_chunks = (size_t)((len + METAL_FILE_READ_CHUNK - 1) / METAL_FILE_READ_CHUNK);
+  __block int ok = 1;
+  void (^read_chunk)(size_t) = ^(size_t i) {
+    u64 lo = (u64)i * METAL_FILE_READ_CHUNK;
+    u64 hi = (lo + METAL_FILE_READ_CHUNK < len) ? lo + METAL_FILE_READ_CHUNK : len;
+    while (lo < hi) {
+      ssize_t r = pread(fd, out + lo, (size_t)(hi - lo), (off_t)(file_off + lo));
+      if (r < 0 && errno == EINTR) continue;
+      if (r <= 0) { __sync_fetch_and_and(&ok, 0); return; }
+      lo += (u64)r;
+    }
+  };
+  if (n_chunks <= 1) {
+    read_chunk(0);
+  } else {
+    dispatch_apply(n_chunks, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), read_chunk);
+  }
+  if (ok) METAL_FILE_READ_BYTES += len;
+  return ok;
+}
+
 typedef struct { char const *base; u64 off, end, page; } ZcTouchSeg;
 static void *zc_touch_seg(void *vp) {
   ZcTouchSeg *s = (ZcTouchSeg *)vp;
@@ -964,7 +998,8 @@ static void zc_parallel_touch(char const *base, u64 len, u64 page) {
 // Returns 0 on failure (no device, mis-aligned ptr, minor >= maplen, table
 // full, or the no-copy wrap returned nil): the caller falls back to the
 // staged-upload copy path, so this never silently corrupts.
-u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
+u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor,
+                                 int fd, u64 file_off) {
   if (METAL_DEVICE == nil) return 0;
   if (page_base == NULL || maplen == 0 || minor >= maplen) return 0;
   // Dedup: a borrowed wrap of this exact mmap region already exists -> reuse it
@@ -996,6 +1031,31 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
   // mmap, never read because view bounds stop at the weight's numel).
   u64 wrap_len = (maplen + page - 1) & ~(page - 1);
 
+  static int wrap_known = 0, wrap_optin = 0;
+  if (!wrap_known) {
+    char const *e = getenv("THVM_METAL_MMAP_WRAP");
+    wrap_optin = (e != NULL && e[0] == '1');
+    wrap_known = 1;
+  }
+  // Copy mode with the file known: read it straight into the device buffer.
+  // The mapping is never faulted in; MADV_DONTNEED drops whatever a background
+  // warm-up faulted.  A failed read falls through to the copy from the mapping.
+  id<MTLBuffer> wrapped = nil;
+  int loaded = 0;
+  if (!wrap_optin && fd >= 0) {
+    u64 tRead0 = cg_now_us();
+    wrapped = [METAL_DEVICE newBufferWithLength:(NSUInteger)maplen
+                                        options:MTLResourceStorageModeShared];
+    if (wrapped != nil
+        && metal_read_file_into([wrapped contents], fd, file_off, maplen)) {
+      loaded = 1;
+      madvise(page_base, (size_t)maplen, MADV_DONTNEED);
+      METAL_ZC_WRAPS++;
+      METAL_ZC_FAULT_BYTES += maplen;
+      METAL_ZC_WRAP_US += cg_now_us() - tRead0;
+    }
+  }
+
   // Fault the wrapped pages RESIDENT.  newBufferWithBytesNoCopy wraps the
   // VIRTUAL pages, but the GPU's access does NOT trigger the CPU page-fault
   // handler that reads a lazy file-backed mmap from the SSD: a never-touched
@@ -1022,7 +1082,7 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
   // reports which pages are already resident, so we touch ONLY the non-resident
   // ones -- a fully-prefetched/warm weight set faults in ~0 (just the mincore
   // scan), while a genuinely cold page still gets forced in.
-  {
+  if (!loaded) {
     u64 t0 = cg_now_us();
     u64 npages = (maplen + page - 1) / page;
     char const *p = (char const *)page_base;
@@ -1092,14 +1152,9 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
   // (process env) restores the zero-copy wrap for workflows that stream
   // weights through TDiskDropWeight re-wraps.
   u64 tWrap0 = cg_now_us();
-  id<MTLBuffer> wrapped = nil;
-  static int wrap_known = 0, wrap_optin = 0;
-  if (!wrap_known) {
-    char const *e = getenv("THVM_METAL_MMAP_WRAP");
-    wrap_optin = (e != NULL && e[0] == '1');
-    wrap_known = 1;
-  }
-  if (wrap_optin) {
+  if (loaded) {
+    // Read from the file above.
+  } else if (wrap_optin) {
     // Zero-copy wrap (id<MTLBuffer> -- `id` here is the Objective-C
     // generic-object keyword, so the slot index below is named `slot`, not
     // `id`).  deallocator:nil keeps these mmap pages owned by the CPU-side
@@ -1109,8 +1164,10 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
                                              options:MTLResourceStorageModeShared
                                          deallocator:nil];
   } else {
-    wrapped = [METAL_DEVICE newBufferWithLength:(NSUInteger)maplen
-                                        options:MTLResourceStorageModeShared];
+    if (wrapped == nil) {
+      wrapped = [METAL_DEVICE newBufferWithLength:(NSUInteger)maplen
+                                          options:MTLResourceStorageModeShared];
+    }
     if (wrapped != nil) {
       memcpy([wrapped contents], page_base, (size_t)maplen);
       // The mmap pages only served the copy; return them to the OS now.  The
@@ -1118,7 +1175,7 @@ u32 thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor) {
       madvise(page_base, (size_t)maplen, MADV_DONTNEED);
     }
   }
-  METAL_ZC_WRAP_US += cg_now_us() - tWrap0;
+  if (!loaded) METAL_ZC_WRAP_US += cg_now_us() - tWrap0;
   if (wrapped == nil) {
     fprintf(stderr,
       "thvm_metal_buf_wrap_external: no-copy wrap of %llu bytes failed\n",

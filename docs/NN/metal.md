@@ -129,6 +129,31 @@ unwrapped only inside the backend `.m` files. The existing
 refcount / free / read / write functions already abstract this —
 swapping the implementation is mechanical.
 
+### Weights from disk
+
+A disk tensor (`thvm_tensor_mmap`, tinygrad's DISK device: a view into a
+mapping of a file) reaches Metal in `thvm_metal_buf_wrap_external`. By
+default its bytes are read from the file straight into a driver-owned
+`MTLBuffer` with parallel `pread`s (`metal_read_file_into`), as tinygrad's
+`DiskAllocator._copyout` does on macOS in place of a copy out of the mapping
+(`runtime/ops_disk.py:91-97`). From an internal disk that is 9.7 GB/s,
+against 1.1 to 1.7 GB/s for faulting the mapping in from eight threads and
+copying it. The reads bypass the page cache (`F_NOCACHE`), where the bytes
+would be a second copy of the device buffer, and the mapping is never
+touched. The file is read through one descriptor per mapped file, kept open
+while its tensors live (`thvm_disk_buf_file_info`), so the load reads the
+file the mapping shows even after its path was replaced. Without a
+descriptor, or when a read fails, the bytes are copied from the mapping.
+
+`THVM_METAL_MMAP_WRAP=1` wraps the mapping's pages in place instead
+(`newBufferWithBytesNoCopy`): no copy and a fraction of the footprint, but a
+process killed while the graphics processor still reads those pages can leave
+it spinning on them. Only that mode, and the CPU, use a weight through its
+mapping; there a caller may warm the files in the background
+(`TDiskPrefetchAsync`, `TDiskWarmAsync`). With the default load such a
+warm-up competes for the disk and holds up the mapping calls on the same
+files.
+
 ## Scope notes
 
 - **Single device.** One default `MTLDevice` selected at init.

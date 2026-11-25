@@ -49,6 +49,7 @@ update the matching row here in the same change. The ATP rows (`THVM_ATP*`,
 | `THVM_MAX_LIVE_BYTES` | (impl) | Max live-buffer memory. |
 | `THVM_CUDA_REUSE_BUFS` | (impl) | CUDA-specific buffer reuse. |
 | `THVM_METAL_REUSE_BUFS` | (impl) | Metal-specific buffer reuse. |
+| `THVM_METAL_MMAP_WRAP` | off | `1` wraps a disk tensor's mapped pages as the Metal buffer in place of reading the file into a driver-owned buffer (docs/NN/metal.md, Weights from disk). Behavior-preserving. |
 
 ## CPU backend
 

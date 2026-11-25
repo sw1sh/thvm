@@ -1809,7 +1809,13 @@ void thvm_metal_buf_get(u32 i, u64 *nbytes_out, u32 *refcount_out);
 // failure (caller falls back to the staged-upload copy path).  The slot is
 // borrowed: teardown drops only the MTLBuffer ARC ref, never the host mmap
 // pages, and the recycle freelist never reclaims it.
-u32  thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor);
+// With `fd` >= 0 (open on the file `page_base` maps from `file_off`) and the
+// default copy mode, the bytes are read from the file, not copied out of the
+// mapping.
+u32  thvm_metal_buf_wrap_external(void *page_base, u64 maplen, u64 minor,
+                                  int fd, u64 file_off);
+// Bytes the weight load has read from files in place of a copy from a mapping.
+u64  thvm_metal_file_read_bytes(void);
 // Per-realize ARENA planner (schedule/materialize.c) Metal handles.  The
 // planner allocates ONE device buffer for a pass's working set, then hands
 // out per-boundary views of it (tinygrad: arena[offset:offset+nbytes]

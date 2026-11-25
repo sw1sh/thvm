@@ -197,7 +197,11 @@ static u32 kernel_input_on_backend(u32 src_tid, Backend *dst_b) {
         && thvm_disk_buf_map_info(TENS[src_tid].buf_id, &map_base, &maplen, &minor)
         && (minor % isz) == 0) {
       if (TENS_NEXT < TENS_CAP) {
-        u32 wbid = thvm_metal_buf_wrap_external(map_base, maplen, minor);
+        int file_fd = -1;
+        u64 file_off = 0;
+        (void)thvm_disk_buf_file_info(TENS[src_tid].buf_id, &file_fd, &file_off);
+        u32 wbid = thvm_metal_buf_wrap_external(map_base, maplen, minor,
+                                                    file_fd, file_off);
         if (wbid != 0) {
           u32 dwid = TENS_NEXT++;
           TenDesc *dw = &TENS[dwid];
