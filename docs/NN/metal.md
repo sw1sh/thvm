@@ -149,7 +149,15 @@ swapping the implementation is mechanical.
   renderer at `:376`). The Metal compiler's own conversion of a computed
   `bfloat` value gives wrong numbers inside an unrolled reduce loop: a 1 by 1
   convolution of 32 channels lost 20 of its 32 terms.
-
+- **Matmul launch shape.** `cg_tile_metal_dispatch_shape` sizes the launch
+  for the kernel `rmu_emit_matmul_tc` renders, so the two decide from the
+  same facts. With the first operand read row-major (`{M, K}`) the kernel
+  stages tiles in threadgroup memory and the launch is one threadgroup per
+  tile; with it read transposed (stored `{K, M}`, as an attention block over
+  a channels-first feature map builds its scores) the kernel is one simdgroup
+  per 8 by 8 output tile and the launch is `(M / 8) * (N / 8)` threadgroups
+  of 32 threads (`rmt_matmul_a_layout`). A launch sized for staged tiles
+  under the second kernel writes only the first rows of the output.
 ## Build dependency
 
 Shader compilation with `xcrun metal` requires the macOS SDK and

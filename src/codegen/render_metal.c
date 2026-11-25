@@ -12,6 +12,10 @@ typedef struct {
 } RmuTcTile;
 static int rmu_tc_pick_tile(u32 m_extent, u32 n_extent, u32 k_extent,
                             u32 batch_extent, RmuTcTile *out);
+// Also render_uop.c's, for the A operand's layout as the renderer reads it.
+static Term rmu_peel_cast(Term t);
+static i64  rmu_range_coeff(Term t, u32 axis_id);
+static void rmu_collect_ranges(Term t, Term *ranges, u32 *n_out);
 
 
 static int rmt_collect_conv2d_info(KernelEntry const *ke,
@@ -247,6 +251,44 @@ static int rmt_fused_a_matmul_shape(Term sroot, u32 *out_M, u32 *out_N,
   return 1;
 }
 
+// How a tensor-core matmul's A operand (MUL's first, as rmu_emit_matmul_tc takes
+// it) steps through its buffer: 0 row-major {M, K} (the reduce axis has unit
+// stride) or not a matmul, 1 transposed {K, M} (the other axis has it), 2
+// neither.  The renderer tiles only 0; for 1 it emits one simdgroup per 8x8
+// output tile, and for 2 the generic accumulator, so a launch sized for staged
+// tiles would run too few threadgroups and leave most of the output unwritten.
+static int rmt_matmul_a_layout(Term sroot) {
+  if (sroot == 0 || term_tag(sroot) != TAG_UOP
+      || term_ext(sroot) != UOP_STORE) return 0;
+  Term value = heap_read(term_val(sroot) + 2);
+  if (!(term_tag(value) == TAG_UOP && term_ext(value) == UOP_OPT
+        && uop_opt_kind(value) == UOP_OPT_TC)) {
+    int n_opt = 0, n_ew = 0;
+    value = rmt_epi_walk_opt_tc(value, &n_opt, &n_ew, 0, 0);
+    if (value == 0 || n_opt != 1) return 0;
+  }
+  Term reduce = uop_opt_target(value);
+  if (reduce == 0 || term_tag(reduce) != TAG_UOP
+      || term_ext(reduce) != UOP_REDUCE || uop_reduce_n_axes(reduce) != 1) {
+    return 0;
+  }
+  Term mul = uop_reduce_src(reduce);
+  if (term_tag(mul) != TAG_UOP || term_ext(mul) != UOP_MUL) return 0;
+  Term lhs = rmu_peel_cast(heap_read(term_val(mul) + 0));
+  if (term_tag(lhs) != TAG_UOP || term_ext(lhs) != UOP_INDEX_E) return 0;
+  Term addr = heap_read(term_val(lhs) + 1);
+  u32 red = uop_reduce_axis(reduce, 0);
+  if (rmu_range_coeff(addr, red) == 1) return 0;
+  Term ranges[MAX_DIM];
+  u32  n = 0;
+  rmu_collect_ranges(addr, ranges, &n);
+  for (u32 i = 0; i < n; i++) {
+    u32 aid = uop_range_axis_id(ranges[i]);
+    if (aid != red && rmu_range_coeff(addr, aid) == 1) return 1;
+  }
+  return 2;
+}
+
 int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
                                  u32 *threads_x) {
   if (ke == NULL) return 0;
@@ -270,7 +312,8 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
       u32 eM = 0, eN = 0, eK = 0;
       if (rmt_epilogue_tc_shape(sroot, &eM, &eN, &eK)
           && eM != 0 && eN != 0 && eK != 0
-          && (eM % 8u) == 0 && (eN % 8u) == 0 && (eK % 8u) == 0) {
+          && (eM % 8u) == 0 && (eN % 8u) == 0 && (eK % 8u) == 0
+          && rmt_matmul_a_layout(sroot) == 0) {
         RmuTcTile tile;
         if (rmu_tc_pick_tile(eM, eN, eK, 0u, &tile)) {
           u32 tile_m = tile.local_m * tile.rm * 8u;
@@ -387,7 +430,8 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
         UopDagGemmShape g2 = {0};
         if (uop_dag_classify_matmul_shape(sroot, ke, &g2)
             && g2.M != 0 && g2.N != 0 && g2.K != 0
-            && (g2.dtype == DT_FP32 || g2.dtype == DT_BF16)) {
+            && (g2.dtype == DT_FP32 || g2.dtype == DT_BF16)
+            && rmt_matmul_a_layout(sroot) == 0) {
           u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];
           u32 na = uop_dag_collect_axes(sroot, ids, types, exts, MAX_AXES);
           u32 n_global = 0;
@@ -407,6 +451,11 @@ int cg_tile_metal_dispatch_shape(KernelEntry *ke, u32 *groups_x,
           }
         }
       }
+      // An A in neither layout is not a simdgroup matmul: sized as the generic
+      // kernel below.
+      if (rmt_matmul_a_layout(sroot) == 2) tc_template = 0;
+    }
+    if (tc_template) {
       // Else the parallel_tc body: a simdgroup per 8x8 tile of the GLOBAL axes,
       // a LOOP output axis a serial loop (the output_numel grid would race).
       u32 ids[MAX_AXES], types[MAX_AXES], exts[MAX_AXES];

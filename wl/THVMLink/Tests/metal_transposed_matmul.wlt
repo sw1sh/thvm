@@ -77,3 +77,43 @@ VerificationTest[
     True,
     TestID -> "metal/transposed-matmul-contiguous-noregression"
 ]
+
+(* A transposed FIRST operand: y = Transpose[A] . B with A stored {K, M}, as an
+   attention block over a channels-first feature map builds its scores (FLUX's
+   image decoder).  The renderer gives a transposed A one simdgroup per 8x8
+   output tile, not the staged tiles of a row-major A, and the launch has to be
+   sized for the kernel it rendered: sized for staged tiles it ran 256
+   threadgroups where 16384 were needed and wrote the first 16 rows of 1024,
+   leaving the rest zero.  Shapes from the smallest the tile picker accepts up
+   to the decoder's, in f32 and bf16. *)
+transposedFirst[cases_List] := Module[{ctx = TContextNew["metal"], ok},
+    If[ ctx === 0, Return[ConstantArray[True, Length[cases]]]];
+    ok = Function[{k, m, n, dtype},
+        Module[{av, bv},
+            SeedRandom[k + m + n];
+            av = RandomReal[{-1, 1}, {k, m}];
+            bv = RandomReal[{-1, 1}, {k, n}];
+            TInContext[ctx,
+                Module[{a = TRealize @ TUOpCast[TTensorCreate @ NumericArray[av, "Real32"], dtype],
+                        b = TRealize @ TUOpCast[TTensorCreate @ NumericArray[bv, "Real32"], dtype], want, got},
+                    want = Transpose[Normal @ TRealize @ TUOpCast[a, "f32"]] . Normal[TRealize @ TUOpCast[b, "f32"]];
+                    got = Normal @ TRealize @ TUOpCast[TRealize @ TMatMul[Transpose[a], b], "f32"];
+                    Max @ Abs @ Flatten[got - want] / StandardDeviation @ Flatten[want] < 0.02
+                        && Count[got, row_ /; Max[Abs[row]] == 0.] == 0]]]] @@@ cases;
+    TContextDestroy[ctx];
+    ok
+]
+
+VerificationTest[
+    TInit[]; TReset[];
+    transposedFirst @ {{64, 128, 128, "f32"}, {64, 128, 128, "bf16"}, {32, 64, 256, "bf16"}, {32, 16, 16, "bf16"}},
+    {True, True, True, True},
+    TestID -> "metal/transposed-first-operand-writes-every-row"
+]
+
+VerificationTest[
+    TInit[]; TReset[];
+    transposedFirst @ {{512, 1024, 1024, "bf16"}, {512, 1024, 1024, "f32"}},
+    {True, True},
+    TestID -> "metal/transposed-first-operand-decoder-attention-shape"
+]
