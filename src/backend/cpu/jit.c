@@ -440,17 +440,12 @@ static CpuJitFn cpu_jit_build(KernelEntry const *ke, u64 key, const char *src) {
 // a fresh heap cell every realize, it repeats for structurally equal kernels.
 static char *cpu_jit_render_canon(KernelEntry const *ke) {
   if (ke->cached_lift.store_root == 0) return NULL;
-  FILE *fp = tmpfile();
+  char  *raw = NULL;
+  size_t n   = 0;
+  FILE *fp = open_memstream(&raw, &n);
   if (fp == NULL) return NULL;
   cg_render_uop_kernel_c_root(ke->cached_lift.store_root, "k", fp);
-  long n = ftell(fp);
-  if (n <= 0) { fclose(fp); return NULL; }
-  char *raw = (char *)malloc((size_t)n + 1);
-  if (raw == NULL) { fclose(fp); return NULL; }
-  rewind(fp);
-  size_t got = fread(raw, 1, (size_t)n, fp);
-  fclose(fp);
-  raw[got] = '\0';
+  if (fclose(fp) != 0 || raw == NULL || n == 0) { free(raw); return NULL; }
   // Axis ids are dense per kernel (uop_dag_renumber_axes in materialize), so
   // equal kernels render byte-identical.
   return raw;

@@ -530,19 +530,15 @@ static char *cg_emit_via_uop(KernelEntry const *ke) {
   if (store_root == cached_root) {
     store_root = uop_recognise_batched_tc_parallel(store_root);
   }
-  // A tmpfile has no size cap.
-  FILE *fp = tmpfile();
+  // Rendered into memory: a tmpfile is a file created on disk per kernel, a
+  // millisecond each, and a model has thousands.
+  char  *out = NULL;
+  size_t n   = 0;
+  FILE *fp = open_memstream(&out, &n);
   if (fp == NULL) return NULL;
   // The Metal backend looks the function up as "k".
   cg_render_uop_kernel_root(store_root, "k", fp);
-  long n = ftell(fp);
-  if (n <= 0) { fclose(fp); return NULL; }
-  char *out = (char *)malloc((size_t)n + 1);
-  if (out == NULL) { fclose(fp); return NULL; }
-  rewind(fp);
-  size_t got = fread(out, 1, (size_t)n, fp);
-  fclose(fp);
-  out[got] = '\0';
+  if (fclose(fp) != 0 || out == NULL || n == 0) { free(out); return NULL; }
   return out;
 }
 
