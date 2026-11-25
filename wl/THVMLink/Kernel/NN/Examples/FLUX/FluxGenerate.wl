@@ -583,6 +583,15 @@ fxWeightBase[dev_, modelDir_, q8_, loraResolved_, loraKey_] := Module[{key = {mo
    table, the velocity/VAE captures, and the sigma schedule depend on ImageSize
    and live in fxSessionBuild (LAYER 2). *)
 
+(* The weights are used through their file mapping on the CPU, and on a graphics
+   processor only when the mapping itself is wrapped (THVM_METAL_MMAP_WRAP=1).
+   The default graphics-processor load reads each weight from its file into its
+   device buffer (thvm_metal_buf_wrap_external), several times faster than the
+   background warm-up reads, which then only compete with it for the disk and
+   hold up the mapping of the same files (7 of a 31 s cold start). *)
+
+fxWarmFilesQ[dev_] := dev === "cpu" || Environment["THVM_METAL_MMAP_WRAP"] === "1"
+
 fxWeightBaseBuild[dev_, modelDir_, q8_, loraResolved_] := Module[{stxt, tokDir, td, tfPath, qwPaths, vaePath, fxCfg, qwCfg, ctxT, caL, wfT, tembFn, wfq, qwJit, wfV, wsubV},
     fxBoundMemory[];
     stxt = 512;
@@ -590,20 +599,11 @@ fxWeightBaseBuild[dev_, modelDir_, q8_, loraResolved_] := Module[{stxt, tokDir, 
     tfPath = FileNameJoin[{modelDir, "transformer", "diffusion_pytorch_model.safetensors"}];
     qwPaths = FileNameJoin[{modelDir, "text_encoder", #}]& /@ {"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"};
     vaePath = FileNameJoin[{modelDir, "vae", "diffusion_pytorch_model.safetensors"}];
-(* Warm the OS page cache for all three safetensors NOW, on background
-   threads, so the ~6 s of SSD read overlaps the JIT capture below instead
-   of stalling serially inside the first forward's zero-copy fault-in (each
-   weight is faulted resident at its first matmul; with the page already
-   cached that fault runs at memory speed).  Non-blocking -- returns at once;
-   the reads race ahead of the loaders.  ORDER MATCHES ACCESS ORDER: Qwen
-   runs FIRST (STAGE 1 text-encode) and the transformer SECOND (STAGE 2
-   velocity sample), so prefetch Qwen first -- it is used immediately, with
-   the smallest eviction window, while the transformer (the 7.4 GB bulk)
-   warms during the ~5 s Qwen encode and is fresh when STAGE 2 faults it.
-   Prefetching the transformer first (the old order) left it idle through the
-   whole build + Qwen stage, so ~5 GB of it evicted under cache pressure and
-   the STAGE-2 fault-in re-read it serially.  VAE (small) last. *)
-    TDiskPrefetchAsync[Join[qwPaths, {tfPath, vaePath}]];
+(* Where the weights are used through their mapping (fxWarmFilesQ), read the
+   files into the page cache now on background threads, in the order they are
+   used (the text encoder, the transformer, then the small autoencoder), so the
+   reads overlap the build below. *)
+    If[fxWarmFilesQ[dev], TDiskPrefetchAsync[Join[qwPaths, {tfPath, vaePath}]]];
     fxCfg = <|"eps" -> 1.*^-6, "num_double" -> 5, "num_single" -> 20, "heads" -> 24, "head_dim" -> 128|>;
     qwCfg = <|
         "heads" -> 32,
@@ -683,16 +683,10 @@ fxWeightBaseBuild[dev_, modelDir_, q8_, loraResolved_] := Module[{stxt, tokDir, 
    FluxGenerate::loraskip for any module that does not map to a klein weight and
    returns <||> for the no-LoRA case, so fxLoadTfWeight's merge is then a no-op. *)
             loraDeltas = fxLoRALoad[loraResolved];
-(* COLD-START OVERLAP: background-fault the transformer's disk-mmap pages
-   resident NOW, while it is idle.  The transformer is not touched until STAGE
-   2 (velocity sample); STAGE 1 (Qwen encode) runs first.  TDiskPrefetchAsync
-   above only warms the OS page cache; the per-process minor fault that maps
-   those ~3 GB of pages into this address space still happens serially at the
-   first STAGE-2 matmul (the zero-copy wrap's touch loop).  Kicking it off here
-   on a detached thread overlaps that fault with the rest of session-build plus
-   the Qwen text-encode, so STAGE 2 finds the transformer already resident.
-   FLUX_NO_WARM_TF=1 disables it for an A/B baseline. *)
-            If[ Environment["FLUX_NO_WARM_TF"] =!= "1", TDiskWarmAsync[Values[wt]]];
+(* Where the weights are used through their mapping, fault the transformer's
+   pages into this process on a background thread while the text encoder runs:
+   the prefetch above only fills the page cache. *)
+            If[fxWarmFilesQ[dev], TDiskWarmAsync[Values[wt]]];
             wfTL = fxTransformerLoader[wt, dev, q8, loraDeltas];
 (* Pre-warm the merge EAGERLY here, BEFORE any velocity JIT capture.  The
    transformer loader is lazy (a weight realizes on first matmul use), but the
