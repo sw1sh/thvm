@@ -723,6 +723,8 @@ fxWeightBaseBuild[dev_, modelDir_, q8_, loraResolved_] := Module[{stxt, tokDir, 
                     Function[{x, addMask},
                         qwenForward[x, addMask, qcos, qsin, wfqL, qwCfg]
                     ]
+                    ,
+                    "Prune" -> True
                 ]
             ];
             fxTiming["qw-load", tLoadQw, "qw-capture", tCapQw];
@@ -854,8 +856,12 @@ fxSessionBuild[dev_, imgSize_, nSteps_, modelDir_, q8_, loraResolved_, loraKey_]
    (1/2/4/8 bytes) since it is a pure strided byte permutation, not an
    arithmetic op.  The flux/warm-prompt-rebinds-text-encoding test in
    Tests/flux_jit_replay.wlt covers the JIT path. *)
-            TJit @ Function[lat,
-                TRealize @ vaeDecoder[lat, base["wfV"], base["wsubV"], vaeCfg]
+            TJit[
+                Function[lat,
+                    TRealize @ vaeDecoder[lat, base["wfV"], base["wsubV"], vaeCfg]
+                ]
+                ,
+                "Prune" -> True
             ]
         ]
     ];
@@ -1376,10 +1382,18 @@ fxVaeDecodeCached[sess_, lat_] := With[{dev = sess["dev"]},
    re-capture.  Closing enc over the function instead would re-capture per image
    (the closure differs), turning each "warm" image back into a cold start. *)
 
+(* The loaders are lazy, so a weight is first used, and with "Q8" quantized,
+   inside the capture call.  "Prune" -> True keeps that out of the replays: a
+   dispatch that reads none of z, e and tb ran once, in the capture.  Unpruned,
+   every sampler step quantized every weight again: 284 of the 1555 dispatches
+   of a step. *)
+
 fxVelocityJit[rc_, rs_, wf_, cfg_] := TJit[
     Function[{z, e, tb},
         fxTransformer[z, e, tb, rc, rs, wf, cfg]
     ]
+    ,
+    "Prune" -> True
 ]
 
 (* WHOLE-LOOP faithful sampler: TJit-capture the ENTIRE 4-step Euler in ONE
